@@ -1,12 +1,12 @@
 # gh-maestro 要件定義書
 
-v0.2 / 2026-05-30
+v0.4 / 2026-05-30
 
 ---
 
 ## 1. 目的
 
-GitHubをメッセージバス兼永続ストアとして、複数のAIエージェントを協調動作させる。人間の承認を要所に挟みながら、Issue起票からPRマージまでの開発タスクを自動化する。
+GitHubを永続ストアおよびエージェント間の非同期ハンドオフのバスとして使い、複数のAIエージェントを協調動作させる。Issue起票からPRマージまでの開発タスクを自動化する。
 
 ---
 
@@ -14,154 +14,180 @@ GitHubをメッセージバス兼永続ストアとして、複数のAIエージ
 
 | 項目 | 決定事項 |
 |---|---|
-| 実行環境 | 当面は Windows（Windows 10）。将来的に Linux にも対応できる設計とする |
-| エージェントCLI | Claude Code (`claude`) / Antigravity CLI (`agy`) |
+| 実行環境 | Windows（Windows 10）。将来的にLinuxにも対応できる設計とする |
+| オーケストレーター | Claude Code CLI（`claude`）をTUIで対話的に起動 |
+| ワーカー | agy（Antigravity CLI）等。実装は差し替え可能な設計とする |
 | 並列実行 | Issue単位で直列のみ（同時に1タスク） |
 | CI/CDとの関係 | 既存のGitHub Actionsと共存。エージェントはブランチへのpushのみ行う |
 
 ---
 
-## 3. エージェントの役割定義
+## 3. アーキテクチャ概要
 
-### 3.1 オーケストレーター
+### 通信レイヤー
+
+| 通信 | 手段 |
+|---|---|
+| 人間 ↔ オーケストレーター | Claude Code CLI（TUI）— GitHubを媒介しない |
+| オーケストレーター → GitHub | Issue作成（`gh issue create`） |
+| daemon ↔ ワーカー | ファイルI/O（タスクファイル） |
+| ワーカー ↔ GitHub | `gh` CLI（PR作成・レビュー投稿） |
+
+### 役割の分離
+
+- **人間 + オーケストレーター**: Issueを協働で起草しGitHubに作成する。対話的であり daemon は関与しない
+- **daemon**: GitHubの状態をポーリングし、変化を検知してタスクファイルを書き込む
+- **ワーカー**: タスクファイルを監視し、処理後にGitHubを直接更新する
+
+---
+
+## 4. エージェントの役割定義
+
+### 4.1 オーケストレーター（人間が起動）
 
 **責務**
-- リポジトリの現状をGitHub CLI（`gh`）で把握する
-- 何をすべきかを判断し、Issueを作成またはラベルを更新する
-- 判断のみ行い、コードは書かない
+- 人間と対話してIssueの内容を共同起草する
+- `gh issue create` でGitHubにIssueを作成して終了する
+
+**起動方法**
+- 人間が Claude Code CLI をTUIで起動する（daemonは関与しない）
 
 **終了条件**
-- `awaiting-approval` ラベルを付与してデーモンにシグナルを送り、終了する
+- Issue作成完了
 
-**起動条件（ラベル）**
-- `awaiting-orchestrator`：初回または差し戻し後の計画立案
-- `approved`：人間が承認後、タスクをワーカーに割り当て
-
-### 3.2 コーダーワーカー
+### 4.2 コーダーワーカー
 
 **責務**
-- 割り当てIssueを読んで実装する
+- タスクファイルを読み、割り当てIssueを実装する
 - ビルド・テストを自分で実行し、失敗したら自己修正する（リトライ上限内）
-- 完了したらPRを作成し、`awaiting-review` ラベルを付与して終了する
+- 完了したらPRを作成して終了する
 
 **終了条件（成功）**
-- PRを作成し、`awaiting-review` ラベルを付与してデーモンにシグナルを送る
+- PRを作成する（GitHub上の状態遷移がdaemonへの通知となる）
 
 **終了条件（失敗）**
-- リトライ上限（3回）を超えたら `human-escalation` ラベルを付与して停止する
+- リトライ上限を超えたら `human-escalation` ラベルをIssueに付与して停止する
 
 **ブランチ規則**
 - `dev` から切る
 - ブランチ名: `<type>/<issue番号>-<概要>`（例: `feat/42-add-login`）
 - `master`・`dev` への直接pushは禁止
 
-### 3.3 レビュアーワーカー
+### 4.3 レビュアーワーカー
 
 **責務**
 - PRのdiffとIssue要件を照合する
-- レビューコメントを投稿する（修正は行わない）
-- 問題なければ `awaiting-approval` ラベルを付与する（人間にマージ判断を委ねる）
-- 修正が必要なら `awaiting-coder` ラベルを付与してコーダーに差し戻す
-
-**起動条件（ラベル）**
-- `awaiting-review`
+- GitHub のレビュー機能でコメントを投稿する（修正は行わない）
+- 問題なければ `APPROVED` レビューを提出する（人間にマージ判断を委ねる）
+- 修正が必要なら `CHANGES_REQUESTED` レビューを提出してコーダーに差し戻す
 
 ---
 
-## 4. 人間の介入ポイント
+## 5. 人間の介入ポイント
 
 ```
-[人間] Issue を作成 / awaiting-orchestrator ラベルを付与
-  ↓
-[オーケストレーター] 計画立案
-  ↓ awaiting-approval
-[人間] 計画を承認 → approved ラベル  OR  却下 → rejected ラベル
-  ↓ approved
-[オーケストレーター] コーダーに割り当て
-  ↓ awaiting-coder
-[コーダー] 実装・PR作成
-  ↓ awaiting-review
-[レビュアー] レビューコメント
-  ↓ awaiting-approval（問題なし） or awaiting-coder（差し戻し）
-[人間] PRをdev にマージ  OR  差し戻し
+[人間 × オーケストレーター] CLI上で対話 → GitHub Issue 作成
+                                                ↓
+                                   daemon が新規Issueを検知
+                                                ↓ タスクファイル書き込み
+                                   [コーダー] 実装・PR作成
+                                                ↓ PR オープン
+                                   [レビュアー] レビュー
+                                                ↓
+                             APPROVED（問題なし）
+                             または CHANGES_REQUESTED（差し戻し）
+                                                ↓
+                                   [人間] PRをdevにマージ
 ```
 
 人間が行う操作：
-1. 初期Issueの起票（または `awaiting-orchestrator` ラベル付与）
-2. 計画の承認（`approved`）または却下（`rejected`）
-3. PRの最終マージ判断
+1. オーケストレーターと対話してIssueを起草・作成する
+2. PRの最終マージ判断
 
 ---
 
-## 5. ラベル仕様
+## 6. daemon の状態検知
 
-| ラベル | 付与者 | 意味 | デーモンの反応 |
-|---|---|---|---|
-| `awaiting-orchestrator` | 人間 / レビュアー | オーケストレーター起動待ち | オーケストレーターを起動 |
-| `awaiting-approval` | オーケストレーター / レビュアー | 人間の判断待ち | 何もしない |
-| `approved` | 人間 | 承認済み | オーケストレーターを起動 |
-| `rejected` | 人間 | 却下 | オーケストレーターを起動 |
-| `awaiting-coder` | オーケストレーター / レビュアー | コーダー起動待ち | コーダーを起動 |
-| `awaiting-review` | コーダー | レビュアー起動待ち | レビュアーを起動 |
-| `in-progress` | デーモン | 実行中（二重起動防止） | 何もしない |
-| `human-escalation` | エージェント | 人間対応が必要 | 何もしない（通知のみ） |
-| `done` | レビュアー | 完了 | 何もしない |
+カスタムラベルによる状態管理を行わず、GitHubのネイティブな状態を直接読み取る。
+
+| 検知条件 | daemonの反応 |
+|---|---|
+| オープンIssueに対応するオープン/マージ済みPRが存在しない | コーダー向けタスクファイルを書き込む |
+| オープンPRに完了したレビューが存在しない | レビュアー向けタスクファイルを書き込む |
+| オープンPRに `CHANGES_REQUESTED` レビューがある | コーダー向けタスクファイルを書き込む |
+| オープンPRに `APPROVED` レビューがある | 何もしない（人間がマージ判断） |
+| Issueに `human-escalation` ラベルがある | 何もしない（通知のみ） |
+
+**IssueとPRの紐付け**: ブランチ名の命名規則（`<type>/<issue番号>-<概要>`）からIssue番号を抽出する。
+
+### 二重起動防止
+
+タスクファイル（`.agents/inbox/<issue番号>.json`）が存在するIssueはスキップする。ワーカーがGitHubの状態を更新したことをdaemonが検知した時点でタスクファイルを削除する。
 
 ---
 
-## 6. デーモン仕様
+## 7. daemon仕様
 
-### 6.1 基本動作
+### 7.1 基本動作
 
 - Windows上で常駐（PM2またはタスクスケジューラ）
-- 30秒間隔で `gh issue list` をポーリングし、ラベル差分を検出する
-- エージェント完了時にシグナルを受け取り、即時ポーリングを実行する
+- 30秒間隔でGitHubをポーリングし、状態変化を検出する
 
-### 6.2 即時トリガー（シグナル）
+### 7.2 タスクファイル
 
-エージェント完了時にデーモンへ即時ポーリングを通知する。手段はOSによって異なるが、**エージェントが書くコードは共通のラッパーコマンドを呼ぶだけ**にし、OS分岐をデーモン側に閉じ込める。
-
-| OS | 手段 | コマンド |
-|---|---|---|
-| Linux | `SIGUSR1` | `kill -SIGUSR1 <pid>` |
-| Windows | PM2 trigger | `pm2 trigger agent-runtime poll` |
-
-エージェントは `node tools/signal-daemon.js`（ラッパー）を呼ぶ。このスクリプトがOS判定して適切な手段を選ぶ。
-
-### 6.3 競合制御
-
-- ラベル検知時に即座に `in-progress` ラベルを付与してからエージェントをspawnする
-- エージェント終了時に `in-progress` を除去する
-- ポーリング時に `in-progress` が付いているIssueはスキップする
-
-### 6.4 エラー処理
-
-| 状況 | 挙動 |
-|---|---|
-| エージェントプロセスが異常終了 | `in-progress` を除去し、`human-escalation` を付与 |
-| コーダーがリトライ上限超過 | コーダー自身が `human-escalation` を付与して終了 |
-| gh CLI認証エラー | デーモン起動時にチェックし、失敗したら起動しない |
-
-### 6.5 workers.json 形式
+**書き込み先**: `.agents/inbox/<issue番号>.json`
 
 ```json
 {
-  "awaiting-orchestrator": "agy run --skill orchestrator",
-  "approved":              "agy run --skill orchestrator",
-  "rejected":              "agy run --skill orchestrator",
-  "awaiting-coder":        "claude --skill coder",
-  "awaiting-review":       "claude --skill reviewer"
+  "issue": 42,
+  "worker": "coder",
+  "title": "Add login feature",
+  "body": "Issue本文",
+  "pr": null,
+  "timestamp": "2026-05-30T12:00:00Z"
 }
 ```
 
+差し戻し時は `pr` にPR番号を含める。ワーカーはGitHubから詳細（レビューコメント等）を自分で取得する。
+
+### 7.3 エラー処理
+
+| 状況 | 挙動 |
+|---|---|
+| タスクファイル書き込み後、一定時間状態変化がない | タスクファイルを削除し `human-escalation` をIssueに付与 |
+| コーダーがリトライ上限超過 | コーダー自身が `human-escalation` をIssueに付与して終了 |
+| gh CLI認証エラー | daemon起動時にチェックし、失敗したら起動しない |
+
+### 7.4 workers.json 形式
+
+```json
+{
+  "issue-no-pr":          "coder",
+  "pr-needs-review":      "reviewer",
+  "pr-changes-requested": "coder"
+}
+```
+
+キーは検知条件の識別子、値はワーカー種別。ワーカーの具体的な実装はdaemon管轄外。
+
 ---
 
-## 7. 未決定事項（次回確認）
+## 8. ラベル仕様
+
+カスタムラベルは最小限とする。
+
+| ラベル | 付与者 | 意味 |
+|---|---|---|
+| `human-escalation` | ワーカー / daemon | 人間対応が必要 |
+
+---
+
+## 9. 未決定事項
 
 | 項目 | 内容 |
 |---|---|
+| ワーカーのファイル監視方法 | スキル内でのポーリング vs. OSファイルウォッチャー |
+| タスクファイルの後処理 | 処理済みファイルをアーカイブするか削除するか |
+| `human-escalation` の通知手段 | Windows通知 / Issueコメント / メール |
+| タイムアウト値 | ワーカーが反応しない場合の待機時間 |
 | リトライ上限の具体的な値 | コーダーの自己修正は何回まで許容するか（仮: 3回） |
-| `human-escalation` の通知手段 | Windows通知？Issueコメント？メール？ |
-| デーモンの常駐手段 | PM2を第一候補とする（Windows/Linux共通で動作する。タスクスケジューラはPM2が使えない場合の代替） |
-| 対象リポジトリの範囲 | このリポジトリ専用か、複数リポジトリに対応させるか |
-| オーケストレーターのIssue分解粒度 | 1 Issue = 1 PR の原則を守るか、サブIssueに分解するか |

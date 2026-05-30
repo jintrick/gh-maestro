@@ -60,6 +60,11 @@ awaiting-review       → [レビュアー]         → awaiting-approval | awai
 
 コマンドは `GH_ISSUE` 環境変数でIssue番号を受け取る前提で書く。
 
+## エージェントCLI
+
+- **claude (Claude Code CLI)**: オーケストレーターの実行環境。非インタラクティブ起動: `claude -p "prompt"`。ドキュメント → `docs/rag/claude-code/`
+- **agy (Antigravity CLI)**: コーダー・レビュアーの実行環境。非インタラクティブ起動は Python SDK 経由（`pip install google-antigravity`）。ドキュメント → `docs/rag/antigravity/`
+
 ## 未決定事項
 
 - `human-escalation` の通知手段（Windows通知 / Issueコメント / メール）
