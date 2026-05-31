@@ -1,6 +1,6 @@
 # gh-maestro 要件定義書
 
-v1.0 / 2026-05-31
+v1.1 / 2026-05-31
 
 ---
 
@@ -17,8 +17,8 @@ GitHubを永続ストアとして使い、複数のAIエージェントを協調
 | 実行環境 | Windows（Linux版は別途 `gh-maestro.sh` で対応） |
 | ターミナル管理 | Windows: wmux（split pane） |
 | エージェント間通信 | wmux `terminal_send` + `terminal_send_key(enter)`（実機確認済み） |
-| wmux 起動前提 | `gh-maestro.bat` は wmux ペイン内から実行すること。PID tree walking による workspace identity 解決が前提 |
-| オーケストレーター | Claude Code CLI（`claude`）をTUIで対話的に起動 |
+| wmux 起動前提 | 起動スキルは wmux ペイン内から実行すること。PID tree walking による workspace identity 解決が前提 |
+| オーケストレーター | `/gh-maestro` スキルを呼び出したエージェント自身がオーケストレーターになる |
 | ワーカー | agy（Antigravity CLI）等。スキルで動作定義するため実装は差し替え可能 |
 | 並列実行 | Issue単位で直列のみ（同時に1タスク） |
 | ブランチ運用 | `dev` で直接作業 → `dev→main` PR（フィーチャーブランチ不要） |
@@ -38,67 +38,69 @@ gh-maestro を使用する対象プロジェクトは以下を満たすこと：
 
 ```
 gh-maestro/
-├── gh-maestro.bat          # Windowsスタートアップスクリプト
-├── gh-maestro.sh           # Linux版（将来対応）
+├── gh-maestro-install.bat      # 一回限りのグローバルインストーラー
+├── gh-maestro-install.ps1      # インストーラー本体（PowerShell）
 └── skills/
+    ├── gh-maestro/
+    │   └── SKILL.md            # 起動スキル（claudeにもagyにも配置）
     ├── gh-maestro-orchestrator/
-    │   └── SKILL.md        # orchestratorスキル（初期プロンプト経由で参照）
+    │   └── SKILL.md            # orchestratorスキル（claudeにもagyにも配置）
     ├── gh-maestro-coder/
-    │   └── SKILL.md        # agy用スキル（自動ロード）
+    │   └── SKILL.md            # coderスキル（claudeにもagyにも配置）
     └── gh-maestro-reviewer/
-        └── SKILL.md        # agy用スキル（自動ロード）
+        └── SKILL.md            # reviewerスキル（claudeにもagyにも配置）
 ```
 
-**スキルのロード方法**: Claude Code・agy ともに同じ `SKILL.md` フォーマット（[Agent Skills](https://agentskills.io) オープンスタンダード）。配置先のみ異なる：
-- orchestrator（Claude Code）: `.claude/skills/` → 自動ロード
-- coder/reviewer（agy）: `.agents/skills/` → 自動ロード
+**スキルのロード方法**: Claude Code・agy ともに同じ `SKILL.md` フォーマット（[Agent Skills](https://agentskills.io) オープンスタンダード）。インストーラーが両エージェントのグローバルスキルディレクトリに配置する。
 
-**gh-maestroは対象プロジェクトの外に置く**。対象プロジェクトのワークスペースルートで `gh-maestro.bat` を実行する。
+**gh-maestroは対象プロジェクトの外に置く**。対象プロジェクトのワークスペースルートで起動スキルを呼び出す。
 
 ---
 
 ## 4. アーキテクチャ概要
 
-`gh-maestro.bat` をワークスペースルートで実行すると、wmux上に3ペインが作成され、各エージェントが初期プロンプト付きで起動する。
+### 4.1 二段階構成
 
-エージェント間のハンドオフは `terminal_send` + `terminal_send_key(enter)` で行う。受信側TUIはアイドル状態で入力待ちになっているため、テキスト注入のみで起動する。
+**一回限りのインストール（`gh-maestro-install.bat`）**
+- スキルをエージェントのグローバルスキルディレクトリに配置する
+- agy向けに wmux MCP をグローバル設定に書き込む
+- 以後、どのプロジェクトでも追加インストール不要
 
-### 起動スクリプトの動作
+**プロジェクト起動（`/gh-maestro` スキル呼び出し）**
+- 対象プロジェクトのワークスペースルートで、claudeまたはagyから `/gh-maestro` を呼び出す
+- wmuxペインを作成してワーカーエージェントを起動する
+- 呼び出したエージェント自身がオーケストレーターとして動作する
 
-1. `.git/config` から `origin` のリモートURLを読み取り `owner/repo` を特定する
-2. 対象ワークスペースの初期化を行う：
-   a. `skills/` をエージェント種別に応じた配置先へコピーする
-      - `gh-maestro-orchestrator` → `.claude/skills/`（Claude Code用）
-      - `gh-maestro-coder`, `gh-maestro-reviewer` → `.agents/skills/`（agy用）
-      - 将来他のエージェントを追加する場合はここに配置ロジックを足す
-   b. `.agents/mcp_config.json` に wmux MCP サーバー設定を書き込む（agy が `terminal_send` を使えるようにするため）
-3. wmux Named Pipe RPC（`pane.split`）で3ペインを作成する
-4. 各ペイン作成後に `surface_list` 相当のRPCでptyIdを取得する
-5. 各ペインのシェルをワークスペースルートに `cd` させる（新規ペインはwmuxデフォルトCWDで起動するため）
-6. 各エージェントを初期プロンプト付きで起動する。プロンプトには以下を含める：
-   - 対象リポジトリ（`owner/repo`）
-   - 自分の役割とスキル名
-   - 他エージェントのptyId（A2A送信先として使用）
+### 4.2 エージェント配置
 
 ```
-gh-maestro.bat（ワークスペースルートで実行）
-  ├─ ペイン1: claude 起動 → orchestrator（人間との対話TUI）
-  ├─ ペイン2: agy 起動   → coder（指示待機）
-  └─ ペイン3: agy 起動   → reviewer（指示待機）
+/gh-maestro スキル呼び出し（claude or agy）
+  ├─ 現在のペイン: orchestrator（/gh-maestroを呼び出したエージェント）
+  ├─ 新規ペイン: agy 起動 → coder（指示待機）
+  └─ 新規ペイン: agy 起動 → reviewer（指示待機）
 ```
 
-### ワークスペース初期化ファイル
+### 4.3 起動スキルの動作
 
-`gh-maestro.bat` が対象ワークスペースに書き込むファイル：
+1. 前提条件チェック（git、gh認証、dev/mainブランチ）
+2. `.git/config` から `origin` のリモートURLを読み取り `owner/repo` を特定する
+3. wmux Named Pipe RPC（`pane.split`）で2ペインを追加作成する
+4. 各ペインのptyIdを取得する
+5. 各ペインのシェルをワークスペースルートに `cd` させる
+6. coder/reviewerペインで `agy` を起動し、初期プロンプトを送信する（ptyId埋め込み）
+7. `.gh-maestro/session.json` にptyIdを書き込む
+8. orchestratorスキル（`gh-maestro-orchestrator`）の動作に移行する
 
-| ファイル | 内容 |
-|---|---|
-| `.claude/skills/gh-maestro-orchestrator/SKILL.md` | orchestratorスキル（Claude Code用、自動ロード） |
-| `.agents/skills/gh-maestro-coder/SKILL.md` | coderスキル（agy用、自動ロード） |
-| `.agents/skills/gh-maestro-reviewer/SKILL.md` | reviewerスキル（agy用、自動ロード） |
-| `.agents/mcp_config.json` | wmux MCPサーバー設定（マージ） |
+### 4.4 グローバルインストール先
 
-`.agents/mcp_config.json` への追記内容：
+| スキル | Claude Code | agy |
+|---|---|---|
+| `gh-maestro`（起動） | `~/.claude/skills/gh-maestro/` | `~/.gemini/antigravity/skills/gh-maestro/` |
+| `gh-maestro-orchestrator` | `~/.claude/skills/gh-maestro-orchestrator/` | `~/.gemini/antigravity/skills/gh-maestro-orchestrator/` |
+| `gh-maestro-coder` | `~/.claude/skills/gh-maestro-coder/` | `~/.gemini/antigravity/skills/gh-maestro-coder/` |
+| `gh-maestro-reviewer` | `~/.claude/skills/gh-maestro-reviewer/` | `~/.gemini/antigravity/skills/gh-maestro-reviewer/` |
+
+agy向け wmux MCP グローバル設定（`~/.gemini/antigravity/mcp_config.json`）：
 
 ```json
 {
@@ -111,17 +113,29 @@ gh-maestro.bat（ワークスペースルートで実行）
 }
 ```
 
-### ペイン識別とA2A通信
+Claude Codeはwmux MCPが自動登録されるため追加設定不要。
 
-- `gh-maestro.bat` がペイン作成時にptyIdを取得し、各エージェントの初期プロンプトに埋め込む
-- orchestrator（Claude Code）は wmux MCP 自動登録済みのため追加設定不要
-- coder/reviewer（agy）は `.agents/mcp_config.json` の wmux MCP設定を通じて `terminal_send` を使用する
+### 4.5 ペイン識別とA2A通信
 
-### 通信レイヤー
+- 起動スキルがペイン作成時にptyIdを取得し、各エージェントの初期プロンプトに埋め込む
+- orchestratorは `.gh-maestro/session.json` からptyIdを読み込む（動的インジェクション）
+- coder/reviewerは起動時の初期プロンプトに含まれるptyIdを使用する
+
+### 4.6 対象プロジェクトに生成されるファイル
+
+| ファイル | 内容 |
+|---|---|
+| `.gh-maestro/session.json` | PTY IDセッション情報（自動生成） |
+
+スキルはグローバルインストール済みのため、対象プロジェクトへのコピーは不要。
+
+`.gitignore` に `.gh-maestro/` を追加することを推奨。
+
+### 4.7 通信レイヤー
 
 | 通信 | 手段 |
 |---|---|
-| 人間 ↔ オーケストレーター | Claude Code CLI TUI（GitHub不使用） |
+| 人間 ↔ オーケストレーター | エージェントTUI（GitHub不使用） |
 | オーケストレーター → GitHub | `gh issue create` |
 | エージェント間 | `terminal_send(ptyId)` + `terminal_send_key(enter)` |
 | エージェント ↔ GitHub | `gh` CLI（PR作成・レビュー） |
@@ -130,9 +144,9 @@ gh-maestro.bat（ワークスペースルートで実行）
 
 ## 5. エージェントの役割定義
 
-### 5.1 オーケストレーター（Claude Code）
+### 5.1 オーケストレーター
 
-動作は `gh-maestro-orchestrator` スキル（SKILL.md）で定義する。`.claude/skills/` に配置することで自動ロードされる。
+動作は `gh-maestro-orchestrator` スキル（SKILL.md）で定義する。グローバルインストール済みのため自動ロードされる。
 
 **責務**
 - 人間と対話してIssueの内容を共同起草する
@@ -175,12 +189,16 @@ gh-maestro.bat（ワークスペースルートで実行）
 ## 6. ワークフロー
 
 ```
-[人間] gh-maestro.bat を実行
-  │
-  ├─ ワークスペース初期化（スキルコピー + mcp_config書き込み）
-  ├─ 3ペイン作成（ptyId取得 → 初期プロンプトに埋め込み）
-  │
-  └─ [orchestrator] 人間と対話 → gh issue create
+[人間] 一回限り: gh-maestro-install.bat を実行
+  └─ スキル・MCP設定をグローバルインストール
+
+[人間] プロジェクト起動: 対象プロジェクトのワークスペースルートで /gh-maestro を呼び出す
+  ├─ 前提条件チェック
+  ├─ 2ペイン追加作成（ptyId取得）
+  ├─ coder/reviewer 起動（初期プロンプト送信）
+  └─ session.json 書き込み
+
+  [orchestrator] 人間と対話 → gh issue create
            │ terminal_send(coder_pty_id)
            ▼
        [coder] 実装（devブランチ）→ gh pr create（dev→main）
@@ -210,9 +228,11 @@ gh-maestro.bat（ワークスペースルートで実行）
 
 ## 8. 人間の介入ポイント
 
-1. wmuxペイン内で `gh-maestro.bat` をワークスペースルートで実行する
-2. orchestratorと対話してIssueを起草・作成する
-3. `APPROVED` になったPRを `main` にマージする
+1. `gh-maestro-install.bat` を一回だけ実行してグローバルインストールする
+2. wmuxペイン内で対象プロジェクトのルートに移動する
+3. claudeまたはagyを起動して `/gh-maestro` を呼び出す
+4. orchestratorと対話してIssueを起草・作成する
+5. `APPROVED` になったPRを `main` にマージする
 
 ---
 
@@ -223,5 +243,6 @@ gh-maestro.bat（ワークスペースルートで実行）
 | `human-escalation` の通知手段 | wmux通知 / Issueコメント / メール |
 | リトライ上限の値 | コーダーの自己修正は何回まで（仮: 3回） |
 | 直列制御 | 複数Issueが存在する場合にcoderが1件に絞る仕組み |
-| Named Pipe RPC実装 | `gh-maestro.bat` からのペイン作成・ptyId取得の実装方法詳細 |
-| `.agents/mcp_config.json` の競合 | 既存設定とのマージ方針 |
+| Named Pipe RPC実装 | 起動スキルからのペイン作成・ptyId取得の実装方法詳細 |
+| `~/.gemini/antigravity/mcp_config.json` の競合 | 既存設定とのマージ方針 |
+| Linux対応 | `gh-maestro-install.sh` + `~/.config/antigravity/skills/` など |
