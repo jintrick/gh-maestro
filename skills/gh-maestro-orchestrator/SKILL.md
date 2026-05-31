@@ -6,7 +6,7 @@ shell: powershell
 
 ## セッション情報
 
-!`if (Test-Path '.gh-maestro/session.json') { Get-Content '.gh-maestro/session.json' } else { '{"error": "session.json not found — run gh-maestro.bat first"}' }`
+!`if (Test-Path '.gh-maestro/session.json') { Get-Content '.gh-maestro/session.json' } else { '{"error": "session.json not found — run /gh-maestro first"}' }`
 
 上記JSONの各フィールドの意味:
 - `repo`: 対象GitHubリポジトリ（owner/repo形式）
@@ -42,12 +42,18 @@ mcp__wmux__terminal_send_key(ptyId: <coderPtyId>, key: "enter")
 
 **自己レビューする場合:**
 ```
-gh pr view N
-gh pr diff N
+gh pr view <N>
+gh pr diff <N>
 gh issue view <IssueN>
 # 問題なければ:
-gh pr review N --approve --body "LGTM"
+gh pr review <N> --approve --body "LGTM"
 ```
+
+レビュー結果の確認（`gh pr view` ではレビューは取得できない。必ず以下を使う）：
+```
+gh api repos/<repo>/pulls/<N>/reviews
+```
+`state` が `APPROVED` のエントリがあればマージ依頼に進む。
 
 **reviewerに委任する場合:**
 ```

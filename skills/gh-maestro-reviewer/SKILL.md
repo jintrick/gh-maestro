@@ -26,6 +26,11 @@ gh pr diff <N>
 gh issue view <IssueN>
 ```
 
+**注意**: `gh pr view --comments` はIssueコメントのみ取得する。既存レビューの確認は以下を使う：
+```
+gh api repos/<repo>/pulls/<N>/reviews
+```
+
 ### 3. レビュー観点
 - PRのdiffがIssue要件を満たしているか
 - 明らかなバグ・セキュリティ上の問題がないか
