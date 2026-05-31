@@ -22,6 +22,26 @@ reviewer (agy)
     → A2A送信 (結果報告)
 ```
 
+## リポジトリ構成
+
+```
+gh-maestro/
+├── gh-maestro-install.bat/ps1  # グローバルインストーラー
+├── scripts/
+│   └── gh-maestro-setup.ps1    # セットアップ本体（起動スキルから呼び出し）
+├── skills/
+│   ├── gh-maestro/             # 起動スキル（/gh-maestro）
+│   ├── gh-maestro-orchestrator/ # orchestratorスキル
+│   ├── gh-maestro-coder/       # coderスキル
+│   └── gh-maestro-reviewer/    # reviewerスキル
+└── docs/rag/
+    ├── claude-code/            # Claude Code RAGドキュメント
+    ├── antigravity/            # agy RAGドキュメント
+    └── wmux/                   # wmux RAGドキュメント
+```
+
+`docs/rag/` はエージェントが参照するナレッジベース。`CLAUDE.md` からパスが示されており、エージェントが必要に応じてGlobで検索する。
+
 ## 前提条件
 
 | 項目 | 要件 |
