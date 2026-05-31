@@ -49,7 +49,7 @@ gh issue view <IssueN>
 gh pr review <N> --approve --body "LGTM"
 ```
 
-レビュー結果の確認（`gh pr view` ではレビューは取得できない。必ず以下を使う）：
+レビュー結果の確認：
 ```
 gh api repos/<repo>/pulls/<N>/reviews
 ```
