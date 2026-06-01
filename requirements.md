@@ -15,9 +15,9 @@ GitHubを永続ストアとして使い、複数のAIエージェントを協調
 | 項目 | 決定事項 |
 |---|---|
 | 実行環境 | Windows（Linux版は別途 `gh-maestro.sh` で対応） |
-| ターミナル管理 | Windows: wmux（split pane） |
-| エージェント間通信 | wmux `terminal_send` + `terminal_send_key(enter)`（実機確認済み） |
-| wmux 起動前提 | 起動スキルは wmux ペイン内から実行すること。PID tree walking による workspace identity 解決が前提 |
+| ターミナル管理 | Windows: wezterm（split pane） |
+| エージェント間通信 | `wezterm cli send-text --pane-id <id>`（docs/rag/wezterm/ 準拠） |
+| wezterm 起動前提 | 起動スキルは wezterm 内（`WEZTERM_PANE` 環境変数あり）から実行すること。 |
 | オーケストレーター | `/gh-maestro` スキルを呼び出したエージェント自身がオーケストレーターになる |
 | ワーカー | agy（Antigravity CLI）等。スキルで動作定義するため実装は差し替え可能 |
 | 並列実行 | Issue単位で直列のみ（同時に1タスク） |
@@ -31,6 +31,7 @@ gh-maestro を使用する対象プロジェクトは以下を満たすこと：
 - `gh auth login` 済み（GitHub CLI 認証）
 - `git remote` に `origin` が設定済み（GitHubリモートURL）
 - `main` ブランチおよび `dev` ブランチが存在すること
+- 実行環境が WezTerm ターミナル内であること（`WEZTERM_PANE` 環境変数がセットされていること）
 
 ---
 
@@ -63,12 +64,12 @@ gh-maestro/
 
 **一回限りのインストール（`gh-maestro-install.bat`）**
 - スキルをエージェントのグローバルスキルディレクトリに配置する
-- agy向けに wmux MCP をグローバル設定に書き込む
+- wezterm CLI がパスに通っていることを前提とする
 - 以後、どのプロジェクトでも追加インストール不要
 
 **プロジェクト起動（`/gh-maestro` スキル呼び出し）**
 - 対象プロジェクトのワークスペースルートで、claudeまたはagyから `/gh-maestro` を呼び出す
-- wmuxペインを作成してワーカーエージェントを起動する
+- `wezterm cli split-pane` でペインを作成してワーカーエージェントを起動する
 - 呼び出したエージェント自身がオーケストレーターとして動作する
 
 ### 4.2 エージェント配置
@@ -82,13 +83,13 @@ gh-maestro/
 
 ### 4.3 起動スキルの動作
 
-1. 前提条件チェック（git、gh認証、dev/mainブランチ）
+1. 前提条件チェック（git、gh認証、dev/mainブランチ、WEZTERM_PANEの存在）
 2. `.git/config` から `origin` のリモートURLを読み取り `owner/repo` を特定する
-3. wmux Named Pipe RPC（`pane.split`）で2ペインを追加作成する
-4. 各ペインのptyIdを取得する
-5. 各ペインのシェルをワークスペースルートに `cd` させる
-6. coder/reviewerペインで `agy` を起動し、初期プロンプトを送信する（ptyId埋め込み）
-7. `.gh-maestro/session.json` にptyIdを書き込む
+3. `wezterm cli split-pane` で2ペインを追加作成する
+4. 作成された各ペインの `pane-id` を取得する（`split-pane` の標準出力から取得可能）
+5. 各ペインのシェルをワークスペースルートに `cd` させる（`wezterm cli send-text --pane-id <id> "cd ...\n"`）
+6. coder/reviewerペインで `agy` を起動し、初期プロンプトを送信する（pane-id埋め込み）
+7. `.gh-maestro/session.json` に pane-id を書き込む
 8. orchestratorスキル（`gh-maestro-orchestrator`）の動作に移行する
 
 ### 4.4 グローバルインストール先
@@ -100,32 +101,19 @@ gh-maestro/
 | `gh-maestro-coder` | `~/.claude/skills/gh-maestro-coder/` | `~/.gemini/antigravity/skills/gh-maestro-coder/` |
 | `gh-maestro-reviewer` | `~/.claude/skills/gh-maestro-reviewer/` | `~/.gemini/antigravity/skills/gh-maestro-reviewer/` |
 
-agy向け wmux MCP グローバル設定（`~/.gemini/antigravity/mcp_config.json`）：
-
-```json
-{
-  "mcpServers": {
-    "wmux": {
-      "command": "wmux",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-Claude Codeはwmux MCPが自動登録されるため追加設定不要。
+weztermは標準のCLIツールとして動作するため、特定のMCPサーバー設定は不要（`run_shell_command` で直接呼び出し可能）。
 
 ### 4.5 ペイン識別とA2A通信
 
-- 起動スキルがペイン作成時にptyIdを取得し、各エージェントの初期プロンプトに埋め込む
-- orchestratorは `.gh-maestro/session.json` からptyIdを読み込む（動的インジェクション）
-- coder/reviewerは起動時の初期プロンプトに含まれるptyIdを使用する
+- 起動スキルがペイン作成時に `pane-id` を取得し、各エージェントの初期プロンプトに埋め込む
+- orchestratorは `.gh-maestro/session.json` から `pane-id` を読み込む（動的インジェクション）
+- coder/reviewerは起動時の初期プロンプトに含まれる `pane-id` を使用する
 
 ### 4.6 対象プロジェクトに生成されるファイル
 
 | ファイル | 内容 |
 |---|---|
-| `.gh-maestro/session.json` | PTY IDセッション情報（自動生成） |
+| `.gh-maestro/session.json` | pane-id セッション情報（自動生成） |
 
 スキルはグローバルインストール済みのため、対象プロジェクトへのコピーは不要。
 
@@ -137,7 +125,7 @@ Claude Codeはwmux MCPが自動登録されるため追加設定不要。
 |---|---|
 | 人間 ↔ オーケストレーター | エージェントTUI（GitHub不使用） |
 | オーケストレーター → GitHub | `gh issue create` |
-| エージェント間 | `terminal_send(ptyId)` + `terminal_send_key(enter)` |
+| エージェント間 | `wezterm cli send-text --pane-id <id> "指示\n"` |
 | エージェント ↔ GitHub | `gh` CLI（PR作成・レビュー） |
 
 ---
@@ -151,7 +139,7 @@ Claude Codeはwmux MCPが自動登録されるため追加設定不要。
 **責務**
 - 人間と対話してIssueの内容を共同起草する
 - `gh issue create` でGitHubにIssueを作成する
-- coderペインに「Issue #N を実装してください」と送信する
+- coderペインに「Issue #N を実装してください」と送信する（`wezterm cli send-text`）
 - coderから完了報告を受けたら、以下のいずれかを判断して実行する：
   - 自分でレビューする
   - reviewerに転送する
@@ -190,19 +178,19 @@ Claude Codeはwmux MCPが自動登録されるため追加設定不要。
 
 ```
 [人間] 一回限り: gh-maestro-install.bat を実行
-  └─ スキル・MCP設定をグローバルインストール
+  └─ スキルをグローバルインストール
 
-[人間] プロジェクト起動: 対象プロジェクトのワークスペースルートで /gh-maestro を呼び出す
-  ├─ 前提条件チェック
-  ├─ 2ペイン追加作成（ptyId取得）
+[人間] プロジェクト起動: wezterm 内のワークスペースルートで /gh-maestro を呼び出す
+  ├─ 前提条件チェック（WEZTERM_PANE 確認）
+  ├─ `wezterm cli split-pane` で2ペイン追加作成（pane-id 取得）
   ├─ coder/reviewer 起動（初期プロンプト送信）
   └─ session.json 書き込み
 
   [orchestrator] 人間と対話 → gh issue create
-           │ terminal_send(coder_pty_id)
+           │ wezterm cli send-text --pane-id <coder_pane_id>
            ▼
        [coder] 実装（devブランチ）→ gh pr create（dev→main）
-           │ terminal_send(orchestrator_pty_id)
+           │ wezterm cli send-text --pane-id <orchestrator_pane_id>
            ▼
        [orchestrator] レビュー方針を判断
            │
@@ -210,10 +198,10 @@ Claude Codeはwmux MCPが自動登録されるため追加設定不要。
   自己レビュー  reviewer委任  並列
            │
      APPROVED or 修正指摘
-           │ terminal_send(orchestrator_pty_id)
+           │ wezterm cli send-text --pane-id <orchestrator_pane_id>
            ▼
        [orchestrator] → [人間] マージ依頼
-                    or → terminal_send(coder_pty_id) 修正指示
+                    or → wezterm cli send-text --pane-id <coder_pane_id> 修正指示
 ```
 
 ---
@@ -229,7 +217,7 @@ Claude Codeはwmux MCPが自動登録されるため追加設定不要。
 ## 8. 人間の介入ポイント
 
 1. `gh-maestro-install.bat` を一回だけ実行してグローバルインストールする
-2. wmuxペイン内で対象プロジェクトのルートに移動する
+2. wezterm を起動し対象プロジェクトのルートに移動する
 3. claudeまたはagyを起動して `/gh-maestro` を呼び出す
 4. orchestratorと対話してIssueを起草・作成する
 5. `APPROVED` になったPRを `main` にマージする
@@ -240,9 +228,8 @@ Claude Codeはwmux MCPが自動登録されるため追加設定不要。
 
 | 項目 | 内容 |
 |---|---|
-| `human-escalation` の通知手段 | wmux通知 / Issueコメント / メール |
+| `human-escalation` の通知手段 | wezterm通知 / Issueコメント / メール |
 | リトライ上限の値 | コーダーの自己修正は何回まで（仮: 3回） |
 | 直列制御 | 複数Issueが存在する場合にcoderが1件に絞る仕組み |
-| Named Pipe RPC実装 | 起動スキルからのペイン作成・ptyId取得の実装方法詳細 |
-| `~/.gemini/antigravity/mcp_config.json` の競合 | 既存設定とのマージ方針 |
+| `wezterm cli split-pane` のレイアウト | 水平・垂直の分割指定（デフォルトは bottom） |
 | Linux対応 | `gh-maestro-install.sh` + `~/.config/antigravity/skills/` など |
