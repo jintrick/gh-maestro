@@ -2,81 +2,94 @@
 
 GitHubを永続ストアとして、複数のAIエージェントを協調動作させるオーケストレーションシステム。Issue起票からPRマージまでの開発サイクルを自動化する。
 
-## 構成
+## アーキテクチャ
 
 ```
 orchestrator (claude or agy)
     ↕ 人間と対話
     → Issue作成 (gh issue create)
-    → A2A送信 (wmux terminal_send)
+    → ワーカーを動的にペイン生成 (spawn-worker.js)
+    → A2A送信 (send-pane.js)
 
-coder (agy)
-    ← A2A受信
+coder (agy) ※orchestratorが必要時に起動
+    ← 指示受信
     → 実装 (devブランチ)
     → PR作成 (gh pr create)
     → A2A送信 (完了報告)
 
-reviewer (agy)
-    ← A2A受信 (optional)
+reviewer (agy) ※orchestratorが必要時に起動
+    ← レビュー依頼受信
     → レビュー (gh pr review)
     → A2A送信 (結果報告)
 ```
+
+ワーカー（coder / reviewer）の構成と数はタスクに応じてorchestratorが動的に決定する。
 
 ## リポジトリ構成
 
 ```
 gh-maestro/
-├── gh-maestro-install.bat/ps1  # グローバルインストーラー
+├── gh-maestro-install.ps1      # グローバルインストーラー（Windows）
+├── gh-maestro-install.sh       # グローバルインストーラー（Linux/macOS）
 ├── scripts/
-│   └── gh-maestro-setup.ps1    # セットアップ本体（起動スキルから呼び出し）
+│   └── gh-maestro-setup.js     # 前提条件チェック（起動スキルから呼び出し）
 ├── skills/
 │   ├── gh-maestro/             # 起動スキル（/gh-maestro）
-│   ├── gh-maestro-orchestrator/ # orchestratorスキル
-│   ├── gh-maestro-coder/       # coderスキル
-│   └── gh-maestro-reviewer/    # reviewerスキル
+│   ├── gh-maestro-orchestrator/ # orchestratorスキル + ペイン操作アセット
+│   │   └── scripts/
+│   │       ├── send-pane.js    # 既存ペインへの送信
+│   │       └── spawn-worker.js # ワーカーペインの動的生成
+│   ├── gh-maestro-coder/       # coderスキル（役職定義のみ）
+│   └── gh-maestro-reviewer/    # reviewerスキル（役職定義のみ）
 └── docs/rag/
     ├── claude-code/            # Claude Code RAGドキュメント
     ├── antigravity/            # agy RAGドキュメント
-    └── wmux/                   # wmux RAGドキュメント
+    └── wmux/                   # wezterm RAGドキュメント
 ```
 
-`docs/rag/` はエージェントが参照するナレッジベース。`CLAUDE.md` からパスが示されており、エージェントが必要に応じてGlobで検索する。
+インストーラーが `~/.gh-maestro/scripts/` に配置するスクリプト：
+- `gh-maestro-setup.js` — 前提条件チェック
 
 ## 前提条件
 
 | 項目 | 要件 |
 |---|---|
-| OS | Windows 10/11 |
-| ターミナル | [wmux](https://github.com/openwong2kim/wmux) |
+| OS | Windows / Linux / macOS |
+| ターミナル | [WezTerm](https://wezfurlong.org/wezterm/)（`WEZTERM_PANE` 環境変数が必要） |
+| ランタイム | Node.js 18以上 |
 | CLI | `claude`（Claude Code）または `agy`（Antigravity CLI）、`gh`（GitHub CLI） |
 | GitHub | `gh auth login` 済み |
-| リポジトリ | `origin` リモートが GitHub を向いていること |
+| リポジトリ | `origin` リモートが GitHub を向いていること、`main` / `dev` ブランチが存在すること |
 
 ## インストール（一回限り）
 
 gh-maestroを任意の場所にクローンする（対象プロジェクトとは別の場所）:
 
-```powershell
+```sh
 git clone https://github.com/jintrick/gh-maestro.git
 ```
 
 インストーラーを実行する（一回のみ。更新時も再実行）:
 
-```powershell
-C:\path\to\gh-maestro\gh-maestro-install.bat
+```sh
+# Windows
+.\gh-maestro-install.ps1
+
+# Linux / macOS
+chmod +x gh-maestro-install.sh
+./gh-maestro-install.sh
 ```
 
 インストーラーが自動で以下を行う：
 
-1. スキル（`gh-maestro`・`gh-maestro-orchestrator`・`gh-maestro-coder`・`gh-maestro-reviewer`）を `~\.claude\skills\` および `~\.gemini\antigravity\skills\` に配置
-2. セットアップスクリプトを `~\.gh-maestro\scripts\` に配置
-3. agy向け wmux MCP 設定を `~\.gemini\antigravity\mcp_config.json` に書き込み
+1. スキルを `~/.claude/skills/` および `~/.gemini/antigravity/skills/` に配置
+2. `gh-maestro-setup.js` を `~/.gh-maestro/scripts/` に配置（`send-pane.js` はワーカー起動時にワークスペースへ自動配置）
 
 ## 使い方
 
-### 1. wmux を起動してプロジェクトに移動する
+### 1. WezTermを起動してプロジェクトに移動する
 
-wmux を起動し、対象プロジェクトのルートに移動する。`/gh-maestro` は自動でペインを分割するが、手動で3ペイン作っておいても動作する。
+WezTermのペイン内で対象プロジェクトのルートに移動する。
 
 ### 2. `/gh-maestro` を呼び出す
 
@@ -88,29 +101,26 @@ claude または agy を起動し、スキルを呼び出す：
 
 スキルが自動で以下を行う：
 
-1. 前提条件チェック（git、gh認証、devブランチ）
-2. wmux ペイン2枚の追加作成とPTY ID取得
-3. coder/reviewer（agy）を起動して初期プロンプト送信
-4. `.gh-maestro/session.json` にPTY IDを保存
-5. 自身がorchestratorとして動作を開始
+1. 前提条件チェック（WezTerm環境・git・gh認証・devブランチ）
+2. 自身がorchestratorとして動作を開始
 
 ### 3. orchestratorと対話する
 
-スキル起動後、Issueの内容を話し合って起票する。以後は自動で流れる。
+Issueの内容を話し合って起票する。orchestratorがタスクに応じて必要なワーカーを起動する。
 
 ```
-人間: 「ログイン機能を追加したい。...」
+人間: 「ログイン機能を追加したい」
 orchestrator: Issue起草・作成
-orchestrator → coder: 「Issue #N を実装してください」
+orchestrator → coder起動: 「Issue #N を実装してください」
 coder: 実装 → PR作成
 coder → orchestrator: 「PR #M を作成しました」
-orchestrator: レビュー判断（自己 or reviewer委任 or 並列）
-orchestrator → 人間: 「PR #M がAPPROVEDです。mainへのマージをお願いします」
+orchestrator: レビュー判断（自己 or reviewer起動して委任 or 並列）
+orchestrator → 人間: 「PR #M がAPPROVEDです。devへのマージをお願いします」
 ```
 
 ### 4. マージする
 
-PRが承認されたら GitHub 上で `main` にマージする。
+ワーカーが作成するPRは `issue-<N>-<desc>` → `dev` に向いている。承認されたら GitHub 上で `dev` にマージする。`dev` → `main` のマージは別途判断して行う。
 
 ## ワークフロー詳細
 
@@ -119,27 +129,16 @@ PRが承認されたら GitHub 上で `main` にマージする。
 ## 対象プロジェクトに生成されるファイル
 
 ```
-.gh-maestro/session.json    # PTY IDセッション情報（自動生成）
+.gh-maestro/
+├── scripts/
+│   └── send-pane.js              # ワーカー起動時に自動配置（A2A送信ユーティリティ）
+└── worktrees/
+    └── issue-<N>-<desc>/         # ワーカー専用git worktree（ワーカー起動時に自動作成）
 ```
 
-スキルはグローバルインストール済みのため、対象プロジェクトへのコピーは不要。
-
-`.gitignore` に `.gh-maestro/` を追加することを推奨。
+`.gh-maestro/` は初回ワーカー起動時に `.gitignore` へ自動追記される。
 
 ## スキルのカスタマイズ
 
-gh-maestro リポジトリの `skills/` 以下の `SKILL.md` を編集し、`gh-maestro-install.bat` を再実行すると更新が反映される。
+`skills/` 以下の `SKILL.md` を編集してインストーラーを再実行すると更新が反映される。新しいワーカー役職を追加する場合は `skills/` に新しいスキルディレクトリを追加してインストールするだけでよい。
 
-## トラブルシューティング
-
-**「wmux pipe-token not found」と表示される**
-wmuxが起動していないか、wmuxペイン外から実行している。wmuxペイン内で `/gh-maestro` を呼び出すこと。
-
-**「pane.split failed」エラーが出る**
-wmux Named Pipe経由でのペイン分割に失敗している。wmuxをキーボードショートカットで手動で3ペインに分割してから再試行する。
-
-**agyCLIが起動しない**
-`agy` がPATHに通っていない。`agy --help` が動作することを確認する。
-
-**既存セッションに再アタッチしたい**
-`.gh-maestro/session.json` が残っていれば、claude/agy を起動して `/gh-maestro-orchestrator` を呼び出すと既存セッションに接続できる。

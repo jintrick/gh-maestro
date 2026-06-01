@@ -1,37 +1,18 @@
 ---
 name: gh-maestro
-description: gh-maestroセッションをこのワークスペースで起動する。wmuxに2ペインを追加してcoder/reviewerエージェントを起動し、自身がorchestratorとして動作を開始する。対象プロジェクトのルートディレクトリで呼び出すこと。
-shell: powershell
+description: gh-maestroセッションをこのワークスペースで起動する。前提条件チェックを行い、自身がorchestratorとして動作を開始する。対象プロジェクトのルートディレクトリで呼び出すこと。
 ---
 
 ## 前提
 
-このスキルは **wmuxペイン内** から呼び出すこと。wmuxが未起動の場合、Named Pipe接続に失敗する。
+このスキルは **WezTermペイン内** から呼び出すこと（`WEZTERM_PANE` 環境変数がセットされていること）。
 
-## セットアップ手順
+## 起動
 
-以下のスクリプトを実行する：
+以下のスクリプトで前提条件をチェックする：
 
-```powershell
-& "$env:USERPROFILE\.gh-maestro\scripts\gh-maestro-setup.ps1"
+```sh
+node "$HOME/.gh-maestro/scripts/gh-maestro-setup.js"
 ```
 
-スクリプトが成功すると `.gh-maestro/session.json` が書き込まれ、coder/reviewerペインで agy が起動する。
-
-## セッション情報の読み込み
-
-スクリプト成功後、session.jsonを読み込む：
-
-```powershell
-Get-Content '.gh-maestro/session.json' | ConvertFrom-Json
-```
-
-取得したJSONの各フィールド：
-- `repo`: 対象GitHubリポジトリ（owner/repo形式）
-- `coderPtyId`: coderエージェントのptyId（A2A送信先）
-- `reviewerPtyId`: reviewerエージェントのptyId（A2A送信先）
-- `orchestratorPtyId`: 自分自身のptyId
-
-## 以降の動作
-
-session.jsonの読み込みが完了したら、`gh-maestro-orchestrator` スキルに定義されたワークフローに従って動作する。
+チェックを通過したら、`gh-maestro-orchestrator` スキルのゴール定義に従ってorchestratorとして動作を開始する。
