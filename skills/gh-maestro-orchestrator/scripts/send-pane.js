@@ -36,7 +36,9 @@ if (existsSync(workersJson)) {
 }
 
 // 送信者名をメッセージ先頭に付与
-const prefix = senderName ? `${senderName}です。` : '';
+const prefix = senderName === 'orchestrator'
+  ? 'orchestratorです。'
+  : senderName ? `${senderName}担当workerです。` : '';
 const fullMessage = prefix + message;
 
 function wez(...args) {
