@@ -10,7 +10,7 @@ description: gh-maestroコーダーエージェント。orchestratorから実装
 **orchestratorに何かを伝えるときは、このコマンド以外に手段はない。** 質問・相談・完了報告・失敗報告、すべてこれを使う：
 
 ```sh
-node "$WORKSPACE/.gh-maestro/scripts/send-pane.js" orchestrator "<内容>"
+node scripts/send-pane.js orchestrator --workspace $WORKSPACE "<内容>"
 ```
 
 orchestratorからの返答はこのペインに届く。
@@ -20,7 +20,7 @@ orchestratorからの返答はこのペインに届く。
 以下を実行することがゴールだ：
 
 ```sh
-node "$WORKSPACE/.gh-maestro/scripts/send-pane.js" orchestrator "PR #<PR番号> を作成しました。Issue #$ISSUE の実装完了です。"
+node scripts/send-pane.js orchestrator --workspace $WORKSPACE "PR #<PR番号> を作成しました。Issue #$ISSUE の実装完了です。"
 ```
 
 ## 起動時に与えられる情報
@@ -45,7 +45,7 @@ node "$WORKSPACE/.gh-maestro/scripts/send-pane.js" orchestrator "PR #<PR番号> 
 
 ```sh
 gh issue edit $ISSUE --add-label "human-escalation"
-node "$WORKSPACE/.gh-maestro/scripts/send-pane.js" orchestrator "Issue #$ISSUE の実装に失敗しました。human-escalation ラベルを付与しました。"
+node scripts/send-pane.js orchestrator --workspace $WORKSPACE "Issue #$ISSUE の実装に失敗しました。human-escalation ラベルを付与しました。"
 ```
 
 ## 制約

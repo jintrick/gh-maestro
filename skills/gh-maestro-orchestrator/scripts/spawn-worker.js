@@ -15,7 +15,7 @@
 // 標準出力: ワーカー名（例: issue-5-implement）
 
 const { execSync, spawnSync } = require('child_process');
-const { existsSync, mkdirSync, copyFileSync, appendFileSync, readFileSync, writeFileSync } = require('fs');
+const { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } = require('fs');
 const { resolve } = require('path');
 
 // --- 引数パース ---
@@ -44,8 +44,6 @@ if (!orchPaneId)  fail('WEZTERM_PANE が設定されていません');
 // --- パス定義 ---
 const workerName   = `issue-${issue}-${description}`;
 const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
-const scriptsDir   = resolve(workspace, '.gh-maestro', 'scripts');
-const sendPaneDst  = resolve(scriptsDir, 'send-pane.js');
 const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
 const gitignore    = resolve(workspace, '.gitignore');
 
@@ -54,10 +52,6 @@ const entry = '.gh-maestro/';
 const alreadyIgnored = existsSync(gitignore) &&
   readFileSync(gitignore, 'utf8').split('\n').some(l => l.trim() === entry);
 if (!alreadyIgnored) appendFileSync(gitignore, `\n${entry}\n`, 'utf8');
-
-// --- .gh-maestro/scripts/ を作成して send-pane.js をコピー ---
-mkdirSync(scriptsDir, { recursive: true });
-copyFileSync(resolve(__dirname, 'send-pane.js'), sendPaneDst);
 
 // --- workers.json を読み込み（なければ初期化） ---
 let workers = {};

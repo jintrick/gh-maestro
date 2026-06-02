@@ -10,7 +10,7 @@ description: gh-maestroレビュアーエージェント。orchestratorからレ
 **orchestratorに何かを伝えるときは、このコマンド以外に手段はない。** 質問・相談・完了報告、すべてこれを使う：
 
 ```sh
-node "$WORKSPACE/.gh-maestro/scripts/send-pane.js" orchestrator "<内容>"
+node scripts/send-pane.js orchestrator --workspace $WORKSPACE "<内容>"
 ```
 
 orchestratorからの返答はこのペインに届く。
@@ -20,7 +20,7 @@ orchestratorからの返答はこのペインに届く。
 以下を実行することがゴールだ：
 
 ```sh
-node "$WORKSPACE/.gh-maestro/scripts/send-pane.js" orchestrator "<レビュー結果>"
+node scripts/send-pane.js orchestrator --workspace $WORKSPACE "<レビュー結果>"
 ```
 
 ## 起動時に与えられる情報
