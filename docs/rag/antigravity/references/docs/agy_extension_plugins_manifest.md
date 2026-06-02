@@ -4,13 +4,15 @@ Plugins are namespaced bundles that contain skills, agents, rules, MCP servers, 
 
 ## Installation & Staging
 When a plugin is installed, the CLI stages the files in the home directory under:
-`~/.gemini/antigravity-cli/plugins/<plugin_name>/`
+`~/.gemini/config/plugins/<plugin_name>/`
+
+**Note**: The actual staging path observed in practice is `~/.gemini/config/plugins/`, not `~/.gemini/antigravity-cli/plugins/` as older documentation stated.
 
 The Antigravity Agent automatically discovers and loads these staged customizations.
 
 ## Plugin Structure
 ```text
-~/.gemini/antigravity-cli/
+~/.gemini/config/
 ├── plugins/
 │   └── <plugin_name>/
 │       ├── plugin.json         # Required marker file

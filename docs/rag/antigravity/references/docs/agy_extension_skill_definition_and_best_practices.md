@@ -8,7 +8,8 @@ Antigravity supports both workspace-specific and global skills.
 | Location | Scope |
 | :--- | :--- |
 | `<workspace-root>/.agents/skills/<skill-folder>/` | Workspace-specific |
-| `~/.gemini/antigravity/skills/<skill-folder>/` | Global (all workspaces) |
+| `~/.gemini/antigravity-cli/skills/<skill-folder>/` | Global (all workspaces) |
+| `~/.gemini/skills/<skill-folder>/` | Shared (all workspaces) |
 
 **Note**: Antigravity now defaults to `.agents/skills`, but still maintains backward support for `.agent/skills`.
 
