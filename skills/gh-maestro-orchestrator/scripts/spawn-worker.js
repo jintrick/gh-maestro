@@ -106,7 +106,7 @@ const contextLines = [
 ];
 if (baseBranch) contextLines.push(`BASE_BRANCH=${baseBranch}`);
 const extra = prompt ? `\n${prompt}` : '';
-const initialPrompt = `${skill}スキルを発動し、指示に従って作業を開始してください。${extra}\n\n以下の変数が与えられています：\n${contextLines.join('\n')}`;
+const initialPrompt = `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。${extra}\n\n以下の変数が与えられています：\n${contextLines.join('\n')}`;
 
 // --- agy を起動 ---
 const send = (text) => {
