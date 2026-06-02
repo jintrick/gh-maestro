@@ -30,8 +30,8 @@ WORKSPACE=/path/to/workspace
 
 - **get-context.js** — `REPO` と `WORKSPACE` を出力する
 - **send-pane.js** — ワーカー名でメッセージを送信する
-- **spawn-worker.js** — ワーカーを起動し、作業環境を準備する
-- **remove-worker.js** — ワーカーを終了し、作業環境を削除する
+- **spawn-worker.js** — ワーカーを新規ペインで起動し、worktreeを作成する
+- **remove-worker.js** — ワーカーペインにexitを送信し、終了を待ってworktreeを削除する
 
 ### ワーカーの起動
 
