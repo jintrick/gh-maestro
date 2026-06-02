@@ -12,7 +12,7 @@ GitHubを永続ストアとして複数のAIエージェントを協調動作さ
 
 - **claude (Claude Code CLI)**: ドキュメント → `docs/rag/claude-code/`
 - **agy (Antigravity CLI)**: ドキュメント → `docs/rag/antigravity/`
-- **wmux**: ドキュメント → `docs/rag/wmux/`
+- **WezTerm**: ドキュメント → `docs/rag/wezterm/`
 
 ## RAGドキュメントの必須参照ルール
 
@@ -24,4 +24,4 @@ GitHubを永続ストアとして複数のAIエージェントを協調動作さ
 |---|---|
 | agy のパス・スキル・設定・コマンド | `docs/rag/antigravity/` |
 | claude / Claude Code のパス・設定・コマンド | `docs/rag/claude-code/` |
-| wmux のパス・設定・コマンド | `docs/rag/wmux/` |
+| WezTerm のパス・設定・コマンド | `docs/rag/wezterm/` |

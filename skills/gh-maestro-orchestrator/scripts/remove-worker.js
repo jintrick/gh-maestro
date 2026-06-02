@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // remove-worker.js
-// ワーカーペインにexitを送信し、終了を待ってworktreeを削除する
+// ワーカーペインをkillし、worktreeを削除する
 //
 // Usage:
 //   node remove-worker.js \
@@ -29,25 +29,8 @@ const workers = JSON.parse(readFileSync(workersJson, 'utf8'));
 const paneId = workers[workerName];
 if (!paneId) fail(`ワーカー "${workerName}" が workers.json に存在しません`);
 
-// ワーカーペインにexit送信
-function wez(...args) {
-  spawnSync('wezterm', args, { stdio: 'inherit' });
-}
-
-wez('cli', 'send-text', '--pane-id', paneId, '/exit');
-wez('cli', 'send-text', '--pane-id', paneId, '--no-paste', '\r');
-
-// ペイン終了を待つ（最大10秒）
-const deadline = Date.now() + 10000;
-while (Date.now() < deadline) {
-  const r = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8' });
-  if (r.status === 0) {
-    const panes = JSON.parse(r.stdout);
-    const alive = panes.some(p => String(p.pane_id) === String(paneId));
-    if (!alive) break;
-  }
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
-}
+// ワーカーペインをkill（プロセスごと即時終了）
+spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', paneId], { stdio: 'inherit' });
 
 // worktree削除
 try {
