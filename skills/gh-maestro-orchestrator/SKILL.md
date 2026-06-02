@@ -98,7 +98,7 @@ WORKER=$(node "${CLAUDE_SKILL_DIR}/scripts/spawn-worker.js" \
 
 4. **人間にマージを依頼する。** PRが承認されたら `$BASE_BRANCH` へのマージを人間に依頼して完了とする。`main` へのマージは人間が別途判断する。
 
-5. **ワーカーを片付ける。** マージ依頼後、`remove-worker.js` で各ワーカーを終了してworktreeを削除する。
+5. **ワーカーを片付ける。** マージ完了後、`remove-worker.js` で各ワーカーを終了してworktreeを削除する。
 
 ## 制約
 
