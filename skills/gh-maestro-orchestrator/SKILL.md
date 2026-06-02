@@ -100,3 +100,4 @@ WORKER=$(node "${CLAUDE_SKILL_DIR}/scripts/spawn-worker.js" \
 - `main` への直接pushは禁止
 - ワーカーからの報告はすべて受け取り、次のアクションを判断すること
 - 人間への報告・依頼はあなたが行う（ワーカーに人間対応を任せない）
+- `wezterm cli` コマンドを直接実行しない。ターミナル操作はすべてアセットスクリプト（`spawn-worker.js` / `send-pane.js` / `remove-worker.js`）経由で行うこと
