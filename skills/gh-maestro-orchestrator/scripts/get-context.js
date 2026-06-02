@@ -4,15 +4,12 @@
 
 const { execSync } = require('child_process');
 
-const paneId    = process.env.WEZTERM_PANE ?? '';
 const workspace = process.cwd();
 
 // git remote URLをowner/repo形式に正規化
 let repo = '';
 try {
   const raw = execSync('git config --get remote.origin.url', { encoding: 'utf8' }).trim();
-  // https://github.com/owner/repo.git
-  // git@github.com:owner/repo.git
   const match = raw.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/);
   repo = match ? match[1] : raw;
 } catch {
@@ -20,6 +17,5 @@ try {
   process.exit(1);
 }
 
-console.log(`ORCHESTRATOR_PANE_ID=${paneId}`);
 console.log(`REPO=${repo}`);
 console.log(`WORKSPACE=${workspace}`);
