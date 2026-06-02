@@ -35,9 +35,10 @@ node "$WORKSPACE/.gh-maestro/scripts/send-pane.js" orchestrator "PR #<PR番号> 
 ## 手順
 
 1. `gh issue view $ISSUE` でIssueの要件を把握する
-2. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）
-3. `gh pr create --base $BASE_BRANCH` でPRを作成する（本文に `Closes #$ISSUE` を含める）
-4. **ゴールのコマンドを実行する**
+2. **作業環境を準備する**: `$WORKTREE` 内に `package.json` が存在し `node_modules` がない場合、`$WORKSPACE` の対応する `node_modules` をシンボリックリンクで参照させる。サブディレクトリ構成の場合も同様に探して対処する。
+3. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）
+4. `gh pr create --base $BASE_BRANCH` でPRを作成する（本文に `Closes #$ISSUE` を含める）
+5. **ゴールのコマンドを実行する**
 
 ## 失敗時
 
