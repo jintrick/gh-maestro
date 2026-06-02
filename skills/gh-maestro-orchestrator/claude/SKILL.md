@@ -104,3 +104,10 @@ WORKER=$(node "${CLAUDE_SKILL_DIR}/scripts/spawn-worker.js" \
 - `main` への直接pushは禁止
 - ワーカーからの報告はすべて受け取り、次のアクションを判断すること
 - 人間への報告・依頼はあなたが行う（ワーカーに人間対応を任せない）
+
+## gh CLIの注意事項
+
+- `gh pr close` は複数引数不可。複数件閉じる場合はループで1件ずつ実行すること：
+  ```sh
+  for pr in 123 456; do gh pr close $pr; done
+  ```
