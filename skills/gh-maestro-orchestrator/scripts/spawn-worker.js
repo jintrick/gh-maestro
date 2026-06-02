@@ -114,7 +114,8 @@ const send = (text) => {
   spawnSync('wezterm', ['cli', 'send-text', '--pane-id', newPaneId, '--no-paste', '\r'], { encoding: 'utf8' });
 };
 
-send(`agy --dangerously-skip-permissions -i ${JSON.stringify(initialPrompt)}`);
+const escaped = initialPrompt.replace(/'/g, "'\\''");
+send(`agy --dangerously-skip-permissions -i '${escaped}'`);
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---
 console.log(workerName);
