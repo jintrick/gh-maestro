@@ -38,22 +38,7 @@ done
 
 step "Installing skills for agy (Antigravity)..."
 
-# agy はプラグイン構造が必要: ~/.gemini/config/plugins/<plugin>/skills/<skill>/
-AGY_PLUGIN_DEST="$HOME/.gemini/config/plugins/gh-maestro"
-mkdir -p "$AGY_PLUGIN_DEST"
-
-# plugin.json マーカーファイルを作成
-cat > "$AGY_PLUGIN_DEST/plugin.json" <<'JSON'
-{
-  "name": "gh-maestro",
-  "version": "1.0.0",
-  "description": "Multi-agent development orchestration system using GitHub as persistent store",
-  "author": { "name": "gh-maestro" }
-}
-JSON
-ok "plugin.json -> $AGY_PLUGIN_DEST"
-
-AGY_SKILLS_DEST="$AGY_PLUGIN_DEST/skills"
+AGY_SKILLS_DEST="$HOME/.gemini/antigravity-cli/skills"
 mkdir -p "$AGY_SKILLS_DEST"
 for skill in "${SKILL_NAMES[@]}"; do
   src="$SKILLS_DIR/$skill"

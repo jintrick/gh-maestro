@@ -49,21 +49,7 @@ foreach ($skill in $skillNames) {
 
 Write-Step "Installing skills for agy (Antigravity)..."
 
-# agy はプラグイン構造が必要: ~/.gemini/config/plugins/<plugin>/skills/<skill>/
-$agyPluginDest = "$env:USERPROFILE\.gemini\config\plugins\gh-maestro"
-$null = New-Item -ItemType Directory -Force $agyPluginDest
-
-# plugin.json マーカーファイルを作成
-$pluginJson = @{
-    name        = "gh-maestro"
-    version     = "1.0.0"
-    description = "Multi-agent development orchestration system using GitHub as persistent store"
-    author      = @{ name = "gh-maestro" }
-} | ConvertTo-Json
-Set-Content (Join-Path $agyPluginDest "plugin.json") $pluginJson -Encoding UTF8
-Write-OK "plugin.json -> $agyPluginDest"
-
-$agySkillsDest = Join-Path $agyPluginDest "skills"
+$agySkillsDest = "$env:USERPROFILE\.gemini\antigravity-cli\skills"
 $null = New-Item -ItemType Directory -Force $agySkillsDest
 foreach ($skill in $skillNames) {
     $src = Join-Path $skillsDir $skill
