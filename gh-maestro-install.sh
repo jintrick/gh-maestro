@@ -17,37 +17,45 @@ SKILLS_DIR="$GH_MAESTRO_DIR/skills"
 SETUP_SCRIPT="$GH_MAESTRO_DIR/scripts/gh-maestro-setup.js"
 [ -f "$SETUP_SCRIPT" ] || fail "scripts/gh-maestro-setup.js not found in $GH_MAESTRO_DIR"
 
-# ─── Install skills (Claude Code) ────────────────────────────────────────────
-
-step "Installing skills for Claude Code..."
-
 SKILL_NAMES=("gh-maestro" "gh-maestro-orchestrator" "gh-maestro-base" "gh-maestro-coder" "gh-maestro-reviewer")
 
-CLAUDE_SKILLS_DEST="$HOME/.claude/skills"
-mkdir -p "$CLAUDE_SKILLS_DEST"
-for skill in "${SKILL_NAMES[@]}"; do
-  src="$SKILLS_DIR/$skill"
-  [ -d "$src" ] || fail "Skill folder not found: $src"
-  dst_skill="$CLAUDE_SKILLS_DEST/$skill"
-  mkdir -p "$dst_skill"
-  cp -r "$src"/. "$dst_skill/"
-  ok "$skill -> $dst_skill"
-done
+# ─── Install skills ───────────────────────────────────────────────────────────
+# 各スキルは skills/<skill>/<agent>/SKILL.md の構造を持つ
+# scripts/ はスキルルートに置かれた共通アセット
 
-# ─── Install skills (agy / Antigravity) ──────────────────────────────────────
+install_skills() {
+  local agent_dir="$1"
+  local dest="$2"
+  local agent_name="$3"
 
-step "Installing skills for agy (Antigravity)..."
+  step "Installing skills for $agent_name..."
+  mkdir -p "$dest"
 
-AGY_SKILLS_DEST="$HOME/.gemini/antigravity-cli/skills"
-mkdir -p "$AGY_SKILLS_DEST"
-for skill in "${SKILL_NAMES[@]}"; do
-  src="$SKILLS_DIR/$skill"
-  [ -d "$src" ] || fail "Skill folder not found: $src"
-  dst_skill="$AGY_SKILLS_DEST/$skill"
-  mkdir -p "$dst_skill"
-  cp -r "$src"/. "$dst_skill/"
-  ok "$skill -> $dst_skill"
-done
+  for skill in "${SKILL_NAMES[@]}"; do
+    skill_src="$SKILLS_DIR/$skill"
+    [ -d "$skill_src" ] || fail "Skill folder not found: $skill_src"
+
+    agent_skill_src="$skill_src/$agent_dir"
+    [ -f "$agent_skill_src/SKILL.md" ] || continue  # このエージェント向けSKILL.mdがなければスキップ
+
+    dst_skill="$dest/$skill"
+    mkdir -p "$dst_skill"
+
+    # エージェント別 SKILL.md をインストール
+    cp "$agent_skill_src/SKILL.md" "$dst_skill/SKILL.md"
+
+    # 共通スクリプトをインストール（存在する場合）
+    if [ -d "$skill_src/scripts" ]; then
+      mkdir -p "$dst_skill/scripts"
+      cp -r "$skill_src/scripts/". "$dst_skill/scripts/"
+    fi
+
+    ok "$skill ($agent_dir) -> $dst_skill"
+  done
+}
+
+install_skills "claude" "$HOME/.claude/skills" "Claude Code"
+install_skills "agy" "$HOME/.gemini/antigravity-cli/skills" "agy (Antigravity)"
 
 # ─── Install shared scripts ───────────────────────────────────────────────────
 

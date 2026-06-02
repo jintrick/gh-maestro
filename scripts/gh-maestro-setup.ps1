@@ -3,10 +3,11 @@
 .SYNOPSIS
     gh-maestro per-project setup script
 .DESCRIPTION
-    Called by the /gh-maestro skill. Validates prerequisites, creates wmux panes,
+    Called by the /gh-maestro skill. Validates prerequisites, creates wezterm panes,
     starts coder/reviewer agents, and writes .gh-maestro/session.json.
 
-    The caller (orchestrator agent) reads session.json to obtain PTY IDs.
+    Must be run from inside a wezterm pane (WEZTERM_PANE must be set).
+    The caller (orchestrator agent) reads session.json to obtain pane-ids.
 .PARAMETER WorkspaceRoot
     Path to the target project root. Defaults to the current directory.
 #>
@@ -23,6 +24,14 @@ function Write-Fail { param([string]$Msg) Write-Host "  x $Msg" -ForegroundColor
 # ─── 1. Prerequisites ─────────────────────────────────────────────────────────
 
 Write-Step "Checking prerequisites..."
+
+if (-not $env:WEZTERM_PANE) {
+    Write-Fail "WEZTERM_PANE is not set. Run this from inside a wezterm pane."
+}
+
+if (-not (Get-Command wezterm -ErrorAction SilentlyContinue)) {
+    Write-Fail "wezterm CLI not found in PATH."
+}
 
 if (-not (Test-Path (Join-Path $WorkspaceRoot ".git"))) {
     Write-Fail "Not a git repository: $WorkspaceRoot"
@@ -54,97 +63,39 @@ if (-not $devBranch) {
 }
 Write-OK "Branch 'dev' exists"
 
-# ─── 2. Connect to wmux Named Pipe ───────────────────────────────────────────
+# ─── 2. Get orchestrator pane-id ─────────────────────────────────────────────
 
-Write-Step "Connecting to wmux..."
-$tokenFile = Join-Path $env:APPDATA "wmux\pipe-token"
-if (-not (Test-Path $tokenFile)) {
-    Write-Fail "wmux pipe-token not found at $tokenFile. Is wmux running inside a pane?"
+$orchestratorPaneId = $env:WEZTERM_PANE
+Write-OK "Orchestrator pane-id: $orchestratorPaneId"
+
+# ─── 3. Create coder and reviewer panes ──────────────────────────────────────
+
+Write-Step "Creating coder pane..."
+$coderPaneId = (wezterm cli split-pane --bottom 2>&1)
+if ($LASTEXITCODE -ne 0 -or -not $coderPaneId) {
+    Write-Fail "Failed to create coder pane: $coderPaneId"
 }
-$token = (Get-Content $tokenFile -Raw).Trim()
-$pipeName = "wmux-rpc-$token"
-$tokenB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($token))
+$coderPaneId = $coderPaneId.Trim()
+Write-OK "Coder pane-id: $coderPaneId"
 
-$pipe = $null
-try {
-    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
-        ".", $pipeName,
-        [System.IO.Pipes.PipeDirection]::InOut,
-        [System.IO.Pipes.PipeOptions]::None)
-    $pipe.Connect(5000)
-} catch {
-    Write-Fail "Cannot connect to wmux pipe '$pipeName': $_"
+Write-Step "Creating reviewer pane..."
+$reviewerPaneId = (wezterm cli split-pane --bottom 2>&1)
+if ($LASTEXITCODE -ne 0 -or -not $reviewerPaneId) {
+    Write-Fail "Failed to create reviewer pane: $reviewerPaneId"
 }
-
-$writer = [System.IO.StreamWriter]::new($pipe); $writer.AutoFlush = $true
-$reader = [System.IO.StreamReader]::new($pipe)
-$rpcId  = 0
-
-function Invoke-Rpc {
-    param([string]$Method, [hashtable]$Params = @{}, [bool]$WithToken = $false)
-    $script:rpcId++
-    $req = [ordered]@{ jsonrpc = "2.0"; id = $script:rpcId; method = $Method; params = $Params }
-    if ($WithToken) { $req.token = $tokenB64 }
-    $writer.WriteLine(($req | ConvertTo-Json -Depth 10 -Compress))
-    $line = $reader.ReadLine()
-    $resp = $line | ConvertFrom-Json
-    if ($resp.error) { throw "RPC $Method failed: $($resp.error | ConvertTo-Json -Compress)" }
-    return $resp.result
-}
-
-Invoke-Rpc -Method "system.identify" -Params @{} -WithToken $true | Out-Null
-Write-OK "wmux connected"
-
-# ─── 3. Discover / create panes ──────────────────────────────────────────────
-
-Write-Step "Discovering panes..."
-
-function Get-Surfaces { return Invoke-Rpc -Method "surface.list" -Params @{} }
-
-$surfaces = Get-Surfaces
-
-if ($surfaces.Count -lt 3) {
-    Write-Step "Need 3 panes (found $($surfaces.Count)). Splitting..."
-    $needed = 3 - $surfaces.Count
-    for ($i = 0; $i -lt $needed; $i++) {
-        try {
-            Invoke-Rpc -Method "pane.split" -Params @{ direction = "horizontal" } | Out-Null
-            Start-Sleep -Milliseconds 800
-        } catch {
-            Write-Fail "pane.split failed: $_`nPlease manually create 3 panes in wmux and retry."
-        }
-    }
-    $surfaces = Get-Surfaces
-}
-
-if ($surfaces.Count -lt 3) {
-    Write-Fail "Still fewer than 3 panes. Please manually create 3 panes in wmux."
-}
-
-$active  = @($surfaces | Where-Object { $_.isActive -eq $true })[0]
-$workers = @($surfaces | Where-Object { $_.isActive -ne $true })
-
-$orchestratorPtyId  = $active.ptyId
-$orchestratorPaneId = $active.paneId
-$coderPtyId         = $workers[0].ptyId
-$coderPaneId        = $workers[0].paneId
-$reviewerPtyId      = $workers[1].ptyId
-$reviewerPaneId     = $workers[1].paneId
-
-Write-OK "orchestrator pty: $orchestratorPtyId"
-Write-OK "coder       pty: $coderPtyId"
-Write-OK "reviewer    pty: $reviewerPtyId"
+$reviewerPaneId = $reviewerPaneId.Trim()
+Write-OK "Reviewer pane-id: $reviewerPaneId"
 
 # ─── 4. Write session.json ────────────────────────────────────────────────────
 
 $sessionDir = Join-Path $WorkspaceRoot ".gh-maestro"
 $null = New-Item -ItemType Directory -Force $sessionDir
 $session = [ordered]@{
-    repo              = $OwnerRepo
-    orchestratorPtyId = $orchestratorPtyId
-    coderPtyId        = $coderPtyId
-    reviewerPtyId     = $reviewerPtyId
-    startedAt         = (Get-Date -Format "o")
+    repo                = $OwnerRepo
+    orchestratorPaneId  = $orchestratorPaneId
+    coderPaneId         = $coderPaneId
+    reviewerPaneId      = $reviewerPaneId
+    startedAt           = (Get-Date -Format "o")
 }
 $sessionPath = Join-Path $sessionDir "session.json"
 $session | ConvertTo-Json | Set-Content $sessionPath -Encoding UTF8
@@ -153,12 +104,9 @@ Write-OK ".gh-maestro/session.json written"
 # ─── 5. Start worker agents ───────────────────────────────────────────────────
 
 function Send-To {
-    param([string]$PaneId, [string]$Text, [switch]$NoEnter)
-    Invoke-Rpc -Method "input.send" -Params @{ text = $Text; paneId = $PaneId } | Out-Null
-    if (-not $NoEnter) {
-        Start-Sleep -Milliseconds 80
-        Invoke-Rpc -Method "input.sendKey" -Params @{ key = "enter"; paneId = $PaneId } | Out-Null
-    }
+    param([string]$PaneId, [string]$Text)
+    wezterm cli send-text --pane-id $PaneId $Text
+    wezterm cli send-text --pane-id $PaneId --no-paste "`r"
 }
 
 Write-Step "Setting working directories..."
@@ -169,26 +117,24 @@ Start-Sleep -Milliseconds 600
 Write-Step "Starting coder (agy)..."
 Send-To -PaneId $coderPaneId -Text "agy"
 Start-Sleep -Milliseconds 3000
-$coderInit = "リポジトリ: $OwnerRepo / ORCHESTRATOR_PTY_ID=$orchestratorPtyId / gh-maestro-coderスキルに従って動作してください。準備完了後、待機してください。"
+$coderInit = "リポジトリ: $OwnerRepo / ORCHESTRATOR_PANE_ID=$orchestratorPaneId / gh-maestro-coderスキルに従って動作してください。準備完了後、待機してください。"
 Send-To -PaneId $coderPaneId -Text $coderInit
 
 Write-Step "Starting reviewer (agy)..."
 Send-To -PaneId $reviewerPaneId -Text "agy"
 Start-Sleep -Milliseconds 3000
-$reviewerInit = "リポジトリ: $OwnerRepo / ORCHESTRATOR_PTY_ID=$orchestratorPtyId / gh-maestro-reviewerスキルに従って動作してください。準備完了後、待機してください。"
+$reviewerInit = "リポジトリ: $OwnerRepo / ORCHESTRATOR_PANE_ID=$orchestratorPaneId / gh-maestro-reviewerスキルに従って動作してください。準備完了後、待機してください。"
 Send-To -PaneId $reviewerPaneId -Text $reviewerInit
-
-$pipe.Dispose()
 
 # ─── 6. Output session info ───────────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "gh-maestro session started." -ForegroundColor Green
 Write-Host ""
-Write-Host "  Repository : $OwnerRepo"
-Write-Host "  Orchestrator PTY : $orchestratorPtyId"
-Write-Host "  Coder PTY        : $coderPtyId"
-Write-Host "  Reviewer PTY     : $reviewerPtyId"
+Write-Host "  Repository        : $OwnerRepo"
+Write-Host "  Orchestrator pane : $orchestratorPaneId"
+Write-Host "  Coder pane        : $coderPaneId"
+Write-Host "  Reviewer pane     : $reviewerPaneId"
 Write-Host ""
 Write-Host "session.json: $sessionPath"
 Write-Host ""

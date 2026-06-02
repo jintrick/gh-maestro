@@ -28,36 +28,46 @@ if (-not (Test-Path $setupScript)) {
     Write-Fail "scripts\gh-maestro-setup.js not found in $GhMaestroDir"
 }
 
-# ─── Install skills (Claude Code) ────────────────────────────────────────────
-
-Write-Step "Installing skills for Claude Code..."
-
 $skillNames = @("gh-maestro", "gh-maestro-orchestrator", "gh-maestro-base", "gh-maestro-coder", "gh-maestro-reviewer")
 
-$claudeSkillsDest = "$env:USERPROFILE\.claude\skills"
-$null = New-Item -ItemType Directory -Force $claudeSkillsDest
-foreach ($skill in $skillNames) {
-    $src = Join-Path $skillsDir $skill
-    if (-not (Test-Path $src)) { Write-Fail "Skill folder not found: $src" }
-    $dstSkill = Join-Path $claudeSkillsDest $skill
-    $null = New-Item -ItemType Directory -Force $dstSkill
-    Copy-Item "$src\*" $dstSkill -Recurse -Force
-    Write-OK "$skill -> $dstSkill"
-}
+# ─── Install skills ───────────────────────────────────────────────────────────
+# 各スキルは skills/<skill>/<agent>/SKILL.md の構造を持つ
+# scripts/ はスキルルートに置かれた共通アセット
 
-# ─── Install skills (agy / Antigravity) ──────────────────────────────────────
+$agents = @(
+    @{ Name = "Claude Code"; AgentDir = "claude"; Dest = "$env:USERPROFILE\.claude\skills" }
+    @{ Name = "agy (Antigravity)"; AgentDir = "agy"; Dest = "$env:USERPROFILE\.gemini\antigravity-cli\skills" }
+)
 
-Write-Step "Installing skills for agy (Antigravity)..."
+foreach ($agent in $agents) {
+    Write-Step "Installing skills for $($agent.Name)..."
+    $null = New-Item -ItemType Directory -Force $agent.Dest
 
-$agySkillsDest = "$env:USERPROFILE\.gemini\antigravity-cli\skills"
-$null = New-Item -ItemType Directory -Force $agySkillsDest
-foreach ($skill in $skillNames) {
-    $src = Join-Path $skillsDir $skill
-    if (-not (Test-Path $src)) { Write-Fail "Skill folder not found: $src" }
-    $dstSkill = Join-Path $agySkillsDest $skill
-    $null = New-Item -ItemType Directory -Force $dstSkill
-    Copy-Item "$src\*" $dstSkill -Recurse -Force
-    Write-OK "$skill -> $dstSkill"
+    foreach ($skill in $skillNames) {
+        $skillSrc = Join-Path $skillsDir $skill
+        if (-not (Test-Path $skillSrc)) { Write-Fail "Skill folder not found: $skillSrc" }
+
+        $agentSkillSrc = Join-Path $skillSrc $agent.AgentDir
+        if (-not (Test-Path (Join-Path $agentSkillSrc "SKILL.md"))) {
+            continue  # このエージェント向けSKILL.mdがなければスキップ
+        }
+
+        $dstSkill = Join-Path $agent.Dest $skill
+        $null = New-Item -ItemType Directory -Force $dstSkill
+
+        # エージェント別 SKILL.md をインストール
+        Copy-Item (Join-Path $agentSkillSrc "SKILL.md") $dstSkill -Force
+
+        # 共通スクリプトをインストール（存在する場合）
+        $scriptsSrc = Join-Path $skillSrc "scripts"
+        if ($scriptsSrc -and (Test-Path $scriptsSrc)) {
+            $scriptsDst = Join-Path $dstSkill "scripts"
+            $null = New-Item -ItemType Directory -Force $scriptsDst
+            Copy-Item "$scriptsSrc\*" $scriptsDst -Recurse -Force
+        }
+
+        Write-OK "$skill ($($agent.AgentDir)) -> $dstSkill"
+    }
 }
 
 # ─── Install shared scripts ───────────────────────────────────────────────────
