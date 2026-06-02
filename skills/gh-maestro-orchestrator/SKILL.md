@@ -35,10 +35,12 @@ WORKSPACE=/path/to/workspace
 
 ### ワーカーの起動
 
+ワーカーへの指示は**すべて起動時に渡す**こと。spawn後にsend-pane.jsで指示を送ってはならない。
+
 ```sh
 WORKER=$(node "${CLAUDE_SKILL_DIR}/scripts/spawn-worker.js" \
   --skill <skill-name> \        # 使用するスキル名（必須）
-  --prompt "<role-prompt>" \    # gh-maestro-base使用時のみ併用。ゴールと役職固有の制約を記述する
+  --prompt "<role-prompt>" \    # ゴールと役職固有の指示を記述する（全スキルで使用可）
   --issue <N> \                 # Issue番号（worktree命名に使用）
   --description <desc> \        # worktree名のsuffix（例: implement, review）
   --repo $REPO \
@@ -48,10 +50,12 @@ WORKER=$(node "${CLAUDE_SKILL_DIR}/scripts/spawn-worker.js" \
 
 worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成される。戻り値はワーカー名（例: `issue-5-implement`）。
 
-### ワーカーへのメッセージ送信
+### ワーカーへのメッセージ送信（返答専用）
+
+**ワーカーから質問・相談が届いたときにのみ**使用する。初回指示には使わない。
 
 ```sh
-node "$WORKSPACE/.gh-maestro/scripts/send-pane.js" $WORKER "<メッセージ>"
+node "$WORKSPACE/.gh-maestro/scripts/send-pane.js" $WORKER "<返答内容>"
 ```
 
 ### ワーカーの終了とworktree削除
