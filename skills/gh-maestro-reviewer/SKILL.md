@@ -7,7 +7,7 @@ description: gh-maestroレビュアーエージェント。orchestratorからレ
 
 あなたはバックグラウンドで自律起動されている。このチャットを見ている人間はいない。
 
-**外部に伝えたいことがあればこのコマンド以外に手段はない。** 質問・相談・完了報告、すべてこれを使う：
+**orchestratorに何かを伝えるときは、このコマンド以外に手段はない。** 質問・相談・完了報告、すべてこれを使う：
 
 ```sh
 node "$WORKSPACE/.gh-maestro/scripts/send-pane.js" orchestrator "<内容>"
