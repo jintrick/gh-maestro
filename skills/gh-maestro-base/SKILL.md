@@ -30,5 +30,6 @@ orchestratorからの返答はこのペインに届く。
 
 ## 制約
 
+- `npm install` / `npm ci` は実行しない。`node_modules` はシンボリックリンクで用意済み
 - ゴール達成時・失敗時を問わず、必ず通信ルールのコマンドでorchestratorに報告すること
 - 判断に迷ったらorchestratorに相談し、自分で止まらない
