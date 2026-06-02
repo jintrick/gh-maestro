@@ -28,29 +28,50 @@ if (-not (Test-Path $setupScript)) {
     Write-Fail "scripts\gh-maestro-setup.js not found in $GhMaestroDir"
 }
 
-# ─── Install skills ───────────────────────────────────────────────────────────
+# ─── Install skills (Claude Code) ────────────────────────────────────────────
 
-Write-Step "Installing skills..."
+Write-Step "Installing skills for Claude Code..."
 
 $skillNames = @("gh-maestro", "gh-maestro-orchestrator", "gh-maestro-base", "gh-maestro-coder", "gh-maestro-reviewer")
 
-$destinations = @(
-    "$env:USERPROFILE\.claude\skills"
-    "$env:USERPROFILE\.gemini\antigravity\skills"
-)
+$claudeSkillsDest = "$env:USERPROFILE\.claude\skills"
+$null = New-Item -ItemType Directory -Force $claudeSkillsDest
+foreach ($skill in $skillNames) {
+    $src = Join-Path $skillsDir $skill
+    if (-not (Test-Path $src)) { Write-Fail "Skill folder not found: $src" }
+    $dstSkill = Join-Path $claudeSkillsDest $skill
+    $null = New-Item -ItemType Directory -Force $dstSkill
+    Copy-Item "$src\*" $dstSkill -Recurse -Force
+    Write-OK "$skill -> $dstSkill"
+}
 
-foreach ($dest in $destinations) {
-    $null = New-Item -ItemType Directory -Force $dest
-    foreach ($skill in $skillNames) {
-        $src = Join-Path $skillsDir $skill
-        if (-not (Test-Path $src)) {
-            Write-Fail "Skill folder not found: $src"
-        }
-        $dstSkill = Join-Path $dest $skill
-        $null = New-Item -ItemType Directory -Force $dstSkill
-        Copy-Item "$src\*" $dstSkill -Recurse -Force
-        Write-OK "$skill -> $dstSkill"
-    }
+# ─── Install skills (agy / Antigravity) ──────────────────────────────────────
+
+Write-Step "Installing skills for agy (Antigravity)..."
+
+# agy はプラグイン構造が必要: ~/.gemini/config/plugins/<plugin>/skills/<skill>/
+$agyPluginDest = "$env:USERPROFILE\.gemini\config\plugins\gh-maestro"
+$null = New-Item -ItemType Directory -Force $agyPluginDest
+
+# plugin.json マーカーファイルを作成
+$pluginJson = @{
+    name        = "gh-maestro"
+    version     = "1.0.0"
+    description = "Multi-agent development orchestration system using GitHub as persistent store"
+    author      = @{ name = "gh-maestro" }
+} | ConvertTo-Json
+Set-Content (Join-Path $agyPluginDest "plugin.json") $pluginJson -Encoding UTF8
+Write-OK "plugin.json -> $agyPluginDest"
+
+$agySkillsDest = Join-Path $agyPluginDest "skills"
+$null = New-Item -ItemType Directory -Force $agySkillsDest
+foreach ($skill in $skillNames) {
+    $src = Join-Path $skillsDir $skill
+    if (-not (Test-Path $src)) { Write-Fail "Skill folder not found: $src" }
+    $dstSkill = Join-Path $agySkillsDest $skill
+    $null = New-Item -ItemType Directory -Force $dstSkill
+    Copy-Item "$src\*" $dstSkill -Recurse -Force
+    Write-OK "$skill -> $dstSkill"
 }
 
 # ─── Install shared scripts ───────────────────────────────────────────────────
