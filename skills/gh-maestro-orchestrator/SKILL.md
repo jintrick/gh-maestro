@@ -71,7 +71,7 @@ node "${CLAUDE_SKILL_DIR}/scripts/remove-worker.js" \
 | スキル名 | 用途 |
 |---|---|
 | `gh-maestro-coder` | Issue実装 → PRを作成してorchestratorに報告 |
-| `gh-maestro-reviewer` | PR内容をIssue要件と照合してorchestratorに報告 |
+| `gh-maestro-reviewer` | PR内容をreviewerに精読させてorchestratorに報告（必ず`--prompt`でレビュー観点を指示する） |
 | `gh-maestro-base` | 上記に該当しない動的役職（必ず `--prompt` と併用） |
 
 **`gh-maestro-base` の使い方**:
