@@ -13,3 +13,15 @@ GitHubを永続ストアとして複数のAIエージェントを協調動作さ
 - **claude (Claude Code CLI)**: ドキュメント → `docs/rag/claude-code/`
 - **agy (Antigravity CLI)**: ドキュメント → `docs/rag/antigravity/`
 - **wmux**: ドキュメント → `docs/rag/wmux/`
+
+## RAGドキュメントの必須参照ルール
+
+各CLIのファイルパス・設定・コマンド・インストール先・動作仕様について実装・変更・回答する前に、
+必ず対応する `docs/rag/` のドキュメントを読んで根拠を確認すること。
+**推測・類推・訓練データの知識で実装してはならない。**
+
+| 対象 | 参照先 |
+|---|---|
+| agy のパス・スキル・設定・コマンド | `docs/rag/antigravity/` |
+| claude / Claude Code のパス・設定・コマンド | `docs/rag/claude-code/` |
+| wmux のパス・設定・コマンド | `docs/rag/wmux/` |
