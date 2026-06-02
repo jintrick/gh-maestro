@@ -34,7 +34,7 @@ function wez(...args) {
   spawnSync('wezterm', args, { stdio: 'inherit' });
 }
 
-wez('cli', 'send-text', '--pane-id', paneId, 'exit');
+wez('cli', 'send-text', '--pane-id', paneId, '/exit');
 wez('cli', 'send-text', '--pane-id', paneId, '--no-paste', '\r');
 
 // ペイン終了を待つ（最大10秒）
