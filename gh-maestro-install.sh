@@ -17,27 +17,51 @@ SKILLS_DIR="$GH_MAESTRO_DIR/skills"
 SETUP_SCRIPT="$GH_MAESTRO_DIR/scripts/gh-maestro-setup.js"
 [ -f "$SETUP_SCRIPT" ] || fail "scripts/gh-maestro-setup.js not found in $GH_MAESTRO_DIR"
 
-# ─── Install skills ───────────────────────────────────────────────────────────
+# ─── Install skills (Claude Code) ────────────────────────────────────────────
 
-step "Installing skills..."
+step "Installing skills for Claude Code..."
 
 SKILL_NAMES=("gh-maestro" "gh-maestro-orchestrator" "gh-maestro-base" "gh-maestro-coder" "gh-maestro-reviewer")
 
-DESTINATIONS=(
-  "$HOME/.claude/skills"
-  "$HOME/.gemini/antigravity/skills"
-)
+CLAUDE_SKILLS_DEST="$HOME/.claude/skills"
+mkdir -p "$CLAUDE_SKILLS_DEST"
+for skill in "${SKILL_NAMES[@]}"; do
+  src="$SKILLS_DIR/$skill"
+  [ -d "$src" ] || fail "Skill folder not found: $src"
+  dst_skill="$CLAUDE_SKILLS_DEST/$skill"
+  mkdir -p "$dst_skill"
+  cp -r "$src"/. "$dst_skill/"
+  ok "$skill -> $dst_skill"
+done
 
-for dest in "${DESTINATIONS[@]}"; do
-  mkdir -p "$dest"
-  for skill in "${SKILL_NAMES[@]}"; do
-    src="$SKILLS_DIR/$skill"
-    [ -d "$src" ] || fail "Skill folder not found: $src"
-    dst_skill="$dest/$skill"
-    mkdir -p "$dst_skill"
-    cp -r "$src"/. "$dst_skill/"
-    ok "$skill -> $dst_skill"
-  done
+# ─── Install skills (agy / Antigravity) ──────────────────────────────────────
+
+step "Installing skills for agy (Antigravity)..."
+
+# agy はプラグイン構造が必要: ~/.gemini/config/plugins/<plugin>/skills/<skill>/
+AGY_PLUGIN_DEST="$HOME/.gemini/config/plugins/gh-maestro"
+mkdir -p "$AGY_PLUGIN_DEST"
+
+# plugin.json マーカーファイルを作成
+cat > "$AGY_PLUGIN_DEST/plugin.json" <<'JSON'
+{
+  "name": "gh-maestro",
+  "version": "1.0.0",
+  "description": "Multi-agent development orchestration system using GitHub as persistent store",
+  "author": { "name": "gh-maestro" }
+}
+JSON
+ok "plugin.json -> $AGY_PLUGIN_DEST"
+
+AGY_SKILLS_DEST="$AGY_PLUGIN_DEST/skills"
+mkdir -p "$AGY_SKILLS_DEST"
+for skill in "${SKILL_NAMES[@]}"; do
+  src="$SKILLS_DIR/$skill"
+  [ -d "$src" ] || fail "Skill folder not found: $src"
+  dst_skill="$AGY_SKILLS_DEST/$skill"
+  mkdir -p "$dst_skill"
+  cp -r "$src"/. "$dst_skill/"
+  ok "$skill -> $dst_skill"
 done
 
 # ─── Install shared scripts ───────────────────────────────────────────────────
