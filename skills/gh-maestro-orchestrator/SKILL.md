@@ -30,8 +30,8 @@ WORKSPACE=/path/to/workspace
 
 - **get-context.js** — `REPO` と `WORKSPACE` を出力する
 - **send-pane.js** — ワーカー名でメッセージを送信する
-- **spawn-worker.js** — ワーカーを新規ペインで起動し、worktreeを作成する
-- **remove-worker.js** — ワーカーペインにexitを送信し、終了を待ってworktreeを削除する
+- **spawn-worker.js** — ワーカーを起動し、作業環境を準備する
+- **remove-worker.js** — ワーカーを終了し、作業環境を削除する
 
 ### ワーカーの起動
 
@@ -100,4 +100,3 @@ WORKER=$(node "${CLAUDE_SKILL_DIR}/scripts/spawn-worker.js" \
 - `main` への直接pushは禁止
 - ワーカーからの報告はすべて受け取り、次のアクションを判断すること
 - 人間への報告・依頼はあなたが行う（ワーカーに人間対応を任せない）
-- `wezterm cli` コマンドを直接実行しない。ターミナル操作はすべてアセットスクリプト（`spawn-worker.js` / `send-pane.js` / `remove-worker.js`）経由で行うこと
