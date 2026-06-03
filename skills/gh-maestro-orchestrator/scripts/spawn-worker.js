@@ -15,8 +15,8 @@
 // 標準出力: ワーカー名（例: issue-5-implement）
 
 const { execSync, spawnSync } = require('child_process');
-const { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } = require('fs');
-const { resolve } = require('path');
+const { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync, symlinkSync } = require('fs');
+const { resolve, relative, dirname } = require('path');
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
@@ -79,6 +79,32 @@ execSync(`git worktree add "${worktreeDir}" -b "${workerName}"`, {
   cwd: workspace,
   stdio: 'inherit',
 });
+
+// --- node_modules シンボリックリンク作成（最大3階層） ---
+(function linkNodeModules(dir, depth) {
+  if (depth > 3) return;
+  const pkgJson = resolve(dir, 'package.json');
+  if (existsSync(pkgJson)) {
+    const relPath = relative(worktreeDir, dir);
+    const srcModules  = resolve(workspace, relPath, 'node_modules');
+    const destModules = resolve(dir, 'node_modules');
+    if (existsSync(srcModules) && !existsSync(destModules)) {
+      try {
+        symlinkSync(srcModules, destModules, 'junction');
+      } catch (e) {
+        console.warn(`symlink 作成スキップ: ${destModules} — ${e.message}`);
+      }
+    }
+  }
+  try {
+    const { readdirSync, statSync } = require('fs');
+    for (const entry of readdirSync(dir)) {
+      if (entry === 'node_modules' || entry.startsWith('.')) continue;
+      const child = resolve(dir, entry);
+      if (statSync(child).isDirectory()) linkNodeModules(child, depth + 1);
+    }
+  } catch (_) {}
+})(worktreeDir, 0);
 
 // --- WezTerm ペイン分割 ---
 const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId];
