@@ -17,5 +17,5 @@ try {
   process.exit(1);
 }
 
-console.log(`REPO=${repo}`);
-console.log(`WORKSPACE=${workspace}`);
+console.log(`REPO='${repo}'`);
+console.log(`WORKSPACE='${workspace}'`);
