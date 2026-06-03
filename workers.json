@@ -1,7 +1,0 @@
-{
-  "awaiting-orchestrator": "agy run --skill orchestrator",
-  "approved":              "agy run --skill orchestrator",
-  "rejected":              "agy run --skill orchestrator",
-  "awaiting-coder":        "claude --skill coder",
-  "awaiting-review":       "claude --skill reviewer"
-}

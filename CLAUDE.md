@@ -1,67 +1,27 @@
 # gh-maestro
 
-GitHubをメッセージバス兼永続ストアとして、複数のAIエージェントを協調動作させるデーモン。Issue起票からPRマージまでを自動化する。
+GitHubを永続ストアとして複数のAIエージェントを協調動作させるシステム。設計の詳細は `requirements.md` を参照。
 
-## アーキテクチャ
+## スキル編集のルール
 
-```
-src/daemon.js          メインデーモン（30秒ポーリング）
-tools/signal-daemon.js エージェントが完了時に呼ぶ即時ポーリング通知ラッパー
-workers.json           ラベル → エージェントコマンドのマッピング
-ecosystem.config.js    PM2設定（プロセス名: agent-runtime）
-```
+スキルファイルは必ずリポジトリ（`skills/`）を編集すること。
+`~/.claude/skills/` や `~/.gemini/antigravity/skills/` はインストール先であり、直接編集しない。
+編集後はインストールスクリプト（`gh-maestro-install.ps1` / `gh-maestro-install.sh`）を実行して反映する。
 
-## 起動
+## エージェントCLI
 
-```
-# PM2で常駐（推奨）
-npm run start:pm2
+- **claude (Claude Code CLI)**: ドキュメント → `docs/rag/claude-code/`
+- **agy (Antigravity CLI)**: ドキュメント → `docs/rag/antigravity/`
+- **WezTerm**: ドキュメント → `docs/rag/wezterm/`
 
-# 直接起動（開発用）
-npm start
-```
+## RAGドキュメントの必須参照ルール
 
-**前提**: `gh auth login` 済みであること。起動時に認証チェックを行い、失敗したら即終了する。
+各CLIのファイルパス・設定・コマンド・インストール先・動作仕様について実装・変更・回答する前に、
+必ず対応する `docs/rag/` のドキュメントを読んで根拠を確認すること。
+**推測・類推・訓練データの知識で実装してはならない。**
 
-## ラベルフロー
-
-```
-awaiting-orchestrator → [オーケストレーター] → awaiting-approval
-approved / rejected   → [オーケストレーター] → awaiting-coder
-awaiting-coder        → [コーダー]           → awaiting-review
-awaiting-review       → [レビュアー]         → awaiting-approval | awaiting-coder
-```
-
-デーモンが反応するラベル（workers.jsonのキー）にIssueが到達すると：
-1. `in-progress` を即座に付与（二重起動防止）
-2. 対応するコマンドを `GH_ISSUE=<番号>` 環境変数付きでspawn
-3. 完了後に `in-progress` を除去
-4. 異常終了時は `human-escalation` を付与
-
-## 並列制御
-
-**グローバルに1エージェントのみ**。`activeChild` が存在する間はポーリングをスキップ。
-
-## エージェントへの情報渡し
-
-エージェントは環境変数 `GH_ISSUE` から担当Issue番号を取得する。
-
-## 即時ポーリング（エージェントからの通知）
-
-エージェントはラベル更新後に `node tools/signal-daemon.js` を呼ぶことで、デーモンに30秒待たずに再ポーリングさせられる。OSごとの差異はこのスクリプトに閉じている（Windows: PM2 trigger, Linux: SIGUSR1）。
-
-## workers.json の形式
-
-```json
-{
-  "<trigger-label>": "<command>"
-}
-```
-
-コマンドは `GH_ISSUE` 環境変数でIssue番号を受け取る前提で書く。
-
-## 未決定事項
-
-- `human-escalation` の通知手段（Windows通知 / Issueコメント / メール）
-- 対象リポジトリの範囲（このリポジトリ専用 vs 複数リポジトリ対応）
-- オーケストレーターのIssue分解粒度
+| 対象 | 参照先 |
+|---|---|
+| agy のパス・スキル・設定・コマンド | `docs/rag/antigravity/` |
+| claude / Claude Code のパス・設定・コマンド | `docs/rag/claude-code/` |
+| WezTerm のパス・設定・コマンド | `docs/rag/wezterm/` |
