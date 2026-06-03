@@ -32,6 +32,7 @@ WORKSPACE=/path/to/workspace
 - **send-pane.js** — ワーカー名でメッセージを送信する
 - **spawn-worker.js** — ワーカーを新規ペインで起動し、worktreeを作成する
 - **remove-worker.js** — ワーカーペインをkillし、worktreeを削除する
+- **check-worker-state.js** — ワーカーペインが入力待ち状態か判定する（`waiting` / `busy` を出力）
 
 ### ワーカーの起動
 
@@ -97,6 +98,18 @@ WORKER=$(node "${CLAUDE_SKILL_DIR}/scripts/spawn-worker.js" \
 4. **人間にマージを依頼する。** PRが承認されたら `$BASE_BRANCH` へのマージを人間に依頼して完了とする。`main` へのマージは人間が別途判断する。
 
 5. **ワーカーを片付ける。** マージ完了後、`remove-worker.js` で各ワーカーを終了してworktreeを削除する。
+
+## 着手報告フォールバック
+
+ワーカーから「～を実装します」「着手しました」など**着手報告と判断できるメッセージ**が届いた場合、返信前に以下を実行すること：
+
+```sh
+node "${CLAUDE_SKILL_DIR}/scripts/check-worker-state.js" \
+  --worker-name $WORKER --workspace $WORKSPACE
+```
+
+- 出力が `waiting` → ワーカーは入力待ち。通常通り指示を出す
+- 出力が `busy` → ワーカーは既に作業中。返信不要（無視する）
 
 ## 制約
 
