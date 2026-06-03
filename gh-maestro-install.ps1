@@ -63,7 +63,9 @@ foreach ($agent in $agents) {
         if ($scriptsSrc -and (Test-Path $scriptsSrc)) {
             $scriptsDst = Join-Path $dstSkill "scripts"
             $null = New-Item -ItemType Directory -Force $scriptsDst
-            Copy-Item "$scriptsSrc\*" $scriptsDst -Recurse -Force
+            Get-ChildItem -Path $scriptsSrc -File | ForEach-Object {
+                Copy-Item $_.FullName -Destination $scriptsDst -Force
+            }
         }
 
         Write-OK "$skill ($($agent.AgentDir)) -> $dstSkill"
