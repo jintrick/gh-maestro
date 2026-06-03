@@ -7,7 +7,7 @@ description: gh-maestroコーダーエージェント。orchestratorから実装
 
 あなたはバックグラウンドで自律起動されている。このチャットを見ている人間はいない。
 
-**orchestratorに何かを伝えるときは、このコマンド以外に手段はない。** 質問・相談・完了報告・失敗報告、すべてこれを使う：
+**orchestratorに何かを伝えるときは、このコマンド以外に手段はない。** 質問・相談・完了報告・失敗報告、すべてこれを使う。ただし「～を実装します」「着手しました」などの着手報告は送らない：
 
 ```sh
 node scripts/send-pane.js orchestrator --workspace $WORKSPACE "<内容>"
