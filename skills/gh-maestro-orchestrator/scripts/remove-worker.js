@@ -9,7 +9,7 @@
 
 const { spawnSync, execSync } = require('child_process');
 const { resolve } = require('path');
-const { readFileSync, writeFileSync, existsSync } = require('fs');
+const { readFileSync, writeFileSync, existsSync, lstatSync, rmdirSync, readdirSync } = require('fs');
 
 const argv = process.argv.slice(2);
 const get = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
@@ -31,6 +31,23 @@ if (!paneId) fail(`ワーカー "${workerName}" が workers.json に存在しま
 
 // ワーカーペインをkill（プロセスごと即時終了）
 spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', paneId], { stdio: 'inherit' });
+
+// worktree内のシンボリックリンク（junction含む）を先に外す
+// → git worktree remove がリンク先を再帰削除するのを防ぐ
+(function unlinkSymlinks(dir) {
+  if (!existsSync(dir)) return;
+  for (const entry of readdirSync(dir)) {
+    const fullPath = resolve(dir, entry);
+    try {
+      const stat = lstatSync(fullPath);
+      if (stat.isSymbolicLink()) {
+        rmdirSync(fullPath); // junction/symlinkをリンク先を消さずに除去
+      } else if (stat.isDirectory()) {
+        unlinkSymlinks(fullPath);
+      }
+    } catch (_) {}
+  }
+})(worktreeDir);
 
 // worktree削除
 try {
