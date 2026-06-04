@@ -48,6 +48,39 @@ orchestrator → coder 起動・実装 → PR 作成
 orchestrator → reviewer 起動・レビュー → あなたにマージを依頼
 ```
 
+## スキルの構造
+
+スキルは `skills/` 配下に1ディレクトリ1スキルで管理する。
+
+```
+skills/
+  agents.yaml                    # エージェント定義（インストール先・プレースホルダー値）
+  gh-maestro-orchestrator/
+    SKILL.md                     # テンプレート（{{SCRIPTS_PATH}} を使用）
+    scripts/                     # 共通アセット
+  gh-maestro-coder/
+    SKILL.md
+    scripts/
+  ...
+```
+
+`agents.yaml` にエージェントごとのインストール先とプレースホルダー置換値を定義する。インストール時に `SKILL.md` の `{{SCRIPTS_PATH}}` が各エージェント向けの値に置換され、インストール先に配置される。
+
+**新スキルの追加**: `skills/` 配下にディレクトリを作成して `SKILL.md` を置く。次回インストール時に自動で全エージェントへ配布される。
+
+**新エージェントの追加**: `agents.yaml` にエントリを追加してインストールスクリプトを再実行する。
+
+## レビューポリシー
+
+インストール時に Google Engineering Practices をベースにしたデフォルトのレビューポリシーが `~/.gh-maestro/review-policy.md` に配置される。レビュワーはこれを自動的に参照してPRを評価する。
+
+プロジェクト固有の基準を追加したい場合は、対象プロジェクトのルートに `.gh-maestro/review-policy.md` を作成する。レビュワーはグローバルポリシーに加えてプロジェクトポリシーも参照する。
+
+```
+~/.gh-maestro/review-policy.md       # デフォルト（gh-maestroが提供・更新時に上書き）
+<project>/.gh-maestro/review-policy.md  # プロジェクト固有（任意・リポジトリで共有可）
+```
+
 ## 詳細仕様
 
 `requirements.md` を参照。
