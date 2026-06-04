@@ -1,9 +1,5 @@
 agents:
   claude:
     skill_files_install_destination_directory: ~/.claude/skills
-    skill_markdown_template_placeholder_substitutions:
-      SCRIPTS_PATH: ${CLAUDE_SKILL_DIR}/scripts
   agy:
     skill_files_install_destination_directory: ~/.gemini/antigravity-cli/skills
-    skill_markdown_template_placeholder_substitutions:
-      SCRIPTS_PATH: scripts

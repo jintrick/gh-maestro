@@ -211,30 +211,6 @@ const rollbackWorktree = () => {
   catch (e) { console.warn(`  rollback: git branch -d 失敗: ${e.message.split('\n')[0]}`); }
 };
 
-// --- WezTerm ペイン分割 ---
-const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId];
-const split = spawnSync('wezterm', splitArgs, { encoding: 'utf8' });
-if (split.status !== 0 && splitFromPaneId !== orchPaneId) {
-  console.warn(`spawn-worker: ペイン分割失敗: ${split.stderr.trim()} — orchestratorペイン(${orchPaneId})にフォールバックします`);
-  const fallbackArgs = ['cli', 'split-pane', '--bottom', '--cwd', worktreeDir, '--pane-id', orchPaneId];
-  const split2 = spawnSync('wezterm', fallbackArgs, { encoding: 'utf8' });
-  if (split2.status === 0) {
-    split.status = 0;
-    split.stdout = split2.stdout;
-  } else {
-    rollbackWorktree();
-    fail(`WezTermペインの分割に失敗しました（フォールバックも失敗）: ${split2.stderr.trim()}`);
-  }
-} else if (split.status !== 0) {
-  rollbackWorktree();
-  fail(`WezTermペインの分割に失敗しました: ${split.stderr.trim()}`);
-}
-const newPaneId = split.stdout.trim();
-
-// --- workers.json にワーカーを登録 ---
-workers[workerName] = newPaneId;
-writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
-
 // --- 初期プロンプトを組み立てる ---
 const contextLines = [
   `WORKER_NAME=${workerName}`,
@@ -260,18 +236,30 @@ if (skill === 'gh-maestro-reviewer') {
 
 const initialPrompt = `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。${extra}\n\n以下の変数が与えられています：\n${contextLines.join('\n')}${reviewPolicySection}\n\nこの件に関する質問・報告はチャットに出力せず、orchestratorまでお願いします。「～を実装します」「着手しました」などの着手報告も不要です。`;
 
-// --- agy を起動 ---
-const send = (text) => {
-  spawnSync('wezterm', ['cli', 'send-text', '--pane-id', newPaneId, text], { encoding: 'utf8' });
-  spawnSync('wezterm', ['cli', 'send-text', '--pane-id', newPaneId, '--no-paste', '\r'], { encoding: 'utf8' });
-};
+// --- WezTerm ペイン分割 + agy 直接起動（シェルを介さずargvで渡すことで改行等のエスケープ問題を回避） ---
+const agyCmdArgs = ['agy', '--dangerously-skip-permissions', '-i', initialPrompt];
+const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...agyCmdArgs];
+const split = spawnSync('wezterm', splitArgs, { encoding: 'utf8' });
+if (split.status !== 0 && splitFromPaneId !== orchPaneId) {
+  console.warn(`spawn-worker: ペイン分割失敗: ${split.stderr.trim()} — orchestratorペイン(${orchPaneId})にフォールバックします`);
+  const fallbackArgs = ['cli', 'split-pane', '--bottom', '--cwd', worktreeDir, '--pane-id', orchPaneId, '--', ...agyCmdArgs];
+  const split2 = spawnSync('wezterm', fallbackArgs, { encoding: 'utf8' });
+  if (split2.status === 0) {
+    split.status = 0;
+    split.stdout = split2.stdout;
+  } else {
+    rollbackWorktree();
+    fail(`WezTermペインの分割に失敗しました（フォールバックも失敗）: ${split2.stderr.trim()}`);
+  }
+} else if (split.status !== 0) {
+  rollbackWorktree();
+  fail(`WezTermペインの分割に失敗しました: ${split.stderr.trim()}`);
+}
+const newPaneId = split.stdout.trim();
 
-const escaped = initialPrompt
-  .replace(/\\/g, '\\\\')
-  .replace(/'/g, "\\'")
-  .replace(/\r/g, '')
-  .replace(/\n/g, '\\n');
-send(`agy --dangerously-skip-permissions -i $'${escaped}'`);
+// --- workers.json にワーカーを登録 ---
+workers[workerName] = newPaneId;
+writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---
 console.log(workerName);

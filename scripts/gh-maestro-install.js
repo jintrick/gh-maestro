@@ -83,6 +83,10 @@ function step(msg) { console.log(`\x1b[36m[gh-maestro-install] ${msg}\x1b[0m`); 
 function ok(msg)   { console.log(`  \x1b[32mv ${msg}\x1b[0m`); }
 function fail(msg) { console.error(`  \x1b[31mx ${msg}\x1b[0m`); process.exit(1); }
 
+module.exports = { parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter };
+
+if (require.main !== module) return;
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 if (!fs.existsSync(AGENTS_YAML)) fail('skills/agents.yaml not found');
@@ -97,6 +101,11 @@ for (const [agentName, config] of Object.entries(agents)) {
   step(`Installing skills for ${agentName}...`);
   fs.mkdirSync(dest, { recursive: true });
 
+  // SCRIPTS_PATH はインストール先から絶対パスで計算する
+  const substitutions = Object.assign({}, config.substitutions, {
+    SCRIPTS_PATH: path.join(dest, 'gh-maestro-orchestrator', 'scripts'),
+  });
+
   for (const skill of skillDirs) {
     const templatePath = path.join(SKILLS_DIR, skill, 'SKILL.md');
     if (!fs.existsSync(templatePath)) continue;
@@ -105,7 +114,7 @@ for (const [agentName, config] of Object.entries(agents)) {
     fs.mkdirSync(destSkill, { recursive: true });
 
     const template = fs.readFileSync(templatePath, 'utf8');
-    const content = applySubstitutions(template, config.substitutions);
+    const content = applySubstitutions(template, substitutions);
     fs.writeFileSync(path.join(destSkill, 'SKILL.md'), content, 'utf8');
 
     const scriptsSrc = path.join(SKILLS_DIR, skill, 'scripts');
