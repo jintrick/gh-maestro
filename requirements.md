@@ -66,8 +66,12 @@ gh-maestro/
     │   ├── claude/SKILL.md     # coderスキル（ゴール定義）
     │   ├── agy/SKILL.md
     │   └── scripts/send-pane.js
-    └── gh-maestro-reviewer/
-        ├── claude/SKILL.md     # reviewerスキル（ゴール定義）
+    ├── gh-maestro-reviewer/
+    │   ├── claude/SKILL.md     # reviewerスキル（ゴール定義）
+    │   ├── agy/SKILL.md
+    │   └── scripts/send-pane.js
+    └── gh-maestro-investigator/
+        ├── claude/SKILL.md     # investigatorスキル（ゴール定義）
         ├── agy/SKILL.md
         └── scripts/send-pane.js
 ```
@@ -99,7 +103,8 @@ gh-maestro/
 
 orchestratorがタスクに応じてワーカーを動的生成:
   ├─ 新規ペイン: agy → coder（必要時に生成）
-  └─ 新規ペイン: agy → reviewer（必要時に生成）
+  ├─ 新規ペイン: agy → reviewer（必要時に生成）
+  └─ 新規ペイン: agy → investigator（バグ調査依頼時に生成）
 ```
 
 ワーカーの種類・数・レイアウトはorchestratorが判断して決定する。新しい役職はスキルファイルを追加するだけで対応可能。
@@ -150,6 +155,8 @@ orchestratorがタスクに応じてワーカーを動的生成:
 - `gh issue create` でGitHubにIssueを作成する
 - タスクに応じてワーカーペインを動的に生成する（`spawn-worker.js`）
 - coderに実装指示を送信する
+- バグ調査が必要と判断した場合、investigatorを起動して調査を委任する
+- investigatorから調査報告を受けたら、内容を人間に提示し対応方針を判断する
 - coderから完了報告を受けたら、以下のいずれかを判断して実行する：
   - 自分でレビューする
   - reviewerを起動して委任する
@@ -182,7 +189,25 @@ orchestratorがタスクに応じてワーカーを動的生成:
 
 **注意**: `gh pr review --request-changes` はPR作成者と同一GitHubアカウントでは使用不可。レビュアーはorchestratorへの報告で代替する。
 
-### 5.4 責務マトリクス
+### 5.4 インベスティゲーター（agy）
+
+動作は `gh-maestro-investigator` スキル（SKILL.md）で定義する。
+
+**責務**
+- orchestratorからの調査依頼を受け取り、バグの根本原因を特定する
+- Issue本文のエラーメッセージ・スタックトレースを起点にコードを追う
+- 関連Issue・PRをGitHub上で検索し、過去の議論を参照する
+- git履歴から変更起因の特定を試みる
+- 調査結果（根本原因・影響範囲・修正方針・確信度）を `send-pane.js` でorchestratorに報告する
+
+**制約**
+- バグを修正しない（修正はcoderの責務）
+- PRを作成しない
+
+**失敗時**
+- 根本原因を特定できない場合、わかったこと・行き詰まった理由・次の手がかり候補をorchestratorに報告する
+
+### 5.5 責務マトリクス
 
 | 責務 | 担当 |
 |---|---|
@@ -196,6 +221,9 @@ orchestratorがタスクに応じてワーカーを動的生成:
 | 実装 | coder |
 | PRの作成（`gh pr create --base $BASE_BRANCH`） | coder |
 | `human-escalation` ラベルの付与 | coder（失敗時） |
+| バグ調査の委任判断 | orchestrator |
+| バグの根本原因・影響範囲・修正方針の調査 | investigator |
+| 調査報告の人間への提示 | orchestrator |
 | レビュー方針の判断（自己・reviewer委任・並列） | orchestrator |
 | PRレビュー・承認（`gh pr review --approve`） | reviewer（or orchestrator） |
 | orchestratorへの完了・結果報告（`send-pane.js`） | coder / reviewer |
