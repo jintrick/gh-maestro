@@ -6,13 +6,13 @@
 //   node spawn-worker.js \
 //     --skill <skill-name> \
 //     [--prompt "<role-prompt>"]  # gh-maestro-base 使用時は必須
-//     --issue <N> \
+//     [--issue <N>] \             # 省略可。省略時は --prompt の内容が TASK として渡される
 //     --description <desc> \
 //     --repo <owner/repo> \
 //     --workspace <path> \
 //     [--base-branch <branch>]
 //
-// 標準出力: ワーカー名（例: issue-5-implement）
+// 標準出力: ワーカー名（例: issue-5-implement / task-investigate-auth）
 
 const { execSync, spawnSync } = require('child_process');
 const { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync, symlinkSync,
@@ -40,7 +40,6 @@ const fail = (msg) => {
   process.exit(1);
 };
 if (!skill)       fail('--skill が必要です');
-if (!issue)       fail('--issue が必要です');
 if (!description) fail('--description が必要です');
 if (!repo)        fail('--repo が必要です');
 if (skill === 'gh-maestro-base' && !prompt) fail('gh-maestro-base を使う場合は --prompt が必要です');
@@ -54,7 +53,7 @@ const orchPaneId = process.env.WEZTERM_PANE;
 if (!orchPaneId)  fail('WEZTERM_PANE が設定されていません');
 
 // --- パス定義 ---
-const workerName   = `issue-${issue}-${description}`;
+const workerName   = issue ? `issue-${issue}-${description}` : `task-${description}`;
 const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
 const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
 const gitignore    = resolve(workspace, '.gitignore');
@@ -85,7 +84,11 @@ if (!workers.orchestrator) {
 
 // --- 生存確認: staleなpane_idをworkers.jsonから除去 ---
 const getAlivePaneIds = () => {
-  const r = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8' });
+  const r = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8', timeout: 6000 });
+  if (r.error?.code === 'ETIMEDOUT') {
+    console.warn('spawn-worker: wezterm cli list がタイムアウト — stale除去をスキップします');
+    return null;
+  }
   if (r.status !== 0) {
     console.warn(`spawn-worker: wezterm cli list 失敗: ${r.stderr.trim()} — stale除去をスキップします`);
     return null;
@@ -219,8 +222,9 @@ const contextLines = [
   `REPO=${repo}`,
   `WORKSPACE=${workspace}`,
   `WORKTREE=${worktreeDir}`,
-  `ISSUE=${issue}`,
 ];
+if (issue) contextLines.push(`ISSUE=${issue}`);
+if (!issue && prompt) contextLines.push(`TASK=${prompt}`);
 if (baseBranch) contextLines.push(`BASE_BRANCH=${baseBranch}`);
 const extra = prompt ? `\n${prompt}` : '';
 

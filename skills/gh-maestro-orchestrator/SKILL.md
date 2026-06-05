@@ -23,7 +23,12 @@ BASE_BRANCH=$(git branch --show-current)
 ## アセット（`{{SCRIPTS_PATH}}/`）
 
 - **spawn-worker.js** — worktreeを作りワーカーを新規ペインで起動する
-- **send-pane.js** — 起動中のワーカーにメッセージを送る
+- **send-pane.js** — 起動中のワーカーにメッセージを送る（ワーカー名は第1引数に**位置引数**で渡す。`--worker` フラグは存在しない）
+
+```sh
+node "{{SCRIPTS_PATH}}/send-pane.js" $WORKER --workspace $WORKSPACE "<メッセージ>"
+# 例: node "{{SCRIPTS_PATH}}/send-pane.js" issue-5-implement --workspace $WORKSPACE "レビュー指摘を修正してください"
+```
 - **remove-worker.js** — ワーカーペインをkillしてworktreeを削除する
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする
 - **view-file.js** — Issueの原案など、ユーザーに確認・承認してほしいファイルを右ペインでbat表示する。Issueを起草したらチャットで説明するより先にこれで見せろ。`q`でペインが閉じる。
@@ -47,7 +52,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 |---|---|
 | `gh-maestro-coder` | 実装 → PR作成 |
 | `gh-maestro-reviewer` | PRレビュー（必ず`--prompt`でレビュー観点を渡す） |
-| `gh-maestro-investigator` | バグ調査 → 根本原因・修正方針の報告（必ず`--issue`でバグIssue番号を渡す） |
+| `gh-maestro-investigator` | バグ調査 → 根本原因・修正方針の報告（Issueがある場合は`--issue`でIssue番号を渡す。ない場合は`--prompt`で調査内容を渡す） |
 | `gh-maestro-base` | 上記以外の動的役職（必ず`--prompt`で役割を定義する） |
 
 ## 判断の原則
