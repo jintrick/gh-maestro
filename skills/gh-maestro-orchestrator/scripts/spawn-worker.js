@@ -88,26 +88,28 @@ const getAlivePaneIds = () => {
   const r = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8' });
   if (r.status !== 0) {
     console.warn(`spawn-worker: wezterm cli list 失敗: ${r.stderr.trim()} — stale除去をスキップします`);
-    return new Set();
+    return null;
   }
   try {
     return new Set(JSON.parse(r.stdout).map(p => String(p.pane_id)));
   } catch (e) {
     console.warn(`spawn-worker: wezterm cli list の出力パース失敗: ${e.message} — stale除去をスキップします`);
-    return new Set();
+    return null;
   }
 };
 
 const alivePanes = getAlivePaneIds();
-let dirty = false;
-for (const [k, v] of Object.entries(workers)) {
-  if (k !== 'orchestrator' && !alivePanes.has(String(v))) {
-    console.warn(`spawn-worker: stale worker "${k}" (pane_id ${v}) を workers.json から除去します`);
-    delete workers[k];
-    dirty = true;
+if (alivePanes !== null) {
+  let dirty = false;
+  for (const [k, v] of Object.entries(workers)) {
+    if (k !== 'orchestrator' && !alivePanes.has(String(v))) {
+      console.warn(`spawn-worker: stale worker "${k}" (pane_id ${v}) を workers.json から除去します`);
+      delete workers[k];
+      dirty = true;
+    }
   }
+  if (dirty) writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
 }
-if (dirty) writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
 
 // --- レイアウト決定（WezTermの詳細はここに閉じ込める） ---
 const existingWorkers = Object.keys(workers).filter(k => k !== 'orchestrator');
@@ -257,9 +259,15 @@ if (split.status !== 0 && splitFromPaneId !== orchPaneId) {
 }
 const newPaneId = split.stdout.trim();
 
-// --- workers.json にワーカーを登録 ---
-workers[workerName] = newPaneId;
-writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
+// --- workers.json にワーカーを登録（失敗時はペインもロールバック） ---
+try {
+  workers[workerName] = newPaneId;
+  writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
+} catch (e) {
+  spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', newPaneId], { encoding: 'utf8' });
+  rollbackWorktree();
+  fail(`workers.json への書き込みに失敗しました: ${e.message}`);
+}
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---
 console.log(workerName);
