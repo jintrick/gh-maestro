@@ -86,7 +86,3 @@ skills/
 ~/.gh-maestro/review-policy.md       # デフォルト（gh-maestroが提供・更新時に上書き）
 <project>/.gh-maestro/review-policy.md  # プロジェクト固有（任意・リポジトリで共有可）
 ```
-
-## 詳細仕様
-
-`requirements.md` を参照。
