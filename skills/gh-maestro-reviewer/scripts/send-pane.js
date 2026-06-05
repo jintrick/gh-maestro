@@ -49,7 +49,6 @@ const prefix = senderName === 'orchestrator'
   ? 'orchestratorです。'
   : senderName ? `${senderName}担当workerです。` : '';
 
-const { randomUUID } = require('crypto');
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 500;
 
@@ -62,8 +61,8 @@ function sleep(ms) {
 }
 
 for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-  const id = randomUUID();
-  const fullMessage = prefix + message + ` [MSG-ID:${id}]`;
+  const id = Math.random().toString(36).slice(2, 8);
+  const fullMessage = prefix + message + ` [${id}]`;
 
   // リトライ時は前回の入力をクリア
   if (attempt > 1) {
