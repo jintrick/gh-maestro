@@ -48,35 +48,39 @@ if (existsSync(workersJson)) {
 const prefix = senderName === 'orchestrator'
   ? 'orchestratorです。'
   : senderName ? `${senderName}担当workerです。` : '';
-const fullMessage = prefix + message;
+
+const { randomUUID } = require('crypto');
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 500;
 
 function wez(...a) {
   return spawnSync('wezterm', a, { encoding: 'utf8' });
 }
 
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 500;
-
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-// メッセージが注入されたか確認するため末尾20文字を検索する
-const probe = fullMessage.slice(-20);
-
 for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+  const id = randomUUID();
+  const fullMessage = prefix + message + ` [MSG-ID:${id}]`;
+
+  // リトライ時は前回の入力をクリア
+  if (attempt > 1) {
+    wez('cli', 'send-text', '--pane-id', paneId, '--no-paste', '\x15');
+    sleep(100);
+  }
+
   wez('cli', 'send-text', '--pane-id', paneId, fullMessage);
+  sleep(150);
 
   const result = wez('cli', 'get-text', '--pane-id', paneId);
-  if (result.stdout && result.stdout.includes(probe)) {
-    // 注入確認 → Enterを送信して完了
-    const r = wez('cli', 'send-text', '--pane-id', paneId, '--no-paste', '\r');
-    process.exit(r.status ?? 0);
+  if (result.stdout && result.stdout.includes(id)) {
+    wez('cli', 'send-text', '--pane-id', paneId, '--no-paste', '\r');
+    process.exit(0);
   }
 
-  if (attempt < MAX_RETRIES) {
-    sleep(RETRY_DELAY_MS);
-  }
+  if (attempt < MAX_RETRIES) sleep(RETRY_DELAY_MS);
 }
 
 process.stderr.write(`send-pane: failed to deliver message after ${MAX_RETRIES} attempts\n`);
