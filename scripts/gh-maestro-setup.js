@@ -1,16 +1,23 @@
 #!/usr/bin/env node
 // gh-maestro per-project setup script
-// Validates prerequisites only. No state files are written.
+// Validates prerequisites on first run; skips on subsequent runs via sentinel file.
 
-const { spawnSync } = require('child_process');
-const { existsSync } = require('fs');
+const { spawnSync, execSync } = require('child_process');
+const { existsSync, mkdirSync, writeFileSync } = require('fs');
 const { resolve } = require('path');
 
 const workspaceRoot = process.argv[2] ?? process.cwd();
 
 function step(msg)  { console.log(`\x1b[36m[gh-maestro] ${msg}\x1b[0m`); }
 function ok(msg)    { console.log(`  \x1b[32mv ${msg}\x1b[0m`); }
-function fail(msg)  { console.error(`  \x1b[31mx ${msg}\x1b[0m`); process.exit(1); }
+function fail(msg)  { console.error(`  \x1b[31mx ${msg}\x1b[0m`); process.exit(2); }
+
+// ─── Sentinel check ───────────────────────────────────────────────────────────
+
+const sentinelPath = resolve(workspaceRoot, '.gh-maestro', 'setup-ok');
+if (existsSync(sentinelPath)) {
+  process.exit(0);
+}
 
 function run(cmd, args, { capture } = {}) {
   const r = spawnSync(cmd, args, { cwd: workspaceRoot, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit' });
@@ -56,5 +63,9 @@ if (!devBranch) {
 ok("Branch 'dev' exists");
 
 // ─── Done ─────────────────────────────────────────────────────────────────────
+
+mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
+writeFileSync(sentinelPath, '');
+ok('Setup complete (subsequent /gh-maestro invocations will skip this check)');
 
 console.log('\ngh-maestro ready.\n');

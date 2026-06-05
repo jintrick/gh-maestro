@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // remove-worker.js
-// ワーカーペインをkillし、worktreeを削除する
+// ワーカーペインをkillし、workers.jsonからエントリを削除する。
+// worktreeの削除は次回orchestrator起動時のreset-session.jsに委ねる。
 //
 // Usage:
 //   node remove-worker.js \
 //     --worker-name <name> \
 //     --workspace <path>
 
-const { spawnSync, execSync } = require('child_process');
+const { spawnSync } = require('child_process');
 const { resolve } = require('path');
-const { readFileSync, writeFileSync, existsSync, lstatSync, rmdirSync, readdirSync } = require('fs');
+const { readFileSync, writeFileSync, existsSync } = require('fs');
 
 const argv = process.argv.slice(2);
 const get = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
@@ -21,42 +22,33 @@ const fail = (msg) => { console.error(`remove-worker: ${msg}`); process.exit(1);
 if (!workerName) fail('--worker-name が必要です');
 
 const workersJson = resolve(workspace, '.gh-maestro', 'workers.json');
-const worktreeDir = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
 
 if (!existsSync(workersJson)) fail(`workers.json が見つかりません: ${workersJson}`);
 
-const workers = JSON.parse(readFileSync(workersJson, 'utf8'));
-const paneId = workers[workerName];
-if (!paneId) fail(`ワーカー "${workerName}" が workers.json に存在しません`);
-
-// ワーカーペインをkill（プロセスごと即時終了）
-spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', paneId], { stdio: 'inherit' });
-
-// worktree内のシンボリックリンク（junction含む）を先に外す
-// → git worktree remove がリンク先を再帰削除するのを防ぐ
-(function unlinkSymlinks(dir) {
-  if (!existsSync(dir)) return;
-  for (const entry of readdirSync(dir)) {
-    const fullPath = resolve(dir, entry);
-    try {
-      const stat = lstatSync(fullPath);
-      if (stat.isSymbolicLink()) {
-        rmdirSync(fullPath); // junction/symlinkをリンク先を消さずに除去
-      } else if (stat.isDirectory()) {
-        unlinkSymlinks(fullPath);
-      }
-    } catch (_) {}
-  }
-})(worktreeDir);
-
-// worktree削除
+let workers;
 try {
-  execSync(`git worktree remove --force "${worktreeDir}"`, { cwd: workspace, stdio: 'inherit' });
+  workers = JSON.parse(readFileSync(workersJson, 'utf8'));
 } catch (e) {
-  console.error(`remove-worker: git worktree remove 失敗 — ${e.message}`);
-  process.exit(1);
+  fail(`workers.json のパースに失敗しました: ${e.message}`);
 }
 
-// workers.json からエントリを削除
+const paneId = workers[workerName] ?? null;
+if (!paneId) {
+  console.warn(`remove-worker: ワーカー "${workerName}" が workers.json に存在しません — スキップします`);
+} else {
+  const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+  const exitResult = spawnSync('wezterm', ['cli', 'send-text', '--pane-id', paneId, '--no-paste', '/exit\n'], { encoding: 'utf8' });
+  if (exitResult.status !== 0) {
+    console.warn(`remove-worker: /exit 送信失敗 (pane ${paneId}): ${exitResult.stderr.trim()} — kill-paneに進みます`);
+  }
+  sleep(1000);
+
+  const killResult = spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', paneId], { encoding: 'utf8' });
+  if (killResult.status !== 0) {
+    console.warn(`remove-worker: kill-pane 失敗 (pane ${paneId}): ${killResult.stderr.trim()}`);
+  }
+}
+
 delete workers[workerName];
 writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');

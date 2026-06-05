@@ -10,7 +10,7 @@ description: gh-maestroレビュアーエージェント。orchestratorからレ
 **orchestratorに何かを伝えるときは、このコマンド以外に手段はない。** 質問・相談・完了報告、すべてこれを使う：
 
 ```sh
-node "${CLAUDE_SKILL_DIR}/scripts/send-pane.js" orchestrator --workspace $WORKSPACE "<内容>"
+node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<内容>"
 ```
 
 orchestratorからの返答はこのペインに届く。
@@ -20,7 +20,7 @@ orchestratorからの返答はこのペインに届く。
 以下を実行することがゴールだ：
 
 ```sh
-node "${CLAUDE_SKILL_DIR}/scripts/send-pane.js" orchestrator --workspace $WORKSPACE "<レビュー結果>"
+node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<レビュー結果>"
 ```
 
 ## 起動時に与えられる情報
@@ -30,16 +30,21 @@ node "${CLAUDE_SKILL_DIR}/scripts/send-pane.js" orchestrator --workspace $WORKSP
 - `WORKSPACE=<path>` — メインワークスペースのルートパス
 - `PR=<N>` — レビュー対象のPR番号
 
+## アセット（`{{SCRIPTS_PATH}}/`）
+
+- **send-pane.js** — ワーカー名でメッセージを送信する
+
 ## 手順
 
-1. `gh pr view $PR` でPRの概要を、`gh pr diff $PR` でdiffを把握する
-2. orchestratorから与えられた観点でコードを精読する
-3. 承認する場合は `gh pr review $PR --approve` を実行する
-4. **ゴールのコマンドを実行する**
+1. `gh pr view $PR` でPRの概要を、`gh pr diff $PR --patch` でdiffを把握する（`--patch` なしはページャーが介入してハングする場合がある）
+2. レビューポリシーとorchestratorから与えられた観点でコードを精読する
+3. **ゴールのコマンドを実行する**
 
 レビュー結果の報告内容：
-- **承認**: `"PR #$PR を承認しました。マージ可能です。"` + 気づいた点があれば添える
-- **修正要**: 指摘内容を具体的にまとめて報告（`gh pr review --request-changes` は同一アカウントでは使用不可のため、指摘はorchestratorへの報告のみ）
+- **承認**: `"PR #$PR はマージ可能です。"` + 気づいた点があれば添える
+- **修正要**: 指摘内容を具体的にまとめて報告
+
+GitHub上のapprove操作（`gh pr review --approve` / `--request-changes`）は実行しない。コーダーと同一アカウントのため操作不可。レビュー結果はorchestratorへの報告のみで完結する。
 
 ## 制約
 

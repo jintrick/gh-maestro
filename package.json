@@ -5,7 +5,8 @@
   "main": "src/daemon.js",
   "scripts": {
     "start": "node src/daemon.js",
-    "start:pm2": "pm2 start ecosystem.config.js"
+    "start:pm2": "pm2 start ecosystem.config.js",
+    "test": "node --test tests/*.test.js"
   },
   "engines": {
     "node": ">=18"
