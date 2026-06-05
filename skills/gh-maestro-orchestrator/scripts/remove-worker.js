@@ -40,15 +40,22 @@ try {
 const paneId = workers[workerName];
 if (!paneId) fail(`ワーカー "${workerName}" が workers.json に存在しません`);
 
-// ワーカーペインをkill（プロセスごと即時終了）
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+// /exit を送信してagyをグレースフルに終了させてからペインを閉じる
+const exitResult = spawnSync('wezterm', ['cli', 'send-text', '--pane-id', paneId, '--no-paste', '/exit\n'], { encoding: 'utf8' });
+if (exitResult.status !== 0) {
+  console.warn(`remove-worker: /exit 送信失敗 (pane ${paneId}): ${exitResult.stderr.trim()} — kill-paneに進みます`);
+}
+sleep(1000);
+
 const killResult = spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', paneId], { encoding: 'utf8' });
 if (killResult.status !== 0) {
   console.warn(`remove-worker: kill-pane 失敗 (pane ${paneId}): ${killResult.stderr.trim()} — 削除処理は続行します`);
 }
 
-// Windowsではkill後もファイルハンドルが残るため、プロセス終了を待つ
-const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-sleep(1500);
+// kill後もプロセス終了を少し待つ
+sleep(500);
 
 // worktree内のjunction（node_modules等）を先に外す
 // → git worktree remove がリンク先を再帰削除するのを防ぐ
@@ -77,16 +84,28 @@ sleep(1500);
 })(worktreeDir);
 
 // worktree削除（リトライ付き）
+// 事前にロックを解除しておく（locked状態でも --force --force で外せるが、念のため）
+try {
+  const unlockResult = execSync(`git worktree unlock "${worktreeDir}"`, { cwd: workspace, stdio: 'pipe', encoding: 'utf8' });
+  console.log(`remove-worker: worktreeのロックを解除しました`);
+} catch (e) {
+  // ロックされていない場合もエラーになるので無視
+}
+
 const MAX_RETRIES = 5;
-const RETRY_INTERVAL_MS = 1000;
+const RETRY_INTERVAL_MS = 2000;
 let removed = false;
 for (let i = 0; i < MAX_RETRIES; i++) {
   try {
-    execSync(`git worktree remove --force --force "${worktreeDir}"`, { cwd: workspace, stdio: 'inherit' });
+    // stdio: 'pipe' にして実際のgitエラーをキャプチャする
+    execSync(`git worktree remove --force --force "${worktreeDir}"`, { cwd: workspace, stdio: 'pipe' });
     removed = true;
     break;
   } catch (e) {
-    console.warn(`remove-worker: git worktree remove 失敗 (${i + 1}/${MAX_RETRIES}): ${e.message.split('\n')[0]}`);
+    const gitStderr = (e.stderr || Buffer.alloc(0)).toString().trim();
+    const gitStdout = (e.stdout || Buffer.alloc(0)).toString().trim();
+    const detail = gitStderr || gitStdout || e.message.split('\n')[0];
+    console.warn(`remove-worker: git worktree remove 失敗 (${i + 1}/${MAX_RETRIES}): ${detail}`);
     if (i < MAX_RETRIES - 1) {
       console.warn(`  リトライします...`);
       sleep(RETRY_INTERVAL_MS);
@@ -98,9 +117,9 @@ if (!removed) {
   // 全リトライ失敗。git worktree prune + Node.js で強制削除。
   console.warn('remove-worker: git worktree remove が全試行失敗。フォールバックで削除します。');
   try {
-    execSync('git worktree prune', { cwd: workspace, stdio: 'inherit' });
+    execSync('git worktree prune', { cwd: workspace, stdio: 'pipe' });
   } catch (e) {
-    console.warn(`remove-worker: git worktree prune 失敗: ${e.message.split('\n')[0]}`);
+    console.warn(`remove-worker: git worktree prune 失敗: ${(e.stderr || Buffer.alloc(0)).toString().trim() || e.message.split('\n')[0]}`);
   }
   if (existsSync(worktreeDir)) {
     try {
@@ -108,6 +127,16 @@ if (!removed) {
     } catch (e) {
       fail(`worktreeディレクトリの削除に失敗しました: ${worktreeDir}\n  ${e.message}`);
     }
+  }
+}
+
+// git worktree remove が空ディレクトリを残す場合があるため後処理
+if (existsSync(worktreeDir)) {
+  try {
+    rmdirSync(worktreeDir);
+  } catch (e) {
+    // 空でなければ失敗するが、その場合は問題なし
+    console.warn(`remove-worker: 空ディレクトリ除去スキップ: ${worktreeDir} — ${e.message}`);
   }
 }
 
