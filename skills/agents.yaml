@@ -1,5 +1,19 @@
 agents:
   claude:
     skill_files_install_destination_directory: ~/.claude/skills
+    skill_markdown_template_placeholder_substitutions:
+      POLL_INTERVAL_SECONDS: 30
+      POLL_MECHANISM: |
+        `run_in_background: true` でBashを実行し、Monitorツールで完了を検知する。
+
+        ```sh
+        until gh pr view <PR_NUMBER> --repo $REPO --json state -q '.state' 2>/dev/null | grep -q "MERGED"; do sleep {{POLL_INTERVAL_SECONDS}}; done && echo "PR_MERGED:<PR_NUMBER>"
+        ```
   agy:
     skill_files_install_destination_directory: ~/.gemini/antigravity-cli/skills
+    skill_markdown_template_placeholder_substitutions:
+      POLL_INTERVAL_SECONDS: 30
+      POLL_MECHANISM: |
+        `invoke_subagent` でポーリングサブエージェントを起動し、完了時に `send_message` で親へ通知させる。
+
+        サブエージェントへの指示：「`gh pr view <PR_NUMBER> --repo $REPO --json state -q '.state'` を {{POLL_INTERVAL_SECONDS}}秒おきに実行し、状態が MERGED になったら `send_message` で "PR_MERGED:<PR_NUMBER>" を親に送る。」

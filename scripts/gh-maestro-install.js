@@ -14,9 +14,31 @@ function parseAgentsYaml(content) {
   const agents = {};
   let currentAgent = null;
   let inSubstitutions = false;
+  let blockKey = null;
+  let blockIndent = null;
+  let blockLines = [];
+
+  function flushBlock() {
+    if (blockKey && currentAgent) {
+      while (blockLines.length && !blockLines[blockLines.length - 1].trim()) blockLines.pop();
+      agents[currentAgent].substitutions[blockKey] = blockLines.join('\n');
+    }
+    blockKey = null;
+    blockIndent = null;
+    blockLines = [];
+  }
 
   for (const rawLine of content.split('\n')) {
     const line = rawLine.trimEnd();
+
+    if (blockKey !== null) {
+      if (!line.trim()) { blockLines.push(''); continue; }
+      const lineIndent = line.length - line.trimStart().length;
+      if (blockIndent === null) blockIndent = lineIndent;
+      if (lineIndent >= blockIndent) { blockLines.push(line.slice(blockIndent)); continue; }
+      flushBlock();
+    }
+
     if (!line || line.trimStart().startsWith('#')) continue;
 
     const indent = line.length - line.trimStart().length;
@@ -38,10 +60,17 @@ function parseAgentsYaml(content) {
         inSubstitutions = false;
       }
     } else if (indent === 6 && currentAgent && inSubstitutions) {
-      agents[currentAgent].substitutions[key] = value;
+      if (value === '|') {
+        blockKey = key;
+        blockIndent = null;
+        blockLines = [];
+      } else {
+        agents[currentAgent].substitutions[key] = value;
+      }
     }
   }
 
+  flushBlock();
   return agents;
 }
 
@@ -66,9 +95,13 @@ function copyDir(src, dest) {
 
 function applySubstitutions(content, substitutions) {
   let result = content;
-  for (const [key, value] of Object.entries(substitutions)) {
-    result = result.replaceAll(`{{${key}}}`, value);
-  }
+  let prev;
+  do {
+    prev = result;
+    for (const [key, value] of Object.entries(substitutions)) {
+      result = result.replaceAll(`{{${key}}}`, value);
+    }
+  } while (result !== prev);
   return result;
 }
 

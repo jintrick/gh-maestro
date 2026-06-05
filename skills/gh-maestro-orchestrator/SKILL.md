@@ -43,6 +43,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 |---|---|
 | `gh-maestro-coder` | 実装 → PR作成 |
 | `gh-maestro-reviewer` | PRレビュー（必ず`--prompt`でレビュー観点を渡す） |
+| `gh-maestro-investigator` | バグ調査 → 根本原因・修正方針の報告（必ず`--issue`でバグIssue番号を渡す） |
 | `gh-maestro-base` | 上記以外の動的役職（必ず`--prompt`で役割を定義する） |
 
 ## 判断の原則
@@ -59,7 +60,18 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 
 - Issueは人間と共同起草する（単独で作成しない）
 - 保護ブランチ（`main`/`master`/`develop`）から直接作業しない。Issueが確定したらブランチを切り`BASE_BRANCH`を更新する
-- 人間からマージ完了の報告を受けたら次のworkerをspawnする前に`git fetch origin && git merge origin/$BASE_BRANCH`でローカルを追随させる
+- マージ依頼をしたら、即座にPRのマージ完了を自律検知するポーリングを開始する（下記「マージ完了の自律検知」を参照）
+- マージ完了を検知したら次のworkerをspawnする前に`git fetch origin && git merge origin/$BASE_BRANCH`でローカルを追随させる
 - `main`への直接pushは禁止
 - `--prompt`にシングルクォート（`'`）・バッククォート（`` ` ``）を含めない（spawn-worker.jsがエラーで停止する）
 - `gh pr close`は複数引数不可。複数件閉じる場合は1件ずつループする
+
+## マージ完了の自律検知
+
+人間にマージを依頼したら、チャットで案内した直後にバックグラウンドポーリングを開始する。
+
+{{POLL_MECHANISM}}
+
+- `PR_MERGED:` を受け取ったら自律的に次のフローへ進む
+- 人間からの「マージしたよ」報告も同様に受け付ける（どちらが先でも対応する）
+- ポーリング間隔は{{POLL_INTERVAL_SECONDS}}秒
