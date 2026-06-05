@@ -198,6 +198,43 @@ const reviewPolicyContent = stripFrontmatter(fs.readFileSync(reviewPolicySrc, 'u
 fs.writeFileSync(reviewPolicyDest, reviewPolicyContent, 'utf8');
 ok(`review-policy.md -> ${expandHome('~/.gh-maestro')}`);
 
+// ── UserPromptExpansion hook を ~/.claude/settings.json に登録 ────────────────
+
+step('Registering UserPromptExpansion hook in ~/.claude/settings.json...');
+
+const userSettingsPath = expandHome('~/.claude/settings.json');
+let userSettings = {};
+if (fs.existsSync(userSettingsPath)) {
+  try {
+    userSettings = JSON.parse(fs.readFileSync(userSettingsPath, 'utf8'));
+  } catch (e) {
+    fail(`Cannot parse ${userSettingsPath}: ${e.message}`);
+  }
+}
+
+if (!userSettings.hooks) userSettings.hooks = {};
+if (!userSettings.hooks.UserPromptExpansion) userSettings.hooks.UserPromptExpansion = [];
+
+// 既存の gh-maestro エントリを除去（重複防止）
+userSettings.hooks.UserPromptExpansion =
+  userSettings.hooks.UserPromptExpansion.filter(g => g.matcher !== 'gh-maestro');
+
+// フックを追加
+userSettings.hooks.UserPromptExpansion.push({
+  matcher: 'gh-maestro',
+  hooks: [
+    {
+      type: 'command',
+      command: 'node "$HOME/.gh-maestro/scripts/gh-maestro-setup.js"',
+      statusMessage: 'gh-maestro 前提条件チェック中...',
+    },
+  ],
+});
+
+fs.mkdirSync(path.dirname(userSettingsPath), { recursive: true });
+fs.writeFileSync(userSettingsPath, JSON.stringify(userSettings, null, 2) + '\n', 'utf8');
+ok(`UserPromptExpansion hook -> ${userSettingsPath}`);
+
 console.log('\ngh-maestro installed.\n');
 console.log('Usage:');
 console.log('  1. Open wezterm and navigate to your project root');
