@@ -159,6 +159,27 @@ for (const [agentName, config] of Object.entries(agents)) {
   }
 }
 
+// ── Base scripts を全スキルに配布 ────────────────────────────────────────────
+
+step('Distributing base scripts to all skills...');
+const baseScripts = ['send-pane.js'];
+const baseScriptsSrc = path.join(SKILLS_DIR, 'gh-maestro-base', 'scripts');
+const recipientSkills = ['gh-maestro-coder', 'gh-maestro-orchestrator', 'gh-maestro-reviewer'];
+
+for (const [, config] of Object.entries(agents)) {
+  const dest = expandHome(config.dest);
+  for (const skill of recipientSkills) {
+    for (const script of baseScripts) {
+      const src = path.join(baseScriptsSrc, script);
+      if (!fs.existsSync(src)) { fail(`${src} not found`); }
+      const destDir = path.join(dest, skill, 'scripts');
+      fs.mkdirSync(destDir, { recursive: true });
+      fs.copyFileSync(src, path.join(destDir, script));
+    }
+    ok(`send-pane.js -> ${path.join(dest, skill, 'scripts')}`);
+  }
+}
+
 // ── Shared scripts & assets ───────────────────────────────────────────────────
 
 step('Installing shared scripts...');
