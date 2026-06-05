@@ -51,9 +51,33 @@ const prefix = senderName === 'orchestrator'
 const fullMessage = prefix + message;
 
 function wez(...a) {
-  const r = spawnSync('wezterm', a, { stdio: 'inherit' });
-  if (r.status !== 0) process.exit(r.status ?? 1);
+  return spawnSync('wezterm', a, { encoding: 'utf8' });
 }
 
-wez('cli', 'send-text', '--pane-id', paneId, fullMessage);
-wez('cli', 'send-text', '--pane-id', paneId, '--no-paste', '\r');
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 500;
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// メッセージが注入されたか確認するため末尾20文字を検索する
+const probe = fullMessage.slice(-20);
+
+for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+  wez('cli', 'send-text', '--pane-id', paneId, fullMessage);
+
+  const result = wez('cli', 'get-text', '--pane-id', paneId);
+  if (result.stdout && result.stdout.includes(probe)) {
+    // 注入確認 → Enterを送信して完了
+    const r = wez('cli', 'send-text', '--pane-id', paneId, '--no-paste', '\r');
+    process.exit(r.status ?? 0);
+  }
+
+  if (attempt < MAX_RETRIES) {
+    sleep(RETRY_DELAY_MS);
+  }
+}
+
+process.stderr.write(`send-pane: failed to deliver message after ${MAX_RETRIES} attempts\n`);
+process.exit(1);
