@@ -1,16 +1,21 @@
 #!/usr/bin/env node
 // gh-maestro per-project setup script
-// Validates prerequisites only. No state files are written.
+// Validates prerequisites and establishes directory/gitignore invariants.
 
 const { spawnSync } = require('child_process');
-const { existsSync } = require('fs');
+const { existsSync, mkdirSync, readFileSync, appendFileSync } = require('fs');
 const { resolve } = require('path');
 
 const workspaceRoot = process.argv[2] ?? process.cwd();
 
 function step(msg)  { console.log(`\x1b[36m[gh-maestro] ${msg}\x1b[0m`); }
 function ok(msg)    { console.log(`  \x1b[32mv ${msg}\x1b[0m`); }
-function fail(msg)  { console.error(`  \x1b[31mx ${msg}\x1b[0m`); process.exit(1); }
+function fail(msg, ...hints) {
+  console.error(`\n  \x1b[31mx ${msg}\x1b[0m`);
+  for (const h of hints) console.error(`    ${h}`);
+  console.error();
+  process.exit(1);
+}
 
 function run(cmd, args, { capture } = {}) {
   const r = spawnSync(cmd, args, { cwd: workspaceRoot, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit' });
@@ -18,43 +23,115 @@ function run(cmd, args, { capture } = {}) {
   return capture ? r.stdout.trim() : true;
 }
 
-// ─── Prerequisites ────────────────────────────────────────────────────────────
+// ─── 1. 環境チェック ──────────────────────────────────────────────────────────
 
-step('Checking prerequisites...');
+function checkEnvironment() {
+  step('Checking prerequisites...');
 
-if (!process.env.WEZTERM_PANE) {
-  fail('WEZTERM_PANE が設定されていません。WezTerm のペイン内で /gh-maestro を呼び出してください。');
+  if (!process.env.WEZTERM_PANE) {
+    fail(
+      'WEZTERM_PANE が設定されていません。',
+      '→ WezTerm のペイン内から /gh-maestro を実行してください。',
+      '→ すでに WezTerm 内にいる場合は WezTerm が古い可能性があります（v20220807 以降で自動設定）。',
+      '   インストール: https://wezfurlong.org/wezterm/installation.html',
+    );
+  }
+  ok(`Orchestrator pane-id: ${process.env.WEZTERM_PANE}`);
+
+  if (!run('wezterm', ['--version'], { capture: true })) {
+    fail(
+      'wezterm CLI が PATH に見つかりません。',
+      '→ WezTerm をインストールしてください: https://wezfurlong.org/wezterm/installation.html',
+      '→ インストール後はシェルを再起動するか、PATH を再読み込みしてください。',
+    );
+  }
+  ok('wezterm CLI found');
+
+  if (!existsSync(resolve(workspaceRoot, '.git'))) {
+    fail(
+      `git リポジトリではありません: ${workspaceRoot}`,
+      '→ プロジェクトのルートディレクトリに移動してから /gh-maestro を実行してください。',
+      '→ 未初期化の場合: git init && git remote add origin https://github.com/<owner>/<repo>.git',
+    );
+  }
+
+  const remoteUrl = run('git', ['config', '--get', 'remote.origin.url'], { capture: true });
+  if (!remoteUrl) {
+    fail(
+      "git remote 'origin' が設定されていません。",
+      '→ git remote add origin https://github.com/<owner>/<repo>.git',
+    );
+  }
+  const match = remoteUrl.match(/github\.com[:/](.+?\/.+?)(\.git)?$/);
+  if (!match) {
+    fail(
+      `remote.origin.url から GitHub の owner/repo を取得できませんでした: ${remoteUrl}`,
+      '→ gh-maestro は GitHub.com のリポジトリのみサポートしています。',
+      '→ 期待する URL 形式: https://github.com/owner/repo.git または git@github.com:owner/repo.git',
+    );
+  }
+  ok(`Repository: ${match[1]}`);
+
+  if (!run('gh', ['auth', 'status'], { capture: true })) {
+    fail(
+      'gh CLI が認証されていません。',
+      "→ 'gh auth login' を実行して GitHub アカウントを認証してください。",
+      '→ gh CLI 未インストールの場合: https://cli.github.com/',
+    );
+  }
+  ok('gh CLI authenticated');
 }
-ok(`Orchestrator pane-id: ${process.env.WEZTERM_PANE}`);
 
-if (!run('wezterm', ['--version'], { capture: true })) {
-  fail('wezterm CLI not found in PATH.');
-}
-ok('wezterm CLI found');
+// ─── 2. ディレクトリ準備 ──────────────────────────────────────────────────────
 
-if (!existsSync(resolve(workspaceRoot, '.git'))) {
-  fail(`Not a git repository: ${workspaceRoot}`);
+function prepareDirectories() {
+  mkdirSync(resolve(workspaceRoot, '.gh-maestro', 'worktrees'), { recursive: true });
+  ok('.gh-maestro/worktrees directory ready');
 }
 
-const remoteUrl = run('git', ['config', '--get', 'remote.origin.url'], { capture: true });
-if (!remoteUrl) fail("No remote 'origin' found. Configure git remote first.");
-const match = remoteUrl.match(/github\.com[:/](.+?\/.+?)(\.git)?$/);
-if (!match) fail(`Cannot parse owner/repo from remote URL: ${remoteUrl}`);
-ok(`Repository: ${match[1]}`);
+// ─── 3. .gitignore 確認・追記 ─────────────────────────────────────────────────
 
-if (!run('gh', ['auth', 'status'], { capture: true })) {
-  fail("gh CLI not authenticated. Run 'gh auth login' first.");
+function ensureGitIgnore() {
+  const gitignore = resolve(workspaceRoot, '.gitignore');
+  const entry = '.gh-maestro/';
+  if (!existsSync(gitignore)) {
+    appendFileSync(gitignore, `${entry}\n`, 'utf8');
+    ok(`.gitignore created with ${entry}`);
+    return;
+  }
+  const already = readFileSync(gitignore, 'utf8').split('\n').some(l => l.trim() === entry);
+  if (!already) {
+    appendFileSync(gitignore, `\n${entry}\n`, 'utf8');
+    ok(`.gitignore updated: added ${entry}`);
+  } else {
+    ok(`.gitignore already contains ${entry}`);
+  }
 }
-ok('gh CLI authenticated');
 
-const devBranch = run('git', ['branch', '--list', 'dev'], { capture: true });
-if (!devBranch) {
-  step("Creating 'dev' branch from main...");
-  if (!run('git', ['checkout', '-b', 'dev', 'main'])) fail("Failed to create 'dev' branch.");
-  run('git', ['push', '-u', 'origin', 'dev']);
+// ─── 4. dev ブランチ確認・作成 ────────────────────────────────────────────────
+
+function ensureDevBranch() {
+  const devBranch = run('git', ['branch', '--list', 'dev'], { capture: true });
+  if (!devBranch) {
+    step("Creating 'dev' branch from main...");
+    if (!run('git', ['checkout', '-b', 'dev', 'main'])) {
+      fail(
+        "'dev' ブランチの作成に失敗しました。",
+        "→ 'main' ブランチが存在するか確認してください: git branch --list main",
+        '→ main が無い場合、デフォルトブランチ名を確認して手動で作成してください:',
+        '   git checkout -b dev <デフォルトブランチ名> && git push -u origin dev',
+      );
+    }
+    run('git', ['push', '-u', 'origin', 'dev']);
+  }
+  ok("Branch 'dev' exists");
 }
-ok("Branch 'dev' exists");
 
-// ─── Done ─────────────────────────────────────────────────────────────────────
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+checkEnvironment();
+prepareDirectories();
+ensureGitIgnore();
+ensureDevBranch();
 
 console.log('\ngh-maestro ready.\n');

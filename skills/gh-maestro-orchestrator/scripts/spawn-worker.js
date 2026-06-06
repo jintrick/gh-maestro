@@ -15,7 +15,7 @@
 // 標準出力: ワーカー名（例: issue-5-implement）
 
 const { execSync, spawnSync } = require('child_process');
-const { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync, symlinkSync,
+const { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync,
         readdirSync, statSync, lstatSync, rmdirSync, rmSync } = require('fs');
 const { resolve, relative } = require('path');
 
@@ -57,13 +57,6 @@ if (!orchPaneId)  fail('WEZTERM_PANE が設定されていません');
 const workerName   = `issue-${issue}-${description}`;
 const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
 const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
-const gitignore    = resolve(workspace, '.gitignore');
-
-// --- .gitignore に .gh-maestro/ を追記（初回のみ） ---
-const entry = '.gh-maestro/';
-const alreadyIgnored = existsSync(gitignore) &&
-  readFileSync(gitignore, 'utf8').split('\n').some(l => l.trim() === entry);
-if (!alreadyIgnored) appendFileSync(gitignore, `\n${entry}\n`, 'utf8');
 
 // --- workers.json を読み込み（なければ初期化、破損時は空として扱う） ---
 let workers = {};
