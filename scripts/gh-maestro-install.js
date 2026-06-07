@@ -14,9 +14,31 @@ function parseAgentsYaml(content) {
   const agents = {};
   let currentAgent = null;
   let inSubstitutions = false;
+  let blockKey = null;
+  let blockIndent = null;
+  let blockLines = [];
+
+  function flushBlock() {
+    if (blockKey && currentAgent) {
+      while (blockLines.length && !blockLines[blockLines.length - 1].trim()) blockLines.pop();
+      agents[currentAgent].substitutions[blockKey] = blockLines.join('\n');
+    }
+    blockKey = null;
+    blockIndent = null;
+    blockLines = [];
+  }
 
   for (const rawLine of content.split('\n')) {
     const line = rawLine.trimEnd();
+
+    if (blockKey !== null) {
+      if (!line.trim()) { blockLines.push(''); continue; }
+      const lineIndent = line.length - line.trimStart().length;
+      if (blockIndent === null) blockIndent = lineIndent;
+      if (lineIndent >= blockIndent) { blockLines.push(line.slice(blockIndent)); continue; }
+      flushBlock();
+    }
+
     if (!line || line.trimStart().startsWith('#')) continue;
 
     const indent = line.length - line.trimStart().length;
@@ -38,10 +60,17 @@ function parseAgentsYaml(content) {
         inSubstitutions = false;
       }
     } else if (indent === 6 && currentAgent && inSubstitutions) {
-      agents[currentAgent].substitutions[key] = value;
+      if (value === '|') {
+        blockKey = key;
+        blockIndent = null;
+        blockLines = [];
+      } else {
+        agents[currentAgent].substitutions[key] = value;
+      }
     }
   }
 
+  flushBlock();
   return agents;
 }
 
@@ -66,9 +95,13 @@ function copyDir(src, dest) {
 
 function applySubstitutions(content, substitutions) {
   let result = content;
-  for (const [key, value] of Object.entries(substitutions)) {
-    result = result.replaceAll(`{{${key}}}`, value);
-  }
+  let prev;
+  do {
+    prev = result;
+    for (const [key, value] of Object.entries(substitutions)) {
+      result = result.replaceAll(`{{${key}}}`, value);
+    }
+  } while (result !== prev);
   return result;
 }
 
@@ -126,6 +159,27 @@ for (const [agentName, config] of Object.entries(agents)) {
   }
 }
 
+// ── Base scripts を全スキルに配布 ────────────────────────────────────────────
+
+step('Distributing base scripts to all skills...');
+const baseScripts = ['send-pane.js'];
+const baseScriptsSrc = path.join(SKILLS_DIR, 'gh-maestro-base', 'scripts');
+const recipientSkills = ['gh-maestro-coder', 'gh-maestro-orchestrator', 'gh-maestro-reviewer'];
+
+for (const [, config] of Object.entries(agents)) {
+  const dest = expandHome(config.dest);
+  for (const skill of recipientSkills) {
+    for (const script of baseScripts) {
+      const src = path.join(baseScriptsSrc, script);
+      if (!fs.existsSync(src)) { fail(`${src} not found`); }
+      const destDir = path.join(dest, skill, 'scripts');
+      fs.mkdirSync(destDir, { recursive: true });
+      fs.copyFileSync(src, path.join(destDir, script));
+    }
+    ok(`send-pane.js -> ${path.join(dest, skill, 'scripts')}`);
+  }
+}
+
 // ── Shared scripts & assets ───────────────────────────────────────────────────
 
 step('Installing shared scripts...');
@@ -143,6 +197,43 @@ const reviewPolicyDest = expandHome('~/.gh-maestro/review-policy.md');
 const reviewPolicyContent = stripFrontmatter(fs.readFileSync(reviewPolicySrc, 'utf8'));
 fs.writeFileSync(reviewPolicyDest, reviewPolicyContent, 'utf8');
 ok(`review-policy.md -> ${expandHome('~/.gh-maestro')}`);
+
+// ── UserPromptExpansion hook を ~/.claude/settings.json に登録 ────────────────
+
+step('Registering UserPromptExpansion hook in ~/.claude/settings.json...');
+
+const userSettingsPath = expandHome('~/.claude/settings.json');
+let userSettings = {};
+if (fs.existsSync(userSettingsPath)) {
+  try {
+    userSettings = JSON.parse(fs.readFileSync(userSettingsPath, 'utf8'));
+  } catch (e) {
+    fail(`Cannot parse ${userSettingsPath}: ${e.message}`);
+  }
+}
+
+if (!userSettings.hooks) userSettings.hooks = {};
+if (!userSettings.hooks.UserPromptExpansion) userSettings.hooks.UserPromptExpansion = [];
+
+// 既存の gh-maestro エントリを除去（重複防止）
+userSettings.hooks.UserPromptExpansion =
+  userSettings.hooks.UserPromptExpansion.filter(g => g.matcher !== 'gh-maestro');
+
+// フックを追加
+userSettings.hooks.UserPromptExpansion.push({
+  matcher: 'gh-maestro',
+  hooks: [
+    {
+      type: 'command',
+      command: 'node "$HOME/.gh-maestro/scripts/gh-maestro-setup.js"',
+      statusMessage: 'gh-maestro 前提条件チェック中...',
+    },
+  ],
+});
+
+fs.mkdirSync(path.dirname(userSettingsPath), { recursive: true });
+fs.writeFileSync(userSettingsPath, JSON.stringify(userSettings, null, 2) + '\n', 'utf8');
+ok(`UserPromptExpansion hook -> ${userSettingsPath}`);
 
 console.log('\ngh-maestro installed.\n');
 console.log('Usage:');

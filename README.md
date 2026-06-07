@@ -42,10 +42,16 @@ chmod +x gh-maestro-install.sh
 あとは orchestrator の指示に従って開発を進める。
 
 ```
+# 機能追加の場合
 あなた: 「ログイン機能を追加したい」
 orchestrator: Issue を起草・作成
 orchestrator → coder 起動・実装 → PR 作成
 orchestrator → reviewer 起動・レビュー → あなたにマージを依頼
+
+# バグ調査の場合
+あなた: 「Issue #12 のバグを調査してほしい」
+orchestrator → investigator 起動・根本原因/影響範囲/修正方針を報告
+orchestrator: 調査結果をあなたに提示 → 対応方針を判断
 ```
 
 ## スキルの構造
@@ -80,7 +86,3 @@ skills/
 ~/.gh-maestro/review-policy.md       # デフォルト（gh-maestroが提供・更新時に上書き）
 <project>/.gh-maestro/review-policy.md  # プロジェクト固有（任意・リポジトリで共有可）
 ```
-
-## 詳細仕様
-
-`requirements.md` を参照。

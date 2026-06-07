@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // gh-maestro per-project setup script
-// Validates prerequisites and establishes directory/gitignore invariants.
+// Validates prerequisites on first run; skips on subsequent runs via sentinel file.
 
 const { spawnSync } = require('child_process');
-const { existsSync, mkdirSync, readFileSync, appendFileSync } = require('fs');
+const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync } = require('fs');
 const { resolve } = require('path');
 
 const workspaceRoot = process.argv[2] ?? process.cwd();
@@ -15,6 +15,13 @@ function fail(msg, ...hints) {
   for (const h of hints) console.error(`    ${h}`);
   console.error();
   process.exit(1);
+}
+
+// ─── Sentinel check ───────────────────────────────────────────────────────────
+
+const sentinelPath = resolve(workspaceRoot, '.gh-maestro', 'setup-ok');
+if (existsSync(sentinelPath)) {
+  process.exit(0);
 }
 
 function run(cmd, args, { capture } = {}) {
@@ -133,5 +140,9 @@ checkEnvironment();
 prepareDirectories();
 ensureGitIgnore();
 ensureDevBranch();
+
+mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
+writeFileSync(sentinelPath, '');
+ok('Setup complete (subsequent /gh-maestro invocations will skip this check)');
 
 console.log('\ngh-maestro ready.\n');

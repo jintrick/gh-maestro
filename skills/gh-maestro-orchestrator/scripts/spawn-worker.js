@@ -6,13 +6,13 @@
 //   node spawn-worker.js \
 //     --skill <skill-name> \
 //     [--prompt "<role-prompt>"]  # gh-maestro-base 使用時は必須
-//     --issue <N> \
+//     [--issue <N>] \             # 省略可。省略時は --prompt の内容が TASK として渡される
 //     --description <desc> \
 //     --repo <owner/repo> \
 //     --workspace <path> \
 //     [--base-branch <branch>]
 //
-// 標準出力: ワーカー名（例: issue-5-implement）
+// 標準出力: ワーカー名（例: issue-5-implement / task-investigate-auth）
 
 const { execSync, spawnSync } = require('child_process');
 const { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync,
@@ -40,7 +40,6 @@ const fail = (msg) => {
   process.exit(1);
 };
 if (!skill)       fail('--skill が必要です');
-if (!issue)       fail('--issue が必要です');
 if (!description) fail('--description が必要です');
 if (!repo)        fail('--repo が必要です');
 if (skill === 'gh-maestro-base' && !prompt) fail('gh-maestro-base を使う場合は --prompt が必要です');
@@ -54,7 +53,7 @@ const orchPaneId = process.env.WEZTERM_PANE;
 if (!orchPaneId)  fail('WEZTERM_PANE が設定されていません');
 
 // --- パス定義 ---
-const workerName   = `issue-${issue}-${description}`;
+const workerName   = issue ? `issue-${issue}-${description}` : `task-${description}`;
 const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
 const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
 
@@ -78,29 +77,35 @@ if (!workers.orchestrator) {
 
 // --- 生存確認: staleなpane_idをworkers.jsonから除去 ---
 const getAlivePaneIds = () => {
-  const r = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8' });
+  const r = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8', timeout: 6000 });
+  if (r.error?.code === 'ETIMEDOUT') {
+    console.warn('spawn-worker: wezterm cli list がタイムアウト — stale除去をスキップします');
+    return null;
+  }
   if (r.status !== 0) {
     console.warn(`spawn-worker: wezterm cli list 失敗: ${r.stderr.trim()} — stale除去をスキップします`);
-    return new Set();
+    return null;
   }
   try {
     return new Set(JSON.parse(r.stdout).map(p => String(p.pane_id)));
   } catch (e) {
     console.warn(`spawn-worker: wezterm cli list の出力パース失敗: ${e.message} — stale除去をスキップします`);
-    return new Set();
+    return null;
   }
 };
 
 const alivePanes = getAlivePaneIds();
-let dirty = false;
-for (const [k, v] of Object.entries(workers)) {
-  if (k !== 'orchestrator' && !alivePanes.has(String(v))) {
-    console.warn(`spawn-worker: stale worker "${k}" (pane_id ${v}) を workers.json から除去します`);
-    delete workers[k];
-    dirty = true;
+if (alivePanes !== null) {
+  let dirty = false;
+  for (const [k, v] of Object.entries(workers)) {
+    if (k !== 'orchestrator' && !alivePanes.has(String(v))) {
+      console.warn(`spawn-worker: stale worker "${k}" (pane_id ${v}) を workers.json から除去します`);
+      delete workers[k];
+      dirty = true;
+    }
   }
+  if (dirty) writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
 }
-if (dirty) writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
 
 // --- レイアウト決定（WezTermの詳細はここに閉じ込める） ---
 const existingWorkers = Object.keys(workers).filter(k => k !== 'orchestrator');
@@ -210,8 +215,9 @@ const contextLines = [
   `REPO=${repo}`,
   `WORKSPACE=${workspace}`,
   `WORKTREE=${worktreeDir}`,
-  `ISSUE=${issue}`,
 ];
+if (issue) contextLines.push(`ISSUE=${issue}`);
+if (!issue && prompt) contextLines.push(`TASK=${prompt}`);
 if (baseBranch) contextLines.push(`BASE_BRANCH=${baseBranch}`);
 const extra = prompt ? `\n${prompt}` : '';
 
@@ -250,9 +256,15 @@ if (split.status !== 0 && splitFromPaneId !== orchPaneId) {
 }
 const newPaneId = split.stdout.trim();
 
-// --- workers.json にワーカーを登録 ---
-workers[workerName] = newPaneId;
-writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
+// --- workers.json にワーカーを登録（失敗時はペインもロールバック） ---
+try {
+  workers[workerName] = newPaneId;
+  writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
+} catch (e) {
+  spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', newPaneId], { encoding: 'utf8' });
+  rollbackWorktree();
+  fail(`workers.json への書き込みに失敗しました: ${e.message}`);
+}
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---
 console.log(workerName);

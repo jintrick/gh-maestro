@@ -20,7 +20,7 @@ orchestratorからの返答はこのペインに届く。
 以下を実行することがゴールだ：
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "PR #<PR番号> を作成しました。Issue #$ISSUE の実装完了です。"
+node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "PR #<PR番号> を作成しました。CIがすべてpassしました。Issue #$ISSUE の実装完了です。"
 ```
 
 ## 起動時に与えられる情報
@@ -39,7 +39,8 @@ node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "PR #<P
 3. **質問事項がある場合は通信ルールのコマンドでorchestratorに質問し、返答を待ってから作業を進める**
 4. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）
 5. `gh pr create --base $BASE_BRANCH` でPRを作成する（本文に `Closes #$ISSUE` を含める）
-6. **ゴールのコマンドを実行する**
+6. CIがすべてpassするまで待機する。失敗した場合は原因を調査して修正しpushする。3回修正してもpassしない場合は失敗時の手順に従う。
+7. **ゴールのコマンドを実行する**
 
 ## 失敗時
 
