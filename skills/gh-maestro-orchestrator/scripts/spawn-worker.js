@@ -15,7 +15,7 @@
 // 標準出力: ワーカー名（例: issue-5-implement / task-investigate-auth）
 
 const { execSync, spawnSync } = require('child_process');
-const { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync, symlinkSync,
+const { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync,
         readdirSync, statSync, lstatSync, rmdirSync, rmSync } = require('fs');
 const { resolve, relative } = require('path');
 
@@ -56,13 +56,6 @@ if (!orchPaneId)  fail('WEZTERM_PANE が設定されていません');
 const workerName   = issue ? `issue-${issue}-${description}` : `task-${description}`;
 const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
 const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
-const gitignore    = resolve(workspace, '.gitignore');
-
-// --- .gitignore に .gh-maestro/ を追記（初回のみ） ---
-const entry = '.gh-maestro/';
-const alreadyIgnored = existsSync(gitignore) &&
-  readFileSync(gitignore, 'utf8').split('\n').some(l => l.trim() === entry);
-if (!alreadyIgnored) appendFileSync(gitignore, `\n${entry}\n`, 'utf8');
 
 // --- workers.json を読み込み（なければ初期化、破損時は空として扱う） ---
 let workers = {};
@@ -261,12 +254,20 @@ if (split.status !== 0 && splitFromPaneId !== orchPaneId) {
   rollbackWorktree();
   fail(`WezTermペインの分割に失敗しました: ${split.stderr.trim()}`);
 }
-const newPaneId = split.stdout.trim();
+const newPaneId = (split.stdout ?? '').trim();
+if (!newPaneId) {
+  console.error(`spawn-worker: wezterm split-pane が pane-id を返しませんでした`);
+  console.error(`  stdout: ${JSON.stringify(split.stdout)}`);
+  console.error(`  stderr: ${split.stderr?.trim()}`);
+  rollbackWorktree();
+  fail('wezterm split-pane の pane-id を取得できませんでした（ペインが作成された可能性があります）');
+}
 
 // --- workers.json にワーカーを登録（失敗時はペインもロールバック） ---
 try {
   workers[workerName] = newPaneId;
   writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
+  console.warn(`spawn-worker: worker "${workerName}" を pane ${newPaneId} として workers.json に登録しました`);
 } catch (e) {
   spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', newPaneId], { encoding: 'utf8' });
   rollbackWorktree();

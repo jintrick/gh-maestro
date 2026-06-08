@@ -32,9 +32,9 @@ try {
   fail(`workers.json のパースに失敗しました: ${e.message}`);
 }
 
-const paneId = workers[workerName] ?? null;
+const paneId = workers[workerName] || null;
 if (!paneId) {
-  console.warn(`remove-worker: ワーカー "${workerName}" が workers.json に存在しません — スキップします`);
+  console.warn(`remove-worker: ワーカー "${workerName}" の pane_id が workers.json に存在しません (value: ${JSON.stringify(workers[workerName])}) — スキップします`);
 } else {
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 

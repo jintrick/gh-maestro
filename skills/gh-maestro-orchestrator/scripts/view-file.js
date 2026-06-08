@@ -13,7 +13,7 @@ const { existsSync, readFileSync, writeFileSync, mkdirSync } = require('fs');
 const argv = process.argv.slice(2);
 const get = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
 
-const filePath = argv[0];
+const filePath = argv.find(a => !a.startsWith('--'));
 const workspace = get('--workspace') ?? process.cwd();
 
 if (!filePath) {
