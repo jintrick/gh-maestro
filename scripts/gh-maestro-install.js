@@ -169,7 +169,7 @@ for (const [agentName, config] of Object.entries(agents)) {
 step('Distributing base scripts to all skills...');
 const baseScripts = ['send-pane.js'];
 const baseScriptsSrc = path.join(SKILLS_DIR, 'gh-maestro-base', 'scripts');
-const recipientSkills = ['gh-maestro-coder', 'gh-maestro-orchestrator', 'gh-maestro-reviewer'];
+const recipientSkills = skillDirs.filter(s => s !== 'gh-maestro-base');
 
 for (const [, config] of Object.entries(agents)) {
   const dest = expandHome(config.dest);
