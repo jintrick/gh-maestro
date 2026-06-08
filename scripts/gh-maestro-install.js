@@ -80,16 +80,21 @@ function expandHome(p) {
   return p.replace(/^~/, process.env.HOME || process.env.USERPROFILE || '~');
 }
 
-function copyDir(src, dest) {
+function syncDir(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
+  const srcNames = new Set(fs.readdirSync(src));
+  for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
+    if (!srcNames.has(entry.name)) {
+      const stale = path.join(dest, entry.name);
+      if (entry.isDirectory()) fs.rmSync(stale, { recursive: true, force: true });
+      else fs.unlinkSync(stale);
+    }
+  }
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      copyDir(srcPath, destPath);
-    } else {
-      fs.copyFileSync(srcPath, destPath);
-    }
+    if (entry.isDirectory()) syncDir(srcPath, destPath);
+    else fs.copyFileSync(srcPath, destPath);
   }
 }
 
@@ -152,7 +157,7 @@ for (const [agentName, config] of Object.entries(agents)) {
 
     const scriptsSrc = path.join(SKILLS_DIR, skill, 'scripts');
     if (fs.existsSync(scriptsSrc)) {
-      copyDir(scriptsSrc, path.join(destSkill, 'scripts'));
+      syncDir(scriptsSrc, path.join(destSkill, 'scripts'));
     }
 
     ok(`${skill} -> ${destSkill}`);
