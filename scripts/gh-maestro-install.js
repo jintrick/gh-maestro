@@ -169,7 +169,12 @@ for (const [agentName, config] of Object.entries(agents)) {
 step('Distributing base scripts to all skills...');
 const baseScripts = ['send-pane.js'];
 const baseScriptsSrc = path.join(SKILLS_DIR, 'gh-maestro-base', 'scripts');
-const recipientSkills = skillDirs.filter(s => s !== 'gh-maestro-base');
+const recipientSkills = skillDirs.filter(skill => {
+  if (skill === 'gh-maestro-base') return false;
+  const skillMd = path.join(SKILLS_DIR, skill, 'SKILL.md');
+  return fs.existsSync(skillMd) &&
+    fs.readFileSync(skillMd, 'utf8').includes('{{SCRIPTS_PATH}}');
+});
 
 for (const [, config] of Object.entries(agents)) {
   const dest = expandHome(config.dest);
