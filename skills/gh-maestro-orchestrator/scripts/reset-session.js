@@ -118,10 +118,12 @@ const killProcessesInWorktrees = (dir) => {
 
 const psRemove = (dir) => {
   if (!IS_WIN) return false;
+  // Remove-Item -Recurse は PowerShell 5.x で junction を辿り中身を削除するため使用不可。
+  // [System.IO.Directory]::Delete は junction 自体を削除し中身を辿らない。
   const escaped = dir.replace(/'/g, "''");
   try {
     execSync(
-      `powershell -NoProfile -Command "Remove-Item -LiteralPath '${escaped}' -Recurse -Force -ErrorAction Stop"`,
+      `powershell -NoProfile -Command "[System.IO.Directory]::Delete('${escaped}', $true)"`,
       { stdio: 'pipe', timeout: 15000 }
     );
     return !existsSync(dir);
