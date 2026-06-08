@@ -254,12 +254,20 @@ if (split.status !== 0 && splitFromPaneId !== orchPaneId) {
   rollbackWorktree();
   fail(`WezTermペインの分割に失敗しました: ${split.stderr.trim()}`);
 }
-const newPaneId = split.stdout.trim();
+const newPaneId = (split.stdout ?? '').trim();
+if (!newPaneId) {
+  console.error(`spawn-worker: wezterm split-pane が pane-id を返しませんでした`);
+  console.error(`  stdout: ${JSON.stringify(split.stdout)}`);
+  console.error(`  stderr: ${split.stderr?.trim()}`);
+  rollbackWorktree();
+  fail('wezterm split-pane の pane-id を取得できませんでした（ペインが作成された可能性があります）');
+}
 
 // --- workers.json にワーカーを登録（失敗時はペインもロールバック） ---
 try {
   workers[workerName] = newPaneId;
   writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
+  console.warn(`spawn-worker: worker "${workerName}" を pane ${newPaneId} として workers.json に登録しました`);
 } catch (e) {
   spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', newPaneId], { encoding: 'utf8' });
   rollbackWorktree();
