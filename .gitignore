@@ -9,3 +9,5 @@ node_modules/
 .gh-maestro/session.json
 .gh-maestro/viewer-pane
 .gh-maestro/worktrees/
+
+.gh-maestro/
