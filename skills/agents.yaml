@@ -3,17 +3,71 @@ agents:
     skill_files_install_destination_directory: ~/.claude/skills
     skill_markdown_template_placeholder_substitutions:
       POLL_INTERVAL_SECONDS: 30
-      POLL_MECHANISM: |
+      PR_DETECTION_MECHANISM: |
         `run_in_background: true` でBashを実行し、Monitorツールで完了を検知する。
 
         ```sh
-        until gh pr view <PR_NUMBER> --repo $REPO --json state -q '.state' 2>/dev/null | grep -q "MERGED"; do sleep {{POLL_INTERVAL_SECONDS}}; done && echo "PR_MERGED:<PR_NUMBER>"
+        PR=""; until PR=$(gh pr list --repo $REPO --search "Closes #$ISSUE" --state open --json number -q '.[0].number' 2>/dev/null) && [ -n "$PR" ]; do sleep {{POLL_INTERVAL_SECONDS}}; done && echo "PR_DETECTED:$PR"
+        ```
+      POLL_MECHANISM: |
+        `run_in_background: true` でBashを実行し、Monitorツールで検知する。このスクリプトはマージされるまで永続的に実行する。
+
+        ```sh
+        STATE_FILE="$WORKSPACE/.gh-maestro/poll-state-$PR"
+        touch "$STATE_FILE"
+        INTERVAL={{POLL_INTERVAL_SECONDS}}
+        MAX_INTERVAL=300
+        while true; do
+          # マージ検出
+          STATE=$(gh pr view $PR --repo $REPO --json state -q '.state' 2>/dev/null)
+          if [ "$STATE" = "MERGED" ]; then echo "PR_MERGED:$PR"; exit 0; fi
+
+          PREV_COUNT=$(wc -l < "$STATE_FILE" 2>/dev/null || echo 0)
+
+          # インラインのレビューコメントを検出
+          while IFS= read -r line; do
+            ID=$(echo "$line" | cut -d'|' -f1)
+            if ! grep -qxF "$ID" "$STATE_FILE"; then
+              echo "$ID" >> "$STATE_FILE"
+              echo "REVIEW_COMMENT:$(echo "$line" | cut -d'|' -f2-)"
+            fi
+          done < <(gh api "/repos/$REPO/pulls/$PR/comments" --paginate -q '.[] | "\(.id)|\(.path):\(.original_line // "?")|\(.user.login):\(.body)"' 2>/dev/null)
+
+          # PR全体コメントを検出
+          while IFS= read -r line; do
+            ID=$(echo "$line" | cut -d'|' -f1)
+            if ! grep -qxF "$ID" "$STATE_FILE"; then
+              echo "$ID" >> "$STATE_FILE"
+              echo "PR_COMMENT:$(echo "$line" | cut -d'|' -f2-)"
+            fi
+          done < <(gh pr view $PR --repo $REPO --json comments -q '.comments[] | "\(.id)|\(.author.login):\(.body)"' 2>/dev/null)
+
+          CURR_COUNT=$(wc -l < "$STATE_FILE" 2>/dev/null || echo 0)
+          if [ "$CURR_COUNT" -gt "$PREV_COUNT" ]; then
+            INTERVAL={{POLL_INTERVAL_SECONDS}}
+          else
+            INTERVAL=$(( INTERVAL * 3 / 2 ))
+            [ "$INTERVAL" -gt "$MAX_INTERVAL" ] && INTERVAL=$MAX_INTERVAL
+          fi
+          sleep "$INTERVAL"
+        done
         ```
   agy:
     skill_files_install_destination_directory: ~/.gemini/antigravity-cli/skills
     skill_markdown_template_placeholder_substitutions:
       POLL_INTERVAL_SECONDS: 30
-      POLL_MECHANISM: |
+      PR_DETECTION_MECHANISM: |
         `invoke_subagent` でポーリングサブエージェントを起動し、完了時に `send_message` で親へ通知させる。
 
-        サブエージェントへの指示：「`gh pr view <PR_NUMBER> --repo $REPO --json state -q '.state'` を {{POLL_INTERVAL_SECONDS}}秒おきに実行し、状態が MERGED になったら `send_message` で "PR_MERGED:<PR_NUMBER>" を親に送る。」
+        サブエージェントへの指示：「`gh pr list --repo $REPO --search "Closes #$ISSUE" --state open --json number -q '.[0].number'` を {{POLL_INTERVAL_SECONDS}}秒おきに実行し、PR番号が取得できたら `send_message` で "PR_DETECTED:<PR番号>" を親に送信する。」
+      POLL_MECHANISM: |
+        `invoke_subagent` でポーリングサブエージェントを起動し、完了時に `send_message` で親へ通知させる。このサブエージェントはマージされるまで永続的に実行する。
+
+        サブエージェントへの指示：
+        「以下のループを実行する。STATE_FILEとして `$WORKSPACE/.gh-maestro/poll-state-$PR` を使用し、既知のコメントIDを管理する。
+        1. `gh pr view $PR --repo $REPO --json state -q '.state'` を {{POLL_INTERVAL_SECONDS}}秒おきに実行する
+        2. stateが MERGED になったら `send_message` で "PR_MERGED:$PR" を親に送り、終了する
+        3. `gh api "/repos/$REPO/pulls/$PR/comments" --paginate` でインラインレビューコメントを取得し、新規のものがあれば `send_message` で "REVIEW_COMMENT:<path>:<line>:<user>:<body>" を親に送信し、コメントIDをSTATE_FILEに記録する
+        4. `gh pr view $PR --repo $REPO --json comments` でPR全体コメントを取得し、同様に新規分を通知する
+        5. 新しいコメントがなければポーリング間隔を1.5倍に伸ばす（最大300秒）。あればリセットする
+        ※ このサブエージェントはマージが検出されるまで終了しない」
