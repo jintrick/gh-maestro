@@ -193,22 +193,13 @@ for (const [, config] of Object.entries(agents)) {
 // ── Shared scripts & assets ───────────────────────────────────────────────────
 
 step('Installing shared scripts...');
-const setupSrc = path.join(ROOT, 'scripts', 'gh-maestro-setup.js');
-if (!fs.existsSync(setupSrc)) fail('scripts/gh-maestro-setup.js not found');
 const sharedDest = expandHome('~/.gh-maestro/scripts');
 fs.mkdirSync(sharedDest, { recursive: true });
-fs.copyFileSync(setupSrc, path.join(sharedDest, 'gh-maestro-setup.js'));
-ok(`gh-maestro-setup.js -> ${sharedDest}`);
-
-const postReviewSrc = path.join(ROOT, 'scripts', 'post-review.js');
-if (!fs.existsSync(postReviewSrc)) fail('scripts/post-review.js not found');
-fs.copyFileSync(postReviewSrc, path.join(sharedDest, 'post-review.js'));
-ok(`post-review.js -> ${sharedDest}`);
-
-for (const script of ['poll-pr.js', 'poll-reviews.js']) {
-  const src = path.join(ROOT, 'scripts', script);
-  if (!fs.existsSync(src)) fail(`scripts/${script} not found`);
-  fs.copyFileSync(src, path.join(sharedDest, script));
+const scriptsDir = path.join(ROOT, 'scripts');
+const assetScripts = fs.readdirSync(scriptsDir)
+  .filter(f => f.endsWith('.js') && f !== 'gh-maestro-install.js');
+for (const script of assetScripts) {
+  fs.copyFileSync(path.join(scriptsDir, script), path.join(sharedDest, script));
   ok(`${script} -> ${sharedDest}`);
 }
 
