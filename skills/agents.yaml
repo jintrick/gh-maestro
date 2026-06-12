@@ -4,7 +4,9 @@ agents:
     skill_markdown_template_placeholder_substitutions:
       POLL_INTERVAL_SECONDS: 30
       PR_DETECTION_MECHANISM: |
-        `run_in_background: true` でBashを実行し、Monitorツールで完了を検知する。
+        以下を順番に実行する：
+
+        1. 以下のスクリプト全体を1つのBashコマンドとして `run_in_background: true` で実行する。
 
         ```sh
         PR=""
@@ -18,8 +20,14 @@ agents:
         done
         echo "PR_DETECTED:$PR"
         ```
+
+        2. **直ちにMonitorツールを呼び出し**、上記バックグラウンドプロセスを監視する。他のツールを呼んではならない。
+
+        3. `PR_DETECTED:<PR番号>` を受け取ったらPR番号を記録してレビュー監視に移行する。
       POLL_MECHANISM: |
-        `run_in_background: true` でBashを実行し、Monitorツールで検知する。このスクリプトはマージされるまで永続的に実行する。
+        以下を順番に実行する：
+
+        1. 以下のスクリプト全体を1つのBashコマンドとして `run_in_background: true` で実行する。このスクリプトはマージされるまで永続的に動き続ける。
 
         ```sh
         STATE_FILE="$WORKSPACE/.gh-maestro/poll-state-$PR"
@@ -61,6 +69,13 @@ agents:
           sleep "$INTERVAL"
         done
         ```
+
+        2. **直ちにMonitorツールを呼び出し**、上記バックグラウンドプロセスを監視する。他のツールを呼んではならない。
+
+        3. Monitorから届く通知を処理する：
+           - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → コメントトリアージを実行する
+           - `PR_COMMENT:<user>:<body>` → 同様にトリアージする
+           - `PR_MERGED:<PR番号>` → マージ完了。自律的に次のフローへ進む
   agy:
     skill_files_install_destination_directory: ~/.gemini/antigravity-cli/skills
     skill_markdown_template_placeholder_substitutions:
