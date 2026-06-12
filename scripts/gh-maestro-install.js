@@ -205,6 +205,13 @@ if (!fs.existsSync(postReviewSrc)) fail('scripts/post-review.js not found');
 fs.copyFileSync(postReviewSrc, path.join(sharedDest, 'post-review.js'));
 ok(`post-review.js -> ${sharedDest}`);
 
+for (const script of ['poll-pr.js', 'poll-reviews.js']) {
+  const src = path.join(ROOT, 'scripts', script);
+  if (!fs.existsSync(src)) fail(`scripts/${script} not found`);
+  fs.copyFileSync(src, path.join(sharedDest, script));
+  ok(`${script} -> ${sharedDest}`);
+}
+
 step('Installing default review policy...');
 const reviewPolicySrc = path.join(ROOT, 'assets', 'review-policy.md');
 if (!fs.existsSync(reviewPolicySrc)) fail('assets/review-policy.md not found');
