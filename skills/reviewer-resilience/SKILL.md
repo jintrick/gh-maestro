@@ -82,12 +82,6 @@ Remove-Item $tempFile
 `path` はリポジトリルートからの相対パス。
 `line` は diff hunk の右側（新コード）の行番号。削除行への指摘の場合は `side: "LEFT"` とせよ。
 
-### 全体コメント（特定のファイル・行に紐づかない指摘）
-
-```bash
-gh pr review <PR> -c -b "<指摘内容>"
-```
-
 ### APPROVE（問題なし）の場合
 
 全観点で問題がない場合のみ：
