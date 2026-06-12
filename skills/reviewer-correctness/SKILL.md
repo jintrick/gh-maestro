@@ -79,24 +79,32 @@ git show "${COMMIT}:<path>" | wc -l
 
 ### インラインコメント（ファイル・行を特定できる指摘）
 
-各行の指摘をJSONファイルにまとめ、Review APIで一括投稿する：
+**Writeツール**でJSONファイルを直接作成し、シェルには`gh api --input`だけ渡す。
+シェル経由でJSONを生成してはならない（バッククォート等の特殊文字が破壊される）。
 
-PowerShell:
-```powershell
-$review = @{
-  event = "COMMENT"
-  body = "## Correctness Review`n`n<全体サマリ>"
-  comments = @(
-    @{
-      path = "src/file.ts"
-      line = 42
-      side = "RIGHT"
-      body = "**BLOCKER**: <1行要約>`n`n- 根拠: <なぜ不変条件が壊れるか>`n- 失敗シナリオ: <具体的にどう壊れるか>`n- 最小修正案: <最小限の修正>"
+1. Writeツールで `/tmp/gh-review-<PR>.json` を作成する：
+
+```json
+{
+  "event": "COMMENT",
+  "body": "## Correctness Review\n\n<全体サマリ>",
+  "comments": [
+    {
+      "path": "src/file.ts",
+      "line": 42,
+      "side": "RIGHT",
+      "body": "**BLOCKER**: <1行要約>\n\n- 根拠: <なぜ不変条件が壊れるか>\n- 失敗シナリオ: <具体的にどう壊れるか>\n- 最小修正案: <最小限の修正>"
     }
-  )
-} | ConvertTo-Json -Depth 4 -Compress
-$review | Set-Content -Path (New-TemporaryFile) -Encoding UTF8
-gh api repos/{owner}/{repo}/pulls/<PR>/reviews --input (Get-ChildItem $env:TEMP -Filter "tmp*.tmp" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+  ]
+}
+```
+
+JSONの文字列値にバッククォートが含まれる場合、エスケープ不要（` のまま記述する）。
+
+2. Bashで投稿する：
+
+```bash
+gh api repos/{owner}/{repo}/pulls/<PR>/reviews --input /tmp/gh-review-<PR>.json
 ```
 
 ファイル・行を特定できる指摘は必ずインラインコメントを使うこと。

@@ -79,25 +79,32 @@ git show "${COMMIT}:<path>" | wc -l
 
 ### インラインコメント（ファイル・行を特定できる指摘）
 
-各行の指摘をJSONファイルにまとめ、Review APIで一括投稿する：
+**Writeツール**でJSONファイルを直接作成し、シェルには`gh api --input`だけ渡す。
+シェル経由でJSONを生成してはならない（バッククォート等の特殊文字が破壊される）。
 
-PowerShell:
-```powershell
-$tempFile = Join-Path $env:TEMP "gh-review-$pid.json"
-@{
-  event = "COMMENT"
-  body = "## Maintainability Review`n`n<全体サマリ>"
-  comments = @(
-    @{
-      path = "src/file.ts"
-      line = 42
-      side = "RIGHT"
-      body = "**BLOCKER**: <1行要約>`n`n- 根拠: <なぜ保守性を著しく損なうか>`n- 影響: <放置した場合の具体的リスク>`n- 最小修正案: <最小限の修正>"
+1. Writeツールで `/tmp/gh-review-<PR>.json` を作成する：
+
+```json
+{
+  "event": "COMMENT",
+  "body": "## Maintainability Review\n\n<全体サマリ>",
+  "comments": [
+    {
+      "path": "src/file.ts",
+      "line": 42,
+      "side": "RIGHT",
+      "body": "**BLOCKER**: <1行要約>\n\n- 根拠: <なぜ保守性を著しく損なうか>\n- 影響: <放置した場合の具体的リスク>\n- 最小修正案: <最小限の修正>"
     }
-  )
-} | ConvertTo-Json -Depth 4 -Compress | Set-Content -Path $tempFile -Encoding UTF8
-gh api repos/{owner}/{repo}/pulls/<PR>/reviews --input $tempFile
-Remove-Item $tempFile
+  ]
+}
+```
+
+JSONの文字列値にバッククォートが含まれる場合、エスケープ不要（` のまま記述する）。
+
+2. Bashで投稿する：
+
+```bash
+gh api repos/{owner}/{repo}/pulls/<PR>/reviews --input /tmp/gh-review-<PR>.json
 ```
 
 ファイル・行を特定できる指摘は必ずインラインコメントを使うこと。
