@@ -48,7 +48,7 @@ agents:
               echo "$ID" >> "$STATE_FILE"
               echo "REVIEW_COMMENT:$(echo "$line" | cut -d'|' -f2-)"
             fi
-          done < <(gh api "/repos/$REPO/pulls/$PR/comments" --paginate -q '.[] | "\(.id)|\(.path):\(.original_line // "?")|\(.user.login):\(.body)"' 2>/dev/null)
+          done < <(gh api "repos/$REPO/pulls/$PR/comments" --paginate -q '.[] | "\(.id)|\(.path):\(.original_line // "?")|\(.user.login):\(.body | gsub("\n"; " "))"' 2>/dev/null)
 
           # PR全体コメントを検出
           while IFS= read -r line; do
@@ -57,7 +57,7 @@ agents:
               echo "$ID" >> "$STATE_FILE"
               echo "PR_COMMENT:$(echo "$line" | cut -d'|' -f2-)"
             fi
-          done < <(gh pr view $PR --repo $REPO --json comments -q '.comments[] | "\(.id)|\(.author.login):\(.body)"' 2>/dev/null)
+          done < <(gh pr view $PR --repo $REPO --json comments -q '.comments[] | "\(.id)|\(.author.login):\(.body | gsub("\n"; " "))"' 2>/dev/null)
 
           CURR_COUNT=$(wc -l < "$STATE_FILE" 2>/dev/null || echo 0)
           if [ "$CURR_COUNT" -gt "$PREV_COUNT" ]; then
