@@ -139,6 +139,16 @@ for (const [agentName, config] of Object.entries(agents)) {
   step(`Installing skills for ${agentName}...`);
   fs.mkdirSync(dest, { recursive: true });
 
+  // リポジトリに存在しない stale スキルディレクトリを削除する
+  if (fs.existsSync(dest)) {
+    for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
+      if (entry.isDirectory() && !skillDirs.includes(entry.name)) {
+        fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
+        ok(`removed stale skill: ${entry.name}`);
+      }
+    }
+  }
+
   // SCRIPTS_PATH はインストール先から絶対パスで計算する
   const substitutions = Object.assign({}, config.substitutions, {
     SCRIPTS_PATH: path.join(dest, 'gh-maestro-orchestrator', 'scripts'),
@@ -196,8 +206,16 @@ step('Installing shared scripts...');
 const sharedDest = expandHome('~/.gh-maestro/scripts');
 fs.mkdirSync(sharedDest, { recursive: true });
 const scriptsDir = path.join(ROOT, 'scripts');
-const assetScripts = fs.readdirSync(scriptsDir)
-  .filter(f => f.endsWith('.js') && f !== 'gh-maestro-install.js');
+const assetScripts = new Set(
+  fs.readdirSync(scriptsDir).filter(f => f.endsWith('.js') && f !== 'gh-maestro-install.js')
+);
+// stale ファイルを削除
+for (const f of fs.readdirSync(sharedDest)) {
+  if (!assetScripts.has(f)) {
+    fs.unlinkSync(path.join(sharedDest, f));
+    ok(`removed stale script: ${f}`);
+  }
+}
 for (const script of assetScripts) {
   fs.copyFileSync(path.join(scriptsDir, script), path.join(sharedDest, script));
   ok(`${script} -> ${sharedDest}`);
