@@ -72,10 +72,10 @@ agents:
 
         2. **直ちにMonitorツールを呼び出し**、上記バックグラウンドプロセスを監視する。他のツールを呼んではならない。
 
-        3. Monitorから届く通知を処理する：
-           - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → コメントトリアージを実行する
-           - `PR_COMMENT:<user>:<body>` → 同様にトリアージする
-           - `PR_MERGED:<PR番号>` → マージ完了。自律的に次のフローへ進む
+        3. Monitorから届く通知を処理する。`PR_MERGED` を受け取るまでこのループを続ける：
+           - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → コメントトリアージを実行する。**完了後は直ちにMonitorに戻る**
+           - `PR_COMMENT:<user>:<body>` → 同様にトリアージする。**完了後は直ちにMonitorに戻る**
+           - `PR_MERGED:<PR番号>` → マージ完了。自律的に次のフローへ進む（ループ終了）
   agy:
     skill_files_install_destination_directory: ~/.gemini/antigravity-cli/skills
     skill_markdown_template_placeholder_substitutions:
