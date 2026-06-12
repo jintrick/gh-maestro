@@ -79,32 +79,22 @@ git show "${COMMIT}:<path>" | wc -l
 
 ### インラインコメント（ファイル・行を特定できる指摘）
 
-**Writeツール**でJSONファイルを直接作成し、シェルには`gh api --input`だけ渡す。
-シェル経由でJSONを生成してはならない（バッククォート等の特殊文字が破壊される）。
+Writeツールで `/tmp/gh-review-<PR>.json` を作成し、投稿する：
 
-1. Writeツールで `/tmp/gh-review-<PR>.json` を作成する：
+```bash
+node "$HOME/.gh-maestro/scripts/post-review.js" <PR> /tmp/gh-review-<PR>.json
+```
+
+JSON形式（バッククォートはエスケープ不要）：
 
 ```json
 {
   "event": "COMMENT",
   "body": "## Resilience & Security Review\n\n<全体サマリ>",
   "comments": [
-    {
-      "path": "src/file.ts",
-      "line": 42,
-      "side": "RIGHT",
-      "body": "**BLOCKER**: <1行要約>\n\n- 根拠: <なぜ障害が起きるか>\n- 失敗シナリオ: <具体的な障害シナリオ>\n- 最小修正案: <最小限の修正>"
-    }
+    { "path": "src/file.ts", "line": 42, "side": "RIGHT", "body": "**BLOCKER**: ..." }
   ]
 }
-```
-
-JSONの文字列値にバッククォートが含まれる場合、エスケープ不要（` のまま記述する）。
-
-2. Bashで投稿する：
-
-```bash
-gh api repos/{owner}/{repo}/pulls/<PR>/reviews --input /tmp/gh-review-<PR>.json
 ```
 
 ファイル・行を特定できる指摘は必ずインラインコメントを使うこと。

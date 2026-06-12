@@ -200,6 +200,11 @@ fs.mkdirSync(sharedDest, { recursive: true });
 fs.copyFileSync(setupSrc, path.join(sharedDest, 'gh-maestro-setup.js'));
 ok(`gh-maestro-setup.js -> ${sharedDest}`);
 
+const postReviewSrc = path.join(ROOT, 'scripts', 'post-review.js');
+if (!fs.existsSync(postReviewSrc)) fail('scripts/post-review.js not found');
+fs.copyFileSync(postReviewSrc, path.join(sharedDest, 'post-review.js'));
+ok(`post-review.js -> ${sharedDest}`);
+
 step('Installing default review policy...');
 const reviewPolicySrc = path.join(ROOT, 'assets', 'review-policy.md');
 if (!fs.existsSync(reviewPolicySrc)) fail('assets/review-policy.md not found');
