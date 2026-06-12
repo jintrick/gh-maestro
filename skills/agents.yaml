@@ -7,7 +7,16 @@ agents:
         `run_in_background: true` でBashを実行し、Monitorツールで完了を検知する。
 
         ```sh
-        PR=""; until PR=$(gh pr list --repo $REPO --search "Closes #$ISSUE" --state open --json number -q '.[0].number' 2>/dev/null) && [ -n "$PR" ]; do sleep {{POLL_INTERVAL_SECONDS}}; done && echo "PR_DETECTED:$PR"
+        PR=""
+        until [ -n "$PR" ]; do
+          # 1. ブランチ名パターンで検索（issue-<N>-* 形式のブランチ）
+          PR=$(gh pr list --repo $REPO --search "head:issue-${ISSUE}" --state open --json number -q '.[0].number' 2>/dev/null)
+          # 2. フォールバック: PR本文に "#<N>" を含むPRを検索
+          [ -n "$PR" ] || PR=$(gh pr list --repo $REPO --state open --json number,body \
+            -q ".[] | select(.body | strings | contains(\"#${ISSUE}\")) | .number" 2>/dev/null | head -1)
+          [ -n "$PR" ] || sleep {{POLL_INTERVAL_SECONDS}}
+        done
+        echo "PR_DETECTED:$PR"
         ```
       POLL_MECHANISM: |
         `run_in_background: true` でBashを実行し、Monitorツールで検知する。このスクリプトはマージされるまで永続的に実行する。
@@ -59,7 +68,10 @@ agents:
       PR_DETECTION_MECHANISM: |
         `invoke_subagent` でポーリングサブエージェントを起動し、完了時に `send_message` で親へ通知させる。
 
-        サブエージェントへの指示：「`gh pr list --repo $REPO --search "Closes #$ISSUE" --state open --json number -q '.[0].number'` を {{POLL_INTERVAL_SECONDS}}秒おきに実行し、PR番号が取得できたら `send_message` で "PR_DETECTED:<PR番号>" を親に送信する。」
+        サブエージェントへの指示：「以下を {{POLL_INTERVAL_SECONDS}}秒おきに繰り返し、PR番号が取得できたら `send_message` で "PR_DETECTED:<PR番号>" を親に送信して終了する。
+        1. まずブランチ名パターンで検索: `gh pr list --repo $REPO --search "head:issue-${ISSUE}" --state open --json number -q '.[0].number'`
+        2. 見つからなければ本文検索: `gh pr list --repo $REPO --state open --json number,body -q '.[] | select(.body | strings | contains("#$ISSUE")) | .number'`
+        注意: `--search "Closes #$ISSUE"` はGitHubの非同期インデックスに依存するため使わないこと。」
       POLL_MECHANISM: |
         `invoke_subagent` でポーリングサブエージェントを起動し、完了時に `send_message` で親へ通知させる。このサブエージェントはマージされるまで永続的に実行する。
 
