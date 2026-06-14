@@ -46,13 +46,41 @@ chmod +x gh-maestro-install.sh
 あなた: 「ログイン機能を追加したい」
 orchestrator: Issue を起草・作成
 orchestrator → coder 起動・実装 → PR 作成
-orchestrator → reviewer 起動・レビュー → あなたにマージを依頼
+CI: AI Code Review が自動実行（正確性・保守性・堅牢性）
+orchestrator: レビュー結果をトリアージ → あなたにマージを依頼
 
 # バグ調査の場合
 あなた: 「Issue #12 のバグを調査してほしい」
 orchestrator → investigator 起動・根本原因/影響範囲/修正方針を報告
 orchestrator: 調査結果をあなたに提示 → 対応方針を判断
 ```
+
+## AI Code Review CI
+
+PR作成時に3種のAIレビュワーが GitHub Actions 上で自動実行される。
+
+| ワークフロー | 観点 |
+|---|---|
+| `reviewer-correctness` | 不変条件・境界値・状態遷移・API互換性・認可 |
+| `reviewer-maintainability` | 命名・lint抑制・アンチパターン・複雑性・責務分離 |
+| `reviewer-resilience` | 異常系・非同期・セキュリティ脆弱性・外部障害耐性 |
+
+エンジンは `deepseek-v4-flash`（DeepSeek Anthropic互換API）。`DEEPSEEK_API_KEY` シークレットのみ必要。
+
+### ターゲットリポジトリへの導入
+
+```sh
+# Windows
+.\scripts\setup-ai-review.ps1 -Repo <owner/repo>
+
+# Linux / macOS
+./scripts/setup-ai-review.sh <owner/repo>
+```
+
+以下を自動で実行する：
+
+1. `.github/workflows/ai-review.yml` をターゲットリポジトリに配置
+2. `DEEPSEEK_API_KEY` が未設定なら `gh secret set` を実行（値の貼り付けを促す）
 
 ## スキルの構造
 
