@@ -9,4 +9,4 @@
     Run once. Re-run to update after pulling new versions.
 #>
 
-node "$PSScriptRoot\scripts\gh-maestro-install.js"
+node "$PSScriptRoot\gh-maestro-install.js"

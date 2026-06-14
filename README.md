@@ -26,11 +26,10 @@ cd gh-maestro
 
 ```sh
 # Windows
-.\gh-maestro-install.ps1
+.\scripts\gh-maestro-install.ps1
 
 # Linux / macOS
-chmod +x gh-maestro-install.sh
-./gh-maestro-install.sh
+./scripts/gh-maestro-install.sh
 ```
 
 ## 使い方
