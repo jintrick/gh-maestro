@@ -307,6 +307,8 @@ If the repository root contains an [`aw.yml` manifest](/gh-aw/reference/aw-yml-p
 
 **`--approve` flag:** When compiling a workflow that already has a lock file, the compiler enforces *safe update mode* — any newly added secrets or custom actions not present in the previous manifest require explicit approval. Pass `--approve` to accept these changes and regenerate the manifest baseline. On first compile (no existing lock file), enforcement is skipped automatically and `--approve` is not needed.
 
+**[注記] 出力先と `uses:` 参照の関係:** デフォルト（`--dir` 未指定）では `.github/workflows/` 内の `.md` ファイルをコンパイルし、`.lock.yml` を同ディレクトリに生成する。`-d workflows` のように別ディレクトリを指定した場合、`.lock.yml` はそのディレクトリに生成されるが、`uses: owner/repo/.github/workflows/foo.yml@main` で参照するには `.github/workflows/foo.yml` として配置する必要がある。そのため `-d` を使う場合は生成された `.lock.yml` を手動で `.github/workflows/*.yml` にコピーしてからコミットすること。
+
 **Error Reporting:** Displays detailed error messages with file paths, line numbers, column positions, and contextual code snippets.
 
 **JSON Output (`--json`):** Emits an array of `ValidationResult` objects. Each result includes a `labels` field listing all repository labels referenced in safe-outputs (`create-issue.labels`, `create-discussion.labels`, `create-pull-request.labels`, `add-labels.allowed`). Use `--json --no-emit` to collect label references without writing compiled files.

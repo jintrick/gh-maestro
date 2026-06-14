@@ -15,6 +15,9 @@ The [`safe-outputs:`](/gh-aw/reference/glossary/#safe-outputs) (validated GitHub
 
 Safe outputs enforce security through separation: agents run read-only and request actions via structured output, while separate permission-controlled jobs execute those requests. This provides least privilege, defense against prompt injection, auditability, and controlled limits per operation.
 
+> **[注記] `pull-requests: write` はエージェントジョブに一切許可されない**
+> `strict: false` を設定してもこの制約は解除されない。`strict` はネットワーク設定やアクションピン等の検証レベルを緩めるものであり、エージェントジョブへの write 権限付与とは別の概念。PRへの書き込み（レビュー投稿・コメント等）はすべて safe-outputs（`submit-pull-request-review`、`create-pull-request-review-comment`、`add-comment` 等）経由で行うこと。
+
 When no `safe-outputs:` section is present (or when only [system types](#system-types-auto-enabled) are configured), `create-issue` is automatically enabled with conservative defaults (`max: 1`, labels and title-prefix set to the workflow ID). To opt out, add an explicit `safe-outputs:` section with the outputs you want.
 
 Example:
