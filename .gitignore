@@ -3,3 +3,11 @@ node_modules/
 *.log
 .agents/
 .gemini/
+
+# gh-maestro runtime (review-policy.md はプロジェクト設定なので除外)
+.gh-maestro/workers.json
+.gh-maestro/session.json
+.gh-maestro/viewer-pane
+.gh-maestro/worktrees/
+
+.gh-maestro/

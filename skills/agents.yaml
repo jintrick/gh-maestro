@@ -3,17 +3,46 @@ agents:
     skill_files_install_destination_directory: ~/.claude/skills
     skill_markdown_template_placeholder_substitutions:
       POLL_INTERVAL_SECONDS: 30
-      POLL_MECHANISM: |
-        `run_in_background: true` でBashを実行し、Monitorツールで完了を検知する。
+      PR_DETECTION_MECHANISM: |
+        以下を順番に実行する：
 
-        ```sh
-        until gh pr view <PR_NUMBER> --repo $REPO --json state -q '.state' 2>/dev/null | grep -q "MERGED"; do sleep {{POLL_INTERVAL_SECONDS}}; done && echo "PR_MERGED:<PR_NUMBER>"
-        ```
+        1. `run_in_background: true` で実行する：
+           `node "$HOME/.gh-maestro/scripts/poll-pr.js" $ISSUE`
+
+        2. **直ちにMonitorツールを呼び出し**、上記バックグラウンドプロセスを監視する。他のツールを呼んではならない。
+
+        3. `PR_DETECTED:<PR番号>` を受け取ったらPR番号を記録してレビュー監視に移行する。
+      POLL_MECHANISM: |
+        以下を順番に実行する：
+
+        1. `run_in_background: true` で実行する：
+           `node "$HOME/.gh-maestro/scripts/poll-reviews.js" $PR $WORKSPACE`
+
+        2. **直ちにMonitorツールを呼び出し**、上記バックグラウンドプロセスを監視する。他のツールを呼んではならない。
+
+        3. Monitorから届く通知を処理する。`PR_MERGED` を受け取るまでこのループを続ける：
+           - `REVIEW_COMMENT:...` → コメントトリアージを実行する。**完了後は直ちにMonitorに戻る**
+           - `PR_COMMENT:...` → 同様にトリアージする。**完了後は直ちにMonitorに戻る**
+           - `PR_MERGED:<PR番号>` → マージ完了。自律的に次のフローへ進む（ループ終了）
   agy:
     skill_files_install_destination_directory: ~/.gemini/antigravity-cli/skills
     skill_markdown_template_placeholder_substitutions:
       POLL_INTERVAL_SECONDS: 30
-      POLL_MECHANISM: |
+      PR_DETECTION_MECHANISM: |
         `invoke_subagent` でポーリングサブエージェントを起動し、完了時に `send_message` で親へ通知させる。
 
-        サブエージェントへの指示：「`gh pr view <PR_NUMBER> --repo $REPO --json state -q '.state'` を {{POLL_INTERVAL_SECONDS}}秒おきに実行し、状態が MERGED になったら `send_message` で "PR_MERGED:<PR_NUMBER>" を親に送る。」
+        サブエージェントへの指示：「以下を {{POLL_INTERVAL_SECONDS}}秒おきに繰り返し、PR番号が取得できたら `send_message` で "PR_DETECTED:<PR番号>" を親に送信して終了する。
+        1. まずブランチ名パターンで検索: `gh pr list --repo $REPO --search "head:issue-${ISSUE}" --state open --json number -q '.[0].number'`
+        2. 見つからなければ本文検索: `gh pr list --repo $REPO --state open --json number,body -q '.[] | select(.body | strings | contains("#$ISSUE")) | .number'`
+        注意: `--search "Closes #$ISSUE"` はGitHubの非同期インデックスに依存するため使わないこと。」
+      POLL_MECHANISM: |
+        `invoke_subagent` でポーリングサブエージェントを起動し、完了時に `send_message` で親へ通知させる。このサブエージェントはマージされるまで永続的に実行する。
+
+        サブエージェントへの指示：
+        「以下のループを実行する。STATE_FILEとして `$WORKSPACE/.gh-maestro/poll-state-$PR` を使用し、既知のコメントIDを管理する。
+        1. `gh pr view $PR --repo $REPO --json state -q '.state'` を {{POLL_INTERVAL_SECONDS}}秒おきに実行する
+        2. stateが MERGED になったら `send_message` で "PR_MERGED:$PR" を親に送り、終了する
+        3. `gh api "/repos/$REPO/pulls/$PR/comments" --paginate` でインラインレビューコメントを取得し、新規のものがあれば `send_message` で "REVIEW_COMMENT:<path>:<line>:<user>:<body>" を親に送信し、コメントIDをSTATE_FILEに記録する
+        4. `gh pr view $PR --repo $REPO --json comments` でPR全体コメントを取得し、同様に新規分を通知する
+        5. 新しいコメントがなければポーリング間隔を1.5倍に伸ばす（最大300秒）。あればリセットする
+        ※ このサブエージェントはマージが検出されるまで終了しない」

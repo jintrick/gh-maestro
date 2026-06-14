@@ -221,19 +221,7 @@ if (!issue && prompt) contextLines.push(`TASK=${prompt}`);
 if (baseBranch) contextLines.push(`BASE_BRANCH=${baseBranch}`);
 const extra = prompt ? `\n${prompt}` : '';
 
-// レビュワーの場合はレビューポリシーを初期プロンプトに埋め込む
-let reviewPolicySection = '';
-if (skill === 'gh-maestro-reviewer') {
-  const home = process.env.HOME || process.env.USERPROFILE;
-  const globalPolicyPath  = resolve(home, '.gh-maestro', 'review-policy.md');
-  const projectPolicyPath = resolve(workspace, '.gh-maestro', 'review-policy.md');
-  const sections = [];
-  if (existsSync(globalPolicyPath))  sections.push(readFileSync(globalPolicyPath,  'utf8').trim());
-  if (existsSync(projectPolicyPath)) sections.push('---\n\n## プロジェクト固有ポリシー\n\n' + readFileSync(projectPolicyPath, 'utf8').trim());
-  if (sections.length > 0) reviewPolicySection = `\n\n## レビューポリシー\n\n${sections.join('\n\n')}`;
-}
-
-const initialPrompt = `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。${extra}\n\n以下の変数が与えられています：\n${contextLines.join('\n')}${reviewPolicySection}\n\nこの件に関する質問・報告はチャットに出力せず、orchestratorまでお願いします。「～を実装します」「着手しました」などの着手報告も不要です。`;
+const initialPrompt = `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。${extra}\n\n以下の変数が与えられています：\n${contextLines.join('\n')}\n\nこの件に関する質問・報告はチャットに出力せず、orchestratorまでお願いします。「～を実装します」「着手しました」などの着手報告も不要です。`;
 
 // --- WezTerm ペイン分割 + agy 直接起動（シェルを介さずargvで渡すことで改行等のエスケープ問題を回避） ---
 const agyCmdArgs = ['agy', '--dangerously-skip-permissions', '-i', initialPrompt];
