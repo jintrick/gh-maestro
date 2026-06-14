@@ -3,4 +3,4 @@
 # Run once. Re-run to update after pulling new versions.
 set -euo pipefail
 
-node "$(dirname "$0")/gh-maestro-install.js"
+node "$(dirname "$0")/install.js"
