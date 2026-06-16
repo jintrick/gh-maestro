@@ -13,7 +13,7 @@ const { execFileSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const { parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter } =
-  require('../scripts/gh-maestro-install.js');
+  require('../scripts/install.js');
 
 // ── ユーティリティ関数のユニットテスト ──────────────────────────────────────
 
