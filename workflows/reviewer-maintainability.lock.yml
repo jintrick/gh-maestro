@@ -1746,6 +1746,10 @@ jobs:
           name: ${{ needs.agent.outputs.artifact_prefix }}detection
           path: /tmp/gh-aw/threat-detection/detection.log
           if-no-files-found: ignore
+      - name: Normalize detection log markdown
+        if: always() && steps.detection_guard.outputs.run_detection == 'true'
+        run: |
+          sed -i 's/**THREAT_DETECTION_RESULT:/THREAT_DETECTION_RESULT:/g; s/}**"/}"/g' /tmp/gh-aw/threat-detection/detection.log || true
       - name: Parse and conclude threat detection
         id: detection_conclusion
         if: always()
