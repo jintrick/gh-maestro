@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS]
-// Polls for review comments and merge status. Emits:
+// Polls for review comments, commit pushes, and merge status. Emits:
 //   REVIEW_COMMENT:<path>:<line>|<user>:<body>
 //   PR_COMMENT:<user>:<body>
+//   PR_PUSH:<sha>
 //   PR_MERGED:<PR>
 'use strict';
 
@@ -26,6 +27,7 @@ const stateDir = path.join(workspace || process.cwd(), '.gh-maestro');
 fs.mkdirSync(stateDir, { recursive: true });
 const stateFile = path.join(stateDir, `poll-state-${pr}`);
 if (!fs.existsSync(stateFile)) fs.writeFileSync(stateFile, '');
+const shaFile = path.join(stateDir, `poll-sha-${pr}`);
 
 function knownIds() {
   return new Set(fs.readFileSync(stateFile, 'utf8').split('\n').filter(Boolean));
@@ -41,11 +43,22 @@ const commentsJq = `.comments[] | [(.id | tostring), .author.login, (.body | gsu
 (async () => {
   let interval = intervalSec;
   while (true) {
-    const state = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
-      '--json', 'state', '-q', '.state'], { encoding: 'utf8' }).stdout.trim();
+    const prJson = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
+      '--json', 'state,headRefOid', '-q', '[.state, .headRefOid] | join("|")'],
+      { encoding: 'utf8' }).stdout.trim();
+    const [state, headSha] = prJson.split('|');
+
     if (state === 'MERGED') {
       process.stdout.write(`PR_MERGED:${pr}\n`);
       process.exit(0);
+    }
+
+    const prevSha = fs.existsSync(shaFile) ? fs.readFileSync(shaFile, 'utf8').trim() : '';
+    if (headSha && headSha !== prevSha) {
+      fs.writeFileSync(shaFile, headSha);
+      if (prevSha) {
+        process.stdout.write(`PR_PUSH:${headSha}\n`);
+      }
     }
 
     const known = knownIds();
