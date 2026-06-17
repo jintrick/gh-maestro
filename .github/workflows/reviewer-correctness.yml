@@ -70,7 +70,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: "gh-aw-${{ github.workflow }}"
+  group: "gh-aw-reviewer-correctness-${{ github.ref }}"
 
 run-name: "reviewer-correctness"
 
