@@ -17,17 +17,41 @@ function fail(msg, ...hints) {
   process.exit(1);
 }
 
+function run(cmd, args, { capture } = {}) {
+  const r = spawnSync(cmd, args, { cwd: workspaceRoot, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit' });
+  if (r.status !== 0) return null;
+  return capture ? r.stdout.trim() : true;
+}
+
+function getRemoteRepo() {
+  const remoteUrl = run('git', ['config', '--get', 'remote.origin.url'], { capture: true });
+  if (!remoteUrl) return null;
+  const match = remoteUrl.match(/github\.com[:/](.+?\/.+?)(\.git)?$/);
+  return match ? match[1] : null;
+}
+
+// ─── AI Review setup (runs on every invocation until sentinel is written) ─────
+
+const aiReviewSentinel = resolve(workspaceRoot, '.gh-maestro', 'ai-review-ok');
+if (!existsSync(aiReviewSentinel)) {
+  const repoName = getRemoteRepo();
+  if (repoName) {
+    const setupAiReview = resolve(__dirname, 'setup-ai-review.js');
+    if (existsSync(setupAiReview)) {
+      const r = spawnSync(process.execPath, [setupAiReview, repoName], { stdio: 'inherit' });
+      if (r.status === 0) {
+        mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
+        writeFileSync(aiReviewSentinel, '');
+      }
+    }
+  }
+}
+
 // ─── Sentinel check ───────────────────────────────────────────────────────────
 
 const sentinelPath = resolve(workspaceRoot, '.gh-maestro', 'setup-ok');
 if (existsSync(sentinelPath)) {
   process.exit(0);
-}
-
-function run(cmd, args, { capture } = {}) {
-  const r = spawnSync(cmd, args, { cwd: workspaceRoot, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit' });
-  if (r.status !== 0) return null;
-  return capture ? r.stdout.trim() : true;
 }
 
 // ─── 1. 環境チェック ──────────────────────────────────────────────────────────
