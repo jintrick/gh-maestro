@@ -51,6 +51,10 @@ const lockFiles = readdirSync(workflowsDir)
   .filter(f => f.endsWith('.lock.yml'))
   .map(f => ({ name: f, path: resolve(workflowsDir, f) }));
 
+const sourceFiles = readdirSync(workflowsDir)
+  .filter(f => f.endsWith('.md'))
+  .map(f => ({ name: f, path: resolve(workflowsDir, f) }));
+
 if (lockFiles.length === 0) {
   fail(`No .lock.yml files found in ${workflowsDir}`);
 }
@@ -82,6 +86,17 @@ for (const branch of branches) {
       warn(`Failed to deploy ${lf.name} to branch '${branch}'`);
     } else {
       ok(`${lf.name} deployed to ${branch}`);
+    }
+  }
+
+  for (const sf of sourceFiles) {
+    step(`Deploying ${sf.name} to ${repo}@${branch}...`);
+    const srcContent = readFileSync(sf.path, 'utf8');
+    const srcOk = deployFile(repo, branch, `.github/workflows/${sf.name}`, srcContent, `ci: add gh-aw source file ${sf.name}`);
+    if (!srcOk) {
+      warn(`Failed to deploy ${sf.name} to branch '${branch}'`);
+    } else {
+      ok(`${sf.name} deployed to ${branch}`);
     }
   }
 
