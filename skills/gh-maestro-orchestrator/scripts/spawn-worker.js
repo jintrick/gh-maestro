@@ -118,10 +118,25 @@ if (existingWorkers.length === 0) {
   splitFromPaneId = workers[existingWorkers[existingWorkers.length - 1]];
 }
 
+// --- baseBranch をリモートと同期（worktreeが常に最新ベースから分岐するよう保証） ---
+if (baseBranch) {
+  try {
+    execSync(`git fetch origin ${baseBranch}`, { cwd: workspace, stdio: 'pipe' });
+    const cur = execSync('git branch --show-current', { cwd: workspace, encoding: 'utf8' }).trim();
+    if (cur === baseBranch) {
+      try { execSync(`git merge --ff-only origin/${baseBranch}`, { cwd: workspace, stdio: 'pipe' }); }
+      catch (_) { console.warn(`spawn-worker: ローカル ${baseBranch} のff-only更新失敗 — worktreeはorigin/${baseBranch}から分岐します`); }
+    }
+  } catch (e) {
+    console.warn(`spawn-worker: git fetch origin ${baseBranch} 失敗（続行します）: ${e.message.split('\n')[0]}`);
+  }
+}
+
 // --- worktree を作成（staleな残骸があれば先に除去してリトライ） ---
 mkdirSync(resolve(workspace, '.gh-maestro', 'worktrees'), { recursive: true });
+const worktreeStart = baseBranch ? ` "origin/${baseBranch}"` : '';
 try {
-  execSync(`git worktree add "${worktreeDir}" -b "${workerName}"`, { cwd: workspace, stdio: 'inherit' });
+  execSync(`git worktree add "${worktreeDir}" -b "${workerName}"${worktreeStart}`, { cwd: workspace, stdio: 'inherit' });
 } catch (e) {
   console.warn(`spawn-worker: worktree作成失敗: ${e.message.split('\n')[0]} — 残骸を除去してリトライします`);
   // 残骸除去（各ステップの失敗を個別にログ）
@@ -135,7 +150,7 @@ try {
   catch (e2) { console.warn(`  git branch -D: ${e2.message.split('\n')[0]}`); }
   // リトライ
   try {
-    execSync(`git worktree add "${worktreeDir}" -b "${workerName}"`, { cwd: workspace, stdio: 'inherit' });
+    execSync(`git worktree add "${worktreeDir}" -b "${workerName}"${worktreeStart}`, { cwd: workspace, stdio: 'inherit' });
   } catch (e2) {
     fail(`git worktree の作成に失敗しました（残骸除去後もリトライ失敗）: ${e2.message.split('\n')[0]}`);
   }

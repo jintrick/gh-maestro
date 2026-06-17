@@ -66,7 +66,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 - 同時進行中のIssue間でファイル競合が発生していない（競合可能性があれば前のPRがマージされてから次を起票する）
 - `--prompt`には役割とIssue番号のみが含まれ、実装詳細はIssueに記述されている
 - PRのレビューコメントをトリアージし、人間に結果を提示している。マージ判断は人間が行い、マージ後にIssueをクローズしてworktreeを削除している
-- マージ完了後、次のworkerをspawnする前にローカルの`BASE_BRANCH`はリモートと同期している
+- ローカルの`BASE_BRANCH`はリモートと同期している（`spawn-worker.js`起動時に自動でfetch+ff-only更新される。手動gitpullは不要）
 
 **大規模タスクの分割（アンチパターン / 正しいパターン）:**
 
