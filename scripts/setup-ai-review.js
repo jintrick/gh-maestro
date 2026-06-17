@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Deploys ai-review.yml to a target repository (main + dev branches via GitHub API)
+// Deploys ai-review.yml and reviewer-*.lock.yml to a target repository (main + dev branches via GitHub API)
 
 const { spawnSync } = require('child_process');
-const { readFileSync, existsSync } = require('fs');
+const { readFileSync, existsSync, readdirSync } = require('fs');
 const { resolve } = require('path');
 
 const repo = process.argv[2];
@@ -11,7 +11,8 @@ if (!repo || !repo.includes('/')) {
   process.exit(1);
 }
 
-const templatePath = resolve(__dirname, '..', 'workflows', 'caller-template', 'ai-review.yml');
+const workflowsDir = resolve(__dirname, '..', 'workflows');
+const templatePath = resolve(workflowsDir, 'caller-template', 'ai-review.yml');
 
 function step(msg) { console.log(`\x1b[36m[setup-ai-review] ${msg}\x1b[0m`); }
 function ok(msg)   { console.log(`  \x1b[32mv ${msg}\x1b[0m`); }
@@ -31,13 +32,30 @@ function ghApi(apiPath, method, body) {
   return { ok: r.status === 0, data };
 }
 
+function deployFile(repo, branch, targetPath, content, commitMsg) {
+  const contentB64 = Buffer.from(content).toString('base64');
+  const body = { message: commitMsg, content: contentB64, branch };
+  const existing = ghApi(`repos/${repo}/contents/${targetPath}?ref=${branch}`, 'GET');
+  if (existing.ok && existing.data && existing.data.sha) {
+    body.sha = existing.data.sha;
+  }
+  const result = ghApi(`repos/${repo}/contents/${targetPath}`, 'PUT', body);
+  return result.ok;
+}
+
 if (!existsSync(templatePath)) {
   fail(`Template not found: ${templatePath}`);
 }
 
-const content = readFileSync(templatePath, 'utf8');
-const contentB64 = Buffer.from(content).toString('base64');
-const targetPath = '.github/workflows/ai-review.yml';
+const lockFiles = readdirSync(workflowsDir)
+  .filter(f => f.endsWith('.lock.yml'))
+  .map(f => ({ name: f, path: resolve(workflowsDir, f) }));
+
+if (lockFiles.length === 0) {
+  fail(`No .lock.yml files found in ${workflowsDir}`);
+}
+
+const callerContent = readFileSync(templatePath, 'utf8');
 const branches = ['main', 'dev'];
 let deployed = false;
 
@@ -49,25 +67,29 @@ for (const branch of branches) {
   }
 
   step(`Deploying ai-review.yml to ${repo}@${branch}...`);
-
-  const body = { message: 'ci: add AI code review workflow', content: contentB64, branch };
-
-  const existing = ghApi(`repos/${repo}/contents/${targetPath}?ref=${branch}`, 'GET');
-  if (existing.ok && existing.data && existing.data.sha) {
-    body.sha = existing.data.sha;
-  }
-
-  const result = ghApi(`repos/${repo}/contents/${targetPath}`, 'PUT', body);
-  if (!result.ok) {
-    warn(`Failed to deploy ai-review.yml to branch '${branch}' — skipping`);
+  const aiReviewOk = deployFile(repo, branch, '.github/workflows/ai-review.yml', callerContent, 'ci: add AI code review workflow');
+  if (!aiReviewOk) {
+    warn(`Failed to deploy ai-review.yml to branch '${branch}' — skipping branch`);
     continue;
   }
   ok(`ai-review.yml deployed to ${branch}`);
+
+  for (const lf of lockFiles) {
+    step(`Deploying ${lf.name} to ${repo}@${branch}...`);
+    const lockContent = readFileSync(lf.path, 'utf8');
+    const lockOk = deployFile(repo, branch, `.github/workflows/${lf.name}`, lockContent, `ci: add gh-aw lock file ${lf.name}`);
+    if (!lockOk) {
+      warn(`Failed to deploy ${lf.name} to branch '${branch}'`);
+    } else {
+      ok(`${lf.name} deployed to ${branch}`);
+    }
+  }
+
   deployed = true;
 }
 
 if (!deployed) {
-  fail(`Failed to deploy ai-review.yml to any branch of ${repo}`);
+  fail(`Failed to deploy to any branch of ${repo}`);
 }
 
 step('Checking DEEPSEEK_API_KEY secret...');
