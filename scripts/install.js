@@ -255,7 +255,7 @@ if (!userSettings.hooks.UserPromptExpansion) userSettings.hooks.UserPromptExpans
 
 // 既存の gh-maestro エントリを除去（重複防止）
 userSettings.hooks.UserPromptExpansion =
-  userSettings.hooks.UserPromptExpansion.filter(g => g.matcher !== 'gh-maestro');
+  userSettings.hooks.UserPromptExpansion.filter(g => !/gh-maestro/.test(g.matcher ?? ''));
 
 // orchestratorスクリプトのパス（$HOME相対でシェル展開に任せる）
 const claudeSkillsRelToHome = path.relative(
@@ -266,7 +266,7 @@ const orchScripts = `$HOME/${claudeSkillsRelToHome}/gh-maestro-orchestrator/scri
 
 // フックを追加
 userSettings.hooks.UserPromptExpansion.push({
-  matcher: 'gh-maestro',
+  matcher: '^gh-maestro$',
   hooks: [
     {
       type: 'command',
