@@ -206,9 +206,9 @@ step('Installing shared scripts...');
 const sharedDest = expandHome('~/.gh-maestro/scripts');
 fs.mkdirSync(sharedDest, { recursive: true });
 const scriptsDir = path.join(ROOT, 'scripts');
-const INSTALL_EXCLUDE = new Set(['install.js', 'gh-maestro-install.ps1', 'gh-maestro-install.sh', 'gh-maestro-setup.ps1']);
+const INSTALL_EXCLUDE = new Set(['install.js']);
 const assetScripts = new Set(
-  fs.readdirSync(scriptsDir).filter(f => (f.endsWith('.js') || f.endsWith('.ps1') || f.endsWith('.sh')) && !INSTALL_EXCLUDE.has(f))
+  fs.readdirSync(scriptsDir).filter(f => f.endsWith('.js') && !INSTALL_EXCLUDE.has(f))
 );
 // stale ファイルを削除
 for (const f of fs.readdirSync(sharedDest)) {

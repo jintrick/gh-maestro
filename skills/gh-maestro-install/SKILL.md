@@ -8,16 +8,11 @@ gh-maestroのグローバルインストールを実行する。
 ## 手順
 
 1. 現在のディレクトリが gh-maestro リポジトリのルートであることを確認する（`skills/` や `scripts/` が存在するか確認）
-2. OSに応じてインストーラを実行する：
-   - Windows: `.\scripts\gh-maestro-install.ps1`
-   - Linux / macOS: `./scripts/gh-maestro-install.sh`
+2. インストーラを実行する：`node scripts/install.js`
 3. 完了メッセージを確認してユーザーに報告する
 
-## インストール後に使えるコマンド
+## インストール後
 
-ターゲットリポジトリにAIコードレビューCIを導入するには、このスキルと一緒にインストールされた以下のスクリプトを使用する：
-
-- **Windows**: `~/.gh-maestro/scripts/setup-ai-review.ps1 -Repo <owner/repo>`
-- **Linux / macOS**: `~/.gh-maestro/scripts/setup-ai-review.sh <owner/repo>`
-
-ユーザーに上記コマンドを案内すること。
+ターゲットリポジトリへの AI Code Review CI 導入（`ai-review.yml` デプロイ）は、
+対象プロジェクトで `/gh-maestro` を初回起動したときに自動的に実行される。
+手動操作は不要。
