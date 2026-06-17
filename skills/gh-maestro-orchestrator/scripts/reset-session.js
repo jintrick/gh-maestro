@@ -15,6 +15,7 @@ const { existsSync, readFileSync, writeFileSync, rmSync,
 const argv = process.argv.slice(2);
 const get = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
 const workspace = get('--workspace') ?? process.cwd();
+const quiet = argv.includes('--quiet');
 
 const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
 const worktreesDir = resolve(workspace, '.gh-maestro', 'worktrees');
@@ -22,7 +23,7 @@ const IS_WIN = process.platform === 'win32';
 
 const results = { killed: [], skipped: [], worktrees: [], errors: [] };
 
-const log  = (msg) => console.log(`[reset] ${msg}`);
+const log  = (msg) => { if (!quiet) console.log(`[reset] ${msg}`); };
 const warn = (msg) => console.warn(`[reset] ⚠ ${msg}`);
 
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
