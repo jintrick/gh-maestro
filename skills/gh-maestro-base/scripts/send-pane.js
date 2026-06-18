@@ -92,7 +92,9 @@ const POLL_MAX = 15;
 
 for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
   const id = Math.random().toString(36).slice(2, 8);
-  const fullMessage = prefix + message + ` [${id}]`;
+  // --no-paste では \n がそのままEnterになるため、改行を空白に置換してから送信する
+  const flatMessage = (prefix + message).replace(/\n+/g, ' ');
+  const fullMessage = flatMessage + ` [${id}]`;
 
   if (attempt > 1) {
     wez('cli', 'send-text', '--pane-id', paneId, '--no-paste', '\x15'); // 前回分をクリア
