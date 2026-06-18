@@ -13,7 +13,6 @@ const path = require('path');
 
 const [,, pr, workspace, intervalArg] = process.argv;
 const intervalSec = parseInt(intervalArg || '30');
-const maxIntervalSec = 300;
 
 if (!pr) {
   console.error('Usage: poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS]');
@@ -62,7 +61,6 @@ const commentsJq = `.comments[] | [(.id | tostring), .author.login, (.body | gsu
     }
 
     const known = knownIds();
-    let newActivity = false;
 
     const inlineOut = spawnSync('gh', ['api', `repos/${repo}/pulls/${pr}/comments`,
       '--paginate', '-q', inlineJq], { encoding: 'utf8' }).stdout;
@@ -72,7 +70,6 @@ const commentsJq = `.comments[] | [(.id | tostring), .author.login, (.body | gsu
       if (!known.has(id)) {
         recordId(id);
         process.stdout.write(`REVIEW_COMMENT:${line.slice(sep + 1)}\n`);
-        newActivity = true;
       }
     }
 
@@ -84,11 +81,9 @@ const commentsJq = `.comments[] | [(.id | tostring), .author.login, (.body | gsu
       if (!known.has(id)) {
         recordId(id);
         process.stdout.write(`PR_COMMENT:${line.slice(sep + 1)}\n`);
-        newActivity = true;
       }
     }
 
-    interval = newActivity ? intervalSec : Math.min(Math.floor(interval * 1.5), maxIntervalSec);
-    await new Promise(r => setTimeout(r, interval * 1000));
+    await new Promise(r => setTimeout(r, intervalSec * 1000));
   }
 })();
