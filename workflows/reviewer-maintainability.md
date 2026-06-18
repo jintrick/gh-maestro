@@ -109,7 +109,7 @@ git show "${COMMIT}:<path>" | wc -l
 {
   "pull_request_number": ${{ inputs.pr_number }},
   "event": "COMMENT",
-  "body": "## Maintainability Review\n\n<全体サマリ>"
+  "body": "Maintainability Review"
 }
 ```
 
