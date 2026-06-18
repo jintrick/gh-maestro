@@ -225,11 +225,13 @@ const rollbackWorktree = () => {
 };
 
 // --- 初期プロンプトを組み立てる ---
+// パスはbash内で $WORKSPACE として展開されるため、バックスラッシュをスラッシュに統一する
+const toUnix = (p) => p.replace(/\\/g, '/');
 const contextLines = [
   `WORKER_NAME=${workerName}`,
   `REPO=${repo}`,
-  `WORKSPACE=${workspace}`,
-  `WORKTREE=${worktreeDir}`,
+  `WORKSPACE=${toUnix(workspace)}`,
+  `WORKTREE=${toUnix(worktreeDir)}`,
 ];
 if (issue) contextLines.push(`ISSUE=${issue}`);
 if (!issue && prompt) contextLines.push(`TASK=${prompt}`);
