@@ -197,7 +197,9 @@ git show "${COMMIT}:<path>" | wc -l
 
 # 投稿コメントのフォーマット
 
-インラインコメント本文は以下の形式：
+{{#include shared/reviewer-output-policy.md}}
+
+BLOCKERのインラインコメント本文は以下の形式：
 
 ```
 **BLOCKER**: <1行要約>
@@ -205,11 +207,3 @@ git show "${COMMIT}:<path>" | wc -l
 - 失敗シナリオ: <具体的な障害シナリオ>
 - 最小修正案: <最小限の修正>
 ```
-
-```
-**SUGGESTION**: <1行要約>
-- 改善理由: <なぜ改善すべきか>
-- 改善案: <具体的な修正>
-```
-
-指摘がない場合はAPPROVE。1件でもBLOCKERがあれば `requestChanges` は使わず COMMENT で投稿すること（最終判断はorchestratorの責務）。
