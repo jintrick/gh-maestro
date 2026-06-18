@@ -21,7 +21,9 @@ try {
   baseBranch = execSync('git branch --show-current', { encoding: 'utf8' }).trim();
 } catch {}
 
+const unixWorkspace = workspace.replace(/\\/g, '/');
+
 console.log('[gh-maestro session context]');
 console.log(`REPO=${repo}`);
-console.log(`WORKSPACE=${workspace}`);
+console.log(`WORKSPACE=${unixWorkspace}`);
 if (baseBranch) console.log(`BASE_BRANCH=${baseBranch}`);

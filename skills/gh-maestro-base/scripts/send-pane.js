@@ -11,7 +11,9 @@ const { readFileSync, existsSync } = require('fs');
 
 const args = process.argv.slice(2);
 const wsIdx = args.indexOf('--workspace');
-const workspace = wsIdx !== -1 ? args[wsIdx + 1] : null;
+const workspaceArg = wsIdx !== -1 ? args[wsIdx + 1] : null;
+// env var を優先し、なければ --workspace 引数、なければ後方互換パス
+const workspace = process.env.GH_MAESTRO_WORKSPACE ?? workspaceArg ?? null;
 
 // --workspace とその値を除いた残りを解析
 const rest = args.filter((_, i) => i !== wsIdx && i !== wsIdx + 1);
@@ -19,7 +21,7 @@ const [name, ...msgParts] = rest;
 const message = msgParts.join(' ');
 
 if (!name || !message) {
-  console.error('Usage: send-pane.js <worker-name> <message> --workspace <path>');
+  console.error('Usage: send-pane.js <worker-name> <message>');
   process.exit(1);
 }
 
