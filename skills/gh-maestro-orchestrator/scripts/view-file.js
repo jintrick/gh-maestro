@@ -27,8 +27,23 @@ if (!orchPaneId) {
   process.exit(1);
 }
 
-const absPath = resolve(filePath);
-const ghMaestroDir = resolve(workspace, '.gh-maestro');
+// Git Bash の POSIX パス（/tmp/foo, /c/Users/...）を Node.js が扱える Windows パスに変換する。
+// cygpath が使えればそれを優先し、なければ汎用フォールバックで処理する。
+const toWinPath = (p) => {
+  if (!p.startsWith('/')) return p;
+  const r = spawnSync('cygpath', ['-w', p], { encoding: 'utf8' });
+  if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
+  // /c/Users/... → C:\Users\...
+  const drive = p.match(/^\/([a-zA-Z])(\/|$)/);
+  if (drive) return `${drive[1].toUpperCase()}:${p.slice(2).replace(/\//g, '\\')}`;
+  // /tmp/... → %TEMP%\...
+  const temp = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
+  if (p.startsWith('/tmp')) return p.replace('/tmp', temp).replace(/\//g, '\\');
+  return p;
+};
+
+const absPath = resolve(toWinPath(filePath));
+const ghMaestroDir = resolve(toWinPath(workspace), '.gh-maestro');
 const viewerPaneFile = resolve(ghMaestroDir, 'viewer-pane');
 
 // --- アクティブなペインID一覧を取得 ---
@@ -42,11 +57,11 @@ const getAlivePaneIds = () => {
   }
 };
 
-const escapedPath = absPath.replace(/"/g, '\\"');
+const escapedPath = absPath.replace(/\\/g, '/').replace(/"/g, '\\"');
 
 // --- bat の有無を確認してビューアコマンドを決定 ---
 const hasBat = spawnSync('bat', ['--version'], { encoding: 'utf8' }).status === 0;
-const viewCmd = hasBat ? `bat --paging=always "${escapedPath}"` : `cat "${escapedPath}"`;
+const viewCmd = hasBat ? `bat --paging=always --style=plain --theme=ansi "${escapedPath}"` : `cat "${escapedPath}"`;
 
 // --- 既存ビューアペインを確認 ---
 let viewerPaneId = null;

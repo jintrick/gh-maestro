@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // spawn-worker.js
-// ワーカーペインを作成し、worktreeを準備してagyを起動する
+// ワーカーペインを作成し、worktreeを準備してエージェントを起動する
 //
 // Usage:
 //   node spawn-worker.js \
@@ -10,7 +10,8 @@
 //     --description <desc> \
 //     --repo <owner/repo> \
 //     --workspace <path> \
-//     [--base-branch <branch>]
+//     [--base-branch <branch>] \
+//     [--agent <id>]              # ~/.gh-maestro/agents.json のエージェントID（省略時は agy）
 //
 // 標準出力: ワーカー名（例: issue-5-implement / task-investigate-auth）
 
@@ -30,6 +31,7 @@ const description = get('--description');
 const repo        = get('--repo');
 const workspace   = get('--workspace') ?? process.cwd();
 const baseBranch  = get('--base-branch');
+const agentId     = get('--agent') ?? 'agy';
 
 // --- バリデーション ---
 const resetCmd = `node "${resolve(__dirname, 'reset-session.js')}" --workspace "${workspace}"`;
@@ -240,13 +242,36 @@ const extra = prompt ? `\n${prompt}` : '';
 
 const initialPrompt = `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。${extra}\n\n以下の変数が与えられています：\n${contextLines.join('\n')}\n\nこの件に関する質問・報告はチャットに出力せず、orchestratorまでお願いします。「～を実装します」「着手しました」などの着手報告も不要です。`;
 
-// --- WezTerm ペイン分割 + agy 直接起動（シェルを介さずargvで渡すことで改行等のエスケープ問題を回避） ---
-const agyCmdArgs = ['agy', '--dangerously-skip-permissions', '-i', initialPrompt];
-const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...agyCmdArgs];
+// --- agents.json からエージェント設定を解決 ---
+const homedir = process.env.HOME || process.env.USERPROFILE || '';
+const agentsJsonPath = resolve(homedir, '.gh-maestro', 'agents.json');
+let agentConfig = null;
+if (existsSync(agentsJsonPath)) {
+  try {
+    const agents = JSON.parse(readFileSync(agentsJsonPath, 'utf8'));
+    agentConfig = agents.find(a => a.id === agentId) ?? null;
+  } catch (e) {
+    console.warn(`spawn-worker: agents.json のパースに失敗しました: ${e.message}`);
+  }
+}
+if (!agentConfig) {
+  if (agentId !== 'agy') {
+    console.warn(`spawn-worker: エージェント "${agentId}" が agents.json に見つかりません。agy にフォールバックします。`);
+  }
+  agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' };
+}
+const agentCmdArgs = [
+  agentConfig.command,
+  ...agentConfig.extraArgs,
+  ...(agentConfig.promptFlag ? [agentConfig.promptFlag, initialPrompt] : [initialPrompt]),
+];
+
+// --- WezTerm ペイン分割 + エージェント直接起動（シェルを介さずargvで渡すことで改行等のエスケープ問題を回避） ---
+const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...agentCmdArgs];
 const split = spawnSync('wezterm', splitArgs, { encoding: 'utf8' });
 if (split.status !== 0 && splitFromPaneId !== orchPaneId) {
   console.warn(`spawn-worker: ペイン分割失敗: ${split.stderr.trim()} — orchestratorペイン(${orchPaneId})にフォールバックします`);
-  const fallbackArgs = ['cli', 'split-pane', '--bottom', '--cwd', worktreeDir, '--pane-id', orchPaneId, '--', ...agyCmdArgs];
+  const fallbackArgs = ['cli', 'split-pane', '--bottom', '--cwd', worktreeDir, '--pane-id', orchPaneId, '--', ...agentCmdArgs];
   const split2 = spawnSync('wezterm', fallbackArgs, { encoding: 'utf8' });
   if (split2.status === 0) {
     split.status = 0;
