@@ -214,8 +214,10 @@ const rollbackWorktree = () => {
   catch (e) { console.warn(`  rollback: git branch -d 失敗: ${e.message.split('\n')[0]}`); }
 };
 
-// --- 初期プロンプトを組み立てる ---
-// パスはbash内で $WORKSPACE として展開されるため、バックスラッシュをスラッシュに統一する
+// --- 初期プロンプトをファイルに書き出す ---
+// WindowsのspawnSyncは改行を含むargvを正しく渡せないため、argvではなく
+// --append-system-prompt-file でファイル経由で渡す（claude/claude-ds向け）。
+// agyは -i フラグでargv経由（agyが stdin からの読み取りをサポートしていないため）。
 const toUnix = (p) => p.replace(/\\/g, '/');
 const contextLines = [
   `WORKER_NAME=${workerName}`,
@@ -229,6 +231,12 @@ if (baseBranch) contextLines.push(`BASE_BRANCH=${baseBranch}`);
 const extra = prompt ? `\n${prompt}` : '';
 
 const initialPrompt = `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。${extra}\n\n以下の変数が与えられています：\n${contextLines.join('\n')}\n\nこの件に関する質問・報告はチャットに出力せず、orchestratorまでお願いします。「～を実装します」「着手しました」などの着手報告も不要です。`;
+
+const promptDir = resolve(worktreeDir, '.gh-maestro');
+mkdirSync(promptDir, { recursive: true });
+const promptFile = resolve(promptDir, 'prompt.md');
+writeFileSync(promptFile, initialPrompt, 'utf8');
+console.warn(`spawn-worker: プロンプトを ${promptFile} に書き出しました`);
 
 // --- agents.json からエージェント設定を解決 ---
 const homedir = process.env.HOME || process.env.USERPROFILE || '';
@@ -248,11 +256,24 @@ if (!agentConfig) {
   }
   agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' };
 }
-const agentCmdArgs = [
-  agentConfig.command,
-  ...agentConfig.extraArgs,
-  ...(agentConfig.promptFlag ? [agentConfig.promptFlag, initialPrompt] : [initialPrompt]),
-];
+const agentCmdArgs = (() => {
+  if (agentConfig.promptFlag) {
+    // agy: -i フラグでargv経由（改行なしの短い参照プロンプトを渡す）
+    const shortPrompt = `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。詳細は ${promptFile} を参照してください。`;
+    return [
+      agentConfig.command,
+      ...agentConfig.extraArgs,
+      agentConfig.promptFlag, shortPrompt,
+    ];
+  }
+  // claude/claude-ds: --append-system-prompt-file でファイル経由
+  return [
+    agentConfig.command,
+    ...agentConfig.extraArgs,
+    '--append-system-prompt-file', promptFile,
+    `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
+  ];
+})();
 
 // --- WezTerm ペイン分割 + エージェント直接起動（シェルを介さずargvで渡すことで改行等のエスケープ問題を回避） ---
 const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...agentCmdArgs];
