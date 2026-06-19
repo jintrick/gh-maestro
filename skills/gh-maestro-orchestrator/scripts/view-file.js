@@ -7,7 +7,9 @@
 
 const { spawnSync } = require('child_process');
 const { resolve } = require('path');
-const { mkdirSync } = require('fs');
+const { existsSync, readFileSync, writeFileSync, mkdirSync } = require('fs');
+const { randomUUID } = require('crypto');
+const os = require('os');
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
@@ -45,19 +47,27 @@ const toWinPath = (p) => {
 const absPath = resolve(toWinPath(filePath));
 const ghMaestroDir = resolve(toWinPath(workspace), '.gh-maestro');
 
+// viewer pane の同定は pane ID ではなく UUID-named cwd で行う。
+// pane ID は WezTerm 再起動後に再利用される可能性があり一意性が保証されない。
+// 代わりに split-pane --cwd <uuid-dir> で起動し、wezterm cli list の cwd フィールドで検索する。
+// UUID は crypto.randomUUID() で生成するため真に一意。
+const viewerUuidFile = resolve(ghMaestroDir, `viewer-uuid-${orchPaneId}`);
+
 const escapedPath = absPath.replace(/\\/g, '/').replace(/"/g, '\\"');
 
 // --- bat の有無を確認してビューアコマンドを決定 ---
 const hasBat = spawnSync('bat', ['--version'], { encoding: 'utf8' }).status === 0;
 const viewCmd = hasBat ? `bat --paging=always --style=plain --theme=ansi "${escapedPath}"` : `cat "${escapedPath}"`;
 
-// --- viewer pane を探す ---
-// ファイルへの ID 保存は行わない。WezTerm は pane ID を再利用するため、
-// 保存した ID が別ペインを指す可能性を排除できない。
-// 代わりに「オーケストレーターの右隣 = viewer pane」という空間的関係で毎回動的に取得する。
-const getRightPane = () => {
-  const r = spawnSync('wezterm', ['cli', 'get-pane-direction', '--pane-id', orchPaneId, 'Right'], { encoding: 'utf8' });
-  return (r.status === 0 && r.stdout.trim()) ? r.stdout.trim() : null;
+// --- wezterm list から cwd で viewer pane を探す ---
+const findViewerByCwd = (uuid) => {
+  const r = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8' });
+  if (r.status !== 0) return null;
+  let panes;
+  try { panes = JSON.parse(r.stdout); } catch { return null; }
+  const marker = `ghm-viewer-${uuid}`;
+  const found = panes.find(p => (p.cwd || '').replace(/\\/g, '/').includes(marker));
+  return found ? String(found.pane_id) : null;
 };
 
 const send = (paneId, text, noPaste = false) => {
@@ -67,7 +77,12 @@ const send = (paneId, text, noPaste = false) => {
   spawnSync('wezterm', args, { stdio: 'inherit' });
 };
 
-let viewerPaneId = getRightPane();
+// --- 既存 viewer pane を UUID で探す ---
+let viewerPaneId = null;
+if (existsSync(viewerUuidFile)) {
+  const uuid = readFileSync(viewerUuidFile, 'utf8').trim();
+  viewerPaneId = findViewerByCwd(uuid);
+}
 
 if (viewerPaneId) {
   // ペイン再利用: bat/lessが動いていれば q で終了、シェルにいれば q コマンドが走る（エラーは無害）
@@ -76,13 +91,18 @@ if (viewerPaneId) {
   send(viewerPaneId, viewCmd);
   send(viewerPaneId, '\r', true);
 } else {
-  // 新規作成
+  // 新規作成: uuid-named cwd で split し、uuid をファイルに保存
   mkdirSync(ghMaestroDir, { recursive: true });
+
+  const uuid = randomUUID();
+  const viewerCwd = resolve(os.tmpdir(), `ghm-viewer-${uuid}`);
+  mkdirSync(viewerCwd, { recursive: true });
 
   const split = spawnSync('wezterm', [
     'cli', 'split-pane',
     '--right', '--percent', '45',
     '--pane-id', orchPaneId,
+    '--cwd', viewerCwd,
   ], { encoding: 'utf8' });
 
   if (split.status !== 0) {
@@ -91,6 +111,7 @@ if (viewerPaneId) {
   }
 
   viewerPaneId = split.stdout.trim();
+  writeFileSync(viewerUuidFile, uuid, 'utf8');
 
   send(viewerPaneId, viewCmd);
   send(viewerPaneId, '\r', true);
