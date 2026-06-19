@@ -200,6 +200,25 @@ for (const [, config] of Object.entries(agents)) {
   }
 }
 
+// ── lib モジュールを全スキルに配布 ────────────────────────────────────────────
+
+step('Distributing lib modules to all skills...');
+const libModules = ['link-node-modules.js'];
+const libSrc = path.join(ROOT, 'lib');
+for (const [, config] of Object.entries(agents)) {
+  const dest = expandHome(config.dest);
+  for (const skill of recipientSkills) {
+    const destDir = path.join(dest, skill, 'scripts');
+    fs.mkdirSync(destDir, { recursive: true });
+    for (const module of libModules) {
+      const src = path.join(libSrc, module);
+      if (!fs.existsSync(src)) { fail(`${src} not found`); }
+      fs.copyFileSync(src, path.join(destDir, module));
+    }
+    ok(`lib modules -> ${destDir}`);
+  }
+}
+
 // ── Shared scripts & assets ───────────────────────────────────────────────────
 
 step('Installing shared scripts...');

@@ -64,3 +64,39 @@ test('WEZTERM_PANE が未設定だとエラー終了する', () => {
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /WEZTERM_PANE/);
 });
+
+// ── link-node-modules の解決 ──────────────────────────────────────────────────
+
+test('link-node-modules がリポジトリ内パスから解決できる', () => {
+  const nm = path.join(__dirname, '..', 'lib', 'link-node-modules');
+  assert.doesNotThrow(() => {
+    const resolved = require.resolve(nm);
+    assert.ok(resolved.endsWith('link-node-modules.js'));
+  });
+  const mod = require(nm);
+  assert.ok(mod.linkNodeModules);
+  assert.equal(typeof mod.linkNodeModules, 'function');
+});
+
+test('link-node-modules がインストール先と同構造のディレクトリから解決できる', () => {
+  const tmpdir = require('os').tmpdir();
+  const { mkdtempSync, copyFileSync } = require('fs');
+  const { rmSync } = require('fs');
+  const tmp = mkdtempSync(path.join(tmpdir, 'gh-maestro-test-linknm-'));
+  try {
+    const srcNm = path.join(__dirname, '..', 'lib', 'link-node-modules.js');
+    const destNm = path.join(tmp, 'link-node-modules.js');
+    copyFileSync(srcNm, destNm);
+
+    // 別のプロセスで require してキャッシュの影響を排除
+    const verify = spawnSync(process.execPath, ['-e', `
+      const mod = require(${JSON.stringify(destNm)});
+      if (typeof mod.linkNodeModules !== 'function') process.exit(1);
+      console.log('OK');
+    `], { encoding: 'utf8' });
+    assert.equal(verify.status, 0);
+    assert.match(verify.stdout, /^OK/m);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
