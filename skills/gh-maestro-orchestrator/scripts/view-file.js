@@ -44,17 +44,16 @@ const toWinPath = (p) => {
 
 const absPath = resolve(toWinPath(filePath));
 const ghMaestroDir = resolve(toWinPath(workspace), '.gh-maestro');
-const viewerPaneFile = resolve(ghMaestroDir, 'viewer-pane');
 
-// --- アクティブなペインID一覧を取得 ---
-const getAlivePaneIds = () => {
+// viewer-pane ファイルはオーケストレーターペインIDごとに分離する。
+// WezTermはペインIDを再利用するため、単純な生存確認では別ペインへ誤送信する危険がある。
+const viewerPaneFile = resolve(ghMaestroDir, `viewer-pane-${orchPaneId}`);
+
+// --- アクティブなペイン一覧を取得（tab_idも含む） ---
+const getAlivePaneList = () => {
   const r = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8' });
-  if (r.status !== 0) return new Set();
-  try {
-    return new Set(JSON.parse(r.stdout).map(p => String(p.pane_id)));
-  } catch {
-    return new Set();
-  }
+  if (r.status !== 0) return [];
+  try { return JSON.parse(r.stdout); } catch { return []; }
 };
 
 const escapedPath = absPath.replace(/\\/g, '/').replace(/"/g, '\\"');
@@ -64,10 +63,15 @@ const hasBat = spawnSync('bat', ['--version'], { encoding: 'utf8' }).status === 
 const viewCmd = hasBat ? `bat --paging=always --style=plain --theme=ansi "${escapedPath}"` : `cat "${escapedPath}"`;
 
 // --- 既存ビューアペインを確認 ---
+// 生存確認に加え、オーケストレーターと同じタブにあることを検証する。
+// （ペインIDが再利用されて別タブの別ペインに誤送信するのを防ぐ）
 let viewerPaneId = null;
 if (existsSync(viewerPaneFile)) {
   const stored = readFileSync(viewerPaneFile, 'utf8').trim();
-  if (getAlivePaneIds().has(stored)) {
+  const paneList = getAlivePaneList();
+  const orchPane = paneList.find(p => String(p.pane_id) === orchPaneId);
+  const viewerPane = paneList.find(p => String(p.pane_id) === stored);
+  if (viewerPane && orchPane && String(viewerPane.tab_id) === String(orchPane.tab_id)) {
     viewerPaneId = stored;
   }
 }
