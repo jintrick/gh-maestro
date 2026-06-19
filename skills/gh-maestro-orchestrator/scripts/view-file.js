@@ -7,7 +7,7 @@
 
 const { spawnSync } = require('child_process');
 const { resolve } = require('path');
-const { existsSync, readFileSync, writeFileSync, mkdirSync } = require('fs');
+const { mkdirSync } = require('fs');
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
@@ -45,52 +45,38 @@ const toWinPath = (p) => {
 const absPath = resolve(toWinPath(filePath));
 const ghMaestroDir = resolve(toWinPath(workspace), '.gh-maestro');
 
-// viewer-pane ファイルはオーケストレーターペインIDごとに分離する。
-// WezTermはペインIDを再利用するため、単純な生存確認では別ペインへ誤送信する危険がある。
-const viewerPaneFile = resolve(ghMaestroDir, `viewer-pane-${orchPaneId}`);
-
-// --- アクティブなペイン一覧を取得（tab_idも含む） ---
-const getAlivePaneList = () => {
-  const r = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8' });
-  if (r.status !== 0) return [];
-  try { return JSON.parse(r.stdout); } catch { return []; }
-};
-
 const escapedPath = absPath.replace(/\\/g, '/').replace(/"/g, '\\"');
 
 // --- bat の有無を確認してビューアコマンドを決定 ---
 const hasBat = spawnSync('bat', ['--version'], { encoding: 'utf8' }).status === 0;
 const viewCmd = hasBat ? `bat --paging=always --style=plain --theme=ansi "${escapedPath}"` : `cat "${escapedPath}"`;
 
-// --- 既存ビューアペインを確認 ---
-// 生存確認に加え、オーケストレーターと同じタブにあることを検証する。
-// （ペインIDが再利用されて別タブの別ペインに誤送信するのを防ぐ）
-let viewerPaneId = null;
-if (existsSync(viewerPaneFile)) {
-  const stored = readFileSync(viewerPaneFile, 'utf8').trim();
-  const paneList = getAlivePaneList();
-  const orchPane = paneList.find(p => String(p.pane_id) === orchPaneId);
-  const viewerPane = paneList.find(p => String(p.pane_id) === stored);
-  if (viewerPane && orchPane && String(viewerPane.tab_id) === String(orchPane.tab_id)) {
-    viewerPaneId = stored;
-  }
-}
+// --- viewer pane を探す ---
+// ファイルへの ID 保存は行わない。WezTerm は pane ID を再利用するため、
+// 保存した ID が別ペインを指す可能性を排除できない。
+// 代わりに「オーケストレーターの右隣 = viewer pane」という空間的関係で毎回動的に取得する。
+const getRightPane = () => {
+  const r = spawnSync('wezterm', ['cli', 'get-pane-direction', '--pane-id', orchPaneId, 'Right'], { encoding: 'utf8' });
+  return (r.status === 0 && r.stdout.trim()) ? r.stdout.trim() : null;
+};
 
-const send = (text, noPaste = false) => {
-  const args = ['cli', 'send-text', '--pane-id', viewerPaneId];
+const send = (paneId, text, noPaste = false) => {
+  const args = ['cli', 'send-text', '--pane-id', paneId];
   if (noPaste) args.push('--no-paste');
   args.push(text);
   spawnSync('wezterm', args, { stdio: 'inherit' });
 };
 
+let viewerPaneId = getRightPane();
+
 if (viewerPaneId) {
   // ペイン再利用: bat/lessが動いていれば q で終了、シェルにいれば q コマンドが走る（エラーは無害）
-  send('q', true);
-  send('\r', true);
-  send(viewCmd);
-  send('\r', true);
+  send(viewerPaneId, 'q', true);
+  send(viewerPaneId, '\r', true);
+  send(viewerPaneId, viewCmd);
+  send(viewerPaneId, '\r', true);
 } else {
-  // 新規作成: シェルを起動してペインIDを記録
+  // 新規作成
   mkdirSync(ghMaestroDir, { recursive: true });
 
   const split = spawnSync('wezterm', [
@@ -105,8 +91,7 @@ if (viewerPaneId) {
   }
 
   viewerPaneId = split.stdout.trim();
-  writeFileSync(viewerPaneFile, viewerPaneId, 'utf8');
 
-  send(viewCmd);
-  send('\r', true);
+  send(viewerPaneId, viewCmd);
+  send(viewerPaneId, '\r', true);
 }
