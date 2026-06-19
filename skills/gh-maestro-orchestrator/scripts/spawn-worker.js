@@ -16,9 +16,10 @@
 // 標準出力: ワーカー名（例: issue-5-implement / task-investigate-auth）
 
 const { execSync, spawnSync } = require('child_process');
-const { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync,
-        readdirSync, statSync, lstatSync, rmdirSync, rmSync } = require('fs');
+const { existsSync, mkdirSync, readFileSync, writeFileSync,
+        lstatSync, rmdirSync, rmSync } = require('fs');
 const { resolve, relative } = require('path');
+const { linkNodeModules } = require('../../../lib/link-node-modules');
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
@@ -159,43 +160,9 @@ try {
 }
 
 // --- node_modules junctionを作成（最大3階層） ---
-(function linkNodeModules(dir, depth) {
-  if (depth > 3) return;
-  const pkgJson = resolve(dir, 'package.json');
-  if (existsSync(pkgJson)) {
-    const relPath = relative(worktreeDir, dir);
-    const srcModules  = resolve(workspace, relPath, 'node_modules');
-    const destModules = resolve(dir, 'node_modules');
-    if (!existsSync(destModules)) {
-      if (existsSync(srcModules)) {
-        try {
-          symlinkSync(srcModules, destModules, 'junction');
-          console.warn(`spawn-worker: junction作成: ${destModules} → ${srcModules}`);
-        } catch (e) {
-          console.warn(`spawn-worker: junction作成失敗: ${destModules} — ${e.message}`);
-        }
-      } else {
-        console.warn(`spawn-worker: [要対応] ${srcModules} が存在しません。ワークスペースで npm install を実行してください。`);
-      }
-    }
-  }
-  let entries;
-  try {
-    entries = readdirSync(dir);
-  } catch (e) {
-    console.warn(`spawn-worker: readdirSync 失敗: ${dir} — ${e.message}`);
-    return;
-  }
-  for (const entry of entries) {
-    if (entry === 'node_modules' || entry.startsWith('.')) continue;
-    const child = resolve(dir, entry);
-    try {
-      if (statSync(child).isDirectory()) linkNodeModules(child, depth + 1);
-    } catch (e) {
-      console.warn(`spawn-worker: statSync 失敗: ${child} — ${e.message}`);
-    }
-  }
-})(worktreeDir, 0);
+const nmResult = linkNodeModules(worktreeDir, workspace);
+for (const p of nmResult.linked)   console.warn(`spawn-worker: junction作成: ${p}`);
+for (const p of nmResult.missing)  console.warn(`spawn-worker: [要対応] ${p} が存在しません。ワークスペースで npm install を実行してください。`);
 
 // --- worktree のロールバック関数（以降の処理が失敗したときに使う） ---
 const rollbackWorktree = () => {

@@ -4,35 +4,11 @@
 //   2. Replaces the format section in compiled .yml/.lock.yml files
 const fs = require('fs');
 const path = require('path');
+const { parseFrontmatter, extractBody, resolveIncludes } = require('../lib/compile-reviewers-utils');
 
 const ROOT = path.resolve(__dirname, '..');
 const WORKFLOWS_DIR = path.join(ROOT, 'workflows');
 const NAMES = ['reviewer-correctness', 'reviewer-maintainability', 'reviewer-resilience'];
-
-function parseFrontmatter(mdContent) {
-  const parts = mdContent.split(/^---\s*$/m);
-  if (parts.length < 3) return {};
-  const result = {};
-  for (const line of parts[1].split('\n')) {
-    const m = line.match(/^([\w-]+):\s*(.+)$/);
-    if (m) result[m[1]] = m[2].trim();
-  }
-  return result;
-}
-
-function resolveIncludes(body, baseDir) {
-  return body.replace(/\{\{#include ([^}]+)\}\}/g, (_, rel) => {
-    const p = path.join(baseDir, rel.trim());
-    if (!fs.existsSync(p)) throw new Error(`Include not found: ${p}`);
-    return fs.readFileSync(p, 'utf8').trimEnd();
-  });
-}
-
-function extractBody(mdContent) {
-  const parts = mdContent.split(/^---\s*$/m);
-  if (parts.length < 3) throw new Error('Expected two --- delimiters in frontmatter');
-  return parts.slice(2).join('---').trimStart();
-}
 
 for (const name of NAMES) {
   const mdPath = path.join(WORKFLOWS_DIR, `${name}.md`);

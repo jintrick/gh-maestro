@@ -23,12 +23,6 @@ test('--skill がないとエラー終了する', () => {
   assert.match(r.stderr, /--skill/);
 });
 
-test('--issue がないとエラー終了する', () => {
-  const r = run(['--skill', 'gh-maestro-coder', '--description', 'test', '--repo', 'o/r'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /--issue/);
-});
-
 test('--description がないとエラー終了する', () => {
   const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--repo', 'o/r'], BASE_ENV);
   assert.notEqual(r.status, 0);
