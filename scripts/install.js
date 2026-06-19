@@ -228,6 +228,18 @@ const callerTemplateDest = expandHome('~/.gh-maestro/workflows/caller-template')
 syncDir(callerTemplateSrc, callerTemplateDest);
 ok(`workflows/caller-template -> ${callerTemplateDest}`);
 
+step('Installing reviewer workflow files...');
+const workflowsSrc = path.join(ROOT, 'workflows');
+const workflowsDest = expandHome('~/.gh-maestro/workflows');
+for (const f of fs.readdirSync(workflowsSrc)) {
+  if (!f.endsWith('.lock.yml') && !f.endsWith('.md')) continue;
+  const src = path.join(workflowsSrc, f);
+  const dest = path.join(workflowsDest, f);
+  fs.mkdirSync(workflowsDest, { recursive: true });
+  fs.copyFileSync(src, dest);
+  ok(`workflows/${f} -> ${workflowsDest}`);
+}
+
 step('Installing default review policy...');
 const reviewPolicySrc = path.join(ROOT, 'assets', 'review-policy.md');
 if (!fs.existsSync(reviewPolicySrc)) fail('assets/review-policy.md not found');
@@ -235,6 +247,20 @@ const reviewPolicyDest = expandHome('~/.gh-maestro/review-policy.md');
 const reviewPolicyContent = stripFrontmatter(fs.readFileSync(reviewPolicySrc, 'utf8'));
 fs.writeFileSync(reviewPolicyDest, reviewPolicyContent, 'utf8');
 ok(`review-policy.md -> ${expandHome('~/.gh-maestro')}`);
+
+step('Installing default agents config...');
+const agentsConfigPath = expandHome('~/.gh-maestro/agents.json');
+if (!fs.existsSync(agentsConfigPath)) {
+  const defaultAgents = [
+    { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
+    { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
+    { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' },
+  ];
+  fs.writeFileSync(agentsConfigPath, JSON.stringify(defaultAgents, null, 2) + '\n', 'utf8');
+  ok(`agents.json -> ${expandHome('~/.gh-maestro')}`);
+} else {
+  ok(`agents.json already exists — skipping`);
+}
 
 // ── UserPromptExpansion hook を ~/.claude/settings.json に登録 ────────────────
 

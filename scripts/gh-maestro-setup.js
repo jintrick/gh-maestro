@@ -30,10 +30,30 @@ function getRemoteRepo() {
   return match ? match[1] : null;
 }
 
-// ─── AI Review setup (runs on every invocation until sentinel is written) ─────
+// ─── AI Review setup (テンプレートが変わるたびに再デプロイ) ──────────────────
+
+const { createHash } = require('crypto');
+const { readdirSync } = require('fs');
+
+// デプロイ対象の全ファイルをハッシュ（ai-review.yml + *.lock.yml + *.md）
+// ソース: scripts/../workflows/  インストール後: ~/.gh-maestro/scripts/../workflows/（同じ相対パス）
+const workflowsDir = resolve(__dirname, '..', 'workflows');
+function computeDeployHash() {
+  const h = createHash('sha256');
+  const callerTemplate = resolve(workflowsDir, 'caller-template', 'ai-review.yml');
+  if (existsSync(callerTemplate)) h.update(readFileSync(callerTemplate));
+  const files = existsSync(workflowsDir)
+    ? readdirSync(workflowsDir).filter(f => f.endsWith('.lock.yml') || f.endsWith('.md')).sort()
+    : [];
+  for (const f of files) h.update(readFileSync(resolve(workflowsDir, f)));
+  return h.digest('hex').slice(0, 16);
+}
 
 const aiReviewSentinel = resolve(workspaceRoot, '.gh-maestro', 'ai-review-ok');
-if (!existsSync(aiReviewSentinel)) {
+const currentHash = computeDeployHash();
+const savedHash = existsSync(aiReviewSentinel) ? readFileSync(aiReviewSentinel, 'utf8').trim() : null;
+
+if (currentHash !== savedHash) {
   const repoName = getRemoteRepo();
   if (repoName) {
     const setupAiReview = resolve(__dirname, 'setup-ai-review.js');
@@ -41,7 +61,7 @@ if (!existsSync(aiReviewSentinel)) {
       const r = spawnSync(process.execPath, [setupAiReview, repoName], { stdio: 'inherit' });
       if (r.status === 0) {
         mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
-        writeFileSync(aiReviewSentinel, '');
+        writeFileSync(aiReviewSentinel, currentHash);
       }
     }
   }
