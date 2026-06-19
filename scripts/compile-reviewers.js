@@ -9,6 +9,17 @@ const ROOT = path.resolve(__dirname, '..');
 const WORKFLOWS_DIR = path.join(ROOT, 'workflows');
 const NAMES = ['reviewer-correctness', 'reviewer-maintainability', 'reviewer-resilience'];
 
+function parseFrontmatter(mdContent) {
+  const parts = mdContent.split(/^---\s*$/m);
+  if (parts.length < 3) return {};
+  const result = {};
+  for (const line of parts[1].split('\n')) {
+    const m = line.match(/^([\w-]+):\s*(.+)$/);
+    if (m) result[m[1]] = m[2].trim();
+  }
+  return result;
+}
+
 function resolveIncludes(body, baseDir) {
   return body.replace(/\{\{#include ([^}]+)\}\}/g, (_, rel) => {
     const p = path.join(baseDir, rel.trim());
@@ -26,8 +37,11 @@ function extractBody(mdContent) {
 for (const name of NAMES) {
   const mdPath = path.join(WORKFLOWS_DIR, `${name}.md`);
   const mdRaw = fs.readFileSync(mdPath, 'utf8');
+  const frontmatter = parseFrontmatter(mdRaw);
+  const maxTurns = frontmatter['max-turns'] || '30';
   const rawBody = extractBody(mdRaw);
-  const resolvedBody = resolveIncludes(rawBody, WORKFLOWS_DIR);
+  const resolvedBody = resolveIncludes(rawBody, WORKFLOWS_DIR)
+    .replace(/\{\{MAX_TURNS\}\}/g, maxTurns);
 
   const targets = [
     path.join(ROOT, '.github', 'workflows', `${name}.yml`),
@@ -62,7 +76,8 @@ for (const name of NAMES) {
       .map(l => l === '' ? '' : indent + l)
       .join('\n') + '\n          ';
 
-    const result = content.slice(0, fmtIdx) + newSection + content.slice(eofIdx);
+    let result = content.slice(0, fmtIdx) + newSection + content.slice(eofIdx);
+    result = result.replace(/--max-turns \d+/, `--max-turns ${maxTurns}`);
     fs.writeFileSync(target, eol === '\r\n' ? result.replace(/\n/g, '\r\n') : result, 'utf8');
     console.log(`OK: ${target}`);
   }
