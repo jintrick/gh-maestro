@@ -166,11 +166,16 @@ try {
     const relPath = relative(worktreeDir, dir);
     const srcModules  = resolve(workspace, relPath, 'node_modules');
     const destModules = resolve(dir, 'node_modules');
-    if (existsSync(srcModules) && !existsSync(destModules)) {
-      try {
-        symlinkSync(srcModules, destModules, 'junction');
-      } catch (e) {
-        console.warn(`spawn-worker: junction作成スキップ: ${destModules} — ${e.message}`);
+    if (!existsSync(destModules)) {
+      if (existsSync(srcModules)) {
+        try {
+          symlinkSync(srcModules, destModules, 'junction');
+          console.warn(`spawn-worker: junction作成: ${destModules} → ${srcModules}`);
+        } catch (e) {
+          console.warn(`spawn-worker: junction作成失敗: ${destModules} — ${e.message}`);
+        }
+      } else {
+        console.warn(`spawn-worker: [要対応] ${srcModules} が存在しません。ワークスペースで npm install を実行してください。`);
       }
     }
   }
