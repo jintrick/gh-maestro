@@ -315,6 +315,16 @@ fs.mkdirSync(path.dirname(userSettingsPath), { recursive: true });
 fs.writeFileSync(userSettingsPath, JSON.stringify(userSettings, null, 2) + '\n', 'utf8');
 ok(`UserPromptExpansion hook -> ${userSettingsPath}`);
 
+// --- git pre-commit hook (core.hooksPath) を設定 ---
+step('Configuring git pre-commit hook...');
+const { spawnSync: spawnGit } = require('child_process');
+const hookResult = spawnGit('git', ['config', 'core.hooksPath', '.githooks'], { cwd: ROOT, encoding: 'utf8' });
+if (hookResult.status === 0) {
+  ok('git core.hooksPath -> .githooks (npm test runs before each commit)');
+} else {
+  console.log(`  \x1b[33m! git config core.hooksPath 失敗 — 手動で実行: git config core.hooksPath .githooks\x1b[0m`);
+}
+
 console.log('\ngh-maestro installed.\n');
 console.log('Usage:');
 console.log('  1. Open wezterm and navigate to your project root');
