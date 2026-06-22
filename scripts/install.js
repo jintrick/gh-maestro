@@ -302,30 +302,33 @@ if (!userSettings.hooks.UserPromptExpansion) userSettings.hooks.UserPromptExpans
 userSettings.hooks.UserPromptExpansion =
   userSettings.hooks.UserPromptExpansion.filter(g => !/gh-maestro/.test(g.matcher ?? ''));
 
-// orchestratorスクリプトのパス（$HOME相対でシェル展開に任せる）
-const claudeSkillsRelToHome = path.relative(
-  process.env.HOME || process.env.USERPROFILE || '',
-  expandHome(agents['claude'] ? agents['claude'].dest : '~/.claude/skills')
-).replace(/\\/g, '/');
-const orchScripts = `$HOME/${claudeSkillsRelToHome}/gh-maestro-orchestrator/scripts`;
+// orchestratorスクリプトの絶対パス（インストール時に解決し、シェル展開に依存しない）
+const orchScriptsAbs = path.join(
+  expandHome(agents['claude'] ? agents['claude'].dest : '~/.claude/skills'),
+  'gh-maestro-orchestrator', 'scripts'
+);
+const sharedScriptsAbs = expandHome('~/.gh-maestro/scripts');
 
-// フックを追加
+// フックを追加（exec form + ${CLAUDE_PROJECT_DIR} でシェル・OS依存を排除）
 userSettings.hooks.UserPromptExpansion.push({
   matcher: '^gh-maestro$',
   hooks: [
     {
       type: 'command',
-      command: 'node "$HOME/.gh-maestro/scripts/gh-maestro-setup.js"',
+      command: 'node',
+      args: [path.join(sharedScriptsAbs, 'gh-maestro-setup.js')],
       statusMessage: 'gh-maestro 前提条件チェック中...',
     },
     {
       type: 'command',
-      command: `node "${orchScripts}/reset-session.js" --workspace "$(pwd)" --quiet`,
+      command: 'node',
+      args: [path.join(orchScriptsAbs, 'reset-session.js'), '--workspace', '${CLAUDE_PROJECT_DIR}', '--quiet'],
       statusMessage: 'セッションリセット中...',
     },
     {
       type: 'command',
-      command: `node "${orchScripts}/get-context.js"`,
+      command: 'node',
+      args: [path.join(orchScriptsAbs, 'get-context.js')],
     },
   ],
 });
