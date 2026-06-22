@@ -203,7 +203,7 @@ for (const [, config] of Object.entries(agents)) {
 // ── lib モジュールを全スキルに配布 ────────────────────────────────────────────
 
 step('Distributing lib modules to all skills...');
-const libModules = ['link-node-modules.js'];
+const libModules = ['link-node-modules.js', 'win-path.js'];
 const libSrc = path.join(ROOT, 'lib');
 for (const [, config] of Object.entries(agents)) {
   const dest = expandHome(config.dest);

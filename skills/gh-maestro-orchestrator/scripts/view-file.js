@@ -6,10 +6,18 @@
 //   node view-file.js <filepath> [--workspace <path>]
 
 const { spawnSync } = require('child_process');
-const { resolve } = require('path');
+const path = require('path');
+const { resolve } = path;
 const { existsSync, readFileSync, writeFileSync, mkdirSync } = require('fs');
 const { randomUUID } = require('crypto');
 const os = require('os');
+
+// After install: win-path.js is in the same scripts/ dir.
+// In repo: resolve from lib/ at project root.
+const winPathMod = existsSync(path.join(__dirname, 'win-path.js'))
+  ? path.join(__dirname, 'win-path.js')
+  : path.join(__dirname, '..', '..', '..', 'lib', 'win-path.js');
+const { toWinPath } = require(winPathMod);
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
@@ -29,20 +37,6 @@ if (!orchPaneId) {
   process.exit(1);
 }
 
-// Git Bash の POSIX パス（/tmp/foo, /c/Users/...）を Node.js が扱える Windows パスに変換する。
-// cygpath が使えればそれを優先し、なければ汎用フォールバックで処理する。
-const toWinPath = (p) => {
-  if (!p.startsWith('/')) return p;
-  const r = spawnSync('cygpath', ['-w', p], { encoding: 'utf8' });
-  if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
-  // /c/Users/... → C:\Users\...
-  const drive = p.match(/^\/([a-zA-Z])(\/|$)/);
-  if (drive) return `${drive[1].toUpperCase()}:${p.slice(2).replace(/\//g, '\\')}`;
-  // /tmp/... → %TEMP%\...
-  const temp = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
-  if (p.startsWith('/tmp')) return p.replace('/tmp', temp).replace(/\//g, '\\');
-  return p;
-};
 
 const absPath = resolve(toWinPath(filePath));
 const ghMaestroDir = resolve(toWinPath(workspace), '.gh-maestro');
