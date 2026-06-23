@@ -107,6 +107,19 @@ if (!deployed) {
   fail(`Failed to deploy to any branch of ${repo}`);
 }
 
+step('Enabling GitHub Actions PR approval permission...');
+const workflowPerms = ghApi(`repos/${repo}/actions/permissions/workflow`, 'GET');
+const currentDefault = workflowPerms.data?.default_workflow_permissions || 'read';
+const permResult = ghApi(`repos/${repo}/actions/permissions/workflow`, 'PUT', {
+  default_workflow_permissions: currentDefault,
+  can_approve_pull_request_reviews: true,
+});
+if (permResult.ok) {
+  ok('GitHub Actions can now approve pull requests');
+} else {
+  warn('Failed to enable GitHub Actions PR approval — set it manually: repo Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"');
+}
+
 step('Checking DEEPSEEK_API_KEY secret...');
 const secretsList = spawnSync('gh', ['secret', 'list', '--repo', repo], { encoding: 'utf8', stdio: 'pipe' });
 if (secretsList.status === 0 && secretsList.stdout.includes('DEEPSEEK_API_KEY')) {

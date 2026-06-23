@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // spawn-worker.js
-// ワーカーペインを作成し、worktreeを準備してagyを起動する
+// ワーカーペインを作成し、worktreeを準備してエージェントを起動する
 //
 // Usage:
 //   node spawn-worker.js \
@@ -10,14 +10,32 @@
 //     --description <desc> \
 //     --repo <owner/repo> \
 //     --workspace <path> \
-//     [--base-branch <branch>]
+//     [--base-branch <branch>] \
+//     [--agent <id>]              # ~/.gh-maestro/agents.json のエージェントID（省略時は agy）
 //
 // 標準出力: ワーカー名（例: issue-5-implement / task-investigate-auth）
 
 const { execSync, spawnSync } = require('child_process');
-const { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync,
-        readdirSync, statSync, lstatSync, rmdirSync, rmSync } = require('fs');
+const { existsSync, mkdirSync, readFileSync, writeFileSync,
+        lstatSync, rmdirSync, rmSync } = require('fs');
 const { resolve, relative } = require('path');
+// link-node-modules を実行コンテキストに応じて解決する
+// - リポジトリ内実行: skills/gh-maestro-orchestrator/scripts/ → lib/
+// - インストール先:   install.js が同ディレクトリに配布済み
+const { linkNodeModules } = (() => {
+  const candidates = [
+    resolve(__dirname, 'link-node-modules'),
+    resolve(__dirname, '..', '..', '..', 'lib', 'link-node-modules'),
+  ];
+  for (const c of candidates) {
+    try { return require(c); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; }
+  }
+  const msg =
+    `spawn-worker: link-node-modules.js が見つかりません。\n` +
+    `試行パス:\n  ${candidates.join('\n  ')}\n` +
+    `gh-maestro のインストールを再実行してください: git pull && npm install && node scripts/install.js`;
+  throw new Error(msg);
+})();
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
@@ -30,6 +48,7 @@ const description = get('--description');
 const repo        = get('--repo');
 const workspace   = get('--workspace') ?? process.cwd();
 const baseBranch  = get('--base-branch');
+const agentId     = get('--agent') ?? 'agy';
 
 // --- バリデーション ---
 const resetCmd = `node "${resolve(__dirname, 'reset-session.js')}" --workspace "${workspace}"`;
@@ -157,38 +176,9 @@ try {
 }
 
 // --- node_modules junctionを作成（最大3階層） ---
-(function linkNodeModules(dir, depth) {
-  if (depth > 3) return;
-  const pkgJson = resolve(dir, 'package.json');
-  if (existsSync(pkgJson)) {
-    const relPath = relative(worktreeDir, dir);
-    const srcModules  = resolve(workspace, relPath, 'node_modules');
-    const destModules = resolve(dir, 'node_modules');
-    if (existsSync(srcModules) && !existsSync(destModules)) {
-      try {
-        symlinkSync(srcModules, destModules, 'junction');
-      } catch (e) {
-        console.warn(`spawn-worker: junction作成スキップ: ${destModules} — ${e.message}`);
-      }
-    }
-  }
-  let entries;
-  try {
-    entries = readdirSync(dir);
-  } catch (e) {
-    console.warn(`spawn-worker: readdirSync 失敗: ${dir} — ${e.message}`);
-    return;
-  }
-  for (const entry of entries) {
-    if (entry === 'node_modules' || entry.startsWith('.')) continue;
-    const child = resolve(dir, entry);
-    try {
-      if (statSync(child).isDirectory()) linkNodeModules(child, depth + 1);
-    } catch (e) {
-      console.warn(`spawn-worker: statSync 失敗: ${child} — ${e.message}`);
-    }
-  }
-})(worktreeDir, 0);
+const nmResult = linkNodeModules(worktreeDir, workspace);
+for (const p of nmResult.linked)   console.warn(`spawn-worker: junction作成: ${p}`);
+for (const p of nmResult.missing)  console.warn(`spawn-worker: [要対応] ${p} が存在しません。ワークスペースで npm install を実行してください。`);
 
 // --- worktree のロールバック関数（以降の処理が失敗したときに使う） ---
 const rollbackWorktree = () => {
@@ -224,8 +214,10 @@ const rollbackWorktree = () => {
   catch (e) { console.warn(`  rollback: git branch -d 失敗: ${e.message.split('\n')[0]}`); }
 };
 
-// --- 初期プロンプトを組み立てる ---
-// パスはbash内で $WORKSPACE として展開されるため、バックスラッシュをスラッシュに統一する
+// --- 初期プロンプトをファイルに書き出す ---
+// WindowsのspawnSyncは改行を含むargvを正しく渡せないため、argvではなく
+// --append-system-prompt-file でファイル経由で渡す（claude/claude-ds向け）。
+// agyは -i フラグでargv経由（agyが stdin からの読み取りをサポートしていないため）。
 const toUnix = (p) => p.replace(/\\/g, '/');
 const contextLines = [
   `WORKER_NAME=${workerName}`,
@@ -240,13 +232,55 @@ const extra = prompt ? `\n${prompt}` : '';
 
 const initialPrompt = `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。${extra}\n\n以下の変数が与えられています：\n${contextLines.join('\n')}\n\nこの件に関する質問・報告はチャットに出力せず、orchestratorまでお願いします。「～を実装します」「着手しました」などの着手報告も不要です。`;
 
-// --- WezTerm ペイン分割 + agy 直接起動（シェルを介さずargvで渡すことで改行等のエスケープ問題を回避） ---
-const agyCmdArgs = ['agy', '--dangerously-skip-permissions', '-i', initialPrompt];
-const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...agyCmdArgs];
+const promptDir = resolve(worktreeDir, '.gh-maestro');
+mkdirSync(promptDir, { recursive: true });
+const promptFile = resolve(promptDir, 'prompt.md');
+writeFileSync(promptFile, initialPrompt, 'utf8');
+console.warn(`spawn-worker: プロンプトを ${promptFile} に書き出しました`);
+
+// --- agents.json からエージェント設定を解決 ---
+const homedir = process.env.HOME || process.env.USERPROFILE || '';
+const agentsJsonPath = resolve(homedir, '.gh-maestro', 'agents.json');
+let agentConfig = null;
+if (existsSync(agentsJsonPath)) {
+  try {
+    const agents = JSON.parse(readFileSync(agentsJsonPath, 'utf8'));
+    agentConfig = agents.find(a => a.id === agentId) ?? null;
+  } catch (e) {
+    console.warn(`spawn-worker: agents.json のパースに失敗しました: ${e.message}`);
+  }
+}
+if (!agentConfig) {
+  if (agentId !== 'agy') {
+    console.warn(`spawn-worker: エージェント "${agentId}" が agents.json に見つかりません。agy にフォールバックします。`);
+  }
+  agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' };
+}
+const agentCmdArgs = (() => {
+  if (agentConfig.promptFlag) {
+    // agy: -i フラグでargv経由（改行なしの短い参照プロンプトを渡す）
+    const shortPrompt = `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。詳細は ${promptFile} を参照してください。`;
+    return [
+      agentConfig.command,
+      ...agentConfig.extraArgs,
+      agentConfig.promptFlag, shortPrompt,
+    ];
+  }
+  // claude/claude-ds: --append-system-prompt-file でファイル経由
+  return [
+    agentConfig.command,
+    ...agentConfig.extraArgs,
+    '--append-system-prompt-file', promptFile,
+    `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
+  ];
+})();
+
+// --- WezTerm ペイン分割 + エージェント直接起動（シェルを介さずargvで渡すことで改行等のエスケープ問題を回避） ---
+const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...agentCmdArgs];
 const split = spawnSync('wezterm', splitArgs, { encoding: 'utf8' });
 if (split.status !== 0 && splitFromPaneId !== orchPaneId) {
   console.warn(`spawn-worker: ペイン分割失敗: ${split.stderr.trim()} — orchestratorペイン(${orchPaneId})にフォールバックします`);
-  const fallbackArgs = ['cli', 'split-pane', '--bottom', '--cwd', worktreeDir, '--pane-id', orchPaneId, '--', ...agyCmdArgs];
+  const fallbackArgs = ['cli', 'split-pane', '--bottom', '--cwd', worktreeDir, '--pane-id', orchPaneId, '--', ...agentCmdArgs];
   const split2 = spawnSync('wezterm', fallbackArgs, { encoding: 'utf8' });
   if (split2.status === 0) {
     split.status = 0;

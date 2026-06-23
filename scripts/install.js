@@ -200,6 +200,25 @@ for (const [, config] of Object.entries(agents)) {
   }
 }
 
+// ── lib モジュールを全スキルに配布 ────────────────────────────────────────────
+
+step('Distributing lib modules to all skills...');
+const libModules = ['link-node-modules.js', 'win-path.js'];
+const libSrc = path.join(ROOT, 'lib');
+for (const [, config] of Object.entries(agents)) {
+  const dest = expandHome(config.dest);
+  for (const skill of recipientSkills) {
+    const destDir = path.join(dest, skill, 'scripts');
+    fs.mkdirSync(destDir, { recursive: true });
+    for (const module of libModules) {
+      const src = path.join(libSrc, module);
+      if (!fs.existsSync(src)) { fail(`${src} not found`); }
+      fs.copyFileSync(src, path.join(destDir, module));
+    }
+    ok(`lib modules -> ${destDir}`);
+  }
+}
+
 // ── Shared scripts & assets ───────────────────────────────────────────────────
 
 step('Installing shared scripts...');
@@ -228,6 +247,18 @@ const callerTemplateDest = expandHome('~/.gh-maestro/workflows/caller-template')
 syncDir(callerTemplateSrc, callerTemplateDest);
 ok(`workflows/caller-template -> ${callerTemplateDest}`);
 
+step('Installing reviewer workflow files...');
+const workflowsSrc = path.join(ROOT, 'workflows');
+const workflowsDest = expandHome('~/.gh-maestro/workflows');
+for (const f of fs.readdirSync(workflowsSrc)) {
+  if (!f.endsWith('.lock.yml') && !f.endsWith('.md')) continue;
+  const src = path.join(workflowsSrc, f);
+  const dest = path.join(workflowsDest, f);
+  fs.mkdirSync(workflowsDest, { recursive: true });
+  fs.copyFileSync(src, dest);
+  ok(`workflows/${f} -> ${workflowsDest}`);
+}
+
 step('Installing default review policy...');
 const reviewPolicySrc = path.join(ROOT, 'assets', 'review-policy.md');
 if (!fs.existsSync(reviewPolicySrc)) fail('assets/review-policy.md not found');
@@ -235,6 +266,20 @@ const reviewPolicyDest = expandHome('~/.gh-maestro/review-policy.md');
 const reviewPolicyContent = stripFrontmatter(fs.readFileSync(reviewPolicySrc, 'utf8'));
 fs.writeFileSync(reviewPolicyDest, reviewPolicyContent, 'utf8');
 ok(`review-policy.md -> ${expandHome('~/.gh-maestro')}`);
+
+step('Installing default agents config...');
+const agentsConfigPath = expandHome('~/.gh-maestro/agents.json');
+if (!fs.existsSync(agentsConfigPath)) {
+  const defaultAgents = [
+    { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
+    { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
+    { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' },
+  ];
+  fs.writeFileSync(agentsConfigPath, JSON.stringify(defaultAgents, null, 2) + '\n', 'utf8');
+  ok(`agents.json -> ${expandHome('~/.gh-maestro')}`);
+} else {
+  ok(`agents.json already exists — skipping`);
+}
 
 // ── UserPromptExpansion hook を ~/.claude/settings.json に登録 ────────────────
 
@@ -257,30 +302,33 @@ if (!userSettings.hooks.UserPromptExpansion) userSettings.hooks.UserPromptExpans
 userSettings.hooks.UserPromptExpansion =
   userSettings.hooks.UserPromptExpansion.filter(g => !/gh-maestro/.test(g.matcher ?? ''));
 
-// orchestratorスクリプトのパス（$HOME相対でシェル展開に任せる）
-const claudeSkillsRelToHome = path.relative(
-  process.env.HOME || process.env.USERPROFILE || '',
-  expandHome(agents['claude'] ? agents['claude'].dest : '~/.claude/skills')
-).replace(/\\/g, '/');
-const orchScripts = `$HOME/${claudeSkillsRelToHome}/gh-maestro-orchestrator/scripts`;
+// orchestratorスクリプトの絶対パス（インストール時に解決し、シェル展開に依存しない）
+const orchScriptsAbs = path.join(
+  expandHome(agents['claude'] ? agents['claude'].dest : '~/.claude/skills'),
+  'gh-maestro-orchestrator', 'scripts'
+);
+const sharedScriptsAbs = expandHome('~/.gh-maestro/scripts');
 
-// フックを追加
+// フックを追加（exec form + ${CLAUDE_PROJECT_DIR} でシェル・OS依存を排除）
 userSettings.hooks.UserPromptExpansion.push({
   matcher: '^gh-maestro$',
   hooks: [
     {
       type: 'command',
-      command: 'node "$HOME/.gh-maestro/scripts/gh-maestro-setup.js"',
+      command: 'node',
+      args: [path.join(sharedScriptsAbs, 'gh-maestro-setup.js')],
       statusMessage: 'gh-maestro 前提条件チェック中...',
     },
     {
       type: 'command',
-      command: `node "${orchScripts}/reset-session.js" --workspace "$(pwd)" --quiet`,
+      command: 'node',
+      args: [path.join(orchScriptsAbs, 'reset-session.js'), '--workspace', '${CLAUDE_PROJECT_DIR}', '--quiet'],
       statusMessage: 'セッションリセット中...',
     },
     {
       type: 'command',
-      command: `node "${orchScripts}/get-context.js"`,
+      command: 'node',
+      args: [path.join(orchScriptsAbs, 'get-context.js')],
     },
   ],
 });
@@ -288,6 +336,18 @@ userSettings.hooks.UserPromptExpansion.push({
 fs.mkdirSync(path.dirname(userSettingsPath), { recursive: true });
 fs.writeFileSync(userSettingsPath, JSON.stringify(userSettings, null, 2) + '\n', 'utf8');
 ok(`UserPromptExpansion hook -> ${userSettingsPath}`);
+
+// --- git pre-commit hook (core.hooksPath) を設定 ---
+step('Configuring git pre-commit hook...');
+// Unix では実行権限が無いと git がフックを黙ってスキップするため付与する（Windowsでは無視される）。
+try { fs.chmodSync(path.join(ROOT, '.githooks', 'pre-commit'), 0o755); } catch {}
+const { spawnSync: spawnGit } = require('child_process');
+const hookResult = spawnGit('git', ['config', 'core.hooksPath', '.githooks'], { cwd: ROOT, encoding: 'utf8' });
+if (hookResult.status === 0) {
+  ok('git core.hooksPath -> .githooks (npm test runs before each commit)');
+} else {
+  console.log(`  \x1b[33m! git config core.hooksPath 失敗 — 手動で実行: git config core.hooksPath .githooks\x1b[0m`);
+}
 
 console.log('\ngh-maestro installed.\n');
 console.log('Usage:');

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// Usage: node send-pane.js <worker-name> <message> --workspace <path>
+// Usage: node send-pane.js <worker-name> <message> [--workspace <path>]
 //
 // worker-name は .gh-maestro/workers.json で pane-id に解決される。
 // "orchestrator" を指定するとorchestratorペインに送信する。
 // 送信方向に応じて送信者名を自動的にメッセージ先頭に付与する。
+//
+// workspace の解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索
 
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -11,9 +13,7 @@ const { readFileSync, existsSync } = require('fs');
 
 const args = process.argv.slice(2);
 const wsIdx = args.indexOf('--workspace');
-const workspaceArg = wsIdx !== -1 ? args[wsIdx + 1] : null;
-// env var を優先し、なければ --workspace 引数、なければ後方互換パス
-const workspace = process.env.GH_MAESTRO_WORKSPACE ?? workspaceArg ?? null;
+const workspaceArg = (wsIdx !== -1 && args[wsIdx + 1]) ? args[wsIdx + 1] : null;
 
 // --workspace とその値を除いた残りを解析
 const rest = args.filter((_, i) => i !== wsIdx && i !== wsIdx + 1);
@@ -25,15 +25,29 @@ if (!name || !message) {
   process.exit(1);
 }
 
+// CWD から上方に遡って .gh-maestro/workers.json を探す
+function findWorkspaceFromCwd() {
+  let dir = process.cwd();
+  while (true) {
+    const candidate = path.join(dir, '.gh-maestro', 'workers.json');
+    if (existsSync(candidate)) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+const workspace = process.env.GH_MAESTRO_WORKSPACE || workspaceArg || findWorkspaceFromCwd();
+
 // workers.json のパスを解決
 const workersJson = workspace
   ? path.resolve(workspace, '.gh-maestro', 'workers.json')
-  : path.resolve(__dirname, '..', 'workers.json'); // 後方互換
+  : null;
 
 let paneId = name;
 let senderName = null;
 
-if (existsSync(workersJson)) {
+if (workersJson && existsSync(workersJson)) {
   const workers = JSON.parse(readFileSync(workersJson, 'utf8'));
   if (workers[name]) paneId = workers[name];
 
