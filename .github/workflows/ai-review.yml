@@ -10,19 +10,19 @@ permissions:
 
 jobs:
   review-correctness:
-    uses: jintrick/gh-maestro/.github/workflows/reviewer-correctness.yml@main
+    uses: ./.github/workflows/reviewer-correctness.yml
     with:
       pr_number: ${{ github.event.pull_request.number }}
     secrets: inherit
 
   review-maintainability:
-    uses: jintrick/gh-maestro/.github/workflows/reviewer-maintainability.yml@main
+    uses: ./.github/workflows/reviewer-maintainability.yml
     with:
       pr_number: ${{ github.event.pull_request.number }}
     secrets: inherit
 
   review-resilience:
-    uses: jintrick/gh-maestro/.github/workflows/reviewer-resilience.yml@main
+    uses: ./.github/workflows/reviewer-resilience.yml
     with:
       pr_number: ${{ github.event.pull_request.number }}
     secrets: inherit

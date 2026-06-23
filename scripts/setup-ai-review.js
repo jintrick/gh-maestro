@@ -16,6 +16,7 @@ const templatePath = resolve(workflowsDir, 'caller-template', 'ai-review.yml');
 
 function step(msg) { console.log(`\x1b[36m[setup-ai-review] ${msg}\x1b[0m`); }
 function ok(msg)   { console.log(`  \x1b[32mv ${msg}\x1b[0m`); }
+function skip(msg) { console.log(`  \x1b[90m- ${msg}\x1b[0m`); }
 function warn(msg) { console.log(`  \x1b[33m! ${msg}\x1b[0m`); }
 function fail(msg) { console.error(`  \x1b[31mx ${msg}\x1b[0m`); process.exit(1); }
 
@@ -32,15 +33,36 @@ function ghApi(apiPath, method, body) {
   return { ok: r.status === 0, data };
 }
 
+// Returns 'deployed' | 'skipped' | 'failed'
 function deployFile(repo, branch, targetPath, content, commitMsg) {
-  const contentB64 = Buffer.from(content).toString('base64');
+  const normalized = content.replace(/\r\n/g, '\n');
+  const contentB64 = Buffer.from(normalized).toString('base64');
   const body = { message: commitMsg, content: contentB64, branch };
+
   const existing = ghApi(`repos/${repo}/contents/${targetPath}?ref=${branch}`, 'GET');
   if (existing.ok && existing.data && existing.data.sha) {
+    const existingNormalized = Buffer.from(
+      existing.data.content.replace(/\n/g, ''), 'base64'
+    ).toString('utf8').replace(/\r\n/g, '\n');
+    if (existingNormalized === normalized) return 'skipped';
     body.sha = existing.data.sha;
   }
+
   const result = ghApi(`repos/${repo}/contents/${targetPath}`, 'PUT', body);
+  return result.ok ? 'deployed' : 'failed';
+}
+
+function deleteFile(repo, branch, targetPath, sha, commitMsg) {
+  const result = ghApi(`repos/${repo}/contents/${targetPath}`, 'DELETE', {
+    message: commitMsg, sha, branch,
+  });
   return result.ok;
+}
+
+function listWorkflowFiles(repo, branch) {
+  const result = ghApi(`repos/${repo}/contents/.github/workflows?ref=${branch}`, 'GET');
+  if (!result.ok || !Array.isArray(result.data)) return [];
+  return result.data;
 }
 
 if (!existsSync(templatePath)) {
@@ -63,40 +85,50 @@ const callerContent = readFileSync(templatePath, 'utf8');
 const branches = ['main', 'dev'];
 let deployed = false;
 
+const expectedNames = new Set([
+  'ai-review.yml',
+  ...lockFiles.map(f => f.name),
+  ...sourceFiles.map(f => f.name),
+]);
+
 for (const branch of branches) {
   const branchCheck = ghApi(`repos/${repo}/git/ref/heads/${branch}`, 'GET');
   if (!branchCheck.ok) {
-    ok(`Branch '${branch}' not found — skipping`);
+    skip(`Branch '${branch}' not found — skipping`);
     continue;
   }
 
-  step(`Deploying ai-review.yml to ${repo}@${branch}...`);
-  const aiReviewOk = deployFile(repo, branch, '.github/workflows/ai-review.yml', callerContent, 'ci: add AI code review workflow');
-  if (!aiReviewOk) {
-    warn(`Failed to deploy ai-review.yml to branch '${branch}' — skipping branch`);
-    continue;
-  }
-  ok(`ai-review.yml deployed to ${branch}`);
+  step(`Deploying to ${repo}@${branch}...`);
+
+  const aiResult = deployFile(repo, branch, '.github/workflows/ai-review.yml', callerContent, 'ci: update AI code review workflow');
+  if (aiResult === 'failed') { warn(`Failed to deploy ai-review.yml to '${branch}' — skipping branch`); continue; }
+  aiResult === 'skipped' ? skip('ai-review.yml unchanged') : ok('ai-review.yml deployed');
 
   for (const lf of lockFiles) {
-    step(`Deploying ${lf.name} to ${repo}@${branch}...`);
-    const lockContent = readFileSync(lf.path, 'utf8');
-    const lockOk = deployFile(repo, branch, `.github/workflows/${lf.name}`, lockContent, `ci: add gh-aw lock file ${lf.name}`);
-    if (!lockOk) {
-      warn(`Failed to deploy ${lf.name} to branch '${branch}'`);
-    } else {
-      ok(`${lf.name} deployed to ${branch}`);
-    }
+    const content = readFileSync(lf.path, 'utf8');
+    const r = deployFile(repo, branch, `.github/workflows/${lf.name}`, content, `ci: update ${lf.name}`);
+    if (r === 'failed') warn(`Failed to deploy ${lf.name}`);
+    else if (r === 'skipped') skip(`${lf.name} unchanged`);
+    else ok(`${lf.name} deployed`);
   }
 
   for (const sf of sourceFiles) {
-    step(`Deploying ${sf.name} to ${repo}@${branch}...`);
-    const srcContent = readFileSync(sf.path, 'utf8');
-    const srcOk = deployFile(repo, branch, `.github/workflows/${sf.name}`, srcContent, `ci: add gh-aw source file ${sf.name}`);
-    if (!srcOk) {
-      warn(`Failed to deploy ${sf.name} to branch '${branch}'`);
-    } else {
-      ok(`${sf.name} deployed to ${branch}`);
+    const content = readFileSync(sf.path, 'utf8');
+    const r = deployFile(repo, branch, `.github/workflows/${sf.name}`, content, `ci: update ${sf.name}`);
+    if (r === 'failed') warn(`Failed to deploy ${sf.name}`);
+    else if (r === 'skipped') skip(`${sf.name} unchanged`);
+    else ok(`${sf.name} deployed`);
+  }
+
+  // Remove stale reviewer-* files that no longer exist in workflows/
+  const remoteFiles = listWorkflowFiles(repo, branch);
+  for (const file of remoteFiles) {
+    if (!/^reviewer-/.test(file.name)) continue;
+    if (!expectedNames.has(file.name)) {
+      step(`Removing stale ${file.name}...`);
+      const deleted = deleteFile(repo, branch, `.github/workflows/${file.name}`, file.sha, `ci: remove stale workflow ${file.name}`);
+      if (deleted) ok(`Removed stale ${file.name}`);
+      else warn(`Failed to remove stale ${file.name}`);
     }
   }
 

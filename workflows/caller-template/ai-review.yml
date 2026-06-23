@@ -9,8 +9,20 @@ permissions:
   pull-requests: write
 
 jobs:
-  review:
-    uses: jintrick/gh-maestro/.github/workflows/review-entry.yml@main
+  review-correctness:
+    uses: ./.github/workflows/reviewer-correctness.lock.yml
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
+    secrets: inherit
+
+  review-maintainability:
+    uses: ./.github/workflows/reviewer-maintainability.lock.yml
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
+    secrets: inherit
+
+  review-resilience:
+    uses: ./.github/workflows/reviewer-resilience.lock.yml
     with:
       pr_number: ${{ github.event.pull_request.number }}
     secrets: inherit
