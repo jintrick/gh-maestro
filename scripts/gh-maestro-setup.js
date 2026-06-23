@@ -41,11 +41,13 @@ const workflowsDir = resolve(__dirname, '..', 'workflows');
 function computeDeployHash() {
   const h = createHash('sha256');
   const callerTemplate = resolve(workflowsDir, 'caller-template', 'ai-review.yml');
-  if (existsSync(callerTemplate)) h.update(readFileSync(callerTemplate));
+  // utf8 で読み改行を LF に正規化してからハッシュ化する。
+  // Buffer 直読みだと Windows(CRLF)/Unix(LF) でハッシュが変わり毎回再デプロイされる。
+  if (existsSync(callerTemplate)) h.update(readFileSync(callerTemplate, 'utf8').replace(/\r\n/g, '\n'));
   const files = existsSync(workflowsDir)
     ? readdirSync(workflowsDir).filter(f => f.endsWith('.lock.yml') || f.endsWith('.md')).sort()
     : [];
-  for (const f of files) h.update(readFileSync(resolve(workflowsDir, f)));
+  for (const f of files) h.update(readFileSync(resolve(workflowsDir, f), 'utf8').replace(/\r\n/g, '\n'));
   return h.digest('hex').slice(0, 16);
 }
 

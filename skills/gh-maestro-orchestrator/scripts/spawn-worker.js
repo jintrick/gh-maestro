@@ -28,7 +28,7 @@ const { linkNodeModules } = (() => {
     resolve(__dirname, '..', '..', '..', 'lib', 'link-node-modules'),
   ];
   for (const c of candidates) {
-    try { return require(c); } catch {}
+    try { return require(c); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; }
   }
   const msg =
     `spawn-worker: link-node-modules.js が見つかりません。\n` +

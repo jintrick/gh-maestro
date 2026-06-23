@@ -100,7 +100,8 @@ if (viewerPaneId) {
   ], { encoding: 'utf8' });
 
   if (split.status !== 0) {
-    console.error(`view-file: ペイン作成失敗: ${split.stderr.trim()}`);
+    // wezterm 未インストール時は status=null・stderr=null になるため error.message にフォールバックする。
+    console.error(`view-file: ペイン作成失敗: ${(split.stderr || split.error?.message || '').trim()}`);
     process.exit(1);
   }
 
