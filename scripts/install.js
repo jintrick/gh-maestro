@@ -250,12 +250,19 @@ ok(`workflows/caller-template -> ${callerTemplateDest}`);
 step('Installing reviewer workflow files...');
 const workflowsSrc = path.join(ROOT, 'workflows');
 const workflowsDest = expandHome('~/.gh-maestro/workflows');
-for (const f of fs.readdirSync(workflowsSrc)) {
+fs.mkdirSync(workflowsDest, { recursive: true });
+const reviewerFiles = new Set(
+  fs.readdirSync(workflowsSrc).filter(f => f.endsWith('.lock.yml') || f.endsWith('.md'))
+);
+for (const f of fs.readdirSync(workflowsDest)) {
   if (!f.endsWith('.lock.yml') && !f.endsWith('.md')) continue;
-  const src = path.join(workflowsSrc, f);
-  const dest = path.join(workflowsDest, f);
-  fs.mkdirSync(workflowsDest, { recursive: true });
-  fs.copyFileSync(src, dest);
+  if (!reviewerFiles.has(f)) {
+    fs.unlinkSync(path.join(workflowsDest, f));
+    ok(`removed stale workflow: ${f}`);
+  }
+}
+for (const f of reviewerFiles) {
+  fs.copyFileSync(path.join(workflowsSrc, f), path.join(workflowsDest, f));
   ok(`workflows/${f} -> ${workflowsDest}`);
 }
 
