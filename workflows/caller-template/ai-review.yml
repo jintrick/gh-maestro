@@ -1,7 +1,7 @@
 name: AI Code Review
 on:
   pull_request:
-    types: [opened, reopened]
+    types: [opened, synchronize, reopened]
 
 permissions:
   actions: read
@@ -9,23 +9,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  review-correctness:
-    uses: jintrick/gh-maestro/.github/workflows/reviewer-correctness.yml@main
+  review:
+    uses: jintrick/gh-maestro/.github/workflows/review-entry.yml@main
     with:
       pr_number: ${{ github.event.pull_request.number }}
-      aw_context: '{"reviewer_type":"correctness"}'
-    secrets: inherit
-
-  review-maintainability:
-    uses: jintrick/gh-maestro/.github/workflows/reviewer-maintainability.yml@main
-    with:
-      pr_number: ${{ github.event.pull_request.number }}
-      aw_context: '{"reviewer_type":"maintainability"}'
-    secrets: inherit
-
-  review-resilience:
-    uses: jintrick/gh-maestro/.github/workflows/reviewer-resilience.yml@main
-    with:
-      pr_number: ${{ github.event.pull_request.number }}
-      aw_context: '{"reviewer_type":"resilience"}'
     secrets: inherit
