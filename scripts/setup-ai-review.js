@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Deploys ai-review.yml and reviewer-*.lock.yml to a target repository (main + dev branches via GitHub API)
+// Deploys ai-review.yml, reviewer-*.lock.yml, reviewer-*.md, and shared/ files to a target repository
 
 const { spawnSync } = require('child_process');
 const { readFileSync, existsSync, readdirSync } = require('fs');
@@ -12,6 +12,7 @@ if (!repo || !repo.includes('/')) {
 }
 
 const workflowsDir = resolve(__dirname, '..', 'workflows');
+const sharedDir = resolve(__dirname, '..', '.github', 'workflows', 'shared');
 const templatePath = resolve(workflowsDir, 'caller-template', 'ai-review.yml');
 
 function step(msg) { console.log(`\x1b[36m[setup-ai-review] ${msg}\x1b[0m`); }
@@ -77,6 +78,10 @@ const sourceFiles = readdirSync(workflowsDir)
   .filter(f => f.endsWith('.md'))
   .map(f => ({ name: f, path: resolve(workflowsDir, f) }));
 
+const sharedFiles = existsSync(sharedDir)
+  ? readdirSync(sharedDir).map(f => ({ name: f, path: resolve(sharedDir, f) }))
+  : [];
+
 if (lockFiles.length === 0) {
   fail(`No .lock.yml files found in ${workflowsDir}`);
 }
@@ -118,6 +123,14 @@ for (const branch of branches) {
     if (r === 'failed') warn(`Failed to deploy ${sf.name}`);
     else if (r === 'skipped') skip(`${sf.name} unchanged`);
     else ok(`${sf.name} deployed`);
+  }
+
+  for (const sf of sharedFiles) {
+    const content = readFileSync(sf.path, 'utf8');
+    const r = deployFile(repo, branch, `.github/workflows/shared/${sf.name}`, content, `ci: update shared/${sf.name}`);
+    if (r === 'failed') warn(`Failed to deploy shared/${sf.name}`);
+    else if (r === 'skipped') skip(`shared/${sf.name} unchanged`);
+    else ok(`shared/${sf.name} deployed`);
   }
 
   // Remove stale reviewer-* files that no longer exist in workflows/
