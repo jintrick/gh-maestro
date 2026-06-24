@@ -11,12 +11,8 @@ const SHARED    = resolve(ROOT, '.github', 'workflows', 'shared');
 const CALLER    = resolve(WORKFLOWS, 'caller-template', 'ai-review.yml');
 const BRANCHES  = ['main', 'dev'];
 
-// ── CLI ────────────────────────────────────────────────────────────────────
-const repo = process.argv[2];
-if (!repo || !repo.includes('/')) {
-  console.error('Usage: setup-ai-review.js <owner/repo>');
-  process.exit(1);
-}
+// Set by main(); referenced by API functions (only called when require.main === module)
+let repo;
 
 // ── Logging ────────────────────────────────────────────────────────────────
 const log = {
@@ -145,18 +141,29 @@ function checkSecret() {
     : log.warn(`DEEPSEEK_API_KEY not set — run: gh secret set DEEPSEEK_API_KEY --repo ${repo}`);
 }
 
+// ── Exports (for testing) ──────────────────────────────────────────────────
+module.exports = { buildManifest, WORKFLOWS, SHARED, CALLER };
+
 // ── Main ───────────────────────────────────────────────────────────────────
-if (!existsSync(CALLER)) log.fail(`Caller template not found: ${CALLER}`);
+if (require.main === module) {
+  repo = process.argv[2];
+  if (!repo || !repo.includes('/')) {
+    console.error('Usage: setup-ai-review.js <owner/repo>');
+    process.exit(1);
+  }
 
-const manifest = buildManifest();
-if (!manifest.some(e => e.dest.endsWith('.lock.yml'))) {
-  log.fail(`No .lock.yml files found in ${WORKFLOWS}`);
+  if (!existsSync(CALLER)) log.fail(`Caller template not found: ${CALLER}`);
+
+  const manifest = buildManifest();
+  if (!manifest.some(e => e.dest.endsWith('.lock.yml'))) {
+    log.fail(`No .lock.yml files found in ${WORKFLOWS}`);
+  }
+
+  const anyDeployed = BRANCHES.map(b => deployToBranch(b, manifest)).some(Boolean);
+  if (!anyDeployed) log.fail(`Failed to deploy to any branch of ${repo}`);
+
+  enablePrApproval();
+  checkSecret();
+
+  console.log(`\nAI Code Review CI is ready on ${repo}\n`);
 }
-
-const anyDeployed = BRANCHES.map(b => deployToBranch(b, manifest)).some(Boolean);
-if (!anyDeployed) log.fail(`Failed to deploy to any branch of ${repo}`);
-
-enablePrApproval();
-checkSecret();
-
-console.log(`\nAI Code Review CI is ready on ${repo}\n`);
