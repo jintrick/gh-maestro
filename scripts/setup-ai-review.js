@@ -1,177 +1,162 @@
 #!/usr/bin/env node
-// Deploys ai-review.yml, reviewer-*.lock.yml, reviewer-*.md, and shared/ files to a target repository
 
 const { spawnSync } = require('child_process');
 const { readFileSync, existsSync, readdirSync } = require('fs');
-const { resolve } = require('path');
+const { resolve, basename } = require('path');
 
+// ── Paths ──────────────────────────────────────────────────────────────────
+const ROOT      = resolve(__dirname, '..');
+const WORKFLOWS = resolve(ROOT, 'workflows');
+const SHARED    = resolve(ROOT, '.github', 'workflows', 'shared');
+const CALLER    = resolve(WORKFLOWS, 'caller-template', 'ai-review.yml');
+const BRANCHES  = ['main', 'dev'];
+
+// ── CLI ────────────────────────────────────────────────────────────────────
 const repo = process.argv[2];
 if (!repo || !repo.includes('/')) {
   console.error('Usage: setup-ai-review.js <owner/repo>');
   process.exit(1);
 }
 
-const workflowsDir = resolve(__dirname, '..', 'workflows');
-const sharedDir = resolve(__dirname, '..', '.github', 'workflows', 'shared');
-const templatePath = resolve(workflowsDir, 'caller-template', 'ai-review.yml');
+// ── Logging ────────────────────────────────────────────────────────────────
+const log = {
+  step: msg => console.log(`\x1b[36m[setup-ai-review] ${msg}\x1b[0m`),
+  ok:   msg => console.log(`  \x1b[32mv ${msg}\x1b[0m`),
+  skip: msg => console.log(`  \x1b[90m- ${msg}\x1b[0m`),
+  warn: msg => console.log(`  \x1b[33m! ${msg}\x1b[0m`),
+  fail: msg => { console.error(`  \x1b[31mx ${msg}\x1b[0m`); process.exit(1); },
+};
 
-function step(msg) { console.log(`\x1b[36m[setup-ai-review] ${msg}\x1b[0m`); }
-function ok(msg)   { console.log(`  \x1b[32mv ${msg}\x1b[0m`); }
-function skip(msg) { console.log(`  \x1b[90m- ${msg}\x1b[0m`); }
-function warn(msg) { console.log(`  \x1b[33m! ${msg}\x1b[0m`); }
-function fail(msg) { console.error(`  \x1b[31mx ${msg}\x1b[0m`); process.exit(1); }
-
-function ghApi(apiPath, method, body) {
-  const args = ['api', apiPath, '--method', method];
+// ── GitHub API ─────────────────────────────────────────────────────────────
+function ghApi(path, method, body) {
+  const args = ['api', path, '--method', method];
   const opts = { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] };
-  if (body !== null && body !== undefined) {
-    opts.input = JSON.stringify(body);
-    args.push('--input', '-');
-  }
+  if (body != null) { opts.input = JSON.stringify(body); args.push('--input', '-'); }
   const r = spawnSync('gh', args, opts);
   let data = null;
   try { data = JSON.parse(r.stdout); } catch {}
   return { ok: r.status === 0, data };
 }
 
+// ── File operations ────────────────────────────────────────────────────────
 // Returns 'deployed' | 'skipped' | 'failed'
-function deployFile(repo, branch, targetPath, content, commitMsg) {
+function deployFile(branch, destPath, content, commitMsg) {
   const normalized = content.replace(/\r\n/g, '\n');
-  const contentB64 = Buffer.from(normalized).toString('base64');
-  const body = { message: commitMsg, content: contentB64, branch };
+  const body = { message: commitMsg, content: Buffer.from(normalized).toString('base64'), branch };
 
-  const existing = ghApi(`repos/${repo}/contents/${targetPath}?ref=${branch}`, 'GET');
-  if (existing.ok && existing.data && existing.data.sha) {
-    const existingNormalized = Buffer.from(
-      existing.data.content.replace(/\n/g, ''), 'base64'
-    ).toString('utf8').replace(/\r\n/g, '\n');
-    if (existingNormalized === normalized) return 'skipped';
+  const existing = ghApi(`repos/${repo}/contents/${destPath}?ref=${branch}`, 'GET');
+  if (existing.ok && existing.data?.sha) {
+    const remote = Buffer.from(existing.data.content.replace(/\n/g, ''), 'base64')
+      .toString('utf8').replace(/\r\n/g, '\n');
+    if (remote === normalized) return 'skipped';
     body.sha = existing.data.sha;
   }
 
-  const result = ghApi(`repos/${repo}/contents/${targetPath}`, 'PUT', body);
-  return result.ok ? 'deployed' : 'failed';
+  return ghApi(`repos/${repo}/contents/${destPath}`, 'PUT', body).ok ? 'deployed' : 'failed';
 }
 
-function deleteFile(repo, branch, targetPath, sha, commitMsg) {
-  const result = ghApi(`repos/${repo}/contents/${targetPath}`, 'DELETE', {
-    message: commitMsg, sha, branch,
+function deleteFile(branch, destPath, sha) {
+  return ghApi(`repos/${repo}/contents/${destPath}`, 'DELETE', {
+    message: `ci: remove stale ${basename(destPath)}`, sha, branch,
+  }).ok;
+}
+
+function listRemoteWorkflowFiles(branch) {
+  const r = ghApi(`repos/${repo}/contents/.github/workflows?ref=${branch}`, 'GET');
+  return (r.ok && Array.isArray(r.data)) ? r.data : [];
+}
+
+// ── Manifest ───────────────────────────────────────────────────────────────
+// Defines every file to deploy as { src: local path, dest: remote path }
+function buildManifest() {
+  const entries = [];
+  const add = (src, dest) => entries.push({ src, dest });
+
+  add(CALLER, '.github/workflows/ai-review.yml');
+
+  readdirSync(WORKFLOWS)
+    .filter(f => f.endsWith('.lock.yml'))
+    .forEach(f => add(resolve(WORKFLOWS, f), `.github/workflows/${f}`));
+
+  readdirSync(WORKFLOWS)
+    .filter(f => f.endsWith('.md'))
+    .forEach(f => add(resolve(WORKFLOWS, f), `.github/workflows/${f}`));
+
+  if (existsSync(SHARED)) {
+    readdirSync(SHARED)
+      .forEach(f => add(resolve(SHARED, f), `.github/workflows/shared/${f}`));
+  }
+
+  return entries;
+}
+
+// ── Deployment ─────────────────────────────────────────────────────────────
+function deployToBranch(branch, manifest) {
+  if (!ghApi(`repos/${repo}/git/ref/heads/${branch}`, 'GET').ok) {
+    log.skip(`Branch '${branch}' not found — skipping`);
+    return false;
+  }
+
+  log.step(`Deploying to ${repo}@${branch}...`);
+
+  for (const { src, dest } of manifest) {
+    const label = dest.replace('.github/workflows/', '');
+    const r = deployFile(branch, dest, readFileSync(src, 'utf8'), `ci: update ${label}`);
+    if      (r === 'failed') log.warn(`Failed to deploy ${label}`);
+    else if (r === 'skipped') log.skip(`${label} unchanged`);
+    else                      log.ok(`${label} deployed`);
+  }
+
+  pruneStaleFiles(branch, manifest);
+  return true;
+}
+
+function pruneStaleFiles(branch, manifest) {
+  const managed = new Set(
+    manifest.map(e => basename(e.dest)).filter(n => /^reviewer-/.test(n))
+  );
+  for (const file of listRemoteWorkflowFiles(branch)) {
+    if (!/^reviewer-/.test(file.name) || managed.has(file.name)) continue;
+    log.step(`Removing stale ${file.name}...`);
+    deleteFile(branch, `.github/workflows/${file.name}`, file.sha)
+      ? log.ok(`Removed ${file.name}`)
+      : log.warn(`Failed to remove ${file.name}`);
+  }
+}
+
+// ── Post-setup ─────────────────────────────────────────────────────────────
+function enablePrApproval() {
+  log.step('Enabling GitHub Actions PR approval permission...');
+  const current = ghApi(`repos/${repo}/actions/permissions/workflow`, 'GET');
+  const r = ghApi(`repos/${repo}/actions/permissions/workflow`, 'PUT', {
+    default_workflow_permissions: current.data?.default_workflow_permissions ?? 'read',
+    can_approve_pull_request_reviews: true,
   });
-  return result.ok;
+  r.ok
+    ? log.ok('GitHub Actions can now approve pull requests')
+    : log.warn('Failed to enable PR approval — set manually: Settings → Actions → General');
 }
 
-function listWorkflowFiles(repo, branch) {
-  const result = ghApi(`repos/${repo}/contents/.github/workflows?ref=${branch}`, 'GET');
-  if (!result.ok || !Array.isArray(result.data)) return [];
-  return result.data;
+function checkSecret() {
+  log.step('Checking DEEPSEEK_API_KEY secret...');
+  const r = spawnSync('gh', ['secret', 'list', '--repo', repo], { encoding: 'utf8', stdio: 'pipe' });
+  r.status === 0 && r.stdout.includes('DEEPSEEK_API_KEY')
+    ? log.ok('DEEPSEEK_API_KEY already set')
+    : log.warn(`DEEPSEEK_API_KEY not set — run: gh secret set DEEPSEEK_API_KEY --repo ${repo}`);
 }
 
-if (!existsSync(templatePath)) {
-  fail(`Template not found: ${templatePath}`);
+// ── Main ───────────────────────────────────────────────────────────────────
+if (!existsSync(CALLER)) log.fail(`Caller template not found: ${CALLER}`);
+
+const manifest = buildManifest();
+if (!manifest.some(e => e.dest.endsWith('.lock.yml'))) {
+  log.fail(`No .lock.yml files found in ${WORKFLOWS}`);
 }
 
-const lockFiles = readdirSync(workflowsDir)
-  .filter(f => f.endsWith('.lock.yml'))
-  .map(f => ({ name: f, path: resolve(workflowsDir, f) }));
+const anyDeployed = BRANCHES.map(b => deployToBranch(b, manifest)).some(Boolean);
+if (!anyDeployed) log.fail(`Failed to deploy to any branch of ${repo}`);
 
-const sourceFiles = readdirSync(workflowsDir)
-  .filter(f => f.endsWith('.md'))
-  .map(f => ({ name: f, path: resolve(workflowsDir, f) }));
-
-const sharedFiles = existsSync(sharedDir)
-  ? readdirSync(sharedDir).map(f => ({ name: f, path: resolve(sharedDir, f) }))
-  : [];
-
-if (lockFiles.length === 0) {
-  fail(`No .lock.yml files found in ${workflowsDir}`);
-}
-
-const callerContent = readFileSync(templatePath, 'utf8');
-const branches = ['main', 'dev'];
-let deployed = false;
-
-const expectedNames = new Set([
-  'ai-review.yml',
-  ...lockFiles.map(f => f.name),
-  ...sourceFiles.map(f => f.name),
-]);
-
-for (const branch of branches) {
-  const branchCheck = ghApi(`repos/${repo}/git/ref/heads/${branch}`, 'GET');
-  if (!branchCheck.ok) {
-    skip(`Branch '${branch}' not found — skipping`);
-    continue;
-  }
-
-  step(`Deploying to ${repo}@${branch}...`);
-
-  const aiResult = deployFile(repo, branch, '.github/workflows/ai-review.yml', callerContent, 'ci: update AI code review workflow');
-  if (aiResult === 'failed') { warn(`Failed to deploy ai-review.yml to '${branch}' — skipping branch`); continue; }
-  aiResult === 'skipped' ? skip('ai-review.yml unchanged') : ok('ai-review.yml deployed');
-
-  for (const lf of lockFiles) {
-    const content = readFileSync(lf.path, 'utf8');
-    const r = deployFile(repo, branch, `.github/workflows/${lf.name}`, content, `ci: update ${lf.name}`);
-    if (r === 'failed') warn(`Failed to deploy ${lf.name}`);
-    else if (r === 'skipped') skip(`${lf.name} unchanged`);
-    else ok(`${lf.name} deployed`);
-  }
-
-  for (const sf of sourceFiles) {
-    const content = readFileSync(sf.path, 'utf8');
-    const r = deployFile(repo, branch, `.github/workflows/${sf.name}`, content, `ci: update ${sf.name}`);
-    if (r === 'failed') warn(`Failed to deploy ${sf.name}`);
-    else if (r === 'skipped') skip(`${sf.name} unchanged`);
-    else ok(`${sf.name} deployed`);
-  }
-
-  for (const sf of sharedFiles) {
-    const content = readFileSync(sf.path, 'utf8');
-    const r = deployFile(repo, branch, `.github/workflows/shared/${sf.name}`, content, `ci: update shared/${sf.name}`);
-    if (r === 'failed') warn(`Failed to deploy shared/${sf.name}`);
-    else if (r === 'skipped') skip(`shared/${sf.name} unchanged`);
-    else ok(`shared/${sf.name} deployed`);
-  }
-
-  // Remove stale reviewer-* files that no longer exist in workflows/
-  const remoteFiles = listWorkflowFiles(repo, branch);
-  for (const file of remoteFiles) {
-    if (!/^reviewer-/.test(file.name)) continue;
-    if (!expectedNames.has(file.name)) {
-      step(`Removing stale ${file.name}...`);
-      const deleted = deleteFile(repo, branch, `.github/workflows/${file.name}`, file.sha, `ci: remove stale workflow ${file.name}`);
-      if (deleted) ok(`Removed stale ${file.name}`);
-      else warn(`Failed to remove stale ${file.name}`);
-    }
-  }
-
-  deployed = true;
-}
-
-if (!deployed) {
-  fail(`Failed to deploy to any branch of ${repo}`);
-}
-
-step('Enabling GitHub Actions PR approval permission...');
-const workflowPerms = ghApi(`repos/${repo}/actions/permissions/workflow`, 'GET');
-const currentDefault = workflowPerms.data?.default_workflow_permissions || 'read';
-const permResult = ghApi(`repos/${repo}/actions/permissions/workflow`, 'PUT', {
-  default_workflow_permissions: currentDefault,
-  can_approve_pull_request_reviews: true,
-});
-if (permResult.ok) {
-  ok('GitHub Actions can now approve pull requests');
-} else {
-  warn('Failed to enable GitHub Actions PR approval — set it manually: repo Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"');
-}
-
-step('Checking DEEPSEEK_API_KEY secret...');
-const secretsList = spawnSync('gh', ['secret', 'list', '--repo', repo], { encoding: 'utf8', stdio: 'pipe' });
-if (secretsList.status === 0 && secretsList.stdout.includes('DEEPSEEK_API_KEY')) {
-  ok('DEEPSEEK_API_KEY already set');
-} else {
-  warn(`DEEPSEEK_API_KEY is not set on ${repo}.`);
-  warn(`Set it with: gh secret set DEEPSEEK_API_KEY --repo ${repo}`);
-}
+enablePrApproval();
+checkSecret();
 
 console.log(`\nAI Code Review CI is ready on ${repo}\n`);
