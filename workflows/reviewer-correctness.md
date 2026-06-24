@@ -187,4 +187,4 @@ git show "${COMMIT}:<path>" | wc -l
 
 # 投稿コメントのフォーマット
 
-{{#include shared/reviewer-output-policy.md}}
+{{#runtime-import workflows/shared/reviewer-output-policy.md}}

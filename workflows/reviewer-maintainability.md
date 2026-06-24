@@ -236,4 +236,4 @@ lint 抑制コメントは、ほぼ確実にまずい実装を覆い隠すため
 
 # 投稿コメントのフォーマット
 
-{{#include shared/reviewer-output-policy.md}}
+{{#runtime-import workflows/shared/reviewer-output-policy.md}}
