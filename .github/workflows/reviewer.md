@@ -1,6 +1,7 @@
 ---
 name: reviewer
 description: PR Reviewer - correctness / maintainability / resilience の3観点を独立してレビューする
+run-name: ${{ github.event.pull_request.title }}
 on:
   pull_request:
     types: [opened, reopened]
