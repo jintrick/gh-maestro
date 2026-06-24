@@ -13,16 +13,19 @@ jobs:
     uses: ./.github/workflows/reviewer-correctness.lock.yml
     with:
       pr_number: ${{ github.event.pull_request.number }}
+      aw_context: '{"reviewer":"correctness"}'
     secrets: inherit
 
   review-maintainability:
     uses: ./.github/workflows/reviewer-maintainability.lock.yml
     with:
       pr_number: ${{ github.event.pull_request.number }}
+      aw_context: '{"reviewer":"maintainability"}'
     secrets: inherit
 
   review-resilience:
     uses: ./.github/workflows/reviewer-resilience.lock.yml
     with:
       pr_number: ${{ github.event.pull_request.number }}
+      aw_context: '{"reviewer":"resilience"}'
     secrets: inherit
