@@ -141,4 +141,13 @@ for (const [agentName, config] of Object.entries(agents)) {
       `send-pane.js が存在しない: ${sendPane}`
     );
   });
+
+  test(`[${agentName}] SCRIPTS_PATHが指すディレクトリに unlink-junctions.js が存在する`, () => {
+    const orchestratorScripts = path.join(destDir, 'gh-maestro-orchestrator', 'scripts');
+    const unlinkJunctions = path.join(orchestratorScripts, 'unlink-junctions.js');
+    assert.ok(
+      fs.existsSync(unlinkJunctions),
+      `unlink-junctions.js が存在しない: ${unlinkJunctions} — install.js の libModules に追加されていない可能性がある`
+    );
+  });
 }
