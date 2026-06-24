@@ -75,7 +75,7 @@ function buildManifest() {
     .forEach(f => add(resolve(WORKFLOWS, f), `.github/workflows/${f}`));
 
   readdirSync(WORKFLOWS)
-    .filter(f => f.endsWith('.md'))
+    .filter(f => f.endsWith('.md') && f.startsWith('reviewer-'))
     .forEach(f => add(resolve(WORKFLOWS, f), `.github/workflows/${f}`));
 
   if (existsSync(SHARED)) {

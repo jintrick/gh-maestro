@@ -28,9 +28,9 @@ test('buildManifest: workflows/ の .lock.yml が全て含まれる', () => {
   }
 });
 
-test('buildManifest: workflows/ の .md が全て含まれる', () => {
-  const mdFiles = fs.readdirSync(WORKFLOWS).filter(f => f.endsWith('.md'));
-  assert.ok(mdFiles.length > 0, '.md が workflows/ にない');
+test('buildManifest: workflows/ の reviewer-*.md が全て含まれる', () => {
+  const mdFiles = fs.readdirSync(WORKFLOWS).filter(f => f.endsWith('.md') && f.startsWith('reviewer-'));
+  assert.ok(mdFiles.length > 0, 'reviewer-*.md が workflows/ にない');
 
   const manifest = buildManifest();
   for (const f of mdFiles) {
