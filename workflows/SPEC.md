@@ -59,12 +59,12 @@ cp workflows/reviewer-resilience.lock.yml .github/workflows/reviewer-resilience.
 
 ```
 {{#runtime-import reviewer-correctness.md}}
-{{#runtime-import workflows/shared/reviewer-output-policy.md}}
+{{#runtime-import shared/reviewer-output-policy.md}}
 ```
 
 CI 実行時に `runtime_import.cjs` がこれらを解決する。
 
-`{{#runtime-import workflows/shared/reviewer-output-policy.md}}` は `.github/workflows/shared/reviewer-output-policy.md` を読み込む（gh-aw はパスを `.github/` 以下で解決する）。
+gh-aw はパスを `.github/workflows/` からの相対で解決する。`shared/reviewer-output-policy.md` → `.github/workflows/shared/reviewer-output-policy.md`。
 
 ---
 
@@ -81,7 +81,7 @@ CI 実行時に `runtime_import.cjs` がこれらを解決する。
 ## 注意点
 
 - `.github/workflows/reviewer-*.yml` は `workflows/reviewer-*.lock.yml` のコピー。**直接編集しない**
-- `.md` ファイルのボディには `{{#runtime-import workflows/shared/reviewer-output-policy.md}}` を書く（gh-aw 公式構文。独自の `{{#include}}` は廃止済み）
+- `.md` ファイルのボディには `{{#runtime-import shared/reviewer-output-policy.md}}` を書く（gh-aw はパスを `.github/workflows/` 基準で解決する）
 - `ai-review.yml` の各ジョブには `aw_context: '{"reviewer":"<name>"}'` が必須（artifact prefix 衝突防止）
 - トリガーは `opened` と `reopened` のみ。`synchronize` は含めない。既存 PR の再レビューは close→reopen
 
