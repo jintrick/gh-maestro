@@ -13,6 +13,6 @@ gh-maestroのグローバルインストールを実行する。
 
 ## インストール後
 
-ターゲットリポジトリへの AI Code Review CI 導入（`ai-review.yml` デプロイ）は、
+ターゲットリポジトリへの AI Code Review CI 導入（`reviewer` ワークフローのデプロイ）は、
 対象プロジェクトで `/gh-maestro` を初回起動したときに自動的に実行される。
 手動操作は不要。

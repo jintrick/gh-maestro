@@ -2,15 +2,17 @@
 paths:
   - "workflows/**/*.yml"
   - "workflows/**/*.yaml"
+  - "workflows/**/*.md"
   - ".github/workflows/**/*.yml"
   - ".github/workflows/**/*.yaml"
 ---
 
 # CI ワークフロールール
 
+レビューCIは **単一ワークフロー `reviewer.md`**（correctness/maintainability/resilience を1本に統合）。仕様は `workflows/SPEC.md`。
+
 - `pull_request.types` に `synchronize` を含めてはならない（再実行は close→reopen）
 - 既存ワークフローを書き直す際は必ず Read して現状を確認すること
-- `caller-template/ai-review.yml` の各 reviewer ジョブには reviewer 固有の `aw_context` が必須（artifact prefix衝突防止）
-  - `review-correctness`: `aw_context: '{"reviewer":"correctness"}'`
-  - `review-maintainability`: `aw_context: '{"reviewer":"maintainability"}'`
-  - `review-resilience`: `aw_context: '{"reviewer":"resilience"}'`
+- PR番号は `${{ github.event.pull_request.number }}`。`inputs.pr_number` は workflow_call の名残なので使わない
+- `{{#runtime-import}}` のパスは `.github/workflows/` 基準（`shared/...` であって `workflows/shared/...` ではない）
+- frontmatter（トリガー・engine・max-turns 等）変更後は `gh aw compile -d workflows` → lock を `.github/workflows/` にコピー

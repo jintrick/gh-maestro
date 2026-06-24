@@ -8,7 +8,6 @@ const { resolve, basename } = require('path');
 const ROOT      = resolve(__dirname, '..');
 const WORKFLOWS = resolve(ROOT, 'workflows');
 const SHARED    = resolve(ROOT, '.github', 'workflows', 'shared');
-const CALLER    = resolve(WORKFLOWS, 'caller-template', 'ai-review.yml');
 const BRANCHES  = ['main', 'dev'];
 
 // Set by main(); referenced by API functions (only called when require.main === module)
@@ -63,19 +62,20 @@ function listRemoteWorkflowFiles(branch) {
 }
 
 // ── Manifest ───────────────────────────────────────────────────────────────
-// Defines every file to deploy as { src: local path, dest: remote path }
+// Defines every file to deploy as { src: local path, dest: remote path }.
+// The review CI is a single self-triggering workflow (reviewer.lock.yml, on: pull_request).
+// It runtime-imports reviewer.md and shared/reviewer-output-policy.md at CI runtime,
+// so those source files must be deployed alongside the compiled lock.
 function buildManifest() {
   const entries = [];
   const add = (src, dest) => entries.push({ src, dest });
-
-  add(CALLER, '.github/workflows/ai-review.yml');
 
   readdirSync(WORKFLOWS)
     .filter(f => f.endsWith('.lock.yml'))
     .forEach(f => add(resolve(WORKFLOWS, f), `.github/workflows/${f}`));
 
   readdirSync(WORKFLOWS)
-    .filter(f => f.endsWith('.md') && f.startsWith('reviewer-'))
+    .filter(f => f.endsWith('.md') && f.startsWith('reviewer'))
     .forEach(f => add(resolve(WORKFLOWS, f), `.github/workflows/${f}`));
 
   if (existsSync(SHARED)) {
@@ -107,12 +107,17 @@ function deployToBranch(branch, manifest) {
   return true;
 }
 
+// Files this tool manages in the target's .github/workflows/. Anything matching
+// but not in the current manifest is a leftover from a previous layout (e.g. the
+// old 3-reviewer split or the ai-review.yml caller) and gets removed.
+const MANAGED_PATTERN = /^(reviewer|ai-review)/;
+
 function pruneStaleFiles(branch, manifest) {
   const managed = new Set(
-    manifest.map(e => basename(e.dest)).filter(n => /^reviewer-/.test(n))
+    manifest.map(e => basename(e.dest)).filter(n => MANAGED_PATTERN.test(n))
   );
   for (const file of listRemoteWorkflowFiles(branch)) {
-    if (!/^reviewer-/.test(file.name) || managed.has(file.name)) continue;
+    if (!MANAGED_PATTERN.test(file.name) || managed.has(file.name)) continue;
     log.step(`Removing stale ${file.name}...`);
     deleteFile(branch, `.github/workflows/${file.name}`, file.sha)
       ? log.ok(`Removed ${file.name}`)
@@ -142,7 +147,7 @@ function checkSecret() {
 }
 
 // ── Exports (for testing) ──────────────────────────────────────────────────
-module.exports = { buildManifest, WORKFLOWS, SHARED, CALLER };
+module.exports = { buildManifest, WORKFLOWS, SHARED };
 
 // ── Main ───────────────────────────────────────────────────────────────────
 if (require.main === module) {
@@ -152,11 +157,9 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  if (!existsSync(CALLER)) log.fail(`Caller template not found: ${CALLER}`);
-
   const manifest = buildManifest();
   if (!manifest.some(e => e.dest.endsWith('.lock.yml'))) {
-    log.fail(`No .lock.yml files found in ${WORKFLOWS}`);
+    log.fail(`No .lock.yml found in ${WORKFLOWS} — run 'gh aw compile -d workflows' first`);
   }
 
   const anyDeployed = BRANCHES.map(b => deployToBranch(b, manifest)).some(Boolean);

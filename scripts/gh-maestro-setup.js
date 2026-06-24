@@ -35,19 +35,22 @@ function getRemoteRepo() {
 const { createHash } = require('crypto');
 const { readdirSync } = require('fs');
 
-// デプロイ対象の全ファイルをハッシュ（ai-review.yml + *.lock.yml + *.md）
+// デプロイ対象の全ファイルをハッシュ（reviewer.lock.yml + reviewer*.md + shared/*）
 // ソース: scripts/../workflows/  インストール後: ~/.gh-maestro/scripts/../workflows/（同じ相対パス）
 const workflowsDir = resolve(__dirname, '..', 'workflows');
+const sharedDir = resolve(__dirname, '..', '.github', 'workflows', 'shared');
 function computeDeployHash() {
   const h = createHash('sha256');
-  const callerTemplate = resolve(workflowsDir, 'caller-template', 'ai-review.yml');
   // utf8 で読み改行を LF に正規化してからハッシュ化する。
   // Buffer 直読みだと Windows(CRLF)/Unix(LF) でハッシュが変わり毎回再デプロイされる。
-  if (existsSync(callerTemplate)) h.update(readFileSync(callerTemplate, 'utf8').replace(/\r\n/g, '\n'));
-  const files = existsSync(workflowsDir)
-    ? readdirSync(workflowsDir).filter(f => f.endsWith('.lock.yml') || f.endsWith('.md')).sort()
-    : [];
-  for (const f of files) h.update(readFileSync(resolve(workflowsDir, f), 'utf8').replace(/\r\n/g, '\n'));
+  const hashDir = (dir, filter) => {
+    if (!existsSync(dir)) return;
+    for (const f of readdirSync(dir).filter(filter).sort()) {
+      h.update(readFileSync(resolve(dir, f), 'utf8').replace(/\r\n/g, '\n'));
+    }
+  };
+  hashDir(workflowsDir, f => f.endsWith('.lock.yml') || (f.endsWith('.md') && f.startsWith('reviewer')));
+  hashDir(sharedDir, () => true);
   return h.digest('hex').slice(0, 16);
 }
 

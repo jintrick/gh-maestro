@@ -241,12 +241,6 @@ for (const script of assetScripts) {
   ok(`${script} -> ${sharedDest}`);
 }
 
-step('Installing caller template workflows...');
-const callerTemplateSrc = path.join(ROOT, 'workflows', 'caller-template');
-const callerTemplateDest = expandHome('~/.gh-maestro/workflows/caller-template');
-syncDir(callerTemplateSrc, callerTemplateDest);
-ok(`workflows/caller-template -> ${callerTemplateDest}`);
-
 step('Installing reviewer workflow files...');
 const workflowsSrc = path.join(ROOT, 'workflows');
 const workflowsDest = expandHome('~/.gh-maestro/workflows');
