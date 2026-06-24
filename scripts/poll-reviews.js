@@ -28,6 +28,13 @@ const stateFile = path.join(stateDir, `poll-state-${pr}`);
 if (!fs.existsSync(stateFile)) fs.writeFileSync(stateFile, '');
 const shaFile = path.join(stateDir, `poll-sha-${pr}`);
 
+function cleanup() {
+  try { fs.unlinkSync(stateFile); } catch (_) {}
+  try { fs.unlinkSync(shaFile); } catch (_) {}
+}
+process.on('SIGINT',  () => { cleanup(); process.exit(0); });
+process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+
 function knownIds() {
   return new Set(fs.readFileSync(stateFile, 'utf8').split('\n').filter(Boolean));
 }
@@ -49,6 +56,7 @@ const commentsJq = `.comments[] | [(.id | tostring), .author.login, (.body | gsu
 
     if (state === 'MERGED') {
       process.stdout.write(`PR_MERGED:${pr}\n`);
+      cleanup();
       process.exit(0);
     }
 

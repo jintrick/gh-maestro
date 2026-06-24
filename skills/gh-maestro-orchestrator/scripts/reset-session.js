@@ -11,7 +11,7 @@ const { spawnSync, execSync } = require('child_process');
 const path = require('path');
 const { resolve } = path;
 const { existsSync, readFileSync, writeFileSync, rmSync,
-        readdirSync, statSync, renameSync } = require('fs');
+        readdirSync, statSync, renameSync, unlinkSync } = require('fs');
 const { unlinkJunctions } = (() => {
   const candidates = [
     resolve(__dirname, '..', '..', '..', 'lib', 'unlink-junctions'),
@@ -310,7 +310,27 @@ try {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 5. workers.json をリセット
+// 5. poll-state-* / poll-sha-* ゴミファイルを削除
+// ═══════════════════════════════════════════════════════════════════
+
+log('poll-* ファイルを削除します...');
+const ghMaestroDir = resolve(workspace, '.gh-maestro');
+if (existsSync(ghMaestroDir)) {
+  let pollFiles = [];
+  try { pollFiles = readdirSync(ghMaestroDir).filter(f => f.startsWith('poll-')); } catch (_) {}
+  for (const f of pollFiles) {
+    try {
+      unlinkSync(resolve(ghMaestroDir, f));
+      log(`削除: ${f}`);
+    } catch (e) {
+      warn(`poll ファイル削除失敗: ${f} — ${e.message}`);
+    }
+  }
+  if (pollFiles.length === 0) log('poll-* ファイルなし。スキップ。');
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 6. workers.json をリセット
 // ═══════════════════════════════════════════════════════════════════
 
 log('workers.json をリセットします...');
