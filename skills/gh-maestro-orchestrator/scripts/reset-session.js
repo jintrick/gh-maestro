@@ -8,9 +8,20 @@
 //   node reset-session.js [--workspace <path>]
 
 const { spawnSync, execSync } = require('child_process');
-const { resolve } = require('path');
+const path = require('path');
+const { resolve } = path;
 const { existsSync, readFileSync, writeFileSync, rmSync,
-        readdirSync, statSync, lstatSync, rmdirSync, renameSync } = require('fs');
+        readdirSync, statSync, renameSync } = require('fs');
+const { unlinkJunctions } = (() => {
+  const candidates = [
+    resolve(__dirname, '..', '..', '..', 'lib', 'unlink-junctions'),
+    resolve(__dirname, 'unlink-junctions'),
+  ];
+  for (const c of candidates) {
+    try { return require(c); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; }
+  }
+  throw new Error('unlink-junctions.js が見つかりません');
+})();
 
 const argv = process.argv.slice(2);
 const get = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
@@ -59,31 +70,7 @@ const loadWorkers = () => {
   }
 };
 
-// ── junction/symlinkを除去する ────────────────────────────────────
-
-const unlinkJunctions = (dir) => {
-  if (!existsSync(dir)) return;
-  let entries;
-  try {
-    entries = readdirSync(dir);
-  } catch (e) {
-    warn(`readdirSync 失敗: ${dir} — ${e.message}`);
-    return;
-  }
-  for (const entry of entries) {
-    const fullPath = resolve(dir, entry);
-    try {
-      const st = lstatSync(fullPath);
-      if (st.isSymbolicLink()) {
-        rmdirSync(fullPath);
-      } else if (st.isDirectory()) {
-        unlinkJunctions(fullPath);
-      }
-    } catch (e) {
-      warn(`junction除去失敗: ${fullPath} — ${e.message}`);
-    }
-  }
-};
+// ── junction/symlinkを除去する（lib/unlink-junctions.js 参照） ──────
 
 // ── [Windows] worktreesDir配下で動作中のプロセスをWMIで強制終了 ──
 
@@ -142,7 +129,7 @@ const robocopyRemove = (dir) => {
   const tmp = dir + '__empty_tmp__';
   try {
     execSync(`mkdir "${tmp}"`, { stdio: 'pipe' });
-    execSync(`robocopy "${tmp}" "${dir}" /MIR /NFL /NDL /NJH /NJS /nc /ns /np`,
+    execSync(`robocopy "${tmp}" "${dir}" /MIR /XJ /NFL /NDL /NJH /NJS /nc /ns /np`,
       { stdio: 'pipe', timeout: 15000 });
     execSync(`rmdir /S /Q "${tmp}"`, { stdio: 'pipe' });
     execSync(`rmdir /S /Q "${dir}"`, { stdio: 'pipe' });
@@ -189,7 +176,7 @@ const cleanupOrphans = () => {
 // ── worktreeを削除する（junction除去 → git → PowerShell → robocopy → quarantine） ──
 
 const removeWorktree = (dir) => {
-  unlinkJunctions(dir);
+  unlinkJunctions(dir, warn);
 
   try {
     execSync(`git worktree remove --force --force "${dir}"`, { cwd: workspace, stdio: 'pipe' });

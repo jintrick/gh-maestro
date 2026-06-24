@@ -10,8 +10,17 @@
 
 const { spawnSync, execSync } = require('child_process');
 const { resolve } = require('path');
-const { readFileSync, writeFileSync, existsSync,
-        readdirSync, lstatSync, rmdirSync, rmSync } = require('fs');
+const { readFileSync, writeFileSync, existsSync, rmSync } = require('fs');
+const { unlinkJunctions } = (() => {
+  const candidates = [
+    resolve(__dirname, '..', '..', '..', 'lib', 'unlink-junctions'),
+    resolve(__dirname, 'unlink-junctions'),
+  ];
+  for (const c of candidates) {
+    try { return require(c); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; }
+  }
+  throw new Error('unlink-junctions.js が見つかりません');
+})();
 
 const argv = process.argv.slice(2);
 const get = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
@@ -60,25 +69,6 @@ if (!paneId) {
 
 // ── worktreeを即座に削除 ──────────────────────────────────────────────
 
-const unlinkJunctions = (dir) => {
-  if (!existsSync(dir)) return;
-  let entries;
-  try { entries = readdirSync(dir); } catch (e) {
-    console.warn(`remove-worker: readdirSync 失敗: ${dir} — ${e.message}`);
-    return;
-  }
-  for (const entry of entries) {
-    const fullPath = resolve(dir, entry);
-    try {
-      const st = lstatSync(fullPath);
-      if (st.isSymbolicLink()) rmdirSync(fullPath);
-      else if (st.isDirectory()) unlinkJunctions(fullPath);
-    } catch (e) {
-      console.warn(`remove-worker: junction除去失敗: ${fullPath} — ${e.message}`);
-    }
-  }
-};
-
 const psRemove = (dir) => {
   if (!IS_WIN) return false;
   const escaped = dir.replace(/'/g, "''");
@@ -96,7 +86,7 @@ const psRemove = (dir) => {
 if (existsSync(worktreeDir)) {
   console.warn(`remove-worker: worktree "${workerName}" を削除します...`);
 
-  unlinkJunctions(worktreeDir);
+  unlinkJunctions(worktreeDir, (msg) => console.warn(`remove-worker: ${msg}`));
 
   // git worktree remove
   try {
