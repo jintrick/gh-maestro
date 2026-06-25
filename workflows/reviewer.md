@@ -30,7 +30,7 @@ safe-outputs:
     max: 30
     target: "*"
   submit-pull-request-review:
-    max: 3
+    max: 1
     target: "*"
     allowed-events: [COMMENT, APPROVE]
     footer: false
@@ -43,7 +43,7 @@ timeout-minutes: 30
 
 このPRを **Correctness（正しさ）・Maintainability（保守性）・Resilience & Security（堅牢性・セキュリティ）** の3観点で検証する。
 
-**重要: 3観点は独立してレビューし、観点ごとに別々の review を submit せよ。** 観点を跨いで指摘を混ぜるな。1つのレビューに全部まとめるな。各観点は専用の重点項目（後述）に従って独立に判断し、独立に結論（COMMENT / APPROVE）を出す。これにより3つの観点レポートが別々に残る。
+**重要: 3観点は独立してレビューし、各指摘の body 先頭に観点ラベルを付けよ。** 観点を跨いで指摘を混ぜるな。各観点は専用の重点項目（後述）に従って独立に判断する。3観点すべてのインラインコメントを投稿し終えたら、最後に `submit_pull_request_review` を1回だけ提出する（詳細は末尾の最終ステップを参照）。
 
 # 共通手順
 
@@ -91,14 +91,16 @@ git show "${COMMIT}:<path>" | wc -l
   "path": "src/file.ts",
   "line": 42,
   "side": "RIGHT",
-  "body": "**BLOCKER**: ..."
+  "body": "[Correctness] **BLOCKER**: ..."
 }
 ```
 
 `path` はリポジトリルートからの相対パス。
 `line` は実ファイルの行番号（上記bashコマンドで確認した値）。削除行への指摘は `side: "LEFT"` とせよ。
 
-各観点のレビューが終わったら、その観点のインラインコメントを投稿し、`submit_pull_request_review` でその観点のレビューを確定する（観点ごとに1回ずつ、計3回）。指摘がなければ APPROVE、あれば COMMENT。submit の body・形式は末尾の出力ポリシーに従う。
+body 先頭には必ず観点ラベルを付けること：`[Correctness]` / `[Maintainability]` / `[Resilience & Security]`
+
+各観点のレビューが終わったら、その観点のインラインコメントを投稿せよ（submit はまだ呼ぶな）。3観点すべて終了後に submit を1回だけ呼ぶ（末尾の「最終ステップ」を参照）。
 
 ---
 
@@ -160,9 +162,7 @@ git show "${COMMIT}:<path>" | wc -l
 - diff範囲外の設計議論
 - 推測での指摘（「成立条件」を明示できない場合は指摘するな）
 
-**→ この観点のインラインコメントを投稿し、`submit_pull_request_review` を提出せよ。**
-指摘なし: `event: APPROVE`, `body: "LGTM — correctness review: 不変条件の破壊なし"`
-指摘あり: `event: COMMENT`, `body: "Correctness Review"`
+**→ Correctness のインラインコメントを投稿せよ。submit はまだ呼ぶな。**
 
 ---
 
@@ -267,9 +267,7 @@ lint 抑制コメントは、ほぼ確実にまずい実装を覆い隠すため
 - スタイル指摘（linterの責務。ただしlint抑制そのものは指摘対象）
 - diff範囲外の設計議論
 
-**→ この観点のインラインコメントを投稿し、`submit_pull_request_review` を提出せよ。**
-指摘なし: `event: APPROVE`, `body: "LGTM — maintainability review: 保守性リスクなし"`
-指摘あり: `event: COMMENT`, `body: "Maintainability Review"`
+**→ Maintainability のインラインコメントを投稿せよ。submit はまだ呼ぶな。**
 
 ---
 
@@ -342,9 +340,26 @@ lint 抑制コメントは、ほぼ確実にまずい実装を覆い隠すため
 - テスト実行（CI結果のみ参照せよ）
 - 推測での指摘（「成立条件」を明示できない場合は指摘するな）
 
-**→ この観点のインラインコメントを投稿し、`submit_pull_request_review` を提出せよ。**
-指摘なし: `event: APPROVE`, `body: "LGTM — resilience & security review: 破壊経路・脆弱性なし"`
-指摘あり: `event: COMMENT`, `body: "Resilience & Security Review"`
+**→ Resilience & Security のインラインコメントを投稿せよ。**
+
+---
+
+# 最終ステップ: レビューの確定
+
+3観点すべてのインラインコメントを投稿し終えたら、`submit_pull_request_review` を**1回だけ**提出せよ。
+
+- 1件でもBLOCKERがある → `event: COMMENT`
+- すべての観点で指摘なし → `event: APPROVE`
+
+body は以下の3行形式：
+
+```
+Correctness: APPROVE — 不変条件の破壊なし
+Maintainability: APPROVE — 保守性リスクなし
+Resilience & Security: APPROVE — 破壊経路・脆弱性なし
+```
+
+指摘がある観点は `APPROVE` の代わりに `COMMENT — N件の指摘あり` に置き換えよ。
 
 ---
 

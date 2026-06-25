@@ -8,7 +8,7 @@
 - 改善案: <具体的な修正>
 ```
 
-指摘がない場合はAPPROVE。1件でもBLOCKERがあれば `requestChanges` は使わず COMMENT で投稿すること（最終判断はorchestratorの責務）。
+1件でもBLOCKERがあれば `requestChanges` は使わず COMMENT で投稿すること（最終判断はorchestratorの責務）。
 
 BLOCKERのインラインコメント本文は以下の形式：
 

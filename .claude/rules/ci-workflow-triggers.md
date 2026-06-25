@@ -15,4 +15,4 @@ paths:
 - 既存ワークフローを書き直す際は必ず Read して現状を確認すること
 - PR番号は `${{ github.event.pull_request.number }}`。`inputs.pr_number` は workflow_call の名残なので使わない
 - `{{#runtime-import}}` のパスは `.github/workflows/` 基準（`shared/...` であって `workflows/shared/...` ではない）
-- frontmatter（トリガー・engine・max-turns 等）変更後は `gh aw compile -d workflows` → lock を `.github/workflows/` にコピー
+- frontmatter（トリガー・engine・max-turns 等）変更後は **ユーザーに依頼**：`gh aw compile -d workflows` → `node scripts/setup-ai-review.js <owner/repo>`（Claude Code からの実行は必ず失敗する）
