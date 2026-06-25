@@ -19,11 +19,4 @@ paths:
 
 ## submit-pull-request-review の罠
 
-**`submit_pull_request_review` を複数回呼んでも GitHub に残るのは1件だけ。**
-
-gh-aw の safe_outputs ジョブが複数の submit 呼び出しを「consolidated review」として統合し、最後の呼び出しの body/event のみが採用される。`max: 3` に設定してモデルが3回呼んでも結果は1件。`max` は 1 以外に意味がない。
-
-設計上の帰結：
-- 複数観点を別々のレビューとして出すことは **不可能**
-- submit は最後に1回だけ呼ぶ設計にすること
-- 複数観点の区別はインラインコメントの body ラベルで表現する
+複数回呼んでも GitHub に残るのは1件（最後の body/event のみ採用）。`max` は 1 以外に意味がない。複数観点の区別はインラインコメントの body ラベルで表現し、submit は最後に1回だけ呼ぶこと。
