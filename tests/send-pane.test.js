@@ -79,3 +79,60 @@ test('orchestratorからの送信にはプレフィックス "orchestratorです
     assert.ok(!r.stderr.includes('Usage'));
   });
 });
+
+// ── pane cwd 検証 ─────────────────────────────────────────────────────
+
+test('cwd が期待と異なる場合はエラー終了する（他 WezTerm 誤接続検出）', () => {
+  withTempDir(tmp => {
+    const workspace = path.join(tmp, 'project');
+    fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.gh-maestro', 'workers.json'),
+      JSON.stringify({ orchestrator: '0', 'issue-1-fix': '1' }),
+      'utf8'
+    );
+
+    // mock wezterm: cli list は別の cwd を返す
+    const mockWezterm = path.join(tmp, 'wezterm');
+    const mockWeztermContent = process.platform === 'win32'
+      ? `@echo off\r\nif "%1 %2 %3"=="cli list --format" echo [{"pane_id":1,"cwd":"file:///some/other/dir"}]\r\n`
+      : `#!/bin/sh\nif [ "$1 $2 $3" = "cli list --format" ]; then echo '[{"pane_id":1,"cwd":"file:///some/other/dir"}]'; else exit 1; fi`;
+    fs.writeFileSync(mockWezterm, mockWeztermContent);
+    fs.chmodSync(mockWezterm, 0o755);
+
+    const r = run(['issue-1-fix', 'hello', '--workspace', workspace], {
+      WEZTERM_PANE: '0',
+      PATH: `${tmp}:${process.env.PATH}`,
+    });
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /cwd.*期待/);
+  });
+});
+
+test('cwd が一致する場合は検証を通過する', () => {
+  withTempDir(tmp => {
+    const workspace = path.join(tmp, 'project');
+    const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'issue-1-fix');
+    fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.gh-maestro', 'workers.json'),
+      JSON.stringify({ orchestrator: '0', 'issue-1-fix': '1' }),
+      'utf8'
+    );
+
+    const cwdJson = `[{"pane_id":1,"cwd":"file://${worktree.replace(/\\/g, '/')}"}]`;
+    const mockWezterm = path.join(tmp, 'wezterm');
+    const mockWeztermContent = process.platform === 'win32'
+      ? `@echo off\r\nif "%1 %2 %3"=="cli list --format" echo ${cwdJson}\r\n`
+      : `#!/bin/sh\nif [ "$1 $2 $3" = "cli list --format" ]; then echo '${cwdJson}'; else exit 0; fi`;
+    fs.writeFileSync(mockWezterm, mockWeztermContent);
+    fs.chmodSync(mockWezterm, 0o755);
+
+    const r = run(['issue-1-fix', 'hello', '--workspace', workspace], {
+      WEZTERM_PANE: '0',
+      PATH: `${tmp}:${process.env.PATH}`,
+    });
+    assert.ok(!r.stderr.includes('cwd'), `cwd検証が誤って失敗しました: ${r.stderr}`);
+  });
+});

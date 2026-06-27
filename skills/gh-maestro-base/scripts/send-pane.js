@@ -60,6 +60,37 @@ if (workersJson && existsSync(workersJson)) {
   }
 }
 
+// ── pane の実在 & cwd 検証 ───────────────────────────────────────────
+
+const expectedCwd = name === 'orchestrator'
+  ? workspace
+  : path.resolve(workspace, '.gh-maestro', 'worktrees', name);
+
+(function verifyPane() {
+  const listResult = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8' });
+  if (listResult.status !== 0) {
+    process.stderr.write(`send-pane: wezterm cli list 失敗 (exit ${listResult.status}): ${listResult.stderr?.trim()}\n`);
+    process.exit(1);
+  }
+  let panes;
+  try { panes = JSON.parse(listResult.stdout); } catch {
+    process.stderr.write(`send-pane: wezterm cli list の出力パース失敗\n`);
+    process.exit(1);
+  }
+  const target = panes.find(p => String(p.pane_id) === String(paneId));
+  if (!target) {
+    process.stderr.write(`send-pane: pane_id ${paneId} (${name}) は存在しません — ペインが死んでいる可能性があります\n`);
+    process.exit(1);
+  }
+  const actualCwd = (target.cwd || '').replace('file://', '');
+  const normalizedActual = actualCwd.replace(/\\/g, '/');
+  const normalizedExpected = expectedCwd.replace(/\\/g, '/');
+  if (normalizedActual !== normalizedExpected) {
+    process.stderr.write(`send-pane: pane_id ${paneId} の cwd が期待と異なります:\n  期待: ${normalizedExpected}\n  実際: ${normalizedActual}\n  別の WezTerm インスタンスに接続している可能性があります\n`);
+    process.exit(1);
+  }
+})();
+
 // 送信者名をメッセージ先頭に付与
 const prefix = senderName === 'orchestrator'
   ? 'orchestratorです。'
