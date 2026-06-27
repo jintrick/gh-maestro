@@ -274,6 +274,7 @@ if (!fs.existsSync(agentsConfigPath)) {
   const defaultAgents = [
     { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
     { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
+    { id: 'reasonix',  label: 'Reasonix Code',           command: 'reasonix',  extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
     { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' },
   ];
   fs.writeFileSync(agentsConfigPath, JSON.stringify(defaultAgents, null, 2) + '\n', 'utf8');
