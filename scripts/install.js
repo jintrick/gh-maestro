@@ -342,6 +342,7 @@ ok(`UserPromptExpansion hook -> ${userSettingsPath}`);
 step('Configuring git pre-commit hook...');
 // Unix では実行権限が無いと git がフックを黙ってスキップするため付与する（Windowsでは無視される）。
 try { fs.chmodSync(path.join(ROOT, '.githooks', 'pre-commit'), 0o755); } catch {}
+try { fs.chmodSync(path.join(ROOT, 'install.sh'),              0o755); } catch {}
 const { spawnSync: spawnGit } = require('child_process');
 const hookResult = spawnGit('git', ['config', 'core.hooksPath', '.githooks'], { cwd: ROOT, encoding: 'utf8' });
 if (hookResult.status === 0) {
