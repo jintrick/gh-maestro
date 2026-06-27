@@ -82,7 +82,15 @@ const expectedCwd = name === 'orchestrator'
     process.stderr.write(`send-pane: pane_id ${paneId} (${name}) は存在しません — ペインが死んでいる可能性があります\n`);
     process.exit(1);
   }
-  const actualCwd = (target.cwd || '').replace('file://', '');
+  const rawCwd = target.cwd || '';
+  let actualCwd;
+  // WezTerm の cwd は file:// URI。Node の URL でパースして OS 差を吸収する。
+  try {
+    actualCwd = decodeURIComponent(new URL(rawCwd).pathname).replace(/\/$/, '');
+  } catch {
+    // パース失敗時は単純な prefix 除去にフォールバック
+    actualCwd = decodeURIComponent(rawCwd.replace(/^file:\/+/, '/')).replace(/\/$/, '');
+  }
   const normalizedActual = actualCwd.replace(/\\/g, '/');
   const normalizedExpected = expectedCwd.replace(/\\/g, '/');
   if (normalizedActual !== normalizedExpected) {
