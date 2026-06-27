@@ -66,8 +66,13 @@ const expectedCwd = name === 'orchestrator'
   ? workspace
   : path.resolve(workspace, '.gh-maestro', 'worktrees', name);
 
+const WEZ_TIMEOUT_MS = 6000;
+function wez(...a) {
+  return spawnSync('wezterm', a, { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS });
+}
+
 (function verifyPane() {
-  const listResult = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8' });
+  const listResult = wez('cli', 'list', '--format', 'json');
   if (listResult.status !== 0) {
     process.stderr.write(`send-pane: wezterm cli list 失敗 (exit ${listResult.status}): ${listResult.stderr?.trim()}\n`);
     process.exit(1);
@@ -84,11 +89,9 @@ const expectedCwd = name === 'orchestrator'
   }
   const rawCwd = target.cwd || '';
   let actualCwd;
-  // WezTerm の cwd は file:// URI。Node の URL でパースして OS 差を吸収する。
   try {
     actualCwd = decodeURIComponent(new URL(rawCwd).pathname).replace(/\/$/, '');
   } catch {
-    // パース失敗時は単純な prefix 除去にフォールバック
     actualCwd = decodeURIComponent(rawCwd.replace(/^file:\/+/, '/')).replace(/\/$/, '');
   }
   const normalizedActual = actualCwd.replace(/\\/g, '/');
@@ -105,13 +108,6 @@ const prefix = senderName === 'orchestrator'
   : senderName ? `${senderName}担当workerです。` : '';
 
 // ── 送信 ────────────────────────────────────────────────────────────────
-// cwd 検証済みなので送信+Enterのワンショット。get-text による確認ポーリングは
-// エージェントが応答生成中で echo しないと偽の失敗になるため撤廃。
-
-const WEZ_TIMEOUT_MS = 6000;
-function wez(...a) {
-  return spawnSync('wezterm', a, { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS });
-}
 
 const flatMessage = (prefix + message).replace(/\n+/g, ' ');
 const sendResult = wez('cli', 'send-text', '--pane-id', paneId, '--no-paste', flatMessage);
