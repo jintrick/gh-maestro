@@ -70,7 +70,8 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 | スキル | 用途 |
 |---|---|
 | `gh-maestro-coder` | 実装 → PR作成 |
-| `gh-maestro-investigator` | バグ調査 → 根本原因・修正方針の報告（Issueがある場合は`--issue`でIssue番号を渡す。ない場合は`--prompt`で調査内容を渡す） |
+| `gh-maestro-explorer` | 汎用的な事実調査（grep・コード探索・情報収集）。分析・判断は行わず、発見した事実を報告する |
+| `gh-maestro-investigator` | バグ原因の特定 → 根本原因・影響範囲・修正方針の報告（Issueがある場合は`--issue`でIssue番号を渡す。ない場合は`--prompt`で調査内容を渡す） |
 | `gh-maestro-base` | 上記以外の動的役職（必ず`--prompt`で役割を定義する） |
 
 ## セッションのゴール
