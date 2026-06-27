@@ -251,9 +251,11 @@ if (existsSync(agentsJsonPath)) {
   }
 }
 if (!agentConfig) {
-  if (agentId !== 'agy') {
-    console.warn(`spawn-worker: エージェント "${agentId}" が agents.json に見つかりません。agy にフォールバックします。`);
+  const explicit = process.argv.includes('--agent');
+  if (explicit) {
+    fail(`エージェント "${agentId}" が ~/.gh-maestro/agents.json に見つかりません。手動で追加するか、node scripts/install.js を実行してください。`);
   }
+  // --agent 未指定のデフォルトフォールバック
   agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' };
 }
 const agentCmdArgs = (() => {
