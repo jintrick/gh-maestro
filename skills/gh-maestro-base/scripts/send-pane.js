@@ -82,24 +82,41 @@ function wez(...a) {
     process.stderr.write(`send-pane: wezterm cli list の出力パース失敗\n`);
     process.exit(1);
   }
-  const target = panes.find(p => String(p.pane_id) === String(paneId));
-  if (!target) {
-    process.stderr.write(`send-pane: pane_id ${paneId} (${name}) は存在しません — ペインが死んでいる可能性があります\n`);
-    process.exit(1);
-  }
-  const rawCwd = target.cwd || '';
-  let actualCwd;
-  try {
-    actualCwd = decodeURIComponent(new URL(rawCwd).pathname).replace(/\/$/, '');
-  } catch {
-    actualCwd = decodeURIComponent(rawCwd.replace(/^file:\/+/, '/')).replace(/\/$/, '');
-  }
-  const normalizedActual = actualCwd.replace(/\\/g, '/');
+
   const normalizedExpected = expectedCwd.replace(/\\/g, '/');
-  if (normalizedActual !== normalizedExpected) {
-    process.stderr.write(`send-pane: pane_id ${paneId} の cwd が期待と異なります:\n  期待: ${normalizedExpected}\n  実際: ${normalizedActual}\n  別の WezTerm インスタンスに接続している可能性があります\n`);
-    process.exit(1);
+  function normalizeCwd(raw) {
+    try {
+      return decodeURIComponent(new URL(raw).pathname).replace(/\/$/, '').replace(/\\/g, '/');
+    } catch {
+      return decodeURIComponent(raw.replace(/^file:\/+/, '/')).replace(/\/$/, '').replace(/\\/g, '/');
+    }
   }
+  function cwdMatches(p) {
+    return normalizeCwd(p.cwd || '') === normalizedExpected;
+  }
+
+  // 1. pane_id で検索
+  let target = panes.find(p => String(p.pane_id) === String(paneId));
+  if (target && cwdMatches(target)) {
+    // pane_id も cwd も一致 → OK
+    return;
+  }
+
+  // 2. pane_id は見つかったが cwd が不一致 → pane_id が別ペインに再利用された可能性
+  if (target) {
+    process.stderr.write(`send-pane: pane_id ${paneId} の cwd が期待と異なります（再利用の可能性）。cwd で再検索します。\n`);
+  }
+
+  // 3. cwd で全ペインを検索
+  const byCwd = panes.find(p => cwdMatches(p));
+  if (byCwd) {
+    process.stderr.write(`send-pane: cwd 一致するペインを発見: pane_id ${paneId} → ${byCwd.pane_id}\n`);
+    paneId = String(byCwd.pane_id);
+    return;
+  }
+
+  process.stderr.write(`send-pane: ${name} のペインが見つかりません（pane_id=${paneId}, cwd=${normalizedExpected}）\n`);
+  process.exit(1);
 })();
 
 // 送信者名をメッセージ先頭に付与
