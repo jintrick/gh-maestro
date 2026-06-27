@@ -127,3 +127,34 @@ test('--agent で存在しないエージェントを指定した場合はエラ
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('agents.json に定義されていてもバイナリが PATH になければエラー終了する', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-bin-'));
+  try {
+    fs.mkdirSync(path.join(tmp, '.gh-maestro'), { recursive: true });
+    // バイナリが存在しないコマンドを持つエージェントを定義
+    fs.writeFileSync(
+      path.join(tmp, '.gh-maestro', 'agents.json'),
+      JSON.stringify([
+        { id: 'fake', label: 'Fake CLI', command: 'nonexistent-cmd-xyz', extraArgs: [], promptFlag: null },
+      ]),
+    );
+
+    const r = spawnSync(process.execPath, [SCRIPT,
+      '--skill', 'gh-maestro-coder',
+      '--issue', '1', '--description', 'test', '--repo', 'o/r',
+      '--agent', 'fake',
+    ], {
+      encoding: 'utf8',
+      env: { ...process.env, WEZTERM_PANE: '999', HOME: tmp },
+    });
+
+    assert.notEqual(r.status, 0, 'exit code should be non-zero');
+    assert.match(r.stderr, /PATH に見つかりません/, 'error should be about missing binary');
+    assert.match(r.stderr, /nonexistent-cmd-xyz/, 'error should name the missing command');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

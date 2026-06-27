@@ -258,6 +258,17 @@ if (!agentConfig) {
   // --agent 未指定のデフォルトフォールバック
   agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' };
 }
+
+// --- エージェントバイナリが PATH 上に存在するか確認 ---
+{
+  const whichCmd = process.platform === 'win32' ? 'where' : 'command';
+  const whichArgs = process.platform === 'win32' ? [agentConfig.command] : ['-v', agentConfig.command];
+  const which = spawnSync(whichCmd, whichArgs, { encoding: 'utf8', stdio: 'pipe' });
+  if (which.status !== 0) {
+    fail(`エージェント "${agentId}" のコマンド "${agentConfig.command}" が PATH に見つかりません。CLIがインストールされているか確認してください。`);
+  }
+}
+
 const agentCmdArgs = (() => {
   if (agentConfig.promptFlag) {
     // agy: -i フラグでargv経由（改行なしの短い参照プロンプトを渡す）
