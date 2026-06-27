@@ -270,17 +270,38 @@ ok(`review-policy.md -> ${expandHome('~/.gh-maestro')}`);
 
 step('Installing default agents config...');
 const agentsConfigPath = expandHome('~/.gh-maestro/agents.json');
+const defaults = [
+  { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
+  { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
+  { id: 'reasonix',  label: 'Reasonix Code',           command: 'reasonix',  extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
+  { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' },
+];
 if (!fs.existsSync(agentsConfigPath)) {
-  const defaultAgents = [
-    { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
-    { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
-    { id: 'reasonix',  label: 'Reasonix Code',           command: 'reasonix',  extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
-    { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' },
-  ];
-  fs.writeFileSync(agentsConfigPath, JSON.stringify(defaultAgents, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(agentsConfigPath, JSON.stringify(defaults, null, 2) + '\n', 'utf8');
   ok(`agents.json -> ${expandHome('~/.gh-maestro')}`);
 } else {
-  ok(`agents.json already exists — skipping`);
+  let existing = [];
+  try {
+    existing = JSON.parse(fs.readFileSync(agentsConfigPath, 'utf8'));
+    if (!Array.isArray(existing)) existing = [];
+  } catch {
+    ok('agents.json parse failed — overwriting with defaults');
+    existing = [];
+  }
+  const existingIds = new Set(existing.map(a => a.id));
+  let added = 0;
+  for (const agent of defaults) {
+    if (!existingIds.has(agent.id)) {
+      existing.push(agent);
+      added++;
+    }
+  }
+  if (added > 0) {
+    fs.writeFileSync(agentsConfigPath, JSON.stringify(existing, null, 2) + '\n', 'utf8');
+    ok(`agents.json updated (+${added} agent(s))`);
+  } else {
+    ok('agents.json already up to date');
+  }
 }
 
 // ── UserPromptExpansion hook を ~/.claude/settings.json に登録 ────────────────
