@@ -1,0 +1,206 @@
+---
+source_url: https://github.com/github/gh-aw/blob/fcb214e0b4aafd7ab2ad61de1d9fa2210de48973/docs/src/content/docs/index.mdx
+original_title: index
+fetched_at: 2026-06-27T20:49:44.814150+00:00
+---
+
+---
+title: Home
+description: Write repository automation workflows in natural language using markdown files and run them as GitHub Actions. Use AI agents with strong guardrails to automate your development workflow.
+template: splash
+tableOfContents: true
+hero:
+  title: GitHub Agentic Workflows
+  tagline: <strong>Intelligent automation for GitHub. Run the coding agents you know and love, with strong guardrails and cost controls, in GitHub Actions.</strong>
+  actions:
+    - text: Quick Start with CLI
+      link: /gh-aw/setup/quick-start/
+      icon: right-arrow
+      variant: primary
+    - text: Creating Workflows
+      link: /gh-aw/setup/creating-workflows/
+      icon: right-arrow
+---
+
+import FeatureCard from '../../components/FeatureCard.astro';
+import FeatureGrid from '../../components/FeatureGrid.astro';
+import Video from '../../components/Video.astro';
+import BlogLinkSection from '../../components/BlogLinkSection.astro';
+import WorkflowHero from '../../components/WorkflowHero.astro';
+
+<WorkflowHero />
+
+Wake up to ready-to-review repository improvements — automated triage, CI insights, docs updates, and test enhancements from simple markdown workflows.
+
+GitHub Agentic Workflows deliver this: repository automation, running the coding agents you know and love, in GitHub Actions, with strong guardrails and security-first design principles.
+
+Use GitHub Copilot, Claude by Anthropic, Gemini from Google or OpenAI Codex for event-triggered and scheduled jobs to improve your repository. GitHub Agentic Workflows [augment](https://github.github.com/gh-aw/reference/faq/#determinism) your existing, deterministic CI/CD with [Continuous AI](https://githubnext.com/projects/continuous-ai) capabilities.
+
+Developed by GitHub and Microsoft, workflows run with added guardrails, using safe outputs and sandboxed execution to help keep your repository safe.
+
+> ⓘ Note: GitHub Agentic Workflows is in Public Preview and may change significantly.
+
+## Key Features
+
+<FeatureGrid columns={3}>
+  <FeatureCard icon="pencil" title="Simple Markdown Files" href="#example-daily-issues-report">
+    Write automation in plain markdown instead of complex YAML
+  </FeatureCard>
+  <FeatureCard icon="cpu" title="AI-Powered Decision Making" href="#gallery">
+    Workflows that understand context and adapt to situations
+  </FeatureCard>
+  <FeatureCard icon="beaker" title="Multiple AI Engines" href="/gh-aw/reference/engines/">
+    Support for Copilot, Claude, Codex, and custom AI processors
+  </FeatureCard>
+  <FeatureCard icon="mark-github" title="GitHub Integration" href="/gh-aw/reference/github-tools/">
+    Deep integration with Actions, Issues, PRs, Discussions, and repository management
+  </FeatureCard>
+  <FeatureCard icon="shield-lock" title="Safety First" href="#guardrails-built-in">
+    Sandboxed execution with minimal permissions and safe output processing
+  </FeatureCard>
+  <FeatureCard icon="workflow" title="Cost Controls" href="#manage-cost-and-capacity">
+    Per-run AI credit budgets, spend visibility, and OpenTelemetry cost analysis
+  </FeatureCard>
+</FeatureGrid>
+
+## Guardrails Built-In
+
+AI agents can be manipulated by prompt injection, malicious repository content, or compromised tools. GitHub Agentic Workflows uses layered controls to keep each run contained: sandboxing limits where code can execute, scoped permissions limit what it can request, and gated outputs ensure only approved actions reach GitHub.
+
+```mermaid
+flowchart LR
+    INPUT["Repository + Prompt Input"] --> TOKENS["Read-only Token"]
+    TOKENS --> SECRETS["No Secrets in Agent"]
+    SECRETS --> SANDBOX["Sandbox + Network Firewall"]
+    SANDBOX --> SAFE["Safe Outputs Gate"]
+    SAFE --> DETECT["Threat Detection Scan"]
+    DETECT --> APPLY["Scoped Write Job"]
+```
+
+<FeatureGrid columns={3}>
+  <FeatureCard title="Read-only token">
+    The agent can read repository state, but it cannot
+    push commits or write to issues directly.
+  </FeatureCard>
+  <FeatureCard title="No secrets in agent runtime">
+    Sensitive credentials stay in isolated downstream
+    jobs, not inside the agent process.
+  </FeatureCard>
+  <FeatureCard title="Sandbox + network firewall" href="/gh-aw/introduction/architecture/#agent-workflow-firewall-awf">
+    The agent runs in a container behind the Agent Workflow Firewall
+    and can only reach allowed destinations.
+  </FeatureCard>
+  <FeatureCard title="Safe outputs gate" href="/gh-aw/reference/safe-outputs/">
+    Requested actions are validated against your configured safe outputs
+    policy before anything is applied.
+  </FeatureCard>
+  <FeatureCard title="Threat detection" href="/gh-aw/reference/threat-detection/">
+    A dedicated threat detection job scans proposed outputs and blocks
+    suspicious changes.
+  </FeatureCard>
+  <FeatureCard title="Compile-time validation" href="/gh-aw/introduction/architecture/#compilation-time-security">
+    Schema validation, expression allowlisting, action pinning, and security
+    scanners reject misconfigurations before deployment.
+  </FeatureCard>
+</FeatureGrid>
+
+See the [Security Architecture](/gh-aw/introduction/architecture/) for a full breakdown of the layered defense-in-depth model.
+
+## Manage Cost and Capacity
+
+Cost control starts with visibility. Use `gh aw logs` and `gh aw audit` to find runs consuming the most time, tokens, and AI Credits (AIC), then tighten prompts, triggers, and model choices before spend drifts upward.
+
+`max-ai-credits` gives each run a hard budget, while [OpenTelemetry](/gh-aw/guides/open-telemetry/) exports traces and token data to OTLP backends for dashboards, alerting, and cost analysis. For optimization over time, compare cost with [outcomes](/gh-aw/reference/outcomes/) so lower spend still produces useful accepted results.
+
+<FeatureGrid columns={3}>
+  <FeatureCard icon="pulse" title="Cost Management" href="/gh-aw/reference/cost-management/">
+    Track Actions minutes, inference spend, and the heaviest runs before deciding what to optimize
+  </FeatureCard>
+  <FeatureCard icon="workflow" title="OpenTelemetry" href="/gh-aw/guides/open-telemetry/">
+    Export workflow traces to OTLP backends for dashboards, alerts, and spend analysis
+  </FeatureCard>
+  <FeatureCard icon="tools" title="AI Credits Budgets" href="/gh-aw/reference/frontmatter/#ai-credits-guardrail-max-ai-credits">
+    Cap runaway runs with max-ai-credits and optimize around AI Credits usage
+  </FeatureCard>
+</FeatureGrid>
+
+## Example: Daily Issues Report
+
+Here's a simple workflow that runs daily to create an upbeat status report:
+
+```markdown
+---
+on:
+  schedule: daily
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+safe-outputs:
+  create-issue:
+    title-prefix: "[team-status] "
+    labels: [report, daily-status]
+    close-older-issues: true
+---
+
+## Daily Issues Report
+
+Create an upbeat daily status report for the team as a GitHub issue.
+
+## What to include
+
+- Recent repository activity (issues, PRs, discussions, releases, code changes)
+- Progress tracking, goal reminders and highlights
+- Project status and recommendations
+- Actionable next steps for maintainers
+
+```
+
+The `gh aw` cli hardens this to a traditional GitHub Actions Workflow (.lock.yml) that runs an AI coding agent (Copilot CLI, Claude Code, Codex, ...) in a containerized environment on a schedule or manually. The AI coding agent reads your repository context, analyzes issues, generates visualizations, and creates reports. All defined in natural language rather than complex code.
+
+## Gallery
+
+<FeatureGrid columns={3}>
+  <FeatureCard icon="issue-opened" title="Issue & PR Management" href="/gh-aw/blog/2026-01-13-meet-the-workflows-issue-management/">
+    Automated triage, labeling, and project coordination
+  </FeatureCard>
+  <FeatureCard icon="book" title="Continuous Documentation" href="/gh-aw/blog/2026-01-13-meet-the-workflows-documentation/">
+    Continuous documentation maintenance and consistency
+  </FeatureCard>
+  <FeatureCard icon="code-review" title="Continuous Improvement" href="/gh-aw/blog/2026-01-13-meet-the-workflows-continuous-simplicity/">
+    Daily code simplification, refactoring, and style improvements
+  </FeatureCard>
+  <FeatureCard icon="pulse" title="Metrics & Analytics" href="/gh-aw/blog/2026-01-13-meet-the-workflows-metrics-analytics/">
+    Daily reports, trend analysis, and workflow health monitoring
+  </FeatureCard>
+  <FeatureCard icon="tools" title="Quality & Testing" href="/gh-aw/blog/2026-01-13-meet-the-workflows-quality-hygiene/">
+    CI failure diagnosis, test improvements, and quality checks
+  </FeatureCard>
+  <FeatureCard icon="repo" title="Multi-Repository" href="/gh-aw/examples/multi-repo/">
+    Feature sync and cross-repo tracking workflows
+  </FeatureCard>
+</FeatureGrid>
+
+## Getting Started
+
+Install the extension, add a sample workflow, and trigger your first run - all from the command line in minutes.
+
+<Video
+  src="/gh-aw/videos/install-and-add-workflow-in-cli.mp4"
+  title="Install and add workflow in CLI demo video"
+  captionsSrc="/gh-aw/videos/install-and-add-workflow-in-cli.vtt"
+  aspectRatio="16:9"
+/>
+
+## Creating Workflows
+
+Create custom agentic workflows directly from the GitHub web interface using natural language.
+
+<Video
+  src="/gh-aw/videos/create-workflow-on-github.mp4"
+  title="Create workflow on GitHub demo video"
+  captionsSrc="/gh-aw/videos/create-workflow-on-github.vtt"
+  aspectRatio="16:9"
+/>
