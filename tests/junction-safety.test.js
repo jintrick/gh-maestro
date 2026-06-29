@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { unlinkJunctions } = require('../lib/unlink-junctions');
+const { unlinkJunctions } = require('../scripts/unlink-junctions');
 
 function withDirs(fn) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-junction-test-'));
@@ -87,7 +87,7 @@ test('unlinkJunctions: 実ディレクトリと junction が混在しても実�
 
 test('reset-session.js: robocopyRemove が /XJ フラグを含む（junction を追跡しない）', () => {
   const src = fs.readFileSync(
-    path.join(__dirname, '..', 'skills', 'gh-maestro-orchestrator', 'scripts', 'reset-session.js'),
+    path.join(__dirname, '..', 'scripts', 'reset-session.js'),
     'utf8'
   );
   assert.ok(

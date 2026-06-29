@@ -1,5 +1,5 @@
 'use strict';
-// lib/unlink-junctions.js
+// scripts/unlink-junctions.js
 // worktree 内の junction / symlink を安全に除去するユーティリティ。
 //
 // Windows の junction は lstatSync では isDirectory()=true / isSymbolicLink()=false と

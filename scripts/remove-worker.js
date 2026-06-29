@@ -11,16 +11,7 @@
 const { spawnSync, execSync } = require('child_process');
 const { resolve } = require('path');
 const { readFileSync, writeFileSync, existsSync, rmSync } = require('fs');
-const { unlinkJunctions } = (() => {
-  const candidates = [
-    resolve(__dirname, '..', '..', '..', 'lib', 'unlink-junctions'),
-    resolve(__dirname, 'unlink-junctions'),
-  ];
-  for (const c of candidates) {
-    try { return require(c); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; }
-  }
-  throw new Error('unlink-junctions.js が見つかりません');
-})();
+const { unlinkJunctions } = require('./unlink-junctions');
 
 const USAGE = `remove-worker.js — ワーカーのペインを kill し worktree を削除する
 

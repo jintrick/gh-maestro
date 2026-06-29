@@ -8,7 +8,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { pathToFileURL } = require('url');
 
-const SCRIPT = path.join(__dirname, '..', 'skills', 'gh-maestro-base', 'scripts', 'send-pane.js');
+const SCRIPT = path.join(__dirname, '..', 'scripts', 'send-pane.js');
 
 // wezterm を差し替えるための node 製モックを書き出す。
 // `cli list` には MOCK_LIST_JSON を返し、その他（send-text 等）は exit 0。

@@ -1,7 +1,6 @@
 ---
 paths:
   - "scripts/**/*.js"
-  - "skills/**/scripts/**/*.js"
 ---
 
 # スキルアセットの --help 必須

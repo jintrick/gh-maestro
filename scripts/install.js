@@ -165,50 +165,21 @@ for (const [agentName, config] of Object.entries(agents)) {
   }
 }
 
-// ── 全スクリプトを SHARED_SCRIPTS に集約 ──────────────────────────────────────
-// コピー元は3系統: scripts/（共有）, lib/（モジュール）, skills/<skill>/scripts/（スキル固有）。
-// require の2パスフォールバックにより、これらが同居していればインストール先で解決できる。
+// ── scripts/ を SHARED_SCRIPTS にミラーする ───────────────────────────────────
+// リポジトリの scripts/ が、インストール先 ~/.gh-maestro/scripts/ と1:1で対応する。
+// CLIスクリプトもモジュール(link-node-modules等)も全て scripts/ に同居しているため、
+// 各スクリプトの require('./xxx') がリポジトリ実行・インストール先実行の両方で解決する。
 
 step('Installing all scripts into the shared directory...');
 fs.mkdirSync(SHARED_SCRIPTS, { recursive: true });
 
 const INSTALL_EXCLUDE = new Set(['install.js']);
-
-// (src 絶対パス, basename) のリストを集める
-const sources = [];
-const seen = new Map();  // basename -> src（衝突検出用）
-const addSource = (src) => {
-  const base = path.basename(src);
-  if (seen.has(base)) {
-    fail(`スクリプト名が衝突しています: "${base}"\n  ${seen.get(base)}\n  ${src}`);
-  }
-  seen.set(base, src);
-  sources.push(src);
-};
-
-// 1. scripts/*.{js,md}（install.js を除く）
 const scriptsDir = path.join(ROOT, 'scripts');
-for (const f of fs.readdirSync(scriptsDir)) {
-  if ((f.endsWith('.js') || f.endsWith('.md')) && !INSTALL_EXCLUDE.has(f)) {
-    addSource(path.join(scriptsDir, f));
-  }
-}
-// 2. lib/*.js
-const libSrc = path.join(ROOT, 'lib');
-for (const f of fs.readdirSync(libSrc)) {
-  if (f.endsWith('.js')) addSource(path.join(libSrc, f));
-}
-// 3. skills/<skill>/scripts/*
-for (const skill of skillDirs) {
-  const skillScripts = path.join(SKILLS_DIR, skill, 'scripts');
-  if (!fs.existsSync(skillScripts)) continue;
-  for (const f of fs.readdirSync(skillScripts)) {
-    addSource(path.join(skillScripts, f));
-  }
-}
+const scriptFiles = fs.readdirSync(scriptsDir)
+  .filter(f => (f.endsWith('.js') || f.endsWith('.md')) && !INSTALL_EXCLUDE.has(f));
 
-// stale 削除: 期待ファイル集合に無いものを除去する
-const expected = new Set(sources.map(s => path.basename(s)));
+// stale 削除: scripts/ に無いファイルを集約先から除去する
+const expected = new Set(scriptFiles);
 for (const f of fs.readdirSync(SHARED_SCRIPTS)) {
   if (!expected.has(f)) {
     const p = path.join(SHARED_SCRIPTS, f);
@@ -218,10 +189,10 @@ for (const f of fs.readdirSync(SHARED_SCRIPTS)) {
     }
   }
 }
-for (const src of sources) {
-  fs.copyFileSync(src, path.join(SHARED_SCRIPTS, path.basename(src)));
+for (const f of scriptFiles) {
+  fs.copyFileSync(path.join(scriptsDir, f), path.join(SHARED_SCRIPTS, f));
 }
-ok(`${sources.length} scripts -> ${SHARED_SCRIPTS}`);
+ok(`${scriptFiles.length} scripts -> ${SHARED_SCRIPTS}`);
 
 step('Installing default agents config...');
 const agentsConfigPath = expandHome('~/.gh-maestro/agents.json');

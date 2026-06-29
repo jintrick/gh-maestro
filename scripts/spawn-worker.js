@@ -19,23 +19,8 @@ const { execSync, spawnSync } = require('child_process');
 const { existsSync, mkdirSync, readFileSync, writeFileSync,
         lstatSync, rmdirSync, rmSync } = require('fs');
 const { resolve, relative } = require('path');
-// link-node-modules を実行コンテキストに応じて解決する
-// - リポジトリ内実行: skills/gh-maestro-orchestrator/scripts/ → lib/
-// - インストール先:   install.js が同ディレクトリに配布済み
-const { linkNodeModules } = (() => {
-  const candidates = [
-    resolve(__dirname, 'link-node-modules'),
-    resolve(__dirname, '..', '..', '..', 'lib', 'link-node-modules'),
-  ];
-  for (const c of candidates) {
-    try { return require(c); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; }
-  }
-  const msg =
-    `spawn-worker: link-node-modules.js が見つかりません。\n` +
-    `試行パス:\n  ${candidates.join('\n  ')}\n` +
-    `gh-maestro のインストールを再実行してください: git pull && npm install && node scripts/install.js`;
-  throw new Error(msg);
-})();
+// link-node-modules は常に同一ディレクトリに同居する（リポジトリの scripts/ もインストール先 ~/.gh-maestro/scripts/ も）。
+const { linkNodeModules } = require('./link-node-modules');
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);

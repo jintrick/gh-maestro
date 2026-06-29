@@ -1,5 +1,5 @@
 'use strict';
-// lib/link-node-modules.js
+// scripts/link-node-modules.js
 // worktreeにnodeモジュールのjunctionを作成するユーティリティ。
 // spawn-worker.jsから抽出してテスト可能にしたもの。
 

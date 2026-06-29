@@ -6,12 +6,9 @@
 
 const { spawnSync } = require('child_process');
 const path = require('path');
-const { existsSync } = require('fs');
 
-const winPathMod = existsSync(path.join(__dirname, 'win-path.js'))
-  ? path.join(__dirname, 'win-path.js')
-  : path.join(__dirname, '..', '..', '..', 'lib', 'win-path.js');
-const { toWinPath } = require(winPathMod);
+// win-path は常に同一ディレクトリに同居する（リポジトリの scripts/ もインストール先も）。
+const { toWinPath } = require('./win-path');
 
 const USAGE = `view-file.js — ファイルを Zed で開く（ユーザーに確認・承認してほしいファイルの提示用）
 

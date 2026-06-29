@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const SCRIPT = path.join(__dirname, '..', 'skills', 'gh-maestro-orchestrator', 'scripts', 'spawn-worker.js');
+const SCRIPT = path.join(__dirname, '..', 'scripts', 'spawn-worker.js');
 
 function run(args, env = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
@@ -68,7 +68,7 @@ test('WEZTERM_PANE が未設定だとエラー終了する', () => {
 // ── link-node-modules の解決 ──────────────────────────────────────────────────
 
 test('link-node-modules がリポジトリ内パスから解決できる', () => {
-  const nm = path.join(__dirname, '..', 'lib', 'link-node-modules');
+  const nm = path.join(__dirname, '..', 'scripts', 'link-node-modules');
   assert.doesNotThrow(() => {
     const resolved = require.resolve(nm);
     assert.ok(resolved.endsWith('link-node-modules.js'));
@@ -84,7 +84,7 @@ test('link-node-modules がインストール先と同構造のディレクト�
   const { rmSync } = require('fs');
   const tmp = mkdtempSync(path.join(tmpdir, 'gh-maestro-test-linknm-'));
   try {
-    const srcNm = path.join(__dirname, '..', 'lib', 'link-node-modules.js');
+    const srcNm = path.join(__dirname, '..', 'scripts', 'link-node-modules.js');
     const destNm = path.join(tmp, 'link-node-modules.js');
     copyFileSync(srcNm, destNm);
 

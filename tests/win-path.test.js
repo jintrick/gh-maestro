@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { toWinPath } = require('../lib/win-path');
+const { toWinPath } = require('../scripts/win-path');
 
 test('Windowsパスはそのまま返す', () => {
   assert.equal(toWinPath('C:\\Users\\amg\\foo.md'), 'C:\\Users\\amg\\foo.md');

@@ -12,16 +12,7 @@ const path = require('path');
 const { resolve } = path;
 const { existsSync, readFileSync, writeFileSync, rmSync,
         readdirSync, statSync, renameSync, unlinkSync } = require('fs');
-const { unlinkJunctions } = (() => {
-  const candidates = [
-    resolve(__dirname, '..', '..', '..', 'lib', 'unlink-junctions'),
-    resolve(__dirname, 'unlink-junctions'),
-  ];
-  for (const c of candidates) {
-    try { return require(c); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; }
-  }
-  throw new Error('unlink-junctions.js が見つかりません');
-})();
+const { unlinkJunctions } = require('./unlink-junctions');
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
 
@@ -85,7 +76,7 @@ const loadWorkers = () => {
   }
 };
 
-// ── junction/symlinkを除去する（lib/unlink-junctions.js 参照） ──────
+// ── junction/symlinkを除去する（unlink-junctions.js 参照） ──────
 
 // ── [Windows] worktreesDir配下で動作中のプロセスをWMIで強制終了 ──
 

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { linkNodeModules } = require('../lib/link-node-modules');
+const { linkNodeModules } = require('../scripts/link-node-modules');
 
 function withDirs(fn) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-test-'));
