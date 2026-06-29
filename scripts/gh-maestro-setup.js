@@ -3,7 +3,7 @@
 // Validates prerequisites on first run; skips on subsequent runs via sentinel file.
 
 const { spawnSync } = require('child_process');
-const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync } = require('fs');
+const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync } = require('fs');
 const { resolve } = require('path');
 
 const workspaceRoot = process.argv[2] ?? process.cwd();
@@ -30,45 +30,38 @@ function getRemoteRepo() {
   return match ? match[1] : null;
 }
 
-// ─── AI Review setup (テンプレートが変わるたびに再デプロイ) ──────────────────
-
-const { createHash } = require('crypto');
-const { readdirSync } = require('fs');
-
-// デプロイ対象の全ファイルをハッシュ（reviewer.lock.yml + reviewer*.md + shared/*）
-// ソース: scripts/../workflows/  インストール後: ~/.gh-maestro/scripts/../workflows/（同じ相対パス）
-const workflowsDir = resolve(__dirname, '..', 'workflows');
-const sharedDir = resolve(__dirname, '..', '.github', 'workflows', 'shared');
-function computeDeployHash() {
-  const h = createHash('sha256');
-  // utf8 で読み改行を LF に正規化してからハッシュ化する。
-  // Buffer 直読みだと Windows(CRLF)/Unix(LF) でハッシュが変わり毎回再デプロイされる。
-  const hashDir = (dir, filter) => {
-    if (!existsSync(dir)) return;
-    for (const f of readdirSync(dir).filter(filter).sort()) {
-      h.update(readFileSync(resolve(dir, f), 'utf8').replace(/\r\n/g, '\n'));
-    }
-  };
-  hashDir(workflowsDir, f => f.endsWith('.lock.yml') || (f.endsWith('.md') && f.startsWith('reviewer')));
-  hashDir(sharedDir, () => true);
-  return h.digest('hex').slice(0, 16);
-}
+// ─── GitHub Actions AI Review CI 退役クリーンアップ ─────────────────────────
+// 旧バージョンは setup-ai-review.js で CI をデプロイしていた。
+// ローカル spawn 方式に移行したため、デプロイ済みファイルを削除する。
+// sentinel (.gh-maestro/ai-review-ok) が存在するプロジェクトが対象。
 
 const aiReviewSentinel = resolve(workspaceRoot, '.gh-maestro', 'ai-review-ok');
-const currentHash = computeDeployHash();
-const savedHash = existsSync(aiReviewSentinel) ? readFileSync(aiReviewSentinel, 'utf8').trim() : null;
-
-if (currentHash !== savedHash) {
+if (existsSync(aiReviewSentinel)) {
   const repoName = getRemoteRepo();
   if (repoName) {
-    const setupAiReview = resolve(__dirname, 'setup-ai-review.js');
-    if (existsSync(setupAiReview)) {
-      const r = spawnSync(process.execPath, [setupAiReview, repoName], { stdio: 'inherit' });
-      if (r.status === 0) {
-        mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
-        writeFileSync(aiReviewSentinel, currentHash);
+    step('Retiring GitHub Actions AI Review CI...');
+    const RETIRE_BRANCHES = ['main', 'dev'];
+    const RETIRE_PATHS = [
+      '.github/workflows/reviewer.lock.yml',
+      '.github/workflows/reviewer.md',
+      '.github/workflows/shared/reviewer-output-policy.md',
+    ];
+    for (const branch of RETIRE_BRANCHES) {
+      for (const filePath of RETIRE_PATHS) {
+        const get = spawnSync('gh', ['api', `repos/${repoName}/contents/${filePath}?ref=${branch}`, '--jq', '.sha'],
+          { encoding: 'utf8', stdio: 'pipe' });
+        const sha = get.stdout.trim();
+        if (!sha) continue;
+        const del = spawnSync('gh', ['api', `repos/${repoName}/contents/${filePath}`, '--method', 'DELETE', '--input', '-'],
+          { encoding: 'utf8', stdio: 'pipe',
+            input: JSON.stringify({ message: 'ci: retire AI Review CI (replaced by local reviewer)', sha, branch }) });
+        del.status === 0
+          ? ok(`removed ${filePath} from ${branch}`)
+          : console.warn(`  [warn] failed to remove ${filePath} from ${branch}: ${del.stderr.trim()}`);
       }
     }
+    unlinkSync(aiReviewSentinel);
+    ok('AI Review CI retired');
   }
 }
 
