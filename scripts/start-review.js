@@ -38,10 +38,32 @@ function startReview(pr, repo, workspace) {
 
 module.exports = { startReview };
 
+const USAGE = `start-review.js — PR に対してレビュアー(run-review.js)を起動する
+
+Usage: node start-review.js <PR> <REPO> <WORKSPACE>
+
+Arguments:
+  <PR>         レビュー対象のPR番号
+  <REPO>       GitHubリポジトリ（owner/repo 形式）
+  <WORKSPACE>  ワークスペースの絶対パス（ロックとログを置く場所）
+
+Output (stdout):
+  REVIEW_STARTED:<PR>          レビュアーを新規起動した
+  REVIEW_ALREADY_RUNNING:<PR>  既に稼働中（多重起動を防いだ）
+
+通常はPR検出時に poll-pr.js が自動で呼ぶ。レビュアーが起動しなかった・
+失敗した場合に orchestrator が手動で起動・再起動するためにも使える。
+ログは <WORKSPACE>/.gh-maestro/review-<PR>.log を参照。`;
+
 if (require.main === module) {
-  const [,, pr, repo, workspace] = process.argv;
+  const args = process.argv.slice(2);
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+  const [pr, repo, workspace] = args;
   if (!pr || !repo || !workspace) {
-    console.error('Usage: start-review.js <PR> <REPO> <WORKSPACE>');
+    console.error(USAGE);
     process.exit(1);
   }
   const status = startReview(pr, repo, workspace);
