@@ -1,18 +1,24 @@
 # DeepSeek用エージェント CLIラッパー
 
 DeepSeek APIを使ってClaude Codeなどを快適に使うための設定ファイルです。
-APIキーを平文で保存せず、GPGを用いて暗号化して管理します。
 
-## 事前準備（APIキーの暗号化）
+## APIキーの保管場所
 
-APIキーをパスワードで暗号化し、ファイルに保存します。
+キーは reasonix が使う `.env` ファイルから取得します。
 
-1. 以下のコマンドを実行します。
-   ```bash
-   gpg -c -o ~/.deepseek-api-key
-   ```
-2. APIキーを入力（または貼り付け）して **Enter** を押します。
-3. パスワードを2回入力します。これで `~/.deepseek-api-key` が作成されます。
+- Windows: `%APPDATA%\reasonix\.env`
+- Linux / macOS: `~/.reasonix/.env`
+
+中身は次の1行：
+
+```
+DEEPSEEK_API_KEY=<your-key>
+```
+
+> reasonix はプロセス環境変数を受け付けず、この `.env` に平文でキーを置くしかありません。
+> 同じキーが既に平文でディスク上に存在するため、gpg / SecretStore で別途暗号化して保管しても
+> 実効的な保護にならず、二重管理になるだけです。よってこの `.env` を**キーの単一の源**とし、
+> claude-ds ラッパーもここから読みます。
 
 ## インストール手順
 
@@ -25,6 +31,12 @@ cat .bashrc >> ~/.bashrc
 source ~/.bashrc
 ```
 
+### Windows (PowerShell) の場合
+
+`claude-ds` は PowerShell プロファイル（`$PROFILE`）に関数として定義します。
+関数は `%APPDATA%\reasonix\.env` から `DEEPSEEK_API_KEY` を読み、`ANTHROPIC_AUTH_TOKEN` を
+セットして `claude` を起動します。
+
 ## 使用方法
 
 通常モデル（Pro）で起動する場合：
@@ -32,9 +44,10 @@ source ~/.bashrc
 claude-ds
 ```
 
-高速・低価格モデル（Flash）で起動する場合：
+高速・低価格モデル（Flash）で起動する場合（Linux のみ）：
 ```bash
 claude-ds-flash
 ```
 
-※ 初回起動時やキャッシュ（`gpg-agent`）が切れた際に、設定したパスワードの入力を求められます。
+> 認証は `ANTHROPIC_AUTH_TOKEN` を使います。`ANTHROPIC_API_KEY` と併用すると Claude Code が
+> 警告を出すため、`AUTH_TOKEN` に一本化しています。
