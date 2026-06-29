@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Usage: node poll-pr.js <ISSUE> [INTERVAL_SECONDS]
-// Polls until a PR for the given issue is found, then prints PR_DETECTED:<number>
+// Polls until a PR for the given issue is found, then launches the reviewer and prints:
+//   PR_DETECTED:<number>
+//   REVIEW_STARTED:<number> | REVIEW_ALREADY_RUNNING:<number>
 'use strict';
 
-const { spawnSync, spawn } = require('child_process');
-const fs = require('fs');
-const path = require('path');
+const { spawnSync } = require('child_process');
+const { startReview } = require('./start-review');
 const [,, issue, intervalArg] = process.argv;
 const interval = parseInt(intervalArg || '30') * 1000;
 
@@ -36,20 +37,11 @@ function findPR() {
     const pr = findPR();
     if (pr) {
       const workspace = process.cwd();
-      const ghDir = path.join(workspace, '.gh-maestro');
-      const lockFile = path.join(ghDir, `review-${pr}.running`);
-      fs.mkdirSync(ghDir, { recursive: true });
-      if (!fs.existsSync(lockFile)) {
-        fs.writeFileSync(lockFile, String(process.pid));
-        const logFd = fs.openSync(path.join(ghDir, `review-${pr}.log`), 'a');
-        const child = spawn('node', [path.join(__dirname, 'run-review.js'), pr, repo, workspace], {
-          detached: true,
-          stdio: ['ignore', logFd, logFd],
-        });
-        child.unref();
-        fs.closeSync(logFd);
-      }
+      // PR 検出のついでにレビュアーを起動するが、その起動結果も併せて報告する。
+      // これにより orchestrator は「レビュアーが起動済みである」ことを把握できる。
+      const reviewStatus = startReview(pr, repo, workspace);
       process.stdout.write(`PR_DETECTED:${pr}\n`);
+      process.stdout.write(`${reviewStatus}:${pr}\n`);
       process.exit(0);
     }
     await new Promise(r => setTimeout(r, interval));
