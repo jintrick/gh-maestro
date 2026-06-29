@@ -240,6 +240,22 @@ if (!fs.existsSync(agentsConfigPath)) {
   }
 }
 
+// ── ~/.gh-maestro/ を権威的に管理する ─────────────────────────────────────────
+// このディレクトリは gh-maestro 専用。install が正規の管理対象だけを残し、
+// それ以外（旧バージョンの遺産: workflows/ ・.claude/ ・GH_MAESTRO_REF ・
+// 廃止済み review-policy.md 等）は問答無用で除去する。
+// 唯一の保全対象は agents.json（ユーザーがカスタムするため。上のマージ処理で保護済み）。
+// 新しい管理対象を足すときは、その追加と同じコミットで MANAGED に登録すること。
+step('Pruning ~/.gh-maestro/ of unmanaged legacy artifacts...');
+const ghMaestroDir = expandHome('~/.gh-maestro');
+const MANAGED = new Set(['scripts', 'agents.json']);
+for (const entry of fs.readdirSync(ghMaestroDir)) {
+  if (MANAGED.has(entry)) continue;
+  const p = path.join(ghMaestroDir, entry);
+  fs.rmSync(p, { recursive: true, force: true });
+  ok(`removed legacy artifact: ${entry}`);
+}
+
 // ── UserPromptExpansion hook を ~/.claude/settings.json に登録 ────────────────
 
 step('Registering UserPromptExpansion hook in ~/.claude/settings.json...');
