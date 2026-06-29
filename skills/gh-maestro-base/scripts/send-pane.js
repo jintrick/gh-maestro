@@ -67,8 +67,13 @@ const expectedCwd = name === 'orchestrator'
   : path.resolve(workspace, '.gh-maestro', 'worktrees', name);
 
 const WEZ_TIMEOUT_MS = 6000;
+// WEZTERM_MOCK: テスト専用の差し替え口。node で実行するモックスクリプトのパスを指定する。
+// 本番では未設定なので実際の wezterm バイナリを呼ぶ。
+const WEZTERM_MOCK = process.env.WEZTERM_MOCK || null;
 function wez(...a) {
-  return spawnSync('wezterm', a, { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS });
+  return WEZTERM_MOCK
+    ? spawnSync(process.execPath, [WEZTERM_MOCK, ...a], { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS })
+    : spawnSync('wezterm', a, { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS });
 }
 
 (function verifyPane() {
@@ -85,11 +90,16 @@ function wez(...a) {
 
   const normalizedExpected = expectedCwd.replace(/\\/g, '/');
   function normalizeCwd(raw) {
+    let p;
     try {
-      return decodeURIComponent(new URL(raw).pathname).replace(/\/$/, '').replace(/\\/g, '/');
+      p = decodeURIComponent(new URL(raw).pathname);
     } catch {
-      return decodeURIComponent(raw.replace(/^file:\/+/, '/')).replace(/\/$/, '').replace(/\\/g, '/');
+      p = decodeURIComponent(raw.replace(/^file:\/+/, '/'));
     }
+    return p
+      .replace(/^\/([a-zA-Z]:)/, '$1')  // /C:/... → C:/...（非Windowsの /home/... は無変化）
+      .replace(/\/$/, '')
+      .replace(/\\/g, '/');
   }
   function cwdMatches(p) {
     return normalizeCwd(p.cwd || '') === normalizedExpected;
