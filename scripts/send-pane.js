@@ -152,11 +152,15 @@ const prefix = senderName === 'orchestrator'
 
 // ── 送信 ────────────────────────────────────────────────────────────────
 
-const flatMessage = (prefix + message).replace(/\n+/g, ' ');
-const sendResult = wez('cli', 'send-text', '--pane-id', paneId, '--no-paste', flatMessage);
-if (sendResult.status !== 0) {
-  process.stderr.write(`send-pane: wezterm send-text failed (exit ${sendResult.status}): ${sendResult.stderr?.trim()}\n`);
-  process.exit(1);
+function sendMessage(targetPaneId, text) {
+  const flat = text.replace(/\n+/g, ' ');
+  const sendResult = wez('cli', 'send-text', '--pane-id', targetPaneId, '--no-paste', flat);
+  if (sendResult.status !== 0) {
+    process.stderr.write(`send-pane: wezterm send-text failed (exit ${sendResult.status}): ${sendResult.stderr?.trim()}\n`);
+    process.exit(1);
+  }
+  wez('cli', 'send-text', '--pane-id', targetPaneId, '--no-paste', '\r\n');
 }
-wez('cli', 'send-text', '--pane-id', paneId, '--no-paste', '\r');
+
+sendMessage(paneId, prefix + message);
 process.exit(0);
