@@ -246,7 +246,7 @@ const agentsConfigPath = expandHome('~/.gh-maestro/agents.json');
 const defaults = [
   { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
   { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
-  { id: 'reasonix',  label: 'Reasonix Code',           command: 'reasonix',  extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
+  { id: 'reasonix',  label: 'Reasonix Code',           command: 'reasonix',  extraArgs: ['--yolo'], promptFlag: null },
   { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' },
 ];
 if (!fs.existsSync(agentsConfigPath)) {
@@ -261,17 +261,23 @@ if (!fs.existsSync(agentsConfigPath)) {
     ok('agents.json parse failed — overwriting with defaults');
     existing = [];
   }
-  const existingIds = new Set(existing.map(a => a.id));
-  let added = 0;
+  const existingMap = new Map(existing.map(a => [a.id, a]));
+  let added = 0, updated = 0;
   for (const agent of defaults) {
-    if (!existingIds.has(agent.id)) {
+    if (!existingMap.has(agent.id)) {
       existing.push(agent);
       added++;
+    } else {
+      const entry = existingMap.get(agent.id);
+      // extraArgs と promptFlag はデフォルトで上書き（command はユーザーカスタマイズを保持）
+      entry.extraArgs = agent.extraArgs;
+      entry.promptFlag = agent.promptFlag;
+      updated++;
     }
   }
-  if (added > 0) {
+  if (added > 0 || updated > 0) {
     fs.writeFileSync(agentsConfigPath, JSON.stringify(existing, null, 2) + '\n', 'utf8');
-    ok(`agents.json updated (+${added} agent(s))`);
+    ok(`agents.json updated (+${added} added, ${updated} refreshed)`);
   } else {
     ok('agents.json already up to date');
   }
