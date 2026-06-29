@@ -227,7 +227,7 @@ fs.mkdirSync(sharedDest, { recursive: true });
 const scriptsDir = path.join(ROOT, 'scripts');
 const INSTALL_EXCLUDE = new Set(['install.js']);
 const assetScripts = new Set(
-  fs.readdirSync(scriptsDir).filter(f => f.endsWith('.js') && !INSTALL_EXCLUDE.has(f))
+  fs.readdirSync(scriptsDir).filter(f => (f.endsWith('.js') || f.endsWith('.md')) && !INSTALL_EXCLUDE.has(f))
 );
 // stale ファイルを削除
 for (const f of fs.readdirSync(sharedDest)) {
