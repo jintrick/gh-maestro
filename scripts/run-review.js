@@ -43,6 +43,11 @@ function cleanupAndExit(code) {
   process.exit(code);
 }
 
+process.on('uncaughtException', (e) => {
+  log(`uncaught exception: ${e.message}`);
+  cleanupAndExit(1);
+});
+
 fs.mkdirSync(ghDir, { recursive: true });
 log(`run-review started pr=${pr} repo=${repo}`);
 
