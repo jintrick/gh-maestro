@@ -95,16 +95,6 @@ W2=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "
 W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "src/hooks/ のLintエラーを修正"     --issue 12 --description fix-hooks ...)
 ```
 
-## CI ワークフローの再デプロイ
-
-人間から再デプロイを求められたときに実行する：
-
-```sh
-node ~/.gh-maestro/scripts/setup-ai-review.js $REPO
-```
-
-`$REPO` は起動時に設定済みのセッション変数をそのまま使う。成功すれば最新の `jintrick/gh-maestro` テンプレートが `$REPO` の `.github/workflows/` に反映される。
-
 ## 不変条件
 
 これを破るとシステムが即座に機能しなくなる：

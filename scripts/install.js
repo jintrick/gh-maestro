@@ -241,33 +241,6 @@ for (const script of assetScripts) {
   ok(`${script} -> ${sharedDest}`);
 }
 
-step('Installing reviewer workflow files...');
-const workflowsSrc = path.join(ROOT, 'workflows');
-const workflowsDest = expandHome('~/.gh-maestro/workflows');
-fs.mkdirSync(workflowsDest, { recursive: true });
-const reviewerFiles = new Set(
-  fs.readdirSync(workflowsSrc).filter(f => f.endsWith('.lock.yml') || f.endsWith('.md'))
-);
-for (const f of fs.readdirSync(workflowsDest)) {
-  if (!f.endsWith('.lock.yml') && !f.endsWith('.md')) continue;
-  if (!reviewerFiles.has(f)) {
-    fs.unlinkSync(path.join(workflowsDest, f));
-    ok(`removed stale workflow: ${f}`);
-  }
-}
-for (const f of reviewerFiles) {
-  fs.copyFileSync(path.join(workflowsSrc, f), path.join(workflowsDest, f));
-  ok(`workflows/${f} -> ${workflowsDest}`);
-}
-
-step('Installing default review policy...');
-const reviewPolicySrc = path.join(ROOT, 'assets', 'review-policy.md');
-if (!fs.existsSync(reviewPolicySrc)) fail('assets/review-policy.md not found');
-const reviewPolicyDest = expandHome('~/.gh-maestro/review-policy.md');
-const reviewPolicyContent = stripFrontmatter(fs.readFileSync(reviewPolicySrc, 'utf8'));
-fs.writeFileSync(reviewPolicyDest, reviewPolicyContent, 'utf8');
-ok(`review-policy.md -> ${expandHome('~/.gh-maestro')}`);
-
 step('Installing default agents config...');
 const agentsConfigPath = expandHome('~/.gh-maestro/agents.json');
 const defaults = [

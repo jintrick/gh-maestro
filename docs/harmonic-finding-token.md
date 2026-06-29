@@ -87,9 +87,6 @@ const child = spawn('node', ['scripts/run-review.js', pr, repo, workspace], {
 child.unref();
 ```
 
-## 退役（ローカル経路の動作確認後に一括）
-`workflows/reviewer.md`・`reviewer.lock.yml`・`.github/workflows/reviewer.lock.yml`・`scripts/setup-ai-review.js`・`gh aw compile` 手順・`shared/reviewer-output-policy.md`（インライン化済）。移行期間は CI を残し、二重レビュー回避のため一括削除。
-
 ## smoke test（残る不確実性）
 1. **DeepSeek 認証**: `ANTHROPIC_BASE_URL/API_KEY/MODEL=flash` を env に入れた `claude -p "say ok"` が DeepSeek で応答するか
 2. **キー取得**: Windows では `Get-Secret -Name "DeepSeekAPIKey" -AsPlainText` が detached 子プロセスから成功するか。Linux では `gpg -d` 2回目が pinentry なしで返るか
