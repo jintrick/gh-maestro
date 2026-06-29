@@ -71,6 +71,37 @@ if (prompt && /['`]/.test(prompt)) {
 const orchPaneId = process.env.WEZTERM_PANE;
 if (!orchPaneId)  fail('WEZTERM_PANE が設定されていません');
 
+// --- agents.json からエージェント設定を解決 ---
+const homedir = process.env.HOME || process.env.USERPROFILE || '';
+const agentsJsonPath = resolve(homedir, '.gh-maestro', 'agents.json');
+let agentConfig = null;
+if (existsSync(agentsJsonPath)) {
+  try {
+    const agents = JSON.parse(readFileSync(agentsJsonPath, 'utf8'));
+    agentConfig = agents.find(a => a.id === agentId) ?? null;
+  } catch (e) {
+    console.warn(`spawn-worker: agents.json のパースに失敗しました: ${e.message}`);
+  }
+}
+if (!agentConfig) {
+  const explicit = process.argv.includes('--agent');
+  if (explicit) {
+    fail(`エージェント "${agentId}" が ~/.gh-maestro/agents.json に見つかりません。手動で追加するか、node scripts/install.js を実行してください。`);
+  }
+  // --agent 未指定のデフォルトフォールバック
+  agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' };
+}
+
+// --- エージェントバイナリが PATH 上に存在するか確認 ---
+{
+  const whichCmd = process.platform === 'win32' ? 'where' : 'command';
+  const whichArgs = process.platform === 'win32' ? [agentConfig.command] : ['-v', agentConfig.command];
+  const which = spawnSync(whichCmd, whichArgs, { encoding: 'utf8', stdio: 'pipe' });
+  if (which.status !== 0) {
+    fail(`エージェント "${agentId}" のコマンド "${agentConfig.command}" が PATH に見つかりません。CLIがインストールされているか確認してください。`);
+  }
+}
+
 // --- パス定義 ---
 const workerName   = issue ? `issue-${issue}-${description}` : `task-${description}`;
 const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
@@ -237,37 +268,6 @@ mkdirSync(promptDir, { recursive: true });
 const promptFile = resolve(promptDir, 'prompt.md');
 writeFileSync(promptFile, initialPrompt, 'utf8');
 console.warn(`spawn-worker: プロンプトを ${promptFile} に書き出しました`);
-
-// --- agents.json からエージェント設定を解決 ---
-const homedir = process.env.HOME || process.env.USERPROFILE || '';
-const agentsJsonPath = resolve(homedir, '.gh-maestro', 'agents.json');
-let agentConfig = null;
-if (existsSync(agentsJsonPath)) {
-  try {
-    const agents = JSON.parse(readFileSync(agentsJsonPath, 'utf8'));
-    agentConfig = agents.find(a => a.id === agentId) ?? null;
-  } catch (e) {
-    console.warn(`spawn-worker: agents.json のパースに失敗しました: ${e.message}`);
-  }
-}
-if (!agentConfig) {
-  const explicit = process.argv.includes('--agent');
-  if (explicit) {
-    fail(`エージェント "${agentId}" が ~/.gh-maestro/agents.json に見つかりません。手動で追加するか、node scripts/install.js を実行してください。`);
-  }
-  // --agent 未指定のデフォルトフォールバック
-  agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' };
-}
-
-// --- エージェントバイナリが PATH 上に存在するか確認 ---
-{
-  const whichCmd = process.platform === 'win32' ? 'where' : 'command';
-  const whichArgs = process.platform === 'win32' ? [agentConfig.command] : ['-v', agentConfig.command];
-  const which = spawnSync(whichCmd, whichArgs, { encoding: 'utf8', stdio: 'pipe' });
-  if (which.status !== 0) {
-    fail(`エージェント "${agentId}" のコマンド "${agentConfig.command}" が PATH に見つかりません。CLIがインストールされているか確認してください。`);
-  }
-}
 
 const agentCmdArgs = (() => {
   if (agentConfig.promptFlag) {
