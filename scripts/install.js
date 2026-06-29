@@ -269,10 +269,14 @@ if (!fs.existsSync(agentsConfigPath)) {
       added++;
     } else {
       const entry = existingMap.get(agent.id);
-      // extraArgs と promptFlag はデフォルトで上書き（command はユーザーカスタマイズを保持）
-      entry.extraArgs = agent.extraArgs;
-      entry.promptFlag = agent.promptFlag;
-      updated++;
+      // command がデフォルトのままのときだけ extraArgs/promptFlag をデフォルトに追従させる。
+      // ユーザーが command をカスタマイズしている場合、extraArgs はその command と結合している
+      // （例: command=pwsh の DeepSeek ラッパー）ため、上書きすると起動が壊れる。touch しない。
+      if (entry.command === agent.command) {
+        entry.extraArgs = agent.extraArgs;
+        entry.promptFlag = agent.promptFlag;
+        updated++;
+      }
     }
   }
   if (added > 0 || updated > 0) {
