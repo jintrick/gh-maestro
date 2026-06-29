@@ -20,31 +20,32 @@ function log(msg) {
   fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`);
 }
 
+function cleanupAndExit(code) {
+  if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
+  process.exit(code);
+}
+
 fs.mkdirSync(ghDir, { recursive: true });
 log(`run-review started pr=${pr} repo=${repo}`);
 
-// Get DeepSeek API key — Windows: SecretManagement, Linux: gpg
-let apiKey;
-if (process.platform === 'win32') {
-  const r = spawnSync('powershell', ['-Command', 'Get-Secret -Name "DeepSeekAPIKey" -AsPlainText'], {
-    encoding: 'utf8',
-  });
-  if (r.status !== 0) {
-    log(`Get-Secret failed: ${r.stderr}`);
-    if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
-    process.exit(1);
-  }
-  apiKey = r.stdout.trim();
-} else {
-  const r = spawnSync('gpg', ['-d', path.join(os.homedir(), '.deepseek-api-key')], {
-    encoding: 'utf8',
-  });
-  if (r.status !== 0) {
-    log(`gpg decrypt failed: ${r.stderr}`);
-    if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
-    process.exit(1);
-  }
-  apiKey = r.stdout.trim();
+// レビュアーエージェントを ~/.gh-maestro/agents.json から解決する。
+// spawn-worker.js と同じ仕組み: エージェント定義の command + extraArgs をそのまま使い、
+// DeepSeek の APIキー取得・env 解決はラッパー（claude-ds）側に一任する。
+// run-review.js が自前で Get-Secret / gpg や ANTHROPIC_* を組むと、ラッパーと食い違い
+// （AUTH_TOKEN vs API_KEY 等）や二重メンテが発生するため、ここでは再実装しない。
+const reviewAgentId = process.env.GH_MAESTRO_REVIEW_AGENT || 'claude-ds';
+const agentsJsonPath = path.join(os.homedir(), '.gh-maestro', 'agents.json');
+let reviewAgent;
+try {
+  const agents = JSON.parse(fs.readFileSync(agentsJsonPath, 'utf8'));
+  reviewAgent = agents.find(a => a.id === reviewAgentId);
+} catch (e) {
+  log(`agents.json 読み込み失敗 (${agentsJsonPath}): ${e.message}`);
+  cleanupAndExit(1);
+}
+if (!reviewAgent) {
+  log(`レビュアーエージェント "${reviewAgentId}" が agents.json に見つかりません`);
+  cleanupAndExit(1);
 }
 
 // Build prompt from template
@@ -59,31 +60,30 @@ fs.writeFileSync(tmpPrompt, prompt);
 // Fetch PR head so git show <commit>:<path> works for line number verification
 spawnSync('git', ['-C', workspace, 'fetch', 'origin', `pull/${pr}/head`], { stdio: 'ignore' });
 
-// Run claude with DeepSeek env
-log('spawning claude');
-const result = spawnSync(
-  'claude',
-  ['--dangerously-skip-permissions', '-p', '--append-system-prompt-file', tmpPrompt, 'PRレビューを開始せよ'],
-  {
-    cwd: workspace,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
-      ANTHROPIC_API_KEY: apiKey,
-      ANTHROPIC_MODEL: 'deepseek-v4-flash',
-      ANTHROPIC_DEFAULT_MODEL: 'deepseek-v4-flash',
-      CLAUDE_CODE_SUBAGENT_MODEL: 'deepseek-v4-flash',
-    },
-    maxBuffer: 10 * 1024 * 1024,
-  }
-);
+// レビュアーエージェントを spawn-worker.js と同じ要領で起動する。
+// command + extraArgs の後ろにヘッドレス実行用の引数を連結する。
+// 例 (claude-ds): pwsh -Command "claude-ds --dangerously-skip-permissions" \
+//                   -p --append-system-prompt-file <tmpPrompt> PRレビューを開始せよ
+// pwsh -Command は後続トークンをコマンド文字列に連結して再パースするため、claude-ds 関数が
+// `claude @args` でこれらをそのまま claude に転送する。
+const agentArgs = [
+  ...(reviewAgent.extraArgs || []),
+  '-p',
+  '--append-system-prompt-file', tmpPrompt,
+  'PRレビューを開始せよ',
+];
+log(`spawning ${reviewAgent.command} ${agentArgs.join(' ')}`);
+const result = spawnSync(reviewAgent.command, agentArgs, {
+  cwd: workspace,
+  encoding: 'utf8',
+  env: process.env,
+  maxBuffer: 10 * 1024 * 1024,
+});
 
+if (result.error) log(`spawn error: ${result.error.message}`);
 if (result.stdout) log(result.stdout);
 if (result.stderr) log(result.stderr);
-log(`claude exited with status ${result.status}`);
+log(`${reviewAgent.command} exited with status ${result.status}`);
 
 fs.unlinkSync(tmpPrompt);
-if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
-
-process.exit(result.status ?? 0);
+cleanupAndExit(result.status ?? 0);
