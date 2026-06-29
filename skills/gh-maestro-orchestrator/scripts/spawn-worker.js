@@ -102,6 +102,19 @@ if (!agentConfig) {
   }
 }
 
+// --- pwsh -Command 経由エージェントの空白パスガード ---
+// pwsh -Command は文字列を再パースするため、起動引数に渡すパス（worktree 配下の
+// prompt.md 等）に空白があるとトークン分割されて壊れる。worktree は workspace 配下に
+// 作られるので、workspace に空白があれば起動が確実に壊れる。早期に明確なエラーで止める。
+// （claude 直起動や agy は argv がそのまま渡るため空白でも壊れず、この制約の対象外）
+if (agentConfig.extraArgs?.includes('-Command') && /\s/.test(workspace)) {
+  console.error(`spawn-worker: ワークスペースのパスに空白が含まれています: "${workspace}"`);
+  console.error(`  エージェント "${agentId}" は pwsh -Command 経由で起動するため、空白を含むパスは`);
+  console.error(`  PowerShell の再パースで引数が分割され、起動が壊れます。`);
+  console.error(`  → 空白を含まないパスにワークスペースを移すか、argv をそのまま渡すエージェント（claude / agy 等）を使ってください。`);
+  process.exit(1);
+}
+
 // --- パス定義 ---
 const workerName   = issue ? `issue-${issue}-${description}` : `task-${description}`;
 const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
