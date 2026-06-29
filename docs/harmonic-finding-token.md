@@ -14,15 +14,21 @@
 |---|---|---|
 | `claude` | 導入済み。`-p/--print`・`--append-system-prompt-file`・`--model` あり | headless 起動可 |
 | `claude-ds` | **実行ファイルでなく bash エイリアス**（`docs/deepseek/.bashrc`）。env 群を設定して `claude` を呼ぶだけ | env を再現して `claude` を直接 spawn |
-| DeepSeek キー | `~/.deepseek-api-key` に **GPG 暗号化**。**この PC には現状ファイルが無い** | 前提条件: ユーザーが作成（下記）。gpg-agent がパスフレーズをキャッシュするため毎回 pinentry は不要 |
+| DeepSeek キー | Linux: `~/.deepseek-api-key`（GPG暗号化）、Windows: SecretManagement（`DeepSeekAPIKey`） | 前提条件: ユーザーが作成（下記） |
 | モデル | `reviewer.md` は `deepseek-v4-flash` | 質一致のため `ANTHROPIC_MODEL=deepseek-v4-flash` |
 | `gh` | `jintrick` で認証済み | ローカルから PR レビュー投稿可 |
 | 投稿 | `post-review.js` が `gh api .../pulls/N/reviews` | 再利用可 |
 
 ### 前提条件（ユーザー作業・1回のみ）
-`~/.deepseek-api-key` が無いと DeepSeek 認証不可。`docs/deepseek/README.md` の手順で作成:
+
+**Linux**: `docs/deepseek/README.md` の手順で作成:
 ```bash
-gpg -c -o ~/.deepseek-api-key   # APIキーを入力しパスフレーズで暗号化
+gpg -c -o ~/.deepseek-api-key
+```
+
+**Windows**: PowerShell SecretManagement に登録済みであること:
+```powershell
+Set-Secret -Name "DeepSeekAPIKey" -Secret "sk-..."
 ```
 
 ## アーキテクチャ
@@ -86,7 +92,7 @@ child.unref();
 
 ## smoke test（残る不確実性）
 1. **DeepSeek 認証**: `ANTHROPIC_BASE_URL/API_KEY/MODEL=flash` を env に入れた `claude -p "say ok"` が DeepSeek で応答するか
-2. **gpg-agent キャッシュ**: `gpg -d` を2回実行し、2回目が pinentry なしで返るか。detached 子プロセスからでもソケット経由で復号できるか
+2. **キー取得**: Windows では `Get-Secret -Name "DeepSeekAPIKey" -AsPlainText` が detached 子プロセスから成功するか。Linux では `gpg -d` 2回目が pinentry なしで返るか
 3. **claude -p の投稿**: print モードの claude が reviewer プロンプトに従い gh で PR に投稿しきれるか
 
 ## 検証

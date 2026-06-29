@@ -23,16 +23,29 @@ function log(msg) {
 fs.mkdirSync(ghDir, { recursive: true });
 log(`run-review started pr=${pr} repo=${repo}`);
 
-// Decrypt DeepSeek API key (gpg-agent caches the passphrase after first unlock)
-const gpgResult = spawnSync('gpg', ['-d', path.join(os.homedir(), '.deepseek-api-key')], {
-  encoding: 'utf8',
-});
-if (gpgResult.status !== 0) {
-  log(`gpg decrypt failed: ${gpgResult.stderr}`);
-  if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
-  process.exit(1);
+// Get DeepSeek API key — Windows: SecretManagement, Linux: gpg
+let apiKey;
+if (process.platform === 'win32') {
+  const r = spawnSync('powershell', ['-Command', 'Get-Secret -Name "DeepSeekAPIKey" -AsPlainText'], {
+    encoding: 'utf8',
+  });
+  if (r.status !== 0) {
+    log(`Get-Secret failed: ${r.stderr}`);
+    if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
+    process.exit(1);
+  }
+  apiKey = r.stdout.trim();
+} else {
+  const r = spawnSync('gpg', ['-d', path.join(os.homedir(), '.deepseek-api-key')], {
+    encoding: 'utf8',
+  });
+  if (r.status !== 0) {
+    log(`gpg decrypt failed: ${r.stderr}`);
+    if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
+    process.exit(1);
+  }
+  apiKey = r.stdout.trim();
 }
-const apiKey = gpgResult.stdout.trim();
 
 // Build prompt from template
 const promptTemplate = fs.readFileSync(path.join(__dirname, 'review-prompt.md'), 'utf8');
