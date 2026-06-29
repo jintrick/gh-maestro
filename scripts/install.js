@@ -116,9 +116,20 @@ const skillDirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
   .filter(e => e.isDirectory())
   .map(e => e.name);
 
-// 全スクリプト（共有・スキル固有・lib）を集約する単一ディレクトリ。
+// ~/.gh-maestro/ は gh-maestro 専用ディレクトリ。install が書いたものだけを残し、
+// それ以外（旧バージョンの遺産）は最後に prune で除去する。
+// 「書いた＝残す」を保証するため、ここ配下のパスは必ず ghMaestroPath() で組み立てる。
+// パスを作る行為がそのままトップレベル名を keep に記録するので、登録し忘れる余地が無い。
+const ghMaestroDir = expandHome('~/.gh-maestro');
+const ghMaestroKeep = new Set();
+function ghMaestroPath(...segs) {
+  ghMaestroKeep.add(segs[0]);
+  return path.join(ghMaestroDir, ...segs);
+}
+
+// 全スクリプト（CLI・モジュール）を集約する単一ディレクトリ。
 // SKILL.md からは {{SCRIPTS_PATH}} がこの絶対パスに置換されて参照される。
-const SHARED_SCRIPTS = expandHome('~/.gh-maestro/scripts');
+const SHARED_SCRIPTS = ghMaestroPath('scripts');
 
 // ── 各エージェントのスキルディレクトリに SKILL.md のみを配置 ──────────────────
 // スクリプトはスキルdirには置かず、すべて SHARED_SCRIPTS に集約する（下の共有install参照）。
@@ -195,7 +206,7 @@ for (const f of scriptFiles) {
 ok(`${scriptFiles.length} scripts -> ${SHARED_SCRIPTS}`);
 
 step('Installing default agents config...');
-const agentsConfigPath = expandHome('~/.gh-maestro/agents.json');
+const agentsConfigPath = ghMaestroPath('agents.json');
 const defaults = [
   { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
   { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
@@ -241,18 +252,14 @@ if (!fs.existsSync(agentsConfigPath)) {
 }
 
 // ── ~/.gh-maestro/ を権威的に管理する ─────────────────────────────────────────
-// このディレクトリは gh-maestro 専用。install が正規の管理対象だけを残し、
-// それ以外（旧バージョンの遺産: workflows/ ・.claude/ ・GH_MAESTRO_REF ・
-// 廃止済み review-policy.md 等）は問答無用で除去する。
-// 唯一の保全対象は agents.json（ユーザーがカスタムするため。上のマージ処理で保護済み）。
-// 新しい管理対象を足すときは、その追加と同じコミットで MANAGED に登録すること。
+// install がこの実行中に書いたトップレベル名（ghMaestroKeep）だけを残し、それ以外
+// （旧バージョンの遺産: workflows/ ・.claude/ ・GH_MAESTRO_REF ・廃止済み review-policy.md 等）
+// を除去する。keep リストは ghMaestroPath() がパス生成時に自動記録するので、手書きの
+// 管理対象リストは存在せず、登録し忘れによるサイレント削除が起きない。
 step('Pruning ~/.gh-maestro/ of unmanaged legacy artifacts...');
-const ghMaestroDir = expandHome('~/.gh-maestro');
-const MANAGED = new Set(['scripts', 'agents.json']);
 for (const entry of fs.readdirSync(ghMaestroDir)) {
-  if (MANAGED.has(entry)) continue;
-  const p = path.join(ghMaestroDir, entry);
-  fs.rmSync(p, { recursive: true, force: true });
+  if (ghMaestroKeep.has(entry)) continue;
+  fs.rmSync(path.join(ghMaestroDir, entry), { recursive: true, force: true });
   ok(`removed legacy artifact: ${entry}`);
 }
 
