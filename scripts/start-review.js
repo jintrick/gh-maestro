@@ -27,6 +27,7 @@ function startReview(pr, repo, workspace) {
   const logFd = fs.openSync(path.join(ghDir, `review-${pr}.log`), 'a');
   const child = spawn('node', [path.join(__dirname, 'run-review.js'), pr, repo, workspace], {
     detached: true,
+    windowsHide: true,
     stdio: ['ignore', logFd, logFd],
   });
   // 起動自体に失敗した場合（node 不在等）はロックが残らないよう除去する。
