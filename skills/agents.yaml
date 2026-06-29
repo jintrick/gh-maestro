@@ -4,7 +4,7 @@ agents:
     skill_markdown_template_placeholder_substitutions:
       POLL_INTERVAL_SECONDS: 30
       PR_DETECTION_MECHANISM: |
-        Monitorツールを呼び出し、`command` に `node "$HOME/.gh-maestro/scripts/poll-pr.js" $ISSUE` を直接指定して起動する。`persistent: true` を設定すること。他のツールを呼んではならない。
+        Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/poll-pr.js" $ISSUE` を直接指定して起動する。`persistent: true` を設定すること。他のツールを呼んではならない。
 
         poll-pr.js はPRを検出すると同時にレビュアーを起動し、以下を出力する：
         - `PR_DETECTED:<PR番号>` → PR番号を記録する
@@ -13,7 +13,7 @@ agents:
 
         両方を受け取ったらレビュー監視に移行する。レビュアーが起動しなかった場合（`REVIEW_STARTED`/`REVIEW_ALREADY_RUNNING` のどちらも来ない場合）は「レビュアーの手動起動」に従って自分で起動する。
       POLL_MECHANISM: |
-        Monitorツールを呼び出し、`command` に `node "$HOME/.gh-maestro/scripts/poll-reviews.js" $PR $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。他のツールを呼んではならない。
+        Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/poll-reviews.js" $PR $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。他のツールを呼んではならない。
 
         Monitorから届く通知を処理する。`PR_MERGED` を受け取るまでこのループを続ける：
         - `REVIEW_COMMENT:...` → コメントトリアージを実行する。**完了後は直ちにMonitorに戻る**
@@ -29,7 +29,7 @@ agents:
         サブエージェントへの指示：「以下を {{POLL_INTERVAL_SECONDS}}秒おきに繰り返し、PR番号が取得できたら下記3を実行してから `send_message` で "PR_DETECTED:<PR番号>" と start-review.js の出力（"REVIEW_STARTED:<PR番号>" 等）を親に送信して終了する。
         1. まずブランチ名パターンで検索: `gh pr list --repo $REPO --search "head:issue-${ISSUE}" --state open --json number -q '.[0].number'`
         2. 見つからなければ本文検索: `gh pr list --repo $REPO --state open --json number,body -q '.[] | select(.body | strings | contains("#$ISSUE")) | .number'`
-        3. PR番号が取れたらレビュアーを起動する: `node "$HOME/.gh-maestro/scripts/start-review.js" <PR番号> $REPO $WORKSPACE`
+        3. PR番号が取れたらレビュアーを起動する: `node "{{SCRIPTS_PATH}}/start-review.js" <PR番号> $REPO $WORKSPACE`
         注意: `--search "Closes #$ISSUE"` はGitHubの非同期インデックスに依存するため使わないこと。」
       POLL_MECHANISM: |
         `invoke_subagent` でポーリングサブエージェントを起動し、完了時に `send_message` で親へ通知させる。このサブエージェントはマージされるまで永続的に実行する。

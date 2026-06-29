@@ -129,25 +129,28 @@ for (const [agentName, config] of Object.entries(agents)) {
     }
   });
 
-  test(`[${agentName}] SCRIPTS_PATHが指すディレクトリに send-pane.js が存在する`, () => {
-    const orchestratorScripts = path.join(destDir, 'gh-maestro-orchestrator', 'scripts');
-    assert.ok(
-      fs.existsSync(orchestratorScripts),
-      `orchestratorのscriptsディレクトリが存在しない: ${orchestratorScripts}`
-    );
-    const sendPane = path.join(orchestratorScripts, 'send-pane.js');
-    assert.ok(
-      fs.existsSync(sendPane),
-      `send-pane.js が存在しない: ${sendPane}`
-    );
+  test(`[${agentName}] スキルディレクトリに scripts/ サブディレクトリが存在しない（SKILL.mdのみ）`, () => {
+    const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => e.name);
+    for (const skill of skillDirs) {
+      const perSkillScripts = path.join(destDir, skill, 'scripts');
+      assert.ok(
+        !fs.existsSync(perSkillScripts),
+        `スクリプトは集約先に置くべきで、per-skill の scripts/ は存在してはならない: ${perSkillScripts}`
+      );
+    }
   });
+}
 
-  test(`[${agentName}] SCRIPTS_PATHが指すディレクトリに unlink-junctions.js が存在する`, () => {
-    const orchestratorScripts = path.join(destDir, 'gh-maestro-orchestrator', 'scripts');
-    const unlinkJunctions = path.join(orchestratorScripts, 'unlink-junctions.js');
-    assert.ok(
-      fs.existsSync(unlinkJunctions),
-      `unlink-junctions.js が存在しない: ${unlinkJunctions} — install.js の libModules に追加されていない可能性がある`
-    );
+// ── 全スクリプトが集約先（~/.gh-maestro/scripts）に在ることを検証 ─────────────
+
+const SHARED_SCRIPTS = expandHome('~/.gh-maestro/scripts');
+
+// スキル固有・base・lib・共有スクリプトが1か所に集約されている代表例
+for (const name of ['send-pane.js', 'unlink-junctions.js', 'spawn-worker.js', 'start-review.js', 'poll-pr.js', 'review-prompt.md']) {
+  test(`集約先に ${name} が存在する`, () => {
+    const p = path.join(SHARED_SCRIPTS, name);
+    assert.ok(fs.existsSync(p), `集約先に存在しない: ${p}`);
   });
 }

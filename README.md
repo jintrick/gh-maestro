@@ -80,16 +80,22 @@ skills/
   agents.yaml                    # エージェント定義（インストール先・プレースホルダー値）
   gh-maestro-orchestrator/
     SKILL.md                     # テンプレート（{{SCRIPTS_PATH}} を使用）
-    scripts/                     # 共通アセット
+    scripts/                     # このスキル固有のスクリプト（ソース）
   gh-maestro-coder/
     SKILL.md
-    scripts/
   ...
+scripts/                         # 共有スクリプト（ソース）
+lib/                             # 共有モジュール（ソース）
 ```
 
-`agents.yaml` にエージェントごとのインストール先とプレースホルダー置換値を定義する。インストール時に `SKILL.md` の `{{SCRIPTS_PATH}}` が各エージェント向けの値に置換され、インストール先に配置される。
+**スクリプトの配置（重要）**: インストール時、`scripts/`・`lib/`・各 `skills/*/scripts/` の
+**全スクリプトは単一ディレクトリ `~/.gh-maestro/scripts/` に集約**される。スキルのインストール先
+（`~/.claude/skills/<skill>/` 等）には `SKILL.md` のみが置かれ、`scripts/` サブディレクトリは作られない。
 
-**新スキルの追加**: `skills/` 配下にディレクトリを作成して `SKILL.md` を置く。次回インストール時に自動で全エージェントへ配布される。
+`SKILL.md` 内の `{{SCRIPTS_PATH}}` は、インストール時にこの集約先 `~/.gh-maestro/scripts` の
+**絶対パス**に置換される（全エージェント・全スキルで同一）。これにより参照は1規約・配置は1か所に統一される。
+
+**新スキルの追加**: `skills/` 配下にディレクトリを作成して `SKILL.md` を置く（スクリプトが要るなら `scripts/` も）。次回インストール時に SKILL.md が全エージェントへ、スクリプトが集約先へ配布される。
 
 **新エージェントの追加**: `agents.yaml` にエントリを追加してインストールスクリプトを再実行する。
 
