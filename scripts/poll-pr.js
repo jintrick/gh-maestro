@@ -7,11 +7,32 @@
 
 const { spawnSync } = require('child_process');
 const { startReview } = require('./start-review');
-const [,, issue, intervalArg] = process.argv;
+
+const USAGE = `poll-pr.js — Issue に対応する PR を検出し、検出時にレビュアーを起動する
+
+Usage: node poll-pr.js <ISSUE> [INTERVAL_SECONDS]
+
+Arguments:
+  <ISSUE>             対象の Issue 番号
+  [INTERVAL_SECONDS]  ポーリング間隔（秒、デフォルト 30）
+
+Output (stdout):
+  PR_DETECTED:<PR>             PR を検出した
+  REVIEW_STARTED:<PR>          レビュアーを起動した
+  REVIEW_ALREADY_RUNNING:<PR>  レビュアーは既に稼働中
+
+PR が見つかるまでブロックし、見つけたらレビュアー(start-review.js)を起動して終了する。`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+const [issue, intervalArg] = argv;
 const interval = parseInt(intervalArg || '30') * 1000;
 
 if (!issue) {
-  console.error('Usage: poll-pr.js <ISSUE> [INTERVAL_SECONDS]');
+  console.error(USAGE);
   process.exit(1);
 }
 

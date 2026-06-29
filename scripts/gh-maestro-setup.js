@@ -6,6 +6,22 @@ const { spawnSync } = require('child_process');
 const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync } = require('fs');
 const { resolve } = require('path');
 
+const USAGE = `gh-maestro-setup.js — プロジェクトごとの前提条件チェックと初期セットアップ
+
+Usage: node gh-maestro-setup.js [WORKSPACE_ROOT]
+
+Arguments:
+  [WORKSPACE_ROOT]  対象プロジェクトのルート（デフォルト CWD）
+
+WEZTERM_PANE / wezterm CLI / git リポジトリ / gh 認証を検証し、.gh-maestro ディレクトリと
+.gitignore・dev ブランチを用意する。初回実行後は sentinel(.gh-maestro/setup-ok)で
+スキップする。通常は /gh-maestro の起動フックが呼ぶ。`;
+
+if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
 const workspaceRoot = process.argv[2] ?? process.cwd();
 
 function step(msg)  { console.log(`\x1b[36m[gh-maestro] ${msg}\x1b[0m`); }

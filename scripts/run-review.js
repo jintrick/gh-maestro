@@ -6,9 +6,27 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const [,, pr, repo, workspace] = process.argv;
+const USAGE = `run-review.js — claude-ds(レビュアー)を起動して PR をレビューさせる
+
+Usage: node run-review.js <PR> <REPO> <WORKSPACE>
+
+Arguments:
+  <PR>         レビュー対象の PR 番号
+  <REPO>       GitHub リポジトリ（owner/repo 形式）
+  <WORKSPACE>  ワークスペースの絶対パス（ロックとログを置く場所）
+
+通常は start-review.js がデタッチ起動する。レビュアーは ~/.gh-maestro/agents.json の
+'claude-ds'（GH_MAESTRO_REVIEW_AGENT で変更可）を使う。進捗は
+<WORKSPACE>/.gh-maestro/review-<PR>.log に記録される。`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+const [pr, repo, workspace] = argv;
 if (!pr || !repo || !workspace) {
-  console.error('Usage: run-review.js <PR> <REPO> <WORKSPACE>');
+  console.error(USAGE);
   process.exit(1);
 }
 

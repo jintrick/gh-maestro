@@ -11,7 +11,23 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { readFileSync, existsSync } = require('fs');
 
+const USAGE = `send-pane.js — 起動中のワーカー/orchestrator のペインにメッセージを送る
+
+Usage: node send-pane.js <worker-name> <message> [--workspace <path>]
+
+Arguments:
+  <worker-name>       送信先ワーカー名（"orchestrator" で orchestrator ペイン）
+  <message>           送信するメッセージ（残りの引数を連結）
+  --workspace <path>  ワークスペース（省略時: GH_MAESTRO_WORKSPACE env > CWD から上方探索）
+
+worker-name は .gh-maestro/workers.json で pane-id に解決される。送信方向に応じて
+送信者名がメッセージ先頭に自動付与される。`;
+
 const args = process.argv.slice(2);
+if (args.includes('--help') || args.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
 const wsIdx = args.indexOf('--workspace');
 const workspaceArg = (wsIdx !== -1 && args[wsIdx + 1]) ? args[wsIdx + 1] : null;
 
@@ -21,7 +37,7 @@ const [name, ...msgParts] = rest;
 const message = msgParts.join(' ');
 
 if (!name || !message) {
-  console.error('Usage: send-pane.js <worker-name> <message>');
+  console.error(USAGE);
   process.exit(1);
 }
 

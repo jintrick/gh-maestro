@@ -22,14 +22,29 @@ const { unlinkJunctions } = (() => {
   throw new Error('unlink-junctions.js が見つかりません');
 })();
 
+const USAGE = `remove-worker.js — ワーカーのペインを kill し worktree を削除する
+
+Usage: node remove-worker.js --worker-name <name> [--workspace <path>]
+
+Options:
+  --worker-name <name>  削除するワーカー名（必須）
+  --workspace <path>    ワークスペース（デフォルト CWD）
+
+ペインを kill し、worktree と同名ブランチを削除し、workers.json からエントリを除く。
+削除に失敗しても次回 reset-session.js が保険として掃除する。`;
+
 const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
 const get = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
 
 const workerName = get('--worker-name');
 const workspace  = get('--workspace') ?? process.cwd();
 
 const fail = (msg) => { console.error(`remove-worker: ${msg}`); process.exit(1); };
-if (!workerName) fail('--worker-name が必要です');
+if (!workerName) { console.error(USAGE); process.exit(1); }
 
 const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
 const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);

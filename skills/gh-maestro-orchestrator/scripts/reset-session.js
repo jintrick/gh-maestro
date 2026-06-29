@@ -23,7 +23,22 @@ const { unlinkJunctions } = (() => {
   throw new Error('unlink-junctions.js が見つかりません');
 })();
 
+const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
+
+Usage: node reset-session.js [--workspace <path>] [--quiet]
+
+Options:
+  --workspace <path>  ワークスペース（デフォルト CWD）
+  --quiet             進捗ログを抑制する
+
+workers.json の破損・pane 消滅・worktree 残骸など、どんな状態からでもできる限り
+クリーンアップしてから終了する（途中エラーで止まらない）。`;
+
 const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
 const get = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
 const workspace = get('--workspace') ?? process.cwd();
 const quiet = argv.includes('--quiet');

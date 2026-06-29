@@ -11,11 +11,33 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const [,, pr, workspace, intervalArg] = process.argv;
+const USAGE = `poll-reviews.js — PR のレビューコメント・push・マージ状態をポーリングする
+
+Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS]
+
+Arguments:
+  <PR>                対象の PR 番号
+  [WORKSPACE]         状態ファイルを置くワークスペース（デフォルト CWD）
+  [INTERVAL_SECONDS]  ポーリング間隔（秒、デフォルト 30）
+
+Output (stdout):
+  REVIEW_COMMENT:<path>:<line>|<user>:<body>  インラインレビューコメント
+  PR_COMMENT:<user>:<body>                    PR 全体コメント
+  PR_PUSH:<sha>                               新しいコミットが push された
+  PR_MERGED:<PR>                              マージ完了（このとき終了する）
+
+PR_MERGED を検出するまで永続的にポーリングする。`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+const [pr, workspace, intervalArg] = argv;
 const intervalSec = parseInt(intervalArg || '30');
 
 if (!pr) {
-  console.error('Usage: poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS]');
+  console.error(USAGE);
   process.exit(1);
 }
 
