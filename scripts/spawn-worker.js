@@ -267,10 +267,33 @@ const promptFile = resolve(promptDir, 'prompt.md');
 writeFileSync(promptFile, initialPrompt, 'utf8');
 console.warn(`spawn-worker: プロンプトを ${promptFile} に書き出しました`);
 
+// --- skillsViaMd: SKILL.md + 変数を AGENTS.md としてworktreeに書き出す ---
+// スキルシステムを持たないエージェント（reasonix 等）向け。
+// AGENTS.md をworktreeルートに置くことでエージェントがプロジェクト記憶として自動ロードする。
+if (agentConfig.skillsViaMd) {
+  const sharedSkillMd = resolve(homedir, '.gh-maestro', 'skills', skill, 'SKILL.md');
+  let skillContent = '';
+  if (existsSync(sharedSkillMd)) {
+    const raw = readFileSync(sharedSkillMd, 'utf8');
+    // frontmatter を除去
+    skillContent = raw.startsWith('---\n')
+      ? raw.slice(raw.indexOf('\n---\n', 4) + 5)
+      : raw;
+  } else {
+    console.warn(`spawn-worker: 共有スキルファイルが見つかりません: ${sharedSkillMd}`);
+  }
+  const agentsMd = `${skillContent}\n## セッション変数\n\n${contextLines.join('\n')}\n`;
+  writeFileSync(resolve(worktreeDir, 'AGENTS.md'), agentsMd, 'utf8');
+  console.warn(`spawn-worker: AGENTS.md を書き出しました`);
+}
+
 const agentCmdArgs = (() => {
   if (agentConfig.promptFlag) {
     // agy: -i フラグでargv経由（改行なしの短い参照プロンプトを渡す）
-    const shortPrompt = `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。詳細は ${promptFile} を参照してください。`;
+    // reasonix: run サブコマンド経由（AGENTS.md にスキルと変数を埋め込み済み）
+    const shortPrompt = agentConfig.skillsViaMd
+      ? `orchestratorです。AGENTS.mdの指示に従って作業を開始してください。`
+      : `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。詳細は ${toUnix(promptFile)} を参照してください。`;
     return [
       agentConfig.command,
       ...agentConfig.extraArgs,

@@ -205,12 +205,41 @@ for (const f of scriptFiles) {
 }
 ok(`${scriptFiles.length} scripts -> ${SHARED_SCRIPTS}`);
 
+// ── 共有スキルを ~/.gh-maestro/skills/ にデプロイ ─────────────────────────────
+// スキルシステムを持たないエージェント（reasonix 等）が AGENTS.md 経由でスキルを読むための
+// 正規コピー。SCRIPTS_PATH は共有スクリプト先で統一する。
+step('Installing shared skill files into ~/.gh-maestro/skills/...');
+const SHARED_SKILLS = ghMaestroPath('skills');
+fs.mkdirSync(SHARED_SKILLS, { recursive: true });
+
+const canonicalAgent = agents['claude'] || agents[Object.keys(agents)[0]];
+const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {}, {
+  SCRIPTS_PATH: SHARED_SCRIPTS,
+});
+
+// stale 削除
+for (const entry of fs.readdirSync(SHARED_SKILLS, { withFileTypes: true })) {
+  if (entry.isDirectory() && !skillDirs.includes(entry.name)) {
+    fs.rmSync(path.join(SHARED_SKILLS, entry.name), { recursive: true, force: true });
+    ok(`removed stale shared skill: ${entry.name}`);
+  }
+}
+for (const skill of skillDirs) {
+  const templatePath = path.join(SKILLS_DIR, skill, 'SKILL.md');
+  if (!fs.existsSync(templatePath)) continue;
+  const destSkillDir = path.join(SHARED_SKILLS, skill);
+  fs.mkdirSync(destSkillDir, { recursive: true });
+  const template = fs.readFileSync(templatePath, 'utf8');
+  fs.writeFileSync(path.join(destSkillDir, 'SKILL.md'), applySubstitutions(template, sharedSubstitutions), 'utf8');
+  ok(`${skill} -> ${destSkillDir} (shared)`);
+}
+
 step('Installing default agents config...');
 const agentsConfigPath = ghMaestroPath('agents.json');
 const defaults = [
   { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
   { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
-  { id: 'reasonix',  label: 'Reasonix Code',           command: 'reasonix',  extraArgs: ['--yolo'], promptFlag: null },
+  { id: 'reasonix',  label: 'Reasonix Code',           command: 'reasonix',  extraArgs: ['--yolo'], promptFlag: 'run', skillsViaMd: true },
   { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' },
 ];
 if (!fs.existsSync(agentsConfigPath)) {
@@ -239,6 +268,7 @@ if (!fs.existsSync(agentsConfigPath)) {
       if (entry.command === agent.command) {
         entry.extraArgs = agent.extraArgs;
         entry.promptFlag = agent.promptFlag;
+        if ('skillsViaMd' in agent) entry.skillsViaMd = agent.skillsViaMd;
         updated++;
       }
     }
