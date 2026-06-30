@@ -2,7 +2,7 @@
 // spawn-worker.js
 // ワーカーペインを作成し、worktreeを準備してエージェントを起動する
 //
-// ⚠️  このファイルを変更したら /audit-worker-skills を実行して SKILL.md との整合性を確認すること
+// ⚠️  このファイルをコミットに含めるとき、コミット前に /audit-worker-skills を実行すること
 //    （CLAUDE.md「スキルとスクリプトの整合性ルール」参照）
 //
 // Usage:
