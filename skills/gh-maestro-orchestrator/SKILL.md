@@ -188,13 +188,15 @@ gh issue create --title "<タイトル>" --body-file /tmp/issue-draft.md
 
 ## PR検出
 
-コーダーを起動したら、PRが作成されるのをバックグラウンドで検出する。PR番号がわかればレビュー監視に移行できる。
+コーダーを起動すると `spawn-worker.js` が自動でポーリングを開始し、`send-pane.js` 経由で以下が届く：
 
-{{PR_DETECTION_MECHANISM}}
+- `PR_DETECTED:<PR番号>` → PR番号を記録してレビュー監視に移行する
+- `REVIEW_STARTED:<PR番号>` → レビュアーが起動した（記録する）
+- `REVIEW_ALREADY_RUNNING:<PR番号>` → 既にレビュアーが稼働中
 
-`PR_DETECTED:<PR番号>` を受け取ったら、PR番号を記録してレビュー監視に移行する。PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`send-pane.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
+PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`send-pane.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
 
-PR検出と同時にレビュアーが起動され、`REVIEW_STARTED:<PR番号>`（起動した）または `REVIEW_ALREADY_RUNNING:<PR番号>`（既に稼働中）が報告される。**どちらも受け取れなかった場合はレビュアーが起動していない**ので、「レビュアーの手動起動」に従って自分で起動すること。
+**`REVIEW_STARTED`/`REVIEW_ALREADY_RUNNING` のどちらも来ない場合はレビュアーが起動していない**ので、「レビュアーの手動起動」に従って自分で起動すること。
 
 ### レビュアーの手動起動
 

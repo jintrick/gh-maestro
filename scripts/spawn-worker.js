@@ -15,7 +15,7 @@
 //
 // 標準出力: ワーカー名（例: issue-5-implement / task-investigate-auth）
 
-const { execSync, spawnSync } = require('child_process');
+const { execSync, spawn, spawnSync } = require('child_process');
 const { existsSync, mkdirSync, readFileSync, writeFileSync,
         lstatSync, rmdirSync, rmSync } = require('fs');
 const { resolve, relative } = require('path');
@@ -322,6 +322,21 @@ try {
   spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', newPaneId], { encoding: 'utf8' });
   rollbackWorktree();
   fail(`workers.json への書き込みに失敗しました: ${e.message}`);
+}
+
+// --- コーダー起動時はPRポーリングを自動開始 ---
+if (skill === 'gh-maestro-coder' && issue) {
+  const notifier = spawn(process.execPath, [
+    resolve(__dirname, 'poll-and-notify.js'),
+    issue,
+    '--workspace', workspace,
+  ], {
+    cwd: workspace,
+    stdio: 'ignore',
+    detached: true,
+  });
+  notifier.unref();
+  console.warn(`spawn-worker: poll-and-notify を起動しました (issue=${issue})`);
 }
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---
