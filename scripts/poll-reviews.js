@@ -3,6 +3,7 @@
 // Polls for review comments, commit pushes, and merge status. Emits:
 //   REVIEW_COMMENT:<path>:<line>|<user>:<body>
 //   PR_COMMENT:<user>:<body>
+//   PR_REVIEW:<user>:<state>:<body>
 //   PR_PUSH:<sha>
 //   PR_MERGED:<PR>
 'use strict';
@@ -23,6 +24,7 @@ Arguments:
 Output (stdout):
   REVIEW_COMMENT:<path>:<line>|<user>:<body>  インラインレビューコメント
   PR_COMMENT:<user>:<body>                    PR 全体コメント
+  PR_REVIEW:<user>:<state>:<body>             正式レビュー提出（APPROVED/CHANGES_REQUESTED/COMMENTED）
   PR_PUSH:<sha>                               新しいコミットが push された
   PR_MERGED:<PR>                              マージ完了（このとき終了する）
 
@@ -67,6 +69,7 @@ function recordId(id) {
 
 const inlineJq = `.[] | [(.id | tostring), .path, ((.original_line // "?") | tostring), .user.login, (.body | gsub("\\n"; " "))] | join("|")`;
 const commentsJq = `.comments[] | [(.id | tostring), .author.login, (.body | gsub("\\n"; " "))] | join("|")`;
+const reviewsJq = `.[] | [(.id | tostring), .user.login, .state, (.body | gsub("\\n"; " "))] | join("|")`;
 
 (async () => {
   let interval = intervalSec;
@@ -111,6 +114,23 @@ const commentsJq = `.comments[] | [(.id | tostring), .author.login, (.body | gsu
       if (!known.has(id)) {
         recordId(id);
         process.stdout.write(`PR_COMMENT:${line.slice(sep + 1)}\n`);
+      }
+    }
+
+    const reviewsOut = spawnSync('gh', ['api', `repos/${repo}/pulls/${pr}/reviews`,
+      '--paginate', '-q', reviewsJq], { encoding: 'utf8' }).stdout;
+    for (const line of reviewsOut.split('\n').filter(Boolean)) {
+      const sep = line.indexOf('|');
+      const id = line.slice(0, sep);
+      if (!known.has(id)) {
+        recordId(id);
+        const rest = line.slice(sep + 1); // user|state|body
+        const [user, state, ...bodyParts] = rest.split('|');
+        const body = bodyParts.join('|');
+        // APPROVED/CHANGES_REQUESTED は body が空でも emit（マージ判断に必要）
+        if (body.trim() || state === 'APPROVED' || state === 'CHANGES_REQUESTED') {
+          process.stdout.write(`PR_REVIEW:${user}:${state}:${body}\n`);
+        }
       }
     }
 

@@ -18,6 +18,7 @@ agents:
         Monitorから届く通知を処理する。`PR_MERGED` を受け取るまでこのループを続ける：
         - `REVIEW_COMMENT:...` → コメントトリアージを実行する。**完了後は直ちにMonitorに戻る**
         - `PR_COMMENT:...` → 同様にトリアージする。**完了後は直ちにMonitorに戻る**
+        - `PR_REVIEW:<user>:<state>:<body>` → 正式レビュー提出（Submit reviewボタン経由）。stateがAPPROVEDなら人間にマージ許可のシグナルとして伝える。CHANGES_REQUESTEDならbodyをトリアージしてコーダーにフィードバックする。COMMENTEDならPR_COMMENTと同様にトリアージする。**完了後は直ちにMonitorに戻る**
         - `PR_MERGED:<PR番号>` → マージ完了。自律的に次のフローへ進む（ループ終了）
   agy:
     skill_files_install_destination_directory: ~/.gemini/antigravity-cli/skills
@@ -40,5 +41,11 @@ agents:
         2. stateが MERGED になったら `send_message` で "PR_MERGED:$PR" を親に送り、終了する
         3. `gh api "/repos/$REPO/pulls/$PR/comments" --paginate` でインラインレビューコメントを取得し、新規のものがあれば `send_message` で "REVIEW_COMMENT:<path>:<line>:<user>:<body>" を親に送信し、コメントIDをSTATE_FILEに記録する
         4. `gh pr view $PR --repo $REPO --json comments` でPR全体コメントを取得し、同様に新規分を通知する
-        5. 新しいコメントがなければポーリング間隔を1.5倍に伸ばす（最大300秒）。あればリセットする
+        5. `gh api "/repos/$REPO/pulls/$PR/reviews" --paginate` で正式レビュー提出を取得し、新規のものがあれば `send_message` で "PR_REVIEW:<user>:<state>:<body>" を親に送信する（state=APPROVED/CHANGES_REQUESTEDはbody空でも通知。state=COMMENTEDはbodyが空でない場合のみ通知）
+        6. 新しいコメントがなければポーリング間隔を1.5倍に伸ばす（最大300秒）。あればリセットする
         ※ このサブエージェントはマージが検出されるまで終了しない」
+
+        親として届く通知の処理：
+        - `PR_REVIEW:<user>:APPROVED:<body>` → 人間にマージ許可シグナルとして提示する
+        - `PR_REVIEW:<user>:CHANGES_REQUESTED:<body>` → bodyをトリアージしてコーダーにフィードバックする
+        - `PR_REVIEW:<user>:COMMENTED:<body>` → PR_COMMENTと同様にトリアージする
