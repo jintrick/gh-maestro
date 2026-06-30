@@ -1,6 +1,6 @@
 ---
 name: audit-worker-skills
-description: ワーカースキル定義とspawn-workerコードフローの整合性を検証する。スキルとスクリプトが乖離していないか監査する。
+description: ワーカースキル定義（SKILL.md）と実装コード全体の整合性を検証する。スクリプト変更後にSKILL.mdが陳腐化していないか監査する。
 disable-model-invocation: true
 allowed-tools: Read Agent
 ---
@@ -11,8 +11,14 @@ allowed-tools: Read Agent
 
 ## Phase 1: コントラクト抽出
 
-`scripts/spawn-worker.js` と `scripts/link-node-modules.js` を読み、ワーカー起動時にシステムが**保証する**事項を抽出してください：
+以下のファイルを読み、ワーカー起動時にシステムが**保証する**事項を網羅的に抽出してください：
 
+- `scripts/spawn-worker.js` — ワーカー起動フロー全体
+- `scripts/link-node-modules.js` — node_modules自動リンクの動作
+- `scripts/poll-and-notify.js` — coderへの自動ポーリング動作
+- `scripts/install.js` — エージェント設定（agents.json）の初期値と更新ロジック
+
+抽出すべき内容:
 - ワーカーに渡される環境変数（WORKER_NAME / REPO / WORKSPACE / WORKTREE / ISSUE / BASE_BRANCH など）
 - 自動実行される前処理（git worktree作成 / node_modules junction / AGENTS.md書き出し / poll-and-notifyデタッチなど）
 - エージェント種別ごとのプロンプト配信方法（--append-system-prompt-file vs send-text injection）
