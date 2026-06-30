@@ -239,7 +239,7 @@ const agentsConfigPath = ghMaestroPath('agents.json');
 const defaults = [
   { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
   { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
-  { id: 'reasonix',  label: 'Reasonix Code',           command: 'reasonix',  extraArgs: ['--yolo'], promptFlag: null, positionalPrompt: true, skillsViaMd: true },
+  { id: 'reasonix',  label: 'Reasonix Code',           command: 'reasonix',  extraArgs: ['--yolo'], promptFlag: null, skillsViaMd: true },
   { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' },
 ];
 if (!fs.existsSync(agentsConfigPath)) {
@@ -269,7 +269,8 @@ if (!fs.existsSync(agentsConfigPath)) {
         entry.extraArgs = agent.extraArgs;
         entry.promptFlag = agent.promptFlag;
         if ('skillsViaMd' in agent) entry.skillsViaMd = agent.skillsViaMd;
-        if ('positionalPrompt' in agent) entry.positionalPrompt = agent.positionalPrompt;
+        // 廃止されたフィールドを除去
+        delete entry.positionalPrompt;
         updated++;
       }
     }
