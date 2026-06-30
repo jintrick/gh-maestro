@@ -207,7 +207,7 @@ try {
 // --- node_modules junctionを作成（最大3階層） ---
 const nmResult = linkNodeModules(worktreeDir, workspace);
 for (const p of nmResult.linked)   console.warn(`spawn-worker: junction作成: ${p}`);
-for (const p of nmResult.missing)  console.warn(`spawn-worker: [要対応] ${p} が存在しません。ワークスペースで npm install を実行してください。`);
+for (const p of nmResult.missing)  console.warn(`spawn-worker: [要対応] junction作成に失敗しました: ${p}`);
 
 // --- worktree のロールバック関数（以降の処理が失敗したときに使う） ---
 const rollbackWorktree = () => {

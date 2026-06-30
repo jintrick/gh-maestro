@@ -22,7 +22,6 @@ function withDirs(fn) {
 
 test('workspaceにnode_modulesがあればjunctionを作成する', () => {
   withDirs((workspace, worktree) => {
-    fs.writeFileSync(path.join(worktree, 'package.json'), '{}');
     fs.mkdirSync(path.join(workspace, 'node_modules'), { recursive: true });
 
     const { linked, skipped, missing } = linkNodeModules(worktree, workspace);
@@ -34,22 +33,19 @@ test('workspaceにnode_modulesがあればjunctionを作成する', () => {
   });
 });
 
-test('workspaceにnode_modulesがなければmissingに報告する', () => {
+test('workspaceにnode_modulesがなければjunctionは作成されない', () => {
   withDirs((workspace, worktree) => {
-    fs.writeFileSync(path.join(worktree, 'package.json'), '{}');
-    // workspaceにnode_modulesを作らない
-
+    // workspace に node_modules を作らない
     const { linked, skipped, missing } = linkNodeModules(worktree, workspace);
 
     assert.equal(linked.length, 0);
-    assert.equal(missing.length, 1, `missing: ${missing}`);
+    assert.equal(missing.length, 0, 'workspaceにnode_modulesがない場合はエラーではない');
     assert.ok(!fs.existsSync(path.join(worktree, 'node_modules')));
   });
 });
 
 test('worktreeにすでにnode_modulesがあればskipする', () => {
   withDirs((workspace, worktree) => {
-    fs.writeFileSync(path.join(worktree, 'package.json'), '{}');
     fs.mkdirSync(path.join(workspace, 'node_modules'), { recursive: true });
     fs.mkdirSync(path.join(worktree,  'node_modules'), { recursive: true });
 
@@ -61,28 +57,13 @@ test('worktreeにすでにnode_modulesがあればskipする', () => {
   });
 });
 
-test('package.jsonがなければnode_modulesを作成しない', () => {
+test('workspaceのサブディレクトリのnode_modulesもjunctionを作成する', () => {
   withDirs((workspace, worktree) => {
-    fs.mkdirSync(path.join(workspace, 'node_modules'), { recursive: true });
-    // package.jsonを作らない
-
-    const { linked, skipped, missing } = linkNodeModules(worktree, workspace);
-
-    assert.equal(linked.length, 0);
-    assert.equal(skipped.length, 0);
-    assert.equal(missing.length, 0);
-    assert.ok(!fs.existsSync(path.join(worktree, 'node_modules')));
-  });
-});
-
-test('サブディレクトリのpackage.jsonも処理する', () => {
-  withDirs((workspace, worktree) => {
-    const subWorktree  = path.join(worktree,  'packages', 'app');
+    // npm workspaces非hoisted構成: packages/app が自前のnode_modulesを持つ
     const subWorkspace = path.join(workspace, 'packages', 'app');
-    fs.mkdirSync(subWorktree,  { recursive: true });
-    fs.mkdirSync(subWorkspace, { recursive: true });
-    fs.writeFileSync(path.join(subWorktree,  'package.json'), '{}');
+    const subWorktree  = path.join(worktree,  'packages', 'app');
     fs.mkdirSync(path.join(subWorkspace, 'node_modules'), { recursive: true });
+    fs.mkdirSync(subWorktree, { recursive: true });
 
     const { linked } = linkNodeModules(worktree, workspace);
 
@@ -91,17 +72,34 @@ test('サブディレクトリのpackage.jsonも処理する', () => {
   });
 });
 
+test('hoisted構成ではルートのみjunctionを作成しサブパッケージをmissingにしない', () => {
+  withDirs((workspace, worktree) => {
+    // npm workspaces hoisted構成: ルートにのみnode_modulesが存在する
+    fs.mkdirSync(path.join(workspace, 'node_modules'), { recursive: true });
+    // packages/app, packages/server はpackage.jsonを持つがnode_modulesを持たない
+    const subWs1 = path.join(workspace, 'packages', 'app');
+    const subWs2 = path.join(workspace, 'packages', 'server');
+    fs.mkdirSync(subWs1, { recursive: true });
+    fs.mkdirSync(subWs2, { recursive: true });
+    fs.writeFileSync(path.join(subWs1, 'package.json'), '{}');
+    fs.writeFileSync(path.join(subWs2, 'package.json'), '{}');
+
+    const { linked, missing } = linkNodeModules(worktree, workspace);
+
+    assert.equal(linked.length, 1, 'ルートのjunctionのみ作成される');
+    assert.equal(missing.length, 0, 'サブパッケージのnode_modules不在はエラーではない');
+  });
+});
+
 test('node_modulesディレクトリ自体には再帰しない', () => {
   withDirs((workspace, worktree) => {
-    // workspace/node_modules/some-pkg/package.json があっても処理しない
+    // workspace/node_modules/some-pkg/node_modules があっても内部には入らない
     const pkgDir = path.join(workspace, 'node_modules', 'some-pkg');
-    fs.mkdirSync(pkgDir, { recursive: true });
-    fs.writeFileSync(path.join(pkgDir, 'package.json'), '{}');
-    fs.mkdirSync(path.join(workspace, 'node_modules'), { recursive: true });
-    fs.writeFileSync(path.join(worktree, 'package.json'), '{}');
+    fs.mkdirSync(path.join(pkgDir, 'node_modules'), { recursive: true });
 
     const { linked } = linkNodeModules(worktree, workspace);
-    // worktree root の junction 1つのみ（some-pkg は処理しない）
+
+    // worktree root の junction 1つのみ（some-pkg/node_modules には入らない）
     assert.equal(linked.length, 1);
   });
 });
