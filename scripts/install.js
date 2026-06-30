@@ -236,10 +236,22 @@ for (const skill of skillDirs) {
 
 step('Installing default agents config...');
 const agentsConfigPath = ghMaestroPath('agents.json');
+
+// reasonix は npm 経由インストール時に shell ラッパー（.ps1/.sh/.cmd）しか PATH に入らない。
+// WezTerm の split-pane 直接起動では shell を介さないため、これらのラッパーは実行できない。
+// node + reasonix.js パスで直接起動することで Windows/Linux 共通の shell-free 起動を実現する。
+const _rxNpmRoot = (() => {
+  try { return require('child_process').execSync('npm root -g', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim(); }
+  catch { return null; }
+})();
+const _rxJsPath = _rxNpmRoot ? path.join(_rxNpmRoot, 'reasonix', 'bin', 'reasonix.js') : null;
+const _rxCmd = (_rxJsPath && fs.existsSync(_rxJsPath)) ? 'node' : 'reasonix';
+const _rxArgs = (_rxJsPath && fs.existsSync(_rxJsPath)) ? [_rxJsPath, '--yolo'] : ['--yolo'];
+
 const defaults = [
   { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
   { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
-  { id: 'reasonix',  label: 'Reasonix Code',           command: 'reasonix',  extraArgs: ['--yolo'], promptFlag: null, skillsViaMd: true },
+  { id: 'reasonix',  label: 'Reasonix Code',           command: _rxCmd,      extraArgs: _rxArgs, promptFlag: null, skillsViaMd: true },
   { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' },
 ];
 if (!fs.existsSync(agentsConfigPath)) {
@@ -265,7 +277,10 @@ if (!fs.existsSync(agentsConfigPath)) {
       // command がデフォルトのままのときだけ extraArgs/promptFlag をデフォルトに追従させる。
       // ユーザーが command をカスタマイズしている場合、extraArgs はその command と結合している
       // （例: command=pwsh の DeepSeek ラッパー）ため、上書きすると起動が壊れる。touch しない。
-      if (entry.command === agent.command) {
+      // reasonix は旧デフォルト('reasonix')→新デフォルト('node')への移行も行う。
+      const isReasonixMigration = agent.id === 'reasonix' && entry.command === 'reasonix' && agent.command === 'node';
+      if (entry.command === agent.command || isReasonixMigration) {
+        entry.command = agent.command;
         entry.extraArgs = agent.extraArgs;
         entry.promptFlag = agent.promptFlag;
         if ('skillsViaMd' in agent) entry.skillsViaMd = agent.skillsViaMd;
