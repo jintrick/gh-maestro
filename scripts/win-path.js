@@ -2,7 +2,7 @@
 // Git Bash の POSIX パス（/tmp/foo, /c/Users/...）を Windows パスに変換する。
 // cygpath が使えればそれを優先し、なければ汎用フォールバックで処理する。
 
-const { spawnSync } = require('child_process');
+const { spawnSync } = require('./child-process');
 
 function toWinPath(p) {
   if (!p.startsWith('/')) return p;
