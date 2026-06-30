@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const SCRIPT = path.join(__dirname, '..', 'skills', 'gh-maestro-orchestrator', 'scripts', 'get-context.js');
+const SCRIPT = path.join(__dirname, '..', 'scripts', 'get-context.js');
 const REPO_ROOT = path.join(__dirname, '..');
 
 test('REPO と WORKSPACE を正しいフォーマットで出力する', () => {

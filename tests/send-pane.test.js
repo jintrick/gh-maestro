@@ -6,8 +6,24 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { pathToFileURL } = require('url');
 
-const SCRIPT = path.join(__dirname, '..', 'skills', 'gh-maestro-base', 'scripts', 'send-pane.js');
+const SCRIPT = path.join(__dirname, '..', 'scripts', 'send-pane.js');
+
+// wezterm を差し替えるための node 製モックを書き出す。
+// `cli list` には MOCK_LIST_JSON を返し、その他（send-text 等）は exit 0。
+// 実バイナリへの依存と OS 差（PATH 区切り・.cmd 起動制限）を回避する。
+function writeWeztermMock(dir) {
+  const mockPath = path.join(dir, 'wezterm-mock.js');
+  fs.writeFileSync(
+    mockPath,
+    "const a = process.argv.slice(2).join(' ');\n" +
+    "if (a.startsWith('cli list')) process.stdout.write(process.env.MOCK_LIST_JSON || '[]');\n" +
+    "process.exit(0);\n",
+    'utf8'
+  );
+  return mockPath;
+}
 
 function run(args, env = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
@@ -77,5 +93,75 @@ test('orchestratorからの送信にはプレフィックス "orchestratorです
       WEZTERM_PANE: '1',
     });
     assert.ok(!r.stderr.includes('Usage'));
+  });
+});
+
+// ── pane cwd 検証 ─────────────────────────────────────────────────────
+
+test('cwd が期待と異なる pane のみの場合、cwd 再検索で見つからずエラー終了する', () => {
+  withTempDir(tmp => {
+    const workspace = path.join(tmp, 'project');
+    fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.gh-maestro', 'workers.json'),
+      JSON.stringify({ orchestrator: '0', 'issue-1-fix': '1' }),
+      'utf8'
+    );
+
+    // mock: pane_id=1 だが cwd が全然違う（cwd 検索でもヒットしない）
+    const r = run(['issue-1-fix', 'hello', '--workspace', workspace], {
+      WEZTERM_PANE: '0',
+      WEZTERM_MOCK: writeWeztermMock(tmp),
+      MOCK_LIST_JSON: '[{"pane_id":1,"cwd":"file:///some/other/dir"}]',
+    });
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /見つかりません/);
+  });
+});
+
+test('pane_id が間違っていても cwd 一致ペインがあればそちらに送信する', () => {
+  withTempDir(tmp => {
+    const workspace = path.join(tmp, 'project');
+    const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'issue-1-fix');
+    fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.gh-maestro', 'workers.json'),
+      JSON.stringify({ orchestrator: '0', 'issue-1-fix': '99' }),  // 意図的に違う pane_id
+      'utf8'
+    );
+
+    const cwdJson = `[{"pane_id":77,"cwd":"${pathToFileURL(worktree).href}"}]`;  // 正しい cwd のペインは 77
+
+    const r = run(['issue-1-fix', 'hello', '--workspace', workspace], {
+      WEZTERM_PANE: '0',
+      WEZTERM_MOCK: writeWeztermMock(tmp),
+      MOCK_LIST_JSON: cwdJson,
+    });
+    assert.equal(r.status, 0, `expected exit 0, got ${r.status}: ${r.stderr}`);
+    assert.match(r.stderr, /→ 77/, 'should report corrected pane_id 77');
+  });
+});
+
+test('cwd が一致する場合は検証を通過する', () => {
+  withTempDir(tmp => {
+    const workspace = path.join(tmp, 'project');
+    const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'issue-1-fix');
+    fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.gh-maestro', 'workers.json'),
+      JSON.stringify({ orchestrator: '0', 'issue-1-fix': '1' }),
+      'utf8'
+    );
+
+    const cwdJson = `[{"pane_id":1,"cwd":"${pathToFileURL(worktree).href}"}]`;
+
+    const r = run(['issue-1-fix', 'hello', '--workspace', workspace], {
+      WEZTERM_PANE: '0',
+      WEZTERM_MOCK: writeWeztermMock(tmp),
+      MOCK_LIST_JSON: cwdJson,
+    });
+    assert.ok(!r.stderr.includes('cwd'), `cwd検証が誤って失敗しました: ${r.stderr}`);
   });
 });

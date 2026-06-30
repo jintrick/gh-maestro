@@ -3,10 +3,26 @@
 'use strict';
 
 const { spawnSync } = require('child_process');
-const [,, pr, file] = process.argv;
+
+const USAGE = `post-review.js — レビュー結果(JSON)を GitHub PR レビューとして投稿する
+
+Usage: node post-review.js <PR> <json-file>
+
+Arguments:
+  <PR>         投稿先の PR 番号
+  <json-file>  GitHub の pulls/{pr}/reviews API に渡す JSON ファイルのパス
+
+リポジトリは gh repo view から自動解決する。`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+const [pr, file] = argv;
 
 if (!pr || !file) {
-  console.error('Usage: post-review.js <PR> <json-file>');
+  console.error(USAGE);
   process.exit(1);
 }
 

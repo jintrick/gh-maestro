@@ -80,24 +80,6 @@ function expandHome(p) {
   return p.replace(/^~/, process.env.HOME || process.env.USERPROFILE || '~');
 }
 
-function syncDir(src, dest) {
-  fs.mkdirSync(dest, { recursive: true });
-  const srcNames = new Set(fs.readdirSync(src));
-  for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
-    if (!srcNames.has(entry.name)) {
-      const stale = path.join(dest, entry.name);
-      if (entry.isDirectory()) fs.rmSync(stale, { recursive: true, force: true });
-      else fs.unlinkSync(stale);
-    }
-  }
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) syncDir(srcPath, destPath);
-    else fs.copyFileSync(srcPath, destPath);
-  }
-}
-
 function applySubstitutions(content, substitutions) {
   let result = content;
   let prev;
@@ -134,6 +116,24 @@ const skillDirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
   .filter(e => e.isDirectory())
   .map(e => e.name);
 
+// ~/.gh-maestro/ は gh-maestro 専用ディレクトリ。install が書いたものだけを残し、
+// それ以外（旧バージョンの遺産）は最後に prune で除去する。
+// 「書いた＝残す」を保証するため、ここ配下のパスは必ず ghMaestroPath() で組み立てる。
+// パスを作る行為がそのままトップレベル名を keep に記録するので、登録し忘れる余地が無い。
+const ghMaestroDir = expandHome('~/.gh-maestro');
+const ghMaestroKeep = new Set();
+function ghMaestroPath(...segs) {
+  ghMaestroKeep.add(segs[0]);
+  return path.join(ghMaestroDir, ...segs);
+}
+
+// 全スクリプト（CLI・モジュール）を集約する単一ディレクトリ。
+// SKILL.md からは {{SCRIPTS_PATH}} がこの絶対パスに置換されて参照される。
+const SHARED_SCRIPTS = ghMaestroPath('scripts');
+
+// ── 各エージェントのスキルディレクトリに SKILL.md のみを配置 ──────────────────
+// スクリプトはスキルdirには置かず、すべて SHARED_SCRIPTS に集約する（下の共有install参照）。
+
 for (const [agentName, config] of Object.entries(agents)) {
   const dest = expandHome(config.dest);
   step(`Installing skills for ${agentName}...`);
@@ -149,9 +149,9 @@ for (const [agentName, config] of Object.entries(agents)) {
     }
   }
 
-  // SCRIPTS_PATH はインストール先から絶対パスで計算する
+  // {{SCRIPTS_PATH}} は集約先（SHARED_SCRIPTS）の絶対パスに統一する
   const substitutions = Object.assign({}, config.substitutions, {
-    SCRIPTS_PATH: path.join(dest, 'gh-maestro-orchestrator', 'scripts'),
+    SCRIPTS_PATH: SHARED_SCRIPTS,
   });
 
   for (const skill of skillDirs) {
@@ -165,120 +165,149 @@ for (const [agentName, config] of Object.entries(agents)) {
     const content = applySubstitutions(template, substitutions);
     fs.writeFileSync(path.join(destSkill, 'SKILL.md'), content, 'utf8');
 
-    const scriptsSrc = path.join(SKILLS_DIR, skill, 'scripts');
-    if (fs.existsSync(scriptsSrc)) {
-      syncDir(scriptsSrc, path.join(destSkill, 'scripts'));
+    // 旧バージョンが配置していた per-skill の scripts/ を stale として削除する
+    const staleScripts = path.join(destSkill, 'scripts');
+    if (fs.existsSync(staleScripts)) {
+      fs.rmSync(staleScripts, { recursive: true, force: true });
+      ok(`removed stale per-skill scripts: ${path.join(skill, 'scripts')}`);
     }
 
     ok(`${skill} -> ${destSkill}`);
   }
 }
 
-// ── Base scripts を全スキルに配布 ────────────────────────────────────────────
+// ── scripts/ を SHARED_SCRIPTS にミラーする ───────────────────────────────────
+// リポジトリの scripts/ が、インストール先 ~/.gh-maestro/scripts/ と1:1で対応する。
+// CLIスクリプトもモジュール(link-node-modules等)も全て scripts/ に同居しているため、
+// 各スクリプトの require('./xxx') がリポジトリ実行・インストール先実行の両方で解決する。
 
-step('Distributing base scripts to all skills...');
-const baseScripts = ['send-pane.js'];
-const baseScriptsSrc = path.join(SKILLS_DIR, 'gh-maestro-base', 'scripts');
-const recipientSkills = skillDirs.filter(skill => {
-  if (skill === 'gh-maestro-base') return false;
-  const skillMd = path.join(SKILLS_DIR, skill, 'SKILL.md');
-  return fs.existsSync(skillMd) &&
-    fs.readFileSync(skillMd, 'utf8').includes('{{SCRIPTS_PATH}}');
+step('Installing all scripts into the shared directory...');
+fs.mkdirSync(SHARED_SCRIPTS, { recursive: true });
+
+const INSTALL_EXCLUDE = new Set(['install.js']);
+const scriptsDir = path.join(ROOT, 'scripts');
+const scriptFiles = fs.readdirSync(scriptsDir)
+  .filter(f => (f.endsWith('.js') || f.endsWith('.md')) && !INSTALL_EXCLUDE.has(f));
+
+// stale 削除: scripts/ に無いファイルを集約先から除去する
+const expected = new Set(scriptFiles);
+for (const f of fs.readdirSync(SHARED_SCRIPTS)) {
+  if (!expected.has(f)) {
+    const p = path.join(SHARED_SCRIPTS, f);
+    if (fs.statSync(p).isFile()) {
+      fs.unlinkSync(p);
+      ok(`removed stale script: ${f}`);
+    }
+  }
+}
+for (const f of scriptFiles) {
+  fs.copyFileSync(path.join(scriptsDir, f), path.join(SHARED_SCRIPTS, f));
+}
+ok(`${scriptFiles.length} scripts -> ${SHARED_SCRIPTS}`);
+
+// ── 共有スキルを ~/.gh-maestro/skills/ にデプロイ ─────────────────────────────
+// スキルシステムを持たないエージェント（reasonix 等）が AGENTS.md 経由でスキルを読むための
+// 正規コピー。SCRIPTS_PATH は共有スクリプト先で統一する。
+step('Installing shared skill files into ~/.gh-maestro/skills/...');
+const SHARED_SKILLS = ghMaestroPath('skills');
+fs.mkdirSync(SHARED_SKILLS, { recursive: true });
+
+const canonicalAgent = agents['claude'] || agents[Object.keys(agents)[0]];
+const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {}, {
+  SCRIPTS_PATH: SHARED_SCRIPTS,
 });
 
-for (const [, config] of Object.entries(agents)) {
-  const dest = expandHome(config.dest);
-  for (const skill of recipientSkills) {
-    for (const script of baseScripts) {
-      const src = path.join(baseScriptsSrc, script);
-      if (!fs.existsSync(src)) { fail(`${src} not found`); }
-      const destDir = path.join(dest, skill, 'scripts');
-      fs.mkdirSync(destDir, { recursive: true });
-      fs.copyFileSync(src, path.join(destDir, script));
-    }
-    ok(`send-pane.js -> ${path.join(dest, skill, 'scripts')}`);
+// stale 削除
+for (const entry of fs.readdirSync(SHARED_SKILLS, { withFileTypes: true })) {
+  if (entry.isDirectory() && !skillDirs.includes(entry.name)) {
+    fs.rmSync(path.join(SHARED_SKILLS, entry.name), { recursive: true, force: true });
+    ok(`removed stale shared skill: ${entry.name}`);
   }
 }
-
-// ── lib モジュールを全スキルに配布 ────────────────────────────────────────────
-
-step('Distributing lib modules to all skills...');
-const libModules = ['link-node-modules.js'];
-const libSrc = path.join(ROOT, 'lib');
-for (const [, config] of Object.entries(agents)) {
-  const dest = expandHome(config.dest);
-  for (const skill of recipientSkills) {
-    const destDir = path.join(dest, skill, 'scripts');
-    fs.mkdirSync(destDir, { recursive: true });
-    for (const module of libModules) {
-      const src = path.join(libSrc, module);
-      if (!fs.existsSync(src)) { fail(`${src} not found`); }
-      fs.copyFileSync(src, path.join(destDir, module));
-    }
-    ok(`lib modules -> ${destDir}`);
-  }
+for (const skill of skillDirs) {
+  const templatePath = path.join(SKILLS_DIR, skill, 'SKILL.md');
+  if (!fs.existsSync(templatePath)) continue;
+  const destSkillDir = path.join(SHARED_SKILLS, skill);
+  fs.mkdirSync(destSkillDir, { recursive: true });
+  const template = fs.readFileSync(templatePath, 'utf8');
+  fs.writeFileSync(path.join(destSkillDir, 'SKILL.md'), applySubstitutions(template, sharedSubstitutions), 'utf8');
+  ok(`${skill} -> ${destSkillDir} (shared)`);
 }
-
-// ── Shared scripts & assets ───────────────────────────────────────────────────
-
-step('Installing shared scripts...');
-const sharedDest = expandHome('~/.gh-maestro/scripts');
-fs.mkdirSync(sharedDest, { recursive: true });
-const scriptsDir = path.join(ROOT, 'scripts');
-const INSTALL_EXCLUDE = new Set(['install.js']);
-const assetScripts = new Set(
-  fs.readdirSync(scriptsDir).filter(f => f.endsWith('.js') && !INSTALL_EXCLUDE.has(f))
-);
-// stale ファイルを削除
-for (const f of fs.readdirSync(sharedDest)) {
-  if (!assetScripts.has(f)) {
-    fs.unlinkSync(path.join(sharedDest, f));
-    ok(`removed stale script: ${f}`);
-  }
-}
-for (const script of assetScripts) {
-  fs.copyFileSync(path.join(scriptsDir, script), path.join(sharedDest, script));
-  ok(`${script} -> ${sharedDest}`);
-}
-
-step('Installing caller template workflows...');
-const callerTemplateSrc = path.join(ROOT, 'workflows', 'caller-template');
-const callerTemplateDest = expandHome('~/.gh-maestro/workflows/caller-template');
-syncDir(callerTemplateSrc, callerTemplateDest);
-ok(`workflows/caller-template -> ${callerTemplateDest}`);
-
-step('Installing reviewer workflow files...');
-const workflowsSrc = path.join(ROOT, 'workflows');
-const workflowsDest = expandHome('~/.gh-maestro/workflows');
-for (const f of fs.readdirSync(workflowsSrc)) {
-  if (!f.endsWith('.lock.yml') && !f.endsWith('.md')) continue;
-  const src = path.join(workflowsSrc, f);
-  const dest = path.join(workflowsDest, f);
-  fs.mkdirSync(workflowsDest, { recursive: true });
-  fs.copyFileSync(src, dest);
-  ok(`workflows/${f} -> ${workflowsDest}`);
-}
-
-step('Installing default review policy...');
-const reviewPolicySrc = path.join(ROOT, 'assets', 'review-policy.md');
-if (!fs.existsSync(reviewPolicySrc)) fail('assets/review-policy.md not found');
-const reviewPolicyDest = expandHome('~/.gh-maestro/review-policy.md');
-const reviewPolicyContent = stripFrontmatter(fs.readFileSync(reviewPolicySrc, 'utf8'));
-fs.writeFileSync(reviewPolicyDest, reviewPolicyContent, 'utf8');
-ok(`review-policy.md -> ${expandHome('~/.gh-maestro')}`);
 
 step('Installing default agents config...');
-const agentsConfigPath = expandHome('~/.gh-maestro/agents.json');
+const agentsConfigPath = ghMaestroPath('agents.json');
+
+// reasonix は npm 経由インストール時に shell ラッパー（.ps1/.sh/.cmd）しか PATH に入らない。
+// WezTerm の split-pane 直接起動では shell を介さないため、これらのラッパーは実行できない。
+// node + reasonix.js パスで直接起動することで Windows/Linux 共通の shell-free 起動を実現する。
+const _rxNpmRoot = (() => {
+  try { return require('child_process').execSync('npm root -g', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim(); }
+  catch { return null; }
+})();
+const _rxJsPath = _rxNpmRoot ? path.join(_rxNpmRoot, 'reasonix', 'bin', 'reasonix.js') : null;
+const _rxCmd = (_rxJsPath && fs.existsSync(_rxJsPath)) ? 'node' : 'reasonix';
+const _rxArgs = (_rxJsPath && fs.existsSync(_rxJsPath)) ? [_rxJsPath, '--yolo'] : ['--yolo'];
+
+const defaults = [
+  { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
+  { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
+  { id: 'reasonix',  label: 'Reasonix Code',           command: _rxCmd,      extraArgs: _rxArgs, promptFlag: null, skillsViaMd: true },
+  { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' },
+];
 if (!fs.existsSync(agentsConfigPath)) {
-  const defaultAgents = [
-    { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
-    { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
-    { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' },
-  ];
-  fs.writeFileSync(agentsConfigPath, JSON.stringify(defaultAgents, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(agentsConfigPath, JSON.stringify(defaults, null, 2) + '\n', 'utf8');
   ok(`agents.json -> ${expandHome('~/.gh-maestro')}`);
 } else {
-  ok(`agents.json already exists — skipping`);
+  let existing = [];
+  try {
+    existing = JSON.parse(fs.readFileSync(agentsConfigPath, 'utf8'));
+    if (!Array.isArray(existing)) existing = [];
+  } catch {
+    ok('agents.json parse failed — overwriting with defaults');
+    existing = [];
+  }
+  const existingMap = new Map(existing.map(a => [a.id, a]));
+  let added = 0, updated = 0;
+  for (const agent of defaults) {
+    if (!existingMap.has(agent.id)) {
+      existing.push(agent);
+      added++;
+    } else {
+      const entry = existingMap.get(agent.id);
+      // command がデフォルトのままのときだけ extraArgs/promptFlag をデフォルトに追従させる。
+      // ユーザーが command をカスタマイズしている場合、extraArgs はその command と結合している
+      // （例: command=pwsh の DeepSeek ラッパー）ため、上書きすると起動が壊れる。touch しない。
+      // reasonix は旧デフォルト('reasonix')→新デフォルト('node')への移行も行う。
+      const isReasonixMigration = agent.id === 'reasonix' && entry.command === 'reasonix' && agent.command === 'node';
+      if (entry.command === agent.command || isReasonixMigration) {
+        entry.command = agent.command;
+        entry.extraArgs = agent.extraArgs;
+        entry.promptFlag = agent.promptFlag;
+        if ('skillsViaMd' in agent) entry.skillsViaMd = agent.skillsViaMd;
+        // 廃止されたフィールドを除去
+        delete entry.positionalPrompt;
+        updated++;
+      }
+    }
+  }
+  if (added > 0 || updated > 0) {
+    fs.writeFileSync(agentsConfigPath, JSON.stringify(existing, null, 2) + '\n', 'utf8');
+    ok(`agents.json updated (+${added} added, ${updated} refreshed)`);
+  } else {
+    ok('agents.json already up to date');
+  }
+}
+
+// ── ~/.gh-maestro/ を権威的に管理する ─────────────────────────────────────────
+// install がこの実行中に書いたトップレベル名（ghMaestroKeep）だけを残し、それ以外
+// （旧バージョンの遺産: workflows/ ・.claude/ ・GH_MAESTRO_REF ・廃止済み review-policy.md 等）
+// を除去する。keep リストは ghMaestroPath() がパス生成時に自動記録するので、手書きの
+// 管理対象リストは存在せず、登録し忘れによるサイレント削除が起きない。
+step('Pruning ~/.gh-maestro/ of unmanaged legacy artifacts...');
+for (const entry of fs.readdirSync(ghMaestroDir)) {
+  if (ghMaestroKeep.has(entry)) continue;
+  fs.rmSync(path.join(ghMaestroDir, entry), { recursive: true, force: true });
+  ok(`removed legacy artifact: ${entry}`);
 }
 
 // ── UserPromptExpansion hook を ~/.claude/settings.json に登録 ────────────────
@@ -302,30 +331,27 @@ if (!userSettings.hooks.UserPromptExpansion) userSettings.hooks.UserPromptExpans
 userSettings.hooks.UserPromptExpansion =
   userSettings.hooks.UserPromptExpansion.filter(g => !/gh-maestro/.test(g.matcher ?? ''));
 
-// orchestratorスクリプトのパス（$HOME相対でシェル展開に任せる）
-const claudeSkillsRelToHome = path.relative(
-  process.env.HOME || process.env.USERPROFILE || '',
-  expandHome(agents['claude'] ? agents['claude'].dest : '~/.claude/skills')
-).replace(/\\/g, '/');
-const orchScripts = `$HOME/${claudeSkillsRelToHome}/gh-maestro-orchestrator/scripts`;
-
-// フックを追加
+// フックが呼ぶスクリプトはすべて集約先（SHARED_SCRIPTS）の絶対パスで配線する
+// （インストール時に解決し、シェル展開に依存しない）。
 userSettings.hooks.UserPromptExpansion.push({
   matcher: '^gh-maestro$',
   hooks: [
     {
       type: 'command',
-      command: 'node "$HOME/.gh-maestro/scripts/gh-maestro-setup.js"',
+      command: 'node',
+      args: [path.join(SHARED_SCRIPTS, 'gh-maestro-setup.js')],
       statusMessage: 'gh-maestro 前提条件チェック中...',
     },
     {
       type: 'command',
-      command: `node "${orchScripts}/reset-session.js" --workspace "$(pwd)" --quiet`,
+      command: 'node',
+      args: [path.join(SHARED_SCRIPTS, 'reset-session.js'), '--workspace', '${CLAUDE_PROJECT_DIR}', '--quiet'],
       statusMessage: 'セッションリセット中...',
     },
     {
       type: 'command',
-      command: `node "${orchScripts}/get-context.js"`,
+      command: 'node',
+      args: [path.join(SHARED_SCRIPTS, 'get-context.js')],
     },
   ],
 });
@@ -336,6 +362,9 @@ ok(`UserPromptExpansion hook -> ${userSettingsPath}`);
 
 // --- git pre-commit hook (core.hooksPath) を設定 ---
 step('Configuring git pre-commit hook...');
+// Unix では実行権限が無いと git がフックを黙ってスキップするため付与する（Windowsでは無視される）。
+try { fs.chmodSync(path.join(ROOT, '.githooks', 'pre-commit'), 0o755); } catch {}
+try { fs.chmodSync(path.join(ROOT, 'install.sh'),              0o755); } catch {}
 const { spawnSync: spawnGit } = require('child_process');
 const hookResult = spawnGit('git', ['config', 'core.hooksPath', '.githooks'], { cwd: ROOT, encoding: 'utf8' });
 if (hookResult.status === 0) {
