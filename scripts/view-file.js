@@ -4,7 +4,7 @@
 // Usage:
 //   node view-file.js <filepath>
 
-const { spawnSync } = require('child_process');
+const { spawnSync } = require('./child-process');
 const path = require('path');
 
 // win-path は常に同一ディレクトリに同居する（リポジトリの scripts/ もインストール先も）。

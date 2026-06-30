@@ -18,7 +18,7 @@
 //
 // 標準出力: ワーカー名（例: issue-5-implement / task-investigate-auth）
 
-const { execSync, spawn, spawnSync } = require('child_process');
+const { execSync, spawn, spawnSync } = require('./child-process');
 const { existsSync, mkdirSync, readFileSync, writeFileSync,
         lstatSync, rmdirSync, rmSync } = require('fs');
 const { resolve, relative } = require('path');

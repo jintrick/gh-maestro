@@ -8,7 +8,7 @@
 // workspace の解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索
 
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawnSync } = require('./child-process');
 const { readFileSync, existsSync } = require('fs');
 
 const USAGE = `send-pane.js — 起動中のワーカー/orchestrator のペインにメッセージを送る
