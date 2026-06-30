@@ -288,17 +288,18 @@ if (agentConfig.skillsViaMd) {
 }
 
 const agentCmdArgs = (() => {
+  const shortPrompt = agentConfig.skillsViaMd
+    ? `orchestratorです。AGENTS.mdの指示に従って作業を開始してください。`
+    : `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。詳細は ${toUnix(promptFile)} を参照してください。`;
+
+  if (agentConfig.positionalPrompt) {
+    // reasonix: インタラクティブモードでプロンプトをpositional argとして渡す
+    // スキルと変数はAGENTS.mdに書き出し済み（skillsViaMd）
+    return [agentConfig.command, ...agentConfig.extraArgs, shortPrompt];
+  }
   if (agentConfig.promptFlag) {
     // agy: -i フラグでargv経由（改行なしの短い参照プロンプトを渡す）
-    // reasonix: run サブコマンド経由（AGENTS.md にスキルと変数を埋め込み済み）
-    const shortPrompt = agentConfig.skillsViaMd
-      ? `orchestratorです。AGENTS.mdの指示に従って作業を開始してください。`
-      : `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。詳細は ${toUnix(promptFile)} を参照してください。`;
-    return [
-      agentConfig.command,
-      ...agentConfig.extraArgs,
-      agentConfig.promptFlag, shortPrompt,
-    ];
+    return [agentConfig.command, ...agentConfig.extraArgs, agentConfig.promptFlag, shortPrompt];
   }
   // claude/claude-ds: --append-system-prompt-file でファイル経由
   return [
