@@ -370,6 +370,7 @@ if (skill === 'gh-maestro-coder' && issue) {
     cwd: workspace,
     stdio: 'ignore',
     detached: true,
+    windowsHide: true,
   });
   notifier.unref();
   console.warn(`spawn-worker: poll-and-notify を起動しました (issue=${issue})`);
