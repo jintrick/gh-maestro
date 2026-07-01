@@ -184,7 +184,7 @@ for (const [agentName, config] of Object.entries(agents)) {
 step('Installing all scripts into the shared directory...');
 fs.mkdirSync(SHARED_SCRIPTS, { recursive: true });
 
-const INSTALL_EXCLUDE = new Set(['install.js', 'sync-rules.js']);
+const INSTALL_EXCLUDE = new Set(['install.js']);
 const scriptsDir = path.join(ROOT, 'scripts');
 const scriptFiles = fs.readdirSync(scriptsDir)
   .filter(f => (f.endsWith('.js') || f.endsWith('.md')) && !INSTALL_EXCLUDE.has(f));

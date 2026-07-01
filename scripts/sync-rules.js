@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..');
+const ROOT = process.cwd();
 const CLAUDE_RULES = path.join(ROOT, '.claude', 'rules');
 const AGENTS_RULES = path.join(ROOT, '.agents', 'rules');
 
