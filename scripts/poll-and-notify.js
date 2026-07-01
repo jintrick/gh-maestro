@@ -21,6 +21,13 @@ if (!issue || !workspace) {
 
 const scriptsDir = __dirname;
 
+// このプロセスは spawn-worker.js（orchestratorのBashツール実行）の子として起動されるため、
+// WEZTERM_PANE をそのまま継承するとsend-pane.jsの送信者逆引きがorchestrator自身と誤認する
+// （orchestratorのpane-idとworkers.jsonのorchestratorエントリが一致してしまうため）。
+// 通知メッセージが「orchestratorです。」と自己言及するのを防ぐため、明示的に外す。
+const notifierEnv = { ...process.env };
+delete notifierEnv.WEZTERM_PANE;
+
 const poll = spawn(process.execPath, [resolve(scriptsDir, 'poll-pr.js'), issue], {
   cwd: workspace,
   stdio: ['ignore', 'pipe', 'inherit'],
@@ -38,7 +45,7 @@ poll.stdout.on('data', (data) => {
       'orchestrator',
       '--workspace', workspace,
       line.trim(),
-    ], { stdio: 'inherit' });
+    ], { stdio: 'inherit', env: notifierEnv });
   }
 });
 
@@ -49,7 +56,7 @@ poll.on('exit', (code) => {
       'orchestrator',
       '--workspace', workspace,
       buf.trim(),
-    ], { stdio: 'inherit' });
+    ], { stdio: 'inherit', env: notifierEnv });
   }
   process.exit(code ?? 0);
 });
