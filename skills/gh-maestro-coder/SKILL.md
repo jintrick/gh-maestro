@@ -44,6 +44,12 @@ gh issue edit $ISSUE --add-label "human-escalation"
 node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "Issue #$ISSUE の実装に失敗しました。human-escalation ラベルを付与しました。"
 ```
 
+## 実装時の注意
+
+- DOM/外部API/ライブラリの戻り値がnullable・optionalな場合、型アサーション（`as T`、非nullアサーション`!`など）でnullチェックを迂回しない。早期return・throw・assertで明示的にnullを排除してから使う
+- 主処理が成功した後に付随する後続処理（一覧再取得など）を行う場合、それぞれ独立したtry/catchで囲み、どちらの処理が失敗したかをエラーメッセージで区別できるようにする
+- 新規に追加した関数・IPCハンドラには、同一コミットで対応するテストケースを追加する
+
 ## 制約
 
 - `main` への直接pushは禁止
