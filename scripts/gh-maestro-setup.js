@@ -3,7 +3,7 @@
 // Validates prerequisites on first run; skips on subsequent runs via sentinel file.
 
 const { spawnSync } = require('child_process');
-const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync } = require('fs');
+const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, chmodSync } = require('fs');
 const { resolve } = require('path');
 
 const USAGE = `gh-maestro-setup.js — プロジェクトごとの前提条件チェックと初期セットアップ
@@ -192,12 +192,43 @@ function ensureDevBranch() {
   ok("Branch 'dev' exists");
 }
 
+// ─── 5. pre-commit フック設置 ─────────────────────────────────────────────────
+
+function ensurePreCommitHook() {
+  const hooksDir = resolve(workspaceRoot, '.git', 'hooks');
+  const hookPath = resolve(hooksDir, 'pre-commit');
+  const syncScript = resolve(require('os').homedir(), '.gh-maestro', 'scripts', 'sync-rules.js');
+  const marker = 'gh-maestro:sync-rules';
+  const entry = [
+    `# ${marker}`,
+    `if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then`,
+    `  node "${syncScript}"`,
+    `fi`,
+  ].join('\n');
+
+  mkdirSync(hooksDir, { recursive: true });
+
+  if (existsSync(hookPath)) {
+    const current = readFileSync(hookPath, 'utf8');
+    if (current.includes(marker)) {
+      ok('pre-commit hook already contains sync-rules entry');
+      return;
+    }
+    appendFileSync(hookPath, `\n${entry}\n`, 'utf8');
+  } else {
+    writeFileSync(hookPath, `#!/bin/sh\n${entry}\n`, 'utf8');
+  }
+  try { chmodSync(hookPath, 0o755); } catch {}
+  ok(`pre-commit hook installed: ${hookPath}`);
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 checkEnvironment();
 prepareDirectories();
 ensureGitIgnore();
 ensureDevBranch();
+ensurePreCommitHook();
 
 mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
 writeFileSync(sentinelPath, '');
