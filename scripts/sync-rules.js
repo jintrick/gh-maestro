@@ -29,8 +29,7 @@ function parseFrontmatter(rawContent) {
 
 function toAgyFrontmatter(paths, file) {
   if (!paths || paths.length === 0) {
-    console.error(`sync-rules: ${file} has no paths: frontmatter`);
-    process.exit(1);
+    throw new Error(`sync-rules: ${file} has no paths: frontmatter`);
   }
   return `---\ntrigger: glob\nglobs: ${paths.join(',')}\n---\n`;
 }
@@ -52,7 +51,14 @@ function syncRules() {
     const dst = path.join(AGENTS_RULES, file);
     const content = fs.readFileSync(src, 'utf8');
     const { paths, body } = parseFrontmatter(content);
-    fs.writeFileSync(dst, toAgyFrontmatter(paths, file) + body, 'utf8');
+    let frontmatter;
+    try {
+      frontmatter = toAgyFrontmatter(paths, file);
+    } catch (e) {
+      console.error(e.message);
+      process.exit(1);
+    }
+    fs.writeFileSync(dst, frontmatter + body, 'utf8');
     console.log(`  synced: .claude/rules/${file} -> .agents/rules/${file}`);
   }
 
@@ -67,4 +73,6 @@ function syncRules() {
   }
 }
 
-syncRules();
+module.exports = { parseFrontmatter, toAgyFrontmatter };
+
+if (require.main === module) syncRules();
