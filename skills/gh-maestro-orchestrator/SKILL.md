@@ -137,7 +137,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 - ワーカーはその役割が完全に終わった時点で削除されている（PRを作っただけのcoderはまだ生きている。トリアージの結果、修正が必要な指摘があれば`send-pane.js`で転送する）
 - 同時進行中のIssue間でファイル競合が発生していない（競合可能性があれば前のPRがマージされてから次を起票する）
 - `--prompt`には役割とIssue番号のみが含まれ、実装詳細はIssueに記述されている
-- PRのレビューコメントをトリアージし、人間に結果を提示している。マージ判断は人間が行い、マージ後にIssueをクローズしてworktreeを削除している
+- PRのレビューコメントをトリアージし、人間に結果を提示している。マージ判断は人間が行い、マージ後は反省会（コーダーへの意見聴取を含む）を実施してからIssueをクローズしてworktreeを削除している。**反省会より前に`remove-worker.js`を実行しない**
 - ローカルの`BASE_BRANCH`はリモートと同期している（`spawn-worker.js`起動時に自動でfetch+ff-only更新される。手動gitpullは不要）
 
 **大規模タスクの分割（アンチパターン / 正しいパターン）:**
@@ -216,7 +216,7 @@ PR番号が確定したら、レビューコメントとマージ状態のポー
 - `PR_COMMENT:<user>:<body>` → PR全体へのコメント。同様にトリアージする
 - `PR_REVIEW:<user>:<state>:<body>` → 正式レビュー提出（GitHubの「Submit review」ボタン経由）。jintrickのレビューはこの形式で届く。stateで分岐：APPROVED → 人間にマージ許可シグナルとして提示、CHANGES_REQUESTED → bodyをトリアージしてコーダーにフィードバック、COMMENTED → PR_COMMENTと同様にトリアージ
 - `PR_PUSH:<sha>` → コーダーが修正コミットをPRにプッシュした。レビューは初回PR作成時のみ実行される（push後の再レビューはない）。マージ待ち状態に移行し、人間にマージ可否を確認する
-- `PR_MERGED:<PR番号>` → マージ完了。`git -C $WORKSPACE pull --ff-only` で `BASE_BRANCH` を最新化してから反省会へ進む
+- `PR_MERGED:<PR番号>` → マージ完了。`git -C $WORKSPACE pull --ff-only` で `BASE_BRANCH` を最新化してから反省会へ進む。**この時点ではワーカーpane・worktreeを削除しない**（`remove-worker.js`は下記「反省会」完了後にのみ実行する）
 - 人間からの報告も同様に受け付ける
 - ポーリング間隔は{{POLL_INTERVAL_SECONDS}}秒。アクティビティがなければ自動で間隔が延びる
 
