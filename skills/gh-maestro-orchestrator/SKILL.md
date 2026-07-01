@@ -165,12 +165,12 @@ W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "
 ## 基本フロー
 
 1. **Issue確定**: 人間と協働してIssueを起草・作成する（単独では作成しない）
-2. **Coder起動**: エージェントが未選択の場合は「エージェント選択」に従ってユーザーに確認してから、`spawn-worker.js --skill gh-maestro-coder --issue <N> --description <desc> --agent $SELECTED_AGENT` で実装ワーカーを起動する
+2. **Coder起動**: `spawn-worker.js --skill gh-maestro-coder --issue <N> --description <desc> --agent claude-ds`（エージェントは「ワーカー別エージェント」表のとおり固定。ユーザーに確認する必要はない）で実装ワーカーを起動する
 3. **PR検出**: 下記「PR検出」に従い、コーダーが作成したPRを自律検出する
 4. **レビュー監視**: PR番号取得後、下記「レビュー監視」に従い、レビューコメントとマージ状態を監視する
 5. **コメントトリアージ**: 新しいレビューコメントを受信するたびに「レビューコメントのトリアージ」を実行する
-6. **マージ**: トリアージ結果を人間に提示し、マージを依頼する。マージ検出後、`git pull --ff-only` で `BASE_BRANCH` を更新してから反省会を開いて次のIssueへ進む
-7. **反省会**: 下記「反省会」に従い、手戻りの構造的原因を分析して改善提案をまとめる
+6. **マージ**: トリアージ結果を人間に提示し、マージを依頼する。マージ検出後、`git pull --ff-only` で `BASE_BRANCH` を更新する
+7. **反省会**: 下記「反省会」に従い、手戻りの構造的原因を分析して改善提案をまとめる。承認事項の反映・Issueクローズ・`remove-worker.js`によるワーカー削除まで完了させてから次のIssueへ進む
 
 ## Issue確定
 
