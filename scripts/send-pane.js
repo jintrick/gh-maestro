@@ -5,6 +5,11 @@
 // "orchestrator" を指定するとorchestratorペインに送信する。
 // 送信方向に応じて送信者名を自動的にメッセージ先頭に付与する。
 //
+// <message> はキーストローク注入せず .gh-maestro/messages/ にファイルとして書き出し、
+// pane には「このファイルを読んでください」という固定テンプレートの短文だけを送る。
+// これは本文中の特殊文字（"@" 等）がEnterキー入力を消費し、メッセージが未送信のまま
+// composerに残る問題を構造的に避けるため（詳細は message-file.js のコメント参照）。
+//
 // workspace の解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索
 
 const os = require('os');
@@ -15,6 +20,7 @@ const { sendEnter } = require('./send-enter');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { resolveAgentConfig } = require('./resolve-agent');
 const { withPaneLock } = require('./pane-lock');
+const { writeMessageFile, pruneOldMessageFiles } = require('./message-file');
 
 const USAGE = `send-pane.js — 起動中のワーカー/orchestrator のペインにメッセージを送る
 
@@ -26,7 +32,8 @@ Arguments:
   --workspace <path>  ワークスペース（省略時: GH_MAESTRO_WORKSPACE env > CWD から上方探索）
 
 worker-name は .gh-maestro/workers.json で pane-id に解決される。送信方向に応じて
-送信者名がメッセージ先頭に自動付与される。`;
+送信者名がメッセージ先頭に自動付与される。<message> は .gh-maestro/messages/ にファイル
+として書かれ、pane にはそのファイルを読むよう促す短文だけが送られる。`;
 
 const args = process.argv.slice(2);
 if (args.includes('--help') || args.includes('-h')) {
@@ -174,11 +181,18 @@ function sendMessage(targetPaneId, text) {
   return true;
 }
 
+// 本文は特殊文字（"@" 等）によるEnter消費を避けるためファイルへ退避し、
+// pane には固定テンプレートの短文（ファイルを読むよう促すだけ）を送る。
+const messagesDir = path.join(workspace || os.tmpdir(), '.gh-maestro', 'messages');
+const messageFile = writeMessageFile(messagesDir, prefix + message);
+pruneOldMessageFiles(messagesDir, 24 * 60 * 60 * 1000);
+const notification = `${prefix}新着メッセージがあります。${messageFile} を読んでください。`;
+
 // 同一paneへの並行送信（例: 複数ワーカーのpollerが同時にorchestratorへ報告する）による
-// 本文/Enterの入れ替わりを防ぐため、pane単位でロックしてから送信する。
+// 通知/Enterの入れ替わりを防ぐため、pane単位でロックしてから送信する。
 const lockDir = workspace
   ? path.join(workspace, '.gh-maestro', 'locks')
   : path.join(os.tmpdir(), 'gh-maestro-send-pane-locks');
 const lockKey = String(paneId).replace(/[^a-zA-Z0-9_-]/g, '_');
-const ok = withPaneLock(lockDir, lockKey, 15000, () => sendMessage(paneId, prefix + message));
+const ok = withPaneLock(lockDir, lockKey, 15000, () => sendMessage(paneId, notification));
 process.exit(ok ? 0 : 1);
