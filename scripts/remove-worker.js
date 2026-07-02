@@ -12,6 +12,7 @@ const { spawnSync, execSync } = require('child_process');
 const { resolve } = require('path');
 const { readFileSync, writeFileSync, existsSync, rmSync } = require('fs');
 const { unlinkJunctions } = require('./unlink-junctions');
+const { normalizeWorkerEntry } = require('./worker-entry');
 
 const USAGE = `remove-worker.js — ワーカーのペインを kill し worktree を削除する
 
@@ -54,7 +55,7 @@ try {
 
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-const paneId = workers[workerName] || null;
+const paneId = normalizeWorkerEntry(workers[workerName]).paneId;
 if (!paneId) {
   console.warn(`remove-worker: ワーカー "${workerName}" の pane_id が workers.json に存在しません — worktree削除のみ実行します`);
 } else {

@@ -11,6 +11,7 @@ const path = require('path');
 const { spawnSync } = require('./child-process');
 const { readFileSync, existsSync } = require('fs');
 const { sendEnter } = require('./send-enter');
+const { normalizeWorkerEntry } = require('./worker-entry');
 
 const USAGE = `send-pane.js — 起動中のワーカー/orchestrator のペインにメッセージを送る
 
@@ -66,13 +67,13 @@ let senderName = null;
 
 if (workersJson && existsSync(workersJson)) {
   const workers = JSON.parse(readFileSync(workersJson, 'utf8'));
-  if (workers[name]) paneId = workers[name];
+  if (workers[name]) paneId = normalizeWorkerEntry(workers[name]).paneId;
 
   // 送信者を逆引き: 現在のpane-idがworkersのどのエントリか
   const myPaneId = String(process.env.WEZTERM_PANE ?? '');
   if (myPaneId) {
     for (const [k, v] of Object.entries(workers)) {
-      if (String(v) === myPaneId) { senderName = k; break; }
+      if (normalizeWorkerEntry(v).paneId === myPaneId) { senderName = k; break; }
     }
   }
 }

@@ -13,6 +13,7 @@ const { resolve } = path;
 const { existsSync, readFileSync, writeFileSync, rmSync,
         readdirSync, statSync, renameSync, unlinkSync } = require('fs');
 const { unlinkJunctions } = require('./unlink-junctions');
+const { normalizeWorkerEntry } = require('./worker-entry');
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
 
@@ -233,9 +234,9 @@ log('ワーカーペインをkillします...');
 const workers = loadWorkers();
 const alivePanes = getAlivePaneIds();
 
-for (const [name, paneId] of Object.entries(workers)) {
+for (const [name, entry] of Object.entries(workers)) {
   if (name === 'orchestrator') continue;
-  const id = String(paneId ?? '');
+  const id = normalizeWorkerEntry(entry).paneId ?? '';
   if (!id) {
     warn(`"${name}" の pane_id が空です。スキップ。`);
     results.skipped.push(name);
@@ -341,7 +342,7 @@ if (existsSync(ghMaestroDir)) {
 
 log('workers.json をリセットします...');
 const orchPaneId = process.env.WEZTERM_PANE ?? null;
-const fresh = orchPaneId ? { orchestrator: orchPaneId } : {};
+const fresh = orchPaneId ? { orchestrator: { paneId: orchPaneId, agentId: null } } : {};
 try {
   writeFileSync(workersJson, JSON.stringify(fresh, null, 2), 'utf8');
   log(`workers.json をリセットしました。${orchPaneId ? `orchestrator pane: ${orchPaneId}` : 'orchestratorのpane_idは次回spawn時に設定されます。'}`);

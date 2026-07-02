@@ -25,6 +25,7 @@ const { resolve, relative } = require('path');
 // link-node-modules は常に同一ディレクトリに同居する（リポジトリの scripts/ もインストール先 ~/.gh-maestro/scripts/ も）。
 const { linkNodeModules } = require('./link-node-modules');
 const { sendEnter } = require('./send-enter');
+const { normalizeWorkerEntry } = require('./worker-entry');
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
@@ -119,7 +120,7 @@ if (existsSync(workersJson)) {
   }
 }
 if (!workers.orchestrator) {
-  workers.orchestrator = orchPaneId;
+  workers.orchestrator = { paneId: orchPaneId, agentId: null };
 }
 
 // --- 生存確認: staleなpane_idをworkers.jsonから除去 ---
@@ -145,8 +146,9 @@ const alivePanes = getAlivePaneIds();
 if (alivePanes !== null) {
   let dirty = false;
   for (const [k, v] of Object.entries(workers)) {
-    if (k !== 'orchestrator' && !alivePanes.has(String(v))) {
-      console.warn(`spawn-worker: stale worker "${k}" (pane_id ${v}) を workers.json から除去します`);
+    const paneId = normalizeWorkerEntry(v).paneId;
+    if (k !== 'orchestrator' && !alivePanes.has(paneId)) {
+      console.warn(`spawn-worker: stale worker "${k}" (pane_id ${paneId}) を workers.json から除去します`);
       delete workers[k];
       dirty = true;
     }
@@ -162,7 +164,7 @@ if (existingWorkers.length === 0) {
   splitFromPaneId = orchPaneId;
 } else {
   direction = 'bottom';
-  splitFromPaneId = workers[existingWorkers[existingWorkers.length - 1]];
+  splitFromPaneId = normalizeWorkerEntry(workers[existingWorkers[existingWorkers.length - 1]]).paneId;
 }
 
 // --- baseBranch をリモートと同期（worktreeが常に最新ベースから分岐するよう保証） ---
@@ -337,7 +339,7 @@ if (!newPaneId) {
 
 // --- workers.json にワーカーを登録（失敗時はペインもロールバック） ---
 try {
-  workers[workerName] = newPaneId;
+  workers[workerName] = { paneId: newPaneId, agentId: agentConfig.id };
   writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
   console.warn(`spawn-worker: worker "${workerName}" を pane ${newPaneId} として workers.json に登録しました`);
 } catch (e) {
