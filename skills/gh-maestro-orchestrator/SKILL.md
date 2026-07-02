@@ -284,31 +284,34 @@ BLOCKERがゼロになった段階で保留Issueを参照して人間に提示�
 
 SUGGESTION・軽微なDRY違反・スタイル指摘はコーダーへ即転送せず、**専用の保留Issue** に永続化する。チャットに書き留めるとセッションを跨いだ瞬間に蒸発する。
 
-### 保留Issueの作成（PRレビュー監視開始時に1回）
+`gh-maestro-pending` ラベルを持つIssueは**リポジトリ全体で常に1件のみ**（PR番号をまたいで使い回すストックIssue）。新規作成は禁止に近い最終手段であり、**PR検出のたびに必ず先にラベル検索する。**
 
-ラベル `gh-maestro-pending` を付けて作成し、番号をファイルに保存する。この2つが再発見の手がかりになる。
+### 保留Issueの取得（PR検出のたびに毎回実行）
+
+PR番号に依存しない条件でラベル検索する。1件でも見つかればそれを使う。ファイル (`$WORKSPACE/.gh-maestro/pending-$PR`) はキャッシュに過ぎず、信頼できるソースはラベル検索。
 
 ```sh
-PENDING_ISSUE=$(gh issue create --repo $REPO \
-  --title "保留SUGGESTION: PR #$PR" \
-  --body "PR #$PR のトリアージで保留判定されたSUGGESTION一覧。BLOCKERがゼロになったら人間に提示する。" \
-  --label "gh-maestro-pending" \
-  --jq '.number')
+# 常にラベルのみで検索する（PR番号を条件に含めない — ストックIssueはPRと無関係な内容のため検索から漏れる）
+PENDING_ISSUE=$(gh issue list --repo $REPO \
+  --label gh-maestro-pending --state open \
+  --json number -q '.[0].number')
+
 echo $PENDING_ISSUE > $WORKSPACE/.gh-maestro/pending-$PR
 ```
 
-### セッション再起動後の再発見
+### 見つからなかった場合のみ新規作成
 
-ファイルが残っていればそこから読む。なければラベルで検索する。
+上記でゼロ件だったときに限り作成する。
 
 ```sh
-# ファイルから（速い）
-PENDING_ISSUE=$(cat $WORKSPACE/.gh-maestro/pending-$PR 2>/dev/null)
-
-# ファイルがなければラベルで検索（フォールバック）
-PENDING_ISSUE=$(gh issue list --repo $REPO \
-  --label gh-maestro-pending --state open \
-  --search "PR #$PR" --json number -q '.[0].number')
+if [ -z "$PENDING_ISSUE" ]; then
+  PENDING_ISSUE=$(gh issue create --repo $REPO \
+    --title "保留SUGGESTION" \
+    --body "PRレビューのトリアージで保留判定されたSUGGESTION一覧。BLOCKERがゼロになったら人間に提示する。" \
+    --label "gh-maestro-pending" \
+    --jq '.number')
+  echo $PENDING_ISSUE > $WORKSPACE/.gh-maestro/pending-$PR
+fi
 ```
 
 ### 保留判定時の即追記（トリアージのたびに実行）
@@ -335,12 +338,24 @@ gh issue view $PENDING_ISSUE --repo $REPO --comments
 まとめてコーダーへ送りますか？マージ後に別PRにしますか？それとも今回はスキップしますか？
 ```
 
-対応完了後は保留Issueをクローズし、ファイルも削除する。
+**保留Issue自体はクローズしない。** これはストックであり、`gh-maestro-pending` ラベルを持つIssueは常に1件・常にopenであり続ける。
+
+対応することが決まった項目は、保留Issueから**切り出して新規Issueを作成**し、コーダーへの実装指示はその新規Issueに対して行う。「対応完了」となるのはこの切り出し先Issueであり、保留Issueではない。
 
 ```sh
-gh issue close $PENDING_ISSUE --repo $REPO
-rm -f $WORKSPACE/.gh-maestro/pending-$PR
+# 対応する項目をグループ化して新規Issueとして切り出す
+NEW_ISSUE=$(gh issue create --repo $REPO \
+  --title "<切り出した対応内容の要約>" \
+  --body "Issue #$PENDING_ISSUE の保留項目から切り出し。
+- <path>:<line> — <内容>" \
+  --jq '.number')
+
+# 保留Issue側には、切り出し済みである旨をコメントで残す（削除はしない）
+gh issue comment $PENDING_ISSUE --repo $REPO \
+  --body "[切り出し済み → #$NEW_ISSUE] <path>:<line> — <内容>"
 ```
+
+コーダーへの実装指示・PR作成は `$NEW_ISSUE` に対して行い、そのIssueが実装完了時にクローズされる（通常のIssue対応フローと同じ）。`$WORKSPACE/.gh-maestro/pending-$PR` は次回セッションのキャッシュとして残してよく、削除しない。
 
 ## スパイラル検知
 
