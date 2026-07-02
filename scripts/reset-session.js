@@ -336,6 +336,19 @@ if (existsSync(ghMaestroDir)) {
   if (pollFiles.length === 0) log('poll-* ファイルなし。スキップ。');
 }
 
+log('.gh-maestro/messages/ を削除します...');
+const messagesDir = resolve(workspace, '.gh-maestro', 'messages');
+if (existsSync(messagesDir)) {
+  try {
+    rmSync(messagesDir, { recursive: true, force: true });
+    log('messages/ を削除しました。');
+  } catch (e) {
+    warn(`messages/ 削除失敗: ${e.message}`);
+  }
+} else {
+  log('messages/ なし。スキップ。');
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // 6. workers.json をリセット
 // ═══════════════════════════════════════════════════════════════════
