@@ -44,16 +44,6 @@ test('gh-maestro-base で --prompt がないとエラー終了する', () => {
   assert.match(r.stderr, /--prompt/);
 });
 
-test('--prompt にシングルクォートを含めるとエラー終了する', () => {
-  const r = run([
-    '--skill', 'gh-maestro-coder',
-    '--issue', '1', '--description', 'test', '--repo', 'o/r',
-    '--prompt', "it's a test",
-  ], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /シングルクォート/);
-});
-
 test('WEZTERM_PANE が未設定だとエラー終了する', () => {
   const envWithoutPane = { ...process.env };
   delete envWithoutPane.WEZTERM_PANE;

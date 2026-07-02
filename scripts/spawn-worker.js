@@ -50,11 +50,6 @@ if (!skill)       fail('--skill が必要です');
 if (!description) fail('--description が必要です');
 if (!repo)        fail('--repo が必要です');
 if (skill === 'gh-maestro-base' && !prompt) fail('gh-maestro-base を使う場合は --prompt が必要です');
-if (prompt && /['`]/.test(prompt)) {
-  console.error("spawn-worker: --prompt にシングルクォート(')またはバッククォート(`)を含めることはできません。");
-  console.error("  → 実装詳細はIssueに記述し、--prompt にはIssue番号と役割のみ記載してください。");
-  process.exit(1);
-}
 
 const orchPaneId = process.env.WEZTERM_PANE;
 if (!orchPaneId)  fail('WEZTERM_PANE が設定されていません');

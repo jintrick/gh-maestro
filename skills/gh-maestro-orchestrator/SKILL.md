@@ -159,7 +159,6 @@ W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "
 - **オーケストレーターは調査・実装コマンドを自分で実行しない。必ずワーカーに委譲する**
 - `BASE_BRANCH`は保護ブランチ（`main`/`master`/`develop`）でもworktreeブランチ（`issue-N-description`形式）でもない。セッション中に変更しない。起動時に保護ブランチ上にいた場合のみ、最初のIssue確定時に開発ブランチを切って設定する
 - `main`への直接pushは禁止
-- `--prompt`にシングルクォート（`'`）・バッククォート（`` ` ``）を含めない（spawn-worker.jsがクラッシュする）
 - `gh pr close`は1件ずつ実行する（複数引数を渡すと失敗する）
 
 ## 基本フロー
