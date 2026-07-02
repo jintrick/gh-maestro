@@ -7,12 +7,14 @@
 //
 // workspace の解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索
 
+const os = require('os');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { readFileSync, existsSync } = require('fs');
 const { sendEnter } = require('./send-enter');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { resolveAgentConfig } = require('./resolve-agent');
+const { withPaneLock } = require('./pane-lock');
 
 const USAGE = `send-pane.js — 起動中のワーカー/orchestrator のペインにメッセージを送る
 
@@ -165,11 +167,18 @@ function sendMessage(targetPaneId, text) {
   const sendResult = wez('cli', 'send-text', '--pane-id', targetPaneId, '--no-paste', flat);
   if (sendResult.status !== 0) {
     process.stderr.write(`send-pane: wezterm send-text failed (exit ${sendResult.status}): ${sendResult.stderr?.trim()}\n`);
-    process.exit(1);
+    return false;
   }
   const terminator = resolveAgentConfig(targetAgentId)?.enterSequence;
   sendEnter(targetPaneId, { send: wez, terminator });
+  return true;
 }
 
-sendMessage(paneId, prefix + message);
-process.exit(0);
+// 同一paneへの並行送信（例: 複数ワーカーのpollerが同時にorchestratorへ報告する）による
+// 本文/Enterの入れ替わりを防ぐため、pane単位でロックしてから送信する。
+const lockDir = workspace
+  ? path.join(workspace, '.gh-maestro', 'locks')
+  : path.join(os.tmpdir(), 'gh-maestro-send-pane-locks');
+const lockKey = String(paneId).replace(/[^a-zA-Z0-9_-]/g, '_');
+const ok = withPaneLock(lockDir, lockKey, 15000, () => sendMessage(paneId, prefix + message));
+process.exit(ok ? 0 : 1);
