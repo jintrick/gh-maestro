@@ -25,6 +25,23 @@ function writeWeztermMock(dir) {
   return mockPath;
 }
 
+// send-text 呼び出しの引数を1行1呼び出しでlogPathに追記するモック。
+// terminator選択の配線（workers.json の agentId → agents.json の enterSequence）を検証するために使う。
+function writeLoggingWeztermMock(dir, logPath) {
+  const mockPath = path.join(dir, 'wezterm-mock-logging.js');
+  fs.writeFileSync(
+    mockPath,
+    "const fs = require('fs');\n" +
+    "const argv = process.argv.slice(2);\n" +
+    "const a = argv.join(' ');\n" +
+    "if (a.startsWith('cli list')) { process.stdout.write(process.env.MOCK_LIST_JSON || '[]'); process.exit(0); }\n" +
+    `fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(argv) + '\\n');\n` +
+    "process.exit(0);\n",
+    'utf8'
+  );
+  return mockPath;
+}
+
 function run(args, env = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
     encoding: 'utf8',
@@ -163,5 +180,54 @@ test('cwd が一致する場合は検証を通過する', () => {
       MOCK_LIST_JSON: cwdJson,
     });
     assert.ok(!r.stderr.includes('cwd'), `cwd検証が誤って失敗しました: ${r.stderr}`);
+  });
+});
+
+// ── agentId経由のterminator解決 ──────────────────────────────────────
+
+test('workers.jsonのagentIdからagents.jsonのenterSequenceを引いてEnterを送信する', () => {
+  withTempDir(tmp => {
+    const workspace = path.join(tmp, 'project');
+    const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'issue-1-fix');
+    fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.gh-maestro', 'workers.json'),
+      JSON.stringify({
+        orchestrator: { paneId: '0' },
+        'issue-1-fix': { paneId: '1', agentId: 'reasonix' },
+      }),
+      'utf8'
+    );
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-home-'));
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.gh-maestro', 'agents.json'),
+      JSON.stringify([{ id: 'reasonix', enterSequence: '\n' }]),
+      'utf8'
+    );
+
+    const logPath = path.join(tmp, 'send-text-calls.log');
+    const cwdJson = `[{"pane_id":1,"cwd":"${pathToFileURL(worktree).href}"}]`;
+
+    try {
+      const r = run(['issue-1-fix', 'hello', '--workspace', workspace], {
+        WEZTERM_PANE: '0',
+        WEZTERM_MOCK: writeLoggingWeztermMock(tmp, logPath),
+        MOCK_LIST_JSON: cwdJson,
+        HOME: home,
+        USERPROFILE: home,
+      });
+      assert.equal(r.status, 0, `expected exit 0, got ${r.status}: ${r.stderr}`);
+
+      const calls = fs.readFileSync(logPath, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+      const sendTextCalls = calls.filter(c => c[0] === 'cli' && c[1] === 'send-text');
+      assert.equal(sendTextCalls.length, 2, 'メッセージ本文送信 + Enter送信の2回のはず');
+      const enterCall = sendTextCalls[1];
+      assert.equal(enterCall[enterCall.length - 1], '\n', 'reasonixのenterSequence(\\n)が使われるべき');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });

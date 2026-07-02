@@ -74,7 +74,7 @@ if (!agentConfig) {
     fail(`エージェント "${agentId}" が ~/.gh-maestro/agents.json に見つかりません。手動で追加するか、node scripts/install.js を実行してください。`);
   }
   // --agent 未指定のデフォルトフォールバック
-  agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' };
+  agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i', enterSequence: '\r\n' };
 }
 
 // --- エージェントバイナリが PATH 上に存在するか確認 ---
@@ -357,7 +357,7 @@ if (agentConfig.skillsViaMd && !agentConfig.promptFlag) {
   if (sendResult.status !== 0) {
     console.warn(`spawn-worker: send-text失敗 (pane ${newPaneId}): ${sendResult.stderr?.trim()}`);
   } else {
-    sendEnter(newPaneId, { terminator: '\n' });
+    sendEnter(newPaneId, { terminator: agentConfig.enterSequence ?? '\n' });
     console.warn(`spawn-worker: 初期プロンプトをsend-textで送信しました (pane ${newPaneId})`);
   }
 }

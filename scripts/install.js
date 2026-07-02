@@ -248,11 +248,15 @@ const _rxJsPath = _rxNpmRoot ? path.join(_rxNpmRoot, 'reasonix', 'bin', 'reasoni
 const _rxCmd = (_rxJsPath && fs.existsSync(_rxJsPath)) ? 'node' : 'reasonix';
 const _rxArgs = (_rxJsPath && fs.existsSync(_rxJsPath)) ? [_rxJsPath, '--yolo'] : ['--yolo'];
 
+// enterSequence: wezterm cli send-text --no-paste でEnter相当を送る際のterminator。
+// ペイン内アプリの改行解釈がエージェントごとに異なるため個別に持たせる（送信の議論の経緯は
+// scripts/send-enter.js のコメント参照）。claude/claude-ds/agyはCRLFで動作実績あり、
+// reasonixはLF単体でのみ動作確認済み。
 const defaults = [
-  { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
-  { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null },
-  { id: 'reasonix',  label: 'Reasonix Code',           command: _rxCmd,      extraArgs: _rxArgs, promptFlag: null, skillsViaMd: true },
-  { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i' },
+  { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null, enterSequence: '\r\n' },
+  { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null, enterSequence: '\r\n' },
+  { id: 'reasonix',  label: 'Reasonix Code',           command: _rxCmd,      extraArgs: _rxArgs, promptFlag: null, skillsViaMd: true, enterSequence: '\n' },
+  { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i', enterSequence: '\r\n' },
 ];
 if (!fs.existsSync(agentsConfigPath)) {
   fs.writeFileSync(agentsConfigPath, JSON.stringify(defaults, null, 2) + '\n', 'utf8');
@@ -284,6 +288,7 @@ if (!fs.existsSync(agentsConfigPath)) {
         entry.extraArgs = agent.extraArgs;
         entry.promptFlag = agent.promptFlag;
         if ('skillsViaMd' in agent) entry.skillsViaMd = agent.skillsViaMd;
+        if ('enterSequence' in agent) entry.enterSequence = agent.enterSequence;
         // 廃止されたフィールドを除去
         delete entry.positionalPrompt;
         updated++;

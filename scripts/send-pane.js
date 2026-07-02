@@ -12,6 +12,7 @@ const { spawnSync } = require('./child-process');
 const { readFileSync, existsSync } = require('fs');
 const { sendEnter } = require('./send-enter');
 const { normalizeWorkerEntry } = require('./worker-entry');
+const { resolveAgentConfig } = require('./resolve-agent');
 
 const USAGE = `send-pane.js — 起動中のワーカー/orchestrator のペインにメッセージを送る
 
@@ -64,10 +65,15 @@ const workersJson = workspace
 
 let paneId = name;
 let senderName = null;
+let targetAgentId = null;
 
 if (workersJson && existsSync(workersJson)) {
   const workers = JSON.parse(readFileSync(workersJson, 'utf8'));
-  if (workers[name]) paneId = normalizeWorkerEntry(workers[name]).paneId;
+  if (workers[name]) {
+    const entry = normalizeWorkerEntry(workers[name]);
+    paneId = entry.paneId;
+    targetAgentId = entry.agentId;
+  }
 
   // 送信者を逆引き: 現在のpane-idがworkersのどのエントリか
   const myPaneId = String(process.env.WEZTERM_PANE ?? '');
@@ -161,7 +167,8 @@ function sendMessage(targetPaneId, text) {
     process.stderr.write(`send-pane: wezterm send-text failed (exit ${sendResult.status}): ${sendResult.stderr?.trim()}\n`);
     process.exit(1);
   }
-  sendEnter(targetPaneId, { send: wez });
+  const terminator = resolveAgentConfig(targetAgentId)?.enterSequence;
+  sendEnter(targetPaneId, { send: wez, terminator });
 }
 
 sendMessage(paneId, prefix + message);
