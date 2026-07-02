@@ -251,11 +251,11 @@ const _rxArgs = (_rxJsPath && fs.existsSync(_rxJsPath)) ? [_rxJsPath, '--yolo'] 
 // enterSequence: wezterm cli send-text --no-paste でEnter相当を送る際のterminator。
 // ペイン内アプリの改行解釈がエージェントごとに異なるため個別に持たせる（送信の議論の経緯は
 // scripts/send-enter.js のコメント参照）。claude/claude-ds/agyはCRLFで動作実績あり、
-// reasonixはLF単体でのみ動作確認済み。
+// reasonixは実機検証の結果 \r 単体のみ送信として認識される（\n は入力欄に残留し無視される）。
 const defaults = [
   { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null, enterSequence: '\r\n' },
   { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null, enterSequence: '\r\n' },
-  { id: 'reasonix',  label: 'Reasonix Code',           command: _rxCmd,      extraArgs: _rxArgs, promptFlag: null, skillsViaMd: true, enterSequence: '\n' },
+  { id: 'reasonix',  label: 'Reasonix Code',           command: _rxCmd,      extraArgs: _rxArgs, promptFlag: null, skillsViaMd: true, enterSequence: '\r' },
   { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i', enterSequence: '\r\n' },
 ];
 if (!fs.existsSync(agentsConfigPath)) {

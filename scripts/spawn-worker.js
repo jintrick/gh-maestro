@@ -357,7 +357,7 @@ if (agentConfig.skillsViaMd && !agentConfig.promptFlag) {
   if (sendResult.status !== 0) {
     console.warn(`spawn-worker: send-text失敗 (pane ${newPaneId}): ${sendResult.stderr?.trim()}`);
   } else {
-    sendEnter(newPaneId, { terminator: agentConfig.enterSequence ?? '\n' });
+    sendEnter(newPaneId, { terminator: agentConfig.enterSequence ?? '\r' });
     console.warn(`spawn-worker: 初期プロンプトをsend-textで送信しました (pane ${newPaneId})`);
   }
 }

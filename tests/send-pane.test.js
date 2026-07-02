@@ -204,7 +204,7 @@ test('workers.jsonのagentIdからagents.jsonのenterSequenceを引いてEnter�
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(
       path.join(home, '.gh-maestro', 'agents.json'),
-      JSON.stringify([{ id: 'reasonix', enterSequence: '\n' }]),
+      JSON.stringify([{ id: 'reasonix', enterSequence: '\r' }]),
       'utf8'
     );
 
@@ -225,7 +225,7 @@ test('workers.jsonのagentIdからagents.jsonのenterSequenceを引いてEnter�
       const sendTextCalls = calls.filter(c => c[0] === 'cli' && c[1] === 'send-text');
       assert.equal(sendTextCalls.length, 2, 'メッセージ本文送信 + Enter送信の2回のはず');
       const enterCall = sendTextCalls[1];
-      assert.equal(enterCall[enterCall.length - 1], '\n', 'reasonixのenterSequence(\\n)が使われるべき');
+      assert.equal(enterCall[enterCall.length - 1], '\r', 'reasonixのenterSequence(\\r)が使われるべき');
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
