@@ -24,6 +24,7 @@ const { existsSync, mkdirSync, readFileSync, writeFileSync,
 const { resolve, relative } = require('path');
 // link-node-modules は常に同一ディレクトリに同居する（リポジトリの scripts/ もインストール先 ~/.gh-maestro/scripts/ も）。
 const { linkNodeModules } = require('./link-node-modules');
+const { sendEnter } = require('./send-enter');
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
@@ -350,10 +351,11 @@ try {
 // TUI初期化待ち後にwezterm cli send-textでプロンプトを送る。
 if (agentConfig.skillsViaMd && !agentConfig.promptFlag) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
-  const sendResult = spawnSync('wezterm', ['cli', 'send-text', '--pane-id', newPaneId, '--no-paste', shortPrompt + '\n'], { encoding: 'utf8' });
+  const sendResult = spawnSync('wezterm', ['cli', 'send-text', '--pane-id', newPaneId, '--no-paste', shortPrompt], { encoding: 'utf8' });
   if (sendResult.status !== 0) {
     console.warn(`spawn-worker: send-text失敗 (pane ${newPaneId}): ${sendResult.stderr?.trim()}`);
   } else {
+    sendEnter(newPaneId, { terminator: '\n' });
     console.warn(`spawn-worker: 初期プロンプトをsend-textで送信しました (pane ${newPaneId})`);
   }
 }

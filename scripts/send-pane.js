@@ -10,6 +10,7 @@
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { readFileSync, existsSync } = require('fs');
+const { sendEnter } = require('./send-enter');
 
 const USAGE = `send-pane.js — 起動中のワーカー/orchestrator のペインにメッセージを送る
 
@@ -159,7 +160,7 @@ function sendMessage(targetPaneId, text) {
     process.stderr.write(`send-pane: wezterm send-text failed (exit ${sendResult.status}): ${sendResult.stderr?.trim()}\n`);
     process.exit(1);
   }
-  wez('cli', 'send-text', '--pane-id', targetPaneId, '--no-paste', '\r\n');
+  sendEnter(targetPaneId, { send: wez });
 }
 
 sendMessage(paneId, prefix + message);
