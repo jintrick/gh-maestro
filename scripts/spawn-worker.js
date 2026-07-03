@@ -26,6 +26,7 @@ const { resolve, relative } = require('path');
 const { linkNodeModules } = require('./link-node-modules');
 const { sendEnter } = require('./send-enter');
 const { normalizeWorkerEntry } = require('./worker-entry');
+const { buildAgentCommandArgs } = require('./agent-launch');
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
@@ -297,19 +298,16 @@ const shortPrompt = agentConfig.skillsViaMd
 // 実装（この4パターン）だけを spawn-worker.js に集約する。エージェント追加時に触るのは
 // agents.json 側のデータだけで済み、ここに新しい if 分岐を足す必要は無いのが望ましい状態。
 // docs/agent-launch-mechanism-plan.md 参照。
-const buildArgsByDelivery = {
-  'system-prompt-file': () => [
-    agentConfig.command, ...agentConfig.extraArgs,
-    '--append-system-prompt-file', promptFile,
-    `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
-  ],
-  'flag': () => [agentConfig.command, ...agentConfig.extraArgs, agentConfig.promptFlag, shortPrompt],
-  'positional': () => [agentConfig.command, ...agentConfig.extraArgs, shortPrompt],
-  'send-text-after-launch': () => [agentConfig.command, ...agentConfig.extraArgs],
-};
-const buildArgs = buildArgsByDelivery[agentConfig.promptDelivery];
-if (!buildArgs) fail(`エージェント "${agentConfig.id}" の promptDelivery "${agentConfig.promptDelivery}" は未知のメカニズムです`);
-const agentCmdArgs = buildArgs();
+let agentCmdArgs;
+try {
+  agentCmdArgs = buildAgentCommandArgs(agentConfig, {
+    promptFile,
+    shortPrompt,
+    systemPromptText: `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
+  });
+} catch (e) {
+  fail(`エージェント "${agentConfig.id}" の起動引数を組み立てられません: ${e.message}`);
+}
 
 // --- WezTerm ペイン分割 + エージェント直接起動（シェルを介さずargvで渡すことで改行等のエスケープ問題を回避） ---
 const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...agentCmdArgs];

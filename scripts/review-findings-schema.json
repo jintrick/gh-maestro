@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["pr", "repo", "headRefOid", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "pr": { "type": "integer", "minimum": 1 },
+    "repo": { "type": "string", "minLength": 1 },
+    "headRefOid": { "type": "string", "minLength": 1 },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "aspect",
+          "path",
+          "line_anchor",
+          "summary",
+          "observed_fact",
+          "invariant",
+          "failure_scenario",
+          "minimal_fix",
+          "verified_references"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "aspect": {
+            "type": "string",
+            "enum": ["Correctness", "Maintainability", "Resilience & Security"]
+          },
+          "path": { "type": "string", "minLength": 1 },
+          "line_anchor": { "type": "string", "minLength": 1 },
+          "context_before": { "type": "string" },
+          "context_after": { "type": "string" },
+          "summary": { "type": "string", "minLength": 1 },
+          "observed_fact": { "type": "string", "minLength": 1 },
+          "invariant": { "type": "string", "minLength": 1 },
+          "failure_scenario": { "type": "string", "minLength": 1 },
+          "minimal_fix": { "type": "string", "minLength": 1 },
+          "verified_references": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

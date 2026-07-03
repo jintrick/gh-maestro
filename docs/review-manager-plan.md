@@ -1,7 +1,7 @@
 # Review Manager 体制 計画書
 
 策定日: 2026-07-03
-ステータス: 設計合意済み・未実装
+ステータス: 要件定義済み・未実装
 
 ## 背景
 
@@ -15,7 +15,8 @@
 - 単一エージェントが「指摘」と「投稿」と「最終判定」を全部担っており、責務が分離されていない
 
 本計画は、Review Manager(RM)が3体のReviewerサブエージェントを並列に立てて観点ごとに
-分離しつつ、findingの集約・投稿・最終提出をRMに一元化する体制への移行を定義する。
+分離しつつ、findingの集約結果を決定的なNode.js投稿パイプラインに渡す体制への移行を定義する。
+RMは採否判断・GitHub投稿を行わない。
 
 ## 全体構成
 
@@ -28,10 +29,16 @@ wezterm
    ├─ 既存レビュー取得
    ├─ 3レビュワーへ同一コンテキスト配布(並列spawn)
    ├─ finding集約
+   └─ finding JSON出力
+
+Node.js review publisher
+   ├─ JSON Schema検証
+   ├─ 形式不備・根拠不足findingの機械的除外
    ├─ 重複統合
-   ├─ line_anchor → 行番号の解決
+   ├─ line_anchor → PR head上の行番号解決
+   ├─ PR diff hunk内判定
    ├─ GitHubインラインコメント投稿
-   └─ 最終レビュー提出(機械的event判定)
+   └─ 最終レビュー提出(event=COMMENT固定)
 
 Correctness Reviewer / Maintainability Reviewer / Resilience & Security Reviewer
 ```
@@ -41,27 +48,40 @@ Correctness Reviewer / Maintainability Reviewer / Resilience & Security Reviewer
 | 役割 | やること | やらないこと |
 |---|---|---|
 | **Reviewer** ×3 | 担当観点でコードを検証し、findingを多めに返す。diffが参照する外部シンボル・型・設定は自分で実ファイルを確認する | 採否判断・優先度判断・投稿・severity付与 |
-| **Review Manager** | PR情報・diff・既存レビューの収集、Reviewer起動、finding集約、重複統合、line_anchor解決、投稿 | トリアージ(採用/却下の判断)、外部定義の事前収集(Reviewerが必要に応じて自分で行う) |
+| **Review Manager** | PR情報・diff・既存レビューの収集、Reviewer起動、finding集約、構造化JSON出力 | トリアージ(採用/却下の判断)、GitHub投稿、外部定義の事前収集(Reviewerが必要に応じて自分で行う) |
+| **Node.js review publisher** | JSON Schema検証、形式不備・根拠不足・diff外・重複の機械的処理、line_anchor解決、PR diff hunk内判定、投稿、最終COMMENT提出 | 誤検知トリアージ、採否判断、Reviewerへの差し戻し |
 | **Orchestrator + 人間** | 採用・却下・保留・追加調査・修正指示を決める | — |
 
 ## RMの実行主体
 
-RMは`gh-maestro-reviewer`スキルとして`spawn-worker.js`経由で起動する
-(現行`run-review.js`のヘッドレスspawn方式の後継)。**RMはCodex CLI**を使う。
+RMは`gh-maestro-reviewer`スキルとして起動する。実行CLIはCodexを第一実装とするが、
+Reviewer起動指示・finding構造・投稿パイプラインは特定CLIへ強く依存させない。
+
+自動レビューの本線は、現行`start-review.js` / `run-review.js`の後継としてheadless detachedに起動する。
+Codexでは`codex exec`を使う。手動デバッグ用には`spawn-worker.js`経由でWezTermペイン上の
+interactive Codexを起動できるようにする。
 
 Reviewer3体は、RMが自分のCLIのネイティブなサブエージェント機構で並列spawnする。
 CLI固有のツール呼び出し構文はスキルの指示書に書かない — 「3観点それぞれについて
 独立したサブエージェントを並列に立てて検証させよ」という自然言語の指示だけで、
 claude code(`Agent`ツール)・codex(自律スポーン/`.codex/agents/*.toml`)いずれでも
-各CLIが自分のネイティブな委任機構を使って解釈する。モデル差別化(RM=高価、
-Reviewer=中〜安価)も同様に自然言語のヒントとして伝え、強制はしない。
+各CLIが自分のネイティブな委任機構を使って解釈する。Codexのcustom agent定義
+(`.codex/agents/*.toml`)は初期実装では作らない。モデル差別化(RM=高価、Reviewer=中〜安価)も
+自然言語のヒントとして伝え、CLI固有設定には寄せない。
+
+`spawn-worker.js`とheadless RM起動系は、`agents.json`の`promptDelivery`に基づく
+エージェント起動argv組み立てを共有する。新しいエージェントを追加するたびに
+`positional` / `system-prompt-file` / `flag` / `send-text-after-launch`相当の分岐を
+別ファイルへコピペしてはならない。
 
 ### 検討の結果、不採用にした案
 
 - **agy の `invoke_subagent`**: 親と同じモデルでしか起動できない仕様がQuota経済(RM=高価、
   Reviewer=中価)の設計思想と衝突するため、Reviewer側の実行CLIとしては不採用
-- **workers.json 登録・WezTermペイン分割方式**: 現行の単一レビュアーもこの方式を使っていない
-  (`run-review.js`はヘッドレスspawn)。RM配下のReviewer3体も同様にworkers.json管理の外に置く
+- **RM自動起動におけるworkers.json登録・WezTermペイン分割方式**: 自動レビュー本線は
+  headless detachedとし、workers.json管理の外に置く。WezTerm起動は手動デバッグ用途に限定する
+- **Codex custom agentファイル必須化**: `.codex/agents/*.toml`を必須にするとCodex依存が強くなるため、
+  初期実装では採用しない
 
 ## 判定基準の伝達
 
@@ -75,6 +95,9 @@ Reviewer=中〜安価)も同様に自然言語のヒントとして伝え、強�
 RMはReviewer起動時に「PR固有のコンテキスト(diff等)」のみをプロンプトに含め、
 判定基準は「`<path>/reviewer-<aspect>.md`を読め」とファイルパス参照で伝える。
 RM自身が150行×3のチェックリストを自分のコンテキストに保持する必要がない。
+
+`gh-maestro-reviewer`スキルの正本はリポジトリの`skills/gh-maestro-reviewer`に置く。
+`install.js`はClaude / Agy向けの既存配布に加え、Codex向けにも`.agents/skills`へ配布する。
 
 ### 外部定義・設定の収集はRMが抱え込まない
 
@@ -98,14 +121,15 @@ RMのCLI(codex / claude code等)がネイティブなサブエージェント機
 - **並列spawn**: `invoke_subagent`/`Agent`ツール/自律スポーンの代わりに、現行`run-review.js`と
   同じ方式(`spawnSync`によるヘッドレスCLIプロセスの個別起動)を観点数(3)ぶん並列実行する
 - **finding受け渡し**: 各Reviewerプロセスは構造化findingを`.gh-maestro/review-<PR>-<aspect>.json`
-  に書き出し、RMはプロセス終了後にこれらを読み込んで以降のパイプライン(集約・重複統合・
-  line_anchor解決・投稿)に渡す。パイプライン自体のロジックはサブエージェント方式と共通
-- **差し戻し**: フォールバック方式では同一スレッドへの追加メッセージ送信ができないため、
-  差し戻しは「該当Reviewerプロセスを`ambiguous_anchor`/`unresolved_anchor`の内容込みで
-  再spawnし、1回だけやり直させる」という形に読み替える(最大1回のルールは変わらない)
+  に書き出し、RMはプロセス終了後にこれらを読み込んで集約JSONへ変換する。
+  以降のNode.js review publisher(JSON Schema検証・重複統合・line_anchor解決・投稿)は
+  サブエージェント方式と共通
 
 どちらの方式でも、Reviewerが返すfindingのデータ構造・RMの集約ロジック・投稿ロジックは
 共通であり、変わるのは「Reviewerの起動方法とfindingの受け渡し経路」だけ。
+
+差し戻し機構は初期設計から削除する。anchor不明・diff外のfindingはinline投稿せず、
+最終レビュー本文の「位置未解決finding」に隔離する。
 
 ## Reviewerの観点別重点
 
@@ -139,7 +163,11 @@ Reviewerサブエージェントは以下の構造化findingを返す(投稿は�
 }
 ```
 
-- `line_anchor`: HEAD実ファイルに存在する**連続したコード断片そのもの**。
+本線ではReviewerの最終回答として同じJSON Schemaに準拠したfinding配列を返す。
+フォールバックの別プロセスspawnでは同じJSON Schemaの配列を
+`.gh-maestro/review-<PR>-<aspect>.json`に書き出す。
+
+- `line_anchor`: PR head実ファイルに存在する**連続したコード断片そのもの**。
   要約・言い換え・説明文は禁止
 - `context_before` / `context_after`(任意): `line_anchor`の直前・直後に実際に存在する行。
   `line_anchor`が同一ファイル内で複数箇所に一致する場合の絞り込みに使う。省略可
@@ -148,28 +176,27 @@ Reviewerサブエージェントは以下の構造化findingを返す(投稿は�
 
 ## line_anchor の解決
 
-RMは投稿直前に`git show <HEAD commit>:<path>`の中で`line_anchor`を突き合わせ、
-実際の行番号(`resolved_line`)を確定する。
+Node.js review publisherは投稿直前にPRの`headRefOid`を取得し、
+`git show <headRefOid>:<path>`の中で`line_anchor`を突き合わせ、
+実際の行番号(`resolved_line`)を確定する。ローカル作業ツリーの`HEAD`は使わない。
 
 1. `line_anchor`だけで1件に一致すれば、それを採用する
 2. 複数件に一致し、かつ`context_before`/`context_after`が付与されていれば、
    前後行との一致でさらに絞り込む(絞り込んだ結果1件になれば採用)
-3. それでも複数件・0件のままなら、下表の通り差し戻す
+3. それでも複数件・0件のままなら、下表の通り位置未解決として扱う
+4. `resolved_line`がPR diffのRIGHT側hunkに含まれることを確認する。含まれなければ
+   `diff_outside_anchor`としてinline投稿しない
 
 | 一致件数(絞り込み後) | 挙動 |
 |---|---|
 | 1件 | インラインコメントとして投稿 |
-| 複数件 | 投稿しない。`ambiguous_anchor`として元のReviewerスレッドに差し戻す |
-| 0件 | 投稿しない。`unresolved_anchor`として元のReviewerスレッドに差し戻す |
+| 複数件 | 投稿しない。`ambiguous_anchor`として確定 |
+| 0件 | 投稿しない。`unresolved_anchor`として確定 |
 
-**差し戻しのルール**:
-- 新しいReviewerを立て直さない。**同じサブエージェントスレッド**に追加メッセージを送り、
-  既存コンテキストのまま再開させる(claude codeのidle再起動 / codexの`/agent`スレッド継続)
-- finding単位で**最大1回**のみ
-- 1回で解決しなければ`ambiguous_anchor`/`unresolved_anchor`として確定し、inline投稿しない
-- RMは推測でanchorを補正しない。無制限リトライは禁止
+RMおよびNode.js review publisherは推測でanchorを補正しない。差し戻し・無制限リトライは禁止する。
 
-解決できなかったfindingは、最終レビュー本文に「位置未解決finding」として隔離して記載する。
+解決できなかったfinding、およびPR diffのRIGHT側hunk外だったfindingは、
+最終レビュー本文に「位置未解決finding」として隔離して記載する。
 
 ## 重複統合
 
@@ -179,6 +206,18 @@ RMは投稿直前に`git show <HEAD commit>:<path>`の中で`line_anchor`を突�
   実質同一なら1件に統合し、aspectラベルを併記する(例: `[Correctness][Resilience & Security]`)
 - `path`・`resolved_line`が同じでも、`invariant` / `failure_scenario`が異なる別懸念なら
   統合せず別々に投稿してよい
+
+RM/Node.js review publisherが投稿対象から機械的に除外できるのは以下に限る。
+
+- JSON Schemaに違反しているfinding
+- `path` / `line_anchor` / `summary` / `observed_fact` / `invariant` / `failure_scenario` /
+  `minimal_fix` の必須項目が空、または実質的にプレースホルダーのfinding
+- `verified_references`が空のfinding
+- 重複統合で代表findingに吸収されたfinding
+- `ambiguous_anchor` / `unresolved_anchor` / `diff_outside_anchor`としてinline投稿できないfinding
+
+明らかな誤検知に見えるfindingであっても、RM/Node.js review publisherは採否判断として除外しない。
+その判断はOrchestrator + 人間が行う。
 
 ## 最終レビューevent: 運用ポリシー
 
@@ -202,7 +241,10 @@ RMは投稿直前に`git show <HEAD commit>:<path>`の中で`line_anchor`を突�
 - `gh-maestro-reviewer`スキルの新規作成(現行`fa86528`で削除された旧reviewer skillの復活ではなく、
   本計画に基づく再設計)
 - `review-prompt.md`の3ファイル分割
-- `run-review.js`のRM起動方式への置き換え(`poll-pr.js`からの呼び出し変更を含む)
-- RM用のfinding集約・line_anchor解決・重複統合ロジックの実装(RMへの指示書として自然言語で記述するか、
-  スクリプトとして決定的に実装するかは別途検討)
-- 差し戻し(スレッド再開)の具体的な実装方法をclaude code / codexそれぞれで検証
+- `run-review.js`後継のheadless RMランナー実装(`poll-pr.js`からの呼び出し変更を含む)
+- 手動デバッグ用の`spawn-worker.js`経由RM起動
+- `agents.json`の`promptDelivery`に基づく起動argv組み立て共通モジュール化
+- `install.js`のCodex向け`.agents/skills`配布対応
+- finding JSON Schemaの定義
+- Node.js review publisherの実装(JSON Schema検証、重複統合、line_anchor解決、
+  PR diff hunk内判定、GitHub投稿、COMMENT固定の最終レビュー提出)

@@ -32,3 +32,13 @@ agents:
         - `PR_REVIEW:<user>:APPROVED:<body>` → 人間にマージ許可シグナルとして提示する
         - `PR_REVIEW:<user>:CHANGES_REQUESTED:<body>` → bodyをトリアージしてコーダーにフィードバックする
         - `PR_REVIEW:<user>:COMMENTED:<body>` → PR_COMMENTと同様にトリアージする
+  codex:
+    skill_files_install_destination_directory: .agents/skills
+    skill_markdown_template_placeholder_substitutions:
+      POLL_INTERVAL_SECONDS: 30
+      POLL_MECHANISM: |
+        `node "{{SCRIPTS_PATH}}/poll-reviews.js" $PR $WORKSPACE` を実行してPRレビュー通知を監視する。
+        通知を受け取ったら以下の通り処理する:
+        - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → インラインコメントをトリアージする
+        - `PR_COMMENT:<user>:<body>` → PR全体コメントをトリアージする
+        - `PR_REVIEW:<user>:<state>:<body>` → stateに応じてレビュー提出をトリアージする

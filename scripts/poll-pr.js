@@ -7,6 +7,7 @@
 
 const { spawnSync } = require('child_process');
 const { startReview } = require('./start-review');
+const { startReviewManager } = require('./start-review-manager');
 
 const USAGE = `poll-pr.js — Issue に対応する PR を検出し、検出時にレビュアーを起動する
 
@@ -60,7 +61,10 @@ function findPR() {
       const workspace = process.cwd();
       // PR 検出のついでにレビュアーを起動するが、その起動結果も併せて報告する。
       // これにより orchestrator は「レビュアーが起動済みである」ことを把握できる。
-      const reviewStatus = startReview(pr, repo, workspace);
+      const useReviewManager = process.env.GH_MAESTRO_REVIEW_BACKEND === 'manager';
+      const reviewStatus = useReviewManager
+        ? startReviewManager(pr, repo, workspace)
+        : startReview(pr, repo, workspace);
       process.stdout.write(`PR_DETECTED:${pr}\n`);
       process.stdout.write(`${reviewStatus}:${pr}\n`);
       process.exit(0);

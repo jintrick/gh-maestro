@@ -99,11 +99,30 @@ function stripFrontmatter(content) {
   return content.slice(end + 5);
 }
 
+function copySkillAssets(srcSkillDir, destSkillDir, substitutions) {
+  const expectedFiles = new Set(['SKILL.md']);
+  for (const entry of fs.readdirSync(srcSkillDir, { withFileTypes: true })) {
+    if (!entry.isFile() || entry.name === 'SKILL.md') continue;
+    if (!/\.(md|json)$/i.test(entry.name)) continue;
+    expectedFiles.add(entry.name);
+    const src = path.join(srcSkillDir, entry.name);
+    const dest = path.join(destSkillDir, entry.name);
+    const raw = fs.readFileSync(src, 'utf8');
+    fs.writeFileSync(dest, applySubstitutions(raw, substitutions), 'utf8');
+  }
+
+  for (const entry of fs.readdirSync(destSkillDir, { withFileTypes: true })) {
+    if (entry.isFile() && !expectedFiles.has(entry.name)) {
+      fs.unlinkSync(path.join(destSkillDir, entry.name));
+    }
+  }
+}
+
 function step(msg) { console.log(`\x1b[36m[gh-maestro-install] ${msg}\x1b[0m`); }
 function ok(msg)   { console.log(`  \x1b[32mv ${msg}\x1b[0m`); }
 function fail(msg) { console.error(`  \x1b[31mx ${msg}\x1b[0m`); process.exit(1); }
 
-module.exports = { parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter };
+module.exports = { parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets };
 
 if (require.main !== module) return;
 
@@ -164,6 +183,7 @@ for (const [agentName, config] of Object.entries(agents)) {
     const template = fs.readFileSync(templatePath, 'utf8');
     const content = applySubstitutions(template, substitutions);
     fs.writeFileSync(path.join(destSkill, 'SKILL.md'), content, 'utf8');
+    copySkillAssets(path.join(SKILLS_DIR, skill), destSkill, substitutions);
 
     // 旧バージョンが配置していた per-skill の scripts/ を stale として削除する
     const staleScripts = path.join(destSkill, 'scripts');
@@ -187,7 +207,7 @@ fs.mkdirSync(SHARED_SCRIPTS, { recursive: true });
 const INSTALL_EXCLUDE = new Set(['install.js']);
 const scriptsDir = path.join(ROOT, 'scripts');
 const scriptFiles = fs.readdirSync(scriptsDir)
-  .filter(f => (f.endsWith('.js') || f.endsWith('.md')) && !INSTALL_EXCLUDE.has(f));
+  .filter(f => (f.endsWith('.js') || f.endsWith('.md') || f.endsWith('.json')) && !INSTALL_EXCLUDE.has(f));
 
 // stale 削除: scripts/ に無いファイルを集約先から除去する
 const expected = new Set(scriptFiles);
@@ -231,6 +251,7 @@ for (const skill of skillDirs) {
   fs.mkdirSync(destSkillDir, { recursive: true });
   const template = fs.readFileSync(templatePath, 'utf8');
   fs.writeFileSync(path.join(destSkillDir, 'SKILL.md'), applySubstitutions(template, sharedSubstitutions), 'utf8');
+  copySkillAssets(path.join(SKILLS_DIR, skill), destSkillDir, sharedSubstitutions);
   ok(`${skill} -> ${destSkillDir} (shared)`);
 }
 
