@@ -103,4 +103,6 @@ scripts/                         # 全スクリプト（CLI・モジュール）
 
 ## レビュー
 
-レビュアー（`run-review.js`）は `scripts/review-prompt.md` のルーブリック（Correctness / Maintainability / Resilience & Security の3観点）に従ってPRを評価する。`review-prompt.md` を編集すればレビュー基準を変更できる。
+Review Manager（`run-review-manager.js`）は `gh-maestro-reviewer` スキルを使い、
+Correctness / Maintainability / Resilience & Security の3観点を独立Reviewerに分けてPRを評価する。
+観点別基準は `skills/gh-maestro-reviewer/reviewer-*.md` を編集する。

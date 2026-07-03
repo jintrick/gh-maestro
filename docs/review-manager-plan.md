@@ -1,11 +1,11 @@
 # Review Manager 体制 計画書
 
 策定日: 2026-07-03
-ステータス: 要件定義済み・未実装
+ステータス: 初期実装済み
 
 ## 背景
 
-現行のPRレビューは`run-review.js`が単一エージェント(claude-ds)をヘッドレスspawnし、
+旧PRレビューは`run-review.js`が単一エージェント(claude-ds)をヘッドレスspawnし、
 `scripts/review-prompt.md`に従って Correctness / Maintainability / Resilience & Security の
 3観点を**同一セッション内で逐次**検証する構成。以下の課題がある。
 
@@ -57,7 +57,7 @@ Correctness Reviewer / Maintainability Reviewer / Resilience & Security Reviewer
 RMは`gh-maestro-reviewer`スキルとして起動する。実行CLIはCodexを第一実装とするが、
 Reviewer起動指示・finding構造・投稿パイプラインは特定CLIへ強く依存させない。
 
-自動レビューの本線は、現行`start-review.js` / `run-review.js`の後継としてheadless detachedに起動する。
+自動レビューの本線は、旧`start-review.js` / `run-review.js`の後継としてheadless detachedに起動する。
 Codexでは`codex exec`を使う。手動デバッグ用には`spawn-worker.js`経由でWezTermペイン上の
 interactive Codexを起動できるようにする。
 
@@ -85,7 +85,7 @@ claude code(`Agent`ツール)・codex(自律スポーン/`.codex/agents/*.toml`)
 
 ## 判定基準の伝達
 
-各観点の判定基準(現行`review-prompt.md`の「観点1〜3」セクション相当、150行前後)は
+各観点の判定基準(旧`review-prompt.md`の「観点1〜3」セクション相当、150行前後)は
 `gh-maestro-reviewer`スキルのアセットとして3ファイルに分割する。
 
 - `reviewer-correctness.md`
@@ -104,7 +104,7 @@ RM自身が150行×3のチェックリストを自分のコンテキストに保
 diffが参照するが定義がdiff内にない型・シンボル・設定値(`package.json`のフィールド、
 外部インターフェース、既存関数のシグネチャ等)は、RMが事前に集めてReviewerへ配らない。
 **各Reviewerが必要になった時点で自分でリポジトリを読んで確認する**(現行
-`review-prompt.md`の「外部参照の解決」節と同じ方針)。理由:
+旧`review-prompt.md`の「外部参照の解決」節と同じ方針)。理由:
 
 - どの外部定義が必要かは観点によって異なり、RMが3観点分を予測して事前収集するのは無駄が多い
 - Reviewerは自分のworktree/workspaceに読み取りアクセスを持つので、都度確認するコストは低い
@@ -118,7 +118,7 @@ diffが参照するが定義がdiff内にない型・シンボル・設定値(`p
 RMのCLI(codex / claude code等)がネイティブなサブエージェント機構を持たない、または
 何らかの理由で使えない場合、RMは以下にフォールバックする。
 
-- **並列spawn**: `invoke_subagent`/`Agent`ツール/自律スポーンの代わりに、現行`run-review.js`と
+- **並列spawn**: `invoke_subagent`/`Agent`ツール/自律スポーンの代わりに、旧`run-review.js`と
   同じ方式(`spawnSync`によるヘッドレスCLIプロセスの個別起動)を観点数(3)ぶん並列実行する
 - **finding受け渡し**: 各Reviewerプロセスは構造化findingを`.gh-maestro/review-<PR>-<aspect>.json`
   に書き出し、RMはプロセス終了後にこれらを読み込んで集約JSONへ変換する。
@@ -236,15 +236,20 @@ RM/Node.js review publisherが投稿対象から機械的に除外できるの�
 将来的に運用実績が積み上がり、「findingゼロなら人間のレビュー負荷を下げるためAPPROVEを
 使いたい」という要望が出た場合は、本ポリシーを別途改定する。現時点ではCOMMENT固定とする。
 
-## 未実装項目(次フェーズ)
+## 実装済み項目
 
-- `gh-maestro-reviewer`スキルの新規作成(現行`fa86528`で削除された旧reviewer skillの復活ではなく、
-  本計画に基づく再設計)
+- `gh-maestro-reviewer`スキルの新規作成
 - `review-prompt.md`の3ファイル分割
-- `run-review.js`後継のheadless RMランナー実装(`poll-pr.js`からの呼び出し変更を含む)
-- 手動デバッグ用の`spawn-worker.js`経由RM起動
+- `run-review-manager.js` / `start-review-manager.js`によるheadless RMランナー実装
+- `poll-pr.js`からのReview Manager起動
 - `agents.json`の`promptDelivery`に基づく起動argv組み立て共通モジュール化
 - `install.js`のCodex向け`.agents/skills`配布対応
 - finding JSON Schemaの定義
-- Node.js review publisherの実装(JSON Schema検証、重複統合、line_anchor解決、
+- Node.js review publisherの初期実装(JSON Schema検証、重複統合、line_anchor解決、
   PR diff hunk内判定、GitHub投稿、COMMENT固定の最終レビュー提出)
+
+## 未実装項目(次フェーズ)
+
+- 手動デバッグ用の`spawn-worker.js`経由RM起動
+- 実PRでのReview Manager end-to-end検証
+- レガシー移行計画ドキュメントの整理
