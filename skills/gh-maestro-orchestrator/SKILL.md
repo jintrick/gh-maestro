@@ -87,11 +87,11 @@ node "{{SCRIPTS_PATH}}/send-pane.js" $WORKER --workspace $WORKSPACE "<メッセ�
 # 例: node "{{SCRIPTS_PATH}}/send-pane.js" issue-5-implement --workspace $WORKSPACE "命名改善: src/auth.go:42 — processData → normalizeSSN に変更してください（PR #12 のレビュー指摘より）"
 ```
 - **remove-worker.js** — ワーカーペインをkillしてworktreeを削除する
-- **start-review.js** — PRに対してレビュアーを起動する。通常はPR検出時にpoll-pr.jsが自動で呼ぶが、レビュアーが起動しなかった・失敗した場合に手動で起動・再起動するために使う
+- **start-review-manager.js** — PRに対してReview Managerを起動する。通常はPR検出時にpoll-pr.jsが自動で呼ぶが、Review Managerが起動しなかった・失敗した場合に手動で起動・再起動するために使う
 
 ```sh
-node "{{SCRIPTS_PATH}}/start-review.js" $PR $REPO $WORKSPACE
-# 出力: REVIEW_STARTED:<PR> （起動した） / REVIEW_ALREADY_RUNNING:<PR> （既に稼働中）
+node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE
+# 出力: REVIEW_MANAGER_STARTED:<PR> （起動した） / REVIEW_MANAGER_ALREADY_RUNNING:<PR> （既に稼働中）
 ```
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする
 - **view-file.js** — Issueの原案など、ユーザーに確認・承認してほしいファイルをZedで開く。Issueを起草したらチャットで説明するより先にこれで見せろ。
@@ -197,19 +197,19 @@ node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tm
 コーダーを起動すると `spawn-worker.js` が自動でポーリングを開始し、`send-pane.js` 経由で以下が届く：
 
 - `PR_DETECTED:<PR番号>` → PR番号を記録してレビュー監視に移行する
-- `REVIEW_STARTED:<PR番号>` → レビュアーが起動した（記録する）
-- `REVIEW_ALREADY_RUNNING:<PR番号>` → 既にレビュアーが稼働中
+- `REVIEW_MANAGER_STARTED:<PR番号>` → Review Managerが起動した（記録する）
+- `REVIEW_MANAGER_ALREADY_RUNNING:<PR番号>` → 既にReview Managerが稼働中
 
 PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`send-pane.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
 
-**`REVIEW_STARTED`/`REVIEW_ALREADY_RUNNING` のどちらも来ない場合はレビュアーが起動していない**ので、「レビュアーの手動起動」に従って自分で起動すること。
+**`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、「Review Managerの手動起動」に従って自分で起動すること。
 
-### レビュアーの手動起動
+### Review Managerの手動起動
 
-レビュアーが起動しなかった、または途中で失敗した場合は、start-review.js で起動・再起動できる。レビューが進まないときは `$WORKSPACE/.gh-maestro/review-<PR>.log` を確認し、失敗していれば再起動する。
+Review Managerが起動しなかった、または途中で失敗した場合は、start-review-manager.js で起動・再起動できる。レビューが進まないときは `$WORKSPACE/.gh-maestro/review-manager-<PR>.log` を確認し、失敗していれば再起動する。
 
 ```sh
-node "{{SCRIPTS_PATH}}/start-review.js" $PR $REPO $WORKSPACE
+node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE
 ```
 
 ## レビュー監視

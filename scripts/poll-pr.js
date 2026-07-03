@@ -2,11 +2,10 @@
 // Usage: node poll-pr.js <ISSUE> [INTERVAL_SECONDS]
 // Polls until a PR for the given issue is found, then launches the reviewer and prints:
 //   PR_DETECTED:<number>
-//   REVIEW_STARTED:<number> | REVIEW_ALREADY_RUNNING:<number>
+//   REVIEW_MANAGER_STARTED:<number> | REVIEW_MANAGER_ALREADY_RUNNING:<number>
 'use strict';
 
 const { spawnSync } = require('child_process');
-const { startReview } = require('./start-review');
 const { startReviewManager } = require('./start-review-manager');
 
 const USAGE = `poll-pr.js — Issue に対応する PR を検出し、検出時にレビュアーを起動する
@@ -18,11 +17,11 @@ Arguments:
   [INTERVAL_SECONDS]  ポーリング間隔（秒、デフォルト 30）
 
 Output (stdout):
-  PR_DETECTED:<PR>             PR を検出した
-  REVIEW_STARTED:<PR>          レビュアーを起動した
-  REVIEW_ALREADY_RUNNING:<PR>  レビュアーは既に稼働中
+  PR_DETECTED:<PR>                     PR を検出した
+  REVIEW_MANAGER_STARTED:<PR>          Review Manager を起動した
+  REVIEW_MANAGER_ALREADY_RUNNING:<PR>  Review Manager は既に稼働中
 
-PR が見つかるまでブロックし、見つけたらレビュアー(start-review.js)を起動して終了する。`;
+PR が見つかるまでブロックし、見つけたら Review Manager(start-review-manager.js)を起動して終了する。`;
 
 const argv = process.argv.slice(2);
 if (argv.includes('--help') || argv.includes('-h')) {
@@ -59,12 +58,9 @@ function findPR() {
     const pr = findPR();
     if (pr) {
       const workspace = process.cwd();
-      // PR 検出のついでにレビュアーを起動するが、その起動結果も併せて報告する。
-      // これにより orchestrator は「レビュアーが起動済みである」ことを把握できる。
-      const useReviewManager = process.env.GH_MAESTRO_REVIEW_BACKEND === 'manager';
-      const reviewStatus = useReviewManager
-        ? startReviewManager(pr, repo, workspace)
-        : startReview(pr, repo, workspace);
+      // PR 検出のついでにReview Managerを起動するが、その起動結果も併せて報告する。
+      // これにより orchestrator は「レビューが起動済みである」ことを把握できる。
+      const reviewStatus = startReviewManager(pr, repo, workspace);
       process.stdout.write(`PR_DETECTED:${pr}\n`);
       process.stdout.write(`${reviewStatus}:${pr}\n`);
       process.exit(0);
