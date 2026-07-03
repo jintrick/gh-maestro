@@ -252,11 +252,20 @@ const _rxArgs = (_rxJsPath && fs.existsSync(_rxJsPath)) ? [_rxJsPath, '--yolo'] 
 // ペイン内アプリの改行解釈がエージェントごとに異なるため個別に持たせる（送信の議論の経緯は
 // scripts/send-enter.js のコメント参照）。claude/claude-ds/agyはCRLFで動作実績あり、
 // reasonixは実機検証の結果 \r 単体のみ送信として認識される（\n は入力欄に残留し無視される）。
+//
+// promptDelivery: プロンプトの配送メカニズム。エージェント固有の起動argv組み立ては
+// spawn-worker.js側に集約されており（docs/agent-launch-mechanism-plan.md 参照）、
+// ここでは「どのメカニズムを使うか」だけを宣言する。
+//   - system-prompt-file: --append-system-prompt-file 経由（claude/claude-ds）
+//   - flag: promptFlag経由でargv（agy）
+//   - positional: プロンプトをargv末尾にそのまま渡す（codex。実機確認済み）
+//   - send-text-after-launch: 起動時は渡さず、sendTextDelayMs 待機後にsend-textで注入（reasonix）
 const defaults = [
-  { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptFlag: null, enterSequence: '\r\n' },
-  { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptFlag: null, enterSequence: '\r\n' },
-  { id: 'reasonix',  label: 'Reasonix Code',           command: _rxCmd,      extraArgs: _rxArgs, promptFlag: null, skillsViaMd: true, enterSequence: '\r' },
-  { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i', enterSequence: '\r\n' },
+  { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'system-prompt-file', enterSequence: '\r\n' },
+  { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'system-prompt-file', enterSequence: '\r\n' },
+  { id: 'reasonix',  label: 'Reasonix Code',           command: _rxCmd,      extraArgs: _rxArgs, promptDelivery: 'send-text-after-launch', sendTextDelayMs: 2000, skillsViaMd: true, enterSequence: '\r' },
+  { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'flag', promptFlag: '-i', enterSequence: '\r\n' },
+  { id: 'codex',     label: 'Codex (OpenAI)',          command: 'codex',     extraArgs: ['--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen'], promptDelivery: 'positional', enterSequence: '\r\n' },
 ];
 if (!fs.existsSync(agentsConfigPath)) {
   fs.writeFileSync(agentsConfigPath, JSON.stringify(defaults, null, 2) + '\n', 'utf8');
@@ -283,11 +292,23 @@ if (!fs.existsSync(agentsConfigPath)) {
       // （例: command=pwsh の DeepSeek ラッパー）ため、上書きすると起動が壊れる。touch しない。
       // reasonix は旧デフォルト('reasonix')→新デフォルト('node')への移行も行う。
       const isReasonixMigration = agent.id === 'reasonix' && entry.command === 'reasonix' && agent.command === 'node';
+      // promptDelivery はCLIの起動メカニズムそのものを表す値で、command のカスタマイズ
+      // （例: claude-ds の pwsh ラッパー）とは独立して常にバックフィルしてよい。
+      // ここを command 一致ガードの中に入れると、customize済みエントリが promptDelivery
+      // 欠如のまま残り、spawn-worker.js のディスパッチが "未知のメカニズム" で失敗する。
+      if (!('promptDelivery' in entry)) {
+        entry.promptDelivery = agent.promptDelivery;
+        if ('promptFlag' in agent) entry.promptFlag = agent.promptFlag;
+        if ('sendTextDelayMs' in agent) entry.sendTextDelayMs = agent.sendTextDelayMs;
+        updated++;
+      }
       if (entry.command === agent.command || isReasonixMigration) {
         entry.command = agent.command;
         entry.extraArgs = agent.extraArgs;
-        entry.promptFlag = agent.promptFlag;
+        entry.promptDelivery = agent.promptDelivery;
+        entry.promptFlag = agent.promptFlag; // 'flag'メカニズムのときだけ意味を持つ。他は undefined になり出力から消える
         if ('skillsViaMd' in agent) entry.skillsViaMd = agent.skillsViaMd;
+        if ('sendTextDelayMs' in agent) entry.sendTextDelayMs = agent.sendTextDelayMs;
         if ('enterSequence' in agent) entry.enterSequence = agent.enterSequence;
         // 廃止されたフィールドを除去
         delete entry.positionalPrompt;

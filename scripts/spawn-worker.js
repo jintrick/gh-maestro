@@ -74,7 +74,7 @@ if (!agentConfig) {
     fail(`エージェント "${agentId}" が ~/.gh-maestro/agents.json に見つかりません。手動で追加するか、node scripts/install.js を実行してください。`);
   }
   // --agent 未指定のデフォルトフォールバック
-  agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptFlag: '-i', enterSequence: '\r\n' };
+  agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'flag', promptFlag: '-i', enterSequence: '\r\n' };
 }
 
 // --- エージェントバイナリが PATH 上に存在するか確認 ---
@@ -292,23 +292,24 @@ const shortPrompt = agentConfig.skillsViaMd
   ? `orchestratorです。AGENTS.mdの指示に従って作業を開始してください。`
   : `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。詳細は ${toUnix(promptFile)} を参照してください。`;
 
-const agentCmdArgs = (() => {
-  if (agentConfig.skillsViaMd && !agentConfig.promptFlag) {
-    // reasonix等: positional argは未サポート。起動後にsend-textで注入する
-    return [agentConfig.command, ...agentConfig.extraArgs];
-  }
-  if (agentConfig.promptFlag) {
-    // agy: -i フラグでargv経由（改行なしの短い参照プロンプトを渡す）
-    return [agentConfig.command, ...agentConfig.extraArgs, agentConfig.promptFlag, shortPrompt];
-  }
-  // claude/claude-ds: --append-system-prompt-file でファイル経由
-  return [
-    agentConfig.command,
-    ...agentConfig.extraArgs,
+// --- プロンプト配送メカニズム ---
+// エージェントごとの起動argv組み立ては、agents.json の promptDelivery（宣言的データ）で選び、
+// 実装（この4パターン）だけを spawn-worker.js に集約する。エージェント追加時に触るのは
+// agents.json 側のデータだけで済み、ここに新しい if 分岐を足す必要は無いのが望ましい状態。
+// docs/agent-launch-mechanism-plan.md 参照。
+const buildArgsByDelivery = {
+  'system-prompt-file': () => [
+    agentConfig.command, ...agentConfig.extraArgs,
     '--append-system-prompt-file', promptFile,
     `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
-  ];
-})();
+  ],
+  'flag': () => [agentConfig.command, ...agentConfig.extraArgs, agentConfig.promptFlag, shortPrompt],
+  'positional': () => [agentConfig.command, ...agentConfig.extraArgs, shortPrompt],
+  'send-text-after-launch': () => [agentConfig.command, ...agentConfig.extraArgs],
+};
+const buildArgs = buildArgsByDelivery[agentConfig.promptDelivery];
+if (!buildArgs) fail(`エージェント "${agentConfig.id}" の promptDelivery "${agentConfig.promptDelivery}" は未知のメカニズムです`);
+const agentCmdArgs = buildArgs();
 
 // --- WezTerm ペイン分割 + エージェント直接起動（シェルを介さずargvで渡すことで改行等のエスケープ問題を回避） ---
 const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...agentCmdArgs];
@@ -348,11 +349,11 @@ try {
   fail(`workers.json への書き込みに失敗しました: ${e.message}`);
 }
 
-// --- skillsViaMd + promptFlagなし（reasonix等）: 起動後にsend-textでプロンプトを注入 ---
-// positional argはreasonixのインタラクティブモードで未サポートのため、
-// TUI初期化待ち後にwezterm cli send-textでプロンプトを送る。
-if (agentConfig.skillsViaMd && !agentConfig.promptFlag) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+// --- send-text-after-launch: 起動後にsend-textでプロンプトを注入 ---
+// positional argが使えないエージェント（reasonix等）向け。
+// TUI初期化待ち（agents.json の sendTextDelayMs、既定2000ms）後にwezterm cli send-textでプロンプトを送る。
+if (agentConfig.promptDelivery === 'send-text-after-launch') {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, agentConfig.sendTextDelayMs ?? 2000);
   const sendResult = spawnSync('wezterm', ['cli', 'send-text', '--pane-id', newPaneId, '--no-paste', shortPrompt], { encoding: 'utf8' });
   if (sendResult.status !== 0) {
     console.warn(`spawn-worker: send-text失敗 (pane ${newPaneId}): ${sendResult.stderr?.trim()}`);
