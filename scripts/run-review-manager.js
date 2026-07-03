@@ -74,7 +74,7 @@ try {
       'exec',
       '--cd', workspace,
       '--model', 'gpt-5.4',
-      '--sandbox', 'workspace-write',
+      '--sandbox', 'danger-full-access',
     ],
     promptDelivery: 'positional',
   }, {
