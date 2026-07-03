@@ -73,6 +73,7 @@ try {
     extraArgs: [
       'exec',
       '--cd', workspace,
+      '--model', 'gpt-5.4',
       '--sandbox', 'workspace-write',
     ],
     promptDelivery: 'positional',
