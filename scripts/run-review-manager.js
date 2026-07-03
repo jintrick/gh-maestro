@@ -69,7 +69,7 @@ try {
   spawnSync('git', ['-C', workspace, 'fetch', 'origin', `pull/${pr}/head`], { stdio: 'ignore' });
 
   const agentArgs = buildAgentCommandArgs({
-    command: process.env.GH_MAESTRO_RM_COMMAND || 'codex',
+    command: 'codex',
     extraArgs: [
       'exec',
       '--cd', workspace,
