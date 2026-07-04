@@ -27,6 +27,7 @@ const { linkNodeModules } = require('./link-node-modules');
 const { sendEnter } = require('./send-enter');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { buildAgentCommandArgs } = require('./agent-launch');
+const { buildLoginShellExecArgs, checkAgentExists } = require('./agent-exec');
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
@@ -78,21 +79,17 @@ if (!agentConfig) {
   agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'flag', promptFlag: '-i', enterSequence: '\r\n' };
 }
 
-// --- エージェントバイナリが PATH 上に存在するか確認 ---
-{
-  const whichCmd = process.platform === 'win32' ? 'where' : 'command';
-  const whichArgs = process.platform === 'win32' ? [agentConfig.command] : ['-v', agentConfig.command];
-  const which = spawnSync(whichCmd, whichArgs, { encoding: 'utf8', stdio: 'pipe' });
-  if (which.status !== 0) {
-    fail(`エージェント "${agentId}" のコマンド "${agentConfig.command}" が PATH に見つかりません。CLIがインストールされているか確認してください。`);
-  }
+// --- エージェントがログインシェルで解決可能か確認 ---
+// 実起動と同じ解決方法（ログインシェル経由）で存在確認を行う。
+// PATH 実行ファイル・pwsh 関数・シェルエイリアスのいずれでも一貫して判定する。
+if (!checkAgentExists(agentConfig.command)) {
+  fail(`エージェント "${agentId}" のコマンド "${agentConfig.command}" が見つかりません。CLIがインストールされているか、pwsh関数/シェルエイリアスが定義されているか確認してください。`);
 }
 
-// --- pwsh -Command 経由エージェントの空白パスガード ---
-// pwsh -Command は文字列を再パースするため、起動引数に渡すパス（worktree 配下の
-// prompt.md 等）に空白があるとトークン分割されて壊れる。worktree は workspace 配下に
-// 作られるので、workspace に空白があれば起動が確実に壊れる。早期に明確なエラーで止める。
-// （claude 直起動や agy は argv がそのまま渡るため空白でも壊れず、この制約の対象外）
+// --- [レガシーガード] pwsh -Command 経由エージェントの空白パスガード ---
+// 新しい agent-exec.js は -EncodedCommand（Windows）/ exec "$@"（Unix）を使用するため
+// 引数内の空白は安全に扱える。ただし、extraArgs に -Command を含む旧来のカスタム設定が
+// agents.json に残っている場合のためにこのガードを残す（新構成では発動しない想定）。
 if (agentConfig.extraArgs?.includes('-Command') && /\s/.test(workspace)) {
   console.error(`spawn-worker: ワークスペースのパスに空白が含まれています: "${workspace}"`);
   console.error(`  エージェント "${agentId}" は pwsh -Command 経由で起動するため、空白を含むパスは`);
@@ -309,12 +306,16 @@ try {
   fail(`エージェント "${agentConfig.id}" の起動引数を組み立てられません: ${e.message}`);
 }
 
-// --- WezTerm ペイン分割 + エージェント直接起動（シェルを介さずargvで渡すことで改行等のエスケープ問題を回避） ---
-const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...agentCmdArgs];
+// --- WezTerm ペイン分割 + エージェント起動（ログインシェル経由） ---
+// 全エージェントを buildLoginShellExecArgs でログインシェル経由にラップする。
+// これにより PATH 実行ファイル・pwsh 関数・エイリアスのすべてが起動可能になる。
+// argv の完全性は各プラットフォームのエンコード方式で保証される（agent-exec.js 参照）。
+const loginShellArgs = buildLoginShellExecArgs(agentCmdArgs);
+const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...loginShellArgs];
 const split = spawnSync('wezterm', splitArgs, { encoding: 'utf8' });
 if (split.status !== 0 && splitFromPaneId !== orchPaneId) {
   console.warn(`spawn-worker: ペイン分割失敗: ${split.stderr.trim()} — orchestratorペイン(${orchPaneId})にフォールバックします`);
-  const fallbackArgs = ['cli', 'split-pane', '--bottom', '--cwd', worktreeDir, '--pane-id', orchPaneId, '--', ...agentCmdArgs];
+  const fallbackArgs = ['cli', 'split-pane', '--bottom', '--cwd', worktreeDir, '--pane-id', orchPaneId, '--', ...loginShellArgs];
   const split2 = spawnSync('wezterm', fallbackArgs, { encoding: 'utf8' });
   if (split2.status === 0) {
     split.status = 0;

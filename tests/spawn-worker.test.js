@@ -142,7 +142,7 @@ test('agents.json に定義されていてもバイナリが PATH になけれ�
     });
 
     assert.notEqual(r.status, 0, 'exit code should be non-zero');
-    assert.match(r.stderr, /PATH に見つかりません/, 'error should be about missing binary');
+    assert.match(r.stderr, /見つかりません/, 'error should be about missing agent command');
     assert.match(r.stderr, /nonexistent-cmd-xyz/, 'error should name the missing command');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
