@@ -63,18 +63,20 @@ function buildBashLoginExecArgs(agentCmdArgs) {
  * シェルによる再パースが一切発生しない。引数内の空白・改行・特殊文字もそのまま維持される。
  *
  * 構築する PowerShell コマンド:
- *   & "<command>" "<arg1>" "<arg2>" ...
- *   - 各引数を "..." で囲み、内部の " は "" にエスケープ（PowerShell文字列リテラル規則）
+ *   & '<command>' '<arg1>' '<arg2>' ...
+ *   - 各引数をシングルクォート '...' で囲む（PowerShell verbatim 文字列リテラル）
+ *   - シングルクォート内の ' は '' にエスケープ（PowerShell の規則）
+ *   - シングルクォート文字列内では $ / " / 改行 はすべてリテラルとして扱われる
  *   - &（call operator）で関数/実行ファイルを呼び出す
  *   - -NoProfile を指定しないことで $PROFILE がロードされ、pwsh関数も解決可能
  */
 function buildPwshExecArgs(agentCmdArgs) {
-  // 各引数を PowerShell のダブルクォート文字列リテラルとしてエスケープ
-  //   " → "" （PowerShell のエスケープ規則）
-  //   全体を "..." で囲む
+  // 各引数を PowerShell のシングルクォートリテラルとしてエスケープ
+  //   ' → '' （PowerShell の規則）
+  //   全体を '...' で囲む（内部での 変数展開 $ / コマンド置換 / " はすべて無効化される）
   const escapedArgs = agentCmdArgs.map((arg) => {
-    const escaped = arg.replace(/"/g, '""');
-    return `"${escaped}"`;
+    const escaped = arg.replace(/'/g, "''");
+    return `'${escaped}'`;
   }).join(' ');
 
   // & <command> <args...>
@@ -122,14 +124,14 @@ function checkPwshExists(command) {
   //   そこで、一度 -NoProfile で失敗した場合は profile 込みでも試す。
   const r1 = spawnSync('pwsh', [
     '-NoLogo', '-NoProfile',
-    '-Command', `Get-Command "${command.replace(/"/g, '""')}" -ErrorAction Stop`,
+    '-Command', `Get-Command '${command.replace(/'/g, "''")}' -ErrorAction Stop`,
   ], { encoding: 'utf8', stdio: 'pipe' });
   if (r1.status === 0) return true;
 
   // -NoProfile で見つからなかった場合、profile 込みで再試行
   // （pwsh 関数として定義されている場合に対応）
   const encoded = Buffer.from(
-    `Get-Command "${command.replace(/"/g, '""')}" -ErrorAction Stop`,
+    `Get-Command '${command.replace(/'/g, "''")}' -ErrorAction Stop`,
     'utf16le',
   ).toString('base64');
   const r2 = spawnSync('pwsh', ['-NoLogo', '-EncodedCommand', encoded], {
@@ -144,7 +146,10 @@ function checkPwshExists(command) {
  * -l（ログインシェル）で .bashrc 等のエイリアス/関数定義がロードされる。
  */
 function checkBashExists(command) {
-  const r = spawnSync('bash', ['-lc', `command -v "${command.replace(/"/g, '\\"')}" 2>/dev/null`], {
+  // シングルクォートで囲み、内部の ' は '\'' でエスケープ（bash の方法）
+  // シングルクォート内では $ / ` / " はすべてリテラルとして扱われる
+  const escaped = command.replace(/'/g, "'\\''");
+  const r = spawnSync('bash', ['-lc', `command -v '${escaped}' 2>/dev/null`], {
     encoding: 'utf8', stdio: 'pipe',
   });
   return r.status === 0;

@@ -17,22 +17,32 @@ test('buildLoginShellExecArgs: win32 は pwsh -EncodedCommand を返す', () => 
 
   // 第4引数が有効な base64 であることを確認（UTF-16LE でデコード → 元のコマンド文字列）
   const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
-  assert.ok(decoded.startsWith('& "claude"'));
+  assert.ok(decoded.startsWith("& 'claude'"));
   assert.ok(decoded.includes('--dangerously-skip-permissions'));
   assert.ok(decoded.includes('/tmp/p.md'));
-  assert.ok(decoded.endsWith('"start"'));
+  assert.ok(decoded.endsWith("'start'"));
 });
 
-test('buildLoginShellExecArgs: win32 で引数内の " をエスケープする', () => {
-  const args = buildLoginShellExecArgs(['claude', 'hello "world" test'], 'win32');
+test('buildLoginShellExecArgs: win32 で引数内の \' をエスケープする', () => {
+  const args = buildLoginShellExecArgs(['claude', "hello 'world' test"], 'win32');
   const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
-  assert.ok(decoded.includes('"hello ""world"" test"'));
+  assert.ok(decoded.includes("'hello ''world'' test'"));
 });
 
 test('buildLoginShellExecArgs: win32 で空白を含むパスを安全に扱う', () => {
   const args = buildLoginShellExecArgs(['claude', '--append-system-prompt-file', 'C:/path with spaces/prompt.md', 'start'], 'win32');
   const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
-  assert.ok(decoded.includes('"C:/path with spaces/prompt.md"'));
+  assert.ok(decoded.includes("'C:/path with spaces/prompt.md'"));
+});
+
+test('buildLoginShellExecArgs: win32 で $ を含む引数を変数展開せず維持する', () => {
+  const args = buildLoginShellExecArgs(['claude-ds', '--model', '$DEEPSEEK_MODEL', 'C:/path/$VAR/prompt.md'], 'win32');
+  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
+  // single-quote なので $ はそのままリテラル
+  assert.ok(decoded.includes("'$DEEPSEEK_MODEL'"));
+  assert.ok(decoded.includes("'C:/path/$VAR/prompt.md'"));
+  // シングルクォートの外に $ がないことを確認
+  assert.ok(!decoded.includes('"$'), 'double-quoted $ が残っていない');
 });
 
 test('buildLoginShellExecArgs: Unix は bash -lc exec を返す', () => {
