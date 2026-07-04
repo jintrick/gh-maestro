@@ -97,7 +97,7 @@ RMはReviewer起動時に「PR固有のコンテキスト(diff等)」のみを�
 RM自身が150行×3のチェックリストを自分のコンテキストに保持する必要がない。
 
 `gh-maestro-reviewer`スキルの正本はリポジトリの`skills/gh-maestro-reviewer`に置く。
-`install.js`はClaude / Agy向けの既存配布に加え、Codex向けにも`.agents/skills`へ配布する。
+`install.js`はClaude / Agy向けの既存配布に加え、Codex向けにも`~/.agents/skills`へ配布する。
 
 ### 外部定義・設定の収集はRMが抱え込まない
 
@@ -243,7 +243,7 @@ RM/Node.js review publisherが投稿対象から機械的に除外できるの�
 - `run-review-manager.js` / `start-review-manager.js`によるheadless RMランナー実装
 - `poll-pr.js`からのReview Manager起動
 - `agents.json`の`promptDelivery`に基づく起動argv組み立て共通モジュール化
-- `install.js`のCodex向け`.agents/skills`配布対応
+- `install.js`のCodex向け`~/.agents/skills`配布対応
 - finding JSON Schemaの定義
 - Node.js review publisherの初期実装(JSON Schema検証、重複統合、line_anchor解決、
   PR diff hunk内判定、GitHub投稿、COMMENT固定の最終レビュー提出)
