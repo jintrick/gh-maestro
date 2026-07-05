@@ -185,7 +185,7 @@ function runPoller(workspace) {
 
         if (shouldNotify) {
           notifyIds.push(mid);
-          lastNotifiedAt.set(mid, now);
+          // lastNotifiedAt は notifyPane 成功後に進める（失敗時は次スキャンで再通知）
         }
 
         // エスカレート: stuck かつ未エスカレート
@@ -209,12 +209,14 @@ function runPoller(workspace) {
         }
       }
 
-      // 通知送信
+      // 通知送信（成功時のみ lastNotifiedAt を進める）
       if (notifyIds.length > 0) {
         const pendingForRecipient = msgs.filter(m => notifyIds.includes(m.messageId));
         const text = buildNotificationText(scriptsDir, pendingForRecipient);
         try {
           notifyPane(workspace, recipient, text);
+          // 通知成功 → タイムスタンプ更新（失敗したら次スキャンで再通知）
+          for (const mid of notifyIds) lastNotifiedAt.set(mid, now);
         } catch (err) {
           process.stderr.write(`[poller] ${recipient} への通知失敗: ${err.message}\n`);
         }

@@ -40,21 +40,21 @@ test('findWorkspaceFromCwd: .gh-maestro があればその親を workspace と�
 });
 
 test('findWorkspaceFromCwd: 親ディレクトリの .gh-maestro を上方向探索で見つける', () => {
-  // C:\Users\Jintrick に .gh-maestro が存在するため、tmpDir（その子孫ディレクトリ）からでも
-  // 親方向探索で workspace が発見される。
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
+  // 自前の fixture で親方向探索を検証（外部ファイルシステムに依存しない）
+  const parentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-parent-'));
+  const childDir = path.join(parentDir, 'deep', 'nested');
   try {
+    fs.mkdirSync(path.join(parentDir, '.gh-maestro'), { recursive: true });
+    fs.mkdirSync(childDir, { recursive: true });
     const origCwd = process.cwd;
-    process.cwd = () => tmpDir;
+    process.cwd = () => childDir;
     try {
-      const result = findWorkspaceFromCwd();
-      assert.ok(result !== null, 'cwd 下に .gh-maestro がなくても親に存在すれば見つかる');
-      assert.ok(fs.existsSync(path.join(result, '.gh-maestro')), '結果ディレクトリに .gh-maestro が存在する');
+      assert.equal(findWorkspaceFromCwd(), parentDir);
     } finally {
       process.cwd = origCwd;
     }
   } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(parentDir, { recursive: true, force: true });
   }
 });
 
@@ -81,23 +81,25 @@ test('resolveWorkspace: --workspace 引数が次優先', () => {
 });
 
 test('resolveWorkspace: 引数なし・env なしでも親に .gh-maestro があれば workspace を返す', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
+  // 自前の fixture で resolveWorkspace(null) が cwd 探索することを検証
+  const parentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-parent-'));
+  const childDir = path.join(parentDir, 'sub');
   try {
+    fs.mkdirSync(path.join(parentDir, '.gh-maestro'), { recursive: true });
+    fs.mkdirSync(childDir, { recursive: true });
     const origCwd = process.cwd;
-    process.cwd = () => tmpDir;
+    process.cwd = () => childDir;
     try {
       withEnv({ GH_MAESTRO_WORKSPACE: undefined }, () => {
         delete process.env.GH_MAESTRO_WORKSPACE;
-        const result = resolveWorkspace(null);
-        // C:\Users\Jintrick に .gh-maestro が存在するため null ではなく workspace が返る
-        assert.ok(result !== null);
-        assert.ok(fs.existsSync(path.join(result, '.gh-maestro')));
+        assert.equal(resolveWorkspace(null), parentDir);
+        assert.ok(fs.existsSync(path.join(parentDir, '.gh-maestro')));
       });
     } finally {
       process.cwd = origCwd;
     }
   } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(parentDir, { recursive: true, force: true });
   }
 });
 
