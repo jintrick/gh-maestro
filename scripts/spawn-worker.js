@@ -20,7 +20,7 @@
 
 const { execSync, spawn, spawnSync } = require('./child-process');
 const { existsSync, mkdirSync, readFileSync, writeFileSync,
-        lstatSync, rmdirSync, rmSync } = require('fs');
+        lstatSync, rmdirSync, rmSync, readdirSync } = require('fs');
 const { resolve, relative } = require('path');
 // link-node-modules は常に同一ディレクトリに同居する（リポジトリの scripts/ もインストール先 ~/.gh-maestro/scripts/ も）。
 const { linkNodeModules } = require('./link-node-modules');
@@ -28,6 +28,7 @@ const { sendEnter } = require('./send-enter');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs, checkAgentExists } = require('./agent-exec');
+const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
@@ -181,15 +182,14 @@ if (baseBranch) {
 
 // --- worktree を作成（staleな残骸があれば先に除去してリトライ） ---
 mkdirSync(resolve(workspace, '.gh-maestro', 'worktrees'), { recursive: true });
-const worktreeStart = baseBranch ? ` "origin/${baseBranch}"` : '';
 try {
-  execSync(`git worktree add "${worktreeDir}" -b "${workerName}"${worktreeStart}`, { cwd: workspace, stdio: 'inherit' });
+  worktreeAdd(worktreeDir, workerName, baseBranch || null, workspace);
 } catch (e) {
   console.warn(`spawn-worker: worktree作成失敗: ${e.message.split('\n')[0]} — 残骸を除去してリトライします`);
   // 残骸除去（各ステップの失敗を個別にログ）
-  try { execSync(`git worktree remove --force "${worktreeDir}"`, { cwd: workspace, stdio: 'pipe' }); }
+  try { worktreeRemove(worktreeDir, workspace); }
   catch (e2) { console.warn(`  git worktree remove: ${e2.message.split('\n')[0]}`); }
-  try { execSync('git worktree prune', { cwd: workspace, stdio: 'pipe' }); }
+  try { worktreePrune(workspace); }
   catch (e2) { console.warn(`  git worktree prune: ${e2.message.split('\n')[0]}`); }
   try { rmSync(worktreeDir, { recursive: true, force: true }); }
   catch (e2) { console.warn(`  rmSync: ${e2.message.split('\n')[0]}`); }
@@ -197,7 +197,7 @@ try {
   catch (e2) { console.warn(`  git branch -D: ${e2.message.split('\n')[0]}`); }
   // リトライ
   try {
-    execSync(`git worktree add "${worktreeDir}" -b "${workerName}"${worktreeStart}`, { cwd: workspace, stdio: 'inherit' });
+    worktreeAdd(worktreeDir, workerName, baseBranch || null, workspace);
   } catch (e2) {
     fail(`git worktree の作成に失敗しました（残骸除去後もリトライ失敗）: ${e2.message.split('\n')[0]}`);
   }
@@ -230,10 +230,10 @@ const rollbackWorktree = () => {
     }
   })(worktreeDir);
 
-  try { execSync(`git worktree remove --force "${worktreeDir}"`, { cwd: workspace, stdio: 'pipe' }); }
+  try { worktreeRemove(worktreeDir, workspace); }
   catch (e) {
     console.warn(`  rollback: git worktree remove 失敗: ${e.message.split('\n')[0]}`);
-    try { execSync('git worktree prune', { cwd: workspace, stdio: 'pipe' }); }
+    try { worktreePrune(workspace); }
     catch (e2) { console.warn(`  rollback: git worktree prune 失敗: ${e2.message.split('\n')[0]}`); }
     try { rmSync(worktreeDir, { recursive: true, force: true }); }
     catch (e2) { console.warn(`  rollback: rmSync 失敗: ${e2.message.split('\n')[0]}`); }

@@ -15,6 +15,7 @@ const { existsSync, readFileSync, writeFileSync, rmSync,
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { listPending } = require('./queue');
+const { worktreeRemove, worktreePrune } = require('./git-worktree');
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
 
@@ -187,14 +188,14 @@ const removeWorktree = (dir) => {
   unlinkJunctions(dir, warn);
 
   try {
-    execSync(`git worktree remove --force --force "${dir}"`, { cwd: workspace, stdio: 'pipe' });
+    worktreeRemove(dir, workspace, { doubleForce: true });
     if (!existsSync(dir)) return { ok: true };
   } catch (e) {
     warn(`git worktree remove 失敗: ${e.message.split('\n')[0]}`);
   }
 
   try {
-    execSync('git worktree prune', { cwd: workspace, stdio: 'pipe' });
+    worktreePrune(workspace);
   } catch (e) {
     warn(`git worktree prune 失敗: ${e.message.split('\n')[0]}`);
   }
@@ -311,7 +312,7 @@ if (existsSync(worktreesDir)) {
 }
 
 try {
-  execSync('git worktree prune', { cwd: workspace, stdio: 'pipe' });
+  worktreePrune(workspace);
   log('git worktree prune 完了。');
 } catch (e) {
   warn(`git worktree prune 失敗: ${e.message.split('\n')[0]}`);
