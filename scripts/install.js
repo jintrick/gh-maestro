@@ -206,24 +206,34 @@ fs.mkdirSync(SHARED_SCRIPTS, { recursive: true });
 
 const INSTALL_EXCLUDE = new Set(['install.js']);
 const scriptsDir = path.join(ROOT, 'scripts');
-const scriptFiles = fs.readdirSync(scriptsDir)
-  .filter(f => (f.endsWith('.js') || f.endsWith('.md') || f.endsWith('.json')) && !INSTALL_EXCLUDE.has(f));
+const entries = fs.readdirSync(scriptsDir, { withFileTypes: true });
+const scriptFiles = entries
+  .filter(e => e.isFile() && (e.name.endsWith('.js') || e.name.endsWith('.md') || e.name.endsWith('.json')) && !INSTALL_EXCLUDE.has(e.name))
+  .map(e => e.name);
+// サブディレクトリ（scripts/shared/ 等）も 1:1 でミラーする。
+// これがないと shared/ を require するスクリプト（send-pane.js 等）が配布先で MODULE_NOT_FOUND になる。
+const scriptSubdirs = entries.filter(e => e.isDirectory()).map(e => e.name);
 
-// stale 削除: scripts/ に無いファイルを集約先から除去する
-const expected = new Set(scriptFiles);
-for (const f of fs.readdirSync(SHARED_SCRIPTS)) {
-  if (!expected.has(f)) {
-    const p = path.join(SHARED_SCRIPTS, f);
-    if (fs.statSync(p).isFile()) {
-      fs.unlinkSync(p);
-      ok(`removed stale script: ${f}`);
-    }
+// stale 削除: scripts/ に無いファイル・ディレクトリを集約先から除去する
+const expectedFiles = new Set(scriptFiles);
+const expectedDirs = new Set(scriptSubdirs);
+for (const entry of fs.readdirSync(SHARED_SCRIPTS, { withFileTypes: true })) {
+  const p = path.join(SHARED_SCRIPTS, entry.name);
+  if (entry.isFile() && !expectedFiles.has(entry.name)) {
+    fs.unlinkSync(p);
+    ok(`removed stale script: ${entry.name}`);
+  } else if (entry.isDirectory() && !expectedDirs.has(entry.name)) {
+    fs.rmSync(p, { recursive: true, force: true });
+    ok(`removed stale script dir: ${entry.name}`);
   }
 }
 for (const f of scriptFiles) {
   fs.copyFileSync(path.join(scriptsDir, f), path.join(SHARED_SCRIPTS, f));
 }
-ok(`${scriptFiles.length} scripts -> ${SHARED_SCRIPTS}`);
+for (const d of scriptSubdirs) {
+  fs.cpSync(path.join(scriptsDir, d), path.join(SHARED_SCRIPTS, d), { recursive: true });
+}
+ok(`${scriptFiles.length} scripts + ${scriptSubdirs.length} subdir(s) -> ${SHARED_SCRIPTS}`);
 
 // ── 共有スキルを ~/.gh-maestro/skills/ にデプロイ ─────────────────────────────
 // スキルシステムを持たないエージェント（reasonix 等）が AGENTS.md 経由でスキルを読むための
