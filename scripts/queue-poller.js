@@ -15,6 +15,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { enqueue, listPending, pruneAcked } = require('./queue');
 const { notifyPane } = require('./pane-notify');
@@ -27,6 +28,7 @@ const RE_NOTIFY_INTERVAL_MS = 120000; // 再通知間隔（ms）
 const STUCK_THRESHOLD_MS = 600000;   // 10分 - この時間超で escallation
 const PRUNE_INTERVAL_MS = 3600000;   // 1時間 - prune の実行間隔
 const PRUNE_MAX_AGE_MS = 86400000;   // 24時間 - acked メッセージの保持期間
+const MAX_MUX_CHECK_FAILURES = 3;    // 連続 mux 到達性失敗で lease を手放す
 
 const USAGE = `queue-poller.js — キュー pending 監視と pane 通知
 
@@ -38,6 +40,37 @@ Options:
 poller は workspace ごとに 1 プロセス起動される。二重起動防止には poller.json の
 atomic 作成（wx）＋ stale heartbeat 乗っ取りを使用する。
 起動は lazy-start: queue-send.js が enqueue 後に stale 検出して spawn する。`;
+
+// ── mux 識別子 ──────────────────────────────────────────────────────────
+
+/**
+ * 現在の WezTerm mux セッションの識別子を返す。
+ * WEZTERM_UNIX_SOCKET は wezterm プロセス（mux）ごとに一意であり、
+ * ターミナル再起動を跨ぐと変化する。これにより「旧 mux に取り残された poller」を検出できる。
+ *
+ * @returns {string|null} 識別子、または取得不能時 null
+ */
+function getMuxId() {
+  return process.env.WEZTERM_UNIX_SOCKET || null;
+}
+
+/**
+ * 現在のプロセスから WezTerm mux への到達性を検証する。
+ * WEZTERM_MOCK env があればモックスクリプトを使う（テスト用）。
+ *
+ * @returns {boolean} wezterm cli list が成功すれば true
+ */
+function checkMuxReachable() {
+  const mock = process.env.WEZTERM_MOCK || null;
+  try {
+    const result = mock
+      ? spawnSync(process.execPath, [mock, 'cli', 'list', '--format', 'json'], { encoding: 'utf8', timeout: 6000 })
+      : spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8', timeout: 6000 });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
 
 // ── poller.json 管理 ────────────────────────────────────────────────────
 
@@ -71,7 +104,15 @@ function acquirePollerLease(workspace, payload) {
     // pid===0 は lazy-start のプレースホルダー → 即乗っ取り
     const isPlaceholder = !existing.pid || existing.pid === 0;
     const elapsed = Date.now() - (existing.heartbeat || 0);
-    if (!isPlaceholder && elapsed < STALE_HEARTBEAT_MS) {
+
+    // muxId 不一致チェック: 両方とも存在し、かつ異なる値なら stale と同等に扱う
+    // ターミナル再起動を跨ぐと WEZTERM_UNIX_SOCKET が変化するため、旧 mux に
+    // 取り残された poller を検出できる。
+    const currentMuxId = getMuxId();
+    const existingMuxId = existing.muxId || null;
+    const muxMismatch = currentMuxId && existingMuxId && currentMuxId !== existingMuxId;
+
+    if (!isPlaceholder && elapsed < STALE_HEARTBEAT_MS && !muxMismatch) {
       // 別プロセスが生きている → 退出
       return false;
     }
@@ -101,6 +142,7 @@ function claimPoller(workspace) {
     pid: process.pid,
     heartbeat: Date.now(),
     startedAt: new Date().toISOString(),
+    muxId: getMuxId(),
   });
   return acquirePollerLease(workspace, payload);
 }
@@ -219,6 +261,9 @@ function runPoller(workspace) {
   // lastPruneTime: 前回 pruneAcked を実行した時刻
   let lastPruneTime = Date.now();
 
+  // muxConsecutiveFailures: mux 到達性チェックの連続失敗回数
+  let muxConsecutiveFailures = 0;
+
   /**
    * 1回のスキャン実行。
    * pending を検出し、宛先ごとに通知・再通知・エスカレートを処理する。
@@ -228,6 +273,23 @@ function runPoller(workspace) {
     updateHeartbeat(workspace);
 
     const now = Date.now();
+
+    // mux 到達性の自己検証: wezterm cli list が連続失敗するなら旧 mux に
+    // 取り残された poller と判断し、lease を手放して自主 exit する。
+    // 次の enqueue の lazy-start が健全な poller を起動する。
+    if (!checkMuxReachable()) {
+      muxConsecutiveFailures++;
+      process.stderr.write(
+        `[poller] mux reachability check failed (${muxConsecutiveFailures}/${MAX_MUX_CHECK_FAILURES})\n`
+      );
+      if (muxConsecutiveFailures >= MAX_MUX_CHECK_FAILURES) {
+        process.stderr.write('[poller] mux unreachable: releasing lease and exiting\n');
+        releasePoller(workspace);
+        process.exit(0);
+      }
+    } else {
+      muxConsecutiveFailures = 0;
+    }
 
     // acked prune を定期的に実行（24h 保持）
     // pending の有無に関わらずタイマー駆動で実行し、idle 時も acked/ が無限に溜まらないようにする
@@ -403,4 +465,4 @@ if (!claimPoller(workspace)) {
 runPoller(workspace);
 } // require.main === module
 
-module.exports = { acquirePollerLease, pollerStatePath, readLastNotifiedState, writeLastNotifiedState };
+module.exports = { acquirePollerLease, pollerStatePath, readLastNotifiedState, writeLastNotifiedState, getMuxId, checkMuxReachable };

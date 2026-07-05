@@ -315,9 +315,310 @@ test('既に poller が稼働中なら lazy-start は2つ目を起動しない',
   });
 });
 
+// ── muxId lease 判定（ユニットテスト: 実 spawn なし） ───────────────────
+
+test('acquirePollerLease: muxId 不一致なら fresh heartbeat でも乗っ取る', () => {
+  withTempDir(workspace => {
+    const queueDir = path.join(workspace, '.gh-maestro', 'queue');
+    const pollerJsonPath = path.join(queueDir, 'poller.json');
+    fs.mkdirSync(queueDir, { recursive: true });
+
+    // 旧 mux の poller を模擬: 新鮮な heartbeat + 異なる muxId
+    fs.writeFileSync(pollerJsonPath, JSON.stringify({
+      pid: 999999,
+      heartbeat: Date.now(),
+      startedAt: new Date().toISOString(),
+      muxId: '/old/wezterm/socket/path',
+    }), 'utf8');
+
+    // 現在の muxId を一時的に設定
+    const originalMuxId = process.env.WEZTERM_UNIX_SOCKET;
+    process.env.WEZTERM_UNIX_SOCKET = '/new/wezterm/socket/path';
+    try {
+      const payload = JSON.stringify({
+        pid: process.pid,
+        heartbeat: Date.now(),
+        startedAt: new Date().toISOString(),
+        muxId: getMuxId(),
+      });
+      const result = acquirePollerLease(workspace, payload);
+      assert.ok(result, 'muxId 不一致なら乗っ取るべき');
+
+      // poller.json が上書きされていることを確認
+      const updated = JSON.parse(fs.readFileSync(pollerJsonPath, 'utf8'));
+      assert.equal(updated.pid, process.pid, 'pid が現在のプロセスに上書きされているべき');
+      assert.equal(updated.muxId, '/new/wezterm/socket/path', 'muxId が新しい値に上書きされているべき');
+    } finally {
+      if (originalMuxId === undefined) {
+        delete process.env.WEZTERM_UNIX_SOCKET;
+      } else {
+        process.env.WEZTERM_UNIX_SOCKET = originalMuxId;
+      }
+    }
+  });
+});
+
+test('acquirePollerLease: muxId が同じなら fresh heartbeat では退出する', () => {
+  withTempDir(workspace => {
+    const queueDir = path.join(workspace, '.gh-maestro', 'queue');
+    const pollerJsonPath = path.join(queueDir, 'poller.json');
+    fs.mkdirSync(queueDir, { recursive: true });
+
+    // 同じ mux の poller を模擬
+    const originalMuxId = process.env.WEZTERM_UNIX_SOCKET;
+    process.env.WEZTERM_UNIX_SOCKET = '/same/wezterm/socket';
+    try {
+      fs.writeFileSync(pollerJsonPath, JSON.stringify({
+        pid: 999999,
+        heartbeat: Date.now(),
+        startedAt: new Date().toISOString(),
+        muxId: '/same/wezterm/socket',
+      }), 'utf8');
+
+      const payload = JSON.stringify({
+        pid: process.pid,
+        heartbeat: Date.now(),
+        startedAt: new Date().toISOString(),
+        muxId: getMuxId(),
+      });
+      const result = acquirePollerLease(workspace, payload);
+      assert.ok(!result, '同じ muxId で新鮮なら退出すべき');
+
+      // poller.json は上書きされない
+      const existing = JSON.parse(fs.readFileSync(pollerJsonPath, 'utf8'));
+      assert.equal(existing.pid, 999999, 'pid が維持されているべき');
+    } finally {
+      if (originalMuxId === undefined) {
+        delete process.env.WEZTERM_UNIX_SOCKET;
+      } else {
+        process.env.WEZTERM_UNIX_SOCKET = originalMuxId;
+      }
+    }
+  });
+});
+
+test('acquirePollerLease: 既存 lease に muxId がない場合は後方互換（heartbeat のみで判定）', () => {
+  withTempDir(workspace => {
+    const queueDir = path.join(workspace, '.gh-maestro', 'queue');
+    const pollerJsonPath = path.join(queueDir, 'poller.json');
+    fs.mkdirSync(queueDir, { recursive: true });
+
+    // muxId なしの poller.json（旧バージョンからの移行）
+    fs.writeFileSync(pollerJsonPath, JSON.stringify({
+      pid: 999999,
+      heartbeat: Date.now(),
+      startedAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const originalMuxId = process.env.WEZTERM_UNIX_SOCKET;
+    process.env.WEZTERM_UNIX_SOCKET = '/some/mux';
+    try {
+      const payload = JSON.stringify({
+        pid: process.pid,
+        heartbeat: Date.now(),
+        startedAt: new Date().toISOString(),
+        muxId: getMuxId(),
+      });
+      const result = acquirePollerLease(workspace, payload);
+      // 既存に muxId なし → muxId 比較スキップ → heartbeat のみで判定 → fresh なので退出
+      assert.ok(!result, '後方互換: muxId なしの既存 lease は heartbeat のみで判定');
+    } finally {
+      if (originalMuxId === undefined) {
+        delete process.env.WEZTERM_UNIX_SOCKET;
+      } else {
+        process.env.WEZTERM_UNIX_SOCKET = originalMuxId;
+      }
+    }
+  });
+});
+
+test('acquirePollerLease: 現在の muxId が取得不能でも後方互換（heartbeat のみで判定）', () => {
+  withTempDir(workspace => {
+    const queueDir = path.join(workspace, '.gh-maestro', 'queue');
+    const pollerJsonPath = path.join(queueDir, 'poller.json');
+    fs.mkdirSync(queueDir, { recursive: true });
+
+    // muxId ありの既存 poller
+    fs.writeFileSync(pollerJsonPath, JSON.stringify({
+      pid: 999999,
+      heartbeat: Date.now(),
+      startedAt: new Date().toISOString(),
+      muxId: '/some/mux',
+    }), 'utf8');
+
+    // WEZTERM_UNIX_SOCKET 未設定
+    const originalMuxId = process.env.WEZTERM_UNIX_SOCKET;
+    delete process.env.WEZTERM_UNIX_SOCKET;
+    try {
+      const payload = JSON.stringify({
+        pid: process.pid,
+        heartbeat: Date.now(),
+        startedAt: new Date().toISOString(),
+        muxId: null,
+      });
+      const result = acquirePollerLease(workspace, payload);
+      // 現在の muxId なし → muxId 比較スキップ → heartbeat のみで判定 → fresh なので退出
+      assert.ok(!result, '後方互換: 現在の muxId なしなら heartbeat のみで判定');
+    } finally {
+      if (originalMuxId === undefined) {
+        delete process.env.WEZTERM_UNIX_SOCKET;
+      } else {
+        process.env.WEZTERM_UNIX_SOCKET = originalMuxId;
+      }
+    }
+  });
+});
+
+test('getMuxId: WEZTERM_UNIX_SOCKET が設定されていればその値を返す', () => {
+  const original = process.env.WEZTERM_UNIX_SOCKET;
+  process.env.WEZTERM_UNIX_SOCKET = '/test/socket/path';
+  try {
+    assert.equal(getMuxId(), '/test/socket/path');
+  } finally {
+    if (original === undefined) {
+      delete process.env.WEZTERM_UNIX_SOCKET;
+    } else {
+      process.env.WEZTERM_UNIX_SOCKET = original;
+    }
+  }
+});
+
+test('getMuxId: WEZTERM_UNIX_SOCKET が未設定なら null を返す', () => {
+  const original = process.env.WEZTERM_UNIX_SOCKET;
+  delete process.env.WEZTERM_UNIX_SOCKET;
+  try {
+    assert.equal(getMuxId(), null);
+  } finally {
+    if (original !== undefined) {
+      process.env.WEZTERM_UNIX_SOCKET = original;
+    }
+  }
+});
+
+// ── mux 到達性自己検証（withPoller + モック wezterm） ──────────────────
+
+test('poller: mux 到達性が健全なら連続失敗カウンタがリセットされ poller は生存し続ける', async () => {
+  await withTempDir(async workspace => {
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-mock-'));
+    try {
+      const mockPath = path.join(mockDir, 'wezterm-mock-healthy.js');
+      fs.writeFileSync(
+        mockPath,
+        "const a = process.argv.slice(2).join(' ');\n" +
+        "if (a.startsWith('cli list --format json')) process.stdout.write('[]');\n" +
+        "process.exit(0);\n",
+        'utf8'
+      );
+
+      // withPoller をコピーして mock を差し替え（mux 到達性検証用に cli list --format json を認識する mock）
+      await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [POLLER_SCRIPT, '--workspace', workspace], {
+          env: { ...process.env, WEZTERM_MOCK: mockPath, GH_MAESTRO_DISABLE_LAZY_POLLER: '1' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stderr = '';
+        child.stderr.on('data', d => { stderr += d.toString(); });
+
+        const timeout = setTimeout(() => {
+          try { child.kill(); } catch {}
+          reject(new Error(`Healthy mux poller timeout\nstderr: ${stderr}`));
+        }, 10000);
+
+        const pollerJsonPath = path.join(workspace, '.gh-maestro', 'queue', 'poller.json');
+        const waitStart = Date.now();
+        (function waitPoller() {
+          if (fs.existsSync(pollerJsonPath)) {
+            setTimeout(() => {
+              // poller が起動して数スキャン経過しても生存していることを確認
+              // mux mock は毎回成功を返すので、muxConsecutiveFailures は 0 にリセットされ続ける
+              try {
+                const state = JSON.parse(fs.readFileSync(pollerJsonPath, 'utf8'));
+                assert.ok(state.pid > 0, 'poller が生存しているべき');
+                // stderr に mux reachability check failed の出力がない
+                assert.ok(!stderr.includes('mux reachability check failed'), '健全な mux では失敗ログが出ない');
+              } catch (e) {
+                try { child.kill(); } catch {}
+                reject(e);
+                return;
+              }
+              try { child.kill(); } catch {}
+              clearTimeout(timeout);
+              resolve();
+            }, 300);
+            return;
+          }
+          if (Date.now() - waitStart > 5000) {
+            try { child.kill(); } catch {}
+            reject(new Error('poller.json not created for healthy mux test\n' + stderr));
+            return;
+          }
+          setTimeout(waitPoller, 50);
+        })();
+      });
+    } finally {
+      fs.rmSync(mockDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('poller: mux 到達性の連続失敗で lease を手放し exit する', async () => {
+  await withTempDir(async workspace => {
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-mock-'));
+    try {
+      const mockPath = path.join(mockDir, 'wezterm-mock-failing.js');
+      // 常に exit 1 を返す mock（mux unreachable）
+      fs.writeFileSync(
+        mockPath,
+        "const a = process.argv.slice(2).join(' ');\n" +
+        "if (a.startsWith('cli list --format json')) {\n" +
+        "  process.stderr.write('mux unreachable (mock)\\n');\n" +
+        "  process.exit(1);\n" +
+        "}\n" +
+        "process.exit(0);\n",
+        'utf8'
+      );
+
+      await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [POLLER_SCRIPT, '--workspace', workspace], {
+          env: { ...process.env, WEZTERM_MOCK: mockPath, GH_MAESTRO_DISABLE_LAZY_POLLER: '1' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stderr = '';
+        child.stderr.on('data', d => { stderr += d.toString(); });
+
+        let resolved = false;
+        const timeout = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            try { child.kill(); } catch {}
+            reject(new Error(`Unreachable mux poller did not exit in time\nstderr: ${stderr}`));
+          }
+        }, 30000); // MAX_MUX_CHECK_FAILURES=3 × POLL_INTERVAL_MS=5s = 最大15s、余裕を見て30s
+
+        child.on('exit', (code) => {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(timeout);
+          // MAX_MUX_CHECK_FAILURES 回連続失敗後に exit 0 するはず
+          assert.equal(code, 0, 'mux 到達不能で exit 0 すべき（自主退出）');
+          assert.ok(stderr.includes('mux reachability check failed'), '失敗ログが出力されているべき');
+          assert.ok(stderr.includes('releasing lease and exiting'), 'lease 解放ログが出力されているべき');
+
+          // poller.json が削除されていることを確認
+          const pollerJsonPath = path.join(workspace, '.gh-maestro', 'queue', 'poller.json');
+          assert.ok(!fs.existsSync(pollerJsonPath), 'exit 後に poller.json が削除されているべき');
+          resolve();
+        });
+      });
+    } finally {
+      fs.rmSync(mockDir, { recursive: true, force: true });
+    }
+  });
+});
+
 // ── poller-state 永続化（ユニットテスト: 実 spawn なし） ────────────────
 
-const { pollerStatePath, writeLastNotifiedState, readLastNotifiedState } = require('../scripts/queue-poller');
+const { pollerStatePath, writeLastNotifiedState, readLastNotifiedState, acquirePollerLease, getMuxId } = require('../scripts/queue-poller');
 
 test('writeLastNotifiedState + readLastNotifiedState のラウンドトリップ', () => {
   withTempDir(workspace => {
