@@ -41,25 +41,42 @@ function resolveWorkspace(workspaceArg) {
  * args 配列から名前付きフラグを抽出する。
  *
  * @param {string[]} args  process.argv.slice(2) 相当
- * @param {string[]} flags 抽出するフラグ名の配列（例: ['--workspace', '--kind', '--message-id']）
- * @returns {{ values: Record<string,string|null>, rest: string[] }}
- *   values: 各フラグ → 値（フラグがなければ null、値不足は null で exitFlagMiss を true に）
+ * @param {string[]} flags 値を取るフラグ名の配列（例: ['--workspace', '--kind', '--message-id']）
+ * @param {string[]} [booleanFlags=[]] 値を取らない真偽フラグ名の配列（例: ['--verbose', '--dry-run']）
+ * @returns {{ values: Record<string,string|boolean|null>, rest: string[] }}
+ *   values: 各フラグ → 値（値フラグは string|null、真偽フラグは boolean|null。フラグなしは null。
+ *           値フラグの値不足は null で exitFlagMiss を true に）
  *   rest:   フラグとその値を除いた位置引数
- *   exitFlagMiss: boolean — フラグがあったが値がない場合 true
+ *   exitFlagMiss: boolean — 値フラグがあったが値がない場合 true（真偽フラグは対象外）
  */
-function parseFlags(args, flags) {
+function parseFlags(args, flags, booleanFlags = []) {
   const values = {};
   const skipIndices = new Set();
   let exitFlagMiss = false;
+  // 既知の全フラグ名を収集。値フラグの次トークンが既知フラグであれば値欠落と判定する。
+  const allKnownFlags = new Set([...flags, ...booleanFlags]);
 
+  // 真偽フラグ: 値を消費しない。存在すれば true、なければ null。
+  for (const flag of booleanFlags) {
+    const idx = args.indexOf(flag);
+    if (idx === -1) {
+      values[flag] = null;
+    } else {
+      values[flag] = true;
+      skipIndices.add(idx);
+    }
+  }
+
+  // 値フラグ: 次トークンを値として消費する。値が欠落していたら exitFlagMiss。
   for (const flag of flags) {
     const idx = args.indexOf(flag);
     if (idx === -1) {
       values[flag] = null;
       continue;
     }
-    if (idx + 1 >= args.length || args[idx + 1].startsWith('--')) {
-      // フラグの次に値がない（フラグで終わる or 次の位置が別フラグ）
+    // 次トークンがない（末尾）／次トークンが既知フラグ／次トークンが -- で始まる未知の長形式フラグ → 値欠落
+    // startsWith('-') による一律判定は避ける（負数 -5 や -my-branch 等の正当な値を誤検出するため）
+    if (idx + 1 >= args.length || allKnownFlags.has(args[idx + 1]) || args[idx + 1].startsWith('--')) {
       values[flag] = null;
       exitFlagMiss = true;
       skipIndices.add(idx);
