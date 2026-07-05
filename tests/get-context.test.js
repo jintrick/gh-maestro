@@ -33,12 +33,31 @@ test('WORKSPACE はカレントディレクトリと一致する（Unixスラッ
 });
 
 test('BASE_BRANCH が出力に含まれる', () => {
-  const r = spawnSync(process.execPath, [SCRIPT], {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-  });
-  assert.equal(r.status, 0);
-  assert.match(r.stdout, /^BASE_BRANCH=.+/m);
+  const { mkdtempSync, writeFileSync, rmSync } = require('fs');
+  const { execSync } = require('child_process');
+  const os = require('os');
+
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-branch-'));
+  try {
+    // 既知のブランチを持つ git リポジトリ fixture を作成し、
+    // detached HEAD 等の呼び出し元の状態に依存せず BASE_BRANCH が必ず出力される状態で検証する
+    execSync('git init', { cwd: tmp, stdio: 'pipe' });
+    execSync('git config user.email "test@test"', { cwd: tmp, stdio: 'pipe' });
+    execSync('git config user.name "test"', { cwd: tmp, stdio: 'pipe' });
+    writeFileSync(path.join(tmp, 'README'), 'test-fixture');
+    execSync('git add README', { cwd: tmp, stdio: 'pipe' });
+    execSync('git commit -m init', { cwd: tmp, stdio: 'pipe' });
+    execSync('git remote add origin https://github.com/test/repo.git', { cwd: tmp, stdio: 'pipe' });
+
+    const r = spawnSync(process.execPath, [SCRIPT], {
+      cwd: tmp,
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^BASE_BRANCH=.+/m);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('git remote がないディレクトリでは非0終了する', () => {

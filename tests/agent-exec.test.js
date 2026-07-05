@@ -2,8 +2,23 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('child_process');
 
 const { buildLoginShellExecArgs, checkAgentExists } = require('../scripts/agent-exec');
+
+/**
+ * 実行環境に bash が存在するかを確認する。
+ * checkBashExists が内部で bash を spawn するため、bash 非存在下では
+ * 当該コードパスをテストしない（スキップする）。
+ */
+function bashAvailable() {
+  try {
+    const r = spawnSync('bash', ['--version'], { encoding: 'utf8', stdio: 'pipe' });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+}
 
 // ── buildLoginShellExecArgs ──────────────────────────────────────────────────
 
@@ -97,14 +112,23 @@ test('checkAgentExists: win32 で存在するコマンドを確認できる', ()
   }
 });
 
-test('checkAgentExists: Unix で存在するコマンドを確認できる', () => {
-  // プラットフォーム非依存テスト（明示的に 'linux' を指定）
+test('checkAgentExists: Unix で存在するコマンドを確認できる', (t) => {
+  // bash 非存在下では checkBashExists が動作しないためスキップ
+  if (!bashAvailable()) {
+    t.diagnostic('bash not available — skipping Unix checkAgentExists test');
+    return;
+  }
   assert.equal(checkAgentExists('node', 'linux'), true);
   assert.equal(checkAgentExists('nonexistent-cmd-xyz-nix', 'linux'), false);
 });
 
-test('checkAgentExists: 異なるプラットフォーム指定で同一結果', () => {
+test('checkAgentExists: 異なるプラットフォーム指定で同一結果', (t) => {
   // node はどのプラットフォームでも解決可能
   assert.equal(checkAgentExists('node', 'win32'), true);
-  assert.equal(checkAgentExists('node', 'linux'), true);
+  // linux の確認は bash が必要
+  if (!bashAvailable()) {
+    t.diagnostic('bash not available — skipping linux cross-platform check');
+  } else {
+    assert.equal(checkAgentExists('node', 'linux'), true);
+  }
 });

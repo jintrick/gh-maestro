@@ -9,14 +9,14 @@
 const { existsSync, readFileSync } = require('fs');
 const { resolve } = require('path');
 
-function agentsJsonPath() {
-  const homedir = process.env.HOME || process.env.USERPROFILE || '';
+function agentsJsonPath(_homedir) {
+  const homedir = _homedir || process.env.HOME || process.env.USERPROFILE || '';
   return resolve(homedir, '.gh-maestro', 'agents.json');
 }
 
-function resolveAgentConfig(agentId) {
+function resolveAgentConfig(agentId, _homedir) {
   if (!agentId) return null;
-  const p = agentsJsonPath();
+  const p = agentsJsonPath(_homedir);
   if (!existsSync(p)) return null;
   try {
     const agents = JSON.parse(readFileSync(p, 'utf8'));
