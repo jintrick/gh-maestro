@@ -62,10 +62,31 @@ test('resolveAgentConfig: agents.jsonのパース失敗時は例外を投げず 
   });
 });
 
-test('resolveAgentConfig: _homedir 省略時は環境変数 HOME/USERPROFILE を参照する', () => {
-  // _homedir 省略で process.env.HOME が参照される（テスト環境の実際の HOME）
-  // HOME/USERPROFILE 以下に agents.json がないことを保証できないため、
-  // 存在しないエージェントIDで検証する
-  const r = resolveAgentConfig('nonexistent-agent-xyz-123-test');
-  assert.equal(r, null);
+test('resolveAgentConfig: _homedir 省略時は環境変数 HOME を参照する', () => {
+  // _homedir 省略時に process.env.HOME から agents.json を解決することを
+  // 明示的に検証する。一時ディレクトリに agents.json を用意し HOME を差し替える。
+  // テストファイル内は直列実行のため save/restore で他テストに影響しない。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-env-home-'));
+  try {
+    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.gh-maestro', 'agents.json'),
+      JSON.stringify([{ id: 'env-agent', enterSequence: '\r\n' }]),
+      'utf8'
+    );
+    const prevHome = process.env.HOME;
+    const prevUserProfile = process.env.USERPROFILE;
+    process.env.HOME = dir;
+    delete process.env.USERPROFILE;
+    try {
+      const r = resolveAgentConfig('env-agent');
+      assert.ok(r, 'env-agent が見つかるべき');
+      assert.equal(r.enterSequence, '\r\n');
+    } finally {
+      process.env.HOME = prevHome;
+      if (prevUserProfile !== undefined) process.env.USERPROFILE = prevUserProfile;
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
