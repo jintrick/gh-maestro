@@ -2,6 +2,17 @@
 
 DeepSeek APIを使ってClaude Codeなどを快適に使うための設定ファイルです。
 
+## Reasonix (キャッシュヒット率の高いハーネスエージェント)
+
+```bash
+npm i -g reasonix@next
+```
+
+## Clauce Code (環境変数でDeepSeekを指定可能)
+
+`claude-ds` をPowershell関数、あるいは
+
+
 ## APIキーの保管場所
 
 キーは reasonix が使う `.env` ファイルから取得します。
