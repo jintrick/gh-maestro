@@ -15,10 +15,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { enqueue, listPending, pruneAcked } = require('./queue');
 const { notifyPane } = require('./pane-notify');
+const { weztermCli } = require('./wezterm-cli');
 
 // ── 閾値（先頭定数） ────────────────────────────────────────────────────
 
@@ -28,7 +28,7 @@ const RE_NOTIFY_INTERVAL_MS = 120000; // 再通知間隔（ms）
 const STUCK_THRESHOLD_MS = 600000;   // 10分 - この時間超で escallation
 const PRUNE_INTERVAL_MS = 3600000;   // 1時間 - prune の実行間隔
 const PRUNE_MAX_AGE_MS = 86400000;   // 24時間 - acked メッセージの保持期間
-const MAX_MUX_CHECK_FAILURES = 3;    // 連続 mux 到達性失敗で lease を手放す
+const MAX_MUX_CHECK_FAILURES = 3;    // 連続 mux 到達性失敗で degraded モードへ遷移
 
 const USAGE = `queue-poller.js — キュー pending 監視と pane 通知
 
@@ -61,11 +61,8 @@ function getMuxId() {
  * @returns {boolean} wezterm cli list が成功すれば true
  */
 function checkMuxReachable() {
-  const mock = process.env.WEZTERM_MOCK || null;
   try {
-    const result = mock
-      ? spawnSync(process.execPath, [mock, 'cli', 'list', '--format', 'json'], { encoding: 'utf8', timeout: 6000 })
-      : spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8', timeout: 6000 });
+    const result = weztermCli('cli', 'list', '--format', 'json');
     return result.status === 0;
   } catch {
     return false;
@@ -105,14 +102,16 @@ function acquirePollerLease(workspace, payload) {
     const isPlaceholder = !existing.pid || existing.pid === 0;
     const elapsed = Date.now() - (existing.heartbeat || 0);
 
-    // muxId 不一致チェック: 両方とも存在し、かつ異なる値なら stale と同等に扱う
-    // ターミナル再起動を跨ぐと WEZTERM_UNIX_SOCKET が変化するため、旧 mux に
-    // 取り残された poller を検出できる。
+    // muxId 不一致チェック: 両方とも存在し、かつ異なる値 かつ 既存 poller が
+    // 自己申告で degraded (muxReachable===false) の場合のみ stale と同等に扱う。
+    // muxReachable===true の健全 poller は muxId が違っても殺さない（クロスターミナル DoS 防止）。
+    // muxReachable が未定義（旧フォーマット）の場合は後方互換のためスキップ。
     const currentMuxId = getMuxId();
     const existingMuxId = existing.muxId || null;
     const muxMismatch = currentMuxId && existingMuxId && currentMuxId !== existingMuxId;
+    const degradedAndMismatch = muxMismatch && existing.muxReachable === false;
 
-    if (!isPlaceholder && elapsed < STALE_HEARTBEAT_MS && !muxMismatch) {
+    if (!isPlaceholder && elapsed < STALE_HEARTBEAT_MS && !degradedAndMismatch) {
       // 別プロセスが生きている → 退出
       return false;
     }
@@ -143,17 +142,24 @@ function claimPoller(workspace) {
     heartbeat: Date.now(),
     startedAt: new Date().toISOString(),
     muxId: getMuxId(),
+    muxReachable: true, // 起動直後は健全と仮定（初回スキャンで検証される）
   });
   return acquirePollerLease(workspace, payload);
 }
 
 /**
- * heartbeat を更新する。
+ * heartbeat を更新する。muxReachable が渡された場合はあわせて書き込む。
+ *
+ * @param {string}  workspace
+ * @param {boolean} [muxReachable]  現在の mux 到達性（未指定時は既存値を維持）
  */
-function updateHeartbeat(workspace) {
+function updateHeartbeat(workspace, muxReachable) {
   try {
     const existing = JSON.parse(fs.readFileSync(pollerJsonPath(workspace), 'utf8'));
     existing.heartbeat = Date.now();
+    if (muxReachable !== undefined) {
+      existing.muxReachable = muxReachable;
+    }
     fs.writeFileSync(pollerJsonPath(workspace), JSON.stringify(existing), 'utf8');
   } catch {
     // 書き込み失敗は無視（次のスキャンで再試行）
@@ -261,7 +267,9 @@ function runPoller(workspace) {
   // lastPruneTime: 前回 pruneAcked を実行した時刻
   let lastPruneTime = Date.now();
 
+  // muxReachable: 現在の mux 到達性（degraded モード管理用）
   // muxConsecutiveFailures: mux 到達性チェックの連続失敗回数
+  let muxReachable = true;
   let muxConsecutiveFailures = 0;
 
   /**
@@ -269,31 +277,37 @@ function runPoller(workspace) {
    * pending を検出し、宛先ごとに通知・再通知・エスカレートを処理する。
    */
   function scan() {
-    // heartbeat 更新
-    updateHeartbeat(workspace);
+    // heartbeat 更新（muxReachable もあわせて永続化）
+    updateHeartbeat(workspace, muxReachable);
 
     const now = Date.now();
 
-    // mux 到達性の自己検証: wezterm cli list が連続失敗するなら旧 mux に
-    // 取り残された poller と判断し、lease を手放して自主 exit する。
-    // 次の enqueue の lazy-start が健全な poller を起動する。
+    // mux 到達性の自己検証: 連続失敗で degraded モードへ遷移し、
+    // poller.json に muxReachable:false を書く。一過性なら自動復帰。
+    // 自主 exit はしない — 次の enqueue lazy-start が degraded poller を
+    // muxId 不一致 + muxReachable===false の条件で正当に交代する。
     //
     // getMuxId() が null の環境（WezTerm 外、CI/CD 等）では mux-check を
     // スキップする。WEZTERM_UNIX_SOCKET が無い環境では wezterm cli list が
-    // 常に失敗するため、チェックすると正常な poller が誤って自殺してしまう。
+    // 常に失敗するため、チェックすると正常な poller が誤って degraded になる。
     if (getMuxId() !== null) {
-      if (!checkMuxReachable()) {
+      if (checkMuxReachable()) {
+        muxConsecutiveFailures = 0;
+        if (!muxReachable) {
+          muxReachable = true;
+          process.stderr.write('[poller] mux reachable again: leaving degraded mode\n');
+          updateHeartbeat(workspace, muxReachable);
+        }
+      } else {
         muxConsecutiveFailures++;
         process.stderr.write(
           `[poller] mux reachability check failed (${muxConsecutiveFailures}/${MAX_MUX_CHECK_FAILURES})\n`
         );
-        if (muxConsecutiveFailures >= MAX_MUX_CHECK_FAILURES) {
-          process.stderr.write('[poller] mux unreachable: releasing lease and exiting\n');
-          releasePoller(workspace);
-          process.exit(0);
+        if (muxConsecutiveFailures >= MAX_MUX_CHECK_FAILURES && muxReachable) {
+          muxReachable = false;
+          process.stderr.write('[poller] mux unreachable: entering degraded mode (will keep retrying)\n');
+          updateHeartbeat(workspace, muxReachable);
         }
-      } else {
-        muxConsecutiveFailures = 0;
       }
     }
 

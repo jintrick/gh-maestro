@@ -12,14 +12,12 @@
 
 const path = require('path');
 const { existsSync, readFileSync } = require('fs');
-const { spawnSync } = require('./child-process');
 const { sendEnter } = require('./send-enter');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { resolveAgentConfig } = require('./resolve-agent');
 const { withPaneLock } = require('./pane-lock');
 const { resolveWorkspace } = require('./shared/workspace');
-
-const WEZ_TIMEOUT_MS = 6000;
+const { weztermCli } = require('./wezterm-cli');
 
 const USAGE = `pane-notify.js — 起動中のワーカー/orchestrator のペインにメッセージを送る（共有モジュール）
 
@@ -63,17 +61,6 @@ if (require.main === module) {
   process.exit(ok ? 0 : 1);
 }
 
-// WEZTERM_MOCK: テスト専用の差し替え口。node で実行するモックスクリプトのパスを指定する。
-// 本番では未設定なので実際の wezterm バイナリを呼ぶ。
-function createWezSender() {
-  const mock = process.env.WEZTERM_MOCK || null;
-  return function wez(...a) {
-    return mock
-      ? spawnSync(process.execPath, [mock, ...a], { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS })
-      : spawnSync('wezterm', a, { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS });
-  };
-}
-
 /**
  * 指定 worker の pane を解決・検証し、メッセージを送信する。
  *
@@ -84,7 +71,6 @@ function createWezSender() {
  */
 function notifyPane(workspace, name, message) {
   const workersJson = path.resolve(workspace, '.gh-maestro', 'workers.json');
-  const wez = createWezSender();
 
   // ── pane 解決 ──────────────────────────────────────────────────────
 
@@ -106,7 +92,7 @@ function notifyPane(workspace, name, message) {
     ? workspace
     : path.resolve(workspace, '.gh-maestro', 'worktrees', name);
 
-  const listResult = wez('cli', 'list', '--format', 'json');
+  const listResult = weztermCli('cli', 'list', '--format', 'json');
   if (listResult.status !== 0) {
     process.stderr.write(`pane-notify: wezterm cli list 失敗 (exit ${listResult.status}): ${listResult.stderr?.trim()}\n`);
     return false;
@@ -158,13 +144,13 @@ function notifyPane(workspace, name, message) {
 
   function sendText(targetPaneId, text) {
     const flat = text.replace(/\n+/g, ' ');
-    const sendResult = wez('cli', 'send-text', '--pane-id', targetPaneId, '--no-paste', flat);
+    const sendResult = weztermCli('cli', 'send-text', '--pane-id', targetPaneId, '--no-paste', flat);
     if (sendResult.status !== 0) {
       process.stderr.write(`pane-notify: wezterm send-text failed (exit ${sendResult.status}): ${sendResult.stderr?.trim()}\n`);
       return false;
     }
     const terminator = resolveAgentConfig(targetAgentId)?.enterSequence;
-    sendEnter(targetPaneId, { send: wez, terminator });
+    sendEnter(targetPaneId, { send: weztermCli, terminator });
     return true;
   }
 

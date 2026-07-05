@@ -9,10 +9,10 @@
 // 呼び出し元ごとに実績のあるterminatorが異なる（例: reasonixは'\n'、その他は'\r\n'）ため、
 // 呼び出し元が明示的に terminator を指定できるようにしてある。
 
-const { spawnSync } = require('./child-process');
+const { weztermCli } = require('./wezterm-cli');
 
 function sendEnter(paneId, { terminator = '\r\n', send = null } = {}) {
-  const invoke = send ?? ((...args) => spawnSync('wezterm', args, { encoding: 'utf8' }));
+  const invoke = send ?? weztermCli;
   return invoke('cli', 'send-text', '--pane-id', paneId, '--no-paste', terminator);
 }
 
