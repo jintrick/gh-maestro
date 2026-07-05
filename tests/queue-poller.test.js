@@ -263,21 +263,52 @@ function killPollerFromJson(pollerJsonPath) {
   } catch {}
 }
 
-const runLazyStartTests = process.env.GH_MAESTRO_TEST_LAZY_START === '1';
+/**
+ * lazy-start テスト用のモック poller スクリプトを一時ファイルとして作成し、
+ * そのパスを返す。モックは poller.json に自身の pid を書き込んで即 exit する。
+ * 実 poller を spawn しないため孤児プロセスを残さない（test-process-spawn-safety.md 準拠）。
+ *
+ * @param {string} mockDir スクリプトを置く一時ディレクトリ
+ * @returns {string} モックスクリプトの絶対パス
+ */
+function writeMockPollerScript(mockDir) {
+  const mockPath = path.join(mockDir, 'mock-poller.js');
+  fs.writeFileSync(mockPath, [
+    "'use strict';",
+    "const fs = require('fs');",
+    "const path = require('path');",
+    "const args = process.argv.slice(2);",
+    "const wsIdx = args.indexOf('--workspace');",
+    "const workspace = wsIdx >= 0 ? args[wsIdx + 1] : '.';",
+    "const pollerJsonPath = path.join(workspace, '.gh-maestro', 'queue', 'poller.json');",
+    "fs.mkdirSync(path.dirname(pollerJsonPath), { recursive: true });",
+    "fs.writeFileSync(pollerJsonPath, JSON.stringify({",
+    "  pid: process.pid,",
+    "  heartbeat: Date.now(),",
+    "  startedAt: new Date().toISOString(),",
+    "}));",
+    "process.exit(0);",
+    ""
+  ].join('\n'), 'utf8');
+  return mockPath;
+}
 
-test('enqueue 後に poller.json がなければ queue-send が poller を起動する', { skip: !runLazyStartTests }, () => {
+test('enqueue 後に poller.json がなければ queue-send が poller を起動する（モック poller）', () => {
   withTempDir(workspace => {
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-mock-'));
     const pollerJsonPath = path.join(workspace, '.gh-maestro', 'queue', 'poller.json');
-
     try {
-      // queue-send でメッセージを送信（lazy-start で poller が detached 起動される）
-      // gate を明示的に無効化: このテストは lazy-start の実挙動を検証する
-      const r = runSend(['worker-1', 'hello', '--workspace', workspace], { GH_MAESTRO_DISABLE_LAZY_POLLER: '' });
+      const mockScript = writeMockPollerScript(mockDir);
+
+      // gate 無効 + モック poller 注入 → 実 poller は起動せず、モックが pid を書く
+      const r = runSend(['worker-1', 'hello', '--workspace', workspace], {
+        GH_MAESTRO_DISABLE_LAZY_POLLER: '',
+        GH_MAESTRO_POLLER_SCRIPT: mockScript,
+      });
       assert.equal(r.status, 0);
       assert.ok(r.stdout.trim().length > 0);
 
-      // detached 起動なので、poller.json ができて実際の poller が pid を書き込むまで待つ
-      // （lazy-start がプレースホルダー pid=0 を先に書くため、pid>0 を確認する）
+      // detached spawn → モックが poller.json に pid を書き込むのを待つ
       const maxWait = 5000;
       const start = Date.now();
       let started = false;
@@ -287,7 +318,6 @@ test('enqueue 後に poller.json がなければ queue-send が poller を起動
             const s = JSON.parse(fs.readFileSync(pollerJsonPath, 'utf8'));
             if (s.pid && s.pid > 0) {
               assert.ok(s.heartbeat, 'heartbeat が存在する');
-              assert.ok(s.pid, 'pid が存在する');
               started = true;
               break;
             }
@@ -297,19 +327,21 @@ test('enqueue 後に poller.json がなければ queue-send が poller を起動
       }
       assert.ok(started, 'lazy-start で poller が起動し pid>0 になるべき');
     } finally {
-      // hazard 防止: 必ず kill
-      killPollerFromJson(pollerJsonPath);
+      fs.rmSync(mockDir, { recursive: true, force: true });
     }
   });
 });
 
-test('既に poller が稼働中なら lazy-start は2つ目を起動しない', { skip: !runLazyStartTests }, () => {
+test('既に poller が稼働中なら lazy-start は2つ目を起動しない（モック poller）', () => {
   withTempDir(workspace => {
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-mock-'));
     const queueDir = path.join(workspace, '.gh-maestro', 'queue');
     const pollerJsonPath = path.join(queueDir, 'poller.json');
     fs.mkdirSync(queueDir, { recursive: true });
 
     try {
+      const mockScript = writeMockPollerScript(mockDir);
+
       // 生きている poller をエミュレート: テストプロセス自身の pid で poller.json を作成
       fs.writeFileSync(pollerJsonPath, JSON.stringify({
         pid: process.pid,
@@ -317,17 +349,18 @@ test('既に poller が稼働中なら lazy-start は2つ目を起動しない',
         startedAt: new Date().toISOString(),
       }), 'utf8');
 
-      // queue-send でメッセージを送信（poller が生きているので lazy-start しない）
-      // gate を明示的に無効化: このテストは lazy-start の実挙動を検証する
-      const r = runSend(['worker-1', 'hello', '--workspace', workspace], { GH_MAESTRO_DISABLE_LAZY_POLLER: '' });
+      // gate 無効だが、acquirePollerLease が稼働中 poller を検出して spawn しない
+      const r = runSend(['worker-1', 'hello', '--workspace', workspace], {
+        GH_MAESTRO_DISABLE_LAZY_POLLER: '',
+        GH_MAESTRO_POLLER_SCRIPT: mockScript,
+      });
       assert.equal(r.status, 0);
 
       // poller.json の pid はそのまま（2つ目を起動していない）
       const state = JSON.parse(fs.readFileSync(pollerJsonPath, 'utf8'));
       assert.equal(state.pid, process.pid, '既存の poller.json が維持されるべき');
     } finally {
-      // 実 spawn は一切発生しない（acquirePollerLease が稼働中 poller と正しく判断する）
-      // 後始末不要。万一の lease 上書きに備え poller.json があれば削除しておく。
+      fs.rmSync(mockDir, { recursive: true, force: true });
       try { fs.unlinkSync(pollerJsonPath); } catch {}
     }
   });

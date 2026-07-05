@@ -80,7 +80,8 @@ try {
   // GH_MAESTRO_DISABLE_LAZY_POLLER=1 でゲート（テスト用）
 
   if (!process.env.GH_MAESTRO_DISABLE_LAZY_POLLER) {
-    const pollerScript = path.join(__dirname, 'queue-poller.js');
+    // GH_MAESTRO_POLLER_SCRIPT でモック注入可（テスト用）
+    const pollerScript = process.env.GH_MAESTRO_POLLER_SCRIPT || path.join(__dirname, 'queue-poller.js');
 
     // acquirePollerLease（queue-poller.js と共用）で lease 取得を試みる
     const placeholderPayload = JSON.stringify({
