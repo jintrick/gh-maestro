@@ -19,7 +19,7 @@ const path = require('path');
 const { readFileSync, existsSync } = require('fs');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { writeMessageFile, pruneOldMessageFiles } = require('./message-file');
-const { resolveWorkspace } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { notifyPane } = require('./pane-notify');
 
 const USAGE = `send-pane.js — 起動中のワーカー/orchestrator のペインにメッセージを送る
@@ -40,11 +40,15 @@ if (args.includes('--help') || args.includes('-h')) {
   console.log(USAGE);
   process.exit(0);
 }
-const wsIdx = args.indexOf('--workspace');
-const workspaceArg = (wsIdx !== -1 && args[wsIdx + 1]) ? args[wsIdx + 1] : null;
 
-// --workspace とその値を除いた残りを解析
-const rest = args.filter((_, i) => i !== wsIdx && i !== wsIdx + 1);
+const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace']);
+
+if (exitFlagMiss) {
+  console.error('send-pane: --workspace には値が必要です。');
+  console.error(USAGE);
+  process.exit(1);
+}
+
 const [name, ...msgParts] = rest;
 const message = msgParts.join(' ');
 
@@ -53,7 +57,7 @@ if (!name || !message) {
   process.exit(1);
 }
 
-const workspace = resolveWorkspace(workspaceArg);
+const workspace = resolveWorkspace(values['--workspace']);
 if (!workspace) {
   console.error('send-pane: ワークスペースを解決できません。');
   process.exit(1);

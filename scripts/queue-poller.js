@@ -44,23 +44,20 @@ function pollerJsonPath(workspace) {
 }
 
 /**
- * poller の二重起動防止と stale 乗っ取り。
+ * poller.json の lease を取得する（二重起動防止 + stale 乗っ取り）。
+ * このロジックは queue-send.js（lazy-start）と共用するため、payload を引数で受け取る。
  *
- * @returns {boolean} このプロセスがプライマリ poller として続行すべきなら true
+ * @param {string} workspace  ワークスペース絶対パス
+ * @param {string} payload    poller.json に書き込む JSON 文字列
+ * @returns {boolean}  この呼び出し元が poller を起動/続行すべきなら true
  */
-function claimPoller(workspace) {
+function acquirePollerLease(workspace, payload) {
   const pPath = pollerJsonPath(workspace);
   fs.mkdirSync(path.dirname(pPath), { recursive: true });
 
-  const payload = () => JSON.stringify({
-    pid: process.pid,
-    heartbeat: Date.now(),
-    startedAt: new Date().toISOString(),
-  });
-
   // 1. atomic 作成（wx）を試みる
   try {
-    fs.writeFileSync(pPath, payload(), { flag: 'wx' });
+    fs.writeFileSync(pPath, payload, { flag: 'wx' });
     return true;
   } catch (err) {
     if (err.code !== 'EEXIST') throw err;
@@ -77,22 +74,33 @@ function claimPoller(workspace) {
       return false;
     }
     // stale: 乗っ取り
-    // 既存プロセスを kill してから乗っ取る
-    try {
-      if (existing.pid && existing.pid !== process.pid) {
-        process.kill(existing.pid, 0); // 生存確認
-        try { process.kill(existing.pid, 'SIGTERM'); } catch {}
-      }
-    } catch {
-      // 既に死んでいる → 何もしない
+    // 既存プロセスを kill してから乗っ取る（pid>0 かつ自プロセスでない場合のみ）
+    if (existing.pid && existing.pid > 0 && existing.pid !== process.pid) {
+      try { process.kill(existing.pid, 0); } catch { /* 既に死んでいる */ }
+      try { process.kill(existing.pid, 'SIGTERM'); } catch { /* best-effort */ }
     }
-    fs.writeFileSync(pPath, payload(), 'utf8');
+    fs.writeFileSync(pPath, payload, 'utf8');
     return true;
   } catch {
     // 読み取りエラー → 上書き
-    try { fs.writeFileSync(pPath, payload(), 'utf8'); } catch {}
+    try { fs.writeFileSync(pPath, payload, 'utf8'); } catch {}
     return true;
   }
+}
+
+/**
+ * poller プロセスとしての lease 取得。
+ * acquirePollerLease を自プロセスの pid で呼ぶ薄いラッパー。
+ *
+ * @returns {boolean} このプロセスがプライマリ poller として続行すべきなら true
+ */
+function claimPoller(workspace) {
+  const payload = JSON.stringify({
+    pid: process.pid,
+    heartbeat: Date.now(),
+    startedAt: new Date().toISOString(),
+  });
+  return acquirePollerLease(workspace, payload);
 }
 
 /**
@@ -269,6 +277,8 @@ function runPoller(workspace) {
 // エントリポイント
 // ═════════════════════════════════════════════════════════════════════════
 
+if (require.main === module) {
+
 const args = process.argv.slice(2);
 
 if (args.includes('--help') || args.includes('-h')) {
@@ -297,3 +307,6 @@ if (!claimPoller(workspace)) {
 }
 
 runPoller(workspace);
+} // require.main === module
+
+module.exports = { acquirePollerLease };

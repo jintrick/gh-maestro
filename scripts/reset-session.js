@@ -358,9 +358,13 @@ const pollerJsonPath = resolve(workspace, '.gh-maestro', 'queue', 'poller.json')
 if (existsSync(pollerJsonPath)) {
   try {
     const pollerState = JSON.parse(readFileSync(pollerJsonPath, 'utf8'));
-    if (pollerState.pid) {
+    const elapsed = Date.now() - (pollerState.heartbeat || 0);
+    // heartbeat が stale（15s超）なら poller は既に死んでいる → pid 再利用リスクのため kill しない
+    if (elapsed > 15000) {
+      log(`poller.json の heartbeat が ${Math.floor(elapsed / 1000)}s 前で stale のため kill をスキップします。`);
+    } else if (pollerState.pid && pollerState.pid > 0) {
       try {
-        process.kill(pollerState.pid, 0);
+        process.kill(pollerState.pid, 0); // 生存確認（死んでいれば ESRCH）
         process.kill(pollerState.pid, 'SIGTERM');
         log(`poller (pid ${pollerState.pid}) を終了しました。`);
         results.killed.push(`poller(${pollerState.pid})`);

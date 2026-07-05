@@ -4,6 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const DUPLICATE_MESSAGE_ID = 'ERR_DUPLICATE_MESSAGE_ID';
+
 /**
  * Characters that are not allowed in 'to' (recipient) and messageId fields.
  * These would allow path traversal (..) or path separator injection.
@@ -109,17 +111,19 @@ function enqueue(workspace, { to, from, kind, body, messageId }) {
         for (const entry of entries) {
           if (entry.isDirectory() && entry.name !== to) {
             if (fs.existsSync(path.join(inboxRoot, entry.name, `${messageId}.json`))) {
-              throw new Error(
+              const err = new Error(
                 `messageId "${messageId}" は既に受信者 "${entry.name}" の inbox に存在します。` +
                 `messageId は全受信者を通じて一意でなければなりません。`
               );
+              err.code = DUPLICATE_MESSAGE_ID;
+              throw err;
             }
           }
         }
       }
     } catch (err) {
-      // Error message:  messageId "dup-id" は既に受信者 "worker-1" の inbox に存在します。
-      if (err.message && err.message.includes('は既に受信者')) throw err;
+      // 安定した識別子（code プロパティ）で判定
+      if (err.code === DUPLICATE_MESSAGE_ID) throw err;
       // TOCTOU: inboxRoot dir disappeared between existsSync and readdirSync
     }
   }

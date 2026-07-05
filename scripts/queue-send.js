@@ -14,6 +14,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { enqueue } = require('./queue');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
+const { acquirePollerLease } = require('./queue-poller');
 
 const USAGE = `queue-send.js — メッセージをファイルシステムキューに送信する
 
@@ -79,32 +80,17 @@ try {
   // GH_MAESTRO_DISABLE_LAZY_POLLER=1 でゲート（テスト用）
 
   if (!process.env.GH_MAESTRO_DISABLE_LAZY_POLLER) {
-    const pollerJsonPath = path.join(workspace, '.gh-maestro', 'queue', 'poller.json');
     const pollerScript = path.join(__dirname, 'queue-poller.js');
 
-    let needStart = false;
-    try {
-      // atomic wx: ファイルがなければ自分が poller 起動権を獲得
-      fs.writeFileSync(pollerJsonPath, JSON.stringify({ pid: 0, heartbeat: Date.now(), startedAt: new Date().toISOString() }), { flag: 'wx' });
-      needStart = true;
-    } catch (err) {
-      if (err.code !== 'EEXIST') {
-        needStart = true; // 予期しないエラー → fallback
-      } else {
-        // EEXIST: 既存ファイルの heartbeat を読んで stale なら起動
-        try {
-          const existing = JSON.parse(fs.readFileSync(pollerJsonPath, 'utf8'));
-          const elapsed = Date.now() - (existing.heartbeat || 0);
-          if (elapsed >= 15000) {
-            needStart = true; // stale → 再起動（queue-poller.js の claimPoller が正しく乗っ取る）
-          }
-        } catch {
-          // poller.json が読めない → 安全のため起動しない
-        }
-      }
-    }
+    // acquirePollerLease（queue-poller.js と共用）で lease 取得を試みる
+    const placeholderPayload = JSON.stringify({
+      pid: 0, // プレースホルダー — claimPoller が即乗っ取る
+      heartbeat: Date.now(),
+      startedAt: new Date().toISOString(),
+    });
+    const acquired = acquirePollerLease(workspace, placeholderPayload);
 
-    if (needStart) {
+    if (acquired) {
       const child = spawn(process.execPath, [pollerScript, '--workspace', workspace], {
         detached: true,
         stdio: 'ignore',
