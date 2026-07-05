@@ -22,7 +22,12 @@ orchestrator からの返答を含むすべてのメッセージは、自分の 
 受動的に届くのを待つのではなく、以下の仕組みで自分から取りに行く。
 wezterm send-text による通知はレイテンシ最適化のヒントに過ぎず、pull が唯一の配送根拠である。
 
-{{INBOX_POLL_MECHANISM}}
+`node "{{SCRIPTS_PATH}}/poll-inbox.js" $WORKER_NAME --workspace $WORKSPACE` を継続実行して inbox を監視する。利用可能な永続実行手段（Monitor 等）があれば使う。なければ bash で定期実行する。
+
+出力から `NEW_MESSAGE:<messageId>` を検出したら:
+- `.gh-maestro/queue/inbox/$WORKER_NAME/<messageId>.json` を読んで内容を把握し、メッセージを処理する
+- 処理後は `node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE` で ack する
+- **完了後は直ちに inbox 監視に戻る**
 
 処理後は必ず ack すること（ack = 読んで受理した。タスク完了ではない）。ack が配送の唯一の根拠：
 

@@ -475,4 +475,4 @@ if (!claimPoller(workspace)) {
 runPoller(workspace);
 } // require.main === module
 
-module.exports = { acquirePollerLease, pollerStatePath, readLastNotifiedState, writeLastNotifiedState, getMuxId, checkMuxReachable };
+module.exports = { acquirePollerLease, pollerStatePath, readLastNotifiedState, writeLastNotifiedState, getMuxId, checkMuxReachable, buildWakeSignal };
