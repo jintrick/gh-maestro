@@ -18,7 +18,7 @@
 //
 // 標準出力: ワーカー名（例: issue-5-implement / task-investigate-auth）
 
-const { execSync, spawn, spawnSync } = require('./child-process');
+const { spawn, spawnSync } = require('./child-process');
 const { existsSync, mkdirSync, readFileSync, writeFileSync,
         lstatSync, rmdirSync, rmSync, readdirSync } = require('fs');
 const { resolve, relative } = require('path');
@@ -167,13 +167,20 @@ if (existingWorkers.length === 0) {
 }
 
 // --- baseBranch をリモートと同期（worktreeが常に最新ベースから分岐するよう保証） ---
+// spawnSync の引数配列でシェル注入を回避する
 if (baseBranch) {
   try {
-    execSync(`git fetch origin ${baseBranch}`, { cwd: workspace, stdio: 'pipe' });
-    const cur = execSync('git branch --show-current', { cwd: workspace, encoding: 'utf8' }).trim();
+    const fetchR = spawnSync('git', ['fetch', 'origin', baseBranch], { cwd: workspace, stdio: 'pipe' });
+    if (fetchR.status !== 0) {
+      throw new Error(`git fetch origin ${baseBranch} 失敗: ${(fetchR.stderr || '').toString().trim()}`);
+    }
+    const curR = spawnSync('git', ['branch', '--show-current'], { cwd: workspace, encoding: 'utf8' });
+    const cur = (curR.stdout || '').trim();
     if (cur === baseBranch) {
-      try { execSync(`git merge --ff-only origin/${baseBranch}`, { cwd: workspace, stdio: 'pipe' }); }
-      catch (_) { console.warn(`spawn-worker: ローカル ${baseBranch} のff-only更新失敗 — worktreeはorigin/${baseBranch}から分岐します`); }
+      try {
+        const mergeR = spawnSync('git', ['merge', '--ff-only', `origin/${baseBranch}`], { cwd: workspace, stdio: 'pipe' });
+        if (mergeR.status !== 0) throw new Error(`merge failed: ${(mergeR.stderr || '').toString().trim()}`);
+      } catch (_) { console.warn(`spawn-worker: ローカル ${baseBranch} のff-only更新失敗 — worktreeはorigin/${baseBranch}から分岐します`); }
     }
   } catch (e) {
     console.warn(`spawn-worker: git fetch origin ${baseBranch} 失敗（続行します）: ${e.message.split('\n')[0]}`);
@@ -193,8 +200,10 @@ try {
   catch (e2) { console.warn(`  git worktree prune: ${e2.message.split('\n')[0]}`); }
   try { rmSync(worktreeDir, { recursive: true, force: true }); }
   catch (e2) { console.warn(`  rmSync: ${e2.message.split('\n')[0]}`); }
-  try { execSync(`git branch -D "${workerName}"`, { cwd: workspace, stdio: 'pipe' }); }
-  catch (e2) { console.warn(`  git branch -D: ${e2.message.split('\n')[0]}`); }
+  try {
+    const delR = spawnSync('git', ['branch', '-D', workerName], { cwd: workspace, stdio: 'pipe' });
+    if (delR.status !== 0) throw new Error(`git branch -D 失敗: ${(delR.stderr || '').toString().trim()}`);
+  } catch (e2) { console.warn(`  git branch -D: ${e2.message.split('\n')[0]}`); }
   // リトライ
   try {
     worktreeAdd(worktreeDir, workerName, baseBranch || null, workspace);
@@ -238,8 +247,10 @@ const rollbackWorktree = () => {
     try { rmSync(worktreeDir, { recursive: true, force: true }); }
     catch (e2) { console.warn(`  rollback: rmSync 失敗: ${e2.message.split('\n')[0]}`); }
   }
-  try { execSync(`git branch -d "${workerName}"`, { cwd: workspace, stdio: 'pipe' }); }
-  catch (e) { console.warn(`  rollback: git branch -d 失敗: ${e.message.split('\n')[0]}`); }
+  try {
+    const delR = spawnSync('git', ['branch', '-d', workerName], { cwd: workspace, stdio: 'pipe' });
+    if (delR.status !== 0) throw new Error(`git branch -d 失敗: ${(delR.stderr || '').toString().trim()}`);
+  } catch (e) { console.warn(`  rollback: git branch -d 失敗: ${e.message.split('\n')[0]}`); }
 };
 
 // --- 初期プロンプトをファイルに書き出す ---
