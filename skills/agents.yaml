@@ -11,6 +11,12 @@ agents:
         - `PR_COMMENT:...` → 同様にトリアージする。**完了後は直ちにMonitorに戻る**
         - `PR_REVIEW:<user>:<state>:<body>` → 正式レビュー提出（Submit reviewボタン経由）。stateがAPPROVEDなら人間にマージ許可のシグナルとして伝える。CHANGES_REQUESTEDならbodyをトリアージしてコーダーにフィードバックする。COMMENTEDならPR_COMMENTと同様にトリアージする。**完了後は直ちにMonitorに戻る**
         - `PR_MERGED:<PR番号>` → マージ完了。自律的に次のフローへ進む（ループ終了）
+      INBOX_POLL_INTERVAL_SECONDS: 2
+      INBOX_POLL_MECHANISM: |
+        Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/poll-inbox.js" $WORKER_NAME --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。
+
+        Monitorから届く通知を処理する：
+        - `NEW_MESSAGE:<messageId>` → `.gh-maestro/queue/inbox/$WORKER_NAME/<messageId>.json` を読んで内容を把握し、メッセージを処理する。処理後は `node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE` で ack する。**完了後は直ちにMonitorに戻る**
   agy:
     skill_files_install_destination_directory: ~/.gemini/antigravity-cli/skills
     skill_markdown_template_placeholder_substitutions:
@@ -32,6 +38,19 @@ agents:
         - `PR_REVIEW:<user>:APPROVED:<body>` → 人間にマージ許可シグナルとして提示する
         - `PR_REVIEW:<user>:CHANGES_REQUESTED:<body>` → bodyをトリアージしてコーダーにフィードバックする
         - `PR_REVIEW:<user>:COMMENTED:<body>` → PR_COMMENTと同様にトリアージする
+      INBOX_POLL_INTERVAL_SECONDS: 2
+      INBOX_POLL_MECHANISM: |
+        `invoke_subagent` で inbox ポーリングサブエージェントを起動し、完了時に `send_message` で親へ通知させる。このサブエージェントはセッション終了まで永続的に実行する。
+
+        サブエージェントへの指示：
+        「以下のループを実行する:
+        1. `node "{{SCRIPTS_PATH}}/poll-inbox.js" $WORKER_NAME --workspace $WORKSPACE --once` を {{INBOX_POLL_INTERVAL_SECONDS}}秒おきに実行する
+        2. 出力に `NEW_MESSAGE:<messageId>` があれば `send_message` で親に通知する
+        3. 新着がなければポーリング間隔を1.5倍に伸ばす（最大300秒）。あればリセットする
+        ※ このサブエージェントはセッション終了まで継続する」
+
+        親として届く通知の処理：
+        - `NEW_MESSAGE:<messageId>` → `.gh-maestro/queue/inbox/$WORKER_NAME/<messageId>.json` を読んで内容を把握し、メッセージを処理する。処理後は `node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE` で ack する
   codex:
     skill_files_install_destination_directory: ~/.agents/skills
     skill_markdown_template_placeholder_substitutions:
@@ -42,3 +61,8 @@ agents:
         - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → インラインコメントをトリアージする
         - `PR_COMMENT:<user>:<body>` → PR全体コメントをトリアージする
         - `PR_REVIEW:<user>:<state>:<body>` → stateに応じてレビュー提出をトリアージする
+      INBOX_POLL_INTERVAL_SECONDS: 2
+      INBOX_POLL_MECHANISM: |
+        `node "{{SCRIPTS_PATH}}/poll-inbox.js" $WORKER_NAME --workspace $WORKSPACE` を実行して inbox を監視する。
+        通知を受け取ったら以下の通り処理する:
+        - `NEW_MESSAGE:<messageId>` → `.gh-maestro/queue/inbox/$WORKER_NAME/<messageId>.json` を読んで内容を把握し、メッセージを処理する。処理後は `node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE` で ack する

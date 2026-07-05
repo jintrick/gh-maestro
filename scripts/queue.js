@@ -212,6 +212,31 @@ function listPending(workspace, recipient) {
 }
 
 /**
+ * Receive all pending messages for a specific recipient (active pull).
+ *
+ * Semantically identical to listPending(workspace, recipient) but framed as
+ * an active receive operation — the recipient is polling their own inbox
+ * rather than a third party listing messages. This is the primary delivery
+ * path for workers: poll-inbox.js detects new messages by scanning the
+ * inbox, and receive() reads the full message contents.
+ *
+ * @param {string} workspace  Absolute path to the workspace root.
+ * @param {string} recipient  The recipient whose inbox to pull from (required).
+ * @returns {object[]}  Array of pending messages (each with `path` set to the
+ *                      absolute inbox file path). Empty if recipient has no
+ *                      inbox directory or no pending messages.
+ */
+function receive(workspace, recipient) {
+  if (!recipient) throw new Error('"recipient" is required');
+  validateField('recipient', recipient);
+
+  // readdirSync ENOENT is absorbed per queue-concurrency.md:
+  // the inbox directory may not exist (no messages ever sent to this recipient)
+  const inboxDir = path.join(queueDir(workspace), 'inbox', recipient);
+  return readMessagesFromDir(inboxDir);
+}
+
+/**
  * Acknowledge a message by moving it from inbox/<recipient>/ to acked/<recipient>/.
  *
  * Idempotent: if the message is already in acked, returns true without error.
@@ -380,4 +405,4 @@ function purgeInbox(workspace, recipient) {
   return { purged, failed };
 }
 
-module.exports = { enqueue, listPending, ack, pruneAcked, purgeInbox };
+module.exports = { enqueue, listPending, receive, ack, pruneAcked, purgeInbox };

@@ -18,7 +18,13 @@ node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<内�
 
 何かを書く前に自問する: 「これはツール呼び出しの引数か？」 NOなら、その内容は書かないか、送るべきならsend-pane.jsの引数に置き換える。
 
-orchestratorからの返答はこのペインに届く。届いたメッセージを読んだら ack すること：
+orchestrator からの返答を含むすべてのメッセージは、自分の inbox を能動的に pull して受信する。
+受動的に届くのを待つのではなく、以下の仕組みで自分から取りに行く。
+wezterm send-text による通知はレイテンシ最適化のヒントに過ぎず、pull が唯一の配送根拠である。
+
+{{INBOX_POLL_MECHANISM}}
+
+処理後は必ず ack すること（ack = 読んで受理した。タスク完了ではない）。ack が配送の唯一の根拠：
 
 ```sh
 node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
