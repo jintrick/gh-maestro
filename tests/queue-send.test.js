@@ -161,3 +161,23 @@ test('workspace が .gh-maestro のないディレクトリでも enqueue は成
     assert.ok(fs.existsSync(inboxDir), 'queue ディレクトリが自動作成される');
   });
 });
+
+// ── フラグ値不足 ───────────────────────────────────────────────────────
+
+test('--kind を値なしで指定すると exit 1', () => {
+  const r = run(['worker-1', 'hello', '--kind']);
+  assert.equal(r.status, 1);
+  assert.ok(r.stderr.includes('--kind'));
+});
+
+test('--workspace を値なしで指定すると exit 1', () => {
+  const r = run(['worker-1', 'hello', '--workspace']);
+  assert.equal(r.status, 1);
+  assert.ok(r.stderr.includes('--workspace'));
+});
+
+test('--message-id を値なしで指定すると exit 1', () => {
+  const r = run(['worker-1', 'hello', '--message-id']);
+  assert.equal(r.status, 1);
+  assert.ok(r.stderr.includes('--message-id'));
+});

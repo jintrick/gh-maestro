@@ -113,3 +113,19 @@ test('複数 inbox から正しいメッセージを ack できる', () => {
     assert.ok(!fs.existsSync(inbox2));
   });
 });
+
+// ── --workspace なし（env 経由） ─────────────────────────────────────────
+
+test('--workspace なしでも GH_MAESTRO_WORKSPACE env で ack できる', () => {
+  withTempDir(workspace => {
+    const send = runSend(['worker-1', 'env ack', '--workspace', workspace, '--message-id', 'env-ack-id']);
+    assert.equal(send.status, 0);
+
+    // --workspace の代わりに env で渡す
+    const r = runAck(['env-ack-id'], { GH_MAESTRO_WORKSPACE: workspace });
+    assert.equal(r.status, 0);
+
+    const ackedFile = path.join(workspace, '.gh-maestro', 'queue', 'acked', 'worker-1', 'env-ack-id.json');
+    assert.ok(fs.existsSync(ackedFile));
+  });
+});

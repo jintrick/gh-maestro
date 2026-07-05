@@ -52,10 +52,16 @@ if (args.includes('--help') || args.includes('-h')) {
 /**
  * Extract the value of a flag from args and return [value, usedIndices].
  * usedIndices contains the flag index and its value index, or empty array if not found.
+ * If the flag is present but has no value, exits with usage error.
  */
 function extractFlag(flag) {
   const idx = args.indexOf(flag);
-  if (idx === -1 || !args[idx + 1]) return [null, []];
+  if (idx === -1) return [null, []];
+  if (idx + 1 >= args.length || args[idx + 1].startsWith('--')) {
+    console.error(`queue-send: ${flag} には値が必要です。`);
+    console.error(USAGE);
+    process.exit(1);
+  }
   return [args[idx + 1], [idx, idx + 1]];
 }
 

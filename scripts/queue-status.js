@@ -113,8 +113,9 @@ const deliveredLabel = `Delivered:  ${deliveredCount}`;
 
 // stuck 判定: pending の createdAt が閾値超
 for (const msg of pending) {
+  if (!msg || !msg.createdAt) continue;
   const createdAt = new Date(msg.createdAt).getTime();
-  if (now - createdAt > STUCK_THRESHOLD_MS) {
+  if (!isNaN(createdAt) && now - createdAt > STUCK_THRESHOLD_MS) {
     stuckCount++;
   }
 }
@@ -129,11 +130,20 @@ console.log('');
 if (pending.length > 0) {
   console.log('Pending messages:');
   for (const msg of pending) {
-    const createdAt = new Date(msg.createdAt).getTime();
-    const elapsed = now - createdAt;
-    const elapsedStr = formatElapsed(elapsed);
-    const stuckMarker = elapsed > STUCK_THRESHOLD_MS ? ' (STUCK)' : '';
-    console.log(`  ${msg.messageId}   ${msg.to}   ${elapsedStr}${stuckMarker}`);
+    if (!msg) { console.log('  <broken message>'); continue; }
+    const id = msg.messageId || '?';
+    const to = msg.to || '?';
+    let elapsedStr = '?';
+    let stuckMarker = '';
+    if (msg.createdAt) {
+      const createdAt = new Date(msg.createdAt).getTime();
+      if (!isNaN(createdAt)) {
+        const elapsed = now - createdAt;
+        elapsedStr = formatElapsed(elapsed);
+        stuckMarker = elapsed > STUCK_THRESHOLD_MS ? ' (STUCK)' : '';
+      }
+    }
+    console.log(`  ${id}   ${to}   ${elapsedStr}${stuckMarker}`);
   }
 }
 

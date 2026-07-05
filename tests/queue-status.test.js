@@ -148,3 +148,42 @@ test('enqueue → status → ack → status の一連が動作する', () => {
     assert.ok(s2.stdout.includes('Delivered:  1'));
   });
 });
+
+// ── 壊れたメッセージへの耐性 ───────────────────────────────────────────
+
+test('createdAt がないメッセージがあってもクラッシュしない', () => {
+  withTempDir(workspace => {
+    // createdAt が欠けたメッセージファイルを直接書き込む
+    const inboxDir = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1');
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.writeFileSync(path.join(inboxDir, 'bad-msg.json'), JSON.stringify({
+      messageId: 'bad-msg',
+      to: 'worker-1',
+      from: 'test',
+      body: 'no date',
+      // createdAt なし
+    }), 'utf8');
+
+    const r = runStatus(['--workspace', workspace]);
+    assert.equal(r.status, 0);
+    assert.ok(r.stdout.includes('bad-msg'));  // 表示はされる
+  });
+});
+
+test('messageId がないメッセージがあってもクラッシュしない', () => {
+  withTempDir(workspace => {
+    const inboxDir = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1');
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.writeFileSync(path.join(inboxDir, 'no-id.json'), JSON.stringify({
+      to: 'worker-1',
+      from: 'test',
+      body: 'no id',
+      createdAt: new Date().toISOString(),
+      // messageId なし
+    }), 'utf8');
+
+    const r = runStatus(['--workspace', workspace]);
+    assert.equal(r.status, 0);
+    assert.ok(r.stdout.includes('?'));  // 欠損を示す '?' が表示される
+  });
+});

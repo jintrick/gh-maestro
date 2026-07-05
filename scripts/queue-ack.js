@@ -52,7 +52,10 @@ if (args.includes('--help') || args.includes('-h')) {
 const wsIdx = args.indexOf('--workspace');
 const workspaceArg = (wsIdx !== -1 && args[wsIdx + 1]) ? args[wsIdx + 1] : null;
 
-const positional = args.filter((_, i) => i !== wsIdx && i !== wsIdx + 1);
+// Guard: wsIdx===-1 のとき wsIdx+1=0 が第1引数（messageId）を誤って除外しない
+const positional = wsIdx === -1
+  ? args
+  : args.filter((_, i) => i !== wsIdx && i !== wsIdx + 1);
 const [messageId] = positional;
 
 if (!messageId) {
