@@ -94,7 +94,10 @@ const fullBody = prefix + message;
 const from = senderName || process.env.GH_MAESTRO_WORKER || 'orchestrator';
 
 // ── enqueue ────────────────────────────────────────────────────────────────
+// poller 起動失敗で exit 0 が妨げられないよう、enqueue と lazy-start の例外は分離する。
+// exit 0 = enqueue 成功（配送成功ではない）。ack だけが配送成功の根拠。
 
+let enqueueOk = false;
 try {
   const result = enqueue(workspace, {
     to: name,
@@ -102,11 +105,17 @@ try {
     body: fullBody,
   });
   console.log(result.messageId);
+  enqueueOk = true;
+} catch (err) {
+  console.error(`send-pane: enqueue に失敗しました: ${err.message}`);
+  process.exit(1);
+}
 
-  // ── lazy-start: poller が起動していなければ起動する ────────────────────
-  // GH_MAESTRO_DISABLE_LAZY_POLLER=1 でゲート（テスト用）
+// ── lazy-start: poller が起動していなければ起動する ────────────────────
+// GH_MAESTRO_DISABLE_LAZY_POLLER=1 でゲート（テスト用）
 
-  if (!process.env.GH_MAESTRO_DISABLE_LAZY_POLLER) {
+if (enqueueOk && !process.env.GH_MAESTRO_DISABLE_LAZY_POLLER) {
+  try {
     const pollerScript = path.join(__dirname, 'queue-poller.js');
 
     // acquirePollerLease（queue-poller.js と共用）で lease 取得を試みる
@@ -125,10 +134,11 @@ try {
       });
       child.unref();
     }
+  } catch (e) {
+    // poller 起動失敗は配送の成否に影響しない（ack が配送成功の根拠）。
+    // 次回 enqueue 時に lazy-start が再試行される。
+    process.stderr.write(`send-pane: poller lazy-start に失敗しました（enqueue は成功）: ${e.message}\n`);
   }
-
-  process.exit(0);
-} catch (err) {
-  console.error(`send-pane: enqueue に失敗しました: ${err.message}`);
-  process.exit(1);
 }
+
+if (enqueueOk) process.exit(0);

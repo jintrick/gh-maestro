@@ -17,7 +17,9 @@ const issue = argv[0];
 const wsIdx = argv.indexOf('--workspace');
 const fromIdx = argv.indexOf('--from');
 const workspace = wsIdx !== -1 ? argv[wsIdx + 1] : null;
-const fromName = fromIdx !== -1 ? argv[fromIdx + 1] : (process.env.GH_MAESTRO_WORKER || 'coder');
+// --from が値なしで末尾に来た場合のガード（undefined で enqueue クラッシュを防止）
+const fromArg = fromIdx !== -1 ? argv[fromIdx + 1] : undefined;
+const fromName = (fromArg && !fromArg.startsWith('--')) ? fromArg : (process.env.GH_MAESTRO_WORKER || 'coder');
 
 if (!issue || !workspace) {
   console.error('Usage: node poll-and-notify.js <ISSUE> --workspace <path> [--from <name>]');
@@ -51,7 +53,10 @@ poll.stdout.on('data', (data) => {
   }
 });
 
-poll.on('exit', (code) => {
+// 'close' イベントを使う: stdout/stderr が完全に閉じてから発火するため、
+// 'data' で読み残したバッファ末尾のデータが失われない。
+// 'exit' は stdout バッファがフラッシュされる前に発火しうるため使わない。
+poll.on('close', (code) => {
   if (buf.trim()) {
     try {
       enqueue(workspace, {
