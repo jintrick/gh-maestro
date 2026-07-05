@@ -403,7 +403,11 @@ log('キュー状態を掃除します...');
 const queueDir = resolve(workspace, '.gh-maestro', 'queue');
 if (existsSync(queueDir)) {
   // 1. junction を先に除去（共有 junction を辿って中身を削除しないため）
-  unlinkJunctions(queueDir, warn);
+  try {
+    unlinkJunctions(queueDir, warn);
+  } catch (e) {
+    warn(`queue/ の junction 除去に失敗しました（後続処理は続行します）: ${e.message}`);
+  }
 
   // 2. EBUSY/EPERM リトライ付きで削除
   let removed = false;

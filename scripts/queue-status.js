@@ -147,9 +147,14 @@ if (pending.length > 0) {
     // stuck エントリの最終通知時刻を表示（poller-state.json から読み取り）
     if (isStuck && lastNotifiedAt && lastNotifiedAt[id]) {
       const lastNotified = lastNotifiedAt[id];
-      const lastNotifiedDate = new Date(lastNotified).toISOString();
-      const elapsedSinceNotified = now - lastNotified;
-      console.log(`           last-notified: ${lastNotifiedDate} (${formatElapsed(elapsedSinceNotified)})`);
+      const ts = new Date(lastNotified).getTime();
+      if (!isNaN(ts)) {
+        const lastNotifiedDate = new Date(ts).toISOString();
+        const elapsedSinceNotified = now - ts;
+        console.log(`           last-notified: ${lastNotifiedDate} (${formatElapsed(elapsedSinceNotified)})`);
+      } else {
+        console.log('           last-notified: (不正な時刻)');
+      }
     } else if (isStuck) {
       console.log('           last-notified: (未通知)');
     }

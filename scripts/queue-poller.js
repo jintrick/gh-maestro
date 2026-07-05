@@ -297,6 +297,15 @@ function runPoller(workspace) {
       }
     }
 
+    // ack 済み・消滅済みのエントリを刈り取る（メモリリーク + state 肥大化防止）
+    const pendingIds = new Set(pending.map(m => m.messageId).filter(Boolean));
+    for (const mid of lastNotifiedAt.keys()) {
+      if (!pendingIds.has(mid)) lastNotifiedAt.delete(mid);
+    }
+    for (const mid of stuckEscalated) {
+      if (!pendingIds.has(mid)) stuckEscalated.delete(mid);
+    }
+
     // 通知後に lastNotifiedAt を永続化（他プロセスからの参照用）
     if (lastNotifiedAt.size > 0) {
       writeLastNotifiedState(workspace, lastNotifiedAt);
