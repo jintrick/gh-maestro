@@ -158,6 +158,7 @@ function enqueue(workspace, { to, from, kind, body, messageId }) {
 /**
  * Read and parse all .json files in a single inbox directory.
  * Unparseable files are silently skipped.
+ * Each returned message includes the absolute `path` to the inbox file.
  */
 function readMessagesFromDir(dir) {
   let files;
@@ -172,8 +173,11 @@ function readMessagesFromDir(dir) {
   const messages = [];
   for (const file of files) {
     try {
-      const content = withRetry(() => fs.readFileSync(path.join(dir, file), 'utf8'));
-      messages.push(JSON.parse(content));
+      const filePath = path.join(dir, file);
+      const content = withRetry(() => fs.readFileSync(filePath, 'utf8'));
+      const msg = JSON.parse(content);
+      msg.path = filePath;  // poller 通知が actionable なパスを表示できるように付与
+      messages.push(msg);
     } catch {
       // skip unparseable
     }

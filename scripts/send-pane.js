@@ -1,39 +1,42 @@
 #!/usr/bin/env node
 // Usage: node send-pane.js <worker-name> <message> [--workspace <path>]
 //
-// worker-name は .gh-maestro/workers.json で pane-id に解決される。
-// "orchestrator" を指定するとorchestratorペインに送信する。
-// 送信方向に応じて送信者名を自動的にメッセージ先頭に付与する。
+// send-pane.js は、メッセージをファイルシステムキューに enqueue し、poller による
+// WezTerm 通知を任せる薄いラッパーである。Phase 4 移行により、従来の WezTerm 入力注入
+// 直接呼び出しから enqueue 主体へ切り替わった。
 //
-// <message> はキーストローク注入せず .gh-maestro/messages/ にファイルとして書き出し、
-// pane には「このファイルを読んでください」という固定テンプレートの短文だけを送る。
-// これは本文中の特殊文字（"@" 等）がEnterキー入力を消費し、メッセージが未送信のまま
-// composerに残る問題を構造的に避けるため（詳細は message-file.js のコメント参照）。
+// exit 0 = enqueue 成功（配送成功ではない）。ack だけが配送成功の根拠。
 //
-// pane 解決・cwd 検証・pane ロック・Enter 送出は共有モジュール pane-notify.js に委譲。
+// worker-name は .gh-maestro/workers.json で pane-id に解決されていたが、
+// enqueue 移行後はそのままキューの recipient 名として使われる。
+// "orchestrator" を指定すると orchestrator の inbox に enqueue する。
+//
+// 送信方向に応じて送信者名がメッセージ本文先頭に自動付与される（後方互換）。
 //
 // workspace の解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索
+
+'use strict';
 
 const os = require('os');
 const path = require('path');
 const { readFileSync, existsSync } = require('fs');
+const { spawn } = require('child_process');
 const { normalizeWorkerEntry } = require('./worker-entry');
-const { writeMessageFile, pruneOldMessageFiles } = require('./message-file');
+const { enqueue } = require('./queue');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
-const { notifyPane } = require('./pane-notify');
+const { acquirePollerLease } = require('./queue-poller');
 
-const USAGE = `send-pane.js — 起動中のワーカー/orchestrator のペインにメッセージを送る
+const USAGE = `send-pane.js — メッセージをファイルシステムキューに送信する（後方互換ラッパー）
 
 Usage: node send-pane.js <worker-name> <message> [--workspace <path>]
 
 Arguments:
-  <worker-name>       送信先ワーカー名（"orchestrator" で orchestrator ペイン）
+  <worker-name>       送信先ワーカー名（"orchestrator" で orchestrator の inbox）
   <message>           送信するメッセージ（残りの引数を連結）
   --workspace <path>  ワークスペース（省略時: GH_MAESTRO_WORKSPACE env > CWD から上方探索）
 
-worker-name は .gh-maestro/workers.json で pane-id に解決される。送信方向に応じて
-送信者名がメッセージ先頭に自動付与される。<message> は .gh-maestro/messages/ にファイル
-として書かれ、pane にはそのファイルを読むよう促す短文だけが送られる。`;
+内部的には queue-send.js と同様に enqueue を行い、poller が pane 通知を担当する。
+exit 0 は「enqueue 成功」であり配送成功ではない。ack だけが配送成功の根拠。`;
 
 const args = process.argv.slice(2);
 if (args.includes('--help') || args.includes('-h')) {
@@ -67,29 +70,75 @@ if (!workspace) {
 let senderName = null;
 const workersJson = path.resolve(workspace, '.gh-maestro', 'workers.json');
 if (existsSync(workersJson)) {
-  const workers = JSON.parse(readFileSync(workersJson, 'utf8'));
-  const myPaneId = String(process.env.WEZTERM_PANE ?? '');
-  if (myPaneId) {
-    for (const [k, v] of Object.entries(workers)) {
-      if (normalizeWorkerEntry(v).paneId === myPaneId) { senderName = k; break; }
+  try {
+    const workers = JSON.parse(readFileSync(workersJson, 'utf8'));
+    const myPaneId = String(process.env.WEZTERM_PANE ?? '');
+    if (myPaneId) {
+      for (const [k, v] of Object.entries(workers)) {
+        if (normalizeWorkerEntry(v).paneId === myPaneId) { senderName = k; break; }
+      }
     }
+  } catch {
+    // workers.json 破損時は senderName なしで続行
   }
 }
 
-// 送信者名をメッセージ先頭に付与
+// 送信者名をメッセージ先頭に付与（後方互換: 従来のsend-paneと同じプレフィックス）
 const prefix = senderName === 'orchestrator'
   ? 'orchestratorです。'
   : senderName ? `${senderName}担当workerです。` : '';
 
-// ── 送信 ────────────────────────────────────────────────────────────────
+const fullBody = prefix + message;
 
-// 本文は特殊文字（"@" 等）によるEnter消費を避けるためファイルへ退避し、
-// pane には固定テンプレートの短文（ファイルを読むよう促すだけ）を送る。
-const messagesDir = path.join(workspace, '.gh-maestro', 'messages');
-const messageFile = writeMessageFile(messagesDir, prefix + message);
-pruneOldMessageFiles(messagesDir, 24 * 60 * 60 * 1000);
-const notification = `${prefix}新着メッセージがあります。${messageFile} を読んでください。`;
+// from: 検出できた送信者名を優先、なければ GH_MAESTRO_WORKER env、最後にデフォルト
+const from = senderName || process.env.GH_MAESTRO_WORKER || 'orchestrator';
 
-// pane 解決・cwd 検証・ロック・Enter 送出は pane-notify.js に委譲
-const ok = notifyPane(workspace, name, notification);
-process.exit(ok ? 0 : 1);
+// ── enqueue ────────────────────────────────────────────────────────────────
+// poller 起動失敗で exit 0 が妨げられないよう、enqueue と lazy-start の例外は分離する。
+// exit 0 = enqueue 成功（配送成功ではない）。ack だけが配送成功の根拠。
+
+let enqueueOk = false;
+try {
+  const result = enqueue(workspace, {
+    to: name,
+    from,
+    body: fullBody,
+  });
+  console.log(result.messageId);
+  enqueueOk = true;
+} catch (err) {
+  console.error(`send-pane: enqueue に失敗しました: ${err.message}`);
+  process.exit(1);
+}
+
+// ── lazy-start: poller が起動していなければ起動する ────────────────────
+// GH_MAESTRO_DISABLE_LAZY_POLLER=1 でゲート（テスト用）
+
+if (enqueueOk && !process.env.GH_MAESTRO_DISABLE_LAZY_POLLER) {
+  try {
+    const pollerScript = path.join(__dirname, 'queue-poller.js');
+
+    // acquirePollerLease（queue-poller.js と共用）で lease 取得を試みる
+    const placeholderPayload = JSON.stringify({
+      pid: 0, // プレースホルダー — claimPoller が即乗っ取る
+      heartbeat: Date.now(),
+      startedAt: new Date().toISOString(),
+    });
+    const acquired = acquirePollerLease(workspace, placeholderPayload);
+
+    if (acquired) {
+      const child = spawn(process.execPath, [pollerScript, '--workspace', workspace], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      child.unref();
+    }
+  } catch (e) {
+    // poller 起動失敗は配送の成否に影響しない（ack が配送成功の根拠）。
+    // 次回 enqueue 時に lazy-start が再試行される。
+    process.stderr.write(`send-pane: poller lazy-start に失敗しました（enqueue は成功）: ${e.message}\n`);
+  }
+}
+
+if (enqueueOk) process.exit(0);

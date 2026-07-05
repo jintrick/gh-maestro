@@ -127,7 +127,7 @@ function releasePoller(workspace) {
 
 /**
  * 通知文を生成する。
- * （server-plan.md Phase 3 のテンプレートに従う）
+ * 各 pending メッセージの messageId とファイルパスを actionable に表示する。
  */
 function buildNotificationText(scriptDir, pendingForRecipient) {
   const lines = [
@@ -136,7 +136,10 @@ function buildNotificationText(scriptDir, pendingForRecipient) {
     `既に処理済みの場合も ack だけしてください。`,
   ];
   for (const msg of pendingForRecipient) {
-    lines.push(`- ${msg.path || '（不明なパス）'}`);
+    const mid = msg.messageId || '（messageIdなし）';
+    const msgPath = msg.path || '（パス不明）';
+    lines.push(`  messageId: ${mid}`);
+    lines.push(`  path: ${msgPath}`);
   }
   return lines.join('\n');
 }
