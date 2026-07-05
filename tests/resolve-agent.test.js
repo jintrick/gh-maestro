@@ -63,12 +63,9 @@ test('resolveAgentConfig: agents.jsonのパース失敗時は例外を投げず 
 });
 
 test('resolveAgentConfig: _homedir 省略時は環境変数 HOME/USERPROFILE を参照する', () => {
-  withTempHome(home => {
-    // agents.json が存在しない → null
-    // _homedir 省略で process.env.HOME が参照される（テスト環境の実際の HOME）
-    // HOME/USERPROFILE 以下に agents.json がないことを保証できないため、
-    // 存在しないエージェントIDで検証する
-    const r = resolveAgentConfig('nonexistent-agent-xyz-123-test');
-    assert.equal(r, null);
-  });
+  // _homedir 省略で process.env.HOME が参照される（テスト環境の実際の HOME）
+  // HOME/USERPROFILE 以下に agents.json がないことを保証できないため、
+  // 存在しないエージェントIDで検証する
+  const r = resolveAgentConfig('nonexistent-agent-xyz-123-test');
+  assert.equal(r, null);
 });
