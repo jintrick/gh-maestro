@@ -237,6 +237,9 @@ function ack(workspace, messageId) {
           const ackedFile = path.join(ackedDir, `${messageId}.json`);
           try {
             withRetry(() => { fs.renameSync(inboxFile, ackedFile); });
+            // rename は mtime を保持するため、ack 時点で mtime を更新する。
+            // これにより pruneAcked の保持期間が「ack 時点から」正しく計測される。
+            try { fs.utimesSync(ackedFile, new Date(), new Date()); } catch {}
           } catch (err) {
             // ENOENT: another process already acked this message — treat as success
             if (err.code === 'ENOENT') return true;

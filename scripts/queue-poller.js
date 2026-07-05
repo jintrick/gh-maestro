@@ -227,6 +227,22 @@ function runPoller(workspace) {
     // heartbeat 更新
     updateHeartbeat(workspace);
 
+    const now = Date.now();
+
+    // acked prune を定期的に実行（24h 保持）
+    // pending の有無に関わらずタイマー駆動で実行し、idle 時も acked/ が無限に溜まらないようにする
+    if (now - lastPruneTime >= PRUNE_INTERVAL_MS) {
+      try {
+        const pruned = pruneAcked(workspace, PRUNE_MAX_AGE_MS);
+        if (pruned > 0) {
+          process.stderr.write(`[poller] prune: ${pruned} acked message(s) deleted\n`);
+        }
+      } catch {
+        // best-effort: prune の失敗は無視
+      }
+      lastPruneTime = now;
+    }
+
     const pending = listPending(workspace);
     if (pending.length === 0) return;
 
@@ -237,8 +253,6 @@ function runPoller(workspace) {
       if (!byRecipient.has(to)) byRecipient.set(to, []);
       byRecipient.get(to).push(msg);
     }
-
-    const now = Date.now();
 
     for (const [recipient, msgs] of byRecipient) {
       const notifyIds = [];
@@ -309,19 +323,6 @@ function runPoller(workspace) {
     // 通知後に lastNotifiedAt を永続化（他プロセスからの参照用）
     if (lastNotifiedAt.size > 0) {
       writeLastNotifiedState(workspace, lastNotifiedAt);
-    }
-
-    // acked prune を定期的に実行（24h 保持）
-    if (now - lastPruneTime >= PRUNE_INTERVAL_MS) {
-      try {
-        const pruned = pruneAcked(workspace, PRUNE_MAX_AGE_MS);
-        if (pruned > 0) {
-          process.stderr.write(`[poller] prune: ${pruned} acked message(s) deleted\n`);
-        }
-      } catch {
-        // best-effort: prune の失敗は無視
-      }
-      lastPruneTime = now;
     }
   }
 

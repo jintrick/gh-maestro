@@ -393,8 +393,35 @@ try {
 } catch (e) {
   warn(`pending 一覧の取得に失敗しました: ${e.message}`);
 }
-if (pendingBeforeReset.length > 0) {
-  warn(`pending メッセージが ${pendingBeforeReset.length} 件残っています。これらは配信されずに失われます。`);
+
+// listPending は破損 JSON を黙ってスキップするため、inbox の生ファイル数も別途確認する
+let rawInboxCount = 0;
+const inboxRoot = resolve(workspace, '.gh-maestro', 'queue', 'inbox');
+try {
+  if (existsSync(inboxRoot)) {
+    const countDir = (dir) => {
+      let n = 0;
+      let entries;
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return n; }
+      for (const e of entries) {
+        try {
+          if (e.isDirectory()) { n += countDir(resolve(dir, e.name)); }
+          else if (e.isFile() && e.name.endsWith('.json')) { n++; }
+        } catch { /* skip unreachable */ }
+      }
+      return n;
+    };
+    rawInboxCount = countDir(inboxRoot);
+  }
+} catch { /* inbox 走査失敗は無視 */ }
+
+const parsedCount = pendingBeforeReset.length;
+if (parsedCount > 0 || rawInboxCount > 0) {
+  if (rawInboxCount !== parsedCount) {
+    warn(`pending メッセージが残っています — 正常: ${parsedCount} 件、生ファイル: ${rawInboxCount} 件（差分 ${rawInboxCount - parsedCount} 件は破損ファイルの可能性）。これらは配信されずに失われます。`);
+  } else {
+    warn(`pending メッセージが ${parsedCount} 件残っています。これらは配信されずに失われます。`);
+  }
 }
 
 // ── queue ディレクトリの安全掃除 ────────────────────────────────────
