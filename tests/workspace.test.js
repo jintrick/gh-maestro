@@ -154,12 +154,40 @@ test('parseFlags: 複数フラグを同時に処理する', () => {
   assert.equal(exitFlagMiss, false);
 });
 
-test('parseFlags: 値フラグの次が短縮フラグ（-x）なら exitFlagMiss=true', () => {
+test('parseFlags: 未知の短縮フラグは値として消費される（負数等と区別不能なため）', () => {
+  // -v は既知フラグになく -- で始まらないため値として扱われる
   const args = ['--workspace', '-v', 'hello'];
   const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace']);
 
+  assert.equal(values['--workspace'], '-v');
+  assert.deepEqual(rest, ['hello']);
+  assert.equal(exitFlagMiss, false);
+});
+
+test('parseFlags: 負数は値として正しく消費される', () => {
+  const args = ['--max-age', '-5', 'hello'];
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--max-age']);
+
+  assert.equal(values['--max-age'], '-5');
+  assert.deepEqual(rest, ['hello']);
+  assert.equal(exitFlagMiss, false);
+});
+
+test('parseFlags: ダッシュ始まりの文字列も値として扱われる', () => {
+  const args = ['--workspace', '-my-branch', 'hello'];
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace']);
+
+  assert.equal(values['--workspace'], '-my-branch');
+  assert.deepEqual(rest, ['hello']);
+  assert.equal(exitFlagMiss, false);
+});
+
+test('parseFlags: 未知の --長形式フラグは値欠落と判定される', () => {
+  const args = ['--workspace', '--unknown-flag', 'hello'];
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace']);
+
   assert.equal(values['--workspace'], null);
-  assert.deepEqual(rest, ['-v', 'hello']);
+  assert.deepEqual(rest, ['--unknown-flag', 'hello']);
   assert.equal(exitFlagMiss, true);
 });
 

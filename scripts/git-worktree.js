@@ -17,6 +17,12 @@ const { spawnSync } = require('./child-process');
  */
 function runOrThrow(cmd, args, opts) {
   const r = spawnSync(cmd, args, opts);
+  // OSレベル失敗（ENOENT 等）は status が null になる。先に error をチェックする。
+  if (r.error) {
+    const err = new Error(`${cmd} ${args.join(' ')} failed: ${r.error.message}`);
+    err.code = r.error.code;
+    throw err;
+  }
   if (r.status !== 0) {
     const err = new Error(`${cmd} ${args.join(' ')} exited with ${r.status}: ${(r.stderr || '').toString().trim()}`);
     err.status = r.status;
