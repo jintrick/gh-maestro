@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // remove-worker.js
 // ワーカーペインをkillし、worktreeを即座に削除し、workers.jsonからエントリを削除する。
-// 削除に失敗した場合でも次回reset-session.jsが保険として掃除する。
+// ディレクトリ実体がロックで残っても（kill直後のハンドル未解放。Windowsでは正常）
+// 次回reset-session.jsがjunction非追跡で安全に掃除する。残骸を手動rmしないこと。
 //
 // Usage:
 //   node remove-worker.js \
@@ -23,7 +24,8 @@ Options:
   --workspace <path>    ワークスペース（デフォルト CWD）
 
 ペインを kill し、worktree と同名ブランチを削除し、workers.json からエントリを除く。
-削除に失敗しても次回 reset-session.js が保険として掃除する。`;
+ディレクトリがロックで残っても次回 reset-session.js が junction 非追跡で安全に掃除する
+（残骸を手動 rm しないこと。node_modules junction を辿って共有ファイルを壊す）。`;
 
 const argv = process.argv.slice(2);
 if (argv.includes('--help') || argv.includes('-h')) {
@@ -128,7 +130,8 @@ if (existsSync(worktreeDir)) {
   }
 
   if (existsSync(worktreeDir)) {
-    console.warn(`remove-worker: worktree "${workerName}" の削除に失敗しました — 次回セッション開始時にreset-session.jsが再試行します`);
+    console.warn(`remove-worker: worktree "${workerName}" のメタデータ・ブランチ・workers.json エントリは削除済み。ディレクトリ実体だけがロックで残りました（kill直後のハンドル未解放。Windowsでは正常な挙動で、失敗ではありません）。次回セッションの reset-session.js が junction 非追跡で安全に掃除します。`);
+    console.warn(`remove-worker: [重要・orchestratorへ] この残骸ディレクトリを手動の rm / rm -rf で消さないこと。worktree 内の node_modules は共有ワークスペースへの junction であり、rm は junction を辿って共有ファイルを破壊します。放置して reset-session.js に任せてください。`);
   } else {
     console.warn(`remove-worker: worktree "${workerName}" を削除しました`);
   }
