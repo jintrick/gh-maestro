@@ -99,13 +99,13 @@ if (existsSync(worktreeDir)) {
 
   // git worktree remove
   try {
-    execSync(`git worktree remove --force --force "${worktreeDir}"`, { cwd: workspace, stdio: 'pipe' });
+    execSync(`git -c core.longpaths=true worktree remove --force --force "${worktreeDir}"`, { cwd: workspace, stdio: 'pipe' });
   } catch (e) {
     console.warn(`remove-worker: git worktree remove 失敗: ${e.message.split('\n')[0]}`);
   }
 
   try {
-    execSync('git worktree prune', { cwd: workspace, stdio: 'pipe' });
+    execSync('git -c core.longpaths=true worktree prune', { cwd: workspace, stdio: 'pipe' });
   } catch (e) {
     console.warn(`remove-worker: git worktree prune 失敗: ${e.message.split('\n')[0]}`);
   }
