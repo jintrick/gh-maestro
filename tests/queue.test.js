@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { enqueue, listPending, ack, pruneAcked } = require('../scripts/queue');
+const { enqueue, listPending, ack, pruneAcked, purgeInbox } = require('../scripts/queue');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
@@ -260,6 +260,78 @@ test('pruneAcked が acked ディレクトリ不在時に 0 を返す', () => {
     // workspace に queue 構造が一切ない状態でもエラーにならず 0 を返す
     const deleted = pruneAcked(workspace, 5000);
     assert.equal(deleted, 0);
+  });
+});
+
+// ── purgeInbox ────────────────────────────────────────────────────────────
+
+test('purgeInbox が指定 recipient の pending メッセージを全削除する', () => {
+  withTempDir(workspace => {
+    enqueue(workspace, { to: 'worker-1', from: 'o', body: 'msg1', messageId: 'id1' });
+    enqueue(workspace, { to: 'worker-1', from: 'o', body: 'msg2', messageId: 'id2' });
+
+    const inboxDir = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1');
+    assert.equal(countJsonFiles(inboxDir), 2);
+
+    const deleted = purgeInbox(workspace, 'worker-1');
+    assert.equal(deleted, 2);
+    assert.equal(countJsonFiles(inboxDir), 0);
+  });
+});
+
+test('purgeInbox が他の recipient のメッセージに影響しない', () => {
+  withTempDir(workspace => {
+    enqueue(workspace, { to: 'worker-1', from: 'o', body: 'msg1', messageId: 'id1' });
+    enqueue(workspace, { to: 'worker-2', from: 'o', body: 'msg2', messageId: 'id2' });
+
+    purgeInbox(workspace, 'worker-1');
+
+    const inboxDir1 = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1');
+    const inboxDir2 = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-2');
+    assert.equal(countJsonFiles(inboxDir1), 0);
+    assert.equal(countJsonFiles(inboxDir2), 1);
+  });
+});
+
+test('purgeInbox が存在しない recipient に対して 0 を返す（冪等）', () => {
+  withTempDir(workspace => {
+    assert.equal(purgeInbox(workspace, 'nonexistent'), 0);
+    // 2回呼んでも安全
+    assert.equal(purgeInbox(workspace, 'nonexistent'), 0);
+  });
+});
+
+test('purgeInbox が空の inbox に対して 0 を返す（冪等）', () => {
+  withTempDir(workspace => {
+    // ディレクトリは存在するが空
+    const inboxDir = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'empty-worker');
+    fs.mkdirSync(inboxDir, { recursive: true });
+
+    assert.equal(purgeInbox(workspace, 'empty-worker'), 0);
+    // 再度呼んでも安全
+    assert.equal(purgeInbox(workspace, 'empty-worker'), 0);
+  });
+});
+
+test('purgeInbox が既に ack 済みのメッセージに影響しない（acked には触れない）', () => {
+  withTempDir(workspace => {
+    enqueue(workspace, { to: 'worker-1', from: 'o', body: 'msg1', messageId: 'id1' });
+    enqueue(workspace, { to: 'worker-1', from: 'o', body: 'msg2', messageId: 'id2' });
+
+    // id1 だけ ack
+    ack(workspace, 'id1');
+
+    // inbox には id2 だけ残っている
+    const inboxDir = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1');
+    assert.equal(countJsonFiles(inboxDir), 1);
+
+    // purgeInbox で inbox の未処理が削除される
+    const deleted = purgeInbox(workspace, 'worker-1');
+    assert.equal(deleted, 1);
+
+    // acked の id1 はそのまま
+    const ackedDir = path.join(workspace, '.gh-maestro', 'queue', 'acked', 'worker-1');
+    assert.ok(fs.existsSync(path.join(ackedDir, 'id1.json')));
   });
 });
 

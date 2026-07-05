@@ -15,6 +15,7 @@ const { readFileSync, writeFileSync, existsSync, rmSync } = require('fs');
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
+const { purgeInbox } = require('./queue');
 
 const USAGE = `remove-worker.js — ワーカーのペインを kill し worktree を削除する
 
@@ -138,6 +139,17 @@ if (existsSync(worktreeDir)) {
   }
 } else {
   console.warn(`remove-worker: worktree "${workerName}" のディレクトリが存在しません — スキップします`);
+}
+
+// ── inbox の未処理メッセージを掃除 ─────────────────────────────────────
+
+try {
+  const purged = purgeInbox(workspace, workerName);
+  if (purged > 0) {
+    console.warn(`remove-worker: ワーカー "${workerName}" の inbox から ${purged} 件の未処理メッセージを削除しました`);
+  }
+} catch (e) {
+  console.warn(`remove-worker: inbox 掃除に失敗しました（ワーカー削除は続行します）: ${e.message}`);
 }
 
 // ── workers.jsonから削除 ──────────────────────────────────────────────

@@ -322,4 +322,55 @@ function pruneAcked(workspace, maxAgeMs) {
   return deleted;
 }
 
-module.exports = { enqueue, listPending, ack, pruneAcked };
+/**
+ * Purge all pending messages for a recipient by deleting them from inbox.
+ *
+ * Best-effort: individual file deletion errors are silently swallowed.
+ * Used when a worker is removed to prevent stuck message escalation.
+ *
+ * Idempotent and concurrency-safe: ENOENT is treated as success (another
+ * process already handled it), and readdirSync/unlinkSync are wrapped in
+ * try/catch per queue-concurrency.md TOCTOU/ENOENT absorption rules.
+ *
+ * @param {string} workspace  Absolute path to the workspace root.
+ * @param {string} recipient  The recipient whose inbox to purge.
+ * @returns {number}  Count of deleted files.
+ */
+function purgeInbox(workspace, recipient) {
+  const inboxDir = path.join(queueDir(workspace), 'inbox', recipient);
+
+  let files;
+  try {
+    files = fs.readdirSync(inboxDir);
+  } catch (err) {
+    // ENOENT: inbox dir doesn't exist or was already removed — success
+    if (err.code === 'ENOENT') return 0;
+    // Other errors (permissions, etc.) — best-effort, skip
+    return 0;
+  }
+
+  let deleted = 0;
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue;
+    const filePath = path.join(inboxDir, file);
+    try {
+      withRetry(() => { fs.unlinkSync(filePath); });
+      deleted++;
+    } catch (err) {
+      // ENOENT: another process already deleted it — treat as success
+      if (err.code === 'ENOENT') {
+        deleted++;
+        continue;
+      }
+      // EBUSY/EPERM after retries exhausted — best-effort, skip
+      // Other errors — best-effort, skip
+    }
+  }
+
+  // Best-effort: try to remove the now-empty directory
+  try { fs.rmdirSync(inboxDir); } catch {}
+
+  return deleted;
+}
+
+module.exports = { enqueue, listPending, ack, pruneAcked, purgeInbox };
