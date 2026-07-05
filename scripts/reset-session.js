@@ -14,6 +14,7 @@ const { existsSync, readFileSync, writeFileSync, rmSync,
         readdirSync, statSync, renameSync, unlinkSync } = require('fs');
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
+const { listPending } = require('./queue');
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
 
@@ -383,14 +384,82 @@ if (existsSync(pollerJsonPath)) {
   log('poller.json なし。スキップ。');
 }
 
+// ── pending 残数警告 ────────────────────────────────────────────────
+
+log('pending メッセージを確認します...');
+let pendingBeforeReset = [];
+try {
+  pendingBeforeReset = listPending(workspace);
+} catch (e) {
+  warn(`pending 一覧の取得に失敗しました: ${e.message}`);
+}
+
+// listPending は破損 JSON を黙ってスキップするため、inbox の生ファイル数も別途確認する
+let rawInboxCount = 0;
+const inboxRoot = resolve(workspace, '.gh-maestro', 'queue', 'inbox');
+try {
+  if (existsSync(inboxRoot)) {
+    const countDir = (dir) => {
+      let n = 0;
+      let entries;
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return n; }
+      for (const e of entries) {
+        try {
+          if (e.isDirectory()) { n += countDir(resolve(dir, e.name)); }
+          else if (e.isFile() && e.name.endsWith('.json')) { n++; }
+        } catch { /* skip unreachable */ }
+      }
+      return n;
+    };
+    rawInboxCount = countDir(inboxRoot);
+  }
+} catch { /* inbox 走査失敗は無視 */ }
+
+const parsedCount = pendingBeforeReset.length;
+if (parsedCount > 0 || rawInboxCount > 0) {
+  if (rawInboxCount !== parsedCount) {
+    warn(`pending メッセージが残っています — 正常: ${parsedCount} 件、生ファイル: ${rawInboxCount} 件（差分 ${rawInboxCount - parsedCount} 件は破損ファイルの可能性）。これらは配信されずに失われます。`);
+  } else {
+    warn(`pending メッセージが ${parsedCount} 件残っています。これらは配信されずに失われます。`);
+  }
+}
+
+// ── queue ディレクトリの安全掃除 ────────────────────────────────────
+
 log('キュー状態を掃除します...');
 const queueDir = resolve(workspace, '.gh-maestro', 'queue');
 if (existsSync(queueDir)) {
+  // 1. junction を先に除去（共有 junction を辿って中身を削除しないため）
   try {
-    rmSync(queueDir, { recursive: true, force: true });
-    log('queue/ を削除しました。');
+    unlinkJunctions(queueDir, warn);
   } catch (e) {
-    warn(`queue/ 削除失敗: ${e.message}`);
+    warn(`queue/ の junction 除去に失敗しました（後続処理は続行します）: ${e.message}`);
+  }
+
+  // 2. EBUSY/EPERM リトライ付きで削除
+  let removed = false;
+  for (let attempt = 0; attempt <= 5 && !removed; attempt++) {
+    try {
+      rmSync(queueDir, { recursive: true, force: true });
+      removed = true;
+    } catch (e) {
+      if (e.code === 'ENOENT') {
+        // TOCTOU: 別プロセスが先に削除した → 成功扱い
+        removed = true;
+      } else if (e.code === 'EBUSY' || e.code === 'EPERM') {
+        if (attempt < 5) {
+          sleep(20);
+        } else {
+          warn(`queue/ 削除失敗（リトライ超過）: ${e.message}`);
+        }
+      } else {
+        warn(`queue/ 削除失敗: ${e.message}`);
+        break;
+      }
+    }
+  }
+  if (removed) {
+    log('queue/ を削除しました。');
   }
 } else {
   log('queue/ なし。スキップ。');

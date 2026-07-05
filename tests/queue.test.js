@@ -207,7 +207,7 @@ test('ack が正しい recipient のディレクトリにファイルを移動�
 
 // ── pruneAcked ──────────────────────────────────────────────────────────
 
-test('pruneAcked が古い acked ファイルを削除する', () => {
+test('pruneAcked が古い acked ファイルを削除し、削除数を返す', () => {
   withTempDir(workspace => {
     enqueue(workspace, { to: 'worker-1', from: 'o', body: 'old', messageId: 'old-msg' });
     ack(workspace, 'old-msg');
@@ -217,13 +217,14 @@ test('pruneAcked が古い acked ファイルを削除する', () => {
     const oldTime = new Date(Date.now() - 100000);
     fs.utimesSync(ackedFile, oldTime, oldTime);
 
-    pruneAcked(workspace, 5000);
+    const deleted = pruneAcked(workspace, 5000);
+    assert.equal(deleted, 1);
 
     assert.ok(!fs.existsSync(ackedFile), 'maxAgeMs を超えた acked ファイルは削除されるべき');
   });
 });
 
-test('pruneAcked が新しい acked ファイルを削除しない', () => {
+test('pruneAcked が新しい acked ファイルを削除せず 0 を返す', () => {
   withTempDir(workspace => {
     enqueue(workspace, { to: 'worker-1', from: 'o', body: 'fresh', messageId: 'fresh-msg' });
     ack(workspace, 'fresh-msg');
@@ -231,13 +232,14 @@ test('pruneAcked が新しい acked ファイルを削除しない', () => {
     const ackedFile = path.join(workspace, '.gh-maestro', 'queue', 'acked', 'worker-1', 'fresh-msg.json');
 
     // prune with a very small maxAge — the file was just created so it should survive
-    pruneAcked(workspace, 5000);
+    const deleted = pruneAcked(workspace, 5000);
+    assert.equal(deleted, 0);
 
     assert.ok(fs.existsSync(ackedFile), '新しい acked ファイルは削除されないべき');
   });
 });
 
-test('pruneAcked が pending（inbox）を削除しない', () => {
+test('pruneAcked が pending（inbox）を削除せず 0 を返す', () => {
   withTempDir(workspace => {
     enqueue(workspace, { to: 'worker-1', from: 'o', body: 'keep', messageId: 'keep-id' });
 
@@ -246,17 +248,18 @@ test('pruneAcked が pending（inbox）を削除しない', () => {
     fs.utimesSync(inboxFile, oldTime, oldTime);
 
     // acked が存在しない場合でも pruneAcked は graceful に動作する
-    pruneAcked(workspace, 5000);
+    const deleted = pruneAcked(workspace, 5000);
+    assert.equal(deleted, 0);
 
     assert.ok(fs.existsSync(inboxFile), 'pending ファイルは削除されないべき');
   });
 });
 
-test('pruneAcked が acked ディレクトリ不在時にエラーにしない', () => {
+test('pruneAcked が acked ディレクトリ不在時に 0 を返す', () => {
   withTempDir(workspace => {
-    // workspace に queue 構造が一切ない状態でもエラーにならない
-    pruneAcked(workspace, 5000);
-    assert.ok(true);
+    // workspace に queue 構造が一切ない状態でもエラーにならず 0 を返す
+    const deleted = pruneAcked(workspace, 5000);
+    assert.equal(deleted, 0);
   });
 });
 

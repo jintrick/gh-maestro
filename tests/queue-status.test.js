@@ -187,3 +187,101 @@ test('messageId がないメッセージがあってもクラッシュしない'
     assert.ok(r.stdout.includes('?'));  // 欠損を示す '?' が表示される
   });
 });
+
+// ── stuck 詳細: last-notified 表示 ──────────────────────────────────────
+
+test('poller-state.json があるとき stuck エントリに最終通知時刻が表示される', () => {
+  withTempDir(workspace => {
+    // stuck な pending を作成
+    runSend(['worker-1', 'stuck msg', '--workspace', workspace, '--message-id', 'stuck-notified']);
+    const inboxFile = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1', 'stuck-notified.json');
+    const msg = JSON.parse(fs.readFileSync(inboxFile, 'utf8'));
+    const past = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    msg.createdAt = past;
+    fs.writeFileSync(inboxFile, JSON.stringify(msg), 'utf8');
+
+    // poller-state.json を作成（最終通知時刻 = 5分前）
+    const pollerStatePath = path.join(workspace, '.gh-maestro', 'queue', 'poller-state.json');
+    const lastNotifiedTime = Date.now() - 5 * 60 * 1000;
+    const queueDir = path.join(workspace, '.gh-maestro', 'queue');
+    fs.mkdirSync(queueDir, { recursive: true });
+    fs.writeFileSync(pollerStatePath, JSON.stringify({
+      lastNotifiedAt: { 'stuck-notified': lastNotifiedTime },
+    }), 'utf8');
+
+    const r = runStatus(['--workspace', workspace]);
+    assert.equal(r.status, 0);
+
+    assert.ok(r.stdout.includes('(STUCK)'));
+    assert.ok(r.stdout.includes('last-notified:'));
+    // 最終通知時刻の ISO 文字列が含まれる
+    const expectedIso = new Date(lastNotifiedTime).toISOString();
+    assert.ok(r.stdout.includes(expectedIso));
+  });
+});
+
+test('poller-state.json がなくても stuck 表示はクラッシュしない', () => {
+  withTempDir(workspace => {
+    // stuck な pending を作成（poller-state.json なし）
+    runSend(['worker-1', 'stuck msg', '--workspace', workspace, '--message-id', 'stuck-no-state']);
+    const inboxFile = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1', 'stuck-no-state.json');
+    const msg = JSON.parse(fs.readFileSync(inboxFile, 'utf8'));
+    const past = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    msg.createdAt = past;
+    fs.writeFileSync(inboxFile, JSON.stringify(msg), 'utf8');
+
+    const r = runStatus(['--workspace', workspace]);
+    assert.equal(r.status, 0);
+
+    assert.ok(r.stdout.includes('(STUCK)'));
+    assert.ok(r.stdout.includes('未通知'));  // poller-state.json がないので未通知
+  });
+});
+
+test('poller-state.json の lastNotifiedAt が破損値でもクラッシュしない', () => {
+  withTempDir(workspace => {
+    // stuck な pending を作成
+    runSend(['worker-1', 'stuck msg', '--workspace', workspace, '--message-id', 'stuck-bad-ts']);
+    const inboxFile = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1', 'stuck-bad-ts.json');
+    const msg = JSON.parse(fs.readFileSync(inboxFile, 'utf8'));
+    const past = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    msg.createdAt = past;
+    fs.writeFileSync(inboxFile, JSON.stringify(msg), 'utf8');
+
+    // 破損したタイムスタンプ値を持つ poller-state.json
+    const pollerStatePath = path.join(workspace, '.gh-maestro', 'queue', 'poller-state.json');
+    const queueDir = path.join(workspace, '.gh-maestro', 'queue');
+    fs.mkdirSync(queueDir, { recursive: true });
+    fs.writeFileSync(pollerStatePath, JSON.stringify({
+      lastNotifiedAt: { 'stuck-bad-ts': 'not-a-number' },
+    }), 'utf8');
+
+    const r = runStatus(['--workspace', workspace]);
+    assert.equal(r.status, 0);
+    assert.ok(r.stdout.includes('(STUCK)'));
+    assert.ok(r.stdout.includes('不正な時刻'));  // フォールバック表示
+  });
+});
+
+test('poller-state.json が壊れていてもクラッシュしない', () => {
+  withTempDir(workspace => {
+    // stuck な pending を作成
+    runSend(['worker-1', 'stuck msg', '--workspace', workspace, '--message-id', 'stuck-corrupt']);
+    const inboxFile = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1', 'stuck-corrupt.json');
+    const msg = JSON.parse(fs.readFileSync(inboxFile, 'utf8'));
+    const past = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    msg.createdAt = past;
+    fs.writeFileSync(inboxFile, JSON.stringify(msg), 'utf8');
+
+    // 壊れた poller-state.json
+    const pollerStatePath = path.join(workspace, '.gh-maestro', 'queue', 'poller-state.json');
+    const queueDir = path.join(workspace, '.gh-maestro', 'queue');
+    fs.mkdirSync(queueDir, { recursive: true });
+    fs.writeFileSync(pollerStatePath, 'this is not json', 'utf8');
+
+    const r = runStatus(['--workspace', workspace]);
+    assert.equal(r.status, 0);
+    assert.ok(r.stdout.includes('(STUCK)'));
+    // 壊れたファイルは無視される
+  });
+});

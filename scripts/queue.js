@@ -237,6 +237,9 @@ function ack(workspace, messageId) {
           const ackedFile = path.join(ackedDir, `${messageId}.json`);
           try {
             withRetry(() => { fs.renameSync(inboxFile, ackedFile); });
+            // rename は mtime を保持するため、ack 時点で mtime を更新する。
+            // これにより pruneAcked の保持期間が「ack 時点から」正しく計測される。
+            try { fs.utimesSync(ackedFile, new Date(), new Date()); } catch {}
           } catch (err) {
             // ENOENT: another process already acked this message — treat as success
             if (err.code === 'ENOENT') return true;
@@ -277,10 +280,11 @@ function ack(workspace, messageId) {
  *
  * @param {string} workspace  Absolute path to the workspace root.
  * @param {number} maxAgeMs   Maximum age in milliseconds.
+ * @returns {number}  Count of deleted files.
  */
 function pruneAcked(workspace, maxAgeMs) {
   const ackedRoot = path.join(queueDir(workspace), 'acked');
-  if (!fs.existsSync(ackedRoot)) return;
+  if (!fs.existsSync(ackedRoot)) return 0;
 
   const now = Date.now();
   let entries;
@@ -288,9 +292,10 @@ function pruneAcked(workspace, maxAgeMs) {
     entries = fs.readdirSync(ackedRoot, { withFileTypes: true });
   } catch {
     // TOCTOU: ackedRoot disappeared between existsSync and readdirSync
-    return;
+    return 0;
   }
 
+  let deleted = 0;
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const dirPath = path.join(ackedRoot, entry.name);
@@ -304,6 +309,7 @@ function pruneAcked(workspace, maxAgeMs) {
           const stat = fs.statSync(filePath);
           if (stat.isFile() && (now - stat.mtimeMs) > maxAgeMs) {
             fs.unlinkSync(filePath);
+            deleted++;
           }
         } catch {
           // best effort — skip unreadable or already-deleted files
@@ -313,6 +319,7 @@ function pruneAcked(workspace, maxAgeMs) {
       // best effort — skip unreachable recipient directories
     }
   }
+  return deleted;
 }
 
 module.exports = { enqueue, listPending, ack, pruneAcked };

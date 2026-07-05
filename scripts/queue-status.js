@@ -14,6 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const { listPending } = require('./queue');
+const { readLastNotifiedState } = require('./queue-poller');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 
 // ── Stuck threshold ─────────────────────────────────────────────────────
@@ -92,6 +93,8 @@ const ackedRoot = path.join(queueRoot, 'acked');
 
 const pending = listPending(workspace);
 const deliveredCount = countAllMessages(ackedRoot);
+const pollerState = readLastNotifiedState(workspace);
+const lastNotifiedAt = pollerState ? pollerState.lastNotifiedAt : null;
 
 const now = Date.now();
 let stuckCount = 0;
@@ -129,15 +132,32 @@ if (pending.length > 0) {
     const to = msg.to || '?';
     let elapsedStr = '?';
     let stuckMarker = '';
+    let isStuck = false;
     if (msg.createdAt) {
       const createdAt = new Date(msg.createdAt).getTime();
       if (!isNaN(createdAt)) {
         const elapsed = now - createdAt;
         elapsedStr = formatElapsed(elapsed);
-        stuckMarker = elapsed > STUCK_THRESHOLD_MS ? ' (STUCK)' : '';
+        isStuck = elapsed > STUCK_THRESHOLD_MS;
+        stuckMarker = isStuck ? ' (STUCK)' : '';
       }
     }
     console.log(`  ${id}   ${to}   ${elapsedStr}${stuckMarker}`);
+
+    // stuck エントリの最終通知時刻を表示（poller-state.json から読み取り）
+    if (isStuck && lastNotifiedAt && lastNotifiedAt[id]) {
+      const lastNotified = lastNotifiedAt[id];
+      const ts = new Date(lastNotified).getTime();
+      if (!isNaN(ts)) {
+        const lastNotifiedDate = new Date(ts).toISOString();
+        const elapsedSinceNotified = now - ts;
+        console.log(`           last-notified: ${lastNotifiedDate} (${formatElapsed(elapsedSinceNotified)})`);
+      } else {
+        console.log('           last-notified: (不正な時刻)');
+      }
+    } else if (isStuck) {
+      console.log('           last-notified: (未通知)');
+    }
   }
 }
 

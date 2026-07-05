@@ -16,7 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
-const { enqueue, listPending } = require('./queue');
+const { enqueue, listPending, pruneAcked } = require('./queue');
 const { notifyPane } = require('./pane-notify');
 
 // ── 閾値（先頭定数） ────────────────────────────────────────────────────
@@ -25,6 +25,8 @@ const POLL_INTERVAL_MS = 5000;       // 定期スキャン間隔（ms）
 const STALE_HEARTBEAT_MS = 15000;    // heartbeat がこの時間超で stale
 const RE_NOTIFY_INTERVAL_MS = 120000; // 再通知間隔（ms）
 const STUCK_THRESHOLD_MS = 600000;   // 10分 - この時間超で escallation
+const PRUNE_INTERVAL_MS = 3600000;   // 1時間 - prune の実行間隔
+const PRUNE_MAX_AGE_MS = 86400000;   // 24時間 - acked メッセージの保持期間
 
 const USAGE = `queue-poller.js — キュー pending 監視と pane 通知
 
@@ -123,6 +125,64 @@ function releasePoller(workspace) {
   try { fs.unlinkSync(pollerJsonPath(workspace)); } catch {}
 }
 
+// ── last-notified 永続化 ─────────────────────────────────────────────────
+
+function pollerStatePath(workspace) {
+  return path.join(workspace, '.gh-maestro', 'queue', 'poller-state.json');
+}
+
+/**
+ * poller-state.json を tmp→rename でアトミックに書き込む。
+ *
+ * @param {string} workspace  ワークスペース絶対パス
+ * @param {Map<string,number>} lastNotifiedAt  messageId → 最終通知時刻（ms）
+ */
+function writeLastNotifiedState(workspace, lastNotifiedAt) {
+  const statePath = pollerStatePath(workspace);
+  const tmpDir = path.join(path.dirname(statePath), 'tmp');
+
+  try { fs.mkdirSync(tmpDir, { recursive: true }); } catch {}
+
+  const obj = {};
+  for (const [mid, ts] of lastNotifiedAt) {
+    obj[mid] = ts;
+  }
+  const payload = JSON.stringify({ lastNotifiedAt: obj });
+
+  const tmpPath = path.join(tmpDir, 'poller-state.json.' + Date.now());
+  try {
+    fs.writeFileSync(tmpPath, payload, 'utf8');
+    fs.renameSync(tmpPath, statePath);
+  } catch {
+    // best-effort: 書き込み失敗は無視（次回 scan で再試行）
+    try { fs.unlinkSync(tmpPath); } catch {}
+  }
+}
+
+/**
+ * poller-state.json を読み取る（他プロセスからの参照用）。
+ *
+ * @param {string} workspace  ワークスペース絶対パス
+ * @returns {{ lastNotifiedAt: Record<string,number> }|null}
+ */
+function readLastNotifiedState(workspace) {
+  const statePath = pollerStatePath(workspace);
+  try {
+    if (!fs.existsSync(statePath)) return null;
+  } catch {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    if (parsed && typeof parsed.lastNotifiedAt === 'object') {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ── 通知テンプレート ────────────────────────────────────────────────────
 
 /**
@@ -156,6 +216,9 @@ function runPoller(workspace) {
   // stuckEscalated: messageId → boolean （再エスカレート防止）
   const stuckEscalated = new Set();
 
+  // lastPruneTime: 前回 pruneAcked を実行した時刻
+  let lastPruneTime = Date.now();
+
   /**
    * 1回のスキャン実行。
    * pending を検出し、宛先ごとに通知・再通知・エスカレートを処理する。
@@ -163,6 +226,22 @@ function runPoller(workspace) {
   function scan() {
     // heartbeat 更新
     updateHeartbeat(workspace);
+
+    const now = Date.now();
+
+    // acked prune を定期的に実行（24h 保持）
+    // pending の有無に関わらずタイマー駆動で実行し、idle 時も acked/ が無限に溜まらないようにする
+    if (now - lastPruneTime >= PRUNE_INTERVAL_MS) {
+      try {
+        const pruned = pruneAcked(workspace, PRUNE_MAX_AGE_MS);
+        if (pruned > 0) {
+          process.stderr.write(`[poller] prune: ${pruned} acked message(s) deleted\n`);
+        }
+      } catch {
+        // best-effort: prune の失敗は無視
+      }
+      lastPruneTime = now;
+    }
 
     const pending = listPending(workspace);
     if (pending.length === 0) return;
@@ -174,8 +253,6 @@ function runPoller(workspace) {
       if (!byRecipient.has(to)) byRecipient.set(to, []);
       byRecipient.get(to).push(msg);
     }
-
-    const now = Date.now();
 
     for (const [recipient, msgs] of byRecipient) {
       const notifyIds = [];
@@ -232,6 +309,20 @@ function runPoller(workspace) {
           process.stderr.write(`[poller] ${recipient} への通知失敗: ${err.message}\n`);
         }
       }
+    }
+
+    // ack 済み・消滅済みのエントリを刈り取る（メモリリーク + state 肥大化防止）
+    const pendingIds = new Set(pending.map(m => m.messageId).filter(Boolean));
+    for (const mid of lastNotifiedAt.keys()) {
+      if (!pendingIds.has(mid)) lastNotifiedAt.delete(mid);
+    }
+    for (const mid of stuckEscalated) {
+      if (!pendingIds.has(mid)) stuckEscalated.delete(mid);
+    }
+
+    // 通知後に lastNotifiedAt を永続化（他プロセスからの参照用）
+    if (lastNotifiedAt.size > 0) {
+      writeLastNotifiedState(workspace, lastNotifiedAt);
     }
   }
 
@@ -312,4 +403,4 @@ if (!claimPoller(workspace)) {
 runPoller(workspace);
 } // require.main === module
 
-module.exports = { acquirePollerLease };
+module.exports = { acquirePollerLease, pollerStatePath, readLastNotifiedState, writeLastNotifiedState };
