@@ -336,17 +336,17 @@ if (existsSync(ghMaestroDir)) {
   if (pollFiles.length === 0) log('poll-* ファイルなし。スキップ。');
 }
 
-log('.gh-maestro/messages/ を削除します...');
+// Phase 4 で .gh-maestro/messages/ は廃止（queue/inbox/ に移行）。
+// 既存セッションの残骸を掃除するため、存在すれば削除する（レガシークリーンアップ）。
+log('.gh-maestro/messages/ のレガシー残骸を掃除します...');
 const messagesDir = resolve(workspace, '.gh-maestro', 'messages');
 if (existsSync(messagesDir)) {
   try {
     rmSync(messagesDir, { recursive: true, force: true });
-    log('messages/ を削除しました。');
+    log('messages/（レガシー）を削除しました。');
   } catch (e) {
-    warn(`messages/ 削除失敗: ${e.message}`);
+    warn(`messages/（レガシー）削除失敗: ${e.message}`);
   }
-} else {
-  log('messages/ なし。スキップ。');
 }
 
 // ═══════════════════════════════════════════════════════════════════

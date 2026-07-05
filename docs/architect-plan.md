@@ -55,9 +55,9 @@ Human
 
 ## 通信設計
 
-architect から orchestrator への主通信路は `send-pane.js` とする。
+architect から orchestrator への主通信路は `send-pane.js`（内部的にはファイルシステムキューの enqueue）とする。
 
-固定イベント名は使わない。`ARCHITECT_HANDOFF_READY` のような機械向け識別子は不要。`send-pane.js` は既に本文を `.gh-maestro/messages/` に書き、paneにはそのファイルを読むよう促す短文だけを送る。本文は自然言語で十分に長く書け、人間にも読める。
+固定イベント名は使わない。`ARCHITECT_HANDOFF_READY` のような機械向け識別子は不要。`send-pane.js` は内部的にメッセージを `.gh-maestro/queue/inbox/` へ enqueue し、poller が WezTerm 通知を担当する。本文は自然言語で十分に長く書け、人間にも読める。
 
 architect は、Issue化可能な状態になったら orchestrator に自然言語で依頼する。
 
@@ -197,7 +197,7 @@ architect は通常workerではないため、`spawn-worker.js` ではなく専�
 
 ## handoff file
 
-handoff file は必須にしない。`send-pane.js` が本文を `.gh-maestro/messages/` に保存するため、通常は自然言語本文だけで十分である。
+handoff file は必須にしない。`send-pane.js` が本文を `.gh-maestro/queue/inbox/` に enqueue するため、通常は自然言語本文だけで十分である。
 
 以下の場合のみ architect が明示的に `.gh-maestro/architect/handoffs/` へMarkdownを書く。
 
@@ -240,7 +240,7 @@ handoff file は必須にしない。`send-pane.js` が本文を `.gh-maestro/me
 
 復旧は以下で十分とする。
 
-- `send-pane.js` が `.gh-maestro/messages/` に送信本文を保存する
+- `send-pane.js` が `.gh-maestro/queue/inbox/` に送信本文を enqueue する
 - architect が必要に応じて `.gh-maestro/architect/handoffs/` にMarkdownを残す
 - orchestrator 再起動時に未処理handoffを自動探索する機能は初期実装では入れない
 

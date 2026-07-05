@@ -20,7 +20,7 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 - `.gh-maestro/` 配下のセッション管理ファイル（session.json・review-*.log・poll-state-* など）を読む
 - 自分が書いた `/tmp/issue-*.md` 等の草稿ファイルを読む
 - `gh pr view`・`gh issue view` 等でPR/Issue情報を取得する（プロセス管理のため）
-- `spawn-worker.js`・`send-pane.js`・`poll-reviews.js` 等のgh-maestroスクリプトを実行する
+- `spawn-worker.js`・`queue-send.js`・`queue-ack.js`・`send-pane.js`・`poll-reviews.js` 等のgh-maestroスクリプトを実行する
 
 ## セッション変数
 
@@ -82,12 +82,18 @@ explorerは**事実のみ報告する**（分析・判断は行わない）。in
 ## アセット（`{{SCRIPTS_PATH}}/`）
 
 - **spawn-worker.js** — worktreeを作りワーカーを新規ペインで起動する
-- **send-pane.js** — 起動中のワーカーにメッセージを送る（ワーカー名は第1引数に**位置引数**で渡す。`--worker` フラグは存在しない）
+- **queue-send.js** — ワーカーにメッセージを送る（推奨の主経路）。メッセージはファイルシステムキューに enqueue され、poller が WezTerm 通知を担当する（ワーカー名は第1引数に**位置引数**で渡す。`--worker` フラグは存在しない）
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" $WORKER --workspace $WORKSPACE "<メッセージ>"
-# 例: node "{{SCRIPTS_PATH}}/send-pane.js" issue-5-implement --workspace $WORKSPACE "命名改善: src/auth.go:42 — processData → normalizeSSN に変更してください（PR #12 のレビュー指摘より）"
+node "{{SCRIPTS_PATH}}/queue-send.js" $WORKER --workspace $WORKSPACE "<メッセージ>"
+# 例: node "{{SCRIPTS_PATH}}/queue-send.js" issue-5-implement --workspace $WORKSPACE "命名改善: src/auth.go:42 — processData → normalizeSSN に変更してください（PR #12 のレビュー指摘より）"
 ```
+- **queue-ack.js** — 自分の inbox の pending メッセージを ack（受理）する。messageId を指定するだけ。二重 ack も安全（冪等）
+
+```sh
+node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
+```
+- **send-pane.js** — 後方互換ラッパー。内部は `queue-send.js` と同じ enqueue を行う。新規の送信には `queue-send.js` を推奨
 - **remove-worker.js** — ワーカーペインをkillしてworktreeを削除する
 - **start-review-manager.js** — PRに対してReview Managerを起動する。通常はPR検出時にpoll-pr.jsが自動で呼ぶが、Review Managerが起動しなかった・失敗した場合に手動で起動・再起動するために使う
 
@@ -137,7 +143,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 - `BASE_BRANCH`は保護ブランチでも一時的なworktreeブランチでもない（詳細は不変条件を参照）
 - 依存関係のないIssueは並列で進行している（直列化の根拠は「AがBの入力になる」場合のみ）
 - 大規模タスクは競合しない軸（ディレクトリ・ファイル種別・機能単位など）で分割し、複数ワーカーが並列処理している
-- ワーカーはその役割が完全に終わった時点で削除されている（PRを作っただけのcoderはまだ生きている。トリアージの結果、修正が必要な指摘があれば`send-pane.js`で転送する）
+- ワーカーはその役割が完全に終わった時点で削除されている（PRを作っただけのcoderはまだ生きている。トリアージの結果、修正が必要な指摘があれば`queue-send.js`で転送する）
 - 同時進行中のIssue間でファイル競合が発生していない（競合可能性があれば前のPRがマージされてから次を起票する）
 - `--prompt`には役割とIssue番号のみが含まれ、実装詳細はIssueに記述されている
 - PRのレビューコメントをトリアージし、人間に結果を提示している。マージ判断は人間が行い、マージ後は反省会（コーダーへの意見聴取を含む）を実施してからIssueをクローズしてworktreeを削除している。**反省会より前に`remove-worker.js`を実行しない**
@@ -196,13 +202,13 @@ node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tm
 
 ## PR検出
 
-コーダーを起動すると `spawn-worker.js` が自動でポーリングを開始し、`send-pane.js` 経由で以下が届く：
+コーダーを起動すると `spawn-worker.js` が自動でポーリングを開始し、orchestrator の inbox 経由で以下が届く：
 
 - `PR_DETECTED:<PR番号>` → PR番号を記録してレビュー監視に移行する
 - `REVIEW_MANAGER_STARTED:<PR番号>` → Review Managerが起動した（記録する）
 - `REVIEW_MANAGER_ALREADY_RUNNING:<PR番号>` → 既にReview Managerが稼働中
 
-PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`send-pane.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
+PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`queue-send.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
 
 **`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、「Review Managerの手動起動」に従って自分で起動すること。
 
@@ -247,7 +253,7 @@ PRに新しいレビューコメントが届くたびに、以下の4分類で�
 ただし「短すぎる」「好みの問題」レベルのスタイル指摘は**保留リストへ**。
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" $WORKER --workspace $WORKSPACE "命名改善: <path>:<line> — <現在の名前> は不正確/不明瞭です。<具体的な提案> に変更してください。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
+node "{{SCRIPTS_PATH}}/queue-send.js" $WORKER --workspace $WORKSPACE "命名改善: <path>:<line> — <現在の名前> は不正確/不明瞭です。<具体的な提案> に変更してください。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
 ```
 
 ### 3. 本当のバグ・セキュリティ問題 — コーダーにフィードバック
@@ -255,7 +261,7 @@ node "{{SCRIPTS_PATH}}/send-pane.js" $WORKER --workspace $WORKSPACE "命名改�
 テストでカバーされていない分岐、エラーハンドリング漏れ、認証バイパス、データ破損の可能性など、**実害のある指摘**はコーダーにフィードバックする。具体的な問題点と修正方針を伝える。
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" $WORKER --workspace $WORKSPACE "修正依頼: <path>:<line> — <問題の説明>。<修正方針>。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
+node "{{SCRIPTS_PATH}}/queue-send.js" $WORKER --workspace $WORKSPACE "修正依頼: <path>:<line> — <問題の説明>。<修正方針>。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
 ```
 
 ### 4. 議論の余地がある提案 / SUGGESTION — 保留Issueへ即追記
@@ -417,7 +423,7 @@ gh issue comment $PENDING_ISSUE --repo $REPO \
 上記に該当しない（分類が明白・機械的な）場合は聴取をスキップし、直接人間への提示に進む。聞く場合のみ：
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" $WORKER --workspace $WORKSPACE "反省会の分類案です。異論や補足があれば教えてください: <分類案の要約>"
+node "{{SCRIPTS_PATH}}/queue-send.js" $WORKER --workspace $WORKSPACE "反省会の分類案です。異論や補足があれば教えてください: <分類案の要約>"
 ```
 
 コーダーからの応答（異論・補足・別視点）があれば、人間への提示フォーマットに反映してから次に進む。応答がなくても一定時間で先に進んでよい。

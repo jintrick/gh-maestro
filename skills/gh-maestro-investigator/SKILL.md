@@ -18,7 +18,11 @@ node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<内�
 
 何かを書く前に自問する: 「これはツール呼び出しの引数か？」 NOなら、その内容をsend-pane.jsの引数に置き換えてから実行する。
 
-orchestratorからの返答はこのペインに届く。
+orchestratorからの返答はこのペインに届く。届いたメッセージを読んだら ack すること：
+
+```sh
+node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
+```
 
 ## ゴール
 

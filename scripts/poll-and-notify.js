@@ -1,32 +1,30 @@
 #!/usr/bin/env node
-// poll-and-notify.js <ISSUE> --workspace <path>
+// poll-and-notify.js <ISSUE> --workspace <path> [--from <name>]
 // spawn-worker.js が gh-maestro-coder を起動するときに自動で起動するヘルパー。
-// poll-pr.js を子プロセスで実行し、stdout 各行を orchestrator へ send-pane.js 経由で転送する。
+// poll-pr.js を子プロセスで実行し、stdout 各行を orchestrator の inbox へ
+// enqueue する（Phase 4 移行により send-pane.js 呼び出しから enqueue に変更）。
+// WezTerm 通知は poller に任せる。
 // poll-pr.js が終了したらこのプロセスも終了する（detached で呼ばれるため親とは無関係に生存する）。
 
 'use strict';
 
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const { resolve } = require('path');
+const { enqueue } = require('./queue');
 
 const argv = process.argv.slice(2);
 const issue = argv[0];
 const wsIdx = argv.indexOf('--workspace');
+const fromIdx = argv.indexOf('--from');
 const workspace = wsIdx !== -1 ? argv[wsIdx + 1] : null;
+const fromName = fromIdx !== -1 ? argv[fromIdx + 1] : (process.env.GH_MAESTRO_WORKER || 'coder');
 
 if (!issue || !workspace) {
-  console.error('Usage: node poll-and-notify.js <ISSUE> --workspace <path>');
+  console.error('Usage: node poll-and-notify.js <ISSUE> --workspace <path> [--from <name>]');
   process.exit(1);
 }
 
 const scriptsDir = __dirname;
-
-// このプロセスは spawn-worker.js（orchestratorのBashツール実行）の子として起動されるため、
-// WEZTERM_PANE をそのまま継承するとsend-pane.jsの送信者逆引きがorchestrator自身と誤認する
-// （orchestratorのpane-idとworkers.jsonのorchestratorエントリが一致してしまうため）。
-// 通知メッセージが「orchestratorです。」と自己言及するのを防ぐため、明示的に外す。
-const notifierEnv = { ...process.env };
-delete notifierEnv.WEZTERM_PANE;
 
 const poll = spawn(process.execPath, [resolve(scriptsDir, 'poll-pr.js'), issue], {
   cwd: workspace,
@@ -40,23 +38,31 @@ poll.stdout.on('data', (data) => {
   buf = lines.pop();
   for (const line of lines) {
     if (!line.trim()) continue;
-    spawnSync(process.execPath, [
-      resolve(scriptsDir, 'send-pane.js'),
-      'orchestrator',
-      '--workspace', workspace,
-      line.trim(),
-    ], { stdio: 'inherit', env: notifierEnv });
+    try {
+      enqueue(workspace, {
+        to: 'orchestrator',
+        from: fromName,
+        kind: 'notification',
+        body: line.trim(),
+      });
+    } catch (err) {
+      process.stderr.write(`poll-and-notify: enqueue 失敗: ${err.message}\n`);
+    }
   }
 });
 
 poll.on('exit', (code) => {
   if (buf.trim()) {
-    spawnSync(process.execPath, [
-      resolve(scriptsDir, 'send-pane.js'),
-      'orchestrator',
-      '--workspace', workspace,
-      buf.trim(),
-    ], { stdio: 'inherit', env: notifierEnv });
+    try {
+      enqueue(workspace, {
+        to: 'orchestrator',
+        from: fromName,
+        kind: 'notification',
+        body: buf.trim(),
+      });
+    } catch (err) {
+      process.stderr.write(`poll-and-notify: enqueue 失敗 (final): ${err.message}\n`);
+    }
   }
   process.exit(code ?? 0);
 });

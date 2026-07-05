@@ -368,6 +368,7 @@ if (skill === 'gh-maestro-coder' && issue) {
     resolve(__dirname, 'poll-and-notify.js'),
     issue,
     '--workspace', workspace,
+    '--from', workerName,
   ], {
     cwd: workspace,
     stdio: 'ignore',
