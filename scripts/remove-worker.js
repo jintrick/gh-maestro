@@ -14,6 +14,7 @@ const { resolve } = require('path');
 const { readFileSync, writeFileSync, existsSync, rmSync } = require('fs');
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
+const { worktreeRemove, worktreePrune } = require('./git-worktree');
 
 const USAGE = `remove-worker.js — ワーカーのペインを kill し worktree を削除する
 
@@ -99,13 +100,13 @@ if (existsSync(worktreeDir)) {
 
   // git worktree remove
   try {
-    execSync(`git -c core.longpaths=true worktree remove --force --force "${worktreeDir}"`, { cwd: workspace, stdio: 'pipe' });
+    worktreeRemove(worktreeDir, workspace, { doubleForce: true });
   } catch (e) {
     console.warn(`remove-worker: git worktree remove 失敗: ${e.message.split('\n')[0]}`);
   }
 
   try {
-    execSync('git -c core.longpaths=true worktree prune', { cwd: workspace, stdio: 'pipe' });
+    worktreePrune(workspace);
   } catch (e) {
     console.warn(`remove-worker: git worktree prune 失敗: ${e.message.split('\n')[0]}`);
   }
