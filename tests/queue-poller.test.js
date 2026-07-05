@@ -721,7 +721,8 @@ test('poller: getMuxId が null の環境では mux-check をスキップし deg
 
 // ── poller-state 永続化（ユニットテスト: 実 spawn なし） ────────────────
 
-const { pollerStatePath, writeLastNotifiedState, readLastNotifiedState, acquirePollerLease, getMuxId } = require('../scripts/queue-poller');
+const { pollerStatePath, writeLastNotifiedState, readLastNotifiedState, acquirePollerLease, getMuxId, buildWakeSignal } = require('../scripts/queue-poller');
+const { enqueue } = require('../scripts/queue');
 
 test('writeLastNotifiedState + readLastNotifiedState のラウンドトリップ', () => {
   withTempDir(workspace => {
@@ -768,5 +769,63 @@ test('writeLastNotifiedState が空 Map を書き込める', () => {
     const state = readLastNotifiedState(workspace);
     assert.ok(state, 'state が読み取れるべき');
     assert.deepEqual(state.lastNotifiedAt, {});
+  });
+});
+
+// ── buildWakeSignal ──────────────────────────────────────────────────────
+
+test('buildWakeSignal は空文字を返す（定型文・業務本文を含まない wake 信号契約）', () => {
+  const result = buildWakeSignal();
+  assert.equal(result, '');
+  assert.equal(typeof result, 'string');
+});
+
+// ── notifyPane 失敗時の lastNotifiedAt 非更新 ──────────────────────────
+
+/**
+ * notifyPane を false にするモック（cli list が空配列 → ペイン未検出）。
+ */
+function noPaneMockBody() {
+  return (
+    "const a = process.argv.slice(2).join(' ');\n" +
+    "if (a.startsWith('cli list')) process.stdout.write('[]');\n" +
+    "process.exit(0);\n"
+  );
+}
+
+test('notifyPane が false を返したとき lastNotifiedAt は更新されない', async () => {
+  await withTempDir(async workspace => {
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-mock-'));
+    try {
+      // 1. poller を起動（mock が [] を返す → notifyPane は pane 未検出で false を返す）
+      await withPoller(workspace, mockDir, async (child, pollerJsonPath, stderr) => {
+        // 2. テストメッセージを enqueue
+        const result = enqueue(workspace, {
+          to: 'test-worker',
+          from: 'test',
+          body: 'test message',
+        });
+        assert.ok(result.messageId, 'enqueue 成功で messageId が返るべき');
+
+        // 3. fs.watch + scan が走るのを待つ（debounce 200ms + scan 実行時間の余裕）
+        await new Promise(resolve => setTimeout(resolve, 800));
+
+        // 4. lastNotifiedAt が更新されていないことを確認
+        //    notifyPane が false を返したため、lastNotifiedAt.set は実行されない
+        const state = readLastNotifiedState(workspace);
+        if (state && state.lastNotifiedAt) {
+          // もし lastNotifiedAt にエントリがあっても、このテストの messageId が含まれていないこと
+          assert.ok(
+            !(result.messageId in state.lastNotifiedAt),
+            `notifyPane 失敗時に lastNotifiedAt に ${result.messageId} が含まれていてはいけない`
+          );
+        }
+        // state が null（初回 scan で notifyPane 全部失敗 → 一度も writeLastNotifiedState されない）でも OK
+      }, {
+        mockBody: noPaneMockBody(),
+      });
+    } finally {
+      fs.rmSync(mockDir, { recursive: true, force: true });
+    }
   });
 });
