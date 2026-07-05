@@ -4,6 +4,7 @@ paths:
   - "scripts/pane-notify.js"
   - "scripts/poll-and-notify.js"
   - "scripts/send-pane.js"
+  - "scripts/reset-session.js"
   - "tests/queue-poller.test.js"
 ---
 
