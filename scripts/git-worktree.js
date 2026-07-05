@@ -42,7 +42,7 @@ function runOrThrow(cmd, args, opts) {
  */
 function worktreeAdd(worktreeDir, branchName, baseRef, cwd) {
   const args = ['-c', 'core.longpaths=true', 'worktree', 'add', worktreeDir, '-b', branchName];
-  if (baseRef) args.push(`origin/${baseRef}`);
+  if (baseRef) args.push('--', `origin/${baseRef}`);
   return runOrThrow('git', args, { cwd, stdio: 'inherit' });
 }
 

@@ -170,7 +170,8 @@ if (existingWorkers.length === 0) {
 // spawnSync の引数配列でシェル注入を回避する
 if (baseBranch) {
   try {
-    const fetchR = spawnSync('git', ['fetch', 'origin', baseBranch], { cwd: workspace, stdio: 'pipe' });
+    // -- でブランチ名が - 始まりでもオプション扱いされないようにする（引数注入対策）
+    const fetchR = spawnSync('git', ['fetch', 'origin', '--', baseBranch], { cwd: workspace, stdio: 'pipe' });
     if (fetchR.status !== 0) {
       throw new Error(`git fetch origin ${baseBranch} 失敗: ${(fetchR.stderr || '').toString().trim()}`);
     }
@@ -178,7 +179,7 @@ if (baseBranch) {
     const cur = (curR.stdout || '').trim();
     if (cur === baseBranch) {
       try {
-        const mergeR = spawnSync('git', ['merge', '--ff-only', `origin/${baseBranch}`], { cwd: workspace, stdio: 'pipe' });
+        const mergeR = spawnSync('git', ['merge', '--ff-only', '--', `origin/${baseBranch}`], { cwd: workspace, stdio: 'pipe' });
         if (mergeR.status !== 0) throw new Error(`merge failed: ${(mergeR.stderr || '').toString().trim()}`);
       } catch (_) { console.warn(`spawn-worker: ローカル ${baseBranch} のff-only更新失敗 — worktreeはorigin/${baseBranch}から分岐します`); }
     }
@@ -201,7 +202,7 @@ try {
   try { rmSync(worktreeDir, { recursive: true, force: true }); }
   catch (e2) { console.warn(`  rmSync: ${e2.message.split('\n')[0]}`); }
   try {
-    const delR = spawnSync('git', ['branch', '-D', workerName], { cwd: workspace, stdio: 'pipe' });
+    const delR = spawnSync('git', ['branch', '-D', '--', workerName], { cwd: workspace, stdio: 'pipe' });
     if (delR.status !== 0) throw new Error(`git branch -D 失敗: ${(delR.stderr || '').toString().trim()}`);
   } catch (e2) { console.warn(`  git branch -D: ${e2.message.split('\n')[0]}`); }
   // リトライ
@@ -248,7 +249,7 @@ const rollbackWorktree = () => {
     catch (e2) { console.warn(`  rollback: rmSync 失敗: ${e2.message.split('\n')[0]}`); }
   }
   try {
-    const delR = spawnSync('git', ['branch', '-d', workerName], { cwd: workspace, stdio: 'pipe' });
+    const delR = spawnSync('git', ['branch', '-d', '--', workerName], { cwd: workspace, stdio: 'pipe' });
     if (delR.status !== 0) throw new Error(`git branch -d 失敗: ${(delR.stderr || '').toString().trim()}`);
   } catch (e) { console.warn(`  rollback: git branch -d 失敗: ${e.message.split('\n')[0]}`); }
 };
