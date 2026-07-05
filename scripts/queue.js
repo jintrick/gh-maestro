@@ -4,6 +4,29 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const DUPLICATE_MESSAGE_ID = 'ERR_DUPLICATE_MESSAGE_ID';
+
+/**
+ * Characters that are not allowed in 'to' (recipient) and messageId fields.
+ * These would allow path traversal (..) or path separator injection.
+ */
+const INVALID_FIELD_RE = /[\/\\:*?"<>|\x00-\x1f]/;
+const PARENT_REF_RE = /(?:^|[\/\\])\.\.(?:$|[\/\\])/;
+
+/**
+ * Validate a queue field value for path-safety.
+ * Throws if the value contains path separators, `..`, or other unsafe chars.
+ */
+function validateField(name, value) {
+  if (!value) return;
+  if (PARENT_REF_RE.test(value)) {
+    throw new Error(`"${name}" に親ディレクトリ参照（..）は許可されません: ${JSON.stringify(value)}`);
+  }
+  if (INVALID_FIELD_RE.test(value)) {
+    throw new Error(`"${name}" に不正な文字が含まれています: ${JSON.stringify(value)}`);
+  }
+}
+
 /**
  * Synchronous sleep using Atomics.wait (available from Node 18).
  * Blocks the current thread for `ms` milliseconds without spinning.
@@ -75,6 +98,35 @@ function enqueue(workspace, { to, from, kind, body, messageId }) {
   if (!to) throw new Error('"to" is required');
   if (!from) throw new Error('"from" is required');
   if (!body) throw new Error('"body" is required');
+
+  validateField('to', to);
+  if (messageId) {
+    validateField('messageId', messageId);
+
+    // 重複 messageId チェック: 全 inbox で同一 messageId が存在しないことを確認する
+    const inboxRoot = path.join(queueDir(workspace), 'inbox');
+    try {
+      if (fs.existsSync(inboxRoot)) {
+        const entries = fs.readdirSync(inboxRoot, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isDirectory() && entry.name !== to) {
+            if (fs.existsSync(path.join(inboxRoot, entry.name, `${messageId}.json`))) {
+              const err = new Error(
+                `messageId "${messageId}" は既に受信者 "${entry.name}" の inbox に存在します。` +
+                `messageId は全受信者を通じて一意でなければなりません。`
+              );
+              err.code = DUPLICATE_MESSAGE_ID;
+              throw err;
+            }
+          }
+        }
+      }
+    } catch (err) {
+      // 安定した識別子（code プロパティ）で判定
+      if (err.code === DUPLICATE_MESSAGE_ID) throw err;
+      // TOCTOU: inboxRoot dir disappeared between existsSync and readdirSync
+    }
+  }
 
   const id = messageId || generateMessageId();
   const qDir = queueDir(workspace);

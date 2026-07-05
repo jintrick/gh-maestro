@@ -10,17 +10,17 @@
 // これは本文中の特殊文字（"@" 等）がEnterキー入力を消費し、メッセージが未送信のまま
 // composerに残る問題を構造的に避けるため（詳細は message-file.js のコメント参照）。
 //
+// pane 解決・cwd 検証・pane ロック・Enter 送出は共有モジュール pane-notify.js に委譲。
+//
 // workspace の解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索
 
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('./child-process');
 const { readFileSync, existsSync } = require('fs');
-const { sendEnter } = require('./send-enter');
 const { normalizeWorkerEntry } = require('./worker-entry');
-const { resolveAgentConfig } = require('./resolve-agent');
-const { withPaneLock } = require('./pane-lock');
 const { writeMessageFile, pruneOldMessageFiles } = require('./message-file');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
+const { notifyPane } = require('./pane-notify');
 
 const USAGE = `send-pane.js — 起動中のワーカー/orchestrator のペインにメッセージを送る
 
@@ -40,11 +40,15 @@ if (args.includes('--help') || args.includes('-h')) {
   console.log(USAGE);
   process.exit(0);
 }
-const wsIdx = args.indexOf('--workspace');
-const workspaceArg = (wsIdx !== -1 && args[wsIdx + 1]) ? args[wsIdx + 1] : null;
 
-// --workspace とその値を除いた残りを解析
-const rest = args.filter((_, i) => i !== wsIdx && i !== wsIdx + 1);
+const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace']);
+
+if (exitFlagMiss) {
+  console.error('send-pane: --workspace には値が必要です。');
+  console.error(USAGE);
+  process.exit(1);
+}
+
 const [name, ...msgParts] = rest;
 const message = msgParts.join(' ');
 
@@ -53,38 +57,17 @@ if (!name || !message) {
   process.exit(1);
 }
 
-// CWD から上方に遡って .gh-maestro/workers.json を探す
-function findWorkspaceFromCwd() {
-  let dir = process.cwd();
-  while (true) {
-    const candidate = path.join(dir, '.gh-maestro', 'workers.json');
-    if (existsSync(candidate)) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
+const workspace = resolveWorkspace(values['--workspace']);
+if (!workspace) {
+  console.error('send-pane: ワークスペースを解決できません。');
+  process.exit(1);
 }
 
-const workspace = process.env.GH_MAESTRO_WORKSPACE || workspaceArg || findWorkspaceFromCwd();
-
-// workers.json のパスを解決
-const workersJson = workspace
-  ? path.resolve(workspace, '.gh-maestro', 'workers.json')
-  : null;
-
-let paneId = name;
+// 送信者を逆引き: 現在のpane-idがworkersのどのエントリか
 let senderName = null;
-let targetAgentId = null;
-
-if (workersJson && existsSync(workersJson)) {
+const workersJson = path.resolve(workspace, '.gh-maestro', 'workers.json');
+if (existsSync(workersJson)) {
   const workers = JSON.parse(readFileSync(workersJson, 'utf8'));
-  if (workers[name]) {
-    const entry = normalizeWorkerEntry(workers[name]);
-    paneId = entry.paneId;
-    targetAgentId = entry.agentId;
-  }
-
-  // 送信者を逆引き: 現在のpane-idがworkersのどのエントリか
   const myPaneId = String(process.env.WEZTERM_PANE ?? '');
   if (myPaneId) {
     for (const [k, v] of Object.entries(workers)) {
@@ -93,75 +76,6 @@ if (workersJson && existsSync(workersJson)) {
   }
 }
 
-// ── pane の実在 & cwd 検証 ───────────────────────────────────────────
-
-const expectedCwd = name === 'orchestrator'
-  ? workspace
-  : path.resolve(workspace, '.gh-maestro', 'worktrees', name);
-
-const WEZ_TIMEOUT_MS = 6000;
-// WEZTERM_MOCK: テスト専用の差し替え口。node で実行するモックスクリプトのパスを指定する。
-// 本番では未設定なので実際の wezterm バイナリを呼ぶ。
-const WEZTERM_MOCK = process.env.WEZTERM_MOCK || null;
-function wez(...a) {
-  return WEZTERM_MOCK
-    ? spawnSync(process.execPath, [WEZTERM_MOCK, ...a], { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS })
-    : spawnSync('wezterm', a, { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS });
-}
-
-(function verifyPane() {
-  const listResult = wez('cli', 'list', '--format', 'json');
-  if (listResult.status !== 0) {
-    process.stderr.write(`send-pane: wezterm cli list 失敗 (exit ${listResult.status}): ${listResult.stderr?.trim()}\n`);
-    process.exit(1);
-  }
-  let panes;
-  try { panes = JSON.parse(listResult.stdout); } catch {
-    process.stderr.write(`send-pane: wezterm cli list の出力パース失敗\n`);
-    process.exit(1);
-  }
-
-  const normalizedExpected = expectedCwd.replace(/\\/g, '/');
-  function normalizeCwd(raw) {
-    let p;
-    try {
-      p = decodeURIComponent(new URL(raw).pathname);
-    } catch {
-      p = decodeURIComponent(raw.replace(/^file:\/+/, '/'));
-    }
-    return p
-      .replace(/^\/([a-zA-Z]:)/, '$1')  // /C:/... → C:/...（非Windowsの /home/... は無変化）
-      .replace(/\/$/, '')
-      .replace(/\\/g, '/');
-  }
-  function cwdMatches(p) {
-    return normalizeCwd(p.cwd || '') === normalizedExpected;
-  }
-
-  // 1. pane_id で検索
-  let target = panes.find(p => String(p.pane_id) === String(paneId));
-  if (target && cwdMatches(target)) {
-    // pane_id も cwd も一致 → OK
-    return;
-  }
-
-  // 2. pane_id は見つかったが cwd が不一致 → pane_id が別ペインに再利用された可能性
-  if (target) {
-    process.stderr.write(`send-pane: pane_id ${paneId} の cwd が期待と異なります（再利用の可能性）。cwd で再検索します。\n`);
-  }
-
-  // 3. cwd で全ペインを検索
-  const byCwd = panes.find(p => cwdMatches(p));
-  if (byCwd) {
-    process.stderr.write(`send-pane: cwd 一致するペインを発見: pane_id ${paneId} → ${byCwd.pane_id}\n`);
-    paneId = String(byCwd.pane_id);
-    return;
-  }
-
-  process.stderr.write(`send-pane: ${name} のペインが見つかりません（pane_id=${paneId}, cwd=${normalizedExpected}）\n`);
-  process.exit(1);
-})();
-
 // 送信者名をメッセージ先頭に付与
 const prefix = senderName === 'orchestrator'
   ? 'orchestratorです。'
@@ -169,30 +83,13 @@ const prefix = senderName === 'orchestrator'
 
 // ── 送信 ────────────────────────────────────────────────────────────────
 
-function sendMessage(targetPaneId, text) {
-  const flat = text.replace(/\n+/g, ' ');
-  const sendResult = wez('cli', 'send-text', '--pane-id', targetPaneId, '--no-paste', flat);
-  if (sendResult.status !== 0) {
-    process.stderr.write(`send-pane: wezterm send-text failed (exit ${sendResult.status}): ${sendResult.stderr?.trim()}\n`);
-    return false;
-  }
-  const terminator = resolveAgentConfig(targetAgentId)?.enterSequence;
-  sendEnter(targetPaneId, { send: wez, terminator });
-  return true;
-}
-
 // 本文は特殊文字（"@" 等）によるEnter消費を避けるためファイルへ退避し、
 // pane には固定テンプレートの短文（ファイルを読むよう促すだけ）を送る。
-const messagesDir = path.join(workspace || os.tmpdir(), '.gh-maestro', 'messages');
+const messagesDir = path.join(workspace, '.gh-maestro', 'messages');
 const messageFile = writeMessageFile(messagesDir, prefix + message);
 pruneOldMessageFiles(messagesDir, 24 * 60 * 60 * 1000);
 const notification = `${prefix}新着メッセージがあります。${messageFile} を読んでください。`;
 
-// 同一paneへの並行送信（例: 複数ワーカーのpollerが同時にorchestratorへ報告する）による
-// 通知/Enterの入れ替わりを防ぐため、pane単位でロックしてから送信する。
-const lockDir = workspace
-  ? path.join(workspace, '.gh-maestro', 'locks')
-  : path.join(os.tmpdir(), 'gh-maestro-send-pane-locks');
-const lockKey = String(paneId).replace(/[^a-zA-Z0-9_-]/g, '_');
-const ok = withPaneLock(lockDir, lockKey, 15000, () => sendMessage(paneId, notification));
+// pane 解決・cwd 検証・ロック・Enter 送出は pane-notify.js に委譲
+const ok = notifyPane(workspace, name, notification);
 process.exit(ok ? 0 : 1);
