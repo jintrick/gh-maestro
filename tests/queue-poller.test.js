@@ -12,8 +12,16 @@ const SEND_SCRIPT = path.join(__dirname, '..', 'scripts', 'queue-send.js');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
+  const result = fn(dir);
+  // async コールバック: 完了後に削除する
+  if (result instanceof Promise) {
+    return result.finally(() => {
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+  }
+  // 同期コールバック: finally で削除
   try {
-    return fn(dir);
+    return result;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
