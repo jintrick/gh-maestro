@@ -277,18 +277,24 @@ function runPoller(workspace) {
     // mux 到達性の自己検証: wezterm cli list が連続失敗するなら旧 mux に
     // 取り残された poller と判断し、lease を手放して自主 exit する。
     // 次の enqueue の lazy-start が健全な poller を起動する。
-    if (!checkMuxReachable()) {
-      muxConsecutiveFailures++;
-      process.stderr.write(
-        `[poller] mux reachability check failed (${muxConsecutiveFailures}/${MAX_MUX_CHECK_FAILURES})\n`
-      );
-      if (muxConsecutiveFailures >= MAX_MUX_CHECK_FAILURES) {
-        process.stderr.write('[poller] mux unreachable: releasing lease and exiting\n');
-        releasePoller(workspace);
-        process.exit(0);
+    //
+    // getMuxId() が null の環境（WezTerm 外、CI/CD 等）では mux-check を
+    // スキップする。WEZTERM_UNIX_SOCKET が無い環境では wezterm cli list が
+    // 常に失敗するため、チェックすると正常な poller が誤って自殺してしまう。
+    if (getMuxId() !== null) {
+      if (!checkMuxReachable()) {
+        muxConsecutiveFailures++;
+        process.stderr.write(
+          `[poller] mux reachability check failed (${muxConsecutiveFailures}/${MAX_MUX_CHECK_FAILURES})\n`
+        );
+        if (muxConsecutiveFailures >= MAX_MUX_CHECK_FAILURES) {
+          process.stderr.write('[poller] mux unreachable: releasing lease and exiting\n');
+          releasePoller(workspace);
+          process.exit(0);
+        }
+      } else {
+        muxConsecutiveFailures = 0;
       }
-    } else {
-      muxConsecutiveFailures = 0;
     }
 
     // acked prune を定期的に実行（24h 保持）
