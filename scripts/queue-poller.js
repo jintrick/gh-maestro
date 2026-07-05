@@ -373,9 +373,10 @@ function runPoller(workspace) {
       if (notifyIds.length > 0) {
         const wakeSignal = buildWakeSignal();
         try {
-          notifyPane(workspace, recipient, wakeSignal);
-          // 通知成功 → タイムスタンプ更新（失敗したら次スキャンで再通知）
-          for (const mid of notifyIds) lastNotifiedAt.set(mid, now);
+          const ok = notifyPane(workspace, recipient, wakeSignal);
+          if (ok) {
+            for (const mid of notifyIds) lastNotifiedAt.set(mid, now);
+          }
         } catch (err) {
           process.stderr.write(`[poller] ${recipient} への通知失敗: ${err.message}\n`);
         }
