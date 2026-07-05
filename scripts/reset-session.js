@@ -14,6 +14,7 @@ const { existsSync, readFileSync, writeFileSync, rmSync,
         readdirSync, statSync, renameSync, unlinkSync } = require('fs');
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
+const { listPending } = require('./queue');
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
 
@@ -383,14 +384,51 @@ if (existsSync(pollerJsonPath)) {
   log('poller.json なし。スキップ。');
 }
 
+// ── pending 残数警告 ────────────────────────────────────────────────
+
+log('pending メッセージを確認します...');
+let pendingBeforeReset = [];
+try {
+  pendingBeforeReset = listPending(workspace);
+} catch (e) {
+  warn(`pending 一覧の取得に失敗しました: ${e.message}`);
+}
+if (pendingBeforeReset.length > 0) {
+  warn(`pending メッセージが ${pendingBeforeReset.length} 件残っています。これらは配信されずに失われます。`);
+}
+
+// ── queue ディレクトリの安全掃除 ────────────────────────────────────
+
 log('キュー状態を掃除します...');
 const queueDir = resolve(workspace, '.gh-maestro', 'queue');
 if (existsSync(queueDir)) {
-  try {
-    rmSync(queueDir, { recursive: true, force: true });
+  // 1. junction を先に除去（共有 junction を辿って中身を削除しないため）
+  unlinkJunctions(queueDir, warn);
+
+  // 2. EBUSY/EPERM リトライ付きで削除
+  let removed = false;
+  for (let attempt = 0; attempt <= 5 && !removed; attempt++) {
+    try {
+      rmSync(queueDir, { recursive: true, force: true });
+      removed = true;
+    } catch (e) {
+      if (e.code === 'ENOENT') {
+        // TOCTOU: 別プロセスが先に削除した → 成功扱い
+        removed = true;
+      } else if (e.code === 'EBUSY' || e.code === 'EPERM') {
+        if (attempt < 5) {
+          sleep(20);
+        } else {
+          warn(`queue/ 削除失敗（リトライ超過）: ${e.message}`);
+        }
+      } else {
+        warn(`queue/ 削除失敗: ${e.message}`);
+        break;
+      }
+    }
+  }
+  if (removed) {
     log('queue/ を削除しました。');
-  } catch (e) {
-    warn(`queue/ 削除失敗: ${e.message}`);
   }
 } else {
   log('queue/ なし。スキップ。');

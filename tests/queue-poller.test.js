@@ -314,3 +314,55 @@ test('既に poller が稼働中なら lazy-start は2つ目を起動しない',
     }
   });
 });
+
+// ── poller-state 永続化（ユニットテスト: 実 spawn なし） ────────────────
+
+const { pollerStatePath, writeLastNotifiedState, readLastNotifiedState } = require('../scripts/queue-poller');
+
+test('writeLastNotifiedState + readLastNotifiedState のラウンドトリップ', () => {
+  withTempDir(workspace => {
+    const statePath = pollerStatePath(workspace);
+    assert.ok(statePath.endsWith('poller-state.json'));
+
+    // 書き込み
+    const map = new Map();
+    map.set('msg-1', 1700000000000);
+    map.set('msg-2', 1700000001000);
+    writeLastNotifiedState(workspace, map);
+
+    // 読み取り
+    const state = readLastNotifiedState(workspace);
+    assert.ok(state, 'state が読み取れるべき');
+    assert.ok(state.lastNotifiedAt, 'lastNotifiedAt が存在するべき');
+    assert.equal(state.lastNotifiedAt['msg-1'], 1700000000000);
+    assert.equal(state.lastNotifiedAt['msg-2'], 1700000001000);
+  });
+});
+
+test('readLastNotifiedState が poller-state.json 不在時に null を返す', () => {
+  withTempDir(workspace => {
+    const state = readLastNotifiedState(workspace);
+    assert.equal(state, null);
+  });
+});
+
+test('readLastNotifiedState が壊れた JSON で null を返す', () => {
+  withTempDir(workspace => {
+    const queueDir = path.join(workspace, '.gh-maestro', 'queue');
+    fs.mkdirSync(queueDir, { recursive: true });
+    fs.writeFileSync(path.join(queueDir, 'poller-state.json'), 'not json', 'utf8');
+
+    const state = readLastNotifiedState(workspace);
+    assert.equal(state, null);
+  });
+});
+
+test('writeLastNotifiedState が空 Map を書き込める', () => {
+  withTempDir(workspace => {
+    writeLastNotifiedState(workspace, new Map());
+
+    const state = readLastNotifiedState(workspace);
+    assert.ok(state, 'state が読み取れるべき');
+    assert.deepEqual(state.lastNotifiedAt, {});
+  });
+});
