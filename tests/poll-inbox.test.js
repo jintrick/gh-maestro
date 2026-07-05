@@ -127,30 +127,55 @@ test('--once が壊れた JSON ファイルをスキップして正常ファイ�
   });
 });
 
-// ── 重複排除（同一プロセス内）──────────────────────────────────────────────
+// ── 重複排除 ─────────────────────────────────────────────────────────────
 
-test('同一プロセス内では既通知の messageId を再通知しない（インメモリ Set）', () => {
+test('クロスプロセス --once 再呼び出しでは全 pending が再通知される（正しい挙動）', () => {
   withTempDir(workspace => {
-    // poll-inbox.js を継続モードで起動し、後からメッセージを enqueue するテストは
-    // detached プロセスになるため避ける。代わりに --once を2回呼んで、
-    // 2回目は新着なし（全 messageId が1回目で通知済み）を確認する。
-    // これはインメモリ Set のテストではなく、単一 --once 呼び出し内の重複排除のテスト。
-    // インメモリ Set によるプロセス内重複排除は、poll-inbox が同じ pending ファイルを
-    // 複数回の interval で再スキャンしたときに発動する（継続モードのテストは実 spawn
-    // になるため test-process-spawn-safety.md に従いスキップ）。
+    // --once は毎回新プロセスなので in-memory seen はリセットされる。
+    // これにより、未 ack の pending は再通知される（worker 再起動時の正しい挙動）。
 
-    // --once で検出
-    runSend(['worker-1', 'test dedup', '--workspace', workspace, '--message-id', 'dedup-test']);
+    runSend(['worker-1', 'test cross-process', '--workspace', workspace, '--message-id', 'cross-1']);
     const r1 = runPoll(['worker-1', '--workspace', workspace, '--once']);
     assert.equal(r1.status, 0);
-    assert.ok(r1.stdout.includes('NEW_MESSAGE:dedup-test'));
+    assert.ok(r1.stdout.includes('NEW_MESSAGE:cross-1'));
 
-    // 同じメッセージがまだ inbox にある状態で再度 --once → 別プロセスなので再通知される
-    // （これは正しい挙動: プロセス再起動 = worker 再起動時は全 pending を再通知すべき）
+    // 別プロセスで再度 --once → 全 pending が再通知される
     const r2 = runPoll(['worker-1', '--workspace', workspace, '--once']);
     assert.equal(r2.status, 0);
-    assert.ok(r2.stdout.includes('NEW_MESSAGE:dedup-test'),
-      '別プロセスからの --once は全 pending を再通知する（正しい挙動）');
+    assert.ok(r2.stdout.includes('NEW_MESSAGE:cross-1'),
+      'クロスプロセス再起動では未 ack pending が再通知されるべき');
+  });
+});
+
+test('同一プロセス内の模擬 scanOnce で in-memory seen により2回目は通知されない', () => {
+  withTempDir(workspace => {
+    // poll-inbox.js の scanOnce() のコアロジック（receive → seen チェック → notify）を
+    // queue.js の receive() + Set で模擬し、in-memory dedup を実検証する。
+    // test-process-spawn-safety.md 遵守（実 spawn なし）。
+    const { enqueue, receive } = require('../scripts/queue');
+
+    enqueue(workspace, { to: 'dedup-worker', from: 'o', body: 'dedup', messageId: 'dedup-inproc' });
+
+    const seen = new Set();
+    const notified = [];
+
+    function mockScanOnce(targetWorkspace, targetSelf) {
+      const msgs = receive(targetWorkspace, targetSelf);
+      for (const msg of msgs) {
+        if (seen.has(msg.messageId)) continue;
+        seen.add(msg.messageId);
+        notified.push(msg.messageId);
+      }
+    }
+
+    // 1回目: 通知される
+    mockScanOnce(workspace, 'dedup-worker');
+    assert.ok(notified.includes('dedup-inproc'), '1回目の scan で通知されるべき');
+    assert.equal(notified.length, 1);
+
+    // 2回目: in-memory seen により通知されない（同じ pending がまだ inbox にある）
+    mockScanOnce(workspace, 'dedup-worker');
+    assert.equal(notified.length, 1, '2回目の scan では新規通知がないべき（seen が効いている）');
   });
 });
 

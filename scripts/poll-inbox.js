@@ -13,14 +13,18 @@
 // これは正しい挙動: 未処理メッセージは再通知されるべきであり、ack 済みは
 // inbox に存在しないため再通知されない。
 //
+// inbox スキャンは queue.js の receive() に委譲している（DRY）。
+// receive() が recipient 名の path-safety 検証を担うため、poll-inbox.js 側で
+// 別途 validate する必要はない（#25 purgeInbox と同型の防御）。
+//
 // workspace resolution order:
 //   GH_MAESTRO_WORKSPACE env > --workspace arg > CWD upward search
 
 'use strict';
 
-const fs = require('fs');
 const path = require('path');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
+const { receive } = require('./queue');
 
 const DEFAULT_INTERVAL_SEC = 2;
 
@@ -43,6 +47,7 @@ Output (stdout):
 inbox/<self>/ を定期スキャンし、未通知の pending を検出する。
 既に通知済みの messageId は同一プロセス内では再通知しない（インメモリ Set で管理）。
 再起動時は全 pending が再通知される（ack 済みは inbox に無いため通知されない）。
+self 名は queue.js の validateField で path-safety が検証される（#25 同型）。
 
 worker の通信ループ:
   1. Monitor 等で poll-inbox.js を起動
@@ -86,10 +91,15 @@ if (!workspace) {
 
 const intervalMs = (parseInt(values['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
 
-// ── inbox パス ──────────────────────────────────────────────────────────────
+// ── self 名の検証（queue.js receive() の validateField に委譲） ────────────
 
-function inboxDir() {
-  return path.join(workspace, '.gh-maestro', 'queue', 'inbox', self);
+// receive() は recipient 名の path-safety を検証する。
+// 起動時に1回呼んで名前を検証し、不正なら即座に exit する。
+try {
+  receive(workspace, self);
+} catch (err) {
+  process.stderr.write(`poll-inbox: ${err.message}\n`);
+  process.exit(1);
 }
 
 // ── メイン ──────────────────────────────────────────────────────────────────
@@ -98,41 +108,27 @@ const seen = new Set();
 
 /**
  * inbox を1回スキャンし、未通知の pending を stdout に出力する。
- * 壊れた JSON はスキップ（listPending/receive と同様のベストエフォート）。
- * inbox ディレクトリが存在しない場合は何も出力しない。
+ *
+ * queue.js の receive() に inbox 読み取りを委譲している（DRY）。
+ * receive() が JSON parse / ENOENT / TOCTOU / corrupted file skip を
+ * すべて処理するため、poll-inbox.js 側で再実装しない。
+ * seen.add は receive() が正常にパースしたメッセージに対してのみ実行される
+ * ため、破損ファイルで誤って seen に入ることはない。
  */
 function scanOnce() {
-  const dir = inboxDir();
-
-  let files;
+  let messages;
   try {
-    if (!fs.existsSync(dir)) return;
-    files = fs.readdirSync(dir);
-  } catch {
-    // dir disappeared between existsSync and readdirSync (TOCTOU) — safe to skip
+    messages = receive(workspace, self);
+  } catch (err) {
+    // receive() の validateField は起動時に通過済みのため、ここでの throw は
+    // TOCTOU（inbox ディレクトリがロックされる等）のみ。安全に skip する。
     return;
   }
 
-  for (const file of files) {
-    if (!file.endsWith('.json')) continue;
-    const messageId = file.slice(0, -5); // strip .json
-    if (seen.has(messageId)) continue;
-
-    const filePath = path.join(dir, file);
-
-    // ファイルが完全な JSON か検証する。壊れたファイルで seen.add してしまうと、
-    // その後ファイルが正常化しても同一プロセス内で二度と通知されないため、
-    // seen.add は JSON パース成功後に実行する。
-    try {
-      const content = fs.readFileSync(filePath, 'utf8');
-      JSON.parse(content);
-    } catch {
-      // unparseable or unreadable — skip, don't add to seen (retry next scan)
-      continue;
-    }
-
-    seen.add(messageId);
-    process.stdout.write(`NEW_MESSAGE:${messageId}\n`);
+  for (const msg of messages) {
+    if (seen.has(msg.messageId)) continue;
+    seen.add(msg.messageId);
+    process.stdout.write(`NEW_MESSAGE:${msg.messageId}\n`);
   }
 }
 
@@ -152,12 +148,17 @@ process.on('SIGTERM', cleanup);
 
 // ── 実行 ────────────────────────────────────────────────────────────────────
 
-if (onceMode) {
+if (require.main === module) {
+  if (onceMode) {
+    scanOnce();
+    process.exit(0);
+  }
+
+  // 継続ポーリング: 初回スキャンを即実行し、その後 interval で定期スキャン
   scanOnce();
-  process.exit(0);
+  intervalHandle = setInterval(scanOnce, intervalMs);
+  // interval は unref しない — これがイベントループを維持し、プロセスが存続する
 }
 
-// 継続ポーリング: 初回スキャンを即実行し、その後 interval で定期スキャン
-scanOnce();
-intervalHandle = setInterval(scanOnce, intervalMs);
-// interval は unref しない — これがイベントループを維持し、プロセスが存続する
+// テスト用 export: scanOnce を同一プロセスで複数回呼び in-memory dedup を検証可能にする
+module.exports = { scanOnce };

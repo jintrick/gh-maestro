@@ -22,7 +22,14 @@ orchestrator からの返答を含むすべてのメッセージは、自分の 
 受動的に届くのを待つのではなく、以下の仕組みで自分から取りに行く。
 wezterm send-text による通知はレイテンシ最適化のヒントに過ぎず、pull が唯一の配送根拠である。
 
-{{INBOX_POLL_MECHANISM}}
+investigator の既定エージェント（reasonix）は bash 実行不可のため、
+他のワーカーが使う poll-inbox.js + Monitor の経路を使えない（#32 で対応予定）。
+代わりに以下の手順で inbox を監視する：
+1. 通知（wezterm send-text）または自身のファイル読み取り機能で新着を検知する
+2. `.gh-maestro/queue/inbox/$WORKER_NAME/` 配下の .json ファイルを読んで内容を把握する
+3. メッセージを処理する
+4. ack する（下記コマンド）
+※ #32 解決後は poll-inbox.js + receive() による能動 pull に統一される
 
 処理後は必ず ack すること（ack = 読んで受理した。タスク完了ではない）。ack が配送の唯一の根拠：
 
