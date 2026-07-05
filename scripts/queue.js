@@ -108,9 +108,15 @@ function enqueue(workspace, { to, from, kind, body, messageId }) {
  * Unparseable files are silently skipped.
  */
 function readMessagesFromDir(dir) {
-  if (!fs.existsSync(dir)) return [];
+  let files;
+  try {
+    if (!fs.existsSync(dir)) return [];
+    files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  } catch {
+    // dir disappeared between existsSync and readdirSync (TOCTOU)
+    return [];
+  }
 
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
   const messages = [];
   for (const file of files) {
     try {
@@ -163,31 +169,45 @@ function ack(workspace, messageId) {
   const ackedRoot = path.join(queueDir(workspace), 'acked');
 
   // Search all inbox directories for the message
-  if (fs.existsSync(inboxRoot)) {
-    const entries = fs.readdirSync(inboxRoot, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const inboxFile = path.join(inboxRoot, entry.name, `${messageId}.json`);
-      if (fs.existsSync(inboxFile)) {
-        const ackedDir = path.join(ackedRoot, entry.name);
-        ensureDir(ackedDir);
-        const ackedFile = path.join(ackedDir, `${messageId}.json`);
-        withRetry(() => { fs.renameSync(inboxFile, ackedFile); });
-        return true;
-      }
-    }
-  }
-
-  // Not found in any inbox — check if already acked
-  if (fs.existsSync(ackedRoot)) {
-    const entries = fs.readdirSync(ackedRoot, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        if (fs.existsSync(path.join(ackedRoot, entry.name, `${messageId}.json`))) {
+  try {
+    if (fs.existsSync(inboxRoot)) {
+      const entries = fs.readdirSync(inboxRoot, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const inboxFile = path.join(inboxRoot, entry.name, `${messageId}.json`);
+        if (fs.existsSync(inboxFile)) {
+          const ackedDir = path.join(ackedRoot, entry.name);
+          ensureDir(ackedDir);
+          const ackedFile = path.join(ackedDir, `${messageId}.json`);
+          try {
+            withRetry(() => { fs.renameSync(inboxFile, ackedFile); });
+          } catch (err) {
+            // ENOENT: another process already acked this message — treat as success
+            if (err.code === 'ENOENT') return true;
+            throw err;
+          }
           return true;
         }
       }
     }
+  } catch {
+    // TOCTOU: inboxRoot dir disappeared between existsSync and readdirSync
+  }
+
+  // Not found in any inbox — check if already acked
+  try {
+    if (fs.existsSync(ackedRoot)) {
+      const entries = fs.readdirSync(ackedRoot, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          if (fs.existsSync(path.join(ackedRoot, entry.name, `${messageId}.json`))) {
+            return true;
+          }
+        }
+      }
+    }
+  } catch {
+    // TOCTOU: ackedRoot dir disappeared
   }
 
   return false;
@@ -207,21 +227,34 @@ function pruneAcked(workspace, maxAgeMs) {
   if (!fs.existsSync(ackedRoot)) return;
 
   const now = Date.now();
-  const entries = fs.readdirSync(ackedRoot, { withFileTypes: true });
+  let entries;
+  try {
+    entries = fs.readdirSync(ackedRoot, { withFileTypes: true });
+  } catch {
+    // TOCTOU: ackedRoot disappeared between existsSync and readdirSync
+    return;
+  }
+
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const dirPath = path.join(ackedRoot, entry.name);
-    const files = fs.readdirSync(dirPath);
-    for (const file of files) {
-      try {
-        const filePath = path.join(dirPath, file);
-        const stat = fs.statSync(filePath);
-        if (stat.isFile() && (now - stat.mtimeMs) > maxAgeMs) {
-          fs.unlinkSync(filePath);
+
+    // Per-recipient processing: failures are best-effort, never propagate
+    try {
+      const files = fs.readdirSync(dirPath);
+      for (const file of files) {
+        try {
+          const filePath = path.join(dirPath, file);
+          const stat = fs.statSync(filePath);
+          if (stat.isFile() && (now - stat.mtimeMs) > maxAgeMs) {
+            fs.unlinkSync(filePath);
+          }
+        } catch {
+          // best effort — skip unreadable or already-deleted files
         }
-      } catch {
-        // best effort — skip unreadable or already-deleted files
       }
+    } catch {
+      // best effort — skip unreachable recipient directories
     }
   }
 }
