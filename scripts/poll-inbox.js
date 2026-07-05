@@ -117,20 +117,21 @@ function scanOnce() {
     if (!file.endsWith('.json')) continue;
     const messageId = file.slice(0, -5); // strip .json
     if (seen.has(messageId)) continue;
-    seen.add(messageId);
 
-    // ファイルが完全な JSON か簡易チェック（parse せずとも .json 拡張子で十分だが、
-    // 壊れたファイルを通知しないために存在確認と簡易バリデーションを行う）
     const filePath = path.join(dir, file);
+
+    // ファイルが完全な JSON か検証する。壊れたファイルで seen.add してしまうと、
+    // その後ファイルが正常化しても同一プロセス内で二度と通知されないため、
+    // seen.add は JSON パース成功後に実行する。
     try {
-      // 読み取り可能であることの確認（壊れたファイルは JSON.parse が失敗する）
       const content = fs.readFileSync(filePath, 'utf8');
-      JSON.parse(content); // 完全性チェック — 壊れていれば skip
+      JSON.parse(content);
     } catch {
-      // unparseable or unreadable — skip, don't notify
+      // unparseable or unreadable — skip, don't add to seen (retry next scan)
       continue;
     }
 
+    seen.add(messageId);
     process.stdout.write(`NEW_MESSAGE:${messageId}\n`);
   }
 }

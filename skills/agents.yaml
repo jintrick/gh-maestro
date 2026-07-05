@@ -43,10 +43,12 @@ agents:
         `invoke_subagent` で inbox ポーリングサブエージェントを起動し、完了時に `send_message` で親へ通知させる。このサブエージェントはセッション終了まで永続的に実行する。
 
         サブエージェントへの指示：
-        「以下のループを実行する:
+        「以下のループを実行する。NOTIFIED_IDS としてインメモリの Set で通知済み messageId を管理する。
+        --once は実行毎に新プロセスになるため poll-inbox.js 内のインメモリ Set が効かない。
+        重複通知を防ぐのはサブエージェント側の責務である。
         1. `node "{{SCRIPTS_PATH}}/poll-inbox.js" $WORKER_NAME --workspace $WORKSPACE --once` を {{INBOX_POLL_INTERVAL_SECONDS}}秒おきに実行する
-        2. 出力に `NEW_MESSAGE:<messageId>` があれば `send_message` で親に通知する
-        3. 新着がなければポーリング間隔を1.5倍に伸ばす（最大300秒）。あればリセットする
+        2. 出力から `NEW_MESSAGE:<messageId>` を抽出し、NOTIFIED_IDS に無いものだけ `send_message` で親に通知して NOTIFIED_IDS に追加する。既に通知済みの messageId はスキップする
+        3. 新着がなければポーリング間隔を1.5倍に伸ばす（最大300秒）。新着があればリセットする
         ※ このサブエージェントはセッション終了まで継続する」
 
         親として届く通知の処理：
