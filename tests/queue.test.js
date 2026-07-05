@@ -273,8 +273,9 @@ test('purgeInbox が指定 recipient の pending メッセージを全削除す�
     const inboxDir = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1');
     assert.equal(countJsonFiles(inboxDir), 2);
 
-    const deleted = purgeInbox(workspace, 'worker-1');
-    assert.equal(deleted, 2);
+    const result = purgeInbox(workspace, 'worker-1');
+    assert.equal(result.purged, 2);
+    assert.equal(result.failed, 0);
     assert.equal(countJsonFiles(inboxDir), 0);
   });
 });
@@ -284,7 +285,9 @@ test('purgeInbox が他の recipient のメッセージに影響しない', () =
     enqueue(workspace, { to: 'worker-1', from: 'o', body: 'msg1', messageId: 'id1' });
     enqueue(workspace, { to: 'worker-2', from: 'o', body: 'msg2', messageId: 'id2' });
 
-    purgeInbox(workspace, 'worker-1');
+    const result = purgeInbox(workspace, 'worker-1');
+    assert.equal(result.purged, 1);
+    assert.equal(result.failed, 0);
 
     const inboxDir1 = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1');
     const inboxDir2 = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-2');
@@ -293,23 +296,31 @@ test('purgeInbox が他の recipient のメッセージに影響しない', () =
   });
 });
 
-test('purgeInbox が存在しない recipient に対して 0 を返す（冪等）', () => {
+test('purgeInbox が存在しない recipient に対して {purged:0, failed:0} を返す（冪等）', () => {
   withTempDir(workspace => {
-    assert.equal(purgeInbox(workspace, 'nonexistent'), 0);
+    let result = purgeInbox(workspace, 'nonexistent');
+    assert.equal(result.purged, 0);
+    assert.equal(result.failed, 0);
     // 2回呼んでも安全
-    assert.equal(purgeInbox(workspace, 'nonexistent'), 0);
+    result = purgeInbox(workspace, 'nonexistent');
+    assert.equal(result.purged, 0);
+    assert.equal(result.failed, 0);
   });
 });
 
-test('purgeInbox が空の inbox に対して 0 を返す（冪等）', () => {
+test('purgeInbox が空の inbox に対して {purged:0, failed:0} を返す（冪等）', () => {
   withTempDir(workspace => {
     // ディレクトリは存在するが空
     const inboxDir = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'empty-worker');
     fs.mkdirSync(inboxDir, { recursive: true });
 
-    assert.equal(purgeInbox(workspace, 'empty-worker'), 0);
+    let result = purgeInbox(workspace, 'empty-worker');
+    assert.equal(result.purged, 0);
+    assert.equal(result.failed, 0);
     // 再度呼んでも安全
-    assert.equal(purgeInbox(workspace, 'empty-worker'), 0);
+    result = purgeInbox(workspace, 'empty-worker');
+    assert.equal(result.purged, 0);
+    assert.equal(result.failed, 0);
   });
 });
 
@@ -335,6 +346,26 @@ test('purgeInbox がパス区切り文字を含む recipient を拒否する', (
   });
 });
 
+test('purgeInbox が削除失敗を failed カウントとして返す', () => {
+  withTempDir(workspace => {
+    const inboxDir = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1');
+    fs.mkdirSync(inboxDir, { recursive: true });
+
+    // 通常のファイル（削除可能）
+    enqueue(workspace, { to: 'worker-1', from: 'o', body: 'ok', messageId: 'ok-id' });
+
+    // ディレクトリを .json として配置 → unlinkSync はディレクトリを削除できない
+    fs.mkdirSync(path.join(inboxDir, 'stuck.json'));
+
+    const result = purgeInbox(workspace, 'worker-1');
+    assert.equal(result.purged, 1, '通常ファイルは purged にカウント');
+    assert.equal(result.failed, 1, '削除不能ファイルは failed にカウント');
+
+    // stuck.json ディレクトリは残っている
+    assert.ok(fs.existsSync(path.join(inboxDir, 'stuck.json')));
+  });
+});
+
 test('purgeInbox が既に ack 済みのメッセージに影響しない（acked には触れない）', () => {
   withTempDir(workspace => {
     enqueue(workspace, { to: 'worker-1', from: 'o', body: 'msg1', messageId: 'id1' });
@@ -348,8 +379,9 @@ test('purgeInbox が既に ack 済みのメッセージに影響しない（acke
     assert.equal(countJsonFiles(inboxDir), 1);
 
     // purgeInbox で inbox の未処理が削除される
-    const deleted = purgeInbox(workspace, 'worker-1');
-    assert.equal(deleted, 1);
+    const result = purgeInbox(workspace, 'worker-1');
+    assert.equal(result.purged, 1);
+    assert.equal(result.failed, 0);
 
     // acked の id1 はそのまま
     const ackedDir = path.join(workspace, '.gh-maestro', 'queue', 'acked', 'worker-1');
@@ -380,5 +412,50 @@ test('enqueue → listPending → ack → listPending の一連が正しく動�
 
     // 全件 pending は 2 件
     assert.equal(listPending(workspace).length, 2);
+  });
+});
+
+// ── remove-worker.js エントリポイント経由の掃除 ──────────────────────────
+
+const { spawnSync } = require('child_process');
+
+test('remove-worker.js が inbox 掃除失敗時に warn を出力する', () => {
+  withTempDir(workspace => {
+    const ghDir = path.join(workspace, '.gh-maestro');
+    const queueDir = path.join(ghDir, 'queue');
+
+    // workers.json を用意（paneId なし → wezterm kill をスキップ）
+    fs.mkdirSync(ghDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(ghDir, 'workers.json'),
+      JSON.stringify({ 'test-worker': {} }, null, 2),
+      'utf8'
+    );
+
+    // inbox に削除不能なディレクトリ（.json と名乗る）を配置
+    const inboxDir = path.join(queueDir, 'inbox', 'test-worker');
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.mkdirSync(path.join(inboxDir, 'stuck.json'));
+
+    const result = spawnSync('node', [
+      path.join(__dirname, '..', 'scripts', 'remove-worker.js'),
+      '--worker-name', 'test-worker',
+      '--workspace', workspace,
+    ], { encoding: 'utf8' });
+
+    const stderr = result.stderr || '';
+
+    // purgeInbox が failed カウントを返し、remove-worker が warn する
+    assert.ok(
+      stderr.includes('削除に失敗しました'),
+      `stderr に削除失敗 warn が含まれること。実際: ${stderr.slice(0, 500)}`
+    );
+
+    // stuck.json ディレクトリは残留
+    assert.ok(fs.existsSync(path.join(inboxDir, 'stuck.json')));
+
+    // workers.json からエントリが削除されている
+    const workers = JSON.parse(fs.readFileSync(path.join(ghDir, 'workers.json'), 'utf8'));
+    assert.ok(!('test-worker' in workers));
   });
 });

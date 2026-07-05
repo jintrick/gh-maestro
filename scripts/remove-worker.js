@@ -143,13 +143,20 @@ if (existsSync(worktreeDir)) {
 
 // ── inbox の未処理メッセージを掃除 ─────────────────────────────────────
 
-try {
-  const purged = purgeInbox(workspace, workerName);
-  if (purged > 0) {
-    console.warn(`remove-worker: ワーカー "${workerName}" の inbox から ${purged} 件の未処理メッセージを削除しました`);
+// workers.json にエントリがある場合のみ inbox 掃除を試みる。
+// 未知の workerName には inbox が存在しないためスキップ。
+if (workers[workerName] !== undefined) {
+  try {
+    const { purged, failed } = purgeInbox(workspace, workerName);
+    if (purged > 0) {
+      console.warn(`remove-worker: ワーカー "${workerName}" の inbox から ${purged} 件の未処理メッセージを削除しました`);
+    }
+    if (failed > 0) {
+      console.warn(`remove-worker: ワーカー "${workerName}" の inbox 掃除で ${failed} 件の削除に失敗しました（残留の可能性あり）`);
+    }
+  } catch (e) {
+    console.warn(`remove-worker: inbox 掃除に失敗しました（ワーカー削除は続行します）: ${e.message}`);
   }
-} catch (e) {
-  console.warn(`remove-worker: inbox 掃除に失敗しました（ワーカー削除は続行します）: ${e.message}`);
 }
 
 // ── workers.jsonから削除 ──────────────────────────────────────────────

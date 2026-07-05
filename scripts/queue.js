@@ -325,7 +325,10 @@ function pruneAcked(workspace, maxAgeMs) {
 /**
  * Purge all pending messages for a recipient by deleting them from inbox.
  *
- * Best-effort: individual file deletion errors are silently swallowed.
+ * Best-effort: individual file deletion errors are silently swallowed and
+ * counted as `failed`. The function never throws on IO errors — the caller
+ * uses `failed > 0` to detect partial/total cleanup failure.
+ *
  * Used when a worker is removed to prevent stuck message escalation.
  *
  * Idempotent and concurrency-safe: ENOENT is treated as success (another
@@ -334,7 +337,7 @@ function pruneAcked(workspace, maxAgeMs) {
  *
  * @param {string} workspace  Absolute path to the workspace root.
  * @param {string} recipient  The recipient whose inbox to purge.
- * @returns {number}  Count of deleted files.
+ * @returns {{ purged: number, failed: number }}
  */
 function purgeInbox(workspace, recipient) {
   if (!recipient) throw new Error('"recipient" is required');
@@ -347,33 +350,34 @@ function purgeInbox(workspace, recipient) {
     files = fs.readdirSync(inboxDir);
   } catch (err) {
     // ENOENT: inbox dir doesn't exist or was already removed — success
-    if (err.code === 'ENOENT') return 0;
+    if (err.code === 'ENOENT') return { purged: 0, failed: 0 };
     // Other errors (permissions, etc.) — best-effort, skip
-    return 0;
+    return { purged: 0, failed: 0 };
   }
 
-  let deleted = 0;
+  let purged = 0;
+  let failed = 0;
   for (const file of files) {
     if (!file.endsWith('.json')) continue;
     const filePath = path.join(inboxDir, file);
     try {
       withRetry(() => { fs.unlinkSync(filePath); });
-      deleted++;
+      purged++;
     } catch (err) {
       // ENOENT: another process already deleted it — treat as success
       if (err.code === 'ENOENT') {
-        deleted++;
+        purged++;
         continue;
       }
-      // EBUSY/EPERM after retries exhausted — best-effort, skip
-      // Other errors — best-effort, skip
+      // EBUSY/EPERM after retries exhausted, or other errors — best-effort
+      failed++;
     }
   }
 
   // Best-effort: try to remove the now-empty directory
   try { fs.rmdirSync(inboxDir); } catch {}
 
-  return deleted;
+  return { purged, failed };
 }
 
 module.exports = { enqueue, listPending, ack, pruneAcked, purgeInbox };
