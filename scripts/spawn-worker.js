@@ -183,13 +183,13 @@ if (baseBranch) {
 mkdirSync(resolve(workspace, '.gh-maestro', 'worktrees'), { recursive: true });
 const worktreeStart = baseBranch ? ` "origin/${baseBranch}"` : '';
 try {
-  execSync(`git worktree add "${worktreeDir}" -b "${workerName}"${worktreeStart}`, { cwd: workspace, stdio: 'inherit' });
+  execSync(`git -c core.longpaths=true worktree add "${worktreeDir}" -b "${workerName}"${worktreeStart}`, { cwd: workspace, stdio: 'inherit' });
 } catch (e) {
   console.warn(`spawn-worker: worktree作成失敗: ${e.message.split('\n')[0]} — 残骸を除去してリトライします`);
   // 残骸除去（各ステップの失敗を個別にログ）
-  try { execSync(`git worktree remove --force "${worktreeDir}"`, { cwd: workspace, stdio: 'pipe' }); }
+  try { execSync(`git -c core.longpaths=true worktree remove --force "${worktreeDir}"`, { cwd: workspace, stdio: 'pipe' }); }
   catch (e2) { console.warn(`  git worktree remove: ${e2.message.split('\n')[0]}`); }
-  try { execSync('git worktree prune', { cwd: workspace, stdio: 'pipe' }); }
+  try { execSync('git -c core.longpaths=true worktree prune', { cwd: workspace, stdio: 'pipe' }); }
   catch (e2) { console.warn(`  git worktree prune: ${e2.message.split('\n')[0]}`); }
   try { rmSync(worktreeDir, { recursive: true, force: true }); }
   catch (e2) { console.warn(`  rmSync: ${e2.message.split('\n')[0]}`); }
@@ -197,7 +197,7 @@ try {
   catch (e2) { console.warn(`  git branch -D: ${e2.message.split('\n')[0]}`); }
   // リトライ
   try {
-    execSync(`git worktree add "${worktreeDir}" -b "${workerName}"${worktreeStart}`, { cwd: workspace, stdio: 'inherit' });
+    execSync(`git -c core.longpaths=true worktree add "${worktreeDir}" -b "${workerName}"${worktreeStart}`, { cwd: workspace, stdio: 'inherit' });
   } catch (e2) {
     fail(`git worktree の作成に失敗しました（残骸除去後もリトライ失敗）: ${e2.message.split('\n')[0]}`);
   }
@@ -230,10 +230,10 @@ const rollbackWorktree = () => {
     }
   })(worktreeDir);
 
-  try { execSync(`git worktree remove --force "${worktreeDir}"`, { cwd: workspace, stdio: 'pipe' }); }
+  try { execSync(`git -c core.longpaths=true worktree remove --force "${worktreeDir}"`, { cwd: workspace, stdio: 'pipe' }); }
   catch (e) {
     console.warn(`  rollback: git worktree remove 失敗: ${e.message.split('\n')[0]}`);
-    try { execSync('git worktree prune', { cwd: workspace, stdio: 'pipe' }); }
+    try { execSync('git -c core.longpaths=true worktree prune', { cwd: workspace, stdio: 'pipe' }); }
     catch (e2) { console.warn(`  rollback: git worktree prune 失敗: ${e2.message.split('\n')[0]}`); }
     try { rmSync(worktreeDir, { recursive: true, force: true }); }
     catch (e2) { console.warn(`  rollback: rmSync 失敗: ${e2.message.split('\n')[0]}`); }
