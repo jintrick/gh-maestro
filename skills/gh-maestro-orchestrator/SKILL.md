@@ -1,6 +1,6 @@
 ---
 name: gh-maestro-orchestrator
-description: gh-maestroオーケストレーター。人間と協働してIssueを起草・作成し、coderに実装指示を出し、Code Assistのレビューコメントをトリアージして人間にマージを依頼する。ワークスペースに.gh-maestro/session.jsonがあるとき自動的にロードする。
+description: gh-maestroオーケストレーター。人間と協働してIssueを起草・作成し、coderに実装指示を出し、Review Managerのレビュー結果をトリアージして人間にマージを依頼する。ワークスペースに.gh-maestro/session.jsonがあるとき自動的にロードする。
 ---
 
 ## 役割
@@ -177,7 +177,7 @@ W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "
 3. **PR検出**: 下記「PR検出」に従い、コーダーが作成したPRを自律検出する
 4. **レビュー監視**: PR番号取得後、下記「レビュー監視」に従い、レビューコメントとマージ状態を監視する
 5. **コメントトリアージ**: 新しいレビューコメントを受信するたびに「レビューコメントのトリアージ」を実行する
-6. **マージ**: トリアージ結果を人間に提示し、マージを依頼する。マージ検出後、`git pull --ff-only` で `BASE_BRANCH` を更新する
+6. **マージ**: 「マージ可否ゲート」通過後にトリアージ結果を人間に提示し、マージを依頼する。マージ検出後、`git pull --ff-only` で `BASE_BRANCH` を更新する
 7. **反省会**: 下記「反省会」に従い、手戻りの構造的原因を分析して改善提案をまとめる。承認事項の反映・Issueクローズ・`remove-worker.js`によるワーカー削除まで完了させてから次のIssueへ進む
 
 ## Issue確定
@@ -243,10 +243,17 @@ PR番号が確定したら、レビューコメントとマージ状態のポー
 - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → インラインのレビュー指摘。コメントトリアージを実行する
 - `PR_COMMENT:<user>:<body>` → PR全体へのコメント。同様にトリアージする
 - `PR_REVIEW:<user>:<state>:<body>` → 正式レビュー提出（GitHubの「Submit review」ボタン経由）。jintrickのレビューはこの形式で届く。stateで分岐：APPROVED → 人間にマージ許可シグナルとして提示、CHANGES_REQUESTED → bodyをトリアージしてコーダーにフィードバック、COMMENTED → PR_COMMENTと同様にトリアージ
-- `PR_PUSH:<sha>` → コーダーが修正コミットをPRにプッシュした。レビューは初回PR作成時のみ実行される（push後の再レビューはない）。マージ待ち状態に移行し、人間にマージ可否を確認する
+- `PR_PUSH:<sha>` → コーダーが修正コミットをPRにプッシュした。レビューは初回PR作成時のみ実行される（push後の再レビューはない）。マージ可否の確認は「マージ可否ゲート」通過時のみ。未通過なら残 BLOCKER の解消を待つ
 - `PR_MERGED:<PR番号>` → マージ完了。`git -C $WORKSPACE pull --ff-only` で `BASE_BRANCH` を最新化してから反省会へ進む。**この時点ではワーカーpane・worktreeを削除しない**（`remove-worker.js`は下記「反省会」完了後にのみ実行する）
 - 人間からの報告も同様に受け付ける
 - ポーリング間隔は{{POLL_INTERVAL_SECONDS}}秒。アクティビティがなければ自動で間隔が延びる
+
+### マージ可否ゲート
+
+`REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の両方を満たすときだけ：
+
+- Review Manager 完了（`PR_REVIEW:...Posted inline findings: N` 到着 or `.gh-maestro/review-manager-<PR>.json` 生成）
+- 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER は修正 push が該当 finding を解消するまで未解消として扱う）
 
 ## レビューコメントのトリアージ
 
