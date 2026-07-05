@@ -140,7 +140,7 @@ test('--workspace を指定して空ディレクトリで起動すると poller.
 
     // cleanup
     try { child.kill('SIGTERM'); } catch {}
-    if (process.platform === 'win32') {
+    if (process.platform === 'win32' && child.pid) {
       try { spawnSync('taskkill', ['/F', '/PID', String(child.pid)], { stdio: 'ignore' }); } catch {}
     }
   } finally {
@@ -292,9 +292,9 @@ test('既に poller が稼働中なら lazy-start は2つ目を起動しない',
     fs.mkdirSync(queueDir, { recursive: true });
 
     try {
-      // 新鮮な poller.json を作成（pid は実在しない値でOK）
+      // 生きている poller をエミュレート: テストプロセス自身の pid で poller.json を作成
       fs.writeFileSync(pollerJsonPath, JSON.stringify({
-        pid: 0,
+        pid: process.pid,
         heartbeat: Date.now(),
         startedAt: new Date().toISOString(),
       }), 'utf8');
@@ -304,25 +304,13 @@ test('既に poller が稼働中なら lazy-start は2つ目を起動しない',
       const r = runSend(['worker-1', 'hello', '--workspace', workspace], { GH_MAESTRO_DISABLE_LAZY_POLLER: '' });
       assert.equal(r.status, 0);
 
-      // poller.json の内容は変わらない（新しいプロセスが起動していない）
+      // poller.json の pid はそのまま（2つ目を起動していない）
       const state = JSON.parse(fs.readFileSync(pollerJsonPath, 'utf8'));
-      assert.equal(state.pid, 0, '既存の poller.json が維持されるべき');
+      assert.equal(state.pid, process.pid, '既存の poller.json が維持されるべき');
     } finally {
-      // pid=0 プレースホルダーは acquirePollerLease に実 spawn される。
-      // spawnSync 終了時点では poller が poller.json をまだ上書きしていないため、
-      // pid>0 になるまで待ってから kill する（pid=0 のままでは kill をすり抜ける）。
-      const maxWait = 3000;
-      const start = Date.now();
-      while (Date.now() - start < maxWait) {
-        try {
-          if (fs.existsSync(pollerJsonPath)) {
-            const s = JSON.parse(fs.readFileSync(pollerJsonPath, 'utf8'));
-            if (s.pid && s.pid > 0) break;
-          }
-        } catch {}
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-      }
-      killPollerFromJson(pollerJsonPath);
+      // 実 spawn は一切発生しない（acquirePollerLease が稼働中 poller と正しく判断する）
+      // 後始末不要。万一の lease 上書きに備え poller.json があれば削除しておく。
+      try { fs.unlinkSync(pollerJsonPath); } catch {}
     }
   });
 });
