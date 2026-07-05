@@ -234,28 +234,18 @@ function readLastNotifiedState(workspace) {
 // ── 通知テンプレート ────────────────────────────────────────────────────
 
 /**
- * 通知文を生成する。
- * 各 pending メッセージの messageId とファイルパスを actionable に表示する。
+ * 中身ゼロの wake 信号を返す。
+ * 受信側は poll-inbox.js で FS を pull し SSOT ファイルを自分で読むため、
+ * 業務本文・定型文を含まない wake 信号のみを送る。
+ * wezterm send-text はレイテンシ最適化のヒントに過ぎず、pull が唯一の配送根拠。
  */
-function buildNotificationText(scriptDir, pendingForRecipient) {
-  const lines = [
-    `新着メッセージが ${pendingForRecipient.length} 件あります。以下を読み、受理したら`,
-    `node ${path.join(scriptDir, 'queue-ack.js')} <messageId> を実行してください。`,
-    `既に処理済みの場合も ack だけしてください。`,
-  ];
-  for (const msg of pendingForRecipient) {
-    const mid = msg.messageId || '（messageIdなし）';
-    const msgPath = msg.path || '（パス不明）';
-    lines.push(`  messageId: ${mid}`);
-    lines.push(`  path: ${msgPath}`);
-  }
-  return lines.join('\n');
+function buildWakeSignal() {
+  return '';
 }
 
 // ── メインループ ────────────────────────────────────────────────────────
 
 function runPoller(workspace) {
-  const scriptsDir = __dirname;
   const inboxRoot = path.join(workspace, '.gh-maestro', 'queue', 'inbox');
 
   // lastNotifiedAt: messageId → Date.now()
@@ -379,12 +369,11 @@ function runPoller(workspace) {
         }
       }
 
-      // 通知送信（成功時のみ lastNotifiedAt を進める）
+      // wake 信号送信（成功時のみ lastNotifiedAt を進める）
       if (notifyIds.length > 0) {
-        const pendingForRecipient = msgs.filter(m => notifyIds.includes(m.messageId));
-        const text = buildNotificationText(scriptsDir, pendingForRecipient);
+        const wakeSignal = buildWakeSignal();
         try {
-          notifyPane(workspace, recipient, text);
+          notifyPane(workspace, recipient, wakeSignal);
           // 通知成功 → タイムスタンプ更新（失敗したら次スキャンで再通知）
           for (const mid of notifyIds) lastNotifiedAt.set(mid, now);
         } catch (err) {
