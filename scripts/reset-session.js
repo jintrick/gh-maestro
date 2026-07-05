@@ -350,7 +350,50 @@ if (existsSync(messagesDir)) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 6. workers.json をリセット
+// 6. poller の kill と queue 状態の掃除
+// ═══════════════════════════════════════════════════════════════════
+
+log('poller プロセスを終了します...');
+const pollerJsonPath = resolve(workspace, '.gh-maestro', 'queue', 'poller.json');
+if (existsSync(pollerJsonPath)) {
+  try {
+    const pollerState = JSON.parse(readFileSync(pollerJsonPath, 'utf8'));
+    if (pollerState.pid) {
+      try {
+        process.kill(pollerState.pid, 0);
+        process.kill(pollerState.pid, 'SIGTERM');
+        log(`poller (pid ${pollerState.pid}) を終了しました。`);
+        results.killed.push(`poller(${pollerState.pid})`);
+      } catch (e) {
+        if (e.code === 'ESRCH') {
+          log(`poller (pid ${pollerState.pid}) は既に終了しています。`);
+        } else {
+          warn(`poller (pid ${pollerState.pid}) の kill に失敗しました: ${e.message}`);
+        }
+      }
+    }
+  } catch (e) {
+    warn(`poller.json の読み取りに失敗しました: ${e.message}`);
+  }
+} else {
+  log('poller.json なし。スキップ。');
+}
+
+log('キュー状態を掃除します...');
+const queueDir = resolve(workspace, '.gh-maestro', 'queue');
+if (existsSync(queueDir)) {
+  try {
+    rmSync(queueDir, { recursive: true, force: true });
+    log('queue/ を削除しました。');
+  } catch (e) {
+    warn(`queue/ 削除失敗: ${e.message}`);
+  }
+} else {
+  log('queue/ なし。スキップ。');
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 7. workers.json をリセット
 // ═══════════════════════════════════════════════════════════════════
 
 log('workers.json をリセットします...');
@@ -365,7 +408,7 @@ try {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 6. サマリー
+// 8. サマリー
 // ═══════════════════════════════════════════════════════════════════
 
 log('');

@@ -11,9 +11,8 @@
 
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
 const { ack } = require('./queue');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 
 const USAGE = `queue-ack.js — メッセージを受理（ack）する
 
@@ -28,18 +27,6 @@ Options:
 messageId はキューの全 recipient を通じてユニークであるため、宛先指定は不要です。
 既に ack 済みの messageId を指定してもエラーになりません（冪等）。`;
 
-// ── workspace 解決 ──────────────────────────────────────────────────────
-
-function findWorkspaceFromCwd() {
-  let dir = process.cwd();
-  while (true) {
-    if (fs.existsSync(path.join(dir, '.gh-maestro'))) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
-}
-
 // ── 引数パース ──────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -49,21 +36,22 @@ if (args.includes('--help') || args.includes('-h')) {
   process.exit(0);
 }
 
-const wsIdx = args.indexOf('--workspace');
-const workspaceArg = (wsIdx !== -1 && args[wsIdx + 1]) ? args[wsIdx + 1] : null;
+const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace']);
 
-// Guard: wsIdx===-1 のとき wsIdx+1=0 が第1引数（messageId）を誤って除外しない
-const positional = wsIdx === -1
-  ? args
-  : args.filter((_, i) => i !== wsIdx && i !== wsIdx + 1);
-const [messageId] = positional;
+if (exitFlagMiss) {
+  console.error('queue-ack: --workspace には値が必要です。');
+  console.error(USAGE);
+  process.exit(1);
+}
+
+const [messageId] = rest;
 
 if (!messageId) {
   console.error(USAGE);
   process.exit(1);
 }
 
-const workspace = process.env.GH_MAESTRO_WORKSPACE || workspaceArg || findWorkspaceFromCwd();
+const workspace = resolveWorkspace(values['--workspace']);
 if (!workspace) {
   console.error('queue-ack: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
   process.exit(1);

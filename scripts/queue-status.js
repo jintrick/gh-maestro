@@ -14,6 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const { listPending } = require('./queue');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 
 // ── Stuck threshold ─────────────────────────────────────────────────────
 // A pending message is considered "stuck" if it has been pending longer
@@ -32,18 +33,6 @@ Options:
   - pending メッセージの一覧（messageId・宛先・経過時間）
   副作用はありません（prune は行いません）。`;
 
-// ── workspace 解決 ──────────────────────────────────────────────────────
-
-function findWorkspaceFromCwd() {
-  let dir = process.cwd();
-  while (true) {
-    if (fs.existsSync(path.join(dir, '.gh-maestro'))) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
-}
-
 // ── 引数パース ──────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -53,10 +42,15 @@ if (args.includes('--help') || args.includes('-h')) {
   process.exit(0);
 }
 
-const wsIdx = args.indexOf('--workspace');
-const workspaceArg = (wsIdx !== -1 && args[wsIdx + 1]) ? args[wsIdx + 1] : null;
+const { values, exitFlagMiss } = parseFlags(args, ['--workspace']);
 
-const workspace = process.env.GH_MAESTRO_WORKSPACE || workspaceArg || findWorkspaceFromCwd();
+if (exitFlagMiss) {
+  console.error('queue-status: --workspace には値が必要です。');
+  console.error(USAGE);
+  process.exit(1);
+}
+
+const workspace = resolveWorkspace(values['--workspace']);
 if (!workspace) {
   console.error('queue-status: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
   process.exit(1);

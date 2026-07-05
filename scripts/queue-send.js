@@ -11,7 +11,9 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 const { enqueue } = require('./queue');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 
 const USAGE = `queue-send.js — メッセージをファイルシステムキューに送信する
 
@@ -28,18 +30,6 @@ Options:
 
 workspace 解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索`;
 
-// ── workspace 解決 ──────────────────────────────────────────────────────
-
-function findWorkspaceFromCwd() {
-  let dir = process.cwd();
-  while (true) {
-    if (fs.existsSync(path.join(dir, '.gh-maestro'))) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
-}
-
 // ── 引数パース ──────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -49,31 +39,15 @@ if (args.includes('--help') || args.includes('-h')) {
   process.exit(0);
 }
 
-/**
- * Extract the value of a flag from args and return [value, usedIndices].
- * usedIndices contains the flag index and its value index, or empty array if not found.
- * If the flag is present but has no value, exits with usage error.
- */
-function extractFlag(flag) {
-  const idx = args.indexOf(flag);
-  if (idx === -1) return [null, []];
-  if (idx + 1 >= args.length || args[idx + 1].startsWith('--')) {
-    console.error(`queue-send: ${flag} には値が必要です。`);
-    console.error(USAGE);
-    process.exit(1);
-  }
-  return [args[idx + 1], [idx, idx + 1]];
+const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--kind', '--message-id']);
+
+if (exitFlagMiss) {
+  console.error('queue-send: フラグには値が必要です。');
+  console.error(USAGE);
+  process.exit(1);
 }
 
-const [workspaceArg, wsIndices] = extractFlag('--workspace');
-const [kindArg, kindIndices] = extractFlag('--kind');
-const [messageIdArg, midIndices] = extractFlag('--message-id');
-
-// Strip known flag-value pairs from positional args
-const skipIndices = new Set([...wsIndices, ...kindIndices, ...midIndices]);
-const positional = args.filter((_, i) => !skipIndices.has(i));
-
-const [recipient, ...msgParts] = positional;
+const [recipient, ...msgParts] = rest;
 const message = msgParts.join(' ');
 
 if (!recipient || !message) {
@@ -81,7 +55,7 @@ if (!recipient || !message) {
   process.exit(1);
 }
 
-const workspace = process.env.GH_MAESTRO_WORKSPACE || workspaceArg || findWorkspaceFromCwd();
+const workspace = resolveWorkspace(values['--workspace']);
 if (!workspace) {
   console.error('queue-send: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
   process.exit(1);
@@ -96,10 +70,52 @@ try {
     to: recipient,
     from,
     body: message,
-    kind: kindArg || undefined,
-    messageId: messageIdArg || undefined,
+    kind: values['--kind'] || undefined,
+    messageId: values['--message-id'] || undefined,
   });
   console.log(result.messageId);
+
+  // ── lazy-start: poller が起動していなければ起動する ────────────────────
+  // GH_MAESTRO_DISABLE_LAZY_POLLER=1 でゲート（テスト用）
+
+  if (!process.env.GH_MAESTRO_DISABLE_LAZY_POLLER) {
+    const pollerJsonPath = path.join(workspace, '.gh-maestro', 'queue', 'poller.json');
+    const pollerScript = path.join(__dirname, 'queue-poller.js');
+
+    let needStart = false;
+    try {
+      // atomic wx: ファイルがなければ自分が poller 起動権を獲得
+      const fd = fs.openSync(pollerJsonPath, 'wx');
+      // プレースホルダーを書き込んでおく（実際の poller が起動後に上書きする）
+      fs.writeFileSync(fd, JSON.stringify({ pid: 0, heartbeat: Date.now(), startedAt: new Date().toISOString() }));
+      fs.closeSync(fd);
+      needStart = true;
+    } catch (err) {
+      if (err.code !== 'EEXIST') {
+        needStart = true; // 予期しないエラー → fallback
+      } else {
+        // EEXIST: 既存ファイルの heartbeat を読んで stale なら起動
+        try {
+          const existing = JSON.parse(fs.readFileSync(pollerJsonPath, 'utf8'));
+          const elapsed = Date.now() - (existing.heartbeat || 0);
+          if (elapsed >= 15000) {
+            needStart = true; // stale → 再起動（queue-poller.js の claimPoller が正しく乗っ取る）
+          }
+        } catch {
+          // poller.json が読めない → 安全のため起動しない
+        }
+      }
+    }
+
+    if (needStart) {
+      const child = spawn(process.execPath, [pollerScript, '--workspace', workspace], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+    }
+  }
+
   process.exit(0);
 } catch (err) {
   console.error(`queue-send: enqueue に失敗しました: ${err.message}`);

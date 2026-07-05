@@ -21,7 +21,7 @@ function withTempDir(fn) {
 function run(args, env = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
     encoding: 'utf8',
-    env: { ...process.env, ...env },
+    env: { ...process.env, GH_MAESTRO_DISABLE_LAZY_POLLER: '1', ...env },
   });
 }
 
@@ -55,15 +55,11 @@ test('メッセージ不足は stderr に usage を出して exit 1', () => {
   assert.ok(r.stderr.includes('queue-send.js'));
 });
 
-test('workspace 解決失敗は stderr に出して exit 1', () => {
-  // 存在しない workspace を指定しても、queue-send は findWorkspaceFromCwd で解決する前に
-  // --workspace を優先する。明示的に --workspace /nonexistent を指定すると、
-  // mkdirSync が失敗するより前に enqueue がエラーになるはず。
-  // ここでは env も --workspace も与えず、存在しない cwd 相当にできないので
-  // 代わりに空っぽの tmp dir を workspace に指定する。
+test('空のディレクトリでも enqueue は成功する（キューが自動作成される）', () => {
+  // --workspace で空のディレクトリを指定すると、queue.js がキュー構造を自動作成する。
+  // このテストは .gh-maestro なしでも enqueue が成功することを確認する。
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-nws-'));
   try {
-    // 空のディレクトリを workspace に指定 → enqueue がキューを作成して成功するはず
     const r = run(['worker-1', 'hello', '--workspace', tmpDir]);
     assert.equal(r.status, 0);
     assert.ok(r.stdout.trim().length > 0);
