@@ -60,9 +60,7 @@ function claimPoller(workspace) {
 
   // 1. atomic 作成（wx）を試みる
   try {
-    const fd = fs.openSync(pPath, 'wx');
-    fs.writeFileSync(fd, payload());
-    fs.closeSync(fd);
+    fs.writeFileSync(pPath, payload(), { flag: 'wx' });
     return true;
   } catch (err) {
     if (err.code !== 'EEXIST') throw err;
@@ -191,7 +189,9 @@ function runPoller(workspace) {
         }
 
         // エスカレート: stuck かつ未エスカレート
-        if (age >= STUCK_THRESHOLD_MS && !stuckEscalated.has(mid)) {
+        // escalation メッセージ自身は再エスカレートしない（無限ループ防止）
+        const isEscalation = msg.kind === 'escalation' || (mid && mid.startsWith('escalation-'));
+        if (!isEscalation && age >= STUCK_THRESHOLD_MS && !stuckEscalated.has(mid)) {
           stuckEscalated.add(mid);
           try {
             const result = enqueue(workspace, {
@@ -252,15 +252,15 @@ function runPoller(workspace) {
   scan();
 
   const intervalHandle = setInterval(scan, POLL_INTERVAL_MS);
-  intervalHandle.unref();
 
   // プロセス終了時のクリーンアップ
   function cleanup() {
     releasePoller(workspace);
+    process.exit(0);
   }
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
-  process.on('exit', cleanup);
+  process.on('exit', () => { releasePoller(workspace); });
 }
 
 // ═════════════════════════════════════════════════════════════════════════

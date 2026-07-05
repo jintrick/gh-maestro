@@ -85,10 +85,7 @@ try {
     let needStart = false;
     try {
       // atomic wx: ファイルがなければ自分が poller 起動権を獲得
-      const fd = fs.openSync(pollerJsonPath, 'wx');
-      // プレースホルダーを書き込んでおく（実際の poller が起動後に上書きする）
-      fs.writeFileSync(fd, JSON.stringify({ pid: 0, heartbeat: Date.now(), startedAt: new Date().toISOString() }));
-      fs.closeSync(fd);
+      fs.writeFileSync(pollerJsonPath, JSON.stringify({ pid: 0, heartbeat: Date.now(), startedAt: new Date().toISOString() }), { flag: 'wx' });
       needStart = true;
     } catch (err) {
       if (err.code !== 'EEXIST') {

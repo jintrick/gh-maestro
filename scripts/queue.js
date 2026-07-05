@@ -9,7 +9,7 @@ const crypto = require('crypto');
  * These would allow path traversal (..) or path separator injection.
  */
 const INVALID_FIELD_RE = /[\/\\:*?"<>|\x00-\x1f]/;
-const PARENT_REF_RE = /(?:^|\/|\\)\.{2}(?:\/|\\)?/;
+const PARENT_REF_RE = /(?:^|[\/\\])\.\.(?:$|[\/\\])/;
 
 /**
  * Validate a queue field value for path-safety.
