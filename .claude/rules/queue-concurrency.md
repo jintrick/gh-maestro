@@ -4,6 +4,7 @@ paths:
   - "scripts/pane-notify.js"
   - "scripts/poll-and-notify.js"
   - "scripts/send-pane.js"
+  - "tests/queue-poller.test.js"
 ---
 
 # ファイルシステムキューの並行アクセス安全性
@@ -24,3 +25,11 @@ paths:
 - **poller の lazy-start は副作用であり、その失敗が enqueue の結果を汚してはならない。** lazy-start は独立した `try/catch` で囲み、起動に失敗しても enqueue 自体が成功していれば **exit 0（＝enqueue 成功）** を返す。起動失敗を「enqueue 失敗」と誤報すると、呼び出し元が重複再送する。
 - **worker 宛ての通知文は ack 可能でなければならない。** 通知には ack 対象の `messageId`（と inbox ファイルパス）を必ず含める。`queue-ack.js <messageId>` を要求しておきながら messageId を示さない通知は、受信側が ack できず pending が滞留・再通知・エスカレートを繰り返す。
 - **子プロセスの stdout を最後まで読み切ってから終了する処理は `'exit'` ではなく `'close'` イベントで行う。** `'exit'` はストリームの drain を保証せず、バッファ末尾（enqueue すべき最終行など）を取りこぼす。
+
+## poller.json の `pid:0` の意味論（実装・テスト共通の罠）
+
+`acquirePollerLease`（`queue-poller.js`）の lease 判定を、単純な「稼働中/不在」で読まないこと。
+
+- **`pid:0` は「poller 不在」ではなく「placeholder（lazy-start が乗っ取ってよい）」を意味する。** `acquirePollerLease` は `!existing.pid || existing.pid === 0` を placeholder 判定に使い、fresh-heartbeat チェックを迂回して**実 poller を spawn する**。
+- **稼働中 poller をテストで模擬するには、生きた非0 PID（例: `process.pid`）を使う。** `pid:0` ＋新鮮な heartbeat を書いても「poller 稼働中」の表現にはならず、逆に実 poller の spawn を引き起こしてテストが孤児プロセスをリークする（このリークは既存テストが pass していても race condition で潜伏する）。
+- **テストが `poller.json` を直接書くときは、その pid 値が `acquirePollerLease` にどう解釈されるか（placeholder / fresh / stale）を必ず確認する。**
