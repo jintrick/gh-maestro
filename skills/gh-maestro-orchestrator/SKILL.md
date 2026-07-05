@@ -200,6 +200,20 @@ node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tm
 次回起票時に「既存ファイルだから読み直す」という無駄なReadが発生するのを防ぐ
 （失敗時は原案を失わないよう削除しない）。
 
+## 自分の inbox の監視
+
+worker からの報告（PR_DETECTED 等）はすべて orchestrator の inbox に enqueue される。
+受動的に届くのを待つのではなく、能動的に inbox を poll して受信する。
+wezterm send-text による通知はレイテンシ最適化のヒントに過ぎず、pull が唯一の配送根拠である。
+
+Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/poll-inbox.js" orchestrator --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。
+
+Monitorから届く通知を処理する：
+- `NEW_MESSAGE:<messageId>` → `.gh-maestro/queue/inbox/orchestrator/<messageId>.json` を読んで内容を把握する。内容に応じて処理する（PR_DETECTED → PR番号を記録 等）。処理後は `node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE` で ack する。**完了後は直ちにMonitorに戻る**
+
+この inbox 監視は PR 検出・Review Manager 起動通知・反省会でのコーダーからの応答など、
+orchestrator が受け取るすべてのメッセージの受信経路である。セッション中は常に稼働させること。
+
 ## PR検出
 
 コーダーを起動すると `spawn-worker.js` が自動でポーリングを開始し、orchestrator の inbox 経由で以下が届く：

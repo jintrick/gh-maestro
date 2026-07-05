@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { enqueue, listPending, ack, pruneAcked, purgeInbox } = require('../scripts/queue');
+const { enqueue, listPending, receive, ack, pruneAcked, purgeInbox } = require('../scripts/queue');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
@@ -157,6 +157,73 @@ test('listPending が inbox ディレクトリ不在時に空配列を返す', (
   withTempDir(workspace => {
     assert.deepEqual(listPending(workspace, 'nonexistent'), []);
     assert.deepEqual(listPending(workspace), []);
+  });
+});
+
+// ── receive ─────────────────────────────────────────────────────────────
+
+test('receive が recipient 指定で pending メッセージを返す', () => {
+  withTempDir(workspace => {
+    enqueue(workspace, { to: 'worker-1', from: 'o', body: 'msg1', messageId: 'id1' });
+    enqueue(workspace, { to: 'worker-1', from: 'o', body: 'msg2', messageId: 'id2' });
+    enqueue(workspace, { to: 'worker-2', from: 'o', body: 'msg3', messageId: 'id3' });
+
+    const msgs = receive(workspace, 'worker-1');
+    assert.equal(msgs.length, 2);
+    assert.equal(msgs[0].to, 'worker-1');
+    assert.equal(msgs[1].to, 'worker-1');
+    // path が付与されている（poll-inbox からの通知で actionable にするため）
+    assert.ok(msgs[0].path);
+    assert.ok(msgs[0].path.includes('inbox'));
+  });
+});
+
+test('receive が inbox ディレクトリ不在時に空配列を返す（ENOENT 吸収）', () => {
+  withTempDir(workspace => {
+    assert.deepEqual(receive(workspace, 'nonexistent'), []);
+  });
+});
+
+test('receive が recipient 必須チェックを行う', () => {
+  withTempDir(workspace => {
+    assert.throws(() => receive(workspace), { message: '"recipient" is required' });
+    assert.throws(() => receive(workspace, ''), { message: '"recipient" is required' });
+  });
+});
+
+test('receive がパストラバーサルを含む recipient を拒否する', () => {
+  withTempDir(workspace => {
+    assert.throws(() => receive(workspace, '../orchestrator'), {
+      message: /親ディレクトリ参照/,
+    });
+  });
+});
+
+test('receive が壊れた JSON ファイルをスキップする', () => {
+  withTempDir(workspace => {
+    enqueue(workspace, { to: 'worker-1', from: 'o', body: 'good', messageId: 'good-id' });
+
+    const inboxDir = path.join(workspace, '.gh-maestro', 'queue', 'inbox', 'worker-1');
+    fs.writeFileSync(path.join(inboxDir, 'corrupted.json'), 'this is not json', 'utf8');
+
+    const msgs = receive(workspace, 'worker-1');
+    assert.equal(msgs.length, 1);
+    assert.equal(msgs[0].messageId, 'good-id');
+  });
+});
+
+test('receive と listPending(workspace, recipient) が同じ結果を返す', () => {
+  withTempDir(workspace => {
+    enqueue(workspace, { to: 'worker-1', from: 'o', body: 'msg1', messageId: 'r1' });
+    enqueue(workspace, { to: 'worker-1', from: 'o', body: 'msg2', messageId: 'r2' });
+
+    const viaReceive = receive(workspace, 'worker-1');
+    const viaList = listPending(workspace, 'worker-1');
+
+    assert.equal(viaReceive.length, viaList.length);
+    const receiveIds = viaReceive.map(m => m.messageId).sort();
+    const listIds = viaList.map(m => m.messageId).sort();
+    assert.deepEqual(receiveIds, listIds);
   });
 });
 
