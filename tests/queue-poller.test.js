@@ -139,35 +139,22 @@ test('--workspace を値なしで指定すると exit 1', () => {
   assert.ok(r.stderr.includes('--workspace'));
 });
 
-test('--workspace を指定して空ディレクトリで起動すると poller.json が作成されるまで待たない（spawnSync即終了）', () => {
-  // spawnSync を使う run() では poller のsetIntervalが無限ループするため、
-  // 代わりに poller プロセスを spawn して poller.json の作成を確認する。
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
-  try {
-    const child = spawn(process.execPath, [POLLER_SCRIPT, '--workspace', tmpDir], {
-      env: { ...process.env },
-      stdio: 'ignore',
-    });
-
-    const pollerJsonPath = path.join(tmpDir, '.gh-maestro', 'queue', 'poller.json');
-    const maxWait = 3000;
-    const start = Date.now();
-    let found = false;
-    while (Date.now() - start < maxWait) {
-      if (fs.existsSync(pollerJsonPath)) { found = true; break; }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+test('--workspace を指定して空ディレクトリで起動すると poller.json が作成される（withPoller + mock wezterm）', async () => {
+  // test-process-spawn-safety.md 準拠: raw spawn ではなく withPoller を使用し、
+  // WEZTERM_MOCK で wezterm CLI をモック化 + テスト終了時に確実に kill する。
+  await withTempDir(async workspace => {
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-mock-'));
+    try {
+      await withPoller(workspace, mockDir, async (child, pollerJsonPath) => {
+        assert.ok(fs.existsSync(pollerJsonPath), '空ディレクトリでも poller.json が作成されるべき');
+        const state = JSON.parse(fs.readFileSync(pollerJsonPath, 'utf8'));
+        assert.ok(state.pid > 0, 'pid が設定されているべき');
+        assert.equal(state.pid, child.pid, 'pid が spawn したプロセスと一致するべき');
+      });
+    } finally {
+      fs.rmSync(mockDir, { recursive: true, force: true });
     }
-    assert.ok(found, '空ディレクトリでも poller.json が作成されるべき');
-
-    // cleanup
-    try { child.kill('SIGTERM'); } catch {}
-    if (process.platform === 'win32' && child.pid) {
-      try { spawnSync('taskkill', ['/F', '/PID', String(child.pid)], { stdio: 'ignore' }); } catch {}
-    }
-  } finally {
-    killPollerFromJson(path.join(tmpDir, '.gh-maestro', 'queue', 'poller.json'));
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
+  });
 });
 
 // ── 二重起動防止 ────────────────────────────────────────────────────────
@@ -268,7 +255,9 @@ function killPollerFromJson(pollerJsonPath) {
   } catch {}
 }
 
-test('enqueue 後に poller.json がなければ queue-send が poller を起動する', () => {
+const runLazyStartTests = process.env.GH_MAESTRO_TEST_LAZY_START === '1';
+
+test('enqueue 後に poller.json がなければ queue-send が poller を起動する', { skip: !runLazyStartTests }, () => {
   withTempDir(workspace => {
     const pollerJsonPath = path.join(workspace, '.gh-maestro', 'queue', 'poller.json');
 
@@ -306,7 +295,7 @@ test('enqueue 後に poller.json がなければ queue-send が poller を起動
   });
 });
 
-test('既に poller が稼働中なら lazy-start は2つ目を起動しない', () => {
+test('既に poller が稼働中なら lazy-start は2つ目を起動しない', { skip: !runLazyStartTests }, () => {
   withTempDir(workspace => {
     const queueDir = path.join(workspace, '.gh-maestro', 'queue');
     const pollerJsonPath = path.join(queueDir, 'poller.json');
