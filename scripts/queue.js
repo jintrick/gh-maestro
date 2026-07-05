@@ -337,6 +337,9 @@ function pruneAcked(workspace, maxAgeMs) {
  * @returns {number}  Count of deleted files.
  */
 function purgeInbox(workspace, recipient) {
+  if (!recipient) throw new Error('"recipient" is required');
+  validateField('recipient', recipient);
+
   const inboxDir = path.join(queueDir(workspace), 'inbox', recipient);
 
   let files;

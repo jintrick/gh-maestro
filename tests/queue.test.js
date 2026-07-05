@@ -313,6 +313,28 @@ test('purgeInbox が空の inbox に対して 0 を返す（冪等）', () => {
   });
 });
 
+test('purgeInbox が空文字列の recipient を拒否する', () => {
+  withTempDir(workspace => {
+    assert.throws(() => purgeInbox(workspace, ''), { message: '"recipient" is required' });
+  });
+});
+
+test('purgeInbox が ".." を含む recipient を拒否する（パストラバーサル防止）', () => {
+  withTempDir(workspace => {
+    assert.throws(() => purgeInbox(workspace, '../orchestrator'), {
+      message: /親ディレクトリ参照/,
+    });
+  });
+});
+
+test('purgeInbox がパス区切り文字を含む recipient を拒否する', () => {
+  withTempDir(workspace => {
+    assert.throws(() => purgeInbox(workspace, 'a/b'), {
+      message: /不正な文字/,
+    });
+  });
+});
+
 test('purgeInbox が既に ack 済みのメッセージに影響しない（acked には触れない）', () => {
   withTempDir(workspace => {
     enqueue(workspace, { to: 'worker-1', from: 'o', body: 'msg1', messageId: 'id1' });
