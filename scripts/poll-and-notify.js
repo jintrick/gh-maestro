@@ -8,9 +8,11 @@
 
 'use strict';
 
+const path = require('path');
 const { spawn } = require('child_process');
-const { resolve } = require('path');
 const { enqueue } = require('./queue');
+// queue-poller は遅延 require: テストが GH_MAESTRO_DISABLE_LAZY_POLLER=1 で
+// ensurePoller の要件をスキップするとき、存在しないモジュールを require しないようにするため。
 
 const argv = process.argv.slice(2);
 const issue = argv[0];
@@ -28,10 +30,63 @@ if (!issue || !workspace) {
 
 const scriptsDir = __dirname;
 
-const poll = spawn(process.execPath, [resolve(scriptsDir, 'poll-pr.js'), issue], {
+const poll = spawn(process.execPath, [path.resolve(scriptsDir, 'poll-pr.js'), issue], {
   cwd: workspace,
   stdio: ['ignore', 'pipe', 'inherit'],
 });
+
+// lazy-start poller は初回 enqueue 成功時に1回だけ試行する
+let pollerStarted = false;
+
+/**
+ * enqueue 成功後に poller の lazy-start を試みる。
+ * send-pane.js / queue-send.js と同じロジック。poller が未起動のセッションでも
+ * worker → orchestrator 通知（PR_DETECTED 等）が inbox に埋もれず可視化される。
+ */
+function ensurePoller() {
+  if (pollerStarted) return;
+  pollerStarted = true;
+
+  if (process.env.GH_MAESTRO_DISABLE_LAZY_POLLER) return;
+
+  try {
+    const { acquirePollerLease } = require('./queue-poller');
+    const pollerScript = path.join(scriptsDir, 'queue-poller.js');
+    const placeholderPayload = JSON.stringify({
+      pid: 0,
+      heartbeat: Date.now(),
+      startedAt: new Date().toISOString(),
+    });
+    const acquired = acquirePollerLease(workspace, placeholderPayload);
+
+    if (acquired) {
+      const child = spawn(process.execPath, [pollerScript, '--workspace', workspace], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      child.unref();
+    }
+  } catch (e) {
+    // poller 起動失敗は配送の成否に影響しない。
+    // 次回 enqueue 時に lazy-start が再試行される。
+    process.stderr.write(`poll-and-notify: poller lazy-start に失敗しました（enqueue は成功）: ${e.message}\n`);
+  }
+}
+
+function doEnqueue(body) {
+  try {
+    enqueue(workspace, {
+      to: 'orchestrator',
+      from: fromName,
+      kind: 'notification',
+      body,
+    });
+    ensurePoller();
+  } catch (err) {
+    process.stderr.write(`poll-and-notify: enqueue 失敗: ${err.message}\n`);
+  }
+}
 
 let buf = '';
 poll.stdout.on('data', (data) => {
@@ -40,16 +95,7 @@ poll.stdout.on('data', (data) => {
   buf = lines.pop();
   for (const line of lines) {
     if (!line.trim()) continue;
-    try {
-      enqueue(workspace, {
-        to: 'orchestrator',
-        from: fromName,
-        kind: 'notification',
-        body: line.trim(),
-      });
-    } catch (err) {
-      process.stderr.write(`poll-and-notify: enqueue 失敗: ${err.message}\n`);
-    }
+    doEnqueue(line.trim());
   }
 });
 
@@ -58,16 +104,7 @@ poll.stdout.on('data', (data) => {
 // 'exit' は stdout バッファがフラッシュされる前に発火しうるため使わない。
 poll.on('close', (code) => {
   if (buf.trim()) {
-    try {
-      enqueue(workspace, {
-        to: 'orchestrator',
-        from: fromName,
-        kind: 'notification',
-        body: buf.trim(),
-      });
-    } catch (err) {
-      process.stderr.write(`poll-and-notify: enqueue 失敗 (final): ${err.message}\n`);
-    }
+    doEnqueue(buf.trim());
   }
   process.exit(code ?? 0);
 });

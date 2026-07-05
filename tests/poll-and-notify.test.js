@@ -51,6 +51,7 @@ test('poll-pr.js の stdout 出力を orchestrator の inbox に enqueue する'
     fs.copyFileSync(SCRIPT, path.join(scriptsDir, 'poll-and-notify.js'));
     fs.copyFileSync(fakePollPr, path.join(scriptsDir, 'poll-pr.js'));
     fs.copyFileSync(path.join(origScriptsDir, 'queue.js'), path.join(scriptsDir, 'queue.js'));
+    fs.copyFileSync(path.join(origScriptsDir, 'queue-poller.js'), path.join(scriptsDir, 'queue-poller.js'));
     fs.copyFileSync(path.join(origScriptsDir, 'shared', 'workspace.js'), path.join(sharedDir, 'workspace.js'));
 
     const r = spawnSync(process.execPath, [
@@ -60,7 +61,7 @@ test('poll-pr.js の stdout 出力を orchestrator の inbox に enqueue する'
       '--from', 'test-worker',
     ], {
       encoding: 'utf8',
-      env: { ...process.env },
+      env: { ...process.env, GH_MAESTRO_DISABLE_LAZY_POLLER: '1' },
       timeout: 10000,
     });
 
@@ -100,6 +101,7 @@ test('--from を省略した場合 GH_MAESTRO_WORKER env またはデフォル�
     fs.copyFileSync(SCRIPT, path.join(scriptsDir, 'poll-and-notify.js'));
     fs.copyFileSync(fakePollPr, path.join(scriptsDir, 'poll-pr.js'));
     fs.copyFileSync(path.join(origScriptsDir, 'queue.js'), path.join(scriptsDir, 'queue.js'));
+    fs.copyFileSync(path.join(origScriptsDir, 'queue-poller.js'), path.join(scriptsDir, 'queue-poller.js'));
     fs.copyFileSync(path.join(origScriptsDir, 'shared', 'workspace.js'), path.join(sharedDir, 'workspace.js'));
 
     const r = spawnSync(process.execPath, [
@@ -108,7 +110,7 @@ test('--from を省略した場合 GH_MAESTRO_WORKER env またはデフォル�
       '--workspace', workspace,
     ], {
       encoding: 'utf8',
-      env: { ...process.env, GH_MAESTRO_WORKER: 'env-worker' },
+      env: { ...process.env, GH_MAESTRO_DISABLE_LAZY_POLLER: '1', GH_MAESTRO_WORKER: 'env-worker' },
       timeout: 10000,
     });
 
