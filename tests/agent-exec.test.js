@@ -2,8 +2,26 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('child_process');
 
 const { buildLoginShellExecArgs, checkAgentExists } = require('../scripts/agent-exec');
+
+/**
+ * bash 経由で command -v を実行し、指定コマンドが解決可能か確認する。
+ * WSL 導入済み Windows では bash --version は通るが WSL 内に node が無いケースが
+ * あるため、単なる bash 存在確認では不十分。実際に command -v で解決できるかまで
+ * 確認することで、実行環境の bash/node 有無に結果が左右されないようにする。
+ */
+function bashCanResolve(command) {
+  try {
+    const r = spawnSync('bash', ['-lc', `command -v '${command}' 2>/dev/null`], {
+      encoding: 'utf8', stdio: 'pipe',
+    });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+}
 
 // ── buildLoginShellExecArgs ──────────────────────────────────────────────────
 
@@ -97,14 +115,24 @@ test('checkAgentExists: win32 で存在するコマンドを確認できる', ()
   }
 });
 
-test('checkAgentExists: Unix で存在するコマンドを確認できる', () => {
-  // プラットフォーム非依存テスト（明示的に 'linux' を指定）
+test('checkAgentExists: Unix で存在するコマンドを確認できる', (t) => {
+  // bash 非存在または bash 経由で node が解決不能な環境ではスキップ
+  // （WSL 導入済み Windows では bash はあるが WSL 内に node が無いケースがある）
+  if (!bashCanResolve('node')) {
+    t.diagnostic('bash cannot resolve node — skipping Unix checkAgentExists test');
+    return;
+  }
   assert.equal(checkAgentExists('node', 'linux'), true);
   assert.equal(checkAgentExists('nonexistent-cmd-xyz-nix', 'linux'), false);
 });
 
-test('checkAgentExists: 異なるプラットフォーム指定で同一結果', () => {
+test('checkAgentExists: 異なるプラットフォーム指定で同一結果', (t) => {
   // node はどのプラットフォームでも解決可能
   assert.equal(checkAgentExists('node', 'win32'), true);
-  assert.equal(checkAgentExists('node', 'linux'), true);
+  // linux の確認は bash 経由で node が解決可能な環境のみ
+  if (!bashCanResolve('node')) {
+    t.diagnostic('bash cannot resolve node — skipping linux cross-platform check');
+  } else {
+    assert.equal(checkAgentExists('node', 'linux'), true);
+  }
 });
