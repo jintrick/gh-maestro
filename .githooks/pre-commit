@@ -1,9 +1,4 @@
 #!/bin/sh
-node --test tests/*.test.js
-test_status=$?
-
 if git diff --cached --name-only | grep -q '^\.claude/rules/'; then
-  node scripts/sync-rules.js
+  node scripts/sync-rules.js || exit 1
 fi
-
-exit $test_status

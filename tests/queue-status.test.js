@@ -30,7 +30,7 @@ function runStatus(args, env = {}) {
 function runSend(args, env = {}) {
   return spawnSync(process.execPath, [SEND_SCRIPT, ...args], {
     encoding: 'utf8',
-    env: { ...process.env, ...env },
+    env: { ...process.env, GH_MAESTRO_DISABLE_LAZY_POLLER: '1', ...env },
   });
 }
 
