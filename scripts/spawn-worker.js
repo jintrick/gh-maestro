@@ -14,7 +14,7 @@
 //     --repo <owner/repo> \
 //     --workspace <path> \
 //     [--base-branch <branch>] \
-//     [--agent <id>]              # ~/.gh-maestro/agents.json のエージェントID（省略時は agy）
+//     [--agent <id>]              # ~/.gh-maestro/agents.json のエージェントID（省略時はスキルに応じたデフォルト）
 //
 // 標準出力: ワーカー名（例: issue-5-implement / task-investigate-auth）
 
@@ -41,7 +41,7 @@ const description = get('--description');
 const repo        = get('--repo');
 const workspace   = get('--workspace') ?? process.cwd();
 const baseBranch  = get('--base-branch');
-const agentId     = get('--agent') ?? 'agy';
+const explicitAgentId = get('--agent');
 
 // --- バリデーション ---
 const resetCmd = `node "${resolve(__dirname, 'reset-session.js')}" --workspace "${workspace}"`;
@@ -55,6 +55,15 @@ if (!skill)       fail('--skill が必要です');
 if (!description) fail('--description が必要です');
 if (!repo)        fail('--repo が必要です');
 if (skill === 'gh-maestro-base' && !prompt) fail('gh-maestro-base を使う場合は --prompt が必要です');
+
+const skillAgentMap = {
+  'gh-maestro-coder': 'claude-ds',
+  'gh-maestro-base': 'claude-ds',
+  'gh-maestro-senior-coder': 'claude-ds-pro',
+  'gh-maestro-investigator': 'reasonix',
+  'gh-maestro-explorer': 'agy'
+};
+const agentId = explicitAgentId ?? skillAgentMap[skill] ?? 'agy';
 
 const orchPaneId = process.env.WEZTERM_PANE;
 if (!orchPaneId)  fail('WEZTERM_PANE が設定されていません');
@@ -72,12 +81,17 @@ if (existsSync(agentsJsonPath)) {
   }
 }
 if (!agentConfig) {
-  const explicit = process.argv.includes('--agent');
-  if (explicit) {
+  if (explicitAgentId) {
     fail(`エージェント "${agentId}" が ~/.gh-maestro/agents.json に見つかりません。手動で追加するか、node scripts/install.js を実行してください。`);
   }
-  // --agent 未指定のデフォルトフォールバック
-  agentConfig = { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'flag', promptFlag: '-i', enterSequence: '\r\n' };
+  // 自動決定されたエージェントIDに対するフォールバック
+  const fallbacks = {
+    'claude-ds': { id: 'claude-ds', label: 'Claude Code (DeepSeek)', command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'system-prompt-file', enterSequence: '\r\n' },
+    'claude-ds-pro': { id: 'claude-ds-pro', label: 'Claude Code (DeepSeek Pro)', command: 'claude-ds-pro', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'system-prompt-file', enterSequence: '\r\n' },
+    'reasonix': { id: 'reasonix', label: 'Reasonix Code', command: 'reasonix', extraArgs: ['--yolo'], promptDelivery: 'send-text-after-launch', sendTextDelayMs: 2000, skillsViaMd: true, enterSequence: '\r' },
+    'agy': { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'flag', promptFlag: '-i', enterSequence: '\r\n' }
+  };
+  agentConfig = fallbacks[agentId] ?? fallbacks['agy'];
 }
 
 // --- エージェントがログインシェルで解決可能か確認 ---

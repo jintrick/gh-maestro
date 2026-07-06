@@ -30,18 +30,9 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 - `WORKSPACE` — ローカルワークスペースの絶対パス
 - `BASE_BRANCH` — ベースブランチ名
 
-## ワーカー別エージェント
+## ワーカーの使い分け
 
-エージェントはワーカーの種類ごとに固定されている。ユーザーに選択させる必要はない。
-
-| スキル | エージェント |
-|---|---|
-| `gh-maestro-coder` | `claude-ds` |
-| `gh-maestro-investigator` | `reasonix` |
-| `gh-maestro-explorer` | `agy` |
-| `gh-maestro-base` | `claude-ds` |
-
-各 `spawn-worker.js` 呼び出しでは、起動するスキルに応じた `--agent` を指定すること。
+オーケストレーターは、各ワーカー（スキル）の能力的な特長を理解し、タスクの性質に応じて適切なスキルを自律的に選択すること。各スキルにはデフォルトのエージェントが紐付けられているため、起動時に `--agent` を明示する必要はない。
 
 ## 調査の委譲（必須）
 
@@ -51,7 +42,8 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 |---|---|
 | ファイルの場所・関数の定義・grep結果・ログが知りたい | `gh-maestro-explorer` |
 | バグの根本原因・影響範囲・修正方針を特定したい | `gh-maestro-investigator` |
-| 実装・PR作成 | `gh-maestro-coder` |
+| 局所的な実装・PR作成（コスト効率重視） | `gh-maestro-coder` |
+| 設計判断や広範囲の影響分析、高度な検証を伴う実装・PR作成 | `gh-maestro-senior-coder` |
 | 上記に当てはまらないが手を動かす仕事がある | `gh-maestro-base`（`--prompt`で役割を明示） |
 
 ### explorer の起動例
@@ -62,8 +54,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --issue <N> \
   --description explore-auth \
   --prompt "src/auth/ 配下でトークン検証を行っている関数をすべてリストアップして報告してください" \
-  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH \
-  --agent agy)
+  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH)
 ```
 
 ### investigator の起動例
@@ -73,8 +64,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --skill gh-maestro-investigator \
   --issue <N> \
   --description investigate-login-bug \
-  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH \
-  --agent reasonix)
+  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH)
 ```
 
 explorerは**事実のみ報告する**（分析・判断は行わない）。investigatorは**根本原因・影響範囲・修正方針まで報告する**。両者の使い分けを誤らないこと。
@@ -122,18 +112,18 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --description <desc> \
   --repo $REPO \
   --workspace $WORKSPACE \
-  --base-branch $BASE_BRANCH \
-  --agent $AGENT)
+  --base-branch $BASE_BRANCH)
 ```
 
 戻り値はワーカー名（例: `issue-5-implement`）。worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成される。
 
-| スキル | エージェント | 用途 |
-|---|---|---|
-| `gh-maestro-coder` | `claude-ds` | 実装 → PR作成 |
-| `gh-maestro-explorer` | `agy` | 汎用的な事実調査（grep・コード探索・情報収集）。分析・判断は行わず、発見した事実を報告する |
-| `gh-maestro-investigator` | `reasonix` | バグ原因の特定 → 根本原因・影響範囲・修正方針の報告（Issueがある場合は`--issue`でIssue番号を渡す。ない場合は`--prompt`で調査内容を渡す） |
-| `gh-maestro-base` | `claude-ds` | 上記以外の動的役職（必ず`--prompt`で役割を定義する） |
+| スキル | 用途・特長 |
+|---|---|
+| `gh-maestro-coder` | コスト効率に優れ、指定されたスコープに閉じた局所的な変更や、明確に定義された仕様の実装・修正に適している。 |
+| `gh-maestro-senior-coder` | 高度な自己検証能力とアーキテクチャの整合性判断能力を持ち、広範な影響分析、複雑なロジック調整、設計判断を伴うタスクの解決に適している。 |
+| `gh-maestro-explorer` | 汎用的な事実調査（grep・コード探索・情報収集）。分析・判断は行わず、発見した事実を報告する。 |
+| `gh-maestro-investigator` | バグ原因の特定 → 根本原因・影響範囲・修正方針の報告（Issueがある場合は`--issue`でIssue番号を渡す。ない場合は`--prompt`で調査内容を渡す）。 |
+| `gh-maestro-base` | 上記以外の動的役職（必ず`--prompt`で役割を定義する）。 |
 
 ## セッションのゴール
 
@@ -173,7 +163,7 @@ W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "
 ## 基本フロー
 
 1. **Issue確定**: 人間と協働してIssueを起草・作成する（単独では作成しない）
-2. **Coder起動**: `spawn-worker.js --skill gh-maestro-coder --issue <N> --description <desc> --agent claude-ds`（エージェントは「ワーカー別エージェント」表のとおり固定。ユーザーに確認する必要はない）で実装ワーカーを起動する
+2. **Coder起動**: `spawn-worker.js --skill gh-maestro-coder --issue <N> --description <desc>` または `--skill gh-maestro-senior-coder` で実装ワーカーを起動する。タスクの特長（設計上の複雑さや影響の大きさなど）を自律的に判断してどちらを使用するか選択する。
 3. **PR検出**: 下記「PR検出」に従い、コーダーが作成したPRを自律検出する
 4. **レビュー監視**: PR番号取得後、下記「レビュー監視」に従い、レビューコメントとマージ状態を監視する
 5. **コメントトリアージ**: 新しいレビューコメントを受信するたびに「レビューコメントのトリアージ」を実行する
@@ -223,6 +213,7 @@ orchestrator が受け取るすべてのメッセージの受信経路である�
 - `REVIEW_MANAGER_ALREADY_RUNNING:<PR番号>` → 既にReview Managerが稼働中
 
 PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`queue-send.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
+**通常コーダー（gh-maestro-coder）が実装に失敗してエスカレーションされた場合、人間が承認した段階で上位のシニアコーダー（gh-maestro-senior-coder）を適用して再起動することを検討せよ。**
 
 **`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、「Review Managerの手動起動」に従って自分で起動すること。
 

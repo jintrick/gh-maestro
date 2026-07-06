@@ -294,6 +294,7 @@ const _rxArgs = (_rxJsPath && fs.existsSync(_rxJsPath)) ? [_rxJsPath, '--yolo'] 
 const defaults = [
   { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'system-prompt-file', enterSequence: '\r\n' },
   { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'system-prompt-file', enterSequence: '\r\n' },
+  { id: 'claude-ds-pro', label: 'Claude Code (DeepSeek Pro)', command: 'claude-ds-pro', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'system-prompt-file', enterSequence: '\r\n' },
   { id: 'reasonix',  label: 'Reasonix Code',           command: _rxCmd,      extraArgs: _rxArgs, promptDelivery: 'send-text-after-launch', sendTextDelayMs: 2000, skillsViaMd: true, enterSequence: '\r' },
   { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'flag', promptFlag: '-i', enterSequence: '\r\n' },
   { id: 'codex',     label: 'Codex (OpenAI)',          command: 'codex',     extraArgs: ['--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen'], promptDelivery: 'positional', enterSequence: '\r\n' },
