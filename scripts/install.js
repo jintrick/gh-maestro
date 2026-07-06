@@ -265,95 +265,99 @@ for (const skill of skillDirs) {
   ok(`${skill} -> ${destSkillDir} (shared)`);
 }
 
-step('Installing default agents config...');
-const agentsConfigPath = ghMaestroPath('agents.json');
+// ── agents.json → config.json 移行 ──────────────────────────────────────────────
+// エージェント設定のSSOTは scripts/agent-defaults.json に移行した（Issue #41）。
+// 既存の ~/.gh-maestro/agents.json にデフォルトと異なるカスタムエントリがあれば、
+// ~/.gh-maestro/config.json の agents override に一度だけ変換する。
+// ユーザーファイルには差分のみ書き、デフォルトをコピーしない（設計原則 #1）。
+// agentsConfigPath は ghMaestroPath ではなく path.join で組み立てる。
+// ghMaestroPath を使うと prune 対象外（keep）になってしまい、移行後に残骸が残るため。
+step('Checking for legacy agents.json migration...');
+const agentsConfigPath = path.join(ghMaestroDir, 'agents.json');
+const configJsonPath = ghMaestroPath('config.json');
 
-// reasonix は npm 経由インストール時に shell ラッパー（.ps1/.sh/.cmd）しか PATH に入らない。
-// WezTerm の split-pane 直接起動では shell を介さないため、これらのラッパーは実行できない。
-// node + reasonix.js パスで直接起動することで Windows/Linux 共通の shell-free 起動を実現する。
-const _rxNpmRoot = (() => {
-  try { return require('child_process').execSync('npm root -g', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim(); }
-  catch { return null; }
-})();
-const _rxJsPath = _rxNpmRoot ? path.join(_rxNpmRoot, 'reasonix', 'bin', 'reasonix.js') : null;
-const _rxCmd = (_rxJsPath && fs.existsSync(_rxJsPath)) ? 'node' : 'reasonix';
-const _rxArgs = (_rxJsPath && fs.existsSync(_rxJsPath)) ? [_rxJsPath, '--yolo'] : ['--yolo'];
-
-// enterSequence: wezterm cli send-text --no-paste でEnter相当を送る際のterminator。
-// ペイン内アプリの改行解釈がエージェントごとに異なるため個別に持たせる（送信の議論の経緯は
-// scripts/send-enter.js のコメント参照）。claude/claude-ds/agyはCRLFで動作実績あり、
-// reasonixは実機検証の結果 \r 単体のみ送信として認識される（\n は入力欄に残留し無視される）。
-//
-// promptDelivery: プロンプトの配送メカニズム。エージェント固有の起動argv組み立ては
-// spawn-worker.js側に集約されており（docs/agent-launch-mechanism-plan.md 参照）、
-// ここでは「どのメカニズムを使うか」だけを宣言する。
-//   - system-prompt-file: --append-system-prompt-file 経由（claude/claude-ds）
-//   - flag: promptFlag経由でargv（agy）
-//   - positional: プロンプトをargv末尾にそのまま渡す（codex。実機確認済み）
-//   - send-text-after-launch: 起動時は渡さず、sendTextDelayMs 待機後にsend-textで注入（reasonix）
-const defaults = [
-  { id: 'claude',    label: 'Claude Code (Anthropic)', command: 'claude',    extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'system-prompt-file', enterSequence: '\r\n' },
-  { id: 'claude-ds', label: 'Claude Code (DeepSeek)',  command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'system-prompt-file', enterSequence: '\r\n' },
-  { id: 'claude-ds-pro', label: 'Claude Code (DeepSeek Pro)', command: 'claude-ds-pro', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'system-prompt-file', enterSequence: '\r\n' },
-  { id: 'reasonix',  label: 'Reasonix Code',           command: _rxCmd,      extraArgs: _rxArgs, promptDelivery: 'send-text-after-launch', sendTextDelayMs: 2000, skillsViaMd: true, enterSequence: '\r' },
-  { id: 'agy',       label: 'Antigravity',             command: 'agy',       extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'flag', promptFlag: '-i', enterSequence: '\r\n' },
-  { id: 'codex',     label: 'Codex (OpenAI)',          command: 'codex',     extraArgs: ['--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen'], promptDelivery: 'positional', enterSequence: '\r\n' },
-];
-if (!fs.existsSync(agentsConfigPath)) {
-  fs.writeFileSync(agentsConfigPath, JSON.stringify(defaults, null, 2) + '\n', 'utf8');
-  ok(`agents.json -> ${expandHome('~/.gh-maestro')}`);
-} else {
-  let existing = [];
+if (fs.existsSync(agentsConfigPath)) {
+  let legacyAgents = [];
   try {
-    existing = JSON.parse(fs.readFileSync(agentsConfigPath, 'utf8'));
-    if (!Array.isArray(existing)) existing = [];
+    legacyAgents = JSON.parse(fs.readFileSync(agentsConfigPath, 'utf8'));
+    if (!Array.isArray(legacyAgents)) legacyAgents = [];
   } catch {
-    ok('agents.json parse failed — overwriting with defaults');
-    existing = [];
+    ok('agents.json parse failed — skipping migration');
+    legacyAgents = [];
   }
-  const existingMap = new Map(existing.map(a => [a.id, a]));
-  let added = 0, updated = 0;
-  for (const agent of defaults) {
-    if (!existingMap.has(agent.id)) {
-      existing.push(agent);
-      added++;
-    } else {
-      const entry = existingMap.get(agent.id);
-      // command がデフォルトのままのときだけ extraArgs/promptFlag をデフォルトに追従させる。
-      // ユーザーが command をカスタマイズしている場合、extraArgs はその command と結合している
-      // （例: command=pwsh の DeepSeek ラッパー）ため、上書きすると起動が壊れる。touch しない。
-      // reasonix は旧デフォルト('reasonix')→新デフォルト('node')への移行も行う。
-      const isReasonixMigration = agent.id === 'reasonix' && entry.command === 'reasonix' && agent.command === 'node';
-      // promptDelivery はCLIの起動メカニズムそのものを表す値で、command のカスタマイズ
-      // （例: claude-ds の pwsh ラッパー）とは独立して常にバックフィルしてよい。
-      // ここを command 一致ガードの中に入れると、customize済みエントリが promptDelivery
-      // 欠如のまま残り、spawn-worker.js のディスパッチが "未知のメカニズム" で失敗する。
-      if (!('promptDelivery' in entry)) {
-        entry.promptDelivery = agent.promptDelivery;
-        if ('promptFlag' in agent) entry.promptFlag = agent.promptFlag;
-        if ('sendTextDelayMs' in agent) entry.sendTextDelayMs = agent.sendTextDelayMs;
-        updated++;
+
+  if (legacyAgents.length > 0) {
+    // agent-defaults.json からデフォルト値を読み込む
+    const defaultsPath = path.join(ROOT, 'scripts', 'agent-defaults.json');
+    let defaultsData = { agents: [] };
+    try {
+      defaultsData = JSON.parse(fs.readFileSync(defaultsPath, 'utf8'));
+    } catch {
+      ok('agent-defaults.json not found — skipping migration');
+    }
+
+    const defaultMap = new Map(defaultsData.agents.map(a => [a.id, a]));
+
+    // デフォルトと異なるフィールドのみを抽出
+    const agentOverrides = {};
+    let migratedCount = 0;
+
+    for (const userAgent of legacyAgents) {
+      const defaultAgent = defaultMap.get(userAgent.id);
+      if (!defaultAgent) {
+        // デフォルトに無いカスタムエージェント — 全体を保存
+        const { id, ...rest } = userAgent;
+        agentOverrides[id] = rest;
+        migratedCount++;
+        continue;
       }
-      if (entry.command === agent.command || isReasonixMigration) {
-        entry.command = agent.command;
-        entry.extraArgs = agent.extraArgs;
-        entry.promptDelivery = agent.promptDelivery;
-        entry.promptFlag = agent.promptFlag; // 'flag'メカニズムのときだけ意味を持つ。他は undefined になり出力から消える
-        if ('skillsViaMd' in agent) entry.skillsViaMd = agent.skillsViaMd;
-        if ('sendTextDelayMs' in agent) entry.sendTextDelayMs = agent.sendTextDelayMs;
-        if ('enterSequence' in agent) entry.enterSequence = agent.enterSequence;
-        // 廃止されたフィールドを除去
-        delete entry.positionalPrompt;
-        updated++;
+
+      // デフォルトと異なるフィールドを抽出
+      const diff = {};
+      for (const [key, value] of Object.entries(userAgent)) {
+        if (key === 'id') continue;
+        // デフォルトに存在しないフィールドはカスタム追加として保存
+        if (!(key in defaultAgent)) {
+          diff[key] = value;
+          continue;
+        }
+        // 値が異なる場合のみ保存
+        if (JSON.stringify(value) !== JSON.stringify(defaultAgent[key])) {
+          diff[key] = value;
+        }
+      }
+
+      if (Object.keys(diff).length > 0) {
+        agentOverrides[userAgent.id] = diff;
+        migratedCount++;
       }
     }
-  }
-  if (added > 0 || updated > 0) {
-    fs.writeFileSync(agentsConfigPath, JSON.stringify(existing, null, 2) + '\n', 'utf8');
-    ok(`agents.json updated (+${added} added, ${updated} refreshed)`);
+
+    if (migratedCount > 0) {
+      // 既存の config.json を読み込み、agents セクションをマージ
+      let existingConfig = {};
+      if (fs.existsSync(configJsonPath)) {
+        try {
+          existingConfig = JSON.parse(fs.readFileSync(configJsonPath, 'utf8'));
+          if (typeof existingConfig !== 'object' || existingConfig === null || Array.isArray(existingConfig)) {
+            existingConfig = {};
+          }
+        } catch {
+          existingConfig = {};
+        }
+      }
+
+      existingConfig.agents = { ...(existingConfig.agents || {}), ...agentOverrides };
+      fs.writeFileSync(configJsonPath, JSON.stringify(existingConfig, null, 2) + '\n', 'utf8');
+      ok(`agents.json → config.json: ${migratedCount} agent override(s) migrated`);
+    } else {
+      ok('agents.json has no customizations — config.json not created (defaults are in agent-defaults.json)');
+    }
   } else {
-    ok('agents.json already up to date');
+    ok('agents.json is empty — nothing to migrate');
   }
+} else {
+  ok('No legacy agents.json — nothing to migrate');
 }
 
 // ── ~/.gh-maestro/ を権威的に管理する ─────────────────────────────────────────

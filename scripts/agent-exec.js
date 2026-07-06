@@ -15,7 +15,7 @@
 //
 // 制約:
 //   - シェルの再パースで引数（空白・改行・@ 等）が壊れない渡し方にすること
-//   - agents.json の command カスタマイズと衝突しないこと
+//   - config.json / agent-defaults.json の command カスタマイズと衝突しないこと
 
 const { spawnSync } = require('./child-process');
 

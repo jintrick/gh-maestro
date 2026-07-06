@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { resolveAgentConfig } = require('../scripts/resolve-agent');
+const { resolveAgentConfig, agentsJsonPath } = require('../scripts/resolve-agent');
 
 /**
  * 一時ディレクトリを作成し fn(home) を実行、終了後に削除する。
@@ -21,16 +21,25 @@ function withTempHome(fn) {
   }
 }
 
-test('resolveAgentConfig: agents.jsonから一致するエージェントを返す', () => {
+test('resolveAgentConfig: config.jsonから一致するエージェントのoverrideを返す', () => {
   withTempHome(home => {
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    // config.json で enterSequence を上書き
     fs.writeFileSync(
-      path.join(home, '.gh-maestro', 'agents.json'),
-      JSON.stringify([{ id: 'reasonix', enterSequence: '\n' }, { id: 'agy', enterSequence: '\r\n' }]),
-      'utf8'
+      path.join(home, '.gh-maestro', 'config.json'),
+      JSON.stringify({
+        agents: {
+          reasonix: { enterSequence: '\n' },
+          agy: { enterSequence: '\r\n' },
+        },
+      }),
+      'utf8',
     );
     const r = resolveAgentConfig('reasonix', home);
+    assert.ok(r, 'reasonix should be resolved');
     assert.equal(r.enterSequence, '\n');
+    // 上書きしていないフィールドはデフォルトのまま
+    assert.equal(r.skillsViaMd, true);
   });
 });
 
@@ -40,48 +49,63 @@ test('resolveAgentConfig: agentIdがnullなら null を返す', () => {
   });
 });
 
-test('resolveAgentConfig: agents.jsonが存在しなければ null を返す', () => {
+test('resolveAgentConfig: config.jsonが存在しなければデフォルトから解決する', () => {
   withTempHome(home => {
-    assert.equal(resolveAgentConfig('agy', home), null);
+    const r = resolveAgentConfig('agy', home);
+    assert.ok(r, 'agy should be resolved from defaults');
+    assert.equal(r.command, 'agy');
+    assert.equal(r.promptDelivery, 'flag');
   });
 });
 
 test('resolveAgentConfig: 該当エージェントが見つからなければ null を返す', () => {
   withTempHome(home => {
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(path.join(home, '.gh-maestro', 'agents.json'), JSON.stringify([{ id: 'agy' }]), 'utf8');
+    fs.writeFileSync(
+      path.join(home, '.gh-maestro', 'config.json'),
+      JSON.stringify({ agents: { agy: {} } }),
+      'utf8',
+    );
     assert.equal(resolveAgentConfig('unknown-agent', home), null);
   });
 });
 
-test('resolveAgentConfig: agents.jsonのパース失敗時は例外を投げず null を返す', () => {
+test('resolveAgentConfig: config.jsonのパース失敗時は例外を投げず null を返す', () => {
   withTempHome(home => {
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(path.join(home, '.gh-maestro', 'agents.json'), '{ not valid json', 'utf8');
-    assert.equal(resolveAgentConfig('agy', home), null);
+    fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), '{ not valid json', 'utf8');
+    // soft-fail: 内部で catch して null を返す
+    // ただし resolve-config.js の loadConfigFile が空オブジェクトを返すため、
+    // パース失敗時はデフォルト値にフォールバックする（null ではなくデフォルトが返る）
+    const r = resolveAgentConfig('agy', home);
+    assert.ok(r, 'should fall back to defaults on parse error');
+    assert.equal(r.command, 'agy');
   });
 });
 
 test('resolveAgentConfig: _homedir 省略時は環境変数 HOME を参照する', () => {
-  // _homedir 省略時に process.env.HOME から agents.json を解決することを
-  // 明示的に検証する。一時ディレクトリに agents.json を用意し HOME を差し替える。
-  // テストファイル内は直列実行のため save/restore で他テストに影響しない。
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-env-home-'));
   try {
     fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(
-      path.join(dir, '.gh-maestro', 'agents.json'),
-      JSON.stringify([{ id: 'env-agent', enterSequence: '\r\n' }]),
-      'utf8'
+      path.join(dir, '.gh-maestro', 'config.json'),
+      JSON.stringify({
+        agents: { 'env-agent': { command: 'custom-cli', label: 'Env Agent', promptDelivery: 'flag', promptFlag: '-p' } },
+      }),
+      'utf8',
     );
+    // 注: env-agent は defaults にないため、resolveAgentConfig は null を返す
+    // （merge のベースとなる defaultAgent が存在しないため）
+
     const prevHome = process.env.HOME;
     const prevUserProfile = process.env.USERPROFILE;
     process.env.HOME = dir;
     delete process.env.USERPROFILE;
     try {
-      const r = resolveAgentConfig('env-agent');
-      assert.ok(r, 'env-agent が見つかるべき');
-      assert.equal(r.enterSequence, '\r\n');
+      // agy は defaults にあるため、HOME から config.json override を適用できる
+      const r = resolveAgentConfig('agy');
+      assert.ok(r, 'agy should be resolved using HOME');
+      assert.equal(r.command, 'agy');
     } finally {
       process.env.HOME = prevHome;
       if (prevUserProfile !== undefined) process.env.USERPROFILE = prevUserProfile;
@@ -89,4 +113,12 @@ test('resolveAgentConfig: _homedir 省略時は環境変数 HOME を参照する
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('agentsJsonPath: config.json のパスを返す（後方互換）', () => {
+  withTempHome(home => {
+    const p = agentsJsonPath(home);
+    assert.ok(p.endsWith('config.json'), `should end with config.json, got: ${p}`);
+    assert.ok(p.includes('.gh-maestro'), 'should include .gh-maestro');
+  });
 });

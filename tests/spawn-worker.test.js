@@ -99,7 +99,7 @@ test('--agent で存在しないエージェントを指定した場合はエラ
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-agent-'));
   try {
     fs.mkdirSync(path.join(tmp, '.gh-maestro'), { recursive: true });
-    // agents.json を意図的に作らない → エージェント未定義
+    // config.json を意図的に作らない → デフォルトにも無いエージェントIDはエラー
 
     const r = spawnSync(process.execPath, [SCRIPT,
       '--skill', 'gh-maestro-coder',
@@ -112,30 +112,32 @@ test('--agent で存在しないエージェントを指定した場合はエラ
 
     assert.notEqual(r.status, 0, 'exit code should be non-zero');
     assert.match(r.stderr, /nonexistent/, 'error should name the missing agent');
-    assert.match(r.stderr, /agents\.json/, 'error should reference agents.json');
+    assert.match(r.stderr, /config\.json/, 'error should reference config.json');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('agents.json に定義されていてもバイナリが PATH になければエラー終了する', () => {
+test('config.json に定義されていてもバイナリが PATH になければエラー終了する', () => {
   const fs = require('fs');
   const os = require('os');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-bin-'));
   try {
     fs.mkdirSync(path.join(tmp, '.gh-maestro'), { recursive: true });
-    // バイナリが存在しないコマンドを持つエージェントを定義
+    // agent-defaults.json にある claude を上書きして存在しないバイナリを指定
     fs.writeFileSync(
-      path.join(tmp, '.gh-maestro', 'agents.json'),
-      JSON.stringify([
-        { id: 'fake', label: 'Fake CLI', command: 'nonexistent-cmd-xyz', extraArgs: [], promptFlag: null },
-      ]),
+      path.join(tmp, '.gh-maestro', 'config.json'),
+      JSON.stringify({
+        agents: {
+          claude: { command: 'nonexistent-cmd-xyz', label: 'Fake CLI', promptDelivery: 'system-prompt-file' },
+        },
+      }),
     );
 
     const r = spawnSync(process.execPath, [SCRIPT,
       '--skill', 'gh-maestro-coder',
       '--issue', '1', '--description', 'test', '--repo', 'o/r',
-      '--agent', 'fake',
+      '--agent', 'claude',
     ], {
       encoding: 'utf8',
       env: { ...process.env, WEZTERM_PANE: '999', HOME: tmp },
