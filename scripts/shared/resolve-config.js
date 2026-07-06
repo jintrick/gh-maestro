@@ -109,20 +109,36 @@ function resolveDynamicCommand(agent) {
  * エージェント設定をマージする。
  * base（デフォルト）に override（config.json）を上書きする。
  * 配列フィールド（extraArgs 等）は override 側が完全に置き換える。
+ * base が null の場合は override だけで新しいエージェントを作る。
  *
- * @param {object} base  デフォルトのエージェント設定
- * @param {object} override  config.json の差分
+ * @param {object|null} base      デフォルトのエージェント設定、または null
+ * @param {object}      override  config.json の差分
  * @returns {object} マージ済み設定
  */
 function mergeAgentConfig(base, override) {
   if (!override || Object.keys(override).length === 0) return base;
-  const result = { ...base };
+  const result = base ? { ...base } : {};
   for (const [key, value] of Object.entries(override)) {
     if (value !== undefined) {
       result[key] = value;
     }
   }
   return result;
+}
+
+/**
+ * 解決済みエージェント設定が起動に必要な最小フィールドを持っているか検証する。
+ * config.json のみで定義されたカスタムエージェントが不完全な状態で使われるのを防ぐ。
+ *
+ * @param {object} agent  解決済みエージェント設定
+ * @returns {boolean} 有効なら true
+ */
+function isValidAgentConfig(agent) {
+  if (!agent || typeof agent !== 'object') return false;
+  // command と promptDelivery が無いと起動できない
+  if (typeof agent.command !== 'string' || agent.command.length === 0) return false;
+  if (typeof agent.promptDelivery !== 'string' || agent.promptDelivery.length === 0) return false;
+  return true;
 }
 
 // ── 公開API ─────────────────────────────────────────────────────────────────
@@ -157,16 +173,26 @@ function resolveAgentConfig(agentId, opts = {}) {
   }
 
   // マージ: default → global → workspace（後勝ち）
+  // defaultAgent が無くても config.json だけで定義されたカスタムエージェントを解決できる。
   let merged = defaultAgent;
   if (merged) {
     merged = resolveDynamicCommand(merged);
-    if (Object.keys(globalOverride).length > 0) {
+  }
+
+  const hasGlobal = Object.keys(globalOverride).length > 0;
+  const hasWorkspace = Object.keys(workspaceOverride).length > 0;
+
+  if (hasGlobal || hasWorkspace) {
+    if (hasGlobal) {
       merged = mergeAgentConfig(merged, globalOverride);
     }
-    if (Object.keys(workspaceOverride).length > 0) {
+    if (hasWorkspace) {
       merged = mergeAgentConfig(merged, workspaceOverride);
     }
   }
+
+  // 解決結果が起動可能な設定を持っているか検証
+  if (!isValidAgentConfig(merged)) return null;
 
   return merged;
 }

@@ -162,7 +162,7 @@ test('resolveAgentConfig: 解決順序 — workspace > global > defaults', () =>
   });
 });
 
-test('resolveAgentConfig: デフォルトにないカスタムエージェントは config から解決できる', () => {
+test('resolveAgentConfig: デフォルトにないカスタムエージェントを config.json から解決できる', () => {
   withTempHome(home => {
     writeConfig(home, {
       agents: {
@@ -170,11 +170,63 @@ test('resolveAgentConfig: デフォルトにないカスタムエージェント
       },
     });
 
-    // デフォルトに無いエージェントは global override だけでは解決できない
-    // （merge のベースとなる defaultAgent が存在しないため）
     const agent = resolveAgentConfig('my-custom-agent', { homedir: home });
-    // デフォルトにベースが無いので null
-    assert.equal(agent, null, 'agent not in defaults should return null even if in config');
+    assert.ok(agent, 'config-only agent should be resolved');
+    assert.equal(agent.command, 'custom-cli');
+    assert.equal(agent.promptDelivery, 'flag');
+    assert.equal(agent.promptFlag, '-p');
+    assert.equal(agent.label, 'Custom');
+  });
+});
+
+test('resolveAgentConfig: config-only エージェントに workspace override が上書きされる', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-custom-'));
+    try {
+      writeConfig(home, {
+        agents: {
+          'my-agent': { command: 'global-cli', promptDelivery: 'flag', promptFlag: '-g' },
+        },
+      });
+      writeWorkspaceConfig(ws, {
+        agents: {
+          'my-agent': { promptFlag: '-w' },
+        },
+      });
+
+      const agent = resolveAgentConfig('my-agent', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      assert.equal(agent.command, 'global-cli', 'command from global preserved');
+      assert.equal(agent.promptFlag, '-w', 'promptFlag overridden by workspace');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('resolveAgentConfig: config-only エージェントが command 欠如で null になる', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'incomplete-agent': { label: 'No Command', promptDelivery: 'flag' },
+      },
+    });
+
+    const agent = resolveAgentConfig('incomplete-agent', { homedir: home });
+    assert.equal(agent, null, 'agent without command should be null');
+  });
+});
+
+test('resolveAgentConfig: config-only エージェントが promptDelivery 欠如で null になる', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'incomplete-agent': { command: 'some-cli', label: 'No Delivery' },
+      },
+    });
+
+    const agent = resolveAgentConfig('incomplete-agent', { homedir: home });
+    assert.equal(agent, null, 'agent without promptDelivery should be null');
   });
 });
 
