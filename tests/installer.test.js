@@ -12,7 +12,7 @@ const os = require('os');
 const { execFileSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
-const { parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter } =
+const { parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive } =
   require('../scripts/install.js');
 
 // ── ユーティリティ関数のユニットテスト ──────────────────────────────────────
@@ -143,7 +143,135 @@ for (const [agentName, config] of Object.entries(agents)) {
   });
 }
 
-// ── 全スクリプトが集約先（~/.gh-maestro/scripts）に在ることを検証 ─────────────
+// ── pruneStaleRecursive（G1） ─────────────────────────────────────────────────
+
+test('pruneStaleRecursive: サブディレクトリ内のstaleファイルを削除する', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-prune-src-'));
+  const dest = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-prune-dest-'));
+  try {
+    // ソース: sub/a.js のみ
+    fs.mkdirSync(path.join(src, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(src, 'sub', 'a.js'), 'a');
+
+    // dest: sub/a.js + sub/stale.js（ゴーストファイル）
+    fs.mkdirSync(path.join(dest, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(dest, 'sub', 'a.js'), 'a');
+    fs.writeFileSync(path.join(dest, 'sub', 'stale.js'), 'stale');
+
+    pruneStaleRecursive(src, dest);
+
+    assert.ok(!fs.existsSync(path.join(dest, 'sub', 'stale.js')), 'staleファイルが削除されている');
+    assert.ok(fs.existsSync(path.join(dest, 'sub', 'a.js')), 'ソースに存在するファイルは残っている');
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test('pruneStaleRecursive: サブディレクトリ内のstaleサブディレクトリを削除する', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-prune-src-'));
+  const dest = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-prune-dest-'));
+  try {
+    fs.mkdirSync(path.join(src, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(src, 'sub', 'a.js'), 'a');
+
+    fs.mkdirSync(path.join(dest, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(dest, 'sub', 'a.js'), 'a');
+    fs.mkdirSync(path.join(dest, 'sub', 'stale-dir'), { recursive: true });
+    fs.writeFileSync(path.join(dest, 'sub', 'stale-dir', 'ghost.txt'), 'ghost');
+
+    pruneStaleRecursive(src, dest);
+
+    assert.ok(!fs.existsSync(path.join(dest, 'sub', 'stale-dir')), 'staleなサブディレクトリが削除されている');
+    assert.ok(fs.existsSync(path.join(dest, 'sub', 'a.js')), 'ソースに存在するファイルは残っている');
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test('pruneStaleRecursive: トップレベルのstaleファイルも削除する', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-prune-src-'));
+  const dest = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-prune-dest-'));
+  try {
+    fs.writeFileSync(path.join(src, 'a.js'), 'a');
+    fs.writeFileSync(path.join(dest, 'a.js'), 'a');
+    fs.writeFileSync(path.join(dest, 'stale.js'), 'stale');
+
+    pruneStaleRecursive(src, dest);
+
+    assert.ok(!fs.existsSync(path.join(dest, 'stale.js')), 'トップレベルのstaleファイルが削除されている');
+    assert.ok(fs.existsSync(path.join(dest, 'a.js')), 'ソースに存在するファイルは残っている');
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+// ── copySkillAssets: サブディレクトリと拡張子フィルタ（G2, G3） ──────────────
+
+test('copySkillAssets: 拡張子 .txt と .yaml のファイルもコピー対象になる（G3）', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-src-'));
+  const dest = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-dest-'));
+  try {
+    fs.writeFileSync(path.join(src, 'SKILL.md'), '# Skill');
+    fs.writeFileSync(path.join(src, 'README.txt'), 'readme');
+    fs.writeFileSync(path.join(src, 'config.yaml'), 'key: val');
+    fs.writeFileSync(path.join(src, 'data.json'), '{}');
+
+    copySkillAssets(src, dest, {});
+
+    assert.ok(fs.existsSync(path.join(dest, 'README.txt')), '.txt ファイルがコピーされている');
+    assert.ok(fs.existsSync(path.join(dest, 'config.yaml')), '.yaml ファイルがコピーされている');
+    assert.ok(fs.existsSync(path.join(dest, 'data.json')), '.json ファイルがコピーされている');
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test('copySkillAssets: destに残った未知のサブディレクトリを削除する（G2）', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-src-'));
+  const dest = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-dest-'));
+  try {
+    fs.writeFileSync(path.join(src, 'SKILL.md'), '# Skill');
+
+    // dest に未知のサブディレクトリを作成
+    fs.mkdirSync(path.join(dest, 'old-subdir'), { recursive: true });
+    fs.writeFileSync(path.join(dest, 'old-subdir', 'stale.txt'), 'stale');
+
+    copySkillAssets(src, dest, {});
+
+    assert.ok(!fs.existsSync(path.join(dest, 'old-subdir')), '未知のサブディレクトリが削除されている');
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test('copySkillAssets: destに残った未知のファイルを削除する', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-src-'));
+  const dest = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-dest-'));
+  try {
+    fs.writeFileSync(path.join(src, 'SKILL.md'), '# Skill');
+    fs.writeFileSync(path.join(dest, 'SKILL.md'), '# Old');
+    fs.writeFileSync(path.join(dest, 'stale.md'), 'stale');
+
+    copySkillAssets(src, dest, {});
+
+    assert.ok(!fs.existsSync(path.join(dest, 'stale.md')), '未知のファイルが削除されている');
+    assert.ok(fs.existsSync(path.join(dest, 'SKILL.md')), 'SKILL.md は残っている');
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
 
 const SHARED_SCRIPTS = expandHome('~/.gh-maestro/scripts');
 
