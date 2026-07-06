@@ -14,7 +14,7 @@
 //     --repo <owner/repo> \
 //     --workspace <path> \
 //     [--base-branch <branch>] \
-//     [--agent <id>]              # ~/.gh-maestro/agents.json のエージェントID（省略時はスキルに応じたデフォルト）
+//     [--agent <id>]              # エージェントID。config.json > agent-defaults.json で解決（省略時はスキルに応じたデフォルト）
 //
 // 標準出力: ワーカー名（例: issue-5-implement / task-investigate-auth）
 
@@ -29,6 +29,7 @@ const { normalizeWorkerEntry } = require('./worker-entry');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs, checkAgentExists } = require('./agent-exec');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
+const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
@@ -56,42 +57,22 @@ if (!description) fail('--description が必要です');
 if (!repo)        fail('--repo が必要です');
 if (skill === 'gh-maestro-base' && !prompt) fail('gh-maestro-base を使う場合は --prompt が必要です');
 
-const skillAgentMap = {
-  'gh-maestro-coder': 'claude-ds',
-  'gh-maestro-base': 'claude-ds',
-  'gh-maestro-senior-coder': 'claude-ds-pro',
-  'gh-maestro-investigator': 'reasonix',
-  'gh-maestro-explorer': 'agy'
-};
-const agentId = explicitAgentId ?? skillAgentMap[skill] ?? 'agy';
+// --- エージェントID決定（--agent フラグ > skillAgentMap > フォールバック 'agy'） ---
+const skillMap = resolveSkillAgentMap({ workspace });
+const agentId = explicitAgentId ?? skillMap[skill] ?? 'agy';
 
 const orchPaneId = process.env.WEZTERM_PANE;
 if (!orchPaneId)  fail('WEZTERM_PANE が設定されていません');
 
-// --- agents.json からエージェント設定を解決 ---
+// --- エージェント設定を解決（config.json > agent-defaults.json） ---
 const homedir = process.env.HOME || process.env.USERPROFILE || '';
-const agentsJsonPath = resolve(homedir, '.gh-maestro', 'agents.json');
-let agentConfig = null;
-if (existsSync(agentsJsonPath)) {
-  try {
-    const agents = JSON.parse(readFileSync(agentsJsonPath, 'utf8'));
-    agentConfig = agents.find(a => a.id === agentId) ?? null;
-  } catch (e) {
-    console.warn(`spawn-worker: agents.json のパースに失敗しました: ${e.message}`);
-  }
-}
+let agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
 if (!agentConfig) {
   if (explicitAgentId) {
-    fail(`エージェント "${agentId}" が ~/.gh-maestro/agents.json に見つかりません。手動で追加するか、node scripts/install.js を実行してください。`);
+    fail(`エージェント "${agentId}" が設定に見つかりません。~/.gh-maestro/config.json または <workspace>/.gh-maestro/config.json で定義されているか確認してください。`);
   }
-  // 自動決定されたエージェントIDに対するフォールバック
-  const fallbacks = {
-    'claude-ds': { id: 'claude-ds', label: 'Claude Code (DeepSeek)', command: 'claude-ds', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'system-prompt-file', enterSequence: '\r\n' },
-    'claude-ds-pro': { id: 'claude-ds-pro', label: 'Claude Code (DeepSeek Pro)', command: 'claude-ds-pro', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'system-prompt-file', enterSequence: '\r\n' },
-    'reasonix': { id: 'reasonix', label: 'Reasonix Code', command: 'reasonix', extraArgs: ['--yolo'], promptDelivery: 'send-text-after-launch', sendTextDelayMs: 2000, skillsViaMd: true, enterSequence: '\r' },
-    'agy': { id: 'agy', label: 'Antigravity', command: 'agy', extraArgs: ['--dangerously-skip-permissions'], promptDelivery: 'flag', promptFlag: '-i', enterSequence: '\r\n' }
-  };
-  agentConfig = fallbacks[agentId] ?? fallbacks['agy'];
+  // フォールバック 'agy' も見つからないのは設定破損
+  fail(`エージェント "${agentId}" の設定を解決できません。agent-defaults.json が破損していないか確認してください。`);
 }
 
 // --- エージェントがログインシェルで解決可能か確認 ---
@@ -104,7 +85,7 @@ if (!checkAgentExists(agentConfig.command)) {
 // --- [レガシーガード] pwsh -Command 経由エージェントの空白パスガード ---
 // 新しい agent-exec.js は -EncodedCommand（Windows）/ exec "$@"（Unix）を使用するため
 // 引数内の空白は安全に扱える。ただし、extraArgs に -Command を含む旧来のカスタム設定が
-// agents.json に残っている場合のためにこのガードを残す（新構成では発動しない想定）。
+// config.json に残っている場合のためにこのガードを残す（新構成では発動しない想定）。
 if (agentConfig.extraArgs?.includes('-Command') && /\s/.test(workspace)) {
   console.error(`spawn-worker: ワークスペースのパスに空白が含まれています: "${workspace}"`);
   console.error(`  エージェント "${agentId}" は pwsh -Command 経由で起動するため、空白を含むパスは`);
@@ -317,9 +298,9 @@ const shortPrompt = agentConfig.skillsViaMd
   : `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。詳細は ${toUnix(promptFile)} を参照してください。`;
 
 // --- プロンプト配送メカニズム ---
-// エージェントごとの起動argv組み立ては、agents.json の promptDelivery（宣言的データ）で選び、
+// エージェントごとの起動argv組み立ては、agent-defaults.json の promptDelivery（宣言的データ）で選び、
 // 実装（この4パターン）だけを spawn-worker.js に集約する。エージェント追加時に触るのは
-// agents.json 側のデータだけで済み、ここに新しい if 分岐を足す必要は無いのが望ましい状態。
+// agent-defaults.json 側のデータだけで済み、ここに新しい if 分岐を足す必要は無いのが望ましい状態。
 // docs/agent-launch-mechanism-plan.md 参照。
 let agentCmdArgs;
 try {
@@ -376,7 +357,7 @@ try {
 
 // --- send-text-after-launch: 起動後にsend-textでプロンプトを注入 ---
 // positional argが使えないエージェント（reasonix等）向け。
-// TUI初期化待ち（agents.json の sendTextDelayMs、既定2000ms）後にwezterm cli send-textでプロンプトを送る。
+// TUI初期化待ち（agent-defaults.json の sendTextDelayMs、既定2000ms）後にwezterm cli send-textでプロンプトを送る。
 if (agentConfig.promptDelivery === 'send-text-after-launch') {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, agentConfig.sendTextDelayMs ?? 2000);
   const sendResult = spawnSync('wezterm', ['cli', 'send-text', '--pane-id', newPaneId, '--no-paste', shortPrompt], { encoding: 'utf8' });

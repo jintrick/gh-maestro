@@ -1,0 +1,69 @@
+{
+  "agents": [
+    {
+      "id": "claude",
+      "label": "Claude Code (Anthropic)",
+      "command": "claude",
+      "runtime": "claude",
+      "extraArgs": ["--dangerously-skip-permissions"],
+      "promptDelivery": "system-prompt-file",
+      "enterSequence": "\r\n"
+    },
+    {
+      "id": "claude-ds",
+      "label": "Claude Code (DeepSeek)",
+      "command": "claude-ds",
+      "runtime": "claude",
+      "extraArgs": ["--dangerously-skip-permissions"],
+      "promptDelivery": "system-prompt-file",
+      "enterSequence": "\r\n"
+    },
+    {
+      "id": "claude-ds-pro",
+      "label": "Claude Code (DeepSeek Pro)",
+      "command": "claude-ds-pro",
+      "runtime": "claude",
+      "extraArgs": ["--dangerously-skip-permissions"],
+      "promptDelivery": "system-prompt-file",
+      "enterSequence": "\r\n"
+    },
+    {
+      "id": "reasonix",
+      "label": "Reasonix Code",
+      "command": "reasonix",
+      "runtime": "claude",
+      "extraArgs": ["--yolo"],
+      "dynamicCommand": true,
+      "promptDelivery": "send-text-after-launch",
+      "sendTextDelayMs": 2000,
+      "skillsViaMd": true,
+      "enterSequence": "\r"
+    },
+    {
+      "id": "agy",
+      "label": "Antigravity",
+      "command": "agy",
+      "runtime": "agy",
+      "extraArgs": ["--dangerously-skip-permissions"],
+      "promptDelivery": "flag",
+      "promptFlag": "-i",
+      "enterSequence": "\r\n"
+    },
+    {
+      "id": "codex",
+      "label": "Codex (OpenAI)",
+      "command": "codex",
+      "runtime": "codex",
+      "extraArgs": ["--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen"],
+      "promptDelivery": "positional",
+      "enterSequence": "\r\n"
+    }
+  ],
+  "skillAgentMap": {
+    "gh-maestro-coder": "claude-ds",
+    "gh-maestro-base": "claude-ds",
+    "gh-maestro-senior-coder": "claude-ds-pro",
+    "gh-maestro-investigator": "reasonix",
+    "gh-maestro-explorer": "agy"
+  }
+}
