@@ -124,41 +124,67 @@ test('resolveAgentConfig: workspace config が global config を上書きする'
     const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-'));
     try {
       writeConfig(home, {
-        agents: { 'claude-ds': { command: 'global-cmd' } },
+        agents: { 'claude-ds': { enterSequence: '\n' } },
       });
       writeWorkspaceConfig(ws, {
-        agents: { 'claude-ds': { command: 'workspace-cmd' } },
+        agents: { 'claude-ds': { enterSequence: '\r' } },
       });
 
       const agent = resolveAgentConfig('claude-ds', { homedir: home, workspace: ws });
-      assert.equal(agent.command, 'workspace-cmd', 'workspace should win over global');
+      assert.equal(agent.enterSequence, '\r', 'workspace should win over global for non-exec fields');
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }
   });
 });
 
-test('resolveAgentConfig: 解決順序 — workspace > global > defaults', () => {
+test('resolveAgentConfig: workspace config は command を上書きできない（セキュリティ）', () => {
   withTempHome(home => {
-    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-order-'));
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-sec-'));
     try {
-      // デフォルト: command='claude-ds', extraArgs=['--dangerously-skip-permissions']
-      // global: command='global-claude'
-      // workspace: extraArgs=['--custom-flag']
-      writeConfig(home, {
-        agents: { 'claude-ds': { command: 'global-claude' } },
-      });
       writeWorkspaceConfig(ws, {
-        agents: { 'claude-ds': { extraArgs: ['--custom-flag'] } },
+        agents: { 'claude-ds': { command: 'malicious-cmd', extraArgs: ['--evil'] } },
       });
 
       const agent = resolveAgentConfig('claude-ds', { homedir: home, workspace: ws });
-      assert.equal(agent.command, 'global-claude', 'global overrides default command');
-      assert.deepEqual(agent.extraArgs, ['--custom-flag'], 'workspace overrides global extraArgs');
-      assert.equal(agent.promptDelivery, 'system-prompt-file', 'default field unchanged');
+      assert.ok(agent);
+      assert.equal(agent.command, 'claude-ds', 'workspace should not override command');
+      assert.deepEqual(agent.extraArgs, ['--dangerously-skip-permissions'], 'workspace should not override extraArgs');
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }
+  });
+});
+
+test('resolveAgentConfig: workspace config が command/extraArgs 以外は上書きできる', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-safe-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: { 'claude-ds': { sendTextDelayMs: 9999, enterSequence: '\r' } },
+      });
+
+      const agent = resolveAgentConfig('claude-ds', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      assert.equal(agent.command, 'claude-ds', 'command unchanged');
+      assert.equal(agent.sendTextDelayMs, 9999, 'non-exec field overridable');
+      assert.equal(agent.enterSequence, '\r', 'non-exec field overridable');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('resolveAgentConfig: global config は command/extraArgs を上書きできる', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: { 'claude-ds': { command: 'pwsh', extraArgs: ['-NoLogo', '-Command', 'my-wrapper'] } },
+    });
+
+    const agent = resolveAgentConfig('claude-ds', { homedir: home });
+    assert.ok(agent);
+    assert.equal(agent.command, 'pwsh', 'global config should override command');
+    assert.deepEqual(agent.extraArgs, ['-NoLogo', '-Command', 'my-wrapper'], 'global config should override extraArgs');
   });
 });
 

@@ -280,9 +280,10 @@ if (fs.existsSync(agentsConfigPath)) {
   let legacyAgents = [];
   try {
     legacyAgents = JSON.parse(fs.readFileSync(agentsConfigPath, 'utf8'));
-    if (!Array.isArray(legacyAgents)) legacyAgents = [];
+    if (!Array.isArray(legacyAgents)) { legacyAgents = []; ghMaestroPath("agents.json"); }
   } catch {
-    ok('agents.json parse failed — skipping migration');
+    ok('agents.json parse failed — skipping migration, preserving file');
+    ghMaestroPath('agents.json');
     legacyAgents = [];
   }
 
@@ -347,7 +348,7 @@ if (fs.existsSync(agentsConfigPath)) {
         }
       }
 
-      existingConfig.agents = { ...(existingConfig.agents || {}), ...agentOverrides };
+      existingConfig.agents = { ...agentOverrides, ...(existingConfig.agents || {}) };
       fs.writeFileSync(configJsonPath, JSON.stringify(existingConfig, null, 2) + '\n', 'utf8');
       ok(`agents.json → config.json: ${migratedCount} agent override(s) migrated`);
     } else {

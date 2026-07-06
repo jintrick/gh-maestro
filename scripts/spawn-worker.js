@@ -65,7 +65,8 @@ const orchPaneId = process.env.WEZTERM_PANE;
 if (!orchPaneId)  fail('WEZTERM_PANE が設定されていません');
 
 // --- エージェント設定を解決（config.json > agent-defaults.json） ---
-let agentConfig = resolveAgentConfig(agentId, { workspace });
+const homedir = process.env.HOME || process.env.USERPROFILE || '';
+let agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
 if (!agentConfig) {
   if (explicitAgentId) {
     fail(`エージェント "${agentId}" が設定に見つかりません。~/.gh-maestro/config.json または <workspace>/.gh-maestro/config.json で定義されているか確認してください。`);

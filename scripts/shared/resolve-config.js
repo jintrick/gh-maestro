@@ -166,10 +166,17 @@ function resolveAgentConfig(agentId, opts = {}) {
   const globalOverride = (globalConfig.agents && globalConfig.agents[agentId]) || {};
 
   // 3. workspace/.gh-maestro/config.json の agents セクション
+  // セキュリティ: workspace config は実行コマンド（command/extraArgs）を上書きできない。
+  // 悪意あるリポジトリを clone しただけで任意コマンド実行されるのを防ぐ。
+  // 実行系フィールドの上書きは ~/.gh-maestro/config.json（ユーザーが明示的に編集したもの）のみ許可。
   let workspaceOverride = {};
   if (opts.workspace) {
     const wsConfig = loadConfigFile(resolve(opts.workspace, '.gh-maestro', 'config.json'));
-    workspaceOverride = (wsConfig.agents && wsConfig.agents[agentId]) || {};
+    const rawWsOverride = (wsConfig.agents && wsConfig.agents[agentId]) || {};
+    // command / extraArgs を workspace override から除去
+    workspaceOverride = { ...rawWsOverride };
+    delete workspaceOverride.command;
+    delete workspaceOverride.extraArgs;
   }
 
   // マージ: default → global → workspace（後勝ち）
