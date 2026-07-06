@@ -43,11 +43,13 @@ Canonical sources live in the repository, not installed copies.
 - Prefer updating `skills/agents.yaml` for default agent configuration.
 - Keep scripts in `scripts/`; do not hide executable logic inside skill directories.
 
-After changing skills, script distribution, or agent defaults, run:
+After changing skills, script distribution, or agent defaults, run **from the `dev` branch** (after the changes are merged):
 
 ```sh
 node scripts/install.js
 ```
+
+**Never run `node scripts/install.js` from a WIP/unmerged feature branch.** It writes to the machine-global `~/.gh-maestro/` shared directory and will overwrite installed state with unreviewed, unmerged code.
 
 ## Change Discipline
 
@@ -60,7 +62,7 @@ node scripts/install.js
 ## Checks
 
 - Run `npm test` for code or installer changes.
-- Run `node scripts/install.js` after skill, script distribution, or `skills/agents.yaml` changes.
+- Run `node scripts/install.js` after skill, script distribution, or `skills/agents.yaml` changes **— only from the `dev` branch after changes are merged. Never from a WIP branch.**
 - If CLI launch flags, subcommands, or argument combinations change, execute a minimal real command for that CLI path, not only `--help`.
 - For doc-only changes, tests are optional unless the documentation changes operational instructions that should be verified.
 

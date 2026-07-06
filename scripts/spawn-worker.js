@@ -370,7 +370,10 @@ if (agentConfig.promptDelivery === 'send-text-after-launch') {
 }
 
 // --- コーダー起動時はPRポーリングを自動開始 ---
-if (skill === 'gh-maestro-coder' && issue) {
+// PRを作成しうる全coderスキルを対象とする。
+// 新たなcoder系スキルの追加時はここに追記すること。
+const PR_CREATING_SKILLS = new Set(['gh-maestro-coder', 'gh-maestro-senior-coder']);
+if (PR_CREATING_SKILLS.has(skill) && issue) {
   const notifier = spawn(process.execPath, [
     resolve(__dirname, 'poll-and-notify.js'),
     issue,

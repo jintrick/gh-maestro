@@ -101,9 +101,14 @@ function stripFrontmatter(content) {
 
 function copySkillAssets(srcSkillDir, destSkillDir, substitutions) {
   const expectedFiles = new Set(['SKILL.md']);
+  const expectedDirs = new Set();
   for (const entry of fs.readdirSync(srcSkillDir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      expectedDirs.add(entry.name);
+      continue;
+    }
     if (!entry.isFile() || entry.name === 'SKILL.md') continue;
-    if (!/\.(md|json)$/i.test(entry.name)) continue;
+    if (!/\.(md|json|txt|yaml|yml)$/i.test(entry.name)) continue;
     expectedFiles.add(entry.name);
     const src = path.join(srcSkillDir, entry.name);
     const dest = path.join(destSkillDir, entry.name);
@@ -114,6 +119,34 @@ function copySkillAssets(srcSkillDir, destSkillDir, substitutions) {
   for (const entry of fs.readdirSync(destSkillDir, { withFileTypes: true })) {
     if (entry.isFile() && !expectedFiles.has(entry.name)) {
       fs.unlinkSync(path.join(destSkillDir, entry.name));
+      ok(`removed stale skill asset: ${entry.name}`);
+    } else if (entry.isDirectory() && !expectedDirs.has(entry.name)) {
+      fs.rmSync(path.join(destSkillDir, entry.name), { recursive: true, force: true });
+      ok(`removed stale skill subdir: ${entry.name}`);
+    }
+  }
+}
+
+function pruneStaleRecursive(srcDir, destDir, label) {
+  if (!fs.existsSync(srcDir) || !fs.existsSync(destDir)) return;
+  const srcNames = new Set(fs.readdirSync(srcDir));
+  for (const name of fs.readdirSync(destDir)) {
+    if (!srcNames.has(name)) {
+      const p = path.join(destDir, name);
+      fs.rmSync(p, { recursive: true, force: true });
+      const display = label ? path.join(label, name) : name;
+      ok(`pruned stale: ${display}`);
+    } else {
+      const srcChild = path.join(srcDir, name);
+      const destChild = path.join(destDir, name);
+      try {
+        const srcStat = fs.statSync(srcChild);
+        const destStat = fs.statSync(destChild);
+        if (srcStat.isDirectory() && destStat.isDirectory()) {
+          const childLabel = label ? path.join(label, name) : name;
+          pruneStaleRecursive(srcChild, destChild, childLabel);
+        }
+      } catch (_) { /* stat失敗時はスキップ */ }
     }
   }
 }
@@ -122,11 +155,35 @@ function step(msg) { console.log(`\x1b[36m[gh-maestro-install] ${msg}\x1b[0m`); 
 function ok(msg)   { console.log(`  \x1b[32mv ${msg}\x1b[0m`); }
 function fail(msg) { console.error(`  \x1b[31mx ${msg}\x1b[0m`); process.exit(1); }
 
-module.exports = { parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets };
+module.exports = { parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive };
 
 if (require.main !== module) return;
 
 // ── Main ──────────────────────────────────────────────────────────────────────
+
+// ── Branch guard: WIPブランチからの実行を防止 ──────────────────────────────────
+// install.js は ~/.gh-maestro/ 共有ディレクトリを書き換えるため、
+// 未レビュー・未マージのWIPブランチからの実行は機械的に拒否する。
+// --force で明示的に許可可能。
+const forceFlag = process.argv.includes('--force');
+try {
+  const { execFileSync: execGit } = require('child_process');
+  const currentBranch = execGit('git', ['branch', '--show-current'], { cwd: ROOT, encoding: 'utf8' }).trim();
+  const PROTECTED_BRANCHES = new Set(['dev', 'main']);
+  if (!PROTECTED_BRANCHES.has(currentBranch) && !forceFlag) {
+    console.error(`\x1b[31m[gh-maestro-install] エラー: 現在のブランチ "${currentBranch}" は保護ブランチではありません。`);
+    console.error(`  WIPブランチからの install.js 実行は ~/.gh-maestro/ 共有ディレクトリを`);
+    console.error(`  未レビュー・未マージのコードで上書きする恐れがあります。`);
+    console.error(`  dev または main ブランチで実行するか、--force フラグを付けて強行してください。`);
+    process.exit(1);
+  }
+  if (!PROTECTED_BRANCHES.has(currentBranch) && forceFlag) {
+    console.warn(`  \x1b[33m! --force によりブランチ "${currentBranch}" からの実行を許可します\x1b[0m`);
+  }
+} catch (e) {
+  // git が使えない環境（稀）では警告のみで続行
+  console.warn(`  \x1b[33m! git branch --show-current 失敗（${e.message.split('\n')[0]}）。ブランチ確認をスキップします。\x1b[0m`);
+}
 
 if (!fs.existsSync(AGENTS_YAML)) fail('skills/agents.yaml not found');
 const agents = parseAgentsYaml(fs.readFileSync(AGENTS_YAML, 'utf8'));
@@ -158,12 +215,15 @@ for (const [agentName, config] of Object.entries(agents)) {
   step(`Installing skills for ${agentName}...`);
   fs.mkdirSync(dest, { recursive: true });
 
-  // リポジトリに存在しない stale スキルディレクトリを削除する
+  // リポジトリに存在しない stale スキルディレクトリ・ファイルを削除する
   if (fs.existsSync(dest)) {
     for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
       if (entry.isDirectory() && !skillDirs.includes(entry.name)) {
         fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
         ok(`removed stale skill: ${entry.name}`);
+      } else if (entry.isFile()) {
+        fs.unlinkSync(path.join(dest, entry.name));
+        ok(`removed stray file in agent skills: ${entry.name} (${agentName})`);
       }
     }
   }
@@ -232,6 +292,8 @@ for (const f of scriptFiles) {
 }
 for (const d of scriptSubdirs) {
   fs.cpSync(path.join(scriptsDir, d), path.join(SHARED_SCRIPTS, d), { recursive: true });
+  // コピー後にサブディレクトリ内のstaleファイルを再帰的に削除（G1）
+  pruneStaleRecursive(path.join(scriptsDir, d), path.join(SHARED_SCRIPTS, d), d);
 }
 ok(`${scriptFiles.length} scripts + ${scriptSubdirs.length} subdir(s) -> ${SHARED_SCRIPTS}`);
 
@@ -247,11 +309,14 @@ const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {
   SCRIPTS_PATH: SHARED_SCRIPTS,
 });
 
-// stale 削除
+// stale 削除（ディレクトリと未知ファイルの両方）
 for (const entry of fs.readdirSync(SHARED_SKILLS, { withFileTypes: true })) {
   if (entry.isDirectory() && !skillDirs.includes(entry.name)) {
     fs.rmSync(path.join(SHARED_SKILLS, entry.name), { recursive: true, force: true });
     ok(`removed stale shared skill: ${entry.name}`);
+  } else if (entry.isFile()) {
+    fs.unlinkSync(path.join(SHARED_SKILLS, entry.name));
+    ok(`removed stray file in shared skills: ${entry.name}`);
   }
 }
 for (const skill of skillDirs) {
