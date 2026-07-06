@@ -140,11 +140,17 @@ function pruneStaleRecursive(srcDir, destDir, label) {
       const srcChild = path.join(srcDir, name);
       const destChild = path.join(destDir, name);
       try {
-        const srcStat = fs.statSync(srcChild);
-        const destStat = fs.statSync(destChild);
+        const srcStat = fs.lstatSync(srcChild);
+        const destStat = fs.lstatSync(destChild);
         if (srcStat.isDirectory() && destStat.isDirectory()) {
           const childLabel = label ? path.join(label, name) : name;
           pruneStaleRecursive(srcChild, destChild, childLabel);
+        } else if ((srcStat.isDirectory() && !destStat.isDirectory()) ||
+                   (!srcStat.isDirectory() && destStat.isDirectory())) {
+          // 型の不一致（srcがファイルでdestがディレクトリ、またはその逆）→ destを削除
+          fs.rmSync(destChild, { recursive: true, force: true });
+          const display = label ? path.join(label, name) : name;
+          ok(`pruned type-mismatch: ${display}`);
         }
       } catch (_) { /* stat失敗時はスキップ */ }
     }
