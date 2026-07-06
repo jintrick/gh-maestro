@@ -187,8 +187,16 @@ try {
     console.warn(`  \x1b[33m! --force によりブランチ "${currentBranch}" からの実行を許可します\x1b[0m`);
   }
 } catch (e) {
-  // git が使えない環境（稀）では警告のみで続行
-  console.warn(`  \x1b[33m! git branch --show-current 失敗（${e.message.split('\n')[0]}）。ブランチ確認をスキップします。\x1b[0m`);
+  // git が使えないなどブランチ確認不能な場合、安全側に倒して中断する。
+  // 警告で続行すると WIP ブランチからの誤実行を防げない（fail-open）。
+  if (!forceFlag) {
+    console.error(`\x1b[31m[gh-maestro-install] エラー: git branch --show-current に失敗しました。`);
+    console.error(`  ブランチ確認ができないため、安全のため中断します。`);
+    console.error(`  どうしても実行する場合は --force を付けてください。`);
+    console.error(`  エラー詳細: ${e.message.split('\n')[0]}`);
+    process.exit(1);
+  }
+  console.warn(`  \x1b[33m! --force によりブランチ確認失敗を無視して続行します（${e.message.split('\n')[0]}）\x1b[0m`);
 }
 
 if (!fs.existsSync(AGENTS_YAML)) fail('skills/agents.yaml not found');
@@ -297,9 +305,13 @@ for (const f of scriptFiles) {
   fs.copyFileSync(path.join(scriptsDir, f), path.join(SHARED_SCRIPTS, f));
 }
 for (const d of scriptSubdirs) {
-  fs.cpSync(path.join(scriptsDir, d), path.join(SHARED_SCRIPTS, d), { recursive: true });
-  // コピー後にサブディレクトリ内のstaleファイルを再帰的に削除（G1）
-  pruneStaleRecursive(path.join(scriptsDir, d), path.join(SHARED_SCRIPTS, d), d);
+  const destSubdir = path.join(SHARED_SCRIPTS, d);
+  // 型不一致（旧バージョンではファイル→新バージョンではディレクトリ、またはその逆）による
+  // fs.cpSync の ENOENT クラッシュを防ぐため、コピー先サブディレクトリを事前に除去する。
+  if (fs.existsSync(destSubdir)) {
+    fs.rmSync(destSubdir, { recursive: true, force: true });
+  }
+  fs.cpSync(path.join(scriptsDir, d), destSubdir, { recursive: true });
 }
 ok(`${scriptFiles.length} scripts + ${scriptSubdirs.length} subdir(s) -> ${SHARED_SCRIPTS}`);
 
