@@ -13,6 +13,17 @@ GitHubを永続ストアとして、複数のAIエージェントを協調動作
 | GitHub CLI | `gh`（`gh auth login` 済み） |
 | リポジトリ | `origin` リモートが GitHub を向いていること |
 
+## アーキテクチャ
+
+gh-maestro は **GitHub Issue のコメント** をメッセージバスとして、 orchestrator と worker エージェント間で通信する。
+
+- 各 worker は固有の **アンカー Issue** を持ち、全てのメッセージはその Issue へのコメントとして送受信される
+- 送信は `msg-send.js`、受信（ポーリング）は `msg-poll.js`、本文取得は `msg-read.js` を使用する
+- 全てのポーリングはエージェント自身のターン内で blocking 実行され、detached 常駐プロセスは存在しない
+- メッセージの真実は GitHub 上に永続化される。ローカルにはカーソルのみ保持し、消失しても再通知されるのみである
+
+詳細な仕様は `docs/github-comm-plan.md` を参照。
+
 ## インストール
 
 gh-maestro を任意の場所にクローンする（対象プロジェクトとは別の場所）：
@@ -34,19 +45,21 @@ node scripts/install.js
 2. `claude` または `agy` を起動する
 3. `/gh-maestro` を入力する
 
-あとは orchestrator の指示に従って開発を進める。
+あとは orchestrator の指示に従って開発を進める。 orchestrator と worker 間の通信はすべて GitHub Issue コメントを介して行われ、指示・報告が永続化される。
 
 ```
 # 機能追加の場合
 あなた: 「ログイン機能を追加したい」
 orchestrator: Issue を起草・作成
-orchestrator → coder 起動・実装 → PR 作成
+orchestrator: coder をアンカー Issue と共に起動 → Issue コメントで指示
+coder: 実装・PR 作成（進捗・結果を Issue コメントで報告）
 CI: AI Code Review が自動実行（正確性・保守性・堅牢性）
 orchestrator: レビュー結果をトリアージ → あなたにマージを依頼
 
 # バグ調査の場合
 あなた: 「Issue #12 のバグを調査してほしい」
-orchestrator → investigator 起動・根本原因/影響範囲/修正方針を報告
+orchestrator: investigator をアンカー Issue と共に起動
+investigator: 根本原因/影響範囲/修正方針を Issue コメントで報告
 orchestrator: 調査結果をあなたに提示 → 対応方針を判断
 ```
 
