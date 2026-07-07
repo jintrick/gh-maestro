@@ -276,7 +276,7 @@ test('copySkillAssets: destに残った未知のファイルを削除する', ()
 const SHARED_SCRIPTS = expandHome('~/.gh-maestro/scripts');
 
 // スキル固有・base・lib・共有スクリプトが1か所に集約されている代表例
-for (const name of ['send-pane.js', 'unlink-junctions.js', 'spawn-worker.js', 'start-review-manager.js', 'poll-pr.js', 'review-publisher.js']) {
+for (const name of ['msg-send.js', 'unlink-junctions.js', 'spawn-worker.js', 'start-review-manager.js', 'poll-pr.js', 'review-publisher.js']) {
   test(`集約先に ${name} が存在する`, () => {
     const p = path.join(SHARED_SCRIPTS, name);
     assert.ok(fs.existsSync(p), `集約先に存在しない: ${p}`);

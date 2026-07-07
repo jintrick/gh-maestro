@@ -3,8 +3,7 @@
 //
 // WEZTERM_MOCK env があればモックスクリプトを使い（テスト用）、
 // なければ実 wezterm バイナリを呼ぶ。
-// queue-poller.js（mux 到達性チェック）と pane-notify.js（通知送信）の
-// 両方から使われる。
+// spawn-worker.js（ペイン起動）等から使われる。
 
 const { spawnSync } = require('./child-process');
 

@@ -6,7 +6,7 @@
 //
 // spawn-worker.js自身の起動時解決（--agent必須検証・見つからない場合のfail終了）とは
 // 用途が異なる。こちらは「わかれば使う、わからなければ呼び出し元のデフォルトに任せる」
-// というsoft-failな参照用途（例: pane-notify.jsのenterSequence選択）のため、
+// というsoft-failな参照用途（例: wezterm-cli.jsのenterSequence選択）のため、
 // ファイル欠落・パース失敗・該当エージェントなしのいずれも例外を投げず null を返す。
 
 const { resolve } = require('path');

@@ -1,21 +1,17 @@
 ---
 paths:
   - "tests/**"
-  - "scripts/queue*.js"
-  - "scripts/poll-and-notify.js"
   - "scripts/spawn-worker.js"
-  - "scripts/pane-notify.js"
   - "scripts/reset-session.js"
 ---
 
 # テスト内での実プロセス spawn 禁止
 
-`.gh-maestro` のプロセス群（poller / notifier / worker）は detached な常駐プロセスを起動する。**テストがこれらを実起動すると孤児プロセスが累積する。** 過去に単一のテストスイート実行で detached poller が **65 プロセス・CPU 100%** に達し、手動強制停止が必要になった。
+**アーキテクチャ原則: detached プロセスをそもそも作らない。** gh-maestro の通信基盤は GitHub Issue コメントベースに移行済み（`docs/github-comm-plan.md`）。ポーリングはすべて呼び出し元エージェントのターン内で blocking 実行され、detached な常駐プロセスは存在しない。テストが実 spawn を必要とする根拠もない。
 
-- **テストは poller / watcher / detached child process を実起動しない。** spawn を env フラグ（例: `GH_MAESTRO_DISABLE_LAZY_POLLER=1`）でゲートするか、spawn 関数を注入してモックし、**テストは実プロセスを 0 個 spawn する**。
-- **ゲートするのは実 spawn であって、テストではない。** env フラグ/注入で抑止するのは実プロセスの spawn。テスト本体は既定スイート（`npm test`）で必ず実行する。テストごと env でスキップするとその回帰カバレッジが静かに消える（実例: PR #40 で lazy-start 2件が `npm test` から skip されカバレッジ喪失→モック注入に修正）。実 spawn 回避と既定実行の両立にはモック注入を優先。
+過去に `.gh-maestro` のプロセス群（poller / notifier / worker）は detached な常駐プロセスを起動していた。単一のテストスイート実行で detached poller が **65 プロセス・CPU 100%** に達し、手動強制停止が必要になった事例がある。
+
+- **テストは poller / watcher / detached child process を実起動しない。** spawn を env フラグでゲートするか、spawn 関数を注入してモックし、**テストは実プロセスを 0 個 spawn する**。
+- **ゲートするのは実 spawn であって、テストではない。** env フラグ/注入で抑止するのは実プロセスの spawn。テスト本体は既定スイート（`npm test`）で必ず実行する。テストごと env でスキップするとその回帰カバレッジが静かに消える。実 spawn 回避と既定実行の両立にはモック注入を優先。
 - **`detached` + `unref` のプロセスはテストランナーをブロックも失敗もさせない。** `node --test` は緑で完走するため「全テスト pass」ではこの被害を検出できない。緑を安全の根拠にしない。
-- **間接的な spawn 経路も塞ぐ。** 直接 spawn していないテストでも、ヘルパー経由で lazy-start 等を発火させることがある（実例: `queue-ack` / `queue-status` のテストが `runSend` → `queue-send` の lazy-start を発火させ、ゲート漏れになった）。「このテストは直接 spawn しないから安全」は誤り。spawn しうるコードを**間接的にでも**呼ぶ全テストでゲートを立てる。
-- **spawn しうるコードのテスト実行後は、孤児プロセスが 0 であることを確認する。** 例（Windows）: `powershell -NoProfile -Command "@(Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | ? { $_.CommandLine -like '*queue-poller*' }).Count"` が 0。
-- **lazy-start / lease 取得は真にアトミックに。** poller.json 等の起動ロックは `fs.writeFileSync(path, payload, { flag: 'wx' })` で作成し、非アトミックな存在チェック＋書き込みでレースを作らない（二重起動＝プロセス増殖の温床）。
-- 常駐プロセスは終了経路を確実に持つ: シグナルハンドラ内で `process.exit()` を呼ぶ、フォールバックの `setInterval` を `unref()` しない（イベントループを維持する）。
+- **spawn しうるコードのテスト実行後は、孤児プロセスが 0 であることを確認する。** 例（Windows）: `powershell -NoProfile -Command "@(Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | ? { $_.CommandLine -like '*node --test*' }).Count"` が 0（テストランナー自身が終了すれば孤児は残らない）。

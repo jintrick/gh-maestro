@@ -15,12 +15,11 @@ allowed-tools: Read Agent
 
 - `scripts/spawn-worker.js` — ワーカー起動フロー全体
 - `scripts/link-node-modules.js` — node_modules自動リンクの動作
-- `scripts/poll-and-notify.js` — coderへの自動ポーリング動作
 - `scripts/install.js` — エージェント設定（agents.json）の初期値と更新ロジック
 
 抽出すべき内容:
 - ワーカーに渡される環境変数（WORKER_NAME / REPO / WORKSPACE / WORKTREE / ISSUE / BASE_BRANCH など）
-- 自動実行される前処理（git worktree作成 / node_modules junction / AGENTS.md書き出し / poll-and-notifyデタッチなど）
+- 自動実行される前処理（git worktree作成 / node_modules junction / AGENTS.md書き出しなど）
 - エージェント種別ごとのプロンプト配信方法（--append-system-prompt-file vs send-text injection）
 - ワーカーが**手動でやる必要がなくなった**操作（自動化により不要になったもの）
 

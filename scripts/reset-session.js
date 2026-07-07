@@ -14,7 +14,6 @@ const { existsSync, readFileSync, writeFileSync, rmSync,
         readdirSync, statSync, renameSync, unlinkSync } = require('fs');
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
-const { listPending } = require('./queue');
 const { killProcessTree } = require('./kill-tree');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 
@@ -379,80 +378,42 @@ if (existsSync(msgStateDir)) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 7. poller の kill と queue 状態の掃除
+// 7. queue 状態の掃除（後方互換: 旧FSキューセッションの残骸を掃除）
+//    queue.js / queue-poller.js は削除済みのため fs 直叩きのみで行う。
 // ═══════════════════════════════════════════════════════════════════
 
-log('poller プロセスを終了します...');
-const pollerJsonPath = resolve(workspace, '.gh-maestro', 'queue', 'poller.json');
-if (existsSync(pollerJsonPath)) {
-  try {
-    const pollerState = JSON.parse(readFileSync(pollerJsonPath, 'utf8'));
-    const elapsed = Date.now() - (pollerState.heartbeat || 0);
-    // heartbeat が stale（15s超）なら poller は既に死んでいる → pid 再利用リスクのため kill しない
-    if (elapsed > 15000) {
-      log(`poller.json の heartbeat が ${Math.floor(elapsed / 1000)}s 前で stale のため kill をスキップします。`);
-    } else if (pollerState.pid && pollerState.pid > 0) {
-      try {
-        process.kill(pollerState.pid, 0); // 生存確認（死んでいれば ESRCH）
-        process.kill(pollerState.pid, 'SIGTERM');
-        log(`poller (pid ${pollerState.pid}) を終了しました。`);
-        results.killed.push(`poller(${pollerState.pid})`);
-      } catch (e) {
-        if (e.code === 'ESRCH') {
-          log(`poller (pid ${pollerState.pid}) は既に終了しています。`);
-        } else {
-          warn(`poller (pid ${pollerState.pid}) の kill に失敗しました: ${e.message}`);
+// ── 後方互換: レガシー queue-poller（detached 常駐プロセス）を kill ──────
+// Phase 2 以前に起動されたセッションの .gh-maestro/queue/poller.json には
+// detached queue-poller の pid が残っている可能性がある。poller.json を読んで
+// heartbeat が新鮮なら best-effort で kill する（PID 再利用レース対策）。
+// poller.json 本体は後続の queue ディレクトリ削除で一緒に消える。
+{
+  const pollerJsonPath = resolve(workspace, '.gh-maestro', 'queue', 'poller.json');
+  if (existsSync(pollerJsonPath)) {
+    try {
+      const pollerState = JSON.parse(readFileSync(pollerJsonPath, 'utf8'));
+      const elapsed = Date.now() - (pollerState.heartbeat || 0);
+      if (elapsed > 15000) {
+        log(`poller.json の heartbeat が ${Math.floor(elapsed / 1000)}s 前で stale のため kill をスキップします。`);
+      } else if (pollerState.pid && pollerState.pid > 0) {
+        try {
+          process.kill(pollerState.pid, 0); // 生存確認（死んでいれば ESRCH）
+          killProcessTree(pollerState.pid); // detached → 子プロセスごと kill
+          log(`レガシー poller (pid ${pollerState.pid}) を終了しました。`);
+          results.killed.push(`legacy-poller(${pollerState.pid})`);
+        } catch (e) {
+          if (e.code === 'ESRCH') {
+            log(`レガシー poller (pid ${pollerState.pid}) は既に終了しています。`);
+          } else {
+            warn(`レガシー poller (pid ${pollerState.pid}) の kill に失敗しました: ${e.message}`);
+          }
         }
       }
+    } catch (e) {
+      warn(`poller.json の読み取りに失敗しました（queue 削除は続行します）: ${e.message}`);
     }
-  } catch (e) {
-    warn(`poller.json の読み取りに失敗しました: ${e.message}`);
-  }
-} else {
-  log('poller.json なし。スキップ。');
-}
-
-// ── pending 残数警告 ────────────────────────────────────────────────
-
-log('pending メッセージを確認します...');
-let pendingBeforeReset = [];
-try {
-  pendingBeforeReset = listPending(workspace);
-} catch (e) {
-  warn(`pending 一覧の取得に失敗しました: ${e.message}`);
-}
-
-// listPending は破損 JSON を黙ってスキップするため、inbox の生ファイル数も別途確認する
-let rawInboxCount = 0;
-const inboxRoot = resolve(workspace, '.gh-maestro', 'queue', 'inbox');
-try {
-  if (existsSync(inboxRoot)) {
-    const countDir = (dir) => {
-      let n = 0;
-      let entries;
-      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return n; }
-      for (const e of entries) {
-        try {
-          if (e.isDirectory()) { n += countDir(resolve(dir, e.name)); }
-          else if (e.isFile() && e.name.endsWith('.json')) { n++; }
-        } catch { /* skip unreachable */ }
-      }
-      return n;
-    };
-    rawInboxCount = countDir(inboxRoot);
-  }
-} catch { /* inbox 走査失敗は無視 */ }
-
-const parsedCount = pendingBeforeReset.length;
-if (parsedCount > 0 || rawInboxCount > 0) {
-  if (rawInboxCount !== parsedCount) {
-    warn(`pending メッセージが残っています — 正常: ${parsedCount} 件、生ファイル: ${rawInboxCount} 件（差分 ${rawInboxCount - parsedCount} 件は破損ファイルの可能性）。これらは配信されずに失われます。`);
-  } else {
-    warn(`pending メッセージが ${parsedCount} 件残っています。これらは配信されずに失われます。`);
   }
 }
-
-// ── queue ディレクトリの安全掃除 ────────────────────────────────────
 
 log('キュー状態を掃除します...');
 const queueDir = resolve(workspace, '.gh-maestro', 'queue');

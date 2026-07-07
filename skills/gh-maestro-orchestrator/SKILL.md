@@ -95,7 +95,6 @@ node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE "<メッセ�
 ```sh
 node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE
 ```
-- **send-pane.js** — 後方互換ラッパー。Phase 3で削除予定。新規の送信には `msg-send.js` を使用すること
 - **remove-worker.js** — ワーカーペインをkillしてworktreeを削除する
 
 ```sh
