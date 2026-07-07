@@ -285,7 +285,7 @@ const scriptFiles = entries
   .filter(e => e.isFile() && (e.name.endsWith('.js') || e.name.endsWith('.md') || e.name.endsWith('.json')) && !INSTALL_EXCLUDE.has(e.name))
   .map(e => e.name);
 // サブディレクトリ（scripts/shared/ 等）も 1:1 でミラーする。
-// これがないと shared/ を require するスクリプト（send-pane.js 等）が配布先で MODULE_NOT_FOUND になる。
+// これがないと shared/ を require するスクリプト（msg-send.js 等）が配布先で MODULE_NOT_FOUND になる。
 const scriptSubdirs = entries.filter(e => e.isDirectory()).map(e => e.name);
 
 // stale 削除: scripts/ に無いファイル・ディレクトリを集約先から除去する

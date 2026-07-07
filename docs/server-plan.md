@@ -1,5 +1,8 @@
 # Filesystem Message Queue 実装計画
 
+> **Superseded by [`docs/github-comm-plan.md`](github-comm-plan.md)**（2026-07-07 承認）。
+> 本ドキュメントは歴史的記録として残す。実装の根拠は `github-comm-plan.md` を参照すること。
+
 策定日: 2026-07-05（HTTP message bus 案を全面改稿）
 対象: `scripts/send-pane.js`, `scripts/message-file.js`, `scripts/poll-and-notify.js`, `scripts/spawn-worker.js`, `scripts/reset-session.js`, `skills/*/SKILL.md`, `.gh-maestro/queue`
 

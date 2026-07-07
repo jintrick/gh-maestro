@@ -7,7 +7,7 @@
 //   worker mode:       NEW_MESSAGE:<commentId>
 //   orchestrator mode: NEW_MESSAGE:<issue>:<commentId>
 //
-// poll-reviews.js / poll-inbox.js と同型の設計。エージェント自身のターン内で
+// poll-reviews.js と同型の設計。エージェント自身のターン内で
 // blocking poll として実行され、detached sidecar にはならない。
 //
 // カーソルは .gh-maestro/msg-state/<self>.json に永続化される。
