@@ -117,6 +117,32 @@ test('link-node-modules がインストール先と同構造のディレクト�
 
 // ── agent 解決 ────────────────────────────────────────────────────────────────
 
+// ── buildWorkerEntry（純粋関数） ────────────────────────────────────────────────
+
+test('buildWorkerEntry が issue フィールドを含むエントリを構築する', () => {
+  const { buildWorkerEntry } = require('../scripts/spawn-worker');
+  const entry = buildWorkerEntry('123', 'claude', 51);
+  assert.equal(entry.paneId, '123');
+  assert.equal(entry.agentId, 'claude');
+  assert.equal(entry.issue, 51);
+  assert.equal(typeof entry.issue, 'number');
+});
+
+test('buildWorkerEntry は issue を数値に変換する（文字列で渡されても Number() される）', () => {
+  const { buildWorkerEntry } = require('../scripts/spawn-worker');
+  const entry = buildWorkerEntry('456', 'agy', '99');
+  assert.equal(entry.issue, 99);
+  assert.equal(typeof entry.issue, 'number');
+});
+
+test('buildWorkerEntry が返すエントリは notifierPid を含まない（ポーリング不要の新設計）', () => {
+  const { buildWorkerEntry } = require('../scripts/spawn-worker');
+  const entry = buildWorkerEntry('1', 'claude', 7);
+  assert.ok(!('notifierPid' in entry), 'notifierPid は含まれていないこと');
+});
+
+// ── agent 解決 ────────────────────────────────────────────────────────────────
+
 test('--agent で存在しないエージェントを指定した場合はエラー終了する', () => {
   const fs = require('fs');
   const os = require('os');
