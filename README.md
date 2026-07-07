@@ -63,9 +63,9 @@ investigator: 根本原因/影響範囲/修正方針を Issue コメントで報
 orchestrator: 調査結果をあなたに提示 → 対応方針を判断
 ```
 
-## AI Code Review CI
+## AI Code Review
 
-PR作成時に単一のAIレビュワー `reviewer` が GitHub Actions 上で自動実行され、3観点を独立してレビューし観点ごとに別々のレビューを投稿する。
+PR作成時またはコミットのpush時、ローカルでAIレビュワー `reviewer`（Review Manager）が自動的に実行され、3観点を独立してレビューし、観点ごとに別々のレビューをGitHub PRに投稿する。
 
 | 観点 | 内容 |
 |---|---|
@@ -73,16 +73,15 @@ PR作成時に単一のAIレビュワー `reviewer` が GitHub Actions 上で自
 | Maintainability | 命名・lint抑制・アンチパターン・複雑性・責務分離 |
 | Resilience & Security | 異常系・非同期・セキュリティ脆弱性・外部障害耐性 |
 
-エンジンは `deepseek-v4-flash`（DeepSeek Anthropic互換API）。`DEEPSEEK_API_KEY` シークレットのみ必要。詳細仕様は `workflows/SPEC.md`。
+エンジンには `gh-maestro-reviewer` スキルを使用する。
 
-### ターゲットリポジトリへの導入
+### 動作の仕組み
 
-対象プロジェクトで `/gh-maestro` を初回起動すると自動的に実行される。
+PR作成などを契機に、バックグラウンドプロセスとして `start-review-manager.js` が起動し、以下の処理を実行する。
 
-以下を自動で実行する：
-
-1. `reviewer.lock.yml`・`reviewer.md`・`shared/` を `main` / `dev` ブランチの `.github/workflows/` に配置
-2. `DEEPSEEK_API_KEY` が未設定の場合は設定コマンドを案内する
+1. `run-review-manager.js` が各観点のサブエージェント（Reviewer）を並列で実行
+2. 各Reviewerが `reviewer-*.md` の基準に沿ってレビューを実行
+3. レビュー結果が統合され、`review-publisher.js` を介して GitHub PR にコメントとして投稿される
 
 ## スキルの構造
 
