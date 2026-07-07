@@ -50,18 +50,20 @@ gh 呼び出し失敗（ネットワーク断・rate limit 等）はそのサイ
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
-let _ghRepoView = () => {
+const GH_TIMEOUT_MS = 30000;
+
+let _ghRepoView = (opts = {}) => {
   return spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-    { encoding: 'utf8' });
+    { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
 };
 
-let _ghApiComments = (repo, issue, since) => {
+let _ghApiComments = (repo, issue, since, opts = {}) => {
   const args = ['api', '--method', 'GET', `repos/${repo}/issues/${issue}/comments`, '--jq', '.'];
   if (since) {
     args.push('-f', `since=${since}`);
   }
   args.push('-f', 'per_page=100');
-  return spawnSync('gh', args, { encoding: 'utf8' });
+  return spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
 };
 
 // ── ヘルパー ──────────────────────────────────────────────────────────────
@@ -196,7 +198,8 @@ function main(argsOverride, opts = {}) {
 
   // ── リポジトリ解決 ──────────────────────────────────────────────────
 
-  const repoResult = _ghRepoView();
+  const ghOpts = { cwd: workspace };
+  const repoResult = _ghRepoView(ghOpts);
   if (repoResult.status !== 0) {
     writeErr(`msg-poll: リポジトリを解決できません: ${repoResult.stderr || '(empty)'}`);
     return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
@@ -242,9 +245,12 @@ function main(argsOverride, opts = {}) {
 
       for (const issue of issues) {
         const issueSince = typeof state.since[issue] === 'string' ? state.since[issue] : null;
-        const result = _ghApiComments(repo, issue, issueSince);
+        const result = _ghApiComments(repo, issue, issueSince, ghOpts);
         if (result.status !== 0) {
-          writeErr(`msg-poll: gh api エラー (issue ${issue}): ${result.stderr || '(empty)'}`);
+          const errMsg = result.error && result.error.code === 'ETIMEDOUT'
+            ? `gh api タイムアウト (issue ${issue})`
+            : `gh api エラー (issue ${issue}): ${result.stderr || result.error?.message || '(empty)'}`;
+          writeErr(`msg-poll: ${errMsg}`);
           continue;
         }
         let comments;
@@ -265,9 +271,12 @@ function main(argsOverride, opts = {}) {
     } else {
       // worker モード: state.since は文字列
       const workerSince = typeof state.since === 'string' ? state.since : null;
-      const result = _ghApiComments(repo, issueArg, workerSince);
+      const result = _ghApiComments(repo, issueArg, workerSince, ghOpts);
       if (result.status !== 0) {
-        writeErr(`msg-poll: gh api エラー: ${result.stderr || '(empty)'}`);
+        const errMsg = result.error && result.error.code === 'ETIMEDOUT'
+          ? 'gh api タイムアウト'
+          : `gh api エラー: ${result.stderr || result.error?.message || '(empty)'}`;
+        writeErr(`msg-poll: ${errMsg}`);
         return;
       }
       let comments;
@@ -283,6 +292,24 @@ function main(argsOverride, opts = {}) {
       }
       for (const c of comments) {
         allIssuesAndComments.push({ issue: issueArg, comment: c });
+      }
+    }
+
+    // ── カーソルを全コメントの最大 created_at まで進める ─────────────────
+    // マッチしなかったコメントもカーソルを進めることで、無関係なコメントが
+    // 100件を超えても自分宛メッセージを見失わない（ページネーション対策）。
+
+    for (const { issue, comment: c } of allIssuesAndComments) {
+      if (c.created_at) {
+        if (isOrchestrator) {
+          if (!state.since[issue] || c.created_at > state.since[issue]) {
+            state.since[issue] = c.created_at;
+          }
+        } else {
+          if (!state.since || c.created_at > state.since) {
+            state.since = c.created_at;
+          }
+        }
       }
     }
 
@@ -309,18 +336,6 @@ function main(argsOverride, opts = {}) {
         writeOut(`NEW_MESSAGE:${cid}`);
       }
 
-      // カーソル更新（orchestrator は issue ごとの個別ウォーターマーク）
-      if (c.created_at) {
-        if (isOrchestrator) {
-          if (!state.since[issue] || c.created_at > state.since[issue]) {
-            state.since[issue] = c.created_at;
-          }
-        } else {
-          if (!state.since || c.created_at > state.since) {
-            state.since = c.created_at;
-          }
-        }
-      }
       newSeenIds.push(cid);
     }
 

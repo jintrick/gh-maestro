@@ -33,14 +33,14 @@ workspace 解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から�
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
-let _ghRepoView = () => {
+let _ghRepoView = (opts = {}) => {
   return spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-    { encoding: 'utf8' });
+    { encoding: 'utf8', ...opts });
 };
 
-let _ghIssueComment = (issue, body) => {
+let _ghIssueComment = (issue, body, opts = {}) => {
   return spawnSync('gh', ['issue', 'comment', String(issue), '--body-file', '-'], {
-    input: body, encoding: 'utf8',
+    input: body, encoding: 'utf8', ...opts,
   });
 };
 
@@ -127,7 +127,8 @@ function main(argsOverride, envOverride) {
 
   // ── リポジトリ解決 ──────────────────────────────────────────────────────
 
-  const repoResult = _ghRepoView();
+  const ghOpts = { cwd: workspace };
+  const repoResult = _ghRepoView(ghOpts);
   if (repoResult.status !== 0) {
     writeErr(`msg-send: リポジトリを解決できません: ${repoResult.stderr || '(empty)'}`);
     return { code: 1, lines: out, errLines: err };
@@ -145,7 +146,7 @@ function main(argsOverride, envOverride) {
 
   // ── 送信 ────────────────────────────────────────────────────────────────
 
-  const result = _ghIssueComment(issue, fullBody);
+  const result = _ghIssueComment(issue, fullBody, ghOpts);
 
   if (result.status !== 0) {
     writeErr(`msg-send: コメント投稿に失敗しました: ${result.stderr || '(empty)'}`);
