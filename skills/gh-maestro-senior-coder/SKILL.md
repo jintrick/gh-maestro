@@ -32,7 +32,8 @@ node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
 
 ## ゴール
 
-PRを作成した時点でこのワーカーの役割は完了する。CI監視はorchestratorの責務であり、コーダーは行わない。orchestratorへの完了報告は**不要**（orchestratorがPRを自律検出する）。
+PRを作成した時点で初期の実装作業は完了するが、orchestratorから後続の修正指示や明示的な終了指示を受信するまでは、インボックスのポーリングを停止（TaskStopなど）せず、待機を維持しなければならない。
+CI監視はorchestratorの責務であり、コーダーは行わない。orchestratorへの完了報告は**不要**（orchestratorがPRを自律検出する）。
 
 ## 起動時に与えられる情報
 
@@ -50,7 +51,7 @@ PRを作成した時点でこのワーカーの役割は完了する。CI監視�
 3. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）
 4. プロジェクトで定義された lint / format チェックを実行し、すべて通ってから push する（`Makefile` の `lint` ターゲット、`package.json` の `lint` スクリプト、`pyproject.toml` の設定など、プロジェクトの慣習に従う）
 5. `gh pr create --base $BASE_BRANCH` でPRを作成する（本文に `Closes #$ISSUE` を含める）
-6. PR作成が完了したらワーカーの役割は完了。**要約・完了メッセージなどのテキストを一切書かず**、そのまま終了する（通信ルール参照）
+6. PR作成が完了した後は、自己終了（TaskStopなど）を行わず、そのまま待機状態を維持する。orchestratorがPRを自律検出し、必要に応じて後続の修正指示を送るため、明示的な終了指示を受信するまでインボックスのポーリングおよび監視ループを維持すること（通信ルール参照）。
 
 ## 失敗時
 

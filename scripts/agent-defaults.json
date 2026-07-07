@@ -35,7 +35,7 @@
       "extraArgs": ["--yolo"],
       "dynamicCommand": true,
       "promptDelivery": "send-text-after-launch",
-      "sendTextDelayMs": 2000,
+      "sendTextDelayMs": 5000,
       "skillsViaMd": true,
       "enterSequence": "\r"
     },
