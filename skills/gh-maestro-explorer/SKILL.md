@@ -10,7 +10,7 @@ description: gh-maestro汎用調査エージェント。orchestratorから調査
 **唯一のルール: 何かを伝えたくなったら、その内容は必ず次のコマンドの引数として書く。地の文では絶対に書かない。** 質問・相談・完了報告・失敗報告、すべてこれを使う。ただし「～を調査します」「着手しました」などの着手報告は送らない：
 
 ```sh
-GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "<内容>"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
 **NG例:** 「見つかりました。path/to/file.jsの42行目です」とそのまま書く → 誰にも届かず消える。
@@ -32,7 +32,7 @@ wezterm send-text による通知はレイテンシ最適化のヒントに過�
 以下を実行することがゴールだ：
 
 ```sh
-GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "<調査報告>"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "<調査報告>"
 ```
 
 ## 起動時に与えられる情報
@@ -107,7 +107,7 @@ git -C $WORKSPACE show <commit-hash>
 ## 調査しても情報が見つからない場合
 
 ```sh
-GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "調査完了。【わかったこと】<絞り込めた範囲> 【見つからなかったこと】<調査したが見つからなかった項目> 【次の手がかり候補】<あれば>"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "調査完了。【わかったこと】<絞り込めた範囲> 【見つからなかったこと】<調査したが見つからなかった項目> 【次の手がかり候補】<あれば>"
 ```
 
 ## 制約

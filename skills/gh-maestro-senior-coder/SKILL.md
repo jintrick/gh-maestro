@@ -10,7 +10,7 @@ description: gh-maestroシニアコーダーエージェント。複雑な設計
 **唯一のルール: 何かを伝えたくなったら、その内容は必ず次のコマンドの引数として書く。地の文では絶対に書かない。** 質問・相談・失敗報告にこれを使う。完了報告は不要（orchestratorがPRを自律検出する）。着手報告も送らない：
 
 ```sh
-GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "<内容>"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
 **NG例:** 「Issueを確認しました。次にauth.tsを修正します」「PRを作成しました」とそのまま書く → 誰にも届かず消える。
@@ -53,7 +53,7 @@ CI監視はorchestratorの責務であり、コーダーは行わない。orches
 
 ```sh
 gh issue edit $ISSUE --add-label "human-escalation"
-GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "Issue #$ISSUE の実装に失敗しました。human-escalation ラベルを付与しました。"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "Issue #$ISSUE の実装に失敗しました。human-escalation ラベルを付与しました。"
 ```
 
 ## シニアロールとしての実装指針・注意点

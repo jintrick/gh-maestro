@@ -10,7 +10,7 @@ description: gh-maestroワーカーの共通骨格テンプレート。orchestra
 **唯一のルール: 何かを伝えたくなったら、その内容は必ず次のコマンドの引数として書く。地の文では絶対に書かない。** 質問・相談・完了報告・失敗報告、すべてこれを使う：
 
 ```sh
-GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "<内容>"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
 **NG例:** 「作業を完了しました」とそのまま書く → 誰にも届かず消える。

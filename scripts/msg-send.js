@@ -2,10 +2,13 @@
 // msg-send.js — GitHub Issue コメントを経由してメッセージを送信する
 //
 // Usage:
-//   node msg-send.js <recipient> [--issue <N>] [--workspace <path>] "<本文>"
+//   node msg-send.js <recipient> [--from <name>] [--issue <N>] [--workspace <path>] "<本文>"
 //
 // workspace resolution order:
 //   GH_MAESTRO_WORKSPACE env > --workspace arg > CWD upward search
+//
+// from resolution order:
+//   --from arg > GH_MAESTRO_WORKER env > 'orchestrator'
 
 'use strict';
 
@@ -16,20 +19,22 @@ const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
-Usage: node msg-send.js <recipient> [--issue <N>] [--workspace <path>] "<本文>"
+Usage: node msg-send.js <recipient> [--from <name>] [--issue <N>] [--workspace <path>] "<本文>"
 
 Arguments:
   <recipient>           送信先（worker 名、または "orchestrator"）
   <本文>                メッセージ本文
 
 Options:
+  --from <name>         送信元名（省略時は GH_MAESTRO_WORKER env → 'orchestrator'）
   --issue <N>           投稿先の Issue 番号（省略時は workers.json または env ISSUE から解決）
   --workspace <path>    ワークスペースパス（省略時は環境変数またはCWDから解決）
 
 Output (stdout):
   投稿されたコメントの URL を1行出力
 
-workspace 解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索`;
+workspace 解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索
+from 解決順: --from 引数 > GH_MAESTRO_WORKER env > 'orchestrator'`;
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -66,7 +71,7 @@ function main(argsOverride, envOverride) {
     return { code: 0, lines: out, errLines: err };
   }
 
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue']);
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue', '--from']);
 
   if (exitFlagMiss) {
     writeErr('msg-send: フラグには値が必要です。');
@@ -96,7 +101,7 @@ function main(argsOverride, envOverride) {
 
   // ── from の解決 ────────────────────────────────────────────────────────
 
-  const from = env.GH_MAESTRO_WORKER || 'orchestrator';
+  const from = values['--from'] || env.GH_MAESTRO_WORKER || 'orchestrator';
 
   // ── issue の解決 ────────────────────────────────────────────────────────
   // 優先順: --issue > env ISSUE > workers.json（worker 宛のみ）

@@ -10,7 +10,7 @@ description: gh-maestroバグ調査エージェント。orchestratorからバグ
 **唯一のルール: 何かを伝えたくなったら、その内容は必ず次のコマンドの引数として書く。地の文では絶対に書かない。** 質問・相談・完了報告・失敗報告、すべてこれを使う。ただし「～を調査します」「着手しました」などの着手報告は送らない：
 
 ```sh
-GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "<内容>"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
 **NG例:** 「原因が分かりました。auth.tsの42行目です」とそのまま書く → 誰にも届かず消える。
@@ -32,7 +32,7 @@ wezterm send-text による通知はレイテンシ最適化のヒントに過�
 以下を実行することがゴールだ：
 
 ```sh
-GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "<調査報告>"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "<調査報告>"
 ```
 
 ## 起動時に与えられる情報
@@ -115,7 +115,7 @@ path/to/file.js:42 — <具体的に何が起きているか。コードの解�
 ## 調査しても特定できない場合
 
 ```sh
-GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "調査完了。根本原因を特定できませんでした。【わかったこと】<絞り込めた範囲> 【行き詰まった理由】<理由> 【次の手がかり候補】<あれば>"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "調査完了。根本原因を特定できませんでした。【わかったこと】<絞り込めた範囲> 【行き詰まった理由】<理由> 【次の手がかり候補】<あれば>"
 ```
 
 ## 制約
