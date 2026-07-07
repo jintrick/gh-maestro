@@ -379,8 +379,41 @@ if (existsSync(msgStateDir)) {
 
 // ═══════════════════════════════════════════════════════════════════
 // 7. queue 状態の掃除（後方互換: 旧FSキューセッションの残骸を掃除）
-//    queue.js は削除済みのため fs 直叩きのみで行う。
+//    queue.js / queue-poller.js は削除済みのため fs 直叩きのみで行う。
 // ═══════════════════════════════════════════════════════════════════
+
+// ── 後方互換: レガシー queue-poller（detached 常駐プロセス）を kill ──────
+// Phase 2 以前に起動されたセッションの .gh-maestro/queue/poller.json には
+// detached queue-poller の pid が残っている可能性がある。poller.json を読んで
+// heartbeat が新鮮なら best-effort で kill する（PID 再利用レース対策）。
+// poller.json 本体は後続の queue ディレクトリ削除で一緒に消える。
+{
+  const pollerJsonPath = resolve(workspace, '.gh-maestro', 'queue', 'poller.json');
+  if (existsSync(pollerJsonPath)) {
+    try {
+      const pollerState = JSON.parse(readFileSync(pollerJsonPath, 'utf8'));
+      const elapsed = Date.now() - (pollerState.heartbeat || 0);
+      if (elapsed > 15000) {
+        log(`poller.json の heartbeat が ${Math.floor(elapsed / 1000)}s 前で stale のため kill をスキップします。`);
+      } else if (pollerState.pid && pollerState.pid > 0) {
+        try {
+          process.kill(pollerState.pid, 0); // 生存確認（死んでいれば ESRCH）
+          killProcessTree(pollerState.pid); // detached → 子プロセスごと kill
+          log(`レガシー poller (pid ${pollerState.pid}) を終了しました。`);
+          results.killed.push(`legacy-poller(${pollerState.pid})`);
+        } catch (e) {
+          if (e.code === 'ESRCH') {
+            log(`レガシー poller (pid ${pollerState.pid}) は既に終了しています。`);
+          } else {
+            warn(`レガシー poller (pid ${pollerState.pid}) の kill に失敗しました: ${e.message}`);
+          }
+        }
+      }
+    } catch (e) {
+      warn(`poller.json の読み取りに失敗しました（queue 削除は続行します）: ${e.message}`);
+    }
+  }
+}
 
 log('キュー状態を掃除します...');
 const queueDir = resolve(workspace, '.gh-maestro', 'queue');
