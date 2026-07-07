@@ -119,7 +119,7 @@ if (!workers.orchestrator) {
 
 // --- 生存確認: staleなpane_idをworkers.jsonから除去 ---
 const getAlivePaneIds = () => {
-  const r = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8', timeout: 6000 });
+  const r = spawnSync('wezterm', ['cli', '--no-auto-start', 'list', '--format', 'json'], { encoding: 'utf8', timeout: 6000 });
   if (r.error?.code === 'ETIMEDOUT') {
     console.warn('spawn-worker: wezterm cli list がタイムアウト — stale除去をスキップします');
     return null;
@@ -318,11 +318,11 @@ try {
 // これにより PATH 実行ファイル・pwsh 関数・エイリアスのすべてが起動可能になる。
 // argv の完全性は各プラットフォームのエンコード方式で保証される（agent-exec.js 参照）。
 const loginShellArgs = buildLoginShellExecArgs(agentCmdArgs);
-const splitArgs = ['cli', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...loginShellArgs];
+const splitArgs = ['cli', '--no-auto-start', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...loginShellArgs];
 const split = spawnSync('wezterm', splitArgs, { encoding: 'utf8' });
 if (split.status !== 0 && splitFromPaneId !== orchPaneId) {
   console.warn(`spawn-worker: ペイン分割失敗: ${split.stderr.trim()} — orchestratorペイン(${orchPaneId})にフォールバックします`);
-  const fallbackArgs = ['cli', 'split-pane', '--bottom', '--cwd', worktreeDir, '--pane-id', orchPaneId, '--', ...loginShellArgs];
+  const fallbackArgs = ['cli', '--no-auto-start', 'split-pane', '--bottom', '--cwd', worktreeDir, '--pane-id', orchPaneId, '--', ...loginShellArgs];
   const split2 = spawnSync('wezterm', fallbackArgs, { encoding: 'utf8' });
   if (split2.status === 0) {
     split.status = 0;
@@ -350,7 +350,7 @@ try {
   writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
   console.warn(`spawn-worker: worker "${workerName}" を pane ${newPaneId} として workers.json に登録しました`);
 } catch (e) {
-  spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', newPaneId], { encoding: 'utf8' });
+  spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', newPaneId], { encoding: 'utf8' });
   rollbackWorktree();
   fail(`workers.json への書き込みに失敗しました: ${e.message}`);
 }
@@ -360,7 +360,7 @@ try {
 // TUI初期化待ち（agent-defaults.json の sendTextDelayMs、既定2000ms）後にwezterm cli send-textでプロンプトを送る。
 if (agentConfig.promptDelivery === 'send-text-after-launch') {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, agentConfig.sendTextDelayMs ?? 2000);
-  const sendResult = spawnSync('wezterm', ['cli', 'send-text', '--pane-id', newPaneId, '--no-paste', shortPrompt], { encoding: 'utf8' });
+  const sendResult = spawnSync('wezterm', ['cli', '--no-auto-start', 'send-text', '--pane-id', newPaneId, '--no-paste', shortPrompt], { encoding: 'utf8' });
   if (sendResult.status !== 0) {
     console.warn(`spawn-worker: send-text失敗 (pane ${newPaneId}): ${sendResult.stderr?.trim()}`);
   } else {
@@ -386,7 +386,18 @@ if (PR_CREATING_SKILLS.has(skill) && issue) {
     windowsHide: true,
   });
   notifier.unref();
-  console.warn(`spawn-worker: poll-and-notify を起動しました (issue=${issue})`);
+  // notifierPid を workers.json に記録する: remove-worker.js / reset-session.js が
+  // pane と無関係に生き続けるこのプロセス（+ 子の poll-pr.js）を確実に終了できるようにする。
+  try {
+    const current = JSON.parse(readFileSync(workersJson, 'utf8'));
+    if (current[workerName]) {
+      current[workerName].notifierPid = notifier.pid;
+      writeFileSync(workersJson, JSON.stringify(current, null, 2), 'utf8');
+    }
+  } catch (e) {
+    console.warn(`spawn-worker: notifierPid の記録に失敗しました: ${e.message}`);
+  }
+  console.warn(`spawn-worker: poll-and-notify を起動しました (issue=${issue}, pid=${notifier.pid})`);
 }
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---

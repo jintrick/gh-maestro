@@ -18,9 +18,14 @@ const WEZ_TIMEOUT_MS = 6000;
  */
 function weztermCli(...args) {
   const mock = process.env.WEZTERM_MOCK || null;
-  return mock
-    ? spawnSync(process.execPath, [mock, ...args], { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS })
-    : spawnSync('wezterm', args, { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS });
+  if (mock) {
+    return spawnSync(process.execPath, [mock, ...args], { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS });
+  }
+  // 呼び出し元は既にGUIセッション内で動いている前提の制御プレーン操作のみ。
+  // --no-auto-start を付けないと、mux未到達時に新しい wezterm-mux-server.exe を
+  // 無限に自動起動してしまう（バックグラウンドの定期ヘルスチェックで特に顕著）。
+  const withGuard = args[0] === 'cli' ? [args[0], '--no-auto-start', ...args.slice(1)] : args;
+  return spawnSync('wezterm', withGuard, { encoding: 'utf8', timeout: WEZ_TIMEOUT_MS });
 }
 
 module.exports = { weztermCli };

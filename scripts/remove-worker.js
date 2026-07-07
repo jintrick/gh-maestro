@@ -9,13 +9,14 @@
 //     --worker-name <name> \
 //     --workspace <path>
 
-const { spawnSync, execSync } = require('child_process');
+const { spawnSync, execSync } = require('./child-process');
 const { resolve } = require('path');
 const { readFileSync, writeFileSync, existsSync, rmSync } = require('fs');
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { purgeInbox } = require('./queue');
+const { killProcessTree } = require('./kill-tree');
 
 const USAGE = `remove-worker.js — ワーカーのペインを kill し worktree を削除する
 
@@ -59,17 +60,26 @@ try {
 
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-const paneId = normalizeWorkerEntry(workers[workerName]).paneId;
+const workerEntry = normalizeWorkerEntry(workers[workerName]);
+const paneId = workerEntry.paneId;
+
+// ── notifier(poll-and-notify.js)をkill ──────────────────────────────
+// paneとは無関係にdetachedで動いているため、pane killでは終了しない。
+if (workerEntry.notifierPid) {
+  killProcessTree(workerEntry.notifierPid);
+  console.warn(`remove-worker: notifier (pid ${workerEntry.notifierPid}) を終了しました`);
+}
+
 if (!paneId) {
   console.warn(`remove-worker: ワーカー "${workerName}" の pane_id が workers.json に存在しません — worktree削除のみ実行します`);
 } else {
-  const exitResult = spawnSync('wezterm', ['cli', 'send-text', '--pane-id', paneId, '--no-paste', '/exit\n'], { encoding: 'utf8' });
+  const exitResult = spawnSync('wezterm', ['cli', '--no-auto-start', 'send-text', '--pane-id', paneId, '--no-paste', '/exit\n'], { encoding: 'utf8' });
   if (exitResult.status !== 0) {
     console.warn(`remove-worker: /exit 送信失敗 (pane ${paneId}): ${exitResult.stderr.trim()} — kill-paneに進みます`);
   }
   sleep(1000);
 
-  const killResult = spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', paneId], { encoding: 'utf8' });
+  const killResult = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', paneId], { encoding: 'utf8' });
   if (killResult.status !== 0) {
     console.warn(`remove-worker: kill-pane 失敗 (pane ${paneId}): ${killResult.stderr.trim()}`);
   }

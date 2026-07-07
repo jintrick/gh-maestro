@@ -7,9 +7,13 @@
 
 function normalizeWorkerEntry(v) {
   if (v && typeof v === 'object') {
-    return { paneId: v.paneId != null ? String(v.paneId) : null, agentId: v.agentId ?? null };
+    return {
+      paneId: v.paneId != null ? String(v.paneId) : null,
+      agentId: v.agentId ?? null,
+      notifierPid: v.notifierPid ?? null,
+    };
   }
-  return { paneId: v != null ? String(v) : null, agentId: null };
+  return { paneId: v != null ? String(v) : null, agentId: null, notifierPid: null };
 }
 
 module.exports = { normalizeWorkerEntry };

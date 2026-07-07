@@ -7,7 +7,7 @@
 // Usage:
 //   node reset-session.js [--workspace <path>]
 
-const { spawnSync, execSync } = require('child_process');
+const { spawnSync, execSync } = require('./child-process');
 const path = require('path');
 const { resolve } = path;
 const { existsSync, readFileSync, writeFileSync, rmSync,
@@ -16,6 +16,7 @@ const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { listPending } = require('./queue');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
+const { killProcessTree } = require('./kill-tree');
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
 
@@ -51,7 +52,7 @@ const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 
 // ── 現在 WezTerm に存在する pane_id の Set を返す ────────────────
 
 const getAlivePaneIds = () => {
-  const r = spawnSync('wezterm', ['cli', 'list', '--format', 'json'], { encoding: 'utf8' });
+  const r = spawnSync('wezterm', ['cli', '--no-auto-start', 'list', '--format', 'json'], { encoding: 'utf8' });
   if (r.status !== 0) {
     warn(`wezterm cli list 失敗: ${r.stderr.trim()} — pane生存確認をスキップします`);
     return new Set();
@@ -98,7 +99,7 @@ const killProcessesInWorktrees = (dir) => {
     `  }`,
     `}`,
     `Write-Output $killed`,
-  ].join(' ');
+  ].join('; ');
   try {
     const out = execSync(`powershell -NoProfile -Command "${script}"`,
       { encoding: 'utf8', stdio: 'pipe', timeout: 10000 });
@@ -238,7 +239,16 @@ const alivePanes = getAlivePaneIds();
 
 for (const [name, entry] of Object.entries(workers)) {
   if (name === 'orchestrator') continue;
-  const id = normalizeWorkerEntry(entry).paneId ?? '';
+  const normalized = normalizeWorkerEntry(entry);
+
+  // notifier(poll-and-notify.js)をkill: paneとは無関係にdetachedで動いているため、
+  // pane_idが無い/既に消えている場合でもここは必ず実行する。
+  if (normalized.notifierPid) {
+    killProcessTree(normalized.notifierPid);
+    log(`"${name}" の notifier (pid ${normalized.notifierPid}) を終了しました。`);
+  }
+
+  const id = normalized.paneId ?? '';
   if (!id) {
     warn(`"${name}" の pane_id が空です。スキップ。`);
     results.skipped.push(name);
@@ -249,7 +259,7 @@ for (const [name, entry] of Object.entries(workers)) {
     results.skipped.push(name);
     continue;
   }
-  const r = spawnSync('wezterm', ['cli', 'kill-pane', '--pane-id', id], { encoding: 'utf8' });
+  const r = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', id], { encoding: 'utf8' });
   if (r.status === 0) {
     log(`"${name}" (pane ${id}) をkillしました。`);
     results.killed.push(name);
