@@ -16,7 +16,6 @@ const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { listPending } = require('./queue');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
-const { killProcessTree } = require('./kill-tree');
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
 
@@ -241,13 +240,6 @@ for (const [name, entry] of Object.entries(workers)) {
   if (name === 'orchestrator') continue;
   const normalized = normalizeWorkerEntry(entry);
 
-  // notifier(poll-and-notify.js)をkill: paneとは無関係にdetachedで動いているため、
-  // pane_idが無い/既に消えている場合でもここは必ず実行する。
-  if (normalized.notifierPid) {
-    killProcessTree(normalized.notifierPid);
-    log(`"${name}" の notifier (pid ${normalized.notifierPid}) を終了しました。`);
-  }
-
   const id = normalized.paneId ?? '';
   if (!id) {
     warn(`"${name}" の pane_id が空です。スキップ。`);
@@ -362,7 +354,24 @@ if (existsSync(messagesDir)) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 6. poller の kill と queue 状態の掃除
+// 6. msg-state の掃除
+// ═══════════════════════════════════════════════════════════════════
+
+log('msg-state を掃除します...');
+const msgStateDir = resolve(workspace, '.gh-maestro', 'msg-state');
+if (existsSync(msgStateDir)) {
+  try {
+    rmSync(msgStateDir, { recursive: true, force: true });
+    log('msg-state/ を削除しました。');
+  } catch (e) {
+    warn(`msg-state/ 削除失敗: ${e.message}`);
+  }
+} else {
+  log('msg-state/ なし。スキップ。');
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 7. poller の kill と queue 状態の掃除
 // ═══════════════════════════════════════════════════════════════════
 
 log('poller プロセスを終了します...');
@@ -477,7 +486,7 @@ if (existsSync(queueDir)) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 7. workers.json をリセット
+// 8. workers.json をリセット
 // ═══════════════════════════════════════════════════════════════════
 
 log('workers.json をリセットします...');
@@ -492,7 +501,7 @@ try {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 8. サマリー
+// 9. サマリー
 // ═══════════════════════════════════════════════════════════════════
 
 log('');

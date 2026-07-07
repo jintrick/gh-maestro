@@ -29,6 +29,12 @@ test('--description がないとエラー終了する', () => {
   assert.match(r.stderr, /--description/);
 });
 
+test('--issue がないとエラー終了する', () => {
+  const r = run(['--skill', 'gh-maestro-coder', '--description', 'test', '--repo', 'o/r'], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /--issue/);
+});
+
 test('--repo がないとエラー終了する', () => {
   const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'test'], BASE_ENV);
   assert.notEqual(r.status, 0);

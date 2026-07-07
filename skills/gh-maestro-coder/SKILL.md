@@ -10,13 +10,13 @@ description: gh-maestroコーダーエージェント。orchestratorから実装
 **唯一のルール: 何かを伝えたくなったら、その内容は必ず次のコマンドの引数として書く。地の文では絶対に書かない。** 質問・相談・失敗報告にこれを使う。完了報告は不要（orchestratorがPRを自律検出する）。着手報告も送らない：
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<内容>"
+GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
 **NG例:** 「Issueを確認しました。次にauth.tsを修正します」「PRを作成しました」とそのまま書く → 誰にも届かず消える。
 **OK例:** 何も書かずに次のツール（Edit/Bash/`gh pr create`等）を呼ぶ。伝える必要があるのは質問・相談・失敗報告だけで、それも上のコマンドの引数にする。
 
-何かを書く前に自問する: 「これはツール呼び出しの引数か？」 NOなら、その内容は書かないか、送るべきならsend-pane.jsの引数に置き換える。
+何かを書く前に自問する: 「これはツール呼び出しの引数か？」 NOなら、その内容は書かないか、送るべきならmsg-send.jsの引数に置き換える。
 
 orchestrator からの返答を含むすべてのメッセージは、自分の inbox を能動的に pull して受信する。
 受動的に届くのを待つのではなく、以下の仕組みで自分から取りに行く。
@@ -24,11 +24,7 @@ wezterm send-text による通知はレイテンシ最適化のヒントに過�
 
 {{INBOX_POLL_MECHANISM}}
 
-処理後は必ず ack すること（ack = 読んで受理した。タスク完了ではない）。ack が配送の唯一の根拠：
-
-```sh
-node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
-```
+処理後は必ず `msg-send.js` で結果を返信すること。ack は不要（GitHub コメントとして永続化されるため）。
 
 ## ゴール
 
@@ -57,7 +53,7 @@ CI監視はorchestratorの責務であり、コーダーは行わない。orches
 
 ```sh
 gh issue edit $ISSUE --add-label "human-escalation"
-node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "Issue #$ISSUE の実装に失敗しました。human-escalation ラベルを付与しました。"
+GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "Issue #$ISSUE の実装に失敗しました。human-escalation ラベルを付与しました。"
 ```
 
 ## 実装時の注意

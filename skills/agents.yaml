@@ -13,10 +13,10 @@ agents:
         - `PR_MERGED:<PR番号>` → マージ完了。自律的に次のフローへ進む（ループ終了）
       INBOX_POLL_INTERVAL_SECONDS: 2
       INBOX_POLL_MECHANISM: |
-        Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/poll-inbox.js" $WORKER_NAME --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。
+        Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。
 
         Monitorから届く通知を処理する：
-        - `NEW_MESSAGE:<messageId>` → `.gh-maestro/queue/inbox/$WORKER_NAME/<messageId>.json` を読んで内容を把握し、メッセージを処理する。処理後は `node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE` で ack する。**完了後は直ちにMonitorに戻る**
+        - `NEW_MESSAGE:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。処理後は必ず `msg-send.js` で結果を返信すること。**完了後は直ちにMonitorに戻る**
   agy:
     skill_files_install_destination_directory: ~/.gemini/antigravity-cli/skills
     skill_markdown_template_placeholder_substitutions:
@@ -43,16 +43,16 @@ agents:
         `invoke_subagent` で inbox ポーリングサブエージェントを起動し、完了時に `send_message` で親へ通知させる。このサブエージェントはセッション終了まで永続的に実行する。
 
         サブエージェントへの指示：
-        「以下のループを実行する。NOTIFIED_IDS としてインメモリの Set で通知済み messageId を管理する。
-        --once は実行毎に新プロセスになるため poll-inbox.js 内のインメモリ Set が効かない。
-        重複通知を防ぐのはサブエージェント側の責務である。
-        1. `node "{{SCRIPTS_PATH}}/poll-inbox.js" $WORKER_NAME --workspace $WORKSPACE --once` を {{INBOX_POLL_INTERVAL_SECONDS}}秒おきに実行する
-        2. 出力から `NEW_MESSAGE:<messageId>` を抽出し、NOTIFIED_IDS に無いものだけ `send_message` で親に通知して NOTIFIED_IDS に追加する。既に通知済みの messageId はスキップする
+        「以下のループを実行する。NOTIFIED_IDS としてインメモリの Set で通知済み commentId を管理する。
+        --once は実行毎に新プロセスになるが、カーソル永続化（.gh-maestro/msg-state/）により二重通知しない。
+        重複通知を更に防ぐためサブエージェント側でも NOTIFIED_IDS でガードする。
+        1. `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE --once` を {{INBOX_POLL_INTERVAL_SECONDS}}秒おきに実行する
+        2. 出力から `NEW_MESSAGE:<commentId>` を抽出し、NOTIFIED_IDS に無いものだけ `send_message` で親に通知して NOTIFIED_IDS に追加する。既に通知済みの commentId はスキップする
         3. 新着がなければポーリング間隔を1.5倍に伸ばす（最大300秒）。新着があればリセットする
         ※ このサブエージェントはセッション終了まで継続する」
 
         親として届く通知の処理：
-        - `NEW_MESSAGE:<messageId>` → `.gh-maestro/queue/inbox/$WORKER_NAME/<messageId>.json` を読んで内容を把握し、メッセージを処理する。処理後は `node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE` で ack する
+        - `NEW_MESSAGE:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。処理後は必ず `msg-send.js` で結果を返信すること
   codex:
     skill_files_install_destination_directory: ~/.agents/skills
     skill_markdown_template_placeholder_substitutions:
@@ -65,6 +65,6 @@ agents:
         - `PR_REVIEW:<user>:<state>:<body>` → stateに応じてレビュー提出をトリアージする
       INBOX_POLL_INTERVAL_SECONDS: 2
       INBOX_POLL_MECHANISM: |
-        `node "{{SCRIPTS_PATH}}/poll-inbox.js" $WORKER_NAME --workspace $WORKSPACE` を実行して inbox を監視する。
+        `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE` を実行して inbox を監視する。
         通知を受け取ったら以下の通り処理する:
-        - `NEW_MESSAGE:<messageId>` → `.gh-maestro/queue/inbox/$WORKER_NAME/<messageId>.json` を読んで内容を把握し、メッセージを処理する。処理後は `node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE` で ack する
+        - `NEW_MESSAGE:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。処理後は必ず `msg-send.js` で結果を返信すること

@@ -10,13 +10,13 @@ description: gh-maestro汎用調査エージェント。orchestratorから調査
 **唯一のルール: 何かを伝えたくなったら、その内容は必ず次のコマンドの引数として書く。地の文では絶対に書かない。** 質問・相談・完了報告・失敗報告、すべてこれを使う。ただし「～を調査します」「着手しました」などの着手報告は送らない：
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<内容>"
+GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
 **NG例:** 「見つかりました。path/to/file.jsの42行目です」とそのまま書く → 誰にも届かず消える。
 **OK例:** 同じ内容を上のコマンドの引数にして実行する。
 
-何かを書く前に自問する: 「これはツール呼び出しの引数か？」 NOなら、その内容をsend-pane.jsの引数に置き換えてから実行する。
+何かを書く前に自問する: 「これはツール呼び出しの引数か？」 NOなら、その内容をmsg-send.jsの引数に置き換えてから実行する。
 
 orchestrator からの返答を含むすべてのメッセージは、自分の inbox を能動的に pull して受信する。
 受動的に届くのを待つのではなく、以下の仕組みで自分から取りに行く。
@@ -24,11 +24,7 @@ wezterm send-text による通知はレイテンシ最適化のヒントに過�
 
 {{INBOX_POLL_MECHANISM}}
 
-処理後は必ず ack すること（ack = 読んで受理した。タスク完了ではない）。ack が配送の唯一の根拠：
-
-```sh
-node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
-```
+指示を処理したら必ず `msg-send.js` で結果を返信すること。ack は不要（GitHub コメントとして永続化されるため）。
 
 ## ゴール
 
@@ -36,7 +32,7 @@ node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
 以下を実行することがゴールだ：
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<調査報告>"
+GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "<調査報告>"
 ```
 
 ## 起動時に与えられる情報
@@ -44,7 +40,8 @@ node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<調�
 - `WORKER_NAME=<name>` — このワーカーの識別名
 - `REPO=<owner/repo>` — 対象リポジトリ
 - `WORKSPACE=<path>` — メインワークスペースのルートパス
-- `TASK=<内容>` — 調査内容
+- `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）
+- `ISSUE=<N>` — アンカー Issue 番号
 
 ## 手順
 
@@ -56,7 +53,7 @@ node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<調�
 gh issue view $ISSUE --repo $REPO
 ```
 
-`TASK` の内容からキーワード・関数名・ファイル名などの手がかりを抽出してメモする。
+Issue 本文と起動時の指示からキーワード・関数名・ファイル名などの手がかりを抽出してメモする。
 
 必要に応じて過去のIssue・PRを確認する：
 
@@ -67,7 +64,7 @@ gh pr list --repo $REPO --state all --search "<キーワード>"
 
 ### フェーズ2: コードの探索
 
-grep で該当箇所を特定する。推測ではなく、`TASK` で与えられた文字列を起点にする：
+grep で該当箇所を特定する。推測ではなく、Issue 本文と起動時の指示で与えられた文字列を起点にする：
 
 ```sh
 cd $WORKSPACE
@@ -105,12 +102,12 @@ git -C $WORKSPACE show <commit-hash>
 
 ## 疑問点がある場合
 
-調査範囲の解釈など、`TASK` だけでは判断できない点は通信ルールのコマンドで質問し、返答を待ってから結論を出す。
+調査範囲の解釈など、Issue 本文や起動時の指示だけでは判断できない点は通信ルールのコマンドで質問し、返答を待ってから結論を出す。
 
 ## 調査しても情報が見つからない場合
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "調査完了。【わかったこと】<絞り込めた範囲> 【見つからなかったこと】<調査したが見つからなかった項目> 【次の手がかり候補】<あれば>"
+GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "調査完了。【わかったこと】<絞り込めた範囲> 【見つからなかったこと】<調査したが見つからなかった項目> 【次の手がかり候補】<あれば>"
 ```
 
 ## 制約
