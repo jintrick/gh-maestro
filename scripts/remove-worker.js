@@ -15,6 +15,7 @@ const { readFileSync, writeFileSync, existsSync, rmSync } = require('fs');
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
+const { killProcessTree } = require('./kill-tree');
 
 const USAGE = `remove-worker.js — ワーカーのペインを kill し worktree を削除する
 
@@ -60,6 +61,14 @@ const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 
 
 const workerEntry = normalizeWorkerEntry(workers[workerName]);
 const paneId = workerEntry.paneId;
+
+// ── 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill ──────
+// Phase 1 以前に起動されたセッションの workers.json には notifierPid が残っている可能性がある。
+// Phase 2 以降の新規 spawn では notifier は起動されないが、移行過渡期の後方互換として残す。
+if (workerEntry.notifierPid) {
+  killProcessTree(workerEntry.notifierPid);
+  console.warn(`remove-worker: レガシー notifier (pid ${workerEntry.notifierPid}) を終了しました`);
+}
 
 if (!paneId) {
   console.warn(`remove-worker: ワーカー "${workerName}" の pane_id が workers.json に存在しません — worktree削除のみ実行します`);

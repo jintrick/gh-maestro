@@ -15,6 +15,7 @@ const { existsSync, readFileSync, writeFileSync, rmSync,
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { listPending } = require('./queue');
+const { killProcessTree } = require('./kill-tree');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
@@ -239,6 +240,13 @@ const alivePanes = getAlivePaneIds();
 for (const [name, entry] of Object.entries(workers)) {
   if (name === 'orchestrator') continue;
   const normalized = normalizeWorkerEntry(entry);
+
+  // 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill
+  // Phase 1 以前に起動されたセッションの workers.json には notifierPid が残っている可能性がある。
+  if (normalized.notifierPid) {
+    killProcessTree(normalized.notifierPid);
+    log(`"${name}" のレガシー notifier (pid ${normalized.notifierPid}) を終了しました。`);
+  }
 
   const id = normalized.paneId ?? '';
   if (!id) {

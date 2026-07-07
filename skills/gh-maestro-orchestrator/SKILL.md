@@ -138,7 +138,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 | `gh-maestro-coder` | コスト効率に優れ、指定されたスコープに閉じた局所的な変更や、明確に定義された仕様の実装・修正に適している。 |
 | `gh-maestro-senior-coder` | 高度な自己検証能力とアーキテクチャの整合性判断能力を持ち、広範な影響分析、複雑なロジック調整、設計判断を伴うタスクの解決に適している。 |
 | `gh-maestro-explorer` | 汎用的な事実調査（grep・コード探索・情報収集）。分析・判断は行わず、発見した事実を報告する。 |
-| `gh-maestro-investigator` | バグ原因の特定 → 根本原因・影響範囲・修正方針の報告（Issueがある場合は`--issue`でIssue番号を渡す。ない場合は`--prompt`で調査内容を渡す）。 |
+| `gh-maestro-investigator` | バグ原因の特定 → 根本原因・影響範囲・修正方針の報告（`--issue` が必須。アンカー Issue がなければ orchestrator が先に起票する）。 |
 | `gh-maestro-base` | 上記以外の動的役職（必ず`--prompt`で役割を定義する）。 |
 
 ## セッションのゴール
