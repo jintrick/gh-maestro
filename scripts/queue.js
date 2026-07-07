@@ -4,28 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const { validateField } = require('./shared/validate');
+
 const DUPLICATE_MESSAGE_ID = 'ERR_DUPLICATE_MESSAGE_ID';
-
-/**
- * Characters that are not allowed in 'to' (recipient) and messageId fields.
- * These would allow path traversal (..) or path separator injection.
- */
-const INVALID_FIELD_RE = /[\/\\:*?"<>|\x00-\x1f]/;
-const PARENT_REF_RE = /(?:^|[\/\\])\.\.(?:$|[\/\\])/;
-
-/**
- * Validate a queue field value for path-safety.
- * Throws if the value contains path separators, `..`, or other unsafe chars.
- */
-function validateField(name, value) {
-  if (!value) return;
-  if (PARENT_REF_RE.test(value)) {
-    throw new Error(`"${name}" に親ディレクトリ参照（..）は許可されません: ${JSON.stringify(value)}`);
-  }
-  if (INVALID_FIELD_RE.test(value)) {
-    throw new Error(`"${name}" に不正な文字が含まれています: ${JSON.stringify(value)}`);
-  }
-}
 
 /**
  * Synchronous sleep using Atomics.wait (available from Node 18).

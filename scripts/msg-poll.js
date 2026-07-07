@@ -1,0 +1,378 @@
+#!/usr/bin/env node
+// msg-poll.js — GitHub Issue コメントをポーリングして新着メッセージを stdout に通知する
+//
+// Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once]
+//
+// Output (stdout):
+//   worker mode:       NEW_MESSAGE:<commentId>
+//   orchestrator mode: NEW_MESSAGE:<issue>:<commentId>
+//
+// poll-reviews.js / poll-inbox.js と同型の設計。エージェント自身のターン内で
+// blocking poll として実行され、detached sidecar にはならない。
+//
+// カーソルは .gh-maestro/msg-state/<self>.json に永続化される。
+// ファイルが無い・壊れている場合は「過去メッセージの再通知」として扱う。
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
+const { validateField } = require('./shared/validate');
+
+const DEFAULT_INTERVAL_SEC = 20;
+const MARKER_RE = /^<!--\s*gh-maestro\s+(\{.*\})\s*-->/;
+const MAX_SEEN_IDS = 100;
+
+const USAGE = `msg-poll.js — GitHub Issue コメントを定期スキャンし新着メッセージを stdout に通知する
+
+Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once]
+
+Arguments:
+  <self>                 自分の名前（worker 名、または "orchestrator"）
+
+Options:
+  --issue <N>            監視対象の Issue 番号（worker モードでは必須、orchestrator モードでは指定不要）
+  --workspace <path>     ワークスペースパス（省略時は環境変数またはCWDから解決）
+  --interval <sec>       ポーリング間隔（秒、既定: ${DEFAULT_INTERVAL_SEC}）
+  --once                 1回だけスキャンして終了する（継続ポーリングしない）
+
+Output (stdout):
+  新着メッセージを1行ずつ出力:
+    worker モード:       NEW_MESSAGE:<commentId>
+    orchestrator モード: NEW_MESSAGE:<issue>:<commentId>
+
+このスクリプトはエージェントのターン内で blocking 実行される。detached 起動しない。
+カーソルは .gh-maestro/msg-state/<self>.json に永続化され、--once の繰り返し実行でも二重通知しない。
+state ファイルが壊れている・存在しない場合は「過去メッセージの再通知」として扱う。
+gh 呼び出し失敗（ネットワーク断・rate limit 等）はそのサイクルをスキップし次サイクルへ継続する。`;
+
+// ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
+
+let _ghRepoView = () => {
+  return spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
+    { encoding: 'utf8' });
+};
+
+let _ghApiComments = (repo, issue, since) => {
+  const args = ['api', '--method', 'GET', `repos/${repo}/issues/${issue}/comments`, '--jq', '.'];
+  if (since) {
+    args.push('-f', `since=${since}`);
+  }
+  args.push('-f', 'per_page=100');
+  return spawnSync('gh', args, { encoding: 'utf8' });
+};
+
+// ── ヘルパー ──────────────────────────────────────────────────────────────
+
+function statePath(workspace, self) {
+  return path.join(workspace, '.gh-maestro', 'msg-state', `${self}.json`);
+}
+
+function readState(workspace, self) {
+  const sp = statePath(workspace, self);
+  try {
+    if (!fs.existsSync(sp)) return { since: null, seenIds: [] };
+    const raw = fs.readFileSync(sp, 'utf8');
+    const parsed = JSON.parse(raw);
+    return {
+      since: typeof parsed.since === 'string' ? parsed.since : null,
+      seenIds: Array.isArray(parsed.seenIds) ? parsed.seenIds : [],
+    };
+  } catch {
+    return { since: null, seenIds: [] };
+  }
+}
+
+function writeState(workspace, self, state) {
+  const sp = statePath(workspace, self);
+  const dir = path.dirname(sp);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const tmp = sp + '.' + Math.random().toString(36).slice(2, 8);
+  const seenIds = state.seenIds.slice(-MAX_SEEN_IDS);
+  fs.writeFileSync(tmp, JSON.stringify({ since: state.since, seenIds }, null, 2), 'utf8');
+  fs.renameSync(tmp, sp);
+}
+
+function parseMarker(body) {
+  if (!body) return null;
+  const firstLine = body.split('\n')[0];
+  const m = firstLine.match(MARKER_RE);
+  if (!m) return null;
+  try {
+    const meta = JSON.parse(m[1]);
+    if (meta && typeof meta.to === 'string') {
+      return meta;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ── メインロジック ────────────────────────────────────────────────────────
+
+/**
+ * 引数バリデーションと初期化を行い、poll 実行に必要なオブジェクトを返す。
+ * scanOnce() は初回のスキャン実行前には呼ばれない（呼び出し側が制御する）。
+ *
+ * @param {string[]} [argsOverride]  省略時は process.argv.slice(2)
+ * @param {{ streamOutput?: boolean }} [opts]  streamOutput=true で scanOnce
+ *   内の出力をリアルタイムに process.stdout へも流す（継続モード CLI 用）
+ * @returns {{
+ *   code: number, lines: string[], errLines: string[],
+ *   scanOnce: (() => void) | null,   // code !== 0 のときは null
+ *   onceMode: boolean,
+ *   intervalMs: number,
+ * }}
+ */
+function main(argsOverride, opts = {}) {
+  const { streamOutput = false } = opts;
+  const out = [];
+  const err = [];
+
+  const writeOut = (s) => {
+    out.push(s);
+    if (streamOutput) process.stdout.write(s + '\n');
+  };
+  const writeErr = (s) => {
+    err.push(s);
+    if (streamOutput) process.stderr.write(s + '\n');
+  };
+
+  const args = argsOverride || process.argv.slice(2);
+
+  if (args.includes('--help') || args.includes('-h')) {
+    writeOut(USAGE);
+    return { code: 0, lines: out, errLines: err, scanOnce: null, onceMode: true, intervalMs: 0 };
+  }
+
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue', '--interval']);
+
+  if (exitFlagMiss) {
+    writeErr('msg-poll: フラグには値が必要です。');
+    writeErr(USAGE);
+    return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
+  }
+
+  const onceMode = rest.includes('--once');
+  const positional = rest.filter(a => a !== '--once');
+  const self = positional[0];
+  const issueArg = values['--issue'];
+
+  if (!self) {
+    writeErr(USAGE);
+    return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
+  }
+
+  // path-safety 検証（queue-path-safety.md 準拠）
+  try {
+    validateField('self', self);
+  } catch (e) {
+    writeErr(`msg-poll: ${e.message}`);
+    return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
+  }
+
+  // orchestrator かどうか
+  const isOrchestrator = self === 'orchestrator';
+
+  // worker モードでは --issue 必須
+  if (!isOrchestrator && !issueArg) {
+    writeErr('msg-poll: worker モードでは --issue <N> が必須です。');
+    writeErr(USAGE);
+    return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
+  }
+
+  const workspace = resolveWorkspace(values['--workspace']);
+  if (!workspace) {
+    writeErr('msg-poll: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
+    return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
+  }
+
+  const intervalMs = (parseInt(values['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
+
+  // ── リポジトリ解決 ──────────────────────────────────────────────────
+
+  const repoResult = _ghRepoView();
+  if (repoResult.status !== 0) {
+    writeErr(`msg-poll: リポジトリを解決できません: ${repoResult.stderr || '(empty)'}`);
+    return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
+  }
+  const repo = repoResult.stdout.trim();
+
+  // ── カーソル読み込み ─────────────────────────────────────────────────
+
+  const state = readState(workspace, self);
+
+  /**
+   * 1回のスキャン。
+   */
+  function scanOnce() {
+    let allIssuesAndComments = [];
+
+    if (isOrchestrator) {
+      // orchestrator モード: workers.json から全ワーカーの issue を収集
+      const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
+      let workers = {};
+      try {
+        if (fs.existsSync(workersPath)) {
+          workers = JSON.parse(fs.readFileSync(workersPath, 'utf8'));
+        }
+      } catch {
+        // workers.json が読めない・parse できない → 空扱いで継続
+      }
+
+      const issues = new Set();
+      for (const entry of Object.values(workers)) {
+        if (entry.issue) {
+          issues.add(String(entry.issue));
+        }
+      }
+
+      for (const issue of issues) {
+        const result = _ghApiComments(repo, issue, state.since);
+        if (result.status !== 0) {
+          writeErr(`msg-poll: gh api エラー (issue ${issue}): ${result.stderr || '(empty)'}`);
+          continue;
+        }
+        let comments;
+        try {
+          comments = JSON.parse(result.stdout || '[]');
+        } catch {
+          writeErr(`msg-poll: JSON parse エラー (issue ${issue})`);
+          continue;
+        }
+        for (const c of comments) {
+          allIssuesAndComments.push({ issue, comment: c });
+        }
+      }
+    } else {
+      // worker モード
+      const result = _ghApiComments(repo, issueArg, state.since);
+      if (result.status !== 0) {
+        writeErr(`msg-poll: gh api エラー: ${result.stderr || '(empty)'}`);
+        return;
+      }
+      let comments;
+      try {
+        comments = JSON.parse(result.stdout || '[]');
+      } catch {
+        writeErr('msg-poll: JSON parse エラー');
+        return;
+      }
+      for (const c of comments) {
+        allIssuesAndComments.push({ issue: issueArg, comment: c });
+      }
+    }
+
+    // ── 新着フィルタリング ──────────────────────────────────────────────
+
+    let latestSince = state.since;
+    const newSeenIds = [...state.seenIds];
+
+    for (const { issue, comment: c } of allIssuesAndComments) {
+      const cid = c.id;
+      if (cid == null) continue;
+
+      // 既知の ID はスキップ
+      if (state.seenIds.includes(cid)) continue;
+
+      const meta = parseMarker(c.body);
+      if (!meta) continue; // マーカーなし・JSON parse 失敗は無視
+
+      if (meta.to !== self) continue; // 自分宛てでない
+
+      // 新着通知
+      if (isOrchestrator) {
+        writeOut(`NEW_MESSAGE:${issue}:${cid}`);
+      } else {
+        writeOut(`NEW_MESSAGE:${cid}`);
+      }
+
+      // カーソル更新
+      if (c.created_at) {
+        if (!latestSince || c.created_at > latestSince) {
+          latestSince = c.created_at;
+        }
+      }
+      newSeenIds.push(cid);
+    }
+
+    // ── カーソル永続化 ─────────────────────────────────────────────────
+    state.since = latestSince;
+    state.seenIds = newSeenIds.slice(-MAX_SEEN_IDS);
+    writeState(workspace, self, state);
+  }
+
+  return {
+    code: 0,
+    lines: out,
+    errLines: err,
+    scanOnce,
+    onceMode,
+    intervalMs,
+  };
+}
+
+// ── CLI エントリポイント ──────────────────────────────────────────────────
+
+if (require.main === module) {
+  const isContinuous = !process.argv.slice(2).includes('--once');
+  // 継続モードでは scanOnce の出力をリアルタイムに stdout へ流す
+  const result = main(undefined, { streamOutput: isContinuous });
+
+  // 初期エラー／help はここで出力
+  for (const l of result.errLines) process.stderr.write(l + '\n');
+
+  if (result.code !== 0) {
+    for (const l of result.lines) process.stdout.write(l + '\n');
+    process.exit(result.code);
+  }
+
+  if (result.scanOnce === null) {
+    // --help
+    for (const l of result.lines) process.stdout.write(l + '\n');
+    process.exit(0);
+  }
+
+  const sc = result.scanOnce;
+
+  if (result.onceMode) {
+    sc();
+    // streamOutput が false なので lines に収集されている
+    for (const l of result.lines) process.stdout.write(l + '\n');
+    process.exit(0);
+  }
+
+  // 継続モード: streamOutput が true なので scanOnce の出力は直接 stdout へ出る
+  let intervalHandle = null;
+
+  function cleanup() {
+    if (intervalHandle) clearInterval(intervalHandle);
+    process.exit(0);
+  }
+
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
+
+  sc();
+  intervalHandle = setInterval(sc, result.intervalMs);
+  // interval は unref しない — イベントループを維持する
+}
+
+// ── テスト用 export ──────────────────────────────────────────────────────
+
+module.exports = {
+  _setGhRepoView: (fn) => { _ghRepoView = fn; },
+  _setGhApiComments: (fn) => { _ghApiComments = fn; },
+  main,
+  // 内部ロジックの単体テスト用
+  parseMarker,
+  readState,
+  writeState,
+  statePath,
+  MARKER_RE,
+  USAGE,
+};
