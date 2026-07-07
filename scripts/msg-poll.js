@@ -76,8 +76,9 @@ function readState(workspace, self) {
     if (!fs.existsSync(sp)) return { since: null, seenIds: [] };
     const raw = fs.readFileSync(sp, 'utf8');
     const parsed = JSON.parse(raw);
+    // since は worker モードでは文字列、orchestrator モードではオブジェクト
     return {
-      since: typeof parsed.since === 'string' ? parsed.since : null,
+      since: parsed.since != null ? parsed.since : null,
       seenIds: Array.isArray(parsed.seenIds) ? parsed.seenIds : [],
     };
   } catch {
@@ -214,11 +215,19 @@ function main(argsOverride, opts = {}) {
 
     if (isOrchestrator) {
       // orchestrator モード: workers.json から全ワーカーの issue を収集
+      // since は Issue ごとの個別ウォーターマーク（オブジェクト）で管理する
+      if (typeof state.since !== 'object' || state.since === null || Array.isArray(state.since)) {
+        state.since = {};
+      }
+
       const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
       let workers = {};
       try {
         if (fs.existsSync(workersPath)) {
-          workers = JSON.parse(fs.readFileSync(workersPath, 'utf8'));
+          const raw = JSON.parse(fs.readFileSync(workersPath, 'utf8'));
+          if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+            workers = raw;
+          }
         }
       } catch {
         // workers.json が読めない・parse できない → 空扱いで継続
@@ -226,13 +235,14 @@ function main(argsOverride, opts = {}) {
 
       const issues = new Set();
       for (const entry of Object.values(workers)) {
-        if (entry.issue) {
+        if (entry && typeof entry === 'object' && entry.issue) {
           issues.add(String(entry.issue));
         }
       }
 
       for (const issue of issues) {
-        const result = _ghApiComments(repo, issue, state.since);
+        const issueSince = typeof state.since[issue] === 'string' ? state.since[issue] : null;
+        const result = _ghApiComments(repo, issue, issueSince);
         if (result.status !== 0) {
           writeErr(`msg-poll: gh api エラー (issue ${issue}): ${result.stderr || '(empty)'}`);
           continue;
@@ -244,13 +254,18 @@ function main(argsOverride, opts = {}) {
           writeErr(`msg-poll: JSON parse エラー (issue ${issue})`);
           continue;
         }
+        if (!Array.isArray(comments)) {
+          writeErr(`msg-poll: gh api の応答が配列ではありません (issue ${issue})`);
+          continue;
+        }
         for (const c of comments) {
           allIssuesAndComments.push({ issue, comment: c });
         }
       }
     } else {
-      // worker モード
-      const result = _ghApiComments(repo, issueArg, state.since);
+      // worker モード: state.since は文字列
+      const workerSince = typeof state.since === 'string' ? state.since : null;
+      const result = _ghApiComments(repo, issueArg, workerSince);
       if (result.status !== 0) {
         writeErr(`msg-poll: gh api エラー: ${result.stderr || '(empty)'}`);
         return;
@@ -262,6 +277,10 @@ function main(argsOverride, opts = {}) {
         writeErr('msg-poll: JSON parse エラー');
         return;
       }
+      if (!Array.isArray(comments)) {
+        writeErr('msg-poll: gh api の応答が配列ではありません');
+        return;
+      }
       for (const c of comments) {
         allIssuesAndComments.push({ issue: issueArg, comment: c });
       }
@@ -269,7 +288,6 @@ function main(argsOverride, opts = {}) {
 
     // ── 新着フィルタリング ──────────────────────────────────────────────
 
-    let latestSince = state.since;
     const newSeenIds = [...state.seenIds];
 
     for (const { issue, comment: c } of allIssuesAndComments) {
@@ -291,17 +309,22 @@ function main(argsOverride, opts = {}) {
         writeOut(`NEW_MESSAGE:${cid}`);
       }
 
-      // カーソル更新
+      // カーソル更新（orchestrator は issue ごとの個別ウォーターマーク）
       if (c.created_at) {
-        if (!latestSince || c.created_at > latestSince) {
-          latestSince = c.created_at;
+        if (isOrchestrator) {
+          if (!state.since[issue] || c.created_at > state.since[issue]) {
+            state.since[issue] = c.created_at;
+          }
+        } else {
+          if (!state.since || c.created_at > state.since) {
+            state.since = c.created_at;
+          }
         }
       }
       newSeenIds.push(cid);
     }
 
     // ── カーソル永続化 ─────────────────────────────────────────────────
-    state.since = latestSince;
     state.seenIds = newSeenIds.slice(-MAX_SEEN_IDS);
     writeState(workspace, self, state);
   }
