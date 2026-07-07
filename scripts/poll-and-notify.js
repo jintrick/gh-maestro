@@ -9,7 +9,7 @@
 'use strict';
 
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn } = require('./child-process');
 const { enqueue } = require('./queue');
 // queue-poller は遅延 require: テストが GH_MAESTRO_DISABLE_LAZY_POLLER=1 で
 // ensurePoller の要件をスキップするとき、存在しないモジュールを require しないようにするため。
