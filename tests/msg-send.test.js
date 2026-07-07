@@ -192,6 +192,44 @@ test('from は GH_MAESTRO_WORKER 未設定時は orchestrator', () => {
   });
 });
 
+test('--from フラグで from が設定される', () => {
+  withTempDir(workspace => {
+    let capturedBody = null;
+
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
+    });
+
+    const r = msgSend.main(
+      ['worker-1', 'hello', '--from', 'issue-52-worker', '--issue', '1', '--workspace', workspace],
+      {}
+    );
+    assert.equal(r.code, 0);
+    assert.ok(capturedBody.includes('"from":"issue-52-worker"'));
+  });
+});
+
+test('--from フラグが GH_MAESTRO_WORKER env より優先される', () => {
+  withTempDir(workspace => {
+    let capturedBody = null;
+
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
+    });
+
+    const r = msgSend.main(
+      ['worker-1', 'hello', '--from', 'explicit-worker', '--issue', '1', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'env-worker' }
+    );
+    assert.equal(r.code, 0);
+    assert.ok(capturedBody.includes('"from":"explicit-worker"'));
+  });
+});
+
 // ── マーカー ────────────────────────────────────────────────────────────────
 
 test('マーカーが正しい形式で本文の前に付与される', () => {
