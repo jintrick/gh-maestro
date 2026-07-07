@@ -35,6 +35,24 @@ test('--issue がないとエラー終了する', () => {
   assert.match(r.stderr, /--issue/);
 });
 
+test('--issue が非数値だとエラー終了する', () => {
+  const r = run(['--skill', 'gh-maestro-coder', '--issue', 'abc', '--description', 'test', '--repo', 'o/r'], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /正の整数/);
+});
+
+test('--issue が 0 だとエラー終了する', () => {
+  const r = run(['--skill', 'gh-maestro-coder', '--issue', '0', '--description', 'test', '--repo', 'o/r'], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /正の整数/);
+});
+
+test('--issue が負数だとエラー終了する', () => {
+  const r = run(['--skill', 'gh-maestro-coder', '--issue', '-1', '--description', 'test', '--repo', 'o/r'], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /正の整数/);
+});
+
 test('--repo がないとエラー終了する', () => {
   const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'test'], BASE_ENV);
   assert.notEqual(r.status, 0);

@@ -57,6 +57,7 @@ if (!description) fail('--description が必要です');
 if (!repo)        fail('--repo が必要です');
 if (skill === 'gh-maestro-base' && !prompt) fail('gh-maestro-base を使う場合は --prompt が必要です');
 if (!issue) fail('--issue が必要です（ワーカーのアンカー Issue）');
+if (!/^[1-9][0-9]*$/.test(issue)) fail('--issue は正の整数である必要があります');
 
 // --- エージェントID決定（--agent フラグ > skillAgentMap > フォールバック 'agy'） ---
 const skillMap = resolveSkillAgentMap({ workspace });
