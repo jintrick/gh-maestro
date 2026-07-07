@@ -85,6 +85,10 @@ node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
 ```
 - **send-pane.js** — 後方互換ラッパー。内部は `queue-send.js` と同じ enqueue を行う。新規の送信には `queue-send.js` を推奨
 - **remove-worker.js** — ワーカーペインをkillしてworktreeを削除する
+
+```sh
+node "{{SCRIPTS_PATH}}/remove-worker.js" --worker-name <workerName> --workspace $WORKSPACE
+```
 - **start-review-manager.js** — PRに対してReview Managerを起動する。通常はPR検出時にpoll-pr.jsが自動で呼ぶが、Review Managerが起動しなかった・失敗した場合に手動で起動・再起動するために使う
 
 ```sh
