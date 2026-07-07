@@ -486,10 +486,9 @@ test('enqueue → listPending → ack → listPending の一連が正しく動�
 
 const { spawnSync } = require('child_process');
 
-test('remove-worker.js が inbox 掃除失敗時に warn を出力する', () => {
+test('remove-worker.js が msg-state を削除し workers.json からエントリを除去する', () => {
   withTempDir(workspace => {
     const ghDir = path.join(workspace, '.gh-maestro');
-    const queueDir = path.join(ghDir, 'queue');
 
     // workers.json を用意（paneId なし → wezterm kill をスキップ）
     fs.mkdirSync(ghDir, { recursive: true });
@@ -499,10 +498,43 @@ test('remove-worker.js が inbox 掃除失敗時に warn を出力する', () =>
       'utf8'
     );
 
-    // inbox に削除不能なディレクトリ（.json と名乗る）を配置
-    const inboxDir = path.join(queueDir, 'inbox', 'test-worker');
-    fs.mkdirSync(inboxDir, { recursive: true });
-    fs.mkdirSync(path.join(inboxDir, 'stuck.json'));
+    // msg-state ファイルを配置
+    const msgStateDir = path.join(ghDir, 'msg-state');
+    const msgStateFile = path.join(msgStateDir, 'test-worker.json');
+    fs.mkdirSync(msgStateDir, { recursive: true });
+    fs.writeFileSync(msgStateFile, JSON.stringify({ since: '2026-01-01T00:00:00Z', seenIds: [] }), 'utf8');
+
+    const result = spawnSync('node', [
+      path.join(__dirname, '..', 'scripts', 'remove-worker.js'),
+      '--worker-name', 'test-worker',
+      '--workspace', workspace,
+    ], { encoding: 'utf8' });
+
+    // msg-state ファイルが削除されている
+    assert.ok(!fs.existsSync(msgStateFile), 'msg-state ファイルが削除されていること');
+
+    // workers.json からエントリが削除されている
+    const workers = JSON.parse(fs.readFileSync(path.join(ghDir, 'workers.json'), 'utf8'));
+    assert.ok(!('test-worker' in workers));
+  });
+});
+
+test('remove-worker.js が msg-state 削除失敗時に warn を出力する（ENOENT 以外）', () => {
+  withTempDir(workspace => {
+    const ghDir = path.join(workspace, '.gh-maestro');
+
+    // workers.json を用意（paneId なし → wezterm kill をスキップ）
+    fs.mkdirSync(ghDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(ghDir, 'workers.json'),
+      JSON.stringify({ 'test-worker': {} }, null, 2),
+      'utf8'
+    );
+
+    // msg-state をファイルではなくディレクトリにして削除不能にする
+    const msgStateDir = path.join(ghDir, 'msg-state');
+    const msgStateFile = path.join(msgStateDir, 'test-worker.json');
+    fs.mkdirSync(msgStateFile, { recursive: true });
 
     const result = spawnSync('node', [
       path.join(__dirname, '..', 'scripts', 'remove-worker.js'),
@@ -512,16 +544,13 @@ test('remove-worker.js が inbox 掃除失敗時に warn を出力する', () =>
 
     const stderr = result.stderr || '';
 
-    // purgeInbox が failed カウントを返し、remove-worker が warn する
+    // msg-state 削除失敗の warn が出力される（rmSync はディレクトリに対して EPERM/EISDIR）
     assert.ok(
-      stderr.includes('削除に失敗しました'),
-      `stderr に削除失敗 warn が含まれること。実際: ${stderr.slice(0, 500)}`
+      stderr.includes('msg-state 削除に失敗しました'),
+      `stderr に msg-state 削除失敗 warn が含まれること。実際: ${stderr.slice(0, 500)}`
     );
 
-    // stuck.json ディレクトリは残留
-    assert.ok(fs.existsSync(path.join(inboxDir, 'stuck.json')));
-
-    // workers.json からエントリが削除されている
+    // workers.json からエントリは削除されている（削除失敗はベストエフォート）
     const workers = JSON.parse(fs.readFileSync(path.join(ghDir, 'workers.json'), 'utf8'));
     assert.ok(!('test-worker' in workers));
   });

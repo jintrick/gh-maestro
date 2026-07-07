@@ -10,13 +10,13 @@ description: gh-maestroワーカーの共通骨格テンプレート。orchestra
 **唯一のルール: 何かを伝えたくなったら、その内容は必ず次のコマンドの引数として書く。地の文では絶対に書かない。** 質問・相談・完了報告・失敗報告、すべてこれを使う：
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<内容>"
+GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
 **NG例:** 「作業を完了しました」とそのまま書く → 誰にも届かず消える。
 **OK例:** 同じ内容を上のコマンドの引数にして実行する。
 
-何かを書く前に自問する: 「これはツール呼び出しの引数か？」 NOなら、その内容をsend-pane.jsの引数に置き換えてから実行する。
+何かを書く前に自問する: 「これはツール呼び出しの引数か？」 NOなら、その内容をmsg-send.jsの引数に置き換えてから実行する。
 
 orchestrator からの返答を含むすべてのメッセージは、自分の inbox を能動的に pull して受信する。
 受動的に届くのを待つのではなく、以下の仕組みで自分から取りに行く。
@@ -24,11 +24,7 @@ wezterm send-text による通知はレイテンシ最適化のヒントに過�
 
 {{INBOX_POLL_MECHANISM}}
 
-処理後は必ず ack すること（ack = 読んで受理した。タスク完了ではない）。ack が配送の唯一の根拠：
-
-```sh
-node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
-```
+指示を処理したら必ず `msg-send.js` で結果を返信すること。ack は不要（GitHub コメントとして永続化されるため）。
 
 ## 起動時に与えられる情報
 
@@ -38,6 +34,7 @@ node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
 - `REPO=<owner/repo>` — 対象リポジトリ
 - `WORKSPACE=<path>` — ワークスペースのルートパス
 - `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）
+- `ISSUE=<N>` — アンカー Issue 番号
 
 ## 作業環境の準備
 

@@ -9,16 +9,16 @@
 //   node spawn-worker.js \
 //     --skill <skill-name> \
 //     [--prompt "<role-prompt>"]  # gh-maestro-base 使用時は必須
-//     [--issue <N>] \             # 省略可。省略時は --prompt の内容が TASK として渡される
+//     --issue <N> \               # 必須。ワーカーのアンカー Issue
 //     --description <desc> \
 //     --repo <owner/repo> \
 //     --workspace <path> \
 //     [--base-branch <branch>] \
 //     [--agent <id>]              # エージェントID。config.json > agent-defaults.json で解決（省略時はスキルに応じたデフォルト）
 //
-// 標準出力: ワーカー名（例: issue-5-implement / task-investigate-auth）
+// 標準出力: ワーカー名（例: issue-5-implement）
 
-const { spawn, spawnSync } = require('./child-process');
+const { spawnSync } = require('./child-process');
 const { existsSync, mkdirSync, readFileSync, writeFileSync,
         lstatSync, rmdirSync, rmSync, readdirSync } = require('fs');
 const { resolve, relative } = require('path');
@@ -56,6 +56,8 @@ if (!skill)       fail('--skill が必要です');
 if (!description) fail('--description が必要です');
 if (!repo)        fail('--repo が必要です');
 if (skill === 'gh-maestro-base' && !prompt) fail('gh-maestro-base を使う場合は --prompt が必要です');
+if (!issue) fail('--issue が必要です（ワーカーのアンカー Issue）');
+if (!/^[1-9][0-9]*$/.test(issue)) fail('--issue は正の整数である必要があります');
 
 // --- エージェントID決定（--agent フラグ > skillAgentMap > フォールバック 'agy'） ---
 const skillMap = resolveSkillAgentMap({ workspace });
@@ -95,7 +97,7 @@ if (agentConfig.extraArgs?.includes('-Command') && /\s/.test(workspace)) {
 }
 
 // --- パス定義 ---
-const workerName   = issue ? `issue-${issue}-${description}` : `task-${description}`;
+const workerName   = `issue-${issue}-${description}`;
 const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
 const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
 
@@ -260,8 +262,7 @@ const contextLines = [
   `WORKSPACE=${toUnix(workspace)}`,
   `WORKTREE=${toUnix(worktreeDir)}`,
 ];
-if (issue) contextLines.push(`ISSUE=${issue}`);
-if (!issue && prompt) contextLines.push(`TASK=${prompt}`);
+contextLines.push(`ISSUE=${issue}`);
 if (baseBranch) contextLines.push(`BASE_BRANCH=${baseBranch}`);
 const extra = prompt ? `\n${prompt}` : '';
 
@@ -346,7 +347,7 @@ if (!newPaneId) {
 
 // --- workers.json にワーカーを登録（失敗時はペインもロールバック） ---
 try {
-  workers[workerName] = { paneId: newPaneId, agentId: agentConfig.id };
+  workers[workerName] = { paneId: newPaneId, agentId: agentConfig.id, issue: Number(issue) };
   writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
   console.warn(`spawn-worker: worker "${workerName}" を pane ${newPaneId} として workers.json に登録しました`);
 } catch (e) {
@@ -367,37 +368,6 @@ if (agentConfig.promptDelivery === 'send-text-after-launch') {
     sendEnter(newPaneId, { terminator: agentConfig.enterSequence ?? '\r' });
     console.warn(`spawn-worker: 初期プロンプトをsend-textで送信しました (pane ${newPaneId})`);
   }
-}
-
-// --- コーダー起動時はPRポーリングを自動開始 ---
-// PRを作成しうる全coderスキルを対象とする。
-// 新たなcoder系スキルの追加時はここに追記すること。
-const PR_CREATING_SKILLS = new Set(['gh-maestro-coder', 'gh-maestro-senior-coder']);
-if (PR_CREATING_SKILLS.has(skill) && issue) {
-  const notifier = spawn(process.execPath, [
-    resolve(__dirname, 'poll-and-notify.js'),
-    issue,
-    '--workspace', workspace,
-    '--from', workerName,
-  ], {
-    cwd: workspace,
-    stdio: 'ignore',
-    detached: true,
-    windowsHide: true,
-  });
-  notifier.unref();
-  // notifierPid を workers.json に記録する: remove-worker.js / reset-session.js が
-  // pane と無関係に生き続けるこのプロセス（+ 子の poll-pr.js）を確実に終了できるようにする。
-  try {
-    const current = JSON.parse(readFileSync(workersJson, 'utf8'));
-    if (current[workerName]) {
-      current[workerName].notifierPid = notifier.pid;
-      writeFileSync(workersJson, JSON.stringify(current, null, 2), 'utf8');
-    }
-  } catch (e) {
-    console.warn(`spawn-worker: notifierPid の記録に失敗しました: ${e.message}`);
-  }
-  console.warn(`spawn-worker: poll-and-notify を起動しました (issue=${issue}, pid=${notifier.pid})`);
 }
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---

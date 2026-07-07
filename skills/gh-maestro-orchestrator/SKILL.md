@@ -20,7 +20,7 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 - `.gh-maestro/` 配下のセッション管理ファイル（session.json・review-*.log・poll-state-* など）を読む
 - 自分が書いた `/tmp/issue-*.md` 等の草稿ファイルを読む
 - `gh pr view`・`gh issue view` 等でPR/Issue情報を取得する（プロセス管理のため）
-- `spawn-worker.js`・`queue-send.js`・`queue-ack.js`・`send-pane.js`・`poll-reviews.js` 等のgh-maestroスクリプトを実行する
+- `spawn-worker.js`・`msg-send.js`・`msg-poll.js`・`msg-read.js`・`poll-reviews.js` 等のgh-maestroスクリプトを実行する
 
 ## セッション変数
 
@@ -45,6 +45,18 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 | 局所的な実装・PR作成（コスト効率重視） | `gh-maestro-coder` |
 | 設計判断や広範囲の影響分析、高度な検証を伴う実装・PR作成 | `gh-maestro-senior-coder` |
 | 上記に当てはまらないが手を動かす仕事がある | `gh-maestro-base`（`--prompt`で役割を明示） |
+
+### アンカー Issue の確保
+
+すべてのワーカーは GitHub Issue をアンカーとして持つ。`spawn-worker.js` の `--issue` は必須である。
+
+| ワーカー | アンカー |
+|---|---|
+| coder / senior-coder | 実装対象の Issue（現行どおり） |
+| investigator | 調査対象のバグ Issue（既存があればそれ。なければ orchestrator が起草・作成する） |
+| explorer | 調査の発端となった Issue（あればそれ。なければ orchestrator が `maestro:task` ラベル付きの軽量 Issue を作成する） |
+
+ワーカー起動前に、該当するアンカー Issue が存在することを必ず確認すること。存在しない場合は先に Issue を作成する。
 
 ### explorer の起動例
 
@@ -72,18 +84,18 @@ explorerは**事実のみ報告する**（分析・判断は行わない）。in
 ## アセット（`{{SCRIPTS_PATH}}/`）
 
 - **spawn-worker.js** — worktreeを作りワーカーを新規ペインで起動する
-- **queue-send.js** — ワーカーにメッセージを送る（推奨の主経路）。メッセージはファイルシステムキューに enqueue され、poller が WezTerm 通知を担当する（ワーカー名は第1引数に**位置引数**で渡す。`--worker` フラグは存在しない）
+- **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。`--issue` は workers.json から自動解決されるため明示しない
 
 ```sh
-node "{{SCRIPTS_PATH}}/queue-send.js" $WORKER --workspace $WORKSPACE "<メッセージ>"
-# 例: node "{{SCRIPTS_PATH}}/queue-send.js" issue-5-implement --workspace $WORKSPACE "命名改善: src/auth.go:42 — processData → normalizeSSN に変更してください（PR #12 のレビュー指摘より）"
+node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE "<メッセージ>"
+# 例: node "{{SCRIPTS_PATH}}/msg-send.js" issue-5-implement --workspace $WORKSPACE "命名改善: src/auth.go:42 — processData → normalizeSSN に変更してください（PR #12 のレビュー指摘より）"
 ```
-- **queue-ack.js** — 自分の inbox の pending メッセージを ack（受理）する。messageId を指定するだけ。二重 ack も安全（冪等）
+- **msg-read.js** — コメントIDから本文を読み出す（マーカー行除去済み）
 
 ```sh
-node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
+node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE
 ```
-- **send-pane.js** — 後方互換ラッパー。内部は `queue-send.js` と同じ enqueue を行う。新規の送信には `queue-send.js` を推奨
+- **send-pane.js** — 後方互換ラッパー。Phase 3で削除予定。新規の送信には `msg-send.js` を使用すること
 - **remove-worker.js** — ワーカーペインをkillしてworktreeを削除する
 
 ```sh
@@ -126,7 +138,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 | `gh-maestro-coder` | コスト効率に優れ、指定されたスコープに閉じた局所的な変更や、明確に定義された仕様の実装・修正に適している。 |
 | `gh-maestro-senior-coder` | 高度な自己検証能力とアーキテクチャの整合性判断能力を持ち、広範な影響分析、複雑なロジック調整、設計判断を伴うタスクの解決に適している。 |
 | `gh-maestro-explorer` | 汎用的な事実調査（grep・コード探索・情報収集）。分析・判断は行わず、発見した事実を報告する。 |
-| `gh-maestro-investigator` | バグ原因の特定 → 根本原因・影響範囲・修正方針の報告（Issueがある場合は`--issue`でIssue番号を渡す。ない場合は`--prompt`で調査内容を渡す）。 |
+| `gh-maestro-investigator` | バグ原因の特定 → 根本原因・影響範囲・修正方針の報告（`--issue` が必須。アンカー Issue がなければ orchestrator が先に起票する）。 |
 | `gh-maestro-base` | 上記以外の動的役職（必ず`--prompt`で役割を定義する）。 |
 
 ## セッションのゴール
@@ -137,7 +149,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 - `BASE_BRANCH`は保護ブランチでも一時的なworktreeブランチでもない（詳細は不変条件を参照）
 - 依存関係のないIssueは並列で進行している（直列化の根拠は「AがBの入力になる」場合のみ）
 - 大規模タスクは競合しない軸（ディレクトリ・ファイル種別・機能単位など）で分割し、複数ワーカーが並列処理している
-- ワーカーはその役割が完全に終わった時点で削除されている（PRを作っただけのcoderはまだ生きている。トリアージの結果、修正が必要な指摘があれば`queue-send.js`で転送する）
+- ワーカーはその役割が完全に終わった時点で削除されている（PRを作っただけのcoderはまだ生きている。トリアージの結果、修正が必要な指摘があれば`msg-send.js`で転送する）
 - 同時進行中のIssue間でファイル競合が発生していない（競合可能性があれば前のPRがマージされてから次を起票する）
 - `--prompt`には役割とIssue番号のみが含まれ、実装詳細はIssueに記述されている
 - PRのレビューコメントをトリアージし、人間に結果を提示している。マージ判断は人間が行い、マージ後は反省会（コーダーへの意見聴取を含む）を実施してからIssueをクローズしてworktreeを削除している。**反省会より前に`remove-worker.js`を実行しない**
@@ -147,7 +159,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 
 ```sh
 # NG: 1000件のLintエラーを1ワーカーに丸投げ
-WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "Lintエラーをすべて修正" ...)
+WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue <N> --prompt "Lintエラーをすべて修正" ...)
 
 # OK: ディレクトリ単位で分割し並列実行
 W1=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "src/components/ のLintエラーを修正" --issue 12 --description fix-components ...)
@@ -196,27 +208,23 @@ node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tm
 
 ## 自分の inbox の監視
 
-worker からの報告（PR_DETECTED 等）はすべて orchestrator の inbox に enqueue される。
-受動的に届くのを待つのではなく、能動的に inbox を poll して受信する。
+worker からの報告はすべて GitHub Issue コメントとして投稿される。
+受動的に届くのを待つのではなく、能動的に Issue コメントを poll して受信する。
 wezterm send-text による通知はレイテンシ最適化のヒントに過ぎず、pull が唯一の配送根拠である。
 
-Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/poll-inbox.js" orchestrator --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。
+Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" orchestrator --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。
 
 Monitorから届く通知を処理する：
-- `NEW_MESSAGE:<messageId>` → `.gh-maestro/queue/inbox/orchestrator/<messageId>.json` を読んで内容を把握する。内容に応じて処理する（PR_DETECTED → PR番号を記録 等）。処理後は `node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE` で ack する。**完了後は直ちにMonitorに戻る**
+- `NEW_MESSAGE:<issue>:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を読む。内容に応じて処理する（PR_DETECTED → PR番号を記録 等）。**完了後は直ちにMonitorに戻る**
 
 この inbox 監視は PR 検出・Review Manager 起動通知・反省会でのコーダーからの応答など、
 orchestrator が受け取るすべてのメッセージの受信経路である。セッション中は常に稼働させること。
 
 ## PR検出
 
-コーダーを起動すると `spawn-worker.js` が自動でポーリングを開始し、orchestrator の inbox 経由で以下が届く：
+コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <N>` を起動してPRを監視する（`N` はコーダーのアンカー Issue 番号）。
 
-- `PR_DETECTED:<PR番号>` → PR番号を記録してレビュー監視に移行する
-- `REVIEW_MANAGER_STARTED:<PR番号>` → Review Managerが起動した（記録する）
-- `REVIEW_MANAGER_ALREADY_RUNNING:<PR番号>` → 既にReview Managerが稼働中
-
-PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`queue-send.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
+PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`msg-send.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
 **通常コーダー（gh-maestro-coder）が実装に失敗してエスカレーションされた場合、人間が承認した段階で上位のシニアコーダー（gh-maestro-senior-coder）を適用して再起動することを検討せよ。**
 
 **`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、「Review Managerの手動起動」に従って自分で起動すること。
@@ -269,7 +277,7 @@ PRに新しいレビューコメントが届くたびに、以下の4分類で�
 ただし「短すぎる」「好みの問題」レベルのスタイル指摘は**保留リストへ**。
 
 ```sh
-node "{{SCRIPTS_PATH}}/queue-send.js" $WORKER --workspace $WORKSPACE "命名改善: <path>:<line> — <現在の名前> は不正確/不明瞭です。<具体的な提案> に変更してください。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
+node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE "命名改善: <path>:<line> — <現在の名前> は不正確/不明瞭です。<具体的な提案> に変更してください。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
 ```
 
 ### 3. 本当のバグ・セキュリティ問題 — コーダーにフィードバック
@@ -277,7 +285,7 @@ node "{{SCRIPTS_PATH}}/queue-send.js" $WORKER --workspace $WORKSPACE "命名改�
 テストでカバーされていない分岐、エラーハンドリング漏れ、認証バイパス、データ破損の可能性など、**実害のある指摘**はコーダーにフィードバックする。具体的な問題点と修正方針を伝える。
 
 ```sh
-node "{{SCRIPTS_PATH}}/queue-send.js" $WORKER --workspace $WORKSPACE "修正依頼: <path>:<line> — <問題の説明>。<修正方針>。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
+node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE "修正依頼: <path>:<line> — <問題の説明>。<修正方針>。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
 ```
 
 ### 4. 議論の余地がある提案 / SUGGESTION — 保留Issueへ即追記
@@ -439,7 +447,7 @@ gh issue comment $PENDING_ISSUE --repo $REPO \
 上記に該当しない（分類が明白・機械的な）場合は聴取をスキップし、直接人間への提示に進む。聞く場合のみ：
 
 ```sh
-node "{{SCRIPTS_PATH}}/queue-send.js" $WORKER --workspace $WORKSPACE "反省会の分類案です。異論や補足があれば教えてください: <分類案の要約>"
+node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE "反省会の分類案です。異論や補足があれば教えてください: <分類案の要約>"
 ```
 
 コーダーからの応答（異論・補足・別視点）があれば、人間への提示フォーマットに反映してから次に進む。応答がなくても一定時間で先に進んでよい。

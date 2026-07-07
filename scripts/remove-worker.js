@@ -15,7 +15,6 @@ const { readFileSync, writeFileSync, existsSync, rmSync } = require('fs');
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
-const { purgeInbox } = require('./queue');
 const { killProcessTree } = require('./kill-tree');
 
 const USAGE = `remove-worker.js — ワーカーのペインを kill し worktree を削除する
@@ -63,11 +62,12 @@ const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 
 const workerEntry = normalizeWorkerEntry(workers[workerName]);
 const paneId = workerEntry.paneId;
 
-// ── notifier(poll-and-notify.js)をkill ──────────────────────────────
-// paneとは無関係にdetachedで動いているため、pane killでは終了しない。
+// ── 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill ──────
+// Phase 1 以前に起動されたセッションの workers.json には notifierPid が残っている可能性がある。
+// Phase 2 以降の新規 spawn では notifier は起動されないが、移行過渡期の後方互換として残す。
 if (workerEntry.notifierPid) {
   killProcessTree(workerEntry.notifierPid);
-  console.warn(`remove-worker: notifier (pid ${workerEntry.notifierPid}) を終了しました`);
+  console.warn(`remove-worker: レガシー notifier (pid ${workerEntry.notifierPid}) を終了しました`);
 }
 
 if (!paneId) {
@@ -151,21 +151,19 @@ if (existsSync(worktreeDir)) {
   console.warn(`remove-worker: worktree "${workerName}" のディレクトリが存在しません — スキップします`);
 }
 
-// ── inbox の未処理メッセージを掃除 ─────────────────────────────────────
-
-// workers.json にエントリがある場合のみ inbox 掃除を試みる。
-// 未知の workerName には inbox が存在しないためスキップ。
-if (workers[workerName] !== undefined) {
+// ── msg-state の削除 ────────────────────────────────────────────────────
+// GitHub コメントのポーリングカーソルを削除する（ベストエフォート、ENOENT は成功扱い）。
+{
+  const msgStateFile = resolve(workspace, '.gh-maestro', 'msg-state', `${workerName}.json`);
   try {
-    const { purged, failed } = purgeInbox(workspace, workerName);
-    if (purged > 0) {
-      console.warn(`remove-worker: ワーカー "${workerName}" の inbox から ${purged} 件の未処理メッセージを削除しました`);
-    }
-    if (failed > 0) {
-      console.warn(`remove-worker: ワーカー "${workerName}" の inbox 掃除で ${failed} 件の削除に失敗しました（残留の可能性あり）`);
+    if (existsSync(msgStateFile)) {
+      rmSync(msgStateFile);
+      console.warn(`remove-worker: msg-state "${workerName}.json" を削除しました`);
     }
   } catch (e) {
-    console.warn(`remove-worker: inbox 掃除に失敗しました（ワーカー削除は続行します）: ${e.message}`);
+    if (e.code !== 'ENOENT') {
+      console.warn(`remove-worker: msg-state 削除に失敗しました（ワーカー削除は続行します）: ${e.message}`);
+    }
   }
 }
 

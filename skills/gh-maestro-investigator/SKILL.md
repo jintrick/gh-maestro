@@ -10,30 +10,21 @@ description: gh-maestroバグ調査エージェント。orchestratorからバグ
 **唯一のルール: 何かを伝えたくなったら、その内容は必ず次のコマンドの引数として書く。地の文では絶対に書かない。** 質問・相談・完了報告・失敗報告、すべてこれを使う。ただし「～を調査します」「着手しました」などの着手報告は送らない：
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<内容>"
+GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
 **NG例:** 「原因が分かりました。auth.tsの42行目です」とそのまま書く → 誰にも届かず消える。
 **OK例:** 同じ内容を上のコマンドの引数にして実行する。
 
-何かを書く前に自問する: 「これはツール呼び出しの引数か？」 NOなら、その内容をsend-pane.jsの引数に置き換えてから実行する。
+何かを書く前に自問する: 「これはツール呼び出しの引数か？」 NOなら、その内容をmsg-send.jsの引数に置き換えてから実行する。
 
 orchestrator からの返答を含むすべてのメッセージは、自分の inbox を能動的に pull して受信する。
 受動的に届くのを待つのではなく、以下の仕組みで自分から取りに行く。
 wezterm send-text による通知はレイテンシ最適化のヒントに過ぎず、pull が唯一の配送根拠である。
 
-`node "{{SCRIPTS_PATH}}/poll-inbox.js" $WORKER_NAME --workspace $WORKSPACE` を継続実行して inbox を監視する。利用可能な永続実行手段（Monitor 等）があれば使う。なければ bash で定期実行する。
+{{INBOX_POLL_MECHANISM}}
 
-出力から `NEW_MESSAGE:<messageId>` を検出したら:
-- `.gh-maestro/queue/inbox/$WORKER_NAME/<messageId>.json` を読んで内容を把握し、メッセージを処理する
-- 処理後は `node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE` で ack する
-- **完了後は直ちに inbox 監視に戻る**
-
-処理後は必ず ack すること（ack = 読んで受理した。タスク完了ではない）。ack が配送の唯一の根拠：
-
-```sh
-node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
-```
+指示を処理したら必ず `msg-send.js` で結果を返信すること。ack は不要（GitHub コメントとして永続化されるため）。
 
 ## ゴール
 
@@ -41,7 +32,7 @@ node "{{SCRIPTS_PATH}}/queue-ack.js" <messageId> --workspace $WORKSPACE
 以下を実行することがゴールだ：
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<調査報告>"
+GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "<調査報告>"
 ```
 
 ## 起動時に与えられる情報
@@ -49,10 +40,8 @@ node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "<調�
 - `WORKER_NAME=<name>` — このワーカーの識別名
 - `REPO=<owner/repo>` — 対象リポジトリ
 - `WORKSPACE=<path>` — メインワークスペースのルートパス
-- `ISSUE=<N>` — 調査対象のIssue番号（省略可）
-- `TASK=<内容>` — `ISSUE` がない場合に調査内容を直接テキストで渡す
-
-`ISSUE` と `TASK` はどちらか一方が与えられる。両方ある場合は `ISSUE` を優先する。
+- `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）
+- `ISSUE=<N>` — 調査対象の Issue 番号
 
 ## 手順
 
@@ -76,10 +65,6 @@ Issue本文から以下を抽出しメモする：
 gh issue list --repo $REPO --state all --search "<エラーメッセージの一部>"
 gh pr list --repo $REPO --state all --search "<エラーメッセージの一部>"
 ```
-
-**`ISSUE` がない場合（`TASK` のみ）：**
-
-`TASK` の内容からエラーメッセージ・関数名・ファイル名などの手がかりを抽出してメモし、フェーズ2に進む。
 
 ### フェーズ2: コードの特定
 
@@ -130,7 +115,7 @@ path/to/file.js:42 — <具体的に何が起きているか。コードの解�
 ## 調査しても特定できない場合
 
 ```sh
-node "{{SCRIPTS_PATH}}/send-pane.js" orchestrator --workspace $WORKSPACE "調査完了。根本原因を特定できませんでした。【わかったこと】<絞り込めた範囲> 【行き詰まった理由】<理由> 【次の手がかり候補】<あれば>"
+GH_MAESTRO_WORKER=$WORKER_NAME node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue $ISSUE --workspace $WORKSPACE "調査完了。根本原因を特定できませんでした。【わかったこと】<絞り込めた範囲> 【行き詰まった理由】<理由> 【次の手がかり候補】<あれば>"
 ```
 
 ## 制約
