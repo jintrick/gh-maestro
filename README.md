@@ -18,11 +18,11 @@ GitHubを永続ストアとして、複数のAIエージェントを協調動作
 gh-maestro は **GitHub Issue のコメント** をメッセージバスとして、 orchestrator と worker エージェント間で通信する。
 
 - 各 worker は固有の **アンカー Issue** を持ち、全てのメッセージはその Issue へのコメントとして送受信される
-- 送信は `msg-send.js`、受信（ポーリング）は `msg-poll.js`、本文取得は `msg-read.js` を使用する
-- 全てのポーリングはエージェント自身のターン内で blocking 実行され、detached 常駐プロセスは存在しない
-- メッセージの真実は GitHub 上に永続化される。ローカルにはカーソルのみ保持し、消失しても再通知されるのみである
+- 起動時の指示は Issue 本文を worker が直接参照し、以降のやり取りを Issue コメント経由で行う
 
 詳細な仕様は `docs/github-comm-plan.md` を参照。
+
+> **注意**: Issue コメントの可視性はリポジトリの可視性に従う。トークン・認証情報・個人情報をメッセージ本文に含めてはならない。
 
 ## インストール
 
@@ -51,14 +51,14 @@ node scripts/install.js
 # 機能追加の場合
 あなた: 「ログイン機能を追加したい」
 orchestrator: Issue を起草・作成
-orchestrator: coder をアンカー Issue と共に起動 → Issue コメントで指示
+orchestrator: coder をアンカー Issue と共に起動（coder は Issue 本文を読んで着手）
 coder: 実装・PR 作成（進捗・結果を Issue コメントで報告）
 CI: AI Code Review が自動実行（正確性・保守性・堅牢性）
 orchestrator: レビュー結果をトリアージ → あなたにマージを依頼
 
 # バグ調査の場合
 あなた: 「Issue #12 のバグを調査してほしい」
-orchestrator: investigator をアンカー Issue と共に起動
+orchestrator: investigator をアンカー Issue と共に起動（investigator は Issue 本文を読んで着手）
 investigator: 根本原因/影響範囲/修正方針を Issue コメントで報告
 orchestrator: 調査結果をあなたに提示 → 対応方針を判断
 ```
