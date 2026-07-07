@@ -61,6 +61,8 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $IS
 - DOM/外部API/ライブラリの戻り値がnullable・optionalな場合、型アサーション（`as T`、非nullアサーション`!`など）でnullチェックを迂回しない。早期return・throw・assertで明示的にnullを排除してから使う
 - 主処理が成功した後に付随する後続処理（一覧再取得など）を行う場合、それぞれ独立したtry/catchで囲み、どちらの処理が失敗したかをエラーメッセージで区別できるようにする
 - 新規に追加した関数・IPCハンドラには、同一コミットで対応するテストケースを追加する
+- CLIスクリプトの `main()` は `process.exit()` を直接呼ばず、結果オブジェクト（終了コード・出力行など）を返す設計にする。`process.exit()` は `require.main === module` で分岐した薄いエントリポイントの中でのみ呼ぶ。こうすることで `main()` をテストから直接呼び出せる
+- `gh api` で `-f per_page=100` のようにフィールドを指定すると、既定では `POST` メソッド扱いになり `GET` のクエリパラメータとして機能しない（422エラーになる）。GETしたい場合は `--method GET` を明示する
 
 ## 制約
 
