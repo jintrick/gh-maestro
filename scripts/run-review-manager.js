@@ -108,7 +108,9 @@ try {
   }
 
   const agentArgs = buildAgentCommandArgs(agentConfig, {
+    promptFile,
     shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
+    systemPromptText: `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
   });
 
   log(`spawning ${agentArgs.join(' ')}`);
