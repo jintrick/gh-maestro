@@ -233,4 +233,4 @@ function resolveSkillAgentMap(opts = {}) {
   return map;
 }
 
-module.exports = { resolveAgentConfig, resolveSkillAgentMap, loadDefaults };
+module.exports = { resolveAgentConfig, resolveSkillAgentMap, loadDefaults, isValidAgentConfig };
