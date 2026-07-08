@@ -45,3 +45,4 @@ wezterm send-text による通知はレイテンシ最適化のヒントに過�
 - `npm install` / `npm ci` は実行しない。`node_modules` はシンボリックリンクで用意済み
 - ゴール達成時・失敗時を問わず、必ず通信ルールのコマンドでorchestratorに報告すること（地の文で報告しない）
 - 判断に迷ったらorchestratorに相談し、自分で止まらない
+- **自分で Monitor や background bash 等でポーリングプロセスを起動しないこと。** 追加指示の待ち受けは `msg-poll.js` 等の共通スクリプトのみを使用する。共通スクリプト側にライフサイクル管理（dead-man's switch + PID registry）が実装されており、自前の背景プロセス起動は孤児化の原因になる。

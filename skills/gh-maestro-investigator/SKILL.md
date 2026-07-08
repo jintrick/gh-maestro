@@ -124,3 +124,4 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $IS
 - PRを作成しない
 - `npm install` / `npm ci` は実行しない
 - 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない
+- **自分で Monitor や background bash 等でポーリングプロセスを起動しないこと。** 追加指示の待ち受けは `msg-poll.js` 等の共通スクリプトのみを使用する。共通スクリプト側にライフサイクル管理（dead-man's switch + PID registry）が実装されており、自前の背景プロセス起動は孤児化の原因になる。

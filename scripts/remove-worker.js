@@ -16,6 +16,7 @@ const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { killProcessTree } = require('./kill-tree');
+const { sweepRegistry } = require('./process-lifecycle');
 
 const USAGE = `remove-worker.js — ワーカーのペインを kill し worktree を削除する
 
@@ -86,6 +87,26 @@ if (!paneId) {
 
   // プロセスがハンドルを解放するまで少し待つ
   sleep(500);
+}
+
+// ── PID registry sweep: ワーカーの登録PIDを同一性確認の上で kill ─────
+// req.9: workerName に紐づく登録PIDを発見し、同一性確認後にkillする
+{
+  const sweepResults = sweepRegistry(workspace, {
+    match: (entry) => entry.workerName === workerName,
+  });
+  if (sweepResults.killed.length > 0) {
+    console.warn(`remove-worker: PID registry: ${sweepResults.killed.length} 件のプロセスを終了しました`);
+    for (const k of sweepResults.killed) {
+      console.warn(`remove-worker:   pid=${k.pid} script=${k.script || '-'}`);
+    }
+  }
+  if (sweepResults.cleaned.length > 0) {
+    console.warn(`remove-worker: PID registry: ${sweepResults.cleaned.length} 件のstaleエントリを掃除しました`);
+  }
+  for (const e of sweepResults.errors) {
+    console.warn(`remove-worker: PID registry error: ${e}`);
+  }
 }
 
 // ── worktreeを即座に削除 ──────────────────────────────────────────────
