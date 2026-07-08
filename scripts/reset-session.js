@@ -16,6 +16,7 @@ const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { killProcessTree } = require('./kill-tree');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
+const { sweepRegistry } = require('./process-lifecycle');
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
 
@@ -455,7 +456,31 @@ if (existsSync(queueDir)) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 8. workers.json をリセット
+// 8. PID registry sweep（全エントリを同一性確認の上で掃除）
+//    req.10: registry 全体を読み取り、全エントリを同一性確認の上でkill
+// ═══════════════════════════════════════════════════════════════════
+
+log('PID registry を sweep します...');
+{
+  const sweepResults = sweepRegistry(workspace);
+  if (sweepResults.killed.length > 0) {
+    log(`PID registry: ${sweepResults.killed.length} 件のプロセスを終了しました`);
+    for (const k of sweepResults.killed) {
+      log(`  pid=${k.pid} worker=${k.workerName || '-'} script=${k.script || '-'}`);
+    }
+    results.killed.push(...sweepResults.killed.map(k => `pid-registry-${k.pid}`));
+  }
+  if (sweepResults.cleaned.length > 0) {
+    log(`PID registry: ${sweepResults.cleaned.length} 件のstaleエントリを掃除しました`);
+  }
+  for (const e of sweepResults.errors) {
+    warn(`PID registry error: ${e}`);
+    results.errors.push(`pid-registry: ${e}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 9. workers.json をリセット
 // ═══════════════════════════════════════════════════════════════════
 
 log('workers.json をリセットします...');
@@ -470,7 +495,7 @@ try {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 9. サマリー
+// 10. サマリー
 // ═══════════════════════════════════════════════════════════════════
 
 log('');

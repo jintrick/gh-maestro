@@ -62,6 +62,13 @@ OUTPUT=${toUnix(outputFile)}
 }
 
 fs.mkdirSync(ghDir, { recursive: true });
+
+// lock ファイルに自PIDを記録（起動元 launcher のPIDを上書き）。
+// launcher (start-review-manager.js) は detach 後すぐに終了するため、
+// 子プロセスである run-review-manager.js 自身が lock を所有・更新する。
+// これにより isLockValid が正しく稼働中プロセスのPIDを確認できる。
+fs.writeFileSync(lockFile, String(process.pid));
+
 log(`run-review-manager started pr=${pr} repo=${repo}`);
 
 try {

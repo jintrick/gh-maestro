@@ -20,6 +20,12 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { validateField } = require('./shared/validate');
+const {
+  resolveSessionPid,
+  createDeadManSwitch,
+  registerProcess,
+  cleanup: lifecycleCleanup,
+} = require('./process-lifecycle');
 
 const DEFAULT_INTERVAL_SEC = 20;
 const MARKER_RE = /^<!--\s*gh-maestro\s+(\{.*\})\s*-->/;
@@ -27,7 +33,7 @@ const MAX_SEEN_IDS = 100;
 
 const USAGE = `msg-poll.js — GitHub Issue コメントを定期スキャンし新着メッセージを stdout に通知する
 
-Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once]
+Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once] [--session-pid <pid>]
 
 Arguments:
   <self>                 自分の名前（worker 名、または "orchestrator"）
@@ -37,6 +43,7 @@ Options:
   --workspace <path>     ワークスペースパス（省略時は環境変数またはCWDから解決）
   --interval <sec>       ポーリング間隔（秒、既定: ${DEFAULT_INTERVAL_SEC}）
   --once                 1回だけスキャンして終了する（継続ポーリングしない）
+  --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
 
 Output (stdout):
   新着メッセージを1行ずつ出力:
@@ -46,7 +53,11 @@ Output (stdout):
 このスクリプトはエージェントのターン内で blocking 実行される。detached 起動しない。
 カーソルは .gh-maestro/msg-state/<self>.json に永続化され、--once の繰り返し実行でも二重通知しない。
 state ファイルが壊れている・存在しない場合は「過去メッセージの再通知」として扱う。
-gh 呼び出し失敗（ネットワーク断・rate limit 等）はそのサイクルをスキップし次サイクルへ継続する。`;
+gh 呼び出し失敗（ネットワーク断・rate limit 等）はそのサイクルをスキップし次サイクルへ継続する。
+
+ライフサイクル管理:
+  ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
+  消滅時はPID registryを解除して自動exitする。起動時にPID registryへ自己登録する。`;
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -152,7 +163,7 @@ function main(argsOverride, opts = {}) {
     return { code: 0, lines: out, errLines: err, scanOnce: null, onceMode: true, intervalMs: 0 };
   }
 
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue', '--interval']);
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue', '--interval', '--session-pid']);
 
   if (exitFlagMiss) {
     writeErr('msg-poll: フラグには値が必要です。');
@@ -196,6 +207,10 @@ function main(argsOverride, opts = {}) {
 
   const intervalMs = (parseInt(values['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
 
+  // ── セッションPID解決（dead-man's switch） ────────────────────────────
+
+  const sessionPid = resolveSessionPid(values['--session-pid']);
+
   // ── リポジトリ解決 ──────────────────────────────────────────────────
 
   const ghOpts = { cwd: workspace };
@@ -210,10 +225,22 @@ function main(argsOverride, opts = {}) {
 
   const state = readState(workspace, self);
 
+  // ── dead-man's switch: 毎周回で親セッションの生存を確認 ──────────
+
+  const checkParent = createDeadManSwitch(sessionPid);
+
   /**
    * 1回のスキャン。
    */
   function scanOnce() {
+    // dead-man's switch: 親が死んでいたら cleanup して exit
+    if (!checkParent()) {
+      lifecycleCleanup(workspace);
+      // stderr に理由を出力して exit（stdout は Monitor 通知チャンネルなので使わない）
+      process.stderr.write(`msg-poll: parent session (pid ${sessionPid}) is dead — exiting\n`);
+      process.exit(0);
+    }
+
     let allIssuesAndComments = [];
 
     if (isOrchestrator) {
@@ -351,6 +378,9 @@ function main(argsOverride, opts = {}) {
     scanOnce,
     onceMode,
     intervalMs,
+    workspace,
+    sessionPid,
+    self,
   };
 }
 
@@ -384,11 +414,21 @@ if (require.main === module) {
     process.exit(0);
   }
 
+  // ── PID registry に自己登録（継続モードのみ） ──────────────────────
+  // worker モードの場合は workerName を含めて登録する。
+  // これにより remove-worker.js の sweep が entry.workerName でマッチできる。
+
+  registerProcess(result.workspace, {
+    script: 'msg-poll.js',
+    workerName: result.self !== 'orchestrator' ? result.self : null,
+  });
+
   // 継続モード: streamOutput が true なので scanOnce の出力は直接 stdout へ出る
   let intervalHandle = null;
 
   function cleanup() {
     if (intervalHandle) clearInterval(intervalHandle);
+    lifecycleCleanup(result.workspace);
     process.exit(0);
   }
 

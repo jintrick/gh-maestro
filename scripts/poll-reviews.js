@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS]
+// Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <pid>]
 // Polls for review comments, commit pushes, and merge status. Emits:
 //   REVIEW_COMMENT:<path>:<line>|<user>:<body>
 //   PR_COMMENT:<user>:<body>
@@ -8,18 +8,27 @@
 //   PR_MERGED:<PR>
 'use strict';
 
-const { spawnSync } = require('child_process');
+const { spawnSync } = require('./child-process');
 const fs = require('fs');
 const path = require('path');
+const {
+  resolveSessionPid,
+  createDeadManSwitch,
+  registerProcess,
+  cleanup: lifecycleCleanup,
+} = require('./process-lifecycle');
 
 const USAGE = `poll-reviews.js — PR のレビューコメント・push・マージ状態をポーリングする
 
-Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS]
+Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <pid>]
 
 Arguments:
   <PR>                対象の PR 番号
   [WORKSPACE]         状態ファイルを置くワークスペース（デフォルト CWD）
   [INTERVAL_SECONDS]  ポーリング間隔（秒、デフォルト 30）
+
+Options:
+  --session-pid <pid>  監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
 
 Output (stdout):
   REVIEW_COMMENT:<path>:<line>|<user>:<body>  インラインレビューコメント
@@ -28,14 +37,29 @@ Output (stdout):
   PR_PUSH:<sha>                               新しいコミットが push された
   PR_MERGED:<PR>                              マージ完了（このとき終了する）
 
-PR_MERGED を検出するまで永続的にポーリングする。`;
+PR_MERGED を検出するまで永続的にポーリングする。
+ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
+消滅時はPID registryを解除して自動exitする。`;
 
 const argv = process.argv.slice(2);
 if (argv.includes('--help') || argv.includes('-h')) {
   console.log(USAGE);
   process.exit(0);
 }
-const [pr, workspace, intervalArg] = argv;
+
+// 簡易フラグパース
+const getFlag = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
+const sessionPidArg = getFlag('--session-pid');
+
+// フラグとその値を除去した位置引数
+const flagSet = new Set(['--session-pid']);
+const positional = [];
+for (let i = 0; i < argv.length; i++) {
+  if (flagSet.has(argv[i])) { i++; continue; }
+  positional.push(argv[i]);
+}
+
+const [pr, workspace, intervalArg] = positional;
 const intervalSec = parseInt(intervalArg || '30');
 
 if (!pr) {
@@ -52,10 +76,21 @@ const stateFile = path.join(stateDir, `poll-state-${pr}`);
 if (!fs.existsSync(stateFile)) fs.writeFileSync(stateFile, '');
 const shaFile = path.join(stateDir, `poll-sha-${pr}`);
 
+// ── ライフサイクル管理 ─────────────────────────────────────────────────
+
+const sessionPid = resolveSessionPid(sessionPidArg);
+const checkParent = createDeadManSwitch(sessionPid);
+
+// PID registry に自己登録
+registerProcess(workspace || process.cwd(), { script: 'poll-reviews.js' });
+
 function cleanup() {
-  try { fs.unlinkSync(stateFile); } catch (_) {}
-  try { fs.unlinkSync(shaFile); } catch (_) {}
+  lifecycleCleanup(workspace || process.cwd(), () => {
+    try { fs.unlinkSync(stateFile); } catch {}
+    try { fs.unlinkSync(shaFile); } catch {}
+  });
 }
+
 process.on('SIGINT',  () => { cleanup(); process.exit(0); });
 process.on('SIGTERM', () => { cleanup(); process.exit(0); });
 
@@ -74,6 +109,13 @@ const reviewsJq = `.[] | [(.id | tostring), .user.login, .state, (.body | gsub("
 (async () => {
   let interval = intervalSec;
   while (true) {
+    // dead-man's switch: 親セッション生存確認
+    if (!checkParent()) {
+      console.error(`poll-reviews: parent session (pid ${sessionPid}) is dead — exiting`);
+      cleanup();
+      process.exit(0);
+    }
+
     const prJson = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
       '--json', 'state,headRefOid', '-q', '[.state, .headRefOid] | join("|")'],
       { encoding: 'utf8' }).stdout.trim();
