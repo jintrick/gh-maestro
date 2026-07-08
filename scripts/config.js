@@ -173,6 +173,7 @@ function cmdUse(profileName) {
   // Validate all agent IDs in the profile map
   const defaults = loadDefaults();
   const validAgentIds = collectValidAgentIds(defaults, config);
+  const defaultAgentIds = new Set(defaults.agents.map(a => a.id));
 
   for (const [skill, agentId] of Object.entries(profileMap)) {
     if (typeof agentId !== 'string' || agentId.length === 0) {
@@ -185,6 +186,19 @@ function cmdUse(profileName) {
         'agent-defaults.json or config agents.',
       );
       process.exit(1);
+    }
+    // Config-only agents (not in defaults) must pass isValidAgentConfig.
+    // Incomplete custom agents (missing command/promptDelivery) would cause
+    // resolveAgentConfig() to return null at worker-launch time.
+    if (!defaultAgentIds.has(agentId)) {
+      const customAgent = config.agents && config.agents[agentId];
+      if (!isValidAgentConfig(customAgent)) {
+        console.error(
+          `Error: agent "${agentId}" (for skill "${skill}") is a custom agent ` +
+          'missing required fields (command + promptDelivery).',
+        );
+        process.exit(1);
+      }
     }
   }
 
@@ -265,16 +279,26 @@ function cmdStatus(workspacePath) {
   console.log(header);
   console.log('-'.repeat(header.length));
 
-  // Cache checkAgentExists results by command name to avoid redundant
-  // login-shell launches when multiple skills map to the same agent.
+  // Cache both resolveAgentConfig and checkAgentExists results.
+  // resolveAgentConfig can be expensive (npm root -g for reasonix etc.),
+  // and checkAgentExists spawns a login shell per unique command.
+  // Caching by agentId prevents DoS via malicious workspace configs
+  // with thousands of fake skill keys mapping to the same agent.
+  const resolvedCache = new Map();
   const existsCache = new Map();
 
   for (const [skill, agentId] of entries) {
-    // Resolve the agent config for this agent ID to get the actual command
-    const resolved = resolveAgentConfig(agentId, {
-      homedir: HOMEDIR,
-      workspace: workspacePath || undefined,
-    });
+    // Resolve the agent config (cached)
+    let resolved;
+    if (resolvedCache.has(agentId)) {
+      resolved = resolvedCache.get(agentId);
+    } else {
+      resolved = resolveAgentConfig(agentId, {
+        homedir: HOMEDIR,
+        workspace: workspacePath || undefined,
+      });
+      resolvedCache.set(agentId, resolved);
+    }
 
     let ok = '✗';
     if (resolved) {
