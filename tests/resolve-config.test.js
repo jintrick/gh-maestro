@@ -297,6 +297,7 @@ test('resolveSkillAgentMap: デフォルトのマッピングを返す', () => {
     assert.equal(map['gh-maestro-senior-coder'], 'claude-ds-pro');
     assert.equal(map['gh-maestro-investigator'], 'reasonix');
     assert.equal(map['gh-maestro-explorer'], 'agy');
+    assert.equal(map['gh-maestro-reviewer'], 'codex');
   });
 });
 
@@ -377,5 +378,18 @@ test('resolveAgentConfig: workspace 未指定時は global config のみ考慮',
     const agent = resolveAgentConfig('claude-ds', { homedir: home });
     assert.equal(agent.enterSequence, '\n', 'global override should apply');
     assert.equal(agent.command, 'claude-ds', 'default field unchanged');
+  });
+});
+
+test('resolveAgentConfig: gh-maestro-reviewer のマッピング結果を解決できる', () => {
+  withTempHome(home => {
+    const map = resolveSkillAgentMap({ homedir: home });
+    const agentId = map['gh-maestro-reviewer'];
+    assert.equal(agentId, 'codex');
+
+    const agent = resolveAgentConfig(agentId, { homedir: home });
+    assert.ok(agent);
+    assert.equal(agent.id, 'codex');
+    assert.equal(agent.command, 'codex');
   });
 });

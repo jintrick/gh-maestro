@@ -225,11 +225,11 @@ test('resolveSkillAgentMapWithSources: workspace config がさらに上書きす
 test('resolveSkillAgentMapWithSources: 新しいスキルを追加できる', () => {
   const defaults = loadDefaults();
   const globalConfig = {
-    skillAgentMap: { 'gh-maestro-reviewer': 'claude' },
+    skillAgentMap: { 'gh-maestro-custom-reviewer': 'claude' },
   };
   const { map, sources } = resolveSkillAgentMapWithSources(defaults, globalConfig, null);
-  assert.equal(map['gh-maestro-reviewer'], 'claude');
-  assert.equal(sources['gh-maestro-reviewer'], 'global');
+  assert.equal(map['gh-maestro-custom-reviewer'], 'claude');
+  assert.equal(sources['gh-maestro-custom-reviewer'], 'global');
   // defaults still present for existing skills
   assert.ok(map['gh-maestro-coder']);
 });

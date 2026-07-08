@@ -64,6 +64,7 @@
     "gh-maestro-base": "claude-ds",
     "gh-maestro-senior-coder": "claude-ds-pro",
     "gh-maestro-investigator": "reasonix",
-    "gh-maestro-explorer": "agy"
+    "gh-maestro-explorer": "agy",
+    "gh-maestro-reviewer": "codex"
   }
 }
