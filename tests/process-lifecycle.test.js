@@ -1,15 +1,14 @@
 'use strict';
 
-const { test, before, after, mock } = require('node:test');
+const { test, before, after, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
 // process-lifecycle.js は child-process.js の execSync に依存する（Windows WMI）。
-// 実プロセスを spawn しないため、必要な関数をモックする。
-// isProcessAlive / createDeadManSwitch / registerProcess / unregisterProcess /
-// sweepRegistry / verifyProcessIdentity / cleanup をテストする。
+// テストは実プロセスを0個spawnする（.claude/rules/test-process-spawn-safety.md 準拠）。
+// プラットフォーム依存の execSync 呼び出しを含む関数はモックで置き換える。
 
 // ── テスト用の一時ワークスペース ─────────────────────────────────────────
 
@@ -24,12 +23,28 @@ after(() => {
   try { fs.rmSync(tmpBase, { recursive: true, force: true }); } catch {}
 });
 
+// 各テスト後に process.pid の registry エントリを確実に削除する。
+// registerProcess 系テストが残留させたエントリが sweepRegistry で
+// テストランナー自身のプロセスを kill する事故を防ぐ。
+afterEach(() => {
+  const pidsFile = path.join(workspace, '.gh-maestro', 'pids', `${process.pid}.json`);
+  try { if (fs.existsSync(pidsFile)) fs.unlinkSync(pidsFile); } catch {}
+});
+
 // ── ヘルパー: モジュールをリロードして依存を注入 ──────────────────────
 
+/**
+ * process-lifecycle.js を再ロードする。
+ *
+ * @param {object} [overrides]
+ * @param {Function} [overrides.execSync]  child-process.js の execSync を置き換える。
+ *   WMI/PowerShell呼び出しをモック化し、実プロセスspawnを回避する。
+ */
 function loadModule(overrides = {}) {
   // キャッシュクリア
   delete require.cache[require.resolve('../scripts/process-lifecycle')];
 
+  // execSync のモック注入（実プロセス spawn 回避）
   if (overrides.execSync) {
     const childProcessPath = require.resolve('../scripts/child-process');
     delete require.cache[childProcessPath];
@@ -48,12 +63,48 @@ function loadModule(overrides = {}) {
   return require('../scripts/process-lifecycle');
 }
 
+// ── モック用ヘルパー ──────────────────────────────────────────────────
+
+// getProcessStartTime が WMI から受け取る ISO 8601 形式の固定タイムスタンプ
+const MOCK_START_TIME = '2025-06-01T12:00:00.000Z';
+
+/**
+ * getProcessStartTime(WMI) の成功を模倣する execSync モックを作成する。
+ * コマンド文字列に 'Win32_Process' が含まれていれば固定タイムスタンプを返す。
+ * それ以外の呼び出しはエラーにする（想定外の spawn を検出）。
+ */
+function mockWmiSuccess() {
+  return (cmd, opts) => {
+    const cmdStr = typeof cmd === 'string' ? cmd : '';
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('CreationDate')) {
+      return MOCK_START_TIME + '\n';
+    }
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('ParentProcessId')) {
+      return '42\n';  // 適当な親PID
+    }
+    throw new Error(`unexpected execSync call in test: ${cmdStr.slice(0, 80)}`);
+  };
+}
+
+/** WMI が空文字列を返す（プロセス不在）execSync モック */
+function mockWmiEmpty() {
+  return (cmd, opts) => {
+    const cmdStr = typeof cmd === 'string' ? cmd : '';
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('CreationDate')) {
+      return '\n';
+    }
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('ParentProcessId')) {
+      return '\n';
+    }
+    throw new Error(`unexpected execSync call in test: ${cmdStr.slice(0, 80)}`);
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
-// isProcessAlive
+// isProcessAlive（実プロセスspawnなしでテスト可能）
 // ═══════════════════════════════════════════════════════════════════════════
 
 test('isProcessAlive: 生存しているPIDは true', () => {
-  // process.kill(pid, 0) は自身のPIDに対して常に成功する（EPERMにならない）
   const plc = loadModule();
   assert.equal(plc.isProcessAlive(process.pid), true);
 });
@@ -67,59 +118,52 @@ test('isProcessAlive: 無効なPIDは false', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// resolveSessionPid
+// resolveSessionPid（findSessionRootPid をモック化）
 // ═══════════════════════════════════════════════════════════════════════════
 
 test('resolveSessionPid: --session-pid フラグ値が最優先', () => {
   const plc = loadModule();
-  // 正の整数を明示指定した場合はそれが使われる
   assert.equal(plc.resolveSessionPid('12345'), 12345);
   assert.equal(plc.resolveSessionPid(99999), 99999);
 });
 
-test('resolveSessionPid: フラグが空/無効なら自動検出にフォールバック', () => {
-  const plc = loadModule();
-  const result = plc.resolveSessionPid(null);
+test('resolveSessionPid: フラグが空文字の場合は自動検出にフォールバック', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const result = plc.resolveSessionPid('');
   assert.equal(typeof result, 'number');
   assert.ok(result > 0);
 });
 
 test('resolveSessionPid: 無効な文字列は自動検出にフォールバック', () => {
-  const plc = loadModule();
+  const plc = loadModule({ execSync: mockWmiSuccess() });
   const result = plc.resolveSessionPid('not-a-number');
   assert.equal(typeof result, 'number');
   assert.ok(result > 0);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// createDeadManSwitch
+// createDeadManSwitch（実プロセスspawn不要）
 // ═══════════════════════════════════════════════════════════════════════════
 
 test('createDeadManSwitch: 自身のPIDに対しては true を返す', () => {
   const plc = loadModule();
   const check = plc.createDeadManSwitch(process.pid);
-  // 自分自身は生きている
   assert.equal(check(), true);
 });
 
 test('createDeadManSwitch: 無効なPIDは3回連続で false を返す', () => {
   const plc = loadModule();
-  // 0 は無効なPID → isProcessAlive(0) は false
   const check = plc.createDeadManSwitch(0);
-  // 1回目・2回目は猶予期間
   assert.equal(check(), true, 'first dead check — grace period');
   assert.equal(check(), true, 'second dead check — grace period');
-  // 3回目で false
   assert.equal(check(), false, 'third dead check — confirmed');
 });
 
 test('createDeadManSwitch: 生存→死亡の遷移で3回連続確認', () => {
   const plc = loadModule();
-  // 自身のPID → 生存
   const check = plc.createDeadManSwitch(process.pid);
   assert.equal(check(), true, 'alive');
 
-  // 存在しない大きなPID → 死亡だが猶予期間で true
   const checkDead = plc.createDeadManSwitch(99999999);
   assert.equal(checkDead(), true, 'first dead — grace');
   assert.equal(checkDead(), true, 'second dead — grace');
@@ -131,7 +175,6 @@ test('createDeadManSwitch: 死亡カウンタは生存確認でリセットさ�
   const check = plc.createDeadManSwitch(process.pid);
   assert.equal(check(), true);
   assert.equal(check(), true);
-  // カウンタはリセットされ続けている
   assert.equal(check(), true);
 });
 
@@ -153,11 +196,9 @@ test('registerProcess: .gh-maestro/pids/<pid>.json を作成する', () => {
   assert.ok(typeof entry.startTime === 'string');
   assert.ok(typeof entry.registeredAt === 'string');
 
-  // ファイルが存在することを確認
   const filePath = plc.pidFilePath(workspace, process.pid);
   assert.ok(fs.existsSync(filePath));
 
-  // ファイル内容を確認
   const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
   assert.equal(raw.pid, process.pid);
   assert.equal(raw.script, 'msg-poll.js');
@@ -174,13 +215,13 @@ test('registerProcess: startTime が明示指定されればそれを使う', ()
 
   assert.equal(entry.startTime, customStart);
 
-  // cleanup
   plc.unregisterProcess(workspace, process.pid);
+  assert.ok(!fs.existsSync(plc.pidFilePath(workspace, process.pid)));
 });
 
 test('unregisterProcess: ファイルを削除する', () => {
   const plc = loadModule();
-  plc.registerProcess(workspace, { script: 'test.js' });
+  plc.registerProcess(workspace, { script: 'test.js', startTime: MOCK_START_TIME });
   const filePath = plc.pidFilePath(workspace, process.pid);
   assert.ok(fs.existsSync(filePath));
 
@@ -194,12 +235,11 @@ test('unregisterProcess: ファイルが存在しなくてもエラーになら�
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// verifyProcessIdentity
+// verifyProcessIdentity（WMI をモック化して決定的にテスト）
 // ═══════════════════════════════════════════════════════════════════════════
 
 test('verifyProcessIdentity: プロセス非生存の場合は match:false', () => {
   const plc = loadModule();
-  // 無効なPID → isProcessAlive が false
   const result = plc.verifyProcessIdentity(0, { startTime: '2025-01-01T00:00:00.000Z' });
   assert.equal(result.match, false);
   assert.ok(result.reason.includes('not alive'));
@@ -213,35 +253,55 @@ test('verifyProcessIdentity: 起動時刻が取得できない場合は match:fa
 });
 
 test('verifyProcessIdentity: startTime比較 - 不正な日付文字列で match:false (NaNガード)', () => {
-  const plc = loadModule();
-  // isProcessAlive(process.pid) は true。
-  // getProcessStartTime(process.pid) が成功すれば、startTime比較に入り
-  //   'invalid-date-format' → new Date().getTime() = NaN → Number.isNaN → match:false
-  // 環境によって getProcessStartTime が失敗した場合は 'cannot get process start time'
-  //   で match:false になる。どちらも match:false が正しい結果。
+  // WMI成功をモック → getProcessStartTime(process.pid) が MOCK_START_TIME を返す
+  // → startTime比較に入り 'invalid-date-format' → new Date().getTime() = NaN
+  // → Number.isNaN チェックで match:false / reason='invalid date'
+  const plc = loadModule({ execSync: mockWmiSuccess() });
   const result = plc.verifyProcessIdentity(process.pid, {
     startTime: 'invalid-date-format',
   });
   assert.equal(result.match, false);
-  assert.ok(
-    result.reason.includes('invalid date') || result.reason.includes('cannot get'),
-    `unexpected reason: ${result.reason}`
-  );
+  assert.ok(result.reason.includes('invalid date'),
+    `expected 'invalid date' reason, got: ${result.reason}`);
+});
+
+test('verifyProcessIdentity: 起動時刻が一致 - 許容範囲内なら match:true', () => {
+  // WMI が MOCK_START_TIME を返す → registeredMeta.startTime も MOCK_START_TIME
+  // → 差は0 < 1000ms → match:true
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const result = plc.verifyProcessIdentity(process.pid, {
+    startTime: MOCK_START_TIME,
+  });
+  assert.equal(result.match, true);
+});
+
+test('verifyProcessIdentity: 起動時刻が大きくずれている場合は match:false', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  // WMI が MOCK_START_TIME (2025-06-01) を返すが、登録時刻は1年前
+  const result = plc.verifyProcessIdentity(process.pid, {
+    startTime: '2024-06-01T12:00:00.000Z',
+  });
+  assert.equal(result.match, false);
+  assert.ok(result.reason.includes('start time mismatch'));
 });
 
 test('verifyProcessIdentity: startTime未設定で alive なPIDは true（同一性確認スキップ）', () => {
-  const plc = loadModule();
-  // 自身のPIDは生存しており、startTimeが未設定 → 同一性確認をスキップして match:true。
-  // ただし getProcessStartTime が失敗する環境では match:false になるため、
-  // 環境依存を考慮して両方の結果を許容する。
+  // WMI が成功を返す → getProcessStartTime は値を返すが
+  // registeredMeta.startTime が未設定 → 比較をスキップ → match:true
+  const plc = loadModule({ execSync: mockWmiSuccess() });
   const result = plc.verifyProcessIdentity(process.pid, {});
-  // getProcessStartTime succeeds → skips startTime check → match:true
-  // getProcessStartTime fails → match:false with 'cannot get'
-  if (result.match === false) {
-    assert.ok(result.reason.includes('cannot get'),
-      `expected 'cannot get' reason, got: ${result.reason}`);
-  }
-  // match:true も正常（環境がWMIサポートあり）
+  assert.equal(result.match, true);
+});
+
+test('verifyProcessIdentity: getProcessStartTime が空文字を返した場合は match:false', () => {
+  // WMI が空を返す → actualStartTime が空 → match:false
+  const plc = loadModule({ execSync: mockWmiEmpty() });
+  const result = plc.verifyProcessIdentity(process.pid, {
+    startTime: '2025-01-01T00:00:00.000Z',
+  });
+  assert.equal(result.match, false);
+  assert.ok(result.reason.includes('cannot get'),
+    `expected 'cannot get' reason, got: ${result.reason}`);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -257,8 +317,6 @@ test('sweepRegistry: ディレクトリが存在しない場合は空結果', ()
 
 test('sweepRegistry: 破損JSONファイルは cleaned に分類される', () => {
   const plc = loadModule();
-
-  // 一時的なpidsディレクトリを準備
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
   fs.writeFileSync(path.join(pidsDir, '12345.json'), 'not valid json {{{');
@@ -267,14 +325,11 @@ test('sweepRegistry: 破損JSONファイルは cleaned に分類される', () =
 
   const corrupt = results.cleaned.filter(c => c.reason.includes('corrupt JSON'));
   assert.ok(corrupt.length >= 1, 'corrupt JSON should be cleaned');
-
-  // ファイルが削除されていることを確認
   assert.ok(!fs.existsSync(path.join(pidsDir, '12345.json')));
 });
 
 test('sweepRegistry: nullエントリは cleaned に分類される', () => {
   const plc = loadModule();
-
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
   fs.writeFileSync(path.join(pidsDir, '99999.json'), 'null');
@@ -288,7 +343,6 @@ test('sweepRegistry: nullエントリは cleaned に分類される', () => {
 
 test('sweepRegistry: 配列エントリは cleaned に分類される', () => {
   const plc = loadModule();
-
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
   fs.writeFileSync(path.join(pidsDir, '88888.json'), '[1, 2, 3]');
@@ -302,7 +356,6 @@ test('sweepRegistry: 配列エントリは cleaned に分類される', () => {
 
 test('sweepRegistry: 文字列エントリは cleaned に分類される', () => {
   const plc = loadModule();
-
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
   fs.writeFileSync(path.join(pidsDir, '77777.json'), '"just a string"');
@@ -316,7 +369,6 @@ test('sweepRegistry: 文字列エントリは cleaned に分類される', () =>
 
 test('sweepRegistry: pidフィールドがないエントリは cleaned', () => {
   const plc = loadModule();
-
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
   fs.writeFileSync(path.join(pidsDir, '66666.json'), JSON.stringify({ script: 'test.js' }));
@@ -330,11 +382,8 @@ test('sweepRegistry: pidフィールドがないエントリは cleaned', () => 
 
 test('sweepRegistry: 生存していないPIDのエントリは cleaned', () => {
   const plc = loadModule();
-
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
-  // -1 は isProcessAlive(-1) が false を返す（無効なPID）
-  // 注: pid=0 は !entryPid (falsy) で弾かれるため -1 を使う
   fs.writeFileSync(path.join(pidsDir, '99998.json'), JSON.stringify({
     pid: -1,
     script: 'test.js',
@@ -350,52 +399,43 @@ test('sweepRegistry: 生存していないPIDのエントリは cleaned', () => 
 
 test('sweepRegistry: dryRun では実際の削除を行わない', () => {
   const plc = loadModule();
-
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
   fs.writeFileSync(path.join(pidsDir, 'dryrun.json'), 'not valid json {{{');
 
   const results = plc.sweepRegistry(workspace, { dryRun: true });
 
-  // 検出はされるが削除はされない
   const corrupt = results.cleaned.filter(c => c.reason.includes('corrupt JSON'));
   assert.ok(corrupt.length >= 1);
   assert.ok(fs.existsSync(path.join(pidsDir, 'dryrun.json')), 'file should still exist in dryRun');
 
-  // cleanup
   fs.unlinkSync(path.join(pidsDir, 'dryrun.json'));
 });
 
 test('sweepRegistry: matchフィルタで特定エントリのみ対象', () => {
   const plc = loadModule();
-
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
 
-  // worker-a のエントリ（-1 は isProcessAlive が false → 'not alive' で cleaned）
   fs.writeFileSync(path.join(pidsDir, '11111.json'), JSON.stringify({
     pid: -1, script: 'poll.js', workerName: 'worker-a', startTime: '2025-01-01T00:00:00.000Z',
   }));
-  // worker-b のエントリ（同様に -1）
   fs.writeFileSync(path.join(pidsDir, '22222.json'), JSON.stringify({
     pid: -1, script: 'poll.js', workerName: 'worker-b', startTime: '2025-01-01T00:00:00.000Z',
   }));
 
-  // worker-a のみにマッチ
   const results = plc.sweepRegistry(workspace, {
     match: (entry) => entry.workerName === 'worker-a',
     dryRun: false,
   });
 
-  // worker-a のエントリは cleaned (pid=-1 は not alive)
   const cleanedA = results.cleaned.filter(c => c.pid === -1 && c.reason && c.reason.includes('not alive'));
   assert.ok(cleanedA.length >= 1, `worker-a entry should be cleaned, got cleaned: ${JSON.stringify(results.cleaned)}`);
   assert.ok(!fs.existsSync(path.join(pidsDir, '11111.json')));
 
-  // worker-b のエントリはマッチしないのでそのまま
+  // worker-b はマッチしないので残る
   assert.ok(fs.existsSync(path.join(pidsDir, '22222.json')));
 
-  // cleanup
   try { fs.unlinkSync(path.join(pidsDir, '22222.json')); } catch {}
 });
 
@@ -406,8 +446,7 @@ test('sweepRegistry: matchフィルタで特定エントリのみ対象', () => 
 test('cleanup: registry解除 + extraCleanup を実行する', () => {
   const plc = loadModule();
 
-  // 事前に登録
-  plc.registerProcess(workspace, { script: 'test.js' });
+  plc.registerProcess(workspace, { script: 'test.js', startTime: MOCK_START_TIME });
   const filePath = plc.pidFilePath(workspace, process.pid);
   assert.ok(fs.existsSync(filePath));
 
@@ -421,7 +460,7 @@ test('cleanup: registry解除 + extraCleanup を実行する', () => {
 test('cleanup: extraCleanup でエラーが発生しても registry 解除は実行される', () => {
   const plc = loadModule();
 
-  plc.registerProcess(workspace, { script: 'test.js' });
+  plc.registerProcess(workspace, { script: 'test.js', startTime: MOCK_START_TIME });
   const filePath = plc.pidFilePath(workspace, process.pid);
   assert.ok(fs.existsSync(filePath));
 
@@ -433,7 +472,7 @@ test('cleanup: extraCleanup でエラーが発生しても registry 解除は実
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// pidsDir / pidFilePath
+// pidsDir / pidFilePath（純粋関数、spawn不要）
 // ═══════════════════════════════════════════════════════════════════════════
 
 test('pidsDir: .gh-maestro/pids を返す', () => {
@@ -449,18 +488,10 @@ test('pidFilePath: <pid>.json を返す', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// getParentPid / findSessionRootPid（構造テスト：関数が存在し呼び出し可能）
+// getParentPid / findSessionRootPid（WMI をモック化）
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('getParentPid: 関数が存在し number|null を返す', () => {
-  const plc = loadModule();
-  assert.equal(typeof plc.getParentPid, 'function');
-  // 自身の親PIDを取得（プラットフォーム依存だが呼び出し可能）
-  const ppid = plc.getParentPid(process.pid);
-  assert.ok(ppid === null || (typeof ppid === 'number' && ppid > 0));
-});
-
-test('getParentPid: 無効な引数で null を返す', () => {
+test('getParentPid: 無効な引数で null を返す（spawn回避）', () => {
   const plc = loadModule();
   assert.equal(plc.getParentPid(0), null);
   assert.equal(plc.getParentPid(-5), null);
@@ -468,8 +499,21 @@ test('getParentPid: 無効な引数で null を返す', () => {
   assert.equal(plc.getParentPid(null), null);
 });
 
-test('findSessionRootPid: 関数が存在し正の整数を返す', () => {
-  const plc = loadModule();
+test('getParentPid: WMI成功時は親PIDを返す', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  // mockWmiSuccess は ParentProcessId クエリに対して '42' を返す
+  const ppid = plc.getParentPid(99999);
+  assert.equal(ppid, 42);
+});
+
+test('getParentPid: WMI空応答時は null を返す', () => {
+  const plc = loadModule({ execSync: mockWmiEmpty() });
+  const ppid = plc.getParentPid(99999);
+  assert.equal(ppid, null);
+});
+
+test('findSessionRootPid: 関数が存在し正の整数を返す（mockWmi使用）', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
   assert.equal(typeof plc.findSessionRootPid, 'function');
   const rootPid = plc.findSessionRootPid();
   assert.equal(typeof rootPid, 'number');
