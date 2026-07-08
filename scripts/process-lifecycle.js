@@ -40,10 +40,14 @@ const IS_WIN = process.platform === 'win32';
  * @returns {number|null}
  */
 function getParentPid(pid) {
+  // pid引数の検証（コマンド実行・パストラバーサル対策）
+  const n = parseInt(pid, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+
   if (IS_WIN) {
     try {
       const out = execSync(
-        `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').ParentProcessId"`,
+        `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=${n}').ParentProcessId"`,
         { encoding: 'utf8', timeout: 5000, stdio: 'pipe' }
       );
       const val = parseInt(out.trim(), 10);
@@ -53,7 +57,7 @@ function getParentPid(pid) {
     }
   } else {
     try {
-      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const stat = fs.readFileSync(`/proc/${n}/stat`, 'utf8');
       // フィールド4（0-indexed: 3）が ppid
       // 注意: comm フィールド（2番目）は括弧で囲まれ、スペースを含む可能性がある
       const commEnd = stat.lastIndexOf(')');
@@ -141,11 +145,14 @@ function isProcessAlive(pid) {
  * @returns {string|null} ISO 8601 形式の起動時刻、または null（取得失敗時）
  */
 function getProcessStartTime(pid) {
-  if (!pid || pid <= 0) return null;
+  // pid引数の検証（コマンド実行・パストラバーサル対策）
+  const n = parseInt(pid, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+
   if (IS_WIN) {
     try {
       const out = execSync(
-        `powershell -NoProfile -Command "$d=(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CreationDate; if($d){[System.DateTime]::Parse($d).ToUniversalTime().ToString('o')}else{''}"`,
+        `powershell -NoProfile -Command "$d=(Get-CimInstance Win32_Process -Filter 'ProcessId=${n}').CreationDate; if($d){[System.DateTime]::Parse($d).ToUniversalTime().ToString('o')}else{''}"`,
         { encoding: 'utf8', timeout: 5000, stdio: 'pipe' }
       );
       const val = out.trim();
@@ -155,10 +162,8 @@ function getProcessStartTime(pid) {
     }
   } else {
     try {
-      const stat = fs.statSync(`/proc/${pid}`);
-      // birthtime は Linux では作成時刻ではない場合がある（statx 非対応カーネル）
-      // その場合は /proc/<pid>/stat の starttime (フィールド22) を使う
-      const statOut = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      // /proc/<pid>/stat の starttime (フィールド22) を boot_time からのオフセットとして計算
+      const statOut = fs.readFileSync(`/proc/${n}/stat`, 'utf8');
       const commEnd = statOut.lastIndexOf(')');
       const afterComm = statOut.slice(commEnd + 2);
       const parts = afterComm.split(' ');
@@ -166,7 +171,6 @@ function getProcessStartTime(pid) {
       const startTimeTicks = parseInt(parts[19], 10);
       if (Number.isFinite(startTimeTicks)) {
         // 起動時刻 ≈ boot_time + starttime / sysconf(_SC_CLK_TCK)
-        // 簡易: /proc/stat から btime を取得
         const procStat = fs.readFileSync('/proc/stat', 'utf8');
         const btimeMatch = procStat.match(/btime\s+(\d+)/);
         if (btimeMatch) {
@@ -177,7 +181,9 @@ function getProcessStartTime(pid) {
           return new Date(startSec * 1000).toISOString();
         }
       }
-      return stat.birthtime.toISOString();
+      // フォールバック: /proc/<pid> の mtime（birthtime は procfs でサポートされず 1970-01-01 を返す）
+      const stat = fs.statSync(`/proc/${n}`);
+      return stat.mtime.toISOString();
     } catch {
       return null;
     }
@@ -268,13 +274,19 @@ function registerProcess(workspace, meta = {}) {
   const dir = pidsDir(workspace);
   fs.mkdirSync(dir, { recursive: true });
 
+  // 起動時刻は実際のプロセス開始時刻を使用する。
+  // Node起動レイテンシが1秒を超えるとverifyProcessIdentityの閾値(1秒)で
+  // 誤動作するため、new Date()（登録時の現在時刻）では不十分。
+  // 取得失敗時のみ現在時刻をフォールバックとする。
+  const actualStartTime = meta.startTime || getProcessStartTime(process.pid) || new Date().toISOString();
+
   const entry = {
     pid: process.pid,
     script: meta.script || path.basename(process.argv[1] || 'unknown'),
     args: meta.args || process.argv.slice(2),
     workerName: meta.workerName || null,
     workspace: workspace,
-    startTime: meta.startTime || new Date().toISOString(),
+    startTime: actualStartTime,
     registeredAt: new Date().toISOString(),
   };
 
@@ -328,6 +340,12 @@ function verifyProcessIdentity(pid, registeredMeta) {
   if (registeredMeta.startTime) {
     const regTime = new Date(registeredMeta.startTime).getTime();
     const actualTime = new Date(actualStartTime).getTime();
+    // 不正な日付文字列の場合 getTime() が NaN を返す。
+    // NaN > 1000 は false のため誤って一致判定（match:true）に倒れてしまう。
+    // 明示的に NaN チェックを入れ、不正値は不一致扱いとする（PID再利用の誤kill防止）。
+    if (Number.isNaN(regTime) || Number.isNaN(actualTime)) {
+      return { match: false, reason: `invalid date: registered=${registeredMeta.startTime}, actual=${actualStartTime}` };
+    }
     // 1秒の許容範囲（WMI と JS Date の精度差を吸収）
     if (Math.abs(regTime - actualTime) > 1000) {
       return { match: false, reason: `start time mismatch: registered=${registeredMeta.startTime}, actual=${actualStartTime}` };
@@ -376,6 +394,13 @@ function sweepRegistry(workspace, opts = {}) {
     } catch {
       try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
       results.cleaned.push({ file, reason: 'corrupt JSON' });
+      continue;
+    }
+
+    // JSON.parse が null や非オブジェクト（文字列・数値等）を返した場合は不正データとして扱う
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
+      results.cleaned.push({ file, reason: `invalid entry type: ${entry === null ? 'null' : typeof entry}` });
       continue;
     }
 
