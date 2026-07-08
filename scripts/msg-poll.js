@@ -380,6 +380,7 @@ function main(argsOverride, opts = {}) {
     intervalMs,
     workspace,
     sessionPid,
+    self,
   };
 }
 
@@ -414,8 +415,13 @@ if (require.main === module) {
   }
 
   // ── PID registry に自己登録（継続モードのみ） ──────────────────────
+  // worker モードの場合は workerName を含めて登録する。
+  // これにより remove-worker.js の sweep が entry.workerName でマッチできる。
 
-  registerProcess(result.workspace, { script: 'msg-poll.js' });
+  registerProcess(result.workspace, {
+    script: 'msg-poll.js',
+    workerName: result.self !== 'orchestrator' ? result.self : null,
+  });
 
   // 継続モード: streamOutput が true なので scanOnce の出力は直接 stdout へ出る
   let intervalHandle = null;
