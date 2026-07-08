@@ -165,7 +165,7 @@ function cmdUse(profileName) {
   }
 
   const profileMap = profiles[profileName].skillAgentMap;
-  if (!profileMap || typeof profileMap !== 'object' || Object.keys(profileMap).length === 0) {
+  if (!profileMap || typeof profileMap !== 'object' || Array.isArray(profileMap) || Object.keys(profileMap).length === 0) {
     console.error(`Error: profile "${profileName}" has no valid skillAgentMap.`);
     process.exit(1);
   }
@@ -265,6 +265,10 @@ function cmdStatus(workspacePath) {
   console.log(header);
   console.log('-'.repeat(header.length));
 
+  // Cache checkAgentExists results by command name to avoid redundant
+  // login-shell launches when multiple skills map to the same agent.
+  const existsCache = new Map();
+
   for (const [skill, agentId] of entries) {
     // Resolve the agent config for this agent ID to get the actual command
     const resolved = resolveAgentConfig(agentId, {
@@ -274,7 +278,10 @@ function cmdStatus(workspacePath) {
 
     let ok = '✗';
     if (resolved) {
-      ok = checkAgentExists(resolved.command) ? '✓' : '✗';
+      if (!existsCache.has(resolved.command)) {
+        existsCache.set(resolved.command, checkAgentExists(resolved.command));
+      }
+      ok = existsCache.get(resolved.command) ? '✓' : '✗';
     }
 
     const srcLabel = sources[skill] || '?';
@@ -308,13 +315,13 @@ function validateConfig(label, configPath, config, defaults) {
   }
 
   const defaultAgentIds = new Set(defaults.agents.map(a => a.id));
-  const configAgentIds = config.agents && typeof config.agents === 'object'
+  const configAgentIds = config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
     ? Object.keys(config.agents) : [];
   const allKnownIds = new Set([...defaultAgentIds, ...configAgentIds]);
 
   // Check top-level skillAgentMap
   if (config.skillAgentMap !== undefined) {
-    if (typeof config.skillAgentMap !== 'object' || config.skillAgentMap === null) {
+    if (typeof config.skillAgentMap !== 'object' || config.skillAgentMap === null || Array.isArray(config.skillAgentMap)) {
       issues.push(`[ERROR] ${label}: skillAgentMap must be an object.`);
     } else {
       for (const [skill, agentId] of Object.entries(config.skillAgentMap)) {
@@ -331,11 +338,11 @@ function validateConfig(label, configPath, config, defaults) {
 
   // Check agents section
   if (config.agents !== undefined) {
-    if (typeof config.agents !== 'object' || config.agents === null) {
+    if (typeof config.agents !== 'object' || config.agents === null || Array.isArray(config.agents)) {
       issues.push(`[ERROR] ${label}: agents must be an object.`);
     } else {
       for (const [agentId, override] of Object.entries(config.agents)) {
-        if (typeof override !== 'object' || override === null) {
+        if (typeof override !== 'object' || override === null || Array.isArray(override)) {
           issues.push(`[ERROR] ${label} agents["${agentId}"]: must be an object.`);
           continue;
         }
@@ -354,15 +361,15 @@ function validateConfig(label, configPath, config, defaults) {
 
   // Check profiles section
   if (config.profiles !== undefined) {
-    if (typeof config.profiles !== 'object' || config.profiles === null) {
+    if (typeof config.profiles !== 'object' || config.profiles === null || Array.isArray(config.profiles)) {
       issues.push(`[ERROR] ${label}: profiles must be an object.`);
     } else {
       for (const [name, profile] of Object.entries(config.profiles)) {
-        if (!profile || typeof profile !== 'object') {
+        if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
           issues.push(`[ERROR] ${label} profiles["${name}"]: must be an object.`);
           continue;
         }
-        if (!profile.skillAgentMap || typeof profile.skillAgentMap !== 'object' ||
+        if (!profile.skillAgentMap || typeof profile.skillAgentMap !== 'object' || Array.isArray(profile.skillAgentMap) ||
             Object.keys(profile.skillAgentMap).length === 0) {
           issues.push(
             `[ERROR] ${label} profiles["${name}"]: missing or empty skillAgentMap.`,
