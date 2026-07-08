@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
+const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 
 const USAGE = `run-review-manager.js — Codex Review Managerをheadless起動してPRレビューを投稿する
 
@@ -75,16 +76,38 @@ try {
   fs.writeFileSync(promptFile, buildPrompt(), 'utf8');
   spawnSync('git', ['-C', workspace, 'fetch', 'origin', `pull/${pr}/head`], { stdio: 'ignore' });
 
-  const agentArgs = buildAgentCommandArgs({
-    command: 'codex',
-    extraArgs: [
-      'exec',
-      '--cd', workspace,
-      '--model', 'gpt-5.4',
-      '--sandbox', 'danger-full-access',
-    ],
-    promptDelivery: 'positional',
-  }, {
+  const skill = 'gh-maestro-reviewer';
+  const skillMap = resolveSkillAgentMap({ workspace });
+  const agentId = skillMap[skill] ?? 'codex';
+  const homedir = process.env.HOME || process.env.USERPROFILE || '';
+  let agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
+
+  if (agentId === 'codex') {
+    const cmd = agentConfig?.command ?? 'codex';
+    agentConfig = {
+      command: cmd,
+      extraArgs: [
+        'exec',
+        '--cd', workspace,
+        '--model', 'gpt-5.4',
+        '--sandbox', 'danger-full-access',
+      ],
+      promptDelivery: agentConfig?.promptDelivery ?? 'positional',
+    };
+  } else if (!agentConfig) {
+    agentConfig = {
+      command: 'codex',
+      extraArgs: [
+        'exec',
+        '--cd', workspace,
+        '--model', 'gpt-5.4',
+        '--sandbox', 'danger-full-access',
+      ],
+      promptDelivery: 'positional',
+    };
+  }
+
+  const agentArgs = buildAgentCommandArgs(agentConfig, {
     shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
   });
 
