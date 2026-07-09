@@ -202,8 +202,8 @@ function cmdUse(profileName) {
     }
   }
 
-  // Write: replace top-level skillAgentMap with the profile's map
-  config.skillAgentMap = { ...profileMap };
+  // Write: merge top-level skillAgentMap with the profile's map (stacking behavior)
+  config.skillAgentMap = { ...config.skillAgentMap, ...profileMap };
   saveConfig(config);
 
   // Display result
@@ -253,16 +253,7 @@ function cmdStatus(workspacePath) {
     }
   }
 
-  // Detect active profile
-  if (config && config.profiles && !config._parseError) {
-    const topMap = config.skillAgentMap || {};
-    for (const [name, profile] of Object.entries(config.profiles)) {
-      if (profile && profile.skillAgentMap && shallowEqual(topMap, profile.skillAgentMap)) {
-        console.log(`Active profile: ${name}\n`);
-        break;
-      }
-    }
-  }
+
 
   // Display table with agent connectivity
   const entries = Object.entries(map).sort((a, b) => a[0].localeCompare(b[0]));

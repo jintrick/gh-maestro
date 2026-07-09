@@ -571,7 +571,7 @@ test('CLI use: 既存のエージェント設定は保持される', () => {
   });
 });
 
-test('CLI use: プロファイル切替で前の skillAgentMap を置き換える', () => {
+test('CLI use: プロファイル適用で前の skillAgentMap を上書きマージする', () => {
   withTempHome(home => {
     writeConfig(home, {
       skillAgentMap: { 'gh-maestro-coder': 'codex', 'gh-maestro-base': 'codex' },
@@ -585,7 +585,7 @@ test('CLI use: プロファイル切替で前の skillAgentMap を置き換え�
     assert.equal(r.status, 0);
 
     const config = loadJSON(path.join(home, '.gh-maestro', 'config.json'));
-    assert.deepEqual(config.skillAgentMap, { 'gh-maestro-coder': 'agy' });
+    assert.deepEqual(config.skillAgentMap, { 'gh-maestro-coder': 'agy', 'gh-maestro-base': 'codex' });
   });
 });
 
@@ -611,21 +611,6 @@ test('CLI status: global override されたエントリのソースが表示さ�
     const r = runConfig(['status'], home);
     assert.equal(r.status, 0, `exit 0, stderr: ${r.stderr}`);
     assert.ok(r.stdout.includes('global'), 'includes global source');
-  });
-});
-
-test('CLI status: アクティブプロファイルが表示される', () => {
-  withTempHome(home => {
-    writeConfig(home, {
-      profiles: {
-        peak: { skillAgentMap: { 'gh-maestro-coder': 'agy' } },
-      },
-      skillAgentMap: { 'gh-maestro-coder': 'agy' },
-    });
-
-    const r = runConfig(['status'], home);
-    assert.equal(r.status, 0, `exit 0, stderr: ${r.stderr}`);
-    assert.ok(r.stdout.includes('peak'), 'stdout includes active profile name');
   });
 });
 
@@ -847,6 +832,46 @@ test('Profile semantics: プロファイルはデフォルトに対する差分�
     r = runConfig(['status'], home);
     assert.equal(r.status, 0, r.stderr);
     assert.ok(r.stdout.includes('gh-maestro-base'), 'base should still be resolved from defaults');
+  });
+});
+
+test('Profile semantics: プロファイルの重ね掛け（スタック適用）ができる', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      profiles: {
+        peak: {
+          skillAgentMap: {
+            'gh-maestro-coder': 'agy',
+            'gh-maestro-explorer': 'claude',
+          },
+        },
+        'avoid-codex': {
+          skillAgentMap: {
+            'gh-maestro-explorer': 'claude-ds',
+          },
+        },
+      },
+    });
+
+    // 1. peakプロファイルを適用
+    let r = runConfig(['use', 'peak'], home);
+    assert.equal(r.status, 0, r.stderr);
+
+    let config = loadJSON(path.join(home, '.gh-maestro', 'config.json'));
+    assert.deepEqual(config.skillAgentMap, {
+      'gh-maestro-coder': 'agy',
+      'gh-maestro-explorer': 'claude',
+    });
+
+    // 2. avoid-codexプロファイルを重ね掛けで適用
+    r = runConfig(['use', 'avoid-codex'], home);
+    assert.equal(r.status, 0, r.stderr);
+
+    config = loadJSON(path.join(home, '.gh-maestro', 'config.json'));
+    assert.deepEqual(config.skillAgentMap, {
+      'gh-maestro-coder': 'agy',
+      'gh-maestro-explorer': 'claude-ds',
+    });
   });
 });
 
