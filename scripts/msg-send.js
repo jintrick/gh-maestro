@@ -147,7 +147,9 @@ function main(argsOverride, envOverride) {
   // ── マーカー生成 ────────────────────────────────────────────────────────
 
   const marker = JSON.stringify({ v: 1, to: recipient, from });
-  const fullBody = `<!-- gh-maestro ${marker} -->\n${body}`;
+  const directionIcon = from === 'orchestrator' ? '📤' : '📥';
+  const humanHeader = `> ${directionIcon} **From:** \`${from}\` ➔ **To:** \`${recipient}\`\n>\n> ` + body.replace(/\n/g, '\n> ');
+  const fullBody = `<!-- gh-maestro ${marker} -->\n${humanHeader}`;
 
   // ── 送信 ────────────────────────────────────────────────────────────────
 
