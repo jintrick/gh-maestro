@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // gh-maestro per-project setup script
-// Validates prerequisites on first run; skips on subsequent runs via sentinel file.
+// Validates prerequisites on first run; always applies idempotent setup steps.
+// Sentinel (.gh-maestro/setup-ok) only gates expensive environment checks.
 
 const { spawnSync } = require('child_process');
 const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, chmodSync } = require('fs');
@@ -14,8 +15,9 @@ Arguments:
   [WORKSPACE_ROOT]  対象プロジェクトのルート（デフォルト CWD）
 
 WEZTERM_PANE / wezterm CLI / git リポジトリ / gh 認証を検証し、.gh-maestro ディレクトリと
-.gitignore・dev ブランチを用意する。初回実行後は sentinel(.gh-maestro/setup-ok)で
-スキップする。通常は /gh-maestro の起動フックが呼ぶ。`;
+.gitignore・dev ブランチ・pre-commit フックを用意する。初回実行後は sentinel
+(.gh-maestro/setup-ok) で環境チェックのみスキップし、冪等なセットアップステップは
+毎回実行する。通常は /gh-maestro の起動フックが呼ぶ。`;
 
 if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
   console.log(USAGE);
@@ -81,14 +83,10 @@ if (existsSync(aiReviewSentinel)) {
   }
 }
 
-// ─── Sentinel check ───────────────────────────────────────────────────────────
+// ─── 1. 環境チェック ──────────────────────────────────────────────────────────
 
 const sentinelPath = resolve(workspaceRoot, '.gh-maestro', 'setup-ok');
-if (existsSync(sentinelPath)) {
-  process.exit(0);
-}
-
-// ─── 1. 環境チェック ──────────────────────────────────────────────────────────
+const isFirstRun = !existsSync(sentinelPath);
 
 function checkEnvironment() {
   step('Checking prerequisites...');
@@ -194,29 +192,57 @@ function ensureDevBranch() {
 
 // ─── 5. pre-commit フック設置 ─────────────────────────────────────────────────
 
+const CURRENT_MARKER = 'gh-maestro:sync-rules:v1';
+const MARKER_RE = /^# gh-maestro:sync-rules(:v\d+)?$/;
+
 function ensurePreCommitHook() {
   const hooksDir = resolve(workspaceRoot, '.git', 'hooks');
   const hookPath = resolve(hooksDir, 'pre-commit');
   const syncScript = resolve(require('os').homedir(), '.gh-maestro', 'scripts', 'sync-rules.js');
-  const marker = 'gh-maestro:sync-rules';
+
   const entry = [
-    `# ${marker}`,
+    `# ${CURRENT_MARKER}`,
     `if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then`,
     `  node "${syncScript}"`,
     `fi`,
-  ].join('\n');
+  ];
 
   mkdirSync(hooksDir, { recursive: true });
 
   if (existsSync(hookPath)) {
-    const current = readFileSync(hookPath, 'utf8');
-    if (current.includes(marker)) {
-      ok('pre-commit hook already contains sync-rules entry');
+    const lines = readFileSync(hookPath, 'utf8').split('\n');
+
+    // Check for existing gh-maestro:sync-rules block
+    const markerIdx = lines.findIndex(l => MARKER_RE.test(l.trim()));
+
+    if (markerIdx !== -1) {
+      const markerLine = lines[markerIdx].trim();
+
+      if (markerLine === `# ${CURRENT_MARKER}`) {
+        ok('pre-commit hook already contains sync-rules entry (current version)');
+        return;
+      }
+
+      // Old version found — replace from marker line through the fi line
+      let endIdx = lines.length - 1;
+      for (let i = markerIdx; i < lines.length; i++) {
+        if (lines[i].trim() === 'fi') {
+          endIdx = i;
+          break;
+        }
+      }
+
+      lines.splice(markerIdx, endIdx - markerIdx + 1, ...entry);
+      writeFileSync(hookPath, lines.join('\n'), 'utf8');
+      try { chmodSync(hookPath, 0o755); } catch {}
+      ok('pre-commit hook updated: sync-rules entry upgraded');
       return;
     }
-    appendFileSync(hookPath, `\n${entry}\n`, 'utf8');
+
+    // No marker found, append
+    appendFileSync(hookPath, `\n${entry.join('\n')}\n`, 'utf8');
   } else {
-    writeFileSync(hookPath, `#!/bin/sh\n${entry}\n`, 'utf8');
+    writeFileSync(hookPath, `#!/bin/sh\n${entry.join('\n')}\n`, 'utf8');
   }
   try { chmodSync(hookPath, 0o755); } catch {}
   ok(`pre-commit hook installed: ${hookPath}`);
@@ -224,14 +250,21 @@ function ensurePreCommitHook() {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-checkEnvironment();
+// Sentinel gates only expensive environment checks.
+// Idempotent setup steps (ensure*) run every invocation so new steps
+// apply automatically to existing projects.
+if (isFirstRun) {
+  checkEnvironment();
+}
+
 prepareDirectories();
 ensureGitIgnore();
 ensureDevBranch();
 ensurePreCommitHook();
 
-mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
-writeFileSync(sentinelPath, '');
-ok('Setup complete (subsequent /gh-maestro invocations will skip this check)');
-
-console.log('\ngh-maestro ready.\n');
+if (isFirstRun) {
+  mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
+  writeFileSync(sentinelPath, '');
+  ok('Setup complete (subsequent /gh-maestro invocations will skip environment checks)');
+  console.log('\ngh-maestro ready.\n');
+}
