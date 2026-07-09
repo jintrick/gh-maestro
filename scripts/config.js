@@ -201,6 +201,17 @@ function cmdUse(profileName) {
   const validAgentIds = collectValidAgentIds(defaults, config);
   const defaultAgentIds = new Set(defaults.agents.map(a => a.id));
 
+  // Warn about unknown skill keys BEFORE agent ID validation (so the warning
+  // is visible even if agent ID errors cause early exit)
+  const knownSkillKeys = Object.keys(defaults.skillAgentMap || {});
+  for (const skill of Object.keys(profileMap)) {
+    if (!knownSkillKeys.includes(skill)) {
+      const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
+      const hint = suggestion ? ` (did you mean "${suggestion}"?)` : '';
+      console.error(`[WARN] Profile "${profileName}": unknown skill key "${skill}"${hint}.`);
+    }
+  }
+
   for (const [skill, agentId] of Object.entries(profileMap)) {
     if (typeof agentId !== 'string' || agentId.length === 0) {
       console.error(`Error: profile "${profileName}": empty agent ID for skill "${skill}".`);
@@ -225,16 +236,6 @@ function cmdUse(profileName) {
         );
         process.exit(1);
       }
-    }
-  }
-
-  // Warn about unknown skill keys (not an error — profiles may add custom keys)
-  const knownSkillKeys = Object.keys(defaults.skillAgentMap);
-  for (const skill of Object.keys(profileMap)) {
-    if (!knownSkillKeys.includes(skill)) {
-      const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
-      const hint = suggestion ? ` (did you mean "${suggestion}"?)` : '';
-      console.error(`[WARN] Profile "${profileName}": unknown skill key "${skill}"${hint}.`);
     }
   }
 
@@ -346,7 +347,7 @@ function cmdStatus(workspacePath) {
 
   // Warn about unknown skill keys in global config sources
   if (config && !config._parseError) {
-    const knownSkillKeys = Object.keys(defaults.skillAgentMap);
+    const knownSkillKeys = Object.keys(defaults.skillAgentMap || {});
     if (config.skillAgentMap && typeof config.skillAgentMap === 'object' && !Array.isArray(config.skillAgentMap)) {
       for (const skill of Object.keys(config.skillAgentMap)) {
         if (!knownSkillKeys.includes(skill)) {
@@ -358,7 +359,7 @@ function cmdStatus(workspacePath) {
     }
     if (config.profiles && typeof config.profiles === 'object' && !Array.isArray(config.profiles)) {
       for (const [profileName, profile] of Object.entries(config.profiles)) {
-        if (profile && profile.skillAgentMap && typeof profile.skillAgentMap === 'object') {
+        if (profile && profile.skillAgentMap && typeof profile.skillAgentMap === 'object' && !Array.isArray(profile.skillAgentMap)) {
           for (const skill of Object.keys(profile.skillAgentMap)) {
             if (!knownSkillKeys.includes(skill)) {
               const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
@@ -416,7 +417,7 @@ function validateConfig(label, configPath, config, defaults) {
       }
 
       // Check for unknown skill keys (not in agent-defaults.json's skillAgentMap)
-      const knownSkillKeys = Object.keys(defaults.skillAgentMap);
+      const knownSkillKeys = Object.keys(defaults.skillAgentMap || {});
       for (const skill of Object.keys(config.skillAgentMap)) {
         if (!knownSkillKeys.includes(skill)) {
           const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
@@ -481,7 +482,7 @@ function validateConfig(label, configPath, config, defaults) {
         }
 
         // Check for unknown skill keys in profile
-        const knownSkillKeys = Object.keys(defaults.skillAgentMap);
+        const knownSkillKeys = Object.keys(defaults.skillAgentMap || {});
         for (const skill of Object.keys(profile.skillAgentMap)) {
           if (!knownSkillKeys.includes(skill)) {
             const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
