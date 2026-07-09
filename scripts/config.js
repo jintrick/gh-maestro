@@ -86,22 +86,6 @@ function collectValidAgentIds(defaults, config) {
   return ids;
 }
 
-/**
- * Shallow-equality for two objects. Both must be non-null objects.
- * @param {object} a
- * @param {object} b
- * @returns {boolean}
- */
-function shallowEqual(a, b) {
-  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
-  const aKeys = Object.keys(a);
-  const bKeys = Object.keys(b);
-  if (aKeys.length !== bKeys.length) return false;
-  for (const key of aKeys) {
-    if (a[key] !== b[key]) return false;
-  }
-  return true;
-}
 
 /**
  * Build a resolved skillAgentMap with source annotations.
@@ -202,8 +186,11 @@ function cmdUse(profileName) {
     }
   }
 
-  // Write: replace top-level skillAgentMap with the profile's map
-  config.skillAgentMap = { ...profileMap };
+  // Write: merge top-level skillAgentMap with the profile's map (stacking behavior)
+  const baseMap = (config.skillAgentMap && typeof config.skillAgentMap === 'object' && !Array.isArray(config.skillAgentMap))
+    ? config.skillAgentMap
+    : {};
+  config.skillAgentMap = { ...baseMap, ...profileMap };
   saveConfig(config);
 
   // Display result
@@ -253,16 +240,7 @@ function cmdStatus(workspacePath) {
     }
   }
 
-  // Detect active profile
-  if (config && config.profiles && !config._parseError) {
-    const topMap = config.skillAgentMap || {};
-    for (const [name, profile] of Object.entries(config.profiles)) {
-      if (profile && profile.skillAgentMap && shallowEqual(topMap, profile.skillAgentMap)) {
-        console.log(`Active profile: ${name}\n`);
-        break;
-      }
-    }
-  }
+
 
   // Display table with agent connectivity
   const entries = Object.entries(map).sort((a, b) => a[0].localeCompare(b[0]));
@@ -545,7 +523,6 @@ module.exports = {
   loadJSON,
   saveConfig,
   collectValidAgentIds,
-  shallowEqual,
   resolveSkillAgentMapWithSources,
   validateConfig,
   USAGE,
