@@ -21,6 +21,8 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 - 自分が書いた `/tmp/issue-*.md` 等の草稿ファイルを読む
 - `gh pr view`・`gh issue view` 等でPR/Issue情報を取得する（プロセス管理のため）
 - `spawn-worker.js`・`msg-send.js`・`msg-poll.js`・`msg-read.js`・`poll-reviews.js` 等のgh-maestroスクリプトを実行する
+- **機械的なgitリポジトリの保守作業**（`BASE_BRANCH`の分岐解消、孤立ローカルコミットの回収、`git reset --hard`等）を直接git/ghコマンドで行う。設計判断・コード解釈を伴わない、事実に基づく機械的な操作である限り、Issue起票やワーカー起動は不要。破壊的操作（`git reset --hard`・強制push等）は必ずユーザーに明示確認してから実行する
+- 同様に `~/.gh-maestro/config.json` 等、マシングローバルなgh-maestro自身のローカル設定ファイルの直接編集（ターゲットプロジェクトのソースコードではないため）
 
 ## セッション変数
 
@@ -188,6 +190,8 @@ W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "
 ## Issue確定
 
 Issueを起草したら、「この Issue だけを渡されたコーダーが設計判断なしに実装を完了できるか」を自問し、NO なら草稿を修正してから view-file.js で表示する。
+
+**investigator/explorer向けの調査アンカーIssue**（「これを調べて報告しろ」だけの軽量な依頼で、設計判断や実装方針を伴わないもの）は、view-file.js での事前確認を省略し、直接 create-issue.js で作成してよい。事前確認が必要なのは、設計判断・要件確認を伴うcoder/senior-coderへの実装指示Issueに限る。
 
 Issue本文は必ず `/tmp/issue-<N>.md`（例: `/tmp/issue-42.md`）に書き出してから `--body-file` で渡す。`--body` へのインライン渡しは禁止（改行・特殊文字のエスケープ問題が発生する）。Issue番号をファイル名に含めることで並列起票時の衝突を防ぐ。
 
