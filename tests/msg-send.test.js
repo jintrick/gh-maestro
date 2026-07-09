@@ -250,8 +250,9 @@ test('マーカーが正しい形式で本文の前に付与される', () => {
     assert.ok(lines[0].includes('"v":1'));
     assert.ok(lines[0].includes('"to":"worker-1"'));
     assert.ok(lines[0].includes('"from":"orchestrator"'));
-    // 本文はマーカーの直後（空行なし）
-    assert.equal(lines[1], 'hello world');
+    // 人間用ヘッダーと本文（引用形式）が含まれる
+    assert.ok(lines[1].includes('From:'));
+    assert.ok(lines[3].includes('hello world'));
   });
 });
 
