@@ -203,7 +203,10 @@ function cmdUse(profileName) {
   }
 
   // Write: merge top-level skillAgentMap with the profile's map (stacking behavior)
-  config.skillAgentMap = { ...config.skillAgentMap, ...profileMap };
+  const baseMap = (config.skillAgentMap && typeof config.skillAgentMap === 'object' && !Array.isArray(config.skillAgentMap))
+    ? config.skillAgentMap
+    : {};
+  config.skillAgentMap = { ...baseMap, ...profileMap };
   saveConfig(config);
 
   // Display result

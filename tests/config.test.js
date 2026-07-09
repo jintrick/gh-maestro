@@ -875,6 +875,38 @@ test('Profile semantics: プロファイルの重ね掛け（スタック適用�
   });
 });
 
+test('Profile semantics: 壊れた skillAgentMap（プレーンオブジェクト以外）があってもプロファイル適用時に修復される', () => {
+  withTempHome(home => {
+    // 1. skillAgentMap が文字列になっている（無効）
+    writeConfig(home, {
+      skillAgentMap: 'corrupted-string-value',
+      profiles: {
+        peak: { skillAgentMap: { 'gh-maestro-coder': 'agy' } },
+      },
+    });
+
+    let r = runConfig(['use', 'peak'], home);
+    assert.equal(r.status, 0, r.stderr);
+
+    let config = loadJSON(path.join(home, '.gh-maestro', 'config.json'));
+    assert.deepEqual(config.skillAgentMap, { 'gh-maestro-coder': 'agy' });
+
+    // 2. skillAgentMap が配列になっている（無効）
+    writeConfig(home, {
+      skillAgentMap: ['array', 'is', 'invalid'],
+      profiles: {
+        peak: { skillAgentMap: { 'gh-maestro-coder': 'agy' } },
+      },
+    });
+
+    r = runConfig(['use', 'peak'], home);
+    assert.equal(r.status, 0, r.stderr);
+
+    config = loadJSON(path.join(home, '.gh-maestro', 'config.json'));
+    assert.deepEqual(config.skillAgentMap, { 'gh-maestro-coder': 'agy' });
+  });
+});
+
 // ── Config parse error handling ────────────────────────────────────────────────
 
 test('CLI use: パース不能な config の場合はエラー', () => {
