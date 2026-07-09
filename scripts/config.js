@@ -86,22 +86,6 @@ function collectValidAgentIds(defaults, config) {
   return ids;
 }
 
-/**
- * Shallow-equality for two objects. Both must be non-null objects.
- * @param {object} a
- * @param {object} b
- * @returns {boolean}
- */
-function shallowEqual(a, b) {
-  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
-  const aKeys = Object.keys(a);
-  const bKeys = Object.keys(b);
-  if (aKeys.length !== bKeys.length) return false;
-  for (const key of aKeys) {
-    if (a[key] !== b[key]) return false;
-  }
-  return true;
-}
 
 /**
  * Build a resolved skillAgentMap with source annotations.
@@ -539,7 +523,6 @@ module.exports = {
   loadJSON,
   saveConfig,
   collectValidAgentIds,
-  shallowEqual,
   resolveSkillAgentMapWithSources,
   validateConfig,
   USAGE,

@@ -10,7 +10,6 @@ const { spawnSync } = require('child_process');
 const {
   loadJSON,
   collectValidAgentIds,
-  shallowEqual,
   resolveSkillAgentMapWithSources,
   validateConfig,
   USAGE,
@@ -164,27 +163,6 @@ test('collectValidAgentIds: config の agents が空でもデフォルトを返�
   assert.ok(ids.has('claude-ds'));
 });
 
-// ── shallowEqual ───────────────────────────────────────────────────────────────
-
-test('shallowEqual: 同一オブジェクトは true', () => {
-  assert.equal(shallowEqual({ a: 1, b: 'x' }, { a: 1, b: 'x' }), true);
-});
-
-test('shallowEqual: 異なる値は false', () => {
-  assert.equal(shallowEqual({ a: 1 }, { a: 2 }), false);
-});
-
-test('shallowEqual: キー数が異なる場合は false', () => {
-  assert.equal(shallowEqual({ a: 1 }, { a: 1, b: 2 }), false);
-});
-
-test('shallowEqual: null 同士は false', () => {
-  assert.equal(shallowEqual(null, null), false);
-});
-
-test('shallowEqual: 一方が null は false', () => {
-  assert.equal(shallowEqual({ a: 1 }, null), false);
-});
 
 // ── resolveSkillAgentMapWithSources ─────────────────────────────────────────────
 
