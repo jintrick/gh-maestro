@@ -3,7 +3,7 @@
 // Validates prerequisites on first run; always applies idempotent setup steps.
 // Sentinel (.gh-maestro/setup-ok) only gates expensive environment checks.
 
-const { spawnSync } = require('child_process');
+const { spawnSync } = require('./child-process');
 const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, chmodSync } = require('fs');
 const { resolve } = require('path');
 
@@ -64,22 +64,42 @@ if (existsSync(aiReviewSentinel)) {
       '.github/workflows/reviewer.md',
       '.github/workflows/shared/reviewer-output-policy.md',
     ];
+    let allDeleted = true;
     for (const branch of RETIRE_BRANCHES) {
       for (const filePath of RETIRE_PATHS) {
-        const get = spawnSync('gh', ['api', `repos/${repoName}/contents/${filePath}?ref=${branch}`, '--jq', '.sha'],
-          { encoding: 'utf8', stdio: 'pipe' });
-        const sha = get.stdout.trim();
+        let sha;
+        try {
+          const get = spawnSync('gh', ['api', `repos/${repoName}/contents/${filePath}?ref=${branch}`, '--jq', '.sha'],
+            { encoding: 'utf8', stdio: 'pipe' });
+          sha = get.stdout.trim();
+        } catch (e) {
+          console.warn(`  [warn] failed to query ${filePath} on ${branch}: ${e.message}`);
+          allDeleted = false;
+          continue;
+        }
         if (!sha) continue;
-        const del = spawnSync('gh', ['api', `repos/${repoName}/contents/${filePath}`, '--method', 'DELETE', '--input', '-'],
-          { encoding: 'utf8', stdio: 'pipe',
-            input: JSON.stringify({ message: 'ci: retire AI Review CI (replaced by local reviewer)', sha, branch }) });
-        del.status === 0
-          ? ok(`removed ${filePath} from ${branch}`)
-          : console.warn(`  [warn] failed to remove ${filePath} from ${branch}: ${del.stderr.trim()}`);
+        try {
+          const del = spawnSync('gh', ['api', `repos/${repoName}/contents/${filePath}`, '--method', 'DELETE', '--input', '-'],
+            { encoding: 'utf8', stdio: 'pipe',
+              input: JSON.stringify({ message: 'ci: retire AI Review CI (replaced by local reviewer)', sha, branch }) });
+          if (del.status === 0) {
+            ok(`removed ${filePath} from ${branch}`);
+          } else {
+            console.warn(`  [warn] failed to remove ${filePath} from ${branch}: ${(del.stderr || '').trim()}`);
+            allDeleted = false;
+          }
+        } catch (e) {
+          console.warn(`  [warn] failed to remove ${filePath} from ${branch}: ${e.message}`);
+          allDeleted = false;
+        }
       }
     }
-    unlinkSync(aiReviewSentinel);
-    ok('AI Review CI retired');
+    if (allDeleted) {
+      unlinkSync(aiReviewSentinel);
+      ok('AI Review CI retired');
+    } else {
+      console.warn('  [warn] AI Review CI retirement incomplete; sentinel kept for retry on next run');
+    }
   }
 }
 
@@ -223,24 +243,11 @@ function ensurePreCommitHook() {
         return;
       }
 
-      // Old version found — replace from marker line through the fi line
-      let endIdx = -1;
-      for (let i = markerIdx; i < lines.length; i++) {
-        if (/^fi(\b|;|$)/.test(lines[i].trim())) {
-          endIdx = i;
-          break;
-        }
-      }
-
-      if (endIdx === -1) {
-        // fi 行が見つからなければ安全側に倒し、末尾に追記する
-        appendFileSync(hookPath, `\n${entry.join('\n')}\n`, 'utf8');
-        try { chmodSync(hookPath, 0o755); } catch {}
-        ok('pre-commit hook updated: block appended (no fi found for old marker)');
-        return;
-      }
-
-      lines.splice(markerIdx, endIdx - markerIdx + 1, ...entry);
+      // Old version found — replace the fixed 4-line gh-maestro block.
+      // The block has a known structure (marker, if, action, fi) so we use
+      // the exact line count rather than scanning for a matching fi, which
+      // could match an unrelated block ahead of the correct one.
+      lines.splice(markerIdx, 4, ...entry);
       writeFileSync(hookPath, lines.join('\n'), 'utf8');
       try { chmodSync(hookPath, 0o755); } catch {}
       ok('pre-commit hook updated: sync-rules entry upgraded');
