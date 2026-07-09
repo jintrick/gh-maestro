@@ -224,12 +224,20 @@ function ensurePreCommitHook() {
       }
 
       // Old version found — replace from marker line through the fi line
-      let endIdx = lines.length - 1;
+      let endIdx = -1;
       for (let i = markerIdx; i < lines.length; i++) {
-        if (lines[i].trim() === 'fi') {
+        if (/^fi(\b|;|$)/.test(lines[i].trim())) {
           endIdx = i;
           break;
         }
+      }
+
+      if (endIdx === -1) {
+        // fi 行が見つからなければ安全側に倒し、末尾に追記する
+        appendFileSync(hookPath, `\n${entry.join('\n')}\n`, 'utf8');
+        try { chmodSync(hookPath, 0o755); } catch {}
+        ok('pre-commit hook updated: block appended (no fi found for old marker)');
+        return;
       }
 
       lines.splice(markerIdx, endIdx - markerIdx + 1, ...entry);
