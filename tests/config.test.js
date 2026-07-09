@@ -196,6 +196,11 @@ test('closestKnownSkillKey: totally different key returns null', () => {
   assert.equal(closestKnownSkillKey('completely-unrelated', keys), null);
 });
 
+test('closestKnownSkillKey: 共通接頭辞のみ一致し個別名が異なる場合は null を返す', () => {
+  const keys = ['gh-maestro-coder', 'gh-maestro-reviewer', 'gh-maestro-base'];
+  assert.equal(closestKnownSkillKey('gh-maestro-foo', keys), null);
+});
+
 // ── resolveSkillAgentMapWithSources ─────────────────────────────────────────────
 
 test('resolveSkillAgentMapWithSources: デフォルトのみですべて default ソース', () => {

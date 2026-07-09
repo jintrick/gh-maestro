@@ -98,17 +98,35 @@ function collectValidAgentIds(defaults, config) {
  */
 function closestKnownSkillKey(key, knownKeys) {
   if (!knownKeys || knownKeys.length === 0) return null;
+
+  // Calculate the common prefix shared by ALL known keys (e.g. "gh-maestro-").
+  // A match that only reaches this prefix length doesn't differentiate between
+  // individual skills — we need actual name-part overlap to make a suggestion.
+  let commonPrefixLen = 0;
+  if (knownKeys.length > 1) {
+    const first = knownKeys[0];
+    for (let i = 0; i < first.length; i++) {
+      if (knownKeys.every(k => k[i] === first[i])) {
+        commonPrefixLen = i + 1;
+      } else {
+        break;
+      }
+    }
+  }
+
   let best = null;
   let bestLen = 0;
   for (const known of knownKeys) {
     let i = 0;
     while (i < key.length && i < known.length && key[i] === known[i]) i++;
-    if (i > bestLen) {
+    // Only consider matches that extend beyond the shared prefix
+    // (meaning the individual skill-name portion actually matches)
+    if (i > commonPrefixLen && i > bestLen) {
       bestLen = i;
       best = known;
     }
   }
-  return bestLen >= 3 ? best : null;
+  return best; // null if no match beyond the common prefix
 }
 
 /**
