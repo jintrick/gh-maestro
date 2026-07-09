@@ -10,6 +10,7 @@ const { spawnSync } = require('child_process');
 const {
   loadJSON,
   collectValidAgentIds,
+  closestKnownSkillKey,
   resolveSkillAgentMapWithSources,
   validateConfig,
   USAGE,
@@ -163,6 +164,42 @@ test('collectValidAgentIds: config の agents が空でもデフォルトを返�
   assert.ok(ids.has('claude-ds'));
 });
 
+
+// ── closestKnownSkillKey ──────────────────────────────────────────────────────────
+
+test('closestKnownSkillKey: exact match returns the match itself', () => {
+  const keys = ['gh-maestro-coder', 'gh-maestro-reviewer', 'gh-maestro-base'];
+  assert.equal(closestKnownSkillKey('gh-maestro-coder', keys), 'gh-maestro-coder');
+});
+
+test('closestKnownSkillKey: returns closest prefix match', () => {
+  const keys = ['gh-maestro-coder', 'gh-maestro-reviewer', 'gh-maestro-base'];
+  const result = closestKnownSkillKey('gh-maestro-review-manager', keys);
+  assert.equal(result, 'gh-maestro-reviewer');
+});
+
+test('closestKnownSkillKey: empty knownKeys returns null', () => {
+  assert.equal(closestKnownSkillKey('anything', []), null);
+});
+
+test('closestKnownSkillKey: null knownKeys returns null', () => {
+  assert.equal(closestKnownSkillKey('anything', null), null);
+});
+
+test('closestKnownSkillKey: short mismatch returns null', () => {
+  const keys = ['gh-maestro-coder', 'gh-maestro-reviewer'];
+  assert.equal(closestKnownSkillKey('xyz', keys), null);
+});
+
+test('closestKnownSkillKey: totally different key returns null', () => {
+  const keys = ['gh-maestro-coder', 'gh-maestro-reviewer', 'gh-maestro-base'];
+  assert.equal(closestKnownSkillKey('completely-unrelated', keys), null);
+});
+
+test('closestKnownSkillKey: 共通接頭辞のみ一致し個別名が異なる場合は null を返す', () => {
+  const keys = ['gh-maestro-coder', 'gh-maestro-reviewer', 'gh-maestro-base'];
+  assert.equal(closestKnownSkillKey('gh-maestro-foo', keys), null);
+});
 
 // ── resolveSkillAgentMapWithSources ─────────────────────────────────────────────
 
@@ -387,6 +424,58 @@ test('validateConfig: プロファイル内のエージェントID が config �
   // No issues about unknown agent IDs for my-custom
   const unknownIssues = issues.filter(i => i.includes('unknown agent'));
   assert.deepEqual(unknownIssues, []);
+});
+
+test('validateConfig: 未知のスキルキーをトップレベルで警告する', () => {
+  const defaults = loadDefaults();
+  const config = { skillAgentMap: { 'gh-maestro-review-manager': 'codex' } };
+  const issues = validateConfig('global', '/tmp/config.json', config, defaults);
+  assert.ok(issues.some(i =>
+    i.includes('unknown skill key') && i.includes('[WARN]') && i.includes('gh-maestro-review-manager'),
+  ));
+});
+
+test('validateConfig: 未知のスキルキーに "did you mean" サジェストを含む', () => {
+  const defaults = loadDefaults();
+  const config = { skillAgentMap: { 'gh-maestro-review-manager': 'codex' } };
+  const issues = validateConfig('global', '/tmp/config.json', config, defaults);
+  assert.ok(issues.some(i =>
+    i.includes('did you mean') && i.includes('gh-maestro-reviewer'),
+  ), 'should suggest gh-maestro-reviewer');
+});
+
+test('validateConfig: 通常のスキルキーは警告にならない', () => {
+  const defaults = loadDefaults();
+  const config = { skillAgentMap: { 'gh-maestro-coder': 'claude-ds' } };
+  const issues = validateConfig('global', '/tmp/config.json', config, defaults);
+  const unknownKeyIssues = issues.filter(i => i.includes('unknown skill key'));
+  assert.deepEqual(unknownKeyIssues, []);
+});
+
+test('validateConfig: プロファイル内の未知のスキルキーを警告する', () => {
+  const defaults = loadDefaults();
+  const config = {
+    profiles: {
+      bad: { skillAgentMap: { 'gh-maestro-review-manager': 'codex' } },
+    },
+  };
+  const issues = validateConfig('global', '/tmp/config.json', config, defaults);
+  assert.ok(issues.some(i =>
+    i.includes('unknown skill key') && i.includes('[WARN]') && i.includes('bad'),
+  ));
+});
+
+test('validateConfig: プロファイルの未知スキルキーに "did you mean" サジェストを含む', () => {
+  const defaults = loadDefaults();
+  const config = {
+    profiles: {
+      bad: { skillAgentMap: { 'gh-maestro-review-manager': 'codex' } },
+    },
+  };
+  const issues = validateConfig('global', '/tmp/config.json', config, defaults);
+  assert.ok(issues.some(i =>
+    i.includes('did you mean') && i.includes('gh-maestro-reviewer') && i.includes('bad'),
+  ), 'should suggest gh-maestro-reviewer in profile context');
 });
 
 // ── CLI integration: --help ────────────────────────────────────────────────────
@@ -746,6 +835,38 @@ test('CLI doctor: workspace config のパースエラーを報告する', () => 
   });
 });
 
+test('CLI doctor: 未知のスキルキーを警告する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      skillAgentMap: { 'gh-maestro-review-manager': 'codex' },
+    });
+
+    const r = runConfig(['doctor'], home);
+    // WARN は exit code 1 にしない（doctor は exit code 1 だが、他の issue による）
+    // ただし警告メッセージが出力されること
+    assert.ok(
+      r.stdout.includes('unknown skill key') && r.stdout.includes('gh-maestro-review-manager'),
+      `should warn about unknown skill key: ${r.stdout}`,
+    );
+  });
+});
+
+test('CLI doctor: プロファイル内の未知のスキルキーを警告する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      profiles: {
+        bad: { skillAgentMap: { 'gh-maestro-review-manager': 'codex' } },
+      },
+    });
+
+    const r = runConfig(['doctor'], home);
+    assert.ok(
+      r.stdout.includes('unknown skill key') && r.stdout.includes('bad'),
+      `should warn about unknown skill key in profile: ${r.stdout}`,
+    );
+  });
+});
+
 // ── saveConfig ─────────────────────────────────────────────────────────────────
 
 test('saveConfig: 設定を書き込める', () => {
@@ -882,6 +1003,29 @@ test('Profile semantics: 壊れた skillAgentMap（プレーンオブジェク�
 
     config = loadJSON(path.join(home, '.gh-maestro', 'config.json'));
     assert.deepEqual(config.skillAgentMap, { 'gh-maestro-coder': 'agy' });
+  });
+});
+
+test('CLI use: 未知のスキルキーを含むプロファイルは警告するが適用は成功する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      skillAgentMap: { 'gh-maestro-coder': 'claude-ds' },
+      profiles: {
+        bad: { skillAgentMap: { 'gh-maestro-review-manager': 'codex' } },
+      },
+    });
+
+    const r = runConfig(['use', 'bad'], home);
+    // 正常終了（unknown key は警告のみ）
+    assert.equal(r.status, 0, `exit 0, stderr: ${r.stderr}`);
+    // 警告が stderr に出ている
+    assert.ok(
+      r.stderr.includes('[WARN]') && r.stderr.includes('unknown skill key') && r.stderr.includes('gh-maestro-review-manager'),
+      `stderr should warn about unknown skill key: ${r.stderr}`,
+    );
+    // 適用は成功している
+    const config = loadJSON(path.join(home, '.gh-maestro', 'config.json'));
+    assert.ok(config.skillAgentMap['gh-maestro-review-manager']);
   });
 });
 

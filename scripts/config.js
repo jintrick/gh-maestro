@@ -88,6 +88,48 @@ function collectValidAgentIds(defaults, config) {
 
 
 /**
+ * Find the closest matching known skill key for a given unknown key.
+ * Uses longest common prefix matching.
+ * Returns the closest match or null if no reasonable match.
+ *
+ * @param {string} key Unknown skill key
+ * @param {string[]} knownKeys Array of known skill keys
+ * @returns {string|null}
+ */
+function closestKnownSkillKey(key, knownKeys) {
+  if (!knownKeys || knownKeys.length === 0) return null;
+
+  // Calculate the common prefix shared by ALL known keys (e.g. "gh-maestro-").
+  // A match that only reaches this prefix length doesn't differentiate between
+  // individual skills — we need actual name-part overlap to make a suggestion.
+  let commonPrefixLen = 0;
+  if (knownKeys.length > 1) {
+    const first = knownKeys[0];
+    for (let i = 0; i < first.length; i++) {
+      if (knownKeys.every(k => k[i] === first[i])) {
+        commonPrefixLen = i + 1;
+      } else {
+        break;
+      }
+    }
+  }
+
+  let best = null;
+  let bestLen = 0;
+  for (const known of knownKeys) {
+    let i = 0;
+    while (i < key.length && i < known.length && key[i] === known[i]) i++;
+    // Only consider matches that extend beyond the shared prefix
+    // (meaning the individual skill-name portion actually matches)
+    if (i > commonPrefixLen && i > bestLen) {
+      bestLen = i;
+      best = known;
+    }
+  }
+  return best; // null if no match beyond the common prefix
+}
+
+/**
  * Build a resolved skillAgentMap with source annotations.
  * Returns { map, sources } where sources maps skill → 'default'|'global'|'workspace'.
  *
@@ -158,6 +200,17 @@ function cmdUse(profileName) {
   const defaults = loadDefaults();
   const validAgentIds = collectValidAgentIds(defaults, config);
   const defaultAgentIds = new Set(defaults.agents.map(a => a.id));
+
+  // Warn about unknown skill keys BEFORE agent ID validation (so the warning
+  // is visible even if agent ID errors cause early exit)
+  const knownSkillKeys = Object.keys(defaults.skillAgentMap || {});
+  for (const skill of Object.keys(profileMap)) {
+    if (!knownSkillKeys.includes(skill)) {
+      const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
+      const hint = suggestion ? ` (did you mean "${suggestion}"?)` : '';
+      console.error(`[WARN] Profile "${profileName}": unknown skill key "${skill}"${hint}.`);
+    }
+  }
 
   for (const [skill, agentId] of Object.entries(profileMap)) {
     if (typeof agentId !== 'string' || agentId.length === 0) {
@@ -291,6 +344,33 @@ function cmdStatus(workspacePath) {
       `${skill.padEnd(maxSkillLen)}  ${agentId.padEnd(maxAgentLen)}  ${srcLabel.padEnd(11)} ${ok}`,
     );
   }
+
+  // Warn about unknown skill keys in global config sources
+  if (config && !config._parseError) {
+    const knownSkillKeys = Object.keys(defaults.skillAgentMap || {});
+    if (config.skillAgentMap && typeof config.skillAgentMap === 'object' && !Array.isArray(config.skillAgentMap)) {
+      for (const skill of Object.keys(config.skillAgentMap)) {
+        if (!knownSkillKeys.includes(skill)) {
+          const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
+          const hint = suggestion ? ` (did you mean "${suggestion}"?)` : '';
+          console.log(`\n[!] Unknown skill key "${skill}" in global config${hint}.`);
+        }
+      }
+    }
+    if (config.profiles && typeof config.profiles === 'object' && !Array.isArray(config.profiles)) {
+      for (const [profileName, profile] of Object.entries(config.profiles)) {
+        if (profile && profile.skillAgentMap && typeof profile.skillAgentMap === 'object' && !Array.isArray(profile.skillAgentMap)) {
+          for (const skill of Object.keys(profile.skillAgentMap)) {
+            if (!knownSkillKeys.includes(skill)) {
+              const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
+              const hint = suggestion ? ` (did you mean "${suggestion}"?)` : '';
+              console.log(`\n[!] Unknown skill key "${skill}" in profile "${profileName}"${hint}.`);
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 // ── subcommand: doctor ─────────────────────────────────────────────────────────
@@ -333,6 +413,16 @@ function validateConfig(label, configPath, config, defaults) {
           issues.push(
             `[WARN] ${label} skillAgentMap["${skill}"]: unknown agent ID "${agentId}".`,
           );
+        }
+      }
+
+      // Check for unknown skill keys (not in agent-defaults.json's skillAgentMap)
+      const knownSkillKeys = Object.keys(defaults.skillAgentMap || {});
+      for (const skill of Object.keys(config.skillAgentMap)) {
+        if (!knownSkillKeys.includes(skill)) {
+          const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
+          const hint = suggestion ? ` (did you mean "${suggestion}"?)` : '';
+          issues.push(`[WARN] ${label} skillAgentMap: unknown skill key "${skill}"${hint}.`);
         }
       }
     }
@@ -387,6 +477,18 @@ function validateConfig(label, configPath, config, defaults) {
             issues.push(
               `[WARN] ${label} profiles["${name}"].skillAgentMap["${skill}"]: ` +
               `unknown agent ID "${agentId}".`,
+            );
+          }
+        }
+
+        // Check for unknown skill keys in profile
+        const knownSkillKeys = Object.keys(defaults.skillAgentMap || {});
+        for (const skill of Object.keys(profile.skillAgentMap)) {
+          if (!knownSkillKeys.includes(skill)) {
+            const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
+            const hint = suggestion ? ` (did you mean "${suggestion}"?)` : '';
+            issues.push(
+              `[WARN] ${label} profiles["${name}"].skillAgentMap: unknown skill key "${skill}"${hint}.`,
             );
           }
         }
@@ -523,6 +625,7 @@ module.exports = {
   loadJSON,
   saveConfig,
   collectValidAgentIds,
+  closestKnownSkillKey,
   resolveSkillAgentMapWithSources,
   validateConfig,
   USAGE,
