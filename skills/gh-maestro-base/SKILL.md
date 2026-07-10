@@ -13,6 +13,11 @@ description: gh-maestroワーカーの共通骨格テンプレート。orchestra
 node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
+> **注意:** 本文に改行・引用符（`'` `"`）・バックスラッシュ等の特殊文字が含まれる場合は、シェルクォート問題を避けるため、位置引数ではなく `--body-file` を使用してください。
+> ```sh
+> node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE --body-file /tmp/message.txt
+> ```
+
 **NG例:** 「作業を完了しました」とそのまま書く → 誰にも届かず消える。
 **OK例:** 同じ内容を上のコマンドの引数にして実行する。
 

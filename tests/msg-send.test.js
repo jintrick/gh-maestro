@@ -290,6 +290,92 @@ test('gh issue comment が空URLを返した場合 code 1', () => {
   });
 });
 
+// ── --body-file ──────────────────────────────────────────────────────────
+
+test('--body-file で指定したファイルの内容が本文として使われる', () => {
+  withTempDir(workspace => {
+    const bodyFile = path.join(workspace, 'body.txt');
+    fs.writeFileSync(bodyFile, 'hello from file', 'utf8');
+
+    let capturedBody = null;
+
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
+    });
+
+    const r = msgSend.main(['worker-1', '--body-file', bodyFile, '--issue', '1', '--workspace', workspace]);
+    assert.equal(r.code, 0);
+    assert.ok(capturedBody.includes('hello from file'));
+  });
+});
+
+test('--body-file と位置引数の本文が両方指定された場合、--body-file が優先される', () => {
+  withTempDir(workspace => {
+    const bodyFile = path.join(workspace, 'body.txt');
+    fs.writeFileSync(bodyFile, 'body-file content', 'utf8');
+
+    let capturedBody = null;
+
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
+    });
+
+    const r = msgSend.main(['worker-1', '--body-file', bodyFile, 'positional body', '--issue', '1', '--workspace', workspace]);
+    assert.equal(r.code, 0);
+    assert.ok(capturedBody.includes('body-file content'));
+    assert.ok(!capturedBody.includes('positional body'));
+  });
+});
+
+test('--body-file のファイルが存在しない場合にエラーになる', () => {
+  withTempDir(workspace => {
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+
+    const r = msgSend.main(['worker-1', '--body-file', '/nonexistent/path.txt', '--issue', '1', '--workspace', workspace]);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('--body-file の読み込みに失敗')));
+  });
+});
+
+test('改行・クォート・バックスラッシュを含む本文が --body-file 経由で正しく渡る', () => {
+  withTempDir(workspace => {
+    const specialBody = "line1\nline2\nit's \"quoted\"\npath\\to\\file";
+    const bodyFile = path.join(workspace, 'body.txt');
+    fs.writeFileSync(bodyFile, specialBody, 'utf8');
+
+    let capturedBody = null;
+
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
+    });
+
+    const r = msgSend.main(['worker-1', '--body-file', bodyFile, '--issue', '1', '--workspace', workspace]);
+    assert.equal(r.code, 0);
+    // 改行が > 引用形式に変換された全文が正しく渡っている
+    const transformedBody = "line1\n> line2\n> it's \"quoted\"\n> path\\to\\file";
+    assert.ok(capturedBody.includes(transformedBody));
+  });
+});
+
+test('--body-file に空ファイルを指定した場合は本文なしエラーになる', () => {
+  withTempDir(workspace => {
+    const bodyFile = path.join(workspace, 'empty.txt');
+    fs.writeFileSync(bodyFile, '', 'utf8');
+
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+
+    const r = msgSend.main(['worker-1', '--body-file', bodyFile, '--issue', '1', '--workspace', workspace]);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('メッセージ本文が必要')));
+  });
+});
+
 // ── 戻り値の注入リセット（後続テストのため） ───────────────────────────────
 
 test('injected gh functions can be reset', () => {

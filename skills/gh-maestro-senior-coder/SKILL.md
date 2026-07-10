@@ -13,6 +13,8 @@ description: gh-maestroシニアコーダーエージェント。複雑な設計
 node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
+> **注意:** 本文に改行・引用符・バックスラッシュ等の特殊文字が含まれる場合は、シェルクォート問題を避けるため `--body-file` を使用してください。詳細は `msg-send.js --help` を参照。
+
 **NG例:** 「Issueを確認しました。次にauth.tsを修正します」「PRを作成しました」とそのまま書く → 誰にも届かず消える。
 **OK例:** 何も書かずに次のツール（Edit/Bash/`gh pr create`等）を呼ぶ。伝える必要があるのは質問・相談・失敗報告だけで、それも上のコマンドの引数にする。
 
