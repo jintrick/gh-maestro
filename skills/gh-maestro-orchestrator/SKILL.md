@@ -86,11 +86,13 @@ explorerは**事実のみ報告する**（分析・判断は行わない）。in
 ## アセット（`{{SCRIPTS_PATH}}/`）
 
 - **spawn-worker.js** — worktreeを作りワーカーを新規ペインで起動する
-- **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。`--issue` は workers.json から自動解決されるため明示しない
+- **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。`--issue` は workers.json から自動解決されるため明示しない。改行・引用符等の特殊文字を含む本文は `--body-file` でファイル経由で渡すこと（シェルクォート問題を回避）。
 
 ```sh
 node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE "<メッセージ>"
 # 例: node "{{SCRIPTS_PATH}}/msg-send.js" issue-5-implement --workspace $WORKSPACE "命名改善: src/auth.go:42 — processData → normalizeSSN に変更してください（PR #12 のレビュー指摘より）"
+# 特殊文字を含む場合:
+# node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE --body-file /tmp/msg.txt
 ```
 - **msg-read.js** — コメントIDから本文を読み出す（マーカー行除去済み）
 

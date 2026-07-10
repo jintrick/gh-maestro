@@ -19,16 +19,19 @@ const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
-Usage: node msg-send.js <recipient> [--from <name>] [--issue <N>] [--workspace <path>] "<本文>"
+Usage: node msg-send.js <recipient> [--from <name>] [--issue <N>] [--workspace <path>] ["<本文>"]
+       node msg-send.js <recipient> --body-file <path> [--from <name>] [--issue <N>] [--workspace <path>]
 
 Arguments:
   <recipient>           送信先（worker 名、または "orchestrator"）
-  <本文>                メッセージ本文
+  <本文>                メッセージ本文（--body-file と併用時は無視されます）
 
 Options:
   --from <name>         送信元名（省略時は GH_MAESTRO_WORKER env → 'orchestrator'）
   --issue <N>           投稿先の Issue 番号（省略時は workers.json または env ISSUE から解決）
   --workspace <path>    ワークスペースパス（省略時は環境変数またはCWDから解決）
+  --body-file <path>    メッセージ本文を記載したファイルのパス（UTF-8）。改行・引用符等の特殊文字を含む本文は
+                        シェルクォート問題を避けるためこちらを使用してください。指定された場合、位置引数の本文より優先されます。
 
 Output (stdout):
   投稿されたコメントの URL を1行出力
@@ -71,7 +74,7 @@ function main(argsOverride, envOverride) {
     return { code: 0, lines: out, errLines: err };
   }
 
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue', '--from']);
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue', '--from', '--body-file']);
 
   if (exitFlagMiss) {
     writeErr('msg-send: フラグには値が必要です。');
@@ -80,7 +83,19 @@ function main(argsOverride, envOverride) {
   }
 
   const recipient = rest[0];
-  const body = rest.slice(1).join(' ');
+
+  // ── 本文解決: --body-file > 位置引数 ─────────────────────────────────────
+  let body;
+  if (values['--body-file']) {
+    try {
+      body = fs.readFileSync(values['--body-file'], 'utf8');
+    } catch (e) {
+      writeErr(`msg-send: --body-file の読み込みに失敗しました: ${e.message}`);
+      return { code: 1, lines: out, errLines: err };
+    }
+  } else {
+    body = rest.slice(1).join(' ');
+  }
 
   if (!recipient) {
     writeErr(USAGE);

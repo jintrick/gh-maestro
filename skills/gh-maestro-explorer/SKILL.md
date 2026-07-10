@@ -13,6 +13,8 @@ description: gh-maestro汎用調査エージェント。orchestratorから調査
 node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
+> **注意:** 本文に改行・引用符・バックスラッシュ等の特殊文字が含まれる場合は、シェルクォート問題を避けるため `--body-file` を使用してください。詳細は `msg-send.js --help` を参照。
+
 **NG例:** 「見つかりました。path/to/file.jsの42行目です」とそのまま書く → 誰にも届かず消える。
 **OK例:** 同じ内容を上のコマンドの引数にして実行する。
 
