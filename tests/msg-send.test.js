@@ -357,12 +357,9 @@ test('改行・クォート・バックスラッシュを含む本文が --body-
 
     const r = msgSend.main(['worker-1', '--body-file', bodyFile, '--issue', '1', '--workspace', workspace]);
     assert.equal(r.code, 0);
-    // 改行がマーカー行（> 引用形式）で正しく渡っている
-    assert.ok(capturedBody.includes("line1"));
-    assert.ok(capturedBody.includes("line2"));
-    assert.ok(capturedBody.includes("it's"));
-    assert.ok(capturedBody.includes('"quoted"'));
-    assert.ok(capturedBody.includes('path\\to\\file'));
+    // 改行が > 引用形式に変換された全文が正しく渡っている
+    const transformedBody = "line1\n> line2\n> it's \"quoted\"\n> path\\to\\file";
+    assert.ok(capturedBody.includes(transformedBody));
   });
 });
 
