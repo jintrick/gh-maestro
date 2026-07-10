@@ -8,11 +8,54 @@ const { isProcessAlive } = require('./process-lifecycle');
 
 const USAGE = `start-review-manager.js — PRに対してReview Managerを起動する
 
-Usage: node start-review-manager.js <PR> <REPO> <WORKSPACE>
+Usage: node start-review-manager.js <PR> <REPO> <WORKSPACE> [--mode heavy|directed] [--prompt <text> | --brief-file <path>]
+
+Options:
+  --mode <heavy|directed>  レビュー戦略（デフォルト: heavy）
+                            heavy: 既存の3観点独立サブエージェント方式
+                            directed: 指定したレビュー方針に沿って絞ったレビューを行う
+  --prompt <text>           directedモードのレビュー方針をテキストで直接指定する
+  --brief-file <path>       directedモードのレビュー方針をファイルで指定する
+                            （--prompt と --brief-file はどちらか一方のみ指定可能）
+
+directed モードでは --prompt または --brief-file のいずれかが必須。
 
 Output:
   REVIEW_MANAGER_STARTED:<PR>
   REVIEW_MANAGER_ALREADY_RUNNING:<PR>`;
+
+const VALID_MODES = new Set(['heavy', 'directed']);
+
+/**
+ * @param {{mode?: string}} options
+ * @returns {string} 検証済みmode（'heavy'|'directed'）
+ */
+function resolveMode(options) {
+  const mode = options.mode || 'heavy';
+  if (!VALID_MODES.has(mode)) {
+    throw new Error(`invalid mode "${mode}" (must be "heavy" or "directed")`);
+  }
+  return mode;
+}
+
+/**
+ * directedモードのレビュー方針テキストを解決する。
+ * @param {{promptText?: string, briefFile?: string}} options
+ * @returns {string}
+ */
+function resolveDirectedBrief(options) {
+  if (options.promptText != null && options.briefFile != null) {
+    throw new Error('--prompt と --brief-file は同時に指定できません');
+  }
+  if (options.promptText != null) return options.promptText;
+  if (options.briefFile != null) {
+    if (!fs.existsSync(options.briefFile)) {
+      throw new Error(`brief file not found: ${options.briefFile}`);
+    }
+    return fs.readFileSync(options.briefFile, 'utf8');
+  }
+  throw new Error('directed モードには --prompt または --brief-file が必要です');
+}
 
 /**
  * lock ファイルが有効かチェックする。
@@ -49,7 +92,16 @@ function isLockValid(lockFile) {
   return false;
 }
 
-function startReviewManager(pr, repo, workspace) {
+/**
+ * @param {string} pr
+ * @param {string} repo
+ * @param {string} workspace
+ * @param {{mode?: string, promptText?: string, briefFile?: string}} [options]
+ */
+function startReviewManager(pr, repo, workspace, options = {}) {
+  // 副作用（lock/brief書き込み）の前に入力を検証する（fail-closed）。
+  const mode = resolveMode(options);
+
   const ghDir = path.join(workspace, '.gh-maestro');
   const lockFile = path.join(ghDir, `review-manager-${pr}.running`);
   fs.mkdirSync(ghDir, { recursive: true });
@@ -57,14 +109,27 @@ function startReviewManager(pr, repo, workspace) {
   // req.13: stale 判定付きで lock チェック
   if (isLockValid(lockFile)) return 'REVIEW_MANAGER_ALREADY_RUNNING';
 
+  // directed モードのレビュー方針を、子プロセス（run-review-manager.js）が
+  // 読める独自の一時ファイルとしてghDir配下に確保する。
+  // オーケストレーターが渡した --brief-file の原本を書き換えないよう、常にコピーする。
+  let briefFile = null;
+  if (mode === 'directed') {
+    const briefText = resolveDirectedBrief(options);
+    briefFile = path.join(ghDir, `review-manager-${pr}-brief.md`);
+    fs.writeFileSync(briefFile, briefText, 'utf8');
+  }
+
   fs.writeFileSync(lockFile, String(process.pid));
   const logFd = fs.openSync(path.join(ghDir, `review-manager-${pr}.log`), 'a');
-  const child = spawn(process.execPath, [
+  const childArgs = [
     path.join(__dirname, 'run-review-manager.js'),
     pr,
     repo,
     workspace,
-  ], {
+    '--mode', mode,
+  ];
+  if (briefFile) childArgs.push('--brief-file', briefFile);
+  const child = spawn(process.execPath, childArgs, {
     detached: true,
     windowsHide: true,
     stdio: ['ignore', logFd, logFd],
@@ -76,7 +141,7 @@ function startReviewManager(pr, repo, workspace) {
   return 'REVIEW_MANAGER_STARTED';
 }
 
-module.exports = { startReviewManager, isLockValid };
+module.exports = { startReviewManager, isLockValid, resolveMode, resolveDirectedBrief };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -84,10 +149,30 @@ if (require.main === module) {
     console.log(USAGE);
     process.exit(0);
   }
-  const [pr, repo, workspace] = args;
+
+  const getFlag = (flag) => { const i = args.indexOf(flag); return i !== -1 ? args[i + 1] ?? null : null; };
+  const flagSet = new Set(['--mode', '--prompt', '--brief-file']);
+  const positional = [];
+  for (let i = 0; i < args.length; i++) {
+    if (flagSet.has(args[i])) { i++; continue; }
+    positional.push(args[i]);
+  }
+  const [pr, repo, workspace] = positional;
   if (!pr || !repo || !workspace) {
     console.error(USAGE);
     process.exit(1);
   }
-  process.stdout.write(`${startReviewManager(pr, repo, workspace)}:${pr}\n`);
+
+  const options = {
+    mode: getFlag('--mode') || undefined,
+    promptText: getFlag('--prompt') || undefined,
+    briefFile: getFlag('--brief-file') || undefined,
+  };
+
+  try {
+    process.stdout.write(`${startReviewManager(pr, repo, workspace, options)}:${pr}\n`);
+  } catch (e) {
+    console.error(`start-review-manager: ${e.message}`);
+    process.exit(1);
+  }
 }

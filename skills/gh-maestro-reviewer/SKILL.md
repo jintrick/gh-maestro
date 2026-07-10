@@ -16,18 +16,26 @@ description: Run a gh-maestro PR Review Manager that delegates three independent
 - `REPO`: `owner/repo`
 - `WORKSPACE`: リポジトリの絶対パス
 - `OUTPUT`: RMが最終JSONを書き出すパス
+- `MODE`: レビュー戦略。`heavy`（デフォルト）または `directed`
+
+`MODE=directed` の場合、プロンプトには追加でオーケストレーターから与えられた
+レビュー方針（自由記述テキスト）が含まれる。RMはこの方針の範囲に絞ってレビューする。
 
 ## RMの責務
 
 1. `gh pr view`でPR情報、`headRefOid`、変更ファイル一覧を取得する。
 2. `gh pr diff`でPR diffを取得する。
 3. 既存レビュー・既存インラインコメントを取得する。
-4. 以下の3観点について、独立したReviewerサブエージェントを並列に立てる。
-   - Correctness: `reviewer-correctness.md`
-   - Maintainability: `reviewer-maintainability.md`
-   - Resilience & Security: `reviewer-resilience-security.md`
-5. 各Reviewerには同じPRコンテキストを渡し、担当観点ファイルを読むよう指示する。
-6. Reviewerの結果を集約し、`OUTPUT`にJSONを書き出す。
+4. `MODE`に応じてレビューを実行する。
+   - `heavy`: 以下の3観点について、独立したReviewerサブエージェントを並列に立てる。
+     - Correctness: `reviewer-correctness.md`
+     - Maintainability: `reviewer-maintainability.md`
+     - Resilience & Security: `reviewer-resilience-security.md`
+     各Reviewerには同じPRコンテキストを渡し、担当観点ファイルを読むよう指示する。
+   - `directed`: 与えられたレビュー方針の範囲に絞ってレビューする。方針の性質に応じて
+     単一のレビュー、または方針を分割した複数のサブエージェント並列起動のどちらでもよい。
+     方針外の観点を無理に指摘しない。
+5. Reviewerの結果を集約し、`OUTPUT`にJSONを書き出す。
 
 RMはGitHubに投稿しない。採否判断、severity付与、APPROVE/REQUEST_CHANGES判定をしない。
 投稿・line解決・diff hunk判定・重複統合は後続のNode.js review publisherが行う。
