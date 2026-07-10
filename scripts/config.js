@@ -23,6 +23,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, isValidAgentConfig } = require('./shared/resolve-config');
+const { isPlainObject } = require('./shared/validate');
 const { checkAgentExists } = require('./agent-exec');
 
 const HOMEDIR = process.env.HOME || process.env.USERPROFILE || '';
@@ -46,7 +47,7 @@ function loadJSON(filePath) {
   }
   try {
     const parsed = JSON.parse(raw);
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    if (isPlainObject(parsed)) {
       return parsed;
     }
     return { _parseError: 'root value is not an object' };
@@ -130,6 +131,17 @@ function closestKnownSkillKey(key, knownKeys) {
 }
 
 /**
+ * Get known skill keys from agent defaults.
+ * Shared helper for cmdUse, cmdStatus, and validateConfig.
+ *
+ * @param {object} defaults
+ * @returns {string[]}
+ */
+function getKnownSkillKeys(defaults) {
+  return Object.keys(defaults.skillAgentMap || {});
+}
+
+/**
  * Build a resolved skillAgentMap with source annotations.
  * Returns { map, sources } where sources maps skill → 'default'|'global'|'workspace'.
  *
@@ -191,7 +203,7 @@ function cmdUse(profileName) {
   }
 
   const profileMap = profiles[profileName].skillAgentMap;
-  if (!profileMap || typeof profileMap !== 'object' || Array.isArray(profileMap) || Object.keys(profileMap).length === 0) {
+  if (!isPlainObject(profileMap) || Object.keys(profileMap).length === 0) {
     console.error(`Error: profile "${profileName}" has no valid skillAgentMap.`);
     process.exit(1);
   }
@@ -203,7 +215,7 @@ function cmdUse(profileName) {
 
   // Warn about unknown skill keys BEFORE agent ID validation (so the warning
   // is visible even if agent ID errors cause early exit)
-  const knownSkillKeys = Object.keys(defaults.skillAgentMap || {});
+  const knownSkillKeys = getKnownSkillKeys(defaults);
   for (const skill of Object.keys(profileMap)) {
     if (!knownSkillKeys.includes(skill)) {
       const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
@@ -240,7 +252,7 @@ function cmdUse(profileName) {
   }
 
   // Write: merge top-level skillAgentMap with the profile's map (stacking behavior)
-  const baseMap = (config.skillAgentMap && typeof config.skillAgentMap === 'object' && !Array.isArray(config.skillAgentMap))
+  const baseMap = (config.skillAgentMap && isPlainObject(config.skillAgentMap))
     ? config.skillAgentMap
     : {};
   config.skillAgentMap = { ...baseMap, ...profileMap };
@@ -280,13 +292,13 @@ function cmdStatus(workspacePath) {
   // Warn about workspace command/extraArgs overrides (silently ignored by resolver)
   if (wsConfig && wsConfig.agents && !wsConfig._parseError) {
     for (const [agentId, override] of Object.entries(wsConfig.agents)) {
-      if (override && typeof override === 'object' &&
+      if (isPlainObject(override) &&
           (override.command !== undefined || override.extraArgs !== undefined)) {
         const suppressed = [];
         if (override.command !== undefined) suppressed.push('command');
         if (override.extraArgs !== undefined) suppressed.push('extraArgs');
         console.log(
-          `[!] Workspace overrides ${suppressed.join('/')} for agent "${agentId}" — ` +
+          `[WARN] Workspace overrides ${suppressed.join('/')} for agent "${agentId}" — ` +
           'IGNORED (security: workspace cannot override execution fields).',
         );
       }
@@ -346,30 +358,34 @@ function cmdStatus(workspacePath) {
   }
 
   // Warn about unknown skill keys in global config sources
+  const unknownWarnings = [];
   if (config && !config._parseError) {
-    const knownSkillKeys = Object.keys(defaults.skillAgentMap || {});
-    if (config.skillAgentMap && typeof config.skillAgentMap === 'object' && !Array.isArray(config.skillAgentMap)) {
+    const knownSkillKeys = getKnownSkillKeys(defaults);
+    if (isPlainObject(config.skillAgentMap)) {
       for (const skill of Object.keys(config.skillAgentMap)) {
         if (!knownSkillKeys.includes(skill)) {
           const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
           const hint = suggestion ? ` (did you mean "${suggestion}"?)` : '';
-          console.log(`\n[!] Unknown skill key "${skill}" in global config${hint}.`);
+          unknownWarnings.push(`[WARN] Unknown skill key "${skill}" in global config${hint}.`);
         }
       }
     }
-    if (config.profiles && typeof config.profiles === 'object' && !Array.isArray(config.profiles)) {
+    if (isPlainObject(config.profiles)) {
       for (const [profileName, profile] of Object.entries(config.profiles)) {
-        if (profile && profile.skillAgentMap && typeof profile.skillAgentMap === 'object' && !Array.isArray(profile.skillAgentMap)) {
+        if (profile && isPlainObject(profile.skillAgentMap)) {
           for (const skill of Object.keys(profile.skillAgentMap)) {
             if (!knownSkillKeys.includes(skill)) {
               const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
               const hint = suggestion ? ` (did you mean "${suggestion}"?)` : '';
-              console.log(`\n[!] Unknown skill key "${skill}" in profile "${profileName}"${hint}.`);
+              unknownWarnings.push(`[WARN] Unknown skill key "${skill}" in profile "${profileName}"${hint}.`);
             }
           }
         }
       }
     }
+  }
+  if (unknownWarnings.length > 0) {
+    console.log('\n' + unknownWarnings.join('\n'));
   }
 }
 
@@ -397,15 +413,16 @@ function validateConfig(label, configPath, config, defaults) {
   }
 
   const defaultAgentIds = new Set(defaults.agents.map(a => a.id));
-  const configAgentIds = config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
+  const configAgentIds = isPlainObject(config.agents)
     ? Object.keys(config.agents) : [];
   const allKnownIds = new Set([...defaultAgentIds, ...configAgentIds]);
 
   // Check top-level skillAgentMap
   if (config.skillAgentMap !== undefined) {
-    if (typeof config.skillAgentMap !== 'object' || config.skillAgentMap === null || Array.isArray(config.skillAgentMap)) {
+    if (!isPlainObject(config.skillAgentMap)) {
       issues.push(`[ERROR] ${label}: skillAgentMap must be an object.`);
     } else {
+      const knownSkillKeys = getKnownSkillKeys(defaults);
       for (const [skill, agentId] of Object.entries(config.skillAgentMap)) {
         if (typeof agentId !== 'string' || agentId.length === 0) {
           issues.push(`[ERROR] ${label} skillAgentMap["${skill}"]: empty agent ID.`);
@@ -414,11 +431,6 @@ function validateConfig(label, configPath, config, defaults) {
             `[WARN] ${label} skillAgentMap["${skill}"]: unknown agent ID "${agentId}".`,
           );
         }
-      }
-
-      // Check for unknown skill keys (not in agent-defaults.json's skillAgentMap)
-      const knownSkillKeys = Object.keys(defaults.skillAgentMap || {});
-      for (const skill of Object.keys(config.skillAgentMap)) {
         if (!knownSkillKeys.includes(skill)) {
           const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
           const hint = suggestion ? ` (did you mean "${suggestion}"?)` : '';
@@ -430,11 +442,11 @@ function validateConfig(label, configPath, config, defaults) {
 
   // Check agents section
   if (config.agents !== undefined) {
-    if (typeof config.agents !== 'object' || config.agents === null || Array.isArray(config.agents)) {
+    if (!isPlainObject(config.agents)) {
       issues.push(`[ERROR] ${label}: agents must be an object.`);
     } else {
       for (const [agentId, override] of Object.entries(config.agents)) {
-        if (typeof override !== 'object' || override === null || Array.isArray(override)) {
+        if (!isPlainObject(override)) {
           issues.push(`[ERROR] ${label} agents["${agentId}"]: must be an object.`);
           continue;
         }
@@ -453,15 +465,16 @@ function validateConfig(label, configPath, config, defaults) {
 
   // Check profiles section
   if (config.profiles !== undefined) {
-    if (typeof config.profiles !== 'object' || config.profiles === null || Array.isArray(config.profiles)) {
+    if (!isPlainObject(config.profiles)) {
       issues.push(`[ERROR] ${label}: profiles must be an object.`);
     } else {
+      const knownSkillKeys = getKnownSkillKeys(defaults);
       for (const [name, profile] of Object.entries(config.profiles)) {
-        if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+        if (!isPlainObject(profile)) {
           issues.push(`[ERROR] ${label} profiles["${name}"]: must be an object.`);
           continue;
         }
-        if (!profile.skillAgentMap || typeof profile.skillAgentMap !== 'object' || Array.isArray(profile.skillAgentMap) ||
+        if (!profile.skillAgentMap || !isPlainObject(profile.skillAgentMap) ||
             Object.keys(profile.skillAgentMap).length === 0) {
           issues.push(
             `[ERROR] ${label} profiles["${name}"]: missing or empty skillAgentMap.`,
@@ -479,11 +492,6 @@ function validateConfig(label, configPath, config, defaults) {
               `unknown agent ID "${agentId}".`,
             );
           }
-        }
-
-        // Check for unknown skill keys in profile
-        const knownSkillKeys = Object.keys(defaults.skillAgentMap || {});
-        for (const skill of Object.keys(profile.skillAgentMap)) {
           if (!knownSkillKeys.includes(skill)) {
             const suggestion = closestKnownSkillKey(skill, knownSkillKeys);
             const hint = suggestion ? ` (did you mean "${suggestion}"?)` : '';
@@ -626,6 +634,7 @@ module.exports = {
   saveConfig,
   collectValidAgentIds,
   closestKnownSkillKey,
+  getKnownSkillKeys,
   resolveSkillAgentMapWithSources,
   validateConfig,
   USAGE,

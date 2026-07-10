@@ -19,6 +19,8 @@
 const { existsSync, readFileSync } = require('fs');
 const { resolve, join } = require('path');
 
+const { isPlainObject } = require('./validate');
+
 // ── デフォルト読み込み ──────────────────────────────────────────────────────
 
 const DEFAULTS_PATH = resolve(__dirname, '..', 'agent-defaults.json');
@@ -38,7 +40,7 @@ function loadConfigFile(configPath) {
   if (!existsSync(configPath)) return {};
   try {
     const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    if (isPlainObject(parsed)) {
       return parsed;
     }
     return {};
