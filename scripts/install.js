@@ -220,6 +220,7 @@ function ghMaestroPath(...segs) {
 // 全スクリプト（CLI・モジュール）を集約する単一ディレクトリ。
 // SKILL.md からは {{SCRIPTS_PATH}} がこの絶対パスに置換されて参照される。
 const SHARED_SCRIPTS = ghMaestroPath('scripts');
+const SHARED_SKILLS = ghMaestroPath('skills');
 
 // ── 各エージェントのスキルディレクトリに SKILL.md のみを配置 ──────────────────
 // スクリプトはスキルdirには置かず、すべて SHARED_SCRIPTS に集約する（下の共有install参照）。
@@ -245,6 +246,7 @@ for (const [agentName, config] of Object.entries(agents)) {
   // {{SCRIPTS_PATH}} は集約先（SHARED_SCRIPTS）の絶対パスに統一する
   const substitutions = Object.assign({}, config.substitutions, {
     SCRIPTS_PATH: SHARED_SCRIPTS,
+    SHARED_SKILLS_PATH: SHARED_SKILLS,
   });
 
   for (const skill of skillDirs) {
@@ -319,12 +321,12 @@ ok(`${scriptFiles.length} scripts + ${scriptSubdirs.length} subdir(s) -> ${SHARE
 // スキルシステムを持たないエージェント（reasonix 等）が AGENTS.md 経由でスキルを読むための
 // 正規コピー。SCRIPTS_PATH は共有スクリプト先で統一する。
 step('Installing shared skill files into ~/.gh-maestro/skills/...');
-const SHARED_SKILLS = ghMaestroPath('skills');
 fs.mkdirSync(SHARED_SKILLS, { recursive: true });
 
 const canonicalAgent = agents['claude'] || agents[Object.keys(agents)[0]];
 const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {}, {
   SCRIPTS_PATH: SHARED_SCRIPTS,
+  SHARED_SKILLS_PATH: SHARED_SKILLS,
 });
 
 // stale 削除（ディレクトリと未知ファイルの両方）
