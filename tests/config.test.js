@@ -720,6 +720,39 @@ test('CLI status: config.json がない場合でもデフォルトマップを�
   });
 });
 
+test('CLI status: グローバル設定に未知のスキルキーがある場合に警告する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      skillAgentMap: { 'gh-maestro-review-manager': 'codex' },
+    });
+
+    const r = runConfig(['status'], home);
+    assert.equal(r.status, 0, `exit 0, stderr: ${r.stderr}`);
+    const stdoutStr = String(r.stdout);
+    assert.ok(stdoutStr.includes('[WARN]'), `stdout missing [WARN]: ${stdoutStr}`);
+    assert.ok(stdoutStr.includes('Unknown skill key'), `stdout missing 'Unknown skill key': ${stdoutStr}`);
+    assert.ok(stdoutStr.includes('gh-maestro-review-manager'), `stdout missing 'gh-maestro-review-manager': ${stdoutStr}`);
+  });
+});
+
+test('CLI status: プロファイル内の未知のスキルキーを警告する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      profiles: {
+        bad: { skillAgentMap: { 'gh-maestro-review-manager': 'codex' } },
+      },
+    });
+
+    const r = runConfig(['status'], home);
+    assert.equal(r.status, 0, `exit 0, stderr: ${r.stderr}`);
+    const stdoutStr = String(r.stdout);
+    assert.ok(stdoutStr.includes('[WARN]'), `stdout missing [WARN]: ${stdoutStr}`);
+    assert.ok(stdoutStr.includes('Unknown skill key'), `stdout missing 'Unknown skill key': ${stdoutStr}`);
+    assert.ok(stdoutStr.includes('gh-maestro-review-manager'), `stdout missing key: ${stdoutStr}`);
+    assert.ok(stdoutStr.includes('bad'), `stdout missing profile name: ${stdoutStr}`);
+  });
+});
+
 // ── CLI integration: doctor ────────────────────────────────────────────────────
 
 test('CLI doctor: 正常な config は OK を表示する', () => {
