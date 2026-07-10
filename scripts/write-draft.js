@@ -41,29 +41,41 @@ function getArg(argv, name) {
   return i !== -1 ? argv[i + 1] : undefined;
 }
 
-function getPositional(argv) {
+function getPositionals(argv) {
   const bodyIdx = argv.indexOf('--body');
   return argv.filter((a, i) => {
     if (a.startsWith('--')) return false;
     if (bodyIdx !== -1 && i === bodyIdx + 1) return false;
     return true;
-  })[0];
+  });
 }
 
 // main() は process.exit() を呼ばず結果オブジェクトを返す。
 // require.main === module の薄いエントリポイントだけが exit する。
-function main(argv, { readStdinFn = readStdin } = {}) {
+function main(argv, { readStdinFn = readStdin, isStdinTTY = () => process.stdin.isTTY } = {}) {
   if (argv.includes('--help') || argv.includes('-h')) {
     return { code: 0, stdout: USAGE };
   }
 
-  const logicalPath = getPositional(argv);
+  const positionals = getPositionals(argv);
   const hasStdin = argv.includes('--stdin');
   const bodyArg = getArg(argv, '--body');
   const hasBody = bodyArg !== undefined;
 
-  if (!logicalPath || (!hasStdin && !hasBody) || (hasStdin && hasBody)) {
+  if (
+    positionals.length !== 1 ||
+    (!hasStdin && !hasBody) ||
+    (hasStdin && hasBody)
+  ) {
     return { code: 1, stderr: USAGE };
+  }
+  const logicalPath = positionals[0];
+
+  if (hasStdin && isStdinTTY()) {
+    return {
+      code: 1,
+      stderr: '--stdin が指定されましたが標準入力がTTYです。パイプまたはheredocで内容を渡してください。',
+    };
   }
 
   const content = hasStdin ? readStdinFn() : bodyArg;

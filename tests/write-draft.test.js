@@ -66,11 +66,31 @@ test('既存ファイルは上書きされる', () => {
 test('--stdin から内容を読み込んで書き込む', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'write-draft-test-'));
   const logicalPath = path.join(tmpDir, 'draft.md');
-  const r = main([logicalPath, '--stdin'], { readStdinFn: () => 'from stdin' });
+  const r = main([logicalPath, '--stdin'], {
+    readStdinFn: () => 'from stdin',
+    isStdinTTY: () => false,
+  });
   assert.equal(r.code, 0);
   const absPath = path.resolve(toWinPath(logicalPath));
   assert.equal(fs.readFileSync(absPath, 'utf8'), 'from stdin');
   fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('--stdin指定時、標準入力がTTYだとエラーで即終了する（ハング防止）', () => {
+  const r = main(['/tmp/foo.md', '--stdin'], {
+    readStdinFn: () => {
+      throw new Error('readStdinFn should not be called when stdin is a TTY');
+    },
+    isStdinTTY: () => true,
+  });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /TTY/);
+});
+
+test('位置引数が2個以上あるとUsageエラー（誤用検知）', () => {
+  const r = main(['/tmp/foo.md', 'extra-arg', '--body', 'hello']);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /Usage/);
 });
 
 test('サブプロセス経由: 引数なしはUsageエラーで終了コード1', () => {
