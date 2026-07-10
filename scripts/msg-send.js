@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
+const { toWinPath } = require('./win-path');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
@@ -88,7 +89,7 @@ function main(argsOverride, envOverride) {
   let body;
   if (values['--body-file']) {
     try {
-      body = fs.readFileSync(values['--body-file'], 'utf8');
+      body = fs.readFileSync(toWinPath(values['--body-file']), 'utf8');
     } catch (e) {
       writeErr(`msg-send: --body-file の読み込みに失敗しました: ${e.message}`);
       return { code: 1, lines: out, errLines: err };
