@@ -93,6 +93,44 @@ test('位置引数が2個以上あるとUsageエラー（誤用検知）', () =>
   assert.match(r.stderr, /Usage/);
 });
 
+test('--body の値が"--help"文字列でもフラグとして誤解釈しない', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'write-draft-test-'));
+  const logicalPath = path.join(tmpDir, 'draft.md');
+  const r = main([logicalPath, '--body', '--help']);
+  assert.equal(r.code, 0);
+  const absPath = path.resolve(toWinPath(logicalPath));
+  assert.equal(fs.readFileSync(absPath, 'utf8'), '--help');
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('--body の値が"--stdin"文字列でもフラグとして誤解釈しない', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'write-draft-test-'));
+  const logicalPath = path.join(tmpDir, 'draft.md');
+  const r = main([logicalPath, '--body', '--stdin'], {
+    readStdinFn: () => {
+      throw new Error('--bodyが指定されているのにstdinを読んではならない');
+    },
+  });
+  assert.equal(r.code, 0);
+  const absPath = path.resolve(toWinPath(logicalPath));
+  assert.equal(fs.readFileSync(absPath, 'utf8'), '--stdin');
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('/tmp/../issue-draft.md のようなpath traversalは拒否される', () => {
+  const r = main(['/tmp/../issue-draft-traversal-test.md', '--body', 'x']);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /許可ルート/);
+  const escaped = path.resolve(path.dirname(path.resolve(toWinPath('/tmp'))), 'issue-draft-traversal-test.md');
+  assert.equal(fs.existsSync(escaped), false);
+});
+
+test('/tmp/../../.git/config のようなpath traversalは拒否される', () => {
+  const r = main(['/tmp/../../.git/config', '--body', 'x']);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /許可ルート/);
+});
+
 test('サブプロセス経由: 引数なしはUsageエラーで終了コード1', () => {
   const r = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' });
   assert.notEqual(r.status, 0);
