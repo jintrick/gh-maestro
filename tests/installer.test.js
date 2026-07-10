@@ -49,6 +49,18 @@ test('applySubstitutions: {{KEY}} を値で置換する', () => {
   assert.equal(result, 'path: /abs/path/scripts/send-pane.js\nother: /abs/path/scripts/foo.js');
 });
 
+test('applySubstitutions: 複数の共有パスplaceholderを同時に置換する', () => {
+  const content = 'script: {{SCRIPTS_PATH}}/spawn-worker.js\ntemplate: {{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/issue-template.md';
+  const result = applySubstitutions(content, {
+    SCRIPTS_PATH: '/abs/path/scripts',
+    SHARED_SKILLS_PATH: '/abs/path/skills',
+  });
+  assert.equal(
+    result,
+    'script: /abs/path/scripts/spawn-worker.js\ntemplate: /abs/path/skills/gh-maestro-orchestrator/issue-template.md'
+  );
+});
+
 test('applySubstitutions: 未定義キーは残らない（全置換されること）', () => {
   const content = 'hello {{SCRIPTS_PATH}} world';
   const result = applySubstitutions(content, { SCRIPTS_PATH: '/x/y' });
@@ -129,6 +141,19 @@ for (const [agentName, config] of Object.entries(agents)) {
     }
   });
 
+  test(`[${agentName}] orchestrator SKILL.md の issue template 参照が shared skills の絶対パスである`, () => {
+    const skillMdPath = path.join(destDir, 'gh-maestro-orchestrator', 'SKILL.md');
+    if (!fs.existsSync(skillMdPath)) return;
+
+    const content = fs.readFileSync(skillMdPath, 'utf8');
+    const match = content.match(/`([^`]+issue-template\.md)`/);
+    assert.ok(match, `${agentName}/gh-maestro-orchestrator/SKILL.md に issue-template.md 参照が見つからない`);
+    assert.ok(
+      path.isAbsolute(match[1]),
+      `${agentName}/gh-maestro-orchestrator/SKILL.md の issue-template 参照が相対パス: "${match[1]}"`
+    );
+  });
+
   test(`[${agentName}] スキルディレクトリに scripts/ サブディレクトリが存在しない（SKILL.mdのみ）`, () => {
     const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
       .filter(e => e.isDirectory())
@@ -142,6 +167,12 @@ for (const [agentName, config] of Object.entries(agents)) {
     }
   });
 }
+
+test('共有スキル配布先に orchestrator の issue-template.md が配置される', () => {
+  const sharedSkillsDir = expandHome('~/.gh-maestro/skills');
+  const templatePath = path.join(sharedSkillsDir, 'gh-maestro-orchestrator', 'issue-template.md');
+  assert.ok(fs.existsSync(templatePath), `共有スキル配布先に issue-template.md が存在しない: ${templatePath}`);
+});
 
 // ── pruneStaleRecursive（G1） ─────────────────────────────────────────────────
 
