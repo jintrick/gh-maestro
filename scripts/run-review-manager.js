@@ -157,21 +157,23 @@ if (require.main === module) {
     if (briefFileArg) { try { fs.unlinkSync(briefFileArg); } catch {} }
   }
 
-  fs.mkdirSync(ghDir, { recursive: true });
-
-  // lock ファイルに自PIDを記録（起動元 launcher のPIDを上書き）。
-  // launcher (start-review-manager.js) は detach 後すぐに終了するため、
-  // 子プロセスである run-review-manager.js 自身が lock を所有・更新する。
-  // これにより isLockValid が正しく稼働中プロセスのPIDを確認できる。
-  fs.writeFileSync(lockFile, String(process.pid));
-
-  log(`run-review-manager started pr=${pr} repo=${repo} mode=${mode}`);
-  if (mode === 'directed') log(`directed brief:\n${directedBrief}`);
-
   // process.exit() は try/finally をスキップする（finally 内の cleanup() が実行されない）ため、
   // 終了コードは変数に保持し、finally 完了後に一度だけ process.exit() する。
+  // mkdirSync/lockFile書き込み/log()もtry内に含める。ここで例外（ディスク容量不足・
+  // 権限エラー等）が発生した場合でもfinallyのcleanup()を確実に実行するため。
   let exitCode = 0;
   try {
+    fs.mkdirSync(ghDir, { recursive: true });
+
+    // lock ファイルに自PIDを記録（起動元 launcher のPIDを上書き）。
+    // launcher (start-review-manager.js) は detach 後すぐに終了するため、
+    // 子プロセスである run-review-manager.js 自身が lock を所有・更新する。
+    // これにより isLockValid が正しく稼働中プロセスのPIDを確認できる。
+    fs.writeFileSync(lockFile, String(process.pid));
+
+    log(`run-review-manager started pr=${pr} repo=${repo} mode=${mode}`);
+    if (mode === 'directed') log(`directed brief:\n${directedBrief}`);
+
     fs.writeFileSync(promptFile, buildPrompt({ pr, repo, workspace, outputFile, mode, directedBrief }), 'utf8');
     spawnSync('git', ['-C', workspace, 'fetch', 'origin', `pull/${pr}/head`], { stdio: 'ignore' });
 
