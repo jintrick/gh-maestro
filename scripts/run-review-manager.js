@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
+const { assertValidPr, reviewArtifactPath } = require('./shared/review-manager-paths');
 
 const USAGE = `run-review-manager.js — Review Managerをheadless起動してPRレビューを実行する
 
@@ -23,7 +25,10 @@ Options:
 
 このスクリプトは通常 start-review-manager.js から detach 起動される内部エンドポイント。
 directed モードでの --brief-file は完了後に削除される（start-review-manager.js が
-このプロセス専用に確保した一時コピーである前提）。`;
+このプロセス専用に確保した一時コピーである前提）。
+
+観測用に review-manager-<PR>.meta.json へ mode を記録する。directed モードの
+レビュー方針そのものはログ・メタデータに残さず、SHA-256ハッシュとバイト長のみを記録する。`;
 
 const VALID_MODES = new Set(['heavy', 'directed']);
 
@@ -82,20 +87,38 @@ ${directedBrief}
 }
 
 /**
- * RMが書き出したfindings JSONに、どのmodeで起動されたかの観測情報を追記する。
- * heavy/directed 双方で常に mode を記録し、後段の形式差分を無くす。
- * @param {string} outputFile
+ * テキストの機微性を保ったまま観測可能にするため、本文の代わりにSHA-256とバイト長を返す。
+ * @param {string} text
+ * @returns {{sha256: string, length: number}}
+ */
+function digestText(text) {
+  return {
+    sha256: crypto.createHash('sha256').update(text, 'utf8').digest('hex'),
+    length: Buffer.byteLength(text, 'utf8'),
+  };
+}
+
+/**
+ * どのmode（と、directedならレビュー方針のダイジェスト）で起動されたかを、
+ * findings JSON本体とは別のメタデータファイルに書き出す。
+ * findings JSONのスキーマ（review-findings-schema.json, additionalProperties:false）を
+ * 変更せずに観測可能性を確保するため、payloadには一切書き込まない（PR #84 Review指摘）。
+ * directed のレビュー方針本文はログ・メタデータのどちらにも残さない
+ * （機微情報が含まれる可能性があるため。PR #84 Review指摘）。
+ *
+ * @param {string} metaFile
  * @param {string} mode
  * @param {string|null} [directedBrief]
  */
-function augmentOutputWithMode(outputFile, mode, directedBrief) {
-  const payload = JSON.parse(fs.readFileSync(outputFile, 'utf8'));
-  payload.mode = mode;
-  if (mode === 'directed') payload.directedPrompt = directedBrief;
-  fs.writeFileSync(outputFile, JSON.stringify(payload, null, 2), 'utf8');
+function writeRunMetadata(metaFile, mode, directedBrief) {
+  const metadata = { mode };
+  if (mode === 'directed' && directedBrief != null) {
+    metadata.directedBrief = digestText(directedBrief);
+  }
+  fs.writeFileSync(metaFile, JSON.stringify(metadata, null, 2), 'utf8');
 }
 
-module.exports = { resolveMode, buildPrompt, augmentOutputWithMode };
+module.exports = { resolveMode, buildPrompt, digestText, writeRunMetadata };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -115,6 +138,15 @@ if (require.main === module) {
 
   if (!pr || !repo || !workspace) {
     console.error(USAGE);
+    process.exit(1);
+  }
+
+  // pr はファイルパス構成要素として使われるため、他の処理より先に検証する
+  // （PR #84 Review指摘: pathトラバーサル対策）。
+  try {
+    assertValidPr(pr);
+  } catch (e) {
+    console.error(`run-review-manager: ${e.message}`);
     process.exit(1);
   }
 
@@ -142,9 +174,10 @@ if (require.main === module) {
   }
 
   const ghDir = path.join(workspace, '.gh-maestro');
-  const lockFile = path.join(ghDir, `review-manager-${pr}.running`);
-  const logFile = path.join(ghDir, `review-manager-${pr}.log`);
-  const outputFile = path.join(ghDir, `review-manager-${pr}.json`);
+  const lockFile = reviewArtifactPath(ghDir, pr, '.running');
+  const logFile = reviewArtifactPath(ghDir, pr, '.log');
+  const outputFile = reviewArtifactPath(ghDir, pr, '.json');
+  const metaFile = reviewArtifactPath(ghDir, pr, '.meta.json');
   const promptFile = path.join(os.tmpdir(), `review-manager-prompt-${pr}-${Date.now()}.md`);
 
   function log(msg) {
@@ -172,7 +205,11 @@ if (require.main === module) {
     fs.writeFileSync(lockFile, String(process.pid));
 
     log(`run-review-manager started pr=${pr} repo=${repo} mode=${mode}`);
-    if (mode === 'directed') log(`directed brief:\n${directedBrief}`);
+    if (mode === 'directed') {
+      const digest = digestText(directedBrief);
+      log(`directed brief sha256=${digest.sha256} length=${digest.length}`);
+    }
+    writeRunMetadata(metaFile, mode, directedBrief);
 
     fs.writeFileSync(promptFile, buildPrompt({ pr, repo, workspace, outputFile, mode, directedBrief }), 'utf8');
     spawnSync('git', ['-C', workspace, 'fetch', 'origin', `pull/${pr}/head`], { stdio: 'ignore' });
@@ -233,12 +270,6 @@ if (require.main === module) {
       log(`RM output not found: ${outputFile}`);
       exitCode = 1;
     } else {
-      try {
-        augmentOutputWithMode(outputFile, mode, directedBrief);
-      } catch (e) {
-        log(`failed to augment output with mode metadata: ${e.message}`);
-      }
-
       const publish = spawnSync(process.execPath, [
         path.join(__dirname, 'review-publisher.js'),
         outputFile,

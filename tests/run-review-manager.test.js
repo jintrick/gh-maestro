@@ -9,7 +9,7 @@ const os = require('os');
 // run-review-manager.js の CLI 実行部は require.main === module でガードされているため、
 // require するだけでは実プロセスをspawnしない
 // （.claude/rules/test-process-spawn-safety.md 準拠）。
-const { resolveMode, buildPrompt, augmentOutputWithMode } = require('../scripts/run-review-manager');
+const { resolveMode, buildPrompt, digestText, writeRunMetadata } = require('../scripts/run-review-manager');
 
 const tmpBase = path.join(os.tmpdir(), 'gh-maestro-test-run-rm-' + Date.now());
 
@@ -69,31 +69,48 @@ test('buildPrompt normalizes backslash paths to forward slashes', () => {
   assert.match(prompt, /OUTPUT=C:\/ws\/out\.json/);
 });
 
-// ── augmentOutputWithMode ────────────────────────────────────────────────
+// ── digestText ───────────────────────────────────────────────────────────
 
-test('augmentOutputWithMode records mode on a heavy-mode output', () => {
-  const outputFile = path.join(tmpBase, 'heavy-output.json');
-  fs.writeFileSync(outputFile, JSON.stringify({ pr: 1, repo: 'o/r', headRefOid: 'abc', findings: [] }));
-  augmentOutputWithMode(outputFile, 'heavy', null);
-  const payload = JSON.parse(fs.readFileSync(outputFile, 'utf8'));
-  assert.equal(payload.mode, 'heavy');
-  assert.equal('directedPrompt' in payload, false);
+test('digestText returns a stable sha256 and byte length', () => {
+  const a = digestText('正しさだけを見る');
+  const b = digestText('正しさだけを見る');
+  assert.equal(a.sha256, b.sha256);
+  assert.equal(a.sha256.length, 64);
+  assert.equal(a.length, Buffer.byteLength('正しさだけを見る', 'utf8'));
 });
 
-test('augmentOutputWithMode records mode and the directed brief on a directed-mode output', () => {
-  const outputFile = path.join(tmpBase, 'directed-output.json');
-  fs.writeFileSync(outputFile, JSON.stringify({ pr: 1, repo: 'o/r', headRefOid: 'abc', findings: [] }));
-  augmentOutputWithMode(outputFile, 'directed', '命名と可読性だけを見る');
-  const payload = JSON.parse(fs.readFileSync(outputFile, 'utf8'));
-  assert.equal(payload.mode, 'directed');
-  assert.equal(payload.directedPrompt, '命名と可読性だけを見る');
+test('digestText differs for different text', () => {
+  const a = digestText('正しさだけを見る');
+  const b = digestText('命名と可読性だけを見る');
+  assert.notEqual(a.sha256, b.sha256);
 });
 
-test('augmentOutputWithMode preserves existing findings', () => {
-  const outputFile = path.join(tmpBase, 'preserve-output.json');
-  const finding = { aspect: 'Correctness', path: 'a.ts', line_anchor: 'x', summary: 's' };
-  fs.writeFileSync(outputFile, JSON.stringify({ pr: 1, repo: 'o/r', headRefOid: 'abc', findings: [finding] }));
-  augmentOutputWithMode(outputFile, 'heavy', null);
-  const payload = JSON.parse(fs.readFileSync(outputFile, 'utf8'));
-  assert.deepEqual(payload.findings, [finding]);
+// ── writeRunMetadata ─────────────────────────────────────────────────────
+// findings JSON本体（outputFile）は変更しない。mode/directedBriefは別ファイルに
+// 書き出し、directedのレビュー方針本文そのものは記録しない（ダイジェストのみ）。
+
+test('writeRunMetadata records only mode for heavy runs', () => {
+  const metaFile = path.join(tmpBase, 'heavy.meta.json');
+  writeRunMetadata(metaFile, 'heavy', null);
+  const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+  assert.equal(meta.mode, 'heavy');
+  assert.equal('directedBrief' in meta, false);
+});
+
+test('writeRunMetadata records a brief digest (not raw text) for directed runs', () => {
+  const metaFile = path.join(tmpBase, 'directed.meta.json');
+  const brief = '命名と可読性だけを見る';
+  writeRunMetadata(metaFile, 'directed', brief);
+  const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+  assert.equal(meta.mode, 'directed');
+  assert.deepEqual(meta.directedBrief, digestText(brief));
+  assert.equal(JSON.stringify(meta).includes(brief), false);
+});
+
+test('writeRunMetadata does not touch any findings output file', () => {
+  const outputFile = path.join(tmpBase, 'untouched-output.json');
+  const original = JSON.stringify({ pr: 1, repo: 'o/r', headRefOid: 'abc', findings: [] });
+  fs.writeFileSync(outputFile, original);
+  writeRunMetadata(path.join(tmpBase, 'untouched.meta.json'), 'directed', '秘密の方針');
+  assert.equal(fs.readFileSync(outputFile, 'utf8'), original);
 });

@@ -5,6 +5,7 @@ const { spawn } = require('./child-process');
 const fs = require('fs');
 const path = require('path');
 const { isProcessAlive } = require('./process-lifecycle');
+const { assertValidPr, reviewArtifactPath } = require('./shared/review-manager-paths');
 
 const USAGE = `start-review-manager.js — PRに対してReview Managerを起動する
 
@@ -100,11 +101,14 @@ function isLockValid(lockFile) {
  */
 function startReviewManager(pr, repo, workspace, options = {}) {
   // 副作用（lock/brief書き込み）の前に入力を検証する（fail-closed）。
+  // pr はファイルパス構成要素として使われるため、厳密な正整数であることを
+  // ここで確定させる（PR #84 Review指摘: pathトラバーサル対策）。
+  assertValidPr(pr);
   const mode = resolveMode(options);
 
   const ghDir = path.join(workspace, '.gh-maestro');
-  const lockFile = path.join(ghDir, `review-manager-${pr}.running`);
   fs.mkdirSync(ghDir, { recursive: true });
+  const lockFile = reviewArtifactPath(ghDir, pr, '.running');
 
   // req.13: stale 判定付きで lock チェック
   if (isLockValid(lockFile)) return 'REVIEW_MANAGER_ALREADY_RUNNING';
@@ -115,12 +119,12 @@ function startReviewManager(pr, repo, workspace, options = {}) {
   let briefFile = null;
   if (mode === 'directed') {
     const briefText = resolveDirectedBrief(options);
-    briefFile = path.join(ghDir, `review-manager-${pr}-brief.md`);
+    briefFile = reviewArtifactPath(ghDir, pr, '-brief.md');
     fs.writeFileSync(briefFile, briefText, 'utf8');
   }
 
   fs.writeFileSync(lockFile, String(process.pid));
-  const logFd = fs.openSync(path.join(ghDir, `review-manager-${pr}.log`), 'a');
+  const logFd = fs.openSync(reviewArtifactPath(ghDir, pr, '.log'), 'a');
   const childArgs = [
     path.join(__dirname, 'run-review-manager.js'),
     pr,
@@ -134,8 +138,14 @@ function startReviewManager(pr, repo, workspace, options = {}) {
     windowsHide: true,
     stdio: ['ignore', logFd, logFd],
   });
-  child.on('error', () => { try { fs.unlinkSync(lockFile); } catch {} });
-  child.on('exit', () => { try { fs.unlinkSync(lockFile); } catch {} });
+  // spawn失敗・子プロセス終了のどちらでも lock/brief 双方を解放する
+  // （briefFileだけ残留すると次回起動までゴミとして残る。PR #84 Review指摘）。
+  const releaseArtifacts = () => {
+    try { fs.unlinkSync(lockFile); } catch {}
+    if (briefFile) { try { fs.unlinkSync(briefFile); } catch {} }
+  };
+  child.on('error', releaseArtifacts);
+  child.on('exit', releaseArtifacts);
   child.unref();
   fs.closeSync(logFd);
   return 'REVIEW_MANAGER_STARTED';

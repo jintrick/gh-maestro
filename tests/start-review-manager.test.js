@@ -200,3 +200,64 @@ test('startReviewManager rejects an invalid mode before touching the filesystem'
   assert.equal(calls.length, 0);
   assert.equal(fs.existsSync(workspace), false);
 });
+
+test('startReviewManager rejects a non-numeric pr before touching the filesystem', () => {
+  const { mod, calls } = loadModule();
+  const workspace = path.join(tmpBase, 'invalid-pr-unused');
+
+  assert.throws(() => mod.startReviewManager('abc', 'o/r', workspace), /invalid PR number/);
+  assert.equal(calls.length, 0);
+  assert.equal(fs.existsSync(workspace), false);
+});
+
+test('startReviewManager rejects a path-traversal pr value before touching the filesystem', () => {
+  const { mod, calls } = loadModule();
+  const workspace = path.join(tmpBase, 'traversal-pr-unused');
+
+  assert.throws(
+    () => mod.startReviewManager('1/../../evil', 'o/r', workspace),
+    /invalid PR number/
+  );
+  assert.equal(calls.length, 0);
+  assert.equal(fs.existsSync(workspace), false);
+});
+
+test('startReviewManager releases both lock and brief files when the child spawn errors', async () => {
+  const workspace = freshWorkspace('spawn-error-cleanup');
+  const { mod } = loadModule((fake) => {
+    // 実装は spawn() の戻り値に対して同期的に .on('error', ...) を登録するため、
+    // そのハンドラ登録が完了した後にemitされるよう1ティック遅らせる。
+    process.nextTick(() => fake.emit('error', new Error('ENOENT')));
+  });
+
+  const result = mod.startReviewManager('21', 'o/r', workspace, {
+    mode: 'directed',
+    promptText: '正しさだけを見る',
+  });
+  assert.equal(result, 'REVIEW_MANAGER_STARTED');
+
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const ghDir = path.join(workspace, '.gh-maestro');
+  assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-21.running')), false);
+  assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-21-brief.md')), false);
+});
+
+test('startReviewManager releases both lock and brief files when the child exits', async () => {
+  const workspace = freshWorkspace('spawn-exit-cleanup');
+  const { mod } = loadModule((fake) => {
+    process.nextTick(() => fake.emit('exit', 1));
+  });
+
+  const result = mod.startReviewManager('23', 'o/r', workspace, {
+    mode: 'directed',
+    promptText: '命名と可読性だけを見る',
+  });
+  assert.equal(result, 'REVIEW_MANAGER_STARTED');
+
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const ghDir = path.join(workspace, '.gh-maestro');
+  assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-23.running')), false);
+  assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-23-brief.md')), false);
+});
