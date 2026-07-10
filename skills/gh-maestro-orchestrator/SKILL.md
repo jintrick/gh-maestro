@@ -111,10 +111,17 @@ node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE
 # 出力: REVIEW_MANAGER_STARTED:<PR> （起動した） / REVIEW_MANAGER_ALREADY_RUNNING:<PR> （既に稼働中）
 ```
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする
+- **write-draft.js** — 論理パス（`/tmp/issue-draft.md` 等）を実体パスへ解決してから草案ファイルを書き出す唯一の入口。`view-file.js`・`create-issue.js` と同じ解決ロジック（`win-path.js`）を通るため、書く先と読む先の実体パスがズレない。オーケストレーターは `C:\tmp` や `%TEMP%` を推論してはならず、常にこのスクリプト経由で草案を書くこと。
 - **view-file.js** — Issueの原案など、ユーザーに確認・承認してほしいファイルをZedで開く。Issueを起草したらチャットで説明するより先にこれで見せろ。
 - **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` を削除する（詳細は「Issue確定」参照）。
 
 ```sh
+# 草案の書き出し（論理パスのみ指定。実体パスの推論は不要）
+node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-draft.md --stdin <<'EOF'
+<Issue本文>
+EOF
+# 出力: DRAFT_WRITTEN:<実体パス>
+
 node "{{SCRIPTS_PATH}}/view-file.js" <filepath>
 # 例: node "{{SCRIPTS_PATH}}/view-file.js" /tmp/issue-draft.md
 ```
@@ -212,16 +219,26 @@ view-file.js で人間に見せて承認を求めるのは「概要」セクシ�
 
 **investigator/explorer向けの調査アンカーIssue**（「これを調べて報告しろ」だけの軽量な依頼で、設計判断や実装方針を伴わないもの）は、view-file.js での事前確認を省略し、直接 create-issue.js で作成してよい。事前確認が必要なのは、設計判断・要件確認を伴うcoder/senior-coderへの実装指示Issueに限る。
 
-Issue本文は必ず `/tmp/issue-<N>.md`（例: `/tmp/issue-42.md`）に書き出してから `--body-file` で渡す。`--body` へのインライン渡しは禁止（改行・特殊文字のエスケープ問題が発生する）。Issue番号をファイル名に含めることで並列起票時の衝突を防ぐ。
+Issue本文は必ず `/tmp/issue-<N>.md`（例: `/tmp/issue-42.md`）という**論理パス**に書き出してから `--body-file` で渡す。`--body` へのインライン渡しは禁止（改行・特殊文字のエスケープ問題が発生する）。Issue番号をファイル名に含めることで並列起票時の衝突を防ぐ。
+
+論理パスの実体（Windows実パス）を推論してはならない。書き出しは必ず `write-draft.js` を経由する。
 
 ```sh
-# 草案を表示してユーザーに承認を求める（Issue番号確定前は issue-draft.md でよい）
+# 草案を書き出す（Issue番号確定前は issue-draft.md でよい）
+node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-draft.md --stdin <<'EOF'
+<Issue本文>
+EOF
+# 出力: DRAFT_WRITTEN:<実体パス>
+
+# 草案を表示してユーザーに承認を求める
 node "{{SCRIPTS_PATH}}/view-file.js" /tmp/issue-draft.md --workspace $WORKSPACE
 
 # 承認後にIssueを作成する（成功時は body-file を自動削除するので orchestrator は削除を意識しなくてよい）
 node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tmp/issue-draft.md
 # 出力: ISSUE_CREATED:<番号> <URL>
 ```
+
+`write-draft.js`・`view-file.js`・`create-issue.js` はすべて同じ論理パス解決ロジック（`win-path.js`）を通るため、同じ `/tmp/issue-draft.md` を渡せば書く先と読む先の実体ファイルは常に一致する。
 
 `gh issue create` を直接呼ばないこと。`create-issue.js` が唯一の呼び出し口であり、
 成功時に `--body-file` を削除する。これにより `issue-draft.md` が使い回され、
