@@ -44,4 +44,50 @@ function reviewArtifactPath(ghDir, pr, suffix) {
   return resolvedFile;
 }
 
-module.exports = { assertValidPr, reviewArtifactPath };
+/**
+ * PR番号から Review Manager専用worktreeのディレクトリ名（ブランチ名としても使う）を作る。
+ * @param {string|number} pr
+ * @returns {string} 例: 'review-pr-123'
+ */
+function reviewWorktreeBranchName(pr) {
+  return `review-pr-${assertValidPr(pr)}`;
+}
+
+/**
+ * PRのheadを取り込む専用ref名を作る。実際にoriginに存在するリモート追跡ブランチではないため
+ * refs/remotes/origin/ 名前空間は使わず、gh-maestro専用の名前空間に置く（実リモートブランチとの
+ * 混同を避けるため）。毎回force-fetchで上書きする前提（呼び出し側は `+` refspecを使う）。
+ * @param {string|number} pr
+ * @returns {string} 例: 'refs/gh-maestro/review-pr-123'
+ */
+function reviewWorktreeFetchRef(pr) {
+  return `refs/gh-maestro/${reviewWorktreeBranchName(pr)}`;
+}
+
+/**
+ * workspace/.gh-maestro/worktrees/ 配下に限定した、Review Manager専用worktreeのパスを構築する。
+ * reviewArtifactPath と同じ封じ込めパターン（識別子検証 + 解決後パスがルート配下に収まることの確認）
+ * を worktrees ディレクトリに適用する。
+ *
+ * @param {string} workspace
+ * @param {string|number} pr
+ * @returns {string} 解決済みの絶対パス
+ */
+function reviewWorktreeDir(workspace, pr) {
+  const branchName = reviewWorktreeBranchName(pr);
+  const worktreesRoot = path.resolve(path.join(workspace, '.gh-maestro', 'worktrees'));
+  const dir = path.join(worktreesRoot, branchName);
+  const resolvedDir = path.resolve(dir);
+  if (resolvedDir !== worktreesRoot && !resolvedDir.startsWith(worktreesRoot + path.sep)) {
+    throw new Error(`resolved path escapes worktrees root: ${dir}`);
+  }
+  return resolvedDir;
+}
+
+module.exports = {
+  assertValidPr,
+  reviewArtifactPath,
+  reviewWorktreeBranchName,
+  reviewWorktreeFetchRef,
+  reviewWorktreeDir,
+};

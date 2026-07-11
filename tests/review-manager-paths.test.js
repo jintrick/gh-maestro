@@ -4,7 +4,10 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
 
-const { assertValidPr, reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
+const {
+  assertValidPr, reviewArtifactPath,
+  reviewWorktreeBranchName, reviewWorktreeFetchRef, reviewWorktreeDir,
+} = require('../scripts/shared/review-manager-paths');
 
 // ── assertValidPr ────────────────────────────────────────────────────────
 
@@ -38,4 +41,31 @@ test('reviewArtifactPath builds a path inside ghDir', () => {
 test('reviewArtifactPath rejects a path-traversal pr before building any path', () => {
   const ghDir = path.resolve('C:/ws/.gh-maestro');
   assert.throws(() => reviewArtifactPath(ghDir, '../../evil', '.running'), /invalid PR number/);
+});
+
+// ── reviewWorktreeBranchName / reviewWorktreeFetchRef ───────────────────
+
+test('reviewWorktreeBranchName builds a PR-scoped branch name', () => {
+  assert.equal(reviewWorktreeBranchName('42'), 'review-pr-42');
+});
+
+test('reviewWorktreeBranchName rejects an invalid PR number', () => {
+  assert.throws(() => reviewWorktreeBranchName('../42'), /invalid PR number/);
+});
+
+test('reviewWorktreeFetchRef builds a dedicated non-remote-tracking ref name', () => {
+  assert.equal(reviewWorktreeFetchRef('42'), 'refs/gh-maestro/review-pr-42');
+});
+
+// ── reviewWorktreeDir ────────────────────────────────────────────────────
+
+test('reviewWorktreeDir builds a path inside workspace/.gh-maestro/worktrees', () => {
+  const workspace = path.resolve('C:/ws');
+  const result = reviewWorktreeDir(workspace, '42');
+  assert.equal(result, path.join(workspace, '.gh-maestro', 'worktrees', 'review-pr-42'));
+});
+
+test('reviewWorktreeDir rejects a path-traversal pr before building any path', () => {
+  const workspace = path.resolve('C:/ws');
+  assert.throws(() => reviewWorktreeDir(workspace, '../../evil'), /invalid PR number/);
 });

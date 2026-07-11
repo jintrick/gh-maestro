@@ -9,7 +9,10 @@ const os = require('os');
 // run-review-manager.js の CLI 実行部は require.main === module でガードされているため、
 // require するだけでは実プロセスをspawnしない
 // （.claude/rules/test-process-spawn-safety.md 準拠）。
-const { resolveMode, buildPrompt, digestText, writeRunMetadata } = require('../scripts/run-review-manager');
+const {
+  resolveMode, buildPrompt, digestText, writeRunMetadata,
+  runAgentHeadless, runAgentVisible,
+} = require('../scripts/run-review-manager');
 const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'run-review-manager.js');
 
@@ -125,6 +128,30 @@ test('サブプロセス経由: --brief-file の値が"--help"文字列だと値
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /Usage/);
   assert.equal(r.stdout, '');
+});
+
+// ── runAgentHeadless / runAgentVisible ──────────────────────────────────
+// Codex実行そのものはネットワーク/実エージェント依存のため統合テスト対象外。
+// ここではプロセスをspawnしても即終了する軽量コマンド、または
+// spawnに到達しないフォールバック分岐だけを確認する
+// （.claude/rules/test-process-spawn-safety.md 準拠: detachしない同期spawnのみ）。
+
+test('runAgentHeadless: 軽量コマンドの終了コードをそのまま返す', () => {
+  const result = runAgentHeadless([process.execPath, '-e', 'process.exit(0)'], tmpBase);
+  assert.equal(result.status, 0);
+});
+
+test('runAgentVisible: WEZTERM_PANE未設定ならwezterm等を呼ばずnullを返す（headlessへフォールバック）', () => {
+  const originalPane = process.env.WEZTERM_PANE;
+  delete process.env.WEZTERM_PANE;
+  try {
+    const logs = [];
+    const result = runAgentVisible(['dummy-cmd'], tmpBase, path.join(tmpBase, 'nonexistent-output.json'), (m) => logs.push(m));
+    assert.equal(result, null);
+    assert.ok(logs.some(m => m.includes('WEZTERM_PANE')));
+  } finally {
+    if (originalPane !== undefined) process.env.WEZTERM_PANE = originalPane;
+  }
 });
 
 test('writeRunMetadata does not touch any findings output file', () => {
