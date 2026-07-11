@@ -38,7 +38,7 @@ agents:
         - `PR_REVIEW:<user>:APPROVED:<body>` → 人間にマージ許可シグナルとして提示する
         - `PR_REVIEW:<user>:CHANGES_REQUESTED:<body>` → bodyをトリアージしてコーダーにフィードバックする
         - `PR_REVIEW:<user>:COMMENTED:<body>` → PR_COMMENTと同様にトリアージする
-      INBOX_POLL_INTERVAL_SECONDS: 60
+      INBOX_POLL_INTERVAL_SECONDS: 600
       INBOX_POLL_MECHANISM: |
         以下はinbox確認の手順定義であり、今すぐ実行するものではない。**本来の作業（Issueの実装等）に着手した後**、作業の合間・区切りのタイミングで都度この手順を呼び出すこと。作業開始前にこれを先に実行して待機してはならない。
 
