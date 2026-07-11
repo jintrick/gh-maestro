@@ -389,7 +389,7 @@ function findRunningInstance(workspace, opts = {}) {
     }
     if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
     if (opts.script && entry.script !== opts.script) continue;
-    if (entry.workerName !== (opts.workerName ?? null)) continue;
+    if ((entry.workerName ?? null) !== (opts.workerName ?? null)) continue;
     if (entry.workspace !== workspace) continue;
 
     const entryPid = entry.pid;
