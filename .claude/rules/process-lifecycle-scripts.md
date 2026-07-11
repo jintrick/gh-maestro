@@ -18,3 +18,5 @@ paths:
 - detachした子プロセスを起動する場合、lock/registryのPIDは子プロセス自身が起動直後に自PIDで上書きする（launcherのPIDのまま生死判定しない）
 - `process-lifecycle.js`の`registerProcess`をワーカー起因のプロセスから呼ぶ場合は必ず`workerName`を渡す（`remove-worker.js`のターゲット削除に必要）
 - lock/temp等のリソースを作成する処理は、生成箇所すべてを`try/finally`または対応するエラーハンドラ（`child.on('error')`/`('exit')`等）でカバーする。一部だけ（例: lockFileのみ）をカバーし他（briefFile等）を見落とすと、異常系でファイルが残留する（PR #84 Review Manager指摘）
+- レジストリのPIDが生きている（`isProcessAlive`）ことだけで「重複プロセスあり」と判定しない。プロセスがクラッシュしてレジストリエントリが残った後にOSがそのPIDを別プロセスへ再利用すると、無関係なプロセスを重複と誤検知し続ける。`verifyProcessIdentity`（`startTime`照合）で本当に同一プロセスかを確認してから重複と判定する（PR #90 Review Manager指摘）
+- 「重複起動チェック→レジストリ登録」のような check-then-register 処理は、2段階が非アトミックだとTOCTOU競合（ほぼ同時に2プロセスが起動し両方がチェックを通過してしまう）を起こす。チェックと登録は単一のアトミックな主張操作（排他ロックファイルの取得等）にまとめる（PR #90 Review Manager指摘）
