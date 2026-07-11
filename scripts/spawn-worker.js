@@ -32,11 +32,6 @@ const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree')
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 const { parseFlags } = require('./shared/workspace');
 
-// --- ワーカーエントリ構築（テスト可能な純粋関数） ---
-function buildWorkerEntry(paneId, agentId, issue) {
-  return { paneId, agentId, issue: Number(issue) };
-}
-
 const SPAWN_WORKER_VALUE_FLAGS = [
   '--skill', '--prompt', '--issue', '--description',
   '--repo', '--workspace', '--base-branch', '--agent',
@@ -360,7 +355,7 @@ if (!newPaneId) {
 
 // --- workers.json にワーカーを登録（失敗時はペインもロールバック） ---
 try {
-  workers[workerName] = buildWorkerEntry(newPaneId, agentConfig.id, Number(issue));
+  workers[workerName] = normalizeWorkerEntry({ paneId: newPaneId, agentId: agentConfig.id, issue });
   writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
   console.warn(`spawn-worker: worker "${workerName}" を pane ${newPaneId} として workers.json に登録しました`);
 } catch (e) {
@@ -387,5 +382,3 @@ if (agentConfig.promptDelivery === 'send-text-after-launch') {
 console.log(workerName);
 
 } // require.main === module
-
-module.exports = { buildWorkerEntry };

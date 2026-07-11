@@ -19,7 +19,7 @@
 const { existsSync, readFileSync } = require('fs');
 const { resolve, join } = require('path');
 
-const { isPlainObject } = require('./validate');
+const { isPlainObject } = require('./object');
 
 // ── デフォルト読み込み ──────────────────────────────────────────────────────
 

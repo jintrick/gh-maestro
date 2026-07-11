@@ -32,15 +32,4 @@ function validateField(name, value) {
   }
 }
 
-/**
- * Check if a value is a plain object (not null, not array).
- * Unified replacement for repeated `typeof x === 'object' && x !== null && !Array.isArray(x)`.
- *
- * @param {*} x
- * @returns {boolean}
- */
-function isPlainObject(x) {
-  return typeof x === 'object' && x !== null && !Array.isArray(x);
-}
-
-module.exports = { validateField, isPlainObject, INVALID_FIELD_RE, PARENT_REF_RE };
+module.exports = { validateField, INVALID_FIELD_RE, PARENT_REF_RE };

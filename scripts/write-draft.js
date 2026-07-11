@@ -38,8 +38,14 @@ function readStdin() {
   }
 }
 
-// argv を1回だけ順に走査し、--body が消費した値をフラグ判定の対象から除外する。
-// これをしないと --body '--help' のような値そのものが誤ってフラグとして解釈される。
+// オプションテーブル方式の単一パス解析。フラグごとに「値を取るか」をテーブル
+// （BOOLEAN_FLAGS / VALUE_FLAGS）に列挙するだけで済み、将来 --body 以外の値ありフラグ
+// （例: --workspace）を追加してもこのループを変更する必要がない。
+// VALUE_FLAGS のフラグは次トークンを無条件に値として消費するため、値そのものが
+// 他フラグと同じ文字列（例: --body '--help'）でも誤ってフラグとして解釈されない。
+const BOOLEAN_FLAGS = new Set(['--help', '-h', '--stdin']);
+const VALUE_FLAGS = new Set(['--body']);
+
 function parseArgs(argv) {
   let help = false;
   let stdin = false;
@@ -48,11 +54,10 @@ function parseArgs(argv) {
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--help' || a === '-h') {
-      help = true;
-    } else if (a === '--stdin') {
-      stdin = true;
-    } else if (a === '--body') {
+    if (BOOLEAN_FLAGS.has(a)) {
+      if (a === '--help' || a === '-h') help = true;
+      else if (a === '--stdin') stdin = true;
+    } else if (VALUE_FLAGS.has(a)) {
       body = argv[i + 1];
       i++;
     } else {

@@ -55,6 +55,7 @@
       "command": "codex",
       "runtime": "codex",
       "extraArgs": ["--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen"],
+      "execArgs": ["exec", "--cd", "{workspace}", "--model", "gpt-5.4", "--sandbox", "danger-full-access"],
       "promptDelivery": "positional",
       "enterSequence": "\r\n"
     }

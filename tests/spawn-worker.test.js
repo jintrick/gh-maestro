@@ -117,28 +117,31 @@ test('link-node-modules がインストール先と同構造のディレクト�
 
 // ── agent 解決 ────────────────────────────────────────────────────────────────
 
-// ── buildWorkerEntry（純粋関数） ────────────────────────────────────────────────
+// ── ワーカーエントリ構築 ────────────────────────────────────────────────────────
+// spawn-worker.js は新規ワーカー登録時に worker-entry.js::normalizeWorkerEntry を
+// 使ってエントリを構築する（buildWorkerEntry という別実装は持たない）。
+// ここでは workers.json に実際に書き込まれる形（観測可能な振る舞い）を検証する。
 
-test('buildWorkerEntry が issue フィールドを含むエントリを構築する', () => {
-  const { buildWorkerEntry } = require('../scripts/spawn-worker');
-  const entry = buildWorkerEntry('123', 'claude', 51);
+test('新規ワーカー登録エントリは paneId/agentId/issue を含む', () => {
+  const { normalizeWorkerEntry } = require('../scripts/worker-entry');
+  const entry = normalizeWorkerEntry({ paneId: '123', agentId: 'claude', issue: 51 });
   assert.equal(entry.paneId, '123');
   assert.equal(entry.agentId, 'claude');
   assert.equal(entry.issue, 51);
   assert.equal(typeof entry.issue, 'number');
 });
 
-test('buildWorkerEntry は issue を数値に変換する（文字列で渡されても Number() される）', () => {
-  const { buildWorkerEntry } = require('../scripts/spawn-worker');
-  const entry = buildWorkerEntry('456', 'agy', '99');
+test('新規ワーカー登録エントリは issue を数値に変換する（文字列で渡されても Number() される）', () => {
+  const { normalizeWorkerEntry } = require('../scripts/worker-entry');
+  const entry = normalizeWorkerEntry({ paneId: '456', agentId: 'agy', issue: '99' });
   assert.equal(entry.issue, 99);
   assert.equal(typeof entry.issue, 'number');
 });
 
-test('buildWorkerEntry が返すエントリは notifierPid を含まない（ポーリング不要の新設計）', () => {
-  const { buildWorkerEntry } = require('../scripts/spawn-worker');
-  const entry = buildWorkerEntry('1', 'claude', 7);
-  assert.ok(!('notifierPid' in entry), 'notifierPid は含まれていないこと');
+test('新規ワーカー登録エントリは notifierPid を持たない（null）ため remove-worker等がレガシーnotifierをkillしようとしない', () => {
+  const { normalizeWorkerEntry } = require('../scripts/worker-entry');
+  const entry = normalizeWorkerEntry({ paneId: '1', agentId: 'claude', issue: 7 });
+  assert.equal(entry.notifierPid, null);
 });
 
 // ── agent 解決 ────────────────────────────────────────────────────────────────
