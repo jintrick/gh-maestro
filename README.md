@@ -118,3 +118,5 @@ scripts/                         # 全スクリプト（CLI・モジュール）
 Review Manager（`run-review-manager.js`）は `gh-maestro-reviewer` スキルを使い、
 Correctness / Maintainability / Resilience & Security の3観点を独立Reviewerに分けてPRを評価する。
 観点別基準は `skills/gh-maestro-reviewer/reviewer-*.md` を編集する。
+
+<!-- gh-maestro-visible-test-throwaway: will be removed -->
