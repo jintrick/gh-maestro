@@ -223,71 +223,59 @@ if (require.main === module) {
     const skillMap = resolveSkillAgentMap({ workspace });
     const agentId = skillMap[skill] ?? 'codex';
     const homedir = process.env.HOME || process.env.USERPROFILE || '';
-    let agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
+    const agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
 
-    if (agentId === 'codex') {
-      const cmd = agentConfig?.command ?? 'codex';
-      agentConfig = {
-        command: cmd,
-        extraArgs: [
-          'exec',
-          '--cd', workspace,
-          '--model', 'gpt-5.4',
-          '--sandbox', 'danger-full-access',
-        ],
-        promptDelivery: agentConfig?.promptDelivery ?? 'positional',
-      };
-    } else if (!agentConfig) {
-      agentConfig = {
-        command: 'codex',
-        extraArgs: [
-          'exec',
-          '--cd', workspace,
-          '--model', 'gpt-5.4',
-          '--sandbox', 'danger-full-access',
-        ],
-        promptDelivery: 'positional',
-      };
-    }
-
-    const agentArgs = buildAgentCommandArgs(agentConfig, {
-      promptFile,
-      shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
-      systemPromptText: `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
-    });
-
-    log(`spawning ${agentArgs.join(' ')}`);
-    const result = spawnSync(agentArgs[0], agentArgs.slice(1), {
-      cwd: workspace,
-      encoding: 'utf8',
-      env: process.env,
-      maxBuffer: 20 * 1024 * 1024,
-    });
-
-    if (result.error) log(`spawn error: ${result.error.message}`);
-    if (result.stdout) log(result.stdout);
-    if (result.stderr) log(result.stderr);
-    log(`${agentArgs[0]} exited with status ${result.status}`);
-
-    if (result.status !== 0) {
-      exitCode = result.status ?? 1;
-    } else if (!fs.existsSync(outputFile)) {
-      log(`RM output not found: ${outputFile}`);
+    // resolveAgentConfig の結果（config.json のユーザー上書きを含む）をそのまま使う。
+    // headless実行専用の引数は agent-defaults.json 側の execArgs に持たせ、
+    // {workspace} プレースホルダのみここで実際のパスに置換する（インラインでの
+    // 設定丸ごと上書きはしない。PR #91 Review Manager指摘）。
+    // 解決失敗（config.json のtypo等）は安全側に倒して中断する（fail-closed-safety-guardsルール）。
+    if (!agentConfig) {
+      log(`エージェント "${agentId}" の設定を解決できません（agent-defaults.json / config.json を確認してください）`);
       exitCode = 1;
     } else {
-      const publish = spawnSync(process.execPath, [
-        path.join(__dirname, 'review-publisher.js'),
-        outputFile,
-      ], {
+      const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
+        .map(a => a.replace(/\{workspace\}/g, workspace));
+
+      const agentArgs = buildAgentCommandArgs({ ...agentConfig, extraArgs }, {
+        promptFile,
+        shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
+        systemPromptText: `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
+      });
+
+      log(`spawning ${agentArgs.join(' ')}`);
+      const result = spawnSync(agentArgs[0], agentArgs.slice(1), {
         cwd: workspace,
         encoding: 'utf8',
         env: process.env,
         maxBuffer: 20 * 1024 * 1024,
       });
-      if (publish.stdout) log(publish.stdout);
-      if (publish.stderr) log(publish.stderr);
-      log(`review-publisher exited with status ${publish.status}`);
-      exitCode = publish.status ?? 0;
+
+      if (result.error) log(`spawn error: ${result.error.message}`);
+      if (result.stdout) log(result.stdout);
+      if (result.stderr) log(result.stderr);
+      log(`${agentArgs[0]} exited with status ${result.status}`);
+
+      if (result.status !== 0) {
+        exitCode = result.status ?? 1;
+      } else if (!fs.existsSync(outputFile)) {
+        log(`RM output not found: ${outputFile}`);
+        exitCode = 1;
+      } else {
+        const publish = spawnSync(process.execPath, [
+          path.join(__dirname, 'review-publisher.js'),
+          outputFile,
+        ], {
+          cwd: workspace,
+          encoding: 'utf8',
+          env: process.env,
+          maxBuffer: 20 * 1024 * 1024,
+        });
+        if (publish.stdout) log(publish.stdout);
+        if (publish.stderr) log(publish.stderr);
+        log(`review-publisher exited with status ${publish.status}`);
+        exitCode = publish.status ?? 0;
+      }
     }
   } finally {
     cleanup();

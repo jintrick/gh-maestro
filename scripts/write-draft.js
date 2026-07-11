@@ -38,29 +38,36 @@ function readStdin() {
   }
 }
 
-// argv を1回だけ順に走査し、--body が消費した値をフラグ判定の対象から除外する。
-// これをしないと --body '--help' のような値そのものが誤ってフラグとして解釈される。
+// オプションテーブル方式の単一パス解析。フラグごとに「値を取るか」をテーブル
+// （BOOLEAN_FLAGS / VALUE_FLAGS）に列挙するだけで済み、将来 --body 以外の値ありフラグ
+// （例: --workspace）を追加してもこのループを変更する必要がない。
+// VALUE_FLAGS のフラグは次トークンを無条件に値として消費するため、値そのものが
+// 他フラグと同じ文字列（例: --body '--help'）でも誤ってフラグとして解釈されない。
+const BOOLEAN_FLAGS = new Set(['--help', '-h', '--stdin']);
+const VALUE_FLAGS = new Set(['--body']);
+
 function parseArgs(argv) {
   let help = false;
   let stdin = false;
-  let body;
+  const values = {};
   const positionals = [];
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--help' || a === '-h') {
-      help = true;
-    } else if (a === '--stdin') {
-      stdin = true;
-    } else if (a === '--body') {
-      body = argv[i + 1];
+    if (BOOLEAN_FLAGS.has(a)) {
+      if (a === '--help' || a === '-h') help = true;
+      else if (a === '--stdin') stdin = true;
+    } else if (VALUE_FLAGS.has(a)) {
+      // フラグ名ごとに代入先を分ける（VALUE_FLAGS に複数の値ありフラグが
+      // 増えても、無関係なフラグの値が body 等の変数を上書きしないようにする）。
+      values[a] = argv[i + 1];
       i++;
     } else {
       positionals.push(a);
     }
   }
 
-  return { help, stdin, body, positionals };
+  return { help, stdin, body: values['--body'], positionals };
 }
 
 // 論理パスの実体解決先が /tmp の実体ルート配下に収まることを確認する。
