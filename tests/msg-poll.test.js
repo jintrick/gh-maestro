@@ -17,6 +17,33 @@ function withTempDir(fn) {
   }
 }
 
+// ── parseArgs（main() と CLI プリフライトが共有する解析ヘルパー） ───────────
+
+test('parseArgs: --help は help:true を返す', () => {
+  const r = msgPoll.parseArgs(['--help']);
+  assert.equal(r.help, true);
+});
+
+test('parseArgs: 値欠落は exitFlagMiss:true を返す', () => {
+  const r = msgPoll.parseArgs(['orchestrator', '--workspace']);
+  assert.equal(r.exitFlagMiss, true);
+});
+
+test('parseArgs: self/onceMode/force/workspaceArg を正しく分離する', () => {
+  const r = msgPoll.parseArgs(['my-worker', '--issue', '5', '--workspace', '/ws', '--once', '--force']);
+  assert.equal(r.self, 'my-worker');
+  assert.equal(r.issueArg, '5');
+  assert.equal(r.workspaceArg, '/ws');
+  assert.equal(r.onceMode, true);
+  assert.equal(r.force, true);
+});
+
+test('parseArgs: --once/--force が無ければ false', () => {
+  const r = msgPoll.parseArgs(['orchestrator', '--workspace', '/ws']);
+  assert.equal(r.onceMode, false);
+  assert.equal(r.force, false);
+});
+
 // ── --help / -h ────────────────────────────────────────────────────────────
 
 test('--help が usage を返して code 0', () => {
@@ -700,15 +727,30 @@ test('worker モード: state.since が文字列でない場合は null 扱い',
 // interval ループには入らず、実ポーリングプロセスは生成されない
 // （.claude/rules/test-process-spawn-safety.md 準拠）。
 
-test('継続モード: 同じ self を監視中の生存プロセスがいれば exit 1 して起動しない', () => {
+test('継続モード: 同じ self を監視中の生存プロセスがいれば exit 1 して起動しない', (t) => {
   const { spawnSync } = require('child_process');
+  const { getProcessStartTime } = require('../scripts/process-lifecycle');
+
+  // findRunningInstance は verifyProcessIdentity（WMI/procfs 経由の起動時刻取得）に
+  // 依存する。サンドボックス環境ではWMI呼び出しが機能しないことがあり、その場合
+  // 実プロセスでの同一性確認そのものが常にfalseになり本テストの前提が成立しない
+  // （ロジック自体は tests/process-lifecycle.test.js のモック済みユニットテストでカバー済み）。
+  const startTimeProbe = getProcessStartTime(process.pid);
+  if (!startTimeProbe) {
+    t.skip('この環境では getProcessStartTime が機能しないため、実プロセスでの同一性確認を検証できません');
+    return;
+  }
+
   withTempDir(workspace => {
     const pidsDir = path.join(workspace, '.gh-maestro', 'pids');
     fs.mkdirSync(pidsDir, { recursive: true });
-    // process.ppid はテストランナーの親プロセス（生存中）を借りて「既存の監視プロセス」を模擬する
+    // process.ppid はテストランナーの親プロセス（生存中）を借りて「既存の監視プロセス」を模擬する。
+    // 子プロセス側の verifyProcessIdentity が同一性確認するため、実際のstartTimeを
+    // 事前に取得してエントリに書き込む（決定的に一致させる）。
     const otherPid = process.ppid;
+    const startTime = getProcessStartTime(otherPid);
     fs.writeFileSync(path.join(pidsDir, `${otherPid}.json`), JSON.stringify({
-      pid: otherPid, script: 'msg-poll.js', workerName: null, workspace,
+      pid: otherPid, script: 'msg-poll.js', workerName: null, workspace, startTime,
     }));
 
     const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
