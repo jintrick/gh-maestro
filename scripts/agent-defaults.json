@@ -54,8 +54,8 @@
       "label": "Codex (OpenAI)",
       "command": "codex",
       "runtime": "codex",
-      "extraArgs": ["--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen"],
-      "execArgs": ["exec", "--cd", "{workspace}", "--model", "gpt-5.4", "--sandbox", "danger-full-access"],
+      "extraArgs": ["--no-alt-screen"],
+      "execArgs": ["exec", "--skip-git-repo-check", "--cd", "{workspace}", "--model", "gpt-5.4", "--sandbox", "workspace-write", "-c", "approval_policy=never", "-c", "sandbox_workspace_write.network_access=true"],
       "promptDelivery": "positional",
       "enterSequence": "\r\n"
     }

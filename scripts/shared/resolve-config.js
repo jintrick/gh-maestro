@@ -21,6 +21,13 @@ const { resolve, join } = require('path');
 
 const { isPlainObject } = require('./object');
 
+// workspace/.gh-maestro/config.json からの上書きを許さない実行系フィールド。
+// command/extraArgs に加え、execArgs も同じ扱いとする（PR #103 Review Manager指摘:
+// execArgsだけ除外対象から漏れると、workspace configで--sandbox/--skip-git-repo-check等の
+// 安全設定を欠いたコマンドラインに差し替えられてしまう）。
+// resolveAgentConfig と config.js（cmdStatusの警告表示）の両方から参照する単一のSSOT。
+const EXEC_SENSITIVE_FIELDS = ['command', 'extraArgs', 'execArgs'];
+
 // ── デフォルト読み込み ──────────────────────────────────────────────────────
 
 const DEFAULTS_PATH = resolve(__dirname, '..', 'agent-defaults.json');
@@ -168,17 +175,18 @@ function resolveAgentConfig(agentId, opts = {}) {
   const globalOverride = (globalConfig.agents && globalConfig.agents[agentId]) || {};
 
   // 3. workspace/.gh-maestro/config.json の agents セクション
-  // セキュリティ: workspace config は実行コマンド（command/extraArgs）を上書きできない。
+  // セキュリティ: workspace config は実行コマンド（EXEC_SENSITIVE_FIELDS）を上書きできない。
   // 悪意あるリポジトリを clone しただけで任意コマンド実行されるのを防ぐ。
+  // execArgs は run-review-manager.js のような exec 系起動（--sandbox / --skip-git-repo-check 等の
+  // 安全設定を含む）で command/extraArgs の代わりに使われるため、同じ扱いが必要
+  // （execArgsだけ上書き可能だとサンドボックス設定を欠いた危険なコマンドラインに差し替えられる。PR #103 Review Manager指摘）。
   // 実行系フィールドの上書きは ~/.gh-maestro/config.json（ユーザーが明示的に編集したもの）のみ許可。
   let workspaceOverride = {};
   if (opts.workspace) {
     const wsConfig = loadConfigFile(resolve(opts.workspace, '.gh-maestro', 'config.json'));
     const rawWsOverride = (wsConfig.agents && wsConfig.agents[agentId]) || {};
-    // command / extraArgs を workspace override から除去
     workspaceOverride = { ...rawWsOverride };
-    delete workspaceOverride.command;
-    delete workspaceOverride.extraArgs;
+    for (const field of EXEC_SENSITIVE_FIELDS) delete workspaceOverride[field];
   }
 
   // マージ: default → global → workspace（後勝ち）
@@ -235,4 +243,37 @@ function resolveSkillAgentMap(opts = {}) {
   return map;
 }
 
-module.exports = { resolveAgentConfig, resolveSkillAgentMap, loadDefaults, isValidAgentConfig };
+/**
+ * Review Managerの実行を可視ペインで行うかどうかを解決する。
+ * 解決順序: workspace/.gh-maestro/config.json > ~/.gh-maestro/config.json > false（既定）。
+ * 非boolean値は無視する（fail-closed: 誤設定で意図せず可視化されないようにする）。
+ *
+ * @param {object} [opts={}]
+ * @param {string} [opts.workspace]
+ * @param {string} [opts.homedir]
+ * @returns {boolean}
+ */
+function resolveReviewManagerVisible(opts = {}) {
+  const homedir = opts.homedir || process.env.HOME || process.env.USERPROFILE || '';
+
+  const globalConfig = loadConfigFile(resolve(homedir, '.gh-maestro', 'config.json'));
+  if (opts.workspace) {
+    const wsConfig = loadConfigFile(resolve(opts.workspace, '.gh-maestro', 'config.json'));
+    if (typeof wsConfig.reviewManagerVisible === 'boolean') {
+      return wsConfig.reviewManagerVisible;
+    }
+  }
+  if (typeof globalConfig.reviewManagerVisible === 'boolean') {
+    return globalConfig.reviewManagerVisible;
+  }
+  return false;
+}
+
+module.exports = {
+  resolveAgentConfig,
+  resolveSkillAgentMap,
+  resolveReviewManagerVisible,
+  loadDefaults,
+  isValidAgentConfig,
+  EXEC_SENSITIVE_FIELDS,
+};

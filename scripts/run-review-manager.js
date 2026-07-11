@@ -7,9 +7,17 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
-const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
-const { assertValidPr, reviewArtifactPath } = require('./shared/review-manager-paths');
+const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
+const { resolveAgentConfig, resolveSkillAgentMap, resolveReviewManagerVisible } = require('./shared/resolve-config');
+const {
+  assertValidPr, reviewArtifactPath,
+  reviewWorktreeBranchName, reviewWorktreeFetchRef, reviewWorktreeDir,
+} = require('./shared/review-manager-paths');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+
+// 可視ペイン実行時、出力ファイル生成を待つポーリング設定。
+const VISIBLE_POLL_INTERVAL_MS = 5000;
+const VISIBLE_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 
 const USAGE = `run-review-manager.js — Review Managerをheadless起動してPRレビューを実行する
 
@@ -119,7 +127,203 @@ function writeRunMetadata(metaFile, mode, directedBrief) {
   fs.writeFileSync(metaFile, JSON.stringify(metadata, null, 2), 'utf8');
 }
 
-module.exports = { resolveMode, buildPrompt, digestText, writeRunMetadata };
+/**
+ * Review Manager専用worktreeを作成し、PRのheadコミットの内容に合わせる。
+ * git-worktree.js の worktreeAdd はそのまま再利用し（新規実装しない）、
+ * PRのhead取得は専用の非トラッキングref（refs/gh-maestro/...）にforce-fetchしてから
+ * worktree側で `git reset --hard` する（origin配下の実ブランチと混同しないため）。
+ *
+ * @param {string} workspace
+ * @param {string} pr
+ * @param {(msg: string) => void} log
+ * @returns {string} 作成したworktreeの絶対パス
+ */
+function setupReviewWorktree(workspace, pr, log) {
+  const worktreesRoot = path.join(workspace, '.gh-maestro', 'worktrees');
+  fs.mkdirSync(worktreesRoot, { recursive: true });
+
+  const dir = reviewWorktreeDir(workspace, pr);
+  const branchName = reviewWorktreeBranchName(pr);
+  const fetchRef = reviewWorktreeFetchRef(pr);
+
+  // 残骸があれば先に除去してから作り直す（spawn-worker.js と同様のリトライパターン）。
+  // git worktree prune はディスク上にディレクトリが存在しない登録済みworktreeのメタデータだけを
+  // 掃除するため、rmSync（ディレクトリ削除）→ worktreePrune（メタデータ掃除）の順で行う。
+  try { worktreeRemove(dir, workspace); } catch {}
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  try { worktreePrune(workspace); } catch {}
+  try { spawnSync('git', ['branch', '-D', '--', branchName], { cwd: workspace, stdio: 'pipe' }); } catch {}
+
+  worktreeAdd(dir, branchName, null, workspace);
+
+  const fetchR = spawnSync('git', ['-C', workspace, 'fetch', 'origin', '--', `+pull/${pr}/head:${fetchRef}`], { stdio: 'pipe', encoding: 'utf8' });
+  if (fetchR.status !== 0) {
+    throw new Error(`PR head の fetch に失敗しました: ${(fetchR.stderr || '').toString().trim()}`);
+  }
+
+  const resetR = spawnSync('git', ['-C', dir, 'reset', '--hard', fetchRef], { stdio: 'pipe', encoding: 'utf8' });
+  if (resetR.status !== 0) {
+    throw new Error(`worktreeをPR headにリセットできませんでした: ${(resetR.stderr || '').toString().trim()}`);
+  }
+
+  log(`review worktree ready: ${dir} (${fetchRef})`);
+  return dir;
+}
+
+/**
+ * Review Manager専用worktreeとその関連git状態（ブランチ・専用ref）を除去する。
+ * 各ステップは独立して失敗を許容する（一部残留してもプロセス全体は継続する）。
+ *
+ * @param {string} workspace
+ * @param {string} pr
+ * @param {(msg: string) => void} log
+ */
+function teardownReviewWorktree(workspace, pr, log) {
+  const dir = reviewWorktreeDir(workspace, pr);
+  const branchName = reviewWorktreeBranchName(pr);
+  const fetchRef = reviewWorktreeFetchRef(pr);
+
+  try {
+    worktreeRemove(dir, workspace);
+  } catch (e) {
+    log(`worktree remove 失敗: ${e.message.split('\n')[0]}`);
+    // git worktree prune はディスク上にディレクトリが存在しない登録済みworktreeのメタデータだけを
+    // 掃除するため、先にディレクトリを消してからpruneする（順序を逆にするとメタデータが残留する）。
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+    try { worktreePrune(workspace); } catch {}
+  }
+  try {
+    const delR = spawnSync('git', ['branch', '-D', '--', branchName], { cwd: workspace, stdio: 'pipe', encoding: 'utf8' });
+    if (delR.status !== 0) log(`branch -D 失敗: ${(delR.stderr || '').toString().trim()}`);
+  } catch (e) { log(`branch -D 例外: ${e.message}`); }
+  try {
+    spawnSync('git', ['update-ref', '-d', fetchRef], { cwd: workspace, stdio: 'pipe' });
+  } catch {}
+}
+
+/**
+ * headless（既定）でエージェントを起動し、完了まで同期ブロックする。
+ * @param {string[]} agentArgs
+ * @param {string} cwd
+ * @returns {{status: number|null, error?: Error, stdout?: string, stderr?: string}}
+ */
+function runAgentHeadless(agentArgs, cwd) {
+  return spawnSync(agentArgs[0], agentArgs.slice(1), {
+    cwd,
+    encoding: 'utf8',
+    env: process.env,
+    maxBuffer: 20 * 1024 * 1024,
+  });
+}
+
+/**
+ * 可視ペイン（wezterm split-pane）に渡すargvを構築する。agent-exec.jsのbuildLoginShellExecArgsと
+ * 同様にログインシェル（PATH実行ファイル・pwsh関数・シェルエイリアス解決）経由で起動するが、
+ * `exec`によるシェル置換はしない。エージェント終了後に終了コードをexitMarkerFileへ書き出す
+ * 後続ステップを実行する必要があるため（buildLoginShellExecArgsはシェルをエージェントプロセスに
+ * 完全に置き換えるため、終了コード捕捉のような後続処理を挟めない。PR #103 Review Manager指摘）。
+ *
+ * @param {string[]} agentCmdArgs
+ * @param {string} exitMarkerFile 終了コードを書き出す先
+ * @param {string} [platform=process.platform]
+ * @returns {string[]}
+ */
+function buildVisiblePaneArgs(agentCmdArgs, exitMarkerFile, platform = process.platform) {
+  if (platform === 'win32') {
+    const escapedArgs = agentCmdArgs.map(a => `'${a.replace(/'/g, "''")}'`).join(' ');
+    const escapedMarker = exitMarkerFile.replace(/'/g, "''");
+    // ネイティブ実行ファイルの終了コードは $LASTEXITCODE に入る（codexはネイティブexe）。
+    const command = `& ${escapedArgs}; Set-Content -LiteralPath '${escapedMarker}' -Value $LASTEXITCODE -NoNewline`;
+    const encoded = Buffer.from(command, 'utf16le').toString('base64');
+    return ['pwsh', '-NoLogo', '-EncodedCommand', encoded];
+  }
+  const escapedMarker = exitMarkerFile.replace(/'/g, "'\\''");
+  return ['bash', '-lc', `"$0" "$@"; echo $? > '${escapedMarker}'`, ...agentCmdArgs];
+}
+
+/**
+ * 可視ペイン（wezterm split-pane）でエージェントを起動する。
+ * spawnSyncによる同期ブロックが使えないため、完了検知はエージェントが終了コードを書き出す
+ * exitMarkerFileの生成をポーリングする（outputFileの生成だけでは、findingsを早期に書き出した後も
+ * ペインが動き続けているケースを完了と誤判定してしまう。PR #103 Review Manager指摘）。
+ * WEZTERM_PANEが無い、またはペイン分割に失敗した場合はnullを返す（呼び出し側でheadlessにフォールバック）。
+ * タイムアウト時は孤児プロセス化を防ぐためペインを明示的に強制終了する。
+ *
+ * @param {string[]} agentArgs
+ * @param {string} cwd
+ * @param {string} outputFile RMが書き出すfindings JSONのパス（終了コード確認後に存在確認する）
+ * @param {(msg: string) => void} log
+ * @returns {{status: number}|null}
+ */
+function runAgentVisible(agentArgs, cwd, outputFile, log) {
+  const paneId = process.env.WEZTERM_PANE;
+  if (!paneId) {
+    log('reviewManagerVisible=true ですが WEZTERM_PANE が未設定のため headless にフォールバックします');
+    return null;
+  }
+
+  const exitMarkerFile = `${outputFile}.exitcode`;
+  try { fs.unlinkSync(exitMarkerFile); } catch {}
+
+  const paneArgs = buildVisiblePaneArgs(agentArgs, exitMarkerFile);
+  const split = spawnSync('wezterm', [
+    'cli', '--no-auto-start', 'split-pane', '--bottom',
+    '--cwd', cwd, '--pane-id', paneId, '--', ...paneArgs,
+  ], { encoding: 'utf8' });
+
+  if (split.status !== 0) {
+    log(`wezterm split-pane 失敗: ${(split.stderr || '').trim()} — headlessにフォールバックします`);
+    return null;
+  }
+  const newPaneId = (split.stdout || '').trim();
+  log(`可視ペイン(${newPaneId})でエージェントを起動しました`);
+
+  const start = Date.now();
+  while (!fs.existsSync(exitMarkerFile)) {
+    if (Date.now() - start > VISIBLE_POLL_TIMEOUT_MS) {
+      log(`可視ペイン実行がタイムアウトしました（${VISIBLE_POLL_TIMEOUT_MS}ms）— ペインを強制終了します`);
+      try {
+        const kill = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', newPaneId], { encoding: 'utf8' });
+        if (kill.status !== 0) log(`kill-pane 失敗: ${(kill.stderr || '').trim()}`);
+      } catch (e) { log(`kill-pane 例外: ${e.message}`); }
+      return { status: 1 };
+    }
+    sleepSync(VISIBLE_POLL_INTERVAL_MS);
+  }
+
+  let exitStatus = 1;
+  try {
+    const parsed = parseInt(fs.readFileSync(exitMarkerFile, 'utf8').trim(), 10);
+    if (Number.isFinite(parsed)) exitStatus = parsed;
+  } catch (e) { log(`exit marker 読み取り失敗: ${e.message}`); }
+  try { fs.unlinkSync(exitMarkerFile); } catch {}
+
+  if (exitStatus !== 0) {
+    log(`可視ペインのエージェントが異常終了しました（exit ${exitStatus}）`);
+    return { status: exitStatus };
+  }
+  if (!fs.existsSync(outputFile)) {
+    log(`可視ペインのエージェントは正常終了しましたが RM output が見つかりません: ${outputFile}`);
+    return { status: 1 };
+  }
+  return { status: 0 };
+}
+
+/**
+ * メインスレッドで安全に使える同期スリープ。Atomics.waitはメインスレッドで
+ * TypeErrorを投げうるため使わず、子プロセスのsetTimeoutをspawnSyncで待つ
+ * （PR #103 Review Manager指摘）。
+ * @param {number} ms
+ */
+function sleepSync(ms) {
+  spawnSync(process.execPath, ['-e', `setTimeout(() => {}, ${Number(ms)})`]);
+}
+
+module.exports = {
+  resolveMode, buildPrompt, digestText, writeRunMetadata,
+  setupReviewWorktree, teardownReviewWorktree,
+  runAgentHeadless, runAgentVisible, buildVisiblePaneArgs,
+};
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -193,6 +397,13 @@ if (require.main === module) {
     try { fs.unlinkSync(promptFile); } catch {}
     try { fs.unlinkSync(lockFile); } catch {}
     if (briefFileArg) { try { fs.unlinkSync(briefFileArg); } catch {} }
+    // 専用worktree（とそのブランチ・専用ref）はレビュー完了後に必ず除去する。
+    // setupReviewWorktree に到達していなくても teardown は安全（各ステップが失敗を許容する）。
+    // log() 自体が失敗しうる状態（ghDir未作成等）でも finally 内の他ステップを止めないよう、
+    // 例外は無視できるlogに差し替える。
+    try {
+      teardownReviewWorktree(workspace, pr, (msg) => { try { log(msg); } catch {} });
+    } catch {}
   }
 
   // process.exit() は try/finally をスキップする（finally 内の cleanup() が実行されない）ため、
@@ -216,65 +427,87 @@ if (require.main === module) {
     }
     writeRunMetadata(metaFile, mode, directedBrief);
 
-    fs.writeFileSync(promptFile, buildPrompt({ pr, repo, workspace, outputFile, mode, directedBrief }), 'utf8');
-    spawnSync('git', ['-C', workspace, 'fetch', 'origin', `pull/${pr}/head`], { stdio: 'ignore' });
-
-    const skill = 'gh-maestro-reviewer';
-    const skillMap = resolveSkillAgentMap({ workspace });
-    const agentId = skillMap[skill] ?? 'codex';
-    const homedir = process.env.HOME || process.env.USERPROFILE || '';
-    const agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
-
-    // resolveAgentConfig の結果（config.json のユーザー上書きを含む）をそのまま使う。
-    // headless実行専用の引数は agent-defaults.json 側の execArgs に持たせ、
-    // {workspace} プレースホルダのみここで実際のパスに置換する（インラインでの
-    // 設定丸ごと上書きはしない。PR #91 Review Manager指摘）。
-    // 解決失敗（config.json のtypo等）は安全側に倒して中断する（fail-closed-safety-guardsルール）。
-    if (!agentConfig) {
-      log(`エージェント "${agentId}" の設定を解決できません（agent-defaults.json / config.json を確認してください）`);
+    // Review Manager（Codex）はメインワークスペースを直接触らせず、専用worktree内でのみ動かす。
+    // PRのdiffが外部由来の入力であるため、無制限の書き込み権限をメインワークスペースに
+    // 持たせない（Issue #101）。
+    let reviewWtDir;
+    try {
+      reviewWtDir = setupReviewWorktree(workspace, pr, log);
+    } catch (e) {
+      log(`review worktree のセットアップに失敗しました: ${e.message}`);
       exitCode = 1;
+      reviewWtDir = null;
+    }
+
+    if (reviewWtDir === null) {
+      // すでに exitCode=1 を設定済み。下の agentConfig 分岐に進まない。
     } else {
-      const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
-        .map(a => a.replace(/\{workspace\}/g, workspace));
+      const worktreeGhDir = path.join(reviewWtDir, '.gh-maestro');
+      fs.mkdirSync(worktreeGhDir, { recursive: true });
+      // Codexが実際に書き込むOUTPUTは専用worktree配下に限定する。
+      // メインワークスペース側の outputFile（review-publisher.js が読む正式な場所）へは、
+      // Codex終了後にこのスクリプト自身（サンドボックス外）がコピーする。
+      const worktreeOutputFile = path.join(worktreeGhDir, `review-manager-${pr}.json`);
 
-      const agentArgs = buildAgentCommandArgs({ ...agentConfig, extraArgs }, {
-        promptFile,
-        shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
-        systemPromptText: `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
-      });
+      // WORKSPACE はCodex自身に伝える実行場所であるため、隔離用に作成したreviewWtDirを渡す
+      // （メインワークスペースを渡すとIssue #101の隔離が無効化される。PR #103 Review Manager指摘）。
+      fs.writeFileSync(promptFile, buildPrompt({ pr, repo, workspace: reviewWtDir, outputFile: worktreeOutputFile, mode, directedBrief }), 'utf8');
 
-      log(`spawning ${agentArgs.join(' ')}`);
-      const result = spawnSync(agentArgs[0], agentArgs.slice(1), {
-        cwd: workspace,
-        encoding: 'utf8',
-        env: process.env,
-        maxBuffer: 20 * 1024 * 1024,
-      });
+      const skill = 'gh-maestro-reviewer';
+      const skillMap = resolveSkillAgentMap({ workspace });
+      const agentId = skillMap[skill] ?? 'codex';
+      const homedir = process.env.HOME || process.env.USERPROFILE || '';
+      const agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
 
-      if (result.error) log(`spawn error: ${result.error.message}`);
-      if (result.stdout) log(result.stdout);
-      if (result.stderr) log(result.stderr);
-      log(`${agentArgs[0]} exited with status ${result.status}`);
-
-      if (result.status !== 0) {
-        exitCode = result.status ?? 1;
-      } else if (!fs.existsSync(outputFile)) {
-        log(`RM output not found: ${outputFile}`);
+      // resolveAgentConfig の結果（config.json のユーザー上書きを含む）をそのまま使う。
+      // headless実行専用の引数は agent-defaults.json 側の execArgs に持たせ、
+      // {workspace} プレースホルダは専用worktreeの実パスに置換する（インラインでの
+      // 設定丸ごと上書きはしない。PR #91 Review Manager指摘）。
+      // 解決失敗（config.json のtypo等）は安全側に倒して中断する（fail-closed-safety-guardsルール）。
+      if (!agentConfig) {
+        log(`エージェント "${agentId}" の設定を解決できません（agent-defaults.json / config.json を確認してください）`);
         exitCode = 1;
       } else {
-        const publish = spawnSync(process.execPath, [
-          path.join(__dirname, 'review-publisher.js'),
-          outputFile,
-        ], {
-          cwd: workspace,
-          encoding: 'utf8',
-          env: process.env,
-          maxBuffer: 20 * 1024 * 1024,
+        const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
+          .map(a => a.replace(/\{workspace\}/g, reviewWtDir));
+
+        const agentArgs = buildAgentCommandArgs({ ...agentConfig, extraArgs }, {
+          promptFile,
+          shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
+          systemPromptText: `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
         });
-        if (publish.stdout) log(publish.stdout);
-        if (publish.stderr) log(publish.stderr);
-        log(`review-publisher exited with status ${publish.status}`);
-        exitCode = publish.status ?? 0;
+
+        const visible = resolveReviewManagerVisible({ workspace, homedir });
+        log(`spawning (visible=${visible}) ${agentArgs.join(' ')}`);
+        const result = (visible && runAgentVisible(agentArgs, reviewWtDir, worktreeOutputFile, log))
+          || runAgentHeadless(agentArgs, reviewWtDir);
+
+        if (result.error) log(`spawn error: ${result.error.message}`);
+        if (result.stdout) log(result.stdout);
+        if (result.stderr) log(result.stderr);
+        log(`${agentArgs[0]} exited with status ${result.status}`);
+
+        if (result.status !== 0) {
+          exitCode = result.status ?? 1;
+        } else if (!fs.existsSync(worktreeOutputFile)) {
+          log(`RM output not found: ${worktreeOutputFile}`);
+          exitCode = 1;
+        } else {
+          fs.copyFileSync(worktreeOutputFile, outputFile);
+          const publish = spawnSync(process.execPath, [
+            path.join(__dirname, 'review-publisher.js'),
+            outputFile,
+          ], {
+            cwd: workspace,
+            encoding: 'utf8',
+            env: process.env,
+            maxBuffer: 20 * 1024 * 1024,
+          });
+          if (publish.stdout) log(publish.stdout);
+          if (publish.stderr) log(publish.stderr);
+          log(`review-publisher exited with status ${publish.status}`);
+          exitCode = publish.status ?? 0;
+        }
       }
     }
   } finally {

@@ -9,7 +9,10 @@ const os = require('os');
 // run-review-manager.js の CLI 実行部は require.main === module でガードされているため、
 // require するだけでは実プロセスをspawnしない
 // （.claude/rules/test-process-spawn-safety.md 準拠）。
-const { resolveMode, buildPrompt, digestText, writeRunMetadata } = require('../scripts/run-review-manager');
+const {
+  resolveMode, buildPrompt, digestText, writeRunMetadata,
+  runAgentHeadless, runAgentVisible, buildVisiblePaneArgs,
+} = require('../scripts/run-review-manager');
 const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'run-review-manager.js');
 
@@ -125,6 +128,76 @@ test('サブプロセス経由: --brief-file の値が"--help"文字列だと値
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /Usage/);
   assert.equal(r.stdout, '');
+});
+
+// ── runAgentHeadless / runAgentVisible ──────────────────────────────────
+// Codex実行そのものはネットワーク/実エージェント依存のため統合テスト対象外。
+// ここではプロセスをspawnしても即終了する軽量コマンド、または
+// spawnに到達しないフォールバック分岐だけを確認する
+// （.claude/rules/test-process-spawn-safety.md 準拠: detachしない同期spawnのみ）。
+
+test('runAgentHeadless: 軽量コマンドの終了コードをそのまま返す', () => {
+  const result = runAgentHeadless([process.execPath, '-e', 'process.exit(0)'], tmpBase);
+  assert.equal(result.status, 0);
+});
+
+test('runAgentVisible: WEZTERM_PANE未設定ならwezterm等を呼ばずnullを返す（headlessへフォールバック）', () => {
+  const originalPane = process.env.WEZTERM_PANE;
+  delete process.env.WEZTERM_PANE;
+  try {
+    const logs = [];
+    const result = runAgentVisible(['dummy-cmd'], tmpBase, path.join(tmpBase, 'nonexistent-output.json'), (m) => logs.push(m));
+    assert.equal(result, null);
+    assert.ok(logs.some(m => m.includes('WEZTERM_PANE')));
+  } finally {
+    if (originalPane !== undefined) process.env.WEZTERM_PANE = originalPane;
+  }
+});
+
+// ── buildVisiblePaneArgs ─────────────────────────────────────────────────
+// 可視ペインは`exec`によるシェル置換をしないため、エージェント終了後に
+// 終了コードをexitMarkerFileへ書き出す後続ステップを挟める（PR #103 Review Manager指摘）。
+
+test('buildVisiblePaneArgs (win32): pwshの $LASTEXITCODE をexitMarkerFileへ書き出すコマンドを構築する', () => {
+  const args = buildVisiblePaneArgs(['codex.exe', 'exec', 'hello world'], 'C:\\ws\\out.json.exitcode', 'win32');
+  assert.deepEqual(args.slice(0, 3), ['pwsh', '-NoLogo', '-EncodedCommand']);
+  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
+  assert.match(decoded, /& 'codex\.exe' 'exec' 'hello world'/);
+  assert.match(decoded, /Set-Content -LiteralPath 'C:\\ws\\out\.json\.exitcode' -Value \$LASTEXITCODE/);
+});
+
+test('buildVisiblePaneArgs (win32): 引数中のシングルクォートをエスケープする', () => {
+  const args = buildVisiblePaneArgs(["it's"], 'C:\\ws\\o.exitcode', 'win32');
+  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
+  assert.match(decoded, /'it''s'/);
+});
+
+test('buildVisiblePaneArgs (posix): 終了コードを $? でexitMarkerFileへ書き出す', () => {
+  const args = buildVisiblePaneArgs(['codex', 'exec'], '/tmp/out.json.exitcode', 'linux');
+  assert.equal(args[0], 'bash');
+  assert.equal(args[1], '-lc');
+  assert.match(args[2], /echo \$\? > '\/tmp\/out\.json\.exitcode'/);
+  assert.deepEqual(args.slice(3), ['codex', 'exec']);
+});
+
+// ── runAgentVisible: split-pane自体に失敗した場合はheadlessへフォールバックする ──
+// 実際のタイムアウト→kill-pane経路（buildVisiblePaneArgsの出力が実際に使われ、
+// エージェント終了後にexitMarkerFileが現れる）はwezterm実機とエージェントの実起動が
+// 必要なため統合テスト対象外（.claude/rules/test-process-spawn-safety.md 準拠）。
+// ここではPANE指定はあるがwezterm split-paneが失敗する（未インストール/不正なpane-id）
+// ケースでnullを返すことだけを確認する。
+
+test('runAgentVisible: wezterm split-paneが失敗するとnullを返す（headlessへフォールバック）', () => {
+  const originalPane = process.env.WEZTERM_PANE;
+  process.env.WEZTERM_PANE = '999';
+  try {
+    const logs = [];
+    const result = runAgentVisible(['dummy-cmd'], tmpBase, path.join(tmpBase, 'nonexistent-output-2.json'), (m) => logs.push(m));
+    assert.equal(result, null);
+  } finally {
+    if (originalPane !== undefined) process.env.WEZTERM_PANE = originalPane;
+    else delete process.env.WEZTERM_PANE;
+  }
 });
 
 test('writeRunMetadata does not touch any findings output file', () => {

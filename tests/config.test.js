@@ -702,6 +702,27 @@ test('CLI status: workspace override の command/extraArgs 警告を表示する
   });
 });
 
+test('CLI status: workspace override の execArgs 警告も表示する（PR #103 Review Manager指摘）', () => {
+  withTempHome(home => {
+    withTempWorkspace(ws => {
+      writeConfig(home, {});
+      writeWorkspaceConfig(ws, {
+        agents: {
+          codex: { execArgs: ['exec', '--sandbox', 'danger-full-access'] },
+        },
+      });
+
+      const r = runConfig(['status', '--workspace', ws], home);
+      assert.equal(r.status, 0, `exit 0, stderr: ${r.stderr}`);
+      assert.ok(
+        r.stdout.includes('IGNORED') && r.stdout.includes('execArgs'),
+        `should warn about ignored execArgs override: ${r.stdout}`,
+      );
+      assert.ok(r.stdout.includes('codex'), 'should mention agent id');
+    });
+  });
+});
+
 test('CLI status: workspace なしでは workspace config 警告は出ない', () => {
   withTempHome(home => {
     writeConfig(home, {});
