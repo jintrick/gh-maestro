@@ -14,10 +14,11 @@ paths:
 
 - 外部由来のpid引数はshell/fs操作に使う前に `parseInt` + `Number.isFinite(pid) && pid > 0` で検証する
 - Linuxのプロセス開始時刻はprocfsの`birthtime`でなく`mtime`を使う（`birthtime`は`1970-01-01`を返すことがある）
-- `.gh-maestro/pids/` 等の1ファイル1レコードJSON stateを読むときは、`JSON.parse`結果が期待するオブジェクト型か検証してからプロパティアクセスする
+- `.gh-maestro/pids/` 等の1ファイル1レコードJSON stateを読むときは、`JSON.parse`結果が期待するオブジェクト型か検証してからプロパティアクセスする。レコード全体の型検証だけでなく、比較演算（`>`等）に使う個々のフィールド（カーソル用タイムスタンプ等）が期待する型（文字列等）であることも検証する。オブジェクト等の非期待型は`>`比較で常にfalseを返し、カーソルが黙って固着する（PR #100 Review Manager指摘）
 - detachした子プロセスを起動する場合、lock/registryのPIDは子プロセス自身が起動直後に自PIDで上書きする（launcherのPIDのまま生死判定しない）
 - `process-lifecycle.js`の`registerProcess`をワーカー起因のプロセスから呼ぶ場合は必ず`workerName`を渡す（`remove-worker.js`のターゲット削除に必要）
 - lock/temp等のリソースを作成する処理は、生成箇所すべてを`try/finally`または対応するエラーハンドラ（`child.on('error')`/`('exit')`等）でカバーする。一部だけ（例: lockFileのみ）をカバーし他（briefFile等）を見落とすと、異常系でファイルが残留する（PR #84 Review Manager指摘）
 - レジストリのPIDが生きている（`isProcessAlive`）ことだけで「重複プロセスあり」と判定しない。プロセスがクラッシュしてレジストリエントリが残った後にOSがそのPIDを別プロセスへ再利用すると、無関係なプロセスを重複と誤検知し続ける。`verifyProcessIdentity`（`startTime`照合）で本当に同一プロセスかを確認してから重複と判定する（PR #90 Review Manager指摘）
 - 「重複起動チェック→レジストリ登録」のような check-then-register 処理は、2段階が非アトミックだとTOCTOU競合（ほぼ同時に2プロセスが起動し両方がチェックを通過してしまう）を起こす。チェックと登録は単一のアトミックな主張操作（排他ロックファイルの取得等）にまとめる（PR #90 Review Manager指摘）
 - 内部でリトライしながら指定時間内の終了を保証する有界待機（`--wait`等）で、サブ処理（`gh`呼び出し等）が独自の固定タイムアウトを持つ場合、締切直前に始まったサブ処理がその分だけ全体の締切を超過しうる。サブ処理のタイムアウトは残り予算に合わせて動的に絞り込む（PR #98 Review Manager指摘）
+- GitHub APIの`since`パラメータ等、タイムスタンプ境界によるカーソル方式を使うポーリングは、境界がinclusive/exclusiveのどちらかをAPI仕様で確認せず前提にしない。同一タイムスタンプの複数レコードが存在すると境界の解釈次第で取りこぼしうる。タイムスタンプ単独でなく、処理済みIDの記録と併用して重複排除する（PR #100 Review Manager指摘）
