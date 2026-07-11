@@ -17,6 +17,7 @@ const { normalizeWorkerEntry } = require('./worker-entry');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { killProcessTree } = require('./kill-tree');
 const { sweepRegistry } = require('./process-lifecycle');
+const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 
 const USAGE = `remove-worker.js — ワーカーのペインを kill し worktree を削除する
 
@@ -30,33 +31,25 @@ Options:
 ディレクトリがロックで残っても次回 reset-session.js が junction 非追跡で安全に掃除する
 （残骸を手動 rm しないこと。node_modules junction を辿って共有ファイルを壊す）。`;
 
-// argv を1回だけ順に走査し、各フラグが消費した値をフラグ判定の対象から除外する。
-// これをしないと --worker-name '--help' のような値そのものが誤ってフラグとして解釈される。
-function parseArgs(argv) {
-  let help = false;
-  let workerName, workspace;
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--help' || a === '-h') {
-      help = true;
-    } else if (a === '--worker-name') {
-      workerName = argv[++i];
-    } else if (a === '--workspace') {
-      workspace = argv[++i];
-    }
-  }
-  return { help, workerName, workspace };
-}
-
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { help, workerName, workspace: workspaceArg } = parseArgs(argv);
-  if (help) {
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--worker-name', '--workspace']);
+
+  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
+  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
+  // 値欠落は常にエラー優先（フェイルクローズ）とする。
+  if (exitFlagMiss) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+
+  if (hasHelpFlag(rest)) {
     console.log(USAGE);
     process.exit(0);
   }
 
-  const workspace = workspaceArg ?? process.cwd();
+  const workerName = values['--worker-name'];
+  const workspace = values['--workspace'] ?? process.cwd();
 
   const fail = (msg) => { console.error(`remove-worker: ${msg}`); process.exit(1); };
   if (!workerName) { console.error(USAGE); process.exit(1); }
@@ -211,5 +204,3 @@ if (require.main === module) {
   delete workers[workerName];
   writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
 }
-
-module.exports = { parseArgs };

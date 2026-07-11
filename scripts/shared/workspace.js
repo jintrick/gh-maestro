@@ -92,4 +92,20 @@ function parseFlags(args, flags, booleanFlags = []) {
   return { values, rest, exitFlagMiss };
 }
 
-module.exports = { findWorkspaceFromCwd, resolveWorkspace, parseFlags };
+/**
+ * parseFlags の `rest`（フラグ・値として消費されなかった残り）に対して
+ * --help/-h が含まれるか判定する。
+ *
+ * `rest` は既に他フラグの値として消費されたトークンを含まないため、
+ * 他オプションの値がたまたま "--help" と一致しても誤検出しない
+ * （生の argv 全体を対象にした `argv.includes('--help')` が引き起こす
+ * フラグ/値衝突を避けるための共通ヘルパー）。
+ *
+ * @param {string[]} rest  parseFlags が返す rest 配列
+ * @returns {boolean}
+ */
+function hasHelpFlag(rest) {
+  return rest.includes('--help') || rest.includes('-h');
+}
+
+module.exports = { findWorkspaceFromCwd, resolveWorkspace, parseFlags, hasHelpFlag };

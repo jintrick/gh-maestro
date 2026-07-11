@@ -30,44 +30,32 @@ const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs, checkAgentExists } = require('./agent-exec');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
+const { parseFlags } = require('./shared/workspace');
 
 // --- ワーカーエントリ構築（テスト可能な純粋関数） ---
 function buildWorkerEntry(paneId, agentId, issue) {
   return { paneId, agentId, issue: Number(issue) };
 }
 
-// --- 引数パース（テスト可能な純粋関数） ---
-// argv を1回だけ順に走査し、各フラグが消費した値をフラグ判定の対象から除外する。
-// これをしないと --description '--issue' のような値そのものが誤って別フラグとして解釈される。
-const SPAWN_WORKER_VALUE_FLAGS = new Set([
+const SPAWN_WORKER_VALUE_FLAGS = [
   '--skill', '--prompt', '--issue', '--description',
   '--repo', '--workspace', '--base-branch', '--agent',
-]);
-function parseArgs(argv) {
-  const values = {};
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (SPAWN_WORKER_VALUE_FLAGS.has(a)) {
-      values[a] = argv[++i] ?? null;
-    }
-  }
-  return values;
-}
+];
 
 if (require.main === module) {
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
-const parsed = parseArgs(argv);
+const { values } = parseFlags(argv, SPAWN_WORKER_VALUE_FLAGS);
 
-const skill       = parsed['--skill'] ?? null;
-const prompt      = parsed['--prompt'] ?? null;
-const issue       = parsed['--issue'] ?? null;
-const description = parsed['--description'] ?? null;
-const repo        = parsed['--repo'] ?? null;
-const workspace   = parsed['--workspace'] ?? process.cwd();
-const baseBranch  = parsed['--base-branch'] ?? null;
-const explicitAgentId = parsed['--agent'] ?? null;
+const skill       = values['--skill'];
+const prompt      = values['--prompt'];
+const issue       = values['--issue'];
+const description = values['--description'];
+const repo        = values['--repo'];
+const workspace   = values['--workspace'] ?? process.cwd();
+const baseBranch  = values['--base-branch'];
+const explicitAgentId = values['--agent'];
 
 // --- バリデーション ---
 const resetCmd = `node "${resolve(__dirname, 'reset-session.js')}" --workspace "${workspace}"`;
@@ -400,4 +388,4 @@ console.log(workerName);
 
 } // require.main === module
 
-module.exports = { buildWorkerEntry, parseArgs };
+module.exports = { buildWorkerEntry };

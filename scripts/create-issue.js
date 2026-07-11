@@ -10,6 +10,7 @@ const { spawnSync } = require('./child-process');
 const fs = require('fs');
 const path = require('path');
 const { toWinPath } = require('./win-path');
+const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 
 const USAGE = `create-issue.js — GitHub Issue を作成し、body-file を必ず削除する
 
@@ -26,41 +27,29 @@ Output (stdout):
 body-file は常にこのスクリプトが削除する。呼び出し側は削除を意識しなくてよい。
 gh issue create が失敗した場合は body-file を残す（原案を失わないため）。`;
 
-// argv を1回だけ順に走査し、各フラグが消費した値をフラグ判定の対象から除外する。
-// これをしないと --title '--help' のような値そのものが誤ってフラグとして解釈される。
-function parseArgs(argv) {
-  let help = false;
-  let title, bodyFile, repo;
-  const positionals = [];
-
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--help' || a === '-h') {
-      help = true;
-    } else if (a === '--title') {
-      title = argv[++i];
-    } else if (a === '--body-file') {
-      bodyFile = argv[++i];
-    } else if (a === '--repo') {
-      repo = argv[++i];
-    } else {
-      positionals.push(a);
-    }
-  }
-
-  return { help, title, bodyFile, repo, positionals };
-}
-
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { help, title, bodyFile, repo, positionals } = parseArgs(argv);
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--title', '--body-file', '--repo']);
 
-  if (help) {
+  // exitFlagMiss（値欠落）を先に判定する。フラグの値が欠落した場合、その
+  // 未消費トークンが rest に残るため、それがたまたま "--help" と一致すると
+  // 後段の hasHelpFlag チェックが誤って help 扱いしてしまう。値欠落は常に
+  // エラー優先（フェイルクローズ）とし、help 判定より先に確定させる。
+  if (exitFlagMiss) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+
+  if (hasHelpFlag(rest)) {
     console.log(USAGE);
     process.exit(0);
   }
 
-  if (!title || !bodyFile || positionals.length > 0) {
+  const title = values['--title'];
+  const bodyFile = values['--body-file'];
+  const repo = values['--repo'];
+
+  if (!title || !bodyFile || rest.length > 0) {
     console.error(USAGE);
     process.exit(1);
   }
@@ -90,5 +79,3 @@ if (require.main === module) {
 
   console.log(`ISSUE_CREATED:${number} ${url}`);
 }
-
-module.exports = { parseArgs };

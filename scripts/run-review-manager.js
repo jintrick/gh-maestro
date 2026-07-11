@@ -9,6 +9,7 @@ const { spawnSync } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 const { assertValidPr, reviewArtifactPath } = require('./shared/review-manager-paths');
+const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 
 const USAGE = `run-review-manager.js — Review Managerをheadless起動してPRレビューを実行する
 
@@ -118,39 +119,28 @@ function writeRunMetadata(metaFile, mode, directedBrief) {
   fs.writeFileSync(metaFile, JSON.stringify(metadata, null, 2), 'utf8');
 }
 
-// argv を1回だけ順に走査し、各フラグが消費した値をフラグ判定・位置引数の対象から除外する。
-// これをしないと --brief-file '--help' のような値そのものが誤ってフラグとして解釈される。
-function parseArgs(argv) {
-  let help = false;
-  let mode, briefFile;
-  const positional = [];
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--help' || a === '-h') {
-      help = true;
-    } else if (a === '--mode') {
-      mode = argv[++i];
-    } else if (a === '--brief-file') {
-      briefFile = argv[++i];
-    } else {
-      positional.push(a);
-    }
-  }
-  return { help, mode, briefFile, positional };
-}
-
-module.exports = { resolveMode, buildPrompt, digestText, writeRunMetadata, parseArgs };
+module.exports = { resolveMode, buildPrompt, digestText, writeRunMetadata };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { help, mode: modeArg, briefFile: briefFileArg, positional } = parseArgs(argv);
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--mode', '--brief-file']);
 
-  if (help) {
+  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
+  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
+  // 値欠落は常にエラー優先（フェイルクローズ）とする。
+  if (exitFlagMiss) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+
+  if (hasHelpFlag(rest)) {
     console.log(USAGE);
     process.exit(0);
   }
 
-  const [pr, repo, workspace] = positional;
+  const modeArg = values['--mode'];
+  const briefFileArg = values['--brief-file'];
+  const [pr, repo, workspace] = rest;
 
   if (!pr || !repo || !workspace) {
     console.error(USAGE);

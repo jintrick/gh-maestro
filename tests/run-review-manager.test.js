@@ -9,7 +9,9 @@ const os = require('os');
 // run-review-manager.js の CLI 実行部は require.main === module でガードされているため、
 // require するだけでは実プロセスをspawnしない
 // （.claude/rules/test-process-spawn-safety.md 準拠）。
-const { resolveMode, buildPrompt, digestText, writeRunMetadata, parseArgs } = require('../scripts/run-review-manager');
+const { resolveMode, buildPrompt, digestText, writeRunMetadata } = require('../scripts/run-review-manager');
+const { spawnSync } = require('child_process');
+const SCRIPT = path.join(__dirname, '..', 'scripts', 'run-review-manager.js');
 
 const tmpBase = path.join(os.tmpdir(), 'gh-maestro-test-run-rm-' + Date.now());
 
@@ -107,32 +109,22 @@ test('writeRunMetadata records a brief digest (not raw text) for directed runs',
   assert.equal(JSON.stringify(meta).includes(brief), false);
 });
 
-// ── parseArgs ────────────────────────────────────────────────────────────
+// ── CLI引数パース（scripts/shared/workspace.js の parseFlags に委譲） ─────────
+// parseFlags 自体の網羅的なエッジケースは tests/workspace.test.js でカバー済み。
+// ここでは実際のCLI起動でフラグ/値衝突が安全に処理される（誤ってhelp表示にならない）
+// ことだけをサブプロセス経由で確認する。
 
-test('parseArgs: 位置引数とフラグを通常どおりパースする', () => {
-  const r = parseArgs(['5', 'o/r', 'C:\\ws', '--mode', 'directed', '--brief-file', '/tmp/b.md']);
-  assert.equal(r.help, false);
-  assert.equal(r.mode, 'directed');
-  assert.equal(r.briefFile, '/tmp/b.md');
-  assert.deepEqual(r.positional, ['5', 'o/r', 'C:\\ws']);
+test('サブプロセス経由: --help は終了コード0でUsageを表示する', () => {
+  const r = spawnSync(process.execPath, [SCRIPT, '--help'], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /run-review-manager\.js/);
 });
 
-test('parseArgs: --help はヘルプフラグとして認識される', () => {
-  const r = parseArgs(['--help']);
-  assert.equal(r.help, true);
-});
-
-test('parseArgs: --brief-file の値が"--help"文字列でもフラグとして誤解釈しない', () => {
-  const r = parseArgs(['5', 'o/r', 'C:\\ws', '--brief-file', '--help']);
-  assert.equal(r.help, false);
-  assert.equal(r.briefFile, '--help');
-  assert.deepEqual(r.positional, ['5', 'o/r', 'C:\\ws']);
-});
-
-test('parseArgs: --mode の値が"--brief-file"文字列でも別フラグとして誤解釈しない', () => {
-  const r = parseArgs(['--mode', '--brief-file', '--brief-file', 'x']);
-  assert.equal(r.mode, '--brief-file');
-  assert.equal(r.briefFile, 'x');
+test('サブプロセス経由: --brief-file の値が"--help"文字列だと値欠落エラーとなり、誤ってhelp表示にならない', () => {
+  const r = spawnSync(process.execPath, [SCRIPT, '5', 'o/r', 'C:\\ws', '--brief-file', '--help'], { encoding: 'utf8' });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /Usage/);
+  assert.equal(r.stdout, '');
 });
 
 test('writeRunMetadata does not touch any findings output file', () => {

@@ -17,6 +17,7 @@ const { normalizeWorkerEntry } = require('./worker-entry');
 const { killProcessTree } = require('./kill-tree');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { sweepRegistry } = require('./process-lifecycle');
+const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
 
@@ -29,34 +30,23 @@ Options:
 workers.json の破損・pane 消滅・worktree 残骸など、どんな状態からでもできる限り
 クリーンアップしてから終了する（途中エラーで止まらない）。`;
 
-// argv を1回だけ順に走査し、--workspace が消費した値をフラグ判定の対象から除外する。
-// これをしないと --workspace '--quiet' のような値そのものが誤ってフラグとして解釈される。
-function parseArgs(argv) {
-  let help = false;
-  let quiet = false;
-  let workspace;
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--help' || a === '-h') {
-      help = true;
-    } else if (a === '--quiet') {
-      quiet = true;
-    } else if (a === '--workspace') {
-      workspace = argv[++i];
-    }
-  }
-  return { help, quiet, workspace };
-}
-
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const parsedArgs = parseArgs(argv);
-  if (parsedArgs.help) {
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace'], ['--quiet']);
+
+  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
+  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
+  // 値欠落は常にエラー優先（フェイルクローズ）とする。
+  if (exitFlagMiss) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+  if (hasHelpFlag(rest)) {
     console.log(USAGE);
     process.exit(0);
   }
-  const workspace = parsedArgs.workspace ?? process.cwd();
-  const quiet = parsedArgs.quiet;
+  const workspace = values['--workspace'] ?? process.cwd();
+  const quiet = values['--quiet'] === true;
 
   const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
   const worktreesDir = resolve(workspace, '.gh-maestro', 'worktrees');
@@ -530,5 +520,3 @@ if (require.main === module) {
     log('全項目正常に完了しました。');
   }
 }
-
-module.exports = { parseArgs };

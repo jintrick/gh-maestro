@@ -7,7 +7,7 @@
 
 const { spawnSync } = require('./child-process');
 const { startReviewManager } = require('./start-review-manager');
-const { resolveWorkspace } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -36,43 +36,34 @@ PR が見つかるまでブロックし、見つけたら Review Manager(start-r
 ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
 消滅時はPID registryを解除して自動exitする。`;
 
-// argv を1回だけ順に走査し、各フラグが消費した値をフラグ判定・位置引数の対象から除外する。
-// これをしないと --workspace '--help' のような値そのものが誤ってフラグとして解釈される。
-function parseArgs(argv) {
-  let help = false;
-  let workspace, sessionPid;
-  const positional = [];
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--help' || a === '-h') {
-      help = true;
-    } else if (a === '--workspace') {
-      workspace = argv[++i];
-    } else if (a === '--session-pid') {
-      sessionPid = argv[++i];
-    } else {
-      positional.push(a);
-    }
-  }
-  return { help, workspace, sessionPid, positional };
-}
-
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { help, workspace: workspaceArg, sessionPid: sessionPidArg, positional } = parseArgs(argv);
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--session-pid']);
 
-  if (help) {
+  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
+  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
+  // 値欠落は常にエラー優先（フェイルクローズ）とする。
+  if (exitFlagMiss) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+
+  if (hasHelpFlag(rest)) {
     console.log(USAGE);
     process.exit(0);
   }
 
-  const [issue, intervalArg] = positional;
-  const interval = parseInt(intervalArg || '30') * 1000;
+  const workspaceArg = values['--workspace'];
+  const sessionPidArg = values['--session-pid'];
+
+  const [issue, intervalArg] = rest;
 
   if (!issue) {
     console.error(USAGE);
     process.exit(1);
   }
+
+  const interval = parseInt(intervalArg || '30') * 1000;
 
   const workspace = resolveWorkspace(workspaceArg);
   if (!workspace) {
@@ -137,5 +128,3 @@ if (require.main === module) {
     }
   })();
 }
-
-module.exports = { parseArgs };

@@ -11,6 +11,7 @@
 const { spawnSync } = require('./child-process');
 const fs = require('fs');
 const path = require('path');
+const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -41,35 +42,25 @@ PR_MERGED を検出するまで永続的にポーリングする。
 ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
 消滅時はPID registryを解除して自動exitする。`;
 
-// argv を1回だけ順に走査し、--session-pid が消費した値をフラグ判定・位置引数の対象から除外する。
-// これをしないと --session-pid '--help' のような値そのものが誤ってフラグとして解釈される。
-function parseArgs(argv) {
-  let help = false;
-  let sessionPid;
-  const positional = [];
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--help' || a === '-h') {
-      help = true;
-    } else if (a === '--session-pid') {
-      sessionPid = argv[++i];
-    } else {
-      positional.push(a);
-    }
-  }
-  return { help, sessionPid, positional };
-}
-
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { help, sessionPid: sessionPidArg, positional } = parseArgs(argv);
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--session-pid']);
 
-  if (help) {
+  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
+  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
+  // 値欠落は常にエラー優先（フェイルクローズ）とする。
+  if (exitFlagMiss) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+
+  if (hasHelpFlag(rest)) {
     console.log(USAGE);
     process.exit(0);
   }
 
-  const [pr, workspace, intervalArg] = positional;
+  const sessionPidArg = values['--session-pid'];
+  const [pr, workspace, intervalArg] = rest;
   const intervalSec = parseInt(intervalArg || '30');
 
   if (!pr) {
@@ -190,5 +181,3 @@ if (require.main === module) {
     }
   })();
 }
-
-module.exports = { parseArgs };

@@ -532,35 +532,24 @@ test('CLI_USAGE: 文字列が定義されている', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// parseCliArgs（純粋関数、spawn不要）
+// CLI引数パース（scripts/shared/workspace.js の parseFlags に委譲）
+// parseFlags 自体の網羅的なエッジケースは tests/workspace.test.js でカバー済み。
+// ここでは実際のCLI起動でフラグ/値衝突が安全に処理される
+// （誤ってhelp表示にならない）ことだけをサブプロセス経由で確認する。
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('parseCliArgs: sub コマンドとフラグを通常どおりパースする', () => {
-  const plc = loadModule();
-  const r = plc.parseCliArgs(['sweep', '--workspace', '/ws', '--worker-name', 'issue-1-test', '--dry-run']);
-  assert.equal(r.help, false);
-  assert.equal(r.dryRun, true);
-  assert.equal(r.workspace, '/ws');
-  assert.equal(r.workerName, 'issue-1-test');
-  assert.deepEqual(r.positional, ['sweep']);
+const SCRIPT = path.join(__dirname, '..', 'scripts', 'process-lifecycle.js');
+
+test('サブプロセス経由: --help は終了コード0でCLI_USAGEを表示する', () => {
+  const { spawnSync } = require('child_process');
+  const r = spawnSync(process.execPath, [SCRIPT, '--help'], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /sweep/);
 });
 
-test('parseCliArgs: --help はヘルプフラグとして認識される', () => {
-  const plc = loadModule();
-  const r = plc.parseCliArgs(['--help']);
-  assert.equal(r.help, true);
-});
-
-test('parseCliArgs: --worker-name の値が"--help"文字列でもフラグとして誤解釈しない', () => {
-  const plc = loadModule();
-  const r = plc.parseCliArgs(['sweep', '--workspace', '/ws', '--worker-name', '--help']);
-  assert.equal(r.help, false);
-  assert.equal(r.workerName, '--help');
-});
-
-test('parseCliArgs: --workspace の値が"--dry-run"文字列でも別フラグとして誤解釈しない', () => {
-  const plc = loadModule();
-  const r = plc.parseCliArgs(['sweep', '--workspace', '--dry-run']);
-  assert.equal(r.workspace, '--dry-run');
-  assert.equal(r.dryRun, false);
+test('サブプロセス経由: --workspace の値が"--help"文字列だと値欠落エラーとなり、誤ってhelp表示にならない', () => {
+  const { spawnSync } = require('child_process');
+  const r = spawnSync(process.execPath, [SCRIPT, 'sweep', '--workspace', '--help'], { encoding: 'utf8' });
+  assert.notEqual(r.status, 0);
+  assert.equal(r.stdout, '');
 });
