@@ -44,10 +44,10 @@ agents:
 
         手順: `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE --wait {{INBOX_POLL_INTERVAL_SECONDS}}` をフォアグラウンドで実行し、完了を待つ（`npm test` 等の実行完了を待つのと同じ扱い。他のツールを呼んではならない）。
 
-        このコマンドは、新着メッセージを検出するか {{INBOX_POLL_INTERVAL_SECONDS}} 秒経過するかのいずれか早い方で自然に終了する（内部的には既定間隔でリトライする）。実行中は PID registry に自己登録されるため、外部から生存を検知できる。
+        このコマンドは、新着メッセージを1件検出するか {{INBOX_POLL_INTERVAL_SECONDS}} 秒経過するかのいずれか早い方で自然に終了する（内部的には既定間隔でリトライする）。1回の呼び出しで返る `NEW_MESSAGE` は常に高々1件（複数件たまっていても最も古い1件のみ）。実行中は PID registry に自己登録されるため、外部から生存を検知できる。
 
         結果の処理：
-        - 出力に `NEW_MESSAGE:<commentId>` が1件以上含まれる場合 → 出力された**全ての** `NEW_MESSAGE:<commentId>` 行それぞれについて `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。1件でも処理し残すと、msg-poll.js側は出力済みの全IDを既読として永続化するため、その未処理分は再取得できず失われる。全件処理し、`msg-send.js` で結果を返信してから、次の作業の区切りで再度この手順を呼び出す
+        - 出力に `NEW_MESSAGE:<commentId>` が出力されている場合 → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。`msg-send.js` で結果を返信してから、次の作業の区切りで再度この手順を呼び出す（未処理分が残っていれば次回の呼び出しで改めて返される）
         - 新着なし（タイムアウトで終了）の場合 → 何もせず、次の作業の区切りで再度この手順を呼び出す
   codex:
     skill_files_install_destination_directory: ~/.agents/skills
