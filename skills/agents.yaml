@@ -40,13 +40,15 @@ agents:
         - `PR_REVIEW:<user>:COMMENTED:<body>` → PR_COMMENTと同様にトリアージする
       INBOX_POLL_INTERVAL_SECONDS: 60
       INBOX_POLL_MECHANISM: |
-        ワーカー本体が直接 `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE --wait {{INBOX_POLL_INTERVAL_SECONDS}}` をフォアグラウンドで実行し、完了を待つ（`npm test` 等の実行完了を待つのと同じ扱い。他のツールを呼んではならない）。
+        以下はinbox確認の手順定義であり、今すぐ実行するものではない。**本来の作業（Issueの実装等）に着手した後**、作業の合間・区切りのタイミングで都度この手順を呼び出すこと。作業開始前にこれを先に実行して待機してはならない。
+
+        手順: `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE --wait {{INBOX_POLL_INTERVAL_SECONDS}}` をフォアグラウンドで実行し、完了を待つ（`npm test` 等の実行完了を待つのと同じ扱い。他のツールを呼んではならない）。
 
         このコマンドは、新着メッセージを検出するか {{INBOX_POLL_INTERVAL_SECONDS}} 秒経過するかのいずれか早い方で自然に終了する（内部的には既定間隔でリトライする）。実行中は PID registry に自己登録されるため、外部から生存を検知できる。
 
         結果の処理：
-        - 出力に `NEW_MESSAGE:<commentId>` が含まれる場合 → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。処理後は必ず `msg-send.js` で結果を返信し、再度同じ `msg-poll.js --wait` コマンドを呼び出して待機を再開する
-        - 新着なし（タイムアウトで終了）の場合 → 何もせず、再度同じ `msg-poll.js --wait` コマンドを呼び出して待機を再開する
+        - 出力に `NEW_MESSAGE:<commentId>` が1件以上含まれる場合 → 出力された**全ての** `NEW_MESSAGE:<commentId>` 行それぞれについて `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。1件でも処理し残すと、msg-poll.js側は出力済みの全IDを既読として永続化するため、その未処理分は再取得できず失われる。全件処理し、`msg-send.js` で結果を返信してから、次の作業の区切りで再度この手順を呼び出す
+        - 新着なし（タイムアウトで終了）の場合 → 何もせず、次の作業の区切りで再度この手順を呼び出す
   codex:
     skill_files_install_destination_directory: ~/.agents/skills
     skill_markdown_template_placeholder_substitutions:

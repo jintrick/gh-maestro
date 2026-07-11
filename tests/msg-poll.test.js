@@ -876,6 +876,52 @@ test('runWaitMode: 新着が無ければ waitMs 経過後に false を返す（�
   });
 });
 
+test('scanOnce: maxGhTimeoutMs を渡すと gh 呼び出しの timeout オプションが残り時間に絞り込まれる', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    let capturedOpts = null;
+    msgPoll._setGhApiComments((repo, issue, since, opts) => {
+      capturedOpts = opts;
+      return { status: 0, stdout: JSON.stringify([]) };
+    });
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    r.scanOnce({ maxGhTimeoutMs: 2000 });
+    assert.equal(capturedOpts.timeout, 2000);
+  });
+});
+
+test('scanOnce: maxGhTimeoutMs が小さすぎても最低1000msは確保される', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    let capturedOpts = null;
+    msgPoll._setGhApiComments((repo, issue, since, opts) => {
+      capturedOpts = opts;
+      return { status: 0, stdout: JSON.stringify([]) };
+    });
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    r.scanOnce({ maxGhTimeoutMs: 10 });
+    assert.equal(capturedOpts.timeout, 1000);
+  });
+});
+
+test('scanOnce: maxGhTimeoutMs 未指定時は既定の GH_TIMEOUT_MS 相当（timeoutキーなし）', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    let capturedOpts = null;
+    msgPoll._setGhApiComments((repo, issue, since, opts) => {
+      capturedOpts = opts;
+      return { status: 0, stdout: JSON.stringify([]) };
+    });
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    r.scanOnce();
+    assert.equal(capturedOpts.timeout, undefined);
+    assert.equal(capturedOpts.cwd, workspace);
+  });
+});
+
 // ── reset mocks ─────────────────────────────────────────────────────────────
 
 msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));

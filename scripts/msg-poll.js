@@ -297,8 +297,19 @@ function main(argsOverride, opts = {}) {
 
   /**
    * 1回のスキャン。
+   *
+   * @param {{ maxGhTimeoutMs?: number }} [opts]  gh 呼び出しの上限タイムアウト（ms）。
+   *   --wait モードで締切間際に呼ばれた場合、既定の GH_TIMEOUT_MS（30秒）を待つと
+   *   --wait で指定した秒数を大幅に超過しうるため、残り時間に応じて上限を絞り込む。
+   *   （最低 1000ms は確保する。0 以下を spawnSync の timeout に渡すとタイムアウトが
+   *   無効化されてしまうため）
    */
-  function scanOnce() {
+  function scanOnce(opts = {}) {
+    const { maxGhTimeoutMs } = opts;
+    const callOpts = maxGhTimeoutMs != null
+      ? { cwd: workspace, timeout: Math.min(GH_TIMEOUT_MS, Math.max(1000, maxGhTimeoutMs)) }
+      : ghOpts;
+
     // dead-man's switch: 親が死んでいたら cleanup して exit
     if (!checkParent()) {
       lifecycleCleanup(workspace);
@@ -338,7 +349,7 @@ function main(argsOverride, opts = {}) {
 
       for (const issue of issues) {
         const issueSince = typeof state.since[issue] === 'string' ? state.since[issue] : null;
-        const result = _ghApiComments(repo, issue, issueSince, ghOpts);
+        const result = _ghApiComments(repo, issue, issueSince, callOpts);
         if (result.status !== 0) {
           const errMsg = result.error && result.error.code === 'ETIMEDOUT'
             ? `gh api タイムアウト (issue ${issue})`
@@ -364,7 +375,7 @@ function main(argsOverride, opts = {}) {
     } else {
       // worker モード: state.since は文字列
       const workerSince = typeof state.since === 'string' ? state.since : null;
-      const result = _ghApiComments(repo, issueArg, workerSince, ghOpts);
+      const result = _ghApiComments(repo, issueArg, workerSince, callOpts);
       if (result.status !== 0) {
         const errMsg = result.error && result.error.code === 'ETIMEDOUT'
           ? 'gh api タイムアウト'
@@ -461,7 +472,7 @@ let _sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * --wait モード: 新着メッセージを検出するか waitMs が経過するまで、
  * scanOnce を intervalMs 間隔でリトライする。
  *
- * @param {{ scanOnce: () => void, lines: string[], intervalMs: number, waitMs: number }} result
+ * @param {{ scanOnce: (opts?: { maxGhTimeoutMs?: number }) => void, lines: string[], intervalMs: number, waitMs: number }} result
  *   main() の戻り値（waitMode: true のもの）
  * @returns {Promise<boolean>} 新着を検出すれば true、タイムアウトなら false
  */
@@ -470,7 +481,9 @@ async function runWaitMode(result) {
   const start = Date.now();
   while (true) {
     const before = lines.length;
-    scanOnce();
+    // gh 呼び出しの上限を残り時間に絞り、--wait の締切超過を最小化する
+    const remainingForGh = Math.max(0, waitMs - (Date.now() - start));
+    scanOnce({ maxGhTimeoutMs: remainingForGh });
     if (lines.length > before) return true;
     const elapsed = Date.now() - start;
     if (elapsed >= waitMs) return false;
