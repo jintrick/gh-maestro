@@ -205,8 +205,18 @@ function ensureDevBranch() {
         '   git checkout -b dev <デフォルトブランチ名> && git push -u origin dev',
       );
     }
-    run('git', ['push', '-u', 'origin', 'dev']);
   }
+
+  // ローカルに dev ブランチがあっても origin/dev が無いことがある
+  // （初回セットアップ時の push 失敗・オフライン実行等）。毎回リモートの
+  // 存在を確認し、無ければ再度 push を試みる。
+  const remoteDev = run('git', ['ls-remote', '--heads', 'origin', 'dev'], { capture: true });
+  if (!remoteDev) {
+    if (!run('git', ['push', '-u', 'origin', 'dev'])) {
+      console.warn("  [warn] 'dev' ブランチのリモートへのpushに失敗しました。手動で実行してください: git push -u origin dev");
+    }
+  }
+
   ok("Branch 'dev' exists");
 }
 
@@ -249,7 +259,11 @@ function ensurePreCommitHook() {
       // could match an unrelated block ahead of the correct one.
       lines.splice(markerIdx, 4, ...entry);
       writeFileSync(hookPath, lines.join('\n'), 'utf8');
-      try { chmodSync(hookPath, 0o755); } catch {}
+      try {
+        chmodSync(hookPath, 0o755);
+      } catch {
+        console.warn('  [warn] pre-commitフックの実行権限設定に失敗しました。手動で chmod +x を実行してください。');
+      }
       ok('pre-commit hook updated: sync-rules entry upgraded');
       return;
     }
@@ -259,7 +273,11 @@ function ensurePreCommitHook() {
   } else {
     writeFileSync(hookPath, `#!/bin/sh\n${entry.join('\n')}\n`, 'utf8');
   }
-  try { chmodSync(hookPath, 0o755); } catch {}
+  try {
+    chmodSync(hookPath, 0o755);
+  } catch {
+    console.warn('  [warn] pre-commitフックの実行権限設定に失敗しました。手動で chmod +x を実行してください。');
+  }
   ok(`pre-commit hook installed: ${hookPath}`);
 }
 
