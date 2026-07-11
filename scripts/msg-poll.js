@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // msg-poll.js — GitHub Issue コメントをポーリングして新着メッセージを stdout に通知する
 //
-// Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once]
+// Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once | --wait <sec>]
 //
 // Output (stdout):
 //   worker mode:       NEW_MESSAGE:<commentId>
@@ -36,7 +36,7 @@ const MAX_SEEN_IDS = 100;
 
 const USAGE = `msg-poll.js — GitHub Issue コメントを定期スキャンし新着メッセージを stdout に通知する
 
-Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once] [--session-pid <pid>] [--force]
+Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once | --wait <sec>] [--session-pid <pid>] [--force]
 
 Arguments:
   <self>                 自分の名前（worker 名、または "orchestrator"）
@@ -46,9 +46,14 @@ Options:
   --workspace <path>     ワークスペースパス（省略時は環境変数またはCWDから解決）
   --interval <sec>       ポーリング間隔（秒、既定: ${DEFAULT_INTERVAL_SEC}）
   --once                 1回だけスキャンして終了する（継続ポーリングしない）
+  --wait <sec>           新着メッセージが見つかるか、指定秒数が経過するまでフォアグラウンドで
+                          待機する（内部的には --interval 秒間隔でリトライする）。新着を検出した
+                          時点、またはタイムアウト時点のいずれか早い方で exit code 0 で終了する。
+                          --once と同時指定はできない（エラー終了する）。
+                          継続モードと同様にPID registryへ自己登録し、終了時に解除する。
   --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
   --force                同じ self を既に監視している生存プロセスがいても起動を強制する
-                          （継続モードのみ有効。既定では多重起動を検知して exit 1 する）
+                          （継続モード・--wait モードのみ有効。既定では多重起動を検知して exit 1 する）
 
 Output (stdout):
   新着メッセージを1行ずつ出力:
@@ -56,13 +61,13 @@ Output (stdout):
     orchestrator モード: NEW_MESSAGE:<issue>:<commentId>
 
 このスクリプトはエージェントのターン内で blocking 実行される。detached 起動しない。
-カーソルは .gh-maestro/msg-state/<self>.json に永続化され、--once の繰り返し実行でも二重通知しない。
+カーソルは .gh-maestro/msg-state/<self>.json に永続化され、--once/--wait の繰り返し実行でも二重通知しない。
 state ファイルが壊れている・存在しない場合は「過去メッセージの再通知」として扱う。
 gh 呼び出し失敗（ネットワーク断・rate limit 等）はそのサイクルをスキップし次サイクルへ継続する。
 
 ライフサイクル管理:
   ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
-  消滅時はPID registryを解除して自動exitする。起動時にPID registryへ自己登録する。`;
+  消滅時はPID registryを解除して自動exitする。継続モード・--wait モードは起動時にPID registryへ自己登録する。`;
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -142,7 +147,7 @@ function parseMarker(body) {
  *   help: boolean, exitFlagMiss: boolean,
  *   self?: string, issueArg?: string|null, workspaceArg?: string|null,
  *   intervalArg?: string|null, sessionPidArg?: string|null,
- *   onceMode?: boolean, force?: boolean,
+ *   onceMode?: boolean, force?: boolean, waitArg?: string|null,
  * }}
  */
 function parseArgs(args) {
@@ -150,7 +155,7 @@ function parseArgs(args) {
     return { help: true, exitFlagMiss: false };
   }
 
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue', '--interval', '--session-pid']);
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue', '--interval', '--session-pid', '--wait']);
   if (exitFlagMiss) {
     return { help: false, exitFlagMiss: true };
   }
@@ -169,6 +174,7 @@ function parseArgs(args) {
     sessionPidArg: values['--session-pid'],
     onceMode,
     force,
+    waitArg: values['--wait'],
   };
 }
 
@@ -216,7 +222,25 @@ function main(argsOverride, opts = {}) {
     return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
   }
 
-  const { self, issueArg, onceMode, force } = parsed;
+  const { self, issueArg, onceMode, force, waitArg } = parsed;
+
+  if (onceMode && waitArg != null) {
+    writeErr('msg-poll: --once と --wait は同時指定できません。');
+    writeErr(USAGE);
+    return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
+  }
+
+  const waitMode = !onceMode && waitArg != null;
+  let waitMs = 0;
+  if (waitMode) {
+    const parsedWait = parseInt(waitArg, 10);
+    if (!Number.isFinite(parsedWait) || parsedWait <= 0) {
+      writeErr(`msg-poll: --wait には正の整数（秒）を指定してください: ${waitArg}`);
+      writeErr(USAGE);
+      return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
+    }
+    waitMs = parsedWait * 1000;
+  }
 
   if (!self) {
     writeErr(USAGE);
@@ -424,7 +448,35 @@ function main(argsOverride, opts = {}) {
     sessionPid,
     self,
     force,
+    waitMode,
+    waitMs,
   };
+}
+
+// ── --wait モード ────────────────────────────────────────────────────────
+
+let _sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * --wait モード: 新着メッセージを検出するか waitMs が経過するまで、
+ * scanOnce を intervalMs 間隔でリトライする。
+ *
+ * @param {{ scanOnce: () => void, lines: string[], intervalMs: number, waitMs: number }} result
+ *   main() の戻り値（waitMode: true のもの）
+ * @returns {Promise<boolean>} 新着を検出すれば true、タイムアウトなら false
+ */
+async function runWaitMode(result) {
+  const { scanOnce, lines, intervalMs, waitMs } = result;
+  const start = Date.now();
+  while (true) {
+    const before = lines.length;
+    scanOnce();
+    if (lines.length > before) return true;
+    const elapsed = Date.now() - start;
+    if (elapsed >= waitMs) return false;
+    const remaining = waitMs - elapsed;
+    await _sleep(Math.min(intervalMs, remaining));
+  }
 }
 
 // ── CLI エントリポイント ──────────────────────────────────────────────────
@@ -433,9 +485,10 @@ if (require.main === module) {
   const rawArgs = process.argv.slice(2);
   // main() と同じ parseArgs() を再利用する（解析ロジックを2箇所に分けない）。
   const parsedForCli = parseArgs(rawArgs);
-  const isContinuous = !parsedForCli.help && !parsedForCli.exitFlagMiss && !parsedForCli.onceMode;
+  const isWait = !parsedForCli.help && !parsedForCli.exitFlagMiss && !parsedForCli.onceMode && parsedForCli.waitArg != null;
+  const isContinuous = !parsedForCli.help && !parsedForCli.exitFlagMiss && !parsedForCli.onceMode && !isWait;
 
-  // ── 単一起動ロック + 多重起動検知（継続モードのみ、main() 本体の gh 呼び出しより前に行う） ──
+  // ── 単一起動ロック + 多重起動検知（継続モード・--wait モードのみ、main() 本体の gh 呼び出しより前に行う） ──
   // main() は self/workspace 解決の直後に gh repo view を実行するため、
   // ここで先にロック取得・重複検知を行う（無駄な gh 呼び出しを避ける）。
   //
@@ -453,7 +506,7 @@ if (require.main === module) {
     }
   }
 
-  if (isContinuous && !parsedForCli.force && parsedForCli.self) {
+  if ((isContinuous || isWait) && !parsedForCli.force && parsedForCli.self) {
     const preWorkspace = resolveWorkspace(parsedForCli.workspaceArg);
     if (preWorkspace) {
       const workerNameForRegistry = parsedForCli.self !== 'orchestrator' ? parsedForCli.self : null;
@@ -482,8 +535,8 @@ if (require.main === module) {
     }
   }
 
-  // 継続モードでは scanOnce の出力をリアルタイムに stdout へ流す
-  const result = main(undefined, { streamOutput: isContinuous });
+  // 継続モード・--wait モードでは scanOnce の出力をリアルタイムに stdout へ流す
+  const result = main(undefined, { streamOutput: isContinuous || isWait });
 
   // 初期エラー／help はここで出力
   for (const l of result.errLines) process.stderr.write(l + '\n');
@@ -511,7 +564,7 @@ if (require.main === module) {
     process.exit(0);
   }
 
-  // ── PID registry に自己登録（継続モードのみ） ──────────────────────
+  // ── PID registry に自己登録（継続モード・--wait モード） ────────────
   // worker モードの場合は workerName を含めて登録する。
   // これにより remove-worker.js の sweep が entry.workerName でマッチできる。
 
@@ -523,6 +576,25 @@ if (require.main === module) {
   // registry への登録が完了したので単一起動ロックを解放する
   // （以後の重複検知は registry の生存確認だけで足りる）
   releaseCliLock();
+
+  if (result.waitMode) {
+    // --wait モード: 新着検出 or タイムアウトのいずれか早い方で exit 0 する。
+    // streamOutput が true なので scanOnce の出力は直接 stdout へ出る。
+    function cleanupWait() {
+      lifecycleCleanup(result.workspace);
+      releaseCliLock();
+    }
+
+    process.on('SIGINT', () => { cleanupWait(); process.exit(0); });
+    process.on('SIGTERM', () => { cleanupWait(); process.exit(0); });
+
+    runWaitMode(result).then(() => {
+      cleanupWait();
+      process.exit(0);
+    });
+
+    return;
+  }
 
   // 継続モード: streamOutput が true なので scanOnce の出力は直接 stdout へ出る
   let intervalHandle = null;
@@ -547,7 +619,9 @@ if (require.main === module) {
 module.exports = {
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
+  _setSleep: (fn) => { _sleep = fn; },
   main,
+  runWaitMode,
   // 内部ロジックの単体テスト用
   parseArgs,
   parseMarker,
