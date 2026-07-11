@@ -24,6 +24,9 @@ const {
   resolveSessionPid,
   createDeadManSwitch,
   registerProcess,
+  findRunningInstance,
+  acquireStartupLock,
+  releaseStartupLock,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
 
@@ -33,7 +36,7 @@ const MAX_SEEN_IDS = 100;
 
 const USAGE = `msg-poll.js — GitHub Issue コメントを定期スキャンし新着メッセージを stdout に通知する
 
-Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once] [--session-pid <pid>]
+Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once] [--session-pid <pid>] [--force]
 
 Arguments:
   <self>                 自分の名前（worker 名、または "orchestrator"）
@@ -44,6 +47,8 @@ Options:
   --interval <sec>       ポーリング間隔（秒、既定: ${DEFAULT_INTERVAL_SEC}）
   --once                 1回だけスキャンして終了する（継続ポーリングしない）
   --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
+  --force                同じ self を既に監視している生存プロセスがいても起動を強制する
+                          （継続モードのみ有効。既定では多重起動を検知して exit 1 する）
 
 Output (stdout):
   新着メッセージを1行ずつ出力:
@@ -126,6 +131,47 @@ function parseMarker(body) {
   }
 }
 
+// ── 引数解析（main() と CLI プリフライトの両方から共有） ──────────────────
+
+/**
+ * CLI引数を解析する。main() と CLI エントリポイントの多重起動プリフライトチェックが
+ * 別々に parseFlags を呼び直すと解析ロジックが乖離するため、ここに一本化する。
+ *
+ * @param {string[]} args
+ * @returns {{
+ *   help: boolean, exitFlagMiss: boolean,
+ *   self?: string, issueArg?: string|null, workspaceArg?: string|null,
+ *   intervalArg?: string|null, sessionPidArg?: string|null,
+ *   onceMode?: boolean, force?: boolean,
+ * }}
+ */
+function parseArgs(args) {
+  if (args.includes('--help') || args.includes('-h')) {
+    return { help: true, exitFlagMiss: false };
+  }
+
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue', '--interval', '--session-pid']);
+  if (exitFlagMiss) {
+    return { help: false, exitFlagMiss: true };
+  }
+
+  const onceMode = rest.includes('--once');
+  const force = rest.includes('--force');
+  const positional = rest.filter(a => a !== '--once' && a !== '--force');
+
+  return {
+    help: false,
+    exitFlagMiss: false,
+    self: positional[0],
+    issueArg: values['--issue'],
+    workspaceArg: values['--workspace'],
+    intervalArg: values['--interval'],
+    sessionPidArg: values['--session-pid'],
+    onceMode,
+    force,
+  };
+}
+
 // ── メインロジック ────────────────────────────────────────────────────────
 
 /**
@@ -157,24 +203,20 @@ function main(argsOverride, opts = {}) {
   };
 
   const args = argsOverride || process.argv.slice(2);
+  const parsed = parseArgs(args);
 
-  if (args.includes('--help') || args.includes('-h')) {
+  if (parsed.help) {
     writeOut(USAGE);
     return { code: 0, lines: out, errLines: err, scanOnce: null, onceMode: true, intervalMs: 0 };
   }
 
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue', '--interval', '--session-pid']);
-
-  if (exitFlagMiss) {
+  if (parsed.exitFlagMiss) {
     writeErr('msg-poll: フラグには値が必要です。');
     writeErr(USAGE);
     return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
   }
 
-  const onceMode = rest.includes('--once');
-  const positional = rest.filter(a => a !== '--once');
-  const self = positional[0];
-  const issueArg = values['--issue'];
+  const { self, issueArg, onceMode, force } = parsed;
 
   if (!self) {
     writeErr(USAGE);
@@ -199,17 +241,17 @@ function main(argsOverride, opts = {}) {
     return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
   }
 
-  const workspace = resolveWorkspace(values['--workspace']);
+  const workspace = resolveWorkspace(parsed.workspaceArg);
   if (!workspace) {
     writeErr('msg-poll: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
     return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
   }
 
-  const intervalMs = (parseInt(values['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
+  const intervalMs = (parseInt(parsed.intervalArg || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
 
   // ── セッションPID解決（dead-man's switch） ────────────────────────────
 
-  const sessionPid = resolveSessionPid(values['--session-pid']);
+  const sessionPid = resolveSessionPid(parsed.sessionPidArg);
 
   // ── リポジトリ解決 ──────────────────────────────────────────────────
 
@@ -381,13 +423,65 @@ function main(argsOverride, opts = {}) {
     workspace,
     sessionPid,
     self,
+    force,
   };
 }
 
 // ── CLI エントリポイント ──────────────────────────────────────────────────
 
 if (require.main === module) {
-  const isContinuous = !process.argv.slice(2).includes('--once');
+  const rawArgs = process.argv.slice(2);
+  // main() と同じ parseArgs() を再利用する（解析ロジックを2箇所に分けない）。
+  const parsedForCli = parseArgs(rawArgs);
+  const isContinuous = !parsedForCli.help && !parsedForCli.exitFlagMiss && !parsedForCli.onceMode;
+
+  // ── 単一起動ロック + 多重起動検知（継続モードのみ、main() 本体の gh 呼び出しより前に行う） ──
+  // main() は self/workspace 解決の直後に gh repo view を実行するため、
+  // ここで先にロック取得・重複検知を行う（無駄な gh 呼び出しを避ける）。
+  //
+  // findRunningInstance（チェック）→ registerProcess（登録）だけでは非アトミックで、
+  // ほぼ同時に2プロセスが起動すると両方がチェックを通過しうる（TOCTOU）。
+  // acquireStartupLock で「チェック開始〜登録完了」の区間を排他化する。
+  let lockWorkspace = null;
+  let lockWorkerName = null;
+  let lockHeld = false;
+
+  function releaseCliLock() {
+    if (lockHeld && lockWorkspace !== null) {
+      releaseStartupLock(lockWorkspace, 'msg-poll.js', lockWorkerName);
+      lockHeld = false;
+    }
+  }
+
+  if (isContinuous && !parsedForCli.force && parsedForCli.self) {
+    const preWorkspace = resolveWorkspace(parsedForCli.workspaceArg);
+    if (preWorkspace) {
+      const workerNameForRegistry = parsedForCli.self !== 'orchestrator' ? parsedForCli.self : null;
+
+      if (!acquireStartupLock(preWorkspace, 'msg-poll.js', workerNameForRegistry)) {
+        process.stderr.write(
+          `msg-poll: 別のプロセスが同じ inbox（self=${parsedForCli.self}）の起動処理中です。` +
+          '少し待つか既存のMonitorを使い回してください。\n'
+        );
+        process.exit(1);
+      }
+      lockWorkspace = preWorkspace;
+      lockWorkerName = workerNameForRegistry;
+      lockHeld = true;
+
+      const dup = findRunningInstance(preWorkspace, { script: 'msg-poll.js', workerName: workerNameForRegistry });
+      if (dup) {
+        process.stderr.write(
+          `msg-poll: 重複起動を検出しました。既に pid=${dup.pid} が同じ inbox（self=${parsedForCli.self}）を監視中です。` +
+          '新規プロセスは起動しません。既存のMonitorを使い回してください。' +
+          '強制的に起動する場合は --force を指定してください。\n'
+        );
+        releaseCliLock();
+        process.exit(1);
+      }
+    }
+  }
+
   // 継続モードでは scanOnce の出力をリアルタイムに stdout へ流す
   const result = main(undefined, { streamOutput: isContinuous });
 
@@ -395,12 +489,14 @@ if (require.main === module) {
   for (const l of result.errLines) process.stderr.write(l + '\n');
 
   if (result.code !== 0) {
+    releaseCliLock();
     for (const l of result.lines) process.stdout.write(l + '\n');
     process.exit(result.code);
   }
 
   if (result.scanOnce === null) {
     // --help
+    releaseCliLock();
     for (const l of result.lines) process.stdout.write(l + '\n');
     process.exit(0);
   }
@@ -408,6 +504,7 @@ if (require.main === module) {
   const sc = result.scanOnce;
 
   if (result.onceMode) {
+    releaseCliLock();
     sc();
     // streamOutput が false なので lines に収集されている
     for (const l of result.lines) process.stdout.write(l + '\n');
@@ -423,12 +520,17 @@ if (require.main === module) {
     workerName: result.self !== 'orchestrator' ? result.self : null,
   });
 
+  // registry への登録が完了したので単一起動ロックを解放する
+  // （以後の重複検知は registry の生存確認だけで足りる）
+  releaseCliLock();
+
   // 継続モード: streamOutput が true なので scanOnce の出力は直接 stdout へ出る
   let intervalHandle = null;
 
   function cleanup() {
     if (intervalHandle) clearInterval(intervalHandle);
     lifecycleCleanup(result.workspace);
+    releaseCliLock();
     process.exit(0);
   }
 
@@ -447,6 +549,7 @@ module.exports = {
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   main,
   // 内部ロジックの単体テスト用
+  parseArgs,
   parseMarker,
   readState,
   writeState,

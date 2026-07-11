@@ -305,6 +305,234 @@ test('verifyProcessIdentity: getProcessStartTime が空文字を返した場合�
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// findRunningInstance
+// ═══════════════════════════════════════════════════════════════════════════
+// verifyProcessIdentity 経由でWMIを呼ぶため、生存PIDを扱うテストは
+// mockWmiSuccess() で決定的にする（実WMI呼び出しを回避）。
+
+test('findRunningInstance: 一致する生存エントリを返す（自PID以外・起動時刻が一致）', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+  // process.ppid は自プロセスとは別の生存プロセス（テストランナーの親）
+  const otherPid = process.ppid;
+
+  fs.writeFileSync(path.join(pidsDir, `${otherPid}.json`), JSON.stringify({
+    pid: otherPid, script: 'msg-poll.js', workerName: null, workspace, startTime: MOCK_START_TIME,
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.ok(result, 'マッチする生存エントリが見つかるはず');
+    assert.equal(result.pid, otherPid);
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, `${otherPid}.json`));
+  }
+});
+
+test('findRunningInstance: 起動時刻が一致しない（PID再利用）場合は重複とみなさない', () => {
+  // mockWmiSuccess は常に MOCK_START_TIME を返す。登録エントリのstartTimeを
+  // それとは異なる値にすることで「別プロセスが同じPIDを再利用した」状況を模擬する。
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+  const otherPid = process.ppid;
+
+  fs.writeFileSync(path.join(pidsDir, `${otherPid}.json`), JSON.stringify({
+    pid: otherPid, script: 'msg-poll.js', workerName: null, workspace,
+    startTime: '2020-01-01T00:00:00.000Z',
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.equal(result, null, 'PID再利用と判定される場合は重複として扱わない（誤って起動をブロックしない）');
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, `${otherPid}.json`));
+  }
+});
+
+test('findRunningInstance: 自PIDのエントリは除外する（自分自身は重複とみなさない）', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+
+  fs.writeFileSync(path.join(pidsDir, `${process.pid}.json`), JSON.stringify({
+    pid: process.pid, script: 'msg-poll.js', workerName: null, workspace,
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.equal(result, null, '自PIDのエントリは自分自身なので除外される（WMI呼び出しに到達する前に弾かれる）');
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, `${process.pid}.json`));
+  }
+});
+
+test('findRunningInstance: script が一致しないエントリは無視する', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+
+  fs.writeFileSync(path.join(pidsDir, '55555.json'), JSON.stringify({
+    pid: -1, script: 'poll-pr.js', workerName: null, workspace,
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.equal(result, null);
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, '55555.json'));
+  }
+});
+
+test('findRunningInstance: workerName が一致しないエントリは無視する（orchestrator/worker の混同防止）', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+
+  fs.writeFileSync(path.join(pidsDir, '44444.json'), JSON.stringify({
+    pid: process.pid, script: 'msg-poll.js', workerName: 'issue-5-implement', workspace,
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.equal(result, null, 'orchestrator(workerName:null) 検索は worker エントリと一致しない');
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, '44444.json'));
+  }
+});
+
+test('findRunningInstance: workerNameフィールド自体が欠落しているエントリもnull(orchestrator)として扱う', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+  const otherPid = process.ppid;
+
+  // workerName フィールド自体が無い（旧形式レジストリエントリを模擬）
+  fs.writeFileSync(path.join(pidsDir, `${otherPid}.json`), JSON.stringify({
+    pid: otherPid, script: 'msg-poll.js', workspace, startTime: MOCK_START_TIME,
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.ok(result, 'workerNameフィールド欠落(undefined)はnullとして扱われ、orchestrator検索にマッチするはず');
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, `${otherPid}.json`));
+  }
+});
+
+test('findRunningInstance: workspace が一致しないエントリは無視する', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+
+  fs.writeFileSync(path.join(pidsDir, '33333.json'), JSON.stringify({
+    pid: process.pid, script: 'msg-poll.js', workerName: null, workspace: '/some/other/workspace',
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.equal(result, null);
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, '33333.json'));
+  }
+});
+
+test('findRunningInstance: 生存していないPIDのエントリは無視する', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+
+  fs.writeFileSync(path.join(pidsDir, '99997.json'), JSON.stringify({
+    pid: -1, script: 'msg-poll.js', workerName: null, workspace,
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.equal(result, null);
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, '99997.json'));
+  }
+});
+
+test('findRunningInstance: registry ディレクトリが無い場合は null', () => {
+  const plc = loadModule();
+  const nonexistent = path.join(tmpBase, 'no-pids-dir-workspace');
+  const result = plc.findRunningInstance(nonexistent, { script: 'msg-poll.js', workerName: null });
+  assert.equal(result, null);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// acquireStartupLock / releaseStartupLock
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('acquireStartupLock: 未取得の場合は取得できる', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const lockPath = plc.startupLockPath(workspace, 'test-lock.js', null);
+  try {
+    const ok = plc.acquireStartupLock(workspace, 'test-lock.js', null);
+    assert.equal(ok, true);
+    assert.ok(fs.existsSync(lockPath));
+  } finally {
+    try { fs.unlinkSync(lockPath); } catch {}
+  }
+});
+
+test('acquireStartupLock: 自分自身が既に保持している場合は再取得できない（生存かつ同一性一致）', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const lockPath = plc.startupLockPath(workspace, 'test-lock.js', null);
+  try {
+    assert.equal(plc.acquireStartupLock(workspace, 'test-lock.js', null), true);
+    // 自PIDが生存かつ同一性一致のロックを保持中 → 2回目の取得は失敗する
+    assert.equal(plc.acquireStartupLock(workspace, 'test-lock.js', null, { maxRetries: 1 }), false);
+  } finally {
+    try { fs.unlinkSync(lockPath); } catch {}
+  }
+});
+
+test('acquireStartupLock: staleなロック（保持者が非生存）は奪取して取得できる', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+  const lockPath = plc.startupLockPath(workspace, 'test-lock.js', null);
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: -1, startTime: MOCK_START_TIME }));
+
+  try {
+    const ok = plc.acquireStartupLock(workspace, 'test-lock.js', null);
+    assert.equal(ok, true, '保持者が非生存のロックは奪取されるはず');
+    const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    assert.equal(holder.pid, process.pid);
+  } finally {
+    try { fs.unlinkSync(lockPath); } catch {}
+  }
+});
+
+test('releaseStartupLock: 自分が保持者なら解放する', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const lockPath = plc.startupLockPath(workspace, 'test-lock.js', null);
+  plc.acquireStartupLock(workspace, 'test-lock.js', null);
+  assert.ok(fs.existsSync(lockPath));
+
+  plc.releaseStartupLock(workspace, 'test-lock.js', null);
+  assert.ok(!fs.existsSync(lockPath));
+});
+
+test('releaseStartupLock: 自分が保持者でなければ何もしない（他プロセスのロックを誤って消さない）', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+  const lockPath = plc.startupLockPath(workspace, 'test-lock.js', null);
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid + 1, startTime: MOCK_START_TIME }));
+
+  try {
+    plc.releaseStartupLock(workspace, 'test-lock.js', null);
+    assert.ok(fs.existsSync(lockPath), '自分の保持するロックでなければ削除されない');
+  } finally {
+    try { fs.unlinkSync(lockPath); } catch {}
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // sweepRegistry
 // ═══════════════════════════════════════════════════════════════════════════
 

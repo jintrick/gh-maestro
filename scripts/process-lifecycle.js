@@ -356,6 +356,153 @@ function verifyProcessIdentity(pid, registeredMeta) {
   return { match: true };
 }
 
+/**
+ * 同一の inbox（script + workerName + workspace）を既に監視している
+ * 生存プロセスを registry から探す（非破壊・読み取り専用）。
+ *
+ * msg-poll.js 等の継続ポーリングスクリプトが、起動前に同じ監視対象の
+ * 多重起動を検知するために使う。sweepRegistry と異なり kill もファイル削除も行わない。
+ *
+ * @param {string} workspace
+ * @param {object} opts
+ * @param {string} opts.script       スクリプト名（例: "msg-poll.js"）
+ * @param {string|null} opts.workerName  worker名。orchestrator モードは null を渡す
+ * @returns {object|null} 一致する生存エントリ（最初の1件）、無ければ null
+ */
+function findRunningInstance(workspace, opts = {}) {
+  const dir = pidsDir(workspace);
+  if (!fs.existsSync(dir)) return null;
+
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  } catch {
+    return null;
+  }
+
+  for (const file of files) {
+    let entry;
+    try {
+      entry = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+    } catch {
+      continue;
+    }
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    if (opts.script && entry.script !== opts.script) continue;
+    if ((entry.workerName ?? null) !== (opts.workerName ?? null)) continue;
+    if (entry.workspace !== workspace) continue;
+
+    const entryPid = entry.pid;
+    if (!entryPid || !Number.isFinite(entryPid)) continue;
+    if (entryPid === process.pid) continue;
+    if (!isProcessAlive(entryPid)) continue;
+
+    // PID再利用対策: 生存はしているが、起動時刻が registry の記録と一致しない場合は
+    // OSが同じPIDを無関係な別プロセスに再割り当てしただけであり、重複起動ではない。
+    // ここで「重複」と誤判定すると、以後の起動が永久にブロックされてしまう
+    // （sweepRegistry と同じ verifyProcessIdentity を用いる）。
+    const identity = verifyProcessIdentity(entryPid, entry);
+    if (!identity.match) continue;
+
+    return entry;
+  }
+
+  return null;
+}
+
+// ── 単一起動ロック（check-then-register のTOCTOU対策） ─────────────────
+
+/**
+ * 単一起動ロックファイルのパスを返す。
+ * @param {string} workspace
+ * @param {string} script
+ * @param {string|null} workerName
+ * @returns {string}
+ */
+function startupLockPath(workspace, script, workerName) {
+  const key = `${script}__${workerName ?? 'orchestrator'}`;
+  return path.join(pidsDir(workspace), `.startup-lock-${key}`);
+}
+
+/**
+ * 同一 (workspace, script, workerName) の起動処理を排他制御するロックを取得する。
+ *
+ * findRunningInstance（チェック）→ registerProcess（登録）の2段階が非アトミックだと、
+ * ほぼ同時に2プロセスが起動した場合に両方がチェックを通過してしまう（TOCTOU）。
+ * このロックで「チェック開始〜登録完了」の区間を排他化する。
+ *
+ * 保持者が非生存、または同一性不一致（PID再利用）の場合は stale とみなし
+ * 自動的に奪取する。
+ *
+ * @param {string} workspace
+ * @param {string} script
+ * @param {string|null} workerName
+ * @param {object} [opts]
+ * @param {number} [opts.maxRetries] stale ロック奪取の最大リトライ回数（既定: 5）
+ * @returns {boolean} 取得できれば true
+ */
+function acquireStartupLock(workspace, script, workerName, opts = {}) {
+  const dir = pidsDir(workspace);
+  fs.mkdirSync(dir, { recursive: true });
+  const lockPath = startupLockPath(workspace, script, workerName);
+  const maxRetries = opts.maxRetries ?? 5;
+
+  const selfEntry = {
+    pid: process.pid,
+    startTime: getProcessStartTime(process.pid) || new Date().toISOString(),
+  };
+
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      fs.writeFileSync(lockPath, JSON.stringify(selfEntry), { encoding: 'utf8', flag: 'wx' });
+      return true;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+    }
+
+    let holder = null;
+    try {
+      holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    } catch {
+      holder = null;
+    }
+
+    const holderAlive = holder && Number.isFinite(holder.pid) && isProcessAlive(holder.pid);
+    const holderMatches = holderAlive && verifyProcessIdentity(holder.pid, holder).match;
+
+    if (holderMatches) {
+      // 正当な保持者がいる → 取得失敗
+      return false;
+    }
+
+    // stale ロック（保持者が非生存、または壊れている、またはPID再利用）→ 奪取して再試行
+    try { fs.unlinkSync(lockPath); } catch {}
+  }
+
+  // リトライ上限に達した（継続的な競合）→ フェイルクローズで失敗扱い
+  return false;
+}
+
+/**
+ * 自プロセスが保持している起動ロックを解放する。
+ * 自分が保持者でない場合は何もしない（他プロセスのロックを誤って消さない）。
+ *
+ * @param {string} workspace
+ * @param {string} script
+ * @param {string|null} workerName
+ */
+function releaseStartupLock(workspace, script, workerName) {
+  const lockPath = startupLockPath(workspace, script, workerName);
+  try {
+    const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    if (holder && holder.pid === process.pid) {
+      fs.unlinkSync(lockPath);
+    }
+  } catch {
+    // 読めない・存在しない → 何もしない
+  }
+}
+
 // ── Registry sweep ────────────────────────────────────────────────────
 
 /**
@@ -559,6 +706,11 @@ module.exports = {
   pidFilePath,
   registerProcess,
   unregisterProcess,
+  findRunningInstance,
+  // 単一起動ロック
+  startupLockPath,
+  acquireStartupLock,
+  releaseStartupLock,
   // 同一性確認
   verifyProcessIdentity,
   // sweep
