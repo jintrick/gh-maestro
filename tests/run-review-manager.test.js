@@ -10,6 +10,8 @@ const os = require('os');
 // require するだけでは実プロセスをspawnしない
 // （.claude/rules/test-process-spawn-safety.md 準拠）。
 const { resolveMode, buildPrompt, digestText, writeRunMetadata } = require('../scripts/run-review-manager');
+const { spawnSync } = require('child_process');
+const SCRIPT = path.join(__dirname, '..', 'scripts', 'run-review-manager.js');
 
 const tmpBase = path.join(os.tmpdir(), 'gh-maestro-test-run-rm-' + Date.now());
 
@@ -105,6 +107,24 @@ test('writeRunMetadata records a brief digest (not raw text) for directed runs',
   assert.equal(meta.mode, 'directed');
   assert.deepEqual(meta.directedBrief, digestText(brief));
   assert.equal(JSON.stringify(meta).includes(brief), false);
+});
+
+// ── CLI引数パース（scripts/shared/workspace.js の parseFlags に委譲） ─────────
+// parseFlags 自体の網羅的なエッジケースは tests/workspace.test.js でカバー済み。
+// ここでは実際のCLI起動でフラグ/値衝突が安全に処理される（誤ってhelp表示にならない）
+// ことだけをサブプロセス経由で確認する。
+
+test('サブプロセス経由: --help は終了コード0でUsageを表示する', () => {
+  const r = spawnSync(process.execPath, [SCRIPT, '--help'], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /run-review-manager\.js/);
+});
+
+test('サブプロセス経由: --brief-file の値が"--help"文字列だと値欠落エラーとなり、誤ってhelp表示にならない', () => {
+  const r = spawnSync(process.execPath, [SCRIPT, '5', 'o/r', 'C:\\ws', '--brief-file', '--help'], { encoding: 'utf8' });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /Usage/);
+  assert.equal(r.stdout, '');
 });
 
 test('writeRunMetadata does not touch any findings output file', () => {

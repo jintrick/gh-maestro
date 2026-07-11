@@ -530,3 +530,26 @@ test('CLI_USAGE: 文字列が定義されている', () => {
   assert.ok(plc.CLI_USAGE.includes('sweep'));
   assert.ok(plc.CLI_USAGE.includes('--workspace'));
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CLI引数パース（scripts/shared/workspace.js の parseFlags に委譲）
+// parseFlags 自体の網羅的なエッジケースは tests/workspace.test.js でカバー済み。
+// ここでは実際のCLI起動でフラグ/値衝突が安全に処理される
+// （誤ってhelp表示にならない）ことだけをサブプロセス経由で確認する。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SCRIPT = path.join(__dirname, '..', 'scripts', 'process-lifecycle.js');
+
+test('サブプロセス経由: --help は終了コード0でCLI_USAGEを表示する', () => {
+  const { spawnSync } = require('child_process');
+  const r = spawnSync(process.execPath, [SCRIPT, '--help'], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /sweep/);
+});
+
+test('サブプロセス経由: --workspace の値が"--help"文字列だと値欠落エラーとなり、誤ってhelp表示にならない', () => {
+  const { spawnSync } = require('child_process');
+  const r = spawnSync(process.execPath, [SCRIPT, 'sweep', '--workspace', '--help'], { encoding: 'utf8' });
+  assert.notEqual(r.status, 0);
+  assert.equal(r.stdout, '');
+});

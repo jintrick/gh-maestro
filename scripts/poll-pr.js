@@ -7,7 +7,7 @@
 
 const { spawnSync } = require('./child-process');
 const { startReviewManager } = require('./start-review-manager');
-const { resolveWorkspace } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -36,92 +36,95 @@ PR が見つかるまでブロックし、見つけたら Review Manager(start-r
 ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
 消滅時はPID registryを解除して自動exitする。`;
 
-const argv = process.argv.slice(2);
-if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(USAGE);
-  process.exit(0);
-}
+if (require.main === module) {
+  const argv = process.argv.slice(2);
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--session-pid']);
 
-// 簡易フラグパース（poll-pr.js は単純な引数構造のため parseFlags を使わず直接パース）
-const getFlag = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
-const workspaceArg = getFlag('--workspace');
-const sessionPidArg = getFlag('--session-pid');
-
-// フラグとその値を除去した位置引数
-const flagSet = new Set(['--workspace', '--session-pid']);
-const positional = [];
-for (let i = 0; i < argv.length; i++) {
-  if (flagSet.has(argv[i])) { i++; continue; }
-  positional.push(argv[i]);
-}
-
-const [issue, intervalArg] = positional;
-const interval = parseInt(intervalArg || '30') * 1000;
-
-if (!issue) {
-  console.error(USAGE);
-  process.exit(1);
-}
-
-const workspace = resolveWorkspace(workspaceArg);
-if (!workspace) {
-  console.error('poll-pr: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
-  process.exit(1);
-}
-
-const repo = spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-  { encoding: 'utf8', cwd: workspace }).stdout.trim();
-
-// ── ライフサイクル管理 ─────────────────────────────────────────────────
-
-const sessionPid = resolveSessionPid(sessionPidArg);
-const checkParent = createDeadManSwitch(sessionPid);
-
-// PID registry に自己登録
-registerProcess(workspace, { script: 'poll-pr.js' });
-
-// cleanup: registry 解除 + exit
-function cleanup() {
-  lifecycleCleanup(workspace);
-  process.exit(0);
-}
-
-process.on('SIGINT', cleanup);
-process.on('SIGTERM', cleanup);
-
-function findPR() {
-  let r = spawnSync('gh', ['pr', 'list', '--repo', repo,
-    '--search', `head:issue-${issue}`, '--state', 'open',
-    '--json', 'number', '-q', '.[0].number'], { encoding: 'utf8' });
-  const pr = r.stdout.trim();
-  if (pr) return pr;
-
-  r = spawnSync('gh', ['pr', 'list', '--repo', repo, '--state', 'open',
-    '--json', 'number,body', '-q',
-    `.[] | select(.body | strings | contains("#${issue}")) | .number`],
-    { encoding: 'utf8' });
-  return r.stdout.trim().split('\n').find(s => s.trim()) || '';
-}
-
-(async () => {
-  while (true) {
-    // dead-man's switch: 親セッション生存確認
-    if (!checkParent()) {
-      console.error(`poll-pr: parent session (pid ${sessionPid}) is dead — exiting`);
-      cleanup();
-      return; // unreachable（cleanup が process.exit する）
-    }
-
-    const pr = findPR();
-    if (pr) {
-      // PR 検出のついでにReview Managerを起動するが、その起動結果も併せて報告する。
-      // これにより orchestrator は「レビューが起動済みである」ことを把握できる。
-      const reviewStatus = startReviewManager(pr, repo, workspace);
-      process.stdout.write(`PR_DETECTED:${pr}\n`);
-      process.stdout.write(`${reviewStatus}:${pr}\n`);
-      cleanup();
-      return; // unreachable
-    }
-    await new Promise(r => setTimeout(r, interval));
+  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
+  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
+  // 値欠落は常にエラー優先（フェイルクローズ）とする。
+  if (exitFlagMiss) {
+    console.error(USAGE);
+    process.exit(1);
   }
-})();
+
+  if (hasHelpFlag(rest)) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+
+  const workspaceArg = values['--workspace'];
+  const sessionPidArg = values['--session-pid'];
+
+  const [issue, intervalArg] = rest;
+
+  if (!issue) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+
+  const interval = parseInt(intervalArg || '30') * 1000;
+
+  const workspace = resolveWorkspace(workspaceArg);
+  if (!workspace) {
+    console.error('poll-pr: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
+    process.exit(1);
+  }
+
+  const repo = spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
+    { encoding: 'utf8', cwd: workspace }).stdout.trim();
+
+  // ── ライフサイクル管理 ─────────────────────────────────────────────────
+
+  const sessionPid = resolveSessionPid(sessionPidArg);
+  const checkParent = createDeadManSwitch(sessionPid);
+
+  // PID registry に自己登録
+  registerProcess(workspace, { script: 'poll-pr.js' });
+
+  // cleanup: registry 解除 + exit
+  function cleanup() {
+    lifecycleCleanup(workspace);
+    process.exit(0);
+  }
+
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
+
+  function findPR() {
+    let r = spawnSync('gh', ['pr', 'list', '--repo', repo,
+      '--search', `head:issue-${issue}`, '--state', 'open',
+      '--json', 'number', '-q', '.[0].number'], { encoding: 'utf8' });
+    const pr = r.stdout.trim();
+    if (pr) return pr;
+
+    r = spawnSync('gh', ['pr', 'list', '--repo', repo, '--state', 'open',
+      '--json', 'number,body', '-q',
+      `.[] | select(.body | strings | contains("#${issue}")) | .number`],
+      { encoding: 'utf8' });
+    return r.stdout.trim().split('\n').find(s => s.trim()) || '';
+  }
+
+  (async () => {
+    while (true) {
+      // dead-man's switch: 親セッション生存確認
+      if (!checkParent()) {
+        console.error(`poll-pr: parent session (pid ${sessionPid}) is dead — exiting`);
+        cleanup();
+        return; // unreachable（cleanup が process.exit する）
+      }
+
+      const pr = findPR();
+      if (pr) {
+        // PR 検出のついでにReview Managerを起動するが、その起動結果も併せて報告する。
+        // これにより orchestrator は「レビューが起動済みである」ことを把握できる。
+        const reviewStatus = startReviewManager(pr, repo, workspace);
+        process.stdout.write(`PR_DETECTED:${pr}\n`);
+        process.stdout.write(`${reviewStatus}:${pr}\n`);
+        cleanup();
+        return; // unreachable
+      }
+      await new Promise(r => setTimeout(r, interval));
+    }
+  })();
+}

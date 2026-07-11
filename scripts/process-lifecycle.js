@@ -26,6 +26,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('./child-process');
+const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 
 const IS_WIN = process.platform === 'win32';
 
@@ -482,22 +483,30 @@ Description:
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--worker-name'], ['--dry-run']);
 
-  if (argv.includes('--help') || argv.includes('-h')) {
-    console.log(CLI_USAGE);
-    process.exit(0);
-  }
-
-  const sub = argv[0];
-  if (sub !== 'sweep') {
+  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
+  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
+  // 値欠落は常にエラー優先（フェイルクローズ）とする。
+  if (exitFlagMiss) {
     console.error(CLI_USAGE);
     process.exit(1);
   }
 
-  const get = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
-  const workspace = get('--workspace');
-  const workerName = get('--worker-name');
-  const dryRun = argv.includes('--dry-run');
+  if (hasHelpFlag(rest)) {
+    console.log(CLI_USAGE);
+    process.exit(0);
+  }
+
+  const workspace = values['--workspace'];
+  const workerName = values['--worker-name'];
+  const dryRun = values['--dry-run'] === true;
+
+  const sub = rest[0];
+  if (sub !== 'sweep') {
+    console.error(CLI_USAGE);
+    process.exit(1);
+  }
 
   if (!workspace) {
     console.error('process-lifecycle: --workspace が必要です');

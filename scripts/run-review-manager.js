@@ -9,6 +9,7 @@ const { spawnSync } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 const { assertValidPr, reviewArtifactPath } = require('./shared/review-manager-paths');
+const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 
 const USAGE = `run-review-manager.js — Review Managerをheadless起動してPRレビューを実行する
 
@@ -122,19 +123,24 @@ module.exports = { resolveMode, buildPrompt, digestText, writeRunMetadata };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  if (argv.includes('--help') || argv.includes('-h')) {
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--mode', '--brief-file']);
+
+  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
+  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
+  // 値欠落は常にエラー優先（フェイルクローズ）とする。
+  if (exitFlagMiss) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+
+  if (hasHelpFlag(rest)) {
     console.log(USAGE);
     process.exit(0);
   }
 
-  const getFlag = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
-  const flagSet = new Set(['--mode', '--brief-file']);
-  const positional = [];
-  for (let i = 0; i < argv.length; i++) {
-    if (flagSet.has(argv[i])) { i++; continue; }
-    positional.push(argv[i]);
-  }
-  const [pr, repo, workspace] = positional;
+  const modeArg = values['--mode'];
+  const briefFileArg = values['--brief-file'];
+  const [pr, repo, workspace] = rest;
 
   if (!pr || !repo || !workspace) {
     console.error(USAGE);
@@ -152,13 +158,12 @@ if (require.main === module) {
 
   let mode;
   try {
-    mode = resolveMode(getFlag('--mode'));
+    mode = resolveMode(modeArg);
   } catch (e) {
     console.error(`run-review-manager: ${e.message}`);
     process.exit(1);
   }
 
-  const briefFileArg = getFlag('--brief-file');
   let directedBrief = null;
   if (mode === 'directed') {
     if (!briefFileArg) {

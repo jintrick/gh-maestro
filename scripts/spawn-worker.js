@@ -30,26 +30,32 @@ const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs, checkAgentExists } = require('./agent-exec');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
+const { parseFlags } = require('./shared/workspace');
 
 // --- ワーカーエントリ構築（テスト可能な純粋関数） ---
 function buildWorkerEntry(paneId, agentId, issue) {
   return { paneId, agentId, issue: Number(issue) };
 }
 
+const SPAWN_WORKER_VALUE_FLAGS = [
+  '--skill', '--prompt', '--issue', '--description',
+  '--repo', '--workspace', '--base-branch', '--agent',
+];
+
 if (require.main === module) {
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
-const get = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
+const { values } = parseFlags(argv, SPAWN_WORKER_VALUE_FLAGS);
 
-const skill       = get('--skill');
-const prompt      = get('--prompt');
-const issue       = get('--issue');
-const description = get('--description');
-const repo        = get('--repo');
-const workspace   = get('--workspace') ?? process.cwd();
-const baseBranch  = get('--base-branch');
-const explicitAgentId = get('--agent');
+const skill       = values['--skill'];
+const prompt      = values['--prompt'];
+const issue       = values['--issue'];
+const description = values['--description'];
+const repo        = values['--repo'];
+const workspace   = values['--workspace'] ?? process.cwd();
+const baseBranch  = values['--base-branch'];
+const explicitAgentId = values['--agent'];
 
 // --- バリデーション ---
 const resetCmd = `node "${resolve(__dirname, 'reset-session.js')}" --workspace "${workspace}"`;

@@ -168,6 +168,18 @@ test('--agent で存在しないエージェントを指定した場合はエラ
   }
 });
 
+// ── 引数パースは scripts/shared/workspace.js の parseFlags に委譲している。
+// parseFlags 自体の網羅的なエッジケースは tests/workspace.test.js でカバー済みのため、
+// ここではフラグ/値衝突が実際のCLI起動でも安全に処理されることだけを確認する。
+
+test('--description の値が"--issue"文字列と一致する場合、値欠落として安全にエラー終了する（フラグ誤認しない）', () => {
+  // parseFlags は '--'始まりの値を許容しない設計（safe-by-default）。
+  // 誤ってフラグとして解釈されるのではなく、値欠落エラーとして扱われることを確認する。
+  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', '--issue', '--repo', 'o/r'], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /--description/);
+});
+
 test('config.json に定義されていてもバイナリが PATH になければエラー終了する', () => {
   const fs = require('fs');
   const os = require('os');
