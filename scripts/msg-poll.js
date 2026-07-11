@@ -46,9 +46,11 @@ Options:
   --workspace <path>     ワークスペースパス（省略時は環境変数またはCWDから解決）
   --interval <sec>       ポーリング間隔（秒、既定: ${DEFAULT_INTERVAL_SEC}）
   --once                 1回だけスキャンして終了する（継続ポーリングしない）
-  --wait <sec>           新着メッセージが見つかるか、指定秒数が経過するまでフォアグラウンドで
-                          待機する（内部的には --interval 秒間隔でリトライする）。新着を検出した
+  --wait <sec>           新着メッセージを1件検出するか、指定秒数が経過するまでフォアグラウンドで
+                          待機する（内部的には --interval 秒間隔でリトライする）。新着を1件検出した
                           時点、またはタイムアウト時点のいずれか早い方で exit code 0 で終了する。
+                          新着が複数件たまっていても、1回の呼び出しで出力・既読化されるのは
+                          最も古い1件のみ。残りは次回の --wait 呼び出しで改めて返される。
                           --once と同時指定はできない（エラー終了する）。
                           継続モードと同様にPID registryへ自己登録し、終了時に解除する。
   --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
@@ -298,14 +300,20 @@ function main(argsOverride, opts = {}) {
   /**
    * 1回のスキャン。
    *
-   * @param {{ maxGhTimeoutMs?: number }} [opts]  gh 呼び出しの上限タイムアウト（ms）。
+   * @param {{ maxGhTimeoutMs?: number, singleMessage?: boolean }} [opts]
+   *   maxGhTimeoutMs: gh 呼び出しの上限タイムアウト（ms）。
    *   --wait モードで締切間際に呼ばれた場合、既定の GH_TIMEOUT_MS（30秒）を待つと
    *   --wait で指定した秒数を大幅に超過しうるため、残り時間に応じて上限を絞り込む。
    *   （最低 1000ms は確保する。0 以下を spawnSync の timeout に渡すとタイムアウトが
    *   無効化されてしまうため）
+   *   singleMessage: true の場合、新着が複数件あっても最も古い1件のみを
+   *   NEW_MESSAGE として出力・既読化する（--wait モード専用）。残りは
+   *   次回呼び出しのために未読のまま残し、カーソル（since）もその1件の
+   *   created_at を超えて進めない（進めると gh api の since フィルタで
+   *   未処理分が再取得できなくなるため）。
    */
   function scanOnce(opts = {}) {
-    const { maxGhTimeoutMs } = opts;
+    const { maxGhTimeoutMs, singleMessage = false } = opts;
     const callOpts = maxGhTimeoutMs != null
       ? { cwd: workspace, timeout: Math.min(GH_TIMEOUT_MS, Math.max(1000, maxGhTimeoutMs)) }
       : ghOpts;
@@ -399,52 +407,86 @@ function main(argsOverride, opts = {}) {
       }
     }
 
-    // ── カーソルを全コメントの最大 created_at まで進める ─────────────────
+    // ── 新着候補の抽出 ──────────────────────────────────────────────────
+    // 自分宛て・未読のコメントを issue ごとに集める。
+
+    const candidatesByIssue = new Map(); // issue -> [{ cid, created_at, issue }]
+    for (const { issue, comment: c } of allIssuesAndComments) {
+      const cid = c.id;
+      if (cid == null) continue;
+      if (state.seenIds.includes(cid)) continue; // 既知の ID はスキップ
+
+      const meta = parseMarker(c.body);
+      if (!meta) continue; // マーカーなし・JSON parse 失敗は無視
+      if (meta.to !== self) continue; // 自分宛てでない
+
+      if (!candidatesByIssue.has(issue)) candidatesByIssue.set(issue, []);
+      candidatesByIssue.get(issue).push({ cid, created_at: c.created_at, issue });
+    }
+
+    const allCandidates = [];
+    for (const arr of candidatesByIssue.values()) allCandidates.push(...arr);
+    allCandidates.sort((a, b) => {
+      if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
+      return a.cid - b.cid;
+    });
+
+    // singleMessage: 最も古い1件のみを出力・既読化する。残りは次回に持ち越す。
+    const emitted = singleMessage ? allCandidates.slice(0, 1) : allCandidates;
+    const emittedIds = new Set(emitted.map((e) => e.cid));
+
+    for (const e of emitted) {
+      if (isOrchestrator) {
+        writeOut(`NEW_MESSAGE:${e.issue}:${e.cid}`);
+      } else {
+        writeOut(`NEW_MESSAGE:${e.cid}`);
+      }
+    }
+
+    const newSeenIds = [...state.seenIds, ...emitted.map((e) => e.cid)];
+    state.seenIds = newSeenIds.slice(-MAX_SEEN_IDS);
+
+    // issue ごとの「持ち越した（出力しなかった）新着候補」の最小 created_at。
+    // これより先にカーソルを進めると、gh api の since フィルタで
+    // 持ち越し分が二度と取得できなくなる。
+    const deferredMinByIssue = new Map();
+    for (const [issue, arr] of candidatesByIssue) {
+      for (const e of arr) {
+        if (emittedIds.has(e.cid)) continue;
+        const cur = deferredMinByIssue.get(issue);
+        if (!cur || e.created_at < cur) deferredMinByIssue.set(issue, e.created_at);
+      }
+    }
+
+    // ── カーソルを進める ───────────────────────────────────────────────
     // マッチしなかったコメントもカーソルを進めることで、無関係なコメントが
     // 100件を超えても自分宛メッセージを見失わない（ページネーション対策）。
+    // ただし、その issue に持ち越した新着候補がある場合は、その最小
+    // created_at を超えて進めない。
 
+    const maxCreatedByIssue = new Map();
     for (const { issue, comment: c } of allIssuesAndComments) {
-      if (c.created_at) {
-        if (isOrchestrator) {
-          if (!state.since[issue] || c.created_at > state.since[issue]) {
-            state.since[issue] = c.created_at;
-          }
-        } else {
-          if (!state.since || c.created_at > state.since) {
-            state.since = c.created_at;
-          }
+      if (!c.created_at) continue;
+      const cur = maxCreatedByIssue.get(issue);
+      if (!cur || c.created_at > cur) maxCreatedByIssue.set(issue, c.created_at);
+    }
+
+    for (const [issue, maxCreated] of maxCreatedByIssue) {
+      const deferredMin = deferredMinByIssue.get(issue);
+      const candidate = deferredMin != null && deferredMin < maxCreated ? deferredMin : maxCreated;
+
+      if (isOrchestrator) {
+        if (!state.since[issue] || candidate > state.since[issue]) {
+          state.since[issue] = candidate;
+        }
+      } else {
+        if (!state.since || candidate > state.since) {
+          state.since = candidate;
         }
       }
     }
 
-    // ── 新着フィルタリング ──────────────────────────────────────────────
-
-    const newSeenIds = [...state.seenIds];
-
-    for (const { issue, comment: c } of allIssuesAndComments) {
-      const cid = c.id;
-      if (cid == null) continue;
-
-      // 既知の ID はスキップ
-      if (state.seenIds.includes(cid)) continue;
-
-      const meta = parseMarker(c.body);
-      if (!meta) continue; // マーカーなし・JSON parse 失敗は無視
-
-      if (meta.to !== self) continue; // 自分宛てでない
-
-      // 新着通知
-      if (isOrchestrator) {
-        writeOut(`NEW_MESSAGE:${issue}:${cid}`);
-      } else {
-        writeOut(`NEW_MESSAGE:${cid}`);
-      }
-
-      newSeenIds.push(cid);
-    }
-
     // ── カーソル永続化 ─────────────────────────────────────────────────
-    state.seenIds = newSeenIds.slice(-MAX_SEEN_IDS);
     writeState(workspace, self, state);
   }
 
@@ -472,7 +514,7 @@ let _sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * --wait モード: 新着メッセージを検出するか waitMs が経過するまで、
  * scanOnce を intervalMs 間隔でリトライする。
  *
- * @param {{ scanOnce: (opts?: { maxGhTimeoutMs?: number }) => void, lines: string[], intervalMs: number, waitMs: number }} result
+ * @param {{ scanOnce: (opts?: { maxGhTimeoutMs?: number, singleMessage?: boolean }) => void, lines: string[], intervalMs: number, waitMs: number }} result
  *   main() の戻り値（waitMode: true のもの）
  * @returns {Promise<boolean>} 新着を検出すれば true、タイムアウトなら false
  */
@@ -483,7 +525,8 @@ async function runWaitMode(result) {
     const before = lines.length;
     // gh 呼び出しの上限を残り時間に絞り、--wait の締切超過を最小化する
     const remainingForGh = Math.max(0, waitMs - (Date.now() - start));
-    scanOnce({ maxGhTimeoutMs: remainingForGh });
+    // --wait は1回の呼び出しで常に高々1件しか返さない契約（Issue #99）
+    scanOnce({ maxGhTimeoutMs: remainingForGh, singleMessage: true });
     if (lines.length > before) return true;
     const elapsed = Date.now() - start;
     if (elapsed >= waitMs) return false;

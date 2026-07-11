@@ -10,11 +10,22 @@ const msgPoll = require('../scripts/msg-poll');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
+  const cleanup = () => fs.rmSync(dir, { recursive: true, force: true });
+  let result;
   try {
-    return fn(dir);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    result = fn(dir);
+  } catch (e) {
+    cleanup();
+    throw e;
   }
+  // fn が async の場合、Promise が解決するまで cleanup を遅らせないと、
+  // 呼び出し元の await 中に一時ディレクトリが消え、状態永続化に依存する
+  // テストが false negative になる。
+  if (result && typeof result.then === 'function') {
+    return result.finally(cleanup);
+  }
+  cleanup();
+  return result;
 }
 
 // ── parseArgs（main() と CLI プリフライトが共有する解析ヘルパー） ───────────
@@ -919,6 +930,86 @@ test('scanOnce: maxGhTimeoutMs 未指定時は既定の GH_TIMEOUT_MS 相当（t
     r.scanOnce();
     assert.equal(capturedOpts.timeout, undefined);
     assert.equal(capturedOpts.cwd, workspace);
+  });
+});
+
+// ── --wait モード: 1回1件返却の契約（Issue #99） ────────────────────────────
+
+test('scanOnce({singleMessage:true}): 新着が複数件あっても最も古い1件のみ出力・既読化する', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    const allComments = [
+      { id: 1, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+      { id: 2, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nB', created_at: '2026-07-07T12:01:00Z' },
+      { id: 3, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nC', created_at: '2026-07-07T12:02:00Z' },
+    ];
+    // 実際の gh api の since フィルタを模擬する（created_at >= since のみ返す）
+    msgPoll._setGhApiComments((repo, issue, since) => {
+      const filtered = since ? allComments.filter(c => c.created_at >= since) : allComments;
+      return { status: 0, stdout: JSON.stringify(filtered) };
+    });
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+
+    r.scanOnce({ singleMessage: true });
+    assert.deepEqual(r.lines, ['NEW_MESSAGE:1']);
+
+    r.lines.length = 0;
+    r.scanOnce({ singleMessage: true });
+    assert.deepEqual(r.lines, ['NEW_MESSAGE:2']);
+
+    r.lines.length = 0;
+    r.scanOnce({ singleMessage: true });
+    assert.deepEqual(r.lines, ['NEW_MESSAGE:3']);
+
+    r.lines.length = 0;
+    r.scanOnce({ singleMessage: true });
+    assert.deepEqual(r.lines, []);
+  });
+});
+
+test('runWaitMode: 複数件の新着があっても1回の呼び出しでは1件しか返らない', async () => {
+  await withTempDir(async workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    const allComments = [
+      { id: 10, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+      { id: 11, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nB', created_at: '2026-07-07T12:01:00Z' },
+    ];
+    msgPoll._setGhApiComments((repo, issue, since) => {
+      const filtered = since ? allComments.filter(c => c.created_at >= since) : allComments;
+      return { status: 0, stdout: JSON.stringify(filtered) };
+    });
+    msgPoll._setSleep(async () => {});
+
+    const r1 = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    const found1 = await msgPoll.runWaitMode(r1);
+    assert.equal(found1, true);
+    assert.deepEqual(r1.lines, ['NEW_MESSAGE:10']);
+
+    // 次回の --wait 呼び出し（新しい main() 実行）で残りの1件が返る
+    const r2 = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    const found2 = await msgPoll.runWaitMode(r2);
+    assert.equal(found2, true);
+    assert.deepEqual(r2.lines, ['NEW_MESSAGE:11']);
+
+    msgPoll._setSleep(async () => {});
+  });
+});
+
+test('scanOnce({singleMessage:false}): --once/継続モードは従来どおり複数件をまとめて返す', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        { id: 1, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+        { id: 2, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nB', created_at: '2026-07-07T12:01:00Z' },
+      ]),
+    }));
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    r.scanOnce();
+    assert.deepEqual(r.lines, ['NEW_MESSAGE:1', 'NEW_MESSAGE:2']);
   });
 });
 
