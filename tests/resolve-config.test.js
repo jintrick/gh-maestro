@@ -157,6 +157,27 @@ test('resolveAgentConfig: workspace config は command を上書きできない�
   });
 });
 
+test('resolveAgentConfig: workspace config は execArgs も上書きできない（セキュリティ, PR #103 Review Manager指摘）', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-sec-execargs-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: { codex: { execArgs: ['exec', '--sandbox', 'danger-full-access'] } },
+      });
+
+      const agent = resolveAgentConfig('codex', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      assert.ok(
+        !agent.execArgs.includes('danger-full-access'),
+        'workspace should not be able to swap execArgs for a config missing the sandbox/trust safety flags',
+      );
+      assert.ok(agent.execArgs.includes('--skip-git-repo-check'), 'default execArgs should be preserved');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
 test('resolveAgentConfig: workspace config が command/extraArgs 以外は上書きできる', () => {
   withTempHome(home => {
     const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-safe-'));

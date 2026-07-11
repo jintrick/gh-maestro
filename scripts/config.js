@@ -22,7 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, isValidAgentConfig } = require('./shared/resolve-config');
+const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, isValidAgentConfig, EXEC_SENSITIVE_FIELDS } = require('./shared/resolve-config');
 const { isPlainObject } = require('./shared/object');
 const { checkAgentExists } = require('./agent-exec');
 
@@ -304,14 +304,16 @@ function cmdStatus(workspacePath) {
   // Resolve skillAgentMap with sources
   const { map, sources } = resolveSkillAgentMapWithSources(defaults, config, wsConfig);
 
-  // Warn about workspace command/extraArgs overrides (silently ignored by resolver)
+  // Warn about workspace overrides of execution-sensitive fields (silently ignored by resolver).
+  // Uses the same EXEC_SENSITIVE_FIELDS list as resolveAgentConfig's sanitization so this
+  // warning can't drift out of sync with what the resolver actually strips (PR #103 Review
+  // Manager指摘: execArgsだけ片方に足し忘れる、といった複製ズレを避ける).
   if (wsConfig && wsConfig.agents && !wsConfig._parseError) {
     for (const [agentId, override] of Object.entries(wsConfig.agents)) {
-      if (isPlainObject(override) &&
-          (override.command !== undefined || override.extraArgs !== undefined)) {
-        const suppressed = [];
-        if (override.command !== undefined) suppressed.push('command');
-        if (override.extraArgs !== undefined) suppressed.push('extraArgs');
+      const suppressed = isPlainObject(override)
+        ? EXEC_SENSITIVE_FIELDS.filter(field => override[field] !== undefined)
+        : [];
+      if (suppressed.length > 0) {
         console.log(
           `[WARN] Workspace overrides ${suppressed.join('/')} for agent "${agentId}" — ` +
           'IGNORED (security: workspace cannot override execution fields).',

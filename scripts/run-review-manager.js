@@ -7,7 +7,6 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
-const { buildLoginShellExecArgs } = require('./agent-exec');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap, resolveReviewManagerVisible } = require('./shared/resolve-config');
 const {
@@ -218,13 +217,41 @@ function runAgentHeadless(agentArgs, cwd) {
 }
 
 /**
+ * 可視ペイン（wezterm split-pane）に渡すargvを構築する。agent-exec.jsのbuildLoginShellExecArgsと
+ * 同様にログインシェル（PATH実行ファイル・pwsh関数・シェルエイリアス解決）経由で起動するが、
+ * `exec`によるシェル置換はしない。エージェント終了後に終了コードをexitMarkerFileへ書き出す
+ * 後続ステップを実行する必要があるため（buildLoginShellExecArgsはシェルをエージェントプロセスに
+ * 完全に置き換えるため、終了コード捕捉のような後続処理を挟めない。PR #103 Review Manager指摘）。
+ *
+ * @param {string[]} agentCmdArgs
+ * @param {string} exitMarkerFile 終了コードを書き出す先
+ * @param {string} [platform=process.platform]
+ * @returns {string[]}
+ */
+function buildVisiblePaneArgs(agentCmdArgs, exitMarkerFile, platform = process.platform) {
+  if (platform === 'win32') {
+    const escapedArgs = agentCmdArgs.map(a => `'${a.replace(/'/g, "''")}'`).join(' ');
+    const escapedMarker = exitMarkerFile.replace(/'/g, "''");
+    // ネイティブ実行ファイルの終了コードは $LASTEXITCODE に入る（codexはネイティブexe）。
+    const command = `& ${escapedArgs}; Set-Content -LiteralPath '${escapedMarker}' -Value $LASTEXITCODE -NoNewline`;
+    const encoded = Buffer.from(command, 'utf16le').toString('base64');
+    return ['pwsh', '-NoLogo', '-EncodedCommand', encoded];
+  }
+  const escapedMarker = exitMarkerFile.replace(/'/g, "'\\''");
+  return ['bash', '-lc', `"$0" "$@"; echo $? > '${escapedMarker}'`, ...agentCmdArgs];
+}
+
+/**
  * 可視ペイン（wezterm split-pane）でエージェントを起動する。
- * spawnSyncによる同期ブロックが使えないため、完了検知はoutputFileの生成をポーリングする。
+ * spawnSyncによる同期ブロックが使えないため、完了検知はエージェントが終了コードを書き出す
+ * exitMarkerFileの生成をポーリングする（outputFileの生成だけでは、findingsを早期に書き出した後も
+ * ペインが動き続けているケースを完了と誤判定してしまう。PR #103 Review Manager指摘）。
  * WEZTERM_PANEが無い、またはペイン分割に失敗した場合はnullを返す（呼び出し側でheadlessにフォールバック）。
+ * タイムアウト時は孤児プロセス化を防ぐためペインを明示的に強制終了する。
  *
  * @param {string[]} agentArgs
  * @param {string} cwd
- * @param {string} outputFile 生成を待つファイル
+ * @param {string} outputFile RMが書き出すfindings JSONのパス（終了コード確認後に存在確認する）
  * @param {(msg: string) => void} log
  * @returns {{status: number}|null}
  */
@@ -235,25 +262,49 @@ function runAgentVisible(agentArgs, cwd, outputFile, log) {
     return null;
   }
 
-  const loginShellArgs = buildLoginShellExecArgs(agentArgs);
+  const exitMarkerFile = `${outputFile}.exitcode`;
+  try { fs.unlinkSync(exitMarkerFile); } catch {}
+
+  const paneArgs = buildVisiblePaneArgs(agentArgs, exitMarkerFile);
   const split = spawnSync('wezterm', [
     'cli', '--no-auto-start', 'split-pane', '--bottom',
-    '--cwd', cwd, '--pane-id', paneId, '--', ...loginShellArgs,
+    '--cwd', cwd, '--pane-id', paneId, '--', ...paneArgs,
   ], { encoding: 'utf8' });
 
   if (split.status !== 0) {
     log(`wezterm split-pane 失敗: ${(split.stderr || '').trim()} — headlessにフォールバックします`);
     return null;
   }
-  log(`可視ペイン(${(split.stdout || '').trim()})でエージェントを起動しました`);
+  const newPaneId = (split.stdout || '').trim();
+  log(`可視ペイン(${newPaneId})でエージェントを起動しました`);
 
   const start = Date.now();
-  while (!fs.existsSync(outputFile)) {
+  while (!fs.existsSync(exitMarkerFile)) {
     if (Date.now() - start > VISIBLE_POLL_TIMEOUT_MS) {
-      log(`可視ペイン実行がタイムアウトしました（${VISIBLE_POLL_TIMEOUT_MS}ms）`);
+      log(`可視ペイン実行がタイムアウトしました（${VISIBLE_POLL_TIMEOUT_MS}ms）— ペインを強制終了します`);
+      try {
+        const kill = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', newPaneId], { encoding: 'utf8' });
+        if (kill.status !== 0) log(`kill-pane 失敗: ${(kill.stderr || '').trim()}`);
+      } catch (e) { log(`kill-pane 例外: ${e.message}`); }
       return { status: 1 };
     }
     sleepSync(VISIBLE_POLL_INTERVAL_MS);
+  }
+
+  let exitStatus = 1;
+  try {
+    const parsed = parseInt(fs.readFileSync(exitMarkerFile, 'utf8').trim(), 10);
+    if (Number.isFinite(parsed)) exitStatus = parsed;
+  } catch (e) { log(`exit marker 読み取り失敗: ${e.message}`); }
+  try { fs.unlinkSync(exitMarkerFile); } catch {}
+
+  if (exitStatus !== 0) {
+    log(`可視ペインのエージェントが異常終了しました（exit ${exitStatus}）`);
+    return { status: exitStatus };
+  }
+  if (!fs.existsSync(outputFile)) {
+    log(`可視ペインのエージェントは正常終了しましたが RM output が見つかりません: ${outputFile}`);
+    return { status: 1 };
   }
   return { status: 0 };
 }
@@ -271,7 +322,7 @@ function sleepSync(ms) {
 module.exports = {
   resolveMode, buildPrompt, digestText, writeRunMetadata,
   setupReviewWorktree, teardownReviewWorktree,
-  runAgentHeadless, runAgentVisible,
+  runAgentHeadless, runAgentVisible, buildVisiblePaneArgs,
 };
 
 if (require.main === module) {
