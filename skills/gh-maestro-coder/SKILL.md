@@ -10,7 +10,7 @@ description: gh-maestroコーダーエージェント。orchestratorから実装
 **唯一のルール: 何かを伝えたくなったら、その内容は必ず次のコマンドの引数として書く。地の文では絶対に書かない。** 質問・相談・失敗報告にこれを使う。完了報告は不要（orchestratorがPRを自律検出する）。着手報告も送らない：
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "<内容>"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
 > **注意:** 本文に改行・引用符・バックスラッシュ等の特殊文字が含まれる場合は、シェルクォート問題を避けるため `--body-file` を使用してください。詳細は `msg-send.js --help` を参照。
@@ -35,7 +35,8 @@ CI監視はorchestratorの責務であり、コーダーは行わない。orches
 
 ## 起動時に与えられる情報
 
-- `WORKER_NAME=<name>` — このワーカーの識別名
+- `WORKER_NAME=<name>` — このワーカーの識別名（worktree名。msg-poll.js/msg-send.js等の一意識別に使う）
+- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-explorer）。人間が読むmsg-send.jsの--fromにはこちらを使う
 - `REPO=<owner/repo>` — 対象リポジトリ
 - `WORKSPACE=<path>` — メインワークスペースのルートパス
 - `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）
@@ -55,7 +56,7 @@ CI監視はorchestratorの責務であり、コーダーは行わない。orches
 
 ```sh
 gh issue edit $ISSUE --add-label "human-escalation"
-node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "Issue #$ISSUE の実装に失敗しました。human-escalation ラベルを付与しました。"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $ISSUE --workspace $WORKSPACE "Issue #$ISSUE の実装に失敗しました。human-escalation ラベルを付与しました。"
 ```
 
 ## 実装時の注意

@@ -10,12 +10,12 @@ description: gh-maestroワーカーの共通骨格テンプレート。orchestra
 **唯一のルール: 何かを伝えたくなったら、その内容は必ず次のコマンドの引数として書く。地の文では絶対に書かない。** 質問・相談・完了報告・失敗報告、すべてこれを使う：
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE "<内容>"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $ISSUE --workspace $WORKSPACE "<内容>"
 ```
 
 > **注意:** 本文に改行・引用符（`'` `"`）・バックスラッシュ等の特殊文字が含まれる場合は、シェルクォート問題を避けるため、位置引数ではなく `--body-file` を使用してください。
 > ```sh
-> node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE --body-file /tmp/message.txt
+> node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $ISSUE --workspace $WORKSPACE --body-file /tmp/message.txt
 > ```
 
 **NG例:** 「作業を完了しました」とそのまま書く → 誰にも届かず消える。
@@ -35,7 +35,8 @@ wezterm send-text による通知はレイテンシ最適化のヒントに過�
 
 起動プロンプトに以下が含まれている：
 
-- `WORKER_NAME=<name>` — このワーカーの識別名
+- `WORKER_NAME=<name>` — このワーカーの識別名（worktree名。msg-poll.js/msg-send.js等の一意識別に使う）
+- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-explorer）。人間が読むmsg-send.jsの--fromにはこちらを使う
 - `REPO=<owner/repo>` — 対象リポジトリ
 - `WORKSPACE=<path>` — ワークスペースのルートパス
 - `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）

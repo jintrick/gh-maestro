@@ -266,6 +266,7 @@ const rollbackWorktree = () => {
 const toUnix = (p) => p.replace(/\\/g, '/');
 const contextLines = [
   `WORKER_NAME=${workerName}`,
+  `WORKER_ROLE=${skill}`,
   `REPO=${repo}`,
   `WORKSPACE=${toUnix(workspace)}`,
   `WORKTREE=${toUnix(worktreeDir)}`,
