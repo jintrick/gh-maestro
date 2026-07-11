@@ -148,9 +148,11 @@ function setupReviewWorktree(workspace, pr, log) {
   const fetchRef = reviewWorktreeFetchRef(pr);
 
   // 残骸があれば先に除去してから作り直す（spawn-worker.js と同様のリトライパターン）。
+  // git worktree prune はディスク上にディレクトリが存在しない登録済みworktreeのメタデータだけを
+  // 掃除するため、rmSync（ディレクトリ削除）→ worktreePrune（メタデータ掃除）の順で行う。
   try { worktreeRemove(dir, workspace); } catch {}
-  try { worktreePrune(workspace); } catch {}
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  try { worktreePrune(workspace); } catch {}
   try { spawnSync('git', ['branch', '-D', '--', branchName], { cwd: workspace, stdio: 'pipe' }); } catch {}
 
   worktreeAdd(dir, branchName, null, workspace);
@@ -186,8 +188,10 @@ function teardownReviewWorktree(workspace, pr, log) {
     worktreeRemove(dir, workspace);
   } catch (e) {
     log(`worktree remove 失敗: ${e.message.split('\n')[0]}`);
-    try { worktreePrune(workspace); } catch {}
+    // git worktree prune はディスク上にディレクトリが存在しない登録済みworktreeのメタデータだけを
+    // 掃除するため、先にディレクトリを消してからpruneする（順序を逆にするとメタデータが残留する）。
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+    try { worktreePrune(workspace); } catch {}
   }
   try {
     const delR = spawnSync('git', ['branch', '-D', '--', branchName], { cwd: workspace, stdio: 'pipe', encoding: 'utf8' });
@@ -249,9 +253,19 @@ function runAgentVisible(agentArgs, cwd, outputFile, log) {
       log(`可視ペイン実行がタイムアウトしました（${VISIBLE_POLL_TIMEOUT_MS}ms）`);
       return { status: 1 };
     }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, VISIBLE_POLL_INTERVAL_MS);
+    sleepSync(VISIBLE_POLL_INTERVAL_MS);
   }
   return { status: 0 };
+}
+
+/**
+ * メインスレッドで安全に使える同期スリープ。Atomics.waitはメインスレッドで
+ * TypeErrorを投げうるため使わず、子プロセスのsetTimeoutをspawnSyncで待つ
+ * （PR #103 Review Manager指摘）。
+ * @param {number} ms
+ */
+function sleepSync(ms) {
+  spawnSync(process.execPath, ['-e', `setTimeout(() => {}, ${Number(ms)})`]);
 }
 
 module.exports = {
@@ -384,7 +398,9 @@ if (require.main === module) {
       // Codex終了後にこのスクリプト自身（サンドボックス外）がコピーする。
       const worktreeOutputFile = path.join(worktreeGhDir, `review-manager-${pr}.json`);
 
-      fs.writeFileSync(promptFile, buildPrompt({ pr, repo, workspace, outputFile: worktreeOutputFile, mode, directedBrief }), 'utf8');
+      // WORKSPACE はCodex自身に伝える実行場所であるため、隔離用に作成したreviewWtDirを渡す
+      // （メインワークスペースを渡すとIssue #101の隔離が無効化される。PR #103 Review Manager指摘）。
+      fs.writeFileSync(promptFile, buildPrompt({ pr, repo, workspace: reviewWtDir, outputFile: worktreeOutputFile, mode, directedBrief }), 'utf8');
 
       const skill = 'gh-maestro-reviewer';
       const skillMap = resolveSkillAgentMap({ workspace });
