@@ -251,13 +251,28 @@ worker からの報告はすべて GitHub Issue コメントとして投稿さ�
 受動的に届くのを待つのではなく、能動的に Issue コメントを poll して受信する。
 wezterm send-text による通知はレイテンシ最適化のヒントに過ぎず、pull が唯一の配送根拠である。
 
-Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" orchestrator --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。
+### 起動規約（単一起動）
+
+**この inbox 監視（`msg-poll.js orchestrator`）はセッション中に最初の1回だけ起動する。** 以後、待ちたい相手や場面（PR検出・レビュー監視・ワーカー起動待ち・反省会での応答待ちなど）が変わっても、新しいMonitorを起動し直さず、既存の1本をそのまま使い回す。
+
+まだ起動していなければ、Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" orchestrator --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。**このセクション以外の場所（「PR検出」「レビュー監視」等）で改めてこのコマンドを起動してはならない**。それらの節はこの1本の inbox 監視を通じて通知を受け取る前提で書かれている。
 
 Monitorから届く通知を処理する：
 - `NEW_MESSAGE:<issue>:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を読む。内容に応じて処理する（PR_DETECTED → PR番号を記録 等）。**完了後は直ちにMonitorに戻る**
 
 この inbox 監視は PR 検出・Review Manager 起動通知・反省会でのコーダーからの応答など、
-orchestrator が受け取るすべてのメッセージの受信経路である。セッション中は常に稼働させること。
+orchestrator が受け取るすべてのメッセージの受信経路である。セッション中は常に1本だけ稼働させること。
+
+`msg-poll.js` は継続モードで起動しようとした際、同じ inbox（`self=orchestrator`）を既に監視している生存プロセスを検知すると、新規プロセスを起動せずエラーで終了する（多重起動防止）。これはセーフガードであり、正常系では**起動前にこのセーフガードに頼らず**、自分がまだ起動していないかをまず思い出すこと。
+
+### 誤って複数起動してしまった場合の復旧手順
+
+「重複しているかもしれない」と気づいた瞬間に片方を反射的に止めてはならない。以下の順で確認してから対処する：
+
+1. **実数を確認する**: `node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE --dry-run` を実行し、`script=msg-poll.js` かつ `worker=-`（orchestrator inbox 監視）のエントリが実際に複数生存しているかを確認する。1本しかなければ「重複」ではない。誤って停止しない。**`--dry-run` は必須。指定しないと確認のつもりが実際にkillしてしまう。**
+2. **複数確認できた場合のみ**、最も新しく起動したもの以外を残す方針で、古いMonitorタスクを`TaskStop`等で停止する。停止対象を誤らないよう、停止前に該当タスクが本当に `msg-poll.js orchestrator` を実行しているか確認する。
+3. 停止した分の registry エントリ（`.gh-maestro/pids/<PID>.json`）は、プロセスが死ねば次回の生存確認で自動的に無視される。**`sweep`（`--dry-run` なし）を対象を絞らずに実行しない**こと。無条件のsweepは他のMonitor（poll-pr.js・poll-reviews.js等）を含む登録済みの生存プロセスも巻き込んで停止させる。
+4. 残った1本が生きていることを確認してからセッションを継続する。届いていたはずのメッセージを見逃していないか、`gh issue view <N> --comments` で直近のワーカー報告を確認する。
 
 ## PR検出
 

@@ -24,6 +24,7 @@ const {
   resolveSessionPid,
   createDeadManSwitch,
   registerProcess,
+  findRunningInstance,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
 
@@ -33,7 +34,7 @@ const MAX_SEEN_IDS = 100;
 
 const USAGE = `msg-poll.js — GitHub Issue コメントを定期スキャンし新着メッセージを stdout に通知する
 
-Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once] [--session-pid <pid>]
+Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once] [--session-pid <pid>] [--force]
 
 Arguments:
   <self>                 自分の名前（worker 名、または "orchestrator"）
@@ -44,6 +45,8 @@ Options:
   --interval <sec>       ポーリング間隔（秒、既定: ${DEFAULT_INTERVAL_SEC}）
   --once                 1回だけスキャンして終了する（継続ポーリングしない）
   --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
+  --force                同じ self を既に監視している生存プロセスがいても起動を強制する
+                          （継続モードのみ有効。既定では多重起動を検知して exit 1 する）
 
 Output (stdout):
   新着メッセージを1行ずつ出力:
@@ -172,7 +175,8 @@ function main(argsOverride, opts = {}) {
   }
 
   const onceMode = rest.includes('--once');
-  const positional = rest.filter(a => a !== '--once');
+  const force = rest.includes('--force');
+  const positional = rest.filter(a => a !== '--once' && a !== '--force');
   const self = positional[0];
   const issueArg = values['--issue'];
 
@@ -381,13 +385,38 @@ function main(argsOverride, opts = {}) {
     workspace,
     sessionPid,
     self,
+    force,
   };
 }
 
 // ── CLI エントリポイント ──────────────────────────────────────────────────
 
 if (require.main === module) {
-  const isContinuous = !process.argv.slice(2).includes('--once');
+  const rawArgs = process.argv.slice(2);
+  const isContinuous = !rawArgs.includes('--once');
+
+  // ── 多重起動検知（継続モードのみ、main() 本体の gh 呼び出しより前に行う） ──
+  // main() は self/workspace 解決の直後に gh repo view を実行するため、
+  // 重複検知をその後段に置くと不要な gh 呼び出しが発生する。
+  // ここでは main() と同じ parseFlags で最小限の事前パースだけ行う。
+  if (isContinuous && !rawArgs.includes('--force')) {
+    const { values: preValues, rest: preRest } = parseFlags(rawArgs, ['--workspace', '--issue', '--interval', '--session-pid']);
+    const preSelf = preRest.filter(a => a !== '--once' && a !== '--force')[0];
+    const preWorkspace = resolveWorkspace(preValues['--workspace']);
+    if (preSelf && preWorkspace) {
+      const workerNameForRegistry = preSelf !== 'orchestrator' ? preSelf : null;
+      const dup = findRunningInstance(preWorkspace, { script: 'msg-poll.js', workerName: workerNameForRegistry });
+      if (dup) {
+        process.stderr.write(
+          `msg-poll: 重複起動を検出しました。既に pid=${dup.pid} が同じ inbox（self=${preSelf}）を監視中です。` +
+          '新規プロセスは起動しません。既存のMonitorを使い回してください。' +
+          '強制的に起動する場合は --force を指定してください。\n'
+        );
+        process.exit(1);
+      }
+    }
+  }
+
   // 継続モードでは scanOnce の出力をリアルタイムに stdout へ流す
   const result = main(undefined, { streamOutput: isContinuous });
 
@@ -417,6 +446,7 @@ if (require.main === module) {
   // ── PID registry に自己登録（継続モードのみ） ──────────────────────
   // worker モードの場合は workerName を含めて登録する。
   // これにより remove-worker.js の sweep が entry.workerName でマッチできる。
+  // 多重起動検知は main() の gh 呼び出しより前（上記）で行い済み。
 
   registerProcess(result.workspace, {
     script: 'msg-poll.js',

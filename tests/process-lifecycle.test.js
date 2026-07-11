@@ -305,6 +305,122 @@ test('verifyProcessIdentity: getProcessStartTime が空文字を返した場合�
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// findRunningInstance
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('findRunningInstance: 一致する生存エントリを返す（自PID以外）', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+  // process.ppid は自プロセスとは別の生存プロセス（テストランナーの親）
+  const otherPid = process.ppid;
+
+  fs.writeFileSync(path.join(pidsDir, `${otherPid}.json`), JSON.stringify({
+    pid: otherPid, script: 'msg-poll.js', workerName: null, workspace,
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.ok(result, 'マッチする生存エントリが見つかるはず');
+    assert.equal(result.pid, otherPid);
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, `${otherPid}.json`));
+  }
+});
+
+test('findRunningInstance: 自PIDのエントリは除外する（自分自身は重複とみなさない）', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+
+  fs.writeFileSync(path.join(pidsDir, `${process.pid}.json`), JSON.stringify({
+    pid: process.pid, script: 'msg-poll.js', workerName: null, workspace,
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.equal(result, null, '自PIDのエントリは自分自身なので除外される');
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, `${process.pid}.json`));
+  }
+});
+
+test('findRunningInstance: script が一致しないエントリは無視する', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+
+  fs.writeFileSync(path.join(pidsDir, '55555.json'), JSON.stringify({
+    pid: -1, script: 'poll-pr.js', workerName: null, workspace,
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.equal(result, null);
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, '55555.json'));
+  }
+});
+
+test('findRunningInstance: workerName が一致しないエントリは無視する（orchestrator/worker の混同防止）', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+
+  fs.writeFileSync(path.join(pidsDir, '44444.json'), JSON.stringify({
+    pid: process.pid, script: 'msg-poll.js', workerName: 'issue-5-implement', workspace,
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.equal(result, null, 'orchestrator(workerName:null) 検索は worker エントリと一致しない');
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, '44444.json'));
+  }
+});
+
+test('findRunningInstance: workspace が一致しないエントリは無視する', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+
+  fs.writeFileSync(path.join(pidsDir, '33333.json'), JSON.stringify({
+    pid: process.pid, script: 'msg-poll.js', workerName: null, workspace: '/some/other/workspace',
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.equal(result, null);
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, '33333.json'));
+  }
+});
+
+test('findRunningInstance: 生存していないPIDのエントリは無視する', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+
+  fs.writeFileSync(path.join(pidsDir, '99997.json'), JSON.stringify({
+    pid: -1, script: 'msg-poll.js', workerName: null, workspace,
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.equal(result, null);
+  } finally {
+    fs.unlinkSync(path.join(pidsDir, '99997.json'));
+  }
+});
+
+test('findRunningInstance: registry ディレクトリが無い場合は null', () => {
+  const plc = loadModule();
+  const nonexistent = path.join(tmpBase, 'no-pids-dir-workspace');
+  const result = plc.findRunningInstance(nonexistent, { script: 'msg-poll.js', workerName: null });
+  assert.equal(result, null);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // sweepRegistry
 // ═══════════════════════════════════════════════════════════════════════════
 

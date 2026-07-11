@@ -695,6 +695,50 @@ test('worker モード: state.since が文字列でない場合は null 扱い',
   });
 });
 
+// ── 継続モードの多重起動検知（サブプロセス経由） ────────────────────────────
+// scanOnce() を呼ばないため gh 呼び出しは発生しない。重複検知で即 exit(1) するため
+// interval ループには入らず、実ポーリングプロセスは生成されない
+// （.claude/rules/test-process-spawn-safety.md 準拠）。
+
+test('継続モード: 同じ self を監視中の生存プロセスがいれば exit 1 して起動しない', () => {
+  const { spawnSync } = require('child_process');
+  withTempDir(workspace => {
+    const pidsDir = path.join(workspace, '.gh-maestro', 'pids');
+    fs.mkdirSync(pidsDir, { recursive: true });
+    // process.ppid はテストランナーの親プロセス（生存中）を借りて「既存の監視プロセス」を模擬する
+    const otherPid = process.ppid;
+    fs.writeFileSync(path.join(pidsDir, `${otherPid}.json`), JSON.stringify({
+      pid: otherPid, script: 'msg-poll.js', workerName: null, workspace,
+    }));
+
+    const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
+    const r = spawnSync(process.execPath, [script, 'orchestrator', '--workspace', workspace], { encoding: 'utf8', timeout: 10000 });
+
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /重複起動/);
+  });
+});
+
+test('継続モード: --force を指定すると重複があっても起動を試みる（重複チェックをスキップする）', () => {
+  const { spawnSync } = require('child_process');
+  withTempDir(workspace => {
+    const pidsDir = path.join(workspace, '.gh-maestro', 'pids');
+    fs.mkdirSync(pidsDir, { recursive: true });
+    const otherPid = process.ppid;
+    fs.writeFileSync(path.join(pidsDir, `${otherPid}.json`), JSON.stringify({
+      pid: otherPid, script: 'msg-poll.js', workerName: null, workspace,
+    }));
+
+    const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
+    // --force により重複チェックを素通りし、実ポーリング（gh呼び出し）に進む。
+    // gh 未モック環境のため repo 解決に失敗して別経路で exit する想定だが、
+    // 少なくとも「重複起動」エラーでは止まらないことを確認する。
+    const r = spawnSync(process.execPath, [script, 'orchestrator', '--workspace', workspace, '--force'], { encoding: 'utf8', timeout: 10000 });
+
+    assert.doesNotMatch(r.stderr, /重複起動/);
+  });
+});
+
 // ── reset mocks ─────────────────────────────────────────────────────────────
 
 msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));

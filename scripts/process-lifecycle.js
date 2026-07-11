@@ -356,6 +356,53 @@ function verifyProcessIdentity(pid, registeredMeta) {
   return { match: true };
 }
 
+/**
+ * 同一の inbox（script + workerName + workspace）を既に監視している
+ * 生存プロセスを registry から探す（非破壊・読み取り専用）。
+ *
+ * msg-poll.js 等の継続ポーリングスクリプトが、起動前に同じ監視対象の
+ * 多重起動を検知するために使う。sweepRegistry と異なり kill もファイル削除も行わない。
+ *
+ * @param {string} workspace
+ * @param {object} opts
+ * @param {string} opts.script       スクリプト名（例: "msg-poll.js"）
+ * @param {string|null} opts.workerName  worker名。orchestrator モードは null を渡す
+ * @returns {object|null} 一致する生存エントリ（最初の1件）、無ければ null
+ */
+function findRunningInstance(workspace, opts = {}) {
+  const dir = pidsDir(workspace);
+  if (!fs.existsSync(dir)) return null;
+
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  } catch {
+    return null;
+  }
+
+  for (const file of files) {
+    let entry;
+    try {
+      entry = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+    } catch {
+      continue;
+    }
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    if (opts.script && entry.script !== opts.script) continue;
+    if (entry.workerName !== (opts.workerName ?? null)) continue;
+    if (entry.workspace !== workspace) continue;
+
+    const entryPid = entry.pid;
+    if (!entryPid || !Number.isFinite(entryPid)) continue;
+    if (entryPid === process.pid) continue;
+    if (!isProcessAlive(entryPid)) continue;
+
+    return entry;
+  }
+
+  return null;
+}
+
 // ── Registry sweep ────────────────────────────────────────────────────
 
 /**
@@ -559,6 +606,7 @@ module.exports = {
   pidFilePath,
   registerProcess,
   unregisterProcess,
+  findRunningInstance,
   // 同一性確認
   verifyProcessIdentity,
   // sweep
