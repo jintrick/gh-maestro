@@ -235,7 +235,7 @@ if (require.main === module) {
       exitCode = 1;
     } else {
       const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
-        .map(a => (a === '{workspace}' ? workspace : a));
+        .map(a => a.replace(/\{workspace\}/g, workspace));
 
       const agentArgs = buildAgentCommandArgs({ ...agentConfig, extraArgs }, {
         promptFile,

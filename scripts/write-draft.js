@@ -49,7 +49,7 @@ const VALUE_FLAGS = new Set(['--body']);
 function parseArgs(argv) {
   let help = false;
   let stdin = false;
-  let body;
+  const values = {};
   const positionals = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -58,14 +58,16 @@ function parseArgs(argv) {
       if (a === '--help' || a === '-h') help = true;
       else if (a === '--stdin') stdin = true;
     } else if (VALUE_FLAGS.has(a)) {
-      body = argv[i + 1];
+      // フラグ名ごとに代入先を分ける（VALUE_FLAGS に複数の値ありフラグが
+      // 増えても、無関係なフラグの値が body 等の変数を上書きしないようにする）。
+      values[a] = argv[i + 1];
       i++;
     } else {
       positionals.push(a);
     }
   }
 
-  return { help, stdin, body, positionals };
+  return { help, stdin, body: values['--body'], positionals };
 }
 
 // 論理パスの実体解決先が /tmp の実体ルート配下に収まることを確認する。
