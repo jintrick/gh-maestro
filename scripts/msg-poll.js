@@ -81,7 +81,11 @@ let _ghRepoView = (opts = {}) => {
 };
 
 let _ghApiComments = (repo, issue, since, opts = {}) => {
-  const args = ['api', '--method', 'GET', `repos/${repo}/issues/${issue}/comments`, '--jq', '.'];
+  // --paginate で全ページを取得する（未読が100件を超えて滞留すると、
+  // per_page=100 のみでは古い分が永久に見えなくなるため）。
+  // --paginate と --jq は併用できないため、--slurp で全ページを単一の
+  // JSON 配列にまとめて受け取る。
+  const args = ['api', '--method', 'GET', `repos/${repo}/issues/${issue}/comments`, '--paginate', '--slurp'];
   if (since) {
     args.push('-f', `since=${since}`);
   }
@@ -120,6 +124,24 @@ function writeState(workspace, self, state) {
   const seenIds = state.seenIds.slice(-MAX_SEEN_IDS);
   fs.writeFileSync(tmp, JSON.stringify({ since: state.since, seenIds }, null, 2), 'utf8');
   fs.renameSync(tmp, sp);
+}
+
+/**
+ * `gh api --paginate --slurp` の出力（ページ配列の配列、例: `[[c1,c2],[c3]]`）を
+ * 1段階フラット化してコメント配列を返す。要素が配列でないコメントオブジェクトの
+ * フラットな配列（`--paginate` を使わない旧来の応答形状・テストのモック）が
+ * 渡された場合はそのまま返す（後方互換）。全体が配列でない場合は null。
+ *
+ * @param {string} stdout
+ * @returns {object[] | null}
+ */
+function parseCommentsResponse(stdout) {
+  const parsed = JSON.parse(stdout || '[]');
+  if (!Array.isArray(parsed)) return null;
+  if (parsed.length > 0 && parsed.every((page) => Array.isArray(page))) {
+    return parsed.flat();
+  }
+  return parsed;
 }
 
 function parseMarker(body) {
@@ -367,12 +389,12 @@ function main(argsOverride, opts = {}) {
         }
         let comments;
         try {
-          comments = JSON.parse(result.stdout || '[]');
+          comments = parseCommentsResponse(result.stdout);
         } catch {
           writeErr(`msg-poll: JSON parse エラー (issue ${issue})`);
           continue;
         }
-        if (!Array.isArray(comments)) {
+        if (comments === null) {
           writeErr(`msg-poll: gh api の応答が配列ではありません (issue ${issue})`);
           continue;
         }
@@ -393,12 +415,12 @@ function main(argsOverride, opts = {}) {
       }
       let comments;
       try {
-        comments = JSON.parse(result.stdout || '[]');
+        comments = parseCommentsResponse(result.stdout);
       } catch {
         writeErr('msg-poll: JSON parse エラー');
         return;
       }
-      if (!Array.isArray(comments)) {
+      if (comments === null) {
         writeErr('msg-poll: gh api の応答が配列ではありません');
         return;
       }
@@ -449,23 +471,23 @@ function main(argsOverride, opts = {}) {
     const newSeenIds = [...state.seenIds, ...emitted.map((e) => e.cid)];
     state.seenIds = newSeenIds.slice(-MAX_SEEN_IDS);
 
-    // issue ごとの「持ち越した（出力しなかった）新着候補」の最小 created_at。
-    // これより先にカーソルを進めると、gh api の since フィルタで
-    // 持ち越し分が二度と取得できなくなる。
-    const deferredMinByIssue = new Map();
+    // issue ごとに「持ち越した（出力しなかった）新着候補」が存在するかどうか。
+    const issuesWithDeferred = new Set();
     for (const [issue, arr] of candidatesByIssue) {
-      for (const e of arr) {
-        if (emittedIds.has(e.cid)) continue;
-        const cur = deferredMinByIssue.get(issue);
-        if (!cur || e.created_at < cur) deferredMinByIssue.set(issue, e.created_at);
+      if (arr.some((e) => !emittedIds.has(e.cid))) {
+        issuesWithDeferred.add(issue);
       }
     }
 
     // ── カーソルを進める ───────────────────────────────────────────────
     // マッチしなかったコメントもカーソルを進めることで、無関係なコメントが
     // 100件を超えても自分宛メッセージを見失わない（ページネーション対策）。
-    // ただし、その issue に持ち越した新着候補がある場合は、その最小
-    // created_at を超えて進めない。
+    // ただし、その issue に持ち越した新着候補がある場合はカーソルを一切
+    // 進めない。GitHub の issue-comments API の since フィルタが
+    // 境界時刻を含む（inclusive）か含まないか（exclusive）は保証されて
+    // いないため、持ち越し分の created_at ちょうどにカーソルを合わせる
+    // （境界値に依存する）方式は取らない。次回の呼び出しでも今回と全く
+    // 同じ since で再取得し、seenIds で重複を弾く。
 
     const maxCreatedByIssue = new Map();
     for (const { issue, comment: c } of allIssuesAndComments) {
@@ -475,8 +497,7 @@ function main(argsOverride, opts = {}) {
     }
 
     for (const [issue, maxCreated] of maxCreatedByIssue) {
-      const deferredMin = deferredMinByIssue.get(issue);
-      const candidate = deferredMin != null && deferredMin < maxCreated ? deferredMin : maxCreated;
+      if (issuesWithDeferred.has(issue)) continue;
 
       if (isOrchestrator) {
         // state.since[issue] が文字列でない（破損した state ファイル等に
@@ -484,13 +505,13 @@ function main(argsOverride, opts = {}) {
         // typeof チェックを省略すると `{}` 等のtruthyな非文字列値で
         // `!state.since[issue]` が false のままカーソルが永久に固着する。
         const cur = typeof state.since[issue] === 'string' ? state.since[issue] : null;
-        if (!cur || candidate > cur) {
-          state.since[issue] = candidate;
+        if (!cur || maxCreated > cur) {
+          state.since[issue] = maxCreated;
         }
       } else {
         const cur = typeof state.since === 'string' ? state.since : null;
-        if (!cur || candidate > cur) {
-          state.since = candidate;
+        if (!cur || maxCreated > cur) {
+          state.since = maxCreated;
         }
       }
     }
@@ -690,6 +711,7 @@ module.exports = {
   // 内部ロジックの単体テスト用
   parseArgs,
   parseMarker,
+  parseCommentsResponse,
   readState,
   writeState,
   statePath,

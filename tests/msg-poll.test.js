@@ -154,6 +154,40 @@ test('parseMarker がマーカーが1行目に無い場合は無視する', () =
   assert.equal(msgPoll.parseMarker('\n<!-- gh-maestro {"v":1,"to":"x","from":"y"} -->\nbody'), null);
 });
 
+// ── parseCommentsResponse（gh api --paginate --slurp 応答のフラット化） ────
+
+test('parseCommentsResponse: ページ配列の配列（--paginate --slurp形状）をフラット化する', () => {
+  const stdout = JSON.stringify([[{ id: 1 }, { id: 2 }], [{ id: 3 }]]);
+  assert.deepEqual(msgPoll.parseCommentsResponse(stdout), [{ id: 1 }, { id: 2 }, { id: 3 }]);
+});
+
+test('parseCommentsResponse: 単一ページのみでも正しくフラット化する（実測: [[c1,c2]]形状）', () => {
+  const stdout = JSON.stringify([[{ id: 1 }, { id: 2 }]]);
+  assert.deepEqual(msgPoll.parseCommentsResponse(stdout), [{ id: 1 }, { id: 2 }]);
+});
+
+test('parseCommentsResponse: 新着なし（実測: [[]]形状）は空配列を返す', () => {
+  assert.deepEqual(msgPoll.parseCommentsResponse('[[]]'), []);
+});
+
+test('parseCommentsResponse: フラットなコメント配列（--paginate不使用の旧形状・テストモック）はそのまま返す（後方互換）', () => {
+  const stdout = JSON.stringify([{ id: 1 }, { id: 2 }]);
+  assert.deepEqual(msgPoll.parseCommentsResponse(stdout), [{ id: 1 }, { id: 2 }]);
+});
+
+test('parseCommentsResponse: 空配列・未指定は空配列を返す', () => {
+  assert.deepEqual(msgPoll.parseCommentsResponse('[]'), []);
+  assert.deepEqual(msgPoll.parseCommentsResponse(undefined), []);
+});
+
+test('parseCommentsResponse: 配列でないトップレベルは null を返す', () => {
+  assert.equal(msgPoll.parseCommentsResponse(JSON.stringify({ foo: 'bar' })), null);
+});
+
+test('parseCommentsResponse: 壊れた JSON は例外を投げる（呼び出し側で catch する契約）', () => {
+  assert.throws(() => msgPoll.parseCommentsResponse('{not json'));
+});
+
 // ── カーソル永続化 ─────────────────────────────────────────────────────────
 
 test('readState が存在しない state ファイルにデフォルト値を返す', () => {
