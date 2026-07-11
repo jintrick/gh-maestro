@@ -38,21 +38,17 @@ agents:
         - `PR_REVIEW:<user>:APPROVED:<body>` → 人間にマージ許可シグナルとして提示する
         - `PR_REVIEW:<user>:CHANGES_REQUESTED:<body>` → bodyをトリアージしてコーダーにフィードバックする
         - `PR_REVIEW:<user>:COMMENTED:<body>` → PR_COMMENTと同様にトリアージする
-      INBOX_POLL_INTERVAL_SECONDS: 2
+      INBOX_POLL_INTERVAL_SECONDS: 60
       INBOX_POLL_MECHANISM: |
-        `invoke_subagent` で inbox ポーリングサブエージェントを起動し、完了時に `send_message` で親へ通知させる。このサブエージェントはセッション終了まで永続的に実行する。
+        以下はinbox確認の手順定義であり、今すぐ実行するものではない。**本来の作業（Issueの実装等）に着手した後**、作業の合間・区切りのタイミングで都度この手順を呼び出すこと。作業開始前にこれを先に実行して待機してはならない。
 
-        サブエージェントへの指示：
-        「以下のループを実行する。NOTIFIED_IDS としてインメモリの Set で通知済み commentId を管理する。
-        --once は実行毎に新プロセスになるが、カーソル永続化（.gh-maestro/msg-state/）により二重通知しない。
-        重複通知を更に防ぐためサブエージェント側でも NOTIFIED_IDS でガードする。
-        1. `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE --once` を {{INBOX_POLL_INTERVAL_SECONDS}}秒おきに実行する
-        2. 出力から `NEW_MESSAGE:<commentId>` を抽出し、NOTIFIED_IDS に無いものだけ `send_message` で親に通知して NOTIFIED_IDS に追加する。既に通知済みの commentId はスキップする
-        3. 新着がなければポーリング間隔を1.5倍に伸ばす（最大300秒）。新着があればリセットする
-        ※ このサブエージェントはセッション終了まで継続する」
+        手順: `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE --wait {{INBOX_POLL_INTERVAL_SECONDS}}` をフォアグラウンドで実行し、完了を待つ（`npm test` 等の実行完了を待つのと同じ扱い。他のツールを呼んではならない）。
 
-        親として届く通知の処理：
-        - `NEW_MESSAGE:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。処理後は必ず `msg-send.js` で結果を返信すること
+        このコマンドは、新着メッセージを検出するか {{INBOX_POLL_INTERVAL_SECONDS}} 秒経過するかのいずれか早い方で自然に終了する（内部的には既定間隔でリトライする）。実行中は PID registry に自己登録されるため、外部から生存を検知できる。
+
+        結果の処理：
+        - 出力に `NEW_MESSAGE:<commentId>` が1件以上含まれる場合 → 出力された**全ての** `NEW_MESSAGE:<commentId>` 行それぞれについて `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。1件でも処理し残すと、msg-poll.js側は出力済みの全IDを既読として永続化するため、その未処理分は再取得できず失われる。全件処理し、`msg-send.js` で結果を返信してから、次の作業の区切りで再度この手順を呼び出す
+        - 新着なし（タイムアウトで終了）の場合 → 何もせず、次の作業の区切りで再度この手順を呼び出す
   codex:
     skill_files_install_destination_directory: ~/.agents/skills
     skill_markdown_template_placeholder_substitutions:

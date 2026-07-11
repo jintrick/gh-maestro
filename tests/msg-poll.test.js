@@ -44,6 +44,17 @@ test('parseArgs: --once/--force が無ければ false', () => {
   assert.equal(r.force, false);
 });
 
+test('parseArgs: --wait <sec> を waitArg として返す', () => {
+  const r = msgPoll.parseArgs(['my-worker', '--issue', '5', '--workspace', '/ws', '--wait', '10']);
+  assert.equal(r.waitArg, '10');
+  assert.equal(r.onceMode, false);
+});
+
+test('parseArgs: --wait が無ければ waitArg は null', () => {
+  const r = msgPoll.parseArgs(['orchestrator', '--workspace', '/ws']);
+  assert.equal(r.waitArg, null);
+});
+
 // ── --help / -h ────────────────────────────────────────────────────────────
 
 test('--help が usage を返して code 0', () => {
@@ -778,6 +789,136 @@ test('継続モード: --force を指定すると重複があっても起動を�
     const r = spawnSync(process.execPath, [script, 'orchestrator', '--workspace', workspace, '--force'], { encoding: 'utf8', timeout: 10000 });
 
     assert.doesNotMatch(r.stderr, /重複起動/);
+  });
+});
+
+// ── --wait モード ───────────────────────────────────────────────────────────
+
+test('--once と --wait の同時指定は code 1', () => {
+  withTempDir(workspace => {
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once', '--wait', '5']);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('--once') && l.includes('--wait')));
+    assert.equal(r.scanOnce, null);
+  });
+});
+
+test('--wait に不正な値（0以下・非数値）を渡すと code 1', () => {
+  withTempDir(workspace => {
+    const r1 = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '0']);
+    assert.equal(r1.code, 1);
+    assert.equal(r1.scanOnce, null);
+
+    const r2 = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', 'abc']);
+    assert.equal(r2.code, 1);
+    assert.equal(r2.scanOnce, null);
+  });
+});
+
+test('--wait は main() の結果に waitMode:true と waitMs を設定する', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '10', '--interval', '3']);
+    assert.equal(r.code, 0);
+    assert.equal(r.waitMode, true);
+    assert.equal(r.waitMs, 10000);
+    assert.equal(r.intervalMs, 3000);
+    assert.equal(r.onceMode, false);
+  });
+});
+
+test('runWaitMode: 新着を即座に検出すればリトライせず true を返す', async () => {
+  await withTempDir(async workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        {
+          id: 42,
+          body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nHi',
+          created_at: '2026-07-07T12:00:00Z',
+        },
+      ]),
+    }));
+
+    let sleepCalls = 0;
+    msgPoll._setSleep(async () => { sleepCalls++; });
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    const found = await msgPoll.runWaitMode(r);
+    assert.equal(found, true);
+    assert.equal(sleepCalls, 0);
+    assert.ok(r.lines.some(l => l === 'NEW_MESSAGE:42'));
+
+    msgPoll._setSleep(async (ms) => {});
+  });
+});
+
+test('runWaitMode: 新着が無ければ waitMs 経過後に false を返す（リトライを重ねる）', async () => {
+  await withTempDir(async workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
+
+    let sleepCalls = 0;
+    // 実待機はごく短く（busy-loop でCPUを浪費しないように）、かつ複数回リトライさせる
+    msgPoll._setSleep(async (ms) => { sleepCalls++; await new Promise(resolve => setTimeout(resolve, Math.min(ms, 20))); });
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '1', '--interval', '1']);
+    const found = await msgPoll.runWaitMode(r);
+    assert.equal(found, false);
+    assert.equal(r.lines.length, 0);
+    // sleep をモックしているので実待機は発生しないが、少なくとも1回はリトライを試みる
+    assert.ok(sleepCalls > 0, `sleepCalls should be > 0, got ${sleepCalls}`);
+
+    msgPoll._setSleep(async (ms) => {});
+  });
+});
+
+test('scanOnce: maxGhTimeoutMs を渡すと gh 呼び出しの timeout オプションが残り時間に絞り込まれる', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    let capturedOpts = null;
+    msgPoll._setGhApiComments((repo, issue, since, opts) => {
+      capturedOpts = opts;
+      return { status: 0, stdout: JSON.stringify([]) };
+    });
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    r.scanOnce({ maxGhTimeoutMs: 2000 });
+    assert.equal(capturedOpts.timeout, 2000);
+  });
+});
+
+test('scanOnce: maxGhTimeoutMs が小さすぎても最低1000msは確保される', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    let capturedOpts = null;
+    msgPoll._setGhApiComments((repo, issue, since, opts) => {
+      capturedOpts = opts;
+      return { status: 0, stdout: JSON.stringify([]) };
+    });
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    r.scanOnce({ maxGhTimeoutMs: 10 });
+    assert.equal(capturedOpts.timeout, 1000);
+  });
+});
+
+test('scanOnce: maxGhTimeoutMs 未指定時は既定の GH_TIMEOUT_MS 相当（timeoutキーなし）', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    let capturedOpts = null;
+    msgPoll._setGhApiComments((repo, issue, since, opts) => {
+      capturedOpts = opts;
+      return { status: 0, stdout: JSON.stringify([]) };
+    });
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    r.scanOnce();
+    assert.equal(capturedOpts.timeout, undefined);
+    assert.equal(capturedOpts.cwd, workspace);
   });
 });
 
