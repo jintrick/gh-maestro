@@ -26,47 +26,69 @@ Output (stdout):
 body-file は常にこのスクリプトが削除する。呼び出し側は削除を意識しなくてよい。
 gh issue create が失敗した場合は body-file を残す（原案を失わないため）。`;
 
-const argv = process.argv.slice(2);
-if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(USAGE);
-  process.exit(0);
+// argv を1回だけ順に走査し、各フラグが消費した値をフラグ判定の対象から除外する。
+// これをしないと --title '--help' のような値そのものが誤ってフラグとして解釈される。
+function parseArgs(argv) {
+  let help = false;
+  let title, bodyFile, repo;
+  const positionals = [];
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--help' || a === '-h') {
+      help = true;
+    } else if (a === '--title') {
+      title = argv[++i];
+    } else if (a === '--body-file') {
+      bodyFile = argv[++i];
+    } else if (a === '--repo') {
+      repo = argv[++i];
+    } else {
+      positionals.push(a);
+    }
+  }
+
+  return { help, title, bodyFile, repo, positionals };
 }
 
-function getArg(name) {
-  const i = argv.indexOf(name);
-  return i !== -1 ? argv[i + 1] : undefined;
+if (require.main === module) {
+  const argv = process.argv.slice(2);
+  const { help, title, bodyFile, repo, positionals } = parseArgs(argv);
+
+  if (help) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+
+  if (!title || !bodyFile || positionals.length > 0) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+
+  const absBodyFile = path.resolve(toWinPath(bodyFile));
+  if (!fs.existsSync(absBodyFile)) {
+    console.error(`body-file が見つかりません: ${absBodyFile}`);
+    process.exit(1);
+  }
+
+  const args = ['issue', 'create', '--title', title, '--body-file', absBodyFile];
+  if (repo) args.push('--repo', repo);
+
+  const result = spawnSync('gh', args, { encoding: 'utf8' });
+
+  if (result.status !== 0) {
+    process.stderr.write(result.stderr || '');
+    console.error(`gh issue create に失敗した。body-file は保持する: ${absBodyFile}`);
+    process.exit(result.status || 1);
+  }
+
+  const url = result.stdout.trim();
+  const match = url.match(/\/issues\/(\d+)/);
+  const number = match ? match[1] : '?';
+
+  fs.unlinkSync(absBodyFile);
+
+  console.log(`ISSUE_CREATED:${number} ${url}`);
 }
 
-const title = getArg('--title');
-const bodyFile = getArg('--body-file');
-const repo = getArg('--repo');
-
-if (!title || !bodyFile) {
-  console.error(USAGE);
-  process.exit(1);
-}
-
-const absBodyFile = path.resolve(toWinPath(bodyFile));
-if (!fs.existsSync(absBodyFile)) {
-  console.error(`body-file が見つかりません: ${absBodyFile}`);
-  process.exit(1);
-}
-
-const args = ['issue', 'create', '--title', title, '--body-file', absBodyFile];
-if (repo) args.push('--repo', repo);
-
-const result = spawnSync('gh', args, { encoding: 'utf8' });
-
-if (result.status !== 0) {
-  process.stderr.write(result.stderr || '');
-  console.error(`gh issue create に失敗した。body-file は保持する: ${absBodyFile}`);
-  process.exit(result.status || 1);
-}
-
-const url = result.stdout.trim();
-const match = url.match(/\/issues\/(\d+)/);
-const number = match ? match[1] : '?';
-
-fs.unlinkSync(absBodyFile);
-
-console.log(`ISSUE_CREATED:${number} ${url}`);
+module.exports = { parseArgs };

@@ -36,20 +36,38 @@ function buildWorkerEntry(paneId, agentId, issue) {
   return { paneId, agentId, issue: Number(issue) };
 }
 
+// --- 引数パース（テスト可能な純粋関数） ---
+// argv を1回だけ順に走査し、各フラグが消費した値をフラグ判定の対象から除外する。
+// これをしないと --description '--issue' のような値そのものが誤って別フラグとして解釈される。
+const SPAWN_WORKER_VALUE_FLAGS = new Set([
+  '--skill', '--prompt', '--issue', '--description',
+  '--repo', '--workspace', '--base-branch', '--agent',
+]);
+function parseArgs(argv) {
+  const values = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (SPAWN_WORKER_VALUE_FLAGS.has(a)) {
+      values[a] = argv[++i] ?? null;
+    }
+  }
+  return values;
+}
+
 if (require.main === module) {
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
-const get = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
+const parsed = parseArgs(argv);
 
-const skill       = get('--skill');
-const prompt      = get('--prompt');
-const issue       = get('--issue');
-const description = get('--description');
-const repo        = get('--repo');
-const workspace   = get('--workspace') ?? process.cwd();
-const baseBranch  = get('--base-branch');
-const explicitAgentId = get('--agent');
+const skill       = parsed['--skill'] ?? null;
+const prompt      = parsed['--prompt'] ?? null;
+const issue       = parsed['--issue'] ?? null;
+const description = parsed['--description'] ?? null;
+const repo        = parsed['--repo'] ?? null;
+const workspace   = parsed['--workspace'] ?? process.cwd();
+const baseBranch  = parsed['--base-branch'] ?? null;
+const explicitAgentId = parsed['--agent'] ?? null;
 
 // --- バリデーション ---
 const resetCmd = `node "${resolve(__dirname, 'reset-session.js')}" --workspace "${workspace}"`;
@@ -382,4 +400,4 @@ console.log(workerName);
 
 } // require.main === module
 
-module.exports = { buildWorkerEntry };
+module.exports = { buildWorkerEntry, parseArgs };

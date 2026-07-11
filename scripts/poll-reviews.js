@@ -41,141 +41,154 @@ PR_MERGED を検出するまで永続的にポーリングする。
 ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
 消滅時はPID registryを解除して自動exitする。`;
 
-const argv = process.argv.slice(2);
-if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(USAGE);
-  process.exit(0);
-}
-
-// 簡易フラグパース
-const getFlag = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
-const sessionPidArg = getFlag('--session-pid');
-
-// フラグとその値を除去した位置引数
-const flagSet = new Set(['--session-pid']);
-const positional = [];
-for (let i = 0; i < argv.length; i++) {
-  if (flagSet.has(argv[i])) { i++; continue; }
-  positional.push(argv[i]);
-}
-
-const [pr, workspace, intervalArg] = positional;
-const intervalSec = parseInt(intervalArg || '30');
-
-if (!pr) {
-  console.error(USAGE);
-  process.exit(1);
-}
-
-const repo = spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-  { encoding: 'utf8' }).stdout.trim();
-
-const stateDir = path.join(workspace || process.cwd(), '.gh-maestro');
-fs.mkdirSync(stateDir, { recursive: true });
-const stateFile = path.join(stateDir, `poll-state-${pr}`);
-if (!fs.existsSync(stateFile)) fs.writeFileSync(stateFile, '');
-const shaFile = path.join(stateDir, `poll-sha-${pr}`);
-
-// ── ライフサイクル管理 ─────────────────────────────────────────────────
-
-const sessionPid = resolveSessionPid(sessionPidArg);
-const checkParent = createDeadManSwitch(sessionPid);
-
-// PID registry に自己登録
-registerProcess(workspace || process.cwd(), { script: 'poll-reviews.js' });
-
-function cleanup() {
-  lifecycleCleanup(workspace || process.cwd(), () => {
-    try { fs.unlinkSync(stateFile); } catch {}
-    try { fs.unlinkSync(shaFile); } catch {}
-  });
-}
-
-process.on('SIGINT',  () => { cleanup(); process.exit(0); });
-process.on('SIGTERM', () => { cleanup(); process.exit(0); });
-
-function knownIds() {
-  return new Set(fs.readFileSync(stateFile, 'utf8').split('\n').filter(Boolean));
-}
-
-function recordId(id) {
-  fs.appendFileSync(stateFile, id + '\n');
-}
-
-const inlineJq = `.[] | [(.id | tostring), .path, ((.original_line // "?") | tostring), .user.login, (.body | gsub("\\n"; " "))] | join("|")`;
-const commentsJq = `.comments[] | [(.id | tostring), .author.login, (.body | gsub("\\n"; " "))] | join("|")`;
-const reviewsJq = `.[] | [(.id | tostring), .user.login, .state, (.body | gsub("\\n"; " "))] | join("|")`;
-
-(async () => {
-  let interval = intervalSec;
-  while (true) {
-    // dead-man's switch: 親セッション生存確認
-    if (!checkParent()) {
-      console.error(`poll-reviews: parent session (pid ${sessionPid}) is dead — exiting`);
-      cleanup();
-      process.exit(0);
+// argv を1回だけ順に走査し、--session-pid が消費した値をフラグ判定・位置引数の対象から除外する。
+// これをしないと --session-pid '--help' のような値そのものが誤ってフラグとして解釈される。
+function parseArgs(argv) {
+  let help = false;
+  let sessionPid;
+  const positional = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--help' || a === '-h') {
+      help = true;
+    } else if (a === '--session-pid') {
+      sessionPid = argv[++i];
+    } else {
+      positional.push(a);
     }
+  }
+  return { help, sessionPid, positional };
+}
 
-    const prJson = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
-      '--json', 'state,headRefOid', '-q', '[.state, .headRefOid] | join("|")'],
-      { encoding: 'utf8' }).stdout.trim();
-    const [state, headSha] = prJson.split('|');
+if (require.main === module) {
+  const argv = process.argv.slice(2);
+  const { help, sessionPid: sessionPidArg, positional } = parseArgs(argv);
 
-    if (state === 'MERGED') {
-      process.stdout.write(`PR_MERGED:${pr}\n`);
-      cleanup();
-      process.exit(0);
-    }
+  if (help) {
+    console.log(USAGE);
+    process.exit(0);
+  }
 
-    const prevSha = fs.existsSync(shaFile) ? fs.readFileSync(shaFile, 'utf8').trim() : '';
-    if (headSha && headSha !== prevSha) {
-      fs.writeFileSync(shaFile, headSha);
-      if (prevSha) {
-        process.stdout.write(`PR_PUSH:${headSha}\n`);
+  const [pr, workspace, intervalArg] = positional;
+  const intervalSec = parseInt(intervalArg || '30');
+
+  if (!pr) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+
+  const repo = spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
+    { encoding: 'utf8' }).stdout.trim();
+
+  const stateDir = path.join(workspace || process.cwd(), '.gh-maestro');
+  fs.mkdirSync(stateDir, { recursive: true });
+  const stateFile = path.join(stateDir, `poll-state-${pr}`);
+  if (!fs.existsSync(stateFile)) fs.writeFileSync(stateFile, '');
+  const shaFile = path.join(stateDir, `poll-sha-${pr}`);
+
+  // ── ライフサイクル管理 ─────────────────────────────────────────────────
+
+  const sessionPid = resolveSessionPid(sessionPidArg);
+  const checkParent = createDeadManSwitch(sessionPid);
+
+  // PID registry に自己登録
+  registerProcess(workspace || process.cwd(), { script: 'poll-reviews.js' });
+
+  function cleanup() {
+    lifecycleCleanup(workspace || process.cwd(), () => {
+      try { fs.unlinkSync(stateFile); } catch {}
+      try { fs.unlinkSync(shaFile); } catch {}
+    });
+  }
+
+  process.on('SIGINT',  () => { cleanup(); process.exit(0); });
+  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+
+  function knownIds() {
+    return new Set(fs.readFileSync(stateFile, 'utf8').split('\n').filter(Boolean));
+  }
+
+  function recordId(id) {
+    fs.appendFileSync(stateFile, id + '\n');
+  }
+
+  const inlineJq = `.[] | [(.id | tostring), .path, ((.original_line // "?") | tostring), .user.login, (.body | gsub("\\n"; " "))] | join("|")`;
+  const commentsJq = `.comments[] | [(.id | tostring), .author.login, (.body | gsub("\\n"; " "))] | join("|")`;
+  const reviewsJq = `.[] | [(.id | tostring), .user.login, .state, (.body | gsub("\\n"; " "))] | join("|")`;
+
+  (async () => {
+    let interval = intervalSec;
+    while (true) {
+      // dead-man's switch: 親セッション生存確認
+      if (!checkParent()) {
+        console.error(`poll-reviews: parent session (pid ${sessionPid}) is dead — exiting`);
+        cleanup();
+        process.exit(0);
       }
-    }
 
-    const known = knownIds();
+      const prJson = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
+        '--json', 'state,headRefOid', '-q', '[.state, .headRefOid] | join("|")'],
+        { encoding: 'utf8' }).stdout.trim();
+      const [state, headSha] = prJson.split('|');
 
-    const inlineOut = spawnSync('gh', ['api', `repos/${repo}/pulls/${pr}/comments`,
-      '--paginate', '-q', inlineJq], { encoding: 'utf8' }).stdout;
-    for (const line of inlineOut.split('\n').filter(Boolean)) {
-      const sep = line.indexOf('|');
-      const id = line.slice(0, sep);
-      if (!known.has(id)) {
-        recordId(id);
-        process.stdout.write(`REVIEW_COMMENT:${line.slice(sep + 1)}\n`);
+      if (state === 'MERGED') {
+        process.stdout.write(`PR_MERGED:${pr}\n`);
+        cleanup();
+        process.exit(0);
       }
-    }
 
-    const commentsOut = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
-      '--json', 'comments', '-q', commentsJq], { encoding: 'utf8' }).stdout;
-    for (const line of commentsOut.split('\n').filter(Boolean)) {
-      const sep = line.indexOf('|');
-      const id = line.slice(0, sep);
-      if (!known.has(id)) {
-        recordId(id);
-        process.stdout.write(`PR_COMMENT:${line.slice(sep + 1)}\n`);
-      }
-    }
-
-    const reviewsOut = spawnSync('gh', ['api', `repos/${repo}/pulls/${pr}/reviews`,
-      '--paginate', '-q', reviewsJq], { encoding: 'utf8' }).stdout;
-    for (const line of reviewsOut.split('\n').filter(Boolean)) {
-      const sep = line.indexOf('|');
-      const id = line.slice(0, sep);
-      if (!known.has(id)) {
-        recordId(id);
-        const rest = line.slice(sep + 1); // user|state|body
-        const [user, state, ...bodyParts] = rest.split('|');
-        const body = bodyParts.join('|');
-        // APPROVED/CHANGES_REQUESTED は body が空でも emit（マージ判断に必要）
-        if (body.trim() || state === 'APPROVED' || state === 'CHANGES_REQUESTED') {
-          process.stdout.write(`PR_REVIEW:${user}:${state}:${body}\n`);
+      const prevSha = fs.existsSync(shaFile) ? fs.readFileSync(shaFile, 'utf8').trim() : '';
+      if (headSha && headSha !== prevSha) {
+        fs.writeFileSync(shaFile, headSha);
+        if (prevSha) {
+          process.stdout.write(`PR_PUSH:${headSha}\n`);
         }
       }
-    }
 
-    await new Promise(r => setTimeout(r, intervalSec * 1000));
-  }
-})();
+      const known = knownIds();
+
+      const inlineOut = spawnSync('gh', ['api', `repos/${repo}/pulls/${pr}/comments`,
+        '--paginate', '-q', inlineJq], { encoding: 'utf8' }).stdout;
+      for (const line of inlineOut.split('\n').filter(Boolean)) {
+        const sep = line.indexOf('|');
+        const id = line.slice(0, sep);
+        if (!known.has(id)) {
+          recordId(id);
+          process.stdout.write(`REVIEW_COMMENT:${line.slice(sep + 1)}\n`);
+        }
+      }
+
+      const commentsOut = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
+        '--json', 'comments', '-q', commentsJq], { encoding: 'utf8' }).stdout;
+      for (const line of commentsOut.split('\n').filter(Boolean)) {
+        const sep = line.indexOf('|');
+        const id = line.slice(0, sep);
+        if (!known.has(id)) {
+          recordId(id);
+          process.stdout.write(`PR_COMMENT:${line.slice(sep + 1)}\n`);
+        }
+      }
+
+      const reviewsOut = spawnSync('gh', ['api', `repos/${repo}/pulls/${pr}/reviews`,
+        '--paginate', '-q', reviewsJq], { encoding: 'utf8' }).stdout;
+      for (const line of reviewsOut.split('\n').filter(Boolean)) {
+        const sep = line.indexOf('|');
+        const id = line.slice(0, sep);
+        if (!known.has(id)) {
+          recordId(id);
+          const rest = line.slice(sep + 1); // user|state|body
+          const [user, state, ...bodyParts] = rest.split('|');
+          const body = bodyParts.join('|');
+          // APPROVED/CHANGES_REQUESTED は body が空でも emit（マージ判断に必要）
+          if (body.trim() || state === 'APPROVED' || state === 'CHANGES_REQUESTED') {
+            process.stdout.write(`PR_REVIEW:${user}:${state}:${body}\n`);
+          }
+        }
+      }
+
+      await new Promise(r => setTimeout(r, intervalSec * 1000));
+    }
+  })();
+}
+
+module.exports = { parseArgs };

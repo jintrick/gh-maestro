@@ -480,24 +480,44 @@ Description:
   各エントリは同一性確認（起動時刻比較）を経て、一致する場合のみ kill される。
   PID再利用が検出されたエントリはファイル削除のみ行う（無関係なプロセスを保護）。`;
 
+// argv を1回だけ順に走査し、各フラグが消費した値をフラグ判定・位置引数の対象から除外する。
+// これをしないと --worker-name '--help' のような値そのものが誤ってフラグとして解釈される。
+function parseCliArgs(argv) {
+  let help = false;
+  let dryRun = false;
+  let workspace, workerName;
+  const positional = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--help' || a === '-h') {
+      help = true;
+    } else if (a === '--dry-run') {
+      dryRun = true;
+    } else if (a === '--workspace') {
+      workspace = argv[++i];
+    } else if (a === '--worker-name') {
+      workerName = argv[++i];
+    } else {
+      positional.push(a);
+    }
+  }
+  return { help, dryRun, workspace, workerName, positional };
+}
+
 if (require.main === module) {
   const argv = process.argv.slice(2);
+  const { help, dryRun, workspace, workerName, positional } = parseCliArgs(argv);
 
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (help) {
     console.log(CLI_USAGE);
     process.exit(0);
   }
 
-  const sub = argv[0];
+  const sub = positional[0];
   if (sub !== 'sweep') {
     console.error(CLI_USAGE);
     process.exit(1);
   }
-
-  const get = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
-  const workspace = get('--workspace');
-  const workerName = get('--worker-name');
-  const dryRun = argv.includes('--dry-run');
 
   if (!workspace) {
     console.error('process-lifecycle: --workspace が必要です');
@@ -557,4 +577,5 @@ module.exports = {
   // 統合
   cleanup,
   CLI_USAGE,
+  parseCliArgs,
 };

@@ -118,22 +118,38 @@ function writeRunMetadata(metaFile, mode, directedBrief) {
   fs.writeFileSync(metaFile, JSON.stringify(metadata, null, 2), 'utf8');
 }
 
-module.exports = { resolveMode, buildPrompt, digestText, writeRunMetadata };
+// argv を1回だけ順に走査し、各フラグが消費した値をフラグ判定・位置引数の対象から除外する。
+// これをしないと --brief-file '--help' のような値そのものが誤ってフラグとして解釈される。
+function parseArgs(argv) {
+  let help = false;
+  let mode, briefFile;
+  const positional = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--help' || a === '-h') {
+      help = true;
+    } else if (a === '--mode') {
+      mode = argv[++i];
+    } else if (a === '--brief-file') {
+      briefFile = argv[++i];
+    } else {
+      positional.push(a);
+    }
+  }
+  return { help, mode, briefFile, positional };
+}
+
+module.exports = { resolveMode, buildPrompt, digestText, writeRunMetadata, parseArgs };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  if (argv.includes('--help') || argv.includes('-h')) {
+  const { help, mode: modeArg, briefFile: briefFileArg, positional } = parseArgs(argv);
+
+  if (help) {
     console.log(USAGE);
     process.exit(0);
   }
 
-  const getFlag = (flag) => { const i = argv.indexOf(flag); return i !== -1 ? argv[i + 1] ?? null : null; };
-  const flagSet = new Set(['--mode', '--brief-file']);
-  const positional = [];
-  for (let i = 0; i < argv.length; i++) {
-    if (flagSet.has(argv[i])) { i++; continue; }
-    positional.push(argv[i]);
-  }
   const [pr, repo, workspace] = positional;
 
   if (!pr || !repo || !workspace) {
@@ -152,13 +168,12 @@ if (require.main === module) {
 
   let mode;
   try {
-    mode = resolveMode(getFlag('--mode'));
+    mode = resolveMode(modeArg);
   } catch (e) {
     console.error(`run-review-manager: ${e.message}`);
     process.exit(1);
   }
 
-  const briefFileArg = getFlag('--brief-file');
   let directedBrief = null;
   if (mode === 'directed') {
     if (!briefFileArg) {

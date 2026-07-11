@@ -530,3 +530,37 @@ test('CLI_USAGE: 文字列が定義されている', () => {
   assert.ok(plc.CLI_USAGE.includes('sweep'));
   assert.ok(plc.CLI_USAGE.includes('--workspace'));
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// parseCliArgs（純粋関数、spawn不要）
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('parseCliArgs: sub コマンドとフラグを通常どおりパースする', () => {
+  const plc = loadModule();
+  const r = plc.parseCliArgs(['sweep', '--workspace', '/ws', '--worker-name', 'issue-1-test', '--dry-run']);
+  assert.equal(r.help, false);
+  assert.equal(r.dryRun, true);
+  assert.equal(r.workspace, '/ws');
+  assert.equal(r.workerName, 'issue-1-test');
+  assert.deepEqual(r.positional, ['sweep']);
+});
+
+test('parseCliArgs: --help はヘルプフラグとして認識される', () => {
+  const plc = loadModule();
+  const r = plc.parseCliArgs(['--help']);
+  assert.equal(r.help, true);
+});
+
+test('parseCliArgs: --worker-name の値が"--help"文字列でもフラグとして誤解釈しない', () => {
+  const plc = loadModule();
+  const r = plc.parseCliArgs(['sweep', '--workspace', '/ws', '--worker-name', '--help']);
+  assert.equal(r.help, false);
+  assert.equal(r.workerName, '--help');
+});
+
+test('parseCliArgs: --workspace の値が"--dry-run"文字列でも別フラグとして誤解釈しない', () => {
+  const plc = loadModule();
+  const r = plc.parseCliArgs(['sweep', '--workspace', '--dry-run']);
+  assert.equal(r.workspace, '--dry-run');
+  assert.equal(r.dryRun, false);
+});
