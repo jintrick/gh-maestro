@@ -205,10 +205,18 @@ function ensureDevBranch() {
         '   git checkout -b dev <デフォルトブランチ名> && git push -u origin dev',
       );
     }
+  }
+
+  // ローカルに dev ブランチがあっても origin/dev が無いことがある
+  // （初回セットアップ時の push 失敗・オフライン実行等）。毎回リモートの
+  // 存在を確認し、無ければ再度 push を試みる。
+  const remoteDev = run('git', ['ls-remote', '--heads', 'origin', 'dev'], { capture: true });
+  if (!remoteDev) {
     if (!run('git', ['push', '-u', 'origin', 'dev'])) {
       console.warn("  [warn] 'dev' ブランチのリモートへのpushに失敗しました。手動で実行してください: git push -u origin dev");
     }
   }
+
   ok("Branch 'dev' exists");
 }
 
