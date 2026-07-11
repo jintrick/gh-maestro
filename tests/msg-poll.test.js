@@ -1013,6 +1013,77 @@ test('scanOnce({singleMessage:false}): --once/継続モードは従来どおり�
   });
 });
 
+test('scanOnce: state.since が非文字列（破損したstate由来）でもカーソルが固着せず進む（worker モード）', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        { id: 1, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+      ]),
+    }));
+
+    const statePath = msgPoll.statePath(workspace, 'my-worker');
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    // 旧バージョン由来などで since が文字列でない（例: 空オブジェクト）壊れた state を模擬する
+    fs.writeFileSync(statePath, JSON.stringify({ since: {}, seenIds: [] }), 'utf8');
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    r.scanOnce();
+    assert.deepEqual(r.lines, ['NEW_MESSAGE:1']);
+
+    const persisted = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    assert.equal(persisted.since, '2026-07-07T12:00:00Z');
+  });
+});
+
+test('scanOnce: state.since[issue] が非文字列でもカーソルが固着せず進む（orchestrator モード）', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        { id: 1, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"my-worker"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+      ]),
+    }));
+
+    fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.gh-maestro', 'workers.json'),
+      JSON.stringify({ 'my-worker': { issue: '1' } }),
+      'utf8'
+    );
+
+    const statePath = msgPoll.statePath(workspace, 'orchestrator');
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, JSON.stringify({ since: { 1: 12345 }, seenIds: [] }), 'utf8');
+
+    const r = msgPoll.main(['orchestrator', '--workspace', workspace, '--once']);
+    r.scanOnce();
+    assert.deepEqual(r.lines, ['NEW_MESSAGE:1:1']);
+
+    const persisted = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    assert.equal(persisted.since['1'], '2026-07-07T12:00:00Z');
+  });
+});
+
+test('scanOnce: created_at が欠落したコメントは新着候補から除外される（クラッシュ・不正ソート防止）', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        { id: 1, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: undefined },
+        { id: 2, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nB', created_at: '2026-07-07T12:00:00Z' },
+      ]),
+    }));
+
+    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    r.scanOnce();
+    assert.deepEqual(r.lines, ['NEW_MESSAGE:2']);
+  });
+});
+
 // ── reset mocks ─────────────────────────────────────────────────────────────
 
 msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));

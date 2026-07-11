@@ -415,6 +415,9 @@ function main(argsOverride, opts = {}) {
       const cid = c.id;
       if (cid == null) continue;
       if (state.seenIds.includes(cid)) continue; // 既知の ID はスキップ
+      // created_at 欠落は、下流の created_at ソート・カーソル計算
+      // （maxCreatedByIssue 等）と扱いを揃え、除外する。
+      if (!c.created_at) continue;
 
       const meta = parseMarker(c.body);
       if (!meta) continue; // マーカーなし・JSON parse 失敗は無視
@@ -476,11 +479,17 @@ function main(argsOverride, opts = {}) {
       const candidate = deferredMin != null && deferredMin < maxCreated ? deferredMin : maxCreated;
 
       if (isOrchestrator) {
-        if (!state.since[issue] || candidate > state.since[issue]) {
+        // state.since[issue] が文字列でない（破損した state ファイル等に
+        // 由来する）場合は不正な値として扱い、無条件に上書きする。
+        // typeof チェックを省略すると `{}` 等のtruthyな非文字列値で
+        // `!state.since[issue]` が false のままカーソルが永久に固着する。
+        const cur = typeof state.since[issue] === 'string' ? state.since[issue] : null;
+        if (!cur || candidate > cur) {
           state.since[issue] = candidate;
         }
       } else {
-        if (!state.since || candidate > state.since) {
+        const cur = typeof state.since === 'string' ? state.since : null;
+        if (!cur || candidate > cur) {
           state.since = candidate;
         }
       }
