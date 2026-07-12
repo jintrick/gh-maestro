@@ -1,12 +1,17 @@
 #!/usr/bin/env node
-// Usage: node poll-pr.js <ISSUE> [--workspace <path>] [--session-pid <pid>] [INTERVAL_SECONDS]
-// Polls until a PR for the given issue is found, then launches the reviewer and prints:
+// Usage: node poll-pr.js <ISSUE> --review-aspects <auto|leaf,leaf,...> [--workspace <path>] [--session-pid <pid>] [INTERVAL_SECONDS]
+// Polls until a PR for the given issue is found, then launches the reviewer (directed mode)
+// and bridges into poll-reviews.js as a child process. Prints:
 //   PR_DETECTED:<number>
 //   REVIEW_MANAGER_STARTED:<number> | REVIEW_MANAGER_ALREADY_RUNNING:<number>
+//   ...poll-reviews.js の出力がそのまま続く（REVIEW_COMMENT / PR_COMMENT / PR_REVIEW / PR_PUSH / PR_MERGED）
 'use strict';
 
+const path = require('path');
 const { spawnSync } = require('./child-process');
-const { startReviewManager } = require('./start-review-manager');
+const { startReviewManager, buildAspectsBrief } = require('./start-review-manager');
+const { listKnownAspects } = require('./shared/review-aspects');
+const { detectAspects } = require('./shared/detect-aspects');
 const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
 const {
   resolveSessionPid,
@@ -15,30 +20,89 @@ const {
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
 
-const USAGE = `poll-pr.js — Issue に対応する PR を検出し、検出時にレビュアーを起動する
+const USAGE = `poll-pr.js — Issue に対応する PR を検出し、検出時にレビュアーを起動し、
+その後 poll-reviews.js に処理を橋渡ししてレビュー監視を続行する
 
-Usage: node poll-pr.js <ISSUE> [--workspace <path>] [--session-pid <pid>] [INTERVAL_SECONDS]
+Usage: node poll-pr.js <ISSUE> --review-aspects <auto|leaf,leaf,...> [--workspace <path>] [--session-pid <pid>] [INTERVAL_SECONDS]
 
 Arguments:
   <ISSUE>             対象の Issue 番号（必須）
   [INTERVAL_SECONDS]  ポーリング間隔（秒、デフォルト 30）
 
 Options:
-  --workspace <path>   ワークスペースパス（省略時は環境変数またはCWDから解決）
-  --session-pid <pid>  監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
+  --review-aspects <value>  必須。PR検出時に directed モードで起動する観点を指定する。
+                             auto: 変更ファイルから scripts/shared/detect-aspects.js で自動算出する
+                             leaf,leaf,...: skills/gh-maestro-reviewer/ 配下に実在する葉名のカンマ区切り
+  --workspace <path>         ワークスペースパス（省略時は環境変数またはCWDから解決）
+  --session-pid <pid>        監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
 
 Output (stdout):
   PR_DETECTED:<PR>                     PR を検出した
   REVIEW_MANAGER_STARTED:<PR>          Review Manager を起動した
   REVIEW_MANAGER_ALREADY_RUNNING:<PR>  Review Manager は既に稼働中
+  以降、poll-reviews.js を子プロセスとして起動し、その標準出力（REVIEW_COMMENT/PR_COMMENT/
+  PR_REVIEW/PR_PUSH/PR_MERGED）をそのまま中継する。poll-reviews.js の終了とともに終了する。
 
-PR が見つかるまでブロックし、見つけたら Review Manager(start-review-manager.js)を起動して終了する。
+PR が見つかるまでブロックし、見つけたら Review Manager(start-review-manager.js)を起動し、
+続けて poll-reviews.js を子プロセスとして起動してレビュー監視を引き継いでから終了する。
 ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
 消滅時はPID registryを解除して自動exitする。`;
 
+/**
+ * --review-aspects の値を検証・解決する。
+ * @param {string|null} rawValue
+ * @param {string[]} knownAspects skills/gh-maestro-reviewer/ 配下の既知の葉名一覧
+ * @returns {{mode: 'auto'} | {mode: 'explicit', aspects: string[]}}
+ */
+function resolveReviewAspects(rawValue, knownAspects) {
+  if (rawValue === 'auto') return { mode: 'auto' };
+
+  const list = rawValue.split(',').map(s => s.trim());
+  if (list.some(s => s === '')) {
+    throw new Error(`--review-aspects の形式が不正です: "${rawValue}"`);
+  }
+  const unknown = list.filter(a => !knownAspects.includes(a));
+  if (unknown.length > 0) {
+    throw new Error(
+      `未知の観点キーワードです: ${unknown.join(', ')}（既知の観点: ${knownAspects.join(', ') || '(なし)'}）`
+    );
+  }
+  return { mode: 'explicit', aspects: list };
+}
+
+/**
+ * gh 経由でPRの変更ファイル一覧を取得する。
+ * @param {string} pr
+ * @param {string} repo
+ * @returns {string[]}
+ */
+function getChangedFiles(pr, repo) {
+  const r = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
+    '--json', 'files', '-q', '.files[].path'], { encoding: 'utf8' });
+  return (r.stdout || '').split('\n').filter(Boolean);
+}
+
+/**
+ * poll-reviews.js を子プロセスとして起動し、その標準出力/標準エラーを自プロセスへ
+ * 中継しながら終了を待つ。シェルのパイプ+ループではなくNode内の子プロセスとして
+ * 起動することで、サブシェルの変数スコープ問題を避ける（Issue #111）。
+ *
+ * @param {string} pr
+ * @param {string} workspace
+ * @param {string|number} sessionPid
+ * @returns {number} poll-reviews.js の終了コード（不明な場合は1）
+ */
+function spawnPollReviews(pr, workspace, sessionPid) {
+  const args = [path.join(__dirname, 'poll-reviews.js'), pr, workspace, '--session-pid', String(sessionPid)];
+  const result = spawnSync(process.execPath, args, { stdio: 'inherit' });
+  return typeof result.status === 'number' ? result.status : 1;
+}
+
+module.exports = { resolveReviewAspects, getChangedFiles, spawnPollReviews };
+
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--session-pid']);
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--session-pid', '--review-aspects']);
 
   // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
   // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
@@ -55,11 +119,28 @@ if (require.main === module) {
 
   const workspaceArg = values['--workspace'];
   const sessionPidArg = values['--session-pid'];
+  const reviewAspectsArg = values['--review-aspects'];
 
   const [issue, intervalArg] = rest;
 
   if (!issue) {
     console.error(USAGE);
+    process.exit(1);
+  }
+
+  // --review-aspects は必須。省略時は silent fallback せず即エラー終了する（Issue #111）。
+  if (reviewAspectsArg == null) {
+    console.error('poll-pr: --review-aspects は必須です（auto または既知の観点カンマ区切り）。');
+    console.error(USAGE);
+    process.exit(1);
+  }
+
+  const knownAspects = listKnownAspects();
+  let reviewAspects;
+  try {
+    reviewAspects = resolveReviewAspects(reviewAspectsArg, knownAspects);
+  } catch (e) {
+    console.error(`poll-pr: ${e.message}`);
     process.exit(1);
   }
 
@@ -83,9 +164,9 @@ if (require.main === module) {
   registerProcess(workspace, { script: 'poll-pr.js' });
 
   // cleanup: registry 解除 + exit
-  function cleanup() {
+  function cleanup(code = 0) {
     lifecycleCleanup(workspace);
-    process.exit(0);
+    process.exit(code);
   }
 
   process.on('SIGINT', cleanup);
@@ -116,12 +197,22 @@ if (require.main === module) {
 
       const pr = findPR();
       if (pr) {
+        const changedFiles = getChangedFiles(pr, repo);
+        const aspects = reviewAspects.mode === 'auto'
+          ? detectAspects(changedFiles, knownAspects)
+          : reviewAspects.aspects;
+        const brief = buildAspectsBrief(aspects);
+
         // PR 検出のついでにReview Managerを起動するが、その起動結果も併せて報告する。
         // これにより orchestrator は「レビューが起動済みである」ことを把握できる。
-        const reviewStatus = startReviewManager(pr, repo, workspace);
+        const reviewStatus = startReviewManager(pr, repo, workspace, { mode: 'directed', promptText: brief });
         process.stdout.write(`PR_DETECTED:${pr}\n`);
         process.stdout.write(`${reviewStatus}:${pr}\n`);
-        cleanup();
+
+        // poll-pr.js と poll-reviews.js は内部ロジックを統合せず、それぞれ独立に保つ。
+        // 代わりにここで poll-reviews.js を子プロセスとして起動し、終了まで中継する（Issue #111）。
+        const exitCode = spawnPollReviews(pr, workspace, sessionPid);
+        cleanup(exitCode);
         return; // unreachable
       }
       await new Promise(r => setTimeout(r, interval));
