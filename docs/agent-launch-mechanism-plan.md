@@ -138,7 +138,7 @@ codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen "<prompt>"
 
 - **初回セットアップウィザードの無人化**: 新しいマシンや新しい`CODEX_HOME`で最初にcodexを起動する際、サンドボックスウィザードが対話入力を要求し、無人spawnをブロックする。CI/自動化向けにこれを事前に済ませる設定(config.tomlでの明示指定等)があるか要調査。現状は「そのマシンで一度手動で`codex`を起動してウィザードを済ませておく」ことがgh-maestro導入手順の前提になる
 - **codexの`enterSequence`**: `send-pane.js`経由の追加メッセージ送信(起動後のフォローアップ)で使うEnter相当の送信terminatorは未検証。claude/agy/claude-dsは`\r\n`実績ありだが、reasonixは`\r`単体という前例があるため、codexも別途実機確認が必要
-- **codexのスキル配置**: codexは`SKILL.md`形式(Open Agent Skills標準)のネイティブスキットシステムを持つ(`~/.agents/skills`)。claude/agyと同様に`skills/agents.yaml`へ実体インストール先を追加できるが、これは本計画のスコープ外(別タスクとして扱う)。今回の検証では未インストールのままでも、codexが自律的にprompt.mdへフォールバックして正しく動作することを確認した
+- **codexのスキル配置**: codexはSKILL.md形式(Open Agent Skills標準)のネイティブスキットシステムを持つ(`~/.agents/skills`)。claude/agyと同様に`skills/agents.yaml`へ実体インストール先を追加できるが、これは本計画のスコープ外(別タスクとして扱う)。今回の検証では未インストールのままでも、codexが自律的にprompt.mdへフォールバックして正しく動作することを確認した
 - **codex向けPOLL_MECHANISM**: `skills/agents.yaml`のclaude/agyエントリにある「PRレビュー通知のポーリング機構」記述に相当するcodex版の設計(codexのsubagent機構・バックグラウンド実行の実際の使い方を要調査)。本計画のスコープ外
 
 ## 実装内容(完了)

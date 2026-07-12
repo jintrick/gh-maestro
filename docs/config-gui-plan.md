@@ -9,7 +9,7 @@
 現在 `gh-maestro` のワーカー割り当てやカスタムエージェントの設定は `config.json` を直接編集することで行われています。しかし、以下の課題があります。
 
 - スキル名（`gh-maestro-coder` など）やエージェントID（`claude-ds` など）のタイポによる設定エラー。
-- ワークスペース固有の `config.json` では `command` や `extraArgs` を上書きできないというセキュリティ制約（[resolve-config.js](file:///C:/Users/amg/work/gh-maestro/scripts/shared/resolve-config.js#L168-L180)）が、テキスト編集では分かりにくい。
+- ワークスペース固有の `config.json` では `command` や `extraArgs` を上書きできないというセキュリティ制約（`scripts/shared/resolve-config.js`）が、テキスト編集では分かりにくい。
 - エージェントがログインシェル上で解決可能かどうか（パスが通っているか）を事前に確認しづらい。
 
 これらを解決するため、視覚的・直感的に設定をバリデーションしながら編集できる GUI ツールを導入します。
@@ -75,7 +75,7 @@ VS Code 内のカスタムエディタ（Webview Panel）として動作させ�
 2. **セキュリティ・フィードバック (重要)**:
    ワークスペース固有の `config.json` を編集している際、`command` や `extraArgs` に相当する入力フィールドは自動的に無効化（Disabled）し、ロックアイコンと共に「**実行コマンドの変更はグローバル設定でのみ許可されています**」という警告をトーストまたはツールチップで明示。
 3. **エージェント・テスター**:
-   エージェント定義ごとに「Test Launch」ボタンを配置し、バックエンドが実際にログインシェル上でその `command` が呼び出せるか（[checkAgentExists](file:///C:/Users/amg/work/gh-maestro/scripts/agent-exec.js#L30)）を非同期検証してステータスを表示。
+   エージェント定義ごとに「Test Launch」ボタンを配置し、バックエンドが実際にログインシェル上でその `command` が呼び出せるか（`scripts/agent-exec.js`の`checkAgentExists`）を非同期検証してステータスを表示。
 
 ---
 

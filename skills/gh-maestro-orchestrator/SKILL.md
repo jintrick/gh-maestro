@@ -241,7 +241,7 @@ node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tm
 `write-draft.js`・`view-file.js`・`create-issue.js` はすべて同じ論理パス解決ロジック（`win-path.js`）を通るため、同じ `/tmp/issue-draft.md` を渡せば書く先と読む先の実体ファイルは常に一致する。
 
 `gh issue create` を直接呼ばないこと。`create-issue.js` が唯一の呼び出し口であり、
-成功時に `--body-file` を削除する。これにより `issue-draft.md` が使い回され、
+成功時に `--body-file` を削除する。これにより `/tmp/issue-draft.md` が使い回され、
 次回起票時に「既存ファイルだから読み直す」という無駄なReadが発生するのを防ぐ
 （失敗時は原案を失わないよう削除しない）。
 
