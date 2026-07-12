@@ -68,7 +68,7 @@ description: Run a gh-maestro PR Review Manager that delegates three independent
      いずれの場合も方針外の観点を無理に指摘しない。
 5. Reviewerの結果を集約し、`OUTPUT`にJSONを書き出す。
 
-RMはGitHubに投稿しない。採否判断、severity付与、APPROVE/REQUEST_CHANGES判定をしない。
+RMはGitHubに投稿しない。採否判断、APPROVE/REQUEST_CHANGES判定をしない。
 投稿・line解決・diff hunk判定・重複統合は後続のNode.js review publisherが行う。
 
 ## Reviewerへの共通指示
@@ -82,6 +82,19 @@ diffが参照する外部シンボル・型・設定は、判定前に実ファ�
 （`Correctness` / `Maintainability` / `Resilience & Security`）を書く。
 `scripts/run-review-manager.js`のプロンプト生成は`aspect`に幹の名前が入る前提のため。
 
+### Severity判定規準
+
+各findingには深刻度（`severity`）とその判定根拠（`severity_rationale`）を必ず付与する。
+深刻度はレビュアーの意見であり、最終的な採否判断はオーケストレーターと人間が行う（advisoryの原則）。
+
+- `BLOCKER`: マージすると本番で実害が発生する（データ破損・クラッシュ・セキュリティ侵害・機能不全）
+- `MAJOR`: 実害の直接発生はないが、放置コストが高い（再発性の高いバグ温床・保守困難化）
+- `SUGGESTION`: 任意の改善提案
+
+**判定に迷う場合は低い方に倒す。** 過剰なBLOCKERはトリアージ側の信頼を毀損する。
+
+### 出力形式
+
 各Reviewerは以下のJSON配列だけを返す。
 
 ```json
@@ -93,17 +106,19 @@ diffが参照する外部シンボル・型・設定は、判定前に実ファ�
     "context_before": "if (!user.id) throw new Error('missing id')",
     "context_after": "return user",
     "summary": "User persistence can report success before the write completes",
-    "observed_fact": "The changed code starts saveUser(user) without awaiting it.",
-    "invariant": "The caller must not return a saved user until persistence has completed successfully.",
-    "failure_scenario": "If saveUser rejects after the response is returned, the API reports success while the user was not persisted.",
-    "minimal_fix": "Await saveUser(user) before returning the user.",
+    "severity": "BLOCKER",
+    "severity_rationale": "APIが成功を返した後に永続化が失敗するとデータ損失が発生するため",
+    "body": "## 観測した事実\n\n変更後のコードは saveUser(user) を await せずに呼び出している。\n\n## 放置すると何が起きるか\n\nsaveUser が reject された場合、API は成功を返しているにもかかわらずユーザーデータが永続化されない。\n\n## 修正の方向性\n\nsaveUser(user) を await してから user を返すように修正する。",
     "verified_references": ["src/foo.ts", "src/userRepository.ts"]
   }
 ]
 ```
 
-`line_anchor`はPR head実ファイルに存在する連続したコード断片そのものにする。
-要約・説明文・diff hunk headerは禁止。`verified_references`には実際に確認したファイルを入れる。
+- `severity`: 上記判定規準に従った深刻度（`BLOCKER` / `MAJOR` / `SUGGESTION`）
+- `severity_rationale`: 判定根拠を1行で記述する
+- `body`: Markdown自由記述。ただし、観測した事実・放置すると何が起きるか・修正の方向性が読み取れること
+- `line_anchor`: PR head実ファイルに存在する連続したコード断片そのものにする。要約・説明文・diff hunk headerは禁止
+- `verified_references`: 実際に確認したファイルを入れる
 
 ## RM出力
 

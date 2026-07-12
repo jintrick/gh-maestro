@@ -29,4 +29,4 @@ diffが参照する外部API wrapper、DB関数、設定値は、
 - UX議論
 - 純粋な保守性議論
 - テスト実行の要求
-- failure_scenarioを明示できない推測指摘
+- severity判定根拠を明示できない推測指摘
