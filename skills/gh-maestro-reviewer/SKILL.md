@@ -28,15 +28,15 @@ description: Run a gh-maestro PR Review Manager that delegates three independent
 観点は幹（3つ、サブエージェントの分割単位）＋葉（幹ごとの詳細チェックリスト）の二層構造。
 
 - `correctness/`（幹: Correctness）
-  - `logic-invariants.md`
-  - `api-contract.md`
-  - `concurrency.md`
+  - `correctness/logic-invariants.md`
+  - `correctness/api-contract.md`
+  - `correctness/concurrency.md`
 - `resilience-security/`（幹: Resilience & Security）
-  - `failure-recovery.md`
-  - `hostile-input.md`
+  - `resilience-security/failure-recovery.md`
+  - `resilience-security/hostile-input.md`
 - `maintainability/`（幹: Maintainability）
-  - `structure-naming.md`
-  - `test-quality.md`
+  - `maintainability/structure-naming.md`
+  - `maintainability/test-quality.md`
 
 `ASPECTS`の各トークンは、上記ツリーに列挙された7つの葉セレクタ（`logic-invariants`,
 `api-contract`, `concurrency`, `failure-recovery`, `hostile-input`, `structure-naming`,

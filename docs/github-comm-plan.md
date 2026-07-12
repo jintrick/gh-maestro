@@ -77,7 +77,7 @@ orchestrator / worker 間のメッセージ配送を、ファイルシステム�
 ```
 
 - `since` は「最後に通知したコメントの created_at」。`seenIds` は同一タイムスタンプ境界での二重通知を防ぐ直近 ID のリスト（最大100件保持で古いものから捨ててよい）。**このファイルが消えた場合の挙動は「过去メッセージの再通知」であり、エラーではない**（poll-inbox.js の再起動時挙動と同じ思想）。
-- `<self>` はファイルパス要素になるため、**`path.join` の前に必ず path-safety 検証を通す**（`.claude/rules/queue-path-safety.md` と同型。検証関数は §4.1 の `shared/validate.js` を使う）。
+- `<self>` はファイルパス要素になるため、**`path.join` の前に必ず path-safety 検証を通す**（旧queue-poller時代の`queue-path-safety`ルール（削除済み、後述§下表）と同型。検証関数は §4.1 の `shared/validate.js` を使う）。
 
 ### 3.4 送信
 
@@ -201,7 +201,7 @@ Usage: node msg-read.js <commentId> [--workspace <path>]
 | `scripts/poll-and-notify.js` | orchestrator が poll-pr.js を直接 Monitor 実行 |
 | `scripts/send-pane.js` `scripts/pane-notify.js` `scripts/send-enter.js` `scripts/pane-lock.js` | WezTerm 通知注入レイヤー全廃 |
 | 上記のテストファイル | 対応するテスト |
-| `.claude/rules/queue-concurrency.md` `.claude/rules/queue-path-safety.md` | 対象コード消滅。ただし path-safety の教訓は shared/validate.js の docコメントと本計画 §3.3 に引き継ぐ |
+| `.claude/rules/`配下の`queue-concurrency`・`queue-path-safety`ルール（削除済み） | 対象コード消滅。ただし path-safety の教訓は shared/validate.js の docコメントと本計画 §3.3 に引き継ぐ |
 | `docs/server-plan.md` | 冒頭に「superseded by github-comm-plan.md」を追記（削除はしない。歴史として残す） |
 
 **削除しない**もの: `poll-pr.js`（存続・起動方法のみ変更）、`poll-reviews.js`（無変更）、`wezterm-cli.js` / `send-pane` 以外のペイン起動系（spawn-worker が使用）、`kill-tree.js`（remove-worker のペイン kill で使用が残るか確認し、未使用になった場合のみ削除）。
