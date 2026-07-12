@@ -152,7 +152,20 @@ function startReviewManager(pr, repo, workspace, options = {}) {
   return 'REVIEW_MANAGER_STARTED';
 }
 
-module.exports = { startReviewManager, isLockValid, resolveMode, resolveDirectedBrief };
+/**
+ * @param {string[]} aspects
+ * @returns {string}
+ */
+function buildAspectsBrief(aspects) {
+  if (!Array.isArray(aspects) || aspects.length === 0) {
+    throw new Error('buildAspectsBrief には1件以上の観点が必要です');
+  }
+  return `オーケストレーターが変更内容から選定した観点に絞ってレビューしてください。` +
+    `skills/gh-maestro-reviewer/ 配下の以下の観点ファイルに対応する基準のみを適用します。\n\n` +
+    aspects.map(a => `- ${a}`).join('\n') + '\n';
+}
+
+module.exports = { startReviewManager, isLockValid, resolveMode, resolveDirectedBrief, buildAspectsBrief };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
