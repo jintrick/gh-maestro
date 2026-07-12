@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Usage: node poll-pr.js <ISSUE> --review-aspects <auto|leaf,leaf,...> [--workspace <path>] [--session-pid <pid>] [INTERVAL_SECONDS]
+// Usage: node poll-pr.js <ISSUE> --review-aspects <auto|leaf,leaf,...> [--workspace <path>] [--session-pid <pid>] [--base-branch <branch>] [INTERVAL_SECONDS]
 // Polls until a PR for the given issue is found, then launches the reviewer (directed mode)
 // and bridges into poll-reviews.js as a child process. Prints:
+//   PR_BASE_MISMATCH:<PR>:<expected>:<actual>  (only when --base-branch and actual base branch mismatch)
 //   PR_DETECTED:<number>
 //   REVIEW_MANAGER_STARTED:<number> | REVIEW_MANAGER_ALREADY_RUNNING:<number>
 //   ...poll-reviews.js の出力がそのまま続く（REVIEW_COMMENT / PR_COMMENT / PR_REVIEW / PR_PUSH / PR_MERGED）
@@ -23,7 +24,7 @@ const {
 const USAGE = `poll-pr.js — Issue に対応する PR を検出し、検出時にレビュアーを起動し、
 その後 poll-reviews.js に処理を橋渡ししてレビュー監視を続行する
 
-Usage: node poll-pr.js <ISSUE> --review-aspects <auto|leaf,leaf,...> [--workspace <path>] [--session-pid <pid>] [INTERVAL_SECONDS]
+Usage: node poll-pr.js <ISSUE> --review-aspects <auto|leaf,leaf,...> [--workspace <path>] [--session-pid <pid>] [--base-branch <branch>] [INTERVAL_SECONDS]
 
 Arguments:
   <ISSUE>             対象の Issue 番号（必須）
@@ -35,8 +36,10 @@ Options:
                              leaf,leaf,...: skills/gh-maestro-reviewer/ 配下に実在する葉名のカンマ区切り
   --workspace <path>         ワークスペースパス（省略時は環境変数またはCWDから解決）
   --session-pid <pid>        監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
+  --base-branch <branch>     期待するベースブランチ名（省略時はベースブランチ検証をスキップ）
 
 Output (stdout):
+  PR_BASE_MISMATCH:<PR>:<expected>:<actual>  ベースブランチ不一致を検出（--base-branch指定時のみ）
   PR_DETECTED:<PR>                     PR を検出した
   REVIEW_MANAGER_STARTED:<PR>          Review Manager を起動した
   REVIEW_MANAGER_ALREADY_RUNNING:<PR>  Review Manager は既に稼働中
@@ -104,11 +107,41 @@ function spawnPollReviews(pr, workspace, sessionPid) {
   return typeof result.status === 'number' ? result.status : 1;
 }
 
-module.exports = { resolveReviewAspects, getChangedFiles, spawnPollReviews };
+
+/**
+ * gh 経由でPRのベースブランチ名を取得する。
+ * @param {string} pr
+ * @param {string} repo
+ * @returns {string} ベースブランチ名、取得失敗時は空文字列
+ */
+function getPrBaseBranch(pr, repo) {
+  const r = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
+    '--json', 'baseRefName', '-q', '.baseRefName'], { encoding: 'utf8' });
+  if (r.status !== 0) {
+    console.error('poll-pr: PR #' + pr + ' のベースブランチ取得に失敗しました（gh pr view）: ' + (r.stderr || '').toString().trim());
+    return '';
+  }
+  return (r.stdout || '').trim();
+}
+
+/**
+ * PR検出時にベースブランチの不一致を検出する（純粋関数）。
+ * @param {string} expectedBaseBranch --base-branch で指定された想定ブランチ
+ * @param {string} actualBaseBranch   PRの実際のベースブランチ
+ * @param {string} pr                 PR番号
+ * @returns {string|null} 不一致時は PR_BASE_MISMATCH 行、一致時は null
+ */
+function formatBaseBranchMismatch(expectedBaseBranch, actualBaseBranch, pr) {
+  if (!expectedBaseBranch || !actualBaseBranch) return null;
+  if (expectedBaseBranch === actualBaseBranch) return null;
+  return 'PR_BASE_MISMATCH:' + pr + ':' + expectedBaseBranch + ':' + actualBaseBranch;
+}
+
+module.exports = { resolveReviewAspects, getChangedFiles, getPrBaseBranch, formatBaseBranchMismatch, spawnPollReviews };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--session-pid', '--review-aspects']);
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--session-pid', '--review-aspects', '--base-branch']);
 
   // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
   // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
@@ -126,6 +159,7 @@ if (require.main === module) {
   const workspaceArg = values['--workspace'];
   const sessionPidArg = values['--session-pid'];
   const reviewAspectsArg = values['--review-aspects'];
+  const baseBranch = values['--base-branch'];
 
   const [issue, intervalArg] = rest;
 
@@ -211,6 +245,16 @@ if (require.main === module) {
 
       const pr = findPR();
       if (pr) {
+        // ベースブランチ検証: --base-branch が指定されていれば検出したPRの
+        // 実際のベースブランチと比較し、不一致なら警告を出力する（処理は継続）。
+        if (baseBranch) {
+          const actualBase = getPrBaseBranch(pr, repo);
+          const mismatch = formatBaseBranchMismatch(baseBranch, actualBase, pr);
+          if (mismatch) {
+            process.stdout.write(mismatch + "\n");
+          }
+        }
+
         const changedFiles = getChangedFiles(pr, repo);
         const aspects = reviewAspects.mode === 'auto'
           ? detectAspects(changedFiles, knownAspects)
