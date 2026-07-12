@@ -236,17 +236,25 @@ node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-draft.md --stdin <<'EOF'
 EOF
 # 出力: DRAFT_WRITTEN:<実体パス>
 
-# 新規Issue作成（調査不要で全く新規の作業）
+# 新規Issue作成（調査不要で全く新規の作業）— create-issue.js は内部で win-path.js を呼ぶため論理パスのままでよい
 node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tmp/issue-draft.md
 # 出力: ISSUE_CREATED:<番号> <URL>
-
-# 既存Issueを実装用に育てる（調査アンカーからの更新）
-gh issue edit <N> --title "<正式タイトル>" --body-file /tmp/issue-<N>.md
 ```
 
-`create-issue.js` は成功時に `--body-file` を削除する。これにより `/tmp/issue-draft.md` が使い回され、次回起票時に「既存ファイルだから読み直す」という無駄なReadが発生するのを防ぐ（失敗時は原案を失わないよう削除しない）。`gh issue edit` はこの削除処理を行わないため、既存Issueの更新時は必要に応じて書き出し後に手動で `/tmp/issue-<N>.md` を削除してよい。
+**既存Issueを更新する場合（調査アンカーから実装指示へ育てる）** — `gh issue edit` は `win-path.js` によるパス解決を行わないため、`write-draft.js` が出力した実体パスを `--body-file` に渡す。
 
-`write-draft.js`・`create-issue.js`・`gh issue edit` で同じ `/tmp/issue-<N>.md` を渡すため、書く先と読む先が一致していることを確認すること。
+```sh
+# 草案を書き出して実体パスを変数に保持
+DRAFT_OUTPUT=$(node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-<N>.md --stdin <<'EOF'
+<Issue本文>
+EOF)
+BODY_PATH=${DRAFT_OUTPUT#DRAFT_WRITTEN:}
+
+# 既存Issueを実装指示に更新
+gh issue edit <N> --title "<正式タイトル>" --body-file "$BODY_PATH"
+```
+
+`create-issue.js` は成功時に `--body-file` を自動削除する（論理パスから実体パスを解決して削除する）。`gh issue edit` はこの自動削除を行わないため、既存Issueの更新後は必要に応じて手動でファイルを削除してよい。
 
 ## 自分の inbox の監視
 
