@@ -276,7 +276,7 @@ orchestrator が受け取るすべてのメッセージの受信経路である�
 
 ## PR検出
 
-コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <N>` を起動してPRを監視する（`N` はコーダーのアンカー Issue 番号）。
+コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <N> --review-aspects auto` を起動してPRを監視する（`N` はコーダーのアンカー Issue 番号）。`--review-aspects auto` は変更ファイルから観点を自動算出し、directedモードでReview Managerを起動する（判定に迷う場合は既知の観点全体まで広げる既定になっている）。この1本のMonitorはPR検出後、内部で `poll-reviews.js` に自動的に橋渡しし、マージ検出まで一貫して面倒を見る。**別途 `poll-reviews.js` を起動する必要はない**（下記「レビュー監視」参照）。
 
 PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`msg-send.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
 **通常コーダー（gh-maestro-coder）が実装に失敗してエスカレーションされた場合、人間が承認した段階で上位のシニアコーダー（gh-maestro-senior-coder）を適用して再起動することを検討せよ。**
@@ -293,9 +293,7 @@ node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE
 
 ## レビュー監視
 
-PR番号が確定したら、レビューコメントとマージ状態のポーリングを開始する。
-
-{{POLL_MECHANISM}}
+「PR検出」で起動した `poll-pr.js <N> --review-aspects auto` の1本のMonitorが、PR検出・Review Manager起動に続けて `poll-reviews.js` へ自動的に橋渡しし、レビューコメントとマージ状態のポーリングをそのまま引き継ぐ。**このために新しいMonitorを起動し直す必要はない**。届く通知（`REVIEW_COMMENT`/`PR_COMMENT`/`PR_REVIEW`/`PR_PUSH`/`PR_MERGED`）を以下の通り処理する：
 
 - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → インラインのレビュー指摘。コメントトリアージを実行する
 - `PR_COMMENT:<user>:<body>` → PR全体へのコメント。同様にトリアージする

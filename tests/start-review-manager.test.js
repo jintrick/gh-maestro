@@ -113,6 +113,25 @@ test('resolveDirectedBrief rejects a missing briefFile', () => {
   );
 });
 
+// ── buildAspectsBrief ────────────────────────────────────────────────────
+
+test('buildAspectsBrief includes every given aspect name', () => {
+  const { mod } = loadModule();
+  const brief = mod.buildAspectsBrief(['api-contract', 'concurrency']);
+  assert.match(brief, /api-contract/);
+  assert.match(brief, /concurrency/);
+});
+
+test('buildAspectsBrief rejects an empty aspect list', () => {
+  const { mod } = loadModule();
+  assert.throws(() => mod.buildAspectsBrief([]), /1件以上の観点が必要です/);
+});
+
+test('buildAspectsBrief rejects a non-array input', () => {
+  const { mod } = loadModule();
+  assert.throws(() => mod.buildAspectsBrief(undefined), /1件以上の観点が必要です/);
+});
+
 // ── isLockValid ──────────────────────────────────────────────────────────
 
 test('isLockValid returns false when no lock file exists', () => {
