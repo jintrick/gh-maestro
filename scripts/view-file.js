@@ -17,7 +17,7 @@ Usage: node view-file.js <filepath> [--workspace <path>]
 Arguments:
   <filepath>  開くファイルのパス（/tmp 形式は OS 依存パスに変換される）
 
-Issue 原案などをチャットで説明する前に、これでユーザーに見せる。`;
+ファイルの内容を確認・承認してほしいときにユーザーに提示する。`;
 
 const argv = process.argv.slice(2);
 if (argv.includes('--help') || argv.includes('-h')) {
