@@ -192,10 +192,11 @@ function resolveAgentConfig(agentId, opts = {}) {
   // マージ: default → global → workspace（後勝ち）
   // defaultAgent が無くても config.json だけで定義されたカスタムエージェントを解決できる。
   let merged = defaultAgent;
-  if (merged) {
-    merged = resolveDynamicCommand(merged);
-  }
 
+  // dynamicCommand 解決はオーバーライドマージの後に行う（Issue #124）。
+  // ユーザーが config.json で extraArgs を上書きすると配列ごと置換されてしまうため、
+  // 先に解決すると動的解決で付与したスクリプトパスが消えてしまう。
+  // マージ後に解決することで、override 後の extraArgs にスクリプトパスを付与できる。
   const hasGlobal = Object.keys(globalOverride).length > 0;
   const hasWorkspace = Object.keys(workspaceOverride).length > 0;
 
@@ -206,6 +207,10 @@ function resolveAgentConfig(agentId, opts = {}) {
     if (hasWorkspace) {
       merged = mergeAgentConfig(merged, workspaceOverride);
     }
+  }
+
+  if (merged) {
+    merged = resolveDynamicCommand(merged);
   }
 
   // 解決結果が起動可能な設定を持っているか検証
