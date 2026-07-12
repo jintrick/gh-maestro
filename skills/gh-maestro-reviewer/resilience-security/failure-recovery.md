@@ -15,6 +15,10 @@
 - 外部APIのタイムアウト、リトライ上限、バックオフ、冪等性
 - DB・外部API・ネットワーク断の部分失敗
 
+await漏れ・未処理Promise・race condition・deadlockに起因する失敗は
+`correctness/concurrency.md`が担当する。異常系調査でこれらの兆候を見つけた場合は、
+自分のaspectとしてではなく`concurrency`の観点として報告してよい。
+
 ## 外部参照の裏取り
 
 diffが参照する外部API wrapper、DB関数、設定値は、

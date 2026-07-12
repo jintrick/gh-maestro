@@ -19,9 +19,9 @@ description: Run a gh-maestro PR Review Manager that delegates three independent
 - `MODE`: レビュー戦略。`heavy`（デフォルト）または `directed`
 
 `MODE=directed` の場合、プロンプトには追加でオーケストレーターから与えられた
-レビュー方針が含まれる。方針は自由記述テキスト、または下記の葉ファイル名を
-カンマ区切りで指定する `ASPECTS`（例: `ASPECTS=api-contract,concurrency`）のどちらでもよい。
-`ASPECTS`が与えられた場合、RMはその葉ファイルに絞ってレビューする。
+レビュー方針が含まれる。方針は自由記述テキスト、または下記の葉セレクタ（拡張子なし、
+`.md`を含めない）をカンマ区切りで指定する `ASPECTS`（例: `ASPECTS=api-contract,concurrency`）
+のどちらでもよい。`ASPECTS`が与えられた場合、RMはその葉ファイルに絞ってレビューする。
 
 ## 観点の構成
 
@@ -38,10 +38,18 @@ description: Run a gh-maestro PR Review Manager that delegates three independent
   - `structure-naming.md`
   - `test-quality.md`
 
-`ASPECTS`で渡される葉の名前は拡張子なしのファイル名（例: `api-contract`）である。
-実ファイルへは上記ツリーを`<葉の名前>.md`で検索して解決する
-（例: `api-contract` → `correctness/api-contract.md`）。葉の名前は幹をまたいで重複しないため、
+`ASPECTS`の各トークンは、上記ツリーに列挙された7つの葉セレクタ（`logic-invariants`,
+`api-contract`, `concurrency`, `failure-recovery`, `hostile-input`, `structure-naming`,
+`test-quality`）のいずれかと**完全一致**した場合のみ受け付ける。実ファイルへは
+`<葉セレクタ>.md`で上記ツリーを検索して解決する（例: `api-contract` →
+`correctness/api-contract.md`）。葉セレクタは幹をまたいで重複しないため、
 どの幹に属するかは検索結果から一意に決まる。
+
+`ASPECTS`のトークンが上記7つの完全一致リストに含まれない場合（未知の名前、`.md`付き、
+`/`や`..`を含むパス的な文字列、空文字列など）、RMはそのトークンをレビューに使わず無視する。
+重複トークンは1件として扱う。`ASPECTS`の全トークンが無効だった場合、RMはReviewerを
+起動せず、`OUTPUT`には空の`findings`配列を書き出してエラー内容をRMの応答で報告する。
+ファイルパスとして未検証の文字列をそのまま`Read`等に渡してはならない。
 
 ## RMの責務
 
