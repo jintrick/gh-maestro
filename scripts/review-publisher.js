@@ -168,6 +168,8 @@ function isLineInDiff(rightLinesByPath, filePath, line) {
   return Boolean(rightLinesByPath.get(filePath)?.has(line));
 }
 
+const SEVERITY_ORDER = { BLOCKER: 0, MAJOR: 1, SUGGESTION: 2 };
+
 function dedupeFindings(findings) {
   const byKey = new Map();
   const duplicates = [];
@@ -184,6 +186,13 @@ function dedupeFindings(findings) {
       continue;
     }
     if (!existing.aspects.includes(finding.aspect)) existing.aspects.push(finding.aspect);
+    // 同一keyのfindingが複数ある場合、最も高いseverityとそのseverity_rationaleを採用する
+    const existingOrder = SEVERITY_ORDER[existing.severity] ?? 99;
+    const incomingOrder = SEVERITY_ORDER[finding.severity] ?? 99;
+    if (incomingOrder < existingOrder) {
+      existing.severity = finding.severity;
+      existing.severity_rationale = finding.severity_rationale;
+    }
     duplicates.push(finding);
   }
   return { findings: [...byKey.values()], duplicates };
