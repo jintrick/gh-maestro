@@ -86,15 +86,13 @@ claude code(`Agent`ツール)・codex(自律スポーン/`.codex/agents/*.toml`)
 ## 判定基準の伝達
 
 各観点の判定基準(旧`review-prompt.md`の「観点1〜3」セクション相当、150行前後)は
-`gh-maestro-reviewer`スキルのアセットとして3ファイルに分割する。
-
-- `reviewer-correctness.md`
-- `reviewer-maintainability.md`
-- `reviewer-resilience-security.md`
+`gh-maestro-reviewer`スキルのアセットとして、幹(3観点)＋葉(幹ごとの詳細チェックリスト)の
+二層構造に分割する。具体的なディレクトリ構成・ファイル一覧・directedモードでの葉選択方法は
+`skills/gh-maestro-reviewer/SKILL.md`を正典とし、本ドキュメントには重複させない。
 
 RMはReviewer起動時に「PR固有のコンテキスト(diff等)」のみをプロンプトに含め、
-判定基準は「`<path>/reviewer-<aspect>.md`を読め」とファイルパス参照で伝える。
-RM自身が150行×3のチェックリストを自分のコンテキストに保持する必要がない。
+判定基準は担当幹ディレクトリ配下の葉ファイルをファイルパス参照で伝える。
+RM自身が全チェックリストを自分のコンテキストに保持する必要がない。
 
 `gh-maestro-reviewer`スキルの正本はリポジトリの`skills/gh-maestro-reviewer`に置く。
 `install.js`はClaude / Agy向けの既存配布に加え、Codex向けにも`~/.agents/skills`へ配布する。

@@ -19,7 +19,37 @@ description: Run a gh-maestro PR Review Manager that delegates three independent
 - `MODE`: レビュー戦略。`heavy`（デフォルト）または `directed`
 
 `MODE=directed` の場合、プロンプトには追加でオーケストレーターから与えられた
-レビュー方針（自由記述テキスト）が含まれる。RMはこの方針の範囲に絞ってレビューする。
+レビュー方針が含まれる。方針は自由記述テキスト、または下記の葉セレクタ（拡張子なし、
+`.md`を含めない）をカンマ区切りで指定する `ASPECTS`（例: `ASPECTS=api-contract,concurrency`）
+のどちらでもよい。`ASPECTS`が与えられた場合、RMはその葉ファイルに絞ってレビューする。
+
+## 観点の構成
+
+観点は幹（3つ、サブエージェントの分割単位）＋葉（幹ごとの詳細チェックリスト）の二層構造。
+
+- `correctness/`（幹: Correctness）
+  - `logic-invariants.md`
+  - `api-contract.md`
+  - `concurrency.md`
+- `resilience-security/`（幹: Resilience & Security）
+  - `failure-recovery.md`
+  - `hostile-input.md`
+- `maintainability/`（幹: Maintainability）
+  - `structure-naming.md`
+  - `test-quality.md`
+
+`ASPECTS`の各トークンは、上記ツリーに列挙された7つの葉セレクタ（`logic-invariants`,
+`api-contract`, `concurrency`, `failure-recovery`, `hostile-input`, `structure-naming`,
+`test-quality`）のいずれかと**完全一致**した場合のみ受け付ける。実ファイルへは
+`<葉セレクタ>.md`で上記ツリーを検索して解決する（例: `api-contract` →
+`correctness/api-contract.md`）。葉セレクタは幹をまたいで重複しないため、
+どの幹に属するかは検索結果から一意に決まる。
+
+`ASPECTS`のトークンが上記7つの完全一致リストに含まれない場合（未知の名前、`.md`付き、
+`/`や`..`を含むパス的な文字列、空文字列など）、RMはそのトークンをレビューに使わず無視する。
+重複トークンは1件として扱う。`ASPECTS`の全トークンが無効だった場合、RMはReviewerを
+起動せず、`OUTPUT`には空の`findings`配列を書き出してエラー内容をRMの応答で報告する。
+ファイルパスとして未検証の文字列をそのまま`Read`等に渡してはならない。
 
 ## RMの責務
 
@@ -27,14 +57,15 @@ description: Run a gh-maestro PR Review Manager that delegates three independent
 2. `gh pr diff`でPR diffを取得する。
 3. 既存レビュー・既存インラインコメントを取得する。
 4. `MODE`に応じてレビューを実行する。
-   - `heavy`: 以下の3観点について、独立したReviewerサブエージェントを並列に立てる。
-     - Correctness: `reviewer-correctness.md`
-     - Maintainability: `reviewer-maintainability.md`
-     - Resilience & Security: `reviewer-resilience-security.md`
-     各Reviewerには同じPRコンテキストを渡し、担当観点ファイルを読むよう指示する。
-   - `directed`: 与えられたレビュー方針の範囲に絞ってレビューする。方針の性質に応じて
-     単一のレビュー、または方針を分割した複数のサブエージェント並列起動のどちらでもよい。
-     方針外の観点を無理に指摘しない。
+   - `heavy`: 上記3幹それぞれについて、独立したReviewerサブエージェントを並列に立てる。
+     各Reviewerには同じPRコンテキストを渡し、担当幹ディレクトリ配下の**全葉ファイル**を
+     読むよう指示する。
+   - `directed`:
+     - `ASPECTS`が与えられた場合、指定された葉ファイルに絞ったReviewerを起動する
+       （葉が属する幹が同じなら1エージェントにまとめてよい）。
+     - 自由記述の方針が与えられた場合、その範囲に絞ってレビューする。方針の性質に応じて
+       単一のレビュー、または方針を分割した複数のサブエージェント並列起動のどちらでもよい。
+     いずれの場合も方針外の観点を無理に指摘しない。
 5. Reviewerの結果を集約し、`OUTPUT`にJSONを書き出す。
 
 RMはGitHubに投稿しない。採否判断、severity付与、APPROVE/REQUEST_CHANGES判定をしない。
@@ -44,6 +75,12 @@ RMはGitHubに投稿しない。採否判断、severity付与、APPROVE/REQUEST_
 
 Reviewerは担当観点だけをレビューし、findingを多めに返す。投稿は禁止。
 diffが参照する外部シンボル・型・設定は、判定前に実ファイルで裏取りする。
+担当外の観点でも重大な欠陥を発見した場合は、該当するaspectを明記した上で報告してよい。
+
+出力JSONの`aspect`フィールドには、`directed`モードで`ASPECTS`により葉単位のレビューを
+行った場合でも、葉の名前（例: `api-contract`）ではなく、その葉が属する幹の名前
+（`Correctness` / `Maintainability` / `Resilience & Security`）を書く。
+`scripts/run-review-manager.js`のプロンプト生成は`aspect`に幹の名前が入る前提のため。
 
 各Reviewerは以下のJSON配列だけを返す。
 
