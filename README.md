@@ -80,7 +80,7 @@ PR作成時またはコミットのpush時、ローカルでAIレビュワー `r
 PR作成などを契機に、バックグラウンドプロセスとして `start-review-manager.js` が起動し、以下の処理を実行する。
 
 1. `run-review-manager.js` が各観点のサブエージェント（Reviewer）を並列で実行
-2. 各Reviewerが `reviewer-*.md` の基準に沿ってレビューを実行
+2. 各Reviewerが観点別ディレクトリ（`correctness/`・`maintainability/`・`resilience-security/`）の基準ファイルに沿ってレビューを実行
 3. レビュー結果が統合され、`review-publisher.js` を介して GitHub PR にコメントとして投稿される
 
 ## スキルの構造
@@ -117,4 +117,94 @@ scripts/                         # 全スクリプト（CLI・モジュール）
 
 Review Manager（`run-review-manager.js`）は `gh-maestro-reviewer` スキルを使い、
 Correctness / Maintainability / Resilience & Security の3観点を独立Reviewerに分けてPRを評価する。
-観点別基準は `skills/gh-maestro-reviewer/reviewer-*.md` を編集する。
+
+観点別基準は `skills/gh-maestro-reviewer/` 配下の各観点ディレクトリにある基準ファイルを編集する。
+
+```
+skills/gh-maestro-reviewer/
+  correctness/              # Correctness観点
+    api-contract.md           API互換性・契約
+    concurrency.md            並行処理・競合
+    logic-invariants.md       不変条件・境界値
+  maintainability/          # Maintainability観点
+    structure-naming.md       命名・構造・アンチパターン
+    test-quality.md           テスト品質
+  resilience-security/      # Resilience & Security観点
+    failure-recovery.md       異常系・障害耐性
+    hostile-input.md          セキュリティ脆弱性・不正入力
+```
+
+## 設定（config.json）
+
+`~/.gh-maestro/config.json`（グローバル）と `<workspace>/.gh-maestro/config.json`（ワークスペースローカル）で動作設定を上書きできる。解決順序は以下のとおり（後勝ち）。
+
+1. `scripts/agent-defaults.json`（デフォルト、リポジトリ由来）
+2. `~/.gh-maestro/config.json`（グローバル）
+3. `<workspace>/.gh-maestro/config.json`（ワークスペースローカル）
+
+### agents
+
+エージェント単位の設定を上書きする。キーにエージェントID、値に上書きしたいフィールドを指定する。
+
+```json
+{
+  "agents": {
+    "claude-ds": {
+      "command": "pwsh",
+      "extraArgs": ["-Command", "claude-ds --dangerously-skip-permissions"],
+      "promptFlag": null
+    }
+  }
+}
+```
+
+各エージェントのデフォルト値は `scripts/agent-defaults.json` を参照。
+
+**セキュリティ**: ワークスペースローカルの `config.json` からは `command`・`extraArgs`・`execArgs` の上書きはできない（悪意あるリポジトリによる任意コマンド実行の防止）。グローバルの `~/.gh-maestro/config.json` では全フィールドの上書きが可能。
+
+### skillAgentMap
+
+スキル名→エージェントIDのマッピングを定義する。`gh-maestro-orchestrator` がワーカー起動時に使用する。確認・変更は `scripts/config.js` を使用する。
+
+```json
+{
+  "skillAgentMap": {
+    "gh-maestro-coder": "claude-ds",
+    "gh-maestro-base": "agy",
+    "gh-maestro-reviewer": "codex"
+  }
+}
+```
+
+### profiles
+
+`skillAgentMap` の名前付きプリセット。`scripts/config.js switch` で切り替える。各プロファイルは `skillAgentMap` を持ち、アクティブなプロファイルのマッピングがトップレベルの `skillAgentMap` より優先される。
+
+```json
+{
+  "profiles": {
+    "default": {
+      "skillAgentMap": {
+        "gh-maestro-coder": "claude-ds",
+        "gh-maestro-reviewer": "codex"
+      }
+    },
+    "peak": {
+      "skillAgentMap": {
+        "gh-maestro-coder": "agy",
+        "gh-maestro-base": "agy"
+      }
+    }
+  }
+}
+```
+
+### reviewManagerVisible
+
+Review Manager の実行ペインを可視化するかどうかを制御するboolean。`true` に設定すると、Review Manager が起動したターミナルペインが前面に表示される（`false` の場合はバックグラウンド実行）。解決順序は workspace config → global config → デフォルト `false`。型が `boolean` 以外の値は無視される（fail-closed）。
+
+```json
+{
+  "reviewManagerVisible": true
+}
+```
