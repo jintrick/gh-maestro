@@ -209,7 +209,11 @@ function resolveAgentConfig(agentId, opts = {}) {
     }
   }
 
-  if (merged) {
+  // ユーザーが global config で command を明示的に上書きしている場合は
+  // dynamicCommand 解決をスキップする（PR #129 レビュー指摘）。
+  // ユーザー指定の command（カスタムラッパー等）が動的解決で上書きされるのを防ぐ。
+  const userOverrodeCommand = hasGlobal && globalOverride.command !== undefined;
+  if (merged && !userOverrodeCommand) {
     merged = resolveDynamicCommand(merged);
   }
 

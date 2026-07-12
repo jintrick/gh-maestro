@@ -428,6 +428,38 @@ test('resolveAgentConfig: global extraArgs 上書き後も dynamicCommand 解決
   });
 });
 
+test('resolveAgentConfig: command 明示上書き時は dynamicCommand 解決をスキップする（PR #129 レビュー指摘）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        reasonix: {
+          command: 'my-custom-wrapper',
+          extraArgs: ['--custom-flag'],
+        },
+      },
+    });
+
+    const agent = resolveAgentConfig('reasonix', { homedir: home });
+    assert.ok(agent, 'reasonix should be resolved with command override');
+
+    // command はユーザー指定のまま（dynamicCommand 解決で上書きされない）
+    assert.equal(
+      agent.command, 'my-custom-wrapper',
+      'user-overridden command should be preserved, not replaced by dynamic resolution',
+    );
+
+    // extraArgs はユーザー指定のまま（動的解決のスクリプトパスが付与されない）
+    assert.deepEqual(
+      agent.extraArgs, ['--custom-flag'],
+      'extraArgs should only contain user-specified values, no dynamic script path',
+    );
+
+    // 他のフィールドは維持される
+    assert.equal(agent.skillsViaMd, true, 'skillsViaMd should be preserved');
+    assert.equal(agent.enterSequence, '\r', 'enterSequence should be preserved');
+  });
+});
+
 // ── 設定マージの境界ケース ──────────────────────────────────────────────────
 
 test('resolveAgentConfig: override が空オブジェクトの場合はデフォルトがそのまま返る', () => {
