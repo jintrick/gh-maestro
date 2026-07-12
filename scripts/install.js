@@ -105,6 +105,10 @@ function copySkillAssets(srcSkillDir, destSkillDir, substitutions) {
   for (const entry of fs.readdirSync(srcSkillDir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
       expectedDirs.add(entry.name);
+      const srcSubDir = path.join(srcSkillDir, entry.name);
+      const destSubDir = path.join(destSkillDir, entry.name);
+      fs.mkdirSync(destSubDir, { recursive: true });
+      copySkillAssets(srcSubDir, destSubDir, substitutions);
       continue;
     }
     if (!entry.isFile() || entry.name === 'SKILL.md') continue;
