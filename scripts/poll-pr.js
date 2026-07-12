@@ -132,7 +132,9 @@ function getPrBaseBranch(pr, repo) {
  * @returns {string|null} 不一致時は PR_BASE_MISMATCH 行、一致時は null
  */
 function formatBaseBranchMismatch(expectedBaseBranch, actualBaseBranch, pr) {
-  if (!expectedBaseBranch || !actualBaseBranch) return null;
+  if (!expectedBaseBranch) return null;
+  // 実際のベースブランチが取得できない場合は (unknown) として報告（fail-closed）
+  if (!actualBaseBranch) return 'PR_BASE_MISMATCH:' + pr + ':' + expectedBaseBranch + ':(unknown)';
   if (expectedBaseBranch === actualBaseBranch) return null;
   return 'PR_BASE_MISMATCH:' + pr + ':' + expectedBaseBranch + ':' + actualBaseBranch;
 }

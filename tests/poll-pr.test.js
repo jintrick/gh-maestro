@@ -174,9 +174,9 @@ test("formatBaseBranchMismatch returns null when expected is empty", () => {
   assert.equal(mod.formatBaseBranchMismatch("", "dev", "42"), null);
 });
 
-test("formatBaseBranchMismatch returns null when actual is empty", () => {
+test("formatBaseBranchMismatch reports (unknown) when actual is empty (fail-closed)", () => {
   const { mod } = loadModule();
-  assert.equal(mod.formatBaseBranchMismatch("dev", "", "42"), null);
+  assert.equal(mod.formatBaseBranchMismatch("dev", "", "42"), "PR_BASE_MISMATCH:42:dev:(unknown)");
 });
 
 // ── CLI起動時の即時エラー終了パス（ループに入る前にexitするため実プロセスspawn可） ──
