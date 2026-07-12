@@ -59,23 +59,6 @@ function resolveDirectedBrief(options) {
 }
 
 /**
- * 観点（葉名）の一覧から directed モード用のレビュー方針テキストを組み立てる。
- * 観点→ブリーフ文への変換ロジックをここに一本化し、poll-pr.js 等の呼び出し側が
- * 独自にテキストを組み立てて重複させないようにする。
- *
- * @param {string[]} aspects skills/gh-maestro-reviewer/ 配下の葉名（1件以上）
- * @returns {string}
- */
-function buildAspectsBrief(aspects) {
-  if (!Array.isArray(aspects) || aspects.length === 0) {
-    throw new Error('buildAspectsBrief には1件以上の観点が必要です');
-  }
-  return `オーケストレーターが変更内容から選定した観点に絞ってレビューしてください。` +
-    `skills/gh-maestro-reviewer/ 配下の以下の観点ファイルに対応する基準のみを適用します。\n\n` +
-    aspects.map(a => `- ${a}`).join('\n') + '\n';
-}
-
-/**
  * lock ファイルが有効かチェックする。
  * lock ファイルに記録されたPIDが生存していれば true（既に起動済み）。
  * PIDが死んでいる（stale）場合は lock ファイルを削除して false を返す。
@@ -168,7 +151,7 @@ function startReviewManager(pr, repo, workspace, options = {}) {
   return 'REVIEW_MANAGER_STARTED';
 }
 
-module.exports = { startReviewManager, isLockValid, resolveMode, resolveDirectedBrief, buildAspectsBrief };
+module.exports = { startReviewManager, isLockValid, resolveMode, resolveDirectedBrief };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
