@@ -31,4 +31,4 @@
 
 - 裏取りしていない挙動の推測に基づく指摘
 - diff範囲外の一般的な設計指摘
-- invariantとfailure_scenarioを明示できない推測指摘
+- severity判定根拠を明示できない推測指摘

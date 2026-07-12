@@ -20,14 +20,20 @@ const REQUIRED_FINDING_FIELDS = [
   'path',
   'line_anchor',
   'summary',
-  'observed_fact',
-  'invariant',
-  'failure_scenario',
-  'minimal_fix',
+  'severity',
+  'severity_rationale',
+  'body',
   'verified_references',
 ];
 
 const VALID_ASPECTS = new Set(['Correctness', 'Maintainability', 'Resilience & Security']);
+const VALID_SEVERITIES = new Set(['BLOCKER', 'MAJOR', 'SUGGESTION']);
+
+const SEVERITY_LABELS = {
+  BLOCKER: '\u{1F534} **BLOCKER**',
+  MAJOR: '\u{1F7E1} **MAJOR**',
+  SUGGESTION: '\u{1F7E2} **SUGGESTION**',
+};
 
 function isBlankLike(value) {
   if (typeof value !== 'string') return true;
@@ -58,6 +64,7 @@ function validateFinding(finding) {
     if (!(field in finding)) errors.push(`${field} is required`);
   }
   if (!VALID_ASPECTS.has(finding.aspect)) errors.push('aspect is invalid');
+  if (!VALID_SEVERITIES.has(finding.severity)) errors.push('severity is invalid (must be BLOCKER, MAJOR, or SUGGESTION)');
   for (const field of REQUIRED_FINDING_FIELDS.filter(f => f !== 'verified_references')) {
     if (isBlankLike(finding[field])) errors.push(`${field} is blank`);
   }
@@ -168,10 +175,8 @@ function dedupeFindings(findings) {
     const key = [
       finding.path,
       finding.resolved_line ?? finding.line_anchor,
-      finding.observed_fact.trim().toLowerCase(),
-      finding.invariant.trim().toLowerCase(),
-      finding.failure_scenario.trim().toLowerCase(),
-      finding.minimal_fix.trim().toLowerCase(),
+      finding.body.trim().toLowerCase(),
+      finding.summary.trim().toLowerCase(),
     ].join('\0');
     const existing = byKey.get(key);
     if (!existing) {
@@ -186,10 +191,11 @@ function dedupeFindings(findings) {
 
 function formatFindingBody(finding) {
   const labels = (finding.aspects || [finding.aspect]).map(a => `[${a}]`).join('');
-  return `${labels} **SUGGESTION**: ${finding.summary}
-- 根拠: ${finding.observed_fact}
-- 失敗シナリオ: ${finding.failure_scenario}
-- 最小修正案: ${finding.minimal_fix}`;
+  const severityLabel = SEVERITY_LABELS[finding.severity] || finding.severity;
+  return `${labels} ${severityLabel}: ${finding.summary}
+判定根拠: ${finding.severity_rationale}
+
+${finding.body}`;
 }
 
 function formatFinalReviewBody({ posted, unresolved, rejected, duplicates }) {
