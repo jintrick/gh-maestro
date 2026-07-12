@@ -38,6 +38,11 @@ description: Run a gh-maestro PR Review Manager that delegates three independent
   - `structure-naming.md`
   - `test-quality.md`
 
+`ASPECTS`で渡される葉の名前は拡張子なしのファイル名（例: `api-contract`）である。
+実ファイルへは上記ツリーを`<葉の名前>.md`で検索して解決する
+（例: `api-contract` → `correctness/api-contract.md`）。葉の名前は幹をまたいで重複しないため、
+どの幹に属するかは検索結果から一意に決まる。
+
 ## RMの責務
 
 1. `gh pr view`でPR情報、`headRefOid`、変更ファイル一覧を取得する。
@@ -63,6 +68,11 @@ RMはGitHubに投稿しない。採否判断、severity付与、APPROVE/REQUEST_
 Reviewerは担当観点だけをレビューし、findingを多めに返す。投稿は禁止。
 diffが参照する外部シンボル・型・設定は、判定前に実ファイルで裏取りする。
 担当外の観点でも重大な欠陥を発見した場合は、該当するaspectを明記した上で報告してよい。
+
+出力JSONの`aspect`フィールドには、`directed`モードで`ASPECTS`により葉単位のレビューを
+行った場合でも、葉の名前（例: `api-contract`）ではなく、その葉が属する幹の名前
+（`Correctness` / `Maintainability` / `Resilience & Security`）を書く。
+`scripts/run-review-manager.js`のプロンプト生成は`aspect`に幹の名前が入る前提のため。
 
 各Reviewerは以下のJSON配列だけを返す。
 
