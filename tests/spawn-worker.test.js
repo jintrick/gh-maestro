@@ -68,6 +68,92 @@ test('gh-maestro-base で --prompt がないとエラー終了する', () => {
   assert.match(r.stderr, /--prompt/);
 });
 
+// ── --help ──────────────────────────────────────────────────────────────────
+
+test('--help はUsageを表示して終了コード0', () => {
+  const r = run(['--help'], BASE_ENV);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /Usage: node spawn-worker\.js/);
+  assert.match(r.stdout, /--prompt-file/);
+});
+
+test('-h はUsageを表示して終了コード0', () => {
+  const r = run(['-h'], BASE_ENV);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /Usage: node spawn-worker\.js/);
+});
+
+// ── --prompt-file ─────────────────────────────────────────────────────────
+
+test('--prompt-file で存在しないファイルを指定するとエラー終了する', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const missing = path.join(os.tmpdir(), 'gh-maestro-test-prompt-file-missing.md');
+  const r = run([
+    '--skill', 'gh-maestro-base',
+    '--issue', '1', '--description', 'test', '--repo', 'o/r',
+    '--prompt-file', missing,
+  ], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /--prompt-file/);
+});
+
+test('--prompt と --prompt-file を同時指定するとエラー終了する', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-promptfile-'));
+  const promptFile = path.join(tmp, 'prompt.md');
+  fs.writeFileSync(promptFile, 'こんにちは');
+  try {
+    const r = run([
+      '--skill', 'gh-maestro-base',
+      '--issue', '1', '--description', 'test', '--repo', 'o/r',
+      '--prompt', 'inline prompt',
+      '--prompt-file', promptFile,
+    ], BASE_ENV);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /--prompt と --prompt-file は同時に指定できません/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('--prompt-file の内容が gh-maestro-base の --prompt 必須チェックを満たす（バリデーションを通過する）', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-promptfile-ok-'));
+  const promptFile = path.join(tmp, 'prompt.md');
+  fs.writeFileSync(promptFile, 'バッククォート ` を含む長文プロンプト');
+  try {
+    const r = run([
+      '--skill', 'gh-maestro-base',
+      '--issue', '1', '--description', 'test', '--repo', 'o/r',
+      '--prompt-file', promptFile,
+      '--agent', 'nonexistent',
+    ], BASE_ENV);
+    // --prompt-file自体は受理され、後段の（無関係な）--agent解決エラーで落ちることを確認する
+    // （gh-maestro-base の --prompt 必須チェックでは落ちない = --prompt-file が有効なプロンプトとして扱われた証拠）
+    assert.notEqual(r.status, 0);
+    assert.doesNotMatch(r.stderr, /--prompt または --prompt-file が必要です/);
+    assert.match(r.stderr, /nonexistent/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ── 未知フラグの拒否 ──────────────────────────────────────────────────────────
+
+test('未知のフラグを指定するとエラー終了する（黙って無視しない）', () => {
+  const r = run([
+    '--skill', 'gh-maestro-coder',
+    '--issue', '1', '--description', 'test', '--repo', 'o/r',
+    '--typo-flag', 'value',
+  ], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /未知の引数/);
+  assert.match(r.stderr, /--typo-flag/);
+});
+
 test('WEZTERM_PANE が未設定だとエラー終了する', () => {
   const envWithoutPane = { ...process.env };
   delete envWithoutPane.WEZTERM_PANE;

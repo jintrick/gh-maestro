@@ -55,7 +55,9 @@ if (require.main === module) {
   }
 
   const absBodyFile = path.resolve(toWinPath(bodyFile));
-  if (!fs.existsSync(absBodyFile)) {
+  try {
+    fs.accessSync(absBodyFile, fs.constants.F_OK);
+  } catch {
     console.error(`body-file が見つかりません: ${absBodyFile}`);
     process.exit(1);
   }
