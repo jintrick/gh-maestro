@@ -113,6 +113,61 @@ test('resolveDirectedBrief rejects a missing briefFile', () => {
   );
 });
 
+// ── buildAspectsBrief ───────────────────────────────────────────────────────
+
+test('buildAspectsBrief formats a single aspect correctly', () => {
+  const { mod } = loadModule();
+  const result = mod.buildAspectsBrief(['correctness']);
+  assert.ok(result.includes('correctness'));
+  assert.ok(result.includes('skills/gh-maestro-reviewer/'));
+  assert.ok(result.includes('オーケストレーターが変更内容から選定した観点'));
+  assert.ok(result.includes('ASPECTS=correctness'));
+});
+
+test('buildAspectsBrief formats multiple aspects as a list', () => {
+  const { mod } = loadModule();
+  const result = mod.buildAspectsBrief(['correctness', 'security', 'readability']);
+  assert.ok(result.includes('- correctness'));
+  assert.ok(result.includes('- security'));
+  assert.ok(result.includes('- readability'));
+  // リスト項目が改行区切りで、カンマ区切りでないことを確認
+  const lines = result.split('\n').filter(l => l.startsWith('- '));
+  assert.equal(lines.length, 3);
+  // ASPECTS 行が機械可読なカンマ区切りで存在することを確認
+  assert.ok(result.includes('ASPECTS=correctness,security,readability'));
+});
+
+test('buildAspectsBrief ASPECTS line uses leaf names as given', () => {
+  const { mod } = loadModule();
+  // detectAspects が返す葉名（api-contract 等）をそのまま使う
+  const result = mod.buildAspectsBrief(['logic-invariants', 'api-contract', 'concurrency']);
+  assert.ok(result.includes('ASPECTS=logic-invariants,api-contract,concurrency'));
+});
+
+test('buildAspectsBrief throws on empty array', () => {
+  const { mod } = loadModule();
+  assert.throws(
+    () => mod.buildAspectsBrief([]),
+    /1件以上の観点が必要です/
+  );
+});
+
+test('buildAspectsBrief throws on non-array input', () => {
+  const { mod } = loadModule();
+  assert.throws(
+    () => mod.buildAspectsBrief(null),
+    /1件以上の観点が必要です/
+  );
+  assert.throws(
+    () => mod.buildAspectsBrief('correctness'),
+    /1件以上の観点が必要です/
+  );
+  assert.throws(
+    () => mod.buildAspectsBrief(undefined),
+    /1件以上の観点が必要です/
+  );
+});
+
 // ── isLockValid ──────────────────────────────────────────────────────────
 
 test('isLockValid returns false when no lock file exists', () => {
