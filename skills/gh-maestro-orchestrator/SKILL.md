@@ -56,9 +56,13 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 |---|---|
 | coder / senior-coder | 実装対象の Issue（現行どおり） |
 | investigator | 調査対象のバグ Issue（既存があればそれ。なければ orchestrator が起草・作成する） |
-| explorer | 調査の発端となった Issue（あればそれ。なければ orchestrator が `maestro:task` ラベル付きの軽量 Issue を作成する） |
+| explorer | 調査の発端となった Issue（あればそれ。なければ orchestrator が作成する） |
 
 ワーカー起動前に、該当するアンカー Issue が存在することを必ず確認すること。存在しない場合は先に Issue を作成する。
+
+**調査アンカー Issue は調査完了後にクローズしない。** 同じ Issue を実装用に育てる。調査が完了し実装方針が固まったら、チャット上で人間に提示し承認を得た上で、`gh issue edit --title <正式タイトル> --body-file <本文>` により Issue を実装指示に更新する。新たに別の Issue を作成する必要はない（詳細は「Issue確定」参照）。
+
+調査アンカー Issue の暫定タイトルは「調査: <キーワード>」とする（例: `調査: 認証トークン検証の現状`）。実装方針確定後、正式タイトルに変更する。
 
 ### explorer の起動例
 
@@ -112,7 +116,7 @@ node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE
 ```
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする
 - **write-draft.js** — 論理パス（`/tmp/issue-draft.md` 等）を実体パスへ解決してから草案ファイルを書き出す唯一の入口。`view-file.js`・`create-issue.js` と同じ解決ロジック（`win-path.js`）を通るため、書く先と読む先の実体パスがズレない。オーケストレーターは `C:\tmp` や `%TEMP%` を推論してはならず、常にこのスクリプト経由で草案を書くこと。
-- **view-file.js** — Issueの原案など、ユーザーに確認・承認してほしいファイルをZedで開く。Issueを起草したらチャットで説明するより先にこれで見せろ。
+- **view-file.js** — ユーザーに確認・承認してほしいファイルをZedで開く。
 - **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` を削除する（詳細は「Issue確定」参照）。
 
 ```sh
@@ -198,7 +202,7 @@ W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "
 
 ## Issue確定
 
-Issueを起草したら、「この Issue だけを渡されたコーダーが設計判断なしに実装を完了できるか」を自問し、NO なら草稿を修正してから view-file.js で表示する。
+Issueを起草したら、「この Issue だけを渡されたコーダーが設計判断なしに実装を完了できるか」を自問し、NO なら草稿を修正する。
 
 ### 既存パターンの事前調査（新規UI/ロジック実装・複数ファイルへの同一修正を伴うIssueで必須）
 
@@ -215,13 +219,15 @@ Issueには2種類の読者がいる。**承認判断を行う人間**（抽象�
 - 「実装詳細」はコーダーが設計判断なしに実装を完了できる情報だけを書く
 - 起票前に `## 起票前チェック` を満たしているか確認する
 
-view-file.js で人間に見せて承認を求めるのは「概要」セクションであり、人間は「実装詳細」を読まなくても承認判断ができる状態にする。「概要」に具体的なシンボル名が混入していたら草稿を修正してから見せる。
+チャット上で人間に提示して承認を求めるのは「概要」セクションであり、人間は「実装詳細」を読まなくても承認判断ができる状態にする。「概要」に具体的なシンボル名が混入していたら草稿を修正してから提示する。
 
-**investigator/explorer向けの調査アンカーIssue**（「これを調べて報告しろ」だけの軽量な依頼で、設計判断や実装方針を伴わないもの）は、view-file.js での事前確認を省略し、直接 create-issue.js で作成してよい。事前確認が必要なのは、設計判断・要件確認を伴うcoder/senior-coderへの実装指示Issueに限る。
+### 人間の承認とGitHubへの反映
 
-Issue本文は必ず `/tmp/issue-<N>.md`（例: `/tmp/issue-42.md`）という**論理パス**に書き出してから `--body-file` で渡す。`--body` へのインライン渡しは禁止（改行・特殊文字のエスケープ問題が発生する）。Issue番号をファイル名に含めることで並列起票時の衝突を防ぐ。
+草案の内容を**チャット上で人間に提示し、承認を得てから** GitHub に反映する。ローカルファイルのZedプレビュー（`view-file.js`）は使用しない。人間は GitHub 上で随時内容を確認できる。
 
-論理パスの実体（Windows実パス）を推論してはならない。書き出しは必ず `write-draft.js` を経由する。
+調査アンカーとして使っていた既存Issueがある場合はそのIssueを更新し、全く新規の作業で調査不要な場合は新規作成する。
+
+Issue本文は必ず `/tmp/issue-<N>.md`（例: `/tmp/issue-42.md`）という**論理パス**に書き出してから `--body-file` で渡す。`--body` へのインライン渡しは禁止（改行・特殊文字のエスケープ問題が発生する）。Issue番号をファイル名に含めることで並列起票時の衝突を防ぐ。論理パスの実体（Windows実パス）を推論してはならず、書き出しは必ず `write-draft.js` を経由する。
 
 ```sh
 # 草案を書き出す（Issue番号確定前は issue-draft.md でよい）
@@ -230,20 +236,17 @@ node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-draft.md --stdin <<'EOF'
 EOF
 # 出力: DRAFT_WRITTEN:<実体パス>
 
-# 草案を表示してユーザーに承認を求める
-node "{{SCRIPTS_PATH}}/view-file.js" /tmp/issue-draft.md --workspace $WORKSPACE
-
-# 承認後にIssueを作成する（成功時は body-file を自動削除するので orchestrator は削除を意識しなくてよい）
+# 新規Issue作成（調査不要で全く新規の作業）
 node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tmp/issue-draft.md
 # 出力: ISSUE_CREATED:<番号> <URL>
+
+# 既存Issueを実装用に育てる（調査アンカーからの更新）
+gh issue edit <N> --title "<正式タイトル>" --body-file /tmp/issue-draft.md
 ```
 
-`write-draft.js`・`view-file.js`・`create-issue.js` はすべて同じ論理パス解決ロジック（`win-path.js`）を通るため、同じ `/tmp/issue-draft.md` を渡せば書く先と読む先の実体ファイルは常に一致する。
+`create-issue.js` は成功時に `--body-file` を削除する。これにより `/tmp/issue-draft.md` が使い回され、次回起票時に「既存ファイルだから読み直す」という無駄なReadが発生するのを防ぐ（失敗時は原案を失わないよう削除しない）。`gh issue edit` はこの削除処理を行わないため、既存Issueの更新時は必要に応じて書き出し後に手動で `/tmp/issue-<N>.md` を削除してよい。
 
-`gh issue create` を直接呼ばないこと。`create-issue.js` が唯一の呼び出し口であり、
-成功時に `--body-file` を削除する。これにより `/tmp/issue-draft.md` が使い回され、
-次回起票時に「既存ファイルだから読み直す」という無駄なReadが発生するのを防ぐ
-（失敗時は原案を失わないよう削除しない）。
+`write-draft.js`・`create-issue.js`・`gh issue edit` で同じ `/tmp/issue-<N>.md` を渡すため、書く先と読む先が一致していることを確認すること。
 
 ## 自分の inbox の監視
 
