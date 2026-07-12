@@ -160,9 +160,10 @@ function buildAspectsBrief(aspects) {
   if (!Array.isArray(aspects) || aspects.length === 0) {
     throw new Error('buildAspectsBrief には1件以上の観点が必要です');
   }
+  const aspectsLine = `ASPECTS=${aspects.join(',')}`;
   return `オーケストレーターが変更内容から選定した観点に絞ってレビューしてください。` +
     `skills/gh-maestro-reviewer/ 配下の以下の観点ファイルに対応する基準のみを適用します。\n\n` +
-    aspects.map(a => `- ${a}`).join('\n') + '\n';
+    aspects.map(a => `- ${a}`).join('\n') + `\n\n${aspectsLine}\n`;
 }
 
 module.exports = { startReviewManager, isLockValid, resolveMode, resolveDirectedBrief, buildAspectsBrief };

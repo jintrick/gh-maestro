@@ -121,6 +121,7 @@ test('buildAspectsBrief formats a single aspect correctly', () => {
   assert.ok(result.includes('correctness'));
   assert.ok(result.includes('skills/gh-maestro-reviewer/'));
   assert.ok(result.includes('オーケストレーターが変更内容から選定した観点'));
+  assert.ok(result.includes('ASPECTS=correctness'));
 });
 
 test('buildAspectsBrief formats multiple aspects as a list', () => {
@@ -132,6 +133,15 @@ test('buildAspectsBrief formats multiple aspects as a list', () => {
   // リスト項目が改行区切りで、カンマ区切りでないことを確認
   const lines = result.split('\n').filter(l => l.startsWith('- '));
   assert.equal(lines.length, 3);
+  // ASPECTS 行が機械可読なカンマ区切りで存在することを確認
+  assert.ok(result.includes('ASPECTS=correctness,security,readability'));
+});
+
+test('buildAspectsBrief ASPECTS line uses leaf names as given', () => {
+  const { mod } = loadModule();
+  // detectAspects が返す葉名（api-contract 等）をそのまま使う
+  const result = mod.buildAspectsBrief(['logic-invariants', 'api-contract', 'concurrency']);
+  assert.ok(result.includes('ASPECTS=logic-invariants,api-contract,concurrency'));
 });
 
 test('buildAspectsBrief throws on empty array', () => {
