@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const { toWinPath } = require('./win-path');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { resolveTextInput } = require('./shared/text-input');
 
 const USAGE = `create-issue.js — GitHub Issue を作成し、body-file を必ず削除する
 
@@ -55,7 +56,9 @@ if (require.main === module) {
   }
 
   const absBodyFile = path.resolve(toWinPath(bodyFile));
-  if (!fs.existsSync(absBodyFile)) {
+  try {
+    resolveTextInput({ filePath: absBodyFile });
+  } catch {
     console.error(`body-file が見つかりません: ${absBodyFile}`);
     process.exit(1);
   }

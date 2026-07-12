@@ -8,13 +8,16 @@
 // Usage:
 //   node spawn-worker.js \
 //     --skill <skill-name> \
-//     [--prompt "<role-prompt>"]  # gh-maestro-base 使用時は必須
+//     [--prompt "<role-prompt>" | --prompt-file <path>]  # gh-maestro-base 使用時はどちらか必須
 //     --issue <N> \               # 必須。ワーカーのアンカー Issue
 //     --description <desc> \
 //     --repo <owner/repo> \
 //     --workspace <path> \
 //     [--base-branch <branch>] \
 //     [--agent <id>]              # エージェントID。config.json > agent-defaults.json で解決（省略時はスキルに応じたデフォルト）
+//
+// バッククォート・引用符等の特殊文字を含む長文プロンプトは、シェルの解釈による破損を避けるため
+// --prompt ではなく --prompt-file を使うこと。--prompt と --prompt-file は同時指定不可。
 //
 // 標準出力: ワーカー名（例: issue-5-implement）
 
@@ -30,21 +33,62 @@ const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs, checkAgentExists } = require('./agent-exec');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
-const { parseFlags } = require('./shared/workspace');
+const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { resolveTextInput } = require('./shared/text-input');
 
 const SPAWN_WORKER_VALUE_FLAGS = [
-  '--skill', '--prompt', '--issue', '--description',
+  '--skill', '--prompt', '--prompt-file', '--issue', '--description',
   '--repo', '--workspace', '--base-branch', '--agent',
 ];
+
+const USAGE = `spawn-worker.js — ワーカーペインを作成し、worktreeを準備してエージェントを起動する
+
+Usage: node spawn-worker.js --skill <skill-name> --issue <N> --description <desc> --repo <owner/repo>
+                            [--prompt <text> | --prompt-file <path>] [--workspace <path>]
+                            [--base-branch <branch>] [--agent <id>]
+
+Arguments:
+  --skill <name>          起動するワーカースキル名
+  --issue <N>             ワーカーのアンカー Issue（正の整数）
+  --description <desc>    ワーカーの説明（worker名の一部になる）
+  --repo <owner/repo>     対象リポジトリ
+  --prompt <text>         役割プロンプト（gh-maestro-base 使用時はどちらか必須）
+  --prompt-file <path>    役割プロンプトをファイルで指定する（--prompt と同時指定不可）。
+                          バッククォート・引用符等の特殊文字を含む長文はこちらを使うこと。
+  --workspace <path>      ワークスペースパス（省略時は CWD）
+  --base-branch <branch>  worktree のベースブランチ
+  --agent <id>            エージェントID（省略時はスキルに応じたデフォルト）
+
+Output (stdout):
+  ワーカー名（例: issue-5-implement）`;
 
 if (require.main === module) {
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
-const { values } = parseFlags(argv, SPAWN_WORKER_VALUE_FLAGS);
+const { values, rest, exitFlagMiss } = parseFlags(argv, SPAWN_WORKER_VALUE_FLAGS);
+
+// exitFlagMiss（値欠落）を先に判定する。値欠落は常にエラー優先（フェイルクローズ）とし、
+// help 判定より先に確定させる（他スクリプトと同様のパターン。argv-parsing-pitfalls参照）。
+if (exitFlagMiss) {
+  console.error(USAGE);
+  process.exit(1);
+}
+
+if (hasHelpFlag(rest)) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+if (rest.length > 0) {
+  console.error(`spawn-worker: 未知の引数です: ${rest.join(' ')}`);
+  console.error(USAGE);
+  process.exit(1);
+}
 
 const skill       = values['--skill'];
-const prompt      = values['--prompt'];
+const promptText  = values['--prompt'];
+const promptFileArg = values['--prompt-file'];
 const issue       = values['--issue'];
 const description = values['--description'];
 const repo        = values['--repo'];
@@ -63,7 +107,14 @@ const fail = (msg) => {
 if (!skill)       fail('--skill が必要です');
 if (!description) fail('--description が必要です');
 if (!repo)        fail('--repo が必要です');
-if (skill === 'gh-maestro-base' && !prompt) fail('gh-maestro-base を使う場合は --prompt が必要です');
+if (promptText != null && promptFileArg != null) fail('--prompt と --prompt-file は同時に指定できません');
+let prompt;
+try {
+  prompt = resolveTextInput({ inlineValue: promptText ?? null, filePath: promptFileArg ?? null });
+} catch (e) {
+  fail(`--prompt-file の読み込みに失敗しました: ${e.message}`);
+}
+if (skill === 'gh-maestro-base' && !prompt) fail('gh-maestro-base を使う場合は --prompt または --prompt-file が必要です');
 if (!issue) fail('--issue が必要です（ワーカーのアンカー Issue）');
 if (!/^[1-9][0-9]*$/.test(issue)) fail('--issue は正の整数である必要があります');
 

@@ -14,6 +14,7 @@ const {
   reviewWorktreeBranchName, reviewWorktreeFetchRef, reviewWorktreeDir,
 } = require('./shared/review-manager-paths');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { resolveTextInput } = require('./shared/text-input');
 
 // 可視ペイン実行時、出力ファイル生成を待つポーリング設定。
 const VISIBLE_POLL_INTERVAL_MS = 5000;
@@ -375,7 +376,7 @@ if (require.main === module) {
       process.exit(1);
     }
     try {
-      directedBrief = fs.readFileSync(briefFileArg, 'utf8');
+      directedBrief = resolveTextInput({ filePath: briefFileArg });
     } catch (e) {
       console.error(`run-review-manager: brief file を読めません: ${e.message}`);
       process.exit(1);

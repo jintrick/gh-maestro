@@ -17,6 +17,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { toWinPath } = require('./win-path');
+const { resolveTextInput } = require('./shared/text-input');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
@@ -87,15 +88,14 @@ function main(argsOverride, envOverride) {
 
   // ── 本文解決: --body-file > 位置引数 ─────────────────────────────────────
   let body;
-  if (values['--body-file']) {
-    try {
-      body = fs.readFileSync(toWinPath(values['--body-file']), 'utf8');
-    } catch (e) {
-      writeErr(`msg-send: --body-file の読み込みに失敗しました: ${e.message}`);
-      return { code: 1, lines: out, errLines: err };
-    }
-  } else {
-    body = rest.slice(1).join(' ');
+  try {
+    body = resolveTextInput({
+      inlineValue: rest.slice(1).join(' '),
+      filePath: values['--body-file'] ? toWinPath(values['--body-file']) : null,
+    });
+  } catch (e) {
+    writeErr(`msg-send: --body-file の読み込みに失敗しました: ${e.message}`);
+    return { code: 1, lines: out, errLines: err };
   }
 
   if (!recipient) {
