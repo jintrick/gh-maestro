@@ -285,6 +285,91 @@ test('copySkillAssets: destに残った未知のサブディレクトリを削�
   }
 });
 
+test('copySkillAssets: サブディレクトリ内のファイルを再帰コピーする（Issue #120）', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-src-'));
+  const dest = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-dest-'));
+  try {
+    fs.mkdirSync(path.join(src, 'aspects'), { recursive: true });
+    fs.writeFileSync(path.join(src, 'SKILL.md'), '# Skill');
+    fs.writeFileSync(path.join(src, 'aspects', 'correctness.md'), '## Correctness');
+    fs.writeFileSync(path.join(src, 'aspects', 'maintainability.md'), '## Maintainability');
+
+    copySkillAssets(src, dest, {});
+
+    assert.ok(fs.existsSync(path.join(dest, 'aspects', 'correctness.md')), 'サブディレクトリのファイルがコピーされている');
+    assert.ok(fs.existsSync(path.join(dest, 'aspects', 'maintainability.md')), 'サブディレクトリのファイルがコピーされている');
+    assert.equal(fs.readFileSync(path.join(dest, 'aspects', 'correctness.md'), 'utf8'), '## Correctness');
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test('copySkillAssets: サブディレクトリのファイルにもapplySubstitutionsが適用される（Issue #120）', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-src-'));
+  const dest = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-dest-'));
+  try {
+    fs.mkdirSync(path.join(src, 'aspects'), { recursive: true });
+    fs.writeFileSync(path.join(src, 'SKILL.md'), '# Skill');
+    fs.writeFileSync(path.join(src, 'aspects', 'correctness.md'), 'path: {{SCRIPTS_PATH}}/test.js');
+
+    copySkillAssets(src, dest, { SCRIPTS_PATH: '/custom/path' });
+
+    const content = fs.readFileSync(path.join(dest, 'aspects', 'correctness.md'), 'utf8');
+    assert.equal(content, 'path: /custom/path/test.js');
+    assert.ok(!content.includes('{{'), 'サブディレクトリ内のファイルでもプレースホルダーが置換されている');
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test('copySkillAssets: 2階層以上ネストしたサブディレクトリも再帰コピーする（Issue #120）', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-src-'));
+  const dest = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-dest-'));
+  try {
+    fs.mkdirSync(path.join(src, 'aspects', 'deep'), { recursive: true });
+    fs.writeFileSync(path.join(src, 'SKILL.md'), '# Skill');
+    fs.writeFileSync(path.join(src, 'aspects', 'correctness.md'), '## Correctness');
+    fs.writeFileSync(path.join(src, 'aspects', 'deep', 'nested.md'), '## Nested');
+
+    copySkillAssets(src, dest, {});
+
+    assert.ok(fs.existsSync(path.join(dest, 'aspects', 'correctness.md')), '1階層目のファイルがコピーされている');
+    assert.ok(fs.existsSync(path.join(dest, 'aspects', 'deep', 'nested.md')), '2階層目のファイルがコピーされている');
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test('copySkillAssets: サブディレクトリ内のstaleファイルも削除される（Issue #120）', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-src-'));
+  const dest = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-dest-'));
+  try {
+    fs.mkdirSync(path.join(src, 'aspects'), { recursive: true });
+    fs.writeFileSync(path.join(src, 'SKILL.md'), '# Skill');
+    fs.writeFileSync(path.join(src, 'aspects', 'correctness.md'), '## Correctness');
+
+    // dest にソースに無いファイルを配置
+    fs.mkdirSync(path.join(dest, 'aspects'), { recursive: true });
+    fs.writeFileSync(path.join(dest, 'aspects', 'correctness.md'), '## Old');
+    fs.writeFileSync(path.join(dest, 'aspects', 'stale.md'), 'stale');
+
+    copySkillAssets(src, dest, {});
+
+    assert.ok(fs.existsSync(path.join(dest, 'aspects', 'correctness.md')), 'ソースに存在するファイルは残っている');
+    assert.ok(!fs.existsSync(path.join(dest, 'aspects', 'stale.md')), 'サブディレクトリ内のstaleファイルが削除されている');
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
 test('copySkillAssets: destに残った未知のファイルを削除する', () => {
   const tmpdir = require('os').tmpdir();
   const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-skill-src-'));
