@@ -35,6 +35,7 @@ const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree')
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
+const { toWinPath } = require('./win-path');
 
 const SPAWN_WORKER_VALUE_FLAGS = [
   '--skill', '--prompt', '--prompt-file', '--issue', '--description',
@@ -110,7 +111,7 @@ if (!repo)        fail('--repo が必要です');
 if (promptText != null && promptFileArg != null) fail('--prompt と --prompt-file は同時に指定できません');
 let prompt;
 try {
-  prompt = resolveTextInput({ inlineValue: promptText ?? null, filePath: promptFileArg ?? null });
+  prompt = resolveTextInput({ inlineValue: promptText ?? null, filePath: promptFileArg ? toWinPath(promptFileArg) : null });
 } catch (e) {
   fail(`--prompt-file の読み込みに失敗しました: ${e.message}`);
 }

@@ -7,6 +7,7 @@ const path = require('path');
 const { isProcessAlive } = require('./process-lifecycle');
 const { assertValidPr, reviewArtifactPath } = require('./shared/review-manager-paths');
 const { resolveTextInput } = require('./shared/text-input');
+const { toWinPath } = require('./win-path');
 
 const USAGE = `start-review-manager.js — PRに対してReview Managerを起動する
 
@@ -49,10 +50,11 @@ function resolveDirectedBrief(options) {
   if (options.promptText != null && options.briefFile != null) {
     throw new Error('--prompt と --brief-file は同時に指定できません');
   }
-  if (options.briefFile != null && !fs.existsSync(options.briefFile)) {
+  const briefFile = options.briefFile != null ? toWinPath(options.briefFile) : null;
+  if (briefFile != null && !fs.existsSync(briefFile)) {
     throw new Error(`brief file not found: ${options.briefFile}`);
   }
-  const text = resolveTextInput({ inlineValue: options.promptText ?? null, filePath: options.briefFile ?? null });
+  const text = resolveTextInput({ inlineValue: options.promptText ?? null, filePath: briefFile });
   if (text != null) return text;
   throw new Error('directed モードには --prompt または --brief-file が必要です');
 }
