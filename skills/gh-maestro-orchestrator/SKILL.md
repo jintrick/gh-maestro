@@ -288,6 +288,17 @@ orchestrator が受け取るすべてのメッセージの受信経路である�
 ## PR検出
 
 コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <N>` を起動してPRを監視する（`N` はコーダーのアンカー Issue 番号）。
+`--base-branch` にはセッション変数 `$BASE_BRANCH` を渡すことで、PR作成時のベースブランチ不一致を検出できる。
+
+```sh
+node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --review-aspects auto --workspace $WORKSPACE --base-branch $BASE_BRANCH
+```
+
+PR検出時の出力:
+- `PR_BASE_MISMATCH:<PR>:<expected>:<actual>` — ベースブランチ不一致（想定と実際が異なる場合は出力される。処理は継続）
+- `PR_DETECTED:<PR>` — 通常通りPR番号が報告される
+
+`PR_BASE_MISMATCH` を受け取った場合、即座に処理を中断する必要はない（PR自体は作成されている）が、PRのベースブランチが想定外であることを認識しておくこと。後続のマージフローに影響を与える可能性があるため、人間にその旨伝えることを検討する。
 
 PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`msg-send.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
 **通常コーダー（gh-maestro-coder）が実装に失敗してエスカレーションされた場合、人間が承認した段階で上位のシニアコーダー（gh-maestro-senior-coder）を適用して再起動することを検討せよ。**
