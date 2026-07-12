@@ -60,7 +60,7 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 
 ワーカー起動前に、該当するアンカー Issue が存在することを必ず確認すること。存在しない場合は先に Issue を作成する。
 
-**調査アンカー Issue は調査完了後にクローズしない。** 同じ Issue を実装用に育てる。調査が完了し実装方針が固まったら、チャット上で人間に提示し承認を得た上で、`gh issue edit --title <正式タイトル> --body-file <本文>` により Issue を実装指示に更新する。新たに別の Issue を作成する必要はない（詳細は「Issue確定」参照）。
+**調査アンカー Issue は調査完了後にクローズしない。** 同じ Issue を実装用に育てる。調査が完了し実装方針が固まったら、チャット上で人間に提示し承認を得た上で、`gh issue edit <N> --title "<正式タイトル>" --body-file /tmp/issue-<N>.md` により Issue を実装指示に更新する。新たに別の Issue を作成する必要はない（詳細は「Issue確定」参照）。
 
 調査アンカー Issue の暫定タイトルは「調査: <キーワード>」とする（例: `調査: 認証トークン検証の現状`）。実装方針確定後、正式タイトルに変更する。
 
@@ -241,7 +241,7 @@ node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tm
 # 出力: ISSUE_CREATED:<番号> <URL>
 
 # 既存Issueを実装用に育てる（調査アンカーからの更新）
-gh issue edit <N> --title "<正式タイトル>" --body-file /tmp/issue-draft.md
+gh issue edit <N> --title "<正式タイトル>" --body-file /tmp/issue-<N>.md
 ```
 
 `create-issue.js` は成功時に `--body-file` を削除する。これにより `/tmp/issue-draft.md` が使い回され、次回起票時に「既存ファイルだから読み直す」という無駄なReadが発生するのを防ぐ（失敗時は原案を失わないよう削除しない）。`gh issue edit` はこの削除処理を行わないため、既存Issueの更新時は必要に応じて書き出し後に手動で `/tmp/issue-<N>.md` を削除してよい。
