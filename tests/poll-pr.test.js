@@ -70,7 +70,7 @@ test('resolveReviewAspects rejects an empty element', () => {
 // ── getChangedFiles ──────────────────────────────────────────────────────
 
 test('getChangedFiles parses newline-separated file paths from gh output', () => {
-  const { mod, calls } = loadModule(() => ({ stdout: 'a.js\nb.js\n' }));
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'a.js\nb.js\n' }));
   const files = mod.getChangedFiles('7', 'o/r');
   assert.deepEqual(files, ['a.js', 'b.js']);
   assert.equal(calls[0].cmd, 'gh');
@@ -78,8 +78,23 @@ test('getChangedFiles parses newline-separated file paths from gh output', () =>
 });
 
 test('getChangedFiles returns an empty array for empty gh output', () => {
-  const { mod } = loadModule(() => ({ stdout: '' }));
+  const { mod } = loadModule(() => ({ status: 0, stdout: '' }));
   assert.deepEqual(mod.getChangedFiles('7', 'o/r'), []);
+});
+
+test('getChangedFiles warns and returns an empty array when gh pr view fails', () => {
+  const { mod } = loadModule(() => ({ status: 1, stdout: '', stderr: 'rate limit exceeded' }));
+  const originalError = console.error;
+  const errors = [];
+  console.error = (...args) => errors.push(args.join(' '));
+  try {
+    const files = mod.getChangedFiles('7', 'o/r');
+    assert.deepEqual(files, []);
+    assert.ok(errors.some(e => e.includes('変更ファイル一覧の取得に失敗しました')));
+    assert.ok(errors.some(e => e.includes('rate limit exceeded')));
+  } finally {
+    console.error = originalError;
+  }
 });
 
 // ── spawnPollReviews ─────────────────────────────────────────────────────

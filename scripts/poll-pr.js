@@ -79,6 +79,12 @@ function resolveReviewAspects(rawValue, knownAspects) {
 function getChangedFiles(pr, repo) {
   const r = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
     '--json', 'files', '-q', '.files[].path'], { encoding: 'utf8' });
+  if (r.status !== 0) {
+    // 失敗を握りつぶして空配列を返すと、auto判定が気づかれないまま全観点
+    // （heavyモード相当）へフォールバックしてしまう。原因が分かるよう警告する（PR #112 レビュー指摘）。
+    console.error(`poll-pr: 変更ファイル一覧の取得に失敗しました（gh pr view）: ${(r.stderr || '').toString().trim()}`);
+    return [];
+  }
   return (r.stdout || '').split('\n').filter(Boolean);
 }
 
@@ -136,6 +142,14 @@ if (require.main === module) {
   }
 
   const knownAspects = listKnownAspects();
+  // 観点ディレクトリが存在しない・.mdファイルが1件もない等でknownAspectsが空の場合、
+  // 'auto'指定時にdetectAspectsが空配列を返しbuildAspectsBriefが例外を投げてクラッシュする。
+  // silent fallbackせず起動時にfail-fastする（PR #112 レビュー指摘）。
+  if (knownAspects.length === 0) {
+    console.error('poll-pr: 既知の観点が1件も見つかりません（skills/gh-maestro-reviewer/ 配下を確認してください）。');
+    process.exit(1);
+  }
+
   let reviewAspects;
   try {
     reviewAspects = resolveReviewAspects(reviewAspectsArg, knownAspects);

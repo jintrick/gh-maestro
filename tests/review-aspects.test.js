@@ -34,3 +34,19 @@ test('listKnownAspects scans a custom two-level trunk/leaf layout', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('listKnownAspects ignores a directory whose name happens to end in .md', () => {
+  const dir = path.join(os.tmpdir(), 'gh-maestro-test-aspects-dirmd-' + Date.now());
+  const trunkDir = path.join(dir, 'trunk-a');
+  fs.mkdirSync(trunkDir, { recursive: true });
+  fs.writeFileSync(path.join(trunkDir, 'real-leaf.md'), '');
+  // ファイルではなくディレクトリなので観点として扱われてはならない（PR #112 レビュー指摘）
+  fs.mkdirSync(path.join(trunkDir, 'fake-leaf.md'));
+
+  try {
+    const aspects = listKnownAspects(dir);
+    assert.deepEqual(aspects, ['real-leaf']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

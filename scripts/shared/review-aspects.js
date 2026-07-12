@@ -27,13 +27,14 @@ function listKnownAspects(reviewerSkillDir = DEFAULT_REVIEWER_SKILL_DIR) {
     const trunkDir = path.join(reviewerSkillDir, trunk.name);
     let leafEntries;
     try {
-      leafEntries = fs.readdirSync(trunkDir);
+      leafEntries = fs.readdirSync(trunkDir, { withFileTypes: true });
     } catch {
       continue;
     }
     for (const leaf of leafEntries) {
-      if (!leaf.endsWith('.md')) continue;
-      aspects.push(path.basename(leaf, '.md'));
+      if (!leaf.isFile()) continue;
+      if (!leaf.name.endsWith('.md')) continue;
+      aspects.push(path.basename(leaf.name, '.md'));
     }
   }
   return aspects.sort();
