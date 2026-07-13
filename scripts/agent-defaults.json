@@ -7,7 +7,8 @@
       "runtime": "claude",
       "extraArgs": ["--dangerously-skip-permissions"],
       "promptDelivery": "system-prompt-file",
-      "enterSequence": "\r\n"
+      "enterSequence": "\r\n",
+      "rulesSupported": true
     },
     {
       "id": "claude-ds",
@@ -16,7 +17,8 @@
       "runtime": "claude",
       "extraArgs": ["--dangerously-skip-permissions"],
       "promptDelivery": "system-prompt-file",
-      "enterSequence": "\r\n"
+      "enterSequence": "\r\n",
+      "rulesSupported": true
     },
     {
       "id": "claude-ds-pro",
@@ -25,7 +27,8 @@
       "runtime": "claude",
       "extraArgs": ["--dangerously-skip-permissions"],
       "promptDelivery": "system-prompt-file",
-      "enterSequence": "\r\n"
+      "enterSequence": "\r\n",
+      "rulesSupported": true
     },
     {
       "id": "reasonix",
@@ -37,7 +40,8 @@
       "promptDelivery": "send-text-after-launch",
       "sendTextDelayMs": 5000,
       "skillsViaMd": true,
-      "enterSequence": "\r"
+      "enterSequence": "\r",
+      "rulesSupported": false
     },
     {
       "id": "agy",
@@ -47,7 +51,8 @@
       "extraArgs": ["--dangerously-skip-permissions"],
       "promptDelivery": "flag",
       "promptFlag": "-i",
-      "enterSequence": "\r\n"
+      "enterSequence": "\r\n",
+      "rulesSupported": false
     },
     {
       "id": "codex",
@@ -57,7 +62,8 @@
       "extraArgs": ["--no-alt-screen"],
       "execArgs": ["exec", "--skip-git-repo-check", "--cd", "{workspace}", "--model", "gpt-5.4", "--dangerously-bypass-approvals-and-sandbox"],
       "promptDelivery": "positional",
-      "enterSequence": "\r\n"
+      "enterSequence": "\r\n",
+      "rulesSupported": false
     }
   ],
   "skillAgentMap": {

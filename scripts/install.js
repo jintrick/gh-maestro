@@ -7,6 +7,7 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const SKILLS_DIR = path.join(ROOT, 'skills');
 const AGENTS_YAML = path.join(SKILLS_DIR, 'agents.yaml');
+const { validateAgentDefaults } = require(path.join(__dirname, 'shared', 'validate-agent-defaults'));
 
 // ── Minimal YAML parser for agents.yaml ──────────────────────────────────────
 
@@ -210,6 +211,45 @@ const skillDirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
   .filter(e => e.isDirectory())
   .map(e => e.name);
 
+// agent-defaults.json を読み込み、rulesSupported フラグのマップを構築する
+const defaultsPath = path.join(ROOT, 'scripts', 'agent-defaults.json');
+let agentDefaults = { agents: [] };
+try {
+  const parsed = JSON.parse(fs.readFileSync(defaultsPath, 'utf8'));
+  if (parsed && Array.isArray(parsed.agents)) {
+    agentDefaults = parsed;
+  } else {
+    console.warn(`  \x1b[33m! agent-defaults.json の agents フィールドが配列ではありません。rulesSupported 判定をスキップします\x1b[0m`);
+  }
+} catch (e) {
+  console.warn(`  \x1b[33m! agent-defaults.json の読み込みに失敗しました: ${e.message}。rulesSupported 判定をスキップします\x1b[0m`);
+}
+const agentsArr = Array.isArray(agentDefaults.agents) ? agentDefaults.agents : [];
+const rulesSupportedMap = new Map(agentsArr.map(a => [a.id, a.rulesSupported === true]));
+
+// agent-defaults.json の内容を検証する。エラーがあれば fail-closed で中断する
+// （fail-closed-safety-guards: 安全と確認できない場合は中断）。
+const defaultsIssues = validateAgentDefaults(agentDefaults);
+const defaultsErrors = defaultsIssues.filter(i => i.startsWith('[ERROR]'));
+if (defaultsErrors.length > 0) {
+  console.error(`\x1b[31m[gh-maestro-install] agent-defaults.json にエラーがあります:\x1b[0m`);
+  for (const err of defaultsErrors) console.error(`  ${err}`);
+  process.exit(1);
+}
+const defaultsWarnings = defaultsIssues.filter(i => i.startsWith('[WARN]'));
+for (const w of defaultsWarnings) console.warn(`  \x1b[33m! ${w}\x1b[0m`);
+
+// RULES_CHECK_STEP: rulesSupported が false のエージェントにのみ注入される。
+// コーディング開始前に .claude/rules/*.md を手動で調査するステップ。
+const RULES_CHECK_STEP_CONTENT = `0. **（ルール確認ステップ）** これから変更するファイルに関連するコーディング規約（\`.claude/rules/*.md\`）が無いか確認し、該当するものがあれば内容を読んでから作業に着手する：
+
+   まず、Issueの要件からこれから変更するファイルパスを特定し、以下のコマンドで該当するルールファイルを検索する：
+   \`\`\`sh
+   node "{{SCRIPTS_PATH}}/find-matching-rules.js" --root "$WORKTREE" <変更予定のファイルパス...>
+   \`\`\`
+
+   該当するルールファイルがあれば、\`Read\` ツールで内容を読み、その規約に従って実装すること。該当しなければそのまま次に進む。`;
+
 // ~/.gh-maestro/ は gh-maestro 専用ディレクトリ。install が書いたものだけを残し、
 // それ以外（旧バージョンの遺産）は最後に prune で除去する。
 // 「書いた＝残す」を保証するため、ここ配下のパスは必ず ghMaestroPath() で組み立てる。
@@ -248,9 +288,11 @@ for (const [agentName, config] of Object.entries(agents)) {
   }
 
   // {{SCRIPTS_PATH}} は集約先（SHARED_SCRIPTS）の絶対パスに統一する
+  const agentRulesSupported = rulesSupportedMap.get(agentName) !== false;
   const substitutions = Object.assign({}, config.substitutions, {
     SCRIPTS_PATH: SHARED_SCRIPTS,
     SHARED_SKILLS_PATH: SHARED_SKILLS,
+    RULES_CHECK_STEP: agentRulesSupported ? '' : RULES_CHECK_STEP_CONTENT,
   });
 
   for (const skill of skillDirs) {
@@ -328,9 +370,15 @@ step('Installing shared skill files into ~/.gh-maestro/skills/...');
 fs.mkdirSync(SHARED_SKILLS, { recursive: true });
 
 const canonicalAgent = agents['claude'] || agents[Object.keys(agents)[0]];
+// skillsViaMd エージェントのいずれかが rulesSupported: false の場合、
+// 共有スキルに RULES_CHECK_STEP を含める
+const anySkillsViaMdNeedsRules = agentsArr.some(
+  a => a.skillsViaMd && a.rulesSupported === false
+);
 const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {}, {
   SCRIPTS_PATH: SHARED_SCRIPTS,
   SHARED_SKILLS_PATH: SHARED_SKILLS,
+  RULES_CHECK_STEP: anySkillsViaMdNeedsRules ? RULES_CHECK_STEP_CONTENT : '',
 });
 
 // stale 削除（ディレクトリと未知ファイルの両方）
