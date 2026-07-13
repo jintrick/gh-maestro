@@ -7,6 +7,7 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const SKILLS_DIR = path.join(ROOT, 'skills');
 const AGENTS_YAML = path.join(SKILLS_DIR, 'agents.yaml');
+const { validateAgentDefaults } = require(path.join(__dirname, 'shared', 'validate-agent-defaults'));
 
 // ── Minimal YAML parser for agents.yaml ──────────────────────────────────────
 
@@ -225,6 +226,18 @@ try {
 }
 const agentsArr = Array.isArray(agentDefaults.agents) ? agentDefaults.agents : [];
 const rulesSupportedMap = new Map(agentsArr.map(a => [a.id, a.rulesSupported === true]));
+
+// agent-defaults.json の内容を検証する。エラーがあれば fail-closed で中断する
+// （fail-closed-safety-guards: 安全と確認できない場合は中断）。
+const defaultsIssues = validateAgentDefaults(agentDefaults);
+const defaultsErrors = defaultsIssues.filter(i => i.startsWith('[ERROR]'));
+if (defaultsErrors.length > 0) {
+  console.error(`\x1b[31m[gh-maestro-install] agent-defaults.json にエラーがあります:\x1b[0m`);
+  for (const err of defaultsErrors) console.error(`  ${err}`);
+  process.exit(1);
+}
+const defaultsWarnings = defaultsIssues.filter(i => i.startsWith('[WARN]'));
+for (const w of defaultsWarnings) console.warn(`  \x1b[33m! ${w}\x1b[0m`);
 
 // RULES_CHECK_STEP: rulesSupported が false のエージェントにのみ注入される。
 // コーディング開始前に .claude/rules/*.md を手動で調査するステップ。

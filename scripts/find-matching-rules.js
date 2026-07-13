@@ -117,7 +117,7 @@ function findMatchingRules(root, files) {
     if (!globs || globs.length === 0) continue;
 
     if (files.some(f => matchesAny(f, globs))) {
-      matched.push(path.join('.claude', 'rules', entry.name));
+      matched.push('.claude/rules/' + entry.name);
     }
   }
 
@@ -158,3 +158,5 @@ if (require.main === module) {
 
   process.exit(0);
 }
+
+module.exports = { globToRegex, matchesAny, findMatchingRules };
