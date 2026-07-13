@@ -214,11 +214,17 @@ const skillDirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
 const defaultsPath = path.join(ROOT, 'scripts', 'agent-defaults.json');
 let agentDefaults = { agents: [] };
 try {
-  agentDefaults = JSON.parse(fs.readFileSync(defaultsPath, 'utf8'));
+  const parsed = JSON.parse(fs.readFileSync(defaultsPath, 'utf8'));
+  if (parsed && Array.isArray(parsed.agents)) {
+    agentDefaults = parsed;
+  } else {
+    console.warn(`  \x1b[33m! agent-defaults.json の agents フィールドが配列ではありません。rulesSupported 判定をスキップします\x1b[0m`);
+  }
 } catch (e) {
-  console.warn(`  \x1b[33m! agent-defaults.json の読み込みに失敗しました: ${e.message}\x1b[0m`);
+  console.warn(`  \x1b[33m! agent-defaults.json の読み込みに失敗しました: ${e.message}。rulesSupported 判定をスキップします\x1b[0m`);
 }
-const rulesSupportedMap = new Map(agentDefaults.agents.map(a => [a.id, a.rulesSupported === true]));
+const agentsArr = Array.isArray(agentDefaults.agents) ? agentDefaults.agents : [];
+const rulesSupportedMap = new Map(agentsArr.map(a => [a.id, a.rulesSupported === true]));
 
 // RULES_CHECK_STEP: rulesSupported が false のエージェントにのみ注入される。
 // コーディング開始前に .claude/rules/*.md を手動で調査するステップ。
@@ -353,7 +359,7 @@ fs.mkdirSync(SHARED_SKILLS, { recursive: true });
 const canonicalAgent = agents['claude'] || agents[Object.keys(agents)[0]];
 // skillsViaMd エージェントのいずれかが rulesSupported: false の場合、
 // 共有スキルに RULES_CHECK_STEP を含める
-const anySkillsViaMdNeedsRules = agentDefaults.agents.some(
+const anySkillsViaMdNeedsRules = agentsArr.some(
   a => a.skillsViaMd && a.rulesSupported === false
 );
 const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {}, {
