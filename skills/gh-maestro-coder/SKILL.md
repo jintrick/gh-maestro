@@ -45,6 +45,7 @@ CI監視はorchestratorの責務であり、コーダーは行わない。orches
 
 ## 手順
 
+{{RULES_CHECK_STEP}}
 1. `gh issue view $ISSUE` でIssueの要件を把握する
 2. **質問事項がある場合は通信ルールのコマンドでorchestratorに質問し、返答を待ってから作業を進める**
 3. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）

@@ -210,6 +210,27 @@ const skillDirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
   .filter(e => e.isDirectory())
   .map(e => e.name);
 
+// agent-defaults.json を読み込み、rulesSupported フラグのマップを構築する
+const defaultsPath = path.join(ROOT, 'scripts', 'agent-defaults.json');
+let agentDefaults = { agents: [] };
+try {
+  agentDefaults = JSON.parse(fs.readFileSync(defaultsPath, 'utf8'));
+} catch (e) {
+  console.warn(`  \x1b[33m! agent-defaults.json の読み込みに失敗しました: ${e.message}\x1b[0m`);
+}
+const rulesSupportedMap = new Map(agentDefaults.agents.map(a => [a.id, a.rulesSupported === true]));
+
+// RULES_CHECK_STEP: rulesSupported が false のエージェントにのみ注入される。
+// コーディング開始前に .claude/rules/*.md を手動で調査するステップ。
+const RULES_CHECK_STEP_CONTENT = `0. **（ルール確認ステップ）** これから変更するファイルに関連するコーディング規約（\`.claude/rules/*.md\`）が無いか確認し、該当するものがあれば内容を読んでから作業に着手する：
+
+   まず、Issueの要件からこれから変更するファイルパスを特定し、以下のコマンドで該当するルールファイルを検索する：
+   \`\`\`sh
+   node "{{SCRIPTS_PATH}}/find-matching-rules.js" --root "$WORKTREE" <変更予定のファイルパス...>
+   \`\`\`
+
+   該当するルールファイルがあれば、\`Read\` ツールで内容を読み、その規約に従って実装すること。該当しなければそのまま次に進む。`;
+
 // ~/.gh-maestro/ は gh-maestro 専用ディレクトリ。install が書いたものだけを残し、
 // それ以外（旧バージョンの遺産）は最後に prune で除去する。
 // 「書いた＝残す」を保証するため、ここ配下のパスは必ず ghMaestroPath() で組み立てる。
@@ -248,9 +269,11 @@ for (const [agentName, config] of Object.entries(agents)) {
   }
 
   // {{SCRIPTS_PATH}} は集約先（SHARED_SCRIPTS）の絶対パスに統一する
+  const agentRulesSupported = rulesSupportedMap.get(agentName) !== false;
   const substitutions = Object.assign({}, config.substitutions, {
     SCRIPTS_PATH: SHARED_SCRIPTS,
     SHARED_SKILLS_PATH: SHARED_SKILLS,
+    RULES_CHECK_STEP: agentRulesSupported ? '' : RULES_CHECK_STEP_CONTENT,
   });
 
   for (const skill of skillDirs) {
@@ -328,9 +351,15 @@ step('Installing shared skill files into ~/.gh-maestro/skills/...');
 fs.mkdirSync(SHARED_SKILLS, { recursive: true });
 
 const canonicalAgent = agents['claude'] || agents[Object.keys(agents)[0]];
+// skillsViaMd エージェントのいずれかが rulesSupported: false の場合、
+// 共有スキルに RULES_CHECK_STEP を含める
+const anySkillsViaMdNeedsRules = agentDefaults.agents.some(
+  a => a.skillsViaMd && a.rulesSupported === false
+);
 const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {}, {
   SCRIPTS_PATH: SHARED_SCRIPTS,
   SHARED_SKILLS_PATH: SHARED_SKILLS,
+  RULES_CHECK_STEP: anySkillsViaMdNeedsRules ? RULES_CHECK_STEP_CONTENT : '',
 });
 
 // stale 削除（ディレクトリと未知ファイルの両方）
