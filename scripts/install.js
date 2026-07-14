@@ -369,7 +369,10 @@ ok(`${scriptFiles.length} scripts + ${scriptSubdirs.length} subdir(s) -> ${SHARE
 step('Installing shared skill files into ~/.gh-maestro/skills/...');
 fs.mkdirSync(SHARED_SKILLS, { recursive: true });
 
-const canonicalAgent = agents['claude'] || agents[Object.keys(agents)[0]];
+const canonicalAgent = agents['claude'];
+if (!canonicalAgent) {
+  fail('agents.yaml に "claude" エージェントの定義がありません。共有スキルの生成に claude エージェントの定義が必要です。');
+}
 // skillsViaMd エージェントのいずれかが rulesSupported: false の場合、
 // 共有スキルに RULES_CHECK_STEP を含める
 const anySkillsViaMdNeedsRules = agentsArr.some(
