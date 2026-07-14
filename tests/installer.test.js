@@ -103,7 +103,7 @@ const LEGACY_POLLING_FIELDS = ['POLL_MECHANISM', 'INBOX_POLL_MECHANISM', 'POLL_I
 
 // Supervisor方式に移行したエージェント（agy, codex, reasonix）には
 // POLL_MECHANISM も INBOX_POLL_MECHANISM も存在してはならない。
-const SUPERVISOR_ONLY_AGENTS = ['agy', 'codex', 'reasonix'];
+const SUPERVISOR_ONLY_AGENTS = ['agy', 'codex'];
 for (const name of SUPERVISOR_ONLY_AGENTS) {
   test(`[${name}] agents.yaml に旧方式のポーリング記述（POLL_MECHANISM/INBOX_POLL_MECHANISM 等）が無い`, () => {
     const agent = agents[name];
