@@ -286,6 +286,26 @@ orchestrator が受け取るすべてのメッセージの受信経路である�
 3. 停止した分の registry エントリ（`.gh-maestro/pids/<PID>.json`）は、プロセスが死ねば次回の生存確認で自動的に無視される。**`sweep`（`--dry-run` なし）を対象を絞らずに実行しない**こと。無条件のsweepは他のMonitor（poll-pr.js・poll-reviews.js等）を含む登録済みの生存プロセスも巻き込んで停止させる。
 4. 残った1本が生きていることを確認してからセッションを継続する。届いていたはずのメッセージを見逃していないか、`gh issue view <N> --comments` で直近のワーカー報告を確認する。
 
+## worker への指示配送（Inbox Supervisor）
+
+orchestrator から worker への追加指示（`msg-send.js` で送ったコメント）は、`inbox-supervisor.js` が常駐プロセスとして GitHub Issue コメントを監視し、稼働中の worker に配送する。この配送は worker 自身のポーリングに依存しない（worker は自分で Monitor や background bash を起動してはならない — 各 worker の SKILL.md 参照）。
+
+### 起動規約（単一起動）
+
+**この配送プロセス（`inbox-supervisor.js`）はセッション中に最初の1回だけ起動する。** worker を初めて起動する前に、まだ起動していなければBashツールを `run_in_background: true` で呼び出し、`command` に `node "{{SCRIPTS_PATH}}/inbox-supervisor.js" --workspace $WORKSPACE` を直接指定して起動する。Monitorツールは使わない — このプロセスはorchestratorへ通知を返す必要がなく（配送はworker側へ直接行われる）、継続的な出力をorchestratorの文脈に流し込む意味がないため。
+
+**起動を怠ると、workerへの追加指示（レビュー指摘の転送・修正依頼等）が一切配送されず、workerは気づかないまま待機し続ける。** worker起動直後、必ずこのプロセスが起動済みかどうかを確認すること。
+
+`inbox-supervisor.js` は起動時、同じworkspaceを既に監視している生存プロセスを検知すると、新規プロセスを起動せずexit 1で終了する（多重起動防止）。これはセーフガードであり、正常系では起動前にこのセーフガードに頼らず、自分がまだ起動していないかをまず思い出すこと。
+
+### 誤って複数起動してしまった場合の復旧手順
+
+「重複しているかもしれない」と気づいた瞬間に片方を反射的に止めてはならない。以下の順で確認してから対処する：
+
+1. **実数を確認する**: `node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE --dry-run` を実行し、`script=inbox-supervisor.js` のエントリが実際に複数生存しているかを確認する。1本しかなければ「重複」ではない。誤って停止しない。**`--dry-run` は必須。指定しないと確認のつもりが実際にkillしてしまう。**
+2. **複数確認できた場合のみ**、最も新しく起動したもの以外を`TaskStop`等で停止する。停止対象を誤らないよう、停止前に該当タスクが本当に `inbox-supervisor.js` を実行しているか確認する。
+3. 残った1本が生きていることを確認してからセッションを継続する。
+
 ## PR検出
 
 コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <N>` を起動してPRを監視する（`N` はコーダーのアンカー Issue 番号）。
