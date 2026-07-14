@@ -9,11 +9,45 @@
 // （skill-asset-help ルール準拠）。
 
 const { buildAgentCommandArgs } = require('../../agent-launch');
-const { formatPlainInboxPrompt } = require('./adapter-base');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
 
 const STRATEGY_TYPE = 'monitor';
+
+// ── ヘルパー ──────────────────────────────────────────────────────────────
+
+/**
+ * エージェントに与える Monitor ベースの inbox ポーリング手順プロンプトを生成する。
+ * このプロンプトは Supervisor（Issue C）によってエージェントのコンテキストに注入される。
+ *
+ * deliverMessage() と start() の両方から参照される共有ロジック。
+ *
+ * @param {object} [opts={}]
+ * @param {string} [opts.scriptsPath] - msg-poll.js / msg-read.js / msg-send.js の
+ *   存在するディレクトリの絶対パス。省略時は呼び出し元が実行時に解決する前提で
+ *   プレースホルダ `{{SCRIPTS_PATH}}` を出力する。
+ * @param {string} [opts.workerName]  - ワーカー名
+ * @param {string} [opts.issue]       - Issue 番号
+ * @param {string} [opts.workspace]   - ワークスペースパス
+ * @returns {string} プロンプト文
+ */
+function buildInboxPollPrompt(opts = {}) {
+  const scriptsPath = opts.scriptsPath || '{{SCRIPTS_PATH}}';
+  const workerName = opts.workerName || '$WORKER_NAME';
+  const issue = opts.issue || '$ISSUE';
+  const workspace = opts.workspace || '$WORKSPACE';
+
+  return [
+    'Monitorツールを呼び出し、`command` に ' +
+    `\`node "${scriptsPath}/msg-poll.js" ${workerName} --issue ${issue} --workspace ${workspace}\` ` +
+    'を直接指定して起動する。`persistent: true` を設定すること。',
+    '',
+    'Monitorから届く通知を処理する：',
+    `- \`NEW_MESSAGE:<commentId>\` → \`node "${scriptsPath}/msg-read.js" <commentId> --workspace ${workspace}\` ` +
+    'で本文を取得し、メッセージを処理する。処理後は必ず `msg-send.js` で結果を返信すること。' +
+    '**完了後は直ちにMonitorに戻る**',
+  ].join('\n');
+}
 
 // ── 公開API ───────────────────────────────────────────────────────────────
 
@@ -103,24 +137,31 @@ function createClaudeAdapter(agentConfig) {
 
     /**
      * 新着メッセージをエージェントに伝えるためのプロンプト手順を返す。
-     * inbox-supervisor.js が既に GitHub Issue を監視し配送しているため、
-     * claude の場合も受信したメッセージ本文をそのまま提示するのみで、
-     * ワーカー自身にポーリングを開始させる指示は含めない
-     * （自前で Monitor 等のポーリングプロセスを起動しないという各 SKILL.md の
-     * 方針と、ここで生成する配送文面を一致させる）。
+     * claude の場合は Monitor ツールによる inbox ポーリング手順を生成する。
      *
      * @param {import('./adapter-base').Message} message
-     * @param {object} [_opts={}] - 未使用（Adapter 共通インターフェースのため受け取る）
+     * @param {object} [opts={}]
+     * @param {string} [opts.scriptsPath]
+     * @param {string} [opts.workerName]
+     * @param {string} [opts.issue]
+     * @param {string} [opts.workspace]
      * @returns {import('./adapter-base').DeliverResult}
      */
-    deliverMessage(message, _opts = {}) {
+    deliverMessage(message, opts = {}) {
       if (!message || typeof message !== 'object') {
         throw new Error('message is required');
       }
 
+      const prompt = buildInboxPollPrompt(opts);
+
+      // メッセージ本文があれば、プロンプトの前に付与する
+      const fullPrompt = message.body
+        ? `以下のメッセージを受信しました:\n\n> ${message.body.split(/\r?\n/).join('\n> ')}\n\n---\n\n${prompt}`
+        : prompt;
+
       return {
         type: STRATEGY_TYPE,
-        prompt: formatPlainInboxPrompt(message),
+        prompt: fullPrompt,
       };
     },
 
@@ -140,4 +181,4 @@ function createClaudeAdapter(agentConfig) {
   };
 }
 
-module.exports = { createClaudeAdapter, STRATEGY_TYPE };
+module.exports = { createClaudeAdapter, buildInboxPollPrompt, STRATEGY_TYPE };

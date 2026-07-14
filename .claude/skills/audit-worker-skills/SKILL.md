@@ -11,29 +11,26 @@ allowed-tools: Read Agent
 
 ## Phase 1: コントラクト抽出
 
-以下のファイルを読み、ワーカー起動時・稼働中にシステムが**保証する**事項を網羅的に抽出してください：
+以下のファイルを読み、ワーカー起動時にシステムが**保証する**事項を網羅的に抽出してください：
 
 - `scripts/spawn-worker.js` — ワーカー起動フロー全体
 - `scripts/link-node-modules.js` — node_modules自動リンクの動作
 - `scripts/install.js` — エージェント設定（agents.json）の初期値と更新ロジック
-- `scripts/shared/inbox-adapters/*.js` — inbox-supervisor.jsが稼働中ワーカーに配送するメッセージの内容・形式
 
 抽出すべき内容:
 - ワーカーに渡される環境変数（WORKER_NAME / REPO / WORKSPACE / WORKTREE / ISSUE / BASE_BRANCH など）
 - 自動実行される前処理（git worktree作成 / node_modules junction / AGENTS.md書き出しなど）
 - エージェント種別ごとのプロンプト配信方法（--append-system-prompt-file vs send-text injection）
 - ワーカーが**手動でやる必要がなくなった**操作（自動化により不要になったもの）
-- **稼働中に配送されるメッセージ（`deliverMessage()`）が、ワーカーに追加の自発的行動（自前のポーリング開始等）を指示していないか**（inbox-supervisor.jsが唯一の配送経路である前提と矛盾する指示がAdapter層に紛れ込むと、二重配送の実障害につながる）
 
 これを「コントラクト」として把握したうえで Phase 2 に進んでください。
 
 ## Phase 2: 並列スキル検証
 
-以下5スキルに対して、**Agent ツールで並列に**サブエージェントを起動してください。
+以下4スキルに対して、**Agent ツールで並列に**サブエージェントを起動してください。
 各サブエージェントには Phase 1 で把握したコントラクトの全文を埋め込んで渡すこと。
 
 対象:
-- `skills/gh-maestro-base/SKILL.md`（「自分でポーリングしない」等、他ワーカースキルが継承する共通方針の一次記述元）
 - `skills/gh-maestro-coder/SKILL.md`
 - `skills/gh-maestro-investigator/SKILL.md`
 - `skills/gh-maestro-explorer/SKILL.md`

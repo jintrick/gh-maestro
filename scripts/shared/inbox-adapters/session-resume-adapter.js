@@ -10,7 +10,6 @@
 // （skill-asset-help ルール準拠）。
 
 const { buildAgentCommandArgs } = require('../../agent-launch');
-const { formatPlainInboxPrompt } = require('./adapter-base');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
 
@@ -27,7 +26,25 @@ const STRATEGY_TYPE = 'session-resume';
  * @returns {string} プロンプト文
  */
 function buildSessionResumePrompt(message) {
-  return formatPlainInboxPrompt(message);
+  const lines = [
+    '',
+    '[gh-maestro inbox] 新着メッセージを受信しました。',
+    `From: ${message.from || '(unknown)'}`,
+    '',
+  ];
+
+  if (message.body) {
+    // 外部由来の改行は \r\n 対応で分割する（inbox-adapter-crlf-handling ルール準拠）
+    const quoted = message.body.split(/\r?\n/).map(line => `> ${line}`).join('\n');
+    lines.push(quoted);
+    lines.push('');
+  }
+
+  lines.push('このメッセージを処理してください。返信には msg-send.js を使用します。');
+  lines.push('処理後は直ちに待機状態に戻り、追加の指示を待ってください。');
+  lines.push('');
+
+  return lines.join('\n');
 }
 
 // ── 公開API ───────────────────────────────────────────────────────────────
