@@ -57,13 +57,14 @@ const RETRY_BASE_DELAY_MS = 10000;
 
 const USAGE = `inbox-supervisor.js — 全ワーカーのGitHub Issueインボックスを監視し新着メッセージを配送する
 
-Usage: node inbox-supervisor.js --workspace <path> [--interval <sec>] [--session-pid <pid>] [--force]
+Usage: node inbox-supervisor.js --workspace <path> [--interval <sec>] [--session-pid <pid>] [--force] [--once]
 
 Options:
   --workspace <path>     ワークスペースパス（必須）
   --interval <sec>       ポーリング間隔（秒、既定: ${DEFAULT_INTERVAL_SEC}）
   --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
   --force                既に同じworkspaceで稼働中のSupervisorがいても起動を強制する
+  --once                 1回だけスキャンして終了する（継続ポーリングしない。テスト・手動実行用）
 
 Output (stdout):
   検出・配送イベントを1行ずつ出力:
@@ -425,6 +426,7 @@ function shouldRetry(pendingEntry, nowMs) {
  * @returns {{
  *   code: number, lines: string[], errLines: string[],
  *   runOnce: (() => void) | null,
+ *   onceMode: boolean,
  *   intervalMs: number,
  *   workspace: string,
  * }}
@@ -447,7 +449,7 @@ function main(argsOverride, opts = {}) {
 
   if (args.includes('--help') || args.includes('-h')) {
     writeOut(USAGE);
-    return { code: 0, lines: out, errLines: err, runOnce: null, intervalMs: 0, workspace: '' };
+    return { code: 0, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
   }
 
   const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--interval', '--session-pid']);
@@ -458,16 +460,19 @@ function main(argsOverride, opts = {}) {
     return { code: 1, lines: out, errLines: err, runOnce: null, intervalMs: 0, workspace: '' };
   }
 
-  if (rest.length > 0) {
-    writeErr(`inbox-supervisor: 未知の引数です: ${rest.join(' ')}`);
+  const onceMode = rest.includes('--once');
+  const filteredRest = rest.filter(a => a !== '--once');
+
+  if (filteredRest.length > 0) {
+    writeErr(`inbox-supervisor: 未知の引数です: ${filteredRest.join(' ')}`);
     writeErr(USAGE);
-    return { code: 1, lines: out, errLines: err, runOnce: null, intervalMs: 0, workspace: '' };
+    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
   }
 
   const workspace = resolveWorkspace(values['--workspace']);
   if (!workspace) {
     writeErr('inbox-supervisor: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
-    return { code: 1, lines: out, errLines: err, runOnce: null, intervalMs: 0, workspace: '' };
+    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
   }
 
   const intervalMs = (parseInt(values['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
@@ -479,12 +484,12 @@ function main(argsOverride, opts = {}) {
   const repoResult = _ghRepoView(ghOpts);
   if (repoResult.status !== 0) {
     writeErr(`inbox-supervisor: リポジトリを解決できません: ${repoResult.stderr || '(empty)'}`);
-    return { code: 1, lines: out, errLines: err, runOnce: null, intervalMs: 0, workspace: '' };
+    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
   }
   const repo = repoResult.stdout.trim();
   if (!repo) {
     writeErr('inbox-supervisor: リポジトリを解決できません（空のレスポンス）。');
-    return { code: 1, lines: out, errLines: err, runOnce: null, intervalMs: 0, workspace: '' };
+    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
   }
 
   // ホームディレクトリ（エージェント設定解決用）
@@ -697,6 +702,7 @@ function main(argsOverride, opts = {}) {
     lines: out,
     errLines: err,
     runOnce,
+    onceMode,
     intervalMs,
     workspace,
     sessionPid,
@@ -716,6 +722,7 @@ if (require.main === module) {
   }
 
   const force = rawArgs.includes('--force');
+  const onceMode = rawArgs.includes('--once');
 
   // ── 単一起動ロック + 多重起動検知 ──────────────────────────────────
   if (!force) {
@@ -783,9 +790,15 @@ if (require.main === module) {
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
 
-  // 初回スキャンを即実行し、以降 intervalMs 間隔で継続
-  ru();
-  setInterval(ru, result.intervalMs);
+  if (result.onceMode) {
+    // --once: 1回だけスキャンして終了
+    ru();
+    cleanup();
+  } else {
+    // 継続モード: 初回スキャンを即実行し、以降 intervalMs 間隔で継続
+    ru();
+    setInterval(ru, result.intervalMs);
+  }
 }
 
 // ── テスト用 export ──────────────────────────────────────────────────────

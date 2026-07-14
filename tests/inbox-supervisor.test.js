@@ -1118,3 +1118,110 @@ describe('Cursor type safety', () => {
     });
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CLI integration: 実プロセス起動での動作確認
+// ═══════════════════════════════════════════════════════════════════════════
+
+const { spawnSync: realSpawnSync } = require('child_process');
+const { registerProcess: plcRegister, unregisterProcess: plcUnregister } = require('../scripts/process-lifecycle');
+
+const SUPERVISOR_SCRIPT = path.join(__dirname, '..', 'scripts', 'inbox-supervisor.js');
+
+/** ヘルパー: inbox-supervisor.js を子プロセスとして起動 */
+function runSupervisor(args, cwd) {
+  return realSpawnSync(process.execPath, [SUPERVISOR_SCRIPT, ...args], {
+    cwd,
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+}
+
+describe('CLI integration (subprocess)', () => {
+  test('--help は Usage を表示して exit 0', () => {
+    withTempDir((dir) => {
+      const r = runSupervisor(['--help'], dir);
+      assert.equal(r.status, 0, `exit 0, got ${r.status}, stderr: ${r.stderr}`);
+      assert.ok(r.stdout.includes('Usage'), `stdout should include Usage: ${r.stdout}`);
+      assert.ok(r.stdout.includes('inbox-supervisor.js'));
+    });
+  });
+
+  test('-h も同様に exit 0', () => {
+    withTempDir((dir) => {
+      const r = runSupervisor(['-h'], dir);
+      assert.equal(r.status, 0, `exit 0, got ${r.status}`);
+      assert.ok(r.stdout.includes('Usage'));
+    });
+  });
+
+  test('--workspace 値欠落で exit 1', () => {
+    withTempDir((dir) => {
+      const r = runSupervisor(['--workspace'], dir);
+      assert.equal(r.status, 1, `exit 1, got ${r.status}`);
+      assert.ok(r.stderr.includes('フラグには値が必要'), `stderr: ${r.stderr}`);
+    });
+  });
+
+  test('--workspace 未指定で workspace 外から実行すると exit 1', () => {
+    withTempDir((dir) => {
+      // dir には .gh-maestro がなく、GH_MAESTRO_WORKSPACE env も無い
+      // → resolveWorkspace が CWD 上空探索でも見つけられず null を返す
+      const r = runSupervisor(['--once'], dir);
+      assert.equal(r.status, 1, `exit 1, got ${r.status}, stderr: ${r.stderr}`);
+      assert.ok(
+        r.stderr.includes('ワークスペースを解決') || r.stderr.includes('リポジトリを解決'),
+        `stderr should mention failure: ${r.stderr}`
+      );
+    });
+  });
+
+  test('重複起動を検出して拒否する（既存プロセスがPID registryに登録されている場合）', () => {
+    withTempDir((dir) => {
+      const maestroDir = path.join(dir, '.gh-maestro');
+      fs.mkdirSync(maestroDir, { recursive: true });
+
+      // 自プロセスを inbox-supervisor.js として PID registry に登録
+      plcRegister(dir, { script: 'inbox-supervisor.js', workerName: null });
+
+      try {
+        const r = runSupervisor(['--once', '--workspace', dir], dir);
+        assert.equal(r.status, 1, `exit 1, got ${r.status}, stderr: ${r.stderr}`);
+        assert.ok(r.stderr.includes('重複起動'), `stderr should mention 重複起動: ${r.stderr}`);
+      } finally {
+        plcUnregister(dir);
+      }
+    });
+  });
+
+  test('--force 指定時は重複起動チェックをバイパスする', () => {
+    withTempDir((dir) => {
+      const maestroDir = path.join(dir, '.gh-maestro');
+      fs.mkdirSync(maestroDir, { recursive: true });
+      plcRegister(dir, { script: 'inbox-supervisor.js', workerName: null });
+
+      try {
+        const r = runSupervisor(['--once', '--force', '--workspace', dir], dir);
+        assert.notEqual(r.status, 0, `should exit non-zero (gh failure), got ${r.status}`);
+        assert.ok(!r.stderr.includes('重複起動'),
+          `stderr should NOT mention 重複起動: ${r.stderr}`);
+      } finally {
+        plcUnregister(dir);
+      }
+    });
+  });
+
+  test('PID registry に該当エントリが無ければ正常起動を試みる', () => {
+    withTempDir((dir) => {
+      const maestroDir = path.join(dir, '.gh-maestro');
+      fs.mkdirSync(maestroDir, { recursive: true });
+
+      const r = runSupervisor(['--once', '--workspace', dir], dir);
+      assert.notEqual(r.status, 0, `should exit non-zero (no git repo), got ${r.status}`);
+      assert.ok(!r.stderr.includes('重複起動'),
+        `stderr should NOT mention 重複起動: ${r.stderr}`);
+      assert.ok(r.stderr.includes('リポジトリを解決'),
+        `stderr should mention repo resolution failure: ${r.stderr}`);
+    });
+  });
+});
