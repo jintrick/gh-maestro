@@ -49,7 +49,7 @@ const CONDITIONAL_REQUIRED = [
  * 各エントリ: [conditionField, conditionValue, requiredField, expectedType]
  */
 const BOOLEAN_CONDITIONAL_REQUIRED = [
-  ['sessionResume', true, 'resumeCommand', 'string'],
+  ['sessionResume', true, 'resumeCommand', 'array'],
 ];
 
 /**
@@ -62,7 +62,7 @@ const KNOWN_OPTIONAL_FIELDS = [
   ['skillsViaMd', 'boolean'],
   ['promptFlag', 'string'],
   ['execArgs', 'array'],
-  ['resumeCommand', 'string'],
+  ['resumeCommand', 'array'],
 ];
 
 // ── ヘルパー ─────────────────────────────────────────────────────────────────

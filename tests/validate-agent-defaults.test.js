@@ -32,7 +32,7 @@ function makeValidAgent(overrides = {}) {
     rulesSupported: false,
     asynchronousNotification: false,
     sessionResume: true,
-    resumeCommand: '--continue',
+    resumeCommand: ['--continue'],
     ...overrides,
   };
 }
@@ -82,7 +82,7 @@ test('validateAgentDefaults: 全エージェントが sessionResume を持って
 test('validateAgentDefaults: 全エージェントが resumeCommand を持っている', () => {
   for (const agent of realDefaults.agents) {
     assert.ok('resumeCommand' in agent, `"${agent.id}" に resumeCommand フィールドがありません`);
-    assert.equal(typeof agent.resumeCommand, 'string', `"${agent.id}" の resumeCommand は string である必要があります`);
+    assert.ok(Array.isArray(agent.resumeCommand), `"${agent.id}" の resumeCommand は array である必要があります`);
   }
 });
 
@@ -108,12 +108,12 @@ test('validateAgentDefaults: sessionResume の値が期待通り', () => {
 
 test('validateAgentDefaults: resumeCommand の値が期待通り', () => {
   const map = new Map(realDefaults.agents.map(a => [a.id, a.resumeCommand]));
-  assert.equal(map.get('claude'), '--continue');
-  assert.equal(map.get('claude-ds'), '--continue');
-  assert.equal(map.get('claude-ds-pro'), '--continue');
-  assert.equal(map.get('reasonix'), '--continue');
-  assert.equal(map.get('agy'), '--continue');
-  assert.equal(map.get('codex'), 'exec resume --last');
+  assert.deepEqual(map.get('claude'), ['--continue']);
+  assert.deepEqual(map.get('claude-ds'), ['--continue']);
+  assert.deepEqual(map.get('claude-ds-pro'), ['--continue']);
+  assert.deepEqual(map.get('reasonix'), ['--continue']);
+  assert.deepEqual(map.get('agy'), ['--continue']);
+  assert.deepEqual(map.get('codex'), ['exec', 'resume', '--last']);
 });
 
 // ── validateAgentEntry: 必須フィールド ────────────────────────────────────────
@@ -213,10 +213,10 @@ test('validateAgentEntry: sessionResume=false で resumeCommand がなくても�
   assert.deepEqual(errors, [], `sessionResume=falseなのにresumeCommand欠落エラー: ${errors.join('\n')}`);
 });
 
-test('validateAgentEntry: resumeCommand が string でないとエラー', () => {
-  const agent = makeValidAgent({ resumeCommand: 123 });
+test('validateAgentEntry: resumeCommand が array でないとエラー', () => {
+  const agent = makeValidAgent({ resumeCommand: 'not-an-array' });
   const issues = validateAgentEntry(agent, 0);
-  assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('resumeCommand') && i.includes('string')),
+  assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('resumeCommand') && i.includes('array')),
     `resumeCommand型不正: ${issues.join('\n')}`);
 });
 
