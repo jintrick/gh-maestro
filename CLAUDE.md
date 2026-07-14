@@ -1,19 +1,24 @@
 # gh-maestro
 
-A local orchestration system that uses GitHub as durable state and coordinates multiple AI agents.
+GitHubを永続状態として使い、複数のAIエージェントを協調させるローカルオーケストレーションシステム。
 
 @AGENTS.md
 
-See `AGENTS.md` for quota economics, agent roles, review policy, and change discipline. This file holds only Claude Code specific rules that must apply every session.
+quota経済・エージェントの役割・レビュー方針・変更規律は `AGENTS.md` を参照。このファイルにはClaude Code固有の、毎セッション必ず適用すべきルールのみを置く。
 
-## Git Operation Rules
+## Git操作ルール
 
-- Once a file change is approved, commit and push it immediately in the same turn. Do not wait for a separate instruction.
-- Always confirm with the user before running `git reset --hard`. Never run it unprompted.
-- If a push fails as non-fast-forward, do not use `git reset --hard`. Report the situation to the user and ask how to proceed.
+- ファイル変更が承認されたら、同じターン内で即座にcommit・pushする。別途指示を待たない。
+- `git reset --hard` は必ずユーザーに確認してから実行する。無断で実行しない。
+- pushがnon-fast-forwardで失敗した場合、`git reset --hard` は使わない。状況をユーザーに報告し、対応方針を確認する。
 
-## Install Rules
+## Installルール
 
-- `node scripts/install.js` writes to the machine-global `~/.gh-maestro/` shared directory.
-- **Never run it from a WIP/unmerged feature branch.** Only run it from `dev` (or `main`) after changes are merged.
-- If you must run it from a WIP branch (e.g. for development testing), use `node scripts/install.js --force`.
+- `node scripts/install.js` はマシングローバルな共有ディレクトリ `~/.gh-maestro/` に書き込む。
+- **WIP・未マージのfeatureブランチから実行しないこと。** 変更がマージされた後、`dev`（または`main`）ブランチからのみ実行する。
+- 開発時の動作確認等でWIPブランチから実行する必要がある場合は `node scripts/install.js --force` を使う。
+
+## プロセス統合ルール
+
+- 常駐/バックグラウンドプロセス（デーモン型スクリプト）を新規実装する場合、そのスクリプト自体を実装しユニットテストが通っただけでは完了とみなさない。単体で正しく動くスクリプトでも、実運用のセッションフローの中でそれを起動する仕組みがどこにも無ければ、本番では一度も実行されないまま放置されうる。
+- 完了と判断する前に、実際のセッションでそのプロセスを起動するはずのもの（オーケストレーターの操作手順・起動フック等）が本当に起動処理を行うこと、そしてそのプロセスの効果（配送・通知等）が意図した相手まで実際に届くことを、実機でエンドツーエンドに確認する。
