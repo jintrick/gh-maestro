@@ -8,7 +8,10 @@
       "extraArgs": ["--dangerously-skip-permissions"],
       "promptDelivery": "system-prompt-file",
       "enterSequence": "\r\n",
-      "rulesSupported": true
+      "rulesSupported": true,
+      "asynchronousNotification": true,
+      "sessionResume": true,
+      "resumeCommand": "--continue"
     },
     {
       "id": "claude-ds",
@@ -18,7 +21,10 @@
       "extraArgs": ["--dangerously-skip-permissions"],
       "promptDelivery": "system-prompt-file",
       "enterSequence": "\r\n",
-      "rulesSupported": true
+      "rulesSupported": true,
+      "asynchronousNotification": true,
+      "sessionResume": true,
+      "resumeCommand": "--continue"
     },
     {
       "id": "claude-ds-pro",
@@ -28,7 +34,10 @@
       "extraArgs": ["--dangerously-skip-permissions"],
       "promptDelivery": "system-prompt-file",
       "enterSequence": "\r\n",
-      "rulesSupported": true
+      "rulesSupported": true,
+      "asynchronousNotification": true,
+      "sessionResume": true,
+      "resumeCommand": "--continue"
     },
     {
       "id": "reasonix",
@@ -41,7 +50,10 @@
       "sendTextDelayMs": 5000,
       "skillsViaMd": true,
       "enterSequence": "\r",
-      "rulesSupported": false
+      "rulesSupported": false,
+      "asynchronousNotification": false,
+      "sessionResume": true,
+      "resumeCommand": "--continue"
     },
     {
       "id": "agy",
@@ -52,7 +64,10 @@
       "promptDelivery": "flag",
       "promptFlag": "-i",
       "enterSequence": "\r\n",
-      "rulesSupported": false
+      "rulesSupported": false,
+      "asynchronousNotification": false,
+      "sessionResume": true,
+      "resumeCommand": "--continue"
     },
     {
       "id": "codex",
@@ -63,7 +78,10 @@
       "execArgs": ["exec", "--skip-git-repo-check", "--cd", "{workspace}", "--model", "gpt-5.4", "--dangerously-bypass-approvals-and-sandbox"],
       "promptDelivery": "positional",
       "enterSequence": "\r\n",
-      "rulesSupported": false
+      "rulesSupported": false,
+      "asynchronousNotification": false,
+      "sessionResume": true,
+      "resumeCommand": "exec resume --last"
     }
   ],
   "skillAgentMap": {

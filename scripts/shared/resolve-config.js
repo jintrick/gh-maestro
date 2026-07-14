@@ -26,7 +26,7 @@ const { isPlainObject } = require('./object');
 // execArgsだけ除外対象から漏れると、workspace configで--sandbox/--skip-git-repo-check等の
 // 安全設定を欠いたコマンドラインに差し替えられてしまう）。
 // resolveAgentConfig と config.js（cmdStatusの警告表示）の両方から参照する単一のSSOT。
-const EXEC_SENSITIVE_FIELDS = ['command', 'extraArgs', 'execArgs'];
+const EXEC_SENSITIVE_FIELDS = ['command', 'extraArgs', 'execArgs', 'resumeCommand'];
 
 // ── デフォルト読み込み ──────────────────────────────────────────────────────
 
