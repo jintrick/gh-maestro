@@ -240,26 +240,93 @@ function isPaneAlive(paneId) {
 // ── 配送 ──────────────────────────────────────────────────────────────────
 
 /**
+ * Adapter を安全に解決する。失敗時は null を返す。
+ *
+ * session-resume 戦略のエージェント（reasonix/agy/codex）は
+ * 対応する Adapter 実装が未提供のため null になる。
+ *
+ * @param {string} agentId
+ * @param {string} workspace
+ * @param {string} homedir
+ * @returns {object|null} InboxAdapter または null
+ */
+function resolveAdapterSafe(agentId, workspace, homedir) {
+  if (!agentId) return null;
+  try {
+    const agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
+    if (!agentConfig) return null;
+    return resolveAdapter(agentConfig);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 配送用テキストを整形する。
+ * Adapter が利用可能な場合は adapter.deliverMessage() を使い、
+ * 利用不能な場合は formatMessageForAgent() にフォールバックする。
+ *
+ * @param {object} params
+ * @param {string} params.workerName
+ * @param {object} params.message    - { from, body }
+ * @param {string} params.workspace
+ * @param {string} params.homedir
+ * @param {string} params.issue      - Issue 番号（文字列）
+ * @param {object|null} params.adapter - 事前解決済みの Adapter（省略時は内部で解決）
+ * @returns {string}
+ */
+function formatDeliveryText({ workerName, message, workspace, homedir, issue, adapter }) {
+  const resolvedAdapter = adapter || resolveAdapterSafe(
+    workerName, // agentId は workerName からは直接引けないが、呼び出し元が agentId を渡す前提
+    workspace,
+    homedir,
+  );
+
+  if (resolvedAdapter) {
+    try {
+      const scriptsPath = path.join(homedir, '.gh-maestro', 'scripts');
+      const result = resolvedAdapter.deliverMessage(message, {
+        scriptsPath,
+        workerName,
+        issue,
+        workspace,
+      });
+      if (result && typeof result.prompt === 'string') {
+        return result.prompt;
+      }
+    } catch {
+      // Adapter 配送失敗 → フォールバック
+    }
+  }
+
+  // フォールバック: 直接フォーマット
+  return formatMessageForAgent({ workerName, message });
+}
+
+/**
  * メッセージをエージェントに配送する。
  *
- * 稼働中のエージェント（ペイン生存）には wezterm cli send-text で直接配送する。
+ * 稼働中のエージェント（ペイン生存）には wezterm cli send-text で配送する。
  * 休止中のエージェントには配送を保留し、pending に記録する。
  *
  * @param {object} params
- * @param {string} params.workerName    - ワーカー名
- * @param {string|null} params.paneId   - WezTerm ペインID
- * @param {string|null} params.agentId  - エージェントID
- * @param {object} params.message       - メッセージ { from, body }
- * @param {string} params.workspace     - ワークスペースパス
+ * @param {string} params.workerName
+ * @param {string|null} params.paneId
+ * @param {string|null} params.agentId
+ * @param {object} params.message    - { from, body }
+ * @param {string} params.workspace
+ * @param {string} params.homedir
+ * @param {string} params.issue      - Issue 番号（文字列）
  * @returns {{ success: boolean, method: string, error?: string }}
  */
-function deliverMessage({ workerName, paneId, agentId, message, workspace }) {
-  // ペインが生存していれば直接配送
+function deliverMessage({ workerName, paneId, agentId, message, workspace, homedir, issue }) {
   if (paneId && isPaneAlive(paneId)) {
-    return deliverToRunningAgent({ paneId, workerName, message });
+    // Adapter を解決し、エージェント種別に応じた配送テキストを整形
+    const adapter = resolveAdapterSafe(agentId, workspace, homedir);
+    const text = formatDeliveryText({ workerName, message, workspace, homedir, issue, adapter });
+    return deliverToRunningAgent({ paneId, text });
   }
 
-  // ペインが無い／死んでいる → 保留
   return {
     success: false,
     method: 'pending',
@@ -268,18 +335,14 @@ function deliverMessage({ workerName, paneId, agentId, message, workspace }) {
 }
 
 /**
- * 稼働中のエージェントのペインにメッセージを送信する。
+ * 稼働中のエージェントのペインにテキストを送信する。
  *
  * @param {object} params
- * @param {string} params.paneId      - WezTerm ペインID
- * @param {string} params.workerName  - ワーカー名
- * @param {object} params.message     - メッセージ { from, body }
+ * @param {string} params.paneId - WezTerm ペインID
+ * @param {string} params.text   - 送信するテキスト（配送用に整形済み）
  * @returns {{ success: boolean, method: string, error?: string }}
  */
-function deliverToRunningAgent({ paneId, workerName, message }) {
-  // メッセージ本文をエージェント向けに整形
-  const text = formatMessageForAgent({ workerName, message });
-
+function deliverToRunningAgent({ paneId, text }) {
   try {
     const result = _weztermSendText(paneId, text);
     if (result.status !== 0) {
@@ -300,7 +363,7 @@ function deliverToRunningAgent({ paneId, workerName, message }) {
 }
 
 /**
- * エージェント向けのメッセージテキストを整形する。
+ * エージェント向けのメッセージテキストを整形する（Adapter 未対応時のフォールバック）。
  * 外部由来の改行は \r\n 対応で分割する（inbox-adapter-crlf-handling ルール準拠）。
  *
  * @param {object} params
@@ -463,11 +526,24 @@ function main(argsOverride, opts = {}) {
 
         writeOut(`RETRYING:${workerName}:${commentId}:${pending.retries + 1}`);
 
-        // メッセージ本文を再取得
+        // メッセージ本文を再取得（pending 時に lastBody が保存されなかった古いエントリ対策）
         let messageBody = pending.lastBody || '';
         if (!messageBody) {
           const bodyResult = _ghApiComments(repo, issue, null, { cwd: workspace });
-          // body 取得失敗時は lastBody がなければ空で続行
+          if (bodyResult.status === 0) {
+            try {
+              const bodyComments = parseCommentsResponse(bodyResult.stdout);
+              if (bodyComments) {
+                const target = bodyComments.find(c => c.id === commentId);
+                if (target && target.body) {
+                  messageBody = target.body;
+                  cursor.pendingDeliveries[commentIdStr].lastBody = target.body;
+                }
+              }
+            } catch {
+              // body 再取得の parse 失敗 → 空で続行
+            }
+          }
         }
 
         const deliveryResult = deliverMessage({
@@ -476,6 +552,8 @@ function main(argsOverride, opts = {}) {
           agentId: entry.agentId,
           message: { from: pending.lastFrom || '(unknown)', body: messageBody },
           workspace,
+          homedir,
+          issue,
         });
 
         if (deliveryResult.success) {
@@ -575,6 +653,8 @@ function main(argsOverride, opts = {}) {
           agentId: entry.agentId,
           message: { from: candidate.from, body: candidate.body },
           workspace,
+          homedir,
+          issue,
         });
 
         cursor.seenIds.push(candidate.cid);
@@ -722,6 +802,8 @@ module.exports = {
   stateDir,
   loadWorkers,
   isPaneAlive,
+  resolveAdapterSafe,
+  formatDeliveryText,
   deliverMessage,
   deliverToRunningAgent,
   formatMessageForAgent,

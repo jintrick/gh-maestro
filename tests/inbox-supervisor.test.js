@@ -405,7 +405,7 @@ describe('formatMessageForAgent', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// deliverToRunningAgent / deliverMessage
+// deliverToRunningAgent / deliverMessage / formatDeliveryText
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('Delivery', () => {
@@ -416,8 +416,7 @@ describe('Delivery', () => {
 
     const result = supervisor.deliverToRunningAgent({
       paneId: '123',
-      workerName: 'issue-5-fix',
-      message: { from: 'orch', body: 'hello' },
+      text: 'formatted message',
     });
 
     assert.equal(result.success, true);
@@ -431,8 +430,7 @@ describe('Delivery', () => {
 
     const result = supervisor.deliverToRunningAgent({
       paneId: '999',
-      workerName: 'w',
-      message: { from: 'orch', body: 'hello' },
+      text: 'formatted message',
     });
 
     assert.equal(result.success, false);
@@ -448,8 +446,9 @@ describe('Delivery', () => {
     supervisor._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
 
     const result = supervisor.deliverMessage({
-      workerName: 'w', paneId: '123', agentId: 'claude',
+      workerName: 'w', paneId: '123', agentId: null,
       message: { from: 'orch', body: 'hello' }, workspace: '/ws',
+      homedir: '/home/user', issue: '5',
     });
 
     assert.equal(result.success, true);
@@ -464,8 +463,9 @@ describe('Delivery', () => {
     }));
 
     const result = supervisor.deliverMessage({
-      workerName: 'w', paneId: '123', agentId: 'claude',
+      workerName: 'w', paneId: '123', agentId: null,
       message: { from: 'orch', body: 'hello' }, workspace: '/ws',
+      homedir: '/home/user', issue: '5',
     });
 
     assert.equal(result.success, false);
@@ -474,12 +474,36 @@ describe('Delivery', () => {
 
   test('deliverMessage: paneId が null の場合は pending', () => {
     const result = supervisor.deliverMessage({
-      workerName: 'w', paneId: null, agentId: 'claude',
+      workerName: 'w', paneId: null, agentId: null,
       message: { from: 'orch', body: 'hello' }, workspace: '/ws',
+      homedir: '/home/user', issue: '5',
     });
 
     assert.equal(result.success, false);
     assert.equal(result.method, 'pending');
+  });
+
+  test('formatDeliveryText: Adapter 未解決時はフォールバックする', () => {
+    const text = supervisor.formatDeliveryText({
+      workerName: 'w',
+      message: { from: 'orch', body: 'hello' },
+      workspace: '/ws',
+      homedir: '/nonexistent',
+      issue: '5',
+    });
+
+    assert.ok(text.includes('[gh-maestro inbox]'));
+    assert.ok(text.includes('orch'));
+    assert.ok(text.includes('hello'));
+  });
+
+  test('resolveAdapterSafe: agentId が null なら null', () => {
+    assert.equal(supervisor.resolveAdapterSafe(null, '/ws', '/home'), null);
+  });
+
+  test('resolveAdapterSafe: 存在しない agentId なら null', () => {
+    // 存在しないagentId → resolveAgentConfig が null → resolveAdapterSafe も null
+    assert.equal(supervisor.resolveAdapterSafe('nonexistent-agent', '/ws', '/home'), null);
   });
 });
 
