@@ -288,7 +288,12 @@ orchestrator が受け取るすべてのメッセージの受信経路である�
 
 ## worker への指示配送（Inbox Supervisor）
 
-orchestrator から worker への追加指示（`msg-send.js` で送ったコメント）は、`inbox-supervisor.js` が常駐プロセスとして GitHub Issue コメントを監視し、稼働中の worker に配送する。この配送は worker 自身のポーリングに依存しない（worker は自分で Monitor や background bash を起動してはならない — 各 worker の SKILL.md 参照）。
+orchestrator から worker への追加指示（`msg-send.js` で送ったコメント）の配送方法は、workerのエージェント種別によって異なる：
+
+- **claude系（claude/claude-ds/claude-ds-pro。Monitor通知を持つ）**: worker自身が `msg-poll.js` を Monitor で回し続けて自己ポーリングする（各workerのSKILL.md参照）。待機中のトークンコストがほぼゼロなため、これが正規の配送経路。`inbox-supervisor.js` もこれらのworkerを監視し稼働中ならWezTerm経由で追加配送するが、あくまで補助であり、workerの自己ポーリングを止めさせてはならない。
+- **セッション再開系（reasonix/agy/codex。Monitorを持たない）**: 継続ポーリングはエージェントをフル起動するのに等しくトークンを浪費するため、これらのworkerは自分でポーリングしない。`inbox-supervisor.js` が唯一の配送経路であり、稼働中はWezTerm送信、**プロセスが終了して休止している（これが定常状態）場合は`inbox-supervisor.js`が自動的にセッションをresumeしてから配送する**。orchestratorが手動で介入する必要はない。
+
+いずれの場合も、`inbox-supervisor.js` はセッション中に起動しておく必要がある。
 
 ### 起動規約（単一起動）
 
@@ -297,6 +302,10 @@ orchestrator から worker への追加指示（`msg-send.js` で送ったコメ
 **起動を怠ると、workerへの追加指示（レビュー指摘の転送・修正依頼等）が一切配送されず、workerは気づかないまま待機し続ける。** worker起動直後、必ずこのプロセスが起動済みかどうかを確認すること。
 
 `inbox-supervisor.js` は起動時、同じworkspaceを既に監視している生存プロセスを検知すると、新規プロセスを起動せずexit 1で終了する（多重起動防止）。これはセーフガードであり、正常系では起動前にこのセーフガードに頼らず、自分がまだ起動していないかをまず思い出すこと。
+
+### resume配送の失敗
+
+セッション再開系workerへの配送は、resumeに失敗すると（worktree消失・ペイン起動失敗等）5回の指数バックオフ再試行の末、配送を諦める。worker（reasonix/agy/codex）が指示を送ったのに長時間反応しない場合、`inbox-supervisor.js` を起動した際のBashツールのバックグラウンド出力を確認し、`DELIVERY_FAILED:<workerName>:<commentId>:resume-failed` の有無とエラー内容を確認すること。
 
 ### 誤って複数起動してしまった場合の復旧手順
 
