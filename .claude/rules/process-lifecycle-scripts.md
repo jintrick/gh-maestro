@@ -8,6 +8,7 @@ paths:
   - "scripts/reset-session.js"
   - "scripts/start-review-manager.js"
   - "scripts/run-review-manager.js"
+  - "scripts/inbox-supervisor.js"
 ---
 
 # プロセスライフサイクル管理スクリプトの落とし穴
@@ -22,3 +23,4 @@ paths:
 - 「重複起動チェック→レジストリ登録」のような check-then-register 処理は、2段階が非アトミックだとTOCTOU競合（ほぼ同時に2プロセスが起動し両方がチェックを通過してしまう）を起こす。チェックと登録は単一のアトミックな主張操作（排他ロックファイルの取得等）にまとめる（PR #90 Review Manager指摘）
 - 内部でリトライしながら指定時間内の終了を保証する有界待機（`--wait`等）で、サブ処理（`gh`呼び出し等）が独自の固定タイムアウトを持つ場合、締切直前に始まったサブ処理がその分だけ全体の締切を超過しうる。サブ処理のタイムアウトは残り予算に合わせて動的に絞り込む（PR #98 Review Manager指摘）
 - GitHub APIの`since`パラメータ等、タイムスタンプ境界によるカーソル方式を使うポーリングは、境界がinclusive/exclusiveのどちらかをAPI仕様で確認せず前提にしない。同一タイムスタンプの複数レコードが存在すると境界の解釈次第で取りこぼしうる。タイムスタンプ単独でなく、処理済みIDの記録と併用して重複排除する（PR #100 Review Manager指摘）
+- 多重起動防止・ロックを持つCLIスクリプトは、`require()`してmain()を直接呼ぶユニットテストだけでなく、実プロセス起動を伴う統合テストで検証する。`require.main === module`以下の分岐（`--force`バイパス・既存ロックでの多重起動拒否等）はユニットテストでは経路に入らず見落とされる（PR #139 Review Manager指摘）
