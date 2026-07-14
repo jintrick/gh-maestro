@@ -611,6 +611,17 @@ function main(argsOverride, opts = {}) {
     for (const [workerName, entry] of workers) {
       if (!entry.issue) continue;
 
+      // claude系（Monitorで自己ポーリングする）はinbox-supervisor.jsの配送対象外。
+      // 自己ポーリングが唯一の配送根拠であり、WezTerm送信は使わない
+      // （フォールバックではなく無差別送信になってしまうため。実障害: 2026-07-15）。
+      let agentConfig;
+      try {
+        agentConfig = entry.agentId ? resolveAgentConfig(entry.agentId, { workspace, homedir }) : null;
+      } catch {
+        agentConfig = null;
+      }
+      if (agentConfig && agentConfig.asynchronousNotification) continue;
+
       const issue = String(entry.issue);
       const cursor = readCursor(workspace, workerName);
 

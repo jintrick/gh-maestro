@@ -762,7 +762,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 },
+          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
         },
       });
 
@@ -802,7 +802,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 },
+          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
         },
         cursors: {
           'issue-5-fix': {
@@ -839,7 +839,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 },
+          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
         },
       });
 
@@ -869,7 +869,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 },
+          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
         },
         cursors: {
           'issue-5-fix': {
@@ -920,7 +920,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 },
+          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
         },
         cursors: {
           'issue-5-fix': {
@@ -965,7 +965,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 },
+          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
         },
         cursors: {
           'issue-5-fix': {
@@ -1003,7 +1003,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 },
+          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
         },
       });
 
@@ -1030,7 +1030,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 },
+          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
         },
       });
 
@@ -1054,7 +1054,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'no-issue-worker': { paneId: '123', agentId: 'claude', issue: null },
+          'no-issue-worker': { paneId: '123', agentId: 'agy', issue: null },
         },
       });
 
@@ -1093,7 +1093,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '111', agentId: 'claude', issue: 5 },
+          'issue-5-fix': { paneId: '111', agentId: 'agy', issue: 5 },
           'issue-8-add': { paneId: '222', agentId: 'agy', issue: 8 },
         },
       });
@@ -1112,6 +1112,43 @@ describe('runOnce scan and deliver cycle', () => {
       const state8 = supervisor.readCursor(dir, 'issue-8-add');
       assert.equal(state8.since, null);
       assert.deepEqual(state8.seenIds, []);
+    });
+  });
+
+  test('claude系（asynchronousNotification:true）はスキャン対象外— 検出もWezTerm送信も行わない', () => {
+    // 実障害（2026-07-15）: claude系workerは自己ポーリングが唯一の正規配送経路のはずが、
+    // deliverMessage()がworker種別を見ずペイン生存時に無条件でWezTerm送信していた。
+    // フォールバックのつもりが無差別送信になっていたため、そもそもscanの段階で除外する。
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([
+      {
+        id: 900, created_at: '2024-06-01T12:00:00Z',
+        body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> msg',
+      },
+    ]));
+    let sendTextCalled = false;
+    supervisor._setWeztermListPanes(() => ({
+      status: 0, stdout: JSON.stringify([{ pane_id: 456 }]), stderr: '',
+    }));
+    supervisor._setWeztermSendText(() => { sendTextCalled = true; return { status: 0, stdout: '', stderr: '' }; });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 },
+        },
+      });
+
+      const r = supervisor.main(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('DETECTED:issue-5-fix:')), 'claude系workerは検出対象に含まれない');
+      assert.equal(sendTextCalled, false, 'claude系workerにWezTerm送信してはならない');
+
+      const lastLine = r.lines[r.lines.length - 1];
+      // workers.size（読み込まれたworker数）は1のままだが、検出数（totalDetected）は0のまま
+      assert.ok(lastLine.includes('SCAN_END:1:0'), `claude系はskipされ検出0件になるはず: ${lastLine}`);
     });
   });
 });
@@ -1140,7 +1177,7 @@ describe('Reliability: restart continuity', () => {
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
-        workers: { 'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 } },
+        workers: { 'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 } },
       });
 
       const r1 = supervisor.main(['--workspace', dir]);
@@ -1163,7 +1200,7 @@ describe('Reliability: restart continuity', () => {
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
-        workers: { 'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 } },
+        workers: { 'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 } },
         cursors: {
           'issue-5-fix': {
             since: '2024-06-01T12:00:00Z',
@@ -1196,7 +1233,7 @@ describe('Reliability: restart continuity', () => {
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
-        workers: { 'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 } },
+        workers: { 'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 } },
         cursors: {
           'issue-5-fix': {
             since: '2024-06-01T12:00:00Z',
