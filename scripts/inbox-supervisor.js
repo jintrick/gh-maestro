@@ -244,7 +244,7 @@ function isPaneAlive(paneId) {
  * Adapter を安全に解決する。失敗時は null を返す。
  *
  * session-resume 戦略のエージェント（reasonix/agy/codex）は
- * 対応する Adapter 実装が未提供のため null になる。
+ * session-resume-adapter.js で提供される。
  *
  * @param {string} agentId
  * @param {string} workspace

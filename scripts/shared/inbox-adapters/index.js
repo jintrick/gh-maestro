@@ -11,6 +11,7 @@
 // （skill-asset-help ルール準拠）。
 
 const { createClaudeAdapter } = require('./claude-adapter');
+const { createSessionResumeAdapter } = require('./session-resume-adapter');
 const { selectStrategy, STRATEGY } = require('./strategy-selector');
 
 // ── Adapter 解決 ──────────────────────────────────────────────────────────
@@ -19,12 +20,12 @@ const { selectStrategy, STRATEGY } = require('./strategy-selector');
  * エージェント設定から、そのエージェントに適した InboxAdapter を解決して返す。
  *
  * 内部で selectStrategy() を呼び出し、戦略に対応する Adapter 実装を返す。
- * 現時点で実装済みなのは "monitor" 戦略（claude 系）のみ。
- * "session-resume" 戦略に対応する Adapter は Issue D で実装予定。
+ * "monitor" 戦略（claude 系）と "session-resume" 戦略（agy / codex / reasonix 系）の
+ * 両方に対応している。
  *
  * @param {object} agentConfig - resolveAgentConfig() で解決済みのエージェント設定
  * @returns {object} InboxAdapter インターフェースを満たすオブジェクト
- * @throws {Error} 戦略が未実装の場合、または能力宣言が不完全な場合
+ * @throws {Error} 戦略が不明な場合、または能力宣言が不完全な場合
  */
 function resolveAdapter(agentConfig) {
   const strategy = selectStrategy(agentConfig);
@@ -34,11 +35,7 @@ function resolveAdapter(agentConfig) {
       return createClaudeAdapter(agentConfig);
 
     case STRATEGY.SESSION_RESUME:
-      throw new Error(
-        `エージェント "${agentConfig.id || '(idなし)'}" は ` +
-        '"session-resume" 戦略に分類されましたが、この戦略に対応する ' +
-        'Adapter 実装はまだ提供されていません（Issue D で実装予定）。'
-      );
+      return createSessionResumeAdapter(agentConfig);
 
     default:
       throw new Error(
@@ -57,6 +54,7 @@ module.exports = {
 
   // Adapter ファクトリ（テスト用）
   createClaudeAdapter,
+  createSessionResumeAdapter,
 
   // インターフェース検証（adapter-base.js の再エクスポート）
   ...require('./adapter-base'),
