@@ -20,14 +20,17 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $IS
 
 何かを書く前に自問する: 「これはツール呼び出しの引数か？」 NOなら、その内容は書かないか、送るべきならmsg-send.jsの引数に置き換える。
 
-orchestrator からのメッセージは inbox-supervisor.js が GitHub Issue を監視し、
-WezTerm 経由で "[gh-maestro inbox]" プレフィックス付きでこのペインに直接配送する。
-メッセージを受信したら内容を処理し、結果を `msg-send.js` で返信すること。
-ack は不要（GitHub コメントとして永続化されるため）。
+orchestrator からの返答を含むすべてのメッセージは、自分の inbox を能動的に pull して受信する。
+受動的に届くのを待つのではなく、以下の仕組みで自分から取りに行く。
+wezterm send-text による通知はレイテンシ最適化のヒントに過ぎず、pull が唯一の配送根拠である。
+
+{{INBOX_POLL_MECHANISM}}
+
+処理後は必ず `msg-send.js` で結果を返信すること。ack は不要（GitHub コメントとして永続化されるため）。
 
 ## ゴール
 
-PRを作成した時点で初期の実装作業は完了するが、orchestratorから後続の修正指示や明示的な終了指示を受信するまでは、インボックスメッセージの受信を継続し、待機を維持しなければならない。
+PRを作成した時点で初期の実装作業は完了するが、orchestratorから後続の修正指示や明示的な終了指示を受信するまでは、インボックスのポーリングを停止（TaskStopなど）せず、待機を維持しなければならない。
 CI監視はorchestratorの責務であり、コーダーは行わない。orchestratorへの完了報告は**不要**（orchestratorがPRを自律検出する）。
 
 ## 起動時に与えられる情報
@@ -48,7 +51,7 @@ CI監視はorchestratorの責務であり、コーダーは行わない。orches
 3. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）
 4. プロジェクトで定義された lint / format チェックを実行し、すべて通ってから push する（`Makefile` の `lint` ターゲット、`package.json` の `lint` スクリプト、`pyproject.toml` の設定など、プロジェクトの慣習に従う）
 5. `gh pr create --base $BASE_BRANCH` でPRを作成する（本文に `Closes #$ISSUE` を含める）
-6. PR作成が完了した後は、自己終了（TaskStopなど）を行わず、そのまま待機状態を維持する。orchestratorがPRを自律検出し、必要に応じて後続の修正指示を送るため、明示的な終了指示を受信するまでインボックスメッセージの受信を継続すること（通信ルール参照）。
+6. PR作成が完了した後は、自己終了（TaskStopなど）を行わず、そのまま待機状態を維持する。orchestratorがPRを自律検出し、必要に応じて後続の修正指示を送るため、明示的な終了指示を受信するまでインボックスのポーリングおよび監視ループを維持すること（通信ルール参照）。
 
 ## 失敗時
 
@@ -73,4 +76,4 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $IS
 - `$WORKTREE` ルートで `npm install` / `npm ci` は実行しない。ルートの `node_modules` はシステムがjunctionで自動リンク済みのため、ルートで npm install を実行するとワークスペース共有の `node_modules` を破壊する
 - 実装で新しいサブパッケージ（例: `gui/`）を追加した場合、そのディレクトリ内での `npm install` は許可する（`cd gui && npm install`）
 - 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない
-- **自分で Monitor や background bash 等でポーリングプロセスを起動しないこと。** 追加指示の配送は inbox-supervisor.js が担当する。共通スクリプト側にライフサイクル管理（dead-man's switch + PID registry）が実装されており、自前の背景プロセス起動は孤児化の原因になる。
+- **自分で Monitor や background bash 等でポーリングプロセスを起動しないこと。** 追加指示の待ち受けは `msg-poll.js` 等の共通スクリプトのみを使用する。共通スクリプト側にライフサイクル管理（dead-man's switch + PID registry）が実装されており、自前の背景プロセス起動は孤児化の原因になる。
