@@ -721,6 +721,62 @@ describe('runOnce scan and deliver cycle', () => {
     });
   });
 
+  test('pending 再試行: lastBody が空の場合に _ghApiComments から本文を再取得して配送する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    // 新着コメントスキャンは空
+    supervisor._setGhApiComments(mockGhApiComments([
+      {
+        id: 350,
+        created_at: '2024-06-01T15:00:00Z',
+        body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> re-fetched body content',
+      },
+    ]));
+    supervisor._setWeztermListPanes(() => ({
+      status: 0, stdout: JSON.stringify([{ pane_id: 456 }]), stderr: '',
+    }));
+    supervisor._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 },
+        },
+        cursors: {
+          'issue-5-fix': {
+            since: '2024-06-01T12:00:00Z',
+            seenIds: [350],
+            deliveredIds: [],
+            pendingDeliveries: {
+              '350': {
+                retries: 1,
+                lastAttempt: new Date(Date.now() - 20000).toISOString(),
+                lastError: 'pane not alive',
+                lastFrom: 'orchestrator',
+                lastBody: '',  // ★ 空 — 再取得パスをテスト
+              },
+            },
+          },
+        },
+      });
+
+      const r = supervisor.main(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      // 再試行が行われ、本文を再取得して配送成功する
+      assert.ok(r.lines.some(l => l.startsWith('RETRYING:issue-5-fix:350')),
+        `RETRYING not found in: ${r.lines.join('\n')}`);
+      assert.ok(r.lines.some(l => l === 'DELIVERED:issue-5-fix:350'),
+        `DELIVERED not found in: ${r.lines.join('\n')}`);
+
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.ok(state.deliveredIds.includes(350));
+      assert.equal(state.pendingDeliveries['350'], undefined);
+      // 再取得された本文が pending エントリに保存されている
+      // （pending は削除済みのため、lastBody の検証は不要）
+    });
+  });
+
   test('pending が MAX_RETRIES 超過で再試行されない', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
