@@ -538,7 +538,7 @@ test('createSessionResumeAdapter: resume が resumeCommand を正しく使う（
   assert.ok(result.args.includes('--last'));
 });
 
-test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeCommand 末尾の --last/--continue を置き換える（サブコマンドは保持）', () => {
+test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeCommand 末尾の --last/--continue を置き換える（サブコマンドは保持・順序維持）', () => {
   const agent = getAgentMap().get('codex');
   const adapter = createSessionResumeAdapter(agent);
   const result = adapter.resume('specific-session-id');
@@ -547,9 +547,20 @@ test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeComma
   // resumeCommand ["exec", "resume", "--last"] の末尾 "--last" が sessionRef に置き換わる
   // 前段の exec / resume サブコマンドは保持される
   assert.ok(!result.args.includes('--last'), 'should not include --last when sessionRef replaces it');
+
+  // サブコマンドとsessionRefの存在確認
   assert.ok(result.args.includes('exec'), 'should preserve exec subcommand');
   assert.ok(result.args.includes('resume'), 'should preserve resume subcommand');
   assert.ok(result.args.includes('specific-session-id'), 'should include sessionRef');
+
+  // 順序検証: exec → resume → sessionRef の順であること
+  const execIdx = result.args.indexOf('exec');
+  const resumeIdx = result.args.indexOf('resume');
+  const sessionIdx = result.args.indexOf('specific-session-id');
+  assert.ok(execIdx >= 0 && resumeIdx > execIdx,
+    `exec(${execIdx}) should come before resume(${resumeIdx})`);
+  assert.ok(resumeIdx >= 0 && sessionIdx > resumeIdx,
+    `resume(${resumeIdx}) should come before sessionRef(${sessionIdx})`);
 });
 
 test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeCommand 末尾の --continue を置き換える（agy: サブコマンドなし）', () => {
