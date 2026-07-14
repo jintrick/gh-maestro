@@ -75,12 +75,12 @@ test('validateAdapterMethods: メソッド欠落を検出する', () => {
 
 test('validateAdapterMethods: 全欠落を検出する（null）', () => {
   const missing = validateAdapterMethods(null);
-  assert.deepEqual(missing.sort(), ADAPTER_METHODS.sort());
+  assert.deepEqual(missing.sort(), [...ADAPTER_METHODS].sort());
 });
 
 test('validateAdapterMethods: 全欠落を検出する（非オブジェクト）', () => {
   const missing = validateAdapterMethods('not-an-adapter');
-  assert.deepEqual(missing.sort(), ADAPTER_METHODS.sort());
+  assert.deepEqual(missing.sort(), [...ADAPTER_METHODS].sort());
 });
 
 test('isValidAdapter: 有効なAdapterはtrue', () => {
