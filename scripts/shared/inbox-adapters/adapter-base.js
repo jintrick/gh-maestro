@@ -20,9 +20,10 @@
 /**
  * @typedef {object} StartOptions
  * @property {string} skill         - スキル名
- * @property {string} promptFile    - プロンプトファイルの絶対パス
- * @property {string} shortPrompt   - 短縮プロンプト（flag/positional配送用）
- * @property {object} [contextVars] - コンテキスト変数（WORKER_NAME, ISSUE 等）
+ * @property {string} promptFile       - プロンプトファイルの絶対パス
+ * @property {string} shortPrompt      - 短縮プロンプト（flag/positional配送用）
+ * @property {string} systemPromptText - システムプロンプトテキスト（system-prompt-file 配送用）
+ * @property {object} [contextVars]    - コンテキスト変数（WORKER_NAME, ISSUE 等）
  */
 
 /**

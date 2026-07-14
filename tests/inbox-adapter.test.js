@@ -364,7 +364,7 @@ test('createClaudeAdapter: deliverMessage が monitor タイプの結果を返�
   const result = adapter.deliverMessage({ from: 'orchestrator', body: '修正してください' });
 
   assert.equal(result.type, STRATEGY_TYPE);
-  assert.ok(typeof result.prompt, 'string');
+  assert.equal(typeof result.prompt, 'string');
   assert.ok(result.prompt.includes('Monitorツール'));
   assert.ok(result.prompt.includes('修正してください'));
   assert.ok(result.prompt.includes('msg-poll.js'));
@@ -414,7 +414,7 @@ test('createClaudeAdapter: stop が exit アクションを返す', () => {
   const result = adapter.stop();
 
   assert.equal(result.action, 'exit');
-  assert.ok(typeof result.description, 'string');
+  assert.equal(typeof result.description, 'string');
 });
 
 // ── Adapter インターフェース準拠 ───────────────────────────────────────────

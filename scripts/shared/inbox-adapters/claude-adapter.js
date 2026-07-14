@@ -156,7 +156,7 @@ function createClaudeAdapter(agentConfig) {
 
       // メッセージ本文があれば、プロンプトの前に付与する
       const fullPrompt = message.body
-        ? `以下のメッセージを受信しました:\n\n> ${message.body.split('\n').join('\n> ')}\n\n---\n\n${prompt}`
+        ? `以下のメッセージを受信しました:\n\n> ${message.body.split(/\r?\n/).join('\n> ')}\n\n---\n\n${prompt}`
         : prompt;
 
       return {
