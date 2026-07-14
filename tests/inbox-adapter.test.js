@@ -21,11 +21,11 @@ const {
   ADAPTER_METHODS,
   validateAdapterMethods,
   isValidAdapter,
+  formatPlainInboxPrompt,
 } = require('../scripts/shared/inbox-adapters/adapter-base');
 
 const {
   createClaudeAdapter,
-  buildInboxPollPrompt,
   STRATEGY_TYPE,
 } = require('../scripts/shared/inbox-adapters/claude-adapter');
 
@@ -196,36 +196,34 @@ test('selectStrategy: id がないエージェントは (idなし) と表示さ�
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// buildInboxPollPrompt: Monitor プロンプト生成（内部ヘルパー）
+// formatPlainInboxPrompt: Adapter 非依存の配送プロンプト整形（共通ヘルパー）
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('buildInboxPollPrompt: 既定ではプレースホルダを含む', () => {
-  const prompt = buildInboxPollPrompt();
-  assert.ok(prompt.includes('Monitorツール'));
-  assert.ok(prompt.includes('{{SCRIPTS_PATH}}'));
-  assert.ok(prompt.includes('$WORKER_NAME'));
-  assert.ok(prompt.includes('$ISSUE'));
-  assert.ok(prompt.includes('$WORKSPACE'));
-  assert.ok(prompt.includes('msg-poll.js'));
-  assert.ok(prompt.includes('msg-read.js'));
+test('formatPlainInboxPrompt: Monitor等のポーリング開始指示を含まない', () => {
+  const prompt = formatPlainInboxPrompt({ from: 'orchestrator', body: 'テスト指示' });
+  assert.ok(!prompt.includes('Monitorツール'));
+  assert.ok(!prompt.includes('msg-poll.js'));
+  assert.ok(!prompt.includes('persistent'));
+  assert.ok(prompt.includes('テスト指示'));
   assert.ok(prompt.includes('msg-send.js'));
-  assert.ok(prompt.includes('persistent: true'));
-  assert.ok(prompt.includes('NEW_MESSAGE:<commentId>'));
 });
 
-test('buildInboxPollPrompt: パラメータを指定するとプレースホルダが置換される', () => {
-  const prompt = buildInboxPollPrompt({
-    scriptsPath: '/home/user/.gh-maestro/scripts',
-    workerName: 'issue-5-test',
-    issue: '5',
-    workspace: '/home/user/work/repo',
-  });
+test('formatPlainInboxPrompt: from が無い場合は unknown と表示', () => {
+  const prompt = formatPlainInboxPrompt({ body: 'test' });
+  assert.ok(prompt.includes('(unknown)'));
+});
 
-  assert.ok(!prompt.includes('{{SCRIPTS_PATH}}'));
-  assert.ok(prompt.includes('/home/user/.gh-maestro/scripts'));
-  assert.ok(prompt.includes('issue-5-test'));
-  assert.ok(prompt.includes('--issue 5'));
-  assert.ok(prompt.includes('/home/user/work/repo'));
+test('formatPlainInboxPrompt: body が空の場合は引用行を含まない', () => {
+  const prompt = formatPlainInboxPrompt({ from: 'test', body: '' });
+  assert.ok(!prompt.includes('>'));
+});
+
+test('formatPlainInboxPrompt: \\r\\n 改行が正しく処理される', () => {
+  const prompt = formatPlainInboxPrompt({ from: 'test', body: 'line1\r\nline2\r\nline3' });
+  assert.ok(prompt.includes('> line1'));
+  assert.ok(prompt.includes('> line2'));
+  assert.ok(prompt.includes('> line3'));
+  assert.ok(!prompt.includes('\r'));
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -371,9 +369,13 @@ test('createClaudeAdapter: deliverMessage が monitor タイプの結果を返�
 
   assert.equal(result.type, STRATEGY_TYPE);
   assert.equal(typeof result.prompt, 'string');
-  assert.ok(result.prompt.includes('Monitorツール'));
   assert.ok(result.prompt.includes('修正してください'));
-  assert.ok(result.prompt.includes('msg-poll.js'));
+  // inbox-supervisor.js が唯一の配送経路であり、ワーカー自身に
+  // Monitor 等のポーリングを開始させる指示を含めてはならない
+  // （二重配送の実障害があったため — worker-flow-audit 参照）
+  assert.ok(!result.prompt.includes('Monitorツール'));
+  assert.ok(!result.prompt.includes('msg-poll.js'));
+  assert.ok(!result.prompt.includes('persistent'));
 });
 
 test('createClaudeAdapter: deliverMessage は message 必須', () => {
@@ -388,28 +390,19 @@ test('createClaudeAdapter: deliverMessage は body が空でもプロンプト�
   const result = adapter.deliverMessage({ from: 'orchestrator', body: '' });
 
   assert.equal(result.type, STRATEGY_TYPE);
-  assert.ok(result.prompt.includes('Monitorツール'));
-  // body が空文字の場合はプロンプトのみ
-  assert.ok(!result.prompt.includes('以下のメッセージを受信しました'));
+  assert.equal(typeof result.prompt, 'string');
+  assert.ok(!result.prompt.includes('Monitorツール'));
 });
 
-test('createClaudeAdapter: deliverMessage に opts を渡すとプロンプトに反映される', () => {
+test('createClaudeAdapter: deliverMessage は opts を無視しても動作する', () => {
   const agent = getAgentMap().get('claude');
   const adapter = createClaudeAdapter(agent);
   const result = adapter.deliverMessage(
     { from: 'orchestrator', body: 'test' },
-    {
-      scriptsPath: '/custom/scripts',
-      workerName: 'issue-99-fix',
-      issue: '99',
-      workspace: '/custom/workspace',
-    }
+    { scriptsPath: '/custom/scripts', workerName: 'issue-99-fix', issue: '99', workspace: '/custom/workspace' }
   );
 
-  assert.ok(result.prompt.includes('/custom/scripts'));
-  assert.ok(result.prompt.includes('issue-99-fix'));
-  assert.ok(result.prompt.includes('--issue 99'));
-  assert.ok(result.prompt.includes('/custom/workspace'));
+  assert.ok(result.prompt.includes('test'));
 });
 
 // ── stop ───────────────────────────────────────────────────────────────────
@@ -788,3 +781,33 @@ test('agent-defaults.json: 全エージェントが selectStrategy で分類で�
     assert.equal(isValidAdapter(adapter), true, `${id}: resolveAdapter returns valid adapter`);
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 回帰ガード: Adapter層に自己ポーリング指示の文言が再混入していないこと
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// inbox-supervisor.js が全ワーカーの配送を一元的に担う設計（Issue #134-#136）の
+// 下で、Adapter層が「ワーカー自身にMonitor等のポーリングを開始させる」文言を
+// 生成すると、inbox-supervisor.js の配送と二重に発火する（実障害: claude-adapter.js
+// の buildInboxPollPrompt が該当。gijiaiリポジトリの稼働ログで同一コメントIDが
+// .gh-maestro/inbox-supervisor/cursors/ と .gh-maestro/msg-state/ の両方に
+// 記録される二重検出として確認済み）。ソースレベルの文字列チェックで、
+// この種の文言が Adapter 実装ファイルに再混入した場合に検出する。
+
+const FORBIDDEN_SELF_POLL_PHRASES = ['Monitorツールを呼び出し', 'persistent: true'];
+const ADAPTER_SOURCE_FILES = ['claude-adapter.js', 'session-resume-adapter.js'];
+
+for (const filename of ADAPTER_SOURCE_FILES) {
+  test(`${filename}: 自己ポーリング指示の文言を含まない`, () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, '..', 'scripts', 'shared', 'inbox-adapters', filename),
+      'utf8'
+    );
+    for (const phrase of FORBIDDEN_SELF_POLL_PHRASES) {
+      assert.ok(
+        !source.includes(phrase),
+        `${filename} contains forbidden self-poll phrase: "${phrase}"`
+      );
+    }
+  });
+}

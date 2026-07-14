@@ -102,8 +102,42 @@ function isValidAdapter(adapter) {
   return validateAdapterMethods(adapter).length === 0;
 }
 
+// ── 配送プロンプト整形（共通） ────────────────────────────────────────────
+
+/**
+ * 新着メッセージをそのまま提示する、Adapter非依存のプロンプト文を生成する。
+ * Monitor等の非同期通知手段を持たないエージェント（session-resume戦略）と、
+ * 稼働中エージェントへの直接配送の両方で共通して使う。
+ *
+ * 外部由来の改行は \r\n 対応で分割する（inbox-adapter-crlf-handling ルール準拠）。
+ *
+ * @param {import('./adapter-base').Message} message
+ * @returns {string}
+ */
+function formatPlainInboxPrompt(message) {
+  const lines = [
+    '',
+    '[gh-maestro inbox] 新着メッセージを受信しました。',
+    `From: ${message.from || '(unknown)'}`,
+    '',
+  ];
+
+  if (message.body) {
+    const quoted = message.body.split(/\r?\n/).map(line => `> ${line}`).join('\n');
+    lines.push(quoted);
+    lines.push('');
+  }
+
+  lines.push('このメッセージを処理してください。返信には msg-send.js を使用します。');
+  lines.push('処理後は直ちに待機状態に戻り、追加の指示を待ってください。');
+  lines.push('');
+
+  return lines.join('\n');
+}
+
 module.exports = {
   ADAPTER_METHODS,
   validateAdapterMethods,
   isValidAdapter,
+  formatPlainInboxPrompt,
 };

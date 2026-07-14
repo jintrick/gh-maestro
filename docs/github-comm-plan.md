@@ -1,7 +1,7 @@
 # GitHub Comment Message Bus 移行計画
 
 策定日: 2026-07-07
-状態: **承認済み計画**（本ドキュメントが正。`docs/server-plan.md` の Filesystem Message Queue 計画を全面的に置き換える）
+状態: **一部内容が後続設計で置き換え済み。** 本ドキュメントは FS キュー（`docs/server-plan.md`）から GitHub Issue コメントへの移行という歴史的経緯の記録として残す。ただし「detached 常駐プロセスは0個」「ワーカー自身がMonitorでポーリングする」という本ドキュメントの前提は、Issue #134〜#136（`scripts/inbox-supervisor.js` の新設とワーカー自己ポーリングの廃止）により置き換えられている。現行のワーカー向け配送方式は各 `skills/gh-maestro-*/SKILL.md` の「通信ルール」節と `scripts/inbox-supervisor.js` を正とすること。本ドキュメントの設計原則を実装の根拠として引用しない。
 対象読者: 実装を担当する coder / senior-coder エージェント。**本計画書に書かれていない設計判断を独自に行わないこと。** 不明点は orchestrator に質問する。
 
 ---
