@@ -34,6 +34,9 @@ const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspac
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { resolveAgentConfig } = require('./shared/resolve-config');
 const { resolveAdapter } = require('./shared/inbox-adapters');
+const { buildAgentResumeCommandArgs } = require('./agent-launch');
+const { launchAgentInPane } = require('./shared/pane-launch');
+const { getOrchestratorPaneId, updateWorkerPaneId } = require('./shared/workers-registry');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -305,10 +308,98 @@ function formatDeliveryText({ workerName, message, workspace, homedir, issue, ad
 }
 
 /**
+ * 休止中（ペイン非生存）のセッション再開系ワーカーを resume() で復帰させ、メッセージを配送する。
+ *
+ * 対象は sessionResume: true かつ asynchronousNotification: false のエージェントのみ
+ * （reasonix/agy/codex）。claude系（Monitorで自己ポーリングする）はプロセスが終了している
+ * こと自体が異常系であり、自動resumeの対象にしない — その場合は呼び出し元が
+ * 従来通り pending 扱いにフォールバックする（method: 'pending' を返す）。
+ *
+ * @param {object} params
+ * @param {string} params.workerName
+ * @param {string|null} params.agentId
+ * @param {object} params.message    - { from, body }
+ * @param {string} params.workspace
+ * @param {string} params.homedir
+ * @returns {{ success: boolean, method: string, error?: string, newPaneId?: string }}
+ */
+function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir }) {
+  let agentConfig;
+  try {
+    agentConfig = agentId ? resolveAgentConfig(agentId, { workspace, homedir }) : null;
+  } catch {
+    agentConfig = null;
+  }
+  if (!agentConfig) {
+    return { success: false, method: 'pending', error: `agentId "${agentId}" のconfigを解決できません` };
+  }
+  if (!agentConfig.sessionResume || agentConfig.asynchronousNotification) {
+    // resume対象外（claude系等）→ 呼び出し元が従来通りpending扱いにする
+    return { success: false, method: 'pending', error: 'not a session-resume agent' };
+  }
+
+  const worktreeDir = path.join(workspace, '.gh-maestro', 'worktrees', workerName);
+  if (!fs.existsSync(worktreeDir)) {
+    return { success: false, method: 'resume-failed', error: `worktree ${worktreeDir} が存在しません（resume不可能）` };
+  }
+
+  let adapter;
+  try {
+    adapter = resolveAdapter(agentConfig);
+  } catch (e) {
+    return { success: false, method: 'resume-failed', error: `Adapter解決失敗: ${e.message}` };
+  }
+
+  let resumeResult;
+  try {
+    resumeResult = adapter.resume();
+  } catch (e) {
+    return { success: false, method: 'resume-failed', error: `resume()失敗: ${e.message}` };
+  }
+
+  let argv, afterLaunchText;
+  try {
+    ({ argv, afterLaunchText } = buildAgentResumeCommandArgs(agentConfig, resumeResult.args, {
+      shortPrompt: message.body || '(本文なし)',
+    }));
+  } catch (e) {
+    return { success: false, method: 'resume-failed', error: `resume起動argv構築失敗: ${e.message}` };
+  }
+
+  const orchPaneId = getOrchestratorPaneId(workspace);
+  if (!orchPaneId) {
+    return { success: false, method: 'resume-failed', error: 'orchestratorのpaneIdを解決できません' };
+  }
+
+  let newPaneId;
+  try {
+    ({ paneId: newPaneId } = launchAgentInPane({
+      argv,
+      worktreeDir,
+      splitFromPaneId: orchPaneId,
+      orchPaneId,
+      direction: 'bottom',
+      afterLaunchText,
+      sendTextDelayMs: agentConfig.sendTextDelayMs ?? 2000,
+      enterTerminator: agentConfig.enterSequence ?? '\r',
+    }));
+  } catch (e) {
+    return { success: false, method: 'resume-failed', error: `ペイン起動失敗: ${e.message}` };
+  }
+
+  if (!updateWorkerPaneId(workspace, workerName, newPaneId)) {
+    return { success: false, method: 'resume-failed', error: `workers.json書き込み失敗（worker "${workerName}" が見つかりません）` };
+  }
+
+  return { success: true, method: 'resume', newPaneId };
+}
+
+/**
  * メッセージをエージェントに配送する。
  *
  * 稼働中のエージェント（ペイン生存）には wezterm cli send-text で配送する。
- * 休止中のエージェントには配送を保留し、pending に記録する。
+ * 休止中のエージェントは、セッション再開系（reasonix/agy/codex）であれば resume() で
+ * 復帰させてから配送する。それ以外（claude系等）は配送を保留し、pending に記録する。
  *
  * @param {object} params
  * @param {string} params.workerName
@@ -326,6 +417,12 @@ function deliverMessage({ workerName, paneId, agentId, message, workspace, homed
     const adapter = resolveAdapterSafe(agentId, workspace, homedir);
     const text = formatDeliveryText({ workerName, message, workspace, homedir, issue, adapter });
     return deliverToRunningAgent({ paneId, text });
+  }
+
+  const resumeResult = tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir });
+  if (resumeResult.method !== 'pending') {
+    // resumeを試みた結果（成功 or 明確な失敗）。既存のpendingDeliveries/バックオフ機構にそのまま乗る。
+    return resumeResult;
   }
 
   return {
@@ -817,6 +914,7 @@ module.exports = {
   isPaneAlive,
   resolveAdapterSafe,
   formatDeliveryText,
+  tryResumeAndDeliver,
   deliverMessage,
   deliverToRunningAgent,
   formatMessageForAgent,

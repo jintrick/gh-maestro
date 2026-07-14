@@ -43,4 +43,65 @@ function buildAgentCommandArgs(agentConfig, opts = {}) {
   }
 }
 
-module.exports = { buildAgentCommandArgs };
+/**
+ * セッション再開（resume）用の起動 argv を構築する。
+ *
+ * buildAgentCommandArgs と同じ promptDelivery 分岐を使うが、"新規セッション" を前提にした
+ * プロンプト配送ではなく、resumeArgs（Adapter の resume() が返す args）をコマンドに組み込む。
+ * 呼び出し元は inbox-supervisor.js の resume 配線のみで、対象は asynchronousNotification: false
+ * かつ sessionResume: true のエージェント（reasonix/agy/codex）に限られる。
+ * これらが使う promptDelivery は flag / positional / send-text-after-launch のいずれかであり、
+ * claude 系専用の system-prompt-file はこの経路には来ない想定のため未対応（呼ばれたらエラー）。
+ *
+ * @param {object} agentConfig
+ * @param {string[]} resumeArgs - Adapter の resume() が返す args（例: ['--continue']）
+ * @param {object} opts
+ * @param {string} opts.shortPrompt - 再開後に伝える新着メッセージ本文
+ * @returns {{ argv: string[], afterLaunchText: string|null }}
+ *   argv: wezterm split-pane に渡すエージェント起動コマンド一式
+ *   afterLaunchText: send-text-after-launch 方式の場合のみ非null（ペイン起動後に別途送信する本文）
+ */
+function buildAgentResumeCommandArgs(agentConfig, resumeArgs, opts = {}) {
+  if (!agentConfig || typeof agentConfig !== 'object') {
+    throw new Error('agentConfig is required');
+  }
+  if (!Array.isArray(resumeArgs)) {
+    throw new Error('resumeArgs must be an array');
+  }
+
+  const command = agentConfig.command;
+  if (!command) throw new Error('agentConfig.command is required');
+
+  const extraArgs = agentConfig.extraArgs || [];
+  const promptDelivery = agentConfig.promptDelivery;
+  const shortPrompt = opts.shortPrompt;
+
+  switch (promptDelivery) {
+    case 'flag':
+      if (!agentConfig.promptFlag) throw new Error('agentConfig.promptFlag is required for flag delivery');
+      if (!shortPrompt) throw new Error('shortPrompt is required for flag delivery');
+      return {
+        argv: [command, ...extraArgs, ...resumeArgs, agentConfig.promptFlag, shortPrompt],
+        afterLaunchText: null,
+      };
+
+    case 'positional':
+      if (!shortPrompt) throw new Error('shortPrompt is required for positional delivery');
+      return {
+        argv: [command, ...extraArgs, ...resumeArgs, shortPrompt],
+        afterLaunchText: null,
+      };
+
+    case 'send-text-after-launch':
+      if (!shortPrompt) throw new Error('shortPrompt is required for send-text-after-launch delivery');
+      return {
+        argv: [command, ...extraArgs, ...resumeArgs],
+        afterLaunchText: shortPrompt,
+      };
+
+    default:
+      throw new Error(`buildAgentResumeCommandArgs は promptDelivery "${promptDelivery}" に対応していません（flag/positional/send-text-after-launchのみ対応）`);
+  }
+}
+
+module.exports = { buildAgentCommandArgs, buildAgentResumeCommandArgs };

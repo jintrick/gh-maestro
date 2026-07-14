@@ -508,6 +508,187 @@ describe('Delivery', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// tryResumeAndDeliver / deliverMessage の resume 配線
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('resume配線（休止中のセッション再開系ワーカー）', () => {
+  const paneLaunch = require('../scripts/shared/pane-launch');
+  const { readWorkersRaw } = require('../scripts/shared/workers-registry');
+
+  /** launchAgentInPane が split-pane に渡す argv（ログインシェルラップ済み）から元のコマンド文字列を復元する */
+  function decodeLoginShellCommand(splitArgs) {
+    const idx = splitArgs.indexOf('-EncodedCommand');
+    if (idx !== -1 && splitArgs[idx + 1]) {
+      return Buffer.from(splitArgs[idx + 1], 'base64').toString('utf16le');
+    }
+    // bash -lc 経由（Unix）: ラップ後の生argvがそのまま並ぶ
+    return splitArgs.join(' ');
+  }
+
+  beforeEach(() => {
+    resetWeztermMocks();
+    paneLaunch._setWeztermSplitPane(() => ({ status: 0, stdout: '77', stderr: '' }));
+    paneLaunch._setWeztermKillPane(() => ({ status: 0, stdout: '', stderr: '' }));
+    paneLaunch._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
+    paneLaunch._setSleep(() => {});
+  });
+
+  function setupResumeWorkspace(dir, { workerName = 'issue-7-fix', agentId = 'agy' } = {}) {
+    fs.mkdirSync(path.join(dir, '.gh-maestro', 'worktrees', workerName), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), JSON.stringify({
+      orchestrator: { paneId: '1' },
+      [workerName]: { paneId: '456', agentId, issue: 7 },
+    }, null, 2));
+  }
+
+  test('tryResumeAndDeliver: asynchronousNotification=true（claude）は method:pending でresumeしない', () => {
+    const result = supervisor.tryResumeAndDeliver({
+      workerName: 'issue-7-fix', agentId: 'claude',
+      message: { from: 'orch', body: 'hi' }, workspace: '/ws', homedir: '/home',
+    });
+    assert.equal(result.method, 'pending');
+    assert.equal(result.success, false);
+  });
+
+  test('tryResumeAndDeliver: agentIdが未解決なら method:pending', () => {
+    const result = supervisor.tryResumeAndDeliver({
+      workerName: 'issue-7-fix', agentId: 'nonexistent-agent',
+      message: { from: 'orch', body: 'hi' }, workspace: '/ws', homedir: '/home',
+    });
+    assert.equal(result.method, 'pending');
+  });
+
+  test('tryResumeAndDeliver: worktreeが存在しなければ resume-failed', () => {
+    withTempDir((dir) => {
+      // workers.json のみ用意し、worktreeディレクトリは作らない
+      fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), JSON.stringify({
+        orchestrator: { paneId: '1' },
+        'issue-7-fix': { paneId: '456', agentId: 'agy', issue: 7 },
+      }, null, 2));
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName: 'issue-7-fix', agentId: 'agy',
+        message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home',
+      });
+      assert.equal(result.success, false);
+      assert.equal(result.method, 'resume-failed');
+      assert.ok(result.error.includes('worktree'));
+    });
+  });
+
+  test('tryResumeAndDeliver: agy成功時はresumeし新paneIdでworkers.jsonを更新する', () => {
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
+
+      let splitArgs = null;
+      paneLaunch._setWeztermSplitPane((args) => {
+        splitArgs = args;
+        return { status: 0, stdout: '77', stderr: '' };
+      });
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName: 'issue-7-fix', agentId: 'agy',
+        message: { from: 'orch', body: '新着メッセージ本文' }, workspace: dir, homedir: '/home',
+      });
+
+      assert.equal(result.success, true);
+      assert.equal(result.method, 'resume');
+      assert.equal(result.newPaneId, '77');
+
+      // 分割元は orchestrator のペイン（'1'）
+      assert.ok(splitArgs.includes('1'));
+      // ログインシェルでラップされたコマンド文字列に --continue とメッセージ本文が含まれる
+      assert.ok(decodeLoginShellCommand(splitArgs).includes('--continue'));
+      assert.ok(decodeLoginShellCommand(splitArgs).includes('新着メッセージ本文'));
+
+      const raw = readWorkersRaw(dir);
+      assert.equal(raw['issue-7-fix'].paneId, '77');
+    });
+  });
+
+  test('tryResumeAndDeliver: codex（positional）も成功する', () => {
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-8-fix', agentId: 'codex' });
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName: 'issue-8-fix', agentId: 'codex',
+        message: { from: 'orch', body: 'test' }, workspace: dir, homedir: '/home',
+      });
+      assert.equal(result.success, true);
+      assert.equal(result.method, 'resume');
+    });
+  });
+
+  test('tryResumeAndDeliver: reasonix（send-text-after-launch）も成功する', () => {
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-9-fix', agentId: 'reasonix' });
+
+      const sentTexts = [];
+      paneLaunch._setWeztermSendText((paneId, text) => {
+        sentTexts.push(text);
+        return { status: 0, stdout: '', stderr: '' };
+      });
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName: 'issue-9-fix', agentId: 'reasonix',
+        message: { from: 'orch', body: 'reasonix宛メッセージ' }, workspace: dir, homedir: '/home',
+      });
+      assert.equal(result.success, true);
+      assert.ok(sentTexts.includes('reasonix宛メッセージ'));
+    });
+  });
+
+  test('tryResumeAndDeliver: ペイン起動失敗時は resume-failed', () => {
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
+      paneLaunch._setWeztermSplitPane(() => ({ status: 1, stdout: '', stderr: 'split boom' }));
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName: 'issue-7-fix', agentId: 'agy',
+        message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home',
+      });
+      assert.equal(result.success, false);
+      assert.equal(result.method, 'resume-failed');
+    });
+  });
+
+  test('deliverMessage: ペイン非生存 + session-resume系エージェントは resume を試みる', () => {
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
+      supervisor._setWeztermListPanes(() => ({ status: 0, stdout: '[]', stderr: '' }));
+
+      const result = supervisor.deliverMessage({
+        workerName: 'issue-7-fix', paneId: '456', agentId: 'agy',
+        message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home', issue: '7',
+      });
+
+      assert.equal(result.success, true);
+      assert.equal(result.method, 'resume');
+    });
+  });
+
+  test('deliverMessage: ペイン非生存 + claude は従来通りpending（resumeしない）', () => {
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'claude' });
+      supervisor._setWeztermListPanes(() => ({ status: 0, stdout: '[]', stderr: '' }));
+
+      let splitCalled = false;
+      paneLaunch._setWeztermSplitPane(() => { splitCalled = true; return { status: 0, stdout: '77', stderr: '' }; });
+
+      const result = supervisor.deliverMessage({
+        workerName: 'issue-7-fix', paneId: '456', agentId: 'claude',
+        message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home', issue: '7',
+      });
+
+      assert.equal(result.success, false);
+      assert.equal(result.method, 'pending');
+      assert.equal(splitCalled, false, 'claude系ではsplit-paneを呼ばない');
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // shouldRetry
 // ═══════════════════════════════════════════════════════════════════════════
 

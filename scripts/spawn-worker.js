@@ -27,10 +27,10 @@ const { existsSync, mkdirSync, readFileSync, writeFileSync,
 const { resolve, relative } = require('path');
 // link-node-modules は常に同一ディレクトリに同居する（リポジトリの scripts/ もインストール先 ~/.gh-maestro/scripts/ も）。
 const { linkNodeModules } = require('./link-node-modules');
-const { sendEnter } = require('./send-enter');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { buildAgentCommandArgs } = require('./agent-launch');
-const { buildLoginShellExecArgs, checkAgentExists } = require('./agent-exec');
+const { checkAgentExists } = require('./agent-exec');
+const { launchAgentInPane, killPaneQuiet } = require('./shared/pane-launch');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
@@ -376,34 +376,34 @@ try {
 }
 
 // --- WezTerm ペイン分割 + エージェント起動（ログインシェル経由） ---
-// 全エージェントを buildLoginShellExecArgs でログインシェル経由にラップする。
+// 全エージェントをログインシェル経由にラップする（scripts/shared/pane-launch.js に集約）。
 // これにより PATH 実行ファイル・pwsh 関数・エイリアスのすべてが起動可能になる。
 // argv の完全性は各プラットフォームのエンコード方式で保証される（agent-exec.js 参照）。
-const loginShellArgs = buildLoginShellExecArgs(agentCmdArgs);
-const splitArgs = ['cli', '--no-auto-start', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...loginShellArgs];
-const split = spawnSync('wezterm', splitArgs, { encoding: 'utf8' });
-if (split.status !== 0 && splitFromPaneId !== orchPaneId) {
-  console.warn(`spawn-worker: ペイン分割失敗: ${split.stderr.trim()} — orchestratorペイン(${orchPaneId})にフォールバックします`);
-  const fallbackArgs = ['cli', '--no-auto-start', 'split-pane', '--bottom', '--cwd', worktreeDir, '--pane-id', orchPaneId, '--', ...loginShellArgs];
-  const split2 = spawnSync('wezterm', fallbackArgs, { encoding: 'utf8' });
-  if (split2.status === 0) {
-    split.status = 0;
-    split.stdout = split2.stdout;
-  } else {
-    rollbackWorktree();
-    fail(`WezTermペインの分割に失敗しました（フォールバックも失敗）: ${split2.stderr.trim()}`);
-  }
-} else if (split.status !== 0) {
+// send-text-after-launch方式（positional argが使えないreasonix等）向けの初期プロンプト注入も
+// launchAgentInPane が担う（TUI初期化待ち: agent-defaults.json の sendTextDelayMs、既定2000ms）。
+let newPaneId;
+let afterLaunchTextSent;
+try {
+  ({ paneId: newPaneId, afterLaunchTextSent } = launchAgentInPane({
+    argv: agentCmdArgs,
+    worktreeDir,
+    splitFromPaneId,
+    orchPaneId,
+    direction,
+    afterLaunchText: agentConfig.promptDelivery === 'send-text-after-launch' ? shortPrompt : null,
+    sendTextDelayMs: agentConfig.sendTextDelayMs ?? 2000,
+    enterTerminator: agentConfig.enterSequence ?? '\r',
+  }));
+} catch (e) {
   rollbackWorktree();
-  fail(`WezTermペインの分割に失敗しました: ${split.stderr.trim()}`);
+  fail(e.message);
 }
-const newPaneId = (split.stdout ?? '').trim();
-if (!newPaneId) {
-  console.error(`spawn-worker: wezterm split-pane が pane-id を返しませんでした`);
-  console.error(`  stdout: ${JSON.stringify(split.stdout)}`);
-  console.error(`  stderr: ${split.stderr?.trim()}`);
-  rollbackWorktree();
-  fail('wezterm split-pane の pane-id を取得できませんでした（ペインが作成された可能性があります）');
+if (agentConfig.promptDelivery === 'send-text-after-launch') {
+  if (afterLaunchTextSent) {
+    console.warn(`spawn-worker: 初期プロンプトをsend-textで送信しました (pane ${newPaneId})`);
+  } else {
+    console.warn(`spawn-worker: send-text失敗 (pane ${newPaneId})`);
+  }
 }
 
 // --- workers.json にワーカーを登録（失敗時はペインもロールバック） ---
@@ -412,23 +412,9 @@ try {
   writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
   console.warn(`spawn-worker: worker "${workerName}" を pane ${newPaneId} として workers.json に登録しました`);
 } catch (e) {
-  spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', newPaneId], { encoding: 'utf8' });
+  killPaneQuiet(newPaneId);
   rollbackWorktree();
   fail(`workers.json への書き込みに失敗しました: ${e.message}`);
-}
-
-// --- send-text-after-launch: 起動後にsend-textでプロンプトを注入 ---
-// positional argが使えないエージェント（reasonix等）向け。
-// TUI初期化待ち（agent-defaults.json の sendTextDelayMs、既定2000ms）後にwezterm cli send-textでプロンプトを送る。
-if (agentConfig.promptDelivery === 'send-text-after-launch') {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, agentConfig.sendTextDelayMs ?? 2000);
-  const sendResult = spawnSync('wezterm', ['cli', '--no-auto-start', 'send-text', '--pane-id', newPaneId, '--no-paste', shortPrompt], { encoding: 'utf8' });
-  if (sendResult.status !== 0) {
-    console.warn(`spawn-worker: send-text失敗 (pane ${newPaneId}): ${sendResult.stderr?.trim()}`);
-  } else {
-    sendEnter(newPaneId, { terminator: agentConfig.enterSequence ?? '\r' });
-    console.warn(`spawn-worker: 初期プロンプトをsend-textで送信しました (pane ${newPaneId})`);
-  }
 }
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---
