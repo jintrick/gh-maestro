@@ -132,12 +132,14 @@ function createSessionResumeAdapter(agentConfig) {
       const extraArgs = config.extraArgs || [];
 
       // sessionRef が指定された場合は、resumeCommand の末尾の
-      // --last / --continue フラグを sessionRef で置き換える
+      // --last / --continue フラグを sessionRef で置き換える。
+      // 前段のサブコマンド（exec / resume 等）はそのまま残す。
       if (sessionRef) {
-        const sessionRefArgs = [sessionRef];
+        const cmdArgs = [...config.resumeCommand];
+        cmdArgs[cmdArgs.length - 1] = sessionRef;
         return {
           command: config.command,
-          args: [...extraArgs, ...sessionRefArgs],
+          args: [...extraArgs, ...cmdArgs],
         };
       }
 

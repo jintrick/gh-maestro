@@ -538,15 +538,29 @@ test('createSessionResumeAdapter: resume が resumeCommand を正しく使う（
   assert.ok(result.args.includes('--last'));
 });
 
-test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeCommand の代わりに使われる', () => {
+test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeCommand 末尾の --last/--continue を置き換える（サブコマンドは保持）', () => {
   const agent = getAgentMap().get('codex');
   const adapter = createSessionResumeAdapter(agent);
   const result = adapter.resume('specific-session-id');
 
   assert.equal(result.command, 'codex');
-  // sessionRef がある場合、resumeCommand（exec resume --last）の代わりに sessionRef が使われる
-  assert.ok(!result.args.includes('--last'), 'should not include --last when sessionRef is given');
+  // resumeCommand ["exec", "resume", "--last"] の末尾 "--last" が sessionRef に置き換わる
+  // 前段の exec / resume サブコマンドは保持される
+  assert.ok(!result.args.includes('--last'), 'should not include --last when sessionRef replaces it');
+  assert.ok(result.args.includes('exec'), 'should preserve exec subcommand');
+  assert.ok(result.args.includes('resume'), 'should preserve resume subcommand');
   assert.ok(result.args.includes('specific-session-id'), 'should include sessionRef');
+});
+
+test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeCommand 末尾の --continue を置き換える（agy: サブコマンドなし）', () => {
+  const agent = getAgentMap().get('agy');
+  const adapter = createSessionResumeAdapter(agent);
+  const result = adapter.resume('specific-conversation-id');
+
+  assert.equal(result.command, 'agy');
+  assert.ok(!result.args.includes('--continue'), 'should not include --continue when sessionRef replaces it');
+  assert.ok(result.args.includes('specific-conversation-id'), 'should include sessionRef');
+  assert.ok(result.args.includes('--dangerously-skip-permissions'), 'should preserve extraArgs');
 });
 
 test('createSessionResumeAdapter: sessionResume=false で resume を呼ぶとエラー', () => {
