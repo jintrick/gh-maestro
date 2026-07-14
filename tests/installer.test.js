@@ -97,6 +97,64 @@ const agentsYamlPath = path.join(ROOT, 'skills', 'agents.yaml');
 const agentsContent = fs.readFileSync(agentsYamlPath, 'utf8');
 const agents = parseAgentsYaml(agentsContent);
 
+// ── 旧方式のポーリング記述が混入していないことを検証（Issue #136 回帰防止） ───
+
+const LEGACY_POLLING_FIELDS = ['POLL_MECHANISM', 'INBOX_POLL_MECHANISM', 'POLL_INTERVAL_SECONDS', 'INBOX_POLL_INTERVAL_SECONDS'];
+
+// Supervisor方式に移行したエージェント（agy, codex, reasonix）には
+// POLL_MECHANISM も INBOX_POLL_MECHANISM も存在してはならない。
+const SUPERVISOR_ONLY_AGENTS = ['agy', 'codex'];
+for (const name of SUPERVISOR_ONLY_AGENTS) {
+  test(`[${name}] agents.yaml に旧方式のポーリング記述（POLL_MECHANISM/INBOX_POLL_MECHANISM 等）が無い`, () => {
+    const agent = agents[name];
+    if (!agent) return; // 存在しないエージェントはスキップ（未定義は空テストとして通す）
+    const subs = agent.substitutions || {};
+    for (const field of LEGACY_POLLING_FIELDS) {
+      assert.ok(
+        !(field in subs),
+        `${name} に旧方式の "${field}" が残っています。Supervisor方式への移行後に削除されるべきです。`
+      );
+    }
+  });
+}
+
+// claude は orchestrator の POLL_MECHANISM（レビュー監視用）を保持するため、
+// POLL_MECHANISM / POLL_INTERVAL_SECONDS は削除対象外。
+// ただし INBOX_POLL_MECHANISM / INBOX_POLL_INTERVAL_SECONDS は削除されていること。
+test('[claude] agents.yaml に INBOX_POLL_MECHANISM が残っていない', () => {
+  const claude = agents['claude'];
+  if (!claude) return;
+  const subs = claude.substitutions || {};
+  assert.ok(!('INBOX_POLL_MECHANISM' in subs),
+    'claude に旧方式の "INBOX_POLL_MECHANISM" が残っています。Supervisor方式への移行後に削除されるべきです。');
+  assert.ok(!('INBOX_POLL_INTERVAL_SECONDS' in subs),
+    'claude に旧方式の "INBOX_POLL_INTERVAL_SECONDS" が残っています。Supervisor方式への移行後に削除されるべきです。');
+  // POLL_MECHANISM と POLL_INTERVAL_SECONDS は orchestrator のレビュー監視用に保持されていることを確認
+  assert.ok('POLL_MECHANISM' in subs,
+    'claude の POLL_MECHANISM（orchestrator レビュー監視用）が誤って削除されています。このフィールドは保持すべきです。');
+  assert.ok('POLL_INTERVAL_SECONDS' in subs,
+    'claude の POLL_INTERVAL_SECONDS（orchestrator レビュー監視用）が誤って削除されています。このフィールドは保持すべきです。');
+});
+
+// agents.yaml の全エージェントについて、INBOX_POLL_MECHANISM が一切存在しないことを
+// 包括的に検証する。新しいエージェントを追加する際にうっかり旧方式の記述をコピーして
+// 混入させた場合、このテストが失敗する。
+test('agents.yaml の全エージェントに INBOX_POLL_MECHANISM が存在しない', () => {
+  for (const [name, config] of Object.entries(agents)) {
+    const subs = config.substitutions || {};
+    assert.ok(
+      !('INBOX_POLL_MECHANISM' in subs),
+      `${name} に "INBOX_POLL_MECHANISM" が存在します。このフィールドは廃止されました（Issue #136）。`
+    );
+    assert.ok(
+      !('INBOX_POLL_INTERVAL_SECONDS' in subs),
+      `${name} に "INBOX_POLL_INTERVAL_SECONDS" が存在します。このフィールドは廃止されました（Issue #136）。`
+    );
+  }
+});
+
+// ── インストール後の成果物を検証（バグ再発防止の核心） ─────────────────────────
+
 for (const [agentName, config] of Object.entries(agents)) {
   const destDir = expandHome(config.dest);
 
