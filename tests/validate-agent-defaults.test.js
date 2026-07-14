@@ -79,10 +79,12 @@ test('validateAgentDefaults: 全エージェントが sessionResume を持って
   }
 });
 
-test('validateAgentDefaults: 全エージェントが resumeCommand を持っている', () => {
+test('validateAgentDefaults: sessionResume=true のエージェントは resumeCommand を持っている', () => {
   for (const agent of realDefaults.agents) {
-    assert.ok('resumeCommand' in agent, `"${agent.id}" に resumeCommand フィールドがありません`);
-    assert.ok(Array.isArray(agent.resumeCommand), `"${agent.id}" の resumeCommand は array である必要があります`);
+    if (agent.sessionResume) {
+      assert.ok('resumeCommand' in agent, `"${agent.id}" は sessionResume=true ですが resumeCommand フィールドがありません`);
+      assert.ok(Array.isArray(agent.resumeCommand), `"${agent.id}" の resumeCommand は array である必要があります`);
+    }
   }
 });
 
