@@ -1,0 +1,825 @@
+#!/usr/bin/env node
+// inbox-supervisor.js — 全ワーカーのGitHub Issueインボックスを監視し、
+// 新着メッセージを検出して各エージェントに配送する常駐プロセス
+//
+// Usage:
+//   node inbox-supervisor.js --workspace <path> [--interval <sec>] [--session-pid <pid>]
+//
+// アーキテクチャ:
+//   - 各ワーカーのIssueをポーリングし、自分宛ての新着コメントを検出する
+//   - スキャンロジックは msg-poll.js の parseMarker / parseCommentsResponse を再利用
+//   - カーソル・配送状態は .gh-maestro/inbox-supervisor/cursors/<workerName>.json に永続化
+//   - 配送は Adapter 層（scripts/shared/inbox-adapters/）経由でエージェント種別に応じた方法で行う
+//   - 稼働中のエージェントには wezterm cli send-text で直接配送
+//   - 休止中のエージェントは pending キューに保持し、再開時に配送
+//
+// 信頼性:
+//   - カーソル永続化（since + seenIds）による再起動後の継続
+//   - 配送済みID管理による重複配送防止
+//   - 配送失敗時の指数バックオフリトライ（最大5回）
+//   - PID registry + dead-man's switch によるライフサイクル管理
+//
+// 既存ポーリングとの関係:
+//   - ワーカーの自己ポーリング（msg-poll.js Monitor経由）を置き換える
+//   - orchestrator inbox監視（msg-poll.js orchestratorモード）とは独立（別の監視対象）
+//   - poll-pr.js / poll-reviews.js とは監視対象が異なり競合しない
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('./child-process');
+const { weztermCli } = require('./wezterm-cli');
+const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { normalizeWorkerEntry } = require('./worker-entry');
+const { resolveAgentConfig } = require('./shared/resolve-config');
+const { resolveAdapter } = require('./shared/inbox-adapters');
+const {
+  resolveSessionPid,
+  createDeadManSwitch,
+  registerProcess,
+  findRunningInstance,
+  acquireStartupLock,
+  releaseStartupLock,
+  cleanup: lifecycleCleanup,
+} = require('./process-lifecycle');
+
+// msg-poll.js のスキャンロジックを再利用
+const { parseMarker, parseCommentsResponse } = require('./msg-poll');
+
+// ── 定数 ──────────────────────────────────────────────────────────────────
+
+const DEFAULT_INTERVAL_SEC = 20;
+const GH_TIMEOUT_MS = 30000;
+const MAX_SEEN_IDS = 200;
+const MAX_RETRIES = 5;
+const RETRY_BASE_DELAY_MS = 10000;
+
+const USAGE = `inbox-supervisor.js — 全ワーカーのGitHub Issueインボックスを監視し新着メッセージを配送する
+
+Usage: node inbox-supervisor.js --workspace <path> [--interval <sec>] [--session-pid <pid>] [--force] [--once]
+
+Options:
+  --workspace <path>     ワークスペースパス（必須）
+  --interval <sec>       ポーリング間隔（秒、既定: ${DEFAULT_INTERVAL_SEC}）
+  --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
+  --force                既に同じworkspaceで稼働中のSupervisorがいても起動を強制する
+  --once                 1回だけスキャンして終了する（継続ポーリングしない。テスト・手動実行用）
+
+Output (stdout):
+  検出・配送イベントを1行ずつ出力:
+    SCAN_START
+    DETECTED:<workerName>:<commentId>
+    DELIVERED:<workerName>:<commentId>
+    DELIVERY_FAILED:<workerName>:<commentId>:<reason>
+    RETRYING:<workerName>:<commentId>:<attempt>
+    SCAN_END:<workers>:<detected>
+
+Description:
+  workers.json に登録された全ワーカーのIssueを定期ポーリングし、
+  各ワーカー宛ての新着メッセージを検出・配送する。
+  カーソル・配送状態は .gh-maestro/inbox-supervisor/ に永続化され、
+  プロセス再起動後も未配送メッセージを失わずに再開できる。
+  ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
+  消滅時はPID registryを解除して自動exitする。`;
+
+// ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
+
+let _ghRepoView = (opts = {}) => {
+  return spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
+    { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
+};
+
+let _ghApiComments = (repo, issue, since, opts = {}) => {
+  const args = ['api', '--method', 'GET', `repos/${repo}/issues/${issue}/comments`, '--paginate', '--slurp'];
+  if (since) {
+    args.push('-f', `since=${since}`);
+  }
+  args.push('-f', 'per_page=100');
+  return spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
+};
+
+// ── WezTerm 呼び出し（テストで注入可能） ──────────────────────────────────
+
+let _weztermListPanes = (opts = {}) => {
+  return weztermCli('cli', 'list', '--format', 'json');
+};
+
+let _weztermSendText = (paneId, text, opts = {}) => {
+  return weztermCli('cli', 'send-text', '--pane-id', String(paneId), '--no-paste', text);
+};
+
+// ── 状態管理 ──────────────────────────────────────────────────────────────
+
+/**
+ * Supervisor の状態ディレクトリを返す。
+ * @param {string} workspace
+ * @returns {string}
+ */
+function stateDir(workspace) {
+  return path.join(workspace, '.gh-maestro', 'inbox-supervisor');
+}
+
+/**
+ * 特定ワーカーのカーソルファイルパスを返す。
+ * @param {string} workspace
+ * @param {string} workerName
+ * @returns {string}
+ */
+function cursorPath(workspace, workerName) {
+  return path.join(stateDir(workspace), 'cursors', `${workerName}.json`);
+}
+
+/**
+ * ワーカーのカーソル状態を読み込む。
+ * ファイルが無い・壊れている場合は初期状態を返す。
+ *
+ * @param {string} workspace
+ * @param {string} workerName
+ * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object }}
+ */
+function readCursor(workspace, workerName) {
+  const cp = cursorPath(workspace, workerName);
+  try {
+    if (!fs.existsSync(cp)) {
+      return { since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {} };
+    }
+    const raw = fs.readFileSync(cp, 'utf8');
+    const parsed = JSON.parse(raw);
+    return {
+      since: typeof parsed.since === 'string' ? parsed.since : null,
+      seenIds: Array.isArray(parsed.seenIds) ? parsed.seenIds : [],
+      deliveredIds: Array.isArray(parsed.deliveredIds) ? parsed.deliveredIds : [],
+      pendingDeliveries:
+        parsed.pendingDeliveries && typeof parsed.pendingDeliveries === 'object' && !Array.isArray(parsed.pendingDeliveries)
+          ? parsed.pendingDeliveries : {},
+    };
+  } catch {
+    return { since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {} };
+  }
+}
+
+/**
+ * ワーカーのカーソル状態を永続化する。
+ * アトミック書き込み（tmp → rename）で破損を防ぐ。
+ *
+ * @param {string} workspace
+ * @param {string} workerName
+ * @param {object} state
+ */
+function writeCursor(workspace, workerName, state) {
+  const cp = cursorPath(workspace, workerName);
+  const dir = path.dirname(cp);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const tmp = cp + '.' + Math.random().toString(36).slice(2, 8);
+  const seenIds = state.seenIds.slice(-MAX_SEEN_IDS);
+  const deliveredIds = (state.deliveredIds || []).slice(-MAX_SEEN_IDS);
+  fs.writeFileSync(tmp, JSON.stringify({
+    since: state.since,
+    seenIds,
+    deliveredIds,
+    pendingDeliveries: state.pendingDeliveries || {},
+  }, null, 2), 'utf8');
+  fs.renameSync(tmp, cp);
+}
+
+// ── workers.json 読み込み ─────────────────────────────────────────────────
+
+/**
+ * workers.json を読み込み、正規化されたワーカーエントリの Map を返す。
+ * orchestrator エントリは除外する。
+ *
+ * @param {string} workspace
+ * @returns {Map<string, { paneId: string|null, agentId: string|null, issue: number|null }>}
+ */
+function loadWorkers(workspace) {
+  const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
+  const map = new Map();
+
+  let raw;
+  try {
+    if (!fs.existsSync(workersPath)) return map;
+    raw = JSON.parse(fs.readFileSync(workersPath, 'utf8'));
+  } catch {
+    return map;
+  }
+
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return map;
+
+  for (const [name, entry] of Object.entries(raw)) {
+    if (name === 'orchestrator') continue;
+    const normalized = normalizeWorkerEntry(entry);
+    map.set(name, normalized);
+  }
+
+  return map;
+}
+
+// ── ペイン生存確認 ────────────────────────────────────────────────────────
+
+/**
+ * 指定された paneId が WezTerm 内で生存しているか確認する。
+ * 取得失敗時は安全側に倒して false を返す（fail-closed）。
+ *
+ * @param {string} paneId
+ * @returns {boolean}
+ */
+function isPaneAlive(paneId) {
+  if (!paneId) return false;
+  try {
+    const result = _weztermListPanes();
+    if (result.status !== 0) return false;
+    const panes = JSON.parse(result.stdout);
+    if (!Array.isArray(panes)) return false;
+    return panes.some(p => String(p.pane_id) === String(paneId));
+  } catch {
+    return false;
+  }
+}
+
+// ── 配送 ──────────────────────────────────────────────────────────────────
+
+/**
+ * Adapter を安全に解決する。失敗時は null を返す。
+ *
+ * session-resume 戦略のエージェント（reasonix/agy/codex）は
+ * 対応する Adapter 実装が未提供のため null になる。
+ *
+ * @param {string} agentId
+ * @param {string} workspace
+ * @param {string} homedir
+ * @returns {object|null} InboxAdapter または null
+ */
+function resolveAdapterSafe(agentId, workspace, homedir) {
+  if (!agentId) return null;
+  try {
+    const agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
+    if (!agentConfig) return null;
+    return resolveAdapter(agentConfig);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 配送用テキストを整形する。
+ * Adapter が利用可能な場合は adapter.deliverMessage() を使い、
+ * 利用不能な場合は formatMessageForAgent() にフォールバックする。
+ *
+ * @param {object} params
+ * @param {string} params.workerName
+ * @param {object} params.message    - { from, body }
+ * @param {string} params.workspace
+ * @param {string} params.homedir
+ * @param {string} params.issue      - Issue 番号（文字列）
+ * @param {object|null} params.adapter - 事前解決済みの Adapter（省略時は内部で解決）
+ * @returns {string}
+ */
+function formatDeliveryText({ workerName, message, workspace, homedir, issue, adapter }) {
+  const resolvedAdapter = adapter || resolveAdapterSafe(
+    workerName, // agentId は workerName からは直接引けないが、呼び出し元が agentId を渡す前提
+    workspace,
+    homedir,
+  );
+
+  if (resolvedAdapter) {
+    try {
+      const scriptsPath = path.join(homedir, '.gh-maestro', 'scripts');
+      const result = resolvedAdapter.deliverMessage(message, {
+        scriptsPath,
+        workerName,
+        issue,
+        workspace,
+      });
+      if (result && typeof result.prompt === 'string') {
+        return result.prompt;
+      }
+    } catch {
+      // Adapter 配送失敗 → フォールバック
+    }
+  }
+
+  // フォールバック: 直接フォーマット
+  return formatMessageForAgent({ workerName, message });
+}
+
+/**
+ * メッセージをエージェントに配送する。
+ *
+ * 稼働中のエージェント（ペイン生存）には wezterm cli send-text で配送する。
+ * 休止中のエージェントには配送を保留し、pending に記録する。
+ *
+ * @param {object} params
+ * @param {string} params.workerName
+ * @param {string|null} params.paneId
+ * @param {string|null} params.agentId
+ * @param {object} params.message    - { from, body }
+ * @param {string} params.workspace
+ * @param {string} params.homedir
+ * @param {string} params.issue      - Issue 番号（文字列）
+ * @returns {{ success: boolean, method: string, error?: string }}
+ */
+function deliverMessage({ workerName, paneId, agentId, message, workspace, homedir, issue }) {
+  if (paneId && isPaneAlive(paneId)) {
+    // Adapter を解決し、エージェント種別に応じた配送テキストを整形
+    const adapter = resolveAdapterSafe(agentId, workspace, homedir);
+    const text = formatDeliveryText({ workerName, message, workspace, homedir, issue, adapter });
+    return deliverToRunningAgent({ paneId, text });
+  }
+
+  return {
+    success: false,
+    method: 'pending',
+    error: `pane ${paneId || '(none)'} is not alive — queued for resume`,
+  };
+}
+
+/**
+ * 稼働中のエージェントのペインにテキストを送信する。
+ *
+ * @param {object} params
+ * @param {string} params.paneId - WezTerm ペインID
+ * @param {string} params.text   - 送信するテキスト（配送用に整形済み）
+ * @returns {{ success: boolean, method: string, error?: string }}
+ */
+function deliverToRunningAgent({ paneId, text }) {
+  try {
+    const result = _weztermSendText(paneId, text);
+    if (result.status !== 0) {
+      return {
+        success: false,
+        method: 'send-text',
+        error: `wezterm cli send-text failed (exit ${result.status}): ${(result.stderr || '').toString().trim()}`,
+      };
+    }
+    return { success: true, method: 'send-text' };
+  } catch (e) {
+    return {
+      success: false,
+      method: 'send-text',
+      error: `wezterm cli send-text error: ${e.message}`,
+    };
+  }
+}
+
+/**
+ * エージェント向けのメッセージテキストを整形する（Adapter 未対応時のフォールバック）。
+ * 外部由来の改行は \r\n 対応で分割する（inbox-adapter-crlf-handling ルール準拠）。
+ *
+ * @param {object} params
+ * @param {string} params.workerName
+ * @param {object} params.message   - { from, body }
+ * @returns {string}
+ */
+function formatMessageForAgent({ workerName, message }) {
+  const lines = [
+    '',
+    '[gh-maestro inbox] 新着メッセージを受信しました。',
+    `From: ${message.from || '(unknown)'}`,
+    `To: ${workerName}`,
+    '',
+  ];
+
+  if (message.body) {
+    lines.push(message.body);
+    lines.push('');
+  }
+
+  lines.push('このメッセージを処理してください。返信には msg-send.js を使用します。');
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+// ── 再試行判定 ────────────────────────────────────────────────────────────
+
+/**
+ * pending エントリが再試行可能か判定する。
+ * 指数バックオフ: RETRY_BASE_DELAY_MS * 2^(retries-1)
+ *
+ * @param {object} pendingEntry  - { retries: number, lastAttempt: string, lastError: string }
+ * @param {number} nowMs         - 現在時刻（Unix ms）
+ * @returns {boolean}
+ */
+function shouldRetry(pendingEntry, nowMs) {
+  if (!pendingEntry || typeof pendingEntry.retries !== 'number') return true;
+  if (pendingEntry.retries >= MAX_RETRIES) return false;
+
+  const lastAttempt = pendingEntry.lastAttempt
+    ? new Date(pendingEntry.lastAttempt).getTime()
+    : 0;
+
+  if (Number.isNaN(lastAttempt) || lastAttempt <= 0) return true;
+
+  const delay = RETRY_BASE_DELAY_MS * Math.pow(2, pendingEntry.retries - 1);
+  return (nowMs - lastAttempt) >= delay;
+}
+
+// ── メインロジック ────────────────────────────────────────────────────────
+
+/**
+ * 引数バリデーションと初期化を行い、poll 実行に必要なオブジェクトを返す。
+ *
+ * @param {string[]} [argsOverride]  省略時は process.argv.slice(2)
+ * @param {{ streamOutput?: boolean }} [opts]
+ * @returns {{
+ *   code: number, lines: string[], errLines: string[],
+ *   runOnce: (() => void) | null,
+ *   onceMode: boolean,
+ *   intervalMs: number,
+ *   workspace: string,
+ * }}
+ */
+function main(argsOverride, opts = {}) {
+  const { streamOutput = false } = opts;
+  const out = [];
+  const err = [];
+
+  const writeOut = (s) => {
+    out.push(s);
+    if (streamOutput) process.stdout.write(s + '\n');
+  };
+  const writeErr = (s) => {
+    err.push(s);
+    if (streamOutput) process.stderr.write(s + '\n');
+  };
+
+  const args = argsOverride || process.argv.slice(2);
+
+  if (args.includes('--help') || args.includes('-h')) {
+    writeOut(USAGE);
+    return { code: 0, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
+  }
+
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--interval', '--session-pid']);
+
+  if (exitFlagMiss) {
+    writeErr('inbox-supervisor: フラグには値が必要です。');
+    writeErr(USAGE);
+    return { code: 1, lines: out, errLines: err, runOnce: null, intervalMs: 0, workspace: '' };
+  }
+
+  const onceMode = rest.includes('--once');
+  const filteredRest = rest.filter(a => a !== '--once');
+
+  if (filteredRest.length > 0) {
+    writeErr(`inbox-supervisor: 未知の引数です: ${filteredRest.join(' ')}`);
+    writeErr(USAGE);
+    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
+  }
+
+  const workspace = resolveWorkspace(values['--workspace']);
+  if (!workspace) {
+    writeErr('inbox-supervisor: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
+    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
+  }
+
+  const intervalMs = (parseInt(values['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
+  const sessionPid = resolveSessionPid(values['--session-pid']);
+  const checkParent = createDeadManSwitch(sessionPid);
+
+  // リポジトリ解決
+  const ghOpts = { cwd: workspace };
+  const repoResult = _ghRepoView(ghOpts);
+  if (repoResult.status !== 0) {
+    writeErr(`inbox-supervisor: リポジトリを解決できません: ${repoResult.stderr || '(empty)'}`);
+    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
+  }
+  const repo = repoResult.stdout.trim();
+  if (!repo) {
+    writeErr('inbox-supervisor: リポジトリを解決できません（空のレスポンス）。');
+    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
+  }
+
+  // ホームディレクトリ（エージェント設定解決用）
+  const homedir = process.env.HOME || process.env.USERPROFILE || '';
+
+  /**
+   * 1回のポーリングサイクル。
+   * 全ワーカーをスキャンし、新着メッセージの検出・配送を行う。
+   */
+  function runOnce() {
+    if (!checkParent()) {
+      lifecycleCleanup(workspace);
+      process.stderr.write(`inbox-supervisor: parent session (pid ${sessionPid}) is dead — exiting\n`);
+      process.exit(0);
+    }
+
+    writeOut('SCAN_START');
+
+    const workers = loadWorkers(workspace);
+    let totalDetected = 0;
+
+    for (const [workerName, entry] of workers) {
+      if (!entry.issue) continue;
+
+      const issue = String(entry.issue);
+      const cursor = readCursor(workspace, workerName);
+
+      // ── pending 再試行 ───────────────────────────────────────────────
+      const nowMs = Date.now();
+      const pendingEntries = Object.entries(cursor.pendingDeliveries || {});
+      for (const [commentIdStr, pending] of pendingEntries) {
+        const commentId = parseInt(commentIdStr, 10);
+        if (!Number.isFinite(commentId)) {
+          delete cursor.pendingDeliveries[commentIdStr];
+          continue;
+        }
+
+        if (!shouldRetry(pending, nowMs)) continue;
+
+        writeOut(`RETRYING:${workerName}:${commentId}:${pending.retries + 1}`);
+
+        // メッセージ本文を再取得（pending 時に lastBody が保存されなかった古いエントリ対策）
+        let messageBody = pending.lastBody || '';
+        if (!messageBody) {
+          const bodyResult = _ghApiComments(repo, issue, null, { cwd: workspace });
+          if (bodyResult.status === 0) {
+            try {
+              const bodyComments = parseCommentsResponse(bodyResult.stdout);
+              if (bodyComments) {
+                const target = bodyComments.find(c => c.id === commentId);
+                if (target && target.body) {
+                  messageBody = target.body;
+                  cursor.pendingDeliveries[commentIdStr].lastBody = target.body;
+                }
+              }
+            } catch {
+              // body 再取得の parse 失敗 → 空で続行
+            }
+          }
+        }
+
+        const deliveryResult = deliverMessage({
+          workerName,
+          paneId: entry.paneId,
+          agentId: entry.agentId,
+          message: { from: pending.lastFrom || '(unknown)', body: messageBody },
+          workspace,
+          homedir,
+          issue,
+        });
+
+        if (deliveryResult.success) {
+          cursor.deliveredIds.push(commentId);
+          delete cursor.pendingDeliveries[commentIdStr];
+          writeOut(`DELIVERED:${workerName}:${commentId}`);
+        } else {
+          cursor.pendingDeliveries[commentIdStr] = {
+            retries: pending.retries + 1,
+            lastAttempt: new Date().toISOString(),
+            lastError: deliveryResult.error || 'unknown',
+            lastFrom: pending.lastFrom,
+            lastBody: pending.lastBody,
+          };
+          writeOut(`DELIVERY_FAILED:${workerName}:${commentId}:${deliveryResult.error || 'unknown'}`);
+
+          if (pending.retries + 1 >= MAX_RETRIES) {
+            writeErr(`inbox-supervisor: ${workerName} comment ${commentId} — max retries (${MAX_RETRIES}) exceeded, giving up`);
+          }
+        }
+      }
+
+      // ── 新着コメントのスキャン ─────────────────────────────────────
+      // カーソルが無い初回は since を指定せず全件取得（seenIds で重複防止）
+      const workerSince = cursor.since || null;
+      const apiResult = _ghApiComments(repo, issue, workerSince, { cwd: workspace });
+
+      if (apiResult.status !== 0) {
+        writeErr(`inbox-supervisor: gh api エラー (worker ${workerName}, issue ${issue}): ${apiResult.stderr || apiResult.error?.message || '(empty)'}`);
+        continue;
+      }
+
+      let comments;
+      try {
+        comments = parseCommentsResponse(apiResult.stdout);
+      } catch {
+        writeErr(`inbox-supervisor: JSON parse エラー (worker ${workerName}, issue ${issue})`);
+        continue;
+      }
+      if (comments === null) {
+        writeErr(`inbox-supervisor: gh api の応答が配列ではありません (worker ${workerName}, issue ${issue})`);
+        continue;
+      }
+
+      // ── 新着候補の抽出 ─────────────────────────────────────────────
+      const candidates = [];
+      let maxCreated = workerSince;
+
+      for (const c of comments) {
+        const cid = c.id;
+        if (cid == null) continue;
+        if (!c.created_at) continue;
+
+        // 未処理のコメントか
+        if (cursor.seenIds.includes(cid)) continue;
+
+        // このワーカー宛てか
+        const meta = parseMarker(c.body);
+        if (!meta) continue;
+        if (meta.to !== workerName) continue;
+
+        candidates.push({
+          cid,
+          created_at: c.created_at,
+          from: meta.from || '(unknown)',
+          body: c.body || '',
+        });
+
+        // カーソル追跡用
+        if (!maxCreated || c.created_at > maxCreated) {
+          maxCreated = c.created_at;
+        }
+      }
+
+      // カーソルを進める（全コメントの最大 created_at まで）
+      for (const c of comments) {
+        if (!c.created_at) continue;
+        if (!maxCreated || c.created_at > maxCreated) {
+          maxCreated = c.created_at;
+        }
+      }
+
+      // ── 配送 ───────────────────────────────────────────────────────
+      for (const candidate of candidates) {
+        totalDetected++;
+        writeOut(`DETECTED:${workerName}:${candidate.cid}`);
+
+        // 配送前に deliveredIds をチェック（重複防止）
+        if (cursor.deliveredIds.includes(candidate.cid)) {
+          cursor.seenIds.push(candidate.cid);
+          continue;
+        }
+
+        const deliveryResult = deliverMessage({
+          workerName,
+          paneId: entry.paneId,
+          agentId: entry.agentId,
+          message: { from: candidate.from, body: candidate.body },
+          workspace,
+          homedir,
+          issue,
+        });
+
+        cursor.seenIds.push(candidate.cid);
+
+        if (deliveryResult.success) {
+          cursor.deliveredIds.push(candidate.cid);
+          writeOut(`DELIVERED:${workerName}:${candidate.cid}`);
+        } else {
+          // 配送失敗 → pending に記録
+          cursor.pendingDeliveries[String(candidate.cid)] = {
+            retries: 1,
+            lastAttempt: new Date().toISOString(),
+            lastError: deliveryResult.error || 'unknown',
+            lastFrom: candidate.from,
+            lastBody: candidate.body,
+          };
+          writeOut(`DELIVERY_FAILED:${workerName}:${candidate.cid}:${deliveryResult.error || 'unknown'}`);
+        }
+      }
+
+      // ── カーソルを進める ──────────────────────────────────────────
+      // candidates がいても既に配送済み（または配送失敗）の場合はカーソルを進める。
+      // msg-poll.js と同様、since の境界に関する仮定を置かず seenIds で重複防止する。
+      if (maxCreated && maxCreated !== workerSince) {
+        cursor.since = maxCreated;
+      }
+
+      // trimmed
+      cursor.seenIds = cursor.seenIds.slice(-MAX_SEEN_IDS);
+      cursor.deliveredIds = cursor.deliveredIds.slice(-MAX_SEEN_IDS);
+
+      writeCursor(workspace, workerName, cursor);
+    }
+
+    writeOut(`SCAN_END:${workers.size}:${totalDetected}`);
+  }
+
+  return {
+    code: 0,
+    lines: out,
+    errLines: err,
+    runOnce,
+    onceMode,
+    intervalMs,
+    workspace,
+    sessionPid,
+  };
+}
+
+// ── CLI エントリポイント ──────────────────────────────────────────────────
+
+if (require.main === module) {
+  const rawArgs = process.argv.slice(2);
+  const { values: preValues, exitFlagMiss: preExitFlagMiss } = parseFlags(rawArgs, ['--workspace', '--interval', '--session-pid']);
+
+  if (preExitFlagMiss) {
+    process.stderr.write('inbox-supervisor: フラグには値が必要です。\n');
+    process.stderr.write(USAGE);
+    process.exit(1);
+  }
+
+  const force = rawArgs.includes('--force');
+  const onceMode = rawArgs.includes('--once');
+
+  // ── 単一起動ロック + 多重起動検知 ──────────────────────────────────
+  if (!force) {
+    const preWorkspace = resolveWorkspace(preValues['--workspace']);
+    if (preWorkspace) {
+      if (!acquireStartupLock(preWorkspace, 'inbox-supervisor.js', null)) {
+        process.stderr.write(
+          'inbox-supervisor: 別のプロセスが同じworkspaceのSupervisor起動処理中です。' +
+          '少し待ってから再試行してください。\n'
+        );
+        process.exit(1);
+      }
+
+      const dup = findRunningInstance(preWorkspace, { script: 'inbox-supervisor.js', workerName: null });
+      if (dup) {
+        releaseStartupLock(preWorkspace, 'inbox-supervisor.js', null);
+        process.stderr.write(
+          `inbox-supervisor: 重複起動を検出しました。既に pid=${dup.pid} が同じworkspaceを監視中です。` +
+          '強制的に起動する場合は --force を指定してください。\n'
+        );
+        process.exit(1);
+      }
+    }
+  }
+
+  const result = main(undefined, { streamOutput: true });
+
+  for (const l of result.errLines) process.stderr.write(l + '\n');
+
+  if (result.code !== 0) {
+    if (!force) {
+      const preWorkspace = resolveWorkspace(preValues['--workspace']);
+      if (preWorkspace) releaseStartupLock(preWorkspace, 'inbox-supervisor.js', null);
+    }
+    for (const l of result.lines) process.stdout.write(l + '\n');
+    process.exit(result.code);
+  }
+
+  if (result.runOnce === null) {
+    // --help
+    if (!force) {
+      const preWorkspace = resolveWorkspace(preValues['--workspace']);
+      if (preWorkspace) releaseStartupLock(preWorkspace, 'inbox-supervisor.js', null);
+    }
+    for (const l of result.lines) process.stdout.write(l + '\n');
+    process.exit(0);
+  }
+
+  // PID registry に自己登録
+  registerProcess(result.workspace, { script: 'inbox-supervisor.js' });
+
+  // registry への登録が完了したので単一起動ロックを解放
+  if (!force) {
+    const preWorkspace = resolveWorkspace(preValues['--workspace']);
+    if (preWorkspace) releaseStartupLock(preWorkspace, 'inbox-supervisor.js', null);
+  }
+
+  const ru = result.runOnce;
+
+  function cleanup() {
+    lifecycleCleanup(result.workspace);
+    process.exit(0);
+  }
+
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
+
+  if (result.onceMode) {
+    // --once: 1回だけスキャンして終了
+    ru();
+    cleanup();
+  } else {
+    // 継続モード: 初回スキャンを即実行し、以降 intervalMs 間隔で継続
+    ru();
+    setInterval(ru, result.intervalMs);
+  }
+}
+
+// ── テスト用 export ──────────────────────────────────────────────────────
+
+module.exports = {
+  _setGhRepoView: (fn) => { _ghRepoView = fn; },
+  _setGhApiComments: (fn) => { _ghApiComments = fn; },
+  _setWeztermListPanes: (fn) => { _weztermListPanes = fn; },
+  _setWeztermSendText: (fn) => { _weztermSendText = fn; },
+  main,
+  readCursor,
+  writeCursor,
+  cursorPath,
+  stateDir,
+  loadWorkers,
+  isPaneAlive,
+  resolveAdapterSafe,
+  formatDeliveryText,
+  deliverMessage,
+  deliverToRunningAgent,
+  formatMessageForAgent,
+  shouldRetry,
+  USAGE,
+};
