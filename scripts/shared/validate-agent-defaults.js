@@ -21,6 +21,8 @@ const REQUIRED_FIELDS = [
   ['promptDelivery', 'string'],
   ['enterSequence', 'string'],
   ['rulesSupported', 'boolean'],
+  ['asynchronousNotification', 'boolean'],
+  ['sessionResume', 'boolean'],
 ];
 
 /**
@@ -43,6 +45,14 @@ const CONDITIONAL_REQUIRED = [
 ];
 
 /**
+ * 特定のbooleanフィールドが true のときに追加で必須となるフィールド。
+ * 各エントリ: [conditionField, conditionValue, requiredField, expectedType]
+ */
+const BOOLEAN_CONDITIONAL_REQUIRED = [
+  ['sessionResume', true, 'resumeCommand', 'array'],
+];
+
+/**
  * 既知のオプショナルフィールド（必須ではないが、存在する場合の型チェック対象）。
  * 各エントリ: [fieldName, expectedType]
  */
@@ -52,6 +62,7 @@ const KNOWN_OPTIONAL_FIELDS = [
   ['skillsViaMd', 'boolean'],
   ['promptFlag', 'string'],
   ['execArgs', 'array'],
+  ['resumeCommand', 'array'],
 ];
 
 // ── ヘルパー ─────────────────────────────────────────────────────────────────
@@ -133,6 +144,18 @@ function validateAgentEntry(agent, index) {
     }
   }
 
+  // ── boolean条件付き必須フィールド ──
+  for (const [condField, condValue, requiredField, expectedType] of BOOLEAN_CONDITIONAL_REQUIRED) {
+    if (agent[condField] === condValue) {
+      const val = agent[requiredField];
+      if (val === undefined || val === null) {
+        issues.push(`[ERROR] ${label}: ${condField}=${condValue} のため "${requiredField}" が必須ですが、設定されていません`);
+      } else if (getType(val) !== expectedType) {
+        issues.push(`[ERROR] ${label}: "${requiredField}" は ${expectedType} である必要があります（実際: ${getType(val)}）`);
+      }
+    }
+  }
+
   // ── 未知のトップレベルフィールドを警告 ──
   const knownFields = new Set([
     ...REQUIRED_FIELDS.map(([f]) => f),
@@ -195,4 +218,4 @@ function validateAgentDefaults(data) {
   return issues;
 }
 
-module.exports = { validateAgentEntry, validateAgentDefaults, REQUIRED_FIELDS, KNOWN_OPTIONAL_FIELDS, CONDITIONAL_REQUIRED, KNOWN_PROMPT_DELIVERIES };
+module.exports = { validateAgentEntry, validateAgentDefaults, REQUIRED_FIELDS, KNOWN_OPTIONAL_FIELDS, CONDITIONAL_REQUIRED, BOOLEAN_CONDITIONAL_REQUIRED, KNOWN_PROMPT_DELIVERIES };

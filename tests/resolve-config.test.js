@@ -178,6 +178,27 @@ test('resolveAgentConfig: workspace config は execArgs も上書きできない
   });
 });
 
+test('resolveAgentConfig: workspace config は resumeCommand も上書きできない（セキュリティ, Issue \\#132）', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-sec-resume-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: { codex: { resumeCommand: ['exec', 'resume', '--dangerous'] } },
+      });
+
+      const agent = resolveAgentConfig('codex', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      assert.ok(
+        !agent.resumeCommand.includes('--dangerous'),
+        'workspace should not be able to inject dangerous flags via resumeCommand',
+      );
+      assert.ok(agent.resumeCommand.includes('--last'), 'default resumeCommand should be preserved');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
 test('resolveAgentConfig: workspace config が command/extraArgs 以外は上書きできる', () => {
   withTempHome(home => {
     const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-safe-'));
