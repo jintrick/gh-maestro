@@ -59,6 +59,9 @@ node scripts/install.js
 - Keep local/generated state out of commits unless it is intentionally tracked.
 - Do not use destructive git or filesystem cleanup commands unless the user explicitly asks for them.
 
+## Execution Environment
+
+- Do not run shell commands in a filesystem sandbox. Use unsandboxed/escalated execution for every command, including reads and tests.
 ## Checks
 
 - Run `npm test` for code or installer changes.

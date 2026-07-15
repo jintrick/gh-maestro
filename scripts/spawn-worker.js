@@ -8,7 +8,7 @@
 // Usage:
 //   node spawn-worker.js \
 //     --skill <skill-name> \
-//     [--prompt "<role-prompt>" | --prompt-file <path>]  # gh-maestro-base 使用時はどちらか必須
+//     [--short-prompt "<short-message>" | --prompt-file <path>]  # gh-maestro-base は --prompt-file 必須
 //     --issue <N> \               # 必須。ワーカーのアンカー Issue
 //     --description <desc> \
 //     --repo <owner/repo> \
@@ -16,8 +16,8 @@
 //     [--base-branch <branch>] \
 //     [--agent <id>]              # エージェントID。config.json > agent-defaults.json で解決（省略時はスキルに応じたデフォルト）
 //
-// バッククォート・引用符等の特殊文字を含む長文プロンプトは、シェルの解釈による破損を避けるため
-// --prompt ではなく --prompt-file を使うこと。--prompt と --prompt-file は同時指定不可。
+// 任意の指示は必ず --prompt-file で渡す。--short-prompt は、改行・シェル特殊文字を含まない
+// 短い補足メッセージだけの例外であり、--prompt-file と同時指定不可。
 //
 // 標準出力: ワーカー名（例: issue-5-implement）
 
@@ -38,14 +38,14 @@ const { resolveTextInput } = require('./shared/text-input');
 const { toWinPath } = require('./win-path');
 
 const SPAWN_WORKER_VALUE_FLAGS = [
-  '--skill', '--prompt', '--prompt-file', '--issue', '--description',
+  '--skill', '--short-prompt', '--prompt-file', '--issue', '--description',
   '--repo', '--workspace', '--base-branch', '--agent',
 ];
 
 const USAGE = `spawn-worker.js — ワーカーペインを作成し、worktreeを準備してエージェントを起動する
 
 Usage: node spawn-worker.js --skill <skill-name> --issue <N> --description <desc> --repo <owner/repo>
-                            [--prompt <text> | --prompt-file <path>] [--workspace <path>]
+                            [--short-prompt <text> | --prompt-file <path>] [--workspace <path>]
                             [--base-branch <branch>] [--agent <id>]
 
 Arguments:
@@ -53,9 +53,10 @@ Arguments:
   --issue <N>             ワーカーのアンカー Issue（正の整数）
   --description <desc>    ワーカーの説明（worker名の一部になる）
   --repo <owner/repo>     対象リポジトリ
-  --prompt <text>         役割プロンプト（gh-maestro-base 使用時はどちらか必須）
-  --prompt-file <path>    役割プロンプトをファイルで指定する（--prompt と同時指定不可）。
-                          バッククォート・引用符等の特殊文字を含む長文はこちらを使うこと。
+  --prompt-file <path>    任意の役割・作業指示をファイルで指定する。
+                          gh-maestro-base 使用時は必須。--short-prompt と同時指定不可。
+  --short-prompt <text>   例外的な短い補足メッセージ。1行・200文字以内で、文字・数字・空白と
+                          . _ : / - のみ使用可能。任意の指示には --prompt-file を使用する。
   --workspace <path>      ワークスペースパス（省略時は CWD）
   --base-branch <branch>  worktree のベースブランチ
   --agent <id>            エージェントID（省略時はスキルに応じたデフォルト）
@@ -88,8 +89,8 @@ if (rest.length > 0) {
 }
 
 const skill       = values['--skill'];
-const promptText  = values['--prompt'];
-const promptFileArg = values['--prompt-file'];
+const shortPromptText = values['--short-prompt'];
+const promptFileArg   = values['--prompt-file'];
 const issue       = values['--issue'];
 const description = values['--description'];
 const repo        = values['--repo'];
@@ -108,14 +109,17 @@ const fail = (msg) => {
 if (!skill)       fail('--skill が必要です');
 if (!description) fail('--description が必要です');
 if (!repo)        fail('--repo が必要です');
-if (promptText != null && promptFileArg != null) fail('--prompt と --prompt-file は同時に指定できません');
+if (shortPromptText != null && promptFileArg != null) fail('--short-prompt と --prompt-file は同時に指定できません');
+if (shortPromptText != null && !/^[\p{L}\p{N}\p{M}\p{Zs}._:/-]{1,200}$/u.test(shortPromptText)) {
+  fail('--short-prompt は1行・200文字以内で、文字・数字・空白と . _ : / - のみ使用できます。任意の指示はファイルに書き出し、--prompt-file <path> を使用してください');
+}
 let prompt;
 try {
-  prompt = resolveTextInput({ inlineValue: promptText ?? null, filePath: promptFileArg ? toWinPath(promptFileArg) : null });
+  prompt = resolveTextInput({ inlineValue: shortPromptText ?? null, filePath: promptFileArg ? toWinPath(promptFileArg) : null });
 } catch (e) {
   fail(`--prompt-file の読み込みに失敗しました: ${e.message}`);
 }
-if (skill === 'gh-maestro-base' && !prompt) fail('gh-maestro-base を使う場合は --prompt または --prompt-file が必要です');
+if (skill === 'gh-maestro-base' && !promptFileArg) fail('gh-maestro-base を使う場合は --prompt-file が必要です。任意の役割指示をファイルに書き出して指定してください');
 if (!issue) fail('--issue が必要です（ワーカーのアンカー Issue）');
 if (!/^[1-9][0-9]*$/.test(issue)) fail('--issue は正の整数である必要があります');
 

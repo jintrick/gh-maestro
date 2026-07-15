@@ -12,6 +12,7 @@ const {
   resolveReviewManagerVisible,
   loadDefaults,
 } = require('../scripts/shared/resolve-config');
+const { buildAgentCommandArgs } = require('../scripts/agent-launch');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -120,6 +121,28 @@ test('resolveAgentConfig: ~/.gh-maestro/config.json の override がデフォル
   });
 });
 
+test('resolveAgentConfig: グローバルpwshラッパーのReview ManagerはClaudeを--printで起動する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'claude-ds-pro': {
+          command: 'pwsh',
+          extraArgs: ['-Command', 'claude-ds-pro --dangerously-skip-permissions'],
+          execArgs: ['-Command', 'claude-ds-pro --dangerously-skip-permissions --print'],
+        },
+      },
+    });
+    const agent = resolveAgentConfig('claude-ds-pro', { homedir: home });
+    const args = buildAgentCommandArgs({ ...agent, extraArgs: agent.execArgs }, {
+      promptFile: 'C:/tmp/review-manager-prompt.md',
+      systemPromptText: 'review',
+    });
+    assert.deepEqual(args, [
+      'pwsh', '-Command', 'claude-ds-pro --dangerously-skip-permissions --print',
+      '--append-system-prompt-file', 'C:/tmp/review-manager-prompt.md', 'review',
+    ]);
+  });
+});
 test('resolveAgentConfig: workspace config が global config を上書きする', () => {
   withTempHome(home => {
     const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-'));

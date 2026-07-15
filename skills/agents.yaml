@@ -13,10 +13,10 @@ agents:
         - `PR_MERGED:<PR番号>` → マージ完了。自律的に次のフローへ進む（ループ終了）
       INBOX_POLL_INTERVAL_SECONDS: 2
       INBOX_POLL_MECHANISM: |
-        Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。
+        **作業・調査・質問より先、最初のツール呼び出しとして** Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。この起動を後回しにしてはならない。
 
         Monitorから届く通知を処理する：
-        - `NEW_MESSAGE:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。処理後は必ず `msg-send.js` で結果を返信すること。**完了後は直ちにMonitorに戻る**
+        - `NEW_MESSAGE:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。処理後は必ず `msg-send.js` で結果を返信すること。**既存の persistent Monitor は自動的に待機を継続する。新しいMonitor・`msg-poll.js`・`--watch-pid`を起動してはならない。**
   agy:
     skill_files_install_destination_directory: ~/.gemini/antigravity-cli/skills
     skill_markdown_template_placeholder_substitutions:

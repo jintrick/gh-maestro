@@ -47,7 +47,7 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 | バグの根本原因・影響範囲・修正方針を特定したい | `gh-maestro-investigator` |
 | 局所的な実装・PR作成（コスト効率重視） | `gh-maestro-coder` |
 | 設計判断や広範囲の影響分析、高度な検証を伴う実装・PR作成 | `gh-maestro-senior-coder` |
-| 上記に当てはまらないが手を動かす仕事がある | `gh-maestro-base`（`--prompt`で役割を明示） |
+| 上記に当てはまらないが手を動かす仕事がある | `gh-maestro-base`（`--prompt-file`で役割を明示） |
 
 ### アンカー Issue の確保
 
@@ -65,6 +65,21 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 
 調査アンカー Issue の暫定タイトルは「調査: <キーワード>」とする（例: `調査: 認証トークン検証の現状`）。実装方針確定後、正式タイトルに変更する。
 
+
+### プロンプト入力の原則
+
+任意の役割・作業指示は、必ずファイルに書き出して `--prompt-file` で渡す。`--prompt` は廃止済みであり、使ってはならない。
+
+`--short-prompt` は、改行やシェル特殊文字を含まない200文字以下の短い補足メッセージだけに使える例外である。実装内容・調査内容・役割定義には使わない。迷った場合は必ず `--prompt-file` を使う。
+
+```sh
+PROMPT_FILE=/tmp/worker-prompt-<N>-<desc>.md
+node "{{SCRIPTS_PATH}}/write-draft.js" $PROMPT_FILE --stdin <<'EOF'
+<ワーカーへの任意の指示>
+EOF
+# 出力された実体パスを --prompt-file に渡す
+```
+
 ### explorer の起動例
 
 ```sh
@@ -72,7 +87,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --skill gh-maestro-explorer \
   --issue <N> \
   --description explore-auth \
-  --prompt "src/auth/ 配下でトークン検証を行っている関数をすべてリストアップして報告してください" \
+  --prompt-file <上で書き出した実体パス> \
   --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH)
 ```
 
@@ -138,7 +153,7 @@ node "{{SCRIPTS_PATH}}/view-file.js" <filepath>
 ```sh
 WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --skill <skill-name> \
-  --prompt "<指示>" \      # gh-maestro-base使用時は必須。他スキルでも補足指示に使える
+  --prompt-file <プロンプトファイルの実体パス> \
   --issue <N> \
   --description <desc> \
   --repo $REPO \
@@ -154,7 +169,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 | `gh-maestro-senior-coder` | 高度な自己検証能力とアーキテクチャの整合性判断能力を持ち、広範な影響分析、複雑なロジック調整、設計判断を伴うタスクの解決に適している。 |
 | `gh-maestro-explorer` | 汎用的な事実調査（grep・コード探索・情報収集）。分析・判断は行わず、発見した事実を報告する。 |
 | `gh-maestro-investigator` | バグ原因の特定 → 根本原因・影響範囲・修正方針の報告（`--issue` が必須。アンカー Issue がなければ orchestrator が先に起票する）。 |
-| `gh-maestro-base` | 上記以外の動的役職（必ず`--prompt`で役割を定義する）。 |
+| `gh-maestro-base` | 上記以外の動的役職（必ず`--prompt-file`で役割を定義する）。 |
 
 ## セッションのゴール
 
@@ -166,7 +181,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 - 大規模タスクは競合しない軸（ディレクトリ・ファイル種別・機能単位など）で分割し、複数ワーカーが並列処理している
 - ワーカーはその役割が完全に終わった時点で削除されている（PRを作っただけのcoderはまだ生きている。トリアージの結果、修正が必要な指摘があれば`msg-send.js`で転送する）
 - 同時進行中のIssue間でファイル競合が発生していない（競合可能性があれば前のPRがマージされてから次を起票する）
-- `--prompt`には役割とIssue番号のみが含まれ、実装詳細はIssueに記述されている
+- 任意の初期指示は必ず`--prompt-file`で渡す。`--short-prompt`は短い補足メッセージだけに限定し、実装詳細はIssueに記述されている
 - PRのレビューコメントをトリアージし、人間に結果を提示している。マージ判断は人間が行い、マージ後は反省会（コーダーへの意見聴取を含む）を実施してからIssueをクローズしてworktreeを削除している。**反省会より前に`remove-worker.js`を実行しない**
 - ローカルの`BASE_BRANCH`はリモートと同期している（`spawn-worker.js`起動時に自動でfetch+ff-only更新される。手動gitpullは不要）
 
@@ -174,12 +189,12 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 
 ```sh
 # NG: 1000件のLintエラーを1ワーカーに丸投げ
-WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue <N> --prompt "Lintエラーをすべて修正" ...)
+WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue <N> --prompt-file <prompt-file> ...)
 
 # OK: ディレクトリ単位で分割し並列実行
-W1=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "src/components/ のLintエラーを修正" --issue 12 --description fix-components ...)
-W2=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "src/utils/ のLintエラーを修正"     --issue 12 --description fix-utils ...)
-W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt "src/hooks/ のLintエラーを修正"     --issue 12 --description fix-hooks ...)
+W1=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <components-prompt-file> --issue 12 --description fix-components ...)
+W2=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <utils-prompt-file>      --issue 12 --description fix-utils ...)
+W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <hooks-prompt-file>      --issue 12 --description fix-hooks ...)
 ```
 
 ## 不変条件

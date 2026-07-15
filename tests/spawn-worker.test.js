@@ -59,13 +59,13 @@ test('--repo がないとエラー終了する', () => {
   assert.match(r.stderr, /--repo/);
 });
 
-test('gh-maestro-base で --prompt がないとエラー終了する', () => {
+test('gh-maestro-base で --prompt-file がないとエラー終了する', () => {
   const r = run([
     '--skill', 'gh-maestro-base',
     '--issue', '1', '--description', 'test', '--repo', 'o/r',
   ], BASE_ENV);
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /--prompt/);
+  assert.match(r.stderr, /--prompt-file/);
 });
 
 // ── --help ──────────────────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ test('--prompt-file で存在しないファイルを指定するとエラー終
   assert.match(r.stderr, /--prompt-file/);
 });
 
-test('--prompt と --prompt-file を同時指定するとエラー終了する', () => {
+test('--short-prompt と --prompt-file を同時指定するとエラー終了する', () => {
   const fs = require('fs');
   const os = require('os');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-promptfile-'));
@@ -108,17 +108,17 @@ test('--prompt と --prompt-file を同時指定するとエラー終了する',
     const r = run([
       '--skill', 'gh-maestro-base',
       '--issue', '1', '--description', 'test', '--repo', 'o/r',
-      '--prompt', 'inline prompt',
+      '--short-prompt', 'inline prompt',
       '--prompt-file', promptFile,
     ], BASE_ENV);
     assert.notEqual(r.status, 0);
-    assert.match(r.stderr, /--prompt と --prompt-file は同時に指定できません/);
+    assert.match(r.stderr, /--short-prompt と --prompt-file は同時に指定できません/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('--prompt-file の内容が gh-maestro-base の --prompt 必須チェックを満たす（バリデーションを通過する）', () => {
+test('--prompt-file の内容が gh-maestro-base の必須チェックを満たす（バリデーションを通過する）', () => {
   const fs = require('fs');
   const os = require('os');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-promptfile-ok-'));
@@ -132,15 +132,51 @@ test('--prompt-file の内容が gh-maestro-base の --prompt 必須チェック
       '--agent', 'nonexistent',
     ], BASE_ENV);
     // --prompt-file自体は受理され、後段の（無関係な）--agent解決エラーで落ちることを確認する
-    // （gh-maestro-base の --prompt 必須チェックでは落ちない = --prompt-file が有効なプロンプトとして扱われた証拠）
+    // （gh-maestro-base の --prompt-file 必須チェックでは落ちない = 有効なプロンプトとして扱われた証拠）
     assert.notEqual(r.status, 0);
-    assert.doesNotMatch(r.stderr, /--prompt または --prompt-file が必要です/);
+    assert.doesNotMatch(r.stderr, /--prompt-file が必要です/);
     assert.match(r.stderr, /nonexistent/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
+test('--short-prompt は短い安全なメッセージを受け付ける', () => {
+  const r = run([
+    '--skill', 'gh-maestro-coder',
+    '--issue', '1', '--description', 'test', '--repo', 'o/r',
+    '--short-prompt', 'Issue 1 follow-up',
+    '--agent', 'nonexistent',
+  ], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  assert.doesNotMatch(r.stderr, /--short-prompt は1行/);
+  assert.match(r.stderr, /nonexistent/);
+});
+
+test('--short-prompt は改行またはシェル特殊文字を拒否して --prompt-file へ誘導する', () => {
+  for (const prompt of ['first\nsecond', 'run `command`', 'value $HOME', 'quote "text"', 'path\\name']) {
+    const r = run([
+      '--skill', 'gh-maestro-coder',
+      '--issue', '1', '--description', 'test', '--repo', 'o/r',
+      '--short-prompt', prompt,
+    ], BASE_ENV);
+    assert.notEqual(r.status, 0, prompt);
+    assert.match(r.stderr, /--short-prompt は1行/);
+    assert.match(r.stderr, /--prompt-file/);
+  }
+});
+
+test('廃止した --prompt は未知の引数として拒否する', () => {
+  const r = run([
+    '--skill', 'gh-maestro-coder',
+    '--issue', '1', '--description', 'test', '--repo', 'o/r',
+    '--prompt', 'legacy prompt',
+  ], BASE_ENV);
+  assert.notEqual(r.status, 0);
+
+  assert.match(r.stderr, /未知の引数/);
+  assert.match(r.stderr, /--prompt/);
+});
 // ── 未知フラグの拒否 ──────────────────────────────────────────────────────────
 
 test('未知のフラグを指定するとエラー終了する（黙って無視しない）', () => {

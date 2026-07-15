@@ -86,4 +86,4 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $IS
 - `$WORKTREE` ルートで `npm install` / `npm ci` は実行しない。ルートの `node_modules` はシステムがjunctionで自動リンク済みのため、ルートで npm install を実行するとワークスペース共有の `node_modules` を破壊する
 - 実装で新しいサブパッケージ（例: `gui/`）を追加した場合、そのディレクトリ内での `npm install` は許可する（`cd gui && npm install`）
 - 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない
-- **自分で Monitor や background bash 等でポーリングプロセスを起動しないこと。** 追加指示の待ち受けは `msg-poll.js` 等の共通スクリプトのみを使用する。共通スクリプト側にライフサイクル管理（dead-man's switch + PID registry）が実装されており、自前の背景プロセス起動は孤児化の原因になる。
+- **追加指示の待ち受けは、通信ルールに注入された `{{INBOX_POLL_MECHANISM}}` の手順だけを使用すること。** 独自の background bash・detached プロセス・ポーリングループを作ってはならない。共通の `msg-poll.js` 側にライフサイクル管理（dead-man's switch + PID registry）が実装されている。
