@@ -48,6 +48,8 @@
       "command": "reasonix",
       "runtime": "claude",
       "extraArgs": ["--yolo"],
+      "execArgs": ["run", "--dir", "{workspace}", "--show-thinking"],
+      "execPromptDelivery": "positional",
       "dynamicCommand": true,
       "promptDelivery": "send-text-after-launch",
       "sendTextDelayMs": 5000,

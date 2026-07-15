@@ -442,6 +442,19 @@ test('resolveAgentConfig: reasonix の command が動的に解決される', () 
   });
 });
 
+test('resolveAgentConfig: reasonix のReview Manager用execArgsにも動的スクリプトパスを付与する', () => {
+  withTempHome(home => {
+    const agent = resolveAgentConfig('reasonix', { homedir: home });
+    assert.ok(agent);
+    assert.ok(agent.execArgs.includes('run'));
+    assert.ok(agent.execArgs.includes('--show-thinking'));
+
+    if (agent.command === 'node') {
+      assert.ok(agent.execArgs[0].endsWith('reasonix.js'));
+      assert.equal(agent.execArgs[1], 'run');
+    }
+  });
+});
 test('resolveAgentConfig: global extraArgs 上書き後も dynamicCommand 解決が保持される（Issue #124）', () => {
   withTempHome(home => {
     writeConfig(home, {

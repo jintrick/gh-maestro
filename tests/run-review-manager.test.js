@@ -157,6 +157,23 @@ test('buildReviewManagerAgentArgs: AntigravityはRMで--printを使い通常の-
 });
 
 
+test('buildReviewManagerAgentArgs: ReasonixはRMでrunと位置引数プロンプトを使う', () => {
+  const args = buildReviewManagerAgentArgs({
+    command: 'node',
+    execArgs: ['C:\\tools\\reasonix.js', 'run', '--dir', '{workspace}', '--show-thinking'],
+    execPromptDelivery: 'positional',
+    promptDelivery: 'send-text-after-launch',
+  }, {
+    reviewWtDir: 'C:\\review-worktree',
+    promptFile: 'C:\\tmp\\review-manager.md',
+    skill: 'gh-maestro-reviewer',
+  });
+
+  assert.deepEqual(args, [
+    'node', 'C:\\tools\\reasonix.js', 'run', '--dir', 'C:\\review-worktree', '--show-thinking',
+    'Read C:/tmp/review-manager.md and execute it.',
+  ]);
+});
 test('runAgentVisible: WEZTERM_PANE未設定ならwezterm等を呼ばずnullを返す（headlessへフォールバック）', () => {
   const originalPane = process.env.WEZTERM_PANE;
   delete process.env.WEZTERM_PANE;

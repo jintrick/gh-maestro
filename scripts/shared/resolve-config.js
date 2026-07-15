@@ -106,6 +106,7 @@ function resolveDynamicCommand(agent) {
       ...agent,
       command: resolved.command,
       extraArgs: [...resolved.prependArgs, ...(agent.extraArgs || [])],
+      execArgs: agent.execArgs ? [...resolved.prependArgs, ...agent.execArgs] : agent.execArgs,
     };
   }
   // 動的解決が失敗しても、元の command でフォールバックする
