@@ -28,6 +28,7 @@ const {
   acquireStartupLock,
   releaseStartupLock,
   cleanup: lifecycleCleanup,
+  isProcessAlive,
 } = require('./process-lifecycle');
 
 const DEFAULT_INTERVAL_SEC = 20;
@@ -37,6 +38,7 @@ const MAX_SEEN_IDS = 100;
 const USAGE = `msg-poll.js — GitHub Issue コメントを定期スキャンし新着メッセージを stdout に通知する
 
 Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once | --wait <sec>] [--session-pid <pid>] [--force]
+       node msg-poll.js --watch-pid <pid> [--interval <sec>]
 
 Arguments:
   <self>                 自分の名前（worker 名、または "orchestrator"）
@@ -56,11 +58,19 @@ Options:
   --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
   --force                同じ self を既に監視している生存プロセスがいても起動を強制する
                           （継続モード・--wait モードのみ有効。既定では多重起動を検知して exit 1 する）
+  --watch-pid <pid>      他の <self> 引数を無視し、指定PIDの生存監視のみを行う特殊モード。
+                          「重複起動を検出しました」エラー時に代替コマンドとして案内される
+                          （このモードは msg-poll.js 自身を起動するかどうかの判断を必要としない）。
+                          PIDが生存している間は何も出力しない。死亡を検知した時点で
+                          \`PID_DIED:<pid>\` を1行出力して exit 0 する。Monitorのcommandに
+                          そのまま渡すことを想定している。PID registryへの自己登録は行わない
+                          （監視対象そのものではなくその健全性を見ているだけのため）。
 
 Output (stdout):
   新着メッセージを1行ずつ出力:
     worker モード:       NEW_MESSAGE:<commentId>
     orchestrator モード: NEW_MESSAGE:<issue>:<commentId>
+  --watch-pid モード:    PID_DIED:<pid>（監視対象PIDの死亡を検知した1回のみ）
 
 このスクリプトはエージェントのターン内で blocking 実行される。detached 起動しない。
 カーソルは .gh-maestro/msg-state/<self>.json に永続化され、--once/--wait の繰り返し実行でも二重通知しない。
@@ -70,6 +80,20 @@ gh 呼び出し失敗（ネットワーク断・rate limit 等）はそのサイ
 ライフサイクル管理:
   ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
   消滅時はPID registryを解除して自動exitする。継続モード・--wait モードは起動時にPID registryへ自己登録する。`;
+
+/**
+ * 「重複起動を検出しました」エラー時に案内する、既存PIDを監視するための
+ * 代替コマンド文字列を組み立てる。
+ *
+ * @param {number} pid
+ * @param {string|null} [intervalSec]
+ * @returns {string}
+ */
+function buildWatchPidCommand(pid, intervalSec) {
+  const parts = ['node', JSON.stringify(__filename), '--watch-pid', String(pid)];
+  if (intervalSec) parts.push('--interval', String(intervalSec));
+  return parts.join(' ');
+}
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -569,6 +593,37 @@ async function runWaitMode(result) {
 
 if (require.main === module) {
   const rawArgs = process.argv.slice(2);
+
+  // ── --watch-pid: 既存の生存プロセスを監視するだけの軽量モード ──────────
+  // <self> 等の他の引数を必要としない、完全に独立したモード。
+  // 「重複起動を検出しました」時の代替コマンドとして案内される。
+  if (rawArgs.includes('--watch-pid')) {
+    const { values: watchValues, exitFlagMiss: watchExitFlagMiss } =
+      parseFlags(rawArgs, ['--watch-pid', '--interval']);
+    if (watchExitFlagMiss) {
+      process.stderr.write('msg-poll: フラグには値が必要です。\n');
+      process.exit(1);
+    }
+    const watchPid = parseInt(watchValues['--watch-pid'], 10);
+    if (!Number.isFinite(watchPid) || watchPid <= 0) {
+      process.stderr.write(`msg-poll: --watch-pid には正の整数のPIDを指定してください: ${watchValues['--watch-pid']}\n`);
+      process.exit(1);
+    }
+    const watchIntervalMs = (parseInt(watchValues['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
+
+    const checkWatchedPid = () => {
+      if (!isProcessAlive(watchPid)) {
+        process.stdout.write(`PID_DIED:${watchPid}\n`);
+        process.exit(0);
+      }
+    };
+    checkWatchedPid();
+    const watchIntervalHandle = setInterval(checkWatchedPid, watchIntervalMs);
+    process.on('SIGINT', () => { clearInterval(watchIntervalHandle); process.exit(0); });
+    process.on('SIGTERM', () => { clearInterval(watchIntervalHandle); process.exit(0); });
+    return;
+  }
+
   // main() と同じ parseArgs() を再利用する（解析ロジックを2箇所に分けない）。
   const parsedForCli = parseArgs(rawArgs);
   const isWait = !parsedForCli.help && !parsedForCli.exitFlagMiss && !parsedForCli.onceMode && parsedForCli.waitArg != null;
@@ -611,9 +666,11 @@ if (require.main === module) {
       const dup = findRunningInstance(preWorkspace, { script: 'msg-poll.js', workerName: workerNameForRegistry });
       if (dup) {
         process.stderr.write(
-          `msg-poll: 重複起動を検出しました。既に pid=${dup.pid} が同じ inbox（self=${parsedForCli.self}）を監視中です。` +
-          '新規プロセスは起動しません。既存のMonitorを使い回してください。' +
-          '強制的に起動する場合は --force を指定してください。\n'
+          `msg-poll: 重複起動を検出しました。既に pid=${dup.pid} が同じ inbox（self=${parsedForCli.self}）に登録されています。新規プロセスは起動しません。\n` +
+          `代わりに以下をMonitorでpersistent:trueとして起動してください（このコマンドをそのまま使うこと。判断は不要）:\n` +
+          `  ${buildWatchPidCommand(dup.pid)}\n` +
+          `このコマンドは pid=${dup.pid} の生存を監視し続け、死亡時に \`PID_DIED:${dup.pid}\` を通知します。` +
+          `その通知を受け取ったら、そのときはじめて改めてこのコマンドを --force なしで起動し直してください。\n`
         );
         releaseCliLock();
         process.exit(1);
@@ -715,6 +772,7 @@ module.exports = {
   readState,
   writeState,
   statePath,
+  buildWatchPidCommand,
   MARKER_RE,
   USAGE,
 };

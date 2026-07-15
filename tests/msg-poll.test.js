@@ -837,6 +837,83 @@ test('継続モード: --force を指定すると重複があっても起動を�
   });
 });
 
+test('継続モード: 重複起動検出時のエラーに、判断不要でそのまま使えるwatch-pidコマンドが含まれる', (t) => {
+  const { spawnSync } = require('child_process');
+  const { getProcessStartTime } = require('../scripts/process-lifecycle');
+
+  const startTimeProbe = getProcessStartTime(process.pid);
+  if (!startTimeProbe) {
+    t.skip('この環境では getProcessStartTime が機能しないため、実プロセスでの同一性確認を検証できません');
+    return;
+  }
+
+  withTempDir(workspace => {
+    const pidsDir = path.join(workspace, '.gh-maestro', 'pids');
+    fs.mkdirSync(pidsDir, { recursive: true });
+    const otherPid = process.ppid;
+    const startTime = getProcessStartTime(otherPid);
+    fs.writeFileSync(path.join(pidsDir, `${otherPid}.json`), JSON.stringify({
+      pid: otherPid, script: 'msg-poll.js', workerName: null, workspace, startTime,
+    }));
+
+    const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
+    const r = spawnSync(process.execPath, [script, 'orchestrator', '--workspace', workspace], { encoding: 'utf8', timeout: 10000 });
+
+    assert.equal(r.status, 1);
+    // 「重複か生存確認済みの残骸か」をエージェントに判断させず、そのまま使えるコマンドを提示する
+    assert.match(r.stderr, new RegExp(`--watch-pid ${otherPid}\\b`));
+    assert.match(r.stderr, /PID_DIED/);
+  });
+});
+
+// ── buildWatchPidCommand ─────────────────────────────────────────────────────
+
+test('buildWatchPidCommand: pidを含むコマンド文字列を組み立てる', () => {
+  const cmd = msgPoll.buildWatchPidCommand(12345);
+  assert.match(cmd, /--watch-pid 12345/);
+  assert.doesNotMatch(cmd, /--interval/);
+});
+
+test('buildWatchPidCommand: intervalSec指定時は--intervalを含む', () => {
+  const cmd = msgPoll.buildWatchPidCommand(12345, '5');
+  assert.match(cmd, /--interval 5/);
+});
+
+// ── --watch-pid モード（実プロセス起動） ─────────────────────────────────────
+
+test('--watch-pid: 監視対象PIDが生きている間は何も出力しない', () => {
+  const { spawnSync } = require('child_process');
+  const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
+  // テストランナー自身のPID（このテストの実行中は確実に生存）を監視対象にする。
+  // 短いタイムアウトで強制終了させ、その間に出力が無いことを確認する。
+  const r = spawnSync(process.execPath, [script, '--watch-pid', String(process.pid), '--interval', '1'],
+    { encoding: 'utf8', timeout: 2500 });
+  // タイムアウトでkillされる想定（生存中は自発的に終了しない）
+  assert.equal(r.stdout.trim(), '');
+});
+
+test('--watch-pid: 監視対象PIDが死んでいれば即座にPID_DIEDを出力してexit 0', () => {
+  const { spawnSync } = require('child_process');
+  const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
+  // 実行中のプロセスとほぼ確実に衝突しない、既に終了済みの子プロセスのPIDを使う
+  const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)'], { encoding: 'utf8' });
+  const deadPid = dead.pid;
+
+  const r = spawnSync(process.execPath, [script, '--watch-pid', String(deadPid), '--interval', '1'],
+    { encoding: 'utf8', timeout: 5000 });
+
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout.trim(), `PID_DIED:${deadPid}`);
+});
+
+test('--watch-pid: 不正なpid指定はexit 1', () => {
+  const { spawnSync } = require('child_process');
+  const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
+  const r = spawnSync(process.execPath, [script, '--watch-pid', 'not-a-number'], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /正の整数のPID/);
+});
+
 // ── --wait モード ───────────────────────────────────────────────────────────
 
 test('--once と --wait の同時指定は code 1', () => {

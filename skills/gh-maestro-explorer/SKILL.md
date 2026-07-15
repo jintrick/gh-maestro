@@ -26,6 +26,16 @@ wezterm send-text による通知はレイテンシ最適化のヒントに過�
 
 {{INBOX_POLL_MECHANISM}}
 
+**このポーリングはあなたの唯一の受信経路である。止まっている間、orchestratorからの指示は一切届かない。**
+
+上記の起動が「重複起動を検出しました」で失敗した場合、エラーメッセージ自体に、そのまま使える代替コマンド（`--watch-pid`）が示される。判断せず、示されたコマンドをそのままMonitorで`persistent: true`として起動すること。
+
+そのMonitorから `PID_DIED:<pid>` の通知を受け取ったら、受信経路が停止したことを意味する。以下で残骸を安全に停止してから、通常のポーリング（`{{INBOX_POLL_MECHANISM}}`の手順）を起動し直すこと：
+
+```sh
+node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE --worker-name $WORKER_NAME
+```
+
 指示を処理したら必ず `msg-send.js` で結果を返信すること。ack は不要（GitHub コメントとして永続化されるため）。
 
 ## ゴール
