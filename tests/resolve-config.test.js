@@ -121,14 +121,14 @@ test('resolveAgentConfig: ~/.gh-maestro/config.json の override がデフォル
   });
 });
 
-test('resolveAgentConfig: グローバルpwshラッパーのReview ManagerはClaudeを--printで起動する', () => {
+test('resolveAgentConfig: グローバルpwshラッパーのReview ManagerはClaudeをストリーム出力で起動する', () => {
   withTempHome(home => {
     writeConfig(home, {
       agents: {
         'claude-ds-pro': {
           command: 'pwsh',
           extraArgs: ['-Command', 'claude-ds-pro --dangerously-skip-permissions'],
-          execArgs: ['-Command', 'claude-ds-pro --dangerously-skip-permissions --print'],
+          execArgs: ['-Command', 'claude-ds-pro --dangerously-skip-permissions --print --output-format stream-json --verbose'],
         },
       },
     });
@@ -138,7 +138,7 @@ test('resolveAgentConfig: グローバルpwshラッパーのReview ManagerはCla
       systemPromptText: 'review',
     });
     assert.deepEqual(args, [
-      'pwsh', '-Command', 'claude-ds-pro --dangerously-skip-permissions --print',
+      'pwsh', '-Command', 'claude-ds-pro --dangerously-skip-permissions --print --output-format stream-json --verbose',
       '--append-system-prompt-file', 'C:/tmp/review-manager-prompt.md', 'review',
     ]);
   });
