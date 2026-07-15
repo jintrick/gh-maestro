@@ -1,0 +1,12 @@
+#!/bin/sh
+# git post-checkout args: <prev-HEAD> <new-HEAD> <branch-checkout-flag>
+PREV_HEAD="$1"
+NEW_HEAD="$2"
+
+# 新規clone直後は prev-HEAD がヌルSHAになり diff が使えないため、
+# その場合は無条件で同期する（sync-rules.js は冪等なので安全）。
+if [ "$PREV_HEAD" = "0000000000000000000000000000000000000000" ]; then
+  node scripts/sync-rules.js
+elif git diff --name-only "$PREV_HEAD" "$NEW_HEAD" -- .claude/rules/ | grep -q .; then
+  node scripts/sync-rules.js
+fi
