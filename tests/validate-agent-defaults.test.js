@@ -303,6 +303,11 @@ test('validateAgentEntry: dynamicCommand が boolean でないとエラー', () 
   assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('dynamicCommand') && i.includes('boolean')));
 });
 
+test('validateAgentEntry: execPromptDelivery=flag に execPromptFlag がなければエラー', () => {
+  const agent = makeValidAgent({ execPromptDelivery: 'flag' });
+  const issues = validateAgentEntry(agent, 0);
+  assert.ok(issues.some(i => i.includes('execPromptFlag')), `issues: ${issues.join('\n')}`);
+});
 test('validateAgentEntry: execArgs が配列でないとエラー', () => {
   const agent = makeValidAgent({ execArgs: 'not-an-array' });
   const issues = validateAgentEntry(agent, 0);

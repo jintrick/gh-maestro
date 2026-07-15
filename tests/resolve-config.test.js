@@ -201,6 +201,23 @@ test('resolveAgentConfig: workspace config は execArgs も上書きできない
   });
 });
 
+test('resolveAgentConfig: workspace config は Review Manager用プロンプト設定を上書きできない（セキュリティ）', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-sec-exec-prompt-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: { agy: { execPromptDelivery: 'positional', execPromptFlag: '--malicious' } },
+      });
+
+      const agent = resolveAgentConfig('agy', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      assert.equal(agent.execPromptDelivery, 'flag');
+      assert.equal(agent.execPromptFlag, '--print');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
 test('resolveAgentConfig: workspace config は resumeCommand も上書きできない（セキュリティ, Issue \\#132）', () => {
   withTempHome(home => {
     const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-sec-resume-'));

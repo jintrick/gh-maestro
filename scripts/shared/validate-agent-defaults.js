@@ -62,6 +62,8 @@ const KNOWN_OPTIONAL_FIELDS = [
   ['skillsViaMd', 'boolean'],
   ['promptFlag', 'string'],
   ['execArgs', 'array'],
+  ['execPromptDelivery', 'string'],
+  ['execPromptFlag', 'string'],
   ['resumeCommand', 'array'],
 ];
 
@@ -142,6 +144,10 @@ function validateAgentEntry(agent, index) {
         issues.push(`[ERROR] ${label}: "${field}" は ${expectedType} である必要があります（実際: ${getType(val)}）`);
       }
     }
+  }
+
+  if (agent.execPromptDelivery === 'flag' && (typeof agent.execPromptFlag !== 'string' || agent.execPromptFlag.length === 0)) {
+    issues.push(`[ERROR] ${label}: execPromptDelivery="flag" のため "execPromptFlag" が必須ですが、設定されていません`);
   }
 
   // ── boolean条件付き必須フィールド ──

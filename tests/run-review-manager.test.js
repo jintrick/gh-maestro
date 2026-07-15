@@ -11,7 +11,7 @@ const os = require('os');
 // （.claude/rules/test-process-spawn-safety.md 準拠）。
 const {
   resolveMode, buildPrompt, digestText, writeRunMetadata,
-  runAgentHeadless, runAgentVisible, buildVisiblePaneArgs,
+  buildReviewManagerAgentArgs, runAgentHeadless, runAgentVisible, buildVisiblePaneArgs,
 } = require('../scripts/run-review-manager');
 const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'run-review-manager.js');
@@ -140,6 +140,22 @@ test('runAgentHeadless: 軽量コマンドの終了コードをそのまま返�
   const result = runAgentHeadless([process.execPath, '-e', 'process.exit(0)'], tmpBase);
   assert.equal(result.status, 0);
 });
+test('buildReviewManagerAgentArgs: AntigravityはRMで--printを使い通常の-iを使わない', () => {
+  const defaults = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'agent-defaults.json'), 'utf8'));
+  const agent = defaults.agents.find(entry => entry.id === 'agy');
+  const args = buildReviewManagerAgentArgs(agent, {
+    reviewWtDir: 'C:\\review-worktree',
+    promptFile: 'C:\\tmp\\review-manager.md',
+    skill: 'gh-maestro-reviewer',
+  });
+
+  assert.deepEqual(args, [
+    'agy', '--dangerously-skip-permissions', '--print-timeout', '30m0s',
+    '--print', 'Read C:/tmp/review-manager.md and execute it.',
+  ]);
+  assert.ok(!args.includes('-i'));
+});
+
 
 test('runAgentVisible: WEZTERM_PANE未設定ならwezterm等を呼ばずnullを返す（headlessへフォールバック）', () => {
   const originalPane = process.env.WEZTERM_PANE;

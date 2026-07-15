@@ -203,6 +203,30 @@ function teardownReviewWorktree(workspace, pr, log) {
 }
 
 /**
+ * Review Manager用の非対話起動argvを組み立てる。
+ * 通常ワーカー用のプロンプト配送を維持したまま、execPromptDeliveryがあればRMだけで使う。
+ *
+ * @param {object} agentConfig
+ * @param {{reviewWtDir: string, promptFile: string, skill: string}} options
+ * @returns {string[]}
+ */
+function buildReviewManagerAgentArgs(agentConfig, { reviewWtDir, promptFile, skill }) {
+  const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
+    .map(a => a.replace(/\{workspace\}/g, reviewWtDir));
+
+  return buildAgentCommandArgs({
+    ...agentConfig,
+    extraArgs,
+    promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
+    promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
+  }, {
+    promptFile,
+    shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
+    systemPromptText: `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
+  });
+}
+
+/**
  * headless（既定）でエージェントを起動し、完了まで同期ブロックする。
  * @param {string[]} agentArgs
  * @param {string} cwd
@@ -323,7 +347,7 @@ function sleepSync(ms) {
 module.exports = {
   resolveMode, buildPrompt, digestText, writeRunMetadata,
   setupReviewWorktree, teardownReviewWorktree,
-  runAgentHeadless, runAgentVisible, buildVisiblePaneArgs,
+  buildReviewManagerAgentArgs, runAgentHeadless, runAgentVisible, buildVisiblePaneArgs,
 };
 
 if (require.main === module) {
@@ -469,13 +493,10 @@ if (require.main === module) {
         log(`エージェント "${agentId}" の設定を解決できません（agent-defaults.json / config.json を確認してください）`);
         exitCode = 1;
       } else {
-        const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
-          .map(a => a.replace(/\{workspace\}/g, reviewWtDir));
-
-        const agentArgs = buildAgentCommandArgs({ ...agentConfig, extraArgs }, {
+        const agentArgs = buildReviewManagerAgentArgs(agentConfig, {
+          reviewWtDir,
           promptFile,
-          shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
-          systemPromptText: `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
+          skill,
         });
 
         const visible = resolveReviewManagerVisible({ workspace, homedir });
