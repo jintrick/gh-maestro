@@ -9,6 +9,7 @@ const path = require('path');
 const supervisor = require('../scripts/inbox-supervisor');
 const { spawnSync } = require('../scripts/child-process');
 const { weztermCli } = require('../scripts/wezterm-cli');
+const paneLaunch = require('../scripts/shared/pane-launch');
 
 // ── テストヘルパー ────────────────────────────────────────────────────────
 
@@ -28,13 +29,26 @@ function withTempDir(fn) {
   }
 }
 
-/** 最小限の .gh-maestro 環境をセットアップ */
+/**
+ * 最小限の .gh-maestro 環境をセットアップする。
+ *
+ * opts.workers を指定した場合、resume経由の配送テストがそのまま使えるよう
+ * （1）orchestratorのpaneIdが未指定なら既定値を補い、
+ * （2）各worker（orchestrator除く）のworktreeディレクトリを自動作成する。
+ * WezTermへのテキスト注入は廃止し配送は常にresume（ペイン起動）のみを
+ * 経路とするため、resumeが辿る前提条件をテストのセットアップ側で満たしておく。
+ */
 function setupWorkspace(dir, opts = {}) {
   const maestroDir = path.join(dir, '.gh-maestro');
   fs.mkdirSync(maestroDir, { recursive: true });
 
   if (opts.workers) {
-    fs.writeFileSync(path.join(maestroDir, 'workers.json'), JSON.stringify(opts.workers, null, 2));
+    const workers = { orchestrator: { paneId: '1' }, ...opts.workers };
+    fs.writeFileSync(path.join(maestroDir, 'workers.json'), JSON.stringify(workers, null, 2));
+    for (const name of Object.keys(opts.workers)) {
+      if (name === 'orchestrator') continue;
+      fs.mkdirSync(path.join(maestroDir, 'worktrees', name), { recursive: true });
+    }
   }
 
   if (opts.cursors) {
@@ -87,15 +101,22 @@ function resetGhRepoView() {
 /** wezterm mocks の実実装にリセット */
 function resetWeztermMocks() {
   supervisor._setWeztermListPanes((opts) => weztermCli('cli', 'list', '--format', 'json'));
-  supervisor._setWeztermSendText((paneId, text, opts) =>
-    weztermCli('cli', 'send-text', '--pane-id', String(paneId), '--no-paste', text));
 }
 
 /** 全モックを実実装にリセット */
+/** resumeによるペイン起動が既定で成功するようにpane-launch側のモックを設定する */
+function resetPaneLaunchMocks() {
+  paneLaunch._setWeztermSplitPane(() => ({ status: 0, stdout: '999', stderr: '' }));
+  paneLaunch._setWeztermKillPane(() => ({ status: 0, stdout: '', stderr: '' }));
+  paneLaunch._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
+  paneLaunch._setSleep(() => {});
+}
+
 function resetAllMocks() {
   resetGhRepoView();
   resetGhApiComments();
   resetWeztermMocks();
+  resetPaneLaunchMocks();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -371,79 +392,23 @@ describe('isPaneAlive', () => {
 // formatMessageForAgent
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('formatMessageForAgent', () => {
-  test('メッセージを整形する', () => {
-    const text = supervisor.formatMessageForAgent({
-      workerName: 'issue-5-fix',
-      message: { from: 'orchestrator', body: '修正をお願いします。' },
-    });
-
-    assert.ok(text.includes('[gh-maestro inbox]'));
-    assert.ok(text.includes('orchestrator'));
-    assert.ok(text.includes('issue-5-fix'));
-    assert.ok(text.includes('修正をお願いします。'));
-    assert.ok(text.includes('msg-send.js'));
-  });
-
-  test('body が空でも動作する', () => {
-    const text = supervisor.formatMessageForAgent({
-      workerName: 'w',
-      message: { from: 'orch', body: '' },
-    });
-    assert.ok(text.includes('[gh-maestro inbox]'));
-  });
-
-  test('\\r\\n 改行対応（inbox-adapter-crlf-handling ルール準拠）', () => {
-    const text = supervisor.formatMessageForAgent({
-      workerName: 'w',
-      message: { from: 'orch', body: 'line1\r\nline2\r\nline3' },
-    });
-    assert.ok(text.includes('line1'));
-    assert.ok(text.includes('line2'));
-    assert.ok(text.includes('line3'));
-  });
-});
-
 // ═══════════════════════════════════════════════════════════════════════════
-// deliverToRunningAgent / deliverMessage / formatDeliveryText
+// deliverMessage
 // ═══════════════════════════════════════════════════════════════════════════
+//
+// 稼働中ペインへのテキスト注入（send-text）による配送は廃止した（実障害:
+// 2026-07-15、WezTermは起動基盤としてのみ使うという設計原則に反していた）。
+// 配送は常にresume（プロセスの起動/再開）のみを経路とする。
 
 describe('Delivery', () => {
   beforeEach(() => resetWeztermMocks());
 
-  test('deliverToRunningAgent: 成功時は success:true', () => {
-    supervisor._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
-
-    const result = supervisor.deliverToRunningAgent({
-      paneId: '123',
-      text: 'formatted message',
-    });
-
-    assert.equal(result.success, true);
-    assert.equal(result.method, 'send-text');
-  });
-
-  test('deliverToRunningAgent: wezterm 失敗時は success:false', () => {
-    supervisor._setWeztermSendText(() => ({
-      status: 1, stdout: '', stderr: 'pane not found',
-    }));
-
-    const result = supervisor.deliverToRunningAgent({
-      paneId: '999',
-      text: 'formatted message',
-    });
-
-    assert.equal(result.success, false);
-    assert.ok(result.error.includes('pane not found'));
-  });
-
-  test('deliverMessage: ペイン生存時は send-text を試みる', () => {
+  test('deliverMessage: ペイン生存時は稼働中とみなしpending（送信しない）', () => {
     supervisor._setWeztermListPanes(() => ({
       status: 0,
       stdout: JSON.stringify([{ pane_id: 123 }]),
       stderr: '',
     }));
-    supervisor._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
 
     const result = supervisor.deliverMessage({
       workerName: 'w', paneId: '123', agentId: null,
@@ -451,8 +416,9 @@ describe('Delivery', () => {
       homedir: '/home/user', issue: '5',
     });
 
-    assert.equal(result.success, true);
-    assert.equal(result.method, 'send-text');
+    assert.equal(result.success, false);
+    assert.equal(result.method, 'pending');
+    assert.ok(result.error.includes('alive'));
   });
 
   test('deliverMessage: ペイン非生存時は pending', () => {
@@ -481,29 +447,6 @@ describe('Delivery', () => {
 
     assert.equal(result.success, false);
     assert.equal(result.method, 'pending');
-  });
-
-  test('formatDeliveryText: Adapter 未解決時はフォールバックする', () => {
-    const text = supervisor.formatDeliveryText({
-      workerName: 'w',
-      message: { from: 'orch', body: 'hello' },
-      workspace: '/ws',
-      homedir: '/nonexistent',
-      issue: '5',
-    });
-
-    assert.ok(text.includes('[gh-maestro inbox]'));
-    assert.ok(text.includes('orch'));
-    assert.ok(text.includes('hello'));
-  });
-
-  test('resolveAdapterSafe: agentId が null なら null', () => {
-    assert.equal(supervisor.resolveAdapterSafe(null, '/ws', '/home'), null);
-  });
-
-  test('resolveAdapterSafe: 存在しない agentId なら null', () => {
-    // 存在しないagentId → resolveAgentConfig が null → resolveAdapterSafe も null
-    assert.equal(supervisor.resolveAdapterSafe('nonexistent-agent', '/ws', '/home'), null);
   });
 });
 
@@ -754,10 +697,10 @@ describe('runOnce scan and deliver cycle', () => {
         body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test',
       },
     ]));
+    // ペインは非生存（休止中）とし、resume経由で配送させる
     supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: 456 }]), stderr: '',
+      status: 0, stdout: JSON.stringify([]), stderr: '',
     }));
-    supervisor._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
@@ -794,10 +737,10 @@ describe('runOnce scan and deliver cycle', () => {
         body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test 2',
       },
     ]));
+    // ペインは非生存（休止中）とし、resume経由で配送させる
     supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: 456 }]), stderr: '',
+      status: 0, stdout: JSON.stringify([]), stderr: '',
     }));
-    supervisor._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
@@ -831,10 +774,11 @@ describe('runOnce scan and deliver cycle', () => {
         body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test',
       },
     ]));
-    // ペイン非生存 → 配送失敗
+    // ペイン非生存 → resumeを試みるが、ペイン起動自体が失敗する
     supervisor._setWeztermListPanes(() => ({
       status: 0, stdout: JSON.stringify([]), stderr: '',
     }));
+    paneLaunch._setWeztermSplitPane(() => ({ status: 1, stdout: '', stderr: 'split boom' }));
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
@@ -861,10 +805,10 @@ describe('runOnce scan and deliver cycle', () => {
   test('pending の再試行で配送成功したら deliveredIds に移動', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
+    // ペインは非生存（休止中）とし、resume経由での再試行を成功させる
     supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: 456 }]), stderr: '',
+      status: 0, stdout: JSON.stringify([]), stderr: '',
     }));
-    supervisor._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
@@ -912,10 +856,10 @@ describe('runOnce scan and deliver cycle', () => {
         body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> re-fetched body content',
       },
     ]));
+    // ペインは非生存（休止中）とし、resume経由での再試行を成功させる
     supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: 456 }]), stderr: '',
+      status: 0, stdout: JSON.stringify([]), stderr: '',
     }));
-    supervisor._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
@@ -1085,10 +1029,10 @@ describe('runOnce scan and deliver cycle', () => {
       }
       return { status: 0, stdout: JSON.stringify([]), stderr: '' };
     });
+    // どちらのペインも非生存（休止中）とし、resume経由で配送させる
     supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: 111 }, { pane_id: 222 }]), stderr: '',
+      status: 0, stdout: JSON.stringify([]), stderr: '',
     }));
-    supervisor._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
@@ -1115,7 +1059,7 @@ describe('runOnce scan and deliver cycle', () => {
     });
   });
 
-  test('claude系（asynchronousNotification:true）はスキャン対象外— 検出もWezTerm送信も行わない', () => {
+  test('claude系（asynchronousNotification:true）はスキャン対象外— 検出もペイン起動も行わない', () => {
     // 実障害（2026-07-15）: claude系workerは自己ポーリングが唯一の正規配送経路のはずが、
     // deliverMessage()がworker種別を見ずペイン生存時に無条件でWezTerm送信していた。
     // フォールバックのつもりが無差別送信になっていたため、そもそもscanの段階で除外する。
@@ -1126,11 +1070,11 @@ describe('runOnce scan and deliver cycle', () => {
         body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> msg',
       },
     ]));
-    let sendTextCalled = false;
+    let splitPaneCalled = false;
     supervisor._setWeztermListPanes(() => ({
       status: 0, stdout: JSON.stringify([{ pane_id: 456 }]), stderr: '',
     }));
-    supervisor._setWeztermSendText(() => { sendTextCalled = true; return { status: 0, stdout: '', stderr: '' }; });
+    paneLaunch._setWeztermSplitPane(() => { splitPaneCalled = true; return { status: 0, stdout: '999', stderr: '' }; });
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
@@ -1144,7 +1088,7 @@ describe('runOnce scan and deliver cycle', () => {
       r.runOnce();
 
       assert.ok(!r.lines.some(l => l.startsWith('DETECTED:issue-5-fix:')), 'claude系workerは検出対象に含まれない');
-      assert.equal(sendTextCalled, false, 'claude系workerにWezTerm送信してはならない');
+      assert.equal(splitPaneCalled, false, 'claude系workerに対してWezTermペインを起動してはならない');
 
       const lastLine = r.lines[r.lines.length - 1];
       // workers.size（読み込まれたworker数）は1のままだが、検出数（totalDetected）は0のまま
@@ -1162,10 +1106,10 @@ describe('Reliability: restart continuity', () => {
 
   test('再起動後もカーソルから継続できる', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    // ペインは非生存（休止中）とし、resume経由で配送させる
     supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: 456 }]), stderr: '',
+      status: 0, stdout: JSON.stringify([]), stderr: '',
     }));
-    supervisor._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
 
     // 1回目の run: コメント 700 を配送
     supervisor._setGhApiComments(mockGhApiComments([
@@ -1225,11 +1169,10 @@ describe('Reliability: restart continuity', () => {
   test('未配送メッセージが再起動後も pending に残りリトライされる', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    // 再試行時はペイン復活
+    // 再試行時もペインは非生存（休止中）のままとし、resume経由で配送させる
     supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: 456 }]), stderr: '',
+      status: 0, stdout: JSON.stringify([]), stderr: '',
     }));
-    supervisor._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
 
     withTempDir((dir) => {
       setupWorkspace(dir, {

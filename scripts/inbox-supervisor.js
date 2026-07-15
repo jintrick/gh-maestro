@@ -108,10 +108,6 @@ let _weztermListPanes = (opts = {}) => {
   return weztermCli('cli', 'list', '--format', 'json');
 };
 
-let _weztermSendText = (paneId, text, opts = {}) => {
-  return weztermCli('cli', 'send-text', '--pane-id', String(paneId), '--no-paste', text);
-};
-
 // ── 状態管理 ──────────────────────────────────────────────────────────────
 
 /**
@@ -242,70 +238,13 @@ function isPaneAlive(paneId) {
 }
 
 // ── 配送 ──────────────────────────────────────────────────────────────────
-
-/**
- * Adapter を安全に解決する。失敗時は null を返す。
- *
- * session-resume 戦略のエージェント（reasonix/agy/codex）は
- * session-resume-adapter.js で提供される。
- *
- * @param {string} agentId
- * @param {string} workspace
- * @param {string} homedir
- * @returns {object|null} InboxAdapter または null
- */
-function resolveAdapterSafe(agentId, workspace, homedir) {
-  if (!agentId) return null;
-  try {
-    const agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
-    if (!agentConfig) return null;
-    return resolveAdapter(agentConfig);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * 配送用テキストを整形する。
- * Adapter が利用可能な場合は adapter.deliverMessage() を使い、
- * 利用不能な場合は formatMessageForAgent() にフォールバックする。
- *
- * @param {object} params
- * @param {string} params.workerName
- * @param {object} params.message    - { from, body }
- * @param {string} params.workspace
- * @param {string} params.homedir
- * @param {string} params.issue      - Issue 番号（文字列）
- * @param {object|null} params.adapter - 事前解決済みの Adapter（省略時は内部で解決）
- * @returns {string}
- */
-function formatDeliveryText({ workerName, message, workspace, homedir, issue, adapter }) {
-  const resolvedAdapter = adapter || resolveAdapterSafe(
-    workerName, // agentId は workerName からは直接引けないが、呼び出し元が agentId を渡す前提
-    workspace,
-    homedir,
-  );
-
-  if (resolvedAdapter) {
-    try {
-      const scriptsPath = path.join(homedir, '.gh-maestro', 'scripts');
-      const result = resolvedAdapter.deliverMessage(message, {
-        scriptsPath,
-        workerName,
-        issue,
-        workspace,
-      });
-      if (result && typeof result.prompt === 'string') {
-        return result.prompt;
-      }
-    } catch {
-      // Adapter 配送失敗 → フォールバック
-    }
-  }
-
-  // フォールバック: 直接フォーマット
-  return formatMessageForAgent({ workerName, message });
-}
+//
+// WezTermペインへのテキスト送信（send-text）は「稼働中のプロセスへの通知の
+// 入力注入」であり、送信してもEnter/terminatorを伴わなければ配送されたことに
+// ならず、伴わせて実装しても「起動基盤としてのみ使う」という設計原則に反する。
+// 配送は常にプロセスの起動/再開（resume。launchAgentInPaneによるペイン生成）
+// のみを経路とする。稼働中（isPaneAlive）のワーカーには一切書き込まず、
+// 休止するのを待って次のスキャンサイクルでresumeする。
 
 /**
  * 休止中（ペイン非生存）のセッション再開系ワーカーを resume() で復帰させ、メッセージを配送する。
@@ -397,9 +336,11 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
 /**
  * メッセージをエージェントに配送する。
  *
- * 稼働中のエージェント（ペイン生存）には wezterm cli send-text で配送する。
- * 休止中のエージェントは、セッション再開系（reasonix/agy/codex）であれば resume() で
- * 復帰させてから配送する。それ以外（claude系等）は配送を保留し、pending に記録する。
+ * 対象は runOnce() のスキャン段階で asynchronousNotification:true（claude系）
+ * が既に除外されているため、ここに来るのは全てセッション再開系（reasonix/agy/codex）。
+ * 稼働中（ペイン生存 = タスク処理中）のワーカーには一切書き込まず、休止するのを
+ * 待って次のスキャンサイクルで resume() 経由で配送する。稼働中ペインへの
+ * テキスト注入は行わない（配送経路はプロセスの起動/再開のみ）。
  *
  * @param {object} params
  * @param {string} params.workerName
@@ -413,10 +354,11 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
  */
 function deliverMessage({ workerName, paneId, agentId, message, workspace, homedir, issue }) {
   if (paneId && isPaneAlive(paneId)) {
-    // Adapter を解決し、エージェント種別に応じた配送テキストを整形
-    const adapter = resolveAdapterSafe(agentId, workspace, homedir);
-    const text = formatDeliveryText({ workerName, message, workspace, homedir, issue, adapter });
-    return deliverToRunningAgent({ paneId, text });
+    return {
+      success: false,
+      method: 'pending',
+      error: `pane ${paneId} is alive (worker busy) — waiting for it to become idle for resume delivery`,
+    };
   }
 
   const resumeResult = tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir });
@@ -430,63 +372,6 @@ function deliverMessage({ workerName, paneId, agentId, message, workspace, homed
     method: 'pending',
     error: `pane ${paneId || '(none)'} is not alive — queued for resume`,
   };
-}
-
-/**
- * 稼働中のエージェントのペインにテキストを送信する。
- *
- * @param {object} params
- * @param {string} params.paneId - WezTerm ペインID
- * @param {string} params.text   - 送信するテキスト（配送用に整形済み）
- * @returns {{ success: boolean, method: string, error?: string }}
- */
-function deliverToRunningAgent({ paneId, text }) {
-  try {
-    const result = _weztermSendText(paneId, text);
-    if (result.status !== 0) {
-      return {
-        success: false,
-        method: 'send-text',
-        error: `wezterm cli send-text failed (exit ${result.status}): ${(result.stderr || '').toString().trim()}`,
-      };
-    }
-    return { success: true, method: 'send-text' };
-  } catch (e) {
-    return {
-      success: false,
-      method: 'send-text',
-      error: `wezterm cli send-text error: ${e.message}`,
-    };
-  }
-}
-
-/**
- * エージェント向けのメッセージテキストを整形する（Adapter 未対応時のフォールバック）。
- * 外部由来の改行は \r\n 対応で分割する（inbox-adapter-crlf-handling ルール準拠）。
- *
- * @param {object} params
- * @param {string} params.workerName
- * @param {object} params.message   - { from, body }
- * @returns {string}
- */
-function formatMessageForAgent({ workerName, message }) {
-  const lines = [
-    '',
-    '[gh-maestro inbox] 新着メッセージを受信しました。',
-    `From: ${message.from || '(unknown)'}`,
-    `To: ${workerName}`,
-    '',
-  ];
-
-  if (message.body) {
-    lines.push(message.body);
-    lines.push('');
-  }
-
-  lines.push('このメッセージを処理してください。返信には msg-send.js を使用します。');
-  lines.push('');
-
-  return lines.join('\n');
 }
 
 // ── 再試行判定 ────────────────────────────────────────────────────────────
@@ -915,7 +800,6 @@ module.exports = {
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setWeztermListPanes: (fn) => { _weztermListPanes = fn; },
-  _setWeztermSendText: (fn) => { _weztermSendText = fn; },
   main,
   readCursor,
   writeCursor,
@@ -923,12 +807,8 @@ module.exports = {
   stateDir,
   loadWorkers,
   isPaneAlive,
-  resolveAdapterSafe,
-  formatDeliveryText,
   tryResumeAndDeliver,
   deliverMessage,
-  deliverToRunningAgent,
-  formatMessageForAgent,
   shouldRetry,
   USAGE,
 };
