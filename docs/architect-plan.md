@@ -1,49 +1,154 @@
-# gh-maestro Architect 導入計画書
+  # gh-maestro Architect 導入計画書
 
-## 1. 目的と責務
-要求仕様のブラッシュアップ、アーキテクチャ設計、設計変更に伴う **「計画書（Markdownファイル）」の作成**、および **「相談役（オーケストレーターからの設計判断相談へのアドバイス）」** を担うワーカーとして `gh-maestro-architect` を導入する。
+  ## 1. 目的
 
-* **受動的な動作**: 自発的に行動することは一切なく、常にオーケストレーターから明確に依頼された内容（相談や計画書作成タスク）のみをオンデマンドで処理する。
-* **出力・動作制限**: コードの変更、テストの実装、IssueやPR作成、事実調査などの余計な開発実務は一切行わず、成果物は計画書の出力または相談への回答に限定する。
-* **モデル選定はこの計画の対象外**: `gh-maestro-architect` が使うエージェントは、既存の `agent-defaults.json` 定義済みエージェント（`claude` / `claude-ds` / `claude-ds-pro` / `agy` / `reasonix` / `codex`）から `skillAgentMap` でユーザーが選択する。新しいエージェントID（`claude-fable` 等、将来PowerShell関数として個別定義予定のもの）をこの計画で追加することはしない。
+  `gh-maestro-architect` は、確定した要件定義を満たすための実装計画を作るオンデマンドワーカーである。
 
-## 2. 変更・追加対象ファイル
+  人間と orchestrator が「何を実現するか」を決め、architect は「その要件をどう実現するか」を深く検討する。高い設計能力
+  を持つモデルを使い、出力形式を固定しないことで、設計上の論点、代替案、実装順序、リスクを必要な粒度で表現できるように
+  する。
 
-### ① `skills/gh-maestro-architect/SKILL.md` (新規)
-上記目的・責務を指示するスキル定義。成果物の提出や相談への回答は、既存の msg-bus 経由（`scripts/msg-send.js`）で orchestrator へ送るルールを定義する。計画書本体はワークスペース内のMarkdownファイルとして出力し、msg-send で送るのはそのファイルパスの通知のみとする（本文をメッセージに直接載せない）。
+  architect は独立した意思決定者ではない。Issue の優先順位、要件の採否、実装開始、マージの判断は、引き続き人間と
+  orchestrator が所有する。
 
-### ② `scripts/agent-defaults.json` の更新
-`skillAgentMap` に `gh-maestro-architect` のデフォルトエントリを追加する。デフォルト値は既存エージェントの中から選ぶ（例: `claude`）。新規エージェント定義の追加は不要。
+  ## 2. 責務と非責務
 
-```json
-{
-  "skillAgentMap": {
-    "gh-maestro-architect": "claude"
+  ### architect の責務
+
+  - orchestrator が確定した要件定義と調査コンテクストを読み、実装計画を検討する。
+  - 実装方針、変更箇所、依存関係、作業順序、技術的リスク、検証観点を自由形式で説明する。
+  - 要件間の矛盾、前提不足、実現困難な制約を見つけた場合、要件を勝手に変えず、根拠と影響を明記して差し戻す。
+  - 成果物を対象 GitHub Issue のコメントとして投稿し、設計過程を GitHub に恒久的に残す。
+
+  ### architect の非責務
+
+  - 要件定義の変更、スコープ縮小、優先順位付け、実装開始の決定。
+  - リポジトリを自律探索して不足コンテクストを埋めること。
+  - コード、テスト、設定、Issue、PR の作成・変更。
+  - coder への直接指示、PR のレビュー、マージ可否の判定。
+
+  調査が不足している場合、architect は必要な調査を質問または依頼として返す。orchestrator が explorer または
+  investigator を起動し、その結果を圧縮して architect に再投入する。
+
+  ## 3. 要件定義を不変の入力契約にする
+
+  architect への主入力は「相談内容」ではなく、orchestrator が人間と合意した **要件定義** である。要件定義は対象 Issue
+  本文の明確な節として管理し、architect はこれを実装上の契約として扱う。
+
+  要件定義には、少なくとも以下を含める。
+
+  - 目的
+  - 実現すべき振る舞い
+  - 制約
+  - 対象外
+  - 受け入れ条件
+  - 既決事項
+  - 明示された未決事項
+
+  architect は要件を再解釈して別の問題へ置き換えてはならない。要件を満たせない、または変更した方がよいと考える場合は、
+  実装計画とは区別して「要件変更が必要な理由」として提示する。採否は人間と orchestrator が決める。
+
+  orchestrator が architect のコメントを受けて Issue 本文を更新するときも、要件定義を architect の提案へ合わせて書き換
+  えない。人間との合意による要件改訂だけが要件定義を変更できる。architect の出力から統合できるのは、実装方針、作業分
+  割、検証方法などである。
+
+  ## 4. 入出力と永続化
+
+  ### 入力
+
+  orchestrator は architect に、次を一つのコンテクストパケットとして渡す。
+
+  - 対象 Issue の番号と URL
+  - Issue 本文にある、現時点で確定した要件定義
+  - 要件に関連する既決事項と未決事項
+  - explorer/investigator が収集した事実を、必要十分な範囲へ圧縮した調査結果
+  - architect に答えてほしい設計上の問い。問いがなければ「要件を満たす実装計画の作成」とする
+
+  生の会話ログ、大量のファイル内容、未選別の探索結果をそのまま渡さない。リポジトリの事実収集は architect の責務ではな
+  く、orchestrator が起動する調査ワーカーの責務である。
+
+  ### 出力
+
+  architect の出力は **自由形式の Markdown** とする。JSON、定型見出し、機械パース可能なスキーマは要求しない。モデルが
+  要件に応じて最も有用な設計表現を選べることを優先する。
+
+  ただし、読み手が要件への対応を追跡できるよう、skill は自然言語で次の観点を求める。
+
+  - 要件をどのように満たすか
+  - 重要な判断と、その根拠、代替案、トレードオフ
+  - 実装時に変更すべき領域と、おおまかな実施順序
+  - リスク、未解決事項、追加調査または人間の判断が必要な点
+
+  出力は対象 Issue にコメントとして直接投稿する。ローカルの Markdown ファイルを正本にせず、メッセージバスへ本文やファ
+  イルパスだけを送る方式も採用しない。GitHub 上のコメントが設計過程の正本である。
+
+  ## 5. 実行フロー
+
+  1. 人間が orchestrator に実装の相談を持ちかける。
+  2. orchestrator が起点となる GitHub Issue を作成し、人間との対話を通じて要件定義を Issue 本文に確定する。
+  3. orchestrator は要件定義に必要な事実だけを explorer または investigator へ依頼し、結果を圧縮する。
+  4. orchestrator が要件定義と調査コンテクストを architect に渡して起動する。
+  5. architect が対象 Issue に自由形式の実装計画、または不足情報・要件上の矛盾をコメントする。
+  6. 不足情報があれば orchestrator が調査または人間との要件確認を行い、必要に応じて architect を再起動する。
+  7. orchestrator が architect の設計記録を読み、要件定義を保持したまま Issue 本文の実装方針・作業分割・検証条件を整え
+  る。
+  8. orchestrator が確定した Issue 本文を coder へ渡し、既存の実装フローへ移行する。
+
+  coder の入力契約は architect コメントそのものではなく、orchestrator が統合した Issue 本文とする。これにより、設計メ
+  モ中の保留案や代替案を coder が確定事項と誤認しない。
+
+  ## 6. 実装上の要件
+
+  ### スキル
+
+  `skills/gh-maestro-architect/SKILL.md` を追加する。以下を明記する。
+
+  - 要件定義を変更しない。
+  - 調査・実装を自律的に行わない。
+  - 自由形式の結果を対象 Issue コメントへ投稿する。
+  - 情報不足時は質問または調査要求を返す。
+  - Issue コメントの投稿成功を完了条件とする。
+
+  ### ワーカー起動
+
+  既存の共有ワーカー起動経路を使う。architect 専用の起動スクリプトや個別の agent 解決ロジックは追加しない。
+
+  `skillAgentMap` に `gh-maestro-architect` を追加し、使用モデルは既存のエージェント設定機構で選択可能にする。既定値
+  は、高品質な設計検討に適した `codex` とする。
+
+  ```json
+  {
+    "skillAgentMap": {
+      "gh-maestro-architect": "codex"
+    }
   }
-}
-```
 
-### ③ 解決ロジックの追加実装は不要
-`skillAgentMap` / エージェント設定の解決優先度（`workspace/.gh-maestro/config.json` > `~/.gh-maestro/config.json` > `agent-defaults.json`）は `scripts/shared/resolve-config.js`（`resolveSkillAgentMap` / `resolveAgentConfig`）としてすでに実装済みであり、`spawn-worker.js` も既にこれを利用している。ユーザーは以下のように `~/.gh-maestro/config.json` または `workspace/.gh-maestro/config.json` に `skillAgentMap` を書くだけで、`gh-maestro-architect` に割り当てるエージェントを既存の6種から選び直せる。
+  codex の具体的なモデル選択は既存のエージェント設定で管理する。architect 導入に合わせて、新しい CLI バイナリ名や特別
+  な起動経路を増やさない。
 
-```json
-{
-  "skillAgentMap": {
-    "gh-maestro-architect": "codex"
-  }
-}
-```
+  ### orchestrator
 
-### ④ `skills/gh-maestro-orchestrator/SKILL.md` の更新
-* 「ワーカーの使い分け」表に `gh-maestro-architect` を追加する。
-* 人間から「アーキテクトに相談しろ」「計画書を作らせろ」と指示された際、あるいはオーケストレーター自身が実装判断や設計面で迷った際に、`spawn-worker.js` を実行して `gh-maestro-architect` を起動するルールを追加する。
+  skills/gh-maestro-orchestrator/SKILL.md のワーカー使い分けと Issue 起票フローを更新する。
 
-## 3. 手順
-1. `scripts/agent-defaults.json` の `skillAgentMap` に `gh-maestro-architect` のデフォルトエントリを追記。
-2. `skills/gh-maestro-architect/SKILL.md` を新規作成。
-3. `skills/gh-maestro-orchestrator/SKILL.md` に連携ルールを追記。
-4. **`dev` ブランチにマージ後**、インストールスクリプトを実行し、配布物を更新する（WIPブランチから実行しない）。
-   ```sh
-   node scripts/install.js
-   ```
-5. `npm test` を実行してテストが正常に通ることを確認する。
+  architect を起動する前提は「要件定義が確定し、必要な調査コンテクストが揃っていること」とする。architect の設計コメン
+  トを受け取った後に要件定義を曲げない規則も明記する。
+
+  ### 再試行と追跡
+
+  architect 実行には対象 Issue と実行IDを紐付ける。起動失敗、コメント投稿失敗、途中終了を区別し、完了した実行を再試行
+  した際に同じ成果物を重複投稿しないようにする。
+
+  完了の判定は、対象 Issue への architect コメント投稿が成功したこととする。ワーカーのプロセス起動通知だけで完了扱いに
+  してはならない。
+
+  ## 7. 検証
+
+  - skillAgentMap による architect のエージェント解決をテストする。
+  - 既存共有ランチャーで architect を起動でき、CLI 引数が対象エージェントへ正しく渡ることを最小の実行経路で確認する。
+  - architect が Issue コメントの投稿に成功した場合だけ完了として記録されることを確認する。
+  - 投稿失敗、プロセス異常終了、再試行で、完了の誤検出や重複コメントが起きないことをテストする。
+  - orchestrator の skill に、要件定義を architect の提案で改変しない規則と、調査不足時の再調査フローが記載されている
+    ことを確認する。
+
+  実装変更後は npm test を実行する。skill、エージェント既定値、配布対象を変更した場合は、変更を dev にマージした後に限
+  り node scripts/install.js を実行する。
