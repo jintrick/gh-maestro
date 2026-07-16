@@ -87,7 +87,7 @@ test('buildLoginShellExecArgs: 終了フックはエージェント終了後に�
   assert.ok(decoded.includes("& 'node' '/tmp/record-execution-exit.js' '/tmp/workspace' 'exec-42' $exitCode"));
 
   const unixArgs = buildLoginShellExecArgs(['codex-pro', 'start'], 'linux', hook);
-  assert.ok(unixArgs[2].includes('shift 4'));
+  assert.ok(unixArgs[2].includes('shift 3'));
   assert.deepEqual(unixArgs.slice(3, 7), ['node', '/tmp/record-execution-exit.js', '/tmp/workspace', 'exec-42']);
   assert.deepEqual(unixArgs.slice(7), ['codex-pro', 'start']);
 });

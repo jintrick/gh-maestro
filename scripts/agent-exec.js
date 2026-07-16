@@ -54,7 +54,7 @@ function buildLoginShellExecArgs(agentCmdArgs, platform = process.platform, onEx
  */
 function buildBashLoginExecArgs(agentCmdArgs, onExit = null) {
   if (!onExit) return ['bash', '-lc', 'exec "$0" "$@"', ...agentCmdArgs];
-  return ['bash', '-lc', 'hook=$0; script=$1; workspace=$2; execution=$3; shift 4; "$@"; code=$?; "$hook" "$script" "$workspace" "$execution" "$code"; exit "$code"', onExit.command, ...onExit.args, ...agentCmdArgs];
+  return ['bash', '-lc', `hook=$0; script=$1; workspace=$2; execution=$3; shift ${onExit.args.length}; "$@"; code=$?; "$hook" "$script" "$workspace" "$execution" "$code"; exit "$code"`, onExit.command, ...onExit.args, ...agentCmdArgs];
 }
 
 /**
