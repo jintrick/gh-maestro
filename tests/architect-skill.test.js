@@ -14,9 +14,12 @@ test('architect skill は要件不変・直接コメント・成功時のみ完�
   assert.match(architectSkill, /自律的なリポジトリ探索/);
   assert.match(architectSkill, /--raw --execution-id/);
   assert.match(architectSkill, /投稿成功時だけ実行記録を完了/);
+  assert.match(architectSkill, /msg-send\.js" orchestrator/);
+  assert.match(architectSkill, /返答を待ち受けず/);
 });
 
 test('orchestrator skill は再調査と要件不変を明記する', () => {
   assert.match(orchestratorSkill, /必要な explorer\/investigator の再調査/);
   assert.match(orchestratorSkill, /要件本文を変更できるのは人間との合意/);
+  assert.match(orchestratorSkill, /既存の `msg-send\.js` 経路/);
 });
