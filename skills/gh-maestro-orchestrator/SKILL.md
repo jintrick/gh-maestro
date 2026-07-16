@@ -45,7 +45,7 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 |---|---|
 | ファイルの場所・関数の定義・grep結果・ログが知りたい | `gh-maestro-explorer` |
 | バグの根本原因・影響範囲・修正方針を特定したい | `gh-maestro-investigator` |
-| 確定済み要件と圧縮済み調査結果から、抽象設計の論点・選択肢を整理したい | `gh-maestro-architect`（「Architect 起動判断」を満たす場合だけ） |
+| 抽象設計の論点・選択肢を整理したい | `gh-maestro-architect` |
 | 局所的な実装・PR作成（コスト効率重視） | `gh-maestro-coder` |
 | 設計判断や広範囲の影響分析、高度な検証を伴う実装・PR作成 | `gh-maestro-senior-coder` |
 | 上記に当てはまらないが手を動かす仕事がある | `gh-maestro-base`（`--prompt-file`で役割を明示） |
@@ -69,9 +69,8 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 
 ### プロンプト入力の原則
 
-任意の役割・作業指示は、必ずファイルに書き出して `--prompt-file` で渡す。`--prompt` は廃止済みであり、使ってはならない。
-
-`--short-prompt` は、改行やシェル特殊文字を含まない200文字以下の短い補足メッセージだけに使える例外である。実装内容・調査内容・役割定義には使わない。迷った場合は必ず `--prompt-file` を使う。
+- 任意の役割・作業指示は、必ずファイルに書き出して `--prompt-file` で渡す。
+- 改行やシェル特殊文字を含まない200文字以下の短い補足メッセージの場合は、`--short-prompt` を使う。
 
 ```sh
 PROMPT_FILE=/tmp/worker-prompt-<N>-<desc>.md
@@ -190,10 +189,10 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 **大規模タスクの分割（アンチパターン / 正しいパターン）:**
 
 ```sh
-# NG: 1000件のLintエラーを1ワーカーに丸投げ
+# アンチパターン: 1000件のLintエラーを1ワーカーに丸投げ
 WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue <N> --prompt-file <prompt-file> ...)
 
-# OK: ディレクトリ単位で分割し並列実行
+# 正しいパターン: ディレクトリ単位で分割し並列実行
 W1=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <components-prompt-file> --issue 12 --description fix-components ...)
 W2=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <utils-prompt-file>      --issue 12 --description fix-utils ...)
 W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <hooks-prompt-file>      --issue 12 --description fix-hooks ...)
@@ -205,8 +204,8 @@ W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-f
 
 - **オーケストレーターは調査・実装コマンドを自分で実行しない。必ずワーカーに委譲する**
 - **`remove-worker.js` は、人間が削除を許可した後にだけ実行する。役割が完了していても、人間の許可なくワーカーを削除しない**
-- `BASE_BRANCH`は保護ブランチ（`main`/`master`/`develop`）でもworktreeブランチ（`issue-N-description`形式）でもない。セッション中に変更しない。起動時に保護ブランチ上にいた場合のみ、最初のIssue確定時に開発ブランチを切って設定する
-- `main`への直接pushは禁止
+- `BASE_BRANCH`は保護ブランチ（`main`/`master`）でもworktreeブランチ（`issue-N-description`形式）でもない。セッション中に変更しない。起動時に保護ブランチ上にいた場合のみ、最初のIssue確定時に開発ブランチを切って設定する
+- `main` / `master`への直接pushは禁止
 - `gh pr close`は1件ずつ実行する（複数引数を渡すと失敗する）
 
 ## 基本フロー
