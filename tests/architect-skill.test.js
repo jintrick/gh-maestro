@@ -33,4 +33,7 @@ test('orchestrator skill は要件確定、調査、architect、実装仕様確�
   assert.match(orchestratorSkill, /必要な explorer\/investigator の再調査/);
   assert.match(orchestratorSkill, /要件本文を変更できるのは人間との合意/);
   assert.match(orchestratorSkill, /既存の `msg-send\.js` 経路/);
+  assert.match(orchestratorSkill, /人間が削除を許可した後にだけ実行/);
+  assert.match(orchestratorSkill, /architect は対象 Issue がクローズされるまで任意の相談役として維持/);
+  assert.match(orchestratorSkill, /相談を開始するかどうか、その時機、相談内容は人間が決める/);
 });
