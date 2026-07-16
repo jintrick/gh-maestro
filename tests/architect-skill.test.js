@@ -23,11 +23,11 @@ test('architect skill は通信・完了・入力境界・手順・再試行を�
   assert.match(architectSkill, /orchestrator からの次の指示を受信/);
 });
 
-test('orchestrator skill は要件確定、調査、architect起動判断、実装仕様確定の順で基本フローを定義する', () => {
+test('orchestrator skill は要件確定、調査、architect起動判断、coder向け実装指示確定の順で基本フローを定義する', () => {
   const requirements = orchestratorSkill.indexOf('**要件確定**');
   const research = orchestratorSkill.indexOf('**必要な調査**');
   const architect = orchestratorSkill.indexOf('**Architect起動判断**');
-  const implementation = orchestratorSkill.indexOf('**実装仕様の確定**');
+  const implementation = orchestratorSkill.indexOf('**Coder向け実装指示の確定**');
   const coder = orchestratorSkill.indexOf('**Coder起動**');
   assert.ok(requirements < research && research < architect && architect < implementation && implementation < coder);
   assert.match(orchestratorSkill, /必要な explorer\/investigator の再調査/);
@@ -39,4 +39,7 @@ test('orchestrator skill は要件確定、調査、architect起動判断、実�
   assert.match(orchestratorSkill, /大規模リファクタリング/);
   assert.match(orchestratorSkill, /新規案件または新規機能/);
   assert.match(orchestratorSkill, /規模や新規性だけを理由に必須起動してはならない/);
+  assert.match(orchestratorSkill, /抽象設計の論点・選択肢・トレードオフ/);
+  assert.match(orchestratorSkill, /具体的な実装手順・コード調査/);
+  assert.doesNotMatch(orchestratorSkill, /gh-maestro-architect` \|.*実装計画/);
 });

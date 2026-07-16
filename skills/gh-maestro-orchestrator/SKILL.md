@@ -37,7 +37,7 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 
 オーケストレーターは、各ワーカー（スキル）の能力的な特長を理解し、タスクの性質に応じて適切なスキルを自律的に選択すること。各スキルにはデフォルトのエージェントが紐付けられているため、起動時に `--agent` を明示する必要はない。
 
-## 調査の委譲（必須）
+## ワーカー選択
 
 **「調べたい」という衝動が生まれた瞬間、自分でコマンドを打つ前にワーカーを起動せよ。**
 
@@ -45,7 +45,7 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 |---|---|
 | ファイルの場所・関数の定義・grep結果・ログが知りたい | `gh-maestro-explorer` |
 | バグの根本原因・影響範囲・修正方針を特定したい | `gh-maestro-investigator` |
-| 確定済み要件と調査結果から実装計画を検討したい | `gh-maestro-architect` |
+| 確定済み要件と圧縮済み調査結果から、抽象設計の論点・選択肢を整理したい | `gh-maestro-architect`（「Architect 起動判断」を満たす場合だけ） |
 | 局所的な実装・PR作成（コスト効率重視） | `gh-maestro-coder` |
 | 設計判断や広範囲の影響分析、高度な検証を伴う実装・PR作成 | `gh-maestro-senior-coder` |
 | 上記に当てはまらないが手を動かす仕事がある | `gh-maestro-base`（`--prompt-file`で役割を明示） |
@@ -102,7 +102,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH)
 ```
 
-explorerは**事実のみ報告する**（分析・判断は行わない）。investigatorは**根本原因・影響範囲・修正方針まで報告する**。両者の使い分けを誤らないこと。
+explorer は**事実のみ報告する**（分析・判断は行わない）。investigator は**根本原因・影響範囲・修正方針まで報告する**。architect は、確定済み要件と圧縮済みの事実を前提に、抽象設計の論点・選択肢・トレードオフを整理する任意の相談役である。具体的な実装手順、ファイル単位の変更、コード調査は coder の責務である。これらの使い分けを誤らないこと。
 
 ## アセット（`{{SCRIPTS_PATH}}/`）
 
@@ -170,7 +170,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 | `gh-maestro-senior-coder` | 高度な自己検証能力とアーキテクチャの整合性判断能力を持ち、広範な影響分析、複雑なロジック調整、設計判断を伴うタスクの解決に適している。 |
 | `gh-maestro-explorer` | 汎用的な事実調査（grep・コード探索・情報収集）。分析・判断は行わず、発見した事実を報告する。 |
 | `gh-maestro-investigator` | バグ原因の特定 → 根本原因・影響範囲・修正方針の報告（`--issue` が必須。アンカー Issue がなければ orchestrator が先に起票する）。 |
-| `gh-maestro-architect` | 確定済み要件と圧縮済み調査コンテクストから自由形式の実装計画を対象 Issue にコメントする。要件・優先順位・実装開始・マージは決めない。 |
+| `gh-maestro-architect` | 確定済み要件と圧縮済み調査コンテクストから、抽象設計の論点・選択肢・トレードオフを対象 Issue にコメントする任意の相談役。具体的な実装手順・コード調査・要件変更・優先順位・実装開始・マージは決めない。 |
 | `gh-maestro-base` | 上記以外の動的役職（必ず`--prompt-file`で役割を定義する）。 |
 
 ## セッションのゴール
@@ -212,10 +212,10 @@ W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-f
 ## 基本フロー
 
 1. **要件確定**: 人間と協働して対象 Issue を起草・作成し、目的・振る舞い・制約・対象外・受け入れ条件・既決事項・未決事項を Issue 本文で確定する。単独で要件を決めない。
-2. **必要な調査**: 確定した要件を入力として explorer または investigator に必要な事実だけを調査させ、結果を architect 向けに圧縮する。調査結果から要件を勝手に変更しない。
+2. **必要な調査**: 確定した要件を入力として explorer または investigator に必要な事実だけを調査させ、結果を統合可能な形に圧縮する。architect を起動する場合だけ、その圧縮結果を入力に使う。調査結果から要件を勝手に変更しない。
 3. **Architect起動判断**: 「Architect 起動判断」に従い、抽象的な設計判断が必要な場合だけ architect を起動する。不要ならこの工程を省略する。
 4. **抽象設計の検討**: architect を起動した場合だけ、確定済み要件と圧縮済み調査コンテクストを渡し、対象 Issue への設計コメントを得る。不足情報・矛盾が返ったら、調査または人間確認へ戻る。
-5. **実装仕様の確定**: 要件定義を保持したまま実装方針・作業分割・検証条件を Issue 本文へ統合する。architect を使った場合はコメントを検討材料にするが、coder の入力は architect コメントではなく、この確定済み Issue 本文である。
+5. **Coder向け実装指示の確定**: 要件定義を保持したまま実装方針・作業分割・検証条件を Issue 本文へ統合する。architect を使った場合はコメントを検討材料にするが、コードレベルの具体化は coder が worktree で行う。coder の入力は architect コメントではなく、この確定済み Issue 本文である。
 6. **Coder起動**: `spawn-worker.js --skill gh-maestro-coder --issue <N> --description <desc>` または `--skill gh-maestro-senior-coder` で実装ワーカーを起動する。タスクの特長（設計上の複雑さや影響の大きさなど）を自律的に判断してどちらを使用するか選択する。
 7. **PR検出**: 下記「PR検出」に従い、コーダーが作成したPRを自律検出する
 8. **レビュー監視**: PR番号取得後、下記「レビュー監視」に従い、レビューコメントとマージ状態を監視する
@@ -229,7 +229,7 @@ W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-f
 
 ### 既存パターンの事前調査（新規UI/ロジック実装・複数ファイルへの同一修正を伴うIssueで必須）
 
-確定済み要件に既存の設計判断・要件確認を伴う実装が含まれる場合（新規 UI コンポーネント、認証フロー、データ整形処理、または同種の修正を複数ファイルに横展開する場合など）は、architect 起動前に、類似の目的を持つ既存コンポーネント・パターン・共有ユーティリティ関数がコードベースに無いか `gh-maestro-explorer` に調査させること。「参考実装」として特定の1ファイルの実装だけを示すのではなく、`scripts/shared/` 配下等に既存の共有ヘルパーが無いかを必ず確認する。既存パターン・共有ヘルパーが見つかった場合は、その事実を圧縮済み調査コンテクストへ含め、architect の設計検討に渡す（PR #89 反省会: 既存の `scripts/shared/workspace.js::parseFlags` を調査せず、8スクリプトに独自パーサーが重複実装された）。
+確定済み要件に既存の設計判断・要件確認を伴う実装が含まれる場合（新規 UI コンポーネント、認証フロー、データ整形処理、または同種の修正を複数ファイルに横展開する場合など）は、類似の目的を持つ既存コンポーネント・パターン・共有ユーティリティ関数がコードベースに無いか `gh-maestro-explorer` に調査させること。「参考実装」として特定の1ファイルの実装だけを示すのではなく、`scripts/shared/` 配下等に既存の共有ヘルパーが無いかを必ず確認する。既存パターン・共有ヘルパーが見つかった場合は、その事実を圧縮して Issue 本文に統合し、Architect を起動する場合だけ設計検討にも渡す（PR #89 反省会: 既存の `scripts/shared/workspace.js::parseFlags` を調査せず、8スクリプトに独自パーサーが重複実装された）。
 
 ### Architect 起動判断
 
@@ -267,13 +267,13 @@ architect は対象 Issue がクローズされるまで任意の相談役とし
 
 ```sh
 WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
-  --skill gh-maestro-architect --issue <N> --description architect-plan \
+  --skill gh-maestro-architect --issue <N> --description abstract-design \
   --prompt-file <圧縮済み要件・調査コンテクストのファイル> \
   --execution-id issue-<N>-architect-<attempt> \
   --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH)
 ```
 
-architect の検討結果を踏まえて実装方針・作業分割・検証条件を Issue 本文へ統合した後、coder には architect コメントではなく、その確定済み Issue 本文だけを実装仕様として渡す。
+architect の検討結果を踏まえて実装方針・作業分割・検証条件を Issue 本文へ統合した後、coder には architect コメントではなく、その確定済み Issue 本文だけを実装指示として渡す。coder は必要なコード調査を worktree で行い、具体的な実装を組み立てる。
 
 ### Issue本文テンプレート（人間向け／コーダー向けの分離）
 
