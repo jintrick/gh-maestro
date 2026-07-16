@@ -23,10 +23,10 @@ test('architect skill は通信・完了・入力境界・手順・再試行を�
   assert.match(architectSkill, /orchestrator からの次の指示を受信/);
 });
 
-test('orchestrator skill は要件確定、調査、architect、実装仕様確定の順で基本フローを定義する', () => {
+test('orchestrator skill は要件確定、調査、architect起動判断、実装仕様確定の順で基本フローを定義する', () => {
   const requirements = orchestratorSkill.indexOf('**要件確定**');
   const research = orchestratorSkill.indexOf('**必要な調査**');
-  const architect = orchestratorSkill.indexOf('**Architect起動**');
+  const architect = orchestratorSkill.indexOf('**Architect起動判断**');
   const implementation = orchestratorSkill.indexOf('**実装仕様の確定**');
   const coder = orchestratorSkill.indexOf('**Coder起動**');
   assert.ok(requirements < research && research < architect && architect < implementation && implementation < coder);
@@ -36,4 +36,7 @@ test('orchestrator skill は要件確定、調査、architect、実装仕様確�
   assert.match(orchestratorSkill, /人間が削除を許可した後にだけ実行/);
   assert.match(orchestratorSkill, /architect は対象 Issue がクローズされるまで任意の相談役として維持/);
   assert.match(orchestratorSkill, /相談を開始するかどうか、その時機、相談内容は人間が決める/);
+  assert.match(orchestratorSkill, /大規模リファクタリング/);
+  assert.match(orchestratorSkill, /新規案件または新規機能/);
+  assert.match(orchestratorSkill, /規模や新規性だけを理由に必須起動してはならない/);
 });
