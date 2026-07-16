@@ -59,8 +59,14 @@ agents:
         - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → インラインコメントをトリアージする
         - `PR_COMMENT:<user>:<body>` → PR全体コメントをトリアージする
         - `PR_REVIEW:<user>:<state>:<body>` → stateに応じてレビュー提出をトリアージする
-      INBOX_POLL_INTERVAL_SECONDS: 2
+      INBOX_POLL_INTERVAL_SECONDS: 600
       INBOX_POLL_MECHANISM: |
-        `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE` を実行して inbox を監視する。
-        通知を受け取ったら以下の通り処理する:
-        - `NEW_MESSAGE:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。処理後は必ず `msg-send.js` で結果を返信すること
+        以下はinbox確認の手順定義であり、今すぐ実行するものではない。**本来の作業（Issueの実装等）に着手した後**、作業の合間・区切りのタイミングで都度この手順を呼び出すこと。作業開始前にこれを先に実行して待機してはならない。
+
+        手順: `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE --wait {{INBOX_POLL_INTERVAL_SECONDS}}` を通常のシェルコマンドとして実行し、完了を待つ（`npm test` 等の完了を待つのと同じ扱い）。**`--wait` を付けずに実行してはならない**（`--wait` なしの継続ポーリングモードは自然に終了しないブロッキングコマンドになる）。
+
+        このコマンドは、新着メッセージを1件検出するか {{INBOX_POLL_INTERVAL_SECONDS}} 秒経過するかのいずれか早い方で自然に終了する（内部的には既定間隔でリトライする）。1回の呼び出しで返る `NEW_MESSAGE` は常に高々1件（複数件たまっていても最も古い1件のみ）。
+
+        結果の処理：
+        - 出力に `NEW_MESSAGE:<commentId>` が出力されている場合 → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。`msg-send.js` で結果を返信してから、次の作業の区切りで再度この手順を呼び出す（未処理分が残っていれば次回の呼び出しで改めて返される）
+        - 新着なし（タイムアウトで終了）の場合 → 何もせず、次の作業の区切りで再度この手順を呼び出す
