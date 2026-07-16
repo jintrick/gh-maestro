@@ -90,6 +90,20 @@
       "asynchronousNotification": false,
       "sessionResume": true,
       "resumeCommand": ["exec", "resume", "--last"]
+    },
+    {
+      "id": "codex-pro",
+      "label": "Codex Pro (OpenAI)",
+      "command": "codex-pro",
+      "runtime": "codex",
+      "extraArgs": ["--no-alt-screen"],
+      "execArgs": ["exec", "--skip-git-repo-check", "--cd", "{workspace}", "--dangerously-bypass-approvals-and-sandbox"],
+      "promptDelivery": "positional",
+      "enterSequence": "\r\n",
+      "rulesSupported": false,
+      "asynchronousNotification": false,
+      "sessionResume": true,
+      "resumeCommand": ["exec", "resume", "--last"]
     }
   ],
   "skillAgentMap": {
@@ -98,6 +112,7 @@
     "gh-maestro-senior-coder": "claude-ds-pro",
     "gh-maestro-investigator": "reasonix",
     "gh-maestro-explorer": "agy",
-    "gh-maestro-reviewer": "codex"
+    "gh-maestro-reviewer": "codex",
+    "gh-maestro-architect": "codex-pro"
   }
 }

@@ -18,11 +18,12 @@ const { spawnSync } = require('child_process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { toWinPath } = require('./win-path');
 const { resolveTextInput } = require('./shared/text-input');
+const { markCommentResult, readRegistry } = require('./shared/execution-registry');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
 Usage: node msg-send.js <recipient> [--from <name>] [--issue <N>] [--workspace <path>] ["<本文>"]
-       node msg-send.js <recipient> --body-file <path> [--from <name>] [--issue <N>] [--workspace <path>]
+       node msg-send.js <recipient> --body-file <path> [--from <name>] [--issue <N>] [--workspace <path>] [--raw] [--execution-id <id>]
 
 Arguments:
   <recipient>           送信先（worker 名、または "orchestrator"）
@@ -34,6 +35,8 @@ Options:
   --workspace <path>    ワークスペースパス（省略時は環境変数またはCWDから解決）
   --body-file <path>    メッセージ本文を記載したファイルのパス（UTF-8）。改行・引用符等の特殊文字を含む本文は
                         シェルクォート問題を避けるためこちらを使用してください。指定された場合、位置引数の本文より優先されます。
+  --raw                 メッセージ用のマーカー・引用ヘッダーを付けず、本文をそのまま Issue コメントに投稿する。
+  --execution-id <id>  実行記録と紐付けるID。投稿成功時だけ completed として記録する。
 
 Output (stdout):
   投稿されたコメントの URL を1行出力
@@ -76,7 +79,10 @@ function main(argsOverride, envOverride) {
     return { code: 0, lines: out, errLines: err };
   }
 
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue', '--from', '--body-file']);
+  const rawIndex = args.indexOf('--raw');
+  const raw = rawIndex !== -1;
+  const parsedArgs = raw ? args.filter((_, index) => index !== rawIndex) : args;
+  const { values, rest, exitFlagMiss } = parseFlags(parsedArgs, ['--workspace', '--issue', '--from', '--body-file', '--execution-id']);
 
   if (exitFlagMiss) {
     writeErr('msg-send: フラグには値が必要です。');
@@ -165,21 +171,49 @@ function main(argsOverride, envOverride) {
   const marker = JSON.stringify({ v: 1, to: recipient, from });
   const directionIcon = from === 'orchestrator' ? '📤' : '📥';
   const humanHeader = `> ${directionIcon} **From:** \`${from}\` ➔ **To:** \`${recipient}\`\n>\n> ` + body.replace(/\n/g, '\n> ');
-  const fullBody = `<!-- gh-maestro ${marker} -->\n${humanHeader}`;
+  const fullBody = raw ? body : `<!-- gh-maestro ${marker} -->\n${humanHeader}`;
+  const executionId = values['--execution-id'];
+  if (executionId) {
+    try {
+      const execution = readRegistry(workspace)[executionId];
+      if (execution?.status === 'completed') {
+        writeOut(execution.commentUrl);
+        return { code: 0, lines: out, errLines: err };
+      }
+    } catch (e) {
+      writeErr(`msg-send: 実行記録を読み込めません: ${e.message}`);
+      return { code: 1, lines: out, errLines: err };
+    }
+  }
 
   // ── 送信 ────────────────────────────────────────────────────────────────
 
   const result = _ghIssueComment(issue, fullBody, ghOpts);
 
   if (result.status !== 0) {
+    if (executionId) {
+      try { markCommentResult(workspace, executionId, { error: result.stderr || '(empty)' }); } catch (_) {}
+    }
     writeErr(`msg-send: コメント投稿に失敗しました: ${result.stderr || '(empty)'}`);
     return { code: 1, lines: out, errLines: err };
   }
 
   const commentUrl = result.stdout.trim();
   if (!commentUrl) {
+    if (executionId) {
+      try { markCommentResult(workspace, executionId, { error: 'URLが取得できませんでした' }); } catch (_) {}
+    }
     writeErr('msg-send: コメント投稿は成功しましたがURLが取得できませんでした。');
     return { code: 1, lines: out, errLines: err };
+  }
+
+  if (executionId) {
+    try {
+      markCommentResult(workspace, executionId, { commentUrl });
+    } catch (e) {
+      writeErr(`msg-send: コメント投稿は成功しましたが実行記録を更新できませんでした: ${e.message}`);
+      return { code: 1, lines: out, errLines: err };
+    }
   }
 
   writeOut(commentUrl);

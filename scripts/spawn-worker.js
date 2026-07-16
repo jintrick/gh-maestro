@@ -15,6 +15,7 @@
 //     --workspace <path> \
 //     [--base-branch <branch>] \
 //     [--agent <id>]              # エージェントID。config.json > agent-defaults.json で解決（省略時はスキルに応じたデフォルト）
+//     [--execution-id <id>]       # 外部成果物と紐付ける実行ID
 //
 // 任意の指示は必ず --prompt-file で渡す。--short-prompt は、改行・シェル特殊文字を含まない
 // 短い補足メッセージだけの例外であり、--prompt-file と同時指定不可。
@@ -36,17 +37,19 @@ const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-c
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
 const { toWinPath } = require('./win-path');
+const { startExecution, markLaunchFailure } = require('./shared/execution-registry');
 
 const SPAWN_WORKER_VALUE_FLAGS = [
   '--skill', '--short-prompt', '--prompt-file', '--issue', '--description',
   '--repo', '--workspace', '--base-branch', '--agent',
+  '--execution-id',
 ];
 
 const USAGE = `spawn-worker.js — ワーカーペインを作成し、worktreeを準備してエージェントを起動する
 
 Usage: node spawn-worker.js --skill <skill-name> --issue <N> --description <desc> --repo <owner/repo>
                             [--short-prompt <text> | --prompt-file <path>] [--workspace <path>]
-                            [--base-branch <branch>] [--agent <id>]
+                            [--base-branch <branch>] [--agent <id>] [--execution-id <id>]
 
 Arguments:
   --skill <name>          起動するワーカースキル名
@@ -60,6 +63,7 @@ Arguments:
   --workspace <path>      ワークスペースパス（省略時は CWD）
   --base-branch <branch>  worktree のベースブランチ
   --agent <id>            エージェントID（省略時はスキルに応じたデフォルト）
+  --execution-id <id>     外部成果物と紐付ける実行ID。指定時だけ実行状態を追跡する。
 
 Output (stdout):
   ワーカー名（例: issue-5-implement）`;
@@ -97,6 +101,7 @@ const repo        = values['--repo'];
 const workspace   = values['--workspace'] ?? process.cwd();
 const baseBranch  = values['--base-branch'];
 const explicitAgentId = values['--agent'];
+const executionId = values['--execution-id'] || null;
 
 // --- バリデーション ---
 const resetCmd = `node "${resolve(__dirname, 'reset-session.js')}" --workspace "${workspace}"`;
@@ -327,6 +332,7 @@ const contextLines = [
   `WORKSPACE=${toUnix(workspace)}`,
   `WORKTREE=${toUnix(worktreeDir)}`,
 ];
+if (executionId) contextLines.push(`EXECUTION_ID=${executionId}`);
 contextLines.push(`ISSUE=${issue}`);
 if (baseBranch) contextLines.push(`BASE_BRANCH=${baseBranch}`);
 const extra = prompt ? `\n${prompt}` : '';
@@ -387,7 +393,14 @@ try {
 // launchAgentInPane が担う（TUI初期化待ち: agent-defaults.json の sendTextDelayMs、既定2000ms）。
 let newPaneId;
 let afterLaunchTextSent;
+let execution;
 try {
+  if (executionId) {
+    execution = startExecution(workspace, { executionId, issue, workerName, skill });
+    if (execution.status === 'completed') {
+      fail(`実行 "${executionId}" は既に完了しています（${execution.commentUrl}）。同じ成果物は再投稿しません`);
+    }
+  }
   ({ paneId: newPaneId, afterLaunchTextSent } = launchAgentInPane({
     argv: agentCmdArgs,
     worktreeDir,
@@ -397,8 +410,15 @@ try {
     afterLaunchText: agentConfig.promptDelivery === 'send-text-after-launch' ? shortPrompt : null,
     sendTextDelayMs: agentConfig.sendTextDelayMs ?? 2000,
     enterTerminator: agentConfig.enterSequence ?? '\r',
+    onExit: executionId ? {
+      command: process.execPath,
+      args: [resolve(__dirname, 'record-execution-exit.js'), workspace, executionId],
+    } : null,
   }));
 } catch (e) {
+  if (executionId) {
+    try { markLaunchFailure(workspace, executionId, e.message); } catch (_) {}
+  }
   rollbackWorktree();
   fail(e.message);
 }

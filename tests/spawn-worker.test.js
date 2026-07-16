@@ -75,6 +75,7 @@ test('--help はUsageを表示して終了コード0', () => {
   assert.equal(r.status, 0);
   assert.match(r.stdout, /Usage: node spawn-worker\.js/);
   assert.match(r.stdout, /--prompt-file/);
+  assert.match(r.stdout, /--execution-id/);
 });
 
 test('-h はUsageを表示して終了コード0', () => {

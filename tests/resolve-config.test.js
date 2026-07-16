@@ -377,6 +377,7 @@ test('resolveSkillAgentMap: デフォルトのマッピングを返す', () => {
     const map = resolveSkillAgentMap({ homedir: home });
     assert.equal(map['gh-maestro-coder'], 'claude-ds');
     assert.equal(map['gh-maestro-base'], 'claude-ds');
+    assert.equal(map['gh-maestro-architect'], 'codex-pro');
     assert.equal(map['gh-maestro-senior-coder'], 'claude-ds-pro');
     assert.equal(map['gh-maestro-investigator'], 'reasonix');
     assert.equal(map['gh-maestro-explorer'], 'agy');
@@ -613,6 +614,15 @@ test('resolveAgentConfig: gh-maestro-reviewer のマッピング結果を解決�
     assert.ok(agent);
     assert.equal(agent.id, 'codex');
     assert.equal(agent.command, 'codex');
+  });
+});
+
+test('resolveAgentConfig: gh-maestro-architect は codex-pro に解決される', () => {
+  withTempHome(home => {
+    const map = resolveSkillAgentMap({ homedir: home });
+    const agent = resolveAgentConfig(map['gh-maestro-architect'], { homedir: home });
+    assert.equal(agent.id, 'codex-pro');
+    assert.equal(agent.command, 'codex-pro');
   });
 });
 

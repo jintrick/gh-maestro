@@ -290,6 +290,40 @@ test('gh issue comment が空URLを返した場合 code 1', () => {
   });
 });
 
+test('--raw は本文をそのまま投稿し、投稿成功時だけ実行を完了にする', () => {
+  withTempDir(workspace => {
+    const executions = require('../scripts/shared/execution-registry');
+    executions.startExecution(workspace, { executionId: 'architect-1', issue: 1, workerName: 'worker-1', skill: 'gh-maestro-architect' });
+    let capturedBody = null;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
+    });
+
+    const r = msgSend.main(['worker-1', '# Plan\n\nKeep this Markdown', '--raw', '--execution-id', 'architect-1', '--issue', '1', '--workspace', workspace]);
+    assert.equal(r.code, 0);
+    assert.equal(capturedBody, '# Plan\n\nKeep this Markdown');
+    assert.equal(executions.readRegistry(workspace)['architect-1'].status, 'completed');
+  });
+});
+
+test('完了済み execution-id の再試行は Issue コメントを重複投稿しない', () => {
+  withTempDir(workspace => {
+    const executions = require('../scripts/shared/execution-registry');
+    executions.startExecution(workspace, { executionId: 'architect-1', issue: 1, workerName: 'worker-1', skill: 'gh-maestro-architect' });
+    executions.markCommentResult(workspace, 'architect-1', { commentUrl: 'https://example.test/existing-comment' });
+    let calls = 0;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment(() => { calls++; return { status: 0, stdout: 'unexpected\n' }; });
+
+    const r = msgSend.main(['worker-1', 'same plan', '--raw', '--execution-id', 'architect-1', '--issue', '1', '--workspace', workspace]);
+    assert.equal(r.code, 0);
+    assert.equal(r.lines[0], 'https://example.test/existing-comment');
+    assert.equal(calls, 0);
+  });
+});
+
 // ── --body-file ──────────────────────────────────────────────────────────
 
 test('--body-file で指定したファイルの内容が本文として使われる', () => {
