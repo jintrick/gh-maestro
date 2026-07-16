@@ -19,6 +19,7 @@ const EXCLUDED_DIRS = ['docs/rag'];
 // 旧パスや、まだ実装されていない提案上のパスへの意図的な言及であり、リネーム漏れの
 // 兆候ではないため対象外とする。
 const EXCLUDED_FILES = [
+  'docs/agent-launch-mechanism-plan.md',
   'docs/architect-plan.md',
   'docs/harmonic-finding-token.md',
   'docs/review-manager-plan.md',

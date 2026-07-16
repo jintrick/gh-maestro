@@ -15,7 +15,10 @@ const paneLaunch = require('../scripts/shared/pane-launch');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
-  const cleanup = () => fs.rmSync(dir, { recursive: true, force: true });
+  // Windows: 直前にspawnSyncした子プロセスのCWDだったディレクトリは、プロセス終了直後でも
+  // OSがハンドル解放をわずかに遅延させ、即rmdirするとEBUSYになることがある（PID registry
+  // サブプロセスCLI統合テストで実際に断続的発生）。maxRetries/retryDelayで吸収する。
+  const cleanup = () => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   try {
     const result = fn(dir);
     if (result && typeof result.then === 'function') {
