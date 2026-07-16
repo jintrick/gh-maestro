@@ -50,8 +50,9 @@ function launchAgentInPane({
   afterLaunchText = null,
   sendTextDelayMs = 2000,
   enterTerminator = '\r',
+  onExit = null,
 }) {
-  const loginShellArgs = buildLoginShellExecArgs(argv);
+  const loginShellArgs = buildLoginShellExecArgs(argv, process.platform, onExit);
   const splitArgs = ['cli', '--no-auto-start', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...loginShellArgs];
 
   let split = _weztermSplitPane(splitArgs);

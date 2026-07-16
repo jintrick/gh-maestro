@@ -45,6 +45,7 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 |---|---|
 | ファイルの場所・関数の定義・grep結果・ログが知りたい | `gh-maestro-explorer` |
 | バグの根本原因・影響範囲・修正方針を特定したい | `gh-maestro-investigator` |
+| 確定済み要件と調査結果から実装計画を検討したい | `gh-maestro-architect` |
 | 局所的な実装・PR作成（コスト効率重視） | `gh-maestro-coder` |
 | 設計判断や広範囲の影響分析、高度な検証を伴う実装・PR作成 | `gh-maestro-senior-coder` |
 | 上記に当てはまらないが手を動かす仕事がある | `gh-maestro-base`（`--prompt-file`で役割を明示） |
@@ -169,6 +170,7 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 | `gh-maestro-senior-coder` | 高度な自己検証能力とアーキテクチャの整合性判断能力を持ち、広範な影響分析、複雑なロジック調整、設計判断を伴うタスクの解決に適している。 |
 | `gh-maestro-explorer` | 汎用的な事実調査（grep・コード探索・情報収集）。分析・判断は行わず、発見した事実を報告する。 |
 | `gh-maestro-investigator` | バグ原因の特定 → 根本原因・影響範囲・修正方針の報告（`--issue` が必須。アンカー Issue がなければ orchestrator が先に起票する）。 |
+| `gh-maestro-architect` | 確定済み要件と圧縮済み調査コンテクストから自由形式の実装計画を対象 Issue にコメントする。要件・優先順位・実装開始・マージは決めない。 |
 | `gh-maestro-base` | 上記以外の動的役職（必ず`--prompt-file`で役割を定義する）。 |
 
 ## セッションのゴール
@@ -223,6 +225,26 @@ Issueを起草したら、「この Issue だけを渡されたコーダーが�
 ### 既存パターンの事前調査（新規UI/ロジック実装・複数ファイルへの同一修正を伴うIssueで必須）
 
 coder/senior-coderへの実装指示Issue（既存の設計判断・要件確認を伴うもの）を起草する際、新規にUIコンポーネント・認証フロー・データ整形処理等を実装させる場合、または同種の修正を複数ファイルに横展開させる場合は、Issueを書き始める前に、類似の目的を持つ既存コンポーネント・パターン・共有ユーティリティ関数がコードベースに無いか `gh-maestro-explorer` に調査させること。「参考実装」として特定の1ファイルの実装だけを示すのではなく、`scripts/shared/` 配下等に既存の共有ヘルパーが無いかを必ず確認する。既存パターン・共有ヘルパーが見つかった場合は、それを再利用する方針をIssueの「実装詳細」セクションに明記する（PR #89 反省会: 既存の `scripts/shared/workspace.js::parseFlags` を調査せず、8スクリプトに独自パーサーが重複実装された）。
+
+### Architect による実装計画
+
+要件定義（目的・振る舞い・制約・対象外・受け入れ条件・既決事項・未決事項）が Issue 本文で確定し、必要な調査結果を圧縮できた後にだけ `gh-maestro-architect` を起動する。生の会話ログや未選別の探索結果を渡してはならない。
+
+architect のコメントは設計検討の記録であり、要件定義を変更する根拠にはならない。コメントに不足情報や矛盾の指摘があれば、必要な explorer/investigator の再調査または人間への確認を行い、結果を圧縮して architect を再実行する。要件本文を変更できるのは人間との合意がある場合だけである。
+
+architect 起動後は、コメントURLが投稿成功として記録されるまで完了扱いにしない。投稿に失敗した実行、プロセス異常終了した実行、完了済み実行IDの再試行は `executions.json` の状態を確認する。同じ完了済み実行では既存コメントを使い、重複投稿しない。
+
+起動は既存の共有ランチャーを使い、各試行に安定した `--execution-id` を付ける。再試行で同じ成果物を使う場合は同じIDを指定する。
+
+```sh
+WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
+  --skill gh-maestro-architect --issue <N> --description architect-plan \
+  --prompt-file <圧縮済み要件・調査コンテクストのファイル> \
+  --execution-id issue-<N>-architect-<attempt> \
+  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH)
+```
+
+architect の検討結果を踏まえて実装方針・作業分割・検証条件を Issue 本文へ統合した後、coder には architect コメントではなく、その確定済み Issue 本文だけを実装仕様として渡す。
 
 ### Issue本文テンプレート（人間向け／コーダー向けの分離）
 

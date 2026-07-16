@@ -28,15 +28,15 @@ const { spawnSync } = require('./child-process');
  * @returns {string[]} wezterm split-pane に渡す argv（ログインシェル経由）
  * @throws {Error} agentCmdArgs が空の場合
  */
-function buildLoginShellExecArgs(agentCmdArgs, platform = process.platform) {
+function buildLoginShellExecArgs(agentCmdArgs, platform = process.platform, onExit = null) {
   if (!Array.isArray(agentCmdArgs) || agentCmdArgs.length === 0) {
     throw new Error('agentCmdArgs must be a non-empty array');
   }
 
   if (platform === 'win32') {
-    return buildPwshExecArgs(agentCmdArgs);
+    return buildPwshExecArgs(agentCmdArgs, onExit);
   }
-  return buildBashLoginExecArgs(agentCmdArgs);
+  return buildBashLoginExecArgs(agentCmdArgs, onExit);
 }
 
 /**
@@ -52,8 +52,9 @@ function buildLoginShellExecArgs(agentCmdArgs, platform = process.platform) {
  * 空白・改行を含む引数も安全。bash が exec で自分を置き換えるため、エージェント終了後
  * 余計なプロセスは残らない。
  */
-function buildBashLoginExecArgs(agentCmdArgs) {
-  return ['bash', '-lc', 'exec "$0" "$@"', ...agentCmdArgs];
+function buildBashLoginExecArgs(agentCmdArgs, onExit = null) {
+  if (!onExit) return ['bash', '-lc', 'exec "$0" "$@"', ...agentCmdArgs];
+  return ['bash', '-lc', 'hook=$0; script=$1; workspace=$2; execution=$3; shift 4; "$@"; code=$?; "$hook" "$script" "$workspace" "$execution" "$code"; exit "$code"', onExit.command, ...onExit.args, ...agentCmdArgs];
 }
 
 /**
@@ -70,7 +71,7 @@ function buildBashLoginExecArgs(agentCmdArgs) {
  *   - &（call operator）で関数/実行ファイルを呼び出す
  *   - -NoProfile を指定しないことで $PROFILE がロードされ、pwsh関数も解決可能
  */
-function buildPwshExecArgs(agentCmdArgs) {
+function buildPwshExecArgs(agentCmdArgs, onExit = null) {
   // 各引数を PowerShell のシングルクォートリテラルとしてエスケープ
   //   ' → '' （PowerShell の規則）
   //   全体を '...' で囲む（内部での 変数展開 $ / コマンド置換 / " はすべて無効化される）
@@ -81,7 +82,10 @@ function buildPwshExecArgs(agentCmdArgs) {
 
   // & <command> <args...>
   // PowerShell の call operator & は関数・コマンドレット・実行ファイルのどれでも実行できる
-  const command = `& ${escapedArgs}`;
+  const exitHook = onExit
+    ? `; $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }; & '${onExit.command.replace(/'/g, "''")}' ${onExit.args.map(arg => `'${arg.replace(/'/g, "''")}'`).join(' ')} $exitCode; exit $exitCode`
+    : '';
+  const command = `& ${escapedArgs}${exitHook}`;
 
   // UTF-16LE base64 にエンコード（PowerShell -EncodedCommand の要求形式）
   const encoded = Buffer.from(command, 'utf16le').toString('base64');
