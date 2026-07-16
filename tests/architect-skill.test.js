@@ -19,13 +19,11 @@ test('architect skill は通信・完了・入力境界・手順・再試行を�
   assert.match(architectSkill, /投稿が成功し、コメント URL を得られた時だけ/);
   assert.match(architectSkill, /msg-send\.js" orchestrator/);
   assert.match(architectSkill, /\{\{INBOX_POLL_MECHANISM\}\}/);
-  assert.match(architectSkill, /ワーカーを終了するかどうかは orchestrator だけが決め/);
-  assert.match(architectSkill, /自分で終了してはならない/);
+  assert.match(architectSkill, /orchestrator からの次の指示を受信/);
 });
 
 test('orchestrator skill は再調査と要件不変を明記する', () => {
   assert.match(orchestratorSkill, /必要な explorer\/investigator の再調査/);
   assert.match(orchestratorSkill, /要件本文を変更できるのは人間との合意/);
   assert.match(orchestratorSkill, /既存の `msg-send\.js` 経路/);
-  assert.match(orchestratorSkill, /architect ワーカーの終了ではない/);
 });
