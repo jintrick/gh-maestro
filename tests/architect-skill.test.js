@@ -9,11 +9,14 @@ const root = path.join(__dirname, '..');
 const architectSkill = fs.readFileSync(path.join(root, 'skills', 'gh-maestro-architect', 'SKILL.md'), 'utf8');
 const orchestratorSkill = fs.readFileSync(path.join(root, 'skills', 'gh-maestro-orchestrator', 'SKILL.md'), 'utf8');
 
-test('architect skill は要件不変・直接コメント・成功時のみ完了を明記する', () => {
-  assert.match(architectSkill, /要件定義を変更しない/);
+test('architect skill は通信・完了・入力境界・手順・再試行を構造化して明記する', () => {
+  for (const heading of ['通信規約', 'ゴールと終了条件', '起動時に与えられる情報', '入力の境界', '手順', '投稿失敗と再試行']) {
+    assert.match(architectSkill, new RegExp(`## ${heading}`));
+  }
+  assert.match(architectSkill, /要件定義の変更/);
   assert.match(architectSkill, /自律的なリポジトリ探索/);
   assert.match(architectSkill, /--raw --execution-id/);
-  assert.match(architectSkill, /投稿成功時だけ実行記録を完了/);
+  assert.match(architectSkill, /投稿が成功し、コメント URL を得られた時だけ/);
   assert.match(architectSkill, /msg-send\.js" orchestrator/);
   assert.match(architectSkill, /返答を待ち受けず/);
 });
