@@ -92,6 +92,25 @@ test('buildLoginShellExecArgs: 終了フックはエージェント終了後に�
   assert.deepEqual(unixArgs.slice(7), ['codex-pro', 'start']);
 });
 
+test('buildLoginShellExecArgs: Unix の終了フックはエージェントコマンドを実行してから終了コードを渡す', (t) => {
+  const bashProbe = spawnSync('bash', ['-lc', 'exit 0'], { encoding: 'utf8' });
+  if (bashProbe.status !== 0) {
+    t.skip('bash の実行環境が利用できない');
+    return;
+  }
+
+  const args = buildLoginShellExecArgs(
+    ['bash', '-lc', 'printf agent-ran; exit 7'],
+    'linux',
+    { command: 'bash', args: ['-lc', 'printf hook:$1', 'hook-shell'] },
+  );
+  const result = spawnSync(args[0], args.slice(1), { encoding: 'utf8' });
+
+  assert.equal(result.status, 7, result.stderr);
+  assert.match(result.stdout, /agent-ran/);
+  assert.match(result.stdout, /hook:7/);
+});
+
 test('buildLoginShellExecArgs: 空配列でエラーになる', () => {
   assert.throws(() => buildLoginShellExecArgs([]), /non-empty array/);
   assert.throws(() => buildLoginShellExecArgs(null), /non-empty array/);
