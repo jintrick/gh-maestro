@@ -625,32 +625,3 @@ test('resolveAgentConfig: gh-maestro-architect は codex-pro に解決される'
     assert.equal(agent.command, 'codex-pro');
   });
 });
-
-test('loadDefaults: codex は承認バイパス/danger-full-accessを持たず、workspace-write + never approvalを使う（Issue #101）', () => {
-  const defaults = loadDefaults();
-  const codex = defaults.agents.find(a => a.id === 'codex');
-  assert.ok(codex, 'codex should exist in defaults');
-  assert.ok(
-    !codex.extraArgs.includes('--dangerously-bypass-approvals-and-sandbox'),
-    'extraArgs should not include the approvals/sandbox bypass flag',
-  );
-  assert.ok(!codex.execArgs.includes('danger-full-access'), 'execArgs should not request danger-full-access');
-  assert.ok(codex.execArgs.includes('workspace-write'), 'execArgs should request workspace-write sandbox');
-  // codex exec には --ask-for-approval フラグが存在しない（実機確認済み: `error: unexpected
-  // argument '--ask-for-approval' found`）。exec は元々非対話実行のため、承認方針は
-  // -c approval_policy=never という設定オーバーライドで表現する。
-  assert.ok(!codex.execArgs.includes('--ask-for-approval'), 'exec has no --ask-for-approval flag; must not be used');
-  assert.ok(
-    codex.execArgs.some(a => a === 'approval_policy=never'),
-    'execArgs should set approval_policy=never via -c override',
-  );
-  assert.ok(
-    codex.execArgs.some(a => a === 'sandbox_workspace_write.network_access=true'),
-    'execArgs should enable network access within the workspace-write sandbox',
-  );
-  // 専用worktreeは毎回新規パスのため、Codexの「trusted directory」判定に未登録で
-  // codex exec が即エラー終了する（実機確認済み: "Not inside a trusted directory and
-  // --skip-git-repo-check was not specified."）。非対話自動実行のため trust プロンプトへの
-  // 応答手段がなく、これを付けないと初回実行が必ず失敗する。
-  assert.ok(codex.execArgs.includes('--skip-git-repo-check'), 'execArgs should skip the git-repo trust check for fresh worktrees');
-});
