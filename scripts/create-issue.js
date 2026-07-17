@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const { toWinPath } = require('./win-path');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { isRetryableGhFailure, graphqlCreateIssue } = require('./shared/gh-fallback');
 
 const USAGE = `create-issue.js — GitHub Issue を作成し、body-file を必ず削除する
 
@@ -65,7 +66,19 @@ if (require.main === module) {
   const args = ['issue', 'create', '--title', title, '--body-file', absBodyFile];
   if (repo) args.push('--repo', repo);
 
-  const result = spawnSync('gh', args, { encoding: 'utf8' });
+  let result = spawnSync('gh', args, { encoding: 'utf8' });
+
+  if (result.status !== 0 && isRetryableGhFailure(result)) {
+    process.stderr.write('create-issue: REST API失敗のためGraphQLにフォールバックします\n');
+    const resolvedRepo = repo || (() => {
+      const repoView = spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { encoding: 'utf8' });
+      return repoView.status === 0 ? repoView.stdout.trim() : null;
+    })();
+    if (resolvedRepo) {
+      const body = fs.readFileSync(absBodyFile, 'utf8');
+      result = graphqlCreateIssue({ repo: resolvedRepo, title, body });
+    }
+  }
 
   if (result.status !== 0) {
     process.stderr.write(result.stderr || '');

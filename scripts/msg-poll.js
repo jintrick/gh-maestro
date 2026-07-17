@@ -17,9 +17,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { validateField } = require('./shared/validate');
+const { isRetryableGhFailure, graphqlListComments } = require('./shared/gh-fallback');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -114,7 +115,14 @@ let _ghApiComments = (repo, issue, since, opts = {}) => {
     args.push('-f', `since=${since}`);
   }
   args.push('-f', 'per_page=100');
-  return spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
+  const restResult = spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
+
+  if (restResult.status === 0 || !isRetryableGhFailure(restResult)) {
+    return restResult;
+  }
+
+  process.stderr.write('msg-poll: REST API失敗のためGraphQLにフォールバックします\n');
+  return graphqlListComments({ repo, issue, since, opts: { timeout: GH_TIMEOUT_MS, ...opts } });
 };
 
 // ── ヘルパー ──────────────────────────────────────────────────────────────

@@ -126,7 +126,8 @@ Usage: node msg-send.js <recipient> [--issue <N>] [--workspace <path>] "<本文>
 - `<recipient>`: worker 名または `orchestrator`。
 - `--issue` 省略時: `<recipient>` が worker 名なら `.gh-maestro/workers.json` の該当エントリから `issue` を解決する。解決できなければ exit 1（フェイルクローズ。`.claude/rules/fail-closed-safety-guards.md`）。`orchestrator` 宛の場合は送信者が自分のアンカー Issue を知っているため `--issue`（または env `ISSUE`）必須。
 - 動作: マーカー行（`from` は env `WORKER_NAME`、無ければ `orchestrator`）+ 空行なしで本文を連結し、`gh issue comment <N> --body-file -` の stdin に渡す。
-- 出力: 成功時、投稿されたコメント URL を stdout に1行。exit 0。gh が非0で終了したら stderr をそのまま流して exit 1。**リトライ・fallback・lazy-start は実装しない。**
+- 出力: 成功時、投稿されたコメント URL を stdout に1行。exit 0。gh が非0で終了したら stderr をそのまま流して exit 1。**リトライ・lazy-start は実装しない。**
+- **GraphQLフォールバック（2026-07-17改訂）**: REST APIが5xx/タイムアウト等サーバ・ネットワーク起因で失敗した場合のみ、`shared/gh-fallback.js` の `graphqlAddComment` 経由で `gh api graphql` によるコメント投稿にフォールバックする。4xx等のクライアントエラー（存在しない Issue・権限なし等）はフォールバックせずそのままエラー返却する（同じ理由で失敗するため無駄な二度手間を避ける）。改訂理由は §8 参照。
 
 ### 4.3 `scripts/msg-poll.js`
 
@@ -141,6 +142,7 @@ Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <s
   - orchestrator モード: `NEW_MESSAGE:<issue>:<commentId>`
 - カーソルは §3.3 の `.gh-maestro/msg-state/<self>.json`。起動時に読み、通知のたびに更新して書く（tmp に書いて rename、`shared/` にヘルパを置いてよい）。
 - gh の呼び出しが失敗したサイクル（ネットワーク断・rate limit 等）は stderr に1行出して**スキップし、次のサイクルへ継続**する。プロセスは死なない。
+- **GraphQLフォールバック（2026-07-17改訂）**: RESTがサーバ・ネットワーク起因で失敗した場合、`shared/gh-fallback.js` の `graphqlListComments` にフォールバックする。GraphQLには REST の `since` 相当のサーバ側フィルタが無いため、直近100件を取得しクライアント側で `createdAt > since` を判定する。**制約**: 1ポーリング間隔中に自分宛ての未読が100件を超える異常事態では取りこぼす可能性がある。フォールバックは短期障害時のみの利用と割り切る。`databaseId` フィールドがREST版の数値コメントIDと同一なので、`NEW_MESSAGE:<id>` の出力プロトコルはフォールバック使用の有無に関わらず変わらない。
 - `--once`: 1回スキャンして exit 0（テスト・agy 系エージェント用）。カーソルは永続化されるため、`--once` の繰り返し実行でも二重通知しない（poll-inbox.js の in-memory Set と違い、ここが改善点）。
 - SIGINT / SIGTERM でクリーンに exit 0（poll-inbox.js の cleanup と同型）。
 - **detached 起動・子プロセス spawn・WezTerm 通知は一切行わない。**
@@ -148,12 +150,13 @@ Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <s
 ### 4.4 `scripts/msg-read.js`
 
 ```
-Usage: node msg-read.js <commentId> [--workspace <path>]
+Usage: node msg-read.js <commentId> [--workspace <path>] [--issue <N>]
 ```
 
 - `gh api repos/{repo}/issues/comments/<commentId> -q .body` を実行し、**マーカー行を取り除いた本文**を stdout に出力する。exit 0。
 - 存在しない commentId は gh のエラーを stderr に流して exit 1。
 - 目的: エージェントが repo 解決や jq クエリを手書きせず、1コマンドで本文を読めるようにする。
+- **GraphQLフォールバック（2026-07-17改訂）**: RESTがサーバ・ネットワーク起因で失敗した場合、`shared/gh-fallback.js` の `graphqlCommentBody` にフォールバックする。GraphQLはコメントの `databaseId`（REST数値ID）から直接1件を引く root クエリを持たないため、**任意の `--issue <N>` フラグ**を追加した。フォールバック発動時にissue番号が分かれば、そのissueの直近100件からdatabaseId一致するコメントを検索して本文を返す。`--issue` 省略時にフォールバックが必要になった場合はエラーで諦める。orchestratorは`NEW_MESSAGE:<issue>:<commentId>`から、workerは自分のアンカーissue（env `ISSUE`）からissue番号を得られるため、実運用では省略されない想定。
 
 ### 4.5 レート制限の見積り（実装判断の根拠）
 
@@ -162,6 +165,10 @@ Usage: node msg-read.js <commentId> [--workspace <path>]
 ---
 
 ## 5. 既存コードの変更
+
+### 5.0 `scripts/shared/gh-fallback.js`（新規・2026-07-17追加）
+
+REST APIがサーバ・ネットワーク起因（5xx/タイムアウト等）で失敗した場合に、`gh api graphql` による等価操作へフォールバックする共有ロジック。`isRetryableGhFailure(result)`（フォールバック対象か判定）、`graphqlAddComment`（コメント投稿）、`graphqlListComments`（コメント一覧、`since`はクライアント側フィルタ）、`graphqlCommentBody`（`--issue`必須のコメント本文取得）、`graphqlCreateIssue`（Issue作成）を提供する。`msg-send.js` / `msg-poll.js` / `msg-read.js` / `create-issue.js` から利用される。テスト注入用に `_setGraphqlExec` を公開し、ユニットテストは実 `gh` を起動しない。詳細・改訂理由は §8 参照。
 
 ### 5.1 `scripts/spawn-worker.js`
 
@@ -239,7 +246,7 @@ Usage: node msg-read.js <commentId> [--workspace <path>]
 
 ## 8. 既知のリスクと割り切り
 
-- **ネットワーク依存**: GitHub 断でメッセージ送受信が止まる。割り切る（gh は既にシステム全体のハード依存であり、PR/Issue 操作が止まる時点でどのみち作業は止まる）。msg-poll はエラーサイクルをスキップして継続するため、復旧後に自動的に追いつく。
+- **ネットワーク依存（2026-07-17改訂）**: 当初は「GitHub断でメッセージ送受信が止まる。割り切る（ghは既にシステム全体のハード依存であり、PR/Issue操作が止まる時点でどのみち作業は止まる）」としていた。この割り切りは「RESTが死ねばGraphQLも同時に死ぬ」という暗黙の前提に基づいていたが、2026-07-17に実際に発生したREST API障害（Degraded Performance）ではGraphQL APIとGit Operationsは無傷だった（`gh api graphql`での実地検証済み）。前提が崩れたため、メッセージ配送（`msg-send.js`/`msg-poll.js`/`msg-read.js`）とIssue作成（`create-issue.js`）については `shared/gh-fallback.js` によるGraphQLフォールバックを導入し、REST劣化時も通信を継続できるようにする（§5.0参照）。**このフォールバックのスコープはコメント送受信とIssue作成に限定する。** PRレビュー投稿・PR検出等の他のgh依存操作（`post-review.js`/`review-publisher.js`/`poll-pr.js`）はフォールバック対象外のまま据え置く（スコープ外。将来必要になれば別途検討）。msg-pollはエラーサイクルをスキップして継続するため、フォールバックも失敗した場合は復旧後に自動的に追いつく。
 - **Issue のチャター増加**: 指示・報告がコメントとして残る。これは**欠点ではなく本計画の目的**（歴史の記録）。ただし「着手しました」等の無内容な報告は現行 SKILL.md どおり禁止を維持する。
 - **秘匿情報**: コメントは repo の可視性に従う。SKILL.md に「トークン・認証情報・個人情報をメッセージ本文に含めない」を明記する（FSキュー時代には無かった注意点）。
 - **同一 Issue 上の複数ワーカー**: アンカー Issue が同一でも `to` フィルタで混信しない。カーソルは受信者ごとに独立。

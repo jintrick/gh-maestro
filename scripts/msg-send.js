@@ -14,11 +14,12 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { toWinPath } = require('./win-path');
 const { resolveTextInput } = require('./shared/text-input');
 const { markCommentResult, readRegistry } = require('./shared/execution-registry');
+const { isRetryableGhFailure, graphqlAddComment } = require('./shared/gh-fallback');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
@@ -51,10 +52,17 @@ let _ghRepoView = (opts = {}) => {
     { encoding: 'utf8', ...opts });
 };
 
-let _ghIssueComment = (issue, body, opts = {}) => {
-  return spawnSync('gh', ['issue', 'comment', String(issue), '--body-file', '-'], {
+let _ghIssueComment = (issue, body, repo, opts = {}) => {
+  const restResult = spawnSync('gh', ['issue', 'comment', String(issue), '--body-file', '-'], {
     input: body, encoding: 'utf8', ...opts,
   });
+
+  if (restResult.status === 0 || !isRetryableGhFailure(restResult)) {
+    return restResult;
+  }
+
+  process.stderr.write('msg-send: REST API失敗のためGraphQLにフォールバックします\n');
+  return graphqlAddComment({ repo, issue, body, opts });
 };
 
 // ── メインロジック ──────────────────────────────────────────────────────
@@ -188,7 +196,7 @@ function main(argsOverride, envOverride) {
 
   // ── 送信 ────────────────────────────────────────────────────────────────
 
-  const result = _ghIssueComment(issue, fullBody, ghOpts);
+  const result = _ghIssueComment(issue, fullBody, repo, ghOpts);
 
   if (result.status !== 0) {
     if (executionId) {

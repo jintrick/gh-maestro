@@ -8,18 +8,23 @@
 
 'use strict';
 
-const { spawnSync } = require('child_process');
+const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
+const { isRetryableGhFailure, graphqlCommentBody } = require('./shared/gh-fallback');
 
 const USAGE = `msg-read.js — GitHub Issue コメントの本文を読み出す
 
-Usage: node msg-read.js <commentId> [--workspace <path>]
+Usage: node msg-read.js <commentId> [--workspace <path>] [--issue <N>]
 
 Arguments:
   <commentId>           読み出すコメントの ID（数値）
 
 Options:
   --workspace <path>    ワークスペースパス（省略時は環境変数またはCWDから解決）
+  --issue <N>           コメントが投稿されている Issue 番号。REST APIが失敗した際の
+                        GraphQLフォールバック専用（GraphQLはコメントIDから直接本文を
+                        引くrootクエリを持たないため）。REST成功時は使用されない。
+                        省略時、フォールバックが必要になった場合はエラーで終了する。
 
 Output (stdout):
   マーカー行を除いたコメント本文
@@ -33,9 +38,16 @@ let _ghRepoView = () => {
     { encoding: 'utf8' });
 };
 
-let _ghApiComment = (repo, commentId) => {
-  return spawnSync('gh', ['api', `repos/${repo}/issues/comments/${commentId}`, '-q', '.body'],
+let _ghApiComment = (repo, commentId, issue) => {
+  const restResult = spawnSync('gh', ['api', `repos/${repo}/issues/comments/${commentId}`, '-q', '.body'],
     { encoding: 'utf8' });
+
+  if (restResult.status === 0 || !isRetryableGhFailure(restResult)) {
+    return restResult;
+  }
+
+  process.stderr.write('msg-read: REST API失敗のためGraphQLにフォールバックします\n');
+  return graphqlCommentBody({ repo, issue, commentId });
 };
 
 const MARKER_RE = /^<!--\s*gh-maestro\s+(\{.*\})\s*-->/;
@@ -70,7 +82,7 @@ function main(argsOverride) {
     return { code: 0, lines: out, errLines: err };
   }
 
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace']);
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue']);
 
   if (exitFlagMiss) {
     writeErr('msg-read: フラグには値が必要です。');
@@ -102,7 +114,7 @@ function main(argsOverride) {
 
   // ── コメント読み出し ─────────────────────────────────────────────────
 
-  const result = _ghApiComment(repo, commentId);
+  const result = _ghApiComment(repo, commentId, values['--issue']);
 
   if (result.status !== 0) {
     writeErr(`msg-read: コメントの読み出しに失敗しました: ${result.stderr || '(empty)'}`);
