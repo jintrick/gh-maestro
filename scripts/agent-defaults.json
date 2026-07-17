@@ -52,7 +52,7 @@
       "execPromptDelivery": "positional",
       "dynamicCommand": true,
       "promptDelivery": "send-text-after-launch",
-      "sendTextDelayMs": 5000,
+      "sendTextDelayMs": 10000,
       "skillsViaMd": true,
       "enterSequence": "\r",
       "rulesSupported": false,
