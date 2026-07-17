@@ -459,7 +459,7 @@ test('createSessionResumeAdapter: getCapabilities が正しい能力を返す', 
 
 // ── start ──────────────────────────────────────────────────────────────────
 
-test('createSessionResumeAdapter: start がコマンドと引数を返す（reasonix: send-text-after-launch）', () => {
+test('createSessionResumeAdapter: start がコマンドと引数を返す（reasonix: positional 配送）', () => {
   const agent = getAgentMap().get('reasonix');
   const adapter = createSessionResumeAdapter(agent);
   const result = adapter.start({
@@ -483,7 +483,7 @@ test('createSessionResumeAdapter: start がコマンドと引数を返す（agy:
   assert.equal(typeof result.command, 'string');
   assert.ok(Array.isArray(result.args));
   assert.equal(result.command, agent.command);
-  assert.ok(result.args.includes('-i'));
+  assert.ok(result.args.includes('--print'));
   assert.ok(result.args.includes('--dangerously-skip-permissions'));
 });
 

@@ -566,14 +566,14 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     });
   });
 
-  test('tryResumeAndDeliver: reasonix（send-text-after-launch）も成功する', () => {
+  test('tryResumeAndDeliver: reasonix（positional）も成功する', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-9-fix', agentId: 'reasonix' });
 
-      const sentTexts = [];
-      paneLaunch._setWeztermSendText((paneId, text) => {
-        sentTexts.push(text);
-        return { status: 0, stdout: '', stderr: '' };
+      let splitArgs = null;
+      paneLaunch._setWeztermSplitPane((args) => {
+        splitArgs = args;
+        return { status: 0, stdout: '88', stderr: '' };
       });
 
       const result = supervisor.tryResumeAndDeliver({
@@ -581,7 +581,9 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
         message: { from: 'orch', body: 'reasonix宛メッセージ' }, workspace: dir, homedir: '/home',
       });
       assert.equal(result.success, true);
-      assert.ok(sentTexts.includes('reasonix宛メッセージ'));
+      assert.equal(result.method, 'resume');
+      assert.ok(decodeLoginShellCommand(splitArgs).includes('--continue'));
+      assert.ok(decodeLoginShellCommand(splitArgs).includes('reasonix宛メッセージ'));
     });
   });
 

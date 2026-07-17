@@ -115,7 +115,7 @@ test('validateAgentDefaults: resumeCommand の値が期待通り', () => {
   assert.deepEqual(map.get('claude-ds-pro'), ['--continue']);
   assert.deepEqual(map.get('reasonix'), ['--continue']);
   assert.deepEqual(map.get('agy'), ['--continue']);
-  assert.deepEqual(map.get('codex'), ['exec', 'resume', '--last']);
+  assert.deepEqual(map.get('codex'), ['resume', '--last']);
 });
 
 // ── validateAgentEntry: 必須フィールド ────────────────────────────────────────

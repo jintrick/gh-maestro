@@ -390,8 +390,10 @@ try {
 // 全エージェントをログインシェル経由にラップする（scripts/shared/pane-launch.js に集約）。
 // これにより PATH 実行ファイル・pwsh 関数・エイリアスのすべてが起動可能になる。
 // argv の完全性は各プラットフォームのエンコード方式で保証される（agent-exec.js 参照）。
-// send-text-after-launch方式（positional argが使えないreasonix等）向けの初期プロンプト注入も
-// launchAgentInPane が担う（TUI初期化待ち: agent-defaults.json の sendTextDelayMs、既定2000ms）。
+// send-text-after-launch方式（起動argvにプロンプトを渡せないエージェント向けの後方互換経路。
+// 現状どのエージェントも使っていない — reasonix/agy/codexは全て非対話1回実行モードの
+// argv直接渡しに統一済み）向けの初期プロンプト注入も launchAgentInPane が担う
+// （TUI初期化待ち: agent-defaults.json の sendTextDelayMs、既定2000ms）。
 let newPaneId;
 let afterLaunchTextSent;
 let execution;

@@ -431,10 +431,10 @@ test('resolveAgentConfig: reasonix の command が動的に解決される', () 
       agent.command === 'node' || agent.command === 'reasonix',
       `reasonix command should be 'node' or 'reasonix', got: ${agent.command}`,
     );
-    // extraArgs には少なくとも '--yolo' が含まれる
+    // extraArgs には少なくとも 'run'（非対話1回実行モード）が含まれる
     assert.ok(
-      agent.extraArgs.some(a => a === '--yolo'),
-      'extraArgs should include --yolo',
+      agent.extraArgs.some(a => a === 'run'),
+      'extraArgs should include run',
     );
     // skillsViaMd は維持される
     assert.equal(agent.skillsViaMd, true);
