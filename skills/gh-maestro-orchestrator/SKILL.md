@@ -384,7 +384,7 @@ orchestrator から worker への追加指示（`msg-send.js` で送ったコメ
 
 ## PR検出
 
-コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <N>` を起動してPRを監視する（`N` はコーダーのアンカー Issue 番号）。
+コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <N>` を起動してPRを監視する（`N` はコーダーのアンカー Issue 番号）。**`persistent: true` を設定すること。** `poll-pr.js` はPR検出後、内部で `poll-reviews.js` を子プロセスとして起動し、その出力（`REVIEW_COMMENT`/`PR_COMMENT`/`PR_REVIEW`/`PR_PUSH`/`PR_MERGED`）をそのまま中継し続ける単一プロセスなので、**このMonitor 1本がPR検出からマージ検知まで完結する。** `persistent: true` を付け忘れると既定の5分でMonitorがタイムアウトし、レビュー中に通知が届かなくなる（下記「レビュー監視」はこの1本を継続して読む前提であり、別途起動し直すことはない）。
 `--base-branch` にはセッション変数 `$BASE_BRANCH` を渡すことで、PR作成時のベースブランチ不一致を検出できる。
 
 ```sh
@@ -412,9 +412,9 @@ node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE
 
 ## レビュー監視
 
-PR番号が確定したら、レビューコメントとマージ状態のポーリングを開始する。
+PR番号が確定したら、レビューコメントとマージ状態の通知を処理する。
 
-{{POLL_MECHANISM}}
+**新しいMonitorやポーリングプロセスをここで起動してはならない。** 「PR検出」で `persistent: true` を付けて起動した `poll-pr.js` のMonitor 1本が、PR検出後は内部で `poll-reviews.js` の出力をそのまま中継し続けている。以下はすべてその同じMonitorから届く通知として処理する（`poll-reviews.js` を単独で別プロセスとして起動するのは二重ポーリング・二重通知の原因になるため厳禁）。
 
 - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → インラインのレビュー指摘。コメントトリアージを実行する
 - `PR_COMMENT:<user>:<body>` → PR全体へのコメント。同様にトリアージする
@@ -422,7 +422,7 @@ PR番号が確定したら、レビューコメントとマージ状態のポー
 - `PR_PUSH:<sha>` → コーダーが修正コミットをPRにプッシュした。レビューは初回PR作成時のみ実行される（push後の再レビューはない）。マージ可否の確認は「マージ可否ゲート」通過時のみ。未通過なら残 BLOCKER の解消を待つ
 - `PR_MERGED:<PR番号>` → マージ完了。`git -C $WORKSPACE pull --ff-only` で `BASE_BRANCH` を最新化してから反省会へ進む。**この時点ではワーカーpane・worktreeを削除しない**（`remove-worker.js`は下記「反省会」完了後にのみ実行する）
 - 人間からの報告も同様に受け付ける
-- ポーリング間隔は{{POLL_INTERVAL_SECONDS}}秒。アクティビティがなければ自動で間隔が延びる
+- ポーリング間隔は30秒（`poll-reviews.js`の既定値）。アクティビティがなければ自動で間隔が延びる
 
 ### マージ可否ゲート
 
