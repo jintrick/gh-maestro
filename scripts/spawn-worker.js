@@ -34,6 +34,7 @@ const { checkAgentExists } = require('./agent-exec');
 const { launchAgentInPane, killPaneQuiet } = require('./shared/pane-launch');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
+const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
 const { toWinPath } = require('./win-path');
@@ -440,6 +441,12 @@ try {
   rollbackWorktree();
   fail(`workers.json への書き込みに失敗しました: ${e.message}`);
 }
+
+// --- inbox-supervisor.js の自動起動保証（best-effort） ---
+// エージェント種別を問わず毎回試みる。稼働中なら inbox-supervisor.js 自身のロックが検知して
+// 即exitするため二重起動にはならない（ensure-inbox-supervisor.js 参照）。orchestrator が
+// 手動起動を忘れても配送経路が失われないようにする。
+ensureInboxSupervisorRunning({ workspace, scriptsPath: __dirname });
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---
 console.log(workerName);

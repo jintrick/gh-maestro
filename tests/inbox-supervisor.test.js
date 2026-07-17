@@ -668,6 +668,46 @@ describe('shouldRetry', () => {
   test('null/undefined は true', () => {
     assert.equal(supervisor.shouldRetry(null, Date.now()), true);
   });
+
+  test('lastMethod=pending なら retries が MAX_RETRIES 以上でも true（相手がbusyなだけで失敗ではない）', () => {
+    const now = Date.now();
+    // retries=5でもbackoff期間さえ過ぎていればtrue（頭打ちしたbackoff間隔=160s経過）
+    assert.equal(supervisor.shouldRetry(
+      { retries: 5, lastMethod: 'pending', lastAttempt: new Date(now - 200000).toISOString() }, now), true);
+    assert.equal(supervisor.shouldRetry(
+      { retries: 20, lastMethod: 'pending', lastAttempt: new Date(now - 200000).toISOString() }, now), true);
+  });
+
+  test('lastMethod=pending でもbackoff期間内なら false', () => {
+    const now = Date.now();
+    assert.equal(supervisor.shouldRetry(
+      { retries: 5, lastMethod: 'pending', lastAttempt: new Date(now).toISOString() }, now), false);
+  });
+
+  test('lastMethod=resume-failed なら従来通りMAX_RETRIESで恒久停止', () => {
+    assert.equal(supervisor.shouldRetry({ retries: 5, lastMethod: 'resume-failed' }, Date.now()), false);
+  });
+
+  test('lastMethod未設定（旧cursorエントリ）でもlastErrorの文言からpending系と推定して救済する', () => {
+    const now = Date.now();
+    assert.equal(supervisor.shouldRetry({
+      retries: 5,
+      lastError: 'pane 35 is alive (worker busy) — waiting for it to become idle for resume delivery',
+      lastAttempt: new Date(now - 200000).toISOString(),
+    }, now), true);
+    assert.equal(supervisor.shouldRetry({
+      retries: 5,
+      lastError: 'pane (none) is not alive — queued for resume',
+      lastAttempt: new Date(now - 200000).toISOString(),
+    }, now), true);
+  });
+
+  test('lastMethod未設定かつlastErrorが真の失敗文言なら従来通り恒久停止', () => {
+    assert.equal(supervisor.shouldRetry({
+      retries: 5,
+      lastError: 'worktree /tmp/wt が存在しません（resume不可能）',
+    }, Date.now()), false);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

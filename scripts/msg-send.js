@@ -20,6 +20,7 @@ const { toWinPath } = require('./win-path');
 const { resolveTextInput } = require('./shared/text-input');
 const { markCommentResult, readRegistry } = require('./shared/execution-registry');
 const { isRetryableGhFailure, graphqlAddComment } = require('./shared/gh-fallback');
+const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
@@ -222,6 +223,13 @@ function main(argsOverride, envOverride) {
       writeErr(`msg-send: コメント投稿は成功しましたが実行記録を更新できませんでした: ${e.message}`);
       return { code: 1, lines: out, errLines: err };
     }
+  }
+
+  // --- inbox-supervisor.js の自動起動保証（best-effort） ---
+  // ワーカー宛て送信時のみ。orchestratorが手動起動を忘れても配送経路が失われないようにする
+  // （ensure-inbox-supervisor.js 参照）。稼働中なら二重起動にはならない。
+  if (recipient !== 'orchestrator') {
+    try { ensureInboxSupervisorRunning({ workspace, scriptsPath: __dirname }); } catch {}
   }
 
   writeOut(commentUrl);

@@ -378,15 +378,29 @@ function deliverMessage({ workerName, paneId, agentId, message, workspace, homed
 
 /**
  * pending エントリが再試行可能か判定する。
- * 指数バックオフ: RETRY_BASE_DELAY_MS * 2^(retries-1)
+ * 指数バックオフ: RETRY_BASE_DELAY_MS * 2^(retries-1)（MAX_RETRIES到達分で頭打ち）
  *
- * @param {object} pendingEntry  - { retries: number, lastAttempt: string, lastError: string }
+ * lastMethod === 'pending'（相手のペインが稼働中＝作業中で、resumeを試みる前に見送った状態。
+ * deliverMessage() 参照）はMAX_RETRIESの対象外とする。これは配送の失敗ではなく、
+ * 相手が休止するのを待っているだけの正常な状態であり、回数で恒久的に諦めてはならない
+ * （実障害: pane busyのまま5回を消費し、その後ペインが休止してもメッセージが永久に
+ * 再試行されなくなっていた）。真の失敗（lastMethod === 'resume-failed'等）のみ、
+ * 従来通りMAX_RETRIES到達で諦める。
+ *
+ * @param {object} pendingEntry  - { retries: number, lastAttempt: string, lastError: string, lastMethod?: string }
  * @param {number} nowMs         - 現在時刻（Unix ms）
  * @returns {boolean}
  */
 function shouldRetry(pendingEntry, nowMs) {
   if (!pendingEntry || typeof pendingEntry.retries !== 'number') return true;
-  if (pendingEntry.retries >= MAX_RETRIES) return false;
+
+  // lastMethod未設定の既存cursorエントリ（この修正より前に書かれたもの）は、
+  // lastError文言からdeliverMessage()の'pending'系エラーだったかを推定する
+  // （後方互換: 修正前にMAX_RETRIESを使い切って恒久停止していたエントリも救済する）。
+  const isAwaitingIdle = pendingEntry.lastMethod === 'pending'
+    || (typeof pendingEntry.lastError === 'string'
+        && (pendingEntry.lastError.includes('idle for resume delivery') || pendingEntry.lastError.includes('queued for resume')));
+  if (!isAwaitingIdle && pendingEntry.retries >= MAX_RETRIES) return false;
 
   const lastAttempt = pendingEntry.lastAttempt
     ? new Date(pendingEntry.lastAttempt).getTime()
@@ -394,7 +408,10 @@ function shouldRetry(pendingEntry, nowMs) {
 
   if (Number.isNaN(lastAttempt) || lastAttempt <= 0) return true;
 
-  const delay = RETRY_BASE_DELAY_MS * Math.pow(2, pendingEntry.retries - 1);
+  // backoffの指数はMAX_RETRIES相当で頭打ちにする。isAwaitingIdleはretriesが際限なく
+  // 増え続けうるため、キャップしないと待機間隔が指数的に膨れ上がってしまう。
+  const backoffExponent = Math.min(pendingEntry.retries, MAX_RETRIES) - 1;
+  const delay = RETRY_BASE_DELAY_MS * Math.pow(2, Math.max(0, backoffExponent));
   return (nowMs - lastAttempt) >= delay;
 }
 
@@ -563,12 +580,13 @@ function main(argsOverride, opts = {}) {
             retries: pending.retries + 1,
             lastAttempt: new Date().toISOString(),
             lastError: deliveryResult.error || 'unknown',
+            lastMethod: deliveryResult.method,
             lastFrom: pending.lastFrom,
             lastBody: pending.lastBody,
           };
           writeOut(`DELIVERY_FAILED:${workerName}:${commentId}:${deliveryResult.error || 'unknown'}`);
 
-          if (pending.retries + 1 >= MAX_RETRIES) {
+          if (deliveryResult.method !== 'pending' && pending.retries + 1 >= MAX_RETRIES) {
             writeErr(`inbox-supervisor: ${workerName} comment ${commentId} — max retries (${MAX_RETRIES}) exceeded, giving up`);
           }
         }
@@ -666,6 +684,7 @@ function main(argsOverride, opts = {}) {
             retries: 1,
             lastAttempt: new Date().toISOString(),
             lastError: deliveryResult.error || 'unknown',
+            lastMethod: deliveryResult.method,
             lastFrom: candidate.from,
             lastBody: candidate.body,
           };

@@ -5,8 +5,17 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { EventEmitter } = require('events');
 
 const msgSend = require('../scripts/msg-send');
+
+// msg-send.js は成功時にensureInboxSupervisorRunning()を呼ぶ（best-effort）。
+// テストでは実プロセスをspawnしないよう常にモックする（test-process-spawn-safety参照）。
+require('../scripts/shared/ensure-inbox-supervisor')._setSpawn(() => {
+  const child = new EventEmitter();
+  child.unref = () => {};
+  return child;
+});
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
