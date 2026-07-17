@@ -6,6 +6,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'spawn-worker.js');
+const { shouldPruneStaleWorker } = require(SCRIPT);
 
 function run(args, env = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
@@ -16,6 +17,64 @@ function run(args, env = {}) {
 
 // WEZTERM_PANE がないと即失敗するので、ダミー値をセットして引数バリデーションまで到達させる
 const BASE_ENV = { WEZTERM_PANE: '999' };
+
+// ── shouldPruneStaleWorker（stale worker除去判定） ────────────────────────────
+// 実障害: 新規ワーカー起動のたびに、たまたま休止中（正常）だったセッション再開系
+// ワーカーがworkers.jsonから消え、二度とresumeされなくなっていた。
+
+test('shouldPruneStaleWorker: ペインが生存していれば除去しない', () => {
+  const result = shouldPruneStaleWorker(
+    { paneId: '5', agentId: 'agy' },
+    new Set(['5']),
+    () => ({ sessionResume: true, asynchronousNotification: false }),
+  );
+  assert.equal(result, false);
+});
+
+test('shouldPruneStaleWorker: ペイン不在でもセッション再開系エージェントなら除去しない（正常な休止）', () => {
+  const result = shouldPruneStaleWorker(
+    { paneId: '5', agentId: 'agy' },
+    new Set(['9']),
+    () => ({ sessionResume: true, asynchronousNotification: false }),
+  );
+  assert.equal(result, false);
+});
+
+test('shouldPruneStaleWorker: ペイン不在でclaude系（asynchronousNotification:true）なら除去する', () => {
+  const result = shouldPruneStaleWorker(
+    { paneId: '5', agentId: 'claude' },
+    new Set(['9']),
+    () => ({ sessionResume: true, asynchronousNotification: true }),
+  );
+  assert.equal(result, true);
+});
+
+test('shouldPruneStaleWorker: agentConfigが解決できない場合はfail-safeで除去する', () => {
+  const result = shouldPruneStaleWorker(
+    { paneId: '5', agentId: 'unknown-agent' },
+    new Set(['9']),
+    () => null,
+  );
+  assert.equal(result, true);
+});
+
+test('shouldPruneStaleWorker: resolveAgentが例外を投げてもfail-safeで除去する', () => {
+  const result = shouldPruneStaleWorker(
+    { paneId: '5', agentId: 'broken' },
+    new Set(['9']),
+    () => { throw new Error('boom'); },
+  );
+  assert.equal(result, true);
+});
+
+test('shouldPruneStaleWorker: agentIdが無ければfail-safeで除去する', () => {
+  const result = shouldPruneStaleWorker(
+    { paneId: '5', agentId: null },
+    new Set(['9']),
+    () => { throw new Error('should not be called'); },
+  );
+  assert.equal(result, true);
+});
 
 test('--skill がないとエラー終了する', () => {
   const r = run(['--issue', '1', '--description', 'test', '--repo', 'o/r'], BASE_ENV);

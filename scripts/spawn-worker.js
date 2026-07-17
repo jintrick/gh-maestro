@@ -69,6 +69,34 @@ Arguments:
 Output (stdout):
   ワーカー名（例: issue-5-implement）`;
 
+/**
+ * ワーカーエントリをworkers.jsonから除去すべき（stale）か判定する。
+ *
+ * ペインが生存していれば除去しない。ペインが生存していなくても、セッション再開系
+ * エージェント（sessionResume:true かつ asynchronousNotification:false。reasonix/agy/
+ * codex等）であれば、それは1ターン完了ごとの正常な休止状態であり除去しない
+ * （tryResumeAndDeliverの判定条件と同一）。それ以外（claude系等、常駐し続ける設計の
+ * ためペイン不在が本当に異常＝放棄を意味する）のみ除去対象とする。
+ *
+ * @param {{paneId: string|null, agentId: string|null}} entry
+ * @param {Set<string>} alivePaneIds
+ * @param {(agentId: string) => object|null} resolveAgent
+ * @returns {boolean}
+ */
+function shouldPruneStaleWorker(entry, alivePaneIds, resolveAgent) {
+  if (alivePaneIds.has(entry.paneId)) return false;
+  let agentConfig;
+  try {
+    agentConfig = entry.agentId ? resolveAgent(entry.agentId) : null;
+  } catch {
+    agentConfig = null;
+  }
+  if (agentConfig && agentConfig.sessionResume && !agentConfig.asynchronousNotification) return false;
+  return true;
+}
+
+module.exports = { shouldPruneStaleWorker };
+
 if (require.main === module) {
 
 // --- 引数パース ---
@@ -212,12 +240,13 @@ const alivePanes = getAlivePaneIds();
 if (alivePanes !== null) {
   let dirty = false;
   for (const [k, v] of Object.entries(workers)) {
-    const paneId = normalizeWorkerEntry(v).paneId;
-    if (k !== 'orchestrator' && !alivePanes.has(paneId)) {
-      console.warn(`spawn-worker: stale worker "${k}" (pane_id ${paneId}) を workers.json から除去します`);
-      delete workers[k];
-      dirty = true;
-    }
+    if (k === 'orchestrator') continue;
+    const entry = normalizeWorkerEntry(v);
+    if (!shouldPruneStaleWorker(entry, alivePanes, (id) => resolveAgentConfig(id, { workspace, homedir }))) continue;
+
+    console.warn(`spawn-worker: stale worker "${k}" (pane_id ${entry.paneId}) を workers.json から除去します`);
+    delete workers[k];
+    dirty = true;
   }
   if (dirty) writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
 }
