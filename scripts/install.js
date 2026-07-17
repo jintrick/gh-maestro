@@ -369,7 +369,20 @@ ok(`${scriptFiles.length} scripts + ${scriptSubdirs.length} subdir(s) -> ${SHARE
 step('Installing shared skill files into ~/.gh-maestro/skills/...');
 fs.mkdirSync(SHARED_SKILLS, { recursive: true });
 
-const canonicalAgent = agents['claude'] || agents[Object.keys(agents)[0]];
+// skillsViaMd エージェント（reasonix等。Monitorツールを持たない）が読む共有スキルの
+// プレースホルダーは、skillsViaMd エージェントと同じ配送カテゴリ（sessionResume &&
+// !asynchronousNotification）を持つ agents.yaml エントリから選ぶ。claude用テキストは
+// Monitorツール前提のため、Monitorを持たないエージェントに展開すると実行不能な指示が
+// 埋め込まれる（過去のreasonix実障害、.claude/rules/shared-skill-agent-tools.md参照）。
+const skillsViaMdAgent = agentsArr.find(a => a.skillsViaMd);
+const sameCategoryAgent = skillsViaMdAgent
+  ? agentsArr.find(a => a.id !== skillsViaMdAgent.id
+      && !!a.sessionResume === !!skillsViaMdAgent.sessionResume
+      && !!a.asynchronousNotification === !!skillsViaMdAgent.asynchronousNotification
+      && agents[a.id])
+  : null;
+const canonicalAgent = (sameCategoryAgent && agents[sameCategoryAgent.id])
+  || agents['claude'] || agents[Object.keys(agents)[0]];
 // skillsViaMd エージェントのいずれかが rulesSupported: false の場合、
 // 共有スキルに RULES_CHECK_STEP を含める
 const anySkillsViaMdNeedsRules = agentsArr.some(

@@ -20,27 +20,15 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $IS
 
 何かを書く前に自問する: 「これはツール呼び出しの引数か？」 NOなら、その内容は書かないか、送るべきならmsg-send.jsの引数に置き換える。
 
-orchestrator からの返答を含むすべてのメッセージは、自分の inbox を能動的に pull して受信する。
-受動的に届くのを待つのではなく、以下の仕組みで自分から取りに行く。
-wezterm send-text による通知はレイテンシ最適化のヒントに過ぎず、pull が唯一の配送根拠である。
+orchestrator からの追加指示の受信方法は、あなたのエージェント種別によって以下のいずれかに決まっている（自分で選ぶものではない）：
 
 {{INBOX_POLL_MECHANISM}}
-
-**このポーリングはあなたの唯一の受信経路である。止まっている間、orchestratorからの指示は一切届かない。**
-
-上記の起動が「重複起動を検出しました」で失敗した場合、エラーメッセージ自体に、そのまま使える代替コマンド（`--watch-pid`）が示される。判断せず、示されたコマンドをそのままMonitorで`persistent: true`として起動すること。
-
-そのMonitorから `PID_DIED:<pid>` の通知を受け取ったら、受信経路が停止したことを意味する。以下で残骸を安全に停止してから、上記のMonitor起動手順を最初からやり直すこと：
-
-```sh
-node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE --worker-name $WORKER_NAME
-```
 
 処理後は必ず `msg-send.js` で結果を返信すること。ack は不要（GitHub コメントとして永続化されるため）。
 
 ## ゴール
 
-PRを作成した時点で初期の実装作業は完了するが、orchestratorから後続の修正指示や明示的な終了指示を受信するまでは、インボックスのポーリングを停止（TaskStopなど）せず、待機を維持しなければならない。
+PRを作成した時点で初期の実装作業は完了する。後続の修正指示を受け取れる状態を維持すること——具体的な維持方法は上記の受信機構に従う（自己ポーリング型なら明示的な終了操作を行わずポーリングを継続し、resume型ならそのまま自然に終了してよい。次の指示があれば自動的に再開される）。
 CI監視はorchestratorの責務であり、コーダーは行わない。orchestratorへの完了報告は**不要**（orchestratorがPRを自律検出する）。
 
 ## 起動時に与えられる情報
@@ -60,7 +48,7 @@ CI監視はorchestratorの責務であり、コーダーは行わない。orches
 3. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）
 4. プロジェクトで定義された lint / format チェックを実行し、すべて通ってから push する（`Makefile` の `lint` ターゲット、`package.json` の `lint` スクリプト、`pyproject.toml` の設定など、プロジェクトの慣習に従う）
 5. `gh pr create --base $BASE_BRANCH` でPRを作成する（本文に `Closes #$ISSUE` を含める）
-6. PR作成が完了した後は、自己終了（TaskStopなど）を行わず、そのまま待機状態を維持する。orchestratorがPRを自律検出し、必要に応じて後続の修正指示を送るため、明示的な終了指示を受信するまでインボックスのポーリングおよび監視ループを維持すること（通信ルール参照）。
+6. PR作成が完了した後の待機方法は通信ルールの受信機構に従う——自己ポーリング型なら自己終了（TaskStopなど）せずポーリングを継続し、resume型ならそのまま自然に終了してよい。orchestratorがPRを自律検出し、必要に応じて後続の修正指示を送る。
 
 ## 失敗時
 
@@ -85,4 +73,4 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $IS
 - `$WORKTREE` ルートで `npm install` / `npm ci` は実行しない。ルートの `node_modules` はシステムがjunctionで自動リンク済みのため、ルートで npm install を実行するとワークスペース共有の `node_modules` を破壊する
 - 実装で新しいサブパッケージ（例: `gui/`）を追加した場合、そのディレクトリ内での `npm install` は許可する（`cd gui && npm install`）
 - 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない
-- **自分で Monitor や background bash 等でポーリングプロセスを起動しないこと。** 追加指示の待ち受けは `msg-poll.js` 等の共通スクリプトのみを使用する。共通スクリプト側にライフサイクル管理（dead-man's switch + PID registry）が実装されており、自前の背景プロセス起動は孤児化の原因になる。
+- **自分で Monitor や background bash 等でポーリングプロセスを起動しないこと。** 追加指示の待ち受けは上記「通信ルール」に記載の受信機構の手順のみに従う（自己ポーリング型なら共通スクリプト、resume型なら何もしない）。共通スクリプト側にライフサイクル管理（dead-man's switch + PID registry）が実装されており、自前の背景プロセス起動は孤児化の原因になる。
