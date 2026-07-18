@@ -6,6 +6,12 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { EventEmitter } = require('events');
+const { spawnSync } = require('child_process');
+
+const SCRIPT = path.join(__dirname, '..', 'scripts', 'start-review-manager.js');
+function runCli(args) {
+  return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
+}
 
 // start-review-manager.js は child-process.js の spawn で
 // run-review-manager.js をdetach起動する。
@@ -59,6 +65,41 @@ function freshWorkspace(name) {
   fs.mkdirSync(workspace, { recursive: true });
   return workspace;
 }
+
+// ── CLIエントリポイント（parseFlags/hasHelpFlagへの統一） ─────────────────────
+// 実障害: 独自の getFlag/flagSet ループが argv.includes('--help') で生のargv全体を
+// 見ていたため、--brief-file の値としてたまたま "--help" を渡すと、値欠落エラーに
+// ならず誤ってヘルプ表示（exit 0）になってしまっていた。
+
+test('--help はUsageを表示して終了コード0', () => {
+  const r = runCli(['--help']);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /Usage: node start-review-manager\.js/);
+});
+
+test('-h はUsageを表示して終了コード0', () => {
+  const r = runCli(['-h']);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /Usage: node start-review-manager\.js/);
+});
+
+test('--brief-file の値が"--help"文字列と一致する場合、値欠落として安全にエラー終了する（誤ってヘルプ扱いしない）', () => {
+  const r = runCli(['42', 'o/r', '/tmp/ws', '--brief-file', '--help']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /Usage: node start-review-manager\.js/);
+});
+
+test('位置引数が不足しているとUsageを表示して終了コード1', () => {
+  const r = runCli(['42', 'o/r']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /Usage: node start-review-manager\.js/);
+});
+
+test('位置引数が多すぎるとUsageを表示して終了コード1', () => {
+  const r = runCli(['42', 'o/r', '/tmp/ws', 'extra']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /Usage: node start-review-manager\.js/);
+});
 
 // ── resolveMode ──────────────────────────────────────────────────────────
 

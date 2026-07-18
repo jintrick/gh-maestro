@@ -8,6 +8,7 @@ const { isProcessAlive } = require('./process-lifecycle');
 const { assertValidPr, reviewArtifactPath } = require('./shared/review-manager-paths');
 const { resolveTextInput } = require('./shared/text-input');
 const { toWinPath } = require('./win-path');
+const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 
 const USAGE = `start-review-manager.js — PRに対してReview Managerを起動する
 
@@ -170,28 +171,31 @@ module.exports = { startReviewManager, isLockValid, resolveMode, resolveDirected
 
 if (require.main === module) {
   const args = process.argv.slice(2);
-  if (args.includes('--help') || args.includes('-h')) {
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--mode', '--prompt', '--brief-file']);
+
+  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
+  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
+  // 値欠落は常にエラー優先（フェイルクローズ）とする。
+  if (exitFlagMiss) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+
+  if (hasHelpFlag(rest)) {
     console.log(USAGE);
     process.exit(0);
   }
 
-  const getFlag = (flag) => { const i = args.indexOf(flag); return i !== -1 ? args[i + 1] ?? null : null; };
-  const flagSet = new Set(['--mode', '--prompt', '--brief-file']);
-  const positional = [];
-  for (let i = 0; i < args.length; i++) {
-    if (flagSet.has(args[i])) { i++; continue; }
-    positional.push(args[i]);
-  }
-  const [pr, repo, workspace] = positional;
-  if (!pr || !repo || !workspace) {
+  const [pr, repo, workspace] = rest;
+  if (!pr || !repo || !workspace || rest.length > 3) {
     console.error(USAGE);
     process.exit(1);
   }
 
   const options = {
-    mode: getFlag('--mode') || undefined,
-    promptText: getFlag('--prompt') || undefined,
-    briefFile: getFlag('--brief-file') || undefined,
+    mode: values['--mode'] || undefined,
+    promptText: values['--prompt'] || undefined,
+    briefFile: values['--brief-file'] || undefined,
   };
 
   try {
