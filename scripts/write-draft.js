@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // write-draft.js — 論理パス（/tmp/... 等）を実体パスへ解決してから草案ファイルを書き出す
-// view-file.js・create-issue.js と同じ win-path.js の解決ロジックを通すことで、
+// create-issue.js と同じ win-path.js の解決ロジックを通すことで、
 // 書き込み先と参照先の実体パスがズレないようにする。
 'use strict';
 

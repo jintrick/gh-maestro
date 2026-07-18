@@ -133,8 +133,7 @@ node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE
 # 出力: REVIEW_MANAGER_STARTED:<PR> （起動した） / REVIEW_MANAGER_ALREADY_RUNNING:<PR> （既に稼働中）
 ```
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする
-- **write-draft.js** — 論理パス（`/tmp/issue-draft.md` 等）を実体パスへ解決してから草案ファイルを書き出す唯一の入口。`view-file.js`・`create-issue.js` と同じ解決ロジック（`win-path.js`）を通るため、書く先と読む先の実体パスがズレない。オーケストレーターは `C:\tmp` や `%TEMP%` を推論してはならず、常にこのスクリプト経由で草案を書くこと。
-- **view-file.js** — ユーザーに確認・承認してほしいファイルをZedで開く。
+- **write-draft.js** — 論理パス（`/tmp/issue-draft.md` 等）を実体パスへ解決してから草案ファイルを書き出す唯一の入口。`create-issue.js` と同じ解決ロジック（`win-path.js`）を通るため、書く先と読む先の実体パスがズレない。オーケストレーターは `C:\tmp` や `%TEMP%` を推論してはならず、常にこのスクリプト経由で草案を書くこと。
 - **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` を削除する（詳細は「Issue確定」参照）。
 
 ```sh
@@ -143,9 +142,6 @@ node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-draft.md --stdin <<'EOF'
 <Issue本文>
 EOF
 # 出力: DRAFT_WRITTEN:<実体パス>
-
-node "{{SCRIPTS_PATH}}/view-file.js" <filepath>
-# 例: node "{{SCRIPTS_PATH}}/view-file.js" /tmp/issue-draft.md
 ```
 
 すべてのスクリプトは `{{SCRIPTS_PATH}}/`（インストール時に絶対パスへ置換）に集約されている。各スクリプトは `--help` で使い方を確認できる。
@@ -295,7 +291,7 @@ Issueには2種類の読者がいる。**承認判断を行う人間**（抽象�
 
 ### 人間の承認とGitHubへの反映
 
-草案の内容を**チャット上で人間に提示し、承認を得てから** GitHub に反映する。ローカルファイルのZedプレビュー（`view-file.js`）は使用しない。人間は GitHub 上で随時内容を確認できる。
+草案の内容を**チャット上で人間に提示し、承認を得てから** GitHub に反映する。人間は GitHub 上で随時内容を確認できる。
 
 調査アンカーとして使っていた既存Issueがある場合はそのIssueを更新し、全く新規の作業で調査不要な場合は新規作成する。
 
