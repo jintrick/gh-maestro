@@ -95,7 +95,21 @@ function shouldPruneStaleWorker(entry, alivePaneIds, resolveAgent) {
   return true;
 }
 
-module.exports = { shouldPruneStaleWorker };
+/**
+ * skillsViaMd エージェント（reasonix等）向け AGENTS.md の本文を組み立てる。
+ *
+ * SKILL.md本文・今回の指示（--prompt-file/--short-prompt）・セッション変数の3要素を結合する。
+ * `prompt` が無ければ「今回の指示」セクション自体を省略する。
+ *
+ * @param {{skillContent: string, prompt: string|null, contextLines: string[]}} params
+ * @returns {string}
+ */
+function buildAgentsMdContent({ skillContent, prompt, contextLines }) {
+  const instructionSection = prompt ? `\n## 今回の指示\n\n${prompt}\n` : '';
+  return `${skillContent}${instructionSection}\n## セッション変数\n\n${contextLines.join('\n')}\n`;
+}
+
+module.exports = { shouldPruneStaleWorker, buildAgentsMdContent };
 
 if (require.main === module) {
 
@@ -390,7 +404,7 @@ if (agentConfig.skillsViaMd) {
   } else {
     console.warn(`spawn-worker: 共有スキルファイルが見つかりません: ${sharedSkillMd}`);
   }
-  const agentsMd = `${skillContent}\n## セッション変数\n\n${contextLines.join('\n')}\n`;
+  const agentsMd = buildAgentsMdContent({ skillContent, prompt, contextLines });
   writeFileSync(resolve(worktreeDir, 'AGENTS.md'), agentsMd, 'utf8');
   console.warn(`spawn-worker: AGENTS.md を書き出しました`);
 }
