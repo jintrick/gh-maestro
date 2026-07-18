@@ -88,6 +88,45 @@ test('--description がないとエラー終了する', () => {
   assert.match(r.stderr, /--description/);
 });
 
+// ── --description のバリデーション ────────────────────────────────────────────
+// 実障害: --description はworkerName（worktreeディレクトリ名・gitブランチ名の一部）に
+// そのまま使われるにもかかわらず、空でないことしか検証していなかった。
+// "../../../"のようなパストラバーサル値でworktreeDirがpath.resolve()により
+// 意図した.gh-maestro/worktrees/配下から脱出しうる、スペース・gitの特殊文字混入で
+// git branch作成が壊れる等の危険があった。
+
+test('--description にパストラバーサル文字列(../)を含むとエラー終了する', () => {
+  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', '../../../etc', '--repo', 'o/r'], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /--description/);
+});
+
+test('--description にスラッシュを含むとエラー終了する', () => {
+  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'foo/bar', '--repo', 'o/r'], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /--description/);
+});
+
+test('--description にスペースを含むとエラー終了する', () => {
+  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'foo bar', '--repo', 'o/r'], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /--description/);
+});
+
+test('--description が51文字以上だとエラー終了する', () => {
+  const tooLong = 'a'.repeat(51);
+  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', tooLong, '--repo', 'o/r'], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /--description/);
+});
+
+test('--description の英数字・ハイフン・アンダースコアはバリデーションを通過する', () => {
+  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'explore-auth_v2', '--repo', 'o/r'], BASE_ENV);
+  assert.notEqual(r.status, 0);
+  // description自体のバリデーションでは落ちず、後段（WEZTERM_PANE等）で止まることを確認
+  assert.doesNotMatch(r.stderr, /--description は英数字/);
+});
+
 test('--issue がないとエラー終了する', () => {
   const r = run(['--skill', 'gh-maestro-coder', '--description', 'test', '--repo', 'o/r'], BASE_ENV);
   assert.notEqual(r.status, 0);

@@ -55,7 +55,9 @@ Usage: node spawn-worker.js --skill <skill-name> --issue <N> --description <desc
 Arguments:
   --skill <name>          起動するワーカースキル名
   --issue <N>             ワーカーのアンカー Issue（正の整数）
-  --description <desc>    ワーカーの説明（worker名の一部になる）
+  --description <desc>    ワーカーの説明。workerName（worktreeディレクトリ名・gitブランチ名・
+                          workers.jsonのキー）の一部として issue-<N>-<desc> の形で使われる。
+                          英数字・ハイフン・アンダースコアのみ、1〜50文字（例: explore-auth）。
   --repo <owner/repo>     対象リポジトリ
   --prompt-file <path>    任意の役割・作業指示をファイルで指定する。
                           gh-maestro-base 使用時は必須。--short-prompt と同時指定不可。
@@ -142,6 +144,9 @@ const fail = (msg) => {
 };
 if (!skill)       fail('--skill が必要です');
 if (!description) fail('--description が必要です');
+if (description && !/^[A-Za-z0-9_-]{1,50}$/.test(description)) {
+  fail('--description は英数字・ハイフン・アンダースコアのみ、1〜50文字である必要があります（例: explore-auth）。この値は worktreeディレクトリ名・gitブランチ名にそのまま使われるため、スペース・スラッシュ・ドット等は使用できません');
+}
 if (!repo)        fail('--repo が必要です');
 if (shortPromptText != null && promptFileArg != null) fail('--short-prompt と --prompt-file は同時に指定できません');
 if (shortPromptText != null && !/^[\p{L}\p{N}\p{M}\p{Zs}._:/-]{1,200}$/u.test(shortPromptText)) {
