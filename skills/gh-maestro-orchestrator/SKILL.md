@@ -132,6 +132,9 @@ node "{{SCRIPTS_PATH}}/remove-worker.js" --worker-name <workerName> --workspace 
 node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE
 # 出力: REVIEW_MANAGER_STARTED:<PR> （起動した） / REVIEW_MANAGER_ALREADY_RUNNING:<PR> （既に稼働中）
 ```
+- **msg-poll.js** — GitHub Issueコメントを定期スキャンし新着メッセージを通知する。orchestratorの唯一のinbox監視手段（詳細は「自分のinbox監視」参照）
+- **poll-pr.js** — Issueに対応するPRを検出し、検出時にReview Managerを起動、その後poll-reviews.jsへ処理を橋渡ししてレビュー監視を継続する単一プロセス（詳細は「PR検出」参照）
+- **process-lifecycle.js** — PID registryを走査しstaleなプロセスエントリを掃除する（詳細は各節の「復旧手順」参照）
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする
 - **write-draft.js** — 論理パス（`/tmp/issue-draft.md` 等）を実体パスへ解決してから草案ファイルを書き出す唯一の入口。`create-issue.js` と同じ解決ロジック（`win-path.js`）を通るため、書く先と読む先の実体パスがズレない。オーケストレーターは `C:\tmp` や `%TEMP%` を推論してはならず、常にこのスクリプト経由で草案を書くこと。
 - **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` を削除する（詳細は「Issue確定」参照）。
