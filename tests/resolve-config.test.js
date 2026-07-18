@@ -78,7 +78,6 @@ test('loadDefaults: reasonix が dynamicCommand を持つ', () => {
   const reasonix = defaults.agents.find(a => a.id === 'reasonix');
   assert.ok(reasonix, 'reasonix should exist in defaults');
   assert.equal(reasonix.dynamicCommand, true, 'reasonix should have dynamicCommand: true');
-  assert.equal(reasonix.skillsViaMd, true, 'reasonix should have skillsViaMd: true');
 });
 
 // ── resolveAgentConfig ───────────────────────────────────────────────────────
@@ -436,8 +435,6 @@ test('resolveAgentConfig: reasonix の command が動的に解決される', () 
       agent.extraArgs.some(a => a === 'run'),
       'extraArgs should include run',
     );
-    // skillsViaMd は維持される
-    assert.equal(agent.skillsViaMd, true);
     // enterSequence は維持される
     assert.equal(agent.enterSequence, '\r');
   });
@@ -497,9 +494,6 @@ test('resolveAgentConfig: global extraArgs 上書き後も dynamicCommand 解決
         'overridden flag should come after the dynamically resolved script path',
       );
     }
-
-    // 動的解決に関係ないフィールドは維持される
-    assert.equal(agent.skillsViaMd, true, 'skillsViaMd should be preserved');
   });
 });
 
@@ -530,7 +524,6 @@ test('resolveAgentConfig: command 明示上書き時は dynamicCommand 解決を
     );
 
     // 他のフィールドは維持される
-    assert.equal(agent.skillsViaMd, true, 'skillsViaMd should be preserved');
     assert.equal(agent.enterSequence, '\r', 'enterSequence should be preserved');
   });
 });

@@ -39,7 +39,7 @@ test('resolveAgentConfig: config.jsonから一致するエージェントのover
     assert.ok(r, 'reasonix should be resolved');
     assert.equal(r.enterSequence, '\n');
     // 上書きしていないフィールドはデフォルトのまま
-    assert.equal(r.skillsViaMd, true);
+    assert.equal(r.dynamicCommand, true);
   });
 });
 

@@ -6,7 +6,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'spawn-worker.js');
-const { shouldPruneStaleWorker, buildAgentsMdContent } = require(SCRIPT);
+const { shouldPruneStaleWorker } = require(SCRIPT);
 
 function run(args, env = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
@@ -125,33 +125,6 @@ test('gh-maestro-base で --prompt-file がないとエラー終了する', () =
   ], BASE_ENV);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /--prompt-file/);
-});
-
-// ── buildAgentsMdContent（skillsViaMdエージェント向けAGENTS.md本文組み立て） ──────────
-// 実障害: reasonix（skillsViaMd）向けAGENTS.mdは、SKILL.md本文とセッション変数だけを
-// 結合しており、--prompt-file/--short-prompt で渡した「今回の指示」が含まれず、
-// reasonixに対してだけプロンプト内容が消えていた。
-
-test('buildAgentsMdContent: promptを指定すると「今回の指示」セクションに含まれる', () => {
-  const md = buildAgentsMdContent({
-    skillContent: 'スキル本文\n',
-    prompt: 'このIssueのバグを調査してください',
-    contextLines: ['ISSUE=42'],
-  });
-  assert.match(md, /## 今回の指示/);
-  assert.match(md, /このIssueのバグを調査してください/);
-  assert.match(md, /## セッション変数/);
-  assert.match(md, /ISSUE=42/);
-});
-
-test('buildAgentsMdContent: promptが無ければ「今回の指示」セクション自体が現れない', () => {
-  const md = buildAgentsMdContent({
-    skillContent: 'スキル本文\n',
-    prompt: null,
-    contextLines: ['ISSUE=42'],
-  });
-  assert.doesNotMatch(md, /## 今回の指示/);
-  assert.match(md, /## セッション変数/);
 });
 
 // ── --help ──────────────────────────────────────────────────────────────────

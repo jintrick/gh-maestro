@@ -166,6 +166,43 @@ for (const [agentName, config] of Object.entries(agents)) {
       );
     }
   });
+
+  // Monitorツールを持たないエージェント（agy/codex/reasonix。sessionResume系）向けの
+  // ネイティブインストール先には、claude専用のMonitor起動指示が紛れ込んではならない。
+  // 過去、reasonix（当時のskillsViaMd機構）がこの種の取り違えで実行不能な指示を受け取った
+  // 実障害（PR #38）の再発防止。
+  if (agentName !== 'claude') {
+    test(`[${agentName}] にclaude専用のMonitor起動指示が含まれない`, () => {
+      const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
+        .filter(e => e.isDirectory())
+        .map(e => e.name)
+        .filter(name => name !== 'gh-maestro-orchestrator');
+
+      for (const skill of skillDirs) {
+        const skillMdPath = path.join(destDir, skill, 'SKILL.md');
+        if (!fs.existsSync(skillMdPath)) continue;
+        const content = fs.readFileSync(skillMdPath, 'utf8');
+        assert.ok(
+          !content.includes('最初のツール呼び出しとして'),
+          `${agentName}/${skill}/SKILL.md にclaude専用のMonitor起動指示が含まれている`
+        );
+        assert.ok(
+          !content.includes('persistent: true'),
+          `${agentName}/${skill}/SKILL.md にMonitor専用の persistent: true 指示が含まれている`
+        );
+      }
+    });
+
+    test(`[${agentName}] のgh-maestro-investigatorにresume型の受信機構の説明が含まれる`, () => {
+      const skillMdPath = path.join(destDir, 'gh-maestro-investigator', 'SKILL.md');
+      if (!fs.existsSync(skillMdPath)) return;
+      const content = fs.readFileSync(skillMdPath, 'utf8');
+      assert.ok(
+        content.includes('inbox-supervisor.js'),
+        `${agentName}/gh-maestro-investigator/SKILL.md にinbox-supervisor.js経由の受信説明が見つからない`
+      );
+    });
+  }
 }
 
 test('共有スキル配布先に orchestrator の issue-template.md が配置される', () => {
@@ -174,37 +211,14 @@ test('共有スキル配布先に orchestrator の issue-template.md が配置�
   assert.ok(fs.existsSync(templatePath), `共有スキル配布先に issue-template.md が存在しない: ${templatePath}`);
 });
 
-// skillsViaMd エージェント（reasonix等）が読む共有スキルは、Monitorツールを持たない
-// エージェント向けの canonical（agy/codex等のsession-resume系）から置換されるべきで、
-// Monitor前提のclaude用テキストが紛れ込んではならない（実行不能な指示になるため）。
-// 過去にcanonicalAgentが無条件でclaude固定だったために発生した実障害の再発防止。
-// gh-maestro-orchestrator はワーカーテンプレートではなく、常にClaude Code自身が読む
-// orchestrator専用スキルのため対象外（正当にMonitor/persistent: trueを使う）。
-test('共有スキル（skillsViaMd向け）にMonitorツール前提の指示が含まれない', () => {
-  const sharedSkillsDir = expandHome('~/.gh-maestro/skills');
-  const skillDirs = fs.readdirSync(sharedSkillsDir, { withFileTypes: true })
-    .filter(e => e.isDirectory())
-    .map(e => e.name)
-    .filter(name => name !== 'gh-maestro-orchestrator');
+// 全エージェントはそれぞれのネイティブなスキル発見機構（skill_files_install_destination_directory）
+// でSKILL.mdを読む方式に統一済み（reasonixも含む）。~/.gh-maestro/skills/ 配下の共有コピーは
+// orchestrator専用の非SKILL.mdアセット配布用（issue-template.md等）であり、置換には常にclaude用
+// substitutionsを使う。ワーカーエージェントが直接読むことはないため、Monitor前提の指示が
+// 含まれていること自体は問題ではない（かつてreasonix等がこの共有コピーをAGENTS.md経由で読む
+// 特別扱いだった名残の検証はここでは行わない）。
 
-  for (const skill of skillDirs) {
-    const skillMdPath = path.join(sharedSkillsDir, skill, 'SKILL.md');
-    if (!fs.existsSync(skillMdPath)) continue;
-    const content = fs.readFileSync(skillMdPath, 'utf8');
-    // 「Monitorツールを持たない」等の説明文中の言及はOK。claude専用の実際の起動指示
-    // （Monitor呼び出し・persistent設定）が紛れ込んでいないかを見る。
-    assert.ok(
-      !content.includes('最初のツール呼び出しとして'),
-      `共有スキル ${skill}/SKILL.md にclaude専用のMonitor起動指示が含まれている（Monitorを持たないskillsViaMdエージェントでは実行不能）`
-    );
-    assert.ok(
-      !content.includes('persistent: true'),
-      `共有スキル ${skill}/SKILL.md にMonitor専用の persistent: true 指示が含まれている`
-    );
-  }
-});
-
-test('共有スキル（skillsViaMd向け）のSKILL.mdに未置換の {{...}} が残っていない', () => {
+test('共有スキルのSKILL.mdに未置換の {{...}} が残っていない', () => {
   const sharedSkillsDir = expandHome('~/.gh-maestro/skills');
   const skillDirs = fs.readdirSync(sharedSkillsDir, { withFileTypes: true })
     .filter(e => e.isDirectory())
@@ -220,17 +234,6 @@ test('共有スキル（skillsViaMd向け）のSKILL.mdに未置換の {{...}} �
       `共有スキル ${skill}/SKILL.md に未置換プレースホルダーあり: ${(unreplaced || []).join(', ')}`
     );
   }
-});
-
-test('共有スキル（skillsViaMd向け）にresume型の受信機構の説明が含まれる', () => {
-  const sharedSkillsDir = expandHome('~/.gh-maestro/skills');
-  const skillMdPath = path.join(sharedSkillsDir, 'gh-maestro-investigator', 'SKILL.md');
-  if (!fs.existsSync(skillMdPath)) return;
-  const content = fs.readFileSync(skillMdPath, 'utf8');
-  assert.ok(
-    content.includes('inbox-supervisor.js'),
-    'skillsViaMdエージェント向けSKILL.mdにinbox-supervisor.js経由の受信説明が見つからない'
-  );
 });
 
 // ── pruneStaleRecursive（G1） ─────────────────────────────────────────────────

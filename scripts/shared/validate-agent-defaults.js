@@ -59,7 +59,6 @@ const BOOLEAN_CONDITIONAL_REQUIRED = [
 const KNOWN_OPTIONAL_FIELDS = [
   ['dynamicCommand', 'boolean'],
   ['sendTextDelayMs', 'number'],
-  ['skillsViaMd', 'boolean'],
   ['promptFlag', 'string'],
   ['execArgs', 'array'],
   ['execPromptDelivery', 'string'],

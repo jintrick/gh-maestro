@@ -52,7 +52,6 @@
       "execPromptDelivery": "positional",
       "dynamicCommand": true,
       "promptDelivery": "positional",
-      "skillsViaMd": true,
       "enterSequence": "\r",
       "rulesSupported": false,
       "asynchronousNotification": false,

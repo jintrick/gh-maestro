@@ -364,34 +364,19 @@ for (const d of scriptSubdirs) {
 ok(`${scriptFiles.length} scripts + ${scriptSubdirs.length} subdir(s) -> ${SHARED_SCRIPTS}`);
 
 // ── 共有スキルを ~/.gh-maestro/skills/ にデプロイ ─────────────────────────────
-// スキルシステムを持たないエージェント（reasonix 等）が AGENTS.md 経由でスキルを読むための
-// 正規コピー。SCRIPTS_PATH は共有スクリプト先で統一する。
+// 全エージェントがそれぞれのネイティブなスキル発見機構（skill_files_install_destination_directory）
+// 経由でSKILL.mdを読む方式に統一済み（reasonixも含む。agents.yaml参照）。
+// ここで作る共有コピーは、orchestrator専用の非SKILL.mdアセット（issue-template.md等）を
+// 配布するためのものであり、orchestratorは常にClaude Code自身で動くため、置換にはclaude用
+// substitutionsを使う。
 step('Installing shared skill files into ~/.gh-maestro/skills/...');
 fs.mkdirSync(SHARED_SKILLS, { recursive: true });
 
-// skillsViaMd エージェント（reasonix等。Monitorツールを持たない）が読む共有スキルの
-// プレースホルダーは、skillsViaMd エージェントと同じ配送カテゴリ（sessionResume &&
-// !asynchronousNotification）を持つ agents.yaml エントリから選ぶ。claude用テキストは
-// Monitorツール前提のため、Monitorを持たないエージェントに展開すると実行不能な指示が
-// 埋め込まれる（過去のreasonix実障害、.claude/rules/shared-skill-agent-tools.md参照）。
-const skillsViaMdAgent = agentsArr.find(a => a.skillsViaMd);
-const sameCategoryAgent = skillsViaMdAgent
-  ? agentsArr.find(a => a.id !== skillsViaMdAgent.id
-      && !!a.sessionResume === !!skillsViaMdAgent.sessionResume
-      && !!a.asynchronousNotification === !!skillsViaMdAgent.asynchronousNotification
-      && agents[a.id])
-  : null;
-const canonicalAgent = (sameCategoryAgent && agents[sameCategoryAgent.id])
-  || agents['claude'] || agents[Object.keys(agents)[0]];
-// skillsViaMd エージェントのいずれかが rulesSupported: false の場合、
-// 共有スキルに RULES_CHECK_STEP を含める
-const anySkillsViaMdNeedsRules = agentsArr.some(
-  a => a.skillsViaMd && a.rulesSupported === false
-);
+const canonicalAgent = agents['claude'] || agents[Object.keys(agents)[0]];
 const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {}, {
   SCRIPTS_PATH: SHARED_SCRIPTS,
   SHARED_SKILLS_PATH: SHARED_SKILLS,
-  RULES_CHECK_STEP: anySkillsViaMdNeedsRules ? RULES_CHECK_STEP_CONTENT : '',
+  RULES_CHECK_STEP: '',
 });
 
 // stale 削除（ディレクトリと未知ファイルの両方）
