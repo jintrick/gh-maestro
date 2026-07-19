@@ -7,8 +7,7 @@ description: gh-maestro汎用調査エージェント。orchestratorから調査
 
 ## ゴール
 
-報告を行った時点で初期の調査作業は完了する。そのまま自然に終了してよい（次の指示があれば inbox-supervisor.js が自動的にあなたを再開する）。
-以下を実行することがゴールだ：
+報告を行った時点で調査作業は完了する。以下を実行することがゴールだ：
 
 ```sh
 node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $ISSUE --workspace $WORKSPACE "<調査報告>"
@@ -66,7 +65,7 @@ git -C $WORKSPACE show <commit-hash>
 
 ### フェーズ4: 報告
 
-ゴールのコマンドを実行する（要約や念押しの地の文を追加せず、コマンド引数のみで報告する）。実行後はそのまま自然に終了してよい。orchestratorが報告内容を元に後続の指示を送る可能性があり、届いたら inbox-supervisor.js が自動的にあなたを再開する。報告は**事実のみ**。分析・判断・修正方針・推奨は含めない：
+ゴールのコマンドを実行する（要約や念押しの地の文を追加せず、コマンド引数のみで報告する）。報告は**事実のみ**。分析・判断・修正方針・推奨は含めない：
 
 ```
 【調査結果】
@@ -97,4 +96,3 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $IS
 - PRを作成しない
 - `npm install` / `npm ci` は実行しない
 - 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない
-- **自分で Monitor や background bash 等でポーリングプロセスを起動しないこと。** 追加指示の待ち受けは何もしなくてよい（inbox-supervisor.js が唯一の配送経路であり、自然終了後に自動的に再開される）。自前の背景プロセス起動は孤児化の原因になる。

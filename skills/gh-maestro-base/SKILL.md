@@ -25,4 +25,3 @@ description: gh-maestroワーカーの共通骨格テンプレート。orchestra
 - `npm install` / `npm ci` は実行しない。`node_modules` はシンボリックリンクで用意済み
 - ゴール達成時・失敗時を問わず、必ず通信ルールのコマンドでorchestratorに報告すること（地の文で報告しない）
 - 判断に迷ったらorchestratorに相談し、自分で止まらない
-- **自分で Monitor や background bash 等でポーリングプロセスを起動しないこと。** 追加指示の待ち受けは何もしなくてよい（inbox-supervisor.js が唯一の配送経路であり、自然終了後に自動的に再開される）。自前の背景プロセス起動は孤児化の原因になる。

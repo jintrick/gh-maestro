@@ -191,16 +191,6 @@ for (const [agentName, config] of Object.entries(agents)) {
       );
     }
   });
-
-  test(`[${agentName}] のgh-maestro-investigatorにresume型の受信機構の説明が含まれる`, () => {
-    const skillMdPath = path.join(destDir, 'gh-maestro-investigator', 'SKILL.md');
-    if (!fs.existsSync(skillMdPath)) return;
-    const content = fs.readFileSync(skillMdPath, 'utf8');
-    assert.ok(
-      content.includes('inbox-supervisor.js'),
-      `${agentName}/gh-maestro-investigator/SKILL.md にinbox-supervisor.js経由の受信説明が見つからない`
-    );
-  });
 }
 
 test('共有スキル配布先に orchestrator の issue-template.md が配置される', () => {

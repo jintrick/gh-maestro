@@ -5,12 +5,9 @@ description: gh-maestroシニアコーダーエージェント。複雑な設計
 
 {{COMMUNICATION_RULES}}
 
-完了報告は不要（orchestratorがPRを自律検出する）。
-
 ## ゴール
 
-PRを作成した時点で初期の実装作業は完了する。そのまま自然に終了してよい（次の指示があれば inbox-supervisor.js が自動的にあなたを再開する）。
-CI監視はorchestratorの責務であり、コーダーは行わない。orchestratorへの完了報告は**不要**（orchestratorがPRを自律検出する）。
+PRを作成した時点で実装作業は完了する。CI監視はorchestratorの責務であり、コーダーは行わない。完了報告は不要（orchestratorがPRを自律検出する）。
 
 ## 起動時に与えられる情報
 
@@ -29,7 +26,6 @@ CI監視はorchestratorの責務であり、コーダーは行わない。orches
 3. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）
 4. プロジェクトで定義された lint / format チェックを実行し、すべて通ってから push する（`Makefile` の `lint` ターゲット、`package.json` の `lint` スクリプト、`pyproject.toml` の設定など、プロジェクトの慣習に従う）
 5. `gh pr create --base $BASE_BRANCH` でPRを作成する（本文に `Closes #$ISSUE` を含める）
-6. PR作成が完了したら、そのまま自然に終了してよい。orchestratorがPRを自律検出し、必要に応じて後続の修正指示を送る（届いたら inbox-supervisor.js が自動的にあなたを再開する）。
 
 ## 失敗時
 
@@ -54,4 +50,3 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $IS
 - `$WORKTREE` ルートで `npm install` / `npm ci` は実行しない。ルートの `node_modules` はシステムがjunctionで自動リンク済みのため、ルートで npm install を実行するとワークスペース共有の `node_modules` を破壊する
 - 実装で新しいサブパッケージ（例: `gui/`）を追加した場合、そのディレクトリ内での `npm install` は許可する（`cd gui && npm install`）
 - 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない
-- **自分で Monitor や background bash 等でポーリングプロセスを起動しないこと。** 追加指示の待ち受けは何もしなくてよい（inbox-supervisor.js が唯一の配送経路であり、自然終了後に自動的に再開される）。自前の背景プロセス起動は孤児化の原因になる。

@@ -17,12 +17,7 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator \
   --issue "$ISSUE" --workspace "$WORKSPACE" --from "$WORKER_NAME"
 ```
 
-この通知は既存の Issue コメント・メッセージマーカー・orchestrator inbox 監視で配送される。質問、追加調査要求、失敗報告も同じ経路を使う。
-
-orchestrator からのメッセージは inbox-supervisor.js が自動的に配送する。待つ・確認する対応は一切不要で、自分でポーリングプロセスを起動しない。
-
-{{INBOX_POLL_MECHANISM}}
-
+質問、追加調査要求、失敗報告も同じ経路を使う。
 
 ## ゴールと責務
 
@@ -66,7 +61,6 @@ orchestrator からのメッセージは inbox-supervisor.js が自動的に配�
    ```
 
 5. 手順4で得たコメント URL だけを、上の通信規約にある `msg-send.js orchestrator` コマンドで通知する。設計 Markdown 本文や一時ファイルのパスは通知に含めない。
-6. そのまま自然に終了してよい。orchestrator からの次の指示は、inbox-supervisor.js が休止を検知した時点で自動的にセッションを再開して届く。
 
 ## 投稿失敗と再試行
 

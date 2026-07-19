@@ -19,8 +19,6 @@ test('architect skill は通信・完了・入力境界・手順・再試行を�
   assert.match(architectSkill, /--raw --execution-id/);
   assert.match(architectSkill, /投稿が成功すると、実行記録は `completed`/);
   assert.match(architectSkill, /msg-send\.js" orchestrator/);
-  assert.match(architectSkill, /\{\{INBOX_POLL_MECHANISM\}\}/);
-  assert.match(architectSkill, /inbox-supervisor\.js が休止を検知した時点で自動的にセッションを再開/);
 });
 
 test('orchestrator skill は要件確定、調査、architect起動判断、coder向け実装指示確定の順で基本フローを定義する', () => {
