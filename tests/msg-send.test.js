@@ -80,6 +80,76 @@ test('--issue で指定した Issue が使われる', () => {
   });
 });
 
+// ── --skill による送信先解決（〈issue + 役割〉→ workerName 逆引き） ──────────
+
+function writeWorkersForSkill(workspace) {
+  const ghDir = path.join(workspace, '.gh-maestro');
+  fs.mkdirSync(ghDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(ghDir, 'workers.json'),
+    JSON.stringify({
+      orchestrator: { paneId: '1' },
+      'issue-42-investigate': { paneId: '10', agentId: 'reasonix', issue: 42, skill: 'gh-maestro-investigator' },
+      'issue-42-implement': { paneId: '11', agentId: 'claude-ds', issue: 42, skill: 'gh-maestro-coder' },
+    }, null, 2),
+    'utf8'
+  );
+}
+
+test('--skill: issue+役割で送信先workerNameを解決しマーカーの to に入れる', () => {
+  withTempDir(workspace => {
+    writeWorkersForSkill(workspace);
+    let capturedBody = null;
+    let capturedIssue = null;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedIssue = issue;
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/42#issuecomment-1\n' };
+    });
+
+    const r = msgSend.main(['修正してください', '--issue', '42', '--skill', 'gh-maestro-coder', '--workspace', workspace]);
+    assert.equal(r.code, 0);
+    assert.equal(capturedIssue, '42');
+    assert.ok(capturedBody.includes('"to":"issue-42-implement"'), '解決された workerName が to に入る');
+    assert.ok(capturedBody.includes('修正してください'));
+  });
+});
+
+test('--skill: 同一issueでも役割で区別して別ワーカーに解決する', () => {
+  withTempDir(workspace => {
+    writeWorkersForSkill(workspace);
+    let capturedBody = null;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/42#issuecomment-1\n' };
+    });
+
+    const r = msgSend.main(['追加調査を', '--issue', '42', '--skill', 'gh-maestro-investigator', '--workspace', workspace]);
+    assert.equal(r.code, 0);
+    assert.ok(capturedBody.includes('"to":"issue-42-investigate"'));
+  });
+});
+
+test('--skill: --issue が無いとエラー', () => {
+  withTempDir(workspace => {
+    writeWorkersForSkill(workspace);
+    const r = msgSend.main(['本文', '--skill', 'gh-maestro-coder', '--workspace', workspace]);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('--issue が必要')));
+  });
+});
+
+test('--skill: 該当ワーカーが無いと候補解決エラーで code 1', () => {
+  withTempDir(workspace => {
+    writeWorkersForSkill(workspace);
+    const r = msgSend.main(['本文', '--issue', '99', '--skill', 'gh-maestro-coder', '--workspace', workspace]);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('見つかりません')));
+  });
+});
+
 test('env ISSUE で Issue が解決される', () => {
   withTempDir(workspace => {
     let capturedIssue = null;

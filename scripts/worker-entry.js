@@ -15,10 +15,14 @@ function normalizeWorkerEntry(v) {
       paneId: v.paneId != null ? String(v.paneId) : null,
       agentId: v.agentId ?? null,
       issue: v.issue != null ? Number(v.issue) : null,
+      // skill（役割名。gh-maestro-coder等）は、orchestratorが workerName を覚えずに
+      // 〈issue + skill〉でワーカーを指せるようにするための識別子（resolveWorkerName参照）。
+      // agentId（claude-ds等）は役割と1対1でないため判別に使えない。
+      skill: v.skill ?? null,
       notifierPid: v.notifierPid ?? null,
     };
   }
-  return { paneId: v != null ? String(v) : null, agentId: null, issue: null, notifierPid: null };
+  return { paneId: v != null ? String(v) : null, agentId: null, issue: null, skill: null, notifierPid: null };
 }
 
 module.exports = { normalizeWorkerEntry };

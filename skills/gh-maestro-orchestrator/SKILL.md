@@ -79,26 +79,32 @@ EOF
 # 出力された実体パスを --prompt-file に渡す
 ```
 
+### ワーカーの指し方（重要）
+
+**起動後にワーカーへメッセージを送る・削除するときは、workerName を覚えず〈`--issue <N>` + `--skill <役割>`〉で指す。** workers.json から一意に解決される（`msg-send.js` / `remove-worker.js` が対応）。orchestrator は起動時に付けた workerName という文字列を記憶し続ける必要がない。
+
+例外は、**同一Issue・同一役割で複数のワーカーを並列起動した場合**（下記「大規模タスクの分割」の `W1`/`W2`/`W3` 等）だけ。この場合のみ `--issue`+`--skill` では一意に決まらず、スクリプトが候補一覧を表示してエラーになるので、`--worker-name issue-<N>-<desc>` で明示する。
+
 ### explorer の起動例
 
 ```sh
-WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
+node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --skill gh-maestro-explorer \
   --issue <N> \
   --description explore-auth \
   --prompt-file <上で書き出した実体パス> \
-  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH)
+  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
 ```
 
 ### investigator の起動例
 
 ```sh
-WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
+node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --skill gh-maestro-investigator \
   --issue <N> \
   --description investigate-login-bug \
   --prompt-file <上で書き出した実体パス> \
-  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH)
+  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
 ```
 
 調査対象のバグIssue本文だけで調査観点が尽くせる場合は `--prompt-file` を省略してよいが、Issue本文を超える補足（重点的に見てほしい箇所・除外してよい範囲など）を伝えたい場合は、explorerと同様に必ず `--prompt-file` で渡す。「原則」通りIssue本文に書ききれない指示をチャットに書き留めて終わらせない。
@@ -108,23 +114,26 @@ explorer は**事実のみ報告する**（分析・判断は行わない）。i
 ## アセット（`{{SCRIPTS_PATH}}/`）
 
 - **spawn-worker.js** — worktreeを作りワーカーを新規ペインで起動する
-- **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。`--issue` は workers.json から自動解決されるため明示しない。改行・引用符等の特殊文字を含む本文は `--body-file` でファイル経由で渡すこと（シェルクォート問題を回避）。
+- **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉で指定する（workerName を覚える必要はない）。改行・引用符等の特殊文字を含む本文は `--body-file` でファイル経由で渡すこと（シェルクォート問題を回避）。
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE "<メッセージ>"
-# 例: node "{{SCRIPTS_PATH}}/msg-send.js" issue-5-implement --workspace $WORKSPACE "命名改善: src/auth.go:42 — processData → normalizeSSN に変更してください（PR #12 のレビュー指摘より）"
+node "{{SCRIPTS_PATH}}/msg-send.js" --issue <N> --skill <役割> --workspace $WORKSPACE "<メッセージ>"
+# 例: node "{{SCRIPTS_PATH}}/msg-send.js" --issue 5 --skill gh-maestro-coder --workspace $WORKSPACE "命名改善: src/auth.go:42 — processData → normalizeSSN に変更してください（PR #12 のレビュー指摘より）"
 # 特殊文字を含む場合:
-# node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE --body-file /tmp/msg.txt
+# node "{{SCRIPTS_PATH}}/msg-send.js" --issue 5 --skill gh-maestro-coder --workspace $WORKSPACE --body-file /tmp/msg.txt
+# 同一issue・同一役割で複数並列した場合のみ workerName を位置引数で明示:
+# node "{{SCRIPTS_PATH}}/msg-send.js" issue-5-fix-utils --workspace $WORKSPACE "<メッセージ>"
 ```
 - **msg-read.js** — コメントIDから本文を読み出す（マーカー行除去済み）
 
 ```sh
 node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE
 ```
-- **remove-worker.js** — ワーカーペインをkillしてworktreeを削除する
+- **remove-worker.js** — ワーカーペインをkillしてworktreeを削除する。削除対象も〈`--issue` + `--skill`〉で指定する
 
 ```sh
-node "{{SCRIPTS_PATH}}/remove-worker.js" --worker-name <workerName> --workspace $WORKSPACE
+node "{{SCRIPTS_PATH}}/remove-worker.js" --issue <N> --skill <役割> --workspace $WORKSPACE
+# 同一issue・同一役割で複数並列した場合のみ: --worker-name issue-<N>-<desc> で明示
 ```
 - **start-review-manager.js** — PRに対してReview Managerを起動する。通常はPR検出時にpoll-pr.jsが自動で呼ぶが、Review Managerが起動しなかった・失敗した場合に手動で起動・再起動するために使う
 
@@ -152,17 +161,17 @@ EOF
 ### ワーカーの起動
 
 ```sh
-WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
+node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --skill <skill-name> \
   --prompt-file <プロンプトファイルの実体パス> \
   --issue <N> \
   --description <desc> \
   --repo $REPO \
   --workspace $WORKSPACE \
-  --base-branch $BASE_BRANCH)
+  --base-branch $BASE_BRANCH
 ```
 
-戻り値はワーカー名（例: `issue-5-implement`）。worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成される。
+worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、workers.json に〈issue + skill〉付きで登録される。**起動後にこのワーカーを指すときは、上記「ワーカーの指し方」の通り〈`--issue` + `--skill`〉で参照すればよく、戻り値の workerName を変数に控える必要はない。**
 
 `--description <desc>` は `issue-<N>-<desc>` の形でworktreeディレクトリ名・gitブランチ名・`workers.json`のキーにそのまま使われるため、**英数字・ハイフン・アンダースコアのみ、1〜50文字**（例: `explore-auth`）。スペース・スラッシュ・ドット等は使用できない（`spawn-worker.js --help`参照）。
 
@@ -193,13 +202,15 @@ WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 
 ```sh
 # アンチパターン: 1000件のLintエラーを1ワーカーに丸投げ
-WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue <N> --prompt-file <prompt-file> ...)
+node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue <N> --prompt-file <prompt-file> ...
 
 # 正しいパターン: ディレクトリ単位で分割し並列実行
-W1=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <components-prompt-file> --issue 12 --description fix-components ...)
-W2=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <utils-prompt-file>      --issue 12 --description fix-utils ...)
-W3=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <hooks-prompt-file>      --issue 12 --description fix-hooks ...)
+node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <components-prompt-file> --issue 12 --description fix-components ...
+node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <utils-prompt-file>      --issue 12 --description fix-utils ...
+node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <hooks-prompt-file>      --issue 12 --description fix-hooks ...
 ```
+
+この並列分割は「同一issue・同一役割で複数ワーカー」の唯一の正当なケースであり、以後これらを個別に指すときだけ〈`--issue` + `--skill`〉では一意に決まらない。`--worker-name issue-12-fix-utils` のように workerName（= `issue-<N>-<desc>`）で明示する。
 
 ## 不変条件
 
@@ -270,11 +281,11 @@ architect は対象 Issue がクローズされるまで任意の相談役とし
 起動は既存の共有ランチャーを使い、各試行に安定した `--execution-id` を付ける。再試行で同じ成果物を使う場合は同じIDを指定する。
 
 ```sh
-WORKER=$(node "{{SCRIPTS_PATH}}/spawn-worker.js" \
+node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --skill gh-maestro-architect --issue <N> --description abstract-design \
   --prompt-file <圧縮済み要件・調査コンテクストのファイル> \
   --execution-id issue-<N>-architect-<attempt> \
-  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH)
+  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
 ```
 
 architect の検討結果を踏まえて実装方針・作業分割・検証条件を Issue 本文へ統合した後、coder には architect コメントではなく、その確定済み Issue 本文だけを実装指示として渡す。coder は必要なコード調査を worktree で行い、具体的な実装を組み立てる。
@@ -459,7 +470,8 @@ PRに新しいレビューコメントが届くたびに、以下の4分類で�
 ただし「短すぎる」「好みの問題」レベルのスタイル指摘は**保留リストへ**。
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE "命名改善: <path>:<line> — <現在の名前> は不正確/不明瞭です。<具体的な提案> に変更してください。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
+node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE "命名改善: <path>:<line> — <現在の名前> は不正確/不明瞭です。<具体的な提案> に変更してください。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
+# senior-coder を使っていた場合は --skill gh-maestro-senior-coder
 ```
 
 ### 3. 本当のバグ・セキュリティ問題 — コーダーにフィードバック
@@ -467,7 +479,7 @@ node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE "命名改善
 テストでカバーされていない分岐、エラーハンドリング漏れ、認証バイパス、データ破損の可能性など、**実害のある指摘**はコーダーにフィードバックする。具体的な問題点と修正方針を伝える。
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE "修正依頼: <path>:<line> — <問題の説明>。<修正方針>。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
+node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE "修正依頼: <path>:<line> — <問題の説明>。<修正方針>。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
 ```
 
 ### 4. 議論の余地がある提案 / SUGGESTION — 保留Issueへ即追記
@@ -635,7 +647,7 @@ gh issue comment $PENDING_ISSUE --repo $REPO \
 上記に該当しない（分類が明白・機械的な）場合は聴取をスキップし、直接人間への提示に進む。聞く場合のみ：
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" $WORKER --workspace $WORKSPACE "反省会の分類案です。異論や補足があれば教えてください: <分類案の要約>"
+node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE "反省会の分類案です。異論や補足があれば教えてください: <分類案の要約>"
 ```
 
 コーダーからの応答（異論・補足・別視点）があれば、人間への提示フォーマットに反映してから次に進む。応答がなくても一定時間で先に進んでよい。

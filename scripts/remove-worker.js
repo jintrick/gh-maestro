@@ -18,22 +18,28 @@ const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { killProcessTree } = require('./kill-tree');
 const { sweepRegistry } = require('./process-lifecycle');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { resolveWorkerName } = require('./shared/workers-registry');
 
 const USAGE = `remove-worker.js — ワーカーのペインを kill し worktree を削除する
 
 Usage: node remove-worker.js --worker-name <name> [--workspace <path>]
+       node remove-worker.js --issue <N> --skill <role> [--workspace <path>]
 
 Options:
-  --worker-name <name>  削除するワーカー名（必須）
+  --worker-name <name>  削除するワーカー名。--issue+--skill と併用不可。
+  --issue <N>           削除対象ワーカーを workerName ではなく〈Issue番号 + 役割〉で指定する場合のIssue番号。
+  --skill <role>        同上の役割（gh-maestro-coder等）。workers.json から一意に解決する。
+                        該当が複数ある場合は候補を表示してエラー終了するので --worker-name で明示する。
   --workspace <path>    ワークスペース（デフォルト CWD）
 
+--worker-name か〈--issue + --skill〉のいずれかで削除対象を指定する。
 ペインを kill し、worktree と同名ブランチを削除し、workers.json からエントリを除く。
 ディレクトリがロックで残っても次回 reset-session.js が junction 非追跡で安全に掃除する
 （残骸を手動 rm しないこと。node_modules junction を辿って共有ファイルを壊す）。`;
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--worker-name', '--workspace']);
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--worker-name', '--workspace', '--issue', '--skill']);
 
   // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
   // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
@@ -48,11 +54,25 @@ if (require.main === module) {
     process.exit(0);
   }
 
-  const workerName = values['--worker-name'];
   const workspace = values['--workspace'] ?? process.cwd();
-
   const fail = (msg) => { console.error(`remove-worker: ${msg}`); process.exit(1); };
-  if (!workerName) { console.error(USAGE); process.exit(1); }
+
+  // 削除対象の解決: --worker-name（明示）優先。無ければ〈--issue + --skill〉から逆引きする。
+  let workerName = values['--worker-name'];
+  if (workerName && (values['--issue'] || values['--skill'])) {
+    fail('--worker-name と〈--issue + --skill〉は併用できません。どちらか一方で指定してください。');
+  }
+  if (!workerName) {
+    if (!values['--issue'] || !values['--skill']) {
+      console.error(USAGE);
+      process.exit(1);
+    }
+    try {
+      workerName = resolveWorkerName(workspace, { issue: values['--issue'], skill: values['--skill'] });
+    } catch (e) {
+      fail(e.message);
+    }
+  }
 
   const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
   const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);

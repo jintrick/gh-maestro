@@ -11,6 +11,7 @@ const {
   readWorkersRaw,
   updateWorkerPaneId,
   getOrchestratorPaneId,
+  resolveWorkerName,
 } = require('../scripts/shared/workers-registry');
 
 function withTempDir(fn) {
@@ -118,5 +119,78 @@ test('getOrchestratorPaneId: orchestratorエントリが無ければnull', () =>
 test('getOrchestratorPaneId: workers.jsonが無ければnull', () => {
   withTempDir((dir) => {
     assert.equal(getOrchestratorPaneId(dir), null);
+  });
+});
+
+// ── resolveWorkerName（〈issue + skill〉からの逆引き） ────────────────────────
+
+test('resolveWorkerName: issue+skill が一意に決まれば workerName を返す', () => {
+  withTempDir((dir) => {
+    writeWorkers(dir, {
+      orchestrator: { paneId: '1' },
+      'issue-42-investigate': { paneId: '10', agentId: 'reasonix', issue: 42, skill: 'gh-maestro-investigator' },
+      'issue-42-implement': { paneId: '11', agentId: 'claude-ds', issue: 42, skill: 'gh-maestro-coder' },
+    });
+    assert.equal(resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }), 'issue-42-implement');
+    assert.equal(resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-investigator' }), 'issue-42-investigate');
+  });
+});
+
+test('resolveWorkerName: issue が文字列で渡されても数値比較で解決する', () => {
+  withTempDir((dir) => {
+    writeWorkers(dir, {
+      'issue-42-implement': { paneId: '11', agentId: 'claude-ds', issue: 42, skill: 'gh-maestro-coder' },
+    });
+    assert.equal(resolveWorkerName(dir, { issue: '42', skill: 'gh-maestro-coder' }), 'issue-42-implement');
+  });
+});
+
+test('resolveWorkerName: 該当0件はエラー', () => {
+  withTempDir((dir) => {
+    writeWorkers(dir, {
+      'issue-42-implement': { paneId: '11', agentId: 'claude-ds', issue: 42, skill: 'gh-maestro-coder' },
+    });
+    assert.throws(
+      () => resolveWorkerName(dir, { issue: 99, skill: 'gh-maestro-coder' }),
+      /該当するワーカーが見つかりません/
+    );
+  });
+});
+
+test('resolveWorkerName: 同一issue+同一skillで複数該当なら候補付きでエラー', () => {
+  withTempDir((dir) => {
+    writeWorkers(dir, {
+      'issue-12-fix-components': { paneId: '10', agentId: 'claude-ds', issue: 12, skill: 'gh-maestro-coder' },
+      'issue-12-fix-utils': { paneId: '11', agentId: 'claude-ds', issue: 12, skill: 'gh-maestro-coder' },
+    });
+    assert.throws(
+      () => resolveWorkerName(dir, { issue: 12, skill: 'gh-maestro-coder' }),
+      /複数のワーカーが該当.*issue-12-fix-components.*issue-12-fix-utils|複数のワーカーが該当.*issue-12-fix-utils.*issue-12-fix-components/
+    );
+  });
+});
+
+test('resolveWorkerName: orchestratorエントリは対象外', () => {
+  withTempDir((dir) => {
+    writeWorkers(dir, {
+      orchestrator: { paneId: '1', issue: 42, skill: 'gh-maestro-coder' },
+      'issue-42-implement': { paneId: '11', agentId: 'claude-ds', issue: 42, skill: 'gh-maestro-coder' },
+    });
+    // orchestrator が偶然同じ issue/skill を持っていても解決対象に含めない
+    assert.equal(resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }), 'issue-42-implement');
+  });
+});
+
+test('resolveWorkerName: workers.jsonが無ければエラー', () => {
+  withTempDir((dir) => {
+    assert.throws(() => resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }), /読み込めません/);
+  });
+});
+
+test('resolveWorkerName: issue/skill 欠落はエラー', () => {
+  withTempDir((dir) => {
+    writeWorkers(dir, { 'issue-42-implement': { paneId: '11', issue: 42, skill: 'gh-maestro-coder' } });
+    assert.throws(() => resolveWorkerName(dir, { skill: 'gh-maestro-coder' }), /issue が必要です/);
+    assert.throws(() => resolveWorkerName(dir, { issue: 42 }), /skill が必要です/);
   });
 });

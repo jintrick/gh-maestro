@@ -21,19 +21,24 @@ const { resolveTextInput } = require('./shared/text-input');
 const { markCommentResult, readRegistry } = require('./shared/execution-registry');
 const { isRetryableGhFailure, graphqlAddComment } = require('./shared/gh-fallback');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
+const { resolveWorkerName } = require('./shared/workers-registry');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
 Usage: node msg-send.js <recipient> [--from <name>] [--issue <N>] [--workspace <path>] ["<本文>"]
+       node msg-send.js --issue <N> --skill <role> [--workspace <path>] ["<本文>"]
        node msg-send.js <recipient> --body-file <path> [--from <name>] [--issue <N>] [--workspace <path>] [--raw] [--execution-id <id>]
 
 Arguments:
-  <recipient>           送信先（worker 名、または "orchestrator"）
+  <recipient>           送信先（worker 名、または "orchestrator"）。--skill 使用時は指定しない。
   <本文>                メッセージ本文（--body-file と併用時は無視されます）
 
 Options:
+  --skill <role>        送信先ワーカーを workerName ではなく〈--issue + 役割（gh-maestro-coder等）〉で
+                        指定する。workers.json から一意に解決する。位置引数 recipient とは併用不可。
+                        該当が複数ある場合は候補を表示してエラー終了するので --worker 名（位置引数）で明示する。
   --from <name>         送信元名（省略時は GH_MAESTRO_WORKER env → 'orchestrator'）
-  --issue <N>           投稿先の Issue 番号（省略時は workers.json または env ISSUE から解決）
+  --issue <N>           投稿先の Issue 番号（省略時は workers.json または env ISSUE から解決）。--skill 使用時は必須。
   --workspace <path>    ワークスペースパス（省略時は環境変数またはCWDから解決）
   --body-file <path>    メッセージ本文を記載したファイルのパス（UTF-8）。改行・引用符等の特殊文字を含む本文は
                         シェルクォート問題を避けるためこちらを使用してください。指定された場合、位置引数の本文より優先されます。
@@ -91,7 +96,7 @@ function main(argsOverride, envOverride) {
   const rawIndex = args.indexOf('--raw');
   const raw = rawIndex !== -1;
   const parsedArgs = raw ? args.filter((_, index) => index !== rawIndex) : args;
-  const { values, rest, exitFlagMiss } = parseFlags(parsedArgs, ['--workspace', '--issue', '--from', '--body-file', '--execution-id']);
+  const { values, rest, exitFlagMiss } = parseFlags(parsedArgs, ['--workspace', '--issue', '--from', '--body-file', '--execution-id', '--skill']);
 
   if (exitFlagMiss) {
     writeErr('msg-send: フラグには値が必要です。');
@@ -99,13 +104,47 @@ function main(argsOverride, envOverride) {
     return { code: 1, lines: out, errLines: err };
   }
 
-  const recipient = rest[0];
+  const workspace = resolveWorkspace(values['--workspace']);
+  if (!workspace) {
+    writeErr('msg-send: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
+    return { code: 1, lines: out, errLines: err };
+  }
+
+  // ── 送信先の解決: --skill 指定時は〈--issue + 役割〉から workerName を逆引きする ──
+  // --skill モードでは位置引数に recipient を置かず、位置引数はすべて本文とみなす
+  // （recipient と本文の区別を --skill の有無で一意にする）。
+  const skillFlag = values['--skill'];
+  let recipient;
+  let bodyPositionals;
+  if (skillFlag) {
+    if (rest.length > 0 && values['--body-file']) {
+      // --skill + --body-file の場合、位置引数があってはならない（本文はファイル）
+      writeErr('msg-send: --skill と --body-file を併用する場合、本文を位置引数で渡さないでください。');
+      writeErr(USAGE);
+      return { code: 1, lines: out, errLines: err };
+    }
+    const skillIssue = values['--issue'] || env.ISSUE || null;
+    if (!skillIssue) {
+      writeErr('msg-send: --skill 使用時は --issue が必要です（送信先ワーカーを issue+役割で特定するため）。');
+      return { code: 1, lines: out, errLines: err };
+    }
+    try {
+      recipient = resolveWorkerName(workspace, { issue: skillIssue, skill: skillFlag });
+    } catch (e) {
+      writeErr(`msg-send: ${e.message}`);
+      return { code: 1, lines: out, errLines: err };
+    }
+    bodyPositionals = rest;
+  } else {
+    recipient = rest[0];
+    bodyPositionals = rest.slice(1);
+  }
 
   // ── 本文解決: --body-file > 位置引数 ─────────────────────────────────────
   let body;
   try {
     body = resolveTextInput({
-      inlineValue: rest.slice(1).join(' '),
+      inlineValue: bodyPositionals.join(' '),
       filePath: values['--body-file'] ? toWinPath(values['--body-file']) : null,
     });
   } catch (e) {
@@ -121,12 +160,6 @@ function main(argsOverride, envOverride) {
   if (!body) {
     writeErr('msg-send: メッセージ本文が必要です。');
     writeErr(USAGE);
-    return { code: 1, lines: out, errLines: err };
-  }
-
-  const workspace = resolveWorkspace(values['--workspace']);
-  if (!workspace) {
-    writeErr('msg-send: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
     return { code: 1, lines: out, errLines: err };
   }
 
