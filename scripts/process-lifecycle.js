@@ -152,8 +152,13 @@ function getProcessStartTime(pid) {
 
   if (IS_WIN) {
     try {
+      // Get-CimInstance の CreationDate は既に [DateTime] オブジェクトなので、
+      // [System.DateTime]::Parse で文字列パースし直してはならない。DateTime→文字列の
+      // 暗黙変換は現在カルチャ依存で、日本語ロケール等では Parse が失敗し null を返して
+      // しまう（プロセス同一性確認＝重複検出・sweepが全て機能しなくなる実バグだった）。
+      // DateTime オブジェクトに直接 ToUniversalTime().ToString('o') を適用する。
       const out = execSync(
-        `powershell -NoProfile -Command "$d=(Get-CimInstance Win32_Process -Filter 'ProcessId=${n}').CreationDate; if($d){[System.DateTime]::Parse($d).ToUniversalTime().ToString('o')}else{''}"`,
+        `powershell -NoProfile -Command "$d=(Get-CimInstance Win32_Process -Filter 'ProcessId=${n}').CreationDate; if($d){$d.ToUniversalTime().ToString('o')}else{''}"`,
         { encoding: 'utf8', timeout: 5000, stdio: 'pipe' }
       );
       const val = out.trim();
