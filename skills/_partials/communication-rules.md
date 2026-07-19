@@ -10,6 +10,4 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $IS
 
 すべての作業を終えたら、最終出力には `DONE` の1語だけを書く。
 
-追加の指示の受信方法は、あなたのエージェント種別によって決まっている（自分で選ぶものではない）：
-
 {{INBOX_POLL_MECHANISM}}
