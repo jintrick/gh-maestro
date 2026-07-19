@@ -7,6 +7,9 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const SKILLS_DIR = path.join(ROOT, 'skills');
 const AGENTS_YAML = path.join(SKILLS_DIR, 'agents.yaml');
+// 部分テンプレート（複数スキルの SKILL.md へ {{...}} で差し込む共通本文）の置き場所。
+// `_` 始まりのため skillDirs の走査対象からは除外され、スキルとしてはインストールされない。
+const PARTIALS_DIR = path.join(SKILLS_DIR, '_partials');
 const { validateAgentDefaults } = require(path.join(__dirname, 'shared', 'validate-agent-defaults'));
 
 // ── Minimal YAML parser for agents.yaml ──────────────────────────────────────
@@ -91,6 +94,13 @@ function applySubstitutions(content, substitutions) {
     }
   } while (result !== prev);
   return result;
+}
+
+// 部分テンプレート（skills/_partials/*.md）を読み込む。末尾改行は SKILL.md への差し込み時に
+// 余分な空行を生むため落とす。中身の {{SCRIPTS_PATH}} 等のプレースホルダーは、差し込み後に
+// applySubstitutions の複数パスで解決される。
+function readPartial(name) {
+  return fs.readFileSync(path.join(PARTIALS_DIR, name), 'utf8').trimEnd();
 }
 
 function stripFrontmatter(content) {
@@ -208,7 +218,7 @@ if (!fs.existsSync(AGENTS_YAML)) fail('skills/agents.yaml not found');
 const agents = parseAgentsYaml(fs.readFileSync(AGENTS_YAML, 'utf8'));
 
 const skillDirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
-  .filter(e => e.isDirectory())
+  .filter(e => e.isDirectory() && !e.name.startsWith('_'))  // `_partials` 等の部分テンプレート置き場を除外
   .map(e => e.name);
 
 // agent-defaults.json を読み込み、rulesSupported フラグのマップを構築する
@@ -239,34 +249,11 @@ if (defaultsErrors.length > 0) {
 const defaultsWarnings = defaultsIssues.filter(i => i.startsWith('[WARN]'));
 for (const w of defaultsWarnings) console.warn(`  \x1b[33m! ${w}\x1b[0m`);
 
-// RULES_CHECK_STEP: rulesSupported が false のエージェントにのみ注入される。
-// コーディング開始前に .claude/rules/*.md を手動で調査するステップ。
-const RULES_CHECK_STEP_CONTENT = `0. **（ルール確認ステップ）** これから変更するファイルに関連するコーディング規約（\`.claude/rules/*.md\`）が無いか確認し、該当するものがあれば内容を読んでから作業に着手する：
-
-   まず、Issueの要件からこれから変更するファイルパスを特定し、以下のコマンドで該当するルールファイルを検索する：
-   \`\`\`sh
-   node "{{SCRIPTS_PATH}}/find-matching-rules.js" --root "$WORKTREE" <変更予定のファイルパス...>
-   \`\`\`
-
-   該当するルールファイルがあれば、\`Read\` ツールで内容を読み、その規約に従って実装すること。該当しなければそのまま次に進む。`;
-
-// COMMUNICATION_RULES: 全ワーカースキル共通の通信ルール本文。
-// 各SKILL.mdへの重複コピペをやめ単一のソースにする（コピペ間のドリフト防止）。
-// {{INBOX_POLL_MECHANISM}} をネストして含む。applySubstitutionsは解決するまで
-// 複数パス回すため、ここでの入れ子は安全に解決される。
-const COMMUNICATION_RULES_CONTENT = `## 通信ルール
-
-作業の結果・質問・相談・報告は、最終応答として書かず、必ず次のコマンドをツール呼び出しとして実行する：
-
-\`\`\`sh
-node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $ISSUE --workspace $WORKSPACE "<内容>"
-\`\`\`
-
-「〜します」「着手しました」などの着手報告は送らない。改行・引用符・バックスラッシュを含む本文は \`--body-file\` を使う（詳細は \`msg-send.js --help\`）。指示を処理したら結果を返信する（ackは不要）。
-
-追加の指示の受信方法は、あなたのエージェント種別によって決まっている（自分で選ぶものではない）：
-
-{{INBOX_POLL_MECHANISM}}`;
+// スキル本文へ差し込む共通部分テンプレート（本文は skills/_partials/*.md が正本）。
+// 指示文というコンテンツをスクリプト内の文字列リテラルに埋め込まず、編集しやすい .md に置く。
+// RULES_CHECK_STEP は rulesSupported が false のエージェントにのみ注入される。
+const RULES_CHECK_STEP_CONTENT = readPartial('rules-check-step.md');
+const COMMUNICATION_RULES_CONTENT = readPartial('communication-rules.md');
 
 // ~/.gh-maestro/ は gh-maestro 専用ディレクトリ。install が書いたものだけを残し、
 // それ以外（旧バージョンの遺産）は最後に prune で除去する。
