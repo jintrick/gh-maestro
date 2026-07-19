@@ -250,6 +250,24 @@ const RULES_CHECK_STEP_CONTENT = `0. **（ルール確認ステップ）** こ�
 
    該当するルールファイルがあれば、\`Read\` ツールで内容を読み、その規約に従って実装すること。該当しなければそのまま次に進む。`;
 
+// COMMUNICATION_RULES: 全ワーカースキル共通の通信ルール本文。
+// 各SKILL.mdへの重複コピペをやめ単一のソースにする（コピペ間のドリフト防止）。
+// {{INBOX_POLL_MECHANISM}} をネストして含む。applySubstitutionsは解決するまで
+// 複数パス回すため、ここでの入れ子は安全に解決される。
+const COMMUNICATION_RULES_CONTENT = `## 通信ルール
+
+作業の結果・質問・相談・報告は、最終応答として書かず、必ず次のコマンドをツール呼び出しとして実行する：
+
+\`\`\`sh
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $ISSUE --workspace $WORKSPACE "<内容>"
+\`\`\`
+
+「〜します」「着手しました」などの着手報告は送らない。改行・引用符・バックスラッシュを含む本文は \`--body-file\` を使う（詳細は \`msg-send.js --help\`）。指示を処理したら結果を返信する（ackは不要）。
+
+追加の指示の受信方法は、あなたのエージェント種別によって決まっている（自分で選ぶものではない）：
+
+{{INBOX_POLL_MECHANISM}}`;
+
 // ~/.gh-maestro/ は gh-maestro 専用ディレクトリ。install が書いたものだけを残し、
 // それ以外（旧バージョンの遺産）は最後に prune で除去する。
 // 「書いた＝残す」を保証するため、ここ配下のパスは必ず ghMaestroPath() で組み立てる。
@@ -293,6 +311,7 @@ for (const [agentName, config] of Object.entries(agents)) {
     SCRIPTS_PATH: SHARED_SCRIPTS,
     SHARED_SKILLS_PATH: SHARED_SKILLS,
     RULES_CHECK_STEP: agentRulesSupported ? '' : RULES_CHECK_STEP_CONTENT,
+    COMMUNICATION_RULES: COMMUNICATION_RULES_CONTENT,
   });
 
   for (const skill of skillDirs) {
@@ -377,6 +396,7 @@ const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {
   SCRIPTS_PATH: SHARED_SCRIPTS,
   SHARED_SKILLS_PATH: SHARED_SKILLS,
   RULES_CHECK_STEP: '',
+  COMMUNICATION_RULES: COMMUNICATION_RULES_CONTENT,
 });
 
 // stale 削除（ディレクトリと未知ファイルの両方）
