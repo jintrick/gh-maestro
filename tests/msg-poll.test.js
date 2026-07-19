@@ -8,6 +8,13 @@ const path = require('path');
 
 const msgPoll = require('../scripts/msg-poll');
 
+// テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
+// 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
+// --session-pid を渡すため、テストでも常に自プロセスPIDを渡してこの探索を省く。
+const _realMain = msgPoll.main;
+const TEST_SESSION_PID = String(process.pid);
+const runMain = (args, opts) => _realMain([...args, '--session-pid', TEST_SESSION_PID], opts);
+
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
   const cleanup = () => fs.rmSync(dir, { recursive: true, force: true });
@@ -69,7 +76,7 @@ test('parseArgs: --wait が無ければ waitArg は null', () => {
 // ── --help / -h ────────────────────────────────────────────────────────────
 
 test('--help が usage を返して code 0', () => {
-  const r = msgPoll.main(['--help']);
+  const r = runMain(['--help']);
   assert.equal(r.code, 0);
   assert.ok(r.lines.join('\n').includes('msg-poll.js'));
   assert.equal(r.errLines.length, 0);
@@ -77,7 +84,7 @@ test('--help が usage を返して code 0', () => {
 });
 
 test('-h が usage を返して code 0', () => {
-  const r = msgPoll.main(['-h']);
+  const r = runMain(['-h']);
   assert.equal(r.code, 0);
   assert.ok(r.lines.join('\n').includes('msg-poll.js'));
   assert.equal(r.errLines.length, 0);
@@ -87,14 +94,14 @@ test('-h が usage を返して code 0', () => {
 // ── 引数エラー ──────────────────────────────────────────────────────────────
 
 test('self なしは code 1', () => {
-  const r = msgPoll.main([]);
+  const r = runMain([]);
   assert.equal(r.code, 1);
   assert.ok(r.errLines.join('\n').includes('msg-poll.js'));
   assert.equal(r.scanOnce, null);
 });
 
 test('worker モードで --issue なしは code 1', () => {
-  const r = msgPoll.main(['my-worker']);
+  const r = runMain(['my-worker']);
   assert.equal(r.code, 1);
   assert.ok(r.errLines.some(l => l.includes('--issue')));
   assert.equal(r.scanOnce, null);
@@ -104,7 +111,7 @@ test('worker モードで --issue なしは code 1', () => {
 
 test('.. を含む self は code 1', () => {
   withTempDir(workspace => {
-    const r = msgPoll.main(['../orchestrator', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['../orchestrator', '--issue', '1', '--workspace', workspace, '--once']);
     assert.equal(r.code, 1);
     assert.ok(r.errLines.some(l => l.includes('親ディレクトリ参照')));
     assert.equal(r.scanOnce, null);
@@ -113,7 +120,7 @@ test('.. を含む self は code 1', () => {
 
 test('パス区切り文字を含む self は code 1', () => {
   withTempDir(workspace => {
-    const r = msgPoll.main(['a/b', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['a/b', '--issue', '1', '--workspace', workspace, '--once']);
     assert.equal(r.code, 1);
     assert.ok(r.errLines.some(l => l.includes('不正な文字')));
     assert.equal(r.scanOnce, null);
@@ -303,7 +310,7 @@ test('worker モード --once: 新着を検出して NEW_MESSAGE を出力', () 
       ]),
     }));
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
     assert.ok(r.lines.some(l => l === 'NEW_MESSAGE:123456789'), `Expected NEW_MESSAGE:123456789 in: ${r.lines.join('|')}`);
@@ -329,7 +336,7 @@ test('worker モード --once: to フィルタが働き他宛ては無視され�
       ]),
     }));
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
     assert.ok(!r.lines.some(l => l.includes('111')), `other-worker message should be filtered out: ${r.lines.join('|')}`);
@@ -347,7 +354,7 @@ test('worker モード --once: マーカーなしコメントは無視される'
       ]),
     }));
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
     assert.equal(r.lines.length, 0);
@@ -364,7 +371,7 @@ test('worker モード --once: JSON parse エラーのマーカーは無視さ�
       ]),
     }));
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
     assert.equal(r.lines.length, 0);
@@ -393,13 +400,13 @@ test('--once 2回実行で2回目は通知されない（カーソル永続化�
     });
 
     // 1回目: 新着あり
-    const r1 = msgPoll.main(['worker-2', '--issue', '1', '--workspace', workspace, '--once']);
+    const r1 = runMain(['worker-2', '--issue', '1', '--workspace', workspace, '--once']);
     assert.equal(r1.code, 0);
     r1.scanOnce();
     assert.ok(r1.lines.some(l => l === 'NEW_MESSAGE:999'), `1回目: ${r1.lines.join('|')}`);
 
     // 2回目: 同じコメントは seenIds に含まれているので通知されない
-    const r2 = msgPoll.main(['worker-2', '--issue', '1', '--workspace', workspace, '--once']);
+    const r2 = runMain(['worker-2', '--issue', '1', '--workspace', workspace, '--once']);
     assert.equal(r2.code, 0);
     r2.scanOnce();
     assert.ok(!r2.lines.some(l => l.includes('999')), `2回目は通知されないべき: ${r2.lines.join('|')}`);
@@ -416,7 +423,7 @@ test('gh api 失敗時にスキップして code 0（エラーは errLines に�
       stderr: 'gh: rate limit exceeded',
     }));
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
     assert.ok(r.errLines.some(l => l.includes('gh api エラー')), `Expected error in errLines: ${r.errLines.join('|')}`);
@@ -432,7 +439,7 @@ test('gh api の JSON が壊れている場合にスキップ', () => {
       stdout: 'not json at all',
     }));
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
     assert.ok(r.errLines.some(l => l.includes('JSON parse エラー')));
@@ -463,7 +470,7 @@ test('orchestrator モード: 複数 issue をスキャンする', () => {
       return { status: 0, stdout: JSON.stringify([]) };
     });
 
-    const r = msgPoll.main(['orchestrator', '--workspace', workspace, '--once']);
+    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
     assert.deepEqual(seenIssues.sort(), ['10', '20']);
@@ -480,7 +487,7 @@ test('orchestrator モード: workers.json が無い場合もエラーになら�
       return { status: 0, stdout: JSON.stringify([]) };
     });
 
-    const r = msgPoll.main(['orchestrator', '--workspace', workspace, '--once']);
+    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
     assert.equal(called, false, 'workers.json が無いので gh api は呼ばれない');
@@ -510,7 +517,7 @@ test('orchestrator モード: 重複 issue は排除される', () => {
       return { status: 0, stdout: JSON.stringify([]) };
     });
 
-    const r = msgPoll.main(['orchestrator', '--workspace', workspace, '--once']);
+    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
     assert.deepEqual(seenIssues.sort(), ['10', '20']);
@@ -539,7 +546,7 @@ test('orchestrator モード: 出力形式が NEW_MESSAGE:<issue>:<commentId>', 
       ]),
     }));
 
-    const r = msgPoll.main(['orchestrator', '--workspace', workspace, '--once']);
+    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
     assert.ok(r.lines.some(l => l === 'NEW_MESSAGE:10:777'), `Expected NEW_MESSAGE:10:777 in: ${r.lines.join('|')}`);
@@ -554,7 +561,7 @@ test('orchestrator モード --issue 指定も受け付ける（orchestrator の
       stdout: JSON.stringify([]),
     }));
 
-    const r = msgPoll.main(['orchestrator', '--issue', '5', '--workspace', workspace, '--once']);
+    const r = runMain(['orchestrator', '--issue', '5', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
   });
@@ -570,7 +577,7 @@ test('gh api が空配列を返した場合に空出力で exit 0', () => {
       stdout: JSON.stringify([]),
     }));
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
     assert.equal(r.lines.length, 0);
@@ -621,7 +628,7 @@ test('orchestrator モード: Issue ごとの個別 since が永続化される'
     });
 
     // 1回目のスキャン
-    const r1 = msgPoll.main(['orchestrator', '--workspace', workspace, '--once']);
+    const r1 = runMain(['orchestrator', '--workspace', workspace, '--once']);
     assert.equal(r1.code, 0);
     r1.scanOnce();
 
@@ -659,7 +666,7 @@ test('orchestrator モード: 古い state 形式（文字列 since）からの�
       return { status: 0, stdout: JSON.stringify([]) };
     });
 
-    const r = msgPoll.main(['orchestrator', '--workspace', workspace, '--once']);
+    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
     r.scanOnce();
     // 文字列sinceは無視され、新形式 {} に移行するため since パラメータは null
     assert.equal(capturedSince, null);
@@ -678,7 +685,7 @@ test('workers.json が配列の場合にクラッシュしない', () => {
     let called = false;
     msgPoll._setGhApiComments(() => { called = true; return { status: 0, stdout: JSON.stringify([]) }; });
 
-    const r = msgPoll.main(['orchestrator', '--workspace', workspace, '--once']);
+    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
     r.scanOnce();
     assert.equal(called, false, '配列の workers.json は無視される');
   });
@@ -701,7 +708,7 @@ test('workers.json のエントリが null の場合にクラッシュしない'
       return { status: 0, stdout: JSON.stringify([]) };
     });
 
-    const r = msgPoll.main(['orchestrator', '--workspace', workspace, '--once']);
+    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
     r.scanOnce();
     assert.deepEqual(seenIssues, ['10'], 'null エントリはスキップされ w2 だけ処理される');
   });
@@ -717,7 +724,7 @@ test('workers.json が null にパースされる場合にクラッシュしな�
     let called = false;
     msgPoll._setGhApiComments(() => { called = true; return { status: 0, stdout: JSON.stringify([]) }; });
 
-    const r = msgPoll.main(['orchestrator', '--workspace', workspace, '--once']);
+    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
     r.scanOnce();
     assert.equal(called, false);
   });
@@ -733,7 +740,7 @@ test('gh api が配列でない JSON を返した場合にクラッシュしな�
       stdout: JSON.stringify({ error: 'something went wrong' }),
     }));
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     assert.equal(r.code, 0);
     r.scanOnce();
     assert.ok(r.errLines.some(l => l.includes('配列ではありません')));
@@ -749,7 +756,7 @@ test('gh api が null を返した場合にクラッシュしない', () => {
       stdout: 'null',
     }));
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     r.scanOnce();
     assert.equal(r.lines.length, 0);
   });
@@ -771,7 +778,7 @@ test('worker モード: state.since が文字列でない場合は null 扱い',
       return { status: 0, stdout: JSON.stringify([]) };
     });
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     r.scanOnce();
     // 数値 since は型チェックで弾かれ null として扱われる
     assert.equal(capturedSince, null);
@@ -918,7 +925,7 @@ test('--watch-pid: 不正なpid指定はexit 1', () => {
 
 test('--once と --wait の同時指定は code 1', () => {
   withTempDir(workspace => {
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once', '--wait', '5']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once', '--wait', '5']);
     assert.equal(r.code, 1);
     assert.ok(r.errLines.some(l => l.includes('--once') && l.includes('--wait')));
     assert.equal(r.scanOnce, null);
@@ -927,11 +934,11 @@ test('--once と --wait の同時指定は code 1', () => {
 
 test('--wait に不正な値（0以下・非数値）を渡すと code 1', () => {
   withTempDir(workspace => {
-    const r1 = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '0']);
+    const r1 = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '0']);
     assert.equal(r1.code, 1);
     assert.equal(r1.scanOnce, null);
 
-    const r2 = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', 'abc']);
+    const r2 = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', 'abc']);
     assert.equal(r2.code, 1);
     assert.equal(r2.scanOnce, null);
   });
@@ -942,7 +949,7 @@ test('--wait は main() の結果に waitMode:true と waitMs を設定する', 
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '10', '--interval', '3']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '10', '--interval', '3']);
     assert.equal(r.code, 0);
     assert.equal(r.waitMode, true);
     assert.equal(r.waitMs, 10000);
@@ -968,7 +975,7 @@ test('runWaitMode: 新着を即座に検出すればリトライせず true を�
     let sleepCalls = 0;
     msgPoll._setSleep(async () => { sleepCalls++; });
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
     const found = await msgPoll.runWaitMode(r);
     assert.equal(found, true);
     assert.equal(sleepCalls, 0);
@@ -987,7 +994,7 @@ test('runWaitMode: 新着が無ければ waitMs 経過後に false を返す（�
     // 実待機はごく短く（busy-loop でCPUを浪費しないように）、かつ複数回リトライさせる
     msgPoll._setSleep(async (ms) => { sleepCalls++; await new Promise(resolve => setTimeout(resolve, Math.min(ms, 20))); });
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '1', '--interval', '1']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '1', '--interval', '1']);
     const found = await msgPoll.runWaitMode(r);
     assert.equal(found, false);
     assert.equal(r.lines.length, 0);
@@ -1007,7 +1014,7 @@ test('scanOnce: maxGhTimeoutMs を渡すと gh 呼び出しの timeout オプシ
       return { status: 0, stdout: JSON.stringify([]) };
     });
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
     r.scanOnce({ maxGhTimeoutMs: 2000 });
     assert.equal(capturedOpts.timeout, 2000);
   });
@@ -1022,7 +1029,7 @@ test('scanOnce: maxGhTimeoutMs が小さすぎても最低1000msは確保され�
       return { status: 0, stdout: JSON.stringify([]) };
     });
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
     r.scanOnce({ maxGhTimeoutMs: 10 });
     assert.equal(capturedOpts.timeout, 1000);
   });
@@ -1037,7 +1044,7 @@ test('scanOnce: maxGhTimeoutMs 未指定時は既定の GH_TIMEOUT_MS 相当（t
       return { status: 0, stdout: JSON.stringify([]) };
     });
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     r.scanOnce();
     assert.equal(capturedOpts.timeout, undefined);
     assert.equal(capturedOpts.cwd, workspace);
@@ -1060,7 +1067,7 @@ test('scanOnce({singleMessage:true}): 新着が複数件あっても最も古い
       return { status: 0, stdout: JSON.stringify(filtered) };
     });
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
 
     r.scanOnce({ singleMessage: true });
     assert.deepEqual(r.lines, ['NEW_MESSAGE:1']);
@@ -1092,13 +1099,13 @@ test('runWaitMode: 複数件の新着があっても1回の呼び出しでは1�
     });
     msgPoll._setSleep(async () => {});
 
-    const r1 = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    const r1 = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
     const found1 = await msgPoll.runWaitMode(r1);
     assert.equal(found1, true);
     assert.deepEqual(r1.lines, ['NEW_MESSAGE:10']);
 
     // 次回の --wait 呼び出し（新しい main() 実行）で残りの1件が返る
-    const r2 = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
+    const r2 = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
     const found2 = await msgPoll.runWaitMode(r2);
     assert.equal(found2, true);
     assert.deepEqual(r2.lines, ['NEW_MESSAGE:11']);
@@ -1118,7 +1125,7 @@ test('scanOnce({singleMessage:false}): --once/継続モードは従来どおり�
       ]),
     }));
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     r.scanOnce();
     assert.deepEqual(r.lines, ['NEW_MESSAGE:1', 'NEW_MESSAGE:2']);
   });
@@ -1139,7 +1146,7 @@ test('scanOnce: state.since が非文字列（破損したstate由来）でも�
     // 旧バージョン由来などで since が文字列でない（例: 空オブジェクト）壊れた state を模擬する
     fs.writeFileSync(statePath, JSON.stringify({ since: {}, seenIds: [] }), 'utf8');
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     r.scanOnce();
     assert.deepEqual(r.lines, ['NEW_MESSAGE:1']);
 
@@ -1169,7 +1176,7 @@ test('scanOnce: state.since[issue] が非文字列でもカーソルが固着せ
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(statePath, JSON.stringify({ since: { 1: 12345 }, seenIds: [] }), 'utf8');
 
-    const r = msgPoll.main(['orchestrator', '--workspace', workspace, '--once']);
+    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
     r.scanOnce();
     assert.deepEqual(r.lines, ['NEW_MESSAGE:1:1']);
 
@@ -1189,7 +1196,7 @@ test('scanOnce: created_at が欠落したコメントは新着候補から除�
       ]),
     }));
 
-    const r = msgPoll.main(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     r.scanOnce();
     assert.deepEqual(r.lines, ['NEW_MESSAGE:2']);
   });

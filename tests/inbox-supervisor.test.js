@@ -11,6 +11,13 @@ const { spawnSync } = require('../scripts/child-process');
 const { weztermCli } = require('../scripts/wezterm-cli');
 const paneLaunch = require('../scripts/shared/pane-launch');
 
+// テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
+// 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
+// --session-pid を渡すため、テストでも常に自プロセスPIDを渡してこの探索を省く。
+const _realMain = supervisor.main;
+const TEST_SESSION_PID = String(process.pid);
+const runMain = (args, opts) => _realMain([...args, '--session-pid', TEST_SESSION_PID], opts);
+
 // ── テストヘルパー ────────────────────────────────────────────────────────
 
 function withTempDir(fn) {
@@ -128,7 +135,7 @@ function resetAllMocks() {
 
 describe('CLI usage', () => {
   test('--help が usage を返して code 0', () => {
-    const r = supervisor.main(['--help']);
+    const r = runMain(['--help']);
     assert.equal(r.code, 0);
     assert.ok(r.lines.join('\n').includes('inbox-supervisor.js'));
     assert.equal(r.errLines.length, 0);
@@ -136,7 +143,7 @@ describe('CLI usage', () => {
   });
 
   test('-h が usage を返して code 0', () => {
-    const r = supervisor.main(['-h']);
+    const r = runMain(['-h']);
     assert.equal(r.code, 0);
     assert.ok(r.lines.join('\n').includes('inbox-supervisor.js'));
     assert.equal(r.runOnce, null);
@@ -151,7 +158,7 @@ describe('CLI argument validation', () => {
   test('未知の引数で code 1', () => {
     const r = withTempDir((dir) => {
       setupWorkspace(dir);
-      return supervisor.main(['--workspace', dir, '--bogus']);
+      return runMain(['--workspace', dir, '--bogus']);
     });
     assert.equal(r.code, 1);
     assert.ok(r.errLines.some(l => l.includes('未知の引数')));
@@ -159,14 +166,14 @@ describe('CLI argument validation', () => {
   });
 
   test('--workspace 値欠落で code 1', () => {
-    const r = supervisor.main(['--workspace']);
+    const r = runMain(['--workspace']);
     assert.equal(r.code, 1);
     assert.equal(r.runOnce, null);
   });
 
   test('存在しないワークスペースパスで code 1', () => {
     // 実在しないパスを指定した場合、CWD フォールバックも効かない（/nonexistent/... 配下に CWD は無い）
-    const r = supervisor.main(['--workspace', '/nonexistent/path/12345']);
+    const r = runMain(['--workspace', '/nonexistent/path/12345']);
     assert.equal(r.code, 1);
     assert.equal(r.runOnce, null);
   });
@@ -180,7 +187,7 @@ describe('CLI argument validation', () => {
 
     const r = withTempDir((dir) => {
       setupWorkspace(dir);
-      return supervisor.main(['--workspace', dir]);
+      return runMain(['--workspace', dir]);
     });
 
     assert.equal(r.code, 1);
@@ -724,7 +731,7 @@ describe('runOnce scan and deliver cycle', () => {
 
     withTempDir((dir) => {
       setupWorkspace(dir);
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -754,7 +761,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -802,7 +809,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -832,7 +839,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -878,7 +885,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -929,7 +936,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -974,7 +981,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -996,7 +1003,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       assert.doesNotThrow(() => r.runOnce());
       assert.ok(r.errLines.some(l => l.includes('rate limit exceeded')));
@@ -1023,7 +1030,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -1047,7 +1054,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -1087,7 +1094,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -1128,7 +1135,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -1169,7 +1176,7 @@ describe('Reliability: restart continuity', () => {
         workers: { 'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 } },
       });
 
-      const r1 = supervisor.main(['--workspace', dir]);
+      const r1 = runMain(['--workspace', dir]);
       r1.runOnce();
       assert.ok(r1.lines.some(l => l === 'DELIVERED:issue-5-fix:700'));
 
@@ -1200,7 +1207,7 @@ describe('Reliability: restart continuity', () => {
         },
       });
 
-      const r2 = supervisor.main(['--workspace', dir]);
+      const r2 = runMain(['--workspace', dir]);
       r2.runOnce();
 
       // 700 は再検出されない
@@ -1240,7 +1247,7 @@ describe('Reliability: restart continuity', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -1284,7 +1291,7 @@ describe('Duplicate delivery prevention', () => {
         },
       });
 
-      const r = supervisor.main(['--workspace', dir]);
+      const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
       r.runOnce();
 
@@ -1336,7 +1343,8 @@ const SUPERVISOR_SCRIPT = path.join(__dirname, '..', 'scripts', 'inbox-superviso
 
 /** ヘルパー: inbox-supervisor.js を子プロセスとして起動 */
 function runSupervisor(args, cwd) {
-  return realSpawnSync(process.execPath, [SUPERVISOR_SCRIPT, ...args], {
+  // --session-pid を渡し、子プロセス側の親プロセスツリー探索（Windowsでは高コスト）を省く。
+  return realSpawnSync(process.execPath, [SUPERVISOR_SCRIPT, ...args, '--session-pid', String(process.pid)], {
     cwd,
     encoding: 'utf8',
     timeout: 5000,
