@@ -28,7 +28,7 @@ orchestrator からの追加指示の受信方法は、あなたのエージェ�
 
 ## ゴール
 
-PRを作成した時点で初期の実装作業は完了する。後続の修正指示を受け取れる状態を維持すること——具体的な維持方法は上記の受信機構に従う（自己ポーリング型なら明示的な終了操作を行わずポーリングを継続し、resume型ならそのまま自然に終了してよい。次の指示があれば自動的に再開される）。
+PRを作成した時点で初期の実装作業は完了する。そのまま自然に終了してよい（次の指示があれば inbox-supervisor.js が自動的にあなたを再開する）。
 CI監視はorchestratorの責務であり、コーダーは行わない。orchestratorへの完了報告は**不要**（orchestratorがPRを自律検出する）。
 
 ## 起動時に与えられる情報
@@ -49,7 +49,7 @@ CI監視はorchestratorの責務であり、コーダーは行わない。orches
 3. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）
 4. プロジェクトで定義された lint / format チェックを実行し、すべて通ってから push する（`Makefile` の `lint` ターゲット、`package.json` の `lint` スクリプト、`pyproject.toml` の設定など、プロジェクトの慣習に従う）
 5. `gh pr create --base $BASE_BRANCH` でPRを作成する（本文に `Closes #$ISSUE` を含める）
-6. PR作成が完了した後の待機方法は通信ルールの受信機構に従う——自己ポーリング型なら自己終了（TaskStopなど）せずポーリングを継続し、resume型ならそのまま自然に終了してよい。orchestratorがPRを自律検出し、必要に応じて後続の修正指示を送る。
+6. PR作成が完了したら、そのまま自然に終了してよい。orchestratorがPRを自律検出し、必要に応じて後続の修正指示を送る（届いたら inbox-supervisor.js が自動的にあなたを再開する）。
 
 ## 失敗時
 
@@ -74,4 +74,4 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $IS
 - `$WORKTREE` ルートで `npm install` / `npm ci` は実行しない。ルートの `node_modules` はシステムがjunctionで自動リンク済みのため、ルートで npm install を実行するとワークスペース共有の `node_modules` を破壊する
 - 実装で新しいサブパッケージ（例: `gui/`）を追加した場合、そのディレクトリ内での `npm install` は許可する（`cd gui && npm install`）
 - 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない
-- **追加指示の待ち受けは、上記「通信ルール」に記載の受信機構の手順だけを使用すること。** 独自の background bash・detached プロセス・ポーリングループを作ってはならない。共通の `msg-poll.js` 側にライフサイクル管理（dead-man's switch + PID registry）が実装されている。
+- **追加指示の待ち受けは何もしなくてよい。** inbox-supervisor.js が唯一の配送経路であり、自然終了後に自動的に再開される。独自の background bash・detached プロセス・ポーリングループを作ってはならない。

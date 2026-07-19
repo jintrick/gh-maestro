@@ -249,10 +249,10 @@ function isPaneAlive(paneId) {
 /**
  * 休止中（ペイン非生存）のセッション再開系ワーカーを resume() で復帰させ、メッセージを配送する。
  *
- * 対象は sessionResume: true かつ asynchronousNotification: false のエージェントのみ
- * （reasonix/agy/codex）。claude系（Monitorで自己ポーリングする）はプロセスが終了している
- * こと自体が異常系であり、自動resumeの対象にしない — その場合は呼び出し元が
- * 従来通り pending 扱いにフォールバックする（method: 'pending' を返す）。
+ * 対象は sessionResume: true かつ asynchronousNotification: false のエージェント
+ * （claude/claude-ds/claude-ds-pro/reasonix/agy/codex/codex-pro）。条件を満たさない
+ * エージェントは自動resumeの対象にせず、呼び出し元が pending 扱いにフォールバックする
+ * （method: 'pending' を返す）。
  *
  * @param {object} params
  * @param {string} params.workerName
@@ -273,7 +273,7 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
     return { success: false, method: 'pending', error: `agentId "${agentId}" のconfigを解決できません` };
   }
   if (!agentConfig.sessionResume || agentConfig.asynchronousNotification) {
-    // resume対象外（claude系等）→ 呼び出し元が従来通りpending扱いにする
+    // resume対象外 → 呼び出し元が従来通りpending扱いにする
     return { success: false, method: 'pending', error: 'not a session-resume agent' };
   }
 
@@ -336,8 +336,9 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
 /**
  * メッセージをエージェントに配送する。
  *
- * 対象は runOnce() のスキャン段階で asynchronousNotification:true（claude系）
- * が既に除外されているため、ここに来るのは全てセッション再開系（reasonix/agy/codex）。
+ * 対象は runOnce() のスキャン段階で asynchronousNotification:true のエージェント
+ * （自己ポーリングするエージェント種別。現状はどのエージェントも該当しない）が
+ * 既に除外されているため、ここに来るのは全てセッション再開系エージェント。
  * 稼働中（ペイン生存 = タスク処理中）のワーカーには一切書き込まず、休止するのを
  * 待って次のスキャンサイクルで resume() 経由で配送する。稼働中ペインへの
  * テキスト注入は行わない（配送経路はプロセスの起動/再開のみ）。
@@ -513,9 +514,8 @@ function main(argsOverride, opts = {}) {
     for (const [workerName, entry] of workers) {
       if (!entry.issue) continue;
 
-      // claude系（Monitorで自己ポーリングする）はinbox-supervisor.jsの配送対象外。
-      // 自己ポーリングが唯一の配送根拠であり、WezTerm送信は使わない
-      // （フォールバックではなく無差別送信になってしまうため。実障害: 2026-07-15）。
+      // asynchronousNotification:true（自己ポーリングするエージェント種別。現状はどのエージェントも
+      // 該当しないが、将来追加され得るため判定自体は残す）はinbox-supervisor.jsの配送対象外。
       let agentConfig;
       try {
         agentConfig = entry.agentId ? resolveAgentConfig(entry.agentId, { workspace, homedir }) : null;

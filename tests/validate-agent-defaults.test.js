@@ -90,9 +90,10 @@ test('validateAgentDefaults: sessionResume=true のエージェントは resumeC
 
 test('validateAgentDefaults: asynchronousNotification の値が期待通り', () => {
   const map = new Map(realDefaults.agents.map(a => [a.id, a.asynchronousNotification]));
-  assert.equal(map.get('claude'), true);
-  assert.equal(map.get('claude-ds'), true);
-  assert.equal(map.get('claude-ds-pro'), true);
+  // 全エージェントがresume方式に統一されている
+  assert.equal(map.get('claude'), false);
+  assert.equal(map.get('claude-ds'), false);
+  assert.equal(map.get('claude-ds-pro'), false);
   assert.equal(map.get('reasonix'), false);
   assert.equal(map.get('agy'), false);
   assert.equal(map.get('codex'), false);

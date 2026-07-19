@@ -120,12 +120,11 @@ test('STRATEGY: 定数が定義されている', () => {
 test('selectStrategy: 6エージェント全ての戦略が正しく選ばれる', () => {
   const agents = getAgentMap();
 
-  // asynchronousNotification: true → monitor
-  assert.equal(selectStrategy(agents.get('claude')), STRATEGY.MONITOR);
-  assert.equal(selectStrategy(agents.get('claude-ds')), STRATEGY.MONITOR);
-  assert.equal(selectStrategy(agents.get('claude-ds-pro')), STRATEGY.MONITOR);
-
   // asynchronousNotification: false, sessionResume: true → session-resume
+  // （全エージェントがresume方式に統一されている）
+  assert.equal(selectStrategy(agents.get('claude')), STRATEGY.SESSION_RESUME);
+  assert.equal(selectStrategy(agents.get('claude-ds')), STRATEGY.SESSION_RESUME);
+  assert.equal(selectStrategy(agents.get('claude-ds-pro')), STRATEGY.SESSION_RESUME);
   assert.equal(selectStrategy(agents.get('reasonix')), STRATEGY.SESSION_RESUME);
   assert.equal(selectStrategy(agents.get('agy')), STRATEGY.SESSION_RESUME);
   assert.equal(selectStrategy(agents.get('codex')), STRATEGY.SESSION_RESUME);
@@ -239,7 +238,7 @@ test('createClaudeAdapter: agentConfig 必須', () => {
 
 // ── getCapabilities ────────────────────────────────────────────────────────
 
-test('createClaudeAdapter: getCapabilities が正しい能力を返す', () => {
+test('createClaudeAdapter: getCapabilities は渡された設定をそのまま返す', () => {
   const agents = getAgentMap();
 
   for (const id of ['claude', 'claude-ds', 'claude-ds-pro']) {
@@ -247,8 +246,8 @@ test('createClaudeAdapter: getCapabilities が正しい能力を返す', () => {
     const adapter = createClaudeAdapter(agent);
     const caps = adapter.getCapabilities();
 
-    assert.equal(caps.asynchronousNotification, true, `${id}: asynchronousNotification`);
-    assert.equal(caps.sessionResume, true, `${id}: sessionResume`);
+    assert.equal(caps.asynchronousNotification, agent.asynchronousNotification, `${id}: asynchronousNotification`);
+    assert.equal(caps.sessionResume, agent.sessionResume, `${id}: sessionResume`);
   }
 });
 
@@ -710,23 +709,8 @@ test('buildSessionResumePrompt: \\r\\n 改行が正しく処理される', () =>
 // index.js: resolveAdapter 統合
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('resolveAdapter: claude系は ClaudeAdapter を返す', () => {
-  for (const id of ['claude', 'claude-ds', 'claude-ds-pro']) {
-    const agent = getAgentMap().get(id);
-    const adapter = resolveAdapter(agent);
-
-    // インターフェース準拠
-    assert.equal(isValidAdapter(adapter), true, `${id}: isValidAdapter`);
-
-    // getCapabilities が正しい
-    const caps = adapter.getCapabilities();
-    assert.equal(caps.asynchronousNotification, true, `${id}: caps.asyncNotification`);
-    assert.equal(caps.sessionResume, true, `${id}: caps.sessionResume`);
-  }
-});
-
-test('resolveAdapter: session-resume 戦略のエージェントは SessionResumeAdapter を返す', () => {
-  for (const id of ['reasonix', 'agy', 'codex']) {
+test('resolveAdapter: session-resume 戦略のエージェントは SessionResumeAdapter を返す（claude系含む全エージェント）', () => {
+  for (const id of ['claude', 'claude-ds', 'claude-ds-pro', 'reasonix', 'agy', 'codex']) {
     const agent = getAgentMap().get(id);
     const adapter = resolveAdapter(agent);
 
@@ -741,7 +725,7 @@ test('resolveAdapter: session-resume 戦略のエージェントは SessionResum
 });
 
 test('resolveAdapter: session-resume 戦略の adapter.deliverMessage は session-resume タイプを返す', () => {
-  for (const id of ['reasonix', 'agy', 'codex']) {
+  for (const id of ['claude', 'claude-ds', 'claude-ds-pro', 'reasonix', 'agy', 'codex']) {
     const agent = getAgentMap().get(id);
     const adapter = resolveAdapter(agent);
     const result = adapter.deliverMessage({ from: 'orchestrator', body: 'テストメッセージ' });
@@ -774,10 +758,10 @@ test('agent-defaults.json: 全エージェントが selectStrategy で分類で�
     results.set(id, strategy);
   }
 
-  // 期待値（selectStrategy）
-  assert.equal(results.get('claude'), STRATEGY.MONITOR);
-  assert.equal(results.get('claude-ds'), STRATEGY.MONITOR);
-  assert.equal(results.get('claude-ds-pro'), STRATEGY.MONITOR);
+  // 期待値（selectStrategy） — 全エージェントがresume方式に統一されている
+  assert.equal(results.get('claude'), STRATEGY.SESSION_RESUME);
+  assert.equal(results.get('claude-ds'), STRATEGY.SESSION_RESUME);
+  assert.equal(results.get('claude-ds-pro'), STRATEGY.SESSION_RESUME);
   assert.equal(results.get('reasonix'), STRATEGY.SESSION_RESUME);
   assert.equal(results.get('agy'), STRATEGY.SESSION_RESUME);
   assert.equal(results.get('codex'), STRATEGY.SESSION_RESUME);

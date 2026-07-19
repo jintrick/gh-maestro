@@ -167,42 +167,40 @@ for (const [agentName, config] of Object.entries(agents)) {
     }
   });
 
-  // Monitorツールを持たないエージェント（agy/codex/reasonix。sessionResume系）向けの
-  // ネイティブインストール先には、claude専用のMonitor起動指示が紛れ込んではならない。
-  // 過去、reasonix（当時のskillsViaMd機構）がこの種の取り違えで実行不能な指示を受け取った
-  // 実障害（PR #38）の再発防止。
-  if (agentName !== 'claude') {
-    test(`[${agentName}] にclaude専用のMonitor起動指示が含まれない`, () => {
-      const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-        .filter(e => e.isDirectory())
-        .map(e => e.name)
-        .filter(name => name !== 'gh-maestro-orchestrator');
+  // 全エージェントがresume方式（inbox-supervisor.js経由）に統一されているため、
+  // どのエージェント向けインストール先にも自己ポーリング専用の起動指示（旧Monitor方式）が
+  // 紛れ込んではならない。過去、reasonix（当時のskillsViaMd機構）がこの種の取り違えで
+  // 実行不能な指示を受け取った実障害（PR #38）の再発防止。
+  test(`[${agentName}] に自己ポーリング専用のMonitor起動指示が含まれない`, () => {
+    const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => e.name)
+      .filter(name => name !== 'gh-maestro-orchestrator');
 
-      for (const skill of skillDirs) {
-        const skillMdPath = path.join(destDir, skill, 'SKILL.md');
-        if (!fs.existsSync(skillMdPath)) continue;
-        const content = fs.readFileSync(skillMdPath, 'utf8');
-        assert.ok(
-          !content.includes('最初のツール呼び出しとして'),
-          `${agentName}/${skill}/SKILL.md にclaude専用のMonitor起動指示が含まれている`
-        );
-        assert.ok(
-          !content.includes('persistent: true'),
-          `${agentName}/${skill}/SKILL.md にMonitor専用の persistent: true 指示が含まれている`
-        );
-      }
-    });
-
-    test(`[${agentName}] のgh-maestro-investigatorにresume型の受信機構の説明が含まれる`, () => {
-      const skillMdPath = path.join(destDir, 'gh-maestro-investigator', 'SKILL.md');
-      if (!fs.existsSync(skillMdPath)) return;
+    for (const skill of skillDirs) {
+      const skillMdPath = path.join(destDir, skill, 'SKILL.md');
+      if (!fs.existsSync(skillMdPath)) continue;
       const content = fs.readFileSync(skillMdPath, 'utf8');
       assert.ok(
-        content.includes('inbox-supervisor.js'),
-        `${agentName}/gh-maestro-investigator/SKILL.md にinbox-supervisor.js経由の受信説明が見つからない`
+        !content.includes('最初のツール呼び出しとして'),
+        `${agentName}/${skill}/SKILL.md に自己ポーリング専用のMonitor起動指示が含まれている`
       );
-    });
-  }
+      assert.ok(
+        !content.includes('persistent: true'),
+        `${agentName}/${skill}/SKILL.md にMonitor専用の persistent: true 指示が含まれている`
+      );
+    }
+  });
+
+  test(`[${agentName}] のgh-maestro-investigatorにresume型の受信機構の説明が含まれる`, () => {
+    const skillMdPath = path.join(destDir, 'gh-maestro-investigator', 'SKILL.md');
+    if (!fs.existsSync(skillMdPath)) return;
+    const content = fs.readFileSync(skillMdPath, 'utf8');
+    assert.ok(
+      content.includes('inbox-supervisor.js'),
+      `${agentName}/gh-maestro-investigator/SKILL.md にinbox-supervisor.js経由の受信説明が見つからない`
+    );
+  });
 }
 
 test('共有スキル配布先に orchestrator の issue-template.md が配置される', () => {

@@ -104,11 +104,22 @@ test('buildAgentResumeCommandArgs: send-text-after-launch delivery（reasonix）
   assert.equal(afterLaunchText, '新着メッセージです');
 });
 
-test('buildAgentResumeCommandArgs: system-prompt-file等 未対応deliveryはエラー', () => {
+test('buildAgentResumeCommandArgs: system-prompt-file delivery（claude系。resume時はpositionalと同じ組み立て）', () => {
+  const { argv, afterLaunchText } = buildAgentResumeCommandArgs({
+    command: 'claude-ds-pro',
+    extraArgs: ['--dangerously-skip-permissions', '--print'],
+    promptDelivery: 'system-prompt-file',
+  }, ['--continue'], { shortPrompt: '新着メッセージです' });
+
+  assert.deepEqual(argv, ['claude-ds-pro', '--dangerously-skip-permissions', '--print', '--continue', '新着メッセージです']);
+  assert.equal(afterLaunchText, null);
+});
+
+test('buildAgentResumeCommandArgs: 未知のdeliveryはエラー', () => {
   assert.throws(() => buildAgentResumeCommandArgs({
     command: 'claude',
-    promptDelivery: 'system-prompt-file',
-  }, ['--continue'], { shortPrompt: 'x' }), /promptDelivery "system-prompt-file" に対応していません/);
+    promptDelivery: 'unknown',
+  }, ['--continue'], { shortPrompt: 'x' }), /promptDelivery "unknown" に対応していません/);
 });
 
 test('buildAgentResumeCommandArgs: resumeArgsが配列でないとエラー', () => {

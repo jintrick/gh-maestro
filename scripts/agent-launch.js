@@ -48,10 +48,11 @@ function buildAgentCommandArgs(agentConfig, opts = {}) {
  *
  * buildAgentCommandArgs と同じ promptDelivery 分岐を使うが、"新規セッション" を前提にした
  * プロンプト配送ではなく、resumeArgs（Adapter の resume() が返す args）をコマンドに組み込む。
- * 呼び出し元は inbox-supervisor.js の resume 配線のみで、対象は asynchronousNotification: false
- * かつ sessionResume: true のエージェント（reasonix/agy/codex）に限られる。
- * これらが使う promptDelivery は flag / positional / send-text-after-launch のいずれかであり、
- * claude 系専用の system-prompt-file はこの経路には来ない想定のため未対応（呼ばれたらエラー）。
+ * 呼び出し元は inbox-supervisor.js の resume 配線で、対象は sessionResume: true の全エージェント
+ * （claude/claude-ds/claude-ds-pro/reasonix/agy/codex/codex-pro）。
+ * resume 時は前回セッションのコンテキストが `--continue` 等で復元されるため、
+ * claude 系の system-prompt-file（初回起動時のみ必要な役割・スキル文書の注入）は不要で、
+ * 新着メッセージを positional と同じ形で末尾に渡すだけでよい。
  *
  * @param {object} agentConfig
  * @param {string[]} resumeArgs - Adapter の resume() が返す args（例: ['--continue']）
@@ -86,7 +87,8 @@ function buildAgentResumeCommandArgs(agentConfig, resumeArgs, opts = {}) {
       };
 
     case 'positional':
-      if (!shortPrompt) throw new Error('shortPrompt is required for positional delivery');
+    case 'system-prompt-file':
+      if (!shortPrompt) throw new Error(`shortPrompt is required for ${promptDelivery} delivery`);
       return {
         argv: [command, ...extraArgs, ...resumeArgs, shortPrompt],
         afterLaunchText: null,
@@ -100,7 +102,7 @@ function buildAgentResumeCommandArgs(agentConfig, resumeArgs, opts = {}) {
       };
 
     default:
-      throw new Error(`buildAgentResumeCommandArgs は promptDelivery "${promptDelivery}" に対応していません（flag/positional/send-text-after-launchのみ対応）`);
+      throw new Error(`buildAgentResumeCommandArgs は promptDelivery "${promptDelivery}" に対応していません（flag/positional/system-prompt-file/send-text-after-launchのみ対応）`);
   }
 }
 

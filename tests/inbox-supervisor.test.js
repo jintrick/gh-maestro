@@ -494,13 +494,25 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     }, null, 2));
   }
 
-  test('tryResumeAndDeliver: asynchronousNotification=true（claude）は method:pending でresumeしない', () => {
-    const result = supervisor.tryResumeAndDeliver({
-      workerName: 'issue-7-fix', agentId: 'claude',
-      message: { from: 'orch', body: 'hi' }, workspace: '/ws', homedir: '/home',
+  test('tryResumeAndDeliver: claude（system-prompt-file）も成功する', () => {
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-10-fix', agentId: 'claude' });
+
+      let splitArgs = null;
+      paneLaunch._setWeztermSplitPane((args) => {
+        splitArgs = args;
+        return { status: 0, stdout: '99', stderr: '' };
+      });
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName: 'issue-10-fix', agentId: 'claude',
+        message: { from: 'orch', body: 'claude宛メッセージ' }, workspace: dir, homedir: '/home',
+      });
+      assert.equal(result.success, true);
+      assert.equal(result.method, 'resume');
+      assert.ok(decodeLoginShellCommand(splitArgs).includes('--continue'));
+      assert.ok(decodeLoginShellCommand(splitArgs).includes('claude宛メッセージ'));
     });
-    assert.equal(result.method, 'pending');
-    assert.equal(result.success, false);
   });
 
   test('tryResumeAndDeliver: agentIdが未解決なら method:pending', () => {
@@ -623,22 +635,18 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     });
   });
 
-  test('deliverMessage: ペイン非生存 + claude は従来通りpending（resumeしない）', () => {
+  test('deliverMessage: ペイン非生存 + claude も resume を試みる', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'claude' });
       supervisor._setWeztermListPanes(() => ({ status: 0, stdout: '[]', stderr: '' }));
-
-      let splitCalled = false;
-      paneLaunch._setWeztermSplitPane(() => { splitCalled = true; return { status: 0, stdout: '77', stderr: '' }; });
 
       const result = supervisor.deliverMessage({
         workerName: 'issue-7-fix', paneId: '456', agentId: 'claude',
         message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home', issue: '7',
       });
 
-      assert.equal(result.success, false);
-      assert.equal(result.method, 'pending');
-      assert.equal(splitCalled, false, 'claude系ではsplit-paneを呼ばない');
+      assert.equal(result.success, true);
+      assert.equal(result.method, 'resume');
     });
   });
 });
@@ -1111,10 +1119,10 @@ describe('runOnce scan and deliver cycle', () => {
     });
   });
 
-  test('claude系（asynchronousNotification:true）はスキャン対象外— 検出もペイン起動も行わない', () => {
-    // 実障害（2026-07-15）: claude系workerは自己ポーリングが唯一の正規配送経路のはずが、
-    // deliverMessage()がworker種別を見ずペイン生存時に無条件でWezTerm送信していた。
-    // フォールバックのつもりが無差別送信になっていたため、そもそもscanの段階で除外する。
+  test('claude系も他のエージェントと同様にスキャン対象に含まれる（稼働中ペインならresumeしない）', () => {
+    // claude系はresume方式に統一されたため、スキャン除外対象ではなくなった。
+    // ただしペインが稼働中（作業中）の場合はどのエージェント種別でも書き込まない、という
+    // 汎用ルールにより、この場合はresumeが試みられないことに変わりはない。
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([
       {
@@ -1139,12 +1147,11 @@ describe('runOnce scan and deliver cycle', () => {
       assert.equal(r.code, 0);
       r.runOnce();
 
-      assert.ok(!r.lines.some(l => l.startsWith('DETECTED:issue-5-fix:')), 'claude系workerは検出対象に含まれない');
-      assert.equal(splitPaneCalled, false, 'claude系workerに対してWezTermペインを起動してはならない');
+      assert.ok(r.lines.some(l => l.startsWith('DETECTED:issue-5-fix:')), 'claude系workerもスキャン・検出対象に含まれる');
+      assert.equal(splitPaneCalled, false, 'ペインが稼働中の間はresumeで書き込まない');
 
       const lastLine = r.lines[r.lines.length - 1];
-      // workers.size（読み込まれたworker数）は1のままだが、検出数（totalDetected）は0のまま
-      assert.ok(lastLine.includes('SCAN_END:1:0'), `claude系はskipされ検出0件になるはず: ${lastLine}`);
+      assert.ok(lastLine.includes('SCAN_END:1:1'), `claude系も検出されるはず: ${lastLine}`);
     });
   });
 });

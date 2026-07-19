@@ -302,10 +302,9 @@ orchestrator が受け取るすべてのメッセージの受信経路である�
 
 ## worker への指示配送（Inbox Supervisor）
 
-orchestrator から worker への追加指示（`msg-send.js` で送ったコメント）の配送方法は、workerのエージェント種別によって異なる：
+orchestrator から worker への追加指示（`msg-send.js` で送ったコメント）は、workerのエージェント種別（claude/claude-ds/claude-ds-pro/reasonix/agy/codex/codex-pro）によらず、**すべて`inbox-supervisor.js`経由のresume配送に統一されている**。
 
-- **claude系（claude/claude-ds/claude-ds-pro。Monitor通知を持つ）**: worker自身が `msg-poll.js` を Monitor で回し続けて自己ポーリングする（各workerのSKILL.md参照）。待機中のトークンコストがほぼゼロなため、これが唯一の配送経路。**`inbox-supervisor.js` はこれらのworkerを一切スキャン・配送対象にしない**（WezTerm送信は行わない）。自己ポーリングと無差別なWezTerm送信が並存すると、貼り付けられた未送信テキストがペインに溜まり続ける実害があったため、明確に対象外としている。
-- **セッション再開系（reasonix/agy/codex。Monitorを持たない）**: 継続ポーリングはエージェントをフル起動するのに等しくトークンを浪費するため、これらのworkerは自分でポーリングしない。`inbox-supervisor.js` が唯一の配送経路であり、**配送は常にプロセスの起動/再開（resume）のみを経路とする**。稼働中（タスク処理中）のworkerには一切書き込まず、**プロセスが終了して休止している（これが定常状態）のを待ち、休止した時点で自動的にセッションをresumeしてから配送する**。稼働中ペインへのWezTermテキスト注入は行わない（配送されたかどうか確認できない不確実な手段であり、二度と使わない）。orchestratorが手動で介入する必要はない。
+継続ポーリングはエージェントをフル起動し続けるのに等しくトークンを浪費するため、どのworkerも自分でポーリングしない。1回の作業が終わったら自然に終了してよい（これが全workerの定常状態）。`inbox-supervisor.js` が唯一の配送経路であり、**配送は常にプロセスの起動/再開（resume）のみを経路とする**。稼働中（タスク処理中）のworkerには一切書き込まず、**プロセスが終了して休止しているのを待ち、休止した時点で自動的にセッションをresumeしてから配送する**。稼働中ペインへのWezTermテキスト注入は行わない（配送されたかどうか確認できない不確実な手段であり、使わない）。orchestratorが手動で介入する必要はない。
 
 ### 起動は自動（手動起動は不要）
 
@@ -317,7 +316,7 @@ orchestrator から worker への追加指示（`msg-send.js` で送ったコメ
 
 ### resume配送の失敗
 
-セッション再開系workerへの配送のうち、**相手のペインが稼働中（作業中）で見送っているだけの状態は、いくら長引いても「失敗」としてカウントされない**（休止するまで無期限に待つ）。resumeを実際に試みて失敗した場合（worktree消失・ペイン起動失敗等）のみ、5回の指数バックオフ再試行の末に配送を諦める。worker（reasonix/agy/codex）が指示を送ったのに長時間反応しない場合、`.gh-maestro/inbox-supervisor-autostart.log`（自動起動時のログ）または起動元セッションのバックグラウンド出力を確認し、`DELIVERY_FAILED:<workerName>:<commentId>:resume-failed`（`pending`ではなく`resume-failed`であること）の有無とエラー内容を確認すること。
+workerへの配送のうち、**相手のペインが稼働中（作業中）で見送っているだけの状態は、いくら長引いても「失敗」としてカウントされない**（休止するまで無期限に待つ）。resumeを実際に試みて失敗した場合（worktree消失・ペイン起動失敗等）のみ、5回の指数バックオフ再試行の末に配送を諦める。workerに指示を送ったのに長時間反応しない場合、`.gh-maestro/inbox-supervisor-autostart.log`（自動起動時のログ）または起動元セッションのバックグラウンド出力を確認し、`DELIVERY_FAILED:<workerName>:<commentId>:resume-failed`（`pending`ではなく`resume-failed`であること）の有無とエラー内容を確認すること。
 
 ### 誤って複数起動してしまった場合の復旧手順
 

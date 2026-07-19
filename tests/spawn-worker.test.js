@@ -40,7 +40,7 @@ test('shouldPruneStaleWorker: ペイン不在でもセッション再開系エ�
   assert.equal(result, false);
 });
 
-test('shouldPruneStaleWorker: ペイン不在でclaude系（asynchronousNotification:true）なら除去する', () => {
+test('shouldPruneStaleWorker: ペイン不在でasynchronousNotification:trueなら除去する', () => {
   const result = shouldPruneStaleWorker(
     { paneId: '5', agentId: 'claude' },
     new Set(['9']),

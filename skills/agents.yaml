@@ -2,20 +2,12 @@ agents:
   claude:
     skill_files_install_destination_directory: ~/.claude/skills
     skill_markdown_template_placeholder_substitutions:
-      INBOX_POLL_INTERVAL_SECONDS: 2
       INBOX_POLL_MECHANISM: |
-        **作業・調査・質問より先、最初のツール呼び出しとして** Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" $WORKER_NAME --issue $ISSUE --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。この起動を後回しにしてはならない。**これがあなたの唯一の受信経路である。止まっている間、orchestratorからの指示は一切届かない。**
+        このワーカー種別は自己ポーリングを行わない。継続的なポーリングはエージェントをフル起動し続けるのに等しくトークンを浪費するため、意図的に採用していない。
 
-        Monitorから届く通知を処理する：
-        - `NEW_MESSAGE:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を取得し、メッセージを処理する。処理後は必ず `msg-send.js` で結果を返信すること。**既存の persistent Monitor は自動的に待機を継続する。新しいMonitor・`msg-poll.js`・`--watch-pid`を起動してはならない。**
+        代わりに、orchestrator側で稼働する `inbox-supervisor.js` が唯一の配送経路である。あなたのプロセスが終了して休止する（＝作業の区切りで自然に終了する。これがこのワーカー種別の定常状態）たびに、新着メッセージがあれば自動的にセッションを再開（resume）し、そのメッセージを新しいプロンプトとして渡す。
 
-        上記の起動が「重複起動を検出しました」で失敗した場合、エラーメッセージ自体に、そのまま使える代替コマンド（`--watch-pid`）が示される。判断せず、示されたコマンドをそのままMonitorで`persistent: true`として起動すること。
-
-        そのMonitorから `PID_DIED:<pid>` の通知を受け取ったら、受信経路が停止したことを意味する。以下で残骸を安全に停止してから、上記のMonitor起動手順を最初からやり直すこと：
-
-        ```sh
-        node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE --worker-name $WORKER_NAME
-        ```
+        **あなたが行うべきことは何もない。** 作業が完了したら、そのまま自然に終了してよい（TaskStop等の明示的な終了操作も、ポーリング・監視ループの維持も不要）。追加の指示があれば、inbox-supervisor.js が検知して自動的にあなたを再起動し、その指示を渡す。稼働中のあなたのペインに外部からテキストが注入されることはない（配送されたか確認できない不確実な手段のため使用しない）。
   agy:
     skill_files_install_destination_directory: ~/.gemini/antigravity-cli/skills
     skill_markdown_template_placeholder_substitutions:

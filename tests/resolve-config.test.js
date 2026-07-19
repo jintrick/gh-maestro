@@ -172,7 +172,11 @@ test('resolveAgentConfig: workspace config は command を上書きできない�
       const agent = resolveAgentConfig('claude-ds', { homedir: home, workspace: ws });
       assert.ok(agent);
       assert.equal(agent.command, 'claude-ds', 'workspace should not override command');
-      assert.deepEqual(agent.extraArgs, ['--dangerously-skip-permissions'], 'workspace should not override extraArgs');
+      assert.deepEqual(
+        agent.extraArgs,
+        ['--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose'],
+        'workspace should not override extraArgs'
+      );
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }
