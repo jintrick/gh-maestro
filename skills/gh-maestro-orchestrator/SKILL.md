@@ -37,16 +37,16 @@ gh-maestroの存在意義はquota経済である。コーダー起動・レビ�
 
 ## ワーカーの使い分け
 
-オーケストレーターは、各ワーカー（スキル）の能力的な特長を理解し、タスクの性質に応じて適切なスキルを自律的に選択すること。
+各ワーカー（スキル）の特長を理解し、タスクの性質に応じて適切なスキルを自律的に選択すること。
 
-| こういう状況になったら | 使うワーカー |
+| ワーカー | 使いどころ・特長 |
 |---|---|
-| ファイルの場所・関数の定義・grep結果・ログが知りたい | `gh-maestro-explorer` |
-| バグの根本原因・影響範囲・修正方針を特定したい | `gh-maestro-investigator` |
-| 抽象設計の論点・選択肢を整理したい | `gh-maestro-architect` |
-| 局所的な実装・PR作成（コスト効率重視） | `gh-maestro-coder` |
-| 設計判断や広範囲の影響分析、高度な検証を伴う実装・PR作成 | `gh-maestro-senior-coder` |
-| 上記に当てはまらないが手を動かす仕事がある | `gh-maestro-base`（`--prompt-file`で役割を明示） |
+| `gh-maestro-explorer` | ファイルの場所・関数定義・grep結果・ログなど**事実**の調査。分析・判断はしない |
+| `gh-maestro-investigator` | バグの根本原因・影響範囲・修正方針の特定（explorerと違いコードの解釈・判断を行う） |
+| `gh-maestro-architect` | 抽象設計の論点・選択肢・トレードオフの整理。確定要件と圧縮済み事実だけで扱う相談役で、対象Issueにコメントする。実装手順・コード調査・要件変更・優先順位・実装開始・マージは決めない |
+| `gh-maestro-coder` | 局所的でスコープの明確な実装・PR作成（コスト効率重視） |
+| `gh-maestro-senior-coder` | 広範な影響分析・複雑なロジック調整・設計判断を伴う実装・PR作成。高い自己検証能力を持つ |
+| `gh-maestro-base` | 上記以外の動的役職（必ず `--prompt-file` で役割を定義する） |
 
 
 ## アンカー Issue の確保
@@ -55,7 +55,7 @@ gh-maestroの存在意義はquota経済である。コーダー起動・レビ�
 
 | ワーカー | アンカー |
 |---|---|
-| coder / senior-coder | 実装対象の Issue（現行どおり） |
+| coder / senior-coder | 実装対象の Issue |
 | investigator | 調査対象のバグ Issue（既存があればそれ。なければ orchestrator が起草・作成する） |
 | explorer | 調査の発端となった Issue（あればそれ。なければ orchestrator が作成する） |
 
@@ -79,110 +79,43 @@ EOF
 # 出力された実体パスを --prompt-file に渡す
 ```
 
-### ワーカーの指し方（重要）
-
-**起動後にワーカーへメッセージを送る・削除するときは、workerName を覚えず〈`--issue <N>` + `--skill <役割>`〉で指す。** workers.json から一意に解決される（`msg-send.js` / `remove-worker.js` が対応）。orchestrator は起動時に付けた workerName という文字列を記憶し続ける必要がない。
-
-例外は、**同一Issue・同一役割で複数のワーカーを並列起動した場合**（下記「大規模タスクの分割」の `W1`/`W2`/`W3` 等）だけ。この場合のみ `--issue`+`--skill` では一意に決まらず、スクリプトが候補一覧を表示してエラーになるので、`--worker-name issue-<N>-<desc>` で明示する。
-
-### explorer の起動例
-
-```sh
-node "{{SCRIPTS_PATH}}/spawn-worker.js" \
-  --skill gh-maestro-explorer \
-  --issue <N> \
-  --description explore-auth \
-  --prompt-file <上で書き出した実体パス> \
-  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
-```
-
-### investigator の起動例
-
-```sh
-node "{{SCRIPTS_PATH}}/spawn-worker.js" \
-  --skill gh-maestro-investigator \
-  --issue <N> \
-  --description investigate-login-bug \
-  --prompt-file <上で書き出した実体パス> \
-  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
-```
-
-調査対象のバグIssue本文だけで調査観点が尽くせる場合は `--prompt-file` を省略してよいが、Issue本文を超える補足（重点的に見てほしい箇所・除外してよい範囲など）を伝えたい場合は、explorerと同様に必ず `--prompt-file` で渡す。「原則」通りIssue本文に書ききれない指示をチャットに書き留めて終わらせない。
-
-explorer は**事実のみ報告する**（分析・判断は行わない）。investigator は**根本原因・影響範囲・修正方針まで報告する**。architect は、確定済み要件と圧縮済みの事実を前提に、抽象設計の論点・選択肢・トレードオフを整理する任意の相談役である。具体的な実装手順、ファイル単位の変更、コード調査は coder の責務である。これらの使い分けを誤らないこと。
-
-## アセット（`{{SCRIPTS_PATH}}/`）
-
-- **spawn-worker.js** — worktreeを作りワーカーを新規ペインで起動する
-- **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉で指定する（workerName を覚える必要はない）。改行・引用符等の特殊文字を含む本文は `--body-file` でファイル経由で渡すこと（シェルクォート問題を回避）。
-
-```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" --issue <N> --skill <役割> --workspace $WORKSPACE "<メッセージ>"
-# 例: node "{{SCRIPTS_PATH}}/msg-send.js" --issue 5 --skill gh-maestro-coder --workspace $WORKSPACE "命名改善: src/auth.go:42 — processData → normalizeSSN に変更してください（PR #12 のレビュー指摘より）"
-# 特殊文字を含む場合:
-# node "{{SCRIPTS_PATH}}/msg-send.js" --issue 5 --skill gh-maestro-coder --workspace $WORKSPACE --body-file /tmp/msg.txt
-# 同一issue・同一役割で複数並列した場合のみ workerName を位置引数で明示:
-# node "{{SCRIPTS_PATH}}/msg-send.js" issue-5-fix-utils --workspace $WORKSPACE "<メッセージ>"
-```
-- **msg-read.js** — コメントIDから本文を読み出す（マーカー行除去済み）
-
-```sh
-node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE
-```
-- **remove-worker.js** — ワーカーペインをkillしてworktreeを削除する。削除対象も〈`--issue` + `--skill`〉で指定する
-
-```sh
-node "{{SCRIPTS_PATH}}/remove-worker.js" --issue <N> --skill <役割> --workspace $WORKSPACE
-# 同一issue・同一役割で複数並列した場合のみ: --worker-name issue-<N>-<desc> で明示
-```
-- **start-review-manager.js** — PRに対してReview Managerを起動する。通常はPR検出時にpoll-pr.jsが自動で呼ぶが、Review Managerが起動しなかった・失敗した場合に手動で起動・再起動するために使う
-
-```sh
-node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE
-# 出力: REVIEW_MANAGER_STARTED:<PR> （起動した） / REVIEW_MANAGER_ALREADY_RUNNING:<PR> （既に稼働中）
-```
-- **msg-poll.js** — GitHub Issueコメントを定期スキャンし新着メッセージを通知する。orchestratorの唯一のinbox監視手段（詳細は「自分のinbox監視」参照）
-- **poll-pr.js** — Issueに対応するPRを検出し、検出時にReview Managerを起動、その後poll-reviews.jsへ処理を橋渡ししてレビュー監視を継続する単一プロセス（詳細は「PR検出」参照）
-- **process-lifecycle.js** — PID registryを走査しstaleなプロセスエントリを掃除する（詳細は各節の「復旧手順」参照）
-- **reset-session.js** — 壊れた状態からセッションを強制リセットする
-- **write-draft.js** — 論理パス（`/tmp/issue-draft.md` 等）を実体パスへ解決してから草案ファイルを書き出す唯一の入口。`create-issue.js` と同じ解決ロジック（`win-path.js`）を通るため、書く先と読む先の実体パスがズレない。オーケストレーターは `C:\tmp` や `%TEMP%` を推論してはならず、常にこのスクリプト経由で草案を書くこと。
-- **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` を削除する（詳細は「Issue確定」参照）。
-
-```sh
-# 草案の書き出し（論理パスのみ指定。実体パスの推論は不要）
-node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-draft.md --stdin <<'EOF'
-<Issue本文>
-EOF
-# 出力: DRAFT_WRITTEN:<実体パス>
-```
-
-すべてのスクリプトは `{{SCRIPTS_PATH}}/`（インストール時に絶対パスへ置換）に集約されている。各スクリプトは `--help` で使い方を確認できる。
-
 ### ワーカーの起動
 
 ```sh
 node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --skill <skill-name> \
-  --prompt-file <プロンプトファイルの実体パス> \
   --issue <N> \
   --description <desc> \
-  --repo $REPO \
-  --workspace $WORKSPACE \
-  --base-branch $BASE_BRANCH
+  --prompt-file <上で書き出した実体パス> \
+  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
 ```
 
-worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、workers.json に〈issue + skill〉付きで登録される。**起動後にこのワーカーを指すときは、上記「ワーカーの指し方」の通り〈`--issue` + `--skill`〉で参照すればよく、戻り値の workerName を変数に控える必要はない。**
+worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、workers.json に〈issue + skill〉付きで登録される。`--description <desc>` は `issue-<N>-<desc>` の形でworktreeディレクトリ名・gitブランチ名・`workers.json`のキーに使われるため、**英数字・ハイフン・アンダースコアのみ、1〜50文字**（例: `explore-auth`）。スペース・スラッシュ・ドット等は不可（`spawn-worker.js --help`参照）。
 
-`--description <desc>` は `issue-<N>-<desc>` の形でworktreeディレクトリ名・gitブランチ名・`workers.json`のキーにそのまま使われるため、**英数字・ハイフン・アンダースコアのみ、1〜50文字**（例: `explore-auth`）。スペース・スラッシュ・ドット等は使用できない（`spawn-worker.js --help`参照）。
+- **investigator**: 調査対象のバグIssue本文だけで観点が尽くせるなら `--prompt-file` を省略してよい。本文を超える補足（重点的に見る箇所・除外範囲など）がある場合のみ渡す。
+- **architect**: 起動には確定要件が前提。詳細は「Architect による抽象設計の検討」参照（`--execution-id` を付ける）。
 
-| スキル | 用途・特長 |
-|---|---|
-| `gh-maestro-coder` | コスト効率に優れ、指定されたスコープに閉じた局所的な変更や、明確に定義された仕様の実装・修正に適している。 |
-| `gh-maestro-senior-coder` | 高度な自己検証能力とアーキテクチャの整合性判断能力を持ち、広範な影響分析、複雑なロジック調整、設計判断を伴うタスクの解決に適している。 |
-| `gh-maestro-explorer` | 汎用的な事実調査（grep・コード探索・情報収集）。分析・判断は行わず、発見した事実を報告する。 |
-| `gh-maestro-investigator` | バグ原因の特定 → 根本原因・影響範囲・修正方針の報告（`--issue` が必須。アンカー Issue がなければ orchestrator が先に起票する）。 |
-| `gh-maestro-architect` | 確定済み要件と圧縮済み調査コンテクストから、抽象設計の論点・選択肢・トレードオフを対象 Issue にコメントする任意の相談役。具体的な実装手順・コード調査・要件変更・優先順位・実装開始・マージは決めない。 |
-| `gh-maestro-base` | 上記以外の動的役職（必ず`--prompt-file`で役割を定義する）。 |
+### ワーカーの指し方（重要）
+
+**起動後にワーカーへメッセージを送る・削除するときは、workerName を覚えず〈`--issue <N>` + `--skill <役割>`〉で指す。** workers.json から一意に解決される（`msg-send.js` / `remove-worker.js` が対応）。起動時の戻り値 workerName を変数に控える必要はない。
+
+例外は**同一Issue・同一役割で複数のワーカーを並列起動した場合**（下記「大規模タスクの分割」）だけ。この場合のみ一意に決まらず、スクリプトが候補一覧を表示してエラーにするので `--worker-name issue-<N>-<desc>` で明示する。
+
+## アセット（`{{SCRIPTS_PATH}}/`）
+
+すべてのスクリプトは `{{SCRIPTS_PATH}}/`（インストール時に絶対パスへ置換）に集約され、`--help` で使い方を確認できる。ワーカー宛て（`msg-send.js` / `remove-worker.js`）の送信先指定は「ワーカーの指し方」を参照。
+
+- **spawn-worker.js** — worktreeを作りワーカーを新規ペインで起動する（「ワーカーの起動」参照）
+- **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉。特殊文字を含む本文は `--body-file` で渡す（シェルクォート回避）
+- **msg-read.js** — コメントIDから本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE`
+- **remove-worker.js** — ワーカーのペインをkillしてworktreeを削除する。対象は〈`--issue` + `--skill`〉
+- **start-review-manager.js** — PRにReview Managerを起動する（「Review Managerの手動起動」参照）
+- **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）
+- **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「PR検出」参照）
+- **process-lifecycle.js** — PID registryを走査しstaleなプロセスを掃除する（各「復旧手順」参照）
+- **reset-session.js** — 壊れた状態からセッションを強制リセットする
+- **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「Issue確定」参照）
+- **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` を削除する（「Issue確定」参照）
 
 ## セッションのゴール
 
@@ -388,11 +321,7 @@ orchestrator から worker への追加指示（`msg-send.js` で送ったコメ
 
 ### 誤って複数起動してしまった場合の復旧手順
 
-自動起動になったため通常は発生しないが、万一「重複しているかもしれない」と気づいた場合、気づいた瞬間に片方を反射的に止めてはならない。以下の順で確認してから対処する：
-
-1. **実数を確認する**: `node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE --dry-run` を実行し、`script=inbox-supervisor.js` のエントリが実際に複数生存しているかを確認する。1本しかなければ「重複」ではない。誤って停止しない。**`--dry-run` は必須。指定しないと確認のつもりが実際にkillしてしまう。**
-2. **複数確認できた場合のみ**、最も新しく起動したもの以外を`TaskStop`等で停止する。停止対象を誤らないよう、停止前に該当タスクが本当に `inbox-supervisor.js` を実行しているか確認する。
-3. 残った1本が生きていることを確認してからセッションを継続する。
+自動起動のため通常は発生しない。万一疑いがあれば、「自分の inbox の監視 → 誤って複数起動してしまった場合の復旧手順」と全く同じ手順を、`script=inbox-supervisor.js` を対象に行う（`--dry-run` で実数を確認してから、複数のときだけ最新以外を停止する）。
 
 ## PR検出
 
