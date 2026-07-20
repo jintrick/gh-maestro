@@ -203,4 +203,12 @@ test('CLI --help exits 0 without requiring --review-aspects', () => {
   const result = spawnSync(process.execPath, [pollPrPath, '--help'], { encoding: 'utf8' });
   assert.equal(result.status, 0);
   assert.match(result.stdout, /review-aspects/);
+  // --no-review-manager（レビューを蒸し返さずに監視だけ再開する再起動用フラグ）が文書化されていること
+  assert.match(result.stdout, /--no-review-manager/);
+});
+
+test('CLI: --review-aspects 省略のエラーメッセージが --no-review-manager を案内する', () => {
+  const result = spawnSync(process.execPath, [pollPrPath, '111'], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /--no-review-manager/);
 });

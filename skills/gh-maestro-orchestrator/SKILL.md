@@ -343,6 +343,14 @@ PRが長時間（目安: 10分）検出されない場合はコーダーが失�
 
 **`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、「Review Managerの手動起動」に従って自分で起動すること。
 
+### レビュー済みPRの監視を再開する（再レビューを蒸し返さない）
+
+Monitor が落ちた等で `poll-pr.js` を再起動する必要があるが、**そのPRのレビューは既に済んでいる／再レビューは不要**という場合は、`--no-review-manager` を付けて起動する。PR検出時に Review Manager を起動せず、レビューコメント・マージ状態の監視だけを再開する（`--review-aspects` は不要）。これを付けずに再起動すると、検出のたびにレビューが蒸し返されて quota を浪費する。
+
+```sh
+node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --no-review-manager --workspace $WORKSPACE --base-branch $BASE_BRANCH
+```
+
 ### Review Managerの手動起動
 
 Review Managerが起動しなかった、または途中で失敗した場合は、start-review-manager.js で起動・再起動できる。レビューが進まないときは `$WORKSPACE/.gh-maestro/review-manager-<PR>.log` を確認し、失敗していれば再起動する。

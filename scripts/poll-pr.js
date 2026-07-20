@@ -31,9 +31,13 @@ Arguments:
   [INTERVAL_SECONDS]  ポーリング間隔（秒、デフォルト 30）
 
 Options:
-  --review-aspects <value>  必須。PR検出時に directed モードで起動する観点を指定する。
+  --review-aspects <value>  Review Manager を起動する場合は必須（--no-review-manager 指定時は不要）。
+                             PR検出時に directed モードで起動する観点を指定する。
                              auto: 変更ファイルから scripts/shared/detect-aspects.js で自動算出する
                              leaf,leaf,...: skills/gh-maestro-reviewer/ 配下に実在する葉名のカンマ区切り
+  --no-review-manager        PR検出時に Review Manager を起動せず、レビュー監視だけを再開する。
+                             既にレビュー済み／再レビュー不要な状態で poll-pr.js を再起動するときに使う
+                             （再起動のたびにレビューを蒸し返すのを防ぐ）。このとき --review-aspects は不要。
   --workspace <path>         ワークスペースパス（省略時は環境変数またはCWDから解決）
   --session-pid <pid>        監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
   --base-branch <branch>     期待するベースブランチ名（省略時はベースブランチ検証をスキップ）
@@ -143,7 +147,7 @@ module.exports = { resolveReviewAspects, getChangedFiles, getPrBaseBranch, forma
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--session-pid', '--review-aspects', '--base-branch']);
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--session-pid', '--review-aspects', '--base-branch'], ['--no-review-manager']);
 
   // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
   // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
@@ -162,6 +166,7 @@ if (require.main === module) {
   const sessionPidArg = values['--session-pid'];
   const reviewAspectsArg = values['--review-aspects'];
   const baseBranch = values['--base-branch'];
+  const noReviewManager = values['--no-review-manager'] === true;
 
   const [issue, intervalArg] = rest;
 
@@ -170,28 +175,32 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  // --review-aspects は必須。省略時は silent fallback せず即エラー終了する（Issue #111）。
-  if (reviewAspectsArg == null) {
-    console.error('poll-pr: --review-aspects は必須です（auto または既知の観点カンマ区切り）。');
-    console.error(USAGE);
-    process.exit(1);
-  }
+  // Review Manager を起動しないモードでは観点は不要。観点関連の検証・解決も丸ごと省く。
+  let knownAspects = [];
+  let reviewAspects = null;
+  if (!noReviewManager) {
+    // --review-aspects は必須。省略時は silent fallback せず即エラー終了する（Issue #111）。
+    if (reviewAspectsArg == null) {
+      console.error('poll-pr: --review-aspects は必須です（auto または既知の観点カンマ区切り）。Review Managerを起動しない場合は --no-review-manager を指定してください。');
+      console.error(USAGE);
+      process.exit(1);
+    }
 
-  const knownAspects = listKnownAspects();
-  // 観点ディレクトリが存在しない・.mdファイルが1件もない等でknownAspectsが空の場合、
-  // 'auto'指定時にdetectAspectsが空配列を返しbuildAspectsBriefが例外を投げてクラッシュする。
-  // silent fallbackせず起動時にfail-fastする（PR #112 レビュー指摘）。
-  if (knownAspects.length === 0) {
-    console.error('poll-pr: 既知の観点が1件も見つかりません（skills/gh-maestro-reviewer/ 配下を確認してください）。');
-    process.exit(1);
-  }
+    knownAspects = listKnownAspects();
+    // 観点ディレクトリが存在しない・.mdファイルが1件もない等でknownAspectsが空の場合、
+    // 'auto'指定時にdetectAspectsが空配列を返しbuildAspectsBriefが例外を投げてクラッシュする。
+    // silent fallbackせず起動時にfail-fastする（PR #112 レビュー指摘）。
+    if (knownAspects.length === 0) {
+      console.error('poll-pr: 既知の観点が1件も見つかりません（skills/gh-maestro-reviewer/ 配下を確認してください）。');
+      process.exit(1);
+    }
 
-  let reviewAspects;
-  try {
-    reviewAspects = resolveReviewAspects(reviewAspectsArg, knownAspects);
-  } catch (e) {
-    console.error(`poll-pr: ${e.message}`);
-    process.exit(1);
+    try {
+      reviewAspects = resolveReviewAspects(reviewAspectsArg, knownAspects);
+    } catch (e) {
+      console.error(`poll-pr: ${e.message}`);
+      process.exit(1);
+    }
   }
 
   const interval = parseInt(intervalArg || '30') * 1000;
@@ -257,17 +266,21 @@ if (require.main === module) {
           }
         }
 
-        const changedFiles = getChangedFiles(pr, repo);
-        const aspects = reviewAspects.mode === 'auto'
-          ? detectAspects(changedFiles, knownAspects)
-          : reviewAspects.aspects;
-        const brief = buildAspectsBrief(aspects);
-
-        // PR 検出のついでにReview Managerを起動するが、その起動結果も併せて報告する。
-        // これにより orchestrator は「レビューが起動済みである」ことを把握できる。
-        const reviewStatus = startReviewManager(pr, repo, workspace, { mode: 'directed', promptText: brief });
         process.stdout.write(`PR_DETECTED:${pr}\n`);
-        process.stdout.write(`${reviewStatus}:${pr}\n`);
+
+        // --no-review-manager のときは Review Manager を起動せず、レビュー監視だけを再開する。
+        if (!noReviewManager) {
+          const changedFiles = getChangedFiles(pr, repo);
+          const aspects = reviewAspects.mode === 'auto'
+            ? detectAspects(changedFiles, knownAspects)
+            : reviewAspects.aspects;
+          const brief = buildAspectsBrief(aspects);
+
+          // Review Manager を起動し、その起動結果も併せて報告する。
+          // これにより orchestrator は「レビューが起動済みである」ことを把握できる。
+          const reviewStatus = startReviewManager(pr, repo, workspace, { mode: 'directed', promptText: brief });
+          process.stdout.write(`${reviewStatus}:${pr}\n`);
+        }
 
         // poll-pr.js と poll-reviews.js は内部ロジックを統合せず、それぞれ独立に保つ。
         // 代わりにここで poll-reviews.js を子プロセスとして起動し、終了まで中継する（Issue #111）。
