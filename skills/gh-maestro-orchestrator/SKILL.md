@@ -362,6 +362,8 @@ PR番号が確定したら、レビューコメントとマージ状態の通知
 - `PR_REVIEW:<user>:<state>:<body>` → 正式レビュー提出（GitHubの「Submit review」ボタン経由）。jintrickのレビューはこの形式で届く。stateで分岐：APPROVED → 人間にマージ許可シグナルとして提示、CHANGES_REQUESTED → bodyをトリアージしてコーダーにフィードバック、COMMENTED → PR_COMMENTと同様にトリアージ
 - `PR_PUSH:<sha>` → コーダーが修正コミットをPRにプッシュした。レビューは初回PR作成時のみ実行される（push後の再レビューはない）。マージ可否の確認は「マージ可否ゲート」通過時のみ。未通過なら残 BLOCKER の解消を待つ
 - `PR_MERGED:<PR番号>` → マージ完了。`git -C $WORKSPACE pull --ff-only` で `BASE_BRANCH` を最新化してから反省会へ進む。**この時点ではワーカーpane・worktreeを削除しない**（後始末の `finalize-issue.js` は下記「反省会」完了後にのみ実行する）
+- `POLL_ERROR:<detail>` → レビュー監視のGitHubアクセスが失敗し始めた（GitHub障害・一時的なネットワーク断など）。ポーラーは再試行を継続するので何かを起動し直す必要はないが、**「レビューがまだ来ないだけ」と解釈して待ち続けてはならない**。レビュー監視が劣化していることを人間に伝える。復旧すれば `POLL_RECOVERED` が届く
+- `POLL_RECOVERED` → 上記の劣化から復旧した。通常のレビュー監視に戻ってよい
 - 人間からの報告も同様に受け付ける
 - ポーリング間隔は30秒（`poll-reviews.js`の既定値）。アクティビティがなければ自動で間隔が延びる
 

@@ -19,3 +19,17 @@ test('isValidCommentId: GitHubエラーレスポンス由来のゴミ断片を�
   assert.equal(isValidCommentId('12a'), false);
   assert.equal(isValidCommentId('-1'), false);
 });
+
+const { pollDegradationTransition } = require('../scripts/poll-reviews.js');
+
+test('pollDegradationTransition: 正常→劣化の遷移でPOLL_ERRORを一度だけ発火', () => {
+  assert.deepEqual(pollDegradationTransition(false, true), { degraded: true, emit: 'POLL_ERROR' });
+  // 劣化継続中は再発火しない（スパム防止）
+  assert.deepEqual(pollDegradationTransition(true, true), { degraded: true, emit: null });
+});
+
+test('pollDegradationTransition: 劣化→復旧の遷移でPOLL_RECOVEREDを一度だけ発火', () => {
+  assert.deepEqual(pollDegradationTransition(true, false), { degraded: false, emit: 'POLL_RECOVERED' });
+  // 正常継続中は何も出さない
+  assert.deepEqual(pollDegradationTransition(false, false), { degraded: false, emit: null });
+});

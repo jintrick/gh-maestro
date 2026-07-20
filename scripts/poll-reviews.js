@@ -6,6 +6,8 @@
 //   PR_REVIEW:<user>:<state>:<body>
 //   PR_PUSH:<sha>
 //   PR_MERGED:<PR>
+//   POLL_ERROR:<detail>  (GitHubアクセスが失敗し始めたとき。遷移時のみ)
+//   POLL_RECOVERED       (失敗から復旧したとき。遷移時のみ)
 'use strict';
 
 const { spawnSync } = require('./child-process');
@@ -37,6 +39,8 @@ Output (stdout):
   PR_REVIEW:<user>:<state>:<body>             正式レビュー提出（APPROVED/CHANGES_REQUESTED/COMMENTED）
   PR_PUSH:<sha>                               新しいコミットが push された
   PR_MERGED:<PR>                              マージ完了（このとき終了する）
+  POLL_ERROR:<detail>                         GitHubアクセスが失敗し始めた（遷移時のみ。再試行は継続）
+  POLL_RECOVERED                              失敗から復旧した（遷移時のみ）
 
 PR_MERGED を検出するまで永続的にポーリングする。
 ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
@@ -53,7 +57,20 @@ function isValidCommentId(id) {
   return /^[0-9]+$/.test(id);
 }
 
-module.exports = { isValidCommentId };
+/**
+ * ポーリングサイクルの結果から、劣化状態の遷移と発火すべきイベントを決める純粋関数。
+ * 状態遷移（正常→劣化／劣化→復旧）のときだけイベントを返し、それ以外は null（スパム防止）。
+ * @param {boolean} prevDegraded 直前の劣化状態
+ * @param {boolean} hadError このサイクルで GitHub アクセスに失敗があったか
+ * @returns {{ degraded: boolean, emit: 'POLL_ERROR' | 'POLL_RECOVERED' | null }}
+ */
+function pollDegradationTransition(prevDegraded, hadError) {
+  if (hadError && !prevDegraded) return { degraded: true, emit: 'POLL_ERROR' };
+  if (!hadError && prevDegraded) return { degraded: false, emit: 'POLL_RECOVERED' };
+  return { degraded: prevDegraded, emit: null };
+}
+
+module.exports = { isValidCommentId, pollDegradationTransition };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -134,8 +151,22 @@ if (require.main === module) {
   const commentsJq = `.comments[] | [(.id | tostring), .author.login, (.body | gsub("\\n"; " "))] | join("|")`;
   const reviewsJq = `.[] | [(.id | tostring), .user.login, .state, (.body | gsub("\\n"; " "))] | join("|")`;
 
+  // GitHubアクセスの失敗をサイレントに握り潰さない。stderr は Monitor に拾われるとは限らないため、
+  // orchestrator に確実に届く stdout へ、状態遷移（正常→劣化／劣化→復旧）のときだけイベントを出す
+  // （毎周回出すとスパムになるので遷移時のみ）。これにより持続的な障害が可視化され、
+  // orchestrator が「まだレビューが来ないだけ」と誤解して無限に待つのを防ぐ。
+  let degraded = false;
+  function noteCycleResult(hadError) {
+    const t = pollDegradationTransition(degraded, hadError);
+    degraded = t.degraded;
+    if (t.emit === 'POLL_ERROR') {
+      process.stdout.write('POLL_ERROR:review監視のGitHubアクセスが失敗しています（一時的な可能性。復旧まで再試行を継続します）\n');
+    } else if (t.emit === 'POLL_RECOVERED') {
+      process.stdout.write('POLL_RECOVERED\n');
+    }
+  }
+
   (async () => {
-    let interval = intervalSec;
     while (true) {
       // dead-man's switch: 親セッション生存確認
       if (!checkParent()) {
@@ -148,6 +179,7 @@ if (require.main === module) {
         '--json', 'state,headRefOid', '-q', '[.state, .headRefOid] | join("|")']);
       // PR状態が取れないサイクルは以降を丸ごとスキップ（誤った差分検知・中継を防ぐ）。
       if (prJson === null) {
+        noteCycleResult(true);
         await new Promise(r => setTimeout(r, intervalSec * 1000));
         continue;
       }
@@ -168,6 +200,7 @@ if (require.main === module) {
       }
 
       const known = knownIds();
+      let hadError = false;
 
       const inlineOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/comments`,
         '--paginate', '-q', inlineJq]);
@@ -179,6 +212,8 @@ if (require.main === module) {
           recordId(id);
           process.stdout.write(`REVIEW_COMMENT:${line.slice(sep + 1)}\n`);
         }
+      } else {
+        hadError = true;
       }
 
       const commentsOut = ghCapture(['pr', 'view', pr, '--repo', repo,
@@ -191,6 +226,8 @@ if (require.main === module) {
           recordId(id);
           process.stdout.write(`PR_COMMENT:${line.slice(sep + 1)}\n`);
         }
+      } else {
+        hadError = true;
       }
 
       const reviewsOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/reviews`,
@@ -209,8 +246,11 @@ if (require.main === module) {
             process.stdout.write(`PR_REVIEW:${user}:${state}:${body}\n`);
           }
         }
+      } else {
+        hadError = true;
       }
 
+      noteCycleResult(hadError);
       await new Promise(r => setTimeout(r, intervalSec * 1000));
     }
   })();
