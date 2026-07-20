@@ -108,7 +108,8 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - **spawn-worker.js** — worktreeを作りワーカーを新規ペインで起動する（「ワーカーの起動」参照）
 - **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉。特殊文字を含む本文は `--body-file` で渡す（シェルクォート回避）
 - **msg-read.js** — コメントIDから本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE`
-- **remove-worker.js** — ワーカーのペインをkillしてworktreeを削除する。対象は〈`--issue` + `--skill`〉
+- **remove-worker.js** — 個別ワーカーのペインをkillしてworktreeを削除する。対象は〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
+- **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）
 - **start-review-manager.js** — PRにReview Managerを起動する（「Review Managerの手動起動」参照）
 - **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「PR検出」参照）
@@ -128,7 +129,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - ワーカーは役割が完全に終わり、人間が削除を許可した時点で削除されている（PRを作っただけのcoderはまだ生きている。トリアージの結果、修正が必要な指摘があれば`msg-send.js`で転送する）
 - 同時進行中のIssue間でファイル競合が発生していない（競合可能性があれば前のPRがマージされてから次を起票する）
 - 任意の初期指示は必ず`--prompt-file`で渡す。`--short-prompt`は短い補足メッセージだけに限定し、実装詳細はIssueに記述されている
-- PRのレビューコメントをトリアージし、人間に結果を提示している。マージ判断は人間が行い、マージ後は反省会（コーダーへの意見聴取を含む）を実施してからIssueをクローズし、人間の削除許可後にworktreeを削除している。**反省会と人間の削除許可より前に`remove-worker.js`を実行しない**
+- PRのレビューコメントをトリアージし、人間に結果を提示している。マージ判断は人間が行い、マージ後は反省会（コーダーへの意見聴取を含む）を実施する。反省会と承認事項の反映が済んだら `finalize-issue.js` を1回呼び、Issueクローズと全ワーカー削除を一括で行う。**反省会が完了するより前にワーカーを削除しない**
 - ローカルの`BASE_BRANCH`はリモートと同期している（`spawn-worker.js`起動時に自動でfetch+ff-only更新される。手動gitpullは不要）
 
 **大規模タスクの分割（アンチパターン / 正しいパターン）:**
@@ -150,7 +151,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 これを破るとシステムが即座に機能しなくなる：
 
 - **オーケストレーターは調査・実装コマンドを自分で実行しない。必ずワーカーに委譲する**
-- **`remove-worker.js` は、人間が削除を許可した後にだけ実行する。役割が完了していても、人間の許可なくワーカーを削除しない**
+- **ワーカー削除（`remove-worker.js` / `finalize-issue.js`）は、反省会が完了した後にだけ実行する。反省会前にワーカーを削除しない（コーダーが自分への指摘を振り返る機会を失う）**
 - `BASE_BRANCH`は保護ブランチ（`main`/`master`）でもworktreeブランチ（`issue-N-description`形式）でもない。セッション中に変更しない。起動時に保護ブランチ上にいた場合のみ、最初のIssue確定時に開発ブランチを切って設定する
 - `main` / `master`への直接pushは禁止
 - `gh pr close`は1件ずつ実行する（複数引数を渡すと失敗する）
@@ -167,7 +168,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 8. **レビュー監視**: PR番号取得後、下記「レビュー監視」に従い、レビューコメントとマージ状態を監視する
 9. **コメントトリアージ**: 新しいレビューコメントを受信するたびに「レビューコメントのトリアージ」を実行する
 10. **マージ**: 「マージ可否ゲート」通過後にトリアージ結果を人間に提示し、マージを依頼する。マージ検出後、`git pull --ff-only` で `BASE_BRANCH` を更新する
-11. **反省会**: 下記「反省会」に従い、手戻りの構造的原因を分析して改善提案をまとめる。承認事項の反映・Issueクローズ後、人間から削除許可を得て `remove-worker.js` によりワーカーを削除してから次のIssueへ進む
+11. **反省会と後始末**: 下記「反省会」に従い、手戻りの構造的原因を分析して改善提案をまとめる。反省会・承認事項の反映が済んだら `finalize-issue.js --issue <N>` を1回呼び、Issueクローズと全ワーカー削除を一括で行ってから次のIssueへ進む
 
 ## Issue確定
 
@@ -360,7 +361,7 @@ PR番号が確定したら、レビューコメントとマージ状態の通知
 - `PR_COMMENT:<user>:<body>` → PR全体へのコメント。同様にトリアージする
 - `PR_REVIEW:<user>:<state>:<body>` → 正式レビュー提出（GitHubの「Submit review」ボタン経由）。jintrickのレビューはこの形式で届く。stateで分岐：APPROVED → 人間にマージ許可シグナルとして提示、CHANGES_REQUESTED → bodyをトリアージしてコーダーにフィードバック、COMMENTED → PR_COMMENTと同様にトリアージ
 - `PR_PUSH:<sha>` → コーダーが修正コミットをPRにプッシュした。レビューは初回PR作成時のみ実行される（push後の再レビューはない）。マージ可否の確認は「マージ可否ゲート」通過時のみ。未通過なら残 BLOCKER の解消を待つ
-- `PR_MERGED:<PR番号>` → マージ完了。`git -C $WORKSPACE pull --ff-only` で `BASE_BRANCH` を最新化してから反省会へ進む。**この時点ではワーカーpane・worktreeを削除しない**（`remove-worker.js`は下記「反省会」完了後にのみ実行する）
+- `PR_MERGED:<PR番号>` → マージ完了。`git -C $WORKSPACE pull --ff-only` で `BASE_BRANCH` を最新化してから反省会へ進む。**この時点ではワーカーpane・worktreeを削除しない**（後始末の `finalize-issue.js` は下記「反省会」完了後にのみ実行する）
 - 人間からの報告も同様に受け付ける
 - ポーリング間隔は30秒（`poll-reviews.js`の既定値）。アクティビティがなければ自動で間隔が延びる
 
@@ -530,7 +531,7 @@ gh issue comment $PENDING_ISSUE --repo $REPO \
 
 `PR_MERGED` を検出したら、Issue クローズ・worktree 削除の前に反省会を実施する。目的は「同じ指摘を次回のコーダーが最初から回避できるようにすること」であり、個人の批判ではない。
 
-**反省会が完了するまで `remove-worker.js` を実行してはならない。** 反省会には実装を担当したコーダー本人を参加させる。ペインをkillしてworktreeを削除すると、コーダーが自分への指摘を振り返る機会を失う。
+**反省会が完了するまでワーカーを削除してはならない（`finalize-issue.js` を呼ばない）。** 反省会には実装を担当したコーダー本人を参加させる。ペインをkillしてworktreeを削除すると、コーダーが自分への指摘を振り返る機会を失う。
 
 ### 分析対象
 
@@ -610,4 +611,10 @@ node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-cod
 
 提案が0件（すべて個別判断）の場合は「今回は汎用化できる改善点がありませんでした」と報告して終了する。
 
-反省会（コーダーへの意見聴取を含む）と承認事項の反映がすべて終わってから、最後にIssueをクローズする。その後、人間から削除許可を得て `remove-worker.js` でワーカーpaneとworktreeを削除する。
+反省会（コーダーへの意見聴取を含む）と承認事項の反映がすべて終わったら、最後に `finalize-issue.js` を1回呼ぶ。
+
+```sh
+node "{{SCRIPTS_PATH}}/finalize-issue.js" --issue <N> --repo $REPO --workspace $WORKSPACE
+```
+
+これがそのIssueに紐づく全ワーカーの削除とIssueのクローズを一括・決定的に行う。Issueクローズとワーカー削除を個別に手作業でやらない（取りこぼしを防ぐため）。人間の削除許可を都度取る必要はない——マージが唯一の人間チェックポイントであり、反省会が済めば後始末は自動でよい。
