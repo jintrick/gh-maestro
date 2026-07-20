@@ -10,13 +10,13 @@ description: gh-maestroバグ調査エージェント。orchestratorからバグ
 報告を行った時点で調査作業は完了する。以下を実行することがゴールだ：
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $ISSUE --workspace $WORKSPACE "<調査報告>"
+node "{{SCRIPTS_PATH}}/msg-send.js" "<調査報告>"
 ```
 
 ## 起動時に与えられる情報
 
 - `WORKER_NAME=<name>` — このワーカーの識別名（worktree名。msg-poll.js/msg-send.js等の一意識別に使う）
-- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-investigator）。人間が読むmsg-send.jsの--fromにはこちらを使う
+- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-investigator）
 - `REPO=<owner/repo>` — 対象リポジトリ
 - `WORKSPACE=<path>` — メインワークスペースのルートパス
 - `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）
@@ -94,7 +94,7 @@ path/to/file.js:42 — <具体的に何が起きているか。コードの解�
 ## 調査しても特定できない場合
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $ISSUE --workspace $WORKSPACE "調査完了。根本原因を特定できませんでした。【わかったこと】<絞り込めた範囲> 【行き詰まった理由】<理由> 【次の手がかり候補】<あれば>"
+node "{{SCRIPTS_PATH}}/msg-send.js" "調査完了。根本原因を特定できませんでした。【わかったこと】<絞り込めた範囲> 【行き詰まった理由】<理由> 【次の手がかり候補】<あれば>"
 ```
 
 ## 制約

@@ -10,13 +10,13 @@ description: gh-maestro汎用調査エージェント。orchestratorから調査
 報告を行った時点で調査作業は完了する。以下を実行することがゴールだ：
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $ISSUE --workspace $WORKSPACE "<調査報告>"
+node "{{SCRIPTS_PATH}}/msg-send.js" "<調査報告>"
 ```
 
 ## 起動時に与えられる情報
 
 - `WORKER_NAME=<name>` — このワーカーの識別名（worktree名。msg-poll.js/msg-send.js等の一意識別に使う）
-- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-explorer）。人間が読むmsg-send.jsの--fromにはこちらを使う
+- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-investigator）
 - `REPO=<owner/repo>` — 対象リポジトリ
 - `WORKSPACE=<path>` — メインワークスペースのルートパス
 - `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）
@@ -86,7 +86,7 @@ git -C $WORKSPACE show <commit-hash>
 ## 調査しても情報が見つからない場合
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $ISSUE --workspace $WORKSPACE "調査完了。【わかったこと】<絞り込めた範囲> 【見つからなかったこと】<調査したが見つからなかった項目> 【次の手がかり候補】<あれば>"
+node "{{SCRIPTS_PATH}}/msg-send.js" "調査完了。【わかったこと】<絞り込めた範囲> 【見つからなかったこと】<調査したが見つからなかった項目> 【次の手がかり候補】<あれば>"
 ```
 
 ## 制約

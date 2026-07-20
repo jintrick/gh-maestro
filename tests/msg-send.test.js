@@ -236,22 +236,28 @@ test('orchestrator 宛で --issue も env ISSUE も無ければ code 1', () => {
 
 // ── from フィールド ─────────────────────────────────────────────────────────
 
-test('from は GH_MAESTRO_WORKER env が使われる', () => {
+test('ワーカーコンテキスト: 本文だけで from=ワーカー名 / to=orchestrator / issueはワーカー名から導出', () => {
   withTempDir(workspace => {
     let capturedBody = null;
+    let capturedIssue = null;
 
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgSend._setGhIssueComment((issue, body) => {
+      capturedIssue = issue;
       capturedBody = body;
       return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
     });
 
+    // ゼロノブ: 本文だけ渡す。identity/宛先/Issueは環境から確定される。
     const r = msgSend.main(
-      ['worker-1', 'hello', '--issue', '1', '--workspace', workspace],
-      { GH_MAESTRO_WORKER: 'custom-worker', ISSUE: '1' }
+      ['hello', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-1-fix' }
     );
     assert.equal(r.code, 0);
-    assert.ok(capturedBody.includes('"from":"custom-worker"'));
+    assert.ok(capturedBody.includes('"from":"issue-1-fix"'));
+    assert.ok(capturedBody.includes('"to":"orchestrator"'));
+    assert.equal(String(capturedIssue), '1');
+    assert.ok(capturedBody.includes('> hello'));
   });
 });
 
@@ -290,7 +296,7 @@ test('--from フラグで from が設定される', () => {
   });
 });
 
-test('--from フラグが GH_MAESTRO_WORKER env より優先される', () => {
+test('ワーカーコンテキスト: --from を渡しても無視され from はワーカー識別に固定される（成りすまし防止）', () => {
   withTempDir(workspace => {
     let capturedBody = null;
 
@@ -301,11 +307,25 @@ test('--from フラグが GH_MAESTRO_WORKER env より優先される', () => {
     });
 
     const r = msgSend.main(
-      ['worker-1', 'hello', '--from', 'explicit-worker', '--issue', '1', '--workspace', workspace],
-      { GH_MAESTRO_WORKER: 'env-worker' }
+      ['hello', '--from', 'orchestrator', '--issue', '1', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-1-worker' }
     );
     assert.equal(r.code, 0);
-    assert.ok(capturedBody.includes('"from":"explicit-worker"'));
+    // --from orchestrator を渡しても、ワーカーは orchestrator に化けられない
+    assert.ok(capturedBody.includes('"from":"issue-1-worker"'));
+    assert.ok(!capturedBody.includes('"from":"orchestrator"'));
+  });
+});
+
+test('ワーカーコンテキスト: --skill（orchestrator専用）はエラーで拒否される', () => {
+  withTempDir(workspace => {
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    const r = msgSend.main(
+      ['報告本文', '--skill', 'gh-maestro-investigator', '--issue', '1', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-1-investigate' }
+    );
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.join('\n').includes('--skill は orchestrator 専用'));
   });
 });
 

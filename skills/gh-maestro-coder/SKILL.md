@@ -12,7 +12,7 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
 ## 起動時に与えられる情報
 
 - `WORKER_NAME=<name>` — このワーカーの識別名（worktree名。msg-poll.js/msg-send.js等の一意識別に使う）
-- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-explorer）。人間が読むmsg-send.jsの--fromにはこちらを使う
+- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-investigator）
 - `REPO=<owner/repo>` — 対象リポジトリ
 - `WORKSPACE=<path>` — メインワークスペースのルートパス
 - `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）
@@ -32,7 +32,7 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
 
 ```sh
 gh issue edit $ISSUE --add-label "human-escalation"
-node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --from $WORKER_ROLE --issue $ISSUE --workspace $WORKSPACE "Issue #$ISSUE の実装に失敗しました。human-escalation ラベルを付与しました。"
+node "{{SCRIPTS_PATH}}/msg-send.js" "Issue #$ISSUE の実装に失敗しました。human-escalation ラベルを付与しました。"
 ```
 
 ## 実装時の注意

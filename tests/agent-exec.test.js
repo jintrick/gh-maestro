@@ -63,6 +63,31 @@ test('buildLoginShellExecArgs: win32 で $ を含む引数を変数展開せず�
   assert.ok(!decoded.includes('"$'), 'double-quoted $ が残っていない');
 });
 
+test('buildLoginShellExecArgs: win32 で env をコマンド冒頭に $env: で注入する', () => {
+  const args = buildLoginShellExecArgs(['claude-ds-pro', '--print'], 'win32', null,
+    { GH_MAESTRO_WORKER: 'issue-247-x', GH_MAESTRO_WORKSPACE: 'C:\\Users\\J\\gijiai' });
+  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
+  assert.ok(decoded.startsWith("$env:GH_MAESTRO_WORKER='issue-247-x'; "));
+  // バックスラッシュはシングルクォート内でリテラル保持される
+  assert.ok(decoded.includes("$env:GH_MAESTRO_WORKSPACE='C:\\Users\\J\\gijiai'; "));
+  // env の後に本来の & 呼び出しが続く
+  assert.ok(decoded.includes("& 'claude-ds-pro' '--print'"));
+});
+
+test('buildLoginShellExecArgs: win32 で env が空なら従来通りプリフィックス無し', () => {
+  const args = buildLoginShellExecArgs(['claude', '--print'], 'win32', null, {});
+  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
+  assert.ok(decoded.startsWith("& 'claude'"));
+});
+
+test('buildLoginShellExecArgs: Unix で env を export で注入する', () => {
+  const args = buildLoginShellExecArgs(['agy', '--print'], 'linux', null, { GH_MAESTRO_WORKER: 'issue-9-x' });
+  assert.equal(args[0], 'bash');
+  assert.equal(args[1], '-lc');
+  assert.ok(args[2].startsWith("export GH_MAESTRO_WORKER='issue-9-x'; "));
+  assert.ok(args[2].includes('exec "$0" "$@"'));
+});
+
 test('buildLoginShellExecArgs: Unix は bash -lc exec を返す', () => {
   const args = buildLoginShellExecArgs(['claude', '--dangerously-skip-permissions', '-f', '/tmp/p.md'], 'linux');
 

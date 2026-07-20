@@ -431,6 +431,9 @@ try {
     afterLaunchText: agentConfig.promptDelivery === 'send-text-after-launch' ? shortPrompt : null,
     sendTextDelayMs: agentConfig.sendTextDelayMs ?? 2000,
     enterTerminator: agentConfig.enterSequence ?? '\r',
+    // ワーカー識別を「環境の事実」として渡す。msg-send.js はこれを見て自分がワーカーだと判定し、
+    // 送信元を自動確定して orchestrator 専用の宛先指定機構（--skill）を拒否する（成りすまし・誤配送の防止）。
+    env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },
     onExit: executionId ? {
       command: process.execPath,
       args: [resolve(__dirname, 'record-execution-exit.js'), workspace, executionId],

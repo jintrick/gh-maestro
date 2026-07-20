@@ -28,15 +28,15 @@ const { spawnSync } = require('./child-process');
  * @returns {string[]} wezterm split-pane に渡す argv（ログインシェル経由）
  * @throws {Error} agentCmdArgs が空の場合
  */
-function buildLoginShellExecArgs(agentCmdArgs, platform = process.platform, onExit = null) {
+function buildLoginShellExecArgs(agentCmdArgs, platform = process.platform, onExit = null, env = {}) {
   if (!Array.isArray(agentCmdArgs) || agentCmdArgs.length === 0) {
     throw new Error('agentCmdArgs must be a non-empty array');
   }
 
   if (platform === 'win32') {
-    return buildPwshExecArgs(agentCmdArgs, onExit);
+    return buildPwshExecArgs(agentCmdArgs, onExit, env);
   }
-  return buildBashLoginExecArgs(agentCmdArgs, onExit);
+  return buildBashLoginExecArgs(agentCmdArgs, onExit, env);
 }
 
 /**
@@ -52,9 +52,14 @@ function buildLoginShellExecArgs(agentCmdArgs, platform = process.platform, onEx
  * 空白・改行を含む引数も安全。bash が exec で自分を置き換えるため、エージェント終了後
  * 余計なプロセスは残らない。
  */
-function buildBashLoginExecArgs(agentCmdArgs, onExit = null) {
-  if (!onExit) return ['bash', '-lc', 'exec "$0" "$@"', ...agentCmdArgs];
-  return ['bash', '-lc', `hook=$0; script=$1; workspace=$2; execution=$3; shift ${onExit.args.length}; "$@"; code=$?; "$hook" "$script" "$workspace" "$execution" "$code"; exit "$code"`, onExit.command, ...onExit.args, ...agentCmdArgs];
+function buildBashLoginExecArgs(agentCmdArgs, onExit = null, env = {}) {
+  // 環境変数を export でシェルスクリプト冒頭に注入する（キーは固定の内部定数、値はシングル
+  // クォートでリテラル化）。ワーカー識別（GH_MAESTRO_WORKER 等）を「環境の事実」として渡すため。
+  const envPrefix = Object.entries(env)
+    .map(([k, v]) => `export ${k}='${String(v).replace(/'/g, "'\\''")}'; `)
+    .join('');
+  if (!onExit) return ['bash', '-lc', `${envPrefix}exec "$0" "$@"`, ...agentCmdArgs];
+  return ['bash', '-lc', `${envPrefix}hook=$0; script=$1; workspace=$2; execution=$3; shift ${onExit.args.length}; "$@"; code=$?; "$hook" "$script" "$workspace" "$execution" "$code"; exit "$code"`, onExit.command, ...onExit.args, ...agentCmdArgs];
 }
 
 /**
@@ -71,7 +76,7 @@ function buildBashLoginExecArgs(agentCmdArgs, onExit = null) {
  *   - &（call operator）で関数/実行ファイルを呼び出す
  *   - -NoProfile を指定しないことで $PROFILE がロードされ、pwsh関数も解決可能
  */
-function buildPwshExecArgs(agentCmdArgs, onExit = null) {
+function buildPwshExecArgs(agentCmdArgs, onExit = null, env = {}) {
   // 各引数を PowerShell のシングルクォートリテラルとしてエスケープ
   //   ' → '' （PowerShell の規則）
   //   全体を '...' で囲む（内部での 変数展開 $ / コマンド置換 / " はすべて無効化される）
@@ -80,12 +85,18 @@ function buildPwshExecArgs(agentCmdArgs, onExit = null) {
     return `'${escaped}'`;
   }).join(' ');
 
+  // 環境変数を $env:KEY='VALUE' でコマンド冒頭に注入する（キーは固定の内部定数、値はシングル
+  // クォートでリテラル化）。ワーカー識別（GH_MAESTRO_WORKER 等）を「環境の事実」として渡すため。
+  const envPrefix = Object.entries(env)
+    .map(([k, v]) => `$env:${k}='${String(v).replace(/'/g, "''")}'; `)
+    .join('');
+
   // & <command> <args...>
   // PowerShell の call operator & は関数・コマンドレット・実行ファイルのどれでも実行できる
   const exitHook = onExit
     ? `; $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }; & '${onExit.command.replace(/'/g, "''")}' ${onExit.args.map(arg => `'${arg.replace(/'/g, "''")}'`).join(' ')} $exitCode; exit $exitCode`
     : '';
-  const command = `& ${escapedArgs}${exitHook}`;
+  const command = `${envPrefix}& ${escapedArgs}${exitHook}`;
 
   // UTF-16LE base64 にエンコード（PowerShell -EncodedCommand の要求形式）
   const encoded = Buffer.from(command, 'utf16le').toString('base64');

@@ -321,6 +321,9 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
       afterLaunchText,
       sendTextDelayMs: agentConfig.sendTextDelayMs ?? 2000,
       enterTerminator: agentConfig.enterSequence ?? '\r',
+      // resume 時もワーカー識別を環境の事実として再注入する（初回起動と同じ。
+      // これが無いと resume 後のワーカーが自分を識別できず msg-send.js を誤用しうる）。
+      env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },
     }));
   } catch (e) {
     return { success: false, method: 'resume-failed', error: `ペイン起動失敗: ${e.message}` };

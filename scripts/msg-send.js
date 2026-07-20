@@ -25,20 +25,24 @@ const { resolveWorkerName } = require('./shared/workers-registry');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
-Usage: node msg-send.js <recipient> [--from <name>] [--issue <N>] [--workspace <path>] ["<本文>"]
-       node msg-send.js --issue <N> --skill <role> [--workspace <path>] ["<本文>"]
+Usage (ワーカーから orchestrator へ報告): node msg-send.js "<本文>"
+       （GH_MAESTRO_WORKER 環境変数から送信元・宛先・Issueを自動確定する。--from/--skill/recipient は不要）
+Usage (orchestrator からワーカーへ送信): node msg-send.js --issue <N> --skill <role> [--workspace <path>] ["<本文>"]
        node msg-send.js <recipient> --body-file <path> [--from <name>] [--issue <N>] [--workspace <path>] [--raw] [--execution-id <id>]
 
 Arguments:
   <recipient>           送信先（worker 名、または "orchestrator"）。--skill 使用時は指定しない。
+                        ワーカーコンテキスト（GH_MAESTRO_WORKER 有り）では常に orchestrator 宛に固定され、
+                        位置引数はすべて本文とみなす（recipient を書く必要はない）。
   <本文>                メッセージ本文（--body-file と併用時は無視されます）
 
 Options:
-  --skill <role>        送信先ワーカーを workerName ではなく〈--issue + 役割（gh-maestro-coder等）〉で
-                        指定する。workers.json から一意に解決する。位置引数 recipient とは併用不可。
+  --skill <role>        （orchestrator 専用）送信先ワーカーを〈--issue + 役割（gh-maestro-coder等）〉で指定する。
+                        workers.json から一意に解決する。ワーカーコンテキストでは使用不可（エラー）。
                         該当が複数ある場合は候補を表示してエラー終了するので --worker 名（位置引数）で明示する。
-  --from <name>         送信元名（省略時は GH_MAESTRO_WORKER env → 'orchestrator'）
-  --issue <N>           投稿先の Issue 番号（省略時は workers.json または env ISSUE から解決）。--skill 使用時は必須。
+  --from <name>         送信元名。ワーカーコンテキストでは無視され、常に GH_MAESTRO_WORKER の値になる。
+  --issue <N>           投稿先の Issue 番号。--skill 使用時は必須。ワーカーコンテキストでは
+                        ワーカー名 issue-<N>-<desc> から自動導出されるため通常は不要。
   --workspace <path>    ワークスペースパス（省略時は環境変数またはCWDから解決）
   --body-file <path>    メッセージ本文を記載したファイルのパス（UTF-8）。改行・引用符等の特殊文字を含む本文は
                         シェルクォート問題を避けるためこちらを使用してください。指定された場合、位置引数の本文より優先されます。
@@ -48,8 +52,9 @@ Options:
 Output (stdout):
   投稿されたコメントの URL を1行出力
 
-workspace 解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索
-from 解決順: --from 引数 > GH_MAESTRO_WORKER env > 'orchestrator'`;
+コンテキスト判定: GH_MAESTRO_WORKER 環境変数の有無でワーカー/orchestrator を判別する
+  （spawn-worker.js / inbox-supervisor.js が起動時にワーカーへ注入する）。
+workspace 解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索`;
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -110,13 +115,38 @@ function main(argsOverride, envOverride) {
     return { code: 1, lines: out, errLines: err };
   }
 
-  // ── 送信先の解決: --skill 指定時は〈--issue + 役割〉から workerName を逆引きする ──
-  // --skill モードでは位置引数に recipient を置かず、位置引数はすべて本文とみなす
-  // （recipient と本文の区別を --skill の有無で一意にする）。
+  // ── コンテキスト判定 ────────────────────────────────────────────────────
+  // GH_MAESTRO_WORKER が環境にあれば「ワーカーとして実行中」。ワーカーは常に orchestrator へ
+  // 自分の名を from として報告するだけであり、orchestrator 専用の宛先解決機構（--skill）は
+  // 使えない。この判定で成りすまし（from が silent に orchestrator へ化ける）と誤配送
+  // （自分自身や他ワーカーを宛先にする）を構造的に不可能にする。
+  const workerIdentity = env.GH_MAESTRO_WORKER || null;
+  const isWorker = !!workerIdentity;
+
+  // ── 送信先の解決 ────────────────────────────────────────────────────────
   const skillFlag = values['--skill'];
   let recipient;
   let bodyPositionals;
-  if (skillFlag) {
+
+  if (isWorker) {
+    if (skillFlag) {
+      writeErr('msg-send: --skill は orchestrator 専用です。ワーカーからの報告は宛先を指定せず本文だけで送ってください（例: node msg-send.js "<内容>"）。');
+      writeErr(USAGE);
+      return { code: 1, lines: out, errLines: err };
+    }
+    if (raw) {
+      // --raw（マーカー無しでIssueへ直接投稿。architectの設計コメント等）は宛先をマーカーに
+      // 使わないため、位置引数の扱いは従来通り（先頭を宛先プレースホルダ、残りを本文）に保つ。
+      recipient = rest[0] || workerIdentity;
+      bodyPositionals = rest.length > 0 ? rest.slice(1) : rest;
+    } else {
+      // マーカー付き報告は常に orchestrator 宛。旧テンプレの先頭 'orchestrator' は冗長なので剥がす。
+      recipient = 'orchestrator';
+      bodyPositionals = (rest[0] === 'orchestrator') ? rest.slice(1) : rest;
+    }
+  } else if (skillFlag) {
+    // （orchestrator が）--skill 指定時は〈--issue + 役割〉から workerName を逆引きする。
+    // --skill モードでは位置引数に recipient を置かず、位置引数はすべて本文とみなす。
     if (rest.length > 0 && values['--body-file']) {
       // --skill + --body-file の場合、位置引数があってはならない（本文はファイル）
       writeErr('msg-send: --skill と --body-file を併用する場合、本文を位置引数で渡さないでください。');
@@ -164,14 +194,22 @@ function main(argsOverride, envOverride) {
   }
 
   // ── from の解決 ────────────────────────────────────────────────────────
-
-  const from = values['--from'] || env.GH_MAESTRO_WORKER || 'orchestrator';
+  // ワーカーコンテキストでは常に自分の識別名（--from の誤指定・省略に関わらず）。
+  // これにより「--from 省略時に silent に orchestrator へ化ける」成りすましを構造的に排除する。
+  const from = isWorker ? workerIdentity : (values['--from'] || 'orchestrator');
 
   // ── issue の解決 ────────────────────────────────────────────────────────
-  // 優先順: --issue > env ISSUE > workers.json（worker 宛のみ）
-  // orchestrator 宛で --issue も env ISSUE も無ければ exit 1（フェイルクローズ）
+  // 優先順: --issue > env ISSUE > ワーカー名から導出 > workers.json（worker 宛のみ）
+  // orchestrator 宛で解決できなければ exit 1（フェイルクローズ）
 
   let issue = values['--issue'] || env.ISSUE || null;
+
+  // ワーカーコンテキストでは、ワーカー名 issue-<N>-<desc> から Issue番号を導出できる。
+  // これによりワーカーの報告は本文だけ（node msg-send.js "<内容>"）で完結する。
+  if (!issue && isWorker) {
+    const m = /^issue-(\d+)-/.exec(workerIdentity);
+    if (m) issue = m[1];
+  }
 
   if (!issue && recipient !== 'orchestrator') {
     // worker 宛: workers.json から解決を試みる
