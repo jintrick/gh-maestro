@@ -42,6 +42,19 @@ PR_MERGED を検出するまで永続的にポーリングする。
 ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
 消滅時はPID registryを解除して自動exitする。`;
 
+/**
+ * GitHub のコメント/レビューIDは正の整数。gh のエラーレスポンス（404 JSON 等）や
+ * 切れた出力の断片が state に記録されたり REVIEW_COMMENT として中継されたりするのを防ぐため、
+ * 記録・中継の前に必ずこれで検証する。
+ * @param {string} id
+ * @returns {boolean}
+ */
+function isValidCommentId(id) {
+  return /^[0-9]+$/.test(id);
+}
+
+module.exports = { isValidCommentId };
+
 if (require.main === module) {
   const argv = process.argv.slice(2);
   const { values, rest, exitFlagMiss } = parseFlags(argv, ['--session-pid']);
@@ -103,6 +116,20 @@ if (require.main === module) {
     fs.appendFileSync(stateFile, id + '\n');
   }
 
+  // gh 呼び出しは終了コードを必ず確認する。GitHub障害中は gh がエラーレスポンス
+  // （404 JSON・切れた出力等）を stdout に出して非ゼロ終了しうる。status を見ずに
+  // stdout を消費すると、そのゴミが state に記録され REVIEW_COMMENT 断片として中継され続ける。
+  // 失敗時は null を返し（呼び出し側はそのサイクル/セクションをスキップ）、エラーは stderr へ出す
+  // （stdout はイベントストリームなので混ぜない）。
+  function ghCapture(args) {
+    const r = spawnSync('gh', args, { encoding: 'utf8' });
+    if (r.status !== 0) {
+      process.stderr.write(`poll-reviews: gh ${args.join(' ')} 失敗 (status ${r.status}): ${(r.stderr || '').toString().trim()}\n`);
+      return null;
+    }
+    return r.stdout;
+  }
+
   const inlineJq = `.[] | [(.id | tostring), .path, ((.original_line // "?") | tostring), .user.login, (.body | gsub("\\n"; " "))] | join("|")`;
   const commentsJq = `.comments[] | [(.id | tostring), .author.login, (.body | gsub("\\n"; " "))] | join("|")`;
   const reviewsJq = `.[] | [(.id | tostring), .user.login, .state, (.body | gsub("\\n"; " "))] | join("|")`;
@@ -117,10 +144,14 @@ if (require.main === module) {
         process.exit(0);
       }
 
-      const prJson = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
-        '--json', 'state,headRefOid', '-q', '[.state, .headRefOid] | join("|")'],
-        { encoding: 'utf8' }).stdout.trim();
-      const [state, headSha] = prJson.split('|');
+      const prJson = ghCapture(['pr', 'view', pr, '--repo', repo,
+        '--json', 'state,headRefOid', '-q', '[.state, .headRefOid] | join("|")']);
+      // PR状態が取れないサイクルは以降を丸ごとスキップ（誤った差分検知・中継を防ぐ）。
+      if (prJson === null) {
+        await new Promise(r => setTimeout(r, intervalSec * 1000));
+        continue;
+      }
+      const [state, headSha] = prJson.trim().split('|');
 
       if (state === 'MERGED') {
         process.stdout.write(`PR_MERGED:${pr}\n`);
@@ -138,34 +169,37 @@ if (require.main === module) {
 
       const known = knownIds();
 
-      const inlineOut = spawnSync('gh', ['api', `repos/${repo}/pulls/${pr}/comments`,
-        '--paginate', '-q', inlineJq], { encoding: 'utf8' }).stdout;
-      for (const line of inlineOut.split('\n').filter(Boolean)) {
-        const sep = line.indexOf('|');
-        const id = line.slice(0, sep);
-        if (!known.has(id)) {
+      const inlineOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/comments`,
+        '--paginate', '-q', inlineJq]);
+      if (inlineOut !== null) {
+        for (const line of inlineOut.split('\n').filter(Boolean)) {
+          const sep = line.indexOf('|');
+          const id = line.slice(0, sep);
+          if (!isValidCommentId(id) || known.has(id)) continue;
           recordId(id);
           process.stdout.write(`REVIEW_COMMENT:${line.slice(sep + 1)}\n`);
         }
       }
 
-      const commentsOut = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
-        '--json', 'comments', '-q', commentsJq], { encoding: 'utf8' }).stdout;
-      for (const line of commentsOut.split('\n').filter(Boolean)) {
-        const sep = line.indexOf('|');
-        const id = line.slice(0, sep);
-        if (!known.has(id)) {
+      const commentsOut = ghCapture(['pr', 'view', pr, '--repo', repo,
+        '--json', 'comments', '-q', commentsJq]);
+      if (commentsOut !== null) {
+        for (const line of commentsOut.split('\n').filter(Boolean)) {
+          const sep = line.indexOf('|');
+          const id = line.slice(0, sep);
+          if (!isValidCommentId(id) || known.has(id)) continue;
           recordId(id);
           process.stdout.write(`PR_COMMENT:${line.slice(sep + 1)}\n`);
         }
       }
 
-      const reviewsOut = spawnSync('gh', ['api', `repos/${repo}/pulls/${pr}/reviews`,
-        '--paginate', '-q', reviewsJq], { encoding: 'utf8' }).stdout;
-      for (const line of reviewsOut.split('\n').filter(Boolean)) {
-        const sep = line.indexOf('|');
-        const id = line.slice(0, sep);
-        if (!known.has(id)) {
+      const reviewsOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/reviews`,
+        '--paginate', '-q', reviewsJq]);
+      if (reviewsOut !== null) {
+        for (const line of reviewsOut.split('\n').filter(Boolean)) {
+          const sep = line.indexOf('|');
+          const id = line.slice(0, sep);
+          if (!isValidCommentId(id) || known.has(id)) continue;
           recordId(id);
           const rest = line.slice(sep + 1); // user|state|body
           const [user, state, ...bodyParts] = rest.split('|');
