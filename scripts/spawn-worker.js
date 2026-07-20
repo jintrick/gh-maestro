@@ -434,10 +434,13 @@ try {
     // ワーカー識別を「環境の事実」として渡す。msg-send.js はこれを見て自分がワーカーだと判定し、
     // 送信元を自動確定して orchestrator 専用の宛先指定機構（--skill）を拒否する（成りすまし・誤配送の防止）。
     env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },
-    onExit: executionId ? {
+    // 全ワーカーに終了フックを付ける。非ゼロ終了（起動失敗・クラッシュ）を orchestrator へ通知し、
+    // サイレント失敗（orchestratorが人間に言われるまで気づけない）を潰す。executionId が無い
+    // ワーカーは空文字を渡す（execution記録はスキップされ、異常終了通知だけが働く）。
+    onExit: {
       command: process.execPath,
-      args: [resolve(__dirname, 'record-execution-exit.js'), workspace, executionId],
-    } : null,
+      args: [resolve(__dirname, 'worker-exit-hook.js'), workspace, executionId ?? ''],
+    },
   }));
 } catch (e) {
   if (executionId) {

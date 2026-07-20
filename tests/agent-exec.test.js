@@ -105,15 +105,15 @@ test('buildLoginShellExecArgs: Unix で空白を含む引数を argv として�
   assert.equal(args[6], 'multi\nline');
 });
 
-test('buildLoginShellExecArgs: 終了フックはエージェント終了後に実行IDと終了コードを渡す', () => {
-  const hook = { command: 'node', args: ['/tmp/record-execution-exit.js', '/tmp/workspace', 'exec-42'] };
+test('buildLoginShellExecArgs: 終了フックはエージェント終了後に引数と終了コードを渡す', () => {
+  const hook = { command: 'node', args: ['/tmp/worker-exit-hook.js', '/tmp/workspace', 'exec-42'] };
   const winArgs = buildLoginShellExecArgs(['codex-pro', 'start'], 'win32', hook);
   const decoded = Buffer.from(winArgs[3], 'base64').toString('utf16le');
-  assert.ok(decoded.includes("& 'node' '/tmp/record-execution-exit.js' '/tmp/workspace' 'exec-42' $exitCode"));
+  assert.ok(decoded.includes("& 'node' '/tmp/worker-exit-hook.js' '/tmp/workspace' 'exec-42' $exitCode"));
 
   const unixArgs = buildLoginShellExecArgs(['codex-pro', 'start'], 'linux', hook);
   assert.ok(unixArgs[2].includes('shift 3'));
-  assert.deepEqual(unixArgs.slice(3, 7), ['node', '/tmp/record-execution-exit.js', '/tmp/workspace', 'exec-42']);
+  assert.deepEqual(unixArgs.slice(3, 7), ['node', '/tmp/worker-exit-hook.js', '/tmp/workspace', 'exec-42']);
   assert.deepEqual(unixArgs.slice(7), ['codex-pro', 'start']);
 });
 
