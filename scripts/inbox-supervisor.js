@@ -18,6 +18,10 @@
 //   - 配送済みID管理による重複配送防止
 //   - 配送失敗時の指数バックオフリトライ（最大5回）
 //   - PID registry + dead-man's switch によるライフサイクル管理
+//   - resume直後の生存確認（wezterm split-paneの成功=プロセス生存ではないため、TUI初期化の
+//     猶予後にisPaneAliveで再確認する。消えていればDELIVEREDにせずresume-failedとして扱う）
+//   - リトライ断念時のorchestrator通知（stderrへのログだけでは誰も気づけないため、
+//     msg-send.js経由でorchestratorのinboxに直接投稿する）
 //
 // 既存ポーリングとの関係:
 //   - ワーカーの自己ポーリング（msg-poll.js Monitor経由）を置き換える
@@ -106,6 +110,22 @@ let _ghApiComments = (repo, issue, since, opts = {}) => {
 
 let _weztermListPanes = (opts = {}) => {
   return weztermCli('cli', 'list', '--format', 'json');
+};
+
+// resume直後の生存確認用の待機（テストで注入可能。実装は pane-launch.js の afterLaunchText
+// 待機と同じ Atomics.wait による同期スリープ）。
+let _sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+
+// 配送を断念した際に orchestrator へ通知する（テストで注入可能）。inbox-supervisor.js は
+// ワーカーではないため GH_MAESTRO_WORKER は設定せず、--from/--issue を明示して投稿する。
+let _notifyOrchestrator = ({ workspace, issue, body }) => {
+  return spawnSync(process.execPath, [
+    path.join(__dirname, 'msg-send.js'),
+    'orchestrator', body,
+    '--from', 'inbox-supervisor',
+    '--issue', issue,
+    '--workspace', workspace,
+  ], { encoding: 'utf8' });
 };
 
 // ── 状態管理 ──────────────────────────────────────────────────────────────
@@ -332,6 +352,18 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
     }));
   } catch (e) {
     return { success: false, method: 'resume-failed', error: `ペイン起動失敗: ${e.message}` };
+  }
+
+  // wezterm split-pane が paneId を返したことは、起動先プロセスが生存し続けていることを
+  // 保証しない（実障害: resumeが成功と誤認識され、起動直後にpane/ホスト環境ごと消滅した
+  // ワーカーが誰にも気づかれず放置された）。TUI初期化と同じ猶予を置いてから生存確認する。
+  _sleep(agentConfig.sendTextDelayMs ?? 2000);
+  if (!isPaneAlive(newPaneId)) {
+    return {
+      success: false,
+      method: 'resume-failed',
+      error: `resume直後にpane ${newPaneId} が消失しました（起動直後のクラッシュ、またはホスト環境自体の不安定化の可能性）`,
+    };
   }
 
   if (!updateWorkerPaneId(workspace, workerName, newPaneId)) {
@@ -596,6 +628,17 @@ function main(argsOverride, opts = {}) {
 
           if (deliveryResult.method !== 'pending' && pending.retries + 1 >= MAX_RETRIES) {
             writeErr(`inbox-supervisor: ${workerName} comment ${commentId} — max retries (${MAX_RETRIES}) exceeded, giving up`);
+            // 断念を stderr に書くだけでは誰も読まない（detachedプロセスのstderrは通常誰も
+            // 監視していない）。orchestrator自身のinboxに投稿し、確実に気づけるようにする。
+            const giveUpBody = `⚠️ ワーカー "${workerName}" へのメッセージ配送に${MAX_RETRIES}回失敗し断念しました（comment ${commentId}）。最後のエラー: ${deliveryResult.error || 'unknown'}。ワーカーが応答不能になっている可能性があります。状態を確認し、必要なら再起動を検討してください。`;
+            try {
+              const notifyResult = _notifyOrchestrator({ workspace, issue, body: giveUpBody });
+              if (notifyResult.status !== 0) {
+                writeErr(`inbox-supervisor: 配送断念のorchestrator通知に失敗: ${(notifyResult.stderr || '').trim()}`);
+              }
+            } catch (e) {
+              writeErr(`inbox-supervisor: 配送断念のorchestrator通知に失敗: ${e.message}`);
+            }
           }
         }
       }
@@ -827,6 +870,8 @@ module.exports = {
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setWeztermListPanes: (fn) => { _weztermListPanes = fn; },
+  _setSleep: (fn) => { _sleep = fn; },
+  _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
   main,
   readCursor,
   writeCursor,
