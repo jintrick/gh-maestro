@@ -21,6 +21,10 @@ let workspace;
 beforeEach(() => {
   workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ensure-supervisor-'));
   mod._setSpawn(() => fakeChild());
+  // findSessionRootPid は実装がWMI/execSyncを呼ぶため、テストでは常にモックする
+  // （.claude/rules/test-process-spawn-safety.md 準拠。実プロセスを起動しない）。
+  mod._setFindSessionRootPid(() => 12345);
+  mod._setFindRunningInstance(() => null);
 });
 
 test('ensureInboxSupervisorRunning: detached・windowsHide付きでinbox-supervisor.jsをspawnする', () => {
@@ -36,9 +40,65 @@ test('ensureInboxSupervisorRunning: detached・windowsHide付きでinbox-supervi
   assert.deepEqual(captured.args, [
     path.join('/abs/scripts', 'inbox-supervisor.js'),
     '--workspace', workspace,
+    '--session-pid', '12345',
   ]);
   assert.equal(captured.opts.detached, true);
   assert.equal(captured.opts.windowsHide, true);
+});
+
+test('ensureInboxSupervisorRunning: 呼び出し元プロセスがまだ生存しているうちにセッションPIDを解決し、子へ明示的に渡す', () => {
+  // 実障害の再発防止テスト: 子プロセス自身に解決を委ねると、直近の親（この
+  // 呼び出し元）が既に終了した後では親チェーンを辿れず、使い捨てCLIを
+  // セッション本体と誤認して数十秒で自滅していた。呼び出し元の生存中に
+  // 解決した値がそのまま --session-pid として子に渡ることを確認する。
+  mod._setFindSessionRootPid(() => 99999);
+  let captured = null;
+  mod._setSpawn((cmd, args, opts) => {
+    captured = { cmd, args, opts };
+    return fakeChild();
+  });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.ok(captured.args.includes('--session-pid'));
+  assert.equal(captured.args[captured.args.indexOf('--session-pid') + 1], '99999');
+});
+
+test('ensureInboxSupervisorRunning: セッションPID解決が失敗しても--session-pidなしでspawnする（フォールバック）', () => {
+  mod._setFindSessionRootPid(() => { throw new Error('WMI failure'); });
+  let captured = null;
+  mod._setSpawn((cmd, args, opts) => {
+    captured = { cmd, args, opts };
+    return fakeChild();
+  });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.ok(captured, 'spawnは実行される');
+  assert.equal(captured.args.includes('--session-pid'), false);
+});
+
+test('ensureInboxSupervisorRunning: 既にSupervisorが稼働中ならspawnもセッションPID解決も行わない', () => {
+  mod._setFindRunningInstance(() => ({ pid: 777, script: 'inbox-supervisor.js' }));
+  let spawnCalled = false;
+  let resolveCalled = false;
+  mod._setSpawn(() => { spawnCalled = true; return fakeChild(); });
+  mod._setFindSessionRootPid(() => { resolveCalled = true; return 12345; });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.equal(spawnCalled, false);
+  assert.equal(resolveCalled, false);
+});
+
+test('ensureInboxSupervisorRunning: 稼働中判定が例外を投げてもfail-openでspawnを試みる', () => {
+  mod._setFindRunningInstance(() => { throw new Error('registry read failed'); });
+  let spawnCalled = false;
+  mod._setSpawn(() => { spawnCalled = true; return fakeChild(); });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.equal(spawnCalled, true);
 });
 
 test('ensureInboxSupervisorRunning: unrefを呼ぶ（呼び出し元プロセスをブロックしない）', () => {

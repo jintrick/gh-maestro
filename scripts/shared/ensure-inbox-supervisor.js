@@ -11,11 +11,21 @@
 // spawn-worker.js（ワーカー作成時）とmsg-send.js（ワーカー宛て送信時）の両方から
 // 呼ぶことで、エージェントの記憶に頼らず決定的に起動を保証する。
 //
-// inbox-supervisor.js自身がstartup時に多重起動防止のロックを持つため
-// （acquireStartupLock、scripts/process-lifecycle.js）、ここでは事前チェックをせず
-// 常にspawnを試みてよい。既に稼働中ならinbox-supervisor.js自身のロックが検知して
-// 即exitするため、二重起動にはならない。この関数はbest-effortのfire-and-forgetであり、
-// 起動の成否を待たず・呼び出し元をブロックしない。
+// セッションPIDはこの関数の呼び出し元（まだ生存が保証されている今の時点）で解決し、
+// 子（inbox-supervisor.js）へ --session-pid として明示的に渡す。
+// 実障害: 子に解決を委ねると、子自身のfindSessionRootPidは「自分の直近の親」から
+// 親チェーンを遡るが、その直近の親は本関数の呼び出し元（msg-send.js/spawn-worker.js。
+// fire-and-forgetで即終了する使い捨てCLI）であり、子の起動から間もなく消える。
+// 消えた後にさらに1階層上（本当のセッション本体）へ遡ろうとするとWMI照会が
+// 対象なしで失敗し、遡行はその場で静かに止まって「直近の使い捨てCLI」を
+// セッション本体と誤認する。結果、そのCLIが（設計通り）即座に消えたことを
+// 「オーケストレーターセッションが死んだ」と誤判定し、子が数十秒で自滅していた。
+// 呼び出し元がまだ生きている時点で解決すれば、この取りこぼしは起きない。
+//
+// 既に稼働中のSupervisorがいれば、spawnもセッションPID解決もスキップする
+// （二重起動はinbox-supervisor.js自身のロックでも防がれるが、事前チェックで
+// 無駄なspawnと毎回のセッションPID解決コストを避ける）。この関数はbest-effortの
+// fire-and-forgetであり、起動の成否を待たず・呼び出し元をブロックしない。
 //
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
@@ -23,8 +33,11 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('../child-process');
+const { findSessionRootPid, findRunningInstance } = require('../process-lifecycle');
 
 let _spawn = (cmd, args, opts) => spawn(cmd, args, opts);
+let _findSessionRootPid = findSessionRootPid;
+let _findRunningInstance = findRunningInstance;
 
 /**
  * inbox-supervisor.js が稼働していなければ、detachedプロセスとして自動起動を試みる。
@@ -36,15 +49,36 @@ let _spawn = (cmd, args, opts) => spawn(cmd, args, opts);
  */
 function ensureInboxSupervisorRunning({ workspace, scriptsPath }) {
   if (!workspace || !scriptsPath) return;
+
+  try {
+    if (_findRunningInstance(workspace, { script: 'inbox-supervisor.js', workerName: null })) {
+      return; // 既に稼働中 → spawn・セッションPID解決とも不要
+    }
+  } catch {
+    // 判定失敗時はfail-openで従来通りspawnを試みる（多重起動はinbox-supervisor.js自身のロックが防ぐ）
+  }
+
   let logFd;
   try {
     const ghDir = path.join(workspace, '.gh-maestro');
     fs.mkdirSync(ghDir, { recursive: true });
     logFd = fs.openSync(path.join(ghDir, 'inbox-supervisor-autostart.log'), 'a');
-    const child = _spawn(process.execPath, [
+
+    const args = [
       path.join(scriptsPath, 'inbox-supervisor.js'),
       '--workspace', workspace,
-    ], {
+    ];
+
+    try {
+      const sessionPid = _findSessionRootPid();
+      if (Number.isFinite(sessionPid) && sessionPid > 0) {
+        args.push('--session-pid', String(sessionPid));
+      }
+    } catch {
+      // 解決失敗時は従来通り子プロセス側の自動検出にフォールバックする
+    }
+
+    const child = _spawn(process.execPath, args, {
       detached: true,
       windowsHide: true,
       stdio: ['ignore', logFd, logFd],
@@ -63,4 +97,6 @@ function ensureInboxSupervisorRunning({ workspace, scriptsPath }) {
 module.exports = {
   ensureInboxSupervisorRunning,
   _setSpawn: (fn) => { _spawn = fn; },
+  _setFindSessionRootPid: (fn) => { _findSessionRootPid = fn; },
+  _setFindRunningInstance: (fn) => { _findRunningInstance = fn; },
 };
