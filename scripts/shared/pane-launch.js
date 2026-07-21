@@ -15,6 +15,7 @@ const { buildLoginShellExecArgs } = require('../agent-exec');
 // inbox-supervisor.js の _setWeztermListPanes / _setWeztermSendText と同型のパターン。
 
 let _weztermSplitPane = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
+let _weztermSpawnWindow = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
 let _weztermKillPane = (paneId) =>
   spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', paneId], { encoding: 'utf8' });
 let _weztermSendText = (paneId, text) =>
@@ -97,6 +98,43 @@ function launchAgentInPane({
 }
 
 /**
+ * argv を実行する新規WezTermウィンドウを作成する（ログインシェル経由）。
+ *
+ * launchAgentInPane と異なり、分割元ペイン（splitFromPaneId/orchPaneId/direction）という
+ * 概念を持たない — 独立したOSウィンドウとして起動するため、他ワーカーのペインレイアウトに
+ * 依存・干渉しない（`wezterm cli spawn --new-window`、docs/rag/wezterm/reference/spawn.md 参照）。
+ * 返る pane-id は split-pane 由来のものと同様に kill-pane で終了できる。
+ *
+ * @param {object} params
+ * @param {string[]} params.argv    - エージェントコマンド + 全引数
+ * @param {string} params.cwd       - ウィンドウの作業ディレクトリ
+ * @param {object} [params.env={}]  - 起動プロセスに注入する環境変数
+ * @param {object} [params.onExit=null] - agent-exec.js の buildLoginShellExecArgs に渡す終了フック
+ * @param {string|null} [params.captureLogPath=null] - 標準出力/標準エラーの複製保存先
+ * @returns {{ paneId: string }}
+ * @throws {Error} ウィンドウ作成に失敗した場合
+ */
+function launchAgentInWindow({ argv, cwd, env = {}, onExit = null, captureLogPath = null }) {
+  const loginShellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, env, captureLogPath);
+  const spawnArgs = ['cli', '--no-auto-start', 'spawn', '--new-window', '--cwd', cwd, '--', ...loginShellArgs];
+
+  const result = _weztermSpawnWindow(spawnArgs);
+  if (result.status !== 0) {
+    throw new Error(`WezTermウィンドウの起動に失敗しました: ${(result.stderr || '').toString().trim()}`);
+  }
+
+  const paneId = (result.stdout ?? '').toString().trim();
+  if (!paneId) {
+    throw new Error(
+      `wezterm cli spawn の pane-id を取得できませんでした（ウィンドウが作成された可能性があります）: ` +
+      `stdout=${JSON.stringify(result.stdout)} stderr=${(result.stderr || '').toString().trim()}`
+    );
+  }
+
+  return { paneId };
+}
+
+/**
  * ペインをbest-effortで終了する（ロールバック用）。失敗は無視する。
  *
  * @param {string} paneId
@@ -111,8 +149,10 @@ function killPaneQuiet(paneId) {
 
 module.exports = {
   launchAgentInPane,
+  launchAgentInWindow,
   killPaneQuiet,
   _setWeztermSplitPane: (fn) => { _weztermSplitPane = fn; },
+  _setWeztermSpawnWindow: (fn) => { _weztermSpawnWindow = fn; },
   _setWeztermKillPane: (fn) => { _weztermKillPane = fn; },
   _setWeztermSendText: (fn) => { _weztermSendText = fn; },
   _setSleep: (fn) => { _sleep = fn; },

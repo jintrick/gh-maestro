@@ -109,14 +109,18 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉。特殊文字を含む本文は `--body-file` で渡す（シェルクォート回避）
 - **msg-read.js** — コメントIDから本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE`
 - **remove-worker.js** — 個別ワーカーのペインをkillしてworktreeを削除する。対象は〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
-- **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）
+- **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する
 - **start-review-manager.js** — PRにReview Managerを起動する（「Review Managerの手動起動」参照）
 - **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「PR検出」参照）
 - **process-lifecycle.js** — PID registryを走査しstaleなプロセスを掃除する（各「復旧手順」参照）
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする
 - **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「Issue確定」参照）
-- **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` を削除する（「Issue確定」参照）
+- **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` を削除する（「Issue確定」参照）。成功時、あわせて対話型ワーカー**assistant**（`gh-maestro-assistant`スキル。issue/PRについての人間の質問に答える対話セッション）を新規WezTermウィンドウで自動起動する
+
+### assistant（対話型ワーカー）について
+
+`create-issue.js` は起票と同時に、`spawn-assistant.js` 経由でagy専用の対話型ワーカー「assistant」を自動起動する。**このワーカーはあなた（orchestrator）の管理対象外である。** `workers.json` に登録されず、あなたからは見えず、`msg-send.js`/`remove-worker.js`の対象にもならない。人間が直接そのウィンドウに向かって質問・雑務を依頼する専用の存在であり、あなたが起動・終了・監督を意識する必要は一切ない。終了も`finalize-issue.js`実行時に自動で行われる（`.gh-maestro/assistants.json`で管理。`workers.json`とは無関係）。あなたのセッション中に見慣れないWezTermウィンドウが開いても、それはassistantであり異常ではない。
 
 ## セッションのゴール
 
@@ -641,6 +645,19 @@ node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-cod
 ---
 上記の改善を実施しますか？不要なものは除いてください。
 ```
+
+上記の内容は、人間へのチャット提示と同時に、**同じ内容をIssue #<N>へのコメントとしても投稿する**（「Issue確定」節と同じ、`write-draft.js`で論理パスに書き出してから`gh`コマンドを直接呼ぶパターンを使う）：
+
+```sh
+node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/retro-<N>.md --stdin <<'EOF'
+<上記「提示フォーマット」の内容>
+EOF
+gh issue comment <N> --repo $REPO --body-file "$BODY_PATH"
+```
+
+（`gh issue edit`と同様、`gh issue comment`は`win-path.js`によるパス解決を行わないため、`write-draft.js`が出力した実体パスをそのまま渡す）
+
+反省会はオーケストレーターと人間のチャットだけで完結し、GitHub上に痕跡が残らない。issueコメント化することで、そのIssueに紐づくassistant（対話型ワーカー。管理対象外だがIssueは読める）が、人間から「反省会どうなった？」と聞かれた際に`gh issue view`経由で答えられるようになる。
 
 ### 反省会後のアクション
 

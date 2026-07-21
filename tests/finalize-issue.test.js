@@ -114,3 +114,46 @@ test('finalizeIssue: Issueクローズ失敗は closed:false で返る', () => {
     assert.equal(result.closed, false);
   });
 });
+
+test('finalizeIssue: 既定のkillAssistantFnはassistants.jsonにエントリが無ければskipped扱い（assistantKilled:null）', () => {
+  withTempWorkspace({ 'issue-5-coder': { paneId: '1', issue: 5 } }, (dir) => {
+    const result = finalizeIssue(
+      { workspace: dir, issue: 5 },
+      {
+        removeWorkerFn: () => ({ ok: true }),
+        closeIssueFn: () => ({ ok: true }),
+      }
+    );
+    assert.equal(result.assistantKilled, null);
+    assert.equal(result.closed, true);
+  });
+});
+
+test('finalizeIssue: killAssistantFnが注入されればそれが呼ばれ、結果がassistantKilledに反映される', () => {
+  withTempWorkspace({}, (dir) => {
+    let calledWith = null;
+    const result = finalizeIssue(
+      { workspace: dir, issue: 9 },
+      {
+        closeIssueFn: () => ({ ok: true }),
+        killAssistantFn: (ws, issue) => { calledWith = { ws, issue }; return { ok: true }; },
+      }
+    );
+    assert.deepEqual(calledWith, { ws: dir, issue: 9 });
+    assert.equal(result.assistantKilled, true);
+  });
+});
+
+test('finalizeIssue: assistant終了失敗はassistantKilled:falseだが、closedはissueクローズ結果に従う（best-effort）', () => {
+  withTempWorkspace({}, (dir) => {
+    const result = finalizeIssue(
+      { workspace: dir, issue: 9 },
+      {
+        closeIssueFn: () => ({ ok: true }),
+        killAssistantFn: () => ({ ok: false, stderr: 'kill-pane failed' }),
+      }
+    );
+    assert.equal(result.assistantKilled, false);
+    assert.equal(result.closed, true);
+  });
+});

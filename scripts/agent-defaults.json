@@ -102,6 +102,20 @@
       "asynchronousNotification": false,
       "sessionResume": true,
       "resumeCommand": ["resume", "--last"]
+    },
+    {
+      "id": "agy-interactive",
+      "label": "Antigravity (interactive)",
+      "command": "agy",
+      "runtime": "agy",
+      "extraArgs": ["--dangerously-skip-permissions"],
+      "promptDelivery": "flag",
+      "promptFlag": "--prompt-interactive",
+      "enterSequence": "\r\n",
+      "rulesSupported": false,
+      "asynchronousNotification": false,
+      "sessionResume": true,
+      "resumeCommand": ["--continue"]
     }
   ],
   "skillAgentMap": {
