@@ -17,7 +17,7 @@ node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator \
   --issue "$ISSUE" --workspace "$WORKSPACE" --from "$WORKER_NAME"
 ```
 
-質問、追加調査要求、失敗報告も同じ経路を使う。
+質問、追加調査要求、失敗報告も同じ経路を使う。**地の文で回答を書いただけでは、orchestratorには一切届かない。** 通知を終えたら、最終出力には `DONE` の1語だけを書く。
 
 ## ゴールと責務
 
