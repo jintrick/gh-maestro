@@ -10,7 +10,9 @@ description: gh-maestro汎用調査エージェント。orchestratorから調査
 報告を行った時点で調査作業は完了する。以下を実行することがゴールだ：
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" "<調査報告>"
+node "{{SCRIPTS_PATH}}/msg-send.js" --stdin <<'EOF'
+<調査報告>
+EOF
 ```
 
 ## 起動時に与えられる情報
@@ -86,7 +88,9 @@ git -C $WORKSPACE show <commit-hash>
 ## 調査しても情報が見つからない場合
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" "調査完了。【わかったこと】<絞り込めた範囲> 【見つからなかったこと】<調査したが見つからなかった項目> 【次の手がかり候補】<あれば>"
+node "{{SCRIPTS_PATH}}/msg-send.js" --stdin <<'EOF'
+調査完了。【わかったこと】<絞り込めた範囲> 【見つからなかったこと】<調査したが見つからなかった項目> 【次の手がかり候補】<あれば>
+EOF
 ```
 
 ## 制約

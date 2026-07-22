@@ -26,6 +26,12 @@ function withTempDir(fn) {
   }
 }
 
+// 本文は位置引数で渡せない（--body-file / --stdin のいずれか必須）。テストでは
+// 実stdinを使わず、readStdinFn/isStdinTTYを注入して --stdin 経路を検証する。
+function stdinIO(text) {
+  return { readStdinFn: () => text, isStdinTTY: () => false };
+}
+
 // ── --help / -h ────────────────────────────────────────────────────────────
 
 test('--help が usage を返して code 0', () => {
@@ -50,10 +56,28 @@ test('recipient なしは usage を stderr にして code 1', () => {
   assert.ok(r.errLines.join('\n').includes('msg-send.js'));
 });
 
-test('本文なしは code 1', () => {
+test('--body-file も --stdin も無いとエラーになる（本文は位置引数で渡せない）', () => {
   const r = msgSend.main(['worker-1']);
   assert.equal(r.code, 1);
-  assert.ok(r.errLines.some(l => l.includes('メッセージ本文が必要')));
+  assert.ok(r.errLines.some(l => l.includes('--body-file') && l.includes('--stdin')));
+});
+
+test('本文相当のトークンを位置引数で渡すとエラーになる（--stdinと併用しても拒否される）', () => {
+  withTempDir(workspace => {
+    const r = msgSend.main(['worker-1', 'これは本文のつもり', '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO('hello'));
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('位置引数で渡せません')));
+  });
+});
+
+test('--body-file と --stdin を両方指定するとエラーになる', () => {
+  withTempDir(workspace => {
+    const bodyFile = path.join(workspace, 'body.txt');
+    fs.writeFileSync(bodyFile, 'from file', 'utf8');
+    const r = msgSend.main(['worker-1', '--body-file', bodyFile, '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO('from stdin'));
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('同時に指定できません')));
+  });
 });
 
 // ── issue 解決 ──────────────────────────────────────────────────────────────
@@ -70,7 +94,7 @@ test('--issue で指定した Issue が使われる', () => {
       return { status: 0, stdout: 'https://github.com/test/repo/issues/99#issuecomment-1\n' };
     });
 
-    const r = msgSend.main(['worker-1', 'hello', '--issue', '99', '--workspace', workspace]);
+    const r = msgSend.main(['worker-1', '--stdin', '--issue', '99', '--workspace', workspace], null, stdinIO('hello'));
     assert.equal(r.code, 0);
     assert.equal(capturedIssue, '99');
     assert.ok(capturedBody.includes('hello'));
@@ -108,7 +132,7 @@ test('--skill: issue+役割で送信先workerNameを解決しマーカーの to 
       return { status: 0, stdout: 'https://github.com/test/repo/issues/42#issuecomment-1\n' };
     });
 
-    const r = msgSend.main(['修正してください', '--issue', '42', '--skill', 'gh-maestro-coder', '--workspace', workspace]);
+    const r = msgSend.main(['--issue', '42', '--skill', 'gh-maestro-coder', '--workspace', workspace, '--stdin'], null, stdinIO('修正してください'));
     assert.equal(r.code, 0);
     assert.equal(capturedIssue, '42');
     assert.ok(capturedBody.includes('"to":"issue-42-implement"'), '解決された workerName が to に入る');
@@ -126,7 +150,7 @@ test('--skill: 同一issueでも役割で区別して別ワーカーに解決す
       return { status: 0, stdout: 'https://github.com/test/repo/issues/42#issuecomment-1\n' };
     });
 
-    const r = msgSend.main(['追加調査を', '--issue', '42', '--skill', 'gh-maestro-investigator', '--workspace', workspace]);
+    const r = msgSend.main(['--issue', '42', '--skill', 'gh-maestro-investigator', '--workspace', workspace, '--stdin'], null, stdinIO('追加調査を'));
     assert.equal(r.code, 0);
     assert.ok(capturedBody.includes('"to":"issue-42-investigate"'));
   });
@@ -135,7 +159,7 @@ test('--skill: 同一issueでも役割で区別して別ワーカーに解決す
 test('--skill: --issue が無いとエラー', () => {
   withTempDir(workspace => {
     writeWorkersForSkill(workspace);
-    const r = msgSend.main(['本文', '--skill', 'gh-maestro-coder', '--workspace', workspace]);
+    const r = msgSend.main(['--skill', 'gh-maestro-coder', '--workspace', workspace, '--stdin'], null, stdinIO('本文'));
     assert.equal(r.code, 1);
     assert.ok(r.errLines.some(l => l.includes('--issue が必要')));
   });
@@ -144,7 +168,7 @@ test('--skill: --issue が無いとエラー', () => {
 test('--skill: 該当ワーカーが無いと候補解決エラーで code 1', () => {
   withTempDir(workspace => {
     writeWorkersForSkill(workspace);
-    const r = msgSend.main(['本文', '--issue', '99', '--skill', 'gh-maestro-coder', '--workspace', workspace]);
+    const r = msgSend.main(['--issue', '99', '--skill', 'gh-maestro-coder', '--workspace', workspace, '--stdin'], null, stdinIO('本文'));
     assert.equal(r.code, 1);
     assert.ok(r.errLines.some(l => l.includes('見つかりません')));
   });
@@ -160,7 +184,7 @@ test('env ISSUE で Issue が解決される', () => {
       return { status: 0, stdout: 'https://github.com/test/repo/issues/42#issuecomment-1\n' };
     });
 
-    const r = msgSend.main(['worker-1', 'hello', '--workspace', workspace], { ISSUE: '42' });
+    const r = msgSend.main(['worker-1', '--stdin', '--workspace', workspace], { ISSUE: '42' }, stdinIO('hello'));
     assert.equal(r.code, 0);
     assert.equal(capturedIssue, '42');
   });
@@ -176,7 +200,7 @@ test('--issue が env ISSUE より優先される', () => {
       return { status: 0, stdout: 'https://github.com/test/repo/issues/99#issuecomment-1\n' };
     });
 
-    const r = msgSend.main(['worker-1', 'hello', '--issue', '99', '--workspace', workspace], { ISSUE: '42' });
+    const r = msgSend.main(['worker-1', '--stdin', '--issue', '99', '--workspace', workspace], { ISSUE: '42' }, stdinIO('hello'));
     assert.equal(r.code, 0);
     assert.equal(capturedIssue, '99');
   });
@@ -200,7 +224,7 @@ test('workers.json から issue を解決する', () => {
       return { status: 0, stdout: 'https://github.com/test/repo/issues/55#issuecomment-1\n' };
     });
 
-    const r = msgSend.main(['worker-1', 'hello', '--workspace', workspace]);
+    const r = msgSend.main(['worker-1', '--stdin', '--workspace', workspace], null, stdinIO('hello'));
     assert.equal(r.code, 0);
     assert.equal(capturedIssue, '55');
   });
@@ -218,7 +242,7 @@ test('workers.json に該当 worker が無い場合は code 1（フェイルク�
 
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
 
-    const r = msgSend.main(['worker-1', 'hello', '--workspace', workspace]);
+    const r = msgSend.main(['worker-1', '--stdin', '--workspace', workspace], null, stdinIO('hello'));
     assert.equal(r.code, 1);
     assert.ok(r.errLines.some(l => l.includes('Issue番号を解決できません')));
   });
@@ -228,7 +252,7 @@ test('orchestrator 宛で --issue も env ISSUE も無ければ code 1', () => {
   withTempDir(workspace => {
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
 
-    const r = msgSend.main(['orchestrator', 'hello', '--workspace', workspace], {});
+    const r = msgSend.main(['orchestrator', '--stdin', '--workspace', workspace], {}, stdinIO('hello'));
     assert.equal(r.code, 1);
     assert.ok(r.errLines.some(l => l.includes('Issue番号を解決できません')));
   });
@@ -250,8 +274,9 @@ test('ワーカーコンテキスト: 本文だけで from=ワーカー名 / to=
 
     // ゼロノブ: 本文だけ渡す。identity/宛先/Issueは環境から確定される。
     const r = msgSend.main(
-      ['hello', '--workspace', workspace],
-      { GH_MAESTRO_WORKER: 'issue-1-fix' }
+      ['--stdin', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-1-fix' },
+      stdinIO('hello'),
     );
     assert.equal(r.code, 0);
     assert.ok(capturedBody.includes('"from":"issue-1-fix"'));
@@ -271,7 +296,7 @@ test('from は GH_MAESTRO_WORKER 未設定時は orchestrator', () => {
       return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
     });
 
-    const r = msgSend.main(['worker-1', 'hello', '--issue', '1', '--workspace', workspace], {});
+    const r = msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], {}, stdinIO('hello'));
     assert.equal(r.code, 0);
     assert.ok(capturedBody.includes('"from":"orchestrator"'));
   });
@@ -288,8 +313,9 @@ test('--from フラグで from が設定される', () => {
     });
 
     const r = msgSend.main(
-      ['worker-1', 'hello', '--from', 'issue-52-worker', '--issue', '1', '--workspace', workspace],
-      {}
+      ['worker-1', '--stdin', '--from', 'issue-52-worker', '--issue', '1', '--workspace', workspace],
+      {},
+      stdinIO('hello'),
     );
     assert.equal(r.code, 0);
     assert.ok(capturedBody.includes('"from":"issue-52-worker"'));
@@ -307,8 +333,9 @@ test('ワーカーコンテキスト: --from を渡しても無視され from �
     });
 
     const r = msgSend.main(
-      ['hello', '--from', 'orchestrator', '--issue', '1', '--workspace', workspace],
-      { GH_MAESTRO_WORKER: 'issue-1-worker' }
+      ['--stdin', '--from', 'orchestrator', '--issue', '1', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-1-worker' },
+      stdinIO('hello'),
     );
     assert.equal(r.code, 0);
     // --from orchestrator を渡しても、ワーカーは orchestrator に化けられない
@@ -321,8 +348,9 @@ test('ワーカーコンテキスト: --skill（orchestrator専用）はエラ�
   withTempDir(workspace => {
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     const r = msgSend.main(
-      ['報告本文', '--skill', 'gh-maestro-investigator', '--issue', '1', '--workspace', workspace],
-      { GH_MAESTRO_WORKER: 'issue-1-investigate' }
+      ['--skill', 'gh-maestro-investigator', '--issue', '1', '--workspace', workspace, '--stdin'],
+      { GH_MAESTRO_WORKER: 'issue-1-investigate' },
+      stdinIO('報告本文'),
     );
     assert.equal(r.code, 1);
     assert.ok(r.errLines.join('\n').includes('--skill は orchestrator 専用'));
@@ -341,7 +369,7 @@ test('マーカーが正しい形式で本文の前に付与される', () => {
       return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
     });
 
-    msgSend.main(['worker-1', 'hello world', '--issue', '1', '--workspace', workspace]);
+    msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO('hello world'));
 
     const lines = capturedBody.split('\n');
     // 1行目がマーカー
@@ -361,7 +389,7 @@ test('gh repo view 失敗時に code 1', () => {
   withTempDir(workspace => {
     msgSend._setGhRepoView(() => ({ status: 1, stderr: 'gh: command not found' }));
 
-    const r = msgSend.main(['worker-1', 'hello', '--issue', '1', '--workspace', workspace]);
+    const r = msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO('hello'));
     assert.equal(r.code, 1);
     assert.ok(r.errLines.some(l => l.includes('リポジトリを解決できません')));
   });
@@ -372,7 +400,7 @@ test('gh issue comment 失敗時に code 1', () => {
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgSend._setGhIssueComment(() => ({ status: 1, stderr: 'gh: rate limit' }));
 
-    const r = msgSend.main(['worker-1', 'hello', '--issue', '1', '--workspace', workspace]);
+    const r = msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO('hello'));
     assert.equal(r.code, 1);
     assert.ok(r.errLines.some(l => l.includes('コメント投稿に失敗')));
   });
@@ -383,7 +411,7 @@ test('gh issue comment が空URLを返した場合 code 1', () => {
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgSend._setGhIssueComment(() => ({ status: 0, stdout: '' }));
 
-    const r = msgSend.main(['worker-1', 'hello', '--issue', '1', '--workspace', workspace]);
+    const r = msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO('hello'));
     assert.equal(r.code, 1);
     assert.ok(r.errLines.some(l => l.includes('URLが取得できません')));
   });
@@ -400,7 +428,11 @@ test('--raw は本文をそのまま投稿し、投稿成功時だけ実行を�
       return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
     });
 
-    const r = msgSend.main(['worker-1', '# Plan\n\nKeep this Markdown', '--raw', '--execution-id', 'architect-1', '--issue', '1', '--workspace', workspace]);
+    const r = msgSend.main(
+      ['worker-1', '--raw', '--stdin', '--execution-id', 'architect-1', '--issue', '1', '--workspace', workspace],
+      null,
+      stdinIO('# Plan\n\nKeep this Markdown'),
+    );
     assert.equal(r.code, 0);
     assert.equal(capturedBody, '# Plan\n\nKeep this Markdown');
     assert.equal(executions.readRegistry(workspace)['architect-1'].status, 'completed');
@@ -416,7 +448,11 @@ test('完了済み execution-id の再試行は Issue コメントを重複投�
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgSend._setGhIssueComment(() => { calls++; return { status: 0, stdout: 'unexpected\n' }; });
 
-    const r = msgSend.main(['worker-1', 'same plan', '--raw', '--execution-id', 'architect-1', '--issue', '1', '--workspace', workspace]);
+    const r = msgSend.main(
+      ['worker-1', '--raw', '--stdin', '--execution-id', 'architect-1', '--issue', '1', '--workspace', workspace],
+      null,
+      stdinIO('same plan'),
+    );
     assert.equal(r.code, 0);
     assert.equal(r.lines[0], 'https://example.test/existing-comment');
     assert.equal(calls, 0);
@@ -444,23 +480,16 @@ test('--body-file で指定したファイルの内容が本文として使わ�
   });
 });
 
-test('--body-file と位置引数の本文が両方指定された場合、--body-file が優先される', () => {
+test('--body-file と本文相当の位置引数を両方指定するとエラーになる', () => {
   withTempDir(workspace => {
     const bodyFile = path.join(workspace, 'body.txt');
     fs.writeFileSync(bodyFile, 'body-file content', 'utf8');
 
-    let capturedBody = null;
-
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    msgSend._setGhIssueComment((issue, body) => {
-      capturedBody = body;
-      return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
-    });
 
     const r = msgSend.main(['worker-1', '--body-file', bodyFile, 'positional body', '--issue', '1', '--workspace', workspace]);
-    assert.equal(r.code, 0);
-    assert.ok(capturedBody.includes('body-file content'));
-    assert.ok(!capturedBody.includes('positional body'));
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('位置引数で渡せません')));
   });
 });
 
@@ -509,6 +538,52 @@ test('--body-file に空ファイルを指定した場合は本文なしエラ�
   });
 });
 
+// ── --stdin（本件バグ修正の核）────────────────────────────────────────────
+
+test('--stdin から読み込んだ内容が本文として使われる', () => {
+  withTempDir(workspace => {
+    let capturedBody = null;
+
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
+    });
+
+    const r = msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO('from stdin'));
+    assert.equal(r.code, 0);
+    assert.ok(capturedBody.includes('from stdin'));
+  });
+});
+
+test('--stdin指定時、標準入力がTTYだとエラーで即終了する（ハング防止）', () => {
+  withTempDir(workspace => {
+    const r = msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], null, {
+      readStdinFn: () => { throw new Error('readStdinFn should not be called when stdin is a TTY'); },
+      isStdinTTY: () => true,
+    });
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('TTY')));
+  });
+});
+
+test('--stdin経由ならバッククォート・ドル記号を含む本文もそのまま投稿できる（本件インシデントの再現防止）', () => {
+  withTempDir(workspace => {
+    let capturedBody = null;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
+    });
+
+    const dangerousBody = '`AUTHORITY_TO_COLUMN` を参照し、$ISSUE を使う';
+    const r = msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO(dangerousBody));
+    assert.equal(r.code, 0);
+    assert.ok(capturedBody.includes('`AUTHORITY_TO_COLUMN`'));
+    assert.ok(capturedBody.includes('$ISSUE'));
+  });
+});
+
 // ── 戻り値の注入リセット（後続テストのため） ───────────────────────────────
 
 test('injected gh functions can be reset', () => {
@@ -517,7 +592,7 @@ test('injected gh functions can be reset', () => {
   msgSend._setGhIssueComment(() => ({ status: 0, stdout: 'reset-url\n' }));
 
   withTempDir(workspace => {
-    const r = msgSend.main(['worker-1', 'hello', '--issue', '1', '--workspace', workspace]);
+    const r = msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO('hello'));
     assert.equal(r.code, 0);
     assert.equal(r.lines[0], 'reset-url');
   });

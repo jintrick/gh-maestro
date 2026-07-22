@@ -10,7 +10,9 @@ description: gh-maestroバグ調査エージェント。orchestratorからバグ
 報告を行った時点で調査作業は完了する。以下を実行することがゴールだ：
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" "<調査報告>"
+node "{{SCRIPTS_PATH}}/msg-send.js" --stdin <<'EOF'
+<調査報告>
+EOF
 ```
 
 ## 起動時に与えられる情報
@@ -94,7 +96,9 @@ path/to/file.js:42 — <具体的に何が起きているか。コードの解�
 ## 調査しても特定できない場合
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" "調査完了。根本原因を特定できませんでした。【わかったこと】<絞り込めた範囲> 【行き詰まった理由】<理由> 【次の手がかり候補】<あれば>"
+node "{{SCRIPTS_PATH}}/msg-send.js" --stdin <<'EOF'
+調査完了。根本原因を特定できませんでした。【わかったこと】<絞り込めた範囲> 【行き詰まった理由】<理由> 【次の手がかり候補】<あれば>
+EOF
 ```
 
 ## 制約

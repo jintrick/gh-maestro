@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const { toWinPath } = require('./win-path');
+const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 
 const USAGE = `write-draft.js — 論理パスへ草案ファイルを書き出す（/tmp 等の論理パスを実体パスへ解決してから書き込む）
 
@@ -29,14 +30,6 @@ Output (stdout):
 親ディレクトリが無ければ作成する。既存ファイルは常に上書きする。
 内容が空の場合は書き込まずエラー終了する（空ファイルによるサイレント失敗を防ぐ）。
 失敗時は解決しようとした論理パス・実体パスの両方をstderrに出力する。`;
-
-function readStdin() {
-  try {
-    return fs.readFileSync(0, 'utf8');
-  } catch {
-    return '';
-  }
-}
 
 // オプションテーブル方式の単一パス解析。フラグごとに「値を取るか」をテーブル
 // （BOOLEAN_FLAGS / VALUE_FLAGS）に列挙するだけで済み、将来 --body 以外の値ありフラグ
@@ -83,7 +76,7 @@ function resolveDraftPath(logicalPath) {
 
 // main() は process.exit() を呼ばず結果オブジェクトを返す。
 // require.main === module の薄いエントリポイントだけが exit する。
-function main(argv, { readStdinFn = readStdin, isStdinTTY = () => process.stdin.isTTY } = {}) {
+function main(argv, { readStdinFn, isStdinTTY } = {}) {
   const { help, stdin: hasStdin, body: bodyArg, positionals } = parseArgs(argv);
 
   if (help) {
@@ -101,14 +94,15 @@ function main(argv, { readStdinFn = readStdin, isStdinTTY = () => process.stdin.
   }
   const logicalPath = positionals[0];
 
-  if (hasStdin && isStdinTTY()) {
-    return {
-      code: 1,
-      stderr: '--stdin が指定されましたが標準入力がTTYです。パイプまたはheredocで内容を渡してください。',
-    };
+  let content;
+  try {
+    content = resolveTextInput({ inlineValue: hasStdin ? null : bodyArg, stdin: hasStdin, readStdinFn, isStdinTTY });
+  } catch (e) {
+    if (e instanceof StdinTTYError) {
+      return { code: 1, stderr: `--stdin が指定されましたが${e.message}` };
+    }
+    throw e;
   }
-
-  const content = hasStdin ? readStdinFn() : bodyArg;
 
   if (!content || content.length === 0) {
     return {

@@ -106,7 +106,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 すべてのスクリプトは `{{SCRIPTS_PATH}}/`（インストール時に絶対パスへ置換）に集約され、`--help` で使い方を確認できる。ワーカー宛て（`msg-send.js` / `remove-worker.js`）の送信先指定は「ワーカーの指し方」を参照。
 
 - **spawn-worker.js** — worktreeを作りワーカーを新規ペインで起動する（「ワーカーの起動」参照）
-- **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉。特殊文字を含む本文は `--body-file` で渡す（シェルクォート回避）
+- **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉。本文は位置引数で渡せない（バッククォート・ドル記号がbashのコマンド置換に解釈され黙って消えるため常に拒否される）。必ず `--stdin`（ヒアドキュメントは`<<'EOF'`とクォート付きにする）または `--body-file` で渡す
 - **msg-read.js** — コメントIDから本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE`
 - **remove-worker.js** — 個別ワーカーのペインをkillしてworktreeを削除する。対象は〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する
@@ -433,7 +433,9 @@ PRに新しいレビューコメントが届くたびに、以下の4分類で�
 ただし「短すぎる」「好みの問題」レベルのスタイル指摘は**保留リストへ**。
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE "命名改善: <path>:<line> — <現在の名前> は不正確/不明瞭です。<具体的な提案> に変更してください。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
+node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE --stdin <<'EOF'
+命名改善: <path>:<line> — <現在の名前> は不正確/不明瞭です。<具体的な提案> に変更してください。（PR #<PR番号> のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。
+EOF
 # senior-coder を使っていた場合は --skill gh-maestro-senior-coder
 ```
 
@@ -442,7 +444,9 @@ node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-cod
 テストでカバーされていない分岐、エラーハンドリング漏れ、認証バイパス、データ破損の可能性など、**実害のある指摘**はコーダーにフィードバックする。具体的な問題点と修正方針を伝える。
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE "修正依頼: <path>:<line> — <問題の説明>。<修正方針>。（PR #$PR のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。"
+node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE --stdin <<'EOF'
+修正依頼: <path>:<line> — <問題の説明>。<修正方針>。（PR #<PR番号> のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。
+EOF
 ```
 
 ### 4. 議論の余地がある提案 / SUGGESTION — 保留Issueへ即追記
@@ -614,7 +618,9 @@ gh issue comment $PENDING_ISSUE --repo $REPO \
 上記に該当しない（分類が明白・機械的な）場合は聴取をスキップし、直接人間への提示に進む。聞く場合のみ：
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE "反省会の分類案です。異論や補足があれば教えてください: <分類案の要約>"
+node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE --stdin <<'EOF'
+反省会の分類案です。異論や補足があれば教えてください: <分類案の要約>
+EOF
 ```
 
 コーダーからの応答（異論・補足・別視点）があれば、人間への提示フォーマットに反映してから次に進む。応答がなくても一定時間で先に進んでよい。

@@ -12,9 +12,9 @@ description: 確定済み要件と圧縮済み調査コンテクストから、G
 設計成果物そのものはメッセージ本文に送らない。自由形式 Markdown を対象 Issue へ直接コメントし、そのコメント URL だけを既存のメッセージ経路で orchestrator に通知する。
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator \
-  "architect の設計コメントを投稿しました: <コメントURL>" \
-  --issue "$ISSUE" --workspace "$WORKSPACE" --from "$WORKER_NAME"
+node "{{SCRIPTS_PATH}}/msg-send.js" orchestrator --issue "$ISSUE" --workspace "$WORKSPACE" --from "$WORKER_NAME" --stdin <<'EOF'
+architect の設計コメントを投稿しました: <コメントURL>
+EOF
 ```
 
 質問、追加調査要求、失敗報告も同じ経路を使う。**地の文で回答を書いただけでは、orchestratorには一切届かない。** 通知を終えたら、最終出力には `DONE` の1語だけを書く。
