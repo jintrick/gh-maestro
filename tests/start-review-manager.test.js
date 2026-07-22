@@ -17,6 +17,13 @@ function runCli(args) {
 // run-review-manager.js をdetach起動する。
 // テストは実プロセスを0個spawnする（.claude/rules/test-process-spawn-safety.md 準拠）。
 // spawn はモックに置き換える。
+//
+// レビュー観点の選択（旧 heavy/directed モード、ASPECTS/--prompt/--brief-file）は廃止した。
+// ファイルパターンでの機械的な観点自動判定が一部の観点だけに絞り込んでしまい他の観点の
+// レビューが丸ごと欠落する実障害があったため、観点を絞り込むかどうかの判断はオーケストレーター
+// 側からは完全に排除し、Review Manager自身がPR diffを見た上で判断する方式に一本化した
+// （skills/gh-maestro-reviewer/SKILL.md参照）。start-review-manager.jsは<PR> <REPO> <WORKSPACE>
+// だけを受け取り、常に同じ振る舞いでrun-review-manager.jsを起動するだけになった。
 
 const tmpBase = path.join(os.tmpdir(), 'gh-maestro-test-start-rm-' + Date.now());
 
@@ -67,9 +74,6 @@ function freshWorkspace(name) {
 }
 
 // ── CLIエントリポイント（parseFlags/hasHelpFlagへの統一） ─────────────────────
-// 実障害: 独自の getFlag/flagSet ループが argv.includes('--help') で生のargv全体を
-// 見ていたため、--brief-file の値としてたまたま "--help" を渡すと、値欠落エラーに
-// ならず誤ってヘルプ表示（exit 0）になってしまっていた。
 
 test('--help はUsageを表示して終了コード0', () => {
   const r = runCli(['--help']);
@@ -83,12 +87,6 @@ test('-h はUsageを表示して終了コード0', () => {
   assert.match(r.stdout, /Usage: node start-review-manager\.js/);
 });
 
-test('--brief-file の値が"--help"文字列と一致する場合、値欠落として安全にエラー終了する（誤ってヘルプ扱いしない）', () => {
-  const r = runCli(['42', 'o/r', '/tmp/ws', '--brief-file', '--help']);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /Usage: node start-review-manager\.js/);
-});
-
 test('位置引数が不足しているとUsageを表示して終了コード1', () => {
   const r = runCli(['42', 'o/r']);
   assert.notEqual(r.status, 0);
@@ -99,114 +97,6 @@ test('位置引数が多すぎるとUsageを表示して終了コード1', () =>
   const r = runCli(['42', 'o/r', '/tmp/ws', 'extra']);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /Usage: node start-review-manager\.js/);
-});
-
-// ── resolveMode ──────────────────────────────────────────────────────────
-
-test('resolveMode defaults to heavy when unspecified', () => {
-  const { mod } = loadModule();
-  assert.equal(mod.resolveMode({}), 'heavy');
-});
-
-test('resolveMode accepts directed', () => {
-  const { mod } = loadModule();
-  assert.equal(mod.resolveMode({ mode: 'directed' }), 'directed');
-});
-
-test('resolveMode rejects unknown mode', () => {
-  const { mod } = loadModule();
-  assert.throws(() => mod.resolveMode({ mode: 'light' }), /invalid mode/);
-});
-
-// ── resolveDirectedBrief ─────────────────────────────────────────────────
-
-test('resolveDirectedBrief returns promptText when given', () => {
-  const { mod } = loadModule();
-  assert.equal(mod.resolveDirectedBrief({ promptText: '正しさだけを見る' }), '正しさだけを見る');
-});
-
-test('resolveDirectedBrief reads briefFile when given', () => {
-  const { mod } = loadModule();
-  const workspace = freshWorkspace('brief-file');
-  const briefPath = path.join(workspace, 'brief.md');
-  fs.writeFileSync(briefPath, '命名と可読性だけを見る', 'utf8');
-  assert.equal(mod.resolveDirectedBrief({ briefFile: briefPath }), '命名と可読性だけを見る');
-});
-
-test('resolveDirectedBrief rejects both promptText and briefFile', () => {
-  const { mod } = loadModule();
-  assert.throws(
-    () => mod.resolveDirectedBrief({ promptText: 'a', briefFile: 'b.md' }),
-    /同時に指定できません/
-  );
-});
-
-test('resolveDirectedBrief rejects neither promptText nor briefFile', () => {
-  const { mod } = loadModule();
-  assert.throws(() => mod.resolveDirectedBrief({}), /必要です/);
-});
-
-test('resolveDirectedBrief rejects a missing briefFile', () => {
-  const { mod } = loadModule();
-  assert.throws(
-    () => mod.resolveDirectedBrief({ briefFile: path.join(tmpBase, 'does-not-exist.md') }),
-    /brief file not found/
-  );
-});
-
-// ── buildAspectsBrief ───────────────────────────────────────────────────────
-
-test('buildAspectsBrief formats a single aspect correctly', () => {
-  const { mod } = loadModule();
-  const result = mod.buildAspectsBrief(['correctness']);
-  assert.ok(result.includes('correctness'));
-  assert.ok(result.includes('skills/gh-maestro-reviewer/'));
-  assert.ok(result.includes('オーケストレーターが変更内容から選定した観点'));
-  assert.ok(result.includes('ASPECTS=correctness'));
-});
-
-test('buildAspectsBrief formats multiple aspects as a list', () => {
-  const { mod } = loadModule();
-  const result = mod.buildAspectsBrief(['correctness', 'security', 'readability']);
-  assert.ok(result.includes('- correctness'));
-  assert.ok(result.includes('- security'));
-  assert.ok(result.includes('- readability'));
-  // リスト項目が改行区切りで、カンマ区切りでないことを確認
-  const lines = result.split('\n').filter(l => l.startsWith('- '));
-  assert.equal(lines.length, 3);
-  // ASPECTS 行が機械可読なカンマ区切りで存在することを確認
-  assert.ok(result.includes('ASPECTS=correctness,security,readability'));
-});
-
-test('buildAspectsBrief ASPECTS line uses leaf names as given', () => {
-  const { mod } = loadModule();
-  // detectAspects が返す葉名（api-contract 等）をそのまま使う
-  const result = mod.buildAspectsBrief(['logic-invariants', 'api-contract', 'concurrency']);
-  assert.ok(result.includes('ASPECTS=logic-invariants,api-contract,concurrency'));
-});
-
-test('buildAspectsBrief throws on empty array', () => {
-  const { mod } = loadModule();
-  assert.throws(
-    () => mod.buildAspectsBrief([]),
-    /1件以上の観点が必要です/
-  );
-});
-
-test('buildAspectsBrief throws on non-array input', () => {
-  const { mod } = loadModule();
-  assert.throws(
-    () => mod.buildAspectsBrief(null),
-    /1件以上の観点が必要です/
-  );
-  assert.throws(
-    () => mod.buildAspectsBrief('correctness'),
-    /1件以上の観点が必要です/
-  );
-  assert.throws(
-    () => mod.buildAspectsBrief(undefined),
-    /1件以上の観点が必要です/
-  );
 });
 
 // ── isLockValid ──────────────────────────────────────────────────────────
@@ -247,54 +137,24 @@ test('startReviewManager returns ALREADY_RUNNING and does not spawn when locked'
   assert.equal(calls.length, 0);
 });
 
-test('startReviewManager defaults to heavy mode and spawns run-review-manager.js', () => {
+test('startReviewManager spawns run-review-manager.js with pr/repo/workspace only', () => {
   const { mod, calls } = loadModule();
-  const workspace = freshWorkspace('heavy-default');
+  const workspace = freshWorkspace('spawns-child');
 
   const result = mod.startReviewManager('7', 'o/r', workspace);
   assert.equal(result, 'REVIEW_MANAGER_STARTED');
   assert.equal(calls.length, 1);
   const [call] = calls;
-  assert.ok(call.args.includes('--mode'));
-  assert.equal(call.args[call.args.indexOf('--mode') + 1], 'heavy');
+  assert.ok(call.args.some(a => a.endsWith('run-review-manager.js')));
+  assert.ok(call.args.includes('7'));
+  assert.ok(call.args.includes('o/r'));
+  assert.ok(call.args.includes(workspace));
+  // 観点選択のフラグは一切渡さない（廃止済み）
+  assert.equal(call.args.includes('--mode'), false);
   assert.equal(call.args.includes('--brief-file'), false);
 
   const lockFile = path.join(workspace, '.gh-maestro', 'review-manager-7.running');
   assert.equal(fs.existsSync(lockFile), true);
-});
-
-test('startReviewManager passes directed mode and a brief-file copy of the prompt text', () => {
-  const { mod, calls } = loadModule();
-  const workspace = freshWorkspace('directed-prompt');
-
-  const result = mod.startReviewManager('9', 'o/r', workspace, {
-    mode: 'directed',
-    promptText: 'CLI surface changeだけを見る',
-  });
-  assert.equal(result, 'REVIEW_MANAGER_STARTED');
-  const [call] = calls;
-  assert.equal(call.args[call.args.indexOf('--mode') + 1], 'directed');
-  const briefFileArg = call.args[call.args.indexOf('--brief-file') + 1];
-  assert.equal(fs.readFileSync(briefFileArg, 'utf8'), 'CLI surface changeだけを見る');
-});
-
-test('startReviewManager rejects directed mode without a prompt and does not create a lock', () => {
-  const { mod, calls } = loadModule();
-  const workspace = freshWorkspace('directed-missing-prompt');
-
-  assert.throws(() => mod.startReviewManager('11', 'o/r', workspace, { mode: 'directed' }));
-  assert.equal(calls.length, 0);
-  const lockFile = path.join(workspace, '.gh-maestro', 'review-manager-11.running');
-  assert.equal(fs.existsSync(lockFile), false);
-});
-
-test('startReviewManager rejects an invalid mode before touching the filesystem', () => {
-  const { mod, calls } = loadModule();
-  const workspace = path.join(tmpBase, 'invalid-mode-unused');
-
-  assert.throws(() => mod.startReviewManager('13', 'o/r', workspace, { mode: 'light' }));
-  assert.equal(calls.length, 0);
-  assert.equal(fs.existsSync(workspace), false);
 });
 
 test('startReviewManager rejects a non-numeric pr before touching the filesystem', () => {
@@ -318,7 +178,7 @@ test('startReviewManager rejects a path-traversal pr value before touching the f
   assert.equal(fs.existsSync(workspace), false);
 });
 
-test('startReviewManager releases both lock and brief files when the child spawn errors', async () => {
+test('startReviewManager releases the lock file when the child spawn errors', async () => {
   const workspace = freshWorkspace('spawn-error-cleanup');
   const { mod } = loadModule((fake) => {
     // 実装は spawn() の戻り値に対して同期的に .on('error', ...) を登録するため、
@@ -326,34 +186,26 @@ test('startReviewManager releases both lock and brief files when the child spawn
     process.nextTick(() => fake.emit('error', new Error('ENOENT')));
   });
 
-  const result = mod.startReviewManager('21', 'o/r', workspace, {
-    mode: 'directed',
-    promptText: '正しさだけを見る',
-  });
+  const result = mod.startReviewManager('21', 'o/r', workspace);
   assert.equal(result, 'REVIEW_MANAGER_STARTED');
 
   await new Promise((resolve) => setImmediate(resolve));
 
   const ghDir = path.join(workspace, '.gh-maestro');
   assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-21.running')), false);
-  assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-21-brief.md')), false);
 });
 
-test('startReviewManager releases both lock and brief files when the child exits', async () => {
+test('startReviewManager releases the lock file when the child exits', async () => {
   const workspace = freshWorkspace('spawn-exit-cleanup');
   const { mod } = loadModule((fake) => {
     process.nextTick(() => fake.emit('exit', 1));
   });
 
-  const result = mod.startReviewManager('23', 'o/r', workspace, {
-    mode: 'directed',
-    promptText: '命名と可読性だけを見る',
-  });
+  const result = mod.startReviewManager('23', 'o/r', workspace);
   assert.equal(result, 'REVIEW_MANAGER_STARTED');
 
   await new Promise((resolve) => setImmediate(resolve));
 
   const ghDir = path.join(workspace, '.gh-maestro');
   assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-23.running')), false);
-  assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-23-brief.md')), false);
 });

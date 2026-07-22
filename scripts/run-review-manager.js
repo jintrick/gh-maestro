@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 'use strict';
 
-const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -14,7 +13,6 @@ const {
   reviewWorktreeBranchName, reviewWorktreeFetchRef, reviewWorktreeDir,
 } = require('./shared/review-manager-paths');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
-const { resolveTextInput } = require('./shared/text-input');
 
 // 可視ペイン実行時、出力ファイル生成を待つポーリング設定。
 const VISIBLE_POLL_INTERVAL_MS = 5000;
@@ -22,71 +20,31 @@ const VISIBLE_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 
 const USAGE = `run-review-manager.js — Review Managerをheadless起動してPRレビューを実行する
 
-Usage: node run-review-manager.js <PR> <REPO> <WORKSPACE> [--mode heavy|directed] [--brief-file <path>]
+Usage: node run-review-manager.js <PR> <REPO> <WORKSPACE>
 
 Arguments:
   <PR>         レビュー対象の PR 番号
   <REPO>       GitHub リポジトリ(owner/repo)
   <WORKSPACE>  ワークスペースの絶対パス
 
-Options:
-  --mode <heavy|directed>  レビュー戦略（デフォルト: heavy）
-  --brief-file <path>      directedモードのレビュー方針ファイル（directed時必須）
-
 このスクリプトは通常 start-review-manager.js から detach 起動される内部エンドポイント。
-directed モードでの --brief-file は完了後に削除される（start-review-manager.js が
-このプロセス専用に確保した一時コピーである前提）。
-
-観測用に review-manager-<PR>.meta.json へ mode を記録する。directed モードの
-レビュー方針そのものはログ・メタデータに残さず、SHA-256ハッシュとバイト長のみを記録する。`;
-
-const VALID_MODES = new Set(['heavy', 'directed']);
+3幹（Correctness/Resilience & Security/Maintainability）全てについて独立した
+サブエージェントを並列に起動する。観点を絞り込む判断はReview Manager自身がPR diffを
+見た上で行う（skills/gh-maestro-reviewer/SKILL.md参照）。`;
 
 /**
- * @param {string|null} mode
- * @returns {string} 検証済みmode（'heavy'|'directed'）
- */
-function resolveMode(mode) {
-  const resolved = mode || 'heavy';
-  if (!VALID_MODES.has(resolved)) {
-    throw new Error(`invalid mode "${resolved}" (must be "heavy" or "directed")`);
-  }
-  return resolved;
-}
-
-/**
- * @param {{pr: string, repo: string, workspace: string, outputFile: string, mode: string, directedBrief?: string|null}} params
+ * @param {{pr: string, repo: string, workspace: string, outputFile: string}} params
  * @returns {string}
  */
-function buildPrompt({ pr, repo, workspace, outputFile, mode, directedBrief }) {
+function buildPrompt({ pr, repo, workspace, outputFile }) {
   const toUnix = p => p.replace(/\\/g, '/');
-  const header = `gh-maestro-reviewerスキルを発動し、Review ManagerとしてPRレビューを実行してください。
+  return `gh-maestro-reviewerスキルを発動し、Review ManagerとしてPRレビューを実行してください。
 
 PR=${pr}
 REPO=${repo}
 WORKSPACE=${toUnix(workspace)}
 OUTPUT=${toUnix(outputFile)}
-MODE=${mode}
-`;
 
-  if (mode === 'directed') {
-    return `${header}
-オーケストレーターから以下のレビュー方針が与えられています。この方針の範囲に絞ってレビューしてください。
-
----
-${directedBrief}
----
-
-必ず以下を守ってください。
-- GitHubへ投稿しない
-- 採否判断しない
-- 上記レビュー方針の範囲に絞ってレビューする（方針外の観点は無理に指摘しない）
-- 各findingのaspectには Correctness / Maintainability / Resilience & Security のうち最も近いものを付与する
-- 最終結果はOUTPUTのJSONだけに書き出す（heavyモードと同一のJSON形式）
-`;
-  }
-
-  return `${header}
 必ず以下を守ってください。
 - GitHubへ投稿しない
 - 採否判断しない
@@ -94,38 +52,6 @@ ${directedBrief}
 - Reviewerには該当する観点別基準ファイルを読ませる
 - 最終結果はOUTPUTのJSONだけに書き出す
 `;
-}
-
-/**
- * テキストの機微性を保ったまま観測可能にするため、本文の代わりにSHA-256とバイト長を返す。
- * @param {string} text
- * @returns {{sha256: string, length: number}}
- */
-function digestText(text) {
-  return {
-    sha256: crypto.createHash('sha256').update(text, 'utf8').digest('hex'),
-    length: Buffer.byteLength(text, 'utf8'),
-  };
-}
-
-/**
- * どのmode（と、directedならレビュー方針のダイジェスト）で起動されたかを、
- * findings JSON本体とは別のメタデータファイルに書き出す。
- * findings JSONのスキーマ（review-findings-schema.json, additionalProperties:false）を
- * 変更せずに観測可能性を確保するため、payloadには一切書き込まない（PR #84 Review指摘）。
- * directed のレビュー方針本文はログ・メタデータのどちらにも残さない
- * （機微情報が含まれる可能性があるため。PR #84 Review指摘）。
- *
- * @param {string} metaFile
- * @param {string} mode
- * @param {string|null} [directedBrief]
- */
-function writeRunMetadata(metaFile, mode, directedBrief) {
-  const metadata = { mode };
-  if (mode === 'directed' && directedBrief != null) {
-    metadata.directedBrief = digestText(directedBrief);
-  }
-  fs.writeFileSync(metaFile, JSON.stringify(metadata, null, 2), 'utf8');
 }
 
 /**
@@ -345,14 +271,14 @@ function sleepSync(ms) {
 }
 
 module.exports = {
-  resolveMode, buildPrompt, digestText, writeRunMetadata,
+  buildPrompt,
   setupReviewWorktree, teardownReviewWorktree,
   buildReviewManagerAgentArgs, runAgentHeadless, runAgentVisible, buildVisiblePaneArgs,
 };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--mode', '--brief-file']);
+  const { rest, exitFlagMiss } = parseFlags(argv, []);
 
   // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
   // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
@@ -367,8 +293,6 @@ if (require.main === module) {
     process.exit(0);
   }
 
-  const modeArg = values['--mode'];
-  const briefFileArg = values['--brief-file'];
   const [pr, repo, workspace] = rest;
 
   if (!pr || !repo || !workspace) {
@@ -385,33 +309,10 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  let mode;
-  try {
-    mode = resolveMode(modeArg);
-  } catch (e) {
-    console.error(`run-review-manager: ${e.message}`);
-    process.exit(1);
-  }
-
-  let directedBrief = null;
-  if (mode === 'directed') {
-    if (!briefFileArg) {
-      console.error('run-review-manager: directed モードには --brief-file が必要です');
-      process.exit(1);
-    }
-    try {
-      directedBrief = resolveTextInput({ filePath: briefFileArg });
-    } catch (e) {
-      console.error(`run-review-manager: brief file を読めません: ${e.message}`);
-      process.exit(1);
-    }
-  }
-
   const ghDir = path.join(workspace, '.gh-maestro');
   const lockFile = reviewArtifactPath(ghDir, pr, '.running');
   const logFile = reviewArtifactPath(ghDir, pr, '.log');
   const outputFile = reviewArtifactPath(ghDir, pr, '.json');
-  const metaFile = reviewArtifactPath(ghDir, pr, '.meta.json');
   const promptFile = path.join(os.tmpdir(), `review-manager-prompt-${pr}-${Date.now()}.md`);
 
   function log(msg) {
@@ -421,7 +322,6 @@ if (require.main === module) {
   function cleanup() {
     try { fs.unlinkSync(promptFile); } catch {}
     try { fs.unlinkSync(lockFile); } catch {}
-    if (briefFileArg) { try { fs.unlinkSync(briefFileArg); } catch {} }
     // 専用worktree（とそのブランチ・専用ref）はレビュー完了後に必ず除去する。
     // setupReviewWorktree に到達していなくても teardown は安全（各ステップが失敗を許容する）。
     // log() 自体が失敗しうる状態（ghDir未作成等）でも finally 内の他ステップを止めないよう、
@@ -445,12 +345,7 @@ if (require.main === module) {
     // これにより isLockValid が正しく稼働中プロセスのPIDを確認できる。
     fs.writeFileSync(lockFile, String(process.pid));
 
-    log(`run-review-manager started pr=${pr} repo=${repo} mode=${mode}`);
-    if (mode === 'directed') {
-      const digest = digestText(directedBrief);
-      log(`directed brief sha256=${digest.sha256} length=${digest.length}`);
-    }
-    writeRunMetadata(metaFile, mode, directedBrief);
+    log(`run-review-manager started pr=${pr} repo=${repo}`);
 
     // Review Manager（Codex）はメインワークスペースを直接触らせず、専用worktree内でのみ動かす。
     // PRのdiffが外部由来の入力であるため、無制限の書き込み権限をメインワークスペースに
@@ -476,7 +371,7 @@ if (require.main === module) {
 
       // WORKSPACE はCodex自身に伝える実行場所であるため、隔離用に作成したreviewWtDirを渡す
       // （メインワークスペースを渡すとIssue #101の隔離が無効化される。PR #103 Review Manager指摘）。
-      fs.writeFileSync(promptFile, buildPrompt({ pr, repo, workspace: reviewWtDir, outputFile: worktreeOutputFile, mode, directedBrief }), 'utf8');
+      fs.writeFileSync(promptFile, buildPrompt({ pr, repo, workspace: reviewWtDir, outputFile: worktreeOutputFile }), 'utf8');
 
       const skill = 'gh-maestro-reviewer';
       const skillMap = resolveSkillAgentMap({ workspace });

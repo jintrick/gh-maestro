@@ -354,7 +354,7 @@ workerへの配送のうち、**相手のペインが稼働中（作業中）で
 コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <N>` を起動してPRを監視する（`N` はコーダーのアンカー Issue 番号）。**`persistent: true` を設定すること。** `poll-pr.js` はPR検出後、内部で `poll-reviews.js` を子プロセスとして起動し、その出力（`REVIEW_COMMENT`/`PR_COMMENT`/`PR_REVIEW`/`PR_PUSH`/`PR_MERGED`）をそのまま中継し続ける単一プロセスなので、**このMonitor 1本がPR検出からマージ検知まで完結する。** `persistent: true` を付け忘れると既定の5分でMonitorがタイムアウトし、レビュー中に通知が届かなくなる（下記「レビュー監視」はこの1本を継続して読む前提であり、別途起動し直すことはない）。
 `--base-branch` にはセッション変数 `$BASE_BRANCH` を渡すことで、PR作成時のベースブランチ不一致を検出できる。
 
-`poll-pr.js`はレビュー観点を一切選ばない。PR検出時に常にReview Managerをheavyモード（全観点）で起動する。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。以前存在した「変更ファイルパスから観点を自動判定する」機構（`--review-aspects auto`）は、ファイル名に特定の文字列が含まれるだけで一部の観点だけに絞り込んでしまい他の観点のレビューが丸ごと欠落する実障害があったため廃止した。
+`poll-pr.js`はレビュー観点を一切選ばない。PR検出時に常にReview Managerを全観点で起動する。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。以前存在した「変更ファイルパスから観点を自動判定する」機構（`--review-aspects auto`）や、`heavy`/`directed`というモードの区別自体も、ファイル名に特定の文字列が含まれるだけで一部の観点だけに絞り込んでしまい他の観点のレビューが丸ごと欠落する実障害があったため廃止した。
 
 ```sh
 node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --workspace $WORKSPACE --base-branch $BASE_BRANCH

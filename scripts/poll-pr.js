@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Usage: node poll-pr.js <ISSUE> [--workspace <path>] [--session-pid <pid>] [--base-branch <branch>] [INTERVAL_SECONDS]
-// Polls until a PR for the given issue is found, then launches the reviewer (heavy mode:
-// all review aspects, Review Manager自身が実際のdiffを見て判断する — Issueのファイル名
-// パターンでオーケストレーターや機械的ロジックが観点を絞り込むことはしない）
+// Polls until a PR for the given issue is found, then launches the reviewer
+// (全観点。観点を絞り込むかどうかの判断はReview Manager自身が実際のdiffを見て行う —
+// オーケストレーターや機械的ロジックが観点を絞り込むことはしない）
 // and bridges into poll-reviews.js as a child process. Prints:
 //   PR_BASE_MISMATCH:<PR>:<expected>:<actual>  (only when --base-branch and actual base branch mismatch)
 //   PR_DETECTED:<number>
@@ -46,8 +46,8 @@ Output (stdout):
   以降、poll-reviews.js を子プロセスとして起動し、その標準出力（REVIEW_COMMENT/PR_COMMENT/
   PR_REVIEW/PR_PUSH/PR_MERGED）をそのまま中継する。poll-reviews.js の終了とともに終了する。
 
-PR が見つかるまでブロックし、見つけたら Review Manager(start-review-manager.js)をheavyモード
-（全観点。skills/gh-maestro-reviewer/SKILL.md参照）で起動し、続けて poll-reviews.js を
+PR が見つかるまでブロックし、見つけたら Review Manager(start-review-manager.js)を
+全観点で起動し（skills/gh-maestro-reviewer/SKILL.md参照）、続けて poll-reviews.js を
 子プロセスとして起動してレビュー監視を引き継いでから終了する。観点を絞り込む判断は
 Review Manager自身が実際のdiffを見た上で行う（本スクリプトはファイルパターン等による
 機械的な観点選定を一切行わない。ファイル名に基づく自動判定が一部の観点だけに絞り込んでしまい
@@ -202,7 +202,7 @@ if (require.main === module) {
 
         // --no-review-manager のときは Review Manager を起動せず、レビュー監視だけを再開する。
         if (!noReviewManager) {
-          // 常にheavyモード（全観点）で起動する。観点を絞り込むかどうかの判断は
+          // 常に全観点で起動する。観点を絞り込むかどうかの判断は
           // Review Manager自身が実際のdiffを見た上で行う（skills/gh-maestro-reviewer/SKILL.md参照）。
           // オーケストレーター側・本スクリプト側でファイルパターン等から機械的に観点を
           // 決定することは行わない。
