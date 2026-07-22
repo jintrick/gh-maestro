@@ -17,7 +17,7 @@ const { buildLoginShellExecArgs } = require('../agent-exec');
 // ワーカーペインの既定の高さ（行数）。--cells指定なしのwezterm既定（50%分割）だと、
 // 直前ワーカーの下へ次々split-paneする現行レイアウトでは新規ペインが幾何級数的に
 // 縮んでいく（50%→25%→12.5%...）。固定行数にすることで積み上げても高さが一定になる。
-const DEFAULT_WORKER_PANE_ROWS = 18;
+const DEFAULT_WORKER_PANE_ROWS = 5;
 
 let _weztermSplitPane = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
 let _weztermSpawnWindow = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
@@ -40,7 +40,7 @@ let _sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0,
  * @param {string} params.splitFromPaneId       - 分割元のペインID
  * @param {string} [params.orchPaneId]          - フォールバック先（orchestratorのペインID）
  * @param {string} [params.direction='bottom']  - 'right' | 'bottom'
- * @param {number|null} [params.splitCells=18]  - 新規ペインの高さ（行数）。nullなら--cellsを付けずwezterm既定（50%分割）を使う
+ * @param {number|null} [params.splitCells=5]  - 新規ペインの高さ（行数）。nullなら--cellsを付けずwezterm既定（50%分割）を使う
  * @param {string|null} [params.afterLaunchText] - send-text-after-launch方式のプロンプト本文（無ければ送信しない）
  * @param {number} [params.sendTextDelayMs=2000] - afterLaunchText送信前の遅延（TUI初期化待ち）
  * @param {string} [params.enterTerminator='\r'] - afterLaunchText送信後に送る改行シーケンス
