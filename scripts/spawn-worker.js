@@ -31,7 +31,7 @@ const { linkNodeModules } = require('./link-node-modules');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { checkAgentExists } = require('./agent-exec');
-const { launchAgentInPane, killPaneQuiet } = require('./shared/pane-launch');
+const { launchAgentInPane, killPaneQuiet, pickSplitFromPaneId } = require('./shared/pane-launch');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
@@ -257,15 +257,14 @@ if (alivePanes !== null) {
 }
 
 // --- レイアウト決定（WezTermの詳細はここに閉じ込める） ---
+// 常にbottom方向。他に生きているワーカーがいなければorchestratorの下、いれば直前の
+// ワーカーの下に積む（pickSplitFromPaneId参照。inbox-supervisor.jsのresumeも同じ関数を使う）。
 const existingWorkers = Object.keys(workers).filter(k => k !== 'orchestrator');
-let direction, splitFromPaneId;
-if (existingWorkers.length === 0) {
-  direction = 'right';
-  splitFromPaneId = orchPaneId;
-} else {
-  direction = 'bottom';
-  splitFromPaneId = normalizeWorkerEntry(workers[existingWorkers[existingWorkers.length - 1]]).paneId;
-}
+const direction = 'bottom';
+const splitFromPaneId = pickSplitFromPaneId(
+  existingWorkers.map(k => normalizeWorkerEntry(workers[k]).paneId),
+  orchPaneId,
+);
 
 // --- baseBranch をリモートと同期（worktreeが常に最新ベースから分岐するよう保証） ---
 // spawnSync の引数配列でシェル注入を回避する

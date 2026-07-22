@@ -14,6 +14,11 @@ const { buildLoginShellExecArgs } = require('../agent-exec');
 // ── wezterm 呼び出し（テストで注入可能） ──────────────────────────────────
 // inbox-supervisor.js の _setWeztermListPanes / _setWeztermSendText と同型のパターン。
 
+// ワーカーペインの既定の高さ（行数）。--cells指定なしのwezterm既定（50%分割）だと、
+// 直前ワーカーの下へ次々split-paneする現行レイアウトでは新規ペインが幾何級数的に
+// 縮んでいく（50%→25%→12.5%...）。固定行数にすることで積み上げても高さが一定になる。
+const DEFAULT_WORKER_PANE_ROWS = 18;
+
 let _weztermSplitPane = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
 let _weztermSpawnWindow = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
 let _weztermKillPane = (paneId) =>
@@ -35,6 +40,7 @@ let _sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0,
  * @param {string} params.splitFromPaneId       - 分割元のペインID
  * @param {string} [params.orchPaneId]          - フォールバック先（orchestratorのペインID）
  * @param {string} [params.direction='bottom']  - 'right' | 'bottom'
+ * @param {number|null} [params.splitCells=18]  - 新規ペインの高さ（行数）。nullなら--cellsを付けずwezterm既定（50%分割）を使う
  * @param {string|null} [params.afterLaunchText] - send-text-after-launch方式のプロンプト本文（無ければ送信しない）
  * @param {number} [params.sendTextDelayMs=2000] - afterLaunchText送信前の遅延（TUI初期化待ち）
  * @param {string} [params.enterTerminator='\r'] - afterLaunchText送信後に送る改行シーケンス
@@ -51,6 +57,7 @@ function launchAgentInPane({
   splitFromPaneId,
   orchPaneId,
   direction = 'bottom',
+  splitCells = DEFAULT_WORKER_PANE_ROWS,
   afterLaunchText = null,
   sendTextDelayMs = 2000,
   enterTerminator = '\r',
@@ -59,12 +66,13 @@ function launchAgentInPane({
   captureLogPath = null,
 }) {
   const loginShellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, env, captureLogPath);
-  const splitArgs = ['cli', '--no-auto-start', 'split-pane', `--${direction}`, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...loginShellArgs];
+  const sizeArgs = splitCells != null ? ['--cells', String(splitCells)] : [];
+  const splitArgs = ['cli', '--no-auto-start', 'split-pane', `--${direction}`, ...sizeArgs, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...loginShellArgs];
 
   let split = _weztermSplitPane(splitArgs);
   if (split.status !== 0) {
     if (orchPaneId && splitFromPaneId !== orchPaneId) {
-      const fallbackArgs = ['cli', '--no-auto-start', 'split-pane', '--bottom', '--cwd', worktreeDir, '--pane-id', orchPaneId, '--', ...loginShellArgs];
+      const fallbackArgs = ['cli', '--no-auto-start', 'split-pane', '--bottom', ...sizeArgs, '--cwd', worktreeDir, '--pane-id', orchPaneId, '--', ...loginShellArgs];
       const split2 = _weztermSplitPane(fallbackArgs);
       if (split2.status !== 0) {
         throw new Error(`WezTermペインの分割に失敗しました（フォールバックも失敗）: ${(split2.stderr || '').toString().trim()}`);
@@ -135,6 +143,26 @@ function launchAgentInWindow({ argv, cwd, env = {}, onExit = null, captureLogPat
 }
 
 /**
+ * 新規ワーカーペインの分割元（splitFromPaneId）を決める。
+ *
+ * レイアウト方針: 常にbottom方向。他に生きている（登録されている）ワーカーが
+ * いなければorchestratorペインの下に、いれば「直前に登録されたワーカー」の下に積む。
+ * spawn-worker.js（新規起動）とinbox-supervisor.js（resume起動）の両方が、
+ * それぞれ自分以外のワーカーpaneIdを登録順に並べてこの関数に渡すことで、
+ * 新規/resumeを問わず同じ縦積みチェーンに乗る（起動経路によってペイン位置が
+ * 食い違う不具合の再発防止）。
+ *
+ * @param {string[]} otherWorkerPaneIds - 自分以外の既存ワーカーのpaneId（登録順）
+ * @param {string} orchPaneId
+ * @returns {string}
+ */
+function pickSplitFromPaneId(otherWorkerPaneIds, orchPaneId) {
+  return otherWorkerPaneIds.length > 0
+    ? otherWorkerPaneIds[otherWorkerPaneIds.length - 1]
+    : orchPaneId;
+}
+
+/**
  * ペインをbest-effortで終了する（ロールバック用）。失敗は無視する。
  *
  * @param {string} paneId
@@ -151,6 +179,8 @@ module.exports = {
   launchAgentInPane,
   launchAgentInWindow,
   killPaneQuiet,
+  pickSplitFromPaneId,
+  DEFAULT_WORKER_PANE_ROWS,
   _setWeztermSplitPane: (fn) => { _weztermSplitPane = fn; },
   _setWeztermSpawnWindow: (fn) => { _weztermSpawnWindow = fn; },
   _setWeztermKillPane: (fn) => { _weztermKillPane = fn; },

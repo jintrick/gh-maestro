@@ -39,7 +39,7 @@ const { normalizeWorkerEntry } = require('./worker-entry');
 const { resolveAgentConfig } = require('./shared/resolve-config');
 const { resolveAdapter } = require('./shared/inbox-adapters');
 const { buildAgentResumeCommandArgs } = require('./agent-launch');
-const { launchAgentInPane } = require('./shared/pane-launch');
+const { launchAgentInPane, pickSplitFromPaneId } = require('./shared/pane-launch');
 const { getOrchestratorPaneId, updateWorkerPaneId } = require('./shared/workers-registry');
 const {
   resolveSessionPid,
@@ -330,6 +330,15 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
     return { success: false, method: 'resume-failed', error: 'orchestratorのpaneIdを解決できません' };
   }
 
+  // レイアウトはspawn-worker.js（新規起動）と同じチェーンに乗せる: 自分以外に生きている
+  // （登録されている）ワーカーがいなければorchestratorの下、いれば直前ワーカーの下に積む。
+  // 自分自身（resume対象のworkerName）は既にworkers.jsonに載っているが、そのpaneIdは
+  // 死んでいるので分割元の候補から除外する。
+  const otherWorkerPaneIds = [...loadWorkers(workspace).entries()]
+    .filter(([name]) => name !== workerName)
+    .map(([, entry]) => entry.paneId);
+  const splitFromPaneId = pickSplitFromPaneId(otherWorkerPaneIds, orchPaneId);
+
   // resumeへの応答（msg-send.js経由でのGitHub投稿）が実際に届いたかを、worker-exit-hook.js が
   // 終了後に確認できるようにする。エージェント種別に関わらず、標準出力をファイルにも複製
   // 保存し（captureLogPath）、配送しようとした時刻（sinceTimestamp）を渡す。
@@ -349,7 +358,7 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
     ({ paneId: newPaneId } = launchAgentInPane({
       argv,
       worktreeDir,
-      splitFromPaneId: orchPaneId,
+      splitFromPaneId,
       orchPaneId,
       direction: 'bottom',
       afterLaunchText,
