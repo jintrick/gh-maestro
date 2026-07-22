@@ -143,26 +143,6 @@ function launchAgentInWindow({ argv, cwd, env = {}, onExit = null, captureLogPat
 }
 
 /**
- * 新規ワーカーペインの分割元（splitFromPaneId）を決める。
- *
- * レイアウト方針: 常にbottom方向。他に生きている（登録されている）ワーカーが
- * いなければorchestratorペインの下に、いれば「直前に登録されたワーカー」の下に積む。
- * spawn-worker.js（新規起動）とinbox-supervisor.js（resume起動）の両方が、
- * それぞれ自分以外のワーカーpaneIdを登録順に並べてこの関数に渡すことで、
- * 新規/resumeを問わず同じ縦積みチェーンに乗る（起動経路によってペイン位置が
- * 食い違う不具合の再発防止）。
- *
- * @param {string[]} otherWorkerPaneIds - 自分以外の既存ワーカーのpaneId（登録順）
- * @param {string} orchPaneId
- * @returns {string}
- */
-function pickSplitFromPaneId(otherWorkerPaneIds, orchPaneId) {
-  return otherWorkerPaneIds.length > 0
-    ? otherWorkerPaneIds[otherWorkerPaneIds.length - 1]
-    : orchPaneId;
-}
-
-/**
  * ペインをbest-effortで終了する（ロールバック用）。失敗は無視する。
  *
  * @param {string} paneId
@@ -179,7 +159,6 @@ module.exports = {
   launchAgentInPane,
   launchAgentInWindow,
   killPaneQuiet,
-  pickSplitFromPaneId,
   DEFAULT_WORKER_PANE_ROWS,
   _setWeztermSplitPane: (fn) => { _weztermSplitPane = fn; },
   _setWeztermSpawnWindow: (fn) => { _weztermSpawnWindow = fn; },

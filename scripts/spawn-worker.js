@@ -31,7 +31,7 @@ const { linkNodeModules } = require('./link-node-modules');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { checkAgentExists } = require('./agent-exec');
-const { launchAgentInPane, killPaneQuiet, pickSplitFromPaneId } = require('./shared/pane-launch');
+const { launchAgentInPane, killPaneQuiet } = require('./shared/pane-launch');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
@@ -257,14 +257,14 @@ if (alivePanes !== null) {
 }
 
 // --- レイアウト決定（WezTermの詳細はここに閉じ込める） ---
-// 常にbottom方向。他に生きているワーカーがいなければorchestratorの下、いれば直前の
-// ワーカーの下に積む（pickSplitFromPaneId参照。inbox-supervisor.jsのresumeも同じ関数を使う）。
-const existingWorkers = Object.keys(workers).filter(k => k !== 'orchestrator');
+// 常にorchestratorのペインからbottom方向に分割する。既存ワーカーのペインから
+// 連鎖的に分割すると、そのペイン自体が既に固定行数（DEFAULT_WORKER_PANE_ROWS）
+// まで縮んでいるため「No space for split!」で失敗する、または中途半端な行数に
+// squeezeされる（実機検証で確認済み）。orchestratorのペインは十分な余白を
+// 持ち続ける限り毎回同じ行数を安定して切り出せるため、常にここから分割する
+// （inbox-supervisor.jsのresumeも同様）。
 const direction = 'bottom';
-const splitFromPaneId = pickSplitFromPaneId(
-  existingWorkers.map(k => normalizeWorkerEntry(workers[k]).paneId),
-  orchPaneId,
-);
+const splitFromPaneId = orchPaneId;
 
 // --- baseBranch をリモートと同期（worktreeが常に最新ベースから分岐するよう保証） ---
 // spawnSync の引数配列でシェル注入を回避する
