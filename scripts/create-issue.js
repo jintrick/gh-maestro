@@ -14,7 +14,7 @@ const { spawnSync } = require('./child-process');
 const fs = require('fs');
 const path = require('path');
 const { toWinPath } = require('./win-path');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
 const { isRetryableGhFailure, graphqlCreateIssue } = require('./shared/gh-fallback');
 
 const USAGE = `create-issue.js — GitHub Issue を作成し、body-file を必ず削除する
@@ -25,8 +25,8 @@ Arguments:
   --title <タイトル>     Issue タイトル
   --body-file <path>    Issue本文ファイル（/tmp 形式可）。作成成功後に削除される
   --repo <owner/repo>   対象リポジトリ（省略時はカレントディレクトリのリポジトリ）
-  --workspace <path>    ワークスペースのルートパス（省略時は CWD）。issue作成成功時、
-                        このワークスペースを起点に対話型ワーカー「assistant」を自動起動する
+  --workspace <path>    ワークスペースのルートパス（省略時は環境変数またはCWDから上方探索で解決）。
+                        issue作成成功時、このワークスペースを起点に対話型ワーカー「assistant」を自動起動する
 
 Output (stdout):
   ISSUE_CREATED:<番号>  作成成功。<URL> も併記される
@@ -137,10 +137,21 @@ if (require.main === module) {
   const title = values['--title'];
   const bodyFile = values['--body-file'];
   const repo = values['--repo'];
-  const workspace = values['--workspace'] || process.cwd();
+  // 生のprocess.cwd()を直接信用しない。--workspace省略時、orchestratorの実際のシェルCWDが
+  // ワークスペースルートからズレていると（サブディレクトリでの操作後など）、assistantの
+  // 登録（.gh-maestro/assistants.json）が誤った場所に書き込まれ、finalize-issue.js
+  // （常に--workspace $WORKSPACEを明示）側からは見つからず、assistantが終了されない
+  // 実障害になる。resolveWorkspace()の「.gh-maestro/を持つ祖先ディレクトリへの上方探索」で
+  // このズレを吸収する。
+  const workspace = resolveWorkspace(values['--workspace']);
 
   if (!title || !bodyFile || rest.length > 0) {
     console.error(USAGE);
+    process.exit(1);
+  }
+
+  if (!workspace) {
+    console.error('create-issue: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
     process.exit(1);
   }
 

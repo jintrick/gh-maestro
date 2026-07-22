@@ -257,7 +257,9 @@ EOF
 # 出力: DRAFT_WRITTEN:<実体パス>
 
 # 新規Issue作成（調査不要で全く新規の作業）— create-issue.js は内部で win-path.js を呼ぶため論理パスのままでよい
-node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tmp/issue-draft.md
+# --workspace は必ず明示する（省略するとassistant起動先がずれ、finalize-issue.js側から見つからず
+# 終了できなくなる実障害があった。他のスクリプト呼び出しと同様に必ず $WORKSPACE を渡す）
+node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tmp/issue-draft.md --workspace $WORKSPACE
 # 出力: ISSUE_CREATED:<番号> <URL>
 ```
 
