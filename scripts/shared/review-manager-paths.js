@@ -30,7 +30,7 @@ function assertValidPr(pr) {
  *
  * @param {string} ghDir
  * @param {string|number} pr
- * @param {string} suffix 例: '.running', '.log', '.json', '-brief.md'
+ * @param {string} suffix 例: '.running', '.log', '.json'
  * @returns {string} 解決済みの絶対パス
  */
 function reviewArtifactPath(ghDir, pr, suffix) {
