@@ -106,7 +106,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 すべてのスクリプトは `{{SCRIPTS_PATH}}/`（インストール時に絶対パスへ置換）に集約され、`--help` で使い方を確認できる。ワーカー宛て（`msg-send.js` / `remove-worker.js`）の送信先指定は「ワーカーの指し方」を参照。
 
 - **spawn-worker.js** — worktreeを作りワーカーを新規ペインで起動する（「ワーカーの起動」参照）
-- **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉。本文は位置引数で渡せない（バッククォート・ドル記号がbashのコマンド置換に解釈され黙って消えるため常に拒否される）。必ず `--stdin`（ヒアドキュメントは`<<'EOF'`とクォート付きにする）または `--body-file` で渡す
+- **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉。本文は位置引数では渡せず、`--stdin`（ヒアドキュメントは`<<'EOF'`とクォート付きにする）または `--body-file` で渡す
 - **msg-read.js** — コメントIDから本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE`
 - **remove-worker.js** — 個別ワーカーのペインをkillしてworktreeを削除する。対象は〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する

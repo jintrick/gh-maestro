@@ -252,7 +252,7 @@ function main(argsOverride, envOverride, ioOverride) {
   let issue = values['--issue'] || env.ISSUE || null;
 
   // ワーカーコンテキストでは、ワーカー名 issue-<N>-<desc> から Issue番号を導出できる。
-  // これによりワーカーの報告は本文だけ（node msg-send.js "<内容>"）で完結する。
+  // これによりワーカーの報告は本文だけ（node msg-send.js --stdin <<'EOF' ... EOF）で完結する。
   if (!issue && isWorker) {
     const m = /^issue-(\d+)-/.exec(workerIdentity);
     if (m) issue = m[1];
