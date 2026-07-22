@@ -6,11 +6,17 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 // poll-pr.js は require.main===module 時のみCLIを実行するため、
-// resolveReviewAspects/getChangedFiles/spawnPollReviews は純粋関数としてrequireで検証する。
+// getPrBaseBranch/formatBaseBranchMismatch/spawnPollReviews は純粋関数としてrequireで検証する。
 // spawnPollReviews は child-process.js の spawnSync をモックし、実プロセスを0個spawnする
 // （.claude/rules/test-process-spawn-safety.md 準拠）。CLI起動時の即時エラー終了パス
-// （--review-aspects省略・未知キーワード）のみ、ループに入らず即exitすることを利用して
-// 実プロセスをspawnSyncで同期実行する（detachedポーラーは起動しない）。
+// （--help）のみ、ループに入らず即exitすることを利用して実プロセスをspawnSyncで同期実行する
+// （detachedポーラーは起動しない）。
+//
+// 観点選定（旧--review-aspects auto/明示リスト）は廃止した。ファイルパターンでの
+// 機械的な観点自動判定が一部の観点だけに絞り込んでしまい他の観点のレビューが丸ごと
+// 欠落する実障害があったため、poll-pr.jsは常にReview Managerをheavyモード（全観点）で
+// 起動するだけにし、観点を絞り込むかどうかの判断はReview Manager自身（実際のdiffを
+// 見た上での判断）に委ねる（skills/gh-maestro-reviewer/SKILL.md参照）。
 
 const pollPrPath = require.resolve('../scripts/poll-pr');
 
@@ -40,62 +46,6 @@ function loadModule(spawnSyncImpl) {
   delete require.cache[childProcessPath];
   return { mod, calls };
 }
-
-// ── resolveReviewAspects ─────────────────────────────────────────────────
-
-test('resolveReviewAspects accepts "auto"', () => {
-  const { mod } = loadModule();
-  assert.deepEqual(mod.resolveReviewAspects('auto', ['api-contract']), { mode: 'auto' });
-});
-
-test('resolveReviewAspects accepts a comma-separated list of known leaves', () => {
-  const { mod } = loadModule();
-  const result = mod.resolveReviewAspects('api-contract,concurrency', ['api-contract', 'concurrency', 'test-quality']);
-  assert.deepEqual(result, { mode: 'explicit', aspects: ['api-contract', 'concurrency'] });
-});
-
-test('resolveReviewAspects rejects an unknown leaf name', () => {
-  const { mod } = loadModule();
-  assert.throws(
-    () => mod.resolveReviewAspects('api-contract,typo-aspect', ['api-contract', 'concurrency']),
-    /未知の観点キーワードです.*typo-aspect/
-  );
-});
-
-test('resolveReviewAspects rejects an empty element', () => {
-  const { mod } = loadModule();
-  assert.throws(() => mod.resolveReviewAspects('api-contract,,concurrency', ['api-contract', 'concurrency']));
-});
-
-// ── getChangedFiles ──────────────────────────────────────────────────────
-
-test('getChangedFiles parses newline-separated file paths from gh output', () => {
-  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'a.js\nb.js\n' }));
-  const files = mod.getChangedFiles('7', 'o/r');
-  assert.deepEqual(files, ['a.js', 'b.js']);
-  assert.equal(calls[0].cmd, 'gh');
-  assert.ok(calls[0].args.includes('7'));
-});
-
-test('getChangedFiles returns an empty array for empty gh output', () => {
-  const { mod } = loadModule(() => ({ status: 0, stdout: '' }));
-  assert.deepEqual(mod.getChangedFiles('7', 'o/r'), []);
-});
-
-test('getChangedFiles warns and returns an empty array when gh pr view fails', () => {
-  const { mod } = loadModule(() => ({ status: 1, stdout: '', stderr: 'rate limit exceeded' }));
-  const originalError = console.error;
-  const errors = [];
-  console.error = (...args) => errors.push(args.join(' '));
-  try {
-    const files = mod.getChangedFiles('7', 'o/r');
-    assert.deepEqual(files, []);
-    assert.ok(errors.some(e => e.includes('変更ファイル一覧の取得に失敗しました')));
-    assert.ok(errors.some(e => e.includes('rate limit exceeded')));
-  } finally {
-    console.error = originalError;
-  }
-});
 
 // ── spawnPollReviews ─────────────────────────────────────────────────────
 
@@ -181,34 +131,16 @@ test("formatBaseBranchMismatch reports (unknown) when actual is empty (fail-clos
 
 // ── CLI起動時の即時エラー終了パス（ループに入る前にexitするため実プロセスspawn可） ──
 
-test('CLI exits non-zero when --review-aspects is omitted', () => {
-  const result = spawnSync(process.execPath, [pollPrPath, '111'], { encoding: 'utf8' });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /--review-aspects/);
-});
-
-test('CLI exits non-zero for an unknown --review-aspects keyword', () => {
-  const result = spawnSync(process.execPath, [pollPrPath, '111', '--review-aspects', 'not-a-real-aspect'], { encoding: 'utf8' });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /未知の観点キーワードです/);
-  assert.match(result.stderr, /not-a-real-aspect/);
-});
-
-test('CLI exits non-zero when --review-aspects value is missing', () => {
-  const result = spawnSync(process.execPath, [pollPrPath, '111', '--review-aspects'], { encoding: 'utf8' });
-  assert.notEqual(result.status, 0);
-});
-
-test('CLI --help exits 0 without requiring --review-aspects', () => {
+test('CLI --help exits 0 and no longer mentions --review-aspects（廃止した観点自動判定フラグの回帰防止）', () => {
   const result = spawnSync(process.execPath, [pollPrPath, '--help'], { encoding: 'utf8' });
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /review-aspects/);
+  assert.doesNotMatch(result.stdout, /--review-aspects/);
   // --no-review-manager（レビューを蒸し返さずに監視だけ再開する再起動用フラグ）が文書化されていること
   assert.match(result.stdout, /--no-review-manager/);
 });
 
-test('CLI: --review-aspects 省略のエラーメッセージが --no-review-manager を案内する', () => {
-  const result = spawnSync(process.execPath, [pollPrPath, '111'], { encoding: 'utf8' });
+test('CLI exits non-zero when <ISSUE> is omitted', () => {
+  const result = spawnSync(process.execPath, [pollPrPath], { encoding: 'utf8' });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /--no-review-manager/);
+  assert.match(result.stderr, /Usage/);
 });

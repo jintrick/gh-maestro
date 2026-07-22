@@ -354,8 +354,10 @@ workerへの配送のうち、**相手のペインが稼働中（作業中）で
 コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <N>` を起動してPRを監視する（`N` はコーダーのアンカー Issue 番号）。**`persistent: true` を設定すること。** `poll-pr.js` はPR検出後、内部で `poll-reviews.js` を子プロセスとして起動し、その出力（`REVIEW_COMMENT`/`PR_COMMENT`/`PR_REVIEW`/`PR_PUSH`/`PR_MERGED`）をそのまま中継し続ける単一プロセスなので、**このMonitor 1本がPR検出からマージ検知まで完結する。** `persistent: true` を付け忘れると既定の5分でMonitorがタイムアウトし、レビュー中に通知が届かなくなる（下記「レビュー監視」はこの1本を継続して読む前提であり、別途起動し直すことはない）。
 `--base-branch` にはセッション変数 `$BASE_BRANCH` を渡すことで、PR作成時のベースブランチ不一致を検出できる。
 
+`poll-pr.js`はレビュー観点を一切選ばない。PR検出時に常にReview Managerをheavyモード（全観点）で起動する。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。以前存在した「変更ファイルパスから観点を自動判定する」機構（`--review-aspects auto`）は、ファイル名に特定の文字列が含まれるだけで一部の観点だけに絞り込んでしまい他の観点のレビューが丸ごと欠落する実障害があったため廃止した。
+
 ```sh
-node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --review-aspects auto --workspace $WORKSPACE --base-branch $BASE_BRANCH
+node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --workspace $WORKSPACE --base-branch $BASE_BRANCH
 ```
 
 PR検出時の出力:
@@ -371,7 +373,7 @@ PRが長時間（目安: 10分）検出されない場合はコーダーが失�
 
 ### レビュー済みPRの監視を再開する（再レビューを蒸し返さない）
 
-Monitor が落ちた等で `poll-pr.js` を再起動する必要があるが、**そのPRのレビューは既に済んでいる／再レビューは不要**という場合は、`--no-review-manager` を付けて起動する。PR検出時に Review Manager を起動せず、レビューコメント・マージ状態の監視だけを再開する（`--review-aspects` は不要）。これを付けずに再起動すると、検出のたびにレビューが蒸し返されて quota を浪費する。
+Monitor が落ちた等で `poll-pr.js` を再起動する必要があるが、**そのPRのレビューは既に済んでいる／再レビューは不要**という場合は、`--no-review-manager` を付けて起動する。PR検出時に Review Manager を起動せず、レビューコメント・マージ状態の監視だけを再開する。これを付けずに再起動すると、検出のたびにレビューが蒸し返されて quota を浪費する。
 
 ```sh
 node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --no-review-manager --workspace $WORKSPACE --base-branch $BASE_BRANCH
