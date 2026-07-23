@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
+const { buildPwshCaptureClauses } = require('./agent-exec');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap, resolveReviewManagerVisible } = require('./shared/resolve-config');
 const {
@@ -170,16 +171,23 @@ function runAgentHeadless(agentArgs, cwd) {
 /**
  * 可視ペイン（wezterm split-pane）に渡すargvを構築する。agent-exec.jsのbuildLoginShellExecArgsと
  * 同様にログインシェル（PATH実行ファイル・pwsh関数・シェルエイリアス解決）経由で起動するが、
- * `exec`によるシェル置換はしない。エージェント終了後に終了コードをexitMarkerFileへ書き出す
- * 後続ステップを実行する必要があるため（buildLoginShellExecArgsはシェルをエージェントプロセスに
- * 完全に置き換えるため、終了コード捕捉のような後続処理を挟めない。PR #103 Review Manager指摘）。
+ * Windows側はbuildLoginShellExecArgsの`onExit`フックと違い、終了コードを固定のexitMarkerFileへ
+ * 書き出す（本スクリプトは完了検知をポーリングで行うため、onExitフック呼び出し先コマンドではなく
+ * 単純なファイル書き出しで十分。PR #103 Review Manager指摘）。
  *
- * captureLogPath指定時は、agent-exec.js（tee/Tee-Object）と同じ手法で標準出力/標準エラーを
- * ファイルにも複製する。可視ペインではRM自身の発言（観点をどう判断・除外したか等）が
- * 画面に表示された後どこにも残らないため、これが唯一の永続記録経路になる。
+ * captureLogPath指定時は、agent-exec.js::buildPwshCaptureClauses（Windows側）/ tee（Unix側）と
+ * 同じ手法で標準出力/標準エラーをファイルにも複製する。可視ペインではRM自身の発言（観点をどう
+ * 判断・除外したか等）が画面に表示された後どこにも残らないため、これが唯一の永続記録経路になる。
  * agent-exec.jsの既存呼び出し元は毎回新規ファイルを使うため上書きで問題ないが、
  * ここではrun-review-manager.js自身が既に書き込み済みの`.log`に追記する必要があるため、
  * Tee-Object/teeともに追記（-Append/-a）を使う。
+ *
+ * 【現在captureLogPathは呼び出し元で常にnullにして無効化中】本番（GijiAI）でcodex/agyの
+ * `--print`（ワンショット）モード実行がTee-Objectパイプ経由だと exit 1 でクラッシュする障害が
+ * 発生し（commit 82bfa83でこの機能を追加した直後から）、原因がパイプ手法自体との相性である
+ * 可能性が高いため一時的に無効化した。agent-exec.js側のTee-Object手法は`--prompt-interactive`
+ * （対話モード）でのみ実績があり、`--print`モードでの安全性は未検証。再度有効化する前に、
+ * トークンを使う実機検証（ユーザーの事前承認必須）で安全性を確認すること。
  *
  * @param {string[]} agentCmdArgs
  * @param {string} exitMarkerFile 終了コードを書き出す先
@@ -191,16 +199,7 @@ function buildVisiblePaneArgs(agentCmdArgs, exitMarkerFile, platform = process.p
   if (platform === 'win32') {
     const escapedArgs = agentCmdArgs.map(a => `'${a.replace(/'/g, "''")}'`).join(' ');
     const escapedMarker = exitMarkerFile.replace(/'/g, "''");
-    // [Console]::OutputEncodingをUTF-8にしてからパイプする（文字化け対策。
-    // agent-exec.js::buildPwshExecArgsの実機検証済みの手法と同一）。
-    const capturePrefix = captureLogPath
-      ? '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
-      : '';
-    // Tee-Objectはコマンドレットのため $LASTEXITCODE を書き換えない
-    // （ネイティブコマンドの終了コードのまま保持される。実機検証済み）。
-    const captureSuffix = captureLogPath
-      ? ` 2>&1 | Tee-Object -FilePath '${captureLogPath.replace(/'/g, "''")}' -Append`
-      : '';
+    const { prefix: capturePrefix, suffix: captureSuffix } = buildPwshCaptureClauses(captureLogPath, { append: true });
     // ネイティブ実行ファイルの終了コードは $LASTEXITCODE に入る（codexはネイティブexe）。
     const command = `${capturePrefix}& ${escapedArgs}${captureSuffix}; Set-Content -LiteralPath '${escapedMarker}' -Value $LASTEXITCODE -NoNewline`;
     const encoded = Buffer.from(command, 'utf16le').toString('base64');
@@ -422,7 +421,10 @@ if (require.main === module) {
 
         const visible = resolveReviewManagerVisible({ workspace, homedir });
         log(`spawning (visible=${visible}) ${agentArgs.join(' ')}`);
-        const result = (visible && runAgentVisible(agentArgs, reviewWtDir, worktreeOutputFile, log, logFile))
+        // captureLogPath は一時的にnull固定（キャプチャ無効化）。Tee-Objectパイプ経由での
+        // codex/agy `--print`モード起動が本番でexit 1即クラッシュする障害があり
+        // （buildVisiblePaneArgsのdocコメント参照）、原因調査完了までは無効化する。
+        const result = (visible && runAgentVisible(agentArgs, reviewWtDir, worktreeOutputFile, log, null))
           || runAgentHeadless(agentArgs, reviewWtDir);
 
         if (result.error) log(`spawn error: ${result.error.message}`);

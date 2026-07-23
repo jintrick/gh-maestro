@@ -76,6 +76,30 @@ function buildBashLoginExecArgs(agentCmdArgs, onExit = null, env = {}, captureLo
 }
 
 /**
+ * Windows pwsh向けTee-Objectキャプチャ節（prefix/suffix）を構築する。
+ * buildPwshExecArgs（本ファイル）と run-review-manager.js::buildVisiblePaneArgs の
+ * 両方が同一のTee-Objectパイプ手法（文字化け対策のOutputEncoding設定含む）を必要とする
+ * ため、ここに一本化する（重複実装の解消。ユーザー指摘: 実績のある方法に統一する）。
+ *
+ * @param {string|null} captureLogPath
+ * @param {{append?: boolean}} [options] - append: true なら追記（-Append）。
+ *   run-review-manager.js は既存の`.log`に追記するため true を渡す。
+ * @returns {{prefix: string, suffix: string}} captureLogPath が falsy なら両方 ''
+ */
+function buildPwshCaptureClauses(captureLogPath, { append = false } = {}) {
+  if (!captureLogPath) return { prefix: '', suffix: '' };
+  const flag = append ? ' -Append' : '';
+  return {
+    // 既定のコンソール出力エンコーディング（日本語Windowsでは Shift-JIS系）のまま
+    // パイプすると、ネイティブプロセスのUTF-8出力が文字化けする（実機検証済み）。
+    prefix: '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ',
+    // Tee-Objectはコマンドレットのため $LASTEXITCODE を書き換えない
+    // （ネイティブコマンドの終了コードのまま保持される。実機検証済み）。
+    suffix: ` 2>&1 | Tee-Object -FilePath '${captureLogPath.replace(/'/g, "''")}'${flag}`,
+  };
+}
+
+/**
  * Windows: pwsh -EncodedCommand 経由の argv を構築する。
  *
  * PowerShell -EncodedCommand はコマンド文字列を UTF-16LE の base64 として受け取るため、
@@ -109,21 +133,8 @@ function buildPwshExecArgs(agentCmdArgs, onExit = null, env = {}, captureLogPath
 
   // captureLogPath指定時はパイプでTee-Objectへ流す（Start-Transcriptはネイティブプロセスの
   // 標準出力を確実には捕捉できないため不採用——実機検証で、ネストしたpwsh呼び出しの出力が
-  // transcriptに記録されないことを確認済み）。ネイティブコマンドをパイプに含めても、
-  // Tee-Objectはコマンドレットのため $LASTEXITCODE は書き換えられず、ネイティブコマンドの
-  // 終了コードのまま保持される（実機検証済み）。
-  //
-  // [Console]::OutputEncoding を明示的にUTF-8にしてからパイプする。既定の
-  // コンソール出力エンコーディングはシステムのANSI/OEMコードページ（日本語Windowsでは
-  // Shift-JIS系）になっており、ネイティブプロセスのUTF-8出力をパイプ経由でテキスト化する際に
-  // 文字化けする（実機検証で発覚: 日本語を含む出力がTee-Object経由で保存すると文字化けし、
-  // パイプを使わない直接リダイレクトでは文字化けしなかった）。
-  const captureSuffix = captureLogPath
-    ? ` 2>&1 | Tee-Object -FilePath '${captureLogPath.replace(/'/g, "''")}'`
-    : '';
-  const capturePrefix = captureLogPath
-    ? '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
-    : '';
+  // transcriptに記録されないことを確認済み）。構築の詳細は buildPwshCaptureClauses 参照。
+  const { prefix: capturePrefix, suffix: captureSuffix } = buildPwshCaptureClauses(captureLogPath);
 
   // & <command> <args...>
   // PowerShell の call operator & は関数・コマンドレット・実行ファイルのどれでも実行できる
@@ -204,4 +215,4 @@ function checkBashExists(command) {
   return r.status === 0;
 }
 
-module.exports = { buildLoginShellExecArgs, checkAgentExists };
+module.exports = { buildLoginShellExecArgs, checkAgentExists, buildPwshCaptureClauses };
