@@ -140,6 +140,29 @@ test('buildVisiblePaneArgs (win32): 引数中のシングルクォートをエ�
   assert.match(decoded, /'it''s'/);
 });
 
+test('buildVisiblePaneArgs (win32): captureLogPath指定時はTee-Objectで追記し$LASTEXITCODEは保持する', () => {
+  const args = buildVisiblePaneArgs(['codex.exe', 'exec'], 'C:\\ws\\out.json.exitcode', 'win32', 'C:\\ws\\review-manager-7.log');
+  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
+  assert.match(decoded, /Tee-Object -FilePath 'C:\\ws\\review-manager-7\.log' -Append/);
+  assert.match(decoded, /\[Console\]::OutputEncoding = \[System\.Text\.Encoding\]::UTF8/);
+  // Tee-Object通過後も$LASTEXITCODEをそのままexitMarkerFileへ書き出す（上書きしない）
+  assert.match(decoded, /Set-Content -LiteralPath 'C:\\ws\\out\.json\.exitcode' -Value \$LASTEXITCODE/);
+});
+
+test('buildVisiblePaneArgs (win32): captureLogPath未指定なら従来通りTee-Objectを挟まない', () => {
+  const args = buildVisiblePaneArgs(['codex.exe', 'exec'], 'C:\\ws\\out.json.exitcode', 'win32');
+  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
+  assert.doesNotMatch(decoded, /Tee-Object/);
+});
+
+test('buildVisiblePaneArgs (posix): captureLogPath指定時はteeで追記しPIPESTATUSで終了コードを取り出す', () => {
+  const args = buildVisiblePaneArgs(['codex', 'exec'], '/tmp/out.json.exitcode', 'linux', '/tmp/review-manager-7.log');
+  assert.equal(args[0], 'bash');
+  assert.match(args[2], /tee -a '\/tmp\/review-manager-7\.log'/);
+  assert.match(args[2], /\$\{PIPESTATUS\[0\]\}/);
+  assert.match(args[2], /> '\/tmp\/out\.json\.exitcode'/);
+});
+
 test('buildVisiblePaneArgs (posix): 終了コードを $? でexitMarkerFileへ書き出す', () => {
   const args = buildVisiblePaneArgs(['codex', 'exec'], '/tmp/out.json.exitcode', 'linux');
   assert.equal(args[0], 'bash');

@@ -174,21 +174,45 @@ function runAgentHeadless(agentArgs, cwd) {
  * 後続ステップを実行する必要があるため（buildLoginShellExecArgsはシェルをエージェントプロセスに
  * 完全に置き換えるため、終了コード捕捉のような後続処理を挟めない。PR #103 Review Manager指摘）。
  *
+ * captureLogPath指定時は、agent-exec.js（tee/Tee-Object）と同じ手法で標準出力/標準エラーを
+ * ファイルにも複製する。可視ペインではRM自身の発言（観点をどう判断・除外したか等）が
+ * 画面に表示された後どこにも残らないため、これが唯一の永続記録経路になる。
+ * agent-exec.jsの既存呼び出し元は毎回新規ファイルを使うため上書きで問題ないが、
+ * ここではrun-review-manager.js自身が既に書き込み済みの`.log`に追記する必要があるため、
+ * Tee-Object/teeともに追記（-Append/-a）を使う。
+ *
  * @param {string[]} agentCmdArgs
  * @param {string} exitMarkerFile 終了コードを書き出す先
  * @param {string} [platform=process.platform]
+ * @param {string|null} [captureLogPath=null] 指定時、標準出力/標準エラーをこのパスにも追記する
  * @returns {string[]}
  */
-function buildVisiblePaneArgs(agentCmdArgs, exitMarkerFile, platform = process.platform) {
+function buildVisiblePaneArgs(agentCmdArgs, exitMarkerFile, platform = process.platform, captureLogPath = null) {
   if (platform === 'win32') {
     const escapedArgs = agentCmdArgs.map(a => `'${a.replace(/'/g, "''")}'`).join(' ');
     const escapedMarker = exitMarkerFile.replace(/'/g, "''");
+    // [Console]::OutputEncodingをUTF-8にしてからパイプする（文字化け対策。
+    // agent-exec.js::buildPwshExecArgsの実機検証済みの手法と同一）。
+    const capturePrefix = captureLogPath
+      ? '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
+      : '';
+    // Tee-Objectはコマンドレットのため $LASTEXITCODE を書き換えない
+    // （ネイティブコマンドの終了コードのまま保持される。実機検証済み）。
+    const captureSuffix = captureLogPath
+      ? ` 2>&1 | Tee-Object -FilePath '${captureLogPath.replace(/'/g, "''")}' -Append`
+      : '';
     // ネイティブ実行ファイルの終了コードは $LASTEXITCODE に入る（codexはネイティブexe）。
-    const command = `& ${escapedArgs}; Set-Content -LiteralPath '${escapedMarker}' -Value $LASTEXITCODE -NoNewline`;
+    const command = `${capturePrefix}& ${escapedArgs}${captureSuffix}; Set-Content -LiteralPath '${escapedMarker}' -Value $LASTEXITCODE -NoNewline`;
     const encoded = Buffer.from(command, 'utf16le').toString('base64');
     return ['pwsh', '-NoLogo', '-EncodedCommand', encoded];
   }
   const escapedMarker = exitMarkerFile.replace(/'/g, "'\\''");
+  if (captureLogPath) {
+    const escapedCapture = captureLogPath.replace(/'/g, "'\\''");
+    // パイプを挟むと $? はパイプ末尾（tee）のステータスになるため、PIPESTATUSで
+    // エージェント自身（先頭コマンド）の終了コードを取り出す。
+    return ['bash', '-lc', `"$0" "$@" 2>&1 | tee -a '${escapedCapture}'; code=\${PIPESTATUS[0]}; echo $code > '${escapedMarker}'`, ...agentCmdArgs];
+  }
   return ['bash', '-lc', `"$0" "$@"; echo $? > '${escapedMarker}'`, ...agentCmdArgs];
 }
 
@@ -204,9 +228,11 @@ function buildVisiblePaneArgs(agentCmdArgs, exitMarkerFile, platform = process.p
  * @param {string} cwd
  * @param {string} outputFile RMが書き出すfindings JSONのパス（終了コード確認後に存在確認する）
  * @param {(msg: string) => void} log
+ * @param {string|null} [captureLogPath=null] 指定時、エージェントの標準出力/標準エラーを
+ *   このパスにも追記する（可視ペインではRM自身の発言が画面表示後どこにも残らないため）
  * @returns {{status: number}|null}
  */
-function runAgentVisible(agentArgs, cwd, outputFile, log) {
+function runAgentVisible(agentArgs, cwd, outputFile, log, captureLogPath = null) {
   const paneId = process.env.WEZTERM_PANE;
   if (!paneId) {
     log('reviewManagerVisible=true ですが WEZTERM_PANE が未設定のため headless にフォールバックします');
@@ -216,7 +242,7 @@ function runAgentVisible(agentArgs, cwd, outputFile, log) {
   const exitMarkerFile = `${outputFile}.exitcode`;
   try { fs.unlinkSync(exitMarkerFile); } catch {}
 
-  const paneArgs = buildVisiblePaneArgs(agentArgs, exitMarkerFile);
+  const paneArgs = buildVisiblePaneArgs(agentArgs, exitMarkerFile, process.platform, captureLogPath);
   const split = spawnSync('wezterm', [
     'cli', '--no-auto-start', 'split-pane', '--bottom',
     '--cwd', cwd, '--pane-id', paneId, '--', ...paneArgs,
@@ -396,7 +422,7 @@ if (require.main === module) {
 
         const visible = resolveReviewManagerVisible({ workspace, homedir });
         log(`spawning (visible=${visible}) ${agentArgs.join(' ')}`);
-        const result = (visible && runAgentVisible(agentArgs, reviewWtDir, worktreeOutputFile, log))
+        const result = (visible && runAgentVisible(agentArgs, reviewWtDir, worktreeOutputFile, log, logFile))
           || runAgentHeadless(agentArgs, reviewWtDir);
 
         if (result.error) log(`spawn error: ${result.error.message}`);
