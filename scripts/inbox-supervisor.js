@@ -335,19 +335,13 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
   // いるため分割に失敗する、または中途半端な行数にsqueezeされる（実機検証で確認済み）。
   const splitFromPaneId = orchPaneId;
 
-  // resumeへの応答（msg-send.js経由でのGitHub投稿）が実際に届いたかを、worker-exit-hook.js が
-  // 終了後に確認できるようにする。エージェント種別に関わらず、標準出力をファイルにも複製
-  // 保存し（captureLogPath）、配送しようとした時刻（sinceTimestamp）を渡す。
-  // ディレクトリ作成に失敗しても resume 配送自体は止めない（安全網が効かないだけに留める）。
-  let captureLogPath = null;
-  const sinceTimestamp = new Date().toISOString();
-  try {
-    const captureDir = path.join(workspace, '.gh-maestro', 'inbox-supervisor', 'worker-output');
-    fs.mkdirSync(captureDir, { recursive: true });
-    captureLogPath = path.join(captureDir, `${workerName}-${Date.now()}.log`);
-  } catch {
-    captureLogPath = null;
-  }
+  // 【Issue #151 Phase 1 時点の一時的な状態】resume応答の自動代理送信（worker-exit-hook.js）は
+  // ワーカーの標準出力の複製保存を前提にしているが、その手段だったTee-Object/teeパイプは
+  // 非対話execモードとの非互換で本番クラッシュを起こしたため撤去した（Issue #150）。
+  // WezTermペインはプロセスの標準出力をファイルへ直接リダイレクトできず、代替手段が無い。
+  // 起動をheadless化するPhase 3で、ワーカーのログファイル（fd直接リダイレクト）を
+  // worker-exit-hook.js へ渡す形で復旧する。それまでこの安全網は作動しない。
+  // worker-exit-hook.js 側の実装（verifyReplyAndRelayIfMissing）は変更していない。
 
   let newPaneId;
   try {
@@ -363,14 +357,12 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
       // resume 時もワーカー識別を環境の事実として再注入する（初回起動と同じ。
       // これが無いと resume 後のワーカーが自分を識別できず msg-send.js を誤用しうる）。
       env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },
-      captureLogPath,
-      // resume 後の異常終了も orchestrator へ通知する（初回起動と同じ終了フック）。
-      // 第3・第4引数（capture-log-path・since-timestamp）は resume 応答の代理送信判定に使う
-      // （worker-exit-hook.js参照）。新規起動（spawn-worker.js）はこの2引数を渡さず、
-      // 従来通り異常終了通知のみが働く。
+      // resume 後の異常終了は orchestrator へ通知する（初回起動と同じ終了フック）。
+      // 代理送信用の第3・第4引数（capture-log-path・since-timestamp）は上記の理由により
+      // 現在渡していない。3引数形（新規起動と同形）となり、異常終了通知だけが働く。
       onExit: {
         command: process.execPath,
-        args: [path.join(__dirname, 'worker-exit-hook.js'), workspace, '', captureLogPath || '', sinceTimestamp],
+        args: [path.join(__dirname, 'worker-exit-hook.js'), workspace, ''],
       },
     }));
   } catch (e) {

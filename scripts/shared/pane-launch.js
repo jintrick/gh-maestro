@@ -45,8 +45,6 @@ let _sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0,
  * @param {number} [params.sendTextDelayMs=2000] - afterLaunchText送信前の遅延（TUI初期化待ち）
  * @param {string} [params.enterTerminator='\r'] - afterLaunchText送信後に送る改行シーケンス
  * @param {object} [params.env={}] - 起動プロセスに注入する環境変数（例: { GH_MAESTRO_WORKER, GH_MAESTRO_WORKSPACE }）
- * @param {string|null} [params.captureLogPath=null] - 指定時、エージェントの標準出力/標準エラーを
- *   このパスにも複製保存する（agent-exec.jsのbuildLoginShellExecArgsへそのまま渡す）
  * @returns {{ paneId: string, afterLaunchTextSent: boolean|null }}
  *   afterLaunchTextSent: afterLaunchText未指定ならnull、指定時はsend-textが成功したか
  * @throws {Error} ペイン作成に失敗した場合（フォールバックも失敗した場合を含む）
@@ -63,9 +61,8 @@ function launchAgentInPane({
   enterTerminator = '\r',
   onExit = null,
   env = {},
-  captureLogPath = null,
 }) {
-  const loginShellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, env, captureLogPath);
+  const loginShellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, env);
   const sizeArgs = splitCells != null ? ['--cells', String(splitCells)] : [];
   const splitArgs = ['cli', '--no-auto-start', 'split-pane', `--${direction}`, ...sizeArgs, '--cwd', worktreeDir, '--pane-id', splitFromPaneId, '--', ...loginShellArgs];
 
@@ -118,12 +115,11 @@ function launchAgentInPane({
  * @param {string} params.cwd       - ウィンドウの作業ディレクトリ
  * @param {object} [params.env={}]  - 起動プロセスに注入する環境変数
  * @param {object} [params.onExit=null] - agent-exec.js の buildLoginShellExecArgs に渡す終了フック
- * @param {string|null} [params.captureLogPath=null] - 標準出力/標準エラーの複製保存先
  * @returns {{ paneId: string }}
  * @throws {Error} ウィンドウ作成に失敗した場合
  */
-function launchAgentInWindow({ argv, cwd, env = {}, onExit = null, captureLogPath = null }) {
-  const loginShellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, env, captureLogPath);
+function launchAgentInWindow({ argv, cwd, env = {}, onExit = null }) {
+  const loginShellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, env);
   const spawnArgs = ['cli', '--no-auto-start', 'spawn', '--new-window', '--cwd', cwd, '--', ...loginShellArgs];
 
   const result = _weztermSpawnWindow(spawnArgs);
