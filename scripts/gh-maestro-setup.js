@@ -15,9 +15,9 @@ Arguments:
   [WORKSPACE_ROOT]  対象プロジェクトのルート（デフォルト CWD）
 
 WEZTERM_PANE / wezterm CLI / git リポジトリ / gh 認証を検証し、.gh-maestro ディレクトリと
-.gitignore・dev ブランチ・pre-commit フックを用意する。初回実行後は sentinel
-(.gh-maestro/setup-ok) で環境チェックのみスキップし、冪等なセットアップステップは
-毎回実行する。通常は /gh-maestro の起動フックが呼ぶ。`;
+.gitignore・dev ブランチ・pre-commit/pre-push フック（sync-rules同期・lint/format/typecheck/test
+検証）を用意する。初回実行後は sentinel (.gh-maestro/setup-ok) で環境チェックのみスキップし、
+冪等なセットアップステップは毎回実行する。通常は /gh-maestro の起動フックが呼ぶ。`;
 
 if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
   console.log(USAGE);
@@ -220,65 +220,115 @@ function ensureDevBranch() {
   ok("Branch 'dev' exists");
 }
 
-// ─── 5. pre-commit フック設置 ─────────────────────────────────────────────────
+// ─── 5. git フック設置 ────────────────────────────────────────────────────────
+//
+// 複数のフック（sync-rules用pre-commit、checks用pre-commit/pre-push）が同じ
+// 「マーカーコメント検出→バージョン一致なら何もしない→旧バージョンなら固定行数
+// splice置換→無ければ追記/新規作成」パターンを踏むため、upsertMarkerBlockに集約する。
 
-const CURRENT_MARKER = 'gh-maestro:sync-rules:v1';
-const MARKER_RE = /^# gh-maestro:sync-rules(:v\d+)?$/;
-
-function ensurePreCommitHook() {
-  const hooksDir = resolve(workspaceRoot, '.git', 'hooks');
-  const hookPath = resolve(hooksDir, 'pre-commit');
-  const syncScript = resolve(require('os').homedir(), '.gh-maestro', 'scripts', 'sync-rules.js');
-
-  const entry = [
-    `# ${CURRENT_MARKER}`,
-    `if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then`,
-    `  node "${syncScript}"`,
-    `fi`,
-  ];
-
+/**
+ * hookPath内の、marker/markerReで識別されるブロックをentryLinesへ収束させる
+ * （新規作成/追記/バージョンアップグレード/既に最新なら何もしない、を冪等に行う）。
+ *
+ * @param {string} hookPath
+ * @param {{marker: string, markerRe: RegExp, entryLines: string[]}} block
+ * @returns {'unchanged'|'created'|'updated'|'appended'}
+ */
+function upsertMarkerBlock(hookPath, { marker, markerRe, entryLines }) {
+  const hooksDir = resolve(hookPath, '..');
   mkdirSync(hooksDir, { recursive: true });
+
+  const entry = [`# ${marker}`, ...entryLines];
 
   if (existsSync(hookPath)) {
     const lines = readFileSync(hookPath, 'utf8').split('\n');
-
-    // Check for existing gh-maestro:sync-rules block
-    const markerIdx = lines.findIndex(l => MARKER_RE.test(l.trim()));
+    const markerIdx = lines.findIndex(l => markerRe.test(l.trim()));
 
     if (markerIdx !== -1) {
       const markerLine = lines[markerIdx].trim();
 
-      if (markerLine === `# ${CURRENT_MARKER}`) {
-        ok('pre-commit hook already contains sync-rules entry (current version)');
-        return;
+      if (markerLine === `# ${marker}`) {
+        return 'unchanged';
       }
 
-      // Old version found — replace the fixed 4-line gh-maestro block.
-      // The block has a known structure (marker, if, action, fi) so we use
-      // the exact line count rather than scanning for a matching fi, which
-      // could match an unrelated block ahead of the correct one.
-      lines.splice(markerIdx, 4, ...entry);
+      // Old version found — replace the fixed-length gh-maestro block.
+      // The block has a known structure (marker + entryLines) so we use the
+      // exact line count rather than scanning for a matching terminator,
+      // which could match an unrelated block ahead of the correct one.
+      lines.splice(markerIdx, entry.length, ...entry);
       writeFileSync(hookPath, lines.join('\n'), 'utf8');
-      try {
-        chmodSync(hookPath, 0o755);
-      } catch {
-        console.warn('  [warn] pre-commitフックの実行権限設定に失敗しました。手動で chmod +x を実行してください。');
-      }
-      ok('pre-commit hook updated: sync-rules entry upgraded');
-      return;
+      applyExecPermission(hookPath);
+      return 'updated';
     }
 
-    // No marker found, append
     appendFileSync(hookPath, `\n${entry.join('\n')}\n`, 'utf8');
-  } else {
-    writeFileSync(hookPath, `#!/bin/sh\n${entry.join('\n')}\n`, 'utf8');
+    applyExecPermission(hookPath);
+    return 'appended';
   }
+
+  writeFileSync(hookPath, `#!/bin/sh\n${entry.join('\n')}\n`, 'utf8');
+  applyExecPermission(hookPath);
+  return 'created';
+}
+
+function applyExecPermission(hookPath) {
   try {
     chmodSync(hookPath, 0o755);
   } catch {
-    console.warn('  [warn] pre-commitフックの実行権限設定に失敗しました。手動で chmod +x を実行してください。');
+    console.warn(`  [warn] ${hookPath} の実行権限設定に失敗しました。手動で chmod +x を実行してください。`);
   }
-  ok(`pre-commit hook installed: ${hookPath}`);
+}
+
+const SYNC_RULES_MARKER = 'gh-maestro:sync-rules:v1';
+const SYNC_RULES_MARKER_RE = /^# gh-maestro:sync-rules(:v\d+)?$/;
+const CHECKS_MARKER = 'gh-maestro:checks:v1';
+const CHECKS_MARKER_RE = /^# gh-maestro:checks(:v\d+)?$/;
+
+function runChecksScriptPath() {
+  return resolve(require('os').homedir(), '.gh-maestro', 'scripts', 'hooks', 'run-checks.js');
+}
+
+function ensurePreCommitHook(root = workspaceRoot) {
+  const hookPath = resolve(root, '.git', 'hooks', 'pre-commit');
+  const syncScript = resolve(require('os').homedir(), '.gh-maestro', 'scripts', 'sync-rules.js');
+
+  const syncResult = upsertMarkerBlock(hookPath, {
+    marker: SYNC_RULES_MARKER,
+    markerRe: SYNC_RULES_MARKER_RE,
+    entryLines: [
+      `if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then`,
+      `  node "${syncScript}"`,
+      `fi`,
+    ],
+  });
+  reportHookResult('pre-commit hook (sync-rules)', syncResult);
+
+  const checksResult = upsertMarkerBlock(hookPath, {
+    marker: CHECKS_MARKER,
+    markerRe: CHECKS_MARKER_RE,
+    entryLines: [`node "${runChecksScriptPath()}" precommit || exit 1`],
+  });
+  reportHookResult('pre-commit hook (checks)', checksResult);
+}
+
+function ensurePrePushHook(root = workspaceRoot) {
+  const hookPath = resolve(root, '.git', 'hooks', 'pre-push');
+
+  const checksResult = upsertMarkerBlock(hookPath, {
+    marker: CHECKS_MARKER,
+    markerRe: CHECKS_MARKER_RE,
+    entryLines: [`node "${runChecksScriptPath()}" prepush || exit 1`],
+  });
+  reportHookResult('pre-push hook (checks)', checksResult);
+}
+
+function reportHookResult(label, result) {
+  switch (result) {
+    case 'unchanged': ok(`${label}: already current`); break;
+    case 'updated': ok(`${label}: upgraded`); break;
+    case 'appended': ok(`${label}: entry appended`); break;
+    case 'created': ok(`${label}: installed`); break;
+  }
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -294,6 +344,7 @@ prepareDirectories();
 ensureGitIgnore();
 ensureDevBranch();
 ensurePreCommitHook();
+ensurePrePushHook();
 
 if (isFirstRun) {
   mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
