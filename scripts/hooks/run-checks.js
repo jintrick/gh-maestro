@@ -50,7 +50,7 @@ function readPackageJson(workspaceRoot) {
   try {
     const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
     return { pkg };
-  } catch (e) {
+  } catch {
     return null;
   }
 }

@@ -251,11 +251,17 @@ function upsertMarkerBlock(hookPath, { marker, markerRe, entryLines }) {
         return 'unchanged';
       }
 
-      // Old version found — replace the fixed-length gh-maestro block.
-      // The block has a known structure (marker + entryLines) so we use the
-      // exact line count rather than scanning for a matching terminator,
-      // which could match an unrelated block ahead of the correct one.
-      lines.splice(markerIdx, entry.length, ...entry);
+      // Old version found — replace the block from the marker up to (but
+      // excluding) the next blank line or EOF. Blocks written by this
+      // function are always blank-line-delimited (created: trailing
+      // newline acts as the delimiter; appended: leading '\n' before the
+      // new block), so scanning for a blank line finds the real boundary
+      // of the OLD block regardless of how many lines the NEW entry has —
+      // unlike splicing by entry.length, which silently drifts if the
+      // block's line count changes across versions.
+      let blockEnd = markerIdx + 1;
+      while (blockEnd < lines.length && lines[blockEnd].trim() !== '') blockEnd++;
+      lines.splice(markerIdx, blockEnd - markerIdx, ...entry);
       writeFileSync(hookPath, lines.join('\n'), 'utf8');
       applyExecPermission(hookPath);
       return 'updated';
@@ -288,8 +294,8 @@ function runChecksScriptPath() {
   return resolve(require('os').homedir(), '.gh-maestro', 'scripts', 'hooks', 'run-checks.js');
 }
 
-function ensurePreCommitHook(root = workspaceRoot) {
-  const hookPath = resolve(root, '.git', 'hooks', 'pre-commit');
+function ensurePreCommitHook() {
+  const hookPath = resolve(workspaceRoot, '.git', 'hooks', 'pre-commit');
   const syncScript = resolve(require('os').homedir(), '.gh-maestro', 'scripts', 'sync-rules.js');
 
   const syncResult = upsertMarkerBlock(hookPath, {
@@ -311,8 +317,8 @@ function ensurePreCommitHook(root = workspaceRoot) {
   reportHookResult('pre-commit hook (checks)', checksResult);
 }
 
-function ensurePrePushHook(root = workspaceRoot) {
-  const hookPath = resolve(root, '.git', 'hooks', 'pre-push');
+function ensurePrePushHook() {
+  const hookPath = resolve(workspaceRoot, '.git', 'hooks', 'pre-push');
 
   const checksResult = upsertMarkerBlock(hookPath, {
     marker: CHECKS_MARKER,
