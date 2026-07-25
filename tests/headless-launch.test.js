@@ -100,6 +100,32 @@ test('launchAgentHeadless: シム自身の標準入出力は使わない（ロ�
   assert.equal(spawnCalls[0].options.stdio, 'ignore');
 });
 
+test('launchAgentHeadless: NO_COLOR=1 を既定で注入する（ログはファイルであり端末ではない）', () => {
+  headlessLaunch._setSpawn(fakeSpawn());
+
+  launchAgentHeadless({ argv: ['reasonix', 'run'], cwd: tmpDir, logPath: path.join(tmpDir, 'w.log') });
+
+  const call = spawnCalls[0];
+  assert.equal(call.options.env.NO_COLOR, '1');
+  // ログインシェル側にも注入され、エージェントプロセスまで確実に届く
+  const shellArgs = JSON.parse(call.args[1]);
+  const serialized = process.platform === 'win32'
+    ? Buffer.from(shellArgs[3], 'base64').toString('utf16le')
+    : shellArgs[2];
+  assert.match(serialized, /NO_COLOR/);
+});
+
+test('launchAgentHeadless: 呼び出し元が NO_COLOR を明示指定すればそちらが勝つ', () => {
+  headlessLaunch._setSpawn(fakeSpawn());
+
+  launchAgentHeadless({
+    argv: ['codex', 'exec'], cwd: tmpDir, logPath: path.join(tmpDir, 'w.log'),
+    env: { NO_COLOR: '0' },
+  });
+
+  assert.equal(spawnCalls[0].options.env.NO_COLOR, '0');
+});
+
 test('launchAgentHeadless: env をプロセス環境にマージして渡す', () => {
   headlessLaunch._setSpawn(fakeSpawn());
 

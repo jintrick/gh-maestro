@@ -24,6 +24,17 @@ const { getProcessStartTime } = require('../process-lifecycle');
 
 const SHIM_PATH = path.join(__dirname, 'headless-shim.js');
 
+// headless実行の出力先はログファイルであり端末ではない。ANSIカラーコードは可読性を下げ、
+// resume応答の代理送信でGitHubへ転記されたときには制御文字がそのまま本文に混ざる。
+// NO_COLOR（https://no-color.org/）は多くのCLIが尊重する事実上の標準で、
+// 対応しないCLIは単に無視するため、全ワーカー共通で設定して差し支えない。
+//
+// 実機検証（2026-07-25）の注意点: codex / claude / agy は非TTYの時点で既に無色だった。
+// reasonix v1.16.0-rc.1 は NO_COLOR=1 でも TERM=dumb でも dim（\x1b[2m）を出し続ける
+// ——特に `--show-thinking` 時に顕著（ESC 30個 vs 2個）。この設定は「正しい信号を出して
+// おく」ためのものであり、reasonix の色を今すぐ消す効果は無い。
+const HEADLESS_ENV = Object.freeze({ NO_COLOR: '1' });
+
 // テスト中に実ワーカー（エージェントCLI）を起動してしまう事故を構造的に防ぐガード。
 // .claude/rules/test-process-spawn-safety.md が求める「実spawnをenvフラグでゲートする」の
 // 実装であり、ここが最後の砦になる。
@@ -90,9 +101,13 @@ function launchAgentHeadless({ argv, cwd, logPath, env = {}, onExit = null }) {
     );
   }
 
+  // headless共通の環境変数を土台に、呼び出し元指定を上書きとして重ねる
+  // （呼び出し元が明示的に指定した値が勝つ）。
+  const launchEnv = { ...HEADLESS_ENV, ...env };
+
   // ログインシェル経由のラップは維持する。$PROFILE の pwsh 関数として定義された
   // エージェント（claude-ds 等）は、これを通さないと解決できない（agent-exec.js 参照）。
-  const shellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, env);
+  const shellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, launchEnv);
 
   // ログの準備に失敗したらプロセスを起動しない。記録の残らないワーカーを走らせると、
   // 本Issueが解消しようとしている「後から追跡できない実行」がそのまま再発する。
@@ -109,7 +124,7 @@ function launchAgentHeadless({ argv, cwd, logPath, env = {}, onExit = null }) {
   try {
     child = _spawn(process.execPath, [SHIM_PATH, JSON.stringify(shellArgs), logPath], {
       cwd,
-      env: { ...process.env, ...env },
+      env: { ...process.env, ...launchEnv },
       // 起動元の使い捨てCLIが終了してもワーカーを生かすために detached が要る。
       // node は detached でも正常に動く（pwsh は動かない。だからシムを挟んでいる）。
       detached: true,
