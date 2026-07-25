@@ -24,6 +24,25 @@ const { getProcessStartTime } = require('../process-lifecycle');
 
 const SHIM_PATH = path.join(__dirname, 'headless-shim.js');
 
+// テスト中に実ワーカー（エージェントCLI）を起動してしまう事故を構造的に防ぐガード。
+// .claude/rules/test-process-spawn-safety.md が求める「実spawnをenvフラグでゲートする」の
+// 実装であり、ここが最後の砦になる。
+//
+// 実障害: 引数バリデーションを検証するだけのテストが、ガードの無い状態では worktree 作成と
+// エージェント起動まで到達し、実際に claude.exe が4本起動してトークンを消費した
+// （WEZTERM_PANE 必須チェックが偶然の安全弁になっており、headless化で失われたため）。
+//
+// NODE_TEST_CONTEXT は node --test がテストファイルへ自動的に設定し、そこから spawn された
+// 子プロセスにも継承される。テスト側の設定漏れに依存せず効くため、これを主たる判定に使う。
+// GH_MAESTRO_DISABLE_REAL_SPAWN は、別のテストランナーや手動確認で明示的に抑止したい場合の口。
+const REAL_SPAWN_DISABLED_ENV = 'GH_MAESTRO_DISABLE_REAL_SPAWN';
+
+function realSpawnDisabledReason() {
+  if (process.env.NODE_TEST_CONTEXT) return 'テスト実行中（NODE_TEST_CONTEXT が設定されています）';
+  if (process.env[REAL_SPAWN_DISABLED_ENV]) return `${REAL_SPAWN_DISABLED_ENV} が設定されています`;
+  return null;
+}
+
 // テストで注入可能にする（実プロセスを spawn しない。test-process-spawn-safety ルール準拠）。
 let _spawn = spawn;
 let _getProcessStartTime = getProcessStartTime;
@@ -62,6 +81,15 @@ function workerLogPath(workspace, workerName) {
  * @throws {Error} ログを準備できない場合、または spawn に失敗した場合
  */
 function launchAgentHeadless({ argv, cwd, logPath, env = {}, onExit = null }) {
+  // spawn が注入済み（テストが明示的に差し替えた）なら実プロセスは起きないので通す。
+  const disabledReason = _spawn === spawn ? realSpawnDisabledReason() : null;
+  if (disabledReason) {
+    throw new Error(
+      `実ワーカーを起動しません: ${disabledReason}。` +
+      `起動経路をテストから検証する場合は _setSpawn で spawn を注入してください。`
+    );
+  }
+
   // ログインシェル経由のラップは維持する。$PROFILE の pwsh 関数として定義された
   // エージェント（claude-ds 等）は、これを通さないと解決できない（agent-exec.js 参照）。
   const shellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, env);
@@ -109,6 +137,7 @@ module.exports = {
   launchAgentHeadless,
   workerLogPath,
   SHIM_PATH,
+  REAL_SPAWN_DISABLED_ENV,
   _setSpawn: (fn) => { _spawn = fn; },
   _setGetProcessStartTime: (fn) => { _getProcessStartTime = fn; },
 };

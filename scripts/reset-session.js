@@ -15,6 +15,7 @@ const { existsSync, readFileSync, writeFileSync, rmSync,
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { killProcessTree } = require('./kill-tree');
+const { isWorkerAlive } = require('./shared/worker-liveness');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { sweepRegistry } = require('./process-lifecycle');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
@@ -240,10 +241,10 @@ if (require.main === module) {
   cleanupOrphans();
 
   // ═══════════════════════════════════════════════════════════════════
-  // 2. ワーカーペインをkill
+  // 2. ワーカープロセスをkill
   // ═══════════════════════════════════════════════════════════════════
 
-  log('ワーカーペインをkillします...');
+  log('ワーカープロセスをkillします...');
   const workers = loadWorkers();
   const alivePanes = getAlivePaneIds();
 
@@ -252,29 +253,51 @@ if (require.main === module) {
     const normalized = normalizeWorkerEntry(entry);
 
     // 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill
-    // Phase 1 以前に起動されたセッションの workers.json には notifierPid が残っている可能性がある。
+    // 過去のセッションの workers.json には notifierPid が残っている可能性がある。
     if (normalized.notifierPid) {
       killProcessTree(normalized.notifierPid);
       log(`"${name}" のレガシー notifier (pid ${normalized.notifierPid}) を終了しました。`);
     }
 
+    let handled = false;
+
+    // headless ワーカー: 登録PIDは中継シムのもの。配下にログインシェルとエージェント本体が
+    // ぶら下がるためツリー全体を落とす。
+    if (normalized.pid) {
+      if (isWorkerAlive(normalized)) {
+        killProcessTree(normalized.pid);
+        log(`"${name}" (pid ${normalized.pid}) をkillしました。`);
+        results.killed.push(name);
+      } else {
+        log(`"${name}" (pid ${normalized.pid}) は既に終了しています。スキップ。`);
+        results.skipped.push(name);
+      }
+      handled = true;
+    }
+
+    // 後方互換: 移行前セッション（Issue #151 以前）が残した WezTerm ペインを kill。
+    // 起動経路が headless に変わってもこの掃除経路は必要である
+    // （.claude/rules/legacy-process-cleanup-safety.md 参照）。
     const id = normalized.paneId ?? '';
-    if (!id) {
-      warn(`"${name}" の pane_id が空です。スキップ。`);
-      results.skipped.push(name);
-      continue;
+    if (id) {
+      if (alivePanes.size > 0 && !alivePanes.has(id)) {
+        log(`"${name}" のレガシーpane ${id} は既に存在しません。スキップ。`);
+        if (!handled) results.skipped.push(name);
+      } else {
+        const r = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', id], { encoding: 'utf8' });
+        if (r.status === 0) {
+          log(`"${name}" のレガシーpane ${id} をkillしました。`);
+          if (!handled) results.killed.push(name);
+        } else {
+          warn(`"${name}" のレガシーpane ${id} のkillに失敗しました: ${(r.stderr || '').trim()}`);
+          if (!handled) results.skipped.push(name);
+        }
+      }
+      handled = true;
     }
-    if (alivePanes.size > 0 && !alivePanes.has(id)) {
-      log(`"${name}" (pane ${id}) は既に存在しません。スキップ。`);
-      results.skipped.push(name);
-      continue;
-    }
-    const r = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', id], { encoding: 'utf8' });
-    if (r.status === 0) {
-      log(`"${name}" (pane ${id}) をkillしました。`);
-      results.killed.push(name);
-    } else {
-      warn(`"${name}" (pane ${id}) のkillに失敗しました: ${r.stderr.trim()}`);
+
+    if (!handled) {
+      warn(`"${name}" に終了対象のプロセスが記録されていません。スキップ。`);
       results.skipped.push(name);
     }
   }
@@ -494,11 +517,12 @@ if (require.main === module) {
   // ═══════════════════════════════════════════════════════════════════
 
   log('workers.json をリセットします...');
-  const orchPaneId = process.env.WEZTERM_PANE ?? null;
-  const fresh = orchPaneId ? { orchestrator: { paneId: orchPaneId, agentId: null } } : {};
+  // orchestrator エントリはワーカー走査時に一律スキップされる予約キー。
+  // WezTerm脱却によりペインIDを持たなくなったため、存在だけを保持する。
+  const fresh = { orchestrator: { agentId: null } };
   try {
     writeFileSync(workersJson, JSON.stringify(fresh, null, 2), 'utf8');
-    log(`workers.json をリセットしました。${orchPaneId ? `orchestrator pane: ${orchPaneId}` : 'orchestratorのpane_idは次回spawn時に設定されます。'}`);
+    log('workers.json をリセットしました。');
   } catch (e) {
     warn(`workers.json の書き込みに失敗しました: ${e.message}`);
     results.errors.push(`workers.json write: ${e.message}`);

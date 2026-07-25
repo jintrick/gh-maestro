@@ -10,7 +10,7 @@
 //   - スキャンロジックは msg-poll.js の parseMarker / parseCommentsResponse を再利用
 //   - カーソル・配送状態は .gh-maestro/inbox-supervisor/cursors/<workerName>.json に永続化
 //   - 配送は Adapter 層（scripts/shared/inbox-adapters/）経由でエージェント種別に応じた方法で行う
-//   - 稼働中のエージェントには wezterm cli send-text で直接配送
+//   - 稼働中のエージェントには一切書き込まず、休止するのを待って resume する
 //   - 休止中のエージェントは pending キューに保持し、再開時に配送
 //
 // 信頼性:
@@ -18,8 +18,8 @@
 //   - 配送済みID管理による重複配送防止
 //   - 配送失敗時の指数バックオフリトライ（最大5回）
 //   - PID registry + dead-man's switch によるライフサイクル管理
-//   - resume直後の生存確認（wezterm split-paneの成功=プロセス生存ではないため、TUI初期化の
-//     猶予後にisPaneAliveで再確認する。消えていればDELIVEREDにせずresume-failedとして扱う）
+//   - resume直後の生存確認（spawnの成功=プロセス生存し続けることではないため、短い猶予後に
+//     PIDで再確認する。消えていればDELIVEREDにせずresume-failedとして扱う）
 //   - リトライ断念時のorchestrator通知（stderrへのログだけでは誰も気づけないため、
 //     msg-send.js経由でorchestratorのinboxに直接投稿する）
 //
@@ -33,14 +33,14 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
-const { weztermCli } = require('./wezterm-cli');
 const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { resolveAgentConfig } = require('./shared/resolve-config');
 const { resolveAdapter } = require('./shared/inbox-adapters');
 const { buildAgentResumeCommandArgs } = require('./agent-launch');
-const { launchAgentInPane } = require('./shared/pane-launch');
-const { getOrchestratorPaneId, updateWorkerPaneId } = require('./shared/workers-registry');
+const { launchAgentHeadless, workerLogPath } = require('./shared/headless-launch');
+const { updateWorkerProcess } = require('./shared/workers-registry');
+const { isWorkerAlive } = require('./shared/worker-liveness');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -106,15 +106,15 @@ let _ghApiComments = (repo, issue, since, opts = {}) => {
   return spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
 };
 
-// ── WezTerm 呼び出し（テストで注入可能） ──────────────────────────────────
+// ── ワーカー生存確認（テストで注入可能） ──────────────────────────────────
 
-let _weztermListPanes = (opts = {}) => {
-  return weztermCli('cli', 'list', '--format', 'json');
-};
+let _isWorkerAlive = isWorkerAlive;
 
-// resume直後の生存確認用の待機（テストで注入可能。実装は pane-launch.js の afterLaunchText
-// 待機と同じ Atomics.wait による同期スリープ）。
+// resume直後の生存確認までの待機（テストで注入可能）。
 let _sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+
+// resume 直後にプロセスが即死していないかを確認するまでの猶予。
+const RESUME_LIVENESS_GRACE_MS = 2000;
 
 // 配送を断念した際に orchestrator へ通知する（テストで注入可能）。inbox-supervisor.js は
 // ワーカーではないため GH_MAESTRO_WORKER は設定せず、--from/--issue を明示して投稿する。
@@ -210,7 +210,7 @@ function writeCursor(workspace, workerName, state) {
  * orchestrator エントリは除外する。
  *
  * @param {string} workspace
- * @returns {Map<string, { paneId: string|null, agentId: string|null, issue: number|null }>}
+ * @returns {Map<string, { pid: number|null, startTime: string|null, agentId: string|null, issue: number|null }>}
  */
 function loadWorkers(workspace) {
   const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
@@ -235,35 +235,12 @@ function loadWorkers(workspace) {
   return map;
 }
 
-// ── ペイン生存確認 ────────────────────────────────────────────────────────
-
-/**
- * 指定された paneId が WezTerm 内で生存しているか確認する。
- * 取得失敗時は安全側に倒して false を返す（fail-closed）。
- *
- * @param {string} paneId
- * @returns {boolean}
- */
-function isPaneAlive(paneId) {
-  if (!paneId) return false;
-  try {
-    const result = _weztermListPanes();
-    if (result.status !== 0) return false;
-    const panes = JSON.parse(result.stdout);
-    if (!Array.isArray(panes)) return false;
-    return panes.some(p => String(p.pane_id) === String(paneId));
-  } catch {
-    return false;
-  }
-}
-
 // ── 配送 ──────────────────────────────────────────────────────────────────
 //
-// WezTermペインへのテキスト送信（send-text）は「稼働中のプロセスへの通知の
-// 入力注入」であり、送信してもEnter/terminatorを伴わなければ配送されたことに
-// ならず、伴わせて実装しても「起動基盤としてのみ使う」という設計原則に反する。
-// 配送は常にプロセスの起動/再開（resume。launchAgentInPaneによるペイン生成）
-// のみを経路とする。稼働中（isPaneAlive）のワーカーには一切書き込まず、
+// 稼働中のプロセスへ外から入力を注入する経路は持たない。届いたかどうかを確認できない
+// 不確実な手段であり、「起動基盤としてのみ使う」という設計原則にも反する。
+// 配送は常にプロセスの起動/再開（resume。launchAgentHeadlessによるプロセス生成）
+// のみを経路とする。稼働中（isWorkerAlive）のワーカーには一切書き込まず、
 // 休止するのを待って次のスキャンサイクルでresumeする。
 
 /**
@@ -325,67 +302,73 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
     return { success: false, method: 'resume-failed', error: `resume起動argv構築失敗: ${e.message}` };
   }
 
-  const orchPaneId = getOrchestratorPaneId(workspace);
-  if (!orchPaneId) {
-    return { success: false, method: 'resume-failed', error: 'orchestratorのpaneIdを解決できません' };
+  // send-text-after-launch は画面への入力注入が前提であり headless では実現できない。
+  // 黙って本文抜きで起動するとワーカーが指示を受け取れないままGitHubに無関係な応答を
+  // 投げうるため、フェイルクローズで配送を止める。
+  if (afterLaunchText) {
+    return {
+      success: false,
+      method: 'resume-failed',
+      error: `エージェント "${agentConfig.id}" は send-text-after-launch 方式ですが、headless実行では本文を渡せません`,
+    };
   }
 
-  // レイアウトはspawn-worker.js（新規起動）と同じくorchestratorのペインから常に分割する。
-  // 他のワーカーのペインから連鎖的に分割すると、そのペイン自体が既に固定行数まで縮んで
-  // いるため分割に失敗する、または中途半端な行数にsqueezeされる（実機検証で確認済み）。
-  const splitFromPaneId = orchPaneId;
-
-  // 【Issue #151 Phase 1 時点の一時的な状態】resume応答の自動代理送信（worker-exit-hook.js）は
-  // ワーカーの標準出力の複製保存を前提にしているが、その手段だったTee-Object/teeパイプは
-  // 非対話execモードとの非互換で本番クラッシュを起こしたため撤去した（Issue #150）。
-  // WezTermペインはプロセスの標準出力をファイルへ直接リダイレクトできず、代替手段が無い。
-  // 起動をheadless化するPhase 3で、ワーカーのログファイル（fd直接リダイレクト）を
-  // worker-exit-hook.js へ渡す形で復旧する。それまでこの安全網は作動しない。
-  // worker-exit-hook.js 側の実装（verifyReplyAndRelayIfMissing）は変更していない。
-
-  let newPaneId;
+  // resumeへの応答（msg-send.js経由でのGitHub投稿）が実際に届いたかを、worker-exit-hook.js が
+  // 終了後に確認できるようにする。ワーカーの標準出力はログファイルへ直接リダイレクトされて
+  // いるので、そのパスと「今回のresume分がどこから始まるか」のオフセットを渡す。
+  // オフセットを渡さないと、今回の実行が何も出力せずに終わったとき、前回の実行の出力を
+  // 今回の応答として代理送信してしまう。
+  const logPath = workerLogPath(workspace, workerName);
+  let logOffset = 0;
   try {
-    ({ paneId: newPaneId } = launchAgentInPane({
+    logOffset = fs.existsSync(logPath) ? fs.statSync(logPath).size : 0;
+  } catch {
+    logOffset = 0;
+  }
+  const sinceTimestamp = new Date().toISOString();
+
+  let launched;
+  try {
+    launched = launchAgentHeadless({
       argv,
-      worktreeDir,
-      splitFromPaneId,
-      orchPaneId,
-      direction: 'bottom',
-      afterLaunchText,
-      sendTextDelayMs: agentConfig.sendTextDelayMs ?? 2000,
-      enterTerminator: agentConfig.enterSequence ?? '\r',
+      cwd: worktreeDir,
+      logPath,
       // resume 時もワーカー識別を環境の事実として再注入する（初回起動と同じ。
       // これが無いと resume 後のワーカーが自分を識別できず msg-send.js を誤用しうる）。
       env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },
       // resume 後の異常終了は orchestrator へ通知する（初回起動と同じ終了フック）。
-      // 代理送信用の第3・第4引数（capture-log-path・since-timestamp）は上記の理由により
-      // 現在渡していない。3引数形（新規起動と同形）となり、異常終了通知だけが働く。
+      // 第3〜第5引数（log-path・since-timestamp・log-offset）は resume 応答の
+      // 代理送信判定に使う（worker-exit-hook.js参照）。新規起動（spawn-worker.js）は
+      // これらを渡さず、異常終了通知だけが働く。
       onExit: {
         command: process.execPath,
-        args: [path.join(__dirname, 'worker-exit-hook.js'), workspace, ''],
+        args: [
+          path.join(__dirname, 'worker-exit-hook.js'),
+          workspace, '', logPath, sinceTimestamp, String(logOffset),
+        ],
       },
-    }));
+    });
   } catch (e) {
-    return { success: false, method: 'resume-failed', error: `ペイン起動失敗: ${e.message}` };
+    return { success: false, method: 'resume-failed', error: `プロセス起動失敗: ${e.message}` };
   }
 
-  // wezterm split-pane が paneId を返したことは、起動先プロセスが生存し続けていることを
-  // 保証しない（実障害: resumeが成功と誤認識され、起動直後にpane/ホスト環境ごと消滅した
-  // ワーカーが誰にも気づかれず放置された）。TUI初期化と同じ猶予を置いてから生存確認する。
-  _sleep(agentConfig.sendTextDelayMs ?? 2000);
-  if (!isPaneAlive(newPaneId)) {
+  // spawn が pid を返したことは、起動先プロセスが生存し続けていることを保証しない
+  // （実障害: resumeが成功と誤認識され、起動直後に消滅したワーカーが誰にも気づかれず
+  // 放置された）。短い猶予を置いてから生存確認する。
+  _sleep(RESUME_LIVENESS_GRACE_MS);
+  if (!_isWorkerAlive({ pid: launched.pid, startTime: launched.startTime })) {
     return {
       success: false,
       method: 'resume-failed',
-      error: `resume直後にpane ${newPaneId} が消失しました（起動直後のクラッシュ、またはホスト環境自体の不安定化の可能性）`,
+      error: `resume直後に pid ${launched.pid} が消失しました（起動直後のクラッシュの可能性）。ログ: ${logPath}`,
     };
   }
 
-  if (!updateWorkerPaneId(workspace, workerName, newPaneId)) {
+  if (!updateWorkerProcess(workspace, workerName, launched)) {
     return { success: false, method: 'resume-failed', error: `workers.json書き込み失敗（worker "${workerName}" が見つかりません）` };
   }
 
-  return { success: true, method: 'resume', newPaneId };
+  return { success: true, method: 'resume', pid: launched.pid };
 }
 
 /**
@@ -394,30 +377,29 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
  * 対象は runOnce() のスキャン段階で asynchronousNotification:true のエージェント
  * （自己ポーリングするエージェント種別。現状はどのエージェントも該当しない）が
  * 既に除外されているため、ここに来るのは全てセッション再開系エージェント。
- * 稼働中（ペイン生存 = タスク処理中）のワーカーには一切書き込まず、休止するのを
- * 待って次のスキャンサイクルで resume() 経由で配送する。稼働中ペインへの
- * テキスト注入は行わない（配送経路はプロセスの起動/再開のみ）。
+ * 稼働中（プロセス生存 = タスク処理中）のワーカーには一切書き込まず、休止するのを
+ * 待って次のスキャンサイクルで resume() 経由で配送する。稼働中のプロセスへの
+ * 入力注入は行わない（配送経路はプロセスの起動/再開のみ）。
  *
  * @param {object} params
  * @param {string} params.workerName
- * @param {string|null} params.paneId
- * @param {string|null} params.agentId
+ * @param {object} params.entry      - workers.json のエントリ（生存確認に pid/startTime を使う）
  * @param {object} params.message    - { from, body }
  * @param {string} params.workspace
  * @param {string} params.homedir
  * @param {string} params.issue      - Issue 番号（文字列）
  * @returns {{ success: boolean, method: string, error?: string }}
  */
-function deliverMessage({ workerName, paneId, agentId, message, workspace, homedir, issue }) {
-  if (paneId && isPaneAlive(paneId)) {
+function deliverMessage({ workerName, entry, message, workspace, homedir, issue }) {
+  if (_isWorkerAlive(entry)) {
     return {
       success: false,
       method: 'pending',
-      error: `pane ${paneId} is alive (worker busy) — waiting for it to become idle for resume delivery`,
+      error: `worker pid ${entry.pid} is alive (worker busy) — waiting for it to become idle for resume delivery`,
     };
   }
 
-  const resumeResult = tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir });
+  const resumeResult = tryResumeAndDeliver({ workerName, agentId: entry.agentId, message, workspace, homedir });
   if (resumeResult.method !== 'pending') {
     // resumeを試みた結果（成功 or 明確な失敗）。既存のpendingDeliveries/バックオフ機構にそのまま乗る。
     return resumeResult;
@@ -426,7 +408,7 @@ function deliverMessage({ workerName, paneId, agentId, message, workspace, homed
   return {
     success: false,
     method: 'pending',
-    error: `pane ${paneId || '(none)'} is not alive — queued for resume`,
+    error: `worker process (pid ${entry.pid || 'none'}) is not alive — queued for resume`,
   };
 }
 
@@ -618,8 +600,7 @@ function main(argsOverride, opts = {}) {
 
         const deliveryResult = deliverMessage({
           workerName,
-          paneId: entry.paneId,
-          agentId: entry.agentId,
+          entry,
           message: { from: pending.lastFrom || '(unknown)', body: messageBody },
           workspace,
           homedir,
@@ -731,8 +712,7 @@ function main(argsOverride, opts = {}) {
 
         const deliveryResult = deliverMessage({
           workerName,
-          paneId: entry.paneId,
-          agentId: entry.agentId,
+          entry,
           message: { from: candidate.from, body: candidate.body },
           workspace,
           homedir,
@@ -884,7 +864,7 @@ if (require.main === module) {
 module.exports = {
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
-  _setWeztermListPanes: (fn) => { _weztermListPanes = fn; },
+  _setIsWorkerAlive: (fn) => { _isWorkerAlive = fn; },
   _setSleep: (fn) => { _sleep = fn; },
   _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
   main,
@@ -893,7 +873,6 @@ module.exports = {
   cursorPath,
   stateDir,
   loadWorkers,
-  isPaneAlive,
   tryResumeAndDeliver,
   deliverMessage,
   shouldRetry,

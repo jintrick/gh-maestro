@@ -2,13 +2,13 @@
 // workers-registry.js — workers.json への書き込みヘルパー
 //
 // inbox-supervisor.js は元々 workers.json を読み取り専用で扱っていたが（loadWorkers()）、
-// resumeによるペイン再作成後は新しいpaneIdを書き戻す必要がある。
-// spawn-worker.js の新規登録とは異なり、既存エントリの一部フィールド（paneId）のみを
+// resumeによるプロセス再起動後は新しいpid/startTimeを書き戻す必要がある。
+// spawn-worker.js の新規登録とは異なり、既存エントリのプロセス識別フィールドのみを
 // 更新する用途に絞った、最小限の共有ヘルパー。
 
 const fs = require('fs');
 const path = require('path');
-const { normalizeWorkerEntry } = require('../worker-entry');
+const { normalizeWorkerEntry, normalizePid } = require('../worker-entry');
 
 /**
  * workspace の workers.json パスを返す。
@@ -37,38 +37,35 @@ function readWorkersRaw(workspace) {
 }
 
 /**
- * 既存workerエントリのpaneIdのみを更新する。アトミック書き込み（tmp → rename）。
+ * 既存workerエントリのプロセス識別フィールド（pid/startTime/logPath）を更新する。
+ * アトミック書き込み（tmp → rename）。
  * workerNameのエントリが存在しない場合は何もせずfalseを返す。
+ *
+ * resume でワーカーを再起動したときに呼ぶ。移行前セッションが残した paneId は
+ * ここで消す——新しいプロセスが起きた以上、古いペインIDは掃除経路にとっても
+ * 誤った対象であり、残すと無関係なペインをkillしうる。
  *
  * @param {string} workspace
  * @param {string} workerName
- * @param {string} newPaneId
+ * @param {{pid: number, startTime: string|null, logPath: string|null}} process
  * @returns {boolean} 更新に成功したか
  */
-function updateWorkerPaneId(workspace, workerName, newPaneId) {
+function updateWorkerProcess(workspace, workerName, { pid, startTime = null, logPath = null }) {
   const p = workersJsonPath(workspace);
   const raw = readWorkersRaw(workspace);
   if (!raw || !(workerName in raw)) return false;
 
   const entry = normalizeWorkerEntry(raw[workerName]);
-  entry.paneId = String(newPaneId);
+  entry.pid = normalizePid(pid);
+  entry.startTime = startTime;
+  entry.logPath = logPath ?? entry.logPath;
+  entry.paneId = null;
   raw[workerName] = entry;
 
   const tmp = p + '.' + Math.random().toString(36).slice(2, 8);
   fs.writeFileSync(tmp, JSON.stringify(raw, null, 2), 'utf8');
   fs.renameSync(tmp, p);
   return true;
-}
-
-/**
- * orchestratorのpaneIdを返す（split元のフォールバック用）。存在しなければnull。
- * @param {string} workspace
- * @returns {string|null}
- */
-function getOrchestratorPaneId(workspace) {
-  const raw = readWorkersRaw(workspace);
-  if (!raw || !raw.orchestrator) return null;
-  return normalizeWorkerEntry(raw.orchestrator).paneId;
 }
 
 /**
@@ -119,7 +116,6 @@ function resolveWorkerName(workspace, { issue, skill }) {
 module.exports = {
   workersJsonPath,
   readWorkersRaw,
-  updateWorkerPaneId,
-  getOrchestratorPaneId,
+  updateWorkerProcess,
   resolveWorkerName,
 };

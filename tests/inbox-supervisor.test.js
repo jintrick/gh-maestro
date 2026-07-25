@@ -8,8 +8,7 @@ const path = require('path');
 
 const supervisor = require('../scripts/inbox-supervisor');
 const { spawnSync } = require('../scripts/child-process');
-const { weztermCli } = require('../scripts/wezterm-cli');
-const paneLaunch = require('../scripts/shared/pane-launch');
+const headlessLaunch = require('../scripts/shared/headless-launch');
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
@@ -43,17 +42,16 @@ function withTempDir(fn) {
  * 最小限の .gh-maestro 環境をセットアップする。
  *
  * opts.workers を指定した場合、resume経由の配送テストがそのまま使えるよう
- * （1）orchestratorのpaneIdが未指定なら既定値を補い、
- * （2）各worker（orchestrator除く）のworktreeディレクトリを自動作成する。
- * WezTermへのテキスト注入は廃止し配送は常にresume（ペイン起動）のみを
- * 経路とするため、resumeが辿る前提条件をテストのセットアップ側で満たしておく。
+ * orchestratorエントリを補い、各worker（orchestrator除く）のworktreeディレクトリを
+ * 自動作成する。配送は常にresume（プロセス起動）のみを経路とするため、
+ * resumeが辿る前提条件をテストのセットアップ側で満たしておく。
  */
 function setupWorkspace(dir, opts = {}) {
   const maestroDir = path.join(dir, '.gh-maestro');
   fs.mkdirSync(maestroDir, { recursive: true });
 
   if (opts.workers) {
-    const workers = { orchestrator: { paneId: '1' }, ...opts.workers };
+    const workers = { orchestrator: { agentId: null }, ...opts.workers };
     fs.writeFileSync(path.join(maestroDir, 'workers.json'), JSON.stringify(workers, null, 2));
     for (const name of Object.keys(opts.workers)) {
       if (name === 'orchestrator') continue;
@@ -108,25 +106,42 @@ function resetGhRepoView() {
   });
 }
 
-/** wezterm mocks の実実装にリセット */
-function resetWeztermMocks() {
-  supervisor._setWeztermListPanes((opts) => weztermCli('cli', 'list', '--format', 'json'));
+/** resumeモックが返すPID。既存ワーカーのPIDと区別するために使う */
+const RESUMED_PID = 999;
+
+/**
+ * ワーカー生存判定の既定。
+ * 既存ワーカー（休止中＝resume対象）は false、resumeで新たに起動したプロセスだけ true を返す。
+ * この2つを区別しないと、resume直後の生存確認が必ず失敗してしまう。
+ */
+function setWorkersIdle() {
+  supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
 }
 
-/** 全モックを実実装にリセット */
-/** resumeによるペイン起動が既定で成功するようにpane-launch側のモックを設定する */
-function resetPaneLaunchMocks() {
-  paneLaunch._setWeztermSplitPane(() => ({ status: 0, stdout: '999', stderr: '' }));
-  paneLaunch._setWeztermKillPane(() => ({ status: 0, stdout: '', stderr: '' }));
-  paneLaunch._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
-  paneLaunch._setSleep(() => {});
+/** ワーカー生存判定を「稼働中」に固定する（配送を見送る状態） */
+function setWorkersBusy() {
+  supervisor._setIsWorkerAlive(() => true);
+}
+
+/**
+ * resumeによるheadless起動が既定で成功するようにspawnをモックする。
+ * 実プロセスは1つも起動しない（.claude/rules/test-process-spawn-safety.md）。
+ */
+let lastSpawnCalls = [];
+function resetHeadlessLaunchMocks({ pid = RESUMED_PID } = {}) {
+  lastSpawnCalls = [];
+  headlessLaunch._setSpawn((cmd, args, options) => {
+    lastSpawnCalls.push({ cmd, args, options });
+    return { pid, on() { return this; }, unref() {} };
+  });
+  headlessLaunch._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
 }
 
 function resetAllMocks() {
   resetGhRepoView();
   resetGhApiComments();
-  resetWeztermMocks();
-  resetPaneLaunchMocks();
+  resetHeadlessLaunchMocks();
+  setWorkersIdle();
   // resume直後の生存確認スリープは実待機させない
   supervisor._setSleep(() => {});
   // 配送断念通知は既定では何もしない安全なモック（実spawnを起こさない）
@@ -321,22 +336,23 @@ describe('loadWorkers', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          orchestrator: { paneId: 'p1', agentId: null, issue: null },
-          'issue-5-fix': { paneId: 'p2', agentId: 'claude', issue: 5 },
-          'issue-8-add': { paneId: 'p3', agentId: 'agy', issue: 8 },
+          orchestrator: { agentId: null, issue: null },
+          'issue-5-fix': { pid: 102, startTime: 's2', agentId: 'claude', issue: 5 },
+          'issue-8-add': { pid: 103, startTime: 's3', agentId: 'agy', issue: 8 },
         },
       });
 
       const workers = supervisor.loadWorkers(dir);
       assert.equal(workers.size, 2);
-      assert.equal(workers.get('issue-5-fix').paneId, 'p2');
+      assert.equal(workers.get('issue-5-fix').pid, 102);
+      assert.equal(workers.get('issue-5-fix').startTime, 's2');
       assert.equal(workers.get('issue-5-fix').agentId, 'claude');
       assert.equal(workers.get('issue-5-fix').issue, 5);
-      assert.equal(workers.get('issue-8-add').paneId, 'p3');
+      assert.equal(workers.get('issue-8-add').pid, 103);
     });
   });
 
-  test('旧形式（pane_id文字列）の後方互換', () => {
+  test('レガシー形式（pane_id文字列）も読める（移行前セッションの掃除に必要）', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: { 'old-worker': 'pane-123' },
@@ -368,41 +384,6 @@ describe('loadWorkers', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// isPaneAlive
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe('isPaneAlive', () => {
-  beforeEach(() => resetWeztermMocks());
-
-  test('生存ペインは true、非存在ペインは false', () => {
-    supervisor._setWeztermListPanes(() => ({
-      status: 0,
-      stdout: JSON.stringify([{ pane_id: 123 }, { pane_id: 456 }]),
-      stderr: '',
-    }));
-
-    assert.equal(supervisor.isPaneAlive('123'), true);
-    assert.equal(supervisor.isPaneAlive('456'), true);
-    assert.equal(supervisor.isPaneAlive('789'), false);
-  });
-
-  test('wezterm 失敗時は false（fail-closed）', () => {
-    supervisor._setWeztermListPanes(() => ({
-      status: 1,
-      stdout: '',
-      stderr: 'connection refused',
-    }));
-
-    assert.equal(supervisor.isPaneAlive('123'), false);
-  });
-
-  test('paneId が null/空文字なら false', () => {
-    assert.equal(supervisor.isPaneAlive(null), false);
-    assert.equal(supervisor.isPaneAlive(''), false);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
 // formatMessageForAgent
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -410,22 +391,18 @@ describe('isPaneAlive', () => {
 // deliverMessage
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// 稼働中ペインへのテキスト注入（send-text）による配送は廃止した（実障害:
-// 2026-07-15、WezTermは起動基盤としてのみ使うという設計原則に反していた）。
+// 稼働中プロセスへの入力注入による配送は行わない（実障害: 2026-07-15、
+// WezTermは起動基盤としてのみ使うという設計原則に反していた）。
 // 配送は常にresume（プロセスの起動/再開）のみを経路とする。
 
 describe('Delivery', () => {
-  beforeEach(() => resetWeztermMocks());
+  beforeEach(() => resetAllMocks());
 
-  test('deliverMessage: ペイン生存時は稼働中とみなしpending（送信しない）', () => {
-    supervisor._setWeztermListPanes(() => ({
-      status: 0,
-      stdout: JSON.stringify([{ pane_id: 123 }]),
-      stderr: '',
-    }));
+  test('deliverMessage: プロセス生存時は稼働中とみなしpending（二重起動しない）', () => {
+    setWorkersBusy();
 
     const result = supervisor.deliverMessage({
-      workerName: 'w', paneId: '123', agentId: null,
+      workerName: 'w', entry: { pid: 123, startTime: 's', agentId: null },
       message: { from: 'orch', body: 'hello' }, workspace: '/ws',
       homedir: '/home/user', issue: '5',
     });
@@ -435,15 +412,11 @@ describe('Delivery', () => {
     assert.ok(result.error.includes('alive'));
   });
 
-  test('deliverMessage: ペイン非生存時は pending', () => {
-    supervisor._setWeztermListPanes(() => ({
-      status: 0,
-      stdout: JSON.stringify([{ pane_id: 999 }]),
-      stderr: '',
-    }));
+  test('deliverMessage: プロセス非生存時は pending', () => {
+    setWorkersIdle();
 
     const result = supervisor.deliverMessage({
-      workerName: 'w', paneId: '123', agentId: null,
+      workerName: 'w', entry: { pid: 123, startTime: 's', agentId: null },
       message: { from: 'orch', body: 'hello' }, workspace: '/ws',
       homedir: '/home/user', issue: '5',
     });
@@ -452,9 +425,9 @@ describe('Delivery', () => {
     assert.equal(result.method, 'pending');
   });
 
-  test('deliverMessage: paneId が null の場合は pending', () => {
+  test('deliverMessage: pid が null の場合は pending', () => {
     const result = supervisor.deliverMessage({
-      workerName: 'w', paneId: null, agentId: null,
+      workerName: 'w', entry: { pid: null, agentId: null },
       message: { from: 'orch', body: 'hello' }, workspace: '/ws',
       homedir: '/home/user', issue: '5',
     });
@@ -469,38 +442,30 @@ describe('Delivery', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('resume配線（休止中のセッション再開系ワーカー）', () => {
-  const paneLaunch = require('../scripts/shared/pane-launch');
   const { readWorkersRaw } = require('../scripts/shared/workers-registry');
 
-  /** launchAgentInPane が split-pane に渡す argv（ログインシェルラップ済み）から元のコマンド文字列を復元する */
-  function decodeLoginShellCommand(splitArgs) {
-    const idx = splitArgs.indexOf('-EncodedCommand');
-    if (idx !== -1 && splitArgs[idx + 1]) {
-      return Buffer.from(splitArgs[idx + 1], 'base64').toString('utf16le');
+  /** headless-shim へ渡された shellArgs（ログインシェルラップ済み）から元のコマンド文字列を復元する */
+  function decodeLoginShellCommand(spawnCall) {
+    const shellArgs = JSON.parse(spawnCall.args[1]);
+    const idx = shellArgs.indexOf('-EncodedCommand');
+    if (idx !== -1 && shellArgs[idx + 1]) {
+      return Buffer.from(shellArgs[idx + 1], 'base64').toString('utf16le');
     }
     // bash -lc 経由（Unix）: ラップ後の生argvがそのまま並ぶ
-    return splitArgs.join(' ');
+    return shellArgs.join(' ');
   }
 
   beforeEach(() => {
-    resetWeztermMocks();
-    paneLaunch._setWeztermSplitPane(() => ({ status: 0, stdout: '77', stderr: '' }));
-    paneLaunch._setWeztermKillPane(() => ({ status: 0, stdout: '', stderr: '' }));
-    paneLaunch._setWeztermSendText(() => ({ status: 0, stdout: '', stderr: '' }));
-    paneLaunch._setSleep(() => {});
-    supervisor._setSleep(() => {});
-    // resume直後の生存確認: 既定のsplit-paneモック('77')が生きているものとして扱う
-    // （個別テストで別のpaneIdを返す場合はそのテスト内で上書きする）
-    supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: '77' }]), stderr: '',
-    }));
+    resetAllMocks();
+    // resume直後の生存確認は既定で「生きている」とする（個別テストで上書きする）
+    supervisor._setIsWorkerAlive(() => true);
   });
 
   function setupResumeWorkspace(dir, { workerName = 'issue-7-fix', agentId = 'agy' } = {}) {
     fs.mkdirSync(path.join(dir, '.gh-maestro', 'worktrees', workerName), { recursive: true });
     fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), JSON.stringify({
-      orchestrator: { paneId: '1' },
-      [workerName]: { paneId: '456', agentId, issue: 7 },
+      orchestrator: { agentId: null },
+      [workerName]: { pid: 456, startTime: 'old', agentId, issue: 7 },
     }, null, 2));
   }
 
@@ -508,23 +473,15 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-10-fix', agentId: 'claude' });
 
-      let splitArgs = null;
-      paneLaunch._setWeztermSplitPane((args) => {
-        splitArgs = args;
-        return { status: 0, stdout: '99', stderr: '' };
-      });
-      supervisor._setWeztermListPanes(() => ({
-        status: 0, stdout: JSON.stringify([{ pane_id: '99' }]), stderr: '',
-      }));
-
       const result = supervisor.tryResumeAndDeliver({
         workerName: 'issue-10-fix', agentId: 'claude',
         message: { from: 'orch', body: 'claude宛メッセージ' }, workspace: dir, homedir: '/home',
       });
       assert.equal(result.success, true);
       assert.equal(result.method, 'resume');
-      assert.ok(decodeLoginShellCommand(splitArgs).includes('--continue'));
-      assert.ok(decodeLoginShellCommand(splitArgs).includes('claude宛メッセージ'));
+      const cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
+      assert.ok(cmd.includes('--continue'));
+      assert.ok(cmd.includes('claude宛メッセージ'));
     });
   });
 
@@ -541,8 +498,8 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
       // workers.json のみ用意し、worktreeディレクトリは作らない
       fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
       fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), JSON.stringify({
-        orchestrator: { paneId: '1' },
-        'issue-7-fix': { paneId: '456', agentId: 'agy', issue: 7 },
+        orchestrator: { agentId: null },
+        'issue-7-fix': { pid: 456, agentId: 'agy', issue: 7 },
       }, null, 2));
 
       const result = supervisor.tryResumeAndDeliver({
@@ -555,15 +512,11 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     });
   });
 
-  test('tryResumeAndDeliver: agy成功時はresumeし新paneIdでworkers.jsonを更新する', () => {
+  test('tryResumeAndDeliver: agy成功時はresumeし新pid/startTimeでworkers.jsonを更新する', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
-
-      let splitArgs = null;
-      paneLaunch._setWeztermSplitPane((args) => {
-        splitArgs = args;
-        return { status: 0, stdout: '77', stderr: '' };
-      });
+      resetHeadlessLaunchMocks({ pid: 77 });
+      supervisor._setIsWorkerAlive(() => true);
 
       const result = supervisor.tryResumeAndDeliver({
         workerName: 'issue-7-fix', agentId: 'agy',
@@ -572,16 +525,37 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
 
       assert.equal(result.success, true);
       assert.equal(result.method, 'resume');
-      assert.equal(result.newPaneId, '77');
+      assert.equal(result.pid, 77);
 
-      // 分割元は orchestrator のペイン（'1'）
-      assert.ok(splitArgs.includes('1'));
       // ログインシェルでラップされたコマンド文字列に --continue とメッセージ本文が含まれる
-      assert.ok(decodeLoginShellCommand(splitArgs).includes('--continue'));
-      assert.ok(decodeLoginShellCommand(splitArgs).includes('新着メッセージ本文'));
+      const cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
+      assert.ok(cmd.includes('--continue'));
+      assert.ok(cmd.includes('新着メッセージ本文'));
 
       const raw = readWorkersRaw(dir);
-      assert.equal(raw['issue-7-fix'].paneId, '77');
+      assert.equal(raw['issue-7-fix'].pid, 77);
+      assert.equal(raw['issue-7-fix'].startTime, '2026-07-25T00:00:00.000Z');
+    });
+  });
+
+  test('tryResumeAndDeliver: ワーカーのログは1ファイルに追記され、代理送信用のオフセットが終了フックへ渡る', () => {
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
+      // 前回の実行分がすでに書かれている状態を作る
+      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-7-fix.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, '前回の実行の出力\n', 'utf8');
+      const priorSize = fs.statSync(logPath).size;
+
+      supervisor.tryResumeAndDeliver({
+        workerName: 'issue-7-fix', agentId: 'agy',
+        message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home',
+      });
+
+      const cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
+      assert.ok(cmd.includes('worker-exit-hook.js'), '終了フックが仕込まれている');
+      // 前回分のバイト数がオフセットとして渡る（前回の出力を今回の応答として誤送信しないため）
+      assert.ok(cmd.includes(String(priorSize)), `offset ${priorSize} が渡る: ${cmd}`);
     });
   });
 
@@ -602,30 +576,22 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-9-fix', agentId: 'reasonix' });
 
-      let splitArgs = null;
-      paneLaunch._setWeztermSplitPane((args) => {
-        splitArgs = args;
-        return { status: 0, stdout: '88', stderr: '' };
-      });
-      supervisor._setWeztermListPanes(() => ({
-        status: 0, stdout: JSON.stringify([{ pane_id: '88' }]), stderr: '',
-      }));
-
       const result = supervisor.tryResumeAndDeliver({
         workerName: 'issue-9-fix', agentId: 'reasonix',
         message: { from: 'orch', body: 'reasonix宛メッセージ' }, workspace: dir, homedir: '/home',
       });
       assert.equal(result.success, true);
       assert.equal(result.method, 'resume');
-      assert.ok(decodeLoginShellCommand(splitArgs).includes('--continue'));
-      assert.ok(decodeLoginShellCommand(splitArgs).includes('reasonix宛メッセージ'));
+      const cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
+      assert.ok(cmd.includes('--continue'));
+      assert.ok(cmd.includes('reasonix宛メッセージ'));
     });
   });
 
-  test('tryResumeAndDeliver: ペイン起動失敗時は resume-failed', () => {
+  test('tryResumeAndDeliver: プロセス起動失敗時は resume-failed', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
-      paneLaunch._setWeztermSplitPane(() => ({ status: 1, stdout: '', stderr: 'split boom' }));
+      headlessLaunch._setSpawn(() => { throw new Error('spawn boom'); });
 
       const result = supervisor.tryResumeAndDeliver({
         workerName: 'issue-7-fix', agentId: 'agy',
@@ -636,12 +602,12 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     });
   });
 
-  test('tryResumeAndDeliver: pane作成コマンドは成功したが直後に消失していれば resume-failed（DELIVEREDと誤認識しない）', () => {
+  test('tryResumeAndDeliver: spawnは成功したが直後にプロセスが消失していれば resume-failed（DELIVEREDと誤認識しない）', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
-      paneLaunch._setWeztermSplitPane(() => ({ status: 0, stdout: '77', stderr: '' }));
-      // 生存確認の再チェックでは空リスト（pane 77 が既に消えている）
-      supervisor._setWeztermListPanes(() => ({ status: 0, stdout: '[]', stderr: '' }));
+      resetHeadlessLaunchMocks({ pid: 77 });
+      // 起動直後の生存確認で「既に死んでいる」とする
+      supervisor._setIsWorkerAlive(() => false);
 
       const result = supervisor.tryResumeAndDeliver({
         workerName: 'issue-7-fix', agentId: 'agy',
@@ -650,24 +616,22 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
 
       assert.equal(result.success, false);
       assert.equal(result.method, 'resume-failed');
-      assert.ok(result.error.includes('77'), `error should mention the vanished paneId: ${result.error}`);
+      assert.ok(result.error.includes('77'), `error should mention the vanished pid: ${result.error}`);
 
-      // workers.json は古いpaneId('456')のまま更新されない
+      // workers.json は古いpid(456)のまま更新されない
       const raw = readWorkersRaw(dir);
-      assert.equal(raw['issue-7-fix'].paneId, '456');
+      assert.equal(raw['issue-7-fix'].pid, 456);
     });
   });
 
-  test('deliverMessage: ペイン非生存 + session-resume系エージェントは resume を試みる', () => {
+  test('deliverMessage: プロセス非生存 + session-resume系エージェントは resume を試みる', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
-      // '456'（旧pane）は非生存、resumeで作られる新pane('77')は生存、として扱う
-      supervisor._setWeztermListPanes(() => ({
-        status: 0, stdout: JSON.stringify([{ pane_id: '77' }]), stderr: '',
-      }));
+      // 休止中とみなす（resumeが走る）
+      supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
 
       const result = supervisor.deliverMessage({
-        workerName: 'issue-7-fix', paneId: '456', agentId: 'agy',
+        workerName: 'issue-7-fix', entry: { pid: 456, startTime: 'old', agentId: 'agy' },
         message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home', issue: '7',
       });
 
@@ -676,16 +640,13 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     });
   });
 
-  test('deliverMessage: ペイン非生存 + claude も resume を試みる', () => {
+  test('deliverMessage: プロセス非生存 + claude も resume を試みる', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'claude' });
-      // '456'（旧pane）は非生存、resumeで作られる新pane('77')は生存、として扱う
-      supervisor._setWeztermListPanes(() => ({
-        status: 0, stdout: JSON.stringify([{ pane_id: '77' }]), stderr: '',
-      }));
+      supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
 
       const result = supervisor.deliverMessage({
-        workerName: 'issue-7-fix', paneId: '456', agentId: 'claude',
+        workerName: 'issue-7-fix', entry: { pid: 456, startTime: 'old', agentId: 'claude' },
         message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home', issue: '7',
       });
 
@@ -801,16 +762,12 @@ describe('runOnce scan and deliver cycle', () => {
         body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test',
       },
     ]));
-    // ペインは非生存（休止中）とし、resume経由で配送させる。resume後の生存確認では
-    // resumeで作られる新pane('999'。resetPaneLaunchMocksの既定split-pane戻り値)を生存扱いにする
-    supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: '999' }]), stderr: '',
-    }));
+    // 既存ワーカーは休止中とし、resume経由で配送させる（resetAllMocks の既定）。
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
         },
       });
 
@@ -842,16 +799,12 @@ describe('runOnce scan and deliver cycle', () => {
         body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test 2',
       },
     ]));
-    // ペインは非生存（休止中）とし、resume経由で配送させる。resume後の生存確認では
-    // resumeで作られる新pane('999'。resetPaneLaunchMocksの既定split-pane戻り値)を生存扱いにする
-    supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: '999' }]), stderr: '',
-    }));
+    // 既存ワーカーは休止中とし、resume経由で配送させる（resetAllMocks の既定）。
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
         },
         cursors: {
           'issue-5-fix': {
@@ -880,16 +833,14 @@ describe('runOnce scan and deliver cycle', () => {
         body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test',
       },
     ]));
-    // ペイン非生存 → resumeを試みるが、ペイン起動自体が失敗する
-    supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([]), stderr: '',
-    }));
-    paneLaunch._setWeztermSplitPane(() => ({ status: 1, stdout: '', stderr: 'split boom' }));
+    // プロセス非生存 → resumeを試みるが、プロセス起動自体が失敗する
+    setWorkersIdle();
+    headlessLaunch._setSpawn(() => { throw new Error('spawn boom'); });
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
         },
       });
 
@@ -912,15 +863,11 @@ describe('runOnce scan and deliver cycle', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
     // ペインは非生存（休止中）とし、resume経由での再試行を成功させる。resume後の生存確認では
-    // resumeで作られる新pane('999'。resetPaneLaunchMocksの既定split-pane戻り値)を生存扱いにする
-    supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: '999' }]), stderr: '',
-    }));
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
         },
         cursors: {
           'issue-5-fix': {
@@ -964,15 +911,11 @@ describe('runOnce scan and deliver cycle', () => {
       },
     ]));
     // ペインは非生存（休止中）とし、resume経由での再試行を成功させる。resume後の生存確認では
-    // resumeで作られる新pane('999'。resetPaneLaunchMocksの既定split-pane戻り値)を生存扱いにする
-    supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: '999' }]), stderr: '',
-    }));
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
         },
         cursors: {
           'issue-5-fix': {
@@ -1017,7 +960,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
         },
         cursors: {
           'issue-5-fix': {
@@ -1050,8 +993,7 @@ describe('runOnce scan and deliver cycle', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
     // ペイン非生存 → resumeを試みるが、ペイン起動自体が失敗し続ける（真の失敗を再現）
-    supervisor._setWeztermListPanes(() => ({ status: 0, stdout: JSON.stringify([]), stderr: '' }));
-    paneLaunch._setWeztermSplitPane(() => ({ status: 1, stdout: '', stderr: 'split boom' }));
+    headlessLaunch._setSpawn(() => { throw new Error('spawn boom'); });
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -1062,7 +1004,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
         },
         cursors: {
           'issue-5-fix': {
@@ -1109,7 +1051,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
         },
       });
 
@@ -1136,7 +1078,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 },
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
         },
       });
 
@@ -1160,7 +1102,7 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'no-issue-worker': { paneId: '123', agentId: 'agy', issue: null },
+          'no-issue-worker': { pid: 123, startTime: 'old', agentId: 'agy', issue: null },
         },
       });
 
@@ -1192,16 +1134,12 @@ describe('runOnce scan and deliver cycle', () => {
       return { status: 0, stdout: JSON.stringify([]), stderr: '' };
     });
     // どちらのペインも非生存（休止中）とし、resume経由で配送させる。resume後の生存確認では
-    // resumeで作られる新pane('999'。resetPaneLaunchMocksの既定split-pane戻り値)を生存扱いにする
-    supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: '999' }]), stderr: '',
-    }));
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '111', agentId: 'agy', issue: 5 },
-          'issue-8-add': { paneId: '222', agentId: 'agy', issue: 8 },
+          'issue-5-fix': { pid: 111, startTime: 'old', agentId: 'agy', issue: 5 },
+          'issue-8-add': { pid: 222, startTime: 'old', agentId: 'agy', issue: 8 },
         },
       });
 
@@ -1233,16 +1171,15 @@ describe('runOnce scan and deliver cycle', () => {
         body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> msg',
       },
     ]));
-    let splitPaneCalled = false;
-    supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: 456 }]), stderr: '',
-    }));
-    paneLaunch._setWeztermSplitPane(() => { splitPaneCalled = true; return { status: 0, stdout: '999', stderr: '' }; });
+    // ワーカーは稼働中（作業中）とする。稼働中には一切書き込まない＝resumeしないことを確認する。
+    setWorkersBusy();
+    let resumeSpawned = false;
+    headlessLaunch._setSpawn(() => { resumeSpawned = true; return { pid: 999, on() { return this; }, unref() {} }; });
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
         workers: {
-          'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 },
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'claude', issue: 5 },
         },
       });
 
@@ -1251,7 +1188,7 @@ describe('runOnce scan and deliver cycle', () => {
       r.runOnce();
 
       assert.ok(r.lines.some(l => l.startsWith('DETECTED:issue-5-fix:')), 'claude系workerもスキャン・検出対象に含まれる');
-      assert.equal(splitPaneCalled, false, 'ペインが稼働中の間はresumeで書き込まない');
+      assert.equal(resumeSpawned, false, 'ワーカーが稼働中の間はresumeで書き込まない');
 
       const lastLine = r.lines[r.lines.length - 1];
       assert.ok(lastLine.includes('SCAN_END:1:1'), `claude系も検出されるはず: ${lastLine}`);
@@ -1268,11 +1205,7 @@ describe('Reliability: restart continuity', () => {
 
   test('再起動後もカーソルから継続できる', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
-    // ペインは非生存（休止中）とし、resume経由で配送させる。resume後の生存確認では
-    // resumeで作られる新pane('999'。resetPaneLaunchMocksの既定split-pane戻り値)を生存扱いにする
-    supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: '999' }]), stderr: '',
-    }));
+    // 既存ワーカーは休止中とし、resume経由で配送させる（resetAllMocks の既定）。
 
     // 1回目の run: コメント 700 を配送
     supervisor._setGhApiComments(mockGhApiComments([
@@ -1284,7 +1217,7 @@ describe('Reliability: restart continuity', () => {
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
-        workers: { 'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 } },
+        workers: { 'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 } },
       });
 
       const r1 = runMain(['--workspace', dir]);
@@ -1307,7 +1240,7 @@ describe('Reliability: restart continuity', () => {
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
-        workers: { 'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 } },
+        workers: { 'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 } },
         cursors: {
           'issue-5-fix': {
             since: '2024-06-01T12:00:00Z',
@@ -1333,14 +1266,10 @@ describe('Reliability: restart continuity', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
     // 再試行時もペインは非生存（休止中）のままとし、resume経由で配送させる。resume後の生存確認では
-    // resumeで作られる新pane('999'。resetPaneLaunchMocksの既定split-pane戻り値)を生存扱いにする
-    supervisor._setWeztermListPanes(() => ({
-      status: 0, stdout: JSON.stringify([{ pane_id: '999' }]), stderr: '',
-    }));
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
-        workers: { 'issue-5-fix': { paneId: '456', agentId: 'agy', issue: 5 } },
+        workers: { 'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 } },
         cursors: {
           'issue-5-fix': {
             since: '2024-06-01T12:00:00Z',
@@ -1392,7 +1321,7 @@ describe('Duplicate delivery prevention', () => {
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
-        workers: { 'issue-5-fix': { paneId: '456', agentId: 'claude', issue: 5 } },
+        workers: { 'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'claude', issue: 5 } },
         cursors: {
           'issue-5-fix': {
             since: '2024-06-01T11:00:00Z', // コメントより前
