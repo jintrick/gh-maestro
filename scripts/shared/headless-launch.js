@@ -29,10 +29,12 @@ const SHIM_PATH = path.join(__dirname, 'headless-shim.js');
 // NO_COLOR（https://no-color.org/）は多くのCLIが尊重する事実上の標準で、
 // 対応しないCLIは単に無視するため、全ワーカー共通で設定して差し支えない。
 //
-// 実機検証（2026-07-25）の注意点: codex / claude / agy は非TTYの時点で既に無色だった。
-// reasonix v1.16.0-rc.1 は NO_COLOR=1 でも TERM=dumb でも dim（\x1b[2m）を出し続ける
-// ——特に `--show-thinking` 時に顕著（ESC 30個 vs 2個）。この設定は「正しい信号を出して
-// おく」ためのものであり、reasonix の色を今すぐ消す効果は無い。
+// 実機検証（2026-07-25、ログの生バイトでESC数を計測）:
+//   codex / claude / agy … ESC 0。非TTYを検出して自前で無色化している
+//   reasonix          … ESC あり。NO_COLOR=1 でも TERM=dumb でも非TTYでも消えない
+//                        （thinking表示にはカラー判定を適用しない意図的な設計。v1.17.20で確認）
+// reasonix 側は `--show-thinking` を外すことで実害を潰した（agent-defaults.json）。
+// この設定は残りのCLI・将来追加されるCLIに対して「正しい信号を出しておく」ためのもの。
 const HEADLESS_ENV = Object.freeze({ NO_COLOR: '1' });
 
 // テスト中に実ワーカー（エージェントCLI）を起動してしまう事故を構造的に防ぐガード。

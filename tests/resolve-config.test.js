@@ -449,7 +449,8 @@ test('resolveAgentConfig: reasonix のReview Manager用execArgsにも動的ス�
     const agent = resolveAgentConfig('reasonix', { homedir: home });
     assert.ok(agent);
     assert.ok(agent.execArgs.includes('run'));
-    assert.ok(agent.execArgs.includes('--show-thinking'));
+    // Review Manager用のexecArgsは作業ディレクトリを明示する（--dir {workspace}）
+    assert.ok(agent.execArgs.includes('--dir'));
 
     if (agent.command === 'node') {
       assert.ok(agent.execArgs[0].endsWith('reasonix.js'));

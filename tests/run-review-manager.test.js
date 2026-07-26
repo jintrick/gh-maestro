@@ -95,7 +95,7 @@ test('buildReviewManagerAgentArgs: AntigravityはRMで--printを使い通常の-
 test('buildReviewManagerAgentArgs: ReasonixはRMでrunと位置引数プロンプトを使う', () => {
   const args = buildReviewManagerAgentArgs({
     command: 'node',
-    execArgs: ['C:\\tools\\reasonix.js', 'run', '--dir', '{workspace}', '--show-thinking'],
+    execArgs: ['C:\\tools\\reasonix.js', 'run', '--dir', '{workspace}'],
     execPromptDelivery: 'positional',
     promptDelivery: 'send-text-after-launch',
   }, {
@@ -105,7 +105,7 @@ test('buildReviewManagerAgentArgs: ReasonixはRMでrunと位置引数プロン�
   });
 
   assert.deepEqual(args, [
-    'node', 'C:\\tools\\reasonix.js', 'run', '--dir', 'C:\\review-worktree', '--show-thinking',
+    'node', 'C:\\tools\\reasonix.js', 'run', '--dir', 'C:\\review-worktree',
     'Read C:/tmp/review-manager.md and execute it.',
   ]);
 });
