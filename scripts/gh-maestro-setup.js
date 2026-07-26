@@ -19,11 +19,6 @@ WezTerm稼働（assistant用）/ git リポジトリ / gh 認証を検証し、.
 検証）を用意する。初回実行後は sentinel (.gh-maestro/setup-ok) で環境チェックのみスキップし、
 冪等なセットアップステップは毎回実行する。通常は /gh-maestro の起動フックが呼ぶ。`;
 
-if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
-  console.log(USAGE);
-  process.exit(0);
-}
-
 const workspaceRoot = process.argv[2] ?? process.cwd();
 
 function step(msg)  { console.log(`\x1b[36m[gh-maestro] ${msg}\x1b[0m`); }
@@ -53,8 +48,10 @@ function getRemoteRepo() {
 // ローカル spawn 方式に移行したため、デプロイ済みファイルを削除する。
 // sentinel (.gh-maestro/ai-review-ok) が存在するプロジェクトが対象。
 
-const aiReviewSentinel = resolve(workspaceRoot, '.gh-maestro', 'ai-review-ok');
-if (existsSync(aiReviewSentinel)) {
+function retireAiReviewCi() {
+  const aiReviewSentinel = resolve(workspaceRoot, '.gh-maestro', 'ai-review-ok');
+  if (!existsSync(aiReviewSentinel)) return;
+
   const repoName = getRemoteRepo();
   if (repoName) {
     step('Retiring GitHub Actions AI Review CI...');
@@ -106,7 +103,7 @@ if (existsSync(aiReviewSentinel)) {
 // ─── 1. 環境チェック ──────────────────────────────────────────────────────────
 
 const sentinelPath = resolve(workspaceRoot, '.gh-maestro', 'setup-ok');
-const isFirstRun = !existsSync(sentinelPath);
+const isFirstRun = () => !existsSync(sentinelPath);
 
 function checkEnvironment() {
   step('Checking prerequisites...');
@@ -346,22 +343,47 @@ function reportHookResult(label, result) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-// Sentinel gates only expensive environment checks.
-// Idempotent setup steps (ensure*) run every invocation so new steps
-// apply automatically to existing projects.
-if (isFirstRun) {
-  checkEnvironment();
+/**
+ * セットアップ本体。
+ *
+ * このスクリプトの副作用（git hooks の書き換え・.gitignore 追記・dev ブランチ作成・
+ * GitHub API での旧CIファイル削除）は、すべてこの関数の内側に閉じている。
+ * かつては全てがトップレベルにあり、`require('./gh-maestro-setup')` するだけで
+ * これらが実行された——実際に動作確認のつもりで require され、git hooks が
+ * 書き換わる事故が起きた（gh api DELETE まで走りうる状態だった）。
+ */
+function main() {
+  if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+
+  retireAiReviewCi();
+
+  // Sentinel gates only expensive environment checks.
+  // Idempotent setup steps (ensure*) run every invocation so new steps
+  // apply automatically to existing projects.
+  const firstRun = isFirstRun();
+  if (firstRun) {
+    checkEnvironment();
+  }
+
+  prepareDirectories();
+  ensureGitIgnore();
+  ensureDevBranch();
+  ensurePreCommitHook();
+  ensurePrePushHook();
+
+  if (firstRun) {
+    mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
+    writeFileSync(sentinelPath, '');
+    ok('Setup complete (subsequent /gh-maestro invocations will skip environment checks)');
+    console.log('\ngh-maestro ready.\n');
+  }
 }
 
-prepareDirectories();
-ensureGitIgnore();
-ensureDevBranch();
-ensurePreCommitHook();
-ensurePrePushHook();
+module.exports = { main };
 
-if (isFirstRun) {
-  mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
-  writeFileSync(sentinelPath, '');
-  ok('Setup complete (subsequent /gh-maestro invocations will skip environment checks)');
-  console.log('\ngh-maestro ready.\n');
+if (require.main === module) {
+  main();
 }
