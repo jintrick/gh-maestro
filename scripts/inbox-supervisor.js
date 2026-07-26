@@ -244,7 +244,7 @@ function loadWorkers(workspace) {
 // 休止するのを待って次のスキャンサイクルでresumeする。
 
 /**
- * 休止中（ペイン非生存）のセッション再開系ワーカーを resume() で復帰させ、メッセージを配送する。
+ * 休止中（プロセス非生存）のセッション再開系ワーカーを resume() で復帰させ、メッセージを配送する。
  *
  * 対象は sessionResume: true かつ asynchronousNotification: false のエージェント
  * （claude/claude-ds/claude-ds-pro/reasonix/agy/codex/codex-pro）。条件を満たさない
@@ -418,10 +418,10 @@ function deliverMessage({ workerName, entry, message, workspace, homedir, issue 
  * pending エントリが再試行可能か判定する。
  * 指数バックオフ: RETRY_BASE_DELAY_MS * 2^(retries-1)（MAX_RETRIES到達分で頭打ち）
  *
- * lastMethod === 'pending'（相手のペインが稼働中＝作業中で、resumeを試みる前に見送った状態。
+ * lastMethod === 'pending'（相手のプロセスが稼働中＝作業中で、resumeを試みる前に見送った状態。
  * deliverMessage() 参照）はMAX_RETRIESの対象外とする。これは配送の失敗ではなく、
  * 相手が休止するのを待っているだけの正常な状態であり、回数で恒久的に諦めてはならない
- * （実障害: pane busyのまま5回を消費し、その後ペインが休止してもメッセージが永久に
+ * （実障害: busyのまま5回を消費し、その後ワーカーが休止してもメッセージが永久に
  * 再試行されなくなっていた）。真の失敗（lastMethod === 'resume-failed'等）のみ、
  * 従来通りMAX_RETRIES到達で諦める。
  *

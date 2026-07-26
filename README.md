@@ -7,7 +7,7 @@ GitHubを永続ストアとして、複数のAIエージェントを協調動作
 | 項目 | 要件 |
 |---|---|
 | OS | Windows / Linux / macOS |
-| ターミナル | [WezTerm](https://wezfurlong.org/wezterm/) |
+| ターミナル | [WezTerm](https://wezfurlong.org/wezterm/)（Issueごとに自動起動する対話型ワーカー assistant のウィンドウに使用。ワーカー本体はターミナルを使わない） |
 | ランタイム | Node.js 18以上 |
 | AIエージェント | `claude`（Claude Code）または `agy`（Antigravity CLI） |
 | GitHub CLI | `gh`（`gh auth login` 済み） |

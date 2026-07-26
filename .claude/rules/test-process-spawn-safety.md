@@ -7,11 +7,17 @@ paths:
 
 # テスト内での実プロセス spawn 禁止
 
-**アーキテクチャ原則: detached プロセスをそもそも作らない。** gh-maestro の通信基盤は GitHub Issue コメントベースに移行済み（`docs/github-comm-plan.md`）。ポーリングはすべて呼び出し元エージェントのターン内で blocking 実行され、detached な常駐プロセスは存在しない。テストが実 spawn を必要とする根拠もない。
+**アーキテクチャ原則: detached な「常駐ポーラー」を作らない。** gh-maestro の通信基盤は GitHub Issue コメントベースに移行済み（`docs/github-comm-plan.md`）。ポーリングはすべて呼び出し元エージェントのターン内で blocking 実行される。
 
-過去に `.gh-maestro` のプロセス群（poller / notifier / worker）は detached な常駐プロセスを起動していた。単一のテストスイート実行で detached poller が **65 プロセス・CPU 100%** に達し、手動強制停止が必要になった事例がある。
+過去に `.gh-maestro` のプロセス群（poller / notifier）は detached な常駐プロセスを起動していた。単一のテストスイート実行で detached poller が **65 プロセス・CPU 100%** に達し、手動強制停止が必要になった事例がある。
 
-- **テストは poller / watcher / detached child process を実起動しない。** spawn を env フラグでゲートするか、spawn 関数を注入してモックし、**テストは実プロセスを 0 個 spawn する**。
+**ワーカー本体プロセスはこの禁止の対象外である。** Issue #151 以降、ワーカーは `shared/headless-launch.js` により detached で起動される（起動元の使い捨てCLIが終了しても生き続ける必要があるため）。ただしこれは**一度きりの実行で自然終了する**プロセスであり、無限にポーリングし続ける常駐プロセスとは性質が異なる。区別の基準は「終わるかどうか」であって「detached かどうか」ではない。
+
+- 実障害（Issue #151 Phase 2）: 引数バリデーションだけを検証するテストが、ガードの無い状態で worktree 作成とエージェント起動まで到達し、実際に `claude.exe` が **4本起動してトークンを消費**した。うち1本は stray worktree 内でテストスイートまで走り始めていた。`WEZTERM_PANE` 必須チェックが偶然の安全弁になっており、headless 化でそれが失われたことが原因。
+- 対策として `launchAgentHeadless` は `NODE_TEST_CONTEXT`（`node --test` がテストファイルへ自動設定し、そこから spawn された子プロセスにも継承される）を検出したら実起動を拒否する。テスト側の設定漏れに依存せず効く。spawn を注入済みの場合のみ通す。
+
+- **テストは poller / watcher / ワーカー / エージェントCLI を実起動しない。** spawn を env フラグでゲートするか、spawn 関数を注入してモックし、**テストは実プロセスを 0 個 spawn する**。
+- **引数バリデーションだけを見たいテストは、副作用の手前で確実に停止させる。** 全引数を妥当な値で埋めると `spawn-worker.js` は worktree を作りエージェントを起動する。実在しない `--agent` を渡す等、検証の後・副作用の前で落ちる引数を選ぶこと。
 - **ゲートするのは実 spawn であって、テストではない。** env フラグ/注入で抑止するのは実プロセスの spawn。テスト本体は既定スイート（`npm test`）で必ず実行する。テストごと env でスキップするとその回帰カバレッジが静かに消える。実 spawn 回避と既定実行の両立にはモック注入を優先。
 - **`detached` + `unref` のプロセスはテストランナーをブロックも失敗もさせない。** `node --test` は緑で完走するため「全テスト pass」ではこの被害を検出できない。緑を安全の根拠にしない。
 - **spawn しうるコードのテスト実行後は、孤児プロセスが 0 であることを確認する。** 例（Windows）: `powershell -NoProfile -Command "@(Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | ? { $_.CommandLine -like '*node --test*' }).Count"` が 0（テストランナー自身が終了すれば孤児は残らない）。

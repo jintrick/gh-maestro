@@ -59,8 +59,9 @@ function buildAgentCommandArgs(agentConfig, opts = {}) {
  * @param {object} opts
  * @param {string} opts.shortPrompt - 再開後に伝える新着メッセージ本文
  * @returns {{ argv: string[], afterLaunchText: string|null }}
- *   argv: wezterm split-pane に渡すエージェント起動コマンド一式
- *   afterLaunchText: send-text-after-launch 方式の場合のみ非null（ペイン起動後に別途送信する本文）
+ *   argv: エージェント起動コマンド一式（headless-launch.js へ渡す）
+ *   afterLaunchText: send-text-after-launch 方式の場合のみ非null。headless実行では
+ *     画面への入力注入ができないため、呼び出し元はこれが非nullなら配送を中止する
  */
 function buildAgentResumeCommandArgs(agentConfig, resumeArgs, opts = {}) {
   if (!agentConfig || typeof agentConfig !== 'object') {
