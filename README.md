@@ -199,12 +199,3 @@ skills/gh-maestro-reviewer/
 }
 ```
 
-### reviewManagerVisible
-
-Review Manager の実行ペインを可視化するかどうかを制御するboolean。`true` に設定すると、Review Manager が起動したターミナルペインが前面に表示される（`false` の場合はバックグラウンド実行）。解決順序は workspace config → global config → デフォルト `false`。型が `boolean` 以外の値は無視される（fail-closed）。
-
-```json
-{
-  "reviewManagerVisible": true
-}
-```

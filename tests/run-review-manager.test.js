@@ -17,7 +17,7 @@ const os = require('os');
 // 自身がPR diffを見た上で判断する方式に一本化した（skills/gh-maestro-reviewer/SKILL.md参照）。
 const {
   buildPrompt,
-  buildReviewManagerAgentArgs, runAgentHeadless, runAgentVisible, buildVisiblePaneArgs,
+  buildReviewManagerAgentArgs, runAgentHeadless,
 } = require('../scripts/run-review-manager');
 const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'run-review-manager.js');
@@ -65,15 +65,61 @@ test('サブプロセス経由: 位置引数が不足しているとUsageエラ�
   assert.match(r.stderr, /Usage/);
 });
 
-// ── runAgentHeadless / runAgentVisible ──────────────────────────────────
+// ── runAgentHeadless ─────────────────────────────────────────────────────
 // Codex実行そのものはネットワーク/実エージェント依存のため統合テスト対象外。
-// ここではプロセスをspawnしても即終了する軽量コマンド、または
-// spawnに到達しないフォールバック分岐だけを確認する
+// ここではspawnしても即終了する軽量コマンドだけを使う
 // （.claude/rules/test-process-spawn-safety.md 準拠: detachしない同期spawnのみ）。
+//
+// 可視ペイン実行（runAgentVisible / buildVisiblePaneArgs）はIssue #151で廃止した。
+// RMの実行記録はfd直接リダイレクトによるログ追記へ一本化されている。
 
 test('runAgentHeadless: 軽量コマンドの終了コードをそのまま返す', () => {
-  const result = runAgentHeadless([process.execPath, '-e', 'process.exit(0)'], tmpBase);
+  const logFile = path.join(tmpBase, 'rm-exit.log');
+  const result = runAgentHeadless([process.execPath, '-e', 'process.exit(0)'], tmpBase, logFile);
   assert.equal(result.status, 0);
+});
+
+test('runAgentHeadless: 非ゼロ終了コードもそのまま返す', () => {
+  const logFile = path.join(tmpBase, 'rm-exit-nonzero.log');
+  const result = runAgentHeadless([process.execPath, '-e', 'process.exit(3)'], tmpBase, logFile);
+  assert.equal(result.status, 3);
+});
+
+test('runAgentHeadless: 標準出力・標準エラーをログファイルへ直接書き出す', () => {
+  // 以前は出力をメモリにバッファし完了後にまとめて書いていたため、実行中は何も見えなかった。
+  const logFile = path.join(tmpBase, 'rm-capture.log');
+  runAgentHeadless(
+    [process.execPath, '-e', "console.log('stdoutマーカー'); console.error('stderrマーカー');"],
+    tmpBase, logFile,
+  );
+
+  const content = fs.readFileSync(logFile, 'utf8');
+  assert.match(content, /stdoutマーカー/);
+  assert.match(content, /stderrマーカー/, '標準エラーも同じログへ集約される');
+  assert.ok(!content.includes('�'), `マルチバイト文字が文字化けしない: ${content}`);
+});
+
+test('runAgentHeadless: 既存ログへ追記する（launcherが書いた行を消さない）', () => {
+  const logFile = path.join(tmpBase, 'rm-append.log');
+  fs.writeFileSync(logFile, '[launcher] review started\n', 'utf8');
+
+  runAgentHeadless([process.execPath, '-e', "console.log('エージェント出力')"], tmpBase, logFile);
+
+  const content = fs.readFileSync(logFile, 'utf8');
+  assert.match(content, /\[launcher\] review started/);
+  assert.match(content, /エージェント出力/);
+});
+
+test('runAgentHeadless: stdin は継承しない（TTY不在での入力待ちハングを防ぐ）', () => {
+  // codex exec は起動時に stdin を読む。継承すると入力待ちでハングしうる。
+  const logFile = path.join(tmpBase, 'rm-stdin.log');
+  const result = runAgentHeadless(
+    [process.execPath, '-e', "const fs=require('fs'); let d=''; try { d=fs.readFileSync(0,'utf8'); } catch(e) { d='(読めない)'; } console.log('stdin='+JSON.stringify(d));"],
+    tmpBase, logFile,
+  );
+
+  assert.equal(result.status, 0, 'stdin待ちでハングせず完了する');
+  assert.match(fs.readFileSync(logFile, 'utf8'), /stdin=/);
 });
 test('buildReviewManagerAgentArgs: AntigravityはRMで--printを使い通常の-iを使わない', () => {
   const defaults = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'agent-defaults.json'), 'utf8'));
@@ -108,80 +154,4 @@ test('buildReviewManagerAgentArgs: ReasonixはRMでrunと位置引数プロン�
     'node', 'C:\\tools\\reasonix.js', 'run', '--dir', 'C:\\review-worktree',
     'Read C:/tmp/review-manager.md and execute it.',
   ]);
-});
-test('runAgentVisible: WEZTERM_PANE未設定ならwezterm等を呼ばずnullを返す（headlessへフォールバック）', () => {
-  const originalPane = process.env.WEZTERM_PANE;
-  delete process.env.WEZTERM_PANE;
-  try {
-    const logs = [];
-    const result = runAgentVisible(['dummy-cmd'], tmpBase, path.join(tmpBase, 'nonexistent-output.json'), (m) => logs.push(m));
-    assert.equal(result, null);
-    assert.ok(logs.some(m => m.includes('WEZTERM_PANE')));
-  } finally {
-    if (originalPane !== undefined) process.env.WEZTERM_PANE = originalPane;
-  }
-});
-
-// ── buildVisiblePaneArgs ─────────────────────────────────────────────────
-// 可視ペインは`exec`によるシェル置換をしないため、エージェント終了後に
-// 終了コードをexitMarkerFileへ書き出す後続ステップを挟める（PR #103 Review Manager指摘）。
-
-test('buildVisiblePaneArgs (win32): pwshの $LASTEXITCODE をexitMarkerFileへ書き出すコマンドを構築する', () => {
-  const args = buildVisiblePaneArgs(['codex.exe', 'exec', 'hello world'], 'C:\\ws\\out.json.exitcode', 'win32');
-  assert.deepEqual(args.slice(0, 3), ['pwsh', '-NoLogo', '-EncodedCommand']);
-  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
-  assert.match(decoded, /& 'codex\.exe' 'exec' 'hello world'/);
-  assert.match(decoded, /Set-Content -LiteralPath 'C:\\ws\\out\.json\.exitcode' -Value \$LASTEXITCODE/);
-});
-
-test('buildVisiblePaneArgs (win32): 引数中のシングルクォートをエスケープする', () => {
-  const args = buildVisiblePaneArgs(["it's"], 'C:\\ws\\o.exitcode', 'win32');
-  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
-  assert.match(decoded, /'it''s'/);
-});
-
-test('buildVisiblePaneArgs (win32): ログ複製のパイプ（Tee-Object）を構築しない', () => {
-  // 第4引数（旧captureLogPath）を渡しても無視され、パイプは復活しない（Issue #151）
-  const args = buildVisiblePaneArgs(['codex.exe', 'exec'], 'C:\\ws\\out.json.exitcode', 'win32', 'C:\\ws\\review-manager-7.log');
-  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
-  assert.doesNotMatch(decoded, /Tee-Object/);
-  assert.doesNotMatch(decoded, /review-manager-7\.log/);
-  assert.ok(!decoded.includes('|'), `パイプ演算子が含まれない: ${decoded}`);
-  assert.match(decoded, /Set-Content -LiteralPath 'C:\\ws\\out\.json\.exitcode' -Value \$LASTEXITCODE/);
-});
-
-test('buildVisiblePaneArgs (posix): ログ複製のパイプ（tee）を構築しない', () => {
-  const args = buildVisiblePaneArgs(['codex', 'exec'], '/tmp/out.json.exitcode', 'linux', '/tmp/review-manager-7.log');
-  assert.equal(args[0], 'bash');
-  assert.doesNotMatch(args[2], /tee/);
-  assert.doesNotMatch(args[2], /PIPESTATUS/);
-  assert.match(args[2], /echo \$\? > '\/tmp\/out\.json\.exitcode'/);
-});
-
-test('buildVisiblePaneArgs (posix): 終了コードを $? でexitMarkerFileへ書き出す', () => {
-  const args = buildVisiblePaneArgs(['codex', 'exec'], '/tmp/out.json.exitcode', 'linux');
-  assert.equal(args[0], 'bash');
-  assert.equal(args[1], '-lc');
-  assert.match(args[2], /echo \$\? > '\/tmp\/out\.json\.exitcode'/);
-  assert.deepEqual(args.slice(3), ['codex', 'exec']);
-});
-
-// ── runAgentVisible: split-pane自体に失敗した場合はheadlessへフォールバックする ──
-// 実際のタイムアウト→kill-pane経路（buildVisiblePaneArgsの出力が実際に使われ、
-// エージェント終了後にexitMarkerFileが現れる）はwezterm実機とエージェントの実起動が
-// 必要なため統合テスト対象外（.claude/rules/test-process-spawn-safety.md 準拠）。
-// ここではPANE指定はあるがwezterm split-paneが失敗する（未インストール/不正なpane-id）
-// ケースでnullを返すことだけを確認する。
-
-test('runAgentVisible: wezterm split-paneが失敗するとnullを返す（headlessへフォールバック）', () => {
-  const originalPane = process.env.WEZTERM_PANE;
-  process.env.WEZTERM_PANE = '999';
-  try {
-    const logs = [];
-    const result = runAgentVisible(['dummy-cmd'], tmpBase, path.join(tmpBase, 'nonexistent-output-2.json'), (m) => logs.push(m));
-    assert.equal(result, null);
-  } finally {
-    if (originalPane !== undefined) process.env.WEZTERM_PANE = originalPane;
-    else delete process.env.WEZTERM_PANE;
-  }
 });
