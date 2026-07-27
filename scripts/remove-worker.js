@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // remove-worker.js
-// ワーカーペインをkillし、worktreeを即座に削除し、workers.jsonからエントリを削除する。
+// ワーカープロセスをkillし、worktreeを即座に削除し、workers.jsonからエントリを削除する。
 // ディレクトリ実体がロックで残っても（kill直後のハンドル未解放。Windowsでは正常）
 // 次回reset-session.jsがjunction非追跡で安全に掃除する。残骸を手動rmしないこと。
 //
@@ -20,7 +20,7 @@ const { sweepRegistry } = require('./process-lifecycle');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { resolveWorkerName } = require('./shared/workers-registry');
 
-const USAGE = `remove-worker.js — ワーカーのペインを kill し worktree を削除する
+const USAGE = `remove-worker.js — ワーカープロセスを kill し worktree を削除する
 
 Usage: node remove-worker.js --worker-name <name> [--workspace <path>]
        node remove-worker.js --issue <N> --skill <role> [--workspace <path>]
@@ -33,7 +33,8 @@ Options:
   --workspace <path>    ワークスペース（デフォルト CWD）
 
 --worker-name か〈--issue + --skill〉のいずれかで削除対象を指定する。
-ペインを kill し、worktree と同名ブランチを削除し、workers.json からエントリを除く。
+ワーカープロセスツリーを kill し、worktree と同名ブランチを削除し、workers.json からエントリを除く。
+移行前セッションが残した WezTerm ペイン（レガシー paneId）があればそれも kill する。
 ディレクトリがロックで残っても次回 reset-session.js が junction 非追跡で安全に掃除する
 （残骸を手動 rm しないこと。node_modules junction を辿って共有ファイルを壊す）。`;
 
@@ -87,37 +88,47 @@ if (require.main === module) {
     fail(`workers.json のパースに失敗しました: ${e.message}`);
   }
 
-  // ── ペインをkill ─────────────────────────────────────────────────────
+  // ── ワーカープロセスを終了 ─────────────────────────────────────────────
 
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
   const workerEntry = normalizeWorkerEntry(workers[workerName]);
-  const paneId = workerEntry.paneId;
 
   // ── 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill ──────
-  // Phase 1 以前に起動されたセッションの workers.json には notifierPid が残っている可能性がある。
-  // Phase 2 以降の新規 spawn では notifier は起動されないが、移行過渡期の後方互換として残す。
+  // 過去のセッションの workers.json には notifierPid が残っている可能性がある。
+  // 現在の spawn では notifier は起動されないが、移行過渡期の後方互換として残す。
   if (workerEntry.notifierPid) {
     killProcessTree(workerEntry.notifierPid);
     console.warn(`remove-worker: レガシー notifier (pid ${workerEntry.notifierPid}) を終了しました`);
   }
 
-  if (!paneId) {
-    console.warn(`remove-worker: ワーカー "${workerName}" の pane_id が workers.json に存在しません — worktree削除のみ実行します`);
-  } else {
-    const exitResult = spawnSync('wezterm', ['cli', '--no-auto-start', 'send-text', '--pane-id', paneId, '--no-paste', '/exit\n'], { encoding: 'utf8' });
-    if (exitResult.status !== 0) {
-      console.warn(`remove-worker: /exit 送信失敗 (pane ${paneId}): ${exitResult.stderr.trim()} — kill-paneに進みます`);
-    }
-    sleep(1000);
-
-    const killResult = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', paneId], { encoding: 'utf8' });
-    if (killResult.status !== 0) {
-      console.warn(`remove-worker: kill-pane 失敗 (pane ${paneId}): ${killResult.stderr.trim()}`);
-    }
-
-    // プロセスがハンドルを解放するまで少し待つ
+  // headless ワーカーのプロセスツリーを終了する。登録PIDは中継シム（headless-shim.js）の
+  // ものであり、その配下にログインシェルとエージェント本体がぶら下がるため、
+  // 単体killではなくツリー全体を落とす必要がある。
+  if (workerEntry.pid) {
+    killProcessTree(workerEntry.pid);
+    console.warn(`remove-worker: ワーカープロセス (pid ${workerEntry.pid}) を終了しました`);
+    // プロセスがハンドルを解放するまで少し待つ（worktree削除がロックで失敗するのを減らす）
     sleep(500);
+  }
+
+  // ── 後方互換: 移行前セッションが残した WezTerm ペインを kill ──────────────
+  // Issue #151 以前に起動されたワーカーのエントリには paneId が残っている。
+  // 起動経路が headless に変わってもこの掃除は必要である（起動元コードを消したから
+  // kill ロジックも不要、という判断は過去2回手戻りを起こしている。
+  // .claude/rules/legacy-process-cleanup-safety.md 参照）。
+  if (workerEntry.paneId) {
+    const killResult = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', workerEntry.paneId], { encoding: 'utf8' });
+    if (killResult.status !== 0) {
+      console.warn(`remove-worker: レガシーpane ${workerEntry.paneId} のkill-pane 失敗: ${(killResult.stderr || '').trim()}`);
+    } else {
+      console.warn(`remove-worker: レガシーpane ${workerEntry.paneId} を終了しました`);
+    }
+    sleep(500);
+  }
+
+  if (!workerEntry.pid && !workerEntry.paneId) {
+    console.warn(`remove-worker: ワーカー "${workerName}" に終了対象のプロセスが記録されていません — worktree削除のみ実行します`);
   }
 
   // ── PID registry sweep: ワーカーの登録PIDを同一性確認の上で kill ─────

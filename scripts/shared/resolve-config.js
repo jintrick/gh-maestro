@@ -253,36 +253,9 @@ function resolveSkillAgentMap(opts = {}) {
   return map;
 }
 
-/**
- * Review Managerの実行を可視ペインで行うかどうかを解決する。
- * 解決順序: workspace/.gh-maestro/config.json > ~/.gh-maestro/config.json > false（既定）。
- * 非boolean値は無視する（fail-closed: 誤設定で意図せず可視化されないようにする）。
- *
- * @param {object} [opts={}]
- * @param {string} [opts.workspace]
- * @param {string} [opts.homedir]
- * @returns {boolean}
- */
-function resolveReviewManagerVisible(opts = {}) {
-  const homedir = opts.homedir || process.env.HOME || process.env.USERPROFILE || '';
-
-  const globalConfig = loadConfigFile(resolve(homedir, '.gh-maestro', 'config.json'));
-  if (opts.workspace) {
-    const wsConfig = loadConfigFile(resolve(opts.workspace, '.gh-maestro', 'config.json'));
-    if (typeof wsConfig.reviewManagerVisible === 'boolean') {
-      return wsConfig.reviewManagerVisible;
-    }
-  }
-  if (typeof globalConfig.reviewManagerVisible === 'boolean') {
-    return globalConfig.reviewManagerVisible;
-  }
-  return false;
-}
-
 module.exports = {
   resolveAgentConfig,
   resolveSkillAgentMap,
-  resolveReviewManagerVisible,
   loadDefaults,
   isValidAgentConfig,
   EXEC_SENSITIVE_FIELDS,

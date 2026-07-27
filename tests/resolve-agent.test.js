@@ -24,20 +24,23 @@ function withTempHome(fn) {
 test('resolveAgentConfig: config.jsonから一致するエージェントのoverrideを返す', () => {
   withTempHome(home => {
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
-    // config.json で enterSequence を上書き
+    // config.json で label を上書きする。
+    // ここで確認したいのは「config.json の値がデフォルトに勝つ」という汎用マージ挙動であり、
+    // 特定フィールドの意味ではない。実在する任意の上書き可能フィールドで代表させる
+    // （以前は enterSequence を例にしていたが、このフィールド自体を廃止したため差し替えた）。
     fs.writeFileSync(
       path.join(home, '.gh-maestro', 'config.json'),
       JSON.stringify({
         agents: {
-          reasonix: { enterSequence: '\n' },
-          agy: { enterSequence: '\r\n' },
+          reasonix: { label: 'Reasonix (overridden)' },
+          agy: { label: 'Antigravity (overridden)' },
         },
       }),
       'utf8',
     );
     const r = resolveAgentConfig('reasonix', home);
     assert.ok(r, 'reasonix should be resolved');
-    assert.equal(r.enterSequence, '\n');
+    assert.equal(r.label, 'Reasonix (overridden)');
     // 上書きしていないフィールドはデフォルトのまま
     assert.equal(r.dynamicCommand, true);
   });

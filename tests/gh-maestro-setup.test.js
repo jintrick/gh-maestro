@@ -9,8 +9,11 @@ const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'gh-maestro-setup.js');
 
-// gh-maestro-setup.js は require.main===module ガードを持たず全体が top-level
-// スクリプトのため、実プロセス起動（subprocess）でのみ検証する。checkEnvironment
+// セットアップの副作用（git hooks 書き換え・.gitignore 追記・dev ブランチ作成・
+// GitHub API での旧CIファイル削除）はすべて main() の内側に閉じており、
+// require.main===module ガードで CLI 実行時のみ走る。
+// ここでは実プロセス起動（subprocess）で本来の振る舞いを検証しつつ、
+// require しただけでは何も起きないことも確認する。checkEnvironment
 // （WEZTERM_PANE/wezterm/gh 依存）は .gh-maestro/setup-ok を事前に置いて
 // isFirstRun=false にすることでスキップする。
 
@@ -139,4 +142,42 @@ test('手書きの既存pre-commitフックがあってもgh-maestroブロック
     assert.match(preCommit, /# gh-maestro:sync-rules:v1/);
     assert.match(preCommit, /# gh-maestro:checks:v1/);
   });
+});
+
+// ── require.main ガード ───────────────────────────────────────────────────────
+// 実障害: 動作確認のつもりで require され、git hooks が書き換わった。
+// このスクリプトは gh api DELETE（旧CIファイル削除）まで走りうるため、
+// require が副作用ゼロであることは安全上の要件である。
+
+test('require しただけでは副作用が起きない（git hooks を書き換えない）', () => {
+  withGitProject((dir) => {
+    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.gh-maestro', 'setup-ok'), '');
+    const hooksDir = path.join(dir, '.git', 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+
+    // 別プロセスで require のみを行い、hooks が生成されないことを確認する
+    const toPosix = (p) => p.split(path.sep).join('/');
+    const probe = `
+      process.chdir(${JSON.stringify(dir)});
+      require(${JSON.stringify(toPosix(SCRIPT))});
+      const fs = require('fs');
+      const p = ${JSON.stringify(toPosix(path.join(hooksDir, 'pre-commit')))};
+      console.log(JSON.stringify({ preCommitExists: fs.existsSync(p) }));
+    `;
+    const r = spawnSync(process.execPath, ['-e', probe], { encoding: 'utf8', cwd: dir });
+
+    assert.equal(r.status, 0, `require が失敗した: ${r.stderr}`);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.equal(out.preCommitExists, false, 'require だけで pre-commit フックが作られてはならない');
+  });
+});
+
+test('module.exports.main を公開する（CLI実行時のみ副作用を起こす）', () => {
+  const scriptPosix = SCRIPT.split(path.sep).join('/');
+  const r = spawnSync(process.execPath, [
+    '-e', `const m = require(${JSON.stringify(scriptPosix)}); console.log(typeof m.main);`,
+  ], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), 'function');
 });

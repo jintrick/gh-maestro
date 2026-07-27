@@ -6,18 +6,15 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
-const { buildPwshCaptureClauses } = require('./agent-exec');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
-const { resolveAgentConfig, resolveSkillAgentMap, resolveReviewManagerVisible } = require('./shared/resolve-config');
+const { linkNodeModules } = require('./link-node-modules');
+const { unlinkJunctions } = require('./unlink-junctions');
+const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 const {
   assertValidPr, reviewArtifactPath,
   reviewWorktreeBranchName, reviewWorktreeFetchRef, reviewWorktreeDir,
 } = require('./shared/review-manager-paths');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
-
-// 可視ペイン実行時、出力ファイル生成を待つポーリング設定。
-const VISIBLE_POLL_INTERVAL_MS = 5000;
-const VISIBLE_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 
 const USAGE = `run-review-manager.js — Review Managerをheadless起動してPRレビューを実行する
 
@@ -94,6 +91,14 @@ function setupReviewWorktree(workspace, pr, log) {
     throw new Error(`worktreeをPR headにリセットできませんでした: ${(resetR.stderr || '').toString().trim()}`);
   }
 
+  // node_modules をメインワークスペースへjunctionリンクする（spawn-worker.js と同じ扱い）。
+  // これが無いと worktree 内にモジュールが存在せず、Review Manager がプロジェクトの
+  // ツール（tsx 等）を起動した時点で MODULE_NOT_FOUND になる。
+  // リンクは best-effort——失敗してもレビュー自体は続行できるため、ログに残して進む。
+  const nmResult = linkNodeModules(dir, workspace);
+  for (const p of nmResult.linked) log(`node_modules junction 作成: ${p}`);
+  for (const p of nmResult.missing) log(`[要対応] node_modules junction 作成に失敗: ${p}`);
+
   log(`review worktree ready: ${dir} (${fetchRef})`);
   return dir;
 }
@@ -110,6 +115,15 @@ function teardownReviewWorktree(workspace, pr, log) {
   const dir = reviewWorktreeDir(workspace, pr);
   const branchName = reviewWorktreeBranchName(pr);
   const fetchRef = reviewWorktreeFetchRef(pr);
+
+  // 削除の前に node_modules junction を外す。junction を張ったまま再帰削除すると、
+  // リンク先（メインワークスペースの node_modules）まで巻き込んで壊しうる
+  // （.claude/rules/symlink-tree-walk-safety.md。remove-worker.js も同じ順序で行う）。
+  try {
+    unlinkJunctions(dir, (msg) => log(msg));
+  } catch (e) {
+    log(`junction 除去で例外: ${e.message.split('\n')[0]}`);
+  }
 
   try {
     worktreeRemove(dir, workspace);
@@ -154,151 +168,43 @@ function buildReviewManagerAgentArgs(agentConfig, { reviewWtDir, promptFile, ski
 }
 
 /**
- * headless（既定）でエージェントを起動し、完了まで同期ブロックする。
- * @param {string[]} agentArgs
- * @param {string} cwd
- * @returns {{status: number|null, error?: Error, stdout?: string, stderr?: string}}
- */
-function runAgentHeadless(agentArgs, cwd) {
-  return spawnSync(agentArgs[0], agentArgs.slice(1), {
-    cwd,
-    encoding: 'utf8',
-    env: process.env,
-    maxBuffer: 20 * 1024 * 1024,
-  });
-}
-
-/**
- * 可視ペイン（wezterm split-pane）に渡すargvを構築する。agent-exec.jsのbuildLoginShellExecArgsと
- * 同様にログインシェル（PATH実行ファイル・pwsh関数・シェルエイリアス解決）経由で起動するが、
- * Windows側はbuildLoginShellExecArgsの`onExit`フックと違い、終了コードを固定のexitMarkerFileへ
- * 書き出す（本スクリプトは完了検知をポーリングで行うため、onExitフック呼び出し先コマンドではなく
- * 単純なファイル書き出しで十分。PR #103 Review Manager指摘）。
+ * headless でエージェントを起動し、完了まで同期ブロックする。
  *
- * captureLogPath指定時は、agent-exec.js::buildPwshCaptureClauses（Windows側）/ tee（Unix側）と
- * 同じ手法で標準出力/標準エラーをファイルにも複製する。可視ペインではRM自身の発言（観点をどう
- * 判断・除外したか等）が画面に表示された後どこにも残らないため、これが唯一の永続記録経路になる。
- * agent-exec.jsの既存呼び出し元は毎回新規ファイルを使うため上書きで問題ないが、
- * ここではrun-review-manager.js自身が既に書き込み済みの`.log`に追記する必要があるため、
- * Tee-Object/teeともに追記（-Append/-a）を使う。
+ * 標準出力/標準エラーはファイル記述子として logFile へ直接リダイレクトする。
+ * これによりRM自身の発言（どの観点をどう判断・除外したか等）が**実行中から逐次**
+ * ログに残り、完了を待たずに追跡できる（`Get-Content -Wait` / Monitor）。
  *
- * 【現在captureLogPathは呼び出し元で常にnullにして無効化中】本番（GijiAI）でcodex/agyの
- * `--print`（ワンショット）モード実行がTee-Objectパイプ経由だと exit 1 でクラッシュする障害が
- * 発生し（commit 82bfa83でこの機能を追加した直後から）、原因がパイプ手法自体との相性である
- * 可能性が高いため一時的に無効化した。agent-exec.js側のTee-Object手法は`--prompt-interactive`
- * （対話モード）でのみ実績があり、`--print`モードでの安全性は未検証。再度有効化する前に、
- * トークンを使う実機検証（ユーザーの事前承認必須）で安全性を確認すること。
+ * 以前は出力をメモリにバッファして完了後にまとめて書いていたため、実行中は何も
+ * 見えなかった。パイプ（Tee-Object / tee）は使わない——非対話execモードのcodex/agyと
+ * 非互換で本番クラッシュを起こした実績がある（Issue #150）。fdリダイレクトはシェルの
+ * 文字列パイプライン層を通らないため、その障害も文字化けも構造的に起こらない。
  *
- * @param {string[]} agentCmdArgs
- * @param {string} exitMarkerFile 終了コードを書き出す先
- * @param {string} [platform=process.platform]
- * @param {string|null} [captureLogPath=null] 指定時、標準出力/標準エラーをこのパスにも追記する
- * @returns {string[]}
- */
-function buildVisiblePaneArgs(agentCmdArgs, exitMarkerFile, platform = process.platform, captureLogPath = null) {
-  if (platform === 'win32') {
-    const escapedArgs = agentCmdArgs.map(a => `'${a.replace(/'/g, "''")}'`).join(' ');
-    const escapedMarker = exitMarkerFile.replace(/'/g, "''");
-    const { prefix: capturePrefix, suffix: captureSuffix } = buildPwshCaptureClauses(captureLogPath, { append: true });
-    // ネイティブ実行ファイルの終了コードは $LASTEXITCODE に入る（codexはネイティブexe）。
-    const command = `${capturePrefix}& ${escapedArgs}${captureSuffix}; Set-Content -LiteralPath '${escapedMarker}' -Value $LASTEXITCODE -NoNewline`;
-    const encoded = Buffer.from(command, 'utf16le').toString('base64');
-    return ['pwsh', '-NoLogo', '-EncodedCommand', encoded];
-  }
-  const escapedMarker = exitMarkerFile.replace(/'/g, "'\\''");
-  if (captureLogPath) {
-    const escapedCapture = captureLogPath.replace(/'/g, "'\\''");
-    // パイプを挟むと $? はパイプ末尾（tee）のステータスになるため、PIPESTATUSで
-    // エージェント自身（先頭コマンド）の終了コードを取り出す。
-    return ['bash', '-lc', `"$0" "$@" 2>&1 | tee -a '${escapedCapture}'; code=\${PIPESTATUS[0]}; echo $code > '${escapedMarker}'`, ...agentCmdArgs];
-  }
-  return ['bash', '-lc', `"$0" "$@"; echo $? > '${escapedMarker}'`, ...agentCmdArgs];
-}
-
-/**
- * 可視ペイン（wezterm split-pane）でエージェントを起動する。
- * spawnSyncによる同期ブロックが使えないため、完了検知はエージェントが終了コードを書き出す
- * exitMarkerFileの生成をポーリングする（outputFileの生成だけでは、findingsを早期に書き出した後も
- * ペインが動き続けているケースを完了と誤判定してしまう。PR #103 Review Manager指摘）。
- * WEZTERM_PANEが無い、またはペイン分割に失敗した場合はnullを返す（呼び出し側でheadlessにフォールバック）。
- * タイムアウト時は孤児プロセス化を防ぐためペインを明示的に強制終了する。
+ * spawnSync のままなので呼び出し元は従来どおり完了を同期待ちできる。
  *
  * @param {string[]} agentArgs
  * @param {string} cwd
- * @param {string} outputFile RMが書き出すfindings JSONのパス（終了コード確認後に存在確認する）
- * @param {(msg: string) => void} log
- * @param {string|null} [captureLogPath=null] 指定時、エージェントの標準出力/標準エラーを
- *   このパスにも追記する（可視ペインではRM自身の発言が画面表示後どこにも残らないため）
- * @returns {{status: number}|null}
+ * @param {string} logFile 標準出力/標準エラーの追記先
+ * @returns {{status: number|null, error?: Error}}
  */
-function runAgentVisible(agentArgs, cwd, outputFile, log, captureLogPath = null) {
-  const paneId = process.env.WEZTERM_PANE;
-  if (!paneId) {
-    log('reviewManagerVisible=true ですが WEZTERM_PANE が未設定のため headless にフォールバックします');
-    return null;
-  }
-
-  const exitMarkerFile = `${outputFile}.exitcode`;
-  try { fs.unlinkSync(exitMarkerFile); } catch {}
-
-  const paneArgs = buildVisiblePaneArgs(agentArgs, exitMarkerFile, process.platform, captureLogPath);
-  const split = spawnSync('wezterm', [
-    'cli', '--no-auto-start', 'split-pane', '--bottom',
-    '--cwd', cwd, '--pane-id', paneId, '--', ...paneArgs,
-  ], { encoding: 'utf8' });
-
-  if (split.status !== 0) {
-    log(`wezterm split-pane 失敗: ${(split.stderr || '').trim()} — headlessにフォールバックします`);
-    return null;
-  }
-  const newPaneId = (split.stdout || '').trim();
-  log(`可視ペイン(${newPaneId})でエージェントを起動しました`);
-
-  const start = Date.now();
-  while (!fs.existsSync(exitMarkerFile)) {
-    if (Date.now() - start > VISIBLE_POLL_TIMEOUT_MS) {
-      log(`可視ペイン実行がタイムアウトしました（${VISIBLE_POLL_TIMEOUT_MS}ms）— ペインを強制終了します`);
-      try {
-        const kill = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', newPaneId], { encoding: 'utf8' });
-        if (kill.status !== 0) log(`kill-pane 失敗: ${(kill.stderr || '').trim()}`);
-      } catch (e) { log(`kill-pane 例外: ${e.message}`); }
-      return { status: 1 };
-    }
-    sleepSync(VISIBLE_POLL_INTERVAL_MS);
-  }
-
-  let exitStatus = 1;
+function runAgentHeadless(agentArgs, cwd, logFile) {
+  const fd = fs.openSync(logFile, 'a');
   try {
-    const parsed = parseInt(fs.readFileSync(exitMarkerFile, 'utf8').trim(), 10);
-    if (Number.isFinite(parsed)) exitStatus = parsed;
-  } catch (e) { log(`exit marker 読み取り失敗: ${e.message}`); }
-  try { fs.unlinkSync(exitMarkerFile); } catch {}
-
-  if (exitStatus !== 0) {
-    log(`可視ペインのエージェントが異常終了しました（exit ${exitStatus}）`);
-    return { status: exitStatus };
+    return spawnSync(agentArgs[0], agentArgs.slice(1), {
+      cwd,
+      env: process.env,
+      // stdin は 'ignore' に固定する。TTYが無い状態で継承すると入力待ちでハングしうる
+      // （codex exec は起動時に stdin を読む。実機確認済み）。
+      stdio: ['ignore', fd, fd],
+    });
+  } finally {
+    fs.closeSync(fd);
   }
-  if (!fs.existsSync(outputFile)) {
-    log(`可視ペインのエージェントは正常終了しましたが RM output が見つかりません: ${outputFile}`);
-    return { status: 1 };
-  }
-  return { status: 0 };
-}
-
-/**
- * メインスレッドで安全に使える同期スリープ。Atomics.waitはメインスレッドで
- * TypeErrorを投げうるため使わず、子プロセスのsetTimeoutをspawnSyncで待つ
- * （PR #103 Review Manager指摘）。
- * @param {number} ms
- */
-function sleepSync(ms) {
-  spawnSync(process.execPath, ['-e', `setTimeout(() => {}, ${Number(ms)})`]);
 }
 
 module.exports = {
   buildPrompt,
   setupReviewWorktree, teardownReviewWorktree,
-  buildReviewManagerAgentArgs, runAgentHeadless, runAgentVisible, buildVisiblePaneArgs,
+  buildReviewManagerAgentArgs, runAgentHeadless,
 };
 
 if (require.main === module) {
@@ -419,17 +325,13 @@ if (require.main === module) {
           skill,
         });
 
-        const visible = resolveReviewManagerVisible({ workspace, homedir });
-        log(`spawning (visible=${visible}) ${agentArgs.join(' ')}`);
-        // captureLogPath は一時的にnull固定（キャプチャ無効化）。Tee-Objectパイプ経由での
-        // codex/agy `--print`モード起動が本番でexit 1即クラッシュする障害があり
-        // （buildVisiblePaneArgsのdocコメント参照）、原因調査完了までは無効化する。
-        const result = (visible && runAgentVisible(agentArgs, reviewWtDir, worktreeOutputFile, log, null))
-          || runAgentHeadless(agentArgs, reviewWtDir);
+        log(`spawning ${agentArgs.join(' ')}`);
+        // 標準出力/標準エラーは同じ .log へfdで直接リダイレクトされ、実行中から逐次書かれる。
+        // 完了後にまとめて log() へ書き戻す必要はない（以前はメモリにバッファしていたため、
+        // 実行中はRMが何をしているか一切見えなかった）。
+        const result = runAgentHeadless(agentArgs, reviewWtDir, logFile);
 
         if (result.error) log(`spawn error: ${result.error.message}`);
-        if (result.stdout) log(result.stdout);
-        if (result.stderr) log(result.stderr);
         log(`${agentArgs[0]} exited with status ${result.status}`);
 
         if (result.status !== 0) {

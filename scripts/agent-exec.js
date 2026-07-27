@@ -3,7 +3,7 @@
 // agent-exec.js
 // エージェント起動をログインシェル経由に抽象化するモジュール。
 //
-// 問題: spawn-worker.js はエージェントコマンドを直接 wezterm に argv として渡すため、
+// 問題: エージェントコマンドを argv としてそのまま spawn すると、
 //   PATH 上の実行ファイルしか起動できない。pwsh 関数やシェルエイリアス（例: claude-ds
 //   が $PROFILE の関数として定義されている場合）は解決されず、起動できない。
 //
@@ -22,26 +22,27 @@ const { spawnSync } = require('./child-process');
 /**
  * エージェント起動 argv をログインシェル経由にラップする。
  *
+ * 標準出力/標準エラーの記録は呼び出し元の責務である。shared/headless-launch.js が
+ * ファイル記述子への直接リダイレクトで行うため、ここでは一切扱わない
+ * （パイプ経由の複製は非対話execモードと非互換で本番クラッシュを起こした。Issue #150/#151）。
+ *
  * @param {string[]} agentCmdArgs - エージェントコマンド + 全引数の配列
  *   （buildAgentCommandArgs の戻り値。第1要素がコマンド/関数名）
  * @param {string}   [platform=process.platform] - 'win32' またはそれ以外
  * @param {object|null} [onExit=null]
  * @param {object}   [env={}]
- * @param {string|null} [captureLogPath=null] - 指定時、エージェントの標準出力/標準エラーを
- *   このパスにも複製保存する（teeに相当）。ペインの表示はそのまま生きた状態を維持しつつ、
- *   エージェント種別に依存せず出力を後から読めるようにする（resume応答の代理送信に使う）。
- * @returns {string[]} wezterm split-pane に渡す argv（ログインシェル経由）
+ * @returns {string[]} 起動に渡す argv（ログインシェル経由）
  * @throws {Error} agentCmdArgs が空の場合
  */
-function buildLoginShellExecArgs(agentCmdArgs, platform = process.platform, onExit = null, env = {}, captureLogPath = null) {
+function buildLoginShellExecArgs(agentCmdArgs, platform = process.platform, onExit = null, env = {}) {
   if (!Array.isArray(agentCmdArgs) || agentCmdArgs.length === 0) {
     throw new Error('agentCmdArgs must be a non-empty array');
   }
 
   if (platform === 'win32') {
-    return buildPwshExecArgs(agentCmdArgs, onExit, env, captureLogPath);
+    return buildPwshExecArgs(agentCmdArgs, onExit, env);
   }
-  return buildBashLoginExecArgs(agentCmdArgs, onExit, env, captureLogPath);
+  return buildBashLoginExecArgs(agentCmdArgs, onExit, env);
 }
 
 /**
@@ -56,47 +57,15 @@ function buildLoginShellExecArgs(agentCmdArgs, platform = process.platform, onEx
  * 各引数は個別の argv エントリとして渡されるため、シェルによる再パースは発生せず、
  * 空白・改行を含む引数も安全。bash が exec で自分を置き換えるため、エージェント終了後
  * 余計なプロセスは残らない。
- *
- * captureLogPath 指定時は、`exec > >(tee -a <path>) 2>&1;` を冒頭に追加し、以降の
- * 標準出力/標準エラーをファイルにも複製する。プロセス置換によるリダイレクト設定は
- * ファイルディスクリプタの継承を通じて、後続の `exec "$0" "$@"`（プロセス置き換え）後も
- * 維持される。
  */
-function buildBashLoginExecArgs(agentCmdArgs, onExit = null, env = {}, captureLogPath = null) {
+function buildBashLoginExecArgs(agentCmdArgs, onExit = null, env = {}) {
   // 環境変数を export でシェルスクリプト冒頭に注入する（キーは固定の内部定数、値はシングル
   // クォートでリテラル化）。ワーカー識別（GH_MAESTRO_WORKER 等）を「環境の事実」として渡すため。
   const envPrefix = Object.entries(env)
     .map(([k, v]) => `export ${k}='${String(v).replace(/'/g, "'\\''")}'; `)
     .join('');
-  const capturePrefix = captureLogPath
-    ? `exec > >(tee -a '${captureLogPath.replace(/'/g, "'\\''")}') 2>&1; `
-    : '';
-  if (!onExit) return ['bash', '-lc', `${envPrefix}${capturePrefix}exec "$0" "$@"`, ...agentCmdArgs];
-  return ['bash', '-lc', `${envPrefix}${capturePrefix}hook=$0; script=$1; workspace=$2; execution=$3; shift ${onExit.args.length}; "$@"; code=$?; "$hook" "$script" "$workspace" "$execution" "$code"; exit "$code"`, onExit.command, ...onExit.args, ...agentCmdArgs];
-}
-
-/**
- * Windows pwsh向けTee-Objectキャプチャ節（prefix/suffix）を構築する。
- * buildPwshExecArgs（本ファイル）と run-review-manager.js::buildVisiblePaneArgs の
- * 両方が同一のTee-Objectパイプ手法（文字化け対策のOutputEncoding設定含む）を必要とする
- * ため、ここに一本化する（重複実装の解消。ユーザー指摘: 実績のある方法に統一する）。
- *
- * @param {string|null} captureLogPath
- * @param {{append?: boolean}} [options] - append: true なら追記（-Append）。
- *   run-review-manager.js は既存の`.log`に追記するため true を渡す。
- * @returns {{prefix: string, suffix: string}} captureLogPath が falsy なら両方 ''
- */
-function buildPwshCaptureClauses(captureLogPath, { append = false } = {}) {
-  if (!captureLogPath) return { prefix: '', suffix: '' };
-  const flag = append ? ' -Append' : '';
-  return {
-    // 既定のコンソール出力エンコーディング（日本語Windowsでは Shift-JIS系）のまま
-    // パイプすると、ネイティブプロセスのUTF-8出力が文字化けする（実機検証済み）。
-    prefix: '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ',
-    // Tee-Objectはコマンドレットのため $LASTEXITCODE を書き換えない
-    // （ネイティブコマンドの終了コードのまま保持される。実機検証済み）。
-    suffix: ` 2>&1 | Tee-Object -FilePath '${captureLogPath.replace(/'/g, "''")}'${flag}`,
-  };
+  if (!onExit) return ['bash', '-lc', `${envPrefix}exec "$0" "$@"`, ...agentCmdArgs];
+  return ['bash', '-lc', `${envPrefix}hook=$0; script=$1; workspace=$2; execution=$3; shift ${onExit.args.length}; "$@"; code=$?; "$hook" "$script" "$workspace" "$execution" "$code"; exit "$code"`, onExit.command, ...onExit.args, ...agentCmdArgs];
 }
 
 /**
@@ -112,11 +81,8 @@ function buildPwshCaptureClauses(captureLogPath, { append = false } = {}) {
  *   - シングルクォート文字列内では $ / " / 改行 はすべてリテラルとして扱われる
  *   - &（call operator）で関数/実行ファイルを呼び出す
  *   - -NoProfile を指定しないことで $PROFILE がロードされ、pwsh関数も解決可能
- *
- * captureLogPath 指定時は `2>&1 | Tee-Object -FilePath <path>` でネイティブコマンドの
- * 標準出力/標準エラーをファイルにも複製する。
  */
-function buildPwshExecArgs(agentCmdArgs, onExit = null, env = {}, captureLogPath = null) {
+function buildPwshExecArgs(agentCmdArgs, onExit = null, env = {}) {
   // 各引数を PowerShell のシングルクォートリテラルとしてエスケープ
   //   ' → '' （PowerShell の規則）
   //   全体を '...' で囲む（内部での 変数展開 $ / コマンド置換 / " はすべて無効化される）
@@ -131,17 +97,12 @@ function buildPwshExecArgs(agentCmdArgs, onExit = null, env = {}, captureLogPath
     .map(([k, v]) => `$env:${k}='${String(v).replace(/'/g, "''")}'; `)
     .join('');
 
-  // captureLogPath指定時はパイプでTee-Objectへ流す（Start-Transcriptはネイティブプロセスの
-  // 標準出力を確実には捕捉できないため不採用——実機検証で、ネストしたpwsh呼び出しの出力が
-  // transcriptに記録されないことを確認済み）。構築の詳細は buildPwshCaptureClauses 参照。
-  const { prefix: capturePrefix, suffix: captureSuffix } = buildPwshCaptureClauses(captureLogPath);
-
   // & <command> <args...>
   // PowerShell の call operator & は関数・コマンドレット・実行ファイルのどれでも実行できる
   const exitHook = onExit
     ? `; $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }; & '${onExit.command.replace(/'/g, "''")}' ${onExit.args.map(arg => `'${arg.replace(/'/g, "''")}'`).join(' ')} $exitCode; exit $exitCode`
-    : (captureLogPath ? `; $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }; exit $exitCode` : '');
-  const command = `${envPrefix}${capturePrefix}& ${escapedArgs}${captureSuffix}${exitHook}`;
+    : '';
+  const command = `${envPrefix}& ${escapedArgs}${exitHook}`;
 
   // UTF-16LE base64 にエンコード（PowerShell -EncodedCommand の要求形式）
   const encoded = Buffer.from(command, 'utf16le').toString('base64');
@@ -215,4 +176,4 @@ function checkBashExists(command) {
   return r.status === 0;
 }
 
-module.exports = { buildLoginShellExecArgs, checkAgentExists, buildPwshCaptureClauses };
+module.exports = { buildLoginShellExecArgs, checkAgentExists };

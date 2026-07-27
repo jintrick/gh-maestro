@@ -9,7 +9,6 @@ const path = require('path');
 const {
   resolveAgentConfig,
   resolveSkillAgentMap,
-  resolveReviewManagerVisible,
   loadDefaults,
 } = require('../scripts/shared/resolve-config');
 const { buildAgentCommandArgs } = require('../scripts/agent-launch');
@@ -440,7 +439,6 @@ test('resolveAgentConfig: reasonix の command が動的に解決される', () 
       'extraArgs should include run',
     );
     // enterSequence は維持される
-    assert.equal(agent.enterSequence, '\r');
   });
 });
 
@@ -449,7 +447,8 @@ test('resolveAgentConfig: reasonix のReview Manager用execArgsにも動的ス�
     const agent = resolveAgentConfig('reasonix', { homedir: home });
     assert.ok(agent);
     assert.ok(agent.execArgs.includes('run'));
-    assert.ok(agent.execArgs.includes('--show-thinking'));
+    // Review Manager用のexecArgsは作業ディレクトリを明示する（--dir {workspace}）
+    assert.ok(agent.execArgs.includes('--dir'));
 
     if (agent.command === 'node') {
       assert.ok(agent.execArgs[0].endsWith('reasonix.js'));
@@ -528,7 +527,6 @@ test('resolveAgentConfig: command 明示上書き時は dynamicCommand 解決を
     );
 
     // 他のフィールドは維持される
-    assert.equal(agent.enterSequence, '\r', 'enterSequence should be preserved');
   });
 });
 
@@ -554,71 +552,3 @@ test('resolveAgentConfig: workspace 未指定時は global config のみ考慮',
   });
 });
 
-// ── resolveReviewManagerVisible ─────────────────────────────────────────────
-
-test('resolveReviewManagerVisible: 未設定なら既定でfalse（headless）', () => {
-  withTempHome(home => {
-    assert.equal(resolveReviewManagerVisible({ homedir: home }), false);
-  });
-});
-
-test('resolveReviewManagerVisible: global config のtrueが反映される', () => {
-  withTempHome(home => {
-    writeConfig(home, { reviewManagerVisible: true });
-    assert.equal(resolveReviewManagerVisible({ homedir: home }), true);
-  });
-});
-
-test('resolveReviewManagerVisible: workspace config が global config より優先される', () => {
-  withTempHome(home => {
-    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-visible-'));
-    try {
-      writeConfig(home, { reviewManagerVisible: true });
-      writeWorkspaceConfig(ws, { reviewManagerVisible: false });
-      assert.equal(resolveReviewManagerVisible({ homedir: home, workspace: ws }), false);
-    } finally {
-      fs.rmSync(ws, { recursive: true, force: true });
-    }
-  });
-});
-
-test('resolveReviewManagerVisible: 非boolean値は無視してデフォルト/上位設定にフォールバックする', () => {
-  withTempHome(home => {
-    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-visible-invalid-'));
-    try {
-      writeConfig(home, { reviewManagerVisible: true });
-      writeWorkspaceConfig(ws, { reviewManagerVisible: 'yes' });
-      assert.equal(
-        resolveReviewManagerVisible({ homedir: home, workspace: ws }), true,
-        '不正なworkspace値は無視してglobalにフォールバックする',
-      );
-      assert.equal(
-        resolveReviewManagerVisible({ homedir: home }), true,
-      );
-    } finally {
-      fs.rmSync(ws, { recursive: true, force: true });
-    }
-  });
-});
-
-test('resolveAgentConfig: gh-maestro-reviewer のマッピング結果を解決できる', () => {
-  withTempHome(home => {
-    const map = resolveSkillAgentMap({ homedir: home });
-    const agentId = map['gh-maestro-reviewer'];
-    assert.equal(agentId, 'codex');
-
-    const agent = resolveAgentConfig(agentId, { homedir: home });
-    assert.ok(agent);
-    assert.equal(agent.id, 'codex');
-    assert.equal(agent.command, 'codex');
-  });
-});
-
-test('resolveAgentConfig: gh-maestro-architect は codex-pro に解決される', () => {
-  withTempHome(home => {
-    const map = resolveSkillAgentMap({ homedir: home });
-    const agent = resolveAgentConfig(map['gh-maestro-architect'], { homedir: home });
-    assert.equal(agent.id, 'codex-pro');
-    assert.equal(agent.command, 'codex-pro');
-  });
-});

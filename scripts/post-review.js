@@ -14,6 +14,11 @@ Arguments:
 
 リポジトリは gh repo view から自動解決する。`;
 
+// CLI として実行されたときだけ動く。このスクリプトは GitHub へレビューを投稿するため、
+// require されただけで外向きの副作用が起きてはならない。
+// （install.js と同じイディオム。CommonJS のモジュールスコープでは top-level return が使える）
+if (require.main !== module) return;
+
 const argv = process.argv.slice(2);
 if (argv.includes('--help') || argv.includes('-h')) {
   console.log(USAGE);

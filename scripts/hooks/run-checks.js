@@ -69,7 +69,11 @@ function detectPrecommitPlan(workspaceRoot) {
 
   if (!hasLintStagedKey && !hasLintStagedConfigFile) return null;
 
-  return { cmd: 'npx', args: ['lint-staged'] };
+  // --no-install: npx がレジストリから lint-staged を自動ダウンロードするのを禁じる。
+  // 付けないと (1) 未インストール環境で無断のネットワーク接続が発生し、
+  // (2) オフライン時は取得に失敗して pre-commit が非ゼロ終了し、コミットが恒久的に
+  // ブロックされる。ローカルに存在しなければ静かに諦めるのが正しい（Issue #154）。
+  return { cmd: 'npx', args: ['--no-install', 'lint-staged'] };
 }
 
 /**

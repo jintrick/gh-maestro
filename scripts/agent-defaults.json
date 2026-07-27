@@ -5,117 +5,187 @@
       "label": "Claude Code (Anthropic)",
       "command": "claude",
       "runtime": "claude",
-      "extraArgs": ["--dangerously-skip-permissions", "--print", "--output-format", "stream-json", "--verbose"],
-      "execArgs": ["--dangerously-skip-permissions", "--print", "--output-format", "stream-json", "--verbose"],
+      "extraArgs": [
+        "--dangerously-skip-permissions",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--verbose"
+      ],
+      "execArgs": [
+        "--dangerously-skip-permissions",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--verbose"
+      ],
       "promptDelivery": "system-prompt-file",
-      "enterSequence": "\r\n",
       "rulesSupported": true,
-      "asynchronousNotification": false,
-      "sessionResume": true,
-      "resumeCommand": ["--continue"]
+      "resumeCommand": [
+        "--continue"
+      ]
     },
     {
       "id": "claude-ds",
       "label": "Claude Code (DeepSeek)",
       "command": "claude-ds",
       "runtime": "claude",
-      "extraArgs": ["--dangerously-skip-permissions", "--print", "--output-format", "stream-json", "--verbose"],
-      "execArgs": ["--dangerously-skip-permissions", "--print", "--output-format", "stream-json", "--verbose"],
+      "extraArgs": [
+        "--dangerously-skip-permissions",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--verbose"
+      ],
+      "execArgs": [
+        "--dangerously-skip-permissions",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--verbose"
+      ],
       "promptDelivery": "system-prompt-file",
-      "enterSequence": "\r\n",
       "rulesSupported": true,
-      "asynchronousNotification": false,
-      "sessionResume": true,
-      "resumeCommand": ["--continue"]
+      "resumeCommand": [
+        "--continue"
+      ]
     },
     {
       "id": "claude-ds-pro",
       "label": "Claude Code (DeepSeek Pro)",
       "command": "claude-ds-pro",
       "runtime": "claude",
-      "extraArgs": ["--dangerously-skip-permissions", "--print", "--output-format", "stream-json", "--verbose"],
-      "execArgs": ["--dangerously-skip-permissions", "--print", "--output-format", "stream-json", "--verbose"],
+      "extraArgs": [
+        "--dangerously-skip-permissions",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--verbose"
+      ],
+      "execArgs": [
+        "--dangerously-skip-permissions",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--verbose"
+      ],
       "promptDelivery": "system-prompt-file",
-      "enterSequence": "\r\n",
       "rulesSupported": true,
-      "asynchronousNotification": false,
-      "sessionResume": true,
-      "resumeCommand": ["--continue"]
+      "resumeCommand": [
+        "--continue"
+      ]
     },
     {
       "id": "reasonix",
       "label": "Reasonix Code",
       "command": "reasonix",
       "runtime": "claude",
-      "extraArgs": ["run", "--show-thinking"],
-      "execArgs": ["run", "--dir", "{workspace}", "--show-thinking"],
+      "extraArgs": [
+        "run"
+      ],
+      "execArgs": [
+        "run",
+        "--dir",
+        "{workspace}"
+      ],
       "execPromptDelivery": "positional",
       "dynamicCommand": true,
       "promptDelivery": "positional",
-      "enterSequence": "\r",
       "rulesSupported": false,
-      "asynchronousNotification": false,
-      "sessionResume": true,
-      "resumeCommand": ["--continue"]
+      "resumeCommand": [
+        "--continue"
+      ]
     },
     {
       "id": "agy",
       "label": "Antigravity",
       "command": "agy",
       "runtime": "agy",
-      "extraArgs": ["--dangerously-skip-permissions", "--print-timeout", "30m0s"],
-      "execArgs": ["--dangerously-skip-permissions", "--print-timeout", "30m0s"],
+      "extraArgs": [
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "30m0s"
+      ],
+      "execArgs": [
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "30m0s"
+      ],
       "execPromptDelivery": "flag",
       "execPromptFlag": "--print",
       "promptDelivery": "flag",
       "promptFlag": "--print",
-      "enterSequence": "\r\n",
       "rulesSupported": false,
-      "asynchronousNotification": false,
-      "sessionResume": true,
-      "resumeCommand": ["--continue"]
+      "resumeCommand": [
+        "--continue"
+      ]
     },
     {
       "id": "codex",
       "label": "Codex (OpenAI)",
       "command": "codex",
       "runtime": "codex",
-      "extraArgs": ["exec", "--skip-git-repo-check", "--model", "gpt-5.4", "--dangerously-bypass-approvals-and-sandbox"],
-      "execArgs": ["exec", "--skip-git-repo-check", "--cd", "{workspace}", "--model", "gpt-5.4", "--dangerously-bypass-approvals-and-sandbox"],
+      "extraArgs": [
+        "exec",
+        "--skip-git-repo-check",
+        "--model",
+        "gpt-5.4",
+        "--dangerously-bypass-approvals-and-sandbox"
+      ],
+      "execArgs": [
+        "exec",
+        "--skip-git-repo-check",
+        "--cd",
+        "{workspace}",
+        "--model",
+        "gpt-5.4",
+        "--dangerously-bypass-approvals-and-sandbox"
+      ],
       "promptDelivery": "positional",
-      "enterSequence": "\r\n",
       "rulesSupported": false,
-      "asynchronousNotification": false,
-      "sessionResume": true,
-      "resumeCommand": ["resume", "--last"]
+      "resumeCommand": [
+        "resume",
+        "--last"
+      ]
     },
     {
       "id": "codex-pro",
       "label": "Codex Pro (OpenAI)",
       "command": "codex-pro",
       "runtime": "codex",
-      "extraArgs": ["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"],
-      "execArgs": ["exec", "--skip-git-repo-check", "--cd", "{workspace}", "--dangerously-bypass-approvals-and-sandbox"],
+      "extraArgs": [
+        "exec",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox"
+      ],
+      "execArgs": [
+        "exec",
+        "--skip-git-repo-check",
+        "--cd",
+        "{workspace}",
+        "--dangerously-bypass-approvals-and-sandbox"
+      ],
       "promptDelivery": "positional",
-      "enterSequence": "\r\n",
       "rulesSupported": false,
-      "asynchronousNotification": false,
-      "sessionResume": true,
-      "resumeCommand": ["resume", "--last"]
+      "resumeCommand": [
+        "resume",
+        "--last"
+      ]
     },
     {
       "id": "agy-interactive",
       "label": "Antigravity (interactive)",
       "command": "agy",
       "runtime": "agy",
-      "extraArgs": ["--dangerously-skip-permissions"],
+      "extraArgs": [
+        "--dangerously-skip-permissions"
+      ],
       "promptDelivery": "flag",
       "promptFlag": "--prompt-interactive",
-      "enterSequence": "\r\n",
       "rulesSupported": false,
-      "asynchronousNotification": false,
-      "sessionResume": true,
-      "resumeCommand": ["--continue"]
+      "resumeCommand": [
+        "--continue"
+      ]
     }
   ],
   "skillAgentMap": {
