@@ -5,7 +5,7 @@
 // エージェントプロセスが終了した直後に、その終了コードを引数末尾に付けて呼ばれる。
 //   1. execution-id 付き（architect 等）なら executions.json に終了を記録する
 //   2. 非ゼロ終了なら orchestrator へ「異常終了」を通知する（サイレント失敗を潰す）
-//   3. resumeでの起動（capture-log-path・since-timestamp 付き）なら、実際にGitHubへ返信
+//   3. resumeでの起動（log-path・since-timestamp・log-offset 付き）なら、実際にGitHubへ返信
 //      （msg-send.js経由の投稿）が届いたかを確認し、届いていなければキャプチャしておいた
 //      標準出力を代理送信する（実障害: コーダーがresumeで正しく考えて回答を作ったのに
 //      msg-send.jsを一度も呼ばずに終了し、回答がどこにも投稿されなかった。エージェント種別に
@@ -15,9 +15,12 @@
 // 自動的に from=ワーカー / to=orchestrator として投稿する（成りすまし・宛先誤りは起きない）。
 //
 // Usage (フック側が仕込む固定形):
-//   node worker-exit-hook.js <workspace> <execution-id|""> [<capture-log-path|""> <since-timestamp|"">] <exit-code>
-//   capture-log-path/since-timestampはresume起動（inbox-supervisor.js）時のみ渡される。
+//   node worker-exit-hook.js <workspace> <execution-id|""> [<log-path> <since-timestamp> <log-offset>] <exit-code>
+//   log-path/since-timestamp/log-offsetはresume起動（inbox-supervisor.js）時のみ渡される。
 //   新規起動（spawn-worker.js）では渡されず、3.は動作しない。
+//   log-offset は「今回のresume分がログのどこから始まるか」のバイト位置。ワーカーのログは
+//   1ワーカー1ファイルに追記され続けるため、これが無いと今回何も出力しなかった場合に
+//   前回の実行の出力を今回の応答として代理送信してしまう。
 
 const fs = require('fs');
 const path = require('path');
@@ -56,8 +59,9 @@ const MAX_RELAY_CHARS = 8000;
  * @param {string} params.workerName
  * @param {string} params.captureLogPath
  * @param {string} params.sinceTimestamp
+ * @param {number} [params.logOffset=0] 今回のresume分がログのどこから始まるか（バイト位置）
  */
-function verifyReplyAndRelayIfMissing({ workspace, workerName, captureLogPath, sinceTimestamp }) {
+function verifyReplyAndRelayIfMissing({ workspace, workerName, captureLogPath, sinceTimestamp, logOffset = 0 }) {
   const issueMatch = /^issue-(\d+)-/.exec(workerName);
   if (!issueMatch) {
     process.stderr.write(`worker-exit-hook: workerName "${workerName}" からIssue番号を導出できません\n`);
@@ -126,11 +130,11 @@ function verifyReplyAndRelayIfMissing({ workspace, workerName, captureLogPath, s
 
 if (require.main === module) {
   const rawArgs = process.argv.slice(2);
-  const [workspace, executionId, captureLogPath, sinceTimestamp, exitCodeRaw] = rawArgs;
-  // resumeでは5引数（workspace, executionId, captureLogPath, sinceTimestamp, exitCode）、
+  const [workspace, executionId, captureLogPath, sinceTimestamp, logOffsetRaw, exitCodeRaw] = rawArgs;
+  // resumeでは6引数（workspace, executionId, logPath, sinceTimestamp, logOffset, exitCode）、
   // 新規起動では3引数（workspace, executionId, exitCode）で呼ばれる。後者では
   // captureLogPath の位置に exitCode が来るため、引数の個数で判別する。
-  const isResumeInvocation = rawArgs.length >= 5;
+  const isResumeInvocation = rawArgs.length >= 6;
   const resolvedExitCodeRaw = isResumeInvocation ? exitCodeRaw : captureLogPath;
   const exitCode = parseInt(resolvedExitCodeRaw, 10);
   const workerName = process.env.GH_MAESTRO_WORKER || null;
@@ -162,7 +166,11 @@ if (require.main === module) {
   // 3. resumeへの応答確認・未返信時の代理送信
   if (isResumeInvocation && captureLogPath && sinceTimestamp && workerName && workspace) {
     try {
-      verifyReplyAndRelayIfMissing({ workspace, workerName, captureLogPath, sinceTimestamp });
+      const parsedOffset = parseInt(logOffsetRaw, 10);
+      verifyReplyAndRelayIfMissing({
+        workspace, workerName, captureLogPath, sinceTimestamp,
+        logOffset: Number.isFinite(parsedOffset) && parsedOffset > 0 ? parsedOffset : 0,
+      });
     } catch (error) {
       process.stderr.write(`worker-exit-hook: 返信確認・代理送信処理で例外: ${error.message}\n`);
     }

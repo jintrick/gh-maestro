@@ -13,6 +13,10 @@ Usage: node get-context.js
 BASE_BRANCH を解決して [gh-maestro session context] ブロックを stdout に出力する。
 通常は /gh-maestro の起動フックが呼ぶ。`;
 
+// CLI として実行されたときだけ動く。require されただけで git を叩き stdout を汚さないため。
+// （install.js と同じイディオム。CommonJS のモジュールスコープでは top-level return が使える）
+if (require.main !== module) return;
+
 if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
   console.log(USAGE);
   process.exit(0);

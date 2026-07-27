@@ -15,64 +15,69 @@ function run(args, env = {}) {
   });
 }
 
-// WEZTERM_PANE がないと即失敗するので、ダミー値をセットして引数バリデーションまで到達させる
-const BASE_ENV = { WEZTERM_PANE: '999' };
+// headless起動になったため WEZTERM_PANE は不要。引数バリデーションの検証には追加の環境変数は要らない。
+const BASE_ENV = {};
+
+// 生存判定を注入して、実プロセスに触れずに stale 判定だけを検証する
+const ALIVE = () => true;
+const DEAD = () => false;
 
 // ── shouldPruneStaleWorker（stale worker除去判定） ────────────────────────────
 // 実障害: 新規ワーカー起動のたびに、たまたま休止中（正常）だったセッション再開系
 // ワーカーがworkers.jsonから消え、二度とresumeされなくなっていた。
 
-test('shouldPruneStaleWorker: ペインが生存していれば除去しない', () => {
+test('shouldPruneStaleWorker: プロセスが生存していれば除去しない', () => {
   const result = shouldPruneStaleWorker(
-    { paneId: '5', agentId: 'agy' },
-    new Set(['5']),
+    { pid: 5, agentId: 'agy' },
     () => ({ sessionResume: true, asynchronousNotification: false }),
+    ALIVE,
   );
   assert.equal(result, false);
 });
 
-test('shouldPruneStaleWorker: ペイン不在でもセッション再開系エージェントなら除去しない（正常な休止）', () => {
+test('shouldPruneStaleWorker: プロセス不在でもセッション再開系エージェントなら除去しない（正常な休止）', () => {
   const result = shouldPruneStaleWorker(
-    { paneId: '5', agentId: 'agy' },
-    new Set(['9']),
+    { pid: 5, agentId: 'agy' },
     () => ({ sessionResume: true, asynchronousNotification: false }),
+    DEAD,
   );
   assert.equal(result, false);
 });
 
-test('shouldPruneStaleWorker: ペイン不在でasynchronousNotification:trueなら除去する', () => {
+test('shouldPruneStaleWorker: プロセス不在でasynchronousNotification:trueなら除去する', () => {
   const result = shouldPruneStaleWorker(
-    { paneId: '5', agentId: 'claude' },
-    new Set(['9']),
+    { pid: 5, agentId: 'claude' },
     () => ({ sessionResume: true, asynchronousNotification: true }),
+    DEAD,
   );
   assert.equal(result, true);
 });
 
 test('shouldPruneStaleWorker: agentConfigが解決できない場合はfail-safeで除去する', () => {
-  const result = shouldPruneStaleWorker(
-    { paneId: '5', agentId: 'unknown-agent' },
-    new Set(['9']),
-    () => null,
-  );
+  const result = shouldPruneStaleWorker({ pid: 5, agentId: 'unknown-agent' }, () => null, DEAD);
   assert.equal(result, true);
 });
 
 test('shouldPruneStaleWorker: resolveAgentが例外を投げてもfail-safeで除去する', () => {
   const result = shouldPruneStaleWorker(
-    { paneId: '5', agentId: 'broken' },
-    new Set(['9']),
+    { pid: 5, agentId: 'broken' },
     () => { throw new Error('boom'); },
+    DEAD,
   );
   assert.equal(result, true);
 });
 
 test('shouldPruneStaleWorker: agentIdが無ければfail-safeで除去する', () => {
   const result = shouldPruneStaleWorker(
-    { paneId: '5', agentId: null },
-    new Set(['9']),
+    { pid: 5, agentId: null },
     () => { throw new Error('should not be called'); },
+    DEAD,
   );
+  assert.equal(result, true);
+});
+
+test('shouldPruneStaleWorker: pidが無くセッション再開系でなければ除去する', () => {
+  const result = shouldPruneStaleWorker({ pid: null, agentId: 'claude' }, () => ({ sessionResume: false }), DEAD);
   assert.equal(result, true);
 });
 
@@ -121,10 +126,15 @@ test('--description が51文字以上だとエラー終了する', () => {
 });
 
 test('--description の英数字・ハイフン・アンダースコアはバリデーションを通過する', () => {
-  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'explore-auth_v2', '--repo', 'o/r'], BASE_ENV);
+  // 実在しない --agent を渡し、エージェント解決（worktree作成より前）で確実に停止させる。
+  // 全引数を妥当にすると worktree を作り実エージェントを起動してしまうため、
+  // 引数バリデーションだけを見たいテストは必ず副作用の手前で止める。
+  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'explore-auth_v2',
+    '--repo', 'o/r', '--agent', 'nonexistent-agent-for-test'], BASE_ENV);
   assert.notEqual(r.status, 0);
-  // description自体のバリデーションでは落ちず、後段（WEZTERM_PANE等）で止まることを確認
+  // description自体のバリデーションでは落ちず、後段（エージェント解決）で止まることを確認
   assert.doesNotMatch(r.stderr, /--description は英数字/);
+  assert.match(r.stderr, /nonexistent-agent-for-test/);
 });
 
 test('--issue がないとエラー終了する', () => {
@@ -289,15 +299,15 @@ test('未知のフラグを指定するとエラー終了する（黙って無�
   assert.match(r.stderr, /--typo-flag/);
 });
 
-test('WEZTERM_PANE が未設定だとエラー終了する', () => {
+test('WEZTERM_PANE が未設定でも WEZTERM 由来の理由では失敗しない（headless化で不要になった）', () => {
   const envWithoutPane = { ...process.env };
   delete envWithoutPane.WEZTERM_PANE;
-  const r = spawnSync(process.execPath, [SCRIPT,
-    '--skill', 'gh-maestro-coder',
-    '--issue', '1', '--description', 'test', '--repo', 'o/r',
-  ], { encoding: 'utf8', env: envWithoutPane });
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /WEZTERM_PANE/);
+  // 副作用（worktree作成・エージェント起動）の手前で止めるため、実在しない --agent を渡す
+  const r = spawnSync(process.execPath, [SCRIPT, '--skill', 'gh-maestro-coder', '--issue', '1',
+    '--description', 'test', '--repo', 'o/r', '--agent', 'nonexistent-agent-for-test'],
+  { encoding: 'utf8', env: envWithoutPane });
+
+  assert.doesNotMatch(r.stderr, /WEZTERM_PANE/);
 });
 
 // ── link-node-modules の解決 ──────────────────────────────────────────────────
@@ -343,10 +353,14 @@ test('link-node-modules がインストール先と同構造のディレクト�
 // 使ってエントリを構築する（buildWorkerEntry という別実装は持たない）。
 // ここでは workers.json に実際に書き込まれる形（観測可能な振る舞い）を検証する。
 
-test('新規ワーカー登録エントリは paneId/agentId/issue を含む', () => {
+test('新規ワーカー登録エントリは pid/startTime/logPath/agentId/issue を含む', () => {
   const { normalizeWorkerEntry } = require('../scripts/worker-entry');
-  const entry = normalizeWorkerEntry({ paneId: '123', agentId: 'claude', issue: 51 });
-  assert.equal(entry.paneId, '123');
+  const entry = normalizeWorkerEntry({
+    pid: 123, startTime: '2026-07-25T00:00:00.000Z', logPath: 'C:/ws/w.log', agentId: 'claude', issue: 51,
+  });
+  assert.equal(entry.pid, 123);
+  assert.equal(entry.startTime, '2026-07-25T00:00:00.000Z');
+  assert.equal(entry.logPath, 'C:/ws/w.log');
   assert.equal(entry.agentId, 'claude');
   assert.equal(entry.issue, 51);
   assert.equal(typeof entry.issue, 'number');
@@ -354,14 +368,20 @@ test('新規ワーカー登録エントリは paneId/agentId/issue を含む', (
 
 test('新規ワーカー登録エントリは issue を数値に変換する（文字列で渡されても Number() される）', () => {
   const { normalizeWorkerEntry } = require('../scripts/worker-entry');
-  const entry = normalizeWorkerEntry({ paneId: '456', agentId: 'agy', issue: '99' });
+  const entry = normalizeWorkerEntry({ pid: 456, agentId: 'agy', issue: '99' });
   assert.equal(entry.issue, 99);
   assert.equal(typeof entry.issue, 'number');
 });
 
+test('新規ワーカー登録エントリは paneId を持たない（null）ためレガシーkill-pane経路が誤発火しない', () => {
+  const { normalizeWorkerEntry } = require('../scripts/worker-entry');
+  const entry = normalizeWorkerEntry({ pid: 1, agentId: 'claude', issue: 7 });
+  assert.equal(entry.paneId, null);
+});
+
 test('新規ワーカー登録エントリは notifierPid を持たない（null）ため remove-worker等がレガシーnotifierをkillしようとしない', () => {
   const { normalizeWorkerEntry } = require('../scripts/worker-entry');
-  const entry = normalizeWorkerEntry({ paneId: '1', agentId: 'claude', issue: 7 });
+  const entry = normalizeWorkerEntry({ pid: 1, agentId: 'claude', issue: 7 });
   assert.equal(entry.notifierPid, null);
 });
 
@@ -381,7 +401,7 @@ test('--agent で存在しないエージェントを指定した場合はエラ
       '--agent', 'nonexistent',
     ], {
       encoding: 'utf8',
-      env: { ...process.env, WEZTERM_PANE: '999', HOME: tmp },
+      env: { ...process.env, HOME: tmp },
     });
 
     assert.notEqual(r.status, 0, 'exit code should be non-zero');
@@ -426,7 +446,7 @@ test('config.json に定義されていてもバイナリが PATH になけれ�
       '--agent', 'claude',
     ], {
       encoding: 'utf8',
-      env: { ...process.env, WEZTERM_PANE: '999', HOME: tmp },
+      env: { ...process.env, HOME: tmp },
     });
 
     assert.notEqual(r.status, 0, 'exit code should be non-zero');
@@ -434,5 +454,83 @@ test('config.json に定義されていてもバイナリが PATH になけれ�
     assert.match(r.stderr, /nonexistent-cmd-xyz/, 'error should name the missing command');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ── フェイルクローズ: send-text-after-launch は headless では使えない ──────────
+// 画面への入力注入を前提とする方式のため、headless実行では本文を渡せない。
+// 黙ってプロンプト無しで起動するとワーカーが指示を受け取れないまま走り出す。
+// 将来 promptDelivery: send-text-after-launch のエージェントが追加されたとき、
+// このガードが無言で壊れていないことを保証する。
+
+test('send-text-after-launch のエージェントは起動を拒否する（フェイルクローズ）', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-stal-'));
+  try {
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), JSON.stringify({
+      agents: {
+        'legacy-sendtext': {
+          id: 'legacy-sendtext',
+          command: process.execPath,
+          extraArgs: [],
+          promptDelivery: 'send-text-after-launch',
+          asynchronousNotification: false,
+          sessionResume: true,
+          resumeCommand: ['--continue'],
+        },
+      },
+    }, null, 2), 'utf8');
+
+    const r = run(
+      ['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'sendtext',
+        '--repo', 'o/r', '--agent', 'legacy-sendtext'],
+      { HOME: home, USERPROFILE: home },
+    );
+
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /send-text-after-launch/);
+    assert.match(r.stderr, /headless/);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test('send-text-after-launch の拒否は worktree を作る前に起きる（副作用を残さない）', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-stal2-'));
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-stalws-'));
+  try {
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), JSON.stringify({
+      agents: {
+        'legacy-sendtext': {
+          id: 'legacy-sendtext',
+          command: process.execPath,
+          extraArgs: [],
+          promptDelivery: 'send-text-after-launch',
+          asynchronousNotification: false,
+          sessionResume: true,
+          resumeCommand: ['--continue'],
+        },
+      },
+    }, null, 2), 'utf8');
+
+    const r = run(
+      ['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'sendtext',
+        '--repo', 'o/r', '--workspace', ws, '--agent', 'legacy-sendtext'],
+      { HOME: home, USERPROFILE: home },
+    );
+
+    assert.notEqual(r.status, 0);
+    assert.equal(
+      fs.existsSync(path.join(ws, '.gh-maestro', 'worktrees', 'issue-1-sendtext')), false,
+      'ガードは worktree 作成より前に落ちること',
+    );
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(ws, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });

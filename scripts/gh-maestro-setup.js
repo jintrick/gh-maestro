@@ -14,15 +14,10 @@ Usage: node gh-maestro-setup.js [WORKSPACE_ROOT]
 Arguments:
   [WORKSPACE_ROOT]  対象プロジェクトのルート（デフォルト CWD）
 
-WEZTERM_PANE / wezterm CLI / git リポジトリ / gh 認証を検証し、.gh-maestro ディレクトリと
+WezTerm稼働（assistant用）/ git リポジトリ / gh 認証を検証し、.gh-maestro ディレクトリと
 .gitignore・dev ブランチ・pre-commit/pre-push フック（sync-rules同期・lint/format/typecheck/test
 検証）を用意する。初回実行後は sentinel (.gh-maestro/setup-ok) で環境チェックのみスキップし、
 冪等なセットアップステップは毎回実行する。通常は /gh-maestro の起動フックが呼ぶ。`;
-
-if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
-  console.log(USAGE);
-  process.exit(0);
-}
 
 const workspaceRoot = process.argv[2] ?? process.cwd();
 
@@ -53,8 +48,10 @@ function getRemoteRepo() {
 // ローカル spawn 方式に移行したため、デプロイ済みファイルを削除する。
 // sentinel (.gh-maestro/ai-review-ok) が存在するプロジェクトが対象。
 
-const aiReviewSentinel = resolve(workspaceRoot, '.gh-maestro', 'ai-review-ok');
-if (existsSync(aiReviewSentinel)) {
+function retireAiReviewCi() {
+  const aiReviewSentinel = resolve(workspaceRoot, '.gh-maestro', 'ai-review-ok');
+  if (!existsSync(aiReviewSentinel)) return;
+
   const repoName = getRemoteRepo();
   if (repoName) {
     step('Retiring GitHub Actions AI Review CI...');
@@ -106,24 +103,31 @@ if (existsSync(aiReviewSentinel)) {
 // ─── 1. 環境チェック ──────────────────────────────────────────────────────────
 
 const sentinelPath = resolve(workspaceRoot, '.gh-maestro', 'setup-ok');
-const isFirstRun = !existsSync(sentinelPath);
+const isFirstRun = () => !existsSync(sentinelPath);
 
 function checkEnvironment() {
   step('Checking prerequisites...');
 
+  // WezTerm はワーカーの起動には使わない（Issue #151 でheadless実行へ移行済み）。
+  // 依然として必要なのは assistant（Issue起票と同時に自動起動する対話型ワーカー）だけで、
+  // これは `wezterm cli spawn --new-window` で独立ウィンドウとして起動する。
+  // WEZTERM_PANE の値自体はもうどこも読まないが、「WezTermが稼働中である」ことの
+  // 代理指標として確認する（mux未起動だと --no-auto-start 付きの spawn が失敗するため）。
   if (!process.env.WEZTERM_PANE) {
     fail(
-      'WEZTERM_PANE が設定されていません。',
+      'WEZTERM_PANE が設定されていません（WezTermが稼働中か確認できません）。',
       '→ WezTerm のペイン内から /gh-maestro を実行してください。',
       '→ すでに WezTerm 内にいる場合は WezTerm が古い可能性があります（v20220807 以降で自動設定）。',
       '   インストール: https://wezfurlong.org/wezterm/installation.html',
+      '※ ワーカーはWezTermを使わずバックグラウンドで動きます。WezTermが要るのは',
+      '   Issueごとに自動起動する対話型ワーカー assistant のウィンドウのためです。',
     );
   }
-  ok(`Orchestrator pane-id: ${process.env.WEZTERM_PANE}`);
+  ok('WezTerm session detected (assistant のウィンドウ起動に使用)');
 
   if (!run('wezterm', ['--version'], { capture: true })) {
     fail(
-      'wezterm CLI が PATH に見つかりません。',
+      'wezterm CLI が PATH に見つかりません（assistant の起動に必要です）。',
       '→ WezTerm をインストールしてください: https://wezfurlong.org/wezterm/installation.html',
       '→ インストール後はシェルを再起動するか、PATH を再読み込みしてください。',
     );
@@ -339,22 +343,47 @@ function reportHookResult(label, result) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-// Sentinel gates only expensive environment checks.
-// Idempotent setup steps (ensure*) run every invocation so new steps
-// apply automatically to existing projects.
-if (isFirstRun) {
-  checkEnvironment();
+/**
+ * セットアップ本体。
+ *
+ * このスクリプトの副作用（git hooks の書き換え・.gitignore 追記・dev ブランチ作成・
+ * GitHub API での旧CIファイル削除）は、すべてこの関数の内側に閉じている。
+ * かつては全てがトップレベルにあり、`require('./gh-maestro-setup')` するだけで
+ * これらが実行された——実際に動作確認のつもりで require され、git hooks が
+ * 書き換わる事故が起きた（gh api DELETE まで走りうる状態だった）。
+ */
+function main() {
+  if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+
+  retireAiReviewCi();
+
+  // Sentinel gates only expensive environment checks.
+  // Idempotent setup steps (ensure*) run every invocation so new steps
+  // apply automatically to existing projects.
+  const firstRun = isFirstRun();
+  if (firstRun) {
+    checkEnvironment();
+  }
+
+  prepareDirectories();
+  ensureGitIgnore();
+  ensureDevBranch();
+  ensurePreCommitHook();
+  ensurePrePushHook();
+
+  if (firstRun) {
+    mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
+    writeFileSync(sentinelPath, '');
+    ok('Setup complete (subsequent /gh-maestro invocations will skip environment checks)');
+    console.log('\ngh-maestro ready.\n');
+  }
 }
 
-prepareDirectories();
-ensureGitIgnore();
-ensureDevBranch();
-ensurePreCommitHook();
-ensurePrePushHook();
+module.exports = { main };
 
-if (isFirstRun) {
-  mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
-  writeFileSync(sentinelPath, '');
-  ok('Setup complete (subsequent /gh-maestro invocations will skip environment checks)');
-  console.log('\ngh-maestro ready.\n');
+if (require.main === module) {
+  main();
 }

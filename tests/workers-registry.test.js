@@ -9,8 +9,7 @@ const path = require('path');
 const {
   workersJsonPath,
   readWorkersRaw,
-  updateWorkerPaneId,
-  getOrchestratorPaneId,
+  updateWorkerProcess,
   resolveWorkerName,
 } = require('../scripts/shared/workers-registry');
 
@@ -57,68 +56,70 @@ test('readWorkersRaw: 正常なJSONを返す', () => {
   });
 });
 
-test('updateWorkerPaneId: 既存エントリのpaneIdを更新する', () => {
+test('updateWorkerProcess: 既存エントリのpid/startTime/logPathを更新する', () => {
   withTempDir((dir) => {
     writeWorkers(dir, {
-      orchestrator: { paneId: '1' },
-      'issue-5-fix': { paneId: '10', agentId: 'agy', issue: 5 },
+      orchestrator: { agentId: null },
+      'issue-5-fix': { pid: 100, startTime: 'old', agentId: 'agy', issue: 5, skill: 'gh-maestro-coder' },
     });
 
-    const ok = updateWorkerPaneId(dir, 'issue-5-fix', '99');
+    const ok = updateWorkerProcess(dir, 'issue-5-fix', {
+      pid: 999, startTime: '2026-07-25T00:00:00.000Z', logPath: 'C:/ws/w.log',
+    });
     assert.equal(ok, true);
 
     const raw = readWorkersRaw(dir);
-    assert.equal(raw['issue-5-fix'].paneId, '99');
+    assert.equal(raw['issue-5-fix'].pid, 999);
+    assert.equal(raw['issue-5-fix'].startTime, '2026-07-25T00:00:00.000Z');
+    assert.equal(raw['issue-5-fix'].logPath, 'C:/ws/w.log');
+    // 役割・エージェント情報は保たれる
     assert.equal(raw['issue-5-fix'].agentId, 'agy');
     assert.equal(raw['issue-5-fix'].issue, 5);
+    assert.equal(raw['issue-5-fix'].skill, 'gh-maestro-coder');
     // 他エントリは変化しない
-    assert.equal(raw.orchestrator.paneId, '1');
+    assert.deepEqual(raw.orchestrator, { agentId: null });
   });
 });
 
-test('updateWorkerPaneId: 数値paneIdでも文字列化して保存する', () => {
+test('updateWorkerProcess: 文字列pidも数値化して保存する', () => {
+  withTempDir((dir) => {
+    writeWorkers(dir, { 'issue-5-fix': { pid: 100, agentId: 'agy', issue: 5 } });
+    updateWorkerProcess(dir, 'issue-5-fix', { pid: '999', startTime: null, logPath: null });
+    const raw = readWorkersRaw(dir);
+    assert.equal(raw['issue-5-fix'].pid, 999);
+    assert.equal(typeof raw['issue-5-fix'].pid, 'number');
+  });
+});
+
+test('updateWorkerProcess: logPath 省略時は既存の値を維持する', () => {
+  withTempDir((dir) => {
+    writeWorkers(dir, { 'issue-5-fix': { pid: 100, logPath: 'C:/ws/keep.log', agentId: 'agy' } });
+    updateWorkerProcess(dir, 'issue-5-fix', { pid: 999, startTime: 'x' });
+    assert.equal(readWorkersRaw(dir)['issue-5-fix'].logPath, 'C:/ws/keep.log');
+  });
+});
+
+test('updateWorkerProcess: レガシーpaneIdは消す（新プロセスが起きた以上、古いペインIDは誤ったkill対象になる）', () => {
   withTempDir((dir) => {
     writeWorkers(dir, { 'issue-5-fix': { paneId: '10', agentId: 'agy', issue: 5 } });
-    updateWorkerPaneId(dir, 'issue-5-fix', 99);
-    const raw = readWorkersRaw(dir);
-    assert.equal(raw['issue-5-fix'].paneId, '99');
-    assert.equal(typeof raw['issue-5-fix'].paneId, 'string');
+    updateWorkerProcess(dir, 'issue-5-fix', { pid: 999, startTime: 'x', logPath: 'C:/ws/w.log' });
+    assert.equal(readWorkersRaw(dir)['issue-5-fix'].paneId, null);
   });
 });
 
-test('updateWorkerPaneId: 存在しないworkerNameはfalseを返し何も書き換えない', () => {
+test('updateWorkerProcess: 存在しないworkerNameはfalseを返し何も書き換えない', () => {
   withTempDir((dir) => {
-    writeWorkers(dir, { 'issue-5-fix': { paneId: '10' } });
-    const ok = updateWorkerPaneId(dir, 'issue-999-nope', '99');
+    writeWorkers(dir, { 'issue-5-fix': { pid: 100 } });
+    const ok = updateWorkerProcess(dir, 'issue-999-nope', { pid: 999 });
     assert.equal(ok, false);
     // 書き込みが行われていないため、raw のファイル内容がそのまま残っている
-    assert.deepEqual(readWorkersRaw(dir)['issue-5-fix'], { paneId: '10' });
+    assert.deepEqual(readWorkersRaw(dir)['issue-5-fix'], { pid: 100 });
   });
 });
 
-test('updateWorkerPaneId: workers.jsonが無い場合はfalse', () => {
+test('updateWorkerProcess: workers.jsonが無い場合はfalse', () => {
   withTempDir((dir) => {
-    assert.equal(updateWorkerPaneId(dir, 'issue-5-fix', '99'), false);
-  });
-});
-
-test('getOrchestratorPaneId: orchestratorエントリのpaneIdを返す', () => {
-  withTempDir((dir) => {
-    writeWorkers(dir, { orchestrator: { paneId: '1' } });
-    assert.equal(getOrchestratorPaneId(dir), '1');
-  });
-});
-
-test('getOrchestratorPaneId: orchestratorエントリが無ければnull', () => {
-  withTempDir((dir) => {
-    writeWorkers(dir, { 'issue-5-fix': { paneId: '10' } });
-    assert.equal(getOrchestratorPaneId(dir), null);
-  });
-});
-
-test('getOrchestratorPaneId: workers.jsonが無ければnull', () => {
-  withTempDir((dir) => {
-    assert.equal(getOrchestratorPaneId(dir), null);
+    assert.equal(updateWorkerProcess(dir, 'issue-5-fix', { pid: 999 }), false);
   });
 });
 
@@ -127,9 +128,9 @@ test('getOrchestratorPaneId: workers.jsonが無ければnull', () => {
 test('resolveWorkerName: issue+skill が一意に決まれば workerName を返す', () => {
   withTempDir((dir) => {
     writeWorkers(dir, {
-      orchestrator: { paneId: '1' },
-      'issue-42-investigate': { paneId: '10', agentId: 'reasonix', issue: 42, skill: 'gh-maestro-investigator' },
-      'issue-42-implement': { paneId: '11', agentId: 'claude-ds', issue: 42, skill: 'gh-maestro-coder' },
+      orchestrator: { agentId: null },
+      'issue-42-investigate': { pid: 10, agentId: 'reasonix', issue: 42, skill: 'gh-maestro-investigator' },
+      'issue-42-implement': { pid: 11, agentId: 'claude-ds', issue: 42, skill: 'gh-maestro-coder' },
     });
     assert.equal(resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }), 'issue-42-implement');
     assert.equal(resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-investigator' }), 'issue-42-investigate');

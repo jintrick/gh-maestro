@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // spawn-worker.js
-// ワーカーペインを作成し、worktreeを準備してエージェントを起動する
+// worktreeを準備し、ワーカーをheadless（画面なし）で起動する
 //
 // ⚠️  このファイルでフロー変更（環境変数・自動前処理・プロンプト配信方法）をコミットするとき、
 //    コミット前に /audit-worker-skills を実行すること（CLAUDE.md「スキルとスクリプトの整合性ルール」参照）
@@ -31,7 +31,9 @@ const { linkNodeModules } = require('./link-node-modules');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { checkAgentExists } = require('./agent-exec');
-const { launchAgentInPane, killPaneQuiet } = require('./shared/pane-launch');
+const { launchAgentHeadless, workerLogPath } = require('./shared/headless-launch');
+const { isWorkerAlive } = require('./shared/worker-liveness');
+const { killProcessTree } = require('./kill-tree');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
@@ -46,7 +48,7 @@ const SPAWN_WORKER_VALUE_FLAGS = [
   '--execution-id',
 ];
 
-const USAGE = `spawn-worker.js — ワーカーペインを作成し、worktreeを準備してエージェントを起動する
+const USAGE = `spawn-worker.js — worktreeを準備し、ワーカーをheadless（画面なし）で起動する
 
 Usage: node spawn-worker.js --skill <skill-name> --issue <N> --description <desc> --repo <owner/repo>
                             [--short-prompt <text> | --prompt-file <path>] [--workspace <path>]
@@ -69,24 +71,27 @@ Arguments:
   --execution-id <id>     外部成果物と紐付ける実行ID。指定時だけ実行状態を追跡する。
 
 Output (stdout):
-  ワーカー名（例: issue-5-implement）`;
+  ワーカー名（例: issue-5-implement）
+
+ワーカーは画面を持たないバックグラウンドプロセスとして起動し、標準出力/標準エラーは
+<workspace>/.gh-maestro/worker-logs/<worker>.log へ実行中から逐次書き込まれる。`;
 
 /**
  * ワーカーエントリをworkers.jsonから除去すべき（stale）か判定する。
  *
- * ペインが生存していれば除去しない。ペインが生存していなくても、セッション再開系
+ * プロセスが生存していれば除去しない。生存していなくても、セッション再開系
  * エージェント（sessionResume:true かつ asynchronousNotification:false。reasonix/agy/
  * codex等）であれば、それは1ターン完了ごとの正常な休止状態であり除去しない
  * （tryResumeAndDeliverの判定条件と同一）。それ以外（claude系等、常駐し続ける設計の
- * ためペイン不在が本当に異常＝放棄を意味する）のみ除去対象とする。
+ * ためプロセス不在が本当に異常＝放棄を意味する）のみ除去対象とする。
  *
- * @param {{paneId: string|null, agentId: string|null}} entry
- * @param {Set<string>} alivePaneIds
+ * @param {object} entry workers.json のエントリ
  * @param {(agentId: string) => object|null} resolveAgent
+ * @param {(entry: object) => boolean} [aliveFn=isWorkerAlive] テスト用の注入口
  * @returns {boolean}
  */
-function shouldPruneStaleWorker(entry, alivePaneIds, resolveAgent) {
-  if (alivePaneIds.has(entry.paneId)) return false;
+function shouldPruneStaleWorker(entry, resolveAgent, aliveFn = isWorkerAlive) {
+  if (aliveFn(entry)) return false;
   let agentConfig;
   try {
     agentConfig = entry.agentId ? resolveAgent(entry.agentId) : null;
@@ -166,9 +171,6 @@ if (!/^[1-9][0-9]*$/.test(issue)) fail('--issue は正の整数である必要�
 const skillMap = resolveSkillAgentMap({ workspace });
 const agentId = explicitAgentId ?? skillMap[skill] ?? 'agy';
 
-const orchPaneId = process.env.WEZTERM_PANE;
-if (!orchPaneId)  fail('WEZTERM_PANE が設定されていません');
-
 // --- エージェント設定を解決（config.json > agent-defaults.json） ---
 const homedir = process.env.HOME || process.env.USERPROFILE || '';
 let agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
@@ -185,6 +187,18 @@ if (!agentConfig) {
 // PATH 実行ファイル・pwsh 関数・シェルエイリアスのいずれでも一貫して判定する。
 if (!checkAgentExists(agentConfig.command)) {
   fail(`エージェント "${agentId}" のコマンド "${agentConfig.command}" が見つかりません。CLIがインストールされているか、pwsh関数/シェルエイリアスが定義されているか確認してください。`);
+}
+
+// --- send-text-after-launch は headless では実現できない（フェイルクローズ） ---
+// この方式は起動argvにプロンプトを渡せないエージェント向けの後方互換経路で、画面への
+// 入力注入を前提としている。黙ってプロンプト無しで起動するとワーカーが指示を受け取れない
+// まま走り出すため拒否する。worktree作成・プロンプト書き出しより前に落として副作用を残さない。
+if (agentConfig.promptDelivery === 'send-text-after-launch') {
+  fail(
+    `エージェント "${agentConfig.id}" の promptDelivery が "send-text-after-launch" ですが、` +
+    `この方式は画面への入力注入を前提としており headless 実行では使えません。` +
+    `agent-defaults.json / config.json で flag・positional・system-prompt-file のいずれかに変更してください。`
+  );
 }
 
 // --- [レガシーガード] pwsh -Command 経由エージェントの空白パスガード ---
@@ -219,52 +233,25 @@ if (existsSync(workersJson)) {
   }
 }
 if (!workers.orchestrator) {
-  workers.orchestrator = { paneId: orchPaneId, agentId: null };
+  // orchestrator エントリ自体はワーカー走査時に一律スキップされる予約キー。
+  // WezTerm脱却によりペインIDを持たなくなったため、存在だけを保持する。
+  workers.orchestrator = { agentId: null };
 }
 
-// --- 生存確認: staleなpane_idをworkers.jsonから除去 ---
-const getAlivePaneIds = () => {
-  const r = spawnSync('wezterm', ['cli', '--no-auto-start', 'list', '--format', 'json'], { encoding: 'utf8', timeout: 6000 });
-  if (r.error?.code === 'ETIMEDOUT') {
-    console.warn('spawn-worker: wezterm cli list がタイムアウト — stale除去をスキップします');
-    return null;
-  }
-  if (r.status !== 0) {
-    console.warn(`spawn-worker: wezterm cli list 失敗: ${r.stderr.trim()} — stale除去をスキップします`);
-    return null;
-  }
-  try {
-    return new Set(JSON.parse(r.stdout).map(p => String(p.pane_id)));
-  } catch (e) {
-    console.warn(`spawn-worker: wezterm cli list の出力パース失敗: ${e.message} — stale除去をスキップします`);
-    return null;
-  }
-};
-
-const alivePanes = getAlivePaneIds();
-if (alivePanes !== null) {
+// --- 生存確認: 死んだワーカーのエントリをworkers.jsonから除去 ---
+{
   let dirty = false;
   for (const [k, v] of Object.entries(workers)) {
     if (k === 'orchestrator') continue;
     const entry = normalizeWorkerEntry(v);
-    if (!shouldPruneStaleWorker(entry, alivePanes, (id) => resolveAgentConfig(id, { workspace, homedir }))) continue;
+    if (!shouldPruneStaleWorker(entry, (id) => resolveAgentConfig(id, { workspace, homedir }))) continue;
 
-    console.warn(`spawn-worker: stale worker "${k}" (pane_id ${entry.paneId}) を workers.json から除去します`);
+    console.warn(`spawn-worker: stale worker "${k}" (pid ${entry.pid ?? '-'}) を workers.json から除去します`);
     delete workers[k];
     dirty = true;
   }
   if (dirty) writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
 }
-
-// --- レイアウト決定（WezTermの詳細はここに閉じ込める） ---
-// 常にorchestratorのペインからbottom方向に分割する。既存ワーカーのペインから
-// 連鎖的に分割すると、そのペイン自体が既に固定行数（DEFAULT_WORKER_PANE_ROWS）
-// まで縮んでいるため「No space for split!」で失敗する、または中途半端な行数に
-// squeezeされる（実機検証で確認済み）。orchestratorのペインは十分な余白を
-// 持ち続ける限り毎回同じ行数を安定して切り出せるため、常にここから分割する
-// （inbox-supervisor.jsのresumeも同様）。
-const direction = 'bottom';
-const splitFromPaneId = orchPaneId;
 
 // --- baseBranch をリモートと同期（worktreeが常に最新ベースから分岐するよう保証） ---
 // spawnSync の引数配列でシェル注入を回避する
@@ -403,16 +390,13 @@ try {
   fail(`エージェント "${agentConfig.id}" の起動引数を組み立てられません: ${e.message}`);
 }
 
-// --- WezTerm ペイン分割 + エージェント起動（ログインシェル経由） ---
-// 全エージェントをログインシェル経由にラップする（scripts/shared/pane-launch.js に集約）。
+// --- headless 起動（画面を使わず、標準出力は専用ログファイルへ直接リダイレクト） ---
+// 全エージェントをログインシェル経由にラップする（scripts/shared/headless-launch.js に集約）。
 // これにより PATH 実行ファイル・pwsh 関数・エイリアスのすべてが起動可能になる。
 // argv の完全性は各プラットフォームのエンコード方式で保証される（agent-exec.js 参照）。
-// send-text-after-launch方式（起動argvにプロンプトを渡せないエージェント向けの後方互換経路。
-// 現状どのエージェントも使っていない — reasonix/agy/codexは全て非対話1回実行モードの
-// argv直接渡しに統一済み）向けの初期プロンプト注入も launchAgentInPane が担う
-// （TUI初期化待ち: agent-defaults.json の sendTextDelayMs、既定2000ms）。
-let newPaneId;
-let afterLaunchTextSent;
+//
+const logPath = workerLogPath(workspace, workerName);
+let launched;
 let execution;
 try {
   if (executionId) {
@@ -421,15 +405,10 @@ try {
       fail(`実行 "${executionId}" は既に完了しています（${execution.commentUrl}）。同じ成果物は再投稿しません`);
     }
   }
-  ({ paneId: newPaneId, afterLaunchTextSent } = launchAgentInPane({
+  launched = launchAgentHeadless({
     argv: agentCmdArgs,
-    worktreeDir,
-    splitFromPaneId,
-    orchPaneId,
-    direction,
-    afterLaunchText: agentConfig.promptDelivery === 'send-text-after-launch' ? shortPrompt : null,
-    sendTextDelayMs: agentConfig.sendTextDelayMs ?? 2000,
-    enterTerminator: agentConfig.enterSequence ?? '\r',
+    cwd: worktreeDir,
+    logPath,
     // ワーカー識別を「環境の事実」として渡す。msg-send.js はこれを見て自分がワーカーだと判定し、
     // 送信元を自動確定して orchestrator 専用の宛先指定機構（--skill）を拒否する（成りすまし・誤配送の防止）。
     env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },
@@ -440,7 +419,7 @@ try {
       command: process.execPath,
       args: [resolve(__dirname, 'worker-exit-hook.js'), workspace, executionId ?? ''],
     },
-  }));
+  });
 } catch (e) {
   if (executionId) {
     try { markLaunchFailure(workspace, executionId, e.message); } catch (_) {}
@@ -448,21 +427,24 @@ try {
   rollbackWorktree();
   fail(e.message);
 }
-if (agentConfig.promptDelivery === 'send-text-after-launch') {
-  if (afterLaunchTextSent) {
-    console.warn(`spawn-worker: 初期プロンプトをsend-textで送信しました (pane ${newPaneId})`);
-  } else {
-    console.warn(`spawn-worker: send-text失敗 (pane ${newPaneId})`);
-  }
-}
 
-// --- workers.json にワーカーを登録（失敗時はペインもロールバック） ---
+// --- workers.json にワーカーを登録（失敗時はプロセスもロールバック） ---
 try {
-  workers[workerName] = normalizeWorkerEntry({ paneId: newPaneId, agentId: agentConfig.id, issue, skill });
+  workers[workerName] = normalizeWorkerEntry({
+    pid: launched.pid,
+    startTime: launched.startTime,
+    logPath: launched.logPath,
+    agentId: agentConfig.id,
+    issue,
+    skill,
+  });
   writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
-  console.warn(`spawn-worker: worker "${workerName}" を pane ${newPaneId} として workers.json に登録しました`);
+  console.warn(`spawn-worker: worker "${workerName}" を pid ${launched.pid} として workers.json に登録しました`);
+  console.warn(`spawn-worker: 実行ログ: ${launched.logPath}`);
 } catch (e) {
-  killPaneQuiet(newPaneId);
+  // 登録できなかったワーカーは誰からも追跡・終了できなくなるため、プロセスごと落とす。
+  // 中継シム配下にログインシェルとエージェント本体がぶら下がるのでツリー全体を対象にする。
+  try { killProcessTree(launched.pid); } catch (_) {}
   rollbackWorktree();
   fail(`workers.json への書き込みに失敗しました: ${e.message}`);
 }

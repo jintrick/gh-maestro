@@ -3,9 +3,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('child_process');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
 
 const { buildLoginShellExecArgs, checkAgentExists } = require('../scripts/agent-exec');
 
@@ -139,132 +136,56 @@ test('buildLoginShellExecArgs: Unix の終了フックはエージェントコ�
   assert.match(result.stdout, /hook:7/);
 });
 
-// ── captureLogPath（resume応答の代理送信用stdoutキャプチャ） ──────────────────
+// ── ログ複製（Tee-Object / tee）の撤去（Issue #151） ─────────────────────────
+//
+// パイプ経由のログ複製は非対話execモードのcodex/agyと非互換で本番クラッシュを起こした
+// （Issue #150）。記録は shared/headless-launch.js のfd直接リダイレクトが担うため、
+// この層はパイプを一切構築してはならない。再導入を機械的に検出するための回帰テスト。
 
-test('buildLoginShellExecArgs: win32 で captureLogPath 指定時に Tee-Object へのパイプを組み込む', () => {
-  const args = buildLoginShellExecArgs(['claude-ds', '--print'], 'win32', null, {}, 'C:\\ws\\.gh-maestro\\out.log');
+test('buildLoginShellExecArgs: win32 でパイプによるログ複製を一切構築しない', () => {
+  const decoded = (args) => Buffer.from(args[3], 'base64').toString('utf16le');
+
+  const plain = decoded(buildLoginShellExecArgs(['claude-ds', '--print'], 'win32'));
+  assert.ok(!plain.includes('Tee-Object'), plain);
+  assert.ok(!plain.includes('|'), `パイプ演算子が含まれない: ${plain}`);
+  assert.equal(plain, "& 'claude-ds' '--print'");
+
+  // onExit・env を併用しても同じ（パイプは増えない）
+  const withHook = decoded(buildLoginShellExecArgs(
+    ['claude-ds', '--print'], 'win32',
+    { command: 'node', args: ['/ws/worker-exit-hook.js', '/ws', ''] },
+    { GH_MAESTRO_WORKER: 'issue-5-x' },
+  ));
+  assert.ok(!withHook.includes('Tee-Object'), withHook);
+  assert.ok(!withHook.includes('|'), `パイプ演算子が含まれない: ${withHook}`);
+});
+
+test('buildLoginShellExecArgs: Unix でパイプ・プロセス置換によるログ複製を一切構築しない', () => {
+  const plain = buildLoginShellExecArgs(['claude-ds', '--print'], 'linux')[2];
+  assert.ok(!plain.includes('tee'), plain);
+  assert.ok(!plain.includes('>('), `プロセス置換が含まれない: ${plain}`);
+  assert.equal(plain, 'exec "$0" "$@"');
+
+  const withHook = buildLoginShellExecArgs(
+    ['claude-ds', '--print'], 'linux',
+    { command: 'node', args: ['/ws/worker-exit-hook.js', '/ws', ''] },
+    { GH_MAESTRO_WORKER: 'issue-5-x' },
+  )[2];
+  assert.ok(!withHook.includes('tee'), withHook);
+  assert.ok(!withHook.includes('>('), `プロセス置換が含まれない: ${withHook}`);
+});
+
+test('buildLoginShellExecArgs: captureLogPath 相当の第5引数はもう受け付けない（渡しても無視される）', () => {
+  // 呼び出し元の削除漏れがあっても、パイプが復活しないことを保証する。
+  const args = buildLoginShellExecArgs(['claude-ds'], 'win32', null, {}, 'C:\\ws\\out.log');
   const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
-  assert.ok(decoded.includes("& 'claude-ds' '--print' 2>&1 | Tee-Object -FilePath 'C:\\ws\\.gh-maestro\\out.log'"));
-  // captureLogPath のみ（onExit無し）でも $LASTEXITCODE を保存して exit する
-  assert.ok(decoded.includes('exit $exitCode'));
+  assert.ok(!decoded.includes('out.log'), decoded);
+  assert.ok(!decoded.includes('Tee-Object'), decoded);
 });
 
-test('buildLoginShellExecArgs: win32 で captureLogPath と onExit を併用するとパイプの後にフックが呼ばれる', () => {
-  const hook = { command: 'node', args: ['/ws/worker-exit-hook.js', '/ws', '', '/ws/out.log', '2024-01-01T00:00:00Z'] };
-  const args = buildLoginShellExecArgs(['claude-ds', '--print'], 'win32', hook, {}, '/ws/out.log');
-  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
-  const teeIdx = decoded.indexOf('Tee-Object');
-  const hookIdx = decoded.indexOf("& 'node'");
-  assert.ok(teeIdx !== -1 && hookIdx !== -1 && teeIdx < hookIdx,
-    `Tee-Object should come before the exit hook invocation: ${decoded}`);
-});
-
-test('buildLoginShellExecArgs: win32 で captureLogPath 未指定なら Tee-Object関連の文字列が一切出ない', () => {
-  const args = buildLoginShellExecArgs(['claude-ds', '--print'], 'win32');
-  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
-  assert.ok(!decoded.includes('Tee-Object'));
-});
-
-test('buildLoginShellExecArgs: win32 で captureLogPath 内のシングルクォートをエスケープする', () => {
-  const args = buildLoginShellExecArgs(['claude-ds'], 'win32', null, {}, "C:\\o'brien\\out.log");
-  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
-  assert.ok(decoded.includes("Tee-Object -FilePath 'C:\\o''brien\\out.log'"));
-});
-
-test('buildLoginShellExecArgs: Unix で captureLogPath 指定時に tee を組み込む', () => {
-  const args = buildLoginShellExecArgs(['claude-ds', '--print'], 'linux', null, {}, '/ws/out.log');
-  assert.ok(args[2].startsWith("exec > >(tee -a '/ws/out.log') 2>&1; exec \"$0\" \"$@\""));
-});
-
-test('buildLoginShellExecArgs: Unix で captureLogPath 未指定なら tee が出ない', () => {
-  const args = buildLoginShellExecArgs(['claude-ds', '--print'], 'linux');
-  assert.ok(!args[2].includes('tee'));
-});
-
-test('buildLoginShellExecArgs (実行): win32 でcaptureLogPath指定時、実際にログファイルへ複製され、終了コードも正しく伝わる', (t) => {
-  if (process.platform !== 'win32') {
-    t.skip('win32専用のテスト');
-    return;
-  }
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-capture-test-'));
-  const logPath = path.join(dir, 'out.log');
-  const hookOutPath = path.join(dir, 'hook-out.txt');
-  const hookScriptPath = path.join(dir, 'hook.js');
-  // worker-exit-hook.js と同じ実起動形（command: process.execPath + JSファイル）を模す。
-  // pwshの-Command + 末尾位置引数の$args束縛は本番コードが依存する経路ではないため、
-  // 曖昧さを避けて実際に使われる形（node + jsファイル）で検証する。
-  fs.writeFileSync(hookScriptPath, "require('fs').writeFileSync(process.argv[2], 'received exit code: ' + process.argv[process.argv.length - 1]);");
-  try {
-    // pwshの組み込みコマンドを「エージェント」役として使い、標準出力と非ゼロ終了を再現する
-    const agentArgs = ['pwsh', '-NoLogo', '-NoProfile', '-Command', "Write-Host 'agent-output-marker'; exit 5"];
-    const hook = {
-      command: process.execPath,
-      args: [hookScriptPath, hookOutPath],
-    };
-    const args = buildLoginShellExecArgs(agentArgs, 'win32', hook, {}, logPath);
-    const result = spawnSync(args[0], args.slice(1), { encoding: 'utf8', timeout: 30000 });
-
-    assert.equal(result.status, 5, `agent exit code should propagate: stdout=${result.stdout} stderr=${result.stderr}`);
-    assert.ok(fs.existsSync(logPath), 'capture log file should exist');
-    const logContent = fs.readFileSync(logPath, 'utf8');
-    assert.match(logContent, /agent-output-marker/, `captured log should contain the agent's stdout: ${logContent}`);
-    assert.ok(fs.existsSync(hookOutPath), 'exit hook should have run');
-    const hookOut = fs.readFileSync(hookOutPath, 'utf8');
-    assert.match(hookOut, /received exit code: 5/, `exit hook should receive the correct exit code: ${hookOut}`);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('buildLoginShellExecArgs (実行): win32 でcaptureLogPath指定時、マルチバイト文字（日本語）が文字化けせずに複製される', (t) => {
-  if (process.platform !== 'win32') {
-    t.skip('win32専用のテスト');
-    return;
-  }
-  // 実障害: Tee-Objectへのパイプは既定のコンソール出力エンコーディング（日本語Windowsでは
-  // ANSI/OEMコードページ）でネイティブプロセスのUTF-8出力を解釈するため、パイプ無しの
-  // 直接リダイレクトでは正しく保存される日本語テキストが、パイプ経由だと文字化けした。
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-capture-encoding-test-'));
-  const logPath = path.join(dir, 'out.log');
-  try {
-    const agentArgs = ['node', '-e', "console.log('日本語テストマーカー：これは代理送信で拾われる想定の文字列です')"];
-    const args = buildLoginShellExecArgs(agentArgs, 'win32', null, {}, logPath);
-    const result = spawnSync(args[0], args.slice(1), { encoding: 'utf8', timeout: 30000 });
-
-    assert.equal(result.status, 0, `stdout=${result.stdout} stderr=${result.stderr}`);
-    const logContent = fs.readFileSync(logPath, 'utf8');
-    assert.match(logContent, /日本語テストマーカー：これは代理送信で拾われる想定の文字列です/,
-      `captured log should preserve multi-byte characters without mojibake: ${logContent}`);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('buildLoginShellExecArgs (実行): Unix でcaptureLogPath指定時、実際にログファイルへ複製され、終了コードも正しく伝わる', (t) => {
-  const bashProbe = spawnSync('bash', ['-lc', 'exit 0'], { encoding: 'utf8' });
-  if (bashProbe.status !== 0) {
-    t.skip('bash の実行環境が利用できない');
-    return;
-  }
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-capture-test-'));
-  const logPath = path.join(dir, 'out.log').replace(/\\/g, '/');
-  try {
-    const args = buildLoginShellExecArgs(
-      ['bash', '-lc', 'printf agent-output-marker; exit 5'],
-      'linux',
-      null,
-      {},
-      logPath,
-    );
-    const result = spawnSync(args[0], args.slice(1), { encoding: 'utf8', timeout: 30000 });
-
-    assert.equal(result.status, 5, `agent exit code should propagate: stdout=${result.stdout} stderr=${result.stderr}`);
-    assert.ok(fs.existsSync(logPath), 'capture log file should exist');
-    const logContent = fs.readFileSync(logPath, 'utf8');
-    assert.match(logContent, /agent-output-marker/, `captured log should contain the agent's stdout: ${logContent}`);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+test('agent-exec: buildPwshCaptureClauses はエクスポートされていない', () => {
+  const agentExec = require('../scripts/agent-exec');
+  assert.equal(agentExec.buildPwshCaptureClauses, undefined);
 });
 
 test('buildLoginShellExecArgs: 空配列でエラーになる', () => {

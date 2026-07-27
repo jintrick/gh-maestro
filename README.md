@@ -7,7 +7,7 @@ GitHubを永続ストアとして、複数のAIエージェントを協調動作
 | 項目 | 要件 |
 |---|---|
 | OS | Windows / Linux / macOS |
-| ターミナル | [WezTerm](https://wezfurlong.org/wezterm/) |
+| ターミナル | [WezTerm](https://wezfurlong.org/wezterm/)（Issueごとに自動起動する対話型ワーカー assistant のウィンドウに使用。ワーカー本体はターミナルを使わない） |
 | ランタイム | Node.js 18以上 |
 | AIエージェント | `claude`（Claude Code）または `agy`（Antigravity CLI） |
 | GitHub CLI | `gh`（`gh auth login` 済み） |
@@ -199,12 +199,3 @@ skills/gh-maestro-reviewer/
 }
 ```
 
-### reviewManagerVisible
-
-Review Manager の実行ペインを可視化するかどうかを制御するboolean。`true` に設定すると、Review Manager が起動したターミナルペインが前面に表示される（`false` の場合はバックグラウンド実行）。解決順序は workspace config → global config → デフォルト `false`。型が `boolean` 以外の値は無視される（fail-closed）。
-
-```json
-{
-  "reviewManagerVisible": true
-}
-```
