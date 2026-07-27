@@ -9,7 +9,8 @@ GitHubを永続ストアとして、複数のAIエージェントを協調動作
 | OS | Windows / Linux / macOS |
 | ターミナル | [WezTerm](https://wezfurlong.org/wezterm/)（Issueごとに自動起動する対話型ワーカー assistant のウィンドウに使用。ワーカー本体はターミナルを使わない） |
 | ランタイム | Node.js 18以上 |
-| AIエージェント | `claude`（Claude Code）または `agy`（Antigravity CLI） |
+| orchestrator | **`claude`（Claude Code）のみ。** 他のエージェントでは動作しない（後述） |
+| worker（任意） | `claude` / `agy`（Antigravity）/ `codex`（Codex）/ `reasonix` から選択 |
 | GitHub CLI | `gh`（`gh auth login` 済み） |
 | リポジトリ | `origin` リモートが GitHub を向いていること |
 
@@ -23,6 +24,12 @@ gh-maestro は **GitHub Issue のコメント** をメッセージバスとし�
 詳細な仕様は `docs/github-comm-plan.md` を参照。
 
 > **注意**: Issue コメントの可視性はリポジトリの可視性に従う。トークン・認証情報・個人情報をメッセージ本文に含めてはならない。
+
+### orchestrator は Claude Code 専用
+
+orchestrator の手順は Claude Code の **Monitor ツール**（バックグラウンドスクリプトの出力を通知として受け取る）と `TaskStop` を前提に組み立てられている。inbox 監視（`msg-poll.js`）・PR 監視（`poll-pr.js`）・ワーカーログの追尾がいずれもこれに依存するため、Monitor を持たないエージェントでは orchestrator を務められない。
+
+worker は Monitor を必要としない。orchestrator からの追加指示は `inbox-supervisor.js` がプロセスの再開（resume）として配送するため、worker 側はポーリングを一切行わない。したがって worker には agy / codex / reasonix を自由に割り当てられる（`skillAgentMap` 参照）。
 
 ## インストール
 
@@ -42,7 +49,7 @@ node scripts/install.js
 ## 使い方
 
 1. WezTerm 内で対象プロジェクトのルートに移動する
-2. `claude` または `agy` を起動する
+2. `claude`（Claude Code）を起動する
 3. `/gh-maestro` を入力する
 
 あとは orchestrator の指示に従って開発を進める。 orchestrator と worker 間の通信はすべて GitHub Issue コメントを介して行われ、指示・報告が永続化される。
@@ -53,7 +60,7 @@ node scripts/install.js
 orchestrator: Issue を起草・作成
 orchestrator: coder をアンカー Issue と共に起動（coder は Issue 本文を読んで着手）
 coder: 実装・PR 作成（進捗・結果を Issue コメントで報告）
-CI: AI Code Review が自動実行（正確性・保守性・堅牢性）
+orchestrator: PR を検出して Review Manager をローカル起動（正確性・保守性・堅牢性）
 orchestrator: レビュー結果をトリアージ → あなたにマージを依頼
 
 # バグ調査の場合
@@ -65,7 +72,9 @@ orchestrator: 調査結果をあなたに提示 → 対応方針を判断
 
 ## AI Code Review
 
-PR作成時またはコミットのpush時、ローカルでAIレビュワー `reviewer`（Review Manager）が自動的に実行され、3観点を独立してレビューし、観点ごとに別々のレビューをGitHub PRに投稿する。
+PRが作成されると、ローカルでAIレビュワー `reviewer`（Review Manager）が自動的に実行され、3観点を独立してレビューし、観点ごとに別々のレビューをGitHub PRに投稿する。
+
+**レビューが走るのは初回のPR作成時だけである。** その後コーダーが修正をpushしても再レビューは実行されない（`PR_PUSH` は通知されるが、レビューは再実行されない）。再レビューが必要なときは `start-review-manager.js` を手動で起動する。
 
 | 観点 | 内容 |
 |---|---|
@@ -77,7 +86,7 @@ PR作成時またはコミットのpush時、ローカルでAIレビュワー `r
 
 ### 動作の仕組み
 
-PR作成などを契機に、バックグラウンドプロセスとして `start-review-manager.js` が起動し、以下の処理を実行する。
+orchestrator が起動した `poll-pr.js` がPRを検出すると、`start-review-manager.js` がバックグラウンドで起動し、以下の処理を実行する。
 
 1. `run-review-manager.js` が各観点のサブエージェント（Reviewer）を並列で実行
 2. 各Reviewerが観点別ディレクトリ（`correctness/`・`maintainability/`・`resilience-security/`）の基準ファイルに沿ってレビューを実行
@@ -103,11 +112,21 @@ PR・レビューの監視プロセスは、放置しても溜まらないよう
 ```
 skills/
   agents.yaml                    # エージェント定義（インストール先・プレースホルダー値）
+  _partials/                     # 複数SKILL.mdで共有する部分テンプレート（先頭 _ は配布対象外）
+  gh-maestro/                    # /gh-maestro 起動スキル
   gh-maestro-orchestrator/
     SKILL.md                     # テンプレート（{{SCRIPTS_PATH}} を使用）
-  gh-maestro-coder/
-    SKILL.md
-  ...
+  gh-maestro-coder/              # 以下ワーカー系
+  gh-maestro-senior-coder/
+  gh-maestro-investigator/
+  gh-maestro-explorer/
+  gh-maestro-architect/
+  gh-maestro-base/               # 動的ワーカー生成の骨格
+  gh-maestro-reviewer/           # Review Manager（観点別基準ファイルを同梱）
+  gh-maestro-assistant/          # Issueごとに自動起動する対話型ワーカー
+  gh-maestro-pending-triage/     # 保留Issueのトリアージ
+  gh-maestro-init/               # 対象プロジェクトのlint/test設定を整備
+  gh-maestro-install/            # インストール/更新
 scripts/                         # 全スクリプト（CLI・モジュール）のソース。install.js もここ
 ```
 
@@ -125,6 +144,16 @@ scripts/                         # 全スクリプト（CLI・モジュール）
 **新スキルの追加**: `skills/` 配下にディレクトリを作成して `SKILL.md` を置く。スクリプトが要るなら `scripts/` に追加する。
 
 **新エージェントの追加**: `agents.yaml` にエントリを追加してインストールスクリプトを再実行する。
+
+## worker の実行ログ
+
+worker は画面を持たないバックグラウンドプロセスとして動く。標準出力/標準エラーは実行中から逐次
+`<workspace>/.gh-maestro/worker-logs/<workerName>.log` へ書き込まれる（1ワーカー1ファイル、初回起動もresumeも同じファイルに追記）。
+
+worker の報告は Issue コメントとして届くため、通常このログを読む必要はない。異常終了の切り分けや、
+実行中の経過を追いたいときに参照する。
+
+Review Manager のログは `<workspace>/.gh-maestro/review-manager-<PR>.log` にある。
 
 ## レビュー
 
