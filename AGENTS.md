@@ -64,7 +64,7 @@ node scripts/install.js
 - Run `npm test` for code or installer changes.
 - Run `node scripts/install.js` after skill, script distribution, or `skills/agents.yaml` changes **— only from the `dev` branch after changes are merged. Never from a WIP branch.**
 - If CLI launch flags, subcommands, or argument combinations change, execute a minimal real command for that CLI path, not only `--help`.
-- For doc-only changes, do not run `npm test` unnecessarily unless explicitly requested or testing script instructions.
+- For doc-only changes, do not run `npm test` unnecessarily.
 
 ## Local Reference Docs
 
@@ -75,4 +75,4 @@ Use local RAG docs before implementing or answering about tool behavior:
 - Antigravity CLI: `docs/rag/antigravity/`
 - WezTerm: `docs/rag/wezterm/`
 
-Do not infer CLI paths, flags, config files, skill locations, or sandbox behavior from memory when local RAG docs exist. However, note that local RAG docs may contain stale info; if empirical user behavior contradicts RAG docs, prioritize real behavior and update the RAG docs accordingly.
+Do not infer CLI paths, flags, config files, skill locations, or sandbox behavior from memory when local RAG docs exist. If empirical behavior contradicts RAG docs, prioritize real behavior and update the docs.

@@ -70,7 +70,7 @@ node scripts/install.js
 - Run `npm test` for code or installer changes.
 - Run `node scripts/install.js` after skill, script distribution, or `skills/agents.yaml` changes **— only from the `dev` branch after changes are merged. Never from a WIP branch.**
 - If CLI launch flags, subcommands, or argument combinations change, execute a minimal real command for that CLI path, not only `--help`.
-- For doc-only changes, do not run `npm test` unnecessarily unless explicitly requested or testing script instructions.
+- For doc-only changes, do not run `npm test` unnecessarily.
 
 ## Local Reference Docs
 
@@ -81,7 +81,7 @@ Use local RAG docs before implementing or answering about tool behavior:
 - Antigravity CLI: `docs/rag/antigravity/`
 - WezTerm: `docs/rag/wezterm/`
 
-Do not infer CLI paths, flags, config files, skill locations, or sandbox behavior from memory when local RAG docs exist. However, note that local RAG docs may contain stale info; if empirical user behavior contradicts RAG docs, prioritize real behavior and update the RAG docs accordingly.
+Do not infer CLI paths, flags, config files, skill locations, or sandbox behavior from memory when local RAG docs exist. If empirical behavior contradicts RAG docs, prioritize real behavior and update the docs.
 
 <!-- END: synced from AGENTS.md -->
 
@@ -92,9 +92,7 @@ Refer to the synced section above (from AGENTS.md) for quota economics, agent ro
 - Once file changes are approved, commit and push immediately in the same turn without waiting for extra instructions.
 - Always confirm with the user before running `git reset --hard`. Never run it unannounced.
 - If push fails due to non-fast-forward, do not use `git reset --hard`. Report the situation to the user and confirm how to proceed.
-- **Commit Hook Synchronization & Validation**:
-  - Updates to `AGENTS.md` are automatically synced to `CLAUDE.md` via git commit hooks. Do not run synchronization scripts manually.
-  - Git hooks (pre-commit / pre-push) automatically execute appropriate checks (linting, tests, typechecks, synchronization). Do not run unnecessary `npm test` or manual check commands when making doc-only changes.
+- **Commit Hooks**: `AGENTS.md` is automatically synced to `CLAUDE.md` and pre-commit/pre-push checks run automatically. Do not manually run sync scripts or unnecessary tests.
 
 ## Installation Rules
 
