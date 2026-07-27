@@ -7,6 +7,8 @@ const path = require('path');
 const { spawnSync } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
+const { linkNodeModules } = require('./link-node-modules');
+const { unlinkJunctions } = require('./unlink-junctions');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 const {
   assertValidPr, reviewArtifactPath,
@@ -89,6 +91,14 @@ function setupReviewWorktree(workspace, pr, log) {
     throw new Error(`worktreeをPR headにリセットできませんでした: ${(resetR.stderr || '').toString().trim()}`);
   }
 
+  // node_modules をメインワークスペースへjunctionリンクする（spawn-worker.js と同じ扱い）。
+  // これが無いと worktree 内にモジュールが存在せず、Review Manager がプロジェクトの
+  // ツール（tsx 等）を起動した時点で MODULE_NOT_FOUND になる。
+  // リンクは best-effort——失敗してもレビュー自体は続行できるため、ログに残して進む。
+  const nmResult = linkNodeModules(dir, workspace);
+  for (const p of nmResult.linked) log(`node_modules junction 作成: ${p}`);
+  for (const p of nmResult.missing) log(`[要対応] node_modules junction 作成に失敗: ${p}`);
+
   log(`review worktree ready: ${dir} (${fetchRef})`);
   return dir;
 }
@@ -105,6 +115,15 @@ function teardownReviewWorktree(workspace, pr, log) {
   const dir = reviewWorktreeDir(workspace, pr);
   const branchName = reviewWorktreeBranchName(pr);
   const fetchRef = reviewWorktreeFetchRef(pr);
+
+  // 削除の前に node_modules junction を外す。junction を張ったまま再帰削除すると、
+  // リンク先（メインワークスペースの node_modules）まで巻き込んで壊しうる
+  // （.claude/rules/symlink-tree-walk-safety.md。remove-worker.js も同じ順序で行う）。
+  try {
+    unlinkJunctions(dir, (msg) => log(msg));
+  } catch (e) {
+    log(`junction 除去で例外: ${e.message.split('\n')[0]}`);
+  }
 
   try {
     worktreeRemove(dir, workspace);

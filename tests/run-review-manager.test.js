@@ -155,3 +155,28 @@ test('buildReviewManagerAgentArgs: ReasonixはRMでrunと位置引数プロン�
     'Read C:/tmp/review-manager.md and execute it.',
   ]);
 });
+
+// ── setupReviewWorktree / teardownReviewWorktree の node_modules 取り扱い ─────
+// 実障害: RM専用worktreeに node_modules が無く、プロジェクトのツール（tsx等）起動時に
+// MODULE_NOT_FOUND になった（Issue #155）。通常ワーカー（spawn-worker.js）は
+// linkNodeModules でメインワークスペースへjunctionリンクしているが、RM側に未移植だった。
+
+test('setupReviewWorktree: linkNodeModules を呼んで node_modules をリンクする', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'run-review-manager.js'), 'utf8');
+  const setupBody = src.slice(src.indexOf('function setupReviewWorktree'), src.indexOf('function teardownReviewWorktree'));
+  assert.match(setupBody, /linkNodeModules\(/, 'setupReviewWorktree が linkNodeModules を呼ぶこと');
+});
+
+test('teardownReviewWorktree: 削除前に unlinkJunctions を呼ぶ（リンク先を巻き込まないため）', () => {
+  // junction を張ったまま再帰削除すると、リンク先の共有 node_modules まで壊しうる
+  // （.claude/rules/symlink-tree-walk-safety.md）。remove-worker.js と同じ順序であること。
+  const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'run-review-manager.js'), 'utf8');
+  const teardownBody = src.slice(src.indexOf('function teardownReviewWorktree'));
+  const unlinkIdx = teardownBody.indexOf('unlinkJunctions(');
+  const removeIdx = teardownBody.indexOf('worktreeRemove(');
+  const rmSyncIdx = teardownBody.indexOf('fs.rmSync(');
+
+  assert.ok(unlinkIdx !== -1, 'unlinkJunctions を呼ぶこと');
+  assert.ok(unlinkIdx < removeIdx, 'worktreeRemove より前に unlinkJunctions すること');
+  assert.ok(unlinkIdx < rmSyncIdx, '再帰削除より前に unlinkJunctions すること');
+});
