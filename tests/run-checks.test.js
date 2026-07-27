@@ -52,7 +52,7 @@ test('detectPrecommitPlan: lint-stagedキーが無ければnull', () => {
 test('detectPrecommitPlan: package.jsonにlint-stagedキーがあればnpx lint-stagedを返す', () => {
   withProject((dir) => {
     writePkg(dir, { name: 'x', 'lint-staged': { '*.js': 'eslint' } });
-    assert.deepEqual(detectPrecommitPlan(dir), { cmd: 'npx', args: ['lint-staged'] });
+    assert.deepEqual(detectPrecommitPlan(dir), { cmd: 'npx', args: ['--no-install', 'lint-staged'] });
   });
 });
 
@@ -60,7 +60,7 @@ test('detectPrecommitPlan: .lintstagedrc.json単体でも検出する', () => {
   withProject((dir) => {
     writePkg(dir, { name: 'x' });
     fs.writeFileSync(path.join(dir, '.lintstagedrc.json'), '{}', 'utf8');
-    assert.deepEqual(detectPrecommitPlan(dir), { cmd: 'npx', args: ['lint-staged'] });
+    assert.deepEqual(detectPrecommitPlan(dir), { cmd: 'npx', args: ['--no-install', 'lint-staged'] });
   });
 });
 

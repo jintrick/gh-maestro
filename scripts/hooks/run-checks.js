@@ -69,7 +69,7 @@ function detectPrecommitPlan(workspaceRoot) {
 
   if (!hasLintStagedKey && !hasLintStagedConfigFile) return null;
 
-  return { cmd: 'npx', args: ['lint-staged'] };
+  return { cmd: 'npx', args: ['--no-install', 'lint-staged'] };
 }
 
 /**
