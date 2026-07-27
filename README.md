@@ -83,6 +83,19 @@ PR作成などを契機に、バックグラウンドプロセスとして `star
 2. 各Reviewerが観点別ディレクトリ（`correctness/`・`maintainability/`・`resilience-security/`）の基準ファイルに沿ってレビューを実行
 3. レビュー結果が統合され、`review-publisher.js` を介して GitHub PR にコメントとして投稿される
 
+### ポーリングプロセスの自律終了
+
+PR・レビューの監視プロセスは、放置しても溜まらないよう自分で終わる。手動で止める必要はない。
+
+| プロセス | 役割 | 終了条件 |
+|---|---|---|
+| `poll-pr.js` | Issue に対する PR の出現を待つ。検出したら Review Manager を起動し、`poll-reviews.js` を子プロセスとして起動して出力を中継する | 子の `poll-reviews.js` が終了したとき |
+| `poll-reviews.js` | PR のコメント・レビュー・push・マージを監視して出力する | `PR_MERGED` を検出したとき（`cleanup()` 後に exit 0） |
+
+加えて両者とも **dead-man's switch** を持つ。ポーリングの毎周回で親セッション（オーケストレーター）の生存を確認し、消えていれば PID レジストリを解除して自動終了する。セッションを閉じても孤児プロセスが残らない。
+
+稼働中のプロセスは `.gh-maestro/pids/` に登録され、`reset-session.js` がまとめて掃除できる。
+
 ## スキルの構造
 
 スキルは `skills/` 配下に1ディレクトリ1スキルで管理する。
