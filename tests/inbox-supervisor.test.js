@@ -602,6 +602,44 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     });
   });
 
+  test('tryResumeAndDeliver: send-text-after-launch のエージェントは配送を拒否する（フェイルクローズ）', () => {
+    // この方式は画面への入力注入が前提で、headless実行では本文を渡せない。
+    // 黙って本文抜きでresumeすると、ワーカーが指示を受け取らないままGitHubへ
+    // 無関係な応答を投げうるため配送自体を止める。
+    // 将来この promptDelivery のエージェントが追加されたとき、ガードが無言で
+    // 壊れていないことを保証する。
+    withTempDir((dir) => {
+      fs.mkdirSync(path.join(dir, '.gh-maestro', 'worktrees', 'issue-7-fix'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), JSON.stringify({
+        orchestrator: { agentId: null },
+        'issue-7-fix': { pid: 456, startTime: 'old', agentId: 'legacy-sendtext', issue: 7 },
+      }, null, 2));
+      fs.writeFileSync(path.join(dir, '.gh-maestro', 'config.json'), JSON.stringify({
+        agents: {
+          'legacy-sendtext': {
+            id: 'legacy-sendtext',
+            command: 'dummy-agent',
+            extraArgs: [],
+            promptDelivery: 'send-text-after-launch',
+            asynchronousNotification: false,
+            sessionResume: true,
+            resumeCommand: ['--continue'],
+          },
+        },
+      }, null, 2));
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName: 'issue-7-fix', agentId: 'legacy-sendtext',
+        message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: dir,
+      });
+
+      assert.equal(result.success, false);
+      assert.equal(result.method, 'resume-failed');
+      assert.match(result.error, /send-text-after-launch/);
+      assert.equal(lastSpawnCalls.length, 0, 'プロセスを起動せずに拒否すること');
+    });
+  });
+
   test('tryResumeAndDeliver: spawnは成功したが直後にプロセスが消失していれば resume-failed（DELIVEREDと誤認識しない）', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });

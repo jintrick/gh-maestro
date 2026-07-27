@@ -202,11 +202,39 @@ test('launchAgentHeadless: startTime が取得できなくても null を返し�
   assert.equal(result.startTime, null);
 });
 
+test("launchAgentHeadless: 子の 'error' イベントにリスナーを登録する（未登録だと呼び出し元ごと落ちる）", () => {
+  // 'error' リスナー未登録のまま EventEmitter が 'error' を発火すると Node は例外を送出し、
+  // spawn-worker.js 等の呼び出し元プロセス自体がクラッシュする。
+  const handlers = {};
+  headlessLaunch._setSpawn((cmd, args, options) => {
+    spawnCalls.push({ cmd, args, options });
+    return {
+      pid: 4242,
+      on(event, fn) { handlers[event] = fn; return this; },
+      unref() {},
+    };
+  });
+  const logPath = path.join(tmpDir, 'w.log');
+
+  launchAgentHeadless({ argv: ['codex', 'exec'], cwd: tmpDir, logPath });
+
+  assert.equal(typeof handlers.error, 'function', "'error' リスナーが登録されていること");
+
+  // 発火してもthrowせず、原因をログへ書き残す（起動元は既に次へ進んでおり例外を受け取れない）
+  assert.doesNotThrow(() => handlers.error(new Error('EAGAIN')));
+  assert.match(fs.readFileSync(logPath, 'utf8'), /起動でエラーが発生しました.*EAGAIN/);
+});
+
 test('launchAgentHeadless: 呼び出し元をブロックしないよう unref する', () => {
   let child = null;
   headlessLaunch._setSpawn((cmd, args, options) => {
     spawnCalls.push({ cmd, args, options });
-    child = { pid: 1234, unrefCalled: false, unref() { this.unrefCalled = true; } };
+    child = {
+      pid: 1234,
+      unrefCalled: false,
+      on() { return this; },
+      unref() { this.unrefCalled = true; },
+    };
     return child;
   });
 

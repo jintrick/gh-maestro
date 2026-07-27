@@ -189,6 +189,18 @@ if (!checkAgentExists(agentConfig.command)) {
   fail(`エージェント "${agentId}" のコマンド "${agentConfig.command}" が見つかりません。CLIがインストールされているか、pwsh関数/シェルエイリアスが定義されているか確認してください。`);
 }
 
+// --- send-text-after-launch は headless では実現できない（フェイルクローズ） ---
+// この方式は起動argvにプロンプトを渡せないエージェント向けの後方互換経路で、画面への
+// 入力注入を前提としている。黙ってプロンプト無しで起動するとワーカーが指示を受け取れない
+// まま走り出すため拒否する。worktree作成・プロンプト書き出しより前に落として副作用を残さない。
+if (agentConfig.promptDelivery === 'send-text-after-launch') {
+  fail(
+    `エージェント "${agentConfig.id}" の promptDelivery が "send-text-after-launch" ですが、` +
+    `この方式は画面への入力注入を前提としており headless 実行では使えません。` +
+    `agent-defaults.json / config.json で flag・positional・system-prompt-file のいずれかに変更してください。`
+  );
+}
+
 // --- [レガシーガード] pwsh -Command 経由エージェントの空白パスガード ---
 // 新しい agent-exec.js は -EncodedCommand（Windows）/ exec "$@"（Unix）を使用するため
 // 引数内の空白は安全に扱える。ただし、extraArgs に -Command を含む旧来のカスタム設定が
@@ -383,17 +395,6 @@ try {
 // これにより PATH 実行ファイル・pwsh 関数・エイリアスのすべてが起動可能になる。
 // argv の完全性は各プラットフォームのエンコード方式で保証される（agent-exec.js 参照）。
 //
-// send-text-after-launch（起動argvにプロンプトを渡せないエージェント向けの後方互換経路）は
-// 画面への入力注入が前提であり、headless では実現できない。黙ってプロンプト無しで起動すると
-// ワーカーが指示を受け取れないまま走り出すため、フェイルクローズで起動を拒否する。
-if (agentConfig.promptDelivery === 'send-text-after-launch') {
-  fail(
-    `エージェント "${agentConfig.id}" の promptDelivery が "send-text-after-launch" ですが、` +
-    `この方式は画面への入力注入を前提としており headless 実行では使えません。` +
-    `agent-defaults.json / config.json で flag・positional・system-prompt-file のいずれかに変更してください。`
-  );
-}
-
 const logPath = workerLogPath(workspace, workerName);
 let launched;
 let execution;

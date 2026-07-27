@@ -138,6 +138,16 @@ function launchAgentHeadless({ argv, cwd, logPath, env = {}, onExit = null }) {
     throw new Error(`エージェントプロセスの起動に失敗しました: ${e.message}`);
   }
 
+  // 'error' リスナーが未登録のまま EventEmitter が 'error' を発火すると、Node は例外を
+  // 送出して**呼び出し元プロセスごと落とす**。ここは非同期 spawn なので、返り値を返した後に
+  // 発火しうる（リソース枯渇時など）。起動元は既に次の処理へ進んでいて例外を受け取れないため、
+  // ログへ書き残すことが唯一の追跡手段になる。
+  child.on('error', (e) => {
+    try {
+      fs.appendFileSync(logPath, `\n[gh-maestro] ワーカープロセスの起動でエラーが発生しました: ${e.message}\n`);
+    } catch { /* ログにも書けない場合は諦める（ここで再throwすると同じ事故になる） */ }
+  });
+
   if (!child.pid) {
     throw new Error('エージェントプロセスのPIDを取得できませんでした');
   }

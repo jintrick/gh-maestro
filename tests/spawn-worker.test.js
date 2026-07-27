@@ -456,3 +456,81 @@ test('config.json に定義されていてもバイナリが PATH になけれ�
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// ── フェイルクローズ: send-text-after-launch は headless では使えない ──────────
+// 画面への入力注入を前提とする方式のため、headless実行では本文を渡せない。
+// 黙ってプロンプト無しで起動するとワーカーが指示を受け取れないまま走り出す。
+// 将来 promptDelivery: send-text-after-launch のエージェントが追加されたとき、
+// このガードが無言で壊れていないことを保証する。
+
+test('send-text-after-launch のエージェントは起動を拒否する（フェイルクローズ）', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-stal-'));
+  try {
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), JSON.stringify({
+      agents: {
+        'legacy-sendtext': {
+          id: 'legacy-sendtext',
+          command: process.execPath,
+          extraArgs: [],
+          promptDelivery: 'send-text-after-launch',
+          asynchronousNotification: false,
+          sessionResume: true,
+          resumeCommand: ['--continue'],
+        },
+      },
+    }, null, 2), 'utf8');
+
+    const r = run(
+      ['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'sendtext',
+        '--repo', 'o/r', '--agent', 'legacy-sendtext'],
+      { HOME: home, USERPROFILE: home },
+    );
+
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /send-text-after-launch/);
+    assert.match(r.stderr, /headless/);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test('send-text-after-launch の拒否は worktree を作る前に起きる（副作用を残さない）', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-stal2-'));
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-stalws-'));
+  try {
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), JSON.stringify({
+      agents: {
+        'legacy-sendtext': {
+          id: 'legacy-sendtext',
+          command: process.execPath,
+          extraArgs: [],
+          promptDelivery: 'send-text-after-launch',
+          asynchronousNotification: false,
+          sessionResume: true,
+          resumeCommand: ['--continue'],
+        },
+      },
+    }, null, 2), 'utf8');
+
+    const r = run(
+      ['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'sendtext',
+        '--repo', 'o/r', '--workspace', ws, '--agent', 'legacy-sendtext'],
+      { HOME: home, USERPROFILE: home },
+    );
+
+    assert.notEqual(r.status, 0);
+    assert.equal(
+      fs.existsSync(path.join(ws, '.gh-maestro', 'worktrees', 'issue-1-sendtext')), false,
+      'ガードは worktree 作成より前に落ちること',
+    );
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(ws, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
