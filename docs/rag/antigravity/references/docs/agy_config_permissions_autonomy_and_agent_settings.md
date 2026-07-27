@@ -2,10 +2,13 @@
 
 The agent's ability to execute tools is governed by global autonomy levels and fine-grained command permissions.
 
-## Autonomy Levels (`/permissions`)
-- **`request-review`**: (Default) Agent must wait for user approval for every tool call.
-- **`always-proceed`**: Agent executes all tools without asking. Recommended only in sandboxed environments.
-- **`strict`**: Enforces maximum adherence to rules in `.agents/rules/` (and backward-compatible `.agent/rules/`).
+## Command & Access Permissions (`/permissions`)
+The `/permissions` command displays the active permission filters (`allow`, `deny`, `ask`) for tool execution and file access.
+
+To automate or skip tool execution approvals:
+- **CLI Startup Flag**: Use `agy --dangerously-skip-permissions` to automatically approve all tool calls without asking.
+- **Autonomous Execution**: Use the `/goal <task>` command to let the agent run autonomously until task completion.
+- **Fine-Grained Permissions**: Pre-approve specific commands in `~/.gemini/antigravity-cli/settings.json`.
 
 ## Fine-Grained Permissions
 Power users can define specific allowed or denied commands in `~/.gemini/antigravity-cli/settings.json`:

@@ -14,6 +14,5 @@ Artifacts are structured outputs produced by the agent during a task (Implementa
 - **Proceed**: Use the designated hotkey (e.g., `Shift+Tab`) or button to approve and execute.
 
 ## Policies
-- **`request-review`**: (Default) Agent stops for manual approval before acting on artifacts.
-- **`always-proceed`**: Agent executes without stopping.
-- **`strict`**: Enforces strict adherence to rules in `.agents/rules/`.
+- **Default Review**: Agent asks for user approval/feedback before executing critical actions or plans.
+- **Autonomous Execution (`/goal`)**: Agent executes tasks until completion without intermediate prompts.

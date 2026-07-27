@@ -21,7 +21,7 @@ Antigravity CLI supports slash commands typed directly into the prompt box to ma
 | `/mcp` | Tools & Monitoring | Open the panel to configure and manage Model Context Protocol servers. |
 | `/model` | Configuration | Select the default reasoning model (persists across sessions). |
 | `/open <path>` | Utility | Immediately open a file in your preferred external editor. |
-| `/permissions` | Configuration | Select agent autonomy level (`request-review`, `always-proceed`, or `strict`). |
+| `/permissions` | Configuration | View active command and file permission filters (`allow`, `deny`, `ask`). |
 | `/planning` | Configuration | Switch to **Planning Mode** (thorough research and artifact generation). |
 | `/rename <name>` | Conversation | Rename the active conversation thread for easier tracking. |
 | `/resume` (alias `/switch`) | Conversation | Open the conversation picker to resume or switch sessions. |
