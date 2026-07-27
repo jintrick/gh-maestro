@@ -53,8 +53,7 @@ function buildSessionResumePrompt(message) {
  * 非同期通知非対応・セッション再開可能なエージェント向け InboxAdapter を作成する。
  *
  * @param {object} agentConfig - resolveAgentConfig() で解決済みのエージェント設定。
- *   asynchronousNotification / sessionResume / resumeCommand / extraArgs /
- *   promptDelivery / command を含む。
+ *   resumeCommand / extraArgs / promptDelivery / command を含む。
  * @returns {object} InboxAdapter インターフェースを満たすオブジェクト
  */
 function createSessionResumeAdapter(agentConfig) {
@@ -68,18 +67,6 @@ function createSessionResumeAdapter(agentConfig) {
   const config = agentConfig;
 
   return {
-    /**
-     * この Adapter が担当するエージェントの能力を返す。
-     *
-     * @returns {import('./adapter-base').AgentCapabilities}
-     */
-    getCapabilities() {
-      return {
-        asynchronousNotification: config.asynchronousNotification,
-        sessionResume: config.sessionResume,
-      };
-    },
-
     /**
      * エージェントを新規起動するためのコマンドと引数を返す。
      * agent-launch.js の buildAgentCommandArgs をラップする。
@@ -117,15 +104,9 @@ function createSessionResumeAdapter(agentConfig) {
      * @returns {import('./adapter-base').ResumeResult}
      */
     resume(sessionRef) {
-      if (!config.sessionResume) {
-        throw new Error(
-          `エージェント "${config.id}" は sessionResume に対応していないため、resume() は使用できません。`
-        );
-      }
-
       if (!Array.isArray(config.resumeCommand) || config.resumeCommand.length === 0) {
         throw new Error(
-          `エージェント "${config.id}" は sessionResume=true ですが、resumeCommand が設定されていません。`
+          `エージェント "${config.id}" に resumeCommand が設定されていません。`
         );
       }
 

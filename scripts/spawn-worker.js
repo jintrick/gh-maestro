@@ -79,11 +79,11 @@ Output (stdout):
 /**
  * ワーカーエントリをworkers.jsonから除去すべき（stale）か判定する。
  *
- * プロセスが生存していれば除去しない。生存していなくても、セッション再開系
- * エージェント（sessionResume:true かつ asynchronousNotification:false。reasonix/agy/
- * codex等）であれば、それは1ターン完了ごとの正常な休止状態であり除去しない
- * （tryResumeAndDeliverの判定条件と同一）。それ以外（claude系等、常駐し続ける設計の
- * ためプロセス不在が本当に異常＝放棄を意味する）のみ除去対象とする。
+ * プロセスが生存していれば除去しない。生存していなくても、エージェント設定が解決できる限り
+ * 除去しない——全エージェントはセッション再開方式であり、プロセス不在は1ターン完了ごとの
+ * 正常な休止状態だからである（tryResumeAndDeliverの判定条件と同一）。
+ * 除去するのは agentId が解決できないエントリ（設定破損・削除済みエージェント）だけで、
+ * これは resume 経路が二度と成立しないことを意味する。
  *
  * @param {object} entry workers.json のエントリ
  * @param {(agentId: string) => object|null} resolveAgent
@@ -98,7 +98,7 @@ function shouldPruneStaleWorker(entry, resolveAgent, aliveFn = isWorkerAlive) {
   } catch {
     agentConfig = null;
   }
-  if (agentConfig && agentConfig.sessionResume && !agentConfig.asynchronousNotification) return false;
+  if (agentConfig) return false;
   return true;
 }
 

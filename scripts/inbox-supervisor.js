@@ -246,9 +246,8 @@ function loadWorkers(workspace) {
 /**
  * 休止中（プロセス非生存）のセッション再開系ワーカーを resume() で復帰させ、メッセージを配送する。
  *
- * 対象は sessionResume: true かつ asynchronousNotification: false のエージェント
- * （claude/claude-ds/claude-ds-pro/reasonix/agy/codex/codex-pro）。条件を満たさない
- * エージェントは自動resumeの対象にせず、呼び出し元が pending 扱いにフォールバックする
+ * 全エージェントがセッション再開方式のため、configが解決できれば必ず resume を試みる。
+ * config を解決できないエージェントだけ、呼び出し元が pending 扱いにフォールバックする
  * （method: 'pending' を返す）。
  *
  * @param {object} params
@@ -269,11 +268,6 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
   if (!agentConfig) {
     return { success: false, method: 'pending', error: `agentId "${agentId}" のconfigを解決できません` };
   }
-  if (!agentConfig.sessionResume || agentConfig.asynchronousNotification) {
-    // resume対象外 → 呼び出し元が従来通りpending扱いにする
-    return { success: false, method: 'pending', error: 'not a session-resume agent' };
-  }
-
   const worktreeDir = path.join(workspace, '.gh-maestro', 'worktrees', workerName);
   if (!fs.existsSync(worktreeDir)) {
     return { success: false, method: 'resume-failed', error: `worktree ${worktreeDir} が存在しません（resume不可能）` };
@@ -374,9 +368,7 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
 /**
  * メッセージをエージェントに配送する。
  *
- * 対象は runOnce() のスキャン段階で asynchronousNotification:true のエージェント
- * （自己ポーリングするエージェント種別。現状はどのエージェントも該当しない）が
- * 既に除外されているため、ここに来るのは全てセッション再開系エージェント。
+ * 全エージェントがセッション再開方式である。
  * 稼働中（プロセス生存 = タスク処理中）のワーカーには一切書き込まず、休止するのを
  * 待って次のスキャンサイクルで resume() 経由で配送する。稼働中のプロセスへの
  * 入力注入は行わない（配送経路はプロセスの起動/再開のみ）。
@@ -550,16 +542,6 @@ function main(argsOverride, opts = {}) {
 
     for (const [workerName, entry] of workers) {
       if (!entry.issue) continue;
-
-      // asynchronousNotification:true（自己ポーリングするエージェント種別。現状はどのエージェントも
-      // 該当しないが、将来追加され得るため判定自体は残す）はinbox-supervisor.jsの配送対象外。
-      let agentConfig;
-      try {
-        agentConfig = entry.agentId ? resolveAgentConfig(entry.agentId, { workspace, homedir }) : null;
-      } catch {
-        agentConfig = null;
-      }
-      if (agentConfig && agentConfig.asynchronousNotification) continue;
 
       const issue = String(entry.issue);
       const cursor = readCursor(workspace, workerName);

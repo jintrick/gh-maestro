@@ -28,10 +28,7 @@ function makeValidAgent(overrides = {}) {
     runtime: 'test',
     extraArgs: [],
     promptDelivery: 'positional',
-    enterSequence: '\r\n',
     rulesSupported: false,
-    asynchronousNotification: false,
-    sessionResume: true,
     resumeCommand: ['--continue'],
     ...overrides,
   };
@@ -64,50 +61,6 @@ test('validateAgentDefaults: rulesSupported の値が期待通り', () => {
 });
 
 // ── Issue #132: 能力宣言フィールド ────────────────────────────────────────────
-
-test('validateAgentDefaults: 全エージェントが asynchronousNotification を持っている', () => {
-  for (const agent of realDefaults.agents) {
-    assert.ok('asynchronousNotification' in agent, `"${agent.id}" に asynchronousNotification フィールドがありません`);
-    assert.equal(typeof agent.asynchronousNotification, 'boolean', `"${agent.id}" の asynchronousNotification は boolean である必要があります`);
-  }
-});
-
-test('validateAgentDefaults: 全エージェントが sessionResume を持っている', () => {
-  for (const agent of realDefaults.agents) {
-    assert.ok('sessionResume' in agent, `"${agent.id}" に sessionResume フィールドがありません`);
-    assert.equal(typeof agent.sessionResume, 'boolean', `"${agent.id}" の sessionResume は boolean である必要があります`);
-  }
-});
-
-test('validateAgentDefaults: sessionResume=true のエージェントは resumeCommand を持っている', () => {
-  for (const agent of realDefaults.agents) {
-    if (agent.sessionResume) {
-      assert.ok('resumeCommand' in agent, `"${agent.id}" は sessionResume=true ですが resumeCommand フィールドがありません`);
-      assert.ok(Array.isArray(agent.resumeCommand), `"${agent.id}" の resumeCommand は array である必要があります`);
-    }
-  }
-});
-
-test('validateAgentDefaults: asynchronousNotification の値が期待通り', () => {
-  const map = new Map(realDefaults.agents.map(a => [a.id, a.asynchronousNotification]));
-  // 全エージェントがresume方式に統一されている
-  assert.equal(map.get('claude'), false);
-  assert.equal(map.get('claude-ds'), false);
-  assert.equal(map.get('claude-ds-pro'), false);
-  assert.equal(map.get('reasonix'), false);
-  assert.equal(map.get('agy'), false);
-  assert.equal(map.get('codex'), false);
-});
-
-test('validateAgentDefaults: sessionResume の値が期待通り', () => {
-  const map = new Map(realDefaults.agents.map(a => [a.id, a.sessionResume]));
-  assert.equal(map.get('claude'), true);
-  assert.equal(map.get('claude-ds'), true);
-  assert.equal(map.get('claude-ds-pro'), true);
-  assert.equal(map.get('reasonix'), true);
-  assert.equal(map.get('agy'), true);
-  assert.equal(map.get('codex'), true);
-});
 
 test('validateAgentDefaults: resumeCommand の値が期待通り', () => {
   const map = new Map(realDefaults.agents.map(a => [a.id, a.resumeCommand]));
@@ -169,51 +122,12 @@ test('validateAgentEntry: promptDelivery 欠落を検出する', () => {
   assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('"promptDelivery"')));
 });
 
-test('validateAgentEntry: enterSequence 欠落を検出する', () => {
-  const agent = makeValidAgent();
-  delete agent.enterSequence;
-  const issues = validateAgentEntry(agent, 0);
-  assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('"enterSequence"')));
-});
-
 test('validateAgentEntry: rulesSupported 欠落を検出する', () => {
   const agent = makeValidAgent();
   delete agent.rulesSupported;
   const issues = validateAgentEntry(agent, 0);
   assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('"rulesSupported"') && i.includes('ありません')),
     `rulesSupported欠落: ${issues.join('\n')}`);
-});
-
-test('validateAgentEntry: asynchronousNotification 欠落を検出する', () => {
-  const agent = makeValidAgent();
-  delete agent.asynchronousNotification;
-  const issues = validateAgentEntry(agent, 0);
-  assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('"asynchronousNotification"') && i.includes('ありません')),
-    `asynchronousNotification欠落: ${issues.join('\n')}`);
-});
-
-test('validateAgentEntry: sessionResume 欠落を検出する', () => {
-  const agent = makeValidAgent();
-  delete agent.sessionResume;
-  const issues = validateAgentEntry(agent, 0);
-  assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('"sessionResume"') && i.includes('ありません')),
-    `sessionResume欠落: ${issues.join('\n')}`);
-});
-
-test('validateAgentEntry: sessionResume=true で resumeCommand がなければエラー', () => {
-  const agent = makeValidAgent({ sessionResume: true });
-  delete agent.resumeCommand;
-  const issues = validateAgentEntry(agent, 0);
-  assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('resumeCommand') && i.includes('必須')),
-    `resumeCommand欠落（条件付き）: ${issues.join('\n')}`);
-});
-
-test('validateAgentEntry: sessionResume=false で resumeCommand がなくてもエラーにならない', () => {
-  const agent = makeValidAgent({ sessionResume: false });
-  delete agent.resumeCommand;
-  const issues = validateAgentEntry(agent, 0);
-  const errors = issues.filter(i => i.startsWith('[ERROR]'));
-  assert.deepEqual(errors, [], `sessionResume=falseなのにresumeCommand欠落エラー: ${errors.join('\n')}`);
 });
 
 test('validateAgentEntry: resumeCommand が array でないとエラー', () => {
@@ -243,22 +157,6 @@ test('validateAgentEntry: rulesSupported が boolean でないとエラー', () 
   assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('rulesSupported') && i.includes('boolean')),
     `型不一致: ${issues.join('\n')}`);
 });
-
-test('validateAgentEntry: asynchronousNotification が boolean でないとエラー', () => {
-  const agent = makeValidAgent({ asynchronousNotification: 'yes' });
-  const issues = validateAgentEntry(agent, 0);
-  assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('asynchronousNotification') && i.includes('boolean')),
-    `asynchronousNotification型不正: ${issues.join('\n')}`);
-});
-
-test('validateAgentEntry: sessionResume が boolean でないとエラー', () => {
-  const agent = makeValidAgent({ sessionResume: 'yes' });
-  const issues = validateAgentEntry(agent, 0);
-  assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('sessionResume') && i.includes('boolean')),
-    `sessionResume型不正: ${issues.join('\n')}`);
-});
-
-// ── validateAgentEntry: 条件付き必須 ──────────────────────────────────────────
 
 test('validateAgentEntry: promptDelivery=flag で promptFlag がないとエラー', () => {
   const agent = makeValidAgent({ promptDelivery: 'flag' });
@@ -352,12 +250,3 @@ test('REQUIRED_FIELDS: rulesSupported が必須フィールドに含まれてい
   assert.ok(fieldNames.includes('rulesSupported'), 'rulesSupported must be in REQUIRED_FIELDS');
 });
 
-test('REQUIRED_FIELDS: asynchronousNotification が必須フィールドに含まれている', () => {
-  const fieldNames = REQUIRED_FIELDS.map(([f]) => f);
-  assert.ok(fieldNames.includes('asynchronousNotification'), 'asynchronousNotification must be in REQUIRED_FIELDS');
-});
-
-test('REQUIRED_FIELDS: sessionResume が必須フィールドに含まれている', () => {
-  const fieldNames = REQUIRED_FIELDS.map(([f]) => f);
-  assert.ok(fieldNames.includes('sessionResume'), 'sessionResume must be in REQUIRED_FIELDS');
-});

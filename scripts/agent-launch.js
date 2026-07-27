@@ -48,7 +48,7 @@ function buildAgentCommandArgs(agentConfig, opts = {}) {
  *
  * buildAgentCommandArgs と同じ promptDelivery 分岐を使うが、"新規セッション" を前提にした
  * プロンプト配送ではなく、resumeArgs（Adapter の resume() が返す args）をコマンドに組み込む。
- * 呼び出し元は inbox-supervisor.js の resume 配線で、対象は sessionResume: true の全エージェント
+ * 呼び出し元は inbox-supervisor.js の resume 配線で、対象は全エージェント
  * （claude/claude-ds/claude-ds-pro/reasonix/agy/codex/codex-pro）。
  * resume 時は前回セッションのコンテキストが `--continue` 等で復元されるため、
  * claude 系の system-prompt-file（初回起動時のみ必要な役割・スキル文書の注入）は不要で、
