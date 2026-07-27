@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildAgentCommandArgs, buildAgentResumeCommandArgs } = require('../scripts/agent-launch');
+const { buildAgentCommandArgs, buildAgentResumeCommandArgs, RESUME_REPORTING_REMINDER } = require('../scripts/agent-launch');
 
 test('buildAgentCommandArgs: system-prompt-file delivery', () => {
   const args = buildAgentCommandArgs({
@@ -104,15 +104,25 @@ test('buildAgentResumeCommandArgs: send-text-after-launch delivery（reasonix）
   assert.equal(afterLaunchText, '新着メッセージです');
 });
 
-test('buildAgentResumeCommandArgs: system-prompt-file delivery（claude系。resume時はpositionalと同じ組み立て）', () => {
+test('buildAgentResumeCommandArgs: system-prompt-file delivery（claude系。--continueはシステムプロンプトを復元しないため、resumeのたびに報告プロトコルのリマインダーを--append-system-promptで再注入する）', () => {
   const { argv, afterLaunchText } = buildAgentResumeCommandArgs({
     command: 'claude-ds-pro',
     extraArgs: ['--dangerously-skip-permissions', '--print'],
     promptDelivery: 'system-prompt-file',
   }, ['--continue'], { shortPrompt: '新着メッセージです' });
 
-  assert.deepEqual(argv, ['claude-ds-pro', '--dangerously-skip-permissions', '--print', '--continue', '新着メッセージです']);
+  assert.deepEqual(argv, [
+    'claude-ds-pro', '--dangerously-skip-permissions', '--print', '--continue',
+    '--append-system-prompt', RESUME_REPORTING_REMINDER,
+    '新着メッセージです',
+  ]);
   assert.equal(afterLaunchText, null);
+});
+
+test('buildAgentResumeCommandArgs: リマインダーはmsg-send.jsの正確な呼び出し構文と位置引数禁止の警告を含む', () => {
+  assert.match(RESUME_REPORTING_REMINDER, /msg-send\.js/);
+  assert.match(RESUME_REPORTING_REMINDER, /--stdin/);
+  assert.match(RESUME_REPORTING_REMINDER, /位置引数/);
 });
 
 test('buildAgentResumeCommandArgs: 未知のdeliveryはエラー', () => {

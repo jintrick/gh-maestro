@@ -24,7 +24,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawnSync } = require('./child-process');
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -40,12 +40,15 @@ let _ghApiComments = (repo, issue, since, opts = {}) => {
   return spawnSync('gh', args, { encoding: 'utf8', timeout: 30000, ...opts });
 };
 
+// msg-send.js自身が「本文は位置引数で渡せない」ガードを持つ（--stdin/--body-fileのみ許可。
+// 過去にバッククォート/$入りの本文が位置引数のままbashに解釈され黙って壊れた事故に由来）。
+// ここから呼ぶ場合も同じ規約に従い、本文はspawnSyncのinputでstdin経由に渡す。
+function buildMsgSendRelayArgs(workspace) {
+  return [path.join(__dirname, 'msg-send.js'), '--stdin', '--workspace', workspace];
+}
+
 let _relayMessage = (workspace, body) => {
-  return spawnSync(process.execPath, [
-    path.join(__dirname, 'msg-send.js'),
-    body,
-    '--workspace', workspace,
-  ], { encoding: 'utf8' });
+  return spawnSync(process.execPath, buildMsgSendRelayArgs(workspace), { encoding: 'utf8', input: body });
 };
 
 const MAX_RELAY_CHARS = 8000;
@@ -153,11 +156,7 @@ if (require.main === module) {
   //    1ターン完了を含む）は通知しない。
   if (Number.isFinite(exitCode) && exitCode !== 0 && workerName && workspace) {
     const body = `⚠️ 起動失敗または異常終了: exit code ${exitCode}。このワーカーのプロセスが正常に完了せず終了しました（起動時のエラーの可能性）。`;
-    const r = spawnSync(process.execPath, [
-      path.join(__dirname, 'msg-send.js'),
-      body,
-      '--workspace', workspace,
-    ], { encoding: 'utf8' });
+    const r = spawnSync(process.execPath, buildMsgSendRelayArgs(workspace), { encoding: 'utf8', input: body });
     if (r.status !== 0) {
       process.stderr.write(`worker-exit-hook: 異常終了通知の投稿に失敗: ${(r.stderr || '').trim()}\n`);
     }
@@ -182,5 +181,6 @@ module.exports = {
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setRelayMessage: (fn) => { _relayMessage = fn; },
   verifyReplyAndRelayIfMissing,
+  buildMsgSendRelayArgs,
   MAX_RELAY_CHARS,
 };

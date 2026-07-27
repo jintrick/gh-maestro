@@ -1,5 +1,29 @@
 'use strict';
 
+const path = require('path');
+
+// resume起動（--continue）はメッセージ履歴を復元するが、システムプロンプトは復元しない
+// （Claude Code公式ドキュメント: 「These flags apply only to the current invocation」）。
+// 初回spawn時にsystem-prompt-file配送で注入した報告プロトコル（msg-send.js経由での報告義務・
+// 位置引数禁止）は、resumeのたびに新しいプロセスとして起動される都合上、再注入しない限り
+// そのターンのシステムプロンプトから欠落する。結果、コーダーが正しく考えて回答しても
+// msg-send.jsを一度も呼ばずにチャット出力だけで終える実障害があった。
+// resumeは全エージェント共通経路（buildAgentResumeCommandArgs）なので、ここで一度だけ
+// 定義し、system-prompt-file配送（claude系）の全resumeに機械的に乗せる。
+const MSG_SEND_PATH = path.join(__dirname, 'msg-send.js').replace(/\\/g, '/');
+const RESUME_REPORTING_REMINDER = [
+  '[gh-maestro] セッション再開時のリマインダーです。作業結果・質問・報告は、チャットへの回答だけでは',
+  'orchestratorに届きません。必ず次のコマンドをツール呼び出しとして実行して伝えてください：',
+  '',
+  `  node "${MSG_SEND_PATH}" --stdin <<'EOF'`,
+  '  <内容>',
+  '  EOF',
+  '',
+  '本文は必ず --stdin または --body-file で渡すこと。位置引数で渡すとmsg-send.jsがエラーで',
+  '拒否します（短い本文でも例外はありません）。ヒアドキュメントの終端記号は必ずクォート付き',
+  '（<<\'EOF\'）にすること。着手報告は不要です。処理を終えたら結果を返信してください。',
+].join('\n');
+
 function buildAgentCommandArgs(agentConfig, opts = {}) {
   if (!agentConfig || typeof agentConfig !== 'object') {
     throw new Error('agentConfig is required');
@@ -88,10 +112,20 @@ function buildAgentResumeCommandArgs(agentConfig, resumeArgs, opts = {}) {
       };
 
     case 'positional':
-    case 'system-prompt-file':
       if (!shortPrompt) throw new Error(`shortPrompt is required for ${promptDelivery} delivery`);
       return {
         argv: [command, ...extraArgs, ...resumeArgs, shortPrompt],
+        afterLaunchText: null,
+      };
+
+    case 'system-prompt-file':
+      if (!shortPrompt) throw new Error(`shortPrompt is required for ${promptDelivery} delivery`);
+      return {
+        argv: [
+          command, ...extraArgs, ...resumeArgs,
+          '--append-system-prompt', RESUME_REPORTING_REMINDER,
+          shortPrompt,
+        ],
         afterLaunchText: null,
       };
 
@@ -107,4 +141,4 @@ function buildAgentResumeCommandArgs(agentConfig, resumeArgs, opts = {}) {
   }
 }
 
-module.exports = { buildAgentCommandArgs, buildAgentResumeCommandArgs };
+module.exports = { buildAgentCommandArgs, buildAgentResumeCommandArgs, RESUME_REPORTING_REMINDER };
