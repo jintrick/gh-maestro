@@ -27,30 +27,14 @@ const DEAD = () => false;
 // ワーカーがworkers.jsonから消え、二度とresumeされなくなっていた。
 
 test('shouldPruneStaleWorker: プロセスが生存していれば除去しない', () => {
-  const result = shouldPruneStaleWorker(
-    { pid: 5, agentId: 'agy' },
-    () => ({ sessionResume: true, asynchronousNotification: false }),
-    ALIVE,
-  );
+  const result = shouldPruneStaleWorker({ pid: 5, agentId: 'agy' }, () => ({ id: 'agy' }), ALIVE);
   assert.equal(result, false);
 });
 
-test('shouldPruneStaleWorker: プロセス不在でもセッション再開系エージェントなら除去しない（正常な休止）', () => {
-  const result = shouldPruneStaleWorker(
-    { pid: 5, agentId: 'agy' },
-    () => ({ sessionResume: true, asynchronousNotification: false }),
-    DEAD,
-  );
+test('shouldPruneStaleWorker: プロセス不在でもagentConfigが解決できれば除去しない（正常な休止）', () => {
+  // 全エージェントがセッション再開方式のため、プロセス不在は1ターン完了ごとの正常な状態。
+  const result = shouldPruneStaleWorker({ pid: 5, agentId: 'agy' }, () => ({ id: 'agy' }), DEAD);
   assert.equal(result, false);
-});
-
-test('shouldPruneStaleWorker: プロセス不在でasynchronousNotification:trueなら除去する', () => {
-  const result = shouldPruneStaleWorker(
-    { pid: 5, agentId: 'claude' },
-    () => ({ sessionResume: true, asynchronousNotification: true }),
-    DEAD,
-  );
-  assert.equal(result, true);
 });
 
 test('shouldPruneStaleWorker: agentConfigが解決できない場合はfail-safeで除去する', () => {
@@ -76,8 +60,8 @@ test('shouldPruneStaleWorker: agentIdが無ければfail-safeで除去する', (
   assert.equal(result, true);
 });
 
-test('shouldPruneStaleWorker: pidが無くセッション再開系でなければ除去する', () => {
-  const result = shouldPruneStaleWorker({ pid: null, agentId: 'claude' }, () => ({ sessionResume: false }), DEAD);
+test('shouldPruneStaleWorker: pidが無くagentIdも解決できなければ除去する', () => {
+  const result = shouldPruneStaleWorker({ pid: null, agentId: 'gone' }, () => null, DEAD);
   assert.equal(result, true);
 });
 

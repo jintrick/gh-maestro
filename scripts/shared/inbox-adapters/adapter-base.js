@@ -12,12 +12,6 @@
 // ── JSDoc 型定義（ドキュメント用） ─────────────────────────────────────────
 
 /**
- * @typedef {object} AgentCapabilities
- * @property {boolean} asynchronousNotification - バックグラウンドで非同期通知を受け取れるか
- * @property {boolean} sessionResume               - 中断したセッションを再開できるか
- */
-
-/**
  * @typedef {object} StartOptions
  * @property {string} skill         - スキル名
  * @property {string} promptFile       - プロンプトファイルの絶対パス
@@ -40,7 +34,7 @@
 
 /**
  * @typedef {object} DeliverResult
- * @property {string} type   - 配送戦略の種類（"monitor" | "session-resume"）
+ * @property {string} type   - 配送方式の種類（"session-resume"）
  * @property {string} prompt - エージェントに与える配送手順のプロンプト文
  */
 
@@ -63,7 +57,6 @@
  * テスト等でインターフェース準拠を検証する際のリファレンスとして使用する。
  */
 const ADAPTER_METHODS = [
-  'getCapabilities',
   'start',
   'resume',
   'deliverMessage',

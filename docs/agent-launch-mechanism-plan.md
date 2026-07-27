@@ -1,7 +1,24 @@
 # エージェント起動メカニズム整理 計画書
 
+> ## ⚠️ この文書は策定時点の記録であり、一部は現状と異なる
+>
+> **今も有効な部分**: 「起動argvの組み立て方は `promptDelivery` という宣言的データで選び、実装は共通側に集約する」という設計方針そのもの。`spawn-worker.js` はこの方針で書かれている。
+>
+> **現状と異なる部分**（Issue #151 および保留#10/#11 の対応で変わった）:
+>
+> | 本文の記述 | 現状 |
+> |---|---|
+> | `agents.json` | ファイル名は `scripts/agent-defaults.json` |
+> | `send-text-after-launch` メカニズム | headless実行では画面への入力注入ができないため**フェイルクローズで拒否**される。`agent-defaults.json` に該当エージェントは無い |
+> | `sendTextDelayMs`（TUI初期化待ち） | 削除。唯一の消費者だった `launchAgentInPane` が廃止された |
+> | `enterSequence` | 削除。同上 |
+> | `skillsViaMd` | 撤去済み。全エージェントがネイティブなスキル発見機構を持つことが判明したため（`.claude/rules/shared-skill-agent-tools.md` 参照） |
+> | `wezterm cli send-text` による注入 | ワーカー起動経路からWezTermは撤去済み。起動は `shared/headless-launch.js` |
+>
+> 起動基盤の現状は `scripts/shared/headless-launch.js` と `scripts/agent-exec.js` のファイル冒頭コメントを一次情報とすること。
+
 策定日: 2026-07-03
-ステータス: 実装・実機検証済み
+ステータス: 策定時の実装は完了。上記のとおり一部が後続変更で置き換わっている
 きっかけ: codexエージェント追加時、`spawn-worker.js`の起動分岐がこれ以上増やせない設計になっていることが判明
 
 ## 問題

@@ -439,7 +439,6 @@ test('resolveAgentConfig: reasonix の command が動的に解決される', () 
       'extraArgs should include run',
     );
     // enterSequence は維持される
-    assert.equal(agent.enterSequence, '\r');
   });
 });
 
@@ -528,7 +527,6 @@ test('resolveAgentConfig: command 明示上書き時は dynamicCommand 解決を
     );
 
     // 他のフィールドは維持される
-    assert.equal(agent.enterSequence, '\r', 'enterSequence should be preserved');
   });
 });
 
