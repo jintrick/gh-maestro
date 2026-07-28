@@ -1,29 +1,28 @@
 'use strict';
 
-const { test, before, after } = require('node:test');
+const { test, before, after, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { EventEmitter } = require('events');
 const { spawnSync } = require('child_process');
+
+const headlessLaunch = require('../scripts/shared/headless-launch');
+const { readRegistry } = require('../scripts/shared/execution-registry');
+const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'start-review-manager.js');
 function runCli(args) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
 }
 
-// start-review-manager.js は child-process.js の spawn で
-// run-review-manager.js をdetach起動する。
+// start-review-manager.js は shared/headless-launch.js の launchAgentHeadless で
+// run-review-manager.js を起動する（通常ワーカーと同じ起動基盤・同じ終了フック機構。
+// PR #172レビュー指摘: 独自の時間ベースヒューリスティックによる生存確認は、
+// worktree構築時間がリポジトリごとに変わるため本質的に脆いと判明し撤去した）。
 // テストは実プロセスを0個spawnする（.claude/rules/test-process-spawn-safety.md 準拠）。
-// spawn はモックに置き換える。
-//
-// レビュー観点の選択（旧 heavy/directed モード、ASPECTS/--prompt/--brief-file）は廃止した。
-// ファイルパターンでの機械的な観点自動判定が一部の観点だけに絞り込んでしまい他の観点の
-// レビューが丸ごと欠落する実障害があったため、観点を絞り込むかどうかの判断はオーケストレーター
-// 側からは完全に排除し、Review Manager自身がPR diffを見た上で判断する方式に一本化した
-// （skills/gh-maestro-reviewer/SKILL.md参照）。start-review-manager.jsは<PR> <REPO> <WORKSPACE>
-// だけを受け取り、常に同じ振る舞いでrun-review-manager.jsを起動するだけになった。
+// headless-launch.js 自身の spawn 注入機構（_setSpawn）をそのまま使う
+// （headless-launch.test.js と同じパターン）。
 
 const tmpBase = path.join(os.tmpdir(), 'gh-maestro-test-start-rm-' + Date.now());
 
@@ -35,49 +34,34 @@ after(() => {
   try { fs.rmSync(tmpBase, { recursive: true, force: true }); } catch {}
 });
 
-/**
- * start-review-manager.js を、child-process.js の spawn をモックした状態で再ロードする。
- * @param {Function} [spawnImpl] 呼び出しを記録しつつフェイクの子プロセスハンドルを返す
- * @returns {{ mod: object, calls: Array }}
- */
-function loadModule(spawnImpl) {
-  const calls = [];
-  const fakeSpawn = (cmd, args, opts) => {
-    calls.push({ cmd, args, opts });
-    const fake = new EventEmitter();
-    fake.unref = () => {};
-    // 実spawnはchild.pidを持つ。startReviewManagerは起動直後クラッシュの検出に
-    // child.pidの有無・その生存確認（実装のisProcessAlive）を使う。テスト実行中の
-    // このプロセス自身のpidは実在が保証されているため、これを既定のfake pidに使う
-    // （isProcessAliveをモックせずに「起動成功」を模せる。isLockValidのテストは
-    // 別途本物の生死判定を必要とするため、_setIsProcessAliveの既定上書きはしない）。
-    fake.pid = process.pid;
-    if (spawnImpl) spawnImpl(fake, cmd, args, opts);
-    return fake;
+let spawnCalls;
+
+function fakeSpawn({ pid = 55501 } = {}) {
+  return (cmd, args, options) => {
+    spawnCalls.push({ cmd, args, options });
+    return {
+      pid,
+      handlers: {},
+      on(event, fn) { this.handlers[event] = fn; return this; },
+      unref() {},
+    };
   };
+}
 
-  const childProcessPath = require.resolve('../scripts/child-process');
-  delete require.cache[childProcessPath];
-  require.cache[childProcessPath] = {
-    id: childProcessPath,
-    filename: childProcessPath,
-    loaded: true,
-    exports: { spawn: fakeSpawn, spawnSync: () => ({}), execSync: () => '' },
-  };
+beforeEach(() => {
+  spawnCalls = [];
+  headlessLaunch._setSpawn(fakeSpawn());
+  headlessLaunch._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+});
 
-  const modPath = require.resolve('../scripts/start-review-manager');
-  delete require.cache[modPath];
-  const mod = require(modPath);
+afterEach(() => {
+  headlessLaunch._setSpawn(require('../scripts/child-process').spawn);
+  headlessLaunch._setGetProcessStartTime(require('../scripts/process-lifecycle').getProcessStartTime);
+});
 
-  delete require.cache[childProcessPath];
-
-  // 既定では実待機（STARTUP_LIVENESS_GRACE_MS）をしない。生存確認は本物の isProcessAlive の
-  // ままにする（fake.pidに自プロセスのpidを使っているため、モック無しで「生きている」と
-  // 正しく判定される。isLockValidのテストが本物の生死判定を必要とするため、
-  // _setIsProcessAlive はここでは上書きしない）。
-  mod._setSleep(() => {});
-
-  return { mod, calls };
+function loadModule() {
+  delete require.cache[require.resolve('../scripts/start-review-manager')];
+  return require('../scripts/start-review-manager');
 }
 
 function freshWorkspace(name) {
@@ -86,7 +70,16 @@ function freshWorkspace(name) {
   return workspace;
 }
 
-// ── CLIエントリポイント（parseFlags/hasHelpFlagへの統一） ─────────────────────
+/** シムに渡されたJSON argv（ログインシェルでラップ済み）をデコードする。 */
+function decodedShellCommand(call) {
+  const shellArgs = JSON.parse(call.args[1]);
+  if (process.platform === 'win32') {
+    return Buffer.from(shellArgs[3], 'base64').toString('utf16le');
+  }
+  return shellArgs[2];
+}
+
+// ── CLIエントリポイント ─────────────────────────────────────────────────────
 
 test('--help はUsageを表示して終了コード0', () => {
   const r = runCli(['--help']);
@@ -100,14 +93,14 @@ test('-h はUsageを表示して終了コード0', () => {
   assert.match(r.stdout, /Usage: node start-review-manager\.js/);
 });
 
-test('位置引数が不足しているとUsageを表示して終了コード1', () => {
-  const r = runCli(['42', 'o/r']);
+test('位置引数が不足している（ISSUE無し）とUsageを表示して終了コード1', () => {
+  const r = runCli(['42', 'o/r', '/tmp/ws']);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /Usage: node start-review-manager\.js/);
 });
 
 test('位置引数が多すぎるとUsageを表示して終了コード1', () => {
-  const r = runCli(['42', 'o/r', '/tmp/ws', 'extra']);
+  const r = runCli(['42', 'o/r', '/tmp/ws', '7', 'extra']);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /Usage: node start-review-manager\.js/);
 });
@@ -115,12 +108,12 @@ test('位置引数が多すぎるとUsageを表示して終了コード1', () =>
 // ── isLockValid ──────────────────────────────────────────────────────────
 
 test('isLockValid returns false when no lock file exists', () => {
-  const { mod } = loadModule();
+  const mod = loadModule();
   assert.equal(mod.isLockValid(path.join(tmpBase, 'no-such.running')), false);
 });
 
 test('isLockValid returns true and keeps the file for a live pid', () => {
-  const { mod } = loadModule();
+  const mod = loadModule();
   const lockFile = path.join(freshWorkspace('lock-live'), 'lock.running');
   fs.writeFileSync(lockFile, String(process.pid));
   assert.equal(mod.isLockValid(lockFile), true);
@@ -128,9 +121,9 @@ test('isLockValid returns true and keeps the file for a live pid', () => {
 });
 
 test('isLockValid returns false and removes the file for a stale pid', () => {
-  const { mod } = loadModule();
+  const mod = loadModule();
   const lockFile = path.join(freshWorkspace('lock-stale'), 'lock.running');
-  // PID 1 は Windows では存在しないため確実に stale として扱われる。
+  // PID 999999999 は確実に stale として扱われる。
   fs.writeFileSync(lockFile, '999999999');
   assert.equal(mod.isLockValid(lockFile), false);
   assert.equal(fs.existsSync(lockFile), false);
@@ -138,128 +131,99 @@ test('isLockValid returns false and removes the file for a stale pid', () => {
 
 // ── startReviewManager ───────────────────────────────────────────────────
 
-test('startReviewManager returns ALREADY_RUNNING and does not spawn when locked', () => {
-  const { mod, calls } = loadModule();
+test('startReviewManager returns ALREADY_RUNNING and does not launch when locked', () => {
+  const mod = loadModule();
   const workspace = freshWorkspace('already-running');
   const ghDir = path.join(workspace, '.gh-maestro');
   fs.mkdirSync(ghDir, { recursive: true });
   fs.writeFileSync(path.join(ghDir, 'review-manager-42.running'), String(process.pid));
 
-  const result = mod.startReviewManager('42', 'o/r', workspace);
+  const result = mod.startReviewManager('42', 'o/r', workspace, '5');
   assert.equal(result, 'REVIEW_MANAGER_ALREADY_RUNNING');
-  assert.equal(calls.length, 0);
-});
-
-test('startReviewManager spawns run-review-manager.js with pr/repo/workspace only', () => {
-  const { mod, calls } = loadModule();
-  const workspace = freshWorkspace('spawns-child');
-
-  const result = mod.startReviewManager('7', 'o/r', workspace);
-  assert.equal(result, 'REVIEW_MANAGER_STARTED');
-  assert.equal(calls.length, 1);
-  const [call] = calls;
-  assert.ok(call.args.some(a => a.endsWith('run-review-manager.js')));
-  assert.ok(call.args.includes('7'));
-  assert.ok(call.args.includes('o/r'));
-  assert.ok(call.args.includes(workspace));
-  // 観点選択のフラグは一切渡さない（廃止済み）
-  assert.equal(call.args.includes('--mode'), false);
-  assert.equal(call.args.includes('--brief-file'), false);
-
-  const lockFile = path.join(workspace, '.gh-maestro', 'review-manager-7.running');
-  assert.equal(fs.existsSync(lockFile), true);
+  assert.equal(spawnCalls.length, 0);
 });
 
 test('startReviewManager rejects a non-numeric pr before touching the filesystem', () => {
-  const { mod, calls } = loadModule();
+  const mod = loadModule();
   const workspace = path.join(tmpBase, 'invalid-pr-unused');
-
-  assert.throws(() => mod.startReviewManager('abc', 'o/r', workspace), /invalid PR number/);
-  assert.equal(calls.length, 0);
+  assert.throws(() => mod.startReviewManager('abc', 'o/r', workspace, '5'), /invalid PR number/);
+  assert.equal(spawnCalls.length, 0);
   assert.equal(fs.existsSync(workspace), false);
 });
 
 test('startReviewManager rejects a path-traversal pr value before touching the filesystem', () => {
-  const { mod, calls } = loadModule();
+  const mod = loadModule();
   const workspace = path.join(tmpBase, 'traversal-pr-unused');
-
   assert.throws(
-    () => mod.startReviewManager('1/../../evil', 'o/r', workspace),
+    () => mod.startReviewManager('1/../../evil', 'o/r', workspace, '5'),
     /invalid PR number/
   );
-  assert.equal(calls.length, 0);
+  assert.equal(spawnCalls.length, 0);
   assert.equal(fs.existsSync(workspace), false);
 });
 
-test('startReviewManager releases the lock file when the child spawn errors', async () => {
-  const workspace = freshWorkspace('spawn-error-cleanup');
-  const { mod } = loadModule((fake) => {
-    // 実装は spawn() の戻り値に対して同期的に .on('error', ...) を登録するため、
-    // そのハンドラ登録が完了した後にemitされるよう1ティック遅らせる。
-    process.nextTick(() => fake.emit('error', new Error('ENOENT')));
-  });
+test('startReviewManager rejects a missing/invalid issue number before touching the filesystem', () => {
+  const mod = loadModule();
+  const workspace = path.join(tmpBase, 'invalid-issue-unused');
+  assert.throws(() => mod.startReviewManager('7', 'o/r', workspace, 'abc'), /invalid issue number/);
+  assert.throws(() => mod.startReviewManager('7', 'o/r', workspace, undefined), /invalid issue number/);
+  assert.equal(spawnCalls.length, 0);
+  assert.equal(fs.existsSync(workspace), false);
+});
 
-  const result = mod.startReviewManager('21', 'o/r', workspace);
+test('startReviewManager launches run-review-manager.js via launchAgentHeadless（ログインシェル経由・通常ワーカーと同じ起動基盤）', () => {
+  const mod = loadModule();
+  const workspace = freshWorkspace('launches-headless');
+
+  const result = mod.startReviewManager('7', 'o/r', workspace, '55');
   assert.equal(result, 'REVIEW_MANAGER_STARTED');
+  assert.equal(spawnCalls.length, 1);
 
-  await new Promise((resolve) => setImmediate(resolve));
+  const decoded = decodedShellCommand(spawnCalls[0]);
+  assert.match(decoded, /run-review-manager\.js/);
+  assert.match(decoded, /'7'/);
+  assert.match(decoded, /'o\/r'/);
 
-  const ghDir = path.join(workspace, '.gh-maestro');
-  assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-21.running')), false);
+  // GH_MAESTRO_WORKER は issue-<N>- パターンに合わせる（worker-exit-hook.jsのIssue番号
+  // 導出・msg-send.jsのワーカーコンテキスト判定をそのまま再利用するため）。
+  assert.match(decoded, /GH_MAESTRO_WORKER='issue-55-review-manager-pr-7'/);
+  assert.match(decoded, /GH_MAESTRO_WORKSPACE=/);
+
+  // onExitフックは通常ワーカーと同じ worker-exit-hook.js
+  assert.match(decoded, /worker-exit-hook\.js/);
 });
 
-test('startReviewManager releases the lock file when the child exits', async () => {
-  const workspace = freshWorkspace('spawn-exit-cleanup');
-  const { mod } = loadModule((fake) => {
-    process.nextTick(() => fake.emit('exit', 1));
-  });
+test('startReviewManager: ロックファイルにlaunchAgentHeadlessが返した実pidを書く', () => {
+  headlessLaunch._setSpawn(fakeSpawn({ pid: 77701 }));
+  const mod = loadModule();
+  const workspace = freshWorkspace('lock-pid');
 
-  const result = mod.startReviewManager('23', 'o/r', workspace);
-  assert.equal(result, 'REVIEW_MANAGER_STARTED');
+  mod.startReviewManager('8', 'o/r', workspace, '55');
 
-  await new Promise((resolve) => setImmediate(resolve));
-
-  const ghDir = path.join(workspace, '.gh-maestro');
-  assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-23.running')), false);
+  const lockFile = path.join(workspace, '.gh-maestro', 'review-manager-8.running');
+  assert.equal(fs.readFileSync(lockFile, 'utf8'), '77701');
 });
 
-// ── 起動直後クラッシュの検出（実障害の再発防止） ───────────────────────────
-//
-// 実障害: poll-pr.js は startReviewManager() の直後、poll-reviews.js を spawnSync で
-// ブロッキング起動する。イベントループがその間ブロックされるため、detached子の
-// 非同期 'error'/'exit' イベントは処理されない（実機で確認済み）。ロック解放も
-// クラッシュ通知も、このイベントに頼っていては届かない。そのため起動直後は
-// 短い猶予の後に同期的に生存確認し、死んでいれば REVIEW_MANAGER_CRASHED を返す。
+test('startReviewManager: execution registryにrunning状態で記録する', () => {
+  const mod = loadModule();
+  const workspace = freshWorkspace('execution-registry');
 
-test('startReviewManager: 起動猶予中にプロセスが死んでいればREVIEW_MANAGER_CRASHEDを返しロックを解放する', () => {
-  const workspace = freshWorkspace('crashed-during-grace');
-  const { mod } = loadModule();
-  mod._setIsProcessAlive(() => false); // 猶予後の生存確認で「死んでいる」を模す
+  mod.startReviewManager('9', 'o/r', workspace, '55');
 
-  const result = mod.startReviewManager('55', 'o/r', workspace);
-  assert.equal(result, 'REVIEW_MANAGER_CRASHED');
-
-  const ghDir = path.join(workspace, '.gh-maestro');
-  assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-55.running')), false, 'ロックは解放されるべき');
+  const registry = readRegistry(workspace);
+  const entries = Object.values(registry).filter(e => e.workerName === 'issue-55-review-manager-pr-9');
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].status, 'running');
+  assert.equal(entries[0].issue, 55);
+  assert.equal(entries[0].skill, 'gh-maestro-reviewer');
 });
 
-test('startReviewManager: 猶予時間の分だけ同期的に待機する（STARTUP_LIVENESS_GRACE_MS）', () => {
-  const workspace = freshWorkspace('grace-sleep-called');
-  const { mod } = loadModule();
-  let sleptMs = null;
-  mod._setSleep((ms) => { sleptMs = ms; });
+test('startReviewManager: ログパスはreviewArtifactPath(.log)（worker-logs配下、通常ワーカーと共通）', () => {
+  const mod = loadModule();
+  const workspace = freshWorkspace('log-path');
 
-  mod.startReviewManager('56', 'o/r', workspace);
-  assert.equal(sleptMs, mod.STARTUP_LIVENESS_GRACE_MS);
-});
+  mod.startReviewManager('10', 'o/r', workspace, '55');
 
-test('startReviewManager: child.pidが取得できなければ即REVIEW_MANAGER_CRASHEDを返す（生存確認を待たない）', () => {
-  const workspace = freshWorkspace('no-pid');
-  let sleptCalled = false;
-  const { mod } = loadModule((fake) => { fake.pid = undefined; });
-  mod._setSleep(() => { sleptCalled = true; });
-
-  const result = mod.startReviewManager('57', 'o/r', workspace);
-  assert.equal(result, 'REVIEW_MANAGER_CRASHED');
-  assert.equal(sleptCalled, false, 'pidが無い時点で確定なので猶予待機は不要');
+  const expectedLogPath = reviewArtifactPath(path.join(workspace, '.gh-maestro'), '10', '.log');
+  assert.equal(spawnCalls[0].args[2], expectedLogPath);
 });
