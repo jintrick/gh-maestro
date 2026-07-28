@@ -2,8 +2,14 @@
 // validate-agent-defaults.js
 // agent-defaults.json の各エージェント定義が備えるべきフィールドを検証する。
 //
+// extends を持つエントリ（例: claude-ds が claude を extends する）は、必須フィールドの
+// 多くを継承で満たすため、resolve-config.js の resolveExtends() で解決した後の形を
+// 検証する（生のエントリのままだと大半のREQUIRED_FIELDSが「無い」と誤判定される）。
+//
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
+
+const { resolveExtends } = require('./resolve-config');
 
 // ── フィールド定義（ここがSSOT） ────────────────────────────────────────────
 
@@ -52,6 +58,7 @@ const KNOWN_OPTIONAL_FIELDS = [
   ['execArgs', 'array'],
   ['execPromptDelivery', 'string'],
   ['execPromptFlag', 'string'],
+  ['extends', 'string'],
 ];
 
 // ── ヘルパー ─────────────────────────────────────────────────────────────────
@@ -193,7 +200,8 @@ function validateAgentDefaults(data) {
   }
 
   for (let i = 0; i < data.agents.length; i++) {
-    issues.push(...validateAgentEntry(data.agents[i], i));
+    const resolved = resolveExtends(data.agents[i], data.agents);
+    issues.push(...validateAgentEntry(resolved, i));
   }
 
   return issues;

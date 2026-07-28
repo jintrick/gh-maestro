@@ -10,9 +10,13 @@ const {
   validateAgentDefaults,
   REQUIRED_FIELDS,
 } = require('../scripts/shared/validate-agent-defaults');
+const { resolveExtends } = require('../scripts/shared/resolve-config');
 
 const DEFAULTS_PATH = path.join(__dirname, '..', 'scripts', 'agent-defaults.json');
 const realDefaults = JSON.parse(fs.readFileSync(DEFAULTS_PATH, 'utf8'));
+// claude-ds/claude-ds-pro/codex-pro のように extends で大半のフィールドを継承する
+// エントリを実効値（継承解決後）にした配列。「値が期待通りか」を見るテストはこちらを使う。
+const resolvedDefaultsAgents = realDefaults.agents.map(a => resolveExtends(a, realDefaults.agents));
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -43,33 +47,35 @@ test('validateAgentDefaults: 実データが検証を通過する', () => {
   assert.deepEqual(errors, [], `実データにエラーがあります:\n${errors.join('\n')}`);
 });
 
-test('validateAgentDefaults: 全エージェントが rulesSupported を持っている', () => {
-  for (const agent of realDefaults.agents) {
+test('validateAgentDefaults: 全エージェントが rulesSupported を持っている（extends解決後）', () => {
+  for (const agent of resolvedDefaultsAgents) {
     assert.ok('rulesSupported' in agent, `"${agent.id}" に rulesSupported フィールドがありません`);
     assert.equal(typeof agent.rulesSupported, 'boolean', `"${agent.id}" の rulesSupported は boolean である必要があります`);
   }
 });
 
 test('validateAgentDefaults: rulesSupported の値が期待通り', () => {
-  const map = new Map(realDefaults.agents.map(a => [a.id, a.rulesSupported]));
+  const map = new Map(resolvedDefaultsAgents.map(a => [a.id, a.rulesSupported]));
   assert.equal(map.get('claude'), true);
   assert.equal(map.get('claude-ds'), true);
   assert.equal(map.get('claude-ds-pro'), true);
   assert.equal(map.get('reasonix'), false);
   assert.equal(map.get('agy'), false);
   assert.equal(map.get('codex'), false);
+  assert.equal(map.get('codex-pro'), false);
 });
 
 // ── Issue #132: 能力宣言フィールド ────────────────────────────────────────────
 
 test('validateAgentDefaults: resumeCommand の値が期待通り', () => {
-  const map = new Map(realDefaults.agents.map(a => [a.id, a.resumeCommand]));
+  const map = new Map(resolvedDefaultsAgents.map(a => [a.id, a.resumeCommand]));
   assert.deepEqual(map.get('claude'), ['--continue']);
   assert.deepEqual(map.get('claude-ds'), ['--continue']);
   assert.deepEqual(map.get('claude-ds-pro'), ['--continue']);
   assert.deepEqual(map.get('reasonix'), ['--continue']);
   assert.deepEqual(map.get('agy'), ['--continue']);
   assert.deepEqual(map.get('codex'), ['resume', '--last']);
+  assert.deepEqual(map.get('codex-pro'), ['resume', '--last']);
 });
 
 // ── validateAgentEntry: 必須フィールド ────────────────────────────────────────
@@ -248,5 +254,30 @@ test('validateAgentDefaults: 重複 id を検出する', () => {
 test('REQUIRED_FIELDS: rulesSupported が必須フィールドに含まれている', () => {
   const fieldNames = REQUIRED_FIELDS.map(([f]) => f);
   assert.ok(fieldNames.includes('rulesSupported'), 'rulesSupported must be in REQUIRED_FIELDS');
+});
+
+// ── extends ──────────────────────────────────────────────────────────────────
+
+test('validateAgentDefaults: extendsで必須フィールドを継承するエントリはエラーにならない', () => {
+  const data = {
+    agents: [
+      makeValidAgent({ id: 'base' }),
+      { id: 'derived', label: 'Derived', command: 'derived-cli', extends: 'base' },
+    ],
+  };
+  const issues = validateAgentDefaults(data);
+  const errors = issues.filter(i => i.startsWith('[ERROR]'));
+  assert.deepEqual(errors, [], `extendsで継承したエントリにエラーが出ています:\n${errors.join('\n')}`);
+});
+
+test('validateAgentDefaults: extends先が存在しないIDだと継承元フィールドが揃わずエラーになる', () => {
+  const data = {
+    agents: [
+      { id: 'derived', label: 'Derived', command: 'derived-cli', extends: 'no-such-base' },
+    ],
+  };
+  const issues = validateAgentDefaults(data);
+  const errors = issues.filter(i => i.startsWith('[ERROR]'));
+  assert.ok(errors.length > 0, 'extends先が存在しない場合は必須フィールド欠落エラーになるべき');
 });
 

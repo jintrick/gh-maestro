@@ -25,8 +25,10 @@ const { isPlainObject } = require('./object');
 // command/extraArgs に加え、execArgs も同じ扱いとする（PR #103 Review Manager指摘:
 // execArgsだけ除外対象から漏れると、workspace configで--sandbox/--skip-git-repo-check等の
 // 安全設定を欠いたコマンドラインに差し替えられてしまう）。
+// extendsも同じ扱いが必要: workspace configがextendsで既存エージェント（claude等）の
+// command/extraArgsを丸ごと引き込めてしまうと、上記の個別フィールド除外が意味を成さなくなる。
 // resolveAgentConfig と config.js（cmdStatusの警告表示）の両方から参照する単一のSSOT。
-const EXEC_SENSITIVE_FIELDS = ['command', 'extraArgs', 'execArgs', 'execPromptDelivery', 'execPromptFlag', 'resumeCommand'];
+const EXEC_SENSITIVE_FIELDS = ['command', 'extraArgs', 'execArgs', 'execPromptDelivery', 'execPromptFlag', 'resumeCommand', 'extends'];
 
 // ── デフォルト読み込み ──────────────────────────────────────────────────────
 
@@ -137,6 +139,40 @@ function mergeAgentConfig(base, override) {
 }
 
 /**
+ * "extends" フィールドを再帰的に解決する。
+ *
+ * claude-ds / claude-ds-pro が claude と、codex-pro が codex と実質的に同一設定
+ * （command以外の全フィールド）であるように、「4種のCLIランタイム（claude/codex/agy/
+ * reasonix）以外は、既存エージェントのモデル違いのラッパーに過ぎない」という運用上の
+ * 実態に、設定の重複無しで対応するための機構。agent-defaults.json自身のエントリにも、
+ * config.json（グローバルのみ。ワークスペースはEXEC_SENSITIVE_FIELDSで除外）で定義する
+ * カスタムエージェントにも使える。
+ *
+ * @param {object} entry        extends を含みうるエントリ（agent-defaults.json の要素、
+ *                               またはconfig.json の agents[id] オーバーライド）
+ * @param {object[]} agentsArray  extends先を探す agent-defaults.json の agents 配列
+ * @param {Set<string>} [seen]  循環参照検出用（呼び出し元は指定不要）
+ * @returns {object} extends を解決・除去した結果
+ */
+function resolveExtends(entry, agentsArray, seen = new Set()) {
+  if (!entry || !entry.extends) return entry;
+
+  const baseId = entry.extends;
+  const { extends: _drop, ...rest } = entry;
+
+  if (seen.has(baseId)) {
+    // 循環参照（フェイルクローズ: 無限再帰を避け、extends無しの不完全な状態を返す。
+    // 不完全な結果は呼び出し元の isValidAgentConfig / validateAgentDefaults が検出する）。
+    return rest;
+  }
+
+  const base = Array.isArray(agentsArray) ? agentsArray.find(a => a && a.id === baseId) : null;
+  const resolvedBase = base ? resolveExtends(base, agentsArray, new Set([...seen, baseId])) : null;
+
+  return mergeAgentConfig(resolvedBase, rest);
+}
+
+/**
  * 解決済みエージェント設定が起動に必要な最小フィールドを持っているか検証する。
  * config.json のみで定義されたカスタムエージェントが不完全な状態で使われるのを防ぐ。
  *
@@ -156,6 +192,13 @@ function isValidAgentConfig(agent) {
 /**
  * 指定された agentId の設定を解決順序でマージして返す。
  *
+ * マージ挙動には非対称性がある: 通常のフィールド（`command`・`enterSequence`等）の
+ * オーバーライドは既存設定に対する**フィールド単位のマージ**だが、オーバーライドが
+ * `extends: "<baseId>"` を持つ場合は、そのagentIdの既存デフォルトの有無に関わらず、
+ * extends解決結果を新しいbaseとした**総入れ替え**になる（既存デフォルト固有の
+ * フィールドは暗黙に失われる）。組み込みのagentId（例: "codex"）を`extends`付きで
+ * 上書きする場合も同じ規則が適用される。
+ *
  * @param {string} agentId        エージェントID
  * @param {object} [opts={}]
  * @param {string} [opts.workspace]  ワークスペース絶対パス
@@ -168,8 +211,9 @@ function resolveAgentConfig(agentId, opts = {}) {
   const homedir = opts.homedir || process.env.HOME || process.env.USERPROFILE || '';
   const defaults = loadDefaults();
 
-  // 1. デフォルトからベースを探す
-  const defaultAgent = defaults.agents.find(a => a.id === agentId) || null;
+  // 1. デフォルトからベースを探す（extends があれば解決する）
+  const rawDefaultAgent = defaults.agents.find(a => a.id === agentId) || null;
+  const defaultAgent = rawDefaultAgent ? resolveExtends(rawDefaultAgent, defaults.agents) : null;
 
   // 2. ~/.gh-maestro/config.json の agents セクション
   const globalConfig = loadConfigFile(resolve(homedir, '.gh-maestro', 'config.json'));
@@ -201,12 +245,19 @@ function resolveAgentConfig(agentId, opts = {}) {
   const hasGlobal = Object.keys(globalOverride).length > 0;
   const hasWorkspace = Object.keys(workspaceOverride).length > 0;
 
+  // override 自身が extends を持つ場合（config.json だけで定義するカスタムエージェント。
+  // 例: codex-terra が codex を extends する）、defaultAgent の有無に関わらず
+  // extends解決結果を新しいbaseとして使う（通常のフィールド単位マージではなく総入れ替え）。
   if (hasGlobal || hasWorkspace) {
     if (hasGlobal) {
-      merged = mergeAgentConfig(merged, globalOverride);
+      merged = globalOverride.extends
+        ? resolveExtends(globalOverride, defaults.agents)
+        : mergeAgentConfig(merged, globalOverride);
     }
     if (hasWorkspace) {
-      merged = mergeAgentConfig(merged, workspaceOverride);
+      merged = workspaceOverride.extends
+        ? resolveExtends(workspaceOverride, defaults.agents)
+        : mergeAgentConfig(merged, workspaceOverride);
     }
   }
 
@@ -220,6 +271,13 @@ function resolveAgentConfig(agentId, opts = {}) {
 
   // 解決結果が起動可能な設定を持っているか検証
   if (!isValidAgentConfig(merged)) return null;
+
+  // id は常に呼び出し元が要求した agentId に固定する。extends 解決結果は継承元の id
+  // （例: codex-terra が codex を extends した場合の "codex"）を引きずっているため、
+  // ここで上書きしないと workers.json に誤った agentId が記録され、resumeで別の
+  // エージェント（継承元そのもの）を起動してしまう（spawn-worker.js の
+  // `agentId: agentConfig.id` 経由）。
+  merged.id = agentId;
 
   return merged;
 }
@@ -256,6 +314,7 @@ function resolveSkillAgentMap(opts = {}) {
 module.exports = {
   resolveAgentConfig,
   resolveSkillAgentMap,
+  resolveExtends,
   loadDefaults,
   isValidAgentConfig,
   EXEC_SENSITIVE_FIELDS,

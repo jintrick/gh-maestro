@@ -202,7 +202,21 @@ skills/gh-maestro-reviewer/
 
 各エージェントのデフォルト値は `scripts/agent-defaults.json` を参照。
 
-**セキュリティ**: ワークスペースローカルの `config.json` からは `command`・`extraArgs`・`execArgs` の上書きはできない（悪意あるリポジトリによる任意コマンド実行の防止）。グローバルの `~/.gh-maestro/config.json` では全フィールドの上書きが可能。
+**セキュリティ**: ワークスペースローカルの `config.json` からは `command`・`extraArgs`・`execArgs`・`extends`（後述）の上書きはできない（悪意あるリポジトリによる任意コマンド実行の防止）。グローバルの `~/.gh-maestro/config.json` では全フィールドの上書きが可能。
+
+#### extends — 既存エージェントを土台にしたカスタムエージェント
+
+gh-maestroが実際に細かい起動設定を必要とするのは claude / codex / agy / reasonix の4種のCLIランタイムだけで、他はモデル選択等を内部で行うラッパー（PowerShell関数等）に過ぎないことが多い。`extends` に既存のエージェントIDを指定すると、そのエージェントの設定を丸ごと土台にでき、`agent-defaults.json` を編集せずに `~/.gh-maestro/config.json` だけで新しいエージェントを登録できる。
+
+```json
+{
+  "agents": {
+    "codex-terra": { "extends": "codex", "command": "codex-terra" }
+  }
+}
+```
+
+**注意（マージ挙動の非対称性）**: `extends` を指定したオーバーライドは、通常のフィールド単位マージ（前述の例のように一部フィールドだけ差し替える）とは異なり、`extends` 先の設定を丸ごと土台にした**総入れ替え**になる。そのエージェントIDが既に `agent-defaults.json` に存在していても、そのデフォルト値は使われず、`extends` 先の設定に置き換わる。`extends` は `agent-defaults.json` 内のエージェントのみを対象にでき、`config.json` だけで定義した別のカスタムエージェントを連鎖して継承することはできない。
 
 ### skillAgentMap
 

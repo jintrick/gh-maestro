@@ -9,6 +9,7 @@ const path = require('path');
 const {
   resolveAgentConfig,
   resolveSkillAgentMap,
+  resolveExtends,
   loadDefaults,
 } = require('../scripts/shared/resolve-config');
 const { buildAgentCommandArgs } = require('../scripts/agent-launch');
@@ -51,9 +52,12 @@ test('loadDefaults: agent-defaults.json を読める', () => {
   assert.ok(typeof defaults.skillAgentMap === 'object', 'skillAgentMap should be an object');
 });
 
-test('loadDefaults: 各エージェントが id, command, runtime, promptDelivery を持つ', () => {
+test('loadDefaults: 各エージェントが id, command, runtime, promptDelivery を持つ（extends解決後）', () => {
   const defaults = loadDefaults();
-  for (const agent of defaults.agents) {
+  // claude-ds/claude-ds-pro/codex-pro のように extends で大半のフィールドを継承する
+  // エントリは、生のままだと runtime 等が無い。resolveExtends で解決した実効値を見る。
+  for (const raw of defaults.agents) {
+    const agent = resolveExtends(raw, defaults.agents);
     assert.ok(agent.id, `agent should have id: ${JSON.stringify(agent)}`);
     assert.ok(agent.command, `agent ${agent.id} should have command`);
     assert.ok(agent.runtime, `agent ${agent.id} should have runtime`);
@@ -61,10 +65,11 @@ test('loadDefaults: 各エージェントが id, command, runtime, promptDeliver
   }
 });
 
-test('loadDefaults: runtime が agents.yaml のキー (claude|agy|codex) のいずれか', () => {
+test('loadDefaults: runtime が agents.yaml のキー (claude|agy|codex) のいずれか（extends解決後）', () => {
   const defaults = loadDefaults();
   const validRuntimes = new Set(['claude', 'agy', 'codex']);
-  for (const agent of defaults.agents) {
+  for (const raw of defaults.agents) {
+    const agent = resolveExtends(raw, defaults.agents);
     assert.ok(
       validRuntimes.has(agent.runtime),
       `agent ${agent.id}: runtime "${agent.runtime}" should be one of claude|agy|codex`,
@@ -254,6 +259,87 @@ test('resolveAgentConfig: workspace config が command/extraArgs 以外は上書
       assert.equal(agent.command, 'claude-ds', 'command unchanged');
       assert.equal(agent.sendTextDelayMs, 9999, 'non-exec field overridable');
       assert.equal(agent.enterSequence, '\r', 'non-exec field overridable');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── extends（4種のCLIランタイム以外はモデル違いのラッパーに過ぎない、という運用実態への対応） ──
+
+test('resolveExtends: extends が無ければそのまま返す', () => {
+  const defaults = loadDefaults();
+  const entry = { id: 'x', command: 'x' };
+  assert.equal(resolveExtends(entry, defaults.agents), entry);
+});
+
+test('resolveExtends: agent-defaults.json自身のclaude-ds-pro/codex-proがclaude/codexを正しく継承している', () => {
+  withTempHome(home => {
+    const dsPro = resolveAgentConfig('claude-ds-pro', { homedir: home });
+    assert.equal(dsPro.id, 'claude-ds-pro');
+    assert.equal(dsPro.command, 'claude-ds-pro');
+    assert.equal(dsPro.promptDelivery, 'system-prompt-file');
+    assert.equal(dsPro.rulesSupported, true);
+    assert.deepEqual(dsPro.resumeCommand, ['--continue']);
+
+    const codexPro = resolveAgentConfig('codex-pro', { homedir: home });
+    assert.equal(codexPro.id, 'codex-pro');
+    assert.equal(codexPro.command, 'codex-pro');
+    assert.equal(codexPro.promptDelivery, 'positional');
+    assert.deepEqual(codexPro.resumeCommand, ['resume', '--last']);
+    assert.ok(codexPro.extraArgs.includes('--skip-git-repo-check'));
+  });
+});
+
+test('resolveAgentConfig: ~/.gh-maestro/config.json だけで定義したextendsベースのカスタムエージェントを解決できる（agent-defaults.jsonへの追記不要）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'codex-terra': { extends: 'codex', command: 'codex-terra' },
+      },
+    });
+
+    const agent = resolveAgentConfig('codex-terra', { homedir: home });
+    assert.ok(agent);
+    // idは常に呼び出し元が要求したagentIdに固定される（継承元のidを引きずらない。
+    // さもないとworkers.json経由のresumeで継承元そのものを起動してしまう）
+    assert.equal(agent.id, 'codex-terra');
+    assert.equal(agent.command, 'codex-terra');
+    assert.equal(agent.promptDelivery, 'positional');
+    assert.deepEqual(agent.resumeCommand, ['resume', '--last']);
+  });
+});
+
+test('resolveAgentConfig: extends先が存在しないIDだとnullを返す（isValidAgentConfigが不完全な結果を弾く）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: { 'broken-agent': { extends: 'no-such-agent' } },
+    });
+    assert.equal(resolveAgentConfig('broken-agent', { homedir: home }), null);
+  });
+});
+
+test('resolveExtends: 循環参照はフェイルクローズする（無限再帰せず不完全な結果を返す）', () => {
+  const cyclic = [
+    { id: 'a', command: 'a', extends: 'b' },
+    { id: 'b', command: 'b', extends: 'a' },
+  ];
+  const resolved = resolveExtends(cyclic[0], cyclic);
+  // 循環検出時点のエントリ自身のフィールドのみが残り、無限再帰しない
+  assert.equal(resolved.id, 'a');
+  assert.ok(!('runtime' in resolved), 'circular extends should not fabricate inherited fields');
+});
+
+test('resolveAgentConfig: workspace config の extends は無視される（EXEC_SENSITIVE_FIELDS、セキュリティ）', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-extends-sec-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: { 'workspace-only-agent': { extends: 'codex', command: 'workspace-only-agent' } },
+      });
+      // extendsが剥がされると command のみが残り、promptDelivery 等の必須フィールドが
+      // 揃わないため isValidAgentConfig で弾かれ null になる（＝丸ごと継承の抜け道にならない）。
+      assert.equal(resolveAgentConfig('workspace-only-agent', { homedir: home, workspace: ws }), null);
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }
