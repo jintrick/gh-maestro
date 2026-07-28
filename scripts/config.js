@@ -22,7 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, isValidAgentConfig, EXEC_SENSITIVE_FIELDS } = require('./shared/resolve-config');
+const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, resolveExtends, isValidAgentConfig, EXEC_SENSITIVE_FIELDS } = require('./shared/resolve-config');
 const { isPlainObject } = require('./shared/object');
 const { checkAgentExists } = require('./agent-exec');
 
@@ -256,9 +256,14 @@ function cmdUse(profileName) {
     // Config-only agents (not in defaults) must pass isValidAgentConfig.
     // Incomplete custom agents (missing command/promptDelivery) would cause
     // resolveAgentConfig() to return null at worker-launch time.
+    // Resolve "extends" first — a custom agent that extends an existing one
+    // legitimately omits command/promptDelivery in its raw form.
     if (!defaultAgentIds.has(agentId)) {
       const customAgent = config.agents && config.agents[agentId];
-      if (!isValidAgentConfig(customAgent)) {
+      const resolvedCustomAgent = customAgent && customAgent.extends
+        ? resolveExtends(customAgent, defaults.agents)
+        : customAgent;
+      if (!isValidAgentConfig(resolvedCustomAgent)) {
         console.error(
           `Error: agent "${agentId}" (for skill "${skill}") is a custom agent ` +
           'missing required fields (command + promptDelivery).',
@@ -461,12 +466,17 @@ function validateConfig(label, configPath, config, defaults) {
           issues.push(`[ERROR] ${label} agents["${agentId}"]: must be an object.`);
           continue;
         }
-        // If the agent is not in defaults, it's a custom agent — must be complete
+        // If the agent is not in defaults, it's a custom agent — must be complete.
+        // Resolve "extends" first: a custom agent that extends an existing agent
+        // (e.g. {"extends": "codex", "command": "codex-terra"}) legitimately omits
+        // command/promptDelivery in its raw form because it inherits them.
         if (!defaultAgentIds.has(agentId)) {
-          if (!isValidAgentConfig(override)) {
+          const resolved = override.extends ? resolveExtends(override, defaults.agents) : override;
+          if (!isValidAgentConfig(resolved)) {
             issues.push(
               `[ERROR] ${label} agents["${agentId}"]: custom agent missing ` +
-              'required fields (command + promptDelivery).',
+              'required fields (command + promptDelivery)' +
+              (override.extends ? ` (extends: "${override.extends}", which may not exist).` : '.'),
             );
           }
         }

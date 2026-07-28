@@ -29,51 +29,13 @@
       "id": "claude-ds",
       "label": "Claude Code (DeepSeek)",
       "command": "claude-ds",
-      "runtime": "claude",
-      "extraArgs": [
-        "--dangerously-skip-permissions",
-        "--print",
-        "--output-format",
-        "stream-json",
-        "--verbose"
-      ],
-      "execArgs": [
-        "--dangerously-skip-permissions",
-        "--print",
-        "--output-format",
-        "stream-json",
-        "--verbose"
-      ],
-      "promptDelivery": "system-prompt-file",
-      "rulesSupported": true,
-      "resumeCommand": [
-        "--continue"
-      ]
+      "extends": "claude"
     },
     {
       "id": "claude-ds-pro",
       "label": "Claude Code (DeepSeek Pro)",
       "command": "claude-ds-pro",
-      "runtime": "claude",
-      "extraArgs": [
-        "--dangerously-skip-permissions",
-        "--print",
-        "--output-format",
-        "stream-json",
-        "--verbose"
-      ],
-      "execArgs": [
-        "--dangerously-skip-permissions",
-        "--print",
-        "--output-format",
-        "stream-json",
-        "--verbose"
-      ],
-      "promptDelivery": "system-prompt-file",
-      "rulesSupported": true,
-      "resumeCommand": [
-        "--continue"
-      ]
+      "extends": "claude"
     },
     {
       "id": "reasonix",
@@ -128,8 +90,6 @@
       "extraArgs": [
         "exec",
         "--skip-git-repo-check",
-        "--model",
-        "gpt-5.4",
         "--dangerously-bypass-approvals-and-sandbox"
       ],
       "execArgs": [
@@ -137,8 +97,6 @@
         "--skip-git-repo-check",
         "--cd",
         "{workspace}",
-        "--model",
-        "gpt-5.4",
         "--dangerously-bypass-approvals-and-sandbox"
       ],
       "promptDelivery": "positional",
@@ -152,25 +110,7 @@
       "id": "codex-pro",
       "label": "Codex Pro (OpenAI)",
       "command": "codex-pro",
-      "runtime": "codex",
-      "extraArgs": [
-        "exec",
-        "--skip-git-repo-check",
-        "--dangerously-bypass-approvals-and-sandbox"
-      ],
-      "execArgs": [
-        "exec",
-        "--skip-git-repo-check",
-        "--cd",
-        "{workspace}",
-        "--dangerously-bypass-approvals-and-sandbox"
-      ],
-      "promptDelivery": "positional",
-      "rulesSupported": false,
-      "resumeCommand": [
-        "resume",
-        "--last"
-      ]
+      "extends": "codex"
     },
     {
       "id": "agy-interactive",

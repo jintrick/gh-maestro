@@ -354,6 +354,30 @@ test('validateConfig: デフォルトにあるエージェントの override は
   assert.deepEqual(issues, []);
 });
 
+test('validateConfig: extendsで既存エージェントを継承するカスタムエージェントはエラーにならない（command/promptDeliveryを自分では持たない）', () => {
+  const defaults = loadDefaults();
+  const config = {
+    agents: {
+      'codex-terra': { extends: 'codex', command: 'codex-terra' },
+    },
+  };
+  const issues = validateConfig('global', '/tmp/config.json', config, defaults);
+  assert.deepEqual(issues, []);
+});
+
+test('validateConfig: extends先が存在しないカスタムエージェントはエラーになる', () => {
+  const defaults = loadDefaults();
+  const config = {
+    agents: {
+      'broken-agent': { extends: 'no-such-agent' },
+    },
+  };
+  const issues = validateConfig('global', '/tmp/config.json', config, defaults);
+  assert.ok(issues.some(i =>
+    i.includes('broken-agent') && i.includes('missing') && i.includes('[ERROR]'),
+  ));
+});
+
 test('validateConfig: profiles がオブジェクトでなければエラー', () => {
   const defaults = loadDefaults();
   const config = { profiles: 'invalid' };
@@ -614,6 +638,25 @@ test('CLI use: カスタムエージェントをプロファイルで参照で�
 
     const config = loadJSON(path.join(home, '.gh-maestro', 'config.json'));
     assert.deepEqual(config.skillAgentMap, { 'gh-maestro-coder': 'my-agent' });
+  });
+});
+
+test('CLI use: extendsで既存エージェントを継承するカスタムエージェントをプロファイルで参照できる（agent-defaults.jsonへの追記不要）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'codex-terra': { extends: 'codex', command: 'codex-terra' },
+      },
+      profiles: {
+        custom: { skillAgentMap: { 'gh-maestro-reviewer': 'codex-terra' } },
+      },
+    });
+
+    const r = runConfig(['use', 'custom'], home);
+    assert.equal(r.status, 0, `exit 0, stderr: ${r.stderr}`);
+
+    const config = loadJSON(path.join(home, '.gh-maestro', 'config.json'));
+    assert.deepEqual(config.skillAgentMap, { 'gh-maestro-reviewer': 'codex-terra' });
   });
 });
 
