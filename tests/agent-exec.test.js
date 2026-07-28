@@ -38,7 +38,10 @@ test('buildLoginShellExecArgs: win32 は pwsh -EncodedCommand を返す', () => 
   assert.ok(decoded.startsWith("& 'claude'"));
   assert.ok(decoded.includes('--dangerously-skip-permissions'));
   assert.ok(decoded.includes('/tmp/p.md'));
-  assert.ok(decoded.endsWith("'start'"));
+  // onExitが無くても、&は bash の exec と違いプロセスを置き換えないため、
+  // $LASTEXITCODE を明示的に exit しないと呼び出し元が子の終了コードを見失う。
+  assert.ok(decoded.includes("'start'; $exitCode ="));
+  assert.ok(decoded.endsWith('exit $exitCode'));
 });
 
 test('buildLoginShellExecArgs: win32 で引数内の \' をエスケープする', () => {
@@ -148,7 +151,7 @@ test('buildLoginShellExecArgs: win32 でパイプによるログ複製を一切�
   const plain = decoded(buildLoginShellExecArgs(['claude-ds', '--print'], 'win32'));
   assert.ok(!plain.includes('Tee-Object'), plain);
   assert.ok(!plain.includes('|'), `パイプ演算子が含まれない: ${plain}`);
-  assert.equal(plain, "& 'claude-ds' '--print'");
+  assert.equal(plain, "& 'claude-ds' '--print'; $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }; exit $exitCode");
 
   // onExit・env を併用しても同じ（パイプは増えない）
   const withHook = decoded(buildLoginShellExecArgs(

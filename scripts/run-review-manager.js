@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
+const { buildLoginShellExecArgs } = require('./agent-exec');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { linkNodeModules } = require('./link-node-modules');
 const { unlinkJunctions } = require('./unlink-junctions');
@@ -179,6 +180,14 @@ function buildReviewManagerAgentArgs(agentConfig, { reviewWtDir, promptFile, ski
  * 非互換で本番クラッシュを起こした実績がある（Issue #150）。fdリダイレクトはシェルの
  * 文字列パイプライン層を通らないため、その障害も文字化けも構造的に起こらない。
  *
+ * agentArgs はそのまま spawn せず buildLoginShellExecArgs でログインシェル経由に
+ * ラップする（headless-launch.js の通常ワーカー起動と同じ抽象）。agentArgs[0] が
+ * PATH上の実行ファイルとは限らず、$PROFILE で定義されたpwsh関数（例:
+ * "codex-terra" のようなモデル違いラッパー。config.json の extends 機能で
+ * command として指定できる）でありうるため、生spawnだとENOENTになる
+ * （実障害: Review Manager役にpwsh関数エージェントを割り当てるとspawn error:
+ * spawnSync <command> ENOENT で即失敗していた）。
+ *
  * spawnSync のままなので呼び出し元は従来どおり完了を同期待ちできる。
  *
  * @param {string[]} agentArgs
@@ -189,7 +198,8 @@ function buildReviewManagerAgentArgs(agentConfig, { reviewWtDir, promptFile, ski
 function runAgentHeadless(agentArgs, cwd, logFile) {
   const fd = fs.openSync(logFile, 'a');
   try {
-    return spawnSync(agentArgs[0], agentArgs.slice(1), {
+    const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
+    return spawnSync(shellArgs[0], shellArgs.slice(1), {
       cwd,
       env: process.env,
       // stdin は 'ignore' に固定する。TTYが無い状態で継承すると入力待ちでハングしうる

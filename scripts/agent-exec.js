@@ -98,10 +98,16 @@ function buildPwshExecArgs(agentCmdArgs, onExit = null, env = {}) {
     .join('');
 
   // & <command> <args...>
-  // PowerShell の call operator & は関数・コマンドレット・実行ファイルのどれでも実行できる
+  // PowerShell の call operator & は関数・コマンドレット・実行ファイルのどれでも実行できる。
+  // ただし bash の `exec` と異なり & はプロセスを置き換えないため、$LASTEXITCODE を
+  // 明示的に `exit` しない限り pwsh 自身の終了コードは子の終了コードを反映しない
+  // （onExit の有無に関わらず常に必要。以前は onExit が無いときにこの exit を省略しており、
+  // run-review-manager.js のように呼び出し元が同期的に終了コードを見る箇所で
+  // 常に0扱いになる実障害があった）。
+  const exitCodeAssign = '$exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }';
   const exitHook = onExit
-    ? `; $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }; & '${onExit.command.replace(/'/g, "''")}' ${onExit.args.map(arg => `'${arg.replace(/'/g, "''")}'`).join(' ')} $exitCode; exit $exitCode`
-    : '';
+    ? `; ${exitCodeAssign}; & '${onExit.command.replace(/'/g, "''")}' ${onExit.args.map(arg => `'${arg.replace(/'/g, "''")}'`).join(' ')} $exitCode; exit $exitCode`
+    : `; ${exitCodeAssign}; exit $exitCode`;
   const command = `${envPrefix}& ${escapedArgs}${exitHook}`;
 
   // UTF-16LE base64 にエンコード（PowerShell -EncodedCommand の要求形式）

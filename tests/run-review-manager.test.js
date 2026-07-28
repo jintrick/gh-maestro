@@ -121,6 +121,25 @@ test('runAgentHeadless: stdin は継承しない（TTY不在での入力待ち�
   assert.equal(result.status, 0, 'stdin待ちでハングせず完了する');
   assert.match(fs.readFileSync(logFile, 'utf8'), /stdin=/);
 });
+
+test(
+  'runAgentHeadless: PATH上に実行ファイルを持たないコマンド（PowerShellコマンドレット）もログインシェル経由で解決できる',
+  { skip: process.platform !== 'win32' ? 'win32専用（pwsh経由の解決を確認するテスト）' : false },
+  () => {
+    // 実障害の再現（PR #170フォローアップ指摘）: Review Manager役に $PROFILE で定義した
+    // pwsh関数（例: config.jsonのextendsで登録するモデル違いラッパー "codex-terra" 等）を
+    // 割り当てると、以前の実装（生spawn）は ENOENT で即失敗していた。Get-Date はexeを
+    // 持たないPowerShellコマンドレットで、raw spawnでは同じ理由でENOENTになる。
+    // ログインシェル（buildLoginShellExecArgs）経由なら解決できることを確認する。
+    const raw = spawnSync('Get-Date', [], { encoding: 'utf8' });
+    assert.equal(raw.error && raw.error.code, 'ENOENT', '前提: raw spawnでは解決できないコマンドで検証する');
+
+    const logFile = path.join(tmpBase, 'rm-cmdlet.log');
+    const result = runAgentHeadless(['Get-Date'], tmpBase, logFile);
+    assert.equal(result.status, 0, `ログインシェル経由でも解決できるべき: ${fs.readFileSync(logFile, 'utf8')}`);
+  },
+);
+
 test('buildReviewManagerAgentArgs: AntigravityはRMで--printを使い通常の-iを使わない', () => {
   const defaults = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'agent-defaults.json'), 'utf8'));
   const agent = defaults.agents.find(entry => entry.id === 'agy');
