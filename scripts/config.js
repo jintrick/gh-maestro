@@ -256,14 +256,25 @@ function cmdUse(profileName) {
     // Config-only agents (not in defaults) must pass isValidAgentConfig.
     // Incomplete custom agents (missing command/promptDelivery) would cause
     // resolveAgentConfig() to return null at worker-launch time.
-    // Resolve "extends" first — a custom agent that extends an existing one
-    // legitimately omits command/promptDelivery in its raw form.
-    if (!defaultAgentIds.has(agentId)) {
-      const customAgent = config.agents && config.agents[agentId];
-      const resolvedCustomAgent = customAgent && customAgent.extends
-        ? resolveExtends(customAgent, defaults.agents)
-        : customAgent;
-      if (!isValidAgentConfig(resolvedCustomAgent)) {
+    // "extends" must be checked regardless of whether agentId already has a default
+    // entry — resolveAgentConfig() treats an override's "extends" as a full
+    // replacement of any existing default for that id, so even a built-in id
+    // (e.g. "codex") re-pointed at a broken extends target would break at
+    // worker-launch time despite defaultAgentIds.has(agentId) being true
+    // (PR #170 review: this branch previously only checked ids absent from defaults).
+    const customAgent = config.agents && config.agents[agentId];
+    if (customAgent && customAgent.extends) {
+      const resolved = resolveExtends(customAgent, defaults.agents);
+      if (!isValidAgentConfig(resolved)) {
+        console.error(
+          `Error: agent "${agentId}" (for skill "${skill}") extends "${customAgent.extends}", but ` +
+          'the resolved config is missing required fields (command + promptDelivery). ' +
+          `"${customAgent.extends}" must exist in agent-defaults.json.`,
+        );
+        process.exit(1);
+      }
+    } else if (!defaultAgentIds.has(agentId)) {
+      if (!isValidAgentConfig(customAgent)) {
         console.error(
           `Error: agent "${agentId}" (for skill "${skill}") is a custom agent ` +
           'missing required fields (command + promptDelivery).',
@@ -466,17 +477,32 @@ function validateConfig(label, configPath, config, defaults) {
           issues.push(`[ERROR] ${label} agents["${agentId}"]: must be an object.`);
           continue;
         }
-        // If the agent is not in defaults, it's a custom agent — must be complete.
-        // Resolve "extends" first: a custom agent that extends an existing agent
-        // (e.g. {"extends": "codex", "command": "codex-terra"}) legitimately omits
-        // command/promptDelivery in its raw form because it inherits them.
-        if (!defaultAgentIds.has(agentId)) {
-          const resolved = override.extends ? resolveExtends(override, defaults.agents) : override;
+        // "extends" changes resolveAgentConfig()'s behavior into a full replacement
+        // (it ignores any existing default for this agentId and rebuilds from the
+        // extends target instead — see resolveAgentConfig's comment). So an override
+        // with "extends" must be checked here regardless of whether agentId already
+        // has a default entry — an existing agent (e.g. "codex") re-pointed at a
+        // broken extends target is just as broken as a brand-new custom agent with
+        // one (PR #170 review: this branch previously only ran for agentIds absent
+        // from defaults, silently missing "codex" being overridden with a bad extends).
+        // "extends" only resolves against agent-defaults.json's own agents — it cannot
+        // chain to another custom agent defined only in config.json.
+        if (override.extends) {
+          const resolved = resolveExtends(override, defaults.agents);
           if (!isValidAgentConfig(resolved)) {
             issues.push(
+              `[ERROR] ${label} agents["${agentId}"]: extends "${override.extends}", but the ` +
+              'resolved config is missing required fields (command + promptDelivery). ' +
+              `"${override.extends}" must exist in agent-defaults.json (extends cannot chain to ` +
+              'another config.json-only custom agent).',
+            );
+          }
+        } else if (!defaultAgentIds.has(agentId)) {
+          // If the agent is not in defaults, it's a brand-new custom agent — must be complete.
+          if (!isValidAgentConfig(override)) {
+            issues.push(
               `[ERROR] ${label} agents["${agentId}"]: custom agent missing ` +
-              'required fields (command + promptDelivery)' +
-              (override.extends ? ` (extends: "${override.extends}", which may not exist).` : '.'),
+              'required fields (command + promptDelivery).',
             );
           }
         }

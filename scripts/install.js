@@ -11,6 +11,7 @@ const AGENTS_YAML = path.join(SKILLS_DIR, 'agents.yaml');
 // `_` 始まりのため skillDirs の走査対象からは除外され、スキルとしてはインストールされない。
 const PARTIALS_DIR = path.join(SKILLS_DIR, '_partials');
 const { validateAgentDefaults } = require(path.join(__dirname, 'shared', 'validate-agent-defaults'));
+const { resolveExtends } = require(path.join(__dirname, 'shared', 'resolve-config'));
 
 // ── Minimal YAML parser for agents.yaml ──────────────────────────────────────
 
@@ -176,7 +177,27 @@ function step(msg) { console.log(`\x1b[36m[gh-maestro-install] ${msg}\x1b[0m`); 
 function ok(msg)   { console.log(`  \x1b[32mv ${msg}\x1b[0m`); }
 function fail(msg) { console.error(`  \x1b[31mx ${msg}\x1b[0m`); process.exit(1); }
 
-module.exports = { parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive };
+/**
+ * agentDefaults.agents から、各エージェントIDが rulesSupported かどうかのマップを構築する。
+ *
+ * claude-ds/claude-ds-pro のように extends で rulesSupported を継承するエントリは、
+ * 生のエントリのままだと rulesSupported が undefined になり false と誤判定される
+ * （PR #170レビュー指摘）。resolveExtends で実効値にしてから判定する。
+ *
+ * @param {{ agents?: object[] }} agentDefaults
+ * @returns {Map<string, boolean>}
+ */
+function buildRulesSupportedMap(agentDefaults) {
+  const agentsArr = Array.isArray(agentDefaults && agentDefaults.agents) ? agentDefaults.agents : [];
+  return new Map(
+    agentsArr.map(a => [a.id, resolveExtends(a, agentsArr).rulesSupported === true]),
+  );
+}
+
+module.exports = {
+  parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
+  buildRulesSupportedMap,
+};
 
 if (require.main !== module) return;
 
@@ -234,8 +255,7 @@ try {
 } catch (e) {
   console.warn(`  \x1b[33m! agent-defaults.json の読み込みに失敗しました: ${e.message}。rulesSupported 判定をスキップします\x1b[0m`);
 }
-const agentsArr = Array.isArray(agentDefaults.agents) ? agentDefaults.agents : [];
-const rulesSupportedMap = new Map(agentsArr.map(a => [a.id, a.rulesSupported === true]));
+const rulesSupportedMap = buildRulesSupportedMap(agentDefaults);
 
 // agent-defaults.json の内容を検証する。エラーがあれば fail-closed で中断する
 // （fail-closed-safety-guards: 安全と確認できない場合は中断）。

@@ -12,7 +12,7 @@ const os = require('os');
 const { execFileSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
-const { parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive } =
+const { parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive, buildRulesSupportedMap } =
   require('../scripts/install.js');
 
 // ── ユーティリティ関数のユニットテスト ──────────────────────────────────────
@@ -89,6 +89,31 @@ test('stripFrontmatter: YAML frontmatterを除去する', () => {
 test('stripFrontmatter: frontmatterがなければそのまま返す', () => {
   const content = '# No frontmatter\nHello';
   assert.equal(stripFrontmatter(content), content);
+});
+
+// ── buildRulesSupportedMap: extends経由でrulesSupportedを継承するエントリの判定（PR #170レビュー指摘） ──
+
+test('buildRulesSupportedMap: extendsでrulesSupportedを継承するエントリも正しくtrueと判定する', () => {
+  const agentDefaults = {
+    agents: [
+      { id: 'base', rulesSupported: true },
+      { id: 'derived', extends: 'base', command: 'derived-cli' },
+    ],
+  };
+  const map = buildRulesSupportedMap(agentDefaults);
+  assert.equal(map.get('base'), true);
+  assert.equal(map.get('derived'), true, 'extends経由でrulesSupported:trueを継承したエントリはtrueと判定されるべき');
+});
+
+test('buildRulesSupportedMap: 実際のagent-defaults.jsonでclaude-ds/claude-ds-proがtrueと判定される', () => {
+  const defaultsPath = path.join(ROOT, 'scripts', 'agent-defaults.json');
+  const agentDefaults = JSON.parse(fs.readFileSync(defaultsPath, 'utf8'));
+  const map = buildRulesSupportedMap(agentDefaults);
+  assert.equal(map.get('claude'), true);
+  assert.equal(map.get('claude-ds'), true, 'claude-dsはclaudeをextendsしrulesSupported:trueを継承するはず');
+  assert.equal(map.get('claude-ds-pro'), true, 'claude-ds-proはclaudeをextendsしrulesSupported:trueを継承するはず');
+  assert.equal(map.get('codex'), false);
+  assert.equal(map.get('codex-pro'), false, 'codex-proはcodexをextendsしrulesSupported:falseを継承するはず');
 });
 
 // ── インストール後の成果物を検証（バグ再発防止の核心） ─────────────────────────

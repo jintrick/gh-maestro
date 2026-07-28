@@ -192,6 +192,13 @@ function isValidAgentConfig(agent) {
 /**
  * 指定された agentId の設定を解決順序でマージして返す。
  *
+ * マージ挙動には非対称性がある: 通常のフィールド（`command`・`enterSequence`等）の
+ * オーバーライドは既存設定に対する**フィールド単位のマージ**だが、オーバーライドが
+ * `extends: "<baseId>"` を持つ場合は、そのagentIdの既存デフォルトの有無に関わらず、
+ * extends解決結果を新しいbaseとした**総入れ替え**になる（既存デフォルト固有の
+ * フィールドは暗黙に失われる）。組み込みのagentId（例: "codex"）を`extends`付きで
+ * 上書きする場合も同じ規則が適用される。
+ *
  * @param {string} agentId        エージェントID
  * @param {object} [opts={}]
  * @param {string} [opts.workspace]  ワークスペース絶対パス
