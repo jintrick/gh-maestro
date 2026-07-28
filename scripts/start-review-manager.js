@@ -5,7 +5,6 @@ const fs = require('fs');
 const path = require('path');
 let _isProcessAlive = require('./process-lifecycle').isProcessAlive;
 const { launchAgentHeadless } = require('./shared/headless-launch');
-const { startExecution } = require('./shared/execution-registry');
 const { assertValidPr, reviewArtifactPath } = require('./shared/review-manager-paths');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 
@@ -97,20 +96,18 @@ function startReviewManager(pr, repo, workspace, issue) {
 
   const logPath = reviewArtifactPath(ghDir, pr, '.log');
 
-  // 通常ワーカーと同じ execution registry に記録する（.gh-maestro/executions.json）。
-  // 完了・失敗はworker-exit-hook.jsが起動時に渡すexecutionIdを使って更新する。
-  const executionId = `review-manager-${pr}-${Date.now()}`;
   // GH_MAESTRO_WORKER は msg-send.js のワーカーコンテキスト判定・Issue番号導出
   // （/^issue-(\d+)-/ パターン）に使われる。Review Managerはworkers.json管理対象では
   // ないが、この命名規約に合わせるだけでworker-exit-hook.jsをそのまま再利用できる。
   const workerName = `issue-${issue}-review-manager-pr-${pr}`;
-  try {
-    startExecution(workspace, { executionId, issue, workerName, skill: 'gh-maestro-reviewer' });
-  } catch (e) {
-    // 記録の失敗は起動自体を止めない（ベストエフォート）。
-    process.stderr.write(`start-review-manager: execution記録に失敗しました: ${e.message}\n`);
-  }
 
+  // 通常ワーカーと同じ execution registry（.gh-maestro/executions.json）には乗せない。
+  // registryの'completed'はmarkCommentResult（msg-send.js --execution-id経由の投稿成功）
+  // でのみ到達する契約だが、Review Managerはfindings JSONを書いて終了するだけでこの
+  // 投稿を一度も行わない。executionIdを渡すとworker-exit-hook.jsが終了コードに関係なく
+  // markProcessExitを呼び、成功終了（exit 0）でも'process_failed'に誤記録される
+  // （PRレビュー指摘）。onExitへexecutionIdを渡さない（空文字）ことでこの記録処理自体を
+  // スキップする。クラッシュ通知（下記onExitの2.）はexecutionIdに依存しないため影響しない。
   // 通常ワーカーと同じ起動基盤（ログインシェル経由・onExitフック）で起動する。
   // PR #172時点ではここで独自にdetached spawnし、起動直後の生存を時間ベースの
   // ヒューリスティックで確認していたが、レビュー評価の指摘の通りこれは本質的に脆い
@@ -125,7 +122,7 @@ function startReviewManager(pr, repo, workspace, issue) {
     env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },
     onExit: {
       command: process.execPath,
-      args: [path.join(__dirname, 'worker-exit-hook.js'), workspace, executionId],
+      args: [path.join(__dirname, 'worker-exit-hook.js'), workspace, ''],
     },
   });
 

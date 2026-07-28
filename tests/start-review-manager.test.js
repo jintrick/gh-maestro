@@ -8,7 +8,6 @@ const os = require('os');
 const { spawnSync } = require('child_process');
 
 const headlessLaunch = require('../scripts/shared/headless-launch');
-const { readRegistry } = require('../scripts/shared/execution-registry');
 const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'start-review-manager.js');
@@ -129,6 +128,24 @@ test('isLockValid returns false and removes the file for a stale pid', () => {
   assert.equal(fs.existsSync(lockFile), false);
 });
 
+test('_setIsProcessAlive で注入した判定関数が isLockValid に使われる', () => {
+  const mod = loadModule();
+  const lockFile = path.join(freshWorkspace('lock-injected'), 'lock.running');
+  // 実PIDの生死に頼らず、注入した関数の戻り値だけで isLockValid の判定が決まることを確認する。
+  fs.writeFileSync(lockFile, '12345');
+  try {
+    mod._setIsProcessAlive(() => true);
+    assert.equal(mod.isLockValid(lockFile), true);
+    assert.equal(fs.existsSync(lockFile), true);
+
+    mod._setIsProcessAlive(() => false);
+    assert.equal(mod.isLockValid(lockFile), false);
+    assert.equal(fs.existsSync(lockFile), false);
+  } finally {
+    mod._setIsProcessAlive(require('../scripts/process-lifecycle').isProcessAlive);
+  }
+});
+
 // ── startReviewManager ───────────────────────────────────────────────────
 
 test('startReviewManager returns ALREADY_RUNNING and does not launch when locked', () => {
@@ -204,18 +221,18 @@ test('startReviewManager: ロックファイルにlaunchAgentHeadlessが返し�
   assert.equal(fs.readFileSync(lockFile, 'utf8'), '77701');
 });
 
-test('startReviewManager: execution registryにrunning状態で記録する', () => {
+test('startReviewManager: onExitフックへexecutionIdを渡さない（execution registryのcompleted遷移手段が無く、常にprocess_failedへ誤記録されるのを避けるため）', () => {
   const mod = loadModule();
-  const workspace = freshWorkspace('execution-registry');
+  const workspace = freshWorkspace('no-execution-registry');
 
   mod.startReviewManager('9', 'o/r', workspace, '55');
 
-  const registry = readRegistry(workspace);
-  const entries = Object.values(registry).filter(e => e.workerName === 'issue-55-review-manager-pr-9');
-  assert.equal(entries.length, 1);
-  assert.equal(entries[0].status, 'running');
-  assert.equal(entries[0].issue, 55);
-  assert.equal(entries[0].skill, 'gh-maestro-reviewer');
+  const decoded = decodedShellCommand(spawnCalls[0]);
+  assert.match(decoded, /worker-exit-hook\.js/);
+  // worker-exit-hook.js <workspace> <execution-id|""> ... の第2引数（execution-id）が
+  // 空文字であることを確認する。空文字なら worker-exit-hook.js 側の
+  // `if (workspace && executionId)` が偽になり、markProcessExit は一切呼ばれない。
+  assert.match(decoded, /worker-exit-hook\.js' '[^']*' ''/);
 });
 
 test('startReviewManager: ログパスはreviewArtifactPath(.log)（worker-logs配下、通常ワーカーと共通）', () => {
