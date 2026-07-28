@@ -1,16 +1,24 @@
 #!/usr/bin/env node
 'use strict';
 
-const { spawn } = require('./child-process');
 const fs = require('fs');
 const path = require('path');
-const { isProcessAlive } = require('./process-lifecycle');
+let _isProcessAlive = require('./process-lifecycle').isProcessAlive;
+const { launchAgentHeadless } = require('./shared/headless-launch');
 const { assertValidPr, reviewArtifactPath } = require('./shared/review-manager-paths');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 
+const ISSUE_RE = /^[1-9]\d*$/;
+
 const USAGE = `start-review-manager.js — PRに対してReview Managerを起動する
 
-Usage: node start-review-manager.js <PR> <REPO> <WORKSPACE>
+Usage: node start-review-manager.js <PR> <REPO> <WORKSPACE> <ISSUE>
+
+Arguments:
+  <PR>         レビュー対象の PR 番号
+  <REPO>       GitHub リポジトリ（owner/repo）
+  <WORKSPACE>  ワークスペースの絶対パス
+  <ISSUE>      アンカー Issue 番号（起動直後クラッシュ等の異常終了通知の投稿先）
 
 Review Managerは3幹（Correctness/Resilience & Security/Maintainability）全てについて
 独立したサブエージェントを並列に起動し、全観点でレビューする（観点を絞り込む判断は
@@ -18,7 +26,16 @@ Review Manager自身がPR diffを見た上で行う。skills/gh-maestro-reviewer
 
 Output:
   REVIEW_MANAGER_STARTED:<PR>
-  REVIEW_MANAGER_ALREADY_RUNNING:<PR>`;
+  REVIEW_MANAGER_ALREADY_RUNNING:<PR>
+
+起動要求そのものの失敗（ロック解放済み・入力不正等）以外は、この時点で成否を判定しない。
+Review Managerは通常ワーカーと同じ起動基盤（shared/headless-launch.js）・同じ終了フック
+（worker-exit-hook.js）で起動する。エージェントCLIの起動失敗やレビュー実行中のクラッシュ
+（非ゼロ終了）は、通常ワーカーと同様、終了フックが <ISSUE> へのIssueコメントとして
+非同期に通知する。この通知はログインシェルのコマンド連鎖自体に組み込まれているため、
+呼び出し元（poll-pr.js）が何をしていても（poll-reviews.jsをブロッキング起動中でも）
+確実に発火する。呼び出し元はこの通知を待つ必要がなく、PR/レビューコメント監視を
+中断せずに継続できる。`;
 
 /**
  * lock ファイルが有効かチェックする。
@@ -48,7 +65,7 @@ function isLockValid(lockFile) {
     return false;
   }
 
-  if (isProcessAlive(lockPid)) return true;
+  if (_isProcessAlive(lockPid)) return true;
 
   // プロセスは死んでいる → stale lock
   try { fs.unlinkSync(lockFile); } catch {}
@@ -59,12 +76,16 @@ function isLockValid(lockFile) {
  * @param {string} pr
  * @param {string} repo
  * @param {string} workspace
+ * @param {string|number} issue アンカーIssue番号。異常終了通知の投稿先として終了フックへ渡す。
  */
-function startReviewManager(pr, repo, workspace) {
+function startReviewManager(pr, repo, workspace, issue) {
   // 副作用（lock書き込み）の前に入力を検証する（fail-closed）。
   // pr はファイルパス構成要素として使われるため、厳密な正整数であることを
   // ここで確定させる（PR #84 Review指摘: pathトラバーサル対策）。
   assertValidPr(pr);
+  if (!ISSUE_RE.test(String(issue))) {
+    throw new Error(`invalid issue number: ${JSON.stringify(issue)} (must be a positive integer)`);
+  }
 
   const ghDir = path.join(workspace, '.gh-maestro');
   fs.mkdirSync(ghDir, { recursive: true });
@@ -73,28 +94,47 @@ function startReviewManager(pr, repo, workspace) {
   // req.13: stale 判定付きで lock チェック
   if (isLockValid(lockFile)) return 'REVIEW_MANAGER_ALREADY_RUNNING';
 
-  fs.writeFileSync(lockFile, String(process.pid));
-  const logFile = reviewArtifactPath(ghDir, pr, '.log');
-  fs.mkdirSync(path.dirname(logFile), { recursive: true });
-  const logFd = fs.openSync(logFile, 'a');
-  const childArgs = [path.join(__dirname, 'run-review-manager.js'), pr, repo, workspace];
-  const child = spawn(process.execPath, childArgs, {
-    detached: true,
-    windowsHide: true,
-    stdio: ['ignore', logFd, logFd],
+  const logPath = reviewArtifactPath(ghDir, pr, '.log');
+
+  // GH_MAESTRO_WORKER は msg-send.js のワーカーコンテキスト判定・Issue番号導出
+  // （/^issue-(\d+)-/ パターン）に使われる。Review Managerはworkers.json管理対象では
+  // ないが、この命名規約に合わせるだけでworker-exit-hook.jsをそのまま再利用できる。
+  const workerName = `issue-${issue}-review-manager-pr-${pr}`;
+
+  // 通常ワーカーと同じ execution registry（.gh-maestro/executions.json）には乗せない。
+  // registryの'completed'はmarkCommentResult（msg-send.js --execution-id経由の投稿成功）
+  // でのみ到達する契約だが、Review Managerはfindings JSONを書いて終了するだけでこの
+  // 投稿を一度も行わない。executionIdを渡すとworker-exit-hook.jsが終了コードに関係なく
+  // markProcessExitを呼び、成功終了（exit 0）でも'process_failed'に誤記録される
+  // （PRレビュー指摘）。onExitへexecutionIdを渡さない（空文字）ことでこの記録処理自体を
+  // スキップする。クラッシュ通知（下記onExitの2.）はexecutionIdに依存しないため影響しない。
+  // 通常ワーカーと同じ起動基盤（ログインシェル経由・onExitフック）で起動する。
+  // PR #172時点ではここで独自にdetached spawnし、起動直後の生存を時間ベースの
+  // ヒューリスティックで確認していたが、レビュー評価の指摘の通りこれは本質的に脆い
+  // （worktree構築時間がリポジトリごとに変わるため、猶予をどう設定しても取りこぼしうる）。
+  // 通常ワーカーが既に使っている、ログインシェルのコマンド連鎖自体に組み込まれた
+  // onExitフック（呼び出し元の状態に一切依存せず確実に発火する）に乗せることで、
+  // タイムアウトに頼らず起動直後から実行完了までの全期間のクラッシュを検出できる。
+  const launched = launchAgentHeadless({
+    argv: [process.execPath, path.join(__dirname, 'run-review-manager.js'), pr, repo, workspace],
+    cwd: workspace,
+    logPath,
+    env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },
+    onExit: {
+      command: process.execPath,
+      args: [path.join(__dirname, 'worker-exit-hook.js'), workspace, ''],
+    },
   });
-  // spawn失敗・子プロセス終了のどちらでも lock を解放する。
-  const releaseArtifacts = () => {
-    try { fs.unlinkSync(lockFile); } catch {}
-  };
-  child.on('error', releaseArtifacts);
-  child.on('exit', releaseArtifacts);
-  child.unref();
-  fs.closeSync(logFd);
+
+  fs.writeFileSync(lockFile, String(launched.pid));
   return 'REVIEW_MANAGER_STARTED';
 }
 
-module.exports = { startReviewManager, isLockValid };
+module.exports = {
+  startReviewManager,
+  isLockValid,
+  _setIsProcessAlive: (fn) => { _isProcessAlive = fn; },
+};
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -113,14 +153,14 @@ if (require.main === module) {
     process.exit(0);
   }
 
-  const [pr, repo, workspace] = rest;
-  if (!pr || !repo || !workspace || rest.length > 3) {
+  const [pr, repo, workspace, issue] = rest;
+  if (!pr || !repo || !workspace || !issue || rest.length > 4) {
     console.error(USAGE);
     process.exit(1);
   }
 
   try {
-    process.stdout.write(`${startReviewManager(pr, repo, workspace)}:${pr}\n`);
+    process.stdout.write(`${startReviewManager(pr, repo, workspace, issue)}:${pr}\n`);
   } catch (e) {
     console.error(`start-review-manager: ${e.message}`);
     process.exit(1);

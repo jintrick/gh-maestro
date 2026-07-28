@@ -403,6 +403,8 @@ PRが長時間（目安: 10分）検出されない場合はコーダーが失�
 
 **`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、「Review Managerの手動起動」に従って自分で起動すること。
 
+**Review Managerが起動直後または実行中にクラッシュした場合、通常ワーカーと同じ`⚠️ 起動失敗または異常終了: exit code <N>...`という`NEW_MESSAGE`が自分のinboxに届く**（`from`が`issue-<N>-review-manager-pr-<PR>`という名前になる。通常ワーカーの異常終了通知と同じ経路・同じ処理でよい。詳細は「自分の inbox の監視」参照）。これを受け取ったら、poll-pr.js自体は生きたままPR/レビュー監視を継続しているため慌てて再起動する必要はないが、「まだレビューが来ないだけ」と誤解して待ち続けてもいけない。`$WORKSPACE/.gh-maestro/worker-logs/review-manager-<PR>.log` で原因を確認し、人間に報告した上で、原因を解消してから「Review Managerの手動起動」で仕切り直す（`poll-pr.js`自体の再起動は不要）。
+
 ### レビュー済みPRの監視を再開する（再レビューを蒸し返さない）
 
 Monitor が落ちた等で `poll-pr.js` を再起動する必要があるが、**そのPRのレビューは既に済んでいる／再レビューは不要**という場合は、`--no-review-manager` を付けて起動する。PR検出時に Review Manager を起動せず、レビューコメント・マージ状態の監視だけを再開する。これを付けずに再起動すると、検出のたびにレビューが蒸し返されて quota を浪費する。
@@ -416,7 +418,7 @@ node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --no-review-manager --workspace $WORK
 Review Managerが起動しなかった、または途中で失敗した場合は、start-review-manager.js で起動・再起動できる。レビューが進まないときは `$WORKSPACE/.gh-maestro/worker-logs/review-manager-<PR>.log` を確認し、失敗していれば再起動する。
 
 ```sh
-node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE
+node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE $ISSUE
 ```
 
 ## レビュー監視

@@ -8,6 +8,9 @@
 //   PR_DETECTED:<number>
 //   REVIEW_MANAGER_STARTED:<number> | REVIEW_MANAGER_ALREADY_RUNNING:<number>
 //   ...poll-reviews.js の出力がそのまま続く（REVIEW_COMMENT / PR_COMMENT / PR_REVIEW / PR_PUSH / PR_MERGED / POLL_ERROR / POLL_RECOVERED）
+//   Review Managerの起動後のクラッシュ（エージェントCLI起動失敗等）は、本スクリプトの
+//   出力ではなく、通常ワーカーと同じ終了フック経由でIssueコメントとして非同期に通知される
+//   （start-review-manager.js参照）。本スクリプトはそれを待たずPR/レビュー監視を継続する。
 'use strict';
 
 const path = require('path');
@@ -45,6 +48,8 @@ Output (stdout):
   REVIEW_MANAGER_ALREADY_RUNNING:<PR>  Review Manager は既に稼働中
   以降、poll-reviews.js を子プロセスとして起動し、その標準出力（REVIEW_COMMENT/PR_COMMENT/
   PR_REVIEW/PR_PUSH/PR_MERGED）をそのまま中継する。poll-reviews.js の終了とともに終了する。
+  Review Manager起動後のクラッシュはこの標準出力では通知されない（start-review-manager.js
+  参照。Issueコメントとして別経路で届く）。PR/レビュー監視はそれとは独立して継続する。
 
 PR が見つかるまでブロックし、見つけたら Review Manager(start-review-manager.js)を
 全観点で起動し（skills/gh-maestro-reviewer/SKILL.md参照）、続けて poll-reviews.js を
@@ -206,7 +211,10 @@ if (require.main === module) {
           // Review Manager自身が実際のdiffを見た上で行う（skills/gh-maestro-reviewer/SKILL.md参照）。
           // オーケストレーター側・本スクリプト側でファイルパターン等から機械的に観点を
           // 決定することは行わない。
-          const reviewStatus = startReviewManager(pr, repo, workspace);
+          // 起動後のクラッシュはここでは判定しない（終了フック経由でIssueコメントとして
+          // 非同期に通知される。start-review-manager.js参照）。本スクリプトはそれを待たず
+          // 常にPR/レビュー監視（poll-reviews.js）へ進む。
+          const reviewStatus = startReviewManager(pr, repo, workspace, issue);
           process.stdout.write(`${reviewStatus}:${pr}\n`);
         }
 

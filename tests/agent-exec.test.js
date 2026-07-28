@@ -139,6 +139,53 @@ test('buildLoginShellExecArgs: Unix の終了フックはエージェントコ�
   assert.match(result.stdout, /hook:7/);
 });
 
+// ── win32: 終了コード検出の正確性（実障害の再発防止） ──────────────────────
+//
+// $LASTEXITCODE だけに頼ると、agentCmdArgs[0] がPATH上にもpwsh関数としても存在しない
+// 場合（"command not found"）にネイティブプロセスが一度も起動せず $LASTEXITCODE が
+// 更新されないため、onExitフックに exit code 0（成功）が渡ってしまっていた
+// （実障害: config.jsonのextendsで登録したpwsh関数名の誤記や、Review Managerへの
+// カスタムエージェント割り当て時にworker-exit-hook.jsの異常終了通知が発火しなかった）。
+
+test(
+  'buildLoginShellExecArgs: win32 — 存在しないコマンドはonExitフックへexit code 1を渡す',
+  { skip: process.platform !== 'win32' ? 'win32専用（pwshの$?/$LASTEXITCODE実挙動を検証するテスト）' : false },
+  () => {
+    const args = buildLoginShellExecArgs(
+      ['definitely-nonexistent-command-xyz-test'], 'win32',
+      { command: process.execPath, args: ['-e', 'process.stdout.write("HOOK:" + process.argv[1])'] },
+    );
+    const result = spawnSync(args[0], args.slice(1), { encoding: 'utf8' });
+    assert.match(result.stdout, /HOOK:1/, `存在しないコマンドはexit code 1として検出されるべき: ${result.stdout}`);
+  },
+);
+
+test(
+  'buildLoginShellExecArgs: win32 — 実在するコマンドの本物の非ゼロ終了コードは保持される（$?判定に握りつぶされない）',
+  { skip: process.platform !== 'win32' ? 'win32専用（pwshの$?/$LASTEXITCODE実挙動を検証するテスト）' : false },
+  () => {
+    // 実在するコマンドが非ゼロで終了した場合、pwshは $? も False にする（$LASTEXITCODEとは別）。
+    // $? を先に見ると本物の終了コード(7)が握りつぶされ一律 1 になる回帰がありうるため、
+    // $LASTEXITCODE が設定されていれば常にそちらを優先することを確認する。
+    const args = buildLoginShellExecArgs(
+      [process.execPath, '-e', 'process.exit(7)'], 'win32',
+      { command: process.execPath, args: ['-e', 'process.stdout.write("HOOK:" + process.argv[1])'] },
+    );
+    const result = spawnSync(args[0], args.slice(1), { encoding: 'utf8' });
+    assert.match(result.stdout, /HOOK:7/, `実在コマンドの本物の終了コード7が保持されるべき: ${result.stdout}`);
+  },
+);
+
+test(
+  'buildLoginShellExecArgs: win32 — onExit無しでも存在しないコマンドはpwsh自身がexit 1する',
+  { skip: process.platform !== 'win32' ? 'win32専用（pwshの$?/$LASTEXITCODE実挙動を検証するテスト）' : false },
+  () => {
+    const args = buildLoginShellExecArgs(['definitely-nonexistent-command-xyz-test2'], 'win32');
+    const result = spawnSync(args[0], args.slice(1), { encoding: 'utf8' });
+    assert.equal(result.status, 1);
+  },
+);
+
 // ── ログ複製（Tee-Object / tee）の撤去（Issue #151） ─────────────────────────
 //
 // パイプ経由のログ複製は非対話execモードのcodex/agyと非互換で本番クラッシュを起こした
@@ -151,7 +198,7 @@ test('buildLoginShellExecArgs: win32 でパイプによるログ複製を一切�
   const plain = decoded(buildLoginShellExecArgs(['claude-ds', '--print'], 'win32'));
   assert.ok(!plain.includes('Tee-Object'), plain);
   assert.ok(!plain.includes('|'), `パイプ演算子が含まれない: ${plain}`);
-  assert.equal(plain, "& 'claude-ds' '--print'; $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }; exit $exitCode");
+  assert.equal(plain, "& 'claude-ds' '--print'; $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } elseif (-not $?) { 1 } else { 0 }; exit $exitCode");
 
   // onExit・env を併用しても同じ（パイプは増えない）
   const withHook = decoded(buildLoginShellExecArgs(
