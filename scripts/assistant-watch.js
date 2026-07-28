@@ -76,13 +76,51 @@ let _ghIssueComments = (repo, issue, opts = {}) => {
   return spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
 };
 
-let _ghPrList = (repo, issue, opts = {}) => {
-  const args = [
-    'pr', 'list', '--repo', repo, '--state', 'all',
-    '--search', `${issue} in:body`,
-    '--json', 'number,state,mergedAt',
-  ];
-  return spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
+// issueに紐づくPRの新規発見。poll-pr.js の findPR() と全く同じ2段構え（PR #167レビュー指摘）:
+//   1. head:issue-<N>（worktreeのブランチ命名規約による厳密一致。worker-entry.js参照）
+//   2. フォールバック: bodyに"#<N>"を厳密に含むもの（部分文字列の完全一致。GitHubの全文検索の
+//      あいまい一致は使わない——例えば生の数字 "166" だけで検索すると、無関係PRの本文中の
+//      バージョン番号・別issueへの言及・テスト件数等にも誤マッチしうる）
+// poll-pr.js と同じく --state open のみを対象にする（新規発見はPRがまだ開いている間に
+// 起きる前提。一度発見したPRは以後 _ghPrView で番号指定して状態を追い続ける）。
+let _ghFindPr = (repo, issue, opts = {}) => {
+  const headResult = spawnSync('gh', [
+    'pr', 'list', '--repo', repo,
+    '--search', `head:issue-${issue}`, '--state', 'open',
+    '--json', 'number',
+  ], { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
+  if (headResult.status === 0) {
+    try {
+      const found = JSON.parse(headResult.stdout || '[]');
+      if (Array.isArray(found) && found.length > 0) {
+        return found.map((p) => p.number).filter((n) => n != null);
+      }
+    } catch { /* フォールバックへ */ }
+  }
+
+  const bodyResult = spawnSync('gh', [
+    'pr', 'list', '--repo', repo, '--state', 'open',
+    '--json', 'number,body',
+  ], { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
+  if (bodyResult.status !== 0) return [];
+  try {
+    const all = JSON.parse(bodyResult.stdout || '[]');
+    if (!Array.isArray(all)) return [];
+    return all
+      .filter((p) => typeof p.body === 'string' && p.body.includes(`#${issue}`))
+      .map((p) => p.number)
+      .filter((n) => n != null);
+  } catch {
+    return [];
+  }
+};
+
+// 既知PR（番号確定済み）の状態確認。番号指定なので検索の曖昧性は原理的に無い。
+let _ghPrView = (repo, prNumber, opts = {}) => {
+  return spawnSync('gh', [
+    'pr', 'view', String(prNumber), '--repo', repo,
+    '--json', 'state,mergedAt',
+  ], { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
 };
 
 // ── state永続化 ──────────────────────────────────────────────────────────
@@ -188,55 +226,72 @@ function scanOnce({ workspace, ghDir, repo, issue, state, isBaseline, ghOpts }) 
     state.lastCommentId = maxSeenId;
   }
 
-  // ── PR一覧（review_done / pr_merged） ───────────────────────────────────
-  const prResult = _ghPrList(repo, issue, ghOpts);
-  if (prResult.status !== 0) {
-    errors.push(`gh api エラー（PR一覧取得）: ${prResult.stderr || '(empty)'}`);
-    return { events, errors };
-  }
-  let prs = [];
-  try {
-    prs = JSON.parse(prResult.stdout || '[]');
-  } catch {
-    errors.push('PR一覧応答のJSON parseに失敗しました');
-    return { events, errors };
-  }
-  if (!Array.isArray(prs)) prs = [];
-
-  for (const pr of prs) {
-    if (pr.number == null) continue;
-    const key = String(pr.number);
-    const merged = pr.state === 'MERGED' || !!pr.mergedAt;
-    const runningLockPath = reviewArtifactPath(ghDir, pr.number, '.running');
-    const reviewRunning = fs.existsSync(runningLockPath);
-
-    if (!state.prs[key]) {
-      // 新規検出したPR。現在の状態をそのままベースラインにする（このPR自体の検出を
-      // イベント化しない。PR作成自体は通常worker_reportで既に伝わっているため）。
-      state.prs[key] = { merged, reviewSeenRunning: reviewRunning, reviewReported: false };
+  // ── 既知PRの状態更新（review_done / pr_merged） ─────────────────────────
+  // 番号が確定済みのPRを個別に gh pr view で確認する（一覧の全文検索を経由しないため
+  // 誤マッチの余地が無い。PR #167レビュー指摘）。
+  for (const [key, prState] of Object.entries(state.prs)) {
+    const prNumber = Number(key);
+    const viewResult = _ghPrView(repo, prNumber, ghOpts);
+    if (viewResult.status !== 0) {
+      errors.push(`gh pr view エラー（PR #${prNumber}）: ${viewResult.stderr || '(empty)'}`);
       continue;
     }
-
-    const prState = state.prs[key];
+    let prData;
+    try {
+      prData = JSON.parse(viewResult.stdout || '{}');
+    } catch {
+      errors.push(`PR #${prNumber} の応答のJSON parseに失敗しました`);
+      continue;
+    }
+    const merged = prData.state === 'MERGED' || !!prData.mergedAt;
+    const reviewRunning = fs.existsSync(reviewArtifactPath(ghDir, prNumber, '.running'));
 
     if (isBaseline) {
-      // 初回スキャン全体がベースライン確立のみの場合、既知PRの状態も上書きするだけに留める。
       prState.merged = merged;
       prState.reviewSeenRunning = reviewRunning || prState.reviewSeenRunning;
       continue;
     }
 
     if (reviewRunning) {
+      // 新しいレビュー周回（close→reopenでの再トリガ等）が始まった。前回分の
+      // reviewReportedを引きずると、2回目以降のreview_doneが永久に発火しなくなる
+      // （PR #167レビュー指摘）。
+      if (prState.reviewReported) prState.reviewReported = false;
       prState.reviewSeenRunning = true;
     } else if (prState.reviewSeenRunning && !prState.reviewReported) {
-      events.push({ type: 'review_done', pr: pr.number });
+      events.push({ type: 'review_done', pr: prNumber });
       prState.reviewReported = true;
     }
 
     if (merged && !prState.merged) {
-      events.push({ type: 'pr_merged', pr: pr.number, mergedAt: pr.mergedAt || null });
+      events.push({ type: 'pr_merged', pr: prNumber, mergedAt: prData.mergedAt || null });
     }
     prState.merged = merged;
+  }
+
+  // ── 新規PRの発見 ─────────────────────────────────────────────────────────
+  const discovered = _ghFindPr(repo, issue, ghOpts);
+  for (const prNumber of discovered) {
+    const key = String(prNumber);
+    if (state.prs[key]) continue; // 既知
+
+    const viewResult = _ghPrView(repo, prNumber, ghOpts);
+    if (viewResult.status !== 0) {
+      errors.push(`gh pr view エラー（新規PR #${prNumber}）: ${viewResult.stderr || '(empty)'}`);
+      continue;
+    }
+    let prData;
+    try {
+      prData = JSON.parse(viewResult.stdout || '{}');
+    } catch {
+      errors.push(`新規PR #${prNumber} の応答のJSON parseに失敗しました`);
+      continue;
+    }
+    const merged = prData.state === 'MERGED' || !!prData.mergedAt;
+    const reviewRunning = fs.existsSync(reviewArtifactPath(ghDir, prNumber, '.running'));
+    // 新規検出したPR自体はイベント化しない（PR作成自体は通常worker_reportで既に伝わる）。
+    // 現在の状態をそのままベースラインにする。
+    state.prs[key] = { merged, reviewSeenRunning: reviewRunning, reviewReported: false };
   }
 
   return { events, errors };
@@ -370,7 +425,8 @@ if (require.main === module) {
 module.exports = {
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhIssueComments: (fn) => { _ghIssueComments = fn; },
-  _setGhPrList: (fn) => { _ghPrList = fn; },
+  _setGhFindPr: (fn) => { _ghFindPr = fn; },
+  _setGhPrView: (fn) => { _ghPrView = fn; },
   _setSleep: (fn) => { _sleep = fn; },
   main,
   parseArgs,

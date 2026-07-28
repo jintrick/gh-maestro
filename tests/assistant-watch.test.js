@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const watch = require('../scripts/assistant-watch');
+const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-assistant-watch-test-'));
@@ -28,14 +29,16 @@ function withTempDir(fn) {
 function stubOk(overrides = {}) {
   watch._setGhRepoView(() => ({ status: 0, stdout: 'owner/repo\n', stderr: '' }));
   watch._setGhIssueComments(() => ({ status: 0, stdout: JSON.stringify([]), stderr: '' }));
-  watch._setGhPrList(() => ({ status: 0, stdout: JSON.stringify([]), stderr: '' }));
+  watch._setGhFindPr(() => []);
+  watch._setGhPrView(() => ({ status: 0, stdout: JSON.stringify({ state: 'OPEN', mergedAt: null }), stderr: '' }));
   // 実待機の上限を20msに抑えつつ、リアルタイムを少しずつ進める（msg-poll.test.jsと同じ
   // パターン。ゼロ遅延だとタイムアウト判定がDate.now()基準のためビジーループになる）。
   watch._setSleep(async (ms) => { await new Promise((resolve) => setTimeout(resolve, Math.min(ms, 20))); });
   Object.entries(overrides).forEach(([k, v]) => {
     if (k === 'ghRepoView') watch._setGhRepoView(v);
     if (k === 'ghIssueComments') watch._setGhIssueComments(v);
-    if (k === 'ghPrList') watch._setGhPrList(v);
+    if (k === 'ghFindPr') watch._setGhFindPr(v);
+    if (k === 'ghPrView') watch._setGhPrView(v);
   });
 }
 
@@ -110,10 +113,8 @@ describe('main: 初回実行のベースライン確立', () => {
           status: 0,
           stdout: JSON.stringify([commentEntry({ id: 1, from: 'issue-5-fix' })]),
         }),
-        ghPrList: () => ({
-          status: 0,
-          stdout: JSON.stringify([{ number: 10, state: 'OPEN', mergedAt: null }]),
-        }),
+        ghFindPr: () => [10],
+        ghPrView: () => ({ status: 0, stdout: JSON.stringify({ state: 'OPEN', mergedAt: null }) }),
       });
 
       const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '1']);
@@ -217,10 +218,7 @@ describe('main: review_done検知', () => {
         prs: { 42: { merged: false, reviewSeenRunning: true, reviewReported: false } },
       });
       stubOk({
-        ghPrList: () => ({
-          status: 0,
-          stdout: JSON.stringify([{ number: 42, state: 'OPEN', mergedAt: null }]),
-        }),
+        ghPrView: () => ({ status: 0, stdout: JSON.stringify({ state: 'OPEN', mergedAt: null }) }),
       });
       // ロックファイルは存在しない（= 完了）。
 
@@ -242,14 +240,38 @@ describe('main: review_done検知', () => {
         prs: { 42: { merged: false, reviewSeenRunning: false, reviewReported: false } },
       });
       stubOk({
-        ghPrList: () => ({
-          status: 0,
-          stdout: JSON.stringify([{ number: 42, state: 'OPEN', mergedAt: null }]),
-        }),
+        ghPrView: () => ({ status: 0, stdout: JSON.stringify({ state: 'OPEN', mergedAt: null }) }),
       });
 
       const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '1']);
       assert.deepEqual(r.lines, ['TIMEOUT']);
+    });
+  });
+
+  test('新しいレビュー周回（close→reopen等）が始まるとreviewReportedがリセットされ、2回目の完了も検知できる', async () => {
+    await withTempDir(async (workspace) => {
+      const ghDir = path.join(workspace, '.gh-maestro');
+      const lockPath = reviewArtifactPath(ghDir, 42, '.running');
+      fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+
+      const state = { lastCommentId: 0, prs: { 42: { merged: false, reviewSeenRunning: true, reviewReported: true } } };
+      stubOk({ ghPrView: () => ({ status: 0, stdout: JSON.stringify({ state: 'OPEN', mergedAt: null }) }) });
+
+      // 2周目のレビューが開始（ロック再作成）。1周目の reviewReported:true を引きずらず
+      // リセットされることを確認する（リセットが無いと2回目の review_done が永久に発火しない）。
+      fs.writeFileSync(lockPath, String(process.pid));
+      let r = watch.scanOnce({ workspace, ghDir, repo: 'owner/repo', issue: '5', state, isBaseline: false, ghOpts: {} });
+      assert.equal(r.events.length, 0);
+      assert.equal(state.prs['42'].reviewReported, false);
+      assert.equal(state.prs['42'].reviewSeenRunning, true);
+
+      // 2周目のレビューが完了（ロック消失）。
+      fs.unlinkSync(lockPath);
+      r = watch.scanOnce({ workspace, ghDir, repo: 'owner/repo', issue: '5', state, isBaseline: false, ghOpts: {} });
+      assert.equal(r.events.length, 1);
+      assert.equal(r.events[0].type, 'review_done');
+      assert.equal(r.events[0].pr, 42);
+      assert.equal(state.prs['42'].reviewReported, true);
     });
   });
 });
@@ -262,10 +284,7 @@ describe('main: pr_merged検知', () => {
         prs: { 42: { merged: false, reviewSeenRunning: false, reviewReported: false } },
       });
       stubOk({
-        ghPrList: () => ({
-          status: 0,
-          stdout: JSON.stringify([{ number: 42, state: 'MERGED', mergedAt: '2026-07-28T00:00:00Z' }]),
-        }),
+        ghPrView: () => ({ status: 0, stdout: JSON.stringify({ state: 'MERGED', mergedAt: '2026-07-28T00:00:00Z' }) }),
       });
 
       const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '5']);
@@ -283,14 +302,29 @@ describe('main: pr_merged検知', () => {
         prs: { 42: { merged: true, reviewSeenRunning: false, reviewReported: true } },
       });
       stubOk({
-        ghPrList: () => ({
-          status: 0,
-          stdout: JSON.stringify([{ number: 42, state: 'MERGED', mergedAt: '2026-07-28T00:00:00Z' }]),
-        }),
+        ghPrView: () => ({ status: 0, stdout: JSON.stringify({ state: 'MERGED', mergedAt: '2026-07-28T00:00:00Z' }) }),
       });
 
       const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '1']);
       assert.deepEqual(r.lines, ['TIMEOUT']);
+    });
+  });
+});
+
+// ── _ghFindPr: poll-pr.js findPR() と同じ2段構え ────────────────────────
+
+describe('main: PR新規発見のクエリ精度', () => {
+  test('_ghFindPrが返したPR番号を新規発見として扱い、以後は番号指定のgh pr viewで状態を追う', async () => {
+    await withTempDir(async (workspace) => {
+      stubOk({
+        ghFindPr: () => [99],
+        ghPrView: () => ({ status: 0, stdout: JSON.stringify({ state: 'OPEN', mergedAt: null }) }),
+      });
+
+      const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '1']);
+      assert.deepEqual(r.lines, ['TIMEOUT']); // 新規発見自体はイベント化しない
+      const state = watch.readState(workspace, '5');
+      assert.ok(state.prs['99']);
     });
   });
 });
