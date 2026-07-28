@@ -74,7 +74,9 @@ function startReviewManager(pr, repo, workspace) {
   if (isLockValid(lockFile)) return 'REVIEW_MANAGER_ALREADY_RUNNING';
 
   fs.writeFileSync(lockFile, String(process.pid));
-  const logFd = fs.openSync(reviewArtifactPath(ghDir, pr, '.log'), 'a');
+  const logFile = reviewArtifactPath(ghDir, pr, '.log');
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  const logFd = fs.openSync(logFile, 'a');
   const childArgs = [path.join(__dirname, 'run-review-manager.js'), pr, repo, workspace];
   const child = spawn(process.execPath, childArgs, {
     detached: true,

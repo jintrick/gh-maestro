@@ -8,6 +8,7 @@ const {
   assertValidPr, reviewArtifactPath,
   reviewWorktreeBranchName, reviewWorktreeFetchRef, reviewWorktreeDir,
 } = require('../scripts/shared/review-manager-paths');
+const { workerLogPath } = require('../scripts/shared/headless-launch');
 
 // ── assertValidPr ────────────────────────────────────────────────────────
 
@@ -41,6 +42,19 @@ test('reviewArtifactPath builds a path inside ghDir', () => {
 test('reviewArtifactPath rejects a path-traversal pr before building any path', () => {
   const ghDir = path.resolve('C:/ws/.gh-maestro');
   assert.throws(() => reviewArtifactPath(ghDir, '../../evil', '.running'), /invalid PR number/);
+});
+
+test('reviewArtifactPath: .log は ghDir 直下ではなく通常ワーカーと共通のworkerLogPath()配下に置く（ログ保存先の統一）', () => {
+  const workspace = path.resolve('C:/ws');
+  const ghDir = path.join(workspace, '.gh-maestro');
+  const result = reviewArtifactPath(ghDir, '42', '.log');
+  assert.equal(result, workerLogPath(workspace, 'review-manager-42'));
+  assert.equal(result, path.join(workspace, '.gh-maestro', 'worker-logs', 'review-manager-42.log'));
+});
+
+test('reviewArtifactPath: .log でもpath-traversalなprは拒否される', () => {
+  const ghDir = path.resolve('C:/ws/.gh-maestro');
+  assert.throws(() => reviewArtifactPath(ghDir, '../../evil', '.log'), /invalid PR number/);
 });
 
 // ── reviewWorktreeBranchName / reviewWorktreeFetchRef ───────────────────

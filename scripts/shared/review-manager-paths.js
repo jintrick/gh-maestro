@@ -7,6 +7,7 @@
 // 任意ファイル書き込みに悪用できる（PR #84 Review指摘）。
 
 const path = require('path');
+const { workerLogPath } = require('./headless-launch');
 
 const VALID_PR_RE = /^[1-9]\d*$/;
 
@@ -28,6 +29,13 @@ function assertValidPr(pr) {
  * prを検証した上でファイル名を組み立て、解決後のパスがghDir配下に
  * 収まることも確認する（prの検証漏れに対する多層防御）。
  *
+ * '.log'（実行ログ）だけは例外で、ghDir直下ではなく shared/headless-launch.js の
+ * workerLogPath() と同じ `<workspace>/.gh-maestro/worker-logs/` に置く。以前はReview Managerの
+ * ログだけ ghDir 直下という独自の場所になっており、通常ワーカー（coder等）のログ保存先
+ * （workerLogPath）と食い違っていた。ログの保存場所を全ワーカー種別で1つの仕組みに揃える。
+ * '.running'（lock）・'.json'（findingsスキーマで契約が固定された成果物）は対象外のまま
+ * ghDir直下に残す（.claude/rules/review-manager-launcher-conventions.md 参照）。
+ *
  * @param {string} ghDir
  * @param {string|number} pr
  * @param {string} suffix 例: '.running', '.log', '.json'
@@ -36,6 +44,15 @@ function assertValidPr(pr) {
 function reviewArtifactPath(ghDir, pr, suffix) {
   const validPr = assertValidPr(pr);
   const resolvedGhDir = path.resolve(ghDir);
+
+  if (suffix === '.log') {
+    // resolvedGhDir は常に <workspace>/.gh-maestro（呼び出し元がそう組み立てる前提）なので、
+    // 一段上がれば workspace になる。validPr は上で正整数のみに検証済みのため、
+    // これをそのまま workerName として渡してもpath traversalの余地はない。
+    const workspace = path.dirname(resolvedGhDir);
+    return workerLogPath(workspace, `review-manager-${validPr}`);
+  }
+
   const filePath = path.join(resolvedGhDir, `review-manager-${validPr}${suffix}`);
   const resolvedFile = path.resolve(filePath);
   if (resolvedFile !== resolvedGhDir && !resolvedFile.startsWith(resolvedGhDir + path.sep)) {

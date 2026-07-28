@@ -413,7 +413,7 @@ node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --no-review-manager --workspace $WORK
 
 ### Review Managerの手動起動
 
-Review Managerが起動しなかった、または途中で失敗した場合は、start-review-manager.js で起動・再起動できる。レビューが進まないときは `$WORKSPACE/.gh-maestro/review-manager-<PR>.log` を確認し、失敗していれば再起動する。
+Review Managerが起動しなかった、または途中で失敗した場合は、start-review-manager.js で起動・再起動できる。レビューが進まないときは `$WORKSPACE/.gh-maestro/worker-logs/review-manager-<PR>.log` を確認し、失敗していれば再起動する。
 
 ```sh
 node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE

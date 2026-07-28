@@ -269,6 +269,9 @@ if (require.main === module) {
   let exitCode = 0;
   try {
     fs.mkdirSync(ghDir, { recursive: true });
+    // logFile は worker-logs/ 配下（workerLogPath と共通のディレクトリ）で ghDir とは別なので、
+    // ghDir とは別に存在を保証する。
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
 
     // lock ファイルに自PIDを記録（起動元 launcher のPIDを上書き）。
     // launcher (start-review-manager.js) は detach 後すぐに終了するため、
