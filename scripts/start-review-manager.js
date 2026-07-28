@@ -4,9 +4,24 @@
 const { spawn } = require('./child-process');
 const fs = require('fs');
 const path = require('path');
-const { isProcessAlive } = require('./process-lifecycle');
+let _isProcessAlive = require('./process-lifecycle').isProcessAlive;
 const { assertValidPr, reviewArtifactPath } = require('./shared/review-manager-paths');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+
+// 起動直後の即時クラッシュ（ENOENTでのspawn失敗等）を検出するための猶予（ms）。
+// 呼び出し元（poll-pr.js）はこの直後、poll-reviews.jsをspawnSyncでブロッキング起動するため、
+// detachedな子プロセスの非同期 exit/error イベントはその間ずっと処理されない
+// （spawnSyncはイベントループを完全にブロックする。実機確認済み）。イベントに頼らず、
+// 短い猶予の後に同期的に生存確認する（inbox-supervisor.js の resume 直後生存確認と同じ
+// パターン。実障害: Review Managerにpwsh関数エージェント等で即時クラッシュが起きても、
+// PR #171修正前はロック解放も含め一切のフィードバックがオーケストレーターへ届かなかった）。
+//
+// run-review-manager.js は実際のエージェント spawn の前に専用worktreeを作る（git worktree
+// add + node_modules リンク）。実機確認では通常サイズのこのリポジトリで約2.2秒かかり、
+// 2000msでは短すぎてクラッシュ検出前にタイムアウトした（実測）。worktree構築時間 + 直後の
+// エージェントspawn失敗を両方カバーできるよう余裕を持たせる。成功時の遅延コストは
+// レビュー全体（数分オーダー）に対して無視できる。
+const STARTUP_LIVENESS_GRACE_MS = 8000;
 
 const USAGE = `start-review-manager.js — PRに対してReview Managerを起動する
 
@@ -18,7 +33,11 @@ Review Manager自身がPR diffを見た上で行う。skills/gh-maestro-reviewer
 
 Output:
   REVIEW_MANAGER_STARTED:<PR>
-  REVIEW_MANAGER_ALREADY_RUNNING:<PR>`;
+  REVIEW_MANAGER_ALREADY_RUNNING:<PR>
+  REVIEW_MANAGER_CRASHED:<PR>           起動直後（${STARTUP_LIVENESS_GRACE_MS}ms の猶予時間内）に
+                                        プロセスが終了した（エージェントCLI起動失敗等）`;
+
+let _sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
 /**
  * lock ファイルが有効かチェックする。
@@ -48,7 +67,7 @@ function isLockValid(lockFile) {
     return false;
   }
 
-  if (isProcessAlive(lockPid)) return true;
+  if (_isProcessAlive(lockPid)) return true;
 
   // プロセスは死んでいる → stale lock
   try { fs.unlinkSync(lockFile); } catch {}
@@ -84,6 +103,10 @@ function startReviewManager(pr, repo, workspace) {
     stdio: ['ignore', logFd, logFd],
   });
   // spawn失敗・子プロセス終了のどちらでも lock を解放する。
+  // 注意: 呼び出し元（poll-pr.js）はこの関数の直後に poll-reviews.js を spawnSync で
+  // ブロッキング起動するため、この 'error'/'exit' イベント自体は実質的に発火のタイミングを
+  // 保証されない（イベントループがブロックされている間は処理されない）。ロック解放の
+  // 最終的な保険として登録するが、起動直後クラッシュの検出は下記の同期的な生存確認に頼る。
   const releaseArtifacts = () => {
     try { fs.unlinkSync(lockFile); } catch {}
   };
@@ -91,10 +114,30 @@ function startReviewManager(pr, repo, workspace) {
   child.on('exit', releaseArtifacts);
   child.unref();
   fs.closeSync(logFd);
+
+  if (!child.pid) {
+    releaseArtifacts();
+    return 'REVIEW_MANAGER_CRASHED';
+  }
+
+  // 起動直後クラッシュ（ENOENT等）の検出。short-graceの後に同期的に生存確認する
+  // （このモジュール冒頭のSTARTUP_LIVENESS_GRACE_MSコメント参照）。
+  _sleep(STARTUP_LIVENESS_GRACE_MS);
+  if (!_isProcessAlive(child.pid)) {
+    releaseArtifacts();
+    return 'REVIEW_MANAGER_CRASHED';
+  }
+
   return 'REVIEW_MANAGER_STARTED';
 }
 
-module.exports = { startReviewManager, isLockValid };
+module.exports = {
+  startReviewManager,
+  isLockValid,
+  _setSleep: (fn) => { _sleep = fn; },
+  _setIsProcessAlive: (fn) => { _isProcessAlive = fn; },
+  STARTUP_LIVENESS_GRACE_MS,
+};
 
 if (require.main === module) {
   const args = process.argv.slice(2);

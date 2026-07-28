@@ -46,6 +46,12 @@ function loadModule(spawnImpl) {
     calls.push({ cmd, args, opts });
     const fake = new EventEmitter();
     fake.unref = () => {};
+    // 実spawnはchild.pidを持つ。startReviewManagerは起動直後クラッシュの検出に
+    // child.pidの有無・その生存確認（実装のisProcessAlive）を使う。テスト実行中の
+    // このプロセス自身のpidは実在が保証されているため、これを既定のfake pidに使う
+    // （isProcessAliveをモックせずに「起動成功」を模せる。isLockValidのテストは
+    // 別途本物の生死判定を必要とするため、_setIsProcessAliveの既定上書きはしない）。
+    fake.pid = process.pid;
     if (spawnImpl) spawnImpl(fake, cmd, args, opts);
     return fake;
   };
@@ -64,6 +70,13 @@ function loadModule(spawnImpl) {
   const mod = require(modPath);
 
   delete require.cache[childProcessPath];
+
+  // 既定では実待機（STARTUP_LIVENESS_GRACE_MS）をしない。生存確認は本物の isProcessAlive の
+  // ままにする（fake.pidに自プロセスのpidを使っているため、モック無しで「生きている」と
+  // 正しく判定される。isLockValidのテストが本物の生死判定を必要とするため、
+  // _setIsProcessAlive はここでは上書きしない）。
+  mod._setSleep(() => {});
+
   return { mod, calls };
 }
 
@@ -208,4 +221,45 @@ test('startReviewManager releases the lock file when the child exits', async () 
 
   const ghDir = path.join(workspace, '.gh-maestro');
   assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-23.running')), false);
+});
+
+// ── 起動直後クラッシュの検出（実障害の再発防止） ───────────────────────────
+//
+// 実障害: poll-pr.js は startReviewManager() の直後、poll-reviews.js を spawnSync で
+// ブロッキング起動する。イベントループがその間ブロックされるため、detached子の
+// 非同期 'error'/'exit' イベントは処理されない（実機で確認済み）。ロック解放も
+// クラッシュ通知も、このイベントに頼っていては届かない。そのため起動直後は
+// 短い猶予の後に同期的に生存確認し、死んでいれば REVIEW_MANAGER_CRASHED を返す。
+
+test('startReviewManager: 起動猶予中にプロセスが死んでいればREVIEW_MANAGER_CRASHEDを返しロックを解放する', () => {
+  const workspace = freshWorkspace('crashed-during-grace');
+  const { mod } = loadModule();
+  mod._setIsProcessAlive(() => false); // 猶予後の生存確認で「死んでいる」を模す
+
+  const result = mod.startReviewManager('55', 'o/r', workspace);
+  assert.equal(result, 'REVIEW_MANAGER_CRASHED');
+
+  const ghDir = path.join(workspace, '.gh-maestro');
+  assert.equal(fs.existsSync(path.join(ghDir, 'review-manager-55.running')), false, 'ロックは解放されるべき');
+});
+
+test('startReviewManager: 猶予時間の分だけ同期的に待機する（STARTUP_LIVENESS_GRACE_MS）', () => {
+  const workspace = freshWorkspace('grace-sleep-called');
+  const { mod } = loadModule();
+  let sleptMs = null;
+  mod._setSleep((ms) => { sleptMs = ms; });
+
+  mod.startReviewManager('56', 'o/r', workspace);
+  assert.equal(sleptMs, mod.STARTUP_LIVENESS_GRACE_MS);
+});
+
+test('startReviewManager: child.pidが取得できなければ即REVIEW_MANAGER_CRASHEDを返す（生存確認を待たない）', () => {
+  const workspace = freshWorkspace('no-pid');
+  let sleptCalled = false;
+  const { mod } = loadModule((fake) => { fake.pid = undefined; });
+  mod._setSleep(() => { sleptCalled = true; });
+
+  const result = mod.startReviewManager('57', 'o/r', workspace);
+  assert.equal(result, 'REVIEW_MANAGER_CRASHED');
+  assert.equal(sleptCalled, false, 'pidが無い時点で確定なので猶予待機は不要');
 });

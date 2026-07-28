@@ -129,6 +129,21 @@ test("formatBaseBranchMismatch reports (unknown) when actual is empty (fail-clos
   assert.equal(mod.formatBaseBranchMismatch("dev", "", "42"), "PR_BASE_MISMATCH:42:dev:(unknown)");
 });
 
+// ── shouldEnterReviewMonitoring ──────────────────────────────────────────
+// 実障害の再発防止: REVIEW_MANAGER_CRASHEDの後にspawnPollReviews（spawnSyncでブロッキング）へ
+// 進むと、届かないレビューを永久に待ち続けてしまう。
+
+test('shouldEnterReviewMonitoring: REVIEW_MANAGER_CRASHEDならfalse（poll-reviews.jsへ進まない）', () => {
+  const { mod } = loadModule();
+  assert.equal(mod.shouldEnterReviewMonitoring('REVIEW_MANAGER_CRASHED'), false);
+});
+
+test('shouldEnterReviewMonitoring: STARTED/ALREADY_RUNNINGならtrue', () => {
+  const { mod } = loadModule();
+  assert.equal(mod.shouldEnterReviewMonitoring('REVIEW_MANAGER_STARTED'), true);
+  assert.equal(mod.shouldEnterReviewMonitoring('REVIEW_MANAGER_ALREADY_RUNNING'), true);
+});
+
 // ── CLI起動時の即時エラー終了パス（ループに入る前にexitするため実プロセスspawn可） ──
 
 test('CLI --help exits 0 and no longer mentions --review-aspects（廃止した観点自動判定フラグの回帰防止）', () => {

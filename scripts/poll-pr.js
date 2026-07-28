@@ -6,7 +6,9 @@
 // and bridges into poll-reviews.js as a child process. Prints:
 //   PR_BASE_MISMATCH:<PR>:<expected>:<actual>  (only when --base-branch and actual base branch mismatch)
 //   PR_DETECTED:<number>
-//   REVIEW_MANAGER_STARTED:<number> | REVIEW_MANAGER_ALREADY_RUNNING:<number>
+//   REVIEW_MANAGER_STARTED:<number> | REVIEW_MANAGER_ALREADY_RUNNING:<number> | REVIEW_MANAGER_CRASHED:<number>
+//   REVIEW_MANAGER_CRASHED の場合、poll-reviews.js へは進まず（届かないレビューを永久に
+//   待つことになるため）ここで終了する。それ以外は続けて…
 //   ...poll-reviews.js の出力がそのまま続く（REVIEW_COMMENT / PR_COMMENT / PR_REVIEW / PR_PUSH / PR_MERGED / POLL_ERROR / POLL_RECOVERED）
 'use strict';
 
@@ -43,8 +45,14 @@ Output (stdout):
   PR_DETECTED:<PR>                     PR を検出した
   REVIEW_MANAGER_STARTED:<PR>          Review Manager を起動した
   REVIEW_MANAGER_ALREADY_RUNNING:<PR>  Review Manager は既に稼働中
-  以降、poll-reviews.js を子プロセスとして起動し、その標準出力（REVIEW_COMMENT/PR_COMMENT/
-  PR_REVIEW/PR_PUSH/PR_MERGED）をそのまま中継する。poll-reviews.js の終了とともに終了する。
+  REVIEW_MANAGER_CRASHED:<PR>          Review Managerが起動直後（数秒の猶予時間内。start-review-manager.js の
+                                        STARTUP_LIVENESS_GRACE_MS参照）にクラッシュした
+                                        （エージェントCLI起動失敗等）。poll-reviews.js へは進まず、
+                                        ここで終了コード1で終了する。原因を調査し、解消後に
+                                        poll-pr.js を再起動すること
+  以降（REVIEW_MANAGER_CRASHED以外）、poll-reviews.js を子プロセスとして起動し、その標準出力
+  （REVIEW_COMMENT/PR_COMMENT/PR_REVIEW/PR_PUSH/PR_MERGED）をそのまま中継する。
+  poll-reviews.js の終了とともに終了する。
 
 PR が見つかるまでブロックし、見つけたら Review Manager(start-review-manager.js)を
 全観点で起動し（skills/gh-maestro-reviewer/SKILL.md参照）、続けて poll-reviews.js を
@@ -104,7 +112,21 @@ function formatBaseBranchMismatch(expectedBaseBranch, actualBaseBranch, pr) {
   return 'PR_BASE_MISMATCH:' + pr + ':' + expectedBaseBranch + ':' + actualBaseBranch;
 }
 
-module.exports = { getPrBaseBranch, formatBaseBranchMismatch, spawnPollReviews };
+/**
+ * startReviewManager() の戻り値から、poll-reviews.js による監視へ進んでよいかを判定する
+ * （純粋関数）。REVIEW_MANAGER_CRASHED（起動直後クラッシュ）のときは、poll-reviews.js は
+ * spawnSync でブロッキング起動されるため、進むと二度と届かないレビューを永久に待ち続けて
+ * しまう。オーケストレーターは既にこの行でクラッシュを検知済みなので、ここで終了して
+ * 仕切り直しを促す。
+ *
+ * @param {string} reviewStatus startReviewManager() の戻り値
+ * @returns {boolean} true なら poll-reviews.js へ進んでよい
+ */
+function shouldEnterReviewMonitoring(reviewStatus) {
+  return reviewStatus !== 'REVIEW_MANAGER_CRASHED';
+}
+
+module.exports = { getPrBaseBranch, formatBaseBranchMismatch, spawnPollReviews, shouldEnterReviewMonitoring };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -208,6 +230,11 @@ if (require.main === module) {
           // 決定することは行わない。
           const reviewStatus = startReviewManager(pr, repo, workspace);
           process.stdout.write(`${reviewStatus}:${pr}\n`);
+
+          if (!shouldEnterReviewMonitoring(reviewStatus)) {
+            cleanup(1);
+            return; // unreachable
+          }
         }
 
         // poll-pr.js と poll-reviews.js は内部ロジックを統合せず、それぞれ独立に保つ。
