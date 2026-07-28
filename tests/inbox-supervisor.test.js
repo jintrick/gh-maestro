@@ -1423,10 +1423,15 @@ const SUPERVISOR_SCRIPT = path.join(__dirname, '..', 'scripts', 'inbox-superviso
 /** ヘルパー: inbox-supervisor.js を子プロセスとして起動 */
 function runSupervisor(args, cwd) {
   // --session-pid を渡し、子プロセス側の親プロセスツリー探索（Windowsでは高コスト）を省く。
+  // timeout はこのプロセス自体の処理時間ではなく、フルスイート実行時のシステム負荷下での
+  // OSスケジューリング遅延に対する余裕を持たせる（実障害: 5000msだと、他のテストファイルが
+  // 実プロセス（pwsh等）を並行して起動している状況で、ワークスペース未解決による即時
+  // exit(1)しかしないこのプロセスすら5秒以内にスケジュールされずtimeout killされ、
+  // status: null になることがあった）。
   return realSpawnSync(process.execPath, [SUPERVISOR_SCRIPT, ...args, '--session-pid', String(process.pid)], {
     cwd,
     encoding: 'utf8',
-    timeout: 5000,
+    timeout: 15000,
   });
 }
 

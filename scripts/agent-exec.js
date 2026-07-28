@@ -104,7 +104,21 @@ function buildPwshExecArgs(agentCmdArgs, onExit = null, env = {}) {
   // （onExit の有無に関わらず常に必要。以前は onExit が無いときにこの exit を省略しており、
   // run-review-manager.js のように呼び出し元が同期的に終了コードを見る箇所で
   // 常に0扱いになる実障害があった）。
-  const exitCodeAssign = '$exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }';
+  //
+  // $LASTEXITCODE だけでは不十分: agentCmdArgs[0] がPATH上にもpwsh関数としても存在しない
+  // 場合（"command not found"）、ネイティブプロセスが一度も起動しないため $LASTEXITCODE は
+  // 更新されず未設定（$null）のまま残る。この場合 $?（直前ステートメントの成否）は
+  // 確実に $false になるため、$LASTEXITCODE が未設定の時だけ $? でフォールバック判定する
+  // （実機確認済み: 存在しないコマンドを & で呼ぶと $LASTEXITCODE は空のままだが $? は
+  // False）。$? を先に見ると壊れる: ネイティブプロセスが実在し正しく非ゼロ終了した場合も
+  // pwshは $? を False にする（$LASTEXITCODE=7 でも $?=False。実機確認済み）ため、
+  // $? を優先すると本物の終了コードが握りつぶされ一律 1 になってしまう。
+  // 優先順位は「$LASTEXITCODEが実際に設定されているならそれを信頼し、未設定のときだけ
+  // $?で command-not-found かクリーンな成功かを判定する」。
+  // 実障害: この判定が無かったため、エージェントのcommand自体が存在しない場合
+  // （例: config.jsonのextendsで登録したpwsh関数名の誤記）、onExitフックには
+  // exit code 0（成功）が渡り、worker-exit-hook.js の異常終了通知が発火しなかった。
+  const exitCodeAssign = '$exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } elseif (-not $?) { 1 } else { 0 }';
   const exitHook = onExit
     ? `; ${exitCodeAssign}; & '${onExit.command.replace(/'/g, "''")}' ${onExit.args.map(arg => `'${arg.replace(/'/g, "''")}'`).join(' ')} $exitCode; exit $exitCode`
     : `; ${exitCodeAssign}; exit $exitCode`;
