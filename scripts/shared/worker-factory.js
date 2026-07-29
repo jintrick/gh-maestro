@@ -134,6 +134,52 @@ const ROLE_LABEL_MAP = Object.freeze({
 // @property {function|null} onFailure  - 失敗時の後処理（未使用）
 // @property {boolean} participateInExecutionRegistry - execution-registryへ参加するか
 
+// ── Role 導出（ROLE_LABEL_MAP + カスタムスキルフォールバック） ─────────────────
+// ROLE_LABEL_MAP に無いスキル（ユーザーが config.json の skillAgentMap に追加した
+// カスタムスキル等）は、スキル名から安全な role を導出する。
+// gh-maestro- プレフィックスがあれば除去し、なければスキル名全体を role として使う。
+// 導出された role も DESCRIPTION_RE（英数字・ハイフン・アンダースコア 1〜50文字）の
+// 検証を通過することを確認する。
+
+/**
+ * スキル名から role ラベルを導出する。
+ *
+ * ROLE_LABEL_MAP に登録済みならそれを返し、なければスキル名から安全な role を
+ * 機械的に導出する。カスタムスキル名（例: gh-maestro-custom-reviewer）も
+ * 受け付ける。
+ *
+ * @param {string} skill 完全なスキル名
+ * @returns {string} role ラベル
+ * @throws {Error} 導出した role が安全でない場合
+ */
+function deriveRoleFromSkill(skill) {
+  // 既知のスキル → 登録済み role
+  if (ROLE_LABEL_MAP[skill]) {
+    return ROLE_LABEL_MAP[skill];
+  }
+
+  // gh-maestro- プレフィックスがあれば除去
+  let derived;
+  const PREFIX = 'gh-maestro-';
+  if (skill.startsWith(PREFIX)) {
+    derived = skill.slice(PREFIX.length);
+  } else {
+    derived = skill;
+  }
+
+  // 安全性検証: git ブランチ名・ディレクトリ名として使えるか
+  if (!DESCRIPTION_RE.test(derived)) {
+    throw new Error(
+      `カスタムスキル "${skill}" から導出した role "${derived}" が` +
+      `安全な識別子ではありません（${DESCRIPTION_RE.source}: ` +
+      `1–50 chars, A-Z a-z 0-9 _ - only）。` +
+      `スキル名を gh-maestro- で始まる安全な名前に変更してください。`
+    );
+  }
+
+  return derived;
+}
+
 // ── ヘルパー ───────────────────────────────────────────────────────────────────
 
 /**
@@ -169,19 +215,7 @@ function buildWorkerName(issue, role, description) {
  * @returns {WorkerLaunchSpec}
  */
 function buildNormalWorkerLaunchSpec({ skill, issue, description, repo, workspace }) {
-  const role = ROLE_LABEL_MAP[skill];
-  if (!role) {
-    throw new Error(
-      `buildNormalWorkerLaunchSpec: 未知のスキルです: ${JSON.stringify(skill)}。` +
-      `通常ワーカーは ROLE_LABEL_MAP に登録されたスキルのみ受け付けます。`
-    );
-  }
-  if (role === 'review-manager') {
-    throw new Error(
-      `buildNormalWorkerLaunchSpec: review-manager は通常ワーカーではありません。` +
-      `buildReviewManagerLaunchSpec を使用してください。`
-    );
-  }
+  const role = deriveRoleFromSkill(skill);
 
   // 入力検証: issue/description を workerName（延いては worktreeDir/logPath）の
   // 構成要素として使う前に、既存 CLI（spawn-worker.js）と同じ検証を適用する。
@@ -336,6 +370,7 @@ function reviewManagerPolicy() {
 
 module.exports = {
   ROLE_LABEL_MAP,
+  deriveRoleFromSkill,
   buildWorkerName,
   buildNormalWorkerLaunchSpec,
   buildReviewManagerLaunchSpec,

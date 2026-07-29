@@ -6,6 +6,7 @@ const path = require('path');
 
 const {
   ROLE_LABEL_MAP,
+  deriveRoleFromSkill,
   buildWorkerName,
   buildNormalWorkerLaunchSpec,
   buildReviewManagerLaunchSpec,
@@ -226,30 +227,81 @@ test('buildNormalWorkerLaunchSpec: 全通常ワーカースキルで起動仕様
 
 // ── buildNormalWorkerLaunchSpec エラーケース ───────────────────────────────────
 
-test('buildNormalWorkerLaunchSpec: 未知のスキルはエラー', () => {
+test('buildNormalWorkerLaunchSpec: 不正なカスタムスキル名（危険文字を含む）はエラー', () => {
+  // deriveRoleFromSkill は DESCRIPTION_RE 検証を通らない role を拒否する
   assert.throws(
     () => buildNormalWorkerLaunchSpec({
-      skill: 'gh-maestro-unknown-role',
+      skill: 'unsafe/skill/../name',
       issue: 1,
       description: 'test',
       repo: 'o/r',
       workspace: '/ws',
     }),
-    /未知のスキル/,
+    /安全な識別子/,
   );
 });
 
-test('buildNormalWorkerLaunchSpec: review-manager スキルは通常ワーカーとして拒否される', () => {
+// ── deriveRoleFromSkill ─────────────────────────────────────────────────────
+
+test('deriveRoleFromSkill: ROLE_LABEL_MAP に登録済みのスキルはその role を返す', () => {
+  assert.equal(deriveRoleFromSkill('gh-maestro-coder'), 'coder');
+  assert.equal(deriveRoleFromSkill('gh-maestro-senior-coder'), 'senior-coder');
+  assert.equal(deriveRoleFromSkill('gh-maestro-reviewer'), 'review-manager');
+});
+
+test('deriveRoleFromSkill: 未登録の gh-maestro-* スキルはプレフィックスを除去して導出する', () => {
+  assert.equal(deriveRoleFromSkill('gh-maestro-custom-reviewer'), 'custom-reviewer');
+  assert.equal(deriveRoleFromSkill('gh-maestro-my-special-coder'), 'my-special-coder');
+});
+
+test('deriveRoleFromSkill: gh-maestro- プレフィックスが無いスキルはそのまま role として使う', () => {
+  assert.equal(deriveRoleFromSkill('simple-worker'), 'simple-worker');
+  assert.equal(deriveRoleFromSkill('my-custom-skill'), 'my-custom-skill');
+});
+
+test('deriveRoleFromSkill: 危険文字（スラッシュ等）を含む導出 role はエラー', () => {
   assert.throws(
-    () => buildNormalWorkerLaunchSpec({
-      skill: 'gh-maestro-reviewer',
-      issue: 1,
-      description: 'test',
-      repo: 'o/r',
-      workspace: '/ws',
-    }),
-    /review-manager/,
+    () => deriveRoleFromSkill('gh-maestro-role/with/slash'),
+    /安全な識別子/,
   );
+  assert.throws(
+    () => deriveRoleFromSkill('../escape'),
+    /安全な識別子/,
+  );
+});
+
+// ── カスタムスキルの LaunchSpec 生成 ─────────────────────────────────────────
+
+test('buildNormalWorkerLaunchSpec: カスタムスキル（gh-maestro-custom-reviewer）で起動仕様を生成できる', () => {
+  const spec = buildNormalWorkerLaunchSpec({
+    skill: 'gh-maestro-custom-reviewer',
+    issue: 10,
+    description: 'audit-logs',
+    repo: 'o/r',
+    workspace: '/ws',
+  });
+  assert.equal(spec.workerName, 'issue-10-custom-reviewer-audit-logs');
+  assert.equal(spec.role, 'custom-reviewer');
+  assert.equal(spec.skill, 'gh-maestro-custom-reviewer');
+  assert.equal(spec.worktreeKey, spec.workerName);
+});
+
+test('buildNormalWorkerLaunchSpec: gh-maestro-reviewer は通常ワーカーとして受け付ける（手動デバッグ経路）', () => {
+  // docs/review-manager-plan.md に記載の手動デバッグ経路:
+  //   spawn-worker.js --skill gh-maestro-reviewer
+  // 通常ワーカーと同じ規約（worktreeKey=workerName, lease=workers.json）で起動する。
+  const spec = buildNormalWorkerLaunchSpec({
+    skill: 'gh-maestro-reviewer',
+    issue: 55,
+    description: 'debug-pr-7',
+    repo: 'o/r',
+    workspace: '/ws',
+  });
+  assert.equal(spec.workerName, 'issue-55-review-manager-debug-pr-7');
+  assert.equal(spec.role, 'review-manager');
+  assert.equal(spec.skill, 'gh-maestro-reviewer');
+  assert.equal(spec.pr, null);
+  assert.equal(spec.worktreeKey, spec.workerName);
 });
 
 // ── buildReviewManagerLaunchSpec ───────────────────────────────────────────────

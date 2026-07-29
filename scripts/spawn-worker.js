@@ -35,7 +35,8 @@ const { launchAgentHeadless } = require('./shared/headless-launch');
 const { buildNormalWorkerLaunchSpec } = require('./shared/worker-factory');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { createNormalWorkerStore, acquireLease: acquireWorkerLease,
-        activateLease: activateWorkerLease, releaseLease: releaseWorkerLease } = require('./shared/worker-lease');
+        activateLease: activateWorkerLease, releaseLease: releaseWorkerLease,
+        isLeaseLive } = require('./shared/worker-lease');
 const { killProcessTree } = require('./kill-tree');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
@@ -231,6 +232,42 @@ try {
 const workerName   = spec.workerName;
 const worktreeDir  = spec.worktreeDir;
 const logPath      = spec.logPath;
+
+// --- 移行安全策: 旧形式（issue-<issue>-<description>、role無し）のワーカー重複チェック ---
+// Phase 3 で workerName 形式が issue-<issue>-<role>-<description> に変わった。
+// 更新前に旧形式で起動され生存中のワーカーは、新しい lease キーと照合されないため
+// 重複起動を許してしまう。旧形式の lease と workers.json も確認して防ぐ。
+// このチェックは旧形式が不要になった時点で削除できる（移行期間限定）。
+{
+  const oldKey = `issue-${issue}-${description}`;
+  if (oldKey !== workerName) {
+    // 旧形式 lease チェック（Phase 2 以降のワーカーは全員 lease を持つ）
+    const leaseStoreForCheck = createNormalWorkerStore(workspace);
+    const oldLease = leaseStoreForCheck.read(oldKey);
+    if (oldLease && isLeaseLive(oldLease)) {
+      fail(
+        `旧形式（role無し）のワーカー "${oldKey}" が既に稼働中です（pid ${oldLease.pid}）。` +
+        `このワーカーを停止してから再試行してください。` +
+        `識別子形式が issue-<issue>-<role>-<description> へ変更されたための移行措置です。`
+      );
+    }
+    // 旧形式 workers.json チェック（Phase 2 以前の lease 非保持ワーカー向け）
+    if (existsSync(workersJson)) {
+      try {
+        const parsed = JSON.parse(readFileSync(workersJson, 'utf8'));
+        if (typeof parsed === 'object' && parsed !== null && parsed[oldKey]) {
+          const oldEntry = normalizeWorkerEntry(parsed[oldKey]);
+          if (isWorkerAlive(oldEntry)) {
+            fail(
+              `旧形式（role無し）のワーカー "${oldKey}" が workers.json に登録され生存中です（pid ${oldEntry.pid}）。` +
+              `このワーカーを停止してから再試行してください。`
+            );
+          }
+        }
+      } catch { /* workers.json が読めなければスキップ（後続の本処理で改めて読む） */ }
+    }
+  }
+}
 
 // --- リース獲得（重複起動防止。Phase 2: 通常ワーカーのみ） ---
 // lease獲得はworktreeの除去・再作成より先に行う。
