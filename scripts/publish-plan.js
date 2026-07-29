@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // publish-plan.js — Issue の pin 済み計画コメントを管理する決定的スクリプト
 //
-// 対象 Issue のコメント一覧を取得し、既に pin されているコメントがあれば
+// 対象 Issue のコメント一覧を取得し、既に pin されている計画コメントがあれば
 // その本文を更新、なければ新規コメントを投稿して pin する。
+// 計画コメントは本文先頭の機械可読マーカーで識別し、別目的で pin された
+// コメントを誤って破壊しない。
 //
 // Usage:
 //   node publish-plan.js --issue <N> --body-file <path> [--workspace <path>]
@@ -20,6 +22,9 @@ const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspac
 const { toWinPath } = require('./win-path');
 const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 
+// 計画コメントを識別するための機械可読マーカー。本文先頭行に埋め込む。
+const PLAN_MARKER = '<!-- gh-maestro-plan:v1 -->';
+
 const USAGE = `publish-plan.js — Issue の pin 済み計画コメントを管理する
 
 Usage:
@@ -34,9 +39,11 @@ Options:
   --workspace <path>    ワークスペースのルートパス（省略時は環境変数またはCWDから上方探索で解決）
 
 動作:
-  1. 対象 Issue のコメント一覧から pin 済みコメントを検索
-  2. pin 済みコメントがあればその本文を更新する（新規コメントは増やさない）
-  3. pin 済みコメントがなければ新規コメントを投稿し pin する
+  1. 対象 Issue の全コメントから、計画マーカー（${PLAN_MARKER}）を持ち
+     現在のユーザーが投稿した pin 済みコメントを検索
+  2. 見つかればそのコメント本文を更新する（新規コメントは増やさない）
+  3. 見つからなければ新規コメントを投稿し pin する
+  4. マーカーを持たない pin 済みコメント（他目的の pin）は上書きしない
 
 Output (stdout):
   投稿または更新されたコメントの URL を1行出力`;
@@ -48,9 +55,16 @@ let _ghRepoView = (opts = {}) => {
     { encoding: 'utf8', ...opts });
 };
 
-let _ghListComments = (issue, repo, opts = {}) => {
-  return spawnSync('gh', ['api', `repos/${repo}/issues/${issue}/comments`],
+let _ghViewerLogin = (opts = {}) => {
+  return spawnSync('gh', ['api', 'user', '--jq', '.login'],
     { encoding: 'utf8', ...opts });
+};
+
+let _ghListComments = (issue, repo, opts = {}) => {
+  // --paginate で全ページを取得。--jq と --paginate は併用不可のため --slurp で
+  // 全ページを単一の JSON 配列の配列として受け取り、Node 側で平坦化する。
+  return spawnSync('gh', ['api', '--method', 'GET', `repos/${repo}/issues/${issue}/comments`,
+    '--paginate', '--slurp'], { encoding: 'utf8', ...opts });
 };
 
 let _ghCreateComment = (issue, repo, body, opts = {}) => {
@@ -68,23 +82,47 @@ let _ghPinComment = (commentId, repo, opts = {}) => {
     { encoding: 'utf8', ...opts });
 };
 
+// ── ヘルパー ──────────────────────────────────────────────────────────────
+
+/**
+ * `gh api --paginate --slurp` の出力（ページ配列の配列、例: `[[c1,c2],[c3]]`）を
+ * 1段階フラット化してコメント配列を返す。要素が配列でないコメントオブジェクトの
+ * フラットな配列（`--paginate` を使わない旧来の応答形状・テストのモック）が
+ * 渡された場合はそのまま返す（後方互換）。全体が配列でない場合は null。
+ *
+ * @param {string} stdout
+ * @returns {object[] | null}
+ */
+function parseCommentsResponse(stdout) {
+  const parsed = JSON.parse(stdout || '[]');
+  if (!Array.isArray(parsed)) return null;
+  if (parsed.length > 0 && parsed.every((page) => Array.isArray(page))) {
+    return parsed.flat();
+  }
+  return parsed;
+}
+
 // ── コアロジック ──────────────────────────────────────────────────────────
 
 /**
  * Issue に pin 済み計画コメントがあれば更新、なければ新規投稿＋pin する。
+ * 計画コメントは本文先頭の PLAN_MARKER と投稿者で識別する。
+ * マーカーを持たない他目的の pin 済みコメントは上書きしない。
  *
  * @param {{ issue: string, body: string, workspace: string }} params
  * @param {object} [deps]  テスト用の依存注入
  * @param {function} [deps.ghRepoViewFn]
+ * @param {function} [deps.ghViewerLoginFn]
  * @param {function} [deps.ghListCommentsFn]
  * @param {function} [deps.ghCreateCommentFn]
  * @param {function} [deps.ghUpdateCommentFn]
  * @param {function} [deps.ghPinCommentFn]
- * @returns {{ ok: boolean, url?: string, error?: string, action?: 'created'|'updated', warning?: string }}
+ * @returns {{ ok: boolean, url?: string, error?: string, action?: 'created'|'updated' }}
  */
 function publishPlan({ issue, body, workspace }, deps = {}) {
   const {
     ghRepoViewFn = _ghRepoView,
+    ghViewerLoginFn = _ghViewerLogin,
     ghListCommentsFn = _ghListComments,
     ghCreateCommentFn = _ghCreateComment,
     ghUpdateCommentFn = _ghUpdateComment,
@@ -92,6 +130,8 @@ function publishPlan({ issue, body, workspace }, deps = {}) {
   } = deps;
 
   const ghOpts = { cwd: workspace };
+  // 本文にマーカーを付加する（呼び出し元が意識する必要をなくす）
+  const markedBody = PLAN_MARKER + '\n' + body;
 
   // ── リポジトリ解決 ──────────────────────────────────────────────────────
 
@@ -104,7 +144,18 @@ function publishPlan({ issue, body, workspace }, deps = {}) {
     return { ok: false, error: 'リポジトリを解決できません（空のレスポンス）' };
   }
 
-  // ── コメント一覧を取得し pin 済みコメントを検索 ─────────────────────────
+  // ── 現在のユーザー（投稿者判定用） ──────────────────────────────────────
+
+  const viewerResult = ghViewerLoginFn(ghOpts);
+  if (viewerResult.status !== 0) {
+    return { ok: false, error: `現在のユーザーを取得できません: ${viewerResult.stderr || '(empty)'}` };
+  }
+  const viewerLogin = viewerResult.stdout.trim();
+  if (!viewerLogin) {
+    return { ok: false, error: '現在のユーザーを解決できません（空のレスポンス）' };
+  }
+
+  // ── コメント一覧を取得し pin 済み計画コメントを検索 ─────────────────────
 
   const listResult = ghListCommentsFn(issue, repo, ghOpts);
   if (listResult.status !== 0) {
@@ -113,7 +164,7 @@ function publishPlan({ issue, body, workspace }, deps = {}) {
 
   let comments;
   try {
-    comments = JSON.parse(listResult.stdout);
+    comments = parseCommentsResponse(listResult.stdout);
   } catch {
     return { ok: false, error: 'コメント一覧のJSONパースに失敗しました' };
   }
@@ -122,14 +173,21 @@ function publishPlan({ issue, body, workspace }, deps = {}) {
     return { ok: false, error: 'コメント一覧の形式が不正です' };
   }
 
-  const pinned = comments.find(c => c.pin != null);
+  // 計画マーカーを持ち、かつ現在のユーザーが投稿した pin 済みコメントを探す。
+  // マーカーとユーザーの両方を確認することで、他目的で pin されたコメントや
+  // 別ユーザーが投稿した同名マーカー付きコメントを誤って上書きしない。
+  const pinnedPlan = comments.find(c =>
+    c.pin != null &&
+    c.body && c.body.includes(PLAN_MARKER) &&
+    c.user && c.user.login === viewerLogin,
+  );
 
-  // ── pin 済みコメントがあれば更新 ───────────────────────────────────────
+  // ── 既存の計画 pin コメントを更新 ───────────────────────────────────────
 
-  if (pinned) {
-    const updateResult = ghUpdateCommentFn(pinned.id, repo, body, ghOpts);
+  if (pinnedPlan) {
+    const updateResult = ghUpdateCommentFn(pinnedPlan.id, repo, markedBody, ghOpts);
     if (updateResult.status !== 0) {
-      return { ok: false, error: `pin済みコメントの更新に失敗しました: ${updateResult.stderr || '(empty)'}` };
+      return { ok: false, error: `pin済み計画コメントの更新に失敗しました: ${updateResult.stderr || '(empty)'}` };
     }
 
     let updated;
@@ -146,9 +204,9 @@ function publishPlan({ issue, body, workspace }, deps = {}) {
     return { ok: true, url: updated.html_url, action: 'updated' };
   }
 
-  // ── pin 済みコメントなし → 新規投稿して pin ────────────────────────────
+  // ── 計画 pin コメントなし → 新規投稿して pin ────────────────────────────
 
-  const createResult = ghCreateCommentFn(issue, repo, body, ghOpts);
+  const createResult = ghCreateCommentFn(issue, repo, markedBody, ghOpts);
   if (createResult.status !== 0) {
     return { ok: false, error: `コメントの投稿に失敗しました: ${createResult.stderr || '(empty)'}` };
   }
@@ -166,16 +224,17 @@ function publishPlan({ issue, body, workspace }, deps = {}) {
     return { ok: false, error: 'コメント作成レスポンスからID/URLを抽出できませんでした' };
   }
 
-  // pin を試行する（失敗してもコメント作成自体は成功扱い）
+  // pin する。計画フローは「pin 済みであること」が前提のため、
+  // pin 失敗時は ok:false とし、作成済みコメントIDをエラーに含めて再試行可能にする。
   const pinResult = ghPinCommentFn(commentId, repo, ghOpts);
   if (pinResult.status !== 0) {
-    return { ok: true, url, action: 'created', warning: `pinに失敗しました: ${pinResult.stderr || '(empty)'}` };
+    return { ok: false, error: `コメントは作成されましたがpinに失敗しました（commentId=${commentId}）。再実行で同じコメントを対象に再試行してください: ${pinResult.stderr || '(empty)'}` };
   }
 
   return { ok: true, url, action: 'created' };
 }
 
-module.exports = { publishPlan };
+module.exports = { publishPlan, PLAN_MARKER, parseCommentsResponse };
 
 // ── CLI エントリポイント ──────────────────────────────────────────────────
 
@@ -267,8 +326,5 @@ if (require.main === module) {
   }
 
   console.log(result.url);
-  if (result.warning) {
-    console.error(`publish-plan: ${result.warning}`);
-  }
   process.exit(0);
 }
