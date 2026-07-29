@@ -16,8 +16,11 @@ const os = require('os');
 // 観点を絞り込むかどうかの判断はオーケストレーター側からは完全に排除し、Review Manager
 // 自身がPR diffを見た上で判断する方式に一本化した（skills/gh-maestro-reviewer/SKILL.md参照）。
 const {
-  buildPrompt,
+  buildPrompt, generateStagingPath,
   buildReviewManagerAgentArgs, runAgentHeadless,
+  validateArtifactContent, atomicCopyStaging,
+  boundedCleanup, pollForArtifact,
+  _validateFindingShape, _validateAgainstSchema,
 } = require('../scripts/run-review-manager');
 const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'run-review-manager.js');
@@ -34,21 +37,53 @@ after(() => {
 
 // ── buildPrompt ──────────────────────────────────────────────────────────
 
-test('buildPrompt instructs the 3-aspect parallel review', () => {
-  const prompt = buildPrompt({
+test('buildPrompt instructs the 3-aspect parallel review and artifact contract', () => {
+  const { prompt, stagingFile } = buildPrompt({
     pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
   });
   assert.match(prompt, /PR=5/);
   assert.match(prompt, /REPO=o\/r/);
   assert.match(prompt, /3観点のReviewerを独立に並列spawnする/);
+  // 成果物契約（artifact contract）が含まれる
+  assert.match(prompt, /STAGING=/);
+  assert.match(prompt, /atomic rename/);
+  assert.match(prompt, /追記・上書きしない/);
+  // stagingFileが一意であること
+  assert.ok(stagingFile.includes('.staging-'), `staging path should include .staging- prefix: ${stagingFile}`);
+  assert.ok(path.basename(stagingFile).startsWith('.staging-'));
 });
 
 test('buildPrompt normalizes backslash paths to forward slashes', () => {
-  const prompt = buildPrompt({
+  const { prompt } = buildPrompt({
     pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
   });
   assert.match(prompt, /WORKSPACE=C:\/ws/);
   assert.match(prompt, /OUTPUT=C:\/ws\/out\.json/);
+});
+
+test('buildPrompt: stagingFileはoutputFileと同じディレクトリに生成される', () => {
+  const outputFile = path.join(tmpBase, 'output', 'out.json');
+  const { stagingFile } = buildPrompt({
+    pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile,
+  });
+  assert.equal(path.dirname(stagingFile), path.dirname(outputFile));
+});
+
+test('buildPrompt: 連続呼び出しで異なるstagingFileが生成される', () => {
+  const opts = { pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json' };
+  const a = buildPrompt(opts);
+  const b = buildPrompt(opts);
+  assert.notEqual(a.stagingFile, b.stagingFile);
+});
+
+// ── generateStagingPath ──────────────────────────────────────────────────
+
+test('generateStagingPath: 一意のstagingパスを生成する', () => {
+  const finalPath = path.join(tmpBase, 'findings.json');
+  const staging = generateStagingPath(finalPath);
+  assert.equal(path.dirname(staging), path.dirname(finalPath));
+  assert.ok(path.basename(staging).startsWith('.staging-'));
+  assert.ok(staging.includes(String(process.pid)));
 });
 
 // ── CLI引数パース（scripts/shared/workspace.js の parseFlags に委譲） ─────────
@@ -198,4 +233,283 @@ test('teardownReviewWorktree: 削除前に unlinkJunctions を呼ぶ（リンク
   assert.ok(unlinkIdx !== -1, 'unlinkJunctions を呼ぶこと');
   assert.ok(unlinkIdx < removeIdx, 'worktreeRemove より前に unlinkJunctions すること');
   assert.ok(unlinkIdx < rmSyncIdx, '再帰削除より前に unlinkJunctions すること');
+});
+
+// ── validateArtifactContent ──────────────────────────────────────────────
+
+test('validateArtifactContent: 有効なpayloadを合格とする', () => {
+  const payload = JSON.stringify({
+    pr: 5,
+    repo: 'o/r',
+    headRefOid: 'abc123',
+    findings: [
+      {
+        aspect: 'Correctness',
+        path: 'src/foo.js',
+        line_anchor: 'await save()',
+        summary: 'missing await',
+        severity: 'BLOCKER',
+        severity_rationale: 'data loss risk',
+        body: '## Details\n\nThe issue is...',
+        verified_references: ['src/foo.js'],
+      },
+    ],
+  });
+  const result = validateArtifactContent(payload, null);
+  assert.equal(result.valid, true);
+  assert.notEqual(result.payload, null);
+});
+
+test('validateArtifactContent: 不正なJSONは不合格', () => {
+  const result = validateArtifactContent('not json', null);
+  assert.equal(result.valid, false);
+  assert.match(result.error, /JSON parse/);
+});
+
+test('validateArtifactContent: 空オブジェクトは不合格', () => {
+  const result = validateArtifactContent('{}', null);
+  assert.equal(result.valid, false);
+  assert.match(result.error, /pr must be/);
+});
+
+test('validateArtifactContent: findingsが配列でないと不合格', () => {
+  const result = validateArtifactContent(JSON.stringify({
+    pr: 1, repo: 'r', headRefOid: 'abc', findings: 'not-an-array',
+  }), null);
+  assert.equal(result.valid, false);
+  assert.match(result.error, /findings must be an array/);
+});
+
+test('validateArtifactContent: findingに必須フィールドがないと不合格', () => {
+  const result = validateArtifactContent(JSON.stringify({
+    pr: 1, repo: 'r', headRefOid: 'abc',
+    findings: [{ aspect: 'Correctness' }],
+  }), null);
+  assert.equal(result.valid, false);
+  assert.match(result.error, /finding\[0\].*path.*required/);
+});
+
+test('validateArtifactContent: 不正なaspect値は不合格', () => {
+  const result = validateArtifactContent(JSON.stringify({
+    pr: 1, repo: 'r', headRefOid: 'abc',
+    findings: [{
+      aspect: 'InvalidAspect', path: 'f.js', line_anchor: 'x',
+      summary: 's', severity: 'BLOCKER', severity_rationale: 'r',
+      body: 'b', verified_references: ['r'],
+    }],
+  }), null);
+  assert.equal(result.valid, false);
+  assert.match(result.error, /invalid aspect/);
+});
+
+test('validateArtifactContent: 不正なseverity値は不合格', () => {
+  const result = validateArtifactContent(JSON.stringify({
+    pr: 1, repo: 'r', headRefOid: 'abc',
+    findings: [{
+      aspect: 'Correctness', path: 'f.js', line_anchor: 'x',
+      summary: 's', severity: 'CRITICAL', severity_rationale: 'r',
+      body: 'b', verified_references: ['r'],
+    }],
+  }), null);
+  assert.equal(result.valid, false);
+  assert.match(result.error, /invalid severity/);
+});
+
+test('validateArtifactContent: verified_referencesが空配列だと不合格', () => {
+  const result = validateArtifactContent(JSON.stringify({
+    pr: 1, repo: 'r', headRefOid: 'abc',
+    findings: [{
+      aspect: 'Correctness', path: 'f.js', line_anchor: 'x',
+      summary: 's', severity: 'MAJOR', severity_rationale: 'r',
+      body: 'b', verified_references: [],
+    }],
+  }), null);
+  assert.equal(result.valid, false);
+  assert.match(result.error, /verified_references/);
+});
+
+// ── _validateFindingShape ────────────────────────────────────────────────
+
+test('_validateFindingShape: null は不合格', () => {
+  const errs = _validateFindingShape(null);
+  assert.ok(errs.length > 0);
+});
+
+test('_validateFindingShape: 有効なfindingは合格', () => {
+  const errs = _validateFindingShape({
+    aspect: 'Correctness', path: 'f.js', line_anchor: 'x',
+    summary: 's', severity: 'MAJOR', severity_rationale: 'r',
+    body: 'b', verified_references: ['r'],
+  });
+  assert.equal(errs.length, 0);
+});
+
+// ── _validateAgainstSchema ───────────────────────────────────────────────
+
+test('_validateAgainstSchema: 有効なpayloadを合格とする', () => {
+  const schema = JSON.parse(fs.readFileSync(
+    path.join(__dirname, '..', 'scripts', 'review-findings-schema.json'), 'utf8'
+  ));
+  const payload = {
+    pr: 5, repo: 'o/r', headRefOid: 'abc',
+    findings: [{
+      aspect: 'Correctness', path: 'f.js', line_anchor: 'x',
+      summary: 's', severity: 'MAJOR', severity_rationale: 'r',
+      body: 'b', verified_references: ['r'],
+    }],
+  };
+  const errors = _validateAgainstSchema(payload, schema);
+  assert.equal(errors.length, 0);
+});
+
+test('_validateAgainstSchema: additionalProperties:false で未知フィールドを検出する', () => {
+  const schema = {
+    type: 'object',
+    properties: { name: { type: 'string' } },
+    additionalProperties: false,
+  };
+  const errors = _validateAgainstSchema({ name: 'ok', extra: true }, schema);
+  assert.ok(errors.some(e => e.includes('unexpected')), `unexpected field should be detected: ${errors}`);
+});
+
+// ── atomicCopyStaging ────────────────────────────────────────────────────
+
+test('atomicCopyStaging: ファイルをコピーし、元の内容と一致する', () => {
+  const srcFile = path.join(tmpBase, 'atomic-src.json');
+  const dstFile = path.join(tmpBase, 'atomic-dst.json');
+  fs.writeFileSync(srcFile, '{"test":true}', 'utf8');
+
+  const result = atomicCopyStaging(srcFile, dstFile);
+  assert.equal(result.success, true);
+  assert.ok(fs.existsSync(dstFile));
+  assert.equal(fs.readFileSync(dstFile, 'utf8'), '{"test":true}');
+});
+
+test('atomicCopyStaging: コピー先に一時ファイルが残らない', () => {
+  const srcFile = path.join(tmpBase, 'atomic-src2.json');
+  const dstFile = path.join(tmpBase, 'subdir', 'atomic-dst2.json');
+  fs.writeFileSync(srcFile, 'hello', 'utf8');
+
+  const result = atomicCopyStaging(srcFile, dstFile);
+  assert.equal(result.success, true);
+
+  // 一時ファイル（.tmp-プレフィックス）が残っていない
+  const dstDir = path.dirname(dstFile);
+  const children = fs.readdirSync(dstDir);
+  const tmpFiles = children.filter(c => c.startsWith('.tmp-'));
+  assert.equal(tmpFiles.length, 0, `no tmp files should remain: ${tmpFiles.join(', ')}`);
+});
+
+test('atomicCopyStaging: 存在しないsrcは失敗する', () => {
+  const result = atomicCopyStaging(
+    path.join(tmpBase, 'nonexistent.json'),
+    path.join(tmpBase, 'dst.json'),
+  );
+  assert.equal(result.success, false);
+  assert.ok(result.error);
+});
+
+// ── pollForArtifact ──────────────────────────────────────────────────────
+
+test('pollForArtifact: ファイルが最初から存在すれば即座に検出する', async () => {
+  const artifactPath = path.join(tmpBase, 'poll-immediate.json');
+  fs.writeFileSync(artifactPath, '{"ok":true}', 'utf8');
+
+  const result = await pollForArtifact(artifactPath, 5000, 50, { aborted: false });
+  assert.equal(result.found, true);
+  assert.equal(result.content, '{"ok":true}');
+});
+
+test('pollForArtifact: 後から出現するファイルを検出する（atomic renameシミュレーション）', async () => {
+  const artifactPath = path.join(tmpBase, 'poll-delayed.json');
+  // 事前に削除しておく
+  try { fs.unlinkSync(artifactPath); } catch {}
+
+  // 300ms後にファイルを作成（atomic renameのシミュレーション）
+  const timer = setTimeout(() => {
+    fs.writeFileSync(artifactPath, '{"delayed":true}', 'utf8');
+  }, 300);
+
+  const result = await pollForArtifact(artifactPath, 5000, 50, { aborted: false });
+  clearTimeout(timer);
+
+  assert.equal(result.found, true);
+  assert.equal(result.content, '{"delayed":true}');
+});
+
+test('pollForArtifact: deadlineを過ぎると見つからずに終了する', async () => {
+  const artifactPath = path.join(tmpBase, 'poll-deadline.json');
+  try { fs.unlinkSync(artifactPath); } catch {}
+
+  const result = await pollForArtifact(artifactPath, 200, 30, { aborted: false });
+  assert.equal(result.found, false);
+  assert.equal(result.reason, 'deadline');
+});
+
+test('pollForArtifact: シグナルでabortされると即座に終了する', async () => {
+  const artifactPath = path.join(tmpBase, 'poll-abort.json');
+  try { fs.unlinkSync(artifactPath); } catch {}
+
+  const signal = { aborted: false };
+  // 100ms後にabort
+  setTimeout(() => { signal.aborted = true; }, 100);
+
+  const result = await pollForArtifact(artifactPath, 5000, 30, signal);
+  assert.equal(result.found, false);
+  assert.equal(result.reason, 'aborted');
+});
+
+test('pollForArtifact: 空ファイルは未完成とみなし検出しない', async () => {
+  const artifactPath = path.join(tmpBase, 'poll-empty.json');
+  // 空ファイルを即座に作成
+  fs.writeFileSync(artifactPath, '', 'utf8');
+
+  const result = await pollForArtifact(artifactPath, 200, 30, { aborted: false });
+  // 空ファイルは検出されず、deadlineで終了する
+  assert.equal(result.found, false);
+});
+
+// ── boundedCleanup ───────────────────────────────────────────────────────
+
+test('boundedCleanup: 存在しないPIDでもエラーなく完了する（プロセス停止スキップ）', async () => {
+  const testDir = path.join(tmpBase, 'cleanup-no-pid');
+  fs.mkdirSync(testDir, { recursive: true });
+  const lockFile = path.join(testDir, 'test.running');
+  fs.writeFileSync(lockFile, String(process.pid));
+
+  const logs = [];
+  const result = await boundedCleanup({
+    pid: 999999, // 存在しないPID
+    worktreeDir: null,
+    workspace: null,
+    pr: null,
+    lockFile,
+    log: (msg) => logs.push(msg),
+    gracefulShutdownMs: 100,
+  });
+
+  // プロセス停止は成功扱い（存在しないので isProcessAlive が false）
+  assert.equal(result.processStopped, true);
+  // PIDが無効でもleaseは解放される（プロセス停止が「成功」判定）
+  assert.equal(result.leaseReleased, true);
+});
+
+test('boundedCleanup: cleanup結果が独立して診断可能', async () => {
+  const logs = [];
+  const result = await boundedCleanup({
+    pid: null,
+    worktreeDir: null,
+    workspace: null,
+    pr: null,
+    lockFile: null,
+    log: (msg) => logs.push(msg),
+    gracefulShutdownMs: 50,
+  });
+
+  // 各フィールドが独立して存在する
+  assert.ok('processStopped' in result);
+  assert.ok('worktreeCleaned' in result);
+  assert.ok('leaseReleased' in result);
+  assert.ok('errors' in result);
+  assert.ok(Array.isArray(result.errors));
 });

@@ -125,11 +125,30 @@ const ROLE_LABEL_MAP = Object.freeze({
 //
 // 起動から終了時までの扱いを表すポリシー。ワーカー種別ごとに固定の組み合わせを持つ。
 //
+// completionMode は「呼び出し制御（supervise）」と「仕事の完了シグナル」の2関心事を
+// 1つのunion型で表現する（Issue #174 2巡目architect設計）。
+//
+// - launch-accepted: 起動が成立した時点で完了。呼び出し元は即座に返る（detached）。
+//   通常ワーカー（coder/senior-coder/explorer等）が該当。
+// - process-exit:   プロセスの終了（exit status 0）を完了シグナルとする。
+//   呼び出し元はプロセス終了までブロックする。
+// - artifact-committed: 成果物のコミット（atomic rename完了）を完了シグナルとする。
+//   プロセス終了はcleanup目的でのみ扱う。Review Managerが該当。
+//
+// @typedef {'launch-accepted'|'process-exit'|'artifact-committed'} CompletionMode
+//
 // @typedef {object} LifecyclePolicy
-// @property {boolean} detached         - detached起動（true）か完了待ち（false）か
+// @property {CompletionMode} completionMode - 完了判定種別
 // @property {boolean} registerInWorkersJson - workers.json に登録するか
 // @property {boolean} resumeTarget     - resume対象か
 // @property {boolean} keepWorktree     - 終了後worktreeを保持するか（falseなら即時破棄）
+// @property {number|null} timeoutMs    - 監督モード（completionMode !== 'launch-accepted'）の
+//                                        タイムアウト（ms）。nullの場合はデフォルト値を使用。
+// @property {object|null} artifactConfig - completionMode === 'artifact-committed' の場合の
+//                                          成果物検出設定。それ以外は null。
+// @property {string} artifactConfig.outputFileName   - 監視対象の成果物ファイル名
+// @property {number} artifactConfig.pollIntervalMs    - ポーリング間隔（ms）
+// @property {string} artifactConfig.schemaPath        - JSON Schemaの絶対パス
 // @property {function|null} onSuccess  - 成功時の後処理（未使用。Phase 4でreview-publisherをhook）
 // @property {function|null} onFailure  - 失敗時の後処理（未使用）
 // @property {boolean} participateInExecutionRegistry - execution-registryへ参加するか
@@ -325,20 +344,23 @@ function buildReviewManagerLaunchSpec({ issue, pr, repo, workspace }) {
 /**
  * 通常ワーカーの LifecyclePolicy を返す。
  *
- * - detached起動
+ * - completionMode: 'launch-accepted'（起動成立で即完了。呼び出し元はdetach）
  * - workers.json 登録あり
  * - resume対象
  * - worktree保持
  * - execution-registry参加
+ * - artifactConfig: null（成果物の知識を持たない）
  *
  * @returns {LifecyclePolicy}
  */
 function normalWorkerPolicy() {
   return Object.freeze({
-    detached: true,
+    completionMode: 'launch-accepted',
     registerInWorkersJson: true,
     resumeTarget: true,
     keepWorktree: true,
+    timeoutMs: null,
+    artifactConfig: null,
     onSuccess: null,
     onFailure: null,
     participateInExecutionRegistry: true,
@@ -348,20 +370,38 @@ function normalWorkerPolicy() {
 /**
  * Review Manager の LifecyclePolicy を返す。
  *
- * - 完了待ち（同期。呼び出し元が終了までブロックする）
+ * - completionMode: 'artifact-committed'（成果物のatomic renameを完了シグナルとする）
  * - workers.json 非登録
  * - resume非対象
  * - worktree即時破棄
  * - execution-registry非参加（completedへの正しい状態遷移を保証できないため）
+ * - artifactConfig: 成果物検出の設定（ポーリング間隔・スキーマパス等）
+ * - timeoutMs: デフォルトの監督タイムアウト（30分）
  *
+ * @param {object} [opts]
+ * @param {string} [opts.schemaPath] - JSON Schemaファイルの絶対パス
+ * @param {string} [opts.outputFileName] - 成果物ファイル名（デフォルト: findings.json）
+ * @param {number} [opts.pollIntervalMs] - ポーリング間隔ms（デフォルト: 200）
+ * @param {number} [opts.timeoutMs] - 監督タイムアウトms（デフォルト: 30分）
  * @returns {LifecyclePolicy}
  */
-function reviewManagerPolicy() {
+function reviewManagerPolicy(opts = {}) {
+  const schemaPath = opts.schemaPath || null;
+  const outputFileName = opts.outputFileName || 'findings.json';
+  const pollIntervalMs = opts.pollIntervalMs || 200;
+  const timeoutMs = opts.timeoutMs || 30 * 60 * 1000; // 30 minutes
+
   return Object.freeze({
-    detached: false,
+    completionMode: 'artifact-committed',
     registerInWorkersJson: false,
     resumeTarget: false,
     keepWorktree: false,
+    timeoutMs,
+    artifactConfig: Object.freeze({
+      outputFileName,
+      pollIntervalMs,
+      schemaPath,
+    }),
     onSuccess: null,
     onFailure: null,
     participateInExecutionRegistry: false,

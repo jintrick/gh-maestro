@@ -15,7 +15,8 @@ description: Run a gh-maestro PR Review Manager that delegates three independent
 - `PR`: レビュー対象PR番号
 - `REPO`: `owner/repo`
 - `WORKSPACE`: リポジトリの絶対パス
-- `OUTPUT`: RMが最終JSONを書き出すパス
+- `OUTPUT`: RMが最終JSONを書き出すパス（atomic renameの最終宛先）
+- `STAGING`: 実行固有のstagingファイルパス。**全内容をここに書き、closeしてからOUTPUTへatomic renameする**
 
 ## 観点の構成
 
@@ -113,6 +114,12 @@ diffが参照する外部シンボル・型・設定は、判定前に実ファ�
 - `verified_references`: 実際に確認したファイルを入れる
 
 ## RM出力
+
+成果物は以下の手順でatomicに書き出す:
+
+1. **`STAGING`ファイルに全内容を書く。** 1回の実行で1回のみ生成し、追記・上書きしない
+2. **`STAGING`ファイルをcloseする。** 書き込み完了をOSに伝える
+3. **`STAGING`を`OUTPUT`へatomic renameする。** `OUTPUT`へ直接書き込まない。renameのみで作成する
 
 `OUTPUT`には以下のJSONオブジェクトを書き出す。
 

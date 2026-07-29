@@ -525,12 +525,14 @@ test('現行一致: Review Managerのfindings成果物キーはreview-manager-<p
 
 // ── LifecyclePolicy: normalWorkerPolicy ────────────────────────────────────────
 
-test('normalWorkerPolicy: detached=true, 登録あり, resume対象, worktree保持, execution-registry参加', () => {
+test('normalWorkerPolicy: completionMode=launch-accepted, 登録あり, resume対象, worktree保持, execution-registry参加', () => {
   const policy = normalWorkerPolicy();
-  assert.equal(policy.detached, true);
+  assert.equal(policy.completionMode, 'launch-accepted');
   assert.equal(policy.registerInWorkersJson, true);
   assert.equal(policy.resumeTarget, true);
   assert.equal(policy.keepWorktree, true);
+  assert.equal(policy.timeoutMs, null);
+  assert.equal(policy.artifactConfig, null);
   assert.equal(policy.onSuccess, null);
   assert.equal(policy.onFailure, null);
   assert.equal(policy.participateInExecutionRegistry, true);
@@ -538,25 +540,56 @@ test('normalWorkerPolicy: detached=true, 登録あり, resume対象, worktree保
 
 test('normalWorkerPolicy: 返り値はfreezeされている', () => {
   const policy = normalWorkerPolicy();
-  assert.throws(() => { policy.detached = false; }, /frozen|read.only/i);
+  assert.throws(() => { policy.completionMode = 'process-exit'; }, /frozen|read.only/i);
 });
 
 // ── LifecyclePolicy: reviewManagerPolicy ───────────────────────────────────────
 
-test('reviewManagerPolicy: detached=false（完了待ち）, 非登録, resume非対象, worktree破棄, execution-registry非参加', () => {
+test('reviewManagerPolicy: completionMode=artifact-committed, 非登録, resume非対象, worktree破棄, execution-registry非参加', () => {
   const policy = reviewManagerPolicy();
-  assert.equal(policy.detached, false);
+  assert.equal(policy.completionMode, 'artifact-committed');
   assert.equal(policy.registerInWorkersJson, false);
   assert.equal(policy.resumeTarget, false);
   assert.equal(policy.keepWorktree, false);
   assert.equal(policy.onSuccess, null);
   assert.equal(policy.onFailure, null);
   assert.equal(policy.participateInExecutionRegistry, false);
+  assert.equal(typeof policy.timeoutMs, 'number');
+  assert.ok(policy.timeoutMs > 0, 'timeoutMs は正の値');
+  assert.notEqual(policy.artifactConfig, null);
+  assert.equal(typeof policy.artifactConfig.outputFileName, 'string');
+  assert.equal(typeof policy.artifactConfig.pollIntervalMs, 'number');
+  assert.ok(policy.artifactConfig.pollIntervalMs > 0, 'pollIntervalMs は正の値');
+});
+
+test('reviewManagerPolicy: artifactConfig のデフォルト値', () => {
+  const policy = reviewManagerPolicy();
+  assert.equal(policy.artifactConfig.outputFileName, 'findings.json');
+  assert.equal(policy.artifactConfig.pollIntervalMs, 200);
+  assert.equal(policy.artifactConfig.schemaPath, null);
+});
+
+test('reviewManagerPolicy: opts で上書きできる', () => {
+  const policy = reviewManagerPolicy({
+    outputFileName: 'custom.json',
+    pollIntervalMs: 500,
+    schemaPath: '/path/to/schema.json',
+    timeoutMs: 60000,
+  });
+  assert.equal(policy.artifactConfig.outputFileName, 'custom.json');
+  assert.equal(policy.artifactConfig.pollIntervalMs, 500);
+  assert.equal(policy.artifactConfig.schemaPath, '/path/to/schema.json');
+  assert.equal(policy.timeoutMs, 60000);
 });
 
 test('reviewManagerPolicy: 返り値はfreezeされている', () => {
   const policy = reviewManagerPolicy();
   assert.throws(() => { policy.keepWorktree = true; }, /frozen|read.only/i);
+});
+
+test('reviewManagerPolicy: artifactConfig もfreezeされている', () => {
+  const policy = reviewManagerPolicy();
+  assert.throws(() => { policy.artifactConfig.pollIntervalMs = 999; }, /frozen|read.only/i);
 });
 
 // ── 2つのポリシーの差異検証 ────────────────────────────────────────────────────
@@ -565,12 +598,18 @@ test('ポリシー差異: 通常ワーカーとReview Managerは全フィール�
   const normal = normalWorkerPolicy();
   const rm = reviewManagerPolicy();
 
-  // 全真偽値フィールドが反転している
-  assert.notEqual(normal.detached, rm.detached);
+  // completionMode が異なる
+  assert.notEqual(normal.completionMode, rm.completionMode);
+  assert.equal(normal.completionMode, 'launch-accepted');
+  assert.equal(rm.completionMode, 'artifact-committed');
+  // その他の真偽値フィールドが反転している
   assert.notEqual(normal.registerInWorkersJson, rm.registerInWorkersJson);
   assert.notEqual(normal.resumeTarget, rm.resumeTarget);
   assert.notEqual(normal.keepWorktree, rm.keepWorktree);
   assert.notEqual(normal.participateInExecutionRegistry, rm.participateInExecutionRegistry);
+  // artifactConfig は通常ワーカーでは null、Review Managerでは設定あり
+  assert.equal(normal.artifactConfig, null);
+  assert.notEqual(rm.artifactConfig, null);
 });
 
 // ── WorkerLaunchSpec の不変性 ──────────────────────────────────────────────────
