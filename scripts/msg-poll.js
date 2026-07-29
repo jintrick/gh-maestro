@@ -21,6 +21,7 @@ const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { validateField } = require('./shared/validate');
 const { isRetryableGhFailure, graphqlListComments } = require('./shared/gh-fallback');
+const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -106,16 +107,9 @@ let _ghRepoView = (opts = {}) => {
 };
 
 let _ghApiComments = (repo, issue, since, opts = {}) => {
-  // --paginate で全ページを取得する（未読が100件を超えて滞留すると、
-  // per_page=100 のみでは古い分が永久に見えなくなるため）。
-  // --paginate と --jq は併用できないため、--slurp で全ページを単一の
-  // JSON 配列にまとめて受け取る。
-  const args = ['api', '--method', 'GET', `repos/${repo}/issues/${issue}/comments`, '--paginate', '--slurp'];
-  if (since) {
-    args.push('-f', `since=${since}`);
-  }
-  args.push('-f', 'per_page=100');
-  const restResult = spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
+  const callOpts = { ...opts, per_page: 100 };
+  if (since) callOpts.since = since;
+  const restResult = listComments(repo, issue, callOpts);
 
   if (restResult.status === 0 || !isRetryableGhFailure(restResult)) {
     return restResult;
@@ -156,24 +150,6 @@ function writeState(workspace, self, state) {
   const seenIds = state.seenIds.slice(-MAX_SEEN_IDS);
   fs.writeFileSync(tmp, JSON.stringify({ since: state.since, seenIds }, null, 2), 'utf8');
   fs.renameSync(tmp, sp);
-}
-
-/**
- * `gh api --paginate --slurp` の出力（ページ配列の配列、例: `[[c1,c2],[c3]]`）を
- * 1段階フラット化してコメント配列を返す。要素が配列でないコメントオブジェクトの
- * フラットな配列（`--paginate` を使わない旧来の応答形状・テストのモック）が
- * 渡された場合はそのまま返す（後方互換）。全体が配列でない場合は null。
- *
- * @param {string} stdout
- * @returns {object[] | null}
- */
-function parseCommentsResponse(stdout) {
-  const parsed = JSON.parse(stdout || '[]');
-  if (!Array.isArray(parsed)) return null;
-  if (parsed.length > 0 && parsed.every((page) => Array.isArray(page))) {
-    return parsed.flat();
-  }
-  return parsed;
 }
 
 function parseMarker(body) {
