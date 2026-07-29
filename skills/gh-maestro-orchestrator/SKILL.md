@@ -790,6 +790,10 @@ EOF
 
 ### 提示フォーマット
 
+GitHubへの投稿をチャット提示より先に行う。以下の手順で、構造化されたMarkdownを対象Issueへ投稿し、その後人間へ短く通知する。
+
+1. 以下のフォーマットで構造化されたMarkdownを `write-draft.js` で一時ファイルに書き出し、`gh issue comment` で対象Issueへ投稿する。`gh issue comment` は投稿したコメントのURLを標準出力に返すため、これを控えておく。投稿はチャットでの人間への提示より先に行う。
+
 ```
 【反省会】 Issue #<N> / PR #<PR>
 
@@ -815,18 +819,26 @@ EOF
 上記の改善を実施しますか？不要なものは除いてください。
 ```
 
-上記の内容は、人間へのチャット提示と同時に、**同じ内容をIssue #<N>へのコメントとしても投稿する**（「Issue確定」節と同じ、`write-draft.js`で論理パスに書き出してから`gh`コマンドを直接呼ぶパターンを使う）：
-
 ```sh
-node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/retro-<N>.md --stdin <<'EOF'
+DRAFT_OUTPUT=$(node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/retro-<N>.md --stdin <<'EOF'
 <上記「提示フォーマット」の内容>
-EOF
+EOF)
+BODY_PATH=${DRAFT_OUTPUT#DRAFT_WRITTEN:}
+
 gh issue comment <N> --repo $REPO --body-file "$BODY_PATH"
 ```
 
-（`gh issue edit` と同様に `gh issue comment` も `win-path.js` によるパス解決を行わないため実体パスを渡す。詳細は「人間の承認とGitHubへの反映」参照）
+（`gh issue comment` は `win-path.js` によるパス解決を行わないため実体パスを渡す。詳細は「人間の承認とGitHubへの反映」参照）
 
-反省会はオーケストレーターと人間のチャットだけで完結し、GitHub上に痕跡が残らない。issueコメント化することで、そのIssueに紐づくassistant（対話型ワーカー。管理対象外だがIssueは読める）が、人間から「反省会どうなった？」と聞かれた際に`gh issue view`経由で答えられるようになる。
+2. 投稿完了後、人間へのチャット提示は全文を再掲せず、以下の定型の短い一文だけにする：
+
+```
+【反省会】 Issue #<N> に反省会の素案を投稿しました。ご意見をお願いします。
+```
+
+アーキテクトが設計コメント投稿後に `msg-send.js` でURLだけを通知する既存の流儀と同じ考え方である。
+
+issueコメント化することで、そのIssueに紐づくassistant（対話型ワーカー。管理対象外だがIssueは読める）が、人間から「反省会どうなった？」と聞かれた際に `gh issue view` 経由で答えられるようになる。
 
 ### 反省会後のアクション
 
