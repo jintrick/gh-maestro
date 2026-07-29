@@ -564,6 +564,9 @@ async function boundedCleanup({ pid, worktreeDir, workspace, pr, lockFile, log,
   return results;
 }
 
+// テスト用の注入ポイント
+let _injectedPollForArtifact = null;
+
 module.exports = {
   buildPrompt,
   generateStagingPath,
@@ -571,8 +574,10 @@ module.exports = {
   buildReviewManagerAgentArgs, runAgentHeadless,
   pollForArtifact, validateArtifactContent,
   atomicCopyStaging, boundedCleanup,
+  superviseReviewManager,
   // テスト用エクスポート
   _validateFindingShape, _validateAgainstSchema,
+  _setPollForArtifact: (fn) => { _injectedPollForArtifact = fn; },
 };
 
 // ── 監督ループ（artifact-committed mode向け） ──────────────────────────────────
@@ -697,57 +702,75 @@ async function superviseReviewManager({
     }
   };
   agentChild.on('close', closeAgentFd);
-  agentChild.on('error', closeAgentFd);
 
   const agentPid = agentChild.pid;
 
   // 6. 並行監督
+  // processFinalized は exit/error の二重通知を防ぐガード。
+  // Node.jsのChildProcess契約では、spawn失敗時（ENOENT等）に error イベントが発火し
+  // exit は発火しないことがある。逆に正常spawn後は exit のみが発火する。
+  // 両方が発火するエッジケースでも1回だけ処理する。
   let processExited = false;
   let processExitCode = null;
-  let artifactDetected = false;
-  let artifactContent = null;
-  let artifactValidation = null;
+  let processExitReason = null;
+  let processFinalized = false;
 
-  agentChild.on('exit', (code) => {
+  const markProcessDone = (code, reason) => {
+    if (processFinalized) return;
+    processFinalized = true;
     processExited = true;
     processExitCode = code;
+    processExitReason = reason;
+    // 成果物ポーリングを即座に中断させる
+    if (signal) signal.aborted = true;
+  };
+
+  agentChild.on('exit', (code) => {
+    markProcessDone(code, null);
   });
 
-  // 成果物ポーリングとプロセス終了の競合を、成果物側を優先して処理する
+  // error イベント: 子プロセスをspawnできなかった場合に発火する
+  // （例: ENOENT — 実行ファイルが存在しない）。
+  // この場合 exit は発火しないため、監督ループが知る唯一の終了通知となる。
+  // 以前は closeAgentFd（ログFDを閉じるだけ）のみで、監督ループは30分間deadlineを
+  // 待ち続け、同一PRの再起動が .running lease で拒否され続けていた。
+  agentChild.on('error', (err) => {
+    markProcessDone(null, err.message);
+    closeAgentFd();
+  });
+
+  // 成果物ポーリングとプロセス終了の競合を、成果物側を優先して処理する。
+  // pollForArtifact を唯一のartifact検出実装として使う（テストが検証する経路と
+  // 本番の実行経路を一致させる）。
   const schemaPath = path.join(__dirname, 'review-findings-schema.json');
   const pollStart = Date.now();
 
   while (true) {
-    // deadline判定
-    if (Date.now() - pollStart >= deadlineMs) {
+    const elapsed = Date.now() - pollStart;
+    const remaining = deadlineMs - elapsed;
+    if (remaining <= 0) {
       log(`deadline reached after ${deadlineMs}ms`);
       break;
     }
 
-    // 外部中止シグナル
-    if (signal && signal.aborted) {
+    // 外部中止シグナル（プロセス終了以外の理由）
+    if (signal && signal.aborted && !processExited) {
       log('aborted by external signal');
       break;
     }
 
-    // 成果物チェック
-    if (!artifactDetected) {
-      try {
-        if (fs.existsSync(worktreeOutputFile)) {
-          await sleep(50); // 安定待ち
-          const raw = fs.readFileSync(worktreeOutputFile, 'utf8');
-          if (raw.length > 0) {
-            artifactDetected = true;
-            artifactContent = raw;
-            log(`artifact detected at ${worktreeOutputFile} (${raw.length} bytes)`);
-          }
-        }
-      } catch {}
-    }
+    // 成果物ポーリング。
+    // signal.aborted（プロセス終了/error）が発火すると即座に返る。
+    // テストから注入された実装があればそちらを使う（本番の実行経路とテスト経路の一致）。
+    const pollFn = _injectedPollForArtifact || pollForArtifact;
+    const pollResult = await pollFn(
+      worktreeOutputFile, remaining, DEFAULT_ARTIFACT_POLL_INTERVAL_MS, signal
+    );
 
-    // 成果物が検出されたら検証してpublishへ進む（プロセス生存に関わらず）
-    if (artifactDetected && artifactContent !== null) {
-      artifactValidation = validateArtifactContent(artifactContent, schemaPath);
+    if (pollResult.found && pollResult.content) {
+      log(`artifact detected at ${worktreeOutputFile} (${pollResult.content.length} bytes)`);
+
+      const artifactValidation = validateArtifactContent(pollResult.content, schemaPath);
 
       if (artifactValidation.valid) {
         log('artifact validation passed');
@@ -791,11 +814,8 @@ async function superviseReviewManager({
       } else {
         // 成果物はあるが検証不合格
         log(`artifact validation failed: ${artifactValidation.error}`);
-        // プロセスがまだ生きていれば、修正された成果物が再renameされる可能性に賭けて
-        // ポーリングを継続する。ただし、同じ壊れたファイルを何度も読まないよう、
-        // 検出済みフラグは維持しつつ、内容が変わったかだけをチェックする。
-        //
-        // プロセスが既に終了していて検証不合格なら、これ以上修正される見込みはないので中断。
+
+        // プロセスが既に終了していて検証不合格なら、これ以上修正される見込みはない
         if (processExited) {
           return {
             outcome: 'process-exit-no-artifact',
@@ -806,29 +826,35 @@ async function superviseReviewManager({
             reason: `成果物検証不合格（プロセス終了済み）: ${artifactValidation.error}`,
           };
         }
-        // プロセスがまだ動いている → 次のポーリングで再チェック（mtime変化があれば再読）
-        artifactDetected = false;
-        artifactContent = null;
-        await sleep(DEFAULT_ARTIFACT_POLL_INTERVAL_MS);
+
+        // プロセスがまだ動いている → 壊れた成果物を削除し、修正版の再renameを待つ。
+        // 削除しないと pollForArtifact が毎回同じ壊れたファイルを即座に再検出してしまう。
+        // エージェントが再生成すれば新しいrenameでファイルが再出現する。
+        try { fs.unlinkSync(worktreeOutputFile); } catch {}
+        log('invalid artifact removed, waiting for corrected artifact');
         continue;
       }
     }
 
-    // プロセス終了チェック
+    // pollForArtifact が成果物を返さなかった（found === false）
+    // reason は 'deadline' または 'aborted'
     if (processExited) {
-      log(`agent exited with status ${processExitCode} before artifact detected`);
+      const reason = processExitReason
+        ? `プロセス起動/実行エラー（status ${processExitCode}）: ${processExitReason}`
+        : `プロセス終了（status ${processExitCode}）、成果物未検出`;
+      log(reason);
       return {
         outcome: 'process-exit-no-artifact',
         exitCode: processExitCode || 1,
         artifact: null,
         agentPid,
         reviewWtDir,
-        reason: `プロセス終了（status ${processExitCode}）、成果物未検出`,
+        reason,
       };
     }
 
-    // 次のポーリングまで待機
-    await sleep(DEFAULT_ARTIFACT_POLL_INTERVAL_MS);
+    // deadline は次のループ反復の先頭で判定される（remaining <= 0）
+    // signal abort（外部）も次の反復で判定される
   }
 
   // deadline 到達（成果物もプロセス終了も検出されず）
