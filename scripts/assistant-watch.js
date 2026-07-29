@@ -24,10 +24,11 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
-// parseCommentsResponse/parseMarker は副作用の無い純粋なパース関数（gh呼び出し・state永続化・
+const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+// parseMarker は副作用の無い純粋なパース関数（gh呼び出し・state永続化・
 // プロセスレジストリ登録は一切含まない）なので、上記の「msg-poll.js を流用しない」制約とは
 // 矛盾しない。DRYのため素直に再利用する。
-const { parseCommentsResponse, parseMarker } = require('./msg-poll');
+const { parseMarker } = require('./msg-poll');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 
 const DEFAULT_INTERVAL_SEC = 20;
@@ -72,8 +73,7 @@ let _ghRepoView = (opts = {}) => {
 };
 
 let _ghIssueComments = (repo, issue, opts = {}) => {
-  const args = ['api', '--method', 'GET', `repos/${repo}/issues/${issue}/comments`, '--paginate', '--slurp', '-f', 'per_page=100'];
-  return spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
+  return listComments(repo, issue, { ...opts, per_page: 100 });
 };
 
 // issueに紐づくPRの新規発見。poll-pr.js の findPR() と全く同じ2段構え（PR #167レビュー指摘）:

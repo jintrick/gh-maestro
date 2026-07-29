@@ -21,6 +21,7 @@ const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { toWinPath } = require('./win-path');
 const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
+const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 
 // 計画コメントを識別するための機械可読マーカー。本文先頭行に埋め込む。
 const PLAN_MARKER = '<!-- gh-maestro-plan:v1 -->';
@@ -56,10 +57,8 @@ let _ghRepoView = (opts = {}) => {
 };
 
 let _ghListComments = (issue, repo, opts = {}) => {
-  // --paginate で全ページを取得。--jq と --paginate は併用不可のため --slurp で
-  // 全ページを単一の JSON 配列の配列として受け取り、Node 側で平坦化する。
-  return spawnSync('gh', ['api', '--method', 'GET', `repos/${repo}/issues/${issue}/comments`,
-    '--paginate', '--slurp'], { encoding: 'utf8', ...opts });
+  // publish-plan.js は (issue, repo) 順の独自インターフェース（後方互換）。
+  return listComments(repo, issue, opts);
 };
 
 let _ghCreateComment = (issue, repo, body, opts = {}) => {
@@ -78,24 +77,6 @@ let _ghPinComment = (commentId, repo, opts = {}) => {
 };
 
 // ── ヘルパー ──────────────────────────────────────────────────────────────
-
-/**
- * `gh api --paginate --slurp` の出力（ページ配列の配列、例: `[[c1,c2],[c3]]`）を
- * 1段階フラット化してコメント配列を返す。要素が配列でないコメントオブジェクトの
- * フラットな配列（`--paginate` を使わない旧来の応答形状・テストのモック）が
- * 渡された場合はそのまま返す（後方互換）。全体が配列でない場合は null。
- *
- * @param {string} stdout
- * @returns {object[] | null}
- */
-function parseCommentsResponse(stdout) {
-  const parsed = JSON.parse(stdout || '[]');
-  if (!Array.isArray(parsed)) return null;
-  if (parsed.length > 0 && parsed.every((page) => Array.isArray(page))) {
-    return parsed.flat();
-  }
-  return parsed;
-}
 
 // ── コアロジック ──────────────────────────────────────────────────────────
 

@@ -51,8 +51,9 @@ const {
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
 
-// msg-poll.js のスキャンロジックを再利用
-const { parseMarker, parseCommentsResponse } = require('./msg-poll');
+const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+// msg-poll.js のスキャンロジックを再利用（マーカーパースのみ）
+const { parseMarker } = require('./msg-poll');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
 
@@ -98,12 +99,9 @@ let _ghRepoView = (opts = {}) => {
 };
 
 let _ghApiComments = (repo, issue, since, opts = {}) => {
-  const args = ['api', '--method', 'GET', `repos/${repo}/issues/${issue}/comments`, '--paginate', '--slurp'];
-  if (since) {
-    args.push('-f', `since=${since}`);
-  }
-  args.push('-f', 'per_page=100');
-  return spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
+  const callOpts = { ...opts, per_page: 100 };
+  if (since) callOpts.since = since;
+  return listComments(repo, issue, callOpts);
 };
 
 // ── ワーカー生存確認（テストで注入可能） ──────────────────────────────────

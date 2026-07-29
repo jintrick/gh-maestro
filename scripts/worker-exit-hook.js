@@ -25,6 +25,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
+const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -34,10 +35,9 @@ let _ghRepoView = (opts = {}) => {
 };
 
 let _ghApiComments = (repo, issue, since, opts = {}) => {
-  const args = ['api', '--method', 'GET', `repos/${repo}/issues/${issue}/comments`, '--paginate', '--slurp'];
-  if (since) args.push('-f', `since=${since}`);
-  args.push('-f', 'per_page=100');
-  return spawnSync('gh', args, { encoding: 'utf8', timeout: 30000, ...opts });
+  const callOpts = { ...opts, per_page: 100 };
+  if (since) callOpts.since = since;
+  return listComments(repo, issue, callOpts);
 };
 
 // msg-send.js自身が「本文は位置引数で渡せない」ガードを持つ（--stdin/--body-fileのみ許可。
@@ -86,7 +86,7 @@ function verifyReplyAndRelayIfMissing({ workspace, workerName, captureLogPath, s
     return;
   }
 
-  const { parseCommentsResponse, parseMarker } = require('./msg-poll');
+  const { parseMarker } = require('./msg-poll');
   let comments;
   try {
     comments = parseCommentsResponse(commentsResult.stdout);
