@@ -11,6 +11,9 @@ const {
   buildReviewManagerLaunchSpec,
   normalWorkerPolicy,
   reviewManagerPolicy,
+  assertValidIssue,
+  assertValidDescription,
+  assertWithinRoot,
 } = require('../scripts/shared/worker-factory');
 
 const { workerLogPath } = require('../scripts/shared/headless-launch');
@@ -586,4 +589,260 @@ test('LaunchSpec差異: 通常ワーカーはleaseStoreがworkers.json、Review 
 
   assert.match(normal.leaseStore, /workers\.json$/);
   assert.match(rm.leaseStore, /review-manager-42\.running$/);
+});
+
+// ── 入力バリデーション: assertValidIssue ───────────────────────────────────────
+
+test('assertValidIssue: 正整数文字列を受け付ける', () => {
+  assert.equal(assertValidIssue('1'), 1);
+  assert.equal(assertValidIssue('42'), 42);
+  assert.equal(assertValidIssue('99999'), 99999);
+});
+
+test('assertValidIssue: 数値も受け付ける', () => {
+  assert.equal(assertValidIssue(1), 1);
+  assert.equal(assertValidIssue(42), 42);
+});
+
+test('assertValidIssue: 0 は拒否する', () => {
+  assert.throws(() => assertValidIssue('0'), /invalid issue number/);
+  assert.throws(() => assertValidIssue(0), /invalid issue number/);
+});
+
+test('assertValidIssue: 負数は拒否する', () => {
+  assert.throws(() => assertValidIssue('-1'), /invalid issue number/);
+  assert.throws(() => assertValidIssue(-5), /invalid issue number/);
+});
+
+test('assertValidIssue: 非数値は拒否する', () => {
+  assert.throws(() => assertValidIssue('abc'), /invalid issue number/);
+  assert.throws(() => assertValidIssue(''), /invalid issue number/);
+  assert.throws(() => assertValidIssue('1.5'), /invalid issue number/);
+});
+
+test('assertValidIssue: 先頭ゼロは拒否する（01 は git branch の挙動を変えうる危険な値）', () => {
+  // spawn-worker.js の ISSUE_RE /^[1-9][0-9]*$/ は 01 等の先頭ゼロを拒否する。
+  // 先頭ゼロは Number('01') => 1 と正規化され番号としては有効に見えるが、
+  // 後続の文字列連結（issue-01-...）でgit branch名に混入しうるため、
+  // 曖昧な解釈を許す前に文字列レベルで弾く。
+  assert.throws(() => assertValidIssue('01'), /invalid issue number/);
+  assert.throws(() => assertValidIssue('001'), /invalid issue number/);
+});
+
+// ── 入力バリデーション: assertValidDescription ────────────────────────────────
+
+test('assertValidDescription: 英数字・ハイフン・アンダースコア 1〜50文字を受け付ける', () => {
+  assert.equal(assertValidDescription('fix-auth'), 'fix-auth');
+  assert.equal(assertValidDescription('explore_deps_v2'), 'explore_deps_v2');
+  assert.equal(assertValidDescription('a'), 'a'); // 1文字
+  assert.equal(assertValidDescription('A'.repeat(50)), 'A'.repeat(50)); // 50文字（上限）
+});
+
+test('assertValidDescription: 51文字以上は拒否する', () => {
+  assert.throws(
+    () => assertValidDescription('a'.repeat(51)),
+    /invalid description/,
+  );
+});
+
+test('assertValidDescription: 空文字列は拒否する', () => {
+  assert.throws(() => assertValidDescription(''), /invalid description/);
+});
+
+test('assertValidDescription: スラッシュを含むと拒否する（パストラバーサル対策）', () => {
+  assert.throws(() => assertValidDescription('foo/bar'), /invalid description/);
+  assert.throws(() => assertValidDescription('a/b'), /invalid description/);
+});
+
+test('assertValidDescription: ../ を含むパストラバーサル文字列は拒否する', () => {
+  assert.throws(() => assertValidDescription('../../../etc'), /invalid description/);
+  assert.throws(() => assertValidDescription('x/../../../../outside'), /invalid description/);
+  assert.throws(() => assertValidDescription('..'), /invalid description/);
+  // ドット単体も拒否（正規表現がドットを許可していないため）
+  assert.throws(() => assertValidDescription('.'), /invalid description/);
+});
+
+test('assertValidDescription: バックスラッシュを含むと拒否する', () => {
+  assert.throws(() => assertValidDescription('foo\\bar'), /invalid description/);
+});
+
+test('assertValidDescription: スペースを含むと拒否する', () => {
+  assert.throws(() => assertValidDescription('foo bar'), /invalid description/);
+});
+
+test('assertValidDescription: 非文字列（null/undefined/数値）は拒否する', () => {
+  assert.throws(() => assertValidDescription(null), /invalid description/);
+  assert.throws(() => assertValidDescription(undefined), /invalid description/);
+  assert.throws(() => assertValidDescription(123), /invalid description/);
+});
+
+// ── パス封じ込め: assertWithinRoot ─────────────────────────────────────────────
+
+test('assertWithinRoot: ルート配下のパスは通過する', () => {
+  assert.doesNotThrow(() =>
+    assertWithinRoot('C:\\ws\\.gh-maestro\\worktrees', 'C:\\ws\\.gh-maestro\\worktrees\\issue-5-coder-fix-auth', 'worktreeDir')
+  );
+});
+
+test('assertWithinRoot: ルート自身は通過する', () => {
+  assert.doesNotThrow(() =>
+    assertWithinRoot('C:\\root', 'C:\\root', 'root')
+  );
+});
+
+test('assertWithinRoot: ルート外のパスは拒否する', () => {
+  assert.throws(
+    () => assertWithinRoot('C:\\ws\\.gh-maestro\\worktrees', 'C:\\outside\\file', 'worktreeDir'),
+    /管理ルート外/,
+  );
+});
+
+test('assertWithinRoot: ../ による脱出を拒否する（path.resolve で正規化されて判定される）', () => {
+  assert.throws(
+    () => assertWithinRoot(
+      'C:\\ws\\.gh-maestro\\worktrees',
+      'C:\\ws\\.gh-maestro\\worktrees\\..\\..\\outside',
+      'worktreeDir',
+    ),
+    /管理ルート外/,
+  );
+});
+
+// ── factoryレベルの入力検証 ────────────────────────────────────────────────────
+
+test('buildNormalWorkerLaunchSpec: issue が 0 だとエラー', () => {
+  assert.throws(
+    () => buildNormalWorkerLaunchSpec({
+      skill: 'gh-maestro-coder', issue: 0, description: 'fix-auth', repo: 'o/r', workspace: '/ws',
+    }),
+    /invalid issue number/,
+  );
+});
+
+test('buildNormalWorkerLaunchSpec: issue が "abc" だとエラー', () => {
+  assert.throws(
+    () => buildNormalWorkerLaunchSpec({
+      skill: 'gh-maestro-coder', issue: 'abc', description: 'fix-auth', repo: 'o/r', workspace: '/ws',
+    }),
+    /invalid issue number/,
+  );
+});
+
+test('buildNormalWorkerLaunchSpec: issue が "01"（先頭ゼロ）だとエラー', () => {
+  assert.throws(
+    () => buildNormalWorkerLaunchSpec({
+      skill: 'gh-maestro-coder', issue: '01', description: 'fix-auth', repo: 'o/r', workspace: '/ws',
+    }),
+    /invalid issue number/,
+  );
+});
+
+test('buildNormalWorkerLaunchSpec: description にパストラバーサル文字列を含むとエラー', () => {
+  assert.throws(
+    () => buildNormalWorkerLaunchSpec({
+      skill: 'gh-maestro-coder', issue: 5, description: 'x/../../../../outside', repo: 'o/r', workspace: '/ws',
+    }),
+    /invalid description/,
+  );
+});
+
+test('buildNormalWorkerLaunchSpec: description にスラッシュを含むとエラー', () => {
+  assert.throws(
+    () => buildNormalWorkerLaunchSpec({
+      skill: 'gh-maestro-coder', issue: 5, description: 'foo/bar', repo: 'o/r', workspace: '/ws',
+    }),
+    /invalid description/,
+  );
+});
+
+test('buildNormalWorkerLaunchSpec: description が 51文字以上だとエラー', () => {
+  assert.throws(
+    () => buildNormalWorkerLaunchSpec({
+      skill: 'gh-maestro-coder', issue: 5, description: 'a'.repeat(51), repo: 'o/r', workspace: '/ws',
+    }),
+    /invalid description/,
+  );
+});
+
+test('buildNormalWorkerLaunchSpec: description が空文字列だとエラー', () => {
+  assert.throws(
+    () => buildNormalWorkerLaunchSpec({
+      skill: 'gh-maestro-coder', issue: 5, description: '', repo: 'o/r', workspace: '/ws',
+    }),
+    /invalid description/,
+  );
+});
+
+test('buildNormalWorkerLaunchSpec: description にスペースを含むとエラー', () => {
+  assert.throws(
+    () => buildNormalWorkerLaunchSpec({
+      skill: 'gh-maestro-coder', issue: 5, description: 'foo bar', repo: 'o/r', workspace: '/ws',
+    }),
+    /invalid description/,
+  );
+});
+
+test('buildNormalWorkerLaunchSpec: 正規の入力はパスが管理ルート配下に解決される', () => {
+  const spec = buildNormalWorkerLaunchSpec({
+    skill: 'gh-maestro-coder',
+    issue: 5,
+    description: 'fix-auth',
+    repo: 'o/r',
+    workspace: 'C:/ws',
+  });
+
+  // worktreeDir が worktrees/ ルート配下であること
+  const worktreesRoot = path.join('C:/ws', '.gh-maestro', 'worktrees');
+  assert.ok(
+    spec.worktreeDir.startsWith(worktreesRoot + path.sep) || spec.worktreeDir === worktreesRoot,
+    `worktreeDir "${spec.worktreeDir}" should be under "${worktreesRoot}"`,
+  );
+
+  // logPath が worker-logs/ ルート配下であること
+  const logsRoot = path.join('C:/ws', '.gh-maestro', 'worker-logs');
+  assert.ok(
+    spec.logPath.startsWith(logsRoot + path.sep) || spec.logPath === logsRoot,
+    `logPath "${spec.logPath}" should be under "${logsRoot}"`,
+  );
+});
+
+// ── buildReviewManagerLaunchSpec の issue 検証 ─────────────────────────────────
+
+test('buildReviewManagerLaunchSpec: issue が 0 だとエラー', () => {
+  assert.throws(
+    () => buildReviewManagerLaunchSpec({ issue: 0, pr: '42', repo: 'o/r', workspace: '/ws' }),
+    /invalid issue number/,
+  );
+});
+
+test('buildReviewManagerLaunchSpec: issue が負数だとエラー', () => {
+  assert.throws(
+    () => buildReviewManagerLaunchSpec({ issue: -1, pr: '42', repo: 'o/r', workspace: '/ws' }),
+    /invalid issue number/,
+  );
+});
+
+test('buildReviewManagerLaunchSpec: issue が "abc" だとエラー', () => {
+  assert.throws(
+    () => buildReviewManagerLaunchSpec({ issue: 'abc', pr: '42', repo: 'o/r', workspace: '/ws' }),
+    /invalid issue number/,
+  );
+});
+
+test('buildReviewManagerLaunchSpec: 正規の入力はパスが管理ルート配下に解決される', () => {
+  const spec = buildReviewManagerLaunchSpec({
+    issue: 174, pr: '42', repo: 'o/r', workspace: 'C:/ws',
+  });
+
+  // worktreeDir が worktrees/ ルート配下であること
+  const worktreesRoot = path.join('C:/ws', '.gh-maestro', 'worktrees');
+  assert.ok(
+    spec.worktreeDir.startsWith(worktreesRoot + path.sep) || spec.worktreeDir === worktreesRoot,
+  );
+
+  // logPath が worker-logs/ ルート配下であること
+  const logsRoot = path.join('C:/ws', '.gh-maestro', 'worker-logs');
+  assert.ok(
+    spec.logPath.startsWith(logsRoot + path.sep) || spec.logPath === logsRoot,
+  );
 });

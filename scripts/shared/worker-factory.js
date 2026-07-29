@@ -17,6 +17,69 @@ const path = require('path');
 const { workerLogPath } = require('./headless-launch');
 const { assertValidPr } = require('./review-manager-paths');
 
+// ── 入力バリデーション ──────────────────────────────────────────────────────────
+// 外部由来の値（issue/description）が worktree・ログパス等の構成要素になる前に
+// 検証する。既存の spawn-worker.js CLI と同一のバリデーションをfactoryでも適用する。
+
+const ISSUE_RE = /^[1-9][0-9]*$/;
+const DESCRIPTION_RE = /^[A-Za-z0-9_-]{1,50}$/;
+
+/**
+ * Issue番号を正の整数として検証する（spawn-worker.js line 168 と同一の検証）。
+ * @param {number|string} issue
+ * @returns {number} 検証済みの数値
+ * @throws {Error} 正の整数でない場合
+ */
+function assertValidIssue(issue) {
+  const s = String(issue);
+  if (!ISSUE_RE.test(s)) {
+    throw new Error(
+      `invalid issue number: ${JSON.stringify(issue)} ` +
+      `(must be a positive integer)`
+    );
+  }
+  return Number(s);
+}
+
+/**
+ * description を gitブランチ名・worktreeディレクトリ名として安全に使えるか
+ * 検証する（spawn-worker.js line 152 と同一の検証）。
+ * @param {string} description
+ * @returns {string} 検証済みのdescription
+ * @throws {Error} 英数字・ハイフン・アンダースコアのみ 1〜50文字でない場合
+ */
+function assertValidDescription(description) {
+  if (typeof description !== 'string' || !DESCRIPTION_RE.test(description)) {
+    throw new Error(
+      `invalid description: ${JSON.stringify(description)} ` +
+      `(must match ${DESCRIPTION_RE.source}: 1–50 chars, A-Z a-z 0-9 _ - only)`
+    );
+  }
+  return description;
+}
+
+/**
+ * candidate を resolve した結果が root 配下であることを確認する
+ * （path-confinement.md のルール準拠。review-manager-paths.js と同じパターン）。
+ * resolve が "../" を正規化するため、正規化後のパスで配下判定する。
+ * @param {string} root 許可されたルートディレクトリ（事前resolve済み）
+ * @param {string} candidate 検査対象のパス
+ * @param {string} label エラーメッセージ用のラベル（例: 'worktreeDir'）
+ * @throws {Error} ルート配下でない場合
+ */
+function assertWithinRoot(root, candidate, label) {
+  const resolvedCandidate = path.resolve(candidate);
+  if (
+    resolvedCandidate !== root &&
+    !resolvedCandidate.startsWith(root + path.sep)
+  ) {
+    throw new Error(
+      `${label} が管理ルート外に解決されました: ` +
+      `${JSON.stringify(resolvedCandidate)} (root: ${JSON.stringify(root)})`
+    );
+  }
+}
+
 // ── Role ラベルマップ ──────────────────────────────────────────────────────────
 // skill名 → roleラベル（workerNameの <role> 部分）。
 // 全ワーカー種別が一貫して role を持つ（Issue #174 命名規約フォローアップコメント参照）。
@@ -120,15 +183,33 @@ function buildNormalWorkerLaunchSpec({ skill, issue, description, repo, workspac
     );
   }
 
-  const workerName = buildWorkerName(issue, role, description);
-  const ghDir = path.join(workspace, '.gh-maestro');
+  // 入力検証: issue/description を workerName（延いては worktreeDir/logPath）の
+  // 構成要素として使う前に、既存 CLI（spawn-worker.js）と同じ検証を適用する。
+  // description は gitブランチ名・ディレクトリ名として使われるため、
+  // パストラバーサル文字列（../等）はここで拒否される。
+  const validIssue = assertValidIssue(issue);
+  const validDescription = assertValidDescription(description);
+
+  const workerName = buildWorkerName(validIssue, role, validDescription);
+  const ghDir = path.resolve(path.join(workspace, '.gh-maestro'));
+  const worktreesRoot = path.join(ghDir, 'worktrees');
+  const logsRoot = path.join(ghDir, 'worker-logs');
+
+  const worktreeDir = path.join(worktreesRoot, workerName);
+  const logPath = workerLogPath(workspace, workerName);
+
+  // 多層防御: 識別子検証を通過した後も、解決後パスが管理ルート配下かを確認する
+  // （path-confinement.md 準拠。description検証が ../ を弾くが、将来の変更や
+  // 未知のエンコーディングバイパスに備えた防護線）。
+  assertWithinRoot(worktreesRoot, worktreeDir, 'worktreeDir');
+  assertWithinRoot(logsRoot, logPath, 'logPath');
 
   return Object.freeze({
     workerName,
-    issue: Number(issue),
+    issue: validIssue,
     role,
     skill,
-    description,
+    description: validDescription,
     pr: null,
     repo,
     workspace,
@@ -136,8 +217,8 @@ function buildNormalWorkerLaunchSpec({ skill, issue, description, repo, workspac
     logKey: workerName,
     leaseKey: workerName,
     leaseStore: path.join(ghDir, 'workers.json'),
-    worktreeDir: path.join(ghDir, 'worktrees', workerName),
-    logPath: workerLogPath(workspace, workerName),
+    worktreeDir,
+    logPath,
   });
 }
 
@@ -160,17 +241,29 @@ function buildNormalWorkerLaunchSpec({ skill, issue, description, repo, workspac
 function buildReviewManagerLaunchSpec({ issue, pr, repo, workspace }) {
   const skill = 'gh-maestro-reviewer';
   const role = ROLE_LABEL_MAP[skill]; // 'review-manager'
+  const validIssue = assertValidIssue(issue);
   const validPr = assertValidPr(pr);
   const description = `pr-${validPr}`;
 
-  const workerName = buildWorkerName(issue, role, description);
+  const workerName = buildWorkerName(validIssue, role, description);
   // 例: issue-174-review-manager-pr-42
 
-  const ghDir = path.join(workspace, '.gh-maestro');
+  const ghDir = path.resolve(path.join(workspace, '.gh-maestro'));
+  const worktreesRoot = path.join(ghDir, 'worktrees');
+  const logsRoot = path.join(ghDir, 'worker-logs');
+
+  const worktreeDir = path.join(worktreesRoot, `review-pr-${validPr}`);
+  const logPath = workerLogPath(workspace, workerName);
+
+  // 多層防御: 解決後パスが管理ルート配下かを確認する（通常ワーカーと同様の防護線）。
+  // Review Managerのworktreeキーは review-pr-<pr>（pr は assertValidPr で正整数に
+  // 検証済み）だが、将来の変更に備えて封じ込めチェックを適用する。
+  assertWithinRoot(worktreesRoot, worktreeDir, 'worktreeDir');
+  assertWithinRoot(logsRoot, logPath, 'logPath');
 
   return Object.freeze({
     workerName,
-    issue: Number(issue),
+    issue: validIssue,
     role,
     skill,
     description,
@@ -188,8 +281,8 @@ function buildReviewManagerLaunchSpec({ issue, pr, repo, workspace }) {
     // 現行の start-review-manager.js / run-review-manager.js の契約を維持。
     leaseKey: `review-manager-${validPr}`,
     leaseStore: path.join(ghDir, `review-manager-${validPr}.running`),
-    worktreeDir: path.join(ghDir, 'worktrees', `review-pr-${validPr}`),
-    logPath: workerLogPath(workspace, workerName),
+    worktreeDir,
+    logPath,
   });
 }
 
@@ -248,4 +341,8 @@ module.exports = {
   buildReviewManagerLaunchSpec,
   normalWorkerPolicy,
   reviewManagerPolicy,
+  // 入力バリデーション（テスト用にエクスポート）
+  assertValidIssue,
+  assertValidDescription,
+  assertWithinRoot,
 };
