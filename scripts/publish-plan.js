@@ -39,8 +39,8 @@ Options:
   --workspace <path>    ワークスペースのルートパス（省略時は環境変数またはCWDから上方探索で解決）
 
 動作:
-  1. 対象 Issue の全コメントから、計画マーカー（${PLAN_MARKER}）を持ち
-     現在のユーザーが投稿した pin 済みコメントを検索
+  1. 対象 Issue の全コメントから、計画マーカー（${PLAN_MARKER}）を
+     持つ pin 済みコメントを検索
   2. 見つかればそのコメント本文を更新する（新規コメントは増やさない）
   3. 見つからなければ新規コメントを投稿し pin する
   4. マーカーを持たない pin 済みコメント（他目的の pin）は上書きしない
@@ -52,11 +52,6 @@ Output (stdout):
 
 let _ghRepoView = (opts = {}) => {
   return spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-    { encoding: 'utf8', ...opts });
-};
-
-let _ghViewerLogin = (opts = {}) => {
-  return spawnSync('gh', ['api', 'user', '--jq', '.login'],
     { encoding: 'utf8', ...opts });
 };
 
@@ -112,7 +107,6 @@ function parseCommentsResponse(stdout) {
  * @param {{ issue: string, body: string, workspace: string }} params
  * @param {object} [deps]  テスト用の依存注入
  * @param {function} [deps.ghRepoViewFn]
- * @param {function} [deps.ghViewerLoginFn]
  * @param {function} [deps.ghListCommentsFn]
  * @param {function} [deps.ghCreateCommentFn]
  * @param {function} [deps.ghUpdateCommentFn]
@@ -122,7 +116,6 @@ function parseCommentsResponse(stdout) {
 function publishPlan({ issue, body, workspace }, deps = {}) {
   const {
     ghRepoViewFn = _ghRepoView,
-    ghViewerLoginFn = _ghViewerLogin,
     ghListCommentsFn = _ghListComments,
     ghCreateCommentFn = _ghCreateComment,
     ghUpdateCommentFn = _ghUpdateComment,
@@ -144,17 +137,6 @@ function publishPlan({ issue, body, workspace }, deps = {}) {
     return { ok: false, error: 'リポジトリを解決できません（空のレスポンス）' };
   }
 
-  // ── 現在のユーザー（投稿者判定用） ──────────────────────────────────────
-
-  const viewerResult = ghViewerLoginFn(ghOpts);
-  if (viewerResult.status !== 0) {
-    return { ok: false, error: `現在のユーザーを取得できません: ${viewerResult.stderr || '(empty)'}` };
-  }
-  const viewerLogin = viewerResult.stdout.trim();
-  if (!viewerLogin) {
-    return { ok: false, error: '現在のユーザーを解決できません（空のレスポンス）' };
-  }
-
   // ── コメント一覧を取得し pin 済み計画コメントを検索 ─────────────────────
 
   const listResult = ghListCommentsFn(issue, repo, ghOpts);
@@ -173,13 +155,11 @@ function publishPlan({ issue, body, workspace }, deps = {}) {
     return { ok: false, error: 'コメント一覧の形式が不正です' };
   }
 
-  // 計画マーカーを持ち、かつ現在のユーザーが投稿した pin 済みコメントを探す。
-  // マーカーとユーザーの両方を確認することで、他目的で pin されたコメントや
-  // 別ユーザーが投稿した同名マーカー付きコメントを誤って上書きしない。
+  // 計画マーカーを持つ pin 済みコメントを探す。
+  // マーカーで識別することで、他目的で pin されたコメントを誤って上書きしない。
   const pinnedPlan = comments.find(c =>
     c.pin != null &&
-    c.body && c.body.includes(PLAN_MARKER) &&
-    c.user && c.user.login === viewerLogin,
+    c.body && c.body.includes(PLAN_MARKER),
   );
 
   // ── 既存の計画 pin コメントを更新 ───────────────────────────────────────

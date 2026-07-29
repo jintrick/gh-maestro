@@ -42,7 +42,6 @@ test('publishPlan: pin済み計画コメントなし → 新規投稿してpin�
     { issue: '42', body: '# Plan\n\n内容', workspace: '/tmp/ws' },
     {
       ghRepoViewFn: () => ({ status: 0, stdout: 'owner/repo\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 0, stdout: 'coder-bot\n', stderr: '' }),
       ghListCommentsFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
       ghCreateCommentFn: (issue, repo, body) => {
         assert.equal(issue, '42');
@@ -64,7 +63,7 @@ test('publishPlan: pin済み計画コメントなし → 新規投稿してpin�
   assert.deepEqual(pinCalledWith, { commentId: 12345, repo: 'owner/repo' });
 });
 
-test('publishPlan: マーカー＋投稿者一致のpin済みコメントあり → 更新する', () => {
+test('publishPlan: マーカー付きpin済みコメントあり → 更新する', () => {
   let createCalled = false;
   let pinCalled = false;
   const updateBody = MARKER + '\n# 新しい計画';
@@ -73,17 +72,15 @@ test('publishPlan: マーカー＋投稿者一致のpin済みコメントあり 
     body: MARKER + '\n古い計画',
     html_url: 'https://github.com/owner/repo/issues/42#issuecomment-99999',
     pin: { pinned_at: '2026-01-01T00:00:00Z' },
-    user: { login: 'coder-bot' },
   };
   const result = publishPlan(
     { issue: '42', body: '# 新しい計画', workspace: '/tmp/ws' },
     {
       ghRepoViewFn: () => ({ status: 0, stdout: 'owner/repo\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 0, stdout: 'coder-bot\n', stderr: '' }),
       ghListCommentsFn: () => ({ status: 0, stdout: JSON.stringify([
-        { id: 1, body: '普通のコメント', pin: null, user: { login: 'human' } },
+        { id: 1, body: '普通のコメント', pin: null },
         pinnedComment,
-        { id: 2, body: '別のコメント', pin: null, user: { login: 'coder-bot' } },
+        { id: 2, body: '別のコメント', pin: null },
       ]), stderr: '' }),
       ghUpdateCommentFn: (commentId, repo, body) => {
         assert.equal(commentId, 99999);
@@ -109,13 +106,11 @@ test('publishPlan: pin済みだがマーカーなし → 無視して新規投�
     id: 111,
     body: '人間がpinしたメモ',
     pin: { pinned_at: '2026-01-01T00:00:00Z' },
-    user: { login: 'human' },
   };
   const result = publishPlan(
     { issue: '42', body: '計画', workspace: '/tmp/ws' },
     {
       ghRepoViewFn: () => ({ status: 0, stdout: 'o/r\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 0, stdout: 'coder-bot\n', stderr: '' }),
       ghListCommentsFn: () => ({ status: 0, stdout: JSON.stringify([unrelatedPinned]), stderr: '' }),
       ghCreateCommentFn: () => ({ status: 0, stdout: JSON.stringify({ id: 200, html_url: 'https://github.com/o/r/issues/42#issuecomment-200' }), stderr: '' }),
       ghPinCommentFn: (commentId, repo) => {
@@ -131,47 +126,22 @@ test('publishPlan: pin済みだがマーカーなし → 無視して新規投�
   assert.deepEqual(pinCalledWith, { commentId: 200, repo: 'o/r' });
 });
 
-test('publishPlan: マーカー付きだが投稿者が異なるpin済みコメント → 無視して新規投稿', () => {
-  const otherUserPinned = {
-    id: 333,
-    body: MARKER + '\n別の人が立てた計画',
-    pin: { pinned_at: '2026-01-01T00:00:00Z' },
-    user: { login: 'other-user' },
-  };
-  const result = publishPlan(
-    { issue: '42', body: '計画', workspace: '/tmp/ws' },
-    {
-      ghRepoViewFn: () => ({ status: 0, stdout: 'o/r\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 0, stdout: 'coder-bot\n', stderr: '' }),
-      ghListCommentsFn: () => ({ status: 0, stdout: JSON.stringify([otherUserPinned]), stderr: '' }),
-      ghCreateCommentFn: () => ({ status: 0, stdout: JSON.stringify({ id: 400, html_url: 'https://github.com/o/r/issues/42#issuecomment-400' }), stderr: '' }),
-      ghPinCommentFn: () => ({ status: 0, stdout: '', stderr: '' }),
-    }
-  );
-
-  assert.equal(result.ok, true);
-  assert.equal(result.action, 'created');
-  assert.equal(result.url, 'https://github.com/o/r/issues/42#issuecomment-400');
-});
-
 test('publishPlan: コメント一覧が--paginate --slurp形式でも正しく平坦化して検索する', () => {
   const pinnedPlan = {
     id: 500,
     body: MARKER + '\n既存計画',
     pin: { pinned_at: '2026-01-01T00:00:00Z' },
-    user: { login: 'coder-bot' },
   };
   // --paginate --slurp は [[page1], [page2]] の形
   const paginated = JSON.stringify([
-    [{ id: 1, body: 'コメント1', pin: null, user: { login: 'human' } }],
+    [{ id: 1, body: 'コメント1', pin: null }],
     [pinnedPlan],
-    [{ id: 2, body: 'コメント2', pin: null, user: { login: 'human' } }],
+    [{ id: 2, body: 'コメント2', pin: null }],
   ]);
   const result = publishPlan(
     { issue: '42', body: '更新計画', workspace: '/tmp/ws' },
     {
       ghRepoViewFn: () => ({ status: 0, stdout: 'o/r\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 0, stdout: 'coder-bot\n', stderr: '' }),
       ghListCommentsFn: () => ({ status: 0, stdout: paginated, stderr: '' }),
       ghUpdateCommentFn: (commentId) => {
         assert.equal(commentId, 500);
@@ -189,7 +159,6 @@ test('publishPlan: pin失敗時はok:false（作成済みコメントIDをエラ
     { issue: '1', body: '計画', workspace: '/tmp/ws' },
     {
       ghRepoViewFn: () => ({ status: 0, stdout: 'a/b\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 0, stdout: 'bot\n', stderr: '' }),
       ghListCommentsFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
       ghCreateCommentFn: () => ({ status: 0, stdout: JSON.stringify({ id: 555, html_url: 'https://github.com/a/b/issues/1#issuecomment-555' }), stderr: '' }),
       ghPinCommentFn: () => ({ status: 1, stdout: '', stderr: 'Not Found' }),
@@ -213,38 +182,11 @@ test('publishPlan: リポジトリ解決失敗時はok:false', () => {
   assert.ok(result.error.includes('リポジトリを解決できません'));
 });
 
-test('publishPlan: ユーザー取得失敗時はok:false', () => {
-  const result = publishPlan(
-    { issue: '42', body: '計画', workspace: '/tmp/ws' },
-    {
-      ghRepoViewFn: () => ({ status: 0, stdout: 'o/r\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 1, stdout: '', stderr: 'unauthorized' }),
-    }
-  );
-
-  assert.equal(result.ok, false);
-  assert.ok(result.error.includes('現在のユーザーを取得できません'));
-});
-
-test('publishPlan: ユーザー名が空の場合はok:false', () => {
-  const result = publishPlan(
-    { issue: '42', body: '計画', workspace: '/tmp/ws' },
-    {
-      ghRepoViewFn: () => ({ status: 0, stdout: 'o/r\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 0, stdout: '\n', stderr: '' }),
-    }
-  );
-
-  assert.equal(result.ok, false);
-  assert.ok(result.error.includes('解決できません'));
-});
-
 test('publishPlan: コメント一覧取得失敗時はok:false', () => {
   const result = publishPlan(
     { issue: '42', body: '計画', workspace: '/tmp/ws' },
     {
       ghRepoViewFn: () => ({ status: 0, stdout: 'o/r\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 0, stdout: 'bot\n', stderr: '' }),
       ghListCommentsFn: () => ({ status: 1, stdout: '', stderr: 'Not Found' }),
     }
   );
@@ -258,7 +200,6 @@ test('publishPlan: コメント一覧が不正なJSONのときはok:false', () =
     { issue: '42', body: '計画', workspace: '/tmp/ws' },
     {
       ghRepoViewFn: () => ({ status: 0, stdout: 'o/r\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 0, stdout: 'bot\n', stderr: '' }),
       ghListCommentsFn: () => ({ status: 0, stdout: 'not json', stderr: '' }),
     }
   );
@@ -272,7 +213,6 @@ test('publishPlan: コメント一覧が配列でない場合はok:false', () =>
     { issue: '42', body: '計画', workspace: '/tmp/ws' },
     {
       ghRepoViewFn: () => ({ status: 0, stdout: 'o/r\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 0, stdout: 'bot\n', stderr: '' }),
       ghListCommentsFn: () => ({ status: 0, stdout: '{"message":"error"}', stderr: '' }),
     }
   );
@@ -286,8 +226,7 @@ test('publishPlan: 更新のgh api失敗時はok:false', () => {
     { issue: '42', body: '計画', workspace: '/tmp/ws' },
     {
       ghRepoViewFn: () => ({ status: 0, stdout: 'o/r\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 0, stdout: 'bot\n', stderr: '' }),
-      ghListCommentsFn: () => ({ status: 0, stdout: JSON.stringify([{ id: 1, body: MARKER + '\nold', pin: {}, user: { login: 'bot' } }]), stderr: '' }),
+      ghListCommentsFn: () => ({ status: 0, stdout: JSON.stringify([{ id: 1, body: MARKER + '\nold', pin: {} }]), stderr: '' }),
       ghUpdateCommentFn: () => ({ status: 1, stdout: '', stderr: 'validation error' }),
     }
   );
@@ -301,7 +240,6 @@ test('publishPlan: 作成のgh api失敗時はok:false', () => {
     { issue: '42', body: '計画', workspace: '/tmp/ws' },
     {
       ghRepoViewFn: () => ({ status: 0, stdout: 'o/r\n', stderr: '' }),
-      ghViewerLoginFn: () => ({ status: 0, stdout: 'bot\n', stderr: '' }),
       ghListCommentsFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
       ghCreateCommentFn: () => ({ status: 1, stdout: '', stderr: 'failed' }),
     }
