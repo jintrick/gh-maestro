@@ -510,7 +510,7 @@ test('send-text-after-launch の拒否は worktree を作る前に起きる（�
 
     assert.notEqual(r.status, 0);
     assert.equal(
-      fs.existsSync(path.join(ws, '.gh-maestro', 'worktrees', 'issue-1-sendtext')), false,
+      fs.existsSync(path.join(ws, '.gh-maestro', 'worktrees', 'issue-1-coder-sendtext')), false,
       'ガードは worktree 作成より前に落ちること',
     );
   } finally {
