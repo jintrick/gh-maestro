@@ -820,9 +820,11 @@ GitHubへの投稿をチャット提示より先に行う。以下の手順で�
 ```
 
 ```sh
-node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/retro-<N>.md --stdin <<'EOF'
+DRAFT_OUTPUT=$(node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/retro-<N>.md --stdin <<'EOF'
 <上記「提示フォーマット」の内容>
-EOF
+EOF)
+BODY_PATH=${DRAFT_OUTPUT#DRAFT_WRITTEN:}
+
 gh issue comment <N> --repo $REPO --body-file "$BODY_PATH"
 ```
 
