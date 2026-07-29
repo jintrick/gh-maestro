@@ -33,6 +33,8 @@ const { buildAgentCommandArgs } = require('./agent-launch');
 const { checkAgentExists } = require('./agent-exec');
 const { launchAgentHeadless, workerLogPath } = require('./shared/headless-launch');
 const { isWorkerAlive } = require('./shared/worker-liveness');
+const { createNormalWorkerStore, acquireLease: acquireWorkerLease,
+        activateLease: activateWorkerLease, releaseLease: releaseWorkerLease } = require('./shared/worker-lease');
 const { killProcessTree } = require('./kill-tree');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
@@ -217,6 +219,36 @@ if (agentConfig.extraArgs?.includes('-Command') && /\s/.test(workspace)) {
 const workerName   = `issue-${issue}-${description}`;
 const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
 const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
+
+// --- リース獲得（重複起動防止。Phase 2: 通常ワーカーのみ） ---
+// lease獲得はworktreeの除去・再作成より先に行う。
+// live lease（生存中のワーカー）があれば起動を明示的に拒否する。
+// stale leaseの場合だけ回収して起動を継続する。
+// workers.json（resume台帳）とは責務を分離。
+const leaseStore = createNormalWorkerStore(workspace);
+let leaseAcquired = false;
+try {
+  const leaseResult = acquireWorkerLease(leaseStore, workerName, {
+    pid: process.pid,
+    startTime: null,
+    workerName,
+  });
+  leaseAcquired = true;
+  if (leaseResult.staleReclaimed) {
+    console.warn(`spawn-worker: stale lease を回収しました: "${workerName}"`);
+  }
+} catch (e) {
+  fail(`起動を拒否しました: ${e.message}`);
+}
+
+// 以降の fail 呼び出しではリースも解放する
+const _originalFail = fail;
+fail = (msg) => {
+  if (leaseAcquired) {
+    try { releaseWorkerLease(leaseStore, workerName, { pid: process.pid }); } catch {}
+  }
+  _originalFail(msg);
+};
 
 // --- workers.json を読み込み（なければ初期化、破損時は空として扱う） ---
 let workers = {};
@@ -426,6 +458,16 @@ try {
   }
   rollbackWorktree();
   fail(e.message);
+}
+
+// --- リースを実際のワーカーPIDでアクティベート ---
+// 予約リース（launcher PID）を実際のワーカープロセス情報に更新する。
+try {
+  activateWorkerLease(leaseStore, workerName, { pid: launched.pid, startTime: launched.startTime });
+} catch (e) {
+  console.warn(`spawn-worker: リースアクティベートに失敗しました: ${e.message}`);
+  // ワーカー本体は起動済みのためロールバックしない（リースは予約状態のまま残るが、
+  // launcher終了後にstale判定されるため次回起動時に回収される）。
 }
 
 // --- workers.json にワーカーを登録（失敗時はプロセスもロールバック） ---
