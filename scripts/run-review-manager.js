@@ -4,18 +4,25 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('./child-process');
+const { spawn, spawnSync } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { linkNodeModules } = require('./link-node-modules');
 const { unlinkJunctions } = require('./unlink-junctions');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
+const { killProcessTree } = require('./kill-tree');
+const { isProcessAlive } = require('./process-lifecycle');
 const {
   assertValidPr, reviewArtifactPath,
   reviewWorktreeBranchName, reviewWorktreeFetchRef, reviewWorktreeDir,
 } = require('./shared/review-manager-paths');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+
+// ── 定数 ────────────────────────────────────────────────────────────────────────
+const DEFAULT_ARTIFACT_POLL_INTERVAL_MS = 200;
+const DEFAULT_DEADLINE_MS = 30 * 60 * 1000; // 30 minutes
+const GRACEFUL_SHUTDOWN_GRACE_MS = 5000; // 5 seconds for child process to exit normally
 
 const USAGE = `run-review-manager.js — Review Managerをheadless起動してPRレビューを実行する
 
@@ -27,30 +34,54 @@ Arguments:
   <WORKSPACE>  ワークスペースの絶対パス
 
 このスクリプトは通常 start-review-manager.js から detach 起動される内部エンドポイント。
-3幹（Correctness/Resilience & Security/Maintainability）全てについて独立した
-サブエージェントを並列に起動する。観点を絞り込む判断はReview Manager自身がPR diffを
-見た上で行う（skills/gh-maestro-reviewer/SKILL.md参照）。`;
+成果物完成トリガー（artifact-committed）を採用し、エージェントプロセスの終了ではなく
+成果物（findings JSON）のatomic rename完了をpublishの契機とする。
+エージェントがハングしても成果物が完成していればpublishが進行する。`;
+
+// ── 成果物契約（artifact contract）ヘルパー ─────────────────────────────────────
+// エージェントはSTAGINGファイルに全内容を書き、closeしてからOUTPUTへrenameする。
+// ランチャーはOUTPUTの出現（atomic rename）をポーリングし、部分書き込みを観測しない。
+
+/**
+ * 実行固有のstagingファイルパスを生成する。
+ * PID + タイムスタンプ + ランダム文字列で一意性を保証する。
+ * @param {string} finalPath OUTPUTの最終パス
+ * @returns {string} 一意のstagingファイルパス
+ */
+function generateStagingPath(finalPath) {
+  const dir = path.dirname(finalPath);
+  const base = path.basename(finalPath);
+  const rand = Math.random().toString(36).slice(2, 8);
+  const stagingName = `.staging-${base}.${process.pid}-${Date.now()}-${rand}`;
+  return path.join(dir, stagingName);
+}
 
 /**
  * @param {{pr: string, repo: string, workspace: string, outputFile: string}} params
- * @returns {string}
+ * @returns {{prompt: string, stagingFile: string}}
  */
 function buildPrompt({ pr, repo, workspace, outputFile }) {
   const toUnix = p => p.replace(/\\/g, '/');
-  return `gh-maestro-reviewerスキルを発動し、Review ManagerとしてPRレビューを実行してください。
+  const stagingFile = generateStagingPath(outputFile);
+  const prompt = `gh-maestro-reviewerスキルを発動し、Review ManagerとしてPRレビューを実行してください。
 
 PR=${pr}
 REPO=${repo}
 WORKSPACE=${toUnix(workspace)}
 OUTPUT=${toUnix(outputFile)}
+STAGING=${toUnix(stagingFile)}
 
 必ず以下を守ってください。
 - GitHubへ投稿しない
 - 採否判断しない
 - 3観点のReviewerを独立に並列spawnする
 - Reviewerには該当する観点別基準ファイルを読ませる
+- **成果物はSTAGINGファイルに全内容を書き、closeしてからOUTPUTへatomic renameすること**
+- STAGINGファイルはこのプロンプトで指定された一意のパスを使い、追記・上書きしない
+- OUTPUTへ直接書き込まない（renameのみで作成する）
 - 最終結果はOUTPUTのJSONだけに書き出す
 `;
+  return { prompt, stagingFile };
 }
 
 /**
@@ -211,167 +242,713 @@ function runAgentHeadless(agentArgs, cwd, logFile) {
   }
 }
 
-module.exports = {
-  buildPrompt,
-  setupReviewWorktree, teardownReviewWorktree,
-  buildReviewManagerAgentArgs, runAgentHeadless,
-};
+// ── 成果物ポーリング ────────────────────────────────────────────────────────────
+// finalPath の出現（atomic renameによる）をポーリングする。
+// ファイルが存在し、かつ読み取り可能であれば検出成功とする。
+// mtimeベースの安定性判定は行わない（atomic rename自体が完了を保証するため）。
 
-if (require.main === module) {
-  const argv = process.argv.slice(2);
-  const { rest, exitFlagMiss } = parseFlags(argv, []);
+/**
+ * 指定されたパスが出現するまでポーリングする。
+ * ファイルの存在確認→微小な安定待ち→読み取りの順で行う。
+ *
+ * @param {string} artifactPath 監視対象の成果物パス
+ * @param {number} deadlineMs ポーリングを継続する期限（Date.now() + deadlineMs の絶対値ではなく相対ms）
+ * @param {number} pollIntervalMs ポーリング間隔（ms）
+ * @param {{aborted: boolean}} signal 外部からの中止シグナル
+ * @returns {Promise<{found: boolean, content?: string, reason?: string}>}
+ */
+async function pollForArtifact(artifactPath, deadlineMs, pollIntervalMs, signal) {
+  const deadline = Date.now() + deadlineMs;
 
-  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
-  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
-  // 値欠落は常にエラー優先（フェイルクローズ）とする。
-  if (exitFlagMiss) {
-    console.error(USAGE);
-    process.exit(1);
-  }
-
-  if (hasHelpFlag(rest)) {
-    console.log(USAGE);
-    process.exit(0);
-  }
-
-  const [pr, repo, workspace] = rest;
-
-  if (!pr || !repo || !workspace) {
-    console.error(USAGE);
-    process.exit(1);
-  }
-
-  // pr はファイルパス構成要素として使われるため、他の処理より先に検証する
-  // （PR #84 Review指摘: pathトラバーサル対策）。
-  try {
-    assertValidPr(pr);
-  } catch (e) {
-    console.error(`run-review-manager: ${e.message}`);
-    process.exit(1);
-  }
-
-  const ghDir = path.join(workspace, '.gh-maestro');
-  const lockFile = reviewArtifactPath(ghDir, pr, '.running');
-  const logFile = reviewArtifactPath(ghDir, pr, '.log');
-  const outputFile = reviewArtifactPath(ghDir, pr, '.json');
-  const promptFile = path.join(os.tmpdir(), `review-manager-prompt-${pr}-${Date.now()}.md`);
-
-  function log(msg) {
-    fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`);
-  }
-
-  function cleanup() {
-    try { fs.unlinkSync(promptFile); } catch {}
-    try { fs.unlinkSync(lockFile); } catch {}
-    // 専用worktree（とそのブランチ・専用ref）はレビュー完了後に必ず除去する。
-    // setupReviewWorktree に到達していなくても teardown は安全（各ステップが失敗を許容する）。
-    // log() 自体が失敗しうる状態（ghDir未作成等）でも finally 内の他ステップを止めないよう、
-    // 例外は無視できるlogに差し替える。
-    try {
-      teardownReviewWorktree(workspace, pr, (msg) => { try { log(msg); } catch {} });
-    } catch {}
-  }
-
-  // process.exit() は try/finally をスキップする（finally 内の cleanup() が実行されない）ため、
-  // 終了コードは変数に保持し、finally 完了後に一度だけ process.exit() する。
-  // mkdirSync/lockFile書き込み/log()もtry内に含める。ここで例外（ディスク容量不足・
-  // 権限エラー等）が発生した場合でもfinallyのcleanup()を確実に実行するため。
-  let exitCode = 0;
-  try {
-    fs.mkdirSync(ghDir, { recursive: true });
-    // logFile は worker-logs/ 配下（workerLogPath と共通のディレクトリ）で ghDir とは別なので、
-    // ghDir とは別に存在を保証する。
-    fs.mkdirSync(path.dirname(logFile), { recursive: true });
-
-    // lock ファイルに自PIDを記録（起動元 launcher のPIDを上書き）。
-    // launcher (start-review-manager.js) は detach 後すぐに終了するため、
-    // 子プロセスである run-review-manager.js 自身が lock を所有・更新する。
-    // これにより isLockValid が正しく稼働中プロセスのPIDを確認できる。
-    fs.writeFileSync(lockFile, String(process.pid));
-
-    log(`run-review-manager started pr=${pr} repo=${repo}`);
-
-    // Review Manager（Codex）はメインワークスペースを直接触らせず、専用worktree内でのみ動かす。
-    // PRのdiffが外部由来の入力であるため、無制限の書き込み権限をメインワークスペースに
-    // 持たせない（Issue #101）。
-    let reviewWtDir;
-    try {
-      reviewWtDir = setupReviewWorktree(workspace, pr, log);
-    } catch (e) {
-      log(`review worktree のセットアップに失敗しました: ${e.message}`);
-      exitCode = 1;
-      reviewWtDir = null;
+  while (Date.now() < deadline) {
+    if (signal && signal.aborted) {
+      return { found: false, reason: 'aborted' };
     }
 
-    if (reviewWtDir === null) {
-      // すでに exitCode=1 を設定済み。下の agentConfig 分岐に進まない。
-    } else {
-      const worktreeGhDir = path.join(reviewWtDir, '.gh-maestro');
-      fs.mkdirSync(worktreeGhDir, { recursive: true });
-      // Codexが実際に書き込むOUTPUTは専用worktree配下に限定する。
-      // メインワークスペース側の outputFile（review-publisher.js が読む正式な場所）へは、
-      // Codex終了後にこのスクリプト自身（サンドボックス外）がコピーする。
-      const worktreeOutputFile = path.join(worktreeGhDir, `review-manager-${pr}.json`);
+    try {
+      if (fs.existsSync(artifactPath)) {
+        // atomic renameの後は即座に読み取り可能であることが期待されるが、
+        // 一部のネットワークFSでの遅延に備えて微小な安定待ちを入れる
+        await sleep(50);
+        const content = fs.readFileSync(artifactPath, 'utf8');
+        // 空ファイルは未完成とみなす（rename直後の過渡状態対策）
+        if (content.length === 0) {
+          await sleep(pollIntervalMs);
+          continue;
+        }
+        return { found: true, content };
+      }
+    } catch {
+      // ファイルがrename中・ロック中の場合。次のポーリングで再試行
+    }
 
-      // WORKSPACE はCodex自身に伝える実行場所であるため、隔離用に作成したreviewWtDirを渡す
-      // （メインワークスペースを渡すとIssue #101の隔離が無効化される。PR #103 Review Manager指摘）。
-      fs.writeFileSync(promptFile, buildPrompt({ pr, repo, workspace: reviewWtDir, outputFile: worktreeOutputFile }), 'utf8');
+    await sleep(pollIntervalMs);
+  }
 
-      const skill = 'gh-maestro-reviewer';
-      const skillMap = resolveSkillAgentMap({ workspace });
-      const agentId = skillMap[skill] ?? 'codex';
-      const homedir = process.env.HOME || process.env.USERPROFILE || '';
-      const agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
+  return { found: false, reason: 'deadline' };
+}
 
-      // resolveAgentConfig の結果（config.json のユーザー上書きを含む）をそのまま使う。
-      // headless実行専用の引数は agent-defaults.json 側の execArgs に持たせ、
-      // {workspace} プレースホルダは専用worktreeの実パスに置換する（インラインでの
-      // 設定丸ごと上書きはしない。PR #91 Review Manager指摘）。
-      // 解決失敗（config.json のtypo等）は安全側に倒して中断する（fail-closed-safety-guardsルール）。
-      if (!agentConfig) {
-        log(`エージェント "${agentId}" の設定を解決できません（agent-defaults.json / config.json を確認してください）`);
-        exitCode = 1;
-      } else {
-        const agentArgs = buildReviewManagerAgentArgs(agentConfig, {
-          reviewWtDir,
-          promptFile,
-          skill,
-        });
+/** @param {number} ms */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-        log(`spawning ${agentArgs.join(' ')}`);
-        // 標準出力/標準エラーは同じ .log へfdで直接リダイレクトされ、実行中から逐次書かれる。
-        // 完了後にまとめて log() へ書き戻す必要はない（以前はメモリにバッファしていたため、
-        // 実行中はRMが何をしているか一切見えなかった）。
-        const result = runAgentHeadless(agentArgs, reviewWtDir, logFile);
+// ── 成果物バリデーション ───────────────────────────────────────────────────────
 
-        if (result.error) log(`spawn error: ${result.error.message}`);
-        log(`${agentArgs[0]} exited with status ${result.status}`);
+/**
+ * 成果物JSONをパースし、findingsスキーマと意味検証を行う。
+ * review-publisher.jsの検証と重複するが、コピー前に早期に不合格を判定するための
+ * 軽量な事前検証として位置づける。
+ *
+ * @param {string} jsonContent 成果物JSON文字列
+ * @param {string|null} schemaPath review-findings-schema.jsonのパス（nullの場合はスキップ）
+ * @returns {{valid: boolean, error?: string, payload?: object}}
+ */
+function validateArtifactContent(jsonContent, schemaPath) {
+  // 1. JSONパース
+  let payload;
+  try {
+    payload = JSON.parse(jsonContent);
+  } catch (e) {
+    return { valid: false, error: `JSON parse failed: ${e.message}` };
+  }
 
-        if (result.status !== 0) {
-          exitCode = result.status ?? 1;
-        } else if (!fs.existsSync(worktreeOutputFile)) {
-          log(`RM output not found: ${worktreeOutputFile}`);
-          exitCode = 1;
-        } else {
-          fs.copyFileSync(worktreeOutputFile, outputFile);
-          const publish = spawnSync(process.execPath, [
-            path.join(__dirname, 'review-publisher.js'),
-            outputFile,
-          ], {
-            cwd: workspace,
-            encoding: 'utf8',
-            env: process.env,
-            maxBuffer: 20 * 1024 * 1024,
-          });
-          if (publish.stdout) log(publish.stdout);
-          if (publish.stderr) log(publish.stderr);
-          log(`review-publisher exited with status ${publish.status}`);
-          exitCode = publish.status ?? 0;
+  // 2. 基本形状チェック
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { valid: false, error: 'payload must be a JSON object' };
+  }
+  if (!Number.isInteger(payload.pr) || payload.pr < 1) {
+    return { valid: false, error: 'pr must be a positive integer' };
+  }
+  if (typeof payload.repo !== 'string' || !payload.repo) {
+    return { valid: false, error: 'repo is required (non-empty string)' };
+  }
+  if (typeof payload.headRefOid !== 'string' || !payload.headRefOid) {
+    return { valid: false, error: 'headRefOid is required (non-empty string)' };
+  }
+  if (!Array.isArray(payload.findings)) {
+    return { valid: false, error: 'findings must be an array' };
+  }
+
+  // 3. スキーマ検証（指定がある場合）
+  if (schemaPath) {
+    try {
+      const schemaRaw = fs.readFileSync(schemaPath, 'utf8');
+      const schema = JSON.parse(schemaRaw);
+      const schemaErrors = _validateAgainstSchema(payload, schema);
+      if (schemaErrors.length > 0) {
+        return { valid: false, error: `schema: ${schemaErrors.join('; ')}` };
+      }
+    } catch (e) {
+      return { valid: false, error: `schema load failed: ${e.message}` };
+    }
+  }
+
+  // 4. 個別findingの形状検証
+  for (let i = 0; i < payload.findings.length; i++) {
+    const errs = _validateFindingShape(payload.findings[i]);
+    if (errs.length > 0) {
+      return { valid: false, error: `finding[${i}]: ${errs.join('; ')}` };
+    }
+  }
+
+  return { valid: true, payload };
+}
+
+/** @param {object} f */
+function _validateFindingShape(f) {
+  const errors = [];
+  if (!f || typeof f !== 'object') return ['must be an object'];
+  const required = ['aspect', 'path', 'line_anchor', 'summary', 'severity', 'severity_rationale', 'body', 'verified_references'];
+  for (const field of required) {
+    if (!(field in f)) errors.push(`${field} is required`);
+  }
+  const validAspects = new Set(['Correctness', 'Maintainability', 'Resilience & Security']);
+  if (f.aspect && !validAspects.has(f.aspect)) errors.push(`invalid aspect: ${f.aspect}`);
+  const validSeverities = new Set(['BLOCKER', 'MAJOR', 'SUGGESTION']);
+  if (f.severity && !validSeverities.has(f.severity)) errors.push(`invalid severity: ${f.severity}`);
+  if (f.verified_references !== undefined && (!Array.isArray(f.verified_references) || f.verified_references.length === 0)) {
+    errors.push('verified_references must be a non-empty array');
+  }
+  return errors;
+}
+
+/**
+ * 簡易JSON Schema検証。
+ * additionalProperties: false、required、type、enum、minItems、minLength、minimum をサポート。
+ * 完全なJSON Schema実装ではないが、review-findings-schema.jsonの検証には十分。
+ *
+ * @param {*} value
+ * @param {object} schema
+ * @param {string} path_
+ * @returns {string[]}
+ */
+function _validateAgainstSchema(value, schema, path_ = '') {
+  const errors = [];
+
+  if (schema.type === 'object') {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      errors.push(`${path_}: expected object`);
+      return errors;
+    }
+    if (schema.required) {
+      for (const field of schema.required) {
+        if (!(field in value)) errors.push(`${path_}: missing required '${field}'`);
+      }
+    }
+    if (schema.additionalProperties === false && schema.properties) {
+      for (const key of Object.keys(value)) {
+        if (!(key in schema.properties)) errors.push(`${path_}: unexpected field '${key}'`);
+      }
+    }
+    if (schema.properties) {
+      for (const [key, ps] of Object.entries(schema.properties)) {
+        if (key in value) {
+          errors.push(..._validateAgainstSchema(value[key], ps, path_ ? `${path_}.${key}` : key));
         }
       }
     }
-  } finally {
-    cleanup();
+  } else if (schema.type === 'array') {
+    if (!Array.isArray(value)) {
+      errors.push(`${path_}: expected array`);
+      return errors;
+    }
+    if (typeof schema.minItems === 'number' && value.length < schema.minItems) {
+      errors.push(`${path_}: expected >= ${schema.minItems} items`);
+    }
+    if (schema.items && typeof schema.items === 'object') {
+      for (let i = 0; i < value.length; i++) {
+        errors.push(..._validateAgainstSchema(value[i], schema.items, `${path_}[${i}]`));
+      }
+    }
+  } else if (schema.type === 'string') {
+    if (typeof value !== 'string') errors.push(`${path_}: expected string`);
+    else if (typeof schema.minLength === 'number' && value.length < schema.minLength) {
+      errors.push(`${path_}: string too short (min ${schema.minLength})`);
+    }
+    if (schema.enum && !schema.enum.includes(value)) {
+      errors.push(`${path_}: invalid enum value '${value}'`);
+    }
+  } else if (schema.type === 'integer') {
+    if (!Number.isInteger(value)) errors.push(`${path_}: expected integer`);
+    else if (typeof schema.minimum === 'number' && value < schema.minimum) {
+      errors.push(`${path_}: below minimum ${schema.minimum}`);
+    }
   }
-  process.exit(exitCode);
+
+  return errors;
+}
+
+// ── atomicコピー（staging + rename） ────────────────────────────────────────────
+// worktree内のcommitted artifactをメインワークスペースへ引き渡す際、
+// destination側でもstaging→atomic renameで行い、publisherが部分コピーを観測しない。
+
+/**
+ * ファイルをatomicにコピーする。
+ * コピー先と同じディレクトリに一時ファイルを作成し、renameで置き換える。
+ *
+ * @param {string} srcPath コピー元の絶対パス
+ * @param {string} dstPath コピー先の絶対パス
+ * @returns {{success: boolean, error?: string}}
+ */
+function atomicCopyStaging(srcPath, dstPath) {
+  const dstDir = path.dirname(dstPath);
+  try { fs.mkdirSync(dstDir, { recursive: true }); } catch {}
+
+  const tmpPath = path.join(
+    dstDir,
+    `.tmp-${path.basename(dstPath)}.${process.pid}-${Date.now()}`
+  );
+
+  try {
+    fs.copyFileSync(srcPath, tmpPath);
+    fs.renameSync(tmpPath, dstPath);
+    return { success: true };
+  } catch (e) {
+    try { fs.unlinkSync(tmpPath); } catch {}
+    return { success: false, error: e.message };
+  }
+}
+
+// ── bounded cleanup ────────────────────────────────────────────────────────────
+// publish後の後始末。プロセス停止→worktree破棄→lease解放の順で行う。
+// 各段階の結果は独立して診断可能。publish済みの業務結果はcleanup失敗で取り消さない。
+
+/**
+ * publish後のプロセス停止・worktree破棄・lease解放を順に行う。
+ *
+ * @param {object} opts
+ * @param {number|null} opts.pid 停止対象のプロセスPID（エージェントの子プロセス）
+ * @param {string} opts.worktreeDir worktreeの絶対パス
+ * @param {string} opts.workspace メインワークスペース
+ * @param {string} opts.pr PR番号
+ * @param {string} opts.lockFile .running ロックファイルのパス
+ * @param {(msg: string) => void} opts.log ログ関数
+ * @param {number} [opts.gracefulShutdownMs] 正常終了猶予（ms）。デフォルト5000
+ * @returns {Promise<{processStopped: boolean, worktreeCleaned: boolean, leaseReleased: boolean, errors: string[]}>}
+ */
+async function boundedCleanup({ pid, worktreeDir, workspace, pr, lockFile, log,
+                                 gracefulShutdownMs }) {
+  const graceMs = gracefulShutdownMs ?? GRACEFUL_SHUTDOWN_GRACE_MS;
+  const results = {
+    processStopped: false,
+    worktreeCleaned: false,
+    leaseReleased: false,
+    errors: [],
+  };
+
+  // 1. 子プロセスに短い正常終了猶予を与える
+  if (pid != null && Number.isFinite(pid) && pid > 0) {
+    let processExited = false;
+    const graceEnd = Date.now() + graceMs;
+    while (Date.now() < graceEnd) {
+      if (!isProcessAlive(pid)) {
+        processExited = true;
+        break;
+      }
+      await sleep(200);
+    }
+
+    // 2. 残存していればプロセスツリーを停止
+    if (!processExited) {
+      try {
+        killProcessTree(pid);
+        // kill直後はOSのプロセス破棄が完了していないことがあるため、少し待つ
+        await sleep(1000);
+        results.processStopped = !isProcessAlive(pid);
+        if (!results.processStopped) {
+          results.errors.push(
+            `プロセスツリー停止未完了 (pid ${pid}): ` +
+            `kill後もプロセスが生存しています。同一PRの再起動は拒否されます`
+          );
+        }
+      } catch (e) {
+        results.errors.push(`プロセスツリー停止例外 (pid ${pid}): ${e.message}`);
+      }
+    } else {
+      results.processStopped = true;
+    }
+  }
+
+  // 3. worktree破棄
+  if (worktreeDir && workspace && pr != null) {
+    try {
+      teardownReviewWorktree(workspace, pr, (msg) => {
+        try { log(msg); } catch {}
+      });
+      results.worktreeCleaned = true;
+    } catch (e) {
+      results.errors.push(`worktree cleanup 失敗: ${e.message}`);
+    }
+  }
+
+  // 4. lease解放（.runningファイル削除）
+  // プロセス停止が確認できている場合のみ解放する。
+  // kill failureの場合は同一PRの二重起動を防ぐため、lease/`.running`を保持する。
+  if (lockFile) {
+    if (results.processStopped || pid == null) {
+      try {
+        if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
+        results.leaseReleased = true;
+      } catch (e) {
+        results.errors.push(`lease 解放失敗: ${e.message}`);
+      }
+    } else {
+      results.errors.push(
+        `leaseを保持します（プロセス停止未確認のため）。` +
+        `lockFile=${lockFile}`
+      );
+    }
+  }
+
+  return results;
+}
+
+// テスト用の注入ポイント
+let _injectedPollForArtifact = null;
+
+module.exports = {
+  buildPrompt,
+  generateStagingPath,
+  setupReviewWorktree, teardownReviewWorktree,
+  buildReviewManagerAgentArgs, runAgentHeadless,
+  pollForArtifact, validateArtifactContent,
+  atomicCopyStaging, boundedCleanup,
+  superviseReviewManager,
+  // テスト用エクスポート
+  _validateFindingShape, _validateAgainstSchema,
+  _setPollForArtifact: (fn) => { _injectedPollForArtifact = fn; },
+};
+
+// ── 監督ループ（artifact-committed mode向け） ──────────────────────────────────
+// 成果物コミット・プロセス終了・deadlineの3イベントを並行監督する。
+// 有効な成果物がコミットされればプロセス生存に関わらずpublishを進める。
+// プロセスが成果物なしで終了すれば非publish。
+// 両者が競合すれば成果物側を優先する。
+
+/**
+ * 監督ループの結果
+ *
+ * @typedef {object} SupervisionResult
+ * @property {'artifact-published'|'process-exit-no-artifact'|'timeout'|'setup-failed'|'agent-config-failed'} outcome
+ * @property {number} exitCode スクリプトの終了コード
+ * @property {object|null} artifact 検証済みの成果物（outcome === 'artifact-published' の場合のみ）
+ * @property {string} [reason] outcome の補足説明
+ * @property {number|null} agentPid エージェントプロセスのPID（cleanup用）
+ * @property {string|null} reviewWtDir worktreeの絶対パス（cleanup用）
+ */
+
+/**
+ * 成果物・プロセス終了・deadlineを並行監督し、成果物検出時にpublishする。
+ *
+ * @param {object} opts
+ * @param {string} opts.pr
+ * @param {string} opts.repo
+ * @param {string} opts.workspace
+ * @param {string} opts.ghDir
+ * @param {string} opts.lockFile
+ * @param {string} opts.logFile
+ * @param {string} opts.outputFile メインワークスペース側の最終成果物パス
+ * @param {string} opts.promptFile
+ * @param {number} opts.deadlineMs 監督タイムアウト（ms）
+ * @param {(msg: string) => void} opts.log
+ * @param {{aborted: boolean}} opts.signal 外部からの中止シグナル
+ * @returns {Promise<SupervisionResult>}
+ */
+async function superviseReviewManager({
+  pr, repo, workspace, ghDir, lockFile, logFile,
+  outputFile, promptFile, deadlineMs, log, signal,
+}) {
+  // 1. ディレクトリ作成・ロック
+  try {
+    fs.mkdirSync(ghDir, { recursive: true });
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    fs.writeFileSync(lockFile, String(process.pid));
+  } catch (e) {
+    return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir: null, reason: `初期化失敗: ${e.message}` };
+  }
+
+  log(`run-review-manager started pr=${pr} repo=${repo}`);
+
+  // 2. review worktree セットアップ
+  let reviewWtDir;
+  try {
+    reviewWtDir = setupReviewWorktree(workspace, pr, log);
+  } catch (e) {
+    log(`review worktree のセットアップに失敗しました: ${e.message}`);
+    return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir: null, reason: `worktree setup: ${e.message}` };
+  }
+
+  // 3. プロンプト準備（成果物契約付き）
+  const worktreeGhDir = path.join(reviewWtDir, '.gh-maestro');
+  fs.mkdirSync(worktreeGhDir, { recursive: true });
+  const worktreeOutputFile = path.join(worktreeGhDir, `review-manager-${pr}.json`);
+  const { prompt: promptText, stagingFile } = buildPrompt({ pr, repo, workspace: reviewWtDir, outputFile: worktreeOutputFile });
+
+  try {
+    fs.writeFileSync(promptFile, promptText, 'utf8');
+  } catch (e) {
+    return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir, reason: `prompt file書き込み失敗: ${e.message}` };
+  }
+
+  // 4. エージェント設定解決
+  const skill = 'gh-maestro-reviewer';
+  const skillMap = resolveSkillAgentMap({ workspace });
+  const agentId = skillMap[skill] ?? 'codex';
+  const homedir = process.env.HOME || process.env.USERPROFILE || '';
+  const agentConfig = resolveAgentConfig(agentId, { workspace, homedir });
+
+  if (!agentConfig) {
+    log(`エージェント "${agentId}" の設定を解決できません（agent-defaults.json / config.json を確認してください）`);
+    return { outcome: 'agent-config-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir, reason: 'agent config resolve failed' };
+  }
+
+  const agentArgs = buildReviewManagerAgentArgs(agentConfig, {
+    reviewWtDir,
+    promptFile,
+    skill,
+  });
+
+  log(`spawning ${agentArgs.join(' ')}`);
+
+  // 5. エージェントを非同期spawn
+  const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
+  let agentFd;
+  try {
+    agentFd = fs.openSync(logFile, 'a');
+  } catch (e) {
+    return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir, reason: `ログファイルを開けません: ${e.message}` };
+  }
+
+  let agentChild;
+  try {
+    agentChild = spawn(shellArgs[0], shellArgs.slice(1), {
+      cwd: reviewWtDir,
+      env: process.env,
+      stdio: ['ignore', agentFd, agentFd],
+    });
+  } catch (e) {
+    try { fs.closeSync(agentFd); } catch {}
+    log(`spawn error: ${e.message}`);
+    return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir, reason: `spawn失敗: ${e.message}` };
+  }
+
+  // agentFd は子プロセスが終了したら閉じる
+  let agentFdClosed = false;
+  const closeAgentFd = () => {
+    if (!agentFdClosed) {
+      try { fs.closeSync(agentFd); } catch {}
+      agentFdClosed = true;
+    }
+  };
+  agentChild.on('close', closeAgentFd);
+
+  const agentPid = agentChild.pid;
+
+  // 6. 並行監督
+  // processFinalized は exit/error の二重通知を防ぐガード。
+  // Node.jsのChildProcess契約では、spawn失敗時（ENOENT等）に error イベントが発火し
+  // exit は発火しないことがある。逆に正常spawn後は exit のみが発火する。
+  // 両方が発火するエッジケースでも1回だけ処理する。
+  let processExited = false;
+  let processExitCode = null;
+  let processExitReason = null;
+  let processFinalized = false;
+
+  const markProcessDone = (code, reason) => {
+    if (processFinalized) return;
+    processFinalized = true;
+    processExited = true;
+    processExitCode = code;
+    processExitReason = reason;
+    // 成果物ポーリングを即座に中断させる
+    if (signal) signal.aborted = true;
+  };
+
+  agentChild.on('exit', (code) => {
+    markProcessDone(code, null);
+  });
+
+  // error イベント: 子プロセスをspawnできなかった場合に発火する
+  // （例: ENOENT — 実行ファイルが存在しない）。
+  // この場合 exit は発火しないため、監督ループが知る唯一の終了通知となる。
+  // 以前は closeAgentFd（ログFDを閉じるだけ）のみで、監督ループは30分間deadlineを
+  // 待ち続け、同一PRの再起動が .running lease で拒否され続けていた。
+  agentChild.on('error', (err) => {
+    markProcessDone(null, err.message);
+    closeAgentFd();
+  });
+
+  // 成果物ポーリングとプロセス終了の競合を、成果物側を優先して処理する。
+  // pollForArtifact を唯一のartifact検出実装として使う（テストが検証する経路と
+  // 本番の実行経路を一致させる）。
+  const schemaPath = path.join(__dirname, 'review-findings-schema.json');
+  const pollStart = Date.now();
+
+  while (true) {
+    const elapsed = Date.now() - pollStart;
+    const remaining = deadlineMs - elapsed;
+    if (remaining <= 0) {
+      log(`deadline reached after ${deadlineMs}ms`);
+      break;
+    }
+
+    // 外部中止シグナル（プロセス終了以外の理由）
+    if (signal && signal.aborted && !processExited) {
+      log('aborted by external signal');
+      break;
+    }
+
+    // 成果物ポーリング。
+    // signal.aborted（プロセス終了/error）が発火すると即座に返る。
+    // テストから注入された実装があればそちらを使う（本番の実行経路とテスト経路の一致）。
+    const pollFn = _injectedPollForArtifact || pollForArtifact;
+    const pollResult = await pollFn(
+      worktreeOutputFile, remaining, DEFAULT_ARTIFACT_POLL_INTERVAL_MS, signal
+    );
+
+    if (pollResult.found && pollResult.content) {
+      log(`artifact detected at ${worktreeOutputFile} (${pollResult.content.length} bytes)`);
+
+      const artifactValidation = validateArtifactContent(pollResult.content, schemaPath);
+
+      if (artifactValidation.valid) {
+        log('artifact validation passed');
+
+        // atomic copy worktree → main workspace
+        const copyResult = atomicCopyStaging(worktreeOutputFile, outputFile);
+        if (!copyResult.success) {
+          return {
+            outcome: 'process-exit-no-artifact',
+            exitCode: 1,
+            artifact: null,
+            agentPid,
+            reviewWtDir,
+            reason: `成果物コピー失敗: ${copyResult.error}`,
+          };
+        }
+        log(`artifact atomically copied to ${outputFile}`);
+
+        // publish
+        const publish = spawnSync(process.execPath, [
+          path.join(__dirname, 'review-publisher.js'),
+          outputFile,
+        ], {
+          cwd: workspace,
+          encoding: 'utf8',
+          env: process.env,
+          maxBuffer: 20 * 1024 * 1024,
+        });
+        if (publish.stdout) log(publish.stdout);
+        if (publish.stderr) log(publish.stderr);
+        log(`review-publisher exited with status ${publish.status}`);
+
+        return {
+          outcome: 'artifact-published',
+          exitCode: publish.status ?? 0,
+          artifact: artifactValidation.payload,
+          agentPid,
+          reviewWtDir,
+          reason: `publish completed (status ${publish.status})`,
+        };
+      } else {
+        // 成果物はあるが検証不合格
+        log(`artifact validation failed: ${artifactValidation.error}`);
+
+        // プロセスが既に終了していて検証不合格なら、これ以上修正される見込みはない
+        if (processExited) {
+          return {
+            outcome: 'process-exit-no-artifact',
+            exitCode: 1,
+            artifact: null,
+            agentPid,
+            reviewWtDir,
+            reason: `成果物検証不合格（プロセス終了済み）: ${artifactValidation.error}`,
+          };
+        }
+
+        // プロセスがまだ動いている → 壊れた成果物を削除し、修正版の再renameを待つ。
+        // 削除しないと pollForArtifact が毎回同じ壊れたファイルを即座に再検出してしまう。
+        // エージェントが再生成すれば新しいrenameでファイルが再出現する。
+        try { fs.unlinkSync(worktreeOutputFile); } catch {}
+        log('invalid artifact removed, waiting for corrected artifact');
+        continue;
+      }
+    }
+
+    // pollForArtifact が成果物を返さなかった（found === false）
+    // reason は 'deadline' または 'aborted'
+    if (processExited) {
+      const reason = processExitReason
+        ? `プロセス起動/実行エラー（status ${processExitCode}）: ${processExitReason}`
+        : `プロセス終了（status ${processExitCode}）、成果物未検出`;
+      log(reason);
+      return {
+        outcome: 'process-exit-no-artifact',
+        exitCode: processExitCode || 1,
+        artifact: null,
+        agentPid,
+        reviewWtDir,
+        reason,
+      };
+    }
+
+    // deadline は次のループ反復の先頭で判定される（remaining <= 0）
+    // signal abort（外部）も次の反復で判定される
+  }
+
+  // deadline 到達（成果物もプロセス終了も検出されず）
+  log('timeout: neither artifact nor process exit detected');
+  return {
+    outcome: 'timeout',
+    exitCode: 1,
+    artifact: null,
+    agentPid: agentChild ? agentChild.pid : null,
+    reviewWtDir,
+    reason: `deadline (${deadlineMs}ms) reached without artifact or process exit`,
+  };
+}
+
+if (require.main === module) {
+  (async () => {
+    const argv = process.argv.slice(2);
+    const { rest, exitFlagMiss } = parseFlags(argv, []);
+
+    if (exitFlagMiss) {
+      console.error(USAGE);
+      process.exit(1);
+    }
+
+    if (hasHelpFlag(rest)) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+
+    const [pr, repo, workspace] = rest;
+
+    if (!pr || !repo || !workspace) {
+      console.error(USAGE);
+      process.exit(1);
+    }
+
+    try {
+      assertValidPr(pr);
+    } catch (e) {
+      console.error(`run-review-manager: ${e.message}`);
+      process.exit(1);
+    }
+
+    const ghDir = path.join(workspace, '.gh-maestro');
+    const lockFile = reviewArtifactPath(ghDir, pr, '.running');
+    const logFile = reviewArtifactPath(ghDir, pr, '.log');
+    const outputFile = reviewArtifactPath(ghDir, pr, '.json');
+    const promptFile = path.join(os.tmpdir(), `review-manager-prompt-${pr}-${Date.now()}.md`);
+
+    function log(msg) {
+      try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`); } catch {}
+    }
+
+    // 成果物完成トリガー: 監督ループを実行
+    const signal = { aborted: false };
+    let supervisionResult;
+    let cleanupResult;
+
+    try {
+      supervisionResult = await superviseReviewManager({
+        pr, repo, workspace, ghDir, lockFile, logFile,
+        outputFile, promptFile,
+        deadlineMs: DEFAULT_DEADLINE_MS,
+        log, signal,
+      });
+
+      // publish結果に関わらず、後始末は必ず実行する
+      log(`supervision outcome: ${supervisionResult.outcome} — ${supervisionResult.reason || ''}`);
+
+      cleanupResult = await boundedCleanup({
+        pid: supervisionResult.agentPid,
+        worktreeDir: supervisionResult.reviewWtDir,
+        workspace, pr, lockFile,
+        log,
+        gracefulShutdownMs: GRACEFUL_SHUTDOWN_GRACE_MS,
+      });
+    } catch (e) {
+      log(`fatal error: ${e.message}`);
+      supervisionResult = { outcome: 'setup-failed', exitCode: 1, artifact: null, reason: e.message };
+    } finally {
+      // promptファイルは必ず削除
+      try { fs.unlinkSync(promptFile); } catch {}
+
+      // 監督結果・cleanup結果をログに記録
+      if (supervisionResult) {
+        log(`final outcome: ${supervisionResult.outcome} exitCode=${supervisionResult.exitCode}`);
+      }
+      if (cleanupResult && cleanupResult.errors.length > 0) {
+        for (const err of cleanupResult.errors) {
+          log(`cleanup error: ${err}`);
+        }
+      }
+    }
+
+    process.exit(supervisionResult ? supervisionResult.exitCode : 1);
+  })();
 }
