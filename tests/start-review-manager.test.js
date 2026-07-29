@@ -9,6 +9,7 @@ const { spawnSync } = require('child_process');
 
 const headlessLaunch = require('../scripts/shared/headless-launch');
 const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
+const { buildReviewManagerLaunchSpec } = require('../scripts/shared/worker-factory');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'start-review-manager.js');
 function runCli(args) {
@@ -188,7 +189,7 @@ test('startReviewManager rejects a missing/invalid issue number before touching 
   assert.equal(fs.existsSync(workspace), false);
 });
 
-test('startReviewManager launches run-review-manager.js via launchAgentHeadless（ログインシェル経由・通常ワーカーと同じ起動基盤）', () => {
+test('startReviewManager launches run-review-manager.js via launchAgentHeadless（ログインシェル経由・通常ワーカーと同じ起動基盤。Phase 5: issueも構造化引数として渡す）', () => {
   const mod = loadModule();
   const workspace = freshWorkspace('launches-headless');
 
@@ -200,6 +201,8 @@ test('startReviewManager launches run-review-manager.js via launchAgentHeadless�
   assert.match(decoded, /run-review-manager\.js/);
   assert.match(decoded, /'7'/);
   assert.match(decoded, /'o\/r'/);
+  // Phase 5: issue が第4位置引数として渡される
+  assert.match(decoded, /'55'/);
 
   // GH_MAESTRO_WORKER は issue-<N>- パターンに合わせる（worker-exit-hook.jsのIssue番号
   // 導出・msg-send.jsのワーカーコンテキスト判定をそのまま再利用するため）。
@@ -235,12 +238,14 @@ test('startReviewManager: onExitフックへexecutionIdを渡さない（executi
   assert.match(decoded, /worker-exit-hook\.js' '[^']*' ''/);
 });
 
-test('startReviewManager: ログパスはreviewArtifactPath(.log)（worker-logs配下、通常ワーカーと共通）', () => {
+test('startReviewManager: ログパスはfactory仕様のlogPath（worker-logs配下、正規workerNameキーで通常ワーカーと共通）', () => {
   const mod = loadModule();
   const workspace = freshWorkspace('log-path');
 
   mod.startReviewManager('10', 'o/r', workspace, '55');
 
-  const expectedLogPath = reviewArtifactPath(path.join(workspace, '.gh-maestro'), '10', '.log');
-  assert.equal(spawnCalls[0].args[2], expectedLogPath);
+  // Phase 5: ログパスは factory（buildReviewManagerLaunchSpec）で計算される。
+  // 正規workerName（issue-<issue>-review-manager-pr-<pr>）をログキーとして使う。
+  const spec = buildReviewManagerLaunchSpec({ issue: '55', pr: '10', repo: 'o/r', workspace });
+  assert.equal(spawnCalls[0].args[2], spec.logPath);
 });
