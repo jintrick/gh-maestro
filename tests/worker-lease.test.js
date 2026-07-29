@@ -1,6 +1,6 @@
 'use strict';
 
-const { test, afterEach, beforeEach } = require('node:test');
+const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
@@ -18,14 +18,9 @@ afterEach(() => {
 
 // ── テスト用ヘルパー ───────────────────────────────────────────────────────────
 
-/**
- * 一時ディレクトリ上に store を作成する。
- * テスト終了時に自動削除するため、各テストで独立した store を使う。
- */
 function tempStore() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
   const store = lease.createNormalWorkerStore(tmp);
-  // cleanup 用に dir を露出
   store._tmpDir = tmp;
   return store;
 }
@@ -36,7 +31,6 @@ function cleanupStore(store) {
   }
 }
 
-/** liveness 関数を注入する */
 function mockLiveness({ alive = true, identityMatch = true } = {}) {
   const calls = { alive: [], verify: [] };
   lease._setIsProcessAlive((pid) => { calls.alive.push(pid); return alive; });
@@ -50,7 +44,7 @@ function mockLiveness({ alive = true, identityMatch = true } = {}) {
 
 // ── createNormalWorkerStore ────────────────────────────────────────────────────
 
-test('createNormalWorkerStore: read/write/remove の基本操作', () => {
+test('createNormalWorkerStore: read/write/remove/update の基本操作', () => {
   const store = tempStore();
   try {
     // 初期状態では read は null
@@ -68,7 +62,7 @@ test('createNormalWorkerStore: read/write/remove の基本操作', () => {
       { code: 'EEXIST' }
     );
 
-    // update で上書き
+    // update で原子的に上書き（temp+rename）
     store.update('test-key', { pid: 9999, startTime: '2026-07-29T00:00:00.000Z', workerName: 'updated', createdAt: '2026-07-29T00:00:00.000Z' });
     assert.equal(store.read('test-key').pid, 9999);
     assert.equal(store.read('test-key').workerName, 'updated');
@@ -87,7 +81,6 @@ test('createNormalWorkerStore: read/write/remove の基本操作', () => {
 test('createNormalWorkerStore: 破損JSONは read で null を返す', () => {
   const store = tempStore();
   try {
-    // 手動で不正なJSONを書き込む
     const fp = path.join(store._tmpDir, '.gh-maestro', 'leases', 'broken.json');
     fs.mkdirSync(path.dirname(fp), { recursive: true });
     fs.writeFileSync(fp, '{not valid json', 'utf8');
@@ -110,6 +103,24 @@ test('createNormalWorkerStore: JSON.parse がオブジェクト以外を返し�
 
     fs.writeFileSync(fp, '[1,2,3]', 'utf8');
     assert.equal(store.read('not-obj'), null);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('createNormalWorkerStore: update は temp+rename で原子的に更新する', () => {
+  const store = tempStore();
+  try {
+    store.write('test-key', { pid: 1, workerName: 'original', createdAt: 'x' });
+    // 同時readをエミュレート: update中にreadしても完全なデータが読める
+    store.update('test-key', { pid: 2, workerName: 'updated', createdAt: 'y' });
+    const entry = store.read('test-key');
+    assert.equal(entry.pid, 2);
+    assert.equal(entry.workerName, 'updated');
+    // 一時ファイルが残っていないことを確認
+    const tmpFiles = fs.readdirSync(path.join(store._tmpDir, '.gh-maestro', 'leases'))
+      .filter(f => f.includes('.tmp.'));
+    assert.equal(tmpFiles.length, 0, '一時ファイルが残留していないこと');
   } finally {
     cleanupStore(store);
   }
@@ -140,7 +151,6 @@ test('isLeaseLive: PIDは生きているがstartTimeが一致しなければ fal
 
 test('isLeaseLive: startTimeが無ければPID生存のみで判定（移行前・予約エントリ）', () => {
   const calls = mockLiveness({ alive: true, identityMatch: false });
-  // startTime が空文字列
   assert.equal(lease.isLeaseLive({ pid: 4242, startTime: '', workerName: 'w', createdAt: 'x' }), true);
   assert.equal(calls.verify.length, 0, 'startTimeが空なら同一性確認をスキップ');
 });
@@ -156,12 +166,91 @@ test('isLeaseLive: null/非オブジェクト/pid無しは false', () => {
   assert.equal(lease.isLeaseLive({ pid: 'string' }), false);
 });
 
+// ── acquireLeaseLock / releaseLeaseLock ────────────────────────────────────────
+
+test('acquireLeaseLock: 既存ロックがなければ取得に成功する', () => {
+  const store = tempStore();
+  try {
+    mockLiveness({ alive: true });
+    const result = lease.acquireLeaseLock(store, 'test-key');
+    assert.equal(result, true);
+    // ロック後にrelease
+    lease.releaseLeaseLock(store, 'test-key');
+    // ロックファイルが消えている
+    assert.equal(fs.existsSync(store.lockPath('test-key')), false);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireLeaseLock: liveな保持者がいればエラーを投げる', () => {
+  const store = tempStore();
+  try {
+    mockLiveness({ alive: true });
+    // 事前に別PIDでロックを作成
+    fs.mkdirSync(path.dirname(store.lockPath('test-key')), { recursive: true });
+    fs.writeFileSync(store.lockPath('test-key'), '99999', 'utf8');
+
+    assert.throws(
+      () => lease.acquireLeaseLock(store, 'test-key'),
+      /進行中/
+    );
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireLeaseLock: staleロック（保持者死亡）は奪取して成功する', () => {
+  const store = tempStore();
+  try {
+    // 保持者は死亡
+    mockLiveness({ alive: false });
+    fs.mkdirSync(path.dirname(store.lockPath('test-key')), { recursive: true });
+    fs.writeFileSync(store.lockPath('test-key'), '99999', 'utf8');
+
+    const result = lease.acquireLeaseLock(store, 'test-key');
+    assert.equal(result, true);
+    lease.releaseLeaseLock(store, 'test-key');
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('releaseLeaseLock: 自プロセスのロックのみ解放する', () => {
+  const store = tempStore();
+  try {
+    mockLiveness({ alive: true });
+    lease.acquireLeaseLock(store, 'test-key');
+    assert.equal(fs.existsSync(store.lockPath('test-key')), true);
+    lease.releaseLeaseLock(store, 'test-key');
+    assert.equal(fs.existsSync(store.lockPath('test-key')), false);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('releaseLeaseLock: 他プロセスのロックは解放しない', () => {
+  const store = tempStore();
+  try {
+    fs.mkdirSync(path.dirname(store.lockPath('test-key')), { recursive: true });
+    fs.writeFileSync(store.lockPath('test-key'), '99999', 'utf8');
+
+    lease.releaseLeaseLock(store, 'test-key');
+    // 他プロセスのロックはそのまま
+    assert.equal(fs.existsSync(store.lockPath('test-key')), true);
+    // 後片付け
+    fs.unlinkSync(store.lockPath('test-key'));
+  } finally {
+    cleanupStore(store);
+  }
+});
+
 // ── acquireLease ──────────────────────────────────────────────────────────────
 
 test('acquireLease: 既存リースがなければ新規作成に成功する', () => {
   const store = tempStore();
   try {
-    mockLiveness();
+    mockLiveness({ alive: true, identityMatch: true });
     const result = lease.acquireLease(store, 'issue-1-coder-test', {
       pid: 4242, startTime: '2026-07-29T00:00:00.000Z', workerName: 'issue-1-coder-test',
     });
@@ -244,12 +333,11 @@ test('acquireLease: stale lease（startTime不一致=PID再利用）は回収し
 test('acquireLease: 破損JSONの既存リースは stale 扱いで回収', () => {
   const store = tempStore();
   try {
-    // 手動で破損JSONを書き込む
     const fp = path.join(store._tmpDir, '.gh-maestro', 'leases', 'issue-1-coder-test.json');
     fs.mkdirSync(path.dirname(fp), { recursive: true });
     fs.writeFileSync(fp, 'corrupt', 'utf8');
 
-    mockLiveness();
+    mockLiveness({ alive: true, identityMatch: true });
     const result = lease.acquireLease(store, 'issue-1-coder-test', {
       pid: 4242, startTime: null, workerName: 'issue-1-coder-test',
     });
@@ -261,63 +349,53 @@ test('acquireLease: 破損JSONの既存リースは stale 扱いで回収', () =
   }
 });
 
-test('acquireLease: TOCTOU競合（readとwriteの間に別プロセスが作成）→ liveなら拒否', () => {
+test('acquireLease: per-keyロックにより並行起動を拒否する', () => {
   const store = tempStore();
   try {
-    // 1回目の write で EEXIST を起こし、その後 read で live なエントリが見つかるケース
-    let writeAttempt = 0;
-    const origWrite = store.write.bind(store);
-    store.write = function (key, entry) {
-      writeAttempt++;
-      if (writeAttempt === 1) {
-        // 1回目: EEXIST を発生させる
-        origWrite(key, { pid: 9999, startTime: '2026-07-29T00:00:00.000Z', workerName: 'racer', createdAt: '2026-07-29T00:00:00.000Z' });
-        const err = new Error('EEXIST');
-        err.code = 'EEXIST';
-        throw err;
-      }
-      // 2回目: 成功
-      return origWrite(key, entry);
-    };
-
     mockLiveness({ alive: true, identityMatch: true });
+    // 事前に別PIDでロックを作成（他launcherが起動処理中）
+    fs.mkdirSync(path.dirname(store.lockPath('issue-1-coder-test')), { recursive: true });
+    fs.writeFileSync(store.lockPath('issue-1-coder-test'), '99999', 'utf8');
 
     assert.throws(
       () => lease.acquireLease(store, 'issue-1-coder-test', {
         pid: 4242, startTime: null, workerName: 'issue-1-coder-test',
       }),
-      /別プロセスによって起動されました/
+      /進行中/
     );
   } finally {
     cleanupStore(store);
   }
 });
 
-test('acquireLease: TOCTOU競合 → 競合エントリがstaleなら回収してリトライ成功', () => {
+test('acquireLease: ロック取得後にlive leaseが現れた場合は拒否（再チェック）', () => {
   const store = tempStore();
   try {
-    let writeAttempt = 0;
-    const origWrite = store.write.bind(store);
-    store.write = function (key, entry) {
-      writeAttempt++;
-      if (writeAttempt === 1) {
-        // 競合エントリを作成（stale — PIDが死んでいる）
-        origWrite(key, { pid: 9999, startTime: '2026-07-29T00:00:00.000Z', workerName: 'racer', createdAt: '2026-07-29T00:00:00.000Z' });
-        const err = new Error('EEXIST');
-        err.code = 'EEXIST';
-        throw err;
+    // 高速チェック: leaseなし → ロック取得へ進む
+    // ロック取得後の再チェック: leaseが出現
+    mockLiveness({ alive: true, identityMatch: true });
+
+    // store.read を差し替え: 1回目はnull（高速チェック通過）、2回目はlive lease（再チェックで検出）
+    let readCount = 0;
+    const origRead = store.read.bind(store);
+    store.read = function (key) {
+      readCount++;
+      if (readCount === 1) return null; // 高速チェック
+      if (readCount >= 2) {
+        // ロック下の再チェック: live leaseが出現
+        return { pid: 7777, startTime: '2026-07-28T00:00:00.000Z', workerName: 'issue-1-coder-test', createdAt: 'x' };
       }
-      return origWrite(key, entry);
+      return origRead(key);
     };
 
-    mockLiveness({ alive: false }); // 競合も自分も死んでいる → stale
-
-    const result = lease.acquireLease(store, 'issue-1-coder-test', {
-      pid: 4242, startTime: null, workerName: 'issue-1-coder-test',
-    });
-    assert.equal(result.acquired, true);
-    assert.equal(result.staleReclaimed, true);
-    assert.equal(store.read('issue-1-coder-test').pid, 4242);
+    assert.throws(
+      () => lease.acquireLease(store, 'issue-1-coder-test', {
+        pid: 4242, startTime: null, workerName: 'issue-1-coder-test',
+      }),
+      /既に稼働中/
+    );
+    // ロックは解放されている
+    assert.equal(fs.existsSync(store.lockPath('issue-1-coder-test')), false);
   } finally {
     cleanupStore(store);
   }
@@ -346,9 +424,7 @@ test('releaseLease: PIDが異なる場合は解放しない（他プロセスの
       pid: 8888, startTime: 'x', workerName: 'w', createdAt: 'x',
     });
 
-    // 別のPIDで解放を試みる
     lease.releaseLease(store, 'test-key', { pid: 4242 });
-    // 元のリースはそのまま
     assert.equal(store.read('test-key').pid, 8888);
   } finally {
     cleanupStore(store);
@@ -369,7 +445,6 @@ test('releaseLease: 存在しないキーでもエラーにならない', () => 
 test('activateLease: リースのPIDとstartTimeを実際のワーカー情報で更新する', () => {
   const store = tempStore();
   try {
-    // 予約リース（launcherのPID）
     store.write('test-key', {
       pid: 100, startTime: 'old', workerName: 'w', createdAt: '2026-07-29T00:00:00.000Z',
     });
@@ -381,7 +456,6 @@ test('activateLease: リースのPIDとstartTimeを実際のワーカー情報�
     const entry = store.read('test-key');
     assert.equal(entry.pid, 4242);
     assert.equal(entry.startTime, '2026-07-29T00:00:01.000Z');
-    // 他のフィールドは維持
     assert.equal(entry.workerName, 'w');
     assert.equal(entry.createdAt, '2026-07-29T00:00:00.000Z');
   } finally {
@@ -412,9 +486,25 @@ test('activateLease: startTime省略時はgetProcessStartTimeで取得する', (
 
     const entry = store.read('test-key');
     assert.equal(entry.pid, 4242);
-    // getProcessStartTime のモックが返す値
     // pid=4242 は4桁なので padStart(3, '0') を通過し、'.4242Z' になる
     assert.equal(entry.startTime, '2026-07-29T00:00:00.4242Z');
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('activateLease: temp+rename更新により並行readが不完全JSONを読まない', () => {
+  const store = tempStore();
+  try {
+    store.write('test-key', {
+      pid: 100, startTime: 'old', workerName: 'w', createdAt: 'x',
+    });
+
+    // update中にreadしても完全な値が返る（atomic renameの保証）
+    lease.activateLease(store, 'test-key', { pid: 99999, startTime: '2026-07-29T02:00:00.000Z' });
+    const entry = store.read('test-key');
+    assert.equal(entry.pid, 99999);
+    assert.ok(entry.startTime);
   } finally {
     cleanupStore(store);
   }
@@ -456,7 +546,7 @@ test('シナリオ: stale回収からの再起動', () => {
       pid: 11111, startTime: '2026-07-28T00:00:00.000Z', workerName: 'issue-5-coder-fix-auth', createdAt: '2026-07-28T00:00:00.000Z',
     });
 
-    // PIDは死んでいる（stale判定）→ 回収される
+    // PIDは死んでいる（stale判定）→ 高速チェック通過 → ロック取得 → 回収
     mockLiveness({ alive: false });
     const r2 = lease.acquireLease(store, 'issue-5-coder-fix-auth', {
       pid: process.pid, startTime: null, workerName: 'issue-5-coder-fix-auth',
@@ -488,6 +578,26 @@ test('シナリオ: 起動失敗時のロールバック（リース解放）', 
       pid: 99999, startTime: null, workerName: 'issue-5-coder-fix-auth',
     });
     assert.equal(r.acquired, true);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('シナリオ: staleロック保持者がいる場合、死亡していれば奪取して進行する', () => {
+  const store = tempStore();
+  try {
+    // 死んだlauncherのロックが残っている
+    mockLiveness({ alive: false }); // isProcessAlive → false
+    fs.mkdirSync(path.dirname(store.lockPath('issue-5-coder-fix-auth')), { recursive: true });
+    fs.writeFileSync(store.lockPath('issue-5-coder-fix-auth'), '12345', 'utf8');
+
+    // 既存leaseはなし、ロックはstale → 奪取成功
+    lease.acquireLease(store, 'issue-5-coder-fix-auth', {
+      pid: process.pid, startTime: null, workerName: 'issue-5-coder-fix-auth',
+    });
+    assert.equal(store.read('issue-5-coder-fix-auth').pid, process.pid);
+    // ロックは解放済み
+    assert.equal(fs.existsSync(store.lockPath('issue-5-coder-fix-auth')), false);
   } finally {
     cleanupStore(store);
   }

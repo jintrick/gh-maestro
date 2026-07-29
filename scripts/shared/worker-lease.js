@@ -6,7 +6,7 @@
 //   リース保存先（lease store）を抽象化し、通常ワーカー用アダプタと将来の
 //   Review Manager `.running` 契約用アダプタの両方を持てる設計。
 //
-// Phase 2（本ファイル初版）:
+// Phase 2（本ファイル）:
 //   - 通常ワーカー用 lease store（.gh-maestro/leases/<key>.json）
 //   - リース獲得（live lease 拒否 / stale lease 回収 / 原子作成）
 //   - リース解放・アクティベート
@@ -31,8 +31,9 @@ let _getProcessStartTime = getProcessStartTime;
 // Lease store は以下のインターフェースを持つプレーンオブジェクト:
 //   read(key)    → entry|null  リースエントリを読み取る
 //   write(key, entry) → void   原子的に新規作成（EEXIST で競合検知）
-//   update(key, entry) → void  既存エントリを上書き
+//   update(key, entry) → void  既存エントリを temp+rename で原子的に上書き
 //   remove(key)  → void        リースを削除
+//   lockPath(key)→ string      キーに対応するロックファイルのパス
 //
 // entry 形式: { pid, startTime, workerName, createdAt }
 
@@ -50,6 +51,10 @@ function createNormalWorkerStore(workspace) {
 
   function filePath(key) {
     return path.join(dir, `${key}.json`);
+  }
+
+  function lockPath(key) {
+    return path.join(dir, `.lock-${key}`);
   }
 
   return {
@@ -73,11 +78,23 @@ function createNormalWorkerStore(workspace) {
       fs.writeFileSync(fp, JSON.stringify(entry, null, 2), { encoding: 'utf8', flag: 'wx' });
     },
 
-    /** 既存エントリを上書きする。存在しなくても新規作成（排他不要の更新用）。 */
+    /**
+     * 既存エントリを原子的に上書きする。
+     * 一時ファイルへの書き込み + atomic rename により、並行 read が
+     * 空ファイルや不完全 JSON を読むことがないようにする。
+     */
     update(key, entry) {
       fs.mkdirSync(dir, { recursive: true });
       const fp = filePath(key);
-      fs.writeFileSync(fp, JSON.stringify(entry, null, 2), 'utf8');
+      const tmpPath = `${fp}.tmp.${process.pid}`;
+      try {
+        fs.writeFileSync(tmpPath, JSON.stringify(entry, null, 2), 'utf8');
+        fs.renameSync(tmpPath, fp);
+      } catch (e) {
+        // rename 失敗時は一時ファイルを掃除（ベストエフォート）
+        try { fs.unlinkSync(tmpPath); } catch {}
+        throw e;
+      }
     },
 
     /** リースを削除する。 */
@@ -88,6 +105,11 @@ function createNormalWorkerStore(workspace) {
       } catch (e) {
         if (e.code !== 'ENOENT') throw e;
       }
+    },
+
+    /** キーに対応する per-key ロックファイルのパスを返す。 */
+    lockPath(key) {
+      return lockPath(key);
     },
   };
 }
@@ -122,16 +144,88 @@ function isLeaseLive(entry) {
   return true;
 }
 
+// ── Per-Key 起動ロック ────────────────────────────────────────────────────────
+//
+// stale lease の read-remove-write 区間を直列化する。
+// 2つの launcher が同じ stale entry を読んだ後、A の新規 lease を
+// B の store.remove(key) が削除してしまう TOCTOU 競合を防ぐ。
+
+/**
+ * 指定キーの起動処理を排他制御するロックを取得する。
+ *
+ * 保持者が非生存の場合は stale とみなし自動的に奪取する。
+ *
+ * @param {object} store lease store
+ * @param {string} key リースキー
+ * @param {number} maxRetries 最大リトライ回数
+ * @returns {boolean} 取得できれば true
+ * @throws {Error} live な保持者がいる、またはリトライ上限超過
+ */
+function acquireLeaseLock(store, key, maxRetries = 5) {
+  const lockPath = store.lockPath(key);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      fs.writeFileSync(lockPath, String(process.pid), { encoding: 'utf8', flag: 'wx' });
+      return true;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+    }
+
+    // ロックが存在 → 保持者の生存を確認
+    let holderPid = null;
+    try {
+      holderPid = parseInt(fs.readFileSync(lockPath, 'utf8').trim(), 10);
+    } catch {
+      holderPid = null;
+    }
+
+    if (holderPid && Number.isFinite(holderPid) && holderPid > 0 && _isProcessAlive(holderPid)) {
+      throw new Error(
+        `worker "${key}" の起動処理が別プロセス（pid ${holderPid}）で進行中です。` +
+        `しばらくお待ちください。`
+      );
+    }
+
+    // stale ロック（保持者が非生存、または壊れている）→ 奪取して再試行
+    try { fs.unlinkSync(lockPath); } catch {}
+  }
+
+  throw new Error(
+    `worker "${key}" の起動ロックを取得できませんでした（最大試行回数 ${maxRetries} 超過）`
+  );
+}
+
+/**
+ * 自プロセスが保持している per-key ロックを解放する。
+ * 自分が保持者でない場合は何もしない。
+ *
+ * @param {object} store lease store
+ * @param {string} key リースキー
+ */
+function releaseLeaseLock(store, key) {
+  const lockPath = store.lockPath(key);
+  try {
+    const raw = fs.readFileSync(lockPath, 'utf8').trim();
+    if (parseInt(raw, 10) === process.pid) {
+      fs.unlinkSync(lockPath);
+    }
+  } catch {
+    // 読めない・存在しない → 何もしない
+  }
+}
+
 // ── リース操作 ────────────────────────────────────────────────────────────────
 
 /**
  * リースを獲得する。
  *
  * 処理順序（worktree の除去・再作成より先に行う）:
- *   1. 既存リースを読み取る
+ *   1. 既存リースを読み取る（ロック取得前に高速チェック）
  *   2. live lease があれば明示的に拒否（エラーを throw）
- *   3. stale lease なら回収（削除）してから新規作成
- *   4. リースがなければ原子的に新規作成（wx フラグで競合防止）
+ *   3. per-key ロックを取得し、read-remove-write 区間を直列化
+ *   4. ロック下で再読み取り→再判定→stale回収→原子的新規作成
  *
  * 作成されたリースエントリの pid は起動元（launcher）のPID。
  * ワーカー起動後に activateLease() で実際のワーカーPIDに更新する。
@@ -143,52 +237,81 @@ function isLeaseLive(entry) {
  * @param {string|null} opt.startTime 起動元のプロセス起動時刻
  * @param {string} opt.workerName ワーカー名（エラーメッセージ用）
  * @returns {{ acquired: true, staleReclaimed: boolean }}
- * @throws {Error} live lease が存在する場合
+ * @throws {Error} live lease が存在する場合、または別launcherが進行中の場合
  */
 function acquireLease(store, key, { pid, startTime, workerName }) {
-  const existing = store.read(key);
-
-  if (existing && isLeaseLive(existing)) {
+  // ── 高速パス: ロック取得前に live lease をチェック ──
+  const quickCheck = store.read(key);
+  if (quickCheck && isLeaseLive(quickCheck)) {
     throw new Error(
-      `worker "${workerName}" は既に稼働中です（pid ${existing.pid}）。` +
+      `worker "${workerName}" は既に稼働中です（pid ${quickCheck.pid}）。` +
       `重複起動できません。前のワーカーが終了するまでお待ちください。`
     );
   }
 
-  // stale lease があれば回収
-  const staleReclaimed = !!existing;
-  if (existing) {
-    store.remove(key);
+  // ── per-key ロックを取得 ──
+  // 他プロセスが同じキーの stale 回収を実行中ならここで待つか拒否される。
+  let lockAcquired = false;
+  try {
+    acquireLeaseLock(store, key);
+    lockAcquired = true;
+  } catch (e) {
+    throw new Error(`起動を拒否しました: ${e.message}`);
   }
 
-  const now = new Date().toISOString();
-  const entry = {
-    pid,
-    startTime: startTime || _getProcessStartTime(pid) || now,
-    workerName,
-    createdAt: now,
-  };
-
   try {
-    store.write(key, entry);
-    return { acquired: true, staleReclaimed };
-  } catch (e) {
-    if (e.code === 'EEXIST') {
-      // TOCTOU 競合: read と write の間に別プロセスが同じキーで lease を作成した。
-      // 競合エントリを再確認し、live なら拒否、stale なら再回収してリトライ。
-      const raced = store.read(key);
-      if (raced && isLeaseLive(raced)) {
-        throw new Error(
-          `worker "${workerName}" は別プロセスによって起動されました（pid ${raced.pid}）。` +
-          `重複起動できません。`
-        );
-      }
-      // 競合エントリが stale → 回収してリトライ（1回のみ）
-      store.remove(key);
-      store.write(key, entry);
-      return { acquired: true, staleReclaimed: true };
+    // ── ロック下で再読み取り・再判定 ──
+    // ロック取得待ちの間に別プロセスが live lease を作成している可能性がある。
+    const existing = store.read(key);
+
+    if (existing && isLeaseLive(existing)) {
+      throw new Error(
+        `worker "${workerName}" は既に稼働中です（pid ${existing.pid}）。` +
+        `重複起動できません。`
+      );
     }
-    throw e;
+
+    // stale lease があれば回収
+    let staleReclaimed = !!existing;
+    if (existing) {
+      store.remove(key);
+    }
+
+    // 新規リースを原子的に作成
+    const now = new Date().toISOString();
+    const entry = {
+      pid,
+      startTime: startTime || _getProcessStartTime(pid) || now,
+      workerName,
+      createdAt: now,
+    };
+
+    try {
+      store.write(key, entry);
+    } catch (e) {
+      if (e.code === 'EEXIST') {
+        // read が null を返してもファイルがディスク上に存在するケース:
+        // 破損JSON・空ファイル等で store.read() が null を返したが、
+        // ファイル実体が残っているため 'wx' が EEXIST で失敗する。
+        // ロック下なので安全に削除→再作成できる。
+        const retryRead = store.read(key);
+        if (retryRead && isLeaseLive(retryRead)) {
+          throw new Error(
+            `worker "${workerName}" は既に稼働中です（pid ${retryRead.pid}）。` +
+            `重複起動できません。`
+          );
+        }
+        // 破損またはstale → 削除して再試行
+        store.remove(key);
+        staleReclaimed = true; // 破損ファイルも回収扱い
+        store.write(key, entry);
+      } else {
+        throw e;
+      }
+    }
+    return { acquired: true, staleReclaimed };
+  } finally {
+    releaseLeaseLock(store, key);
   }
 }
 
@@ -215,7 +338,10 @@ function releaseLease(store, key, { pid }) {
  * リースを実際のワーカーPIDでアクティベートする。
  *
  * 起動元（launcher）のPIDで予約したリースを、実際に起動したワーカープロセスの
- * PID・startTime で更新する。ワーカー起動確認後に呼ぶ。
+ * PID・startTime で更新する。
+ *
+ * store.update() は temp+rename による原子更新のため、並行 read が
+ * 空ファイルや不完全 JSON を読むことは構造的に起きない。
  *
  * @param {object} store lease store
  * @param {string} key リースキー
@@ -238,6 +364,8 @@ function activateLease(store, key, { pid, startTime }) {
 module.exports = {
   createNormalWorkerStore,
   acquireLease,
+  acquireLeaseLock,
+  releaseLeaseLock,
   releaseLease,
   activateLease,
   isLeaseLive,
