@@ -20,7 +20,7 @@
 // 任意の指示は必ず --prompt-file で渡す。--short-prompt は、改行・シェル特殊文字を含まない
 // 短い補足メッセージだけの例外であり、--prompt-file と同時指定不可。
 //
-// 標準出力: ワーカー名（例: issue-5-implement）
+// 標準出力: ワーカー名（例: issue-5-coder-implement）
 
 const { spawnSync } = require('./child-process');
 const { existsSync, mkdirSync, readFileSync, writeFileSync,
@@ -31,10 +31,12 @@ const { linkNodeModules } = require('./link-node-modules');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { checkAgentExists } = require('./agent-exec');
-const { launchAgentHeadless, workerLogPath } = require('./shared/headless-launch');
+const { launchAgentHeadless } = require('./shared/headless-launch');
+const { buildNormalWorkerLaunchSpec } = require('./shared/worker-factory');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { createNormalWorkerStore, acquireLease: acquireWorkerLease,
-        activateLease: activateWorkerLease, releaseLease: releaseWorkerLease } = require('./shared/worker-lease');
+        activateLease: activateWorkerLease, releaseLease: releaseWorkerLease,
+        isLeaseLive } = require('./shared/worker-lease');
 const { killProcessTree } = require('./kill-tree');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
@@ -60,8 +62,9 @@ Arguments:
   --skill <name>          起動するワーカースキル名
   --issue <N>             ワーカーのアンカー Issue（正の整数）
   --description <desc>    ワーカーの説明。workerName（worktreeディレクトリ名・gitブランチ名・
-                          workers.jsonのキー）の一部として issue-<N>-<desc> の形で使われる。
-                          英数字・ハイフン・アンダースコアのみ、1〜50文字（例: explore-auth）。
+                          workers.jsonのキー）の一部として issue-<N>-<role>-<desc> の形で使われる。
+                          role はスキルから導出される（例: coder, senior-coder, explorer）。
+	                          英数字・ハイフン・アンダースコアのみ、1〜50文字（例: explore-auth）。
   --repo <owner/repo>     対象リポジトリ
   --prompt-file <path>    任意の役割・作業指示をファイルで指定する。
                           gh-maestro-base 使用時は必須。--short-prompt と同時指定不可。
@@ -73,7 +76,7 @@ Arguments:
   --execution-id <id>     外部成果物と紐付ける実行ID。指定時だけ実行状態を追跡する。
 
 Output (stdout):
-  ワーカー名（例: issue-5-implement）
+  ワーカー名（例: issue-5-coder-implement）
 
 ワーカーは画面を持たないバックグラウンドプロセスとして起動し、標準出力/標準エラーは
 <workspace>/.gh-maestro/worker-logs/<worker>.log へ実行中から逐次書き込まれる。`;
@@ -143,7 +146,7 @@ const executionId = values['--execution-id'] || null;
 
 // --- バリデーション ---
 const resetCmd = `node "${resolve(__dirname, 'reset-session.js')}" --workspace "${workspace}"`;
-const fail = (msg) => {
+let fail = (msg) => {
   console.error(`spawn-worker: ${msg}`);
   console.error(`  → セッション状態が壊れている可能性があります。次のコマンドでリセットしてください:`);
   console.error(`    ${resetCmd}`);
@@ -215,10 +218,56 @@ if (agentConfig.extraArgs?.includes('-Command') && /\s/.test(workspace)) {
   process.exit(1);
 }
 
-// --- パス定義 ---
-const workerName   = `issue-${issue}-${description}`;
-const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
+// --- 起動仕様をfactoryから確定（Phase 3: 共通パイプライン） ---
+// workerName・worktreeキー・ブランチ名・ログキーの一貫性を保証するため、
+// scripts/shared/worker-factory.js の buildNormalWorkerLaunchSpec に一元化する。
+// これにより「識別子がファイルごとに別々に手書きされる」不具合パターンを防ぐ。
 const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
+let spec;
+try {
+  spec = buildNormalWorkerLaunchSpec({ skill, issue, description, repo, workspace });
+} catch (e) {
+  fail(`起動仕様の生成に失敗しました: ${e.message}`);
+}
+const workerName   = spec.workerName;
+const worktreeDir  = spec.worktreeDir;
+const logPath      = spec.logPath;
+
+// --- 移行安全策: 旧形式（issue-<issue>-<description>、role無し）のワーカー重複チェック ---
+// Phase 3 で workerName 形式が issue-<issue>-<role>-<description> に変わった。
+// 更新前に旧形式で起動され生存中のワーカーは、新しい lease キーと照合されないため
+// 重複起動を許してしまう。旧形式の lease と workers.json も確認して防ぐ。
+// このチェックは旧形式が不要になった時点で削除できる（移行期間限定）。
+{
+  const oldKey = `issue-${issue}-${description}`;
+  if (oldKey !== workerName) {
+    // 旧形式 lease チェック（Phase 2 以降のワーカーは全員 lease を持つ）
+    const leaseStoreForCheck = createNormalWorkerStore(workspace);
+    const oldLease = leaseStoreForCheck.read(oldKey);
+    if (oldLease && isLeaseLive(oldLease)) {
+      fail(
+        `旧形式（role無し）のワーカー "${oldKey}" が既に稼働中です（pid ${oldLease.pid}）。` +
+        `このワーカーを停止してから再試行してください。` +
+        `識別子形式が issue-<issue>-<role>-<description> へ変更されたための移行措置です。`
+      );
+    }
+    // 旧形式 workers.json チェック（Phase 2 以前の lease 非保持ワーカー向け）
+    if (existsSync(workersJson)) {
+      try {
+        const parsed = JSON.parse(readFileSync(workersJson, 'utf8'));
+        if (typeof parsed === 'object' && parsed !== null && parsed[oldKey]) {
+          const oldEntry = normalizeWorkerEntry(parsed[oldKey]);
+          if (isWorkerAlive(oldEntry)) {
+            fail(
+              `旧形式（role無し）のワーカー "${oldKey}" が workers.json に登録され生存中です（pid ${oldEntry.pid}）。` +
+              `このワーカーを停止してから再試行してください。`
+            );
+          }
+        }
+      } catch { /* workers.json が読めなければスキップ（後続の本処理で改めて読む） */ }
+    }
+  }
+}
 
 // --- リース獲得（重複起動防止。Phase 2: 通常ワーカーのみ） ---
 // lease獲得はworktreeの除去・再作成より先に行う。
@@ -427,7 +476,6 @@ try {
 // これにより PATH 実行ファイル・pwsh 関数・エイリアスのすべてが起動可能になる。
 // argv の完全性は各プラットフォームのエンコード方式で保証される（agent-exec.js 参照）。
 //
-const logPath = workerLogPath(workspace, workerName);
 let launched;
 let execution;
 try {
