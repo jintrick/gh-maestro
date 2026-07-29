@@ -4,11 +4,12 @@
 // Usage: node assistant-watch.js --issue <N> [--workspace <path>] [--repo <owner/repo>]
 //                                 [--wait <sec>] [--interval <sec>]
 //
-// 検知する4種のイベント（Issue #166）:
+// 検知する5種のイベント（Issue #166, #187）:
 //   worker_report — ワーカー→オーケストレーターへのIssueコメント報告（msg-send.jsマーカー）
 //   hanseikai     — 【反省会】で始まるIssueコメント
 //   review_done   — Review Managerの .running ロックファイルの消失
 //   pr_merged     — 既知PRがマージ済みへ遷移
+//   pr_created    — コーダーによる新規PRの作成を検出
 //
 // 副作用ゼロ（gh の参照系コマンドとローカルファイルの読み取りのみ）。
 // scripts/poll-pr.js・scripts/msg-poll.js は呼び出さない・内部でも流用しない
@@ -53,7 +54,7 @@ Options:
 
 Output (stdout):
   新規イベントを検知した場合、1行以上の \`EVENT <json>\` を出力してexit 0。
-    json.type: "worker_report" | "hanseikai" | "review_done" | "pr_merged"
+    json.type: "worker_report" | "hanseikai" | "review_done" | "pr_merged" | "pr_created"
   タイムアウトまで何も見つからなければ \`TIMEOUT\` を1行出力してexit 0。
 
 副作用: 読み取り専用。gh issue view / gh pr list 等の参照コマンドとローカルファイルの
@@ -289,7 +290,11 @@ function scanOnce({ workspace, ghDir, repo, issue, state, isBaseline, ghOpts }) 
     }
     const merged = prData.state === 'MERGED' || !!prData.mergedAt;
     const reviewRunning = fs.existsSync(reviewArtifactPath(ghDir, prNumber, '.running'));
-    // 新規検出したPR自体はイベント化しない（PR作成自体は通常worker_reportで既に伝わる）。
+    // 新規PR発見時にpr_createdイベントを発行する（コーダーは完了報告を投稿しないため、
+    // このイベントが唯一の通知経路となる。#187）。
+    if (!isBaseline) {
+      events.push({ type: 'pr_created', pr: prNumber });
+    }
     // 現在の状態をそのままベースラインにする。
     state.prs[key] = { merged, reviewSeenRunning: reviewRunning, reviewReported: false };
   }

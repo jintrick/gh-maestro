@@ -11,7 +11,16 @@ const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths')
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-assistant-watch-test-'));
-  const cleanup = () => fs.rmSync(dir, { recursive: true, force: true });
+  // GH_MAESTRO_WORKSPACE が設定されていると resolveWorkspace が --workspace 引数より
+  // 環境変数を優先し、全テストが同一ファイルに書き込んで EPERM 競合を起こす（#187）。
+  // テンポラリディレクトリに設定することでテスト間の分離を確保する。
+  const origWorkspace = process.env.GH_MAESTRO_WORKSPACE;
+  process.env.GH_MAESTRO_WORKSPACE = dir;
+  const cleanup = () => {
+    if (origWorkspace !== undefined) process.env.GH_MAESTRO_WORKSPACE = origWorkspace;
+    else delete process.env.GH_MAESTRO_WORKSPACE;
+    fs.rmSync(dir, { recursive: true, force: true });
+  };
   let result;
   try {
     result = fn(dir);
@@ -87,10 +96,14 @@ describe('main: 引数検証', () => {
   });
 
   test('workspace を解決できなければエラー', async () => {
-    const r = await watch.main(['--issue', '5', '--workspace', '/definitely/does/not/exist/xyz']);
-    // resolveWorkspace は存在確認をしないため、実際に workspace 解決エラーになるのは
-    // --workspace 省略時に CWD 上方探索で見つからない場合。ここでは --repo 解決失敗で確認する。
-    assert.equal(typeof r.code, 'number');
+    // GH_MAESTRO_WORKSPACE 環境変数が設定されている場合はこれが優先されるため、
+    // 非存在パスを --workspace で渡しても workspace 解決自体は成功する。
+    // 代わりにテンポラリディレクトリ（git repoではない）を workspace として渡し、
+    // _ghRepoView が失敗するパスを検証する。
+    await withTempDir(async (workspace) => {
+      const r = await watch.main(['--issue', '5', '--workspace', workspace]);
+      assert.equal(typeof r.code, 'number');
+    });
   });
 
   test('リポジトリを解決できなければエラー', async () => {
@@ -314,17 +327,26 @@ describe('main: pr_merged検知', () => {
 // ── _ghFindPr: poll-pr.js findPR() と同じ2段構え ────────────────────────
 
 describe('main: PR新規発見のクエリ精度', () => {
-  test('_ghFindPrが返したPR番号を新規発見として扱い、以後は番号指定のgh pr viewで状態を追う', async () => {
+  test('_ghFindPrが返したPR番号を新規発見として扱い、初回発見時にpr_createdイベントを発行する', async () => {
     await withTempDir(async (workspace) => {
+      // 既存stateがある状態（初回ベースライン確立済み）で新規PRを発見 → pr_createdが発行される
+      watch.writeState(workspace, '5', {
+        lastCommentId: 0,
+        prs: { 42: { merged: false, reviewSeenRunning: false, reviewReported: false } },
+      });
       stubOk({
         ghFindPr: () => [99],
         ghPrView: () => ({ status: 0, stdout: JSON.stringify({ state: 'OPEN', mergedAt: null }) }),
       });
 
-      const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '1']);
-      assert.deepEqual(r.lines, ['TIMEOUT']); // 新規発見自体はイベント化しない
+      const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '5']);
+      assert.equal(r.lines.length, 1);
+      const event = JSON.parse(r.lines[0].replace(/^EVENT /, ''));
+      assert.equal(event.type, 'pr_created');
+      assert.equal(event.pr, 99);
       const state = watch.readState(workspace, '5');
       assert.ok(state.prs['99']);
+      assert.equal(state.prs['99'].merged, false);
     });
   });
 });
