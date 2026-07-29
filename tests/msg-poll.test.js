@@ -673,6 +673,68 @@ test('orchestrator モード: 古い state 形式（文字列 since）からの�
   });
 });
 
+// ── orchestrator 初回スキャン（state 不在 → サイレント catch-up） ────
+
+test('orchestrator モード 初回スキャン: state 不在時、既存コメントを NEW_MESSAGE として出力しない（サイレント catch-up）', () => {
+  const origWorkspace = process.env.GH_MAESTRO_WORKSPACE;
+  delete process.env.GH_MAESTRO_WORKSPACE;
+  try {
+    withTempDir(workspace => {
+      const ghDir = path.join(workspace, '.gh-maestro');
+      fs.mkdirSync(ghDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(ghDir, 'workers.json'),
+        JSON.stringify({ 'w': { issue: 100 } }, null, 2),
+        'utf8'
+      );
+
+      msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+
+      // 初回スキャン: 既存コメント（since なしで全件取得される）
+      msgPoll._setGhApiComments(() => ({
+        status: 0,
+        stdout: JSON.stringify([
+          { id: 1, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nold1',
+            created_at: '2026-07-07T10:00:00Z' },
+          { id: 2, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nold2',
+            created_at: '2026-07-07T09:00:00Z' },
+        ]),
+      }));
+
+      const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
+      assert.equal(r.code, 0);
+      r.scanOnce();
+
+      // 既存コメントは NEW_MESSAGE として出力されない
+      assert.equal(r.lines.length, 0, '初回スキャンでは既存コメントを通知しない');
+
+      // state が永続化されている
+      const state = msgPoll.readState(workspace, 'orchestrator');
+      assert.equal(state.since['100'], '2026-07-07T10:00:00Z');
+      assert.ok(state.seenIds.includes(1), 'comment 1 が seenIds に含まれる');
+      assert.ok(state.seenIds.includes(2), 'comment 2 が seenIds に含まれる');
+
+      // 2回目のスキャン: 新着コメントのみを検出する
+      msgPoll._setGhApiComments((repo, issue, since) => {
+        assert.equal(since, '2026-07-07T10:00:00Z', '2回目は since が使われる');
+        return {
+          status: 0,
+          stdout: JSON.stringify([
+            { id: 3, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nnew',
+              created_at: '2026-07-07T11:00:00Z' },
+          ]),
+        };
+      });
+
+      const r2 = runMain(['orchestrator', '--workspace', workspace, '--once']);
+      r2.scanOnce();
+      assert.deepEqual(r2.lines, ['NEW_MESSAGE:100:3'], '新規コメントは通知される');
+    });
+  } finally {
+    process.env.GH_MAESTRO_WORKSPACE = origWorkspace;
+  }
+});
+
 // ── workers.json 安全性 ────────────────────────────────────────────────────
 
 test('workers.json が配列の場合にクラッシュしない', () => {
