@@ -9,7 +9,7 @@
 // （GraphQLフォールバック・エラー時continue等）を実装する。本モジュールは
 // REST API呼び出しと応答の平坦化のみを行い、ビジネスロジックは持ち込まない。
 
-const { spawnSync } = require('../child-process');
+let _spawnSync = require('../child-process').spawnSync;
 
 const GH_TIMEOUT_MS = 30000;
 
@@ -18,7 +18,7 @@ let _listComments = (repo, issue, opts = {}) => {
   const args = ['api', '--method', 'GET', `repos/${repo}/issues/${issue}/comments`, '--paginate', '--slurp'];
   if (since) args.push('-f', `since=${since}`);
   if (per_page) args.push('-f', `per_page=${per_page}`);
-  return spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...restOpts });
+  return _spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...restOpts });
 };
 
 /**
@@ -43,4 +43,5 @@ module.exports = {
   listComments: (repo, issue, opts) => _listComments(repo, issue, opts || {}),
   parseCommentsResponse,
   _setListComments: (fn) => { _listComments = fn; },
+  _setSpawnSync: (fn) => { _spawnSync = fn; },
 };
