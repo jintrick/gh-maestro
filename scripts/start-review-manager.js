@@ -5,10 +5,9 @@ const fs = require('fs');
 const path = require('path');
 let _isProcessAlive = require('./process-lifecycle').isProcessAlive;
 const { launchAgentHeadless } = require('./shared/headless-launch');
-const { assertValidPr, reviewArtifactPath } = require('./shared/review-manager-paths');
+const { assertValidPr } = require('./shared/review-manager-paths');
+const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
-
-const ISSUE_RE = /^[1-9]\d*$/;
 
 const USAGE = `start-review-manager.js — PRに対してReview Managerを起動する
 
@@ -83,23 +82,21 @@ function startReviewManager(pr, repo, workspace, issue) {
   // pr はファイルパス構成要素として使われるため、厳密な正整数であることを
   // ここで確定させる（PR #84 Review指摘: pathトラバーサル対策）。
   assertValidPr(pr);
-  if (!ISSUE_RE.test(String(issue))) {
-    throw new Error(`invalid issue number: ${JSON.stringify(issue)} (must be a positive integer)`);
-  }
+
+  // Phase 5: パス計算を factory（buildReviewManagerLaunchSpec）に一元化する。
+  // workerName・ログパス・leaseパスの一貫性が保証され、
+  // 「識別子がファイルごとに別々に手書きされる」不具合パターンを防ぐ。
+  // assertValidIssue は factory 内部で検証される。
+  const spec = buildReviewManagerLaunchSpec({ issue, pr, repo, workspace });
+  const workerName = spec.workerName;
+  const lockFile = spec.leaseStore;
+  const logPath = spec.logPath;
 
   const ghDir = path.join(workspace, '.gh-maestro');
   fs.mkdirSync(ghDir, { recursive: true });
-  const lockFile = reviewArtifactPath(ghDir, pr, '.running');
 
   // req.13: stale 判定付きで lock チェック
   if (isLockValid(lockFile)) return 'REVIEW_MANAGER_ALREADY_RUNNING';
-
-  const logPath = reviewArtifactPath(ghDir, pr, '.log');
-
-  // GH_MAESTRO_WORKER は msg-send.js のワーカーコンテキスト判定・Issue番号導出
-  // （/^issue-(\d+)-/ パターン）に使われる。Review Managerはworkers.json管理対象では
-  // ないが、この命名規約に合わせるだけでworker-exit-hook.jsをそのまま再利用できる。
-  const workerName = `issue-${issue}-review-manager-pr-${pr}`;
 
   // 通常ワーカーと同じ execution registry（.gh-maestro/executions.json）には乗せない。
   // registryの'completed'はmarkCommentResult（msg-send.js --execution-id経由の投稿成功）
@@ -116,7 +113,9 @@ function startReviewManager(pr, repo, workspace, issue) {
   // onExitフック（呼び出し元の状態に一切依存せず確実に発火する）に乗せることで、
   // タイムアウトに頼らず起動直後から実行完了までの全期間のクラッシュを検出できる。
   const launched = launchAgentHeadless({
-    argv: [process.execPath, path.join(__dirname, 'run-review-manager.js'), pr, repo, workspace],
+    // Phase 5: ISSUE を run-review-manager.js へ構造化引数として渡す。
+    // shell文字列の再構築を避け、argv配列で直接渡す（argv-parsing-pitfalls ルール準拠）。
+    argv: [process.execPath, path.join(__dirname, 'run-review-manager.js'), pr, repo, workspace, String(issue)],
     cwd: workspace,
     logPath,
     env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },

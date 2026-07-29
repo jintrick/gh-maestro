@@ -17,6 +17,7 @@ const {
   assertValidPr, reviewArtifactPath,
   reviewWorktreeBranchName, reviewWorktreeFetchRef, reviewWorktreeDir,
 } = require('./shared/review-manager-paths');
+const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
@@ -26,12 +27,13 @@ const GRACEFUL_SHUTDOWN_GRACE_MS = 5000; // 5 seconds for child process to exit 
 
 const USAGE = `run-review-manager.js — Review Managerをheadless起動してPRレビューを実行する
 
-Usage: node run-review-manager.js <PR> <REPO> <WORKSPACE>
+Usage: node run-review-manager.js <PR> <REPO> <WORKSPACE> <ISSUE>
 
 Arguments:
   <PR>         レビュー対象の PR 番号
   <REPO>       GitHub リポジトリ(owner/repo)
   <WORKSPACE>  ワークスペースの絶対パス
+  <ISSUE>      アンカー Issue 番号（workerName生成に使用）
 
 このスクリプトは通常 start-review-manager.js から detach 起動される内部エンドポイント。
 成果物完成トリガー（artifact-committed）を採用し、エージェントプロセスの終了ではなく
@@ -884,9 +886,9 @@ if (require.main === module) {
       process.exit(0);
     }
 
-    const [pr, repo, workspace] = rest;
+    const [pr, repo, workspace, issue] = rest;
 
-    if (!pr || !repo || !workspace) {
+    if (!pr || !repo || !workspace || !issue) {
       console.error(USAGE);
       process.exit(1);
     }
@@ -898,9 +900,13 @@ if (require.main === module) {
       process.exit(1);
     }
 
+    // Phase 5: パス計算を factory（buildReviewManagerLaunchSpec）に一元化する。
+    // これにより workerName・ログパス・leaseパスの一貫性が保証され、
+    // 「識別子がファイルごとに別々に手書きされる」不具合パターンを防ぐ。
+    const spec = buildReviewManagerLaunchSpec({ issue, pr, repo, workspace });
     const ghDir = path.join(workspace, '.gh-maestro');
-    const lockFile = reviewArtifactPath(ghDir, pr, '.running');
-    const logFile = reviewArtifactPath(ghDir, pr, '.log');
+    const lockFile = spec.leaseStore;
+    const logFile = spec.logPath;
     const outputFile = reviewArtifactPath(ghDir, pr, '.json');
     const promptFile = path.join(os.tmpdir(), `review-manager-prompt-${pr}-${Date.now()}.md`);
 
