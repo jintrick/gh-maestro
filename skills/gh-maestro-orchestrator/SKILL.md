@@ -308,7 +308,16 @@ orchestrator評価: <承認推奨 or 要修正（理由）>
 人間の判断を受けて：
 
 - **承認**: `msg-send.js` でコーダーに承認を伝え、実装着手を指示する。
+  コーダー／シニアコーダーの場合、承認指示を送る**前に** `set-response-contract.js` で応答契約を設定すること。
+  これにより、実装完了後に `msg-send.js` が呼ばれなくても PR 作成をもって完了とみなされ、
+  誤った自動代理送信が発生しなくなる。
   ```sh
+  # 1. 応答契約を設定（コーダー／シニアコーダーの計画承認時のみ必須）
+  node "{{SCRIPTS_PATH}}/set-response-contract.js" \
+    --issue <N> --skill <gh-maestro-coder または gh-maestro-senior-coder> \
+    --type artifact-or-message --artifact pr --workspace $WORKSPACE
+
+  # 2. 承認指示を送信
   node "{{SCRIPTS_PATH}}/msg-send.js" --issue <N> --skill <gh-maestro-coder または gh-maestro-senior-coder> --workspace $WORKSPACE --stdin <<'EOF'
   計画が承認されました。計画に従って実装を開始してください。
   EOF
