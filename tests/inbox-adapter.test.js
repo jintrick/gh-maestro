@@ -36,6 +36,10 @@ const {
   resolveAdapter,
 } = require('../scripts/shared/inbox-adapters');
 
+const {
+  buildAgentResumeCommandArgs,
+} = require('../scripts/agent-launch');
+
 // ═══════════════════════════════════════════════════════════════════════════
 // adapter-base: インターフェース検証
 // ═══════════════════════════════════════════════════════════════════════════
@@ -160,6 +164,103 @@ test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeComma
   assert.ok(!result.args.includes('--continue'), 'should not include --continue when sessionRef replaces it');
   assert.ok(result.args.includes('specific-conversation-id'), 'should include sessionRef');
   assert.ok(!result.args.includes('--dangerously-skip-permissions'), 'should NOT include extraArgs (added by buildAgentResumeCommandArgs)');
+});
+
+// ── resume + buildAgentResumeCommandArgs 結合（extraArgs重複防止の実証） ────
+
+test('integrated: codex の resume→buildAgentResumeCommandArgs で extraArgs が1回のみ出現する', () => {
+  const agent = getAgentMap().get('codex');
+  const adapter = createSessionResumeAdapter(agent);
+  const resumeResult = adapter.resume();
+  const message = '新着指示を処理してください';
+
+  const finalResult = buildAgentResumeCommandArgs(
+    agent,
+    resumeResult.args,
+    { shortPrompt: message },
+  );
+
+  const argv = finalResult.argv;
+
+  // codex の extraArgs: ["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
+  // resumeCommand: ["resume", "--last"]
+  // 期待 argv: ["codex", "exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "resume", "--last", "新着指示を処理してください"]
+
+  assert.equal(argv[0], 'codex', 'command should be first');
+
+  // extraArgs が argv 内にそれぞれ1回だけ出現する
+  const execCount = argv.filter(a => a === 'exec').length;
+  const skipGitCount = argv.filter(a => a === '--skip-git-repo-check').length;
+  const bypassCount = argv.filter(a => a === '--dangerously-bypass-approvals-and-sandbox').length;
+  assert.equal(execCount, 1, 'exec should appear exactly once');
+  assert.equal(skipGitCount, 1, '--skip-git-repo-check should appear exactly once');
+  assert.equal(bypassCount, 1, '--dangerously-bypass-approvals-and-sandbox should appear exactly once');
+
+  // resume 固有の引数（resumeCommand）も1回だけ
+  const resumeCount = argv.filter(a => a === 'resume').length;
+  const lastCount = argv.filter(a => a === '--last').length;
+  assert.equal(resumeCount, 1, 'resume should appear exactly once');
+  assert.equal(lastCount, 1, '--last should appear exactly once');
+
+  // 末尾にメッセージがある
+  assert.equal(argv[argv.length - 1], message, 'message should be last');
+
+  // 順序検証: extraArgs → resumeArgs → message
+  const execIdx = argv.indexOf('exec');
+  const resumeIdx = argv.indexOf('resume');
+  const msgIdx = argv.indexOf(message);
+  assert.ok(execIdx < resumeIdx, 'exec(' + execIdx + ') should come before resume(' + resumeIdx + ')');
+  assert.ok(resumeIdx < msgIdx, 'resume(' + resumeIdx + ') should come before message(' + msgIdx + ')');
+});
+
+test('integrated: codex の sessionRef 付き resume→buildAgentResumeCommandArgs でも extraArgs が1回のみ', () => {
+  const agent = getAgentMap().get('codex');
+  const adapter = createSessionResumeAdapter(agent);
+  const resumeResult = adapter.resume('session-abc-123');
+  const message = '続行指示';
+
+  const finalResult = buildAgentResumeCommandArgs(
+    agent,
+    resumeResult.args,
+    { shortPrompt: message },
+  );
+
+  const argv = finalResult.argv;
+
+  // extraArgs が1回だけ
+  const execCount = argv.filter(a => a === 'exec').length;
+  assert.equal(execCount, 1, 'exec should appear exactly once');
+
+  // sessionRef が含まれ、--last は置き換えられている
+  assert.ok(argv.includes('session-abc-123'), 'should include sessionRef');
+  assert.ok(!argv.includes('--last'), 'should not include --last');
+  assert.equal(argv[argv.length - 1], message, 'message should be last');
+});
+
+test('integrated: agy の resume→buildAgentResumeCommandArgs で extraArgs が1回のみ出現する', () => {
+  const agent = getAgentMap().get('agy');
+  const adapter = createSessionResumeAdapter(agent);
+  const resumeResult = adapter.resume();
+  const message = '指示を処理';
+
+  const finalResult = buildAgentResumeCommandArgs(
+    agent,
+    resumeResult.args,
+    { shortPrompt: message },
+  );
+
+  const argv = finalResult.argv;
+
+  // agy の extraArgs: ["--dangerously-skip-permissions", "--print-timeout", "30m0s"]
+  const skipPermCount = argv.filter(a => a === '--dangerously-skip-permissions').length;
+  assert.equal(skipPermCount, 1, '--dangerously-skip-permissions should appear exactly once');
+
+  // resume 固有の引数（--continue）も1回だけ
+  const continueCount = argv.filter(a => a === '--continue').length;
+  assert.equal(continueCount, 1, '--continue should appear exactly once');
+
+  // 末尾にメッセージ
+  assert.equal(argv[argv.length - 1], message, 'message should be last');
 });
 
 test('createSessionResumeAdapter: deliverMessage が session-resume タイプの結果を返す', () => {
