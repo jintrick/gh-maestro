@@ -54,6 +54,7 @@ const {
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // msg-poll.js のスキャンロジックを再利用（マーカーパースのみ）
 const { parseMarker } = require('./msg-poll');
+const { readContract, clearContract } = require('./shared/response-contract');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
 
@@ -319,6 +320,19 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
   }
   const sinceTimestamp = new Date().toISOString();
 
+  // ── 応答契約の読み取り ──────────────────────────────────────────────────
+  // orchestrator が set-response-contract.js で設定した契約があれば読み取り、
+  // sinceTimestamp を注入した完全なspecをJSON文字列で onExit args 第7引数に追加する。
+  // 契約のクリアは、配送試行が確定的な終着点に達したときだけ行う:
+  //   - 生存確認まで成功（本関数末尾）
+  //   - 5回のリトライを尽くした配送断念（runOnce の pending 再試行パス）
+  // リトライ中（一時的な失敗でバックオフ中）は契約をそのまま残す。
+  const contract = _readContract(workspace, workerName);
+  let contractArg = '';
+  if (contract && contract.type === 'artifact-or-message') {
+    contractArg = JSON.stringify({ ...contract, sinceTimestamp });
+  }
+
   let launched;
   try {
     launched = launchAgentHeadless({
@@ -329,14 +343,16 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
       // これが無いと resume 後のワーカーが自分を識別できず msg-send.js を誤用しうる）。
       env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },
       // resume 後の異常終了は orchestrator へ通知する（初回起動と同じ終了フック）。
-      // 第3〜第5引数（log-path・since-timestamp・log-offset）は resume 応答の
+      // 第3〜第6引数（log-path・since-timestamp・log-offset）は resume 応答の
       // 代理送信判定に使う（worker-exit-hook.js参照）。新規起動（spawn-worker.js）は
       // これらを渡さず、異常終了通知だけが働く。
+      // 第7引数 contractArg: 応答契約のJSON文字列（空文字列="契約なし"=message-required）
       onExit: {
         command: process.execPath,
         args: [
           path.join(__dirname, 'worker-exit-hook.js'),
           workspace, '', logPath, sinceTimestamp, String(logOffset),
+          contractArg,
         ],
       },
     });
@@ -358,6 +374,12 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
 
   if (!updateWorkerProcess(workspace, workerName, launched)) {
     return { success: false, method: 'resume-failed', error: `workers.json書き込み失敗（worker "${workerName}" が見つかりません）` };
+  }
+
+  // 配送試行が生存確認まで成功した確定的な終着点 → 契約を消費する。
+  // リトライ中（本関数が success: false で return したケース）では契約をクリアしない。
+  if (contract) {
+    _clearContract(workspace, workerName);
   }
 
   return { success: true, method: 'resume', pid: launched.pid };
@@ -615,6 +637,13 @@ function main(argsOverride, opts = {}) {
             } catch (e) {
               writeErr(`inbox-supervisor: 配送断念のorchestrator通知に失敗: ${e.message}`);
             }
+            // 5回のリトライを尽くした配送断念は確定的な終着点 → 契約を消費する。
+            // これにより、別の新着メッセージで次回resumeされるときに不要な契約が残留しない。
+            try {
+              _clearContract(workspace, workerName);
+            } catch {
+              // クリア失敗は無視（次回のresumeでreadContractが最新契約を読むため）
+            }
           }
         }
       }
@@ -839,6 +868,9 @@ if (require.main === module) {
   }
 }
 
+let _readContract = readContract;
+let _clearContract = clearContract;
+
 // ── テスト用 export ──────────────────────────────────────────────────────
 
 module.exports = {
@@ -847,6 +879,8 @@ module.exports = {
   _setIsWorkerAlive: (fn) => { _isWorkerAlive = fn; },
   _setSleep: (fn) => { _sleep = fn; },
   _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
+  _setReadContract: (fn) => { _readContract = fn; },
+  _setClearContract: (fn) => { _clearContract = fn; },
   main,
   readCursor,
   writeCursor,
