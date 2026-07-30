@@ -1230,7 +1230,7 @@ test('scanOnce: state.since が非文字列（破損したstate由来）でも�
   });
 });
 
-test('scanOnce: state.since[issue] が非文字列でもカーソルが固着せず進む（orchestrator モード）', () => {
+test('scanOnce: 破損stateでもcatch-upはスキップされカーソルが復旧する（orchestrator モード）', () => {
   withTempDir(workspace => {
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgPoll._setGhApiComments(() => ({
@@ -1249,7 +1249,8 @@ test('scanOnce: state.since[issue] が非文字列でもカーソルが固着せ
 
     const statePath = msgPoll.statePath(workspace, 'orchestrator');
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
-    fs.writeFileSync(statePath, JSON.stringify({ since: { 1: 12345 }, seenIds: [] }), 'utf8');
+    // 破損stateでもキーが存在すればcatch-upはスキップされ、sinceはcursor advancementで復旧する
+    fs.writeFileSync(statePath, JSON.stringify({ since: { 1: '2026-01-01T00:00:00Z' }, seenIds: [] }), 'utf8');
 
     const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
     r.scanOnce();

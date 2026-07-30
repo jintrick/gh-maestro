@@ -445,7 +445,7 @@ function main(argsOverride, opts = {}) {
     if (isOrchestrator) {
       const seenSet = new Set(state.seenIds);
       for (const { issue, comment: c } of allIssuesAndComments) {
-        if (issue in state.since) continue;
+        if (typeof state.since[issue] === 'string') continue;
         const cid = c.id;
         if (cid != null) seenSet.add(cid);
       }
