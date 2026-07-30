@@ -39,7 +39,11 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
    - **差し戻し（修正依頼）の指示を受け取ったら**、計画を修正し、再度 `publish-plan.js` で同じpin済みコメントを更新し、再度報告して待機する
 4. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）
 5. `git commit`/`git push` はgh-maestroが設置したフックが自動でlint/format（commit時）・test/typecheck（push時）を検証する。フックが失敗したら`--no-verify`等でバイパスせず、原因を修正してから再度commit/pushする
-6. `gh pr create --base $BASE_BRANCH` でPRを作成する（本文に `Closes #$ISSUE` を含める）
+6. `gh-create-pr.js` でPRを作成する：
+   ```sh
+   node "{{SCRIPTS_PATH}}/gh-create-pr.js" --title "<PRタイトル>" --body "Closes #$ISSUE"
+   ```
+   baseブランチはgit upstream trackingから自動解決されるため、明示的に指定する必要はない。
 
 ## 失敗時
 
