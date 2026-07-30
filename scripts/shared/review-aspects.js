@@ -1,43 +1,41 @@
 'use strict';
-// 共有: skills/gh-maestro-reviewer/ 配下から既知の観点（葉）名を動的に取得する。
-// ハードコードした一覧を持たず、実際に存在するファイルをスキャンして一致判定に使う。
+// review-aspects.js — Review Managerのレビュー基準（7葉）と幹（3幹）の定義
+//
+// run-review-jobs.js / finalize-review.js 等から共有参照される単一の正規定義。
+// 将来葉や幹を変更する際はこのファイルだけを更新する。
+//
+// require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
+// （skill-asset-help ルール準拠）。
 
-const fs = require('fs');
-const path = require('path');
+const ALL_LEAF_IDS = Object.freeze([
+  'correctness/logic-invariants',
+  'correctness/api-contract',
+  'correctness/concurrency',
+  'resilience-security/failure-recovery',
+  'resilience-security/hostile-input',
+  'maintainability/structure-naming',
+  'maintainability/test-quality',
+]);
 
-const DEFAULT_REVIEWER_SKILL_DIR = path.join(__dirname, '..', '..', 'skills', 'gh-maestro-reviewer');
+const TRUNK_TO_LEAVES = Object.freeze({
+  'Correctness': ['correctness/logic-invariants', 'correctness/api-contract', 'correctness/concurrency'],
+  'Resilience & Security': ['resilience-security/failure-recovery', 'resilience-security/hostile-input'],
+  'Maintainability': ['maintainability/structure-naming', 'maintainability/test-quality'],
+});
 
-/**
- * skills/gh-maestro-reviewer/<幹>/<葉>.md をスキャンし、葉名（拡張子なし）の一覧を返す。
- * SKILL.md（幹直下のファイル）は葉として扱わない。
- *
- * @param {string} [reviewerSkillDir]
- * @returns {string[]} ソート済みの葉名一覧
- */
-function listKnownAspects(reviewerSkillDir = DEFAULT_REVIEWER_SKILL_DIR) {
-  const aspects = [];
-  let trunkEntries;
-  try {
-    trunkEntries = fs.readdirSync(reviewerSkillDir, { withFileTypes: true });
-  } catch {
-    return aspects;
-  }
-  for (const trunk of trunkEntries) {
-    if (!trunk.isDirectory()) continue;
-    const trunkDir = path.join(reviewerSkillDir, trunk.name);
-    let leafEntries;
-    try {
-      leafEntries = fs.readdirSync(trunkDir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const leaf of leafEntries) {
-      if (!leaf.isFile()) continue;
-      if (!leaf.name.endsWith('.md')) continue;
-      aspects.push(path.basename(leaf.name, '.md'));
-    }
-  }
-  return aspects.sort();
-}
+const VALID_ASPECTS = new Set(['Correctness', 'Maintainability', 'Resilience & Security']);
 
-module.exports = { listKnownAspects, DEFAULT_REVIEWER_SKILL_DIR };
+const VALID_SEVERITIES = new Set(['BLOCKER', 'MAJOR', 'SUGGESTION']);
+
+const FINDING_REQUIRED_FIELDS = [
+  'aspect', 'path', 'line_anchor', 'summary',
+  'severity', 'severity_rationale', 'body', 'verified_references',
+];
+
+module.exports = {
+  ALL_LEAF_IDS,
+  TRUNK_TO_LEAVES,
+  VALID_ASPECTS,
+  VALID_SEVERITIES,
+  FINDING_REQUIRED_FIELDS,
+};
