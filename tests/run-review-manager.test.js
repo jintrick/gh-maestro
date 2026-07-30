@@ -39,20 +39,22 @@ after(() => {
 
 // ── buildPrompt ──────────────────────────────────────────────────────────
 
-test('buildPrompt instructs the 3-aspect parallel review and artifact contract', () => {
-  const { prompt, stagingFile } = buildPrompt({
+test('buildPrompt instructs the coverage-ledger + tool-driven review flow', () => {
+  const { prompt } = buildPrompt({
     pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
   });
   assert.match(prompt, /PR=5/);
   assert.match(prompt, /REPO=o\/r/);
-  assert.match(prompt, /3観点のReviewerを独立に並列spawnする/);
-  // 成果物契約（artifact contract）が含まれる
-  assert.match(prompt, /STAGING=/);
-  assert.match(prompt, /atomic rename/);
-  assert.match(prompt, /追記・上書きしない/);
-  // stagingFileが一意であること
-  assert.ok(stagingFile.includes('.staging-'), `staging path should include .staging- prefix: ${stagingFile}`);
-  assert.ok(path.basename(stagingFile).startsWith('.staging-'));
+  // 7葉の adopted / excluded 分類を指示
+  assert.match(prompt, /adopted \/ excluded/);
+  // run-review-jobs.js でジョブを実行するよう指示
+  assert.match(prompt, /run-review-jobs\.js/);
+  // finalize-review.js --mode complete で最終化するよう指示
+  assert.match(prompt, /finalize-review\.js --mode complete/);
+  // 全件テスト禁止
+  assert.match(prompt, /全体ビルド/);
+  // return no longer includes stagingFile (artifact contract handled by finalize-review.js)
+  assert.ok(typeof prompt === 'string');
 });
 
 test('buildPrompt normalizes backslash paths to forward slashes', () => {
@@ -63,19 +65,21 @@ test('buildPrompt normalizes backslash paths to forward slashes', () => {
   assert.match(prompt, /OUTPUT=C:\/ws\/out\.json/);
 });
 
-test('buildPrompt: stagingFileはoutputFileと同じディレクトリに生成される', () => {
-  const outputFile = path.join(tmpBase, 'output', 'out.json');
-  const { stagingFile } = buildPrompt({
-    pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile,
+test('buildPrompt: SCRIPTS path is included so RM can invoke tool scripts', () => {
+  const { prompt } = buildPrompt({
+    pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
   });
-  assert.equal(path.dirname(stagingFile), path.dirname(outputFile));
+  assert.match(prompt, /SCRIPTS=/);
+  // finalize-review.js が OUTPUT へ書き込む指示が含まれる
+  assert.match(prompt, /OUTPUTファイルへ直接書き込まない/);
 });
 
-test('buildPrompt: 連続呼び出しで異なるstagingFileが生成される', () => {
+test('buildPrompt: 異なる出力パスで呼び出しても prompt が正しく生成される', () => {
   const opts = { pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json' };
   const a = buildPrompt(opts);
   const b = buildPrompt(opts);
-  assert.notEqual(a.stagingFile, b.stagingFile);
+  assert.ok(typeof a.prompt === 'string');
+  assert.ok(typeof b.prompt === 'string');
 });
 
 // ── generateStagingPath ──────────────────────────────────────────────────

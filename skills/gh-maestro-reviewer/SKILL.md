@@ -1,12 +1,17 @@
 ---
 name: gh-maestro-reviewer
-description: Run a gh-maestro PR Review Manager that delegates three independent review aspects and emits structured findings JSON without posting to GitHub.
+description: Run a gh-maestro PR Review Manager that evaluates 7 review leaves, creates an execution manifest, delegates jobs to Node.js tool scripts, and produces structured findings JSON or an incomplete-review plane comment.
 ---
 
 # gh-maestro-reviewer
 
-あなたは gh-maestro の Review Manager(RM) である。PRレビュー対象を3観点に分け、
-独立したReviewerサブエージェントを並列に起動してfindingを集約する。
+あなたは gh-maestro の Review Manager（RM）である。レビューの意味的な管理主体として、
+対象PRのdiffを読み、どの葉（review criteria）が関連するかを判断し、レビュージョブを
+分割・実行し、その結果を統合して最終成果物を生成する。
+
+Node.jsの決定論的ツール（`run-review-jobs.js` / `finalize-review.js`）は、
+あなたが決めた実行計画を機械的に遂行する道具である。分割方針や打切り判断は
+Node.js側に埋め込まれておらず、あなたが行う。
 
 ## 入力
 
@@ -14,13 +19,13 @@ description: Run a gh-maestro PR Review Manager that delegates three independent
 
 - `PR`: レビュー対象PR番号
 - `REPO`: `owner/repo`
-- `WORKSPACE`: リポジトリの絶対パス
-- `OUTPUT`: RMが最終JSONを書き出すパス（atomic renameの最終宛先）
-- `STAGING`: 実行固有のstagingファイルパス。**全内容をここに書き、closeしてからOUTPUTへatomic renameする**
+- `WORKSPACE`: リポジトリの絶対パス（PR headにリセットされた専用worktree）
+- `OUTPUT`: 最終JSONの書き出し先パス。**あなたが直接書くのではなく、`finalize-review.js --mode complete` がatomic writeする**
+- `SCRIPTS`: ツールスクリプトのディレクトリ（`{WORKSPACE}/scripts`）
 
-## 観点の構成
+## レビュー基準（7葉）
 
-観点は幹（3つ、サブエージェントの分割単位）＋葉（幹ごとの詳細チェックリスト）の二層構造。
+レビューの母集合は以下の7葉である。3幹は報告上の分類であり、プロセス分割の固定単位ではない。
 
 - `correctness/`（幹: Correctness）
   - `correctness/logic-invariants.md`
@@ -35,102 +40,200 @@ description: Run a gh-maestro PR Review Manager that delegates three independent
 
 ## RMの責務
 
-1. `gh pr view`でPR情報、`headRefOid`、変更ファイル一覧を取得する。
-2. `gh pr diff`でPR diffを取得する。
-3. 既存レビュー・既存インラインコメントを取得する。
-4. 上記3幹それぞれについて、独立したReviewerサブエージェントを並列に立てる。
-   各Reviewerには同じPRコンテキストを渡し、担当幹ディレクトリ配下の**全葉ファイル**を
-   読むよう指示するのが原則。ただし、手順1〜2で実際に取得したPR diffを読んだ上で、
-   特定の葉が明らかにこのPRに無関係だとRM自身が判断できる場合に限り、その葉を
-   読み込み対象から除外してよい（例: 非同期処理・ロック・並行アクセスを一切含まない
-   単純な文言修正のみのPRで`concurrency`を除外する等）。この判断はファイル名等の
-   機械的な規則ではなく、diffの実際の内容を確認した上でのRM自身の判断でなければ
-   ならない。除外は葉単位に限り、3幹そのものを丸ごと省略しない（粒度が粗すぎ、
-   見逃しリスクが高いため）。除外した葉があれば、`OUTPUT`のJSON（スキーマ固定のため
-   追記不可）ではなく、RM自身の応答（チャット出力）で「どの葉を・どのdiffの事実に
-   基づいて除外したか」を明示する。判断に迷う場合は除外せず全葉を対象にする。
-5. Reviewerの結果を集約し、`OUTPUT`にJSONを書き出す。
+### 1. 証拠の取得
 
-RMはGitHubに投稿しない。採否判断、APPROVE/REQUEST_CHANGES判定をしない。
-投稿・line解決・diff hunk判定・重複統合は後続のNode.js review publisherが行う。
-
-## Reviewerへの共通指示
-
-Reviewerは担当観点だけをレビューし、findingを多めに返す。投稿は禁止。
-diffが参照する外部シンボル・型・設定は、判定前に実ファイルで裏取りする。
-担当外の観点でも重大な欠陥を発見した場合は、該当するaspectを明記した上で報告してよい。
-
-### 裏取りでファイルを読むとき
-
-作業ディレクトリは**PR headにリセットされた専用worktree**である。**PRで削除・リネームされたファイルはディスク上に存在しない。**
-
-- 読む前に存在を確認する。存在しないパスへいきなり `Get-Content` / `cat` を撃たない
-- **削除・リネームされた側の内容を見たいときは `git show HEAD^:<path>`** を使う。作業ツリーには無い
-- diffの削除行や旧パス、importの参照先は、そのまま実在するとは限らない。パスを推測で組み立てて読みにいかない
-
-実障害（Issue #152）: 存在しないパスへの `Get-Content` が多発し、`Cannot find path ... because it does not exist.` を繰り返した。プロセスは落ちないため失敗として扱われず、裏取りだけが空振りして時間とトークンを消費した。
-
-出力JSONの`aspect`フィールドには、RM自身の判断で一部の葉を除外し葉単位が絞られた場合でも、
-葉の名前（例: `api-contract`）ではなく、その葉が属する幹の名前
-（`Correctness` / `Maintainability` / `Resilience & Security`）を書く。
-`scripts/run-review-manager.js`のプロンプト生成は`aspect`に幹の名前が入る前提のため。
-
-### Severity判定規準
-
-各findingには深刻度（`severity`）とその判定根拠（`severity_rationale`）を必ず付与する。
-深刻度はレビュアーの意見であり、最終的な採否判断はオーケストレーターと人間が行う（advisoryの原則）。
-
-- `BLOCKER`: マージすると本番で実害が発生する（データ破損・クラッシュ・セキュリティ侵害・機能不全）
-- `MAJOR`: 実害の直接発生はないが、放置コストが高い（再発性の高いバグ温床・保守困難化）
-- `SUGGESTION`: 任意の改善提案
-
-**判定に迷う場合は低い方に倒す。** 過剰なBLOCKERはトリアージ側の信頼を毀損する。
-
-### 出力形式
-
-各Reviewerは以下のJSON配列だけを返す。
-
-```json
-[
-  {
-    "aspect": "Correctness",
-    "path": "src/foo.ts",
-    "line_anchor": "await saveUser(user)",
-    "context_before": "if (!user.id) throw new Error('missing id')",
-    "context_after": "return user",
-    "summary": "User persistence can report success before the write completes",
-    "severity": "BLOCKER",
-    "severity_rationale": "APIが成功を返した後に永続化が失敗するとデータ損失が発生するため",
-    "body": "## 観測した事実\n\n変更後のコードは saveUser(user) を await せずに呼び出している。\n\n## 放置すると何が起きるか\n\nsaveUser が reject された場合、API は成功を返しているにもかかわらずユーザーデータが永続化されない。\n\n## 修正の方向性\n\nsaveUser(user) を await してから user を返すように修正する。",
-    "verified_references": ["src/foo.ts", "src/userRepository.ts"]
-  }
-]
+```
+gh pr view <PR> --repo <REPO> --json number,headRefOid,files
+gh pr diff <PR> --repo <REPO>
 ```
 
-- `severity`: 上記判定規準に従った深刻度（`BLOCKER` / `MAJOR` / `SUGGESTION`）
-- `severity_rationale`: 判定根拠を1行で記述する
-- `body`: Markdown自由記述。ただし、観測した事実・放置すると何が起きるか・修正の方向性が読み取れること
-- `line_anchor`: PR head実ファイルに存在する連続したコード断片そのものにする。要約・説明文・diff hunk headerは禁止
-- `verified_references`: 実際に確認したファイルを入れる
+### 2. coverage ledgerの作成（7葉の関連性判断）
 
-## RM出力
+7葉すべてを読み、実際のdiffに基づいて各葉を次のいずれかに分類する。
 
-成果物は以下の手順でatomicに書き出す:
+- **adopted（採用）**: このPRのdiffに関連するため、レビュー対象に含める
+- **excluded（除外）**: 明らかに無関係である。diffの具体的内容に基づく理由を必ず付与する
 
-1. **`STAGING`ファイルに全内容を書く。** 1回の実行で1回のみ生成し、追記・上書きしない
-2. **`STAGING`ファイルをcloseする。** 書き込み完了をOSに伝える
-3. **`STAGING`を`OUTPUT`へatomic renameする。** `OUTPUT`へ直接書き込まない。renameのみで作成する
+この判断はファイル名や拡張子等の機械的規則ではなく、**実際のdiffを読んだ上でのあなた自身の判断**でなければならない。判断に迷う場合は excluded にせず adopted にする。葉単位の除外は許容するが、3幹そのものを丸ごと除外してはならない（粒度が粗すぎ、見逃しリスクが高いため）。
 
-`OUTPUT`には以下のJSONオブジェクトを書き出す。
+### 3. 実行manifestの作成
+
+採用した葉をレビュージョブに分割し、実行manifestをJSONファイルとして書き出す。
+
+ジョブ分割の指針:
+- 1葉=1ジョブでも、強く関連する複数葉を1ジョブにまとめてもよい
+- 独立した観点は別ジョブにし、並列実行で効率化する
+- 各ジョブには `id`、`leaf_ids`、`aspect`（幹名）、`trunk_dir`、`leaf_files` を指定する
+
+manifestのJSON構造:
+
+```json
+{
+  "pr": <PR番号>,
+  "repo": "<owner/repo>",
+  "headRefOid": "<PR headのcommit OID>",
+  "changedFiles": ["<ファイルパス>", ...],
+  "coverage_ledger": {
+    "leaves": [
+      {
+        "id": "correctness/logic-invariants",
+        "trunk": "Correctness",
+        "decision": "adopted",
+        "rationale": null
+      },
+      {
+        "id": "correctness/api-contract",
+        "trunk": "Correctness",
+        "decision": "excluded",
+        "rationale": "APIシグネチャに変更がなく、外部コール元に影響しないため"
+      }
+    ]
+  },
+  "jobs": [
+    {
+      "id": "job-1",
+      "leaf_ids": ["correctness/logic-invariants"],
+      "aspect": "Correctness",
+      "trunk_dir": "skills/gh-maestro-reviewer/correctness",
+      "leaf_files": ["skills/gh-maestro-reviewer/correctness/logic-invariants.md"],
+      "retry_policy": { "max_attempts": 2 }
+    }
+  ],
+  "parallelism": "parallel"
+}
+```
+
+**必須ルール**:
+- 7葉すべてが coverage_ledger.leaves に漏れなく出現しなければならない（`run-review-jobs.js` が機械的に検証する）
+- excluded には必ず rationale（diffに即した理由）を記述する
+- jobs[].leaf_ids は coverage_ledger 上の adopted 葉だけを参照する
+- 各 adopted 葉は少なくとも1つのジョブに割り当てる
+- 同じ葉を複数ジョブに重複割り当てしてはならない
+
+manifestは以下のパスに書き出す:
+
+```
+<WORKSPACE>/.gh-maestro/review-manifest-<PR>.json
+```
+
+### 4. ジョブの実行
+
+manifestを書き出したら、以下のコマンドでジョブを実行する:
+
+```sh
+node <SCRIPTS>/run-review-jobs.js \
+  --manifest <WORKSPACE>/.gh-maestro/review-manifest-<PR>.json \
+  --results <WORKSPACE>/.gh-maestro/review-results-<PR>.json \
+  --workspace <WORKSPACE>
+```
+
+`run-review-jobs.js` は:
+- manifestを機械的に検証する（7葉の欠落・重複・未割当をチェック）
+- 全ジョブを指定された並列度でheadless起動する
+- 各ジョブの標準出力からfindings JSON配列を取得する
+- 結果を `<WORKSPACE>/.gh-maestro/review-results-<PR>.json` に書き出す
+
+### 5. 結果の確認と再試行
+
+resultsファイルを読み、全ジョブの成功/失敗を確認する。
+
+```sh
+# resultsファイルの読み方（例）
+cat <WORKSPACE>/.gh-maestro/review-results-<PR>.json
+```
+
+失敗したジョブがある場合:
+- 成功したジョブの結果は保持される（再実行しない）
+- 失敗したジョブだけを含む新しいmanifestを作成し、`run-review-jobs.js` を再実行する
+- 再試行回数は各ジョブの `retry_policy.max_attempts` で管理する（デフォルト2回）
+- 再試行時も同じジョブIDを使う（上書きされず、attempt番号がインクリメントされる）
+
+再試行で解消しない失敗が残る場合、あなたが打切りを判断する。打切り基準:
+- 合理的な再試行（2回程度）で解消しない技術的失敗
+- タイムアウト超過
+- ジョブワーカーの出力が継続的に不正
+
+### 6. 最終化
+
+#### 完全レビュー（全採用葉が成功）
+
+全採用葉で有効な結果が揃った場合:
+
+```sh
+node <SCRIPTS>/finalize-review.js \
+  --results <WORKSPACE>/.gh-maestro/review-results-<PR>.json \
+  --mode complete \
+  --output <OUTPUT> \
+  --workspace <WORKSPACE>
+```
+
+`finalize-review.js` は:
+- 完全性ゲート（7葉の会計・採用葉の結果・3幹の追跡可能性）を機械的に検証する
+- ゲート通過 → findingsを集約し、所定のスキーマで検証後、`<OUTPUT>` にatomic writeする
+- ゲート失敗 → エラー終了する（completeモードでは不完全な結果を書き出さない）
+
+**OUTPUTファイルはあなたが直接書き込まないこと。** `finalize-review.js` だけがatomic writeする。
+あなたがJSONを生成するPowerShell/bash/JavaScriptインラインスクリプトを書いてはならない。
+
+#### 不完全レビュー（失敗が残り打切りを判断）
+
+採用葉の一部がどうしても成功せず、打切りを判断した場合:
+
+```sh
+node <SCRIPTS>/finalize-review.js \
+  --results <WORKSPACE>/.gh-maestro/review-results-<PR>.json \
+  --mode incomplete \
+  --workspace <WORKSPACE>
+```
+
+`finalize-review.js` は:
+- 成功した葉・失敗した葉・除外した葉・失敗理由を明記したプレーンコメントをPRに投稿する
+- `.gh-maestro/review-manager-<PR>.incomplete` センチネルファイルを作成する
+- 正式なfindings JSONは書き出さない
+
+## RMの禁止事項
+
+- GitHubへ投稿しない（採否判断、APPROVE/REQUEST_CHANGES判定もしない）
+- OUTPUTファイルへ直接書き込まない。JSON生成のインラインスクリプトを書かない
+- **スコープ限定なしの全件テスト（`npm test` 等）および全体ビルド（`npm run build` 等）を実行しない。** diffで変更された特定のテストファイルのみを対象にしたピンポイント実行（例: `node --test tests/<file>.test.js`）は許容する
+- ファイル名・拡張子・glob等の機械的規則だけで葉の関連性を判断しない。必ず実際のdiffを読んで判断する
+- 3幹そのものを丸ごと除外しない（葉単位の除外のみ）
+- 同じ葉を複数ジョブに重複割り当てしない
+
+## ジョブワーカーへの指示（参考）
+
+各ジョブワーカーには `run-review-jobs.js` が自動的に以下の内容を含むプロンプトを生成する:
+- 担当観点（aspect）と担当葉ファイルの全文
+- PR情報と変更ファイル一覧
+- 全件テスト実行禁止・ピンポイント実行許容を含む禁止事項
+- Severity判定規準
+- 標準出力へのJSON配列出力指示（指摘なしの場合は空配列 `[]`）
+
+あなたがジョブワーカーのプロンプトを手書きする必要はない。
+`run-review-jobs.js` がmanifestの内容から機械的に生成する。
+
+## 出力形式（参考: 最終findings.jsonのスキーマ）
 
 ```json
 {
   "pr": 123,
   "repo": "owner/repo",
   "headRefOid": "...",
-  "findings": []
+  "findings": [
+    {
+      "aspect": "Correctness",
+      "path": "src/foo.ts",
+      "line_anchor": "await saveUser(user)",
+      "context_before": "if (!user.id) throw new Error('missing id')",
+      "context_after": "return user",
+      "summary": "User persistence can report success before the write completes",
+      "severity": "BLOCKER",
+      "severity_rationale": "APIが成功を返した後に永続化が失敗するとデータ損失が発生するため",
+      "body": "## 観測した事実\n\n...\n\n## 放置すると何が起きるか\n\n...\n\n## 修正の方向性\n\n...",
+      "verified_references": ["src/foo.ts", "src/userRepository.ts"]
+    }
+  ]
 }
 ```
 
-`findings`はReviewerが返したfinding配列を連結したものにする。
-JSON以外の説明やMarkdownを`OUTPUT`へ混ぜてはならない。
+このJSONをあなたが直接書き出してはならない。`finalize-review.js --mode complete` が集約・検証・書き出しを行う。

@@ -64,26 +64,28 @@ function generateStagingPath(finalPath) {
  */
 function buildPrompt({ pr, repo, workspace, outputFile }) {
   const toUnix = p => p.replace(/\\/g, '/');
-  const stagingFile = generateStagingPath(outputFile);
+  const scriptsDir = toUnix(path.join(__dirname));
   const prompt = `gh-maestro-reviewerスキルを発動し、Review ManagerとしてPRレビューを実行してください。
 
 PR=${pr}
 REPO=${repo}
 WORKSPACE=${toUnix(workspace)}
 OUTPUT=${toUnix(outputFile)}
-STAGING=${toUnix(stagingFile)}
+SCRIPTS=${scriptsDir}
 
 必ず以下を守ってください。
 - GitHubへ投稿しない
 - 採否判断しない
-- 3観点のReviewerを独立に並列spawnする
-- Reviewerには該当する観点別基準ファイルを読ませる
-- **成果物はSTAGINGファイルに全内容を書き、closeしてからOUTPUTへatomic renameすること**
-- STAGINGファイルはこのプロンプトで指定された一意のパスを使い、追記・上書きしない
-- OUTPUTへ直接書き込まない（renameのみで作成する）
-- 最終結果はOUTPUTのJSONだけに書き出す
+- 7葉すべてを読み、diffに基づいて各葉を adopted / excluded に分類すること
+- 採用葉をジョブに分割し、実行manifestを .gh-maestro/review-manifest-${pr}.json に書き出すこと
+- node ${scriptsDir}/run-review-jobs.js でジョブを実行すること
+- 全採用葉が成功したら node ${scriptsDir}/finalize-review.js --mode complete で最終化すること
+- 失敗が残り打切りを判断したら node ${scriptsDir}/finalize-review.js --mode incomplete で不完全報告すること
+- OUTPUTファイルへ直接書き込まない（finalize-review.jsだけがatomic writeする）
+- JSONを生成するPowerShell/bash/JavaScriptインラインスクリプトを書かない
+- 全件テスト（npm test等）・全体ビルド（npm run build等）を実行しない
 `;
-  return { prompt, stagingFile };
+  return { prompt };
 }
 
 /**
@@ -645,7 +647,7 @@ async function superviseReviewManager({
   const worktreeGhDir = path.join(reviewWtDir, '.gh-maestro');
   fs.mkdirSync(worktreeGhDir, { recursive: true });
   const worktreeOutputFile = path.join(worktreeGhDir, `review-manager-${pr}.json`);
-  const { prompt: promptText, stagingFile } = buildPrompt({ pr, repo, workspace: reviewWtDir, outputFile: worktreeOutputFile });
+  const { prompt: promptText } = buildPrompt({ pr, repo, workspace: reviewWtDir, outputFile: worktreeOutputFile });
 
   try {
     fs.writeFileSync(promptFile, promptText, 'utf8');
@@ -841,6 +843,22 @@ async function superviseReviewManager({
     // pollForArtifact が成果物を返さなかった（found === false）
     // reason は 'deadline' または 'aborted'
     if (processExited) {
+      // 不完全レビューのセンチネルファイルを確認
+      // finalize-review.js --mode incomplete が作成し、OUTPUT不在だが
+      // レビューが正当に完了（不完全として）したことを示す。
+      const sentinelPath = path.join(ghDir, `review-manager-${pr}.incomplete`);
+      if (fs.existsSync(sentinelPath)) {
+        log('incomplete review sentinel detected — review completed as incomplete');
+        return {
+          outcome: 'incomplete-review',
+          exitCode: 0,
+          artifact: null,
+          agentPid,
+          reviewWtDir,
+          reason: 'review completed as incomplete (plane comment posted by finalize-review.js)',
+        };
+      }
+
       const reason = processExitReason
         ? `プロセス起動/実行エラー（status ${processExitCode}）: ${processExitReason}`
         : `プロセス終了（status ${processExitCode}）、成果物未検出`;
