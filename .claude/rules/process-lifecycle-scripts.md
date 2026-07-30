@@ -9,6 +9,7 @@ paths:
   - "scripts/start-review-manager.js"
   - "scripts/run-review-manager.js"
   - "scripts/inbox-supervisor.js"
+  - "scripts/worker-exit-hook.js"
 ---
 
 # プロセスライフサイクル管理スクリプトの落とし穴
@@ -24,3 +25,5 @@ paths:
 - 内部でリトライしながら指定時間内の終了を保証する有界待機（`--wait`等）で、サブ処理（`gh`呼び出し等）が独自の固定タイムアウトを持つ場合、締切直前に始まったサブ処理がその分だけ全体の締切を超過しうる。サブ処理のタイムアウトは残り予算に合わせて動的に絞り込む（PR #98 Review Manager指摘）
 - GitHub APIの`since`パラメータ等、タイムスタンプ境界によるカーソル方式を使うポーリングは、境界がinclusive/exclusiveのどちらかをAPI仕様で確認せず前提にしない。同一タイムスタンプの複数レコードが存在すると境界の解釈次第で取りこぼしうる。タイムスタンプ単独でなく、処理済みIDの記録と併用して重複排除する（PR #100 Review Manager指摘）
 - 多重起動防止・ロックを持つCLIスクリプトは、`require()`してmain()を直接呼ぶユニットテストだけでなく、実プロセス起動を伴う統合テストで検証する。`require.main === module`以下の分岐（`--force`バイパス・既存ロックでの多重起動拒否等）はユニットテストでは経路に入らず見落とされる（PR #139 Review Manager指摘）
+- launcher（`inbox-supervisor.js`等）がonExitフック（`worker-exit-hook.js`）へ渡す引数に、共通ランチャー（`agent-exec.js`等）が末尾へ実際の終了コードを追加する場合、hook側の分割代入は固定位置ではなく末尾からの相対位置で解釈する。この種の変更を検証するテストは、手組みのargv配列を直接渡すのではなく、実際のランチャー関数（`buildLoginShellExecArgs`等）経由で構築した引数で行う。手組み配列は誤った前提の引数順序をそのまま再現し不整合を検出できない（PR #195 Review Manager指摘）
+- ローカルの`new Date().toISOString()`（ミリ秒精度）とGitHub APIの`createdAt`等（秒精度）を文字列比較する場合、精度差により同一秒内のイベントが誤って「前」と判定されうる。異なるソースのタイムスタンプを比較する前に精度を揃える（PR #195 Review Manager指摘）
