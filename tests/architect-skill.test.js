@@ -21,13 +21,15 @@ test('architect skill は通信・完了・入力境界・手順・再試行を�
   assert.match(architectSkill, /msg-send\.js" orchestrator/);
 });
 
-test('orchestrator skill は要件確定、調査、architect起動判断、coder向け実装指示確定の順で基本フローを定義する', () => {
+test('orchestrator skill は要件確定、調査、architect起動判断、抽象設計の検討、coder起動、計画評価、実装開始指示の順で基本フローを定義する', () => {
   const requirements = orchestratorSkill.indexOf('**要件確定**');
   const research = orchestratorSkill.indexOf('**必要な調査**');
   const architect = orchestratorSkill.indexOf('**Architect起動判断**');
-  const implementation = orchestratorSkill.indexOf('**Coder向け実装指示の確定**');
+  const design = orchestratorSkill.indexOf('**抽象設計の検討**');
   const coder = orchestratorSkill.indexOf('**Coder起動**');
-  assert.ok(requirements < research && research < architect && architect < implementation && implementation < coder);
+  const planning = orchestratorSkill.indexOf('**計画評価**');
+  const startImpl = orchestratorSkill.indexOf('**実装開始指示**');
+  assert.ok(requirements < research && research < architect && architect < design && design < coder && coder < planning && planning < startImpl);
   assert.match(orchestratorSkill, /必要な explorer\/investigator の再調査/);
   assert.match(orchestratorSkill, /要件本文を変更できるのは人間との合意/);
   assert.match(orchestratorSkill, /既存の `msg-send\.js` 経路/);

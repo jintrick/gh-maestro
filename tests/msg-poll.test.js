@@ -534,6 +534,15 @@ test('orchestrator モード: 出力形式が NEW_MESSAGE:<issue>:<commentId>', 
       'utf8'
     );
 
+    // 初回スキャン扱いにならないよう、catch-up をスキップする state を事前作成する
+    const stateDir = path.join(ghDir, 'msg-state');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateDir, 'orchestrator.json'),
+      JSON.stringify({ since: { 10: '2026-01-01T00:00:00Z' }, seenIds: [] }),
+      'utf8'
+    );
+
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgPoll._setGhApiComments(() => ({
       status: 0,
