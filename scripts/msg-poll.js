@@ -437,6 +437,22 @@ function main(argsOverride, opts = {}) {
       }
     }
 
+    // ── 初回スキャンのサイレント catch-up（orchestrator モード） ────
+    // state.since[issue] が未設定の Issue（初回スキャン）では、全コメントを
+    // NEW_MESSAGE として出力せずに seenIds に追加する（サイレント catch-up）。
+    // カーソル（since）は後続の cursor advancement で自動的に進む。
+    // 重複判定は Set で O(1) に行い、最終的に seenIds 配列へマージする。
+    if (isOrchestrator) {
+      const seenSet = new Set(state.seenIds);
+      for (const { issue, comment: c } of allIssuesAndComments) {
+        const issueSince = typeof state.since[issue] === 'string' ? state.since[issue] : null;
+        if (issueSince !== null) continue;
+        const cid = c.id;
+        if (cid != null) seenSet.add(cid);
+      }
+      state.seenIds = [...seenSet].slice(-MAX_SEEN_IDS);
+    }
+
     // ── 新着候補の抽出 ──────────────────────────────────────────────────
     // 自分宛て・未読のコメントを issue ごとに集める。
 
