@@ -38,8 +38,9 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
    - **承認の指示を受け取ったら**、以下の手順4に進む
    - **差し戻し（修正依頼）の指示を受け取ったら**、計画を修正し、再度 `publish-plan.js` で同じpin済みコメントを更新し、再度報告して待機する
 4. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）
-5. `git commit`/`git push` はgh-maestroが設置したフックが自動でlint/format（commit時）・test/typecheck（push時）を検証する。フックが失敗したら`--no-verify`等でバイパスせず、原因を修正してから再度commit/pushする
-6. `gh-create-pr.js` でPRを作成する：
+5. **新規追加・修正したファイルに対応するテストケースを作成し、`npm test` で全passすることを確認する**
+6. `git commit`/`git push` はgh-maestroが設置したフックが自動でlint/format（commit時）・test/typecheck（push時）を検証する。フックが失敗したら`--no-verify`等でバイパスせず、原因を修正してから再度commit/pushする
+7. `gh-create-pr.js` でPRを作成する：
    ```sh
    node "{{SCRIPTS_PATH}}/gh-create-pr.js" --title "<PRタイトル>" --body "Closes #$ISSUE"
    ```
@@ -58,7 +59,6 @@ EOF
 
 - DOM/外部API/ライブラリの戻り値がnullable・optionalな場合、型アサーション（`as T`、非nullアサーション`!`など）でnullチェックを迂回しない。早期return・throw・assertで明示的にnullを排除してから使う
 - 主処理が成功した後に付随する後続処理（一覧再取得など）を行う場合、それぞれ独立したtry/catchで囲み、どちらの処理が失敗したかをエラーメッセージで区別できるようにする
-- 新規に追加した関数・IPCハンドラには、同一コミットで対応するテストケースを追加する
 - CLIスクリプトの `main()` は `process.exit()` を直接呼ばず、結果オブジェクト（終了コード・出力行など）を返す設計にする。`process.exit()` は `require.main === module` で分岐した薄いエントリポイントの中でのみ呼ぶ。こうすることで `main()` をテストから直接呼び出せる
 - `gh api` で `-f per_page=100` のようにフィールドを指定すると、既定では `POST` メソッド扱いになり `GET` のクエリパラメータとして機能しない（422エラーになる）。GETしたい場合は `--method GET` を明示する
 - ある変数やパスの参照先を変更する（例: 参照先ディレクトリの差し替え、権限スコープの変更）際は、変更前にその変数の使用箇所をファイル内でgrepし、洗い出した全箇所が新しい参照先に揃っているか一つずつ確認してから完了とする。CLIの起動引数・プロセスのcwd・プロンプトやテンプレートに埋め込まれた文字列など、同じ値が複数の独立した経路で参照されているケースでは、目立つ箇所だけ直して他を直し漏れることが典型的な失敗パターンである
