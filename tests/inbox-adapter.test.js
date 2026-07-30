@@ -115,7 +115,7 @@ test('createSessionResumeAdapter: resume が resumeCommand を含むコマンド
 
   assert.equal(result.command, agent.command);
   assert.ok(result.args.includes('--continue'), 'agy: --continue');
-  assert.ok(result.args.includes('--dangerously-skip-permissions'), 'agy: --dangerously-skip-permissions');
+  assert.ok(!result.args.includes('--dangerously-skip-permissions'), 'agy: should NOT include extraArgs (added by buildAgentResumeCommandArgs)');
 });
 
 test('createSessionResumeAdapter: resume が resumeCommand を正しく使う（codex）', () => {
@@ -124,32 +124,29 @@ test('createSessionResumeAdapter: resume が resumeCommand を正しく使う（
   const result = adapter.resume();
 
   assert.equal(result.command, 'codex');
-  assert.ok(result.args.includes('exec'));
-  assert.ok(result.args.includes('resume'));
-  assert.ok(result.args.includes('--last'));
+  // resume() は resumeCommand のみ返し、extraArgs（exec等）は buildAgentResumeCommandArgs が追加する
+  assert.ok(result.args.includes('resume'), 'should include resume subcommand');
+  assert.ok(result.args.includes('--last'), 'should include --last');
+  assert.ok(!result.args.includes('exec'), 'should NOT include extraArgs subcommands');
 });
 
-test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeCommand 末尾の --last/--continue を置き換える（サブコマンドは保持・順序維持）', () => {
+test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeCommand 末尾の --last/--continue を置き換える', () => {
   const agent = getAgentMap().get('codex');
   const adapter = createSessionResumeAdapter(agent);
   const result = adapter.resume('specific-session-id');
 
   assert.equal(result.command, 'codex');
-  // resumeCommand ["exec", "resume", "--last"] の末尾 "--last" が sessionRef に置き換わる
-  // 前段の exec / resume サブコマンドは保持される
+  // resumeCommand ["resume", "--last"] の末尾 "--last" が sessionRef に置き換わる
   assert.ok(!result.args.includes('--last'), 'should not include --last when sessionRef replaces it');
 
-  // サブコマンドとsessionRefの存在確認
-  assert.ok(result.args.includes('exec'), 'should preserve exec subcommand');
+  // resume サブコマンドと sessionRef の存在確認
   assert.ok(result.args.includes('resume'), 'should preserve resume subcommand');
   assert.ok(result.args.includes('specific-session-id'), 'should include sessionRef');
+  assert.ok(!result.args.includes('exec'), 'should NOT include extraArgs subcommands');
 
-  // 順序検証: exec → resume → sessionRef の順であること
-  const execIdx = result.args.indexOf('exec');
+  // 順序検証: resume → sessionRef の順であること
   const resumeIdx = result.args.indexOf('resume');
   const sessionIdx = result.args.indexOf('specific-session-id');
-  assert.ok(execIdx >= 0 && resumeIdx > execIdx,
-    `exec(${execIdx}) should come before resume(${resumeIdx})`);
   assert.ok(resumeIdx >= 0 && sessionIdx > resumeIdx,
     `resume(${resumeIdx}) should come before sessionRef(${sessionIdx})`);
 });
@@ -162,7 +159,7 @@ test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeComma
   assert.equal(result.command, 'agy');
   assert.ok(!result.args.includes('--continue'), 'should not include --continue when sessionRef replaces it');
   assert.ok(result.args.includes('specific-conversation-id'), 'should include sessionRef');
-  assert.ok(result.args.includes('--dangerously-skip-permissions'), 'should preserve extraArgs');
+  assert.ok(!result.args.includes('--dangerously-skip-permissions'), 'should NOT include extraArgs (added by buildAgentResumeCommandArgs)');
 });
 
 test('createSessionResumeAdapter: deliverMessage が session-resume タイプの結果を返す', () => {
