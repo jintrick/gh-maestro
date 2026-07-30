@@ -67,6 +67,19 @@ let _relayMessage = (workspace, body) => {
 const MAX_RELAY_CHARS = 8000;
 
 /**
+ * ISO 8601 タイムスタンプを秒精度に正規化する（ミリ秒部分を除去）。
+ * gh pr list の createdAt は秒精度だが inbox-supervisor の sinceTimestamp は
+ * ミリ秒精度（new Date().toISOString()）のため、同一秒内の文字列比較で
+ * 精度差による誤判定が起きるのを防ぐ。
+ *
+ * @param {string} isoTimestamp
+ * @returns {string}
+ */
+function normalizeToSecondPrecision(isoTimestamp) {
+  return isoTimestamp.replace(/\.\d+Z$/, 'Z');
+}
+
+/**
  * resume区間内にPRが新規作成されたかを確認する。
  *
  * `gh pr list --head <workerBranch>` で完全一致検索し、
@@ -95,9 +108,12 @@ function checkPrCreatedDuringResume({ repo, workerBranch, sinceTimestamp }) {
   }
   if (!Array.isArray(prs)) return false;
 
+  // sinceTimestamp を秒精度に正規化。gh pr list の createdAt は秒精度であり、
+  // ミリ秒精度のまま比較すると同一秒内で文字列比較の順序が不正確になる。
+  const normalizedSince = normalizeToSecondPrecision(sinceTimestamp);
   return prs.some((pr) => {
     if (!pr.createdAt) return false;
-    return pr.createdAt > sinceTimestamp;
+    return pr.createdAt > normalizedSince;
   });
 }
 
@@ -200,21 +216,32 @@ function verifyReplyAndRelayIfMissing({ workspace, workerName, captureLogPath, s
 
 if (require.main === module) {
   const rawArgs = process.argv.slice(2);
-  const [workspace, executionId, captureLogPath, sinceTimestamp, logOffsetRaw, exitCodeRaw, contractSpecRaw] = rawArgs;
-  // resumeでは6引数（workspace, executionId, logPath, sinceTimestamp, logOffset, exitCode）、
-  // resume+contractでは7引数（上記+contractSpecRaw）。
-  // 新規起動では3引数（workspace, executionId, exitCode）で呼ばれる。後者では
-  // captureLogPath の位置に exitCode が来るため、引数の個数で判別する。
-  const isResumeInvocation = rawArgs.length >= 6;
-  const resolvedExitCodeRaw = isResumeInvocation ? exitCodeRaw : captureLogPath;
-  const exitCode = parseInt(resolvedExitCodeRaw, 10);
+  // agent-exec.js（共通ランチャー）は終了コードを必ず最後の引数として追加する。
+  //   - 新規起動（3引数）: workspace, executionId, exitCode
+  //   - resume（6引数）: workspace, executionId, logPath, sinceTimestamp, logOffset, exitCode
+  //   - resume+contract（7引数）: workspace, executionId, logPath, sinceTimestamp, logOffset, contractArg, exitCode
+  // 終了コードは常に rawArgs[rawArgs.length - 1] である。
+  const exitCodeRaw = rawArgs[rawArgs.length - 1];
+  const hookArgs = rawArgs.slice(0, -1); // exitCode を除いた残り
+  const isResumeInvocation = hookArgs.length >= 5; // resumeは5引数以上（ws, execId, log, since, offset）
+
+  const [
+    workspace,
+    executionId = '',
+    captureLogPath,
+    sinceTimestamp,
+    logOffsetRaw,
+    contractSpecRaw,
+  ] = hookArgs;
+
+  const exitCode = parseInt(exitCodeRaw, 10);
   const workerName = process.env.GH_MAESTRO_WORKER || null;
 
   // 1. execution 記録（--execution-id 付きの起動のときだけ）
   if (workspace && executionId) {
     try {
       const { markProcessExit } = require('./shared/execution-registry');
-      markProcessExit(workspace, executionId, resolvedExitCodeRaw);
+      markProcessExit(workspace, executionId, exitCodeRaw);
     } catch (error) {
       process.stderr.write(`worker-exit-hook: execution 記録失敗: ${error.message}\n`);
     }
@@ -258,6 +285,7 @@ module.exports = {
   _setRelayMessage: (fn) => { _relayMessage = fn; },
   verifyReplyAndRelayIfMissing,
   checkPrCreatedDuringResume,
+  normalizeToSecondPrecision,
   buildMsgSendRelayArgs,
   MAX_RELAY_CHARS,
 };
