@@ -731,7 +731,11 @@ test('orchestrator モード 初回スキャン: state 不在時、既存コメ�
       assert.deepEqual(r2.lines, ['NEW_MESSAGE:100:3'], '新規コメントは通知される');
     });
   } finally {
-    process.env.GH_MAESTRO_WORKSPACE = origWorkspace;
+    if (origWorkspace !== undefined) {
+      process.env.GH_MAESTRO_WORKSPACE = origWorkspace;
+    } else {
+      delete process.env.GH_MAESTRO_WORKSPACE;
+    }
   }
 });
 
