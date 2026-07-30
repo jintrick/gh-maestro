@@ -33,6 +33,22 @@ function runOrThrow(cmd, args, opts) {
 }
 
 /**
+ * worktree作成後にbaseRefへのupstream trackingを明示的に設定する。
+ * git worktree add は branch.autoSetupMerge に依存してtrackingを設定するため、
+ * これが false の環境ではtrackingが付かない。常に明示設定することでambientな
+ * git設定への依存を排除する。
+ *
+ * @param {string} branchName - 作成したブランチ名
+ * @param {string} baseRef - ベースブランチ（例: "dev"）
+ * @param {string} cwd - 実行ディレクトリ（リポジトリルート）
+ */
+function setUpstream(branchName, baseRef, cwd) {
+  runOrThrow('git',
+    ['-c', 'core.longpaths=true', 'branch', '--set-upstream-to', `origin/${baseRef}`, '--', branchName],
+    { cwd, stdio: 'pipe' });
+}
+
+/**
  * git worktree add — worktree を作成する
  * @param {string} worktreeDir - worktree の絶対パス
  * @param {string} branchName  - 作成するブランチ名
@@ -43,7 +59,10 @@ function runOrThrow(cmd, args, opts) {
 function worktreeAdd(worktreeDir, branchName, baseRef, cwd) {
   const args = ['-c', 'core.longpaths=true', 'worktree', 'add', worktreeDir, '-b', branchName];
   if (baseRef) args.push('--', `origin/${baseRef}`);
-  return runOrThrow('git', args, { cwd, stdio: 'inherit' });
+  const result = runOrThrow('git', args, { cwd, stdio: 'inherit' });
+  // branch.autoSetupMerge に依存せず、常に明示的に upstream tracking を設定する
+  if (baseRef) setUpstream(branchName, baseRef, cwd);
+  return result;
 }
 
 /**
