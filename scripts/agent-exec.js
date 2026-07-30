@@ -65,7 +65,12 @@ function buildBashLoginExecArgs(agentCmdArgs, onExit = null, env = {}) {
     .map(([k, v]) => `export ${k}='${String(v).replace(/'/g, "'\\''")}'; `)
     .join('');
   if (!onExit) return ['bash', '-lc', `${envPrefix}exec "$0" "$@"`, ...agentCmdArgs];
-  return ['bash', '-lc', `${envPrefix}hook=$0; script=$1; workspace=$2; execution=$3; shift ${onExit.args.length}; "$@"; code=$?; "$hook" "$script" "$workspace" "$execution" "$code"; exit "$code"`, onExit.command, ...onExit.args, ...agentCmdArgs];
+  // 全 onExit.args を動的にbash配列にキャプチャし、shiftで除去する。
+  // 以前は固定で $1,$2,$3 しかキャプチャしておらず、resume時（6引数）の
+  // 後半3引数（logPath, sinceTimestamp, logOffset）および第7引数（contractArg）が
+  // フック呼び出しに渡らず欠落していた（Unix/Linux環境でのみ発現）。
+  // このループは onExit.args の要素数に依存せず正しく全要素を保持する。
+  return ['bash', '-lc', `${envPrefix}hook=$0; _args=(); _i=0; while [ $_i -lt ${onExit.args.length} ]; do _args+=("$1"); shift; _i=$((_i+1)); done; "$@"; code=$?; "$hook" "\${_args[@]}" "$code"; exit "$code"`, onExit.command, ...onExit.args, ...agentCmdArgs];
 }
 
 /**

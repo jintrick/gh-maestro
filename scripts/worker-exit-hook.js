@@ -216,6 +216,43 @@ function verifyReplyAndRelayIfMissing({ workspace, workerName, captureLogPath, s
 
 if (require.main === module) {
   const rawArgs = process.argv.slice(2);
+
+  // TEMP DIAGNOSTIC for #202 — 根本原因特定後に削除
+  // 親プロセスの情報（ppid, CommandLine, ParentProcessId）を記録し、
+  // worker-exit-hook.js がどの経路から呼ばれたかを特定可能にする。
+  try {
+    const diagWs = rawArgs[0];
+    if (diagWs) {
+      const diagPath = path.join(diagWs, '.gh-maestro', 'diag-202.log');
+      let parentCmd = null;
+      let parentPpid = null;
+      if (process.platform === 'win32') {
+        try {
+          const r = spawnSync('powershell', ['-NoProfile', '-Command',
+            `$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${process.ppid}'; if($p){$p.CommandLine+'|:|'+$p.ParentProcessId}else{''}`,
+          ], { encoding: 'utf8', timeout: 3000, stdio: 'pipe' });
+          if (r.status === 0 && r.stdout) {
+            const parts = r.stdout.trim().split('|:|');
+            parentCmd = parts[0] || null;
+            parentPpid = parts.length > 1 ? parseInt(parts[1], 10) : null;
+            if (!Number.isFinite(parentPpid)) parentPpid = null;
+          }
+        } catch {}
+      }
+      const entry = JSON.stringify({
+        ts: new Date().toISOString(),
+        pid: process.pid,
+        ppid: process.ppid,
+        parentCmd,
+        parentPpid,
+        rawArgs,
+        workerName: process.env.GH_MAESTRO_WORKER || null,
+        workspace: diagWs,
+      });
+      fs.appendFileSync(diagPath, entry + '\n', 'utf8');
+    }
+  } catch {}
+
   // agent-exec.js（共通ランチャー）は終了コードを必ず最後の引数として追加する。
   //   - 新規起動（3引数）: workspace, executionId, exitCode
   //   - resume（6引数）: workspace, executionId, logPath, sinceTimestamp, logOffset, exitCode
