@@ -19,29 +19,12 @@ const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
+const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS, FINDING_REQUIRED_FIELDS } = require('./shared/review-aspects');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
 const DEFAULT_JOB_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes per job
 const DEFAULT_TOTAL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes total
-
-const ALL_LEAF_IDS = Object.freeze([
-  'correctness/logic-invariants',
-  'correctness/api-contract',
-  'correctness/concurrency',
-  'resilience-security/failure-recovery',
-  'resilience-security/hostile-input',
-  'maintainability/structure-naming',
-  'maintainability/test-quality',
-]);
-
-const TRUNK_TO_LEAVES = Object.freeze({
-  'Correctness': ['correctness/logic-invariants', 'correctness/api-contract', 'correctness/concurrency'],
-  'Resilience & Security': ['resilience-security/failure-recovery', 'resilience-security/hostile-input'],
-  'Maintainability': ['maintainability/structure-naming', 'maintainability/test-quality'],
-});
-
-const VALID_ASPECTS = new Set(['Correctness', 'Maintainability', 'Resilience & Security']);
 
 const USAGE = `run-review-jobs.js — RMの実行manifestに従いレビュージョブをheadless起動する
 
@@ -335,7 +318,7 @@ ${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)
  * @param {number} timeoutMs
  * @returns {Promise<{jobId: string, status: 'success'|'failed', leaf_ids: string[], attempt: number, findings?: object[], error?: string}>}
  */
-function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, timeoutMs) {
+function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, timeoutMs, childRef = null) {
   return new Promise((resolve) => {
     const promptText = buildJobPrompt(job, manifest, reviewWtDir);
     const promptFile = path.join(os.tmpdir(), `review-job-${job.id}-${Date.now()}.md`);
@@ -398,6 +381,7 @@ function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, tim
         env: process.env,
         stdio: ['ignore', 'pipe', stderrFd],
       });
+      if (childRef) childRef.child = child;
     } catch (e) {
       try { fs.closeSync(stderrFd); } catch {}
       try { fs.unlinkSync(promptFile); } catch {}
@@ -477,15 +461,15 @@ function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, tim
       }
 
       // 個別findingの形状検証
+      const { VALID_SEVERITIES } = require('./shared/review-aspects');
       const findingErrors = [];
       for (let i = 0; i < findings.length; i++) {
         const f = findings[i];
-        const required = ['aspect', 'path', 'line_anchor', 'summary', 'severity', 'severity_rationale', 'body', 'verified_references'];
-        for (const field of required) {
+        for (const field of FINDING_REQUIRED_FIELDS) {
           if (!(field in f)) findingErrors.push(`finding[${i}].${field} is missing`);
         }
         if (f.aspect && !VALID_ASPECTS.has(f.aspect)) findingErrors.push(`finding[${i}].aspect invalid: ${f.aspect}`);
-        if (f.severity && !['BLOCKER', 'MAJOR', 'SUGGESTION'].includes(f.severity)) findingErrors.push(`finding[${i}].severity invalid: ${f.severity}`);
+        if (f.severity && !VALID_SEVERITIES.has(f.severity)) findingErrors.push(`finding[${i}].severity invalid: ${f.severity}`);
       }
 
       if (findingErrors.length > 0) {
@@ -571,13 +555,24 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   const reviewWtDir = workspace; // ジョブワーカーは呼び出し元（RM）のworktreeを共有
 
   // 4. 全ジョブを並列起動
-  const jobPromises = manifest.jobs.map(job =>
-    launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, jobTimeoutMs)
-  );
+  // 子プロセスへの参照を保持し、total-timeout時に実際にkillできるようにする
+  const activeChildren = [];
+  const jobPromises = manifest.jobs.map(job => {
+    const childRef = { child: null };
+    activeChildren.push(childRef);
+    return launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, jobTimeoutMs, childRef);
+  });
 
-  // 全体タイムアウト付きで全ジョブの完了を待つ
+  // 全体タイムアウト: 締切到達時に残っている子プロセスを実際に終了させる
+  let totalTimedOut = false;
   const totalTimer = new Promise((resolve) => {
-    setTimeout(() => resolve('total-timeout'), totalTimeoutMs);
+    setTimeout(() => {
+      totalTimedOut = true;
+      for (const ref of activeChildren) {
+        try { if (ref.child) ref.child.kill(); } catch {}
+      }
+      resolve('total-timeout');
+    }, totalTimeoutMs);
   });
 
   const allJobsPromise = Promise.all(jobPromises);
@@ -585,7 +580,7 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
 
   let jobResults;
   if (raceResult === 'total-timeout') {
-    // タイムアウト: 完了しなかったジョブはfailed扱い
+    // タイムアウト: 残存ジョブの結果を収集（killされたものは自然に解決される）
     const settled = await Promise.allSettled(jobPromises);
     jobResults = manifest.jobs.map((job, i) => {
       if (settled[i].status === 'fulfilled') return settled[i].value;
@@ -652,28 +647,30 @@ if (require.main === module) {
   (async () => {
     const args = process.argv.slice(2);
     const valueFlags = ['--manifest', '--results', '--workspace', '--job-timeout', '--total-timeout'];
-    const { rest, exitFlagMiss } = parseFlags(args, valueFlags, ['--help', '-h']);
+    const { values, rest, exitFlagMiss } = parseFlags(args, valueFlags, ['--help', '-h']);
 
     if (exitFlagMiss) {
       console.error(USAGE);
       process.exit(2);
     }
 
-    if (hasHelpFlag(rest) || rest.length === 0) {
+    if (values['--help'] || values['-h']) {
       console.log(USAGE);
       process.exit(0);
     }
 
-    const getArg = (name) => {
-      const idx = rest.indexOf(name);
-      return idx >= 0 && idx + 1 < rest.length ? rest[idx + 1] : null;
-    };
+    // 未知の位置引数があればエラー
+    if (rest.length > 0) {
+      console.error(`unexpected positional arguments: ${rest.join(' ')}`);
+      console.error(USAGE);
+      process.exit(2);
+    }
 
-    const manifestPath = getArg('--manifest');
-    const resultsPath = getArg('--results');
-    const workspace = getArg('--workspace') || process.cwd();
-    const jobTimeoutMs = parseInt(getArg('--job-timeout'), 10) || DEFAULT_JOB_TIMEOUT_MS;
-    const totalTimeoutMs = parseInt(getArg('--total-timeout'), 10) || DEFAULT_TOTAL_TIMEOUT_MS;
+    const manifestPath = values['--manifest'];
+    const resultsPath = values['--results'];
+    const workspace = values['--workspace'] || process.cwd();
+    const jobTimeoutMs = values['--job-timeout'] ? parseInt(values['--job-timeout'], 10) : DEFAULT_JOB_TIMEOUT_MS;
+    const totalTimeoutMs = values['--total-timeout'] ? parseInt(values['--total-timeout'], 10) : DEFAULT_TOTAL_TIMEOUT_MS;
 
     if (!manifestPath || !resultsPath) {
       console.error(USAGE);

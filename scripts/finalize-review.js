@@ -13,27 +13,8 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
-
-// ── 定数 ────────────────────────────────────────────────────────────────────────
-
-const ALL_LEAF_IDS = Object.freeze([
-  'correctness/logic-invariants',
-  'correctness/api-contract',
-  'correctness/concurrency',
-  'resilience-security/failure-recovery',
-  'resilience-security/hostile-input',
-  'maintainability/structure-naming',
-  'maintainability/test-quality',
-]);
-
-const TRUNK_TO_LEAVES = Object.freeze({
-  'Correctness': ['correctness/logic-invariants', 'correctness/api-contract', 'correctness/concurrency'],
-  'Resilience & Security': ['resilience-security/failure-recovery', 'resilience-security/hostile-input'],
-  'Maintainability': ['maintainability/structure-naming', 'maintainability/test-quality'],
-});
-
-const VALID_ASPECTS = new Set(['Correctness', 'Maintainability', 'Resilience & Security']);
+const { parseFlags } = require('./shared/workspace');
+const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS } = require('./shared/review-aspects');
 
 const USAGE = `finalize-review.js — 完全性ゲート検証後、正式findings JSON書き出しまたは不完全コメント投稿
 
@@ -528,8 +509,6 @@ module.exports = {
   buildIncompleteComment,
   writeSentinel,
   finalizeReview,
-  ALL_LEAF_IDS,
-  TRUNK_TO_LEAVES,
 };
 
 // ── CLIエントリポイント ────────────────────────────────────────────────────────
@@ -537,27 +516,29 @@ if (require.main === module) {
   (async () => {
     const args = process.argv.slice(2);
     const valueFlags = ['--results', '--mode', '--output', '--workspace'];
-    const { rest, exitFlagMiss } = parseFlags(args, valueFlags, ['--help', '-h']);
+    const { values, rest, exitFlagMiss } = parseFlags(args, valueFlags, ['--help', '-h']);
 
     if (exitFlagMiss) {
       console.error(USAGE);
       process.exit(2);
     }
 
-    if (hasHelpFlag(rest) || rest.length === 0) {
+    if (values['--help'] || values['-h']) {
       console.log(USAGE);
       process.exit(0);
     }
 
-    const getArg = (name) => {
-      const idx = rest.indexOf(name);
-      return idx >= 0 && idx + 1 < rest.length ? rest[idx + 1] : null;
-    };
+    // 未知の位置引数があればエラー
+    if (rest.length > 0) {
+      console.error(`unexpected positional arguments: ${rest.join(' ')}`);
+      console.error(USAGE);
+      process.exit(2);
+    }
 
-    const resultsPath = getArg('--results');
-    const mode = getArg('--mode');
-    const outputPath = getArg('--output');
-    const workspace = getArg('--workspace') || process.cwd();
+    const resultsPath = values['--results'];
+    const mode = values['--mode'];
+    const outputPath = values['--output'];
+    const workspace = values['--workspace'] || process.cwd();
 
     if (!resultsPath || !mode || (mode === 'complete' && !outputPath)) {
       console.error(USAGE);
