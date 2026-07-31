@@ -326,6 +326,13 @@ function main(argsOverride, envOverride, ioOverride) {
     const scriptPath = (require.main && require.main.filename) || __filename;
     let realScriptPath = null;
     try { realScriptPath = fs.realpathSync(scriptPath); } catch {}
+    // Extract invocation ID from body if present (TEMP DIAGNOSTIC for #202).
+    // This bridges worker-exit-hook.js's notification posting with the audit log,
+    // enabling cross-correlation between the hook invocation and the GitHub comment.
+    let diagInvocationId = null;
+    const invMatch = /<!-- diag-202-inv: ([a-f0-9-]+) -->/.exec(fullBody);
+    if (invMatch) diagInvocationId = invMatch[1];
+
     const entry = JSON.stringify({
       ts: new Date().toISOString(),
       pid: process.pid,
@@ -342,6 +349,7 @@ function main(argsOverride, envOverride, ioOverride) {
       issue,
       bodyHash,
       bodyPreview: fullBody.slice(0, 120),
+      invocationId: diagInvocationId,
     });
     fs.appendFileSync(auditPath, entry + '\n', 'utf8');
   } catch {}

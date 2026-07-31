@@ -217,6 +217,10 @@ function verifyReplyAndRelayIfMissing({ workspace, workerName, captureLogPath, s
 if (require.main === module) {
   const rawArgs = process.argv.slice(2);
 
+  // TEMP DIAGNOSTIC for #202 — invocation ID for cross-correlation
+  // between this worker-exit-hook invocation and the msg-send.js audit log.
+  const invocationId = require('crypto').randomUUID();
+
   // TEMP DIAGNOSTIC for #202 — 根本原因特定後に削除
   // 親プロセスの情報（ppid, 実行ファイル名, ParentProcessId）を記録し、
   // worker-exit-hook.js がどの経路から呼ばれたかを特定可能にする。
@@ -253,6 +257,7 @@ if (require.main === module) {
           rawArgs,
           workerName: process.env.GH_MAESTRO_WORKER || null,
           workspace: diagWs,
+          invocationId,
         });
         fs.appendFileSync(diagPath, entry + '\n', 'utf8');
       }
@@ -306,8 +311,41 @@ if (require.main === module) {
   // 2. 非ゼロ終了は orchestrator へ通知する。正常終了（exit 0。セッション再開系ワーカーの
   //    1ターン完了を含む）は通知しない。
   if (Number.isFinite(exitCode) && exitCode !== 0 && workerName && workspace) {
-    const body = `⚠️ 起動失敗または異常終了: exit code ${exitCode}。このワーカーのプロセスが正常に完了せず終了しました（起動時のエラーの可能性）。`;
+    // TEMP DIAGNOSTIC for #202 — log immediately before notification posting
+    // so we can correlate: if this entry exists but the audit log (msg-send.js)
+    // does NOT have a corresponding entry, the notification was posted through
+    // a different code path or msg-send.js copy.
+    try {
+      fs.appendFileSync(path.join(workspace, '.gh-maestro', 'diag-202.log'),
+        JSON.stringify({
+          ts: new Date().toISOString(),
+          where: 'notify-pre',
+          pid: process.pid,
+          invocationId,
+          exitCode,
+          workerName,
+        }) + '\n', 'utf8');
+    } catch {}
+
+    const body = `⚠️ 起動失敗または異常終了: exit code ${exitCode}。このワーカーのプロセスが正常に完了せず終了しました（起動時のエラーの可能性）。<!-- diag-202-inv: ${invocationId} -->`;
     const r = spawnSync(process.execPath, buildMsgSendRelayArgs(workspace), { encoding: 'utf8', input: body });
+
+    // TEMP DIAGNOSTIC for #202 — log after notification posting
+    // so we can verify whether the spawnSync itself succeeded.
+    try {
+      fs.appendFileSync(path.join(workspace, '.gh-maestro', 'diag-202.log'),
+        JSON.stringify({
+          ts: new Date().toISOString(),
+          where: 'notify-post',
+          pid: process.pid,
+          invocationId,
+          exitCode,
+          workerName,
+          spawnStatus: r.status,
+          spawnStderr: (r.stderr || '').trim().slice(0, 200) || null,
+        }) + '\n', 'utf8');
+    } catch {}
+
     if (r.status !== 0) {
       process.stderr.write(`worker-exit-hook: 異常終了通知の投稿に失敗: ${(r.stderr || '').trim()}\n`);
     }
