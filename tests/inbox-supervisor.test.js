@@ -1447,6 +1447,76 @@ describe('Hang detection', () => {
       });
     });
   });
+
+  test('--hang-threshold-sec より短い経過時間なら通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+
+      // 10秒前のログ（--hang-threshold-sec=30 より短い＝通知されない）
+      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'recent log\n', 'utf8');
+      const recentTime = new Date(Date.now() - 10 * 1000);
+      fs.utimesSync(logPath, recentTime, recentTime);
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '30']);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('HANG_DETECTED')),
+        `HANG_DETECTED が出力されないこと: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 0, '通知呼び出しが発生しない');
+    });
+  });
+
+  test('--hang-threshold-sec より長い経過時間なら通知する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+
+      // 60秒前のログ（--hang-threshold-sec=10 より長い＝通知される）
+      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'old log\n', 'utf8');
+      const oldTime = new Date(Date.now() - 60 * 1000);
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '10']);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')),
+        `HANG_DETECTED が出力されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1, '通知が1回呼ばれる');
+    });
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

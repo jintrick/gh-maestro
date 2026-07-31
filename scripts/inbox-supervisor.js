@@ -123,14 +123,16 @@ const RESUME_LIVENESS_GRACE_MS = 2000;
 
 // 配送を断念した際に orchestrator へ通知する（テストで注入可能）。inbox-supervisor.js は
 // ワーカーではないため GH_MAESTRO_WORKER は設定せず、--from/--issue を明示して投稿する。
+// msg-send.js は本文を位置引数で受け付けない（--stdin / --body-file のみ）ため、
+// spawnSync の input で stdin 経由に渡す。
 let _notifyOrchestrator = ({ workspace, issue, body }) => {
   return spawnSync(process.execPath, [
     path.join(__dirname, 'msg-send.js'),
-    'orchestrator', body,
+    '--stdin',
     '--from', 'inbox-supervisor',
     '--issue', issue,
     '--workspace', workspace,
-  ], { encoding: 'utf8' });
+  ], { encoding: 'utf8', input: body });
 };
 
 // ── 状態管理 ──────────────────────────────────────────────────────────────
@@ -636,6 +638,9 @@ function main(argsOverride, opts = {}) {
                   cursor.hangNotifiedPid = entry.pid;
                   cursor.hangNotifiedAt = new Date().toISOString();
                   writeOut(`HANG_DETECTED:${workerName}:${entry.pid}`);
+                  // 後続処理（gh apiコメント取得等）が失敗してループがcontinueしても
+                  // 通知済み状態が失われないよう、ここで先に永続化する。
+                  writeCursor(workspace, workerName, cursor);
                 } else {
                   writeErr(`inbox-supervisor: hang通知の投稿に失敗: ${(notifyResult.stderr || '').trim()}`);
                 }
@@ -648,6 +653,8 @@ function main(argsOverride, opts = {}) {
             cursor.hangNotifiedPid = null;
             cursor.hangNotifiedAt = null;
             writeOut(`HANG_RESUMED:${workerName}`);
+            // 復帰状態を後続処理より先に永続化する（上記HANG_DETECTEDと同じ理由）。
+            writeCursor(workspace, workerName, cursor);
           }
         }
       }
