@@ -27,8 +27,13 @@ const { isPlainObject } = require('./object');
 // 安全設定を欠いたコマンドラインに差し替えられてしまう）。
 // extendsも同じ扱いが必要: workspace configがextendsで既存エージェント（claude等）の
 // command/extraArgsを丸ごと引き込めてしまうと、上記の個別フィールド除外が意味を成さなくなる。
+// nonInteractiveTokensも同じ扱い（Issue #163 Review Manager指摘）: 単なる宣言フィールドでは
+// なく安全ガードそのものであり、workspace config（信頼できないclone元からの入力として扱う）
+// が agents.<id>.nonInteractiveTokens: [] を指定するだけで、グローバル設定側の
+// extraArgs/execArgs 欠落検出を無効化できてしまう。カスタムエージェントで宣言したい場合は
+// ~/.gh-maestro/config.json（グローバル・信頼された設定）でのみ可能。
 // resolveAgentConfig と config.js（cmdStatusの警告表示）の両方から参照する単一のSSOT。
-const EXEC_SENSITIVE_FIELDS = ['command', 'extraArgs', 'execArgs', 'execPromptDelivery', 'execPromptFlag', 'resumeCommand', 'extends'];
+const EXEC_SENSITIVE_FIELDS = ['command', 'extraArgs', 'execArgs', 'execPromptDelivery', 'execPromptFlag', 'resumeCommand', 'extends', 'nonInteractiveTokens'];
 
 // ── デフォルト読み込み ──────────────────────────────────────────────────────
 
@@ -188,29 +193,38 @@ function isValidAgentConfig(agent) {
 }
 
 /**
- * 解決済みエージェントの extraArgs が非対話化トークンを保持しているか検証する。
+ * 解決済みエージェントの起動引数が非対話化トークンを保持しているか検証する。
  *
  * agent-defaults.json の `nonInteractiveTokens`（宣言フィールド）に列挙されたトークン
  * （claude系: --print、reasonix: run、codex系: exec 等）は、headless 起動時に画面・標準入力が
- * 無い環境で対話モードに入らず1回実行で終了させるために必須。config.json の extraArgs 上書きは
- * 配列ごと置換されるため、うっかりトークンを欠落させた設定がそのまま有効化されてしまい、
+ * 無い環境で対話モードに入らず1回実行で終了させるために必須。config.json の extraArgs/execArgs
+ * 上書きは配列ごと置換されるため、うっかりトークンを欠落させた設定がそのまま有効化されてしまい、
  * 起動がハングしても誰にも気づけない（Issue #163）。
  *
- * この関数は「extraArgs がトークンを保持しているか」を直接見る。欠落検出は呼び出し元
- * （spawn-worker.js の起動ブロック・config.js status の警告）が行う。
+ * この関数は「指定された引数配列がトークンを保持しているか」を直接見る。欠落検出は呼び出し元
+ * （spawn-worker.js の起動ブロック・run-review-manager.js / run-review-jobs.js の起動ブロック・
+ * config.js status の警告）が行う。
  *
- * @param {object} agent 解決済みエージェント設定
+ * @param {object} agent     解決済みエージェント設定（nonInteractiveTokens を読む）
+ * @param {string[]} [argsArray]  検証対象の引数配列。省略時は agent.extraArgs。
+ *   Review Manager系（run-review-manager.js / run-review-jobs.js）は
+ *   agentConfig.execArgs ?? agentConfig.extraArgs を渡す。execArgs だけを対話モードになる形に
+ *   上書きすると extraArgs は既定のまま残り、extraArgs だけ見る検証をすり抜けてしまうため、
+ *   実際に起動に使われる配列を検証対象にしなければならない（Issue #163 Review Manager指摘）。
  * @returns {{ valid: boolean, missing: string[] }}
  *   valid: 非対話化トークンをすべて保持していれば true
  *   missing: 欠落しているトークンの配列（valid なら空）
  */
-function validateNonInteractiveTokens(agent) {
+function validateNonInteractiveTokens(agent, argsArray) {
   const tokens = agent && Array.isArray(agent.nonInteractiveTokens) ? agent.nonInteractiveTokens : [];
   // 宣言フィールドが無いエージェント（agy 等。非対話性は promptFlag 選択に依存）は
   // 検証対象外として常に valid（欠落検出の誤検知を避ける）。
   if (tokens.length === 0) return { valid: true, missing: [] };
-  const extraArgs = agent && Array.isArray(agent.extraArgs) ? agent.extraArgs : [];
-  const missing = tokens.filter(token => !extraArgs.includes(token));
+  const args = argsArray !== undefined ? argsArray : (agent && agent.extraArgs);
+  // 検証対象が配列でない（undefined 等）場合はトークン保持を確認できないため、
+  // 欠落として扱う（フェイルクローズ: 安全と確認できない場合は起動を止める側に倒す）。
+  const argsList = Array.isArray(args) ? args : [];
+  const missing = tokens.filter(token => !argsList.includes(token));
   return { valid: missing.length === 0, missing };
 }
 

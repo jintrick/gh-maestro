@@ -194,7 +194,9 @@ if (!agentConfig) {
 // 行い、副作用を残さずに起動を拒否する（fail-closed-safety-guards: 検出できた異常は放置しない）。
 // 検証自体が例外を投げることはなく、nonInteractiveTokens 未宣言のエージェント（agy 等）は
 // 常に valid を返すため、正当なカスタマイズまで止めることはない。
-const tokenCheck = validateNonInteractiveTokens(agentConfig);
+// 通常ワーカー起動は extraArgs を使う（execArgs は Review Manager 系の起動専用で、
+// そちらは run-review-manager.js / run-review-jobs.js 側で検証する）。
+const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.extraArgs);
 if (!tokenCheck.valid) {
   fail(
     `エージェント "${agentId}" の extraArgs が非対話化トークン（${tokenCheck.missing.join(', ')}）を保持していません。` +

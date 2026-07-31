@@ -1054,21 +1054,21 @@ test('CLI use: パース不能な config の場合はエラー', () => {
 // 対して1回（pwsh/bash）だけ起動するよう高速化した上で、警告出力をデフォルトの npm test
 // で検証する。
 
-test('CLI status: 非対話化トークンを欠落させたエージェントを警告する（Issue #163）', () => {
+test('CLI status: 非対話化トークンを欠落させたエージェントを警告する（extraArgs・execArgsの両方, Issue #163）', () => {
   withTempHome(home => {
     const mappedAgents = {
-      'claude-ds': ['--dangerously-skip-permissions'], // --print を欠落
-      'claude-ds-pro': ['--dangerously-skip-permissions'], // --print を欠落
-      reasonix: ['--custom-flag'], // run を欠落
-      agy: ['--dangerously-skip-permissions'], // nonInteractiveTokens 未宣言 → 警告対象外
-      codex: ['--skip-git-repo-check'], // exec を欠落
-      'codex-pro': ['--skip-git-repo-check'], // exec を欠落
+      'claude-ds': { extraArgs: ['--dangerously-skip-permissions'] }, // extraArgs の --print を欠落
+      'claude-ds-pro': { extraArgs: ['--dangerously-skip-permissions'] }, // extraArgs の --print を欠落
+      reasonix: { extraArgs: ['--custom-flag'] }, // run を欠落
+      agy: { extraArgs: ['--dangerously-skip-permissions'] }, // nonInteractiveTokens 未宣言 → 警告対象外
+      codex: { extraArgs: ['--skip-git-repo-check'], execArgs: ['--skip-git-repo-check'] }, // 両方 exec を欠落
+      'codex-pro': { extraArgs: ['--skip-git-repo-check'] }, // extraArgs の exec を欠落
     };
     writeConfig(home, {
       agents: Object.fromEntries(
-        Object.entries(mappedAgents).map(([id, extraArgs]) => [
+        Object.entries(mappedAgents).map(([id, override]) => [
           id,
-          { command: process.execPath, extraArgs },
+          { command: process.execPath, ...override },
         ]),
       ),
     });
@@ -1080,9 +1080,15 @@ test('CLI status: 非対話化トークンを欠落させたエージェント�
       r.stdout.includes('non-interactive token'),
       `non-interactive token に言及すること: ${r.stdout}`,
     );
+    // extraArgs 側の欠落警告（通常ワーカー起動経路）
     assert.ok(
-      r.stdout.includes('claude-ds') && r.stdout.includes('--print'),
-      `claude-ds と欠落トークン --print に言及すること: ${r.stdout}`,
+      r.stdout.includes('in extraArgs') && r.stdout.includes('claude-ds') && r.stdout.includes('--print'),
+      `extraArgs の欠落警告に claude-ds / --print が含まれること: ${r.stdout}`,
+    );
+    // execArgs 側の欠落警告（Review Manager 起動経路。Issue #163 BLOCKER）
+    assert.ok(
+      r.stdout.includes('in execArgs') && r.stdout.includes('codex') && r.stdout.includes('exec'),
+      `execArgs の欠落警告に codex / exec が含まれること: ${r.stdout}`,
     );
   });
 });

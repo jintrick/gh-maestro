@@ -719,3 +719,53 @@ test('resolveAgentConfig: config.json で extraArgs から --print を欠落さ�
   });
 });
 
+test('validateNonInteractiveTokens: argsArray 指定で execArgs を検証できる（execArgs 経由の起動漏れ, Issue #163 BLOCKER）', () => {
+  const agent = {
+    extraArgs: ['exec', '--skip-git-repo-check'],
+    execArgs: ['--skip-git-repo-check'], // exec を欠落
+    nonInteractiveTokens: ['exec'],
+  };
+  // extraArgs は保持している → 省略時（extraArgs 検証）では valid
+  assert.equal(validateNonInteractiveTokens(agent).valid, true);
+  // Review Manager 系起動は execArgs ?? extraArgs を使うため、execArgs を渡すと
+  // 欠落を検出できる（修正前はこのケースが素通りしていた）
+  const result = validateNonInteractiveTokens(agent, agent.execArgs);
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.missing, ['exec']);
+});
+
+test('validateNonInteractiveTokens: argsArray が execArgs ?? extraArgs なら RM 起動経路の実態を検証できる', () => {
+  const agent = {
+    extraArgs: ['exec', '--skip-git-repo-check'],
+    nonInteractiveTokens: ['exec'],
+  };
+  // execArgs 未定義 → RM は extraArgs にフォールバック → extraArgs が保持していれば valid
+  assert.equal(validateNonInteractiveTokens(agent, agent.execArgs ?? agent.extraArgs).valid, true);
+});
+
+test('validateNonInteractiveTokens: argsArray が null の場合は欠落として扱う（フェイルクローズ）', () => {
+  const agent = { extraArgs: ['--print'], nonInteractiveTokens: ['--print'] };
+  const result = validateNonInteractiveTokens(agent, null);
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.missing, ['--print']);
+});
+
+test('resolveAgentConfig: workspace config は nonInteractiveTokens を上書きできない（セキュリティ, Issue #163 Review Manager指摘）', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-nonint-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: { codex: { nonInteractiveTokens: [] } },
+      });
+
+      const agent = resolveAgentConfig('codex', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      // workspace による nonInteractiveTokens: [] の上書きは EXEC_SENSITIVE_FIELDS で
+      // 除去される → デフォルトの ['exec'] が残り、安全ガードは無効化できない
+      assert.deepEqual(agent.nonInteractiveTokens, ['exec']);
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+

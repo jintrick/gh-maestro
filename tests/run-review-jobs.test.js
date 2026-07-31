@@ -10,6 +10,7 @@ const {
   validateManifest,
   validateJobs,
   buildJobPrompt,
+  launchJobWorker,
 } = require('../scripts/run-review-jobs');
 
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES } = require('../scripts/shared/review-aspects');
@@ -130,4 +131,28 @@ test('buildJobPrompt includes aspect and prohibition text', () => {
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('launchJobWorker: execArgsが非対話化トークンを欠くとspawnせずfailedになる（Issue #163 BLOCKER）', async () => {
+  // 修正前の検証漏れを再現: extraArgs はトークンを保持しているが、ジョブワーカーが
+  // 実際に使う execArgs ?? extraArgs のうち execArgs が対話モード化されているケース。
+  // ガードは spawn より前で解決するため、実プロセスは起動しない。
+  const result = await launchJobWorker(
+    { id: 'job-1', leaf_ids: ['leaf-1'], aspect: 'Correctness' },
+    { pr: 1 },
+    {
+      id: 'codex',
+      nonInteractiveTokens: ['exec'],
+      extraArgs: ['exec', '--skip-git-repo-check'],
+      execArgs: ['--skip-git-repo-check'], // exec を欠落
+    },
+    '/tmp/review-wt',
+    '/tmp/ws',
+    10000,
+    null,
+  );
+  assert.equal(result.status, 'failed');
+  assert.equal(result.jobId, 'job-1');
+  assert.ok(result.error.includes('exec'), `error が欠落トークン exec に言及: ${result.error}`);
+  assert.ok(result.error.includes('non-interactive token'), `error が非対話化トークンに言及: ${result.error}`);
 });

@@ -363,12 +363,15 @@ function cmdStatus(workspacePath) {
   const resolvedCache = new Map();
   const existsCache = new Map();
 
-  // config.json の extraArgs 上書きで非対話化トークン（--print / run / exec 等）が
-  // 欠落しているエージェントの警告。spawn-worker.js の起動ブロックとは別に、
-  // 人間が status で日常的に乖離を確認できるようにする（Issue #163）。
-  // 同一agentId（複数スキルが同じエージェントにマップされる場合）は警告を重複させない。
+  // config.json の extraArgs / execArgs 上書きで非対話化トークン（--print / run / exec 等）が
+  // 欠落しているエージェントの警告。spawn-worker.js / run-review-manager.js / run-review-jobs.js
+  // の起動ブロックとは別に、人間が status で日常的に乖離を確認できるようにする（Issue #163）。
+  // 通常ワーカー起動は extraArgs、Review Manager 系起動は execArgs ?? extraArgs を使うため、
+  // 両方を個別に検証する（execArgs だけ上書きで対話モード化された設定を extraArgs 側の
+  // 検証がすり抜けないように）。同一 agentId（複数スキルが同じエージェントにマップされる
+  // 場合）は警告を重複させない。
   const nonInteractiveWarnings = [];
-  const warnedAgents = new Set();
+  const warnedAgentFields = new Set();
 
   for (const [skill, agentId] of entries) {
     // Resolve the agent config (cached)
@@ -385,12 +388,23 @@ function cmdStatus(workspacePath) {
 
     let ok = '✗';
     if (resolved) {
-      const tokenCheck = validateNonInteractiveTokens(resolved);
-      if (!tokenCheck.valid && !warnedAgents.has(agentId)) {
-        warnedAgents.add(agentId);
+      const extraCheck = validateNonInteractiveTokens(resolved, resolved.extraArgs);
+      if (!extraCheck.valid && !warnedAgentFields.has(`${agentId}:extraArgs`)) {
+        warnedAgentFields.add(`${agentId}:extraArgs`);
         nonInteractiveWarnings.push(
-          `[WARN] Agent "${agentId}" is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} — headless launch will hang.`,
+          `[WARN] Agent "${agentId}" is missing non-interactive token(s): ${extraCheck.missing.join(', ')} in extraArgs — headless launch will hang.`,
         );
+      }
+      // execArgs が無ければ Review Manager 起動は extraArgs にフォールバックするため、
+      // execArgs が存在する場合のみ個別に検証する（extraArgs 側で検証済み）。
+      if (resolved.execArgs !== undefined) {
+        const execCheck = validateNonInteractiveTokens(resolved, resolved.execArgs);
+        if (!execCheck.valid && !warnedAgentFields.has(`${agentId}:execArgs`)) {
+          warnedAgentFields.add(`${agentId}:execArgs`);
+          nonInteractiveWarnings.push(
+            `[WARN] Agent "${agentId}" is missing non-interactive token(s): ${execCheck.missing.join(', ')} in execArgs — Review Manager launch will hang.`,
+          );
+        }
       }
       if (!existsCache.has(resolved.command)) {
         existsCache.set(resolved.command, checkAgentExists(resolved.command));
@@ -624,7 +638,7 @@ Usage:
 Subcommands:
   use <profile>     Apply a named profile's skillAgentMap to config.json
   status            Show resolved skillAgentMap with connectivity checks and
-                    warn when an agent's extraArgs is missing its
+                    warn when an agent's extraArgs/execArgs is missing its
                     non-interactive token (--print / run / exec etc.)
   doctor            Validate config structure and report issues
 

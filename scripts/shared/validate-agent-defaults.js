@@ -60,8 +60,9 @@ const KNOWN_OPTIONAL_FIELDS = [
   ['execPromptFlag', 'string'],
   ['extends', 'string'],
   // 非対話化に必要なトークンの宣言（Issue #163）。resolve-config.js の
-  // validateNonInteractiveTokens が読む。実行系フィールドではなく能力宣言のため
-  // EXEC_SENSITIVE_FIELDS には含めない（config.json から上書きできる）。
+  // validateNonInteractiveTokens が読む。安全ガードそのものであり、workspace config
+  // （信頼できないclone元からの入力）による無効化を防ぐため EXEC_SENSITIVE_FIELDS に含め、
+  // 上書きはグローバル（~/.gh-maestro/config.json）のみ許可する（Review Manager指摘）。
   ['nonInteractiveTokens', 'array'],
 ];
 
