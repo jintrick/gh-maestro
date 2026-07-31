@@ -12,8 +12,11 @@ const os = require('os');
 const { execFileSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
-const { parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive, buildRulesSupportedMap } =
-  require('../scripts/install.js');
+const {
+  parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
+  buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids,
+} = require('../scripts/install.js');
+const { MANAGED_TOP_LEVEL } = require('../scripts/shared/storage-layout');
 
 // ── ユーティリティ関数のユニットテスト ──────────────────────────────────────
 
@@ -258,6 +261,91 @@ test('共有スキルのSKILL.mdに未置換の {{...}} が残っていない', 
       !unreplaced,
       `共有スキル ${skill}/SKILL.md に未置換プレースホルダーあり: ${(unreplaced || []).join(', ')}`
     );
+  }
+});
+
+// ── assertManagedTopLevelName / quarantineLegacyHomePids（Issue #214） ────────
+
+test('assertManagedTopLevelName: MANAGED_TOP_LEVEL に宣言済みの名前は throw しない', () => {
+  for (const name of MANAGED_TOP_LEVEL) {
+    assert.doesNotThrow(() => assertManagedTopLevelName(name));
+  }
+});
+
+test('assertManagedTopLevelName: 未宣言の名前（登録漏れ）は throw する', () => {
+  assert.throws(() => assertManagedTopLevelName('pids'), /MANAGED_TOP_LEVEL/);
+  assert.throws(() => assertManagedTopLevelName('workflows'));
+});
+
+test('quarantineLegacyHomePids: 隔離元ディレクトリが存在しない場合は ok:true, migrated:0', () => {
+  const tmpdir = require('os').tmpdir();
+  const nonexistent = path.join(tmpdir, 'gh-maestro-test-quarantine-nonexistent-' + Date.now());
+  const quarantineDir = path.join(tmpdir, 'gh-maestro-test-quarantine-dest-' + Date.now());
+  const result = quarantineLegacyHomePids(nonexistent, quarantineDir);
+  assert.deepEqual(result, { ok: true, migrated: 0, errors: [] });
+  assert.ok(!fs.existsSync(quarantineDir), '隔離元が無ければ隔離先も作られないはず');
+});
+
+test('quarantineLegacyHomePids: 正常なJSONレコードを全て隔離先へコピーする', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-quarantine-src-'));
+  const dest = path.join(tmpdir, 'gh-maestro-test-quarantine-dest-' + Date.now());
+  try {
+    fs.writeFileSync(path.join(src, '111.json'), JSON.stringify({ pid: 111, script: 'poll-reviews.js' }));
+    fs.writeFileSync(path.join(src, '222.json'), JSON.stringify({ pid: 222, script: 'msg-poll.js' }));
+    fs.writeFileSync(path.join(src, '.startup-lock-foo'), JSON.stringify({ pid: 111 }));
+
+    const result = quarantineLegacyHomePids(src, dest);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.migrated, 3);
+    assert.deepEqual(result.errors, []);
+    assert.ok(fs.existsSync(path.join(dest, '111.json')));
+    assert.ok(fs.existsSync(path.join(dest, '222.json')));
+    assert.ok(fs.existsSync(path.join(dest, '.startup-lock-foo')));
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(dest, '111.json'), 'utf8')).pid,
+      111
+    );
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test('quarantineLegacyHomePids: 壊れたJSONが1件でもあれば ok:false を返す（fail-closed）', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-quarantine-corrupt-src-'));
+  const dest = path.join(tmpdir, 'gh-maestro-test-quarantine-corrupt-dest-' + Date.now());
+  try {
+    fs.writeFileSync(path.join(src, '111.json'), JSON.stringify({ pid: 111 }));
+    fs.writeFileSync(path.join(src, '999.json'), 'not valid json {{{');
+
+    const result = quarantineLegacyHomePids(src, dest);
+
+    assert.equal(result.ok, false, '壊れたJSONが1件でもあれば全体を ok:false にする');
+    assert.ok(result.errors.some(e => e.includes('999.json')));
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    try { fs.rmSync(dest, { recursive: true, force: true }); } catch {}
+  }
+});
+
+test('quarantineLegacyHomePids: JSON以外のファイル（startup-lock等）は中身を検証せずコピーする', () => {
+  const tmpdir = require('os').tmpdir();
+  const src = fs.mkdtempSync(path.join(tmpdir, 'gh-maestro-test-quarantine-nonjson-src-'));
+  const dest = path.join(tmpdir, 'gh-maestro-test-quarantine-nonjson-dest-' + Date.now());
+  try {
+    fs.writeFileSync(path.join(src, '.startup-lock-bar'), 'not json at all');
+
+    const result = quarantineLegacyHomePids(src, dest);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.migrated, 1);
+    assert.equal(fs.readFileSync(path.join(dest, '.startup-lock-bar'), 'utf8'), 'not json at all');
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
   }
 });
 

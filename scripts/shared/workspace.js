@@ -8,16 +8,27 @@
 //   GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { canonicalWorkspace } = require('./storage-layout');
 
 /**
  * CWD から上方に遡り、.gh-maestro ディレクトリを持つ最初のディレクトリを返す。
  * 見つからなければ null。
+ *
+ * ホームディレクトリ自体は候補として認定しない。~/.gh-maestro は install.js の
+ * managed root であり、実行時のワークスペースではない（Issue #214: CWD がホーム
+ * ディレクトリ配下のどこかにある場合、この上方探索が `~/.gh-maestro` を「見つけて」
+ * ホームディレクトリを workspace として返してしまい、PID registry 等の実行時状態が
+ * managed root 配下に作られてしまう事故があった）。
  */
 function findWorkspaceFromCwd() {
+  const home = canonicalWorkspace(os.homedir());
   let dir = process.cwd();
   while (true) {
-    if (fs.existsSync(path.join(dir, '.gh-maestro'))) return dir;
+    if (fs.existsSync(path.join(dir, '.gh-maestro')) && canonicalWorkspace(dir) !== home) {
+      return dir;
+    }
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;

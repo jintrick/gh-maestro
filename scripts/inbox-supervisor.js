@@ -875,6 +875,17 @@ function main(argsOverride, opts = {}) {
 
 if (require.main === module) {
   const rawArgs = process.argv.slice(2);
+
+  // --help/-h は単一起動ロック取得等の副作用より前に判定する。
+  // ここでチェックしないと、workspace が解決できてしまう限りロック取得・多重起動検知
+  // （ファイル書き込みを伴う）まで進んでしまい、--help だけのつもりが registry へ
+  // 触れてしまう（Issue #214 のガードで home 誤解決時に throw するようになったことで
+  // 顕在化した、本来 main() 側と同様に最優先で弾くべき既存の抜け穴）。
+  if (rawArgs.includes('--help') || rawArgs.includes('-h')) {
+    process.stdout.write(USAGE + '\n');
+    process.exit(0);
+  }
+
   const { values: preValues, exitFlagMiss: preExitFlagMiss } = parseFlags(rawArgs, ['--workspace', '--interval', '--session-pid']);
 
   if (preExitFlagMiss) {
@@ -890,21 +901,31 @@ if (require.main === module) {
   if (!force) {
     const preWorkspace = resolveWorkspace(preValues['--workspace']);
     if (preWorkspace) {
-      if (!acquireStartupLock(preWorkspace, 'inbox-supervisor.js', null)) {
-        process.stderr.write(
-          'inbox-supervisor: 別のプロセスが同じworkspaceのSupervisor起動処理中です。' +
-          '少し待ってから再試行してください。\n'
-        );
-        process.exit(1);
-      }
+      // preWorkspace がホームディレクトリ等 managed root と衝突する場合、
+      // acquireStartupLock/findRunningInstance は assertValidWorkspace で throw する
+      // （Issue #214: install.js の管理領域と衝突する workspace への書き込み拒否）。
+      // CLI からは「ワークスペースを解決できない」場合と同様に、生の例外ではなく
+      // 通常のエラーメッセージ + exit 1 として扱う。
+      try {
+        if (!acquireStartupLock(preWorkspace, 'inbox-supervisor.js', null)) {
+          process.stderr.write(
+            'inbox-supervisor: 別のプロセスが同じworkspaceのSupervisor起動処理中です。' +
+            '少し待ってから再試行してください。\n'
+          );
+          process.exit(1);
+        }
 
-      const dup = findRunningInstance(preWorkspace, { script: 'inbox-supervisor.js', workerName: null });
-      if (dup) {
-        releaseStartupLock(preWorkspace, 'inbox-supervisor.js', null);
-        process.stderr.write(
-          `inbox-supervisor: 重複起動を検出しました。既に pid=${dup.pid} が同じworkspaceを監視中です。` +
-          '強制的に起動する場合は --force を指定してください。\n'
-        );
+        const dup = findRunningInstance(preWorkspace, { script: 'inbox-supervisor.js', workerName: null });
+        if (dup) {
+          releaseStartupLock(preWorkspace, 'inbox-supervisor.js', null);
+          process.stderr.write(
+            `inbox-supervisor: 重複起動を検出しました。既に pid=${dup.pid} が同じworkspaceを監視中です。` +
+            '強制的に起動する場合は --force を指定してください。\n'
+          );
+          process.exit(1);
+        }
+      } catch (e) {
+        process.stderr.write(`inbox-supervisor: ワークスペースを解決できません（${e.message}）\n`);
         process.exit(1);
       }
     }

@@ -13,7 +13,7 @@
 const { spawnSync } = require('./child-process');
 const fs = require('fs');
 const path = require('path');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -27,7 +27,8 @@ Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <
 
 Arguments:
   <PR>                対象の PR 番号
-  [WORKSPACE]         状態ファイルを置くワークスペース（デフォルト CWD）
+  [WORKSPACE]         状態ファイルを置くワークスペース（省略時は GH_MAESTRO_WORKSPACE env
+                      またはCWDからの .gh-maestro/ 上方探索で解決）
   [INTERVAL_SECONDS]  ポーリング間隔（秒、デフォルト 30）
 
 Options:
@@ -90,7 +91,7 @@ if (require.main === module) {
   }
 
   const sessionPidArg = values['--session-pid'];
-  const [pr, workspace, intervalArg] = rest;
+  const [pr, workspaceArg, intervalArg] = rest;
   const intervalSec = parseInt(intervalArg || '30');
 
   if (!pr) {
@@ -98,10 +99,20 @@ if (require.main === module) {
     process.exit(1);
   }
 
+  // 他スクリプト（poll-pr.js等）と同じ workspace 解決順（GH_MAESTRO_WORKSPACE env >
+  // 引数 > CWD探索）に統一する。素の process.cwd() フォールバックだと、CWD が
+  // ホームディレクトリ配下のどこか等に誤解決される余地が残るため使わない
+  // （Issue #214: process-lifecycle.js の PID registry が managed root と衝突する事故の一因）。
+  const workspace = resolveWorkspace(workspaceArg);
+  if (!workspace) {
+    console.error('poll-reviews: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
+    process.exit(1);
+  }
+
   const repo = spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
     { encoding: 'utf8' }).stdout.trim();
 
-  const stateDir = path.join(workspace || process.cwd(), '.gh-maestro');
+  const stateDir = path.join(workspace, '.gh-maestro');
   fs.mkdirSync(stateDir, { recursive: true });
   const stateFile = path.join(stateDir, `poll-state-${pr}`);
   if (!fs.existsSync(stateFile)) fs.writeFileSync(stateFile, '');
@@ -113,10 +124,10 @@ if (require.main === module) {
   const checkParent = createDeadManSwitch(sessionPid);
 
   // PID registry に自己登録
-  registerProcess(workspace || process.cwd(), { script: 'poll-reviews.js' });
+  registerProcess(workspace, { script: 'poll-reviews.js' });
 
   function cleanup() {
-    lifecycleCleanup(workspace || process.cwd(), () => {
+    lifecycleCleanup(workspace, () => {
       try { fs.unlinkSync(stateFile); } catch {}
       try { fs.unlinkSync(shaFile); } catch {}
     });

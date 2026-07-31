@@ -18,7 +18,7 @@ const { killProcessTree } = require('./kill-tree');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { sweepRegistry } = require('./process-lifecycle');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const readStateLib = require('./shared/read-state');
 
@@ -27,7 +27,8 @@ const USAGE = `reset-session.js — gh-maestro セッションを強制リセッ
 Usage: node reset-session.js [--workspace <path>] [--quiet]
 
 Options:
-  --workspace <path>  ワークスペース（デフォルト CWD）
+  --workspace <path>  ワークスペース（省略時は GH_MAESTRO_WORKSPACE env または
+                      CWDからの .gh-maestro/ 上方探索で解決）
   --quiet             進捗ログを抑制する
 
 workers.json の破損・pane 消滅・worktree 残骸など、どんな状態からでもできる限り
@@ -122,8 +123,15 @@ if (require.main === module) {
     console.log(USAGE);
     process.exit(0);
   }
-  const workspace = values['--workspace'] ?? process.cwd();
+  // 他スクリプト（poll-pr.js等）と同じ workspace 解決順（GH_MAESTRO_WORKSPACE env >
+  // --workspace > CWD探索）に統一する。素の process.cwd() フォールバックだと、CWD が
+  // ホームディレクトリ配下等に誤解決される余地が残るため使わない（Issue #214）。
+  const workspace = resolveWorkspace(values['--workspace']);
   const quiet = values['--quiet'] === true;
+  if (!workspace) {
+    console.error('reset-session: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
+    process.exit(1);
+  }
 
   const workersJson  = resolve(workspace, '.gh-maestro', 'workers.json');
   const worktreesDir = resolve(workspace, '.gh-maestro', 'worktrees');

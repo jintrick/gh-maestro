@@ -6,6 +6,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+const storageLayout = require('../scripts/shared/storage-layout');
+
 // process-lifecycle.js は child-process.js の execSync に依存する（Windows WMI）。
 // テストは実プロセスを0個spawnする（.claude/rules/test-process-spawn-safety.md 準拠）。
 // プラットフォーム依存の execSync 呼び出しを含む関数はモックで置き換える。
@@ -15,20 +17,31 @@ const os = require('os');
 const tmpBase = path.join(os.tmpdir(), 'gh-maestro-test-lifecycle-' + Date.now());
 const workspace = path.join(tmpBase, 'workspace');
 
+// PID registry の新ロケーションは OS の runtime root（storage-layout.js）配下。
+// テストが開発機の実 runtime root に触れないよう、一時ディレクトリへ差し替える。
+const prevRuntimeDir = process.env.GH_MAESTRO_RUNTIME_DIR;
+process.env.GH_MAESTRO_RUNTIME_DIR = path.join(tmpBase, 'runtime-root');
+
 before(() => {
   fs.mkdirSync(workspace, { recursive: true });
 });
 
 after(() => {
   try { fs.rmSync(tmpBase, { recursive: true, force: true }); } catch {}
+  if (prevRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+  else process.env.GH_MAESTRO_RUNTIME_DIR = prevRuntimeDir;
 });
 
-// 各テスト後に process.pid の registry エントリを確実に削除する。
+// 各テスト後に process.pid の registry エントリ（新旧両ロケーション）を確実に削除する。
 // registerProcess 系テストが残留させたエントリが sweepRegistry で
 // テストランナー自身のプロセスを kill する事故を防ぐ。
 afterEach(() => {
-  const pidsFile = path.join(workspace, '.gh-maestro', 'pids', `${process.pid}.json`);
-  try { if (fs.existsSync(pidsFile)) fs.unlinkSync(pidsFile); } catch {}
+  const legacyFile = path.join(workspace, '.gh-maestro', 'pids', `${process.pid}.json`);
+  try { if (fs.existsSync(legacyFile)) fs.unlinkSync(legacyFile); } catch {}
+  try {
+    const newFile = path.join(storageLayout.workspaceRuntimeDir(workspace), 'pids', `${process.pid}.json`);
+    if (fs.existsSync(newFile)) fs.unlinkSync(newFile);
+  } catch {}
 });
 
 // ── ヘルパー: モジュールをリロードして依存を注入 ──────────────────────
@@ -232,6 +245,180 @@ test('unregisterProcess: ファイルを削除する', () => {
 test('unregisterProcess: ファイルが存在しなくてもエラーにならない', () => {
   const plc = loadModule();
   assert.doesNotThrow(() => plc.unregisterProcess(workspace, 99999999));
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// bridge: dual-write / union-read / dual-delete（Issue #214 移行）
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('registerProcess: 新ロケーションに加え、旧ロケーション（legacy）にも dual-write する', () => {
+  const plc = loadModule();
+  plc.registerProcess(workspace, { script: 'msg-poll.js', startTime: MOCK_START_TIME });
+
+  try {
+    const legacyPath = plc.legacyPidFilePath(workspace, process.pid);
+    assert.ok(fs.existsSync(legacyPath), 'legacy ロケーションにも書かれるはず');
+    const raw = JSON.parse(fs.readFileSync(legacyPath, 'utf8'));
+    assert.equal(raw.pid, process.pid);
+    assert.equal(raw.script, 'msg-poll.js');
+  } finally {
+    plc.unregisterProcess(workspace, process.pid);
+  }
+});
+
+test('unregisterProcess: 新旧両ロケーションから削除する（dual-delete）', () => {
+  const plc = loadModule();
+  plc.registerProcess(workspace, { script: 'test.js', startTime: MOCK_START_TIME });
+  const newPath = plc.pidFilePath(workspace, process.pid);
+  const legacyPath = plc.legacyPidFilePath(workspace, process.pid);
+  assert.ok(fs.existsSync(newPath));
+  assert.ok(fs.existsSync(legacyPath));
+
+  plc.unregisterProcess(workspace, process.pid);
+  assert.ok(!fs.existsSync(newPath));
+  assert.ok(!fs.existsSync(legacyPath));
+});
+
+test('findRunningInstance: legacyロケーションのみに存在するエントリ（旧コードのプロセス）も見つかる（union-read）', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const legacyDir = plc.legacyPidsDir(workspace);
+  fs.mkdirSync(legacyDir, { recursive: true });
+  const otherPid = process.ppid;
+
+  fs.writeFileSync(path.join(legacyDir, `${otherPid}.json`), JSON.stringify({
+    pid: otherPid, script: 'msg-poll.js', workerName: null, workspace, startTime: MOCK_START_TIME,
+  }));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.ok(result, 'legacyのみのエントリでも見つかるはず');
+    assert.equal(result.pid, otherPid);
+  } finally {
+    fs.unlinkSync(path.join(legacyDir, `${otherPid}.json`));
+  }
+});
+
+test('findRunningInstance: 新旧両方に同一pidのエントリがあっても1回だけ判定する（dual-write後の重複排除）', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const newDir = plc.pidsDir(workspace);
+  const legacyDir = plc.legacyPidsDir(workspace);
+  fs.mkdirSync(newDir, { recursive: true });
+  fs.mkdirSync(legacyDir, { recursive: true });
+  const otherPid = process.ppid;
+  const entry = { pid: otherPid, script: 'msg-poll.js', workerName: null, workspace, startTime: MOCK_START_TIME };
+
+  fs.writeFileSync(path.join(newDir, `${otherPid}.json`), JSON.stringify(entry));
+  fs.writeFileSync(path.join(legacyDir, `${otherPid}.json`), JSON.stringify(entry));
+
+  try {
+    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
+    assert.ok(result);
+    assert.equal(result.pid, otherPid);
+  } finally {
+    fs.unlinkSync(path.join(newDir, `${otherPid}.json`));
+    fs.unlinkSync(path.join(legacyDir, `${otherPid}.json`));
+  }
+});
+
+test('sweepRegistry: legacyロケーションのみに存在する stale エントリも掃除される（union-read）', () => {
+  const plc = loadModule();
+  const legacyDir = plc.legacyPidsDir(workspace);
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.writeFileSync(path.join(legacyDir, '99996.json'), JSON.stringify({
+    pid: -1, script: 'test.js', startTime: '2025-01-01T00:00:00.000Z',
+  }));
+
+  const results = plc.sweepRegistry(workspace, { dryRun: false });
+
+  const cleaned = results.cleaned.filter(c => c.reason && c.reason.includes('not alive'));
+  assert.ok(cleaned.length >= 1);
+  assert.ok(!fs.existsSync(path.join(legacyDir, '99996.json')));
+});
+
+test('sweepRegistry: 新旧両方にある同一pidのstaleエントリは、両方のファイルが削除される', () => {
+  const plc = loadModule();
+  const newDir = plc.pidsDir(workspace);
+  const legacyDir = plc.legacyPidsDir(workspace);
+  fs.mkdirSync(newDir, { recursive: true });
+  fs.mkdirSync(legacyDir, { recursive: true });
+  const entry = JSON.stringify({ pid: -1, script: 'test.js', startTime: '2025-01-01T00:00:00.000Z' });
+  fs.writeFileSync(path.join(newDir, '99995.json'), entry);
+  fs.writeFileSync(path.join(legacyDir, '99995.json'), entry);
+
+  const results = plc.sweepRegistry(workspace, { dryRun: false });
+
+  assert.ok(!fs.existsSync(path.join(newDir, '99995.json')));
+  assert.ok(!fs.existsSync(path.join(legacyDir, '99995.json')));
+  const cleaned = results.cleaned.filter(c => c.pid === -1);
+  assert.equal(cleaned.length, 1, '新旧2ファイルにまたがっていても1エントリとして報告されるはず');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// bridge: acquireStartupLock の取得順序（legacy → new）
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('acquireStartupLock: 成功時は新旧両方のロックファイルを作成する', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const legacyLock = plc.legacyStartupLockPath(workspace, 'test-lock-both.js', null);
+  const newLock = plc.startupLockPath(workspace, 'test-lock-both.js', null);
+  try {
+    assert.equal(plc.acquireStartupLock(workspace, 'test-lock-both.js', null), true);
+    assert.ok(fs.existsSync(legacyLock), '旧ロケーションのロックも作られるはず');
+    assert.ok(fs.existsSync(newLock));
+  } finally {
+    try { fs.unlinkSync(legacyLock); } catch {}
+    try { fs.unlinkSync(newLock); } catch {}
+  }
+});
+
+test('acquireStartupLock: 旧ロケーションを他プロセスが保持中なら新ロケーションを触らず失敗する', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const legacyDir = plc.legacyPidsDir(workspace);
+  fs.mkdirSync(legacyDir, { recursive: true });
+  const legacyLock = plc.legacyStartupLockPath(workspace, 'test-lock-legacy-held.js', null);
+  const newLock = plc.startupLockPath(workspace, 'test-lock-legacy-held.js', null);
+  // 生存かつ同一性一致する他プロセス（process.ppid）が legacy ロックを保持中と偽装
+  fs.writeFileSync(legacyLock, JSON.stringify({ pid: process.ppid, startTime: MOCK_START_TIME }));
+
+  try {
+    const ok = plc.acquireStartupLock(workspace, 'test-lock-legacy-held.js', null, { maxRetries: 1 });
+    assert.equal(ok, false);
+    assert.ok(!fs.existsSync(newLock), '旧ロケーションで失敗した場合、新ロケーションは触らないはず');
+  } finally {
+    try { fs.unlinkSync(legacyLock); } catch {}
+  }
+});
+
+test('acquireStartupLock: 新ロケーションの取得に失敗したら旧ロケーションのロックを解放する（rollback）', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const newDir = plc.pidsDir(workspace);
+  fs.mkdirSync(newDir, { recursive: true });
+  const legacyLock = plc.legacyStartupLockPath(workspace, 'test-lock-rollback.js', null);
+  const newLock = plc.startupLockPath(workspace, 'test-lock-rollback.js', null);
+  // 生存かつ同一性一致する他プロセスが新ロケーションのロックを保持中と偽装
+  fs.writeFileSync(newLock, JSON.stringify({ pid: process.ppid, startTime: MOCK_START_TIME }));
+
+  try {
+    const ok = plc.acquireStartupLock(workspace, 'test-lock-rollback.js', null, { maxRetries: 1 });
+    assert.equal(ok, false);
+    assert.ok(!fs.existsSync(legacyLock), '新ロケーションで失敗した場合、取得済みの旧ロケーションロックは解放されるはず');
+  } finally {
+    try { fs.unlinkSync(newLock); } catch {}
+    try { fs.unlinkSync(legacyLock); } catch {}
+  }
+});
+
+test('releaseStartupLock: 新旧両方のロックを解放する', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const legacyLock = plc.legacyStartupLockPath(workspace, 'test-lock-release-both.js', null);
+  const newLock = plc.startupLockPath(workspace, 'test-lock-release-both.js', null);
+  plc.acquireStartupLock(workspace, 'test-lock-release-both.js', null);
+  assert.ok(fs.existsSync(legacyLock));
+  assert.ok(fs.existsSync(newLock));
+
+  plc.releaseStartupLock(workspace, 'test-lock-release-both.js', null);
+  assert.ok(!fs.existsSync(legacyLock));
+  assert.ok(!fs.existsSync(newLock));
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -469,24 +656,28 @@ test('findRunningInstance: registry ディレクトリが無い場合は null', 
 test('acquireStartupLock: 未取得の場合は取得できる', () => {
   const plc = loadModule({ execSync: mockWmiSuccess() });
   const lockPath = plc.startupLockPath(workspace, 'test-lock.js', null);
+  const legacyLockPath = plc.legacyStartupLockPath(workspace, 'test-lock.js', null);
   try {
     const ok = plc.acquireStartupLock(workspace, 'test-lock.js', null);
     assert.equal(ok, true);
     assert.ok(fs.existsSync(lockPath));
   } finally {
     try { fs.unlinkSync(lockPath); } catch {}
+    try { fs.unlinkSync(legacyLockPath); } catch {}
   }
 });
 
 test('acquireStartupLock: 自分自身が既に保持している場合は再取得できない（生存かつ同一性一致）', () => {
   const plc = loadModule({ execSync: mockWmiSuccess() });
   const lockPath = plc.startupLockPath(workspace, 'test-lock.js', null);
+  const legacyLockPath = plc.legacyStartupLockPath(workspace, 'test-lock.js', null);
   try {
     assert.equal(plc.acquireStartupLock(workspace, 'test-lock.js', null), true);
     // 自PIDが生存かつ同一性一致のロックを保持中 → 2回目の取得は失敗する
     assert.equal(plc.acquireStartupLock(workspace, 'test-lock.js', null, { maxRetries: 1 }), false);
   } finally {
     try { fs.unlinkSync(lockPath); } catch {}
+    try { fs.unlinkSync(legacyLockPath); } catch {}
   }
 });
 
@@ -495,6 +686,7 @@ test('acquireStartupLock: staleなロック（保持者が非生存）は奪取�
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
   const lockPath = plc.startupLockPath(workspace, 'test-lock.js', null);
+  const legacyLockPath = plc.legacyStartupLockPath(workspace, 'test-lock.js', null);
   fs.writeFileSync(lockPath, JSON.stringify({ pid: -1, startTime: MOCK_START_TIME }));
 
   try {
@@ -504,17 +696,20 @@ test('acquireStartupLock: staleなロック（保持者が非生存）は奪取�
     assert.equal(holder.pid, process.pid);
   } finally {
     try { fs.unlinkSync(lockPath); } catch {}
+    try { fs.unlinkSync(legacyLockPath); } catch {}
   }
 });
 
 test('releaseStartupLock: 自分が保持者なら解放する', () => {
   const plc = loadModule({ execSync: mockWmiSuccess() });
   const lockPath = plc.startupLockPath(workspace, 'test-lock.js', null);
+  const legacyLockPath = plc.legacyStartupLockPath(workspace, 'test-lock.js', null);
   plc.acquireStartupLock(workspace, 'test-lock.js', null);
   assert.ok(fs.existsSync(lockPath));
 
   plc.releaseStartupLock(workspace, 'test-lock.js', null);
   assert.ok(!fs.existsSync(lockPath));
+  try { fs.unlinkSync(legacyLockPath); } catch {}
 });
 
 test('releaseStartupLock: 自分が保持者でなければ何もしない（他プロセスのロックを誤って消さない）', () => {
@@ -700,19 +895,55 @@ test('cleanup: extraCleanup でエラーが発生しても registry 解除は実
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// pidsDir / pidFilePath（純粋関数、spawn不要）
+// pidsDir / legacyPidsDir / pidFilePath（純粋関数、spawn不要）
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('pidsDir: .gh-maestro/pids を返す', () => {
+test('pidsDir: runtimeRoot()/workspaces/<key>/pids を返す（新ロケーション）', () => {
   const plc = loadModule();
-  const dir = plc.pidsDir('/foo/bar');
-  assert.equal(dir, path.join('/foo/bar', '.gh-maestro', 'pids'));
+  const dir = plc.pidsDir(workspace);
+  assert.equal(
+    dir,
+    path.join(storageLayout.workspaceRuntimeDir(workspace), 'pids')
+  );
 });
 
-test('pidFilePath: <pid>.json を返す', () => {
+test('legacyPidsDir: <workspace>/.gh-maestro/pids を返す（旧ロケーション）', () => {
   const plc = loadModule();
-  const fp = plc.pidFilePath('/foo/bar', 12345);
-  assert.equal(fp, path.join('/foo/bar', '.gh-maestro', 'pids', '12345.json'));
+  const dir = plc.legacyPidsDir(workspace);
+  assert.equal(dir, path.join(workspace, '.gh-maestro', 'pids'));
+});
+
+test('pidFilePath: <pid>.json を新ロケーション配下に返す', () => {
+  const plc = loadModule();
+  const fp = plc.pidFilePath(workspace, 12345);
+  assert.equal(fp, path.join(plc.pidsDir(workspace), '12345.json'));
+});
+
+test('legacyPidFilePath: <pid>.json を旧ロケーション配下に返す', () => {
+  const plc = loadModule();
+  const fp = plc.legacyPidFilePath(workspace, 12345);
+  assert.equal(fp, path.join(workspace, '.gh-maestro', 'pids', '12345.json'));
+});
+
+test('pidsDir: workspace がホームディレクトリに解決される場合は throw する（Issue #214 の根本原因ガード）', () => {
+  const plc = loadModule();
+  assert.throws(() => plc.pidsDir(os.homedir()));
+});
+
+test('legacyPidsDir: workspace がホームディレクトリに解決される場合は throw する', () => {
+  const plc = loadModule();
+  assert.throws(() => plc.legacyPidsDir(os.homedir()));
+});
+
+test('registerProcess: workspace がホームディレクトリの場合は throw し、~/.gh-maestro/pids を作らない（Issue #214）', () => {
+  const plc = loadModule();
+  const legacyHomePids = path.join(os.homedir(), '.gh-maestro', 'pids');
+  const existedBefore = fs.existsSync(legacyHomePids);
+  assert.throws(() => plc.registerProcess(os.homedir(), { script: 'test.js' }));
+  // throw が書き込みより先に発火するため、事前に存在しなかった場合は作られない
+  if (!existedBefore) {
+    assert.ok(!fs.existsSync(legacyHomePids), 'home解決時は ~/.gh-maestro/pids が作られてはならない');
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
