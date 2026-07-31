@@ -57,6 +57,17 @@ node scripts/install.js
 
 **Never run `node scripts/install.js` from a WIP/unmerged feature branch.** It writes to the machine-global `~/.gh-maestro/` shared directory and will overwrite installed state with unreviewed, unmerged code.
 
+## Runtime State vs Managed Storage
+
+`~/.gh-maestro/` (home-relative) is installer-managed: `install.js` treats it as authoritative and deletes any top-level entry it did not write itself during that run. `<workspace>/.gh-maestro/` (per-workspace: `workers.json`, `assistants.json`, cursors, etc.) is a different, install.js-untouched location and is fine to write to directly — most of the codebase already does.
+
+The actual danger (Issue #214) is not the literal string `.gh-maestro` — dozens of call sites use it legitimately. It's a `workspace` value that, through some resolution bug, becomes equal to (or nested inside) the home directory, which silently turns `<workspace>/.gh-maestro/` into `~/.gh-maestro/` and collides with the managed root. The code that broke looked identical to every other correct call site; only the runtime value of `workspace` was wrong. This is not visible by scanning source code for patterns, so there is no static/CI check for it — grepping for `.gh-maestro` would false-positive on nearly every file that legitimately uses it.
+
+- Always obtain `workspace` via `scripts/shared/workspace.js`'s `resolveWorkspace()` (which validates against exactly this collision and returns `null` if invalid) rather than inventing new resolution logic.
+- Anything that is live process/runtime state that must never be pruned by `install.js` (PID registries, locks) belongs in `scripts/shared/storage-layout.js`'s `runtimeRoot()` / `workspaceRuntimeDir()`, not `<workspace>/.gh-maestro/` — this keeps it physically separate from the managed root even if the collision above recurs. `process-lifecycle.js`'s PID registry is the reference implementation.
+- If `install.js` itself needs to own a new top-level entry under `~/.gh-maestro/`, declare it in `storage-layout.js`'s `MANAGED_TOP_LEVEL` first — `ghMaestroPath()` throws immediately if a new top-level name isn't declared there.
+- Review checkpoint: don't look for the string `.gh-maestro` (too common to be meaningful); check whether the `workspace` value in play was actually obtained from `resolveWorkspace()`.
+
 ## Change Discipline
 
 - Prefer existing project patterns over new abstractions.
