@@ -218,38 +218,44 @@ if (require.main === module) {
   const rawArgs = process.argv.slice(2);
 
   // TEMP DIAGNOSTIC for #202 — 根本原因特定後に削除
-  // 親プロセスの情報（ppid, CommandLine, ParentProcessId）を記録し、
+  // 親プロセスの情報（ppid, 実行ファイル名, ParentProcessId）を記録し、
   // worker-exit-hook.js がどの経路から呼ばれたかを特定可能にする。
+  // 機密情報流出防止のためCommandLine全体ではなく実行ファイル名のみ取得。
   try {
     const diagWs = rawArgs[0];
     if (diagWs) {
       const diagPath = path.join(diagWs, '.gh-maestro', 'diag-202.log');
-      let parentCmd = null;
-      let parentPpid = null;
-      if (process.platform === 'win32') {
-        try {
-          const r = spawnSync('powershell', ['-NoProfile', '-Command',
-            `$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${process.ppid}'; if($p){$p.CommandLine+'|:|'+$p.ParentProcessId}else{''}`,
-          ], { encoding: 'utf8', timeout: 3000, stdio: 'pipe' });
-          if (r.status === 0 && r.stdout) {
-            const parts = r.stdout.trim().split('|:|');
-            parentCmd = parts[0] || null;
-            parentPpid = parts.length > 1 ? parseInt(parts[1], 10) : null;
-            if (!Number.isFinite(parentPpid)) parentPpid = null;
-          }
-        } catch {}
+      // 5MB上限 — 超えたら追記しない（一時的な診断）
+      let skip = false;
+      try { skip = fs.statSync(diagPath).size >= 5 * 1024 * 1024; } catch {}
+      if (!skip) {
+        let parentName = null;
+        let parentPpid = null;
+        if (process.platform === 'win32') {
+          try {
+            const r = spawnSync('powershell', ['-NoProfile', '-Command',
+              `$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${process.ppid}'; if($p){$p.Name+'|:|'+$p.ParentProcessId}else{''}`,
+            ], { encoding: 'utf8', timeout: 3000, stdio: 'pipe' });
+            if (r.status === 0 && r.stdout) {
+              const parts = r.stdout.trim().split('|:|');
+              parentName = parts[0] || null;
+              parentPpid = parts.length > 1 ? parseInt(parts[1], 10) : null;
+              if (!Number.isFinite(parentPpid)) parentPpid = null;
+            }
+          } catch {}
+        }
+        const entry = JSON.stringify({
+          ts: new Date().toISOString(),
+          pid: process.pid,
+          ppid: process.ppid,
+          parentName,
+          parentPpid,
+          rawArgs,
+          workerName: process.env.GH_MAESTRO_WORKER || null,
+          workspace: diagWs,
+        });
+        fs.appendFileSync(diagPath, entry + '\n', 'utf8');
       }
-      const entry = JSON.stringify({
-        ts: new Date().toISOString(),
-        pid: process.pid,
-        ppid: process.ppid,
-        parentCmd,
-        parentPpid,
-        rawArgs,
-        workerName: process.env.GH_MAESTRO_WORKER || null,
-        workspace: diagWs,
-      });
-      fs.appendFileSync(diagPath, entry + '\n', 'utf8');
     }
   } catch {}
 

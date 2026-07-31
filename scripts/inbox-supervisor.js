@@ -261,15 +261,19 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
   // TEMP DIAGNOSTIC for #202 — 根本原因特定後に削除
   try {
     const diagPath = path.join(workspace, '.gh-maestro', 'diag-202.log');
-    const entry = JSON.stringify({
-      ts: new Date().toISOString(),
-      where: 'tryResumeAndDeliver-enter',
-      pid: process.pid,
-      workerName,
-      agentId,
-      msgFrom: message?.from || null,
-    });
-    fs.appendFileSync(diagPath, entry + '\n', 'utf8');
+    let skip = false;
+    try { skip = fs.statSync(diagPath).size >= 5 * 1024 * 1024; } catch {}
+    if (!skip) {
+      const entry = JSON.stringify({
+        ts: new Date().toISOString(),
+        where: 'tryResumeAndDeliver-enter',
+        pid: process.pid,
+        workerName,
+        agentId,
+        msgFrom: message?.from || null,
+      });
+      fs.appendFileSync(diagPath, entry + '\n', 'utf8');
+    }
   } catch {}
 
   let agentConfig;
@@ -420,10 +424,14 @@ function deliverMessage({ workerName, entry, message, workspace, homedir, issue 
   // TEMP DIAGNOSTIC for #202 — 根本原因特定後に削除
   try {
     const diagPath = path.join(workspace, '.gh-maestro', 'diag-202.log');
-    const entryInfo = entry ? { pid: entry.pid, agentId: entry.agentId } : null;
-    const alive = entry ? _isWorkerAlive(entry) : null;
-    const entryStr = JSON.stringify({ ts: new Date().toISOString(), where: 'deliverMessage-enter', pid: process.pid, workerName, entry: entryInfo, isAlive: alive, msgFrom: message?.from || null });
-    fs.appendFileSync(diagPath, entryStr + '\n', 'utf8');
+    let skip = false;
+    try { skip = fs.statSync(diagPath).size >= 5 * 1024 * 1024; } catch {}
+    if (!skip) {
+      const entryInfo = entry ? { pid: entry.pid, agentId: entry.agentId } : null;
+      const alive = entry ? _isWorkerAlive(entry) : null;
+      const entryStr = JSON.stringify({ ts: new Date().toISOString(), where: 'deliverMessage-enter', pid: process.pid, workerName, entry: entryInfo, isAlive: alive, msgFrom: message?.from || null });
+      fs.appendFileSync(diagPath, entryStr + '\n', 'utf8');
+    }
   } catch {}
 
   if (_isWorkerAlive(entry)) {

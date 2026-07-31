@@ -294,3 +294,53 @@ test('checkAgentExists: 異なるプラットフォーム指定で同一結果',
     assert.equal(checkAgentExists('node', 'linux'), true);
   }
 });
+
+// ── 7引数（resume形）の終了フック引数渡し検証 ────────────────────────────
+//
+// 旧実装では bash 経路で $1,$2,$3 しかキャプチャしておらず、resume時に渡される
+// 後半の引数（logPath, sinceTimestamp, logOffset, contractArg）がフックに届か
+// なかった。このテストは7引数の onExit.args を実際の bash -lc 経由で実行し、
+// 全引数 + 終了コードが正しくフックに渡っていることを確認する。
+// フック（bash -c）自身が消費する -c / script / hook-shim の3引数に加え、
+// resumeデータ4引数 + 終了コード1が届くことで、7引数設計の正当性を検証する。
+
+test('buildLoginShellExecArgs: Unix の終了フックがresume時の7引数と終了コードを正しく渡す', (t) => {
+  const bashProbe = spawnSync('bash', ['-lc', 'exit 0'], { encoding: 'utf8' });
+  if (bashProbe.status !== 0) {
+    t.skip('bash の実行環境が利用できない');
+    return;
+  }
+
+  // 7個の onExit.args: bash -c の仕組み3個（-c/script/hook-shim）+
+  // resumeデータ4個（ws/execId/logPath/sinceTimestamp ≒ inbox-supervisor.js）
+  const hook = {
+    command: 'bash',
+    args: [
+      '-c',
+      'echo "na=$#"; for a in "$@"; do echo "ARG:$a"; done',
+      'hook-shim',
+      '/test/ws', 'exec-42', '/logs/w.log', '2026-01-01T00:00:00Z',
+    ],
+  };
+
+  const agentCmd = ['bash', '-lc', 'printf "agent-ran\n"; exit 0'];
+  const unixArgs = buildLoginShellExecArgs(agentCmd, 'linux', hook);
+  const result = spawnSync(unixArgs[0], unixArgs.slice(1), { encoding: 'utf8' });
+
+  assert.equal(result.status, 0, `stderr: ${result.stderr}`);
+  const lines = result.stdout.split('\n').map(l => l.trim()).filter(Boolean);
+
+  // エージェントコマンドが実行されたこと
+  assert.ok(lines.includes('agent-ran'), `agent should run: ${lines.join(', ')}`);
+
+  // bash -c 内の位置パラメータ: hook-shim($0)とすると$#=5（4 resume args + 1 exit code）
+  assert.ok(lines.some(l => l === 'na=5'), `4 resume args + exit code: ${lines.join(', ')}`);
+
+  // resumeデータが正しい順序で届いている
+  const argLines = lines.filter(l => l.startsWith('ARG:'));
+  assert.equal(argLines[0], 'ARG:/test/ws', 'workspace');
+  assert.equal(argLines[1], 'ARG:exec-42', 'executionId');
+  assert.equal(argLines[2], 'ARG:/logs/w.log', 'logPath');
+  assert.equal(argLines[3], 'ARG:2026-01-01T00:00:00Z', 'sinceTimestamp');
+  assert.equal(argLines[4], 'ARG:0', 'exit code should be last');
+});
