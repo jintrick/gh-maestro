@@ -53,11 +53,14 @@ node scripts/install.js
 
 ## Runtime State vs Managed Storage
 
-`~/.gh-maestro/` is installer-managed: `install.js` treats it as authoritative and deletes any top-level entry it did not write itself during that run. Never write process/runtime state (PID files, locks, or anything a script produces while running, as opposed to at install time) directly under `~/.gh-maestro/` or `<workspace>/.gh-maestro/` — it will eventually be pruned out from under the running process.
+`~/.gh-maestro/` (home-relative) is installer-managed: `install.js` treats it as authoritative and deletes any top-level entry it did not write itself during that run. `<workspace>/.gh-maestro/` (per-workspace: `workers.json`, `assistants.json`, cursors, etc.) is a different, install.js-untouched location and is fine to write to directly — most of the codebase already does.
 
-- Runtime state must go through `scripts/shared/storage-layout.js` (`runtimeRoot()` / `workspaceRuntimeDir()`), which resolves to an OS-appropriate state directory that is physically separate from the installer's managed root. `process-lifecycle.js`'s PID registry is the reference implementation.
-- If `install.js` itself needs to own a new top-level entry under `~/.gh-maestro/`, declare it in `storage-layout.js`'s `MANAGED_TOP_LEVEL` first — `ghMaestroPath()` throws immediately if a new top-level name isn't declared there, so this specific mistake can't pass silently.
-- There is no static/CI check enforcing the rule above for a new script that hand-rolls a path with `path.join(workspace, '.gh-maestro', ...)` instead of using the shared resolver — that must be caught in review. (Issue #214: a workspace that mistakenly resolved to the home directory caused `install.js` to silently delete a live process registry it had no knowledge of.)
+The actual danger (Issue #214) is not the literal string `.gh-maestro` — dozens of call sites use it legitimately. It's a `workspace` value that, through some resolution bug, becomes equal to (or nested inside) the home directory, which silently turns `<workspace>/.gh-maestro/` into `~/.gh-maestro/` and collides with the managed root. The code that broke looked identical to every other correct call site; only the runtime value of `workspace` was wrong. This is not visible by scanning source code for patterns, so there is no static/CI check for it — grepping for `.gh-maestro` would false-positive on nearly every file that legitimately uses it.
+
+- Always obtain `workspace` via `scripts/shared/workspace.js`'s `resolveWorkspace()` (which validates against exactly this collision and returns `null` if invalid) rather than inventing new resolution logic.
+- Anything that is live process/runtime state that must never be pruned by `install.js` (PID registries, locks) belongs in `scripts/shared/storage-layout.js`'s `runtimeRoot()` / `workspaceRuntimeDir()`, not `<workspace>/.gh-maestro/` — this keeps it physically separate from the managed root even if the collision above recurs. `process-lifecycle.js`'s PID registry is the reference implementation.
+- If `install.js` itself needs to own a new top-level entry under `~/.gh-maestro/`, declare it in `storage-layout.js`'s `MANAGED_TOP_LEVEL` first — `ghMaestroPath()` throws immediately if a new top-level name isn't declared there.
+- Review checkpoint: don't look for the string `.gh-maestro` (too common to be meaningful); check whether the `workspace` value in play was actually obtained from `resolveWorkspace()`.
 
 ## Change Discipline
 
