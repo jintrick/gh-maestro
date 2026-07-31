@@ -11,6 +11,7 @@ const {
   resolveSkillAgentMap,
   resolveExtends,
   loadDefaults,
+  validateNonInteractiveTokens,
 } = require('../scripts/shared/resolve-config');
 const { buildAgentCommandArgs } = require('../scripts/agent-launch');
 
@@ -635,6 +636,86 @@ test('resolveAgentConfig: workspace 未指定時は global config のみ考慮',
     const agent = resolveAgentConfig('claude-ds', { homedir: home });
     assert.equal(agent.enterSequence, '\n', 'global override should apply');
     assert.equal(agent.command, 'claude-ds', 'default field unchanged');
+  });
+});
+
+// ── validateNonInteractiveTokens（Issue #163） ─────────────────────────────────
+
+test('validateNonInteractiveTokens: 全トークンを保持していれば valid', () => {
+  const agent = { extraArgs: ['--print', '--verbose'], nonInteractiveTokens: ['--print'] };
+  assert.deepEqual(validateNonInteractiveTokens(agent), { valid: true, missing: [] });
+});
+
+test('validateNonInteractiveTokens: トークン欠落を missing で報告する', () => {
+  const agent = { extraArgs: ['--verbose'], nonInteractiveTokens: ['--print'] };
+  const result = validateNonInteractiveTokens(agent);
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.missing, ['--print']);
+});
+
+test('validateNonInteractiveTokens: 複数トークンの一部欠落のみ報告する', () => {
+  const agent = { extraArgs: ['run', '--dir', '/tmp'], nonInteractiveTokens: ['run', 'exec'] };
+  const result = validateNonInteractiveTokens(agent);
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.missing, ['exec']);
+});
+
+test('validateNonInteractiveTokens: nonInteractiveTokens 未宣言のエージェントは常に valid（agy等）', () => {
+  const agent = { extraArgs: ['--dangerously-skip-permissions'] };
+  assert.deepEqual(validateNonInteractiveTokens(agent), { valid: true, missing: [] });
+});
+
+test('validateNonInteractiveTokens: agent が null でも例外を投げず valid', () => {
+  assert.deepEqual(validateNonInteractiveTokens(null), { valid: true, missing: [] });
+});
+
+test('validateNonInteractiveTokens: extraArgs 未定義でも nonInteractiveTokens があれば欠落報告', () => {
+  const agent = { nonInteractiveTokens: ['run'] };
+  const result = validateNonInteractiveTokens(agent);
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.missing, ['run']);
+});
+
+test('resolveAgentConfig: claude-ds は extends 経由で nonInteractiveTokens: ["--print"] を継承する', () => {
+  withTempHome(home => {
+    const agent = resolveAgentConfig('claude-ds', { homedir: home });
+    assert.deepEqual(agent.nonInteractiveTokens, ['--print']);
+  });
+});
+
+test('resolveAgentConfig: codex-pro は extends 経由で nonInteractiveTokens: ["exec"] を継承する', () => {
+  withTempHome(home => {
+    const agent = resolveAgentConfig('codex-pro', { homedir: home });
+    assert.deepEqual(agent.nonInteractiveTokens, ['exec']);
+  });
+});
+
+test('resolveAgentConfig: reasonix は動的解決後も run トークンを保持し valid（Issue #163）', () => {
+  withTempHome(home => {
+    const agent = resolveAgentConfig('reasonix', { homedir: home });
+    assert.ok(agent);
+    assert.deepEqual(agent.nonInteractiveTokens, ['run']);
+    // 動的解決で command=node の場合は先頭にスクリプトパスが付与されるが、run は残る
+    assert.equal(validateNonInteractiveTokens(agent).valid, true);
+  });
+});
+
+test('resolveAgentConfig: config.json で extraArgs から --print を欠落させると validateNonInteractiveTokens が検出する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'claude-ds': { extraArgs: ['--dangerously-skip-permissions'] },
+      },
+    });
+    const agent = resolveAgentConfig('claude-ds', { homedir: home });
+    assert.ok(agent);
+    // extraArgs は上書きで配列ごと置換されるが、nonInteractiveTokens は
+    // デフォルト（claude からの継承）のまま残る → 欠落を機械的に検出できる
+    assert.deepEqual(agent.nonInteractiveTokens, ['--print']);
+    assert.equal(agent.extraArgs.includes('--print'), false);
+    const result = validateNonInteractiveTokens(agent);
+    assert.equal(result.valid, false);
+    assert.deepEqual(result.missing, ['--print']);
   });
 });
 

@@ -59,6 +59,10 @@ const KNOWN_OPTIONAL_FIELDS = [
   ['execPromptDelivery', 'string'],
   ['execPromptFlag', 'string'],
   ['extends', 'string'],
+  // 非対話化に必要なトークンの宣言（Issue #163）。resolve-config.js の
+  // validateNonInteractiveTokens が読む。実行系フィールドではなく能力宣言のため
+  // EXEC_SENSITIVE_FIELDS には含めない（config.json から上書きできる）。
+  ['nonInteractiveTokens', 'array'],
 ];
 
 // ── ヘルパー ─────────────────────────────────────────────────────────────────

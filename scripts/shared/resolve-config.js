@@ -187,6 +187,33 @@ function isValidAgentConfig(agent) {
   return true;
 }
 
+/**
+ * 解決済みエージェントの extraArgs が非対話化トークンを保持しているか検証する。
+ *
+ * agent-defaults.json の `nonInteractiveTokens`（宣言フィールド）に列挙されたトークン
+ * （claude系: --print、reasonix: run、codex系: exec 等）は、headless 起動時に画面・標準入力が
+ * 無い環境で対話モードに入らず1回実行で終了させるために必須。config.json の extraArgs 上書きは
+ * 配列ごと置換されるため、うっかりトークンを欠落させた設定がそのまま有効化されてしまい、
+ * 起動がハングしても誰にも気づけない（Issue #163）。
+ *
+ * この関数は「extraArgs がトークンを保持しているか」を直接見る。欠落検出は呼び出し元
+ * （spawn-worker.js の起動ブロック・config.js status の警告）が行う。
+ *
+ * @param {object} agent 解決済みエージェント設定
+ * @returns {{ valid: boolean, missing: string[] }}
+ *   valid: 非対話化トークンをすべて保持していれば true
+ *   missing: 欠落しているトークンの配列（valid なら空）
+ */
+function validateNonInteractiveTokens(agent) {
+  const tokens = agent && Array.isArray(agent.nonInteractiveTokens) ? agent.nonInteractiveTokens : [];
+  // 宣言フィールドが無いエージェント（agy 等。非対話性は promptFlag 選択に依存）は
+  // 検証対象外として常に valid（欠落検出の誤検知を避ける）。
+  if (tokens.length === 0) return { valid: true, missing: [] };
+  const extraArgs = agent && Array.isArray(agent.extraArgs) ? agent.extraArgs : [];
+  const missing = tokens.filter(token => !extraArgs.includes(token));
+  return { valid: missing.length === 0, missing };
+}
+
 // ── 公開API ─────────────────────────────────────────────────────────────────
 
 /**
@@ -317,5 +344,6 @@ module.exports = {
   resolveExtends,
   loadDefaults,
   isValidAgentConfig,
+  validateNonInteractiveTokens,
   EXEC_SENSITIVE_FIELDS,
 };

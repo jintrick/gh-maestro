@@ -22,7 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, resolveExtends, isValidAgentConfig, EXEC_SENSITIVE_FIELDS } = require('./shared/resolve-config');
+const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, resolveExtends, isValidAgentConfig, validateNonInteractiveTokens, EXEC_SENSITIVE_FIELDS } = require('./shared/resolve-config');
 const { isPlainObject } = require('./shared/object');
 const { checkAgentExists } = require('./agent-exec');
 
@@ -363,6 +363,13 @@ function cmdStatus(workspacePath) {
   const resolvedCache = new Map();
   const existsCache = new Map();
 
+  // config.json の extraArgs 上書きで非対話化トークン（--print / run / exec 等）が
+  // 欠落しているエージェントの警告。spawn-worker.js の起動ブロックとは別に、
+  // 人間が status で日常的に乖離を確認できるようにする（Issue #163）。
+  // 同一agentId（複数スキルが同じエージェントにマップされる場合）は警告を重複させない。
+  const nonInteractiveWarnings = [];
+  const warnedAgents = new Set();
+
   for (const [skill, agentId] of entries) {
     // Resolve the agent config (cached)
     let resolved;
@@ -378,6 +385,13 @@ function cmdStatus(workspacePath) {
 
     let ok = '✗';
     if (resolved) {
+      const tokenCheck = validateNonInteractiveTokens(resolved);
+      if (!tokenCheck.valid && !warnedAgents.has(agentId)) {
+        warnedAgents.add(agentId);
+        nonInteractiveWarnings.push(
+          `[WARN] Agent "${agentId}" is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} — headless launch will hang.`,
+        );
+      }
       if (!existsCache.has(resolved.command)) {
         existsCache.set(resolved.command, checkAgentExists(resolved.command));
       }
@@ -388,6 +402,10 @@ function cmdStatus(workspacePath) {
     console.log(
       `${skill.padEnd(maxSkillLen)}  ${agentId.padEnd(maxAgentLen)}  ${srcLabel.padEnd(11)} ${ok}`,
     );
+  }
+
+  if (nonInteractiveWarnings.length > 0) {
+    console.log('\n' + nonInteractiveWarnings.join('\n'));
   }
 
   // Warn about unknown skill keys in global config sources
@@ -605,7 +623,9 @@ Usage:
 
 Subcommands:
   use <profile>     Apply a named profile's skillAgentMap to config.json
-  status            Show resolved skillAgentMap with connectivity checks
+  status            Show resolved skillAgentMap with connectivity checks and
+                    warn when an agent's extraArgs is missing its
+                    non-interactive token (--print / run / exec etc.)
   doctor            Validate config structure and report issues
 
 Options:
