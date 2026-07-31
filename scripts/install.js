@@ -12,6 +12,7 @@ const AGENTS_YAML = path.join(SKILLS_DIR, 'agents.yaml');
 const PARTIALS_DIR = path.join(SKILLS_DIR, '_partials');
 const { validateAgentDefaults } = require(path.join(__dirname, 'shared', 'validate-agent-defaults'));
 const { resolveExtends } = require(path.join(__dirname, 'shared', 'resolve-config'));
+const storageLayout = require(path.join(__dirname, 'shared', 'storage-layout'));
 
 // ── Minimal YAML parser for agents.yaml ──────────────────────────────────────
 
@@ -194,9 +195,103 @@ function buildRulesSupportedMap(agentDefaults) {
   );
 }
 
+// ── Issue #214: managed root (~/.gh-maestro/) の登録漏れ検知と legacy pids 隔離 ──
+
+/**
+ * ghMaestroPath() が組み立てようとしているトップレベル名が
+ * storage-layout.js の MANAGED_TOP_LEVEL に宣言済みかを検証する。
+ *
+ * install.js は ~/.gh-maestro/ を「未知のトップレベルは削除する」allow-list方式で
+ * 権威的に管理している。新しいトップレベル名を書くコードを追加する際、この宣言を
+ * 更新し忘れると、実行時に throw して気づける（サイレントな登録漏れを防ぐ）。
+ * PID registry 等の実行時状態はそもそもこの宣言に含めてはならない
+ * （runtime root を使うべき。process-lifecycle.js 参照）。
+ *
+ * @param {string} topLevelName
+ * @throws {Error} MANAGED_TOP_LEVEL に含まれない場合
+ */
+function assertManagedTopLevelName(topLevelName) {
+  if (!storageLayout.MANAGED_TOP_LEVEL.has(topLevelName)) {
+    throw new Error(
+      `ghMaestroPath: "${topLevelName}" は scripts/shared/storage-layout.js の MANAGED_TOP_LEVEL に`
+      + ` 宣言されていません。~/.gh-maestro/ 配下に新しいトップレベル名を書く場合は、先にそこへ`
+      + ` 追加してください（実行時状態は runtime root を使うべきで、ここに追加すべきではありません）。`
+    );
+  }
+}
+
+/**
+ * Issue #214: install.js の prune ロジックが、稼働中プロセスの PID registry
+ * （本来 ~/.gh-maestro/pids に作られてはならないバグ経路の遺物）を無条件削除して
+ * しまっていた事故の再発防止。
+ *
+ * legacyHomePidsDir（通常は ~/.gh-maestro/pids）の中身を quarantineDir
+ * （runtimeRoot()/legacy-home/pids 相当）へ検証付きでコピーする。
+ * 全エントリのコピーに成功した場合のみ ok:true を返す。1件でも読み込み/JSON検証/
+ * 書き込みに失敗した場合は ok:false を返し、呼び出し側はそのディレクトリの削除を
+ * スキップすべきである（fail-closed。ヒューリスティックな内容判定ではなく、
+ * 実際のコピー成否で安全性を判定する）。
+ *
+ * @param {string} legacyHomePidsDir
+ * @param {string} quarantineDir
+ * @returns {{ ok: boolean, migrated: number, errors: string[] }}
+ */
+function quarantineLegacyHomePids(legacyHomePidsDir, quarantineDir) {
+  if (!fs.existsSync(legacyHomePidsDir)) return { ok: true, migrated: 0, errors: [] };
+
+  let entries;
+  try {
+    entries = fs.readdirSync(legacyHomePidsDir, { withFileTypes: true });
+  } catch (e) {
+    return { ok: false, migrated: 0, errors: [`readdir failed: ${e.message}`] };
+  }
+
+  const errors = [];
+  let migrated = 0;
+
+  for (const entry of entries) {
+    // サブディレクトリ等ファイル以外は想定外。fail-closedのため対象外として無視せず、
+    // 隔離不能な内容として報告する（削除スキップの判断材料にする）。
+    if (!entry.isFile()) {
+      errors.push(`${entry.name}: unexpected non-file entry`);
+      continue;
+    }
+
+    const srcPath = path.join(legacyHomePidsDir, entry.name);
+    let content;
+    try {
+      content = fs.readFileSync(srcPath, 'utf8');
+    } catch (e) {
+      errors.push(`${entry.name}: read failed: ${e.message}`);
+      continue;
+    }
+
+    // PID registry のレコードファイル（<pid>.json）は内容が有効なJSONであることを確認する。
+    // start-up-lock 等の非JSONファイルはそのままコピーする。
+    if (entry.name.endsWith('.json')) {
+      try {
+        JSON.parse(content);
+      } catch (e) {
+        errors.push(`${entry.name}: invalid JSON: ${e.message}`);
+        continue;
+      }
+    }
+
+    try {
+      fs.mkdirSync(quarantineDir, { recursive: true });
+      fs.writeFileSync(path.join(quarantineDir, entry.name), content, 'utf8');
+      migrated++;
+    } catch (e) {
+      errors.push(`${entry.name}: write failed: ${e.message}`);
+    }
+  }
+
+  return { ok: errors.length === 0, migrated, errors };
+}
+
 module.exports = {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
-  buildRulesSupportedMap,
+  buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids,
 };
 
 if (require.main !== module) return;
@@ -282,6 +377,8 @@ const COMMUNICATION_RULES_CONTENT = readPartial('communication-rules.md');
 const ghMaestroDir = expandHome('~/.gh-maestro');
 const ghMaestroKeep = new Set();
 function ghMaestroPath(...segs) {
+  // Issue #214: 未宣言のトップレベル名（登録漏れ・実行時状態の誤混入）を早期に検知する。
+  assertManagedTopLevelName(segs[0]);
   ghMaestroKeep.add(segs[0]);
   return path.join(ghMaestroDir, ...segs);
 }
@@ -523,14 +620,48 @@ if (fs.existsSync(agentsConfigPath)) {
   ok('No legacy agents.json — nothing to migrate');
 }
 
+// ── Issue #214: legacy PID registry の隔離（prune より必ず先に実行） ────────────
+// ~/.gh-maestro/pids は、workspace がホームディレクトリに誤解決された場合に
+// process-lifecycle.js が作ってしまうバグ経路の遺物であり、稼働中プロセスの
+// 生存判定に使われている可能性がある。中身を検証せずに prune で無条件削除すると
+// sweep の誤判定・誤killを招く（Issue #214 本体）。
+// 全エントリの隔離コピーに成功した場合のみ、通常の prune によるディレクトリ削除を許可する。
+// 1件でも失敗した場合は fail-closed でこのエントリの削除だけをスキップする
+// （ヒューリスティックな内容判定ではなく、実際のコピー成否で判定する）。
+step('Quarantining legacy home PID registry (Issue #214) before prune...');
+// runtime root（GH_MAESTRO_RUNTIME_DIR で明示 override 可能）が managed root
+// （~/.gh-maestro/）と衝突している場合、隔離先ディレクトリ自体が prune 対象に巻き込まれる
+// おそれがあるため、隔離処理を始める前に自己検査で fail-closed に倒す。
+storageLayout.assertDisjointRoots();
+const legacyHomePidsDir = path.join(ghMaestroDir, 'pids');
+const prunePathSkip = new Set();
+if (fs.existsSync(legacyHomePidsDir)) {
+  const quarantineDir = path.join(storageLayout.runtimeRoot(), 'legacy-home', 'pids');
+  const quarantineResult = quarantineLegacyHomePids(legacyHomePidsDir, quarantineDir);
+  if (quarantineResult.ok) {
+    ok(`quarantined ${quarantineResult.migrated} legacy pids entrie(s) -> ${quarantineDir}`);
+  } else {
+    prunePathSkip.add('pids');
+    console.warn(`  \x1b[33m! ~/.gh-maestro/pids の隔離に失敗したエントリがあるため、削除をスキップします（fail-closed）:\x1b[0m`);
+    for (const e of quarantineResult.errors) console.warn(`    ${e}`);
+  }
+} else {
+  ok('No legacy ~/.gh-maestro/pids found — nothing to quarantine');
+}
+
 // ── ~/.gh-maestro/ を権威的に管理する ─────────────────────────────────────────
 // install がこの実行中に書いたトップレベル名（ghMaestroKeep）だけを残し、それ以外
 // （旧バージョンの遺産: workflows/ ・.claude/ ・GH_MAESTRO_REF ・廃止済み review-policy.md 等）
 // を除去する。keep リストは ghMaestroPath() がパス生成時に自動記録するので、手書きの
-// 管理対象リストは存在せず、登録し忘れによるサイレント削除が起きない。
+// 管理対象リストは存在せず、登録し忘れによるサイレント削除が起きない
+// （ghMaestroPath() 自体も MANAGED_TOP_LEVEL 宣言と照合するため、二重にチェックされる）。
 step('Pruning ~/.gh-maestro/ of unmanaged legacy artifacts...');
 for (const entry of fs.readdirSync(ghMaestroDir)) {
   if (ghMaestroKeep.has(entry)) continue;
+  if (prunePathSkip.has(entry)) {
+    console.warn(`  \x1b[33m! skipping deletion of "${entry}" (quarantine failed above, fail-closed)\x1b[0m`);
+    continue;
+  }
   fs.rmSync(path.join(ghMaestroDir, entry), { recursive: true, force: true });
   ok(`removed legacy artifact: ${entry}`);
 }

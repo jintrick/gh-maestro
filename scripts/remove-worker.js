@@ -17,7 +17,7 @@ const { normalizeWorkerEntry } = require('./worker-entry');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { killProcessTree } = require('./kill-tree');
 const { sweepRegistry } = require('./process-lifecycle');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
 const { resolveWorkerName } = require('./shared/workers-registry');
 
 const USAGE = `remove-worker.js — ワーカープロセスを kill し worktree を削除する
@@ -30,7 +30,8 @@ Options:
   --issue <N>           削除対象ワーカーを workerName ではなく〈Issue番号 + 役割〉で指定する場合のIssue番号。
   --skill <role>        同上の役割（gh-maestro-coder等）。workers.json から一意に解決する。
                         該当が複数ある場合は候補を表示してエラー終了するので --worker-name で明示する。
-  --workspace <path>    ワークスペース（デフォルト CWD）
+  --workspace <path>    ワークスペース（省略時は GH_MAESTRO_WORKSPACE env または
+                        CWDからの .gh-maestro/ 上方探索で解決）
 
 --worker-name か〈--issue + --skill〉のいずれかで削除対象を指定する。
 ワーカープロセスツリーを kill し、worktree と同名ブランチを削除し、workers.json からエントリを除く。
@@ -55,8 +56,13 @@ if (require.main === module) {
     process.exit(0);
   }
 
-  const workspace = values['--workspace'] ?? process.cwd();
   const fail = (msg) => { console.error(`remove-worker: ${msg}`); process.exit(1); };
+
+  // 他スクリプト（poll-pr.js等）と同じ workspace 解決順（GH_MAESTRO_WORKSPACE env >
+  // --workspace > CWD探索）に統一する。素の process.cwd() フォールバックだと、CWD が
+  // ホームディレクトリ配下等に誤解決される余地が残るため使わない（Issue #214）。
+  const workspace = resolveWorkspace(values['--workspace']);
+  if (!workspace) fail('ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
 
   // 削除対象の解決: --worker-name（明示）優先。無ければ〈--issue + --skill〉から逆引きする。
   let workerName = values['--worker-name'];

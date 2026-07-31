@@ -58,6 +58,59 @@ test('findWorkspaceFromCwd: 親ディレクトリの .gh-maestro を上方向探
   }
 });
 
+test('findWorkspaceFromCwd: ホームディレクトリ自体は workspace として認定しない（Issue #214）', () => {
+  // ~/.gh-maestro は install.js の managed root であり、実行時ワークスペースではない。
+  // CWD がホーム配下のどこかで、ホーム自体にしか .gh-maestro が無い場合、
+  // 上方探索はホームを「見つけて」しまってはならない（見つけると workspace = home に
+  // 誤解決され、PID registry 等が managed root 配下に作られてしまう）。
+  //
+  // フィクスチャは実ホームディレクトリの子孫に置いてはならない。os.tmpdir() は
+  // Windows では既定で %USERPROFILE%\AppData\Local\Temp（実ホーム配下）を指すため、
+  // このフィクスチャ配下から上方探索すると、この開発機に既にインストール済みの
+  // 実 ~/.gh-maestro に到達してしまい（本テストが偽装したホーム以外の場所で）誤って
+  // マーカーを「発見」してしまう。実ホームの祖先にならない場所に置く。
+  const fixtureRoot = process.platform === 'win32'
+    ? path.join(path.parse(os.tmpdir()).root, 'gh-maestro-test-root-' + Date.now())
+    : fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-fakehome-'));
+  if (process.platform === 'win32') fs.mkdirSync(fixtureRoot, { recursive: true });
+  const fakeHome = process.platform === 'win32' ? path.join(fixtureRoot, 'fakehome') : fixtureRoot;
+  fs.mkdirSync(path.join(fakeHome, '.gh-maestro'), { recursive: true });
+  const childDir = path.join(fakeHome, 'some', 'nested', 'cwd');
+  fs.mkdirSync(childDir, { recursive: true });
+
+  const envKey = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+  const origEnvVal = process.env[envKey];
+  const origCwd = process.cwd;
+  process.env[envKey] = fakeHome;
+  process.cwd = () => childDir;
+  try {
+    assert.equal(findWorkspaceFromCwd(), null);
+  } finally {
+    process.cwd = origCwd;
+    if (origEnvVal === undefined) delete process.env[envKey]; else process.env[envKey] = origEnvVal;
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('findWorkspaceFromCwd: ホーム配下でも、子ディレクトリ自身の .gh-maestro は通常通り workspace として返す', () => {
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-fakehome2-'));
+  const projectDir = path.join(fakeHome, 'work', 'my-project');
+  fs.mkdirSync(path.join(projectDir, '.gh-maestro'), { recursive: true });
+
+  const envKey = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+  const origEnvVal = process.env[envKey];
+  const origCwd = process.cwd;
+  process.env[envKey] = fakeHome;
+  process.cwd = () => projectDir;
+  try {
+    assert.equal(findWorkspaceFromCwd(), projectDir, 'ホーム自身ではなく、実際にマーカーを持つ子ディレクトリが返るはず');
+  } finally {
+    process.cwd = origCwd;
+    if (origEnvVal === undefined) delete process.env[envKey]; else process.env[envKey] = origEnvVal;
+    fs.rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
 // ── resolveWorkspace ────────────────────────────────────────────────────
 
 test('resolveWorkspace: GH_MAESTRO_WORKSPACE env を最優先', () => {
@@ -100,6 +153,41 @@ test('resolveWorkspace: 引数なし・env なしでも親に .gh-maestro があ
     }
   } finally {
     fs.rmSync(parentDir, { recursive: true, force: true });
+  }
+});
+
+test('resolveWorkspace: --workspace 引数が明示的にホームディレクトリを指す場合は null（Issue #214）', () => {
+  // CWD探索由来だけでなく、--workspace / GH_MAESTRO_WORKSPACE で明示的にホームを
+  // 指定した場合も resolveWorkspace() が一元的に弾く。これにより、この戻り値を
+  // 使う全呼び出し元（poll-pr.js等）が個別の try/catch なしで安全に扱える。
+  withEnv({ GH_MAESTRO_WORKSPACE: undefined }, () => {
+    delete process.env.GH_MAESTRO_WORKSPACE;
+    assert.equal(resolveWorkspace(os.homedir()), null);
+  });
+});
+
+test('resolveWorkspace: GH_MAESTRO_WORKSPACE env が明示的にホームディレクトリを指す場合も null', () => {
+  withEnv({ GH_MAESTRO_WORKSPACE: os.homedir() }, () => {
+    assert.equal(resolveWorkspace('/some/other/arg'), null);
+  });
+});
+
+test('resolveWorkspace: --workspace 引数が managed root（~/.gh-maestro）配下を指す場合も null', () => {
+  withEnv({ GH_MAESTRO_WORKSPACE: undefined }, () => {
+    delete process.env.GH_MAESTRO_WORKSPACE;
+    assert.equal(resolveWorkspace(path.join(os.homedir(), '.gh-maestro')), null);
+  });
+});
+
+test('resolveWorkspace: 通常のワークスペースは引き続き解決される（回帰確認）', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-normal-'));
+  try {
+    withEnv({ GH_MAESTRO_WORKSPACE: undefined }, () => {
+      delete process.env.GH_MAESTRO_WORKSPACE;
+      assert.equal(resolveWorkspace(tmpDir), path.resolve(tmpDir));
+    });
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 

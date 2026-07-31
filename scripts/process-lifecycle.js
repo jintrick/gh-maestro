@@ -27,6 +27,7 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('./child-process');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const storageLayout = require('./shared/storage-layout');
 
 const IS_WIN = process.platform === 'win32';
 
@@ -244,18 +245,48 @@ function createDeadManSwitch(monitorPid, opts = {}) {
 }
 
 // ── PID Registry（1プロセス1ファイル） ─────────────────────────────────
+//
+// Issue #214: PID registry は本来 workspace 固有の runtime 状態であり、
+// install.js が権威的に prune する managed root（~/.gh-maestro/）とは
+// 物理的に別の runtime root（storage-layout.js の runtimeRoot()）に置く。
+// workspace が誤ってホームディレクトリ（＝managed root の親）に解決された
+// 場合は pidsDir()/legacyPidsDir() の入口で assertValidWorkspace が throw し、
+// 以後のあらゆる pids 操作（作成・sweep・lock）を一括で遮断する（fail-closed）。
+//
+// 移行期間中は旧ロケーション（<workspace>/.gh-maestro/pids/）も bridge として
+// dual-write / union-read / dual-delete する。これにより、まだ再起動していない
+// 旧プロセス（旧コードのまま legacy のみ読み書きする）との生存判定・二重起動
+// 防止が移行の前後で分断されない。
 
 /**
- * PID registry のディレクトリパスを返す。
+ * PID registry のディレクトリパスを返す（新ロケーション: OS runtime root 配下）。
+ * workspace がホームディレクトリ等 managed root と衝突する場合は throw する。
+ * 併せて、runtime root 自体が managed root と衝突していないか（例: 誤設定された
+ * GH_MAESTRO_RUNTIME_DIR が ~/.gh-maestro を指している）も自己検査する。
+ * pidsDir() は全 pids 操作のチョークポイントであるため、ここで検査すれば
+ * registerProcess/sweepRegistry/lock 系すべてに一括で効く。
  * @param {string} workspace
  * @returns {string}
  */
 function pidsDir(workspace) {
+  storageLayout.assertValidWorkspace(workspace);
+  storageLayout.assertDisjointRoots();
+  return path.join(storageLayout.workspaceRuntimeDir(workspace), 'pids');
+}
+
+/**
+ * PID registry の旧ロケーション（<workspace>/.gh-maestro/pids）を返す。
+ * bridge 期間中の dual-write/union-read/dual-delete 専用。
+ * @param {string} workspace
+ * @returns {string}
+ */
+function legacyPidsDir(workspace) {
+  storageLayout.assertValidWorkspace(workspace);
   return path.join(workspace, '.gh-maestro', 'pids');
 }
 
 /**
- * 特定PIDの registry ファイルパスを返す。
+ * 特定PIDの registry ファイルパスを返す（新ロケーション）。
  * @param {string} workspace
  * @param {number} pid
  * @returns {string}
@@ -265,8 +296,18 @@ function pidFilePath(workspace, pid) {
 }
 
 /**
- * 自プロセスを PID registry に登録する。
- * .gh-maestro/pids/<pid>.json を作成する。
+ * 特定PIDの registry ファイルパスを返す（旧ロケーション）。
+ * @param {string} workspace
+ * @param {number} pid
+ * @returns {string}
+ */
+function legacyPidFilePath(workspace, pid) {
+  return path.join(legacyPidsDir(workspace), `${pid}.json`);
+}
+
+/**
+ * 自プロセスを PID registry に登録する。新ロケーションへ書き込み、
+ * bridge として旧ロケーションへも best-effort で dual-write する。
  *
  * @param {string} workspace
  * @param {object} meta
@@ -277,7 +318,10 @@ function pidFilePath(workspace, pid) {
  * @returns {object} 登録されたエントリ
  */
 function registerProcess(workspace, meta = {}) {
+  // pidsDir() が assertValidWorkspace を呼ぶため、無効な workspace は
+  // 以下のいかなる書き込みよりも先に throw する（fail-closed）。
   const dir = pidsDir(workspace);
+  storageLayout.ensureWorkspaceRuntimeDir(workspace);
   fs.mkdirSync(dir, { recursive: true });
 
   // 起動時刻は実際のプロセス開始時刻を使用する。
@@ -298,24 +342,40 @@ function registerProcess(workspace, meta = {}) {
 
   const filePath = pidFilePath(workspace, process.pid);
   fs.writeFileSync(filePath, JSON.stringify(entry, null, 2), 'utf8');
+
+  // bridge: 旧ロケーションへの dual-write（best-effort）。
+  // まだ再起動していない旧コードの読み手がこのプロセスを認識できるようにする。
+  try {
+    const legacyDir = legacyPidsDir(workspace);
+    fs.mkdirSync(legacyDir, { recursive: true });
+    fs.writeFileSync(legacyPidFilePath(workspace, process.pid), JSON.stringify(entry, null, 2), 'utf8');
+  } catch {}
+
   return entry;
 }
 
 /**
  * 自プロセス（または指定PID）を PID registry から解除する。
- * .gh-maestro/pids/<pid>.json を削除する。
+ * 新旧両ロケーションから削除する（旧ロケーションは best-effort）。
  *
  * @param {string} workspace
  * @param {number} [pid] 省略時は process.pid
  */
 function unregisterProcess(workspace, pid) {
   const targetPid = pid || process.pid;
+
   const filePath = pidFilePath(workspace, targetPid);
   try {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   } catch (e) {
     if (e.code !== 'ENOENT') throw e;
   }
+
+  // bridge: 旧ロケーションの解除は best-effort（存在しない/読めない等は無視）。
+  try {
+    const legacyFilePath = legacyPidFilePath(workspace, targetPid);
+    if (fs.existsSync(legacyFilePath)) fs.unlinkSync(legacyFilePath);
+  } catch {}
 }
 
 // ── プロセス同一性確認（PID再利用対策） ──────────────────────────────
@@ -375,41 +435,50 @@ function verifyProcessIdentity(pid, registeredMeta) {
  * @returns {object|null} 一致する生存エントリ（最初の1件）、無ければ null
  */
 function findRunningInstance(workspace, opts = {}) {
-  const dir = pidsDir(workspace);
-  if (!fs.existsSync(dir)) return null;
+  // bridge: 新旧両ロケーションを union して読む（旧コードのプロセスは
+  // legacy にしか登録されていない可能性があるため）。
+  const dirs = [pidsDir(workspace), legacyPidsDir(workspace)];
+  const seenPids = new Set();
 
-  let files;
-  try {
-    files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
-  } catch {
-    return null;
-  }
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
 
-  for (const file of files) {
-    let entry;
+    let files;
     try {
-      entry = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+      files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
     } catch {
       continue;
     }
-    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
-    if (opts.script && entry.script !== opts.script) continue;
-    if ((entry.workerName ?? null) !== (opts.workerName ?? null)) continue;
-    if (entry.workspace !== workspace) continue;
 
-    const entryPid = entry.pid;
-    if (!entryPid || !Number.isFinite(entryPid)) continue;
-    if (entryPid === process.pid) continue;
-    if (!isProcessAlive(entryPid)) continue;
+    for (const file of files) {
+      let entry;
+      try {
+        entry = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+      } catch {
+        continue;
+      }
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      if (opts.script && entry.script !== opts.script) continue;
+      if ((entry.workerName ?? null) !== (opts.workerName ?? null)) continue;
+      if (entry.workspace !== workspace) continue;
 
-    // PID再利用対策: 生存はしているが、起動時刻が registry の記録と一致しない場合は
-    // OSが同じPIDを無関係な別プロセスに再割り当てしただけであり、重複起動ではない。
-    // ここで「重複」と誤判定すると、以後の起動が永久にブロックされてしまう
-    // （sweepRegistry と同じ verifyProcessIdentity を用いる）。
-    const identity = verifyProcessIdentity(entryPid, entry);
-    if (!identity.match) continue;
+      const entryPid = entry.pid;
+      if (!entryPid || !Number.isFinite(entryPid)) continue;
+      if (entryPid === process.pid) continue;
+      // dual-write により同一pidが新旧両方に存在しうる。既に判定済みならスキップ。
+      if (seenPids.has(entryPid)) continue;
+      seenPids.add(entryPid);
+      if (!isProcessAlive(entryPid)) continue;
 
-    return entry;
+      // PID再利用対策: 生存はしているが、起動時刻が registry の記録と一致しない場合は
+      // OSが同じPIDを無関係な別プロセスに再割り当てしただけであり、重複起動ではない。
+      // ここで「重複」と誤判定すると、以後の起動が永久にブロックされてしまう
+      // （sweepRegistry と同じ verifyProcessIdentity を用いる）。
+      const identity = verifyProcessIdentity(entryPid, entry);
+      if (!identity.match) continue;
+
+      return entry;
+    }
   }
 
   return null;
@@ -418,7 +487,7 @@ function findRunningInstance(workspace, opts = {}) {
 // ── 単一起動ロック（check-then-register のTOCTOU対策） ─────────────────
 
 /**
- * 単一起動ロックファイルのパスを返す。
+ * 単一起動ロックファイルのパスを返す（新ロケーション）。
  * @param {string} workspace
  * @param {string} script
  * @param {string|null} workerName
@@ -430,32 +499,32 @@ function startupLockPath(workspace, script, workerName) {
 }
 
 /**
- * 同一 (workspace, script, workerName) の起動処理を排他制御するロックを取得する。
- *
- * findRunningInstance（チェック）→ registerProcess（登録）の2段階が非アトミックだと、
- * ほぼ同時に2プロセスが起動した場合に両方がチェックを通過してしまう（TOCTOU）。
- * このロックで「チェック開始〜登録完了」の区間を排他化する。
- *
- * 保持者が非生存、または同一性不一致（PID再利用）の場合は stale とみなし
- * 自動的に奪取する。
- *
+ * 単一起動ロックファイルのパスを返す（旧ロケーション）。bridge専用。
  * @param {string} workspace
  * @param {string} script
  * @param {string|null} workerName
- * @param {object} [opts]
- * @param {number} [opts.maxRetries] stale ロック奪取の最大リトライ回数（既定: 5）
- * @returns {boolean} 取得できれば true
+ * @returns {string}
  */
-function acquireStartupLock(workspace, script, workerName, opts = {}) {
-  const dir = pidsDir(workspace);
-  fs.mkdirSync(dir, { recursive: true });
-  const lockPath = startupLockPath(workspace, script, workerName);
-  const maxRetries = opts.maxRetries ?? 5;
+function legacyStartupLockPath(workspace, script, workerName) {
+  const key = `${script}__${workerName ?? 'orchestrator'}`;
+  return path.join(legacyPidsDir(workspace), `.startup-lock-${key}`);
+}
 
-  const selfEntry = {
-    pid: process.pid,
-    startTime: getProcessStartTime(process.pid) || new Date().toISOString(),
-  };
+/**
+ * 単一のロックファイルに対する取得処理（stale奪取込み）。
+ * acquireStartupLock の新旧両ロケーションで共通利用する内部ヘルパー。
+ *
+ * @param {string} dir mkdir 対象ディレクトリ（lockPath の親）
+ * @param {string} lockPath
+ * @param {number} maxRetries
+ * @param {{pid: number, startTime: string}} selfEntry 呼び出し元で1回だけ計算した自分自身のエントリ。
+ *   getProcessStartTime は Windows では PowerShell/WMI 呼び出しを伴い高コストなため、
+ *   新旧2ロケーションの取得で毎回計算し直さない（bridge化で2倍の呼び出しコストが
+ *   掛かるのを避ける）。
+ * @returns {boolean}
+ */
+function acquireLockAt(dir, lockPath, maxRetries, selfEntry) {
+  fs.mkdirSync(dir, { recursive: true });
 
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -489,15 +558,10 @@ function acquireStartupLock(workspace, script, workerName, opts = {}) {
 }
 
 /**
- * 自プロセスが保持している起動ロックを解放する。
- * 自分が保持者でない場合は何もしない（他プロセスのロックを誤って消さない）。
- *
- * @param {string} workspace
- * @param {string} script
- * @param {string|null} workerName
+ * 保持しているロックを解放する（自分が保持者の場合のみ）。
+ * @param {string} lockPath
  */
-function releaseStartupLock(workspace, script, workerName) {
-  const lockPath = startupLockPath(workspace, script, workerName);
+function releaseLockAt(lockPath) {
   try {
     const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
     if (holder && holder.pid === process.pid) {
@@ -506,6 +570,67 @@ function releaseStartupLock(workspace, script, workerName) {
   } catch {
     // 読めない・存在しない → 何もしない
   }
+}
+
+/**
+ * 同一 (workspace, script, workerName) の起動処理を排他制御するロックを取得する。
+ *
+ * findRunningInstance（チェック）→ registerProcess（登録）の2段階が非アトミックだと、
+ * ほぼ同時に2プロセスが起動した場合に両方がチェックを通過してしまう（TOCTOU）。
+ * このロックで「チェック開始〜登録完了」の区間を排他化する。
+ *
+ * 保持者が非生存、または同一性不一致（PID再利用）の場合は stale とみなし
+ * 自動的に奪取する。
+ *
+ * bridge期間中は旧ロケーションを第一ゲート、新ロケーションを第二ゲートとし、
+ * 両方取得できた場合のみ成功とする（取得順は常に legacy → new に固定）。
+ * 新ロケーションの取得に失敗した場合は、既に取得した旧ロケーションのロックを
+ * 解放してから失敗を返す。
+ *
+ * @param {string} workspace
+ * @param {string} script
+ * @param {string|null} workerName
+ * @param {object} [opts]
+ * @param {number} [opts.maxRetries] stale ロック奪取の最大リトライ回数（既定: 5）
+ * @returns {boolean} 取得できれば true
+ */
+function acquireStartupLock(workspace, script, workerName, opts = {}) {
+  const maxRetries = opts.maxRetries ?? 5;
+
+  // 新旧2ロケーション分の getProcessStartTime（Windowsでは WMI 呼び出し）を
+  // 1回にまとめる。
+  const selfEntry = {
+    pid: process.pid,
+    startTime: getProcessStartTime(process.pid) || new Date().toISOString(),
+  };
+
+  const legacyDir = legacyPidsDir(workspace);
+  const legacyLock = legacyStartupLockPath(workspace, script, workerName);
+  const gotLegacy = acquireLockAt(legacyDir, legacyLock, maxRetries, selfEntry);
+  if (!gotLegacy) return false;
+
+  const newDir = pidsDir(workspace);
+  const newLock = startupLockPath(workspace, script, workerName);
+  const gotNew = acquireLockAt(newDir, newLock, maxRetries, selfEntry);
+  if (!gotNew) {
+    releaseLockAt(legacyLock);
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * 自プロセスが保持している起動ロックを解放する（新旧両ロケーション）。
+ * 自分が保持者でない場合は何もしない（他プロセスのロックを誤って消さない）。
+ *
+ * @param {string} workspace
+ * @param {string} script
+ * @param {string|null} workerName
+ */
+function releaseStartupLock(workspace, script, workerName) {
+  releaseLockAt(legacyStartupLockPath(workspace, script, workerName));
+  releaseLockAt(startupLockPath(workspace, script, workerName));
 }
 
 // ── Registry sweep ────────────────────────────────────────────────────
@@ -518,6 +643,10 @@ function releaseStartupLock(workspace, script, workerName) {
  *   2. PID生存・同一性不一致 → ファイル削除のみ（PID再利用、無関係なプロセス）
  *   3. PID生存・同一性一致 → kill + ファイル削除（stale だが生き残っている）
  *
+ * bridge期間中は新旧両ロケーションを union して走査する。同一PIDのエントリが
+ * 両方に存在する場合（dual-write の結果）は1つのエントリとして判定し、
+ * kill/削除の対象ファイルは両ロケーション分をまとめて扱う。
+ *
  * @param {string} workspace
  * @param {object} [opts]
  * @param {(entry: object) => boolean} [opts.match] エントリのフィルタ関数
@@ -525,50 +654,71 @@ function releaseStartupLock(workspace, script, workerName) {
  * @returns {{ killed: object[], cleaned: object[], errors: string[] }}
  */
 function sweepRegistry(workspace, opts = {}) {
-  const dir = pidsDir(workspace);
+  const dirs = [pidsDir(workspace), legacyPidsDir(workspace)];
   const results = { killed: [], cleaned: [], errors: [] };
 
-  if (!fs.existsSync(dir)) return results;
+  if (!dirs.some(d => fs.existsSync(d))) return results;
 
-  let entries;
-  try {
-    entries = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
-  } catch (e) {
-    results.errors.push(`readdir failed: ${e.message}`);
-    return results;
+  // entryPid -> { entry, filePaths: string[] }（新旧に跨るエントリを集約する）
+  const byPid = new Map();
+
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+
+    let entries;
+    try {
+      entries = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+    } catch (e) {
+      results.errors.push(`readdir failed (${dir}): ${e.message}`);
+      continue;
+    }
+
+    for (const file of entries) {
+      const filePath = path.join(dir, file);
+      let entry;
+
+      try {
+        entry = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      } catch {
+        try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
+        results.cleaned.push({ file, reason: 'corrupt JSON' });
+        continue;
+      }
+
+      // JSON.parse が null や非オブジェクト（文字列・数値等）を返した場合は不正データとして扱う
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
+        results.cleaned.push({ file, reason: `invalid entry type: ${entry === null ? 'null' : typeof entry}` });
+        continue;
+      }
+
+      const entryPid = entry.pid;
+      if (!entryPid || !Number.isFinite(entryPid)) {
+        try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
+        results.cleaned.push({ file, reason: 'missing/invalid pid' });
+        continue;
+      }
+
+      // フィルタ
+      if (opts.match && !opts.match(entry)) continue;
+
+      if (!byPid.has(entryPid)) byPid.set(entryPid, { entry, filePaths: [] });
+      byPid.get(entryPid).filePaths.push(filePath);
+    }
   }
 
-  for (const file of entries) {
-    const filePath = path.join(dir, file);
-    let entry;
-
-    try {
-      entry = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    } catch {
-      try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
-      results.cleaned.push({ file, reason: 'corrupt JSON' });
-      continue;
+  const removeFiles = (filePaths) => {
+    if (opts.dryRun) return;
+    for (const fp of filePaths) {
+      try { fs.unlinkSync(fp); } catch {}
     }
+  };
 
-    // JSON.parse が null や非オブジェクト（文字列・数値等）を返した場合は不正データとして扱う
-    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
-      try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
-      results.cleaned.push({ file, reason: `invalid entry type: ${entry === null ? 'null' : typeof entry}` });
-      continue;
-    }
-
+  for (const { entry, filePaths } of byPid.values()) {
     const entryPid = entry.pid;
-    if (!entryPid || !Number.isFinite(entryPid)) {
-      try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
-      results.cleaned.push({ file, reason: 'missing/invalid pid' });
-      continue;
-    }
-
-    // フィルタ
-    if (opts.match && !opts.match(entry)) continue;
 
     if (!isProcessAlive(entryPid)) {
-      try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
+      removeFiles(filePaths);
       results.cleaned.push({ pid: entryPid, reason: 'process not alive' });
       continue;
     }
@@ -577,7 +727,7 @@ function sweepRegistry(workspace, opts = {}) {
     const identity = verifyProcessIdentity(entryPid, entry);
     if (!identity.match) {
       // PID再利用 → ファイル削除のみ（無関係なプロセスを kill しない）
-      try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
+      removeFiles(filePaths);
       results.cleaned.push({ pid: entryPid, reason: `identity mismatch: ${identity.reason}` });
       continue;
     }
@@ -586,7 +736,7 @@ function sweepRegistry(workspace, opts = {}) {
     if (!opts.dryRun) {
       const { killProcessTree } = require('./kill-tree');
       killProcessTree(entryPid);
-      try { fs.unlinkSync(filePath); } catch {}
+      removeFiles(filePaths);
     }
     results.killed.push({
       pid: entryPid,
@@ -709,11 +859,14 @@ module.exports = {
   // PID registry
   pidsDir,
   pidFilePath,
+  legacyPidsDir,
+  legacyPidFilePath,
   registerProcess,
   unregisterProcess,
   findRunningInstance,
   // 単一起動ロック
   startupLockPath,
+  legacyStartupLockPath,
   acquireStartupLock,
   releaseStartupLock,
   // 同一性確認

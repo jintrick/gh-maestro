@@ -875,6 +875,17 @@ function main(argsOverride, opts = {}) {
 
 if (require.main === module) {
   const rawArgs = process.argv.slice(2);
+
+  // --help/-h は単一起動ロック取得等の副作用より前に判定する。
+  // ここでチェックしないと、workspace が解決できてしまう限りロック取得・多重起動検知
+  // （ファイル書き込みを伴う）まで進んでしまい、--help だけのつもりが registry へ
+  // 触れてしまう（Issue #214 のガードで home 誤解決時に throw するようになったことで
+  // 顕在化した、本来 main() 側と同様に最優先で弾くべき既存の抜け穴）。
+  if (rawArgs.includes('--help') || rawArgs.includes('-h')) {
+    process.stdout.write(USAGE + '\n');
+    process.exit(0);
+  }
+
   const { values: preValues, exitFlagMiss: preExitFlagMiss } = parseFlags(rawArgs, ['--workspace', '--interval', '--session-pid']);
 
   if (preExitFlagMiss) {
@@ -890,21 +901,32 @@ if (require.main === module) {
   if (!force) {
     const preWorkspace = resolveWorkspace(preValues['--workspace']);
     if (preWorkspace) {
-      if (!acquireStartupLock(preWorkspace, 'inbox-supervisor.js', null)) {
-        process.stderr.write(
-          'inbox-supervisor: 別のプロセスが同じworkspaceのSupervisor起動処理中です。' +
-          '少し待ってから再試行してください。\n'
-        );
-        process.exit(1);
-      }
+      // resolveWorkspace() は workspace が home/managed root と衝突する場合に既に
+      // null を返すため、通常はここへ来ない。ただし acquireStartupLock/findRunningInstance
+      // 内部の pidsDir() は、GH_MAESTRO_RUNTIME_DIR の誤設定（runtime root が managed root
+      // と衝突している場合）も assertDisjointRoots() で throw する。workspace 自体は
+      // 正当でもこのケースは起こりうるため、生の例外ではなく通常のエラーメッセージ +
+      // exit 1 として扱う防御を残す。
+      try {
+        if (!acquireStartupLock(preWorkspace, 'inbox-supervisor.js', null)) {
+          process.stderr.write(
+            'inbox-supervisor: 別のプロセスが同じworkspaceのSupervisor起動処理中です。' +
+            '少し待ってから再試行してください。\n'
+          );
+          process.exit(1);
+        }
 
-      const dup = findRunningInstance(preWorkspace, { script: 'inbox-supervisor.js', workerName: null });
-      if (dup) {
-        releaseStartupLock(preWorkspace, 'inbox-supervisor.js', null);
-        process.stderr.write(
-          `inbox-supervisor: 重複起動を検出しました。既に pid=${dup.pid} が同じworkspaceを監視中です。` +
-          '強制的に起動する場合は --force を指定してください。\n'
-        );
+        const dup = findRunningInstance(preWorkspace, { script: 'inbox-supervisor.js', workerName: null });
+        if (dup) {
+          releaseStartupLock(preWorkspace, 'inbox-supervisor.js', null);
+          process.stderr.write(
+            `inbox-supervisor: 重複起動を検出しました。既に pid=${dup.pid} が同じworkspaceを監視中です。` +
+            '強制的に起動する場合は --force を指定してください。\n'
+          );
+          process.exit(1);
+        }
+      } catch (e) {
+        process.stderr.write(`inbox-supervisor: ワークスペースを解決できません（${e.message}）\n`);
         process.exit(1);
       }
     }
