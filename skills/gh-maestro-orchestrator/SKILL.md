@@ -111,10 +111,10 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - **remove-worker.js** — 個別ワーカーのプロセスをkillしてworktreeを削除する。対象は〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する
 - **start-review-manager.js** — PRにReview Managerを起動する（「Review Managerの手動起動」参照）
-- **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）
+- **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）。既読の正本は明示既読コメントID集合（Issue #207）。**msg-state が欠落・破損・旧形式・未初期化の場合、走査を停止し「reset-session.js での初期化が必要」と報告する**
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「PR検出」参照）
 - **process-lifecycle.js** — PID registryを走査しstaleなプロセスを掃除する（各「復旧手順」参照）
-- **reset-session.js** — 壊れた状態からセッションを強制リセットする
+- **reset-session.js** — 壊れた状態からセッションを強制リセットする。`msg-state` は単純削除せず、wipe前の管理対象 Issue の既読ベースラインを再構築する（Issue #207）。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口でもある
 - **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「Issue確定」参照）
 - **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` を削除する（「Issue確定」参照）。成功時、あわせて対話型ワーカー**assistant**（`gh-maestro-assistant`スキル。issue/PRについての人間の質問に答える対話セッション）を新規WezTermウィンドウで自動起動する
 - **publish-plan.js** — Issue の pin 済み計画コメントを管理する。pin済みコメントがあれば更新、なければ新規投稿してpinする（「計画評価と承認」参照）。`--issue <N> --body-file <path> [--workspace <path>]` で呼び出す
@@ -405,6 +405,8 @@ pull が唯一の配送根拠である。届くのを待つ受動的な経路は
 
 Monitorから届く通知を処理する：
 - `NEW_MESSAGE:<issue>:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を読む。内容に応じて処理する（PR_DETECTED → PR番号を記録 等）。**完了後は直ちにMonitorに戻る**
+
+**既読の仕組み（Issue #207）**: ワーカー生成時（spawn-worker.js）に、その Issue の既存コメントが既読ベースラインとして記録される。そのため、**ワーカー起動後に投稿されたコメントだけが `NEW_MESSAGE` として届く**。ワーカー生成前に存在した古いコメントが一括通知されることはない。もし msg-poll が `未初期化です。reset-session.js で初期化してください` や `旧形式(v1)です` を報告したら、セッション初期化・移行として `node "{{SCRIPTS_PATH}}/reset-session.js" --workspace $WORKSPACE` を実行してから再開する。
 
 この inbox 監視は PR 検出・Review Manager 起動通知・本番公開（CI/CD）確認・反省会でのコーダーからの応答など、
 orchestrator が受け取るすべてのメッセージの受信経路である。セッション中は常に1本だけ稼働させること。

@@ -6,7 +6,10 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'spawn-worker.js');
-const { shouldPruneStaleWorker } = require(SCRIPT);
+const { shouldPruneStaleWorker, establishOrchestratorBaseline } = require(SCRIPT);
+const readStateLib = require('../scripts/shared/read-state');
+const fs = require('fs');
+const os = require('os');
 
 function run(args, env = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
@@ -516,6 +519,135 @@ test('send-text-after-launch の拒否は worktree を作る前に起きる（�
   } finally {
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     fs.rmSync(ws, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+// ── establishOrchestratorBaseline（Issue #207: ワーカー生成時のベースライン既読化） ──
+// ワーカー起動前に、対象 Issue の既存コメントIDを orchestrator の既読集合へ追加する。
+// 実プロセス spawn はせず、gh-comments の取得と markRead を注入して検証する
+// （test-process-spawn-safety ルール準拠）。
+
+test('establishOrchestratorBaseline: 既存コメントIDが orchestrator 既読集合に記録され、取得最適化カーソルも設定される', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline-'));
+  try {
+    const init = readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+    assert.equal(init.ok, true);
+
+    const listCommentsFn = () => ({
+      status: 0,
+      stdout: JSON.stringify([
+        [{ id: 1, created_at: '2026-07-07T10:00:00Z' }, { id: 2, created_at: '2026-07-07T11:00:00Z' }],
+        [{ id: 3, created_at: '2026-07-07T12:00:00Z' }],
+      ]),
+    });
+    const result = establishOrchestratorBaseline(ws, { repo: 'o/r', issue: '207', listCommentsFn });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.count, 3);
+    const st = readStateLib.readState(ws, 'orchestrator');
+    assert.deepEqual(st.state.readByIssue['207'], [1, 2, 3], '全ページ分のIDが既読集合に入る');
+    assert.equal(st.state.sinceByIssue['207'], '2026-07-07T12:00:00Z', '直近 created_at が取得最適化カーソルになる');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('establishOrchestratorBaseline: 冪等（再実行しても重複しない）', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline2-'));
+  try {
+    readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+    const listCommentsFn = () => ({ status: 0, stdout: JSON.stringify([{ id: 1 }]) });
+
+    const r1 = establishOrchestratorBaseline(ws, { repo: 'o/r', issue: '207', listCommentsFn });
+    const r2 = establishOrchestratorBaseline(ws, { repo: 'o/r', issue: '207', listCommentsFn });
+
+    assert.equal(r1.ok, true);
+    assert.equal(r2.ok, true);
+    const st = readStateLib.readState(ws, 'orchestrator');
+    assert.deepEqual(st.state.readByIssue['207'], [1], '再実行でも重複しない（集合和）');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('establishOrchestratorBaseline: orchestrator state 未初期化なら失敗し取得も呼ばない', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline3-'));
+  try {
+    let listCalled = false;
+    const listCommentsFn = () => { listCalled = true; return { status: 0, stdout: '[]' }; };
+
+    const result = establishOrchestratorBaseline(ws, { repo: 'o/r', issue: '207', listCommentsFn });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /reset-session\.js/);
+    assert.equal(listCalled, false, '未初期化ではコメント取得を呼ばない');
+    assert.equal(fs.existsSync(readStateLib.statePath(ws, 'orchestrator')), false, '空状態を暗黙作成しない');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('establishOrchestratorBaseline: v1（旧形式）state でも失敗する（移行が必要）', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline4-'));
+  try {
+    const sp = readStateLib.statePath(ws, 'orchestrator');
+    fs.mkdirSync(path.dirname(sp), { recursive: true });
+    fs.writeFileSync(sp, JSON.stringify({ since: { 10: 'x' }, seenIds: [] }), 'utf8');
+
+    const result = establishOrchestratorBaseline(ws, { repo: 'o/r', issue: '207', listCommentsFn: () => ({ status: 0, stdout: '[]' }) });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /legacy/);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('establishOrchestratorBaseline: コメント一覧の取得失敗時は失敗し状態を変更しない', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline5-'));
+  try {
+    readStateLib.initializeState(ws, 'orchestrator', { byIssue: { 207: [99] }, generation: 'g' });
+
+    const result = establishOrchestratorBaseline(ws, {
+      repo: 'o/r', issue: '207',
+      listCommentsFn: () => ({ status: 1, stderr: 'gh: rate limit' }),
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /に失敗しました/);
+
+    const st = readStateLib.readState(ws, 'orchestrator');
+    assert.deepEqual(st.state.readByIssue['207'], [99], '失敗時は既読集合を変更しない');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('establishOrchestratorBaseline: 応答が配列でない場合に失敗する', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline6-'));
+  try {
+    readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+    const result = establishOrchestratorBaseline(ws, {
+      repo: 'o/r', issue: '207',
+      listCommentsFn: () => ({ status: 0, stdout: JSON.stringify({ not: 'array' }) }),
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /配列ではありません/);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('establishOrchestratorBaseline: markRead が失敗すれば失敗として報告される', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline7-'));
+  try {
+    readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+    const result = establishOrchestratorBaseline(ws, {
+      repo: 'o/r', issue: '207',
+      listCommentsFn: () => ({ status: 0, stdout: JSON.stringify([{ id: 1 }]) }),
+      markReadFn: () => ({ ok: false, error: 'injected failure' }),
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /injected failure/);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
   }
 });
 
