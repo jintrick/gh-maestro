@@ -39,7 +39,7 @@ const { createNormalWorkerStore, acquireLease: acquireWorkerLease,
         isLeaseLive } = require('./shared/worker-lease');
 const { killProcessTree } = require('./kill-tree');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
-const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
+const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
@@ -185,6 +185,24 @@ if (!agentConfig) {
   }
   // フォールバック 'agy' も見つからないのは設定破損
   fail(`エージェント "${agentId}" の設定を解決できません。agent-defaults.json が破損していないか確認してください。`);
+}
+
+// --- 非対話化トークン検証（フェイルクローズ、Issue #163） ---
+// config.json の extraArgs 上書きは配列ごと置換されるため、非対話化に必須のトークン
+// （claude系: --print、reasonix: run、codex系: exec 等）がうっかり欠落しても、headless 起動は
+// 対話モードでハングし誰にも気づけない。欠落検出は worktree 作成・プロセス起動より前に
+// 行い、副作用を残さずに起動を拒否する（fail-closed-safety-guards: 検出できた異常は放置しない）。
+// 検証自体が例外を投げることはなく、nonInteractiveTokens 未宣言のエージェント（agy 等）は
+// 常に valid を返すため、正当なカスタマイズまで止めることはない。
+// 通常ワーカー起動は extraArgs を使う（execArgs は Review Manager 系の起動専用で、
+// そちらは run-review-manager.js / run-review-jobs.js 側で検証する）。
+const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.extraArgs);
+if (!tokenCheck.valid) {
+  fail(
+    `エージェント "${agentId}" の extraArgs が非対話化トークン（${tokenCheck.missing.join(', ')}）を保持していません。` +
+    `トークン欠落のまま起動すると headless 実行で対話モードに入りハングします。` +
+    `~/.gh-maestro/config.json の agents["${agentId}"].extraArgs を確認してください。`,
+  );
 }
 
 // --- エージェントがログインシェルで解決可能か確認 ---

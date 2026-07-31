@@ -518,3 +518,51 @@ test('send-text-after-launch の拒否は worktree を作る前に起きる（�
     fs.rmSync(ws, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
+
+// ── 非対話化トークン検証（Issue #163） ─────────────────────────────────────────
+// config.json の extraArgs 上書きで非対話化トークン（--print / run / exec 等）が欠落すると、
+// headless 起動が対話モードでハングする。起動をフェイルクローズで拒否する。
+
+test('非対話化トークンを欠落させたエージェントは起動を拒否する（フェイルクローズ, Issue #163）', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-tokenchk-'));
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-tokenchkws-'));
+  try {
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), JSON.stringify({
+      agents: {
+        claude: {
+          id: 'claude',
+          command: process.execPath,
+          extraArgs: ['--dangerously-skip-permissions'], // --print を欠落
+          promptDelivery: 'system-prompt-file',
+          nonInteractiveTokens: ['--print'],
+        },
+      },
+    }, null, 2), 'utf8');
+
+    const r = run(
+      ['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'tokenchk',
+        '--repo', 'o/r', '--workspace', ws, '--agent', 'claude'],
+      { HOME: home, USERPROFILE: home },
+    );
+
+    assert.notEqual(r.status, 0, `非ゼロ終了であること: ${r.stderr}`);
+    assert.match(r.stderr, /非対話化トークン/);
+    assert.match(r.stderr, /--print/);
+    assert.match(r.stderr, /config\.json/);
+    // ガードは worktree 作成より前に落ちる（副作用を残さない）
+    assert.equal(
+      fs.existsSync(path.join(ws, '.gh-maestro', 'worktrees', 'issue-1-coder-tokenchk')), false,
+      'ガードは worktree 作成より前に落ちること',
+    );
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(ws, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+// 注: 正のケース（トークン保持ならガードを通る）は tests/resolve-config.test.js の
+// validateNonInteractiveTokens 単体テスト + 実機の `node scripts/config.js status`
+// （正常時は警告なし）で担保する。ここで subprocess で検証すると checkAgentExists が
+// ログインシェル（pwsh）を起動するため、テスト内実プロセス spawn 禁止ルールに反する。

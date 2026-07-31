@@ -19,6 +19,9 @@
         "stream-json",
         "--verbose"
       ],
+      "nonInteractiveTokens": [
+        "--print"
+      ],
       "promptDelivery": "system-prompt-file",
       "rulesSupported": true,
       "resumeCommand": [
@@ -49,6 +52,9 @@
         "run",
         "--dir",
         "{workspace}"
+      ],
+      "nonInteractiveTokens": [
+        "run"
       ],
       "execPromptDelivery": "positional",
       "dynamicCommand": true,
@@ -98,6 +104,9 @@
         "--cd",
         "{workspace}",
         "--dangerously-bypass-approvals-and-sandbox"
+      ],
+      "nonInteractiveTokens": [
+        "exec"
       ],
       "promptDelivery": "positional",
       "rulesSupported": false,

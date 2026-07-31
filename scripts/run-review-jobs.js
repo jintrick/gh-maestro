@@ -17,7 +17,7 @@ const os = require('os');
 const { spawn } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs } = require('./agent-exec');
-const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
+const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { parseFlags } = require('./shared/workspace');
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS, FINDING_REQUIRED_FIELDS } = require('./shared/review-aspects');
@@ -320,6 +320,22 @@ ${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)
  */
 function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, timeoutMs, childRef = null) {
   return new Promise((resolve) => {
+    // 非対話化トークン検証（フェイルクローズ、Issue #163 Review Manager指摘）。
+    // ジョブワーカーは execArgs ?? extraArgs を起動引数に使うため、execArgs を対話
+    // モード化した上書きを extraArgs 側の検証だけで素通りしないよう、実際に使われる
+    // 引数配列を検証してから spawn する（spawn 直前のガード。全ジョブが同じ
+    // agentConfig を共有するため、1件でも欠落すれば全ジョブが起動せず失敗する）。
+    const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
+    if (!tokenCheck.valid) {
+      resolve({
+        jobId: job.id,
+        status: 'failed',
+        leaf_ids: job.leaf_ids,
+        attempt: 1,
+        error: `agent "${agentConfig.id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (check ~/.gh-maestro/config.json agents["${agentConfig.id}"].execArgs / extraArgs)`,
+      });
+      return;
+    }
     const promptText = buildJobPrompt(job, manifest, reviewWtDir);
     const promptFile = path.join(os.tmpdir(), `review-job-${job.id}-${Date.now()}.md`);
 

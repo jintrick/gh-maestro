@@ -10,7 +10,7 @@ const { buildLoginShellExecArgs } = require('./agent-exec');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { linkNodeModules } = require('./link-node-modules');
 const { unlinkJunctions } = require('./unlink-junctions');
-const { resolveAgentConfig, resolveSkillAgentMap } = require('./shared/resolve-config');
+const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { killProcessTree } = require('./kill-tree');
 const { isProcessAlive } = require('./process-lifecycle');
 const {
@@ -665,6 +665,20 @@ async function superviseReviewManager({
   if (!agentConfig) {
     log(`エージェント "${agentId}" の設定を解決できません（agent-defaults.json / config.json を確認してください）`);
     return { outcome: 'agent-config-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir, reason: 'agent config resolve failed' };
+  }
+
+  // 非対話化トークン検証（フェイルクローズ、Issue #163 Review Manager指摘）。
+  // RMは agentConfig.execArgs ?? agentConfig.extraArgs を起動引数に使うため、
+  // extraArgs だけ見る検証では execArgs を対話モード化した上書きをすり抜ける。
+  // 実際に使われる引数配列（execArgs ?? extraArgs）を検証してから起動する。
+  const execTokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
+  if (!execTokenCheck.valid) {
+    log(
+      `エージェント "${agentId}" の execArgs/extraArgs が非対話化トークン（${execTokenCheck.missing.join(', ')}）を保持していません。` +
+      `トークン欠落のまま起動すると headless 実行で対話モードに入りハングします。` +
+      `~/.gh-maestro/config.json の agents["${agentId}"].execArgs / extraArgs を確認してください。`,
+    );
+    return { outcome: 'agent-config-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir, reason: `non-interactive token missing: ${execTokenCheck.missing.join(', ')}` };
   }
 
   const agentArgs = buildReviewManagerAgentArgs(agentConfig, {
