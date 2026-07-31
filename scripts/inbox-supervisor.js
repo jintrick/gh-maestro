@@ -63,6 +63,7 @@ const GH_TIMEOUT_MS = 30000;
 const MAX_SEEN_IDS = 200;
 const MAX_RETRIES = 5;
 const RETRY_BASE_DELAY_MS = 10000;
+const DEFAULT_HANG_THRESHOLD_MS = 20 * 60 * 1000; // 20分
 
 const USAGE = `inbox-supervisor.js — 全ワーカーのGitHub Issueインボックスを監視し新着メッセージを配送する
 
@@ -71,6 +72,8 @@ Usage: node inbox-supervisor.js --workspace <path> [--interval <sec>] [--session
 Options:
   --workspace <path>     ワークスペースパス（必須）
   --interval <sec>       ポーリング間隔（秒、既定: ${DEFAULT_INTERVAL_SEC}）
+  --hang-threshold-sec <sec>
+                         ハング判定の閾値（秒、ログ更新がこの時間以上止まったら通知。既定: 1200=20分）
   --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
   --force                既に同じworkspaceで稼働中のSupervisorがいても起動を強制する
   --once                 1回だけスキャンして終了する（継続ポーリングしない。テスト・手動実行用）
@@ -82,6 +85,8 @@ Output (stdout):
     DELIVERED:<workerName>:<commentId>
     DELIVERY_FAILED:<workerName>:<commentId>:<reason>
     RETRYING:<workerName>:<commentId>:<attempt>
+    HANG_DETECTED:<workerName>:<pid>
+    HANG_RESUMED:<workerName>
     SCAN_END:<workers>:<detected>
 
 Description:
@@ -89,6 +94,7 @@ Description:
   各ワーカー宛ての新着メッセージを検出・配送する。
   カーソル・配送状態は .gh-maestro/inbox-supervisor/ に永続化され、
   プロセス再起動後も未配送メッセージを失わずに再開できる。
+  ハング検知: ワーカーのログファイル更新が一定時間（--hang-threshold-sec）以上止まっている場合、HANG_DETECTEDを出力しorchestratorへ通知する。その後ログが再び更新されるとHANG_RESUMEDを出力する。同一PIDへの重複通知は防止される。
   ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
   消滅時はPID registryを解除して自動exitする。`;
 
@@ -154,13 +160,13 @@ function cursorPath(workspace, workerName) {
  *
  * @param {string} workspace
  * @param {string} workerName
- * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object }}
+ * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object, hangNotifiedPid: number|null, hangNotifiedAt: string|null }}
  */
 function readCursor(workspace, workerName) {
   const cp = cursorPath(workspace, workerName);
   try {
     if (!fs.existsSync(cp)) {
-      return { since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {} };
+      return { since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {}, hangNotifiedPid: null, hangNotifiedAt: null };
     }
     const raw = fs.readFileSync(cp, 'utf8');
     const parsed = JSON.parse(raw);
@@ -171,9 +177,11 @@ function readCursor(workspace, workerName) {
       pendingDeliveries:
         parsed.pendingDeliveries && typeof parsed.pendingDeliveries === 'object' && !Array.isArray(parsed.pendingDeliveries)
           ? parsed.pendingDeliveries : {},
+      hangNotifiedPid: typeof parsed.hangNotifiedPid === 'number' ? parsed.hangNotifiedPid : null,
+      hangNotifiedAt: typeof parsed.hangNotifiedAt === 'string' ? parsed.hangNotifiedAt : null,
     };
   } catch {
-    return { since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {} };
+    return { since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {}, hangNotifiedPid: null, hangNotifiedAt: null };
   }
 }
 
@@ -198,6 +206,8 @@ function writeCursor(workspace, workerName, state) {
     seenIds,
     deliveredIds,
     pendingDeliveries: state.pendingDeliveries || {},
+    hangNotifiedPid: typeof state.hangNotifiedPid === 'number' ? state.hangNotifiedPid : null,
+    hangNotifiedAt: typeof state.hangNotifiedAt === 'string' ? state.hangNotifiedAt : null,
   }, null, 2), 'utf8');
   fs.renameSync(tmp, cp);
 }
@@ -532,7 +542,7 @@ function main(argsOverride, opts = {}) {
     return { code: 0, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
   }
 
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--interval', '--session-pid']);
+  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--interval', '--hang-threshold-sec', '--session-pid']);
 
   if (exitFlagMiss) {
     writeErr('inbox-supervisor: フラグには値が必要です。');
@@ -556,6 +566,7 @@ function main(argsOverride, opts = {}) {
   }
 
   const intervalMs = (parseInt(values['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
+  const hangThresholdMs = (parseInt(values['--hang-threshold-sec'] || String(Math.round(DEFAULT_HANG_THRESHOLD_MS / 1000))) || DEFAULT_HANG_THRESHOLD_MS / 1000) * 1000;
   const sessionPid = resolveSessionPid(values['--session-pid']);
   const checkParent = createDeadManSwitch(sessionPid);
 
@@ -596,6 +607,50 @@ function main(argsOverride, opts = {}) {
 
       const issue = String(entry.issue);
       const cursor = readCursor(workspace, workerName);
+
+      // ── ハング検知 ──────────────────────────────────────────────────
+      // ワーカーが生存しているがログファイルの更新が一定時間止まっていれば「ハングの疑い」
+      // として orchestrator へ通知する。同一PIDに対しては1回のみ通知し、ログが再び動いたら
+      // リセットする。
+      if (_isWorkerAlive(entry)) {
+        const logPath = workerLogPath(workspace, workerName);
+        let mtimeMs = null;
+        try {
+          if (fs.existsSync(logPath)) {
+            mtimeMs = fs.statSync(logPath).mtimeMs;
+          }
+        } catch {
+          // ログファイルが存在しない・statできない → ハング判定はスキップ
+        }
+
+        if (mtimeMs !== null) {
+          const staleMs = Date.now() - mtimeMs;
+          if (staleMs > hangThresholdMs) {
+            // ハング状態 — 同じPIDには1回だけ通知
+            if (cursor.hangNotifiedPid !== entry.pid) {
+              const minutes = Math.floor(staleMs / 60000);
+              const body = `⚠️ ワーカー "${workerName}" がハングしている疑いがあります（ログ最終更新から ${minutes} 分以上経過、PID ${entry.pid}）。状態を確認し、必要ならプロセスを終了して再起動を検討してください。`;
+              try {
+                const notifyResult = _notifyOrchestrator({ workspace, issue, body });
+                if (notifyResult.status === 0) {
+                  cursor.hangNotifiedPid = entry.pid;
+                  cursor.hangNotifiedAt = new Date().toISOString();
+                  writeOut(`HANG_DETECTED:${workerName}:${entry.pid}`);
+                } else {
+                  writeErr(`inbox-supervisor: hang通知の投稿に失敗: ${(notifyResult.stderr || '').trim()}`);
+                }
+              } catch (e) {
+                writeErr(`inbox-supervisor: hang通知の投稿に失敗: ${e.message}`);
+              }
+            }
+          } else if (cursor.hangNotifiedPid !== null) {
+            // ログが再び動き始めた → ハング状態からの復帰
+            cursor.hangNotifiedPid = null;
+            cursor.hangNotifiedAt = null;
+            writeOut(`HANG_RESUMED:${workerName}`);
+          }
+        }
+      }
 
       // ── pending 再試行 ───────────────────────────────────────────────
       const nowMs = Date.now();
