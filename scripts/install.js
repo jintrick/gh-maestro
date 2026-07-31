@@ -629,6 +629,10 @@ if (fs.existsSync(agentsConfigPath)) {
 // 1件でも失敗した場合は fail-closed でこのエントリの削除だけをスキップする
 // （ヒューリスティックな内容判定ではなく、実際のコピー成否で判定する）。
 step('Quarantining legacy home PID registry (Issue #214) before prune...');
+// runtime root（GH_MAESTRO_RUNTIME_DIR で明示 override 可能）が managed root
+// （~/.gh-maestro/）と衝突している場合、隔離先ディレクトリ自体が prune 対象に巻き込まれる
+// おそれがあるため、隔離処理を始める前に自己検査で fail-closed に倒す。
+storageLayout.assertDisjointRoots();
 const legacyHomePidsDir = path.join(ghMaestroDir, 'pids');
 const prunePathSkip = new Set();
 if (fs.existsSync(legacyHomePidsDir)) {

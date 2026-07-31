@@ -261,11 +261,16 @@ function createDeadManSwitch(monitorPid, opts = {}) {
 /**
  * PID registry のディレクトリパスを返す（新ロケーション: OS runtime root 配下）。
  * workspace がホームディレクトリ等 managed root と衝突する場合は throw する。
+ * 併せて、runtime root 自体が managed root と衝突していないか（例: 誤設定された
+ * GH_MAESTRO_RUNTIME_DIR が ~/.gh-maestro を指している）も自己検査する。
+ * pidsDir() は全 pids 操作のチョークポイントであるため、ここで検査すれば
+ * registerProcess/sweepRegistry/lock 系すべてに一括で効く。
  * @param {string} workspace
  * @returns {string}
  */
 function pidsDir(workspace) {
   storageLayout.assertValidWorkspace(workspace);
+  storageLayout.assertDisjointRoots();
   return path.join(storageLayout.workspaceRuntimeDir(workspace), 'pids');
 }
 

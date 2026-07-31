@@ -872,6 +872,29 @@ test('継続モード: --force を指定すると重複があっても起動を�
   });
 });
 
+test('継続モード: --workspace がホームディレクトリと衝突する場合、生の例外ではなくワークスペース解決エラーで exit 1 する（Issue #214）', () => {
+  // resolveWorkspace() が workspace の home 衝突を検知して null を返すため、
+  // acquireStartupLock/registerProcess 等の assertValidWorkspace throw が
+  // 子プロセスの生スタックトレースとして漏れ出ることなく、通常のエラーメッセージ
+  // + exit 1 に倒れることを実プロセス起動で確認する。
+  const { spawnSync } = require('child_process');
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-fakehome-'));
+  try {
+    const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
+    const envKey = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+    const env = { ...cleanSpawnEnv(), [envKey]: fakeHome };
+
+    const r = spawnSync(process.execPath, [script, 'orchestrator', '--workspace', fakeHome],
+      { encoding: 'utf8', timeout: 10000, env });
+
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /ワークスペースを解決できません/);
+    assert.doesNotMatch(r.stderr, /assertValidWorkspace/, `生の例外スタックトレースが漏れてはならない: ${r.stderr}`);
+  } finally {
+    fs.rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
 test('継続モード: 重複起動検出時のエラーに、判断不要でそのまま使えるwatch-pidコマンドが含まれる', (t) => {
   const { spawnSync } = require('child_process');
   const { getProcessStartTime } = require('../scripts/process-lifecycle');

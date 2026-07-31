@@ -946,6 +946,21 @@ test('registerProcess: workspace がホームディレクトリの場合は thro
   }
 });
 
+test('pidsDir: GH_MAESTRO_RUNTIME_DIR が managed root（~/.gh-maestro）と衝突する場合も throw する（assertDisjointRoots の実配線確認）', () => {
+  // workspace 自体は正当でも、runtime root の誤設定（例: GH_MAESTRO_RUNTIME_DIR が
+  // ~/.gh-maestro を指す）は assertValidWorkspace では検出できない。pidsDir() が
+  // assertDisjointRoots() も併せて呼んでいることを確認する。
+  const prevRuntimeDir = process.env.GH_MAESTRO_RUNTIME_DIR;
+  process.env.GH_MAESTRO_RUNTIME_DIR = storageLayout.managedRoot();
+  try {
+    const plc = loadModule();
+    assert.throws(() => plc.pidsDir(workspace));
+  } finally {
+    if (prevRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = prevRuntimeDir;
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // getParentPid / findSessionRootPid（WMI をモック化）
 // ═══════════════════════════════════════════════════════════════════════════

@@ -901,11 +901,12 @@ if (require.main === module) {
   if (!force) {
     const preWorkspace = resolveWorkspace(preValues['--workspace']);
     if (preWorkspace) {
-      // preWorkspace がホームディレクトリ等 managed root と衝突する場合、
-      // acquireStartupLock/findRunningInstance は assertValidWorkspace で throw する
-      // （Issue #214: install.js の管理領域と衝突する workspace への書き込み拒否）。
-      // CLI からは「ワークスペースを解決できない」場合と同様に、生の例外ではなく
-      // 通常のエラーメッセージ + exit 1 として扱う。
+      // resolveWorkspace() は workspace が home/managed root と衝突する場合に既に
+      // null を返すため、通常はここへ来ない。ただし acquireStartupLock/findRunningInstance
+      // 内部の pidsDir() は、GH_MAESTRO_RUNTIME_DIR の誤設定（runtime root が managed root
+      // と衝突している場合）も assertDisjointRoots() で throw する。workspace 自体は
+      // 正当でもこのケースは起こりうるため、生の例外ではなく通常のエラーメッセージ +
+      // exit 1 として扱う防御を残す。
       try {
         if (!acquireStartupLock(preWorkspace, 'inbox-supervisor.js', null)) {
           process.stderr.write(

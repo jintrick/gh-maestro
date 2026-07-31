@@ -156,6 +156,41 @@ test('resolveWorkspace: 引数なし・env なしでも親に .gh-maestro があ
   }
 });
 
+test('resolveWorkspace: --workspace 引数が明示的にホームディレクトリを指す場合は null（Issue #214）', () => {
+  // CWD探索由来だけでなく、--workspace / GH_MAESTRO_WORKSPACE で明示的にホームを
+  // 指定した場合も resolveWorkspace() が一元的に弾く。これにより、この戻り値を
+  // 使う全呼び出し元（poll-pr.js等）が個別の try/catch なしで安全に扱える。
+  withEnv({ GH_MAESTRO_WORKSPACE: undefined }, () => {
+    delete process.env.GH_MAESTRO_WORKSPACE;
+    assert.equal(resolveWorkspace(os.homedir()), null);
+  });
+});
+
+test('resolveWorkspace: GH_MAESTRO_WORKSPACE env が明示的にホームディレクトリを指す場合も null', () => {
+  withEnv({ GH_MAESTRO_WORKSPACE: os.homedir() }, () => {
+    assert.equal(resolveWorkspace('/some/other/arg'), null);
+  });
+});
+
+test('resolveWorkspace: --workspace 引数が managed root（~/.gh-maestro）配下を指す場合も null', () => {
+  withEnv({ GH_MAESTRO_WORKSPACE: undefined }, () => {
+    delete process.env.GH_MAESTRO_WORKSPACE;
+    assert.equal(resolveWorkspace(path.join(os.homedir(), '.gh-maestro')), null);
+  });
+});
+
+test('resolveWorkspace: 通常のワークスペースは引き続き解決される（回帰確認）', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-normal-'));
+  try {
+    withEnv({ GH_MAESTRO_WORKSPACE: undefined }, () => {
+      delete process.env.GH_MAESTRO_WORKSPACE;
+      assert.equal(resolveWorkspace(tmpDir), path.resolve(tmpDir));
+    });
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 // ── parseFlags ──────────────────────────────────────────────────────────
 
 test('parseFlags: フラグと値を抽出する', () => {
