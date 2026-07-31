@@ -10,6 +10,10 @@ paths:
   - "scripts/run-review-manager.js"
   - "scripts/inbox-supervisor.js"
   - "scripts/worker-exit-hook.js"
+  - "scripts/install.js"
+  - "scripts/shared/workspace.js"
+  - "scripts/shared/storage-layout.js"
+  - "scripts/shared/ensure-inbox-supervisor.js"
 ---
 
 # プロセスライフサイクル管理スクリプトの落とし穴
@@ -28,3 +32,4 @@ paths:
 - launcher（`inbox-supervisor.js`等）がonExitフック（`worker-exit-hook.js`）へ渡す引数に、共通ランチャー（`agent-exec.js`等）が末尾へ実際の終了コードを追加する場合、hook側の分割代入は固定位置ではなく末尾からの相対位置で解釈する。この種の変更を検証するテストは、手組みのargv配列を直接渡すのではなく、実際のランチャー関数（`buildLoginShellExecArgs`等）経由で構築した引数で行う。手組み配列は誤った前提の引数順序をそのまま再現し不整合を検出できない（PR #195 Review Manager指摘）
 - ローカルの`new Date().toISOString()`（ミリ秒精度）とGitHub APIの`createdAt`等（秒精度）を文字列比較する場合、精度差により同一秒内のイベントが誤って「前」と判定されうる。異なるソースのタイムスタンプを比較する前に精度を揃える（PR #195 Review Manager指摘）
 - `agent-defaults.json`のスキーマ変更（`resolve-config.js`側のロジック変更を伴う変更）に限らず、**`inbox-supervisor.js`・`poll-pr.js`・`poll-reviews.js`・`msg-poll.js`等の常駐プロセスは、`node scripts/install.js`でファイルを更新しても、既に起動中のプロセスは再起動するまで新しいコードを一切認識しない**（Node.jsはファイル変更を実行中プロセスへホットリロードしない）。スクリプト内容を変更するPRをマージ・installした後は、対象の常駐プロセスを`taskkill /PID <pid> /F`（Windows）等で停止し、再起動すること。`process-lifecycle.js sweep`は生存中の正当なプロセスも無差別にkillしうるため、この目的では使わない（対象PIDを`.gh-maestro/pids/*.json`から`script`名で個別に特定してkillする）。実障害: `inbox-supervisor.js`(pid 12812)が`node scripts/install.js`実行後もコード変更を認識せず、再起動まで`extends`未対応の古い解決ロジックのまま`agent-defaults.json`を読み、`resolveAgentConfig()`が`null`を返し続けて配送が数時間滞留した（Issue #173）
+- workspaceが必要なスクリプトは独自の解決ロジックを書かず、必ず`scripts/shared/workspace.js`の`resolveWorkspace(workspaceArg)`を使う（home等`~/.gh-maestro/`と衝突する場合は`null`を返す）。PID/lock等「install.jsが絶対に消してはいけない状態」は`<workspace>/.gh-maestro/`にすら置かず、`scripts/shared/storage-layout.js`の`runtimeRoot()`/`workspaceRuntimeDir()`を使う（`<workspace>/.gh-maestro/`自体はinstall.js管理外で`workers.json`等が普通に使うため問題ない）。実障害: workspace解決のバグで`~/.gh-maestro/pids`が作られ、install.jsのprune（`~/.gh-maestro/`配下の未登録トップレベルを無条件削除する仕組み）に巻き込まれて稼働中プロセスの生存判定が壊れた（Issue #214）。この種の間違いはコードの見た目が正しい呼び出し箇所と同一（壊れているのは`workspace`変数の実行時の値だけ）なため、lint/grepでは検知できない。レビューでは「`.gh-maestro`という文字を書いているか」ではなく「`workspace`が`resolveWorkspace()`を経由しているか」を見る
