@@ -19,6 +19,8 @@ const { isWorkerAlive } = require('./shared/worker-liveness');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { sweepRegistry } = require('./process-lifecycle');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+const readStateLib = require('./shared/read-state');
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
 
@@ -29,7 +31,72 @@ Options:
   --quiet             進捗ログを抑制する
 
 workers.json の破損・pane 消滅・worktree 残骸など、どんな状態からでもできる限り
-クリーンアップしてから終了する（途中エラーで止まらない）。`;
+クリーンアップしてから終了する（途中エラーで止まらない）。
+msg-state は単純削除せず、管理対象 Issue の既読ベースラインを再構築する（Issue #207）。
+取得・保存の一部が失敗した場合は新状態を書き込まず、空状態でポーラーを再開しない。`;
+
+/**
+ * orchestrator の msg-state を「既読ベースライン再構築」する（Issue #207）。
+ *
+ * 単純削除はやめ、wipe 前の workers.json から管理対象 Issue 集合を確定し、
+ * 各 Issue の既存コメントIDを取得して initialized 状態（generation 付き）を原子的に
+ * 再構築する。スナップショットに含まれなかった（取得中に投稿された）コメントは
+ * 未読として通知される。
+ *
+ * 取得・保存の一部が失敗した場合は新状態を書き込まない（既存状態を保持 or 欠落のまま）。
+ * 空状態でポーラーを再開しない — msg-poll.js 側の「未初期化なら停止」が安全網になる。
+ *
+ * @param {string} workspace
+ * @param {{ workers?: object, repo: string, listCommentsFn?: Function }} params
+ *   workers: リセット時点（wipe前）の workers.json オブジェクト
+ *   repo:    対象リポジトリ（owner/repo）
+ * @returns {{ ok: boolean, generation?: string, issues?: string[], counts?: object, error?: string }}
+ */
+function rebuildOrchestratorBaseline(workspace, { workers = {}, repo, listCommentsFn = listComments }) {
+  // 管理対象 Issue 集合 = wipe 前の workers.json の全ワーカー Issue（Q1: orchestrator 確定）
+  const issues = [];
+  for (const [name, entry] of Object.entries(workers)) {
+    if (name === 'orchestrator') continue;
+    const normalized = normalizeWorkerEntry(entry);
+    if (normalized.issue) issues.push(String(normalized.issue));
+  }
+
+  const byIssue = {};
+  const counts = {};
+  for (const issue of issues) {
+    const r = listCommentsFn(repo, issue, { cwd: workspace });
+    if (r.status !== 0) {
+      return {
+        ok: false,
+        error: `ベースライン取得失敗 (issue ${issue}): ${r.stderr || r.error?.message || '(empty)'}`,
+      };
+    }
+    let comments;
+    try {
+      comments = parseCommentsResponse(r.stdout);
+    } catch (e) {
+      return { ok: false, error: `ベースライン取得のJSONパース失敗 (issue ${issue}): ${e.message}` };
+    }
+    if (comments === null) {
+      return { ok: false, error: `ベースライン取得の応答が配列ではない (issue ${issue})` };
+    }
+    const ids = comments
+      .map((c) => c.id)
+      .filter((x) => typeof x === 'number' && Number.isFinite(x));
+    byIssue[issue] = ids;
+    counts[issue] = ids.length;
+  }
+
+  const generation = `reset-${Date.now()}`;
+  const initResult = readStateLib.initializeState(workspace, 'orchestrator', { byIssue, generation });
+  if (!initResult.ok) {
+    return { ok: false, error: `msg-state 再構築に失敗: ${initResult.error}` };
+  }
+
+  return { ok: true, generation, issues, counts };
+}
+
+module.exports = { rebuildOrchestratorBaseline, USAGE };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -395,20 +462,52 @@ if (require.main === module) {
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  // 6. msg-state の掃除
+  // 6. msg-state の既読ベースライン再構築（Issue #207）
+  //     単純削除はやめ、orchestrator の既読状態を「管理対象 Issue の既存コメントID
+  //     スナップショット」で再構築する。取得・保存の一部が失敗した場合は新状態を
+  //     書き込まず（既存状態を保持 or 欠落のまま）、空状態でポーラーを再開しない。
   // ═══════════════════════════════════════════════════════════════════
 
-  log('msg-state を掃除します...');
+  log('msg-state の既読ベースラインを再構築します...');
+  const repoResult = spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
+    { cwd: workspace, encoding: 'utf8' });
+  const resetRepo = repoResult.status === 0 ? repoResult.stdout.trim() : '';
+
+  if (!resetRepo) {
+    warn('リポジトリを解決できないため msg-state のベースライン再構築をスキップします（既存状態は変更しません）。');
+    warn('msg-state が欠落・未初期化のままなら、msg-poll は走査を停止して「明示初期化が必要」と報告します。');
+    results.errors.push('msg-state baseline: リポジトリ未解決のため再構築しませんでした');
+  } else {
+    const baselineResult = rebuildOrchestratorBaseline(workspace, { workers, repo: resetRepo });
+    if (baselineResult.ok) {
+      log(`msg-state を再構築しました（generation=${baselineResult.generation}, Issues=${(baselineResult.issues || []).join(',') || '(なし)'}）`);
+      for (const [issue, count] of Object.entries(baselineResult.counts || {})) {
+        log(`  Issue ${issue}: ${count} 件を既読ベースラインに含めました`);
+      }
+    } else {
+      warn(`msg-state のベースライン再構築に失敗: ${baselineResult.error}`);
+      warn('新状態は書き込まれていません（既存状態を保持 or 欠落のまま）。空状態でポーラーを再開しません。');
+      results.errors.push(`msg-state baseline: ${baselineResult.error}`);
+    }
+  }
+
+  // クラッシュによる tmp 書き込み残骸（<self>.json.<rand>）があれば掃除する。
+  // 正規の状態ファイルは <self>.json のみなので、*.json.* は安全に削除できる。
   const msgStateDir = resolve(workspace, '.gh-maestro', 'msg-state');
   if (existsSync(msgStateDir)) {
     try {
-      rmSync(msgStateDir, { recursive: true, force: true });
-      log('msg-state/ を削除しました。');
+      const tmpLeftovers = readdirSync(msgStateDir).filter((f) => f.includes('.json.'));
+      for (const f of tmpLeftovers) {
+        try {
+          unlinkSync(resolve(msgStateDir, f));
+          log(`tmp残骸を削除: ${f}`);
+        } catch (e) {
+          warn(`tmp残骸の削除失敗: ${f} — ${e.message}`);
+        }
+      }
     } catch (e) {
-      warn(`msg-state/ 削除失敗: ${e.message}`);
+      warn(`msg-state の tmp残骸掃除に失敗: ${e.message}`);
     }
-  } else {
-    log('msg-state/ なし。スキップ。');
   }
 
   // ═══════════════════════════════════════════════════════════════════

@@ -17,6 +17,19 @@ require('../scripts/shared/ensure-inbox-supervisor')._setSpawn(() => {
   return child;
 });
 
+// ワーカー起動コンテキストでは GH_MAESTRO_WORKER / GH_MAESTRO_WORKSPACE が注入され、
+// msg-send.js が「ワーカー扱い」になったり resolveWorkspace が --workspace 引数を
+// 無視したりして、テストが明示的に渡した一時dirと期待を踏み外す。テストは実ワークスペースの
+// 状態を触らない前提のため、この2変数を退避して外す（終了時に復元）。
+const SAVED_MAESTRO_ENV = {};
+for (const k of ['GH_MAESTRO_WORKER', 'GH_MAESTRO_WORKSPACE']) {
+  if (process.env[k] !== undefined) SAVED_MAESTRO_ENV[k] = process.env[k];
+  delete process.env[k];
+}
+process.on('exit', () => {
+  for (const [k, v] of Object.entries(SAVED_MAESTRO_ENV)) process.env[k] = v;
+});
+
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
   try {

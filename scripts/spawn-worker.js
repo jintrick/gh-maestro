@@ -45,6 +45,8 @@ const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
 const { toWinPath } = require('./win-path');
 const { startExecution, markLaunchFailure } = require('./shared/execution-registry');
+const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+const readStateLib = require('./shared/read-state');
 
 const SPAWN_WORKER_VALUE_FLAGS = [
   '--skill', '--short-prompt', '--prompt-file', '--issue', '--description',
@@ -107,7 +109,62 @@ function shouldPruneStaleWorker(entry, resolveAgent, aliveFn = isWorkerAlive) {
   return true;
 }
 
-module.exports = { shouldPruneStaleWorker };
+/**
+ * orchestrator 用の「Issue ベースライン既読化」（Issue #207）。
+ *
+ * ワーカーを起動可能にする前に、対象 Issue の既存コメントIDのスナップショットを
+ * orchestrator の既読集合（msg-state/orchestrator.json の readByIssue）へ追加する。
+ * 重要な境界は「ベースラインが永続化されるまでワーカーを起動しない」こと。ワーカー自身の
+ * 計画コメント投稿は起動後なのでスナップショットに含まれず、後続の通常走査で必ず新着になる。
+ *
+ * 冪等（集合和）なので、クラッシュ復旧時に stale lease（phase='initializing'）が回収されて
+ * この関数が再実行されても「再実行＝完了確認」として安全に進められる。
+ *
+ * @param {string} workspace
+ * @param {{ repo: string, issue: string|number, listCommentsFn?: Function, markReadFn?: Function }} params
+ * @returns {{ ok: boolean, count?: number, error?: string }}
+ */
+function establishOrchestratorBaseline(workspace, { repo, issue, listCommentsFn = listComments, markReadFn = readStateLib.markRead }) {
+  const pre = readStateLib.readState(workspace, 'orchestrator');
+  if (pre.status !== 'ok') {
+    return {
+      ok: false,
+      error: `orchestrator msg-state が ${pre.status} のため、Issue ${issue} のベースライン既読化を実行できません。` +
+        `reset-session.js で初期化してください。`,
+    };
+  }
+
+  const commentsResult = listCommentsFn(repo, issue, { cwd: workspace });
+  if (commentsResult.status !== 0) {
+    return {
+      ok: false,
+      error: `ベースライン取得（Issue ${issue} のコメント一覧）に失敗しました: ${commentsResult.stderr || commentsResult.error?.message || '(empty)'}`,
+    };
+  }
+
+  let comments;
+  try {
+    comments = parseCommentsResponse(commentsResult.stdout);
+  } catch {
+    return { ok: false, error: `ベースライン取得のJSONパースに失敗しました (Issue ${issue})` };
+  }
+  if (comments === null) {
+    return { ok: false, error: `ベースライン取得の応答が配列ではありません (Issue ${issue})` };
+  }
+
+  const ids = comments
+    .map((c) => c.id)
+    .filter((x) => typeof x === 'number' && Number.isFinite(x));
+
+  const markResult = markReadFn(workspace, 'orchestrator', { issue, ids });
+  if (!markResult.ok) {
+    return { ok: false, error: `ベースラインの既読記録に失敗しました: ${markResult.error}` };
+  }
+
+  return { ok: true, count: ids.length };
+}
+
+module.exports = { shouldPruneStaleWorker, establishOrchestratorBaseline };
 
 if (require.main === module) {
 
@@ -316,6 +373,21 @@ fail = (msg) => {
   }
   _originalFail(msg);
 };
+
+// --- orchestrator 用 Issue ベースライン既読化（Issue #207） ---
+// ワーカーを起動可能にする前に、対象 Issue の既存コメントIDを orchestrator の既読集合へ
+// 追加する（明示スナップショット）。重要な境界は「ベースラインが永続化されるまでワーカーを
+// 起動しない」こと。ワーカー自身の計画コメント投稿は起動後なのでスナップショットに含まれず、
+// 後続の通常走査で必ず新着として通知される。
+// クラッシュ復旧時は stale lease（phase='initializing'）が回収され、この再実行（集合和のため
+// 冪等）が「ベースライン完了の確認」を兼ねる。
+const baselineResult = establishOrchestratorBaseline(workspace, { repo, issue });
+
+if (!baselineResult.ok) {
+  // worktree 作成より前のためロールバック不要。リースは fail 内で解放される。
+  fail(`orchestrator 用ベースライン既読化に失敗しました: ${baselineResult.error}`);
+}
+console.warn(`spawn-worker: Issue ${issue} の既存コメント ${baselineResult.count} 件を orchestrator 既読として記録しました`);
 
 // --- workers.json を読み込み（なければ初期化、破損時は空として扱う） ---
 let workers = {};

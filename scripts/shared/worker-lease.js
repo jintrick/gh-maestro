@@ -284,6 +284,11 @@ function acquireLease(store, key, { pid, startTime, workerName }) {
       startTime: startTime || _getProcessStartTime(pid) || now,
       workerName,
       createdAt: now,
+      // phase: 'initializing' = ワーカー起動準備中（orchestrator 用 Issue ベースライン既読化の
+      // 完了前。Issue #207）。起動（activateLease）で 'active' に更新される。
+      // クラッシュ復旧時は stale lease として回収され、ベースラインが冪等に再実行される
+      // （集合和のため「再実行＝完了確認」となる）。
+      phase: 'initializing',
     };
 
     try {
@@ -358,6 +363,8 @@ function activateLease(store, key, { pid, startTime }) {
     ...existing,
     pid,
     startTime: startTime || _getProcessStartTime(pid) || now,
+    // ワーカープロセス起動まで完了したら active（initializing → active。Issue #207）
+    phase: 'active',
   });
 }
 
