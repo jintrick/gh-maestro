@@ -71,6 +71,7 @@ node scripts/install.js
 - Run `node scripts/install.js` after skill, script distribution, or `skills/agents.yaml` changes **— only from the `dev` branch after changes are merged. Never from a WIP branch.**
 - If CLI launch flags, subcommands, or argument combinations change, execute a minimal real command for that CLI path, not only `--help`.
 - For doc-only changes, do not run `npm test` unnecessarily.
+- **`dev` must never be in a state where `npm test` has any failures.** A failing test blocks merge no matter how unrelated it looks to the change under review — "unrelated" is a rationalization, not a valid reason to proceed. Do not accept a coder's prose summary ("tests pass") as evidence; read the actual test-runner summary line (`# fail`) yourself before presenting anything as merge-ready. If a failing test already exists on `dev`, fixing it takes priority over other work — do not work around it or defer it.
 
 ## Local Reference Docs
 

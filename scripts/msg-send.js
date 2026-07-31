@@ -313,6 +313,39 @@ function main(argsOverride, envOverride, ioOverride) {
     }
   }
 
+  // TEMP DIAGNOSTIC for #202 — 実際にGitHubへ投稿する直前の状態を、workspace解決に
+  // 依存しない絶対パス（ホームディレクトリ直下）へ記録する。worker-exit-hook.js側の
+  // 診断ログは常にworkspace変数を経由して書き込み先を決めており、workspace解決自体が
+  // 想定と違えばメインログもエラーフォールバックも同じ理由で共倒れする（architect助言）。
+  // この監査点はworkspace変数を書き込み先の決定に一切使わない。
+  try {
+    const crypto = require('crypto');
+    const os = require('os');
+    const auditPath = path.join(os.homedir(), '.gh-maestro-diag-202-audit.log');
+    const bodyHash = crypto.createHash('sha256').update(fullBody).digest('hex');
+    const scriptPath = (require.main && require.main.filename) || __filename;
+    let realScriptPath = null;
+    try { realScriptPath = fs.realpathSync(scriptPath); } catch {}
+    const entry = JSON.stringify({
+      ts: new Date().toISOString(),
+      pid: process.pid,
+      ppid: process.ppid,
+      execPath: process.execPath,
+      argv: process.argv,
+      cwd: process.cwd(),
+      scriptPath,
+      realScriptPath,
+      workerIdentity,
+      workspace,
+      recipient,
+      from,
+      issue,
+      bodyHash,
+      bodyPreview: fullBody.slice(0, 120),
+    });
+    fs.appendFileSync(auditPath, entry + '\n', 'utf8');
+  } catch {}
+
   // ── 送信 ────────────────────────────────────────────────────────────────
 
   const result = _ghIssueComment(issue, fullBody, repo, ghOpts);

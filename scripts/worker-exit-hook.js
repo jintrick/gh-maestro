@@ -257,7 +257,20 @@ if (require.main === module) {
         fs.appendFileSync(diagPath, entry + '\n', 'utf8');
       }
     }
-  } catch {}
+  } catch (diagError) {
+    // TEMP DIAGNOSTIC for #202 — 診断ログ自体の書き込み失敗を握り潰さず記録する
+    // （握り潰しが「なぜログが残らないか」の原因究明を妨げていたため）
+    try {
+      const diagWsFallback = rawArgs[0];
+      if (diagWsFallback) {
+        fs.appendFileSync(
+          path.join(diagWsFallback, '.gh-maestro', 'diag-202-errors.log'),
+          JSON.stringify({ ts: new Date().toISOString(), pid: process.pid, error: diagError && diagError.message, rawArgs }) + '\n',
+          'utf8'
+        );
+      }
+    } catch {}
+  }
 
   // agent-exec.js（共通ランチャー）は終了コードを必ず最後の引数として追加する。
   //   - 新規起動（3引数）: workspace, executionId, exitCode
