@@ -15,6 +15,10 @@ const headlessLaunch = require('../scripts/shared/headless-launch');
 // --session-pid を渡すため、テストでも常に自プロセスPIDを渡してこの探索を省く。
 const _realMain = supervisor.main;
 const TEST_SESSION_PID = String(process.pid);
+// GH_MAESTRO_WORKSPACE が設定されていると resolveWorkspace が env を優先し、
+// --workspace 引数が無視される。テスト中は一時的に除去する。
+const _savedWorkspaceEnv = process.env.GH_MAESTRO_WORKSPACE;
+delete process.env.GH_MAESTRO_WORKSPACE;
 const runMain = (args, opts) => _realMain([...args, '--session-pid', TEST_SESSION_PID], opts);
 
 // ── テストヘルパー ────────────────────────────────────────────────────────
@@ -229,6 +233,8 @@ describe('Cursor state management', () => {
       assert.deepEqual(state.seenIds, []);
       assert.deepEqual(state.deliveredIds, []);
       assert.deepEqual(state.pendingDeliveries, {});
+      assert.equal(state.hangNotifiedPid, null);
+      assert.equal(state.hangNotifiedAt, null);
     });
   });
 
@@ -241,6 +247,8 @@ describe('Cursor state management', () => {
             seenIds: [1, 2, 3],
             deliveredIds: [1, 2],
             pendingDeliveries: { '3': { retries: 1, lastError: 'timeout' } },
+            hangNotifiedPid: 123,
+            hangNotifiedAt: '2024-06-01T12:00:00Z',
           },
         },
       });
@@ -250,6 +258,8 @@ describe('Cursor state management', () => {
       assert.deepEqual(state.seenIds, [1, 2, 3]);
       assert.deepEqual(state.deliveredIds, [1, 2]);
       assert.deepEqual(state.pendingDeliveries, { '3': { retries: 1, lastError: 'timeout' } });
+      assert.equal(state.hangNotifiedPid, 123);
+      assert.equal(state.hangNotifiedAt, '2024-06-01T12:00:00Z');
     });
   });
 
@@ -262,6 +272,8 @@ describe('Cursor state management', () => {
       const state = supervisor.readCursor(dir, 'bad');
       assert.equal(state.since, null);
       assert.deepEqual(state.seenIds, []);
+      assert.equal(state.hangNotifiedPid, null);
+      assert.equal(state.hangNotifiedAt, null);
     });
   });
 
@@ -274,6 +286,8 @@ describe('Cursor state management', () => {
         seenIds: [10, 20, 30],
         deliveredIds: [10, 20],
         pendingDeliveries: { '30': { retries: 2, lastError: 'send-text failed', lastFrom: 'orch', lastBody: 'hello' } },
+        hangNotifiedPid: 123,
+        hangNotifiedAt: '2024-06-01T12:00:00Z',
       };
 
       supervisor.writeCursor(dir, 'roundtrip', state);
@@ -283,6 +297,8 @@ describe('Cursor state management', () => {
       assert.deepEqual(loaded.seenIds, state.seenIds);
       assert.deepEqual(loaded.deliveredIds, state.deliveredIds);
       assert.deepEqual(loaded.pendingDeliveries, state.pendingDeliveries);
+      assert.equal(loaded.hangNotifiedPid, state.hangNotifiedPid);
+      assert.equal(loaded.hangNotifiedAt, state.hangNotifiedAt);
     });
   });
 
@@ -1230,6 +1246,275 @@ describe('runOnce scan and deliver cycle', () => {
 
       const lastLine = r.lines[r.lines.length - 1];
       assert.ok(lastLine.includes('SCAN_END:1:1'), `claude系も検出されるはず: ${lastLine}`);
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ハング検知
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('Hang detection', () => {
+  beforeEach(() => resetAllMocks());
+
+  test('ハング検知→通知: ワーカー生存＋ログmtime閾値超過で orchestartor に通知する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    // ワーカーは稼働中（生存）とする
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+
+      // ログファイルを古いmtimeで作成
+      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'old log content\n', 'utf8');
+      // 閾値（既定1200秒=20分）を超える過去のmtimeに設定
+      const oldTime = new Date(Date.now() - 25 * 60 * 1000); // 25分前
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')),
+        `HANG_DETECTED が出力されること: ${r.lines.join('\n')}`);
+
+      assert.equal(notifyCalls.length, 1, 'orchestratorへ1回通知');
+      assert.ok(notifyCalls[0].body.includes('ハング'));
+      assert.ok(notifyCalls[0].body.includes('issue-5-fix'));
+      assert.ok(notifyCalls[0].body.includes('456'));
+
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state.hangNotifiedPid, 456);
+      assert.ok(typeof state.hangNotifiedAt === 'string');
+    });
+  });
+
+  test('重複通知防止: 同一PIDでログ未更新のまま2回目のrunOnceでは通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+        cursors: {
+          'issue-5-fix': {
+            since: null,
+            seenIds: [],
+            deliveredIds: [],
+            pendingDeliveries: {},
+            hangNotifiedPid: 456, // 既に通知済み
+            hangNotifiedAt: '2024-07-30T12:00:00.000Z',
+          },
+        },
+      });
+
+      // 古いログ（まだ更新されていない）
+      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'old log\n', 'utf8');
+      const oldTime = new Date(Date.now() - 25 * 60 * 1000);
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      // HANG_DETECTED は出力されない（同一PIDに既に通知済みのため）
+      assert.ok(!r.lines.some(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')),
+        `再通知されないこと: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 0, '通知呼び出しが発生しない');
+    });
+  });
+
+  test('復帰検知: ハング通知後にログが更新されると HANG_RESUMED が出力されて状態がリセットされる', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+        cursors: {
+          'issue-5-fix': {
+            since: null,
+            seenIds: [],
+            deliveredIds: [],
+            pendingDeliveries: {},
+            hangNotifiedPid: 456, // 前回通知済み
+            hangNotifiedAt: '2024-07-30T12:00:00.000Z',
+          },
+        },
+      });
+
+      // ログを直近に更新（ハングから復帰した状態をシミュレート）
+      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'updated log content\n', 'utf8');
+      // 現在時刻のmtime（fs.writeFileSync の既定 = 現在時刻）
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l === 'HANG_RESUMED:issue-5-fix'),
+        `HANG_RESUMED が出力されること: ${r.lines.join('\n')}`);
+
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state.hangNotifiedPid, null, 'PIDがリセットされている');
+      assert.equal(state.hangNotifiedAt, null, 'タイムスタンプがリセットされている');
+    });
+  });
+
+  test('ワーカー非生存時はハング判定をスキップする', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    // 非生存（_isWorkerAliveがfalseを返す）＝ resetAllMocks の既定
+    // setWorkersIdle() が設定する既定で休止中扱い
+
+    const r = withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+
+      // 古いログがあってもハング検知されない
+      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'old log\n', 'utf8');
+      const oldTime = new Date(Date.now() - 25 * 60 * 1000);
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      return r;
+    });
+
+    assert.ok(!r.lines.some(l => l.startsWith('HANG_DETECTED')),
+      `ハング検知の出力がないこと: ${r.lines.join('\n')}`);
+  });
+
+  test('ログファイルが存在しなければ例外を投げずにスキップする', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    // ログファイルを作成しない（存在しない状態）
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+
+      assert.doesNotThrow(() => {
+        const r = runMain(['--workspace', dir]);
+        assert.equal(r.code, 0);
+        r.runOnce();
+      });
+    });
+  });
+
+  test('--hang-threshold-sec より短い経過時間なら通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+
+      // 10秒前のログ（--hang-threshold-sec=30 より短い＝通知されない）
+      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'recent log\n', 'utf8');
+      const recentTime = new Date(Date.now() - 10 * 1000);
+      fs.utimesSync(logPath, recentTime, recentTime);
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '30']);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('HANG_DETECTED')),
+        `HANG_DETECTED が出力されないこと: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 0, '通知呼び出しが発生しない');
+    });
+  });
+
+  test('--hang-threshold-sec より長い経過時間なら通知する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+
+      // 60秒前のログ（--hang-threshold-sec=10 より長い＝通知される）
+      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'old log\n', 'utf8');
+      const oldTime = new Date(Date.now() - 60 * 1000);
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '10']);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')),
+        `HANG_DETECTED が出力されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1, '通知が1回呼ばれる');
     });
   });
 });
