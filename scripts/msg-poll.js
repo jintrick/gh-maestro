@@ -12,9 +12,10 @@
 //
 // 既読状態は .gh-maestro/msg-state/<self>.json に永続化される（v2スキーマ、Issue #207）。
 // 既読の正本は「明示的に既読化されたコメントID集合（readByIssue）」であり、時刻カーソル
-// （since）による既読推測は行わない。orchestrator モードでは state が欠落・破損・旧形式
-// （未初期化）の場合、空状態を暗黙作成せず走査を停止して「reset-session.js での初期化
-// が必要」と報告する。
+// （since）による既読推測は行わない。sinceByIssue は取得範囲の絞り込み（パフォーマンス
+// 最適化）にのみ使う（ウォーターマークの1秒前から差分取得し、境界秒の取りこぼしを防ぐ）。
+// orchestrator モードでは state が欠落・破損・旧形式（未初期化）の場合、空状態を暗黙作成
+// せず走査を停止して「reset-session.js での初期化が必要」と報告する。
 
 'use strict';
 
@@ -80,7 +81,8 @@ Output (stdout):
 このスクリプトはエージェントのターン内で blocking 実行される。detached 起動しない。
 既読状態は .gh-maestro/msg-state/<self>.json（v2スキーマ）に永続化され、--once/--wait の
 繰り返し実行でも二重通知しない。既読の正本は明示既読コメントID集合（readByIssue）であり、
-時刻カーソル（since）による既読推測・初回サイレント catch-up は行わない。
+時刻カーソル（since）による既読推測・初回サイレント catch-up は行わない。sinceByIssue は
+取得範囲の絞り込みのみに使い、ウォーターマークの1秒前から差分取得する（取りこぼし防止）。
 orchestrator モードでは state が欠落・破損・旧形式（未初期化）の場合、空状態を暗黙作成せず
 走査を停止し、stderr に「reset-session.js での初期化が必要」と報告する。
 gh 呼び出し失敗（ネットワーク断・rate limit 等）はそのサイクルをスキップし次サイクルへ継続する。
@@ -145,6 +147,25 @@ const writeState = readStateLib.writeState;
 function addRecord(map, issue, cid) {
   if (!map.has(issue)) map.set(issue, new Set());
   map.get(issue).add(cid);
+}
+
+/**
+ * ISO8601 時刻文字列から deltaSec 秒を加算して秒精度（ミリ秒なし）で返す。
+ * パース不能なら null。
+ *
+ * 取得最適化カーソル（sinceByIssue）の安全マージン用。GitHub の since フィルタは
+ * 「created_at > since」の排他的挙動とみなし、境界秒に新着が詰まる場合の取りこぼしを
+ * 防ぐため、ウォーターマークの1秒前を取得開始点にする（新着は必ずウォーターマーク以上の
+ * created_at を持つため、1秒のマージンで全件を確実に含める）。
+ *
+ * @param {string} iso
+ * @param {number} deltaSec
+ * @returns {string|null}
+ */
+function addSeconds(iso, deltaSec) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Date(d.getTime() + deltaSec * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 function parseMarker(body) {
@@ -326,9 +347,11 @@ function main(argsOverride, opts = {}) {
    * 1回のスキャン。
    *
    * 既読判定は時刻カーソルではなく、明示的に既読化されたコメントID集合
-   * （readState の readByIssue）で行う（Issue #207）。gh api の since フィルタは
-   * 使わず全件取得し、ID だけを照合する（since による取得範囲外に未記録IDを
-   * 作らないことが保証できないため）。
+   * （readState の readByIssue）で行う（Issue #207）。gh api の since は取得範囲の
+   * 絞り込み（パフォーマンス最適化）にのみ使い、ウォーターマーク（sinceByIssue）の
+   * 1秒前から差分取得する。取りこぼしは「1秒の安全マージン」「持ち越しがある間は
+   * ウォーターマークを進めない」「取得失敗時は進めない（フェイルクローズ）」で構造的に
+   * 防ぐ。既読判定は常に ID 集合との照合で行う。
    *
    * @param {{ maxGhTimeoutMs?: number, singleMessage?: boolean }} [opts]
    *   maxGhTimeoutMs: gh 呼び出しの上限タイムアウト（ms）。
@@ -430,7 +453,13 @@ function main(argsOverride, opts = {}) {
       }
 
       for (const issue of issues) {
-        const result = _ghApiComments(repo, issue, null, callOpts);
+        // 取得範囲の絞り込み（パフォーマンス最適化）: sinceByIssue（ウォーターマーク）の
+        // 1秒前から取得する。既読判定には使わない（既読判定は常にID集合で行う。Issue #207）。
+        // 取得失敗時はウォーターマークが進まないため、次サイクルで同じ範囲を再取得する
+        // （フェイルクローズ。黙って古いコメントを見逃さない）。
+        const watermark = typeof state.sinceByIssue[issue] === 'string' ? state.sinceByIssue[issue] : null;
+        const fetchSince = watermark ? addSeconds(watermark, -1) : null;
+        const result = _ghApiComments(repo, issue, fetchSince, callOpts);
         if (result.status !== 0) {
           const errMsg = result.error && result.error.code === 'ETIMEDOUT'
             ? `gh api タイムアウト (issue ${issue})`
@@ -454,7 +483,11 @@ function main(argsOverride, opts = {}) {
         }
       }
     } else {
-      const result = _ghApiComments(repo, issueArg, null, callOpts);
+      // worker モードも取得最適化カーソル（1秒前から）で絞り込む
+      const workerKey = String(issueArg);
+      const workerWatermark = typeof state.sinceByIssue[workerKey] === 'string' ? state.sinceByIssue[workerKey] : null;
+      const workerFetchSince = workerWatermark ? addSeconds(workerWatermark, -1) : null;
+      const result = _ghApiComments(repo, issueArg, workerFetchSince, callOpts);
       if (result.status !== 0) {
         const errMsg = result.error && result.error.code === 'ETIMEDOUT'
           ? 'gh api タイムアウト'
@@ -529,12 +562,23 @@ function main(argsOverride, opts = {}) {
 
     // singleMessage: 最も古い1件のみを出力・既読化する。残り（持ち越し）は既読記録しない。
     const emitted = singleMessage ? allCandidates.slice(0, 1) : allCandidates;
+    const emittedIds = new Set(emitted.map((e) => e.cid));
 
     for (const e of emitted) {
       if (isOrchestrator) {
         writeOut(`NEW_MESSAGE:${e.issue}:${e.cid}`);
       } else {
         writeOut(`NEW_MESSAGE:${e.cid}`);
+      }
+    }
+
+    // 持ち越し候補（未出力）がある Issue は、ウォーターマークを進めない。
+    // 進めると since ベースの取得範囲から持ち越し分が消え、永久に再取得できなくなる
+    // （--wait / singleMessage 契約を壊す）。次サイクルで同じ範囲を再取得する。
+    const issuesWithDeferred = new Set();
+    for (const [issue, arr] of candidatesByIssue) {
+      if (arr.some((e) => !emittedIds.has(e.cid))) {
+        issuesWithDeferred.add(issue);
       }
     }
 
@@ -552,6 +596,7 @@ function main(argsOverride, opts = {}) {
     }
     const sinceByIssue = {};
     for (const [issue, ts] of maxCreatedByIssue) {
+      if (issuesWithDeferred.has(issue)) continue;
       sinceByIssue[issue] = ts;
     }
     const markResult = readStateLib.markReadMany(workspace, self, { byIssue, sinceByIssue });

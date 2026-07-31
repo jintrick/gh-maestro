@@ -94,20 +94,51 @@ test('readState: v2 正常は ok で正規化状態を返す', () => {
   });
 });
 
-test('readState: v2 の破損値（readByIssue非配列・非数値ID）は安全に正規化される', () => {
+test('readState: v2 の readByIssue が破損（非数値ID混入・配列でない値）は corrupt', () => {
+  withTempDir(workspace => {
+    // 非数値ID混入
+    writeRaw(workspace, 'orchestrator', {
+      schemaVersion: 2, initialized: true, generation: 'g',
+      readByIssue: { 10: [1, 'not-a-number'] },
+    });
+    assert.equal(rs.readState(workspace, 'orchestrator').status, 'corrupt');
+
+    // 配列でない値
+    writeRaw(workspace, 'orchestrator', {
+      schemaVersion: 2, initialized: true, generation: 'g',
+      readByIssue: { 10: 'not-an-array' },
+    });
+    assert.equal(rs.readState(workspace, 'orchestrator').status, 'corrupt');
+  });
+});
+
+test('readState: v2 の readByIssue 欠落・非オブジェクトは corrupt（空集合へ黙って正規化しない）', () => {
+  withTempDir(workspace => {
+    // readByIssue 欠落
+    writeRaw(workspace, 'orchestrator', { schemaVersion: 2, initialized: true, generation: 'g' });
+    assert.equal(rs.readState(workspace, 'orchestrator').status, 'corrupt');
+
+    // readByIssue が配列
+    writeRaw(workspace, 'orchestrator', {
+      schemaVersion: 2, initialized: true, generation: 'g', readByIssue: [1, 2],
+    });
+    assert.equal(rs.readState(workspace, 'orchestrator').status, 'corrupt');
+  });
+});
+
+test('readState: v2 正常は ok。sinceByIssue は寛容に正規化される', () => {
   withTempDir(workspace => {
     writeRaw(workspace, 'orchestrator', {
       schemaVersion: 2,
       initialized: true,
       generation: 'g',
-      readByIssue: { 10: [1, 'not-a-number', { x: 1 }], 11: 'not-an-array' },
-      sinceByIssue: { 10: 12345 },
+      readByIssue: { 10: [1, 2, 3] },
+      sinceByIssue: { 10: '2026-07-07T00:00:00Z', 11: 12345 }, // 非stringは無視
     });
     const r = rs.readState(workspace, 'orchestrator');
     assert.equal(r.status, 'ok');
-    assert.deepEqual(r.state.readByIssue['10'], [1]);
-    assert.deepEqual(r.state.readByIssue['11'], []);
-    assert.deepEqual(r.state.sinceByIssue, {});
+    assert.deepEqual(r.state.readByIssue['10'], [1, 2, 3]);
+    assert.deepEqual(r.state.sinceByIssue, { 10: '2026-07-07T00:00:00Z' });
   });
 });
 
@@ -184,6 +215,16 @@ test('markReadMany: 複数Issueを一度の更新で追加し sinceByIssue も�
   });
 });
 
+test('markRead: since（取得最適化カーソル）を設定できる', () => {
+  withTempDir(workspace => {
+    rs.initializeState(workspace, 'orchestrator', { generation: 'g' });
+    const r = rs.markRead(workspace, 'orchestrator', { issue: 10, ids: [1], since: '2026-07-07T12:00:00Z' });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.state.readByIssue['10'], [1]);
+    assert.equal(r.state.sinceByIssue['10'], '2026-07-07T12:00:00Z');
+  });
+});
+
 test('markRead: 変更が無い場合（空ID・既読済みのみ）は書き込み不要で成功', () => {
   withTempDir(workspace => {
     rs.initializeState(workspace, 'orchestrator', { byIssue: { 10: [1] }, generation: 'g' });
@@ -219,7 +260,19 @@ test('stale ロック（保持者死亡）は奪取して更新できる', () =>
     const lp = rs.stateLockPath(workspace, 'orchestrator');
     fs.mkdirSync(path.dirname(lp), { recursive: true });
     // 確実に死亡しているPID（999999）でロックを残す
-    fs.writeFileSync(lp, '999999', 'utf8');
+    fs.writeFileSync(lp, JSON.stringify({ pid: 999999, startTime: '2020-01-01T00:00:00Z' }), 'utf8');
+    const r = rs.markRead(workspace, 'orchestrator', { issue: 10, ids: [1] });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.state.readByIssue['10'], [1]);
+  });
+});
+
+test('破損ロック（JSONでない）は stale とみなし奪取して更新できる', () => {
+  withTempDir(workspace => {
+    rs.initializeState(workspace, 'orchestrator', { generation: 'g' });
+    const lp = rs.stateLockPath(workspace, 'orchestrator');
+    fs.mkdirSync(path.dirname(lp), { recursive: true });
+    fs.writeFileSync(lp, 'not-json', 'utf8');
     const r = rs.markRead(workspace, 'orchestrator', { issue: 10, ids: [1] });
     assert.equal(r.ok, true);
     assert.deepEqual(r.state.readByIssue['10'], [1]);
@@ -249,6 +302,18 @@ test('initializeState: byIssue が空でも initialized=true（空状態で再�
     assert.deepEqual(r.state.readByIssue, {});
     const after = rs.readState(workspace, 'orchestrator');
     assert.equal(after.status, 'ok');
+  });
+});
+
+test('initializeState: sinceByIssue（取得最適化カーソル）付きで初期化される', () => {
+  withTempDir(workspace => {
+    const r = rs.initializeState(workspace, 'orchestrator', {
+      byIssue: { 10: [1] },
+      sinceByIssue: { 10: '2026-07-07T12:00:00Z', 20: 12345 }, // 非stringは無視
+      generation: 'reset-abc',
+    });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.state.sinceByIssue, { 10: '2026-07-07T12:00:00Z' });
   });
 });
 

@@ -27,8 +27,10 @@ const WORKERS = {
 test('rebuildOrchestratorBaseline: workers.json の Issue 分が readByIssue に再構築される', () => {
   withTempDir(workspace => {
     const listCommentsFn = (repo, issue) => {
-      if (issue === '10') return { status: 0, stdout: JSON.stringify([[{ id: 1 }, { id: 2 }]]) };
-      if (issue === '20') return { status: 0, stdout: JSON.stringify([{ id: 100 }]) };
+      if (issue === '10') {
+        return { status: 0, stdout: JSON.stringify([[{ id: 1, created_at: '2026-07-07T10:00:00Z' }, { id: 2, created_at: '2026-07-07T11:00:00Z' }]]) };
+      }
+      if (issue === '20') return { status: 0, stdout: JSON.stringify([{ id: 100, created_at: '2026-07-07T12:00:00Z' }]) };
       return { status: 0, stdout: JSON.stringify([]) };
     };
 
@@ -49,6 +51,8 @@ test('rebuildOrchestratorBaseline: workers.json の Issue 分が readByIssue に
     assert.equal(st.state.generation, result.generation);
     assert.deepEqual(st.state.readByIssue['10'], [1, 2]);
     assert.deepEqual(st.state.readByIssue['20'], [100]);
+    assert.equal(st.state.sinceByIssue['10'], '2026-07-07T11:00:00Z', '直近 created_at が取得最適化カーソルになる');
+    assert.equal(st.state.sinceByIssue['20'], '2026-07-07T12:00:00Z');
   });
 });
 

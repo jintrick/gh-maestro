@@ -62,6 +62,7 @@ function rebuildOrchestratorBaseline(workspace, { workers = {}, repo, listCommen
   }
 
   const byIssue = {};
+  const sinceByIssue = {};
   const counts = {};
   for (const issue of issues) {
     const r = listCommentsFn(repo, issue, { cwd: workspace });
@@ -83,12 +84,20 @@ function rebuildOrchestratorBaseline(workspace, { workers = {}, repo, listCommen
     const ids = comments
       .map((c) => c.id)
       .filter((x) => typeof x === 'number' && Number.isFinite(x));
+    // 直近 created_at を取得最適化カーソルとして設定（既読判定には使わない。Issue #207）
+    let maxCreated = null;
+    for (const c of comments) {
+      if (typeof c.created_at === 'string' && (!maxCreated || c.created_at > maxCreated)) {
+        maxCreated = c.created_at;
+      }
+    }
     byIssue[issue] = ids;
+    if (maxCreated) sinceByIssue[issue] = maxCreated;
     counts[issue] = ids.length;
   }
 
   const generation = `reset-${Date.now()}`;
-  const initResult = readStateLib.initializeState(workspace, 'orchestrator', { byIssue, generation });
+  const initResult = readStateLib.initializeState(workspace, 'orchestrator', { byIssue, sinceByIssue, generation });
   if (!initResult.ok) {
     return { ok: false, error: `msg-state 再構築に失敗: ${initResult.error}` };
   }

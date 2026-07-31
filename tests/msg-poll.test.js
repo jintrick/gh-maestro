@@ -580,6 +580,69 @@ test('orchestrator モード: not-for-me / マーカーなしコメントも既�
   });
 });
 
+test('orchestrator モード: 取得最適化カーソルが設定され、2回目以降はウォーターマークの1秒前から差分取得する', () => {
+  withTempDir(workspace => {
+    initOrchestratorState(workspace);
+    writeWorkers(workspace, { 'w': { issue: 10 } });
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+
+    const allComments = [
+      { id: 1, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+    ];
+    let callCount = 0;
+    msgPoll._setGhApiComments((repo, issue, since) => {
+      callCount++;
+      if (callCount === 1) {
+        assert.equal(since, null, '初回は全件取得（カーソル未設定）');
+      } else {
+        assert.equal(since, '2026-07-07T11:59:59Z', '2回目はウォーターマークの1秒前から取得（取りこぼし防止）');
+      }
+      return { status: 0, stdout: JSON.stringify(allComments) };
+    });
+
+    const r1 = runMain(['orchestrator', '--workspace', workspace, '--once']);
+    r1.scanOnce();
+    assert.ok(r1.lines.some(l => l === 'NEW_MESSAGE:10:1'));
+
+    // ウォーターマーク（sinceByIssue）が max created_at まで進んでいる
+    const st = msgPoll.readState(workspace, 'orchestrator');
+    assert.equal(st.state.sinceByIssue['10'], '2026-07-07T12:00:00Z');
+
+    // 2回目: 差分取得（1秒前から）。既読IDなので通知されない
+    const r2 = runMain(['orchestrator', '--workspace', workspace, '--once']);
+    r2.scanOnce();
+    assert.equal(callCount, 2);
+    assert.equal(r2.lines.length, 0, '既読IDは再通知しない');
+  });
+});
+
+test('orchestrator モード: singleMessage で持ち越し候補がある間はウォーターマークを進めない', () => {
+  withTempDir(workspace => {
+    initOrchestratorState(workspace);
+    writeWorkers(workspace, { 'w': { issue: 10 } });
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+
+    const allComments = [
+      { id: 1, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+      { id: 2, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nB', created_at: '2026-07-07T12:01:00Z' },
+    ];
+    msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify(allComments) }));
+
+    const r = runMain(['orchestrator', '--workspace', workspace, '--wait', '30']);
+    r.scanOnce({ singleMessage: true });
+    assert.deepEqual(r.lines, ['NEW_MESSAGE:10:1']);
+
+    // 持ち越し（2）がある間はウォーターマークを進めない
+    const st = msgPoll.readState(workspace, 'orchestrator');
+    assert.equal(st.state.sinceByIssue['10'] || null, null, '持ち越しがある間はウォーターマークを進めない');
+
+    // 2回目: 持ち越しを出力
+    r.lines.length = 0;
+    r.scanOnce({ singleMessage: true });
+    assert.deepEqual(r.lines, ['NEW_MESSAGE:10:2']);
+  });
+});
+
 test('orchestrator モード: --issue 指定も受け付ける（orchestrator の場合は必須でない）', () => {
   withTempDir(workspace => {
     initOrchestratorState(workspace);

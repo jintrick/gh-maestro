@@ -165,30 +165,43 @@ function acquireLeaseLock(store, key, maxRetries = 5) {
   const lockPath = store.lockPath(key);
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
 
+  const selfEntry = {
+    pid: process.pid,
+    startTime: _getProcessStartTime(process.pid) || new Date().toISOString(),
+  };
+
   for (let i = 0; i < maxRetries; i++) {
     try {
-      fs.writeFileSync(lockPath, String(process.pid), { encoding: 'utf8', flag: 'wx' });
+      fs.writeFileSync(lockPath, JSON.stringify(selfEntry), { encoding: 'utf8', flag: 'wx' });
       return true;
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
     }
 
-    // ロックが存在 → 保持者の生存を確認
-    let holderPid = null;
+    // ロックが存在 → 現在の保持者を読み直し、PID+startTime の同一性まで確認してから
+    // stale 判定する。無条件 unlink だと、他プロセスが直前に書いた新しいロックを
+    // 消して同一ワーカーの二重起動を許す TOCTOU 競合になるため（Review指摘 #4）、
+    // process-lifecycle.js の acquireStartupLock と同型のパターンに揃える。
+    let holder = null;
     try {
-      holderPid = parseInt(fs.readFileSync(lockPath, 'utf8').trim(), 10);
+      holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
     } catch {
-      holderPid = null;
+      holder = null;
     }
 
-    if (holderPid && Number.isFinite(holderPid) && holderPid > 0 && _isProcessAlive(holderPid)) {
+    const holderAlive = holder
+      && Number.isFinite(holder.pid)
+      && holder.pid > 0
+      && _isProcessAlive(holder.pid);
+    const holderMatches = holderAlive && _verifyProcessIdentity(holder.pid, holder).match;
+    if (holderMatches) {
       throw new Error(
-        `worker "${key}" の起動処理が別プロセス（pid ${holderPid}）で進行中です。` +
+        `worker "${key}" の起動処理が別プロセス（pid ${holder.pid}）で進行中です。` +
         `しばらくお待ちください。`
       );
     }
 
-    // stale ロック（保持者が非生存、または壊れている）→ 奪取して再試行
+    // stale ロック（保持者非生存・PID再利用・破損）→ 奪取して再試行
     try { fs.unlinkSync(lockPath); } catch {}
   }
 
@@ -207,8 +220,8 @@ function acquireLeaseLock(store, key, maxRetries = 5) {
 function releaseLeaseLock(store, key) {
   const lockPath = store.lockPath(key);
   try {
-    const raw = fs.readFileSync(lockPath, 'utf8').trim();
-    if (parseInt(raw, 10) === process.pid) {
+    const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    if (holder && holder.pid === process.pid) {
       fs.unlinkSync(lockPath);
     }
   } catch {

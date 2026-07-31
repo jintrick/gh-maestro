@@ -527,7 +527,7 @@ test('send-text-after-launch の拒否は worktree を作る前に起きる（�
 // 実プロセス spawn はせず、gh-comments の取得と markRead を注入して検証する
 // （test-process-spawn-safety ルール準拠）。
 
-test('establishOrchestratorBaseline: 既存コメントIDが orchestrator 既読集合に記録される', () => {
+test('establishOrchestratorBaseline: 既存コメントIDが orchestrator 既読集合に記録され、取得最適化カーソルも設定される', () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline-'));
   try {
     const init = readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
@@ -535,7 +535,10 @@ test('establishOrchestratorBaseline: 既存コメントIDが orchestrator 既読
 
     const listCommentsFn = () => ({
       status: 0,
-      stdout: JSON.stringify([[{ id: 1 }, { id: 2 }], [{ id: 3 }]]),
+      stdout: JSON.stringify([
+        [{ id: 1, created_at: '2026-07-07T10:00:00Z' }, { id: 2, created_at: '2026-07-07T11:00:00Z' }],
+        [{ id: 3, created_at: '2026-07-07T12:00:00Z' }],
+      ]),
     });
     const result = establishOrchestratorBaseline(ws, { repo: 'o/r', issue: '207', listCommentsFn });
 
@@ -543,6 +546,7 @@ test('establishOrchestratorBaseline: 既存コメントIDが orchestrator 既読
     assert.equal(result.count, 3);
     const st = readStateLib.readState(ws, 'orchestrator');
     assert.deepEqual(st.state.readByIssue['207'], [1, 2, 3], '全ページ分のIDが既読集合に入る');
+    assert.equal(st.state.sinceByIssue['207'], '2026-07-07T12:00:00Z', '直近 created_at が取得最適化カーソルになる');
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }

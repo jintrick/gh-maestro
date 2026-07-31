@@ -156,7 +156,17 @@ function establishOrchestratorBaseline(workspace, { repo, issue, listCommentsFn 
     .map((c) => c.id)
     .filter((x) => typeof x === 'number' && Number.isFinite(x));
 
-  const markResult = markReadFn(workspace, 'orchestrator', { issue, ids });
+  // スナップショットの直近 created_at を取得最適化カーソル（sinceByIssue）として設定する。
+  // これにより、ベースライン後はポーラーが全件取得せず、この時刻から差分だけを取得できる
+  // （既読判定には使わない。Issue #207）。
+  let maxCreated = null;
+  for (const c of comments) {
+    if (typeof c.created_at === 'string' && (!maxCreated || c.created_at > maxCreated)) {
+      maxCreated = c.created_at;
+    }
+  }
+
+  const markResult = markReadFn(workspace, 'orchestrator', { issue, ids, since: maxCreated });
   if (!markResult.ok) {
     return { ok: false, error: `ベースラインの既読記録に失敗しました: ${markResult.error}` };
   }

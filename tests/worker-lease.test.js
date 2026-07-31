@@ -186,10 +186,10 @@ test('acquireLeaseLock: 既存ロックがなければ取得に成功する', ()
 test('acquireLeaseLock: liveな保持者がいればエラーを投げる', () => {
   const store = tempStore();
   try {
-    mockLiveness({ alive: true });
-    // 事前に別PIDでロックを作成
+    mockLiveness({ alive: true, identityMatch: true });
+    // 事前に別プロセスのロック（JSON: pid+startTime）を作成
     fs.mkdirSync(path.dirname(store.lockPath('test-key')), { recursive: true });
-    fs.writeFileSync(store.lockPath('test-key'), '99999', 'utf8');
+    fs.writeFileSync(store.lockPath('test-key'), JSON.stringify({ pid: 99999, startTime: '2026-07-29T00:00:00.000Z' }), 'utf8');
 
     assert.throws(
       () => lease.acquireLeaseLock(store, 'test-key'),
@@ -206,11 +206,41 @@ test('acquireLeaseLock: staleロック（保持者死亡）は奪取して成功
     // 保持者は死亡
     mockLiveness({ alive: false });
     fs.mkdirSync(path.dirname(store.lockPath('test-key')), { recursive: true });
-    fs.writeFileSync(store.lockPath('test-key'), '99999', 'utf8');
+    fs.writeFileSync(store.lockPath('test-key'), JSON.stringify({ pid: 99999, startTime: '2026-07-29T00:00:00.000Z' }), 'utf8');
 
     const result = lease.acquireLeaseLock(store, 'test-key');
     assert.equal(result, true);
     lease.releaseLeaseLock(store, 'test-key');
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireLeaseLock: PID再利用（生存だがstartTime不一致）はstaleとみなし奪取する', () => {
+  const store = tempStore();
+  try {
+    // 生存しているが、ロックに記録されたstartTimeとは別プロセス（PID再利用）のケース
+    mockLiveness({ alive: true, identityMatch: false });
+    fs.mkdirSync(path.dirname(store.lockPath('test-key')), { recursive: true });
+    fs.writeFileSync(store.lockPath('test-key'), JSON.stringify({ pid: 99999, startTime: '2026-07-29T00:00:00.000Z' }), 'utf8');
+
+    const result = lease.acquireLeaseLock(store, 'test-key');
+    assert.equal(result, true);
+    lease.releaseLeaseLock(store, 'test-key');
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireLeaseLock: 破損ロック（JSONでない）はstaleとみなし奪取する', () => {
+  const store = tempStore();
+  try {
+    mockLiveness({ alive: false });
+    fs.mkdirSync(path.dirname(store.lockPath('test-key')), { recursive: true });
+    fs.writeFileSync(store.lockPath('test-key'), 'not-json', 'utf8');
+
+    const result = lease.acquireLeaseLock(store, 'test-key');
+    assert.equal(result, true);
   } finally {
     cleanupStore(store);
   }
@@ -233,7 +263,7 @@ test('releaseLeaseLock: 他プロセスのロックは解放しない', () => {
   const store = tempStore();
   try {
     fs.mkdirSync(path.dirname(store.lockPath('test-key')), { recursive: true });
-    fs.writeFileSync(store.lockPath('test-key'), '99999', 'utf8');
+    fs.writeFileSync(store.lockPath('test-key'), JSON.stringify({ pid: 99999, startTime: 'x' }), 'utf8');
 
     lease.releaseLeaseLock(store, 'test-key');
     // 他プロセスのロックはそのまま
@@ -353,9 +383,9 @@ test('acquireLease: per-keyロックにより並行起動を拒否する', () =>
   const store = tempStore();
   try {
     mockLiveness({ alive: true, identityMatch: true });
-    // 事前に別PIDでロックを作成（他launcherが起動処理中）
+    // 事前に別プロセスのロックを作成（他launcherが起動処理中）
     fs.mkdirSync(path.dirname(store.lockPath('issue-1-coder-test')), { recursive: true });
-    fs.writeFileSync(store.lockPath('issue-1-coder-test'), '99999', 'utf8');
+    fs.writeFileSync(store.lockPath('issue-1-coder-test'), JSON.stringify({ pid: 99999, startTime: '2026-07-29T00:00:00.000Z' }), 'utf8');
 
     assert.throws(
       () => lease.acquireLease(store, 'issue-1-coder-test', {
