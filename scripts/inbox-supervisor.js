@@ -258,8 +258,8 @@ function loadWorkers(workspace) {
  * 休止中（プロセス非生存）のセッション再開系ワーカーを resume() で復帰させ、メッセージを配送する。
  *
  * 全エージェントがセッション再開方式のため、configが解決できれば必ず resume を試みる。
- * config を解決できないエージェントだけ、呼び出し元が pending 扱いにフォールバックする
- * （method: 'pending' を返す）。
+ * config を解決できないエージェントは method: 'config-unresolvable' を返す
+ * （恒久的失敗であり'pending'＝相手が稼働中で順番待ちとは区別する。Issue #173）。
  *
  * @param {object} params
  * @param {string} params.workerName
@@ -295,7 +295,9 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
     agentConfig = null;
   }
   if (!agentConfig) {
-    return { success: false, method: 'pending', error: `agentId "${agentId}" のconfigを解決できません` };
+    // config解決の恒久的失敗は'pending'（相手が稼働中で順番待ち＝正常）と区別する。
+    // 'pending'のままだとshouldRetry()のisAwaitingIdleがtrueになり無限リトライ＋通知未発火になる。
+    return { success: false, method: 'config-unresolvable', error: `agentId "${agentId}" のconfigを解決できません` };
   }
   const worktreeDir = path.join(workspace, '.gh-maestro', 'worktrees', workerName);
   if (!fs.existsSync(worktreeDir)) {

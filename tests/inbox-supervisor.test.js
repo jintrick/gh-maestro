@@ -428,28 +428,33 @@ describe('Delivery', () => {
     assert.ok(result.error.includes('alive'));
   });
 
-  test('deliverMessage: プロセス非生存時は pending', () => {
+  test('deliverMessage: プロセス非生存 + agentId未解決なら本当のconfigエラーが伝播する（汎用pendingで上書きされない）', () => {
     setWorkersIdle();
 
     const result = supervisor.deliverMessage({
-      workerName: 'w', entry: { pid: 123, startTime: 's', agentId: null },
+      workerName: 'w', entry: { pid: 123, startTime: 's', agentId: 'nonexistent-agent' },
       message: { from: 'orch', body: 'hello' }, workspace: '/ws',
       homedir: '/home/user', issue: '5',
     });
 
     assert.equal(result.success, false);
-    assert.equal(result.method, 'pending');
+    assert.equal(result.method, 'config-unresolvable');
+    assert.ok(result.error.includes('configを解決できません'),
+      `本当のconfigエラーが含まれる: ${result.error}`);
+    assert.ok(!result.error.includes('queued for resume'),
+      `汎用メッセージで上書きされない: ${result.error}`);
   });
 
-  test('deliverMessage: pid が null の場合は pending', () => {
+  test('deliverMessage: pid が null + agentId未解決でも config-unresolvable', () => {
     const result = supervisor.deliverMessage({
-      workerName: 'w', entry: { pid: null, agentId: null },
+      workerName: 'w', entry: { pid: null, agentId: 'nonexistent-agent' },
       message: { from: 'orch', body: 'hello' }, workspace: '/ws',
       homedir: '/home/user', issue: '5',
     });
 
     assert.equal(result.success, false);
-    assert.equal(result.method, 'pending');
+    assert.equal(result.method, 'config-unresolvable');
+    assert.ok(result.error.includes('configを解決できません'));
   });
 });
 
@@ -501,12 +506,14 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     });
   });
 
-  test('tryResumeAndDeliver: agentIdが未解決なら method:pending', () => {
+  test('tryResumeAndDeliver: agentIdが未解決なら method:config-unresolvable', () => {
     const result = supervisor.tryResumeAndDeliver({
       workerName: 'issue-7-fix', agentId: 'nonexistent-agent',
       message: { from: 'orch', body: 'hi' }, workspace: '/ws', homedir: '/home',
     });
-    assert.equal(result.method, 'pending');
+    assert.equal(result.success, false);
+    assert.equal(result.method, 'config-unresolvable');
+    assert.ok(result.error.includes('configを解決できません'));
   });
 
   test('tryResumeAndDeliver: worktreeが存在しなければ resume-failed', () => {
@@ -764,6 +771,27 @@ describe('shouldRetry', () => {
     assert.equal(supervisor.shouldRetry({ retries: 5, lastMethod: 'resume-failed' }, Date.now()), false);
   });
 
+  test('lastMethod=config-unresolvable なら MAX_RETRIES で false（無限リトライしない）', () => {
+    const now = Date.now();
+    // retries=4（次の試行で5回目）はまだtrue、retries=5到達でfalse
+    assert.equal(supervisor.shouldRetry({
+      retries: 4, lastMethod: 'config-unresolvable', lastAttempt: new Date(now - 200000).toISOString(),
+    }, now), true);
+    assert.equal(supervisor.shouldRetry({
+      retries: 5, lastMethod: 'config-unresolvable',
+    }, now), false);
+    assert.equal(supervisor.shouldRetry({
+      retries: 10, lastMethod: 'config-unresolvable',
+    }, now), false);
+  });
+
+  test('lastMethod未設定でも lastError が config 解決失敗文言なら恒久停止対象（pending系と誤認しない）', () => {
+    assert.equal(supervisor.shouldRetry({
+      retries: 5,
+      lastError: 'agentId "nonexistent-agent" のconfigを解決できません',
+    }, Date.now()), false);
+  });
+
   test('lastMethod未設定（旧cursorエントリ）でもlastErrorの文言からpending系と推定して救済する', () => {
     const now = Date.now();
     assert.equal(supervisor.shouldRetry({
@@ -910,6 +938,66 @@ describe('runOnce scan and deliver cycle', () => {
       assert.ok(!state.deliveredIds.includes(200));
       assert.ok(state.pendingDeliveries['200']);
       assert.equal(state.pendingDeliveries['200'].retries, 1);
+    });
+  });
+
+  test('config解決失敗が5回（MAX_RETRIES）で断念し orchestrator に本当のエラーで通知する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    // ワーカーは非生存（resetAllMocks の既定）＋ agentId が解決できない。
+    // _notifyOrchestrator を実spawnせず記録だけするモックに差し替える。
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          // agentId が解決できないワーカー（config-unresolvable が発生する状態）
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'nonexistent-agent', issue: 5 },
+        },
+        cursors: {
+          'issue-5-fix': {
+            since: '2024-06-01T12:00:00Z',
+            seenIds: [200],
+            deliveredIds: [],
+            pendingDeliveries: {
+              '200': {
+                // 既に4回失敗済み。今回の試行で5回目＝MAX_RETRIES到達。
+                // lastMethod が config-unresolvable なので pending 系（無限リトライ）と誤認しない。
+                retries: 4,
+                lastAttempt: new Date(Date.now() - 200000).toISOString(),
+                lastError: 'agentId "nonexistent-agent" のconfigを解決できません',
+                lastMethod: 'config-unresolvable',
+                lastFrom: 'orchestrator',
+                lastBody: 'pending message body',
+              },
+            },
+          },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l === 'RETRYING:issue-5-fix:200:5'),
+        `5回目の再試行が出力されること: ${r.lines.join('\n')}`);
+      assert.ok(r.lines.some(l => l.startsWith('DELIVERY_FAILED:issue-5-fix:200') && l.includes('configを解決できません')),
+        `DELIVERY_FAILED に本当のエラーが含まれること: ${r.lines.join('\n')}`);
+
+      assert.equal(notifyCalls.length, 1, '配送断念の通知が1回呼ばれる');
+      assert.ok(notifyCalls[0].body.includes('issue-5-fix'),
+        `giveUpBody にワーカー名が含まれる: ${notifyCalls[0].body}`);
+      assert.ok(notifyCalls[0].body.includes('configを解決できません'),
+        `giveUpBody に本当のエラーが含まれる: ${notifyCalls[0].body}`);
+
+      // カーソルにも本当のエラーが残る
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state.pendingDeliveries['200'].retries, 5);
+      assert.ok(state.pendingDeliveries['200'].lastError.includes('configを解決できません'));
     });
   });
 
