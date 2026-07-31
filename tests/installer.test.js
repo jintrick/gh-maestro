@@ -122,12 +122,24 @@ const agentsYamlPath = path.join(ROOT, 'skills', 'agents.yaml');
 const agentsContent = fs.readFileSync(agentsYamlPath, 'utf8');
 const agents = parseAgentsYaml(agentsContent);
 
+// destDir（例: ~/.claude/skills）はgh-maestroが専有するディレクトリではなく、
+// 同じマシンにインストールされた他の無関係なスキル（training-attendance-check等）も
+// 同居しうる共有ディレクトリである。destDir配下を無条件に全走査すると、gh-maestro管理外の
+// スキルが独自にscripts/等を持つだけで誤って失敗する。gh-maestro自身が実際にインストール
+// するスキル名（リポジトリのskills/配下のディレクトリ名。_partialsは実スキルではないので除外）
+// だけに走査対象を絞る。
+const knownSkillNames = new Set(
+  fs.readdirSync(path.join(ROOT, 'skills'), { withFileTypes: true })
+    .filter(e => e.isDirectory() && e.name !== '_partials')
+    .map(e => e.name)
+);
+
 for (const [agentName, config] of Object.entries(agents)) {
   const destDir = expandHome(config.dest);
 
   test(`[${agentName}] インストール後のSKILL.mdに未置換の {{...}} が残っていない`, () => {
     const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-      .filter(e => e.isDirectory())
+      .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
       .map(e => e.name);
 
     for (const skill of skillDirs) {
@@ -144,7 +156,7 @@ for (const [agentName, config] of Object.entries(agents)) {
 
   test(`[${agentName}] インストール後のSKILL.mdのSCRIPTS_PATHが絶対パスである`, () => {
     const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-      .filter(e => e.isDirectory())
+      .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
       .map(e => e.name);
 
     for (const skill of skillDirs) {
@@ -181,7 +193,7 @@ for (const [agentName, config] of Object.entries(agents)) {
 
   test(`[${agentName}] スキルディレクトリに scripts/ サブディレクトリが存在しない（SKILL.mdのみ）`, () => {
     const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-      .filter(e => e.isDirectory())
+      .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
       .map(e => e.name);
     for (const skill of skillDirs) {
       const perSkillScripts = path.join(destDir, skill, 'scripts');
@@ -198,7 +210,7 @@ for (const [agentName, config] of Object.entries(agents)) {
   // 実行不能な指示を受け取った実障害（PR #38）の再発防止。
   test(`[${agentName}] に自己ポーリング専用のMonitor起動指示が含まれない`, () => {
     const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-      .filter(e => e.isDirectory())
+      .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
       .map(e => e.name)
       .filter(name => name !== 'gh-maestro-orchestrator');
 
