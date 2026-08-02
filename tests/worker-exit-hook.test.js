@@ -362,13 +362,17 @@ describe('buildMsgSendRelayArgs', () => {
 
 const { spawnSync: realSpawnSync } = require('child_process');
 const HOOK_SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-exit-hook.js');
+// 実spawnする子プロセスにはワーカー文脈の環境変数（GH_MAESTRO_WORKER 等）を継承させない。
+// 継承すると、非ゼロ終了時に worker-exit-hook.js の通知分岐が msg-send.js を呼び、
+// 実ワークスペース・実Issueへ偽の異常終了通知を投稿する事故になる（Issue #202）。
+const { cleanSpawnEnv } = require('./_spawn-env');
 
 describe('CLI引数の解釈', () => {
   test('3引数（新規起動形）はcaptureLogPathの位置がexitCodeとして解釈される', () => {
     withTempDir((dir) => {
       // workspace, executionId, exitCode の3引数。GH_MAESTRO_WORKER無しなので
       // 異常終了通知・代理送信のいずれも発生しない（クラッシュしないことだけ確認）。
-      const r = realSpawnSync(process.execPath, [HOOK_SCRIPT, dir, '', '0'], { encoding: 'utf8', timeout: 10000 });
+      const r = realSpawnSync(process.execPath, [HOOK_SCRIPT, dir, '', '0'], { encoding: 'utf8', timeout: 10000, env: cleanSpawnEnv() });
       assert.equal(r.status, 0, `stderr: ${r.stderr}`);
     });
   });
@@ -379,7 +383,7 @@ describe('CLI引数の解釈', () => {
       // resume（6引数）: workspace, executionId, logPath, sinceTimestamp, logOffset, exitCode
       const r = realSpawnSync(process.execPath, [
         HOOK_SCRIPT, dir, '', path.join(dir, 'out.log'), '2024-01-01T00:00:00Z', '0',
-      ], { encoding: 'utf8', timeout: 10000 });
+      ], { encoding: 'utf8', timeout: 10000, env: cleanSpawnEnv() });
       assert.equal(r.status, 0, `stderr: ${r.stderr}`);
     });
   });
@@ -391,7 +395,7 @@ describe('CLI引数の解釈', () => {
       const contract = JSON.stringify({ type: 'artifact-or-message', artifact: 'pr', issue: 5, sinceTimestamp: '2024-01-01T00:00:00Z' });
       const r = realSpawnSync(process.execPath, [
         HOOK_SCRIPT, dir, '', path.join(dir, 'out.log'), '2024-01-01T00:00:00Z', contract, '0',
-      ], { encoding: 'utf8', timeout: 10000 });
+      ], { encoding: 'utf8', timeout: 10000, env: cleanSpawnEnv() });
       assert.equal(r.status, 0, `stderr: ${r.stderr}`);
     });
   });
@@ -403,11 +407,47 @@ describe('CLI引数の解釈', () => {
       const contract = JSON.stringify({ type: 'artifact-or-message', artifact: 'pr', issue: 5, sinceTimestamp: '2024-01-01T00:00:00Z' });
       const r = realSpawnSync(process.execPath, [
         HOOK_SCRIPT, dir, '', path.join(dir, 'out.log'), '2024-01-01T00:00:00Z', contract, '1',
-      ], { encoding: 'utf8', timeout: 10000 });
+      ], { encoding: 'utf8', timeout: 10000, env: cleanSpawnEnv() });
       // GH_MAESTRO_WORKER 未設定なので異常終了通知は発生しない（msg-send がエラーになるだけ）
       // 重要なのは引数解釈の誤り（exitCode と contract の取り違え）でクラッシュしないこと
       // 非ゼロ終了コードの処理に失敗しても exit 0 でフック自体は正常完了する
       assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+    });
+  });
+
+  // ── 回帰テスト（Issue #202） ─────────────────────────────────────────────
+  // 実運用では `npm test` がワーカー起動コンテキスト（GH_MAESTRO_WORKER / GH_MAESTRO_WORKSPACE /
+  // ISSUE が注入された状態）で実行されることがある。この環境を親プロセス（テストランナー）に
+  // 再現し、実spawn CLIテストがそれらを子へ継承しない（= 異常終了通知を投稿しない）ことを検証する。
+  // 万一 cleanSpawnEnv() が漏れて env がリークした場合も、親に注入する GH_MAESTRO_WORKSPACE は
+  // git repo ではない一時dirを指すため、msg-send.js はリポジトリ解決で失敗し GitHub 投稿には
+  // 至らない（テスト自体が安全）。リーク時は通知分岐が発火して stderr に「異常終了通知の投稿に失敗」
+  // が出るため、下の doesNotMatch で回帰を検出できる。
+
+  test('ワーカー文脈envが親に注入されていても実spawnは通知を投稿しない（回帰 #202）', () => {
+    withTempDir((dir) => {
+      const savedWorker = process.env.GH_MAESTRO_WORKER;
+      const savedWorkspace = process.env.GH_MAESTRO_WORKSPACE;
+      const savedIssue = process.env.ISSUE;
+      process.env.GH_MAESTRO_WORKER = 'issue-999-dummy';
+      process.env.GH_MAESTRO_WORKSPACE = path.join(dir, 'not-a-repo');
+      process.env.ISSUE = '999';
+      try {
+        // 非ゼロ終了コード + 親にワーカーenvが有る状態でも、cleanSpawnEnv() を適用した
+        // 実spawnでは通知分岐が発火しない（msg-send.js への中継が走らない）。
+        const r = realSpawnSync(process.execPath, [HOOK_SCRIPT, dir, '', '1'],
+          { encoding: 'utf8', timeout: 10000, env: cleanSpawnEnv() });
+        assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+        assert.doesNotMatch(r.stderr, /異常終了通知/, `通知の投稿が試行されました: ${r.stderr}`);
+      } finally {
+        const restore = (key, value) => {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        };
+        restore('GH_MAESTRO_WORKER', savedWorker);
+        restore('GH_MAESTRO_WORKSPACE', savedWorkspace);
+        restore('ISSUE', savedIssue);
+      }
     });
   });
 });

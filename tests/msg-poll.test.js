@@ -8,6 +8,7 @@ const path = require('path');
 
 const msgPoll = require('../scripts/msg-poll');
 const readStateLib = require('../scripts/shared/read-state');
+const { cleanSpawnEnv } = require('./_spawn-env');
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
@@ -27,13 +28,6 @@ const runMain = (args, opts) => {
     if (saved !== undefined) process.env.GH_MAESTRO_WORKSPACE = saved;
   }
 };
-
-// 実プロセス起動するテスト用に GH_MAESTRO_WORKSPACE を外した env を作る。
-function cleanSpawnEnv() {
-  const env = { ...process.env };
-  delete env.GH_MAESTRO_WORKSPACE;
-  return env;
-}
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));

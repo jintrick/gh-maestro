@@ -77,7 +77,28 @@ let _ghRepoView = (opts = {}) => {
     { encoding: 'utf8', ...opts });
 };
 
-let _ghIssueComment = (issue, body, repo, opts = {}) => {
+// テスト実行中（node --test）の実投稿を構造的に防ぐガード。
+// node --test は NODE_TEST_CONTEXT をテストファイルへ自動設定し、そこから spawn された
+// 子プロセスにも継承される。実障害: worker-exit-hook.js の実spawnテストがワーカー文脈の
+// 環境変数を子へ継承し、この msg-send.js が実ワークスペース・実Issueへ偽の異常終了通知を
+// 投稿した（Issue #202）。テスト側の envクリーン漏れに依存しない多層防御として、
+// msg-send.js 本体が本物の投稿を機械的にブロックする
+// （Issue #151 で launchAgentHeadless に入れた NODE_TEST_CONTEXT ガードと同じ検出方式）。
+function testContextPostBlockReason() {
+  if (process.env.NODE_TEST_CONTEXT) {
+    return 'テスト実行中（NODE_TEST_CONTEXT）のため、実際のGitHub投稿は行いません';
+  }
+  return null;
+}
+
+// 実装の既定値。_resetGhIssueComment で復元可能にするため名前付き const で保持する。
+const defaultGhIssueComment = (issue, body, repo, opts = {}) => {
+  const blockReason = testContextPostBlockReason();
+  if (blockReason) {
+    // gh を一切呼ばずに拒否する（フェイルクローズ）。main() が stderr として報告する。
+    return { status: 1, stdout: '', stderr: `投稿を拒否しました: ${blockReason}` };
+  }
+
   const restResult = spawnSync('gh', ['issue', 'comment', String(issue), '--body-file', '-'], {
     input: body, encoding: 'utf8', ...opts,
   });
@@ -89,6 +110,8 @@ let _ghIssueComment = (issue, body, repo, opts = {}) => {
   process.stderr.write('msg-send: REST API失敗のためGraphQLにフォールバックします\n');
   return graphqlAddComment({ repo, issue, body, opts });
 };
+
+let _ghIssueComment = defaultGhIssueComment;
 
 // ── メインロジック ──────────────────────────────────────────────────────
 
@@ -313,47 +336,6 @@ function main(argsOverride, envOverride, ioOverride) {
     }
   }
 
-  // TEMP DIAGNOSTIC for #202 — 実際にGitHubへ投稿する直前の状態を、workspace解決に
-  // 依存しない絶対パス（ホームディレクトリ直下）へ記録する。worker-exit-hook.js側の
-  // 診断ログは常にworkspace変数を経由して書き込み先を決めており、workspace解決自体が
-  // 想定と違えばメインログもエラーフォールバックも同じ理由で共倒れする（architect助言）。
-  // この監査点はworkspace変数を書き込み先の決定に一切使わない。
-  try {
-    const crypto = require('crypto');
-    const os = require('os');
-    const auditPath = path.join(os.homedir(), '.gh-maestro-diag-202-audit.log');
-    const bodyHash = crypto.createHash('sha256').update(fullBody).digest('hex');
-    const scriptPath = (require.main && require.main.filename) || __filename;
-    let realScriptPath = null;
-    try { realScriptPath = fs.realpathSync(scriptPath); } catch {}
-    // Extract invocation ID from body if present (TEMP DIAGNOSTIC for #202).
-    // This bridges worker-exit-hook.js's notification posting with the audit log,
-    // enabling cross-correlation between the hook invocation and the GitHub comment.
-    let diagInvocationId = null;
-    const invMatch = /<!-- diag-202-inv: ([a-f0-9-]+) -->/.exec(fullBody);
-    if (invMatch) diagInvocationId = invMatch[1];
-
-    const entry = JSON.stringify({
-      ts: new Date().toISOString(),
-      pid: process.pid,
-      ppid: process.ppid,
-      execPath: process.execPath,
-      argv: process.argv,
-      cwd: process.cwd(),
-      scriptPath,
-      realScriptPath,
-      workerIdentity,
-      workspace,
-      recipient,
-      from,
-      issue,
-      bodyHash,
-      bodyPreview: fullBody.slice(0, 120),
-      invocationId: diagInvocationId,
-    });
-    fs.appendFileSync(auditPath, entry + '\n', 'utf8');
-  } catch {}
-
   // ── 送信 ────────────────────────────────────────────────────────────────
 
   const result = _ghIssueComment(issue, fullBody, repo, ghOpts);
@@ -400,6 +382,8 @@ function main(argsOverride, envOverride, ioOverride) {
 module.exports = {
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhIssueComment: (fn) => { _ghIssueComment = fn; },
+  _resetGhIssueComment: () => { _ghIssueComment = defaultGhIssueComment; },
+  testContextPostBlockReason,
   main,
   USAGE,
 };
