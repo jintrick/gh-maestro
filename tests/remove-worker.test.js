@@ -14,12 +14,8 @@ const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'remove-worker.js');
 // resolveWorkspace は --workspace 引数より GH_MAESTRO_WORKSPACE env を優先するため、
 // テストが --workspace で渡した一時dirを無視して実ワークスペースを読まないよう env を外す
-// （msg-poll.test.js の cleanSpawnEnv と同様）。
-function cleanSpawnEnv() {
-  const env = { ...process.env };
-  delete env.GH_MAESTRO_WORKSPACE;
-  return env;
-}
+// （共通ヘルパー tests/_spawn-env.js の cleanSpawnEnv。ワーカー文脈環境変数も除去する）。
+const { cleanSpawnEnv } = require('./_spawn-env');
 function run(args) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env: cleanSpawnEnv() });
 }

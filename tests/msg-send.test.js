@@ -610,3 +610,45 @@ test('injected gh functions can be reset', () => {
     assert.equal(r.lines[0], 'reset-url');
   });
 });
+
+// ── テスト実行中の実投稿防止ガード（Issue #202） ─────────────────────────────
+// 実障害: worker-exit-hook.js の実spawnテストがワーカー文脈の環境変数を子へ継承し、
+// msg-send.js が実ワークスペース・実Issueへ偽の異常終了通知を投稿した。テスト側の
+// envクリーン漏れに依存しない多層防御として、実 _ghIssueComment が NODE_TEST_CONTEXT
+// 検出時に gh を一切呼ばずに投稿を拒否することを検証する。
+
+test('testContextPostBlockReason: NODE_TEST_CONTEXT 有無で null / 理由文字列を返す', () => {
+  const saved = process.env.NODE_TEST_CONTEXT;
+  try {
+    delete process.env.NODE_TEST_CONTEXT;
+    assert.equal(msgSend.testContextPostBlockReason(), null);
+    process.env.NODE_TEST_CONTEXT = 'child-v8';
+    assert.match(msgSend.testContextPostBlockReason(), /NODE_TEST_CONTEXT/);
+  } finally {
+    if (saved === undefined) delete process.env.NODE_TEST_CONTEXT;
+    else process.env.NODE_TEST_CONTEXT = saved;
+  }
+});
+
+test('NODE_TEST_CONTEXT 下では実投稿を拒否する（構造的ガード）', () => {
+  // このテスト自体は node --test 配下で走るため NODE_TEST_CONTEXT が立っているが、
+  // ランナーに依存せず明示的に設定する（後で復元）。
+  const saved = process.env.NODE_TEST_CONTEXT;
+  process.env.NODE_TEST_CONTEXT = 'child-v8';
+  try {
+    withTempDir(workspace => {
+      msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+      // モックを外して実実装（ガード入り）を使う。ガードが発火するため gh は呼ばれず、
+      // main() は拒否メッセージ付きで code 1 になる（= 実投稿へ到達しない）。
+      msgSend._resetGhIssueComment();
+      const r = msgSend.main(['orchestrator', '--stdin', '--issue', '5', '--workspace', workspace], null, stdinIO('hello'));
+      assert.equal(r.code, 1);
+      assert.ok(r.errLines.some(l => l.includes('拒否')), `拒否メッセージが必要: ${r.errLines.join('\n')}`);
+    });
+  } finally {
+    if (saved === undefined) delete process.env.NODE_TEST_CONTEXT;
+    else process.env.NODE_TEST_CONTEXT = saved;
+    // 後続テストへ実装を安全なモックへ戻す（ガード入りの実実装を残さない）
+    msgSend._setGhIssueComment(() => ({ status: 1, stdout: '', stderr: 'reset' }));
+  }
+});
