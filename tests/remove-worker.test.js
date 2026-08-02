@@ -12,8 +12,16 @@ const { spawnSync } = require('child_process');
 // 引数が矛盾している場合は、ペインkillやworktree削除に進む前に exit 1 で止まる）。
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'remove-worker.js');
+// resolveWorkspace は --workspace 引数より GH_MAESTRO_WORKSPACE env を優先するため、
+// テストが --workspace で渡した一時dirを無視して実ワークスペースを読まないよう env を外す
+// （msg-poll.test.js の cleanSpawnEnv と同様）。
+function cleanSpawnEnv() {
+  const env = { ...process.env };
+  delete env.GH_MAESTRO_WORKSPACE;
+  return env;
+}
 function run(args) {
-  return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
+  return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env: cleanSpawnEnv() });
 }
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-rmw-'));
@@ -77,4 +85,18 @@ test('--issue+--skill で複数該当なら候補付きエラーで終了する'
     assert.match(r.stderr, /issue-12-a/);
     assert.match(r.stderr, /issue-12-b/);
   });
+});
+
+test('余剰な位置引数はエラー終了する（黙って無視しない）', () => {
+  const r = run(['--worker-name', 'issue-5-x', 'extra']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /未知の引数/);
+  assert.match(r.stderr, /extra/);
+});
+
+test('未知のフラグはエラー終了する（黙って無視しない）', () => {
+  const r = run(['--worker-name', 'issue-5-x', '--bogus']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /未知の引数/);
+  assert.match(r.stderr, /--bogus/);
 });
