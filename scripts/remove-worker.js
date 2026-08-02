@@ -56,6 +56,14 @@ if (require.main === module) {
     process.exit(0);
   }
 
+  // このスクリプトは位置引数を取らない。余剰な位置引数・未知フラグは黙って無視しない
+  // （spawn-worker.js / create-issue.js と同じ rest 検証パターン。argv-parsing-pitfalls参照）。
+  if (rest.length > 0) {
+    console.error(`remove-worker: 未知の引数です: ${rest.join(' ')}`);
+    console.error(USAGE);
+    process.exit(1);
+  }
+
   const fail = (msg) => { console.error(`remove-worker: ${msg}`); process.exit(1); };
 
   // 他スクリプト（poll-pr.js等）と同じ workspace 解決順（GH_MAESTRO_WORKSPACE env >

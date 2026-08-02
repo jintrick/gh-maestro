@@ -105,6 +105,21 @@ test('parseArgs: --wait が無ければ waitArg は null', () => {
   assert.equal(r.waitArg, null);
 });
 
+test('parseArgs: 余剰な位置引数は unknownArgs を返す', () => {
+  const r = msgPoll.parseArgs(['my-worker', '--issue', '5', 'extra']);
+  assert.deepEqual(r.unknownArgs, ['extra']);
+});
+
+test('parseArgs: 未知のフラグは unknownArgs に含まれる', () => {
+  const r = msgPoll.parseArgs(['my-worker', '--issue', '5', '--bogus']);
+  assert.deepEqual(r.unknownArgs, ['--bogus']);
+});
+
+test('parseArgs: 正常系は unknownArgs が null', () => {
+  const r = msgPoll.parseArgs(['my-worker', '--issue', '5', '--workspace', '/ws', '--once', '--force']);
+  assert.equal(r.unknownArgs, null);
+});
+
 // ── --help / -h ────────────────────────────────────────────────────────────
 
 test('--help が usage を返して code 0', () => {
@@ -136,6 +151,13 @@ test('worker モードで --issue なしは code 1', () => {
   const r = runMain(['my-worker']);
   assert.equal(r.code, 1);
   assert.ok(r.errLines.some(l => l.includes('--issue')));
+  assert.equal(r.scanOnce, null);
+});
+
+test('余剰な位置引数は code 1（黙って無視しない）', () => {
+  const r = runMain(['my-worker', '--issue', '5', 'extra']);
+  assert.equal(r.code, 1);
+  assert.ok(r.errLines.some(l => l.includes('未知の引数')));
   assert.equal(r.scanOnce, null);
 });
 
@@ -966,6 +988,15 @@ test('--watch-pid: 不正なpid指定はexit 1', () => {
   const r = spawnSync(process.execPath, [script, '--watch-pid', 'not-a-number'], { encoding: 'utf8', timeout: 5000, env: cleanSpawnEnv() });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /正の整数のPID/);
+});
+
+test('--watch-pid: 余剰な位置引数・未知フラグはエラー終了する（黙って無視しない）', () => {
+  const { spawnSync } = require('child_process');
+  const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
+  const r = spawnSync(process.execPath, [script, '--watch-pid', String(process.pid), 'extra'],
+    { encoding: 'utf8', timeout: 5000, env: cleanSpawnEnv() });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /未知の引数/);
 });
 
 // ── --wait モード ───────────────────────────────────────────────────────────

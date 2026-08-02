@@ -193,6 +193,7 @@ function parseMarker(body) {
  * @param {string[]} args
  * @returns {{
  *   help: boolean, exitFlagMiss: boolean,
+ *   unknownArgs?: string[]|null,
  *   self?: string, issueArg?: string|null, workspaceArg?: string|null,
  *   intervalArg?: string|null, sessionPidArg?: string|null,
  *   onceMode?: boolean, force?: boolean, waitArg?: string|null,
@@ -212,9 +213,14 @@ function parseArgs(args) {
   const force = rest.includes('--force');
   const positional = rest.filter(a => a !== '--once' && a !== '--force');
 
+  // 正当な位置引数は self の1つのみ。余剰な位置引数・未知フラグ（--once/--force以外で
+  // parseFlagsに消費されなかった rest）は黙って無視しない（argv-parsing-pitfalls参照）。
+  const unknownArgs = positional.length > 1 ? positional.slice(1) : null;
+
   return {
     help: false,
     exitFlagMiss: false,
+    unknownArgs,
     self: positional[0],
     issueArg: values['--issue'],
     workspaceArg: values['--workspace'],
@@ -266,6 +272,12 @@ function main(argsOverride, opts = {}) {
 
   if (parsed.exitFlagMiss) {
     writeErr('msg-poll: フラグには値が必要です。');
+    writeErr(USAGE);
+    return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
+  }
+
+  if (parsed.unknownArgs) {
+    writeErr(`msg-poll: 未知の引数です: ${parsed.unknownArgs.join(' ')}`);
     writeErr(USAGE);
     return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
   }
@@ -659,10 +671,15 @@ if (require.main === module) {
   // <self> 等の他の引数を必要としない、完全に独立したモード。
   // 「重複起動を検出しました」時の代替コマンドとして案内される。
   if (rawArgs.includes('--watch-pid')) {
-    const { values: watchValues, exitFlagMiss: watchExitFlagMiss } =
+    const { values: watchValues, rest: watchRest, exitFlagMiss: watchExitFlagMiss } =
       parseFlags(rawArgs, ['--watch-pid', '--interval']);
     if (watchExitFlagMiss) {
       process.stderr.write('msg-poll: フラグには値が必要です。\n');
+      process.exit(1);
+    }
+    // watch-pid モードは位置引数を取らない。余剰な位置引数・未知フラグは黙って無視しない。
+    if (watchRest.length > 0) {
+      process.stderr.write(`msg-poll: 未知の引数です: ${watchRest.join(' ')}\n`);
       process.exit(1);
     }
     const watchPid = parseInt(watchValues['--watch-pid'], 10);
@@ -687,8 +704,11 @@ if (require.main === module) {
 
   // main() と同じ parseArgs() を再利用する（解析ロジックを2箇所に分けない）。
   const parsedForCli = parseArgs(rawArgs);
-  const isWait = !parsedForCli.help && !parsedForCli.exitFlagMiss && !parsedForCli.onceMode && parsedForCli.waitArg != null;
-  const isContinuous = !parsedForCli.help && !parsedForCli.exitFlagMiss && !parsedForCli.onceMode && !isWait;
+  // 未知引数がある場合は main() がエラー終了するため、多重起動プリフライトのロック取得・
+  // gh解決などの副作用を走らせない（未知引数で素早く fail-fast する）。
+  const hasUnknownArgs = !parsedForCli.help && parsedForCli.unknownArgs != null;
+  const isWait = !parsedForCli.help && !parsedForCli.exitFlagMiss && !hasUnknownArgs && !parsedForCli.onceMode && parsedForCli.waitArg != null;
+  const isContinuous = !parsedForCli.help && !parsedForCli.exitFlagMiss && !hasUnknownArgs && !parsedForCli.onceMode && !isWait;
 
   // ── 単一起動ロック + 多重起動検知（継続モード・--wait モードのみ、main() 本体の gh 呼び出しより前に行う） ──
   // main() は self/workspace 解決の直後に gh repo view を実行するため、
