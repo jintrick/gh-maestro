@@ -22,3 +22,11 @@ paths:
 - **`detached` + `unref` のプロセスはテストランナーをブロックも失敗もさせない。** `node --test` は緑で完走するため「全テスト pass」ではこの被害を検出できない。緑を安全の根拠にしない。
 - **spawn しうるコードのテスト実行後は、孤児プロセスが 0 であることを確認する。** 例（Windows）: `powershell -NoProfile -Command "@(Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | ? { $_.CommandLine -like '*node --test*' }).Count"` が 0（テストランナー自身が終了すれば孤児は残らない）。
 - **自プロセス（`process.pid`）を registry に登録するテストは、`afterEach` 等で必ず `unregisterProcess` すること。** 残留すると後続テストの `sweepRegistry`/`killProcessTree` がテストランナー自身を対象にする事故につながる（PR #64 で実際に発生）。
+
+## 実spawnした子プロセスへの環境変数リークと外部副作用ガード（Issue #202）
+
+上記は「テストが常駐プロセスをspawnする」失敗モードだが、これとは別に「一度きりで終了する実spawn自体は許容されるが、その子プロセスが親のワーカー文脈環境変数（`GH_MAESTRO_WORKER`・`GH_MAESTRO_WORKSPACE`等）を継承し、その先で外部副作用API（GitHub投稿等）を呼んでしまう」という失敗モードがある。
+
+- 実障害: `worker-exit-hook.test.js` の実spawn CLIテストが `env` 未指定だったため、ワーカープロセス自身が `npm test` を実行すると `GH_MAESTRO_WORKER`/`GH_MAESTRO_WORKSPACE` が子プロセスへ継承され、`msg-send.js` が実ワークスペース・実Issueを解決して本物のGitHub Issueへ偽の通知を投稿した。
+- 対策は二層: (1) `tests/_spawn-env.js::cleanSpawnEnv()` で実spawn時にワーカー文脈envを除去する（テスト側の対策）。(2) `scripts/msg-send.js` に `NODE_TEST_CONTEXT`（`node --test` が自動設定し子プロセスにも継承される）を検出したら実投稿をフェイルクローズで拒否するガードを追加する（本番コード側の構造的対策。Issue #151 で `launchAgentHeadless` に導入したのと同じパターン）。
+- (1)だけでは「envクリーンし忘れ」という将来のテスト側の注意力に依存する。**外部副作用（GitHub投稿・破壊的操作等）を持つ共有スクリプトを新設・変更する際は、(2)のようなNODE_TEST_CONTEXTガードを本体側に持たせることを検討する**（テスト側の設定漏れに依存せず効くため）。
