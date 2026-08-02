@@ -213,15 +213,21 @@ function parseArgs(args) {
   const force = rest.includes('--force');
   const positional = rest.filter(a => a !== '--once' && a !== '--force');
 
-  // 正当な位置引数は self の1つのみ。余剰な位置引数・未知フラグ（--once/--force以外で
-  // parseFlagsに消費されなかった rest）は黙って無視しない（argv-parsing-pitfalls参照）。
-  const unknownArgs = positional.length > 1 ? positional.slice(1) : null;
+  // `--` で始まる未消費トークンは未知フラグとして扱い、位置引数（self）として受理しない。
+  // 先頭に来て self として採用されると未知フラグが黙って通過し、ポーリング・状態更新・
+  // PID registry操作まで進んでしまう（Review指摘。argv-parsing-pitfalls参照）。
+  const unknownArgs = positional.filter(a => a.startsWith('--'));
+  const selfCandidates = positional.filter(a => !a.startsWith('--'));
+  // 余剰な非フラグ位置引数（self は1つだけ）も未知引数として扱う。
+  if (selfCandidates.length > 1) {
+    unknownArgs.push(...selfCandidates.slice(1));
+  }
 
   return {
     help: false,
     exitFlagMiss: false,
-    unknownArgs,
-    self: positional[0],
+    unknownArgs: unknownArgs.length > 0 ? unknownArgs : null,
+    self: selfCandidates[0],
     issueArg: values['--issue'],
     workspaceArg: values['--workspace'],
     intervalArg: values['--interval'],

@@ -115,6 +115,12 @@ test('parseArgs: 未知のフラグは unknownArgs に含まれる', () => {
   assert.deepEqual(r.unknownArgs, ['--bogus']);
 });
 
+test('parseArgs: 先頭の未知フラグは self として採用されず unknownArgs に含まれる', () => {
+  const r = msgPoll.parseArgs(['--bogus', '--issue', '5', '--once']);
+  assert.deepEqual(r.unknownArgs, ['--bogus']);
+  assert.equal(r.self, undefined);
+});
+
 test('parseArgs: 正常系は unknownArgs が null', () => {
   const r = msgPoll.parseArgs(['my-worker', '--issue', '5', '--workspace', '/ws', '--once', '--force']);
   assert.equal(r.unknownArgs, null);
@@ -159,6 +165,19 @@ test('余剰な位置引数は code 1（黙って無視しない）', () => {
   assert.equal(r.code, 1);
   assert.ok(r.errLines.some(l => l.includes('未知の引数')));
   assert.equal(r.scanOnce, null);
+});
+
+test('先頭の未知フラグは self として受理されず code 1（gh呼び出し等の副作用に到達しない）', () => {
+  withTempDir(workspace => {
+    let repoViewCalls = 0;
+    msgPoll._setGhRepoView(() => { repoViewCalls++; return { status: 0, stdout: 'test/repo\n' }; });
+
+    const r = runMain(['--bogus', '--issue', '5', '--once', '--workspace', workspace]);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('未知の引数')));
+    assert.equal(r.scanOnce, null);
+    assert.equal(repoViewCalls, 0, 'gh repo view は呼ばれない');
+  });
 });
 
 // ── path-safety 検証 ───────────────────────────────────────────────────────
