@@ -92,7 +92,9 @@ function applySubstitutions(content, substitutions) {
   do {
     prev = result;
     for (const [key, value] of Object.entries(substitutions)) {
-      result = result.replaceAll(`{{${key}}}`, value);
+      // replaceAll の第2引数が文字列だと $&/$`/$'/$$ 等を特殊置換パターンとして解釈してしまう
+      // （検索側が正規表現でなくても働く仕様）。置換値をそのまま返す関数形式にして無効化する。
+      result = result.replaceAll(`{{${key}}}`, () => value);
     }
   } while (result !== prev);
   return result;

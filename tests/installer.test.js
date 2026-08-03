@@ -70,6 +70,50 @@ test('applySubstitutions: 未定義キーは残らない（全置換されるこ
   assert.ok(!result.includes('{{'), `未置換のプレースホルダーが残っている: ${result}`);
 });
 
+test('applySubstitutions: 値に $` などのJS特殊置換パターンが含まれていても文字通りに置換する', () => {
+  // String.prototype.replaceAll(literalString, replacementString) は、第2引数が文字列の場合、
+  // 検索側が正規表現でなくても $&/$`/$'/$$ 等を特殊パターンとして解釈する。
+  // $` は「マッチ箇所より前の文字列全体」を意味するため、置換値がこの並びを含むと、
+  // 意図しない周辺テキスト（今回はSKILL.mdのフロントマター）が本文中に複製されてしまう。
+  const content = 'before {{X}} after';
+  const value = 'lit/`$`eral';
+  const result = applySubstitutions(content, { X: value });
+  assert.equal(result, `before ${value} after`, `$\` が特殊パターンとして解釈され本文が破損している: ${result}`);
+});
+
+test('applySubstitutions: 実際の communication-rules.md を差し込んでもフロントマターが本文に複製されない（回帰）', () => {
+  // 実障害: skills/_partials/communication-rules.md の説明文中にある例示
+  // 「バッククォート/`$`入りの報告」がリテラルに $` の並びを含んでおり、
+  // {{COMMUNICATION_RULES}} を差し込んだ際にSKILL.md自身のフロントマターが
+  // 本文中の関係ない位置へ複製されるかたちで破損していた（explorer/investigator等で確認）。
+  const communicationRules = fs.readFileSync(
+    path.join(ROOT, 'skills', '_partials', 'communication-rules.md'),
+    'utf8'
+  ).trimEnd();
+  const skillMd = [
+    '---',
+    'name: gh-maestro-explorer',
+    'description: dummy skill for regression test',
+    '---',
+    '',
+    '{{COMMUNICATION_RULES}}',
+    '',
+    '## ゴール',
+  ].join('\n');
+
+  const result = applySubstitutions(skillMd, {
+    COMMUNICATION_RULES: communicationRules,
+    SCRIPTS_PATH: '/abs/path/scripts',
+  });
+
+  const frontmatterOccurrences = (result.match(/name: gh-maestro-explorer/g) || []).length;
+  assert.equal(
+    frontmatterOccurrences,
+    1,
+    `本文中にフロントマターが意図せず複製されている（$\` 特殊パターン回帰）:\n${result}`
+  );
+});
+
 test('expandHome: ~ をホームディレクトリに展開する', () => {
   const home = process.env.HOME || process.env.USERPROFILE;
   const result = expandHome('~/foo/bar');
