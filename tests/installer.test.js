@@ -617,3 +617,10 @@ for (const name of ['msg-send.js', 'unlink-junctions.js', 'spawn-worker.js', 'st
     assert.ok(fs.existsSync(p), `集約先に存在しない: ${p}`);
   });
 }
+
+test('集約先に agents.yaml が配布され、内容が skills/agents.yaml と一致する', () => {
+  const distributed = path.join(SHARED_SCRIPTS, 'agents.yaml');
+  const original = path.join(ROOT, 'skills', 'agents.yaml');
+  assert.ok(fs.existsSync(distributed), `集約先に存在しない: ${distributed}`);
+  assert.equal(fs.readFileSync(distributed, 'utf8'), fs.readFileSync(original, 'utf8'));
+});

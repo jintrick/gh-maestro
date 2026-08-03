@@ -1,8 +1,21 @@
+# agy の設置先について: 実機検証（2026-08）で、Antigravity CLI (agy) は
+# ~/.gemini/antigravity-cli/skills ではなく、ホーム直下の ~/.agents/skills
+# （ワークスペース非依存のグローバル）を実際に読み込んでいることが確認された
+# （旧設定は誤り。gh-maestro-assistant/explorerがスキルを認識できない不具合の
+# 根本原因だった）。
+#
+# 注意: ~/.agents/skills は codex とも共有される物理ディレクトリになる。
+# install.js は agy 用と codex 用でそれぞれ独立にレンダリングしたSKILL.mdを
+# 同じディレクトリへ書き込むため、両者の skill_markdown_template_placeholder_substitutions
+# やルール対応状況（rulesSupported）が将来異なる値になった場合、後から処理された
+# エージェント側の内容で先の内容が警告なく上書きされる。現時点では両者とも
+# substitutions未設定・rulesSupported:false で内容が一致するため実害はないが、
+# どちらかの設定を変える際はこの共有関係を踏まえること。
 agents:
   claude:
     skill_files_install_destination_directory: ~/.claude/skills
   agy:
-    skill_files_install_destination_directory: ~/.gemini/antigravity-cli/skills
+    skill_files_install_destination_directory: ~/.agents/skills
   reasonix:
     skill_files_install_destination_directory: ~/.reasonix/skills
   codex:

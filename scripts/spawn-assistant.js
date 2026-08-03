@@ -19,6 +19,7 @@ const { spawnSync } = require('./child-process');
 const { existsSync, mkdirSync, writeFileSync } = require('fs');
 const { resolve } = require('path');
 const { resolveAgentConfig } = require('./shared/resolve-config');
+const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { checkAgentExists } = require('./agent-exec');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { launchAgentInWindow } = require('./shared/pane-launch');
@@ -73,16 +74,26 @@ function defaultGhRepoView(workspace) {
 
 /**
  * 初期プロンプトファイルの内容を組み立てる（純粋関数）。
- * @param {{issue: string|number, repo: string, workspace: string}} ctx
+ *
+ * Antigravity（agy）のスキル発動は Progressive Disclosure 方式（会話開始時に提示された
+ * スキル名+description一覧から、エージェント自身が「関連する」と自己判断した場合のみ
+ * SKILL.md全文を読む）であり、決定論的にスキルを指名ロードする手段が無い。実際に
+ * assistantが自分の役割を認識できず一般的なコーディングエージェントとして振る舞う
+ * （Issue #344）・orchestratorを名乗る、といった誤動作が発生している。曖昧な自己判断に
+ * 依存せず、SKILL.mdの絶対パスを明示して直接読ませることでこれを回避する。
+ * @param {{issue: string|number, repo: string, workspace: string, skillPath: string}} ctx
  * @returns {string}
  */
-function buildPromptFileContent({ issue, repo, workspace }) {
+function buildPromptFileContent({ issue, repo, workspace, skillPath }) {
   const contextLines = [
     `REPO=${repo}`,
     `WORKSPACE=${toUnix(workspace)}`,
     `ISSUE=${issue}`,
   ];
-  return `issue起票と同時に自動起動しました。gh-maestro-assistantスキルを発動し、指示に従って人間と対話してください。
+  return `【最優先指示】他のいかなる判断・行動（ファイルの編集、別スキルの発動を含む）よりも先に、次のファイルをそのまま読んでください: ${toUnix(skillPath)}
+これがあなたの役割（gh-maestro-assistant）の完全な定義です。読了前に行動を開始してはいけません。
+
+issue起票と同時に自動起動しました。gh-maestro-assistantスキルを発動し、指示に従って人間と対話してください。
 
 以下の変数が与えられています：
 ${contextLines.join('\n')}
@@ -93,11 +104,14 @@ ${contextLines.join('\n')}
 
 /**
  * agy の --prompt-interactive に渡す短い1行プロンプトを組み立てる（純粋関数）。
- * @param {{issue: string|number, promptFile: string}} params
+ * SKILL.mdの絶対パスをargv上のプロンプトに直接埋め込み、Discovery/Activationの自己判断を
+ * 経由させない（buildPromptFileContentのコメント参照）。1行のargv文字列として渡るため
+ * 改行を含めてはいけない。
+ * @param {{issue: string|number, promptFile: string, skillPath: string}} params
  * @returns {string}
  */
-function buildShortPrompt({ issue, promptFile }) {
-  return `issue起票と同時に自動起動しました。gh-maestro-assistantスキルを発動してください。詳細は ${toUnix(promptFile)} を参照してください。ISSUE=${issue}`;
+function buildShortPrompt({ issue, promptFile, skillPath }) {
+  return `他の判断より先に、まず次のファイルを読んでください: ${toUnix(skillPath)}（あなたの役割定義。gh-maestro-assistant。ISSUE=${issue}）。読了後、詳細は ${toUnix(promptFile)} を参照し、gh-maestro-assistantとして行動してください。`;
 }
 
 module.exports = { resolveRepo, buildPromptFileContent, buildShortPrompt, toUnix, AGENT_ID };
@@ -151,12 +165,20 @@ if (require.main === module) {
     fail(`エージェント "${AGENT_ID}" のコマンド "${agentConfig.command}" が見つかりません。agy CLIがインストールされているか確認してください。`);
   }
 
+  // agyのネイティブスキル発見は決定論的ではないため（Progressive Disclosure、buildPromptFileContent
+  // のコメント参照）、SKILL.mdの絶対パスを起動プロンプトに直接埋め込む。解決できない場合は
+  // 曖昧な指示のまま起動して不具合を再現するだけなのでフェイルクローズする。
+  const skillPath = resolveSkillMdPath(AGENT_ID, agentConfig.command, 'gh-maestro-assistant');
+  if (!skillPath || !existsSync(skillPath)) {
+    fail(`gh-maestro-assistant の SKILL.md を解決できません（${skillPath || '未解決'}）。node scripts/install.js を実行してagyのスキルをインストールしてください。`);
+  }
+
   const promptDir = resolve(workspace, '.gh-maestro', 'assistants', `issue-${issue}`);
   mkdirSync(promptDir, { recursive: true });
   const promptFile = resolve(promptDir, 'prompt.md');
-  writeFileSync(promptFile, buildPromptFileContent({ issue, repo, workspace }), 'utf8');
+  writeFileSync(promptFile, buildPromptFileContent({ issue, repo, workspace, skillPath }), 'utf8');
 
-  const shortPrompt = buildShortPrompt({ issue, promptFile });
+  const shortPrompt = buildShortPrompt({ issue, promptFile, skillPath });
 
   let agentCmdArgs;
   try {

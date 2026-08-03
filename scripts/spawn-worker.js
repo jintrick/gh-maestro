@@ -40,6 +40,7 @@ const { createNormalWorkerStore, acquireLease: acquireWorkerLease,
 const { killProcessTree } = require('./kill-tree');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
+const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
@@ -291,6 +292,20 @@ if (agentConfig.promptDelivery === 'send-text-after-launch') {
   );
 }
 
+// --- agy系ワーカーのSKILL.md絶対パスを解決する（決定論的な発動、Issue #344対策） ---
+// agy（Antigravity CLI）のネイティブなスキル発見は決定論的でなく（Progressive Disclosure、
+// 自己判断でActivationするかを決める方式）、自然言語の「スキルを発動してください」だけの
+// 指示では稀に自分の役割を認識できず誤動作する（gh-maestro-assistantで実障害を確認済み。
+// scripts/spawn-assistant.js の同名コメント参照）。agy以外のランタイム（claude/codex/reasonix）
+// はこの問題を持たないため対象外とし、プロンプト文言も一切変更しない。
+let agySkillPath = null;
+if (agentConfig.runtime === 'agy') {
+  agySkillPath = resolveSkillMdPath(agentConfig.id, agentConfig.command, skill);
+  if (!agySkillPath || !existsSync(agySkillPath)) {
+    fail(`${skill} の SKILL.md を解決できません（${agySkillPath || '未解決'}）。node scripts/install.js を実行してagyのスキルをインストールしてください。`);
+  }
+}
+
 // --- [レガシーガード] pwsh -Command 経由エージェントの空白パスガード ---
 // 新しい agent-exec.js は -EncodedCommand（Windows）/ exec "$@"（Unix）を使用するため
 // 引数内の空白は安全に扱える。ただし、extraArgs に -Command を含む旧来のカスタム設定が
@@ -539,7 +554,14 @@ contextLines.push(`ISSUE=${issue}`);
 if (baseBranch) contextLines.push(`BASE_BRANCH=${baseBranch}`);
 const extra = prompt ? `\n${prompt}` : '';
 
-const initialPrompt = `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。${extra}\n\n以下の変数が与えられています：\n${contextLines.join('\n')}\n\nこの件に関する質問・報告はチャットに出力せず、orchestratorまでお願いします。「～を実装します」「着手しました」などの着手報告も不要です。`;
+// agy系ワーカーのみ、SKILL.mdの絶対パスを先頭に明示する（agySkillPathの解決理由は
+// 上記の「agy系ワーカーのSKILL.md絶対パスを解決する」節のコメント参照）。
+// 他ランタイムはagySkillPathが常にnullのため、プロンプト文言は従来通り変化しない。
+const skillPathNotice = agySkillPath
+  ? `【最優先指示】他のいかなる判断・行動（ファイルの編集、別スキルの発動を含む）よりも先に、次のファイルをそのまま読んでください: ${toUnix(agySkillPath)}\nこれがあなたの役割（${skill}）の完全な定義です。読了前に行動を開始してはいけません。\n\n`
+  : '';
+
+const initialPrompt = `${skillPathNotice}orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。${extra}\n\n以下の変数が与えられています：\n${contextLines.join('\n')}\n\nこの件に関する質問・報告はチャットに出力せず、orchestratorまでお願いします。「～を実装します」「着手しました」などの着手報告も不要です。`;
 
 const promptDir = resolve(worktreeDir, '.gh-maestro');
 mkdirSync(promptDir, { recursive: true });
@@ -553,7 +575,12 @@ console.warn(`spawn-worker: プロンプトを ${promptFile} に書き出しま�
 // スキル文書を書き出す専用処理は持たない（過去、reasonixだけAGENTS.mdへ手動合成しており
 // --prompt-file/--short-promptの内容が届かないバグの温床だった）。
 
-const shortPrompt = `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。詳細は ${toUnix(promptFile)} を参照してください。`;
+// shortPromptはargv上の1行文字列として渡るため改行を含めない（spawn-assistant.jsの
+// buildShortPromptと同じ制約）。
+const skillPathShortNotice = agySkillPath
+  ? `他の判断より先に、まず次のファイルを読んでください: ${toUnix(agySkillPath)}（あなたの役割定義。${skill}）。読了後、`
+  : '';
+const shortPrompt = `${skillPathShortNotice}orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。詳細は ${toUnix(promptFile)} を参照してください。`;
 
 // --- プロンプト配送メカニズム ---
 // エージェントごとの起動argv組み立ては、agent-defaults.json の promptDelivery（宣言的データ）で選び、

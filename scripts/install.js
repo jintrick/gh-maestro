@@ -13,78 +13,9 @@ const PARTIALS_DIR = path.join(SKILLS_DIR, '_partials');
 const { validateAgentDefaults } = require(path.join(__dirname, 'shared', 'validate-agent-defaults'));
 const { resolveExtends } = require(path.join(__dirname, 'shared', 'resolve-config'));
 const storageLayout = require(path.join(__dirname, 'shared', 'storage-layout'));
-
-// ── Minimal YAML parser for agents.yaml ──────────────────────────────────────
-
-function parseAgentsYaml(content) {
-  const agents = {};
-  let currentAgent = null;
-  let inSubstitutions = false;
-  let blockKey = null;
-  let blockIndent = null;
-  let blockLines = [];
-
-  function flushBlock() {
-    if (blockKey && currentAgent) {
-      while (blockLines.length && !blockLines[blockLines.length - 1].trim()) blockLines.pop();
-      agents[currentAgent].substitutions[blockKey] = blockLines.join('\n');
-    }
-    blockKey = null;
-    blockIndent = null;
-    blockLines = [];
-  }
-
-  for (const rawLine of content.split('\n')) {
-    const line = rawLine.trimEnd();
-
-    if (blockKey !== null) {
-      if (!line.trim()) { blockLines.push(''); continue; }
-      const lineIndent = line.length - line.trimStart().length;
-      if (blockIndent === null) blockIndent = lineIndent;
-      if (lineIndent >= blockIndent) { blockLines.push(line.slice(blockIndent)); continue; }
-      flushBlock();
-    }
-
-    if (!line || line.trimStart().startsWith('#')) continue;
-
-    const indent = line.length - line.trimStart().length;
-    const colonIdx = line.indexOf(':');
-    if (colonIdx === -1) continue;
-
-    const key = line.slice(0, colonIdx).trim();
-    const value = line.slice(colonIdx + 1).trim();
-
-    if (indent === 2 && !value) {
-      currentAgent = key;
-      agents[key] = { substitutions: {} };
-      inSubstitutions = false;
-    } else if (indent === 4 && currentAgent) {
-      if (key === 'skill_markdown_template_placeholder_substitutions') {
-        inSubstitutions = true;
-      } else if (key === 'skill_files_install_destination_directory') {
-        agents[currentAgent].dest = value;
-        inSubstitutions = false;
-      }
-    } else if (indent === 6 && currentAgent && inSubstitutions) {
-      if (value === '|') {
-        blockKey = key;
-        blockIndent = null;
-        blockLines = [];
-      } else {
-        agents[currentAgent].substitutions[key] = value;
-      }
-    }
-  }
-
-  flushBlock();
-  return agents;
-}
+const { parseAgentsYaml, expandHome } = require(path.join(__dirname, 'shared', 'agents-yaml'));
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
-
-function expandHome(p) {
-  return p.replace(/^~/, process.env.HOME || process.env.USERPROFILE || '~');
-}
 
 function applySubstitutions(content, substitutions) {
   let result = content;
@@ -462,7 +393,9 @@ const scriptFiles = entries
 const scriptSubdirs = entries.filter(e => e.isDirectory()).map(e => e.name);
 
 // stale 削除: scripts/ に無いファイル・ディレクトリを集約先から除去する
-const expectedFiles = new Set(scriptFiles);
+// 'agents.yaml' は scripts/ 配下ではなく skills/agents.yaml からの配布分（下記参照）のため、
+// scriptFiles の走査には含まれないが stale 削除対象からは除外する必要がある。
+const expectedFiles = new Set([...scriptFiles, 'agents.yaml']);
 const expectedDirs = new Set(scriptSubdirs);
 for (const entry of fs.readdirSync(SHARED_SCRIPTS, { withFileTypes: true })) {
   const p = path.join(SHARED_SCRIPTS, entry.name);
@@ -487,6 +420,13 @@ for (const d of scriptSubdirs) {
   fs.cpSync(path.join(scriptsDir, d), destSubdir, { recursive: true });
 }
 ok(`${scriptFiles.length} scripts + ${scriptSubdirs.length} subdir(s) -> ${SHARED_SCRIPTS}`);
+
+// skills/agents.yaml も SHARED_SCRIPTS に配布する（単純コピー、値の変換・再計算はしない）。
+// spawn-assistant.js 等ランタイム側が「agentIdに対応するSKILL.mdの実インストール先」を実行時に
+// 解決するために必要（skills/agents.yaml 自体は従来 install.js 実行時にしか読まれず、
+// ~/.gh-maestro/ 配下には一切配布されていなかった）。SSOTは引き続き skills/agents.yaml。
+fs.copyFileSync(AGENTS_YAML, path.join(SHARED_SCRIPTS, 'agents.yaml'));
+ok(`agents.yaml -> ${path.join(SHARED_SCRIPTS, 'agents.yaml')}`);
 
 // ── 共有スキルを ~/.gh-maestro/skills/ にデプロイ ─────────────────────────────
 // 全エージェントがそれぞれのネイティブなスキル発見機構（skill_files_install_destination_directory）

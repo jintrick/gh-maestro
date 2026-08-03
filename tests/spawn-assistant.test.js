@@ -35,17 +35,37 @@ test('resolveRepo: gh repo viewの出力が空ならnull', () => {
 });
 
 test('buildPromptFileContent: ISSUE/REPO/WORKSPACEを含み、worktreeが無い旨を明記する', () => {
-  const content = buildPromptFileContent({ issue: '5', repo: 'o/r', workspace: 'C:\\ws' });
+  const content = buildPromptFileContent({ issue: '5', repo: 'o/r', workspace: 'C:\\ws', skillPath: 'C:\\skills\\gh-maestro-assistant\\SKILL.md' });
   assert.match(content, /ISSUE=5/);
   assert.match(content, /REPO=o\/r/);
   assert.match(content, /WORKSPACE=C:\/ws/);
   assert.match(content, /workers\.json/);
 });
 
+test('buildPromptFileContent: SKILL.mdの絶対パス（スラッシュ化）を先頭付近に明示する', () => {
+  const content = buildPromptFileContent({ issue: '5', repo: 'o/r', workspace: 'C:\\ws', skillPath: 'C:\\skills\\gh-maestro-assistant\\SKILL.md' });
+  assert.match(content, /C:\/skills\/gh-maestro-assistant\/SKILL\.md/);
+  assert.match(content, /読了前に行動を開始してはいけません/);
+});
+
 test('buildShortPrompt: issue番号とpromptFileパス（スラッシュ化）を含む1行', () => {
-  const shortPrompt = buildShortPrompt({ issue: '9', promptFile: 'C:\\ws\\.gh-maestro\\assistants\\issue-9\\prompt.md' });
+  const shortPrompt = buildShortPrompt({
+    issue: '9',
+    promptFile: 'C:\\ws\\.gh-maestro\\assistants\\issue-9\\prompt.md',
+    skillPath: 'C:\\skills\\gh-maestro-assistant\\SKILL.md',
+  });
   assert.match(shortPrompt, /ISSUE=9/);
   assert.match(shortPrompt, /gh-maestro-assistant/);
   assert.match(shortPrompt, /C:\/ws\/\.gh-maestro\/assistants\/issue-9\/prompt\.md/);
+  assert.equal(shortPrompt.includes('\n'), false);
+});
+
+test('buildShortPrompt: SKILL.mdの絶対パス（スラッシュ化）を含む1行', () => {
+  const shortPrompt = buildShortPrompt({
+    issue: '9',
+    promptFile: 'C:\\ws\\.gh-maestro\\assistants\\issue-9\\prompt.md',
+    skillPath: 'C:\\skills\\gh-maestro-assistant\\SKILL.md',
+  });
+  assert.match(shortPrompt, /C:\/skills\/gh-maestro-assistant\/SKILL\.md/);
   assert.equal(shortPrompt.includes('\n'), false);
 });
