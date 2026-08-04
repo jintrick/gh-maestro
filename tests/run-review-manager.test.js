@@ -74,6 +74,14 @@ test('buildPrompt: SCRIPTS path is included so RM can invoke tool scripts', () =
   assert.match(prompt, /OUTPUTファイルへ直接書き込まない/);
 });
 
+test('buildPrompt: SCRIPTSディレクトリに同居する他ワーカー用ツール（msg-send.js等）の使用を禁止する指示が含まれる', () => {
+  const { prompt } = buildPrompt({
+    pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
+  });
+  assert.match(prompt, /msg-send\.js/);
+  assert.match(prompt, /完了報告/);
+});
+
 test('buildPrompt: 異なる出力パスで呼び出しても prompt が正しく生成される', () => {
   const opts = { pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json' };
   const a = buildPrompt(opts);

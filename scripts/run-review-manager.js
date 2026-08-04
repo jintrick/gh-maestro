@@ -84,6 +84,7 @@ SCRIPTS=${scriptsDir}
 - OUTPUTファイルへ直接書き込まない（finalize-review.jsだけがatomic writeする）
 - JSONを生成するPowerShell/bash/JavaScriptインラインスクリプトを書かない
 - 全件テスト（npm test等）・全体ビルド（npm run build等）を実行しない
+- msg-send.js等でorchestratorへ完了報告や状況連絡をしない（完了検知はポーリングのみで行う設計であり、能動的な報告は二重通知の原因になる）。SCRIPTSディレクトリには他ワーカー用のツールも同居しているが、上記で指示したスクリプト以外は実行しない
 `;
   return { prompt };
 }
