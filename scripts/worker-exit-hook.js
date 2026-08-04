@@ -3,9 +3,11 @@
 // worker-exit-hook.js
 // 全ワーカーの onExit フック（spawn-worker.js / inbox-supervisor.js が起動コマンド末尾に仕込む）。
 // エージェントプロセスが終了した直後に、その終了コードを引数末尾に付けて呼ばれる。
-//   1. execution-id 付き（architect 等）なら executions.json に終了を記録する
-//   2. 非ゼロ終了なら orchestrator へ「異常終了」を通知する（サイレント失敗を潰す）
-//   3. resumeでの起動（log-path・since-timestamp・log-offset 付き）なら、実際にGitHubへ返信
+//   1. ワーカーログから thinking_tokens 進捗イベント行（claude-ds系が大量出力する
+//      中身のない雑音）を取り除く（scripts/shared/log-compact.js）
+//   2. execution-id 付き（architect 等）なら executions.json に終了を記録する
+//   3. 非ゼロ終了なら orchestrator へ「異常終了」を通知する（サイレント失敗を潰す）
+//   4. resumeでの起動（log-path・since-timestamp・log-offset 付き）なら、実際にGitHubへ返信
 //      （msg-send.js経由の投稿）が届いたかを確認し、届いていなければキャプチャしておいた
 //      標準出力を代理送信する。ただし、応答契約（contract）が artifact-or-message で
 //      指定成果物（PR）が成立している場合は、代理送信を抑制する。
@@ -30,6 +32,8 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+const { compactWorkerLog } = require('./shared/log-compact');
+const { workerLogPath } = require('./shared/headless-launch');
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -238,7 +242,20 @@ if (require.main === module) {
   const exitCode = parseInt(exitCodeRaw, 10);
   const workerName = process.env.GH_MAESTRO_WORKER || null;
 
-  // 1. execution 記録（--execution-id 付きの起動のときだけ）
+  // 1. ワーカーログの圧縮（thinking_tokens進捗イベント行の除去）。
+  //    エージェントプロセスは既に完全終了しており（このフック自体がログインシェルの
+  //    コマンド列で「エージェント起動 && このフック」の後段として実行される）、
+  //    ログへの追記は発生し得ない区間なので安全に置き換えられる。ベストエフォート:
+  //    失敗しても他のステップ（返信確認・代理送信等）を止めない。
+  if (workspace && workerName) {
+    try {
+      compactWorkerLog(workerLogPath(workspace, workerName));
+    } catch (error) {
+      process.stderr.write(`worker-exit-hook: ログ圧縮に失敗: ${error.message}\n`);
+    }
+  }
+
+  // 2. execution 記録（--execution-id 付きの起動のときだけ）
   if (workspace && executionId) {
     try {
       const { markProcessExit } = require('./shared/execution-registry');
@@ -248,7 +265,7 @@ if (require.main === module) {
     }
   }
 
-  // 2. 非ゼロ終了は orchestrator へ通知する。正常終了（exit 0。セッション再開系ワーカーの
+  // 3. 非ゼロ終了は orchestrator へ通知する。正常終了（exit 0。セッション再開系ワーカーの
   //    1ターン完了を含む）は通知しない。
   if (Number.isFinite(exitCode) && exitCode !== 0 && workerName && workspace) {
     const body = `⚠️ 起動失敗または異常終了: exit code ${exitCode}。このワーカーのプロセスが正常に完了せず終了しました（起動時のエラーの可能性）。`;
@@ -259,7 +276,7 @@ if (require.main === module) {
     }
   }
 
-  // 3. resumeへの応答確認・未返信時の代理送信
+  // 4. resumeへの応答確認・未返信時の代理送信
   if (isResumeInvocation && captureLogPath && sinceTimestamp && workerName && workspace) {
     try {
       // 契約のパース（第7引数。存在しなければ null → message-required 動作）

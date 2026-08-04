@@ -415,6 +415,24 @@ describe('CLI引数の解釈', () => {
     });
   });
 
+  test('新規起動形（3引数）でも GH_MAESTRO_WORKER があればワーカーログを圧縮する', () => {
+    withTempDir((dir) => {
+      const workerName = 'issue-5-fix';
+      const logDir = path.join(dir, '.gh-maestro', 'worker-logs');
+      fs.mkdirSync(logDir, { recursive: true });
+      const logPath = path.join(logDir, `${workerName}.log`);
+      const thinkingLine = '{"type":"system","subtype":"thinking_tokens","estimated_tokens":1,"estimated_tokens_delta":1,"uuid":"x","session_id":"y"}';
+      const realLine = '{"type":"assistant","message":"hello"}';
+      fs.writeFileSync(logPath, `${thinkingLine}\n${realLine}\n${thinkingLine}\n`);
+
+      const env = { ...cleanSpawnEnv(), GH_MAESTRO_WORKER: workerName };
+      const r = realSpawnSync(process.execPath, [HOOK_SCRIPT, dir, '', '0'], { encoding: 'utf8', timeout: 10000, env });
+
+      assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+      assert.equal(fs.readFileSync(logPath, 'utf8'), `${realLine}\n`);
+    });
+  });
+
   // ── 回帰テスト（Issue #202） ─────────────────────────────────────────────
   // 実運用では `npm test` がワーカー起動コンテキスト（GH_MAESTRO_WORKER / GH_MAESTRO_WORKSPACE /
   // ISSUE が注入された状態）で実行されることがある。この環境を親プロセス（テストランナー）に
