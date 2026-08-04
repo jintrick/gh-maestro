@@ -6,10 +6,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { compactWorkerLog, isThinkingTokensLine } = require('../scripts/shared/log-compact');
+const { compactWorkerLog, isThinkingTokensLine } = require('../scripts/shared/strip-thinking-token-lines');
 
 function withTempDir(fn) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-log-compact-test-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-strip-thinking-token-lines-test-'));
   try {
     return fn(dir);
   } finally {

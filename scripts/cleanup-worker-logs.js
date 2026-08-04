@@ -1,28 +1,29 @@
 #!/usr/bin/env node
 'use strict';
-// compact-worker-log.js
+// cleanup-worker-logs.js
 // 既存のワーカーログから thinking_tokens 進捗イベント行（claude-ds系が大量出力する
-// 中身のない雑音。scripts/shared/log-compact.js 参照）を取り除く手動メンテナンスCLI。
+// 中身のない雑音。scripts/shared/strip-thinking-token-lines.js 参照）を取り除く
+// 手動メンテナンスCLI。
 //
 // worker-exit-hook.js が今後の分は毎回exit時に自動で圧縮するが、本コマンドは
 // それ以前に既に肥大化した既存ログを一括で圧縮するために使う。
 //
 // 実行中のワーカー（まだそのログへ追記し続けているプロセス）に対しては使わないこと。
 // 追記中のファイルを置き換えると、書き込み側は古いinodeへ書き続けて新しい内容が消失する
-// （scripts/shared/log-compact.js の冒頭コメント参照）。
+// （scripts/shared/strip-thinking-token-lines.js の冒頭コメント参照）。
 //
 // Usage:
-//   node compact-worker-log.js [--workspace <path>] [--worker <name>]
+//   node cleanup-worker-logs.js [--workspace <path>] [--worker <name>]
 
 const fs = require('fs');
 const path = require('path');
 const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
 const { workerLogPath } = require('./shared/headless-launch');
-const { compactWorkerLog } = require('./shared/log-compact');
+const { compactWorkerLog } = require('./shared/strip-thinking-token-lines');
 
-const USAGE = `compact-worker-log.js — ワーカーログから thinking_tokens 進捗イベント行を取り除く
+const USAGE = `cleanup-worker-logs.js — ワーカーログから thinking_tokens 進捗イベント行を取り除く
 
-Usage: node compact-worker-log.js [--workspace <path>] [--worker <name>]
+Usage: node cleanup-worker-logs.js [--workspace <path>] [--worker <name>]
 
 Options:
   --workspace <path>  ワークスペース（省略時は GH_MAESTRO_WORKSPACE env または
@@ -50,12 +51,12 @@ if (require.main === module) {
   }
 
   if (rest.length > 0) {
-    console.error(`compact-worker-log: 未知の引数です: ${rest.join(' ')}`);
+    console.error(`cleanup-worker-logs: 未知の引数です: ${rest.join(' ')}`);
     console.error(USAGE);
     process.exit(1);
   }
 
-  const fail = (msg) => { console.error(`compact-worker-log: ${msg}`); process.exit(1); };
+  const fail = (msg) => { console.error(`cleanup-worker-logs: ${msg}`); process.exit(1); };
 
   const workspace = resolveWorkspace(values['--workspace']);
   if (!workspace) fail('ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
@@ -75,7 +76,7 @@ if (require.main === module) {
   }
 
   if (targets.length === 0) {
-    console.log('compact-worker-log: 対象ログがありません');
+    console.log('cleanup-worker-logs: 対象ログがありません');
     process.exit(0);
   }
 
@@ -84,7 +85,7 @@ if (require.main === module) {
     try {
       result = compactWorkerLog(logPath);
     } catch (e) {
-      console.error(`compact-worker-log: 圧縮に失敗: ${logPath} — ${e.message}`);
+      console.error(`cleanup-worker-logs: 圧縮に失敗: ${logPath} — ${e.message}`);
       continue;
     }
     if (result.compacted) {

@@ -1,5 +1,5 @@
 'use strict';
-// log-compact.js — ワーカーログから中身のない雑音行を取り除く
+// strip-thinking-token-lines.js — ワーカーログから中身のない雑音行を取り除く
 //
 // claude-ds系（DeepSeek経由のstream-json --verbose出力）は、thinkingブロックの
 // トークン数を1個ずつ数え上げる進捗イベントを逐次出力する。1行の例:

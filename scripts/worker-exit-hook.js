@@ -4,7 +4,7 @@
 // 全ワーカーの onExit フック（spawn-worker.js / inbox-supervisor.js が起動コマンド末尾に仕込む）。
 // エージェントプロセスが終了した直後に、その終了コードを引数末尾に付けて呼ばれる。
 //   1. ワーカーログから thinking_tokens 進捗イベント行（claude-ds系が大量出力する
-//      中身のない雑音）を取り除く（scripts/shared/log-compact.js）
+//      中身のない雑音）を取り除く（scripts/shared/strip-thinking-token-lines.js）
 //   2. execution-id 付き（architect 等）なら executions.json に終了を記録する
 //   3. 非ゼロ終了なら orchestrator へ「異常終了」を通知する（サイレント失敗を潰す）
 //   4. resumeでの起動（log-path・since-timestamp・log-offset 付き）なら、実際にGitHubへ返信
@@ -32,7 +32,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
-const { compactWorkerLog } = require('./shared/log-compact');
+const { compactWorkerLog } = require('./shared/strip-thinking-token-lines');
 const { workerLogPath } = require('./shared/headless-launch');
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
