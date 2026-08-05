@@ -114,6 +114,29 @@ test('applySubstitutions: 実際の communication-rules.md を差し込んでも
   );
 });
 
+test('applySubstitutions: coder共通partialをネストしたplaceholderごと展開する', () => {
+  const workflow = fs.readFileSync(path.join(ROOT, 'skills', '_partials', 'coder-workflow.md'), 'utf8').trimEnd();
+  const commentsAndNaming = fs.readFileSync(
+    path.join(ROOT, 'skills', '_partials', 'comments-and-naming.md'),
+    'utf8'
+  ).trimEnd();
+  const skillMd = '{{CODER_WORKFLOW}}\n\n{{COMMENTS_AND_NAMING}}';
+
+  const result = applySubstitutions(skillMd, {
+    CODER_WORKFLOW: workflow,
+    COMMENTS_AND_NAMING: commentsAndNaming,
+    RULES_CHECK_STEP: 'RULES_CHECK_STEP_CONTENT',
+    SCRIPTS_PATH: '/abs/path/scripts',
+  });
+
+  assert.ok(result.includes('## ゴール'));
+  assert.ok(result.includes('## 制約'));
+  assert.ok(result.includes('## コメントと命名の方針'));
+  assert.ok(result.includes('RULES_CHECK_STEP_CONTENT'));
+  assert.ok(result.includes('/abs/path/scripts/publish-plan.js'));
+  assert.ok(!result.includes('{{'), `共通partialのplaceholderが未置換: ${result}`);
+});
+
 test('expandHome: ~ をホームディレクトリに展開する', () => {
   const home = process.env.HOME || process.env.USERPROFILE;
   const result = expandHome('~/foo/bar');

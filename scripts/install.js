@@ -302,6 +302,8 @@ for (const w of defaultsWarnings) console.warn(`  \x1b[33m! ${w}\x1b[0m`);
 // RULES_CHECK_STEP は rulesSupported が false のエージェントにのみ注入される。
 const RULES_CHECK_STEP_CONTENT = readPartial('rules-check-step.md');
 const COMMUNICATION_RULES_CONTENT = readPartial('communication-rules.md');
+const CODER_WORKFLOW_CONTENT = readPartial('coder-workflow.md');
+const COMMENTS_AND_NAMING_CONTENT = readPartial('comments-and-naming.md');
 
 // ~/.gh-maestro/ は gh-maestro 専用ディレクトリ。install が書いたものだけを残し、
 // それ以外（旧バージョンの遺産）は最後に prune で除去する。
@@ -349,6 +351,8 @@ for (const [agentName, config] of Object.entries(agents)) {
     SHARED_SKILLS_PATH: SHARED_SKILLS,
     RULES_CHECK_STEP: agentRulesSupported ? '' : RULES_CHECK_STEP_CONTENT,
     COMMUNICATION_RULES: COMMUNICATION_RULES_CONTENT,
+    CODER_WORKFLOW: CODER_WORKFLOW_CONTENT,
+    COMMENTS_AND_NAMING: COMMENTS_AND_NAMING_CONTENT,
   });
 
   for (const skill of skillDirs) {
@@ -443,6 +447,8 @@ const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {
   SHARED_SKILLS_PATH: SHARED_SKILLS,
   RULES_CHECK_STEP: '',
   COMMUNICATION_RULES: COMMUNICATION_RULES_CONTENT,
+  CODER_WORKFLOW: CODER_WORKFLOW_CONTENT,
+  COMMENTS_AND_NAMING: COMMENTS_AND_NAMING_CONTENT,
 });
 
 // stale 削除（ディレクトリと未知ファイルの両方）

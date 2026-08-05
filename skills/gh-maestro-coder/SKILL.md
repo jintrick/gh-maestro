@@ -5,55 +5,9 @@ description: gh-maestroコーダーエージェント。orchestratorから実装
 
 {{COMMUNICATION_RULES}}
 
-## ゴール
+{{CODER_WORKFLOW}}
 
-PRを作成した時点で実装作業は完了する。CI監視はorchestratorの責務であり、コーダーは行わない。実装完了後の報告は不要（orchestratorがPRを自律検出する）。
-
-**計画報告は実装着手前に必須である。** 計画をIssueのpin済みコメントとして投稿し、`msg-send.js`でorchestratorに報告すること。この報告を送った時点で1アクション完了とみなし、プロセスを終了してよい（承認または差し戻しの指示が届き次第、orchestratorから再開される）。
-
-## 起動時に与えられる情報
-
-- `WORKER_NAME=<name>` — このワーカーの識別名（worktree名。msg-poll.js/msg-send.js等の一意識別に使う）
-- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-investigator）
-- `REPO=<owner/repo>` — 対象リポジトリ
-- `WORKSPACE=<path>` — メインワークスペースのルートパス
-- `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）
-- `ISSUE=<N>` — 担当するIssue番号
-- `BASE_BRANCH=<branch>` — PRのベースブランチ
-
-## 手順
-
-{{RULES_CHECK_STEP}}
-1. `gh issue view $ISSUE` でIssueの要件を把握する
-2. **質問事項がある場合は通信ルールのコマンドでorchestratorに質問し、返答を待ってから作業を進める**
-3. **計画フェーズ（実装着手前に必須）**:
-   - `$WORKTREE` 上で実装計画に必要な調査（対象ファイル・変更方針・作業分割・検証条件）を行う
-   - 実装計画をMarkdownファイルとして作成する
-   - `publish-plan.js` で計画をIssueのpin済みコメントとして投稿する：
-     ```sh
-     node "{{SCRIPTS_PATH}}/publish-plan.js" --issue $ISSUE --body-file <計画ファイル> --workspace $WORKSPACE
-     ```
-     スクリプトが自動的に新規投稿（初回）か既存pinコメントの更新（差し戻し後）かを判定するため、コーダー側で分岐する必要はない
-   - 通信ルールの `msg-send.js` で計画投稿完了を報告する（既存の「結果を返信する」規約の一種として位置づける）。この報告を送った時点で1アクション完了とみなし、**そのまま終了してよい**（既存のresume機構により、承認または差し戻しの指示が届いた時点でorchestratorから再開される）
-   - **承認の指示を受け取ったら**、以下の手順4に進む
-   - **差し戻し（修正依頼）の指示を受け取ったら**、計画を修正し、再度 `publish-plan.js` で同じpin済みコメントを更新し、再度報告して待機する
-4. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）
-5. **新規追加・修正したファイルに対応するテストケースを作成し、`npm test` で全passすることを確認する**
-6. `git commit`/`git push` はgh-maestroが設置したフックが自動でlint/format（commit時）・test/typecheck（push時）を検証する。フックが失敗したら`--no-verify`等でバイパスせず、原因を修正してから再度commit/pushする
-7. `gh-create-pr.js` でPRを作成する：
-   ```sh
-   node "{{SCRIPTS_PATH}}/gh-create-pr.js" --title "<PRタイトル>" --body "Closes #$ISSUE"
-   ```
-   baseブランチはgit upstream trackingから自動解決されるため、明示的に指定する必要はない。
-
-## 失敗時
-
-```sh
-gh issue edit $ISSUE --add-label "human-escalation"
-node "{{SCRIPTS_PATH}}/msg-send.js" --stdin <<'EOF'
-実装に失敗しました。human-escalation ラベルを付与しました。
-EOF
-```
+{{COMMENTS_AND_NAMING}}
 
 ## 実装時の注意
 
@@ -64,7 +18,6 @@ EOF
 - ある変数やパスの参照先を変更する（例: 参照先ディレクトリの差し替え、権限スコープの変更）際は、変更前にその変数の使用箇所をファイル内でgrepし、洗い出した全箇所が新しい参照先に揃っているか一つずつ確認してから完了とする。CLIの起動引数・プロセスのcwd・プロンプトやテンプレートに埋め込まれた文字列など、同じ値が複数の独立した経路で参照されているケースでは、目立つ箇所だけ直して他を直し漏れることが典型的な失敗パターンである
 - 1つのファイルを複数のファイルに分割・再配置する際は、分割前のファイルの内容（重点項目・チェックリスト・注意書きなど）が分割後のいずれかのファイルに漏れなく引き継がれているか、分割前後で一つずつ突き合わせて確認する。似た内容を持つ複数の分割先候補がある場合、特定の項目がどちらにも属さず脱落しやすい
 - フックが不明な理由で失敗する場合も、原因を特定できないという理由だけでバイパスしない。判断に迷ったら通信ルールのコマンドでorchestratorに相談する
-- 関数名・メソッド名を付ける・見直すときは、その名前が主張する保証（存在確認・妥当性検証・冪等性など）を実装が実際に満たしているか自己点検する。一致しない場合は実装を強化するか、より正確な名前に変更する。名前はAIコーダーが仕様として読む対象であるため、簡潔さより実際の挙動を過不足なく言い表す正確さを優先し、名前が長くなることを厭わない
 
 ## 制約
 
