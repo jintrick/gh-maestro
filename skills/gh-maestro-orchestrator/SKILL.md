@@ -110,7 +110,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - **msg-read.js** — コメントIDから本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE`
 - **remove-worker.js** — 個別ワーカーのプロセスをkillしてworktreeを削除する。対象は〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する
-- **start-review-manager.js** — PRにReview Managerを起動する（「Review Managerの手動起動」参照）
+- **start-review-manager.js** — PRにReview Managerを起動する（`inbox-recovery.md`の「PR監視・Review Managerの再起動」参照）
 - **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）。既読の正本は明示既読コメントID集合（Issue #207）。**msg-state が欠落・破損・旧形式・未初期化の場合、走査を停止し「reset-session.js での初期化が必要」と報告する**
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「PR検出」参照）
 - **process-lifecycle.js** — PID registryを走査しstaleなプロセスを掃除する（各「復旧手順」参照）
@@ -417,12 +417,7 @@ orchestrator が受け取るすべてのメッセージの受信経路である�
 
 ### 誤って複数起動してしまった場合の復旧手順（inbox監視）
 
-「重複しているかもしれない」と気づいた瞬間に片方を反射的に止めてはならない。以下の順で確認してから対処する：
-
-1. **実数を確認する**: `node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE --dry-run` を実行し、`script=msg-poll.js` かつ `worker=-`（orchestrator inbox 監視）のエントリが実際に複数生存しているかを確認する。1本しかなければ「重複」ではない。誤って停止しない。**`--dry-run` は必須。指定しないと確認のつもりが実際にkillしてしまう。**
-2. **複数確認できた場合のみ**、最も新しく起動したもの以外を残す方針で、古いMonitorタスクを`TaskStop`等で停止する。停止対象を誤らないよう、停止前に該当タスクが本当に `msg-poll.js orchestrator` を実行しているか確認する。
-3. 停止した分の registry エントリ（`.gh-maestro/pids/<PID>.json`）は、プロセスが死ねば次回の生存確認で自動的に無視される。**`sweep`（`--dry-run` なし）を対象を絞らずに実行しない**こと。無条件のsweepは他のMonitor（poll-pr.js・poll-reviews.js等）を含む登録済みの生存プロセスも巻き込んで停止させる。
-4. 残った1本が生きていることを確認してからセッションを継続する。届いていたはずのメッセージを見逃していないか、`gh issue view <N> --comments` で直近のワーカー報告を確認する。
+「重複しているかもしれない」と気づいた瞬間に片方を反射的に止めてはならない。復旧手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/inbox-recovery.md`の「inbox監視の重複復旧」を参照する。
 
 ## worker への指示配送（Inbox Supervisor）
 
@@ -430,88 +425,18 @@ orchestrator から worker への追加指示（`msg-send.js` で送ったコメ
 
 継続ポーリングはエージェントをフル起動し続けるのに等しくトークンを浪費するため、どのworkerも自分でポーリングしない。1回の作業が終わったら自然に終了してよい（これが全workerの定常状態）。`inbox-supervisor.js` が唯一の配送経路であり、**配送は常にプロセスの起動/再開（resume）のみを経路とする**。稼働中（タスク処理中）のworkerには一切書き込まず、**プロセスが終了して休止しているのを待ち、休止した時点で自動的にセッションをresumeしてから配送する**。稼働中のプロセスへ外から入力を注入する経路は持たない（配送されたかどうか確認できない不確実な手段であり、使わない）。orchestratorが手動で介入する必要はない。
 
-### ワーカーの異常終了通知
+### 通知の種類と一次対応
 
-ワーカーのプロセスが**非ゼロ終了**（起動失敗・クラッシュ等）で終わると、終了フック（`worker-exit-hook.js`）が自動的に `⚠️ 起動失敗または異常終了: exit code <N>...` というメッセージを orchestrator の inbox に投稿する（正常終了 exit 0 では通知されない）。この通知を受け取ったら、そのワーカーは**作業を完了できずに死んでいる**。「まだ報告が来ないだけ」と待ち続けてはならない。原因（起動設定・CLIバージョン・モデル指定・一時的障害など）を切り分けたうえで人間に伝え、再起動（必要なら上位エージェント）を検討する。
+以下はワーカー・Inbox Supervisorから届く通知やマーカーの見分け方と一次対応。詳細な原因・復旧手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/inbox-recovery.md` を参照する。
 
-### ワーカーの実行ログ
-
-ワーカーは画面を持たない。標準出力/標準エラーは `$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log` へ**実行中から逐次**書かれる。1ワーカー1ファイルで、初回起動もresumeも同じファイルに追記される。
-
-**既定ではこのログを読まない。** ワーカーの報告は Issue コメントとして届き、それが唯一の配送根拠である。ログは冗長で、読むだけでコンテキストとトークンを消費する。
-
-読むのは次の場合だけ:
-
-- 異常終了通知（上記）を受け取り、原因を切り分けるとき
-- 配送断念通知を受け取ったとき
-- ワーカーが長時間まったく反応せず、生きているか確かめたいとき
-
-このときは `Read` でログを読む。
-
-実行中の経過をどうしても追う必要がある場合（長時間ワーカーが本当に進んでいるかの確認等）に限り、**フィルタ付きで**一時的に Monitor を張る。用が済んだら `TaskStop` で止める。これは「自分の inbox の監視」の単一起動規約とは別枠の、使い捨ての監視である。
-
-```
-tail -f "$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log" \
-  | grep -E --line-buffered "<進捗の目印>|Error|Traceback|FAILED|Killed|OOM"
-```
-
-このコマンド形には3つの必須要素がある。どれを落としても監視が無言で機能しなくなる。
-
-- **`--line-buffered`**: 付けないと一致行が grep のバッファに溜まって通知が飛ばない
-- **失敗シグネチャを含める**: 成功の目印だけを拾うフィルタは、クラッシュ・ハング・異常終了のとき何も出さない。**沈黙は正常を意味しない**——「まだ動いている」と区別がつかなくなる。失敗側を列挙しきれないなら、ノイズが増えてもフィルタを広く取る
-- **生ログを流さない**: `tail -f` 単体（grep なし）は1行ごとに通知が飛んでチャットを埋め、Monitor 自体が過剰イベントで自動停止する
-
-Monitor のコマンドは Bash 環境で実行される（Windows でも Git Bash 経由で上記がそのまま動く）。
-
-なお「ワーカーが終わったら教えてほしい」という**単発の通知**が欲しいだけなら Monitor は使わない。ワーカーの完了は PR 検出と inbox への報告で分かる。
-
-### 配送断念の通知（Inbox Supervisor 自身による検知）
-
-`inbox-supervisor.js` はresumeでプロセスを起動した直後、短い猶予を置いてからPIDで生存を再確認する。**spawnが成功しPIDが返ったことは、プロセスが生存し続けることを保証しない**（実障害: 起動コマンド自体は成功と報告されたのに、起動直後のクラッシュやホスト環境自体の不安定化で直後に消滅し、`DELIVERED`と誤記録されたままワーカーが無応答で放置された）。この再確認で消失が判明した場合はresume失敗として扱い、バックオフしながらリトライする。**リトライを最大回数（5回）まで尽くしても配送できなかった場合、`inbox-supervisor.js` 自身が `msg-send.js` 経由でorchestratorのinboxに配送断念を通知する**（`⚠️ ワーカー "<name>" へのメッセージ配送に5回失敗し断念しました...`）。
-
-これは上記の「ワーカーの異常終了通知」（終了フックによる非ゼロ終了検知）とは別の検知経路である。終了フックはワーカープロセスが**自分でexitできた場合**にしか働かない。プロセスが強制終了された、あるいはホスト環境ごと突然消滅して終了フックが実行される機会すら無かった場合はこの経路では検知できず、配送断念通知が最後の砦になる。どちらの通知を受け取った場合も、そのワーカーは作業を完了できていない。「まだ報告が来ないだけ」と待たず、原因を切り分けて人間に伝える。
-
-### resume応答の送信忘れに対する自動代理送信（全エージェント種別共通）
-
-resumeで再開されたワーカーが、届いた指示に対して正しく考えて回答を作ったのに、`msg-send.js` を一度も実行せずにセッションを終えてしまい、回答がGitHubに一切投稿されない実障害が起きた（issue-253-dashboard-impl、claude-ds）。ワーカーは記憶を持たない使い捨てセッションであり、通信規約の文言指示だけでは「地の文で答えて終わる」誤りを防げなかった。
-
-これはClaude Code固有の対策では不十分である。**gh-maestroはworkerのエージェント種別を`skillAgentMap`/`config.json`でいつでも差し替えられる**ため（例: `gh-maestro-coder`が`claude-ds`ではなく`agy`になる設定も現実に存在する）、特定エージェントの機能に依存しない対策が必要になる。そこで、全エージェントに共通する唯一の事実——「非対話モードで起動され、答えは標準出力に出る」——を使う。resume起動時にワーカーの標準出力/標準エラーをファイルにも複製保存し（`scripts/agent-exec.js`のcaptureLogPath）、ワーカー終了時（`worker-exit-hook.js`）に**実際にGitHubへ返信が届いたかを直接確認**する。届いていなければ、複製しておいた出力の末尾を、hookが自動的に `msg-send.js` 経由で代理送信する。代理送信されたコメントは本文冒頭の `⚠️ [自動代理送信: ...]` という注記で見分けられる。
-
-この安全網はエージェント種別を問わず全resume応答に効く（新規起動の完了報告要否はスキルごとに異なるため対象外——resumeへの応答のみ対象）。代理送信を受け取ったら、ワーカーは内容的には正しく応答できていたが送信の作法だけを誤った、と理解した上で内容を評価すればよい。頻発する場合は該当ワーカーのスキル記述（通信規約の遵守）に問題がある可能性を疑う。
-
-### 新規起動での投稿漏れ（resumeで完遂させる。ログを読んで代行しない）
-
-上記の自動代理送信は**resumeへの応答**にしか効かない。ワーカーの**初回起動**が調査・作業自体は完了させたのに`msg-send.js`を一度も実行せずプロセスが終了した場合は対象外であり、安全網が働かない。
-
-この状態（プロセスは終了しているのに該当Issueへの報告コメントが見当たらない）に気づいた場合、**orchestrator自身が`$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log`を読んで内容を回収し、代わりに`gh issue comment`や`msg-send.js`で代理投稿してはならない**。実際にこれをやって、数百行のログ全文を読み込み、巨大な本文を手作業で再構成してGitHubへ再投稿しようとし、大量のトークンを浪費した上に投稿自体もheredocの構文エラーで失敗した実障害がある。
-
-正しい対処は、そのワーカー宛てに短いresumeメッセージを送るだけである:
-
-```sh
-node "C:\Users\amg\.gh-maestro\scripts/msg-send.js" --issue <N> --skill <role> --workspace $WORKSPACE --stdin <<'EOF'
-報告投稿（msg-send.js）を怠っているようです。まとめた内容を必ずmsg-send.js経由でorchestratorへ投稿してください。
-EOF
-```
-
-ワーカーは記憶を保持したまま生きている（単に`msg-send.js`の呼び出しを忘れただけ）ため、resumeで自分のセッション文脈から報告内容を組み立てて正しく投稿できる。orchestratorはいつも通りinbox監視で`NEW_MESSAGE`を待てばよい。ログを読むのは「ワーカーの実行ログ」節に列挙した限定的なケース（異常終了通知・配送断念通知を受けた原因切り分け等）に限る。
-
-### 起動は自動（手動起動は不要）
-
-**`inbox-supervisor.js` の起動はorchestratorが覚えて手動で行うものではない。** `spawn-worker.js`（ワーカー作成時）と `msg-send.js`（ワーカー宛て送信時）の両方が、内部で自動的に起動を確認・保証する（`scripts/shared/ensure-inbox-supervisor.js`）。orchestratorはこのプロセスの起動を意識する必要がない——Bashツールで明示的に起動する手順は存在しない。
-
-これは意図的な設計変更である。以前は「worker起動前にBashツールで手動起動すること」という指示だったが、**起動を怠ると配送が一切行われず、しかもエージェントの記憶に依存する経路だったため、実際に起動を忘れて配送が長期間止まる実障害が発生した**。決定的なコード（spawn-worker.js/msg-send.js）側で起動を保証する形に修正済み。
-
-`spawn-worker.js`/`msg-send.js`は起動を試みる前に、同じworkspaceを監視中の生存プロセスがいないか（`ensureInboxSupervisorRunning`内で）確認し、いれば起動そのものをスキップする。万一この事前チェックをすり抜けても、`inbox-supervisor.js`自身が起動時に同じ確認を行い、既に監視中のプロセスを検知すれば新規プロセスを起動せずexit 1で終了する（多重起動防止の二重の安全網）。
-
-**dead-man's switch（親セッション死活監視）が監視するPIDは、起動を呼び出した`spawn-worker.js`/`msg-send.js`自身が、まだ生存しているうちに解決して`--session-pid`で明示的に子へ渡す。** `inbox-supervisor.js`はdetachedかつfire-and-forgetで起動されるため、起動直後には呼び出し元（使い捨てのCLIプロセス）が既に終了していることがある。もし子自身に解決を委ねると、子の直近の親（=その使い捨てCLI）が消えた時点でそこより上のセッション本体への遡行が失敗し、消えて当然の使い捨てCLIを「オーケストレーターセッション本体」と誤認して、オーケストレーターが生きているにもかかわらず起動直後（3スキャン周期以内）に自滅する実障害があった。この理由により、この解決処理を子（`inbox-supervisor.js`）側に戻す変更は行わないこと。
-
-### resume配送の失敗
-
-workerへの配送のうち、**相手のプロセスが稼働中（作業中）で見送っているだけの状態は、いくら長引いても「失敗」としてカウントされない**（休止するまで無期限に待つ）。resumeを実際に試みて失敗した場合（worktree消失・プロセス起動失敗等）のみ、5回の指数バックオフ再試行の末に配送を諦める。workerに指示を送ったのに長時間反応しない場合、`.gh-maestro/inbox-supervisor-autostart.log`（自動起動時のログ）または起動元セッションのバックグラウンド出力を確認し、`DELIVERY_FAILED:<workerName>:<commentId>:resume-failed`（`pending`ではなく`resume-failed`であること）の有無とエラー内容を確認すること。
-
-### 誤って複数起動してしまった場合の復旧手順（Inbox Supervisor）
-
-自動起動のため通常は発生しない。万一疑いがあれば、「自分の inbox の監視 → 誤って複数起動してしまった場合の復旧手順（inbox監視）」と全く同じ手順を、`script=inbox-supervisor.js` を対象に行う（`--dry-run` で実数を確認してから、複数のときだけ最新以外を停止する）。
+- **ワーカーの異常終了通知**（`⚠️ 起動失敗または異常終了: exit code <N>...`）: 終了フックが非ゼロ終了時に自動投稿する。そのワーカーは作業を完了できずに死んでいる。「まだ報告が来ないだけ」と待ち続けない。原因を切り分けて人間に伝える。
+- **配送断念の通知**（`⚠️ ワーカー "<name>" へのメッセージ配送に5回失敗し断念しました...`）: resume配送が5回リトライしても失敗したことをInbox Supervisor自身が通知する。上記と同様、そのワーカーは作業を完了できていない。
+- **自動代理送信のマーカー**（本文冒頭の`⚠️ [自動代理送信: ...]`）: ワーカーが`msg-send.js`の呼び出しを忘れただけで、内容自体は正しく応答できている。そのまま内容を評価してよい。
+- **ワーカーの実行ログ**（`$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log`）: 既定では読まない。上記の異常終了通知・配送断念通知を受けて原因を切り分けるとき、またはワーカーが長時間無反応で生死を確認したいときだけ`Read`で読む。
+- **新規起動での投稿漏れ**（プロセスは終了しているのに報告コメントが見当たらない）: ログを読んで代理投稿しない。短いresumeメッセージを送り、ワーカー自身に報告させる。
+- **Inbox Supervisorの起動**: 自動（`spawn-worker.js`/`msg-send.js`が内部で保証する）。手動起動の手順は存在しない。
+- **resume配送の失敗**: workerが稼働中で応答を待っているだけの状態は失敗としてカウントしない。実際にresumeが失敗した場合のみ5回のリトライ後に配送を諦める。
+- **誤って複数起動してしまった場合の復旧手順（Inbox Supervisor）**: 自動起動のため通常は発生しない。疑いがあれば「自分の inbox の監視 → 誤って複数起動してしまった場合の復旧手順（inbox監視）」と同じ手順を`script=inbox-supervisor.js`に対して行う。
 
 ## PR検出
 
@@ -533,25 +458,13 @@ PR検出時の出力:
 PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`msg-send.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
 **通常コーダー（gh-maestro-coder）が実装に失敗してエスカレーションされた場合、人間が承認した段階で上位のシニアコーダー（gh-maestro-senior-coder）を適用して再起動することを検討せよ。**
 
-**`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、「Review Managerの手動起動」に従って自分で起動すること。
+**`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、`inbox-recovery.md`の「PR監視・Review Managerの再起動」に従って自分で起動すること。
 
-**Review Managerが起動直後または実行中にクラッシュした場合、通常ワーカーと同じ`⚠️ 起動失敗または異常終了: exit code <N>...`という`NEW_MESSAGE`が自分のinboxに届く**（`from`が`issue-<N>-review-manager-pr-<PR>`という名前になる。通常ワーカーの異常終了通知と同じ経路・同じ処理でよい。詳細は「自分の inbox の監視」参照）。これを受け取ったら、poll-pr.js自体は生きたままPR/レビュー監視を継続しているため慌てて再起動する必要はないが、「まだレビューが来ないだけ」と誤解して待ち続けてもいけない。`$WORKSPACE/.gh-maestro/worker-logs/issue-<N>-review-manager-pr-<PR>.log` で原因を確認し（`<N>`はcrash通知の`from`に含まれるIssue番号）、人間に報告した上で、原因を解消してから「Review Managerの手動起動」で仕切り直す（`poll-pr.js`自体の再起動は不要）。
+**Review Managerが起動直後または実行中にクラッシュした場合、通常ワーカーと同じ`⚠️ 起動失敗または異常終了: exit code <N>...`という`NEW_MESSAGE`が自分のinboxに届く**（`from`が`issue-<N>-review-manager-pr-<PR>`という名前になる。通常ワーカーの異常終了通知と同じ経路・同じ処理でよい）。これを受け取ったら、poll-pr.js自体は生きたままPR/レビュー監視を継続しているため慌てて再起動する必要はないが、「まだレビューが来ないだけ」と誤解して待ち続けてもいけない。`$WORKSPACE/.gh-maestro/worker-logs/issue-<N>-review-manager-pr-<PR>.log` で原因を確認し（`<N>`はcrash通知の`from`に含まれるIssue番号）、人間に報告した上で、原因を解消してから`inbox-recovery.md`の「PR監視・Review Managerの再起動」で仕切り直す（`poll-pr.js`自体の再起動は不要）。
 
-### レビュー済みPRの監視を再開する（再レビューを蒸し返さない）
+### PR監視・Review Managerの再起動が必要なとき
 
-Monitor が落ちた等で `poll-pr.js` を再起動する必要があるが、**そのPRのレビューは既に済んでいる／再レビューは不要**という場合は、`--no-review-manager` を付けて起動する。PR検出時に Review Manager を起動せず、レビューコメント・マージ状態の監視だけを再開する。これを付けずに再起動すると、検出のたびにレビューが蒸し返されて quota を浪費する。
-
-```sh
-node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --no-review-manager --workspace $WORKSPACE --base-branch $BASE_BRANCH
-```
-
-### Review Managerの手動起動
-
-Review Managerが起動しなかった、または途中で失敗した場合は、start-review-manager.js で起動・再起動できる。レビューが進まないときは `$WORKSPACE/.gh-maestro/worker-logs/issue-<N>-review-manager-pr-<PR>.log` を確認し、失敗していれば再起動する（`<N>`は現在のIssue番号=`$ISSUE`）。
-
-```sh
-node "{{SCRIPTS_PATH}}/start-review-manager.js" $PR $REPO $WORKSPACE $ISSUE
-```
+Monitorが落ちた場合の`poll-pr.js`再起動、Review Managerが起動しなかった／失敗した場合の再起動は、いずれも `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/inbox-recovery.md` の「PR監視・Review Managerの再起動」を参照する。**再レビューが不要な場合は`poll-pr.js`に`--no-review-manager`を付けること**（付け忘れると検出のたびにレビューが蒸し返されquotaを浪費する）。
 
 ## レビュー監視
 
