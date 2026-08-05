@@ -114,27 +114,42 @@ test('applySubstitutions: 実際の communication-rules.md を差し込んでも
   );
 });
 
-test('applySubstitutions: coder共通partialをネストしたplaceholderごと展開する', () => {
-  const workflow = fs.readFileSync(path.join(ROOT, 'skills', '_partials', 'coder-workflow.md'), 'utf8').trimEnd();
-  const commentsAndNaming = fs.readFileSync(
-    path.join(ROOT, 'skills', '_partials', 'comments-and-naming.md'),
-    'utf8'
-  ).trimEnd();
-  const skillMd = '{{CODER_WORKFLOW}}\n\n{{COMMENTS_AND_NAMING}}';
-
-  const result = applySubstitutions(skillMd, {
+test('coder/senior-coderの実テンプレートがinstallerのpartial配線で展開される', () => {
+  const partial = name => fs.readFileSync(path.join(ROOT, 'skills', '_partials', name), 'utf8').trimEnd();
+  const workflow = partial('coder-workflow.md');
+  const commentsAndNaming = partial('comments-and-naming.md');
+  const substitutions = {
     CODER_WORKFLOW: workflow,
     COMMENTS_AND_NAMING: commentsAndNaming,
-    RULES_CHECK_STEP: 'RULES_CHECK_STEP_CONTENT',
+    COMMUNICATION_RULES: partial('communication-rules.md'),
+    RULES_CHECK_STEP: partial('rules-check-step.md'),
     SCRIPTS_PATH: '/abs/path/scripts',
-  });
+  };
+  const installSource = fs.readFileSync(path.join(ROOT, 'scripts', 'install.js'), 'utf8');
 
-  assert.ok(result.includes('## ゴール'));
-  assert.ok(result.includes('## 制約'));
-  assert.ok(result.includes('## コメントと命名の方針'));
-  assert.ok(result.includes('RULES_CHECK_STEP_CONTENT'));
-  assert.ok(result.includes('/abs/path/scripts/publish-plan.js'));
-  assert.ok(!result.includes('{{'), `共通partialのplaceholderが未置換: ${result}`);
+  for (const skill of ['gh-maestro-coder', 'gh-maestro-senior-coder']) {
+    const template = fs.readFileSync(path.join(ROOT, 'skills', skill, 'SKILL.md'), 'utf8');
+    assert.ok(template.includes('{{CODER_WORKFLOW}}'), `${skill}がCODER_WORKFLOWを参照していない`);
+    assert.ok(template.includes('{{COMMENTS_AND_NAMING}}'), `${skill}がCOMMENTS_AND_NAMINGを参照していない`);
+
+    const result = applySubstitutions(template, substitutions);
+    assert.ok(result.includes('## ゴール'), `${skill}に共通workflowのゴールが展開されていない`);
+    assert.ok(result.includes('## 制約'), `${skill}に共通workflowの制約が展開されていない`);
+    assert.ok(result.includes('## コメントと命名の方針'), `${skill}に共通方針が展開されていない`);
+    assert.ok(result.includes('/abs/path/scripts/publish-plan.js'), `${skill}のネストしたSCRIPTS_PATHが未展開`);
+    assert.ok(!result.includes('{{'), `${skill}に未置換placeholderが残っている`);
+  }
+
+  assert.equal(
+    (installSource.match(/CODER_WORKFLOW: CODER_WORKFLOW_CONTENT/g) || []).length,
+    2,
+    'installerのagent/shared substitutions双方にCODER_WORKFLOWが渡されていない'
+  );
+  assert.equal(
+    (installSource.match(/COMMENTS_AND_NAMING: COMMENTS_AND_NAMING_CONTENT/g) || []).length,
+    2,
+    'installerのagent/shared substitutions双方にCOMMENTS_AND_NAMINGが渡されていない'
+  );
 });
 
 test('expandHome: ~ をホームディレクトリに展開する', () => {
