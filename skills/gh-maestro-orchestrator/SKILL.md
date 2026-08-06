@@ -808,7 +808,19 @@ issueコメント化することで、そのIssueに紐づくassistant（対話�
 
 提案が0件（すべて個別判断）の場合は「今回は汎用化できる改善点がありませんでした」と報告して終了する。
 
-反省会（コーダーへの意見聴取を含む）と承認事項の反映がすべて終わったら、最後に `finalize-issue.js` を1回呼ぶ。
+### 決定事項の記録
+
+承認後の対応が終わったら、決定内容（承認・却下・反映先）を別のフォローアップコメントとして対象Issueへ投稿する（素案コメントは編集しない）。投稿手順は素案コメントと同じ（`write-draft.js`で一時ファイルに書き出し、`gh issue comment`で投稿）。フォーマット：
+
+```
+【反省会】決定事項 Issue #<N> / PR #<PR>
+
+| 指摘 | 分類 | 決定 | 反映先 |
+|---|---|---|---|
+| <指摘内容> | <型・制御フロー／Lint／テスト／.claude/rules/／SKILL.md／個別判断> | 承認／却下／保留 | Issue #<M>／.claude/rules/<file>／SKILL.md<節>／(対応なし) |
+```
+
+反省会（コーダーへの意見聴取を含む）と承認事項の反映・決定事項の記録がすべて終わったら、最後に `finalize-issue.js` を1回呼ぶ。
 
 ```sh
 node "{{SCRIPTS_PATH}}/finalize-issue.js" --issue <N> --repo $REPO --workspace $WORKSPACE
