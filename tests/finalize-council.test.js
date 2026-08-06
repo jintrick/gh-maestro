@@ -237,6 +237,99 @@ test('finalizeCouncil: 意見が無くても投稿・集計・state書き出し�
   assert.equal(written.absentees.length, 1);
 });
 
+test('finalizeCouncil: 投稿成功ごとに finalize チェックポイントを永続化する', async () => {
+  const posted = [];
+  const writes = [];
+  await m.finalizeCouncil({
+    title: 'T',
+    now: 'x',
+    session: 's1',
+    participantOrder: ['alpha', 'beta'],
+    opinions: [
+      { participant_id: 'alpha', opinion: 'o1', stance: 'AGREE' },
+      { participant_id: 'beta', opinion: 'o2', stance: 'DISAGREE' },
+    ],
+    votes: [{ participant_id: 'alpha', choice: 'beta', rationale: 'r' }],
+    absentees: [],
+    discussionUrl: 'u',
+    postComment: async (body) => { posted.push(body); return `http://x/c${posted.length}`; },
+    writeState: async (s) => { writes.push(JSON.parse(JSON.stringify(s))); },
+  });
+
+  // 意見2件＋投票1件＋要約1件 = 4回投稿、投稿後のチェックポイント永続化が4回
+  assert.equal(posted.length, 4);
+  // 意見1件目投稿後に永続化された state.finalize は意見1件のみ
+  assert.deepEqual(writes[0].finalize.opinions.map((o) => o.participant_id), ['alpha']);
+  assert.equal(writes[0].finalize.votes.length, 0);
+  assert.equal(writes[0].finalize.summaryCommentUrl, null);
+  // 意見2件目投稿後
+  assert.deepEqual(writes[1].finalize.opinions.map((o) => o.participant_id), ['alpha', 'beta']);
+  // 投票投稿後
+  assert.deepEqual(writes[2].finalize.votes.map((v) => v.participant_id), ['alpha']);
+  assert.ok(writes[2].finalize.opinions.every((o) => o.commentUrl));
+  // 要約投稿後
+  assert.ok(writes[3].finalize.summaryCommentUrl.startsWith('http://x/c'));
+  // 最終 state は complete
+  assert.equal(writes[writes.length - 1].status, 'complete');
+});
+
+test('finalizeCouncil: resume時は finalized の投稿済み項目を再投稿しない', async () => {
+  const posted = [];
+  const state = await m.finalizeCouncil({
+    title: 'T',
+    now: 'x',
+    session: 's1',
+    participantOrder: ['alpha', 'beta'],
+    opinions: [
+      { participant_id: 'alpha', opinion: 'o1', stance: 'AGREE' },
+      { participant_id: 'beta', opinion: 'o2', stance: 'DISAGREE' },
+    ],
+    votes: [{ participant_id: 'alpha', choice: 'beta', rationale: 'r' }],
+    absentees: [],
+    discussionUrl: 'u',
+    // 途中まで完了した finalize チェックポイント（意見alpha・投票は済み、意見beta・要約が未投稿）
+    finalized: {
+      opinions: [{ participant_id: 'alpha', opinion: 'o1', stance: 'AGREE', commentUrl: 'http://x/c1' }],
+      votes: [{ participant_id: 'alpha', choice: 'beta', rationale: 'r', commentUrl: 'http://x/c2' }],
+      summaryCommentUrl: null,
+    },
+    postComment: async (body) => { posted.push(body); return `http://x/r${posted.length}`; },
+    writeState: async () => {},
+  });
+
+  // 未投稿分のみ: 意見beta + 要約 = 2件
+  assert.equal(posted.length, 2);
+  assert.ok(posted[0].includes('意見（beta）'));
+  assert.ok(posted[1].includes('council 要約'));
+  // 投稿済みの commentUrl はチェックポイントから引き継がれる
+  assert.equal(state.opinions.find((o) => o.participant_id === 'alpha').commentUrl, 'http://x/c1');
+  assert.equal(state.votes[0].commentUrl, 'http://x/c2');
+  assert.ok(state.summaryCommentUrl.startsWith('http://x/r'));
+});
+
+test('finalizeCouncil: resume時に要約も投稿済みなら追加投稿なし', async () => {
+  const posted = [];
+  const state = await m.finalizeCouncil({
+    title: 'T',
+    now: 'x',
+    session: 's1',
+    participantOrder: ['alpha'],
+    opinions: [{ participant_id: 'alpha', opinion: 'o1', stance: 'AGREE' }],
+    votes: [{ participant_id: 'alpha', choice: 'alpha', rationale: 'r' }],
+    absentees: [],
+    discussionUrl: 'u',
+    finalized: {
+      opinions: [{ participant_id: 'alpha', opinion: 'o1', stance: 'AGREE', commentUrl: 'http://x/c1' }],
+      votes: [{ participant_id: 'alpha', choice: 'alpha', rationale: 'r', commentUrl: 'http://x/c2' }],
+      summaryCommentUrl: 'http://x/c3',
+    },
+    postComment: async (body) => { posted.push(body); return 'never'; },
+    writeState: async () => {},
+  });
+  assert.equal(posted.length, 0);
+  assert.equal(state.summaryCommentUrl, 'http://x/c3');
+});
+
 // ── buildStoppedState ─────────────────────────────────────────────────────────
 
 test('buildStoppedState: 停止状態の shape を返す', () => {

@@ -21,6 +21,9 @@ const { assertWithinRoot } = require('./worker-factory');
 const { worktreeAddDetached, worktreeRemove } = require('../git-worktree');
 
 const SESSION_RE = /^[A-Za-z0-9_-]{1,64}$/;
+// SESSION_RE の上限64文字から、collision接尾辞（-2, -3...）の余地を差し引いた
+// 自動生成スラッグの基本長。56文字 + "-2" 程度の接尾辞でも64を超えない。
+const MAX_SLUG_BASE_LEN = 56;
 const SHA_RE = /^[0-9a-f]{40}$/;
 
 /**
@@ -39,6 +42,8 @@ function assertValidSession(session) {
  * --title からセッションIDの候補（ASCII スラッグ）を決定論的に生成する。
  * 非ASCII文字・記号は '-' に畳み込み、連続・両端の '-' を取り除く。
  * 結果が空になるタイトルは 'council' にフォールバックする。
+ * 長いタイトルは MAX_SLUG_BASE_LEN で切り詰め、SESSION_RE 形式（最大64文字）を
+ * 保証する（collision 接尾辞の余地もここで確保する）。
  * 例: "RAG構成の採用可否" → "rag"
  *
  * @param {string} title
@@ -50,7 +55,8 @@ function slugifyTitle(title) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  return base || 'council';
+  const slug = base || 'council';
+  return slug.slice(0, MAX_SLUG_BASE_LEN);
 }
 
 /**
@@ -125,7 +131,10 @@ function resolveSession({ session, title, workspace }) {
   let candidate = base;
   let n = 2;
   while (fs.existsSync(councilStatePath(workspace, candidate))) {
-    candidate = `${base}-${n}`;
+    // 接尾辞を足しても SESSION_RE（最大64文字）を超えないよう、base を切り詰める。
+    // base が十分短い場合は slice は無害（元のまま）。
+    const suffix = `-${n}`;
+    candidate = `${base.slice(0, MAX_SLUG_BASE_LEN - suffix.length)}${suffix}`;
     n += 1;
   }
   return candidate;

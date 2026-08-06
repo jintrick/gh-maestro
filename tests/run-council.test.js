@@ -17,6 +17,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// セッション排他ロックのテストで worker-lease の生存確認・同一性確認を注入する
+// （実プロセスに触れない。test-process-spawn-safety ルール準拠）。
+const workerLease = require('../scripts/shared/worker-lease');
+const processLifecycle = require('../scripts/process-lifecycle');
+
 const SHA = 'a'.repeat(40);
 const AGENDA = '# 議題\n\nRAG構成の採用可否について';
 
@@ -137,11 +142,13 @@ function makeResolveConfig({ agents = ['agent-a', 'agent-b'], groupCategory, gro
 }
 
 // run-council-jobs.js の executor 注入。フェーズマニフェストから参加者ごとの結果を生成する。
+// attemptOf（参加者ごとの今回の試行回数。resume 時の再試行上限引継ぎで使う）も handler へ
+// 素通しする（runPhaseWithRetry が attemptOf を正しく渡すかをテストで検証できるように）。
 function makePhaseJobs(handler) {
   const calls = [];
-  const runPhaseJobs = async ({ manifest, workspace }) => {
-    calls.push({ manifest, workspace });
-    return { ok: true, timedOut: false, results: await handler({ manifest, workspace }) };
+  const runPhaseJobs = async ({ manifest, workspace, attemptOf }) => {
+    calls.push({ manifest, workspace, attemptOf });
+    return { ok: true, timedOut: false, results: await handler({ manifest, workspace, attemptOf }) };
   };
   return { runPhaseJobs, calls };
 }
@@ -508,6 +515,48 @@ test('再試行上限: 参加者ごとに最大2試行（1回の再起動）で�
   });
 });
 
+test('runPhaseWithRetry: prior の試行回数を引き継ぎ、再試行上限を跨がない（resume時のattempt加算）', async () => {
+  // prior.results に agent-b の失敗(attempt 1)が記録されている状態からの再開。
+  // attempt は 0 から数え直さず、次回は 2 として起動し、2回目の失敗で上限到達→欠席にする
+  // （3回目の起動はしない。review指摘 #2）。
+  const seen = [];
+  const { mod } = moduleFor({
+    phaseJobs: makePhaseJobs(async ({ manifest, attemptOf }) => {
+      seen.push(manifest.participants.map((p) => attemptOf(p.participant_id)));
+      return manifest.participants.map((p) => {
+        const attempt = attemptOf(p.participant_id);
+        return { participant_id: p.participant_id, status: 'failed', attempt, error: `fail ${attempt}` };
+      });
+    }),
+  });
+  const outcome = await mod.runPhaseWithRetry({
+    phaseName: 'opinion',
+    participants: [
+      { participant_id: 'agent-a', agent_id: 'agent-a' },
+      { participant_id: 'agent-b', agent_id: 'agent-b' },
+    ],
+    makeManifest: (pending) => ({ phase: 'opinion', participants: pending }),
+    workspace: '/ws',
+    maxAttempts: 2,
+    prior: {
+      status: 'in_progress',
+      results: {
+        'agent-a': { participant_id: 'agent-a', status: 'success', attempt: 1 },
+        'agent-b': { participant_id: 'agent-b', status: 'failed', attempt: 1, error: 'fail1' },
+      },
+      absentees: [],
+    },
+  });
+
+  // 成功済み agent-a は再起動されない。agent-b のみ attempt=2 で1回だけ再試行
+  assert.deepEqual(seen, [[2]]);
+  assert.deepEqual(outcome.absentees.map((a) => a.participant_id), ['agent-b']);
+  assert.equal(outcome.results['agent-b'].attempt, 2, '累積試行回数が結果に反映される');
+  // agent-a の成功は引き継がれる（全滅ではない）
+  assert.equal(outcome.allFailed, false);
+  assert.equal(outcome.successes.length, 1);
+});
+
 test('worktree 片付け失敗: 完走後でも exit 3・state に残存を記録', async () => {
   await withCouncilEnv(async ({ workspace }) => {
     const spawn = makeSpawnSync({ worktreeRemoveFail: true });
@@ -622,7 +671,45 @@ test('冪等再開: complete state は --resume 有無にかかわらず即 exit
   });
 });
 
-test('全滅停止後の --resume は再停止（停止は終端）', async () => {
+test('全滅停止後の --resume: 停止フェーズを全参加者で再試行し、成功すれば完走', async () => {
+  await withCouncilEnv(async ({ workspace }) => {
+    // 1回目: opinion 全滅（2試行とも失敗）→ stopped（exit 3）
+    const stopJobs = makePhaseJobs(scenario({
+      opinion: [
+        { pid: 'agent-a', outcomes: ['fail', 'fail'] },
+        { pid: 'agent-b', outcomes: ['fail', 'fail'] },
+      ],
+    }));
+    const r0 = await runAndCapture(() => moduleFor({ phaseJobs: stopJobs }).mod.runCouncil(args(workspace)));
+    assert.equal(r0.code, 3);
+
+    // 2回目: --resume。停止フェーズ（opinion）の進行をリセットし、全参加者を
+    // attempt 0 から再起動する。今回は成功 → 完走（exit 0）
+    const spawn2 = makeSpawnSync();
+    const resumeJobs = makePhaseJobs(scenario({
+      opinion: [
+        { pid: 'agent-a', outcomes: ['success'] },
+        { pid: 'agent-b', outcomes: ['success'] },
+      ],
+      vote: [{ pid: 'agent-a' }, { pid: 'agent-b' }],
+    }));
+    const { mod: mod2 } = loadModule({ spawn: spawn2, resolveConfig: makeResolveConfig(), phaseJobs: resumeJobs });
+    const r1 = await runAndCapture(() => mod2.runCouncil(args(workspace, { session: 'test-council', resume: true })));
+    assert.equal(r1.code, 0);
+    assert.ok(r1.out.includes('COUNCIL_FINISHED 0'));
+
+    // 再試行は「成功者のみ」ではなく全参加者（停止フェーズの進行がリセットされている）
+    const opinionCalls = resumeJobs.calls.filter((c) => c.manifest.phase === 'opinion');
+    assert.equal(opinionCalls.length, 1);
+    assert.deepEqual(opinionCalls[0].manifest.participants.map((p) => p.participant_id), ['agent-a', 'agent-b']);
+
+    const state = JSON.parse(fs.readFileSync(stateFile(workspace, 'test-council'), 'utf8'));
+    assert.equal(state.status, 'complete');
+    assert.equal(state.absentees.length, 0);
+  });
+});
+
+test('全滅停止後の --resume: 再試行も全滅なら再停止（exit 3・attempt は数え直し）', async () => {
   await withCouncilEnv(async ({ workspace }) => {
     const stopJobs = makePhaseJobs(scenario({
       opinion: [
@@ -633,11 +720,99 @@ test('全滅停止後の --resume は再停止（停止は終端）', async () =
     const r0 = await runAndCapture(() => moduleFor({ phaseJobs: stopJobs }).mod.runCouncil(args(workspace)));
     assert.equal(r0.code, 3);
 
-    // resume しても欠席扱い済み（=全員）は再起動しないため、再停止して exit 3
-    const r1 = await runAndCapture(() => moduleFor().mod.runCouncil(args(workspace, { session: 'test-council', resume: true })));
+    // resume 後も全滅 → 再停止。attempt はリセットされて 1 から数え直す
+    const resumeJobs = makePhaseJobs(scenario({
+      opinion: [
+        { pid: 'agent-a', outcomes: ['fail', 'fail'] },
+        { pid: 'agent-b', outcomes: ['fail', 'fail'] },
+      ],
+    }));
+    const r1 = await runAndCapture(() => moduleFor({ phaseJobs: resumeJobs }).mod.runCouncil(args(workspace, { session: 'test-council', resume: true })));
     assert.equal(r1.code, 3);
     assert.ok(r1.out.includes('COUNCIL_STOPPED opinion'));
+    const state = JSON.parse(fs.readFileSync(stateFile(workspace, 'test-council'), 'utf8'));
+    assert.equal(state.status, 'stopped');
+    assert.equal(state.failures[0].attempt, 2, '再試行は1ラウンド目から数え直し、上限で停止');
   });
+});
+
+// ── セッション排他ロック・state 原子書き込み ────────────────────────────────────
+
+test('セッションロック: 実行完了後にロックが解放される', async () => {
+  await withCouncilEnv(async ({ workspace }) => {
+    const spawn = makeSpawnSync();
+    const jobs = makePhaseJobs(scenario({ opinion: [{ pid: 'agent-a' }], vote: [{ pid: 'agent-a' }] }));
+    const { mod } = loadModule({ spawn: spawn, resolveConfig: makeResolveConfig({ agents: ['agent-a'] }), phaseJobs: jobs });
+    const lockPath = path.join(workspace, '.gh-maestro', 'council-test-council.lock');
+    const r = await runAndCapture(() => mod.runCouncil(args(workspace)));
+    assert.equal(r.code, 0);
+    assert.equal(fs.existsSync(lockPath), false, '完了後にセッションロックが解放されている');
+  });
+});
+
+test('セッションロック: 他プロセスが保持中は exit 2 で拒否し、ロックは消さない', async () => {
+  await withCouncilEnv(async ({ workspace }) => {
+    // 別プロセス（pid 424242）がロックを保持している状況を作る
+    const lockPath = path.join(workspace, '.gh-maestro', 'council-test-council.lock');
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: 424242, startTime: new Date().toISOString() }), 'utf8');
+
+    // テスト中は実プロセス生存確認をしない。保持者を「生存・同一プロセス」とみなして
+    // ビジー拒否を検証する（test-process-spawn-safety ルール準拠）
+    workerLease._setIsProcessAlive(() => true);
+    workerLease._setVerifyProcessIdentity(() => ({ match: true }));
+    try {
+      const { mod } = moduleFor();
+      const r = await runAndCapture(() => mod.runCouncil(args(workspace)));
+      assert.equal(r.code, 2);
+      assert.ok(r.err.includes('another process is running council session'));
+      // 保持者が別プロセスなのでロックファイルは残す（誤って消さない）
+      const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+      assert.equal(holder.pid, 424242);
+    } finally {
+      workerLease._setIsProcessAlive(processLifecycle.isProcessAlive);
+      workerLease._setVerifyProcessIdentity(processLifecycle.verifyProcessIdentity);
+    }
+  });
+});
+
+test('セッションロック: stale ロック（保持者非生存）は自動回収して取得できる', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'council-lock-stale-'));
+  try {
+    const lockPath = path.join(ws, '.gh-maestro', 'council-s1.lock');
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    // 死亡済みプロセスの残骸ロック
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999, startTime: '2000-01-01T00:00:00.000Z' }), 'utf8');
+
+    workerLease._setIsProcessAlive(() => false);
+    try {
+      const { mod } = moduleFor();
+      mod.acquireCouncilSessionLock(ws, 's1'); // throw しない
+      const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+      assert.equal(holder.pid, process.pid, 'stale ロックを回収して自分が保持者になる');
+      mod.releaseCouncilSessionLock(ws, 's1');
+      assert.equal(fs.existsSync(lockPath), false, '解放後はロックが消える');
+    } finally {
+      workerLease._setIsProcessAlive(processLifecycle.isProcessAlive);
+    }
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('persistState: 一時ファイル+rename で原子的に書き出し、.tmp が残らない', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'council-atomic-'));
+  try {
+    const { mod } = moduleFor();
+    const statePath = path.join(ws, '.gh-maestro', 'council-s1.json');
+    mod.persistState(statePath, { status: 'running' });
+    assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).status, 'running');
+    // 中間ファイル（.tmp.<pid>）が残っていない
+    const leftovers = fs.readdirSync(path.dirname(statePath)).filter((f) => f.includes('.tmp.'));
+    assert.deepEqual(leftovers, []);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
 });
 
 // ── セッションID（--title からの自動生成・明示指定） ────────────────────────────

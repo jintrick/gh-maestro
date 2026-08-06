@@ -200,6 +200,12 @@ function buildSummaryMarkdown({
  * postComment は本文からコメントURL（string）を返し、投稿失敗時は throw する契約の
  * 注入関数。writeState は state オブジェクトを永続化する注入関数。
  *
+ * 中断からの復元: 各コメント投稿の成功ごとに state.finalize をチェックポイントとして
+ * 永続化する。--resume 時は finalized（state.finalize）を渡すことで、投稿済みの
+ * 意見・投票・要約を再投稿せずスキップする（Discussion への重複投稿を防ぐ）。
+ * 投稿と永続化は別操作のため、投稿直後にクラッシュした1件は resume 時に再投稿されうる
+ * （チェックポイントは「投稿済み」を遅延記録するため。完全な冪等は GitHub 側で保てない）。
+ *
  * @param {object} opts
  * @param {string} opts.title
  * @param {string} opts.now
@@ -211,12 +217,13 @@ function buildSummaryMarkdown({
  * @param {string} opts.discussionUrl
  * @param {(body: string) => Promise<string>} opts.postComment
  * @param {(state: object) => Promise<void>} opts.writeState
+ * @param {object|null} [opts.finalized] - state.finalize のチェックポイント（resume 時）
  * @returns {Promise<object>} complete state
  */
 async function finalizeCouncil({
   title, now, session, participantOrder,
   opinions = [], votes = [], absentees = [], discussionUrl,
-  postComment, writeState,
+  postComment, writeState, finalized = null,
 }) {
   // 全投票をスキーマ検証（失敗はフェイルクローズ: 集計しない）
   const voteErrors = [];
@@ -227,34 +234,52 @@ async function finalizeCouncil({
     throw new Error(`finalize-council: vote schema validation failed: ${voteErrors.join('; ')}`);
   }
 
-  const postedOpinions = [];
+  // チェックポイントを復元（resume 時: 投稿済み項目はスキップ、未投稿のみ再投稿）
+  const checkpoint = {
+    opinions: (finalized && Array.isArray(finalized.opinions)) ? finalized.opinions : [],
+    votes: (finalized && Array.isArray(finalized.votes)) ? finalized.votes : [],
+    summaryCommentUrl: (finalized && typeof finalized.summaryCommentUrl === 'string')
+      ? finalized.summaryCommentUrl
+      : null,
+  };
+  const persistCheckpoint = async () => { await writeState({ finalize: { ...checkpoint } }); };
+
+  // 意見コメント（投稿済みはスキップ。投稿成功のたびにチェックポイント永続化）
   for (const op of opinions) {
+    if (checkpoint.opinions.some((x) => x.participant_id === op.participant_id)) continue;
     const url = await postComment(opinionCommentBody(op));
-    postedOpinions.push({ ...op, commentUrl: url });
+    checkpoint.opinions.push({ ...op, commentUrl: url });
+    await persistCheckpoint();
   }
-  const postedVotes = [];
+
+  // 投票コメント（投稿済みはスキップ。投稿成功のたびにチェックポイント永続化）
   for (const v of votes) {
+    if (checkpoint.votes.some((x) => x.participant_id === v.participant_id)) continue;
     const url = await postComment(voteCommentBody(v));
-    postedVotes.push({ ...v, commentUrl: url });
+    checkpoint.votes.push({ ...v, commentUrl: url });
+    await persistCheckpoint();
   }
 
   const tally = tallyVotes({ votes, participantOrder });
   const summary = buildSummaryMarkdown({
     title, now, participantOrder,
-    opinions: postedOpinions, votes: postedVotes,
+    opinions: checkpoint.opinions, votes: checkpoint.votes,
     tally, absentees, discussionUrl,
   });
-  const summaryCommentUrl = await postComment(summary);
+  if (!checkpoint.summaryCommentUrl) {
+    checkpoint.summaryCommentUrl = await postComment(summary);
+    await persistCheckpoint();
+  }
 
   const state = {
     status: 'complete',
     session,
     title,
     discussionUrl,
-    opinions: postedOpinions,
-    votes: postedVotes,
+    opinions: checkpoint.opinions,
+    votes: checkpoint.votes,
     tally,
-    summaryCommentUrl,
+    summaryCommentUrl: checkpoint.summaryCommentUrl,
     absentees,
   };
   await writeState(state);

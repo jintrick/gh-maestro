@@ -385,8 +385,14 @@ function resolveCouncilConfig(opts = {}) {
     workspaceCouncil = isPlainObject(wsConfig.council) ? wsConfig.council : {};
   }
 
-  // global → workspace 後勝ちのシャローコピー。groups はキー単位、agents は配列ごと置換。
+  // global → workspace 後勝ちのシャローコピー。
+  // groups は「グループ全体の置き換え」ではなくグループキー単位でマージする
+  // （workspace が定義したキーは後勝ち、global のみのキーは維持される。
+  //  各グループ内の agents は配列ごと置換。ドキュメント記載のマージ契約）。
   const merged = { ...globalCouncil, ...workspaceCouncil };
+  if (isPlainObject(globalCouncil.groups) && isPlainObject(workspaceCouncil.groups)) {
+    merged.groups = { ...globalCouncil.groups, ...workspaceCouncil.groups };
+  }
 
   // ── investigationAgent ──
   let investigationAgent = null;

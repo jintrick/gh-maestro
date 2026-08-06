@@ -900,3 +900,38 @@ test('resolveCouncilConfig: category 省略時は category なしで解決する
     assert.deepEqual(result.groups.default, { agents: ['claude'] });
   });
 });
+
+test('resolveCouncilConfig: workspace の groups はグループキー単位で global にマージされる', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: {
+        groups: {
+          default: { agents: ['claude'] },
+          globalOnly: { agents: ['codex'] },
+        },
+      },
+    });
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-council-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        council: {
+          groups: {
+            default: { agents: ['agy'] }, // global の default を上書き
+            wsOnly: { agents: ['codex'], category: 'general' }, // 新規キーを追加
+          },
+        },
+      });
+
+      const result = resolveCouncilConfig({ homedir: home, workspace: ws });
+      assert.ok(result);
+      // workspace が上書きしたキー（後勝ち）
+      assert.deepEqual(result.groups.default.agents, ['agy']);
+      // global のみのキーは維持される（groups 全体の置き換えではない）
+      assert.deepEqual(result.groups.globalOnly, { agents: ['codex'] });
+      // workspace が追加したキーも含まれる
+      assert.deepEqual(result.groups.wsOnly, { agents: ['codex'], category: 'general' });
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});

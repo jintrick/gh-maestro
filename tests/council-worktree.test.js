@@ -77,6 +77,13 @@ test('slugifyTitle: 非ASCIIのみのタイトルは council にフォールバ�
   assert.equal(mod.slugifyTitle('!!!'), 'council');
 });
 
+test('slugifyTitle: 長いタイトルは SESSION_RE（最大64文字）内に収まるよう切り詰める', () => {
+  const { mod } = loadModule();
+  const slug = mod.slugifyTitle('a'.repeat(200) + ' タイトル');
+  assert.ok(slug.length <= 64, `slug length ${slug.length} > 64`);
+  assert.match(slug, /^[A-Za-z0-9_-]{1,64}$/);
+});
+
 test('assertValidSession: 妥当な形式は通す', () => {
   const { mod } = loadModule();
   assert.equal(mod.assertValidSession('rag-2'), 'rag-2');
@@ -165,6 +172,20 @@ test('resolveSession: state ファイルが無ければ接尾辞を付けない'
   withTempWorkspace(ws => {
     fs.writeFileSync(path.join(ws, '.gh-maestro', 'council-other.json'), '{}', 'utf8');
     assert.equal(mod.resolveSession({ title: 'RAG構成の採用可否', workspace: ws }), 'rag');
+  });
+});
+
+test('resolveSession: 長いタイトルでも collision 接尾辞で SESSION_RE を超えない', () => {
+  const { mod } = loadModule();
+  withTempWorkspace(ws => {
+    const base = 'x'.repeat(200); // slugify 後は MAX_SLUG_BASE_LEN で切り詰められる
+    // 切り詰め後の base そのものが既存 state と衝突するようにしておく
+    fs.writeFileSync(path.join(ws, '.gh-maestro', `council-${'x'.repeat(56)}.json`), '{}', 'utf8');
+    const session = mod.resolveSession({ title: base, workspace: ws });
+    assert.ok(session.length <= 64, `session length ${session.length} > 64: ${session}`);
+    assert.match(session, /^[A-Za-z0-9_-]{1,64}$/);
+    // 接尾辞 -2 が付与され、base 側がその分だけ切り詰められている
+    assert.ok(session.endsWith('-2'));
   });
 });
 

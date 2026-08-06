@@ -34,6 +34,7 @@ const {
 } = require('./shared/council-worktree');
 const { runPhaseJobs } = require('./run-council-jobs');
 const { finalizeCouncil, buildStoppedState } = require('./finalize-council');
+const { acquireLeaseLock, releaseLeaseLock } = require('./shared/worker-lease');
 const {
   hasDiscussionsEnabled,
   discussionCategories,
@@ -118,12 +119,66 @@ function loadState(statePath) {
  * state ファイルを書き出す。実行のたびに全進行状況を永続化し、--resume で復元できる
  * （plan: 進捗・状態は全部 state ファイルに置き、orchestrator が途中で切断しても
  * --resume で復元できる）。
+ *
+ * 一時ファイルへの書き込み + rename で原子的に更新する。直接 writeFileSync で
+ * 上書きすると、書き込み途中のクラッシュで state が破損し --resume 不能になる
+ * （rename は同じファイルシステム上でのみ原子的）。
+ *
  * @param {string} statePath
  * @param {object} state
  */
 function persistState(statePath, state) {
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
-  fs.writeFileSync(statePath, JSON.stringify(state, null, 2), 'utf8');
+  const tmpPath = `${statePath}.tmp.${process.pid}`;
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2), 'utf8');
+    fs.renameSync(tmpPath, statePath);
+  } catch (e) {
+    // rename 失敗時は一時ファイルを掃除（ベストエフォート）して失敗を伝える
+    try { fs.unlinkSync(tmpPath); } catch {}
+    throw e;
+  }
+}
+
+// ── セッション排他ロック ───────────────────────────────────────────────────────
+
+/**
+ * council session を対象にした排他ロックの lockPath を返す store。
+ * ロックファイルは <workspace>/.gh-maestro/council-<session>.lock。
+ * session は assertValidSession（^[A-Za-z0-9_-]{1,64}$）済みのためパス構成要素として
+ * 安全（path traversal 不可）。state ファイル（council-<session>.json）と対になる命名。
+ *
+ * @param {string} workspace
+ * @returns {object} worker-lease の store インターフェース（lockPath のみ使用）
+ */
+function councilSessionLockStore(workspace) {
+  return {
+    lockPath(key) {
+      return path.join(workspace, '.gh-maestro', `council-${key}.lock`);
+    },
+  };
+}
+
+/**
+ * セッション排他ロックを取得する。保持者が非生存なら stale として自動回収する
+ * （worker-lease.acquireLeaseLock の原子的ロック。EEXIST + PID/startTime 同一性検証）。
+ * live な保持者がいる場合（同一 session の別プロセスが進行中）は throw。
+ *
+ * @param {string} workspace
+ * @param {string} session
+ */
+function acquireCouncilSessionLock(workspace, session) {
+  acquireLeaseLock(councilSessionLockStore(workspace), session);
+}
+
+/**
+ * セッション排他ロックを解放する。自分が保持者でない場合は何もしない。
+ *
+ * @param {string} workspace
+ * @param {string} session
+ */
+function releaseCouncilSessionLock(workspace, session) {
+  releaseLeaseLock(councilSessionLockStore(workspace), session);
 }
 
 // ── 調査結果・補足コンテクスト ────────────────────────────────────────────────
@@ -242,6 +297,9 @@ function pendingParticipants(prior, eligible) {
  *   - 成功者数が 0 のときのみ allFailed=true（クォーラム緩和: 少なくとも1名成功で続行）
  *
  * prior（再開時の進行状況）がある場合、既に成功・欠席済みの参加者は再起動しない。
+ * 試行回数は参加者ごとに管理し、prior.results に記録された試行回数を引き継ぐ
+ * （--resume 時に毎回 attempt=0 から数え直すと、参加者ごとの再試行上限を跨いで
+ * 実質の再試行回数が増えてしまう。review指摘 #2）。
  * onRound は各ラウンド後の進行状況を state に永続化するフック（途中切断からの復元用）。
  *
  * @param {object} opts
@@ -261,17 +319,37 @@ async function runPhaseWithRetry({
   const results = { ...(prior?.results || {}) };
   const absentees = [...(prior?.absentees || [])];
 
+  // 参加者ごとの累積試行回数。prior.results に attempt が記録済みならそれを引き継ぐ
+  // （resume 時に再試行上限を跨がない）。記録が無い参加者は0から。
+  const attempts = new Map();
+  for (const r of Object.values(prior?.results || {})) {
+    if (r && typeof r.participant_id === 'string') {
+      attempts.set(r.participant_id, Number.isInteger(r.attempt) && r.attempt > 0 ? r.attempt : 0);
+    }
+  }
+  for (const p of participants) {
+    if (!attempts.has(p.participant_id)) attempts.set(p.participant_id, 0);
+  }
+
   let pending = pendingParticipants(prior, participants);
-  let attempt = 0;
-  while (pending.length > 0 && attempt < maxAttempts) {
-    attempt += 1;
-    const manifest = makeManifest(pending);
-    const res = await runPhaseJobs({ manifest, workspace });
+  while (pending.length > 0) {
+    // 未成功の参加者のうち、再試行上限に達していない者だけ今回起動する
+    const toRun = pending.filter((p) => (attempts.get(p.participant_id) || 0) < maxAttempts);
+    if (toRun.length === 0) break;
+
+    const manifest = makeManifest(toRun);
+    const res = await runPhaseJobs({
+      manifest,
+      workspace,
+      // 今回の試行回数 = 累積 + 1（runPhaseJobs が結果の attempt に反映する）
+      attemptOf: (participantId) => (attempts.get(participantId) || 0) + 1,
+    });
     if (!res.ok) {
       throw new Error(`council ${phaseName} phase: ${res.error || 'phase runner structural failure'}`);
     }
     for (const r of res.results) {
       results[r.participant_id] = r;
+      attempts.set(r.participant_id, Number.isInteger(r.attempt) && r.attempt > 0 ? r.attempt : 0);
     }
     pending = pending.filter((p) => (results[p.participant_id] || {}).status !== 'success');
     if (onRound) await onRound({ phaseName, results, absentees });
@@ -479,6 +557,33 @@ async function runCouncilFlow(argv) {
   // セッションIDは --title から自動生成（明示時は形式検証）。--resume では再開対象を特定
   const session = resolveSession({ session: opts.session, title: opts.title, workspace });
   const statePath = councilStatePath(workspace, session);
+
+  // ── セッション単位の排他ロック ──
+  // 同一 session を対象に複数の run-council.js プロセスが同時起動すると、
+  // Discussion の二重作成・ジョブの二重実行・worktree の誤削除が起こり得る
+  // （review指摘 #4）。state 読み込み〜worktree 片付けまでの全区間をロックで
+  // 直列化する（worker-lease.js の原子的ロックを流用。stale ロックは自動回収）。
+  let lockHeld = false;
+  try {
+    acquireCouncilSessionLock(workspace, session);
+    lockHeld = true;
+  } catch (e) {
+    process.stderr.write(`Error: another process is running council session "${session}": ${e.message}\n`);
+    return 2;
+  }
+  try {
+    return await runCouncilLocked({ opts, workspace, homedir, session, statePath });
+  } finally {
+    if (lockHeld) releaseCouncilSessionLock(workspace, session);
+  }
+}
+
+/**
+ * runCouncilFlow の実体。セッション排他ロック取得済みの状態で、state 読み込みから
+ * worktree 片付けまでの全区間を実行する（ロック解放は呼び出し元の finally が担う）。
+ * @returns {Promise<number>}
+ */
+async function runCouncilLocked({ opts, workspace, homedir, session, statePath }) {
   const state = loadState(statePath) || {};
 
   // ── resume・冪等再実行の分岐 ──
@@ -496,6 +601,17 @@ async function runCouncilFlow(argv) {
       `Error: session "${session}" already has incomplete state (status=${state.status}). Pass --resume --session ${session} to resume, or omit --session for a new session.\n`,
     );
     return 2;
+  }
+
+  // ── 全滅停止（status=stopped）からの --resume: 停止フェーズを全参加者で再試行 ──
+  // 停止時は停止フェーズの全参加者が absentees に記録されるため、通常の resume
+  // （成功・欠席済みを除外）では pending が空になり再試行が機能しない。
+  // stopped 再開では停止フェーズの progress をリセットし、全参加者・試行回数0から
+  // 再実行する（再試行は orchestrator の手動判断。review指摘 #7）。
+  if (state.status === 'stopped' && state.phase && state.phases) {
+    delete state.phases[state.phase];
+    state.status = 'running';
+    persistState(statePath, state);
   }
 
   // ── config 解決（fail-closed。GitHub 書き込みなしで止める） ──
@@ -745,6 +861,8 @@ async function runCouncilFlow(argv) {
     discussionUrl,
     postComment,
     writeState,
+    // resume 時は投稿済みコメントのチェックポイントを渡し、再投稿を防ぐ（review指摘 #1）
+    finalized: state.finalize || null,
   });
   process.stdout.write('COUNCIL_FINISHED 0\n');
   return cleanupWorktree({ state, statePath, session, worktreeDir, workspace, exitCode: 0 });
@@ -755,6 +873,8 @@ module.exports = {
   printUsage,
   loadState,
   persistState,
+  acquireCouncilSessionLock,
+  releaseCouncilSessionLock,
   loadInvestigation,
   investigationCommentBody,
   buildContextAppendix,
@@ -767,6 +887,7 @@ module.exports = {
   stopAndCleanup,
   resolveRepo,
   runCouncil,
+  runCouncilLocked,
 };
 
 if (require.main === module) {
