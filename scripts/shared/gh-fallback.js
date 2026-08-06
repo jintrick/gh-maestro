@@ -7,7 +7,7 @@
 // 4xx等のクライアントエラー（存在しない・権限なし等）はフォールバックしても
 // 同じ理由で失敗するため対象外とし、そのまま呼び出し元に返す。
 
-const { spawnSync } = require('../child-process');
+const { graphqlExec, parseGraphqlJson, _setGraphqlExec } = require('./graphql-client');
 
 const SERVER_ERROR_RE = /HTTP 5\d\d/;
 const RETRYABLE_ERROR_CODES = new Set(['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE']);
@@ -24,19 +24,10 @@ function isRetryableGhFailure(result) {
   return SERVER_ERROR_RE.test(result.stderr || '');
 }
 
-// ── gh api graphql 呼び出し（テストで注入可能） ─────────────────────────────
-
-let _graphqlExec = (args, opts = {}) => {
-  return spawnSync('gh', ['api', 'graphql', ...args], { encoding: 'utf8', ...opts });
-};
-
-function parseGraphqlJson(stdout) {
-  try {
-    return JSON.parse(stdout);
-  } catch {
-    return null;
-  }
-}
+// ── gh api graphql 呼び出し ──────────────────────────────────────────────────
+// 低レベル実行（graphqlExec / parseGraphqlJson）は graphql-client.js に切り出した。
+// テストによる注入は graphql-client.js の _setGraphqlExec を経由し、本モジュールは
+// それを _setGraphqlExec として再exportする（既存 tests/gh-fallback.test.js の互換）。
 
 /**
  * 指定 Issue の GraphQL node ID を取得する。
@@ -48,7 +39,7 @@ function parseGraphqlJson(stdout) {
  * @returns {{ status: number, stdout: string, stderr: string, nodeId?: string }}
  */
 function resolveIssueNodeId(owner, name, issueNumber, opts = {}) {
-  const result = _graphqlExec([
+  const result = graphqlExec([
     '-f', 'query=query($owner:String!,$name:String!,$num:Int!){repository(owner:$owner,name:$name){issue(number:$num){id}}}',
     '-f', `owner=${owner}`,
     '-f', `name=${name}`,
@@ -75,7 +66,7 @@ function graphqlAddComment({ repo, issue, body, opts = {} }) {
   const idResult = resolveIssueNodeId(owner, name, issue, opts);
   if (idResult.status !== 0) return idResult;
 
-  const commentResult = _graphqlExec([
+  const commentResult = graphqlExec([
     '-f', 'query=mutation($id:ID!,$body:String!){addComment(input:{subjectId:$id,body:$body}){commentEdge{node{url}}}}',
     '-f', `id=${idResult.nodeId}`,
     '-F', 'body=@-',
@@ -104,7 +95,7 @@ function graphqlAddComment({ repo, issue, body, opts = {} }) {
  */
 function graphqlListComments({ repo, issue, since = null, opts = {} }) {
   const [owner, name] = String(repo).split('/');
-  const result = _graphqlExec([
+  const result = graphqlExec([
     '-f', 'query=query($owner:String!,$name:String!,$num:Int!){repository(owner:$owner,name:$name){issue(number:$num){comments(last:100){nodes{databaseId body createdAt}}}}}',
     '-f', `owner=${owner}`,
     '-f', `name=${name}`,
@@ -153,7 +144,7 @@ function graphqlCommentBody({ repo, issue, commentId, opts = {} }) {
  */
 function graphqlCreateIssue({ repo, title, body, opts = {} }) {
   const [owner, name] = String(repo).split('/');
-  const repoIdResult = _graphqlExec([
+  const repoIdResult = graphqlExec([
     '-f', 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}',
     '-f', `owner=${owner}`,
     '-f', `name=${name}`,
@@ -166,7 +157,7 @@ function graphqlCreateIssue({ repo, title, body, opts = {} }) {
     return { status: 1, stdout: '', stderr: 'gh-fallback: GraphQL応答からrepository IDを取得できませんでした' };
   }
 
-  const createResult = _graphqlExec([
+  const createResult = graphqlExec([
     '-f', 'query=mutation($repoId:ID!,$title:String!,$body:String!){createIssue(input:{repositoryId:$repoId,title:$title,body:$body}){issue{number url}}}',
     '-f', `repoId=${repoId}`,
     '-f', `title=${title}`,
@@ -188,5 +179,5 @@ module.exports = {
   graphqlListComments,
   graphqlCommentBody,
   graphqlCreateIssue,
-  _setGraphqlExec: (fn) => { _graphqlExec = fn; },
+  _setGraphqlExec,
 };

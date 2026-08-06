@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "comment": "council のフェーズ別出力・マニフェストのスキーマ。_validateAgainstSchema（scripts/shared/json-schema.js）で検証する。additionalProperties: false で契約を固定し、未知フィールドはスキーマ・SKILL.md・全consumerを同時更新しない限り追加しない。",
+
+  "opinion": {
+    "type": "object",
+    "required": ["participant_id", "opinion", "stance"],
+    "additionalProperties": false,
+    "properties": {
+      "participant_id": { "type": "string", "minLength": 1 },
+      "opinion": { "type": "string", "minLength": 1 },
+      "stance": { "type": "string", "enum": ["AGREE", "DISAGREE", "NEUTRAL"] },
+      "key_points": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "risks": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    }
+  },
+
+  "vote": {
+    "type": "object",
+    "required": ["participant_id", "choice", "rationale"],
+    "additionalProperties": false,
+    "properties": {
+      "participant_id": { "type": "string", "minLength": 1 },
+      "choice": { "type": "string", "minLength": 1 },
+      "rationale": { "type": "string", "minLength": 1 },
+      "agrees_with": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    }
+  },
+
+  "investigation": {
+    "type": "object",
+    "required": ["findings", "sources"],
+    "additionalProperties": false,
+    "properties": {
+      "findings": { "type": "string", "minLength": 1 },
+      "sources": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    }
+  },
+
+  "manifest": {
+    "type": "object",
+    "required": ["phase", "session", "title", "agenda", "worktree", "participants"],
+    "additionalProperties": false,
+    "properties": {
+      "phase": { "type": "string", "enum": ["opinion", "vote"] },
+      "session": { "type": "string", "minLength": 1 },
+      "title": { "type": "string", "minLength": 1 },
+      "agenda": { "type": "string" },
+      "context_appendix": { "type": "string" },
+      "worktree": { "type": "string", "minLength": 1 },
+      "participants": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "required": ["participant_id", "agent_id"],
+          "additionalProperties": false,
+          "properties": {
+            "participant_id": { "type": "string", "minLength": 1 },
+            "agent_id": { "type": "string", "minLength": 1 }
+          }
+        }
+      },
+      "opinions": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["participant_id", "opinion"],
+          "additionalProperties": false,
+          "properties": {
+            "participant_id": { "type": "string", "minLength": 1 },
+            "opinion": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

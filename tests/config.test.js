@@ -13,6 +13,7 @@ const {
   closestKnownSkillKey,
   resolveSkillAgentMapWithSources,
   validateConfig,
+  validateCouncilConfig,
   USAGE,
 } = require('../scripts/config');
 
@@ -1091,4 +1092,80 @@ test('CLI status: 非対話化トークンを欠落させたエージェント�
       `execArgs の欠落警告に codex / exec が含まれること: ${r.stdout}`,
     );
   });
+});
+
+// ── validateCouncilConfig（Issue #230） ───────────────────────────────────────
+
+test('validateCouncilConfig: 正常な council は問題なし', () => {
+  const issues = validateCouncilConfig('global', {
+    groups: { default: { agents: ['claude', 'agy'], category: 'general' } },
+    investigationAgent: 'claude',
+  });
+  assert.deepEqual(issues, []);
+});
+
+test('validateCouncilConfig: council 未定義は問題なし（任意）', () => {
+  assert.deepEqual(validateCouncilConfig('global', undefined), []);
+});
+
+test('validateCouncilConfig: council がオブジェクトでなければエラー', () => {
+  const issues = validateCouncilConfig('global', ['not', 'an', 'object']);
+  assert.ok(issues.some(i => i.includes('council must be an object') && i.includes('[ERROR]')));
+});
+
+test('validateCouncilConfig: default グループ必須 — 無ければエラー', () => {
+  const issues = validateCouncilConfig('global', {
+    groups: { tech: { agents: ['claude'] } },
+  });
+  assert.ok(issues.some(i => i.includes('"default" group is required') && i.includes('[ERROR]')));
+});
+
+test('validateCouncilConfig: groups がオブジェクトでなければエラー', () => {
+  const issues = validateCouncilConfig('global', { groups: 'nope' });
+  assert.ok(issues.some(i => i.includes('council.groups') && i.includes('must be an object') && i.includes('[ERROR]')));
+});
+
+test('validateCouncilConfig: 空配列 agents はエラー', () => {
+  const issues = validateCouncilConfig('global', {
+    groups: { default: { agents: [] } },
+  });
+  assert.ok(issues.some(i => i.includes('non-empty array') && i.includes('[ERROR]')));
+});
+
+test('validateCouncilConfig: 重複エージェントIDは警告', () => {
+  const issues = validateCouncilConfig('global', {
+    groups: { default: { agents: ['claude', 'claude'] } },
+  });
+  assert.ok(issues.some(i => i.includes('duplicate agent ID') && i.includes('[WARN]')));
+});
+
+test('validateCouncilConfig: 解決不能なエージェントIDは警告', () => {
+  const issues = validateCouncilConfig('global', {
+    groups: { default: { agents: ['no-such-agent'] } },
+  });
+  assert.ok(issues.some(i => i.includes('unknown/unresolvable agent ID "no-such-agent"') && i.includes('[WARN]')));
+});
+
+test('validateCouncilConfig: 解決不能な investigationAgent は警告', () => {
+  const issues = validateCouncilConfig('global', {
+    groups: { default: { agents: ['claude'] } },
+    investigationAgent: 'no-such-agent',
+  });
+  assert.ok(issues.some(i => i.includes('council.investigationAgent') && i.includes('unknown/unresolvable')));
+});
+
+test('validateCouncilConfig: investigationAgent が文字列でない場合はエラー', () => {
+  const issues = validateCouncilConfig('global', {
+    groups: { default: { agents: ['claude'] } },
+    investigationAgent: 42,
+  });
+  assert.ok(issues.some(i => i.includes('must be a non-empty string') && i.includes('[ERROR]')));
+});
+
+test('validateConfig: council セクションの検証結果が issues に混ざる', () => {
+  const defaults = loadDefaults();
+  const issues = validateConfig('global', '/tmp/config.json', {
+    council: { groups: { default: { agents: ['no-such-agent'] } } },
+  }, defaults);
+  assert.ok(issues.some(i => i.includes('council.groups') && i.includes('unknown/unresolvable')));
 });

@@ -444,6 +444,88 @@ function cmdStatus(workspacePath) {
   if (unknownWarnings.length > 0) {
     console.log('\n' + unknownWarnings.join('\n'));
   }
+
+  // Warn about council config issues (Issue #230)
+  const councilWarnings = [];
+  if (config && !config._parseError && config.council !== undefined) {
+    councilWarnings.push(...validateCouncilConfig('global', config.council));
+  }
+  if (wsConfig && !wsConfig._parseError && wsConfig.council !== undefined) {
+    councilWarnings.push(...validateCouncilConfig('workspace', wsConfig.council));
+  }
+  if (councilWarnings.length > 0) {
+    console.log('\n' + councilWarnings.join('\n'));
+  }
+}
+
+// ── council 設定検証（Issue #230） ─────────────────────────────────────────────
+
+/**
+ * council 設定の検証警告を収集する。
+ * resolveCouncilConfig（フェイルクローズで null を返すだけ）とは別に、人間向けに
+ * 何が不正かを個別のメッセージとして返す（doctor / status 用）。
+ *
+ * @param {string} label    'global' or 'workspace'
+ * @param {*} council       config.json の council セクション
+ * @returns {string[]}
+ */
+function validateCouncilConfig(label, council) {
+  const issues = [];
+
+  // council は任意キー。未設定なら検証対象外。
+  if (council === undefined) return issues;
+
+  if (!isPlainObject(council)) {
+    issues.push(`[ERROR] ${label}: council must be an object.`);
+    return issues;
+  }
+
+  // council.groups
+  if (council.groups === undefined) {
+    issues.push(`[WARN] ${label} council.groups: missing (no participant groups defined).`);
+  } else if (!isPlainObject(council.groups)) {
+    issues.push(`[ERROR] ${label} council.groups: must be an object.`);
+  } else {
+    if (council.groups.default === undefined) {
+      issues.push(`[ERROR] ${label} council.groups: "default" group is required.`);
+    }
+    for (const [groupName, group] of Object.entries(council.groups)) {
+      if (!isPlainObject(group)) {
+        issues.push(`[ERROR] ${label} council.groups["${groupName}"]: must be an object.`);
+        continue;
+      }
+      if (!Array.isArray(group.agents) || group.agents.length === 0) {
+        issues.push(`[ERROR] ${label} council.groups["${groupName}"].agents: must be a non-empty array.`);
+        continue;
+      }
+      const seen = new Set();
+      for (const agentId of group.agents) {
+        if (typeof agentId !== 'string' || agentId.length === 0) {
+          issues.push(`[ERROR] ${label} council.groups["${groupName}"].agents: contains empty agent ID.`);
+          continue;
+        }
+        if (seen.has(agentId)) {
+          issues.push(`[WARN] ${label} council.groups["${groupName}"].agents: duplicate agent ID "${agentId}".`);
+          continue;
+        }
+        seen.add(agentId);
+        if (!resolveAgentConfig(agentId, { homedir: HOMEDIR })) {
+          issues.push(`[WARN] ${label} council.groups["${groupName}"].agents: unknown/unresolvable agent ID "${agentId}".`);
+        }
+      }
+    }
+  }
+
+  // council.investigationAgent
+  if (council.investigationAgent !== undefined) {
+    if (typeof council.investigationAgent !== 'string' || council.investigationAgent.length === 0) {
+      issues.push(`[ERROR] ${label} council.investigationAgent: must be a non-empty string.`);
+    } else if (!resolveAgentConfig(council.investigationAgent, { homedir: HOMEDIR })) {
+      issues.push(`[WARN] ${label} council.investigationAgent: unknown/unresolvable agent ID "${council.investigationAgent}".`);
+    }
+  }
+
+  return issues;
 }
 
 // ── subcommand: doctor ─────────────────────────────────────────────────────────
@@ -585,6 +667,11 @@ function validateConfig(label, configPath, config, defaults) {
     }
   }
 
+  // Check council section (Issue #230)
+  if (config.council !== undefined) {
+    issues.push(...validateCouncilConfig(label, config.council));
+  }
+
   return issues;
 }
 
@@ -721,5 +808,6 @@ module.exports = {
   findUnknownSkillKeys,
   resolveSkillAgentMapWithSources,
   validateConfig,
+  validateCouncilConfig,
   USAGE,
 };

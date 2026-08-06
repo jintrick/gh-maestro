@@ -66,6 +66,22 @@ function worktreeAdd(worktreeDir, branchName, baseRef, cwd) {
 }
 
 /**
+ * git worktree add --detach — ブランチを作らず、指定コミットを作業ツリーとして追加する。
+ * council の議論用worktree（読み取り専用の逃げ道・使い捨て）が主な利用元。
+ * sha はユーザー由来値になりうるため、`--` セパレータで operands を分離する
+ * （git-arg-injection ルール準拠。`-` 始まりの値がオプションとして解釈されない）。
+ *
+ * @param {string} worktreeDir - worktree の絶対パス
+ * @param {string} sha - チェックアウトするコミット
+ * @param {string} cwd - 実行ディレクトリ（リポジトリルート）
+ * @returns {import('child_process').SpawnSyncReturns<Buffer>} spawnSync の戻り値
+ */
+function worktreeAddDetached(worktreeDir, sha, cwd) {
+  const args = ['-c', 'core.longpaths=true', 'worktree', 'add', '--detach', worktreeDir, '--', sha];
+  return runOrThrow('git', args, { cwd, stdio: 'pipe' });
+}
+
+/**
  * git worktree remove — worktree を削除する
  * @param {string} worktreeDir - worktree の絶対パス
  * @param {string} cwd - 実行ディレクトリ（リポジトリルート）
@@ -92,4 +108,4 @@ function worktreePrune(cwd, opts = {}) {
   return runOrThrow('git', args, { cwd, stdio: opts.stdio || 'pipe' });
 }
 
-module.exports = { worktreeAdd, worktreeRemove, worktreePrune };
+module.exports = { worktreeAdd, worktreeAddDetached, worktreeRemove, worktreePrune };

@@ -9,6 +9,7 @@ const path = require('path');
 const {
   resolveAgentConfig,
   resolveSkillAgentMap,
+  resolveCouncilConfig,
   resolveExtends,
   loadDefaults,
   validateNonInteractiveTokens,
@@ -769,3 +770,133 @@ test('resolveAgentConfig: workspace config は nonInteractiveTokens を上書き
   });
 });
 
+
+// ── resolveCouncilConfig（Issue #230） ────────────────────────────────────────
+
+test('resolveCouncilConfig: council.groups と investigationAgent を解決する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: {
+        groups: {
+          default: { agents: ['claude', 'agy'], category: 'general' },
+          tech: { agents: ['codex'] },
+        },
+        investigationAgent: 'claude',
+      },
+    });
+
+    const result = resolveCouncilConfig({ homedir: home });
+    assert.ok(result);
+    assert.deepEqual(result.groups.default, { agents: ['claude', 'agy'], category: 'general' });
+    assert.deepEqual(result.groups.tech, { agents: ['codex'] });
+    assert.equal(result.investigationAgent, 'claude');
+  });
+});
+
+test('resolveCouncilConfig: investigationAgent 未指定は調査なしとして null を返す（許容）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { default: { agents: ['claude'] } } },
+    });
+    const result = resolveCouncilConfig({ homedir: home });
+    assert.ok(result);
+    assert.equal(result.investigationAgent, null);
+  });
+});
+
+test('resolveCouncilConfig: default グループ必須 — 無ければフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { tech: { agents: ['claude'] } } },
+    });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: council 未定義はフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, { skillAgentMap: { 'gh-maestro-coder': 'claude' } });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: 空配列 agents はフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, { council: { groups: { default: { agents: [] } } } });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: 重複エージェントIDはフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { default: { agents: ['claude', 'claude'] } } },
+    });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: 解決不能なエージェントIDはフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { default: { agents: ['no-such-agent'] } } },
+    });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: 解決不能な investigationAgent はフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { default: { agents: ['claude'] } }, investigationAgent: 'no-such-agent' },
+    });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: investigationAgent が文字列でない場合もフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { default: { agents: ['claude'] } }, investigationAgent: 42 },
+    });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: workspace 設定が global を上書きする（後勝ち）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: {
+        groups: { default: { agents: ['claude'] } },
+        investigationAgent: 'claude',
+      },
+    });
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-council-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        council: {
+          groups: { default: { agents: ['agy'] } },
+          investigationAgent: 'agy',
+        },
+      });
+
+      const result = resolveCouncilConfig({ homedir: home, workspace: ws });
+      assert.ok(result);
+      assert.deepEqual(result.groups.default.agents, ['agy']);
+      assert.equal(result.investigationAgent, 'agy');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('resolveCouncilConfig: category 省略時は category なしで解決する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { default: { agents: ['claude'] } } },
+    });
+    const result = resolveCouncilConfig({ homedir: home });
+    assert.ok(result);
+    assert.deepEqual(result.groups.default, { agents: ['claude'] });
+  });
+});

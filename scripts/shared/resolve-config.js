@@ -352,9 +352,91 @@ function resolveSkillAgentMap(opts = {}) {
   return map;
 }
 
+/**
+ * council（複数モデル議論）設定を解決・検証する。
+ *
+ * `config.json` の上位キー `council`（`agents` / `profiles` / `skillAgentMap` と並ぶ
+ * 独立セクション。Issue #230）を読み、以下の両方を解決する:
+ *   - `council.groups`: 参加者グループ定義。**`default` キーを必須**とし、各グループの
+ *     `agents`（`resolveAgentConfig` で解決可能なエージェントID）が空配列・重複・
+ *     解決不能でないことを検証する。`category` は任意。
+ *   - `council.investigationAgent`: 調査ジョブに使うエージェントID。**指定されていて
+ *     解決不能な場合はフェイルクローズ**。未指定（undefined）は「調査ジョブなし」として
+ *     許容し null を返す（調査の要不要は orchestrator のその都度判断のため）。
+ *
+ * マージ順序は resolveSkillAgentMap と同じ global → workspace（後勝ち）。
+ * council 設定は実行コマンドを含まないため EXEC_SENSITIVE_FIELDS の対象外。
+ *
+ * @param {object} [opts={}]
+ * @param {string} [opts.workspace]
+ * @param {string} [opts.homedir]
+ * @returns {{ groups: Record<string, { agents: string[], category?: string }>, investigationAgent: string|null } | null}
+ *   解決・検証に失敗した場合は null（fail-closed。呼び出し元は終了コード2等で停止する）
+ */
+function resolveCouncilConfig(opts = {}) {
+  const homedir = opts.homedir || process.env.HOME || process.env.USERPROFILE || '';
+
+  const globalConfig = loadConfigFile(resolve(homedir, '.gh-maestro', 'config.json'));
+  const globalCouncil = isPlainObject(globalConfig.council) ? globalConfig.council : {};
+
+  let workspaceCouncil = {};
+  if (opts.workspace) {
+    const wsConfig = loadConfigFile(resolve(opts.workspace, '.gh-maestro', 'config.json'));
+    workspaceCouncil = isPlainObject(wsConfig.council) ? wsConfig.council : {};
+  }
+
+  // global → workspace 後勝ちのシャローコピー。groups はキー単位、agents は配列ごと置換。
+  const merged = { ...globalCouncil, ...workspaceCouncil };
+
+  // ── investigationAgent ──
+  let investigationAgent = null;
+  if (merged.investigationAgent !== undefined) {
+    if (typeof merged.investigationAgent !== 'string' || merged.investigationAgent.length === 0) {
+      return null;
+    }
+    if (!resolveAgentConfig(merged.investigationAgent, { workspace: opts.workspace, homedir })) {
+      return null; // 指定されているのに解決不能 → fail-closed
+    }
+    investigationAgent = merged.investigationAgent;
+  }
+
+  // ── groups ──
+  if (!isPlainObject(merged.groups)) {
+    return null; // 未定義・不正（配列等） → fail-closed
+  }
+  if (!Object.prototype.hasOwnProperty.call(merged.groups, 'default')) {
+    return null; // default 必須 → fail-closed
+  }
+
+  const groups = {};
+  for (const [groupName, group] of Object.entries(merged.groups)) {
+    if (!isPlainObject(group) || !Array.isArray(group.agents) || group.agents.length === 0) {
+      return null; // 空配列・不正なグループ → fail-closed
+    }
+    const seen = new Set();
+    const agents = [];
+    for (const agentId of group.agents) {
+      if (typeof agentId !== 'string' || agentId.length === 0) return null;
+      if (seen.has(agentId)) return null; // 重複 → fail-closed
+      seen.add(agentId);
+      if (!resolveAgentConfig(agentId, { workspace: opts.workspace, homedir })) {
+        return null; // 解決不能 → fail-closed
+      }
+      agents.push(agentId);
+    }
+    const category = typeof group.category === 'string' && group.category.length > 0
+      ? group.category
+      : undefined;
+    groups[groupName] = category ? { agents, category } : { agents };
+  }
+
+  return { groups, investigationAgent };
+}
+
 module.exports = {
   resolveAgentConfig,
   resolveSkillAgentMap,
+  resolveCouncilConfig,
   resolveExtends,
   loadDefaults,
   isValidAgentConfig,
