@@ -63,18 +63,22 @@ const SHA = '0123456789abcdef0123456789abcdef01234567'; // 40桁の16進数
 
 // ── slugifyTitle / assertValidSession ──────────────────────────────────────────
 
-test('slugifyTitle: ASCII英数字は小文字化して残す', () => {
+test('slugifyTitle: ASCII英数字は小文字化して残し、決定論的ハッシュ接尾辞を付与する', () => {
   const { mod } = loadModule();
-  assert.equal(mod.slugifyTitle('RAG構成の採用可否'), 'rag');
-  // 非ASCII文字は '-' に畳み込まれ、両端の '-' は除去される
-  assert.equal(mod.slugifyTitle('Feature Flag 導入'), 'feature-flag');
-  assert.equal(mod.slugifyTitle(' v1.2 (beta) '), 'v1-2-beta');
+  // 非ASCII文字は '-' に畳み込まれ、両端の '-' は除去される。末尾は sha1 先頭8文字
+  assert.match(mod.slugifyTitle('RAG構成の採用可否'), /^rag-[0-9a-f]{8}$/);
+  assert.match(mod.slugifyTitle('Feature Flag 導入'), /^feature-flag-[0-9a-f]{8}$/);
+  assert.match(mod.slugifyTitle(' v1.2 (beta) '), /^v1-2-beta-[0-9a-f]{8}$/);
+  // 決定論的（同一タイトル → 同一スラッグ。--resume の安定性）
+  assert.equal(mod.slugifyTitle('RAG構成の採用可否'), mod.slugifyTitle('RAG構成の採用可否'));
 });
 
-test('slugifyTitle: 非ASCIIのみのタイトルは council にフォールバック', () => {
+test('slugifyTitle: 非ASCIIのみのタイトルは council ベースでもハッシュで一意化される', () => {
   const { mod } = loadModule();
-  assert.equal(mod.slugifyTitle('採用可否について'), 'council');
-  assert.equal(mod.slugifyTitle('!!!'), 'council');
+  assert.match(mod.slugifyTitle('採用可否について'), /^council-[0-9a-f]{8}$/);
+  assert.match(mod.slugifyTitle('!!!'), /^council-[0-9a-f]{8}$/);
+  // 異なる日本語タイトルが同じ 'council' に潰れない（review指摘 #2 の核心）
+  assert.notEqual(mod.slugifyTitle('採用可否について'), mod.slugifyTitle('料金改定について'));
 });
 
 test('slugifyTitle: 長いタイトルは SESSION_RE（最大64文字）内に収まるよう切り詰める', () => {
@@ -153,17 +157,18 @@ test('resolveSession: 明示 session が形式外なら throw', () => {
 test('resolveSession: session 省略時は title から自動生成する', () => {
   const { mod } = loadModule();
   withTempWorkspace(ws => {
-    assert.equal(mod.resolveSession({ title: 'RAG構成の採用可否', workspace: ws }), 'rag');
+    assert.equal(mod.resolveSession({ title: 'RAG構成の採用可否', workspace: ws }), mod.slugifyTitle('RAG構成の採用可否'));
   });
 });
 
 test('resolveSession: state ファイル既存時は -2, -3... の接尾辞を付与する', () => {
   const { mod } = loadModule();
   withTempWorkspace(ws => {
-    // council-rag.json と council-rag-2.json が既にある場合 → rag-3
-    fs.writeFileSync(path.join(ws, '.gh-maestro', 'council-rag.json'), '{}', 'utf8');
-    fs.writeFileSync(path.join(ws, '.gh-maestro', 'council-rag-2.json'), '{}', 'utf8');
-    assert.equal(mod.resolveSession({ title: 'RAG構成の採用可否', workspace: ws }), 'rag-3');
+    const slug = mod.slugifyTitle('RAG構成の採用可否');
+    // council-<slug>.json と council-<slug>-2.json が既にある場合 → <slug>-3
+    fs.writeFileSync(path.join(ws, '.gh-maestro', `council-${slug}.json`), '{}', 'utf8');
+    fs.writeFileSync(path.join(ws, '.gh-maestro', `council-${slug}-2.json`), '{}', 'utf8');
+    assert.equal(mod.resolveSession({ title: 'RAG構成の採用可否', workspace: ws }), `${slug}-3`);
   });
 });
 
@@ -171,7 +176,7 @@ test('resolveSession: state ファイルが無ければ接尾辞を付けない'
   const { mod } = loadModule();
   withTempWorkspace(ws => {
     fs.writeFileSync(path.join(ws, '.gh-maestro', 'council-other.json'), '{}', 'utf8');
-    assert.equal(mod.resolveSession({ title: 'RAG構成の採用可否', workspace: ws }), 'rag');
+    assert.equal(mod.resolveSession({ title: 'RAG構成の採用可否', workspace: ws }), mod.slugifyTitle('RAG構成の採用可否'));
   });
 });
 
@@ -179,8 +184,9 @@ test('resolveSession: 長いタイトルでも collision 接尾辞で SESSION_RE
   const { mod } = loadModule();
   withTempWorkspace(ws => {
     const base = 'x'.repeat(200); // slugify 後は MAX_SLUG_BASE_LEN で切り詰められる
-    // 切り詰め後の base そのものが既存 state と衝突するようにしておく
-    fs.writeFileSync(path.join(ws, '.gh-maestro', `council-${'x'.repeat(56)}.json`), '{}', 'utf8');
+    const slug = mod.slugifyTitle(base); // 47文字 + '-' + hash8 の56文字
+    // 切り詰め後の slug そのものが既存 state と衝突するようにしておく
+    fs.writeFileSync(path.join(ws, '.gh-maestro', `council-${slug}.json`), '{}', 'utf8');
     const session = mod.resolveSession({ title: base, workspace: ws });
     assert.ok(session.length <= 64, `session length ${session.length} > 64: ${session}`);
     assert.match(session, /^[A-Za-z0-9_-]{1,64}$/);
@@ -224,14 +230,50 @@ test('ensureCouncilWorktree: 未確保なら git worktree add --detach を呼ぶ
   });
 });
 
-test('ensureCouncilWorktree: 既存worktreeは再利用し git を呼ばない（冪等）', () => {
-  const { mod, calls } = loadModule(() => ({ status: 0, stdout: '' }));
+test('ensureCouncilWorktree: 既存worktreeのHEADが要求shaと一致すれば再利用（rev-parseのみ）', () => {
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: SHA + '\n', stderr: '' }));
   withTempWorkspace(ws => {
     const dir = path.join(ws, '.gh-maestro', 'council-wt-s1');
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, '.git'), 'gitdir: ...', 'utf8');
     assert.equal(mod.ensureCouncilWorktree(ws, 's1', SHA), dir);
-    assert.equal(calls.length, 0);
+    // 再利用を確認するための rev-parse 1回だけ。worktree add/remove は呼ばない
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].cmd, 'git');
+    assert.deepEqual(calls[0].args, ['rev-parse', 'HEAD']);
+  });
+});
+
+test('ensureCouncilWorktree: 既存worktreeのHEADが要求shaと不一致なら付け直す', () => {
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'ffffffffffffffffffffffffffffffffffffffff\n', stderr: '' }));
+  withTempWorkspace(ws => {
+    const dir = path.join(ws, '.gh-maestro', 'council-wt-s1');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '.git'), 'gitdir: ...', 'utf8');
+    assert.equal(mod.ensureCouncilWorktree(ws, 's1', SHA), dir);
+    // rev-parse → remove --force → add --detach の順で3回 git を呼ぶ
+    assert.equal(calls.length, 3);
+    assert.deepEqual(calls[0].args, ['rev-parse', 'HEAD']);
+    assert.ok(calls[1].args.includes('worktree'));
+    assert.ok(calls[1].args.includes('remove'));
+    assert.ok(calls[2].args.includes('worktree'));
+    assert.ok(calls[2].args.includes('add'));
+    assert.ok(calls[2].args.includes(SHA));
+  });
+});
+
+test('ensureCouncilWorktree: 既存worktreeのHEADが取得不能でも付け直す（fail-closed）', () => {
+  const { mod, calls } = loadModule((cmd, args, opts, callIndex) => {
+    // 1回目（rev-parse）だけ失敗させ、remove/add は成功させる
+    if (callIndex === 0) return { status: 128, stdout: '', stderr: 'fatal: not a git repository' };
+    return { status: 0, stdout: '' };
+  });
+  withTempWorkspace(ws => {
+    const dir = path.join(ws, '.gh-maestro', 'council-wt-s1');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '.git'), 'gitdir: ...', 'utf8');
+    assert.equal(mod.ensureCouncilWorktree(ws, 's1', SHA), dir);
+    assert.equal(calls.length, 3);
   });
 });
 

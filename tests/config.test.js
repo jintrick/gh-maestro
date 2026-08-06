@@ -1113,11 +1113,13 @@ test('validateCouncilConfig: council がオブジェクトでなければエラ�
   assert.ok(issues.some(i => i.includes('council must be an object') && i.includes('[ERROR]')));
 });
 
-test('validateCouncilConfig: default グループ必須 — 無ければエラー', () => {
+test('validateCouncilConfig: default グループ欠落はファイル単位ではエラーにしない', () => {
+  // review指摘 #4: global に default があり workspace が groups を追加する分割設定が
+  // false positive にならないよう、"default" 必須はマージ後検証（validateCouncilMerged）の責務。
   const issues = validateCouncilConfig('global', {
     groups: { tech: { agents: ['claude'] } },
   });
-  assert.ok(issues.some(i => i.includes('"default" group is required') && i.includes('[ERROR]')));
+  assert.ok(!issues.some(i => i.includes('"default" group is required')));
 });
 
 test('validateCouncilConfig: groups がオブジェクトでなければエラー', () => {
@@ -1168,4 +1170,66 @@ test('validateConfig: council セクションの検証結果が issues に混ざ
     council: { groups: { default: { agents: ['no-such-agent'] } } },
   }, defaults);
   assert.ok(issues.some(i => i.includes('council.groups') && i.includes('unknown/unresolvable')));
+});
+
+// ── validateCouncilMerged（マージ後検証。review指摘 #4/#5） ─────────────────────
+
+/**
+ * resolve-config.js の resolveCouncilConfig / resolveAgentConfig を差し替えた状態で
+ * config.js を再ロードする。config.js はロード時に resolve-config の名前付きエクスポートを
+ * 捕捉するため、キャッシュを消して現在のモックを反映させる。
+ * @param {object} overrides  resolve-config.js の exports に対する上書き
+ * @returns {object} 再ロードした config.js の module.exports
+ */
+function loadConfigWithResolveConfig(overrides) {
+  const configPath = require.resolve('../scripts/config');
+  const resolveConfigPath = require.resolve('../scripts/shared/resolve-config');
+  const real = require(resolveConfigPath);
+  delete require.cache[configPath];
+  require.cache[resolveConfigPath] = {
+    id: resolveConfigPath,
+    filename: resolveConfigPath,
+    loaded: true,
+    exports: { ...real, ...overrides },
+  };
+  try {
+    return require(configPath);
+  } finally {
+    delete require.cache[resolveConfigPath];
+    delete require.cache[configPath];
+  }
+}
+
+test('validateCouncilMerged: マージ解決に成功すれば問題なし', () => {
+  const mod = loadConfigWithResolveConfig({
+    resolveCouncilConfig: () => ({ groups: { default: { agents: ['claude'] } }, investigationAgent: null }),
+  });
+  assert.deepEqual(mod.validateCouncilMerged({}), []);
+});
+
+test('validateCouncilMerged: マージ解決失敗（null）は ERROR で doctor exit 1 の根拠になる', () => {
+  const mod = loadConfigWithResolveConfig({ resolveCouncilConfig: () => null });
+  const issues = mod.validateCouncilMerged({ workspace: '/ws', homedir: '/home' });
+  assert.ok(issues.some(i => i.includes('failed to resolve') && i.includes('[ERROR]')));
+});
+
+test('validateCouncilConfig: resolveAgentConfig に workspace コンテクストが渡る（#5）', () => {
+  // workspace のみに定義されたカスタムエージェントを「unknown」と誤判定しないよう、
+  // エージェント解決に workspace が渡ることを検証する。
+  const seenOpts = [];
+  const mod = loadConfigWithResolveConfig({
+    resolveAgentConfig: (agentId, opts) => {
+      seenOpts.push(opts);
+      return agentId === 'ws-only' ? { id: 'ws-only' } : null;
+    },
+  });
+  const issues = mod.validateCouncilConfig('workspace', {
+    groups: { default: { agents: ['ws-only'] } },
+    investigationAgent: 'ws-only',
+  }, { workspace: '/ws', homedir: '/home' });
+  assert.deepEqual(issues, []);
+  assert.deepEqual(seenOpts, [
+    { homedir: '/home', workspace: '/ws' },
+    { homedir: '/home', workspace: '/ws' },
+  ]);
 });

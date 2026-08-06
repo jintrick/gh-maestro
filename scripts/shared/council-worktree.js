@@ -14,6 +14,7 @@
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('../child-process');
@@ -39,24 +40,34 @@ function assertValidSession(session) {
 }
 
 /**
- * --title からセッションIDの候補（ASCII スラッグ）を決定論的に生成する。
- * 非ASCII文字・記号は '-' に畳み込み、連続・両端の '-' を取り除く。
- * 結果が空になるタイトルは 'council' にフォールバックする。
- * 長いタイトルは MAX_SLUG_BASE_LEN で切り詰め、SESSION_RE 形式（最大64文字）を
- * 保証する（collision 接尾辞の余地もここで確保する）。
- * 例: "RAG構成の採用可否" → "rag"
+ * --title からセッションIDの候補を決定論的に生成する。
+ * 非ASCII文字・記号は '-' に畳み込み、連続・両端の '-' を取り除き、結果が空になる
+ * タイトルは 'council' にフォールバックする。加えて、正規化後のタイトル全体の
+ * SHA-1 先頭8文字を常に接尾辞として付与する。
+ *
+ * ハッシュを付与する理由: ASCII畳み込みだけだと日本語タイトル（"RAG構成の採用可否"、
+ * "採用可否について" 等）は全て 'council'（または同一の残り文字列）に潰れて同じ
+ * セッションIDを共有する。すると state ファイルが衝突し、調査結果の読込先が
+ * 別議題のものに混線する（実害: 過去の調査結果が新しい議題の最初のコメントとして
+ * 誤投稿された。review指摘 #2）。ハッシュは決定論的（同一タイトル → 同一ID）なので
+ * 同じ議題の --resume は安定し、内容が異なれば必ず別IDになる。
+ *
+ * 長いタイトルは MAX_SLUG_BASE_LEN までで切り詰める（ハッシュと '-' を必ず残し、
+ * SESSION_RE 形式=最大64文字を保証。collision 接尾辞の余地もここで確保する）。
+ * 例: "RAG構成の採用可否" → "rag-<hash8>"
  *
  * @param {string} title
  * @returns {string}
  */
 function slugifyTitle(title) {
-  const base = String(title)
-    .normalize('NFKC')
+  const normalized = String(title).normalize('NFKC');
+  const asciiBase = normalized
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  const slug = base || 'council';
-  return slug.slice(0, MAX_SLUG_BASE_LEN);
+  const hash = crypto.createHash('sha1').update(normalized).digest('hex').slice(0, 8);
+  const base = (asciiBase || 'council').slice(0, MAX_SLUG_BASE_LEN - hash.length - 1);
+  return `${base}-${hash}`;
 }
 
 /**
@@ -158,8 +169,28 @@ function resolveWorkspaceHead(workspace) {
 }
 
 /**
- * 議論用worktreeを存在保証する（冪等）。既にworktreeとして存在すれば再利用し、
- * git を呼ばない。無ければ `git worktree add --detach <path> <sha>` で作成する。
+ * 議論用worktreeの現在のHEADを取得する。HEADが解決できない場合（壊れたworktree等）は
+ * null を返す。呼び出し元は null を「要求shaと一致しない」として付け直す
+ * （fail-closed方向）。
+ * @param {string} dir worktreeディレクトリ
+ * @returns {string | null} 40桁の sha、または null
+ */
+function worktreeHead(dir) {
+  const r = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' });
+  if (r.error || r.status !== 0) return null;
+  const sha = String(r.stdout || '').trim();
+  return SHA_RE.test(sha) ? sha : null;
+}
+
+/**
+ * 議論用worktreeを存在保証する（冪等）。
+ * 既にworktreeとして存在しても、そのHEADが要求shaと一致している場合のみ再利用する。
+ * HEADが取得できない・一致しない場合は `git worktree remove --force` で付け直してから
+ * `git worktree add --detach <path> <sha>` で作成する。
+ *
+ * HEADを検証する理由: 存在チェックだけだと、state が記録するHEADより古いコミットを
+ * チェックアウトしたままのworktree（残骸）を再利用し、議論の対象コミットが session を
+ * 越えて食い違う（review指摘 #6）。
  *
  * @param {string} workspace
  * @param {string} session
@@ -169,7 +200,8 @@ function resolveWorkspaceHead(workspace) {
 function ensureCouncilWorktree(workspace, session, sha) {
   const dir = councilWorktreeDir(workspace, session);
   if (fs.existsSync(path.join(dir, '.git'))) {
-    return dir;
+    if (worktreeHead(dir) === sha) return dir;
+    worktreeRemove(dir, workspace, { stdio: 'pipe' });
   }
   worktreeAddDetached(dir, sha, workspace);
   return dir;

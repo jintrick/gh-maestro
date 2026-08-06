@@ -22,7 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, resolveExtends, isValidAgentConfig, validateNonInteractiveTokens, EXEC_SENSITIVE_FIELDS } = require('./shared/resolve-config');
+const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, resolveExtends, isValidAgentConfig, validateNonInteractiveTokens, resolveCouncilConfig, EXEC_SENSITIVE_FIELDS } = require('./shared/resolve-config');
 const { isPlainObject } = require('./shared/object');
 const { checkAgentExists } = require('./agent-exec');
 
@@ -446,12 +446,22 @@ function cmdStatus(workspacePath) {
   }
 
   // Warn about council config issues (Issue #230)
+  // マージ前の各ファイルの形式チェックに加え、マージ後（global + workspace）の検証を行う。
+  const councilCtx = { workspace: workspacePath || undefined, homedir: HOMEDIR };
   const councilWarnings = [];
+  let councilConfigured = false;
   if (config && !config._parseError && config.council !== undefined) {
-    councilWarnings.push(...validateCouncilConfig('global', config.council));
+    councilConfigured = true;
+    councilWarnings.push(...validateCouncilConfig('global', config.council, councilCtx));
   }
   if (wsConfig && !wsConfig._parseError && wsConfig.council !== undefined) {
-    councilWarnings.push(...validateCouncilConfig('workspace', wsConfig.council));
+    councilConfigured = true;
+    councilWarnings.push(...validateCouncilConfig('workspace', wsConfig.council, councilCtx));
+  }
+  // default グループ必須等はマージ結果でしか判定できないため、ここで検証する
+  // （分割設定の false positive を避け、マージ結果として破綻している場合のみ報告）。
+  if (councilConfigured) {
+    councilWarnings.push(...validateCouncilMerged(councilCtx));
   }
   if (councilWarnings.length > 0) {
     console.log('\n' + councilWarnings.join('\n'));
@@ -461,16 +471,23 @@ function cmdStatus(workspacePath) {
 // ── council 設定検証（Issue #230） ─────────────────────────────────────────────
 
 /**
- * council 設定の検証警告を収集する。
- * resolveCouncilConfig（フェイルクローズで null を返すだけ）とは別に、人間向けに
- * 何が不正かを個別のメッセージとして返す（doctor / status 用）。
+ * council 設定の「マージ前の1ファイル分」の形式検証警告を収集する。
+ *
+ * この関数は形式チェック（構造・型・空配列・重複・エージェントIDの解決可能性）に限定する。
+ * `default` グループ必須は global + workspace をマージした結果でしか正しく判定できない
+ * （global に default があり workspace が groups を追加する分割設定は、単独ファイルでは
+ * false positive の ERROR になる。review指摘 #4）。マージ後の検証は validateCouncilMerged が担う。
+ * エージェント解決は workspace を含めて行う（workspace のみに定義されたカスタムエージェントを
+ * 誤って unknown にしない。review指摘 #5）。
  *
  * @param {string} label    'global' or 'workspace'
  * @param {*} council       config.json の council セクション
+ * @param {object} [ctx]    { workspace, homedir }。エージェント解決に使うコンテクスト
  * @returns {string[]}
  */
-function validateCouncilConfig(label, council) {
+function validateCouncilConfig(label, council, ctx = {}) {
   const issues = [];
+  const agentResolveOpts = { homedir: ctx.homedir || HOMEDIR, workspace: ctx.workspace };
 
   // council は任意キー。未設定なら検証対象外。
   if (council === undefined) return issues;
@@ -486,9 +503,6 @@ function validateCouncilConfig(label, council) {
   } else if (!isPlainObject(council.groups)) {
     issues.push(`[ERROR] ${label} council.groups: must be an object.`);
   } else {
-    if (council.groups.default === undefined) {
-      issues.push(`[ERROR] ${label} council.groups: "default" group is required.`);
-    }
     for (const [groupName, group] of Object.entries(council.groups)) {
       if (!isPlainObject(group)) {
         issues.push(`[ERROR] ${label} council.groups["${groupName}"]: must be an object.`);
@@ -509,7 +523,7 @@ function validateCouncilConfig(label, council) {
           continue;
         }
         seen.add(agentId);
-        if (!resolveAgentConfig(agentId, { homedir: HOMEDIR })) {
+        if (!resolveAgentConfig(agentId, agentResolveOpts)) {
           issues.push(`[WARN] ${label} council.groups["${groupName}"].agents: unknown/unresolvable agent ID "${agentId}".`);
         }
       }
@@ -520,12 +534,35 @@ function validateCouncilConfig(label, council) {
   if (council.investigationAgent !== undefined) {
     if (typeof council.investigationAgent !== 'string' || council.investigationAgent.length === 0) {
       issues.push(`[ERROR] ${label} council.investigationAgent: must be a non-empty string.`);
-    } else if (!resolveAgentConfig(council.investigationAgent, { homedir: HOMEDIR })) {
+    } else if (!resolveAgentConfig(council.investigationAgent, agentResolveOpts)) {
       issues.push(`[WARN] ${label} council.investigationAgent: unknown/unresolvable agent ID "${council.investigationAgent}".`);
     }
   }
 
   return issues;
+}
+
+/**
+ * global + workspace をマージした council 設定の検証（doctor / status 用）。
+ *
+ * resolveCouncilConfig は「default グループ必須・各グループの agents が非空/重複なし/
+ * 解決可能・investigationAgent が指定されていれば解決可能」を満たせないと null を返す
+ * （fail-closed）。マージ後に破綻している場合を単一の ERROR として報告する。ファイル単位の
+ * validateCouncilConfig が形式チェックに限定されたため、破綻設定が静かに通らないよう
+ * doctor の exit 1 を保つ責務はここが担う（review指摘 #4/#5）。
+ *
+ * 呼び出し側は「global か workspace の少なくとも一方に council が存在する場合」に限定する
+ * こと（council は任意設定であり、未設定を ERROR にしない）。
+ *
+ * @param {object} opts { workspace?, homedir? }
+ * @returns {string[]}
+ */
+function validateCouncilMerged(opts) {
+  const resolved = resolveCouncilConfig({ workspace: opts.workspace, homedir: opts.homedir || HOMEDIR });
+  if (resolved === null) {
+    return ['[ERROR] council (merged global+workspace): failed to resolve. The merged config must define a "default" group with non-empty, non-duplicate, resolvable agents; if investigationAgent is set, it must resolve too.'];
+  }
+  return [];
 }
 
 // ── subcommand: doctor ─────────────────────────────────────────────────────────
@@ -537,9 +574,10 @@ function validateCouncilConfig(label, council) {
  * @param {string} configPath  absolute path for error messages
  * @param {object} config      parsed config (may have _parseError)
  * @param {object} defaults
+ * @param {object} [ctx]       { workspace, homedir }。council 検証のエージェント解決に使う
  * @returns {string[]}
  */
-function validateConfig(label, configPath, config, defaults) {
+function validateConfig(label, configPath, config, defaults, ctx = {}) {
   const issues = [];
 
   if (config === null) {
@@ -669,7 +707,7 @@ function validateConfig(label, configPath, config, defaults) {
 
   // Check council section (Issue #230)
   if (config.council !== undefined) {
-    issues.push(...validateCouncilConfig(label, config.council));
+    issues.push(...validateCouncilConfig(label, config.council, ctx));
   }
 
   return issues;
@@ -683,18 +721,29 @@ function validateConfig(label, configPath, config, defaults) {
 function cmdDoctor(workspacePath) {
   const defaults = loadDefaults();
   const allIssues = [];
+  const ctx = { workspace: workspacePath || undefined, homedir: HOMEDIR };
 
   // Global config
   const config = loadJSON(CONFIG_PATH);
-  allIssues.push(...validateConfig('global', CONFIG_PATH, config, defaults));
+  allIssues.push(...validateConfig('global', CONFIG_PATH, config, defaults, ctx));
 
   // Workspace config
+  let wsConfig = null;
   if (workspacePath) {
     const wsConfigPath = path.resolve(workspacePath, '.gh-maestro', 'config.json');
-    const wsConfig = loadJSON(wsConfigPath);
+    wsConfig = loadJSON(wsConfigPath);
     if (wsConfig !== null) {
-      allIssues.push(...validateConfig('workspace', wsConfigPath, wsConfig, defaults));
+      allIssues.push(...validateConfig('workspace', wsConfigPath, wsConfig, defaults, ctx));
     }
+  }
+
+  // council はマージ後（global + workspace）の形で検証する。分割設定（global に default、
+  // workspace が groups を追加）の false positive を避けつつ、マージ結果として破綻して
+  // いる場合に exit 1 を保つ（review指摘 #4/#5）。どこにも council が無ければ任意設定なので検証しない。
+  const councilConfigured = (config && !config._parseError && config.council !== undefined)
+    || (wsConfig && !wsConfig._parseError && wsConfig.council !== undefined);
+  if (councilConfigured) {
+    allIssues.push(...validateCouncilMerged(ctx));
   }
 
   if (allIssues.length === 0) {
@@ -809,5 +858,6 @@ module.exports = {
   resolveSkillAgentMapWithSources,
   validateConfig,
   validateCouncilConfig,
+  validateCouncilMerged,
   USAGE,
 };

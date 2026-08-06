@@ -222,3 +222,44 @@ test('discussion: GraphQL errors は null', () => {
   capture([], errorResponse());
   assert.equal(gql.discussion('acme/repo', 12), null);
 });
+
+// ── クエリ文字列の構造妥当性 ────────────────────────────────────────────────────
+
+/**
+ * クエリ文字列で使用されているのに宣言されていない GraphQL 変数を抽出する。
+ * graphqlExec はクエリ文字列をそのまま gh に渡すため、宣言漏れは実行時に
+ * variableNotDefined エラーになる。stub で graphqlExec を差し替えていると
+ * 実行時の検出がスリップするため、文字列自体を構造検証する（review指摘 #1）。
+ */
+function undeclaredVariables(query) {
+  const sig = query.match(/^\s*(?:query|mutation)\s*(?:\(([^)]*)\))?/);
+  const declared = new Set();
+  if (sig && sig[1]) {
+    for (const m of sig[1].matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)) declared.add(m[1]);
+  }
+  const used = new Set();
+  for (const m of query.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)) {
+    if (!declared.has(m[1])) used.add(m[1]);
+  }
+  return [...used].sort();
+}
+
+test('undeclaredVariables: 宣言漏れ変数を検出する（検証が空振りでないこと）', () => {
+  // 本指摘の既知バグ形（$num を使用しているのに宣言していない）を検出できる
+  assert.deepEqual(
+    undeclaredVariables('query($owner:String!){repository(owner:$owner){discussion(number:$num){id}}}'),
+    ['num']
+  );
+});
+
+test('discussion: クエリ文字列は使用変数をすべて宣言している（GraphQLとして妥当）', () => {
+  const calls = [];
+  capture(calls, okResponse({
+    repository: { discussion: { id: 'D1', number: 12, url: 'u', title: 't' } },
+  }));
+  gql.discussion('acme/repo', 12);
+  const query = calls[0].args.find(a => a.startsWith('query=')).slice('query='.length);
+  // number に渡す変数 $num が Int! として宣言されている
+  assert.match(query, /query\(\$owner:String!,\$name:String!,\$num:Int!\)/);
+  assert.deepEqual(undeclaredVariables(query), []);
+});

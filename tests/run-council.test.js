@@ -25,6 +25,12 @@ const processLifecycle = require('../scripts/process-lifecycle');
 const SHA = 'a'.repeat(40);
 const AGENDA = '# 議題\n\nRAG構成の採用可否について';
 
+// --title "Test Council" から自動生成されるセッションID。
+// slugifyTitle はタイトル全体のハッシュ接尾辞を常に付与する（review指摘 #2）ため、
+// ハードコードせず実モジュールから算出する（自動生成セッションを期待するテスト用）。
+const { slugifyTitle } = require('../scripts/shared/council-worktree');
+const AUTO_SESSION = slugifyTitle('Test Council');
+
 // ── モック部品 ────────────────────────────────────────────────────────────────
 
 function fakeAgent(id) {
@@ -401,7 +407,7 @@ test('fail-closed: 未完 state なのに --resume 無し・--resume なのに s
     assert.equal(r0.code, 3, '前段: 全滅停止で state を作成');
 
     // 同じ --session を --resume 無しで再実行 → exit 2
-    const r1 = await runAndCapture(() => moduleFor().mod.runCouncil(args(workspace, { session: 'test-council' })));
+    const r1 = await runAndCapture(() => moduleFor().mod.runCouncil(args(workspace, { session: AUTO_SESSION })));
     assert.equal(r1.code, 2);
     assert.ok(r1.err.includes('already has incomplete state'));
 
@@ -453,7 +459,7 @@ test('意見1名成功で続行: agent-b は欠席、投票は成功者のみ、
     assert.ok(wtAdd && wtRemove, 'git worktree add/remove が呼ばれた');
 
     // state は complete。欠席者・意見/投票・集計が永続化されている
-    const state = JSON.parse(fs.readFileSync(stateFile(workspace, 'test-council'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(stateFile(workspace, AUTO_SESSION), 'utf8'));
     assert.equal(state.status, 'complete');
     assert.equal(state.absentees.length, 1);
     assert.equal(state.absentees[0].participant_id, 'agent-b');
@@ -488,7 +494,7 @@ test('全滅停止: 0名成功で exit 3・stopped state・worktree も片付け
     assert.ok(r.out.includes('COUNCIL_PHASE_DONE opinion 0/2 absent=2'));
     assert.ok(r.out.includes('COUNCIL_WT_REMOVED '));
 
-    const state = JSON.parse(fs.readFileSync(stateFile(workspace, 'test-council'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(stateFile(workspace, AUTO_SESSION), 'utf8'));
     assert.equal(state.status, 'stopped');
     assert.equal(state.phase, 'opinion');
     assert.equal(state.failures.length, 2);
@@ -509,7 +515,7 @@ test('再試行上限: 参加者ごとに最大2試行（1回の再起動）で�
     // opinion は2ラウンド（round1 全員・round2 失敗者のみ）で停止
     const opinionCalls = jobs.calls.filter((c) => c.manifest.phase === 'opinion');
     assert.equal(opinionCalls.length, 2);
-    const state = JSON.parse(fs.readFileSync(stateFile(workspace, 'test-council'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(stateFile(workspace, AUTO_SESSION), 'utf8'));
     assert.equal(state.failures[0].participant_id, 'agent-a');
     assert.equal(state.failures[0].attempt, 2);
   });
@@ -570,10 +576,74 @@ test('worktree 片付け失敗: 完走後でも exit 3・state に残存を記�
     assert.ok(r.out.includes('COUNCIL_FINISHED 0'), 'council 自体は完走している');
     assert.ok(r.out.includes('COUNCIL_WT_REMOVED_FAILED '));
 
-    const state = JSON.parse(fs.readFileSync(stateFile(workspace, 'test-council'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(stateFile(workspace, AUTO_SESSION), 'utf8'));
     assert.equal(state.status, 'complete');
     assert.equal(state.worktreeRemoved, false);
     assert.equal(state.worktreeResidual, true);
+  });
+});
+
+// ── complete + worktreeResidual の --resume（review指摘 #7） ────────────────────
+// 完走済み（status=complete）だが worktree 片付けに失敗した残存がある state を --resume
+// で再開すると、従来は COUNCIL_ALREADY_COMPLETE で exit 0 になり、手動片付けが必要という
+// シグナル（worktreeResidual=true・exit 3）が消えていた。修正後は complete 分岐内で
+// 片付けを再試行し、成功なら COUNCIL_WT_REMOVED / 失敗なら COUNCIL_WT_REMOVED_FAILED で
+// exit 3 を維持する。state は手書きで用意する（フェーズジョブ・GraphQL は再実行されない）。
+
+test('complete + worktreeResidual の --resume: 片付け再試行に成功すれば exit 0 + COUNCIL_WT_REMOVED', async () => {
+  await withCouncilEnv(async ({ workspace }) => {
+    const worktreeDir = path.join(workspace, '.gh-maestro', `council-wt-${AUTO_SESSION}`);
+    fs.mkdirSync(path.dirname(worktreeDir), { recursive: true });
+    fs.mkdirSync(worktreeDir, { recursive: true });
+    fs.writeFileSync(path.join(worktreeDir, '.git'), 'gitdir: /fake\n', 'utf8');
+    fs.writeFileSync(stateFile(workspace, AUTO_SESSION), JSON.stringify({
+      status: 'complete',
+      session: AUTO_SESSION,
+      worktreeDir,
+      worktreeRemoved: false,
+      worktreeResidual: true,
+    }), 'utf8');
+
+    const spawn = makeSpawnSync();
+    const jobs = makePhaseJobs(async () => []);
+    const { mod } = loadModule({ spawn: spawn, resolveConfig: makeResolveConfig(), phaseJobs: jobs });
+    const r = await runAndCapture(() => mod.runCouncil(args(workspace, { session: AUTO_SESSION, resume: true })));
+    assert.equal(r.code, 0);
+    assert.ok(r.out.includes('COUNCIL_ALREADY_COMPLETE'));
+    assert.ok(r.out.includes('COUNCIL_WT_REMOVED '), '片付け再試行の成功が報告される');
+    assert.equal(jobs.calls.length, 0, 'フェーズジョブは再実行されない');
+
+    const state = JSON.parse(fs.readFileSync(stateFile(workspace, AUTO_SESSION), 'utf8'));
+    assert.equal(state.worktreeResidual, false);
+    assert.equal(state.worktreeRemoved, true);
+  });
+});
+
+test('complete + worktreeResidual の --resume: 片付け再試行も失敗なら exit 3 を維持（シグナル消滅を防ぐ）', async () => {
+  await withCouncilEnv(async ({ workspace }) => {
+    const worktreeDir = path.join(workspace, '.gh-maestro', `council-wt-${AUTO_SESSION}`);
+    fs.mkdirSync(path.dirname(worktreeDir), { recursive: true });
+    fs.mkdirSync(worktreeDir, { recursive: true });
+    fs.writeFileSync(path.join(worktreeDir, '.git'), 'gitdir: /fake\n', 'utf8');
+    fs.writeFileSync(stateFile(workspace, AUTO_SESSION), JSON.stringify({
+      status: 'complete',
+      session: AUTO_SESSION,
+      worktreeDir,
+      worktreeRemoved: false,
+      worktreeResidual: true,
+    }), 'utf8');
+
+    const spawn = makeSpawnSync({ worktreeRemoveFail: true });
+    const jobs = makePhaseJobs(async () => []);
+    const { mod } = loadModule({ spawn: spawn, resolveConfig: makeResolveConfig(), phaseJobs: jobs });
+    const r = await runAndCapture(() => mod.runCouncil(args(workspace, { session: AUTO_SESSION, resume: true })));
+    assert.equal(r.code, 3);
+    assert.ok(r.out.includes('COUNCIL_ALREADY_COMPLETE'));
+    assert.ok(r.out.includes('COUNCIL_WT_REMOVED_FAILED '), '手動片付けが必要というシグナルが維持される');
+
+    const state = JSON.parse(fs.readFileSync(stateFile(workspace, AUTO_SESSION), 'utf8'));
+    assert.equal(state.worktreeResidual, true);
+    assert.equal(state.worktreeRemoved, false);
   });
 });
 
@@ -618,7 +688,7 @@ test('--resume: 意見フェーズ途中で中断 → 未完了分のみ再開�
     assert.ok(r1.err.includes('unexpected failure'));
 
     // state は opinion を in_progress のまま残す（a は成功済み）
-    const mid = JSON.parse(fs.readFileSync(stateFile(workspace, 'test-council'), 'utf8'));
+    const mid = JSON.parse(fs.readFileSync(stateFile(workspace, AUTO_SESSION), 'utf8'));
     assert.equal(mid.phases.opinion.status, 'in_progress');
     assert.equal(mid.phases.opinion.results['agent-a'].status, 'success');
 
@@ -629,7 +699,7 @@ test('--resume: 意見フェーズ途中で中断 → 未完了分のみ再開�
       vote: [{ pid: 'agent-a' }, { pid: 'agent-b' }],
     }));
     const { mod: mod2 } = loadModule({ spawn: spawn2, resolveConfig: makeResolveConfig(), phaseJobs: jobs2 });
-    const r2 = await runAndCapture(() => mod2.runCouncil(args(workspace, { session: 'test-council', resume: true })));
+    const r2 = await runAndCapture(() => mod2.runCouncil(args(workspace, { session: AUTO_SESSION, resume: true })));
     assert.equal(r2.code, 0);
     assert.ok(r2.out.includes('COUNCIL_FINISHED 0'));
 
@@ -642,7 +712,7 @@ test('--resume: 意見フェーズ途中で中断 → 未完了分のみ再開�
     const voteManifest = jobs2.calls.find((c) => c.manifest.phase === 'vote').manifest;
     assert.deepEqual(voteManifest.participants.map((p) => p.participant_id), ['agent-a', 'agent-b']);
 
-    const state = JSON.parse(fs.readFileSync(stateFile(workspace, 'test-council'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(stateFile(workspace, AUTO_SESSION), 'utf8'));
     assert.equal(state.status, 'complete');
     assert.equal(state.opinions.length, 2);
     assert.equal(state.votes.length, 2);
@@ -659,11 +729,11 @@ test('冪等再開: complete state は --resume 有無にかかわらず即 exit
     const jobCountAfterFirst = jobs.calls.length;
     assert.ok(jobCountAfterFirst > 0, '初回はフェーズジョブが実行される');
 
-    const r2 = await runAndCapture(() => mod.runCouncil(args(workspace, { session: 'test-council', resume: true })));
+    const r2 = await runAndCapture(() => mod.runCouncil(args(workspace, { session: AUTO_SESSION, resume: true })));
     assert.equal(r2.code, 0);
     assert.ok(r2.out.includes('COUNCIL_ALREADY_COMPLETE'));
 
-    const r3 = await runAndCapture(() => mod.runCouncil(args(workspace, { session: 'test-council' })));
+    const r3 = await runAndCapture(() => mod.runCouncil(args(workspace, { session: AUTO_SESSION })));
     assert.equal(r3.code, 0);
     assert.ok(r3.out.includes('COUNCIL_ALREADY_COMPLETE'));
 
@@ -694,7 +764,7 @@ test('全滅停止後の --resume: 停止フェーズを全参加者で再試行
       vote: [{ pid: 'agent-a' }, { pid: 'agent-b' }],
     }));
     const { mod: mod2 } = loadModule({ spawn: spawn2, resolveConfig: makeResolveConfig(), phaseJobs: resumeJobs });
-    const r1 = await runAndCapture(() => mod2.runCouncil(args(workspace, { session: 'test-council', resume: true })));
+    const r1 = await runAndCapture(() => mod2.runCouncil(args(workspace, { session: AUTO_SESSION, resume: true })));
     assert.equal(r1.code, 0);
     assert.ok(r1.out.includes('COUNCIL_FINISHED 0'));
 
@@ -703,7 +773,7 @@ test('全滅停止後の --resume: 停止フェーズを全参加者で再試行
     assert.equal(opinionCalls.length, 1);
     assert.deepEqual(opinionCalls[0].manifest.participants.map((p) => p.participant_id), ['agent-a', 'agent-b']);
 
-    const state = JSON.parse(fs.readFileSync(stateFile(workspace, 'test-council'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(stateFile(workspace, AUTO_SESSION), 'utf8'));
     assert.equal(state.status, 'complete');
     assert.equal(state.absentees.length, 0);
   });
@@ -727,10 +797,10 @@ test('全滅停止後の --resume: 再試行も全滅なら再停止（exit 3・
         { pid: 'agent-b', outcomes: ['fail', 'fail'] },
       ],
     }));
-    const r1 = await runAndCapture(() => moduleFor({ phaseJobs: resumeJobs }).mod.runCouncil(args(workspace, { session: 'test-council', resume: true })));
+    const r1 = await runAndCapture(() => moduleFor({ phaseJobs: resumeJobs }).mod.runCouncil(args(workspace, { session: AUTO_SESSION, resume: true })));
     assert.equal(r1.code, 3);
     assert.ok(r1.out.includes('COUNCIL_STOPPED opinion'));
-    const state = JSON.parse(fs.readFileSync(stateFile(workspace, 'test-council'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(stateFile(workspace, AUTO_SESSION), 'utf8'));
     assert.equal(state.status, 'stopped');
     assert.equal(state.failures[0].attempt, 2, '再試行は1ラウンド目から数え直し、上限で停止');
   });
@@ -743,7 +813,7 @@ test('セッションロック: 実行完了後にロックが解放される', 
     const spawn = makeSpawnSync();
     const jobs = makePhaseJobs(scenario({ opinion: [{ pid: 'agent-a' }], vote: [{ pid: 'agent-a' }] }));
     const { mod } = loadModule({ spawn: spawn, resolveConfig: makeResolveConfig({ agents: ['agent-a'] }), phaseJobs: jobs });
-    const lockPath = path.join(workspace, '.gh-maestro', 'council-test-council.lock');
+    const lockPath = path.join(workspace, '.gh-maestro', `council-${AUTO_SESSION}.lock`);
     const r = await runAndCapture(() => mod.runCouncil(args(workspace)));
     assert.equal(r.code, 0);
     assert.equal(fs.existsSync(lockPath), false, '完了後にセッションロックが解放されている');
@@ -753,7 +823,7 @@ test('セッションロック: 実行完了後にロックが解放される', 
 test('セッションロック: 他プロセスが保持中は exit 2 で拒否し、ロックは消さない', async () => {
   await withCouncilEnv(async ({ workspace }) => {
     // 別プロセス（pid 424242）がロックを保持している状況を作る
-    const lockPath = path.join(workspace, '.gh-maestro', 'council-test-council.lock');
+    const lockPath = path.join(workspace, '.gh-maestro', `council-${AUTO_SESSION}.lock`);
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     fs.writeFileSync(lockPath, JSON.stringify({ pid: 424242, startTime: new Date().toISOString() }), 'utf8');
 
@@ -821,14 +891,14 @@ test('--session 自動生成: --title からスラッグ・既存 state 衝突�
   await withCouncilEnv(async ({ workspace }) => {
     // 同タイトルの別セッション state を先に置いて衝突させる
     fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(stateFile(workspace, 'test-council'), JSON.stringify({ status: 'complete' }), 'utf8');
+    fs.writeFileSync(stateFile(workspace, AUTO_SESSION), JSON.stringify({ status: 'complete' }), 'utf8');
     const spawn = makeSpawnSync();
     const jobs = makePhaseJobs(scenario({ opinion: [{ pid: 'agent-a' }], vote: [{ pid: 'agent-a' }] }));
     const { mod } = loadModule({ spawn: spawn, resolveConfig: makeResolveConfig({ agents: ['agent-a'] }), phaseJobs: jobs });
     const r = await runAndCapture(() => mod.runCouncil(args(workspace)));
     assert.equal(r.code, 0);
-    assert.ok(r.out.includes('COUNCIL_SESSION test-council-2'));
-    assert.ok(fs.existsSync(stateFile(workspace, 'test-council-2')), '新しいセッションの state が作られる');
+    assert.ok(r.out.includes(`COUNCIL_SESSION ${AUTO_SESSION}-2`));
+    assert.ok(fs.existsSync(stateFile(workspace, `${AUTO_SESSION}-2`)), '新しいセッションの state が作られる');
   });
 });
 
@@ -853,10 +923,10 @@ test('マニフェスト構造: phase/session/title/agenda/worktree/participants
     assert.equal(r.code, 0);
     const opinionManifest = jobs.calls.find((c) => c.manifest.phase === 'opinion').manifest;
     assert.equal(opinionManifest.phase, 'opinion');
-    assert.equal(opinionManifest.session, 'test-council');
+    assert.equal(opinionManifest.session, AUTO_SESSION);
     assert.equal(opinionManifest.title, 'Test Council');
     assert.ok(opinionManifest.agenda.includes('RAG構成'));
-    assert.ok(opinionManifest.worktree.endsWith('council-wt-test-council'));
+    assert.ok(opinionManifest.worktree.endsWith(`council-wt-${AUTO_SESSION}`));
     assert.deepEqual(opinionManifest.participants, [{ participant_id: 'agent-a', agent_id: 'agent-a' }]);
   });
 });
@@ -865,7 +935,7 @@ test('マニフェスト構造: phase/session/title/agenda/worktree/participants
 
 test('調査結果の自動検知: 初回コメント投稿＋context_appendix 全文埋め込み（SSOT）', async () => {
   await withCouncilEnv(async ({ workspace }) => {
-    const invPath = path.join(workspace, '.gh-maestro', 'council-test-council.investigation.json');
+    const invPath = path.join(workspace, '.gh-maestro', `council-${AUTO_SESSION}.investigation.json`);
     fs.mkdirSync(path.dirname(invPath), { recursive: true });
     fs.writeFileSync(invPath, JSON.stringify({ findings: '調査により X が判明', sources: ['src/a.md', 'docs/b.md'] }), 'utf8');
     const spawn = makeSpawnSync();
@@ -927,7 +997,7 @@ test('調査結果・context が無い場合は appendix 無しで完走', async
 
 test('壊れた調査結果ファイルは欠落扱いで続行（exit 0・警告のみ）', async () => {
   await withCouncilEnv(async ({ workspace }) => {
-    const invPath = path.join(workspace, '.gh-maestro', 'council-test-council.investigation.json');
+    const invPath = path.join(workspace, '.gh-maestro', `council-${AUTO_SESSION}.investigation.json`);
     fs.mkdirSync(path.dirname(invPath), { recursive: true });
     fs.writeFileSync(invPath, '{ not json', 'utf8');
     const spawn = makeSpawnSync();
@@ -942,7 +1012,7 @@ test('壊れた調査結果ファイルは欠落扱いで続行（exit 0・警�
 
 test('調査結果コメント投稿失敗はフェイルクローズ（exit 2）', async () => {
   await withCouncilEnv(async ({ workspace }) => {
-    const invPath = path.join(workspace, '.gh-maestro', 'council-test-council.investigation.json');
+    const invPath = path.join(workspace, '.gh-maestro', `council-${AUTO_SESSION}.investigation.json`);
     fs.mkdirSync(path.dirname(invPath), { recursive: true });
     fs.writeFileSync(invPath, JSON.stringify({ findings: 'X', sources: [] }), 'utf8');
     const spawn = makeSpawnSync();

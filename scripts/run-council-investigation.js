@@ -33,6 +33,7 @@ const {
   ensureCouncilWorktree,
 } = require('./shared/council-worktree');
 const { extractJsonObject, fencedData, DEFAULT_JOB_TIMEOUT_MS } = require('./run-council-jobs');
+const { killProcessTree } = require('./kill-tree');
 const councilSchemas = require('./council-schemas.json');
 
 // バックスラッシュ（Windowsパスを / へ正規化するための文字）。
@@ -183,7 +184,10 @@ function launchInvestigationJob({ title, agenda, question, agentConfig, worktree
     const stdoutChunks = [];
     child.stdout.on('data', (chunk) => { stdoutChunks.push(chunk); });
 
-    const timer = setTimeout(() => { try { child.kill(); } catch {} }, timeoutMs);
+    // タイムアウト時は子プロセスだけでなく、そのプロセスツリー全体を終了させる。
+    // Windows では pwsh → agent CLI の親子構造が残り得るため、child.kill() だけだと
+    // agent CLI が孤児として残る（run-council-jobs.js の launchParticipantJob と同じ対策）。
+    const timer = setTimeout(() => { try { killProcessTree(child.pid); } catch {} }, timeoutMs);
 
     const cleanup = () => {
       clearTimeout(timer);

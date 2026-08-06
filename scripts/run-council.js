@@ -590,6 +590,24 @@ async function runCouncilLocked({ opts, workspace, homedir, session, statePath }
   if (state.status === 'complete') {
     // 完走済み（--resume・再実行とも）: 再実行せず即 exit 0（冪等）
     process.stdout.write(`COUNCIL_ALREADY_COMPLETE ${state.discussionUrl || ''}\n`);
+    // 完走済みだが前回の worktree 片付けに失敗した残存がある場合（worktreeResidual）は、
+    // --resume で片付けを再試行する。それでも失敗すれば exit 0 に戻さず、手動片付けが
+    // 必要というシグナル（exit 3 + COUNCIL_WT_REMOVED_FAILED）を維持する
+    // （review指摘 #7: complete 分岐が exit 0 でこのシグナルを消していた）。
+    if (state.worktreeResidual) {
+      try {
+        removeCouncilWorktree(workspace, session);
+        state.worktreeResidual = false;
+        state.worktreeRemoved = true;
+        persistState(statePath, state);
+        process.stdout.write(`COUNCIL_WT_REMOVED ${state.worktreeDir || ''}\n`);
+        return 0;
+      } catch (e) {
+        process.stderr.write(`council worktree removal failed (manual cleanup needed): ${e.message}\n`);
+        process.stdout.write(`COUNCIL_WT_REMOVED_FAILED ${state.worktreeDir || ''}\n`);
+        return 3;
+      }
+    }
     return 0;
   }
   if (opts.resume && !state.session) {

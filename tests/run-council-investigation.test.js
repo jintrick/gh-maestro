@@ -44,7 +44,8 @@ function fakeChild() {
  * run-council-investigation.js を再ロードする。
  * @returns {{ mod: object, calls: object }}
  */
-function loadModule({ spawnImpl, councilResolve, resolveAgent, validateTokens, resolveSessionCalls = [] } = {}) {
+function loadModule({ spawnImpl, spawnSyncImpl, councilResolve, resolveAgent, validateTokens, resolveSessionCalls = [] } = {}) {
+  const spawnSyncCalls = [];
   const childProcessPath = require.resolve('../scripts/child-process');
   delete require.cache[childProcessPath];
   require.cache[childProcessPath] = {
@@ -53,7 +54,11 @@ function loadModule({ spawnImpl, councilResolve, resolveAgent, validateTokens, r
     loaded: true,
     exports: {
       spawn: spawnImpl || (() => { throw new Error('spawn must be injected'); }),
-      spawnSync: () => { throw new Error('spawnSync should not be called in this test'); },
+      spawnSync: (cmd, args, opts) => {
+        spawnSyncCalls.push({ cmd, args, opts });
+        if (spawnSyncImpl) return spawnSyncImpl(cmd, args, opts);
+        throw new Error('spawnSync should not be called in this test');
+      },
       execSync: () => '',
     },
   };
@@ -88,13 +93,18 @@ function loadModule({ spawnImpl, councilResolve, resolveAgent, validateTokens, r
     },
   };
 
+  // run-council-investigation.js → kill-tree.js が child-process.js の spawnSync を
+  // ロード時点で捕捉するため、キャッシュを必ず消して現在のモックを反映させる
+  const killTreePath = require.resolve('../scripts/kill-tree');
+  delete require.cache[killTreePath];
   delete require.cache[modulePath];
   const mod = require(modulePath);
 
   delete require.cache[childProcessPath];
   delete require.cache[resolveConfigPath];
   delete require.cache[cwtPath];
-  return { mod, resolveSessionCalls };
+  delete require.cache[killTreePath];
+  return { mod, resolveSessionCalls, spawnSyncCalls };
 }
 
 /** テスト中だけ GH_MAESTRO_WORKSPACE を無効化し、元へ戻す。 */
@@ -229,6 +239,39 @@ test('launchInvestigationJob: 非対話化トークン欠落は spawn せず失�
   assert.equal(r.ok, false);
   assert.match(r.error, /missing non-interactive token/);
   assert.equal(spawned, 0);
+});
+
+test('launchInvestigationJob: タイムアウトは killProcessTree でプロセスツリーを終了する', async () => {
+  // Windows では taskkill /T、それ以外ではプロセスグループ kill を使う
+  // （run-council-jobs.test.js の全体タイムアウトテストと同型）。
+  const child = fakeChild();
+  child.pid = 1234;
+  const origKill = process.kill;
+  let processKillCalled = false;
+  process.kill = () => { processKillCalled = true; return true; };
+  try {
+    const { mod, spawnSyncCalls } = loadModule({
+      spawnImpl: () => child,
+      spawnSyncImpl: () => ({ status: 0, stdout: '', stderr: '' }),
+    });
+    const pending = mod.launchInvestigationJob({
+      title: 'T', agenda: 'A', agentConfig: fakeAgentConfig(), worktreeDir: '/tmp/wt', workspace: '/tmp/ws', timeoutMs: 5,
+    });
+    // タイマー発火を待つ（実closeを待つとタイマーはクリアされてしまうため、先に発火を確認）
+    await new Promise(r => setTimeout(r, 50));
+    if (process.platform === 'win32') {
+      assert.ok(spawnSyncCalls.some(c => c.cmd === 'taskkill' && c.args.includes('/T') && c.args.includes(String(child.pid))));
+    } else {
+      assert.ok(processKillCalled);
+    }
+    // タイマーでkillされた後、子プロセスの終了（close）で解決する
+    child.emit('close', 137);
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.match(result.error, /exited with code 137/);
+  } finally {
+    process.kill = origKill;
+  }
 });
 
 // ── runCouncilInvestigation（CLI）──────────────────────────────────────────────
