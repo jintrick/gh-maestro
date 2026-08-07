@@ -126,3 +126,36 @@ test('git-worktree: setUpstream はエクスポートされていない', () => 
   assert.equal(typeof mod.worktreePrune, 'function');
   assert.equal(mod.setUpstream, undefined);
 });
+
+// ── worktreeAddDetached ─────────────────────────────────────────────────────────
+
+const SHA = '0123456789abcdef0123456789abcdef01234567'; // 40桁の16進数
+
+test('worktreeAddDetached: --detach と sha を -- 区切りで渡す', () => {
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: '' }));
+  mod.worktreeAddDetached('/tmp/wt', SHA, '/repo');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'git');
+  assert.ok(calls[0].args.includes('worktree'));
+  assert.ok(calls[0].args.includes('add'));
+  assert.ok(calls[0].args.includes('--detach'));
+  assert.ok(calls[0].args.includes('/tmp/wt'));
+  // sha は -- セパレータの後（git-arg-injection ルール: '-' 始まりの値がオプション化しない）
+  const dashIdx = calls[0].args.indexOf('--');
+  assert.ok(dashIdx >= 0);
+  assert.equal(calls[0].args[dashIdx + 1], SHA);
+});
+
+test('worktreeAddDetached: git が失敗したら throw', () => {
+  const { mod } = loadModule(() => ({ status: 128, stderr: 'fatal: ...' }));
+  assert.throws(
+    () => mod.worktreeAddDetached('/tmp/wt', SHA, '/repo'),
+    { message: /exited with 128/ },
+  );
+});
+
+test('git-worktree: worktreeAddDetached がエクスポートされている', () => {
+  const { mod } = loadModule(() => ({ status: 0, stdout: '' }));
+  assert.equal(typeof mod.worktreeAddDetached, 'function');
+});
