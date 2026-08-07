@@ -16,6 +16,7 @@ const { spawnSync } = require('./child-process');
 const { parseFlags } = require('./shared/workspace');
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS } = require('./shared/review-aspects');
 const { _validateAgainstSchema } = require('./shared/json-schema');
+const { atomicWriteJson } = require('./shared/atomic-write');
 
 const USAGE = `finalize-review.js — 完全性ゲート検証後、正式findings JSON書き出しまたは不完全コメント投稿
 
@@ -174,25 +175,19 @@ function validatePayload(payload, workspace) {
 // ── atomic write ──────────────────────────────────────────────────────────────
 
 /**
- * findings JSONをatomicに書き出す（staging → rename）。
+ * findings JSONをatomicに書き出す。実際の staging → rename は共有ヘルパー
+ * atomicWriteJson に委譲し、本関数は呼び出し元契約の {success,error} を維持する
+ * 薄いラッパー（Issue #232: atomic write の共有化）。
  *
  * @param {object} payload
  * @param {string} outputPath
  * @returns {{success: boolean, error?: string}}
  */
 function atomicWrite(payload, outputPath) {
-  const dir = path.dirname(outputPath);
-  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
-
-  const rand = Math.random().toString(36).slice(2, 8);
-  const stagingPath = path.join(dir, `.staging-${path.basename(outputPath)}.${process.pid}-${Date.now()}-${rand}`);
-
   try {
-    fs.writeFileSync(stagingPath, JSON.stringify(payload, null, 2), 'utf8');
-    fs.renameSync(stagingPath, outputPath);
+    atomicWriteJson(outputPath, payload);
     return { success: true };
   } catch (e) {
-    try { fs.unlinkSync(stagingPath); } catch {}
     return { success: false, error: e.message };
   }
 }

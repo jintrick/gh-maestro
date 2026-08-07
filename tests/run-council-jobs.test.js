@@ -77,10 +77,12 @@ function loadModule(opts = {}) {
       opts.validateTokens ? opts.validateTokens(agent, args) : { valid: true, missing: [] },
   };
 
-  // run-council-jobs.js → kill-tree.js が child-process.js の spawnSync をロード時点で
-  // 捕捉するため、キャッシュを必ず消して現在のモックを反映させる
+  // run-council-jobs.js → child-wait.js → kill-tree.js が child-process.js の spawnSync を
+  // ロード時点で捕捉するため、キャッシュを必ず消して現在のモックを反映させる
+  // （kill-tree だけでなく、killProcessTree 参照を保持する child-wait も毎回再ロードする）
   const killTreePath = require.resolve('../scripts/kill-tree');
-  for (const p of [childProcessPath, agentLaunchPath, agentExecPath, resolveConfigPath, jobsPath, killTreePath]) {
+  const childWaitPath = require.resolve('../scripts/shared/child-wait');
+  for (const p of [childProcessPath, agentLaunchPath, agentExecPath, resolveConfigPath, jobsPath, killTreePath, childWaitPath]) {
     delete require.cache[p];
   }
   require.cache[childProcessPath] = { id: childProcessPath, filename: childProcessPath, loaded: true, exports: childProcessMock };
@@ -91,6 +93,7 @@ function loadModule(opts = {}) {
   delete require.cache[childProcessPath];
   delete require.cache[resolveConfigPath];
   delete require.cache[killTreePath];
+  delete require.cache[childWaitPath];
   return { mod, spawnCalls, spawnSyncCalls, agentCalls };
 }
 

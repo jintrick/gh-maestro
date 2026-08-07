@@ -870,15 +870,15 @@ test('セッションロック: stale ロック（保持者非生存）は自動
   }
 });
 
-test('persistState: 一時ファイル+rename で原子的に書き出し、.tmp が残らない', () => {
+test('persistState: 一時ファイル+rename で原子的に書き出し、.staging が残らない', () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'council-atomic-'));
   try {
     const { mod } = moduleFor();
     const statePath = path.join(ws, '.gh-maestro', 'council-s1.json');
     mod.persistState(statePath, { status: 'running' });
     assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).status, 'running');
-    // 中間ファイル（.tmp.<pid>）が残っていない
-    const leftovers = fs.readdirSync(path.dirname(statePath)).filter((f) => f.includes('.tmp.'));
+    // 中間ファイル（.staging-*）が残っていない（共有 atomicWriteJson の命名に追随）
+    const leftovers = fs.readdirSync(path.dirname(statePath)).filter((f) => f.includes('.staging-'));
     assert.deepEqual(leftovers, []);
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });

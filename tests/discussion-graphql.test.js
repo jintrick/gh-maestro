@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 
 const { _setGraphqlExec } = require('../scripts/shared/graphql-client');
 const gql = require('../scripts/shared/discussion-graphql');
+const { undeclaredVariables, queryStructuralErrors } = require('./_graphql-query-validate');
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -225,31 +226,60 @@ test('discussion: GraphQL errors は null', () => {
 
 // ── クエリ文字列の構造妥当性 ────────────────────────────────────────────────────
 
-/**
- * クエリ文字列で使用されているのに宣言されていない GraphQL 変数を抽出する。
- * graphqlExec はクエリ文字列をそのまま gh に渡すため、宣言漏れは実行時に
- * variableNotDefined エラーになる。stub で graphqlExec を差し替えていると
- * 実行時の検出がスリップするため、文字列自体を構造検証する（review指摘 #1）。
- */
-function undeclaredVariables(query) {
-  const sig = query.match(/^\s*(?:query|mutation)\s*(?:\(([^)]*)\))?/);
-  const declared = new Set();
-  if (sig && sig[1]) {
-    for (const m of sig[1].matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)) declared.add(m[1]);
-  }
-  const used = new Set();
-  for (const m of query.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)) {
-    if (!declared.has(m[1])) used.add(m[1]);
-  }
-  return [...used].sort();
-}
-
 test('undeclaredVariables: 宣言漏れ変数を検出する（検証が空振りでないこと）', () => {
   // 本指摘の既知バグ形（$num を使用しているのに宣言していない）を検出できる
   assert.deepEqual(
     undeclaredVariables('query($owner:String!){repository(owner:$owner){discussion(number:$num){id}}}'),
     ['num']
   );
+});
+
+test('QUERIES: 全クエリが構造的に妥当（操作シグネチャ有り・使用変数⊂宣言変数）', () => {
+  // graphqlExec をスタブしたテストは実行時エラーがスリップするため、クエリ文字列
+  // 自体を全件走査する（$num 宣言漏れの再発を構造的に防止。将来の追加も自動カバー）。
+  const entries = Object.entries(gql.QUERIES);
+  assert.ok(entries.length >= 6, `QUERIES に6つ以上のクエリがあること（実際: ${entries.length}）`);
+  for (const [name, query] of entries) {
+    const errors = queryStructuralErrors(query);
+    assert.deepEqual(errors, [], `${name} query: ${errors.join('; ')}`);
+    assert.deepEqual(undeclaredVariables(query), [], `${name} query`);
+  }
+});
+
+test('QUERIES: 各ドメイン関数が送信する query は QUERIES 定数のいずれか（直書きドリフト防止）', () => {
+  // 関数が QUERIES を迂回して別文字列を直書きし始めると、QUERIES 全件検証だけでは
+  // 構造エラーがすり抜けるため、capture した送信クエリが QUERIES の値に含まれることを
+  // 全関数で検証する。
+  const queries = new Set(Object.values(gql.QUERIES));
+  const captured = [];
+  _setGraphqlExec((args) => {
+    const q = args.find(a => a.startsWith('query='));
+    if (q) captured.push(q.slice('query='.length));
+    if (args.some(a => a.includes('createDiscussion'))) {
+      return { status: 0, stdout: JSON.stringify(okResponse({
+        createDiscussion: { discussion: { id: 'D1', number: 1, url: 'u', title: 't' } },
+      })), stderr: '' };
+    }
+    return { status: 0, stdout: JSON.stringify(okResponse({
+      repository: {
+        id: 'R_1',
+        hasDiscussionsEnabled: true,
+        discussion: { id: 'D1', number: 1, url: 'u', title: 't' },
+        discussionCategories: { nodes: [{ id: 'c1', name: 'General' }] },
+      },
+    })), stderr: '' };
+  });
+
+  gql.hasDiscussionsEnabled('acme/repo');
+  gql.discussionCategories('acme/repo');
+  gql.createDiscussion('acme/repo', '議題', '本文', 'cat1');
+  gql.addDiscussionComment('D1', '本文');
+  gql.discussion('acme/repo', 1);
+
+  assert.ok(captured.length >= 6, `captured ${captured.length} queries`);
+  for (const q of captured) {
+    assert.ok(queries.has(q), `query not in QUERIES: ${q}`);
+  }
 });
 
 test('discussion: クエリ文字列は使用変数をすべて宣言している（GraphQLとして妥当）', () => {

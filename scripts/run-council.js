@@ -33,6 +33,7 @@ const {
   removeCouncilWorktree,
 } = require('./shared/council-worktree');
 const { runPhaseJobs } = require('./run-council-jobs');
+const { atomicWriteJson } = require('./shared/atomic-write');
 const { finalizeCouncil, buildStoppedState } = require('./finalize-council');
 const { acquireLeaseLock, releaseLeaseLock } = require('./shared/worker-lease');
 const {
@@ -122,22 +123,14 @@ function loadState(statePath) {
  *
  * 一時ファイルへの書き込み + rename で原子的に更新する。直接 writeFileSync で
  * 上書きすると、書き込み途中のクラッシュで state が破損し --resume 不能になる
- * （rename は同じファイルシステム上でのみ原子的）。
+ * （rename は同じファイルシステム上でのみ原子的）。staging → rename の実装は
+ * 共有ヘルパー atomicWriteJson に委譲する（Issue #232: atomic write の共有化）。
  *
  * @param {string} statePath
  * @param {object} state
  */
 function persistState(statePath, state) {
-  fs.mkdirSync(path.dirname(statePath), { recursive: true });
-  const tmpPath = `${statePath}.tmp.${process.pid}`;
-  try {
-    fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2), 'utf8');
-    fs.renameSync(tmpPath, statePath);
-  } catch (e) {
-    // rename 失敗時は一時ファイルを掃除（ベストエフォート）して失敗を伝える
-    try { fs.unlinkSync(tmpPath); } catch {}
-    throw e;
-  }
+  atomicWriteJson(statePath, state);
 }
 
 // ── セッション排他ロック ───────────────────────────────────────────────────────

@@ -93,10 +93,13 @@ function loadModule({ spawnImpl, spawnSyncImpl, councilResolve, resolveAgent, va
     },
   };
 
-  // run-council-investigation.js → kill-tree.js が child-process.js の spawnSync を
-  // ロード時点で捕捉するため、キャッシュを必ず消して現在のモックを反映させる
+  // run-council-investigation.js → child-wait.js → kill-tree.js が child-process.js の
+  // spawnSync をロード時点で捕捉するため、キャッシュを必ず消して現在のモックを
+  // 反映させる（kill-tree だけでなく、killProcessTree 参照を保持する child-wait も再ロード）
   const killTreePath = require.resolve('../scripts/kill-tree');
+  const childWaitPath = require.resolve('../scripts/shared/child-wait');
   delete require.cache[killTreePath];
+  delete require.cache[childWaitPath];
   delete require.cache[modulePath];
   const mod = require(modulePath);
 
@@ -104,6 +107,7 @@ function loadModule({ spawnImpl, spawnSyncImpl, councilResolve, resolveAgent, va
   delete require.cache[resolveConfigPath];
   delete require.cache[cwtPath];
   delete require.cache[killTreePath];
+  delete require.cache[childWaitPath];
   return { mod, resolveSessionCalls, spawnSyncCalls };
 }
 
