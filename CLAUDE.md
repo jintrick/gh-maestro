@@ -10,6 +10,13 @@ gh-maestro is a local orchestration system that uses GitHub as durable state and
 
 This file is for agent-facing operating rules and project intent. Do not use it as a script inventory or architecture dump; details that are obvious from the code should stay in the code.
 
+## Getting Oriented
+
+Treat yourself like a new team member joining the project: before diagnosing anything, orient yourself in what has actually happened recently.
+
+- Check recent merged PRs and issue activity (`gh pr list --state merged --limit 15`, `gh issue list ...`) before asserting what state the code or config is in. Not knowing the recent issues/PRs is not an acceptable starting point for any agent working on this project — it's the baseline, not an optional deep-dive.
+- If something looks broken or stale, check whether a recent PR already addressed it (or explicitly didn't) before concluding it's an unaddressed gap.
+
 ## Operating Model
 
 gh-maestro is built around quota economics.
@@ -56,6 +63,12 @@ node scripts/install.js
 ```
 
 **Never run `node scripts/install.js` from a WIP/unmerged feature branch.** It writes to the machine-global `~/.gh-maestro/` shared directory and will overwrite installed state with unreviewed, unmerged code.
+
+**Before claiming the installed copy (`~/.gh-maestro/`) is stale relative to `dev`, verify it concretely — do not assume.** A quick `diff` between an installed file and `git show dev:<path>` piped through process substitution can produce a misleading wall of differences on Windows/Git Bash for reasons unrelated to actual content drift (line-ending handling, fifo/process-substitution quirks). Before concluding "install.js hasn't been run" or blaming stale code for an error:
+- Compare actual resolved *behavior*, not raw file diff output — e.g., call the relevant function directly (`resolveAgentConfig(...)`) and inspect the real result.
+- Cross-check file mtimes against the actual merge timestamps of the commits in question (`git show -s --format=%ci <sha>` vs the installed file's mtime), not vibes.
+- If a diff looks suspiciously total (entire file "replaced" rather than a few lines changed), suspect the diff invocation itself before suspecting the file.
+Getting this wrong wastes the human's time chasing a diagnosis that was never real, and undermines trust in the orchestrator's judgment on questions the human cannot easily verify themselves.
 
 ## Runtime State vs Managed Storage
 
