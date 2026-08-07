@@ -1789,10 +1789,20 @@ describe('Cursor type safety', () => {
 // CLI integration: 実プロセス起動での動作確認
 // ═══════════════════════════════════════════════════════════════════════════
 
-const { spawnSync: realSpawnSync } = require('child_process');
-const { registerProcess: plcRegister, unregisterProcess: plcUnregister } = require('../scripts/process-lifecycle');
+const { spawnSync: realSpawnSync, spawn } = require('child_process');
+const { getProcessStartTime } = require('../scripts/process-lifecycle');
 
 const SUPERVISOR_SCRIPT = path.join(__dirname, '..', 'scripts', 'inbox-supervisor.js');
+
+// 排他の正本は role lease（Issue #240）。既存所有者を再現する live lease を
+// <workspace>/.gh-maestro/leases/resident-role-inbox-supervisor.json に書く。
+function writeLiveSupervisorLease(dir, pid, startTime) {
+  const leasesDir = path.join(dir, '.gh-maestro', 'leases');
+  fs.mkdirSync(leasesDir, { recursive: true });
+  fs.writeFileSync(path.join(leasesDir, 'resident-role-inbox-supervisor.json'), JSON.stringify({
+    pid, startTime, workerName: 'inbox-supervisor', phase: 'active',
+  }), 'utf8');
+}
 
 /** ヘルパー: inbox-supervisor.js を子プロセスとして起動 */
 function runSupervisor(args, cwd) {
@@ -1848,42 +1858,65 @@ describe('CLI integration (subprocess)', () => {
     });
   });
 
-  test('重複起動を検出して拒否する（既存プロセスがPID registryに登録されている場合）', () => {
+  test('重複起動を検出して拒否する（既存の live role lease がある場合）', (t) => {
+    const startTimeProbe = getProcessStartTime(process.pid);
+    if (!startTimeProbe) {
+      t.skip('この環境では getProcessStartTime が機能しないため、実プロセスでの同一性確認を検証できません');
+      return;
+    }
     withTempDir((dir) => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
 
-      // 自プロセスを inbox-supervisor.js として PID registry に登録
-      plcRegister(dir, { script: 'inbox-supervisor.js', workerName: null });
+      // 既存所有者の live lease を書く。pid は process.ppid を指定する（--force 無しなので
+      // kill は走らないが、念のためテスト実行環境のプロセスを対象にしない）。
+      writeLiveSupervisorLease(dir, process.ppid, getProcessStartTime(process.ppid));
 
-      try {
-        const r = runSupervisor(['--once', '--workspace', dir], dir);
-        assert.equal(r.status, 1, `exit 1, got ${r.status}, stderr: ${r.stderr}`);
-        assert.ok(r.stderr.includes('重複起動'), `stderr should mention 重複起動: ${r.stderr}`);
-      } finally {
-        plcUnregister(dir);
-      }
+      const r = runSupervisor(['--once', '--workspace', dir], dir);
+      assert.equal(r.status, 1, `exit 1, got ${r.status}, stderr: ${r.stderr}`);
+      assert.ok(r.stderr.includes('重複起動'), `stderr should mention 重複起動: ${r.stderr}`);
     });
   });
 
-  test('--force 指定時は重複起動チェックをバイパスする', () => {
+  test('--force は重複レース判定を無効化せず、既存所有者を停止させて引き継ぐ', () => {
     withTempDir((dir) => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
-      plcRegister(dir, { script: 'inbox-supervisor.js', workerName: null });
 
+      // 既存所有者として使い捨ての実子プロセスを立てる。--force の引き継ぎは
+      // killProcessTree で所有者を終了させるため、process.ppid 等のテスト実行環境の
+      // プロセスを owner に指定してはならない（テストランナーの親を kill してしまう）。
+      const owner = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      let leakedOwner = true;
       try {
+        // 起動直後の子の startTime は WMI にまだ見えないことがあるため、取れるまで待つ
+        let startTime = getProcessStartTime(owner.pid);
+        for (let i = 0; !startTime && i < 20; i++) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+          startTime = getProcessStartTime(owner.pid);
+        }
+        writeLiveSupervisorLease(dir, owner.pid, startTime);
+
         const r = runSupervisor(['--once', '--force', '--workspace', dir], dir);
         assert.notEqual(r.status, 0, `should exit non-zero (gh failure), got ${r.status}`);
         assert.ok(!r.stderr.includes('重複起動'),
           `stderr should NOT mention 重複起動: ${r.stderr}`);
+        if (owner.exitCode === null && owner.signalCode === null) {
+          leakedOwner = false;
+        }
       } finally {
-        plcUnregister(dir);
+        if (owner.exitCode === null && owner.signalCode === null) {
+          try { owner.kill(); } catch {}
+        }
+        assert.equal(leakedOwner, false, '--force の引き継ぎで既存所有者プロセスが停止されること');
       }
     });
   });
 
-  test('PID registry に該当エントリが無ければ正常起動を試みる', () => {
+  test('live role lease が無ければ正常起動を試みる', () => {
     withTempDir((dir) => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });

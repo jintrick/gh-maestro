@@ -32,11 +32,11 @@ const {
   createDeadManSwitch,
   registerProcess,
   findRunningInstance,
-  acquireStartupLock,
-  releaseStartupLock,
   cleanup: lifecycleCleanup,
   isProcessAlive,
 } = require('./process-lifecycle');
+const { acquireResidentLease } = require('./shared/worker-lease');
+const { listUnprocessedResidentAuditEvents, removeResidentAuditEvent } = require('./shared/resident-audit');
 
 const DEFAULT_INTERVAL_SEC = 20;
 const MARKER_RE = /^<!--\s*gh-maestro\s+(\{.*\})\s*-->/;
@@ -62,8 +62,10 @@ Options:
                           --once と同時指定はできない（エラー終了する）。
                           継続モードと同様にPID registryへ自己登録し、終了時に解除する。
   --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
-  --force                同じ self を既に監視している生存プロセスがいても起動を強制する
-                          （継続モード・--wait モードのみ有効。既定では多重起動を検知して exit 1 する）
+  --force                同じ role を既に保持している生存プロセスがいても、既存所有者へ
+                          停止要求を送ってから起動する（継続モード・--wait モードのみ有効。
+                          lease判定を無効化せず、引き継げなければ exit 1 する。既定では
+                          多重起動を検知して exit 1 する）。
   --watch-pid <pid>      他の <self> 引数を無視し、指定PIDの生存監視のみを行う特殊モード。
                           「重複起動を検出しました」エラー時に代替コマンドとして案内される
                           （このモードは msg-poll.js 自身を起動するかどうかの判断を必要としない）。
@@ -76,6 +78,10 @@ Output (stdout):
   新着メッセージを1行ずつ出力:
     worker モード:       NEW_MESSAGE:<commentId>
     orchestrator モード: NEW_MESSAGE:<issue>:<commentId>
+    orchestrator モード: LOCK_DENIED:<role>[:<ownerPid>] / HANDOFF_WAIT:<role>[:<ownerPid>]
+                          （常駐プロセスの role lease で起動が拒否された・引き継ぎ待機に
+                          入った監査イベント。各巡回で未処理分を処理済み化して出力する。
+                          GitHub への投稿は行わない）
   --watch-pid モード:    PID_DIED:<pid>（監視対象PIDの死亡を検知した1回のみ）
 
 このスクリプトはエージェントのターン内で blocking 実行される。detached 起動しない。
@@ -89,7 +95,9 @@ gh 呼び出し失敗（ネットワーク断・rate limit 等）はそのサイ
 
 ライフサイクル管理:
   ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
-  消滅時はPID registryを解除して自動exitする。継続モード・--wait モードは起動時にPID registryへ自己登録する。`;
+  消滅時はPID registryを解除して自動exitする。継続モード・--wait モードは起動時にPID registryへ
+  自己登録し、role lease（role = msgpoll-<self>、<workspace>/.gh-maestro/leases/）を
+  プロセス寿命中保持する。正常終了・シグナル・初期化失敗の全経路で解放する。`;
 
 /**
  * 「重複起動を検出しました」エラー時に案内する、既存PIDを監視するための
@@ -343,13 +351,55 @@ function main(argsOverride, opts = {}) {
 
   const sessionPid = resolveSessionPid(parsed.sessionPidArg);
 
+  // ── 常駐プロセス用 role lease（Issue #240） ───────────────────────────
+  // 継続モード・--wait モードのみ排他する（--once は読み取り専用の一回実行のため）。
+  // 取得は resolveWorkspace 直後・gh 呼び出しより前に行い、多重起動時は無駄な外部呼び出しを
+  // 避けて即拒否する。workspace 表記の差異（大文字小文字・末尾スラッシュ等）でもすり抜けない
+  // よう、role lease は workspace を canonicalWorkspace で正規化して排他する（Issue #240）。
+  let residentLease = null;
+  if (!onceMode) {
+    const role = `msgpoll-${self}`;
+    const handoffTargets = () => {
+      const workerNameForRegistry = self !== 'orchestrator' ? self : null;
+      const dup = findRunningInstance(workspace, { script: 'msg-poll.js', workerName: workerNameForRegistry });
+      return dup ? [dup.pid] : [];
+    };
+    try {
+      const res = acquireResidentLease({ workspace, role, handoff: force, handoffStopTargets: handoffTargets });
+      if (!res.acquired) {
+        // 引き継ぎ期限超過（--force で既存所有者が終了しなかった）
+        writeErr(
+          `msg-poll: role "${role}" を引き継げませんでした（${res.reason}）` +
+          (res.ownerPid ? `。既存プロセス pid=${res.ownerPid} が終了しません` : '') +
+          `。既存のMonitorを使い回すか、--force を再指定してください。`
+        );
+        return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode, intervalMs, residentLease: null };
+      }
+      residentLease = res;
+    } catch (e) {
+      // live lease による拒否。--watch-pid による監視コマンドを案内する。
+      writeErr(`msg-poll: 重複起動を検出しました。${e.message}`);
+      const pidMatch = /pid (\d+)/.exec(e.message);
+      if (pidMatch) {
+        const ownerPid = parseInt(pidMatch[1], 10);
+        writeErr('代わりに以下をMonitorでpersistent:trueとして起動してください（このコマンドをそのまま使うこと。判断は不要）:');
+        writeErr(`  ${buildWatchPidCommand(ownerPid)}`);
+        writeErr(
+          `このコマンドは pid=${ownerPid} の生存を監視し続け、死亡時に \`PID_DIED:${ownerPid}\` を通知します。` +
+          'その通知を受け取ったら、そのときはじめて改めてこのコマンドを --force なしで起動し直してください。'
+        );
+      }
+      return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode, intervalMs, residentLease: null };
+    }
+  }
+
   // ── リポジトリ解決 ──────────────────────────────────────────────────
 
   const ghOpts = { cwd: workspace };
   const repoResult = _ghRepoView(ghOpts);
   if (repoResult.status !== 0) {
     writeErr(`msg-poll: リポジトリを解決できません: ${repoResult.stderr || '(empty)'}`);
-    return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
+    return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0, residentLease };
   }
   const repo = repoResult.stdout.trim();
 
@@ -393,6 +443,20 @@ function main(argsOverride, opts = {}) {
       // stderr に理由を出力して exit（stdout は Monitor 通知チャンネルなので使わない）
       process.stderr.write(`msg-poll: parent session (pid ${sessionPid}) is dead — exiting\n`);
       process.exit(0);
+    }
+
+    // ── 監査イベントの処理（orchestrator のみ） ────────────────────────
+    // 常駐プロセスの role lease で発生した lock-denied / handoff-wait を読み出し、
+    // 処理済み化（削除）してから stdout に出力する。GitHub への投稿はしない
+    // （投稿判断は orchestrator 側）。出力 → 削除の順で、クラッシュ時は重複出力側に倒れる。
+    // --wait（singleMessage）では監査行の出力を「新着検出」と誤判定させないため除外する。
+    if (isOrchestrator && !singleMessage) {
+      const events = listUnprocessedResidentAuditEvents(workspace);
+      for (const { file, event } of events) {
+        const ownerPid = event.detail && event.detail.ownerPid != null ? `:${event.detail.ownerPid}` : '';
+        writeOut(`${event.type === 'lock-denied' ? 'LOCK_DENIED' : 'HANDOFF_WAIT'}:${event.role}${ownerPid}`);
+        removeResidentAuditEvent(workspace, file);
+      }
     }
 
     // ── 既読状態の読み込み（v2・ID正本） ────────────────────────────────
@@ -636,6 +700,7 @@ function main(argsOverride, opts = {}) {
     force,
     waitMode,
     waitMs,
+    residentLease,
   };
 }
 
@@ -716,70 +781,29 @@ if (require.main === module) {
   const isWait = !parsedForCli.help && !parsedForCli.exitFlagMiss && !hasUnknownArgs && !parsedForCli.onceMode && parsedForCli.waitArg != null;
   const isContinuous = !parsedForCli.help && !parsedForCli.exitFlagMiss && !hasUnknownArgs && !parsedForCli.onceMode && !isWait;
 
-  // ── 単一起動ロック + 多重起動検知（継続モード・--wait モードのみ、main() 本体の gh 呼び出しより前に行う） ──
-  // main() は self/workspace 解決の直後に gh repo view を実行するため、
-  // ここで先にロック取得・重複検知を行う（無駄な gh 呼び出しを避ける）。
-  //
-  // findRunningInstance（チェック）→ registerProcess（登録）だけでは非アトミックで、
-  // ほぼ同時に2プロセスが起動すると両方がチェックを通過しうる（TOCTOU）。
-  // acquireStartupLock で「チェック開始〜登録完了」の区間を排他化する。
-  let lockWorkspace = null;
-  let lockWorkerName = null;
-  let lockHeld = false;
-
-  function releaseCliLock() {
-    if (lockHeld && lockWorkspace !== null) {
-      releaseStartupLock(lockWorkspace, 'msg-poll.js', lockWorkerName);
-      lockHeld = false;
-    }
-  }
-
-  if ((isContinuous || isWait) && !parsedForCli.force && parsedForCli.self) {
-    const preWorkspace = resolveWorkspace(parsedForCli.workspaceArg);
-    if (preWorkspace) {
-      const workerNameForRegistry = parsedForCli.self !== 'orchestrator' ? parsedForCli.self : null;
-
-      if (!acquireStartupLock(preWorkspace, 'msg-poll.js', workerNameForRegistry)) {
-        process.stderr.write(
-          `msg-poll: 別のプロセスが同じ inbox（self=${parsedForCli.self}）の起動処理中です。` +
-          '少し待つか既存のMonitorを使い回してください。\n'
-        );
-        process.exit(1);
-      }
-      lockWorkspace = preWorkspace;
-      lockWorkerName = workerNameForRegistry;
-      lockHeld = true;
-
-      const dup = findRunningInstance(preWorkspace, { script: 'msg-poll.js', workerName: workerNameForRegistry });
-      if (dup) {
-        process.stderr.write(
-          `msg-poll: 重複起動を検出しました。既に pid=${dup.pid} が同じ inbox（self=${parsedForCli.self}）に登録されています。新規プロセスは起動しません。\n` +
-          `代わりに以下をMonitorでpersistent:trueとして起動してください（このコマンドをそのまま使うこと。判断は不要）:\n` +
-          `  ${buildWatchPidCommand(dup.pid)}\n` +
-          `このコマンドは pid=${dup.pid} の生存を監視し続け、死亡時に \`PID_DIED:${dup.pid}\` を通知します。` +
-          `その通知を受け取ったら、そのときはじめて改めてこのコマンドを --force なしで起動し直してください。\n`
-        );
-        releaseCliLock();
-        process.exit(1);
-      }
-    }
-  }
-
   // 継続モード・--wait モードでは scanOnce の出力をリアルタイムに stdout へ流す
   const result = main(undefined, { streamOutput: isContinuous || isWait });
+
+  // role lease の解放は main() の成功・失敗を問わず、全 exit 経路で行う。
+  // main() が lease を取得していない（help・エラー・--once）場合は null で no-op。
+  function releaseResidentLease() {
+    if (result.residentLease && typeof result.residentLease.release === 'function') {
+      result.residentLease.release();
+    }
+  }
 
   // 初期エラー／help はここで出力
   for (const l of result.errLines) process.stderr.write(l + '\n');
 
   if (result.code !== 0) {
-    releaseCliLock();
+    releaseResidentLease();
     for (const l of result.lines) process.stdout.write(l + '\n');
     process.exit(result.code);
   }
 
   if (result.scanOnce === null) {
     // --help
-    releaseCliLock();
+    releaseResidentLease();
     for (const l of result.lines) process.stdout.write(l + '\n');
     process.exit(0);
   }
@@ -787,7 +811,7 @@ if (require.main === module) {
   const sc = result.scanOnce;
 
   if (result.onceMode) {
-    releaseCliLock();
+    releaseResidentLease();
     sc();
     // streamOutput が false なので lines/errLines に収集されている。
     // scanOnce 内のエラー（未初期化報告等）も stderr に出して黙殺しない。
@@ -799,22 +823,19 @@ if (require.main === module) {
   // ── PID registry に自己登録（継続モード・--wait モード） ────────────
   // worker モードの場合は workerName を含めて登録する。
   // これにより remove-worker.js の sweep が entry.workerName でマッチできる。
+  // （registry は表示・診断用途。排他の正本は role lease であり、これは二重化しない）
 
   registerProcess(result.workspace, {
     script: 'msg-poll.js',
     workerName: result.self !== 'orchestrator' ? result.self : null,
   });
 
-  // registry への登録が完了したので単一起動ロックを解放する
-  // （以後の重複検知は registry の生存確認だけで足りる）
-  releaseCliLock();
-
   if (result.waitMode) {
     // --wait モード: 新着検出 or タイムアウトのいずれか早い方で exit 0 する。
     // streamOutput が true なので scanOnce の出力は直接 stdout へ出る。
     function cleanupWait() {
       lifecycleCleanup(result.workspace);
-      releaseCliLock();
+      releaseResidentLease();
     }
 
     process.on('SIGINT', () => { cleanupWait(); process.exit(0); });
@@ -834,7 +855,7 @@ if (require.main === module) {
   function cleanup() {
     if (intervalHandle) clearInterval(intervalHandle);
     lifecycleCleanup(result.workspace);
-    releaseCliLock();
+    releaseResidentLease();
     process.exit(0);
   }
 

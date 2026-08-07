@@ -46,10 +46,9 @@ const {
   createDeadManSwitch,
   registerProcess,
   findRunningInstance,
-  acquireStartupLock,
-  releaseStartupLock,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
+const { acquireResidentLease, INBOX_SUPERVISOR_ROLE } = require('./shared/worker-lease');
 
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // msg-poll.js のスキャンロジックを再利用（マーカーパースのみ）
@@ -76,7 +75,9 @@ Options:
   --hang-threshold-sec <sec>
                          ハング判定の閾値（秒、ログ更新がこの時間以上止まったら通知。既定: 1200=20分）
   --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
-  --force                既に同じworkspaceで稼働中のSupervisorがいても起動を強制する
+  --force                既に同じworkspaceで稼働中のSupervisorがいても、既存プロセスへ停止要求を
+                          送ってから起動する（role lease の判定を無効化せず、引き継げなければ
+                          exit 1 する。既定では多重起動を検知して exit 1 する）
   --once                 1回だけスキャンして終了する（継続ポーリングしない。テスト・手動実行用）
 
 Output (stdout):
@@ -520,7 +521,8 @@ function main(argsOverride, opts = {}) {
   }
 
   const onceMode = rest.includes('--once');
-  const filteredRest = rest.filter(a => a !== '--once');
+  const force = rest.includes('--force');
+  const filteredRest = rest.filter(a => a !== '--once' && a !== '--force');
 
   if (filteredRest.length > 0) {
     writeErr(`inbox-supervisor: 未知の引数です: ${filteredRest.join(' ')}`);
@@ -534,6 +536,37 @@ function main(argsOverride, opts = {}) {
     return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
   }
 
+  // ── 常駐プロセス用 role lease（Issue #240） ─────────────────────────────
+  // 外部副作用（新着配送）を持つため --once でも排他する。取得は workspace 解決直後・
+  // gh 呼び出しより前に行い、多重起動時は無駄な外部呼び出しを避けて即拒否する。
+  // workspace 表記の差異（大文字小文字・末尾スラッシュ等）でもすり抜けないよう、
+  // role lease は workspace を canonicalWorkspace で正規化して排他する（Issue #240）。
+  let residentLease = null;
+  {
+    const role = INBOX_SUPERVISOR_ROLE;
+    const handoffTargets = () => {
+      const dup = findRunningInstance(workspace, { script: 'inbox-supervisor.js', workerName: null });
+      return dup ? [dup.pid] : [];
+    };
+    try {
+      const res = acquireResidentLease({ workspace, role, handoff: force, handoffStopTargets: handoffTargets });
+      if (!res.acquired) {
+        // 引き継ぎ期限超過（--force で既存所有者が終了しなかった）
+        writeErr(
+          `inbox-supervisor: role "${role}" を引き継げませんでした（${res.reason}）` +
+          (res.ownerPid ? `。既存プロセス pid=${res.ownerPid} が終了しません` : '') +
+          `。既存プロセスを終了させてから再試行してください。`
+        );
+        return { code: 1, lines: out, errLines: err, runOnce: null, onceMode, intervalMs, workspace, residentLease: null };
+      }
+      residentLease = res;
+    } catch (e) {
+      writeErr(`inbox-supervisor: 重複起動を検出しました。${e.message}`);
+      writeErr('既存プロセスを終了させてから再起動するか、--force で引き継いでください。');
+      return { code: 1, lines: out, errLines: err, runOnce: null, onceMode, intervalMs, workspace, residentLease: null };
+    }
+  }
+
   const intervalMs = (parseInt(values['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
   const hangThresholdMs = (parseInt(values['--hang-threshold-sec'] || String(Math.round(DEFAULT_HANG_THRESHOLD_MS / 1000))) || DEFAULT_HANG_THRESHOLD_MS / 1000) * 1000;
   const sessionPid = resolveSessionPid(values['--session-pid']);
@@ -544,12 +577,12 @@ function main(argsOverride, opts = {}) {
   const repoResult = _ghRepoView(ghOpts);
   if (repoResult.status !== 0) {
     writeErr(`inbox-supervisor: リポジトリを解決できません: ${repoResult.stderr || '(empty)'}`);
-    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
+    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '', residentLease };
   }
   const repo = repoResult.stdout.trim();
   if (!repo) {
     writeErr('inbox-supervisor: リポジトリを解決できません（空のレスポンス）。');
-    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
+    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '', residentLease };
   }
 
   // ホームディレクトリ（エージェント設定解決用）
@@ -833,6 +866,7 @@ function main(argsOverride, opts = {}) {
     intervalMs,
     workspace,
     sessionPid,
+    residentLease,
   };
 }
 
@@ -841,98 +875,45 @@ function main(argsOverride, opts = {}) {
 if (require.main === module) {
   const rawArgs = process.argv.slice(2);
 
-  // --help/-h は単一起動ロック取得等の副作用より前に判定する。
-  // ここでチェックしないと、workspace が解決できてしまう限りロック取得・多重起動検知
-  // （ファイル書き込みを伴う）まで進んでしまい、--help だけのつもりが registry へ
-  // 触れてしまう（Issue #214 のガードで home 誤解決時に throw するようになったことで
-  // 顕在化した、本来 main() 側と同様に最優先で弾くべき既存の抜け穴）。
+  // --help/-h は role lease 取得等の副作用より前に判定する。
   if (rawArgs.includes('--help') || rawArgs.includes('-h')) {
     process.stdout.write(USAGE + '\n');
     process.exit(0);
   }
 
-  const { values: preValues, exitFlagMiss: preExitFlagMiss } = parseFlags(rawArgs, ['--workspace', '--interval', '--session-pid']);
+  const result = main(undefined, { streamOutput: true });
 
-  if (preExitFlagMiss) {
-    process.stderr.write('inbox-supervisor: フラグには値が必要です。\n');
-    process.stderr.write(USAGE);
-    process.exit(1);
-  }
-
-  const force = rawArgs.includes('--force');
-  const onceMode = rawArgs.includes('--once');
-
-  // ── 単一起動ロック + 多重起動検知 ──────────────────────────────────
-  if (!force) {
-    const preWorkspace = resolveWorkspace(preValues['--workspace']);
-    if (preWorkspace) {
-      // resolveWorkspace() は workspace が home/managed root と衝突する場合に既に
-      // null を返すため、通常はここへ来ない。ただし acquireStartupLock/findRunningInstance
-      // 内部の pidsDir() は、GH_MAESTRO_RUNTIME_DIR の誤設定（runtime root が managed root
-      // と衝突している場合）も assertDisjointRoots() で throw する。workspace 自体は
-      // 正当でもこのケースは起こりうるため、生の例外ではなく通常のエラーメッセージ +
-      // exit 1 として扱う防御を残す。
-      try {
-        if (!acquireStartupLock(preWorkspace, 'inbox-supervisor.js', null)) {
-          process.stderr.write(
-            'inbox-supervisor: 別のプロセスが同じworkspaceのSupervisor起動処理中です。' +
-            '少し待ってから再試行してください。\n'
-          );
-          process.exit(1);
-        }
-
-        const dup = findRunningInstance(preWorkspace, { script: 'inbox-supervisor.js', workerName: null });
-        if (dup) {
-          releaseStartupLock(preWorkspace, 'inbox-supervisor.js', null);
-          process.stderr.write(
-            `inbox-supervisor: 重複起動を検出しました。既に pid=${dup.pid} が同じworkspaceを監視中です。` +
-            '強制的に起動する場合は --force を指定してください。\n'
-          );
-          process.exit(1);
-        }
-      } catch (e) {
-        process.stderr.write(`inbox-supervisor: ワークスペースを解決できません（${e.message}）\n`);
-        process.exit(1);
-      }
+  // role lease の解放は main() の成功・失敗を問わず、全 exit 経路で行う。
+  // main() が lease を取得していない（help・引数エラー）場合は null で no-op。
+  function releaseResidentLease() {
+    if (result.residentLease && typeof result.residentLease.release === 'function') {
+      result.residentLease.release();
     }
   }
-
-  const result = main(undefined, { streamOutput: true });
 
   for (const l of result.errLines) process.stderr.write(l + '\n');
 
   if (result.code !== 0) {
-    if (!force) {
-      const preWorkspace = resolveWorkspace(preValues['--workspace']);
-      if (preWorkspace) releaseStartupLock(preWorkspace, 'inbox-supervisor.js', null);
-    }
+    releaseResidentLease();
     for (const l of result.lines) process.stdout.write(l + '\n');
     process.exit(result.code);
   }
 
   if (result.runOnce === null) {
-    // --help
-    if (!force) {
-      const preWorkspace = resolveWorkspace(preValues['--workspace']);
-      if (preWorkspace) releaseStartupLock(preWorkspace, 'inbox-supervisor.js', null);
-    }
+    // --help（main() が USAGE を返す場合）
+    releaseResidentLease();
     for (const l of result.lines) process.stdout.write(l + '\n');
     process.exit(0);
   }
 
-  // PID registry に自己登録
+  // PID registry に自己登録（表示・診断用途。排他の正本は role lease であり、二重化しない）
   registerProcess(result.workspace, { script: 'inbox-supervisor.js' });
-
-  // registry への登録が完了したので単一起動ロックを解放
-  if (!force) {
-    const preWorkspace = resolveWorkspace(preValues['--workspace']);
-    if (preWorkspace) releaseStartupLock(preWorkspace, 'inbox-supervisor.js', null);
-  }
 
   const ru = result.runOnce;
 
   function cleanup() {
     lifecycleCleanup(result.workspace);
+    releaseResidentLease();
     process.exit(0);
   }
 
