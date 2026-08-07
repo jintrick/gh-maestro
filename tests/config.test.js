@@ -366,6 +366,17 @@ test('validateConfig: extendsで既存エージェントを継承するカスタ
   assert.deepEqual(issues, []);
 });
 
+test('validateConfig: extends + 配列追記（extraArgs）のカスタムエージェントはエラーにならない', () => {
+  const defaults = loadDefaults();
+  const config = {
+    agents: {
+      'claude-opus': { extends: 'claude', command: 'claude-opus', extraArgs: ['--model', 'opus'] },
+    },
+  };
+  const issues = validateConfig('global', '/tmp/config.json', config, defaults);
+  assert.deepEqual(issues, []);
+});
+
 test('validateConfig: extends先が存在しないカスタムエージェントはエラーになる', () => {
   const defaults = loadDefaults();
   const config = {

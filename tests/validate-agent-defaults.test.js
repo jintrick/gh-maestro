@@ -47,6 +47,25 @@ test('validateAgentDefaults: 実データが検証を通過する', () => {
   assert.deepEqual(errors, [], `実データにエラーがあります:\n${errors.join('\n')}`);
 });
 
+test('validateAgentDefaults: extends + 配列追記（extraArgs）のエントリはエラーにならない', () => {
+  const data = {
+    agents: [
+      {
+        id: 'base', label: 'Base Agent', command: 'base-cli', runtime: 'base',
+        extraArgs: ['--base'], promptDelivery: 'positional', rulesSupported: false,
+        resumeCommand: ['--continue'],
+      },
+      {
+        id: 'derived', label: 'Derived Agent', extends: 'base', command: 'derived-cli',
+        runtime: 'derived', extraArgs: ['--extra'],
+      },
+    ],
+  };
+  // 解決後（extends解決済み）に全必須フィールドが揃い、extraArgs は継承元+追記分の配列になる
+  const errors = validateAgentDefaults(data).filter(i => i.startsWith('[ERROR]'));
+  assert.deepEqual(errors, [], `extends+配列追記でエラーが出ています:\n${errors.join('\n')}`);
+});
+
 test('validateAgentDefaults: 全エージェントが rulesSupported を持っている（extends解決後）', () => {
   for (const agent of resolvedDefaultsAgents) {
     assert.ok('rulesSupported' in agent, `"${agent.id}" に rulesSupported フィールドがありません`);
