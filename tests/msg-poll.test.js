@@ -532,7 +532,9 @@ test('orchestrator モード: 未処理の lock-denied/handoff-wait 監査イベ
     residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'inbox-supervisor', detail: { ownerPid: 111 } });
     residentAudit.recordResidentAuditEvent({ workspace, type: 'handoff-wait', role: 'msgpoll-orchestrator', detail: { ownerPid: 222 } });
 
-    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
+    // 監査キューを消費できるのは role lease 保持モードのみ（--once は lease を取得せず、
+    // 共有キューを読み取ると他プロセスと重複出力しうる。Issue #240 レビュー指摘）。
+    const r = runMain(['orchestrator', '--workspace', workspace, '--wait', '30']);
     assert.equal(r.code, 0);
     r.scanOnce();
 
@@ -552,7 +554,7 @@ test('orchestrator モード: 監査イベントは ownerPid が無ければ rol
     const residentAudit = require('../scripts/shared/resident-audit');
     residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'inbox-supervisor', detail: {} });
 
-    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
+    const r = runMain(['orchestrator', '--workspace', workspace, '--wait', '30']);
     assert.equal(r.code, 0);
     r.scanOnce();
 

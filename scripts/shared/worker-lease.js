@@ -129,8 +129,12 @@ function createNormalWorkerStore(workspace) {
 /**
  * リースエントリが指すプロセスが稼働中か判定する。
  *
- * PID の生存だけでは不十分で、startTime が記録されている場合は同一性も確認する
- * （PID再利用による誤判定を防ぐ。process-lifecycle-scripts.md ルール準拠）。
+ * startTime は必須で、PID の生存に加えて必ず verifyProcessIdentity による同一性を
+ * 確認する（PID再利用による誤判定・改ざんされたリースによる誤kill防止。
+ * process-lifecycle-scripts.md ルール準拠）。startTime が欠落・不正なリースは
+ * live とみなさない。この判定は --force の停止対象選定にもそのまま使われるため、
+ * startTime なしで live と判定すると書き込み可能な workspace に細工したリースを
+ * 置くだけで任意の生存 PID を強制終了できてしまう。
  *
  * @param {object|null} entry リースエントリ
  * @returns {boolean}
@@ -143,13 +147,13 @@ function isLeaseLive(entry) {
     : null;
   if (!pid) return false;
 
+  // startTime が欠落・不正なリースは live とみなさない（--force の停止対象にもしない）
+  if (typeof entry.startTime !== 'string' || !entry.startTime) return false;
+
   if (!_isProcessAlive(pid)) return false;
 
-  // startTime が記録されていれば同一性を確認（PID再利用対策）
-  if (typeof entry.startTime === 'string' && entry.startTime) {
-    const result = _verifyProcessIdentity(pid, { startTime: entry.startTime });
-    if (!result.match) return false;
-  }
+  const result = _verifyProcessIdentity(pid, { startTime: entry.startTime });
+  if (!result.match) return false;
 
   return true;
 }

@@ -536,6 +536,11 @@ function main(argsOverride, opts = {}) {
     return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
   }
 
+  // intervalMs/hangThresholdMs は lease 拒否・例外時の早期 return でも参照するため、
+  // role lease 取得より前に確定させる（TDZ 回避）。
+  const intervalMs = (parseInt(values['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
+  const hangThresholdMs = (parseInt(values['--hang-threshold-sec'] || String(Math.round(DEFAULT_HANG_THRESHOLD_MS / 1000))) || DEFAULT_HANG_THRESHOLD_MS / 1000) * 1000;
+
   // ── 常駐プロセス用 role lease（Issue #240） ─────────────────────────────
   // 外部副作用（新着配送）を持つため --once でも排他する。取得は workspace 解決直後・
   // gh 呼び出しより前に行い、多重起動時は無駄な外部呼び出しを避けて即拒否する。
@@ -567,8 +572,6 @@ function main(argsOverride, opts = {}) {
     }
   }
 
-  const intervalMs = (parseInt(values['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
-  const hangThresholdMs = (parseInt(values['--hang-threshold-sec'] || String(Math.round(DEFAULT_HANG_THRESHOLD_MS / 1000))) || DEFAULT_HANG_THRESHOLD_MS / 1000) * 1000;
   const sessionPid = resolveSessionPid(values['--session-pid']);
   const checkParent = createDeadManSwitch(sessionPid);
 

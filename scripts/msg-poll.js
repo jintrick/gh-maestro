@@ -449,8 +449,11 @@ function main(argsOverride, opts = {}) {
     // 常駐プロセスの role lease で発生した lock-denied / handoff-wait を読み出し、
     // 処理済み化（削除）してから stdout に出力する。GitHub への投稿はしない
     // （投稿判断は orchestrator 側）。出力 → 削除の順で、クラッシュ時は重複出力側に倒れる。
+    // 消費は role lease 保持モード（継続 / --wait）だけに限定する。--once は lease を
+    // 取得せず、共有キューを読むと削除前に同じイベントを他プロセスと読み合って
+    // 重複出力しうる（Issue #240 レビュー指摘）。
     // --wait（singleMessage）では監査行の出力を「新着検出」と誤判定させないため除外する。
-    if (isOrchestrator && !singleMessage) {
+    if (isOrchestrator && !singleMessage && residentLease !== null) {
       const events = listUnprocessedResidentAuditEvents(workspace);
       for (const { file, event } of events) {
         const ownerPid = event.detail && event.detail.ownerPid != null ? `:${event.detail.ownerPid}` : '';

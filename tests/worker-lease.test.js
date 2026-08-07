@@ -151,10 +151,12 @@ test('isLeaseLive: PIDは生きているがstartTimeが一致しなければ fal
   }), false);
 });
 
-test('isLeaseLive: startTimeが無ければPID生存のみで判定（移行前・予約エントリ）', () => {
-  const calls = mockLiveness({ alive: true, identityMatch: false });
-  assert.equal(lease.isLeaseLive({ pid: 4242, startTime: '', workerName: 'w', createdAt: 'x' }), true);
-  assert.equal(calls.verify.length, 0, 'startTimeが空なら同一性確認をスキップ');
+test('isLeaseLive: startTimeが無ければ live とみなさない（任意PID誤kill防止）', () => {
+  const calls = mockLiveness({ alive: true, identityMatch: true });
+  assert.equal(lease.isLeaseLive({ pid: 4242, startTime: '', workerName: 'w', createdAt: 'x' }), false);
+  assert.equal(lease.isLeaseLive({ pid: 4242, workerName: 'w', createdAt: 'x' }), false);
+  // startTime が欠落したリースは verifyProcessIdentity も通さない
+  assert.equal(calls.verify.length, 0, 'startTime が欠落なら同一性確認は不要（PIDに触れない）');
 });
 
 test('isLeaseLive: null/非オブジェクト/pid無しは false', () => {
@@ -748,6 +750,36 @@ test('acquireResidentLease: --force は既存所有者を停止させて同じ l
       const residentAudit = require('../scripts/shared/resident-audit');
       const events = residentAudit.listUnprocessedResidentAuditEvents(canonical);
       assert.equal(events.some(e => e.event.type === 'handoff-wait'), true);
+    } finally {
+      res.release();
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('acquireResidentLease: startTime 欠落の細工リースは --force の停止対象にしない（任意PID誤kill防止）', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  try {
+    const ownerPid = 424242;
+    mockLiveness({ alive: true });
+    const kills = [];
+    lease._setKillProcessTree((pid) => { kills.push(pid); });
+    lease._setSleep(() => {});
+
+    const canonical = storageLayout.canonicalWorkspace(tmp);
+    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    // 攻撃者が workspace に置ける細工リース: startTime 無し・PID のみ
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
+      pid: ownerPid, workerName: 'inbox-supervisor', phase: 'active',
+    }), 'utf8');
+
+    const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor', handoff: true, deadlineMs: 50 });
+    try {
+      // isLeaseLive が false のため停止対象にならず、stale として回収して取得できる
+      assert.equal(res.acquired, true);
+      assert.deepEqual(kills, [], `細工リースの PID が kill されてはならない: ${JSON.stringify(kills)}`);
     } finally {
       res.release();
     }
