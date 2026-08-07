@@ -15,6 +15,7 @@ const {
   validateNonInteractiveTokens,
 } = require('../scripts/shared/resolve-config');
 const { buildAgentCommandArgs } = require('../scripts/agent-launch');
+const { createSessionResumeAdapter } = require('../scripts/shared/inbox-adapters/session-resume-adapter');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -346,6 +347,161 @@ test('resolveAgentConfig: workspace config の extends は無視される（EXEC
       fs.rmSync(ws, { recursive: true, force: true });
     }
   });
+});
+
+// ── extends 時の配列追記（Issue #235） ───────────────────────────────────────
+
+test('resolveAgentConfig: extends + extraArgs は継承元配列の末尾に追記される（Issue #235 のユースケース）', () => {
+  withTempHome(home => {
+    const claudeDefault = loadDefaults().agents.find(a => a.id === 'claude').extraArgs;
+    writeConfig(home, {
+      agents: {
+        'claude-opus': { extends: 'claude', command: 'claude-opus', extraArgs: ['--model', 'opus'] },
+      },
+    });
+
+    const agent = resolveAgentConfig('claude-opus', { homedir: home });
+    assert.ok(agent);
+    assert.equal(agent.command, 'claude-opus');
+    // 実効 extraArgs = claude の全引数 + 追記分（完全置換ではない）
+    assert.deepEqual(agent.extraArgs, [...claudeDefault, '--model', 'opus']);
+    // nonInteractiveTokens の --print が保持される
+    assert.deepEqual(agent.nonInteractiveTokens, ['--print']);
+    // 非対話化トークンが欠落しない（Issue #163 ガードと整合）
+    assert.deepEqual(validateNonInteractiveTokens(agent), { valid: true, missing: [] });
+  });
+});
+
+test('resolveExtends: 配列フィールドは継承元配列の末尾に追記される', () => {
+  const defaults = loadDefaults();
+  const entry = { id: 'derived', extends: 'claude', command: 'derived', extraArgs: ['--model', 'opus'] };
+  const resolved = resolveExtends(entry, defaults.agents);
+  const claude = defaults.agents.find(a => a.id === 'claude');
+  assert.deepEqual(resolved.extraArgs, [...claude.extraArgs, '--model', 'opus']);
+  assert.equal(resolved.command, 'derived');
+});
+
+test('resolveExtends: 追記対象（extraArgs/execArgs/nonInteractiveTokens）はそれぞれ追記され、resumeCommand は完全置換される', () => {
+  const defaults = loadDefaults();
+  const entry = {
+    id: 'derived',
+    extends: 'claude',
+    command: 'derived',
+    extraArgs: ['--model', 'opus'],
+    execArgs: ['--extra-exec'],
+    resumeCommand: ['--custom-resume'],
+    nonInteractiveTokens: ['--new-token'],
+  };
+  const resolved = resolveExtends(entry, defaults.agents);
+  const claude = defaults.agents.find(a => a.id === 'claude');
+  assert.deepEqual(resolved.extraArgs, [...claude.extraArgs, '--model', 'opus']);
+  assert.deepEqual(resolved.execArgs, [...claude.execArgs, '--extra-exec']);
+  // resumeCommand は追記されず完全置換（末尾要素をセッション参照で置換する resume() の契約と整合）
+  assert.deepEqual(resolved.resumeCommand, ['--custom-resume']);
+  assert.deepEqual(resolved.nonInteractiveTokens, [...claude.nonInteractiveTokens, '--new-token']);
+});
+
+test('resolveExtends: resumeCommand は追記されず従来どおり完全置換される（createSessionResumeAdapter.resume() の末尾置換契約と整合）', () => {
+  const defaults = loadDefaults();
+  const entry = { id: 'derived', extends: 'claude', command: 'derived', resumeCommand: ['resume', '--custom'] };
+  const resolved = resolveExtends(entry, defaults.agents);
+  assert.deepEqual(resolved.resumeCommand, ['resume', '--custom']);
+});
+
+test('resolveAgentConfig + createSessionResumeAdapter.resume: extends で resumeCommand を継承しても sessionRef 置換が末尾の --last に対して行われる', () => {
+  withTempHome(home => {
+    // codex の resumeCommand は ["resume", "--last"]。extends で追記されるのは
+    // extraArgs のみで、resumeCommand は上書きしなければ継承元のまま末尾に --last が残る。
+    writeConfig(home, {
+      agents: {
+        'codex-terra': { extends: 'codex', command: 'codex-terra', extraArgs: ['--all'] },
+      },
+    });
+
+    const agent = resolveAgentConfig('codex-terra', { homedir: home });
+    assert.ok(agent);
+    // resumeCommand は追記対象外 → 継承元のまま ["resume", "--last"]
+    assert.deepEqual(agent.resumeCommand, ['resume', '--last']);
+    // extraArgs は追記される
+    assert.ok(agent.extraArgs.includes('--all'));
+
+    const adapter = createSessionResumeAdapter(agent);
+    const result = adapter.resume('specific-session-id');
+    // resumeCommand 末尾の --last が sessionRef に置き換わる（追記された --all は
+    // extraArgs 側にあり resumeCommand に混入しない）
+    assert.deepEqual(result.args, ['resume', 'specific-session-id']);
+  });
+});
+
+test('resolveExtends: 連鎖 extends（a→b→c）で追記が継承順に累積する', () => {
+  const agents = [
+    { id: 'c', command: 'c', extraArgs: ['--c'] },
+    { id: 'b', extends: 'c', command: 'b', extraArgs: ['--b'] },
+    { id: 'a', extends: 'b', command: 'a', extraArgs: ['--a'] },
+  ];
+  const resolved = resolveExtends(agents[2], agents);
+  assert.deepEqual(resolved.extraArgs, ['--c', '--b', '--a']);
+});
+
+test('resolveExtends: 継承元に無い配列フィールドへの指定は指定分のみになる', () => {
+  const agents = [
+    { id: 'base', command: 'base', extraArgs: ['--base'] },
+    { id: 'derived', extends: 'base', command: 'derived', execArgs: ['--new-exec'] },
+  ];
+  const resolved = resolveExtends(agents[1], agents);
+  assert.deepEqual(resolved.extraArgs, ['--base']);
+  assert.deepEqual(resolved.execArgs, ['--new-exec']);
+});
+
+test('resolveExtends: 配列でない値は従来どおり置換される（後方互換）', () => {
+  const agents = [
+    { id: 'base', command: 'base', sendTextDelayMs: 1000, extraArgs: ['--base'] },
+    { id: 'derived', extends: 'base', command: 'derived', sendTextDelayMs: 5000 },
+  ];
+  const resolved = resolveExtends(agents[1], agents);
+  assert.equal(resolved.command, 'derived');
+  assert.equal(resolved.sendTextDelayMs, 5000, 'non-array value should be replaced, not appended');
+  assert.deepEqual(resolved.extraArgs, ['--base'], 'inherited array unchanged when not overridden');
+});
+
+test('resolveAgentConfig: extends なしの global override は従来どおり配列を完全置換する（非対称性・後方互換）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: { 'claude-ds': { command: 'pwsh', extraArgs: ['-NoLogo', '-Command', 'my-wrapper'] } },
+    });
+
+    const agent = resolveAgentConfig('claude-ds', { homedir: home });
+    assert.ok(agent);
+    // claude-ds は claude を extends するが、この override 自身は extends を持たないため置換経路
+    assert.deepEqual(agent.extraArgs, ['-NoLogo', '-Command', 'my-wrapper'], 'non-extends override should fully replace extraArgs');
+    assert.equal(agent.extraArgs.includes('--print'), false, 'inherited --print should be gone after full replace');
+  });
+});
+
+test('resolveAgentConfig: workspace config の extends + extraArgs は剥がれて null（EXEC_SENSITIVE_FIELDS、セキュリティ）', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-extends-arr-sec-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: {
+          'workspace-only-agent': { extends: 'codex', command: 'workspace-only-agent', extraArgs: ['--evil'] },
+        },
+      });
+      // extends と extraArgs が剥がされると command のみが残り、promptDelivery 等の必須フィールドが
+      // 揃わないため isValidAgentConfig で弾かれ null になる（追記経路への到達を塞ぐ）。
+      assert.equal(resolveAgentConfig('workspace-only-agent', { homedir: home, workspace: ws }), null);
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('validateNonInteractiveTokens: extends + extraArgs 追記ではトークン欠落せず valid（Issue #163 ガードとの整合）', () => {
+  const defaults = loadDefaults();
+  const entry = { id: 'derived', extends: 'claude', command: 'derived', extraArgs: ['--model', 'opus'] };
+  const resolved = resolveExtends(entry, defaults.agents);
+  // 追記なので --print が残り、検証は valid（完全置換なら欠落し得た）
+  assert.deepEqual(validateNonInteractiveTokens(resolved), { valid: true, missing: [] });
 });
 
 test('resolveAgentConfig: global config は command/extraArgs を上書きできる', () => {

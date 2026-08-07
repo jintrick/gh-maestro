@@ -125,18 +125,43 @@ function resolveDynamicCommand(agent) {
 /**
  * エージェント設定をマージする。
  * base（デフォルト）に override（config.json）を上書きする。
- * 配列フィールド（extraArgs 等）は override 側が完全に置き換える。
  * base が null の場合は override だけで新しいエージェントを作る。
+ *
+ * 配列フィールドの扱いはモードで分かれる（Issue #235）:
+ * - 既定（appendArrays=false）: 配列フィールド（extraArgs 等）は override 側が完全に置き換える。
+ *   非extendsの通常上書き経路（global/workspace override）はこのモード。
+ * - appendArrays=true: 対象の配列フィールド（APPEND_ARRAY_FIELDS: extraArgs / execArgs /
+ *   nonInteractiveTokens）は base の配列内容の末尾に override の内容を連結する
+ *   （継承元の内容が失われない）。extends 解決（resolveExtends）専用のモード。
+ *   resumeCommand は対象外（従来どおり完全置換。末尾要素をセッション参照で置換する
+ *   createSessionResumeAdapter.resume() の契約と整合させるため。PR #236 レビュー指摘）。
+ *   配列でない値は従来どおり置換する（不正値の扱いを変えない）。
  *
  * @param {object|null} base      デフォルトのエージェント設定、または null
  * @param {object}      override  config.json の差分
+ * @param {object}      [opts]
+ * @param {boolean}     [opts.appendArrays=false]  true なら APPEND_ARRAY_FIELDS の配列を末尾に連結
  * @returns {object} マージ済み設定
  */
-function mergeAgentConfig(base, override) {
+// extends 解決で追記される配列フィールド（Issue #235）。
+// extraArgs / execArgs は起動時の引数列で、継承元の内容を失わずに積み増すのが自然。
+// nonInteractiveTokens は順序に意味のないトークン集合であり、消費者
+// （validateNonInteractiveTokens 等）は集合メンバーシップ検証しか行わないため、
+// 追記しても継承元トークンの欠落を防ぐ方向にしか働かない（fail-closed 方向で安全）。
+// resumeCommand は対象外（従来どおり完全置換）。createSessionResumeAdapter.resume() が
+// resumeCommand の末尾要素をセッション参照で置換する契約のため、追記すると置換対象が
+// ずれて再開が壊れる（PR #236 レビュー指摘）。
+const APPEND_ARRAY_FIELDS = new Set(['extraArgs', 'execArgs', 'nonInteractiveTokens']);
+
+function mergeAgentConfig(base, override, opts = {}) {
   if (!override || Object.keys(override).length === 0) return base;
   const result = base ? { ...base } : {};
   for (const [key, value] of Object.entries(override)) {
-    if (value !== undefined) {
+    if (value === undefined) continue;
+    if (opts.appendArrays && APPEND_ARRAY_FIELDS.has(key) && Array.isArray(value)) {
+      const inherited = Array.isArray(result[key]) ? result[key] : [];
+      result[key] = [...inherited, ...value];
+    } else {
       result[key] = value;
     }
   }
@@ -152,6 +177,14 @@ function mergeAgentConfig(base, override) {
  * 実態に、設定の重複無しで対応するための機構。agent-defaults.json自身のエントリにも、
  * config.json（グローバルのみ。ワークスペースはEXEC_SENSITIVE_FIELDSで除外）で定義する
  * カスタムエージェントにも使える。
+ *
+ * 対象の配列フィールド（APPEND_ARRAY_FIELDS: extraArgs / execArgs / nonInteractiveTokens）は、
+ * 「継承（extends）＝継承元を土台に積み増す」という意味に合わせ、継承元の配列内容に
+ * 自分の内容を末尾追記する（Issue #235）。追記は appendArrays モードの mergeAgentConfig
+ * で実現する。resumeCommand は追記対象外（従来どおり完全置換）。末尾要素をセッション参照で
+ * 置換する createSessionResumeAdapter.resume() の契約と整合させるため（PR #236 レビュー指摘）。
+ * 非extendsの通常上書き経路（global/workspace override）は従来どおり配列を
+ * 完全置換する（追記/置換の非対称性）。
  *
  * @param {object} entry        extends を含みうるエントリ（agent-defaults.json の要素、
  *                               またはconfig.json の agents[id] オーバーライド）
@@ -174,7 +207,8 @@ function resolveExtends(entry, agentsArray, seen = new Set()) {
   const base = Array.isArray(agentsArray) ? agentsArray.find(a => a && a.id === baseId) : null;
   const resolvedBase = base ? resolveExtends(base, agentsArray, new Set([...seen, baseId])) : null;
 
-  return mergeAgentConfig(resolvedBase, rest);
+  // extends 経由のマージは配列を追記する（継承元の内容を失わない）
+  return mergeAgentConfig(resolvedBase, rest, { appendArrays: true });
 }
 
 /**
@@ -233,12 +267,15 @@ function validateNonInteractiveTokens(agent, argsArray) {
 /**
  * 指定された agentId の設定を解決順序でマージして返す。
  *
- * マージ挙動には非対称性がある: 通常のフィールド（`command`・`enterSequence`等）の
- * オーバーライドは既存設定に対する**フィールド単位のマージ**だが、オーバーライドが
- * `extends: "<baseId>"` を持つ場合は、そのagentIdの既存デフォルトの有無に関わらず、
- * extends解決結果を新しいbaseとした**総入れ替え**になる（既存デフォルト固有の
- * フィールドは暗黙に失われる）。組み込みのagentId（例: "codex"）を`extends`付きで
- * 上書きする場合も同じ規則が適用される。
+ * マージ挙動には非対称性がある:
+ * - 通常のオーバーライド（`extends` なし）: フィールド単位のマージ。配列フィールド
+ *   （`extraArgs`等）は override 側が完全に置き換える。
+ * - `extends: "<baseId>"` を持つオーバーライド: そのagentIdの既存デフォルトの有無に
+ *   関わらず、extends解決結果を新しいbaseとした**総入れ替え**になる（既存デフォルト固有の
+ *   フィールドは暗黙に失われる）。さらに、エントリ自身の配列フィールドのうち
+ *   `extraArgs` / `execArgs` / `nonInteractiveTokens` は継承元の配列に**末尾追記**される
+ *   （Issue #235）。`resumeCommand` は追記対象外（従来どおり完全置換）。組み込みのagentId
+ *   （例: "codex"）を`extends`付きで上書きする場合も同じ規則が適用される。
  *
  * @param {string} agentId        エージェントID
  * @param {object} [opts={}]
