@@ -15,6 +15,7 @@ const {
   validateNonInteractiveTokens,
 } = require('../scripts/shared/resolve-config');
 const { buildAgentCommandArgs } = require('../scripts/agent-launch');
+const { createSessionResumeAdapter } = require('../scripts/shared/inbox-adapters/session-resume-adapter');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -380,7 +381,7 @@ test('resolveExtends: 配列フィールドは継承元配列の末尾に追記�
   assert.equal(resolved.command, 'derived');
 });
 
-test('resolveExtends: 全配列フィールド（extraArgs/execArgs/resumeCommand/nonInteractiveTokens）がそれぞれ追記される', () => {
+test('resolveExtends: 追記対象（extraArgs/execArgs/nonInteractiveTokens）はそれぞれ追記され、resumeCommand は完全置換される', () => {
   const defaults = loadDefaults();
   const entry = {
     id: 'derived',
@@ -388,15 +389,48 @@ test('resolveExtends: 全配列フィールド（extraArgs/execArgs/resumeComman
     command: 'derived',
     extraArgs: ['--model', 'opus'],
     execArgs: ['--extra-exec'],
-    resumeCommand: ['--resume-extra'],
+    resumeCommand: ['--custom-resume'],
     nonInteractiveTokens: ['--new-token'],
   };
   const resolved = resolveExtends(entry, defaults.agents);
   const claude = defaults.agents.find(a => a.id === 'claude');
   assert.deepEqual(resolved.extraArgs, [...claude.extraArgs, '--model', 'opus']);
   assert.deepEqual(resolved.execArgs, [...claude.execArgs, '--extra-exec']);
-  assert.deepEqual(resolved.resumeCommand, [...claude.resumeCommand, '--resume-extra']);
+  // resumeCommand は追記されず完全置換（末尾要素をセッション参照で置換する resume() の契約と整合）
+  assert.deepEqual(resolved.resumeCommand, ['--custom-resume']);
   assert.deepEqual(resolved.nonInteractiveTokens, [...claude.nonInteractiveTokens, '--new-token']);
+});
+
+test('resolveExtends: resumeCommand は追記されず従来どおり完全置換される（createSessionResumeAdapter.resume() の末尾置換契約と整合）', () => {
+  const defaults = loadDefaults();
+  const entry = { id: 'derived', extends: 'claude', command: 'derived', resumeCommand: ['resume', '--custom'] };
+  const resolved = resolveExtends(entry, defaults.agents);
+  assert.deepEqual(resolved.resumeCommand, ['resume', '--custom']);
+});
+
+test('resolveAgentConfig + createSessionResumeAdapter.resume: extends で resumeCommand を継承しても sessionRef 置換が末尾の --last に対して行われる', () => {
+  withTempHome(home => {
+    // codex の resumeCommand は ["resume", "--last"]。extends で追記されるのは
+    // extraArgs のみで、resumeCommand は上書きしなければ継承元のまま末尾に --last が残る。
+    writeConfig(home, {
+      agents: {
+        'codex-terra': { extends: 'codex', command: 'codex-terra', extraArgs: ['--all'] },
+      },
+    });
+
+    const agent = resolveAgentConfig('codex-terra', { homedir: home });
+    assert.ok(agent);
+    // resumeCommand は追記対象外 → 継承元のまま ["resume", "--last"]
+    assert.deepEqual(agent.resumeCommand, ['resume', '--last']);
+    // extraArgs は追記される
+    assert.ok(agent.extraArgs.includes('--all'));
+
+    const adapter = createSessionResumeAdapter(agent);
+    const result = adapter.resume('specific-session-id');
+    // resumeCommand 末尾の --last が sessionRef に置き換わる（追記された --all は
+    // extraArgs 側にあり resumeCommand に混入しない）
+    assert.deepEqual(result.args, ['resume', 'specific-session-id']);
+  });
 });
 
 test('resolveExtends: 連鎖 extends（a→b→c）で追記が継承順に累積する', () => {
