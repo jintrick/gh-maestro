@@ -51,6 +51,12 @@ node scripts/install.js
 
 **Never run `node scripts/install.js` from a WIP/unmerged feature branch.** It writes to the machine-global `~/.gh-maestro/` shared directory and will overwrite installed state with unreviewed, unmerged code.
 
+**Before claiming the installed copy (`~/.gh-maestro/`) is stale relative to `dev`, verify it concretely — do not assume.** A quick `diff` between an installed file and `git show dev:<path>` piped through process substitution can produce a misleading wall of differences on Windows/Git Bash for reasons unrelated to actual content drift (line-ending handling, fifo/process-substitution quirks). Before concluding "install.js hasn't been run" or blaming stale code for an error:
+- Compare actual resolved *behavior*, not raw file diff output — e.g., call the relevant function directly (`resolveAgentConfig(...)`) and inspect the real result.
+- Cross-check file mtimes against the actual merge timestamps of the commits in question (`git show -s --format=%ci <sha>` vs the installed file's mtime), not vibes.
+- If a diff looks suspiciously total (entire file "replaced" rather than a few lines changed), suspect the diff invocation itself before suspecting the file.
+Getting this wrong wastes the human's time chasing a diagnosis that was never real, and undermines trust in the orchestrator's judgment on questions the human cannot easily verify themselves.
+
 ## Runtime State vs Managed Storage
 
 `~/.gh-maestro/` (home-relative) is installer-managed: `install.js` treats it as authoritative and deletes any top-level entry it did not write itself during that run. `<workspace>/.gh-maestro/` (per-workspace: `workers.json`, `assistants.json`, cursors, etc.) is a different, install.js-untouched location and is fine to write to directly — most of the codebase already does.
