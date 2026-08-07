@@ -56,7 +56,7 @@ function rotateLog(logPath, results, dryRun) {
   }
 }
 
-function sweepWorkspaceFiles(workspace, { activeWorkerNames = new Set(), now = Date.now(), dryRun = false } = {}) {
+function sweepWorkspaceFiles(workspace, { activeWorkerNames = new Set(), activeReviewPrs = new Set(), now = Date.now(), dryRun = false } = {}) {
   const results = { removed: [], compacted: [], rotated: [], errors: [] };
   const maestro = path.join(workspace, '.gh-maestro');
   const workerLogDir = path.join(maestro, 'worker-logs');
@@ -90,7 +90,9 @@ function sweepWorkspaceFiles(workspace, { activeWorkerNames = new Set(), now = D
   }
   for (const name of logs) {
     const workerName = name.slice(0, -4);
-    if (activeWorkerNames.has(workerName)) continue;
+    const reviewMatch = /-pr-(\d+)\.log$/.exec(name);
+    if (activeWorkerNames.has(workerName)
+      || (reviewMatch && activeReviewPrs.has(reviewMatch[1]))) continue;
     const logPath = path.join(workerLogDir, name);
     if (!isRegularFile(logPath)) continue;
     if (dryRun) {

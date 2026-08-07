@@ -827,11 +827,23 @@ test('sweepRegistry: stale registry掃除とhousekeepingを一連で実行する
   fs.mkdirSync(pidsDir, { recursive: true });
   fs.mkdirSync(logDir, { recursive: true });
   const staleName = 'issue-237-stale';
+  const activeName = 'issue-237-active';
+  const reviewPr = '237';
+  const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
+  const reviewLockPath = path.join(workspace, '.gh-maestro', `review-manager-${reviewPr}.running`);
+  const leasePath = path.join(workspace, '.gh-maestro', 'leases', `${activeName}.json`);
+  const previousWorkers = fs.existsSync(workersPath) ? fs.readFileSync(workersPath) : null;
   fs.writeFileSync(path.join(pidsDir, 'stale.json'), JSON.stringify({
     pid: -1, script: 'worker.js', workerName: staleName,
   }));
   const noise = '{"type":"system","subtype":"thinking_tokens"}\n';
   fs.writeFileSync(path.join(logDir, `${staleName}.log`), noise);
+  fs.writeFileSync(path.join(logDir, `${activeName}.log`), noise);
+  fs.writeFileSync(path.join(logDir, `issue-55-review-manager-pr-${reviewPr}.log`), noise);
+  fs.mkdirSync(path.dirname(leasePath), { recursive: true });
+  fs.writeFileSync(workersPath, JSON.stringify({ [activeName]: { pid: process.pid, startTime: null } }));
+  fs.writeFileSync(leasePath, JSON.stringify({ pid: process.pid, workerName: activeName }));
+  fs.writeFileSync(reviewLockPath, String(process.pid));
   const old = new Date(Date.now() - 120000);
   fs.utimesSync(path.join(logDir, `${staleName}.log`), old, old);
 
@@ -839,11 +851,17 @@ test('sweepRegistry: stale registry掃除とhousekeepingを一連で実行する
     const results = plc.sweepRegistry(workspace, { dryRun: false });
     assert.ok(results.housekeeping, 'housekeeping must be owned by the lifecycle sweep');
     assert.ok(results.housekeeping.compacted.some(x => x.logPath.endsWith(`${staleName}.log`)));
+    assert.equal(fs.readFileSync(path.join(logDir, `${activeName}.log`), 'utf8'), noise);
+    assert.equal(fs.readFileSync(path.join(logDir, `issue-55-review-manager-pr-${reviewPr}.log`), 'utf8'), noise);
     assert.equal(fs.readFileSync(path.join(logDir, `${staleName}.log`), 'utf8'), '');
   } finally {
     for (const p of [path.join(pidsDir, 'stale.json'), path.join(pidsDir, 'active.json')]) {
       try { fs.unlinkSync(p); } catch {}
     }
+    for (const p of [leasePath, reviewLockPath, workersPath]) {
+      try { fs.unlinkSync(p); } catch {}
+    }
+    if (previousWorkers !== null) fs.writeFileSync(workersPath, previousWorkers);
   }
 });
 
