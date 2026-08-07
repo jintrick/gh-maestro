@@ -14,6 +14,8 @@ afterEach(() => {
   lease._setIsProcessAlive(processLifecycle.isProcessAlive);
   lease._setVerifyProcessIdentity(processLifecycle.verifyProcessIdentity);
   lease._setGetProcessStartTime(processLifecycle.getProcessStartTime);
+  lease._setKillProcessTree(() => { throw new Error('_killProcessTree は未注入のまま呼ばれた'); });
+  lease._setSleep(() => {});
 });
 
 // ── テスト用ヘルパー ───────────────────────────────────────────────────────────
@@ -149,10 +151,12 @@ test('isLeaseLive: PIDは生きているがstartTimeが一致しなければ fal
   }), false);
 });
 
-test('isLeaseLive: startTimeが無ければPID生存のみで判定（移行前・予約エントリ）', () => {
-  const calls = mockLiveness({ alive: true, identityMatch: false });
-  assert.equal(lease.isLeaseLive({ pid: 4242, startTime: '', workerName: 'w', createdAt: 'x' }), true);
-  assert.equal(calls.verify.length, 0, 'startTimeが空なら同一性確認をスキップ');
+test('isLeaseLive: startTimeが無ければ live とみなさない（任意PID誤kill防止）', () => {
+  const calls = mockLiveness({ alive: true, identityMatch: true });
+  assert.equal(lease.isLeaseLive({ pid: 4242, startTime: '', workerName: 'w', createdAt: 'x' }), false);
+  assert.equal(lease.isLeaseLive({ pid: 4242, workerName: 'w', createdAt: 'x' }), false);
+  // startTime が欠落したリースは verifyProcessIdentity も通さない
+  assert.equal(calls.verify.length, 0, 'startTime が欠落なら同一性確認は不要（PIDに触れない）');
 });
 
 test('isLeaseLive: null/非オブジェクト/pid無しは false', () => {
@@ -630,5 +634,185 @@ test('シナリオ: staleロック保持者がいる場合、死亡していれ�
     assert.equal(fs.existsSync(store.lockPath('issue-5-coder-fix-auth')), false);
   } finally {
     cleanupStore(store);
+  }
+});
+
+// ── 常駐プロセス用 role lease（Issue #240） ───────────────────────────────────
+// workspace を canonicalWorkspace() で正規化して排他することで、表記差異（大文字小文字・
+// 末尾スラッシュ等）による重複起動のすり抜けを防ぐ。監査イベント記録は
+// GH_MAESTRO_RUNTIME_DIR（_env-setup.js がテスト用に隔離）へ書かれる。
+
+const storageLayout = require('../scripts/shared/storage-layout');
+
+test('roleLeaseKey: Windows パス無効文字をアンダースコアへ置換する', () => {
+  assert.equal(lease.roleLeaseKey('inbox-supervisor'), 'resident-role-inbox-supervisor');
+  assert.equal(lease.roleLeaseKey('msgpoll-orchestrator'), 'resident-role-msgpoll-orchestrator');
+  // Windows のファイル名に使えない文字が混入しても安全なキーになる
+  assert.equal(lease.roleLeaseKey('a/b:c*d?e"f<g>h|i'), 'resident-role-a_b_c_d_e_f_g_h_i');
+});
+
+test('acquireResidentLease: live lease が無ければ取得して自PIDでアクティブ化する', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  try {
+    mockLiveness({ alive: true });
+    const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor' });
+    try {
+      assert.equal(res.acquired, true);
+      const canonical = storageLayout.canonicalWorkspace(tmp);
+      const entry = JSON.parse(fs.readFileSync(
+        path.join(canonical, '.gh-maestro', 'leases', lease.roleLeaseKey('inbox-supervisor') + '.json'), 'utf8'));
+      // 起動元（launcher）ではなく、実際に稼働するプロセス自身のPID/startTime を記録する
+      assert.equal(entry.pid, process.pid);
+      assert.equal(entry.phase, 'active');
+      assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'inbox-supervisor' }), true);
+    } finally {
+      res.release();
+    }
+    assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'inbox-supervisor' }), false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('acquireResidentLease: live lease があれば lock-denied を監査記録して throw する', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  try {
+    mockLiveness({ alive: true });
+    const canonical = storageLayout.canonicalWorkspace(tmp);
+    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
+      pid: 424242, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
+    }), 'utf8');
+
+    assert.throws(
+      () => lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor' }),
+      /重複起動できません/
+    );
+
+    // lock-denied イベントが記録されている（黙って失敗させない）
+    const residentAudit = require('../scripts/shared/resident-audit');
+    const events = residentAudit.listUnprocessedResidentAuditEvents(canonical);
+    const denied = events.filter(e => e.event.type === 'lock-denied');
+    assert.equal(denied.length, 1);
+    assert.equal(denied[0].event.role, 'inbox-supervisor');
+    assert.equal(denied[0].event.detail.ownerPid, 424242);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('acquireResidentLease: workspace 表記の差異（末尾スラッシュ）でも同一の排他領域で拒否する（Issue #240）', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  try {
+    mockLiveness({ alive: true });
+    const canonical = storageLayout.canonicalWorkspace(tmp);
+    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
+      pid: 424242, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
+    }), 'utf8');
+
+    // 生パスと「末尾スラッシュ付き」の表記が異なっても、同じ canonical へ正規化され同一排他領域になる
+    assert.throws(
+      () => lease.acquireResidentLease({ workspace: tmp + path.sep, role: 'inbox-supervisor' }),
+      /重複起動できません/
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('acquireResidentLease: --force は既存所有者を停止させて同じ lease を再取得する', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  try {
+    mockLiveness({ alive: true });
+    // 既存所有者が kill されるまで alive、kill されたら false を返す
+    let ownerAlive = true;
+    const ownerPid = 424242;
+    lease._setIsProcessAlive((pid) => ownerAlive || pid !== ownerPid);
+    const kills = [];
+    lease._setKillProcessTree((pid) => { kills.push(pid); ownerAlive = false; });
+    lease._setSleep(() => {});
+
+    const canonical = storageLayout.canonicalWorkspace(tmp);
+    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
+      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
+    }), 'utf8');
+
+    const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor', handoff: true, deadlineMs: 1000 });
+    try {
+      assert.equal(res.acquired, true);
+      assert.deepEqual(kills, [ownerPid]);
+      // handoff-wait イベントが記録されている
+      const residentAudit = require('../scripts/shared/resident-audit');
+      const events = residentAudit.listUnprocessedResidentAuditEvents(canonical);
+      assert.equal(events.some(e => e.event.type === 'handoff-wait'), true);
+    } finally {
+      res.release();
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('acquireResidentLease: startTime 欠落の細工リースは --force の停止対象にしない（任意PID誤kill防止）', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  try {
+    const ownerPid = 424242;
+    mockLiveness({ alive: true });
+    const kills = [];
+    lease._setKillProcessTree((pid) => { kills.push(pid); });
+    lease._setSleep(() => {});
+
+    const canonical = storageLayout.canonicalWorkspace(tmp);
+    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    // 攻撃者が workspace に置ける細工リース: startTime 無し・PID のみ
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
+      pid: ownerPid, workerName: 'inbox-supervisor', phase: 'active',
+    }), 'utf8');
+
+    const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor', handoff: true, deadlineMs: 50 });
+    try {
+      // isLeaseLive が false のため停止対象にならず、stale として回収して取得できる
+      assert.equal(res.acquired, true);
+      assert.deepEqual(kills, [], `細工リースの PID が kill されてはならない: ${JSON.stringify(kills)}`);
+    } finally {
+      res.release();
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('acquireResidentLease: --force でも所有者が終了しなければ期限超過で acquired:false（本稼働へ進まない）', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  try {
+    mockLiveness({ alive: true });
+    const ownerPid = 424242;
+    lease._setKillProcessTree(() => {}); // 止めても ownerAlive は変わらない
+    lease._setSleep(() => {});
+
+    const canonical = storageLayout.canonicalWorkspace(tmp);
+    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
+      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
+    }), 'utf8');
+
+    const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor', handoff: true, deadlineMs: 50 });
+    assert.equal(res.acquired, false);
+    assert.equal(res.reason, 'handoff-timeout');
+    assert.equal(res.ownerPid, ownerPid);
+    // 期限超過の lock-denied も記録される
+    const residentAudit = require('../scripts/shared/resident-audit');
+    const events = residentAudit.listUnprocessedResidentAuditEvents(canonical);
+    const denied = events.filter(e => e.event.type === 'lock-denied' && e.event.detail.reason === 'handoff-timeout');
+    assert.equal(denied.length, 1);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });

@@ -522,6 +522,65 @@ test('orchestrator モード: workers.json が無い場合もエラーになら�
   });
 });
 
+test('orchestrator モード: 未処理の lock-denied/handoff-wait 監査イベントを出力して処理済み化する（Issue #240）', () => {
+  withTempDir(workspace => {
+    initOrchestratorState(workspace);
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
+
+    const residentAudit = require('../scripts/shared/resident-audit');
+    residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'inbox-supervisor', detail: { ownerPid: 111 } });
+    residentAudit.recordResidentAuditEvent({ workspace, type: 'handoff-wait', role: 'msgpoll-orchestrator', detail: { ownerPid: 222 } });
+
+    // 監査キューを消費できるのは role lease 保持モードのみ（--once は lease を取得せず、
+    // 共有キューを読み取ると他プロセスと重複出力しうる。Issue #240 レビュー指摘）。
+    const r = runMain(['orchestrator', '--workspace', workspace, '--wait', '30']);
+    assert.equal(r.code, 0);
+    r.scanOnce();
+
+    assert.ok(r.lines.includes('LOCK_DENIED:inbox-supervisor:111'), `lines: ${JSON.stringify(r.lines)}`);
+    assert.ok(r.lines.includes('HANDOFF_WAIT:msgpoll-orchestrator:222'), `lines: ${JSON.stringify(r.lines)}`);
+    // 処理済み化（削除）されている
+    assert.deepEqual(residentAudit.listUnprocessedResidentAuditEvents(workspace), []);
+  });
+});
+
+test('orchestrator モード: 監査イベントは ownerPid が無ければ role のみ出力する', () => {
+  withTempDir(workspace => {
+    initOrchestratorState(workspace);
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
+
+    const residentAudit = require('../scripts/shared/resident-audit');
+    residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'inbox-supervisor', detail: {} });
+
+    const r = runMain(['orchestrator', '--workspace', workspace, '--wait', '30']);
+    assert.equal(r.code, 0);
+    r.scanOnce();
+
+    assert.ok(r.lines.includes('LOCK_DENIED:inbox-supervisor'), `lines: ${JSON.stringify(r.lines)}`);
+  });
+});
+
+test('orchestrator モード: --wait の singleMessage 走査では監査行を出力しない', () => {
+  withTempDir(workspace => {
+    initOrchestratorState(workspace);
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
+
+    const residentAudit = require('../scripts/shared/resident-audit');
+    residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'inbox-supervisor', detail: { ownerPid: 111 } });
+
+    // --wait モードは監査行の出力を「新着検出」と誤判定しないよう出力しない
+    const r = runMain(['orchestrator', '--workspace', workspace, '--wait', '30']);
+    msgPoll._setSleep(async () => {});
+    r.scanOnce({ singleMessage: true });
+    assert.deepEqual(r.lines, [], `lines: ${JSON.stringify(r.lines)}`);
+    // イベントは残る（次回の !singleMessage 走査で処理される）
+    assert.equal(residentAudit.listUnprocessedResidentAuditEvents(workspace).length, 1);
+  });
+});
+
 test('orchestrator モード: 重複 issue は排除される', () => {
   withTempDir(workspace => {
     initOrchestratorState(workspace);
@@ -872,12 +931,16 @@ test('継続モード: 同じ self を監視中の生存プロセスがいれば
   }
 
   withTempDir(workspace => {
-    const pidsDir = path.join(workspace, '.gh-maestro', 'pids');
-    fs.mkdirSync(pidsDir, { recursive: true });
+    // 排他の正本は role lease（Issue #240）。registry エントリでなく
+    // <workspace>/.gh-maestro/leases/resident-role-msgpoll-orchestrator.json を用意する。
+    // pid はテストランナー自身ではなく ppid を指定する（--force 無しなので kill は走らないが、
+    // 念のためテスト環境のプロセスを対象にしない）。
+    const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
     const otherPid = process.ppid;
     const startTime = getProcessStartTime(otherPid);
-    fs.writeFileSync(path.join(pidsDir, `${otherPid}.json`), JSON.stringify({
-      pid: otherPid, script: 'msg-poll.js', workerName: null, workspace, startTime,
+    fs.writeFileSync(path.join(leasesDir, 'resident-role-msgpoll-orchestrator.json'), JSON.stringify({
+      pid: otherPid, startTime, workerName: 'msgpoll-orchestrator', phase: 'active',
     }));
 
     const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
@@ -889,27 +952,57 @@ test('継続モード: 同じ self を監視中の生存プロセスがいれば
   });
 });
 
-test('継続モード: --force を指定すると重複があっても起動を試みる（重複チェックをスキップする）', () => {
-  const { spawnSync } = require('child_process');
+test('継続モード: --force は重複レース判定を無効化せず、既存所有者を停止させて引き継ぐ', () => {
+  const { spawnSync, spawn } = require('child_process');
+  const { getProcessStartTime } = require('../scripts/process-lifecycle');
   withTempDir(workspace => {
-    const pidsDir = path.join(workspace, '.gh-maestro', 'pids');
-    fs.mkdirSync(pidsDir, { recursive: true });
-    const otherPid = process.ppid;
-    fs.writeFileSync(path.join(pidsDir, `${otherPid}.json`), JSON.stringify({
-      pid: otherPid, script: 'msg-poll.js', workerName: null, workspace,
-    }));
+    // 既存所有者として使い捨ての実子プロセスを立てる。--force の引き継ぎは
+    // killProcessTree で所有者を終了させるため、process.ppid 等のテスト実行環境の
+    // プロセスを owner に指定してはならない（テストランナーの親を kill してしまう）。
+    const owner = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
+      stdio: 'ignore',
+      windowsHide: true,
+      env: cleanSpawnEnv(),
+    });
+    let leakedOwner = true;
+    try {
+      const otherPid = owner.pid;
+      // 起動直後の子の startTime は WMI にまだ見えないことがあるため、取れるまで待つ
+      // （startTime が無いと isLeaseLive が同一性確認をスキップし、生きただけのPIDで
+      // 誤判定しうる）。取れない場合は startTime なしでも排他判定は成立するため許容。
+      let startTime = getProcessStartTime(otherPid);
+      for (let i = 0; !startTime && i < 20; i++) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        startTime = getProcessStartTime(otherPid);
+      }
+      const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
+      fs.mkdirSync(leasesDir, { recursive: true });
+      fs.writeFileSync(path.join(leasesDir, 'resident-role-msgpoll-orchestrator.json'), JSON.stringify({
+        pid: otherPid, startTime, workerName: 'msgpoll-orchestrator', phase: 'active',
+      }));
 
-    const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
-    const r = spawnSync(process.execPath, [script, 'orchestrator', '--workspace', workspace, '--force'],
-      { encoding: 'utf8', timeout: 10000, env: cleanSpawnEnv() });
+      const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
+      const r = spawnSync(process.execPath, [script, 'orchestrator', '--workspace', workspace, '--force'],
+        { encoding: 'utf8', timeout: 15000, env: cleanSpawnEnv() });
 
-    assert.doesNotMatch(r.stderr, /重複起動/);
+      assert.doesNotMatch(r.stderr, /重複起動/);
+      // 引き継ぎは lease を再取得して本稼働へ進む（本テストでは gh 解決に失敗して
+      // exit 1 になるが、重複起動の拒否ではない）。owner は停止されている。
+      if (owner.exitCode === null && owner.signalCode === null) {
+        leakedOwner = false;
+      }
+    } finally {
+      if (owner.exitCode === null && owner.signalCode === null) {
+        try { owner.kill(); } catch {}
+      }
+      assert.equal(leakedOwner, false, '--force の引き継ぎで既存所有者プロセスが停止されること');
+    }
   });
 });
 
 test('継続モード: --workspace がホームディレクトリと衝突する場合、生の例外ではなくワークスペース解決エラーで exit 1 する（Issue #214）', () => {
   // resolveWorkspace() が workspace の home 衝突を検知して null を返すため、
-  // acquireStartupLock/registerProcess 等の assertValidWorkspace throw が
+  // registerProcess/role lease 等の assertValidWorkspace throw が
   // 子プロセスの生スタックトレースとして漏れ出ることなく、通常のエラーメッセージ
   // + exit 1 に倒れることを実プロセス起動で確認する。
   const { spawnSync } = require('child_process');
@@ -941,12 +1034,12 @@ test('継続モード: 重複起動検出時のエラーに、判断不要でそ
   }
 
   withTempDir(workspace => {
-    const pidsDir = path.join(workspace, '.gh-maestro', 'pids');
-    fs.mkdirSync(pidsDir, { recursive: true });
+    const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
     const otherPid = process.ppid;
     const startTime = getProcessStartTime(otherPid);
-    fs.writeFileSync(path.join(pidsDir, `${otherPid}.json`), JSON.stringify({
-      pid: otherPid, script: 'msg-poll.js', workerName: null, workspace, startTime,
+    fs.writeFileSync(path.join(leasesDir, 'resident-role-msgpoll-orchestrator.json'), JSON.stringify({
+      pid: otherPid, startTime, workerName: 'msgpoll-orchestrator', phase: 'active',
     }));
 
     const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
@@ -1185,6 +1278,9 @@ test('runWaitMode: 複数件の新着があっても1回の呼び出しでは1�
     const found1 = await msgPoll.runWaitMode(r1);
     assert.equal(found1, true);
     assert.deepEqual(r1.lines, ['NEW_MESSAGE:10']);
+    // --wait モードは role lease を保持したまま main() が返るため、同一 workspace で
+    // 2回連続起動するには前回の lease を解放しておく（重複起動は正当に拒否される）。
+    r1.residentLease.release();
 
     const r2 = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '30']);
     const found2 = await msgPoll.runWaitMode(r2);

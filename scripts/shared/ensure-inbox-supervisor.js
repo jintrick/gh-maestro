@@ -34,10 +34,12 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('../child-process');
 const { findSessionRootPid, findRunningInstance } = require('../process-lifecycle');
+const { isResidentLeaseLive, INBOX_SUPERVISOR_ROLE } = require('./worker-lease');
 
 let _spawn = (cmd, args, opts) => spawn(cmd, args, opts);
 let _findSessionRootPid = findSessionRootPid;
 let _findRunningInstance = findRunningInstance;
+let _isResidentLeaseLive = isResidentLeaseLive;
 
 /**
  * inbox-supervisor.js が稼働していなければ、detachedプロセスとして自動起動を試みる。
@@ -54,8 +56,13 @@ function ensureInboxSupervisorRunning({ workspace, scriptsPath }) {
     if (_findRunningInstance(workspace, { script: 'inbox-supervisor.js', workerName: null })) {
       return; // 既に稼働中 → spawn・セッションPID解決とも不要
     }
+    // registry に無くても role lease が live なら二重起動を避けて spawn しない。
+    // lease が排他の正本（Issue #240）。workspace 表記の差異は role lease 側の正規化で吸収される。
+    if (_isResidentLeaseLive({ workspace, role: INBOX_SUPERVISOR_ROLE })) {
+      return;
+    }
   } catch {
-    // 判定失敗時はfail-openで従来通りspawnを試みる（多重起動はinbox-supervisor.js自身のロックが防ぐ）
+    // 判定失敗時はfail-openで従来通りspawnを試みる（多重起動はinbox-supervisor.js自身のlease取得が防ぐ）
   }
 
   let logFd;
@@ -99,4 +106,5 @@ module.exports = {
   _setSpawn: (fn) => { _spawn = fn; },
   _setFindSessionRootPid: (fn) => { _findSessionRootPid = fn; },
   _setFindRunningInstance: (fn) => { _findRunningInstance = fn; },
+  _setIsResidentLeaseLive: (fn) => { _isResidentLeaseLive = fn; },
 };

@@ -3,13 +3,18 @@
 //
 // 責務:
 //   ワーカー起動時の重複起動防止を、生存確認に基づくリース（lease）で実現する。
-//   リース保存先（lease store）を抽象化し、通常ワーカー用アダプタと将来の
-//   Review Manager `.running` 契約用アダプタの両方を持てる設計。
+//   リース保存先（lease store）を抽象化し、通常ワーカー用アダプタと常駐プロセス用の
+//   role lease の両方を持てる設計。
 //
 // Phase 2（本ファイル）:
 //   - 通常ワーカー用 lease store（.gh-maestro/leases/<key>.json）
 //   - リース獲得（live lease 拒否 / stale lease 回収 / 原子作成）
 //   - リース解放・アクティベート
+//
+// Phase 5（本ファイル、Issue #240）:
+//   - 常駐プロセス用 role lease（msg-poll.js / inbox-supervisor.js の多重起動を、
+//     workspace 表記の差異に依存せず workspace の正規化 + 固定role で排他する）
+//   - 拒否・引き継ぎ（handoff）時の監査イベント記録（resident-audit.js）
 //
 // Phase 4（将来、本PR対象外）:
 //   - Review Manager 用 lease store adapter（.running ファイルをラップ）
@@ -20,11 +25,16 @@
 const path = require('path');
 const fs = require('fs');
 const { isProcessAlive, verifyProcessIdentity, getProcessStartTime } = require('../process-lifecycle');
+const { canonicalWorkspace, assertValidWorkspace } = require('./storage-layout');
+const { killProcessTree } = require('../kill-tree');
+const { recordResidentAuditEvent } = require('./resident-audit');
 
 // テストで注入可能にする（実プロセスに触れない。test-process-spawn-safety ルール準拠）。
 let _isProcessAlive = isProcessAlive;
 let _verifyProcessIdentity = verifyProcessIdentity;
 let _getProcessStartTime = getProcessStartTime;
+let _killProcessTree = killProcessTree;
+let _sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 // ── Lease Store 抽象 ───────────────────────────────────────────────────────────
 //
@@ -119,8 +129,12 @@ function createNormalWorkerStore(workspace) {
 /**
  * リースエントリが指すプロセスが稼働中か判定する。
  *
- * PID の生存だけでは不十分で、startTime が記録されている場合は同一性も確認する
- * （PID再利用による誤判定を防ぐ。process-lifecycle-scripts.md ルール準拠）。
+ * startTime は必須で、PID の生存に加えて必ず verifyProcessIdentity による同一性を
+ * 確認する（PID再利用による誤判定・改ざんされたリースによる誤kill防止。
+ * process-lifecycle-scripts.md ルール準拠）。startTime が欠落・不正なリースは
+ * live とみなさない。この判定は --force の停止対象選定にもそのまま使われるため、
+ * startTime なしで live と判定すると書き込み可能な workspace に細工したリースを
+ * 置くだけで任意の生存 PID を強制終了できてしまう。
  *
  * @param {object|null} entry リースエントリ
  * @returns {boolean}
@@ -133,13 +147,13 @@ function isLeaseLive(entry) {
     : null;
   if (!pid) return false;
 
+  // startTime が欠落・不正なリースは live とみなさない（--force の停止対象にもしない）
+  if (typeof entry.startTime !== 'string' || !entry.startTime) return false;
+
   if (!_isProcessAlive(pid)) return false;
 
-  // startTime が記録されていれば同一性を確認（PID再利用対策）
-  if (typeof entry.startTime === 'string' && entry.startTime) {
-    const result = _verifyProcessIdentity(pid, { startTime: entry.startTime });
-    if (!result.match) return false;
-  }
+  const result = _verifyProcessIdentity(pid, { startTime: entry.startTime });
+  if (!result.match) return false;
 
   return true;
 }
@@ -381,6 +395,191 @@ function activateLease(store, key, { pid, startTime }) {
   });
 }
 
+// ── 常駐プロセス用 role lease（Issue #240） ────────────────────────────────
+//
+// msg-poll.js / inbox-supervisor.js などの常駐プロセスは、固定の role 名を
+// リースキーとして workspace ごとに排他する。通常ワーカー lease と異なり
+// 起動元（launcher）がいないため、lease の PID/startTime は実際に稼働する
+// プロセス自身（= このコードを実行するプロセス）が記録する。
+//
+// Issue #240 の根本症状「workspace 表記の差異（大文字小文字・末尾スラッシュ等）で
+// 重複プロセス検知がすり抜ける」への対策として、store 生成前に
+// storage-layout.js の canonicalWorkspace() で正規化する。createNormalWorkerStore は
+// 生の workspace 文字列でディレクトリを組むため、この層で必ず正規化してから渡す。
+
+/** inbox-supervisor.js の固定 role 名。 */
+const INBOX_SUPERVISOR_ROLE = 'inbox-supervisor';
+
+/** 引き継ぎ（--force）で所有者の終了を待つ上限時間（ms）。 */
+const HANDOFF_WAIT_MS = 10000;
+
+/** 引き継ぎ待機中の再取得ポーリング間隔（ms）。 */
+const HANDOFF_POLL_MS = 500;
+
+// リースキーに使えない文字（Windows のパス無効文字）をアンダースコアに置換する。
+const INVALID_PATH_CHAR_RE = /[/\\:*?"<>|\x00-\x1f]/g;
+
+/**
+ * 固定 role から role lease のリースキーを生成する。
+ *
+ * role は内部定数（inbox-supervisor, msgpoll-<self>）由来のため通常は安全だが、
+ * Windows パスに使えない文字を置換して、store のファイル名として常に安全にする。
+ *
+ * @param {string} role
+ * @returns {string}
+ */
+function roleLeaseKey(role) {
+  return `resident-role-${String(role).replace(INVALID_PATH_CHAR_RE, '_')}`;
+}
+
+/**
+ * workspace を正規化・検証して role lease 用の store を作る。
+ *
+ * 生の workspace 文字列で createNormalWorkerStore を呼ぶと、表記差異ごとに
+ * 別の store（= 別の排他領域）ができて重複がすり抜けるため（Issue #240）、
+ * canonicalWorkspace() で正規化したパスを必ず渡す。
+ *
+ * @param {string} workspace
+ * @returns {object} lease store
+ */
+function createResidentLeaseStore(workspace) {
+  const canonical = canonicalWorkspace(workspace);
+  assertValidWorkspace(canonical);
+  return createNormalWorkerStore(canonical);
+}
+
+/**
+ * 指定 role の lease が live（生存プロセスが保持）か確認する。
+ *
+ * ensure-inbox-supervisor.js などが registry とは独立に二重起動を事前検知するための
+ * 読み取り専用チェック。書き込みはしない。
+ *
+ * @param {object} opt
+ * @param {string} opt.workspace
+ * @param {string} opt.role
+ * @returns {boolean}
+ */
+function isResidentLeaseLive({ workspace, role }) {
+  const store = createResidentLeaseStore(workspace);
+  return isLeaseLive(store.read(roleLeaseKey(role)));
+}
+
+/**
+ * 監査イベントを記録する。記録失敗（不正種別・I/O失敗）は fail closed で例外を伝播する
+ * （recordResidentAuditEvent の契約。記録できないまま排他制御を素通りさせない）。
+ *
+ * @param {string} workspace
+ * @param {string} type
+ * @param {string} role
+ * @param {object} detail
+ */
+function recordAudit(workspace, type, role, detail) {
+  recordResidentAuditEvent({ workspace, type, role, detail });
+}
+
+/**
+ * 常駐プロセス用 role lease を取得する。
+ *
+ * 通常起動（handoff: false）: live lease があれば lock-denied を監査記録して throw する。
+ * --force（handoff: true）:    レース判定を無効化せず、既存所有者（lease 保持者 +
+ *   handoffStopTargets の戻り値）へ停止要求を送り、同じ lease を期限付きで再取得する。
+ *   待機開始時に handoff-wait を監査記録し、期限超過時は lock-denied を記録して
+ *   { acquired: false } を返す（本稼働へは進まない）。
+ *
+ * どの経路でも lease の PID/startTime はこのプロセス自身のものを記録する。
+ * 取得に成功した場合は即座に phase 'active' にする（常駐プロセスは起動直後に
+ * 本稼働するため、launcher の initializing ウィンドウを持たない）。
+ *
+ * @param {object} opt
+ * @param {string} opt.workspace
+ * @param {string} opt.role
+ * @param {boolean} [opt.handoff]   --force による引き継ぎを試みるか
+ * @param {() => Array<number>} [opt.handoffStopTargets]
+ *   引き継ぎ時に停止要求を送る追加PID（registry 由来の旧所有者等）を返す関数
+ * @param {number} [opt.deadlineMs] 引き継ぎ待機の上限時間（既定: HANDOFF_WAIT_MS）
+ * @returns {{ acquired: true, key: string, release: () => void, staleReclaimed: boolean }
+ *          | { acquired: false, reason: 'handoff-timeout', key: string, ownerPid: number|null }}
+ * @throws {Error} live lease が存在する（handoff なし）場合、または監査記録に失敗した場合
+ */
+function acquireResidentLease({
+  workspace,
+  role,
+  handoff = false,
+  handoffStopTargets = () => [],
+  deadlineMs = HANDOFF_WAIT_MS,
+}) {
+  const store = createResidentLeaseStore(workspace);
+  const key = roleLeaseKey(role);
+  const pid = process.pid;
+  const startTime = _getProcessStartTime(pid) || new Date().toISOString();
+
+  const existing = store.read(key);
+  const liveExisting = existing && isLeaseLive(existing);
+
+  // ── 通常起動: live lease があれば拒否 ──
+  if (!handoff && liveExisting) {
+    recordAudit(workspace, 'lock-denied', role, { ownerPid: existing.pid, reason: 'live-lease' });
+    throw new Error(
+      `role "${role}" は既に別プロセス（pid ${existing.pid}）で稼働中です。重複起動できません。` +
+      `既存プロセスが終了するまでお待ちください。`
+    );
+  }
+
+  // ── --force: 既存所有者へ停止要求 → 同じ lease を期限付きで再取得 ──
+  if (handoff && liveExisting) {
+    recordAudit(workspace, 'handoff-wait', role, { ownerPid: existing.pid });
+    const deadline = Date.now() + deadlineMs;
+    while (Date.now() < deadline) {
+      const liveOwner = store.read(key);
+      const targets = new Set();
+      if (liveOwner && isLeaseLive(liveOwner)) targets.add(liveOwner.pid);
+      // registry 由来の旧所有者（findRunningInstance 等）。判定不能・失敗時は
+      // 停止対象から外す（kill できないなら kill しない = 誤kill防止）。
+      let extra = [];
+      try { extra = handoffStopTargets() || []; } catch {}
+      for (const t of extra) {
+        if (Number.isFinite(t) && t > 0 && t !== pid) targets.add(t);
+      }
+      for (const t of targets) {
+        try { _killProcessTree(t); } catch {}
+      }
+      try {
+        const res = acquireLease(store, key, { pid, startTime, workerName: role });
+        activateLease(store, key, { pid, startTime });
+        return { acquired: true, key, release: () => releaseLease(store, key, { pid }), staleReclaimed: res.staleReclaimed };
+      } catch {}
+      _sleep(HANDOFF_POLL_MS);
+    }
+    // 期限超過: まだ live な所有者が残っていれば拒否
+    const last = store.read(key);
+    const lastLive = last && isLeaseLive(last);
+    recordAudit(workspace, 'lock-denied', role, {
+      ownerPid: lastLive ? last.pid : null,
+      reason: 'handoff-timeout',
+    });
+    return { acquired: false, reason: 'handoff-timeout', key, ownerPid: lastLive ? last.pid : null };
+  }
+
+  // ── 通常起動（live lease なし）または stale lease 回収 ──
+  const res = acquireLease(store, key, { pid, startTime, workerName: role });
+  activateLease(store, key, { pid, startTime });
+  return { acquired: true, key, release: () => releaseLease(store, key, { pid }), staleReclaimed: res.staleReclaimed };
+}
+
+/**
+ * 自プロセスが保持する role lease を解放する。
+ * 所有者が自分の場合のみ削除する（他プロセスの lease は触らない）。
+ *
+ * @param {object} opt
+ * @param {string} opt.workspace
+ * @param {string} opt.role
+ * @param {number} opt.pid
+ */
+function releaseResidentLease({ workspace, role, pid }) {
+  const store = createResidentLeaseStore(workspace);
+  releaseLease(store, roleLeaseKey(role), { pid });
+}
+
 module.exports = {
   createNormalWorkerStore,
   acquireLease,
@@ -389,8 +588,16 @@ module.exports = {
   releaseLease,
   activateLease,
   isLeaseLive,
+  // 常駐プロセス用 role lease（Issue #240）
+  INBOX_SUPERVISOR_ROLE,
+  roleLeaseKey,
+  isResidentLeaseLive,
+  acquireResidentLease,
+  releaseResidentLease,
   // テスト用注入（test-process-spawn-safety ルール準拠）
   _setIsProcessAlive: (fn) => { _isProcessAlive = fn; },
   _setVerifyProcessIdentity: (fn) => { _verifyProcessIdentity = fn; },
   _setGetProcessStartTime: (fn) => { _getProcessStartTime = fn; },
+  _setKillProcessTree: (fn) => { _killProcessTree = fn; },
+  _setSleep: (fn) => { _sleep = fn; },
 };

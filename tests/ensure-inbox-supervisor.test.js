@@ -9,6 +9,7 @@ const { EventEmitter } = require('events');
 
 const mod = require('../scripts/shared/ensure-inbox-supervisor');
 const { ensureInboxSupervisorRunning } = mod;
+const workerLease = require('../scripts/shared/worker-lease');
 
 function fakeChild() {
   const emitter = new EventEmitter();
@@ -25,6 +26,9 @@ beforeEach(() => {
   // （.claude/rules/test-process-spawn-safety.md 準拠。実プロセスを起動しない）。
   mod._setFindSessionRootPid(() => 12345);
   mod._setFindRunningInstance(() => null);
+  // 既定は実装（worker-lease.isResidentLeaseLive）。テスト用 temp workspace には
+  // lease が無いため false を返し、既存テストの挙動を変えない。
+  mod._setIsResidentLeaseLive(workerLease.isResidentLeaseLive);
 });
 
 test('ensureInboxSupervisorRunning: detached・windowsHide付きでinbox-supervisor.jsをspawnする', () => {
@@ -93,6 +97,31 @@ test('ensureInboxSupervisorRunning: 既にSupervisorが稼働中ならspawnも�
 
 test('ensureInboxSupervisorRunning: 稼働中判定が例外を投げてもfail-openでspawnを試みる', () => {
   mod._setFindRunningInstance(() => { throw new Error('registry read failed'); });
+  let spawnCalled = false;
+  mod._setSpawn(() => { spawnCalled = true; return fakeChild(); });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.equal(spawnCalled, true);
+});
+
+test('ensureInboxSupervisorRunning: registryに無くても role lease が live なら spawn しない（Issue #240）', () => {
+  mod._setFindRunningInstance(() => null); // registry にはエントリが無い
+  mod._setIsResidentLeaseLive(() => true); // しかし role lease は live（排他の正本）
+  let spawnCalled = false;
+  let resolveCalled = false;
+  mod._setSpawn(() => { spawnCalled = true; return fakeChild(); });
+  mod._setFindSessionRootPid(() => { resolveCalled = true; return 12345; });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.equal(spawnCalled, false);
+  assert.equal(resolveCalled, false);
+});
+
+test('ensureInboxSupervisorRunning: role lease 判定が例外を投げても fail-open で spawn を試みる', () => {
+  mod._setFindRunningInstance(() => null);
+  mod._setIsResidentLeaseLive(() => { throw new Error('lease read failed'); });
   let spawnCalled = false;
   mod._setSpawn(() => { spawnCalled = true; return fakeChild(); });
 
