@@ -2,7 +2,8 @@
 'use strict';
 // worker-exit-hook.js
 // 全ワーカーの onExit フック（spawn-worker.js / inbox-supervisor.js が起動コマンド末尾に仕込む）。
-// エージェントプロセスが終了した直後に、その終了コードを引数末尾に付けて呼ばれる。
+// エージェントプロセスが終了し、標準出力/標準エラーのログfdが閉じた後に、その終了コードを
+// 引数末尾に付けてheadless-shimから呼ばれる。
 //   1. ワーカーログから thinking_tokens 進捗イベント行（claude-ds系が大量出力する
 //      中身のない雑音）を取り除く（scripts/shared/strip-thinking-token-lines.js）
 //   2. execution-id 付き（architect 等）なら executions.json に終了を記録する
@@ -243,9 +244,8 @@ if (require.main === module) {
   const workerName = process.env.GH_MAESTRO_WORKER || null;
 
   // 1. ワーカーログの圧縮（thinking_tokens進捗イベント行の除去）。
-  //    エージェントプロセスは既に完全終了しており（このフック自体がログインシェルの
-  //    コマンド列で「エージェント起動 && このフック」の後段として実行される）、
-  //    ログへの追記は発生し得ない区間なので安全に置き換えられる。ベストエフォート:
+  //    headless-shimが子のclose後に独立プロセスとして起動しているため、ログへの追記は
+  //    発生し得ない区間で安全に置き換えられる。ベストエフォート:
   //    失敗しても他のステップ（返信確認・代理送信等）を止めない。
   if (workspace && workerName) {
     try {

@@ -27,6 +27,16 @@ const path = require('path');
  * @throws {Error} 親ディレクトリ作成・一時ファイル書込み・rename のいずれかが失敗した場合
  */
 function atomicWriteJson(filePath, data) {
+  return atomicWriteText(filePath, JSON.stringify(data, null, 2));
+}
+
+/**
+ * UTF-8テキストを原子的に書き出す。失敗時は staging を必ず掃除する。
+ * @param {string} filePath
+ * @param {string} content
+ * @returns {string}
+ */
+function atomicWriteText(filePath, content) {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
 
@@ -34,7 +44,7 @@ function atomicWriteJson(filePath, data) {
   const stagingPath = path.join(dir, `.staging-${path.basename(filePath)}.${process.pid}-${Date.now()}-${rand}`);
 
   try {
-    fs.writeFileSync(stagingPath, JSON.stringify(data, null, 2), 'utf8');
+    fs.writeFileSync(stagingPath, content, 'utf8');
     fs.renameSync(stagingPath, filePath);
   } catch (e) {
     // 失敗時は staging を掃除（ベストエフォート）して失敗を伝える
@@ -44,4 +54,4 @@ function atomicWriteJson(filePath, data) {
   return filePath;
 }
 
-module.exports = { atomicWriteJson };
+module.exports = { atomicWriteJson, atomicWriteText };

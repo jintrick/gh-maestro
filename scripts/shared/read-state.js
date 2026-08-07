@@ -21,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const { isProcessAlive, verifyProcessIdentity, getProcessStartTime } = require('../process-lifecycle');
+const { atomicWriteJson } = require('./atomic-write');
 
 const SCHEMA_VERSION = 2;
 
@@ -157,10 +158,7 @@ function readState(workspace, self) {
  */
 function writeState(workspace, self, state) {
   const sp = statePath(workspace, self);
-  fs.mkdirSync(path.dirname(sp), { recursive: true });
-  const tmp = `${sp}.${Math.random().toString(36).slice(2, 8)}`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
-  fs.renameSync(tmp, sp);
+  atomicWriteJson(sp, state);
 }
 
 /**

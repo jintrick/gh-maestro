@@ -657,12 +657,13 @@ function sweepRegistry(workspace, opts = {}) {
   const dirs = [pidsDir(workspace), legacyPidsDir(workspace)];
   const results = { killed: [], cleaned: [], errors: [] };
 
-  if (!dirs.some(d => fs.existsSync(d))) return results;
+  const hasRegistry = dirs.some(d => fs.existsSync(d));
 
   // entryPid -> { entry, filePaths: string[] }（新旧に跨るエントリを集約する）
   const byPid = new Map();
 
   for (const dir of dirs) {
+    if (!hasRegistry) break;
     if (!fs.existsSync(dir)) continue;
 
     let entries;
@@ -714,6 +715,9 @@ function sweepRegistry(workspace, opts = {}) {
     }
   };
 
+  const activeWorkerNames = new Set();
+  const activeReviewPrs = new Set();
+
   for (const { entry, filePaths } of byPid.values()) {
     const entryPid = entry.pid;
 
@@ -733,6 +737,11 @@ function sweepRegistry(workspace, opts = {}) {
     }
 
     // 同一性一致 → kill（stale プロセス）
+    // この sweep が処理を決めた時点では対象ログが開いている可能性があるため、
+    // housekeepingへは「今回確認できた生存ワーカー」として渡す。
+    if (entry.workerName && !opts.dryRun) {
+      activeWorkerNames.add(entry.workerName);
+    }
     if (!opts.dryRun) {
       const { killProcessTree } = require('./kill-tree');
       killProcessTree(entryPid);
@@ -743,6 +752,56 @@ function sweepRegistry(workspace, opts = {}) {
       workerName: entry.workerName,
       script: entry.script,
     });
+  }
+
+  // 既存のstale sweepをworkspace housekeepingの単一の権威にする。
+  // workerName指定の部分 sweepでは、他ワーカーを誤ってローテーションしない。
+  if (!opts.match) {
+    // PID registryにない通常headlessワーカーも、既存のworkers.json/leaseの
+    // 生存述語を再利用して保護対象へ加える。
+    try {
+      const { readWorkersRaw } = require('./shared/workers-registry');
+      const { isWorkerAlive } = require('./shared/worker-liveness');
+      const rawWorkers = readWorkersRaw(workspace);
+      if (rawWorkers) {
+        for (const [workerName, entry] of Object.entries(rawWorkers)) {
+          if (workerName !== 'orchestrator' && isWorkerAlive(entry)) activeWorkerNames.add(workerName);
+        }
+      }
+    } catch {}
+    try {
+      const { createNormalWorkerStore, isLeaseLive } = require('./shared/worker-lease');
+      const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
+      const store = createNormalWorkerStore(workspace);
+      for (const name of fs.readdirSync(leasesDir).filter(n => n.endsWith('.json'))) {
+        const workerName = name.slice(0, -5);
+        const entry = store.read(workerName);
+        if (isLeaseLive(entry)) activeWorkerNames.add(entry.workerName || workerName);
+      }
+    } catch {}
+    for (const { entry } of byPid.values()) {
+      if (!entry.workerName || results.killed.some(k => k.workerName === entry.workerName)) continue;
+      if (isProcessAlive(entry.pid) && verifyProcessIdentity(entry.pid, entry).match) {
+        activeWorkerNames.add(entry.workerName);
+      }
+    }
+    // 通常ワーカー以外のReview ManagerはPID registryに登録されず、専用の
+    // review-manager-<PR>.running leaseだけを持つ。既存のlease契約（PID生存）を
+    // 再利用して、対応する issue-*-review-manager-pr-<PR>.log を保護する。
+    try {
+      const entries = fs.readdirSync(path.join(workspace, '.gh-maestro'));
+      for (const name of entries) {
+        const match = /^review-manager-(\d+)\.running$/.exec(name);
+        if (!match) continue;
+        let pid;
+        try { pid = Number(fs.readFileSync(path.join(workspace, '.gh-maestro', name), 'utf8').trim()); } catch { continue; }
+        if (Number.isInteger(pid) && pid > 0 && isProcessAlive(pid)) activeReviewPrs.add(match[1]);
+      }
+    } catch {}
+    const { sweepWorkspaceFiles } = require('./shared/workspace-housekeeping');
+    const housekeeping = sweepWorkspaceFiles(workspace, { activeWorkerNames, activeReviewPrs, dryRun: opts.dryRun });
+    results.errors.push(...housekeeping.errors);
+    Object.defineProperty(results, 'housekeeping', { value: housekeeping, enumerable: false });
   }
 
   return results;

@@ -209,8 +209,9 @@ test('startReviewManager launches run-review-manager.js via launchAgentHeadless�
   assert.match(decoded, /GH_MAESTRO_WORKER='issue-55-review-manager-pr-7'/);
   assert.match(decoded, /GH_MAESTRO_WORKSPACE=/);
 
-  // onExitフックは通常ワーカーと同じ worker-exit-hook.js
-  assert.match(decoded, /worker-exit-hook\.js/);
+  // onExitフックは通常ワーカーと同じ worker-exit-hook.js（shimへ渡す）
+  const exitHook = JSON.parse(spawnCalls[0].args[3]);
+  assert.match(exitHook.args[0], /worker-exit-hook\.js/);
 });
 
 test('startReviewManager: ロックファイルにlaunchAgentHeadlessが返した実pidを書く', () => {
@@ -231,11 +232,12 @@ test('startReviewManager: onExitフックへexecutionIdを渡さない（executi
   mod.startReviewManager('9', 'o/r', workspace, '55');
 
   const decoded = decodedShellCommand(spawnCalls[0]);
-  assert.match(decoded, /worker-exit-hook\.js/);
+  const exitHook = JSON.parse(spawnCalls[0].args[3]);
+  assert.match(exitHook.args[0], /worker-exit-hook\.js/);
   // worker-exit-hook.js <workspace> <execution-id|""> ... の第2引数（execution-id）が
   // 空文字であることを確認する。空文字なら worker-exit-hook.js 側の
   // `if (workspace && executionId)` が偽になり、markProcessExit は一切呼ばれない。
-  assert.match(decoded, /worker-exit-hook\.js' '[^']*' ''/);
+  assert.equal(exitHook.args[2], '');
 });
 
 test('startReviewManager: ログパスはfactory仕様のlogPath（worker-logs配下、正規workerNameキーで通常ワーカーと共通）', () => {

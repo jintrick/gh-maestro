@@ -54,6 +54,7 @@ const {
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // msg-poll.js のスキャンロジックを再利用（マーカーパースのみ）
 const { parseMarker } = require('./msg-poll');
+const { atomicWriteJson } = require('./shared/atomic-write');
 const { readContract, clearContract } = require('./shared/response-contract');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
@@ -197,21 +198,16 @@ function readCursor(workspace, workerName) {
  */
 function writeCursor(workspace, workerName, state) {
   const cp = cursorPath(workspace, workerName);
-  const dir = path.dirname(cp);
-  fs.mkdirSync(dir, { recursive: true });
-
-  const tmp = cp + '.' + Math.random().toString(36).slice(2, 8);
   const seenIds = state.seenIds.slice(-MAX_SEEN_IDS);
   const deliveredIds = (state.deliveredIds || []).slice(-MAX_SEEN_IDS);
-  fs.writeFileSync(tmp, JSON.stringify({
+  atomicWriteJson(cp, {
     since: state.since,
     seenIds,
     deliveredIds,
     pendingDeliveries: state.pendingDeliveries || {},
     hangNotifiedPid: typeof state.hangNotifiedPid === 'number' ? state.hangNotifiedPid : null,
     hangNotifiedAt: typeof state.hangNotifiedAt === 'string' ? state.hangNotifiedAt : null,
-  }, null, 2), 'utf8');
-  fs.renameSync(tmp, cp);
+  });
 }
 
 // ── workers.json 読み込み ─────────────────────────────────────────────────

@@ -133,4 +133,19 @@ describe('compactWorkerLog', () => {
       assert.deepEqual(entries, ['worker.log']);
     });
   });
+
+  test('rename失敗時も圧縮tmpを残さず、次回sweepで再試行できる', () => {
+    withTempDir((dir) => {
+      const logPath = path.join(dir, 'worker.log');
+      fs.writeFileSync(logPath, `${THINKING_TOKENS_LINE}\n{"type":"assistant","message":"hi"}\n`);
+      const originalRename = fs.renameSync;
+      fs.renameSync = () => { throw new Error('simulated sharing violation'); };
+      try {
+        assert.throws(() => compactWorkerLog(logPath), /sharing violation/);
+      } finally {
+        fs.renameSync = originalRename;
+      }
+      assert.deepEqual(fs.readdirSync(dir), ['worker.log']);
+    });
+  });
 });

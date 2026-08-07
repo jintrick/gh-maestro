@@ -23,6 +23,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { atomicWriteJson } = require('./shared/atomic-write');
 const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
@@ -163,10 +164,7 @@ function readState(workspace, issue) {
 
 function writeState(workspace, issue, state) {
   const sp = statePath(workspace, issue);
-  fs.mkdirSync(path.dirname(sp), { recursive: true });
-  const tmp = sp + '.' + Math.random().toString(36).slice(2, 8);
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
-  fs.renameSync(tmp, sp);
+  atomicWriteJson(sp, state);
 }
 
 // ── ヘルパー ──────────────────────────────────────────────────────────────

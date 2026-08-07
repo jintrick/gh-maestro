@@ -69,8 +69,13 @@ function compactWorkerLog(logPath) {
 
   const output = kept.length > 0 ? kept.join('\n') + '\n' : '';
   const tmpPath = `${logPath}.compact-${process.pid}-${Date.now()}.tmp`;
-  fs.writeFileSync(tmpPath, output, 'utf8');
-  fs.renameSync(tmpPath, logPath);
+  try {
+    fs.writeFileSync(tmpPath, output, 'utf8');
+    fs.renameSync(tmpPath, logPath);
+  } catch (error) {
+    try { fs.unlinkSync(tmpPath); } catch {}
+    throw error;
+  }
 
   return { compacted: true, removedLines };
 }
