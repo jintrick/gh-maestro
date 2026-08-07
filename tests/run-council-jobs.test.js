@@ -359,6 +359,59 @@ test('extractJsonObject: JSONが無ければ null', () => {
   assert.equal(mod.extractJsonObject('}'), null);
 });
 
+// ── extractJsonObject（内容ベース選別）──────────────────────────────────────────
+
+test('extractJsonObject: 必須キーで選別し、無関係なJSONを除外する', () => {
+  const { mod } = loadModule();
+  const answer = JSON.stringify({ participant_id: 'p1', opinion: '採用', stance: 'AGREE' });
+  const noise = JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' });
+  const out = mod.extractJsonObject(`${noise}\n${answer}`, ['participant_id', 'opinion', 'stance']);
+  assert.equal(out.participant_id, 'p1');
+  assert.equal(out.opinion, '採用');
+  assert.equal(out.stance, 'AGREE');
+});
+
+test('extractJsonObject: stream-json の result エンベロープ内の回答を展開する', () => {
+  const { mod } = loadModule();
+  const answer = JSON.stringify({ participant_id: 'p1', opinion: '採用', stance: 'AGREE' });
+  const event = JSON.stringify({ type: 'result', subtype: 'success', result: answer, session_id: 's1' });
+  const out = mod.extractJsonObject(event, ['participant_id', 'opinion', 'stance']);
+  assert.equal(out.participant_id, 'p1');
+  assert.equal(out.stance, 'AGREE');
+});
+
+test('extractJsonObject: system/init と result イベントが混在しても回答を選ぶ', () => {
+  const { mod } = loadModule();
+  const answer = JSON.stringify({ participant_id: 'p1', opinion: '採用', stance: 'AGREE' });
+  const init = JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1', model: 'x' });
+  const result = JSON.stringify({ type: 'result', subtype: 'success', result: answer, session_id: 's1' });
+  const out = mod.extractJsonObject(`${init}\n${result}`, ['participant_id', 'opinion', 'stance']);
+  assert.equal(out.participant_id, 'p1');
+  assert.equal(out.opinion, '採用');
+});
+
+test('extractJsonObject: 必須キーを満たす候補が複数あれば曖昧として throw', () => {
+  const { mod } = loadModule();
+  const a = JSON.stringify({ participant_id: 'p1', opinion: 'x', stance: 'AGREE' });
+  const b = JSON.stringify({ participant_id: 'p2', opinion: 'y', stance: 'DISAGREE' });
+  assert.throws(() => mod.extractJsonObject(`${a}\n${b}`, ['participant_id', 'opinion', 'stance']), /ambiguous stdout/);
+});
+
+test('extractJsonObject: 必須キーを満たす候補が無ければ null', () => {
+  const { mod } = loadModule();
+  const noise = JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' });
+  assert.equal(mod.extractJsonObject(noise, ['participant_id', 'opinion', 'stance']), null);
+  // ネストした必須キーはトップレベル扱いしない（payload 内部のオブジェクトは候補にしない）
+  const nested = JSON.stringify({ type: 'init', payload: { participant_id: 'p1', opinion: 'x', stance: 'AGREE' } });
+  assert.equal(mod.extractJsonObject(nested, ['participant_id', 'opinion', 'stance']), null);
+});
+
+test('extractJsonObject: 必須キー省略時は最初のパース可能オブジェクトを返す（後方互換）', () => {
+  const { mod } = loadModule();
+  const out = mod.extractJsonObject('前置き ' + JSON.stringify({ participant_id: 'p1', opinion: 'x' }) + ' 後書き');
+  assert.equal(out.participant_id, 'p1');
+});
+
 /** 一時ワークスペースを作り、fn完了後に後始末する。 */
 async function withTempWorkspace(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-council-jobs-test-'));
@@ -413,6 +466,33 @@ test('launchParticipantJob: 成功パス — stdoutのJSONを検証して succes
   });
 });
 
+test('launchParticipantJob: stream-json の system/init + result イベントから回答を抽出する', async () => {
+  const children = [];
+  const { mod } = loadModule({
+    spawnImpl: () => { const c = fakeChild(); children.push(c); return c; },
+  });
+  await withTempWorkspace(async (ws) => {
+    const promise = mod.launchParticipantJob({
+      participant: { participant_id: 'p1', agent_id: 'claude-test' },
+      manifest: opinionManifest(),
+      agentConfig: fakeAgentConfig(),
+      worktreeDir: '/wt',
+      workspace: ws,
+    });
+    // claude --output-format stream-json 相当: 無関係な system/init イベントの後に
+    // result イベントの result フィールド（JSON文字列）へ回答が内包される。
+    const answer = JSON.stringify({ participant_id: 'p1', opinion: '採用すべき。', stance: 'AGREE' });
+    const init = JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' });
+    const resultEvent = JSON.stringify({ type: 'result', subtype: 'success', result: answer, session_id: 's1' });
+    children[0].stdout.emit('data', Buffer.from(`${init}\n${resultEvent}`));
+    children[0].emit('close', 0);
+    const result = await promise;
+    assert.equal(result.status, 'success');
+    assert.equal(result.output.opinion, '採用すべき。');
+    assert.equal(result.output.stance, 'AGREE');
+  });
+});
+
 test('launchParticipantJob: 非ゼロ exit は failed', async () => {
   const children = [];
   const { mod } = loadModule({ spawnImpl: () => { const c = fakeChild(); children.push(c); return c; } });
@@ -462,8 +542,9 @@ test('launchParticipantJob: スキーマ違反出力は exit 0 でも failed（�
       worktreeDir: '/wt',
       workspace: ws,
     });
-    // stance 欠落（opinionスキーマ違反）
-    children[0].stdout.emit('data', Buffer.from(JSON.stringify({ participant_id: 'p1', opinion: 'x' })));
+    // stance が enum 外（opinionスキーマ違反。必須キー participant_id/opinion/stance は
+    // 揃っているため内容ベース選別は通る → スキーマ検証で弾かれる）
+    children[0].stdout.emit('data', Buffer.from(JSON.stringify({ participant_id: 'p1', opinion: 'x', stance: 'MAYBE' })));
     children[0].emit('close', 0);
     const result = await promise;
     assert.equal(result.status, 'failed');

@@ -214,17 +214,35 @@ test('launchInvestigationJob: stdout にJSONが無ければ失敗（exit 0でも
   assert.match(r.error, /no valid JSON object/);
 });
 
-test('launchInvestigationJob: スキーマ違反（sources欠落）は失敗', async () => {
+test('launchInvestigationJob: スキーマ違反（sources型不正）は失敗', async () => {
   const child = fakeChild();
   const { mod } = loadModule({ spawnImpl: () => child });
   const pending = mod.launchInvestigationJob({
     title: 'T', agenda: 'A', agentConfig: fakeAgentConfig(), worktreeDir: '/tmp/wt', workspace: '/tmp/ws',
   });
-  child.stdout.emit('data', Buffer.from('{ "findings": "F" }'));
+  // 必須キー findings/sources は揃っているため内容ベース選別は通る → スキーマ検証で弾かれる
+  child.stdout.emit('data', Buffer.from('{ "findings": "F", "sources": "wrong-type" }'));
   child.emit('close', 0);
   const r = await pending;
   assert.equal(r.ok, false);
   assert.match(r.error, /investigation schema validation/);
+});
+
+test('launchInvestigationJob: stream-json の result エンベロープ内の調査結果を回収する', async () => {
+  const child = fakeChild();
+  const { mod } = loadModule({ spawnImpl: () => child });
+  const pending = mod.launchInvestigationJob({
+    title: 'T', agenda: 'A', agentConfig: fakeAgentConfig(), worktreeDir: '/tmp/wt', workspace: '/tmp/ws',
+  });
+  const answer = JSON.stringify({ findings: '調査結果', sources: ['a.ts'] });
+  const init = JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' });
+  const result = JSON.stringify({ type: 'result', subtype: 'success', result: answer, session_id: 's1' });
+  child.stdout.emit('data', Buffer.from(`${init}\n${result}`));
+  child.emit('close', 0);
+  const r = await pending;
+  assert.equal(r.ok, true);
+  assert.equal(r.findings, '調査結果');
+  assert.deepEqual(r.sources, ['a.ts']);
 });
 
 test('launchInvestigationJob: 非対話化トークン欠落は spawn せず失敗（fail-closed）', async () => {

@@ -255,23 +255,39 @@ function validateParticipantOutput(phase, output, manifest, participantId) {
 
 // ── stdout からの JSON 抽出 ────────────────────────────────────────────────────
 
+// フェーズ出力の選別に使う必須キー。council-schemas.json の required と一致させる。
+// stdout 内の複数のパース可能JSONオブジェクトから、そのフェーズの回答を「内容」で
+// 特定するために使う（位置では特定できない：claude --output-format stream-json 等、
+// プロンプト由来でない無関係なJSONイベントが先頭に来ることがある）。
+const PHASE_REQUIRED_KEYS = {
+  opinion: ['participant_id', 'opinion', 'stance'],
+  vote: ['participant_id', 'choice', 'rationale'],
+  investigation: ['findings', 'sources'],
+};
+
 /**
- * stdout からJSONオブジェクトを抽出する。
- * 各 '{' 位置から文字列リテラルを考慮して対応する '}' までを切り出し、最初に
- * JSON.parse が成功した候補を返す。前後の説明文・Markdown・雑多な波括弧を許容する
- * （run-review-jobs.js の「stdout.match → JSON.parse」パターンの堅牢版）。
+ * 文字列中の「トップレベルに現れる」パース可能なJSONオブジェクトをすべて回収する。
+ * 各 '{' 位置から文字列リテラルを考慮して対応する '}' までを切り出し、JSON.parse に
+ * 成功したものを候補として返す。前後の説明文・Markdown・雑多な波括弧・NDJSONの
+ * 複数イベントを許容する（run-review-jobs.js の「stdout.match → JSON.parse」パターンの
+ * 堅牢版）。
  *
- * @param {string} stdout
- * @returns {object|null}
+ * パースに成功した区間はスキップする（ネストしたJSONの内部を独立候補として再抽出
+ * しない）。パースに失敗した区間は1文字ずつ進めて後続の候補を探す。
+ *
+ * @param {string} text
+ * @returns {object[]}
  */
-function extractJsonObject(stdout) {
-  const text = String(stdout);
-  for (let start = 0; start < text.length; start++) {
-    if (text[start] !== '{') continue;
+function collectJsonObjects(text) {
+  const candidates = [];
+  let scan = 0;
+  while (scan < text.length) {
+    if (text[scan] !== '{') { scan += 1; continue; }
     let depth = 0;
     let inString = false;
     let escaped = false;
-    for (let i = start; i < text.length; i++) {
+    let matchedEnd = -1;
+    for (let i = scan; i < text.length; i++) {
       const ch = text[i];
       if (inString) {
         if (escaped) { escaped = false; continue; }
@@ -283,13 +299,70 @@ function extractJsonObject(stdout) {
       if (ch === '{') { depth += 1; continue; }
       if (ch === '}') {
         depth -= 1;
-        if (depth === 0) {
-          try { return JSON.parse(text.slice(start, i + 1)); } catch { break; }
-        }
+        if (depth === 0) { matchedEnd = i; break; }
+      }
+    }
+    if (matchedEnd === -1) break; // 閉じ括弧が見つからない → 以後に完全なJSONは無い
+    const slice = text.slice(scan, matchedEnd + 1);
+    try {
+      candidates.push(JSON.parse(slice));
+      scan = matchedEnd + 1;
+    } catch {
+      scan += 1; // パース不能 → 1文字進めて再試行
+    }
+  }
+  return candidates;
+}
+
+/**
+ * stdout から、そのフェーズの回答JSONオブジェクトを「内容ベース」で抽出する。
+ *
+ * トップレベルのパース可能JSONオブジェクトを複数候補として回収し、そのうち
+ * requiredKeys（フェーズの回答スキーマの必須フィールド）をトップレベルに持つものを
+ * 選別する。無関係なイベント（stream-json の system/init 等）は必須キーを持たないため
+ * 自然に除外される。これは位置（先頭/末尾）で選ぶ方式の欠陥を塞ぐ: 先頭を選ぶと
+ * system/init を誤採用し、末尾を選ぶと回答以外のオブジェクトが後続した場合に誤採用する。
+ *
+ * stream-json（claude --output-format stream-json --verbose 等）では、回答JSONは
+ * トップレベルのイベントとしては現れず、result イベントの result フィールド
+ * （JSON文字列）に内包される。候補が文字列の result プロパティを持つ場合は、その中身を
+ * 再スキャンして得たJSONオブジェクトを追加の候補として扱う（エンベロープの展開）。
+ *
+ * @param {string} stdout
+ * @param {string[]} [requiredKeys] 内容選別に使う必須キー（例: opinion フェーズは
+ *   ['participant_id','opinion','stance']）。省略時は最初のパース可能オブジェクトを
+ *   返す（旧仕様。後方互換）。
+ * @returns {object|null} 単一の該当オブジェクト。0件なら null。
+ * @throws {Error} 必須キーを満たすオブジェクトが複数見つかった場合（曖昧。どれを
+ *   採用すべきか確定できないため、呼び出し側は fail-closed にする）。
+ */
+function extractJsonObject(stdout, requiredKeys) {
+  const text = String(stdout);
+  const candidates = collectJsonObjects(text);
+
+  if (!requiredKeys || requiredKeys.length === 0) {
+    return candidates.length > 0 ? candidates[0] : null;
+  }
+
+  const hasRequiredKeys = (obj) =>
+    !!obj && typeof obj === 'object' && !Array.isArray(obj)
+      && requiredKeys.every((k) => Object.prototype.hasOwnProperty.call(obj, k));
+
+  const expanded = [];
+  for (const obj of candidates) {
+    expanded.push(obj);
+    if (obj && typeof obj === 'object' && !Array.isArray(obj) && typeof obj.result === 'string') {
+      for (const inner of collectJsonObjects(obj.result)) {
+        if (inner && typeof inner === 'object' && !Array.isArray(inner)) expanded.push(inner);
       }
     }
   }
-  return null;
+
+  const matches = expanded.filter(hasRequiredKeys);
+  if (matches.length > 1) {
+    throw new Error(`ambiguous stdout: ${matches.length} JSON objects match required keys [${requiredKeys.join(', ')}]. preview: ${text.slice(0, 500)}`);
+  }
+  return matches.length === 1 ? matches[0] : null;
 }
 
 // ── 参加者ジョブ起動 ───────────────────────────────────────────────────────────
@@ -409,7 +482,23 @@ function launchParticipantJob({ participant, manifest, agentConfig, worktreeDir,
         return;
       }
 
-      const output = extractJsonObject(stdout);
+      const requiredKeys = manifest.phase === 'vote'
+        ? PHASE_REQUIRED_KEYS.vote
+        : PHASE_REQUIRED_KEYS.opinion;
+
+      let output;
+      try {
+        output = extractJsonObject(stdout, requiredKeys);
+      } catch (e) {
+        // 回答候補が複数見つかった（曖昧）。どれを採用するか確定できないため fail-closed。
+        resolve({
+          participant_id: participantId,
+          status: 'failed',
+          attempt,
+          error: e.message,
+        });
+        return;
+      }
       if (output === null) {
         resolve({
           participant_id: participantId,
@@ -551,6 +640,7 @@ module.exports = {
   fencedData,
   validateParticipantOutput,
   extractJsonObject,
+  PHASE_REQUIRED_KEYS,
   launchParticipantJob,
   runPhaseJobs,
   DEFAULT_JOB_TIMEOUT_MS,

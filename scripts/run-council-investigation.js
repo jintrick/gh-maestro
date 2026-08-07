@@ -32,7 +32,7 @@ const {
   resolveWorkspaceHead,
   ensureCouncilWorktree,
 } = require('./shared/council-worktree');
-const { extractJsonObject, fencedData, DEFAULT_JOB_TIMEOUT_MS } = require('./run-council-jobs');
+const { extractJsonObject, PHASE_REQUIRED_KEYS, fencedData, DEFAULT_JOB_TIMEOUT_MS } = require('./run-council-jobs');
 const { killProcessTree } = require('./kill-tree');
 const councilSchemas = require('./council-schemas.json');
 
@@ -204,7 +204,14 @@ function launchInvestigationJob({ title, agenda, question, agentConfig, worktree
         return;
       }
 
-      const output = extractJsonObject(stdout);
+      let output;
+      try {
+        output = extractJsonObject(stdout, PHASE_REQUIRED_KEYS.investigation);
+      } catch (e) {
+        // 回答候補が複数見つかった（曖昧）。どれを採用するか確定できないため fail-closed。
+        resolve({ ok: false, error: e.message });
+        return;
+      }
       if (output === null) {
         resolve({ ok: false, error: `no valid JSON object found in stdout. preview: ${stdout.slice(0, 500)}` });
         return;
