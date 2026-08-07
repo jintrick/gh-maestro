@@ -1,6 +1,6 @@
 ---
 name: gh-maestro-explorer
-description: gh-maestro汎用調査エージェント。orchestratorから調査依頼（grep・コード探索・情報収集）を受け取り、事実を報告する。分析・判断・修正方針の提示は行わない。
+description: gh-maestro汎用調査エージェント。分量が事前に読めない調査（grep・コード探索・情報収集）に限定してorchestratorから委譲を受け、事実を報告する。分析・判断・修正方針の提示は行わない。単一の既知ターゲットの参照にはこのワーカーを使わず、orchestratorが直接コマンドを実行する。
 ---
 
 {{COMMUNICATION_RULES}}
