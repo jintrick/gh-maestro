@@ -820,6 +820,33 @@ test('sweepRegistry: 生存していないPIDのエントリは cleaned', () => 
   assert.ok(!fs.existsSync(path.join(pidsDir, '99998.json')));
 });
 
+test('sweepRegistry: stale registry掃除とhousekeepingを一連で実行する', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  const logDir = path.join(workspace, '.gh-maestro', 'worker-logs');
+  fs.mkdirSync(pidsDir, { recursive: true });
+  fs.mkdirSync(logDir, { recursive: true });
+  const staleName = 'issue-237-stale';
+  fs.writeFileSync(path.join(pidsDir, 'stale.json'), JSON.stringify({
+    pid: -1, script: 'worker.js', workerName: staleName,
+  }));
+  const noise = '{"type":"system","subtype":"thinking_tokens"}\n';
+  fs.writeFileSync(path.join(logDir, `${staleName}.log`), noise);
+  const old = new Date(Date.now() - 120000);
+  fs.utimesSync(path.join(logDir, `${staleName}.log`), old, old);
+
+  try {
+    const results = plc.sweepRegistry(workspace, { dryRun: false });
+    assert.ok(results.housekeeping, 'housekeeping must be owned by the lifecycle sweep');
+    assert.ok(results.housekeeping.compacted.some(x => x.logPath.endsWith(`${staleName}.log`)));
+    assert.equal(fs.readFileSync(path.join(logDir, `${staleName}.log`), 'utf8'), '');
+  } finally {
+    for (const p of [path.join(pidsDir, 'stale.json'), path.join(pidsDir, 'active.json')]) {
+      try { fs.unlinkSync(p); } catch {}
+    }
+  }
+});
+
 test('sweepRegistry: dryRun では実際の削除を行わない', () => {
   const plc = loadModule();
   const pidsDir = plc.pidsDir(workspace);

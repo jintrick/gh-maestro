@@ -657,12 +657,13 @@ function sweepRegistry(workspace, opts = {}) {
   const dirs = [pidsDir(workspace), legacyPidsDir(workspace)];
   const results = { killed: [], cleaned: [], errors: [] };
 
-  if (!dirs.some(d => fs.existsSync(d))) return results;
+  const hasRegistry = dirs.some(d => fs.existsSync(d));
 
   // entryPid -> { entry, filePaths: string[] }（新旧に跨るエントリを集約する）
   const byPid = new Map();
 
   for (const dir of dirs) {
+    if (!hasRegistry) break;
     if (!fs.existsSync(dir)) continue;
 
     let entries;
@@ -714,6 +715,8 @@ function sweepRegistry(workspace, opts = {}) {
     }
   };
 
+  const activeWorkerNames = new Set();
+
   for (const { entry, filePaths } of byPid.values()) {
     const entryPid = entry.pid;
 
@@ -733,6 +736,11 @@ function sweepRegistry(workspace, opts = {}) {
     }
 
     // 同一性一致 → kill（stale プロセス）
+    // この sweep が処理を決めた時点では対象ログが開いている可能性があるため、
+    // housekeepingへは「今回確認できた生存ワーカー」として渡す。
+    if (entry.workerName && !opts.dryRun) {
+      activeWorkerNames.add(entry.workerName);
+    }
     if (!opts.dryRun) {
       const { killProcessTree } = require('./kill-tree');
       killProcessTree(entryPid);
@@ -743,6 +751,21 @@ function sweepRegistry(workspace, opts = {}) {
       workerName: entry.workerName,
       script: entry.script,
     });
+  }
+
+  // 既存のstale sweepをworkspace housekeepingの単一の権威にする。
+  // workerName指定の部分 sweepでは、他ワーカーを誤ってローテーションしない。
+  if (!opts.match) {
+    for (const { entry } of byPid.values()) {
+      if (!entry.workerName || results.killed.some(k => k.workerName === entry.workerName)) continue;
+      if (isProcessAlive(entry.pid) && verifyProcessIdentity(entry.pid, entry).match) {
+        activeWorkerNames.add(entry.workerName);
+      }
+    }
+    const { sweepWorkspaceFiles } = require('./shared/workspace-housekeeping');
+    const housekeeping = sweepWorkspaceFiles(workspace, { activeWorkerNames, dryRun: opts.dryRun });
+    results.errors.push(...housekeeping.errors);
+    Object.defineProperty(results, 'housekeeping', { value: housekeeping, enumerable: false });
   }
 
   return results;

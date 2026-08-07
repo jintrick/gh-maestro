@@ -142,7 +142,7 @@ test('launchAgentHeadless: env をプロセス環境にマージして渡す', (
   assert.equal(env.PATH ?? env.Path, process.env.PATH ?? process.env.Path);
 });
 
-test('launchAgentHeadless: onExit フックはシェルコマンド側に埋め込まれる（detachedでは親が終了を待てないため）', () => {
+test('launchAgentHeadless: onExit フックはshimへ渡し、ログfd閉鎖後に実行できる形にする', () => {
   headlessLaunch._setSpawn(fakeSpawn());
 
   launchAgentHeadless({
@@ -153,10 +153,10 @@ test('launchAgentHeadless: onExit フックはシェルコマンド側に埋め�
   });
 
   const shellArgs = JSON.parse(spawnCalls[0].args[1]);
-  const serialized = process.platform === 'win32'
-    ? Buffer.from(shellArgs[3], 'base64').toString('utf16le')
-    : shellArgs.join(' ');
-  assert.match(serialized, /worker-exit-hook\.js/);
+  const hook = JSON.parse(spawnCalls[0].args[3]);
+  assert.doesNotMatch(shellArgs.join(' '), /worker-exit-hook\.js/);
+  assert.equal(hook.command, 'node');
+  assert.deepEqual(hook.args, ['/ws/worker-exit-hook.js', '/ws', '']);
 });
 
 // ── launchAgentHeadless: ログファイル ────────────────────────────────────────
@@ -331,7 +331,7 @@ test('runShim: 子の終了コードをそのまま引き継ぐ（シムの生�
   const logPath = path.join(tmpDir, 'w.log');
   let exitHandler;
   const spawnFn = () => ({
-    on(event, fn) { if (event === 'exit') exitHandler = fn; return this; },
+    on(event, fn) { if (event === 'close') exitHandler = fn; return this; },
   });
   const exits = [];
 
@@ -341,10 +341,34 @@ test('runShim: 子の終了コードをそのまま引き継ぐ（シムの生�
   assert.deepEqual(exits, [3]);
 });
 
+test('runShim: 子のログfdが閉じた後に終了フックを実行する', () => {
+  const logPath = path.join(tmpDir, 'w.log');
+  let exitHandler;
+  const hookCalls = [];
+  const spawnFn = () => ({
+    on(event, fn) { if (event === 'close') exitHandler = fn; return this; },
+  });
+  const spawnSyncFn = (cmd, args, options) => {
+    hookCalls.push({ cmd, args, options });
+    return { status: 0 };
+  };
+
+  runShim({ shellArgs: ['bash', '-lc', 'x'], logPath,
+    exitHook: { command: 'node', args: ['/hook.js', '/ws'] },
+    spawnFn, spawnSyncFn, onExit: () => {} });
+  exitHandler(7, null);
+
+  assert.deepEqual(hookCalls, [{
+    cmd: 'node',
+    args: ['/hook.js', '/ws', '7'],
+    options: { stdio: 'ignore', windowsHide: true },
+  }]);
+});
+
 test('runShim: シグナル終了は非ゼロ扱いにする', () => {
   const logPath = path.join(tmpDir, 'w.log');
   let exitHandler;
-  const spawnFn = () => ({ on(event, fn) { if (event === 'exit') exitHandler = fn; return this; } });
+  const spawnFn = () => ({ on(event, fn) { if (event === 'close') exitHandler = fn; return this; } });
   const exits = [];
 
   runShim({ shellArgs: ['bash', '-lc', 'x'], logPath, spawnFn, onExit: (c) => exits.push(c) });

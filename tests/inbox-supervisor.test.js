@@ -576,9 +576,10 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
       });
 
       const cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
-      assert.ok(cmd.includes('worker-exit-hook.js'), '終了フックが仕込まれている');
+      const exitHook = JSON.parse(lastSpawnCalls[0].args[3]);
+      assert.match(exitHook.args[0], /worker-exit-hook\.js/, '終了フックがshimへ渡されている');
       // 前回分のバイト数がオフセットとして渡る（前回の出力を今回の応答として誤送信しないため）
-      assert.ok(cmd.includes(String(priorSize)), `offset ${priorSize} が渡る: ${cmd}`);
+      assert.ok(exitHook.args.includes(String(priorSize)), `offset ${priorSize} が渡る: ${JSON.stringify(exitHook.args)}`);
     });
   });
 

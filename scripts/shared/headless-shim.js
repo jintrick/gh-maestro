@@ -19,15 +19,16 @@
 //   node headless-shim.js <shell-args-json> <log-path>
 
 const fs = require('fs');
-const { spawn } = require('../child-process');
+const { spawn, spawnSync } = require('../child-process');
 
 const USAGE = `headless-shim.js — headlessワーカーの中継プロセス（gh-maestro内部用）
 
-Usage: node headless-shim.js <shell-args-json> <log-path>
+Usage: node headless-shim.js <shell-args-json> <log-path> [<exit-hook-json>]
 
 Arguments:
   <shell-args-json>  起動するargvのJSON配列（buildLoginShellExecArgs の戻り値）
   <log-path>         標準出力/標準エラーの追記先
+  <exit-hook-json>   子終了後に実行する終了フック（任意）
 
 このスクリプトは shared/headless-launch.js が内部的に起動する中継プロセスであり、
 人手やエージェントが直接呼ぶことは想定していない。
@@ -43,7 +44,8 @@ Arguments:
  * @param {(code: number) => void} params.onExit - 子の終了コードを受け取る
  * @returns {object} 起動した子プロセスハンドル
  */
-function runShim({ shellArgs, logPath, spawnFn = spawn, onExit }) {
+function runShim({ shellArgs, logPath, exitHook = null, spawnFn = spawn,
+  spawnSyncFn = spawnSync, onExit }) {
   // 追記で開く。resume も同じファイルへ書き足し、時系列が1本に繋がる。
   const fd = fs.openSync(logPath, 'a');
 
@@ -65,12 +67,36 @@ function runShim({ shellArgs, logPath, spawnFn = spawn, onExit }) {
   // fd は子へ複製済みなので親側は閉じてよい。
   try { fs.closeSync(fd); } catch { /* 子への複製は済んでいる */ }
 
+  let finished = false;
+  const finish = (code) => {
+    if (finished) return;
+    finished = true;
+    // 子とその標準出力fdが閉じた後にフックを起動する。Windowsで開いたログへの
+    // renameが失敗する原因を、リトライではなくプロセス境界で排除する。
+    if (exitHook) {
+      try {
+        const result = spawnSyncFn(exitHook.command,
+          [...(exitHook.args || []), String(code)],
+          { stdio: 'ignore', windowsHide: true });
+        if (result && (result.error || result.status !== 0)) {
+          const detail = result.error?.message || `exit code ${result.status}`;
+          try { fs.appendFileSync(logPath, `\n[gh-maestro] 終了フックの実行に失敗しました: ${detail}\n`); } catch {}
+        }
+      } catch (error) {
+        try { fs.appendFileSync(logPath, `\n[gh-maestro] 終了フックの起動に失敗しました: ${error.message}\n`); } catch {}
+      }
+    }
+    onExit(code);
+  };
+
   child.on('error', (e) => {
     try { fs.appendFileSync(logPath, `\n[gh-maestro] ワーカープロセスでエラーが発生しました: ${e.message}\n`); } catch { /* best-effort */ }
-    onExit(1);
+    finish(1);
   });
   // 子の終了コードをそのまま引き継ぐ（シムの生死 = ワーカーの生死）。
-  child.on('exit', (code, signal) => onExit(code == null ? (signal ? 1 : 0) : code));
+  // close は子のstdout/stderr fdが閉じた後に発火する。exitではなくcloseを境界に
+  // することで、Windowsの共有違反をプロセス順序で防ぐ。
+  child.on('close', (code, signal) => finish(code == null ? (signal ? 1 : 0) : code));
 
   return child;
 }
@@ -85,8 +111,8 @@ if (require.main === module) {
     process.exit(0);
   }
 
-  const [shellArgsJson, logPath] = args;
-  if (!shellArgsJson || !logPath || args.length !== 2) {
+  const [shellArgsJson, logPath, exitHookJson] = args;
+  if (!shellArgsJson || !logPath || args.length < 2 || args.length > 3) {
     console.error(USAGE);
     process.exit(1);
   }
@@ -103,8 +129,21 @@ if (require.main === module) {
     process.exit(1);
   }
 
+  let exitHook = null;
+  if (exitHookJson) {
+    try {
+      exitHook = JSON.parse(exitHookJson);
+      if (!exitHook || typeof exitHook.command !== 'string' || !Array.isArray(exitHook.args)) {
+        throw new Error('exit-hook-json の形式が不正です');
+      }
+    } catch (e) {
+      console.error(`headless-shim: exit-hook-json のパースに失敗しました: ${e.message}`);
+      process.exit(1);
+    }
+  }
+
   try {
-    runShim({ shellArgs, logPath, onExit: (code) => process.exit(code) });
+    runShim({ shellArgs, logPath, exitHook, onExit: (code) => process.exit(code) });
   } catch {
     // 起動失敗の詳細は runShim がログへ書いている
     process.exit(1);

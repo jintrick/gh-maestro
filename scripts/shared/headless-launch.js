@@ -89,7 +89,7 @@ function workerLogPath(workspace, workerName) {
  * @param {string} params.cwd          - 作業ディレクトリ（worktree）
  * @param {string} params.logPath      - 標準出力/標準エラーの書き込み先（追記。親ディレクトリは自動作成）
  * @param {object} [params.env={}]     - 起動プロセスに注入する環境変数
- * @param {object|null} [params.onExit=null] - 終了フック（agent-exec.js の buildLoginShellExecArgs へ渡す）
+ * @param {object|null} [params.onExit=null] - 子終了後にshimがログfd閉鎖後に実行する終了フック
  * @returns {{ pid: number, startTime: string|null, logPath: string }}
  * @throws {Error} ログを準備できない場合、または spawn に失敗した場合
  */
@@ -109,7 +109,8 @@ function launchAgentHeadless({ argv, cwd, logPath, env = {}, onExit = null }) {
 
   // ログインシェル経由のラップは維持する。$PROFILE の pwsh 関数として定義された
   // エージェント（claude-ds 等）は、これを通さないと解決できない（agent-exec.js 参照）。
-  const shellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, launchEnv);
+  // 終了フックはログfdを保持するシェル内で実行せず、shimが子終了後に起動する。
+  const shellArgs = buildLoginShellExecArgs(argv, process.platform, null, launchEnv);
 
   // ログの準備に失敗したらプロセスを起動しない。記録の残らないワーカーを走らせると、
   // 本Issueが解消しようとしている「後から追跡できない実行」がそのまま再発する。
@@ -124,7 +125,9 @@ function launchAgentHeadless({ argv, cwd, logPath, env = {}, onExit = null }) {
 
   let child;
   try {
-    child = _spawn(process.execPath, [SHIM_PATH, JSON.stringify(shellArgs), logPath], {
+    const shimArgs = [SHIM_PATH, JSON.stringify(shellArgs), logPath];
+    if (onExit) shimArgs.push(JSON.stringify(onExit));
+    child = _spawn(process.execPath, shimArgs, {
       cwd,
       env: { ...process.env, ...launchEnv },
       // 起動元の使い捨てCLIが終了してもワーカーを生かすために detached が要る。

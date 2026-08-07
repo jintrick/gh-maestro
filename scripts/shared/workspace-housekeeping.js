@@ -1,0 +1,116 @@
+'use strict';
+
+// lifecycle sweep 配下でだけ呼び出す、workspace内の実行時ゴミ掃除。
+// 独自のプロセス生存判定やスケジューラは持たず、呼び出し元が確定した
+// activeWorkerNames だけを保護する。
+
+const fs = require('fs');
+const path = require('path');
+const { compactWorkerLog } = require('./strip-thinking-token-lines');
+
+const MAX_WORKER_LOG_BYTES = 10 * 1024 * 1024;
+const MAX_LOG_GENERATIONS = 3;
+const TEMP_MIN_AGE_MS = 60 * 1000;
+
+function isRegularFile(filePath) {
+  try { return fs.lstatSync(filePath).isFile(); } catch { return false; }
+}
+
+function removeOldFiles(dir, predicate, now, results, dryRun) {
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return; }
+  for (const name of names) {
+    if (!predicate(name)) continue;
+    const filePath = path.join(dir, name);
+    if (!isRegularFile(filePath)) continue;
+    try {
+      if (now - fs.statSync(filePath).mtimeMs < TEMP_MIN_AGE_MS) continue;
+      if (!dryRun) fs.unlinkSync(filePath);
+      results.removed.push(filePath);
+    } catch (error) {
+      results.errors.push(`${filePath}: ${error.message}`);
+    }
+  }
+}
+
+function rotateLog(logPath, results, dryRun) {
+  if (dryRun) {
+    results.rotated.push(logPath);
+    return;
+  }
+  try {
+    for (let generation = MAX_LOG_GENERATIONS - 1; generation >= 1; generation--) {
+      const source = `${logPath}.${generation}`;
+      const target = `${logPath}.${generation + 1}`;
+      if (!fs.existsSync(source)) continue;
+      try { fs.unlinkSync(target); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      fs.renameSync(source, target);
+    }
+    const first = `${logPath}.1`;
+    try { fs.unlinkSync(first); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    fs.renameSync(logPath, first);
+    fs.writeFileSync(logPath, '', 'utf8');
+    results.rotated.push(logPath);
+  } catch (error) {
+    results.errors.push(`${logPath}: ${error.message}`);
+  }
+}
+
+function sweepWorkspaceFiles(workspace, { activeWorkerNames = new Set(), now = Date.now(), dryRun = false } = {}) {
+  const results = { removed: [], compacted: [], rotated: [], errors: [] };
+  const maestro = path.join(workspace, '.gh-maestro');
+  const workerLogDir = path.join(maestro, 'worker-logs');
+
+  removeOldFiles(workerLogDir,
+    (name) => name.includes('.compact-') && name.endsWith('.tmp') || name.startsWith('.staging-'), now, results, dryRun);
+  removeOldFiles(path.join(maestro, 'assistant-watch'),
+    (name) => !name.endsWith('.json'), now, results, dryRun);
+  removeOldFiles(path.join(maestro, 'inbox-supervisor', 'cursors'),
+    (name) => !name.endsWith('.json'), now, results, dryRun);
+  removeOldFiles(path.join(maestro, 'msg-state'),
+    (name) => !name.endsWith('.json'), now, results, dryRun);
+
+  let logs;
+  try { logs = fs.readdirSync(workerLogDir).filter(name => name.endsWith('.log')); } catch { logs = []; }
+  // 上限を超えた世代は、現在ログのローテーション有無に関係なく削除する。
+  let generations = [];
+  try {
+    generations = fs.readdirSync(workerLogDir).filter(name => /\.log\.\d+$/.test(name));
+  } catch {}
+  for (const name of generations) {
+    const generation = Number(name.slice(name.lastIndexOf('.') + 1));
+    if (generation <= MAX_LOG_GENERATIONS || !isRegularFile(path.join(workerLogDir, name))) continue;
+    const generationPath = path.join(workerLogDir, name);
+    try {
+      if (!dryRun) fs.unlinkSync(generationPath);
+      results.removed.push(generationPath);
+    } catch (error) {
+      results.errors.push(`${generationPath}: ${error.message}`);
+    }
+  }
+  for (const name of logs) {
+    const workerName = name.slice(0, -4);
+    if (activeWorkerNames.has(workerName)) continue;
+    const logPath = path.join(workerLogDir, name);
+    if (!isRegularFile(logPath)) continue;
+    if (dryRun) {
+      try { if (fs.statSync(logPath).size > MAX_WORKER_LOG_BYTES) results.rotated.push(logPath); } catch {}
+      continue;
+    }
+    try {
+      const compacted = compactWorkerLog(logPath);
+      if (compacted.compacted) results.compacted.push({ logPath, removedLines: compacted.removedLines });
+      if (fs.statSync(logPath).size > MAX_WORKER_LOG_BYTES) rotateLog(logPath, results, dryRun);
+    } catch (error) {
+      results.errors.push(`${logPath}: ${error.message}`);
+    }
+  }
+  return results;
+}
+
+module.exports = {
+  MAX_WORKER_LOG_BYTES,
+  MAX_LOG_GENERATIONS,
+  TEMP_MIN_AGE_MS,
+  sweepWorkspaceFiles,
+};
