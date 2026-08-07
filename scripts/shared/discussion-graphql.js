@@ -24,6 +24,19 @@
 
 const { graphqlExec, parseGraphqlJson, isGraphqlSuccess } = require('./graphql-client');
 
+// GraphQL クエリ文字列の一覧。テスト（tests/_graphql-query-validate.js）が全件の
+// 構造妥当性（使用変数 ⊂ 宣言変数）を検証する。クエリを変更・追加する際は必ず
+// ここに集約し、関数は QUERIES を参照する（graphql-client.js の _setGraphqlExec と
+// 同種のテスト支援 export。Issue #232 指摘 #3 の再発防止）。
+const QUERIES = {
+  repositoryHasDiscussionsEnabled: 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){hasDiscussionsEnabled}}',
+  repositoryDiscussionCategories: 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){discussionCategories(first:100){nodes{id name}}}}',
+  repositoryId: 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}',
+  createDiscussion: 'mutation($repositoryId:ID!,$categoryId:ID!,$title:String!,$body:String!){createDiscussion(input:{repositoryId:$repositoryId,categoryId:$categoryId,title:$title,body:$body}){discussion{id number url title}}}',
+  addDiscussionComment: 'mutation($id:ID!,$body:String!){addDiscussionComment(input:{discussionId:$id,body:$body}){comment{id url}}}',
+  repositoryDiscussion: 'query($owner:String!,$name:String!,$num:Int!){repository(owner:$owner,name:$name){discussion(number:$num){id number url title}}}',
+};
+
 /**
  * リポジトリを owner/name に分割する。形式不正時は空文字が入る。
  * @param {string} repo  `owner/name`
@@ -45,7 +58,7 @@ function splitRepo(repo) {
 function hasDiscussionsEnabled(repo) {
   const { owner, name } = splitRepo(repo);
   const result = graphqlExec([
-    '-f', 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){hasDiscussionsEnabled}}',
+    '-f', `query=${QUERIES.repositoryHasDiscussionsEnabled}`,
     '-f', `owner=${owner}`,
     '-f', `name=${name}`,
   ]);
@@ -65,7 +78,7 @@ function hasDiscussionsEnabled(repo) {
 function discussionCategories(repo) {
   const { owner, name } = splitRepo(repo);
   const result = graphqlExec([
-    '-f', 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){discussionCategories(first:100){nodes{id name}}}}',
+    '-f', `query=${QUERIES.repositoryDiscussionCategories}`,
     '-f', `owner=${owner}`,
     '-f', `name=${name}`,
   ]);
@@ -93,7 +106,7 @@ function discussionCategories(repo) {
 function createDiscussion(repo, title, body, categoryId, opts = {}) {
   const { owner, name } = splitRepo(repo);
   const repoIdResult = graphqlExec([
-    '-f', 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}',
+    '-f', `query=${QUERIES.repositoryId}`,
     '-f', `owner=${owner}`,
     '-f', `name=${name}`,
   ], opts);
@@ -103,7 +116,7 @@ function createDiscussion(repo, title, body, categoryId, opts = {}) {
   if (!repoId) return null;
 
   const createResult = graphqlExec([
-    '-f', 'query=mutation($repositoryId:ID!,$categoryId:ID!,$title:String!,$body:String!){createDiscussion(input:{repositoryId:$repositoryId,categoryId:$categoryId,title:$title,body:$body}){discussion{id number url title}}}',
+    '-f', `query=${QUERIES.createDiscussion}`,
     '-f', `repositoryId=${repoId}`,
     '-f', `categoryId=${categoryId}`,
     '-f', `title=${title}`,
@@ -130,7 +143,7 @@ function createDiscussion(repo, title, body, categoryId, opts = {}) {
  */
 function addDiscussionComment(discussionId, body, opts = {}) {
   const result = graphqlExec([
-    '-f', 'query=mutation($id:ID!,$body:String!){addDiscussionComment(input:{discussionId:$id,body:$body}){comment{id url}}}',
+    '-f', `query=${QUERIES.addDiscussionComment}`,
     '-f', `id=${discussionId}`,
     '-F', 'body=@-',
   ], { ...opts, input: body });
@@ -152,7 +165,7 @@ function addDiscussionComment(discussionId, body, opts = {}) {
 function discussion(repo, number, opts = {}) {
   const { owner, name } = splitRepo(repo);
   const result = graphqlExec([
-    '-f', 'query=query($owner:String!,$name:String!,$num:Int!){repository(owner:$owner,name:$name){discussion(number:$num){id number url title}}}',
+    '-f', `query=${QUERIES.repositoryDiscussion}`,
     '-f', `owner=${owner}`,
     '-f', `name=${name}`,
     '-F', `num=${number}`,
@@ -170,4 +183,5 @@ module.exports = {
   createDiscussion,
   addDiscussionComment,
   discussion,
+  QUERIES,
 };

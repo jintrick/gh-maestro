@@ -81,6 +81,31 @@ test('slugifyTitle: 非ASCIIのみのタイトルは council ベースでもハ�
   assert.notEqual(mod.slugifyTitle('採用可否について'), mod.slugifyTitle('料金改定について'));
 });
 
+test('slugifyTitle: NFKC で全角英字を ASCII へ正規化し、半角版と同一スラッグになる', () => {
+  const { mod } = loadModule();
+  // 全角英字「ＲＡＧ」は NFKC で「RAG」に正規化される
+  assert.match(mod.slugifyTitle('ＲＡＧ構成の採用可否'), /^rag-[0-9a-f]{8}$/);
+  // 同一内容の表現差は同一スラッグ（--resume の安定性が表現揺れに左右されない）
+  assert.equal(mod.slugifyTitle('ＲＡＧ構成の採用可否'), mod.slugifyTitle('RAG構成の採用可否'));
+});
+
+test('slugifyTitle: 純日本語・ひらがな・カタカナのタイトル群は互いに異なるスラッグ（ASCII畳み込み後もハッシュで区別）', () => {
+  const { mod } = loadModule();
+  const titles = ['採用可否について', 'ひらがなのみ', 'カタカナのみ'];
+  const slugs = titles.map(t => mod.slugifyTitle(t));
+  // いずれも ASCII ベースは 'council'（日本語が全て畳み込まれる）だが、ハッシュで一意化される
+  for (const s of slugs) assert.match(s, /^council-[0-9a-f]{8}$/);
+  assert.equal(new Set(slugs).size, slugs.length, `slugs collide: ${slugs.join(', ')}`);
+});
+
+test('slugifyTitle: 末尾1文字だけ異なる日本語タイトルは別スラッグ', () => {
+  const { mod } = loadModule();
+  // ASCII ベースは 'a' / 'b' に別れ、ハッシュでも区別される
+  assert.notEqual(mod.slugifyTitle('議題A'), mod.slugifyTitle('議題B'));
+  assert.match(mod.slugifyTitle('議題A'), /^a-[0-9a-f]{8}$/);
+  assert.match(mod.slugifyTitle('議題B'), /^b-[0-9a-f]{8}$/);
+});
+
 test('slugifyTitle: 長いタイトルは SESSION_RE（最大64文字）内に収まるよう切り詰める', () => {
   const { mod } = loadModule();
   const slug = mod.slugifyTitle('a'.repeat(200) + ' タイトル');
@@ -177,6 +202,17 @@ test('resolveSession: state ファイルが無ければ接尾辞を付けない'
   withTempWorkspace(ws => {
     fs.writeFileSync(path.join(ws, '.gh-maestro', 'council-other.json'), '{}', 'utf8');
     assert.equal(mod.resolveSession({ title: 'RAG構成の採用可否', workspace: ws }), mod.slugifyTitle('RAG構成の採用可否'));
+  });
+});
+
+test('resolveSession: 純日本語タイトルでも state 衝突時は -2 接尾辞が機能する', () => {
+  const { mod } = loadModule();
+  withTempWorkspace(ws => {
+    const slug = mod.slugifyTitle('採用可否について'); // council-<hash8>
+    fs.writeFileSync(path.join(ws, '.gh-maestro', `council-${slug}.json`), '{}', 'utf8');
+    const session = mod.resolveSession({ title: '採用可否について', workspace: ws });
+    assert.equal(session, `${slug}-2`);
+    assert.match(session, /^council-[0-9a-f]{8}-2$/);
   });
 });
 

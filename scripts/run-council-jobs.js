@@ -25,6 +25,7 @@ const { buildLoginShellExecArgs } = require('./agent-exec');
 const { resolveAgentConfig, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { _validateAgainstSchema } = require('./shared/json-schema');
+const { waitChildExit } = require('./shared/child-wait');
 const { killProcessTree } = require('./kill-tree');
 
 const councilSchemas = require('./council-schemas.json');
@@ -385,149 +386,141 @@ function extractJsonObject(stdout, requiredKeys) {
  * @param {{child: object|null}|null} [opts.childRef] - 全体タイムアウトで kill するための参照
  * @returns {Promise<object>}
  */
-function launchParticipantJob({ participant, manifest, agentConfig, worktreeDir, workspace, timeoutMs = DEFAULT_JOB_TIMEOUT_MS, attempt = 1, childRef = null }) {
+async function launchParticipantJob({ participant, manifest, agentConfig, worktreeDir, workspace, timeoutMs = DEFAULT_JOB_TIMEOUT_MS, attempt = 1, childRef = null }) {
   const participantId = participant.participant_id;
-  return new Promise((resolve) => {
-    // 非対話化トークン検証（フェイルクローズ、Issue #163 Review Manager指摘）。
-    // 実際に起動引数に使う execArgs ?? extraArgs を検証してから spawn する。
-    const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
-    if (!tokenCheck.valid) {
-      resolve({
-        participant_id: participantId,
-        status: 'failed',
-        attempt,
-        error: `agent "${agentConfig.id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (check ~/.gh-maestro/config.json agents["${agentConfig.id}"].execArgs / extraArgs)`,
-      });
-      return;
-    }
 
-    const promptText = buildPhasePrompt(participant, manifest);
-    const promptFile = path.join(os.tmpdir(), `council-${manifest.session}-${participantId}-${Date.now()}.md`);
-    try {
-      fs.writeFileSync(promptFile, promptText, 'utf8');
-    } catch (e) {
-      resolve({ participant_id: participantId, status: 'failed', attempt, error: `prompt file write failed: ${e.message}` });
-      return;
-    }
-
-    // `{workspace}` プレースホルダーはジョブcwd（議論用worktree）へ置換する
-    const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
-      .map(a => a.replace(/\{workspace\}/g, worktreeDir));
-
-    const agentArgs = buildAgentCommandArgs({
-      ...agentConfig,
-      extraArgs,
-      promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
-      promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
-    }, {
-      promptFile,
-      shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
-      systemPromptText: `あなたは gh-maestro council の参加者です（participant_id: ${participantId}）。${manifest.title}の議論に参加してください。`,
-    });
-
-    const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
-
-    const logFile = workerLogPath(workspace, `council-${manifest.session}-${participantId}`);
-    try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); } catch {}
-
-    let stderrFd;
-    try {
-      stderrFd = fs.openSync(logFile, 'a');
-    } catch (e) {
-      try { fs.unlinkSync(promptFile); } catch {}
-      resolve({ participant_id: participantId, status: 'failed', attempt, error: `log file open failed: ${e.message}` });
-      return;
-    }
-
-    let child;
-    try {
-      child = spawn(shellArgs[0], shellArgs.slice(1), {
-        cwd: worktreeDir,
-        env: process.env,
-        stdio: ['ignore', 'pipe', stderrFd],
-      });
-      if (childRef) childRef.child = child;
-    } catch (e) {
-      try { fs.closeSync(stderrFd); } catch {}
-      try { fs.unlinkSync(promptFile); } catch {}
-      resolve({ participant_id: participantId, status: 'failed', attempt, error: `spawn failed: ${e.message}` });
-      return;
-    }
-
-    const stdoutChunks = [];
-    child.stdout.on('data', (chunk) => { stdoutChunks.push(chunk); });
-
-    // タイムアウト時は子プロセスとその子孫（ログインシェル → エージェントCLI）を
-    // まとめて終了する。Windows で親シェルのみ kill すると子孫が孤児化するため
-    // killProcessTree（Windows: taskkill /T、Unix: プロセスグループ）を使う。
-    const timer = setTimeout(() => { try { killProcessTree(child.pid); } catch {} }, timeoutMs);
-
-    const cleanup = () => {
-      clearTimeout(timer);
-      try { fs.closeSync(stderrFd); } catch {}
-      try { fs.unlinkSync(promptFile); } catch {}
+  // 非対話化トークン検証（フェイルクローズ、Issue #163 Review Manager指摘）。
+  // 実際に起動引数に使う execArgs ?? extraArgs を検証してから spawn する。
+  const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
+  if (!tokenCheck.valid) {
+    return {
+      participant_id: participantId,
+      status: 'failed',
+      attempt,
+      error: `agent "${agentConfig.id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (check ~/.gh-maestro/config.json agents["${agentConfig.id}"].execArgs / extraArgs)`,
     };
+  }
 
-    child.on('close', (code) => {
-      cleanup();
-      const stdout = Buffer.concat(stdoutChunks).toString('utf8').trim();
+  const promptText = buildPhasePrompt(participant, manifest);
+  const promptFile = path.join(os.tmpdir(), `council-${manifest.session}-${participantId}-${Date.now()}.md`);
+  try {
+    fs.writeFileSync(promptFile, promptText, 'utf8');
+  } catch (e) {
+    return { participant_id: participantId, status: 'failed', attempt, error: `prompt file write failed: ${e.message}` };
+  }
 
-      if (code !== 0) {
-        resolve({
-          participant_id: participantId,
-          status: 'failed',
-          attempt,
-          error: `agent exited with code ${code}${stdout ? ': ' + stdout.slice(0, 500) : ''}`,
-        });
-        return;
-      }
+  // `{workspace}` プレースホルダーはジョブcwd（議論用worktree）へ置換する
+  const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
+    .map(a => a.replace(/\{workspace\}/g, worktreeDir));
 
-      const requiredKeys = manifest.phase === 'vote'
-        ? PHASE_REQUIRED_KEYS.vote
-        : PHASE_REQUIRED_KEYS.opinion;
-
-      let output;
-      try {
-        output = extractJsonObject(stdout, requiredKeys);
-      } catch (e) {
-        // 回答候補が複数見つかった（曖昧）。どれを採用するか確定できないため fail-closed。
-        resolve({
-          participant_id: participantId,
-          status: 'failed',
-          attempt,
-          error: e.message,
-        });
-        return;
-      }
-      if (output === null) {
-        resolve({
-          participant_id: participantId,
-          status: 'failed',
-          attempt,
-          error: `no valid JSON object found in stdout. preview: ${stdout.slice(0, 500)}`,
-        });
-        return;
-      }
-
-      const errors = validateParticipantOutput(manifest.phase, output, manifest, participantId);
-      if (errors.length > 0) {
-        resolve({
-          participant_id: participantId,
-          status: 'failed',
-          attempt,
-          error: `output validation: ${errors.join('; ')}`,
-        });
-        return;
-      }
-
-      resolve({ participant_id: participantId, status: 'success', attempt, output });
-    });
-
-    child.on('error', (err) => {
-      cleanup();
-      resolve({ participant_id: participantId, status: 'failed', attempt, error: `agent process error: ${err.message}` });
-    });
+  const agentArgs = buildAgentCommandArgs({
+    ...agentConfig,
+    extraArgs,
+    promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
+    promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
+  }, {
+    promptFile,
+    shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
+    systemPromptText: `あなたは gh-maestro council の参加者です（participant_id: ${participantId}）。${manifest.title}の議論に参加してください。`,
   });
+
+  const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
+
+  const logFile = workerLogPath(workspace, `council-${manifest.session}-${participantId}`);
+  try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); } catch {}
+
+  let stderrFd;
+  try {
+    stderrFd = fs.openSync(logFile, 'a');
+  } catch (e) {
+    try { fs.unlinkSync(promptFile); } catch {}
+    return { participant_id: participantId, status: 'failed', attempt, error: `log file open failed: ${e.message}` };
+  }
+
+  let child;
+  try {
+    child = spawn(shellArgs[0], shellArgs.slice(1), {
+      cwd: worktreeDir,
+      env: process.env,
+      stdio: ['ignore', 'pipe', stderrFd],
+    });
+    if (childRef) childRef.child = child;
+  } catch (e) {
+    try { fs.closeSync(stderrFd); } catch {}
+    try { fs.unlinkSync(promptFile); } catch {}
+    return { participant_id: participantId, status: 'failed', attempt, error: `spawn failed: ${e.message}` };
+  }
+
+  const stdoutChunks = [];
+  child.stdout.on('data', (chunk) => { stdoutChunks.push(chunk); });
+
+  // タイムアウト時は子プロセスとその子孫（ログインシェル → エージェントCLI）を
+  // まとめて終了する。Windows で親シェルのみ kill すると子孫が孤児化するため
+  // killProcessTree（Windows: taskkill /T、Unix: プロセスグループ）を使う。
+  // タイマー・クリーンアップ登録・close/error 解決は共有ヘルパー waitChildExit に
+  // 委譲し、close 後の stdout 抽出・検証を本関数で行う（Issue #232 共有化）。
+  let code;
+  try {
+    code = await waitChildExit({
+      child,
+      timeoutMs,
+      onCleanup: () => {
+        try { fs.closeSync(stderrFd); } catch {}
+        try { fs.unlinkSync(promptFile); } catch {}
+      },
+    });
+  } catch (err) {
+    // 起動失敗（child 'error'）。onCleanup は waitChildExit 内で実行済み
+    return { participant_id: participantId, status: 'failed', attempt, error: `agent process error: ${err.message}` };
+  }
+
+  const stdout = Buffer.concat(stdoutChunks).toString('utf8').trim();
+
+  if (code !== 0) {
+    return {
+      participant_id: participantId,
+      status: 'failed',
+      attempt,
+      error: `agent exited with code ${code}${stdout ? ': ' + stdout.slice(0, 500) : ''}`,
+    };
+  }
+
+  const requiredKeys = manifest.phase === 'vote'
+    ? PHASE_REQUIRED_KEYS.vote
+    : PHASE_REQUIRED_KEYS.opinion;
+
+  let output;
+  try {
+    output = extractJsonObject(stdout, requiredKeys);
+  } catch (e) {
+    // 回答候補が複数見つかった（曖昧）。どれを採用するか確定できないため fail-closed。
+    return {
+      participant_id: participantId,
+      status: 'failed',
+      attempt,
+      error: e.message,
+    };
+  }
+  if (output === null) {
+    return {
+      participant_id: participantId,
+      status: 'failed',
+      attempt,
+      error: `no valid JSON object found in stdout. preview: ${stdout.slice(0, 500)}`,
+    };
+  }
+
+  const errors = validateParticipantOutput(manifest.phase, output, manifest, participantId);
+  if (errors.length > 0) {
+    return {
+      participant_id: participantId,
+      status: 'failed',
+      attempt,
+      error: `output validation: ${errors.join('; ')}`,
+    };
+  }
+
+  return { participant_id: participantId, status: 'success', attempt, output };
 }
 
 // ── フェーズ実行 ───────────────────────────────────────────────────────────────

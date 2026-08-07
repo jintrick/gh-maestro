@@ -33,7 +33,7 @@ const {
   ensureCouncilWorktree,
 } = require('./shared/council-worktree');
 const { extractJsonObject, PHASE_REQUIRED_KEYS, fencedData, DEFAULT_JOB_TIMEOUT_MS } = require('./run-council-jobs');
-const { killProcessTree } = require('./kill-tree');
+const { waitChildExit } = require('./shared/child-wait');
 const councilSchemas = require('./council-schemas.json');
 
 // バックスラッシュ（Windowsパスを / へ正規化するための文字）。
@@ -116,121 +116,112 @@ function buildInvestigationPrompt({ title, agenda, question }) {
  * @param {number} [opts.timeoutMs]  - ジョブタイムアウト
  * @returns {Promise<{ ok: boolean, findings?: string, sources?: string[], error?: string }>}
  */
-function launchInvestigationJob({ title, agenda, question, agentConfig, worktreeDir, workspace, timeoutMs = DEFAULT_JOB_TIMEOUT_MS }) {
-  return new Promise((resolve) => {
-    // 非対話化トークン検証（フェイルクローズ）。実際に起動引数に使う execArgs ?? extraArgs を検証する。
-    const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
-    if (!tokenCheck.valid) {
-      resolve({
-        ok: false,
-        error: `agent "${agentConfig.id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (check ~/.gh-maestro/config.json agents["${agentConfig.id}"].execArgs / extraArgs)`,
-      });
-      return;
-    }
-
-    const promptText = buildInvestigationPrompt({ title, agenda, question });
-    const promptFile = path.join(os.tmpdir(), `council-investigation-${Date.now()}.md`);
-    try {
-      fs.writeFileSync(promptFile, promptText, 'utf8');
-    } catch (e) {
-      resolve({ ok: false, error: `prompt file write failed: ${e.message}` });
-      return;
-    }
-
-    // `{workspace}` プレースホルダーはジョブcwd（議論用worktree）へ置換する
-    const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
-      .map(a => a.replace(/\{workspace\}/g, worktreeDir));
-
-    const agentArgs = buildAgentCommandArgs({
-      ...agentConfig,
-      extraArgs,
-      promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
-      promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
-    }, {
-      promptFile,
-      // Windowsパス（バックスラッシュ）がシェルでエスケープとして解釈されないよう / へ正規化する
-      shortPrompt: `Read ${promptFile.replace(new RegExp(BS + BS, 'g'), '/')} and execute it.`,
-      systemPromptText: `あなたは gh-maestro council の調査担当エージェントです。${title}の議論に必要な事実を調査してください。`,
-    });
-
-    const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
-
-    const logFile = workerLogPath(workspace, 'council-investigation');
-    try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); } catch {}
-
-    let stderrFd;
-    try {
-      stderrFd = fs.openSync(logFile, 'a');
-    } catch (e) {
-      try { fs.unlinkSync(promptFile); } catch {}
-      resolve({ ok: false, error: `log file open failed: ${e.message}` });
-      return;
-    }
-
-    let child;
-    try {
-      child = spawn(shellArgs[0], shellArgs.slice(1), {
-        cwd: worktreeDir,
-        env: process.env,
-        stdio: ['ignore', 'pipe', stderrFd],
-      });
-    } catch (e) {
-      try { fs.closeSync(stderrFd); } catch {}
-      try { fs.unlinkSync(promptFile); } catch {}
-      resolve({ ok: false, error: `spawn failed: ${e.message}` });
-      return;
-    }
-
-    const stdoutChunks = [];
-    child.stdout.on('data', (chunk) => { stdoutChunks.push(chunk); });
-
-    // タイムアウト時は子プロセスだけでなく、そのプロセスツリー全体を終了させる。
-    // Windows では pwsh → agent CLI の親子構造が残り得るため、child.kill() だけだと
-    // agent CLI が孤児として残る（run-council-jobs.js の launchParticipantJob と同じ対策）。
-    const timer = setTimeout(() => { try { killProcessTree(child.pid); } catch {} }, timeoutMs);
-
-    const cleanup = () => {
-      clearTimeout(timer);
-      try { fs.closeSync(stderrFd); } catch {}
-      try { fs.unlinkSync(promptFile); } catch {}
+async function launchInvestigationJob({ title, agenda, question, agentConfig, worktreeDir, workspace, timeoutMs = DEFAULT_JOB_TIMEOUT_MS }) {
+  // 非対話化トークン検証（フェイルクローズ）。実際に起動引数に使う execArgs ?? extraArgs を検証する。
+  const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
+  if (!tokenCheck.valid) {
+    return {
+      ok: false,
+      error: `agent "${agentConfig.id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (check ~/.gh-maestro/config.json agents["${agentConfig.id}"].execArgs / extraArgs)`,
     };
+  }
 
-    child.on('close', (code) => {
-      cleanup();
-      const stdout = Buffer.concat(stdoutChunks).toString('utf8').trim();
+  const promptText = buildInvestigationPrompt({ title, agenda, question });
+  const promptFile = path.join(os.tmpdir(), `council-investigation-${Date.now()}.md`);
+  try {
+    fs.writeFileSync(promptFile, promptText, 'utf8');
+  } catch (e) {
+    return { ok: false, error: `prompt file write failed: ${e.message}` };
+  }
 
-      if (code !== 0) {
-        resolve({ ok: false, error: `agent exited with code ${code}${stdout ? ': ' + stdout.slice(0, 500) : ''}` });
-        return;
-      }
+  // `{workspace}` プレースホルダーはジョブcwd（議論用worktree）へ置換する
+  const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
+    .map(a => a.replace(/\{workspace\}/g, worktreeDir));
 
-      let output;
-      try {
-        output = extractJsonObject(stdout, PHASE_REQUIRED_KEYS.investigation);
-      } catch (e) {
-        // 回答候補が複数見つかった（曖昧）。どれを採用するか確定できないため fail-closed。
-        resolve({ ok: false, error: e.message });
-        return;
-      }
-      if (output === null) {
-        resolve({ ok: false, error: `no valid JSON object found in stdout. preview: ${stdout.slice(0, 500)}` });
-        return;
-      }
-
-      const errors = _validateAgainstSchema(output, councilSchemas.investigation, 'investigation');
-      if (errors.length > 0) {
-        resolve({ ok: false, error: `investigation schema validation: ${errors.join('; ')}` });
-        return;
-      }
-
-      resolve({ ok: true, findings: output.findings, sources: output.sources });
-    });
-
-    child.on('error', (err) => {
-      cleanup();
-      resolve({ ok: false, error: `agent process error: ${err.message}` });
-    });
+  const agentArgs = buildAgentCommandArgs({
+    ...agentConfig,
+    extraArgs,
+    promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
+    promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
+  }, {
+    promptFile,
+    // Windowsパス（バックスラッシュ）がシェルでエスケープとして解釈されないよう / へ正規化する
+    shortPrompt: `Read ${promptFile.replace(new RegExp(BS + BS, 'g'), '/')} and execute it.`,
+    systemPromptText: `あなたは gh-maestro council の調査担当エージェントです。${title}の議論に必要な事実を調査してください。`,
   });
+
+  const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
+
+  const logFile = workerLogPath(workspace, 'council-investigation');
+  try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); } catch {}
+
+  let stderrFd;
+  try {
+    stderrFd = fs.openSync(logFile, 'a');
+  } catch (e) {
+    try { fs.unlinkSync(promptFile); } catch {}
+    return { ok: false, error: `log file open failed: ${e.message}` };
+  }
+
+  let child;
+  try {
+    child = spawn(shellArgs[0], shellArgs.slice(1), {
+      cwd: worktreeDir,
+      env: process.env,
+      stdio: ['ignore', 'pipe', stderrFd],
+    });
+  } catch (e) {
+    try { fs.closeSync(stderrFd); } catch {}
+    try { fs.unlinkSync(promptFile); } catch {}
+    return { ok: false, error: `spawn failed: ${e.message}` };
+  }
+
+  const stdoutChunks = [];
+  child.stdout.on('data', (chunk) => { stdoutChunks.push(chunk); });
+
+  // タイムアウト時は子プロセスだけでなく、そのプロセスツリー全体を終了させる。
+  // Windows では pwsh → agent CLI の親子構造が残り得るため、child.kill() だけだと
+  // agent CLI が孤児として残る。タイマー・クリーンアップ登録・close/error 解決は
+  // 共有ヘルパー waitChildExit に委譲し、close 後の stdout 抽出・検証を本関数で行う
+  // （run-council-jobs.js の launchParticipantJob と同じ対策、Issue #232 共有化）。
+  let code;
+  try {
+    code = await waitChildExit({
+      child,
+      timeoutMs,
+      onCleanup: () => {
+        try { fs.closeSync(stderrFd); } catch {}
+        try { fs.unlinkSync(promptFile); } catch {}
+      },
+    });
+  } catch (err) {
+    // 起動失敗（child 'error'）。onCleanup は waitChildExit 内で実行済み
+    return { ok: false, error: `agent process error: ${err.message}` };
+  }
+
+  const stdout = Buffer.concat(stdoutChunks).toString('utf8').trim();
+
+  if (code !== 0) {
+    return { ok: false, error: `agent exited with code ${code}${stdout ? ': ' + stdout.slice(0, 500) : ''}` };
+  }
+
+  let output;
+  try {
+    output = extractJsonObject(stdout, PHASE_REQUIRED_KEYS.investigation);
+  } catch (e) {
+    // 回答候補が複数見つかった（曖昧）。どれを採用するか確定できないため fail-closed。
+    return { ok: false, error: e.message };
+  }
+  if (output === null) {
+    return { ok: false, error: `no valid JSON object found in stdout. preview: ${stdout.slice(0, 500)}` };
+  }
+
+  const errors = _validateAgainstSchema(output, councilSchemas.investigation, 'investigation');
+  if (errors.length > 0) {
+    return { ok: false, error: `investigation schema validation: ${errors.join('; ')}` };
+  }
+
+  return { ok: true, findings: output.findings, sources: output.sources };
 }
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
