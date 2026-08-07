@@ -4,6 +4,13 @@ gh-maestro is a local orchestration system that uses GitHub as durable state and
 
 This file is for agent-facing operating rules and project intent. Do not use it as a script inventory or architecture dump; details that are obvious from the code should stay in the code.
 
+## Getting Oriented
+
+Treat yourself like a new team member joining the project: before diagnosing anything, orient yourself in what has actually happened recently.
+
+- Check recent merged PRs and issue activity (`gh pr list --state merged --limit 15`, `gh issue list ...`) before asserting what state the code or config is in. Not knowing the recent issues/PRs is not an acceptable starting point for any agent working on this project — it's the baseline, not an optional deep-dive.
+- If something looks broken or stale, check whether a recent PR already addressed it (or explicitly didn't) before concluding it's an unaddressed gap.
+
 ## Operating Model
 
 gh-maestro is built around quota economics.
