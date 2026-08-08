@@ -172,7 +172,7 @@ test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeComma
 
 // ── resume + buildAgentResumeCommandArgs 結合（extraArgs重複防止の実証） ────
 
-test('integrated: codex の resume→buildAgentResumeCommandArgs で extraArgs の独自トークンが1回のみ出現する（exec は resumeCommand と extraArgs の双方由来で2回）', () => {
+test('integrated: codex の resume→buildAgentResumeCommandArgs で exec が1回のみ出現する（extraArgs と resumeCommand の先頭重複を1つにまとめる）', () => {
   const agent = getAgentMap().get('codex');
   const adapter = createSessionResumeAdapter(agent);
   const resumeResult = adapter.resume();
@@ -188,17 +188,17 @@ test('integrated: codex の resume→buildAgentResumeCommandArgs で extraArgs �
 
   // codex の extraArgs: ["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
   // resumeCommand: ["exec", "resume", "--last"]
-  // 期待 argv: ["codex", "exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "exec", "resume", "--last", "新着指示を処理してください"]
-  // exec は extraArgs と resumeCommand の双方に存在するが、codex CLI は二重 exec を許容して
-  // 非対話再開する（Issue #244 で実機確認済み）。
+  // 期待 argv: ["codex", "exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "resume", "--last", "新着指示を処理してください"]
+  // 先頭トークン "exec" は extraArgs と resumeCommand の双方に存在するため、重複分を1つだけ
+  // 残して連結する（PR #245 レビュー指摘への対応。Issue #244）。
 
   assert.equal(argv[0], 'codex', 'command should be first');
 
-  // extraArgs が argv 内にそれぞれ1回だけ出現する（exec は resumeCommand 側にもあり合計2回は意図的）
+  // exec は extraArgs 由来の1回のみ（resumeCommand 側の重複は除外される）
   const execCount = argv.filter(a => a === 'exec').length;
   const skipGitCount = argv.filter(a => a === '--skip-git-repo-check').length;
   const bypassCount = argv.filter(a => a === '--dangerously-bypass-approvals-and-sandbox').length;
-  assert.equal(execCount, 2, 'exec should appear twice (extraArgs + resumeCommand)');
+  assert.equal(execCount, 1, 'exec should appear exactly once');
   assert.equal(skipGitCount, 1, '--skip-git-repo-check should appear exactly once');
   assert.equal(bypassCount, 1, '--dangerously-bypass-approvals-and-sandbox should appear exactly once');
 
@@ -219,7 +219,7 @@ test('integrated: codex の resume→buildAgentResumeCommandArgs で extraArgs �
   assert.ok(resumeIdx < msgIdx, 'resume(' + resumeIdx + ') should come before message(' + msgIdx + ')');
 });
 
-test('integrated: codex の sessionRef 付き resume→buildAgentResumeCommandArgs で exec は resumeCommand と extraArgs の双方由来で2回', () => {
+test('integrated: codex の sessionRef 付き resume→buildAgentResumeCommandArgs で exec が1回のみ出現する', () => {
   const agent = getAgentMap().get('codex');
   const adapter = createSessionResumeAdapter(agent);
   const resumeResult = adapter.resume('session-abc-123');
@@ -233,9 +233,9 @@ test('integrated: codex の sessionRef 付き resume→buildAgentResumeCommandAr
 
   const argv = finalResult.argv;
 
-  // exec は extraArgs と resumeCommand の双方に存在（codex は二重 exec を許容。Issue #244）
+  // exec は extraArgs と resumeCommand の双方に存在するが、重複分を1つだけ残す（PR #245）
   const execCount = argv.filter(a => a === 'exec').length;
-  assert.equal(execCount, 2, 'exec should appear twice (extraArgs + resumeCommand)');
+  assert.equal(execCount, 1, 'exec should appear exactly once');
 
   // sessionRef が含まれ、--last は置き換えられている
   assert.ok(argv.includes('session-abc-123'), 'should include sessionRef');

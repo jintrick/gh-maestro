@@ -93,6 +93,31 @@ test('buildAgentResumeCommandArgs: positional delivery（codex）', () => {
   assert.equal(afterLaunchText, null);
 });
 
+test('buildAgentResumeCommandArgs: extraArgs と resumeArgs の先頭トークンが一致する場合、重複分を1つにまとめる（codex の exec）', () => {
+  const { argv, afterLaunchText } = buildAgentResumeCommandArgs({
+    command: 'codex',
+    extraArgs: ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'],
+    promptDelivery: 'positional',
+  }, ['exec', 'resume', '--last'], { shortPrompt: '新着メッセージです' });
+
+  // 先頭の "exec" は extraArgs 由来の1つだけ残し、resumeArgs 側の "exec" は除外する
+  assert.deepEqual(argv, ['codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', 'resume', '--last', '新着メッセージです']);
+  assert.equal(afterLaunchText, null);
+  assert.equal(argv.filter(a => a === 'exec').length, 1, 'exec should appear exactly once');
+});
+
+test('buildAgentResumeCommandArgs: 先頭トークンが一致しない場合は重複をまとめない（codex 以外）', () => {
+  const { argv } = buildAgentResumeCommandArgs({
+    command: 'codex',
+    extraArgs: ['--no-alt-screen'],
+    promptDelivery: 'positional',
+  }, ['exec', 'resume', '--last'], { shortPrompt: '新着メッセージです' });
+
+  // extraArgs 先頭が "exec" でないため、resumeArgs の "exec" はそのまま残る
+  assert.deepEqual(argv, ['codex', '--no-alt-screen', 'exec', 'resume', '--last', '新着メッセージです']);
+  assert.equal(argv.filter(a => a === 'exec').length, 1, 'exec should appear exactly once (from resumeArgs)');
+});
+
 test('buildAgentResumeCommandArgs: send-text-after-launch delivery（reasonix）', () => {
   const { argv, afterLaunchText } = buildAgentResumeCommandArgs({
     command: 'node',
