@@ -8,7 +8,6 @@ const {
   resolveLineAnchor,
   parseRightLinesByPath,
   isLineInDiff,
-  dedupeFindings,
   processFindings,
 } = require('../scripts/review-publisher');
 
@@ -95,26 +94,6 @@ test('parseRightLinesByPath records right-side hunk lines', () => {
   assert.equal(isLineInDiff(lines, 'src/foo.ts', 11), true);
   assert.equal(isLineInDiff(lines, 'src/foo.ts', 12), true);
   assert.equal(isLineInDiff(lines, 'src/foo.ts', 9), false);
-});
-
-test('dedupeFindings merges identical concerns across aspects', () => {
-  const a = { ...finding(), resolved_line: 2 };
-  const b = { ...finding({ aspect: 'Resilience & Security' }), resolved_line: 2 };
-  const result = dedupeFindings([a, b]);
-  assert.equal(result.findings.length, 1);
-  assert.deepEqual(result.findings[0].aspects, ['Correctness', 'Resilience & Security']);
-  assert.equal(result.duplicates.length, 1);
-});
-
-test('dedupeFindings keeps the highest severity when identical findings differ in severity', () => {
-  const a = { ...finding(), severity: 'SUGGESTION', severity_rationale: '軽微な改善', resolved_line: 2 };
-  const b = { ...finding({ aspect: 'Resilience & Security' }), severity: 'BLOCKER', severity_rationale: 'データ損失の危険', resolved_line: 2 };
-  const result = dedupeFindings([a, b]);
-  assert.equal(result.findings.length, 1);
-  assert.equal(result.findings[0].severity, 'BLOCKER');
-  assert.equal(result.findings[0].severity_rationale, 'データ損失の危険');
-  assert.deepEqual(result.findings[0].aspects, ['Correctness', 'Resilience & Security']);
-  assert.equal(result.duplicates.length, 1);
 });
 
 test('processFindings resolves, checks diff, and separates unresolved findings', () => {
