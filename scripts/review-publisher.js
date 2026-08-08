@@ -168,36 +168,6 @@ function isLineInDiff(rightLinesByPath, filePath, line) {
   return Boolean(rightLinesByPath.get(filePath)?.has(line));
 }
 
-const SEVERITY_ORDER = { BLOCKER: 0, MAJOR: 1, SUGGESTION: 2 };
-
-function dedupeFindings(findings) {
-  const byKey = new Map();
-  const duplicates = [];
-  for (const finding of findings) {
-    const key = [
-      finding.path,
-      finding.resolved_line ?? finding.line_anchor,
-      finding.body.trim().toLowerCase(),
-      finding.summary.trim().toLowerCase(),
-    ].join('\0');
-    const existing = byKey.get(key);
-    if (!existing) {
-      byKey.set(key, { ...finding, aspects: [finding.aspect] });
-      continue;
-    }
-    if (!existing.aspects.includes(finding.aspect)) existing.aspects.push(finding.aspect);
-    // 同一keyのfindingが複数ある場合、最も高いseverityとそのseverity_rationaleを採用する
-    const existingOrder = SEVERITY_ORDER[existing.severity] ?? 99;
-    const incomingOrder = SEVERITY_ORDER[finding.severity] ?? 99;
-    if (incomingOrder < existingOrder) {
-      existing.severity = finding.severity;
-      existing.severity_rationale = finding.severity_rationale;
-    }
-    duplicates.push(finding);
-  }
-  return { findings: [...byKey.values()], duplicates };
-}
-
 function formatFindingBody(finding) {
   const labels = (finding.aspects || [finding.aspect]).map(a => `[${a}]`).join('');
   const severityLabel = SEVERITY_LABELS[finding.severity] || finding.severity;
@@ -207,13 +177,12 @@ function formatFindingBody(finding) {
 ${finding.body}`;
 }
 
-function formatFinalReviewBody({ posted, unresolved, rejected, duplicates }) {
+function formatFinalReviewBody({ posted, unresolved, rejected }) {
   const lines = [
     `Review Manager completed.`,
     `Posted inline findings: ${posted.length}`,
     `Unresolved findings: ${unresolved.length}`,
     `Rejected malformed findings: ${rejected.length}`,
-    `Merged duplicate findings: ${duplicates.length}`,
   ];
   if (posted.length === 0 && unresolved.length === 0 && rejected.length === 0) {
     lines.push('');
@@ -305,12 +274,10 @@ function processFindings(payload, options = {}) {
     }
   }
 
-  const deduped = dedupeFindings(resolved);
   return {
-    posted: deduped.findings,
+    posted: resolved,
     unresolved,
     rejected,
-    duplicates: deduped.duplicates,
   };
 }
 
@@ -329,7 +296,6 @@ module.exports = {
   resolveLineAnchor,
   parseRightLinesByPath,
   isLineInDiff,
-  dedupeFindings,
   formatFindingBody,
   formatFinalReviewBody,
   processFindings,
