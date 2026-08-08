@@ -85,12 +85,14 @@ test('buildAgentResumeCommandArgs: flag delivery（agy）', () => {
 test('buildAgentResumeCommandArgs: positional delivery（codex）', () => {
   const { argv, afterLaunchText } = buildAgentResumeCommandArgs({
     command: 'codex',
-    extraArgs: ['--no-alt-screen'],
+    extraArgs: ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'],
     promptDelivery: 'positional',
-  }, ['exec', 'resume', '--last'], { shortPrompt: '新着メッセージです' });
+  }, ['resume', '--last'], { shortPrompt: '新着メッセージです' });
 
-  assert.deepEqual(argv, ['codex', '--no-alt-screen', 'exec', 'resume', '--last', '新着メッセージです']);
+  // 非対話トークン exec は extraArgs 由来の1回のみ。resumeCommand（resumeArgs）には含めない
+  assert.deepEqual(argv, ['codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', 'resume', '--last', '新着メッセージです']);
   assert.equal(afterLaunchText, null);
+  assert.equal(argv.filter(a => a === 'exec').length, 1, 'exec should appear exactly once');
 });
 
 test('buildAgentResumeCommandArgs: send-text-after-launch delivery（reasonix）', () => {
