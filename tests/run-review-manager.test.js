@@ -159,16 +159,19 @@ test('runAgentHeadless: 既存ログへ追記する（launcherが書いた行を
   assert.match(content, /エージェント出力/);
 });
 
-test('runAgentHeadless: stdin は継承しない（TTY不在での入力待ちハングを防ぐ）', () => {
-  // codex exec は起動時に stdin を読む。継承すると入力待ちでハングしうる。
+test('runAgentHeadless: stdinへ明示的にEOFを送る（入力待ちハングを防ぐ）', () => {
+  // codex exec は起動時に stdin を読む。stdin を pipe で受け、input: '' で閉じると
+  // 子は即時にEOF（空入力）を得て完了する（Issue #246）。'ignore'（WindowsではNUL）だと
+  // codex 等のCLIがEOFを認識できず追加入力待ちでハングしうる（Issue #244）。
   const logFile = path.join(tmpBase, 'rm-stdin.log');
   const result = runAgentHeadless(
-    [process.execPath, '-e', "const fs=require('fs'); let d=''; try { d=fs.readFileSync(0,'utf8'); } catch(e) { d='(読めない)'; } console.log('stdin='+JSON.stringify(d));"],
+    [process.execPath, '-e', "const fs=require('fs'); let d=''; try { d=fs.readFileSync(0,'utf8'); } catch(e) { d='ERR:'+e.message; } console.log('stdin='+JSON.stringify(d));"],
     tmpBase, logFile,
   );
 
   assert.equal(result.status, 0, 'stdin待ちでハングせず完了する');
-  assert.match(fs.readFileSync(logFile, 'utf8'), /stdin=/);
+  const content = fs.readFileSync(logFile, 'utf8');
+  assert.match(content, /stdin=""/, 'EOFにより空入力として読み取られるべき');
 });
 
 test(
