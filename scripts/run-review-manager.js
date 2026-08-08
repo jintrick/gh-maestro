@@ -239,13 +239,44 @@ function runAgentHeadless(agentArgs, cwd, logFile) {
     return spawnSync(shellArgs[0], shellArgs.slice(1), {
       cwd,
       env: process.env,
-      // stdin は 'ignore' に固定する。TTYが無い状態で継承すると入力待ちでハングしうる
-      // （codex exec は起動時に stdin を読む。実機確認済み）。
-      stdio: ['ignore', fd, fd],
+      // stdin は pipe で受け、input: '' により起動直後にEOFを明示送信する（Issue #246）。
+      // 'ignore'（WindowsではNUL）にすると codex 等のCLIがEOFを認識できず追加入力待ちで
+      // ハングすることがある（Issue #244）。spawnSync は同期のため、pipeを閉じる手段は
+      // input のみ。空文字列を書いて閉じることで即時EOFになる（実機検証済み）。
+      stdio: ['pipe', fd, fd],
+      input: '',
     });
   } finally {
     fs.closeSync(fd);
   }
+}
+
+/**
+ * エージェントを非同期spawnし、起動直後にstdinへEOFを送る（Issue #246）。
+ *
+ * stdout/stderr はログfdへ直接リダイレクトする（パイプ経由の複製はしない）。
+ * stdin は pipe で受け、起動直後に閉じてEOFを明示送信する。'ignore'（WindowsではNUL）だと
+ * codex 等のCLIがEOFを認識できず追加入力待ちでハングしうる（Issue #244）。headless-shim.js
+ * の runShim と同一方式。
+ *
+ * @param {string[]} shellArgs ログインシェル経由にラップ済みの起動argv
+ * @param {{cwd: string, env: object, logFd: number}} opts 起動オプション（logFd はログの追記fd）
+ * @param {Function} [spawnFn=spawn] テスト用のspawn注入口（headless-shim.js と同じパターン）
+ * @returns {object} 起動した子プロセスハンドル（stdinへのEOF送信済み）
+ */
+function spawnAgentWithStdinEof(shellArgs, { cwd, env, logFd }, spawnFn = spawn) {
+  const child = spawnFn(shellArgs[0], shellArgs.slice(1), {
+    cwd,
+    env,
+    stdio: ['pipe', logFd, logFd],
+  });
+
+  // 子へEOFを明示的に送る。pipe で受け、起動直後に閉じて入力終了（EOF）を確実に伝える。
+  // spawn 失敗時等 child.stdin が無い場合は無視する。
+  if (child.stdin) {
+    try { child.stdin.end(); } catch { /* 起動失敗等で閉じられない場合は無視 */ }
+  }
+  return child;
 }
 
 // ── 成果物ポーリング ────────────────────────────────────────────────────────────
@@ -511,7 +542,7 @@ module.exports = {
   buildPrompt,
   generateStagingPath,
   setupReviewWorktree, teardownReviewWorktree,
-  buildReviewManagerAgentArgs, runAgentHeadless,
+  buildReviewManagerAgentArgs, runAgentHeadless, spawnAgentWithStdinEof,
   pollForArtifact, validateArtifactContent,
   atomicCopyStaging, boundedCleanup,
   superviseReviewManager,
@@ -636,10 +667,12 @@ async function superviseReviewManager({
 
   let agentChild;
   try {
-    agentChild = spawn(shellArgs[0], shellArgs.slice(1), {
+    // stdout/stderr はログfdへ直接リダイレクト、stdin へは起動直後にEOFを送る
+    // （spawnAgentWithStdinEof 参照。'ignore' では codex 等が追加入力待ちでハングしうる）。
+    agentChild = spawnAgentWithStdinEof(shellArgs, {
       cwd: reviewWtDir,
       env: process.env,
-      stdio: ['ignore', agentFd, agentFd],
+      logFd: agentFd,
     });
   } catch (e) {
     try { fs.closeSync(agentFd); } catch {}
