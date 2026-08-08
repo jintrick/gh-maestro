@@ -128,12 +128,10 @@ test('createSessionResumeAdapter: resume が resumeCommand を正しく使う（
   const result = adapter.resume();
 
   assert.equal(result.command, 'codex');
-  // resume() は resumeCommand のみ返し、extraArgs（--skip-git-repo-check 等）は buildAgentResumeCommandArgs が追加する。
-  // resumeCommand 自体に非対話トークン exec が含まれる（Issue #244）。
-  assert.ok(result.args.includes('exec'), 'should include exec from resumeCommand (non-interactive)');
+  // resume() は resumeCommand のみ返し、extraArgs（exec等）は buildAgentResumeCommandArgs が追加する
   assert.ok(result.args.includes('resume'), 'should include resume subcommand');
   assert.ok(result.args.includes('--last'), 'should include --last');
-  assert.ok(!result.args.includes('--skip-git-repo-check'), 'should NOT include extraArgs subcommands');
+  assert.ok(!result.args.includes('exec'), 'should NOT include extraArgs subcommands');
 });
 
 test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeCommand 末尾の --last/--continue を置き換える', () => {
@@ -142,21 +140,19 @@ test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeComma
   const result = adapter.resume('specific-session-id');
 
   assert.equal(result.command, 'codex');
-  // resumeCommand ["exec", "resume", "--last"] の末尾 "--last" が sessionRef に置き換わる
+  // resumeCommand ["resume", "--last"] の末尾 "--last" が sessionRef に置き換わる
   assert.ok(!result.args.includes('--last'), 'should not include --last when sessionRef replaces it');
 
-  // exec / resume サブコマンドと sessionRef の存在確認
-  assert.ok(result.args.includes('exec'), 'should preserve exec (non-interactive token) from resumeCommand');
+  // resume サブコマンドと sessionRef の存在確認
   assert.ok(result.args.includes('resume'), 'should preserve resume subcommand');
   assert.ok(result.args.includes('specific-session-id'), 'should include sessionRef');
-  assert.ok(!result.args.includes('--skip-git-repo-check'), 'should NOT include extraArgs subcommands');
+  assert.ok(!result.args.includes('exec'), 'should NOT include extraArgs subcommands');
 
-  // 順序検証: exec → resume → sessionRef の順であること
-  const execIdx = result.args.indexOf('exec');
+  // 順序検証: resume → sessionRef の順であること
   const resumeIdx = result.args.indexOf('resume');
   const sessionIdx = result.args.indexOf('specific-session-id');
-  assert.ok(execIdx >= 0 && execIdx < resumeIdx && sessionIdx > resumeIdx,
-    `exec(${execIdx}) → resume(${resumeIdx}) → sessionRef(${sessionIdx})`);
+  assert.ok(resumeIdx >= 0 && sessionIdx > resumeIdx,
+    `resume(${resumeIdx}) should come before sessionRef(${sessionIdx})`);
 });
 
 test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeCommand 末尾の --continue を置き換える（agy: サブコマンドなし）', () => {
@@ -172,7 +168,7 @@ test('createSessionResumeAdapter: resume で sessionRef を渡すと resumeComma
 
 // ── resume + buildAgentResumeCommandArgs 結合（extraArgs重複防止の実証） ────
 
-test('integrated: codex の resume→buildAgentResumeCommandArgs で exec が1回のみ出現する（extraArgs と resumeCommand の先頭重複を1つにまとめる）', () => {
+test('integrated: codex の resume→buildAgentResumeCommandArgs で extraArgs が1回のみ出現する', () => {
   const agent = getAgentMap().get('codex');
   const adapter = createSessionResumeAdapter(agent);
   const resumeResult = adapter.resume();
@@ -187,14 +183,12 @@ test('integrated: codex の resume→buildAgentResumeCommandArgs で exec が1�
   const argv = finalResult.argv;
 
   // codex の extraArgs: ["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
-  // resumeCommand: ["exec", "resume", "--last"]
+  // resumeCommand: ["resume", "--last"]
   // 期待 argv: ["codex", "exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "resume", "--last", "新着指示を処理してください"]
-  // 先頭トークン "exec" は extraArgs と resumeCommand の双方に存在するため、重複分を1つだけ
-  // 残して連結する（PR #245 レビュー指摘への対応。Issue #244）。
 
   assert.equal(argv[0], 'codex', 'command should be first');
 
-  // exec は extraArgs 由来の1回のみ（resumeCommand 側の重複は除外される）
+  // extraArgs が argv 内にそれぞれ1回だけ出現する
   const execCount = argv.filter(a => a === 'exec').length;
   const skipGitCount = argv.filter(a => a === '--skip-git-repo-check').length;
   const bypassCount = argv.filter(a => a === '--dangerously-bypass-approvals-and-sandbox').length;
@@ -219,7 +213,7 @@ test('integrated: codex の resume→buildAgentResumeCommandArgs で exec が1�
   assert.ok(resumeIdx < msgIdx, 'resume(' + resumeIdx + ') should come before message(' + msgIdx + ')');
 });
 
-test('integrated: codex の sessionRef 付き resume→buildAgentResumeCommandArgs で exec が1回のみ出現する', () => {
+test('integrated: codex の sessionRef 付き resume→buildAgentResumeCommandArgs でも extraArgs が1回のみ', () => {
   const agent = getAgentMap().get('codex');
   const adapter = createSessionResumeAdapter(agent);
   const resumeResult = adapter.resume('session-abc-123');
@@ -233,7 +227,7 @@ test('integrated: codex の sessionRef 付き resume→buildAgentResumeCommandAr
 
   const argv = finalResult.argv;
 
-  // exec は extraArgs と resumeCommand の双方に存在するが、重複分を1つだけ残す（PR #245）
+  // extraArgs が1回だけ
   const execCount = argv.filter(a => a === 'exec').length;
   assert.equal(execCount, 1, 'exec should appear exactly once');
 

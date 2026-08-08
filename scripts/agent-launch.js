@@ -80,7 +80,6 @@ function buildAgentCommandArgs(agentConfig, opts = {}) {
  *
  * @param {object} agentConfig
  * @param {string[]} resumeArgs - Adapter の resume() が返す args（例: ['--continue']）
- *   extraArgs と先頭トークンが一致する場合（codex の "exec"）は、その1つを除いて連結する
  * @param {object} opts
  * @param {string} opts.shortPrompt - 再開後に伝える新着メッセージ本文
  * @returns {{ argv: string[], afterLaunchText: string|null }}
@@ -103,29 +102,19 @@ function buildAgentResumeCommandArgs(agentConfig, resumeArgs, opts = {}) {
   const promptDelivery = agentConfig.promptDelivery;
   const shortPrompt = opts.shortPrompt;
 
-  // extraArgs と resumeArgs の先頭トークンが一致する場合（codex の "exec"）、そのまま連結すると
-  // `codex exec --skip-git-repo-check ... exec resume --last` と二重の起動トークンになり、
-  // CLIのサブコマンド解釈を壊す。先頭の重複分だけ resumeArgs 側から取り除いて1つにまとめる
-  // （PR #245 レビュー指摘）。codex 以外のエージェントは extraArgs と resumeCommand の先頭が
-  // 一致しないため、この処理の影響を受けない。
-  let effectiveResumeArgs = resumeArgs;
-  if (extraArgs.length > 0 && resumeArgs.length > 0 && extraArgs[0] === resumeArgs[0]) {
-    effectiveResumeArgs = resumeArgs.slice(1);
-  }
-
   switch (promptDelivery) {
     case 'flag':
       if (!agentConfig.promptFlag) throw new Error('agentConfig.promptFlag is required for flag delivery');
       if (!shortPrompt) throw new Error('shortPrompt is required for flag delivery');
       return {
-        argv: [command, ...extraArgs, ...effectiveResumeArgs, agentConfig.promptFlag, shortPrompt],
+        argv: [command, ...extraArgs, ...resumeArgs, agentConfig.promptFlag, shortPrompt],
         afterLaunchText: null,
       };
 
     case 'positional':
       if (!shortPrompt) throw new Error(`shortPrompt is required for ${promptDelivery} delivery`);
       return {
-        argv: [command, ...extraArgs, ...effectiveResumeArgs, shortPrompt],
+        argv: [command, ...extraArgs, ...resumeArgs, shortPrompt],
         afterLaunchText: null,
       };
 
@@ -133,7 +122,7 @@ function buildAgentResumeCommandArgs(agentConfig, resumeArgs, opts = {}) {
       if (!shortPrompt) throw new Error(`shortPrompt is required for ${promptDelivery} delivery`);
       return {
         argv: [
-          command, ...extraArgs, ...effectiveResumeArgs,
+          command, ...extraArgs, ...resumeArgs,
           '--append-system-prompt', RESUME_REPORTING_REMINDER,
           shortPrompt,
         ],
@@ -143,7 +132,7 @@ function buildAgentResumeCommandArgs(agentConfig, resumeArgs, opts = {}) {
     case 'send-text-after-launch':
       if (!shortPrompt) throw new Error('shortPrompt is required for send-text-after-launch delivery');
       return {
-        argv: [command, ...extraArgs, ...effectiveResumeArgs],
+        argv: [command, ...extraArgs, ...resumeArgs],
         afterLaunchText: shortPrompt,
       };
 
