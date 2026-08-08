@@ -17,7 +17,7 @@ const os = require('os');
 // 自身がPR diffを見た上で判断する方式に一本化した（skills/gh-maestro-reviewer/SKILL.md参照）。
 const {
   buildPrompt, generateStagingPath,
-  buildReviewManagerAgentArgs, runAgentHeadless,
+  buildReviewManagerAgentArgs, runAgentHeadless, spawnAgentWithStdinEof,
   validateArtifactContent, atomicCopyStaging,
   boundedCleanup, pollForArtifact,
   superviseReviewManager,
@@ -191,6 +191,49 @@ test(
     assert.equal(result.status, 0, `ログインシェル経由でも解決できるべき: ${fs.readFileSync(logFile, 'utf8')}`);
   },
 );
+
+// ── spawnAgentWithStdinEof: 非同期spawnでのEOF送信 ────────────────────────
+// superviseReviewManager の非同期spawn経路は worktree セットアップと ~/.gh-maestro の
+// config解決を必要とするため単体テストでは到達できない。EOF送信は spawn 注入で単体検証する
+// （headless-shim.js の runShim テストと同じパターン。PR #245 参照）。
+
+test('spawnAgentWithStdinEof: 起動直後にstdinへEOFを送る（stdio[0]はpipe）', () => {
+  const calls = [];
+  const stdinEndCalled = [];
+  const spawnFn = (cmd, args, options) => {
+    calls.push({ cmd, args, options });
+    return {
+      on() { return this; },
+      stdin: { end() { stdinEndCalled.push(true); } },
+    };
+  };
+
+  const child = spawnAgentWithStdinEof(
+    ['pwsh', '-NoLogo', '-EncodedCommand', 'AAA='],
+    { cwd: tmpBase, env: {}, logFd: 123 },
+    spawnFn,
+  );
+
+  assert.equal(calls.length, 1);
+  const { cmd, options } = calls[0];
+  assert.equal(cmd, 'pwsh');
+  // stdin は pipe で受け、起動直後に end() でEOFを送る（'ignore'=NULではハングしうる、Issue #244）
+  assert.equal(options.stdio[0], 'pipe');
+  assert.equal(options.stdio[1], 123);
+  assert.equal(options.stdio[2], 123);
+  assert.equal(stdinEndCalled.length, 1, '起動直後に stdin.end() で EOF を送るべき');
+  assert.ok(child, '起動した子プロセスハンドルを返す');
+});
+
+test('spawnAgentWithStdinEof: 子にstdinが無い場合（spawn失敗等）は無視して返す', () => {
+  // spawn 失敗時に child.stdin が存在しないケース。end() を呼ぼうとせず例外も出さない。
+  const child = spawnAgentWithStdinEof(
+    ['missing-cmd'],
+    { cwd: tmpBase, env: {}, logFd: 123 },
+    () => ({ on() { return this; } }),
+  );
+  assert.ok(child, 'エラーを投げずに返す');
+});
 
 test('buildReviewManagerAgentArgs: AntigravityはRMで--printを使い通常の-iを使わない', () => {
   const defaults = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'agent-defaults.json'), 'utf8'));
