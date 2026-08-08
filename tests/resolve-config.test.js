@@ -289,7 +289,7 @@ test('resolveExtends: agent-defaults.json自身のclaude-ds-pro/codex-proがclau
     assert.equal(codexPro.id, 'codex-pro');
     assert.equal(codexPro.command, 'codex-pro');
     assert.equal(codexPro.promptDelivery, 'positional');
-    assert.deepEqual(codexPro.resumeCommand, ['resume', '--last']);
+    assert.deepEqual(codexPro.resumeCommand, ['exec', 'resume', '--last']);
     assert.ok(codexPro.extraArgs.includes('--skip-git-repo-check'));
   });
 });
@@ -309,7 +309,7 @@ test('resolveAgentConfig: ~/.gh-maestro/config.json だけで定義したextends
     assert.equal(agent.id, 'codex-terra');
     assert.equal(agent.command, 'codex-terra');
     assert.equal(agent.promptDelivery, 'positional');
-    assert.deepEqual(agent.resumeCommand, ['resume', '--last']);
+    assert.deepEqual(agent.resumeCommand, ['exec', 'resume', '--last']);
   });
 });
 
@@ -410,7 +410,7 @@ test('resolveExtends: resumeCommand は追記されず従来どおり完全置�
 
 test('resolveAgentConfig + createSessionResumeAdapter.resume: extends で resumeCommand を継承しても sessionRef 置換が末尾の --last に対して行われる', () => {
   withTempHome(home => {
-    // codex の resumeCommand は ["resume", "--last"]。extends で追記されるのは
+    // codex の resumeCommand は ["exec", "resume", "--last"]。extends で追記されるのは
     // extraArgs のみで、resumeCommand は上書きしなければ継承元のまま末尾に --last が残る。
     writeConfig(home, {
       agents: {
@@ -420,8 +420,8 @@ test('resolveAgentConfig + createSessionResumeAdapter.resume: extends で resume
 
     const agent = resolveAgentConfig('codex-terra', { homedir: home });
     assert.ok(agent);
-    // resumeCommand は追記対象外 → 継承元のまま ["resume", "--last"]
-    assert.deepEqual(agent.resumeCommand, ['resume', '--last']);
+    // resumeCommand は追記対象外 → 継承元のまま ["exec", "resume", "--last"]
+    assert.deepEqual(agent.resumeCommand, ['exec', 'resume', '--last']);
     // extraArgs は追記される
     assert.ok(agent.extraArgs.includes('--all'));
 
@@ -429,7 +429,7 @@ test('resolveAgentConfig + createSessionResumeAdapter.resume: extends で resume
     const result = adapter.resume('specific-session-id');
     // resumeCommand 末尾の --last が sessionRef に置き換わる（追記された --all は
     // extraArgs 側にあり resumeCommand に混入しない）
-    assert.deepEqual(result.args, ['resume', 'specific-session-id']);
+    assert.deepEqual(result.args, ['exec', 'resume', 'specific-session-id']);
   });
 });
 

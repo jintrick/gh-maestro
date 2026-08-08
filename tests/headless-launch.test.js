@@ -306,12 +306,16 @@ test('launchAgentHeadless: argv が空なら throw する（agent-exec のバリ
 
 // ── headless-shim: 中継プロセス本体 ──────────────────────────────────────────
 
-test('runShim: 子を非detachedで起動し、stdout/stderrを同一fdへ直接リダイレクトする', () => {
+test('runShim: 子を非detachedで起動し、stdout/stderrを同一fdへ直接リダイレクトし、stdinへEOFを送る', () => {
   const logPath = path.join(tmpDir, 'w.log');
   const calls = [];
+  const stdinEndCalled = [];
   const spawnFn = (cmd, args, options) => {
     calls.push({ cmd, args, options });
-    return { on() { return this; } };
+    return {
+      on() { return this; },
+      stdin: { end() { stdinEndCalled.push(true); } },
+    };
   };
 
   runShim({ shellArgs: ['pwsh', '-NoLogo', '-EncodedCommand', 'AAA='], logPath, spawnFn, onExit: () => {} });
@@ -321,10 +325,12 @@ test('runShim: 子を非detachedで起動し、stdout/stderrを同一fdへ直接
   // detached にしてはならない（そこが本シムの存在理由）
   assert.ok(!options.detached, 'シムの子は detached にしてはならない');
   assert.equal(options.windowsHide, true);
-  assert.equal(options.stdio[0], 'ignore');
+  // stdin は pipe で受け、起動直後に end() でEOFを送る（codex 等の追加入力待ちハング対策、Issue #244）。
+  // stdout/stderr はログfdへ直接リダイレクト（パイプ経由の複製はしない）。
+  assert.equal(options.stdio[0], 'pipe');
   assert.equal(typeof options.stdio[1], 'number');
   assert.equal(options.stdio[1], options.stdio[2]);
-  assert.ok(!options.stdio.includes('pipe'), 'パイプを使ってはならない');
+  assert.equal(stdinEndCalled.length, 1, '起動直後に stdin.end() で EOF を送るべき');
 });
 
 test('runShim: 子の終了コードをそのまま引き継ぐ（シムの生死=ワーカーの生死）', () => {

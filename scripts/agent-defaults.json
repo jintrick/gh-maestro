@@ -111,6 +111,7 @@
       "promptDelivery": "positional",
       "rulesSupported": false,
       "resumeCommand": [
+        "exec",
         "resume",
         "--last"
       ]

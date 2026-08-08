@@ -53,7 +53,9 @@ function runShim({ shellArgs, logPath, exitHook = null, spawnFn = spawn,
   try {
     child = spawnFn(shellArgs[0], shellArgs.slice(1), {
       // detached にしない。ここが本シムの存在理由（ファイル冒頭の説明を参照）。
-      stdio: ['ignore', fd, fd],
+      // stdin は pipe で受け取り、起動直後に end() でEOFを送る（下記）。
+      // stdout/stderr はログfdへ直接リダイレクト（パイプ経由の複製はしない）。
+      stdio: ['pipe', fd, fd],
       windowsHide: true,
     });
   } catch (e) {
@@ -66,6 +68,13 @@ function runShim({ shellArgs, logPath, exitHook = null, spawnFn = spawn,
 
   // fd は子へ複製済みなので親側は閉じてよい。
   try { fs.closeSync(fd); } catch { /* 子への複製は済んでいる */ }
+
+  // 子へEOFを明示的に送る。stdin を 'ignore'（WindowsではNUL）にすると、codex 等のCLIが
+  // 追加入力待ちのままハングすることがある（Issue #244）。pipe で受け、起動直後に閉じて
+  // 入力終了（EOF）を確実に伝える。spawn 失敗時等 child.stdin が無い場合は無視する。
+  if (child.stdin) {
+    try { child.stdin.end(); } catch { /* 起動失敗等で閉じられない場合は無視 */ }
+  }
 
   let finished = false;
   const finish = (code) => {

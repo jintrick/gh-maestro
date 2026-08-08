@@ -135,6 +135,8 @@ function launchAgentHeadless({ argv, cwd, logPath, env = {}, onExit = null }) {
       detached: true,
       windowsHide: true,
       // シム自身の標準入出力は使わない。ログへの書き込みはシムが開くfdが担う。
+      // ワーカーへのstdin EOFはシムが child.stdin.end() で送るため（Issue #244）、
+      // シム自身のstdin は 'ignore' のままでよい（シムはstdinを読まない）。
       stdio: 'ignore',
     });
   } catch (e) {
