@@ -181,7 +181,7 @@ function formatFinalReviewBody({ posted, unresolved, rejected }) {
   const lines = [
     `Review Manager completed.`,
     `Posted inline findings: ${posted.length}`,
-    `Unresolved findings: ${unresolved.length}`,
+    `Unposted findings (anchor unresolved): ${unresolved.length}`,
     `Rejected malformed findings: ${rejected.length}`,
   ];
   if (posted.length === 0 && unresolved.length === 0 && rejected.length === 0) {
