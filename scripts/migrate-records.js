@@ -251,6 +251,9 @@ function shouldControlInboxSupervisor(scope) {
  *   finally でマーカーを確実に削除する。inbox-supervisor の再開は既存の自動起動機構
  *   （ensure-inbox-supervisor.js）が次に必要とした時点で引き受けるため、ここでは
  *   明示的に再起動しない
+ * - 万一マーカー削除前にこのプロセスが強制終了されても、マーカーは所有 pid・起動時刻を
+ *   記録しており、ensure側（isMigrationInProgress）が所有プロセスの生存を確認して
+ *   stale を無視するため、自動起動の抑制が永久に残ることはない（自己回復）
  *
  * マーカー作成を停止より先に行うのは、kill→mark の順だと抑制が確立する前に並行する
  * msg-send.js / spawn-worker.js が supervisor を再起動しうる窓が残るため（Issue #256）。
