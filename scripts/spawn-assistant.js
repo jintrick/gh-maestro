@@ -19,6 +19,7 @@ const { spawnSync } = require('./child-process');
 const { existsSync } = require('fs');
 const { join } = require('path');
 const { resolveAgentConfig } = require('./shared/resolve-config');
+const { workspaceKey } = require('./shared/storage-layout');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { checkAgentExists } = require('./agent-exec');
 const { buildAgentCommandArgs } = require('./agent-launch');
@@ -177,10 +178,14 @@ if (require.main === module) {
   // write-draft.js 経由で /tmp 論理パス（実体 %TEMP%）へ書き出す。一度読まれたら
   // 用済みのハンドオフ情報であり、.gh-maestro/assistants/ 等の管理領域に残さない
   // （Issue #248）。エージェントは起動プロンプトへ埋め込まれた実体パスで読む。
+  // %TEMP% は複数workspaceで共有されるため、ファイル名にworkspace固有のハッシュ
+  // （workspaceKey）を含め、同一Issue番号のassistantが別workspaceで並行起動しても
+  // 他リポジトリ向けの指示を読まないようにする（Issue #248レビュー指摘）。
+  const promptBasename = `assistant-prompt-${workspaceKey(workspace).slice(0, 12)}-${issue}.md`;
   const promptContent = buildPromptFileContent({ issue, repo, workspace, skillPath });
   const draft = spawnSync(process.execPath, [
     join(__dirname, 'write-draft.js'),
-    `/tmp/assistant-prompt-${issue}.md`,
+    `/tmp/${promptBasename}`,
     '--stdin',
   ], { input: promptContent, encoding: 'utf8' });
   if (draft.status !== 0) {

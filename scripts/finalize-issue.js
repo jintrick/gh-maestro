@@ -97,11 +97,24 @@ function defaultKillAssistant(workspace, issue) {
   return { ok: r.status === 0, status: r.status, stderr: (r.stderr || '').trim() };
 }
 
+/**
+ * PR本文が特定Issue番号を参照しているかを判定する（`#<issue>` の厳密一致）。
+ * 前方一致を防ぐため、`#<issue>` の直後に数字が続かないこと（単語境界）を要求する:
+ * 例: `#1` は `#12`・`#123` 等に誤マッチしない（Issue #248レビュー指摘）。
+ * @param {unknown} body
+ * @param {string|number} issue
+ * @returns {boolean}
+ */
+function bodyReferencesIssue(body, issue) {
+  if (typeof body !== 'string') return false;
+  return new RegExp(`#${issue}(?![0-9])`).test(body);
+}
+
 // 既定の対象PR発見処理: Issueに紐づくPR番号を列挙する（poll-pr.js / assistant-watch.js と同一の2段構え）。
 // 1. head:issue-<N>（worktreeブランチ命名規約による厳密一致。worker-entry.js参照）
-// 2. フォールバック: bodyに "#<N>" を厳密に含むもの（部分文字列の完全一致。GitHub全文検索の
-//    あいまい一致は使わない——生の数字だけで検索すると無関係PRの本文中のバージョン番号等に
-//    誤マッチしうる）
+// 2. フォールバック: bodyが "#<N>" を参照するもの（#<N> の直後に数字が続かない単語境界で厳密一致。
+//    bodyReferencesIssue 参照。GitHub全文検索のあいまい一致は使わない——生の数字だけで検索すると
+//    無関係PRの本文中のバージョン番号等に誤マッチしうる）
 // --state all でクローズ済みPRも含めて発見する（.incomplete 後始末はクローズ後でも行いたい）。
 // gh が失敗したら空配列を返す（best-effort。削除漏れは許容し、後続のクローズを阻害しない）。
 function defaultFindReviewPrs(issue, repo, workspace) {
@@ -125,7 +138,7 @@ function defaultFindReviewPrs(issue, repo, workspace) {
     const all = JSON.parse(bodyResult.stdout || '[]');
     if (!Array.isArray(all)) return [];
     return all
-      .filter((p) => typeof p.body === 'string' && p.body.includes(`#${issue}`))
+      .filter((p) => bodyReferencesIssue(p.body, issue))
       .map((p) => p.number)
       .filter((n) => n != null);
   } catch {
@@ -252,7 +265,7 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
   };
 }
 
-module.exports = { collectWorkersForIssue, finalizeIssue, cleanupIssueArtifacts };
+module.exports = { collectWorkersForIssue, finalizeIssue, cleanupIssueArtifacts, bodyReferencesIssue };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);

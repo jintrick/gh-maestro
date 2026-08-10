@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { collectWorkersForIssue, finalizeIssue, cleanupIssueArtifacts } = require('../scripts/finalize-issue.js');
+const { collectWorkersForIssue, finalizeIssue, cleanupIssueArtifacts, bodyReferencesIssue } = require('../scripts/finalize-issue.js');
 
 function withTempWorkspace(workers, fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-finalize-'));
@@ -226,4 +226,27 @@ test('cleanupIssueArtifacts: findReviewPrsFnが例外を投げても他項目は
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── Issue #248レビュー指摘1: PR本文の #<issue> 厳密一致（前方一致を許さない） ──
+
+test('bodyReferencesIssue: 正確な "#<issue>" 参照を検出する', () => {
+  assert.equal(bodyReferencesIssue('Closes #1', 1), true);
+  assert.equal(bodyReferencesIssue('Fixes #1\nSee body', 1), true);
+  assert.equal(bodyReferencesIssue('ref #42.', 42), true);
+  // 直後に数字以外が続くものは「別の番号の一部」ではないため参照として検出する（単語境界ルール）
+  assert.equal(bodyReferencesIssue('see #1x (not an issue ref)', 1), true);
+});
+
+test('bodyReferencesIssue: "#<issue>" の直後に数字が続く前方一致は誤検出しない', () => {
+  // Issue #1 の finalize 時に #12・#123 を参照するPRを誤って拾わない
+  assert.equal(bodyReferencesIssue('Closes #12', 1), false);
+  assert.equal(bodyReferencesIssue('related #123', 1), false);
+  assert.equal(bodyReferencesIssue('Closes #123', 12), false);
+});
+
+test('bodyReferencesIssue: 本文が文字列でなければfalse', () => {
+  assert.equal(bodyReferencesIssue(null, 1), false);
+  assert.equal(bodyReferencesIssue(undefined, 1), false);
+  assert.equal(bodyReferencesIssue(123, 1), false);
 });

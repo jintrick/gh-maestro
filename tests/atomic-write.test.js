@@ -18,14 +18,14 @@ const { cleanSpawnEnv } = require('./_spawn-env');
 const { atomicWriteJson } = require('../scripts/shared/atomic-write');
 const ATOMIC_WRITE_PATH = path.join(__dirname, '..', 'scripts', 'shared', 'atomic-write.js');
 
-/** 一時ディレクトリを作り、テスト後に掃除する。 */
-function withTempDir(fn) {
+/** 一時ディレクトリを作り、テスト後に掃除する。コールバックの返すPromiseをawaitする。 */
+async function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-atomic-'));
-  try { return fn(dir); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  try { return await fn(dir); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
-test('atomicWriteJson: オブジェクトを JSON として書き出す', () => {
-  withTempDir((dir) => {
+test('atomicWriteJson: オブジェクトを JSON として書き出す', async () => {
+  await withTempDir((dir) => {
     const target = path.join(dir, 'out.json');
     const result = atomicWriteJson(target, { status: 'running', count: 2 });
     assert.equal(result, target);
@@ -36,16 +36,16 @@ test('atomicWriteJson: オブジェクトを JSON として書き出す', () => 
   });
 });
 
-test('atomicWriteJson: 親ディレクトリを再帰的に作成する', () => {
-  withTempDir((dir) => {
+test('atomicWriteJson: 親ディレクトリを再帰的に作成する', async () => {
+  await withTempDir((dir) => {
     const target = path.join(dir, 'a', 'b', 'c', 'out.json');
     atomicWriteJson(target, { ok: true });
     assert.equal(JSON.parse(fs.readFileSync(target, 'utf8')).ok, true);
   });
 });
 
-test('atomicWriteJson: 既存ファイルを上書きする（rename は原子的）', () => {
-  withTempDir((dir) => {
+test('atomicWriteJson: 既存ファイルを上書きする（rename は原子的）', async () => {
+  await withTempDir((dir) => {
     const target = path.join(dir, 'out.json');
     atomicWriteJson(target, { version: 1 });
     atomicWriteJson(target, { version: 2 });
@@ -56,8 +56,8 @@ test('atomicWriteJson: 既存ファイルを上書きする（rename は原子�
   });
 });
 
-test('atomicWriteJson: JSON 直列化不能（循環参照）は throw し、staging 残骸を残さない', () => {
-  withTempDir((dir) => {
+test('atomicWriteJson: JSON 直列化不能（循環参照）は throw し、staging 残骸を残さない', async () => {
+  await withTempDir((dir) => {
     const target = path.join(dir, 'out.json');
     const circular = { self: null };
     circular.self = circular;
@@ -68,8 +68,8 @@ test('atomicWriteJson: JSON 直列化不能（循環参照）は throw し、sta
   });
 });
 
-test('atomicWriteJson: rename 失敗（既存ディレクトリが出力先）は throw し、staging 残骸を残さない', () => {
-  withTempDir((dir) => {
+test('atomicWriteJson: rename 失敗（既存ディレクトリが出力先）は throw し、staging 残骸を残さない', async () => {
+  await withTempDir((dir) => {
     // 出力先を既存ディレクトリにすると rename が失敗する（EISDIR/EPERM）
     const target = path.join(dir, 'out.json');
     fs.mkdirSync(target);
@@ -89,7 +89,7 @@ test('atomicWriteJson: rename 失敗（既存ディレクトリが出力先）�
 // ことを検証する。
 
 test('atomicWriteJson: 並行プロセスが同一ファイルへ書き込んでも完全なスナップショットになる', async () => {
-  withTempDir((dir) => {
+  await withTempDir(async (dir) => {
     const target = path.join(dir, 'workers.json');
 
     // 各ワーカーは自分の「完全なスナップショット」を1回書き込む。keyは識別用。
