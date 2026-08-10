@@ -148,4 +148,25 @@ describe('compactWorkerLog', () => {
       assert.deepEqual(fs.readdirSync(dir), ['worker.log']);
     });
   });
+
+  test('writeFileSync失敗時も圧縮tmpを残さない（try/finally化の検証、Issue #248 項目10）', () => {
+    withTempDir((dir) => {
+      const logPath = path.join(dir, 'worker.log');
+      fs.writeFileSync(logPath, `${THINKING_TOKENS_LINE}\n{"type":"assistant","message":"hi"}\n`);
+      const originalWrite = fs.writeFileSync;
+      // 圧縮tmpの書き込みだけを失敗させる（成功時の書き込みは通す）。
+      fs.writeFileSync = (target, ...args) => {
+        if (String(target).includes('.compact-')) throw new Error('simulated write failure');
+        originalWrite(target, ...args);
+      };
+      try {
+        assert.throws(() => compactWorkerLog(logPath), /simulated write failure/);
+      } finally {
+        fs.writeFileSync = originalWrite;
+      }
+      // tmpが残らず、元ログも触られていない
+      assert.deepEqual(fs.readdirSync(dir), ['worker.log']);
+      assert.equal(fs.readFileSync(logPath, 'utf8'), `${THINKING_TOKENS_LINE}\n{"type":"assistant","message":"hi"}\n`);
+    });
+  });
 });

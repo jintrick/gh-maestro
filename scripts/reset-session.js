@@ -10,7 +10,7 @@
 const { spawnSync, execSync } = require('./child-process');
 const path = require('path');
 const { resolve } = path;
-const { existsSync, readFileSync, writeFileSync, rmSync,
+const { existsSync, readFileSync, rmSync,
         readdirSync, statSync, renameSync, unlinkSync } = require('fs');
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
@@ -18,6 +18,7 @@ const { killProcessTree } = require('./kill-tree');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { sweepRegistry } = require('./process-lifecycle');
+const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const readStateLib = require('./shared/read-state');
@@ -637,7 +638,9 @@ if (require.main === module) {
   // WezTerm脱却によりペインIDを持たなくなったため、存在だけを保持する。
   const fresh = { orchestrator: { agentId: null } };
   try {
-    writeFileSync(workersJson, JSON.stringify(fresh, null, 2), 'utf8');
+    // 並行書き込み競合でも破損JSONを作らないようアトミック書き込みに統一する
+    // （Issue #248 項目11）。
+    atomicWriteJson(workersJson, fresh);
     log('workers.json をリセットしました。');
   } catch (e) {
     warn(`workers.json の書き込みに失敗しました: ${e.message}`);

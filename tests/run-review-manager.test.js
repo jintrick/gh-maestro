@@ -20,7 +20,7 @@ const {
   buildReviewManagerAgentArgs, runAgentHeadless, spawnAgentWithStdinEof,
   validateArtifactContent, atomicCopyStaging,
   boundedCleanup, pollForArtifact,
-  superviseReviewManager,
+  superviseReviewManager, clearStaleIncompleteSentinel,
   _validateFindingShape, _validateAgainstSchema,
   _setPollForArtifact,
 } = require('../scripts/run-review-manager');
@@ -712,4 +712,40 @@ test('superviseReviewManager: 無効な成果物は削除され再ポーリン�
   _setPollForArtifact(null);
   // 注入の attach/detach が正常に動作することの確認は上述のテストで行っている
   assert.ok(true);
+});
+
+// ── Issue #248 項目4: clearStaleIncompleteSentinel ─────────────────────────
+// 再レビュー周回の開始（superviseReviewManager ステップ1）で、前周回の古い
+// .incomplete センチネルを消す。残っていると新周回の途中結果を「不完全完了」と
+// 誤判定してしまう。
+
+test('clearStaleIncompleteSentinel: 存在するセンチネルを削除する', () => {
+  const testDir = path.join(tmpBase, 'stale-sentinel-exists');
+  fs.mkdirSync(testDir, { recursive: true });
+  const ghDir = path.join(testDir, 'gh');
+  fs.mkdirSync(ghDir, { recursive: true });
+  const sentinel = path.join(ghDir, 'review-manager-123.incomplete');
+  fs.writeFileSync(sentinel, 'done');
+  clearStaleIncompleteSentinel(ghDir, 123);
+  assert.ok(!fs.existsSync(sentinel), 'sentinel should be removed');
+});
+
+test('clearStaleIncompleteSentinel: 存在しなければno-op（エラーにしない）', () => {
+  const testDir = path.join(tmpBase, 'stale-sentinel-missing');
+  fs.mkdirSync(testDir, { recursive: true });
+  const ghDir = path.join(testDir, 'gh');
+  fs.mkdirSync(ghDir, { recursive: true });
+  // 例外が投げられなければok
+  clearStaleIncompleteSentinel(ghDir, 456);
+});
+
+test('clearStaleIncompleteSentinel: 別PRのセンチネルは残す', () => {
+  const testDir = path.join(tmpBase, 'stale-sentinel-other');
+  fs.mkdirSync(testDir, { recursive: true });
+  const ghDir = path.join(testDir, 'gh');
+  fs.mkdirSync(ghDir, { recursive: true });
+  const other = path.join(ghDir, 'review-manager-999.incomplete');
+  fs.writeFileSync(other, 'done');
+  clearStaleIncompleteSentinel(ghDir, 123);
+  assert.ok(fs.existsSync(other), 'unrelated PR sentinel should remain');
 });

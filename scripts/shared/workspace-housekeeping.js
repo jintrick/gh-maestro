@@ -6,7 +6,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const { compactWorkerLog } = require('./strip-thinking-token-lines');
 
 const MAX_WORKER_LOG_BYTES = 10 * 1024 * 1024;
 const MAX_LOG_GENERATIONS = 3;
@@ -100,11 +99,27 @@ function sweepWorkspaceFiles(workspace, { activeWorkerNames = new Set(), activeR
       continue;
     }
     try {
-      const compacted = compactWorkerLog(logPath);
-      if (compacted.compacted) results.compacted.push({ logPath, removedLines: compacted.removedLines });
+      // ログ圧縮は worker-exit-hook.js（ワーカー終了後の安全なタイミング）と手動CLI
+      // cleanup-worker-logs.js のみが行う。sweep は稼働中ログに触れる圧縮経路を持たない
+      // （Issue #248 項目8。PR #239 の回帰を根本除去）。ここではサイズ超過時の世代
+      // ローテーションのみ行う。
       if (fs.statSync(logPath).size > MAX_WORKER_LOG_BYTES) rotateLog(logPath, results, dryRun);
     } catch (error) {
       results.errors.push(`${logPath}: ${error.message}`);
+    }
+  }
+
+  // inbox-supervisor-autostart.log は supervisor 起動時に stdout/stderr の向き先として
+  // 開かれ、無制限に肥大化しうる。worker-logs と同一の rotateLog（MAX_LOG_GENERATIONS=3）
+  // でサイズ超過時に世代ローテーションする（Issue #248 項目5）。supervisor 稼働中は
+  // ログfdが掴まれたままのため、Windows では rename が失敗し results.errors に記録される
+  // が、非破壊の best-effort である。停止中（次回起動前）の sweep では確実に回転できる。
+  const autostartLog = path.join(maestro, 'inbox-supervisor-autostart.log');
+  if (isRegularFile(autostartLog)) {
+    try {
+      if (fs.statSync(autostartLog).size > MAX_WORKER_LOG_BYTES) rotateLog(autostartLog, results, dryRun);
+    } catch (error) {
+      results.errors.push(`${autostartLog}: ${error.message}`);
     }
   }
   return results;

@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { collectWorkersForIssue, finalizeIssue } = require('../scripts/finalize-issue.js');
+const { collectWorkersForIssue, finalizeIssue, cleanupIssueArtifacts } = require('../scripts/finalize-issue.js');
 
 function withTempWorkspace(workers, fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-finalize-'));
@@ -61,6 +61,7 @@ test('finalizeIssue: 全ワーカーを削除してからIssueをクローズす
       {
         removeWorkerFn: (ws, name) => { removed.push(name); return { ok: true }; },
         closeIssueFn: (issue, repo, ws) => { closedIssue = { issue, repo }; return { ok: true }; },
+        findReviewPrsFn: () => [],
       }
     );
     assert.deepEqual(removed.sort(), ['issue-5-coder', 'issue-5-explore']);
@@ -81,6 +82,7 @@ test('finalizeIssue: ワーカー削除が一部失敗してもIssueは閉じる
       {
         removeWorkerFn: (ws, name) => ({ ok: name !== 'issue-5-explore', stderr: 'boom' }),
         closeIssueFn: () => { closed = true; return { ok: true }; },
+        findReviewPrsFn: () => [],
       }
     );
     assert.equal(result.removedCount, 1);
@@ -94,7 +96,7 @@ test('finalizeIssue: ワーカーが無くてもIssueは閉じる', () => {
     let closed = false;
     const result = finalizeIssue(
       { workspace: dir, issue: 5 },
-      { closeIssueFn: () => { closed = true; return { ok: true }; } }
+      { closeIssueFn: () => { closed = true; return { ok: true }; }, findReviewPrsFn: () => [] }
     );
     assert.equal(result.workers.length, 0);
     assert.equal(result.removedCount, 0);
@@ -109,6 +111,7 @@ test('finalizeIssue: Issueクローズ失敗は closed:false で返る', () => {
       {
         removeWorkerFn: () => ({ ok: true }),
         closeIssueFn: () => ({ ok: false, stderr: 'gh error' }),
+        findReviewPrsFn: () => [],
       }
     );
     assert.equal(result.closed, false);
@@ -122,6 +125,7 @@ test('finalizeIssue: 既定のkillAssistantFnはassistants.jsonにエントリ�
       {
         removeWorkerFn: () => ({ ok: true }),
         closeIssueFn: () => ({ ok: true }),
+        findReviewPrsFn: () => [],
       }
     );
     assert.equal(result.assistantKilled, null);
@@ -137,6 +141,7 @@ test('finalizeIssue: killAssistantFnが注入されればそれが呼ばれ、�
       {
         closeIssueFn: () => ({ ok: true }),
         killAssistantFn: (ws, issue) => { calledWith = { ws, issue }; return { ok: true }; },
+        findReviewPrsFn: () => [],
       }
     );
     assert.deepEqual(calledWith, { ws: dir, issue: 9 });
@@ -151,9 +156,74 @@ test('finalizeIssue: assistant終了失敗はassistantKilled:falseだが、close
       {
         closeIssueFn: () => ({ ok: true }),
         killAssistantFn: () => ({ ok: false, stderr: 'kill-pane failed' }),
+        findReviewPrsFn: () => [],
       }
     );
     assert.equal(result.assistantKilled, false);
     assert.equal(result.closed, true);
   });
+});
+
+// ── Issue #248: cleanupIssueArtifacts（項目2/4/7） ─────────────────────────
+
+test('cleanupIssueArtifacts: 対象issueの assistant-watch/<N>.json を削除する（項目2）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-finalize-'));
+  try {
+    const watchDir = path.join(dir, '.gh-maestro', 'assistant-watch');
+    fs.mkdirSync(watchDir, { recursive: true });
+    fs.writeFileSync(path.join(watchDir, '42.json'), '{}');
+    fs.writeFileSync(path.join(watchDir, '99.json'), '{}');
+    const result = cleanupIssueArtifacts(dir, 42, { findReviewPrsFn: () => [] });
+    assert.equal(result.watchRemoved, true);
+    assert.ok(!fs.existsSync(path.join(watchDir, '42.json')));
+    assert.ok(fs.existsSync(path.join(watchDir, '99.json')), '他のissueのwatchファイルは残す');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cleanupIssueArtifacts: 対象PRの review-manager-<PR>.incomplete を削除し、無関係PRは残す（項目4）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-finalize-'));
+  try {
+    const ghDir = path.join(dir, '.gh-maestro');
+    fs.mkdirSync(ghDir, { recursive: true });
+    fs.writeFileSync(path.join(ghDir, 'review-manager-123.incomplete'), 'done');
+    fs.writeFileSync(path.join(ghDir, 'review-manager-999.incomplete'), 'done');
+    const result = cleanupIssueArtifacts(dir, 7, { findReviewPrsFn: () => [123] });
+    assert.deepEqual(result.incompleteRemoved, [123]);
+    assert.ok(!fs.existsSync(path.join(ghDir, 'review-manager-123.incomplete')));
+    assert.ok(fs.existsSync(path.join(ghDir, 'review-manager-999.incomplete')), '無関係PRのセンチネルは残す');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cleanupIssueArtifacts: executions.json の対象issueレコードだけを間引き、ファイル自体は残す（項目7）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-finalize-'));
+  try {
+    const { startExecution, readRegistry } = require('../scripts/shared/execution-registry');
+    startExecution(dir, { executionId: 'issue-7-a', issue: 7, workerName: 'w-a', skill: 'gh-maestro-coder' });
+    startExecution(dir, { executionId: 'issue-9', issue: 9, workerName: 'w-b', skill: 'gh-maestro-coder' });
+    const result = cleanupIssueArtifacts(dir, 7, { findReviewPrsFn: () => [] });
+    assert.equal(result.executionsPruned, 1);
+    const after = readRegistry(dir);
+    assert.ok(!('issue-7-a' in after));
+    assert.ok('issue-9' in after);
+    assert.ok(fs.existsSync(path.join(dir, '.gh-maestro', 'executions.json')));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cleanupIssueArtifacts: findReviewPrsFnが例外を投げても他項目は続行する（best-effort）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-finalize-'));
+  try {
+    const watchDir = path.join(dir, '.gh-maestro', 'assistant-watch');
+    fs.mkdirSync(watchDir, { recursive: true });
+    fs.writeFileSync(path.join(watchDir, '5.json'), '{}');
+    const result = cleanupIssueArtifacts(dir, 5, { findReviewPrsFn: () => { throw new Error('gh down'); } });
+    assert.equal(result.watchRemoved, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

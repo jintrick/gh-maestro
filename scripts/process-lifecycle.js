@@ -768,7 +768,12 @@ function sweepRegistry(workspace, opts = {}) {
           if (workerName !== 'orchestrator' && isWorkerAlive(entry)) activeWorkerNames.add(workerName);
         }
       }
-    } catch {}
+    } catch (e) {
+      // サイレントに保護が無効化されないよう記録する（sweep自体は継続）。
+      // 保護対象が漏れても殺す側の誤爆は無いが、稼働中ログが誤って
+      // ローテーション対象になる等の見えない劣化の手掛かりになる（Issue #248 項目9）。
+      console.error(`sweep: workers.json生存ワーカー保護の構築に失敗しました: ${e.message}`);
+    }
     try {
       const { createNormalWorkerStore, isLeaseLive } = require('./shared/worker-lease');
       const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
@@ -778,7 +783,9 @@ function sweepRegistry(workspace, opts = {}) {
         const entry = store.read(workerName);
         if (isLeaseLive(entry)) activeWorkerNames.add(entry.workerName || workerName);
       }
-    } catch {}
+    } catch (e) {
+      console.error(`sweep: lease生存ワーカー保護の構築に失敗しました: ${e.message}`);
+    }
     for (const { entry } of byPid.values()) {
       if (!entry.workerName || results.killed.some(k => k.workerName === entry.workerName)) continue;
       if (isProcessAlive(entry.pid) && verifyProcessIdentity(entry.pid, entry).match) {
@@ -797,7 +804,9 @@ function sweepRegistry(workspace, opts = {}) {
         try { pid = Number(fs.readFileSync(path.join(workspace, '.gh-maestro', name), 'utf8').trim()); } catch { continue; }
         if (Number.isInteger(pid) && pid > 0 && isProcessAlive(pid)) activeReviewPrs.add(match[1]);
       }
-    } catch {}
+    } catch (e) {
+      console.error(`sweep: Review Manager .running 生存PR保護の構築に失敗しました: ${e.message}`);
+    }
     const { sweepWorkspaceFiles } = require('./shared/workspace-housekeeping');
     const housekeeping = sweepWorkspaceFiles(workspace, { activeWorkerNames, activeReviewPrs, dryRun: opts.dryRun });
     results.errors.push(...housekeeping.errors);

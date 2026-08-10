@@ -72,9 +72,12 @@ function compactWorkerLog(logPath) {
   try {
     fs.writeFileSync(tmpPath, output, 'utf8');
     fs.renameSync(tmpPath, logPath);
-  } catch (error) {
+  } finally {
+    // 成功時は rename 後に tmp は存在しないため unlink は ENOENT（無害）、
+    // 失敗時（共有違反等で rename が throw）はここで確実に tmp を掃除する
+    // （Issue #248 項目10。従来の catch 内 unlink は成功時の tmp 残骸を
+    // 残しうる構造だった）。
     try { fs.unlinkSync(tmpPath); } catch {}
-    throw error;
   }
 
   return { compacted: true, removedLines };

@@ -850,10 +850,12 @@ test('sweepRegistry: stale registry掃除とhousekeepingを一連で実行する
   try {
     const results = plc.sweepRegistry(workspace, { dryRun: false });
     assert.ok(results.housekeeping, 'housekeeping must be owned by the lifecycle sweep');
-    assert.ok(results.housekeeping.compacted.some(x => x.logPath.endsWith(`${staleName}.log`)));
+    // 項目8: sweepはログ圧縮を行わない（圧縮は worker-exit-hook.js と手動CLIのみ）。
+    // したがって stale ログも圧縮されず、中身がそのまま残る。
+    assert.equal(results.housekeeping.compacted.length, 0);
     assert.equal(fs.readFileSync(path.join(logDir, `${activeName}.log`), 'utf8'), noise);
     assert.equal(fs.readFileSync(path.join(logDir, `issue-55-review-manager-pr-${reviewPr}.log`), 'utf8'), noise);
-    assert.equal(fs.readFileSync(path.join(logDir, `${staleName}.log`), 'utf8'), '');
+    assert.equal(fs.readFileSync(path.join(logDir, `${staleName}.log`), 'utf8'), noise);
   } finally {
     for (const p of [path.join(pidsDir, 'stale.json'), path.join(pidsDir, 'active.json')]) {
       try { fs.unlinkSync(p); } catch {}

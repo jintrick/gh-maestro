@@ -16,8 +16,8 @@
 'use strict';
 
 const { spawnSync } = require('./child-process');
-const { existsSync, mkdirSync, writeFileSync } = require('fs');
-const { resolve } = require('path');
+const { existsSync } = require('fs');
+const { join } = require('path');
 const { resolveAgentConfig } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { checkAgentExists } = require('./agent-exec');
@@ -173,10 +173,23 @@ if (require.main === module) {
     fail(`gh-maestro-assistant の SKILL.md を解決できません（${skillPath || '未解決'}）。node scripts/install.js を実行してagyのスキルをインストールしてください。`);
   }
 
-  const promptDir = resolve(workspace, '.gh-maestro', 'assistants', `issue-${issue}`);
-  mkdirSync(promptDir, { recursive: true });
-  const promptFile = resolve(promptDir, 'prompt.md');
-  writeFileSync(promptFile, buildPromptFileContent({ issue, repo, workspace, skillPath }), 'utf8');
+  // 使い捨ての起動指示ファイル（prompt）は、他のワーカーの --prompt-file と同様、
+  // write-draft.js 経由で /tmp 論理パス（実体 %TEMP%）へ書き出す。一度読まれたら
+  // 用済みのハンドオフ情報であり、.gh-maestro/assistants/ 等の管理領域に残さない
+  // （Issue #248）。エージェントは起動プロンプトへ埋め込まれた実体パスで読む。
+  const promptContent = buildPromptFileContent({ issue, repo, workspace, skillPath });
+  const draft = spawnSync(process.execPath, [
+    join(__dirname, 'write-draft.js'),
+    `/tmp/assistant-prompt-${issue}.md`,
+    '--stdin',
+  ], { input: promptContent, encoding: 'utf8' });
+  if (draft.status !== 0) {
+    fail(`assistantプロンプトを一時ファイルに書き出せませんでした: ${(draft.stderr || '').toString().trim()}`);
+  }
+  const promptFile = (draft.stdout || '').toString().trim().replace(/^DRAFT_WRITTEN:/, '');
+  if (!promptFile) {
+    fail(`assistantプロンプトの一時ファイルパスを解決できませんでした: ${(draft.stdout || '').toString().trim()}`);
+  }
 
   const shortPrompt = buildShortPrompt({ issue, promptFile, skillPath });
 

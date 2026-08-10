@@ -11,12 +11,13 @@
 
 const { spawnSync, execSync } = require('./child-process');
 const { resolve } = require('path');
-const { readFileSync, writeFileSync, existsSync, rmSync } = require('fs');
+const { readFileSync, existsSync, rmSync } = require('fs');
 const { unlinkJunctions } = require('./unlink-junctions');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { killProcessTree } = require('./kill-tree');
 const { sweepRegistry } = require('./process-lifecycle');
+const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
 const { resolveWorkerName } = require('./shared/workers-registry');
 
@@ -244,8 +245,27 @@ if (require.main === module) {
     }
   }
 
+  // ── inbox-supervisor カーソルの削除 ─────────────────────────────────────
+  // ワーカー宛てメッセージの処理カーソルを削除する。ワーカーが消えた以上、この
+  // カーソルは以後使われない（ベストエフォート、ENOENT は成功扱い。Issue #248 項目6）。
+  {
+    const cursorFile = resolve(workspace, '.gh-maestro', 'inbox-supervisor', 'cursors', `${workerName}.json`);
+    try {
+      if (existsSync(cursorFile)) {
+        rmSync(cursorFile);
+        console.warn(`remove-worker: inbox-supervisor cursor "${workerName}.json" を削除しました`);
+      }
+    } catch (e) {
+      if (e.code !== 'ENOENT') {
+        console.warn(`remove-worker: inbox-supervisor cursor 削除に失敗しました（ワーカー削除は続行します）: ${e.message}`);
+      }
+    }
+  }
+
   // ── workers.jsonから削除 ──────────────────────────────────────────────
 
   delete workers[workerName];
-  writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
+  // 並行書き込み競合でも破損JSONを作らないようアトミック書き込みに統一する
+  // （Issue #248 項目11）。
+  atomicWriteJson(workersJson, workers);
 }
