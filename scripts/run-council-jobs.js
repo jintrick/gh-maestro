@@ -426,7 +426,10 @@ async function launchParticipantJob({ participant, manifest, agentConfig, worktr
 
   const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
 
-  const logFile = workerLogPath(workspace, `council-${manifest.session}-${participantId}`);
+  const workerName = `council-${manifest.session}-${participantId}`;
+  const logFile = workerLogPath(workspace, workerName, {
+    ownerKind: 'job', ownerId: manifest.session, workerName,
+  });
   try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); } catch {}
 
   let stderrFd;
