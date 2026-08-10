@@ -154,7 +154,9 @@ test('startReviewManager returns ALREADY_RUNNING and does not launch when locked
   const workspace = freshWorkspace('already-running');
   const ghDir = path.join(workspace, '.gh-maestro');
   fs.mkdirSync(ghDir, { recursive: true });
-  fs.writeFileSync(path.join(ghDir, 'review-manager-42.running'), String(process.pid));
+  const lockFile = path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.running');
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+  fs.writeFileSync(lockFile, String(process.pid));
 
   const result = mod.startReviewManager('42', 'o/r', workspace, '5');
   assert.equal(result, 'REVIEW_MANAGER_ALREADY_RUNNING');
@@ -221,7 +223,7 @@ test('startReviewManager: ロックファイルにlaunchAgentHeadlessが返し�
 
   mod.startReviewManager('8', 'o/r', workspace, '55');
 
-  const lockFile = path.join(workspace, '.gh-maestro', 'review-manager-8.running');
+  const lockFile = path.join(workspace, '.gh-maestro', 'records', 'pr', '8', 'review', 'manager.running');
   assert.equal(fs.readFileSync(lockFile, 'utf8'), '77701');
 });
 

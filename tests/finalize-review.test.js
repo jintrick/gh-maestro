@@ -152,7 +152,7 @@ test('writeSentinel creates .incomplete file', () => {
   try {
     const ghDir = path.join(tmpDir, '.gh-maestro');
     fs.mkdirSync(ghDir, { recursive: true });
-    const sentinelPath = path.join(ghDir, 'review-manager-5.incomplete');
+    const sentinelPath = path.join(ghDir, 'records', 'pr', '5', 'review', 'manager.incomplete');
     const result = writeSentinel(tmpDir, 5);
     assert.ok(result);
     assert.ok(fs.existsSync(sentinelPath));

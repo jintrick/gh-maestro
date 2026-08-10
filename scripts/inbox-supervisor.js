@@ -8,7 +8,7 @@
 // アーキテクチャ:
 //   - 各ワーカーのIssueをポーリングし、自分宛ての新着コメントを検出する
 //   - スキャンロジックは msg-poll.js の parseMarker / parseCommentsResponse を再利用
-//   - カーソル・配送状態は .gh-maestro/inbox-supervisor/cursors/<workerName>.json に永続化
+//   - カーソルは .gh-maestro/records/<owner>/<id>/workers/<worker>/cursor.json に永続化
 //   - 配送は Adapter 層（scripts/shared/inbox-adapters/）経由でエージェント種別に応じた方法で行う
 //   - 稼働中のエージェントには一切書き込まず、休止するのを待って resume する
 //   - 休止中のエージェントは pending キューに保持し、再開時に配送
@@ -56,6 +56,7 @@ const { parseMarker } = require('./msg-poll');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { readContract, clearContract } = require('./shared/response-contract');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
+const { ARTIFACTS, legacyWorkerOwner, recordPath, recordRoot } = require('./shared/record-paths');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
 
@@ -150,7 +151,7 @@ let _notifyOrchestrator = ({ workspace, issue, body }) => {
  * @returns {string}
  */
 function stateDir(workspace) {
-  return path.join(workspace, '.gh-maestro', 'inbox-supervisor');
+  return recordRoot(workspace);
 }
 
 /**
@@ -160,7 +161,8 @@ function stateDir(workspace) {
  * @returns {string}
  */
 function cursorPath(workspace, workerName) {
-  return path.join(stateDir(workspace), 'cursors', `${workerName}.json`);
+  const owner = legacyWorkerOwner(workerName);
+  return recordPath(workspace, { ...owner, artifact: ARTIFACTS.CURSOR });
 }
 
 /**

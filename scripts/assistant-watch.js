@@ -33,6 +33,7 @@ const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // 矛盾しない。DRYのため素直に再利用する。
 const { parseMarker } = require('./msg-poll');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
+const { ARTIFACTS, recordPath } = require('./shared/record-paths');
 
 const DEFAULT_INTERVAL_SEC = 20;
 const DEFAULT_WAIT_SEC = 1200;
@@ -129,7 +130,9 @@ let _ghPrView = (repo, prNumber, opts = {}) => {
 // ── state永続化 ──────────────────────────────────────────────────────────
 
 function statePath(workspace, issue) {
-  return path.join(workspace, '.gh-maestro', 'assistant-watch', `${issue}.json`);
+  return recordPath(workspace, {
+    ownerKind: 'issue', ownerId: issue, artifact: ARTIFACTS.ASSISTANT_WATCH,
+  });
 }
 
 /**

@@ -16,6 +16,7 @@ const { spawnSync } = require('./child-process');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { getAssistant, removeAssistant } = require('./shared/assistants-registry');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
+const { ARTIFACTS, recordPath } = require('./shared/record-paths');
 const { pruneExecutionsForIssue } = require('./shared/execution-registry');
 
 const USAGE = `finalize-issue.js — Issue をクローズし、そのIssueの全ワーカーを削除する
@@ -166,7 +167,9 @@ function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn 
   // item2: assistant-watch/<issue>.json 削除。issue はファイル名に使うため正整数検証してから
   // パス構築する（path-confinement ルール）。
   if (/^[1-9]\d*$/.test(String(issue))) {
-    const watchFile = path.join(ghDir, 'assistant-watch', `${issue}.json`);
+    const watchFile = recordPath(workspace, {
+      ownerKind: 'issue', ownerId: issue, artifact: ARTIFACTS.ASSISTANT_WATCH,
+    });
     try {
       if (existsSync(watchFile)) {
         rmSync(watchFile);

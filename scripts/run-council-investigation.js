@@ -102,7 +102,7 @@ function buildInvestigationPrompt({ title, agenda, question }) {
 /**
  * 調査エージェントをヘッドレス起動し、stdout から { findings, sources } を回収・検証する。
  * run-council-jobs.js の launchParticipantJob と同じ直接spawn方式（stdout はパイプで
- * 回収し、stderr は worker-logs へ記録）。調査は1回のみ（使い捨て）。
+ * 回収し、stderr は records 配下のworker.logへ記録）。調査は1回のみ（使い捨て）。
  *
  * スキーマ違反・JSON欠落は exit 0 でも { ok: false } として返す（フェイルクローズ）。
  *
@@ -114,9 +114,10 @@ function buildInvestigationPrompt({ title, agenda, question }) {
  * @param {string} opts.worktreeDir  - ジョブcwd（議論用worktree）
  * @param {string} opts.workspace    - メインワークスペース（workerLogPath 用）
  * @param {number} [opts.timeoutMs]  - ジョブタイムアウト
+ * @param {string} [opts.jobId='council-investigation'] - 記録所有ジョブID
  * @returns {Promise<{ ok: boolean, findings?: string, sources?: string[], error?: string }>}
  */
-async function launchInvestigationJob({ title, agenda, question, agentConfig, worktreeDir, workspace, timeoutMs = DEFAULT_JOB_TIMEOUT_MS }) {
+async function launchInvestigationJob({ title, agenda, question, agentConfig, worktreeDir, workspace, timeoutMs = DEFAULT_JOB_TIMEOUT_MS, jobId = 'council-investigation' }) {
   // 非対話化トークン検証（フェイルクローズ）。実際に起動引数に使う execArgs ?? extraArgs を検証する。
   const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
   if (!tokenCheck.valid) {
@@ -152,7 +153,9 @@ async function launchInvestigationJob({ title, agenda, question, agentConfig, wo
 
   const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
 
-  const logFile = workerLogPath(workspace, 'council-investigation');
+  const logFile = workerLogPath(workspace, 'council-investigation', {
+    ownerKind: 'job', ownerId: jobId, workerName: 'council-investigation',
+  });
   try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); } catch {}
 
   let stderrFd;
@@ -322,6 +325,7 @@ async function runCouncilInvestigation(argv) {
     agentConfig,
     worktreeDir,
     workspace,
+    jobId: session,
   });
   if (!result.ok) {
     process.stderr.write(`Error: investigation job failed: ${result.error}\n`);

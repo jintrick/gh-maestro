@@ -583,11 +583,11 @@ test('superviseReviewManager: spawn error時は即座にprocess-exit-no-artifact
   const testDir = path.join(tmpBase, 'sv-error-imm');
   fs.mkdirSync(testDir, { recursive: true });
 
-  const ghDir = path.join(testDir, 'gh');
+  const ghDir = path.join(testDir, '.gh-maestro');
   const logFile = path.join(testDir, 'rm.log');
   const promptFile = path.join(testDir, 'prompt.md');
-  const lockFile = path.join(testDir, 'review-manager-999.running');
-  const outputFile = path.join(testDir, 'review-manager-999.json');
+  const lockFile = path.join(ghDir, 'records', 'pr', '999', 'review', 'manager.running');
+  const outputFile = path.join(ghDir, 'records', 'pr', '999', 'review', 'manager.json');
 
   const logs = [];
   const log = (msg) => logs.push(msg);
@@ -621,11 +621,11 @@ test('superviseReviewManager: 成果物検出にpollForArtifactを使う（注�
   const testDir = path.join(tmpBase, 'sv-poll-injected');
   fs.mkdirSync(testDir, { recursive: true });
 
-  const ghDir = path.join(testDir, 'gh');
+  const ghDir = path.join(testDir, '.gh-maestro');
   const logFile = path.join(testDir, 'rm.log');
   const promptFile = path.join(testDir, 'prompt.md');
-  const lockFile = path.join(testDir, 'review-manager-998.running');
-  const outputFile = path.join(testDir, 'review-manager-998.json');
+  const lockFile = path.join(ghDir, 'records', 'pr', '998', 'review', 'manager.running');
+  const outputFile = path.join(ghDir, 'records', 'pr', '998', 'review', 'manager.json');
 
   const logs = [];
   const log = (msg) => logs.push(msg);
@@ -722,9 +722,10 @@ test('superviseReviewManager: 無効な成果物は削除され再ポーリン�
 test('clearStaleIncompleteSentinel: 存在するセンチネルを削除する', () => {
   const testDir = path.join(tmpBase, 'stale-sentinel-exists');
   fs.mkdirSync(testDir, { recursive: true });
-  const ghDir = path.join(testDir, 'gh');
+  const ghDir = path.join(testDir, '.gh-maestro');
   fs.mkdirSync(ghDir, { recursive: true });
-  const sentinel = path.join(ghDir, 'review-manager-123.incomplete');
+  const sentinel = path.join(ghDir, 'records', 'pr', '123', 'review', 'manager.incomplete');
+  fs.mkdirSync(path.dirname(sentinel), { recursive: true });
   fs.writeFileSync(sentinel, 'done');
   clearStaleIncompleteSentinel(ghDir, 123);
   assert.ok(!fs.existsSync(sentinel), 'sentinel should be removed');
@@ -733,7 +734,7 @@ test('clearStaleIncompleteSentinel: 存在するセンチネルを削除する',
 test('clearStaleIncompleteSentinel: 存在しなければno-op（エラーにしない）', () => {
   const testDir = path.join(tmpBase, 'stale-sentinel-missing');
   fs.mkdirSync(testDir, { recursive: true });
-  const ghDir = path.join(testDir, 'gh');
+  const ghDir = path.join(testDir, '.gh-maestro');
   fs.mkdirSync(ghDir, { recursive: true });
   // 例外が投げられなければok
   clearStaleIncompleteSentinel(ghDir, 456);
@@ -742,9 +743,10 @@ test('clearStaleIncompleteSentinel: 存在しなければno-op（エラーにし
 test('clearStaleIncompleteSentinel: 別PRのセンチネルは残す', () => {
   const testDir = path.join(tmpBase, 'stale-sentinel-other');
   fs.mkdirSync(testDir, { recursive: true });
-  const ghDir = path.join(testDir, 'gh');
+  const ghDir = path.join(testDir, '.gh-maestro');
   fs.mkdirSync(ghDir, { recursive: true });
-  const other = path.join(ghDir, 'review-manager-999.incomplete');
+  const other = path.join(ghDir, 'records', 'pr', '999', 'review', 'manager.incomplete');
+  fs.mkdirSync(path.dirname(other), { recursive: true });
   fs.writeFileSync(other, 'done');
   clearStaleIncompleteSentinel(ghDir, 123);
   assert.ok(fs.existsSync(other), 'unrelated PR sentinel should remain');

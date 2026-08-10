@@ -49,10 +49,10 @@ afterEach(() => {
 
 // ── workerLogPath ────────────────────────────────────────────────────────────
 
-test('workerLogPath: 1ワーカー1ファイルのパスを .gh-maestro/worker-logs 配下に返す', () => {
+test('workerLogPath: issue所有のrecords配下に返す', () => {
   assert.equal(
     workerLogPath('/ws', 'issue-151-headless'),
-    path.join('/ws', '.gh-maestro', 'worker-logs', 'issue-151-headless.log'),
+    path.join(path.resolve('C:/ws'), '.gh-maestro', 'records', 'issue', '151', 'workers', 'issue-151-headless', 'worker.log'),
   );
 });
 

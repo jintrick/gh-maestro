@@ -169,14 +169,15 @@ test('finalizeIssue: assistant終了失敗はassistantKilled:falseだが、close
 test('cleanupIssueArtifacts: 対象issueの assistant-watch/<N>.json を削除する（項目2）', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-finalize-'));
   try {
-    const watchDir = path.join(dir, '.gh-maestro', 'assistant-watch');
-    fs.mkdirSync(watchDir, { recursive: true });
-    fs.writeFileSync(path.join(watchDir, '42.json'), '{}');
-    fs.writeFileSync(path.join(watchDir, '99.json'), '{}');
+    const watchDir = path.join(dir, '.gh-maestro', 'records', 'issue');
+    fs.mkdirSync(path.join(watchDir, '42'), { recursive: true });
+    fs.mkdirSync(path.join(watchDir, '99'), { recursive: true });
+    fs.writeFileSync(path.join(watchDir, '42', 'assistant-watch.json'), '{}');
+    fs.writeFileSync(path.join(watchDir, '99', 'assistant-watch.json'), '{}');
     const result = cleanupIssueArtifacts(dir, 42, { findReviewPrsFn: () => [] });
     assert.equal(result.watchRemoved, true);
-    assert.ok(!fs.existsSync(path.join(watchDir, '42.json')));
-    assert.ok(fs.existsSync(path.join(watchDir, '99.json')), '他のissueのwatchファイルは残す');
+    assert.ok(!fs.existsSync(path.join(watchDir, '42', 'assistant-watch.json')));
+    assert.ok(fs.existsSync(path.join(watchDir, '99', 'assistant-watch.json')), '他のissueのwatchファイルは残す');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -187,12 +188,14 @@ test('cleanupIssueArtifacts: 対象PRの review-manager-<PR>.incomplete を削�
   try {
     const ghDir = path.join(dir, '.gh-maestro');
     fs.mkdirSync(ghDir, { recursive: true });
-    fs.writeFileSync(path.join(ghDir, 'review-manager-123.incomplete'), 'done');
-    fs.writeFileSync(path.join(ghDir, 'review-manager-999.incomplete'), 'done');
+    fs.mkdirSync(path.join(ghDir, 'records', 'pr', '123', 'review'), { recursive: true });
+    fs.mkdirSync(path.join(ghDir, 'records', 'pr', '999', 'review'), { recursive: true });
+    fs.writeFileSync(path.join(ghDir, 'records', 'pr', '123', 'review', 'manager.incomplete'), 'done');
+    fs.writeFileSync(path.join(ghDir, 'records', 'pr', '999', 'review', 'manager.incomplete'), 'done');
     const result = cleanupIssueArtifacts(dir, 7, { findReviewPrsFn: () => [123] });
     assert.deepEqual(result.incompleteRemoved, [123]);
-    assert.ok(!fs.existsSync(path.join(ghDir, 'review-manager-123.incomplete')));
-    assert.ok(fs.existsSync(path.join(ghDir, 'review-manager-999.incomplete')), '無関係PRのセンチネルは残す');
+    assert.ok(!fs.existsSync(path.join(ghDir, 'records', 'pr', '123', 'review', 'manager.incomplete')));
+    assert.ok(fs.existsSync(path.join(ghDir, 'records', 'pr', '999', 'review', 'manager.incomplete')), '無関係PRのセンチネルは残す');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -218,9 +221,9 @@ test('cleanupIssueArtifacts: executions.json の対象issueレコードだけを
 test('cleanupIssueArtifacts: findReviewPrsFnが例外を投げても他項目は続行する（best-effort）', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-finalize-'));
   try {
-    const watchDir = path.join(dir, '.gh-maestro', 'assistant-watch');
+    const watchDir = path.join(dir, '.gh-maestro', 'records', 'issue', '5');
     fs.mkdirSync(watchDir, { recursive: true });
-    fs.writeFileSync(path.join(watchDir, '5.json'), '{}');
+    fs.writeFileSync(path.join(watchDir, 'assistant-watch.json'), '{}');
     const result = cleanupIssueArtifacts(dir, 5, { findReviewPrsFn: () => { throw new Error('gh down'); } });
     assert.equal(result.watchRemoved, true);
   } finally {

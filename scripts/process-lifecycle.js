@@ -794,14 +794,17 @@ function sweepRegistry(workspace, opts = {}) {
     }
     // 通常ワーカー以外のReview ManagerはPID registryに登録されず、専用の
     // review-manager-<PR>.running leaseだけを持つ。既存のlease契約（PID生存）を
-    // 再利用して、対応する issue-*-review-manager-pr-<PR>.log を保護する。
+    // 再利用して、対応する records/pr/<PR>/review/manager.log を保護する。
     try {
-      const entries = fs.readdirSync(path.join(workspace, '.gh-maestro'));
-      for (const name of entries) {
-        const match = /^review-manager-(\d+)\.running$/.exec(name);
-        if (!match) continue;
+      const { reviewArtifactPath } = require('./shared/review-manager-paths');
+      const ghDir = path.join(workspace, '.gh-maestro');
+      const entries = fs.readdirSync(path.join(ghDir, 'records', 'pr'), { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+        const match = [null, entry.name];
+        const runningPath = reviewArtifactPath(ghDir, match[1], '.running');
         let pid;
-        try { pid = Number(fs.readFileSync(path.join(workspace, '.gh-maestro', name), 'utf8').trim()); } catch { continue; }
+        try { pid = Number(fs.readFileSync(runningPath, 'utf8').trim()); } catch { continue; }
         if (Number.isInteger(pid) && pid > 0 && isProcessAlive(pid)) activeReviewPrs.add(match[1]);
       }
     } catch (e) {

@@ -21,6 +21,7 @@ const path = require('path');
 const { spawn } = require('../child-process');
 const { buildLoginShellExecArgs } = require('../agent-exec');
 const { getProcessStartTime } = require('../process-lifecycle');
+const { ARTIFACTS, legacyWorkerLogPath, recordPath } = require('./record-paths');
 
 const SHIM_PATH = path.join(__dirname, 'headless-shim.js');
 
@@ -68,10 +69,18 @@ let _getProcessStartTime = getProcessStartTime;
  *
  * @param {string} workspace
  * @param {string} workerName
+ * @param {{ownerKind:string, ownerId:string|number, workerName?:string}} [owner]
  * @returns {string}
  */
-function workerLogPath(workspace, workerName) {
-  return path.join(workspace, '.gh-maestro', 'worker-logs', `${workerName}.log`);
+function workerLogPath(workspace, workerName, owner = null) {
+  if (owner) {
+    return recordPath(workspace, {
+      ...owner,
+      workerName: owner.workerName || workerName,
+      artifact: ARTIFACTS.WORKER_LOG,
+    });
+  }
+  return legacyWorkerLogPath(workspace, workerName);
 }
 
 /**

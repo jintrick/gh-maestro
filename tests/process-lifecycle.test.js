@@ -823,14 +823,14 @@ test('sweepRegistry: 生存していないPIDのエントリは cleaned', () => 
 test('sweepRegistry: stale registry掃除とhousekeepingを一連で実行する', () => {
   const plc = loadModule();
   const pidsDir = plc.pidsDir(workspace);
-  const logDir = path.join(workspace, '.gh-maestro', 'worker-logs');
+  const logDir = path.join(workspace, '.gh-maestro', 'records', 'issue', '237', 'workers');
   fs.mkdirSync(pidsDir, { recursive: true });
   fs.mkdirSync(logDir, { recursive: true });
   const staleName = 'issue-237-stale';
   const activeName = 'issue-237-active';
   const reviewPr = '237';
   const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
-  const reviewLockPath = path.join(workspace, '.gh-maestro', `review-manager-${reviewPr}.running`);
+  const reviewLockPath = path.join(workspace, '.gh-maestro', 'records', 'pr', reviewPr, 'review', 'manager.running');
   const leasePath = path.join(workspace, '.gh-maestro', 'leases', `${activeName}.json`);
   const previousWorkers = fs.existsSync(workersPath) ? fs.readFileSync(workersPath) : null;
   fs.writeFileSync(path.join(pidsDir, 'stale.json'), JSON.stringify({
@@ -839,7 +839,9 @@ test('sweepRegistry: stale registry掃除とhousekeepingを一連で実行する
   const noise = '{"type":"system","subtype":"thinking_tokens"}\n';
   fs.writeFileSync(path.join(logDir, `${staleName}.log`), noise);
   fs.writeFileSync(path.join(logDir, `${activeName}.log`), noise);
-  fs.writeFileSync(path.join(logDir, `issue-55-review-manager-pr-${reviewPr}.log`), noise);
+  const reviewLogPath = path.join(workspace, '.gh-maestro', 'records', 'pr', reviewPr, 'review', 'manager.log');
+  fs.mkdirSync(path.dirname(reviewLogPath), { recursive: true });
+  fs.writeFileSync(reviewLogPath, noise);
   fs.mkdirSync(path.dirname(leasePath), { recursive: true });
   fs.writeFileSync(workersPath, JSON.stringify({ [activeName]: { pid: process.pid, startTime: null } }));
   fs.writeFileSync(leasePath, JSON.stringify({ pid: process.pid, workerName: activeName }));
@@ -854,7 +856,7 @@ test('sweepRegistry: stale registry掃除とhousekeepingを一連で実行する
     // したがって stale ログも圧縮されず、中身がそのまま残る。
     assert.equal(results.housekeeping.compacted.length, 0);
     assert.equal(fs.readFileSync(path.join(logDir, `${activeName}.log`), 'utf8'), noise);
-    assert.equal(fs.readFileSync(path.join(logDir, `issue-55-review-manager-pr-${reviewPr}.log`), 'utf8'), noise);
+    assert.equal(fs.readFileSync(reviewLogPath, 'utf8'), noise);
     assert.equal(fs.readFileSync(path.join(logDir, `${staleName}.log`), 'utf8'), noise);
   } finally {
     for (const p of [path.join(pidsDir, 'stale.json'), path.join(pidsDir, 'active.json')]) {

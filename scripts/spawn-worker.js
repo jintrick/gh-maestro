@@ -83,7 +83,7 @@ Output (stdout):
   ワーカー名（例: issue-5-coder-implement）
 
 ワーカーは画面を持たないバックグラウンドプロセスとして起動し、標準出力/標準エラーは
-<workspace>/.gh-maestro/worker-logs/<worker>.log へ実行中から逐次書き込まれる。`;
+<workspace>/.gh-maestro/records/issue/<N>/workers/<worker>/worker.log へ実行中から逐次書き込まれる。`;
 
 /**
  * ワーカーエントリをworkers.jsonから除去すべき（stale）か判定する。

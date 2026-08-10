@@ -17,6 +17,7 @@ const { parseFlags } = require('./shared/workspace');
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS } = require('./shared/review-aspects');
 const { _validateAgainstSchema } = require('./shared/json-schema');
 const { atomicWriteJson } = require('./shared/atomic-write');
+const { reviewArtifactPath } = require('./shared/review-manager-paths');
 
 const USAGE = `finalize-review.js — 完全性ゲート検証後、正式findings JSON書き出しまたは不完全コメント投稿
 
@@ -293,7 +294,7 @@ function buildIncompleteComment(results, gateResult) {
  * @param {number} pr
  */
 function writeSentinel(workspace, pr) {
-  const sentinelPath = path.join(workspace, '.gh-maestro', `review-manager-${pr}.incomplete`);
+  const sentinelPath = reviewArtifactPath(path.join(workspace, '.gh-maestro'), pr, '.incomplete');
   try {
     fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
     fs.writeFileSync(sentinelPath, JSON.stringify({

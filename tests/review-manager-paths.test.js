@@ -33,10 +33,10 @@ test('assertValidPr rejects path-traversal payloads', () => {
 
 // ── reviewArtifactPath ───────────────────────────────────────────────────
 
-test('reviewArtifactPath builds a path inside ghDir', () => {
+test('reviewArtifactPath builds a PR-owned records path', () => {
   const ghDir = path.resolve('C:/ws/.gh-maestro');
   const result = reviewArtifactPath(ghDir, '42', '.running');
-  assert.equal(result, path.join(ghDir, 'review-manager-42.running'));
+  assert.equal(result, path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.running'));
 });
 
 test('reviewArtifactPath rejects a path-traversal pr before building any path', () => {
@@ -44,12 +44,11 @@ test('reviewArtifactPath rejects a path-traversal pr before building any path', 
   assert.throws(() => reviewArtifactPath(ghDir, '../../evil', '.running'), /invalid PR number/);
 });
 
-test('reviewArtifactPath: .log は ghDir 直下ではなく通常ワーカーと共通のworkerLogPath()配下に置く（ログ保存先の統一）', () => {
+test('reviewArtifactPath: .log はPR recordsのreview配下に置く', () => {
   const workspace = path.resolve('C:/ws');
   const ghDir = path.join(workspace, '.gh-maestro');
   const result = reviewArtifactPath(ghDir, '42', '.log');
-  assert.equal(result, workerLogPath(workspace, 'review-manager-42'));
-  assert.equal(result, path.join(workspace, '.gh-maestro', 'worker-logs', 'review-manager-42.log'));
+  assert.equal(result, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.log'));
 });
 
 test('reviewArtifactPath: .log でもpath-traversalなprは拒否される', () => {

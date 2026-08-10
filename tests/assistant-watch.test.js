@@ -215,7 +215,7 @@ describe('main: writeState失敗耐性', () => {
       watch._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
       stubOk();
       // state ファイルの位置をディレクトリ化 → writeState（rename）が常に失敗する
-      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'assistant-watch', '5.json'), { recursive: true });
+      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'records', 'issue', '5', 'assistant-watch.json'), { recursive: true });
 
       const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '1']);
       assert.equal(r.code, 0);
@@ -245,7 +245,7 @@ describe('main: writeState失敗耐性', () => {
         },
       });
       // state ファイルの位置をディレクトリ化 → writeState（rename）が常に失敗する
-      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'assistant-watch', '5.json'), { recursive: true });
+      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'records', 'issue', '5', 'assistant-watch.json'), { recursive: true });
 
       const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '5']);
       assert.equal(r.code, 0);
@@ -274,7 +274,7 @@ describe('main: writeState失敗耐性', () => {
       });
       // state ファイルの位置をディレクトリ化 → writeState が常に失敗し、連続失敗が閾値(5)に達する
       // （Windows では EPERM リトライで1回約500ms のため、--wait 3 で約5回積もる）。
-      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'assistant-watch', '5.json'), { recursive: true });
+      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'records', 'issue', '5', 'assistant-watch.json'), { recursive: true });
 
       const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '3']);
       assert.equal(r.code, 0);
