@@ -1,6 +1,6 @@
 'use strict';
 
-const { test, beforeEach } = require('node:test');
+const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const os = require('os');
 const path = require('path');
@@ -10,6 +10,12 @@ const { EventEmitter } = require('events');
 const mod = require('../scripts/shared/ensure-inbox-supervisor');
 const { ensureInboxSupervisorRunning } = mod;
 const workerLease = require('../scripts/shared/worker-lease');
+const migrationMarker = require('../scripts/shared/migration-marker');
+const {
+  isProcessAlive,
+  getProcessStartTime,
+  verifyProcessIdentity,
+} = require('../scripts/process-lifecycle');
 
 function fakeChild() {
   const emitter = new EventEmitter();
@@ -29,6 +35,13 @@ beforeEach(() => {
   // 既定は実装（worker-lease.isResidentLeaseLive）。テスト用 temp workspace には
   // lease が無いため false を返し、既存テストの挙動を変えない。
   mod._setIsResidentLeaseLive(workerLease.isResidentLeaseLive);
+});
+
+afterEach(() => {
+  // マーカーの生存確認注入を実装へ戻す（テスト間で持ち越さない）
+  migrationMarker._setIsProcessAlive(isProcessAlive);
+  migrationMarker._setGetProcessStartTime(getProcessStartTime);
+  migrationMarker._setVerifyProcessIdentity(verifyProcessIdentity);
 });
 
 test('ensureInboxSupervisorRunning: detached・windowsHide付きでinbox-supervisor.jsをspawnする', () => {
@@ -93,6 +106,42 @@ test('ensureInboxSupervisorRunning: 既にSupervisorが稼働中ならspawnも�
 
   assert.equal(spawnCalled, false);
   assert.equal(resolveCalled, false);
+});
+
+test('ensureInboxSupervisorRunning: 所有プロセス生存中の.migration-in-progressマーカー存在時はspawnもセッションPID解決も行わない（Issue #256）', () => {
+  // 有効なマーカー（所有プロセス生存）を作成する
+  migrationMarker._setGetProcessStartTime(() => '2026-08-01T00:00:00.000Z');
+  migrationMarker._setIsProcessAlive(() => true);
+  migrationMarker._setVerifyProcessIdentity(() => ({ match: true }));
+  migrationMarker.markMigrationInProgress(workspace);
+  mod._setFindRunningInstance(() => null);
+  let spawnCalled = false;
+  let resolveCalled = false;
+  mod._setSpawn(() => { spawnCalled = true; return fakeChild(); });
+  mod._setFindSessionRootPid(() => { resolveCalled = true; return 12345; });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.equal(spawnCalled, false);
+  assert.equal(resolveCalled, false);
+});
+
+test('ensureInboxSupervisorRunning: 所有プロセスが死んだstaleマーカーは無視して自動起動する（自己回復）', () => {
+  // 移行プロセスが強制終了して削除されずに残ったマーカー（所有プロセスは死んでいる）
+  migrationMarker._setGetProcessStartTime(() => '2026-08-01T00:00:00.000Z');
+  migrationMarker._setIsProcessAlive(() => false);
+  migrationMarker.markMigrationInProgress(workspace);
+  assert.equal(migrationMarker.isMigrationInProgress(workspace), false);
+  mod._setFindRunningInstance(() => null);
+  let spawnCalled = false;
+  let resolveCalled = false;
+  mod._setSpawn(() => { spawnCalled = true; return fakeChild(); });
+  mod._setFindSessionRootPid(() => { resolveCalled = true; return 12345; });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.equal(spawnCalled, true);
+  assert.equal(resolveCalled, true);
 });
 
 test('ensureInboxSupervisorRunning: 稼働中判定が例外を投げてもfail-openでspawnを試みる', () => {

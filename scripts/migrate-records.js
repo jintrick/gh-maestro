@@ -10,6 +10,9 @@ const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspac
 const { isProcessAlive } = require('./process-lifecycle');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
+const { getAssistant } = require('./shared/assistants-registry');
+const { markMigrationInProgress, clearMigrationInProgress } = require('./shared/migration-marker');
+const { runningInboxSupervisorPids, stopRunningInboxSupervisors } = require('./shared/inbox-supervisor-control');
 const {
   ARTIFACTS, assertWithinRoot, legacyWorkerOwner, recordPath, recordRoot,
 } = require('./shared/record-paths');
@@ -26,7 +29,16 @@ Options:
   --help, -h          このヘルプを表示する
 
 出力分類: moved, already-migrated, held, conflict, unparseable, unprocessed。
-対象は指定workspaceの .gh-maestro/ 配下だけで、記録内容・保持期間・削除条件は変更しない。`;
+対象は指定workspaceの .gh-maestro/ 配下だけで、記録内容・保持期間・削除条件は変更しない。
+
+--scope が inbox-supervisor または all の場合:
+  - 稼働中の inbox-supervisor を検知し、ツール自身が停止してから移行する
+    （--dry-run では停止せず、notices に「実実行時に停止する」旨を出す）
+  - 実行中は .gh-maestro/.migration-in-progress マーカーを作成して inbox-supervisor の
+    自動起動を抑制し、完了時に削除する（再開は既存の自動起動機構に任せる）
+assistant-watch は、対象issueのassistantが assistants.json に登録されている間は
+held（assistant agent is running）となり移行しない（対話型assistantは強制終了しない）。
+出力JSONには notices 配列が含まれ、プロセスの停止・検知情報が記録される。`;
 
 const SCOPES = new Set(['all', 'worker-log', 'review-manager', 'inbox-supervisor', 'assistant-watch']);
 
@@ -107,8 +119,12 @@ function classifyScoped(workspace, source, component, file) {
   }
   if (component === 'inbox-supervisor') {
     const owner = legacyWorkerOwner(file.name.replace(/\.json$/, ''));
-    const artifact = source.includes(`${path.sep}cursors${path.sep}`)
-      ? ARTIFACTS.CURSOR : ARTIFACTS.CONTRACT;
+    // source はこのファイルが置かれているディレクトリ（inbox-supervisor/cursors or
+    // inbox-supervisor/contracts）。ディレクトリ名でアーティファクトを判定する。
+    // 旧実装はファイルパスに対する contains 判定をしていたが、呼び出し側が dir を
+    // 渡しており `\cursors\` に永遠に一致せず、cursors/ の全ファイルが contract.json に
+    // 移行されてしまう不具合があった（Issue #256 の実機検証で発見）。
+    const artifact = source.endsWith(`${path.sep}cursors`) ? ARTIFACTS.CURSOR : ARTIFACTS.CONTRACT;
     return { kind: component, owner, artifact,
       destination: recordPath(workspace, { ...owner, artifact }) };
   }
@@ -140,6 +156,23 @@ function ownerIsLive(workspace, item) {
   try { return isWorkerAlive(entry); } catch { return true; }
 }
 
+/**
+ * 対象レコードを移行せず held にすべき理由を返す（なければ null）。
+ *
+ * assistant-watch は対象issueの対話型assistantが assistants.json に登録されている間は
+ * 無条件で held とする。assistant は人間が会話中の可能性がある窓口であり、ツールが
+ * 強制終了・状態移行を行ってはならない（Issue #256）。assistants.json の読み取りは
+ * loadAssistants の「存在しない・壊れている場合は空として扱う」規約に従い、読めない
+ * 場合は assistant が登録されていないものとして移行を許可する。
+ */
+function holdReason(workspace, item) {
+  if (item.kind === 'assistant-watch' && getAssistant(workspace, item.ownerId) !== null) {
+    return 'assistant agent is running';
+  }
+  if (ownerIsLive(workspace, item)) return 'owner process is live';
+  return null;
+}
+
 function sameBytes(a, b) {
   try { return fs.readFileSync(a).equals(fs.readFileSync(b)); } catch { return false; }
 }
@@ -148,8 +181,9 @@ function migrateOne(workspace, item, source, out, dryRun) {
   const records = recordRoot(workspace);
   const sourcePath = path.resolve(source);
   const destination = assertWithinRoot(records, item.destination);
-  if (ownerIsLive(workspace, item)) {
-    out.held.push({ source: sourcePath, destination, reason: 'owner process is live' });
+  const reason = holdReason(workspace, item);
+  if (reason) {
+    out.held.push({ source: sourcePath, destination, reason });
     return;
   }
   if (fs.existsSync(destination)) {
@@ -192,32 +226,89 @@ function planMigration(workspace, scope, { dryRun = false } = {}) {
   return out;
 }
 
-function printResult(workspace, scope, dryRun, out) {
+function printResult(workspace, scope, dryRun, out, notices = []) {
   const summary = {
     workspace, scope, dryRun,
     counts: Object.fromEntries(Object.entries(out).map(([key, values]) => [key, values.length])),
     details: out,
+    notices,
   };
   console.log(JSON.stringify(summary, null, 2));
   return out.conflicts.length || out.unparseable.length || out.held.length || out.unprocessed.length ? 1 : 0;
 }
 
-if (require.main === module) {
-  const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--scope'], ['--dry-run']);
-  if (hasHelpFlag(rest)) { console.log(USAGE); process.exit(0); }
-  if (exitFlagMiss || rest.length > 0) { console.error(USAGE); process.exit(1); }
-  const scope = values['--scope'] || 'all';
-  if (!SCOPES.has(scope)) { console.error(`migrate-records: invalid scope: ${scope}`); console.error(USAGE); process.exit(1); }
-  const workspace = resolveWorkspace(values['--workspace']);
-  if (!workspace) { console.error('migrate-records: ワークスペースを解決できません。'); process.exit(1); }
+function shouldControlInboxSupervisor(scope) {
+  return scope === 'all' || scope === 'inbox-supervisor';
+}
+
+/**
+ * inbox-supervisor の停止・自動起動抑制を移行実行の前後に適用する。
+ *
+ * - scope が対象外なら fn を素通しする
+ * - dry-run は副作用なし（停止・マーカー作成を行わない）。稼働中の supervisor が
+ *   いれば notice で「実実行時に停止する」旨を返す
+ * - 実実行は、マーカーを作成して自動起動を抑制 → 稼働中 supervisor を停止 → fn →
+ *   finally でマーカーを確実に削除する。inbox-supervisor の再開は既存の自動起動機構
+ *   （ensure-inbox-supervisor.js）が次に必要とした時点で引き受けるため、ここでは
+ *   明示的に再起動しない
+ * - 万一マーカー削除前にこのプロセスが強制終了されても、マーカーは所有 pid・起動時刻を
+ *   記録しており、ensure側（isMigrationInProgress）が所有プロセスの生存を確認して
+ *   stale を無視するため、自動起動の抑制が永久に残ることはない（自己回復）
+ *
+ * マーカー作成を停止より先に行うのは、kill→mark の順だと抑制が確立する前に並行する
+ * msg-send.js / spawn-worker.js が supervisor を再起動しうる窓が残るため（Issue #256）。
+ *
+ * @param {string} workspace
+ * @param {string} scope
+ * @param {{dryRun: boolean}} opts
+ * @param {(notice: string|null) => *} fn  実行本体。notice 文字列を引数で受け取る
+ * @returns {*} fn の戻り値
+ */
+function runWithInboxSupervisorControl(workspace, scope, { dryRun }, fn) {
+  if (!shouldControlInboxSupervisor(scope)) return fn(null);
+
+  const running = runningInboxSupervisorPids(workspace);
+  if (dryRun) {
+    return fn(running.length
+      ? `inbox-supervisor は稼働中です（pid: ${running.join(', ')}）。実実行時に停止してから移行します。`
+      : null);
+  }
+
+  markMigrationInProgress(workspace);
   try {
-    const out = planMigration(workspace, scope, { dryRun: !!values['--dry-run'] });
-    process.exit(printResult(workspace, scope, !!values['--dry-run'], out));
+    const stopped = stopRunningInboxSupervisors(workspace);
+    return fn(stopped.length
+      ? `稼働中の inbox-supervisor（pid: ${stopped.join(', ')}）を停止しました。移行完了後に自動起動機構が再開します。`
+      : null);
+  } finally {
+    clearMigrationInProgress(workspace);
+  }
+}
+
+function main(argv) {
+  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--scope'], ['--dry-run']);
+  if (hasHelpFlag(rest)) { console.log(USAGE); return 0; }
+  if (exitFlagMiss || rest.length > 0) { console.error(USAGE); return 1; }
+  const scope = values['--scope'] || 'all';
+  if (!SCOPES.has(scope)) { console.error(`migrate-records: invalid scope: ${scope}`); console.error(USAGE); return 1; }
+  const workspace = resolveWorkspace(values['--workspace']);
+  if (!workspace) { console.error('migrate-records: ワークスペースを解決できません。'); return 1; }
+  const dryRun = !!values['--dry-run'];
+  try {
+    const notices = [];
+    const out = runWithInboxSupervisorControl(workspace, scope, { dryRun }, (notice) => {
+      if (notice) notices.push(notice);
+      return planMigration(workspace, scope, { dryRun });
+    });
+    return printResult(workspace, scope, dryRun, out, notices);
   } catch (e) {
     console.error(`migrate-records: ${e.message}`);
-    process.exit(1);
+    return 1;
   }
+}
+
+if (require.main === module) {
+  process.exit(main(process.argv.slice(2)));
 }
 
 module.exports = {
@@ -226,4 +317,7 @@ module.exports = {
   classifyDirectReview,
   planMigration,
   ownerIsLive,
+  shouldControlInboxSupervisor,
+  runWithInboxSupervisorControl,
+  main,
 };

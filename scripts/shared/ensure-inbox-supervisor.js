@@ -27,6 +27,10 @@
 // 無駄なspawnと毎回のセッションPID解決コストを避ける）。この関数はbest-effortの
 // fire-and-forgetであり、起動の成否を待たず・呼び出し元をブロックしない。
 //
+// migrate-records.js の移行実行中（.gh-maestro/.migration-in-progress マーカー存在中）も
+// 自動起動をスキップする。移行中に復活すると、移行先の空状態で記録を上書きしかける
+// 事故が実際に起きたため（Issue #256）。マーカーの作成・削除は migrate-records.js が行う。
+//
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
@@ -35,6 +39,7 @@ const path = require('path');
 const { spawn } = require('../child-process');
 const { findSessionRootPid, findRunningInstance } = require('../process-lifecycle');
 const { isResidentLeaseLive, INBOX_SUPERVISOR_ROLE } = require('./worker-lease');
+const { isMigrationInProgress } = require('./migration-marker');
 
 let _spawn = (cmd, args, opts) => spawn(cmd, args, opts);
 let _findSessionRootPid = findSessionRootPid;
@@ -51,6 +56,11 @@ let _isResidentLeaseLive = isResidentLeaseLive;
  */
 function ensureInboxSupervisorRunning({ workspace, scriptsPath }) {
   if (!workspace || !scriptsPath) return;
+
+  // migrate-records.js の移行実行中（マーカーファイル存在中）は自動起動を見送る。
+  // 移行中に復活すると移行先の空状態で記録を上書きしかけるため（Issue #256）。
+  // 既存の live 判定と同様、起動を見送るだけで例外は投げない。
+  if (isMigrationInProgress(workspace)) return;
 
   try {
     if (_findRunningInstance(workspace, { script: 'inbox-supervisor.js', workerName: null })) {
