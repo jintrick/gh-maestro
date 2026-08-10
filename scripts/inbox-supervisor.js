@@ -956,6 +956,9 @@ function main(argsOverride, opts = {}) {
   };
 }
 
+let _readContract = readContract;
+let _clearContract = clearContract;
+
 // ── CLI エントリポイント ──────────────────────────────────────────────────
 
 if (require.main === module) {
@@ -1016,9 +1019,6 @@ if (require.main === module) {
     setInterval(ru, result.intervalMs);
   }
 }
-
-let _readContract = readContract;
-let _clearContract = clearContract;
 
 // ── テスト用 export ──────────────────────────────────────────────────────
 
