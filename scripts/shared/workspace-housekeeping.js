@@ -115,8 +115,11 @@ function sweepWorkspaceFiles(workspace, { activeWorkerNames = new Set(), activeR
     const workerIndex = relative.indexOf('workers');
     const workerName = workerIndex >= 0 ? relative[workerIndex + 1] : null;
     const prMatch = /^pr$/.test(relative[0]) ? relative[1] : null;
+    const reviewManagerWorker = workerName && prMatch
+      && workerName.endsWith(`-review-manager-pr-${prMatch}`);
     if ((workerName && activeWorkerNames.has(workerName))
-      || (prMatch && relative.includes('review') && activeReviewPrs.has(prMatch))) continue;
+      || (prMatch && activeReviewPrs.has(prMatch)
+        && (relative.includes('review') || reviewManagerWorker))) continue;
     if (!isRegularFile(logPath)) continue;
     if (dryRun) {
       try { if (fs.statSync(logPath).size > MAX_WORKER_LOG_BYTES) results.rotated.push(logPath); } catch {}

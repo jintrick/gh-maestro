@@ -46,6 +46,23 @@ test('sweepWorkspaceFiles: 完了ログを圧縮せず、残った肥大ログ�
   }
 });
 
+test('sweepWorkspaceFiles: 稼働中Review Managerのworker logをローテーションから保護する', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-housekeeping-'));
+  try {
+    const workerName = 'issue-5-review-manager-pr-42';
+    const logDir = path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'workers', workerName);
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, 'worker.log');
+    fs.writeFileSync(logPath, 'x'.repeat(MAX_WORKER_LOG_BYTES + 1));
+    const result = sweepWorkspaceFiles(workspace, { activeReviewPrs: new Set(['42']) });
+    assert.ok(!result.rotated.includes(logPath));
+    assert.equal(fs.existsSync(`${logPath}.1`), false);
+    assert.equal(fs.statSync(logPath).size, MAX_WORKER_LOG_BYTES + 1);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 // ── Issue #248 項目8: sweepはログ圧縮を一切行わない ──────────────────────────
 // PR #239 の回帰対策。圧縮は worker-exit-hook.js（ワーカー終了後の安全なタイミング）と
 // 手動CLI cleanup-worker-logs.js のみが行う。sweepは稼働中ログに触れる圧縮経路を持たない。
