@@ -95,6 +95,22 @@ test('ensureInboxSupervisorRunning: 既にSupervisorが稼働中ならspawnも�
   assert.equal(resolveCalled, false);
 });
 
+test('ensureInboxSupervisorRunning: .migration-in-progressマーカー存在中はspawnもセッションPID解決も行わない（Issue #256）', () => {
+  const gh = path.join(workspace, '.gh-maestro');
+  fs.mkdirSync(gh, { recursive: true });
+  fs.writeFileSync(path.join(gh, '.migration-in-progress'), '');
+  mod._setFindRunningInstance(() => null);
+  let spawnCalled = false;
+  let resolveCalled = false;
+  mod._setSpawn(() => { spawnCalled = true; return fakeChild(); });
+  mod._setFindSessionRootPid(() => { resolveCalled = true; return 12345; });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.equal(spawnCalled, false);
+  assert.equal(resolveCalled, false);
+});
+
 test('ensureInboxSupervisorRunning: 稼働中判定が例外を投げてもfail-openでspawnを試みる', () => {
   mod._setFindRunningInstance(() => { throw new Error('registry read failed'); });
   let spawnCalled = false;

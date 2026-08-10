@@ -90,6 +90,8 @@ EOF
 
 **dead-man's switch（親セッション死活監視）が監視するPIDは、起動を呼び出した`spawn-worker.js`/`msg-send.js`自身が、まだ生存しているうちに解決して`--session-pid`で明示的に子へ渡す。** `inbox-supervisor.js`はdetachedかつfire-and-forgetで起動されるため、起動直後には呼び出し元（使い捨てのCLIプロセス）が既に終了していることがある。もし子自身に解決を委ねると、子の直近の親（=その使い捨てCLI）が消えた時点でそこより上のセッション本体への遡行が失敗し、消えて当然の使い捨てCLIを「オーケストレーターセッション本体」と誤認して、オーケストレーターが生きているにもかかわらず起動直後（3スキャン周期以内）に自滅する実障害があった。この理由により、この解決処理を子（`inbox-supervisor.js`）側に戻す変更は行わないこと。
 
+**`migrate-records.js` の移行実行中は、inbox-supervisor の自動起動が一時的に抑制される（Issue #256）。** 移行対象の scope が `inbox-supervisor` または `all` のとき、移行ツール自身が稼働中の inbox-supervisor を検知・停止し、`.gh-maestro/.migration-in-progress` マーカーを立てて自動起動を抑止した状態で移行し、完了時にマーカーを削除する。マーカーが存在する間、`ensureInboxSupervisorRunning`（spawn-worker.js / msg-send.js 経由）は起動を見送る。移行後の再開は既存の自動起動機構が次に必要とした時点で行われるため、orchestrator・人間がプロセスを手動で止めたり立ち上げたりする必要はない。`--dry-run` では停止もマーカー作成も行われない（プレビューのみ）。
+
 ## resume配送の失敗
 
 workerへの配送のうち、**相手のプロセスが稼働中（作業中）で見送っているだけの状態は、いくら長引いても「失敗」としてカウントされない**（休止するまで無期限に待つ）。resumeを実際に試みて失敗した場合（worktree消失・プロセス起動失敗等）のみ、5回の指数バックオフ再試行の末に配送を諦める。workerに指示を送ったのに長時間反応しない場合、`.gh-maestro/inbox-supervisor-autostart.log`（自動起動時のログ）または起動元セッションのバックグラウンド出力を確認し、`DELIVERY_FAILED:<workerName>:<commentId>:resume-failed`（`pending`ではなく`resume-failed`であること）の有無とエラー内容を確認すること。
