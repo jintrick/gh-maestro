@@ -870,6 +870,71 @@ describe('runOnce scan and deliver cycle', () => {
     });
   });
 
+  // ── Issue #250: writeCursor の EPERM 失敗への耐性 ───────────────────────
+  // カーソルファイルの位置をディレクトリ化すると rename（writeCursor）が必ず失敗する。
+  // Windows では EPERM（リトライ対象）で約500ms粘ってから throw、Linux では即 throw と
+  // 差異はあるが、いずれも「プロセスを止めず次サイクルで再試行する」ことが目的なので
+  // プラットフォーム非依存のテストとして両OSで実行する。
+
+  test('writeCursor が失敗しても runOnce はクラッシュせず配送と SCAN_END まで進む', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([
+      {
+        id: 100,
+        created_at: '2024-06-01T12:00:00Z',
+        body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test',
+      },
+    ]));
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+      // カーソルファイルの位置をディレクトリ化 → writeCursor（rename）が失敗する
+      fs.mkdirSync(path.join(dir, '.gh-maestro', 'inbox-supervisor', 'cursors', 'issue-5-fix.json'), { recursive: true });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      // throw せず最後まで進む（常駐プロセスが落ちない）
+      assert.doesNotThrow(() => r.runOnce());
+      // 配送は行われ、カーソル保存だけ失敗して stderr に記録される
+      assert.ok(r.lines.some(l => l === 'DELIVERED:issue-5-fix:100'), `Lines: ${r.lines.join('\n')}`);
+      assert.ok(r.lines.some(l => l.includes('SCAN_END:1:1')), `Lines: ${r.lines.join('\n')}`);
+      assert.ok(r.errLines.some(l => l.includes('カーソル保存に失敗')), `errLines: ${r.errLines.join('\n')}`);
+    });
+  });
+
+  test('writeCursor が失敗し続けてもメモリキャッシュで重複配送しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([
+      {
+        id: 100,
+        created_at: '2024-06-01T12:00:00Z',
+        body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test',
+      },
+    ]));
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+      // 全サイクルで writeCursor が失敗するため、ディスクのカーソルは常に初期状態のまま
+      fs.mkdirSync(path.join(dir, '.gh-maestro', 'inbox-supervisor', 'cursors', 'issue-5-fix.json'), { recursive: true });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce(); // 1サイクル目: 配送するが writeCursor 失敗（ディスクは初期のまま）
+      r.runOnce(); // 2サイクル目: ディスクが巻き戻っていてもメモリキャッシュで重複配送しない
+
+      const delivered = r.lines.filter(l => l === 'DELIVERED:issue-5-fix:100');
+      assert.equal(delivered.length, 1, `Expected exactly 1 DELIVERED, got ${delivered.length}: ${r.lines.join('\n')}`);
+    });
+  });
+
   test('既読メッセージは再検出しない（seenIds 重複防止）', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([

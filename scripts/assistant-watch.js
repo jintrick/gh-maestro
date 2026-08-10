@@ -24,6 +24,7 @@
 const fs = require('fs');
 const path = require('path');
 const { atomicWriteJson } = require('./shared/atomic-write');
+const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
 const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
@@ -324,6 +325,19 @@ function parseArgs(args) {
 
 // ── メインロジック ──────────────────────────────────────────────────────
 
+// orchestrator への書き込み連続失敗の警告（Issue #250）。テストで注入可能。
+// inbox-supervisor.js の _notifyOrchestrator と同型。msg-send.js は本文を位置引数で
+// 受け付けない（--stdin / --body-file のみ）ため、spawnSync の input で stdin 経由に渡す。
+let _notifyOrchestrator = ({ workspace, issue, body }) => {
+  return spawnSync(process.execPath, [
+    path.join(__dirname, 'msg-send.js'),
+    '--stdin',
+    '--from', 'assistant-watch',
+    '--issue', issue,
+    '--workspace', workspace,
+  ], { encoding: 'utf8', input: body });
+};
+
 let _sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -390,6 +404,26 @@ async function main(argsOverride) {
   const isFirstEverRun = existingState === null;
   const state = existingState || { lastCommentId: 0, prs: {} };
 
+  // ── 書き込み連続失敗の警告（Issue #250） ─────────────────────────────
+  // writeState の失敗（他プロセスが state ファイルを掴んでいる等の EPERM）は次のサイクル
+  // で再試行されるが、連続失敗が続くと state がディスクに永続化されないまま時間が経過
+  // する。閾値（5回≒約100秒）に達したら orchestrator へ警告する。
+  const writeFailureMonitor = createWriteFailureMonitor({
+    notify: ({ count, detail }) => {
+      const body = `⚠️ assistant-watch の状態書き込みが ${count} 回連続で失敗しています（他プロセスが state ファイルを掴んでいる可能性）。最新のエラー: ${detail}`;
+      let res;
+      try {
+        res = _notifyOrchestrator({ workspace, issue, body });
+      } catch (e) {
+        err.push(`assistant-watch: 書き込み連続失敗の警告の送信に失敗: ${e.message}`);
+        return;
+      }
+      if (res.status !== 0) {
+        err.push(`assistant-watch: 書き込み連続失敗の警告の送信に失敗: ${(res.stderr || '').trim()}`);
+      }
+    },
+  });
+
   const waitMs = waitSec * 1000;
   const intervalMs = intervalSec * 1000;
   const start = Date.now();
@@ -398,10 +432,24 @@ async function main(argsOverride) {
   while (true) {
     const { events, errors } = scanOnce({ workspace, ghDir, repo, issue, state, isBaseline, ghOpts });
     for (const e of errors) err.push(`assistant-watch: ${e}`);
-    writeState(workspace, issue, state);
+
+    // 状態の永続化は他プロセスが state ファイルを掴んでいる等で EPERM 失敗しうる
+    // （Issue #250）。例外はここで捕捉してプロセスを止めず、次サイクルで再試行する。
+    try {
+      writeState(workspace, issue, state);
+      writeFailureMonitor.onSuccess();
+    } catch (e) {
+      err.push(`assistant-watch: 状態の保存に失敗しました: ${e.message}`);
+      writeFailureMonitor.onFailure(e.message);
+    }
     isBaseline = false; // ベースライン確立はループ最初の1サイクルのみ
 
     if (events.length > 0) {
+      // 永続化に失敗しても、検出済みイベントは握り潰さずに出力して返す（msg-poll.js の
+      // 「出力→記録」と同様、クラッシュ時は重複側に倒れる）。state は in-place 更新される
+      // ため、ここで返さず continue すると次サイクルの scanOnce は同じイベントを再検出
+      // できず喪失する。未保存のため次回起動時に再検出され重複 EVENT になり得るが、
+      // それは握り潰しより望ましい。
       for (const e of events) out.push(`EVENT ${JSON.stringify(e)}`);
       return { code: 0, lines: out, errLines: err };
     }
@@ -431,6 +479,7 @@ module.exports = {
   _setGhFindPr: (fn) => { _ghFindPr = fn; },
   _setGhPrView: (fn) => { _ghPrView = fn; },
   _setSleep: (fn) => { _sleep = fn; },
+  _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
   main,
   parseArgs,
   scanOnce,

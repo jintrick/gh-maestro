@@ -480,6 +480,44 @@ test('gh api の JSON が壊れている場合にスキップ', () => {
   });
 });
 
+// ── 書き込み失敗耐性（Issue #250） ─────────────────────────────────────────
+// markReadMany（既読の永続化）が他プロセスに msg-state を掴まれている等で EPERM を
+// throw しても、常駐プロセスをクラッシュさせず次サイクルで再試行する。NEW_MESSAGE は
+// 出力済みなので「重複通知」側に倒れる（握り潰しはしない）。
+
+test('markReadMany が EPERM で throw しても scanOnce はクラッシュせず NEW_MESSAGE を出力済みのまま終わる', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        { id: 555, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nHello', created_at: '2026-07-07T12:00:00Z' },
+      ]),
+    }));
+    // 警告は本物の msg-send.js を spawn させないようスタブする
+    msgPoll._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+
+    const originalMarkReadMany = readStateLib.markReadMany;
+    readStateLib.markReadMany = () => {
+      const err = new Error('simulated rename EPERM (Issue #250)');
+      err.code = 'EPERM';
+      throw err;
+    };
+    try {
+      const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+      assert.equal(r.code, 0);
+      // throw しても scanOnce は例外を外に漏らさない（常駐プロセスが落ちない）
+      assert.doesNotThrow(() => r.scanOnce());
+      // NEW_MESSAGE は出力済み（出力→記録の順、重複側に倒れる）
+      assert.ok(r.lines.some(l => l === 'NEW_MESSAGE:555'), `Expected NEW_MESSAGE:555 in: ${r.lines.join('|')}`);
+      // 失敗は stderr に記録される
+      assert.ok(r.errLines.some(l => l.includes('既読状態の更新で例外')), `Expected write failure log in: ${r.errLines.join('|')}`);
+    } finally {
+      readStateLib.markReadMany = originalMarkReadMany;
+    }
+  });
+});
+
 // ── orchestrator モード ────────────────────────────────────────────────────
 
 test('orchestrator モード: 複数 issue をスキャンする', () => {

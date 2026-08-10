@@ -202,6 +202,59 @@ describe('main: worker_report検知', () => {
   });
 });
 
+// ── Issue #250: writeState の EPERM 失敗への耐性 ────────────────────────────
+// state ファイルの位置をディレクトリ化すると rename（writeState）が必ず失敗する。
+// Windows では EPERM（リトライ対象）で約500ms粘ってから throw、Linux では即 throw と
+// 差異はあるが、いずれも「プロセスを止めず次サイクルで再試行する」ことが目的なので
+// プラットフォーム非依存のテストとして両OSで実行する。
+
+describe('main: writeState失敗耐性', () => {
+  test('writeState が失敗してもプロセスはクラッシュせず TIMEOUT で終了する', async () => {
+    await withTempDir(async (workspace) => {
+      watch._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+      stubOk();
+      // state ファイルの位置をディレクトリ化 → writeState（rename）が常に失敗する
+      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'assistant-watch', '5.json'), { recursive: true });
+
+      const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '1']);
+      assert.equal(r.code, 0);
+      assert.ok(r.lines.includes('TIMEOUT'), `Lines: ${r.lines.join('\n')}`);
+      assert.ok(r.errLines.some(l => l.includes('状態の保存に失敗')), `errLines: ${r.errLines.join('\n')}`);
+    });
+  });
+
+  test('writeState が失敗しても検出済みイベントは握り潰さず出力する', async () => {
+    await withTempDir(async (workspace) => {
+      watch._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+      let ghCalls = 0;
+      stubOk({
+        ghIssueComments: () => {
+          ghCalls++;
+          // 1サイクル目（ベースライン）は空、2サイクル目からワーカー報告を返す。
+          // ベースライン（writeState失敗で未永続化）でも state.lastCommentId はメモリ上で
+          // 進むため、既存コメントを返すだけでは再検出されない。新規コメントを後から
+          // 出現させることで非ベースラインサイクルのイベント検出を再現する。
+          return {
+            status: 0,
+            stdout: JSON.stringify(
+              ghCalls === 1 ? [] : [commentEntry({ id: 100, from: 'issue-5-fix' })]
+            ),
+            stderr: '',
+          };
+        },
+      });
+      // state ファイルの位置をディレクトリ化 → writeState（rename）が常に失敗する
+      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'assistant-watch', '5.json'), { recursive: true });
+
+      const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '5']);
+      assert.equal(r.code, 0);
+      // イベントは writeState 失敗でも握り潰されず出力される（重複側に倒れる）
+      assert.ok(r.lines.some(l => l.startsWith('EVENT ')), `Lines: ${r.lines.join('\n')}`);
+      assert.ok(r.errLines.some(l => l.includes('状態の保存に失敗')), `errLines: ${r.errLines.join('\n')}`);
+    });
+  });
+});
+
 describe('main: hanseikai検知', () => {
   test('【反省会】で始まる新着コメントを検知する', async () => {
     await withTempDir(async (workspace) => {
