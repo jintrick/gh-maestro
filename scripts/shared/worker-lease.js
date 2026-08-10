@@ -28,6 +28,7 @@ const { isProcessAlive, verifyProcessIdentity, getProcessStartTime } = require('
 const { canonicalWorkspace, assertValidWorkspace } = require('./storage-layout');
 const { killProcessTree } = require('../kill-tree');
 const { recordResidentAuditEvent } = require('./resident-audit');
+const { atomicWriteJson } = require('./atomic-write');
 
 // テストで注入可能にする（実プロセスに触れない。test-process-spawn-safety ルール準拠）。
 let _isProcessAlive = isProcessAlive;
@@ -90,21 +91,13 @@ function createNormalWorkerStore(workspace) {
 
     /**
      * 既存エントリを原子的に上書きする。
-     * 一時ファイルへの書き込み + atomic rename により、並行 read が
-     * 空ファイルや不完全 JSON を読むことがないようにする。
+     * staging 書き込み + atomic rename により、並行 read が空ファイルや不完全 JSON を
+     * 読むことがないようにする。atomic-write.js の短時間リトライ（EACCES/EPERM/EBUSY、
+     * 合計500ms予算）で、Windows で他プロセスが対象を一瞬掴む rename EPERM にも耐える
+     * （Issue #252）。
      */
     update(key, entry) {
-      fs.mkdirSync(dir, { recursive: true });
-      const fp = filePath(key);
-      const tmpPath = `${fp}.tmp.${process.pid}`;
-      try {
-        fs.writeFileSync(tmpPath, JSON.stringify(entry, null, 2), 'utf8');
-        fs.renameSync(tmpPath, fp);
-      } catch (e) {
-        // rename 失敗時は一時ファイルを掃除（ベストエフォート）
-        try { fs.unlinkSync(tmpPath); } catch {}
-        throw e;
-      }
+      atomicWriteJson(filePath(key), entry);
     },
 
     /** リースを削除する。 */
@@ -562,7 +555,16 @@ function acquireResidentLease({
 
   // ── 通常起動（live lease なし）または stale lease 回収 ──
   const res = acquireLease(store, key, { pid, startTime, workerName: role });
-  activateLease(store, key, { pid, startTime });
+  try {
+    activateLease(store, key, { pid, startTime });
+  } catch (e) {
+    // アクティベート（update）失敗は保存処理の一時的な競合（Windows の rename EPERM 等）が
+    // 原因で、「別プロセスが稼働中」を意味しない（Issue #252）。リース本体は acquireLease で
+    // 作成済み（phase='initializing'）のため、起動を拒否せず警告して継続する。このリースは
+    // クリーン終了時（release）に削除され、異常終了時は stale として次回起動時に回収される
+    // （spawn-worker.js の activateWorkerLease 失敗処理と同型）。
+    console.warn(`role "${role}" のリースアクティベートに失敗しました: ${e.message}`);
+  }
   return { acquired: true, key, release: () => releaseLease(store, key, { pid }), staleReclaimed: res.staleReclaimed };
 }
 

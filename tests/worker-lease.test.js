@@ -110,7 +110,7 @@ test('createNormalWorkerStore: JSON.parse がオブジェクト以外を返し�
   }
 });
 
-test('createNormalWorkerStore: update は temp+rename で原子的に更新する', () => {
+test('createNormalWorkerStore: update は staging+rename で原子的に更新する', () => {
   const store = tempStore();
   try {
     store.write('test-key', { pid: 1, workerName: 'original', createdAt: 'x' });
@@ -119,10 +119,11 @@ test('createNormalWorkerStore: update は temp+rename で原子的に更新す�
     const entry = store.read('test-key');
     assert.equal(entry.pid, 2);
     assert.equal(entry.workerName, 'updated');
-    // 一時ファイルが残っていないことを確認
-    const tmpFiles = fs.readdirSync(path.join(store._tmpDir, '.gh-maestro', 'leases'))
-      .filter(f => f.includes('.tmp.'));
-    assert.equal(tmpFiles.length, 0, '一時ファイルが残留していないこと');
+    // atomic-write.js の staging 残骸が残っていないことを確認（旧実装の .tmp. プレフィックスは
+    // 使われない）
+    const stagingFiles = fs.readdirSync(path.join(store._tmpDir, '.gh-maestro', 'leases'))
+      .filter(f => f.includes('.staging-'));
+    assert.equal(stagingFiles.length, 0, 'stagingファイルが残留していないこと');
   } finally {
     cleanupStore(store);
   }
@@ -669,6 +670,52 @@ test('acquireResidentLease: live lease が無ければ取得して自PIDでア�
       res.release();
     }
     assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'inbox-supervisor' }), false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('acquireResidentLease: アクティベート（update）失敗時も警告して継続し、起動を拒否しない（Issue #252）', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  try {
+    mockLiveness({ alive: true });
+
+    // Windows で他プロセスが対象ファイルを掴む rename EPERM を再現する。atomic-write.js の
+    // リトライ予算（500ms）を使い切って throw するまで fs.renameSync を失敗させ、update が
+    // 失敗しても acquireResidentLease が起動を拒否しないことを検証する。
+    const origRenameSync = fs.renameSync;
+    const origWarn = console.warn;
+    const warnings = [];
+    fs.renameSync = () => {
+      const err = new Error('EPERM: simulated rename contention');
+      err.code = 'EPERM';
+      throw err;
+    };
+    console.warn = (msg) => { warnings.push(String(msg)); };
+    try {
+      const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor' });
+      try {
+        assert.equal(res.acquired, true);
+        // 黙って素通りせず、アクティベート失敗が警告されている
+        assert.ok(warnings.some(w => w.includes('アクティベートに失敗')),
+          `warnings: ${JSON.stringify(warnings)}`);
+        // リース本体は acquireLease で作成済みのまま残る（phase は initializing のまま）
+        const canonical = storageLayout.canonicalWorkspace(tmp);
+        const entry = JSON.parse(fs.readFileSync(
+          path.join(canonical, '.gh-maestro', 'leases', lease.roleLeaseKey('inbox-supervisor') + '.json'), 'utf8'));
+        assert.equal(entry.pid, process.pid);
+        assert.equal(entry.phase, 'initializing');
+        // 稼働中は正しく live とみなされ、重複起動防止は維持される
+        assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'inbox-supervisor' }), true);
+      } finally {
+        res.release();
+      }
+      // クリーン終了時はリースが解放される
+      assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'inbox-supervisor' }), false);
+    } finally {
+      fs.renameSync = origRenameSync;
+      console.warn = origWarn;
+    }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
