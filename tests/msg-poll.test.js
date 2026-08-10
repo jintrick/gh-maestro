@@ -8,6 +8,7 @@ const path = require('path');
 
 const msgPoll = require('../scripts/msg-poll');
 const readStateLib = require('../scripts/shared/read-state');
+const { spawnSync } = require('../scripts/child-process');
 const { cleanSpawnEnv } = require('./_spawn-env');
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
@@ -477,6 +478,99 @@ test('gh api の JSON が壊れている場合にスキップ', () => {
     r.scanOnce();
     assert.ok(r.errLines.some(l => l.includes('JSON parse エラー')));
     assert.equal(r.lines.length, 0);
+  });
+});
+
+// ── 書き込み失敗耐性（Issue #250） ─────────────────────────────────────────
+// markReadMany（既読の永続化）が他プロセスに msg-state を掴まれている等で EPERM を
+// throw しても、常駐プロセスをクラッシュさせず次サイクルで再試行する。NEW_MESSAGE は
+// 出力済みなので「重複通知」側に倒れる（握り潰しはしない）。
+
+test('markReadMany が EPERM で throw しても scanOnce はクラッシュせず NEW_MESSAGE を出力済みのまま終わる', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        { id: 555, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nHello', created_at: '2026-07-07T12:00:00Z' },
+      ]),
+    }));
+    // 警告は本物の msg-send.js を spawn させないようスタブする
+    msgPoll._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+
+    const originalMarkReadMany = readStateLib.markReadMany;
+    readStateLib.markReadMany = () => {
+      const err = new Error('simulated rename EPERM (Issue #250)');
+      err.code = 'EPERM';
+      throw err;
+    };
+    try {
+      const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+      assert.equal(r.code, 0);
+      // throw しても scanOnce は例外を外に漏らさない（常駐プロセスが落ちない）
+      assert.doesNotThrow(() => r.scanOnce());
+      // NEW_MESSAGE は出力済み（出力→記録の順、重複側に倒れる）
+      assert.ok(r.lines.some(l => l === 'NEW_MESSAGE:555'), `Expected NEW_MESSAGE:555 in: ${r.lines.join('|')}`);
+      // 失敗は stderr に記録される
+      assert.ok(r.errLines.some(l => l.includes('既読状態の更新で例外')), `Expected write failure log in: ${r.errLines.join('|')}`);
+    } finally {
+      readStateLib.markReadMany = originalMarkReadMany;
+    }
+  });
+});
+
+// ── PR #251: _notifyOrchestrator が実 msg-send.js コマンドを正しく構築する ──
+// 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
+// 省略すると recipient が undefined になり usage エラーで必ず送信失敗するため、
+// 「呼ばれたこと」だけでなく「構築されるコマンドライン引数」を検証する。
+
+test('_notifyOrchestrator が msg-send.js に宛先(orchestrator)を含む実引数を渡す（連続失敗警告）', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        { id: 555, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nHello', created_at: '2026-07-07T12:00:00Z' },
+      ]),
+    }));
+
+    // 先行テストが _setNotifyOrchestrator を丸ごと差し替えたまま残すと、実関数経由の
+    // 引数検証が素通しするため、実装を復元してから spawn だけを記録モックに差し替える。
+    msgPoll._setNotifyOrchestrator(msgPoll._notifyOrchestrator);
+    const spawnCalls = [];
+    msgPoll._setNotifySpawn((cmd, args, opts) => {
+      spawnCalls.push({ cmd, args, opts });
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    const originalMarkReadMany = readStateLib.markReadMany;
+    readStateLib.markReadMany = () => {
+      const err = new Error('simulated rename EPERM (Issue #250)');
+      err.code = 'EPERM';
+      throw err;
+    };
+    try {
+      const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+      assert.equal(r.code, 0);
+      // 連続失敗が閾値(5)に達するまで scanOnce を繰り返す（markReadMany 失敗はディスク未永続化のため
+      // 次回も同じコメントを再検出し、毎回 onFailure に到達する）
+      for (let i = 0; i < 5; i++) r.scanOnce();
+
+      assert.equal(spawnCalls.length, 1, `警告の msg-send.js spawn が1回: ${JSON.stringify(spawnCalls)}`);
+      const { cmd, args, opts } = spawnCalls[0];
+      assert.equal(cmd, process.execPath);
+      assert.ok(args[0].endsWith('msg-send.js'), `args[0]=msg-send.js であること: ${args.join(' ')}`);
+      assert.equal(args[1], 'orchestrator', `recipient が位置引数で渡されること: ${args.join(' ')}`);
+      assert.equal(args[args.indexOf('--from') + 1], 'msg-poll');
+      assert.equal(args[args.indexOf('--issue') + 1], '1');
+      assert.equal(args[args.indexOf('--workspace') + 1], workspace);
+      assert.ok(opts.input.includes('連続で失敗しています'), `stdin 本文に警告が含まれること`);
+    } finally {
+      readStateLib.markReadMany = originalMarkReadMany;
+      // 先行テストが残していた状態（高レベルで実spawnしないモック）に戻す
+      msgPoll._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+      msgPoll._setNotifySpawn(spawnSync);
+    }
   });
 });
 

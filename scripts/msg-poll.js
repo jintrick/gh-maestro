@@ -37,6 +37,7 @@ const {
 } = require('./process-lifecycle');
 const { acquireResidentLease } = require('./shared/worker-lease');
 const { listUnprocessedResidentAuditEvents, removeResidentAuditEvent } = require('./shared/resident-audit');
+const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
 
 const DEFAULT_INTERVAL_SEC = 20;
 const MARKER_RE = /^<!--\s*gh-maestro\s+(\{.*\})\s*-->/;
@@ -346,6 +347,48 @@ function main(argsOverride, opts = {}) {
   }
 
   const intervalMs = (parseInt(parsed.intervalArg || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
+
+  // ── 書き込み連続失敗の警告（Issue #250） ─────────────────────────────
+  // markReadMany の失敗（他プロセスが msg-state を掴んでいる等の EPERM）は次のサイクルで
+  // 再試行されるが、連続失敗が続くと既読がディスクに永続化されないまま通知が重複しうる。
+  // 閾値（5回≒約100秒）に達したら orchestrator へ警告する。失敗が1回でも成功すれば
+  // カウンタはリセットされ、警告は再び閾値分の連続失敗が積もるまで再送されない。
+  // 送信先 Issue は worker モードでは監視対象（--issue）、orchestrator モードでは
+  // orchestrator 自身は Issue を持たないため workers.json の先頭ワーカーを使う。
+  const writeFailureMonitor = createWriteFailureMonitor({
+    notify: ({ count, detail }) => {
+      const issue = resolveNotifyIssue();
+      const body = `⚠️ msg-poll の既読状態の書き込みが ${count} 回連続で失敗しています（他プロセスが msg-state を掴んでいる可能性）。最新のエラー: ${detail}`;
+      if (!issue) {
+        writeErr(`msg-poll: 書き込み連続失敗の警告を送信できません（送信先Issueがありません）: ${body}`);
+        return;
+      }
+      let res;
+      try {
+        res = _notifyOrchestrator({ workspace, issue, body });
+      } catch (e) {
+        writeErr(`msg-poll: 書き込み連続失敗の警告の送信に失敗: ${e.message}`);
+        return;
+      }
+      if (res.status !== 0) {
+        writeErr(`msg-poll: 書き込み連続失敗の警告の送信に失敗: ${(res.stderr || '').trim()}`);
+      }
+    },
+  });
+
+  function resolveNotifyIssue() {
+    if (issueArg) return String(issueArg);
+    if (!isOrchestrator) return null;
+    try {
+      const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
+      if (fs.existsSync(workersPath)) {
+        const workers = JSON.parse(fs.readFileSync(workersPath, 'utf8'));
+        const first = Object.values(workers || {}).find((w) => w && w.issue);
+        if (first && first.issue) return String(first.issue);
+      }
+    } catch {}
+    return null;
+  }
 
   // ── セッションPID解決（dead-man's switch） ────────────────────────────
 
@@ -684,9 +727,26 @@ function main(argsOverride, opts = {}) {
       if (issuesWithDeferred.has(issue)) continue;
       sinceByIssue[issue] = ts;
     }
-    const markResult = readStateLib.markReadMany(workspace, self, { byIssue, sinceByIssue });
-    if (!markResult.ok) {
-      writeErr(`msg-poll: 既読状態の更新に失敗しました: ${markResult.error}`);
+    // 既読の永続化は他プロセスが msg-state を掴んでいる等で EPERM 失敗しうる（Issue #250）。
+    // 例外はここで捕捉して常駐プロセスを止めず、次サイクルで再試行する。NEW_MESSAGE は
+    // 既に出力済みなので、失敗時は「重複通知」側に倒れる（握り潰しはしない）。
+    let markErrorDetail = null;
+    try {
+      const markResult = readStateLib.markReadMany(workspace, self, { byIssue, sinceByIssue });
+      if (!markResult.ok) {
+        markErrorDetail = markResult.error;
+      }
+    } catch (e) {
+      writeErr(`msg-poll: 既読状態の更新で例外が発生しました: ${e.message}`);
+      markErrorDetail = e.message;
+      writeFailureMonitor.onFailure(markErrorDetail);
+      return;
+    }
+    if (markErrorDetail != null) {
+      writeErr(`msg-poll: 既読状態の更新に失敗しました: ${markErrorDetail}`);
+      writeFailureMonitor.onFailure(markErrorDetail);
+    } else {
+      writeFailureMonitor.onSuccess();
     }
   }
 
@@ -708,6 +768,23 @@ function main(argsOverride, opts = {}) {
 }
 
 // ── --wait モード ────────────────────────────────────────────────────────
+
+// orchestrator への書き込み連続失敗の警告（Issue #250）。テストで注入可能。
+// inbox-supervisor.js の _notifyOrchestrator と同型。msg-send.js は本文を位置引数で
+// 受け付けない（--stdin / --body-file のみ）ため、spawnSync の input で stdin 経由に渡す。
+let _notifySpawn = spawnSync;
+let _notifyOrchestrator = ({ workspace, issue, body }) => {
+  // 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
+  // 省略すると recipient が undefined になり usage エラーで必ず送信失敗する（PR #251 レビュー指摘）。
+  return _notifySpawn(process.execPath, [
+    path.join(__dirname, 'msg-send.js'),
+    'orchestrator',
+    '--stdin',
+    '--from', 'msg-poll',
+    '--issue', issue,
+    '--workspace', workspace,
+  ], { encoding: 'utf8', input: body });
+};
 
 let _sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -876,6 +953,10 @@ module.exports = {
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setSleep: (fn) => { _sleep = fn; },
+  _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
+  // 実装を直接参照（テストが注入を戻す際の復元用。PR #251 の引数検証テストから使う）
+  _notifyOrchestrator,
+  _setNotifySpawn: (fn) => { _notifySpawn = fn; },
   main,
   runWaitMode,
   // 内部ロジックの単体テスト用

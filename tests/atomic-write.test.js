@@ -15,7 +15,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { cleanSpawnEnv } = require('./_spawn-env');
 
-const { atomicWriteJson } = require('../scripts/shared/atomic-write');
+const { atomicWriteJson, atomicWriteText } = require('../scripts/shared/atomic-write');
 const ATOMIC_WRITE_PATH = path.join(__dirname, '..', 'scripts', 'shared', 'atomic-write.js');
 
 /** 一時ディレクトリを作り、テスト後に掃除する。コールバックの返すPromiseをawaitする。 */
@@ -130,5 +130,77 @@ test('atomicWriteJson: 並行プロセスが同一ファイルへ書き込んで
         }
       }, reject);
     });
+  });
+});
+
+// ── Issue #250: rename の EPERM（他プロセスが対象を掴んでいる）への耐性 ──────────
+// Windows では、他プロセスが対象ファイルを開いていると rename が EPERM で失敗する。
+// atomic-write.js の短時間リトライ（予算500ms）が一時的な競合を救い、開きっぱなしの
+// 競合は予算を使い切って throw する（常駐プロセスを止めないのは呼び出し元の try-catch
+// + 次サイクル再試行の責務。本テストはリトライ層の挙動のみを検証する）。
+// 開きっぱなしの再現に fs.openSync の読み取りハンドルを使う（実機で rename が 100% EPERM
+// になることを確認済み。Zed 等エディタ固有の挙動の再現は不要で、renameSync が EPERM を
+// 投げたときの挙動を検証するのが目的）。
+
+test('atomicWriteText: 開きっぱなし（EPERM）はリトライ後も throw し、対象を書き換えず staging を掃除する（Windows）', { skip: process.platform !== 'win32' }, async () => {
+  await withTempDir((dir) => {
+    const target = path.join(dir, 'out.json');
+    fs.writeFileSync(target, 'old');
+    // 読み取り専用で開いたままにすると、Windows では rename が EPERM で失敗し続ける
+    const fd = fs.openSync(target, 'r');
+    try {
+      assert.throws(() => atomicWriteText(target, 'new'));
+    } finally {
+      fs.closeSync(fd);
+    }
+    // 対象は上書きされていない（リトライ予算を消費して失敗）
+    assert.equal(fs.readFileSync(target, 'utf8'), 'old');
+    const leftovers = fs.readdirSync(dir).filter((f) => f.includes('.staging-'));
+    assert.deepEqual(leftovers, []);
+  });
+});
+
+test('atomicWriteText: リトライ中に対象の掴みが解けたら成功する（Windows）', { skip: process.platform !== 'win32' }, async () => {
+  await withTempDir(async (dir) => {
+    const target = path.join(dir, 'out.json');
+    fs.writeFileSync(target, 'old');
+    // 子プロセスがロック取得を完了したことを親へ伝えるマーカーファイル。
+    // 固定sleepで「掴み切るまでの時間」を推測すると、負荷次第で最初の rename が成功して
+    // リトライ経路を一度も通らない偽陽性テストになる（PR #251 レビュー指摘）。
+    const markerPath = path.join(dir, 'lock-acquired.flag');
+
+    // 別プロセスが対象を掴み、400ms後にハンドルを閉じる。atomicWriteText の同期リトライ
+    // （Atomics.wait はメインスレッドのイベントループをブロックするため、同プロセスの
+    // timer では解放できない）中にロック解放を観測できる。子プロセスは一度きりで自然
+    // 終了する（.claude/rules/test-process-spawn-safety.md の許容範囲）。
+    const child = spawn(process.execPath, ['-e', `
+      const fs = require('fs');
+      const fd = fs.openSync(process.env.ATOMIC_TEST_TARGET, 'r');
+      // openSync 成功（＝ロック取得完了）後にマーカーを書く。親はこれを待ってから検証するため、
+      // 最初の rename が必ず EPERM でリトライ経路に入ることが構造的に保証される。
+      fs.writeFileSync(process.env.ATOMIC_TEST_MARKER, 'locked');
+      setTimeout(() => { try { fs.closeSync(fd); } catch {} }, 400);
+    `], {
+      env: { ...cleanSpawnEnv(), ATOMIC_TEST_TARGET: target, ATOMIC_TEST_MARKER: markerPath },
+      stdio: 'ignore',
+    });
+
+    try {
+      // ロック取得完了マーカーを待ってから検証する（子プロセスの起動遅延に依存しない）。
+      const deadline = Date.now() + 5000;
+      while (!fs.existsSync(markerPath)) {
+        assert.ok(Date.now() < deadline, '子プロセスのロック取得がタイムアウトしました');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      atomicWriteText(target, 'new');
+    } finally {
+      child.kill();
+      // 子プロセス終了（＝fd解放）を待ってから一時ディレクトリ掃除に進む（Windows EBUSY回避）
+      await new Promise((resolve) => {
+        const t = setTimeout(resolve, 1000);
+        child.once('exit', () => { clearTimeout(t); resolve(); });
+      });
+    }
+    assert.equal(fs.readFileSync(target, 'utf8'), 'new');
   });
 });

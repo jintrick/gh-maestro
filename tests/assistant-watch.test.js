@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const watch = require('../scripts/assistant-watch');
+const { spawnSync } = require('../scripts/child-process');
 const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
 
 function withTempDir(fn) {
@@ -198,6 +199,97 @@ describe('main: worker_report検知', () => {
       const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '1']);
       assert.deepEqual(r.lines, ['TIMEOUT']);
       assert.equal(watch.readState(workspace, '5').lastCommentId, 1);
+    });
+  });
+});
+
+// ── Issue #250: writeState の EPERM 失敗への耐性 ────────────────────────────
+// state ファイルの位置をディレクトリ化すると rename（writeState）が必ず失敗する。
+// Windows では EPERM（リトライ対象）で約500ms粘ってから throw、Linux では即 throw と
+// 差異はあるが、いずれも「プロセスを止めず次サイクルで再試行する」ことが目的なので
+// プラットフォーム非依存のテストとして両OSで実行する。
+
+describe('main: writeState失敗耐性', () => {
+  test('writeState が失敗してもプロセスはクラッシュせず TIMEOUT で終了する', async () => {
+    await withTempDir(async (workspace) => {
+      watch._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+      stubOk();
+      // state ファイルの位置をディレクトリ化 → writeState（rename）が常に失敗する
+      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'assistant-watch', '5.json'), { recursive: true });
+
+      const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '1']);
+      assert.equal(r.code, 0);
+      assert.ok(r.lines.includes('TIMEOUT'), `Lines: ${r.lines.join('\n')}`);
+      assert.ok(r.errLines.some(l => l.includes('状態の保存に失敗')), `errLines: ${r.errLines.join('\n')}`);
+    });
+  });
+
+  test('writeState が失敗しても検出済みイベントは握り潰さず出力する', async () => {
+    await withTempDir(async (workspace) => {
+      watch._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+      let ghCalls = 0;
+      stubOk({
+        ghIssueComments: () => {
+          ghCalls++;
+          // 1サイクル目（ベースライン）は空、2サイクル目からワーカー報告を返す。
+          // ベースライン（writeState失敗で未永続化）でも state.lastCommentId はメモリ上で
+          // 進むため、既存コメントを返すだけでは再検出されない。新規コメントを後から
+          // 出現させることで非ベースラインサイクルのイベント検出を再現する。
+          return {
+            status: 0,
+            stdout: JSON.stringify(
+              ghCalls === 1 ? [] : [commentEntry({ id: 100, from: 'issue-5-fix' })]
+            ),
+            stderr: '',
+          };
+        },
+      });
+      // state ファイルの位置をディレクトリ化 → writeState（rename）が常に失敗する
+      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'assistant-watch', '5.json'), { recursive: true });
+
+      const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '5']);
+      assert.equal(r.code, 0);
+      // イベントは writeState 失敗でも握り潰されず出力される（重複側に倒れる）
+      assert.ok(r.lines.some(l => l.startsWith('EVENT ')), `Lines: ${r.lines.join('\n')}`);
+      assert.ok(r.errLines.some(l => l.includes('状態の保存に失敗')), `errLines: ${r.errLines.join('\n')}`);
+    });
+  });
+
+  // ── PR #251: _notifyOrchestrator が実 msg-send.js コマンドを正しく構築する ──
+  // 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
+  // 省略すると recipient が undefined になり usage エラーで必ず送信失敗するため、
+  // 「呼ばれたこと」だけでなく「構築されるコマンドライン引数」を検証する。
+
+  test('_notifyOrchestrator が msg-send.js に宛先(orchestrator)を含む実引数を渡す（連続失敗警告）', async () => {
+    await withTempDir(async (workspace) => {
+      stubOk();
+      // 先行テスト（writeState失敗耐性）が _setNotifyOrchestrator を丸ごと差し替えたまま
+      // 残すと、実関数経由の引数検証が素通しするため、実装を復元してから spawn だけを
+      // 記録モックに差し替える。
+      watch._setNotifyOrchestrator(watch._notifyOrchestrator);
+      const spawnCalls = [];
+      watch._setNotifySpawn((cmd, args, opts) => {
+        spawnCalls.push({ cmd, args, opts });
+        return { status: 0, stdout: '', stderr: '' };
+      });
+      // state ファイルの位置をディレクトリ化 → writeState が常に失敗し、連続失敗が閾値(5)に達する
+      // （Windows では EPERM リトライで1回約500ms のため、--wait 3 で約5回積もる）。
+      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'assistant-watch', '5.json'), { recursive: true });
+
+      const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '3']);
+      assert.equal(r.code, 0);
+      assert.equal(spawnCalls.length, 1, `警告の msg-send.js spawn が1回: ${JSON.stringify(spawnCalls)}`);
+      const { cmd, args, opts } = spawnCalls[0];
+      assert.equal(cmd, process.execPath);
+      assert.ok(args[0].endsWith('msg-send.js'), `args[0]=msg-send.js であること: ${args.join(' ')}`);
+      assert.equal(args[1], 'orchestrator', `recipient が位置引数で渡されること: ${args.join(' ')}`);
+      assert.equal(args[args.indexOf('--from') + 1], 'assistant-watch');
+      assert.equal(args[args.indexOf('--issue') + 1], '5');
+      assert.equal(args[args.indexOf('--workspace') + 1], workspace);
+      assert.ok(opts.input.includes('連続で失敗しています'), `stdin 本文に警告が含まれること`);
+      // 先行テストが残していた状態（高レベルで実spawnしないモック）に戻す
+      watch._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+      watch._setNotifySpawn(spawnSync);
     });
   });
 });

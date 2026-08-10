@@ -148,8 +148,13 @@ function resetAllMocks() {
   setWorkersIdle();
   // resume直後の生存確認スリープは実待機させない
   supervisor._setSleep(() => {});
-  // 配送断念通知は既定では何もしない安全なモック（実spawnを起こさない）
-  supervisor._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+  // 通知は実 _notifyOrchestrator を通しつつ、内部 spawn だけを安全なモック（実spawnを起こさない）
+  // に差し替える。これにより「構築されるコマンドライン引数」の検証を実関数で行える
+  // （PR #251。高レベルの _setNotifyOrchestrator で丸ごと差し替えると、宛先欠落の回帰を検出できない）。
+  // _notifyOrchestrator は実装を復元する（先行テストの _setNotifyOrchestrator 注入が残留すると、
+  // 実関数経由の引数検証テストが素通ししてしまう）。
+  supervisor._setNotifyOrchestrator(supervisor._notifyOrchestrator);
+  supervisor._setNotifySpawn(() => ({ status: 0, stdout: '', stderr: '' }));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -867,6 +872,71 @@ describe('runOnce scan and deliver cycle', () => {
       assert.ok(state.seenIds.includes(100));
       assert.ok(state.deliveredIds.includes(100));
       assert.equal(state.since, '2024-06-01T12:00:00Z');
+    });
+  });
+
+  // ── Issue #250: writeCursor の EPERM 失敗への耐性 ───────────────────────
+  // カーソルファイルの位置をディレクトリ化すると rename（writeCursor）が必ず失敗する。
+  // Windows では EPERM（リトライ対象）で約500ms粘ってから throw、Linux では即 throw と
+  // 差異はあるが、いずれも「プロセスを止めず次サイクルで再試行する」ことが目的なので
+  // プラットフォーム非依存のテストとして両OSで実行する。
+
+  test('writeCursor が失敗しても runOnce はクラッシュせず配送と SCAN_END まで進む', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([
+      {
+        id: 100,
+        created_at: '2024-06-01T12:00:00Z',
+        body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test',
+      },
+    ]));
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+      // カーソルファイルの位置をディレクトリ化 → writeCursor（rename）が失敗する
+      fs.mkdirSync(path.join(dir, '.gh-maestro', 'inbox-supervisor', 'cursors', 'issue-5-fix.json'), { recursive: true });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      // throw せず最後まで進む（常駐プロセスが落ちない）
+      assert.doesNotThrow(() => r.runOnce());
+      // 配送は行われ、カーソル保存だけ失敗して stderr に記録される
+      assert.ok(r.lines.some(l => l === 'DELIVERED:issue-5-fix:100'), `Lines: ${r.lines.join('\n')}`);
+      assert.ok(r.lines.some(l => l.includes('SCAN_END:1:1')), `Lines: ${r.lines.join('\n')}`);
+      assert.ok(r.errLines.some(l => l.includes('カーソル保存に失敗')), `errLines: ${r.errLines.join('\n')}`);
+    });
+  });
+
+  test('writeCursor が失敗し続けてもメモリキャッシュで重複配送しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([
+      {
+        id: 100,
+        created_at: '2024-06-01T12:00:00Z',
+        body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test',
+      },
+    ]));
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+      // 全サイクルで writeCursor が失敗するため、ディスクのカーソルは常に初期状態のまま
+      fs.mkdirSync(path.join(dir, '.gh-maestro', 'inbox-supervisor', 'cursors', 'issue-5-fix.json'), { recursive: true });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce(); // 1サイクル目: 配送するが writeCursor 失敗（ディスクは初期のまま）
+      r.runOnce(); // 2サイクル目: ディスクが巻き戻っていてもメモリキャッシュで重複配送しない
+
+      const delivered = r.lines.filter(l => l === 'DELIVERED:issue-5-fix:100');
+      assert.equal(delivered.length, 1, `Expected exactly 1 DELIVERED, got ${delivered.length}: ${r.lines.join('\n')}`);
     });
   });
 
@@ -1604,6 +1674,91 @@ describe('Hang detection', () => {
       assert.ok(r.lines.some(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')),
         `HANG_DETECTED が出力されること: ${r.lines.join('\n')}`);
       assert.equal(notifyCalls.length, 1, '通知が1回呼ばれる');
+    });
+  });
+
+  // ── Issue #250 / PR #251: HANG_DETECTED 時のカーソル保存の保護漏れ ──────
+  // 通知成功後に実行される writeCursor（HANG_DETECTED 経路）は、EPERM でも常駐プロセスを
+  // 止めず、連続失敗カウンタに計上して次サイクルの保存成功時にリセットされる（HANG_RESUMED
+  // 経路と同じ扱い）。
+
+  test('HANG_DETECTED後のカーソル保存が失敗しても runOnce はクラッシュしない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+    supervisor._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+
+      // 60秒前のログ（--hang-threshold-sec=10 より長い＝ハング検知され、通知成功→カーソル保存へ）
+      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'old log\n', 'utf8');
+      const oldTime = new Date(Date.now() - 60 * 1000);
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      // カーソルファイルの位置をディレクトリ化 → 通知成功後の writeCursor が必ず失敗する
+      fs.mkdirSync(path.join(dir, '.gh-maestro', 'inbox-supervisor', 'cursors', 'issue-5-fix.json'), { recursive: true });
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '10']);
+      assert.equal(r.code, 0);
+      // throw せず最後まで進む（EPERM で supervisor が落ちない）
+      assert.doesNotThrow(() => r.runOnce());
+      assert.ok(r.lines.some(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')),
+        `HANG_DETECTED が出力されること: ${r.lines.join('\n')}`);
+      // カーソル保存の失敗は stderr に記録される
+      assert.ok(r.errLines.some(l => l.includes('カーソル保存に失敗')), `errLines: ${r.errLines.join('\n')}`);
+    });
+  });
+
+  // ── PR #251: _notifyOrchestrator が実 msg-send.js コマンドを正しく構築する ──
+  // 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
+  // 省略すると recipient が undefined になり usage エラーで必ず送信失敗するため、
+  // 「呼ばれたこと」だけでなく「構築されるコマンドライン引数」を検証する。
+
+  test('_notifyOrchestrator が msg-send.js に宛先(orchestrator)を含む実引数を渡す', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const spawnCalls = [];
+    supervisor._setNotifySpawn((cmd, args, opts) => {
+      spawnCalls.push({ cmd, args, opts });
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
+        },
+      });
+
+      // 60秒前のログ → ハング検知され、実 _notifyOrchestrator が msg-send.js を spawn する
+      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'old log\n', 'utf8');
+      const oldTime = new Date(Date.now() - 60 * 1000);
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '10']);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.equal(spawnCalls.length, 1, `msg-send.js spawn が1回: ${JSON.stringify(spawnCalls)}`);
+      const { cmd, args, opts } = spawnCalls[0];
+      assert.equal(cmd, process.execPath);
+      assert.ok(args[0].endsWith('msg-send.js'), `args[0]=msg-send.js であること: ${args.join(' ')}`);
+      assert.equal(args[1], 'orchestrator', `recipient が位置引数で渡されること: ${args.join(' ')}`);
+      assert.equal(args[args.indexOf('--from') + 1], 'inbox-supervisor');
+      assert.equal(args[args.indexOf('--issue') + 1], '5');
+      assert.equal(args[args.indexOf('--workspace') + 1], dir);
+      assert.ok(opts.input.includes('ハング'), `stdin 本文にハング警告が含まれること`);
     });
   });
 });

@@ -55,6 +55,7 @@ const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const { parseMarker } = require('./msg-poll');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { readContract, clearContract } = require('./shared/response-contract');
+const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
 
@@ -127,9 +128,13 @@ const RESUME_LIVENESS_GRACE_MS = 2000;
 // ワーカーではないため GH_MAESTRO_WORKER は設定せず、--from/--issue を明示して投稿する。
 // msg-send.js は本文を位置引数で受け付けない（--stdin / --body-file のみ）ため、
 // spawnSync の input で stdin 経由に渡す。
+// 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
+// 省略すると recipient が undefined になり usage エラーで必ず送信失敗する（PR #251 レビュー指摘）。
+let _notifySpawn = spawnSync;
 let _notifyOrchestrator = ({ workspace, issue, body }) => {
-  return spawnSync(process.execPath, [
+  return _notifySpawn(process.execPath, [
     path.join(__dirname, 'msg-send.js'),
+    'orchestrator',
     '--stdin',
     '--from', 'inbox-supervisor',
     '--issue', issue,
@@ -591,6 +596,50 @@ function main(argsOverride, opts = {}) {
   // ホームディレクトリ（エージェント設定解決用）
   const homedir = process.env.HOME || process.env.USERPROFILE || '';
 
+  // ── 書き込み連続失敗の警告（Issue #250） ─────────────────────────────
+  // カーソル永続化（writeCursor）の失敗（他プロセスがカーソルファイルを掴んでいる等の
+  // EPERM）は次のサイクルで再試行されるが、連続失敗が続くと配送済み状態がディスクに
+  // 永続化されない。連続失敗が閾値（5回≒約100秒）に達したら orchestrator へ警告する。
+  // カウンタはプロセス全体でなくワーカー単位で持つ（あるワーカーの成功が別ワーカーの
+  // 連続失敗をリセットしないようにするため）。
+  const writeFailureMonitors = new Map(); // workerName → monitor
+  const getWriteFailureMonitor = (workerName, issue) => {
+    let monitor = writeFailureMonitors.get(workerName);
+    if (!monitor) {
+      monitor = createWriteFailureMonitor({
+        notify: ({ count, detail }) => {
+          const body = `⚠️ ワーカー "${workerName}" のカーソル書き込みが ${count} 回連続で失敗しています（他プロセスが cursor ファイルを掴んでいる可能性）。最新のエラー: ${detail}`;
+          let res;
+          try {
+            res = _notifyOrchestrator({ workspace, issue, body });
+          } catch (e) {
+            writeErr(`inbox-supervisor: 書き込み連続失敗の警告の送信に失敗: ${e.message}`);
+            return;
+          }
+          if (res.status !== 0) {
+            writeErr(`inbox-supervisor: 書き込み連続失敗の警告の送信に失敗: ${(res.stderr || '').trim()}`);
+          }
+        },
+      });
+      writeFailureMonitors.set(workerName, monitor);
+    }
+    return monitor;
+  };
+
+  // writeCursor の失敗でディスクのカーソルが巻き戻っても、同一プロセス内では重複配送
+  // しないためのメモリ内配送済みキャッシュ（Issue #250）。サイズはディスク側と同じ
+  // MAX_SEEN_IDS に制限する。プロセスが再起動すれば消える（その場合の正本はディスク）。
+  const deliveredIdsCache = new Map(); // workerName → number[]
+  const markDeliveredInMemory = (workerName, cid) => {
+    const arr = deliveredIdsCache.get(workerName) || [];
+    arr.push(cid);
+    deliveredIdsCache.set(workerName, arr.slice(-MAX_SEEN_IDS));
+  };
+  const wasDeliveredInMemory = (workerName, cid) => {
+    const arr = deliveredIdsCache.get(workerName) || [];
+    return arr.includes(cid);
+  };
+
   /**
    * 1回のポーリングサイクル。
    * 全ワーカーをスキャンし、新着メッセージの検出・配送を行う。
@@ -635,20 +684,31 @@ function main(argsOverride, opts = {}) {
             if (cursor.hangNotifiedPid !== entry.pid) {
               const minutes = Math.floor(staleMs / 60000);
               const body = `⚠️ ワーカー "${workerName}" がハングしている疑いがあります（ログ最終更新から ${minutes} 分以上経過、PID ${entry.pid}）。状態を確認し、必要ならプロセスを終了して再起動を検討してください。`;
+              let notified = false;
               try {
                 const notifyResult = _notifyOrchestrator({ workspace, issue, body });
-                if (notifyResult.status === 0) {
-                  cursor.hangNotifiedPid = entry.pid;
-                  cursor.hangNotifiedAt = new Date().toISOString();
-                  writeOut(`HANG_DETECTED:${workerName}:${entry.pid}`);
-                  // 後続処理（gh apiコメント取得等）が失敗してループがcontinueしても
-                  // 通知済み状態が失われないよう、ここで先に永続化する。
-                  writeCursor(workspace, workerName, cursor);
-                } else {
+                notified = notifyResult.status === 0;
+                if (!notified) {
                   writeErr(`inbox-supervisor: hang通知の投稿に失敗: ${(notifyResult.stderr || '').trim()}`);
                 }
               } catch (e) {
                 writeErr(`inbox-supervisor: hang通知の投稿に失敗: ${e.message}`);
+              }
+              // 通知成功時のみ通知済み状態を更新・永続化する。
+              if (notified) {
+                cursor.hangNotifiedPid = entry.pid;
+                cursor.hangNotifiedAt = new Date().toISOString();
+                writeOut(`HANG_DETECTED:${workerName}:${entry.pid}`);
+                // 後続処理（gh apiコメント取得等）が失敗してループがcontinueしても通知済み
+                // 状態が失われないよう、ここで先に永続化する。他プロセスがカーソルを掴んで
+                // いる等の EPERM でも停止せず、次サイクルの writeCursor 成功時にまとめて
+                // 永続化される（HANG_RESUMED と同じ扱い、Issue #250）。
+                try {
+                  writeCursor(workspace, workerName, cursor);
+                } catch (e) {
+                  writeErr(`inbox-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
+                  getWriteFailureMonitor(workerName, issue).onFailure(e.message);
+                }
               }
             }
           } else if (cursor.hangNotifiedPid !== null) {
@@ -657,7 +717,14 @@ function main(argsOverride, opts = {}) {
             cursor.hangNotifiedAt = null;
             writeOut(`HANG_RESUMED:${workerName}`);
             // 復帰状態を後続処理より先に永続化する（上記HANG_DETECTEDと同じ理由）。
-            writeCursor(workspace, workerName, cursor);
+            // 他プロセスがカーソルを掴んでいる等の EPERM でも停止せず、次サイクルの
+            // writeCursor 成功時にまとめて永続化される（Issue #250）。
+            try {
+              writeCursor(workspace, workerName, cursor);
+            } catch (e) {
+              writeErr(`inbox-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
+              getWriteFailureMonitor(workerName, issue).onFailure(e.message);
+            }
           }
         }
       }
@@ -707,6 +774,7 @@ function main(argsOverride, opts = {}) {
 
         if (deliveryResult.success) {
           cursor.deliveredIds.push(commentId);
+          markDeliveredInMemory(workerName, commentId);
           delete cursor.pendingDeliveries[commentIdStr];
           writeOut(`DELIVERED:${workerName}:${commentId}`);
         } else {
@@ -809,8 +877,10 @@ function main(argsOverride, opts = {}) {
         totalDetected++;
         writeOut(`DETECTED:${workerName}:${candidate.cid}`);
 
-        // 配送前に deliveredIds をチェック（重複防止）
-        if (cursor.deliveredIds.includes(candidate.cid)) {
+        // 配送前に deliveredIds をチェック（重複防止）。writeCursor の失敗でディスクが
+        // 巻き戻っても同一プロセス内で重複配送しないよう、メモリ上の配送済みキャッシュ
+        // も併せて確認する（Issue #250）。
+        if (cursor.deliveredIds.includes(candidate.cid) || wasDeliveredInMemory(workerName, candidate.cid)) {
           cursor.seenIds.push(candidate.cid);
           continue;
         }
@@ -828,6 +898,7 @@ function main(argsOverride, opts = {}) {
 
         if (deliveryResult.success) {
           cursor.deliveredIds.push(candidate.cid);
+          markDeliveredInMemory(workerName, candidate.cid);
           writeOut(`DELIVERED:${workerName}:${candidate.cid}`);
         } else {
           // 配送失敗 → pending に記録
@@ -854,7 +925,17 @@ function main(argsOverride, opts = {}) {
       cursor.seenIds = cursor.seenIds.slice(-MAX_SEEN_IDS);
       cursor.deliveredIds = cursor.deliveredIds.slice(-MAX_SEEN_IDS);
 
-      writeCursor(workspace, workerName, cursor);
+      // カーソル永続化は他プロセスがカーソルファイルを掴んでいる等で EPERM 失敗しうる
+      // （Issue #250）。例外はここで捕捉してこのワーカーの処理を終え、次サイクルで再試行
+      // する。ディスクが巻き戻っても deliveredIds はメモリキャッシュで重複配送を防ぐ。
+      try {
+        writeCursor(workspace, workerName, cursor);
+        getWriteFailureMonitor(workerName, issue).onSuccess();
+      } catch (e) {
+        writeErr(`inbox-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
+        getWriteFailureMonitor(workerName, issue).onFailure(e.message);
+        continue;
+      }
     }
 
     writeOut(`SCAN_END:${workers.size}:${totalDetected}`);
@@ -945,6 +1026,9 @@ module.exports = {
   _setIsWorkerAlive: (fn) => { _isWorkerAlive = fn; },
   _setSleep: (fn) => { _sleep = fn; },
   _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
+  // 実装を直接参照（テストが注入を戻す際の復元用。PR #251 の引数検証テストから使う）
+  _notifyOrchestrator,
+  _setNotifySpawn: (fn) => { _notifySpawn = fn; },
   _setReadContract: (fn) => { _readContract = fn; },
   _setClearContract: (fn) => { _clearContract = fn; },
   main,
