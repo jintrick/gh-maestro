@@ -66,6 +66,7 @@ function generateStagingPath(finalPath) {
 function buildPrompt({ pr, repo, workspace, outputFile }) {
   const toUnix = p => p.replace(/\\/g, '/');
   const scriptsDir = toUnix(path.join(__dirname));
+  const manifestFile = reviewArtifactPath(path.join(workspace, '.gh-maestro'), pr, '.manifest.json');
   const prompt = `gh-maestro-reviewerスキルを発動し、Review ManagerとしてPRレビューを実行してください。
 
 PR=${pr}
@@ -78,7 +79,7 @@ SCRIPTS=${scriptsDir}
 - GitHubへ投稿しない
 - 採否判断しない
 - 7葉すべてを読み、diffに基づいて各葉を adopted / excluded に分類すること
-- 採用葉をジョブに分割し、実行manifestを .gh-maestro/review-manifest-${pr}.json に書き出すこと
+- 採用葉をジョブに分割し、実行manifestを ${toUnix(manifestFile)} に書き出すこと
 - node ${scriptsDir}/run-review-jobs.js でジョブを実行すること
 - 全採用葉が成功したら node ${scriptsDir}/finalize-review.js --mode complete で最終化すること
 - 失敗が残り打切りを判断したら node ${scriptsDir}/finalize-review.js --mode incomplete で不完全報告すること
@@ -622,6 +623,7 @@ async function superviseReviewManager({
   try {
     fs.mkdirSync(ghDir, { recursive: true });
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    fs.mkdirSync(path.dirname(lockFile), { recursive: true });
     fs.writeFileSync(lockFile, String(process.pid));
   } catch (e) {
     return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir: null, reason: `初期化失敗: ${e.message}` };
@@ -645,7 +647,7 @@ async function superviseReviewManager({
   // 3. プロンプト準備（成果物契約付き）
   const worktreeGhDir = path.join(reviewWtDir, '.gh-maestro');
   fs.mkdirSync(worktreeGhDir, { recursive: true });
-  const worktreeOutputFile = path.join(worktreeGhDir, `review-manager-${pr}.json`);
+  const worktreeOutputFile = reviewArtifactPath(worktreeGhDir, pr, '.json');
   const { prompt: promptText } = buildPrompt({ pr, repo, workspace: reviewWtDir, outputFile: worktreeOutputFile });
 
   try {
@@ -861,7 +863,7 @@ async function superviseReviewManager({
       // 不完全レビューのセンチネルファイルを確認
       // finalize-review.js --mode incomplete が作成し、OUTPUT不在だが
       // レビューが正当に完了（不完全として）したことを示す。
-      const sentinelPath = path.join(ghDir, `review-manager-${pr}.incomplete`);
+      const sentinelPath = reviewArtifactPath(ghDir, pr, '.incomplete');
       if (fs.existsSync(sentinelPath)) {
         log('incomplete review sentinel detected — review completed as incomplete');
         return {

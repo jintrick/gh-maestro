@@ -30,15 +30,15 @@ describe('response-contract', () => {
 
     test('存在しない契約は null を返す', () => {
       withTempDir((dir) => {
-        assert.equal(readContract(dir, 'nonexistent-worker'), null);
+        assert.equal(readContract(dir, 'issue-1-nonexistent-worker'), null);
       });
     });
 
     test('contractDirの配下にファイルが作成される', () => {
       withTempDir((dir) => {
-        writeContract(dir, 'worker-x', { type: CONTRACT_TYPES.MESSAGE_REQUIRED });
+        writeContract(dir, 'issue-1-worker-x', { type: CONTRACT_TYPES.MESSAGE_REQUIRED });
         const expectedDir = contractDir(dir);
-        const expectedPath = contractPath(dir, 'worker-x');
+        const expectedPath = contractPath(dir, 'issue-1-worker-x');
         assert.ok(fs.existsSync(expectedDir));
         assert.ok(fs.existsSync(expectedPath));
       });
@@ -46,37 +46,37 @@ describe('response-contract', () => {
 
     test('type が文字列でない場合は null を返す（堅牢性）', () => {
       withTempDir((dir) => {
-        const cp = contractPath(dir, 'bad-contract');
+        const cp = contractPath(dir, 'issue-1-bad-contract');
         fs.mkdirSync(path.dirname(cp), { recursive: true });
         fs.writeFileSync(cp, JSON.stringify({ type: 123 }), 'utf8');
-        assert.equal(readContract(dir, 'bad-contract'), null);
+        assert.equal(readContract(dir, 'issue-1-bad-contract'), null);
       });
     });
 
     test('壊れたJSONファイルは null を返す（堅牢性）', () => {
       withTempDir((dir) => {
-        const cp = contractPath(dir, 'corrupt-contract');
+        const cp = contractPath(dir, 'issue-1-corrupt-contract');
         fs.mkdirSync(path.dirname(cp), { recursive: true });
         fs.writeFileSync(cp, 'not valid json {{{', 'utf8');
-        assert.equal(readContract(dir, 'corrupt-contract'), null);
+        assert.equal(readContract(dir, 'issue-1-corrupt-contract'), null);
       });
     });
 
     test('配列が入っている場合は null を返す（堅牢性）', () => {
       withTempDir((dir) => {
-        const cp = contractPath(dir, 'array-contract');
+        const cp = contractPath(dir, 'issue-1-array-contract');
         fs.mkdirSync(path.dirname(cp), { recursive: true });
         fs.writeFileSync(cp, JSON.stringify([1, 2, 3]), 'utf8');
-        assert.equal(readContract(dir, 'array-contract'), null);
+        assert.equal(readContract(dir, 'issue-1-array-contract'), null);
       });
     });
 
     test('再書き込みで内容が更新される', () => {
       withTempDir((dir) => {
-        writeContract(dir, 'worker-y', { type: CONTRACT_TYPES.MESSAGE_REQUIRED });
-        assert.equal(readContract(dir, 'worker-y').type, CONTRACT_TYPES.MESSAGE_REQUIRED);
-        writeContract(dir, 'worker-y', { type: CONTRACT_TYPES.ARTIFACT_OR_MESSAGE, artifact: 'pr', issue: 42 });
-        const updated = readContract(dir, 'worker-y');
+        writeContract(dir, 'issue-1-worker-y', { type: CONTRACT_TYPES.MESSAGE_REQUIRED });
+        assert.equal(readContract(dir, 'issue-1-worker-y').type, CONTRACT_TYPES.MESSAGE_REQUIRED);
+        writeContract(dir, 'issue-1-worker-y', { type: CONTRACT_TYPES.ARTIFACT_OR_MESSAGE, artifact: 'pr', issue: 42 });
+        const updated = readContract(dir, 'issue-1-worker-y');
         assert.equal(updated.type, CONTRACT_TYPES.ARTIFACT_OR_MESSAGE);
         assert.equal(updated.issue, 42);
       });
@@ -86,16 +86,16 @@ describe('response-contract', () => {
   describe('clearContract', () => {
     test('契約を削除できる', () => {
       withTempDir((dir) => {
-        writeContract(dir, 'worker-z', { type: CONTRACT_TYPES.MESSAGE_REQUIRED });
-        assert.notEqual(readContract(dir, 'worker-z'), null);
-        clearContract(dir, 'worker-z');
-        assert.equal(readContract(dir, 'worker-z'), null);
+        writeContract(dir, 'issue-1-worker-z', { type: CONTRACT_TYPES.MESSAGE_REQUIRED });
+        assert.notEqual(readContract(dir, 'issue-1-worker-z'), null);
+        clearContract(dir, 'issue-1-worker-z');
+        assert.equal(readContract(dir, 'issue-1-worker-z'), null);
       });
     });
 
     test('存在しない契約の削除はエラーにならない（冪等）', () => {
       withTempDir((dir) => {
-        clearContract(dir, 'nonexistent-worker');
+        clearContract(dir, 'issue-1-nonexistent-worker');
         // エラーが投げられなければOK
       });
     });

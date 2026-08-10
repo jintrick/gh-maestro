@@ -126,6 +126,7 @@ function startReviewManager(pr, repo, workspace, issue) {
     },
   });
 
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
   fs.writeFileSync(lockFile, String(launched.pid));
   return 'REVIEW_MANAGER_STARTED';
 }

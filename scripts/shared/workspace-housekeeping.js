@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { recordRoot } = require('./record-paths');
 
 const MAX_WORKER_LOG_BYTES = 10 * 1024 * 1024;
 const MAX_LOG_GENERATIONS = 3;
@@ -55,31 +56,53 @@ function rotateLog(logPath, results, dryRun) {
   }
 }
 
+function listRecordLogs(root, relative = '', output = []) {
+  let entries;
+  try { entries = fs.readdirSync(path.join(root, relative), { withFileTypes: true }); } catch { return output; }
+  for (const entry of entries) {
+    const rel = path.join(relative, entry.name);
+    const full = path.join(root, rel);
+    let stat;
+    try { stat = fs.lstatSync(full); } catch { continue; }
+    if (stat.isSymbolicLink()) continue;
+    if (stat.isDirectory()) listRecordLogs(root, rel, output);
+    else if (stat.isFile() && /\.log(?:\.\d+)?$/.test(entry.name)) output.push(full);
+  }
+  return output;
+}
+
+function removeOldRecordTemps(root, now, results, dryRun, relative = '') {
+  let entries;
+  try { entries = fs.readdirSync(path.join(root, relative), { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    const rel = path.join(relative, entry.name);
+    const full = path.join(root, rel);
+    let stat;
+    try { stat = fs.lstatSync(full); } catch { continue; }
+    if (stat.isSymbolicLink()) continue;
+    if (stat.isDirectory()) { removeOldRecordTemps(root, now, results, dryRun, rel); continue; }
+    if (!stat.isFile() || !(entry.name.includes('.compact-') || entry.name.startsWith('.staging-')
+      || /\.(?:json|log)\.[A-Za-z0-9]{6}$/.test(entry.name))) continue;
+    try {
+      if (now - stat.mtimeMs < TEMP_MIN_AGE_MS) continue;
+      if (!dryRun) fs.unlinkSync(full);
+      results.removed.push(full);
+    } catch (error) { results.errors.push(`${full}: ${error.message}`); }
+  }
+}
+
 function sweepWorkspaceFiles(workspace, { activeWorkerNames = new Set(), activeReviewPrs = new Set(), now = Date.now(), dryRun = false } = {}) {
   const results = { removed: [], compacted: [], rotated: [], errors: [] };
   const maestro = path.join(workspace, '.gh-maestro');
-  const workerLogDir = path.join(maestro, 'worker-logs');
-
-  removeOldFiles(workerLogDir,
-    (name) => name.includes('.compact-') && name.endsWith('.tmp') || name.startsWith('.staging-'), now, results, dryRun);
-  removeOldFiles(path.join(maestro, 'assistant-watch'),
-    (name) => !name.endsWith('.json'), now, results, dryRun);
-  removeOldFiles(path.join(maestro, 'inbox-supervisor', 'cursors'),
-    (name) => !name.endsWith('.json'), now, results, dryRun);
-  removeOldFiles(path.join(maestro, 'msg-state'),
-    (name) => !name.endsWith('.json'), now, results, dryRun);
-
-  let logs;
-  try { logs = fs.readdirSync(workerLogDir).filter(name => name.endsWith('.log')); } catch { logs = []; }
+  const records = recordRoot(workspace);
+  removeOldRecordTemps(records, now, results, dryRun);
+  const logs = listRecordLogs(records).filter((filePath) => /\.log$/.test(filePath));
   // 上限を超えた世代は、現在ログのローテーション有無に関係なく削除する。
-  let generations = [];
-  try {
-    generations = fs.readdirSync(workerLogDir).filter(name => /\.log\.\d+$/.test(name));
-  } catch {}
-  for (const name of generations) {
+  const generations = listRecordLogs(records).filter((filePath) => /\.log\.\d+$/.test(filePath));
+  for (const generationPath of generations) {
+    const name = path.basename(generationPath);
     const generation = Number(name.slice(name.lastIndexOf('.') + 1));
-    if (generation <= MAX_LOG_GENERATIONS || !isRegularFile(path.join(workerLogDir, name))) continue;
-    const generationPath = path.join(workerLogDir, name);
+    if (generation <= MAX_LOG_GENERATIONS || !isRegularFile(generationPath)) continue;
     try {
       if (!dryRun) fs.unlinkSync(generationPath);
       results.removed.push(generationPath);
@@ -87,12 +110,13 @@ function sweepWorkspaceFiles(workspace, { activeWorkerNames = new Set(), activeR
       results.errors.push(`${generationPath}: ${error.message}`);
     }
   }
-  for (const name of logs) {
-    const workerName = name.slice(0, -4);
-    const reviewMatch = /-pr-(\d+)\.log$/.exec(name);
-    if (activeWorkerNames.has(workerName)
-      || (reviewMatch && activeReviewPrs.has(reviewMatch[1]))) continue;
-    const logPath = path.join(workerLogDir, name);
+  for (const logPath of logs) {
+    const relative = path.relative(records, logPath).split(path.sep);
+    const workerIndex = relative.indexOf('workers');
+    const workerName = workerIndex >= 0 ? relative[workerIndex + 1] : null;
+    const prMatch = /^pr$/.test(relative[0]) ? relative[1] : null;
+    if ((workerName && activeWorkerNames.has(workerName))
+      || (prMatch && relative.includes('review') && activeReviewPrs.has(prMatch))) continue;
     if (!isRegularFile(logPath)) continue;
     if (dryRun) {
       try { if (fs.statSync(logPath).size > MAX_WORKER_LOG_BYTES) results.rotated.push(logPath); } catch {}

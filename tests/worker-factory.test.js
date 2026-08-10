@@ -171,7 +171,7 @@ test('buildNormalWorkerLaunchSpec: logPath は workerLogPath(workspace, workerNa
   });
   const expected = workerLogPath('C:/ws', 'issue-5-coder-fix-auth');
   assert.equal(spec.logPath, expected);
-  assert.match(spec.logPath, /worker-logs[/\\]issue-5-coder-fix-auth\.log$/);
+  assert.match(spec.logPath, /records[/\\]issue[/\\]5[/\\]workers[/\\]issue-5-coder-fix-auth[/\\]worker\.log$/);
 });
 
 test('buildNormalWorkerLaunchSpec: leaseKey は workerName と同一（workers.jsonのキー）', () => {
@@ -402,7 +402,7 @@ test('buildReviewManagerLaunchSpec: leaseStore は reviewArtifactPath(ghDir, pr,
 
   const expected = reviewArtifactPath(ghDir, '42', '.running');
   assert.equal(spec.leaseStore, expected);
-  assert.match(spec.leaseStore, /review-manager-42\.running$/);
+  assert.match(spec.leaseStore, /records[\\/]pr[\\/]42[\\/]review[\\/]manager\.running$/);
 });
 
 test('buildReviewManagerLaunchSpec: PR番号が無効だとエラー（path traversal対策）', () => {
@@ -503,7 +503,7 @@ test('現行一致: 通常ワーカーのlogKeyがworkerLogPathの第二引数�
 
   const logPath = workerLogPath('C:/ws', spec.logKey);
   assert.equal(logPath, spec.logPath);
-  assert.match(logPath, /worker-logs[/\\]issue-5-coder-fix-auth\.log$/);
+  assert.match(logPath, /records[/\\]issue[/\\]5[/\\]workers[/\\]issue-5-coder-fix-auth[/\\]worker\.log$/);
 });
 
 test('現行一致: Review Managerのfindings成果物キーはreview-manager-<pr>で変わらない', () => {
@@ -518,9 +518,8 @@ test('現行一致: Review Managerのfindings成果物キーはreview-manager-<p
 
   // findings JSON のパス（現行のまま）
   const findingsPath = reviewArtifactPath(ghDir, '42', '.json');
-  assert.equal(findingsPath, path.join(ghDir, 'review-manager-42.json'));
-  // leaseKey が findings 成果物と同一のベース名であることを確認
-  assert.ok(findingsPath.includes(spec.leaseKey));
+  assert.equal(findingsPath, path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.json'));
+  assert.match(findingsPath, /records[\\/]pr[\\/]42[\\/]review[\\/]manager\.json$/);
 });
 
 // ── LifecyclePolicy: normalWorkerPolicy ────────────────────────────────────────
@@ -679,7 +678,7 @@ test('LaunchSpec差異: 通常ワーカーはleaseStoreがworkers.json、Review 
   });
 
   assert.match(normal.leaseStore, /workers\.json$/);
-  assert.match(rm.leaseStore, /review-manager-42\.running$/);
+  assert.match(rm.leaseStore, /records[/\\]pr[/\\]42[/\\]review[/\\]manager\.running$/);
 });
 
 // ── 入力バリデーション: assertValidIssue ───────────────────────────────────────
@@ -890,7 +889,7 @@ test('buildNormalWorkerLaunchSpec: 正規の入力はパスが管理ルート配
   );
 
   // logPath が worker-logs/ ルート配下であること
-  const logsRoot = path.join('C:/ws', '.gh-maestro', 'worker-logs');
+  const logsRoot = path.join('C:/ws', '.gh-maestro', 'records');
   assert.ok(
     spec.logPath.startsWith(logsRoot + path.sep) || spec.logPath === logsRoot,
     `logPath "${spec.logPath}" should be under "${logsRoot}"`,
@@ -932,7 +931,7 @@ test('buildReviewManagerLaunchSpec: 正規の入力はパスが管理ルート�
   );
 
   // logPath が worker-logs/ ルート配下であること
-  const logsRoot = path.join('C:/ws', '.gh-maestro', 'worker-logs');
+  const logsRoot = path.join('C:/ws', '.gh-maestro', 'records');
   assert.ok(
     spec.logPath.startsWith(logsRoot + path.sep) || spec.logPath === logsRoot,
   );

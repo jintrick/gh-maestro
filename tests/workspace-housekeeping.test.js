@@ -11,17 +11,18 @@ test('sweepWorkspaceFiles: 古いatomic tmpを掃除し、稼働中ワーカー�
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-housekeeping-'));
   try {
     const maestro = path.join(workspace, '.gh-maestro');
-    const logDir = path.join(maestro, 'worker-logs');
-    const cursorDir = path.join(maestro, 'inbox-supervisor', 'cursors');
+    const logDir = path.join(maestro, 'records', 'issue', '7', 'workers');
+    const cursorDir = path.join(maestro, 'records', 'issue', '7', 'workers', 'issue-7-active');
     fs.mkdirSync(cursorDir, { recursive: true });
     fs.mkdirSync(logDir, { recursive: true });
     const old = new Date(Date.now() - TEMP_MIN_AGE_MS - 1000);
     const orphan = path.join(cursorDir, 'worker.json.abcd12');
     fs.writeFileSync(orphan, '{}');
     fs.utimesSync(orphan, old, old);
-    const active = path.join(logDir, 'active.log');
+    const active = path.join(logDir, 'issue-7-active', 'worker.log');
+    fs.mkdirSync(path.dirname(active), { recursive: true });
     fs.writeFileSync(active, '{"type":"system","subtype":"thinking_tokens"}\n');
-    const result = sweepWorkspaceFiles(workspace, { activeWorkerNames: new Set(['active']) });
+    const result = sweepWorkspaceFiles(workspace, { activeWorkerNames: new Set(['issue-7-active']) });
     assert.ok(result.removed.includes(orphan));
     assert.equal(fs.readFileSync(active, 'utf8').length > 0, true);
   } finally {
@@ -32,7 +33,7 @@ test('sweepWorkspaceFiles: 古いatomic tmpを掃除し、稼働中ワーカー�
 test('sweepWorkspaceFiles: 完了ログを圧縮せず、残った肥大ログを世代ローテーションする', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-housekeeping-'));
   try {
-    const logDir = path.join(workspace, '.gh-maestro', 'worker-logs');
+    const logDir = path.join(workspace, '.gh-maestro', 'records', 'issue', '7', 'workers', 'issue-7-finished');
     fs.mkdirSync(logDir, { recursive: true });
     const logPath = path.join(logDir, 'finished.log');
     fs.writeFileSync(logPath, 'x'.repeat(MAX_WORKER_LOG_BYTES + 1));
@@ -52,19 +53,19 @@ test('sweepWorkspaceFiles: 完了ログを圧縮せず、残った肥大ログ�
 test('sweepWorkspaceFiles: 稼働中ログ（activeWorkerNames）は中身・mtime不変で、.compact-*.tmp が残らない', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-housekeeping-'));
   try {
-    const logDir = path.join(workspace, '.gh-maestro', 'worker-logs');
+    const logDir = path.join(workspace, '.gh-maestro', 'records', 'issue', '7', 'workers', 'issue-7-active');
     fs.mkdirSync(logDir, { recursive: true });
-    const active = path.join(logDir, 'active.log');
+    const active = path.join(logDir, 'worker.log');
     const content = '{"type":"system","subtype":"thinking_tokens"}\nnormal line\n';
     fs.writeFileSync(active, content);
     // 過去の回帰で残りうる .compact-*.tmp 残骸も置いておく（掃除対象として）。
-    const orphanTmp = path.join(logDir, 'active.log.compact-123-999999.tmp');
+    const orphanTmp = path.join(logDir, 'worker.log.compact-123-999999.tmp');
     fs.writeFileSync(orphanTmp, content);
     const old = new Date(Date.now() - TEMP_MIN_AGE_MS - 1000);
     fs.utimesSync(orphanTmp, old, old);
 
     const beforeMtime = fs.statSync(active).mtimeMs;
-    const result = sweepWorkspaceFiles(workspace, { activeWorkerNames: new Set(['active']) });
+    const result = sweepWorkspaceFiles(workspace, { activeWorkerNames: new Set(['issue-7-active']) });
 
     // 稼働中ログの中身・mtimeは変わらない（圧縮もローテーションも行われない）。
     assert.equal(fs.readFileSync(active, 'utf8'), content);
@@ -80,9 +81,9 @@ test('sweepWorkspaceFiles: 稼働中ログ（activeWorkerNames）は中身・mti
 test('sweepWorkspaceFiles: 保護されないログでも圧縮は行われない（thinking_tokens行が残る）', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-housekeeping-'));
   try {
-    const logDir = path.join(workspace, '.gh-maestro', 'worker-logs');
+    const logDir = path.join(workspace, '.gh-maestro', 'records', 'issue', '7', 'workers', 'issue-7-finished');
     fs.mkdirSync(logDir, { recursive: true });
-    const logPath = path.join(logDir, 'finished.log');
+    const logPath = path.join(logDir, 'worker.log');
     // thinking_tokens 進捗行を含むログ。従来の sweep はこれを圧縮していたが、
     // 項目8以降 sweep は圧縮しないため、行はそのまま残る。
     const content = '{"type":"system","subtype":"thinking_tokens"}\nkeep me\n';

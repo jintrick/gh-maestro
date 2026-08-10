@@ -20,6 +20,7 @@ const path = require('path');
 const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
 const { workerLogPath } = require('./shared/headless-launch');
 const { compactWorkerLog } = require('./shared/strip-thinking-token-lines');
+const { recordRoot } = require('./shared/record-paths');
 
 const USAGE = `cleanup-worker-logs.js — ワーカーログから thinking_tokens 進捗イベント行を取り除く
 
@@ -29,7 +30,7 @@ Options:
   --workspace <path>  ワークスペース（省略時は GH_MAESTRO_WORKSPACE env または
                       CWDからの .gh-maestro/ 上方探索で解決）
   --worker <name>     指定したワーカーのログのみ圧縮する（省略時は
-                      .gh-maestro/worker-logs/ 配下の *.log 全件）
+                      .gh-maestro/records/ 配下の worker/review *.log 全件）
   --help, -h          このヘルプを表示する
 
 実行中（まだ追記中）のワーカーに対しては使わないこと。プロセスが完全に終了した
@@ -65,14 +66,24 @@ if (require.main === module) {
   if (values['--worker']) {
     targets = [workerLogPath(workspace, values['--worker'])];
   } else {
-    const dir = path.join(workspace, '.gh-maestro', 'worker-logs');
-    let entries;
-    try {
-      entries = fs.readdirSync(dir);
-    } catch (e) {
-      fail(`worker-logs ディレクトリを読めません: ${dir} — ${e.message}`);
-    }
-    targets = entries.filter((f) => f.endsWith('.log')).map((f) => path.join(dir, f));
+    const root = recordRoot(workspace);
+    targets = [];
+    const walk = (dir) => {
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) {
+        if (e.code !== 'ENOENT') fail(`records ディレクトリを読めません: ${dir} — ${e.message}`);
+        return;
+      }
+      for (const entry of entries) {
+        const filePath = path.join(dir, entry.name);
+        let stat;
+        try { stat = fs.lstatSync(filePath); } catch { continue; }
+        if (stat.isSymbolicLink()) continue;
+        if (stat.isDirectory()) walk(filePath);
+        else if (stat.isFile() && entry.name.endsWith('.log')) targets.push(filePath);
+      }
+    };
+    walk(root);
   }
 
   if (targets.length === 0) {

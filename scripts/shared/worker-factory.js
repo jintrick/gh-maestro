@@ -15,7 +15,7 @@
 
 const path = require('path');
 const { workerLogPath } = require('./headless-launch');
-const { assertValidPr } = require('./review-manager-paths');
+const { assertValidPr, reviewArtifactPath } = require('./review-manager-paths');
 
 // ── 入力バリデーション ──────────────────────────────────────────────────────────
 // 外部由来の値（issue/description）が worktree・ログパス等の構成要素になる前に
@@ -246,16 +246,16 @@ function buildNormalWorkerLaunchSpec({ skill, issue, description, repo, workspac
   const workerName = buildWorkerName(validIssue, role, validDescription);
   const ghDir = path.resolve(path.join(workspace, '.gh-maestro'));
   const worktreesRoot = path.join(ghDir, 'worktrees');
-  const logsRoot = path.join(ghDir, 'worker-logs');
 
   const worktreeDir = path.join(worktreesRoot, workerName);
-  const logPath = workerLogPath(workspace, workerName);
+  const logPath = workerLogPath(workspace, workerName, {
+    ownerKind: 'issue', ownerId: validIssue, workerName,
+  });
 
   // 多層防御: 識別子検証を通過した後も、解決後パスが管理ルート配下かを確認する
   // （path-confinement.md 準拠。description検証が ../ を弾くが、将来の変更や
   // 未知のエンコーディングバイパスに備えた防護線）。
   assertWithinRoot(worktreesRoot, worktreeDir, 'worktreeDir');
-  assertWithinRoot(logsRoot, logPath, 'logPath');
 
   return Object.freeze({
     workerName,
@@ -303,16 +303,16 @@ function buildReviewManagerLaunchSpec({ issue, pr, repo, workspace }) {
 
   const ghDir = path.resolve(path.join(workspace, '.gh-maestro'));
   const worktreesRoot = path.join(ghDir, 'worktrees');
-  const logsRoot = path.join(ghDir, 'worker-logs');
 
   const worktreeDir = path.join(worktreesRoot, `review-pr-${validPr}`);
-  const logPath = workerLogPath(workspace, workerName);
+  const logPath = workerLogPath(workspace, workerName, {
+    ownerKind: 'pr', ownerId: validPr, workerName,
+  });
 
   // 多層防御: 解決後パスが管理ルート配下かを確認する（通常ワーカーと同様の防護線）。
   // Review Managerのworktreeキーは review-pr-<pr>（pr は assertValidPr で正整数に
   // 検証済み）だが、将来の変更に備えて封じ込めチェックを適用する。
   assertWithinRoot(worktreesRoot, worktreeDir, 'worktreeDir');
-  assertWithinRoot(logsRoot, logPath, 'logPath');
 
   return Object.freeze({
     workerName,
@@ -333,7 +333,7 @@ function buildReviewManagerLaunchSpec({ issue, pr, repo, workspace }) {
     // リースキーは .running ファイルのベース名（review-manager-<pr>）。
     // 現行の start-review-manager.js / run-review-manager.js の契約を維持。
     leaseKey: `review-manager-${validPr}`,
-    leaseStore: path.join(ghDir, `review-manager-${validPr}.running`),
+    leaseStore: reviewArtifactPath(ghDir, validPr, '.running'),
     worktreeDir,
     logPath,
   });

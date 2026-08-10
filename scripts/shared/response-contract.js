@@ -2,7 +2,7 @@
 // response-contract.js — 応答契約の読み書きを担当する共有モジュール
 //
 // 責務:
-//   契約ファイル（.gh-maestro/inbox-supervisor/contracts/<workerName>.json）の
+//   契約ファイル（.gh-maestro/records/<owner>/<id>/workers/<worker>/contract.json）の
 //   読み書きと削除。契約のビジネスロジック（充足判定）は持たない（それは worker-exit-hook.js の責務）。
 //   契約のライフサイクル管理（いつクリアするか）も持たない（それは inbox-supervisor.js の責務）。
 //
@@ -18,6 +18,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { ARTIFACTS, legacyWorkerOwner, recordPath } = require('./record-paths');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
 
@@ -34,7 +35,7 @@ const CONTRACT_TYPES = Object.freeze({
  * @returns {string}
  */
 function contractDir(workspace) {
-  return path.join(workspace, '.gh-maestro', 'inbox-supervisor', 'contracts');
+  return require('./record-paths').recordRoot(workspace);
 }
 
 /**
@@ -43,8 +44,13 @@ function contractDir(workspace) {
  * @param {string} workerName
  * @returns {string}
  */
-function contractPath(workspace, workerName) {
-  return path.join(contractDir(workspace), `${workerName}.json`);
+function contractPath(workspace, workerName, owner = null) {
+  const resolvedOwner = owner || legacyWorkerOwner(workerName);
+  return recordPath(workspace, {
+    ...resolvedOwner,
+    workerName,
+    artifact: ARTIFACTS.CONTRACT,
+  });
 }
 
 // ── 操作 ──────────────────────────────────────────────────────────────────
@@ -59,10 +65,10 @@ function contractPath(workspace, workerName) {
  * @param {object} contract - { type: string, artifact?: string, issue?: number|string }
  */
 function writeContract(workspace, workerName, contract) {
-  const dir = contractDir(workspace);
+  const cp = contractPath(workspace, workerName);
+  const dir = path.dirname(cp);
   fs.mkdirSync(dir, { recursive: true });
 
-  const cp = contractPath(workspace, workerName);
   const tmp = cp + '.' + Math.random().toString(36).slice(2, 8);
   fs.writeFileSync(tmp, JSON.stringify(contract, null, 2), 'utf8');
   fs.renameSync(tmp, cp);

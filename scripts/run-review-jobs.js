@@ -370,7 +370,9 @@ function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, tim
     const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
 
     // ログファイル準備
-    const logFile = workerLogPath(workspace, `review-job-${job.id}`);
+    const logFile = workerLogPath(workspace, `review-job-${job.id}`, {
+      ownerKind: 'job', ownerId: job.id, workerName: `review-job-${job.id}`,
+    });
     try {
       fs.mkdirSync(path.dirname(logFile), { recursive: true });
     } catch {}

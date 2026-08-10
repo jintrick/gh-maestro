@@ -64,10 +64,11 @@ function setupWorkspace(dir, opts = {}) {
   }
 
   if (opts.cursors) {
-    const cursorsDir = path.join(maestroDir, 'inbox-supervisor', 'cursors');
-    fs.mkdirSync(cursorsDir, { recursive: true });
     for (const [name, state] of Object.entries(opts.cursors)) {
-      fs.writeFileSync(path.join(cursorsDir, `${name}.json`), JSON.stringify(state, null, 2));
+      const issue = /^issue-(\d+)-/.exec(name)?.[1] || '1';
+      const cursorDir = path.join(maestroDir, 'records', 'issue', issue, 'workers', name);
+      fs.mkdirSync(cursorDir, { recursive: true });
+      fs.writeFileSync(path.join(cursorDir, 'cursor.json'), JSON.stringify(state, null, 2));
     }
   }
 
@@ -233,7 +234,7 @@ describe('Cursor state management', () => {
   test('readCursor: ファイルが無い場合は初期状態を返す', () => {
     withTempDir((dir) => {
       setupWorkspace(dir);
-      const state = supervisor.readCursor(dir, 'test-worker');
+      const state = supervisor.readCursor(dir, 'issue-1-test-worker');
       assert.equal(state.since, null);
       assert.deepEqual(state.seenIds, []);
       assert.deepEqual(state.deliveredIds, []);
@@ -247,7 +248,7 @@ describe('Cursor state management', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         cursors: {
-          'test-worker': {
+          'issue-1-test-worker': {
             since: '2024-01-01T00:00:00Z',
             seenIds: [1, 2, 3],
             deliveredIds: [1, 2],
@@ -258,7 +259,7 @@ describe('Cursor state management', () => {
         },
       });
 
-      const state = supervisor.readCursor(dir, 'test-worker');
+      const state = supervisor.readCursor(dir, 'issue-1-test-worker');
       assert.equal(state.since, '2024-01-01T00:00:00Z');
       assert.deepEqual(state.seenIds, [1, 2, 3]);
       assert.deepEqual(state.deliveredIds, [1, 2]);
@@ -270,11 +271,11 @@ describe('Cursor state management', () => {
 
   test('readCursor: 壊れたJSONは初期状態を返す', () => {
     withTempDir((dir) => {
-      const cursorsDir = path.join(dir, '.gh-maestro', 'inbox-supervisor', 'cursors');
+      const cursorsDir = path.join(dir, '.gh-maestro', 'records', 'issue', '1', 'workers', 'issue-1-bad');
       fs.mkdirSync(cursorsDir, { recursive: true });
-      fs.writeFileSync(path.join(cursorsDir, 'bad.json'), '{broken json');
+      fs.writeFileSync(path.join(cursorsDir, 'cursor.json'), '{broken json');
 
-      const state = supervisor.readCursor(dir, 'bad');
+      const state = supervisor.readCursor(dir, 'issue-1-bad');
       assert.equal(state.since, null);
       assert.deepEqual(state.seenIds, []);
       assert.equal(state.hangNotifiedPid, null);
@@ -295,8 +296,8 @@ describe('Cursor state management', () => {
         hangNotifiedAt: '2024-06-01T12:00:00Z',
       };
 
-      supervisor.writeCursor(dir, 'roundtrip', state);
-      const loaded = supervisor.readCursor(dir, 'roundtrip');
+      supervisor.writeCursor(dir, 'issue-1-roundtrip', state);
+      const loaded = supervisor.readCursor(dir, 'issue-1-roundtrip');
 
       assert.equal(loaded.since, state.since);
       assert.deepEqual(loaded.seenIds, state.seenIds);
@@ -319,8 +320,8 @@ describe('Cursor state management', () => {
         pendingDeliveries: {},
       };
 
-      supervisor.writeCursor(dir, 'trim-test', state);
-      const loaded = supervisor.readCursor(dir, 'trim-test');
+      supervisor.writeCursor(dir, 'issue-1-trim-test', state);
+      const loaded = supervisor.readCursor(dir, 'issue-1-trim-test');
 
       assert.equal(loaded.seenIds.length, 200);
       assert.equal(loaded.seenIds[0], 51);
@@ -329,14 +330,14 @@ describe('Cursor state management', () => {
   });
 
   test('cursorPath / stateDir が正しいパスを返す', () => {
-    const p = supervisor.cursorPath('/ws', 'my-worker');
+    const p = supervisor.cursorPath('/ws', 'issue-1-my-worker');
     assert.ok(p.includes('.gh-maestro'));
-    assert.ok(p.includes('inbox-supervisor'));
-    assert.ok(p.includes('cursors'));
-    assert.ok(p.endsWith('my-worker.json'));
+    assert.ok(p.includes('records'));
+    assert.ok(p.includes('issue'));
+    assert.ok(p.endsWith(path.join('issue-1-my-worker', 'cursor.json')));
 
     const s = supervisor.stateDir('/ws');
-    assert.ok(s.endsWith(path.join('.gh-maestro', 'inbox-supervisor')));
+    assert.ok(s.endsWith(path.join('.gh-maestro', 'records')));
   });
 });
 
@@ -570,7 +571,7 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
       // 前回の実行分がすでに書かれている状態を作る
-      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-7-fix.log');
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '7', 'workers', 'issue-7-fix', 'worker.log');
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.writeFileSync(logPath, '前回の実行の出力\n', 'utf8');
       const priorSize = fs.statSync(logPath).size;
@@ -898,7 +899,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
       // カーソルファイルの位置をディレクトリ化 → writeCursor（rename）が失敗する
-      fs.mkdirSync(path.join(dir, '.gh-maestro', 'inbox-supervisor', 'cursors', 'issue-5-fix.json'), { recursive: true });
+      fs.mkdirSync(path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'cursor.json'), { recursive: true });
 
       const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
@@ -928,7 +929,7 @@ describe('runOnce scan and deliver cycle', () => {
         },
       });
       // 全サイクルで writeCursor が失敗するため、ディスクのカーソルは常に初期状態のまま
-      fs.mkdirSync(path.join(dir, '.gh-maestro', 'inbox-supervisor', 'cursors', 'issue-5-fix.json'), { recursive: true });
+      fs.mkdirSync(path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'cursor.json'), { recursive: true });
 
       const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
@@ -1436,7 +1437,7 @@ describe('Hang detection', () => {
       });
 
       // ログファイルを古いmtimeで作成
-      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.writeFileSync(logPath, 'old log content\n', 'utf8');
       // 閾値（既定1200秒=20分）を超える過去のmtimeに設定
@@ -1490,7 +1491,7 @@ describe('Hang detection', () => {
       });
 
       // 古いログ（まだ更新されていない）
-      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.writeFileSync(logPath, 'old log\n', 'utf8');
       const oldTime = new Date(Date.now() - 25 * 60 * 1000);
@@ -1536,7 +1537,7 @@ describe('Hang detection', () => {
       });
 
       // ログを直近に更新（ハングから復帰した状態をシミュレート）
-      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.writeFileSync(logPath, 'updated log content\n', 'utf8');
       // 現在時刻のmtime（fs.writeFileSync の既定 = 現在時刻）
@@ -1568,7 +1569,7 @@ describe('Hang detection', () => {
       });
 
       // 古いログがあってもハング検知されない
-      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.writeFileSync(logPath, 'old log\n', 'utf8');
       const oldTime = new Date(Date.now() - 25 * 60 * 1000);
@@ -1626,7 +1627,7 @@ describe('Hang detection', () => {
       });
 
       // 10秒前のログ（--hang-threshold-sec=30 より短い＝通知されない）
-      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.writeFileSync(logPath, 'recent log\n', 'utf8');
       const recentTime = new Date(Date.now() - 10 * 1000);
@@ -1661,7 +1662,7 @@ describe('Hang detection', () => {
       });
 
       // 60秒前のログ（--hang-threshold-sec=10 より長い＝通知される）
-      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.writeFileSync(logPath, 'old log\n', 'utf8');
       const oldTime = new Date(Date.now() - 60 * 1000);
@@ -1696,14 +1697,14 @@ describe('Hang detection', () => {
       });
 
       // 60秒前のログ（--hang-threshold-sec=10 より長い＝ハング検知され、通知成功→カーソル保存へ）
-      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.writeFileSync(logPath, 'old log\n', 'utf8');
       const oldTime = new Date(Date.now() - 60 * 1000);
       fs.utimesSync(logPath, oldTime, oldTime);
 
       // カーソルファイルの位置をディレクトリ化 → 通知成功後の writeCursor が必ず失敗する
-      fs.mkdirSync(path.join(dir, '.gh-maestro', 'inbox-supervisor', 'cursors', 'issue-5-fix.json'), { recursive: true });
+      fs.mkdirSync(path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'cursor.json'), { recursive: true });
 
       const r = runMain(['--workspace', dir, '--hang-threshold-sec', '10']);
       assert.equal(r.code, 0);
@@ -1740,7 +1741,7 @@ describe('Hang detection', () => {
       });
 
       // 60秒前のログ → ハング検知され、実 _notifyOrchestrator が msg-send.js を spawn する
-      const logPath = path.join(dir, '.gh-maestro', 'worker-logs', 'issue-5-fix.log');
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.writeFileSync(logPath, 'old log\n', 'utf8');
       const oldTime = new Date(Date.now() - 60 * 1000);
@@ -1918,10 +1919,10 @@ describe('Cursor type safety', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         cursors: {
-          'bad-since': { since: {}, seenIds: [], deliveredIds: [], pendingDeliveries: {} },
+          'issue-1-bad-since': { since: {}, seenIds: [], deliveredIds: [], pendingDeliveries: {} },
         },
       });
-      const state = supervisor.readCursor(dir, 'bad-since');
+      const state = supervisor.readCursor(dir, 'issue-1-bad-since');
       assert.equal(state.since, null);
     });
   });
@@ -1930,10 +1931,10 @@ describe('Cursor type safety', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
         cursors: {
-          'bad-ids': { since: null, seenIds: 'not-an-array', deliveredIds: null, pendingDeliveries: {} },
+          'issue-1-bad-ids': { since: null, seenIds: 'not-an-array', deliveredIds: null, pendingDeliveries: {} },
         },
       });
-      const state = supervisor.readCursor(dir, 'bad-ids');
+      const state = supervisor.readCursor(dir, 'issue-1-bad-ids');
       assert.deepEqual(state.seenIds, []);
       assert.deepEqual(state.deliveredIds, []);
     });

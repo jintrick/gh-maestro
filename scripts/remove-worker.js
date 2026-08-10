@@ -20,6 +20,7 @@ const { sweepRegistry } = require('./process-lifecycle');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
 const { resolveWorkerName } = require('./shared/workers-registry');
+const { ARTIFACTS, legacyWorkerOwner, recordPath } = require('./shared/record-paths');
 
 const USAGE = `remove-worker.js — ワーカープロセスを kill し worktree を削除する
 
@@ -249,7 +250,9 @@ if (require.main === module) {
   // ワーカー宛てメッセージの処理カーソルを削除する。ワーカーが消えた以上、この
   // カーソルは以後使われない（ベストエフォート、ENOENT は成功扱い。Issue #248 項目6）。
   {
-    const cursorFile = resolve(workspace, '.gh-maestro', 'inbox-supervisor', 'cursors', `${workerName}.json`);
+    const cursorFile = recordPath(workspace, {
+      ...legacyWorkerOwner(workerName), artifact: ARTIFACTS.CURSOR,
+    });
     try {
       if (existsSync(cursorFile)) {
         rmSync(cursorFile);
