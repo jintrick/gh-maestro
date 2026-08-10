@@ -128,9 +128,13 @@ const RESUME_LIVENESS_GRACE_MS = 2000;
 // ワーカーではないため GH_MAESTRO_WORKER は設定せず、--from/--issue を明示して投稿する。
 // msg-send.js は本文を位置引数で受け付けない（--stdin / --body-file のみ）ため、
 // spawnSync の input で stdin 経由に渡す。
+// 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
+// 省略すると recipient が undefined になり usage エラーで必ず送信失敗する（PR #251 レビュー指摘）。
+let _notifySpawn = spawnSync;
 let _notifyOrchestrator = ({ workspace, issue, body }) => {
-  return spawnSync(process.execPath, [
+  return _notifySpawn(process.execPath, [
     path.join(__dirname, 'msg-send.js'),
+    'orchestrator',
     '--stdin',
     '--from', 'inbox-supervisor',
     '--issue', issue,
@@ -680,20 +684,31 @@ function main(argsOverride, opts = {}) {
             if (cursor.hangNotifiedPid !== entry.pid) {
               const minutes = Math.floor(staleMs / 60000);
               const body = `⚠️ ワーカー "${workerName}" がハングしている疑いがあります（ログ最終更新から ${minutes} 分以上経過、PID ${entry.pid}）。状態を確認し、必要ならプロセスを終了して再起動を検討してください。`;
+              let notified = false;
               try {
                 const notifyResult = _notifyOrchestrator({ workspace, issue, body });
-                if (notifyResult.status === 0) {
-                  cursor.hangNotifiedPid = entry.pid;
-                  cursor.hangNotifiedAt = new Date().toISOString();
-                  writeOut(`HANG_DETECTED:${workerName}:${entry.pid}`);
-                  // 後続処理（gh apiコメント取得等）が失敗してループがcontinueしても
-                  // 通知済み状態が失われないよう、ここで先に永続化する。
-                  writeCursor(workspace, workerName, cursor);
-                } else {
+                notified = notifyResult.status === 0;
+                if (!notified) {
                   writeErr(`inbox-supervisor: hang通知の投稿に失敗: ${(notifyResult.stderr || '').trim()}`);
                 }
               } catch (e) {
                 writeErr(`inbox-supervisor: hang通知の投稿に失敗: ${e.message}`);
+              }
+              // 通知成功時のみ通知済み状態を更新・永続化する。
+              if (notified) {
+                cursor.hangNotifiedPid = entry.pid;
+                cursor.hangNotifiedAt = new Date().toISOString();
+                writeOut(`HANG_DETECTED:${workerName}:${entry.pid}`);
+                // 後続処理（gh apiコメント取得等）が失敗してループがcontinueしても通知済み
+                // 状態が失われないよう、ここで先に永続化する。他プロセスがカーソルを掴んで
+                // いる等の EPERM でも停止せず、次サイクルの writeCursor 成功時にまとめて
+                // 永続化される（HANG_RESUMED と同じ扱い、Issue #250）。
+                try {
+                  writeCursor(workspace, workerName, cursor);
+                } catch (e) {
+                  writeErr(`inbox-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
+                  getWriteFailureMonitor(workerName, issue).onFailure(e.message);
+                }
               }
             }
           } else if (cursor.hangNotifiedPid !== null) {
@@ -1011,6 +1026,9 @@ module.exports = {
   _setIsWorkerAlive: (fn) => { _isWorkerAlive = fn; },
   _setSleep: (fn) => { _sleep = fn; },
   _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
+  // 実装を直接参照（テストが注入を戻す際の復元用。PR #251 の引数検証テストから使う）
+  _notifyOrchestrator,
+  _setNotifySpawn: (fn) => { _notifySpawn = fn; },
   _setReadContract: (fn) => { _readContract = fn; },
   _setClearContract: (fn) => { _clearContract = fn; },
   main,

@@ -328,9 +328,13 @@ function parseArgs(args) {
 // orchestrator への書き込み連続失敗の警告（Issue #250）。テストで注入可能。
 // inbox-supervisor.js の _notifyOrchestrator と同型。msg-send.js は本文を位置引数で
 // 受け付けない（--stdin / --body-file のみ）ため、spawnSync の input で stdin 経由に渡す。
+let _notifySpawn = spawnSync;
 let _notifyOrchestrator = ({ workspace, issue, body }) => {
-  return spawnSync(process.execPath, [
+  // 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
+  // 省略すると recipient が undefined になり usage エラーで必ず送信失敗する（PR #251 レビュー指摘）。
+  return _notifySpawn(process.execPath, [
     path.join(__dirname, 'msg-send.js'),
+    'orchestrator',
     '--stdin',
     '--from', 'assistant-watch',
     '--issue', issue,
@@ -480,6 +484,9 @@ module.exports = {
   _setGhPrView: (fn) => { _ghPrView = fn; },
   _setSleep: (fn) => { _sleep = fn; },
   _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
+  // 実装を直接参照（テストが注入を戻す際の復元用。PR #251 の引数検証テストから使う）
+  _notifyOrchestrator,
+  _setNotifySpawn: (fn) => { _notifySpawn = fn; },
   main,
   parseArgs,
   scanOnce,

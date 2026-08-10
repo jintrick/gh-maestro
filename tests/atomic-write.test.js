@@ -164,26 +164,42 @@ test('atomicWriteText: リトライ中に対象の掴みが解けたら成功す
   await withTempDir(async (dir) => {
     const target = path.join(dir, 'out.json');
     fs.writeFileSync(target, 'old');
+    // 子プロセスがロック取得を完了したことを親へ伝えるマーカーファイル。
+    // 固定sleepで「掴み切るまでの時間」を推測すると、負荷次第で最初の rename が成功して
+    // リトライ経路を一度も通らない偽陽性テストになる（PR #251 レビュー指摘）。
+    const markerPath = path.join(dir, 'lock-acquired.flag');
 
-    // 別プロセスが対象を掴み、200ms後にハンドルを閉じる。atomicWriteText の同期リトライ
+    // 別プロセスが対象を掴み、400ms後にハンドルを閉じる。atomicWriteText の同期リトライ
     // （Atomics.wait はメインスレッドのイベントループをブロックするため、同プロセスの
     // timer では解放できない）中にロック解放を観測できる。子プロセスは一度きりで自然
     // 終了する（.claude/rules/test-process-spawn-safety.md の許容範囲）。
     const child = spawn(process.execPath, ['-e', `
       const fs = require('fs');
       const fd = fs.openSync(process.env.ATOMIC_TEST_TARGET, 'r');
-      setTimeout(() => { try { fs.closeSync(fd); } catch {} }, 200);
+      // openSync 成功（＝ロック取得完了）後にマーカーを書く。親はこれを待ってから検証するため、
+      // 最初の rename が必ず EPERM でリトライ経路に入ることが構造的に保証される。
+      fs.writeFileSync(process.env.ATOMIC_TEST_MARKER, 'locked');
+      setTimeout(() => { try { fs.closeSync(fd); } catch {} }, 400);
     `], {
-      env: { ...cleanSpawnEnv(), ATOMIC_TEST_TARGET: target },
+      env: { ...cleanSpawnEnv(), ATOMIC_TEST_TARGET: target, ATOMIC_TEST_MARKER: markerPath },
       stdio: 'ignore',
     });
 
     try {
-      // 子プロセスが対象を掴み切るまでの時間を与える
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // ロック取得完了マーカーを待ってから検証する（子プロセスの起動遅延に依存しない）。
+      const deadline = Date.now() + 5000;
+      while (!fs.existsSync(markerPath)) {
+        assert.ok(Date.now() < deadline, '子プロセスのロック取得がタイムアウトしました');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
       atomicWriteText(target, 'new');
     } finally {
       child.kill();
+      // 子プロセス終了（＝fd解放）を待ってから一時ディレクトリ掃除に進む（Windows EBUSY回避）
+      await new Promise((resolve) => {
+        const t = setTimeout(resolve, 1000);
+        child.once('exit', () => { clearTimeout(t); resolve(); });
+      });
     }
     assert.equal(fs.readFileSync(target, 'utf8'), 'new');
   });
