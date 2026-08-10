@@ -480,7 +480,7 @@ PR番号が確定したら、レビューコメントとマージ状態の通知
 - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → インラインのレビュー指摘。コメントトリアージを実行する
 - `PR_COMMENT:<user>:<body>` → PR全体へのコメント。同様にトリアージする
 - `PR_REVIEW:<user>:<state>:<body>` → 正式レビュー提出（GitHubの「Submit review」ボタン経由）。jintrickのレビューはこの形式で届く。stateで分岐：APPROVED → 人間にマージ許可シグナルとして提示、CHANGES_REQUESTED → bodyをトリアージしてコーダーにフィードバック、COMMENTED → PR_COMMENTと同様にトリアージ
-- `PR_PUSH:<sha>` → コーダーが修正コミットをPRにプッシュした。レビューは初回PR作成時のみ実行される（push後の再レビューはない）。マージ可否の確認は「マージ可否ゲート」通過時のみ。未通過なら残 BLOCKER の解消を待つ
+- `PR_PUSH:<sha>` → コーダーが修正コミットをPRにプッシュした。レビューは初回PR作成時のみ実行される（push後の再レビューはない）。マージ可否の確認は「マージ可否ゲート」通過時のみ。未通過なら残 BLOCKER の解消を待つ。**転送済みの BLOCKER/MAJOR への修正 push を検出したら、Review Manager を再起動せず、そのIssueの explorer（未起動なら新規起動、既存があれば再利用）に「指摘の再現条件が実際に解消されているか」の事実確認を依頼する。** 判断（対応として十分か）は explorer の報告を踏まえて orchestrator が行う（explorer は事実確認に徹し判断はしない）
 - `PR_MERGED:<PR番号>` → マージ完了。`git -C $WORKSPACE pull --ff-only` で `BASE_BRANCH` を最新化してから本番公開（CI/CD）確認（下記「本番公開（CI/CD）確認」参照）へ進む。CI/CD確認完了後に反省会を実施する。**この時点ではワーカープロセス・worktreeを削除しない**（後始末の `finalize-issue.js` は下記「反省会」完了後にのみ実行する）
 - `POLL_ERROR:<detail>` → レビュー監視のGitHubアクセスが失敗し始めた（GitHub障害・一時的なネットワーク断など）。ポーラーは再試行を継続するので何かを起動し直す必要はないが、**「レビューがまだ来ないだけ」と解釈して待ち続けてはならない**。レビュー監視が劣化していることを人間に伝える。復旧すれば `POLL_RECOVERED` が届く
 - `POLL_RECOVERED` → 上記の劣化から復旧した。通常のレビュー監視に戻ってよい
@@ -492,7 +492,7 @@ PR番号が確定したら、レビューコメントとマージ状態の通知
 `REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の両方を満たすときだけ：
 
 - Review Manager 完了（`PR_REVIEW:...Posted inline findings: N` 到着 or `.gh-maestro/review-manager-<PR>.json` 生成）
-- 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER は修正 push が該当 finding を解消するまで未解消として扱う）
+- 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER/MAJOR は、修正 push に対する explorer の事実確認が完了するまで未解消として扱う）
 
 ### 誤ってマージしてしまった場合の対処
 
