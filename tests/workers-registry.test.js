@@ -56,6 +56,35 @@ test('readWorkersRaw: 正常なJSONを返す', () => {
   });
 });
 
+test('readWorkersRaw: 書き込み中の破損JSONでもリトライ後に正常内容を読める（Issue #248 項目12）', () => {
+  withTempDir((dir) => {
+    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
+    // existsSync ガードを通すため実ファイルを置く（中身は注入readFileFnが返すものを使う）
+    fs.writeFileSync(workersJsonPath(dir), '{not json', 'utf8');
+    const valid = JSON.stringify({ 'issue-1-coder': { pid: 1 } }, null, 2);
+    // 最初の1回は書き込み途中の破損内容を返し、2回目以降は正常内容を返す。
+    let calls = 0;
+    const readFileFn = () => {
+      calls++;
+      return calls === 1 ? '{not json' : valid;
+    };
+    const result = readWorkersRaw(dir, { readFileFn, sleepFn: () => {}, maxAttempts: 5, delayMs: 0 });
+    assert.deepEqual(result, { 'issue-1-coder': { pid: 1 } });
+    assert.ok(calls >= 2, `should have retried, called ${calls} times`);
+  });
+});
+
+test('readWorkersRaw: 全試行失敗ならnullのまま（リトライを消費して null）', () => {
+  withTempDir((dir) => {
+    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(workersJsonPath(dir), '{not json', 'utf8');
+    let sleeps = 0;
+    const result = readWorkersRaw(dir, { sleepFn: () => { sleeps++; }, maxAttempts: 3, delayMs: 0 });
+    assert.equal(result, null);
+    assert.equal(sleeps, 2); // 3試行・間のスリープは2回
+  });
+});
+
 test('updateWorkerProcess: 既存エントリのpid/startTime/logPathを更新する', () => {
   withTempDir((dir) => {
     writeWorkers(dir, {

@@ -20,20 +20,44 @@ function workersJsonPath(workspace) {
 }
 
 /**
- * workers.json を読み込む。存在しない・parse失敗の場合は null を返す。
+ * 既定のスリープ: Atomics.wait による同期的な短時間待機。
+ * @param {number} ms
+ */
+function defaultSleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * workers.json を読み込む。存在しない・全試行でparse失敗の場合は null を返す。
+ *
+ * JSON.parse 失敗は、別プロセス（spawn-worker.js等）が書き込み中で、tmp→rename
+ * アトミック書き込みの最中に部分内容を読んだ場合に起こりうる。書き込み完了を待って
+ * 短いリトライを行い、書き込み中の読み取りで保護ロジック全体が無効化される事態を
+ * 防ぐ（Issue #248 項目12）。ファイル自体の不在・型不正（配列等）はリトライしない。
+ *
  * @param {string} workspace
+ * @param {{readFileFn?: (p: string) => string, sleepFn?: (ms: number) => void, maxAttempts?: number, delayMs?: number}} [opts]
+ *   テスト容易性のための注入点。既定は fs.readFileSync と Atomics.wait。
  * @returns {object|null}
  */
-function readWorkersRaw(workspace) {
+function readWorkersRaw(workspace, {
+  readFileFn = (p) => fs.readFileSync(p, 'utf8'),
+  sleepFn = defaultSleep,
+  maxAttempts = 5,
+  delayMs = 20,
+} = {}) {
   const p = workersJsonPath(workspace);
-  try {
-    if (!fs.existsSync(p)) return null;
-    const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-    return raw;
-  } catch {
-    return null;
+  if (!fs.existsSync(p)) return null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const raw = JSON.parse(readFileFn(p));
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+      return raw;
+    } catch {
+      if (attempt < maxAttempts) sleepFn(delayMs);
+    }
   }
+  return null;
 }
 
 /**

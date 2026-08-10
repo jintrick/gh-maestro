@@ -93,4 +93,30 @@ function markProcessExit(workspace, executionId, exitCode) {
   return record;
 }
 
-module.exports = { registryPath, readRegistry, startExecution, markCommentResult, markLaunchFailure, markProcessExit };
+/**
+ * 指定issueに紐づく全実行レコードをレジストリから取り除く（間引き）。
+ *
+ * finalize-issue の後始末から呼ぶ。issueのライフサイクルが終了した時点で、そのissueに
+ * 紐づくワーカーは全員削除済みのため、running 等の未終了レコードも含めて stale であり
+ * 残す価値がない（Issue #248 項目7）。executions.json ファイル自体は削除しない
+ * （レジストリとしての存続）。issue番号の型は数値化して比較する。
+ *
+ * @param {string} workspace
+ * @param {string|number} issue
+ * @returns {number} 削除したレコード数
+ */
+function pruneExecutionsForIssue(workspace, issue) {
+  const wantIssue = Number(issue);
+  const registry = readRegistry(workspace);
+  let removed = 0;
+  for (const [executionId, record] of Object.entries(registry)) {
+    if (Number(record?.issue) === wantIssue) {
+      delete registry[executionId];
+      removed++;
+    }
+  }
+  if (removed > 0) writeRegistry(workspace, registry);
+  return removed;
+}
+
+module.exports = { registryPath, readRegistry, startExecution, markCommentResult, markLaunchFailure, markProcessExit, pruneExecutionsForIssue };

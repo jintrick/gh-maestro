@@ -51,3 +51,43 @@ test('完了済み実行を再起動しても completed とコメントURLを保
     assert.equal(retried.commentUrl, 'https://example.test/comment/1');
   });
 });
+
+// ── Issue #248 項目7: pruneExecutionsForIssue ──────────────────────────────
+
+test('pruneExecutionsForIssue: 対象issueのレコードだけ消し、他issueとファイル自体は残す', () => {
+  withWorkspace(workspace => {
+    registry.startExecution(workspace, { executionId: 'issue-7-a', issue: 7, workerName: 'worker-a', skill: 'gh-maestro-coder' });
+    registry.startExecution(workspace, { executionId: 'issue-7-b', issue: 7, workerName: 'worker-b', skill: 'gh-maestro-investigator' });
+    registry.startExecution(workspace, { executionId: 'issue-9', issue: 9, workerName: 'worker-c', skill: 'gh-maestro-coder' });
+
+    const removed = registry.pruneExecutionsForIssue(workspace, 7);
+
+    assert.equal(removed, 2);
+    const after = registry.readRegistry(workspace);
+    assert.ok(!('issue-7-a' in after));
+    assert.ok(!('issue-7-b' in after));
+    assert.ok('issue-9' in after);
+    // ファイル自体は残る
+    assert.ok(fs.existsSync(registry.registryPath(workspace)));
+  });
+});
+
+test('pruneExecutionsForIssue: issueが文字列で渡されても数値化して一致する', () => {
+  withWorkspace(workspace => {
+    registry.startExecution(workspace, { executionId: 'issue-3', issue: 3, workerName: 'worker', skill: 'gh-maestro-coder' });
+    const removed = registry.pruneExecutionsForIssue(workspace, '3');
+    assert.equal(removed, 1);
+    assert.deepEqual(registry.readRegistry(workspace), {});
+  });
+});
+
+test('pruneExecutionsForIssue: 該当が無ければ0を返し書き込みもしない', () => {
+  withWorkspace(workspace => {
+    registry.startExecution(workspace, { executionId: 'issue-5', issue: 5, workerName: 'worker', skill: 'gh-maestro-coder' });
+    const mtimeBefore = fs.statSync(registry.registryPath(workspace)).mtimeMs;
+    const removed = registry.pruneExecutionsForIssue(workspace, 99);
+    assert.equal(removed, 0);
+    assert.ok('issue-5' in registry.readRegistry(workspace));
+    assert.equal(fs.statSync(registry.registryPath(workspace)).mtimeMs, mtimeBefore);
+  });
+});

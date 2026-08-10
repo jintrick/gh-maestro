@@ -11,10 +11,12 @@
 //   node finalize-issue.js --issue <N> [--repo <owner/repo>] [--workspace <path>]
 
 const path = require('path');
-const { readFileSync, existsSync } = require('fs');
+const { readFileSync, existsSync, rmSync } = require('fs');
 const { spawnSync } = require('./child-process');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { getAssistant, removeAssistant } = require('./shared/assistants-registry');
+const { reviewArtifactPath } = require('./shared/review-manager-paths');
+const { pruneExecutionsForIssue } = require('./shared/execution-registry');
 
 const USAGE = `finalize-issue.js — Issue をクローズし、そのIssueの全ワーカーを削除する
 
@@ -31,6 +33,12 @@ Options:
 このIssueに紐づく対話型ワーカー「assistant」（.gh-maestro/assistants.json に登録。
 workers.json とは別管理）が存在すれば、あわせて強制終了（kill-pane）する。assistantが
 存在しなくてもエラー扱いにしない。
+
+さらに、ライフサイクル終了後の情報価値のない内部状態を後始末する（Issue #248・すべて best-effort）:
+- .gh-maestro/assistant-watch/<N>.json を削除
+- このIssueに紐づくPRの .gh-maestro/review-manager-<PR>.incomplete を削除
+  （PR発見は gh pr list --search head:issue-<N> --state all → 本文 "#<N>" フォールバック）
+- .gh-maestro/executions.json の当該Issueレコードを間引き（ファイル自体は残す）
 
 Output (stdout):
   FINALIZED:<N> removed=<削除成功数>/<対象数> closed=<true|false> assistant=<ok|skipped|failed>`;
@@ -90,11 +98,129 @@ function defaultKillAssistant(workspace, issue) {
 }
 
 /**
+ * PR本文が特定Issue番号を参照しているかを判定する（`#<issue>` の厳密一致）。
+ * 前方一致を防ぐため、`#<issue>` の直後に数字が続かないこと（単語境界）を要求する:
+ * 例: `#1` は `#12`・`#123` 等に誤マッチしない（Issue #248レビュー指摘）。
+ * @param {unknown} body
+ * @param {string|number} issue
+ * @returns {boolean}
+ */
+function bodyReferencesIssue(body, issue) {
+  if (typeof body !== 'string') return false;
+  return new RegExp(`#${issue}(?![0-9])`).test(body);
+}
+
+// 既定の対象PR発見処理: Issueに紐づくPR番号を列挙する（poll-pr.js / assistant-watch.js と同一の2段構え）。
+// 1. head:issue-<N>（worktreeブランチ命名規約による厳密一致。worker-entry.js参照）
+// 2. フォールバック: bodyが "#<N>" を参照するもの（#<N> の直後に数字が続かない単語境界で厳密一致。
+//    bodyReferencesIssue 参照。GitHub全文検索のあいまい一致は使わない——生の数字だけで検索すると
+//    無関係PRの本文中のバージョン番号等に誤マッチしうる）
+// --state all でクローズ済みPRも含めて発見する（.incomplete 後始末はクローズ後でも行いたい）。
+// gh が失敗したら空配列を返す（best-effort。削除漏れは許容し、後続のクローズを阻害しない）。
+function defaultFindReviewPrs(issue, repo, workspace) {
+  const prArgs = ['pr', 'list', '--search', `head:issue-${issue}`, '--state', 'all', '--json', 'number'];
+  if (repo) prArgs.unshift('--repo', repo);
+  const headResult = spawnSync('gh', prArgs, { cwd: workspace, encoding: 'utf8' });
+  if (headResult.status === 0) {
+    try {
+      const found = JSON.parse(headResult.stdout || '[]');
+      if (Array.isArray(found) && found.length > 0) {
+        return found.map((p) => p.number).filter((n) => n != null);
+      }
+    } catch { /* フォールバックへ */ }
+  }
+
+  const bodyArgs = ['pr', 'list', '--state', 'all', '--json', 'number,body'];
+  if (repo) bodyArgs.unshift('--repo', repo);
+  const bodyResult = spawnSync('gh', bodyArgs, { cwd: workspace, encoding: 'utf8' });
+  if (bodyResult.status !== 0) return [];
+  try {
+    const all = JSON.parse(bodyResult.stdout || '[]');
+    if (!Array.isArray(all)) return [];
+    return all
+      .filter((p) => bodyReferencesIssue(p.body, issue))
+      .map((p) => p.number)
+      .filter((n) => n != null);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Issue ライフサイクル終了時の、情報価値のない内部状態の後始末（best-effort）。
+ * 価値ある記録（review-manager-<PR>.json 等）は対象にしない（受理基準c）。
+ *
+ * - assistant-watch/<issue>.json を削除（Issue #248 項目2）
+ * - 対象PRの review-manager-<PR>.incomplete を削除（項目4・終端削除）
+ * - executions.json の当該issueレコードを間引き（項目7）
+ *
+ * @param {string} workspace
+ * @param {string|number} issue
+ * @param {{repo?: string|null, findReviewPrsFn?: Function}} [opts]
+ * @returns {{watchRemoved: boolean, incompleteRemoved: number[], executionsPruned: number}}
+ */
+function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn = defaultFindReviewPrs } = {}) {
+  const ghDir = path.join(workspace, '.gh-maestro');
+  const result = { watchRemoved: false, incompleteRemoved: [], executionsPruned: 0 };
+
+  // item2: assistant-watch/<issue>.json 削除。issue はファイル名に使うため正整数検証してから
+  // パス構築する（path-confinement ルール）。
+  if (/^[1-9]\d*$/.test(String(issue))) {
+    const watchFile = path.join(ghDir, 'assistant-watch', `${issue}.json`);
+    try {
+      if (existsSync(watchFile)) {
+        rmSync(watchFile);
+        result.watchRemoved = true;
+      }
+    } catch (e) {
+      process.stderr.write(`finalize-issue: assistant-watch/${issue}.json の削除に失敗しました（続行します）: ${e.message}\n`);
+    }
+  }
+
+  // item4: 対象PRの .incomplete 削除。reviewArtifactPath が PR の正整数検証 + ghDir封じ込めを担う。
+  let prs = [];
+  try {
+    prs = findReviewPrsFn(issue, repo, workspace) || [];
+  } catch (e) {
+    process.stderr.write(`finalize-issue: 対象PRの検出に失敗しました（続行します）: ${e.message}\n`);
+  }
+  for (const pr of prs) {
+    let sentinel;
+    try {
+      sentinel = reviewArtifactPath(ghDir, pr, '.incomplete');
+    } catch (e) {
+      process.stderr.write(`finalize-issue: 不正なPR番号 ${JSON.stringify(pr)} はスキップします: ${e.message}\n`);
+      continue;
+    }
+    try {
+      if (existsSync(sentinel)) {
+        rmSync(sentinel);
+        result.incompleteRemoved.push(Number(pr));
+      }
+    } catch (e) {
+      process.stderr.write(`finalize-issue: review-manager-${pr}.incomplete の削除に失敗しました（続行します）: ${e.message}\n`);
+    }
+  }
+
+  // item7: executions.json の当該issueレコード間引き（ファイル自体は残す）。
+  try {
+    result.executionsPruned = pruneExecutionsForIssue(workspace, issue);
+  } catch (e) {
+    process.stderr.write(`finalize-issue: executions.json の間引きに失敗しました（続行します）: ${e.message}\n`);
+  }
+
+  return result;
+}
+
+/**
  * Issue に紐づく全ワーカーを削除し、Issue をクローズし、対話型ワーカー「assistant」を終了する。
+ * あわせて、情報価値のない内部状態（assistant-watch/<issue>.json・対象PRの .incomplete・
+ * executions.json の当該issueレコード）を後始末する（Issue #248 項目2/4/7）。
  * @param {{workspace: string, issue: string|number, repo?: string|null}} params
- * @param {{removeWorkerFn?: Function, closeIssueFn?: Function, killAssistantFn?: Function}} [deps] テスト用に spawn を注入する
- * @returns {{workers: {name: string, ok: boolean}[], removedCount: number, closed: boolean, assistantKilled: boolean|null}}
+ * @param {{removeWorkerFn?: Function, closeIssueFn?: Function, killAssistantFn?: Function, findReviewPrsFn?: Function}} [deps] テスト用に spawn を注入する
+ * @returns {{workers: {name: string, ok: boolean}[], removedCount: number, closed: boolean, assistantKilled: boolean|null, artifacts: object}}
  *   assistantKilled: true=正常終了, false=終了処理に失敗, null=対象となるassistantが無かった（skipped）
+ *   artifacts: cleanupIssueArtifacts() の結果（watchRemoved / incompleteRemoved / executionsPruned）
  */
 function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
   const removeWorkerFn = deps.removeWorkerFn || defaultRemoveWorker;
@@ -123,15 +249,23 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
   }
   const assistantKilled = assistantResult.skipped ? null : assistantResult.ok;
 
+  // 情報価値のない内部状態の後始末（best-effort）。テストでは findReviewPrsFn を注入し、
+  // gh spawn が実環境で走らないようにする。
+  const artifacts = cleanupIssueArtifacts(workspace, issue, {
+    repo,
+    findReviewPrsFn: deps.findReviewPrsFn || defaultFindReviewPrs,
+  });
+
   return {
     workers,
     removedCount: workers.filter(w => w.ok).length,
     closed: close.ok,
     assistantKilled,
+    artifacts,
   };
 }
 
-module.exports = { collectWorkersForIssue, finalizeIssue };
+module.exports = { collectWorkersForIssue, finalizeIssue, cleanupIssueArtifacts, bodyReferencesIssue };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);

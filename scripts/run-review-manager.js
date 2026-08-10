@@ -546,10 +546,38 @@ module.exports = {
   pollForArtifact, validateArtifactContent,
   atomicCopyStaging, boundedCleanup,
   superviseReviewManager,
+  clearStaleIncompleteSentinel,
   // テスト用エクスポート
   _validateFindingShape, _validateAgainstSchema,
   _setPollForArtifact: (fn) => { _injectedPollForArtifact = fn; },
 };
+
+/**
+ * 同一PRの古い不完全レビュー・センチネル（review-manager-<PR>.incomplete）を削除する。
+ *
+ * .incomplete は finalize-review.js --mode incomplete が作成する「このレビュー周回は
+ * 不完全として正当に完了した」旨のマーカーで、superviseReviewManager はこれを見て
+ * outcome: 'incomplete-review' を返す。前周回が不完全終了した後、同じPRで再レビューを
+ * 開始すると古いセンチネルが残ったままだと新周回の途中結果を「不完全完了」と誤判定して
+ * しまうため、新たなレビュー周回の開始（.running ロック作成）時に必ず消す
+ * （Issue #248 項目4）。best-effort: 存在しなければ何もしない。
+ *
+ * @param {string} ghDir   .gh-maestro ディレクトリ
+ * @param {string|number} pr レビュー対象 PR 番号（reviewArtifactPath が正整数検証する）
+ */
+function clearStaleIncompleteSentinel(ghDir, pr) {
+  const sentinelPath = reviewArtifactPath(ghDir, pr, '.incomplete');
+  try {
+    if (fs.existsSync(sentinelPath)) {
+      fs.unlinkSync(sentinelPath);
+      console.warn(`run-review-manager: 前周回の不完全レビュー・センチネル ${path.basename(sentinelPath)} を削除しました（再レビュー開始）`);
+    }
+  } catch (e) {
+    // 削除に失敗しても再レビュー自体は続行する（best-effort）。ただし黙って消えないように
+    // ログには残す。
+    console.warn(`run-review-manager: 不完全レビュー・センチネル削除に失敗しました（続行します）: ${e.message}`);
+  }
+}
 
 // ── 監督ループ（artifact-committed mode向け） ──────────────────────────────────
 // 成果物コミット・プロセス終了・deadlineの3イベントを並行監督する。
@@ -598,6 +626,10 @@ async function superviseReviewManager({
   } catch (e) {
     return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir: null, reason: `初期化失敗: ${e.message}` };
   }
+  // 新レビュー周回の開始＝.running ロック作成。前周回が不完全終了した場合の
+  // 古い .incomplete センチネルが残っていると、今回の途中結果を誤って
+  // 「不完全完了」と判定してしまうため、ここで必ず消す（Issue #248 項目4）。
+  clearStaleIncompleteSentinel(ghDir, pr);
 
   log(`run-review-manager started pr=${pr} repo=${repo}`);
 

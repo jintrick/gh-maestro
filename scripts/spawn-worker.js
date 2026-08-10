@@ -42,6 +42,7 @@ const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree')
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
+const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
 const { toWinPath } = require('./win-path');
@@ -446,7 +447,9 @@ if (!workers.orchestrator) {
     delete workers[k];
     dirty = true;
   }
-  if (dirty) writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
+  // 並行書き込み競合（複数プロセスが同時に workers.json を更新）でも、破損JSONを
+  // 作らないようアトミック書き込み（staging→rename）に統一する（Issue #248 項目11）。
+  if (dirty) atomicWriteJson(workersJson, workers);
 }
 
 // --- baseBranch をリモートと同期（worktreeが常に最新ベースから分岐するよう保証） ---
@@ -655,7 +658,7 @@ try {
     issue,
     skill,
   });
-  writeFileSync(workersJson, JSON.stringify(workers, null, 2), 'utf8');
+  atomicWriteJson(workersJson, workers);
   console.warn(`spawn-worker: worker "${workerName}" を pid ${launched.pid} として workers.json に登録しました`);
   console.warn(`spawn-worker: 実行ログ: ${launched.logPath}`);
 } catch (e) {
