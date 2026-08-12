@@ -26,7 +26,12 @@ const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 const { markCommentResult, readRegistry } = require('./shared/execution-registry');
 const { isRetryableGhFailure, graphqlAddComment } = require('./shared/gh-fallback');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
-const { resolveWorkerName } = require('./shared/workers-registry');
+const { resolveWorkerName, readWorkersRaw } = require('./shared/workers-registry');
+const { normalizeWorkerEntry } = require('./worker-entry');
+const { isWorkerAlive } = require('./shared/worker-liveness');
+const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+const { hasReportedSinceStart } = require('./shared/worker-report-check');
+const { main: writeDraftMain } = require('./write-draft');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
@@ -68,7 +73,14 @@ Output (stdout):
 
 コンテキスト判定: GH_MAESTRO_WORKER 環境変数の有無でワーカー/orchestrator を判別する
   （spawn-worker.js / inbox-supervisor.js が起動時にワーカーへ注入する）。
-workspace 解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索`;
+workspace 解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索
+
+拒否ガード（orchestrator からワーカー宛ての送信のみ）: 宛先ワーカーが稼働中（作業中）で、
+  直近の起動以降まだ orchestrator へ報告していないと確定的に判定できた場合、GitHub には
+  一切投稿せず、その場で送信を拒否し code 1 で理由を返す。送ろうとした本文は /tmp 配下へ
+  退避され、そのパスが拒否メッセージに含まれる。判定に必要な事実（起動時刻・GitHub APIの
+  応答）を確認できない場合は拒否せず通す（フェイルオープン。通常どおり休止待ちキューへ積む）。
+  既に報告済みのまま稼働中（居座り）の場合も拒否しない（inbox-supervisor が異常として通知する）。`;
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -112,6 +124,110 @@ const defaultGhIssueComment = (issue, body, repo, opts = {}) => {
 };
 
 let _ghIssueComment = defaultGhIssueComment;
+
+// テストで注入可能（実gh呼び出しを避けるため）。既定は shared/gh-comments.js の実装。
+let _ghListComments = (repo, issue, opts = {}) => listComments(repo, issue, opts);
+
+/**
+ * 送信しようとした本文を /tmp 配下の一時ファイルへ退避する。
+ *
+ * 拒否時に本文をその場で失わせると、送り手（orchestrator＝LLM）は書き直しを強いられ、
+ * 内容が劣化するか面倒がって省略される。write-draft.js と同じ経路（win-path解決＋
+ * 許可ルート(/tmp)封じ込め）で保存し、実体パスを拒否メッセージに含める。
+ *
+ * @param {string} workerName
+ * @param {string} body
+ * @returns {{ ok: true, path: string } | { ok: false, error: string }}
+ */
+function saveRejectedBody(workerName, body) {
+  const logicalPath = `/tmp/msg-send-rejected-${workerName}-${Date.now()}.md`;
+  let result;
+  try {
+    result = writeDraftMain([logicalPath, '--stdin'], { readStdinFn: () => body, isStdinTTY: () => false });
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+  if (result.code !== 0) return { ok: false, error: result.stderr || '(unknown error)' };
+  const m = /^DRAFT_WRITTEN:(.+)$/m.exec(result.stdout || '');
+  if (!m) return { ok: false, error: '書き込み結果から実体パスを取得できませんでした' };
+  return { ok: true, path: m[1] };
+}
+
+/**
+ * 拒否メッセージを組み立てる。
+ *
+ * 読み手は orchestrator（LLM）であり、この文面だけが次の行動を決める唯一の指導文になる。
+ * 「送るな」とだけ言うと、賢いモデルほど迂回路（gh issue comment での直接投稿、ワーカーを
+ * 終了させて休止状態にしてから送る）を自力で見つけてしまうため、両方を名指しで禁止する。
+ * 「後で送り直せ」ではなく「報告を受けてから統合して一度に送れ」と書くのは、単なる
+ * 再送指示だと本Issueが解決しようとしている「指示の分断」がそのまま再発するため。
+ */
+function buildBusyRejectionMessage({ workerName, entry, issue, draftPath }) {
+  const draftLine = draftPath
+    ? `送ろうとした本文は ${draftPath} に退避しました。`
+    : '送ろうとした本文の退避に失敗しました。内容を控えてから、報告受領後に送り直してください。';
+  return [
+    `ワーカー "${workerName}"（pid ${entry.pid}）は作業中で、まだ報告を出していません。この指示は送信していません（GitHubにも残していません）。`,
+    draftLine,
+    `このワーカーの報告は Issue #${issue} のコメントとして届きます。報告を受け取ってから、その内容と退避した本文を統合して一度に送ってください。`,
+    '次のことはしないでください: gh issue comment でマーカー付きコメントを直接投稿する / ワーカーを終了させてから送る。どちらも指示の分断とセッションの破壊を招きます。',
+  ].join('\n');
+}
+
+/**
+ * 作業中（生存中）で、直近の起動以降にまだ orchestrator へ報告していないワーカー宛ての
+ * 送信を、投稿前に拒否する（Issue #263）。
+ *
+ * 「作業中に思いついた追伸」を無条件にキューへ積むと、送り手はそれが届いていないことに
+ * 気づけない。相手が休止中（isWorkerAlive===false）なら通常どおり配送経路（resume）に
+ * 任せるためここでは何もしない。相手が生存中でも、既に報告済みなら「居座り」であり
+ * 送り手の誤りではないため拒否しない（inbox-supervisor が異常として通知する）。
+ *
+ * 判定に必要な事実（起動時刻・報告コメントの有無）を確認できない場合は拒否せず通す
+ * （フェイルオープン）。ここで通しても起きるのは「メッセージが休止待ちキューへ積まれ、
+ * 相手が休止した時点で配送される」という従来どおりの動作であり損害はない。逆に拒否すると
+ * GitHubが一時的に不調な間はワーカーへ一切指示を送れなくなり、起動時刻を記録できなかった
+ * エントリには恒久的に送信不能になる——主要ワークフローが止まる方が損害が大きい。
+ * `.claude/rules/fail-closed-safety-guards.md` は「通すと損害が出るガード」に適用するもので
+ * あり、本件はその前提を満たさない。「報告が届かないまま誰も気づけない」という本Issueの
+ * 核心は、この送信ガードではなく inbox-supervisor 側の居座り通知（STALE_REPORT_DETECTED）
+ * が担う。
+ *
+ * @param {object} params
+ * @param {string} params.workspace
+ * @param {string} params.workerName  - 送信先ワーカー名
+ * @param {string} params.repo
+ * @param {string} params.issue
+ * @param {object} params.ghOpts
+ * @param {string} params.body        - 送信しようとしていた本文（拒否時に退避する）
+ * @returns {string|null}  拒否メッセージ（拒否する場合）。拒否しない場合は null。
+ */
+function checkWorkerBusyRejection({ workspace, workerName, repo, issue, ghOpts, body }) {
+  const raw = readWorkersRaw(workspace);
+  if (!raw || !(workerName in raw)) return null; // 未登録の宛先はこのガードの対象外（issue解決等が別途扱う）
+
+  const entry = normalizeWorkerEntry(raw[workerName]);
+  if (!isWorkerAlive(entry)) return null; // 休止中 → 通常どおり配送に任せる
+
+  if (!entry.startTime) return null; // 判定不能（起動時刻不明）→ 通す
+
+  const commentsResult = _ghListComments(repo, issue, ghOpts);
+  if (commentsResult.status !== 0) return null; // 判定不能（GitHub API取得失敗）→ 通す
+
+  let comments;
+  try {
+    comments = parseCommentsResponse(commentsResult.stdout);
+  } catch {
+    comments = null;
+  }
+  if (!comments) return null; // 判定不能（応答解釈失敗）→ 通す
+
+  const reported = hasReportedSinceStart(comments, workerName, entry.startTime);
+  if (reported !== false) return null; // true(居座り) / null(判定不能) は拒否しない
+
+  const draft = saveRejectedBody(workerName, body);
+  return buildBusyRejectionMessage({ workerName, entry, issue, draftPath: draft.ok ? draft.path : null });
+}
 
 // ── メインロジック ──────────────────────────────────────────────────────
 
@@ -316,6 +432,20 @@ function main(argsOverride, envOverride, ioOverride) {
     return { code: 1, lines: out, errLines: err };
   }
 
+  // ── 作業中で未報告のワーカーへの送信を拒否する（Issue #263） ────────────────
+  // orchestrator コンテキスト（!isWorker）から「ワーカー」宛て（recipient !== 'orchestrator'）
+  // の送信にのみ適用する。ワーカー→orchestrator の報告（isWorker時は recipient が常に
+  // 'orchestrator' に固定される）、inbox-supervisor からの通知（recipient='orchestrator'
+  // 固定）はこの条件に入らず影響を受けない。
+  if (!isWorker && recipient !== 'orchestrator') {
+    const rejectionMessage = checkWorkerBusyRejection({ workspace, workerName: recipient, repo, issue, ghOpts, body });
+    if (rejectionMessage) {
+      writeErr('msg-send: 送信を拒否しました。');
+      for (const line of rejectionMessage.split('\n')) writeErr(line);
+      return { code: 1, lines: out, errLines: err };
+    }
+  }
+
   // ── マーカー生成 ────────────────────────────────────────────────────────
 
   const marker = JSON.stringify({ v: 1, to: recipient, from });
@@ -383,7 +513,9 @@ module.exports = {
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhIssueComment: (fn) => { _ghIssueComment = fn; },
   _resetGhIssueComment: () => { _ghIssueComment = defaultGhIssueComment; },
+  _setGhListComments: (fn) => { _ghListComments = fn; },
   testContextPostBlockReason,
+  checkWorkerBusyRejection,
   main,
   USAGE,
 };

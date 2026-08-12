@@ -1,6 +1,6 @@
 'use strict';
 
-const { test } = require('node:test');
+const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -8,6 +8,17 @@ const path = require('path');
 const { EventEmitter } = require('events');
 
 const msgSend = require('../scripts/msg-send');
+const workerLiveness = require('../scripts/shared/worker-liveness');
+const processLifecycle = require('../scripts/process-lifecycle');
+
+// 稼働中ワーカーへの拒否ガード（Issue #263）のテストは worker-liveness を直接モックする。
+// msg-send.js は inbox-supervisor.js のような独自の注入ポイントを持たず、実体（シングルトン
+// モジュール）を直接呼ぶため、実体側のセッターで差し替える（tests/worker-liveness.test.js と
+// 同じパターン）。実プロセスには一切触れない（.claude/rules/test-process-spawn-safety.md）。
+afterEach(() => {
+  workerLiveness._setIsProcessAlive(processLifecycle.isProcessAlive);
+  workerLiveness._setVerifyProcessIdentity(processLifecycle.verifyProcessIdentity);
+});
 
 // msg-send.js は成功時にensureInboxSupervisorRunning()を呼ぶ（best-effort）。
 // テストでは実プロセスをspawnしないよう常にモックする（test-process-spawn-safety参照）。
@@ -393,6 +404,170 @@ test('マーカーが正しい形式で本文の前に付与される', () => {
     // 人間用ヘッダーと本文（引用形式）が含まれる
     assert.ok(lines[1].includes('From:'));
     assert.ok(lines[3].includes('hello world'));
+  });
+});
+
+// ── 稼働中で未報告のワーカーへの送信拒否（Issue #263） ────────────────────────
+
+function writeBusyWorker(workspace, { workerName = 'issue-9-fix', issue = 9, pid = 42424 } = {}) {
+  const ghDir = path.join(workspace, '.gh-maestro');
+  fs.mkdirSync(ghDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(ghDir, 'workers.json'),
+    JSON.stringify({
+      [workerName]: { pid, startTime: '2026-01-01T00:00:00.000Z', agentId: 'agy', issue },
+    }, null, 2),
+    'utf8'
+  );
+}
+
+function mockCommentsResponse(comments) {
+  return () => ({ status: 0, stdout: JSON.stringify(comments), stderr: '' });
+}
+
+test('稼働中で未報告のワーカー宛て送信は投稿前に拒否され、GitHubに何も投稿されない（本文は退避され迂回路も明示される）', () => {
+  withTempDir(workspace => {
+    writeBusyWorker(workspace);
+    workerLiveness._setIsProcessAlive(() => true);
+    workerLiveness._setVerifyProcessIdentity(() => ({ match: true }));
+
+    let postCalls = 0;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhListComments(mockCommentsResponse([])); // まだ何も報告していない
+    msgSend._setGhIssueComment(() => { postCalls++; return { status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-1\n' }; });
+
+    const r = msgSend.main(['issue-9-fix', '--stdin', '--issue', '9', '--workspace', workspace], null, stdinIO('追加で直して'));
+    // write-draft.js は実OSの一時ディレクトリへ書き込むため、workspace の withTempDir とは
+    // 別に後始末する（draftPath を特定できた場合のみ削除）。
+    let draftPath = null;
+    try {
+      assert.equal(r.code, 1);
+      assert.equal(postCalls, 0, 'GitHubへの投稿が一切発生しないこと');
+      const joined = r.errLines.join('\n');
+      assert.ok(joined.includes('issue-9-fix'), 'ワーカー名が含まれること');
+      assert.ok(joined.includes('報告'), '未報告である旨が含まれること');
+      // (a) 迂回路を名指しで塞ぐ
+      assert.ok(joined.includes('gh issue comment'), 'gh issue comment 迂回の禁止が含まれること');
+      assert.ok(joined.includes('終了させて'), 'ワーカー終了による迂回の禁止が含まれること');
+      // (b) 送ろうとした本文を退避先パスとともに残す
+      const pathMatch = /本文は (\S+\.md) に退避しました/.exec(joined);
+      assert.ok(pathMatch, `退避先パスが含まれること: ${joined}`);
+      draftPath = pathMatch[1];
+      assert.equal(fs.readFileSync(draftPath, 'utf8'), '追加で直して', '退避ファイルに元の本文がそのまま書かれていること');
+      // (c) 統合して一度に送るよう促す（「送り直せ」だけで終わらせない）
+      assert.ok(joined.includes('統合'), '報告と統合して一度に送る旨が含まれること');
+      assert.ok(joined.includes('Issue #9'), 'ワーカーの報告先Issueが示されること');
+    } finally {
+      if (draftPath) fs.rmSync(draftPath, { force: true });
+    }
+  });
+});
+
+test('判定不能（起動時刻を特定できない）なら拒否せず通常どおり配送される', () => {
+  withTempDir(workspace => {
+    const ghDir = path.join(workspace, '.gh-maestro');
+    fs.mkdirSync(ghDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(ghDir, 'workers.json'),
+      JSON.stringify({ 'issue-9-fix': { pid: 42424, startTime: null, agentId: 'agy', issue: 9 } }, null, 2),
+      'utf8'
+    );
+    workerLiveness._setIsProcessAlive(() => true);
+    workerLiveness._setVerifyProcessIdentity(() => ({ match: true }));
+
+    let listCommentsCalled = false;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhListComments(() => { listCommentsCalled = true; return { status: 0, stdout: '[]' }; });
+    let capturedBody = null;
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-5\n' };
+    });
+
+    const r = msgSend.main(['issue-9-fix', '--stdin', '--issue', '9', '--workspace', workspace], null, stdinIO('hello'));
+    assert.equal(r.code, 0, `判定不能は拒否しないこと: ${r.errLines.join('\n')}`);
+    assert.equal(listCommentsCalled, false, '起動時刻が無ければ報告確認自体を行わない');
+    assert.ok(capturedBody && capturedBody.includes('hello'));
+  });
+});
+
+test('判定不能（GitHub APIの取得に失敗）なら拒否せず通常どおり配送される', () => {
+  withTempDir(workspace => {
+    writeBusyWorker(workspace);
+    workerLiveness._setIsProcessAlive(() => true);
+    workerLiveness._setVerifyProcessIdentity(() => ({ match: true }));
+
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhListComments(() => ({ status: 1, stdout: '', stderr: 'gh: rate limit' }));
+    let capturedBody = null;
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-6\n' };
+    });
+
+    const r = msgSend.main(['issue-9-fix', '--stdin', '--issue', '9', '--workspace', workspace], null, stdinIO('hello'));
+    assert.equal(r.code, 0, `判定不能は拒否しないこと: ${r.errLines.join('\n')}`);
+    assert.ok(capturedBody && capturedBody.includes('hello'));
+  });
+});
+
+test('稼働中でも既に報告済みのワーカー宛て送信は拒否されない', () => {
+  withTempDir(workspace => {
+    writeBusyWorker(workspace);
+    workerLiveness._setIsProcessAlive(() => true);
+    workerLiveness._setVerifyProcessIdentity(() => ({ match: true }));
+
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    // 起動時刻(2026-01-01T00:00:00.000Z)より後にワーカー自身が報告済み
+    msgSend._setGhListComments(mockCommentsResponse([
+      {
+        id: 1, created_at: '2026-01-01T00:05:00Z',
+        body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-9-fix"} -->\n> 完了しました',
+      },
+    ]));
+    let capturedBody = null;
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-2\n' };
+    });
+
+    const r = msgSend.main(['issue-9-fix', '--stdin', '--issue', '9', '--workspace', workspace], null, stdinIO('次の指示'));
+    assert.equal(r.code, 0, `居座りは拒否されないこと: ${r.errLines.join('\n')}`);
+    assert.ok(capturedBody && capturedBody.includes('次の指示'));
+  });
+});
+
+test('休止中（非生存）のワーカー宛て送信は影響を受けず通常どおり配送される', () => {
+  withTempDir(workspace => {
+    writeBusyWorker(workspace);
+    workerLiveness._setIsProcessAlive(() => false); // 休止中
+
+    let listCommentsCalled = false;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhListComments(() => { listCommentsCalled = true; return { status: 0, stdout: '[]' }; });
+    msgSend._setGhIssueComment(() => ({ status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-3\n' }));
+
+    const r = msgSend.main(['issue-9-fix', '--stdin', '--issue', '9', '--workspace', workspace], null, stdinIO('hello'));
+    assert.equal(r.code, 0);
+    assert.equal(listCommentsCalled, false, '休止中は報告確認自体を行わない（既存動作に影響しない）');
+  });
+});
+
+test('ワーカーからorchestrator宛の報告はこのガードの対象外（常に許可される）', () => {
+  withTempDir(workspace => {
+    writeBusyWorker(workspace, { workerName: 'issue-9-fix' });
+    // ワーカー自身が稼働中（自プロセス）でも、報告送信そのものは拒否されない
+    workerLiveness._setIsProcessAlive(() => true);
+    workerLiveness._setVerifyProcessIdentity(() => ({ match: true }));
+
+    let postCalls = 0;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhListComments(() => { throw new Error('worker→orchestrator の報告では報告確認を呼んではならない'); });
+    msgSend._setGhIssueComment(() => { postCalls++; return { status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-4\n' }; });
+
+    const r = msgSend.main(['--stdin', '--workspace', workspace], { GH_MAESTRO_WORKER: 'issue-9-fix' }, stdinIO('完了しました'));
+    assert.equal(r.code, 0);
+    assert.equal(postCalls, 1);
   });
 });
 

@@ -1765,6 +1765,259 @@ describe('Hang detection', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 居座り検知（Issue #263）: 既に報告済みなのにプロセスが生存し続けている異常を検知する。
+// ハング検知（ログ更新時刻ベース）とは独立の判定軸で、経過時間を一切使わない。
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('Stale report detection（居座り検知）', () => {
+  beforeEach(() => resetAllMocks());
+
+  const START_TIME = '2026-07-25T00:00:00.000Z';
+
+  function reportComment({ from = 'issue-5-fix', createdAt = '2026-07-25T00:05:00Z' } = {}) {
+    return {
+      id: 700, created_at: createdAt,
+      body: `<!-- gh-maestro {"v":1,"to":"orchestrator","from":"${from}"} -->\n> 完了しました`,
+    };
+  }
+
+  test('居座り検知→通知: 起動以降に報告済みなのに生存中なら通知する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED:issue-5-fix:456')),
+        `STALE_REPORT_DETECTED が出力されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1, 'orchestratorへ1回通知');
+      assert.ok(notifyCalls[0].body.includes('issue-5-fix'));
+      assert.ok(notifyCalls[0].body.includes('456'));
+
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state.staleReportNotifiedPid, 456);
+      assert.equal(state.staleReportNotifiedStartTime, START_TIME, '重複排除キーに起動時刻も記録されること');
+      assert.ok(typeof state.staleReportNotifiedAt === 'string');
+    });
+  });
+
+  // 居座り判定専用の追加のgh api呼び出しを行わない（レビュー指摘: 2重取得はAPIレート制限を
+  // 通じて配送そのものを止めうる。本Issueの目的と矛盾するため必ず1回に抑える）。
+  test('居座り判定は新着コメントスキャンと同じ取得結果を再利用し、追加のgh api呼び出しを行わない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setIsWorkerAlive(() => true);
+    supervisor._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+
+    let apiCallCount = 0;
+    supervisor._setGhApiComments((repo, issue, since, opts) => {
+      apiCallCount++;
+      return { status: 0, stdout: JSON.stringify([reportComment()]), stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.equal(apiCallCount, 1, `1ワーカーにつきgh apiコメント取得は1回だけであること（居座り判定用の別取得を追加しない）: 実際 ${apiCallCount} 回`);
+      assert.ok(r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED:issue-5-fix:456')));
+    });
+  });
+
+  test('未報告のまま生存中は通知しない（休止待ちの正常状態）', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([])); // まだ何も報告していない
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED')),
+        `未報告なら検知されないこと: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 0);
+    });
+  });
+
+  test('重複通知防止: 同一プロセス（同一PID+同一起動時刻）で2回目のrunOnceでは通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+        cursors: {
+          'issue-5-fix': {
+            since: null,
+            seenIds: [],
+            deliveredIds: [],
+            pendingDeliveries: {},
+            staleReportNotifiedPid: 456, // 既に通知済み（同一プロセス）
+            staleReportNotifiedStartTime: START_TIME,
+            staleReportNotifiedAt: '2026-07-25T00:10:00.000Z',
+          },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED')),
+        `再通知されないこと: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 0);
+    });
+  });
+
+  // PID単独をキーにすると、通知後にワーカーが終了し、OSが同じPIDを無関係な別プロセスへ
+  // 再利用した場合、そのPIDで起動された別の（未報告の）ワーカーまで「通知済み」と誤認して
+  // 再通知を抑止してしまう（同一ファイル内の _isWorkerAlive → verifyProcessIdentity と同じ
+  // 落とし穴）。startTimeも一致することを要求して区別する。
+  test('PID再利用: 同一PIDでも起動時刻が異なれば別プロセスとして再通知する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([reportComment({ createdAt: '2026-07-26T00:05:00Z' })]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    const NEW_START_TIME = '2026-07-26T00:00:00.000Z';
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          // PIDは前回と同じ456だが、OSに再利用され別プロセスとして起動している
+          // （startTimeが異なる）。
+          'issue-5-fix': { pid: 456, startTime: NEW_START_TIME, agentId: 'agy', issue: 5 },
+        },
+        cursors: {
+          'issue-5-fix': {
+            since: null,
+            seenIds: [],
+            deliveredIds: [],
+            pendingDeliveries: {},
+            staleReportNotifiedPid: 456, // 前回プロセス（別のstartTime）で通知済み
+            staleReportNotifiedStartTime: START_TIME,
+            staleReportNotifiedAt: '2026-07-25T00:10:00.000Z',
+          },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED:issue-5-fix:456')),
+        `startTimeが変われば別プロセスとして再通知されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1);
+
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state.staleReportNotifiedStartTime, NEW_START_TIME, '通知済みキーが新プロセスの起動時刻に更新されること');
+    });
+  });
+
+  test('起動時刻を特定できない（startTimeが無い）場合は判定せず通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: null, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED')));
+      assert.equal(notifyCalls.length, 0);
+    });
+  });
+
+  test('ワーカー非生存時は居座り判定をスキップする', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
+    // 非生存（resetAllMocks の既定 = setWorkersIdle）
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED')));
+      assert.equal(notifyCalls.length, 0);
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 信頼性: 再起動後継続
 // ═══════════════════════════════════════════════════════════════════════════
 
