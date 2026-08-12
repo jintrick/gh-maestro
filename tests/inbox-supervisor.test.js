@@ -240,6 +240,7 @@ describe('Cursor state management', () => {
       assert.deepEqual(state.deliveredIds, []);
       assert.deepEqual(state.pendingDeliveries, {});
       assert.equal(state.hangNotifiedPid, null);
+      assert.equal(state.hangNotifiedStartTime, null);
       assert.equal(state.hangNotifiedAt, null);
     });
   });
@@ -254,6 +255,7 @@ describe('Cursor state management', () => {
             deliveredIds: [1, 2],
             pendingDeliveries: { '3': { retries: 1, lastError: 'timeout' } },
             hangNotifiedPid: 123,
+            hangNotifiedStartTime: '2024-05-01T00:00:00Z',
             hangNotifiedAt: '2024-06-01T12:00:00Z',
           },
         },
@@ -265,6 +267,7 @@ describe('Cursor state management', () => {
       assert.deepEqual(state.deliveredIds, [1, 2]);
       assert.deepEqual(state.pendingDeliveries, { '3': { retries: 1, lastError: 'timeout' } });
       assert.equal(state.hangNotifiedPid, 123);
+      assert.equal(state.hangNotifiedStartTime, '2024-05-01T00:00:00Z');
       assert.equal(state.hangNotifiedAt, '2024-06-01T12:00:00Z');
     });
   });
@@ -279,6 +282,7 @@ describe('Cursor state management', () => {
       assert.equal(state.since, null);
       assert.deepEqual(state.seenIds, []);
       assert.equal(state.hangNotifiedPid, null);
+      assert.equal(state.hangNotifiedStartTime, null);
       assert.equal(state.hangNotifiedAt, null);
     });
   });
@@ -293,6 +297,7 @@ describe('Cursor state management', () => {
         deliveredIds: [10, 20],
         pendingDeliveries: { '30': { retries: 2, lastError: 'send-text failed', lastFrom: 'orch', lastBody: 'hello' } },
         hangNotifiedPid: 123,
+        hangNotifiedStartTime: '2024-05-01T00:00:00Z',
         hangNotifiedAt: '2024-06-01T12:00:00Z',
       };
 
@@ -304,6 +309,7 @@ describe('Cursor state management', () => {
       assert.deepEqual(loaded.deliveredIds, state.deliveredIds);
       assert.deepEqual(loaded.pendingDeliveries, state.pendingDeliveries);
       assert.equal(loaded.hangNotifiedPid, state.hangNotifiedPid);
+      assert.equal(loaded.hangNotifiedStartTime, state.hangNotifiedStartTime);
       assert.equal(loaded.hangNotifiedAt, state.hangNotifiedAt);
     });
   });
@@ -1484,7 +1490,8 @@ describe('Hang detection', () => {
             seenIds: [],
             deliveredIds: [],
             pendingDeliveries: {},
-            hangNotifiedPid: 456, // 既に通知済み
+            hangNotifiedPid: 456, // 既に通知済み（同一プロセス: startTimeも一致）
+            hangNotifiedStartTime: 'old',
             hangNotifiedAt: '2024-07-30T12:00:00.000Z',
           },
         },
@@ -1530,7 +1537,8 @@ describe('Hang detection', () => {
             seenIds: [],
             deliveredIds: [],
             pendingDeliveries: {},
-            hangNotifiedPid: 456, // 前回通知済み
+            hangNotifiedPid: 456, // 前回通知済み（同一プロセス: startTimeも一致）
+            hangNotifiedStartTime: 'old',
             hangNotifiedAt: '2024-07-30T12:00:00.000Z',
           },
         },
@@ -1760,6 +1768,176 @@ describe('Hang detection', () => {
       assert.equal(args[args.indexOf('--issue') + 1], '5');
       assert.equal(args[args.indexOf('--workspace') + 1], dir);
       assert.ok(opts.input.includes('ハング'), `stdin 本文にハング警告が含まれること`);
+    });
+  });
+
+  // ── Issue #265: resume直後の誤検知防止 ──────────────────────────────────
+  // ログのmtimeは前セッション終了時点のまま引き継がれるため、resume直後に
+  // まだログを書いていない新プロセスをそのまま「無反応」と誤判定してはならない。
+  // 判定基準は「ログmtime」と「現在のプロセスのstartTime」のうち新しい方とする。
+
+  test('resume直後（startTimeが新しくログmtimeが古い）は通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      // 前セッションの終了から109分経過した古いログが引き継がれているが、
+      // プロセス自体はたった今resumeで起動したばかり（startTimeは現在時刻）。
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: new Date().toISOString(), agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'stale log from previous session\n', 'utf8');
+      const oldTime = new Date(Date.now() - 109 * 60 * 1000); // 109分前
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '10']);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('HANG_DETECTED')),
+        `resume直後はHANG_DETECTEDが出力されないこと: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 0, '通知呼び出しが発生しない');
+    });
+  });
+
+  test('resumeで新PIDになった場合、旧プロセスの通知済み状態が残っていてもHANG_RESUMEDは誤報されない（レビュー指摘）', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      const oldStartTime = '2026-08-12T00:00:00.000Z';
+      const newStartTime = new Date().toISOString(); // 新プロセスがたった今起動
+
+      setupWorkspace(dir, {
+        workers: {
+          // resumeでPIDが変わった新プロセス（旧PID 111 とは別物）
+          'issue-5-fix': { pid: 456, startTime: newStartTime, agentId: 'agy', issue: 5 },
+        },
+        cursors: {
+          'issue-5-fix': {
+            since: null,
+            seenIds: [],
+            deliveredIds: [],
+            pendingDeliveries: {},
+            // 旧プロセス（PID 111）に対する通知済み状態が残留している
+            hangNotifiedPid: 111,
+            hangNotifiedStartTime: oldStartTime,
+            hangNotifiedAt: '2026-08-11T22:00:00.000Z',
+          },
+        },
+      });
+
+      // ログは前セッション終了時点のまま（新プロセスはまだ書いていない）
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'stale log from previous session\n', 'utf8');
+      const oldTime = new Date(Date.now() - 109 * 60 * 1000);
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '10']);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      // 実際にはログは動いていないので「復帰した」という報告は誤り
+      assert.ok(!r.lines.some(l => l === 'HANG_RESUMED:issue-5-fix'),
+        `新プロセスへの切り替わりをHANG_RESUMEDとして誤報しないこと: ${r.lines.join('\n')}`);
+      assert.ok(!r.lines.some(l => l.startsWith('HANG_DETECTED')),
+        `新プロセスはstartTimeが新しいため通知もされないこと: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 0, '通知呼び出しが発生しない');
+
+      // 旧プロセスの残留状態はクリアされる（そのプロセスはもう存在しないため）
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state.hangNotifiedPid, null, '旧PIDの通知済み状態はクリアされる');
+      assert.equal(state.hangNotifiedStartTime, null);
+      assert.equal(state.hangNotifiedAt, null);
+    });
+  });
+
+  test('startTimeも十分前（実際にハングしている）なら従来どおり通知する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      const oldTime = new Date(Date.now() - 60 * 1000); // 60秒前に起動・ログ更新
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: oldTime.toISOString(), agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'old log\n', 'utf8');
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '10']);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')),
+        `プロセス起動から十分経過していれば通知されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1, '通知が1回呼ばれる');
+    });
+  });
+
+  test('startTimeが無いエントリでは従来どおりログmtimeのみで判定する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        // startTime を持たない（移行前・取得失敗時を想定）
+        workers: {
+          'issue-5-fix': { pid: 456, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'old log\n', 'utf8');
+      const oldTime = new Date(Date.now() - 60 * 1000);
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '10']);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')),
+        `startTime欠落時もログmtimeで通知されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1, '通知が1回呼ばれる');
     });
   });
 });

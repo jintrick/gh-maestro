@@ -103,7 +103,12 @@ Description:
   各ワーカー宛ての新着メッセージを検出・配送する。
   カーソル・配送状態は .gh-maestro/inbox-supervisor/ に永続化され、
   プロセス再起動後も未配送メッセージを失わずに再開できる。
-  ハング検知: ワーカーのログファイル更新が一定時間（--hang-threshold-sec）以上止まっている場合、HANG_DETECTEDを出力しorchestratorへ通知する。その後ログが再び更新されるとHANG_RESUMEDを出力する。同一PIDへの重複通知は防止される。
+  ハング検知: ワーカーのログファイル更新（ただし現在のプロセスの起動時刻より前の
+    更新は基準にしない）が一定時間（--hang-threshold-sec）以上止まっている場合、
+    HANG_DETECTEDを出力しorchestratorへ通知する。その後、通知した本人（同一PID+
+    起動時刻）が復帰した場合のみHANG_RESUMEDを出力する。同一プロセス（PID+起動時刻）
+    への重複通知は防止される（PID再利用や新プロセスへの切り替わりによる誤抑止・
+    誤った復帰報告を避けるため起動時刻も照合する）。
   居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みなのにプロセスが終了せず生存し続けている場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（経過時間は使わず、報告コメントの有無だけで判定する。ハング検知とは独立）。同一プロセス（PID+起動時刻）への重複通知は防止される（PID再利用による誤抑止を避けるため起動時刻も照合する）。
   ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
   消滅時はPID registryを解除して自動exitする。`;
@@ -177,7 +182,7 @@ function cursorPath(workspace, workerName) {
  *
  * @param {string} workspace
  * @param {string} workerName
- * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object, hangNotifiedPid: number|null, hangNotifiedAt: string|null, staleReportNotifiedPid: number|null, staleReportNotifiedStartTime: string|null, staleReportNotifiedAt: string|null }}
+ * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object, hangNotifiedPid: number|null, hangNotifiedStartTime: string|null, hangNotifiedAt: string|null, staleReportNotifiedPid: number|null, staleReportNotifiedStartTime: string|null, staleReportNotifiedAt: string|null }}
  */
 function readCursor(workspace, workerName) {
   const cp = cursorPath(workspace, workerName);
@@ -185,7 +190,7 @@ function readCursor(workspace, workerName) {
     if (!fs.existsSync(cp)) {
       return {
         since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {},
-        hangNotifiedPid: null, hangNotifiedAt: null,
+        hangNotifiedPid: null, hangNotifiedStartTime: null, hangNotifiedAt: null,
         staleReportNotifiedPid: null, staleReportNotifiedStartTime: null, staleReportNotifiedAt: null,
       };
     }
@@ -199,6 +204,7 @@ function readCursor(workspace, workerName) {
         parsed.pendingDeliveries && typeof parsed.pendingDeliveries === 'object' && !Array.isArray(parsed.pendingDeliveries)
           ? parsed.pendingDeliveries : {},
       hangNotifiedPid: typeof parsed.hangNotifiedPid === 'number' ? parsed.hangNotifiedPid : null,
+      hangNotifiedStartTime: typeof parsed.hangNotifiedStartTime === 'string' ? parsed.hangNotifiedStartTime : null,
       hangNotifiedAt: typeof parsed.hangNotifiedAt === 'string' ? parsed.hangNotifiedAt : null,
       staleReportNotifiedPid: typeof parsed.staleReportNotifiedPid === 'number' ? parsed.staleReportNotifiedPid : null,
       staleReportNotifiedStartTime: typeof parsed.staleReportNotifiedStartTime === 'string' ? parsed.staleReportNotifiedStartTime : null,
@@ -207,7 +213,7 @@ function readCursor(workspace, workerName) {
   } catch {
     return {
       since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {},
-      hangNotifiedPid: null, hangNotifiedAt: null,
+      hangNotifiedPid: null, hangNotifiedStartTime: null, hangNotifiedAt: null,
       staleReportNotifiedPid: null, staleReportNotifiedStartTime: null, staleReportNotifiedAt: null,
     };
   }
@@ -231,6 +237,7 @@ function writeCursor(workspace, workerName, state) {
     deliveredIds,
     pendingDeliveries: state.pendingDeliveries || {},
     hangNotifiedPid: typeof state.hangNotifiedPid === 'number' ? state.hangNotifiedPid : null,
+    hangNotifiedStartTime: typeof state.hangNotifiedStartTime === 'string' ? state.hangNotifiedStartTime : null,
     hangNotifiedAt: typeof state.hangNotifiedAt === 'string' ? state.hangNotifiedAt : null,
     staleReportNotifiedPid: typeof state.staleReportNotifiedPid === 'number' ? state.staleReportNotifiedPid : null,
     staleReportNotifiedStartTime: typeof state.staleReportNotifiedStartTime === 'string' ? state.staleReportNotifiedStartTime : null,
@@ -686,8 +693,18 @@ function main(argsOverride, opts = {}) {
 
       // ── ハング検知 ──────────────────────────────────────────────────
       // ワーカーが生存しているがログファイルの更新が一定時間止まっていれば「ハングの疑い」
-      // として orchestrator へ通知する。同一PIDに対しては1回のみ通知し、ログが再び動いたら
-      // リセットする。
+      // として orchestrator へ通知する。同一プロセス（PID+startTime）には1回のみ通知し、
+      // ログが再び動いたらリセットする。
+      //
+      // 重複通知防止キーは pid 単独ではなく pid + startTime（起動時刻）の組で同一プロセスを
+      // 識別する（居座り検知の staleReportNotifiedPid/StartTime と同じ理由、Issue #265）。
+      // resumeで新プロセスが起動すると entry.startTime が更新され、baselineMs もそれに
+      // 追随して新しくなる（下記）ため、resume直後は非ハング判定に落ちる。この非ハング分岐
+      // は「ログが再び動いた」ことを表す HANG_RESUMED を出すが、旧PIDに対する通知済み状態が
+      // 残っているだけで新プロセス自体は一度もハング通知されていない場合、これを
+      // HANG_RESUMED として報告するのは誤り（ログが実際に動いたわけではない）。
+      // pid+startTime が現在のエントリと一致する場合のみ「復帰」として報告し、一致しない
+      // （＝別プロセスの通知済み状態が残留しているだけの）場合は無言でクリアする。
       if (_isWorkerAlive(entry)) {
         const logPath = workerLogPath(workspace, workerName);
         let mtimeMs = null;
@@ -700,10 +717,26 @@ function main(argsOverride, opts = {}) {
         }
 
         if (mtimeMs !== null) {
-          const staleMs = Date.now() - mtimeMs;
+          // 無反応時間の基準は「ログmtime」と「現在のプロセスの起動時刻」のうち
+          // 新しい方とする（Issue #265）。resumeで新プロセスが起動した直後は
+          // まだログを書いておらず、mtimeは前セッション終了時点のまま引き継がれる。
+          // それをそのまま基準にすると、今動き始めたばかりのプロセスが前回の
+          // 空白期間ぶん無反応だったと誤判定される。startTimeが無い/不正な
+          // エントリでは同一性を確認できないため、従来どおりmtimeのみで判定する
+          // （worker-liveness.js の isWorkerAlive と同じ「判定不能はfail-safe側」方針）。
+          let baselineMs = mtimeMs;
+          if (entry.startTime) {
+            const startTimeMs = new Date(entry.startTime).getTime();
+            if (!Number.isNaN(startTimeMs) && startTimeMs > baselineMs) {
+              baselineMs = startTimeMs;
+            }
+          }
+          const staleMs = Date.now() - baselineMs;
           if (staleMs > hangThresholdMs) {
-            // ハング状態 — 同じPIDには1回だけ通知
-            if (cursor.hangNotifiedPid !== entry.pid) {
+            // ハング状態 — 同一プロセス（pid+startTime）には1回だけ通知
+            const alreadyNotified = cursor.hangNotifiedPid === entry.pid
+              && cursor.hangNotifiedStartTime === entry.startTime;
+            if (!alreadyNotified) {
               const minutes = Math.floor(staleMs / 60000);
               const body = `⚠️ ワーカー "${workerName}" がハングしている疑いがあります（ログ最終更新から ${minutes} 分以上経過、PID ${entry.pid}）。状態を確認し、必要ならプロセスを終了して再起動を検討してください。`;
               let notified = false;
@@ -719,6 +752,7 @@ function main(argsOverride, opts = {}) {
               // 通知成功時のみ通知済み状態を更新・永続化する。
               if (notified) {
                 cursor.hangNotifiedPid = entry.pid;
+                cursor.hangNotifiedStartTime = entry.startTime;
                 cursor.hangNotifiedAt = new Date().toISOString();
                 writeOut(`HANG_DETECTED:${workerName}:${entry.pid}`);
                 // 後続処理（gh apiコメント取得等）が失敗してループがcontinueしても通知済み
@@ -734,11 +768,21 @@ function main(argsOverride, opts = {}) {
               }
             }
           } else if (cursor.hangNotifiedPid !== null) {
-            // ログが再び動き始めた → ハング状態からの復帰
+            // 通知済み状態が残っているが、いまは非ハング判定 → クリアする。
+            // 「ログが再び動いた」と報告してよいのは、通知した本人（pid+startTime一致）が
+            // 復帰した場合だけ。pid/startTimeが今のエントリと食い違う場合は、resumeで
+            // 新プロセスに切り替わった結果、旧プロセスの通知済み状態が残留しているだけ
+            // （その旧プロセスはもう存在しない）なので、HANG_RESUMEDは出さず黙って
+            // クリアする（Issue #265）。
+            const isSameProcess = cursor.hangNotifiedPid === entry.pid
+              && cursor.hangNotifiedStartTime === entry.startTime;
             cursor.hangNotifiedPid = null;
+            cursor.hangNotifiedStartTime = null;
             cursor.hangNotifiedAt = null;
-            writeOut(`HANG_RESUMED:${workerName}`);
-            // 復帰状態を後続処理より先に永続化する（上記HANG_DETECTEDと同じ理由）。
+            if (isSameProcess) {
+              writeOut(`HANG_RESUMED:${workerName}`);
+            }
+            // クリア状態を後続処理より先に永続化する（上記HANG_DETECTEDと同じ理由）。
             // 他プロセスがカーソルを掴んでいる等の EPERM でも停止せず、次サイクルの
             // writeCursor 成功時にまとめて永続化される（Issue #250）。
             try {
