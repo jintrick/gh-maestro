@@ -67,6 +67,13 @@ function validateManifest(manifest) {
   if (typeof manifest.headRefOid !== 'string' || !manifest.headRefOid) {
     errors.push('headRefOid is required (non-empty string)');
   }
+  if (Object.prototype.hasOwnProperty.call(manifest, 'acceptanceCriteria')) {
+    if (!Array.isArray(manifest.acceptanceCriteria) || manifest.acceptanceCriteria.length === 0) {
+      errors.push('acceptanceCriteria must be a non-empty array when present');
+    } else if (manifest.acceptanceCriteria.some(item => typeof item !== 'string' || !item.trim())) {
+      errors.push('acceptanceCriteria must contain only non-empty strings');
+    }
+  }
 
   // coverage_ledger 検証
   const ledger = manifest.coverage_ledger;
@@ -226,6 +233,17 @@ function buildJobPrompt(job, manifest, reviewWtDir) {
     `### ${lc.path}\n\n${lc.content}`
   ).join('\n\n---\n\n');
 
+  const acceptanceSection = Array.isArray(manifest.acceptanceCriteria) && manifest.acceptanceCriteria.length > 0
+    ? `## 受け入れ条件
+
+以下はReview Managerが対象Issueから忠実に列挙し、manifestに引き継いだ受け入れ条件です。判定の物差しとしてのみ使ってください。
+要件そのものの是非を論じず、未実装の指摘に使わず、評価対象は従来どおり変更差分の中に限ってください。
+
+${manifest.acceptanceCriteria.map(item => `- ${item}`).join('\n')}
+
+`
+    : '';
+
   return `あなたは gh-maestro のレビューワーカーです。担当観点「${job.aspect}」について、
 以下の葉ファイルの基準に従い、指定されたdiffをレビューしてください。
 
@@ -246,9 +264,10 @@ HEAD: ${manifest.headRefOid}
 ## 入力証拠
 
 作業ディレクトリはPR headにリセットされた専用worktreeです。
-以下のdiffと変更ファイル一覧だけを入力として使用してください。
+以下のdiffと変更ファイル一覧、およびmanifestに存在する受け入れ条件だけを入力として使用してください。
 担当外の観点は評価しなくて構いません。
 
+${acceptanceSection}
 ### 変更ファイル一覧
 
 ${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)'}

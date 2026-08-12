@@ -41,10 +41,11 @@ after(() => {
 
 test('buildPrompt instructs the coverage-ledger + tool-driven review flow', () => {
   const { prompt } = buildPrompt({
-    pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
+    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
   });
   assert.match(prompt, /PR=5/);
   assert.match(prompt, /REPO=o\/r/);
+  assert.match(prompt, /ISSUE=260/);
   // 7葉の adopted / excluded 分類を指示
   assert.match(prompt, /adopted \/ excluded/);
   // run-review-jobs.js でジョブを実行するよう指示
