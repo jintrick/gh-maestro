@@ -103,7 +103,10 @@ Description:
   各ワーカー宛ての新着メッセージを検出・配送する。
   カーソル・配送状態は .gh-maestro/inbox-supervisor/ に永続化され、
   プロセス再起動後も未配送メッセージを失わずに再開できる。
-  ハング検知: ワーカーのログファイル更新が一定時間（--hang-threshold-sec）以上止まっている場合、HANG_DETECTEDを出力しorchestratorへ通知する。その後ログが再び更新されるとHANG_RESUMEDを出力する。同一PIDへの重複通知は防止される。
+  ハング検知: ワーカーのログファイル更新（ただし現在のプロセスの起動時刻より前の
+    更新は基準にしない）が一定時間（--hang-threshold-sec）以上止まっている場合、
+    HANG_DETECTEDを出力しorchestratorへ通知する。その後ログが再び更新されると
+    HANG_RESUMEDを出力する。同一PIDへの重複通知は防止される。
   居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みなのにプロセスが終了せず生存し続けている場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（経過時間は使わず、報告コメントの有無だけで判定する。ハング検知とは独立）。同一プロセス（PID+起動時刻）への重複通知は防止される（PID再利用による誤抑止を避けるため起動時刻も照合する）。
   ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
   消滅時はPID registryを解除して自動exitする。`;
@@ -700,7 +703,21 @@ function main(argsOverride, opts = {}) {
         }
 
         if (mtimeMs !== null) {
-          const staleMs = Date.now() - mtimeMs;
+          // 無反応時間の基準は「ログmtime」と「現在のプロセスの起動時刻」のうち
+          // 新しい方とする（Issue #265）。resumeで新プロセスが起動した直後は
+          // まだログを書いておらず、mtimeは前セッション終了時点のまま引き継がれる。
+          // それをそのまま基準にすると、今動き始めたばかりのプロセスが前回の
+          // 空白期間ぶん無反応だったと誤判定される。startTimeが無い/不正な
+          // エントリでは同一性を確認できないため、従来どおりmtimeのみで判定する
+          // （worker-liveness.js の isWorkerAlive と同じ「判定不能はfail-safe側」方針）。
+          let baselineMs = mtimeMs;
+          if (entry.startTime) {
+            const startTimeMs = new Date(entry.startTime).getTime();
+            if (!Number.isNaN(startTimeMs) && startTimeMs > baselineMs) {
+              baselineMs = startTimeMs;
+            }
+          }
+          const staleMs = Date.now() - baselineMs;
           if (staleMs > hangThresholdMs) {
             // ハング状態 — 同じPIDには1回だけ通知
             if (cursor.hangNotifiedPid !== entry.pid) {

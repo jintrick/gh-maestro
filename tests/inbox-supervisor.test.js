@@ -1762,6 +1762,116 @@ describe('Hang detection', () => {
       assert.ok(opts.input.includes('ハング'), `stdin 本文にハング警告が含まれること`);
     });
   });
+
+  // ── Issue #265: resume直後の誤検知防止 ──────────────────────────────────
+  // ログのmtimeは前セッション終了時点のまま引き継がれるため、resume直後に
+  // まだログを書いていない新プロセスをそのまま「無反応」と誤判定してはならない。
+  // 判定基準は「ログmtime」と「現在のプロセスのstartTime」のうち新しい方とする。
+
+  test('resume直後（startTimeが新しくログmtimeが古い）は通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      // 前セッションの終了から109分経過した古いログが引き継がれているが、
+      // プロセス自体はたった今resumeで起動したばかり（startTimeは現在時刻）。
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: new Date().toISOString(), agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'stale log from previous session\n', 'utf8');
+      const oldTime = new Date(Date.now() - 109 * 60 * 1000); // 109分前
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '10']);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('HANG_DETECTED')),
+        `resume直後はHANG_DETECTEDが出力されないこと: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 0, '通知呼び出しが発生しない');
+    });
+  });
+
+  test('startTimeも十分前（実際にハングしている）なら従来どおり通知する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      const oldTime = new Date(Date.now() - 60 * 1000); // 60秒前に起動・ログ更新
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: oldTime.toISOString(), agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'old log\n', 'utf8');
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '10']);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')),
+        `プロセス起動から十分経過していれば通知されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1, '通知が1回呼ばれる');
+    });
+  });
+
+  test('startTimeが無いエントリでは従来どおりログmtimeのみで判定する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        // startTime を持たない（移行前・取得失敗時を想定）
+        workers: {
+          'issue-5-fix': { pid: 456, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, 'old log\n', 'utf8');
+      const oldTime = new Date(Date.now() - 60 * 1000);
+      fs.utimesSync(logPath, oldTime, oldTime);
+
+      const r = runMain(['--workspace', dir, '--hang-threshold-sec', '10']);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')),
+        `startTime欠落時もログmtimeで通知されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1, '通知が1回呼ばれる');
+    });
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
