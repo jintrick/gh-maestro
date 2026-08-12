@@ -20,6 +20,7 @@ const {
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags, hasHelpFlag } = require('./shared/workspace');
 const { _validateAgainstSchema } = require('./shared/json-schema');
+const { fetchAcceptanceCriteria } = require('./shared/review-acceptance');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
 const DEFAULT_ARTIFACT_POLL_INTERVAL_MS = 200;
@@ -60,10 +61,10 @@ function generateStagingPath(finalPath) {
 }
 
 /**
- * @param {{pr: string, repo: string, workspace: string, outputFile: string}} params
+ * @param {{pr: string, repo: string, workspace: string, outputFile: string, acceptanceCriteria?: string|null}} params
  * @returns {{prompt: string, stagingFile: string}}
  */
-function buildPrompt({ pr, repo, workspace, outputFile }) {
+function buildPrompt({ pr, repo, workspace, outputFile, acceptanceCriteria = null }) {
   const toUnix = p => p.replace(/\\/g, '/');
   const scriptsDir = toUnix(path.join(__dirname));
   const manifestFile = reviewArtifactPath(path.join(workspace, '.gh-maestro'), pr, '.manifest.json');
@@ -74,6 +75,14 @@ REPO=${repo}
 WORKSPACE=${toUnix(workspace)}
 OUTPUT=${toUnix(outputFile)}
 SCRIPTS=${scriptsDir}
+
+${acceptanceCriteria ? `## 受け入れ条件
+
+以下は対象Issueの本文です。受け入れ条件は変更差分を判定する物差しとしてのみ参照してください。
+要件そのものの是非、差分に存在しない未実装、差分外の既存コードの指摘には使わず、評価対象はPR差分内に限ってください。
+
+${acceptanceCriteria}
+` : ''}
 
 必ず以下を守ってください。
 - GitHubへ投稿しない
@@ -617,7 +626,7 @@ function clearStaleIncompleteSentinel(ghDir, pr) {
  */
 async function superviseReviewManager({
   pr, repo, workspace, ghDir, lockFile, logFile,
-  outputFile, promptFile, deadlineMs, log, signal,
+  outputFile, promptFile, deadlineMs, log, signal, acceptanceCriteria,
 }) {
   // 1. ディレクトリ作成・ロック
   try {
@@ -648,7 +657,7 @@ async function superviseReviewManager({
   const worktreeGhDir = path.join(reviewWtDir, '.gh-maestro');
   fs.mkdirSync(worktreeGhDir, { recursive: true });
   const worktreeOutputFile = reviewArtifactPath(worktreeGhDir, pr, '.json');
-  const { prompt: promptText } = buildPrompt({ pr, repo, workspace: reviewWtDir, outputFile: worktreeOutputFile });
+  const { prompt: promptText } = buildPrompt({ pr, repo, workspace: reviewWtDir, outputFile: worktreeOutputFile, acceptanceCriteria });
 
   try {
     fs.writeFileSync(promptFile, promptText, 'utf8');
@@ -955,9 +964,11 @@ if (require.main === module) {
     let cleanupResult;
 
     try {
+      const acceptanceCriteria = fetchAcceptanceCriteria({ pr, repo });
       supervisionResult = await superviseReviewManager({
         pr, repo, workspace, ghDir, lockFile, logFile,
         outputFile, promptFile,
+        acceptanceCriteria,
         deadlineMs: DEFAULT_DEADLINE_MS,
         log, signal,
       });

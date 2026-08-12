@@ -133,6 +133,44 @@ test('buildJobPrompt includes aspect and prohibition text', () => {
   }
 });
 
+test('buildJobPrompt passes manifest acceptance criteria without external lookup', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-acceptance-'));
+  try {
+    const leafPath = path.join(tmpDir, 'leaf.md');
+    fs.writeFileSync(leafPath, '# Leaf', 'utf8');
+    const prompt = buildJobPrompt(
+      { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness', leaf_files: ['leaf.md'] },
+      {
+        pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'],
+        acceptanceCriteria: '## 受け入れ条件\n\n- 保存後に内容を保持する',
+      },
+      tmpDir,
+    );
+    assert.match(prompt, /保存後に内容を保持する/);
+    assert.match(prompt, /manifestに存在する場合/);
+    assert.match(prompt, /評価対象はPR差分内に限ってください/);
+    assert.doesNotMatch(prompt, /gh issue view/);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('buildJobPrompt keeps the legacy input when manifest has no acceptance criteria', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-no-acceptance-'));
+  try {
+    fs.writeFileSync(path.join(tmpDir, 'leaf.md'), '# Leaf', 'utf8');
+    const prompt = buildJobPrompt(
+      { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness', leaf_files: ['leaf.md'] },
+      { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] },
+      tmpDir,
+    );
+    assert.match(prompt, /以下のdiffと変更ファイル一覧、および上記の受け入れ条件（manifestに存在する場合）だけ/);
+    assert.doesNotMatch(prompt, /保存後に内容を保持する/);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('launchJobWorker: execArgsが非対話化トークンを欠くとspawnせずfailedになる（Issue #163 BLOCKER）', async () => {
   // 修正前の検証漏れを再現: extraArgs はトークンを保持しているが、ジョブワーカーが
   // 実際に使う execArgs ?? extraArgs のうち execArgs が対話モード化されているケース。

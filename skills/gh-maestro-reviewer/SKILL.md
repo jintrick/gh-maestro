@@ -22,6 +22,7 @@ Node.js側に埋め込まれておらず、あなたが行う。
 - `WORKSPACE`: リポジトリの絶対パス（PR headにリセットされた専用worktree）
 - `OUTPUT`: 最終JSONの書き出し先パス。**あなたが直接書くのではなく、`finalize-review.js --mode complete` がatomic writeする**
 - `SCRIPTS`: ツールスクリプトのディレクトリ（`{WORKSPACE}/scripts`）
+- `受け入れ条件`: Review ManagerがPR headブランチの `issue-<N>-...` 形式からIssue番号を抽出して一度だけ取得できた場合に限り、対象Issue本文が含まれる。取得できない場合はこの入力を省略する。
 
 ## レビュー基準（7葉）
 
@@ -46,6 +47,10 @@ Node.js側に埋め込まれておらず、あなたが行う。
 gh pr view <PR> --repo <REPO> --json number,headRefOid,files
 gh pr diff <PR> --repo <REPO>
 ```
+
+PR headブランチ名から `issue-<N>-...` の形式でIssue番号を抽出し、`gh issue view <N> --repo <REPO>` で本文を取得する。取得に失敗した場合は受け入れ条件なしで従来どおり続行する。取得した本文はこのレビュー実行で一度だけ使い、manifestの `acceptanceCriteria` にそのまま含めてジョブへ渡す。ジョブはGitHubから再取得しない。
+
+受け入れ条件は変更差分を判定する物差しとしてのみ参照する。要件そのものの是非、差分に存在しない未実装、差分外の既存コードは指摘せず、評価対象はPR差分内に限る。
 
 ### 2. coverage ledgerの作成（7葉の関連性判断）
 
@@ -73,6 +78,7 @@ manifestのJSON構造:
   "repo": "<owner/repo>",
   "headRefOid": "<PR headのcommit OID>",
   "changedFiles": ["<ファイルパス>", ...],
+  "acceptanceCriteria": "<取得できたIssue本文。取得できない場合は省略>",
   "coverage_ledger": {
     "leaves": [
       {
@@ -203,7 +209,7 @@ node <SCRIPTS>/finalize-review.js \
 
 各ジョブワーカーには `run-review-jobs.js` が自動的に以下の内容を含むプロンプトを生成する:
 - 担当観点（aspect）と担当葉ファイルの全文
-- PR情報と変更ファイル一覧
+- PR情報、変更ファイル一覧、manifestに含まれる受け入れ条件（存在する場合）
 - 全件テスト実行禁止・ピンポイント実行許容を含む禁止事項
 - Severity判定規準
 - 標準出力へのJSON配列出力指示（指摘なしの場合は空配列 `[]`）

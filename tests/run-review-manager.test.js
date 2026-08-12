@@ -57,6 +57,17 @@ test('buildPrompt instructs the coverage-ledger + tool-driven review flow', () =
   assert.ok(typeof prompt === 'string');
 });
 
+test('buildPrompt includes acceptance criteria and limits its use to the diff', () => {
+  const { prompt } = buildPrompt({
+    pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
+    acceptanceCriteria: '## 受け入れ条件\n\n- 保存後に内容を保持する',
+  });
+  assert.match(prompt, /受け入れ条件/);
+  assert.match(prompt, /保存後に内容を保持する/);
+  assert.match(prompt, /物差しとしてのみ参照/);
+  assert.match(prompt, /評価対象はPR差分内に限ってください/);
+});
+
 test('buildPrompt normalizes backslash paths to forward slashes', () => {
   const { prompt } = buildPrompt({
     pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',

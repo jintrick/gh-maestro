@@ -226,6 +226,17 @@ function buildJobPrompt(job, manifest, reviewWtDir) {
     `### ${lc.path}\n\n${lc.content}`
   ).join('\n\n---\n\n');
 
+  const acceptanceSection = typeof manifest.acceptanceCriteria === 'string' && manifest.acceptanceCriteria
+    ? `## 受け入れ条件
+
+以下はReview Managerが対象Issueから取得し、manifestに引き継いだ本文です。受け入れ条件は変更差分を判定する物差しとしてのみ参照してください。
+要件そのものの是非、差分に存在しない未実装、差分外の既存コードの指摘には使わず、評価対象はPR差分内に限ってください。
+
+${manifest.acceptanceCriteria}
+
+`
+    : '';
+
   return `あなたは gh-maestro のレビューワーカーです。担当観点「${job.aspect}」について、
 以下の葉ファイルの基準に従い、指定されたdiffをレビューしてください。
 
@@ -246,9 +257,10 @@ HEAD: ${manifest.headRefOid}
 ## 入力証拠
 
 作業ディレクトリはPR headにリセットされた専用worktreeです。
-以下のdiffと変更ファイル一覧だけを入力として使用してください。
+以下のdiffと変更ファイル一覧、および上記の受け入れ条件（manifestに存在する場合）だけを入力として使用してください。
 担当外の観点は評価しなくて構いません。
 
+${acceptanceSection}
 ### 変更ファイル一覧
 
 ${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)'}
