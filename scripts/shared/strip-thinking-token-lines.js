@@ -13,8 +13,16 @@
 // 実行中のプロセスがまだ追記している最中にこの関数でファイルを置き換えると、
 // 追記側は古いinodeへ書き込み続け、新しいパスには反映されず消失する
 // （headless-launch.js が生fdリダイレクトを使う設計と同じ理由でパイプを避けている）。
+//
+// 置き換え（rename）は atomic-write.js の共有リトライ（EACCES/EPERM/EBUSY、合計500ms
+// 予算）を使う。Windows ではプロセスの stdio fd が閉じた後も OS がファイルハンドルを
+// 即時解放しないことがあり、rename が一時的に EPERM で失敗するため（Issue #258。
+// PR #251 / #253 と同型の対策）。リトライを尽くしても失敗した場合は、失敗をログ自体に
+// 書き残してから throw する。worker-exit-hook の stderr は headless-shim が
+// stdio:'ignore' で起動するため破棄され、その経路だけに頼ると失敗が誰にも届かない。
 
 const fs = require('fs');
+const { renameSyncWithRetry } = require('./atomic-write');
 
 /**
  * 1行が「thinking_tokens進捗イベント」であるかを判定する。
@@ -71,7 +79,20 @@ function compactWorkerLog(logPath) {
   const tmpPath = `${logPath}.compact-${process.pid}-${Date.now()}.tmp`;
   try {
     fs.writeFileSync(tmpPath, output, 'utf8');
-    fs.renameSync(tmpPath, logPath);
+    try {
+      // Windows の rename EPERM（他プロセスの fd 解放遅延）を吸収する共有リトライ。
+      // EACCES/EPERM/EBUSY 以外はリトライせず即 throw する（一時的でないエラーを
+      // 無駄にやり直さない）。
+      renameSyncWithRetry(tmpPath, logPath);
+    } catch (e) {
+      // リトライを尽くしても置き換えに失敗した: 失敗をログ自体へ書き残す。
+      // ここで書き残さないと、呼び出し元 worker-exit-hook の stderr は headless-shim が
+      // stdio:'ignore' で破棄するため、ノイズ行が残ったまま失敗が誰にも届かない。
+      try {
+        fs.appendFileSync(logPath, `\n[gh-maestro] ログ圧縮に失敗しました（thinking_tokens ノイズ行は残っています）: ${e.message}\n`);
+      } catch { /* 追記もできない場合は何もできない。throw は続行する */ }
+      throw e;
+    }
   } finally {
     // 成功時は rename 後に tmp は存在しないため unlink は ENOENT（無害）、
     // 失敗時（共有違反等で rename が throw）はここで確実に tmp を掃除する

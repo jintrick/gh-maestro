@@ -149,6 +149,94 @@ describe('compactWorkerLog', () => {
     });
   });
 
+  test('renameが一時的にEPERMで失敗しても共有リトライが成功させ、ノイズ行が実際に消える', () => {
+    withTempDir((dir) => {
+      const logPath = path.join(dir, 'worker.log');
+      const realLine = '{"type":"assistant","message":"hello"}';
+      fs.writeFileSync(logPath, `${THINKING_TOKENS_LINE}\n${realLine}\n${THINKING_TOKENS_LINE}\n`);
+      const originalRename = fs.renameSync;
+      let renameAttempts = 0;
+      // 圧縮の置き換え（.compact- tmp → worker.log）にだけ失敗を注入する。
+      // 1回目だけ EPERM で失敗し、2回目で成功する（Windowsのハンドル解放遅延を模す）。
+      fs.renameSync = (from, to) => {
+        if (String(from).includes('.compact-')) {
+          if (renameAttempts++ === 0) {
+            const err = new Error('simulated sharing violation (EPERM)');
+            err.code = 'EPERM';
+            throw err;
+          }
+        }
+        return originalRename(from, to);
+      };
+      let result;
+      try {
+        result = compactWorkerLog(logPath);
+      } finally {
+        fs.renameSync = originalRename;
+      }
+      assert.equal(result.compacted, true);
+      assert.equal(result.removedLines, 2);
+      // リトライ成功後はログからノイズ行が実際に消えている（例外が飛ばないことの確認では不十分）
+      assert.equal(fs.readFileSync(logPath, 'utf8'), `${realLine}\n`);
+    });
+  });
+
+  test('renameが最後まで失敗したら、失敗がログファイル自体に記録されノイズ行が残る', () => {
+    withTempDir((dir) => {
+      const logPath = path.join(dir, 'worker.log');
+      const realLine = '{"type":"assistant","message":"hi"}';
+      fs.writeFileSync(logPath, `${THINKING_TOKENS_LINE}\n${realLine}\n`);
+      const originalRename = fs.renameSync;
+      // リトライ予算（合計500ms）を使い切るまで毎回 EPERM で失敗する
+      fs.renameSync = (from, to) => {
+        if (String(from).includes('.compact-')) {
+          const err = new Error('simulated sharing violation (EPERM)');
+          err.code = 'EPERM';
+          throw err;
+        }
+        return originalRename(from, to);
+      };
+      try {
+        assert.throws(() => compactWorkerLog(logPath), /EPERM/);
+      } finally {
+        fs.renameSync = originalRename;
+      }
+      // 失敗がログ自体に残り、あとからログを開いた人間に分かる（stderr経由に依存しない）
+      const content = fs.readFileSync(logPath, 'utf8');
+      assert.match(content, /ログ圧縮に失敗しました/);
+      assert.ok(content.includes(THINKING_TOKENS_LINE), 'ノイズ行が残っている');
+      assert.ok(content.includes(realLine), '実質行も残っている');
+      // tmp残骸は残らない
+      assert.deepEqual(fs.readdirSync(dir), ['worker.log']);
+    });
+  });
+
+  test('非リトライ可能なエラーはリトライせず1回で諦める（一時的でないエラーを無駄にやり直さない）', () => {
+    withTempDir((dir) => {
+      const logPath = path.join(dir, 'worker.log');
+      fs.writeFileSync(logPath, `${THINKING_TOKENS_LINE}\n{"type":"assistant","message":"hi"}\n`);
+      const originalRename = fs.renameSync;
+      let calls = 0;
+      fs.renameSync = (from, to) => {
+        if (String(from).includes('.compact-')) {
+          calls++;
+          const err = new Error('target is a directory');
+          err.code = 'EISDIR';
+          throw err;
+        }
+        return originalRename(from, to);
+      };
+      try {
+        assert.throws(() => compactWorkerLog(logPath), (e) => e.code === 'EISDIR');
+      } finally {
+        fs.renameSync = originalRename;
+      }
+      assert.equal(calls, 1, '非リトライ可能エラー（EACCES/EPERM/EBUSY 以外）はリトライしない');
+      // 最終失敗はログ自体に記録される
+      assert.match(fs.readFileSync(logPath, 'utf8'), /ログ圧縮に失敗しました/);
+    });
+  });
+
   test('writeFileSync失敗時も圧縮tmpを残さない（try/finally化の検証、Issue #248 項目10）', () => {
     withTempDir((dir) => {
       const logPath = path.join(dir, 'worker.log');

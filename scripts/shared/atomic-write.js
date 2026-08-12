@@ -29,6 +29,9 @@
 //   予算を使い切って失敗する。それでもプロセスを止めないのは、各呼び出し元（msg-poll /
 //   inbox-supervisor / assistant-watch）の try-catch + 次サイクル再試行の責務であり、
 //   本モジュールはその失敗を「即時 throw」ではなく「短時間粘った後の throw」に変えるだけ。
+//   renameSyncWithRetry はエクスポートされており、ワーカーログ圧縮
+//   （strip-thinking-token-lines.js の compactWorkerLog）も同じ rename リトライを
+//   再利用する（Issue #258）。
 //
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
@@ -124,4 +127,4 @@ function atomicWriteText(filePath, content) {
   return filePath;
 }
 
-module.exports = { atomicWriteJson, atomicWriteText };
+module.exports = { atomicWriteJson, atomicWriteText, renameSyncWithRetry };
