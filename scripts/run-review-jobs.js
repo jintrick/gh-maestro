@@ -67,6 +67,13 @@ function validateManifest(manifest) {
   if (typeof manifest.headRefOid !== 'string' || !manifest.headRefOid) {
     errors.push('headRefOid is required (non-empty string)');
   }
+  if (Object.prototype.hasOwnProperty.call(manifest, 'acceptanceCriteria')) {
+    if (!Array.isArray(manifest.acceptanceCriteria) || manifest.acceptanceCriteria.length === 0) {
+      errors.push('acceptanceCriteria must be a non-empty array when present');
+    } else if (manifest.acceptanceCriteria.some(item => typeof item !== 'string' || !item.trim())) {
+      errors.push('acceptanceCriteria must contain only non-empty strings');
+    }
+  }
 
   // coverage_ledger 検証
   const ledger = manifest.coverage_ledger;
@@ -226,13 +233,13 @@ function buildJobPrompt(job, manifest, reviewWtDir) {
     `### ${lc.path}\n\n${lc.content}`
   ).join('\n\n---\n\n');
 
-  const acceptanceSection = typeof manifest.acceptanceCriteria === 'string' && manifest.acceptanceCriteria
+  const acceptanceSection = Array.isArray(manifest.acceptanceCriteria) && manifest.acceptanceCriteria.length > 0
     ? `## 受け入れ条件
 
-以下はReview Managerが対象Issueから取得し、manifestに引き継いだ本文です。受け入れ条件は変更差分を判定する物差しとしてのみ参照してください。
-要件そのものの是非、差分に存在しない未実装、差分外の既存コードの指摘には使わず、評価対象はPR差分内に限ってください。
+以下はReview Managerが対象Issueから忠実に列挙し、manifestに引き継いだ受け入れ条件です。判定の物差しとしてのみ使ってください。
+要件そのものの是非を論じず、未実装の指摘に使わず、評価対象は従来どおり変更差分の中に限ってください。
 
-${manifest.acceptanceCriteria}
+${manifest.acceptanceCriteria.map(item => `- ${item}`).join('\n')}
 
 `
     : '';
@@ -257,7 +264,7 @@ HEAD: ${manifest.headRefOid}
 ## 入力証拠
 
 作業ディレクトリはPR headにリセットされた専用worktreeです。
-以下のdiffと変更ファイル一覧、および上記の受け入れ条件（manifestに存在する場合）だけを入力として使用してください。
+以下のdiffと変更ファイル一覧、およびmanifestに存在する受け入れ条件だけを入力として使用してください。
 担当外の観点は評価しなくて構いません。
 
 ${acceptanceSection}

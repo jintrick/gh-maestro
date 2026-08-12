@@ -41,10 +41,11 @@ after(() => {
 
 test('buildPrompt instructs the coverage-ledger + tool-driven review flow', () => {
   const { prompt } = buildPrompt({
-    pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
+    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
   });
   assert.match(prompt, /PR=5/);
   assert.match(prompt, /REPO=o\/r/);
+  assert.match(prompt, /ISSUE=260/);
   // 7葉の adopted / excluded 分類を指示
   assert.match(prompt, /adopted \/ excluded/);
   // run-review-jobs.js でジョブを実行するよう指示
@@ -55,17 +56,6 @@ test('buildPrompt instructs the coverage-ledger + tool-driven review flow', () =
   assert.match(prompt, /全体ビルド/);
   // return no longer includes stagingFile (artifact contract handled by finalize-review.js)
   assert.ok(typeof prompt === 'string');
-});
-
-test('buildPrompt includes acceptance criteria and limits its use to the diff', () => {
-  const { prompt } = buildPrompt({
-    pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
-    acceptanceCriteria: '## 受け入れ条件\n\n- 保存後に内容を保持する',
-  });
-  assert.match(prompt, /受け入れ条件/);
-  assert.match(prompt, /保存後に内容を保持する/);
-  assert.match(prompt, /物差しとしてのみ参照/);
-  assert.match(prompt, /評価対象はPR差分内に限ってください/);
 });
 
 test('buildPrompt normalizes backslash paths to forward slashes', () => {

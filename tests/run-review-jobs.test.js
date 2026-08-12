@@ -133,6 +133,24 @@ test('buildJobPrompt includes aspect and prohibition text', () => {
   }
 });
 
+test('validateManifest: acceptanceCriteria is optional and validates non-empty string arrays', () => {
+  const leaves = ALL_LEAF_IDS.map(id => ({
+    id,
+    trunk: Object.entries(TRUNK_TO_LEAVES).find(([, lvs]) => lvs.includes(id))[0],
+    decision: 'adopted', rationale: null,
+  }));
+  const base = {
+    pr: 1, repo: 'o/r', headRefOid: 'abc', coverage_ledger: { leaves },
+    jobs: [{ id: 'job-1', leaf_ids: [...ALL_LEAF_IDS], aspect: 'Correctness', trunk_dir: 'd', leaf_files: ['f.md'] }],
+  };
+  assert.equal(validateManifest(base).valid, true);
+  assert.equal(validateManifest({ ...base, acceptanceCriteria: ['条件A', '条件B'] }).valid, true);
+  for (const value of ['', [''], ['  '], '条件A', [], [1]]) {
+    const result = validateManifest({ ...base, acceptanceCriteria: value });
+    assert.equal(result.valid, false, `expected invalid acceptanceCriteria: ${JSON.stringify(value)}`);
+  }
+});
+
 test('buildJobPrompt passes manifest acceptance criteria without external lookup', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-acceptance-'));
   try {
@@ -142,13 +160,14 @@ test('buildJobPrompt passes manifest acceptance criteria without external lookup
       { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness', leaf_files: ['leaf.md'] },
       {
         pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'],
-        acceptanceCriteria: '## 受け入れ条件\n\n- 保存後に内容を保持する',
+        acceptanceCriteria: ['保存後に内容を保持する', '失敗時に状態を維持する'],
       },
       tmpDir,
     );
     assert.match(prompt, /保存後に内容を保持する/);
-    assert.match(prompt, /manifestに存在する場合/);
-    assert.match(prompt, /評価対象はPR差分内に限ってください/);
+    assert.match(prompt, /失敗時に状態を維持する/);
+    assert.match(prompt, /manifestに存在する受け入れ条件/);
+    assert.match(prompt, /評価対象は従来どおり変更差分の中に限ってください/);
     assert.doesNotMatch(prompt, /gh issue view/);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -164,7 +183,7 @@ test('buildJobPrompt keeps the legacy input when manifest has no acceptance crit
       { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] },
       tmpDir,
     );
-    assert.match(prompt, /以下のdiffと変更ファイル一覧、および上記の受け入れ条件（manifestに存在する場合）だけ/);
+    assert.match(prompt, /以下のdiffと変更ファイル一覧、およびmanifestに存在する受け入れ条件だけ/);
     assert.doesNotMatch(prompt, /保存後に内容を保持する/);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
