@@ -1765,6 +1765,178 @@ describe('Hang detection', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 居座り検知（Issue #263）: 既に報告済みなのにプロセスが生存し続けている異常を検知する。
+// ハング検知（ログ更新時刻ベース）とは独立の判定軸で、経過時間を一切使わない。
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('Stale report detection（居座り検知）', () => {
+  beforeEach(() => resetAllMocks());
+
+  const START_TIME = '2026-07-25T00:00:00.000Z';
+
+  function reportComment({ from = 'issue-5-fix', createdAt = '2026-07-25T00:05:00Z' } = {}) {
+    return {
+      id: 700, created_at: createdAt,
+      body: `<!-- gh-maestro {"v":1,"to":"orchestrator","from":"${from}"} -->\n> 完了しました`,
+    };
+  }
+
+  test('居座り検知→通知: 起動以降に報告済みなのに生存中なら通知する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED:issue-5-fix:456')),
+        `STALE_REPORT_DETECTED が出力されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1, 'orchestratorへ1回通知');
+      assert.ok(notifyCalls[0].body.includes('issue-5-fix'));
+      assert.ok(notifyCalls[0].body.includes('456'));
+
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state.staleReportNotifiedPid, 456);
+      assert.ok(typeof state.staleReportNotifiedAt === 'string');
+    });
+  });
+
+  test('未報告のまま生存中は通知しない（休止待ちの正常状態）', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([])); // まだ何も報告していない
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED')),
+        `未報告なら検知されないこと: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 0);
+    });
+  });
+
+  test('重複通知防止: 同一PIDで2回目のrunOnceでは通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+        cursors: {
+          'issue-5-fix': {
+            since: null,
+            seenIds: [],
+            deliveredIds: [],
+            pendingDeliveries: {},
+            staleReportNotifiedPid: 456, // 既に通知済み
+            staleReportNotifiedAt: '2026-07-25T00:10:00.000Z',
+          },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED')),
+        `再通知されないこと: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 0);
+    });
+  });
+
+  test('起動時刻を特定できない（startTimeが無い）場合は判定せず通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: null, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED')));
+      assert.equal(notifyCalls.length, 0);
+    });
+  });
+
+  test('ワーカー非生存時は居座り判定をスキップする', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
+    // 非生存（resetAllMocks の既定 = setWorkersIdle）
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED')));
+      assert.equal(notifyCalls.length, 0);
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 信頼性: 再起動後継続
 // ═══════════════════════════════════════════════════════════════════════════
 

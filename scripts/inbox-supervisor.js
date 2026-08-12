@@ -22,6 +22,9 @@
 //     PIDで再確認する。消えていればDELIVEREDにせずresume-failedとして扱う）
 //   - リトライ断念時のorchestrator通知（stderrへのログだけでは誰も気づけないため、
 //     msg-send.js経由でorchestratorのinboxに直接投稿する）
+//   - 未報告のまま居座るワーカーの通知（Issue #263。ワーカーが直近の起動以降に既に報告を
+//     投稿しているのにプロセスが生存し続けている異常を、経過時間ではなく報告コメントの
+//     有無で検知しorchestratorへ通知する。msg-send.js側の追伸拒否ガードと対になる）
 //
 // 既存ポーリングとの関係:
 //   - ワーカーの自己ポーリング（msg-poll.js Monitor経由）を置き換える
@@ -53,6 +56,7 @@ const { acquireResidentLease, INBOX_SUPERVISOR_ROLE } = require('./shared/worker
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // msg-poll.js のスキャンロジックを再利用（マーカーパースのみ）
 const { parseMarker } = require('./msg-poll');
+const { hasReportedSinceStart } = require('./shared/worker-report-check');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { readContract, clearContract } = require('./shared/response-contract');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
@@ -91,6 +95,7 @@ Output (stdout):
     RETRYING:<workerName>:<commentId>:<attempt>
     HANG_DETECTED:<workerName>:<pid>
     HANG_RESUMED:<workerName>
+    STALE_REPORT_DETECTED:<workerName>:<pid>
     SCAN_END:<workers>:<detected>
 
 Description:
@@ -99,6 +104,7 @@ Description:
   カーソル・配送状態は .gh-maestro/inbox-supervisor/ に永続化され、
   プロセス再起動後も未配送メッセージを失わずに再開できる。
   ハング検知: ワーカーのログファイル更新が一定時間（--hang-threshold-sec）以上止まっている場合、HANG_DETECTEDを出力しorchestratorへ通知する。その後ログが再び更新されるとHANG_RESUMEDを出力する。同一PIDへの重複通知は防止される。
+  居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みなのにプロセスが終了せず生存し続けている場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（経過時間は使わず、報告コメントの有無だけで判定する。ハング検知とは独立）。同一PIDへの重複通知は防止される。
   ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
   消滅時はPID registryを解除して自動exitする。`;
 
@@ -171,13 +177,17 @@ function cursorPath(workspace, workerName) {
  *
  * @param {string} workspace
  * @param {string} workerName
- * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object, hangNotifiedPid: number|null, hangNotifiedAt: string|null }}
+ * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object, hangNotifiedPid: number|null, hangNotifiedAt: string|null, staleReportNotifiedPid: number|null, staleReportNotifiedAt: string|null }}
  */
 function readCursor(workspace, workerName) {
   const cp = cursorPath(workspace, workerName);
   try {
     if (!fs.existsSync(cp)) {
-      return { since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {}, hangNotifiedPid: null, hangNotifiedAt: null };
+      return {
+        since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {},
+        hangNotifiedPid: null, hangNotifiedAt: null,
+        staleReportNotifiedPid: null, staleReportNotifiedAt: null,
+      };
     }
     const raw = fs.readFileSync(cp, 'utf8');
     const parsed = JSON.parse(raw);
@@ -190,9 +200,15 @@ function readCursor(workspace, workerName) {
           ? parsed.pendingDeliveries : {},
       hangNotifiedPid: typeof parsed.hangNotifiedPid === 'number' ? parsed.hangNotifiedPid : null,
       hangNotifiedAt: typeof parsed.hangNotifiedAt === 'string' ? parsed.hangNotifiedAt : null,
+      staleReportNotifiedPid: typeof parsed.staleReportNotifiedPid === 'number' ? parsed.staleReportNotifiedPid : null,
+      staleReportNotifiedAt: typeof parsed.staleReportNotifiedAt === 'string' ? parsed.staleReportNotifiedAt : null,
     };
   } catch {
-    return { since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {}, hangNotifiedPid: null, hangNotifiedAt: null };
+    return {
+      since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {},
+      hangNotifiedPid: null, hangNotifiedAt: null,
+      staleReportNotifiedPid: null, staleReportNotifiedAt: null,
+    };
   }
 }
 
@@ -215,6 +231,8 @@ function writeCursor(workspace, workerName, state) {
     pendingDeliveries: state.pendingDeliveries || {},
     hangNotifiedPid: typeof state.hangNotifiedPid === 'number' ? state.hangNotifiedPid : null,
     hangNotifiedAt: typeof state.hangNotifiedAt === 'string' ? state.hangNotifiedAt : null,
+    staleReportNotifiedPid: typeof state.staleReportNotifiedPid === 'number' ? state.staleReportNotifiedPid : null,
+    staleReportNotifiedAt: typeof state.staleReportNotifiedAt === 'string' ? state.staleReportNotifiedAt : null,
   });
 }
 
@@ -726,6 +744,52 @@ function main(argsOverride, opts = {}) {
             } catch (e) {
               writeErr(`inbox-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
               getWriteFailureMonitor(workerName, issue).onFailure(e.message);
+            }
+          }
+        }
+      }
+
+      // ── 未報告のまま居座るワーカーの検知（Issue #263） ─────────────────
+      // ハング検知（ログ更新時刻ベース）とは独立の判定軸。ワーカーが自分の直近の起動
+      // （entry.startTime）以降に既に orchestrator へ報告を投稿しているのに、プロセスが
+      // 終了せず生存し続けている状態を「居座り」として異常通知する。経過時間・ログ更新は
+      // 一切使わず、報告コメントの有無という事実だけで判定する。同一PIDには1回だけ通知する
+      // （resumeで新しいpidになれば再評価される）。
+      if (_isWorkerAlive(entry) && entry.startTime) {
+        const reportCheckResult = _ghApiComments(repo, issue, entry.startTime, { cwd: workspace });
+        if (reportCheckResult.status === 0) {
+          let reportComments = null;
+          try {
+            reportComments = parseCommentsResponse(reportCheckResult.stdout);
+          } catch {
+            reportComments = null;
+          }
+          if (reportComments) {
+            const reported = hasReportedSinceStart(reportComments, workerName, entry.startTime);
+            if (reported === true && cursor.staleReportNotifiedPid !== entry.pid) {
+              const body = `⚠️ ワーカー "${workerName}" は既に報告を投稿済みですが、プロセス（PID ${entry.pid}）が終了せず居座っています。この状態の間、新しい指示は配送されず待機し続けます。状態を確認し、必要ならプロセスを終了してください。`;
+              let notified = false;
+              try {
+                const notifyResult = _notifyOrchestrator({ workspace, issue, body });
+                notified = notifyResult.status === 0;
+                if (!notified) {
+                  writeErr(`inbox-supervisor: 居座り通知の投稿に失敗: ${(notifyResult.stderr || '').trim()}`);
+                }
+              } catch (e) {
+                writeErr(`inbox-supervisor: 居座り通知の投稿に失敗: ${e.message}`);
+              }
+              // 通知成功時のみ通知済み状態を更新・永続化する（HANG_DETECTEDと同じ扱い）。
+              if (notified) {
+                cursor.staleReportNotifiedPid = entry.pid;
+                cursor.staleReportNotifiedAt = new Date().toISOString();
+                writeOut(`STALE_REPORT_DETECTED:${workerName}:${entry.pid}`);
+                try {
+                  writeCursor(workspace, workerName, cursor);
+                } catch (e) {
+                  writeErr(`inbox-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
+                  getWriteFailureMonitor(workerName, issue).onFailure(e.message);
+                }
+              }
             }
           }
         }
