@@ -12,8 +12,13 @@
 const { parseMarker } = require('../msg-poll');
 
 /**
- * 与えられたコメント一覧の中に、対象ワーカー自身（marker の from === workerName）が
- * 直近の起動時刻（startTime）以降に投稿したものが含まれるか判定する。
+ * 与えられたコメント一覧の中に、対象ワーカー自身から orchestrator 宛ての報告
+ * （marker の from === workerName かつ to === 'orchestrator'）で、直近の起動時刻
+ * （startTime）以降に投稿されたものが含まれるか判定する。
+ *
+ * to を確認しないと、他ワーカー宛てに転送・言及されただけのコメントや、たまたま
+ * from が一致する無関係なマーカー付きコメントまで「orchestratorへの報告」として
+ * 誤認しうる。
  *
  * @param {object[]} comments    - gh api の comments 応答（id/created_at/body を含む）
  * @param {string} workerName
@@ -29,7 +34,7 @@ function hasReportedSinceStart(comments, workerName, startTime) {
   for (const c of comments) {
     if (!c || !c.created_at) continue;
     const meta = parseMarker(c.body);
-    if (!meta || meta.from !== workerName) continue;
+    if (!meta || meta.from !== workerName || meta.to !== 'orchestrator') continue;
 
     // ISO文字列同士の精度差（ミリ秒 vs 秒）による誤判定を避けるため、数値化してから
     // 比較する（.claude/rules/process-lifecycle-scripts.md 参照。文字列のまま比較すると

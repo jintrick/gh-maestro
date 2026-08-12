@@ -104,7 +104,7 @@ Description:
   カーソル・配送状態は .gh-maestro/inbox-supervisor/ に永続化され、
   プロセス再起動後も未配送メッセージを失わずに再開できる。
   ハング検知: ワーカーのログファイル更新が一定時間（--hang-threshold-sec）以上止まっている場合、HANG_DETECTEDを出力しorchestratorへ通知する。その後ログが再び更新されるとHANG_RESUMEDを出力する。同一PIDへの重複通知は防止される。
-  居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みなのにプロセスが終了せず生存し続けている場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（経過時間は使わず、報告コメントの有無だけで判定する。ハング検知とは独立）。同一PIDへの重複通知は防止される。
+  居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みなのにプロセスが終了せず生存し続けている場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（経過時間は使わず、報告コメントの有無だけで判定する。ハング検知とは独立）。同一プロセス（PID+起動時刻）への重複通知は防止される（PID再利用による誤抑止を避けるため起動時刻も照合する）。
   ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
   消滅時はPID registryを解除して自動exitする。`;
 
@@ -177,7 +177,7 @@ function cursorPath(workspace, workerName) {
  *
  * @param {string} workspace
  * @param {string} workerName
- * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object, hangNotifiedPid: number|null, hangNotifiedAt: string|null, staleReportNotifiedPid: number|null, staleReportNotifiedAt: string|null }}
+ * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object, hangNotifiedPid: number|null, hangNotifiedAt: string|null, staleReportNotifiedPid: number|null, staleReportNotifiedStartTime: string|null, staleReportNotifiedAt: string|null }}
  */
 function readCursor(workspace, workerName) {
   const cp = cursorPath(workspace, workerName);
@@ -186,7 +186,7 @@ function readCursor(workspace, workerName) {
       return {
         since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {},
         hangNotifiedPid: null, hangNotifiedAt: null,
-        staleReportNotifiedPid: null, staleReportNotifiedAt: null,
+        staleReportNotifiedPid: null, staleReportNotifiedStartTime: null, staleReportNotifiedAt: null,
       };
     }
     const raw = fs.readFileSync(cp, 'utf8');
@@ -201,13 +201,14 @@ function readCursor(workspace, workerName) {
       hangNotifiedPid: typeof parsed.hangNotifiedPid === 'number' ? parsed.hangNotifiedPid : null,
       hangNotifiedAt: typeof parsed.hangNotifiedAt === 'string' ? parsed.hangNotifiedAt : null,
       staleReportNotifiedPid: typeof parsed.staleReportNotifiedPid === 'number' ? parsed.staleReportNotifiedPid : null,
+      staleReportNotifiedStartTime: typeof parsed.staleReportNotifiedStartTime === 'string' ? parsed.staleReportNotifiedStartTime : null,
       staleReportNotifiedAt: typeof parsed.staleReportNotifiedAt === 'string' ? parsed.staleReportNotifiedAt : null,
     };
   } catch {
     return {
       since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {},
       hangNotifiedPid: null, hangNotifiedAt: null,
-      staleReportNotifiedPid: null, staleReportNotifiedAt: null,
+      staleReportNotifiedPid: null, staleReportNotifiedStartTime: null, staleReportNotifiedAt: null,
     };
   }
 }
@@ -232,6 +233,7 @@ function writeCursor(workspace, workerName, state) {
     hangNotifiedPid: typeof state.hangNotifiedPid === 'number' ? state.hangNotifiedPid : null,
     hangNotifiedAt: typeof state.hangNotifiedAt === 'string' ? state.hangNotifiedAt : null,
     staleReportNotifiedPid: typeof state.staleReportNotifiedPid === 'number' ? state.staleReportNotifiedPid : null,
+    staleReportNotifiedStartTime: typeof state.staleReportNotifiedStartTime === 'string' ? state.staleReportNotifiedStartTime : null,
     staleReportNotifiedAt: typeof state.staleReportNotifiedAt === 'string' ? state.staleReportNotifiedAt : null,
   });
 }
@@ -749,52 +751,6 @@ function main(argsOverride, opts = {}) {
         }
       }
 
-      // ── 未報告のまま居座るワーカーの検知（Issue #263） ─────────────────
-      // ハング検知（ログ更新時刻ベース）とは独立の判定軸。ワーカーが自分の直近の起動
-      // （entry.startTime）以降に既に orchestrator へ報告を投稿しているのに、プロセスが
-      // 終了せず生存し続けている状態を「居座り」として異常通知する。経過時間・ログ更新は
-      // 一切使わず、報告コメントの有無という事実だけで判定する。同一PIDには1回だけ通知する
-      // （resumeで新しいpidになれば再評価される）。
-      if (_isWorkerAlive(entry) && entry.startTime) {
-        const reportCheckResult = _ghApiComments(repo, issue, entry.startTime, { cwd: workspace });
-        if (reportCheckResult.status === 0) {
-          let reportComments = null;
-          try {
-            reportComments = parseCommentsResponse(reportCheckResult.stdout);
-          } catch {
-            reportComments = null;
-          }
-          if (reportComments) {
-            const reported = hasReportedSinceStart(reportComments, workerName, entry.startTime);
-            if (reported === true && cursor.staleReportNotifiedPid !== entry.pid) {
-              const body = `⚠️ ワーカー "${workerName}" は既に報告を投稿済みですが、プロセス（PID ${entry.pid}）が終了せず居座っています。この状態の間、新しい指示は配送されず待機し続けます。状態を確認し、必要ならプロセスを終了してください。`;
-              let notified = false;
-              try {
-                const notifyResult = _notifyOrchestrator({ workspace, issue, body });
-                notified = notifyResult.status === 0;
-                if (!notified) {
-                  writeErr(`inbox-supervisor: 居座り通知の投稿に失敗: ${(notifyResult.stderr || '').trim()}`);
-                }
-              } catch (e) {
-                writeErr(`inbox-supervisor: 居座り通知の投稿に失敗: ${e.message}`);
-              }
-              // 通知成功時のみ通知済み状態を更新・永続化する（HANG_DETECTEDと同じ扱い）。
-              if (notified) {
-                cursor.staleReportNotifiedPid = entry.pid;
-                cursor.staleReportNotifiedAt = new Date().toISOString();
-                writeOut(`STALE_REPORT_DETECTED:${workerName}:${entry.pid}`);
-                try {
-                  writeCursor(workspace, workerName, cursor);
-                } catch (e) {
-                  writeErr(`inbox-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
-                  getWriteFailureMonitor(workerName, issue).onFailure(e.message);
-                }
-              }
-            }
-          }
-        }
-      }
-
       // ── pending 再試行 ───────────────────────────────────────────────
       const nowMs = Date.now();
       const pendingEntries = Object.entries(cursor.pendingDeliveries || {});
@@ -898,6 +854,55 @@ function main(argsOverride, opts = {}) {
       if (comments === null) {
         writeErr(`inbox-supervisor: gh api の応答が配列ではありません (worker ${workerName}, issue ${issue})`);
         continue;
+      }
+
+      // ── 未報告のまま居座るワーカーの検知（Issue #263） ─────────────────
+      // ハング検知（ログ更新時刻ベース）とは独立の判定軸。ワーカーが自分の直近の起動
+      // （entry.startTime）以降に既に orchestrator へ報告を投稿しているのに、プロセスが
+      // 終了せず生存し続けている状態を「居座り」として異常通知する。経過時間・ログ更新は
+      // 一切使わず、報告コメントの有無という事実だけで判定する。
+      //
+      // 重複通知防止キーは pid 単独ではなく pid + startTime（起動時刻）の組で同一プロセスを
+      // 識別する。同一ファイル内の生存判定（_isWorkerAlive → verifyProcessIdentity）と同じ
+      // 理由: PIDだけをキーにすると、通知後にワーカーが終了し、OSがそのPIDを無関係な別
+      // プロセスへ再利用した場合、再利用先が同じPIDで別の（未報告の）ワーカーとして
+      // resume されても「既に通知済みのPID」と誤認して再通知を抑止してしまう。
+      //
+      // gh api の呼び出しは上の「新着コメントのスキャン」で取得済みの comments をそのまま
+      // 再利用し、この判定専用の追加取得は行わない。ワーカーごとに毎周期2回目の全件取得を
+      // 行うと、配送処理と同じ周期でAPI呼び出し数が倍になり、レート制限に達すると本Issueが
+      // 直そうとしている「配送が止まる」事態を招く（本末転倒）。comments は since=cursor.since
+      // で絞られているが、報告コメントが初めて出現するサイクルでは必ずこの取得結果に含まれる
+      // （cursor.since はこのサイクルの終わりに comments の最大 created_at まで進むため、
+      // 同一サイクル内であれば取りこぼさない。一度検知した後は pid+startTime ベースの重複
+      // 排除で再通知しないため、翌サイクル以降 since がその報告コメントを過ぎても問題ない）。
+      if (_isWorkerAlive(entry) && entry.startTime) {
+        const reported = hasReportedSinceStart(comments, workerName, entry.startTime);
+        const alreadyNotified = cursor.staleReportNotifiedPid === entry.pid
+          && cursor.staleReportNotifiedStartTime === entry.startTime;
+        if (reported === true && !alreadyNotified) {
+          const body = `⚠️ ワーカー "${workerName}" は既に報告を投稿済みですが、プロセス（PID ${entry.pid}）が終了せず居座っています。この状態の間、新しい指示は配送されず待機し続けます。状態を確認し、必要ならプロセスを終了してください。`;
+          let notified = false;
+          try {
+            const notifyResult = _notifyOrchestrator({ workspace, issue, body });
+            notified = notifyResult.status === 0;
+            if (!notified) {
+              writeErr(`inbox-supervisor: 居座り通知の投稿に失敗: ${(notifyResult.stderr || '').trim()}`);
+            }
+          } catch (e) {
+            writeErr(`inbox-supervisor: 居座り通知の投稿に失敗: ${e.message}`);
+          }
+          // 通知成功時のみ通知済み状態を更新する（HANG_DETECTEDと同じ扱い）。永続化は
+          // このワーカーの処理末尾にある共通の writeCursor に任せる（このブロックの後、
+          // 新着メッセージのスキャン・配送でも同じ cursor オブジェクトを書き換えるため、
+          // ここで個別に保存すると二重書き込みになる）。
+          if (notified) {
+            cursor.staleReportNotifiedPid = entry.pid;
+            cursor.staleReportNotifiedStartTime = entry.startTime;
+            cursor.staleReportNotifiedAt = new Date().toISOString();
+            writeOut(`STALE_REPORT_DETECTED:${workerName}:${entry.pid}`);
+          }
+        }
       }
 
       // ── 新着候補の抽出 ─────────────────────────────────────────────

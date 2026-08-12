@@ -34,6 +34,13 @@ test('別ワーカーからの報告は対象外で false', () => {
   assert.equal(hasReportedSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z'), false);
 });
 
+test('宛先がorchestrator以外の報告（他ワーカー宛の転送・言及等）は対象外で false', () => {
+  const comments = [
+    { id: 1, created_at: '2026-01-01T00:05:00Z', body: marker({ to: 'issue-9-other', from: 'issue-9-fix' }) },
+  ];
+  assert.equal(hasReportedSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z'), false);
+});
+
 test('マーカーが無いコメントは無視される', () => {
   const comments = [
     { id: 1, created_at: '2026-01-01T00:05:00Z', body: '普通のコメント' },
