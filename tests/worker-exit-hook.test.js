@@ -367,6 +367,30 @@ const HOOK_SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-exit-hook.js')
 // 実ワークスペース・実Issueへ偽の異常終了通知を投稿する事故になる（Issue #202）。
 const { cleanSpawnEnv } = require('./_spawn-env');
 
+// 実spawnする hook サブプロセスへ rename EPERM を注入する preload（node -r で読み込ませる）。
+// NODE_OPTIONS ではなく -r 引数を使う（NODE_OPTIONS は Windows のパス解析でバックスラッシュが
+// 化けて読み込めないことを実機で確認済み）。
+//   LOG_RENAME_FAIL_MODE=once   -> 1回目だけ失敗（リトライ成功を検証）
+//   LOG_RENAME_FAIL_MODE=always -> 常に失敗（最終失敗のログ記録を検証）
+const RENAME_INJECTOR_SOURCE = `
+'use strict';
+const fs = require('fs');
+const originalRenameSync = fs.renameSync;
+const mode = process.env.LOG_RENAME_FAIL_MODE;
+if (mode === 'once' || mode === 'always') {
+  let attempts = 0;
+  fs.renameSync = (from, to) => {
+    const isCompactionTarget = String(from).includes('.compact-') || String(to).endsWith('worker.log');
+    if (isCompactionTarget && (mode === 'always' || attempts++ === 0)) {
+      const err = new Error('simulated sharing violation (EPERM)');
+      err.code = 'EPERM';
+      throw err;
+    }
+    return originalRenameSync(from, to);
+  };
+}
+`;
+
 describe('CLI引数の解釈', () => {
   test('3引数（新規起動形）はcaptureLogPathの位置がexitCodeとして解釈される', () => {
     withTempDir((dir) => {
@@ -430,6 +454,53 @@ describe('CLI引数の解釈', () => {
 
       assert.equal(r.status, 0, `stderr: ${r.stderr}`);
       assert.equal(fs.readFileSync(logPath, 'utf8'), `${realLine}\n`);
+    });
+  });
+
+  test('ワーカー終了フック経由で rename の一時的な EPERM をリトライで乗り越えて圧縮できる', () => {
+    withTempDir((dir) => {
+      const workerName = 'issue-5-fix';
+      const logDir = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', workerName);
+      fs.mkdirSync(logDir, { recursive: true });
+      const logPath = path.join(logDir, 'worker.log');
+      const thinkingLine = '{"type":"system","subtype":"thinking_tokens","estimated_tokens":1,"estimated_tokens_delta":1,"uuid":"x","session_id":"y"}';
+      const realLine = '{"type":"assistant","message":"hello"}';
+      fs.writeFileSync(logPath, `${thinkingLine}\n${realLine}\n${thinkingLine}\n`);
+
+      const injectorPath = path.join(dir, 'inject-rename.js');
+      fs.writeFileSync(injectorPath, RENAME_INJECTOR_SOURCE);
+      const env = { ...cleanSpawnEnv(), GH_MAESTRO_WORKER: workerName, LOG_RENAME_FAIL_MODE: 'once' };
+      const r = realSpawnSync(process.execPath, ['-r', injectorPath, HOOK_SCRIPT, dir, '', '0'], { encoding: 'utf8', timeout: 10000, env });
+
+      assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+      // リトライ成功後はログからノイズ行が実際に消えている（例外が飛ばないことの確認では不十分）
+      assert.equal(fs.readFileSync(logPath, 'utf8'), `${realLine}\n`);
+    });
+  });
+
+  test('ワーカー終了フック経由で rename が最後まで失敗したら失敗がログ自体に記録される', () => {
+    withTempDir((dir) => {
+      const workerName = 'issue-5-fix';
+      const logDir = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', workerName);
+      fs.mkdirSync(logDir, { recursive: true });
+      const logPath = path.join(logDir, 'worker.log');
+      const thinkingLine = '{"type":"system","subtype":"thinking_tokens","estimated_tokens":1,"estimated_tokens_delta":1,"uuid":"x","session_id":"y"}';
+      const realLine = '{"type":"assistant","message":"hello"}';
+      fs.writeFileSync(logPath, `${thinkingLine}\n${realLine}\n${thinkingLine}\n`);
+
+      const injectorPath = path.join(dir, 'inject-rename.js');
+      fs.writeFileSync(injectorPath, RENAME_INJECTOR_SOURCE);
+      const env = { ...cleanSpawnEnv(), GH_MAESTRO_WORKER: workerName, LOG_RENAME_FAIL_MODE: 'always' };
+      const r = realSpawnSync(process.execPath, ['-r', injectorPath, HOOK_SCRIPT, dir, '', '0'], { encoding: 'utf8', timeout: 10000, env });
+
+      assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+      const content = fs.readFileSync(logPath, 'utf8');
+      // 失敗がログ自体に残り、あとからログを開いた人間に分かる（stderr 経由に依存しない）
+      assert.match(content, /ログ圧縮に失敗しました/);
+      assert.ok(content.includes(thinkingLine), 'ノイズ行が残っている');
+      assert.ok(content.includes(realLine), '実質行も残っている');
+      // tmp残骸が残らない
+      assert.deepEqual(fs.readdirSync(logDir), ['worker.log']);
     });
   });
 
