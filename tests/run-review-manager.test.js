@@ -879,16 +879,39 @@ test('incompleteSentinelOutcome: notify-failed センチネルは exit 1 の失�
     pr: 42,
     reason: 'notify-failed',
     postError: 'auth failed: token expired',
-    validationErrors: ['leaf x is missing from coverage_ledger', 'pr must be a positive integer'],
+    failureLabel: 'パースエラー',
+    failureDetail: 'manifest JSON parse failed: Unexpected token } in JSON at position 12 (path: /wt/manifest.json)',
     completed_at: 'x',
   }), 'utf8');
 
   const result = incompleteSentinelOutcome({ sentinelPath, agentPid: 123, reviewWtDir: '/wt' });
   assert.equal(result.outcome, 'incomplete-review-notify-failed');
   assert.equal(result.exitCode, 1);
-  // orchestratorが投稿失敗と検証エラーの両方を確認できるように理由に含める
+  // orchestratorが投稿失敗と失敗内容（failureLabel/failureDetail）の両方を確認できるように理由に含める
   assert.ok(result.reason.includes('auth failed: token expired'), `reason should carry postError: ${result.reason}`);
-  assert.ok(result.reason.includes('leaf x is missing from coverage_ledger'), `reason should carry validationErrors: ${result.reason}`);
+  assert.ok(result.reason.includes('パースエラー'), `reason should carry failureLabel: ${result.reason}`);
+  assert.ok(result.reason.includes('manifest JSON parse failed'), `reason should carry failureDetail: ${result.reason}`);
+});
+
+test('incompleteSentinelOutcome: 旧形式（validationErrors配列のみ）センチネルもフォールバック表示する', () => {
+  const testDir = path.join(tmpBase, 'sentinel-notify-failed-old');
+  fs.mkdirSync(testDir, { recursive: true });
+  const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 45, '.incomplete');
+  fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+  // 前回マージ時点の notify-failed センチネル形式（validationErrors のみ）。互換のため読めること
+  fs.writeFileSync(sentinelPath, JSON.stringify({
+    pr: 45,
+    reason: 'notify-failed',
+    postError: 'network error',
+    validationErrors: ['leaf x is missing from coverage_ledger', 'pr must be a positive integer'],
+    completed_at: 'x',
+  }), 'utf8');
+
+  const result = incompleteSentinelOutcome({ sentinelPath, agentPid: null, reviewWtDir: '/wt' });
+  assert.equal(result.outcome, 'incomplete-review-notify-failed');
+  assert.equal(result.exitCode, 1);
+  assert.ok(result.reason.includes('検証エラー: leaf x is missing from coverage_ledger'), `fallback detail: ${result.reason}`);
+  assert.ok(result.reason.includes('pr must be a positive integer'), `all validationErrors joined: ${result.reason}`);
 });
 
 test('incompleteSentinelOutcome: 通知済み（incomplete-review）センチネルは exit 0 の不完全完了', () => {

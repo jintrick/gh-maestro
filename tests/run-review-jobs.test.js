@@ -5,6 +5,9 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { spawnSync } = require('child_process');
+
+const { cleanSpawnEnv } = require('./_spawn-env');
 
 const {
   validateManifest,
@@ -13,7 +16,9 @@ const {
   launchJobWorker,
   runJobsFromManifest,
   buildManifestValidationComment,
+  buildManifestLoadFailureComment,
   notifyManifestValidationFailure,
+  notifyManifestProblem,
   resolveNotifyPr,
   _setGhForTest,
 } = require('../scripts/run-review-jobs');
@@ -408,7 +413,9 @@ test('notifyManifestValidationFailure: 投稿失敗時は成功センチネル�
       assert.equal(sentinel.reason, 'notify-failed', '投稿失敗時に通知成功を示す reason にしない');
       assert.notEqual(sentinel.reason, 'incomplete-review');
       assert.equal(sentinel.postError, 'auth failed: token expired');
-      assert.deepEqual(sentinel.validationErrors, ['leaf x is missing from coverage_ledger']);
+      // 失敗内容は failureLabel / failureDetail で記録され、監督側がログで確認できる
+      assert.equal(sentinel.failureLabel, '検証エラー');
+      assert.equal(sentinel.failureDetail, 'leaf x is missing from coverage_ledger');
     } finally {
       delete process.env.NODE_TEST_CONTEXT;
     }
@@ -527,4 +534,176 @@ test('notifyManifestValidationFailure: CLI --pr があれば manifest.pr 不正�
     _setGhForTest(null);
     fs.rmSync(testDir, { recursive: true, force: true });
   }
+});
+
+// ── 追加対応（orchestrator指示）: --pr/--repo必須化と読み込み・パース失敗の通知統合 ──
+// 積み残しだった「manifest JSONパース失敗」「読み込み失敗」も同じ通知経路（PRコメント＋
+// センチネル）へ流す。manifest.pr / manifest.repo は取れないため、CLI --pr / --repo が通知先。
+
+test('runJobsFromManifest: パース不能JSONでも通知投稿＋成功センチネルを作成する', async () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-parse-'));
+  try {
+    const manifestPath = path.join(testDir, 'manifest.json');
+    const resultsPath = path.join(testDir, 'results.json');
+    // JSON.parse が SyntaxError になる文字列（モデルが書くJSONの構文エラーを模す）
+    fs.writeFileSync(manifestPath, '{"pr": 42, "repo": "o/r", "jobs": [', 'utf8');
+
+    const ghCalls = [];
+    _setGhForTest((args) => { ghCalls.push(args); return { status: 0, stdout: 'https://github.com/o/r/pull/42#issuecomment-2\n' }; });
+    process.env.NODE_TEST_CONTEXT = '1';
+    try {
+      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, '42', 'o/r');
+      assert.equal(result.ok, false);
+      assert.ok(result.summary.error.includes('manifest JSON parse failed'), `summary.error: ${result.summary.error}`);
+      assert.ok(result.summary.notification, 'summaryに通知結果を含める');
+      assert.equal(result.summary.notification.posted, true);
+      assert.equal(result.summary.notification.notifiable, true);
+      // 通知先は CLI --pr / --repo が使われる（manifestは読めないため manifest.pr/repo はない）
+      assert.equal(ghCalls.length, 1);
+      assert.equal(ghCalls[0][2], '42');
+      assert.equal(ghCalls[0][4], 'o/r');
+      // SyntaxError のメッセージ（V8のバリエーション: Unexpected token / in JSON at position /
+      // Unexpected end of JSON input）と manifest パスが本文に載る
+      const body = ghCalls[0][ghCalls[0].indexOf('--body') + 1];
+      assert.match(body, /JSONを解析できませんでした/);
+      assert.match(body, /Unexpected token|in JSON at position|Unexpected end of JSON input/);
+      assert.ok(body.includes(manifestPath), '本文にmanifestパスを含める');
+      // 成功センチネルが PR 42 のパスに作られる
+      assert.ok(result.summary.notification.sentinelPath && result.summary.notification.sentinelPath.includes(path.join('pr', '42')));
+      assert.equal(JSON.parse(fs.readFileSync(result.summary.notification.sentinelPath, 'utf8')).reason, 'incomplete-review');
+    } finally {
+      delete process.env.NODE_TEST_CONTEXT;
+    }
+  } finally {
+    _setGhForTest(null);
+    fs.rmSync(testDir, { recursive: true, force: true });
+  }
+});
+
+test('runJobsFromManifest: パース不能JSON＋投稿失敗はnotify-failedセンチネル（パースエラー）を書く', async () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-parsefail-'));
+  try {
+    const manifestPath = path.join(testDir, 'manifest.json');
+    const resultsPath = path.join(testDir, 'results.json');
+    fs.writeFileSync(manifestPath, 'not json at all', 'utf8');
+
+    _setGhForTest(() => ({ status: 1, stdout: '', stderr: 'auth failed: token expired' }));
+    process.env.NODE_TEST_CONTEXT = '1';
+    try {
+      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, '42', 'o/r');
+      assert.equal(result.ok, false);
+      const notif = result.summary.notification;
+      assert.equal(notif.posted, false);
+      assert.ok(notif.error && notif.error.includes('auth failed'));
+      // 成功センチネルではなく、失敗内容を持つ notify-failed センチネル
+      const sentinel = JSON.parse(fs.readFileSync(notif.sentinelPath, 'utf8'));
+      assert.equal(sentinel.reason, 'notify-failed');
+      assert.equal(sentinel.failureLabel, 'パースエラー');
+      assert.ok(sentinel.failureDetail.includes('manifest JSON parse failed'), `failureDetail: ${sentinel.failureDetail}`);
+      // V8のSyntaxErrorメッセージはバージョンにより文言が異なる（Unexpected token / in JSON at position /
+      // is not valid JSON 等）。通知ロジックが e.message をそのまま運んでいることだけを検証する
+      assert.match(sentinel.failureDetail, /Unexpected token|in JSON at position|is not valid JSON/,
+        `SyntaxErrorメッセージを含む: ${sentinel.failureDetail}`);
+      assert.ok(sentinel.failureDetail.includes(manifestPath), 'failureDetailにmanifestパスを含める');
+    } finally {
+      delete process.env.NODE_TEST_CONTEXT;
+    }
+  } finally {
+    _setGhForTest(null);
+    fs.rmSync(testDir, { recursive: true, force: true });
+  }
+});
+
+test('runJobsFromManifest: manifest読み込み失敗も通知投稿＋センチネルを作成する', async () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-read-'));
+  try {
+    const manifestPath = path.join(testDir, 'no-such-manifest.json');
+    const resultsPath = path.join(testDir, 'results.json');
+
+    const ghCalls = [];
+    _setGhForTest((args) => { ghCalls.push(args); return { status: 0, stdout: 'url\n' }; });
+    process.env.NODE_TEST_CONTEXT = '1';
+    try {
+      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, '42', 'o/r');
+      assert.equal(result.ok, false);
+      assert.ok(result.summary.error.includes('manifest read failed'), `summary.error: ${result.summary.error}`);
+      assert.equal(result.summary.notification.posted, true);
+      assert.equal(ghCalls.length, 1);
+      const body = ghCalls[0][ghCalls[0].indexOf('--body') + 1];
+      assert.match(body, /読み込めませんでした/);
+      assert.ok(body.includes(manifestPath), '本文にmanifestパスを含める');
+      assert.equal(JSON.parse(fs.readFileSync(result.summary.notification.sentinelPath, 'utf8')).reason, 'incomplete-review');
+    } finally {
+      delete process.env.NODE_TEST_CONTEXT;
+    }
+  } finally {
+    _setGhForTest(null);
+    fs.rmSync(testDir, { recursive: true, force: true });
+  }
+});
+
+test('notifyManifestProblem: pr欠落（プログラム呼び出しのみ）は例外で中断せず notifiable:false', () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nmp-nopr-'));
+  try {
+    _setGhForTest((args) => { throw new Error('gh は呼ばれないはず'); });
+    process.env.NODE_TEST_CONTEXT = '1';
+    try {
+      let result;
+      assert.doesNotThrow(() => {
+        result = notifyManifestProblem({
+          workspace: testDir,
+          pr: undefined,
+          repo: 'o/r',
+          commentBody: 'body',
+          failureLabel: 'パースエラー',
+          failureDetail: 'x',
+        });
+      });
+      assert.equal(result.notifiable, false);
+      assert.equal(result.posted, false);
+      assert.equal(result.sentinelPath, null);
+    } finally {
+      delete process.env.NODE_TEST_CONTEXT;
+    }
+  } finally {
+    _setGhForTest(null);
+    fs.rmSync(testDir, { recursive: true, force: true });
+  }
+});
+
+test('buildManifestLoadFailureComment: パース失敗の本文に SyntaxError メッセージとmanifestパスを含める', () => {
+  const body = buildManifestLoadFailureComment('parse', 'Unexpected token } in JSON at position 12', '/wt/records/pr/42/review/manifest.json', '42');
+  assert.match(body, /PR #42/);
+  assert.match(body, /JSONを解析できませんでした/);
+  assert.match(body, /Unexpected token } in JSON at position 12/);
+  assert.ok(body.includes('/wt/records/pr/42/review/manifest.json'));
+  const readBody = buildManifestLoadFailureComment('read', 'ENOENT: no such file', '/x/manifest.json', '42');
+  assert.match(readBody, /読み込めませんでした/);
+  assert.match(readBody, /ENOENT: no such file/);
+});
+
+test('CLI: --pr / --repo は必須で、欠落・不正は作業前に exit 2（クラッシュさせない）', () => {
+  const scriptPath = path.join(__dirname, '..', 'scripts', 'run-review-jobs.js');
+  const baseArgs = ['--manifest', 'm.json', '--results', 'r.json'];
+  const run = (args) => spawnSync(process.execPath, [scriptPath, ...args], {
+    encoding: 'utf8',
+    env: cleanSpawnEnv(),
+  });
+
+  // --pr 欠落 → exit 2 の明確なメッセージ（parseFlags は欠落値を null で返すため、
+  // null.trim() 等の TypeError クラッシュにしないことが本テストの趣旨）
+  const noPr = run([...baseArgs, '--repo', 'o/r']);
+  assert.equal(noPr.status, 2, `--pr 欠落は exit 2: ${noPr.stderr}`);
+  assert.match(noPr.stderr, /--pr は必須です/);
+
+  // --pr 不正（非正整数）→ exit 2
+  const badPr = run([...baseArgs, '--pr', 'abc', '--repo', 'o/r']);
+  assert.equal(badPr.status, 2, `--pr 不正は exit 2: ${badPr.stderr}`);
+  assert.match(badPr.stderr, /--pr は正整数でなければなりません/);
+
+  // --repo 欠落 → exit 2（null.trim() の TypeError クラッシュで exit 1 にならないこと）
+  const noRepo = run([...baseArgs, '--pr', '42']);
+  assert.equal(noRepo.status, 2, `--repo 欠落は exit 2（クラッシュではない）: ${noRepo.stderr}`);
+  assert.match(noRepo.stderr, /--repo は必須です/);
+  assert.doesNotMatch(noRepo.stderr, /TypeError/);
 });

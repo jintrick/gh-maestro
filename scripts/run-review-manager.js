@@ -629,11 +629,12 @@ function readIncompleteSentinel(sentinelPath) {
 /**
  * .incompleteセンチネルから監督結果を組み立てる。
  *
- * reason 'notify-failed'（run-review-jobs.js がmanifest検証失敗通知のPR投稿に失敗したときに
- * 書く、postError と validationErrors を持つセンチネル、Issue #271）は、exit 0 の
- * 「不完全レビューとして通知済み」にはせず、exit 1 の失敗として扱う。これを exit 0 にすると
- * オーケストレーターが「通知は完了した」と誤認し、検証エラーが届かないまま黙って済む。
- * 失敗理由には投稿エラーと検証エラーを両方載せ、orchestrator がログから確認できるようにする。
+ * reason 'notify-failed'（run-review-jobs.js がmanifestの検証失敗・読み込み失敗・パース失敗の
+ * 通知PR投稿に失敗したときに書く、postError と failureLabel / failureDetail を持つセンチネル、
+ * Issue #271）は、exit 0 の「不完全レビューとして通知済み」にはせず、exit 1 の失敗として扱う。
+ * これを exit 0 にするとオーケストレーターが「通知は完了した」と誤認し、検証・解析エラーが
+ * 届かないまま黙って済む。失敗理由には投稿エラーと失敗内容（検証エラー・読み込みエラー・
+ * パースエラー）を両方載せ、orchestrator がログから確認できるようにする。
  *
  * @param {{sentinelPath: string, agentPid: number|null, reviewWtDir: string|null}} params
  * @returns {SupervisionResult}
@@ -641,16 +642,21 @@ function readIncompleteSentinel(sentinelPath) {
 function incompleteSentinelOutcome({ sentinelPath, agentPid, reviewWtDir }) {
   const sentinel = readIncompleteSentinel(sentinelPath);
   if (sentinel && sentinel.reason === 'notify-failed') {
-    const validationDetail = Array.isArray(sentinel.validationErrors) && sentinel.validationErrors.length > 0
-      ? sentinel.validationErrors.join(' | ')
-      : '(記録なし)';
+    // run-review-jobs.js は検証失敗・読み込み失敗・パース失敗を failureLabel / failureDetail で
+    // 記録する。旧形式（validationErrors 配列）のセンチネルにもフォールバックして読めるようにする。
+    const label = typeof sentinel.failureLabel === 'string' && sentinel.failureLabel ? sentinel.failureLabel : '検証エラー';
+    const detail = typeof sentinel.failureDetail === 'string' && sentinel.failureDetail
+      ? sentinel.failureDetail
+      : (Array.isArray(sentinel.validationErrors) && sentinel.validationErrors.length > 0
+          ? sentinel.validationErrors.join(' | ')
+          : '(記録なし)');
     return {
       outcome: 'incomplete-review-notify-failed',
       exitCode: 1,
       artifact: null,
       agentPid,
       reviewWtDir,
-      reason: `検証失敗通知のPR投稿に失敗したため、不完全レビューとして完了扱いにしません。投稿エラー: ${sentinel.postError || '(記録なし)'}。検証エラー: ${validationDetail}`,
+      reason: `検証失敗・解析失敗の通知（PR投稿）に失敗したため、不完全レビューとして完了扱いにしません。投稿エラー: ${sentinel.postError || '(記録なし)'}。${label}: ${detail}`,
     };
   }
   return {

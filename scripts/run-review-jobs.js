@@ -30,24 +30,26 @@ const DEFAULT_TOTAL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes total
 
 const USAGE = `run-review-jobs.js — RMの実行manifestに従いレビュージョブをheadless起動する
 
-Usage: node run-review-jobs.js --manifest <path> --results <path> [--workspace <path>] [--pr <N>]
+Usage: node run-review-jobs.js --manifest <path> --results <path> --pr <N> --repo <owner/repo> [--workspace <path>]
 
 Options:
   --manifest <path>    RMが書き出した実行manifestのJSONファイルパス
   --results <path>     ジョブ実行結果を書き出すJSONファイルパス
+  --pr <N>             必須。通知先PR番号（検証前の起動コンテキスト。正整数のみ受理）
+  --repo <owner/repo>  必須。リポジトリ（検証前の起動コンテキスト）。manifestの読み込み・
+                       解析に失敗した場合でも通知先として使う（manifest.repo は取れないため）
   --workspace <path>   ワークスペースの絶対パス（デフォルト: cwd）
-  --pr <N>             manifest検証失敗時の通知先PR番号（検証前の起動コンテキスト。省略時は
-                       manifest.pr にフォールバックする）
   --job-timeout <ms>   ジョブごとのタイムアウト（ms、デフォルト: 600000）
   --total-timeout <ms> 全体のタイムアウト（ms、デフォルト: 1800000）
 
 Output:
   終了コード0: 全ジョブ成功。resultsファイルに結果を書き出し
   終了コード1: 一部ジョブ失敗。resultsファイルに成功・失敗を含む全結果を書き出し
-  終了コード2: manifest不正または起動失敗
-    manifestの機械検証に失敗した場合は、検証エラーをPRへのプレーンコメントとして投稿し、
-    .incompleteセンチネルを書き出した上で終了コード2で終了する（不完全レビューとして通知済み。
-    レビュー担当は再試行しない。書き直し判断はオーケストレーターが行う）。
+  終了コード2: manifest不正・読み込み/解析失敗または起動失敗
+    manifestの機械検証・読み込み・解析の失敗は、エラー内容（検証エラー・読み込みエラー・
+    パースエラー）をPRへのプレーンコメントとして投稿し、.incompleteセンチネルを書き出した
+    上で終了コード2で終了する（不完全レビューとして通知済み。レビュー担当は再試行しない。
+    書き直し判断はオーケストレーターが行う）。
     投稿に失敗した場合は成功センチネルを書かず notify-failed センチネルを書き、
     監督側が失敗（exit 1）として扱う。`;
 
@@ -627,29 +629,67 @@ function readSentinelReason(sentinelPath) {
 }
 
 /**
- * manifest検証失敗を、既存の「不完全レビュー」経路へ冪等に通知する。
+ * manifestの読み込み・JSONパースに失敗した旨を報告するプレーンコメント本文を生成する。
+ * 検証失敗（buildManifestValidationComment）と同一の「PRへのプレーンコメント」チャネルに
+ * 載ることで、オーケストレーターの poll-reviews.js が失敗を確実に受け取れる
+ * （Issue #271: モデルが書くJSONの構文エラーは最も起きやすく、stderrのみでは黙って済む）。
  *
- * 1. 通知先PRを resolveNotifyPr で確定する（CLI --pr を最優先、次に manifest.pr。どちらも
- *    不正なら通知不能として例外で中断せず明確な失敗を返す）
+ * @param {'read'|'parse'} kind 読み込み失敗かJSONパース失敗か
+ * @param {string} errorText エラーメッセージ。パース失敗時は SyntaxError のメッセージ
+ *   （JSON.parse は壊れている位置を「in JSON at position N」として含む）をそのまま載せる
+ * @param {string} manifestPath 対象のmanifestファイルパス
+ * @param {string} [notifyPr] 通知先PR番号（CLI --pr 由来）
+ * @returns {string}
+ */
+function buildManifestLoadFailureComment(kind, errorText, manifestPath, notifyPr) {
+  const prLabel = notifyPr || '?';
+  const [title, reasonLine] = kind === 'parse'
+    ? ['実行計画のJSONを解析できませんでした', 'がJSONとして解析できなかった']
+    : ['実行計画のmanifestを読み込めませんでした', 'が読み込めなかった'];
+  const lines = [
+    `## ⚠️ ${title}（レビューは実行されていません）`,
+    '',
+    `PR #${prLabel} の実行manifest（${manifestPath}）${reasonLine}ため、`,
+    'レビュー担当はこの通知を行った上で停止しました。計画の書き直し・再実行は行いません。',
+    '',
+    '### エラー',
+    '```',
+    errorText,
+    '```',
+    '',
+    '---',
+    '_失敗は自動通知です（run-review-jobs.js）。_',
+  ];
+  return lines.join('\n');
+}
+
+/**
+ * manifestの問題（検証失敗・読み込み失敗・JSONパース失敗）を、既存の「不完全レビュー」
+ * 経路へ冪等に通知する。
+ *
+ * 1. 通知先PRを resolveNotifyPr で確定する（CLI --pr 必須化により本番では常に正整数。
+ *    不正な場合は通知不能として例外で中断せず明確な失敗を返す）
  * 2. 「通知済みの不完全レビュー」センチネル（reason: 'incomplete-review'）が既にあれば
  *    同一PRで再投稿しない（冪等）。reason が notify-failed の場合は再投稿して回復を試みる
- * 3. 検証エラーをPRへのプレーンコメントとして投稿
+ * 3. commentBody をPRへのプレーンコメントとして投稿
  * 4. 投稿成功時のみ writeSentinel で「通知済み」センチネルを作成。
  *    投稿失敗時（認証切れ・ネットワーク障害等）は通知成功を偽装せず、postError と
- *    検証エラーを持つ notify-failed センチネルを作成する（監督側が非成功として観測する。
- *    Issue #271 レビュー指摘: 失敗してもセンチネルを書くため「通知済み」に見えて
- *    冪等ガードが再投稿を永久に塞いでいた）
+ *    failureLabel / failureDetail を持つ notify-failed センチネルを作成する
+ *    （監督側が非成功として観測する。冪等ガードは reason 'incomplete-review' のみスキップ
+ *    するため、次回実行時に再投稿される＝回復経路。Issue #271 レビュー指摘: 失敗しても
+ *    センチネルを書くため「通知済み」に見えて冪等ガードが再投稿を永久に塞いでいた）
  *
  * gh への投稿は _setGhForTest で注入可能。NODE_TEST_CONTEXT 検出時は実投稿を拒否する
  * （msg-send.js / gh-create-pr.js と同じ構造的ガード、Issue #202）。
  *
  * @param {{
- *   manifest: object,
  *   workspace: string,
- *   errors: string[],
  *   pr?: number|string,
- * }} params  pr は検証前の起動コンテキスト（CLI --pr）由来の信頼できるPR番号。
- *   省略時は manifest.pr にフォールバックする。
+ *   repo?: string,
+ *   commentBody: string,
+ *   failureLabel: string,
+ *   failureDetail: string,
+ * }} params  pr/repo は検証前の起動コンテキスト（CLI --pr / --repo）由来の信頼できる値。
  * @returns {{
  *   notifiable: boolean,
  *   skipped: boolean,
@@ -659,18 +699,19 @@ function readSentinelReason(sentinelPath) {
  *   sentinelPath: string|null,
  * }}
  */
-function notifyManifestValidationFailure({ manifest, workspace, errors, pr }) {
-  const notifyPr = resolveNotifyPr([pr, manifest.pr]);
+function notifyManifestProblem({ workspace, pr, repo, commentBody, failureLabel, failureDetail }) {
+  const notifyPr = resolveNotifyPr([pr]);
   if (!notifyPr) {
     // 通知先PRを特定できない: コメントもprスコープのセンチネルも書けない。
     // reviewArtifactPath の例外で中断せず、明確な失敗を返す（run-review-managerが
-    // 成果物なしの非ゼロ終了として観測する。検証エラーはstderrのsummary経由で届く）。
+    // 成果物なしの非ゼロ終了として観測する。失敗内容はstderrのsummary経由で届く）。
+    // CLI --pr 必須化により本番では到達しない（プログラム呼び出し専用のフォールバック）。
     return {
       notifiable: false,
       skipped: false,
       posted: false,
       commentUrl: null,
-      error: '通知先PRを特定できない（CLI --pr と manifest.pr のどちらも正整数でない）。検証失敗のPRへの通知を省略します',
+      error: '通知先PRを特定できない（--pr が正整数でない）。PRへの通知を省略します',
       sentinelPath: null,
     };
   }
@@ -682,8 +723,7 @@ function notifyManifestValidationFailure({ manifest, workspace, errors, pr }) {
     return { notifiable: true, skipped: true, posted: false, commentUrl: null, error: null, sentinelPath };
   }
 
-  const body = buildManifestValidationComment(manifest, errors, notifyPr);
-  const ghArgs = ['pr', 'comment', notifyPr, '--repo', manifest.repo, '--body', body];
+  const ghArgs = ['pr', 'comment', notifyPr, '--repo', repo, '--body', commentBody];
 
   let result;
   if (_ghForTest) {
@@ -716,7 +756,8 @@ function notifyManifestValidationFailure({ manifest, workspace, errors, pr }) {
   const failedSentinel = writeSentinel(workspace, notifyPr, {
     reason: 'notify-failed',
     postError,
-    validationErrors: errors,
+    failureLabel,
+    failureDetail,
   });
   return {
     notifiable: true,
@@ -726,6 +767,39 @@ function notifyManifestValidationFailure({ manifest, workspace, errors, pr }) {
     error: postError,
     sentinelPath: failedSentinel || null,
   };
+}
+
+/**
+ * manifest検証失敗を notifyManifestProblem 経由で通知する（共通の投稿＋センチネルロジック）。
+ *
+ * @param {{
+ *   manifest: object,
+ *   workspace: string,
+ *   errors: string[],
+ *   pr?: number|string,
+ *   repo?: string,
+ * }} params  pr/repo は検証前の起動コンテキスト（CLI --pr / --repo）由来の信頼できる値。
+ *   省略時は manifest.pr / manifest.repo にフォールバックする（プログラム呼び出し用。
+ *   CLI必須化により本番では常にCLI値が渡る）。
+ * @returns {{
+ *   notifiable: boolean,
+ *   skipped: boolean,
+ *   posted: boolean,
+ *   commentUrl: string|null,
+ *   error: string|null,
+ *   sentinelPath: string|null,
+ * }}
+ */
+function notifyManifestValidationFailure({ manifest, workspace, errors, pr, repo }) {
+  const notifyPr = resolveNotifyPr([pr, manifest.pr]);
+  return notifyManifestProblem({
+    workspace,
+    pr: notifyPr,
+    repo: repo || manifest.repo,
+    commentBody: buildManifestValidationComment(manifest, errors, notifyPr),
+    failureLabel: '検証エラー',
+    failureDetail: errors.join(' | '),
+  });
 }
 
 /**
@@ -747,23 +821,48 @@ function _setGhForTest(impl) {
  * @param {number} jobTimeoutMs
  * @param {number} totalTimeoutMs
  * @param {number|string} [pr] 検証前の起動コンテキスト（CLI --pr）由来の信頼できるPR番号。
- *   manifest検証失敗時の通知先に使う（manifest.pr が不正でも通知を中断しない）。
+ *   manifestの読み込み・解析・検証の失敗すべての通知先に使う（manifest.pr が不正・欠落でも
+ *   通知を中断しない）。
+ * @param {string} [repo] 検証前の起動コンテキスト（CLI --repo）由来のリポジトリ。
+ *   manifestの読み込み・解析失敗時は manifest.repo が取れないため、これを使う。
  * @returns {Promise<{ok: boolean, summary: object}>}
  */
-async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr) {
+async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo) {
   // 1. manifest読み込み
   let manifestRaw;
   try {
     manifestRaw = fs.readFileSync(manifestPath, 'utf8');
   } catch (e) {
-    return { ok: false, summary: { error: `manifest read failed: ${e.message}` } };
+    // Issue #271: 読み込み失敗も通知経路へ流す（検証失敗と同じ「PRコメント＋センチネル」）。
+    // pr/repo は検証前の起動コンテキスト（CLI --pr / --repo）で、manifestが読めなくても通知は可能。
+    const loadError = e && e.message ? e.message : String(e);
+    const notification = notifyManifestProblem({
+      workspace,
+      pr,
+      repo,
+      commentBody: buildManifestLoadFailureComment('read', loadError, manifestPath, pr),
+      failureLabel: '読み込みエラー',
+      failureDetail: `manifest read failed: ${loadError} (path: ${manifestPath})`,
+    });
+    return { ok: false, summary: { error: `manifest read failed: ${loadError}`, notification } };
   }
 
   let manifest;
   try {
     manifest = JSON.parse(manifestRaw);
   } catch (e) {
-    return { ok: false, summary: { error: `manifest JSON parse failed: ${e.message}` } };
+    // Issue #271: JSONパース失敗（モデルが書くJSONで最も起きやすい構文エラー）も通知経路へ流す。
+    // SyntaxError のメッセージ（壊れている位置を含む）と manifest パスを通知本文に載せる。
+    const parseError = e && e.message ? e.message : String(e);
+    const notification = notifyManifestProblem({
+      workspace,
+      pr,
+      repo,
+      commentBody: buildManifestLoadFailureComment('parse', parseError, manifestPath, pr),
+      failureLabel: 'パースエラー',
+      failureDetail: `manifest JSON parse failed: ${parseError} (path: ${manifestPath})`,
+    });
+    return { ok: false, summary: { error: `manifest JSON parse failed: ${parseError}`, notification } };
   }
 
   // 2. manifest検証
@@ -877,7 +976,9 @@ module.exports = {
   launchJobWorker,
   runJobsFromManifest,
   buildManifestValidationComment,
+  buildManifestLoadFailureComment,
   notifyManifestValidationFailure,
+  notifyManifestProblem,
   resolveNotifyPr,
   _setGhForTest,
   ALL_LEAF_IDS,
@@ -888,7 +989,7 @@ module.exports = {
 if (require.main === module) {
   (async () => {
     const args = process.argv.slice(2);
-    const valueFlags = ['--manifest', '--results', '--workspace', '--pr', '--job-timeout', '--total-timeout'];
+    const valueFlags = ['--manifest', '--results', '--workspace', '--pr', '--repo', '--job-timeout', '--total-timeout'];
     const { values, rest, exitFlagMiss } = parseFlags(args, valueFlags, ['--help', '-h']);
 
     if (exitFlagMiss) {
@@ -911,11 +1012,23 @@ if (require.main === module) {
     const manifestPath = values['--manifest'];
     const resultsPath = values['--results'];
     const workspace = values['--workspace'] || process.cwd();
-    // --pr は検証前の起動コンテキスト由来（RMのプロンプトに含まれるPR番号）。不正なら
-    // フェイルクローズで終了する（path traversal対策で正整数のみ受理、PR #84）。
+    // --pr / --repo は検証前の起動コンテキスト由来（RMのプロンプトに含まれる PR / REPO）。
+    // 必須化し、作業を始める前にフェイルクローズで検証する。--pr は path traversal対策で
+    // 正整数のみ受理（PR #84）。--repo は manifest の読み込み・解析に失敗した場合の通知先に
+    // 必要で、欠落させると「起動時に必ず落ちる」呼び出し元が残るため必須にする（Issue #271）。
+    // parseFlags は値なしフラグの値を null で返す（undefined ではない）ため、欠落判定は
+    // どちらも null と undefined を同一視する（null.trim() の TypeError クラッシュ回避）。
     const pr = values['--pr'];
-    if (pr !== undefined && !/^[1-9]\d*$/.test(pr)) {
-      console.error(`--pr は正整数でなければなりません: ${pr}`);
+    if (pr == null || !/^[1-9]\d*$/.test(pr)) {
+      console.error(pr == null
+        ? '--pr は必須です（検証前の起動コンテキストのPR番号）'
+        : `--pr は正整数でなければなりません: ${pr}`);
+      console.error(USAGE);
+      process.exit(2);
+    }
+    const repo = values['--repo'];
+    if (repo == null || repo.trim() === '') {
+      console.error('--repo は必須です（owner/repo）');
       console.error(USAGE);
       process.exit(2);
     }
@@ -927,7 +1040,7 @@ if (require.main === module) {
       process.exit(2);
     }
 
-    const result = await runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr);
+    const result = await runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo);
 
     if (!result.ok) {
       console.error(JSON.stringify(result.summary));
