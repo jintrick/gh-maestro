@@ -550,6 +550,10 @@ module.exports = {
   atomicCopyStaging, boundedCleanup,
   superviseReviewManager,
   clearStaleIncompleteSentinel,
+  findIncompleteSentinel,
+  readIncompleteSentinel,
+  incompleteSentinelOutcome,
+  persistReviewManifest,
   // テスト用エクスポート
   _validateFindingShape, _validateAgainstSchema,
   _setPollForArtifact: (fn) => { _injectedPollForArtifact = fn; },
@@ -582,6 +586,126 @@ function clearStaleIncompleteSentinel(ghDir, pr) {
   }
 }
 
+/**
+ * 不完全レビュー・センチネル（.incomplete）をメインworkspaceとreview worktreeの両方から探す。
+ *
+ * finalize-review.js --mode incomplete がメインworkspace側へ、run-review-jobs.js
+ * （manifest検証失敗時、Issue #271）がワーカーのreview worktree側へ .incomplete を書き出す。
+ * どちらか一方しか見ないと検出漏れになる（Issue #271: 検証失敗時はworktree側へ書かれるのに
+ * main側だけを見て検出できず、黙って process-exit-no-artifact になっていた）。
+ *
+ * @param {string} ghDir メインworkspaceの .gh-maestro ディレクトリ
+ * @param {string} reviewWtDir レビュー専用worktreeの絶対パス（nullならworktree側は確認しない）
+ * @param {string|number} pr
+ * @returns {string|null} 最初に見つかったセンチネルの絶対パス（なければnull）
+ */
+function findIncompleteSentinel(ghDir, reviewWtDir, pr) {
+  const candidates = [reviewArtifactPath(ghDir, pr, '.incomplete')];
+  if (reviewWtDir) {
+    candidates.push(reviewArtifactPath(path.join(reviewWtDir, '.gh-maestro'), pr, '.incomplete'));
+  }
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+/**
+ * センチネルファイルの内容をJSONとして読む。解釈できない場合は null。
+ * reason の区別に使う（'incomplete-review' = 通知済みの不完全完了 / 'notify-failed' =
+ * 検証失敗通知のPR投稿に失敗したため失敗扱いにするべき）。
+ *
+ * @param {string} sentinelPath
+ * @returns {object|null}
+ */
+function readIncompleteSentinel(sentinelPath) {
+  try {
+    const data = JSON.parse(fs.readFileSync(sentinelPath, 'utf8'));
+    if (data && typeof data === 'object') return data;
+  } catch {}
+  return null;
+}
+
+/**
+ * .incompleteセンチネルから監督結果を組み立てる。
+ *
+ * reason 'notify-failed'（run-review-jobs.js がmanifestの検証失敗・読み込み失敗・パース失敗の
+ * 通知PR投稿に失敗したときに書く、postError と failureLabel / failureDetail を持つセンチネル、
+ * Issue #271）は、exit 0 の「不完全レビューとして通知済み」にはせず、exit 1 の失敗として扱う。
+ * これを exit 0 にするとオーケストレーターが「通知は完了した」と誤認し、検証・解析エラーが
+ * 届かないまま黙って済む。失敗理由には投稿エラーと失敗内容（検証エラー・読み込みエラー・
+ * パースエラー）を両方載せ、orchestrator がログから確認できるようにする。
+ *
+ * @param {{sentinelPath: string, agentPid: number|null, reviewWtDir: string|null}} params
+ * @returns {SupervisionResult}
+ */
+function incompleteSentinelOutcome({ sentinelPath, agentPid, reviewWtDir }) {
+  const sentinel = readIncompleteSentinel(sentinelPath);
+  if (sentinel && sentinel.reason === 'notify-failed') {
+    // run-review-jobs.js は検証失敗・読み込み失敗・パース失敗を failureLabel / failureDetail で
+    // 記録する。旧形式（validationErrors 配列）のセンチネルにもフォールバックして読めるようにする。
+    const label = typeof sentinel.failureLabel === 'string' && sentinel.failureLabel ? sentinel.failureLabel : '検証エラー';
+    const detail = typeof sentinel.failureDetail === 'string' && sentinel.failureDetail
+      ? sentinel.failureDetail
+      : (Array.isArray(sentinel.validationErrors) && sentinel.validationErrors.length > 0
+          ? sentinel.validationErrors.join(' | ')
+          : '(記録なし)');
+    return {
+      outcome: 'incomplete-review-notify-failed',
+      exitCode: 1,
+      artifact: null,
+      agentPid,
+      reviewWtDir,
+      reason: `検証失敗・解析失敗の通知（PR投稿）に失敗したため、不完全レビューとして完了扱いにしません。投稿エラー: ${sentinel.postError || '(記録なし)'}。${label}: ${detail}`,
+    };
+  }
+  return {
+    outcome: 'incomplete-review',
+    exitCode: 0,
+    artifact: null,
+    agentPid,
+    reviewWtDir,
+    reason: 'review completed as incomplete (plane comment posted; no retry per Issue #271)',
+  };
+}
+
+/**
+ * 実行manifest（run-review-jobs.js がジョブへ受け入れ条件を渡す元になったJSON）を、
+ * レビュー用worktreeからメインworkspaceのrecordへ永続化する。
+ *
+ * boundedCleanup がworktreeを破壊する前に呼ぶ。これにより、レビュー完了後に
+ * 「受け入れ条件が各ジョブへ正しく渡されたか」を manifest.json（acceptanceCriteria入り）で
+ * 検証できる（Issue #271 受け入れ条件4）。best-effort: 失敗してもレビュー結果の処理は継続する。
+ *
+ * @param {{reviewWtDir: string, workspace: string, pr: string|number, log: (msg: string) => void}} params
+ * @returns {{persisted: boolean, sourcePath: string|null, targetPath: string}}
+ */
+function persistReviewManifest({ reviewWtDir, workspace, pr, log }) {
+  const targetPath = reviewArtifactPath(path.join(workspace, '.gh-maestro'), pr, '.manifest.json');
+
+  // 取り出し候補: RMが書き込んだ可能性があるパス。SKILL.md改訂前のlegacyパスも含める。
+  const candidates = [];
+  if (reviewWtDir) {
+    candidates.push(reviewArtifactPath(path.join(reviewWtDir, '.gh-maestro'), pr, '.manifest.json'));
+    candidates.push(path.join(reviewWtDir, '.gh-maestro', `review-manifest-${pr}.json`));
+  }
+
+  const sourcePath = candidates.find(p => fs.existsSync(p)) || null;
+  if (!sourcePath) {
+    return { persisted: false, sourcePath: null, targetPath };
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.copyFileSync(sourcePath, targetPath);
+    log(`review manifest を永続化しました: ${sourcePath} → ${targetPath}`);
+    return { persisted: true, sourcePath, targetPath };
+  } catch (e) {
+    log(`[要対応] review manifest の永続化に失敗しました: ${e.message}`);
+    return { persisted: false, sourcePath, targetPath };
+  }
+}
+
 // ── 監督ループ（artifact-committed mode向け） ──────────────────────────────────
 // 成果物コミット・プロセス終了・deadlineの3イベントを並行監督する。
 // 有効な成果物がコミットされればプロセス生存に関わらずpublishを進める。
@@ -592,7 +716,7 @@ function clearStaleIncompleteSentinel(ghDir, pr) {
  * 監督ループの結果
  *
  * @typedef {object} SupervisionResult
- * @property {'artifact-published'|'process-exit-no-artifact'|'timeout'|'setup-failed'|'agent-config-failed'} outcome
+ * @property {'artifact-published'|'process-exit-no-artifact'|'timeout'|'setup-failed'|'agent-config-failed'|'incomplete-review'|'incomplete-review-notify-failed'} outcome
  * @property {number} exitCode スクリプトの終了コード
  * @property {object|null} artifact 検証済みの成果物（outcome === 'artifact-published' の場合のみ）
  * @property {string} [reason] outcome の補足説明
@@ -782,6 +906,22 @@ async function superviseReviewManager({
       break;
     }
 
+    // 不完全レビュー・センチネルがあれば、成果物・プロセス状態に関わらず即時終了する。
+    // センチネルは finalize-review.js --mode incomplete、または run-review-jobs.js（manifest検証失敗時、
+    // Issue #271）が「レビューは不完全として終了済み」の決定打として書き出す。
+    // ただし reason 'notify-failed'（検証失敗通知のPR投稿に失敗したケース）は exit 0 の
+    // 「通知済み」扱いにせず失敗として扱う（下記 incompleteSentinelOutcome）。
+    // プロセスが生存中でもセンチネルがあればループを止める（ヘッドレス再試行はアンチパターンであり、
+    // ループを止める責務は監督側にある。Issue #271: 検証失敗後に黙って待ち続ける事故を防ぐ）。
+    const sentinelPath = findIncompleteSentinel(ghDir, reviewWtDir, pr);
+    if (sentinelPath) {
+      // reason 'notify-failed' は失敗として扱う（投稿成功センチネルだけが exit 0 の不完全完了。
+      // Issue #271: 投稿失敗で exit 0 にすると検証エラーが届かないまま黙って済む）。
+      const outcome = incompleteSentinelOutcome({ sentinelPath, agentPid, reviewWtDir });
+      log(`incomplete review sentinel detected (${path.basename(sentinelPath)}) — ${outcome.reason}`);
+      return outcome;
+    }
+
     // 成果物ポーリング。
     // signal.aborted（プロセス終了/error）が発火すると即座に返る。
     // テストから注入された実装があればそちらを使う（本番の実行経路とテスト経路の一致）。
@@ -861,23 +1001,8 @@ async function superviseReviewManager({
 
     // pollForArtifact が成果物を返さなかった（found === false）
     // reason は 'deadline' または 'aborted'
+    // センチネル検出はループ先頭で行っているため、ここは残プロセス終了のみ処理する。
     if (processExited) {
-      // 不完全レビューのセンチネルファイルを確認
-      // finalize-review.js --mode incomplete が作成し、OUTPUT不在だが
-      // レビューが正当に完了（不完全として）したことを示す。
-      const sentinelPath = reviewArtifactPath(ghDir, pr, '.incomplete');
-      if (fs.existsSync(sentinelPath)) {
-        log('incomplete review sentinel detected — review completed as incomplete');
-        return {
-          outcome: 'incomplete-review',
-          exitCode: 0,
-          artifact: null,
-          agentPid,
-          reviewWtDir,
-          reason: 'review completed as incomplete (plane comment posted by finalize-review.js)',
-        };
-      }
-
       const reason = processExitReason
         ? `プロセス起動/実行エラー（status ${processExitCode}）: ${processExitReason}`
         : `プロセス終了（status ${processExitCode}）、成果物未検出`;
@@ -967,6 +1092,15 @@ if (require.main === module) {
 
       // publish結果に関わらず、後始末は必ず実行する
       log(`supervision outcome: ${supervisionResult.outcome} — ${supervisionResult.reason || ''}`);
+
+      // Issue #271 受け入れ条件4: レビュー後も「受け入れ条件が各ジョブへ渡された実績」を
+      // manifest.json で検証できるよう、実行manifestをworktreeからメインworkspaceのrecordへ
+      // 退避する。boundedCleanup がworktreeを破壊する前に必ず実行する（best-effort）。
+      persistReviewManifest({
+        reviewWtDir: supervisionResult.reviewWtDir,
+        workspace, pr,
+        log,
+      });
 
       cleanupResult = await boundedCleanup({
         pid: supervisionResult.agentPid,

@@ -21,9 +21,12 @@ const {
   validateArtifactContent, atomicCopyStaging,
   boundedCleanup, pollForArtifact,
   superviseReviewManager, clearStaleIncompleteSentinel,
+  findIncompleteSentinel, readIncompleteSentinel, incompleteSentinelOutcome,
+  persistReviewManifest,
   _validateFindingShape, _validateAgainstSchema,
   _setPollForArtifact,
 } = require('../scripts/run-review-manager');
+const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
 const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'run-review-manager.js');
 
@@ -751,4 +754,188 @@ test('clearStaleIncompleteSentinel: 別PRのセンチネルは残す', () => {
   fs.writeFileSync(other, 'done');
   clearStaleIncompleteSentinel(ghDir, 123);
   assert.ok(fs.existsSync(other), 'unrelated PR sentinel should remain');
+});
+
+// ── Issue #271: センチネル検出（main/worktree両方）と manifest 永続化 ─────────
+// 検証失敗時に run-review-jobs.js が worktree 側へ書く .incomplete センチネルも
+// 検出できること（main側だけ見ると黙って process-exit-no-artifact になる）、および
+// boundedCleanup が worktree を破壊する前に manifest を main の record へ退避できることを
+// 検証する。
+
+test('findIncompleteSentinel: メインworkspaceのセンチネルを検出する', () => {
+  const testDir = path.join(tmpBase, 'sentinel-main');
+  fs.mkdirSync(testDir, { recursive: true });
+  const ghDir = path.join(testDir, '.gh-maestro');
+  fs.mkdirSync(ghDir, { recursive: true });
+  const mainSentinel = path.join(ghDir, 'records', 'pr', '321', 'review', 'manager.incomplete');
+  fs.mkdirSync(path.dirname(mainSentinel), { recursive: true });
+  fs.writeFileSync(mainSentinel, '{}', 'utf8');
+
+  const found = findIncompleteSentinel(ghDir, path.join(testDir, 'wt'), 321);
+  assert.equal(found, mainSentinel);
+});
+
+test('findIncompleteSentinel: worktree側のセンチネルも検出する（Issue #271）', () => {
+  const testDir = path.join(tmpBase, 'sentinel-wt');
+  fs.mkdirSync(testDir, { recursive: true });
+  const ghDir = path.join(testDir, '.gh-maestro');
+  fs.mkdirSync(ghDir, { recursive: true });
+  // worktree側にだけセンチネル（manifest検証失敗時に run-review-jobs.js が書く場所）
+  const wtDir = path.join(testDir, 'wt');
+  const wtSentinel = path.join(wtDir, '.gh-maestro', 'records', 'pr', '654', 'review', 'manager.incomplete');
+  fs.mkdirSync(path.dirname(wtSentinel), { recursive: true });
+  fs.writeFileSync(wtSentinel, '{}', 'utf8');
+
+  const found = findIncompleteSentinel(ghDir, wtDir, 654);
+  assert.equal(found, wtSentinel);
+});
+
+test('findIncompleteSentinel: mainを優先し、どちらにも無ければnull', () => {
+  const testDir = path.join(tmpBase, 'sentinel-priority');
+  fs.mkdirSync(testDir, { recursive: true });
+  const ghDir = path.join(testDir, '.gh-maestro');
+  fs.mkdirSync(ghDir, { recursive: true });
+  const wtDir = path.join(testDir, 'wt');
+
+  // 両方に存在 → main側を返す
+  const mainSentinel = path.join(ghDir, 'records', 'pr', '777', 'review', 'manager.incomplete');
+  fs.mkdirSync(path.dirname(mainSentinel), { recursive: true });
+  fs.writeFileSync(mainSentinel, '{}', 'utf8');
+  const wtSentinel = path.join(wtDir, '.gh-maestro', 'records', 'pr', '777', 'review', 'manager.incomplete');
+  fs.mkdirSync(path.dirname(wtSentinel), { recursive: true });
+  fs.writeFileSync(wtSentinel, '{}', 'utf8');
+  assert.equal(findIncompleteSentinel(ghDir, wtDir, 777), mainSentinel);
+
+  // どちらにも存在しない → null
+  assert.equal(findIncompleteSentinel(ghDir, wtDir, 999), null);
+  // reviewWtDir が null でも例外を投げず main だけ確認する
+  assert.equal(findIncompleteSentinel(ghDir, null, 999), null);
+});
+
+test('persistReviewManifest: worktreeのrecordsパスからmainのrecordへ永続化する', () => {
+  const testDir = path.join(tmpBase, 'persist-records');
+  fs.mkdirSync(testDir, { recursive: true });
+  const workspace = testDir;
+  const wtDir = path.join(testDir, 'wt');
+  const manifestContent = JSON.stringify({ pr: 111, repo: 'o/r', acceptanceCriteria: ['条件A', '条件B'] });
+
+  // worktree側 records パスにmanifestを用意（改訂後のSKILL.mdが書く場所）
+  const srcManifest = path.join(wtDir, '.gh-maestro', 'records', 'pr', '111', 'review', 'manifest.json');
+  fs.mkdirSync(path.dirname(srcManifest), { recursive: true });
+  fs.writeFileSync(srcManifest, manifestContent, 'utf8');
+
+  const logs = [];
+  const result = persistReviewManifest({ reviewWtDir: wtDir, workspace, pr: 111, log: (m) => logs.push(m) });
+
+  const target = path.join(workspace, '.gh-maestro', 'records', 'pr', '111', 'review', 'manifest.json');
+  assert.equal(result.persisted, true);
+  assert.equal(result.sourcePath, srcManifest);
+  assert.equal(result.targetPath, target);
+  assert.equal(fs.readFileSync(target, 'utf8'), manifestContent);
+});
+
+test('persistReviewManifest: legacyパス（review-manifest-<PR>.json）からも取り込む', () => {
+  const testDir = path.join(tmpBase, 'persist-legacy');
+  fs.mkdirSync(testDir, { recursive: true });
+  const workspace = testDir;
+  const wtDir = path.join(testDir, 'wt');
+  const manifestContent = JSON.stringify({ pr: 222, repo: 'o/r', acceptanceCriteria: ['x'] });
+
+  const srcLegacy = path.join(wtDir, '.gh-maestro', 'review-manifest-222.json');
+  fs.mkdirSync(path.dirname(srcLegacy), { recursive: true });
+  fs.writeFileSync(srcLegacy, manifestContent, 'utf8');
+
+  const result = persistReviewManifest({ reviewWtDir: wtDir, workspace, pr: 222, log: () => {} });
+  assert.equal(result.persisted, true);
+  assert.equal(result.sourcePath, srcLegacy);
+  const target = path.join(workspace, '.gh-maestro', 'records', 'pr', '222', 'review', 'manifest.json');
+  assert.equal(fs.readFileSync(target, 'utf8'), manifestContent);
+});
+
+test('persistReviewManifest: 候補が無ければpersisted:false（エラーにしない）', () => {
+  const testDir = path.join(tmpBase, 'persist-none');
+  fs.mkdirSync(testDir, { recursive: true });
+  const result = persistReviewManifest({ reviewWtDir: path.join(testDir, 'wt'), workspace: testDir, pr: 333, log: () => {} });
+  assert.equal(result.persisted, false);
+  assert.equal(result.sourcePath, null);
+
+  // reviewWtDir が null でも例外を投げない
+  const nullWt = persistReviewManifest({ reviewWtDir: null, workspace: testDir, pr: 334, log: () => {} });
+  assert.equal(nullWt.persisted, false);
+  assert.equal(nullWt.sourcePath, null);
+});
+
+// ── PR #272 レビュー指摘: notify-failedセンチネルは失敗として観測する ──────
+// 欠陥Aの監督側: run-review-jobs.js が検証失敗通知のPR投稿に失敗したとき、
+// 投稿成功センチネル（incomplete-review）を exit 0 の「不完全完了」として扱うと、
+// オーケストレーターが通知済みと誤認する。notify-failed は exit 1 の失敗にする。
+
+test('incompleteSentinelOutcome: notify-failed センチネルは exit 1 の失敗として返す', () => {
+  const testDir = path.join(tmpBase, 'sentinel-notify-failed');
+  fs.mkdirSync(testDir, { recursive: true });
+  const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 42, '.incomplete');
+  fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+  fs.writeFileSync(sentinelPath, JSON.stringify({
+    pr: 42,
+    reason: 'notify-failed',
+    postError: 'auth failed: token expired',
+    failureLabel: 'パースエラー',
+    failureDetail: 'manifest JSON parse failed: Unexpected token } in JSON at position 12 (path: /wt/manifest.json)',
+    completed_at: 'x',
+  }), 'utf8');
+
+  const result = incompleteSentinelOutcome({ sentinelPath, agentPid: 123, reviewWtDir: '/wt' });
+  assert.equal(result.outcome, 'incomplete-review-notify-failed');
+  assert.equal(result.exitCode, 1);
+  // orchestratorが投稿失敗と失敗内容（failureLabel/failureDetail）の両方を確認できるように理由に含める
+  assert.ok(result.reason.includes('auth failed: token expired'), `reason should carry postError: ${result.reason}`);
+  assert.ok(result.reason.includes('パースエラー'), `reason should carry failureLabel: ${result.reason}`);
+  assert.ok(result.reason.includes('manifest JSON parse failed'), `reason should carry failureDetail: ${result.reason}`);
+});
+
+test('incompleteSentinelOutcome: 旧形式（validationErrors配列のみ）センチネルもフォールバック表示する', () => {
+  const testDir = path.join(tmpBase, 'sentinel-notify-failed-old');
+  fs.mkdirSync(testDir, { recursive: true });
+  const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 45, '.incomplete');
+  fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+  // 前回マージ時点の notify-failed センチネル形式（validationErrors のみ）。互換のため読めること
+  fs.writeFileSync(sentinelPath, JSON.stringify({
+    pr: 45,
+    reason: 'notify-failed',
+    postError: 'network error',
+    validationErrors: ['leaf x is missing from coverage_ledger', 'pr must be a positive integer'],
+    completed_at: 'x',
+  }), 'utf8');
+
+  const result = incompleteSentinelOutcome({ sentinelPath, agentPid: null, reviewWtDir: '/wt' });
+  assert.equal(result.outcome, 'incomplete-review-notify-failed');
+  assert.equal(result.exitCode, 1);
+  assert.ok(result.reason.includes('検証エラー: leaf x is missing from coverage_ledger'), `fallback detail: ${result.reason}`);
+  assert.ok(result.reason.includes('pr must be a positive integer'), `all validationErrors joined: ${result.reason}`);
+});
+
+test('incompleteSentinelOutcome: 通知済み（incomplete-review）センチネルは exit 0 の不完全完了', () => {
+  const testDir = path.join(tmpBase, 'sentinel-incomplete-ok');
+  fs.mkdirSync(testDir, { recursive: true });
+  const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 43, '.incomplete');
+  fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+  fs.writeFileSync(sentinelPath, JSON.stringify({ pr: 43, reason: 'incomplete-review', completed_at: 'x' }), 'utf8');
+
+  const result = incompleteSentinelOutcome({ sentinelPath, agentPid: 456, reviewWtDir: '/wt' });
+  assert.equal(result.outcome, 'incomplete-review');
+  assert.equal(result.exitCode, 0);
+});
+
+test('readIncompleteSentinel: 解釈できないセンチネルは null（notify-failed判定にしない）', () => {
+  const testDir = path.join(tmpBase, 'sentinel-unreadable');
+  fs.mkdirSync(testDir, { recursive: true });
+  const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 44, '.incomplete');
+  fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+  fs.writeFileSync(sentinelPath, 'not-json', 'utf8');
+
+  assert.equal(readIncompleteSentinel(sentinelPath), null);
+  // 解釈できない場合は notify-failed ではなく通常の不完全完了扱いになる
+  const result = incompleteSentinelOutcome({ sentinelPath, agentPid: null, reviewWtDir: null });
+  assert.equal(result.outcome, 'incomplete-review');
+  assert.equal(result.exitCode, 0);
 });

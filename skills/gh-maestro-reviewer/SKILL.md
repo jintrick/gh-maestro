@@ -118,21 +118,28 @@ manifestのJSON構造:
 - 各 adopted 葉は少なくとも1つのジョブに割り当てる
 - 同じ葉を複数ジョブに重複割り当てしてはならない
 
-manifestは以下のパスに書き出す:
+manifestは以下のパスに書き出す（run-review-manager.js が起動プロンプトで指定するパスと一致する。
+レコード集約のため `<WORKSPACE>/.gh-maestro/records/pr/<PR>/review/manifest.json` に置く）:
 
 ```
-<WORKSPACE>/.gh-maestro/review-manifest-<PR>.json
+<WORKSPACE>/.gh-maestro/records/pr/<PR>/review/manifest.json
 ```
 
 ### 4. ジョブの実行
 
-manifestを書き出したら、以下のコマンドでジョブを実行する:
+manifestを書き出したら、以下のコマンドでジョブを実行する（`--manifest` には書き出したmanifestの
+パスをそのまま渡す。**`--pr` には起動プロンプトの `PR` 番号、`--repo` には `REPO` を必ず渡すこと**
+——どちらも検証前のコンテキストから渡され、manifestの読み込み・解析・検証の失敗すべての
+通知先として使う。manifestの読み込み・解析に失敗した場合 manifest.pr / manifest.repo は
+取れないため、この2つが必須）：
 
 ```sh
 node <SCRIPTS>/run-review-jobs.js \
-  --manifest <WORKSPACE>/.gh-maestro/review-manifest-<PR>.json \
+  --manifest <WORKSPACE>/.gh-maestro/records/pr/<PR>/review/manifest.json \
   --results <WORKSPACE>/.gh-maestro/review-results-<PR>.json \
-  --workspace <WORKSPACE>
+  --workspace <WORKSPACE> \
+  --pr <PR> \
+  --repo <REPO>
 ```
 
 `run-review-jobs.js` は:
@@ -153,6 +160,14 @@ cat <WORKSPACE>/.gh-maestro/review-results-<PR>.json
 失敗したジョブがある場合:
 - **resultsファイルは実行のたびにまるごと上書きされる（前回結果とのマージはしない）。** 失敗したジョブだけを含むmanifestで再実行すると、既に成功していたジョブの結果が失われる。再実行時は、既に成功しているジョブも含めた全ジョブのmanifestを作成すること
 - 再試行回数は `retry_policy.max_attempts`（デフォルト2回）を目安にするが、`run-review-jobs.js` は試行回数を機械的に追跡しない（毎回attempt:1として実行される）。何回再試行したかはあなた自身が把握し、目安を超えたら打切りを判断すること
+
+**manifest検証失敗時（exit code 2）は再試行しない**:
+- `run-review-jobs.js` が終了コード2で終了し、stderr に `manifest validation failed` を含む場合、それは実行manifestが機械検証に合格しなかったことを意味する（7葉の欠落・重複・未割当など）
+- この検証失敗は run-review-jobs.js が既に通知済みである——PRへのプレーンコメント投稿と `.incomplete` センチネル作成（不完全レビュー経路）を行い、その上で終了している
+- manifest の読み込み失敗・JSONパース失敗（`manifest read failed` / `manifest JSON parse failed`）も同じ通知経路で通知される。読み込み・解析失敗時は manifest.pr / manifest.repo が取れないため、`--pr` / `--repo` が通知先になる
+- 通知のPR投稿に失敗した場合（認証切れ・ネットワーク障害等）は、run-review-jobs.js は `notify-failed` センチネルを書き、監督側がレビューを失敗（非ゼロ終了）として扱う。これもあなたの側で追加で行うことはない
+- あなたはそのまま終了すること。manifestを書き直して再実行してはならない（ヘッドレスプロセス内の再試行ループはアンチパターン。止まらなくなったときの事故がこのシステムで最悪の壊れ方をする）
+- 計画の書き直し・再実行の判断はオーケストレーターが行う
 
 再試行で解消しない失敗が残る場合、あなたが打切りを判断する。打切り基準:
 - 合理的な再試行（2回程度）で解消しない技術的失敗
