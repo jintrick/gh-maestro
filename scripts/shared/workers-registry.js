@@ -98,14 +98,17 @@ function readWorkersRaw(workspace, {
  * @param {string} workspace
  * @param {string} workerName
  * @param {{pid: number, startTime: string|null, logPath: string|null}} process
- * @returns {boolean} 更新に成功したか
+ * @returns {boolean} エントリが存在し更新に成功した場合は true、エントリ不在の場合は false。
+ *   readWorkersRaw の契約どおり、レジストリ破損・読み取り不能は throw する（Issue #275 項目1）。
+ *   呼び出し側は false を「エントリ不在」として扱い、破損は例外として区別して報告すること。
+ *   破損を false に潰すと、呼び出し側（inbox-supervisor の resume）が「ワーカーが見つから
+ *   ない」と誤報告し、診断を誤誘導する。
  */
 function updateWorkerProcess(workspace, workerName, { pid, startTime = null, logPath = null }) {
   const p = workersJsonPath(workspace);
-  // readWorkersRaw は不在のみ null、破損は throw する。既存契約「読めなければ更新対象なし
-  // として false」を維持するため、破損も false に握りつぶす（この関数の契約は更新成否のみ）。
-  let raw;
-  try { raw = readWorkersRaw(workspace); } catch { return false; }
+  // readWorkersRaw は不在のみ null、破損は throw する。エントリ不在のみ false にし、
+  // 破損は例外のまま呼び出し側へ伝播させる（不在と破損を取り違えようのない形にする）。
+  const raw = readWorkersRaw(workspace);
   if (!raw || !(workerName in raw)) return false;
 
   const entry = normalizeWorkerEntry(raw[workerName]);

@@ -112,11 +112,13 @@ test('readWorkersRaw: JSONのnullリテラルは型不正でthrow', () => {
   });
 });
 
-test('updateWorkerProcess: 破損workers.jsonはfalse（既存契約の維持）', () => {
+test('updateWorkerProcess: 破損workers.jsonはthrow（falseはエントリ不在専用に保つ）', () => {
   withTempDir((dir) => {
     fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(workersJsonPath(dir), '{not json', 'utf8');
-    assert.equal(updateWorkerProcess(dir, 'issue-5-fix', { pid: 999 }), false);
+    // 破損を false に潰すと呼び出し側（inbox-supervisor）が「エントリ不在」と誤報告するため、
+    // 破損は例外として伝播させる（Issue #275 項目1）。false はエントリ不在の専用に残す。
+    assert.throws(() => updateWorkerProcess(dir, 'issue-5-fix', { pid: 999 }), /workers\.json を解析できません/);
   });
 });
 

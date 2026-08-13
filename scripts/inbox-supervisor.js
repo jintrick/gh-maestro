@@ -424,8 +424,17 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir,
     };
   }
 
-  if (!updateWorkerProcess(workspace, workerName, launched)) {
-    return { success: false, method: 'resume-failed', error: `workers.json書き込み失敗（worker "${workerName}" が見つかりません）` };
+  try {
+    const updated = updateWorkerProcess(workspace, workerName, launched);
+    if (!updated) {
+      // updateWorkerProcess の false はエントリ不在のみ（破損は throw でここに来ない）。
+      return { success: false, method: 'resume-failed', error: `workers.json に worker "${workerName}" のエントリがありません` };
+    }
+  } catch (e) {
+    // レジストリ破損・読み取り不能（readWorkersRaw の throw）。「エントリ不在」とは区別して
+    // 報告しないと、破損が「ワーカーが見つからない」に化けて診断を誤誘導する（Issue #275
+    // 項目1）。resume-failed としてバックオフに乗せる。
+    return { success: false, method: 'resume-failed', error: `workers.json の読み取り・解析に失敗しました: ${e.message}` };
   }
 
   // 配送試行が生存確認まで成功した確定的な終着点 → 契約を消費する。
