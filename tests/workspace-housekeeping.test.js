@@ -22,7 +22,7 @@ test('sweepWorkspaceFiles: 古いatomic tmpを掃除し、稼働中ワーカー�
     const active = path.join(logDir, 'issue-7-active', 'worker.log');
     fs.mkdirSync(path.dirname(active), { recursive: true });
     fs.writeFileSync(active, '{"type":"system","subtype":"thinking_tokens"}\n');
-    const result = sweepWorkspaceFiles(workspace, { activeWorkerNames: new Set(['issue-7-active']) });
+    const result = sweepWorkspaceFiles(workspace, { excludedWorkerNames: new Set(['issue-7-active']) });
     assert.ok(result.removed.includes(orphan));
     assert.equal(fs.readFileSync(active, 'utf8').length > 0, true);
   } finally {
@@ -54,7 +54,7 @@ test('sweepWorkspaceFiles: 稼働中Review Managerのworker logをローテー�
     fs.mkdirSync(logDir, { recursive: true });
     const logPath = path.join(logDir, 'worker.log');
     fs.writeFileSync(logPath, 'x'.repeat(MAX_WORKER_LOG_BYTES + 1));
-    const result = sweepWorkspaceFiles(workspace, { activeReviewPrs: new Set(['42']) });
+    const result = sweepWorkspaceFiles(workspace, { excludedReviewPrs: new Set(['42']) });
     assert.ok(!result.rotated.includes(logPath));
     assert.equal(fs.existsSync(`${logPath}.1`), false);
     assert.equal(fs.statSync(logPath).size, MAX_WORKER_LOG_BYTES + 1);
@@ -67,7 +67,7 @@ test('sweepWorkspaceFiles: 稼働中Review Managerのworker logをローテー�
 // PR #239 の回帰対策。圧縮は worker-exit-hook.js（ワーカー終了後の安全なタイミング）と
 // 手動CLI cleanup-worker-logs.js のみが行う。sweepは稼働中ログに触れる圧縮経路を持たない。
 
-test('sweepWorkspaceFiles: 稼働中ログ（activeWorkerNames）は中身・mtime不変で、.compact-*.tmp が残らない', () => {
+test('sweepWorkspaceFiles: 稼働中ログ（excludedWorkerNames）は中身・mtime不変で、.compact-*.tmp が残らない', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-housekeeping-'));
   try {
     const logDir = path.join(workspace, '.gh-maestro', 'records', 'issue', '7', 'workers', 'issue-7-active');
@@ -82,7 +82,7 @@ test('sweepWorkspaceFiles: 稼働中ログ（activeWorkerNames）は中身・mti
     fs.utimesSync(orphanTmp, old, old);
 
     const beforeMtime = fs.statSync(active).mtimeMs;
-    const result = sweepWorkspaceFiles(workspace, { activeWorkerNames: new Set(['issue-7-active']) });
+    const result = sweepWorkspaceFiles(workspace, { excludedWorkerNames: new Set(['issue-7-active']) });
 
     // 稼働中ログの中身・mtimeは変わらない（圧縮もローテーションも行われない）。
     assert.equal(fs.readFileSync(active, 'utf8'), content);

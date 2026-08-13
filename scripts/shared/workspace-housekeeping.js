@@ -1,8 +1,9 @@
 'use strict';
 
 // lifecycle sweep 配下でだけ呼び出す、workspace内の実行時ゴミ掃除。
-// 独自のプロセス生存判定やスケジューラは持たず、呼び出し元が確定した
-// activeWorkerNames だけを保護する。
+// 独自のプロセス生存判定やスケジューラは持たず、呼び出し元（collect-housekeeping-exclusions）
+// が確定した除外対象ワーカー（excludedWorkerNames / excludedReviewPrs）のログを
+// ローテーション対象から除外する。
 
 const fs = require('fs');
 const path = require('path');
@@ -91,7 +92,7 @@ function removeOldRecordTemps(root, now, results, dryRun, relative = '') {
   }
 }
 
-function sweepWorkspaceFiles(workspace, { activeWorkerNames = new Set(), activeReviewPrs = new Set(), now = Date.now(), dryRun = false } = {}) {
+function sweepWorkspaceFiles(workspace, { excludedWorkerNames = new Set(), excludedReviewPrs = new Set(), now = Date.now(), dryRun = false } = {}) {
   const results = { removed: [], compacted: [], rotated: [], errors: [] };
   const maestro = path.join(workspace, '.gh-maestro');
   const records = recordRoot(workspace);
@@ -117,8 +118,8 @@ function sweepWorkspaceFiles(workspace, { activeWorkerNames = new Set(), activeR
     const prMatch = /^pr$/.test(relative[0]) ? relative[1] : null;
     const reviewManagerWorker = workerName && prMatch
       && workerName.endsWith(`-review-manager-pr-${prMatch}`);
-    if ((workerName && activeWorkerNames.has(workerName))
-      || (prMatch && activeReviewPrs.has(prMatch)
+    if ((workerName && excludedWorkerNames.has(workerName))
+      || (prMatch && excludedReviewPrs.has(prMatch)
         && (relative.includes('review') || reviewManagerWorker))) continue;
     if (!isRegularFile(logPath)) continue;
     if (dryRun) {

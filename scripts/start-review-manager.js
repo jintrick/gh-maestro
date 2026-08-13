@@ -3,7 +3,15 @@
 
 const fs = require('fs');
 const path = require('path');
-let _isProcessAlive = require('./process-lifecycle').isProcessAlive;
+// process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。CLI 主経路
+// （require.main === module）から sweepRegistry 経由でこのモジュールが require される
+// 可能性を踏まえ、評価時に捕捉すると module.exports 未確定の undefined を掴むため、
+// 最初の呼び出し時まで解決を遅らせる。テスト注入（_set*）は注入値が優先される。
+let _injectedIsProcessAlive = null;
+function _isProcessAlive(pid) {
+  const fn = _injectedIsProcessAlive ?? require('./process-lifecycle').isProcessAlive;
+  return fn(pid);
+}
 const { launchAgentHeadless } = require('./shared/headless-launch');
 const { assertValidPr } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
@@ -134,7 +142,7 @@ function startReviewManager(pr, repo, workspace, issue) {
 module.exports = {
   startReviewManager,
   isLockValid,
-  _setIsProcessAlive: (fn) => { _isProcessAlive = fn; },
+  _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
 };
 
 if (require.main === module) {

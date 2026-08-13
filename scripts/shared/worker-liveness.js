@@ -12,11 +12,24 @@
 // （skill-asset-help ルール準拠）。
 
 const { normalizeWorkerEntry } = require('../worker-entry');
-const { isProcessAlive, verifyProcessIdentity } = require('../process-lifecycle');
 
-// テストで注入可能にする（実プロセスに触れない）。
-let _isProcessAlive = isProcessAlive;
-let _verifyProcessIdentity = verifyProcessIdentity;
+// process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。
+// process-lifecycle.js は CLI 主経路（require.main === module）から sweepRegistry 経由で
+// このモジュールを require する。評価時に require して捕捉すると、module.exports の代入
+// 前に循環参照した process-lifecycle の undefined を掴むため、最初の呼び出し時まで
+// 解決を遅らせる。テスト注入（_set*）は注入値が優先される。
+let _injectedIsProcessAlive = null;
+let _injectedVerifyProcessIdentity = null;
+
+function _isProcessAlive(pid) {
+  const fn = _injectedIsProcessAlive ?? require('../process-lifecycle').isProcessAlive;
+  return fn(pid);
+}
+
+function _verifyProcessIdentity(pid, identity) {
+  const fn = _injectedVerifyProcessIdentity ?? require('../process-lifecycle').verifyProcessIdentity;
+  return fn(pid, identity);
+}
 
 /**
  * workers.json のエントリが指すワーカープロセスが稼働中か判定する。
@@ -46,6 +59,6 @@ function isWorkerAlive(entry) {
 
 module.exports = {
   isWorkerAlive,
-  _setIsProcessAlive: (fn) => { _isProcessAlive = fn; },
-  _setVerifyProcessIdentity: (fn) => { _verifyProcessIdentity = fn; },
+  _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
+  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
 };
