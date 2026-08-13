@@ -14,7 +14,7 @@ const { spawnSync } = require('./child-process');
 const fs = require('fs');
 const path = require('path');
 const { toWinPath } = require('./win-path');
-const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { isRetryableGhFailure, graphqlCreateIssue } = require('./shared/gh-fallback');
 
 const USAGE = `create-issue.js — GitHub Issue を作成し、body-file を必ず削除する
@@ -118,18 +118,28 @@ module.exports = { createIssue };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--title', '--body-file', '--repo', '--workspace']);
-
-  // exitFlagMiss（値欠落）を先に判定する。フラグの値が欠落した場合、その
-  // 未消費トークンが rest に残るため、それがたまたま "--help" と一致すると
-  // 後段の hasHelpFlag チェックが誤って help 扱いしてしまう。値欠落は常に
-  // エラー優先（フェイルクローズ）とし、help 判定より先に確定させる。
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: { '--title': {}, '--body-file': {}, '--repo': {}, '--workspace': {} },
+      booleans: ['--help', '-h'],
+      positionals: { min: 0, max: 0 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    // ヘルプ要求かどうかは parseFlags が throw 時に確定済み。値欠落エラーが混ざっている
+    // 間は helpRequested=false になり、--help を値として渡された場合にヘルプへ握りつぶさない
+    // （判定の意味論は scripts/shared/workspace.js の hasGenuineHelpRequest 参照）。
+    if (err.helpRequested) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`create-issue: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
   }
@@ -145,7 +155,7 @@ if (require.main === module) {
   // このズレを吸収する。
   const workspace = resolveWorkspace(values['--workspace']);
 
-  if (!title || !bodyFile || rest.length > 0) {
+  if (!title || !bodyFile) {
     console.error(USAGE);
     process.exit(1);
   }

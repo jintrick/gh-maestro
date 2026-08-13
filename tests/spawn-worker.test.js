@@ -262,7 +262,7 @@ test('--short-prompt は改行またはシェル特殊文字を拒否して --pr
   }
 });
 
-test('廃止した --prompt は未知の引数として拒否する', () => {
+test('廃止した --prompt は未知のフラグとして拒否する', () => {
   const r = run([
     '--skill', 'gh-maestro-coder',
     '--issue', '1', '--description', 'test', '--repo', 'o/r',
@@ -270,7 +270,7 @@ test('廃止した --prompt は未知の引数として拒否する', () => {
   ], BASE_ENV);
   assert.notEqual(r.status, 0);
 
-  assert.match(r.stderr, /未知の引数/);
+  assert.match(r.stderr, /未知のフラグ/);
   assert.match(r.stderr, /--prompt/);
 });
 // ── 未知フラグの拒否 ──────────────────────────────────────────────────────────
@@ -282,7 +282,7 @@ test('未知のフラグを指定するとエラー終了する（黙って無�
     '--typo-flag', 'value',
   ], BASE_ENV);
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /未知の引数/);
+  assert.match(r.stderr, /未知のフラグ/);
   assert.match(r.stderr, /--typo-flag/);
 });
 

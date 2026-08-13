@@ -264,7 +264,7 @@ test('main: 未知の引数でエラー', () => {
   const { mod } = loadModule();
   const result = mod.main(['--title', 'hello', '--body', 'world', '--unknown']);
   assert.equal(result.exitCode, 1);
-  assert.ok(result.stderr.includes('未知の引数'));
+  assert.ok(result.stderr.includes('未知のフラグ'));
 });
 
 test('main: 正常系でURLを出力する', () => {
@@ -295,4 +295,41 @@ test('main: --value フラグで値不足の場合にエラー', () => {
   const { mod } = loadModule();
   const result = mod.main(['--title']);
   assert.equal(result.exitCode, 1);
+});
+
+// ── buildPrCreateArgs（抽出された純関数: NODE_TEST_CONTEXT ガードに依存せず検証可能） ──
+
+test('buildPrCreateArgs: baseブランチとタイトルを組み立てる', () => {
+  const { mod } = loadModule();
+  assert.deepEqual(mod.buildPrCreateArgs({ env: { GH_MAESTRO_BASE_BRANCH: 'dev' }, title: 'Fix bug' }),
+    ['pr', 'create', '--base', 'dev', '--title', 'Fix bug']);
+});
+
+test('buildPrCreateArgs: --body は --body フラグで渡す', () => {
+  const { mod } = loadModule();
+  assert.deepEqual(mod.buildPrCreateArgs({ env: { GH_MAESTRO_BASE_BRANCH: 'dev' }, title: 'T', body: 'Closes #1' }),
+    ['pr', 'create', '--base', 'dev', '--title', 'T', '--body', 'Closes #1']);
+});
+
+test('buildPrCreateArgs: body があれば --body-file より --body を優先する', () => {
+  const { mod } = loadModule();
+  assert.deepEqual(mod.buildPrCreateArgs({ env: { GH_MAESTRO_BASE_BRANCH: 'dev' }, title: 'T', body: 'x', bodyFile: '/tmp/b.md' }),
+    ['pr', 'create', '--base', 'dev', '--title', 'T', '--body', 'x']);
+});
+
+test('buildPrCreateArgs: body が無ければ --body-file で渡す', () => {
+  const { mod } = loadModule();
+  assert.deepEqual(mod.buildPrCreateArgs({ env: { GH_MAESTRO_BASE_BRANCH: 'dev' }, title: 'T', bodyFile: '/tmp/b.md' }),
+    ['pr', 'create', '--base', 'dev', '--title', 'T', '--body-file', '/tmp/b.md']);
+});
+
+test('buildPrCreateArgs: --repo は付与する', () => {
+  const { mod } = loadModule();
+  assert.deepEqual(mod.buildPrCreateArgs({ env: { GH_MAESTRO_BASE_BRANCH: 'dev' }, title: 'T', repo: 'owner/repo' }),
+    ['pr', 'create', '--base', 'dev', '--title', 'T', '--repo', 'owner/repo']);
+});
+
+test('buildPrCreateArgs: GH_MAESTRO_BASE_BRANCH 未設定なら throw（誤ったbaseでPRを作らない）', () => {
+  const { mod } = loadModule();
+  assert.throws(() => mod.buildPrCreateArgs({ env: {}, title: 'T' }), /GH_MAESTRO_BASE_BRANCH/);
 });

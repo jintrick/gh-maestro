@@ -4,9 +4,13 @@
 const fs = require('fs');
 const path = require('path');
 const { parseFrontmatter } = require('./sync-rules');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 
-const VALUE_FLAGS = ['--root'];
+const SPEC = {
+  flags: { '--root': {} },
+  booleans: ['--help', '-h'],
+  positionals: { min: 0, max: Infinity },
+};
 
 const USAGE = `find-matching-rules.js — ファイルパスにマッチする .claude/rules/*.md を検索する
 
@@ -128,14 +132,21 @@ function findMatchingRules(root, files) {
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, VALUE_FLAGS);
-
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, SPEC));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (err.helpRequested) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`find-matching-rules: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
   }

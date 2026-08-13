@@ -64,13 +64,16 @@ describe('parseArgs', () => {
     assert.equal(watch.parseArgs(['--help']).help, true);
   });
 
-  test('フラグの値欠落は exitFlagMiss:true を返す', () => {
-    assert.equal(watch.parseArgs(['--issue']).exitFlagMiss, true);
+  test('フラグの値欠落は validationErrors を返す', () => {
+    const r = watch.parseArgs(['--issue']);
+    assert.equal(r.help, false);
+    assert.ok(r.validationErrors.some(e => e.message === 'フラグ --issue には値が必要です'));
   });
 
-  test('未知の位置引数は unknownArgs を返す', () => {
+  test('未知の位置引数は validationErrors を返す', () => {
     const r = watch.parseArgs(['--issue', '5', 'extra']);
-    assert.deepEqual(r.unknownArgs, ['extra']);
+    assert.equal(r.help, false);
+    assert.ok(r.validationErrors.some(e => e.message === '予期しない位置引数です: extra'));
   });
 
   test('正常系: 各フラグを分離する', () => {

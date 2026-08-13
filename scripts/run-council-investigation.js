@@ -25,7 +25,7 @@ const { buildLoginShellExecArgs } = require('./agent-exec');
 const { resolveAgentConfig, resolveCouncilConfig, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { _validateAgainstSchema } = require('./shared/json-schema');
-const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const {
   resolveSession,
   councilInvestigationPath,
@@ -248,17 +248,19 @@ function printUsage(stream) {
   stream.write('  2  事前確認・config 不正（fail-closed。調査ジョブを起動しない）\n');
 }
 
-const VALUE_FLAGS = ['--title', '--agenda-file', '--question', '--session', '--workspace'];
+const SPEC = {
+  flags: { '--title': {}, '--agenda-file': {}, '--question': {}, '--session': {}, '--workspace': {} },
+  booleans: ['--help', '-h'],
+  positionals: { min: 0, max: 0 },
+};
 
 /**
  * 引数を検証し、usage エラーがあればメッセージを返す。無ければ null。
  * @returns {string|null}
  */
-function usageError(values, rest, exitFlagMiss) {
-  if (exitFlagMiss) return 'missing value for a flag';
+function usageError(values, rest) {
   if (!values['--title']) return '--title is required';
   if (!values['--agenda-file']) return '--agenda-file is required';
-  if (rest.length > 0) return `unexpected argument: ${rest[0]}`;
   return null;
 }
 
@@ -268,12 +270,24 @@ function usageError(values, rest, exitFlagMiss) {
  * @returns {Promise<number>}
  */
 async function runCouncilInvestigation(argv) {
-  const { values, rest, exitFlagMiss } = parseFlags(argv, VALUE_FLAGS, []);
-  if (hasHelpFlag(rest)) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, SPEC));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (err.helpRequested) {
+      printUsage(process.stdout);
+      return 0;
+    }
+    printUsage(process.stderr);
+    process.stderr.write(`\nError: ${err.errors.map(e => e.message).join('\n')}\n`);
+    return 1;
+  }
+  if (values['--help'] || values['-h']) {
     printUsage(process.stdout);
     return 0;
   }
-  const err = usageError(values, rest, exitFlagMiss);
+  const err = usageError(values, rest);
   if (err) {
     printUsage(process.stderr);
     process.stderr.write(`\nError: ${err}\n`);

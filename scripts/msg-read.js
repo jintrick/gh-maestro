@@ -77,30 +77,30 @@ function main(argsOverride) {
 
   const args = argsOverride || process.argv.slice(2);
 
-  if (args.includes('--help') || args.includes('-h')) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(args, {
+      flags: { '--workspace': {}, '--issue': {} },
+      booleans: ['--help', '-h'],
+      // commentId はちょうど1つの位置引数。未知フラグ（-- 始まり）・余剰位置引数は
+      // パーサ側で拒否される（Issue #14 / argv-parsing-pitfalls。未知フラグ単独が
+      // commentId として通ると意図しない gh api 呼び出しに進むため）。
+      positionals: { min: 1, max: 1 },
+    }));
+  } catch (e) {
+    if (e.name !== 'ArgsValidationError') throw e;
+    if (e.helpRequested) {
+      writeOut(USAGE);
+      return { code: 0, lines: out, errLines: err };
+    }
+    for (const ve of e.errors) writeErr(`msg-read: ${ve.message}`);
+    writeErr(USAGE);
+    return { code: 1, lines: out, errLines: err };
+  }
+
+  if (values['--help'] || values['-h']) {
     writeOut(USAGE);
     return { code: 0, lines: out, errLines: err };
-  }
-
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue']);
-
-  if (exitFlagMiss) {
-    writeErr('msg-read: フラグには値が必要です。');
-    writeErr(USAGE);
-    return { code: 1, lines: out, errLines: err };
-  }
-
-  // 正当な位置引数は commentId の1つのみ。余剰な位置引数・未知フラグは黙って無視しない
-  // （spawn-worker.js / create-issue.js と同じ rest 検証パターン。argv-parsing-pitfalls参照）。
-  // `--` で始まるトークンは commentId として受理しない。未知フラグ単独（例: msg-read.js
-  // --bogus）が commentId として通ると意図しない gh api 呼び出しに進む（Review指摘）。
-  const unknownArgs = [];
-  if (rest[0] && rest[0].startsWith('--')) unknownArgs.push(rest[0]);
-  if (rest.length > 1) unknownArgs.push(...rest.slice(1));
-  if (unknownArgs.length > 0) {
-    writeErr(`msg-read: 未知の引数です: ${unknownArgs.join(' ')}`);
-    writeErr(USAGE);
-    return { code: 1, lines: out, errLines: err };
   }
 
   const commentId = rest[0];

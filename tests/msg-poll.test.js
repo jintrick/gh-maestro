@@ -69,9 +69,11 @@ test('parseArgs: --help は help:true を返す', () => {
   assert.equal(r.help, true);
 });
 
-test('parseArgs: 値欠落は exitFlagMiss:true を返す', () => {
+test('parseArgs: 値欠落は validationErrors を返す', () => {
   const r = msgPoll.parseArgs(['orchestrator', '--workspace']);
-  assert.equal(r.exitFlagMiss, true);
+  assert.equal(r.help, false);
+  assert.ok(r.validationErrors && r.validationErrors.length > 0);
+  assert.ok(r.validationErrors.some(e => e.message === 'フラグ --workspace には値が必要です'));
 });
 
 test('parseArgs: self/onceMode/force/workspaceArg を正しく分離する', () => {
@@ -95,30 +97,32 @@ test('parseArgs: --wait <sec> を waitArg として返す', () => {
   assert.equal(r.onceMode, false);
 });
 
-test('parseArgs: --wait が無ければ waitArg は null', () => {
+test('parseArgs: --wait が無ければ waitArg は undefined', () => {
   const r = msgPoll.parseArgs(['orchestrator', '--workspace', '/ws']);
-  assert.equal(r.waitArg, null);
+  assert.equal(r.waitArg, undefined);
 });
 
-test('parseArgs: 余剰な位置引数は unknownArgs を返す', () => {
+test('parseArgs: 余剰な位置引数は validationErrors を返す', () => {
   const r = msgPoll.parseArgs(['my-worker', '--issue', '5', 'extra']);
-  assert.deepEqual(r.unknownArgs, ['extra']);
+  assert.equal(r.help, false);
+  assert.ok(r.validationErrors.some(e => e.message === '予期しない位置引数です: extra'));
 });
 
-test('parseArgs: 未知のフラグは unknownArgs に含まれる', () => {
+test('parseArgs: 未知のフラグは validationErrors に含まれる', () => {
   const r = msgPoll.parseArgs(['my-worker', '--issue', '5', '--bogus']);
-  assert.deepEqual(r.unknownArgs, ['--bogus']);
+  assert.equal(r.help, false);
+  assert.ok(r.validationErrors.some(e => e.message === '未知のフラグです: --bogus'));
 });
 
-test('parseArgs: 先頭の未知フラグは self として採用されず unknownArgs に含まれる', () => {
+test('parseArgs: 先頭の未知フラグは self として採用されず validationErrors に含まれる', () => {
   const r = msgPoll.parseArgs(['--bogus', '--issue', '5', '--once']);
-  assert.deepEqual(r.unknownArgs, ['--bogus']);
+  assert.ok(r.validationErrors.some(e => e.message === '未知のフラグです: --bogus'));
   assert.equal(r.self, undefined);
 });
 
-test('parseArgs: 正常系は unknownArgs が null', () => {
+test('parseArgs: 正常系は validationErrors が null', () => {
   const r = msgPoll.parseArgs(['my-worker', '--issue', '5', '--workspace', '/ws', '--once', '--force']);
-  assert.equal(r.unknownArgs, null);
+  assert.equal(r.validationErrors, null);
 });
 
 // ── --help / -h ────────────────────────────────────────────────────────────
@@ -158,7 +162,7 @@ test('worker モードで --issue なしは code 1', () => {
 test('余剰な位置引数は code 1（黙って無視しない）', () => {
   const r = runMain(['my-worker', '--issue', '5', 'extra']);
   assert.equal(r.code, 1);
-  assert.ok(r.errLines.some(l => l.includes('未知の引数')));
+  assert.ok(r.errLines.some(l => l.includes('予期しない位置引数')));
   assert.equal(r.scanOnce, null);
 });
 
@@ -169,7 +173,7 @@ test('先頭の未知フラグは self として受理されず code 1（gh呼�
 
     const r = runMain(['--bogus', '--issue', '5', '--once', '--workspace', workspace]);
     assert.equal(r.code, 1);
-    assert.ok(r.errLines.some(l => l.includes('未知の引数')));
+    assert.ok(r.errLines.some(l => l.includes('未知のフラグ')));
     assert.equal(r.scanOnce, null);
     assert.equal(repoViewCalls, 0, 'gh repo view は呼ばれない');
   });
@@ -1196,7 +1200,7 @@ test('--watch-pid: 余剰な位置引数・未知フラグはエラー終了す�
   const r = spawnSync(process.execPath, [script, '--watch-pid', String(process.pid), 'extra'],
     { encoding: 'utf8', timeout: 5000, env: cleanSpawnEnv() });
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /未知の引数/);
+  assert.match(r.stderr, /予期しない位置引数/);
 });
 
 // ── --wait モード ───────────────────────────────────────────────────────────

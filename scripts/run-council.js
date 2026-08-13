@@ -23,7 +23,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { resolveAgentConfig, resolveCouncilConfig, validateNonInteractiveTokens } = require('./shared/resolve-config');
-const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const {
   resolveSession,
   councilStatePath,
@@ -46,8 +46,11 @@ const {
 const USAGE = 'Usage: node scripts/run-council.js [--session <id>] [--group <group>] --title <text> --body-file <agenda.md>\n'
   + '             [--context-file <ctx.md>] [--workspace <WS>] [--resume]';
 
-const VALUE_FLAGS = ['--session', '--group', '--title', '--body-file', '--context-file', '--workspace'];
-const BOOLEAN_FLAGS = ['--resume'];
+const SPEC = {
+  flags: { '--session': {}, '--group': {}, '--title': {}, '--body-file': {}, '--context-file': {}, '--workspace': {} },
+  booleans: ['--resume', '--help', '-h'],
+  positionals: { min: 0, max: 0 },
+};
 
 const MAX_PARTICIPANT_ATTEMPTS = 2; // 参加者ごとの再試行上限（retry_policy.max_attempts と同じ値）
 
@@ -80,13 +83,18 @@ function printUsage(stream) {
  * @returns {{ code: number } | { opts: object, usageError: null }}
  */
 function parseArgs(argv) {
-  const { values, rest, exitFlagMiss } = parseFlags(argv, VALUE_FLAGS, BOOLEAN_FLAGS);
-  if (hasHelpFlag(rest)) return { code: 0 };
-  if (exitFlagMiss) return { code: 1, error: 'missing value for a flag' };
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, SPEC));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (err.helpRequested) return { code: 0 };
+    return { code: 1, error: err.errors.map(e => e.message).join('\n') };
+  }
+  if (values['--help'] || values['-h']) return { code: 0 };
   if (!values['--title']) return { code: 1, error: '--title is required' };
   if (!values['--body-file']) return { code: 1, error: '--body-file is required' };
   if (values['--resume'] && !values['--session']) return { code: 1, error: '--resume requires --session' };
-  if (rest.length > 0) return { code: 1, error: `unexpected argument: ${rest[0]}` };
   return {
     opts: {
       session: values['--session'] || undefined,

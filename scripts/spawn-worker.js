@@ -44,18 +44,21 @@ const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens }
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
 const { atomicWriteJson } = require('./shared/atomic-write');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
 const { toWinPath } = require('./win-path');
 const { startExecution, markLaunchFailure } = require('./shared/execution-registry');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const readStateLib = require('./shared/read-state');
 
-const SPAWN_WORKER_VALUE_FLAGS = [
-  '--skill', '--short-prompt', '--prompt-file', '--issue', '--description',
-  '--repo', '--workspace', '--base-branch', '--agent',
-  '--execution-id',
-];
+const SPEC = {
+  flags: {
+    '--skill': {}, '--short-prompt': {}, '--prompt-file': {}, '--issue': {}, '--description': {},
+    '--repo': {}, '--workspace': {}, '--base-branch': {}, '--agent': {}, '--execution-id': {},
+  },
+  booleans: ['--help', '-h'],
+  positionals: { min: 0, max: 0 },
+};
 
 const USAGE = `spawn-worker.js — worktreeを準備し、ワーカーをheadless（画面なし）で起動する
 
@@ -183,24 +186,23 @@ if (require.main === module) {
 
 // --- 引数パース ---
 const argv = process.argv.slice(2);
-const { values, rest, exitFlagMiss } = parseFlags(argv, SPAWN_WORKER_VALUE_FLAGS);
-
-// exitFlagMiss（値欠落）を先に判定する。値欠落は常にエラー優先（フェイルクローズ）とし、
-// help 判定より先に確定させる（他スクリプトと同様のパターン。argv-parsing-pitfalls参照）。
-if (exitFlagMiss) {
+let values, rest;
+try {
+  ({ values, rest } = parseFlags(argv, SPEC));
+} catch (err) {
+  if (err.name !== 'ArgsValidationError') throw err;
+  if (err.helpRequested) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+  for (const e of err.errors) console.error(`spawn-worker: ${e.message}`);
   console.error(USAGE);
   process.exit(1);
 }
 
-if (hasHelpFlag(rest)) {
+if (values['--help'] || values['-h']) {
   console.log(USAGE);
   process.exit(0);
-}
-
-if (rest.length > 0) {
-  console.error(`spawn-worker: 未知の引数です: ${rest.join(' ')}`);
-  console.error(USAGE);
-  process.exit(1);
 }
 
 const skill       = values['--skill'];

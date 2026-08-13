@@ -201,48 +201,46 @@ function parseMarker(body) {
  *
  * @param {string[]} args
  * @returns {{
- *   help: boolean, exitFlagMiss: boolean,
- *   unknownArgs?: string[]|null,
+ *   help: boolean,
+ *   validationErrors?: Array<{ message: string }>|null,  // 検証エラー時のみ設定（help・成功時は null）
  *   self?: string, issueArg?: string|null, workspaceArg?: string|null,
  *   intervalArg?: string|null, sessionPidArg?: string|null,
  *   onceMode?: boolean, force?: boolean, waitArg?: string|null,
  * }}
  */
 function parseArgs(args) {
-  if (args.includes('--help') || args.includes('-h')) {
-    return { help: true, exitFlagMiss: false };
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(args, {
+      flags: { '--workspace': {}, '--issue': {}, '--interval': {}, '--session-pid': {}, '--wait': {} },
+      booleans: ['--once', '--force', '--help', '-h'],
+      // self（ワーカー名/recipient）は最大1つの位置引数。未知フラグ（-- 始まり）は
+      // パーサ側で拒否される（Issue #14 / argv-parsing-pitfalls。先頭に来て self として
+      // 採用されるとポーリング・状態更新・PID registry操作まで進んでしまうため）。
+      positionals: { min: 0, max: 1 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (err.helpRequested) {
+      return { help: true, validationErrors: null };
+    }
+    return { help: false, validationErrors: err.errors };
   }
 
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--issue', '--interval', '--session-pid', '--wait']);
-  if (exitFlagMiss) {
-    return { help: false, exitFlagMiss: true };
-  }
-
-  const onceMode = rest.includes('--once');
-  const force = rest.includes('--force');
-  const positional = rest.filter(a => a !== '--once' && a !== '--force');
-
-  // `--` で始まる未消費トークンは未知フラグとして扱い、位置引数（self）として受理しない。
-  // 先頭に来て self として採用されると未知フラグが黙って通過し、ポーリング・状態更新・
-  // PID registry操作まで進んでしまう（Review指摘。argv-parsing-pitfalls参照）。
-  const unknownArgs = positional.filter(a => a.startsWith('--'));
-  const selfCandidates = positional.filter(a => !a.startsWith('--'));
-  // 余剰な非フラグ位置引数（self は1つだけ）も未知引数として扱う。
-  if (selfCandidates.length > 1) {
-    unknownArgs.push(...selfCandidates.slice(1));
+  if (values['--help'] || values['-h']) {
+    return { help: true, validationErrors: null };
   }
 
   return {
     help: false,
-    exitFlagMiss: false,
-    unknownArgs: unknownArgs.length > 0 ? unknownArgs : null,
-    self: selfCandidates[0],
+    validationErrors: null,
+    self: rest[0],
     issueArg: values['--issue'],
     workspaceArg: values['--workspace'],
     intervalArg: values['--interval'],
     sessionPidArg: values['--session-pid'],
-    onceMode,
-    force,
+    onceMode: values['--once'] === true,
+    force: values['--force'] === true,
     waitArg: values['--wait'],
   };
 }
@@ -285,14 +283,8 @@ function main(argsOverride, opts = {}) {
     return { code: 0, lines: out, errLines: err, scanOnce: null, onceMode: true, intervalMs: 0 };
   }
 
-  if (parsed.exitFlagMiss) {
-    writeErr('msg-poll: フラグには値が必要です。');
-    writeErr(USAGE);
-    return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
-  }
-
-  if (parsed.unknownArgs) {
-    writeErr(`msg-poll: 未知の引数です: ${parsed.unknownArgs.join(' ')}`);
+  if (parsed.validationErrors) {
+    for (const e of parsed.validationErrors) writeErr(`msg-poll: ${e.message}`);
     writeErr(USAGE);
     return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
   }
@@ -822,15 +814,18 @@ if (require.main === module) {
   // <self> 等の他の引数を必要としない、完全に独立したモード。
   // 「重複起動を検出しました」時の代替コマンドとして案内される。
   if (rawArgs.includes('--watch-pid')) {
-    const { values: watchValues, rest: watchRest, exitFlagMiss: watchExitFlagMiss } =
-      parseFlags(rawArgs, ['--watch-pid', '--interval']);
-    if (watchExitFlagMiss) {
-      process.stderr.write('msg-poll: フラグには値が必要です。\n');
-      process.exit(1);
-    }
-    // watch-pid モードは位置引数を取らない。余剰な位置引数・未知フラグは黙って無視しない。
-    if (watchRest.length > 0) {
-      process.stderr.write(`msg-poll: 未知の引数です: ${watchRest.join(' ')}\n`);
+    let watchValues, watchRest;
+    try {
+      ({ values: watchValues, rest: watchRest } = parseFlags(rawArgs, {
+        flags: { '--watch-pid': {}, '--interval': {} },
+        booleans: [],
+        // watch-pid モードは位置引数を取らない。余剰な位置引数・未知フラグは黙って無視しない
+        // （パーサ側で拒否。argv-parsing-pitfalls参照）。
+        positionals: { min: 0, max: 0 },
+      }));
+    } catch (err) {
+      if (err.name !== 'ArgsValidationError') throw err;
+      for (const e of err.errors) process.stderr.write(`msg-poll: ${e.message}\n`);
       process.exit(1);
     }
     const watchPid = parseInt(watchValues['--watch-pid'], 10);
@@ -855,11 +850,12 @@ if (require.main === module) {
 
   // main() と同じ parseArgs() を再利用する（解析ロジックを2箇所に分けない）。
   const parsedForCli = parseArgs(rawArgs);
-  // 未知引数がある場合は main() がエラー終了するため、多重起動プリフライトのロック取得・
-  // gh解決などの副作用を走らせない（未知引数で素早く fail-fast する）。
-  const hasUnknownArgs = !parsedForCli.help && parsedForCli.unknownArgs != null;
-  const isWait = !parsedForCli.help && !parsedForCli.exitFlagMiss && !hasUnknownArgs && !parsedForCli.onceMode && parsedForCli.waitArg != null;
-  const isContinuous = !parsedForCli.help && !parsedForCli.exitFlagMiss && !hasUnknownArgs && !parsedForCli.onceMode && !isWait;
+  // 検証エラー（未知引数・値欠落等）がある場合は main() がエラー終了するため、
+  // 多重起動プリフライトのロック取得・gh解決などの副作用を走らせない（不正引数で
+  // 素早く fail-fast する）。
+  const hasValidationErrors = !parsedForCli.help && parsedForCli.validationErrors != null;
+  const isWait = !parsedForCli.help && !hasValidationErrors && !parsedForCli.onceMode && parsedForCli.waitArg != null;
+  const isContinuous = !parsedForCli.help && !hasValidationErrors && !parsedForCli.onceMode && !isWait;
 
   // 継続モード・--wait モードでは scanOnce の出力をリアルタイムに stdout へ流す
   const result = main(undefined, { streamOutput: isContinuous || isWait });

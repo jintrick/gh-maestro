@@ -13,7 +13,7 @@
 const path = require('path');
 const { readFileSync, existsSync, rmSync } = require('fs');
 const { spawnSync } = require('./child-process');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 const { getAssistant, removeAssistant } = require('./shared/assistants-registry');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { ARTIFACTS, recordPath } = require('./shared/record-paths');
@@ -272,13 +272,24 @@ module.exports = { collectWorkersForIssue, finalizeIssue, cleanupIssueArtifacts,
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--issue', '--repo', '--workspace']);
-
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: { '--issue': {}, '--repo': {}, '--workspace': {} },
+      booleans: ['--help', '-h'],
+      positionals: { min: 0, max: 0 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (err.helpRequested) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`finalize-issue: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
   }

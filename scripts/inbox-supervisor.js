@@ -36,7 +36,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
-const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { resolveAgentConfig } = require('./shared/resolve-config');
 const { resolveAdapter } = require('./shared/inbox-adapters');
@@ -550,28 +550,32 @@ function main(argsOverride, opts = {}) {
 
   const args = argsOverride || process.argv.slice(2);
 
-  if (args.includes('--help') || args.includes('-h')) {
+  let values;
+  try {
+    ({ values } = parseFlags(args, {
+      flags: { '--workspace': {}, '--interval': {}, '--hang-threshold-sec': {}, '--session-pid': {} },
+      booleans: ['--once', '--force', '--help', '-h'],
+      // 未知フラグ・位置引数はパーサ側で拒否される（argv-parsing-pitfalls参照）。
+      positionals: { min: 0, max: 0 },
+    }));
+  } catch (e) {
+    if (e.name !== 'ArgsValidationError') throw e;
+    if (e.helpRequested) {
+      writeOut(USAGE);
+      return { code: 0, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
+    }
+    for (const ve of e.errors) writeErr(`inbox-supervisor: ${ve.message}`);
+    writeErr(USAGE);
+    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
+  }
+
+  if (values['--help'] || values['-h']) {
     writeOut(USAGE);
     return { code: 0, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
   }
 
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--interval', '--hang-threshold-sec', '--session-pid']);
-
-  if (exitFlagMiss) {
-    writeErr('inbox-supervisor: フラグには値が必要です。');
-    writeErr(USAGE);
-    return { code: 1, lines: out, errLines: err, runOnce: null, intervalMs: 0, workspace: '' };
-  }
-
-  const onceMode = rest.includes('--once');
-  const force = rest.includes('--force');
-  const filteredRest = rest.filter(a => a !== '--once' && a !== '--force');
-
-  if (filteredRest.length > 0) {
-    writeErr(`inbox-supervisor: 未知の引数です: ${filteredRest.join(' ')}`);
-    writeErr(USAGE);
-    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
-  }
+  const onceMode = values['--once'] === true;
+  const force = values['--force'] === true;
 
   const workspace = resolveWorkspace(values['--workspace']);
   if (!workspace) {

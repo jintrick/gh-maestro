@@ -248,24 +248,33 @@ function main(argsOverride, envOverride, ioOverride) {
   const env = envOverride || process.env;
   const { readStdinFn, isStdinTTY } = ioOverride || {};
 
-  if (args.includes('--help') || args.includes('-h')) {
-    writeOut(USAGE);
-    return { code: 0, lines: out, errLines: err };
-  }
-
   const rawIndex = args.indexOf('--raw');
   const raw = rawIndex !== -1;
+  // --raw はマーカー無し投稿モードのため、パーサには渡さず手動で除去する（移行時も温存）。
   const parsedArgs = raw ? args.filter((_, index) => index !== rawIndex) : args;
-  const { values, rest, exitFlagMiss } = parseFlags(
-    parsedArgs,
-    ['--workspace', '--issue', '--from', '--body-file', '--execution-id', '--skill'],
-    ['--stdin'],
-  );
-
-  if (exitFlagMiss) {
-    writeErr('msg-send: フラグには値が必要です。');
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(parsedArgs, {
+      flags: { '--workspace': {}, '--issue': {}, '--from': {}, '--body-file': {}, '--execution-id': {}, '--skill': {} },
+      booleans: ['--stdin', '--help', '-h'],
+      // 宛先（recipient）は位置引数で受け取る。個数の妥当性は下の extraPositionals 判定で
+      // 専用メッセージ（--stdin / --body-file 案内）と共に検証するため、パーサ側では上限を設けない。
+      positionals: { min: 0, max: Infinity },
+    }));
+  } catch (e) {
+    if (e.name !== 'ArgsValidationError') throw e;
+    if (e.helpRequested) {
+      writeOut(USAGE);
+      return { code: 0, lines: out, errLines: err };
+    }
+    for (const ve of e.errors) writeErr(`msg-send: ${ve.message}`);
     writeErr(USAGE);
     return { code: 1, lines: out, errLines: err };
+  }
+
+  if (values['--help'] || values['-h']) {
+    writeOut(USAGE);
+    return { code: 0, lines: out, errLines: err };
   }
 
   const workspace = resolveWorkspace(values['--workspace']);

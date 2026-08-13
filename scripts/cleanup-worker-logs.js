@@ -17,7 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { workerLogPath } = require('./shared/headless-launch');
 const { compactWorkerLog } = require('./shared/strip-thinking-token-lines');
 const { recordRoot } = require('./shared/record-paths');
@@ -39,22 +39,30 @@ Options:
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--worker']);
-
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: { '--workspace': {}, '--worker': {} },
+      booleans: ['--help', '-h'],
+      positionals: { min: 0, max: 0 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    // ヘルプ要求かどうかは parseFlags が throw 時に確定済み。値欠落エラーが混ざっている
+    // 間は helpRequested=false になり、--help を値として渡された場合にヘルプへ握りつぶさない
+    // （判定の意味論は scripts/shared/workspace.js の hasGenuineHelpRequest 参照）。
+    if (err.helpRequested) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`cleanup-worker-logs: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
-  }
-
-  if (rest.length > 0) {
-    console.error(`cleanup-worker-logs: 未知の引数です: ${rest.join(' ')}`);
-    console.error(USAGE);
-    process.exit(1);
   }
 
   const fail = (msg) => { console.error(`cleanup-worker-logs: ${msg}`); process.exit(1); };

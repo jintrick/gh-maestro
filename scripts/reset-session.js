@@ -19,7 +19,7 @@ const { isWorkerAlive } = require('./shared/worker-liveness');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { sweepRegistry } = require('./process-lifecycle');
 const { atomicWriteJson } = require('./shared/atomic-write');
-const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const readStateLib = require('./shared/read-state');
 
@@ -111,16 +111,24 @@ module.exports = { rebuildOrchestratorBaseline, USAGE };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace'], ['--quiet']);
-
-  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
-  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
-  // 値欠落は常にエラー優先（フェイルクローズ）とする。
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: { '--workspace': {} },
+      booleans: ['--quiet', '--help', '-h'],
+      positionals: { min: 0, max: 0 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (err.helpRequested) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`reset-session: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
   }

@@ -14,7 +14,7 @@
 // 終了コード: 0=成功、1=エラー
 
 const { spawnSync } = require('./child-process');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 
 const USAGE = `Usage:
   node gh-create-pr.js --title <title> --body <body> [--repo <owner/repo>]
@@ -34,8 +34,11 @@ Output:
   PRのURLを標準出力に出力します。
   exit 0 = 成功、exit 1 = エラー`;
 
-const VALUE_FLAGS = ['--title', '--body', '--body-file', '--repo'];
-const BOOLEAN_FLAGS = [];
+const SPEC = {
+  flags: { '--title': {}, '--body': {}, '--body-file': {}, '--repo': {} },
+  booleans: ['--help', '-h'],
+  positionals: { min: 0, max: 0 },
+};
 
 /**
  * baseブランチを環境変数 GH_MAESTRO_BASE_BRANCH から解決する。
@@ -63,6 +66,28 @@ function resolveBaseBranch(opts = {}) {
 }
 
 /**
+ * gh pr create の引数配列を組み立てる（純関数。Issue #275 項目2）。
+ *
+ * 元は createPr の NODE_TEST_CONTEXT ガードの内側に引数組み立てが埋まっており、テストが
+ * withGuardBypassed でガードを迂回しないと検証できなかった。実PR作成（外部副作用）と
+ * は独立に検証できるよう切り出し、テストはこの関数を直接呼ぶ。
+ *
+ * @param {object} opts  createPr と同じ opts（title/body/bodyFile/repo/cwd/env）
+ * @returns {string[]}  gh pr create の引数配列
+ */
+function buildPrCreateArgs(opts) {
+  const baseBranch = resolveBaseBranch(opts);
+  const args = ['pr', 'create', '--base', baseBranch, '--title', opts.title];
+  if (opts.body) {
+    args.push('--body', opts.body);
+  } else if (opts.bodyFile) {
+    args.push('--body-file', opts.bodyFile);
+  }
+  if (opts.repo) args.push('--repo', opts.repo);
+  return args;
+}
+
+/**
  * gh pr create を実行する。
  * @param {object} opts
  * @param {string} opts.title - PRタイトル
@@ -80,14 +105,7 @@ function createPr(opts) {
   if (process.env.NODE_TEST_CONTEXT) {
     return { url: '', status: 1, stderr: 'テスト実行中（NODE_TEST_CONTEXT）のため、実際のPR作成は行いません' };
   }
-  const baseBranch = resolveBaseBranch(opts);
-  const args = ['pr', 'create', '--base', baseBranch, '--title', opts.title];
-  if (opts.body) {
-    args.push('--body', opts.body);
-  } else if (opts.bodyFile) {
-    args.push('--body-file', opts.bodyFile);
-  }
-  if (opts.repo) args.push('--repo', opts.repo);
+  const args = buildPrCreateArgs(opts);
   const r = spawnSync('gh', args, { cwd: opts.cwd, encoding: 'utf8' });
   return { url: (r.stdout || '').trim(), status: r.status, stderr: (r.stderr || '').trim() };
 }
@@ -95,18 +113,19 @@ function createPr(opts) {
 // ── CLI エントリポイント ─────────────────────────────────────────────────────
 
 function main(argv) {
-  const { values, rest, exitFlagMiss } = parseFlags(argv, VALUE_FLAGS, BOOLEAN_FLAGS);
-
-  if (exitFlagMiss) {
-    return { exitCode: 1, stderr: USAGE };
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, SPEC));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (err.helpRequested) {
+      return { exitCode: 0, stdout: USAGE };
+    }
+    return { exitCode: 1, stderr: `gh-create-pr: ${err.errors.map(e => e.message).join('\n')}\n${USAGE}` };
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     return { exitCode: 0, stdout: USAGE };
-  }
-
-  if (rest.length > 0) {
-    return { exitCode: 1, stderr: `gh-create-pr: 未知の引数です: ${rest.join(' ')}\n${USAGE}` };
   }
 
   const title = values['--title'];
@@ -138,7 +157,7 @@ function main(argv) {
   return { exitCode: 0, stdout: result.url };
 }
 
-module.exports = { resolveBaseBranch, createPr, main, USAGE };
+module.exports = { resolveBaseBranch, buildPrCreateArgs, createPr, main, USAGE };
 
 if (require.main === module) {
   const result = main(process.argv.slice(2));

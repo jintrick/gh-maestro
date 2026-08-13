@@ -26,7 +26,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('./child-process');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 const storageLayout = require('./shared/storage-layout');
 
 const IS_WIN = process.platform === 'win32';
@@ -870,17 +870,26 @@ module.exports = {
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--worker-name'], ['--dry-run']);
-
-  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
-  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
-  // 値欠落は常にエラー優先（フェイルクローズ）とする。
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: { '--workspace': {}, '--worker-name': {} },
+      booleans: ['--dry-run', '--help', '-h'],
+      // サブコマンドはちょうど1つ（sweep）。未知フラグ・余剰位置引数はパーサ側で拒否。
+      positionals: { min: 1, max: 1 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (err.helpRequested) {
+      console.log(CLI_USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`process-lifecycle: ${e.message}`);
     console.error(CLI_USAGE);
     process.exit(1);
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(CLI_USAGE);
     process.exit(0);
   }
