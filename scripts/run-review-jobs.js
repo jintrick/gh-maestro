@@ -14,7 +14,9 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn } = require('./child-process');
+const { spawn, spawnSync } = require('./child-process');
+const { writeSentinel } = require('./finalize-review');
+const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
@@ -40,7 +42,10 @@ Options:
 Output:
   終了コード0: 全ジョブ成功。resultsファイルに結果を書き出し
   終了コード1: 一部ジョブ失敗。resultsファイルに成功・失敗を含む全結果を書き出し
-  終了コード2: manifest不正または起動失敗`;
+  終了コード2: manifest不正または起動失敗
+    manifestの機械検証に失敗した場合は、検証エラーをPRへのプレーンコメントとして投稿し、
+    .incompleteセンチネルを書き出した上で終了コード2で終了する（不完全レビューとして通知済み。
+    レビュー担当は再試行しない。書き直し判断はオーケストレーターが行う）。`;
 
 // ── manifest検証 ───────────────────────────────────────────────────────────────
 
@@ -544,6 +549,103 @@ function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, tim
   });
 }
 
+// ── manifest検証失敗の通知 ────────────────────────────────────────────────────
+// 実行manifestの機械検証に失敗した場合、レビュー担当（RM）はこの事実を既存の
+// 「不完全レビュー」経路（PRへのプレーンコメント + .incompleteセンチネル）に載せて
+// 通知し、そのまま停止する。再試行はしない（ヘッドレス再試行はアンチパターン。
+// AGENTS.md「Headless Retry Is An Anti-Pattern」/ Issue #271）。
+// 計画の書き直し・再実行の判断はオーケストレーターが行う。
+
+let _ghForTest = null;
+
+/**
+ * 実行manifestの機械検証に失敗した旨を報告するプレーンコメント本文を生成する。
+ * finalize-review.js の buildIncompleteComment とは別経路だが、同じ「PRへのプレーン
+ * コメント」チャネルに載ることで、オーケストレーターの poll-reviews.js が検証失敗を
+ * 確実に受け取れる（Issue #271: 検証失敗の内容がオーケストレーターへ届かなかった）。
+ *
+ * @param {object} manifest
+ * @param {string[]} errors
+ * @returns {string}
+ */
+function buildManifestValidationComment(manifest, errors) {
+  const lines = [
+    '## ⚠️ 実行計画の機械検証に失敗しました（レビューは実行されていません）',
+    '',
+    `PR #${manifest.pr} の実行manifest（run-review-jobs.js）が機械検証に合格しなかったため、`,
+    'レビュー担当はこの通知を行った上で停止しました。計画の書き直し・再実行は行いません。',
+    '',
+    '### 検証エラー',
+    '',
+  ];
+  for (const e of errors) {
+    lines.push(`- ${e}`);
+  }
+  lines.push('');
+  lines.push('---');
+  lines.push('_検証失敗は自動通知です（run-review-jobs.js）。_');
+  return lines.join('\n');
+}
+
+/**
+ * manifest検証失敗を、既存の「不完全レビュー」経路へ冪等に通知する。
+ *
+ * 1. .incompleteセンチネルが既に存在すれば、同一PRで二重投稿しない（冪等）
+ * 2. 検証エラーをPRへのプレーンコメントとして投稿
+ * 3. writeSentinel で .incompleteセンチネルを作成（finalize-review.js と同じ経路）
+ *
+ * gh への投稿は _setGhForTest で注入可能。NODE_TEST_CONTEXT 検出時は実投稿を拒否する
+ * （msg-send.js / gh-create-pr.js と同じ構造的ガード、Issue #202）。
+ *
+ * @param {{manifest: object, workspace: string, errors: string[]}} params
+ * @returns {{
+ *   skipped: boolean,
+ *   posted: boolean,
+ *   commentUrl: string|null,
+ *   error: string|null,
+ *   sentinelPath: string|null,
+ * }}
+ */
+function notifyManifestValidationFailure({ manifest, workspace, errors }) {
+  const pr = String(manifest.pr);
+  const sentinelPath = reviewArtifactPath(path.join(workspace, '.gh-maestro'), pr, '.incomplete');
+
+  if (fs.existsSync(sentinelPath)) {
+    return { skipped: true, posted: false, commentUrl: null, error: null, sentinelPath };
+  }
+
+  const body = buildManifestValidationComment(manifest, errors);
+  const ghArgs = ['pr', 'comment', pr, '--repo', manifest.repo, '--body', body];
+
+  let result;
+  if (_ghForTest) {
+    result = _ghForTest(ghArgs);
+  } else if (process.env.NODE_TEST_CONTEXT) {
+    result = { status: 1, stdout: '', stderr: 'テスト実行中（NODE_TEST_CONTEXT）のため、実際のGitHub投稿は行いません' };
+  } else {
+    const r = spawnSync('gh', ghArgs, { encoding: 'utf8', stdio: 'pipe' });
+    result = { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+  }
+
+  const written = writeSentinel(workspace, pr);
+
+  return {
+    skipped: false,
+    posted: result.status === 0,
+    commentUrl: result.status === 0 ? String(result.stdout).trim() : null,
+    error: result.status === 0 ? null : (String(result.stderr).trim() || `gh pr comment 失敗（status ${result.status}）`),
+    sentinelPath: written || sentinelPath,
+  };
+}
+
+/**
+ * テスト用: gh 呼び出しを注入する。実プロセスを0個spawnするテストから使う。
+ * @param {(args: string[]) => {status: number, stdout?: string, stderr?: string}} impl
+ */
+function _setGhForTest(impl) {
+  _ghForTest = impl;
+}
+
 // ── メイン ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -575,7 +677,13 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   // 2. manifest検証
   const validation = validateManifest(manifest);
   if (!validation.valid) {
-    return { ok: false, summary: { error: `manifest validation failed`, details: validation.errors } };
+    // Issue #271: 検証失敗を黙って終了せず、検証エラーをPRコメントと .incomplete センチネルで
+    // 通知してから終了する。再試行はしない（ヘッドレス再試行はアンチパターン）。
+    const notification = notifyManifestValidationFailure({ manifest, workspace, errors: validation.errors });
+    return {
+      ok: false,
+      summary: { error: `manifest validation failed`, details: validation.errors, notification },
+    };
   }
 
   // 3. エージェント設定解決
@@ -675,6 +783,9 @@ module.exports = {
   buildJobPrompt,
   launchJobWorker,
   runJobsFromManifest,
+  buildManifestValidationComment,
+  notifyManifestValidationFailure,
+  _setGhForTest,
   ALL_LEAF_IDS,
   TRUNK_TO_LEAVES,
 };
