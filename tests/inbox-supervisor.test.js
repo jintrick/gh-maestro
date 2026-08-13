@@ -568,6 +568,26 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     });
   });
 
+  test('tryResumeAndDeliver: 破損 workers.json は resume-failed（レジストリ失敗。エントリ不在と区別して報告）', () => {
+    withTempDir((dir) => {
+      // worktree は存在する。workers.json のみ解析不能にする。
+      fs.mkdirSync(path.join(dir, '.gh-maestro', 'worktrees', 'issue-7-fix'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), '{ broken json');
+      resetHeadlessLaunchMocks({ pid: 77 });
+      supervisor._setIsWorkerAlive(() => true);
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName: 'issue-7-fix', agentId: 'agy',
+        message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home',
+      });
+      assert.equal(result.success, false);
+      assert.equal(result.method, 'resume-failed');
+      // 「ワーカーが見つからない」ではなくレジストリ失敗として報告されること
+      assert.ok(result.error.includes('読み取り・解析に失敗'), result.error);
+      assert.ok(!result.error.includes('見つかりません'), result.error);
+    });
+  });
+
   test('tryResumeAndDeliver: agy成功時はresumeし新pid/startTimeでworkers.jsonを更新する', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });

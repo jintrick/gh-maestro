@@ -511,6 +511,28 @@ test('判定不能（GitHub APIの取得に失敗）なら拒否せず通常ど�
   });
 });
 
+test('判定不能（workers.json が解析不能）でも拒否せず通常どおり配送される（フェイルオープン維持）', () => {
+  withTempDir(workspace => {
+    const ghDir = path.join(workspace, '.gh-maestro');
+    fs.mkdirSync(ghDir, { recursive: true });
+    // workers.json を解析不能にする。readWorkersRaw は throw し、checkWorkerBusyRejection の
+    // catch が null に落として通す（Issue #275 項目1）。判定不能時のフェイルオープンは
+    // 上記 docstring のとおり、拒否した場合の方が損害が大きい（指示が一切届かなくなる）。
+    fs.writeFileSync(path.join(ghDir, 'workers.json'), '{ broken json');
+
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    let capturedBody = null;
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-8\n' };
+    });
+
+    const r = msgSend.main(['issue-9-fix', '--stdin', '--issue', '9', '--workspace', workspace], null, stdinIO('hello'));
+    assert.equal(r.code, 0, `解析不能は拒否しないこと: ${r.errLines.join('\n')}`);
+    assert.ok(capturedBody && capturedBody.includes('hello'));
+  });
+});
+
 test('稼働中でも既に報告済みのワーカー宛て送信は拒否されない', () => {
   withTempDir(workspace => {
     writeBusyWorker(workspace);

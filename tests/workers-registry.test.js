@@ -33,19 +33,19 @@ test('readWorkersRaw: ファイルが無ければnull', () => {
   });
 });
 
-test('readWorkersRaw: 壊れたJSONはnull', () => {
+test('readWorkersRaw: 壊れたJSONはthrow（全リトライ後も解析不能）', () => {
   withTempDir((dir) => {
     fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(workersJsonPath(dir), '{not json', 'utf8');
-    assert.equal(readWorkersRaw(dir), null);
+    assert.throws(() => readWorkersRaw(dir), /workers\.json を解析できません/);
   });
 });
 
-test('readWorkersRaw: 配列はnull（オブジェクトでない）', () => {
+test('readWorkersRaw: 配列は型不正でthrow（オブジェクトでない）', () => {
   withTempDir((dir) => {
     fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(workersJsonPath(dir), '[]', 'utf8');
-    assert.equal(readWorkersRaw(dir), null);
+    assert.throws(() => readWorkersRaw(dir), /workers\.json の形式が不正です/);
   });
 });
 
@@ -58,11 +58,10 @@ test('readWorkersRaw: 正常なJSONを返す', () => {
 
 test('readWorkersRaw: 書き込み中の破損JSONでもリトライ後に正常内容を読める（Issue #248 項目12）', () => {
   withTempDir((dir) => {
-    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
-    // existsSync ガードを通すため実ファイルを置く（中身は注入readFileFnが返すものを使う）
-    fs.writeFileSync(workersJsonPath(dir), '{not json', 'utf8');
     const valid = JSON.stringify({ 'issue-1-coder': { pid: 1 } }, null, 2);
-    // 最初の1回は書き込み途中の破損内容を返し、2回目以降は正常内容を返す。
+    // 最初の1回は書き込み途中の破損内容を返し、2回目以降は正常内容を返す
+    // （readFileFn を注入するため実ファイルは書かない。ファイル不在の ENOENT は null に
+    // 倒れるが、注入 readFileFn は実ファイルを読まないため本テストには無関係）。
     let calls = 0;
     const readFileFn = () => {
       calls++;
@@ -74,14 +73,52 @@ test('readWorkersRaw: 書き込み中の破損JSONでもリトライ後に正常
   });
 });
 
-test('readWorkersRaw: 全試行失敗ならnullのまま（リトライを消費して null）', () => {
+test('readWorkersRaw: 全試行でparse失敗ならthrow（リトライ消費後に解析不能を伝える）', () => {
   withTempDir((dir) => {
     fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(workersJsonPath(dir), '{not json', 'utf8');
     let sleeps = 0;
-    const result = readWorkersRaw(dir, { sleepFn: () => { sleeps++; }, maxAttempts: 3, delayMs: 0 });
-    assert.equal(result, null);
+    assert.throws(
+      () => readWorkersRaw(dir, { sleepFn: () => { sleeps++; }, maxAttempts: 3, delayMs: 0 }),
+      /workers\.json を解析できません/
+    );
     assert.equal(sleeps, 2); // 3試行・間のスリープは2回
+  });
+});
+
+test('readWorkersRaw: 読み取り時のENOENTのみnull（注入readFileFn）', () => {
+  withTempDir((dir) => {
+    const err = new Error('no such file');
+    err.code = 'ENOENT';
+    const readFileFn = () => { throw err; };
+    assert.equal(readWorkersRaw(dir, { readFileFn }), null);
+  });
+});
+
+test('readWorkersRaw: ENOENT以外の読み取りエラー（権限等）はthrow', () => {
+  withTempDir((dir) => {
+    const err = new Error('EACCES: permission denied');
+    err.code = 'EACCES';
+    const readFileFn = () => { throw err; };
+    assert.throws(() => readWorkersRaw(dir, { readFileFn }), /EACCES/);
+  });
+});
+
+test('readWorkersRaw: JSONのnullリテラルは型不正でthrow', () => {
+  withTempDir((dir) => {
+    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(workersJsonPath(dir), 'null', 'utf8');
+    assert.throws(() => readWorkersRaw(dir), /workers\.json の形式が不正です/);
+  });
+});
+
+test('updateWorkerProcess: 破損workers.jsonはthrow（falseはエントリ不在専用に保つ）', () => {
+  withTempDir((dir) => {
+    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(workersJsonPath(dir), '{not json', 'utf8');
+    // 破損を false に潰すと呼び出し側（inbox-supervisor）が「エントリ不在」と誤報告するため、
+    // 破損は例外として伝播させる（Issue #275 項目1）。false はエントリ不在の専用に残す。
+    assert.throws(() => updateWorkerProcess(dir, 'issue-5-fix', { pid: 999 }), /workers\.json を解析できません/);
   });
 });
 
@@ -211,9 +248,36 @@ test('resolveWorkerName: orchestratorエントリは対象外', () => {
   });
 });
 
-test('resolveWorkerName: workers.jsonが無ければエラー', () => {
+test('resolveWorkerName: workers.jsonが無ければ「読み込めません」エラー（不在のみ）', () => {
   withTempDir((dir) => {
-    assert.throws(() => resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }), /読み込めません/);
+    assert.throws(
+      () => resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }),
+      (err) => {
+        assert.match(err.message, /読み込めません/);
+        // 不在は破損ではない。破損固有のメッセージ（解析できません）と取り違えてはならない
+        // （Issue #275 項目1）。
+        assert.doesNotMatch(err.message, /解析できません/);
+        return true;
+      }
+    );
+  });
+});
+
+test('resolveWorkerName: 破損workers.jsonは「解析できません」エラー（不在と区別）', () => {
+  withTempDir((dir) => {
+    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(workersJsonPath(dir), '{not json', 'utf8');
+    assert.throws(
+      () => resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }),
+      (err) => {
+        // readWorkersRaw の契約どおり破損は throw を伝播させる。不在専用の「読み込めません」に
+        // 潰すと「まだ1件も起動していない正常な空状態」と「ファイルが壊れている」を区別できない
+        // （Issue #275 項目1）。
+        assert.match(err.message, /解析できません/);
+        assert.doesNotMatch(err.message, /読み込めません/);
+        return true;
+      }
+    );
   });
 });
 
