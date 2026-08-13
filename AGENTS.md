@@ -75,6 +75,17 @@ The actual danger (Issue #214) is not the literal string `.gh-maestro` — dozen
 - If `install.js` itself needs to own a new top-level entry under `~/.gh-maestro/`, declare it in `storage-layout.js`'s `MANAGED_TOP_LEVEL` first — `ghMaestroPath()` throws immediately if a new top-level name isn't declared there.
 - Review checkpoint: don't look for the string `.gh-maestro` (too common to be meaningful); check whether the `workspace` value in play was actually obtained from `resolveWorkspace()`.
 
+## Headless Retry Is An Anti-Pattern
+
+**Do not introduce retry loops into headless processes.** When a headless worker (coder, Review Manager, explorer, investigator, or any agent launched without a visible pane) hits a failure it might resolve by trying again, it must surface that failure to the orchestrator instead of looping on its own.
+
+A runaway loop inside a headless process is the worst failure mode this system has. Nobody sees it: the orchestrator reads the silence as "the report has not arrived yet" and keeps waiting, the human sees nothing at all, and the model burns quota the entire time. This has already happened in other forms (workers spinning at 100% CPU after their final report).
+
+- Failures always route to the orchestrator once. The orchestrator decides whether to retry, restart, escalate to the human, or abandon.
+- This applies to the model's own agentic retries as much as to `while` loops in scripts. "The model will give up eventually" is not a bound.
+- Where a bound genuinely must live inside a process, it is enforced by deterministic code (a count or a deadline), never by the model's discretion.
+- Bounded, non-agentic retries around a single transient I/O operation (a file rename, one HTTP request) are not what this rule is about. The rule targets loops that re-run agent work.
+
 ## Change Discipline
 
 - Prefer existing project patterns over new abstractions.
