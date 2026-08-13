@@ -26,7 +26,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('./child-process');
-const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 const storageLayout = require('./shared/storage-layout');
 
 const IS_WIN = process.platform === 'win32';
@@ -880,7 +880,7 @@ if (require.main === module) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    if (err.helpRequested) {
       console.log(CLI_USAGE);
       process.exit(0);
     }

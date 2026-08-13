@@ -7,7 +7,7 @@ paths:
 
 `scripts/`配下の多くのCLIスクリプトは外部ライブラリを使わず`argv.includes()`/独自の`getArg()`で引数を解析している。この方式は以下の不具合を繰り返し発生させている。
 
-- **フラグ/値の衝突**: `argv.includes('--help')`のように生の`argv`全体を見てフラグ判定すると、他のオプションの値がたまたま`"--help"`等のフラグ文字列と一致した場合に誤判定する（例: `create-issue.js --title "--help"`が意図せずhelp表示になる。`spawn-worker.js`にも同型のパターンあり。PR #85 Review Manager指摘で発覚）。値として消費したトークンはフラグ判定対象から除外すること。parseFlags を catch した際のヘルプ判定は生の `argv.includes('--help')` でなく `hasGenuineHelpRequest(argv, err.errors)` を使う（値欠落エラーが混ざっている間は `--help` を値として渡された可能性が高く、ヘルプに握りつぶさない。旧実装の `exitFlagMiss` 先行判定と同じ意味論）。
+- **フラグ/値の衝突**: `argv.includes('--help')`のように生の`argv`全体を見てフラグ判定すると、他のオプションの値がたまたま`"--help"`等のフラグ文字列と一致した場合に誤判定する（例: `create-issue.js --title "--help"`が意図せずhelp表示になる。`spawn-worker.js`にも同型のパターンあり。PR #85 Review Manager指摘で発覚）。値として消費したトークンはフラグ判定対象から除外すること。parseFlags を catch した際のヘルプ判定は生の `argv.includes('--help')` でなく `err.helpRequested` を使う（parseFlags が throw 時に確定済み。値欠落エラーが混ざっている間は false になり、`--help` を値として渡された場合にヘルプへ握りつぶさない。旧実装の `exitFlagMiss` 先行判定と同じ意味論。判定述語は `scripts/shared/workspace.js` の `hasGenuineHelpRequest`）。
 - **余分な位置引数の無視**: 想定外の位置引数を無言で無視すると、呼び出し側の誤用（引数の数え間違い等）に気づけない。位置引数の個数を検証し、想定外ならエラーにする。
 - **`--stdin`等の標準入力待ちオプション**: パイプ/リダイレクトなしで対話的に呼び出されるとハングする。`process.stdin.isTTY`をチェックし、TTYならエラーで即終了する。
 

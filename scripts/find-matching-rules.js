@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { parseFrontmatter } = require('./sync-rules');
-const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 
 const SPEC = {
   flags: { '--root': {} },
@@ -137,7 +137,7 @@ if (require.main === module) {
     ({ values, rest } = parseFlags(argv, SPEC));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    if (err.helpRequested) {
       console.log(USAGE);
       process.exit(0);
     }

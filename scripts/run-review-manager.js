@@ -18,7 +18,7 @@ const {
   reviewWorktreeBranchName, reviewWorktreeFetchRef, reviewWorktreeDir,
 } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
-const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 const { _validateAgainstSchema } = require('./shared/json-schema');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
@@ -1096,7 +1096,7 @@ if (require.main === module) {
       }));
     } catch (err) {
       if (err.name !== 'ArgsValidationError') throw err;
-      if (hasGenuineHelpRequest(argv, err.errors)) {
+      if (err.helpRequested) {
         console.log(USAGE);
         process.exit(0);
       }

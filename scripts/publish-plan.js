@@ -18,7 +18,7 @@
 'use strict';
 
 const { spawnSync } = require('./child-process');
-const { resolveWorkspace, parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { toWinPath } = require('./win-path');
 const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
@@ -210,7 +210,7 @@ if (require.main === module) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    if (err.helpRequested) {
       console.log(USAGE);
       process.exit(0);
     }

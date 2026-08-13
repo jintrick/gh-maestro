@@ -23,7 +23,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { resolveAgentConfig, resolveCouncilConfig, validateNonInteractiveTokens } = require('./shared/resolve-config');
-const { parseFlags, resolveWorkspace, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const {
   resolveSession,
   councilStatePath,
@@ -88,7 +88,7 @@ function parseArgs(argv) {
     ({ values, rest } = parseFlags(argv, SPEC));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) return { code: 0 };
+    if (err.helpRequested) return { code: 0 };
     return { code: 1, error: err.errors.map(e => e.message).join('\n') };
   }
   if (values['--help'] || values['-h']) return { code: 0 };

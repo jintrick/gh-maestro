@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
-const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS } = require('./shared/review-aspects');
 const { _validateAgainstSchema } = require('./shared/json-schema');
 const { atomicWriteJson } = require('./shared/atomic-write');
@@ -529,7 +529,7 @@ if (require.main === module) {
       }));
     } catch (err) {
       if (err.name !== 'ArgsValidationError') throw err;
-      if (hasGenuineHelpRequest(args, err.errors)) {
+      if (err.helpRequested) {
         console.log(USAGE);
         process.exit(0);
       }

@@ -22,7 +22,7 @@ const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
-const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS, FINDING_REQUIRED_FIELDS } = require('./shared/review-aspects');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
@@ -1278,7 +1278,7 @@ if (require.main === module) {
       }));
     } catch (err) {
       if (err.name !== 'ArgsValidationError') throw err;
-      if (hasGenuineHelpRequest(args, err.errors)) {
+      if (err.helpRequested) {
         console.log(USAGE);
         process.exit(0);
       }

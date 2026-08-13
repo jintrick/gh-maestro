@@ -19,7 +19,7 @@ const { isWorkerAlive } = require('./shared/worker-liveness');
 const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { sweepRegistry } = require('./process-lifecycle');
 const { atomicWriteJson } = require('./shared/atomic-write');
-const { parseFlags, resolveWorkspace, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const readStateLib = require('./shared/read-state');
 
@@ -120,7 +120,7 @@ if (require.main === module) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    if (err.helpRequested) {
       console.log(USAGE);
       process.exit(0);
     }

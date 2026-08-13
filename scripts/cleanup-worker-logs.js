@@ -17,7 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { parseFlags, resolveWorkspace, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { workerLogPath } = require('./shared/headless-launch');
 const { compactWorkerLog } = require('./shared/strip-thinking-token-lines');
 const { recordRoot } = require('./shared/record-paths');
@@ -48,9 +48,10 @@ if (require.main === module) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    // --help/-h 指定時に他エラー（値欠落等）があっても help を優先する。
-    // フラグの値として "--help" が誤消費されないのは spec booleans 宣言で構造的に保証される。
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    // ヘルプ要求かどうかは parseFlags が throw 時に確定済み。値欠落エラーが混ざっている
+    // 間は helpRequested=false になり、--help を値として渡された場合にヘルプへ握りつぶさない
+    // （判定の意味論は scripts/shared/workspace.js の hasGenuineHelpRequest 参照）。
+    if (err.helpRequested) {
       console.log(USAGE);
       process.exit(0);
     }

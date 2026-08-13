@@ -18,7 +18,7 @@ const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { killProcessTree } = require('./kill-tree');
 const { sweepRegistry } = require('./process-lifecycle');
 const { atomicWriteJson } = require('./shared/atomic-write');
-const { parseFlags, resolveWorkspace, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { resolveWorkerName } = require('./shared/workers-registry');
 const { ARTIFACTS, legacyWorkerOwner, recordPath } = require('./shared/record-paths');
 
@@ -54,7 +54,7 @@ if (require.main === module) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    if (err.helpRequested) {
       console.log(USAGE);
       process.exit(0);
     }

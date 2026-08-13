@@ -14,7 +14,7 @@ const { spawnSync } = require('./child-process');
 const fs = require('fs');
 const path = require('path');
 const { toWinPath } = require('./win-path');
-const { parseFlags, resolveWorkspace, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { isRetryableGhFailure, graphqlCreateIssue } = require('./shared/gh-fallback');
 
 const USAGE = `create-issue.js — GitHub Issue を作成し、body-file を必ず削除する
@@ -127,10 +127,10 @@ if (require.main === module) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    // 値欠落・未知フラグ等は throw でまとめて検出される。help 指定が併存する場合は
-    // help を優先する（フラグの値として "--help" が誤消費されないのは spec booleans
-    // 宣言で構造的に保証される）。
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    // ヘルプ要求かどうかは parseFlags が throw 時に確定済み。値欠落エラーが混ざっている
+    // 間は helpRequested=false になり、--help を値として渡された場合にヘルプへ握りつぶさない
+    // （判定の意味論は scripts/shared/workspace.js の hasGenuineHelpRequest 参照）。
+    if (err.helpRequested) {
       console.log(USAGE);
       process.exit(0);
     }

@@ -25,7 +25,7 @@ const { buildLoginShellExecArgs } = require('./agent-exec');
 const { resolveAgentConfig, resolveCouncilConfig, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { _validateAgainstSchema } = require('./shared/json-schema');
-const { parseFlags, resolveWorkspace, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const {
   resolveSession,
   councilInvestigationPath,
@@ -275,7 +275,7 @@ async function runCouncilInvestigation(argv) {
     ({ values, rest } = parseFlags(argv, SPEC));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    if (err.helpRequested) {
       printUsage(process.stdout);
       return 0;
     }

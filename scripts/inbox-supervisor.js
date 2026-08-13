@@ -36,7 +36,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
-const { resolveWorkspace, parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { resolveAgentConfig } = require('./shared/resolve-config');
 const { resolveAdapter } = require('./shared/inbox-adapters');
@@ -560,7 +560,7 @@ function main(argsOverride, opts = {}) {
     }));
   } catch (e) {
     if (e.name !== 'ArgsValidationError') throw e;
-    if (hasGenuineHelpRequest(args, e.errors)) {
+    if (e.helpRequested) {
       writeOut(USAGE);
       return { code: 0, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
     }

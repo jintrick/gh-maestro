@@ -6,7 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { parseFlags, resolveWorkspace, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { isProcessAlive } = require('./process-lifecycle');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
@@ -295,7 +295,7 @@ function main(argv) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) { console.log(USAGE); return 0; }
+    if (err.helpRequested) { console.log(USAGE); return 0; }
     for (const e of err.errors) console.error(`migrate-records: ${e.message}`);
     console.error(USAGE);
     return 1;

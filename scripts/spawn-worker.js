@@ -44,7 +44,7 @@ const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens }
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
 const { atomicWriteJson } = require('./shared/atomic-write');
-const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
 const { toWinPath } = require('./win-path');
 const { startExecution, markLaunchFailure } = require('./shared/execution-registry');
@@ -191,7 +191,7 @@ try {
   ({ values, rest } = parseFlags(argv, SPEC));
 } catch (err) {
   if (err.name !== 'ArgsValidationError') throw err;
-  if (hasGenuineHelpRequest(argv, err.errors)) {
+  if (err.helpRequested) {
     console.log(USAGE);
     process.exit(0);
   }

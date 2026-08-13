@@ -20,7 +20,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
-const { resolveWorkspace, parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { toWinPath } = require('./win-path');
 const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 const { markCommentResult, readRegistry } = require('./shared/execution-registry');
@@ -263,7 +263,7 @@ function main(argsOverride, envOverride, ioOverride) {
     }));
   } catch (e) {
     if (e.name !== 'ArgsValidationError') throw e;
-    if (hasGenuineHelpRequest(parsedArgs, e.errors)) {
+    if (e.helpRequested) {
       writeOut(USAGE);
       return { code: 0, lines: out, errLines: err };
     }

@@ -13,7 +13,7 @@
 const path = require('path');
 const { readFileSync, existsSync, rmSync } = require('fs');
 const { spawnSync } = require('./child-process');
-const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 const { getAssistant, removeAssistant } = require('./shared/assistants-registry');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { ARTIFACTS, recordPath } = require('./shared/record-paths');
@@ -281,7 +281,7 @@ if (require.main === module) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    if (err.helpRequested) {
       console.log(USAGE);
       process.exit(0);
     }

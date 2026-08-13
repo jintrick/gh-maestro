@@ -9,7 +9,7 @@
 'use strict';
 
 const { spawnSync } = require('./child-process');
-const { resolveWorkspace, parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { isRetryableGhFailure, graphqlCommentBody } = require('./shared/gh-fallback');
 
 const USAGE = `msg-read.js — GitHub Issue コメントの本文を読み出す
@@ -89,7 +89,7 @@ function main(argsOverride) {
     }));
   } catch (e) {
     if (e.name !== 'ArgsValidationError') throw e;
-    if (hasGenuineHelpRequest(args, e.errors)) {
+    if (e.helpRequested) {
       writeOut(USAGE);
       return { code: 0, lines: out, errLines: err };
     }

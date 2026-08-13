@@ -26,7 +26,7 @@ const path = require('path');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
 const { spawnSync } = require('./child-process');
-const { resolveWorkspace, parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // parseMarker は副作用の無い純粋なパース関数（gh呼び出し・state永続化・
 // プロセスレジストリ登録は一切含まない）なので、上記の「msg-poll.js を流用しない」制約とは
@@ -317,7 +317,7 @@ function parseArgs(args) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(args, err.errors)) return { help: true };
+    if (err.helpRequested) return { help: true };
     return { help: false, validationErrors: err.errors };
   }
   if (values['--help'] || values['-h']) return { help: true };

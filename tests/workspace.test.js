@@ -430,3 +430,62 @@ test('hasGenuineHelpRequest: 未知フラグエラーがあっても true', () =
 test('hasGenuineHelpRequest: --help が無ければ false', () => {
   assert.equal(hasGenuineHelpRequest(['--workspace', '/ws'], []), false);
 });
+
+// ── parseFlags が throw する ArgsValidationError.helpRequested（パーサー側で確定） ─────
+
+function captureArgsValidationError(args, spec) {
+  try {
+    parseFlags(args, spec);
+    assert.fail('ArgsValidationError が投げられるべき');
+  } catch (e) {
+    assert.equal(e.name, 'ArgsValidationError');
+    return e;
+  }
+}
+
+test('parseFlags: --help + 必須欠落は throw したエラーの helpRequested=true', () => {
+  const err = captureArgsValidationError(['--help'], {
+    flags: { '--pr': { required: true } },
+    booleans: ['--help', '-h'],
+  });
+  assert.equal(err.helpRequested, true);
+});
+
+test('parseFlags: -h + 必須欠落は throw したエラーの helpRequested=true', () => {
+  const err = captureArgsValidationError(['-h'], {
+    flags: { '--pr': { required: true } },
+    booleans: ['--help', '-h'],
+  });
+  assert.equal(err.helpRequested, true);
+});
+
+test('parseFlags: 値欠落が混ざると helpRequested=false（--help は値として渡された可能性）', () => {
+  const err = captureArgsValidationError(['--title', '--help'], {
+    flags: { '--title': {} },
+    booleans: ['--help', '-h'],
+  });
+  assert.equal(err.helpRequested, false);
+});
+
+test('parseFlags: 未知フラグ + --help は helpRequested=true', () => {
+  const err = captureArgsValidationError(['--bogus', '--help'], {
+    flags: { '--pr': { required: true } },
+    booleans: ['--help', '-h'],
+  });
+  assert.equal(err.helpRequested, true);
+});
+
+test('parseFlags: --help が無ければ helpRequested=false', () => {
+  const err = captureArgsValidationError(['--pr'], {
+    flags: { '--pr': { required: true } },
+  });
+  assert.equal(err.helpRequested, false);
+});
+
+test('parseFlags: 成功時は throw せず helpRequested を持たない', () => {
+  const { values } = parseFlags(['--title', 'x'], {
+    flags: { '--title': {} },
+    booleans: ['--help', '-h'],
+  });
+  assert.equal(values['--title'], 'x');
+});

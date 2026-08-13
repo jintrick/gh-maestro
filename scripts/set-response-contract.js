@@ -20,7 +20,7 @@
 'use strict';
 
 const { resolveWorkerName } = require('./shared/workers-registry');
-const { resolveWorkspace, parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { CONTRACT_TYPES, writeContract, clearContract } = require('./shared/response-contract');
 
 const SPEC = {
@@ -67,7 +67,7 @@ function main(argsOverride) {
     ({ values, rest } = parseFlags(args, SPEC));
   } catch (e) {
     if (e.name !== 'ArgsValidationError') throw e;
-    if (hasGenuineHelpRequest(args, e.errors)) {
+    if (e.helpRequested) {
       writeOut(USAGE);
       return { code: 0, lines: out, errLines: err };
     }

@@ -10,7 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('../child-process');
-const { parseFlags, hasGenuineHelpRequest } = require('../shared/workspace');
+const { parseFlags } = require('../shared/workspace');
 
 const USAGE = `run-checks.js — 言語エコシステム規約を検出してlint/format/typecheck/testを実行する
 
@@ -156,7 +156,7 @@ if (require.main === module) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    if (err.helpRequested) {
       console.log(USAGE);
       process.exit(0);
     }

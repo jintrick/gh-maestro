@@ -22,7 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
-const { resolveWorkspace, parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { validateField } = require('./shared/validate');
 const { isRetryableGhFailure, graphqlListComments } = require('./shared/gh-fallback');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
@@ -221,7 +221,7 @@ function parseArgs(args) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(args, err.errors)) {
+    if (err.helpRequested) {
       return { help: true, validationErrors: null };
     }
     return { help: false, validationErrors: err.errors };

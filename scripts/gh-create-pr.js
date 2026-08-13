@@ -14,7 +14,7 @@
 // 終了コード: 0=成功、1=エラー
 
 const { spawnSync } = require('./child-process');
-const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 
 const USAGE = `Usage:
   node gh-create-pr.js --title <title> --body <body> [--repo <owner/repo>]
@@ -118,7 +118,7 @@ function main(argv) {
     ({ values, rest } = parseFlags(argv, SPEC));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    if (err.helpRequested) {
       return { exitCode: 0, stdout: USAGE };
     }
     return { exitCode: 1, stderr: `gh-create-pr: ${err.errors.map(e => e.message).join('\n')}\n${USAGE}` };

@@ -74,7 +74,10 @@ function resolveWorkspace(workspaceArg) {
 /**
  * parseFlags の検証エラー。
  * errors プロパティに検証エラー一覧（{ message, kind, flag? }）を持つ。
- * 呼び出し側は catch して errors を表示し、自スクリプトの usage を出してから
+ * helpRequested プロパティに「--help/-h が真のヘルプ要求か」を parseFlags が throw 時点で
+ * 確定した結果を持つ（値欠落エラーが混ざっている場合は false）。
+ * 呼び出し側は生の argv から --help の有無を再判定せず、このプロパティだけを読む。
+ * 検証エラー時は errors を表示し、自スクリプトの usage を出してから
  * そのスクリプト本来の誤用時の終了コードで終了する（終了コードはスクリプトごとに
  * 現在の値を維持する。Issue #275 で一斉変更しない）。
  */
@@ -83,6 +86,7 @@ class ArgsValidationError extends Error {
     super(errors.map((e) => e.message).join('\n'));
     this.name = 'ArgsValidationError';
     this.errors = errors;
+    this.helpRequested = false;
   }
 }
 
@@ -110,7 +114,8 @@ class ArgsValidationError extends Error {
  *   values: 出現したフラグのみ（真偽フラグは true。任意フラグの欠落はキー不在=undefined。
  *           呼び出し側は `values['--x'] ?? 既定値` で明示的に既定値を与える）
  *   rest:   位置引数（未知の -- 始まりトークンは rest に入らず errors 側）
- * @throws {ArgsValidationError} 必須欠落・値欠落・未知フラグ・位置引数違反のいずれかがある場合
+ * @throws {ArgsValidationError} 必須欠落・値欠落・未知フラグ・位置引数違反のいずれかがある場合。
+ *   `--help`/`-h` をヘルプ表示へ逸らすべきかは err.helpRequested で判別できる（パーサー側で確定済み）
  */
 function parseFlags(args, spec) {
   if (arguments.length !== 2 || spec == null || Array.isArray(spec)) {
@@ -183,20 +188,34 @@ function parseFlags(args, spec) {
     errors.push({ message: `予期しない位置引数です: ${rest.slice(positionals.max).join(' ')}`, kind: 'too-many-positionals' });
   }
 
-  if (errors.length > 0) throw new ArgsValidationError(errors);
+  if (errors.length > 0) {
+    // 真のヘルプ要求かどうかをパーサー側で確定させ、呼び出し側は err.helpRequested を読むだけにする。
+    // 「catch で正しいヘルパーを正しい argv 変数で呼ぶ」という呼び出し側の注意に依存しない。
+    // 値欠落エラーが混ざっている間は --help を値として渡された可能性が高く、ヘルプ要求とみなさない
+    // （旧実装の exitFlagMiss 先行判定と同じ意味論。詳細は hasGenuineHelpRequest 参照）。
+    const err = new ArgsValidationError(errors);
+    err.helpRequested = hasGenuineHelpRequest(args, errors);
+    throw err;
+  }
   return { values, rest };
 }
 
 /**
- * ArgsValidationError を catch した際に、`--help`/`-h` をヘルプ表示へ逸らすべきかを判定する。
+ * parseFlags が throw する ArgsValidationError の helpRequested を決定する述語。
  *
  * 旧契約の parseFlags は値欠落を `exitFlagMiss` で返し、全呼び出し元が「値欠落をヘルプ判定より
  * 先にエラー扱い」していた。これは値欠落時に未消費の値トークンがたまたま `--help` と一致する
  * 場合にヘルプ表示へ握りつぶされる事故（argv-parsing-pitfalls.md「フラグ/値の衝突」）を防ぐため。
- * 新契約では値欠落は ArgsValidationError の missing-value として現れるため、それが混ざっている
- * 間はヘルプを優先しない（値として `--help` を渡された可能性が高く、真のヘルプ要求と区別できない）。
- * それ以外の検証エラー（必須欠落・未知フラグ・位置引数違反）は `--help` があれば真の要求として
- * ヘルプを優先する（例: `run-review-jobs --help` は必須フラグ欠落エラーに負けずに usage を出す）。
+ * 値欠落エラーが混ざっている間は `--help` を値として渡された可能性が高く、真のヘルプ要求と
+ * 区別できないため false を返す。それ以外の検証エラー（必須欠落・未知フラグ・位置引数違反）と
+ * `--help` が併存する場合は真の要求として true を返す
+ * （例: `run-review-jobs --help` は必須フラグ欠落エラーに負けずに usage を出す）。
+ *
+ * この述語は parseFlags の throw 時点で、引数（parseFlags に渡した生の argv）と検証エラー一覧から
+ * 評価され、結果は ArgsValidationError.helpRequested に載る。呼び出し側は本関数を直接呼ばず、
+ * catch したエラーの err.helpRequested を読む。生の argv を呼び出し側が再構築・再指定する
+ * 必要がなく、「呼び出し側が正しいヘルパーを正しい argv で呼び忘れる」事故を構造的に排除する
+ * （呼び忘れても失敗側は「--help で usage が出ない」であり、ヘルプへ握りつぶす方向には倒れない）。
  *
  * @param {string[]} args  process.argv.slice(2)
  * @param {{kind: string}[]} errors  ArgsValidationError の errors 一覧

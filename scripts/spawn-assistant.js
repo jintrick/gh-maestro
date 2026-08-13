@@ -25,7 +25,7 @@ const { checkAgentExists } = require('./agent-exec');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { launchAgentInWindow } = require('./shared/pane-launch');
 const { setAssistant } = require('./shared/assistants-registry');
-const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
 
 const AGENT_ID = 'agy-interactive';
 
@@ -128,7 +128,7 @@ if (require.main === module) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    if (err.helpRequested) {
       console.log(USAGE);
       process.exit(0);
     }

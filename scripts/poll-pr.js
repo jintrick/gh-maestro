@@ -16,7 +16,7 @@
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { startReviewManager } = require('./start-review-manager');
-const { resolveWorkspace, parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -124,7 +124,7 @@ if (require.main === module) {
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (hasGenuineHelpRequest(argv, err.errors)) {
+    if (err.helpRequested) {
       console.log(USAGE);
       process.exit(0);
     }
