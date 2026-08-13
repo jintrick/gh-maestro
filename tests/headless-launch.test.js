@@ -9,12 +9,30 @@ const path = require('path');
 const headlessLaunch = require('../scripts/shared/headless-launch');
 const { launchAgentHeadless, workerLogPath, SHIM_PATH } = headlessLaunch;
 const { runShim } = require('../scripts/shared/headless-shim');
+const { buildWorkerEnv } = require('../scripts/shared/worker-env');
 
 // 実プロセスは 0 個 spawn する（.claude/rules/test-process-spawn-safety.md）。
 // spawn は必ず注入したフェイクへ差し替えてから呼ぶ。
 
 let tmpDir;
 let spawnCalls;
+
+/**
+ * 親プロセスから継承されうる値として process.env.GH_MAESTRO_BASE_BRANCH を一時的に設定する。
+ * launchAgentHeadless の最終envは `{ ...process.env, ...HEADLESS_ENV, ...env }` として構築される
+ * ため、キーを「含めない」だけでは親の値が残る（Issue #269 レビュー指摘）。空文字・指定値で
+ * 上書きされることを最終的なspawn envで検証するために使う。
+ */
+function withInheritedBaseBranch(branch, fn) {
+  const saved = process.env.GH_MAESTRO_BASE_BRANCH;
+  process.env.GH_MAESTRO_BASE_BRANCH = branch;
+  try {
+    return fn();
+  } finally {
+    if (saved === undefined) delete process.env.GH_MAESTRO_BASE_BRANCH;
+    else process.env.GH_MAESTRO_BASE_BRANCH = saved;
+  }
+}
 
 /**
  * spawn のフェイク。呼び出し引数を記録し、擬似的な子プロセスハンドルを返す。
@@ -140,6 +158,47 @@ test('launchAgentHeadless: env をプロセス環境にマージして渡す', (
   assert.equal(env.GH_MAESTRO_WORKER, 'issue-151-x');
   assert.equal(env.GH_MAESTRO_WORKSPACE, tmpDir);
   assert.equal(env.PATH ?? env.Path, process.env.PATH ?? process.env.Path);
+});
+
+test('launchAgentHeadless: 初回起動で base 未指定なら継承した GH_MAESTRO_BASE_BRANCH を空文字で消す（フェイルクローズ）', () => {
+  // spawn-worker.js の初回起動は buildWorkerEnv の戻り値を env として渡す（Issue #269）。
+  // 最終envは `{ ...process.env, ...env }` なので、キーを「含めない」だけでは親から継承した値
+  // （例: 報告時に msg-send.js 経由で子プロセスへ混入する値）が残る。base を持たないワーカーが
+  // 無関係なブランチを base にPRを作らないよう、空文字で上書きされることを最終的なspawn envで検証する。
+  headlessLaunch._setSpawn(fakeSpawn());
+
+  withInheritedBaseBranch('main', () => {
+    launchAgentHeadless({
+      argv: ['claude-ds', '--print'],
+      cwd: tmpDir,
+      logPath: path.join(tmpDir, 'w.log'),
+      env: buildWorkerEnv({ workerName: 'issue-1-impl', workspace: tmpDir, baseBranch: null }),
+    });
+  });
+
+  const { env } = spawnCalls[0].options;
+  assert.equal(env.GH_MAESTRO_BASE_BRANCH, '', '継承値(main)は除去され空文字になる');
+  assert.equal(env.GH_MAESTRO_WORKER, 'issue-1-impl');
+  assert.equal(env.GH_MAESTRO_WORKSPACE, tmpDir);
+});
+
+test('launchAgentHeadless: 初回起動で base 指定なら継承値を上書きして GH_MAESTRO_BASE_BRANCH に渡る', () => {
+  // 初回起動（spawn-worker.js）と resume配送（inbox-supervisor.js）で同じ buildWorkerEnv を
+  // 通すため、どちらの経路でも最終envに base が入る。親から継承した値（main）を指定値（dev）が
+  // 上書きすることも最終的なspawn envで検証する。
+  headlessLaunch._setSpawn(fakeSpawn());
+
+  withInheritedBaseBranch('main', () => {
+    launchAgentHeadless({
+      argv: ['claude-ds', '--print'],
+      cwd: tmpDir,
+      logPath: path.join(tmpDir, 'w.log'),
+      env: buildWorkerEnv({ workerName: 'issue-1-impl', workspace: tmpDir, baseBranch: 'dev' }),
+    });
+  });
+
+  const { env } = spawnCalls[0].options;
+  assert.equal(env.GH_MAESTRO_BASE_BRANCH, 'dev', '継承値(main)を上書きして dev が入る');
 });
 
 test('launchAgentHeadless: onExit フックはshimへ渡し、ログfd閉鎖後に実行できる形にする', () => {

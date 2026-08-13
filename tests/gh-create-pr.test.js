@@ -1,6 +1,6 @@
 'use strict';
 
-const { test, after } = require('node:test');
+const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 // gh-create-pr.js は require.main===module 時のみCLIを実行するため、
@@ -9,15 +9,15 @@ const assert = require('node:assert/strict');
 // （.claude/rules/test-process-spawn-safety.md 準拠）。
 
 // createPr の NODE_TEST_CONTEXT ガードは「テスト実行中の外部副作用（実PR作成）を機械的に
-// 拒否する」構造的対策（Issue #202）。このテストファイルでは実PR作成の引数組み立てを
-// 検証するため、テスト実行中だけ一時的に除去する。ガード自体の動作は
-// 「NODE_TEST_CONTEXT 設定時はブロックされる」テストで明示的に確認する。
-const _savedNodeTestContext = process.env.NODE_TEST_CONTEXT;
-delete process.env.NODE_TEST_CONTEXT;
-after(() => {
-  if (_savedNodeTestContext === undefined) delete process.env.NODE_TEST_CONTEXT;
-  else process.env.NODE_TEST_CONTEXT = _savedNodeTestContext;
-});
+// 拒否する」構造的対策（Issue #202）。実PR作成の引数組み立てを検証する各テストは、
+// createPr を呼ぶ直前にだけガードを一時的に除去する（withGuardBypassed）。
+// ガード自体の動作は「NODE_TEST_CONTEXT 設定時はブロックされる」テストで明示的に確認する。
+//
+// 注: モジュール読み込み時に NODE_TEST_CONTEXT を除去してはいけない。node --test は
+// ファイル読み込み時点でこの環境変数の状態を見て子プロセス分離するか決めるため、
+// 読み込み時の除去は「このファイル全体を子プロセスで実行し、個別テスト数が集計されない」
+// 副作用を生む（Issue #269 レビュー確認で判明。実際に dev との差分で集計数が -11 になった）。
+// ガードの除去は必ずテストコールバック内・実行時に限定し、呼び出し後に元の値へ戻す。
 
 const ghCreatePrPath = require.resolve('../scripts/gh-create-pr');
 
@@ -61,6 +61,23 @@ function withBaseBranch(branch, fn) {
   } finally {
     if (saved === undefined) delete process.env.GH_MAESTRO_BASE_BRANCH;
     else process.env.GH_MAESTRO_BASE_BRANCH = saved;
+  }
+}
+
+/**
+ * createPr の NODE_TEST_CONTEXT ガード（実PR作成の機械的拒否）を、このコールバック内だけで
+ * 除去して実引数組み立てを検証できるようにする。実行時に限定するのは、モジュール読み込み時
+ * に除去すると node --test がこのファイルを子プロセス分離して集計から外すため
+ * （上記ヘッダーコメント参照）。ガード自体の検証は「NODE_TEST_CONTEXT 設定時はブロック」テスト。
+ */
+function withGuardBypassed(fn) {
+  const saved = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  try {
+    return fn();
+  } finally {
+    if (saved === undefined) delete process.env.NODE_TEST_CONTEXT;
+    else process.env.NODE_TEST_CONTEXT = saved;
   }
 }
 
@@ -110,7 +127,7 @@ test('createPr: 環境変数のbaseを --base として gh pr create に渡す�
   // 回帰テスト（Issue #269）: コーダーの標準的な `git push -u` で upstream が自ブランチを
   // 指すようになっても、base は環境変数から解決され --base に渡る。git は一切呼ばれない。
   const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/123\n' }));
-  const result = mod.createPr({ title: 'Fix bug', body: 'Closes #1', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } });
+  const result = withGuardBypassed(() => mod.createPr({ title: 'Fix bug', body: 'Closes #1', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } }));
   assert.equal(result.url, 'https://github.com/owner/repo/pull/123');
   assert.equal(result.status, 0);
 
@@ -132,14 +149,14 @@ test('createPr: base が自ブランチと同名でも base==head にならず b
   // 本Issueの直接の事故形状: upstream が自ブランチを指すと旧実装は base==head で失敗した。
   // 新実装では env の値がそのまま --base に渡る。
   const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/1\n' }));
-  mod.createPr({ title: 'Fix', body: 'Closes #1', env: { GH_MAESTRO_BASE_BRANCH: 'issue-269-coder-fix-pr-base-resolution' } });
+  withGuardBypassed(() => mod.createPr({ title: 'Fix', body: 'Closes #1', env: { GH_MAESTRO_BASE_BRANCH: 'issue-269-coder-fix-pr-base-resolution' } }));
   const ghCall = calls.find(c => c.cmd === 'gh');
   assert.equal(ghCall.args[3], 'issue-269-coder-fix-pr-base-resolution');
 });
 
 test('createPr: --repo が指定された場合に渡される', () => {
   const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/456\n' }));
-  mod.createPr({ title: 'Fix', body: 'Closes #1', repo: 'custom/repo', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } });
+  withGuardBypassed(() => mod.createPr({ title: 'Fix', body: 'Closes #1', repo: 'custom/repo', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } }));
   const ghCall = calls.find(c => c.cmd === 'gh');
   assert.ok(ghCall.args.includes('--repo'));
   assert.ok(ghCall.args.includes('custom/repo'));
@@ -147,14 +164,14 @@ test('createPr: --repo が指定された場合に渡される', () => {
 
 test('createPr: gh 失敗時に status と stderr を返す', () => {
   const { mod } = loadModule(() => ({ status: 1, stdout: '', stderr: 'gh: error: ...' }));
-  const result = mod.createPr({ title: 'Fix', body: 'Closes #1', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } });
+  const result = withGuardBypassed(() => mod.createPr({ title: 'Fix', body: 'Closes #1', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } }));
   assert.equal(result.status, 1);
   assert.equal(result.stderr, 'gh: error: ...');
 });
 
 test('createPr: bodyFile が指定された場合に --body-file で渡される', () => {
   const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/789\n' }));
-  mod.createPr({ title: 'Fix', bodyFile: '/tmp/body.md', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } });
+  withGuardBypassed(() => mod.createPr({ title: 'Fix', bodyFile: '/tmp/body.md', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } }));
   const ghCall = calls.find(c => c.cmd === 'gh');
   assert.ok(ghCall.args.includes('--body-file'));
   assert.ok(ghCall.args.includes('/tmp/body.md'));
@@ -177,7 +194,7 @@ test('createPr: NODE_TEST_CONTEXT 設定時は実PR作成をブロックする�
 
 test('createPr: GH_MAESTRO_BASE_BRANCH 未設定なら実PRを作らず throw する', () => {
   const { mod, calls } = loadModule();
-  assert.throws(() => mod.createPr({ title: 'Fix', body: 'Closes #1', env: {} }), {
+  assert.throws(() => withGuardBypassed(() => mod.createPr({ title: 'Fix', body: 'Closes #1', env: {} })), {
     message: /GH_MAESTRO_BASE_BRANCH が設定されていません/,
   });
   assert.equal(calls.length, 0, 'フェイルクローズ時は gh を呼ばない');
@@ -235,21 +252,21 @@ test('main: 未知の引数でエラー', () => {
 
 test('main: 正常系でURLを出力する', () => {
   const { mod } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/123\n' }));
-  const result = withBaseBranch('dev', () => mod.main(['--title', 'Fix bug', '--body', 'Closes #1']));
+  const result = withBaseBranch('dev', () => withGuardBypassed(() => mod.main(['--title', 'Fix bug', '--body', 'Closes #1'])));
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout, 'https://github.com/owner/repo/pull/123');
 });
 
 test('main: gh 失敗時はエラー終了', () => {
   const { mod } = loadModule(() => ({ status: 1, stdout: '', stderr: 'gh error details' }));
-  const result = withBaseBranch('dev', () => mod.main(['--title', 'Fix', '--body', 'Closes #1']));
+  const result = withBaseBranch('dev', () => withGuardBypassed(() => mod.main(['--title', 'Fix', '--body', 'Closes #1'])));
   assert.equal(result.exitCode, 1);
   assert.ok(result.stderr.includes('gh pr create 失敗'));
 });
 
 test('main: GH_MAESTRO_BASE_BRANCH 未設定なら明確に失敗する（誤ったbaseでPRを作らない）', () => {
   const { mod, calls } = loadModule();
-  const result = mod.main(['--title', 'Fix', '--body', 'Closes #1']);
+  const result = withGuardBypassed(() => mod.main(['--title', 'Fix', '--body', 'Closes #1']));
   assert.equal(result.exitCode, 1);
   assert.ok(result.stderr.includes('GH_MAESTRO_BASE_BRANCH'));
   assert.equal(calls.length, 0, 'フェイルクローズ時は gh を呼ばない');
