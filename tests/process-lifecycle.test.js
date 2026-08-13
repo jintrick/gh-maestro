@@ -1114,6 +1114,32 @@ test('サブプロセス経由: sweep は CLI 主経路でも除外リストを�
   }
 });
 
+test('サブプロセス経由: 解析不能な workers.json で sweep は fail-closed の exit 1 を返す（PR #268 指摘回帰）', () => {
+  const { spawnSync } = require('child_process');
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-sweep-cli-corrupt-'));
+  try {
+    const ghDir = path.join(ws, '.gh-maestro');
+    fs.mkdirSync(ghDir, { recursive: true });
+    // 解析不能な workers.json。修復前は readWorkersRaw の null が「ファイル不在」と同列に
+    // 扱われ、除外リストが空集合として正常返却されて kill ループ・housekeeping が続行した
+    // （PR #268 レビュー指摘）。修正後は fail-closed で exit 1 を返す。
+    fs.writeFileSync(path.join(ghDir, 'workers.json'), '{ broken json');
+    // 生存しうるワーカーのログも置いておく: 修正前なら除外漏れのまま housekeeping 対象になる。
+    fs.mkdirSync(path.join(ghDir, 'records', 'issue', '5', 'workers', 'issue-5-active'), { recursive: true });
+    fs.writeFileSync(path.join(ghDir, 'records', 'issue', '5', 'workers', 'issue-5-active', 'worker.log'), 'x'.repeat(1000));
+
+    const r = spawnSync(process.execPath, [SCRIPT, 'sweep', '--workspace', ws], {
+      encoding: 'utf8',
+      env: cleanSpawnEnv(),
+    });
+    assert.equal(r.status, 1, `fail-closed で exit 1 になるべき。stdout=${r.stdout} stderr=${r.stderr}`);
+    assert.match(`${r.stdout}\n${r.stderr}`, /除外リストの構築に失敗/, 'fail-closed のエラーが報告される');
+    assert.ok(fs.existsSync(path.join(ghDir, 'workers.json')), 'fail-closed では破壊的処理（削除等）を行わない');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test('sweepRegistry: 除外リスト構築失敗時は fail-closed で kill も housekeeping も実行しない', () => {
   const plc = loadModule();
   const pidsDir = plc.pidsDir(workspace);

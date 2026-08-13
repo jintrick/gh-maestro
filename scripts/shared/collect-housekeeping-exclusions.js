@@ -23,7 +23,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const { readWorkersRaw } = require('./workers-registry');
+const { readWorkersRaw, workersJsonPath } = require('./workers-registry');
 const { isWorkerAlive } = require('./worker-liveness');
 const { createNormalWorkerStore, isLeaseLive } = require('./worker-lease');
 const { reviewArtifactPath } = require('./review-manager-paths');
@@ -41,12 +41,20 @@ function _isProcessAlive(pid) {
  *
  * ディレクトリ欠落（新規ワークスペース等）は空集合として扱う。一方、例外の伝播は
  * フェイルクローズの入口であり、sweepRegistry 側で掃除を中断させる（組み立て不能のまま
- * 稼働中ワーカーのログを整理しない。Issue #267）。個々のレコードが壊れている場合は
- * 各情報源の読み取り側（store.read / readWorkersRaw 等）が null に潰して無害化する。
+ * 稼働中ワーカーのログを整理しない。Issue #267）。
+ *
+ * 「ファイルが存在するのに読み取り・解析できない」状態は「ファイル不在」と同じ扱いに
+ * しない。不在＝正常な空状態だが、存在するのに読めない・parseできない・型不正は
+ * 「そのワーカーの生存が判定できない」ことであり、黙って除外漏れにすると稼働中ワーカーの
+ * ログを整理・ローテーションしかねない。この区別は workers.json（レジストリ全体）だけで
+ * なく、lease と Review Manager の manager.running の各レコードについても行う
+ * （PR #268 レビュー指摘）。PID registry（.gh-maestro/pids/）は sweepRegistry 側が破損
+ * エントリを results.cleaned として能動的に検出・削除する既存契約があり、取り違えはない。
  *
  * @param {string} workspace ワークスペース絶対パス
  * @returns {{ workerNames: Set<string>, reviewPrs: Set<string> }}
  *   除外対象のワーカー名（通常 headless ワーカー）と Review Manager 対象 PR 番号
+ * @throws {Error} いずれかの情報源が「存在するのに読み取り・解析不能」の場合
  */
 function collectHousekeepingExclusions(workspace) {
   const workerNames = new Set();
@@ -60,6 +68,12 @@ function collectHousekeepingExclusions(workspace) {
     for (const [workerName, entry] of Object.entries(rawWorkers)) {
       if (workerName !== 'orchestrator' && isWorkerAlive(entry)) workerNames.add(workerName);
     }
+  } else if (fs.existsSync(workersJsonPath(workspace))) {
+    // readWorkersRaw は「ファイル不在」と「全リトライ後の parse 失敗・型不正」の両方で
+    // null を返す。存在するのに null はレジストリ全体が読み取り・解析不能であり、
+    // 空集合として正常返却すると稼働中ワーカーを除外できないまま housekeeping が続行
+    // される（PR #268 レビュー指摘）。fail-closed で例外を伝播させる。
+    throw new Error(`workers.json の読み取り・解析に失敗しました: ${workersJsonPath(workspace)}`);
   }
 
   // lease が live のワーカーも除外対象へ加える。
@@ -69,6 +83,14 @@ function collectHousekeepingExclusions(workspace) {
     for (const name of fs.readdirSync(leasesDir).filter(n => n.endsWith('.json'))) {
       const workerName = name.slice(0, -5);
       const entry = store.read(workerName);
+      // store.read は「不在」と「破損・解析不能」の両方で null を返す。このループは
+      // readdirSync で存在を確認した直後のため、null かつファイルが残っているのは
+      // 読み取り不能・解析不能を意味する（列挙直後に消えた = ワーカー終了による lease
+      // 解放は skip でよい）。破損 lease の生存判定は不能であり、黙って除外漏れにすると
+      // 稼働中ワーカーのログを整理しかねない（PR #268 レビュー指摘）。fail-closed で伝播。
+      if (entry === null && fs.existsSync(path.join(leasesDir, name))) {
+        throw new Error(`lease の読み取り・解析に失敗しました: ${path.join(leasesDir, name)}`);
+      }
       if (isLeaseLive(entry)) workerNames.add(entry.workerName || workerName);
     }
   }
@@ -81,9 +103,22 @@ function collectHousekeepingExclusions(workspace) {
     for (const entry of fs.readdirSync(prDir, { withFileTypes: true })) {
       if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
       const runningPath = reviewArtifactPath(ghDir, entry.name, '.running');
-      let pid;
-      try { pid = Number(fs.readFileSync(runningPath, 'utf8').trim()); } catch { continue; }
-      if (Number.isInteger(pid) && pid > 0 && _isProcessAlive(pid)) reviewPrs.add(entry.name);
+      let raw;
+      try {
+        raw = fs.readFileSync(runningPath, 'utf8');
+      } catch (e) {
+        // ENOENT = RM 未起動（または終了済み）→ 対象外。それ以外の読み取り不能
+        // （存在するのに読めない）は RM の生存を判定できないため fail-closed で伝播
+        // （PR #268 レビュー指摘）。
+        if (e.code === 'ENOENT') continue;
+        throw new Error(`manager.running の読み取りに失敗しました: ${runningPath}: ${e.message}`);
+      }
+      const pid = Number(raw.trim());
+      if (!Number.isInteger(pid) || pid <= 0) {
+        // 有効な PID 文字列でない = 解析不能。RM の生存を判定できないため fail-closed。
+        throw new Error(`manager.running の PID が不正です（解析不能）: ${runningPath}`);
+      }
+      if (_isProcessAlive(pid)) reviewPrs.add(entry.name);
     }
   }
 

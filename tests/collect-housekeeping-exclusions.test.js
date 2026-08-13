@@ -172,3 +172,80 @@ test('collectHousekeepingExclusions: records/pr の非PRディレクトリは無
     fs.rmSync(ws, { recursive: true, force: true });
   }
 });
+
+// ── PR #268 レビュー指摘: 「ファイル不在」と「読み取り・解析不能」を区別する ──────
+//
+// readWorkersRaw / store.read は「不在」と「解析不能・型不正」の両方で null を返す。
+// 不在は正常な空状態として空集合でよいが、存在するのに読めない・parseできない状態を
+// 不在と同じ扱いにすると、除外リストが空集合として正常返却され、fail-closed に到達せず
+// 稼働中ワーカーを除外できないまま housekeeping が続行する（PR #268 レビュー指摘）。
+// 以下は「存在するのに解析不能」な情報源が例外として伝播することを確認する。
+
+test('collectHousekeepingExclusions: 解析不能な workers.json は例外を投げる（fail-closed）', () => {
+  const { che } = fresh();
+  const ws = tmpWorkspace();
+  try {
+    const ghDir = path.join(ws, '.gh-maestro');
+    fs.mkdirSync(ghDir, { recursive: true });
+    fs.writeFileSync(path.join(ghDir, 'workers.json'), '{broken json');
+    // readWorkersRaw は parse を maxAttempts 回リトライしてから null を返すため、
+    // existsSync 分岐により例外として伝播する。
+    assert.throws(() => che.collectHousekeepingExclusions(ws), /workers\.json の読み取り・解析に失敗/);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('collectHousekeepingExclusions: 型不正（配列）な workers.json は例外を投げる（fail-closed）', () => {
+  const { che } = fresh();
+  const ws = tmpWorkspace();
+  try {
+    const ghDir = path.join(ws, '.gh-maestro');
+    fs.mkdirSync(ghDir, { recursive: true });
+    fs.writeFileSync(path.join(ghDir, 'workers.json'), '[]');
+    assert.throws(() => che.collectHousekeepingExclusions(ws), /workers\.json の読み取り・解析に失敗/);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('collectHousekeepingExclusions: 破損 lease は例外を投げる（fail-closed）', () => {
+  const { che } = fresh();
+  const ws = tmpWorkspace();
+  try {
+    const leasesDir = path.join(ws, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    // 列挙された lease ファイルが存在するのに store.read が null（= 解析不能）を返す。
+    fs.writeFileSync(path.join(leasesDir, 'issue-2-coder.json'), '{broken lease');
+    assert.throws(() => che.collectHousekeepingExclusions(ws), /lease の読み取り・解析に失敗/);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('collectHousekeepingExclusions: PID 不正な manager.running は例外を投げる（fail-closed）', () => {
+  const { che } = fresh();
+  const ws = tmpWorkspace();
+  try {
+    const reviewDir = path.join(ws, '.gh-maestro', 'records', 'pr', '42', 'review');
+    fs.mkdirSync(reviewDir, { recursive: true });
+    fs.writeFileSync(path.join(reviewDir, 'manager.running'), 'not-a-pid');
+    assert.throws(() => che.collectHousekeepingExclusions(ws), /manager\.running の PID が不正/);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('collectHousekeepingExclusions: manager.running が無い PR はスキップする（RM 未起動）', () => {
+  const { che } = fresh();
+  const ws = tmpWorkspace();
+  try {
+    // .running が無い = ENOENT → RM 未起動として対象外（fail-closed にならない）。
+    const reviewDir = path.join(ws, '.gh-maestro', 'records', 'pr', '42', 'review');
+    fs.mkdirSync(reviewDir, { recursive: true });
+    const { reviewPrs } = che.collectHousekeepingExclusions(ws);
+    assert.equal(reviewPrs.size, 0);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
