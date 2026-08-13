@@ -20,7 +20,7 @@ const {
   buildReviewManagerAgentArgs, runAgentHeadless, spawnAgentWithStdinEof,
   validateArtifactContent, atomicCopyStaging,
   boundedCleanup, pollForArtifact,
-  superviseReviewManager, clearStaleIncompleteSentinel,
+  superviseReviewManager, clearStaleIncompleteSentinel, resetRetryCount,
   findIncompleteSentinel, readIncompleteSentinel, incompleteSentinelOutcome,
   persistReviewManifest,
   _validateFindingShape, _validateAgainstSchema,
@@ -45,10 +45,13 @@ after(() => {
 test('buildPrompt instructs the coverage-ledger + tool-driven review flow', () => {
   const { prompt } = buildPrompt({
     pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
+    mainGhDir: 'C:\\main\\.gh-maestro',
   });
   assert.match(prompt, /PR=5/);
   assert.match(prompt, /REPO=o\/r/);
   assert.match(prompt, /ISSUE=260/);
+  // 再試行カウンタ永続化先（メインワークスペース ghDir）を渡す（Issue #273）
+  assert.match(prompt, /GH_DIR=C:\/main\/\.gh-maestro/);
   // 7葉の adopted / excluded 分類を指示
   assert.match(prompt, /adopted \/ excluded/);
   // run-review-jobs.js でジョブを実行するよう指示
@@ -64,14 +67,17 @@ test('buildPrompt instructs the coverage-ledger + tool-driven review flow', () =
 test('buildPrompt normalizes backslash paths to forward slashes', () => {
   const { prompt } = buildPrompt({
     pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
+    mainGhDir: 'C:\\main\\.gh-maestro',
   });
   assert.match(prompt, /WORKSPACE=C:\/ws/);
   assert.match(prompt, /OUTPUT=C:\/ws\/out\.json/);
+  assert.match(prompt, /GH_DIR=C:\/main\/\.gh-maestro/);
 });
 
 test('buildPrompt: SCRIPTS path is included so RM can invoke tool scripts', () => {
   const { prompt } = buildPrompt({
     pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
+    mainGhDir: 'C:\\main\\.gh-maestro',
   });
   assert.match(prompt, /SCRIPTS=/);
   // finalize-review.js が OUTPUT へ書き込む指示が含まれる
@@ -81,13 +87,14 @@ test('buildPrompt: SCRIPTS path is included so RM can invoke tool scripts', () =
 test('buildPrompt: SCRIPTSディレクトリに同居する他ワーカー用ツール（msg-send.js等）の使用を禁止する指示が含まれる', () => {
   const { prompt } = buildPrompt({
     pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json',
+    mainGhDir: 'C:\\main\\.gh-maestro',
   });
   assert.match(prompt, /msg-send\.js/);
   assert.match(prompt, /完了報告/);
 });
 
 test('buildPrompt: 異なる出力パスで呼び出しても prompt が正しく生成される', () => {
-  const opts = { pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json' };
+  const opts = { pr: '5', repo: 'o/r', workspace: 'C:\\ws', outputFile: 'C:\\ws\\out.json', mainGhDir: 'C:\\main\\.gh-maestro' };
   const a = buildPrompt(opts);
   const b = buildPrompt(opts);
   assert.ok(typeof a.prompt === 'string');
@@ -754,6 +761,43 @@ test('clearStaleIncompleteSentinel: 別PRのセンチネルは残す', () => {
   fs.writeFileSync(other, 'done');
   clearStaleIncompleteSentinel(ghDir, 123);
   assert.ok(fs.existsSync(other), 'unrelated PR sentinel should remain');
+});
+
+// ── Issue #273: resetRetryCount（再試行カウンタの周回開始リセット） ─────────
+// 新レビュー周回の開始（superviseReviewManager ステップ1）で、前周回の再試行カウンタを消す。
+// 残っていると新周回が最初から「上限到達」と誤判定される（受け入れ条件「新しいレビューが
+// 始まるときには回数がリセットされ、前のレビューの回数を引きずらない」）。
+
+test('resetRetryCount: 存在するカウンタを削除する', () => {
+  const testDir = path.join(tmpBase, 'reset-retry-exists');
+  fs.mkdirSync(testDir, { recursive: true });
+  const ghDir = path.join(testDir, '.gh-maestro');
+  fs.mkdirSync(ghDir, { recursive: true });
+  const counter = path.join(ghDir, 'records', 'pr', '123', 'review', 'manager.retries.json');
+  fs.mkdirSync(path.dirname(counter), { recursive: true });
+  fs.writeFileSync(counter, '{"attempts":2}');
+  resetRetryCount(ghDir, 123);
+  assert.ok(!fs.existsSync(counter), 'counter should be removed');
+});
+
+test('resetRetryCount: 存在しなければno-op（エラーにしない）', () => {
+  const testDir = path.join(tmpBase, 'reset-retry-missing');
+  fs.mkdirSync(testDir, { recursive: true });
+  const ghDir = path.join(testDir, '.gh-maestro');
+  fs.mkdirSync(ghDir, { recursive: true });
+  resetRetryCount(ghDir, 456); // 例外が投げられなければok
+});
+
+test('resetRetryCount: 別PRのカウンタは残す', () => {
+  const testDir = path.join(tmpBase, 'reset-retry-other');
+  fs.mkdirSync(testDir, { recursive: true });
+  const ghDir = path.join(testDir, '.gh-maestro');
+  fs.mkdirSync(ghDir, { recursive: true });
+  const other = path.join(ghDir, 'records', 'pr', '999', 'review', 'manager.retries.json');
+  fs.mkdirSync(path.dirname(other), { recursive: true });
+  fs.writeFileSync(other, '{"attempts":2}');
+  resetRetryCount(ghDir, 123);
+  assert.ok(fs.existsSync(other), 'unrelated PR counter should remain');
 });
 
 // ── Issue #271: センチネル検出（main/worktree両方）と manifest 永続化 ─────────

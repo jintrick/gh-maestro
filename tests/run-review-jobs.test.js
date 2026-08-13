@@ -20,7 +20,13 @@ const {
   notifyManifestValidationFailure,
   notifyManifestProblem,
   resolveNotifyPr,
+  retryCountPath,
+  readRetryCount,
+  incrementRetryCount,
+  applyRetryGate,
+  MAX_REVIEW_ATTEMPTS,
   _setGhForTest,
+  _setFinalizeReviewForTest,
 } = require('../scripts/run-review-jobs');
 
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES } = require('../scripts/shared/review-aspects');
@@ -706,4 +712,153 @@ test('CLI: --pr / --repo は必須で、欠落・不正は作業前に exit 2（
   assert.equal(noRepo.status, 2, `--repo 欠落は exit 2（クラッシュではない）: ${noRepo.stderr}`);
   assert.match(noRepo.stderr, /--repo は必須です/);
   assert.doesNotMatch(noRepo.stderr, /TypeError/);
+
+  // --gh-dir 欠落 → exit 2（Issue #273。--repo と同型の null.trim() クラッシュにしないこと）
+  const noGhDir = run([...baseArgs, '--pr', '42', '--repo', 'o/r']);
+  assert.equal(noGhDir.status, 2, `--gh-dir 欠落は exit 2（クラッシュではない）: ${noGhDir.stderr}`);
+  assert.match(noGhDir.stderr, /--gh-dir は必須です/);
+  assert.doesNotMatch(noGhDir.stderr, /TypeError/);
+});
+
+// ── Issue #273: 再試行カウンタ（決定的上限） ───────────────────────────────────
+
+test('retryCountPath: ghDir配下のrecords/pr/<PR>/review/manager.retries.jsonを解決する', () => {
+  const ghDir = path.resolve('C:/ws/.gh-maestro');
+  assert.equal(
+    retryCountPath(ghDir, 42),
+    path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.retries.json'),
+  );
+});
+
+test('readRetryCount: ファイル欠落・壊れ・非整数・負数は0を返す', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rrc-'));
+  const ghDir = path.join(workspace, '.gh-maestro');
+  try {
+    assert.equal(readRetryCount(ghDir, 42), 0); // 欠落
+    fs.mkdirSync(path.dirname(retryCountPath(ghDir, 42)), { recursive: true });
+    fs.writeFileSync(retryCountPath(ghDir, 42), '{ not json', 'utf8');
+    assert.equal(readRetryCount(ghDir, 42), 0); // 壊れ
+    fs.writeFileSync(retryCountPath(ghDir, 42), JSON.stringify({ attempts: 'x' }), 'utf8');
+    assert.equal(readRetryCount(ghDir, 42), 0); // 非整数
+    fs.writeFileSync(retryCountPath(ghDir, 42), JSON.stringify({ attempts: -1 }), 'utf8');
+    assert.equal(readRetryCount(ghDir, 42), 0); // 負数
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('incrementRetryCount: 1から始まり1ずつ増える', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'irc-'));
+  const ghDir = path.join(workspace, '.gh-maestro');
+  try {
+    assert.equal(incrementRetryCount(ghDir, 42), 1);
+    assert.equal(incrementRetryCount(ghDir, 42), 2);
+    assert.equal(readRetryCount(ghDir, 42), 2);
+    const data = JSON.parse(fs.readFileSync(retryCountPath(ghDir, 42), 'utf8'));
+    assert.equal(data.attempts, 2);
+    assert.equal(data.pr, 42);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('applyRetryGate: 上限未満は gated:false でインクリメント、上限到達で gated:true', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'arg-'));
+  const ghDir = path.join(workspace, '.gh-maestro');
+  try {
+    assert.deepEqual(applyRetryGate({ ghDir, pr: 42 }), { gated: false, attempts: 1 });
+    assert.deepEqual(applyRetryGate({ ghDir, pr: 42 }), { gated: false, attempts: 2 });
+    const gated = applyRetryGate({ ghDir, pr: 42 });
+    assert.equal(gated.gated, true);
+    assert.equal(gated.reason, 'retry-limit-reached');
+    assert.equal(gated.attempts, MAX_REVIEW_ATTEMPTS);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('applyRetryGate: ghDir または pr が欠落・不正なら gated:false（プログラム呼び出しはゲートしない）', () => {
+  assert.deepEqual(applyRetryGate({ ghDir: null, pr: 42 }), { gated: false });
+  assert.deepEqual(applyRetryGate({ ghDir: '/x/.gh-maestro', pr: null }), { gated: false });
+  assert.deepEqual(applyRetryGate({ ghDir: '/x/.gh-maestro', pr: 'abc' }), { gated: false });
+});
+
+test('validateManifest: retry_policy を含むjobも検証に通る（未使用設定は無視される）', () => {
+  const manifest = {
+    pr: 123,
+    repo: 'owner/repo',
+    headRefOid: 'abc123',
+    coverage_ledger: {
+      leaves: ALL_LEAF_IDS.map(id => ({
+        id,
+        trunk: Object.entries(TRUNK_TO_LEAVES).find(([, leaves]) => leaves.includes(id))[0],
+        decision: 'adopted',
+        rationale: null,
+      })),
+    },
+    jobs: [{
+      id: 'job-1',
+      leaf_ids: [...ALL_LEAF_IDS],
+      aspect: 'Correctness',
+      trunk_dir: 'skills/gh-maestro-reviewer/correctness',
+      leaf_files: ALL_LEAF_IDS.map(id => 'skills/gh-maestro-reviewer/' + id + '.md'),
+      retry_policy: { max_attempts: 99 },
+    }],
+  };
+  const { valid, errors } = validateManifest(manifest);
+  assert.equal(valid, true, 'unexpected errors: ' + errors.join('; '));
+});
+
+test('runJobsFromManifest: 上限到達時にジョブを起動せず finalizeReview(incomplete) を呼んで拒否する', async () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-limit-'));
+  try {
+    const manifestPath = path.join(testDir, 'manifest.json');
+    const resultsPath = path.join(testDir, 'results.json');
+    const ghDir = path.join(testDir, 'main', '.gh-maestro');
+
+    const validManifest = {
+      pr: 42, repo: 'o/r', headRefOid: 'abc',
+      coverage_ledger: {
+        leaves: ALL_LEAF_IDS.map(id => ({
+          id,
+          trunk: Object.entries(TRUNK_TO_LEAVES).find(([, lvs]) => lvs.includes(id))[0],
+          decision: 'adopted', rationale: null,
+        })),
+      },
+      jobs: ALL_LEAF_IDS.map((id, i) => ({
+        id: 'job-' + i, leaf_ids: [id], aspect: 'Correctness',
+        trunk_dir: 'skills/gh-maestro-reviewer/correctness',
+        leaf_files: ['skills/gh-maestro-reviewer/' + id + '.md'],
+      })),
+    };
+    fs.writeFileSync(manifestPath, JSON.stringify(validManifest), 'utf8');
+
+    // カウンタを上限まで進める（2回実行済み）
+    incrementRetryCount(ghDir, 42);
+    incrementRetryCount(ghDir, 42);
+    assert.equal(readRetryCount(ghDir, 42), MAX_REVIEW_ATTEMPTS);
+
+    const finalizeCalls = [];
+    _setFinalizeReviewForTest(async (rp, mode, out, ws) => {
+      finalizeCalls.push({ rp, mode, out, ws });
+      return { ok: true, summary: { mode: 'incomplete', commentUrl: 'url', sentinelPath: '/x' } };
+    });
+
+    try {
+      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, 42, 'o/r', ghDir);
+      assert.equal(result.ok, false);
+      assert.equal(result.summary.retryLimitReached, true);
+      assert.match(result.summary.error, /retry limit reached/);
+      assert.equal(finalizeCalls.length, 1, 'finalizeReview を1回呼ぶ');
+      assert.equal(finalizeCalls[0].mode, 'incomplete');
+      assert.equal(finalizeCalls[0].rp, resultsPath);
+      assert.equal(finalizeCalls[0].ws, testDir);
+      // カウンタは上限のまま増えない（拒否時にインクリメントしない）
+      assert.equal(readRetryCount(ghDir, 42), MAX_REVIEW_ATTEMPTS);
+    } finally {
+      _setFinalizeReviewForTest(null);
+    }
+  } finally {
+    fs.rmSync(testDir, { recursive: true, force: true });
+  }
 });

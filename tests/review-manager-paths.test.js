@@ -56,6 +56,17 @@ test('reviewArtifactPath: .log でもpath-traversalなprは拒否される', () 
   assert.throws(() => reviewArtifactPath(ghDir, '../../evil', '.log'), /invalid PR number/);
 });
 
+test('reviewArtifactPath: .retries.json はPR recordsのreview配下に置く', () => {
+  const ghDir = path.resolve('C:/ws/.gh-maestro');
+  const result = reviewArtifactPath(ghDir, '42', '.retries.json');
+  assert.equal(result, path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.retries.json'));
+});
+
+test('reviewArtifactPath: .retries.json でもpath-traversalなprは拒否される', () => {
+  const ghDir = path.resolve('C:/ws/.gh-maestro');
+  assert.throws(() => reviewArtifactPath(ghDir, '../../evil', '.retries.json'), /invalid PR number/);
+});
+
 // ── reviewWorktreeBranchName / reviewWorktreeFetchRef ───────────────────
 
 test('reviewWorktreeBranchName builds a PR-scoped branch name', () => {

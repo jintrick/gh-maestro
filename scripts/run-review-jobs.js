@@ -4,7 +4,7 @@
 // run-review-jobs.js — RMが書いた実行manifestを受け取り、指定されたジョブをheadless起動し、
 // 全ジョブの完了を待って結果を永続化する。判断を一切加えない機械的な実行器。
 //
-// Usage: node run-review-jobs.js --manifest <path> --results <path> [--workspace <path>]
+// 使い方（フラグ・終了コード）は --help（下記 USAGE 定数）を参照。
 //
 // manifest は RM（Review Manager）が書き出したJSONファイル。coverage_ledger（7葉の
 // 採用/除外会計）と jobs（実行するジョブのリスト）を含む。
@@ -15,8 +15,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn, spawnSync } = require('./child-process');
-const { writeSentinel } = require('./finalize-review');
+const { writeSentinel, finalizeReview } = require('./finalize-review');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
+const { atomicWriteJson } = require('./shared/atomic-write');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
@@ -27,10 +28,14 @@ const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS, FINDING_REQUIRED_FIELDS } 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
 const DEFAULT_JOB_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes per job
 const DEFAULT_TOTAL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes total
+// 1レビュー周回あたりに run-review-jobs.js が実行計画を実行できる合計回数
+// （初回＋再試行）。council の MAX_PARTICIPANT_ATTEMPTS（=2）と同じ「合計試行回数」
+// セマンティクス: attempt 1,2 は許容し、attempt 3 を拒否する。
+const MAX_REVIEW_ATTEMPTS = 2;
 
 const USAGE = `run-review-jobs.js — RMの実行manifestに従いレビュージョブをheadless起動する
 
-Usage: node run-review-jobs.js --manifest <path> --results <path> --pr <N> --repo <owner/repo> [--workspace <path>]
+Usage: node run-review-jobs.js --manifest <path> --results <path> --pr <N> --repo <owner/repo> --gh-dir <path> [--workspace <path>]
 
 Options:
   --manifest <path>    RMが書き出した実行manifestのJSONファイルパス
@@ -38,6 +43,8 @@ Options:
   --pr <N>             必須。通知先PR番号（検証前の起動コンテキスト。正整数のみ受理）
   --repo <owner/repo>  必須。リポジトリ（検証前の起動コンテキスト）。manifestの読み込み・
                        解析に失敗した場合でも通知先として使う（manifest.repo は取れないため）
+  --gh-dir <path>      必須。メインワークスペースの .gh-maestro ディレクトリ（再試行カウンタの
+                       永続化先。RMのworktreeではなくメインワークスペース側を渡すこと）
   --workspace <path>   ワークスペースの絶対パス（デフォルト: cwd）
   --job-timeout <ms>   ジョブごとのタイムアウト（ms、デフォルト: 600000）
   --total-timeout <ms> 全体のタイムアウト（ms、デフォルト: 1800000）
@@ -51,7 +58,11 @@ Output:
     上で終了コード2で終了する（不完全レビューとして通知済み。レビュー担当は再試行しない。
     書き直し判断はオーケストレーターが行う）。
     投稿に失敗した場合は成功センチネルを書かず notify-failed センチネルを書き、
-    監督側が失敗（exit 1）として扱う。`;
+    監督側が失敗（exit 1）として扱う。
+  終了コード3: 再試行上限到達（MAX_REVIEW_ATTEMPTS）。ジョブを起動せず、既存の不完全レビュー
+    経路（finalize-review.js --mode incomplete）でPRへプレーンコメント投稿と .incomplete
+    センチネル作成を行った上で終了する（不完全レビューとして通知済み。レビュー担当は再試行
+    しない。再レビューの判断はオーケストレーターが行う）。`;
 
 // ── manifest検証 ───────────────────────────────────────────────────────────────
 
@@ -198,13 +209,6 @@ function validateJobs(jobs, adoptedLeaves, errors) {
     }
     if (!Array.isArray(job.leaf_files) || job.leaf_files.length === 0) {
       errors.push(`job ${job.id}: leaf_files must be a non-empty array`);
-    }
-
-    // retry_policy 検証（オプショナル）
-    if (job.retry_policy) {
-      if (typeof job.retry_policy.max_attempts !== 'number' || job.retry_policy.max_attempts < 1) {
-        errors.push(`job ${job.id}: retry_policy.max_attempts must be a positive integer`);
-      }
     }
   }
 
@@ -810,6 +814,110 @@ function _setGhForTest(impl) {
   _ghForTest = impl;
 }
 
+let _finalizeReviewForTest = null;
+
+/**
+ * テスト用: finalizeReview（不完全レビュー経路）を注入する。実プロセスを0個spawnする
+ * テストから使う（_setGhForTest と同じパターン。finalizeReview は内部で gh pr comment を
+ * spawnSync するため、上限到達経路のテストでは注入で置き換える）。
+ * @param {(resultsPath: string, mode: string, outputPath: string|null, workspace: string) => Promise<object>} impl
+ */
+function _setFinalizeReviewForTest(impl) {
+  _finalizeReviewForTest = impl;
+}
+
+// ── 再試行カウンタ（決定的上限） ────────────────────────────────────────────────
+// レビュージョブ再試行の回数上限を、モデルの自己申告ではなく決定的コードで強制する
+// （Issue #273 / AGENTS.md「Headless Retry Is An Anti-Pattern」）。
+//
+// カウンタは「1レビュー周回あたりに run-review-jobs.js が実行計画を実行した回数」を
+// ラウンド単位で記録する。RMの再試行は「全ジョブを含むmanifestの再実行」であるため、
+// 回数の自然な単位はラウンド（=本スクリプトの呼び出し1回）である。job id は再実行ごとに
+// 書き換わりうるが、ラウンド単位ならそれに依存しない。
+//
+// 永続化先はメインワークスペースの records/pr/<PR>/review/manager.retries.json
+// （--gh-dir で渡されるメインワークスペースの .gh-maestro 配下）。results（実行ごと
+// 全上書き）や manifest（モデルが書く＝モデルがリセットできる）ではなく、RM の worktree 外
+// に置くことで「レビュー担当が書き換えたりリセットしたりできない場所」を満たす。
+// リセットは監督側（run-review-manager.js）が新レビュー周回の開始（.running ロック作成）
+// 時に resetRetryCount で行う。本スクリプト側では一切リセットしない。
+//
+// 上限到達時の出口は既存の不完全レビュー経路（finalize-review.js --mode incomplete）を
+// 再利用する（新しい通知経路は作らない）。不完全コメントには最終実行で成功したジョブの
+// 指摘内容が含まれる。
+
+/**
+ * 再試行カウンタファイルのパスを解決する。
+ * @param {string} ghDir メインワークスペースの .gh-maestro ディレクトリ
+ * @param {string|number} pr 正整数のPR番号
+ * @returns {string}
+ */
+function retryCountPath(ghDir, pr) {
+  return reviewArtifactPath(ghDir, pr, '.retries.json');
+}
+
+/**
+ * 再試行カウンタを読む。欠落・壊れ・非整数は 0（初回実行）として扱う。
+ * @param {string} ghDir
+ * @param {string|number} pr
+ * @returns {number} これまでの実行回数（非負整数）
+ */
+function readRetryCount(ghDir, pr) {
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(retryCountPath(ghDir, pr), 'utf8'));
+  } catch {
+    return 0;
+  }
+  if (data && typeof data === 'object' && Number.isInteger(data.attempts) && data.attempts >= 0) {
+    return data.attempts;
+  }
+  return 0;
+}
+
+/**
+ * 再試行カウンタを1つ進めて永続化する。書き込み失敗は throw する（呼び出し元が
+ * フェイルクローズで処理する。カウンタを進められないままジョブを実行すると、
+ * 次回以降も同じ回数と判定され上限が効かなくなるため、黙って続行しない）。
+ *
+ * @param {string} ghDir
+ * @param {string|number} pr
+ * @returns {number} 更新後の実行回数
+ */
+function incrementRetryCount(ghDir, pr) {
+  const next = readRetryCount(ghDir, pr) + 1;
+  atomicWriteJson(retryCountPath(ghDir, pr), {
+    pr: Number(pr),
+    attempts: next,
+    updated_at: new Date().toISOString(),
+  });
+  return next;
+}
+
+/**
+ * 再試行上限を判定し、未達ならカウンタを進める（ゲート）。
+ *
+ * ghDir / pr のどちらかが使えない場合（プログラム呼び出しで省略された場合）は
+ * ゲートを適用せず gated:false を返す。本番（CLI）では --gh-dir / --pr が必須のため
+ * 常に適用される。
+ *
+ * @param {object} opts
+ * @param {string|null} opts.ghDir メインワークスペースの .gh-maestro（nullならゲートしない）
+ * @param {string|number|null} opts.pr
+ * @returns {{gated: boolean, reason?: string, attempts?: number}}
+ */
+function applyRetryGate({ ghDir, pr }) {
+  const notifyPr = resolveNotifyPr([pr]);
+  if (!ghDir || !notifyPr) {
+    return { gated: false };
+  }
+  const count = readRetryCount(ghDir, notifyPr);
+  if (count >= MAX_REVIEW_ATTEMPTS) {
+    return { gated: true, reason: 'retry-limit-reached', attempts: count };
+  }
+  return { gated: false, attempts: incrementRetryCount(ghDir, notifyPr) };
+}
+
 // ── メイン ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -825,9 +933,11 @@ function _setGhForTest(impl) {
  *   通知を中断しない）。
  * @param {string} [repo] 検証前の起動コンテキスト（CLI --repo）由来のリポジトリ。
  *   manifestの読み込み・解析失敗時は manifest.repo が取れないため、これを使う。
+ * @param {string} [ghDir] メインワークスペースの .gh-maestro ディレクトリ（再試行カウンタの
+ *   永続化先）。CLI --gh-dir 由来。省略時（プログラム呼び出し）は再試行ゲートを適用しない。
  * @returns {Promise<{ok: boolean, summary: object}>}
  */
-async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo) {
+async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo, ghDir) {
   // 1. manifest読み込み
   let manifestRaw;
   try {
@@ -875,6 +985,27 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
     return {
       ok: false,
       summary: { error: `manifest validation failed`, details: validation.errors, notification },
+    };
+  }
+
+  // 2.5 再試行上限ゲート（Issue #273）。
+  // manifest検証（上）は「再試行しない」経路のため attempt を消費せず、ここから先の
+  // ジョブ実行ループにだけ上限を掛ける。上限到達時はジョブを起動せず、既存の不完全
+  // レビュー経路（finalizeReview --mode incomplete）で通知してから拒否する。
+  const gate = applyRetryGate({ ghDir, pr });
+  if (gate.gated) {
+    // 既存の不完全レビュー経路を再利用（新しい通知経路は作らない）。results は前回実行の
+    // スナップショットが残っており、そこから成功ジョブの指摘内容を不完全コメントに載せる。
+    // finalizeReview が失敗しても（results 欠落等）、上限はそのまま維持して拒否する。
+    const incomplete = await (_finalizeReviewForTest || finalizeReview)(resultsPath, 'incomplete', null, workspace);
+    return {
+      ok: false,
+      summary: {
+        error: `retry limit reached (${MAX_REVIEW_ATTEMPTS} attempts max)`,
+        retryLimitReached: true,
+        attempts: gate.attempts,
+        incomplete,
+      },
     };
   }
 
@@ -980,7 +1111,13 @@ module.exports = {
   notifyManifestValidationFailure,
   notifyManifestProblem,
   resolveNotifyPr,
+  retryCountPath,
+  readRetryCount,
+  incrementRetryCount,
+  applyRetryGate,
+  MAX_REVIEW_ATTEMPTS,
   _setGhForTest,
+  _setFinalizeReviewForTest,
   ALL_LEAF_IDS,
   TRUNK_TO_LEAVES,
 };
@@ -989,7 +1126,7 @@ module.exports = {
 if (require.main === module) {
   (async () => {
     const args = process.argv.slice(2);
-    const valueFlags = ['--manifest', '--results', '--workspace', '--pr', '--repo', '--job-timeout', '--total-timeout'];
+    const valueFlags = ['--manifest', '--results', '--workspace', '--pr', '--repo', '--gh-dir', '--job-timeout', '--total-timeout'];
     const { values, rest, exitFlagMiss } = parseFlags(args, valueFlags, ['--help', '-h']);
 
     if (exitFlagMiss) {
@@ -1032,6 +1169,15 @@ if (require.main === module) {
       console.error(USAGE);
       process.exit(2);
     }
+    // --gh-dir は再試行カウンタの永続化先（メインワークスペースの .gh-maestro）。
+    // --repo と同じく parseFlags は欠落を null で返すため、null.trim() の TypeError
+    // クラッシュにしない（Issue #273 / PR #272 の --repo と同型のクラッシュ回避）。
+    const ghDir = values['--gh-dir'];
+    if (ghDir == null || String(ghDir).trim() === '') {
+      console.error('--gh-dir は必須です（メインワークスペースの .gh-maestro ディレクトリ）');
+      console.error(USAGE);
+      process.exit(2);
+    }
     const jobTimeoutMs = values['--job-timeout'] ? parseInt(values['--job-timeout'], 10) : DEFAULT_JOB_TIMEOUT_MS;
     const totalTimeoutMs = values['--total-timeout'] ? parseInt(values['--total-timeout'], 10) : DEFAULT_TOTAL_TIMEOUT_MS;
 
@@ -1040,11 +1186,13 @@ if (require.main === module) {
       process.exit(2);
     }
 
-    const result = await runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo);
+    const result = await runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo, ghDir);
 
     if (!result.ok) {
       console.error(JSON.stringify(result.summary));
-      process.exit(2);
+      // 再試行上限到達は既に不完全レビューとして通知済み。manifest検証失敗（exit 2）と
+      // 区別するため専用の終了コード3で終了する（RMはこれを見て再試行しない）。
+      process.exit(result.summary.retryLimitReached ? 3 : 2);
     }
 
     console.log(JSON.stringify(result.summary));

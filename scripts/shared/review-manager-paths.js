@@ -45,6 +45,7 @@ function reviewArtifactPath(ghDir, pr, suffix) {
     '.json': ARTIFACTS.REVIEW_MANAGER_JSON,
     '.running': ARTIFACTS.REVIEW_MANAGER_RUNNING,
     '.incomplete': ARTIFACTS.REVIEW_MANAGER_INCOMPLETE,
+    '.retries.json': ARTIFACTS.REVIEW_MANAGER_RETRY_COUNT,
     '.manifest.json': ARTIFACTS.REVIEW_MANIFEST,
   };
   const artifact = artifactBySuffix[suffix];

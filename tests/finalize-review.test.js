@@ -147,6 +147,71 @@ test('buildIncompleteComment includes success, failure, and excluded sections', 
   assert.match(comment, /leaf correctness\/api-contract missing/);
 });
 
+test('buildIncompleteComment: 成功ジョブの指摘内容を含む（Issue #273）', () => {
+  const finding = {
+    aspect: 'Correctness',
+    path: 'src/foo.ts',
+    line_anchor: 'await save(user)',
+    summary: '永続化が成功を返す前に失われる',
+    severity: 'MAJOR',
+    severity_rationale: 'API成功後に永続化失敗するとデータ損失',
+    body: '## 観測した事実\n\n永続化前に成功を返す。\n\n## 放置すると何が起きるか\n\nデータ損失。',
+    verified_references: ['src/foo.ts', 'src/userRepo.ts'],
+  };
+  const results = {
+    manifest_ref: { pr: 5, repo: 'o/r', headRefOid: 'abc' },
+    coverage_ledger: {
+      leaves: [
+        { id: 'correctness/logic-invariants', trunk: 'Correctness', decision: 'adopted', rationale: null },
+        { id: 'correctness/api-contract', trunk: 'Correctness', decision: 'adopted', rationale: null },
+      ],
+    },
+    jobs: [
+      { id: 'job-1', status: 'success', leaf_ids: ['correctness/logic-invariants'], findings: [finding] },
+      { id: 'job-2', status: 'failed', leaf_ids: ['correctness/api-contract'], error: 'timeout' },
+    ],
+  };
+  const gateResult = {
+    passed: false,
+    failures: ['adopted leaf correctness/api-contract has only failed job results'],
+    successLeaves: ['correctness/logic-invariants'],
+    failedLeaves: ['correctness/api-contract'],
+    excludedLeaves: [],
+  };
+  const comment = buildIncompleteComment(results, gateResult);
+  assert.match(comment, /最後の実行で成功したジョブの指摘/);
+  assert.match(comment, /MAJOR/);
+  assert.match(comment, /Correctness/);
+  assert.match(comment, /src\/foo\.ts/);
+  assert.match(comment, /永続化が成功を返す前に失われる/);
+  assert.match(comment, /await save\(user\)/);
+  assert.match(comment, /データ損失/);
+  assert.match(comment, /src\/userRepo\.ts/);
+});
+
+test('buildIncompleteComment: 成功ジョブのfindingsが無ければ指摘セクションを出さない', () => {
+  const results = {
+    manifest_ref: { pr: 5, repo: 'o/r', headRefOid: 'abc' },
+    coverage_ledger: {
+      leaves: [
+        { id: 'correctness/logic-invariants', trunk: 'Correctness', decision: 'adopted', rationale: null },
+      ],
+    },
+    jobs: [
+      { id: 'job-1', status: 'success', leaf_ids: ['correctness/logic-invariants'], findings: [] },
+    ],
+  };
+  const gateResult = {
+    passed: false,
+    failures: [],
+    successLeaves: ['correctness/logic-invariants'],
+    failedLeaves: [],
+    excludedLeaves: [],
+  };
+  const comment = buildIncompleteComment(results, gateResult);
+  assert.doesNotMatch(comment, /最後の実行で成功したジョブの指摘/);
+});
+
 test('writeSentinel creates .incomplete file', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gmsl-'));
   try {

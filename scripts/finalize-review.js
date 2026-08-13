@@ -225,6 +225,46 @@ function buildIncompleteComment(results, gateResult) {
     lines.push('（なし）');
   }
 
+  // 最後の実行で成功したジョブの指摘内容（Issue #273: 再試行上限で打切りになっても、
+  // 30分かけて集めた指摘を捨てない）。results は実行のたび全上書きされるため、ここに載るのは
+  // 「最終スナップショット」で成功したジョブの findings のみ（前回成功・今回失敗したジョブの
+  // findings は仕様上残らない）。body は複数行のMarkdownを含みうるため <details> で折りたたみ、
+  // 本文のMarkdown整形を保ったまま保持する。
+  const successFindings = [];
+  for (const jr of results.jobs || []) {
+    if (jr.status === 'success' && Array.isArray(jr.findings)) {
+      successFindings.push(...jr.findings);
+    }
+  }
+  if (successFindings.length > 0) {
+    lines.push('');
+    lines.push('### 最後の実行で成功したジョブの指摘');
+    lines.push('');
+    lines.push(`最終スナップショットの成功ジョブから集約（${successFindings.length} 件）。`);
+    lines.push('');
+    for (const f of successFindings) {
+      const severity = f.severity || '?';
+      const aspect = f.aspect || '?';
+      const findingPath = f.path || '?';
+      const summary = f.summary || '(summaryなし)';
+      lines.push('<details>');
+      lines.push(`<summary><b>[${severity}] [${aspect}] ${findingPath}</b> — ${summary}</summary>`);
+      lines.push('');
+      if (f.line_anchor) lines.push(`行アンカー: \`${f.line_anchor}\``);
+      if (f.severity_rationale) lines.push(`判定根拠: ${f.severity_rationale}`);
+      if (Array.isArray(f.verified_references) && f.verified_references.length > 0) {
+        lines.push(`参照: ${f.verified_references.join(', ')}`);
+      }
+      if (f.body) {
+        lines.push('');
+        lines.push(String(f.body));
+      }
+      lines.push('');
+      lines.push('</details>');
+      lines.push('');
+    }
+  }
+
   lines.push('');
   lines.push('### 失敗/未完了の葉');
   lines.push('');
