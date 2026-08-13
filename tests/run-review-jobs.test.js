@@ -21,6 +21,9 @@ const {
   notifyManifestProblem,
   resolveNotifyPr,
   retryCountPath,
+  retryCountLockPath,
+  acquireRetryCountLock,
+  releaseRetryCountLock,
   readRetryCount,
   incrementRetryCount,
   applyRetryGate,
@@ -762,6 +765,35 @@ test('incrementRetryCount: 1から始まり1ずつ増える', () => {
   }
 });
 
+test('acquireRetryCountLock/releaseRetryCountLock: ロックを取得・解放でき、解放後に残留しない', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rl-'));
+  const ghDir = path.join(workspace, '.gh-maestro');
+  try {
+    const lockPath = retryCountLockPath(ghDir, 42);
+    acquireRetryCountLock(lockPath);
+    assert.ok(fs.existsSync(lockPath), 'ロック取得でロックファイルが作られる');
+    releaseRetryCountLock(lockPath);
+    assert.ok(!fs.existsSync(lockPath), '解放でロックファイルが消える');
+    // 解放後に再取得できる（残留ロックでデッドロックしない）
+    acquireRetryCountLock(lockPath);
+    releaseRetryCountLock(lockPath);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('applyRetryGate: ゲート通過後にロックファイルが残留しない', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'arglock-'));
+  const ghDir = path.join(workspace, '.gh-maestro');
+  try {
+    applyRetryGate({ ghDir, pr: 42 });
+    applyRetryGate({ ghDir, pr: 42 });
+    assert.ok(!fs.existsSync(retryCountLockPath(ghDir, 42)), 'ゲート後にロックファイルが残留しない');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test('applyRetryGate: 上限未満は gated:false でインクリメント、上限到達で gated:true', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'arg-'));
   const ghDir = path.join(workspace, '.gh-maestro');
@@ -783,7 +815,7 @@ test('applyRetryGate: ghDir または pr が欠落・不正なら gated:false（
   assert.deepEqual(applyRetryGate({ ghDir: '/x/.gh-maestro', pr: 'abc' }), { gated: false });
 });
 
-test('validateManifest: retry_policy を含むjobも検証に通る（未使用設定は無視される）', () => {
+test('validateManifest: retry_policy を含むjobは検証に落ちる（廃止設定は受理しない、Issue #273）', () => {
   const manifest = {
     pr: 123,
     repo: 'owner/repo',
@@ -806,7 +838,11 @@ test('validateManifest: retry_policy を含むjobも検証に通る（未使用�
     }],
   };
   const { valid, errors } = validateManifest(manifest);
-  assert.equal(valid, true, 'unexpected errors: ' + errors.join('; '));
+  assert.equal(valid, false, 'retry_policy は廃止済み。受理すべきでない');
+  assert.ok(
+    errors.some(e => e.includes('retry_policy is no longer supported')),
+    '廃止理由がエラーに含まれる: ' + errors.join('; '),
+  );
 });
 
 test('runJobsFromManifest: 上限到達時にジョブを起動せず finalizeReview(incomplete) を呼んで拒否する', async () => {

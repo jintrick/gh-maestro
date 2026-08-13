@@ -596,11 +596,18 @@ function clearStaleIncompleteSentinel(ghDir, pr) {
  * run-review-jobs.js が書き込む。前周回が打切り（上限到達）で終了した後、同じPRで再レビューを
  * 開始すると古いカウンタが残ったままだと新周回が最初から「上限到達」と誤判定されてしまうため、
  * 新たなレビュー周回の開始（.running ロック作成）時に必ず消す（clearStaleIncompleteSentinel と
- * 同位置・同型のリセット。Issue #273 受け入れ条件「新しいレビューが始まるときには回数が
- * リセットされ、前のレビューの回数を引きずらない」）。best-effort: 存在しなければ何もしない。
+ * 同位置。Issue #273 受け入れ条件「新しいレビューが始まるときには回数がリセットされ、
+ * 前のレビューの回数を引きずらない」）。存在しなければ何もしない。
+ *
+ * 削除に失敗した場合はフェイルクローズで例外を投げる（best-effort にしない）。削除失敗のまま
+ * 進むと、新しい Review Manager の最初の run-review-jobs.js 呼び出しが古い attempts:2 を読んで
+ * 即座に上限到達と誤判定し、ジョブを1件も実行しない（レビューが黙って空振りし、orchestrator には
+ * 不完全レビューとしてしか届かない）。Windows の一時的なファイルロック（PR #251/#253/#259 で
+ * 対処済みの実在事象）で unlinkSync が EPERM/EACCES になるケースを黙って流さない。
  *
  * @param {string} ghDir   .gh-maestro ディレクトリ（メインワークスペース）
  * @param {string|number} pr レビュー対象 PR 番号（reviewArtifactPath が正整数検証する）
+ * @throws {Error} カウンタ削除に失敗した場合（続行すると新周回が上限到達と誤判定される）
  */
 function resetRetryCount(ghDir, pr) {
   const counterPath = reviewArtifactPath(ghDir, pr, '.retries.json');
@@ -610,9 +617,11 @@ function resetRetryCount(ghDir, pr) {
       console.warn(`run-review-manager: 前周回の再試行カウンタ ${path.basename(counterPath)} を削除しました（再レビュー開始）`);
     }
   } catch (e) {
-    // 削除に失敗しても再レビュー自体は続行する（best-effort）。ただし黙って消えないように
-    // ログには残す。
-    console.warn(`run-review-manager: 再試行カウンタ削除に失敗しました（続行します）: ${e.message}`);
+    if (e && e.code === 'ENOENT') {
+      // 存在確認と削除の間に別プロセスが消した（レース）。成功扱いで良い。
+      return;
+    }
+    throw new Error(`再試行カウンタのリセットに失敗しました（続行すると新周回が上限到達と誤判定されます）: ${e.message}`);
   }
 }
 
@@ -791,7 +800,13 @@ async function superviseReviewManager({
   // 再試行カウンタも同じ周回開始タイミングでリセットする（Issue #273）。
   // 前周回が打切り（上限到達）で終了した後に同じPRを再レビューすると、古いカウンタが
   // 残ったままでは新周回が最初から上限到達と誤判定されるため。
-  resetRetryCount(ghDir, pr);
+  // リセット失敗はフェイルクローズ（resetRetryCount が throw）。黙って続行すると
+  // 新周回がジョブを1件も実行しないため、setup-failed として異常終了する。
+  try {
+    resetRetryCount(ghDir, pr);
+  } catch (e) {
+    return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir: null, reason: e.message };
+  }
 
   log(`run-review-manager started pr=${pr} repo=${repo}`);
 

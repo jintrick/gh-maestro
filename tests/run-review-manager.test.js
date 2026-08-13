@@ -800,6 +800,21 @@ test('resetRetryCount: 別PRのカウンタは残す', () => {
   assert.ok(fs.existsSync(other), 'unrelated PR counter should remain');
 });
 
+test('resetRetryCount: 削除失敗（ディレクトリ等）は throw する（フェイルクローズ、Issue #273 レビュー指摘）', () => {
+  const testDir = path.join(tmpBase, 'reset-retry-fail');
+  fs.mkdirSync(testDir, { recursive: true });
+  const ghDir = path.join(testDir, '.gh-maestro');
+  fs.mkdirSync(ghDir, { recursive: true });
+  // カウンタパスを「ディレクトリ」として作ることで unlinkSync を失敗させる
+  // （unlinkSync はディレクトリを削除できない。Windows では EPERM/EACCES）。
+  const counter = path.join(ghDir, 'records', 'pr', '123', 'review', 'manager.retries.json');
+  fs.mkdirSync(counter, { recursive: true });
+  assert.throws(
+    () => resetRetryCount(ghDir, 123),
+    /再試行カウンタのリセットに失敗しました/,
+  );
+});
+
 // ── Issue #271: センチネル検出（main/worktree両方）と manifest 永続化 ─────────
 // 検証失敗時に run-review-jobs.js が worktree 側へ書く .incomplete センチネルも
 // 検出できること（main側だけ見ると黙って process-exit-no-artifact になる）、および

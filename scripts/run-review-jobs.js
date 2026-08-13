@@ -210,6 +210,14 @@ function validateJobs(jobs, adoptedLeaves, errors) {
     if (!Array.isArray(job.leaf_files) || job.leaf_files.length === 0) {
       errors.push(`job ${job.id}: leaf_files must be a non-empty array`);
     }
+
+    // retry_policy は Issue #273 で廃止。上限は固定の MAX_REVIEW_ATTEMPTS に置き換わった。
+    // 残存する retry_policy は「設定が上限を変えるように見えて実際は常に無視される」という
+    // 誤認を生むため、受理せず機械検証で拒否する（将来のRM/manifest生成側が誤って書いた
+    // 場合も、ここで明確に失敗して気づける）。
+    if (Object.prototype.hasOwnProperty.call(job, 'retry_policy')) {
+      errors.push(`job ${job.id}: retry_policy is no longer supported (removed in Issue #273); the retry limit is now fixed at MAX_REVIEW_ATTEMPTS. Remove retry_policy from the manifest`);
+    }
   }
 
   // 全 adopted leaf が少なくとも1つのジョブに割り当てられているか
@@ -894,12 +902,92 @@ function incrementRetryCount(ghDir, pr) {
   return next;
 }
 
+// ── カウンタ排他ロック ────────────────────────────────────────────────────────
+// readRetryCount → incrementRetryCount の read-modify-write を直列化する。
+//
+// RM は1ターンで複数の run-review-jobs.js を並列に起動しうる（暴走時はまさにそうなる）ため、
+// 「読んだ後に書く」が競合すると、両方が同じ回数を読んで同じ回数を書き、上限を素通りする。
+// atomicWriteJson は個々のファイル置換を原子的にするだけで、read-modify-write 全体は
+// 直列化しない（Issue #273 レビュー指摘）。wx フラグの原子的作成でロックを取り、
+// read-modify-write 区間を直列化する。
+//
+// ロック保持ウィンドウは数ms。mtime が閾値（30秒）を超えたロックは、保持プロセスが
+// クラッシュした stale ロックとみなして回収する。PID/startTime 照合（worker-lease.js）は
+// 使わない——このロックは短命で、Windows の WMI 呼び出しを伴う高コストな
+// getProcessStartTime を避けるため。
+
+const RETRY_COUNT_LOCK_STALE_MS = 30 * 1000; // これを超えて残っていれば stale とみなす
+const RETRY_COUNT_LOCK_WAIT_MS = 5 * 1000;   // ロック取得の最大待ち時間
+
+const _sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
+function _sleepSync(ms) {
+  Atomics.wait(_sleepBuffer, 0, 0, ms);
+}
+
+/**
+ * 再試行カウンタの排他ロックファイルのパス。
+ * @param {string} ghDir
+ * @param {string} pr
+ * @returns {string}
+ */
+function retryCountLockPath(ghDir, pr) {
+  return retryCountPath(ghDir, pr) + '.lock';
+}
+
+/**
+ * 再試行カウンタの排他ロックを取得する（wx フラグによる原子的作成）。
+ * 既存ロックが stale（mtime 閾値超過）なら回収して再試行する。
+ * @param {string} lockPath
+ * @throws {Error} ロックを取得できない（別プロセスが進行中、または stale ロックが残留）
+ */
+function acquireRetryCountLock(lockPath) {
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + RETRY_COUNT_LOCK_WAIT_MS;
+  while (Date.now() < deadline) {
+    let fd;
+    try {
+      fd = fs.openSync(lockPath, 'wx');
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      return;
+    } catch (e) {
+      if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+      if (e.code !== 'EEXIST') throw e;
+    }
+    // 既存ロック: stale なら回収して再試行
+    try {
+      const st = fs.statSync(lockPath);
+      if (Date.now() - st.mtimeMs > RETRY_COUNT_LOCK_STALE_MS) {
+        try { fs.unlinkSync(lockPath); } catch {}
+        continue;
+      }
+    } catch {
+      // 既に消えた → 次の反復で取得を試みる
+      continue;
+    }
+    _sleepSync(5);
+  }
+  throw new Error('再試行カウンタのロックを取得できませんでした（別プロセスが進行中か stale ロックが残留）');
+}
+
+/**
+ * 再試行カウンタの排他ロックを解放する。
+ * @param {string} lockPath
+ */
+function releaseRetryCountLock(lockPath) {
+  try { fs.unlinkSync(lockPath); } catch {}
+}
+
 /**
  * 再試行上限を判定し、未達ならカウンタを進める（ゲート）。
  *
- * ghDir / pr のどちらかが使えない場合（プログラム呼び出しで省略された場合）は
+ * read-modify-write は acquireRetryCountLock の排他ロック下で行う（並列呼び出しでも
+ * 上限を素通りしない）。ghDir / pr のどちらかが使えない場合（プログラム呼び出しで省略）は
  * ゲートを適用せず gated:false を返す。本番（CLI）では --gh-dir / --pr が必須のため
  * 常に適用される。
+ *
+ * ロック取得失敗（別プロセス進行中・権限等）は throw する（呼び出し元がフェイルクローズで
+ * 拒否する。黙ってジョブを実行すると上限が効かないため）。
  *
  * @param {object} opts
  * @param {string|null} opts.ghDir メインワークスペースの .gh-maestro（nullならゲートしない）
@@ -911,11 +999,17 @@ function applyRetryGate({ ghDir, pr }) {
   if (!ghDir || !notifyPr) {
     return { gated: false };
   }
-  const count = readRetryCount(ghDir, notifyPr);
-  if (count >= MAX_REVIEW_ATTEMPTS) {
-    return { gated: true, reason: 'retry-limit-reached', attempts: count };
+  const lockPath = retryCountLockPath(ghDir, notifyPr);
+  acquireRetryCountLock(lockPath);
+  try {
+    const count = readRetryCount(ghDir, notifyPr);
+    if (count >= MAX_REVIEW_ATTEMPTS) {
+      return { gated: true, reason: 'retry-limit-reached', attempts: count };
+    }
+    return { gated: false, attempts: incrementRetryCount(ghDir, notifyPr) };
+  } finally {
+    releaseRetryCountLock(lockPath);
   }
-  return { gated: false, attempts: incrementRetryCount(ghDir, notifyPr) };
 }
 
 // ── メイン ─────────────────────────────────────────────────────────────────────
@@ -992,7 +1086,14 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   // manifest検証（上）は「再試行しない」経路のため attempt を消費せず、ここから先の
   // ジョブ実行ループにだけ上限を掛ける。上限到達時はジョブを起動せず、既存の不完全
   // レビュー経路（finalizeReview --mode incomplete）で通知してから拒否する。
-  const gate = applyRetryGate({ ghDir, pr });
+  let gate;
+  try {
+    gate = applyRetryGate({ ghDir, pr });
+  } catch (e) {
+    // カウンタの排他ロック取得に失敗（別プロセス進行中・権限・stale 残留）。上限を
+    // 保証できないままジョブを実行すると上限が効かなくなるため、フェイルクローズで拒否する。
+    return { ok: false, summary: { error: `retry counter lock failed: ${e.message}` } };
+  }
   if (gate.gated) {
     // 既存の不完全レビュー経路を再利用（新しい通知経路は作らない）。results は前回実行の
     // スナップショットが残っており、そこから成功ジョブの指摘内容を不完全コメントに載せる。
@@ -1112,6 +1213,9 @@ module.exports = {
   notifyManifestProblem,
   resolveNotifyPr,
   retryCountPath,
+  retryCountLockPath,
+  acquireRetryCountLock,
+  releaseRetryCountLock,
   readRetryCount,
   incrementRetryCount,
   applyRetryGate,

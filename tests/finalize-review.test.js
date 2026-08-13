@@ -9,6 +9,8 @@ const {
   aggregateFindings,
   buildIncompleteComment,
   writeSentinel,
+  finalizeReview,
+  _setGhForTest,
 } = require('../scripts/finalize-review');
 
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES } = require('../scripts/shared/review-aspects');
@@ -224,6 +226,75 @@ test('writeSentinel creates .incomplete file', () => {
     const content = JSON.parse(fs.readFileSync(sentinelPath, 'utf8'));
     assert.equal(content.pr, 5);
     assert.equal(content.reason, 'incomplete-review');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('finalizeReview(incomplete): 投稿失敗時に notify-failed センチネルを書く（Issue #273 レビュー指摘）', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-nf-'));
+  try {
+    const resultsPath = path.join(tmpDir, 'results.json');
+    const results = {
+      manifest_ref: { pr: 5, repo: 'o/r', headRefOid: 'abc' },
+      coverage_ledger: {
+        leaves: [
+          { id: 'correctness/logic-invariants', trunk: 'Correctness', decision: 'adopted', rationale: null },
+        ],
+      },
+      jobs: [
+        { id: 'job-1', status: 'success', leaf_ids: ['correctness/logic-invariants'], findings: [] },
+      ],
+    };
+    fs.writeFileSync(resultsPath, JSON.stringify(results), 'utf8');
+
+    _setGhForTest(() => ({ status: 1, stdout: '', stderr: 'auth failed: token expired' }));
+    try {
+      const res = await finalizeReview(resultsPath, 'incomplete', null, tmpDir);
+      assert.equal(res.ok, false);
+      assert.match(res.summary.error, /plane comment post failed/);
+      // センチネルは「通知済みの不完全完了」ではなく notify-failed（監督側が exit 1 で扱う）
+      const sentinelPath = path.join(tmpDir, '.gh-maestro', 'records', 'pr', '5', 'review', 'manager.incomplete');
+      assert.ok(fs.existsSync(sentinelPath), 'notify-failed センチネルが書かれる');
+      const sentinel = JSON.parse(fs.readFileSync(sentinelPath, 'utf8'));
+      assert.equal(sentinel.reason, 'notify-failed');
+      assert.match(sentinel.postError, /auth failed/);
+      assert.equal(sentinel.failureLabel, '不完全レビュー通知');
+    } finally {
+      _setGhForTest(null);
+    }
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('finalizeReview(incomplete): 投稿成功時は incomplete-review センチネルを書く', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-ok-'));
+  try {
+    const resultsPath = path.join(tmpDir, 'results.json');
+    const results = {
+      manifest_ref: { pr: 5, repo: 'o/r', headRefOid: 'abc' },
+      coverage_ledger: {
+        leaves: [
+          { id: 'correctness/logic-invariants', trunk: 'Correctness', decision: 'adopted', rationale: null },
+        ],
+      },
+      jobs: [
+        { id: 'job-1', status: 'success', leaf_ids: ['correctness/logic-invariants'], findings: [] },
+      ],
+    };
+    fs.writeFileSync(resultsPath, JSON.stringify(results), 'utf8');
+
+    _setGhForTest(() => ({ status: 0, stdout: 'https://github.com/comment-url\n', stderr: '' }));
+    try {
+      const res = await finalizeReview(resultsPath, 'incomplete', null, tmpDir);
+      assert.equal(res.ok, true);
+      const sentinelPath = path.join(tmpDir, '.gh-maestro', 'records', 'pr', '5', 'review', 'manager.incomplete');
+      const sentinel = JSON.parse(fs.readFileSync(sentinelPath, 'utf8'));
+      assert.equal(sentinel.reason, 'incomplete-review');
+    } finally {
+      _setGhForTest(null);
+    }
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
