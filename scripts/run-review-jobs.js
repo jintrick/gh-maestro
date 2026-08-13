@@ -865,22 +865,41 @@ function retryCountPath(ghDir, pr) {
 }
 
 /**
- * 再試行カウンタを読む。欠落・壊れ・非整数は 0（初回実行）として扱う。
+ * 再試行カウンタを読む。
+ *
+ * ファイル不在（ENOENT）だけが「まだ1回も実行していない＝0回」という正常ケースで、
+ * 読み取り失敗・JSON解析失敗・形式不正（attempts が非負整数でない）はフェイルクローズで
+ * throw する。破損・読めないカウンタを 0 回として扱うと、このIssueが入れる決定的な歯止めが
+ * その瞬間だけ無効（上限が事実上リセット）になる（Issue #267 / PR #268 の readWorkersRaw と
+ * 同じ「不在と失敗の取り違え」を新しいコードに入れない。Windows の一時的な読み取り失敗は
+ * 実在の事象: PR #251/#253/#259）。
+ *
  * @param {string} ghDir
  * @param {string|number} pr
  * @returns {number} これまでの実行回数（非負整数）
+ * @throws {Error} 読み取り失敗・JSON解析失敗・形式不正（上限を保証できないため）
  */
 function readRetryCount(ghDir, pr) {
+  const counterPath = retryCountPath(ghDir, pr);
+  let raw;
+  try {
+    raw = fs.readFileSync(counterPath, 'utf8');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') {
+      return 0; // 不在 = 初回実行
+    }
+    throw new Error(`再試行カウンタを読み取れませんでした: ${e.message}`);
+  }
   let data;
   try {
-    data = JSON.parse(fs.readFileSync(retryCountPath(ghDir, pr), 'utf8'));
-  } catch {
-    return 0;
+    data = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`再試行カウンタが壊れています（JSON解析失敗）: ${e.message}`);
   }
-  if (data && typeof data === 'object' && Number.isInteger(data.attempts) && data.attempts >= 0) {
-    return data.attempts;
+  if (!data || typeof data !== 'object' || !Number.isInteger(data.attempts) || data.attempts < 0) {
+    throw new Error('再試行カウンタの形式が不正です（attempts が非負整数でない）');
   }
-  return 0;
+  return data.attempts;
 }
 
 /**
@@ -919,6 +938,13 @@ function incrementRetryCount(ghDir, pr) {
 const RETRY_COUNT_LOCK_STALE_MS = 30 * 1000; // これを超えて残っていれば stale とみなす
 const RETRY_COUNT_LOCK_WAIT_MS = 5 * 1000;   // ロック取得の最大待ち時間
 
+// テスト用: ロック取得の最大待ち時間を上書きする（タイムアウト経路の回帰テストで短縮する）。
+// null なら RETRY_COUNT_LOCK_WAIT_MS を使う。
+let _retryCountLockWaitMs = null;
+function _setRetryCountLockWaitMs(ms) {
+  _retryCountLockWaitMs = ms;
+}
+
 const _sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
 function _sleepSync(ms) {
   Atomics.wait(_sleepBuffer, 0, 0, ms);
@@ -938,11 +964,13 @@ function retryCountLockPath(ghDir, pr) {
  * 再試行カウンタの排他ロックを取得する（wx フラグによる原子的作成）。
  * 既存ロックが stale（mtime 閾値超過）なら回収して再試行する。
  * @param {string} lockPath
+ * @param {number} [maxWaitMs] 最大待ち時間（省略時は RETRY_COUNT_LOCK_WAIT_MS、テストで短縮可）
  * @throws {Error} ロックを取得できない（別プロセスが進行中、または stale ロックが残留）
  */
-function acquireRetryCountLock(lockPath) {
+function acquireRetryCountLock(lockPath, maxWaitMs) {
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-  const deadline = Date.now() + RETRY_COUNT_LOCK_WAIT_MS;
+  const waitMs = maxWaitMs ?? _retryCountLockWaitMs ?? RETRY_COUNT_LOCK_WAIT_MS;
+  const deadline = Date.now() + waitMs;
   while (Date.now() < deadline) {
     let fd;
     try {
@@ -1090,9 +1118,9 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   try {
     gate = applyRetryGate({ ghDir, pr });
   } catch (e) {
-    // カウンタの排他ロック取得に失敗（別プロセス進行中・権限・stale 残留）。上限を
-    // 保証できないままジョブを実行すると上限が効かなくなるため、フェイルクローズで拒否する。
-    return { ok: false, summary: { error: `retry counter lock failed: ${e.message}` } };
+    // カウンタの排他ロック取得・読み取り・インクリメントのいずれかに失敗。上限を保証できない
+    // ままジョブを実行すると上限が効かなくなるため、フェイルクローズで拒否する。
+    return { ok: false, summary: { error: `retry counter gate failed: ${e.message}` } };
   }
   if (gate.gated) {
     // 既存の不完全レビュー経路を再利用（新しい通知経路は作らない）。results は前回実行の
@@ -1216,6 +1244,7 @@ module.exports = {
   retryCountLockPath,
   acquireRetryCountLock,
   releaseRetryCountLock,
+  _setRetryCountLockWaitMs,
   readRetryCount,
   incrementRetryCount,
   applyRetryGate,
