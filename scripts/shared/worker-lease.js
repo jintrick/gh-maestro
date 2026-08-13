@@ -24,16 +24,36 @@
 
 const path = require('path');
 const fs = require('fs');
-const { isProcessAlive, verifyProcessIdentity, getProcessStartTime } = require('../process-lifecycle');
 const { canonicalWorkspace, assertValidWorkspace } = require('./storage-layout');
 const { killProcessTree } = require('../kill-tree');
 const { recordResidentAuditEvent } = require('./resident-audit');
 const { atomicWriteJson } = require('./atomic-write');
 
+// process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。
+// process-lifecycle.js は CLI 主経路（require.main === module）から sweepRegistry 経由で
+// このモジュールを require する。評価時に require して捕捉すると、module.exports の代入
+// 前に循環参照した process-lifecycle の undefined を掴むため、最初の呼び出し時まで
+// 解決を遅らせる。テスト注入（_set*）は注入値が優先される。
+let _injectedIsProcessAlive = null;
+let _injectedVerifyProcessIdentity = null;
+let _injectedGetProcessStartTime = null;
+
+function _isProcessAlive(pid) {
+  const fn = _injectedIsProcessAlive ?? require('../process-lifecycle').isProcessAlive;
+  return fn(pid);
+}
+
+function _verifyProcessIdentity(pid, identity) {
+  const fn = _injectedVerifyProcessIdentity ?? require('../process-lifecycle').verifyProcessIdentity;
+  return fn(pid, identity);
+}
+
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime ?? require('../process-lifecycle').getProcessStartTime;
+  return fn(pid);
+}
+
 // テストで注入可能にする（実プロセスに触れない。test-process-spawn-safety ルール準拠）。
-let _isProcessAlive = isProcessAlive;
-let _verifyProcessIdentity = verifyProcessIdentity;
-let _getProcessStartTime = getProcessStartTime;
 let _killProcessTree = killProcessTree;
 let _sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
@@ -597,9 +617,9 @@ module.exports = {
   acquireResidentLease,
   releaseResidentLease,
   // テスト用注入（test-process-spawn-safety ルール準拠）
-  _setIsProcessAlive: (fn) => { _isProcessAlive = fn; },
-  _setVerifyProcessIdentity: (fn) => { _verifyProcessIdentity = fn; },
-  _setGetProcessStartTime: (fn) => { _getProcessStartTime = fn; },
+  _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
+  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setKillProcessTree: (fn) => { _killProcessTree = fn; },
   _setSleep: (fn) => { _sleep = fn; },
 };

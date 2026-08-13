@@ -1062,6 +1062,7 @@ test('CLI_USAGE: 文字列が定義されている', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'process-lifecycle.js');
+const { cleanSpawnEnv } = require('./_spawn-env');
 
 test('サブプロセス経由: --help は終了コード0でCLI_USAGEを表示する', () => {
   const { spawnSync } = require('child_process');
@@ -1075,4 +1076,67 @@ test('サブプロセス経由: --workspace の値が"--help"文字列だと値�
   const r = spawnSync(process.execPath, [SCRIPT, 'sweep', '--workspace', '--help'], { encoding: 'utf8' });
   assert.notEqual(r.status, 0);
   assert.equal(r.stdout, '');
+});
+
+// ── Issue #267 回帰: CLI 主経路（require.main === module）での循環 require ──
+// process-lifecycle.js は module.exports の代入を CLI ブロックより先に行うことで、
+// sweepRegistry が require する shared モジュール群（worker-liveness / worker-lease /
+// collect-housekeeping-exclusions）へ完全な exports を渡す。CLI 主経路でしか顕在化し
+// ないため、ユニットテストではなく実サブプロセス起動で検証する。
+
+test('サブプロセス経由: sweep は CLI 主経路でも除外リストを組み立てて exit 0 で完了する（循環 require 回帰）', () => {
+  const { spawnSync } = require('child_process');
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-sweep-cli-'));
+  try {
+    const ghDir = path.join(ws, '.gh-maestro');
+    fs.mkdirSync(path.join(ghDir, 'leases'), { recursive: true });
+    fs.mkdirSync(path.join(ghDir, 'records', 'pr', '42', 'review'), { recursive: true });
+    // 全情報源（workers.json / lease / Review Manager .running）に「有効だが死んだ」PIDを置き、
+    // 除外リスト組み立てで process-lifecycle の生存述語（isProcessAlive 等）が実際に呼ばれる
+    // 状態を作る。修復前は CLI 主経路でのみ循環 require により undefined 捕捉が TypeError を
+    // 起こし、sweep 全体が落ちた（Issue #267）。死んだPIDなら WMI/PowerShell を起動しない
+    // （test-process-spawn-safety ルール準拠）。
+    fs.writeFileSync(path.join(ghDir, 'workers.json'), JSON.stringify({
+      'issue-1-coder': { pid: 999999999, startTime: '2025-01-01T00:00:00.000Z' },
+    }));
+    fs.writeFileSync(path.join(ghDir, 'leases', 'issue-2-coder.json'), JSON.stringify({
+      pid: 999999999, startTime: '2025-01-01T00:00:00.000Z', workerName: 'issue-2-coder',
+    }));
+    fs.writeFileSync(path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.running'), '999999999');
+
+    const r = spawnSync(process.execPath, [SCRIPT, 'sweep', '--workspace', ws], {
+      encoding: 'utf8',
+      env: cleanSpawnEnv(),
+    });
+    assert.equal(r.status, 0, `sweep は exit 0 で完了すべき。stdout=${r.stdout} stderr=${r.stderr}`);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('sweepRegistry: 除外リスト構築失敗時は fail-closed で kill も housekeeping も実行しない', () => {
+  const plc = loadModule();
+  const pidsDir = plc.pidsDir(workspace);
+  fs.mkdirSync(pidsDir, { recursive: true });
+  fs.writeFileSync(path.join(pidsDir, 'alive.json'), JSON.stringify({
+    pid: process.pid, script: 'worker.js', workerName: 'issue-fail-closed',
+  }));
+  // 共有部品を throw するスタブへ差し替え、除外リスト構築の失敗経路を作る。
+  const chePath = require.resolve('../scripts/shared/collect-housekeeping-exclusions');
+  const orig = require.cache[chePath];
+  require.cache[chePath] = {
+    id: chePath, filename: chePath, loaded: true,
+    exports: { collectHousekeepingExclusions: () => { throw new Error('boom'); } },
+  };
+  try {
+    const results = plc.sweepRegistry(workspace, { dryRun: false });
+    assert.ok(results.errors.some((e) => e.includes('除外リストの構築に失敗')), `errors: ${JSON.stringify(results.errors)}`);
+    assert.equal(results.killed.length, 0);
+    assert.equal(results.cleaned.length, 0);
+    assert.ok(!('housekeeping' in results), 'housekeeping は実行されない');
+    assert.ok(fs.existsSync(path.join(pidsDir, 'alive.json')), 'kill ループはスキップされる');
+  } finally {
+    if (orig) require.cache[chePath] = orig; else delete require.cache[chePath];
+    try { fs.unlinkSync(path.join(pidsDir, 'alive.json')); } catch {}
+  }
 });

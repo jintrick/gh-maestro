@@ -24,16 +24,29 @@
 
 const fs = require('fs');
 const path = require('path');
-const {
-  isProcessAlive,
-  getProcessStartTime,
-  verifyProcessIdentity,
-} = require('../process-lifecycle');
 
-// テスト用注入（test-process-spawn-safety ルール準拠。実プロセス確認を回避する）
-let _isProcessAlive = isProcessAlive;
-let _getProcessStartTime = getProcessStartTime;
-let _verifyProcessIdentity = verifyProcessIdentity;
+// process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。process-lifecycle.js は
+// CLI 主経路（require.main === module）から sweepRegistry 経由でこのモジュールを require する
+// ことがあるため、評価時に require して捕捉すると module.exports 未確定の undefined を掴む。
+// 最初の呼び出し時まで解決を遅らせる。テスト注入（_set*）は注入値が優先される。
+let _injectedIsProcessAlive = null;
+let _injectedGetProcessStartTime = null;
+let _injectedVerifyProcessIdentity = null;
+
+function _isProcessAlive(pid) {
+  const fn = _injectedIsProcessAlive ?? require('../process-lifecycle').isProcessAlive;
+  return fn(pid);
+}
+
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime ?? require('../process-lifecycle').getProcessStartTime;
+  return fn(pid);
+}
+
+function _verifyProcessIdentity(pid, identity) {
+  const fn = _injectedVerifyProcessIdentity ?? require('../process-lifecycle').verifyProcessIdentity;
+  return fn(pid, identity);
+}
 
 function migrationInProgressPath(workspace) {
   return path.resolve(workspace, '.gh-maestro', '.migration-in-progress');
@@ -89,7 +102,7 @@ module.exports = {
   isMigrationInProgress,
   markMigrationInProgress,
   clearMigrationInProgress,
-  _setIsProcessAlive: (fn) => { _isProcessAlive = fn; },
-  _setGetProcessStartTime: (fn) => { _getProcessStartTime = fn; },
-  _setVerifyProcessIdentity: (fn) => { _verifyProcessIdentity = fn; },
+  _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
+  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
 };

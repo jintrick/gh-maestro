@@ -20,7 +20,6 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('../child-process');
 const { buildLoginShellExecArgs } = require('../agent-exec');
-const { getProcessStartTime } = require('../process-lifecycle');
 const { ARTIFACTS, legacyWorkerLogPath, recordPath } = require('./record-paths');
 
 const SHIM_PATH = path.join(__dirname, 'headless-shim.js');
@@ -59,7 +58,16 @@ function realSpawnDisabledReason() {
 
 // テストで注入可能にする（実プロセスを spawn しない。test-process-spawn-safety ルール準拠）。
 let _spawn = spawn;
-let _getProcessStartTime = getProcessStartTime;
+
+// process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。CLI 主経路
+// （require.main === module）から sweepRegistry 経由でこのモジュールが require される
+// 可能性を踏まえ、評価時に捕捉すると module.exports 未確定の undefined を掴むため、
+// 最初の呼び出し時まで解決を遅らせる。テスト注入（_set*）は注入値が優先される。
+let _injectedGetProcessStartTime = null;
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime ?? require('../process-lifecycle').getProcessStartTime;
+  return fn(pid);
+}
 
 /**
  * ワーカーのログファイルパスを返す。
@@ -180,5 +188,5 @@ module.exports = {
   SHIM_PATH,
   REAL_SPAWN_DISABLED_ENV,
   _setSpawn: (fn) => { _spawn = fn; },
-  _setGetProcessStartTime: (fn) => { _getProcessStartTime = fn; },
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
 };

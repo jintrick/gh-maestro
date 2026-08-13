@@ -37,13 +37,27 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('../child-process');
-const { findSessionRootPid, findRunningInstance } = require('../process-lifecycle');
 const { isResidentLeaseLive, INBOX_SUPERVISOR_ROLE } = require('./worker-lease');
 const { isMigrationInProgress } = require('./migration-marker');
 
+// process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。CLI 主経路
+// （require.main === module）から sweepRegistry 経由でこのモジュールが require される
+// 可能性を踏まえ、評価時に捕捉すると module.exports 未確定の undefined を掴むため、
+// 最初の呼び出し時まで解決を遅らせる。テスト注入（_set*）は注入値が優先される。
+let _injectedFindSessionRootPid = null;
+let _injectedFindRunningInstance = null;
+
+function _findSessionRootPid() {
+  const fn = _injectedFindSessionRootPid ?? require('../process-lifecycle').findSessionRootPid;
+  return fn();
+}
+
+function _findRunningInstance(workspace, opts) {
+  const fn = _injectedFindRunningInstance ?? require('../process-lifecycle').findRunningInstance;
+  return fn(workspace, opts);
+}
+
 let _spawn = (cmd, args, opts) => spawn(cmd, args, opts);
-let _findSessionRootPid = findSessionRootPid;
-let _findRunningInstance = findRunningInstance;
 let _isResidentLeaseLive = isResidentLeaseLive;
 
 /**
@@ -114,7 +128,7 @@ function ensureInboxSupervisorRunning({ workspace, scriptsPath }) {
 module.exports = {
   ensureInboxSupervisorRunning,
   _setSpawn: (fn) => { _spawn = fn; },
-  _setFindSessionRootPid: (fn) => { _findSessionRootPid = fn; },
-  _setFindRunningInstance: (fn) => { _findRunningInstance = fn; },
+  _setFindSessionRootPid: (fn) => { _injectedFindSessionRootPid = fn; },
+  _setFindRunningInstance: (fn) => { _injectedFindRunningInstance = fn; },
   _setIsResidentLeaseLive: (fn) => { _isResidentLeaseLive = fn; },
 };

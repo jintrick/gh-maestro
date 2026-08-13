@@ -26,7 +26,6 @@
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
-const { findRunningInstance } = require('../process-lifecycle');
 const { killProcessTree } = require('../kill-tree');
 const {
   INBOX_SUPERVISOR_ROLE,
@@ -35,7 +34,17 @@ const {
   createResidentLeaseStore,
 } = require('./worker-lease');
 
-let _findRunningInstance = findRunningInstance;
+// process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。CLI 主経路
+// （require.main === module）から sweepRegistry 経由でこのモジュールが require される
+// 可能性を踏まえ、評価時に捕捉すると module.exports 未確定の undefined を掴むため、
+// 最初の呼び出し時まで解決を遅らせる。テスト注入（_set*）は注入値が優先される。
+let _injectedFindRunningInstance = null;
+
+function _findRunningInstance(workspace, opts) {
+  const fn = _injectedFindRunningInstance ?? require('../process-lifecycle').findRunningInstance;
+  return fn(workspace, opts);
+}
+
 let _createResidentLeaseStore = createResidentLeaseStore;
 let _isLeaseLive = isLeaseLive;
 let _killProcessTree = killProcessTree;
@@ -99,7 +108,7 @@ module.exports = {
   runningInboxSupervisorPids,
   stopRunningInboxSupervisors,
   // テスト用注入（test-process-spawn-safety ルール準拠。実プロセスは起動・killしない）
-  _setFindRunningInstance: (fn) => { _findRunningInstance = fn; },
+  _setFindRunningInstance: (fn) => { _injectedFindRunningInstance = fn; },
   _setCreateResidentLeaseStore: (fn) => { _createResidentLeaseStore = fn; },
   _setIsLeaseLive: (fn) => { _isLeaseLive = fn; },
   _setKillProcessTree: (fn) => { _killProcessTree = fn; },

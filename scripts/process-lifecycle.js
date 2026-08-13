@@ -715,8 +715,25 @@ function sweepRegistry(workspace, opts = {}) {
     }
   };
 
-  const activeWorkerNames = new Set();
-  const activeReviewPrs = new Set();
+  const excludedWorkerNames = new Set();
+  const excludedReviewPrs = new Set();
+
+  // 後段の housekeeping（ログ整理・一時ファイル削除）から除外する稼働中ワーカーを先に
+  // 組み立てる。失敗時は fail-closed: kill ループも housekeeping も実行せず中断し、
+  // 終了コードに反映させる（除外リストを組み立てられないまま破壊的処理を進めない。
+  // Issue #267）。workerName 指定の部分 sweep では他ワーカーを誤って対象にしないため
+  // ここでは何もしない。
+  if (!opts.match) {
+    try {
+      const { collectHousekeepingExclusions } = require('./shared/collect-housekeeping-exclusions');
+      const { workerNames, reviewPrs } = collectHousekeepingExclusions(workspace);
+      for (const name of workerNames) excludedWorkerNames.add(name);
+      for (const pr of reviewPrs) excludedReviewPrs.add(pr);
+    } catch (e) {
+      results.errors.push(`sweep: 稼働中ワーカー除外リストの構築に失敗したため掃除を中断します: ${e.message}`);
+      return results;
+    }
+  }
 
   for (const { entry, filePaths } of byPid.values()) {
     const entryPid = entry.pid;
@@ -738,9 +755,9 @@ function sweepRegistry(workspace, opts = {}) {
 
     // 同一性一致 → kill（stale プロセス）
     // この sweep が処理を決めた時点では対象ログが開いている可能性があるため、
-    // housekeepingへは「今回確認できた生存ワーカー」として渡す。
+    // housekeeping のログ整理から除外する対象として workerName を渡す。
     if (entry.workerName && !opts.dryRun) {
-      activeWorkerNames.add(entry.workerName);
+      excludedWorkerNames.add(entry.workerName);
     }
     if (!opts.dryRun) {
       const { killProcessTree } = require('./kill-tree');
@@ -754,64 +771,19 @@ function sweepRegistry(workspace, opts = {}) {
     });
   }
 
-  // 既存のstale sweepをworkspace housekeepingの単一の権威にする。
-  // workerName指定の部分 sweepでは、他ワーカーを誤ってローテーションしない。
+  // 既存の stale sweep を workspace housekeeping の単一の権威にする。
   if (!opts.match) {
-    // PID registryにない通常headlessワーカーも、既存のworkers.json/leaseの
-    // 生存述語を再利用して保護対象へ加える。
-    try {
-      const { readWorkersRaw } = require('./shared/workers-registry');
-      const { isWorkerAlive } = require('./shared/worker-liveness');
-      const rawWorkers = readWorkersRaw(workspace);
-      if (rawWorkers) {
-        for (const [workerName, entry] of Object.entries(rawWorkers)) {
-          if (workerName !== 'orchestrator' && isWorkerAlive(entry)) activeWorkerNames.add(workerName);
-        }
-      }
-    } catch (e) {
-      // サイレントに保護が無効化されないよう記録する（sweep自体は継続）。
-      // 保護対象が漏れても殺す側の誤爆は無いが、稼働中ログが誤って
-      // ローテーション対象になる等の見えない劣化の手掛かりになる（Issue #248 項目9）。
-      console.error(`sweep: workers.json生存ワーカー保護の構築に失敗しました: ${e.message}`);
-    }
-    try {
-      const { createNormalWorkerStore, isLeaseLive } = require('./shared/worker-lease');
-      const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
-      const store = createNormalWorkerStore(workspace);
-      for (const name of fs.readdirSync(leasesDir).filter(n => n.endsWith('.json'))) {
-        const workerName = name.slice(0, -5);
-        const entry = store.read(workerName);
-        if (isLeaseLive(entry)) activeWorkerNames.add(entry.workerName || workerName);
-      }
-    } catch (e) {
-      console.error(`sweep: lease生存ワーカー保護の構築に失敗しました: ${e.message}`);
-    }
+    // この sweep 自身が確認した生存ワーカー（PID registry 由来）を除外対象に加える。
+    // kill を決めたワーカーはログが開いたままの可能性があるため、共有部品が収集した
+    // workers.json / lease / .running 由来の除外対象に加えて housekeeping へ渡す。
     for (const { entry } of byPid.values()) {
       if (!entry.workerName || results.killed.some(k => k.workerName === entry.workerName)) continue;
       if (isProcessAlive(entry.pid) && verifyProcessIdentity(entry.pid, entry).match) {
-        activeWorkerNames.add(entry.workerName);
+        excludedWorkerNames.add(entry.workerName);
       }
-    }
-    // 通常ワーカー以外のReview ManagerはPID registryに登録されず、専用の
-    // review-manager-<PR>.running leaseだけを持つ。既存のlease契約（PID生存）を
-    // 再利用して、対応する records/pr/<PR>/review/manager.log を保護する。
-    try {
-      const { reviewArtifactPath } = require('./shared/review-manager-paths');
-      const ghDir = path.join(workspace, '.gh-maestro');
-      const entries = fs.readdirSync(path.join(ghDir, 'records', 'pr'), { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
-        const match = [null, entry.name];
-        const runningPath = reviewArtifactPath(ghDir, match[1], '.running');
-        let pid;
-        try { pid = Number(fs.readFileSync(runningPath, 'utf8').trim()); } catch { continue; }
-        if (Number.isInteger(pid) && pid > 0 && isProcessAlive(pid)) activeReviewPrs.add(match[1]);
-      }
-    } catch (e) {
-      console.error(`sweep: Review Manager .running 生存PR保護の構築に失敗しました: ${e.message}`);
     }
     const { sweepWorkspaceFiles } = require('./shared/workspace-housekeeping');
-    const housekeeping = sweepWorkspaceFiles(workspace, { activeWorkerNames, activeReviewPrs, dryRun: opts.dryRun });
+    const housekeeping = sweepWorkspaceFiles(workspace, { excludedWorkerNames, excludedReviewPrs, dryRun: opts.dryRun });
     results.errors.push(...housekeeping.errors);
     Object.defineProperty(results, 'housekeeping', { value: housekeeping, enumerable: false });
   }
@@ -852,7 +824,49 @@ Options:
 Description:
   PID registry を走査し、stale エントリを掃除する。
   各エントリは同一性確認（起動時刻比較）を経て、一致する場合のみ kill される。
-  PID再利用が検出されたエントリはファイル削除のみ行う（無関係なプロセスを保護）。`;
+  PID再利用が検出されたエントリはファイル削除のみ行う（無関係なプロセスを保護）。
+
+  終了コード: 0（成功）/ 1（エラー）。エラーには fail-closed も含まれる——
+  稼働中ワーカーの除外リストを組み立てられない場合は、kill も housekeeping も
+  実行せずに中断して 1 を返す（Issue #267）。`;
+
+// ── エクスポート ──────────────────────────────────────────────────────
+//
+// module.exports は CLI ブロック（if (require.main === module)）より先に代入する。
+// CLI 実行時は sweepRegistry が collect-housekeeping-exclusions を require し、そこから
+// worker-liveness / worker-lease がこのモジュールへ循環 require する。この代入が後にあると、
+// それらが require した process-lifecycle の exports が空のまま循環参照し、ロード時捕捉が
+// undefined を掴む（Issue #267）。各 shared モジュール側も呼び出し時点で解決する防衛を入れる。
+
+module.exports = {
+  // 親セッション監視
+  getParentPid,
+  findSessionRootPid,
+  resolveSessionPid,
+  isProcessAlive,
+  getProcessStartTime,
+  createDeadManSwitch,
+  // PID registry
+  pidsDir,
+  pidFilePath,
+  legacyPidsDir,
+  legacyPidFilePath,
+  registerProcess,
+  unregisterProcess,
+  findRunningInstance,
+  // 単一起動ロック
+  startupLockPath,
+  legacyStartupLockPath,
+  acquireStartupLock,
+  releaseStartupLock,
+  // 同一性確認
+  verifyProcessIdentity,
+  // sweep
+  sweepRegistry,
+  // 統合
+  cleanup,
+  CLI_USAGE,
+};
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -916,35 +930,3 @@ if (require.main === module) {
 
   process.exit(results.errors.length > 0 ? 1 : 0);
 }
-
-// ── エクスポート ──────────────────────────────────────────────────────
-
-module.exports = {
-  // 親セッション監視
-  getParentPid,
-  findSessionRootPid,
-  resolveSessionPid,
-  isProcessAlive,
-  getProcessStartTime,
-  createDeadManSwitch,
-  // PID registry
-  pidsDir,
-  pidFilePath,
-  legacyPidsDir,
-  legacyPidFilePath,
-  registerProcess,
-  unregisterProcess,
-  findRunningInstance,
-  // 単一起動ロック
-  startupLockPath,
-  legacyStartupLockPath,
-  acquireStartupLock,
-  releaseStartupLock,
-  // 同一性確認
-  verifyProcessIdentity,
-  // sweep
-  sweepRegistry,
-  // 統合
-  cleanup,
-  CLI_USAGE,
-};
