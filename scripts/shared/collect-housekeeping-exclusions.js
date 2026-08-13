@@ -23,7 +23,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const { readWorkersRaw, workersJsonPath } = require('./workers-registry');
+const { readWorkersRaw } = require('./workers-registry');
 const { isWorkerAlive } = require('./worker-liveness');
 const { createNormalWorkerStore, isLeaseLive } = require('./worker-lease');
 const { reviewArtifactPath } = require('./review-manager-paths');
@@ -46,10 +46,12 @@ function _isProcessAlive(pid) {
  * 「ファイルが存在するのに読み取り・解析できない」状態は「ファイル不在」と同じ扱いに
  * しない。不在＝正常な空状態だが、存在するのに読めない・parseできない・型不正は
  * 「そのワーカーの生存が判定できない」ことであり、黙って除外漏れにすると稼働中ワーカーの
- * ログを整理・ローテーションしかねない。この区別は workers.json（レジストリ全体）だけで
- * なく、lease と Review Manager の manager.running の各レコードについても行う
- * （PR #268 レビュー指摘）。PID registry（.gh-maestro/pids/）は sweepRegistry 側が破損
- * エントリを results.cleaned として能動的に検出・削除する既存契約があり、取り違えはない。
+ * ログを整理・ローテーションしかねない。workers.json（レジストリ全体）は readWorkersRaw が
+ * 不在のみ null・それ以外は throw するため、本モジュールは例外をそのまま伝播させるだけで
+ * よい（Issue #275 項目1）。lease と Review Manager の manager.running は本モジュール側で
+ * 不在との区別を行う（PR #268 レビュー指摘）。PID registry（.gh-maestro/pids/）は
+ * sweepRegistry 側が破損エントリを results.cleaned として能動的に検出・削除する既存契約が
+ * あり、取り違えはない。
  *
  * @param {string} workspace ワークスペース絶対パス
  * @returns {{ workerNames: Set<string>, reviewPrs: Set<string> }}
@@ -63,17 +65,15 @@ function collectHousekeepingExclusions(workspace) {
 
   // PID registry にない通常 headless ワーカーも、既存の workers.json の生存述語を
   // 再利用して除外対象へ加える。
+  // readWorkersRaw は「ファイル不在」のみ null で、存在するのに読み取り・parse・型不正は
+  // throw する（Issue #275 項目1）。不在は空集合でよい。存在するのに解析不能は生存判定
+  // 不能であり、黙って除外漏れにすると稼働中ワーカーのログを整理・ローテーションしかねない
+  // ため、例外をそのまま伝播させて fail-closed にする（PR #268 レビュー指摘）。
   const rawWorkers = readWorkersRaw(workspace);
   if (rawWorkers) {
     for (const [workerName, entry] of Object.entries(rawWorkers)) {
       if (workerName !== 'orchestrator' && isWorkerAlive(entry)) workerNames.add(workerName);
     }
-  } else if (fs.existsSync(workersJsonPath(workspace))) {
-    // readWorkersRaw は「ファイル不在」と「全リトライ後の parse 失敗・型不正」の両方で
-    // null を返す。存在するのに null はレジストリ全体が読み取り・解析不能であり、
-    // 空集合として正常返却すると稼働中ワーカーを除外できないまま housekeeping が続行
-    // される（PR #268 レビュー指摘）。fail-closed で例外を伝播させる。
-    throw new Error(`workers.json の読み取り・解析に失敗しました: ${workersJsonPath(workspace)}`);
   }
 
   // lease が live のワーカーも除外対象へ加える。

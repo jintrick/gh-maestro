@@ -175,10 +175,12 @@ test('collectHousekeepingExclusions: records/pr の非PRディレクトリは無
 
 // ── PR #268 レビュー指摘: 「ファイル不在」と「読み取り・解析不能」を区別する ──────
 //
-// readWorkersRaw / store.read は「不在」と「解析不能・型不正」の両方で null を返す。
 // 不在は正常な空状態として空集合でよいが、存在するのに読めない・parseできない状態を
 // 不在と同じ扱いにすると、除外リストが空集合として正常返却され、fail-closed に到達せず
 // 稼働中ワーカーを除外できないまま housekeeping が続行する（PR #268 レビュー指摘）。
+// workers.json は readWorkersRaw が不在のみ null・それ以外は throw するため、その例外を
+// 本モジュールが伝播する（Issue #275 項目1）。lease の store.read は「不在」と「解析不能」
+// の両方で null を返すため、本モジュール側で readdirSync 列挙との突き合わせにより区別する。
 // 以下は「存在するのに解析不能」な情報源が例外として伝播することを確認する。
 
 test('collectHousekeepingExclusions: 解析不能な workers.json は例外を投げる（fail-closed）', () => {
@@ -188,9 +190,8 @@ test('collectHousekeepingExclusions: 解析不能な workers.json は例外を�
     const ghDir = path.join(ws, '.gh-maestro');
     fs.mkdirSync(ghDir, { recursive: true });
     fs.writeFileSync(path.join(ghDir, 'workers.json'), '{broken json');
-    // readWorkersRaw は parse を maxAttempts 回リトライしてから null を返すため、
-    // existsSync 分岐により例外として伝播する。
-    assert.throws(() => che.collectHousekeepingExclusions(ws), /workers\.json の読み取り・解析に失敗/);
+    // readWorkersRaw が parse を maxAttempts 回リトライして throw する。
+    assert.throws(() => che.collectHousekeepingExclusions(ws), /workers\.json を解析できません/);
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }
@@ -203,7 +204,7 @@ test('collectHousekeepingExclusions: 型不正（配列）な workers.json は�
     const ghDir = path.join(ws, '.gh-maestro');
     fs.mkdirSync(ghDir, { recursive: true });
     fs.writeFileSync(path.join(ghDir, 'workers.json'), '[]');
-    assert.throws(() => che.collectHousekeepingExclusions(ws), /workers\.json の読み取り・解析に失敗/);
+    assert.throws(() => che.collectHousekeepingExclusions(ws), /workers\.json の形式が不正です/);
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }

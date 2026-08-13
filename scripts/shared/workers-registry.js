@@ -28,17 +28,25 @@ function defaultSleep(ms) {
 }
 
 /**
- * workers.json を読み込む。存在しない・全試行でparse失敗の場合は null を返す。
+ * workers.json を読み込む。ファイルが存在しない場合のみ null を返す。
+ *
+ * 「ファイルが存在するのに読み取り・parse・型検証に失敗した」場合は throw する。
+ * 旧契約は parse 失敗・型不正も null に返し、「ファイル不在」と conflate していたため、
+ * 呼び出し側は existsSync の事後補正で区別せざるを得ず、区別し忘れると破損を「ワーカー
+ * ゼロ件」と誤解釈して危険な処理（稼働中ワーカーのログ整理等）を続行した（Issue #275
+ * 項目1）。新契約は不在のみ null、それ以外は throw で区別する。
  *
  * JSON.parse 失敗は、別プロセス（spawn-worker.js等）が書き込み中で、tmp→rename
  * アトミック書き込みの最中に部分内容を読んだ場合に起こりうる。書き込み完了を待って
  * 短いリトライを行い、書き込み中の読み取りで保護ロジック全体が無効化される事態を
- * 防ぐ（Issue #248 項目12）。ファイル自体の不在・型不正（配列等）はリトライしない。
+ * 防ぐ（Issue #248 項目12）。リトライを消費しても parse できない場合は throw する。
+ * 型不正（配列・null・プリミティブ）は書き込み中の部分内容では起こり得ないため
+ * リトライせず即 throw する。
  *
  * @param {string} workspace
  * @param {{readFileFn?: (p: string) => string, sleepFn?: (ms: number) => void, maxAttempts?: number, delayMs?: number}} [opts]
  *   テスト容易性のための注入点。既定は fs.readFileSync と Atomics.wait。
- * @returns {object|null}
+ * @returns {object|null} ファイル不在のみ null。それ以外の読み取り・parse・型検証失敗は throw。
  */
 function readWorkersRaw(workspace, {
   readFileFn = (p) => fs.readFileSync(p, 'utf8'),
@@ -47,17 +55,35 @@ function readWorkersRaw(workspace, {
   delayMs = 20,
 } = {}) {
   const p = workersJsonPath(workspace);
-  if (!fs.existsSync(p)) return null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // 各試行の冒頭で再読込する（parse 失敗からの再試行時は新しい内容を読む）。
+    // 読み取りエラーは「ファイル不在（ENOENT）のみ null」を 1 箇所で完結させる。
+    let content;
     try {
-      const raw = JSON.parse(readFileFn(p));
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-      return raw;
-    } catch {
-      if (attempt < maxAttempts) sleepFn(delayMs);
+      content = readFileFn(p);
+    } catch (e) {
+      // ENOENT（ファイル不在）のみ null。それ以外の読み取りエラー（権限・ディレクトリ等）は
+      // throw して呼び出し側に知らせる。不在を null にするのは正常な空状態だが、存在するのに
+      // 読めない状態を null に握りつぶすと「ワーカーが誰もいない」と誤判断される。
+      if (e && e.code === 'ENOENT') return null;
+      throw e;
     }
+    let raw;
+    try {
+      raw = JSON.parse(content);
+    } catch {
+      // 書き込み中（tmp→rename）の部分読み取りは完了を待って再読込してリトライする。
+      if (attempt < maxAttempts) {
+        sleepFn(delayMs);
+        continue;
+      }
+      throw new Error(`workers.json を解析できません（${p}）`);
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error(`workers.json の形式が不正です（オブジェクトでない）: ${p}`);
+    }
+    return raw;
   }
-  return null;
 }
 
 /**
@@ -76,7 +102,10 @@ function readWorkersRaw(workspace, {
  */
 function updateWorkerProcess(workspace, workerName, { pid, startTime = null, logPath = null }) {
   const p = workersJsonPath(workspace);
-  const raw = readWorkersRaw(workspace);
+  // readWorkersRaw は不在のみ null、破損は throw する。既存契約「読めなければ更新対象なし
+  // として false」を維持するため、破損も false に握りつぶす（この関数の契約は更新成否のみ）。
+  let raw;
+  try { raw = readWorkersRaw(workspace); } catch { return false; }
   if (!raw || !(workerName in raw)) return false;
 
   const entry = normalizeWorkerEntry(raw[workerName]);
@@ -112,7 +141,10 @@ function resolveWorkerName(workspace, { issue, skill }) {
   if (issue == null || issue === '') throw new Error('resolveWorkerName: issue が必要です');
   if (!skill) throw new Error('resolveWorkerName: skill が必要です');
 
-  const raw = readWorkersRaw(workspace);
+  // readWorkersRaw は不在のみ null、破損は throw する。既存契約「不在も破損も『読み込め
+  // ません』エラー」を維持するため、破損は catch して null に落として同じエラーにする。
+  let raw;
+  try { raw = readWorkersRaw(workspace); } catch { raw = null; }
   if (!raw) throw new Error(`workers.json を読み込めません（${workspace}）`);
 
   const wantIssue = Number(issue);

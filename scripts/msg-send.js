@@ -203,7 +203,11 @@ function buildBusyRejectionMessage({ workerName, entry, issue, draftPath }) {
  * @returns {string|null}  拒否メッセージ（拒否する場合）。拒否しない場合は null。
  */
 function checkWorkerBusyRejection({ workspace, workerName, repo, issue, ghOpts, body }) {
-  const raw = readWorkersRaw(workspace);
+  // readWorkersRaw は不在のみ null、破損は throw する。このガードは上記 docstring のとおり
+  // 「判定不能は拒否せず通す（フェイルオープン）」契約のため、破損も null に落として通す。
+  // 判定不能時にここで通しても損害はない（従来どおり休止待ちキューへ積まれて配送される）。
+  let raw;
+  try { raw = readWorkersRaw(workspace); } catch { return null; }
   if (!raw || !(workerName in raw)) return null; // 未登録の宛先はこのガードの対象外（issue解決等が別途扱う）
 
   const entry = normalizeWorkerEntry(raw[workerName]);

@@ -84,6 +84,23 @@ test('migration holds a worker log owned by a live workers.json process', () => 
   assert.equal(fs.existsSync(oldLog), true);
 });
 
+test('migration holds a worker log when workers.json is unreadable（破損時は held に倒れる）', () => {
+  const dir = workspace();
+  const workerName = 'issue-5-coder-fix';
+  const oldLog = path.join(dir, '.gh-maestro', 'worker-logs', `${workerName}.log`);
+  fs.mkdirSync(path.dirname(oldLog), { recursive: true });
+  fs.writeFileSync(oldLog, 'live\n');
+  // workers.json を解析不能にする。readWorkersRaw は throw し、ownerIsLive の既存の catch が
+  // 「生存を判定できない」ことを held（true）に倒す（Issue #275 項目1）。破損を「非生存」と
+  // 誤判定すると移行対象が動いてしまい、稼働中ワーカーのログを引き剥がす。
+  fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), '{ broken json');
+
+  const result = planMigration(dir, 'worker-log', { dryRun: true });
+  assert.equal(result.held.length, 1);
+  assert.equal(result.moved.length, 0);
+  assert.equal(fs.existsSync(oldLog), true);
+});
+
 test('migration classifies inbox-supervisor cursors vs contracts by their directory', () => {
   const dir = workspace();
   const oldCursor = path.join(dir, '.gh-maestro', 'inbox-supervisor', 'cursors', 'issue-5-coder-fix.json');
