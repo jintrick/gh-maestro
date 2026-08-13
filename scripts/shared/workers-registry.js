@@ -144,10 +144,11 @@ function resolveWorkerName(workspace, { issue, skill }) {
   if (issue == null || issue === '') throw new Error('resolveWorkerName: issue が必要です');
   if (!skill) throw new Error('resolveWorkerName: skill が必要です');
 
-  // readWorkersRaw は不在のみ null、破損は throw する。既存契約「不在も破損も『読み込め
-  // ません』エラー」を維持するため、破損は catch して null に落として同じエラーにする。
-  let raw;
-  try { raw = readWorkersRaw(workspace); } catch { raw = null; }
+  // readWorkersRaw は不在のみ null、破損は throw する。不在（null）のみ「読み込めません」に
+  // 落とし、破損は例外をそのまま伝播させる。「まだ1件もワーカーを起動していない正常な空状態」
+  // と「ファイルが壊れている」を同一メッセージに潰すと、前者は放置してよいのに後者は介入が
+  // 要る、という区別ができなくなる（Issue #275 項目1）。
+  const raw = readWorkersRaw(workspace);
   if (!raw) throw new Error(`workers.json を読み込めません（${workspace}）`);
 
   const wantIssue = Number(issue);

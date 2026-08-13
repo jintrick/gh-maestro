@@ -248,17 +248,36 @@ test('resolveWorkerName: orchestratorエントリは対象外', () => {
   });
 });
 
-test('resolveWorkerName: workers.jsonが無ければエラー', () => {
+test('resolveWorkerName: workers.jsonが無ければ「読み込めません」エラー（不在のみ）', () => {
   withTempDir((dir) => {
-    assert.throws(() => resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }), /読み込めません/);
+    assert.throws(
+      () => resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }),
+      (err) => {
+        assert.match(err.message, /読み込めません/);
+        // 不在は破損ではない。破損固有のメッセージ（解析できません）と取り違えてはならない
+        // （Issue #275 項目1）。
+        assert.doesNotMatch(err.message, /解析できません/);
+        return true;
+      }
+    );
   });
 });
 
-test('resolveWorkerName: 破損workers.jsonも「読み込めません」エラー（既存契約の維持）', () => {
+test('resolveWorkerName: 破損workers.jsonは「解析できません」エラー（不在と区別）', () => {
   withTempDir((dir) => {
     fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(workersJsonPath(dir), '{not json', 'utf8');
-    assert.throws(() => resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }), /読み込めません/);
+    assert.throws(
+      () => resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }),
+      (err) => {
+        // readWorkersRaw の契約どおり破損は throw を伝播させる。不在専用の「読み込めません」に
+        // 潰すと「まだ1件も起動していない正常な空状態」と「ファイルが壊れている」を区別できない
+        // （Issue #275 項目1）。
+        assert.match(err.message, /解析できません/);
+        assert.doesNotMatch(err.message, /読み込めません/);
+        return true;
+      }
+    );
   });
 });
 
