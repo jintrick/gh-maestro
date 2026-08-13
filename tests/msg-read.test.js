@@ -44,19 +44,19 @@ test('commentId なしは code 1', () => {
 test('余剰な位置引数は code 1（黙って無視しない）', () => {
   const r = msgRead.main(['123', 'extra']);
   assert.equal(r.code, 1);
-  assert.ok(r.errLines.some(l => l.includes('未知の引数')));
+  assert.ok(r.errLines.some(l => l.includes('予期しない位置引数')));
 });
 
 test('未知のフラグは code 1（黙って無視しない）', () => {
   const r = msgRead.main(['123', '--bogus']);
   assert.equal(r.code, 1);
-  assert.ok(r.errLines.some(l => l.includes('未知の引数')));
+  assert.ok(r.errLines.some(l => l.includes('未知のフラグ')));
 });
 
 test('単独の未知フラグは commentId として受理されず code 1', () => {
   const r = msgRead.main(['--bogus']);
   assert.equal(r.code, 1);
-  assert.ok(r.errLines.some(l => l.includes('未知の引数')));
+  assert.ok(r.errLines.some(l => l.includes('未知のフラグ')));
 });
 
 // ── stripMarker ─────────────────────────────────────────────────────────────

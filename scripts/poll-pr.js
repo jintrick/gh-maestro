@@ -16,7 +16,7 @@
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { startReviewManager } = require('./start-review-manager');
-const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -113,17 +113,27 @@ module.exports = { getPrBaseBranch, formatBaseBranchMismatch, spawnPollReviews }
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--session-pid', '--base-branch'], ['--no-review-manager']);
-
-  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
-  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
-  // 値欠落は常にエラー優先（フェイルクローズ）とする。
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: { '--workspace': {}, '--session-pid': {}, '--base-branch': {} },
+      booleans: ['--no-review-manager', '--help', '-h'],
+      // issue（必須）と interval（任意）の2つまで。未知フラグ・余剰位置引数はパーサ側で拒否される
+      // （Issue #14 / argv-parsing-pitfalls）。
+      positionals: { min: 1, max: 2 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (hasGenuineHelpRequest(argv, err.errors)) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`poll-pr: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
   }
@@ -134,11 +144,6 @@ if (require.main === module) {
   const noReviewManager = values['--no-review-manager'] === true;
 
   const [issue, intervalArg] = rest;
-
-  if (!issue) {
-    console.error(USAGE);
-    process.exit(1);
-  }
 
   const interval = parseInt(intervalArg || '30') * 1000;
 

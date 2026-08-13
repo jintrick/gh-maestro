@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
-const { parseFlags } = require('./shared/workspace');
+const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS } = require('./shared/review-aspects');
 const { _validateAgainstSchema } = require('./shared/json-schema');
 const { atomicWriteJson } = require('./shared/atomic-write');
@@ -519,10 +519,21 @@ module.exports = {
 if (require.main === module) {
   (async () => {
     const args = process.argv.slice(2);
-    const valueFlags = ['--results', '--mode', '--output', '--workspace'];
-    const { values, rest, exitFlagMiss } = parseFlags(args, valueFlags, ['--help', '-h']);
-
-    if (exitFlagMiss) {
+    let values, rest;
+    try {
+      ({ values, rest } = parseFlags(args, {
+        flags: { '--results': {}, '--mode': {}, '--output': {}, '--workspace': {} },
+        booleans: ['--help', '-h'],
+        // 未知フラグ・位置引数はパーサ側で拒否される（argv-parsing-pitfalls参照）。
+        positionals: { min: 0, max: 0 },
+      }));
+    } catch (err) {
+      if (err.name !== 'ArgsValidationError') throw err;
+      if (hasGenuineHelpRequest(args, err.errors)) {
+        console.log(USAGE);
+        process.exit(0);
+      }
+      for (const e of err.errors) console.error(`finalize-review: ${e.message}`);
       console.error(USAGE);
       process.exit(2);
     }
@@ -530,13 +541,6 @@ if (require.main === module) {
     if (values['--help'] || values['-h']) {
       console.log(USAGE);
       process.exit(0);
-    }
-
-    // 未知の位置引数があればエラー
-    if (rest.length > 0) {
-      console.error(`unexpected positional arguments: ${rest.join(' ')}`);
-      console.error(USAGE);
-      process.exit(2);
     }
 
     const resultsPath = values['--results'];

@@ -6,7 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace, hasGenuineHelpRequest } = require('./shared/workspace');
 const { isProcessAlive } = require('./process-lifecycle');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
@@ -286,9 +286,21 @@ function runWithInboxSupervisorControl(workspace, scope, { dryRun }, fn) {
 }
 
 function main(argv) {
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--scope'], ['--dry-run']);
-  if (hasHelpFlag(rest)) { console.log(USAGE); return 0; }
-  if (exitFlagMiss || rest.length > 0) { console.error(USAGE); return 1; }
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: { '--workspace': {}, '--scope': {} },
+      booleans: ['--dry-run', '--help', '-h'],
+      positionals: { min: 0, max: 0 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (hasGenuineHelpRequest(argv, err.errors)) { console.log(USAGE); return 0; }
+    for (const e of err.errors) console.error(`migrate-records: ${e.message}`);
+    console.error(USAGE);
+    return 1;
+  }
+  if (values['--help'] || values['-h']) { console.log(USAGE); return 0; }
   const scope = values['--scope'] || 'all';
   if (!SCOPES.has(scope)) { console.error(`migrate-records: invalid scope: ${scope}`); console.error(USAGE); return 1; }
   const workspace = resolveWorkspace(values['--workspace']);

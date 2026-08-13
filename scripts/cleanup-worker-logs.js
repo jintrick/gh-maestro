@@ -17,7 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace, hasGenuineHelpRequest } = require('./shared/workspace');
 const { workerLogPath } = require('./shared/headless-launch');
 const { compactWorkerLog } = require('./shared/strip-thinking-token-lines');
 const { recordRoot } = require('./shared/record-paths');
@@ -39,22 +39,29 @@ Options:
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--workspace', '--worker']);
-
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: { '--workspace': {}, '--worker': {} },
+      booleans: ['--help', '-h'],
+      positionals: { min: 0, max: 0 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    // --help/-h 指定時に他エラー（値欠落等）があっても help を優先する。
+    // フラグの値として "--help" が誤消費されないのは spec booleans 宣言で構造的に保証される。
+    if (hasGenuineHelpRequest(argv, err.errors)) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`cleanup-worker-logs: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
-  }
-
-  if (rest.length > 0) {
-    console.error(`cleanup-worker-logs: 未知の引数です: ${rest.join(' ')}`);
-    console.error(USAGE);
-    process.exit(1);
   }
 
   const fail = (msg) => { console.error(`cleanup-worker-logs: ${msg}`); process.exit(1); };

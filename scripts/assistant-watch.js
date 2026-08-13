@@ -26,7 +26,7 @@ const path = require('path');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
 const { spawnSync } = require('./child-process');
-const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // parseMarker は副作用の無い純粋なパース関数（gh呼び出し・state永続化・
 // プロセスレジストリ登録は一切含まない）なので、上記の「msg-poll.js を流用しない」制約とは
@@ -307,17 +307,24 @@ function scanOnce({ workspace, ghDir, repo, issue, state, isBaseline, ghOpts }) 
 // ── 引数解析 ──────────────────────────────────────────────────────────────
 
 function parseArgs(args) {
-  if (hasHelpFlag(args)) return { help: true };
-
-  const { values, rest, exitFlagMiss } = parseFlags(
-    args, ['--issue', '--workspace', '--repo', '--wait', '--interval'],
-  );
-  if (exitFlagMiss) return { help: false, exitFlagMiss: true };
-  if (rest.length > 0) return { help: false, unknownArgs: rest };
+  let values;
+  try {
+    ({ values } = parseFlags(args, {
+      flags: { '--issue': {}, '--workspace': {}, '--repo': {}, '--wait': {}, '--interval': {} },
+      booleans: ['--help', '-h'],
+      // 未知フラグ・位置引数はパーサ側で拒否される（argv-parsing-pitfalls参照）。
+      positionals: { min: 0, max: 0 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (hasGenuineHelpRequest(args, err.errors)) return { help: true };
+    return { help: false, validationErrors: err.errors };
+  }
+  if (values['--help'] || values['-h']) return { help: true };
 
   return {
     help: false,
-    exitFlagMiss: false,
+    validationErrors: null,
     issueArg: values['--issue'],
     workspaceArg: values['--workspace'],
     repoArg: values['--repo'],
@@ -361,13 +368,8 @@ async function main(argsOverride) {
     out.push(USAGE);
     return { code: 0, lines: out, errLines: err };
   }
-  if (parsed.exitFlagMiss) {
-    err.push('assistant-watch: フラグには値が必要です。');
-    err.push(USAGE);
-    return { code: 1, lines: out, errLines: err };
-  }
-  if (parsed.unknownArgs) {
-    err.push(`assistant-watch: 未知の引数です: ${parsed.unknownArgs.join(' ')}`);
+  if (parsed.validationErrors) {
+    for (const e of parsed.validationErrors) err.push(`assistant-watch: ${e.message}`);
     err.push(USAGE);
     return { code: 1, lines: out, errLines: err };
   }

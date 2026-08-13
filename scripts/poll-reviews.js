@@ -13,7 +13,7 @@
 const { spawnSync } = require('./child-process');
 const fs = require('fs');
 const path = require('path');
-const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace, hasGenuineHelpRequest } = require('./shared/workspace');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -75,17 +75,26 @@ module.exports = { isValidCommentId, pollDegradationTransition };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--session-pid']);
-
-  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
-  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
-  // 値欠落は常にエラー優先（フェイルクローズ）とする。
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: { '--session-pid': {} },
+      booleans: ['--help', '-h'],
+      // pr（必須）・workspace・interval の3つまで。未知フラグ・余剰位置引数はパーサ側で拒否。
+      positionals: { min: 1, max: 3 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (hasGenuineHelpRequest(argv, err.errors)) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`poll-reviews: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
   }

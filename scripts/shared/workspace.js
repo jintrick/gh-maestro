@@ -72,47 +72,85 @@ function resolveWorkspace(workspaceArg) {
 }
 
 /**
- * args 配列から名前付きフラグを抽出する。
+ * parseFlags の検証エラー。
+ * errors プロパティに検証エラー一覧（{ message, kind, flag? }）を持つ。
+ * 呼び出し側は catch して errors を表示し、自スクリプトの usage を出してから
+ * そのスクリプト本来の誤用時の終了コードで終了する（終了コードはスクリプトごとに
+ * 現在の値を維持する。Issue #275 で一斉変更しない）。
+ */
+class ArgsValidationError extends Error {
+  constructor(errors) {
+    super(errors.map((e) => e.message).join('\n'));
+    this.name = 'ArgsValidationError';
+    this.errors = errors;
+  }
+}
+
+/**
+ * args 配列から名前付きフラグを抽出し、仕様オブジェクトに照らして検証する。
+ *
+ * 旧契約 `parseFlags(args, flags, booleanFlags)` は、値欠落を `values[flag]=null` と
+ * `exitFlagMiss` の2チャネルに分けて返し、「呼び出し側が null を確認し忘れると
+ * null.trim() で TypeError」という呼び出し側の注意に依存する契約だった（Issue #275 項目3）。
+ * 新契約は仕様オブジェクトを必須とし、検証エラーを throw する。呼び出し側は
+ * `values`（出現したフラグのみ、欠落はキー不在）か `ArgsValidationError` のどちらかだけを
+ * 受け取る。
+ *
+ * シグネチャ検証: 旧形式（第2引数=フラグ名配列・第2引数なし・第3引数あり）は
+ * 仕様オブジェクト（非配列 object）として不正のため、明確に throw する。
+ * これにより移行し忘れた呼び出し元は実行時に落ちる（改名による ReferenceError 検出の代替。
+ * Issue #275 round 4 確定事項）。
  *
  * @param {string[]} args  process.argv.slice(2) 相当
- * @param {string[]} flags 値を取るフラグ名の配列（例: ['--workspace', '--kind', '--message-id']）
- * @param {string[]} [booleanFlags=[]] 値を取らない真偽フラグ名の配列（例: ['--verbose', '--dry-run']）
- * @returns {{ values: Record<string,string|boolean|null>, rest: string[] }}
- *   values: 各フラグ → 値（値フラグは string|null、真偽フラグは boolean|null。フラグなしは null。
- *           値フラグの値不足は null で exitFlagMiss を true に）
- *   rest:   フラグとその値を除いた位置引数
- *   exitFlagMiss: boolean — 値フラグがあったが値がない場合 true（真偽フラグは対象外）
+ * @param {{flags?: Record<string, {required?: boolean, hint?: string}>, booleans?: string[], positionals?: {min?: number, max?: number}}} spec
+ *   flags:      値を取るフラグ名 → { required, hint }（hint は必須欠落メッセージに追記する文脈）
+ *   booleans:   値を取らない真偽フラグ名の配列（例: ['--help', '-h']）
+ *   positionals: 位置引数の個数制約（既定 {min:0, max:0}）
+ * @returns {{ values: Record<string, string|boolean>, rest: string[] }}
+ *   values: 出現したフラグのみ（真偽フラグは true。任意フラグの欠落はキー不在=undefined。
+ *           呼び出し側は `values['--x'] ?? 既定値` で明示的に既定値を与える）
+ *   rest:   位置引数（未知の -- 始まりトークンは rest に入らず errors 側）
+ * @throws {ArgsValidationError} 必須欠落・値欠落・未知フラグ・位置引数違反のいずれかがある場合
  */
-function parseFlags(args, flags, booleanFlags = []) {
-  const values = {};
-  const skipIndices = new Set();
-  let exitFlagMiss = false;
-  // 既知の全フラグ名を収集。値フラグの次トークンが既知フラグであれば値欠落と判定する。
-  const allKnownFlags = new Set([...flags, ...booleanFlags]);
+function parseFlags(args, spec) {
+  if (arguments.length !== 2 || spec == null || Array.isArray(spec)) {
+    throw new Error('parseFlags の契約が変わりました: 第2引数に仕様オブジェクトが必要です。旧形式 (args, flags, booleanFlags) は廃止されました。呼び出し元を新契約へ移行してください。');
+  }
 
-  // 真偽フラグ: 値を消費しない。存在すれば true、なければ null。
-  for (const flag of booleanFlags) {
+  const { flags = {}, booleans = [], positionals = { min: 0, max: 0 } } = spec;
+  const values = {};
+  const errors = [];
+  const rest = [];
+  const skipIndices = new Set();
+  // 既知の全フラグ名を収集。値フラグの次トークンが既知フラグであれば値欠落と判定する。
+  const allKnownFlags = new Set([...Object.keys(flags), ...booleans]);
+
+  // 真偽フラグ: 値を消費しない。存在すれば true（欠落はキー不在）。
+  for (const flag of booleans) {
     const idx = args.indexOf(flag);
-    if (idx === -1) {
-      values[flag] = null;
-    } else {
+    if (idx !== -1) {
       values[flag] = true;
       skipIndices.add(idx);
     }
   }
 
-  // 値フラグ: 次トークンを値として消費する。値が欠落していたら exitFlagMiss。
-  for (const flag of flags) {
+  // 値フラグ: 次トークンを値として消費する。値が欠落していたら errors に積む。
+  for (const [flag, def] of Object.entries(flags)) {
     const idx = args.indexOf(flag);
     if (idx === -1) {
-      values[flag] = null;
+      if (def.required) {
+        errors.push({
+          message: `必須フラグがありません: ${flag}${def.hint ? `（${def.hint}）` : ''}`,
+          kind: 'required-missing',
+          flag,
+        });
+      }
       continue;
     }
     // 次トークンがない（末尾）／次トークンが既知フラグ／次トークンが -- で始まる未知の長形式フラグ → 値欠落
     // startsWith('-') による一律判定は避ける（負数 -5 や -my-branch 等の正当な値を誤検出するため）
     if (idx + 1 >= args.length || allKnownFlags.has(args[idx + 1]) || args[idx + 1].startsWith('--')) {
-      values[flag] = null;
-      exitFlagMiss = true;
+      errors.push({ message: `フラグ ${flag} には値が必要です`, kind: 'missing-value', flag });
       skipIndices.add(idx);
     } else {
       values[flag] = args[idx + 1];
@@ -121,25 +159,52 @@ function parseFlags(args, flags, booleanFlags = []) {
     }
   }
 
-  const rest = args.filter((_, i) => !skipIndices.has(i));
+  // 未消費トークンの分類: -- 始まりは位置引数として受理しない（Issue #14 先頭の未消費フラグ誤受理）。
+  // 既知フラグが未消費のまま残るのは重複指定、未知なら未知フラグ。
+  const unconsumed = args.filter((_, i) => !skipIndices.has(i));
+  for (const token of unconsumed) {
+    if (token.startsWith('--')) {
+      const known = allKnownFlags.has(token);
+      errors.push({
+        message: known ? `フラグが重複しています: ${token}` : `未知のフラグです: ${token}`,
+        kind: known ? 'duplicate-flag' : 'unknown-flag',
+        flag: token,
+      });
+    } else {
+      rest.push(token);
+    }
+  }
 
-  return { values, rest, exitFlagMiss };
+  // 位置引数の個数検証
+  if (rest.length < positionals.min) {
+    errors.push({ message: '位置引数が必要です', kind: 'positional-missing' });
+  }
+  if (rest.length > positionals.max) {
+    errors.push({ message: `予期しない位置引数です: ${rest.slice(positionals.max).join(' ')}`, kind: 'too-many-positionals' });
+  }
+
+  if (errors.length > 0) throw new ArgsValidationError(errors);
+  return { values, rest };
 }
 
 /**
- * parseFlags の `rest`（フラグ・値として消費されなかった残り）に対して
- * --help/-h が含まれるか判定する。
+ * ArgsValidationError を catch した際に、`--help`/`-h` をヘルプ表示へ逸らすべきかを判定する。
  *
- * `rest` は既に他フラグの値として消費されたトークンを含まないため、
- * 他オプションの値がたまたま "--help" と一致しても誤検出しない
- * （生の argv 全体を対象にした `argv.includes('--help')` が引き起こす
- * フラグ/値衝突を避けるための共通ヘルパー）。
+ * 旧契約の parseFlags は値欠落を `exitFlagMiss` で返し、全呼び出し元が「値欠落をヘルプ判定より
+ * 先にエラー扱い」していた。これは値欠落時に未消費の値トークンがたまたま `--help` と一致する
+ * 場合にヘルプ表示へ握りつぶされる事故（argv-parsing-pitfalls.md「フラグ/値の衝突」）を防ぐため。
+ * 新契約では値欠落は ArgsValidationError の missing-value として現れるため、それが混ざっている
+ * 間はヘルプを優先しない（値として `--help` を渡された可能性が高く、真のヘルプ要求と区別できない）。
+ * それ以外の検証エラー（必須欠落・未知フラグ・位置引数違反）は `--help` があれば真の要求として
+ * ヘルプを優先する（例: `run-review-jobs --help` は必須フラグ欠落エラーに負けずに usage を出す）。
  *
- * @param {string[]} rest  parseFlags が返す rest 配列
- * @returns {boolean}
+ * @param {string[]} args  process.argv.slice(2)
+ * @param {{kind: string}[]} errors  ArgsValidationError の errors 一覧
+ * @returns {boolean} ヘルプ表示へ逸らすべき場合 true
  */
-function hasHelpFlag(rest) {
-  return rest.includes('--help') || rest.includes('-h');
+function hasGenuineHelpRequest(args, errors) {
+  if (!(args.includes('--help') || args.includes('-h'))) return false;
+  return !errors.some((e) => e.kind === 'missing-value');
 }
 
-module.exports = { findWorkspaceFromCwd, resolveWorkspace, parseFlags, hasHelpFlag };
+module.exports = { findWorkspaceFromCwd, resolveWorkspace, parseFlags, hasGenuineHelpRequest, ArgsValidationError };

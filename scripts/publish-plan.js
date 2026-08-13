@@ -18,7 +18,7 @@
 'use strict';
 
 const { spawnSync } = require('./child-process');
-const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
 const { toWinPath } = require('./win-path');
 const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
@@ -201,18 +201,25 @@ module.exports = { publishPlan, PLAN_MARKER, parseCommentsResponse };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(
-    argv,
-    ['--issue', '--body-file', '--workspace'],
-    ['--stdin'],
-  );
-
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: { '--issue': {}, '--body-file': {}, '--workspace': {} },
+      booleans: ['--stdin', '--help', '-h'],
+      positionals: { min: 0, max: 0 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (hasGenuineHelpRequest(argv, err.errors)) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`publish-plan: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
   }

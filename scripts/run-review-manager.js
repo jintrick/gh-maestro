@@ -18,7 +18,7 @@ const {
   reviewWorktreeBranchName, reviewWorktreeFetchRef, reviewWorktreeDir,
 } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
 const { _validateAgainstSchema } = require('./shared/json-schema');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
@@ -1085,14 +1085,27 @@ async function superviseReviewManager({
 if (require.main === module) {
   (async () => {
     const argv = process.argv.slice(2);
-    const { rest, exitFlagMiss } = parseFlags(argv, []);
-
-    if (exitFlagMiss) {
+    let values, rest;
+    try {
+      ({ values, rest } = parseFlags(argv, {
+        flags: {},
+        booleans: ['--help', '-h'],
+        // pr / repo / workspace / issue のちょうど4つの位置引数。未知フラグ・余剰位置引数は
+        // パーサ側で拒否される（argv-parsing-pitfalls参照）。
+        positionals: { min: 4, max: 4 },
+      }));
+    } catch (err) {
+      if (err.name !== 'ArgsValidationError') throw err;
+      if (hasGenuineHelpRequest(argv, err.errors)) {
+        console.log(USAGE);
+        process.exit(0);
+      }
+      for (const e of err.errors) console.error(`run-review-manager: ${e.message}`);
       console.error(USAGE);
       process.exit(1);
     }
 
-    if (hasHelpFlag(rest)) {
+    if (values['--help'] || values['-h']) {
       console.log(USAGE);
       process.exit(0);
     }

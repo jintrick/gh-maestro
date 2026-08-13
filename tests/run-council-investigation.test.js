@@ -347,7 +347,8 @@ test('runCouncilInvestigation: 成功時は結果を書き出し 0 を返す', a
       // --title からのセッションID自動生成は共有 resolveSession へ委譲されている
       assert.equal(sessionCalls.length, 1);
       assert.equal(sessionCalls[0].title, 'RAG構成の採用可否');
-      assert.equal(sessionCalls[0].session, null);
+      // 新契約では未指定の任意フラグはキー不在=undefined（旧契約の null から変更、Issue #275）
+      assert.equal(sessionCalls[0].session, undefined);
       assert.equal(sessionCalls[0].workspace, ws);
       // 解決されたセッション（mock は 'autogen'）で結果ファイルが書かれている
       const resultPath = path.join(ws, '.gh-maestro', 'council-autogen.investigation.json');

@@ -15,7 +15,7 @@ function _isProcessAlive(pid) {
 const { launchAgentHeadless } = require('./shared/headless-launch');
 const { assertValidPr } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
 
 const USAGE = `start-review-manager.js — PRに対してReview Managerを起動する
 
@@ -147,17 +147,27 @@ module.exports = {
 
 if (require.main === module) {
   const args = process.argv.slice(2);
-  const { rest, exitFlagMiss } = parseFlags(args, []);
-
-  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
-  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
-  // 値欠落は常にエラー優先（フェイルクローズ）とする。
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(args, {
+      flags: {},
+      booleans: ['--help', '-h'],
+      // pr / repo / workspace / issue のちょうど4つの位置引数。未知フラグ・余剰位置引数は
+      // パーサ側で拒否される（argv-parsing-pitfalls参照）。
+      positionals: { min: 4, max: 4 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (hasGenuineHelpRequest(args, err.errors)) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`start-review-manager: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
   }

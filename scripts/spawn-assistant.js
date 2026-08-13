@@ -25,7 +25,7 @@ const { checkAgentExists } = require('./agent-exec');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { launchAgentInWindow } = require('./shared/pane-launch');
 const { setAssistant } = require('./shared/assistants-registry');
-const { parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
 
 const AGENT_ID = 'agy-interactive';
 
@@ -119,24 +119,27 @@ module.exports = { resolveRepo, buildPromptFileContent, buildShortPrompt, toUnix
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--issue', '--workspace', '--repo']);
-
-  // 値欠落は常にエラー優先（フェイルクローズ）とし、help判定より先に確定させる
-  // （argv-parsing-pitfalls ルール参照）。
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: { '--issue': {}, '--workspace': {}, '--repo': {} },
+      booleans: ['--help', '-h'],
+      positionals: { min: 0, max: 0 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (hasGenuineHelpRequest(argv, err.errors)) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`spawn-assistant: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
-  }
-
-  if (rest.length > 0) {
-    console.error(`spawn-assistant: 未知の引数です: ${rest.join(' ')}`);
-    console.error(USAGE);
-    process.exit(1);
   }
 
   const issue = values['--issue'];

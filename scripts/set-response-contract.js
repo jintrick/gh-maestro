@@ -20,10 +20,14 @@
 'use strict';
 
 const { resolveWorkerName } = require('./shared/workers-registry');
-const { resolveWorkspace, parseFlags, hasHelpFlag } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
 const { CONTRACT_TYPES, writeContract, clearContract } = require('./shared/response-contract');
 
-const VALUE_FLAGS = ['--issue', '--skill', '--type', '--artifact', '--workspace'];
+const SPEC = {
+  flags: { '--issue': {}, '--skill': {}, '--type': {}, '--artifact': {}, '--workspace': {} },
+  booleans: ['--help', '-h'],
+  positionals: { min: 0, max: 0 },
+};
 
 const USAGE = `set-response-contract.js — orchestratorが応答契約を設定する
 
@@ -58,23 +62,23 @@ function main(argsOverride) {
 
   const args = argsOverride || process.argv.slice(2);
 
-  if (hasHelpFlag(args)) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(args, SPEC));
+  } catch (e) {
+    if (e.name !== 'ArgsValidationError') throw e;
+    if (hasGenuineHelpRequest(args, e.errors)) {
+      writeOut(USAGE);
+      return { code: 0, lines: out, errLines: err };
+    }
+    for (const ve of e.errors) writeErr(`set-response-contract: ${ve.message}`);
+    writeErr(USAGE);
+    return { code: 1, lines: out, errLines: err };
+  }
+
+  if (values['--help'] || values['-h']) {
     writeOut(USAGE);
     return { code: 0, lines: out, errLines: err };
-  }
-
-  const { values, rest, exitFlagMiss } = parseFlags(args, VALUE_FLAGS);
-
-  if (exitFlagMiss) {
-    writeErr('set-response-contract: フラグには値が必要です。');
-    writeErr(USAGE);
-    return { code: 1, lines: out, errLines: err };
-  }
-
-  if (rest.length > 0) {
-    writeErr(`set-response-contract: 未知の引数です: ${rest.join(' ')}`);
-    writeErr(USAGE);
-    return { code: 1, lines: out, errLines: err };
   }
 
   const issue = values['--issue'];

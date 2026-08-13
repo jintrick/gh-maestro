@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { resolveWorkspace, parseFlags, findWorkspaceFromCwd } = require('../scripts/shared/workspace');
+const { resolveWorkspace, parseFlags, findWorkspaceFromCwd, hasGenuineHelpRequest } = require('../scripts/shared/workspace');
 
 function withEnv(env, fn) {
   const orig = { ...process.env };
@@ -191,156 +191,242 @@ test('resolveWorkspace: 通常のワークスペースは引き続き解決さ�
   }
 });
 
-// ── parseFlags ──────────────────────────────────────────────────────────
+// ── parseFlags（新契約: 仕様オブジェクト + ArgsValidationError throw） ─────
+
+function expectValidationError(args, spec, expectedMessage) {
+  assert.throws(
+    () => parseFlags(args, spec),
+    (err) => {
+      assert.equal(err.name, 'ArgsValidationError');
+      assert.equal(err.message, expectedMessage);
+      return true;
+    },
+  );
+}
 
 test('parseFlags: フラグと値を抽出する', () => {
   const args = ['--workspace', '/ws', '--kind', 'notify', 'pos1', 'pos2'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--kind']);
+  const { values, rest } = parseFlags(args, {
+    flags: { '--workspace': {}, '--kind': {} },
+    positionals: { min: 0, max: 2 },
+  });
 
   assert.equal(values['--workspace'], '/ws');
   assert.equal(values['--kind'], 'notify');
   assert.deepEqual(rest, ['pos1', 'pos2']);
-  assert.equal(exitFlagMiss, false);
 });
 
-test('parseFlags: フラグなしは全て rest', () => {
-  const args = ['pos1', 'pos2'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace']);
+test('parseFlags: 欠落した任意フラグはキー不在（undefined）', () => {
+  const { values, rest } = parseFlags(['pos1', 'pos2'], {
+    flags: { '--workspace': {} },
+    positionals: { min: 0, max: 2 },
+  });
 
-  assert.equal(values['--workspace'], null);
+  assert.equal('--workspace' in values, false);
+  assert.equal(values['--workspace'], undefined);
   assert.deepEqual(rest, ['pos1', 'pos2']);
-  assert.equal(exitFlagMiss, false);
 });
 
-test('parseFlags: フラグに値がない場合 exitFlagMiss=true', () => {
-  const args = ['--workspace', '--kind', 'notify'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--kind']);
+test('parseFlags: 真偽フラグは存在すれば true、なければキー不在', () => {
+  const withVerbose = parseFlags(['--verbose', 'hello'], {
+    booleans: ['--verbose'],
+    positionals: { min: 0, max: 1 },
+  });
+  assert.equal(withVerbose.values['--verbose'], true);
 
-  assert.equal(values['--workspace'], null);
-  assert.equal(values['--kind'], 'notify');
-  assert.deepEqual(rest, []);
-  assert.equal(exitFlagMiss, true);
-});
-
-test('parseFlags: フラグが末尾で値なしは exitFlagMiss=true', () => {
-  const args = ['--workspace'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace']);
-
-  assert.equal(values['--workspace'], null);
-  assert.deepEqual(rest, []);
-  assert.equal(exitFlagMiss, true);
-});
-
-test('parseFlags: 複数フラグを同時に処理する', () => {
-  const args = ['--message-id', 'myid', '--workspace', '/ws', 'hello'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--kind', '--message-id']);
-
-  assert.equal(values['--workspace'], '/ws');
-  assert.equal(values['--kind'], null);
-  assert.equal(values['--message-id'], 'myid');
-  assert.deepEqual(rest, ['hello']);
-  assert.equal(exitFlagMiss, false);
-});
-
-test('parseFlags: 未知の短縮フラグは値として消費される（負数等と区別不能なため）', () => {
-  // -v は既知フラグになく -- で始まらないため値として扱われる
-  const args = ['--workspace', '-v', 'hello'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace']);
-
-  assert.equal(values['--workspace'], '-v');
-  assert.deepEqual(rest, ['hello']);
-  assert.equal(exitFlagMiss, false);
-});
-
-test('parseFlags: 負数は値として正しく消費される', () => {
-  const args = ['--max-age', '-5', 'hello'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--max-age']);
-
-  assert.equal(values['--max-age'], '-5');
-  assert.deepEqual(rest, ['hello']);
-  assert.equal(exitFlagMiss, false);
-});
-
-test('parseFlags: ダッシュ始まりの文字列も値として扱われる', () => {
-  const args = ['--workspace', '-my-branch', 'hello'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace']);
-
-  assert.equal(values['--workspace'], '-my-branch');
-  assert.deepEqual(rest, ['hello']);
-  assert.equal(exitFlagMiss, false);
-});
-
-test('parseFlags: 未知の --長形式フラグは値欠落と判定される', () => {
-  const args = ['--workspace', '--unknown-flag', 'hello'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace']);
-
-  assert.equal(values['--workspace'], null);
-  assert.deepEqual(rest, ['--unknown-flag', 'hello']);
-  assert.equal(exitFlagMiss, true);
-});
-
-test('parseFlags: 真偽フラグは存在すれば true、値を消費しない', () => {
-  const args = ['--verbose', 'hello'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, [], ['--verbose']);
-
-  assert.equal(values['--verbose'], true);
-  assert.deepEqual(rest, ['hello']);
-  assert.equal(exitFlagMiss, false);
-});
-
-test('parseFlags: 真偽フラグがなければ null', () => {
-  const args = ['hello'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, [], ['--verbose']);
-
-  assert.equal(values['--verbose'], null);
-  assert.deepEqual(rest, ['hello']);
-  assert.equal(exitFlagMiss, false);
+  const withoutVerbose = parseFlags(['hello'], {
+    booleans: ['--verbose'],
+    positionals: { min: 0, max: 1 },
+  });
+  assert.equal('--verbose' in withoutVerbose.values, false);
 });
 
 test('parseFlags: 真偽フラグが末尾にあってもエラーにならない', () => {
-  const args = ['hello', '--dry-run'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, [], ['--dry-run']);
+  const { values } = parseFlags(['hello', '--dry-run'], {
+    booleans: ['--dry-run'],
+    positionals: { min: 0, max: 1 },
+  });
 
   assert.equal(values['--dry-run'], true);
-  assert.deepEqual(rest, ['hello']);
-  assert.equal(exitFlagMiss, false);
 });
 
 test('parseFlags: 真偽フラグと値フラグを混在できる', () => {
-  const args = ['--workspace', '/ws', '--verbose', 'hello'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace'], ['--verbose']);
+  const { values, rest } = parseFlags(['--workspace', '/ws', '--verbose', 'hello'], {
+    flags: { '--workspace': {} },
+    booleans: ['--verbose'],
+    positionals: { min: 0, max: 1 },
+  });
 
   assert.equal(values['--workspace'], '/ws');
   assert.equal(values['--verbose'], true);
   assert.deepEqual(rest, ['hello']);
-  assert.equal(exitFlagMiss, false);
 });
 
-test('parseFlags: 値フラグの次が真偽フラグなら exitFlagMiss（真偽フラグ名が値フラグに食われない）', () => {
-  // 真偽フラグも - で始まるため、値フラグの次が真偽フラグでも値欠落になる
-  const args = ['--workspace', '--verbose', 'hello'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace'], ['--verbose']);
+test('parseFlags: 値フラグの次が真偽フラグなら値欠落（真偽フラグ名が値フラグに食われない）', () => {
+  expectValidationError(
+    ['--workspace', '--verbose', 'hello'],
+    { flags: { '--workspace': {} }, booleans: ['--verbose'], positionals: { min: 0, max: 1 } },
+    'フラグ --workspace には値が必要です',
+  );
+});
 
-  // 値フラグ --workspace の次が --verbose なので値欠落となる
-  // 真偽フラグ --verbose は値フラグの値として消費されず、独立して true になる
-  // skipIndices: --verbose は真偽フラグの for ループで idx=1 が追加されるが、
-  // 値フラグ --workspace の for ループでは idx=0 と idx+1=1 の両方を skipIndices に入れようとする
-  // が、--workspace は idx=0 で idx+1=1 は --verbose で startsWith('-') → exitFlagMiss=true
-  // このとき skipIndices には --workspace の idx=0 のみ追加される
-  // 真偽フラグのループが先に走るため --verbose の idx=1 はすでに skipIndices に入っている
-  // 実際には: values['--verbose']=true, values['--workspace']=null, exitFlagMiss=true
-  assert.equal(values['--workspace'], null);
-  assert.equal(values['--verbose'], true);
+test('parseFlags: フラグに値がない場合（次のトークンが既知フラグ）は ArgsValidationError', () => {
+  expectValidationError(
+    ['--workspace', '--kind', 'notify'],
+    { flags: { '--workspace': {}, '--kind': {} }, positionals: { min: 0, max: 2 } },
+    'フラグ --workspace には値が必要です',
+  );
+});
+
+test('parseFlags: フラグが末尾で値なしは ArgsValidationError', () => {
+  expectValidationError(
+    ['--workspace'],
+    { flags: { '--workspace': {} } },
+    'フラグ --workspace には値が必要です',
+  );
+});
+
+test('parseFlags: 必須フラグの欠落は ArgsValidationError（hint 付き）', () => {
+  expectValidationError(
+    ['--workspace', '/ws'],
+    { flags: { '--workspace': {}, '--pr': { required: true, hint: '検証前の起動コンテキストのPR番号' } } },
+    '必須フラグがありません: --pr（検証前の起動コンテキストのPR番号）',
+  );
+});
+
+test('parseFlags: 未知の -- 始まりフラグは位置引数として受理されず ArgsValidationError（Issue #14）', () => {
+  expectValidationError(
+    ['--bogus', 'hello'],
+    { flags: { '--workspace': {} }, positionals: { min: 0, max: 2 } },
+    '未知のフラグです: --bogus',
+  );
+});
+
+test('parseFlags: 重複したフラグは ArgsValidationError', () => {
+  expectValidationError(
+    ['--workspace', '/ws', '--workspace'],
+    { flags: { '--workspace': {} } },
+    'フラグが重複しています: --workspace',
+  );
+});
+
+test('parseFlags: 未知の --長形式フラグは「値欠落」と「未知フラグ」の両方で拒否される', () => {
+  let caught;
+  try {
+    parseFlags(['--workspace', '--unknown-flag', 'hello'], { flags: { '--workspace': {} }, positionals: { min: 0, max: 1 } });
+    assert.fail('ArgsValidationError が投げられるべき');
+  } catch (e) {
+    caught = e;
+  }
+  assert.equal(caught.name, 'ArgsValidationError');
+  const messages = caught.errors.map((e) => e.message);
+  assert.ok(messages.includes('フラグ --workspace には値が必要です'));
+  assert.ok(messages.includes('未知のフラグです: --unknown-flag'));
+});
+
+test('parseFlags: 負数は値として正しく消費される', () => {
+  const { values, rest } = parseFlags(['--max-age', '-5', 'hello'], {
+    flags: { '--max-age': {} },
+    positionals: { min: 0, max: 1 },
+  });
+
+  assert.equal(values['--max-age'], '-5');
   assert.deepEqual(rest, ['hello']);
-  assert.equal(exitFlagMiss, true);
 });
 
-test('parseFlags: 後方互換性 — booleanFlags なしでも既存の挙動は変わらない', () => {
-  const args = ['--workspace', '/ws', '--kind', 'notify', 'pos1'];
-  const { values, rest, exitFlagMiss } = parseFlags(args, ['--workspace', '--kind']);
+test('parseFlags: 短いダッシュ始まりの文字列（-v 等）は値として消費される', () => {
+  const { values, rest } = parseFlags(['--workspace', '-v', 'hello'], {
+    flags: { '--workspace': {} },
+    positionals: { min: 0, max: 1 },
+  });
 
-  assert.equal(values['--workspace'], '/ws');
-  assert.equal(values['--kind'], 'notify');
-  assert.deepEqual(rest, ['pos1']);
-  assert.equal(exitFlagMiss, false);
+  assert.equal(values['--workspace'], '-v');
+  assert.deepEqual(rest, ['hello']);
+});
+
+test('parseFlags: --x=value 形式はサポートされない（未知フラグとして拒否）', () => {
+  expectValidationError(
+    ['--workspace=/ws'],
+    { flags: { '--workspace': {} } },
+    '未知のフラグです: --workspace=/ws',
+  );
+});
+
+test('parseFlags: 位置引数の個数が min 未満なら ArgsValidationError', () => {
+  expectValidationError(
+    [],
+    { flags: {}, positionals: { min: 1, max: 1 } },
+    '位置引数が必要です',
+  );
+});
+
+test('parseFlags: 位置引数の個数が max を超えるなら ArgsValidationError', () => {
+  expectValidationError(
+    ['pos1', 'pos2'],
+    { flags: {}, positionals: { min: 0, max: 1 } },
+    '予期しない位置引数です: pos2',
+  );
+});
+
+test('parseFlags: 既定 positionals（max 0）では位置引数は ArgsValidationError', () => {
+  expectValidationError(
+    ['pos1'],
+    { flags: { '--workspace': {} } },
+    '予期しない位置引数です: pos1',
+  );
+});
+
+test('parseFlags: 空引数はエラーなく空 values / rest を返す', () => {
+  const { values, rest } = parseFlags([], { flags: {}, booleans: ['--help'], positionals: { min: 0, max: 0 } });
+  assert.deepEqual(values, {});
+  assert.deepEqual(rest, []);
+});
+
+test('parseFlags: 旧形式（第2引数がフラグ名配列）は契約変更エラーで throw', () => {
+  assert.throws(
+    () => parseFlags(['--workspace', '/ws'], ['--workspace'], ['--help']),
+    /parseFlags の契約が変わりました/,
+  );
+});
+
+test('parseFlags: 旧形式（第2引数なし）は契約変更エラーで throw', () => {
+  assert.throws(
+    () => parseFlags(['--workspace', '/ws']),
+    /parseFlags の契約が変わりました/,
+  );
+});
+
+// ── hasGenuineHelpRequest（catch でのヘルプ優先判定。値欠落はヘルプに握りつぶさない） ─────
+
+test('hasGenuineHelpRequest: --help があれば true', () => {
+  assert.equal(hasGenuineHelpRequest(['--help'], []), true);
+});
+
+test('hasGenuineHelpRequest: -h があれば true', () => {
+  assert.equal(hasGenuineHelpRequest(['-h'], []), true);
+});
+
+test('hasGenuineHelpRequest: 値欠落エラーが混ざっていると false（値として --help を渡された可能性）', () => {
+  assert.equal(
+    hasGenuineHelpRequest(['--workspace', '--help'], [{ kind: 'missing-value', flag: '--workspace' }]),
+    false,
+  );
+});
+
+test('hasGenuineHelpRequest: 必須欠落エラーだけなら true（--help は真の要求）', () => {
+  assert.equal(
+    hasGenuineHelpRequest(['--help'], [{ kind: 'required-missing', flag: '--pr' }]),
+    true,
+  );
+});
+
+test('hasGenuineHelpRequest: 未知フラグエラーがあっても true', () => {
+  assert.equal(
+    hasGenuineHelpRequest(['--help'], [{ kind: 'unknown-flag', flag: '--bogus' }]),
+    true,
+  );
+});
+
+test('hasGenuineHelpRequest: --help が無ければ false', () => {
+  assert.equal(hasGenuineHelpRequest(['--workspace', '/ws'], []), false);
 });

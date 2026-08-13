@@ -22,7 +22,7 @@ const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
-const { parseFlags } = require('./shared/workspace');
+const { parseFlags, hasGenuineHelpRequest } = require('./shared/workspace');
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS, FINDING_REQUIRED_FIELDS } = require('./shared/review-aspects');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
@@ -1259,10 +1259,30 @@ module.exports = {
 if (require.main === module) {
   (async () => {
     const args = process.argv.slice(2);
-    const valueFlags = ['--manifest', '--results', '--workspace', '--pr', '--repo', '--gh-dir', '--job-timeout', '--total-timeout'];
-    const { values, rest, exitFlagMiss } = parseFlags(args, valueFlags, ['--help', '-h']);
-
-    if (exitFlagMiss) {
+    let values, rest;
+    try {
+      ({ values, rest } = parseFlags(args, {
+        flags: {
+          '--pr': { required: true, hint: '検証前の起動コンテキストのPR番号' },
+          '--repo': { required: true },
+          '--gh-dir': { required: true },
+          '--manifest': { required: true },
+          '--results': { required: true },
+          '--workspace': {},
+          '--job-timeout': {},
+          '--total-timeout': {},
+        },
+        booleans: ['--help', '-h'],
+        // 未知フラグ・位置引数はパーサ側で拒否される（argv-parsing-pitfalls参照）。
+        positionals: { min: 0, max: 0 },
+      }));
+    } catch (err) {
+      if (err.name !== 'ArgsValidationError') throw err;
+      if (hasGenuineHelpRequest(args, err.errors)) {
+        console.log(USAGE);
+        process.exit(0);
+      }
+      for (const e of err.errors) console.error(`run-review-jobs: ${e.message}`);
       console.error(USAGE);
       process.exit(2);
     }
@@ -1272,41 +1292,30 @@ if (require.main === module) {
       process.exit(0);
     }
 
-    // 未知の位置引数があればエラー
-    if (rest.length > 0) {
-      console.error(`unexpected positional arguments: ${rest.join(' ')}`);
-      console.error(USAGE);
-      process.exit(2);
-    }
-
     const manifestPath = values['--manifest'];
     const resultsPath = values['--results'];
     const workspace = values['--workspace'] || process.cwd();
-    // --pr / --repo は検証前の起動コンテキスト由来（RMのプロンプトに含まれる PR / REPO）。
+    // --pr / --repo / --gh-dir は検証前の起動コンテキスト由来（RMのプロンプトに含まれる PR / REPO）。
     // 必須化し、作業を始める前にフェイルクローズで検証する。--pr は path traversal対策で
     // 正整数のみ受理（PR #84）。--repo は manifest の読み込み・解析に失敗した場合の通知先に
     // 必要で、欠落させると「起動時に必ず落ちる」呼び出し元が残るため必須にする（Issue #271）。
-    // parseFlags は値なしフラグの値を null で返す（undefined ではない）ため、欠落判定は
-    // どちらも null と undefined を同一視する（null.trim() の TypeError クラッシュ回避）。
+    // --gh-dir は再試行カウンタの永続化先（メインワークスペースの .gh-maestro、Issue #273）。
+    // 欠落（キー不在）はパーサの required が検出するため、ここでは値の形式だけを検証する。
+    // 空文字列（--repo "" 等）は required を満たしてしまうため trim で補足する。
     const pr = values['--pr'];
-    if (pr == null || !/^[1-9]\d*$/.test(pr)) {
-      console.error(pr == null
-        ? '--pr は必須です（検証前の起動コンテキストのPR番号）'
-        : `--pr は正整数でなければなりません: ${pr}`);
+    if (!/^[1-9]\d*$/.test(pr)) {
+      console.error(`--pr は正整数でなければなりません: ${pr}`);
       console.error(USAGE);
       process.exit(2);
     }
     const repo = values['--repo'];
-    if (repo == null || repo.trim() === '') {
+    if (repo.trim() === '') {
       console.error('--repo は必須です（owner/repo）');
       console.error(USAGE);
       process.exit(2);
     }
-    // --gh-dir は再試行カウンタの永続化先（メインワークスペースの .gh-maestro）。
-    // --repo と同じく parseFlags は欠落を null で返すため、null.trim() の TypeError
-    // クラッシュにしない（Issue #273 / PR #272 の --repo と同型のクラッシュ回避）。
     const ghDir = values['--gh-dir'];
-    if (ghDir == null || String(ghDir).trim() === '') {
+    if (String(ghDir).trim() === '') {
       console.error('--gh-dir は必須です（メインワークスペースの .gh-maestro ディレクトリ）');
       console.error(USAGE);
       process.exit(2);

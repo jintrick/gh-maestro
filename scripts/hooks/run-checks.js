@@ -10,7 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('../child-process');
-const { parseFlags, hasHelpFlag } = require('../shared/workspace');
+const { parseFlags, hasGenuineHelpRequest } = require('../shared/workspace');
 
 const USAGE = `run-checks.js — 言語エコシステム規約を検出してlint/format/typecheck/testを実行する
 
@@ -145,21 +145,29 @@ module.exports = { detectPrecommitPlan, detectPrepushPlan, main, USAGE };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { rest, exitFlagMiss } = parseFlags(argv, []);
-
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: {},
+      booleans: ['--help', '-h'],
+      // stage（必須）と workspaceRoot（任意）の2つまで。未知フラグ・余剰位置引数は
+      // パーサ側で拒否される（argv-parsing-pitfalls参照）。
+      positionals: { min: 1, max: 2 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (hasGenuineHelpRequest(argv, err.errors)) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`run-checks: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
-  }
-
-  if (rest.length < 1 || rest.length > 2) {
-    console.error(USAGE);
-    process.exit(1);
   }
 
   const [stage, workspaceRootArg] = rest;

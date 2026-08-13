@@ -211,7 +211,7 @@ describe('CLI argument validation', () => {
       return runMain(['--workspace', dir, '--bogus']);
     });
     assert.equal(r.code, 1);
-    assert.ok(r.errLines.some(l => l.includes('未知の引数')));
+    assert.ok(r.errLines.some(l => l.includes('未知のフラグ')));
     assert.equal(r.runOnce, null);
   });
 
@@ -2500,7 +2500,7 @@ describe('CLI integration (subprocess)', () => {
     withTempDir((dir) => {
       const r = runSupervisor(['--workspace'], dir);
       assert.equal(r.status, 1, `exit 1, got ${r.status}`);
-      assert.ok(r.stderr.includes('フラグには値が必要'), `stderr: ${r.stderr}`);
+      assert.ok(r.stderr.includes('フラグ --workspace には値が必要'), `stderr: ${r.stderr}`);
     });
   });
 

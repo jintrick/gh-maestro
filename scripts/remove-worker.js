@@ -18,7 +18,7 @@ const { worktreeRemove, worktreePrune } = require('./git-worktree');
 const { killProcessTree } = require('./kill-tree');
 const { sweepRegistry } = require('./process-lifecycle');
 const { atomicWriteJson } = require('./shared/atomic-write');
-const { parseFlags, hasHelpFlag, resolveWorkspace } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace, hasGenuineHelpRequest } = require('./shared/workspace');
 const { resolveWorkerName } = require('./shared/workers-registry');
 const { ARTIFACTS, legacyWorkerOwner, recordPath } = require('./shared/record-paths');
 
@@ -43,27 +43,29 @@ Options:
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const { values, rest, exitFlagMiss } = parseFlags(argv, ['--worker-name', '--workspace', '--issue', '--skill']);
-
-  // exitFlagMiss（値欠落）を先に判定する。未消費の値トークンが rest に残るため、
-  // それがたまたま "--help" と一致すると後段の hasHelpFlag が誤検出しうる。
-  // 値欠落は常にエラー優先（フェイルクローズ）とする。
-  if (exitFlagMiss) {
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlags(argv, {
+      flags: { '--worker-name': {}, '--workspace': {}, '--issue': {}, '--skill': {} },
+      booleans: ['--help', '-h'],
+      // このスクリプトは位置引数を取らない。余剰な位置引数・未知フラグはパーサ側で拒否される
+      // （spawn-worker.js / create-issue.js と同じ rest 検証パターン。argv-parsing-pitfalls参照）。
+      positionals: { min: 0, max: 0 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (hasGenuineHelpRequest(argv, err.errors)) {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    for (const e of err.errors) console.error(`remove-worker: ${e.message}`);
     console.error(USAGE);
     process.exit(1);
   }
 
-  if (hasHelpFlag(rest)) {
+  if (values['--help'] || values['-h']) {
     console.log(USAGE);
     process.exit(0);
-  }
-
-  // このスクリプトは位置引数を取らない。余剰な位置引数・未知フラグは黙って無視しない
-  // （spawn-worker.js / create-issue.js と同じ rest 検証パターン。argv-parsing-pitfalls参照）。
-  if (rest.length > 0) {
-    console.error(`remove-worker: 未知の引数です: ${rest.join(' ')}`);
-    console.error(USAGE);
-    process.exit(1);
   }
 
   const fail = (msg) => { console.error(`remove-worker: ${msg}`); process.exit(1); };

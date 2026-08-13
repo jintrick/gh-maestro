@@ -86,13 +86,13 @@ test('--issue+--skill で複数該当なら候補付きエラーで終了する'
 test('余剰な位置引数はエラー終了する（黙って無視しない）', () => {
   const r = run(['--worker-name', 'issue-5-x', 'extra']);
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /未知の引数/);
+  assert.match(r.stderr, /予期しない位置引数/);
   assert.match(r.stderr, /extra/);
 });
 
 test('未知のフラグはエラー終了する（黙って無視しない）', () => {
   const r = run(['--worker-name', 'issue-5-x', '--bogus']);
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /未知の引数/);
+  assert.match(r.stderr, /未知のフラグ/);
   assert.match(r.stderr, /--bogus/);
 });
