@@ -1,12 +1,23 @@
 'use strict';
 
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 
 // gh-create-pr.js は require.main===module 時のみCLIを実行するため、
 // resolveBaseBranch/createPr は純粋関数としてrequireで検証する。
 // child-process.js の spawnSync をモックし、実プロセスを0個spawnする
 // （.claude/rules/test-process-spawn-safety.md 準拠）。
+
+// createPr の NODE_TEST_CONTEXT ガードは「テスト実行中の外部副作用（実PR作成）を機械的に
+// 拒否する」構造的対策（Issue #202）。このテストファイルでは実PR作成の引数組み立てを
+// 検証するため、テスト実行中だけ一時的に除去する。ガード自体の動作は
+// 「NODE_TEST_CONTEXT 設定時はブロックされる」テストで明示的に確認する。
+const _savedNodeTestContext = process.env.NODE_TEST_CONTEXT;
+delete process.env.NODE_TEST_CONTEXT;
+after(() => {
+  if (_savedNodeTestContext === undefined) delete process.env.NODE_TEST_CONTEXT;
+  else process.env.NODE_TEST_CONTEXT = _savedNodeTestContext;
+});
 
 const ghCreatePrPath = require.resolve('../scripts/gh-create-pr');
 
@@ -41,63 +52,70 @@ function loadModule(spawnSyncImpl) {
   return { mod, calls };
 }
 
+/** main() が読む process.env.GH_MAESTRO_BASE_BRANCH を一時的に設定する。 */
+function withBaseBranch(branch, fn) {
+  const saved = process.env.GH_MAESTRO_BASE_BRANCH;
+  process.env.GH_MAESTRO_BASE_BRANCH = branch;
+  try {
+    return fn();
+  } finally {
+    if (saved === undefined) delete process.env.GH_MAESTRO_BASE_BRANCH;
+    else process.env.GH_MAESTRO_BASE_BRANCH = saved;
+  }
+}
+
 // ── resolveBaseBranch ───────────────────────────────────────────────────────
 
-test('resolveBaseBranch: origin/dev から dev を解決する', () => {
-  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'origin/dev\n' }));
-  const branch = mod.resolveBaseBranch();
+test('resolveBaseBranch: 環境変数から base を解決する（git を呼ばない）', () => {
+  const { mod, calls } = loadModule();
+  const branch = mod.resolveBaseBranch({ env: { GH_MAESTRO_BASE_BRANCH: 'dev' } });
   assert.equal(branch, 'dev');
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].cmd, 'git');
-  assert.deepEqual(calls[0].args, ['rev-parse', '--abbrev-ref', '@{upstream}']);
+  // upstream tracking には一切依存しない（Issue #269）: git を1回も呼ばない
+  assert.equal(calls.length, 0);
 });
 
-test('resolveBaseBranch: origin/main から main を解決する', () => {
-  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'origin/main\n' }));
-  const branch = mod.resolveBaseBranch();
-  assert.equal(branch, 'main');
-  assert.equal(calls.length, 1);
+test('resolveBaseBranch: 異なるブランチ値もそのまま返す', () => {
+  const { mod, calls } = loadModule();
+  assert.equal(mod.resolveBaseBranch({ env: { GH_MAESTRO_BASE_BRANCH: 'main' } }), 'main');
+  assert.equal(mod.resolveBaseBranch({ env: { GH_MAESTRO_BASE_BRANCH: '  feature/x  ' } }), 'feature/x');
+  assert.equal(calls.length, 0);
 });
 
-test('resolveBaseBranch: upstream未設定でエラー', () => {
-  const { mod } = loadModule(() => ({ status: 128, stdout: '', stderr: 'fatal: ...' }));
-  assert.throws(() => mod.resolveBaseBranch(), {
-    message: /upstream trackingが設定されていません/,
+test('resolveBaseBranch: env未指定でも process.env から読む', () => {
+  const { mod } = loadModule();
+  assert.equal(mod.resolveBaseBranch({ env: { GH_MAESTRO_BASE_BRANCH: 'dev' } }), 'dev');
+});
+
+test('resolveBaseBranch: 未設定ならフェイルクローズ（エラー）', () => {
+  const { mod, calls } = loadModule();
+  assert.throws(() => mod.resolveBaseBranch({ env: {} }), {
+    message: /GH_MAESTRO_BASE_BRANCH が設定されていません/,
   });
-});
-
-test('resolveBaseBranch: origin/ 以外の形式でエラー', () => {
-  const { mod } = loadModule(() => ({ status: 0, stdout: 'upstream/dev\n' }));
-  assert.throws(() => mod.resolveBaseBranch(), {
-    message: /予期しないupstream形式/,
+  assert.throws(() => mod.resolveBaseBranch({ env: { GH_MAESTRO_BASE_BRANCH: '  ' } }), {
+    message: /GH_MAESTRO_BASE_BRANCH が設定されていません/,
   });
+  assert.equal(calls.length, 0);
 });
 
-test('resolveBaseBranch: gitエラー（r.error）でエラー', () => {
-  const { mod } = loadModule(() => ({ error: new Error('ENOENT') }));
-  assert.throws(() => mod.resolveBaseBranch(), {
-    message: /upstream trackingが設定されていません/,
+test('resolveBaseBranch: - 始まりの値はオプション注入を防ぐため拒否する', () => {
+  const { mod } = loadModule();
+  assert.throws(() => mod.resolveBaseBranch({ env: { GH_MAESTRO_BASE_BRANCH: '--force' } }), {
+    message: /不正なベースブランチ形式/,
   });
 });
 
 // ── createPr ─────────────────────────────────────────────────────────────────
 
-test('createPr: 正しい引数で gh pr create を呼ぶ', () => {
-  let callIndex = 0;
-  const { mod, calls } = loadModule((cmd, args) => {
-    if (callIndex === 0) {
-      // 1回目: git rev-parse (resolveBaseBranch)
-      callIndex++;
-      return { status: 0, stdout: 'origin/dev\n' };
-    }
-    // 2回目: gh pr create
-    return { status: 0, stdout: 'https://github.com/owner/repo/pull/123\n' };
-  });
-  const result = mod.createPr({ title: 'Fix bug', body: 'Closes #1' });
+test('createPr: 環境変数のbaseを --base として gh pr create に渡す（回帰: upstream非依存）', () => {
+  // 回帰テスト（Issue #269）: コーダーの標準的な `git push -u` で upstream が自ブランチを
+  // 指すようになっても、base は環境変数から解決され --base に渡る。git は一切呼ばれない。
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/123\n' }));
+  const result = mod.createPr({ title: 'Fix bug', body: 'Closes #1', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } });
   assert.equal(result.url, 'https://github.com/owner/repo/pull/123');
   assert.equal(result.status, 0);
 
-  // 最後の呼び出しが gh pr create であることを確認
+  const gitCall = calls.find(c => c.cmd === 'git');
+  assert.equal(gitCall, undefined, 'git を1回も呼んではいけない（upstream tracking非依存）');
   const ghCall = calls.find(c => c.cmd === 'gh');
   assert.ok(ghCall, 'gh should be called');
   assert.equal(ghCall.args[0], 'pr');
@@ -110,40 +128,59 @@ test('createPr: 正しい引数で gh pr create を呼ぶ', () => {
   assert.equal(ghCall.args[7], 'Closes #1');
 });
 
+test('createPr: base が自ブランチと同名でも base==head にならず base に渡る', () => {
+  // 本Issueの直接の事故形状: upstream が自ブランチを指すと旧実装は base==head で失敗した。
+  // 新実装では env の値がそのまま --base に渡る。
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/1\n' }));
+  mod.createPr({ title: 'Fix', body: 'Closes #1', env: { GH_MAESTRO_BASE_BRANCH: 'issue-269-coder-fix-pr-base-resolution' } });
+  const ghCall = calls.find(c => c.cmd === 'gh');
+  assert.equal(ghCall.args[3], 'issue-269-coder-fix-pr-base-resolution');
+});
+
 test('createPr: --repo が指定された場合に渡される', () => {
-  let callIndex = 0;
-  const { mod, calls } = loadModule(() => {
-    if (callIndex++ === 0) return { status: 0, stdout: 'origin/dev\n' };
-    return { status: 0, stdout: 'https://github.com/owner/repo/pull/456\n' };
-  });
-  mod.createPr({ title: 'Fix', body: 'Closes #1', repo: 'custom/repo' });
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/456\n' }));
+  mod.createPr({ title: 'Fix', body: 'Closes #1', repo: 'custom/repo', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } });
   const ghCall = calls.find(c => c.cmd === 'gh');
   assert.ok(ghCall.args.includes('--repo'));
   assert.ok(ghCall.args.includes('custom/repo'));
 });
 
 test('createPr: gh 失敗時に status と stderr を返す', () => {
-  let callIndex = 0;
-  const { mod } = loadModule(() => {
-    if (callIndex++ === 0) return { status: 0, stdout: 'origin/dev\n' };
-    return { status: 1, stdout: '', stderr: 'gh: error: ...' };
-  });
-  const result = mod.createPr({ title: 'Fix', body: 'Closes #1' });
+  const { mod } = loadModule(() => ({ status: 1, stdout: '', stderr: 'gh: error: ...' }));
+  const result = mod.createPr({ title: 'Fix', body: 'Closes #1', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } });
   assert.equal(result.status, 1);
   assert.equal(result.stderr, 'gh: error: ...');
 });
 
 test('createPr: bodyFile が指定された場合に --body-file で渡される', () => {
-  let callIndex = 0;
-  const { mod, calls } = loadModule(() => {
-    if (callIndex++ === 0) return { status: 0, stdout: 'origin/dev\n' };
-    return { status: 0, stdout: 'https://github.com/owner/repo/pull/789\n' };
-  });
-  mod.createPr({ title: 'Fix', bodyFile: '/tmp/body.md' });
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/789\n' }));
+  mod.createPr({ title: 'Fix', bodyFile: '/tmp/body.md', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } });
   const ghCall = calls.find(c => c.cmd === 'gh');
   assert.ok(ghCall.args.includes('--body-file'));
   assert.ok(ghCall.args.includes('/tmp/body.md'));
   assert.ok(!ghCall.args.includes('--body'));
+});
+
+test('createPr: NODE_TEST_CONTEXT 設定時は実PR作成をブロックする（フェイルクローズ）', () => {
+  const { mod, calls } = loadModule();
+  process.env.NODE_TEST_CONTEXT = '1';
+  try {
+    const result = mod.createPr({ title: 'Fix', body: 'Closes #1', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } });
+    assert.equal(result.status, 1);
+    assert.equal(result.url, '');
+    assert.match(result.stderr, /NODE_TEST_CONTEXT/);
+  } finally {
+    delete process.env.NODE_TEST_CONTEXT;
+  }
+  assert.equal(calls.length, 0, 'ブロック時は gh を呼ばない');
+});
+
+test('createPr: GH_MAESTRO_BASE_BRANCH 未設定なら実PRを作らず throw する', () => {
+  const { mod, calls } = loadModule();
+  assert.throws(() => mod.createPr({ title: 'Fix', body: 'Closes #1', env: {} }), {
+    message: /GH_MAESTRO_BASE_BRANCH が設定されていません/,
+  });
+  assert.equal(calls.length, 0, 'フェイルクローズ時は gh を呼ばない');
 });
 
 // ── main（CLIエントリポイント） ──────────────────────────────────────────────
@@ -160,6 +197,12 @@ test('main: -h を表示する', () => {
   const result = mod.main(['-h']);
   assert.equal(result.exitCode, 0);
   assert.ok(result.stdout.includes('Usage'));
+});
+
+test('main: --help に GH_MAESTRO_BASE_BRANCH の説明を含む', () => {
+  const { mod } = loadModule();
+  const result = mod.main(['--help']);
+  assert.ok(result.stdout.includes('GH_MAESTRO_BASE_BRANCH'));
 });
 
 test('main: --title なしでエラー', () => {
@@ -191,32 +234,25 @@ test('main: 未知の引数でエラー', () => {
 });
 
 test('main: 正常系でURLを出力する', () => {
-  let callIndex = 0;
-  const { mod } = loadModule(() => {
-    if (callIndex++ === 0) return { status: 0, stdout: 'origin/dev\n' };
-    return { status: 0, stdout: 'https://github.com/owner/repo/pull/123\n' };
-  });
-  const result = mod.main(['--title', 'Fix bug', '--body', 'Closes #1']);
+  const { mod } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/123\n' }));
+  const result = withBaseBranch('dev', () => mod.main(['--title', 'Fix bug', '--body', 'Closes #1']));
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout, 'https://github.com/owner/repo/pull/123');
 });
 
 test('main: gh 失敗時はエラー終了', () => {
-  let callIndex = 0;
-  const { mod } = loadModule(() => {
-    if (callIndex++ === 0) return { status: 0, stdout: 'origin/dev\n' };
-    return { status: 1, stdout: '', stderr: 'gh error details' };
-  });
-  const result = mod.main(['--title', 'Fix', '--body', 'Closes #1']);
+  const { mod } = loadModule(() => ({ status: 1, stdout: '', stderr: 'gh error details' }));
+  const result = withBaseBranch('dev', () => mod.main(['--title', 'Fix', '--body', 'Closes #1']));
   assert.equal(result.exitCode, 1);
   assert.ok(result.stderr.includes('gh pr create 失敗'));
 });
 
-test('main: resolveBaseBranch のエラーをキャッチする', () => {
-  const { mod } = loadModule(() => ({ status: 128, stdout: '' }));
+test('main: GH_MAESTRO_BASE_BRANCH 未設定なら明確に失敗する（誤ったbaseでPRを作らない）', () => {
+  const { mod, calls } = loadModule();
   const result = mod.main(['--title', 'Fix', '--body', 'Closes #1']);
   assert.equal(result.exitCode, 1);
-  assert.ok(result.stderr.includes('upstream tracking'));
+  assert.ok(result.stderr.includes('GH_MAESTRO_BASE_BRANCH'));
+  assert.equal(calls.length, 0, 'フェイルクローズ時は gh を呼ばない');
 });
 
 test('main: --value フラグで値不足の場合にエラー', () => {

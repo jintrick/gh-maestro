@@ -6,7 +6,7 @@ const { normalizeWorkerEntry, normalizePid } = require('../scripts/worker-entry'
 
 const EMPTY = {
   pid: null, startTime: null, logPath: null,
-  agentId: null, issue: null, skill: null,
+  agentId: null, issue: null, skill: null, baseBranch: null,
   paneId: null, notifierPid: null,
 };
 
@@ -47,6 +47,19 @@ test('normalizeWorkerEntry: skill を保持する', () => {
   const r = normalizeWorkerEntry({ pid: 1, agentId: 'claude-ds', issue: 7, skill: 'gh-maestro-coder' });
   assert.equal(r.skill, 'gh-maestro-coder');
   assert.equal(r.agentId, 'claude-ds');
+});
+
+test('normalizeWorkerEntry: baseBranch を保持する（resume時のGH_MAESTRO_BASE_BRANCH再注入に使う）', () => {
+  const r = normalizeWorkerEntry({ pid: 1, baseBranch: 'dev' });
+  assert.equal(r.baseBranch, 'dev');
+});
+
+test('normalizeWorkerEntry: baseBranch は空文字・非文字列なら null にする', () => {
+  assert.equal(normalizeWorkerEntry({ pid: 1, baseBranch: '' }).baseBranch, null);
+  assert.equal(normalizeWorkerEntry({ pid: 1, baseBranch: 123 }).baseBranch, null);
+  assert.equal(normalizeWorkerEntry({ pid: 1, baseBranch: null }).baseBranch, null);
+  // レガシーレコード（baseBranch 未設定）も null に正規化される
+  assert.equal(normalizeWorkerEntry({ pid: 1 }).baseBranch, null);
 });
 
 // ── レガシー形式（移行前セッションの掃除にのみ使う） ─────────────────────────

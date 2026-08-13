@@ -37,7 +37,7 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
    ```sh
    node "{{SCRIPTS_PATH}}/gh-create-pr.js" --title "<PRタイトル>" --body "Closes #$ISSUE"
    ```
-   baseブランチはgit upstream trackingから自動解決されるため、明示的に指定する必要はない
+   baseブランチはワーカー起動時に与えられた `BASE_BRANCH` が環境変数として自動注入され解決されるため、明示的に指定する必要はない（`--base` フラグは受け付けない。未設定ならPR作成は明確に失敗する）
 
 ## 失敗時
 

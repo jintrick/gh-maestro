@@ -1,7 +1,7 @@
 'use strict';
 // workers.json のエントリを正規化・構築する。
 //
-// 新形式: { pid, startTime, logPath, agentId, issue, skill }。
+// 新形式: { pid, startTime, logPath, agentId, issue, skill, baseBranch }。
 //   pid/startTime — headless起動したワーカープロセスの識別。生存確認は pid だけでなく
 //     startTime との組で行う（OSがPIDを再利用したとき、無関係なプロセスを「稼働中」と
 //     誤判定し続けるのを防ぐ。scripts/shared/worker-liveness.js 参照）。
@@ -10,6 +10,9 @@
 //   issue/skill — orchestrator が workerName を覚えずに〈issue + skill〉でワーカーを
 //     指せるようにするための識別子（resolveWorkerName 参照）。agentId は役割と1対1で
 //     ないため判別に使えない。
+//   baseBranch — このワーカーのPRのベースブランチ。初回起動（spawn-worker.js）が登録し、
+//     resume配送（inbox-supervisor.js）が GH_MAESTRO_BASE_BRANCH 環境変数として再注入する
+//     ために使う（Issue #269）。本変更以前に起動したレガシーレコードには無い。
 //
 // レガシー: paneId / notifierPid は、WezTermペイン運用時代（Issue #151 以前）に
 // 起動されたワーカーのエントリを読むためだけに残している。新規登録では設定されない。
@@ -43,6 +46,7 @@ function normalizeWorkerEntry(v) {
       agentId: v.agentId ?? null,
       issue: v.issue != null ? Number(v.issue) : null,
       skill: v.skill ?? null,
+      baseBranch: typeof v.baseBranch === 'string' && v.baseBranch !== '' ? v.baseBranch : null,
       // ── レガシー（移行前セッションの掃除にのみ使う） ──
       paneId: v.paneId != null ? String(v.paneId) : null,
       notifierPid: v.notifierPid ?? null,
@@ -51,7 +55,7 @@ function normalizeWorkerEntry(v) {
   // 最旧形式: pane_id 文字列そのものがエントリだった時代
   return {
     pid: null, startTime: null, logPath: null,
-    agentId: null, issue: null, skill: null,
+    agentId: null, issue: null, skill: null, baseBranch: null,
     paneId: v != null ? String(v) : null, notifierPid: null,
   };
 }

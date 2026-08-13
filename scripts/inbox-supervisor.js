@@ -42,6 +42,7 @@ const { resolveAgentConfig } = require('./shared/resolve-config');
 const { resolveAdapter } = require('./shared/inbox-adapters');
 const { buildAgentResumeCommandArgs } = require('./agent-launch');
 const { launchAgentHeadless, workerLogPath } = require('./shared/headless-launch');
+const { buildWorkerEnv } = require('./shared/worker-env');
 const { updateWorkerProcess } = require('./shared/workers-registry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const {
@@ -298,9 +299,12 @@ function loadWorkers(workspace) {
  * @param {object} params.message    - { from, body }
  * @param {string} params.workspace
  * @param {string} params.homedir
+ * @param {string|null} params.baseBranch - workers.json に永続化されたこのワーカーのPRベースブランチ。
+ *   初回起動（spawn-worker.js）が登録し、resume 時に GH_MAESTRO_BASE_BRANCH として再注入する
+ *   （Issue #269）。レガシーレコードでは null。
  * @returns {{ success: boolean, method: string, error?: string, newPaneId?: string }}
  */
-function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir }) {
+function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir, baseBranch }) {
   let agentConfig;
   try {
     agentConfig = agentId ? resolveAgentConfig(agentId, { workspace, homedir }) : null;
@@ -384,9 +388,12 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir 
       argv,
       cwd: worktreeDir,
       logPath,
-      // resume 時もワーカー識別を環境の事実として再注入する（初回起動と同じ。
-      // これが無いと resume 後のワーカーが自分を識別できず msg-send.js を誤用しうる）。
-      env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },
+      // resume 時もワーカー識別・ベースブランチを環境の事実として再注入する
+      // （初回起動と同じ scripts/shared/worker-env.js。これが無いと resume 後のワーカーが
+      // 自分を識別できず msg-send.js を誤用しうる）。GH_MAESTRO_BASE_BRANCH は初回起動時に
+      // workers.json へ永続化した値を引く（Issue #269）。レガシーレコード（baseBranch null）は
+      // 注入されず、後段の gh-create-pr.js がフェイルクローズする。
+      env: buildWorkerEnv({ workerName, workspace, baseBranch }),
       // resume 後の異常終了は orchestrator へ通知する（初回起動と同じ終了フック）。
       // 第3〜第6引数（log-path・since-timestamp・log-offset）は resume 応答の
       // 代理送信判定に使う（worker-exit-hook.js参照）。新規起動（spawn-worker.js）は
@@ -456,7 +463,9 @@ function deliverMessage({ workerName, entry, message, workspace, homedir, issue 
     };
   }
 
-  const resumeResult = tryResumeAndDeliver({ workerName, agentId: entry.agentId, message, workspace, homedir });
+  const resumeResult = tryResumeAndDeliver({
+    workerName, agentId: entry.agentId, message, workspace, homedir, baseBranch: entry.baseBranch,
+  });
   if (resumeResult.method !== 'pending') {
     // resumeを試みた結果（成功 or 明確な失敗）。既存のpendingDeliveries/バックオフ機構にそのまま乗る。
     return resumeResult;

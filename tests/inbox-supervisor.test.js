@@ -19,6 +19,11 @@ const TEST_SESSION_PID = String(process.pid);
 // --workspace 引数が無視される。テスト中は一時的に除去する。
 const _savedWorkspaceEnv = process.env.GH_MAESTRO_WORKSPACE;
 delete process.env.GH_MAESTRO_WORKSPACE;
+// GH_MAESTRO_BASE_BRANCH は resume 配送時に buildWorkerEnv が launchAgentHeadless env へ
+// マージする（Issue #269）。外側の環境に偶然設定されている値が注入有無の検証を狂わせないよう、
+// テスト中は一時的に除去する。
+const _savedBaseBranchEnv = process.env.GH_MAESTRO_BASE_BRANCH;
+delete process.env.GH_MAESTRO_BASE_BRANCH;
 const runMain = (args, opts) => _realMain([...args, '--session-pid', TEST_SESSION_PID], opts);
 
 // ── テストヘルパー ────────────────────────────────────────────────────────
@@ -726,6 +731,48 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
 
       assert.equal(result.success, true);
       assert.equal(result.method, 'resume');
+    });
+  });
+
+  test('deliverMessage: プロセス非生存時、entry.baseBranch を GH_MAESTRO_BASE_BRANCH として注入する（Issue #269）', () => {
+    // PR作成（gh-create-pr.js）のbase解決を upstream 非依存にするため、resume起動時の
+    // launchAgentHeadless env に base が入っていなければならない（spawn-worker.js と同じ値）。
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
+      supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
+
+      const result = supervisor.deliverMessage({
+        workerName: 'issue-7-fix',
+        entry: { pid: 456, startTime: 'old', agentId: 'agy', baseBranch: 'dev' },
+        message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home', issue: '7',
+      });
+
+      assert.equal(result.success, true);
+      assert.equal(result.method, 'resume');
+
+      const spawnEnv = lastSpawnCalls[0].options.env;
+      assert.equal(spawnEnv.GH_MAESTRO_BASE_BRANCH, 'dev');
+      assert.equal(spawnEnv.GH_MAESTRO_WORKER, 'issue-7-fix');
+      assert.equal(spawnEnv.GH_MAESTRO_WORKSPACE, dir);
+    });
+  });
+
+  test('deliverMessage: baseBranch 未設定のレガシーレコードでは GH_MAESTRO_BASE_BRANCH を注入しない', () => {
+    // baseBranch 導入以前に起動したレガシーワーカーレコード。注入しないことで
+    // gh-create-pr.js 側はフェイルクローズ（誤ったbaseでPRを作らない）する。
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
+      supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
+
+      const result = supervisor.deliverMessage({
+        workerName: 'issue-7-fix',
+        entry: { pid: 456, startTime: 'old', agentId: 'agy' },
+        message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home', issue: '7',
+      });
+
+      assert.equal(result.success, true);
+      const spawnEnv = lastSpawnCalls[0].options.env;
+      assert.equal(Object.prototype.hasOwnProperty.call(spawnEnv, 'GH_MAESTRO_BASE_BRANCH'), false);
     });
   });
 });
