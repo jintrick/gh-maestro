@@ -128,13 +128,15 @@ manifestは以下のパスに書き出す（run-review-manager.js が起動プ�
 ### 4. ジョブの実行
 
 manifestを書き出したら、以下のコマンドでジョブを実行する（`--manifest` には書き出したmanifestの
-パスをそのまま渡す）:
+パスをそのまま渡す。`--pr` には起動プロンプトの `PR` 番号を必ず渡すこと——manifest検証失敗時の
+通知先として検証前のコンテキストから渡され、manifest.pr が不正でも通知が中断しない）:
 
 ```sh
 node <SCRIPTS>/run-review-jobs.js \
   --manifest <WORKSPACE>/.gh-maestro/records/pr/<PR>/review/manifest.json \
   --results <WORKSPACE>/.gh-maestro/review-results-<PR>.json \
-  --workspace <WORKSPACE>
+  --workspace <WORKSPACE> \
+  --pr <PR>
 ```
 
 `run-review-jobs.js` は:
@@ -159,6 +161,7 @@ cat <WORKSPACE>/.gh-maestro/review-results-<PR>.json
 **manifest検証失敗時（exit code 2）は再試行しない**:
 - `run-review-jobs.js` が終了コード2で終了し、stderr に `manifest validation failed` を含む場合、それは実行manifestが機械検証に合格しなかったことを意味する（7葉の欠落・重複・未割当など）
 - この検証失敗は run-review-jobs.js が既に通知済みである——PRへのプレーンコメント投稿と `.incomplete` センチネル作成（不完全レビュー経路）を行い、その上で終了している
+- 通知のPR投稿に失敗した場合（認証切れ・ネットワーク障害等）は、run-review-jobs.js は `notify-failed` センチネルを書き、監督側がレビューを失敗（非ゼロ終了）として扱う。これもあなたの側で追加で行うことはない
 - あなたはそのまま終了すること。manifestを書き直して再実行してはならない（ヘッドレスプロセス内の再試行ループはアンチパターン。止まらなくなったときの事故がこのシステムで最悪の壊れ方をする）
 - 計画の書き直し・再実行の判断はオーケストレーターが行う
 

@@ -21,10 +21,12 @@ const {
   validateArtifactContent, atomicCopyStaging,
   boundedCleanup, pollForArtifact,
   superviseReviewManager, clearStaleIncompleteSentinel,
-  findIncompleteSentinel, persistReviewManifest,
+  findIncompleteSentinel, readIncompleteSentinel, incompleteSentinelOutcome,
+  persistReviewManifest,
   _validateFindingShape, _validateAgainstSchema,
   _setPollForArtifact,
 } = require('../scripts/run-review-manager');
+const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
 const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'run-review-manager.js');
 
@@ -861,4 +863,56 @@ test('persistReviewManifest: 候補が無ければpersisted:false（エラーに
   const nullWt = persistReviewManifest({ reviewWtDir: null, workspace: testDir, pr: 334, log: () => {} });
   assert.equal(nullWt.persisted, false);
   assert.equal(nullWt.sourcePath, null);
+});
+
+// ── PR #272 レビュー指摘: notify-failedセンチネルは失敗として観測する ──────
+// 欠陥Aの監督側: run-review-jobs.js が検証失敗通知のPR投稿に失敗したとき、
+// 投稿成功センチネル（incomplete-review）を exit 0 の「不完全完了」として扱うと、
+// オーケストレーターが通知済みと誤認する。notify-failed は exit 1 の失敗にする。
+
+test('incompleteSentinelOutcome: notify-failed センチネルは exit 1 の失敗として返す', () => {
+  const testDir = path.join(tmpBase, 'sentinel-notify-failed');
+  fs.mkdirSync(testDir, { recursive: true });
+  const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 42, '.incomplete');
+  fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+  fs.writeFileSync(sentinelPath, JSON.stringify({
+    pr: 42,
+    reason: 'notify-failed',
+    postError: 'auth failed: token expired',
+    validationErrors: ['leaf x is missing from coverage_ledger', 'pr must be a positive integer'],
+    completed_at: 'x',
+  }), 'utf8');
+
+  const result = incompleteSentinelOutcome({ sentinelPath, agentPid: 123, reviewWtDir: '/wt' });
+  assert.equal(result.outcome, 'incomplete-review-notify-failed');
+  assert.equal(result.exitCode, 1);
+  // orchestratorが投稿失敗と検証エラーの両方を確認できるように理由に含める
+  assert.ok(result.reason.includes('auth failed: token expired'), `reason should carry postError: ${result.reason}`);
+  assert.ok(result.reason.includes('leaf x is missing from coverage_ledger'), `reason should carry validationErrors: ${result.reason}`);
+});
+
+test('incompleteSentinelOutcome: 通知済み（incomplete-review）センチネルは exit 0 の不完全完了', () => {
+  const testDir = path.join(tmpBase, 'sentinel-incomplete-ok');
+  fs.mkdirSync(testDir, { recursive: true });
+  const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 43, '.incomplete');
+  fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+  fs.writeFileSync(sentinelPath, JSON.stringify({ pr: 43, reason: 'incomplete-review', completed_at: 'x' }), 'utf8');
+
+  const result = incompleteSentinelOutcome({ sentinelPath, agentPid: 456, reviewWtDir: '/wt' });
+  assert.equal(result.outcome, 'incomplete-review');
+  assert.equal(result.exitCode, 0);
+});
+
+test('readIncompleteSentinel: 解釈できないセンチネルは null（notify-failed判定にしない）', () => {
+  const testDir = path.join(tmpBase, 'sentinel-unreadable');
+  fs.mkdirSync(testDir, { recursive: true });
+  const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 44, '.incomplete');
+  fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+  fs.writeFileSync(sentinelPath, 'not-json', 'utf8');
+
+  assert.equal(readIncompleteSentinel(sentinelPath), null);
+  // 解釈できない場合は notify-failed ではなく通常の不完全完了扱いになる
+  const result = incompleteSentinelOutcome({ sentinelPath, agentPid: null, reviewWtDir: null });
+  assert.equal(result.outcome, 'incomplete-review');
+  assert.equal(result.exitCode, 0);
 });

@@ -551,6 +551,8 @@ module.exports = {
   superviseReviewManager,
   clearStaleIncompleteSentinel,
   findIncompleteSentinel,
+  readIncompleteSentinel,
+  incompleteSentinelOutcome,
   persistReviewManifest,
   // テスト用エクスポート
   _validateFindingShape, _validateAgainstSchema,
@@ -609,6 +611,59 @@ function findIncompleteSentinel(ghDir, reviewWtDir, pr) {
 }
 
 /**
+ * センチネルファイルの内容をJSONとして読む。解釈できない場合は null。
+ * reason の区別に使う（'incomplete-review' = 通知済みの不完全完了 / 'notify-failed' =
+ * 検証失敗通知のPR投稿に失敗したため失敗扱いにするべき）。
+ *
+ * @param {string} sentinelPath
+ * @returns {object|null}
+ */
+function readIncompleteSentinel(sentinelPath) {
+  try {
+    const data = JSON.parse(fs.readFileSync(sentinelPath, 'utf8'));
+    if (data && typeof data === 'object') return data;
+  } catch {}
+  return null;
+}
+
+/**
+ * .incompleteセンチネルから監督結果を組み立てる。
+ *
+ * reason 'notify-failed'（run-review-jobs.js がmanifest検証失敗通知のPR投稿に失敗したときに
+ * 書く、postError と validationErrors を持つセンチネル、Issue #271）は、exit 0 の
+ * 「不完全レビューとして通知済み」にはせず、exit 1 の失敗として扱う。これを exit 0 にすると
+ * オーケストレーターが「通知は完了した」と誤認し、検証エラーが届かないまま黙って済む。
+ * 失敗理由には投稿エラーと検証エラーを両方載せ、orchestrator がログから確認できるようにする。
+ *
+ * @param {{sentinelPath: string, agentPid: number|null, reviewWtDir: string|null}} params
+ * @returns {SupervisionResult}
+ */
+function incompleteSentinelOutcome({ sentinelPath, agentPid, reviewWtDir }) {
+  const sentinel = readIncompleteSentinel(sentinelPath);
+  if (sentinel && sentinel.reason === 'notify-failed') {
+    const validationDetail = Array.isArray(sentinel.validationErrors) && sentinel.validationErrors.length > 0
+      ? sentinel.validationErrors.join(' | ')
+      : '(記録なし)';
+    return {
+      outcome: 'incomplete-review-notify-failed',
+      exitCode: 1,
+      artifact: null,
+      agentPid,
+      reviewWtDir,
+      reason: `検証失敗通知のPR投稿に失敗したため、不完全レビューとして完了扱いにしません。投稿エラー: ${sentinel.postError || '(記録なし)'}。検証エラー: ${validationDetail}`,
+    };
+  }
+  return {
+    outcome: 'incomplete-review',
+    exitCode: 0,
+    artifact: null,
+    agentPid,
+    reviewWtDir,
+    reason: 'review completed as incomplete (plane comment posted; no retry per Issue #271)',
+  };
+}
+
+/**
  * 実行manifest（run-review-jobs.js がジョブへ受け入れ条件を渡す元になったJSON）を、
  * レビュー用worktreeからメインworkspaceのrecordへ永続化する。
  *
@@ -655,7 +710,7 @@ function persistReviewManifest({ reviewWtDir, workspace, pr, log }) {
  * 監督ループの結果
  *
  * @typedef {object} SupervisionResult
- * @property {'artifact-published'|'process-exit-no-artifact'|'timeout'|'setup-failed'|'agent-config-failed'} outcome
+ * @property {'artifact-published'|'process-exit-no-artifact'|'timeout'|'setup-failed'|'agent-config-failed'|'incomplete-review'|'incomplete-review-notify-failed'} outcome
  * @property {number} exitCode スクリプトの終了コード
  * @property {object|null} artifact 検証済みの成果物（outcome === 'artifact-published' の場合のみ）
  * @property {string} [reason] outcome の補足説明
@@ -845,22 +900,20 @@ async function superviseReviewManager({
       break;
     }
 
-    // 不完全レビュー・センチネルがあれば、成果物・プロセス状態に関わらず即時「不完全完了」で終了する。
+    // 不完全レビュー・センチネルがあれば、成果物・プロセス状態に関わらず即時終了する。
     // センチネルは finalize-review.js --mode incomplete、または run-review-jobs.js（manifest検証失敗時、
     // Issue #271）が「レビューは不完全として終了済み」の決定打として書き出す。
+    // ただし reason 'notify-failed'（検証失敗通知のPR投稿に失敗したケース）は exit 0 の
+    // 「通知済み」扱いにせず失敗として扱う（下記 incompleteSentinelOutcome）。
     // プロセスが生存中でもセンチネルがあればループを止める（ヘッドレス再試行はアンチパターンであり、
     // ループを止める責務は監督側にある。Issue #271: 検証失敗後に黙って待ち続ける事故を防ぐ）。
     const sentinelPath = findIncompleteSentinel(ghDir, reviewWtDir, pr);
     if (sentinelPath) {
-      log(`incomplete review sentinel detected (${path.basename(sentinelPath)}) — review completed as incomplete`);
-      return {
-        outcome: 'incomplete-review',
-        exitCode: 0,
-        artifact: null,
-        agentPid,
-        reviewWtDir,
-        reason: 'review completed as incomplete (plane comment posted; no retry per Issue #271)',
-      };
+      // reason 'notify-failed' は失敗として扱う（投稿成功センチネルだけが exit 0 の不完全完了。
+      // Issue #271: 投稿失敗で exit 0 にすると検証エラーが届かないまま黙って済む）。
+      const outcome = incompleteSentinelOutcome({ sentinelPath, agentPid, reviewWtDir });
+      log(`incomplete review sentinel detected (${path.basename(sentinelPath)}) — ${outcome.reason}`);
+      return outcome;
     }
 
     // 成果物ポーリング。

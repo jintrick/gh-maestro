@@ -30,12 +30,14 @@ const DEFAULT_TOTAL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes total
 
 const USAGE = `run-review-jobs.js — RMの実行manifestに従いレビュージョブをheadless起動する
 
-Usage: node run-review-jobs.js --manifest <path> --results <path> [--workspace <path>]
+Usage: node run-review-jobs.js --manifest <path> --results <path> [--workspace <path>] [--pr <N>]
 
 Options:
   --manifest <path>    RMが書き出した実行manifestのJSONファイルパス
   --results <path>     ジョブ実行結果を書き出すJSONファイルパス
   --workspace <path>   ワークスペースの絶対パス（デフォルト: cwd）
+  --pr <N>             manifest検証失敗時の通知先PR番号（検証前の起動コンテキスト。省略時は
+                       manifest.pr にフォールバックする）
   --job-timeout <ms>   ジョブごとのタイムアウト（ms、デフォルト: 600000）
   --total-timeout <ms> 全体のタイムアウト（ms、デフォルト: 1800000）
 
@@ -45,7 +47,9 @@ Output:
   終了コード2: manifest不正または起動失敗
     manifestの機械検証に失敗した場合は、検証エラーをPRへのプレーンコメントとして投稿し、
     .incompleteセンチネルを書き出した上で終了コード2で終了する（不完全レビューとして通知済み。
-    レビュー担当は再試行しない。書き直し判断はオーケストレーターが行う）。`;
+    レビュー担当は再試行しない。書き直し判断はオーケストレーターが行う）。
+    投稿に失敗した場合は成功センチネルを書かず notify-failed センチネルを書き、
+    監督側が失敗（exit 1）として扱う。`;
 
 // ── manifest検証 ───────────────────────────────────────────────────────────────
 
@@ -559,6 +563,25 @@ function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, tim
 let _ghForTest = null;
 
 /**
+ * 通知先PR番号として利用可能な正整数を、候補の先頭から順に返す。
+ *
+ * manifest.pr はLLMが書いた実行計画の一部で信頼できない（0・欠落・文字列等が混入しうる）。
+ * 通知・センチネルは必ずこの関数を経由して得たPR番号に固定し、通知処理が不正なprで
+ * 例外に巻き込まれて中断しないようにする（Issue #271 レビュー指摘: 不正prで
+ * reviewArtifactPath が throw し、コメントもセンチネルも書かれず黙って終わっていた）。
+ *
+ * @param {Array<number|string|undefined>} candidates 優先順に並べたpr候補（CLI --pr, manifest.pr 等）
+ * @returns {string|null} 最初に見つかった正整数の文字列表現。無ければ null
+ */
+function resolveNotifyPr(candidates) {
+  for (const p of candidates) {
+    if (typeof p === 'number' && Number.isInteger(p) && p >= 1) return String(p);
+    if (typeof p === 'string' && /^[1-9]\d*$/.test(p)) return p;
+  }
+  return null;
+}
+
+/**
  * 実行manifestの機械検証に失敗した旨を報告するプレーンコメント本文を生成する。
  * finalize-review.js の buildIncompleteComment とは別経路だが、同じ「PRへのプレーン
  * コメント」チャネルに載ることで、オーケストレーターの poll-reviews.js が検証失敗を
@@ -566,13 +589,16 @@ let _ghForTest = null;
  *
  * @param {object} manifest
  * @param {string[]} errors
+ * @param {string} [notifyPr] 通知先PR番号（resolveNotifyPr の結果）。manifest.pr が不正でも
+ *   コメント本文のPR参照は通知先を指すようにする。
  * @returns {string}
  */
-function buildManifestValidationComment(manifest, errors) {
+function buildManifestValidationComment(manifest, errors, notifyPr) {
+  const prLabel = notifyPr || manifest.pr;
   const lines = [
     '## ⚠️ 実行計画の機械検証に失敗しました（レビューは実行されていません）',
     '',
-    `PR #${manifest.pr} の実行manifest（run-review-jobs.js）が機械検証に合格しなかったため、`,
+    `PR #${prLabel} の実行manifest（run-review-jobs.js）が機械検証に合格しなかったため、`,
     'レビュー担当はこの通知を行った上で停止しました。計画の書き直し・再実行は行いません。',
     '',
     '### 検証エラー',
@@ -588,17 +614,44 @@ function buildManifestValidationComment(manifest, errors) {
 }
 
 /**
+ * センチネルファイルの reason を読む。JSONとして解釈できなければ null。
+ * @param {string} sentinelPath
+ * @returns {string|null}
+ */
+function readSentinelReason(sentinelPath) {
+  try {
+    const data = JSON.parse(fs.readFileSync(sentinelPath, 'utf8'));
+    if (data && typeof data === 'object' && typeof data.reason === 'string') return data.reason;
+  } catch {}
+  return null;
+}
+
+/**
  * manifest検証失敗を、既存の「不完全レビュー」経路へ冪等に通知する。
  *
- * 1. .incompleteセンチネルが既に存在すれば、同一PRで二重投稿しない（冪等）
- * 2. 検証エラーをPRへのプレーンコメントとして投稿
- * 3. writeSentinel で .incompleteセンチネルを作成（finalize-review.js と同じ経路）
+ * 1. 通知先PRを resolveNotifyPr で確定する（CLI --pr を最優先、次に manifest.pr。どちらも
+ *    不正なら通知不能として例外で中断せず明確な失敗を返す）
+ * 2. 「通知済みの不完全レビュー」センチネル（reason: 'incomplete-review'）が既にあれば
+ *    同一PRで再投稿しない（冪等）。reason が notify-failed の場合は再投稿して回復を試みる
+ * 3. 検証エラーをPRへのプレーンコメントとして投稿
+ * 4. 投稿成功時のみ writeSentinel で「通知済み」センチネルを作成。
+ *    投稿失敗時（認証切れ・ネットワーク障害等）は通知成功を偽装せず、postError と
+ *    検証エラーを持つ notify-failed センチネルを作成する（監督側が非成功として観測する。
+ *    Issue #271 レビュー指摘: 失敗してもセンチネルを書くため「通知済み」に見えて
+ *    冪等ガードが再投稿を永久に塞いでいた）
  *
  * gh への投稿は _setGhForTest で注入可能。NODE_TEST_CONTEXT 検出時は実投稿を拒否する
  * （msg-send.js / gh-create-pr.js と同じ構造的ガード、Issue #202）。
  *
- * @param {{manifest: object, workspace: string, errors: string[]}} params
+ * @param {{
+ *   manifest: object,
+ *   workspace: string,
+ *   errors: string[],
+ *   pr?: number|string,
+ * }} params  pr は検証前の起動コンテキスト（CLI --pr）由来の信頼できるPR番号。
+ *   省略時は manifest.pr にフォールバックする。
  * @returns {{
+ *   notifiable: boolean,
  *   skipped: boolean,
  *   posted: boolean,
  *   commentUrl: string|null,
@@ -606,16 +659,31 @@ function buildManifestValidationComment(manifest, errors) {
  *   sentinelPath: string|null,
  * }}
  */
-function notifyManifestValidationFailure({ manifest, workspace, errors }) {
-  const pr = String(manifest.pr);
-  const sentinelPath = reviewArtifactPath(path.join(workspace, '.gh-maestro'), pr, '.incomplete');
-
-  if (fs.existsSync(sentinelPath)) {
-    return { skipped: true, posted: false, commentUrl: null, error: null, sentinelPath };
+function notifyManifestValidationFailure({ manifest, workspace, errors, pr }) {
+  const notifyPr = resolveNotifyPr([pr, manifest.pr]);
+  if (!notifyPr) {
+    // 通知先PRを特定できない: コメントもprスコープのセンチネルも書けない。
+    // reviewArtifactPath の例外で中断せず、明確な失敗を返す（run-review-managerが
+    // 成果物なしの非ゼロ終了として観測する。検証エラーはstderrのsummary経由で届く）。
+    return {
+      notifiable: false,
+      skipped: false,
+      posted: false,
+      commentUrl: null,
+      error: '通知先PRを特定できない（CLI --pr と manifest.pr のどちらも正整数でない）。検証失敗のPRへの通知を省略します',
+      sentinelPath: null,
+    };
   }
 
-  const body = buildManifestValidationComment(manifest, errors);
-  const ghArgs = ['pr', 'comment', pr, '--repo', manifest.repo, '--body', body];
+  const sentinelPath = reviewArtifactPath(path.join(workspace, '.gh-maestro'), notifyPr, '.incomplete');
+
+  // 冪等: 「通知済み」センチネルのみスキップ対象。notify-failed は再投稿して回復を試みる
+  if (fs.existsSync(sentinelPath) && readSentinelReason(sentinelPath) === 'incomplete-review') {
+    return { notifiable: true, skipped: true, posted: false, commentUrl: null, error: null, sentinelPath };
+  }
+
+  const body = buildManifestValidationComment(manifest, errors, notifyPr);
+  const ghArgs = ['pr', 'comment', notifyPr, '--repo', manifest.repo, '--body', body];
 
   let result;
   if (_ghForTest) {
@@ -627,14 +695,36 @@ function notifyManifestValidationFailure({ manifest, workspace, errors }) {
     result = { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
   }
 
-  const written = writeSentinel(workspace, pr);
+  if (result.status === 0) {
+    // 投稿成功時のみ「通知済み」センチネルを作成する
+    const written = writeSentinel(workspace, notifyPr);
+    return {
+      notifiable: true,
+      skipped: false,
+      posted: true,
+      commentUrl: String(result.stdout).trim(),
+      error: null,
+      sentinelPath: written || sentinelPath,
+    };
+  }
 
+  // 投稿失敗: 通知成功を示すセンチネルは作らない。失敗内容を持つ notify-failed センチネルを
+  // 作り、監督側（superviseReviewManager）が exit 0 の不完全完了ではなく失敗として観測できる
+  // 状態を残す。冪等ガードは reason 'incomplete-review' のみスキップするため、次回実行時に
+  // 再投稿される（回復経路）。
+  const postError = String(result.stderr).trim() || `gh pr comment 失敗（status ${result.status}）`;
+  const failedSentinel = writeSentinel(workspace, notifyPr, {
+    reason: 'notify-failed',
+    postError,
+    validationErrors: errors,
+  });
   return {
+    notifiable: true,
     skipped: false,
-    posted: result.status === 0,
-    commentUrl: result.status === 0 ? String(result.stdout).trim() : null,
-    error: result.status === 0 ? null : (String(result.stderr).trim() || `gh pr comment 失敗（status ${result.status}）`),
-    sentinelPath: written || sentinelPath,
+    posted: false,
+    commentUrl: null,
+    error: postError,
+    sentinelPath: failedSentinel || null,
   };
 }
 
@@ -656,9 +746,11 @@ function _setGhForTest(impl) {
  * @param {string} workspace
  * @param {number} jobTimeoutMs
  * @param {number} totalTimeoutMs
+ * @param {number|string} [pr] 検証前の起動コンテキスト（CLI --pr）由来の信頼できるPR番号。
+ *   manifest検証失敗時の通知先に使う（manifest.pr が不正でも通知を中断しない）。
  * @returns {Promise<{ok: boolean, summary: object}>}
  */
-async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs) {
+async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr) {
   // 1. manifest読み込み
   let manifestRaw;
   try {
@@ -679,7 +771,8 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   if (!validation.valid) {
     // Issue #271: 検証失敗を黙って終了せず、検証エラーをPRコメントと .incomplete センチネルで
     // 通知してから終了する。再試行はしない（ヘッドレス再試行はアンチパターン）。
-    const notification = notifyManifestValidationFailure({ manifest, workspace, errors: validation.errors });
+    // pr は信頼できる起動コンテキスト（CLI --pr）で、manifest.pr が不正でも通知を中断しない。
+    const notification = notifyManifestValidationFailure({ manifest, workspace, errors: validation.errors, pr });
     return {
       ok: false,
       summary: { error: `manifest validation failed`, details: validation.errors, notification },
@@ -785,6 +878,7 @@ module.exports = {
   runJobsFromManifest,
   buildManifestValidationComment,
   notifyManifestValidationFailure,
+  resolveNotifyPr,
   _setGhForTest,
   ALL_LEAF_IDS,
   TRUNK_TO_LEAVES,
@@ -794,7 +888,7 @@ module.exports = {
 if (require.main === module) {
   (async () => {
     const args = process.argv.slice(2);
-    const valueFlags = ['--manifest', '--results', '--workspace', '--job-timeout', '--total-timeout'];
+    const valueFlags = ['--manifest', '--results', '--workspace', '--pr', '--job-timeout', '--total-timeout'];
     const { values, rest, exitFlagMiss } = parseFlags(args, valueFlags, ['--help', '-h']);
 
     if (exitFlagMiss) {
@@ -817,6 +911,14 @@ if (require.main === module) {
     const manifestPath = values['--manifest'];
     const resultsPath = values['--results'];
     const workspace = values['--workspace'] || process.cwd();
+    // --pr は検証前の起動コンテキスト由来（RMのプロンプトに含まれるPR番号）。不正なら
+    // フェイルクローズで終了する（path traversal対策で正整数のみ受理、PR #84）。
+    const pr = values['--pr'];
+    if (pr !== undefined && !/^[1-9]\d*$/.test(pr)) {
+      console.error(`--pr は正整数でなければなりません: ${pr}`);
+      console.error(USAGE);
+      process.exit(2);
+    }
     const jobTimeoutMs = values['--job-timeout'] ? parseInt(values['--job-timeout'], 10) : DEFAULT_JOB_TIMEOUT_MS;
     const totalTimeoutMs = values['--total-timeout'] ? parseInt(values['--total-timeout'], 10) : DEFAULT_TOTAL_TIMEOUT_MS;
 
@@ -825,7 +927,7 @@ if (require.main === module) {
       process.exit(2);
     }
 
-    const result = await runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs);
+    const result = await runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr);
 
     if (!result.ok) {
       console.error(JSON.stringify(result.summary));

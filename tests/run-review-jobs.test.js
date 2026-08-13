@@ -14,6 +14,7 @@ const {
   runJobsFromManifest,
   buildManifestValidationComment,
   notifyManifestValidationFailure,
+  resolveNotifyPr,
   _setGhForTest,
 } = require('../scripts/run-review-jobs');
 
@@ -283,13 +284,14 @@ test('notifyManifestValidationFailure: gh投稿（注入）とセンチネル作
   }
 });
 
-test('notifyManifestValidationFailure: センチネル既存時は再投稿しない（冪等）', () => {
+test('notifyManifestValidationFailure: 通知済みセンチネル既存時は再投稿しない（冪等）', () => {
   const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nvmf-idem-'));
   try {
-    // 事前にセンチネルを作成（同一PRでの再実行を模す）
+    // 事前に「通知済み」センチネルを作成（同一PRでの再実行を模す）。
+    // reason 'incomplete-review' のときだけスキップ対象（notify-failed は再投稿する）。
     const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 7, '.incomplete');
     fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
-    fs.writeFileSync(sentinelPath, '{}', 'utf8');
+    fs.writeFileSync(sentinelPath, JSON.stringify({ pr: 7, reason: 'incomplete-review', completed_at: 'x' }), 'utf8');
 
     const ghCalls = [];
     _setGhForTest((args) => { ghCalls.push(args); return { status: 0, stdout: '' }; });
@@ -312,7 +314,7 @@ test('notifyManifestValidationFailure: センチネル既存時は再投稿し�
   }
 });
 
-test('notifyManifestValidationFailure: NODE_TEST_CONTEXT時は実投稿せずセンチネルだけ書く', () => {
+test('notifyManifestValidationFailure: NODE_TEST_CONTEXT時は実投稿せずnotify-failedセンチネルを書く', () => {
   const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nvmf-guard-'));
   try {
     _setGhForTest(null); // 注入なし: 本番経路（実gh）をガードがブロックすることを検証
@@ -325,7 +327,10 @@ test('notifyManifestValidationFailure: NODE_TEST_CONTEXT時は実投稿せずセ
       });
       assert.equal(result.posted, false);
       assert.ok(result.error && result.error.includes('NODE_TEST_CONTEXT'), `error should mention guard: ${result.error}`);
+      // 投稿が「失敗」した扱いなので、通知成功センチネルではなく notify-failed センチネルを書く
       assert.ok(fs.existsSync(result.sentinelPath), 'センチネルはガード時も作成される');
+      const sentinelContent = JSON.parse(fs.readFileSync(result.sentinelPath, 'utf8'));
+      assert.equal(sentinelContent.reason, 'notify-failed');
     } finally {
       delete process.env.NODE_TEST_CONTEXT;
     }
@@ -361,6 +366,160 @@ test('runJobsFromManifest: 検証失敗時に通知を実行し ok:false で返�
       assert.ok(result.summary.notification, 'summaryに通知結果を含める');
       assert.equal(result.summary.notification.posted, true);
       assert.equal(ghCalls.length, 1, '検証失敗時に gh pr comment を1回呼ぶ');
+    } finally {
+      delete process.env.NODE_TEST_CONTEXT;
+    }
+  } finally {
+    _setGhForTest(null);
+    fs.rmSync(testDir, { recursive: true, force: true });
+  }
+});
+
+// ── PR #272 レビュー指摘の回帰テスト ─────────────────────────────────────────
+// 欠陥A: 投稿失敗時も成功センチネルを書いていた → 通知成功を偽装 + 冪等ガードが再投稿を塞ぐ
+// 欠陥B: manifest.pr が不正（0・欠落）だと reviewArtifactPath が throw し、コメントも
+//   センチネルも書かれず黙って終わっていた
+
+test('resolveNotifyPr: 候補の先頭から正整数を選ぶ', () => {
+  assert.equal(resolveNotifyPr([42]), '42');
+  assert.equal(resolveNotifyPr([undefined, '12']), '12');
+  assert.equal(resolveNotifyPr(['12', 7]), '12');
+  assert.equal(resolveNotifyPr(['07']), null);       // 先頭ゼロは正整数として受理しない
+  assert.equal(resolveNotifyPr([0, 'abc', -1]), null);
+  assert.equal(resolveNotifyPr([undefined, undefined]), null);
+});
+
+test('notifyManifestValidationFailure: 投稿失敗時は成功センチネルを作らずnotify-failedを書く（欠陥A）', () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nvmf-postfail-'));
+  try {
+    // 投稿が非ゼロで失敗（認証切れ・ネットワーク障害を模す）
+    _setGhForTest(() => ({ status: 1, stdout: '', stderr: 'auth failed: token expired' }));
+    process.env.NODE_TEST_CONTEXT = '1';
+    try {
+      const result = notifyManifestValidationFailure({
+        manifest: { pr: 42, repo: 'owner/repo', headRefOid: 'abc' },
+        workspace: testDir,
+        errors: ['leaf x is missing from coverage_ledger'],
+      });
+      assert.equal(result.posted, false);
+      assert.ok(result.error && result.error.includes('auth failed'), `error should carry gh stderr: ${result.error}`);
+      assert.ok(result.sentinelPath && fs.existsSync(result.sentinelPath), 'notify-failedセンチネルは作られる');
+      const sentinel = JSON.parse(fs.readFileSync(result.sentinelPath, 'utf8'));
+      assert.equal(sentinel.reason, 'notify-failed', '投稿失敗時に通知成功を示す reason にしない');
+      assert.notEqual(sentinel.reason, 'incomplete-review');
+      assert.equal(sentinel.postError, 'auth failed: token expired');
+      assert.deepEqual(sentinel.validationErrors, ['leaf x is missing from coverage_ledger']);
+    } finally {
+      delete process.env.NODE_TEST_CONTEXT;
+    }
+  } finally {
+    _setGhForTest(null);
+    fs.rmSync(testDir, { recursive: true, force: true });
+  }
+});
+
+test('notifyManifestValidationFailure: notify-failedセンチネル残存時は再投稿して回復する（冪等は成功時のみ）', () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nvmf-recover-'));
+  try {
+    // 前回の投稿失敗で notify-failed センチネルが残っている（認証切れ等の一時障害を想定）
+    const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 7, '.incomplete');
+    fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+    fs.writeFileSync(sentinelPath, JSON.stringify({ pr: 7, reason: 'notify-failed', postError: 'auth failed', validationErrors: ['bad'] }), 'utf8');
+
+    const ghCalls = [];
+    _setGhForTest((args) => { ghCalls.push(args); return { status: 0, stdout: 'https://github.com/x/pull/7#issuecomment-1\n' }; });
+    process.env.NODE_TEST_CONTEXT = '1';
+    try {
+      const result = notifyManifestValidationFailure({
+        manifest: { pr: 7, repo: 'owner/repo' },
+        workspace: testDir,
+        errors: ['bad'],
+      });
+      assert.equal(result.posted, true, 'notify-failed センチネルがあっても再投稿して回復する');
+      assert.equal(result.skipped, false);
+      assert.equal(ghCalls.length, 1);
+      // 再投稿成功で「通知済み」センチネルに置き換わる
+      const sentinel = JSON.parse(fs.readFileSync(sentinelPath, 'utf8'));
+      assert.equal(sentinel.reason, 'incomplete-review');
+    } finally {
+      delete process.env.NODE_TEST_CONTEXT;
+    }
+  } finally {
+    _setGhForTest(null);
+    fs.rmSync(testDir, { recursive: true, force: true });
+  }
+});
+
+test('notifyManifestValidationFailure: manifest.pr=0 でも例外で中断せず明確な失敗を返す（欠陥B）', () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nvmf-pr0-'));
+  try {
+    _setGhForTest((args) => { throw new Error('gh は呼ばれないはず'); });
+    process.env.NODE_TEST_CONTEXT = '1';
+    try {
+      // 例外を投げずに戻ること自体が回帰検証（修正前は reviewArtifactPath が throw）
+      let result;
+      assert.doesNotThrow(() => {
+        result = notifyManifestValidationFailure({
+          manifest: { pr: 0, repo: 'o/r' },
+          workspace: testDir,
+          errors: ['pr must be a positive integer', 'coverage_ledger.leaves must be an array'],
+        });
+      });
+      assert.equal(result.notifiable, false);
+      assert.equal(result.posted, false);
+      assert.ok(result.error && result.error.includes('通知先PRを特定できない'), `error should explain: ${result.error}`);
+      assert.equal(result.sentinelPath, null);
+    } finally {
+      delete process.env.NODE_TEST_CONTEXT;
+    }
+  } finally {
+    _setGhForTest(null);
+    fs.rmSync(testDir, { recursive: true, force: true });
+  }
+});
+
+test('notifyManifestValidationFailure: manifest.pr欠落でも例外で中断しない（欠陥B）', () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nvmf-nopr-'));
+  try {
+    process.env.NODE_TEST_CONTEXT = '1';
+    try {
+      const manifest = { repo: 'o/r' }; // pr キー自体が無い
+      let result;
+      assert.doesNotThrow(() => {
+        result = notifyManifestValidationFailure({ manifest, workspace: testDir, errors: ['pr must be a positive integer'] });
+      });
+      assert.equal(result.notifiable, false);
+      assert.equal(result.posted, false);
+      assert.equal(result.sentinelPath, null);
+    } finally {
+      delete process.env.NODE_TEST_CONTEXT;
+    }
+  } finally {
+    _setGhForTest(null);
+    fs.rmSync(testDir, { recursive: true, force: true });
+  }
+});
+
+test('notifyManifestValidationFailure: CLI --pr があれば manifest.pr 不正でも通知する（欠陥Bの回復）', () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nvmf-clipr-'));
+  try {
+    const ghCalls = [];
+    _setGhForTest((args) => { ghCalls.push(args); return { status: 0, stdout: 'https://github.com/owner/repo/pull/42#issuecomment-9\n' }; });
+    process.env.NODE_TEST_CONTEXT = '1';
+    try {
+      const result = notifyManifestValidationFailure({
+        manifest: { pr: 0, repo: 'owner/repo' }, // manifestは不正でも、信頼できる起動コンテキストのprで通知できる
+        workspace: testDir,
+        errors: ['pr must be a positive integer'],
+        pr: 42,
+      });
+      assert.equal(result.notifiable, true);
+      assert.equal(result.posted, true);
+      assert.equal(ghCalls.length, 1);
+      assert.equal(ghCalls[0][2], '42', '通知先は CLI --pr を使う');
+      // センチネルも PR 42 のパスに作られ、コメント本文のPR参照も通知先になる
+      assert.ok(result.sentinelPath && result.sentinelPath.includes(path.join('pr', '42')));
+      assert.equal(JSON.parse(fs.readFileSync(result.sentinelPath, 'utf8')).reason, 'incomplete-review');
     } finally {
       delete process.env.NODE_TEST_CONTEXT;
     }

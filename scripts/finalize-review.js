@@ -290,10 +290,16 @@ function buildIncompleteComment(results, gateResult) {
  * run-review-manager.js の監督ループがこのファイルを検出して
  * 「OUTPUT不在だがレビューは終了した」ことを認識する。
  *
+ * run-review-jobs.js（manifest検証失敗時の通知、Issue #271）は、gh pr comment の投稿に
+ * 失敗した場合に opts.reason='notify-failed' のセンチネルを書く。この場合だけ監督ループが
+ * 不完全完了（exit 0）ではなく失敗（exit 1）として扱うため、reason を区別できる必要がある。
+ *
  * @param {string} workspace
- * @param {number} pr
+ * @param {number|string} pr
+ * @param {{reason?: string, [k: string]: unknown}} [opts] センチネルに追記する任意フィールド。
+ *   reason を省略すると 'incomplete-review'（通知済みの不完全完了）。
  */
-function writeSentinel(workspace, pr) {
+function writeSentinel(workspace, pr, opts = {}) {
   const sentinelPath = reviewArtifactPath(path.join(workspace, '.gh-maestro'), pr, '.incomplete');
   try {
     fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
@@ -301,6 +307,7 @@ function writeSentinel(workspace, pr) {
       pr,
       reason: 'incomplete-review',
       completed_at: new Date().toISOString(),
+      ...opts,
     }), 'utf8');
     return sentinelPath;
   } catch {
