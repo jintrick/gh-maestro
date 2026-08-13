@@ -1,6 +1,9 @@
 'use strict';
 // gh-create-pr.js
-// gh pr create のラッパー。baseブランチをgit upstream trackingから自動解決する。
+// gh pr create のラッパー。baseブランチを環境変数 GH_MAESTRO_BASE_BRANCH から解決する
+// （ワーカー起動時に spawn-worker.js / inbox-supervisor.js が注入）。
+// git upstream tracking には依存しない。upstream はコーダーの標準的な `git push -u` で
+// 自ブランチへ書き換わるため、これに依存すると base==head でPR作成が壊れる（Issue #269）。
 // コーダーが --base を明示的に指定できず、誤ったbaseブランチでPRが作成されるのを防止する。
 //
 // Usage:
@@ -23,7 +26,8 @@ Arguments:
   --body-file <path>        PR本文のファイルパス（--body と排他、いずれか必須）
   --repo <owner/repo>       リポジトリ指定（省略可、git remoteから自動検出）
 
-baseブランチはカレントディレクトリのgit upstream trackingから自動解決されます。
+baseブランチは環境変数 GH_MAESTRO_BASE_BRANCH から解決されます（ワーカー起動時に
+spawn-worker.js / inbox-supervisor.js が注入。未設定なら明確に失敗します）。
 --base フラグは受け付けません。
 
 Output:
@@ -34,24 +38,28 @@ const VALUE_FLAGS = ['--title', '--body', '--body-file', '--repo'];
 const BOOLEAN_FLAGS = [];
 
 /**
- * カレントディレクトリのgit upstream trackingからbaseブランチを解決する。
+ * baseブランチを環境変数 GH_MAESTRO_BASE_BRANCH から解決する。
+ *
+ * git upstream tracking には依存しない。upstream はコーダーの標準的な `git push -u` で
+ * 自ブランチへ書き換わるため、これに依存すると base==head となりPR作成が壊れる
+ * （Issue #269）。base はワーカー起動時に注入されるため、コーダーが --base で
+ * 上書きすることはできない（フェイルクローズ: 未設定なら誤ったbaseでPRを作らず失敗する）。
+ *
  * @param {object} [opts]
- * @param {string} [opts.cwd] - 実行ディレクトリ（省略時はprocess.cwd()）
+ * @param {object} [opts.env] - 環境変数（省略時は process.env）。テスト用。
  * @returns {string} baseブランチ名（例: "dev"）。
- * @throws {Error} upstream未設定・gitエラー時
+ * @throws {Error} GH_MAESTRO_BASE_BRANCH 未設定・不正時
  */
 function resolveBaseBranch(opts = {}) {
-  const cwd = opts.cwd || process.cwd();
-  const r = spawnSync('git', ['rev-parse', '--abbrev-ref', '@{upstream}'], { cwd, encoding: 'utf8' });
-  if (r.error || r.status !== 0 || !r.stdout) {
-    throw new Error('git upstream trackingが設定されていません。worktreeが正しく作成されているか確認してください。');
+  const env = opts.env || process.env;
+  const baseBranch = (env.GH_MAESTRO_BASE_BRANCH || '').trim();
+  if (!baseBranch) {
+    throw new Error('GH_MAESTRO_BASE_BRANCH が設定されていません。ワーカー起動時にベースブランチが渡されているか確認してください。');
   }
-  const upstream = r.stdout.trim();
-  // "origin/dev" → "dev"
-  if (!upstream.startsWith('origin/')) {
-    throw new Error(`予期しないupstream形式です: ${upstream}（origin/<branch>形式を期待）`);
+  if (baseBranch.startsWith('-')) {
+    throw new Error(`不正なベースブランチ形式です: ${baseBranch}（- 始まりの値は受け付けません）`);
   }
-  return upstream.slice('origin/'.length);
+  return baseBranch;
 }
 
 /**
@@ -62,9 +70,16 @@ function resolveBaseBranch(opts = {}) {
  * @param {string} [opts.bodyFile] - PR本文のファイルパス（body と排他）
  * @param {string} [opts.repo] - リポジトリ指定
  * @param {string} [opts.cwd] - 実行ディレクトリ
- * @returns {{ url: string, status: number }}
+ * @param {object} [opts.env] - 環境変数（省略時は process.env）。resolveBaseBranch へ渡す。
+ * @returns {{ url: string, status: number, stderr: string }}
  */
 function createPr(opts) {
+  // NODE_TEST_CONTEXT 検出時に実PR作成を機械的に拒否する（Issue #202 の構造的対策）。
+  // ワーカーenv（GH_MAESTRO_BASE_BRANCH 等）がテスト配下の子プロセスへ漏れた場合でも、
+  // 実リポジトリへ誤ってPRが作られるのを防ぐ（msg-send.js の投稿拒否と同じ方式）。
+  if (process.env.NODE_TEST_CONTEXT) {
+    return { url: '', status: 1, stderr: 'テスト実行中（NODE_TEST_CONTEXT）のため、実際のPR作成は行いません' };
+  }
   const baseBranch = resolveBaseBranch(opts);
   const args = ['pr', 'create', '--base', baseBranch, '--title', opts.title];
   if (opts.body) {

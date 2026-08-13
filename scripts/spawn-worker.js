@@ -29,6 +29,7 @@ const { resolve, relative } = require('path');
 // link-node-modules は常に同一ディレクトリに同居する（リポジトリの scripts/ もインストール先 ~/.gh-maestro/scripts/ も）。
 const { linkNodeModules } = require('./link-node-modules');
 const { normalizeWorkerEntry } = require('./worker-entry');
+const { buildWorkerEnv } = require('./shared/worker-env');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { checkAgentExists } = require('./agent-exec');
 const { launchAgentHeadless } = require('./shared/headless-launch');
@@ -619,9 +620,13 @@ try {
     argv: agentCmdArgs,
     cwd: worktreeDir,
     logPath,
-    // ワーカー識別を「環境の事実」として渡す。msg-send.js はこれを見て自分がワーカーだと判定し、
-    // 送信元を自動確定して orchestrator 専用の宛先指定機構（--skill）を拒否する（成りすまし・誤配送の防止）。
-    env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },
+    // ワーカー識別・ベースブランチを「環境の事実」として渡す（scripts/shared/worker-env.js）。
+    // msg-send.js は GH_MAESTRO_WORKER を見て自分がワーカーだと判定し、送信元を自動確定して
+    // orchestrator 専用の宛先指定機構（--skill）を拒否する（成りすまし・誤配送の防止）。
+    // GH_MAESTRO_BASE_BRANCH は PR作成時（gh-create-pr.js）のベースブランチ解決に使う
+    // （Issue #269）。resume配送（inbox-supervisor.js）も workers.json の baseBranch から
+    // 同じ値を注入するため、初回とresumeで env が一致する。
+    env: buildWorkerEnv({ workerName, workspace, baseBranch }),
     // 全ワーカーに終了フックを付ける。非ゼロ終了（起動失敗・クラッシュ）を orchestrator へ通知し、
     // サイレント失敗（orchestratorが人間に言われるまで気づけない）を潰す。executionId が無い
     // ワーカーは空文字を渡す（execution記録はスキップされ、異常終了通知だけが働く）。
@@ -657,6 +662,9 @@ try {
     agentId: agentConfig.id,
     issue,
     skill,
+    // resume配送（inbox-supervisor.js）が GH_MAESTRO_BASE_BRANCH として再注入できるよう、
+    // ベースブランチをワーカーレコードに永続化する（Issue #269）。
+    baseBranch,
   });
   atomicWriteJson(workersJson, workers);
   console.warn(`spawn-worker: worker "${workerName}" を pid ${launched.pid} として workers.json に登録しました`);

@@ -19,6 +19,11 @@ const TEST_SESSION_PID = String(process.pid);
 // --workspace 引数が無視される。テスト中は一時的に除去する。
 const _savedWorkspaceEnv = process.env.GH_MAESTRO_WORKSPACE;
 delete process.env.GH_MAESTRO_WORKSPACE;
+// GH_MAESTRO_BASE_BRANCH は resume 配送時に buildWorkerEnv が launchAgentHeadless env へ
+// マージする（Issue #269）。外側の環境に偶然設定されている値が注入有無の検証を狂わせないよう、
+// テスト中は一時的に除去する。
+const _savedBaseBranchEnv = process.env.GH_MAESTRO_BASE_BRANCH;
+delete process.env.GH_MAESTRO_BASE_BRANCH;
 const runMain = (args, opts) => _realMain([...args, '--session-pid', TEST_SESSION_PID], opts);
 
 // ── テストヘルパー ────────────────────────────────────────────────────────
@@ -39,6 +44,22 @@ function withTempDir(fn) {
   } catch (e) {
     cleanup();
     throw e;
+  }
+}
+
+/**
+ * 親プロセスから継承されうる値として process.env.GH_MAESTRO_BASE_BRANCH を一時的に設定する。
+ * `{ ...process.env, ...env }` のマージで親の値が残らないこと（Issue #269 レビュー指摘）を
+ * 最終的なspawn envで検証するために使う。
+ */
+function withInheritedBaseBranch(branch, fn) {
+  const saved = process.env.GH_MAESTRO_BASE_BRANCH;
+  process.env.GH_MAESTRO_BASE_BRANCH = branch;
+  try {
+    return fn();
+  } finally {
+    if (saved === undefined) delete process.env.GH_MAESTRO_BASE_BRANCH;
+    else process.env.GH_MAESTRO_BASE_BRANCH = saved;
   }
 }
 
@@ -726,6 +747,57 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
 
       assert.equal(result.success, true);
       assert.equal(result.method, 'resume');
+    });
+  });
+
+  test('deliverMessage: プロセス非生存時、entry.baseBranch を GH_MAESTRO_BASE_BRANCH として注入する（Issue #269）', () => {
+    // PR作成（gh-create-pr.js）のbase解決を upstream 非依存にするため、resume起動時の
+    // launchAgentHeadless env に base が入っていなければならない（spawn-worker.js と同じ値）。
+    // 親から継承した値（process.env.GH_MAESTRO_BASE_BRANCH='main'）を上書きし、最終的なspawn env
+    // （`{ ...process.env, ...env }` マージ後）に dev が入ることを検証する。
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
+      supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
+
+      withInheritedBaseBranch('main', () => {
+        const result = supervisor.deliverMessage({
+          workerName: 'issue-7-fix',
+          entry: { pid: 456, startTime: 'old', agentId: 'agy', baseBranch: 'dev' },
+          message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home', issue: '7',
+        });
+
+        assert.equal(result.success, true);
+        assert.equal(result.method, 'resume');
+
+        const spawnEnv = lastSpawnCalls[0].options.env;
+        assert.equal(spawnEnv.GH_MAESTRO_BASE_BRANCH, 'dev', '継承値(main)を上書きして dev が入る');
+        assert.equal(spawnEnv.GH_MAESTRO_WORKER, 'issue-7-fix');
+        assert.equal(spawnEnv.GH_MAESTRO_WORKSPACE, dir);
+      });
+    });
+  });
+
+  test('deliverMessage: baseBranch 未設定のレガシーレコードでは GH_MAESTRO_BASE_BRANCH を空文字で上書きする（フェイルクローズ）', () => {
+    // baseBranch 導入以前に起動したレガシーワーカーレコード。キーを省略しただけでは
+    // `{ ...process.env, ...env }` のマージで親から継承した値が残ってしまうため、空文字で
+    // 明示的に上書きし gh-create-pr.js 側をフェイルクローズ（誤ったbaseでPRを作らない）させる。
+    // 親から継承した値（process.env.GH_MAESTRO_BASE_BRANCH='main'）が除去されることを
+    // 最終的なspawn env（マージ後）で検証する。
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
+      supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
+
+      withInheritedBaseBranch('main', () => {
+        const result = supervisor.deliverMessage({
+          workerName: 'issue-7-fix',
+          entry: { pid: 456, startTime: 'old', agentId: 'agy' },
+          message: { from: 'orch', body: 'hi' }, workspace: dir, homedir: '/home', issue: '7',
+        });
+
+        assert.equal(result.success, true);
+        const spawnEnv = lastSpawnCalls[0].options.env;
+        assert.equal(spawnEnv.GH_MAESTRO_BASE_BRANCH, '', '継承値(main)は除去され空文字になる');
+      });
     });
   });
 });
