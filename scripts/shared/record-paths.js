@@ -18,6 +18,7 @@ const ARTIFACTS = Object.freeze({
   REVIEW_MANAGER_LOG: 'reviewManagerLog',
   REVIEW_MANAGER_RUNNING: 'reviewManagerRunning',
   REVIEW_MANAGER_INCOMPLETE: 'reviewManagerIncomplete',
+  REVIEW_MANAGER_RETRY_COUNT: 'reviewManagerRetryCount',
   REVIEW_MANIFEST: 'reviewManifest',
 });
 
@@ -109,6 +110,9 @@ function recordPath(workspace, params) {
       break;
     case ARTIFACTS.REVIEW_MANAGER_INCOMPLETE:
       candidate = path.join(base, 'review', 'manager.incomplete');
+      break;
+    case ARTIFACTS.REVIEW_MANAGER_RETRY_COUNT:
+      candidate = path.join(base, 'review', 'manager.retries.json');
       break;
     case ARTIFACTS.REVIEW_MANIFEST:
       candidate = path.join(base, 'review', 'manifest.json');

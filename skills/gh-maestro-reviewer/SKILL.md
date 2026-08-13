@@ -103,8 +103,7 @@ manifestのJSON構造:
       "leaf_ids": ["correctness/logic-invariants"],
       "aspect": "Correctness",
       "trunk_dir": "skills/gh-maestro-reviewer/correctness",
-      "leaf_files": ["skills/gh-maestro-reviewer/correctness/logic-invariants.md"],
-      "retry_policy": { "max_attempts": 2 }
+      "leaf_files": ["skills/gh-maestro-reviewer/correctness/logic-invariants.md"]
     }
   ],
   "parallelism": "parallel"
@@ -128,10 +127,12 @@ manifestは以下のパスに書き出す（run-review-manager.js が起動プ�
 ### 4. ジョブの実行
 
 manifestを書き出したら、以下のコマンドでジョブを実行する（`--manifest` には書き出したmanifestの
-パスをそのまま渡す。**`--pr` には起動プロンプトの `PR` 番号、`--repo` には `REPO` を必ず渡すこと**
-——どちらも検証前のコンテキストから渡され、manifestの読み込み・解析・検証の失敗すべての
-通知先として使う。manifestの読み込み・解析に失敗した場合 manifest.pr / manifest.repo は
-取れないため、この2つが必須）：
+パスをそのまま渡す。**`--pr` には起動プロンプトの `PR` 番号、`--repo` には `REPO`、`--gh-dir` には
+起動プロンプトの `GH_DIR` を必ず渡すこと**——`--pr`/`--repo` は検証前のコンテキストから渡され、
+manifestの読み込み・解析・検証の失敗すべての通知先として使う。`--gh-dir` は再試行カウンタの
+永続化先（メインワークスペースの `.gh-maestro` ディレクトリ）で、欠落させると再試行回数が
+追跡できなくなるため必須。manifestの読み込み・解析に失敗した場合 manifest.pr / manifest.repo は
+取れないため、`--pr`/`--repo` が必須）：
 
 ```sh
 node <SCRIPTS>/run-review-jobs.js \
@@ -139,7 +140,8 @@ node <SCRIPTS>/run-review-jobs.js \
   --results <WORKSPACE>/.gh-maestro/review-results-<PR>.json \
   --workspace <WORKSPACE> \
   --pr <PR> \
-  --repo <REPO>
+  --repo <REPO> \
+  --gh-dir <GH_DIR>
 ```
 
 `run-review-jobs.js` は:
@@ -159,7 +161,7 @@ cat <WORKSPACE>/.gh-maestro/review-results-<PR>.json
 
 失敗したジョブがある場合:
 - **resultsファイルは実行のたびにまるごと上書きされる（前回結果とのマージはしない）。** 失敗したジョブだけを含むmanifestで再実行すると、既に成功していたジョブの結果が失われる。再実行時は、既に成功しているジョブも含めた全ジョブのmanifestを作成すること
-- 再試行回数は `retry_policy.max_attempts`（デフォルト2回）を目安にするが、`run-review-jobs.js` は試行回数を機械的に追跡しない（毎回attempt:1として実行される）。何回再試行したかはあなた自身が把握し、目安を超えたら打切りを判断すること
+- **再試行回数はあなた自身が数えなくてよい。** `run-review-jobs.js` が実行計画を実行した回数を決定的に記録し（メインワークスペースの `records/pr/<PR>/review/manager.retries.json`）、`MAX_REVIEW_ATTEMPTS = 2`（初回＋再試行1回の計2回）を超えた呼び出しは拒否する。この上限はモデルの裁量ではなく決定的コードが判定する
 
 **manifest検証失敗時（exit code 2）は再試行しない**:
 - `run-review-jobs.js` が終了コード2で終了し、stderr に `manifest validation failed` を含む場合、それは実行manifestが機械検証に合格しなかったことを意味する（7葉の欠落・重複・未割当など）
@@ -168,6 +170,12 @@ cat <WORKSPACE>/.gh-maestro/review-results-<PR>.json
 - 通知のPR投稿に失敗した場合（認証切れ・ネットワーク障害等）は、run-review-jobs.js は `notify-failed` センチネルを書き、監督側がレビューを失敗（非ゼロ終了）として扱う。これもあなたの側で追加で行うことはない
 - あなたはそのまま終了すること。manifestを書き直して再実行してはならない（ヘッドレスプロセス内の再試行ループはアンチパターン。止まらなくなったときの事故がこのシステムで最悪の壊れ方をする）
 - 計画の書き直し・再実行の判断はオーケストレーターが行う
+
+**再試行上限到達時（exit code 3）は再試行しない**:
+- `run-review-jobs.js` が終了コード3で終了した場合、それは実行計画の実行回数が上限（`MAX_REVIEW_ATTEMPTS = 2`＝初回＋再試行1回）に達したことを意味する
+- この上限到達は run-review-jobs.js が既に通知済みである——既存の不完全レビュー経路（`finalize-review.js --mode incomplete`）を使って、最後の実行で成功したジョブの指摘内容を含むプレーンコメント投稿と `.incomplete` センチネル作成を行い、その上で終了している
+- あなたはそのまま終了すること。manifestを書き直して再実行してはならない（上限は決定的コードが判定するため、再実行しても同じ終了コード3で拒否される）
+- 再レビューの判断はオーケストレーターが行う
 
 再試行で解消しない失敗が残る場合、あなたが打切りを判断する。打切り基準:
 - 合理的な再試行（2回程度）で解消しない技術的失敗
@@ -208,7 +216,7 @@ node <SCRIPTS>/finalize-review.js \
 ```
 
 `finalize-review.js` は:
-- 成功した葉・失敗した葉・除外した葉・失敗理由を明記したプレーンコメントをPRに投稿する
+- 成功した葉・失敗した葉・除外した葉・失敗理由に加え、**最後の実行で成功したジョブの指摘内容**を明記したプレーンコメントをPRに投稿する
 - `.gh-maestro/review-manager-<PR>.incomplete` センチネルファイルを作成する
 - 正式なfindings JSONは書き出さない
 

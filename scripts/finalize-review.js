@@ -19,6 +19,14 @@ const { _validateAgainstSchema } = require('./shared/json-schema');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 
+// テスト用: gh 呼び出しを注入する（実プロセスを0個spawnするテストから使う。
+// run-review-jobs.js の _setGhForTest と同じパターン。NODE_TEST_CONTEXT 検出時は
+// 実投稿を拒否する）。
+let _ghForTest = null;
+function _setGhForTest(impl) {
+  _ghForTest = impl;
+}
+
 const USAGE = `finalize-review.js — 完全性ゲート検証後、正式findings JSON書き出しまたは不完全コメント投稿
 
 Usage:
@@ -225,6 +233,46 @@ function buildIncompleteComment(results, gateResult) {
     lines.push('（なし）');
   }
 
+  // 最後の実行で成功したジョブの指摘内容（Issue #273: 再試行上限で打切りになっても、
+  // 30分かけて集めた指摘を捨てない）。results は実行のたび全上書きされるため、ここに載るのは
+  // 「最終スナップショット」で成功したジョブの findings のみ（前回成功・今回失敗したジョブの
+  // findings は仕様上残らない）。body は複数行のMarkdownを含みうるため <details> で折りたたみ、
+  // 本文のMarkdown整形を保ったまま保持する。
+  const successFindings = [];
+  for (const jr of results.jobs || []) {
+    if (jr.status === 'success' && Array.isArray(jr.findings)) {
+      successFindings.push(...jr.findings);
+    }
+  }
+  if (successFindings.length > 0) {
+    lines.push('');
+    lines.push('### 最後の実行で成功したジョブの指摘');
+    lines.push('');
+    lines.push(`最終スナップショットの成功ジョブから集約（${successFindings.length} 件）。`);
+    lines.push('');
+    for (const f of successFindings) {
+      const severity = f.severity || '?';
+      const aspect = f.aspect || '?';
+      const findingPath = f.path || '?';
+      const summary = f.summary || '(summaryなし)';
+      lines.push('<details>');
+      lines.push(`<summary><b>[${severity}] [${aspect}] ${findingPath}</b> — ${summary}</summary>`);
+      lines.push('');
+      if (f.line_anchor) lines.push(`行アンカー: \`${f.line_anchor}\``);
+      if (f.severity_rationale) lines.push(`判定根拠: ${f.severity_rationale}`);
+      if (Array.isArray(f.verified_references) && f.verified_references.length > 0) {
+        lines.push(`参照: ${f.verified_references.join(', ')}`);
+      }
+      if (f.body) {
+        lines.push('');
+        lines.push(String(f.body));
+      }
+      lines.push('');
+      lines.push('</details>');
+      lines.push('');
+    }
+  }
+
   lines.push('');
   lines.push('### 失敗/未完了の葉');
   lines.push('');
@@ -400,26 +448,38 @@ async function finalizeReview(resultsPath, mode, outputPath, workspace) {
     let commentUrl = null;
     let commentError = null;
 
-    try {
-      const ghResult = spawnSync('gh', [
-        'pr', 'comment', String(pr),
-        '--repo', repo,
-        '--body', commentBody,
-      ], { encoding: 'utf8', stdio: 'pipe' });
-
-      if (ghResult.status === 0) {
-        commentUrl = (ghResult.stdout || '').trim();
-      } else {
-        commentError = (ghResult.stderr || '').toString().trim();
+    const ghArgs = ['pr', 'comment', String(pr), '--repo', repo, '--body', commentBody];
+    let ghResult;
+    if (_ghForTest) {
+      ghResult = _ghForTest(ghArgs);
+    } else if (process.env.NODE_TEST_CONTEXT) {
+      ghResult = { status: 1, stdout: '', stderr: 'テスト実行中（NODE_TEST_CONTEXT）のため、実際のGitHub投稿は行いません' };
+    } else {
+      try {
+        ghResult = spawnSync('gh', ghArgs, { encoding: 'utf8', stdio: 'pipe' });
+      } catch (e) {
+        ghResult = { status: 1, stdout: '', stderr: e.message };
       }
-    } catch (e) {
-      commentError = e.message;
     }
 
-    // 4. センチネルファイル作成
-    const sentinelPath = writeSentinel(workspace, pr);
+    if (ghResult && ghResult.status === 0) {
+      commentUrl = (ghResult.stdout || '').trim();
+    } else {
+      commentError = (ghResult && (ghResult.stderr || '')) ? String(ghResult.stderr).trim() : '(gh 投稿失敗)';
+    }
 
+    // 4. センチネルファイル作成。
+    // 投稿失敗時は「通知済みの不完全完了」を示す incomplete-review を書かず、notify-failed
+    // センチネルを書く（PR #272 の notifyManifestProblem と同じ考え方。投稿に失敗したのに
+    // 成功扱いすると、上限到達などの事実が orchestrator へ届かないまま黙って済む）。
+    // 監督側 incompleteSentinelOutcome が notify-failed を exit 1 の失敗として扱う。
     if (!commentUrl && commentError) {
+      const sentinelPath = writeSentinel(workspace, pr, {
+        reason: 'notify-failed',
+        postError: commentError,
+        failureLabel: '不完全レビュー通知',
+        failureDetail: commentError,
+      });
       return {
         ok: false,
         summary: {
@@ -428,6 +488,8 @@ async function finalizeReview(resultsPath, mode, outputPath, workspace) {
         },
       };
     }
+
+    const sentinelPath = writeSentinel(workspace, pr);
 
     return {
       ok: true,
@@ -450,6 +512,7 @@ module.exports = {
   buildIncompleteComment,
   writeSentinel,
   finalizeReview,
+  _setGhForTest,
 };
 
 // ── CLIエントリポイント ────────────────────────────────────────────────────────
