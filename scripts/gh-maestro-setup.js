@@ -54,6 +54,15 @@ function retireAiReviewCi() {
 
   const repoName = getRemoteRepo();
   if (repoName) {
+    if (process.env.NODE_TEST_CONTEXT) {
+      // テスト実行中（node --test が自動設定し子プロセスへ継承する環境変数）は、
+      // GitHub API の DELETE（外部システムへの副作用）を実行しない。
+      // Issue #151 の launchAgentHeadless / #202 の msg-send.js と同じフェイルクローズ。
+      // フック環境の GIT_* がテストへ漏れて実リポジトリのリモートを解決した場合も、
+      // この経路で DELETE に到達しうるため、ここで確実に拒否する（Issue #283）。
+      console.warn('  [warn] NODE_TEST_CONTEXT 検出のため GitHub Actions AI Review CI の退役（GitHub API DELETE）をスキップしました。テスト実行中は外部システムへの副作用を実行しません。');
+      return;
+    }
     step('Retiring GitHub Actions AI Review CI...');
     const RETIRE_BRANCHES = ['main', 'dev'];
     const RETIRE_PATHS = [

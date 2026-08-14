@@ -30,3 +30,15 @@ paths:
 - 実障害: `worker-exit-hook.test.js` の実spawn CLIテストが `env` 未指定だったため、ワーカープロセス自身が `npm test` を実行すると `GH_MAESTRO_WORKER`/`GH_MAESTRO_WORKSPACE` が子プロセスへ継承され、`msg-send.js` が実ワークスペース・実Issueを解決して本物のGitHub Issueへ偽の通知を投稿した。
 - 対策は二層: (1) `tests/_spawn-env.js::cleanSpawnEnv()` で実spawn時にワーカー文脈envを除去する（テスト側の対策）。(2) `scripts/msg-send.js` に `NODE_TEST_CONTEXT`（`node --test` が自動設定し子プロセスにも継承される）を検出したら実投稿をフェイルクローズで拒否するガードを追加する（本番コード側の構造的対策。Issue #151 で `launchAgentHeadless` に導入したのと同じパターン）。
 - (1)だけでは「envクリーンし忘れ」という将来のテスト側の注意力に依存する。**外部副作用（GitHub投稿・破壊的操作等）を持つ共有スクリプトを新設・変更する際は、(2)のようなNODE_TEST_CONTEXTガードを本体側に持たせることを検討する**（テスト側の設定漏れに依存せず効くため）。
+
+## フック環境の git 変数がテストへ漏れ、実リポジトリを破壊する経路（Issue #283）
+
+#202 が「子プロセスが親のワーカー文脈 env を継承する」失敗モードなのに対し、本件は「**git がフック環境へ注入した GIT_* 変数を node --test が子プロセスへ継承し、`GIT_DIR` が `spawnSync` の cwd 指定より優先されて git のリポジトリ発見を実リポジトリへ上書きする**」経路。
+
+- 実障害: リンク付き worktree から push すると git が pre-push フック環境へ `GIT_DIR=<実リポジトリ>/.git/worktrees/<名前>` を設定する（core.hooksPath により worktree の `.githooks` が実行される）。`npm test`（node --test）がこれを全テストファイルと spawn 子プロセスへ継承し、一時dirを cwd にしていても `worktreeAdd` / `superviseReviewManager` / `gh-maestro-setup.js` の git 操作が全て実リポジトリへ着弾する。既存テストは「**緑のまま**実リポジトリを壊す」ため、テスト失敗では検出されない。
+- 対策は3層 + 外部副作用ガード:
+  1. `.githooks/pre-push`・`.githooks/pre-commit` の冒頭で注入変数（GIT_DIR / GIT_COMMON_DIR / GIT_WORK_TREE / GIT_INDEX_FILE / GIT_PREFIX / GIT_OBJECT_DIRECTORY / GIT_ALTERNATE_OBJECT_DIRECTORIES / GIT_QUARANTINE_PATH）を unset（注入源の遮断）。
+  2. `tests/_env-setup.js` の `--require` プリロードで同じ変数を除去（テスト環境の中和。手動 `npm test` も守られる）。
+  3. `scripts/child-process.js` 共有ラッパーが **git を spawn するとき** `GIT_LOCAL_ENV_VARS`（`git rev-parse --local-env-vars` の15変数 + GIT_QUARANTINE_PATH）を env から除去する（「cwd が正」を保証。テストはバイパス不要で既存テストが無改変のまま通る）。git 以外の spawn は従来どおり。
+  - 外部副作用（GitHub API DELETE）: `gh-maestro-setup.js::retireAiReviewCi` に `NODE_TEST_CONTEXT` 検出時フェイルクローズガード。ローカル git 操作は上記3層で守られるためガード不要。
+- 受け入れ条件は「ガードが throw すること」ではなく「**実リポジトリが無傷であること**」。`tests/env-leak-guard.test.js` が GIT_DIR 注入下で各操作を呼び、victim リポジトリのスナップショット（for-each-ref / HEAD / config / worktree list / `.git/worktrees/` 列挙）が操作前後で不変であることを検証する。
