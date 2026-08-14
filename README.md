@@ -125,7 +125,6 @@ skills/
   gh-maestro-reviewer/           # Review Manager（観点別基準ファイルを同梱）
   gh-maestro-assistant/          # Issueごとに自動起動する対話型ワーカー
   gh-maestro-pending-triage/     # 保留Issueのトリアージ
-  gh-maestro-init/               # 対象プロジェクトのlint/test設定を整備
   gh-maestro-install/            # インストール/更新
 scripts/                         # 全スクリプト（CLI・モジュール）のソース。install.js もここ
 ```

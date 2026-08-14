@@ -290,6 +290,29 @@ function upsertMarkerBlock(hookPath, { marker, markerRe, entryLines }) {
   return 'created';
 }
 
+/**
+ * marker で始まるブロックをフックから削除する（upsertMarkerBlock の逆操作）。
+ * ブロック境界の判定は upsertMarkerBlock と同じく「次の空行または EOF まで」。
+ * @returns {'absent'|'removed'}
+ */
+function removeMarkerBlock(hookPath, { markerRe }) {
+  if (!existsSync(hookPath)) return 'absent';
+
+  const lines = readFileSync(hookPath, 'utf8').split('\n');
+  const markerIdx = lines.findIndex(l => markerRe.test(l.trim()));
+  if (markerIdx === -1) return 'absent';
+
+  let blockEnd = markerIdx + 1;
+  while (blockEnd < lines.length && lines[blockEnd].trim() !== '') blockEnd++;
+  // ブロック直後の空行も1つ畳んで、撤去のたびに空行が溜まらないようにする。
+  if (blockEnd < lines.length && lines[blockEnd].trim() === '') blockEnd++;
+  lines.splice(markerIdx, blockEnd - markerIdx);
+
+  writeFileSync(hookPath, lines.join('\n'), 'utf8');
+  applyExecPermission(hookPath);
+  return 'removed';
+}
+
 function applyExecPermission(hookPath) {
   try {
     chmodSync(hookPath, 0o755);
@@ -300,12 +323,11 @@ function applyExecPermission(hookPath) {
 
 const SYNC_RULES_MARKER = 'gh-maestro:sync-rules:v1';
 const SYNC_RULES_MARKER_RE = /^# gh-maestro:sync-rules(:v\d+)?$/;
-const CHECKS_MARKER = 'gh-maestro:checks:v1';
+// Issue #283: フックからのテスト実行は廃止した。git はフック実行時に GIT_DIR 等を
+// 環境へ注入し、それを継承したテストが cwd 指定を無視して実リポジトリを破壊しうる。
+// フック経由の実行結果がコーダー自身の実行結果と一致する保証が無い以上、
+// フックでテストを走らせてはならない。既存の設置済みブロックはここで撤去する。
 const CHECKS_MARKER_RE = /^# gh-maestro:checks(:v\d+)?$/;
-
-function runChecksScriptPath() {
-  return resolve(require('os').homedir(), '.gh-maestro', 'scripts', 'hooks', 'run-checks.js');
-}
 
 function ensurePreCommitHook() {
   const hookPath = resolve(workspaceRoot, '.git', 'hooks', 'pre-commit');
@@ -322,23 +344,16 @@ function ensurePreCommitHook() {
   });
   reportHookResult('pre-commit hook (sync-rules)', syncResult);
 
-  const checksResult = upsertMarkerBlock(hookPath, {
-    marker: CHECKS_MARKER,
-    markerRe: CHECKS_MARKER_RE,
-    entryLines: [`node "${runChecksScriptPath()}" precommit || exit 1`],
-  });
-  reportHookResult('pre-commit hook (checks)', checksResult);
+  if (removeMarkerBlock(hookPath, { markerRe: CHECKS_MARKER_RE }) === 'removed') {
+    ok('pre-commit hook (checks): 廃止したため撤去しました');
+  }
 }
 
-function ensurePrePushHook() {
-  const hookPath = resolve(workspaceRoot, '.git', 'hooks', 'pre-push');
-
-  const checksResult = upsertMarkerBlock(hookPath, {
-    marker: CHECKS_MARKER,
-    markerRe: CHECKS_MARKER_RE,
-    entryLines: [`node "${runChecksScriptPath()}" prepush || exit 1`],
-  });
-  reportHookResult('pre-push hook (checks)', checksResult);
+function retireChecksHooks() {
+  const prePush = resolve(workspaceRoot, '.git', 'hooks', 'pre-push');
+  if (removeMarkerBlock(prePush, { markerRe: CHECKS_MARKER_RE }) === 'removed') {
+    ok('pre-push hook (checks): 廃止したため撤去しました');
+  }
 }
 
 function reportHookResult(label, result) {
@@ -381,7 +396,7 @@ function main() {
   ensureGitIgnore();
   ensureDevBranch();
   ensurePreCommitHook();
-  ensurePrePushHook();
+  retireChecksHooks();
 
   if (firstRun) {
     mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });

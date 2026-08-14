@@ -48,19 +48,54 @@ function readHook(dir, name) {
   return fs.readFileSync(path.join(dir, '.git', 'hooks', name), 'utf8');
 }
 
-test('新規プロジェクトにpre-commit/pre-pushフック両方を新規設置する', () => {
+test('新規プロジェクトにはsync-rulesフックのみを設置し、checksフックは設置しない', () => {
   withGitProject((dir) => {
     const r = runSetup(dir);
     assert.equal(r.status, 0, r.stderr);
 
     const preCommit = readHook(dir, 'pre-commit');
     assert.match(preCommit, /# gh-maestro:sync-rules:v1/);
-    assert.match(preCommit, /# gh-maestro:checks:v1/);
-    assert.match(preCommit, /run-checks\.js.*precommit \|\| exit 1/);
+    // Issue #283: フックからのテスト実行は廃止した。
+    assert.doesNotMatch(preCommit, /gh-maestro:checks/);
+    assert.doesNotMatch(preCommit, /run-checks/);
 
-    const prePush = readHook(dir, 'pre-push');
-    assert.match(prePush, /# gh-maestro:checks:v1/);
-    assert.match(prePush, /run-checks\.js.*prepush \|\| exit 1/);
+    assert.equal(fs.existsSync(path.join(dir, '.git', 'hooks', 'pre-push')), false,
+      'pre-push フックは作られないこと');
+  });
+});
+
+test('既に設置済みのchecksブロックは撤去され、無関係なブロックは残る', () => {
+  withGitProject((dir) => {
+    const hookPath = path.join(dir, '.git', 'hooks', 'pre-commit');
+    fs.mkdirSync(path.dirname(hookPath), { recursive: true });
+    fs.writeFileSync(hookPath, [
+      '#!/bin/sh',
+      '# gh-maestro:checks:v1',
+      'node "/somewhere/run-checks.js" precommit || exit 1',
+      '',
+      '# some-unrelated-marker',
+      'echo unrelated-block-must-survive',
+    ].join('\n') + '\n', 'utf8');
+
+    const prePushPath = path.join(dir, '.git', 'hooks', 'pre-push');
+    fs.writeFileSync(prePushPath, [
+      '#!/bin/sh',
+      '# gh-maestro:checks:v1',
+      'node "/somewhere/run-checks.js" prepush || exit 1',
+    ].join('\n') + '\n', 'utf8');
+
+    const r = runSetup(dir);
+    assert.equal(r.status, 0, r.stderr);
+
+    const preCommit = readHook(dir, 'pre-commit');
+    assert.doesNotMatch(preCommit, /gh-maestro:checks/);
+    assert.doesNotMatch(preCommit, /run-checks/);
+    assert.match(preCommit, /# some-unrelated-marker/);
+    assert.match(preCommit, /echo unrelated-block-must-survive/);
+
+    const prePush = fs.readFileSync(prePushPath, 'utf8');
+    assert.doesNotMatch(prePush, /gh-maestro:checks/);
+    assert.doesNotMatch(prePush, /run-checks/);
   });
 });
 
@@ -68,15 +103,13 @@ test('2回連続実行しても内容が変化しない（冪等）', () => {
   withGitProject((dir) => {
     assert.equal(runSetup(dir).status, 0);
     const preCommitFirst = readHook(dir, 'pre-commit');
-    const prePushFirst = readHook(dir, 'pre-push');
 
     assert.equal(runSetup(dir).status, 0);
     assert.equal(readHook(dir, 'pre-commit'), preCommitFirst);
-    assert.equal(readHook(dir, 'pre-push'), prePushFirst);
   });
 });
 
-test('旧バージョンマーカーのchecksブロックは最新版へ置き換わる', () => {
+test('旧バージョンマーカーのchecksブロックも撤去される', () => {
   withGitProject((dir) => {
     const hookPath = path.join(dir, '.git', 'hooks', 'pre-commit');
     fs.mkdirSync(path.dirname(hookPath), { recursive: true });
@@ -91,8 +124,7 @@ test('旧バージョンマーカーのchecksブロックは最新版へ置き�
 
     const preCommit = readHook(dir, 'pre-commit');
     assert.doesNotMatch(preCommit, /old-behavior/);
-    assert.match(preCommit, /# gh-maestro:checks:v1/);
-    assert.match(preCommit, /run-checks\.js.*precommit \|\| exit 1/);
+    assert.doesNotMatch(preCommit, /gh-maestro:checks/);
   });
 });
 
@@ -120,8 +152,7 @@ test('旧ブロックの行数が新エントリと異なっていても、後�
 
     const preCommit = readHook(dir, 'pre-commit');
     assert.doesNotMatch(preCommit, /old-line-1|old-line-2|old-line-3/);
-    assert.match(preCommit, /# gh-maestro:checks:v1/);
-    assert.match(preCommit, /run-checks\.js.*precommit \|\| exit 1/);
+    assert.doesNotMatch(preCommit, /gh-maestro:checks/);
     // 後続の無関係なブロックが誤って削られていないこと
     assert.match(preCommit, /# some-unrelated-marker/);
     assert.match(preCommit, /echo unrelated-block-must-survive/);
@@ -140,7 +171,7 @@ test('手書きの既存pre-commitフックがあってもgh-maestroブロック
     const preCommit = readHook(dir, 'pre-commit');
     assert.match(preCommit, /custom-user-hook/);
     assert.match(preCommit, /# gh-maestro:sync-rules:v1/);
-    assert.match(preCommit, /# gh-maestro:checks:v1/);
+    assert.doesNotMatch(preCommit, /gh-maestro:checks/);
   });
 });
 
