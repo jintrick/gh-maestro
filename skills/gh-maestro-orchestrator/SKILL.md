@@ -165,6 +165,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 - `BASE_BRANCH`は保護ブランチ（`main`/`master`）でもworktreeブランチ（`issue-N-description`形式）でもない。セッション中に変更しない。起動時に保護ブランチ上にいた場合のみ、最初のIssue確定時に開発ブランチを切って設定する
 - `main` / `master`への直接pushは禁止
 - `gh pr close`は1件ずつ実行する（複数引数を渡すと失敗する）
+- **`install.js` の実行を必要とする変更をマージしたら、そのセッションでは以後いかなるタスクにも着手しない。install 実行後は必ずセッションを終了し、orchestrator を再起動する。** 対象は `skills/**`・`scripts/` の配布物・`skills/agents.yaml` の変更。稼働中の常駐プロセス（`inbox-supervisor.js` / `msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）は起動時にロードしたコードを保持し続けるため、install してもそれらには新しいコードが届かない。気づかないまま作業を続けると「コードは直っているのに実システムでは壊れたまま」の状態で判断することになる（Issue #280 で実害。丸一日気づかなかった）。**プロセスを走らせたままスクリプトを更新する機構は作らないと決定済みであり、セッション再起動が唯一の正しい回避手段である。** 「この変更は常駐プロセスに関係ないから大丈夫」という判断もしない——関係の有無を毎回見積もること自体がコストであり、間違えたときに気づけない。
 
 ## 基本フロー
 
