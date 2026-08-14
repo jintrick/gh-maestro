@@ -1,7 +1,14 @@
 #!/bin/sh
 if git diff --cached --name-only | grep -q '^\.claude/rules/'; then
   node scripts/sync-rules.js || exit 1
+  # .agents/rules/ は .gitignore 対象で追跡外のため stage 不要。
 fi
 if git diff --cached --name-only | grep -q '^AGENTS\.md$'; then
   node scripts/sync-agents-md.js || exit 1
+  # 同期結果を必ずコミットに含める。stage しないと AGENTS.md だけが進み、
+  # CLAUDE.md が取り残されて規約がコーダーに届かない。
+  git add CLAUDE.md || exit 1
 fi
+
+# gh-maestro:checks:v1
+node scripts/hooks/run-checks.js precommit || exit 1

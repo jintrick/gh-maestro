@@ -1,0 +1,3 @@
+#!/bin/sh
+# gh-maestro:checks:v1
+node scripts/hooks/run-checks.js prepush || exit 1
