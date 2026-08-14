@@ -21,12 +21,16 @@ afterEach(() => {
 });
 
 // msg-send.js は成功時にensureInboxSupervisorRunning()を呼ぶ（best-effort）。
-// テストでは実プロセスをspawnしないよう常にモックする（test-process-spawn-safety参照）。
-require('../scripts/shared/ensure-inbox-supervisor')._setSpawn(() => {
+// テストでは実プロセスをspawnせず外部照会も行わないようモックする（test-process-spawn-safety参照）。
+const ensureInboxSupervisor = require('../scripts/shared/ensure-inbox-supervisor');
+ensureInboxSupervisor._setSpawn(() => {
   const child = new EventEmitter();
   child.unref = () => {};
   return child;
 });
+ensureInboxSupervisor._setFindRunningInstance(() => null);
+ensureInboxSupervisor._setIsResidentLeaseLive(() => false);
+ensureInboxSupervisor._setFindSessionRootPid(() => 12345);
 
 // ワーカー起動コンテキストでは GH_MAESTRO_WORKER / GH_MAESTRO_WORKSPACE が注入され、
 // msg-send.js が「ワーカー扱い」になったり resolveWorkspace が --workspace 引数を

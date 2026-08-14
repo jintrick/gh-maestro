@@ -21,6 +21,7 @@ const path = require('path');
 // （実プロセスに触れない。test-process-spawn-safety ルール準拠）。
 const workerLease = require('../scripts/shared/worker-lease');
 const processLifecycle = require('../scripts/process-lifecycle');
+workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
 
 const SHA = 'a'.repeat(40);
 const AGENDA = '# 議題\n\nRAG構成の採用可否について';

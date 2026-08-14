@@ -9,6 +9,7 @@ const path = require('path');
 const supervisor = require('../scripts/inbox-supervisor');
 const { spawnSync } = require('../scripts/child-process');
 const headlessLaunch = require('../scripts/shared/headless-launch');
+const workerLease = require('../scripts/shared/worker-lease');
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
@@ -168,6 +169,7 @@ function resetAllMocks() {
   resetGhApiComments();
   resetHeadlessLaunchMocks();
   setWorkersIdle();
+  workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
   // resume直後の生存確認スリープは実待機させない
   supervisor._setSleep(() => {});
   // 通知は実 _notifyOrchestrator を通しつつ、内部 spawn だけを安全なモック（実spawnを起こさない）
@@ -178,6 +180,8 @@ function resetAllMocks() {
   supervisor._setNotifyOrchestrator(supervisor._notifyOrchestrator);
   supervisor._setNotifySpawn(() => ({ status: 0, stdout: '', stderr: '' }));
 }
+
+resetAllMocks();
 
 // ═══════════════════════════════════════════════════════════════════════════
 // --help / usage
