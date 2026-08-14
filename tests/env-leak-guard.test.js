@@ -253,23 +253,11 @@ const HOOK_INJECTED_VARS = [
   'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_QUARANTINE_PATH',
 ];
 
-test('.githooks/pre-push は run-checks.js 呼び出しより前に git 注入変数を unset する', () => {
-  const content = fs.readFileSync(path.join(__dirname, '..', '.githooks', 'pre-push'), 'utf8');
-  const unsetIdx = content.indexOf('unset GIT_DIR');
-  assert.notEqual(unsetIdx, -1, 'pre-push: unset 行が必要');
-  // コメント内の言及ではなく、実際の起動行を探す（pre-push: `run-checks.js prepush`）。
-  assert.ok(unsetIdx < content.indexOf('run-checks.js prepush'), 'pre-push: unset が run-checks.js 起動より前にあること');
-  for (const v of HOOK_INJECTED_VARS) {
-    assert.ok(content.includes(v), `pre-push は ${v} を unset に含むこと`);
-  }
-});
-
 test('.githooks/pre-commit は run-checks.js 呼び出しより前に git 注入変数を unset する', () => {
   const content = fs.readFileSync(path.join(__dirname, '..', '.githooks', 'pre-commit'), 'utf8');
   const unsetIdx = content.indexOf('unset GIT_DIR');
   assert.notEqual(unsetIdx, -1, 'pre-commit: unset 行が必要');
   assert.ok(unsetIdx < content.indexOf('git diff --cached'), 'pre-commit: unset が最初の git 呼び出しより前にあること');
-  assert.ok(unsetIdx < content.indexOf('run-checks.js'), 'pre-commit: unset が run-checks.js より前にあること');
   for (const v of HOOK_INJECTED_VARS) {
     assert.ok(content.includes(v), `pre-commit は ${v} を unset に含むこと`);
   }

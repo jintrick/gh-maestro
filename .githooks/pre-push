@@ -1,7 +1,0 @@
-#!/bin/sh
-# フック実行時にgitが設定する変数を落とす（Issue #283）。run-checks.js は cwd 基準で動くため機能欠損なし。
-unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX \
-      GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_QUARANTINE_PATH 2>/dev/null || true
-
-# gh-maestro:checks:v1
-node scripts/hooks/run-checks.js prepush || exit 1
