@@ -27,3 +27,29 @@ if (!process.env.GH_MAESTRO_RUNTIME_DIR) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
   });
 }
+
+// git はフック（pre-commit / pre-push 等）の実行時に GIT_DIR / GIT_COMMON_DIR /
+// GIT_INDEX_FILE / GIT_WORK_TREE / GIT_PREFIX 等を設定する。テストスイートを git フック
+// 内から実行した場合、これらは `node --test` の親プロセスから fork される全テストファイル
+// と、そこから spawn される子プロセス（git / gh）へそのまま継承される。
+//
+// 設定されたまま一時リポジトリを扱うテスト（spawnSync('git', ..., { cwd: 一時dir }) で
+// git init / commit / remote add を行う fixture や、cwd 依存で gh repo view を呼ぶ
+// assistant-watch のテスト等）が走ると、git/gh は cwd の一時リポジトリを無視して
+// GIT_DIR が指す実リポジトリ（フックを実行しているリポジトリ）を解決してしまい、
+// 「remote origin already exists」・実リポジトリへの意図しない書き込み・実ポーリング
+// （assistant-watch の既定 20 分待機）等、想定外の挙動に至る
+// （実障害: Issue #282 の pre-push フック内 npm test が GIT_DIR 漏洩でハングした）。
+// テストは呼び出し元の git 文脈から独立させる必要があるため、ここで確実に除去する。
+for (const key of [
+  'GIT_DIR',
+  'GIT_COMMON_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_QUARANTINE_PATH',
+  'GIT_PREFIX',
+]) {
+  delete process.env[key];
+}
