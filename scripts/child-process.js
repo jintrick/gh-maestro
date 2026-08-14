@@ -13,14 +13,14 @@
 const { spawn: _spawn, spawnSync: _spawnSync, execSync: _execSync } = require('child_process');
 const path = require('path');
 
-// `git rev-parse --local-env-vars` が返すリポジトリローカルな git 環境変数。これらが残った
-// まま git を spawn すると cwd を無視して実リポジトリへ操作が向く。加えて GIT_QUARANTINE_PATH
-// （--local-env-vars には含まれないが、フックがコミット時に注入する変数）も除去する。
+// リポジトリの「位置」を決める git 環境変数。これらが残ったまま git を spawn すると
+// cwd を無視して実リポジトリへ操作が向く。`git rev-parse --local-env-vars` の一覧から、
+// 位置と無関係な設定変数（GIT_CONFIG / GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT）は
+// 意図的に除外する。呼び出し元やCI環境が safe.directory 等を渡している場合に、
+// gh-maestro の git 呼び出しだけがその設定を失うのを避けるため。加えて
+// GIT_QUARANTINE_PATH（--local-env-vars には含まれないがフックが注入する）も除去する。
 const GIT_LOCAL_ENV_VARS = [
   'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-  'GIT_CONFIG',
-  'GIT_CONFIG_PARAMETERS',
-  'GIT_CONFIG_COUNT',
   'GIT_OBJECT_DIRECTORY',
   'GIT_DIR',
   'GIT_WORK_TREE',

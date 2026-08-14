@@ -231,6 +231,11 @@ test('gh-maestro-setup.js はテスト実行中(NODE_TEST_CONTEXT)に retireAiRe
     assert.equal(addRemote.status, 0, addRemote.stderr);
     fs.mkdirSync(path.join(target, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(path.join(target, '.gh-maestro', 'ai-review-ok'), '', 'utf8');
+    // setup-ok センチネルを置いて checkEnvironment（および ensureDevBranch の
+    // ls-remote / push）をスキップさせる。存在しない origin に対する SSH 接続は
+    // host key 未登録やパスフレーズ待ちで無期限にブロックしうるため、テストから
+    // 実ネットワーク I/O を排除する。検証対象は retireAiReviewCi のガードだけ。
+    fs.writeFileSync(path.join(target, '.gh-maestro', 'setup-ok'), '', 'utf8');
 
     // env 未指定で spawn → node --test が設定した NODE_TEST_CONTEXT が子プロセスへ継承される。
     // retireAiReviewCi は checkEnvironment より先に呼ばれるため、ガードはその前に発火する。
