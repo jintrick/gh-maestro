@@ -672,7 +672,7 @@ try { fs.chmodSync(path.join(ROOT, 'install.sh'),              0o755); } catch {
 const { spawnSync: spawnGit } = require('child_process');
 const hookResult = spawnGit('git', ['config', 'core.hooksPath', '.githooks'], { cwd: ROOT, encoding: 'utf8' });
 if (hookResult.status === 0) {
-  ok('git core.hooksPath -> .githooks (npm test runs before each commit)');
+  ok('git core.hooksPath -> .githooks (.claude/rules と AGENTS.md の同期のみ。テストは実行しない)');
 } else {
   console.log(`  \x1b[33m! git config core.hooksPath 失敗 — 手動で実行: git config core.hooksPath .githooks\x1b[0m`);
 }
