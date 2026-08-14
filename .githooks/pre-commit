@@ -1,6 +1,9 @@
 #!/bin/sh
-# フック実行時にgitが設定する変数を落とす（Issue #283）。以降の git/node 呼び出しは cwd 基準でリポジトリを解決する。
-unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX \
+# フック実行時にgitが設定する「リポジトリ位置」系の変数だけを落とす（Issue #283）。
+# GIT_INDEX_FILE と GIT_PREFIX は落とさない。git commit -a やパス指定コミットでは
+# git が一時インデックスを渡すため、落とすと以降のステージ判定が実インデックスを
+# 読んでしまい、ステージ内容が空に見えて sync が無言でスキップされる。
+unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE \
       GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_QUARANTINE_PATH 2>/dev/null || true
 
 if git diff --cached --name-only | grep -q '^\.claude/rules/'; then
