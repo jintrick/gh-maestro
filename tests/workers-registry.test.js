@@ -173,6 +173,39 @@ test('updateWorkerProcess: レガシーpaneIdは消す（新プロセスが起�
   });
 });
 
+test('updateWorkerProcess: ホワイトリスト外の未知フィールドは書き戻し後も保持する（Issue #278）', () => {
+  withTempDir((dir) => {
+    // baseBranch 導入時に起こった「新フィールドが resume 書き戻しで黙って消える」事故の回帰テスト。
+    // normalizeWorkerEntry のホワイトリストに載っていないフィールド（将来追加されるフィールドを
+    // 模す someFutureField / ネストした nested）が書き戻し後も残ることを固定する。
+    // 書き戻しをホワイトリスト再構築（normalizeWorkerEntry 単独）に戻すと本テストは落ちる。
+    writeWorkers(dir, {
+      'issue-5-fix': {
+        pid: 100, startTime: 'old', agentId: 'agy', issue: 5, skill: 'gh-maestro-coder',
+        someFutureField: 'keep-me',
+        nested: { a: 1 },
+      },
+    });
+
+    const ok = updateWorkerProcess(dir, 'issue-5-fix', {
+      pid: 999, startTime: '2026-07-25T00:00:00.000Z', logPath: 'C:/ws/w.log',
+    });
+    assert.equal(ok, true);
+
+    const raw = readWorkersRaw(dir);
+    // 未知フィールドが保持される
+    assert.equal(raw['issue-5-fix'].someFutureField, 'keep-me');
+    assert.deepEqual(raw['issue-5-fix'].nested, { a: 1 });
+    // 既知フィールドは従来どおり更新・保持される
+    assert.equal(raw['issue-5-fix'].pid, 999);
+    assert.equal(raw['issue-5-fix'].startTime, '2026-07-25T00:00:00.000Z');
+    assert.equal(raw['issue-5-fix'].logPath, 'C:/ws/w.log');
+    assert.equal(raw['issue-5-fix'].agentId, 'agy');
+    assert.equal(raw['issue-5-fix'].issue, 5);
+    assert.equal(raw['issue-5-fix'].skill, 'gh-maestro-coder');
+  });
+});
+
 test('updateWorkerProcess: 存在しないworkerNameはfalseを返し何も書き換えない', () => {
   withTempDir((dir) => {
     writeWorkers(dir, { 'issue-5-fix': { pid: 100 } });

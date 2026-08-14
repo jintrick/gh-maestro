@@ -91,6 +91,10 @@ function readWorkersRaw(workspace, {
  * アトミック書き込み（tmp → rename）。
  * workerNameのエントリが存在しない場合は何もせずfalseを返す。
  *
+ * 書き戻しはホワイトリスト再構築ではなく既存エントリの引き継ぎで行い、既知の一覧に
+ * 載っていないフィールドも保持する（Issue #278）。新フィールドを追加した際に、書き戻しの
+ * たびに黙って消える事故を構造的に排除する。
+ *
  * resume でワーカーを再起動したときに呼ぶ。移行前セッションが残した paneId は
  * ここで消す——新しいプロセスが起きた以上、古いペインIDは掃除経路にとっても
  * 誤った対象であり、残すと無関係なペインをkillしうる。
@@ -111,7 +115,17 @@ function updateWorkerProcess(workspace, workerName, { pid, startTime = null, log
   const raw = readWorkersRaw(workspace);
   if (!raw || !(workerName in raw)) return false;
 
-  const entry = normalizeWorkerEntry(raw[workerName]);
+  // 書き戻しは既存エントリを引き継ぐ。normalizeWorkerEntry は既知フィールドの正規化
+  // （issue の数値化・baseBranch 空文字→null 等）に使うが、そのホワイトリストに載って
+  // いないフィールドは返すオブジェクトに含まれず、そのまま書き戻すと黙って消える
+  // （Issue #278）。そこで既存エントリを先にスプレッドし、その上に正規化結果を重ねることで、
+  // 「既知フィールドは従来どおり正規化し、未知フィールドは保持する」を両立する。
+  // 最旧形式（エントリが pane_id 文字列そのもの）はオブジェクトでないためスプレッドせず
+  // 正規化のみで扱う——文字列をスプレッドすると数値キーに分解されレコードを汚染する。
+  const prev = raw[workerName];
+  const entry = (prev !== null && typeof prev === 'object' && !Array.isArray(prev))
+    ? { ...prev, ...normalizeWorkerEntry(prev) }
+    : normalizeWorkerEntry(prev);
   entry.pid = normalizePid(pid);
   entry.startTime = startTime;
   entry.logPath = logPath ?? entry.logPath;
