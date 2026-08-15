@@ -2082,6 +2082,8 @@ describe('Stale report detection（居座り検知）', () => {
       assert.equal(notifyCalls.length, 1, 'orchestratorへ1回通知');
       assert.ok(notifyCalls[0].body.includes('issue-5-fix'));
       assert.ok(notifyCalls[0].body.includes('456'));
+      assert.ok(notifyCalls[0].body.includes('未コミット変更'), '未コミット変更の確認を促す文言が含まれること');
+      assert.ok(!notifyCalls[0].body.includes('必要ならプロセスを終了してください'), '断定的な終了指示が含まれないこと');
 
       const state = supervisor.readCursor(dir, 'issue-5-fix');
       assert.equal(state.staleReportNotifiedPid, 456);

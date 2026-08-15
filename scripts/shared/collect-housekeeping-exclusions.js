@@ -27,6 +27,7 @@ const { readWorkersRaw } = require('./workers-registry');
 const { isWorkerAlive } = require('./worker-liveness');
 const { createNormalWorkerStore, isLeaseLive } = require('./worker-lease');
 const { reviewArtifactPath } = require('./review-manager-paths');
+const { normalizePid } = require('../worker-entry');
 
 // process-lifecycle 由来の関数のみ呼び出し時点で解決する（循環 require 対策、上記参照）。
 // テスト注入（_setIsProcessAlive）は注入値が優先される。
@@ -54,13 +55,14 @@ function _isProcessAlive(pid) {
  * あり、取り違えはない。
  *
  * @param {string} workspace ワークスペース絶対パス
- * @returns {{ workerNames: Set<string>, reviewPrs: Set<string> }}
- *   除外対象のワーカー名（通常 headless ワーカー）と Review Manager 対象 PR 番号
+ * @returns {{ workerNames: Set<string>, reviewPrs: Set<string>, pids: Set<number> }}
+ *   除外対象のワーカー名（通常 headless ワーカー）、Review Manager 対象 PR 番号、および稼働中プロセスの PID
  * @throws {Error} いずれかの情報源が「存在するのに読み取り・解析不能」の場合
  */
 function collectHousekeepingExclusions(workspace) {
   const workerNames = new Set();
   const reviewPrs = new Set();
+  const pids = new Set();
   const ghDir = path.join(workspace, '.gh-maestro');
 
   // PID registry にない通常 headless ワーカーも、既存の workers.json の生存述語を
@@ -72,7 +74,11 @@ function collectHousekeepingExclusions(workspace) {
   const rawWorkers = readWorkersRaw(workspace);
   if (rawWorkers) {
     for (const [workerName, entry] of Object.entries(rawWorkers)) {
-      if (workerName !== 'orchestrator' && isWorkerAlive(entry)) workerNames.add(workerName);
+      if (workerName !== 'orchestrator' && isWorkerAlive(entry)) {
+        workerNames.add(workerName);
+        const normPid = normalizePid(entry && typeof entry === 'object' ? entry.pid : null);
+        if (normPid) pids.add(normPid);
+      }
     }
   }
 
@@ -91,7 +97,11 @@ function collectHousekeepingExclusions(workspace) {
       if (entry === null && fs.existsSync(path.join(leasesDir, name))) {
         throw new Error(`lease の読み取り・解析に失敗しました: ${path.join(leasesDir, name)}`);
       }
-      if (isLeaseLive(entry)) workerNames.add(entry.workerName || workerName);
+      if (isLeaseLive(entry)) {
+        workerNames.add(entry.workerName || workerName);
+        const normPid = normalizePid(entry.pid);
+        if (normPid) pids.add(normPid);
+      }
     }
   }
 
@@ -118,11 +128,13 @@ function collectHousekeepingExclusions(workspace) {
         // 有効な PID 文字列でない = 解析不能。RM の生存を判定できないため fail-closed。
         throw new Error(`manager.running の PID が不正です（解析不能）: ${runningPath}`);
       }
-      if (_isProcessAlive(pid)) reviewPrs.add(entry.name);
+      if (_isProcessAlive(pid)) {
+        reviewPrs.add(entry.name);
+      }
     }
   }
 
-  return { workerNames, reviewPrs };
+  return { workerNames, reviewPrs, pids };
 }
 
 module.exports = {

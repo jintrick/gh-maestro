@@ -717,18 +717,22 @@ function sweepRegistry(workspace, opts = {}) {
 
   const excludedWorkerNames = new Set();
   const excludedReviewPrs = new Set();
+  const excludedPids = new Set();
 
-  // 後段の housekeeping（ログ整理・一時ファイル削除）から除外する稼働中ワーカーを先に
-  // 組み立てる。失敗時は fail-closed: kill ループも housekeeping も実行せず中断し、
-  // 終了コードに反映させる（除外リストを組み立てられないまま破壊的処理を進めない。
-  // Issue #267）。workerName 指定の部分 sweep では他ワーカーを誤って対象にしないため
-  // ここでは何もしない。
+  // 前段の kill ループおよび後段の housekeeping（ログ整理・一時ファイル削除）から除外する
+  // 稼働中ワーカー・常駐プロセスを先に組み立てる。失敗時は fail-closed: kill ループも
+  // housekeeping も実行せず中断し、終了コードに反映させる（除外リストを組み立てられないまま
+  // 破壊的処理を進めない。Issue #267）。workerName 指定の部分 sweep では他ワーカーを誤って
+  // 対象にしないためここでは何もしない。
   if (!opts.match) {
     try {
       const { collectHousekeepingExclusions } = require('./shared/collect-housekeeping-exclusions');
-      const { workerNames, reviewPrs } = collectHousekeepingExclusions(workspace);
+      const { workerNames, reviewPrs, pids } = collectHousekeepingExclusions(workspace);
       for (const name of workerNames) excludedWorkerNames.add(name);
       for (const pr of reviewPrs) excludedReviewPrs.add(pr);
+      if (pids) {
+        for (const pid of pids) excludedPids.add(pid);
+      }
     } catch (e) {
       results.errors.push(`sweep: 稼働中ワーカー除外リストの構築に失敗したため掃除を中断します: ${e.message}`);
       return results;
@@ -750,6 +754,11 @@ function sweepRegistry(workspace, opts = {}) {
       // PID再利用 → ファイル削除のみ（無関係なプロセスを kill しない）
       removeFiles(filePaths);
       results.cleaned.push({ pid: entryPid, reason: `identity mismatch: ${identity.reason}` });
+      continue;
+    }
+
+    // 除外対象（role lease 保持者、稼働中ワーカーなど）の PID または workerName は kill しない
+    if (excludedPids.has(entryPid) || (entry.workerName && excludedWorkerNames.has(entry.workerName))) {
       continue;
     }
 

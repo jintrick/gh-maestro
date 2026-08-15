@@ -1166,3 +1166,118 @@ test('sweepRegistry: 除外リスト構築失敗時は fail-closed で kill も 
     try { fs.unlinkSync(path.join(pidsDir, 'alive.json')); } catch {}
   }
 });
+
+test('sweepRegistry: role lease 保持者および稼働中ワーカーは PID registry にあっても kill されず保護される', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const pidsDir = plc.pidsDir(workspace);
+  const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
+  fs.mkdirSync(pidsDir, { recursive: true });
+  fs.mkdirSync(leasesDir, { recursive: true });
+
+  const residentPid = process.pid;
+  const residentPidFile = path.join(pidsDir, `inbox-supervisor.js-${residentPid}.json`);
+  const residentLeaseFile = path.join(leasesDir, 'resident-role-inbox-supervisor.json');
+  const stalePidFile = path.join(pidsDir, 'stale.json');
+
+  // inbox-supervisor の PID registry 登録（workerName なし、表示・診断用）
+  fs.writeFileSync(residentPidFile, JSON.stringify({
+    pid: residentPid,
+    script: 'inbox-supervisor.js',
+    startTime: MOCK_START_TIME,
+  }));
+
+  // inbox-supervisor の role lease（排他の正本）
+  fs.writeFileSync(residentLeaseFile, JSON.stringify({
+    pid: residentPid,
+    workerName: 'inbox-supervisor',
+    startTime: MOCK_START_TIME,
+  }));
+
+  // stale プロセス
+  fs.writeFileSync(stalePidFile, JSON.stringify({
+    pid: -1,
+    script: 'stale-worker.js',
+  }));
+
+  try {
+    const results = plc.sweepRegistry(workspace, { dryRun: false });
+    // stale は cleaned
+    assert.ok(results.cleaned.some(c => c.pid === -1));
+    assert.ok(!fs.existsSync(stalePidFile), 'stale ファイルは削除される');
+
+    // resident process は kill されず、ファイルも残る
+    assert.ok(!results.killed.some(k => k.pid === residentPid), 'role lease 保持者は kill されない');
+    assert.ok(fs.existsSync(residentPidFile), 'role lease 保持者の registry ファイルは保護される');
+  } finally {
+    for (const p of [residentPidFile, residentLeaseFile, stalePidFile]) {
+      try { fs.unlinkSync(p); } catch {}
+    }
+  }
+});
+
+test('sweepRegistry: workers.json の文字列 PID でも registry に workerName が無い稼働中プロセスが保護される', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const pidsDir = plc.pidsDir(workspace);
+  const ghDir = path.join(workspace, '.gh-maestro');
+  fs.mkdirSync(pidsDir, { recursive: true });
+  fs.mkdirSync(ghDir, { recursive: true });
+
+  const activePid = process.pid;
+  const activePidFile = path.join(pidsDir, `${activePid}.json`);
+  const workersFile = path.join(ghDir, 'workers.json');
+
+  // workers.json に文字列形式の PID で登録
+  fs.writeFileSync(workersFile, JSON.stringify({
+    'issue-99-coder': { pid: String(activePid), startTime: MOCK_START_TIME },
+  }));
+
+  // PID registry には workerName なしで登録（表示・診断用）
+  fs.writeFileSync(activePidFile, JSON.stringify({
+    pid: activePid,
+    script: 'worker.js',
+    startTime: MOCK_START_TIME,
+  }));
+
+  try {
+    const results = plc.sweepRegistry(workspace, { dryRun: false });
+    assert.ok(!results.killed.some(k => k.pid === activePid), '文字列 PID のワーカーは kill されない');
+    assert.ok(fs.existsSync(activePidFile), '文字列 PID ワーカーの registry ファイルは保護される');
+  } finally {
+    for (const p of [activePidFile, workersFile]) {
+      try { fs.unlinkSync(p); } catch {}
+    }
+  }
+});
+
+test('sweepRegistry: manager.running の PID は stale registry エントリを誤って保護しない（PID再利用時のstale回収）', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const pidsDir = plc.pidsDir(workspace);
+  const ghDir = path.join(workspace, '.gh-maestro');
+  const reviewDir = path.join(ghDir, 'records', 'pr', '99', 'review');
+  fs.mkdirSync(pidsDir, { recursive: true });
+  fs.mkdirSync(reviewDir, { recursive: true });
+
+  // 死んだ正の PID (999999999) を持つ Review Manager の running ファイルと、同 PID の stale registry
+  const stalePid = 999999999;
+  const stalePidFile = path.join(pidsDir, `${stalePid}.json`);
+  const runningFile = path.join(reviewDir, 'manager.running');
+
+  fs.writeFileSync(runningFile, String(stalePid) + '\n');
+  fs.writeFileSync(stalePidFile, JSON.stringify({
+    pid: stalePid,
+    script: 'legacy-stale.js',
+  }));
+
+  try {
+    const results = plc.sweepRegistry(workspace, { dryRun: false });
+    // manager.running に PID が書かれていても、stale エントリは保護されず cleaned される
+    assert.ok(results.cleaned.some(c => c.pid === stalePid), 'manager.running の PID は stale エントリを shield しない');
+    assert.ok(!fs.existsSync(stalePidFile), 'stale ファイルは回収・削除される');
+  } finally {
+    for (const p of [stalePidFile, runningFile]) {
+      try { fs.unlinkSync(p); } catch {}
+    }
+  }
+});
+
+
