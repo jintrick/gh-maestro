@@ -23,13 +23,23 @@ const ghCreatePrPath = require.resolve('../scripts/gh-create-pr');
 
 /**
  * scripts/child-process.js の spawnSync をモックした状態で gh-create-pr.js を再ロードする。
- * @param {Function} spawnSyncImpl (cmd, args, opts) => result
+ *
+ * テストゲート（Issue #209）は gh-create-pr.js の main() が `npm test` を spawn するため、
+ * その spawn（cmd が npm / npm.cmd）は実実行せず `npmResult` を返す。gh 等の他の spawn は
+ * `spawnSyncImpl` に委譲する。実プロセスは 0 個しか spawn しない。
+ * @param {Function} [spawnSyncImpl] (cmd, args, opts) => result（npm 以外の spawn 用）
+ * @param {object} [opts]
+ * @param {object} [opts.npmResult] npm test spawn が返す結果（既定は `# fail 0`）
  */
-function loadModule(spawnSyncImpl) {
+function loadModule(spawnSyncImpl, opts = {}) {
   const calls = [];
-  const fakeSpawnSync = (cmd, args, opts) => {
-    calls.push({ cmd, args, opts });
-    return spawnSyncImpl ? spawnSyncImpl(cmd, args, opts) : { status: 0, stdout: '' };
+  const npmResult = opts.npmResult !== undefined
+    ? opts.npmResult
+    : { status: 0, stdout: '# tests 1\n# pass 1\n# fail 0\n' };
+  const fakeSpawnSync = (cmd, args, spawnOpts) => {
+    calls.push({ cmd, args, opts: spawnOpts });
+    if (isNpmCmd(cmd)) return npmResult;
+    return spawnSyncImpl ? spawnSyncImpl(cmd, args, spawnOpts) : { status: 0, stdout: '' };
   };
 
   const childProcessPath = require.resolve('../scripts/child-process');
@@ -42,14 +52,26 @@ function loadModule(spawnSyncImpl) {
       spawn: () => { throw new Error('spawn should not be called in this test'); },
       spawnSync: fakeSpawnSync,
       execSync: () => '',
+      // shared/test-gate.js が spawn 前に GIT_* を除去するのに使う（Issue #283/#209）。
+      stripGitEnv: (o) => ({ ...(o && o.env ? o.env : process.env) }),
     },
   };
 
+  // shared/test-gate.js も child-process のモックに依存するため、キャッシュを破棄して
+  // 再ロードする。破棄しないと最初の loadModule 時点のモック（spawnSync）に束縛されたまま
+  // 後続テストの npmResult が反映されない（Issue #209 のゲートテストで実害）。
+  const testGatePath = require.resolve('../scripts/shared/test-gate');
   delete require.cache[ghCreatePrPath];
+  delete require.cache[testGatePath];
   const mod = require(ghCreatePrPath);
 
   delete require.cache[childProcessPath];
   return { mod, calls };
+}
+
+/** spawnSync の cmd が npm（Windows: npm.cmd）か判定する。 */
+function isNpmCmd(cmd) {
+  return /^npm(\.cmd)?$/i.test(String(cmd));
 }
 
 /** main() が読む process.env.GH_MAESTRO_BASE_BRANCH を一時的に設定する。 */
@@ -295,6 +317,63 @@ test('main: --value フラグで値不足の場合にエラー', () => {
   const { mod } = loadModule();
   const result = mod.main(['--title']);
   assert.equal(result.exitCode, 1);
+});
+
+// ── テストゲート（Issue #209） ───────────────────────────────────────────────
+
+test('main: npm test が # fail 0 ならPR作成まで進む（ゲート通過）', () => {
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/123\n' }));
+  const result = withBaseBranch('dev', () => withGuardBypassed(() => mod.main(['--title', 'Fix', '--body', 'Closes #1'])));
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, 'https://github.com/owner/repo/pull/123');
+  const ghCall = calls.find(c => c.cmd === 'gh');
+  assert.ok(ghCall, 'ゲート通過時は gh を呼ぶ');
+});
+
+test('main: npm test が # fail 2 ならPRを作成しない（理由を問わない）', () => {
+  const { mod, calls } = loadModule(
+    () => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/123\n' }),
+    { npmResult: { status: 1, stdout: '# tests 2\n# pass 0\n# fail 2\n' } }
+  );
+  const result = withBaseBranch('dev', () => mod.main(['--title', 'Fix', '--body', 'Closes #1']));
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /テストが失敗しているためPRを作成しません/);
+  assert.match(result.stderr, /# fail = 2/);
+  const ghCall = calls.find(c => c.cmd === 'gh');
+  assert.equal(ghCall, undefined, 'テスト失敗時は gh（実PR作成）を呼ばない');
+});
+
+test('main: npm test が # fail 行を返さなければ fail-closed でPRを作成しない', () => {
+  const { mod, calls } = loadModule(
+    () => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/123\n' }),
+    { npmResult: { status: 0, stdout: '想定外の出力（集計行なし）' } }
+  );
+  const result = withBaseBranch('dev', () => mod.main(['--title', 'Fix', '--body', 'Closes #1']));
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /集計行を読み取れませんでした/);
+  const ghCall = calls.find(c => c.cmd === 'gh');
+  assert.equal(ghCall, undefined, '集計行が読めない場合は gh を呼ばない');
+});
+
+test('main: npm test 自体が失敗（status != 0）なら fail-closed でPRを作成しない', () => {
+  const { mod, calls } = loadModule(
+    () => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/123\n' }),
+    { npmResult: { status: 2, stdout: 'npm: command failed' } }
+  );
+  const result = withBaseBranch('dev', () => mod.main(['--title', 'Fix', '--body', 'Closes #1']));
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /テストが失敗しているためPRを作成しません/);
+  const ghCall = calls.find(c => c.cmd === 'gh');
+  assert.equal(ghCall, undefined, 'npm test 失敗時は gh を呼ばない');
+});
+
+test('main: GH_MAESTRO_BASE_BRANCH 未設定ならテストゲートより先に失敗する', () => {
+  // base 未設定の誤用は高コストなテストゲート（実スイート実行）の前に失敗させる。
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/1\n' }));
+  const result = withNoBaseBranch(() => mod.main(['--title', 'Fix', '--body', 'Closes #1']));
+  assert.equal(result.exitCode, 1);
+  assert.ok(result.stderr.includes('GH_MAESTRO_BASE_BRANCH'));
+  assert.equal(calls.length, 0, 'base未設定時は npm も gh も呼ばない');
 });
 
 // ── buildPrCreateArgs（抽出された純関数: NODE_TEST_CONTEXT ガードに依存せず検証可能） ──

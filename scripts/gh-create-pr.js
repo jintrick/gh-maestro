@@ -15,6 +15,7 @@
 
 const { spawnSync } = require('./child-process');
 const { parseFlags } = require('./shared/workspace');
+const { runTestSuite } = require('./shared/test-gate');
 
 const USAGE = `Usage:
   node gh-create-pr.js --title <title> --body <body> [--repo <owner/repo>]
@@ -30,9 +31,14 @@ baseブランチは環境変数 GH_MAESTRO_BASE_BRANCH から解決されます�
 spawn-worker.js / inbox-supervisor.js が注入。未設定なら明確に失敗します）。
 --base フラグは受け付けません。
 
+テストゲート（Issue #209）:
+  このスクリプトは PR 作成前に \`npm test\` を実行し、spec レポーターの集計行 \`# fail\` が
+  0 であることを確認します。\`# fail != 0\`（または実行失敗・集計行が読めない）場合は、
+  理由の如何を問わず PR を作成せず終了コード 1 で失敗します。バイパス（--force 等）はありません。
+
 Output:
   PRのURLを標準出力に出力します。
-  exit 0 = 成功、exit 1 = エラー`;
+  exit 0 = 成功、exit 1 = エラー（引数不正・base未設定・テスト失敗を含む）`;
 
 const SPEC = {
   flags: { '--title': {}, '--body': {}, '--body-file': {}, '--repo': {} },
@@ -141,6 +147,28 @@ function main(argv) {
   }
   if (body && bodyFile) {
     return { exitCode: 1, stderr: `gh-create-pr: --body と --body-file は同時に指定できません\n${USAGE}` };
+  }
+
+  // base ブランチを先に解決する（フェイルクローズ）。未設定なら誤った base で PR を作らないため、
+  // 高コストなテストゲートを実行する前に失敗させる（Issue #209 / #269）。
+  try {
+    resolveBaseBranch();
+  } catch (e) {
+    return { exitCode: 1, stderr: `gh-create-pr: エラー: ${e.message}` };
+  }
+
+  // テストゲート（Issue #209）: `npm test` の `# fail` が0でなければ、理由の如何を問わず PR を作成しない。
+  // `# fail` 行が読めない・npm test 自体が失敗した場合も「安全と確認できない」としてフェイルクローズする
+  // （.claude/rules/fail-closed-safety-guards.md）。
+  const gate = runTestSuite();
+  if (gate.status !== 0 || gate.fail === null || gate.fail > 0) {
+    const failDesc = gate.fail === null
+      ? '（# fail 集計行を読み取れませんでした）'
+      : `（# fail = ${gate.fail}）`;
+    return {
+      exitCode: 1,
+      stderr: `gh-create-pr: テストが失敗しているためPRを作成しません（Issue #209）${failDesc}\n${gate.output}\n`,
+    };
   }
 
   let result;

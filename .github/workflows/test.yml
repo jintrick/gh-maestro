@@ -1,0 +1,30 @@
+name: tests
+
+# Issue #209: テスト失敗時のマージ防止の機械的ゲート（ゲートB）。
+# PR への push（レビュー後の修正 push を含む）のたびに GitHub が自動で全件テストを実行する。
+# npm test が失敗（# fail != 0 で node --test が非0終了）すれば job が失敗し、対応する check が red になる。
+# この check の通過を dev / main のブランチ保護のマージ必須条件にすることで、テストが通っていない
+# PR は人間がマージしようとしても GitHub が拒否する（orchestrator の注意力に依存しない）。
+#
+# フック（git hooks）へは回帰させない: フックは git が GIT_DIR 等を注入しテストが実リポジトリを
+# 操作しうる経路（#283）と、push 毎のローカル実行コストのため廃止済み。CI は GitHub 側で実行される
+# ため、この両方の弊害がない。
+
+on:
+  pull_request:
+  push:
+    branches: [dev, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run test suite
+        run: npm test

@@ -492,10 +492,11 @@ PR番号が確定したら、レビューコメントとマージ状態の通知
 
 ### マージ可否ゲート
 
-`REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の両方を満たすときだけ：
+`REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の条件をすべて満たすときだけ：
 
 - Review Manager 完了（`PR_REVIEW:...Posted inline findings: N` 到着 or `.gh-maestro/review-manager-<PR>.json` 生成）
 - 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER/MAJOR は、修正 push に対する explorer の事実確認が完了するまで未解消として扱う）
+- **テスト通過の機械的確認**: この PR のテスト check（`.github/workflows/test.yml` が `pull_request` で実行する `npm test`）が緑であること。dev / main はブランチ保護でこの check の通過がマージ必須条件になっているため、テストが通っていない PR は人間がマージしようとしても GitHub が機械的に拒否する（Issue #209）。テスト check が red の PR をマージ候補として提示・マージ依頼してはならない。あわせて、コーダーが `gh-create-pr.js`（PR作成時ゲート）を迂回して作成した形跡がある PR は、テストが機械確認されるまでマージ候補としない
 
 ### 誤ってマージしてしまった場合の対処
 

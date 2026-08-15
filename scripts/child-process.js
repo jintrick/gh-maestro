@@ -65,4 +65,4 @@ const spawn    = (cmd, args, opts)  => _spawn(cmd, args, sanitizeOpts(opts, isGi
 const spawnSync = (cmd, args, opts) => _spawnSync(cmd, args, sanitizeOpts(opts, isGitExecutable(cmd)));
 const execSync  = (cmd, opts)       => _execSync(cmd, sanitizeOpts(opts, isGitCommandString(cmd)));
 
-module.exports = { spawn, spawnSync, execSync };
+module.exports = { spawn, spawnSync, execSync, stripGitEnv };
