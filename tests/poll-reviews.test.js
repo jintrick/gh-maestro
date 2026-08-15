@@ -34,6 +34,25 @@ test('pollDegradationTransition: 劣化→復旧の遷移でPOLL_RECOVEREDを一
   assert.deepEqual(pollDegradationTransition(false, false), { degraded: false, emit: null });
 });
 
+// ── reviewTerminalEvent（Issue #289: CLOSED も終端として扱う） ──────────────
+const { reviewTerminalEvent } = require('../scripts/poll-reviews.js');
+
+test('reviewTerminalEvent: MERGED は PR_MERGED として終端', () => {
+  assert.equal(reviewTerminalEvent('MERGED', '12'), 'PR_MERGED:12');
+});
+
+test('reviewTerminalEvent: CLOSED（却下・キャンセル）も PR_CLOSED として終端', () => {
+  // Issue #289: 従来は MERGED のみ終端だったため、CLOSED された PR を監視し続けて
+  // 機能死を起こした。CLOSED も終端にすることで新 PR 検出へ戻れる。
+  assert.equal(reviewTerminalEvent('CLOSED', '12'), 'PR_CLOSED:12');
+});
+
+test('reviewTerminalEvent: OPEN 等の非終端状態は null（監視継続）', () => {
+  assert.equal(reviewTerminalEvent('OPEN', '12'), null);
+  assert.equal(reviewTerminalEvent('DRAFT', '12'), null);
+  assert.equal(reviewTerminalEvent('', '12'), null);
+});
+
 // ── extractTestDeclaration & evaluateTestDeclaration ────────────────────────
 const { extractTestDeclaration, evaluateTestDeclaration } = require('../scripts/poll-reviews.js');
 

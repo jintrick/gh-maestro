@@ -526,6 +526,46 @@ test('markReadMany が EPERM で throw しても scanOnce はクラッシュせ�
   });
 });
 
+// ── 監査イベント処理のI/O失敗耐性（Issue #289） ─────────────────────────────
+// 常駐モードの orchestrator 監査イベント読み出し（resident-audit）が I/O 失敗で throw しても、
+// scanOnce はクラッシュせず stderr に出して継続する。従来は未捕捉例外が setInterval まで
+// 漏れて常駐プロセスが exit 1 で崩壊し、inbox 監視が静かに止まった。
+
+test('resident-audit が I/O 失敗で throw しても scanOnce はクラッシュせず継続する', () => {
+  const storageLayout = require('../scripts/shared/storage-layout');
+  withTempDir(workspace => {
+    initOrchestratorState(workspace);
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({ status: 0, stdout: '[]' }));
+    msgPoll._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+
+    // 監査イベント保存先を「ファイル」にして readdirSync を ENOTDIR/EISDIR で throw させる
+    // （real fs 経由で、実コードの I/O 失敗経路を再現する。ENOENT 以外は例外を伝播するため）。
+    const auditDir = path.join(storageLayout.workspaceRuntimeDir(workspace), 'resident-audit');
+    fs.mkdirSync(path.dirname(auditDir), { recursive: true });
+    fs.writeFileSync(auditDir, 'not a directory', 'utf8');
+
+    let r = null;
+    try {
+      // orchestrator 常駐（継続）モード。--once ではなく role lease を保持するため、
+      // scanOnce が監査イベント処理ブロックに入る。
+      r = runMain(['orchestrator', '--workspace', workspace]);
+      assert.equal(r.code, 0);
+      assert.ok(r.residentLease !== null, '常駐モードで role lease を保持していること');
+
+      // I/O 失敗を throw しても scanOnce は例外を外に漏らさない（常駐プロセスが落ちない）
+      assert.doesNotThrow(() => r.scanOnce());
+      // 失敗は stderr に記録される（黙殺しない）
+      assert.ok(r.errLines.some(l => l.includes('監査イベントの処理に失敗')), `Expected audit failure log in: ${r.errLines.join('|')}`);
+    } finally {
+      // main() が保持した lease を解放して後続テストへリークしない
+      if (r && r.residentLease && typeof r.residentLease.release === 'function') {
+        r.residentLease.release();
+      }
+    }
+  });
+});
+
 // ── PR #251: _notifyOrchestrator が実 msg-send.js コマンドを正しく構築する ──
 // 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
 // 省略すると recipient が undefined になり usage エラーで必ず送信失敗するため、

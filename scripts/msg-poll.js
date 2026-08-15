@@ -38,6 +38,7 @@ const {
 const { acquireResidentLease } = require('./shared/worker-lease');
 const { listUnprocessedResidentAuditEvents, removeResidentAuditEvent } = require('./shared/resident-audit');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
+const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
 
 const DEFAULT_INTERVAL_SEC = 20;
 const MARKER_RE = /^<!--\s*gh-maestro\s+(\{.*\})\s*-->/;
@@ -489,11 +490,19 @@ function main(argsOverride, opts = {}) {
     // 重複出力しうる（Issue #240 レビュー指摘）。
     // --wait（singleMessage）では監査行の出力を「新着検出」と誤判定させないため除外する。
     if (isOrchestrator && !singleMessage && residentLease !== null) {
-      const events = listUnprocessedResidentAuditEvents(workspace);
-      for (const { file, event } of events) {
-        const ownerPid = event.detail && event.detail.ownerPid != null ? `:${event.detail.ownerPid}` : '';
-        writeOut(`${event.type === 'lock-denied' ? 'LOCK_DENIED' : 'HANDOFF_WAIT'}:${event.role}${ownerPid}`);
-        removeResidentAuditEvent(workspace, file);
+      // 監査イベントの読み出し・削除はファイルI/Oを伴うため失敗しうる（Issue #289）。
+      // ここで例外が未捕捉だと setInterval コールバックまで漏れて常駐プロセスが exit 1 で
+      // 崩壊し、orchestrator の inbox 監視が静かに停止する。捕捉して stderr に出し、
+      // このサイクルをスキップして継続する（次サイクルで再試行される）。
+      try {
+        const events = listUnprocessedResidentAuditEvents(workspace);
+        for (const { file, event } of events) {
+          const ownerPid = event.detail && event.detail.ownerPid != null ? `:${event.detail.ownerPid}` : '';
+          writeOut(`${event.type === 'lock-denied' ? 'LOCK_DENIED' : 'HANDOFF_WAIT'}:${event.role}${ownerPid}`);
+          removeResidentAuditEvent(workspace, file);
+        }
+      } catch (e) {
+        writeErr(`msg-poll: 監査イベントの処理に失敗しました（次サイクルで再試行）: ${e.message}`);
       }
     }
 
@@ -756,6 +765,7 @@ function main(argsOverride, opts = {}) {
     waitMode,
     waitMs,
     residentLease,
+    issueArg,
   };
 }
 
@@ -895,6 +905,16 @@ if (require.main === module) {
     for (const l of result.lines) process.stdout.write(l + '\n');
     process.exit(0);
   }
+
+  // 常駐監視（継続モード・--wait モード）の異常終了（非ゼロexit）を orchestrator へ通知する
+  // （Issue #289 受け入れ条件3）。起動時エラー・--help・--once の早期 exit は上で既に
+  // return/exit 済みのため、ここに到達するのは resident な監視だけ。正常終了（exit 0 =
+  // SIGINT/SIGTERM/親セッション消滅/--wait 完了）では何もしない。
+  // 通知先は worker モードの監視対象 Issue（issueArg）を明示する。workers.json の先頭ワーカー
+  // 推測フォールバックに落とすと、別 Issue へ誤配送されたり宛先不明で破棄されたりして
+  // 監視停止が待機側へ届かない（Issue #289 レビュー指摘）。orchestrator 専用モードなど
+  // Issue が本当に無い場合だけ、ヘルパー側のフォールバックが使われる。
+  process.on('exit', () => { notifyWatchdogExit({ workspace: result.workspace, scriptName: 'msg-poll.js', issue: result.issueArg }); });
 
   // ── PID registry に自己登録（継続モード・--wait モード） ────────────
   // worker モードの場合は workerName を含めて登録する。
