@@ -947,7 +947,7 @@ function main(argsOverride, opts = {}) {
         const alreadyNotified = cursor.staleReportNotifiedPid === entry.pid
           && cursor.staleReportNotifiedStartTime === entry.startTime;
         if (reported === true && !alreadyNotified) {
-          const body = `⚠️ ワーカー "${workerName}" は既に報告を投稿済みですが、プロセス（PID ${entry.pid}）が終了せず居座っています。この状態の間、新しい指示は配送されず待機し続けます。状態を確認し、必要ならプロセスを終了してください。`;
+          const body = `⚠️ ワーカー "${workerName}" は既に報告を投稿済みですが、プロセス（PID ${entry.pid}）が生存しています。終了処理中・作業継続中・プロセスの終了漏れの可能性があります。この状態の間、新しい指示は配送されず待機し続けます。作業状況（未コミット変更・ログ等）を確認し、不要な残留プロセスの場合は終了してください。`;
           let notified = false;
           try {
             const notifyResult = _notifyOrchestrator({ workspace, issue, body });

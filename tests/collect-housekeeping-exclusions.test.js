@@ -250,3 +250,43 @@ test('collectHousekeepingExclusions: manager.running が無い PR はスキッ�
     fs.rmSync(ws, { recursive: true, force: true });
   }
 });
+
+test('collectHousekeepingExclusions: 生存プロセスの PID を pids 集合として収集する', () => {
+  const { che, liveness, lease } = fresh();
+  const ws = tmpWorkspace();
+  try {
+    const ghDir = path.join(ws, '.gh-maestro');
+    const leasesDir = path.join(ghDir, 'leases');
+    const reviewDir = path.join(ghDir, 'records', 'pr', '42', 'review');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    fs.mkdirSync(reviewDir, { recursive: true });
+
+    // 1. workers.json 由来
+    fs.writeFileSync(path.join(ghDir, 'workers.json'), JSON.stringify({
+      'worker-1': { pid: 1001, startTime: null },
+    }));
+    liveness._setIsProcessAlive((pid) => pid === 1001);
+
+    // 2. lease 由来 (resident role lease を含む)
+    fs.writeFileSync(path.join(leasesDir, 'resident-role-inbox-supervisor.json'), JSON.stringify({
+      pid: 2002, startTime: '2025-01-01T00:00:00.000Z', workerName: 'inbox-supervisor',
+    }));
+    lease._setIsProcessAlive((pid) => pid === 2002);
+    lease._setVerifyProcessIdentity(() => ({ match: true }));
+
+    // 3. manager.running 由来
+    fs.writeFileSync(path.join(reviewDir, 'manager.running'), '3003\n');
+    che._setIsProcessAlive((pid) => pid === 3003);
+
+    const { workerNames, reviewPrs, pids } = che.collectHousekeepingExclusions(ws);
+    assert.ok(workerNames.has('worker-1'));
+    assert.ok(workerNames.has('inbox-supervisor'));
+    assert.ok(reviewPrs.has('42'));
+    assert.ok(pids.has(1001), 'workers.json の生存 PID が含まれること');
+    assert.ok(pids.has(2002), 'lease の生存 PID が含まれること');
+    assert.ok(pids.has(3003), 'manager.running の生存 PID が含まれること');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+

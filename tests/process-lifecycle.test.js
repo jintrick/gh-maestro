@@ -1166,3 +1166,52 @@ test('sweepRegistry: 除外リスト構築失敗時は fail-closed で kill も 
     try { fs.unlinkSync(path.join(pidsDir, 'alive.json')); } catch {}
   }
 });
+
+test('sweepRegistry: role lease 保持者および稼働中ワーカーは PID registry にあっても kill されず保護される', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const pidsDir = plc.pidsDir(workspace);
+  const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
+  fs.mkdirSync(pidsDir, { recursive: true });
+  fs.mkdirSync(leasesDir, { recursive: true });
+
+  const residentPid = process.pid;
+  const residentPidFile = path.join(pidsDir, `inbox-supervisor.js-${residentPid}.json`);
+  const residentLeaseFile = path.join(leasesDir, 'resident-role-inbox-supervisor.json');
+  const stalePidFile = path.join(pidsDir, 'stale.json');
+
+  // inbox-supervisor の PID registry 登録（workerName なし、表示・診断用）
+  fs.writeFileSync(residentPidFile, JSON.stringify({
+    pid: residentPid,
+    script: 'inbox-supervisor.js',
+    startTime: MOCK_START_TIME,
+  }));
+
+  // inbox-supervisor の role lease（排他の正本）
+  fs.writeFileSync(residentLeaseFile, JSON.stringify({
+    pid: residentPid,
+    workerName: 'inbox-supervisor',
+    startTime: MOCK_START_TIME,
+  }));
+
+  // stale プロセス
+  fs.writeFileSync(stalePidFile, JSON.stringify({
+    pid: -1,
+    script: 'stale-worker.js',
+  }));
+
+  try {
+    const results = plc.sweepRegistry(workspace, { dryRun: false });
+    // stale は cleaned
+    assert.ok(results.cleaned.some(c => c.pid === -1));
+    assert.ok(!fs.existsSync(stalePidFile), 'stale ファイルは削除される');
+
+    // resident process は kill されず、ファイルも残る
+    assert.ok(!results.killed.some(k => k.pid === residentPid), 'role lease 保持者は kill されない');
+    assert.ok(fs.existsSync(residentPidFile), 'role lease 保持者の registry ファイルは保護される');
+  } finally {
+    for (const p of [residentPidFile, residentLeaseFile, stalePidFile]) {
+      try { fs.unlinkSync(p); } catch {}
+    }
+  }
+});
+
