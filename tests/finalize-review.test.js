@@ -299,3 +299,108 @@ test('finalizeReview(incomplete): 投稿成功時は incomplete-review センチ
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+// ── finalizeReview(complete) with --integrated（RMフェーズ2の重複統合ドラフト） ──
+
+// validatePayload は workspace/scripts/review-findings-schema.json からスキーマを読むため、
+// テストの一時workspaceへ実スキーマをコピーする。
+function copySchemaToWorkspace(workspace) {
+  const scriptsDir = path.join(workspace, 'scripts');
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  const src = path.join(__dirname, '..', 'scripts', 'review-findings-schema.json');
+  fs.copyFileSync(src, path.join(scriptsDir, 'review-findings-schema.json'));
+}
+
+function completeGateResults() {
+  return {
+    manifest_ref: { pr: 5, repo: 'o/r', headRefOid: 'abc' },
+    coverage_ledger: {
+      leaves: ALL_LEAF_IDS.map(id => ({
+        id,
+        trunk: Object.entries(TRUNK_TO_LEAVES).find(([, lvs]) => lvs.includes(id))[0],
+        decision: 'adopted',
+        rationale: null,
+      })),
+    },
+    jobs: ALL_LEAF_IDS.map((id, i) => ({
+      id: 'job-' + i,
+      status: 'success',
+      leaf_ids: [id],
+      findings: [],
+    })),
+  };
+}
+
+test('finalizeReview(complete, --integrated): 統合ドラフトのfindingsを出力に書き出す', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-int-'));
+  copySchemaToWorkspace(tmpDir);
+  try {
+    const resultsPath = path.join(tmpDir, 'results.json');
+    fs.writeFileSync(resultsPath, JSON.stringify(completeGateResults()), 'utf8');
+
+    // RMフェーズ2が重複を畳んだ統合ドラフト
+    const draftPath = path.join(tmpDir, 'draft.json');
+    const integratedFindings = [
+      {
+        aspect: 'Correctness', path: 'src/foo.ts', line_anchor: 'await save(u)',
+        summary: '永続化が成功を返す前に失われる', severity: 'MAJOR', severity_rationale: 'r',
+        body: 'b', verified_references: ['src/foo.ts'],
+      },
+    ];
+    fs.writeFileSync(draftPath, JSON.stringify({ findings: integratedFindings }), 'utf8');
+
+    const outputPath = path.join(tmpDir, 'manager.json');
+    const res = await finalizeReview(resultsPath, 'complete', outputPath, tmpDir, draftPath);
+    assert.equal(res.ok, true);
+    assert.equal(res.summary.totalFindings, 1);
+    const out = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    assert.equal(out.pr, 5);
+    assert.equal(out.repo, 'o/r');
+    assert.equal(out.headRefOid, 'abc');
+    // 統合ドラフトのfindingsがそのまま使われる
+    assert.equal(out.findings.length, 1);
+    assert.equal(out.findings[0].summary, '永続化が成功を返す前に失われる');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('finalizeReview(complete, --integrated): ドラフトがfindings配列を持たなければエラーで書き出さない', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-int-bad-'));
+  copySchemaToWorkspace(tmpDir);
+  try {
+    const resultsPath = path.join(tmpDir, 'results.json');
+    fs.writeFileSync(resultsPath, JSON.stringify(completeGateResults()), 'utf8');
+
+    const draftPath = path.join(tmpDir, 'draft.json');
+    fs.writeFileSync(draftPath, JSON.stringify({ nope: true }), 'utf8'); // findings配列なし
+
+    const outputPath = path.join(tmpDir, 'manager.json');
+    const res = await finalizeReview(resultsPath, 'complete', outputPath, tmpDir, draftPath);
+    assert.equal(res.ok, false);
+    assert.match(res.summary.error, /findings array/);
+    assert.ok(!fs.existsSync(outputPath), '不正ドラフトでは出力を書かない');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('finalizeReview(complete, --integrated): ドラフトがJSONパース不能ならエラーで書き出さない', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-int-parse-'));
+  copySchemaToWorkspace(tmpDir);
+  try {
+    const resultsPath = path.join(tmpDir, 'results.json');
+    fs.writeFileSync(resultsPath, JSON.stringify(completeGateResults()), 'utf8');
+
+    const draftPath = path.join(tmpDir, 'draft.json');
+    fs.writeFileSync(draftPath, 'not json{{{', 'utf8');
+
+    const outputPath = path.join(tmpDir, 'manager.json');
+    const res = await finalizeReview(resultsPath, 'complete', outputPath, tmpDir, draftPath);
+    assert.equal(res.ok, false);
+    assert.match(res.summary.error, /draft JSON parse failed/);
+    assert.ok(!fs.existsSync(outputPath));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
