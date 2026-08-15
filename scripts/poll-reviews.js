@@ -39,6 +39,7 @@ Output (stdout):
   PR_COMMENT:<user>:<body>                    PR 全体コメント
   PR_REVIEW:<user>:<state>:<body>             正式レビュー提出（APPROVED/CHANGES_REQUESTED/COMMENTED）
   PR_PUSH:<sha>                               新しいコミットが push された
+  TEST_STATUS:<state>:<declaredSha>:<headSha> テスト申告状態（GREEN/RED/STALE/NONE）
   PR_MERGED:<PR>                              マージ完了（このとき終了する）
   POLL_ERROR:<detail>                         GitHubアクセスが失敗し始めた（遷移時のみ。再試行は継続）
   POLL_RECOVERED                              失敗から復旧した（遷移時のみ）
@@ -59,6 +60,83 @@ function isValidCommentId(id) {
 }
 
 /**
+ * 申告コメントから対象コミットSHAとfail/pass数を抽出する純粋関数。
+ * @param {string} body コメント本文
+ * @returns {{ commit: string, fail: number, pass?: number } | null}
+ */
+function extractTestDeclaration(body) {
+  if (!body || typeof body !== 'string' || !body.includes('<!-- gh-maestro-test-result:v1 -->')) {
+    return null;
+  }
+  const commitMatch = body.match(/-\s+\*\*対象コミット\*\*:\s*`([0-9a-fA-F]+)`/);
+  if (!commitMatch) return null;
+  const commit = commitMatch[1];
+
+  const failMatch = body.match(/fail:\s*(\d+)/);
+  if (!failMatch) return null;
+  const fail = parseInt(failMatch[1], 10);
+
+  const passMatch = body.match(/pass:\s*(\d+)/);
+  const pass = passMatch ? parseInt(passMatch[1], 10) : undefined;
+
+  return { commit, fail, pass };
+}
+
+/**
+ * テスト申告の事実とPRのheadShaを突き合わせてステータスを判定する純粋関数。
+ *
+ * 判定ルール:
+ * - declaration なし → NONE
+ * - SHAが一致しない（headShaと異なるコミットに対して実行された結果） → STALE
+ * - SHAが一致し、fail === 0 → GREEN
+ * - SHAが一致し、fail > 0 → RED
+ *
+ * @param {{ commit: string, fail: number, pass?: number } | null} declaration
+ * @param {string} headSha PRの現在のHEADコミットSHA
+ * @returns {{ status: 'GREEN' | 'RED' | 'STALE' | 'NONE', declaredSha?: string, headSha?: string, fail?: number, pass?: number }}
+ */
+function evaluateTestDeclaration(declaration, headSha) {
+  if (!declaration) {
+    return { status: 'NONE', headSha };
+  }
+  const declSha = declaration.commit;
+  // full SHA vs short SHA のプレフィックス一致、または完全一致を判定
+  const isMatch = headSha && declSha && (
+    headSha === declSha ||
+    headSha.startsWith(declSha) ||
+    declSha.startsWith(headSha)
+  );
+
+  if (!isMatch) {
+    return {
+      status: 'STALE',
+      declaredSha: declSha,
+      headSha,
+      fail: declaration.fail,
+      pass: declaration.pass,
+    };
+  }
+
+  if (declaration.fail === 0) {
+    return {
+      status: 'GREEN',
+      declaredSha: declSha,
+      headSha,
+      fail: declaration.fail,
+      pass: declaration.pass,
+    };
+  }
+
+  return {
+    status: 'RED',
+    declaredSha: declSha,
+    headSha,
+    fail: declaration.fail,
+    pass: declaration.pass,
+  };
+}
+
+/**
  * ポーリングサイクルの結果から、劣化状態の遷移と発火すべきイベントを決める純粋関数。
  * 状態遷移（正常→劣化／劣化→復旧）のときだけイベントを返し、それ以外は null（スパム防止）。
  * @param {boolean} prevDegraded 直前の劣化状態
@@ -71,7 +149,12 @@ function pollDegradationTransition(prevDegraded, hadError) {
   return { degraded: prevDegraded, emit: null };
 }
 
-module.exports = { isValidCommentId, pollDegradationTransition };
+module.exports = {
+  isValidCommentId,
+  extractTestDeclaration,
+  evaluateTestDeclaration,
+  pollDegradationTransition,
+};
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -126,6 +209,7 @@ if (require.main === module) {
   const stateFile = path.join(stateDir, `poll-state-${pr}`);
   if (!fs.existsSync(stateFile)) fs.writeFileSync(stateFile, '');
   const shaFile = path.join(stateDir, `poll-sha-${pr}`);
+  const testStatusFile = path.join(stateDir, `poll-test-status-${pr}`);
 
   // ── ライフサイクル管理 ─────────────────────────────────────────────────
 
@@ -139,6 +223,7 @@ if (require.main === module) {
     lifecycleCleanup(workspace, () => {
       try { fs.unlinkSync(stateFile); } catch {}
       try { fs.unlinkSync(shaFile); } catch {}
+      try { fs.unlinkSync(testStatusFile); } catch {}
     });
   }
 
@@ -211,11 +296,13 @@ if (require.main === module) {
         process.exit(0);
       }
 
+      let isPushEvent = false;
       const prevSha = fs.existsSync(shaFile) ? fs.readFileSync(shaFile, 'utf8').trim() : '';
       if (headSha && headSha !== prevSha) {
         fs.writeFileSync(shaFile, headSha);
         if (prevSha) {
           process.stdout.write(`PR_PUSH:${headSha}\n`);
+          isPushEvent = true;
         }
       }
 
@@ -236,15 +323,43 @@ if (require.main === module) {
         hadError = true;
       }
 
-      const commentsOut = ghCapture(['pr', 'view', pr, '--repo', repo,
-        '--json', 'comments', '-q', commentsJq]);
-      if (commentsOut !== null) {
-        for (const line of commentsOut.split('\n').filter(Boolean)) {
-          const sep = line.indexOf('|');
-          const id = line.slice(0, sep);
+      // PR コメント（テスト結果申告マーカーの抽出・判定もここで行う）
+      const commentsJson = ghCapture(['pr', 'view', pr, '--repo', repo,
+        '--json', 'comments']);
+      if (commentsJson !== null) {
+        let commentsList = [];
+        try {
+          const parsed = JSON.parse(commentsJson);
+          commentsList = parsed.comments || [];
+        } catch {}
+
+        // 最新のテスト結果申告コメントを逆順で検索
+        let latestDecl = null;
+        for (let i = commentsList.length - 1; i >= 0; i--) {
+          const c = commentsList[i];
+          const decl = extractTestDeclaration(c.body);
+          if (decl) {
+            latestDecl = decl;
+            break;
+          }
+        }
+
+        const testEvaluation = evaluateTestDeclaration(latestDecl, headSha);
+        const evalKey = `${testEvaluation.status}:${testEvaluation.declaredSha || ''}:${testEvaluation.headSha || ''}`;
+        const prevEvalKey = fs.existsSync(testStatusFile) ? fs.readFileSync(testStatusFile, 'utf8').trim() : '';
+
+        if (evalKey !== prevEvalKey || isPushEvent) {
+          fs.writeFileSync(testStatusFile, evalKey);
+          process.stdout.write(`TEST_STATUS:${testEvaluation.status}:${testEvaluation.declaredSha || 'none'}:${testEvaluation.headSha || 'none'}\n`);
+        }
+
+        for (const c of commentsList) {
+          const id = String(c.id);
           if (!isValidCommentId(id) || known.has(id)) continue;
           recordId(id);
-          process.stdout.write(`PR_COMMENT:${line.slice(sep + 1)}\n`);
+          const author = (c.author && c.author.login) || 'unknown';
+          const singleLineBody = (c.body || '').replace(/\n/g, ' ');
+          process.stdout.write(`PR_COMMENT:${author}:${singleLineBody}\n`);
         }
       } else {
         hadError = true;

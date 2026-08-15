@@ -492,10 +492,14 @@ PR番号が確定したら、レビューコメントとマージ状態の通知
 
 ### マージ可否ゲート
 
-`REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の両方を満たすときだけ：
+`REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の条件を満たすときだけ：
 
 - Review Manager 完了（`PR_REVIEW:...Posted inline findings: N` 到着 or `.gh-maestro/review-manager-<PR>.json` 生成）
 - 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER/MAJOR は、修正 push に対する explorer の事実確認が完了するまで未解消として扱う）
+- **テスト申告状態の確認と事実提示（Issue #209）**:
+  - `poll-reviews.js` またはPRコメントの最新テスト申告マーカー（`<!-- gh-maestro-test-result:v1 -->`）を確認する。
+  - 人間にマージ候補を提示する際、テスト申告の状態（「緑の申告あり」「申告なし」「申告が古い（STALE）」「赤の申告あり」）を**解釈を加えずそのまま事実として記載**する。
+  - **「無関係なテスト失敗だから」「今回は影響ないから」といった関係有無の判断や独自解釈を orchestrator が挟むことは禁止**。申告された事実（対象コミットSHA、fail件数、pass件数）をそのまま伝える。マージするかどうかの最終判断は人間に委ねる。
 
 ### 誤ってマージしてしまった場合の対処
 

@@ -34,6 +34,61 @@ test('pollDegradationTransition: 劣化→復旧の遷移でPOLL_RECOVEREDを一
   assert.deepEqual(pollDegradationTransition(false, false), { degraded: false, emit: null });
 });
 
+// ── extractTestDeclaration & evaluateTestDeclaration ────────────────────────
+const { extractTestDeclaration, evaluateTestDeclaration } = require('../scripts/poll-reviews.js');
+
+test('extractTestDeclaration: 申告マーカーがないコメントは null', () => {
+  assert.equal(extractTestDeclaration('普通のコメント'), null);
+  assert.equal(extractTestDeclaration(''), null);
+  assert.equal(extractTestDeclaration(null), null);
+});
+
+test('extractTestDeclaration: マーカー付きコメントから commit, fail, pass を抽出する', () => {
+  const body = `<!-- gh-maestro-test-result:v1 -->
+### 🧪 テスト結果申告
+- **対象コミット**: \`a1b2c3d4e5\`
+- **結果**: pass (fail: 0, pass: 1826)`;
+  const decl = extractTestDeclaration(body);
+  assert.deepEqual(decl, { commit: 'a1b2c3d4e5', fail: 0, pass: 1826 });
+});
+
+test('extractTestDeclaration: passCount がない場合も抽出可能', () => {
+  const body = `<!-- gh-maestro-test-result:v1 -->
+### 🧪 テスト結果申告
+- **対象コミット**: \`a1b2c3d\`
+- **結果**: fail (fail: 2)`;
+  const decl = extractTestDeclaration(body);
+  assert.deepEqual(decl, { commit: 'a1b2c3d', fail: 2, pass: undefined });
+});
+
+test('evaluateTestDeclaration: 申告なし → NONE', () => {
+  const res = evaluateTestDeclaration(null, 'a1b2c3d4e5');
+  assert.deepEqual(res, { status: 'NONE', headSha: 'a1b2c3d4e5' });
+});
+
+test('evaluateTestDeclaration: コミット不一致（push後未申告） → STALE', () => {
+  const decl = { commit: '1111111', fail: 0, pass: 100 };
+  const res = evaluateTestDeclaration(decl, '2222222');
+  assert.equal(res.status, 'STALE');
+  assert.equal(res.declaredSha, '1111111');
+  assert.equal(res.headSha, '2222222');
+});
+
+test('evaluateTestDeclaration: コミット一致 かつ fail 0 → GREEN', () => {
+  const decl = { commit: 'a1b2c3d', fail: 0, pass: 100 };
+  const res = evaluateTestDeclaration(decl, 'a1b2c3d4e5f6'); // short SHA vs full SHA
+  assert.equal(res.status, 'GREEN');
+  assert.equal(res.declaredSha, 'a1b2c3d');
+  assert.equal(res.headSha, 'a1b2c3d4e5f6');
+});
+
+test('evaluateTestDeclaration: コミット一致 かつ fail > 0 → RED', () => {
+  const decl = { commit: 'a1b2c3d4e5f6', fail: 1, pass: 99 };
+  const res = evaluateTestDeclaration(decl, 'a1b2c3d4e5f6');
+  assert.equal(res.status, 'RED');
+  assert.equal(res.fail, 1);
+});
+
 // ── CLI: workspace 解決（サブプロセス経由） ─────────────────────────────────
 // workspace 解決は gh 呼び出しより前に行われるため、この検証だけなら実 gh 呼び出しは発生しない。
 
