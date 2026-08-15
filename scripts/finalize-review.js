@@ -30,13 +30,17 @@ function _setGhForTest(impl) {
 const USAGE = `finalize-review.js — 完全性ゲート検証後、正式findings JSON書き出しまたは不完全コメント投稿
 
 Usage:
-  node finalize-review.js --results <path> --mode complete --output <path> [--workspace <path>]
+  node finalize-review.js --results <path> --mode complete --output <path> [--integrated <path>] [--workspace <path>]
   node finalize-review.js --results <path> --mode incomplete [--workspace <path>]
 
 Options:
   --results <path>     run-review-jobs.js が出力した結果JSONファイルのパス
   --mode <mode>        complete | incomplete
   --output <path>      completeモード時の出力先JSONファイルパス（incompleteでは不要）
+  --integrated <path>  completeモードで、RMフェーズ2が重複を畳んだ統合findingsドラフトのパス
+                       （省略時は全成功ジョブのfindingsを機械集約）。ドラフトは findings 配列を
+                       持つJSON。エンベロープ（pr/repo/headRefOid）は results 由来で確定。
+                       完全性ゲート・スキーマ検証・atomic writeは常に決定論的に行う。
   --workspace <path>   ワークスペースの絶対パス（デフォルト: cwd）
 
 Output:
@@ -370,9 +374,13 @@ function writeSentinel(workspace, pr, opts = {}) {
  * @param {'complete'|'incomplete'} mode
  * @param {string|null} outputPath
  * @param {string} workspace
+ * @param {string|null} [integratedPath] completeモードで、RMフェーズ2が統合（重複を畳んだ）した
+ *   findingsドラフトのパス。指定時は機械集約（aggregateFindings）の代わりにドラフトのfindingsを
+ *   最終成果物へ使う。エンベロープ（pr/repo/headRefOid）は results.manifest_ref から確定させる。
+ *   完全性ゲート・スキーマ検証・atomic writeは常に決定的に行う（統合判断はモデル、検証・書出しは決定論的）。
  * @returns {Promise<{ok: boolean, summary: object}>}
  */
-async function finalizeReview(resultsPath, mode, outputPath, workspace) {
+async function finalizeReview(resultsPath, mode, outputPath, workspace, integratedPath = null) {
   // 1. results読み込み
   let resultsRaw;
   try {
@@ -410,8 +418,35 @@ async function finalizeReview(resultsPath, mode, outputPath, workspace) {
       };
     }
 
-    // 3. findings集約
-    const payload = aggregateFindings(results);
+    // 3. findings決定: RMフェーズ2が統合（重複を畳んだ）ドラフトが指定された場合はそれを使い、
+    //    指定がなければ全成功ジョブのfindingsを機械集約する。エンベロープは results 由来で確定。
+    let findings;
+    if (integratedPath) {
+      let draftRaw;
+      try {
+        draftRaw = fs.readFileSync(integratedPath, 'utf8');
+      } catch (e) {
+        return { ok: false, summary: { error: `integrated draft read failed: ${e.message}` } };
+      }
+      let draft;
+      try {
+        draft = JSON.parse(draftRaw);
+      } catch (e) {
+        return { ok: false, summary: { error: `integrated draft JSON parse failed: ${e.message}` } };
+      }
+      if (!draft || typeof draft !== 'object' || !Array.isArray(draft.findings)) {
+        return { ok: false, summary: { error: 'integrated draft must be an object with a findings array' } };
+      }
+      findings = draft.findings;
+    } else {
+      findings = aggregateFindings(results).findings;
+    }
+    const payload = {
+      pr: results.manifest_ref.pr,
+      repo: results.manifest_ref.repo,
+      headRefOid: results.manifest_ref.headRefOid,
+      findings,
+    };
 
     // 4. スキーマ検証
     const validation = validatePayload(payload, workspace);
@@ -522,7 +557,7 @@ if (require.main === module) {
     let values, rest;
     try {
       ({ values, rest } = parseFlags(args, {
-        flags: { '--results': {}, '--mode': {}, '--output': {}, '--workspace': {} },
+        flags: { '--results': {}, '--mode': {}, '--output': {}, '--workspace': {}, '--integrated': {} },
         booleans: ['--help', '-h'],
         // 未知フラグ・位置引数はパーサ側で拒否される（argv-parsing-pitfalls参照）。
         positionals: { min: 0, max: 0 },
@@ -547,6 +582,7 @@ if (require.main === module) {
     const mode = values['--mode'];
     const outputPath = values['--output'];
     const workspace = values['--workspace'] || process.cwd();
+    const integratedPath = values['--integrated'] || null;
 
     if (!resultsPath || !mode || (mode === 'complete' && !outputPath)) {
       console.error(USAGE);
@@ -558,7 +594,7 @@ if (require.main === module) {
       process.exit(2);
     }
 
-    const result = await finalizeReview(resultsPath, mode, outputPath || null, workspace);
+    const result = await finalizeReview(resultsPath, mode, outputPath || null, workspace, integratedPath);
 
     if (!result.ok) {
       console.error(JSON.stringify(result.summary));
