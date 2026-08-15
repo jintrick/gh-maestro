@@ -765,6 +765,7 @@ function main(argsOverride, opts = {}) {
     waitMode,
     waitMs,
     residentLease,
+    issueArg,
   };
 }
 
@@ -909,7 +910,11 @@ if (require.main === module) {
   // （Issue #289 受け入れ条件3）。起動時エラー・--help・--once の早期 exit は上で既に
   // return/exit 済みのため、ここに到達するのは resident な監視だけ。正常終了（exit 0 =
   // SIGINT/SIGTERM/親セッション消滅/--wait 完了）では何もしない。
-  process.on('exit', () => { notifyWatchdogExit({ workspace: result.workspace, scriptName: 'msg-poll.js' }); });
+  // 通知先は worker モードの監視対象 Issue（issueArg）を明示する。workers.json の先頭ワーカー
+  // 推測フォールバックに落とすと、別 Issue へ誤配送されたり宛先不明で破棄されたりして
+  // 監視停止が待機側へ届かない（Issue #289 レビュー指摘）。orchestrator 専用モードなど
+  // Issue が本当に無い場合だけ、ヘルパー側のフォールバックが使われる。
+  process.on('exit', () => { notifyWatchdogExit({ workspace: result.workspace, scriptName: 'msg-poll.js', issue: result.issueArg }); });
 
   // ── PID registry に自己登録（継続モード・--wait モード） ────────────
   // worker モードの場合は workerName を含めて登録する。

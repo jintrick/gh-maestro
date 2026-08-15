@@ -49,9 +49,12 @@ Output (stdout):
   REVIEW_MANAGER_ALREADY_RUNNING:<PR>  Review Manager は既に稼働中
   PR_CLOSED_RESUMED:<PR>               監視していたPRがクローズされ、新PR検出に復帰した
   以降、poll-reviews.js を子プロセスとして起動し、その標準出力（REVIEW_COMMENT/PR_COMMENT/
-  PR_REVIEW/PR_PUSH/PR_MERGED/PR_CLOSED）をそのまま中継する。poll-reviews.js が
-  PR_CLOSED で終了したときは、新 PR の検出（findPR ループ）へ復帰して監視を継続する。
-  それ以外（MERGED 等）で終了したときは、その終了コードでこのプロセスも終了する。
+  PR_REVIEW/PR_PUSH/PR_MERGED/PR_CLOSED）をそのまま中継する。poll-reviews.js が正常終了
+  （exit 0）かつ PR_CLOSED で終了したときは、新 PR の検出（findPR ループ）へ復帰して監視を
+  継続する。子が非ゼロ終了・シグナル終了（SIGKILL等）した場合は PR 状態に関わらず、
+  その終了コードでこのプロセスも終了して監視停止を通知する（子自身の exit 通知が実行できなくても
+  親が異常終了通知で監視停止を届ける）。それ以外（MERGED 等・正常終了）も、その終了コードで
+  このプロセスを終了する。
   Review Manager起動後のクラッシュはこの標準出力では通知されない（start-review-manager.js
   参照。Issueコメントとして別経路で届く）。PR/レビュー監視はそれとは独立して継続する。
 
@@ -118,13 +121,20 @@ function getPrState(pr, repo) {
  * poll-reviews.js 終了後の続行判断（純粋関数）。
  *
  * 却下・キャンセルで CLOSED された PR はマージ待ちではないため、新 PR 検出（findPR）へ復帰する。
+ * ただし復帰できるのは、子プロセス（poll-reviews.js）が正常終了（exit 0）した場合に限る。
+ * 子が非ゼロ終了・シグナル終了（SIGKILL等）した場合は、SIGKILLでは子自身の exit 通知が実行
+ * できず監視停止が誰にも届かないため、PR状態に関わらず親も exit に倒して異常を表面化させる
+ * （Issue #289 受け入れ条件3）。親が非ゼロで終了することで、親自身の exit 通知
+ * （notifyWatchdogExit）が監視停止を待機側へ届ける。
  * それ以外（MERGED 含む）はプロセスを終了する。状態が取得できない空文字列は fail-closed で
  * exit に倒す（poll-reviews の異常終了を勝手に新PR監視で隠蔽しない。異常は exit 通知で表面化する）。
  *
  * @param {string} prState PRのstate（空文字列は取得失敗）
+ * @param {number} exitCode poll-reviews.js の終了コード（0 は正常終了）
  * @returns {'resume' | 'exit'}
  */
-function resolvePostReviewDecision(prState) {
+function resolvePostReviewDecision(prState, exitCode) {
+  if (exitCode !== 0) return 'exit';
   return prState === 'CLOSED' ? 'resume' : 'exit';
 }
 
@@ -211,7 +221,10 @@ if (require.main === module) {
   // 正常終了（exit 0: SIGINT/SIGTERM/親セッション消滅/MERGED/CLOSED）では何もしない。
   // process.on('exit') は同期コードしか実行できないため、共有ヘルパーは spawnSync で
   // 同期投稿する（best-effort・throwしない）。
-  process.on('exit', () => { notifyWatchdogExit({ workspace, scriptName: 'poll-pr.js' }); });
+  // 通知先は手元にあるこの監視対象 Issue を明示する。workers.json の先頭ワーカー推測
+  // フォールバックに落とすと、別 Issue へ誤配送されたり宛先不明で破棄されたりして
+  // 監視停止が待機側へ届かない（Issue #289 レビュー指摘）。orchestrator に確実に届ける。
+  process.on('exit', () => { notifyWatchdogExit({ workspace, scriptName: 'poll-pr.js', issue }); });
 
   function findPR() {
     let r = spawnSync('gh', ['pr', 'list', '--repo', repo,
@@ -267,11 +280,13 @@ if (require.main === module) {
         // 代わりにここで poll-reviews.js を子プロセスとして起動し、終了まで中継する（Issue #111）。
         const exitCode = spawnPollReviews(pr, workspace, sessionPid);
         // poll-reviews.js が終了したあと、PR の実状態を inspect して続行判断する（declare-and-inspect）。
-        // exit code に頼らず GitHub の実状態を見るため、exit code 衝突や crash 時の誤判定が起きない。
+        // PR状態に加えて子の終了コードも見る：子が非ゼロ終了・シグナル終了した場合は PR状態が
+        // CLOSED でも復帰せず、親も非ゼロで終了して異常を通知する（Issue #289 受け入れ条件3。
+        // SIGKILL等で子自身の exit 通知が実行できなくても、親の exit 通知が監視停止を届ける）。
         const prState = getPrState(pr, repo);
-        if (resolvePostReviewDecision(prState) === 'resume') {
-          // 却下・キャンセルで CLOSED された PR を掴んだまま無言で居座り続けない（Issue #289）。
-          // findPR ループへ戻り、新 PR の検出を継続する。
+        if (resolvePostReviewDecision(prState, exitCode) === 'resume') {
+          // 子が正常終了し、かつ却下・キャンセルで CLOSED された PR を掴んだまま無言で
+          // 居座り続けない（Issue #289）。findPR ループへ戻り、新 PR の検出を継続する。
           process.stdout.write(`PR_CLOSED_RESUMED:${pr}\n`);
           continue;
         }

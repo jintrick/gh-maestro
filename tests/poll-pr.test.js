@@ -133,21 +133,30 @@ test("getPrState returns empty string when gh pr view fails (fail-closed)", () =
 // ── resolvePostReviewDecision（Issue #289: CLOSED → findPR 復帰） ────────────
 const { resolvePostReviewDecision } = require('../scripts/poll-pr');
 
-test("resolvePostReviewDecision: CLOSED は findPR へ復帰（resume）", () => {
-  // 却下・キャンセルで CLOSED された PR はマージ待ちではないため、新 PR 検出へ戻る
-  assert.equal(resolvePostReviewDecision("CLOSED"), "resume");
+test("resolvePostReviewDecision: 子が正常終了かつ CLOSED は findPR へ復帰（resume）", () => {
+  // 子（poll-reviews.js）が exit 0 で正常終了し、却下・キャンセルで CLOSED された PR は
+  // マージ待ちではないため、新 PR 検出へ戻る
+  assert.equal(resolvePostReviewDecision("CLOSED", 0), "resume");
 });
 
-test("resolvePostReviewDecision: MERGED 等は exit", () => {
-  assert.equal(resolvePostReviewDecision("MERGED"), "exit");
-  assert.equal(resolvePostReviewDecision("OPEN"), "exit");
+test("resolvePostReviewDecision: 子が正常終了でも MERGED 等は exit", () => {
+  assert.equal(resolvePostReviewDecision("MERGED", 0), "exit");
+  assert.equal(resolvePostReviewDecision("OPEN", 0), "exit");
+});
+
+test("resolvePostReviewDecision: 子が非ゼロ終了なら CLOSED でも resume せず exit に倒れる", () => {
+  // 子が非ゼロ終了・シグナル終了（SIGKILL等）した場合は、SIGKILLでは子自身の exit 通知が
+  // 実行できず監視停止が誰にも届かない。PR が CLOSED でも復帰せず親も exit に倒し、
+  // 親の exit 通知（notifyWatchdogExit）で監視停止を待機側へ届ける（受け入れ条件3）。
+  assert.equal(resolvePostReviewDecision("CLOSED", 1), "exit");
+  assert.equal(resolvePostReviewDecision("CLOSED", 7), "exit");
 });
 
 test("resolvePostReviewDecision: 状態取得失敗（空文字列）は fail-closed で exit に倒れる", () => {
   // 状態が取得できないとき resume に倒れると、poll-reviews の異常終了を
   // 勝手に新 PR 監視で隠蔽してしまう。fail-closed で exit に倒し、異常を
   // exit 通知で表面化させる（自己復旧しない = 受け入れ条件4 と整合）。
-  assert.equal(resolvePostReviewDecision(""), "exit");
+  assert.equal(resolvePostReviewDecision("", 0), "exit");
 });
 
 // ── formatBaseBranchMismatch ──────────────────────────────────────────────
