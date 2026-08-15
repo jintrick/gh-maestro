@@ -72,7 +72,7 @@ orchestrator: 調査結果をあなたに提示 → 対応方針を判断
 
 ## AI Code Review
 
-PRが作成されると、ローカルでAIレビュワー `reviewer`（Review Manager）が自動的に実行され、3観点を独立してレビューし、観点ごとに別々のレビューをGitHub PRに投稿する。
+PRが作成されると、ローカルでAIレビュワー `reviewer`（Review Manager）が自動的に実行され、4観点を独立してレビューし、観点ごとに別々のレビューをGitHub PRに投稿する。
 
 **レビューが走るのは初回のPR作成時だけである。** その後コーダーが修正をpushしても再レビューは実行されない（`PR_PUSH` は通知されるが、レビューは再実行されない）。再レビューが必要なときは `start-review-manager.js` を手動で起動する。
 
@@ -81,6 +81,7 @@ PRが作成されると、ローカルでAIレビュワー `reviewer`（Review M
 | Correctness | 不変条件・境界値・状態遷移・API互換性・認可 |
 | Maintainability | 命名・lint抑制・アンチパターン・複雑性・責務分離 |
 | Resilience & Security | 異常系・非同期・セキュリティ脆弱性・外部障害耐性 |
+| Test Quality | テスト品質・偽りの緑・性質検証・副作用遮断 |
 
 エンジンには `gh-maestro-reviewer` スキルを使用する。
 
@@ -89,7 +90,7 @@ PRが作成されると、ローカルでAIレビュワー `reviewer`（Review M
 orchestrator が起動した `poll-pr.js` がPRを検出すると、`start-review-manager.js` がバックグラウンドで起動し、以下の処理を実行する。
 
 1. `run-review-manager.js` が各観点のサブエージェント（Reviewer）を並列で実行
-2. 各Reviewerが観点別ディレクトリ（`correctness/`・`maintainability/`・`resilience-security/`）の基準ファイルに沿ってレビューを実行
+2. 各Reviewerが観点別ディレクトリ（`correctness/`・`maintainability/`・`resilience-security/`・`test-quality/`）の基準ファイルに沿ってレビューを実行
 3. レビュー結果が統合され、`review-publisher.js` を介して GitHub PR にコメントとして投稿される
 
 ### ポーリングプロセスの自律終了
@@ -155,9 +156,9 @@ worker の報告は Issue コメントとして届くため、通常このログ
 Review Manager のログも同じ `<workspace>/.gh-maestro/worker-logs/review-manager-<PR>.log` にある。
 
 ## レビュー
-
+ 
 Review Manager（`run-review-manager.js`）は `gh-maestro-reviewer` スキルを使い、
-Correctness / Maintainability / Resilience & Security の3観点を独立Reviewerに分けてPRを評価する。
+Correctness / Maintainability / Resilience & Security / Test Quality の4観点を独立Reviewerに分けてPRを評価する。
 
 観点別基準は `skills/gh-maestro-reviewer/` 配下の各観点ディレクトリにある基準ファイルを編集する。
 
@@ -169,10 +170,11 @@ skills/gh-maestro-reviewer/
     logic-invariants.md       不変条件・境界値
   maintainability/          # Maintainability観点
     structure-naming.md       命名・構造・アンチパターン
-    test-quality.md           テスト品質
   resilience-security/      # Resilience & Security観点
     failure-recovery.md       異常系・障害耐性
     hostile-input.md          セキュリティ脆弱性・不正入力
+  test-quality/             # Test Quality観点
+    test-quality.md           テスト品質
 ```
 
 ## 設定（config.json）

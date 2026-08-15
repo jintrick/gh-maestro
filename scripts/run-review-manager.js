@@ -455,7 +455,7 @@ function _validateFindingShape(f) {
   for (const field of required) {
     if (!(field in f)) errors.push(`${field} is required`);
   }
-  const validAspects = new Set(['Correctness', 'Maintainability', 'Resilience & Security']);
+  const validAspects = new Set(['Correctness', 'Maintainability', 'Resilience & Security', 'Test Quality']);
   if (f.aspect && !validAspects.has(f.aspect)) errors.push(`invalid aspect: ${f.aspect}`);
   const validSeverities = new Set(['BLOCKER', 'MAJOR', 'SUGGESTION']);
   if (f.severity && !validSeverities.has(f.severity)) errors.push(`invalid severity: ${f.severity}`);

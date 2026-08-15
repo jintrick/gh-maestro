@@ -26,7 +26,7 @@ const REQUIRED_FINDING_FIELDS = [
   'verified_references',
 ];
 
-const VALID_ASPECTS = new Set(['Correctness', 'Maintainability', 'Resilience & Security']);
+const VALID_ASPECTS = new Set(['Correctness', 'Maintainability', 'Resilience & Security', 'Test Quality']);
 const VALID_SEVERITIES = new Set(['BLOCKER', 'MAJOR', 'SUGGESTION']);
 
 const SEVERITY_LABELS = {

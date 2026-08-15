@@ -58,11 +58,11 @@ test('checkCompleteness: excluded leaf with rationale is ok', () => {
     leaves: ALL_LEAF_IDS.map(id => ({
       id,
       trunk: Object.entries(TRUNK_TO_LEAVES).find(([, lvs]) => lvs.includes(id))[0],
-      decision: id === 'maintainability/test-quality' ? 'excluded' : 'adopted',
-      rationale: id === 'maintainability/test-quality' ? 'no test changes in diff' : null,
+      decision: id === 'test-quality/test-quality' ? 'excluded' : 'adopted',
+      rationale: id === 'test-quality/test-quality' ? 'no test changes in diff' : null,
     })),
   };
-  const adoptedLeaves = ALL_LEAF_IDS.filter(id => id !== 'maintainability/test-quality');
+  const adoptedLeaves = ALL_LEAF_IDS.filter(id => id !== 'test-quality/test-quality');
   const jobResults = adoptedLeaves.map((id, i) => ({
     id: 'job-' + i,
     status: 'success',
@@ -78,11 +78,11 @@ test('checkCompleteness: excluded leaf without rationale fails', () => {
     leaves: ALL_LEAF_IDS.map(id => ({
       id,
       trunk: Object.entries(TRUNK_TO_LEAVES).find(([, lvs]) => lvs.includes(id))[0],
-      decision: id === 'maintainability/test-quality' ? 'excluded' : 'adopted',
+      decision: id === 'test-quality/test-quality' ? 'excluded' : 'adopted',
       rationale: null,
     })),
   };
-  const adoptedLeaves = ALL_LEAF_IDS.filter(id => id !== 'maintainability/test-quality');
+  const adoptedLeaves = ALL_LEAF_IDS.filter(id => id !== 'test-quality/test-quality');
   const jobResults = adoptedLeaves.map((id, i) => ({
     id: 'job-' + i,
     status: 'success',
@@ -404,3 +404,33 @@ test('finalizeReview(complete, --integrated): ドラフトがJSONパース不能
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('aggregateFindings accepts Test Quality aspect findings and validates schema', () => {
+  const results = {
+    manifest_ref: { pr: 10, repo: 'o/r', headRefOid: 'def' },
+    jobs: [
+      {
+        id: 'job-tq',
+        status: 'success',
+        leaf_ids: ['test-quality/test-quality'],
+        findings: [
+          {
+            aspect: 'Test Quality',
+            path: 'tests/sample.test.js',
+            line_anchor: 'assert.ok(true)',
+            summary: '異常系の拒否分岐をテストしておらず偽りの緑になっている',
+            severity: 'MAJOR',
+            severity_rationale: 'フェイルクローズが破られた際に検出できないため',
+            body: '## 観測した事実\n\n正常系のみテストされている。\n\n## 放置すると何が起きるか\n\n異常時に安全に停止しない。',
+            verified_references: ['tests/sample.test.js'],
+          },
+        ],
+      },
+    ],
+  };
+  const payload = aggregateFindings(results);
+  assert.equal(payload.pr, 10);
+  assert.equal(payload.findings.length, 1);
+  assert.equal(payload.findings[0].aspect, 'Test Quality');
+});
+
