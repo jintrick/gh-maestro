@@ -6,6 +6,7 @@
 //   PR_REVIEW:<user>:<state>:<body>
 //   PR_PUSH:<sha>
 //   PR_MERGED:<PR>
+//   PR_CLOSED:<PR>
 //   POLL_ERROR:<detail>  (GitHubアクセスが失敗し始めたとき。遷移時のみ)
 //   POLL_RECOVERED       (失敗から復旧したとき。遷移時のみ)
 'use strict';
@@ -14,6 +15,7 @@ const { spawnSync } = require('./child-process');
 const fs = require('fs');
 const path = require('path');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
+const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -41,10 +43,11 @@ Output (stdout):
   PR_PUSH:<sha>                               新しいコミットが push された
   TEST_STATUS:<state>:<declaredSha>:<headSha> テスト申告状態（GREEN/RED/STALE/NONE）
   PR_MERGED:<PR>                              マージ完了（このとき終了する）
+  PR_CLOSED:<PR>                              却下・キャンセルでクローズ（このとき終了する）
   POLL_ERROR:<detail>                         GitHubアクセスが失敗し始めた（遷移時のみ。再試行は継続）
   POLL_RECOVERED                              失敗から復旧した（遷移時のみ）
 
-PR_MERGED を検出するまで永続的にポーリングする。
+PR_MERGED または PR_CLOSED を検出するまで永続的にポーリングする。
 ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
 消滅時はPID registryを解除して自動exitする。`;
 
@@ -163,11 +166,27 @@ function pollDegradationTransition(prevDegraded, hadError) {
   return { degraded: prevDegraded, emit: null };
 }
 
+/**
+ * PR状態から、監視終了を引き起こす終端イベントを決める純粋関数。
+ * マージ（MERGED）と却下・キャンセル（CLOSED）の両方を終端として扱う
+ * （Issue #289: 従来は MERGED のみ終端だったため、CLOSED された PR を監視し続けて
+ * 機能死を起こした）。それ以外（OPEN 等）は null を返し監視を継続する。
+ * @param {string} state PRのstate
+ * @param {string} pr PR番号
+ * @returns {string|null} 終端イベント行（PR_MERGED:<pr> / PR_CLOSED:<pr>）、非終端なら null
+ */
+function reviewTerminalEvent(state, pr) {
+  if (state === 'MERGED') return `PR_MERGED:${pr}`;
+  if (state === 'CLOSED') return `PR_CLOSED:${pr}`;
+  return null;
+}
+
 module.exports = {
   isValidCommentId,
   extractTestDeclaration,
   evaluateTestDeclaration,
   pollDegradationTransition,
+  reviewTerminalEvent,
 };
 
 if (require.main === module) {
@@ -244,6 +263,12 @@ if (require.main === module) {
   process.on('SIGINT',  () => { cleanup(); process.exit(0); });
   process.on('SIGTERM', () => { cleanup(); process.exit(0); });
 
+  // 異常終了（非ゼロexit）を orchestrator へ通知する（Issue #289 受け入れ条件3）。
+  // 正常終了（exit 0: SIGINT/SIGTERM/親セッション消滅/MERGED/CLOSED）では何もしない。
+  // process.on('exit') は同期コードしか実行できないため、共有ヘルパーは spawnSync で
+  // 同期投稿する（best-effort・throwしない）。
+  process.on('exit', () => { notifyWatchdogExit({ workspace, scriptName: 'poll-reviews.js' }); });
+
   function knownIds() {
     return new Set(fs.readFileSync(stateFile, 'utf8').split('\n').filter(Boolean));
   }
@@ -303,8 +328,12 @@ if (require.main === module) {
       }
       const [state, headSha, prAuthor] = prJson.trim().split('|');
 
-      if (state === 'MERGED') {
-        process.stdout.write(`PR_MERGED:${pr}\n`);
+      // 終端イベント（MERGED / CLOSED）を検出したら監視を終了する。
+      // CLOSED（却下・キャンセル）も終端として扱う（Issue #289: 従来は MERGED のみ終端だった
+      // ため、CLOSED された PR を監視し続けて poll-pr.js が新 PR を検出できず機能死を起こした）。
+      const terminalEvent = reviewTerminalEvent(state, pr);
+      if (terminalEvent) {
+        process.stdout.write(`${terminalEvent}\n`);
         cleanup();
         process.exit(0);
       }

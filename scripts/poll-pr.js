@@ -7,7 +7,7 @@
 //   PR_BASE_MISMATCH:<PR>:<expected>:<actual>  (only when --base-branch and actual base branch mismatch)
 //   PR_DETECTED:<number>
 //   REVIEW_MANAGER_STARTED:<number> | REVIEW_MANAGER_ALREADY_RUNNING:<number>
-//   ...poll-reviews.js の出力がそのまま続く（REVIEW_COMMENT / PR_COMMENT / PR_REVIEW / PR_PUSH / PR_MERGED / POLL_ERROR / POLL_RECOVERED）
+//   ...poll-reviews.js の出力がそのまま続く（REVIEW_COMMENT / PR_COMMENT / PR_REVIEW / PR_PUSH / PR_MERGED / PR_CLOSED / POLL_ERROR / POLL_RECOVERED）
 //   Review Managerの起動後のクラッシュ（エージェントCLI起動失敗等）は、本スクリプトの
 //   出力ではなく、通常ワーカーと同じ終了フック経由でIssueコメントとして非同期に通知される
 //   （start-review-manager.js参照）。本スクリプトはそれを待たずPR/レビュー監視を継続する。
@@ -17,6 +17,7 @@ const path = require('path');
 const { spawnSync } = require('./child-process');
 const { startReviewManager } = require('./start-review-manager');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
+const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -46,8 +47,11 @@ Output (stdout):
   PR_DETECTED:<PR>                     PR を検出した
   REVIEW_MANAGER_STARTED:<PR>          Review Manager を起動した
   REVIEW_MANAGER_ALREADY_RUNNING:<PR>  Review Manager は既に稼働中
+  PR_CLOSED_RESUMED:<PR>               監視していたPRがクローズされ、新PR検出に復帰した
   以降、poll-reviews.js を子プロセスとして起動し、その標準出力（REVIEW_COMMENT/PR_COMMENT/
-  PR_REVIEW/PR_PUSH/PR_MERGED）をそのまま中継する。poll-reviews.js の終了とともに終了する。
+  PR_REVIEW/PR_PUSH/PR_MERGED/PR_CLOSED）をそのまま中継する。poll-reviews.js が
+  PR_CLOSED で終了したときは、新 PR の検出（findPR ループ）へ復帰して監視を継続する。
+  それ以外（MERGED 等）で終了したときは、その終了コードでこのプロセスも終了する。
   Review Manager起動後のクラッシュはこの標準出力では通知されない（start-review-manager.js
   参照。Issueコメントとして別経路で届く）。PR/レビュー監視はそれとは独立して継続する。
 
@@ -95,6 +99,36 @@ function getPrBaseBranch(pr, repo) {
 }
 
 /**
+ * gh 経由でPRの state を取得する。
+ * @param {string} pr
+ * @param {string} repo
+ * @returns {string} PR状態（'OPEN'|'CLOSED'|'MERGED' 等）。取得失敗時は空文字列（fail-closed）
+ */
+function getPrState(pr, repo) {
+  const r = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
+    '--json', 'state', '-q', '.state'], { encoding: 'utf8' });
+  if (r.status !== 0) {
+    console.error('poll-pr: PR #' + pr + ' の状態取得に失敗しました（gh pr view）: ' + (r.stderr || '').toString().trim());
+    return '';
+  }
+  return (r.stdout || '').trim();
+}
+
+/**
+ * poll-reviews.js 終了後の続行判断（純粋関数）。
+ *
+ * 却下・キャンセルで CLOSED された PR はマージ待ちではないため、新 PR 検出（findPR）へ復帰する。
+ * それ以外（MERGED 含む）はプロセスを終了する。状態が取得できない空文字列は fail-closed で
+ * exit に倒す（poll-reviews の異常終了を勝手に新PR監視で隠蔽しない。異常は exit 通知で表面化する）。
+ *
+ * @param {string} prState PRのstate（空文字列は取得失敗）
+ * @returns {'resume' | 'exit'}
+ */
+function resolvePostReviewDecision(prState) {
+  return prState === 'CLOSED' ? 'resume' : 'exit';
+}
+
+/**
  * PR検出時にベースブランチの不一致を検出する（純粋関数）。
  * @param {string} expectedBaseBranch --base-branch で指定された想定ブランチ
  * @param {string} actualBaseBranch   PRの実際のベースブランチ
@@ -109,7 +143,7 @@ function formatBaseBranchMismatch(expectedBaseBranch, actualBaseBranch, pr) {
   return 'PR_BASE_MISMATCH:' + pr + ':' + expectedBaseBranch + ':' + actualBaseBranch;
 }
 
-module.exports = { getPrBaseBranch, formatBaseBranchMismatch, spawnPollReviews };
+module.exports = { getPrBaseBranch, formatBaseBranchMismatch, getPrState, resolvePostReviewDecision, spawnPollReviews };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -173,6 +207,12 @@ if (require.main === module) {
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
 
+  // 異常終了（非ゼロexit）を orchestrator へ通知する（Issue #289 受け入れ条件3）。
+  // 正常終了（exit 0: SIGINT/SIGTERM/親セッション消滅/MERGED/CLOSED）では何もしない。
+  // process.on('exit') は同期コードしか実行できないため、共有ヘルパーは spawnSync で
+  // 同期投稿する（best-effort・throwしない）。
+  process.on('exit', () => { notifyWatchdogExit({ workspace, scriptName: 'poll-pr.js' }); });
+
   function findPR() {
     let r = spawnSync('gh', ['pr', 'list', '--repo', repo,
       '--search', `head:issue-${issue}`, '--state', 'open',
@@ -226,6 +266,15 @@ if (require.main === module) {
         // poll-pr.js と poll-reviews.js は内部ロジックを統合せず、それぞれ独立に保つ。
         // 代わりにここで poll-reviews.js を子プロセスとして起動し、終了まで中継する（Issue #111）。
         const exitCode = spawnPollReviews(pr, workspace, sessionPid);
+        // poll-reviews.js が終了したあと、PR の実状態を inspect して続行判断する（declare-and-inspect）。
+        // exit code に頼らず GitHub の実状態を見るため、exit code 衝突や crash 時の誤判定が起きない。
+        const prState = getPrState(pr, repo);
+        if (resolvePostReviewDecision(prState) === 'resume') {
+          // 却下・キャンセルで CLOSED された PR を掴んだまま無言で居座り続けない（Issue #289）。
+          // findPR ループへ戻り、新 PR の検出を継続する。
+          process.stdout.write(`PR_CLOSED_RESUMED:${pr}\n`);
+          continue;
+        }
         cleanup(exitCode);
         return; // unreachable
       }

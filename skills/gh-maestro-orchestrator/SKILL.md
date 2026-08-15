@@ -438,6 +438,8 @@ orchestrator から worker への追加指示（`msg-send.js` で送ったコメ
 以下はワーカー・Inbox Supervisorから届く通知やマーカーの見分け方と一次対応。詳細な原因・復旧手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/inbox-recovery.md` を参照する。
 
 - **ワーカーの異常終了通知**（`⚠️ 起動失敗または異常終了: exit code <N>...`）: 終了フックが非ゼロ終了時に自動投稿する。そのワーカーは作業を完了できずに死んでいる。「まだ報告が来ないだけ」と待ち続けない。原因を切り分けて人間に伝える。
+- **監視プロセスの異常終了通知**（`⚠️ 監視プロセス <script> が異常終了しました（exit code <N>）...`）: 常駐監視（`msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）が非ゼロ終了したとき、プロセス自身が自動投稿する。その監視は停止している。「まだ何も来ないだけ」と待ち続けてはならない。どの監視が止まったかを確認し（`$WORKSPACE/.gh-maestro/pids/*.json`の`script`名で特定）、その監視を再起動して人間に報告する（自動復旧はしない）。
+- **監視プロセスを張った Monitor の終了 = 異常のアラーム**: `poll-pr.js` / `poll-reviews.js` / `msg-poll.js` を張った Monitor が終了（exit 0 でない）したら、それは「監視が正常完了した」ことではなく、**監視プロセスの異常終了のアラーム**である。`PR_MERGED` / `PR_CLOSED` を読んで終了したときだけ、意図した終了として扱う。それ以外の終了（特に exit code 非ゼロ）を見落とすと、監視が止まったまま誰にも気づかれない。受信したら、対応する監視プロセスが停止していないか・その監視対象の機能が動いているかを確認する（手順は `inbox-recovery.md` の「監視プロセスの異常死」を参照）。
 - **配送断念の通知**（`⚠️ ワーカー "<name>" へのメッセージ配送に5回失敗し断念しました...`）: resume配送が5回リトライしても失敗したことをInbox Supervisor自身が通知する。上記と同様、そのワーカーは作業を完了できていない。
 - **自動代理送信のマーカー**（本文冒頭の`⚠️ [自動代理送信: ...]`）: ワーカーが`msg-send.js`の呼び出しを忘れただけで、内容自体は正しく応答できている。そのまま内容を評価してよい。
 - **ワーカーの実行ログ**（`$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log`）: 既定では読まない。上記の異常終了通知・配送断念通知を受けて原因を切り分けるとき、またはワーカーが長時間無反応で生死を確認したいときだけ`Read`で読む。
@@ -448,7 +450,8 @@ orchestrator から worker への追加指示（`msg-send.js` で送ったコメ
 
 ## PR検出
 
-コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <N>` を起動してPRを監視する（`N` はコーダーのアンカー Issue 番号）。**`persistent: true` を設定すること。** `poll-pr.js` はPR検出後、内部で `poll-reviews.js` を子プロセスとして起動し、その出力（`REVIEW_COMMENT`/`PR_COMMENT`/`PR_REVIEW`/`PR_PUSH`/`PR_MERGED`）をそのまま中継し続ける単一プロセスなので、**このMonitor 1本がPR検出からマージ検知まで完結する。** `persistent: true` を付け忘れると既定の5分でMonitorがタイムアウトし、レビュー中に通知が届かなくなる（下記「レビュー監視」はこの1本を継続して読む前提であり、別途起動し直すことはない）。
+コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <N>` を起動してPRを監視する（`N` はコーダーのアンカー Issue 番号）。**`persistent: true` を設定すること。** `poll-pr.js` はPR検出後、内部で `poll-reviews.js` を子プロセスとして起動し、その出力（`REVIEW_COMMENT`/`PR_COMMENT`/`PR_REVIEW`/`PR_PUSH`/`PR_MERGED`/`PR_CLOSED`）をそのまま中継し続ける単一プロセスなので、**このMonitor 1本がPR検出からマージ検知まで完結する。** `persistent: true` を付け忘れると既定の5分でMonitorがタイムアウトし、レビュー中に通知が届かなくなる（下記「レビュー監視」はこの1本を継続して読む前提であり、別途起動し直すことはない）。
+PRが却下・キャンセルで `CLOSED` になった場合、`poll-reviews.js` は `PR_CLOSED` を出力して終了し、`poll-pr.js` は**新 PR の検出に復帰する**（`PR_CLOSED_RESUMED:<PR>` を出力して同じ Monitor が新 PR を監視し続ける）。CLOSED された PR に監視が固定されて新 PR が見えなくなる機能死は起きない。CLOSED は却下・キャンセルを意味するため、必要に応じてコーダーに再指示する。
 `--base-branch` にはセッション変数 `$BASE_BRANCH` を渡すことで、PR作成時のベースブランチ不一致を検出できる。
 
 `poll-pr.js`はレビュー観点を一切選ばない。PR検出時に常にReview Managerを全観点で起動する。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。以前存在した「変更ファイルパスから観点を自動判定する」機構（`--review-aspects auto`）や、`heavy`/`directed`というモードの区別自体も、ファイル名に特定の文字列が含まれるだけで一部の観点だけに絞り込んでしまい他の観点のレビューが丸ごと欠落する実障害があったため廃止した。
@@ -460,6 +463,7 @@ node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --workspace $WORKSPACE --base-branch 
 PR検出時の出力:
 - `PR_BASE_MISMATCH:<PR>:<expected>:<actual>` — ベースブランチ不一致（想定と実際が異なる場合は出力される。処理は継続）
 - `PR_DETECTED:<PR>` — 通常通りPR番号が報告される
+- `PR_CLOSED_RESUMED:<PR>` — 監視していたPRがクローズされ、新PR検出に復帰した（この後 `PR_CLOSED` に続いて届く）
 
 `PR_BASE_MISMATCH` を受け取った場合、即座に処理を中断する必要はない（PR自体は作成されている）が、PRのベースブランチが想定外であることを認識しておくこと。後続のマージフローに影響を与える可能性があるため、人間にその旨伝えることを検討する。
 
@@ -485,6 +489,7 @@ PR番号が確定したら、レビューコメントとマージ状態の通知
 - `PR_REVIEW:<user>:<state>:<body>` → 正式レビュー提出（GitHubの「Submit review」ボタン経由）。jintrickのレビューはこの形式で届く。stateで分岐：APPROVED → 人間にマージ許可シグナルとして提示、CHANGES_REQUESTED → bodyをトリアージしてコーダーにフィードバック、COMMENTED → PR_COMMENTと同様にトリアージ
 - `PR_PUSH:<sha>` → コーダーが修正コミットをPRにプッシュした。レビューは初回PR作成時のみ実行される（push後の再レビューはない）。マージ可否の確認は「マージ可否ゲート」通過時のみ。未通過なら残 BLOCKER の解消を待つ。**転送済みの BLOCKER/MAJOR への修正 push を検出したら、Review Manager を再起動せず、そのIssueの explorer（未起動なら新規起動、既存があれば再利用）に「指摘の再現条件が実際に解消されているか」の事実確認を依頼する。** 判断（対応として十分か）は explorer の報告を踏まえて orchestrator が行う（explorer は事実確認に徹し判断はしない）。**新規起動する場合、`spawn-worker.js` は既定で `base_branch` から新規ブランチを作るため、対象PRの変更を一切含まない。事実確認を依頼する前に、対象PRのブランチ/コミットを `git fetch` + `checkout` させてから確認させること**（これを怠り、未反映の`base_branch`を調査させて「修正が反映されていない」という誤った結果を得た実例がある）
 - `PR_MERGED:<PR番号>` → マージ完了。`git -C $WORKSPACE pull --ff-only` で `BASE_BRANCH` を最新化してから本番公開（CI/CD）確認（下記「本番公開（CI/CD）確認」参照）へ進む。CI/CD確認完了後に反省会を実施する。**この時点ではワーカープロセス・worktreeを削除しない**（後始末の `finalize-issue.js` は下記「反省会」完了後にのみ実行する）
+- `PR_CLOSED:<PR番号>` → 該当PRが却下・キャンセルでクローズされた（`CLOSED`）。マージはされない。この後 `poll-pr.js` が新 PR の検出に復帰する（`PR_CLOSED_RESUMED`）。クローズ理由を確認し、必要に応じてコーダーに再指示する。`PR_CLOSED_RESUMED:<PR番号>` は「監視プロセスが生きていて新 PR を待っている」という生存のシグナルでもあるため、**この通知以降は新 PR の `PR_DETECTED` を待つ**（無言のまま監視が止まったと誤解しない）
 - `POLL_ERROR:<detail>` → レビュー監視のGitHubアクセスが失敗し始めた（GitHub障害・一時的なネットワーク断など）。ポーラーは再試行を継続するので何かを起動し直す必要はないが、**「レビューがまだ来ないだけ」と解釈して待ち続けてはならない**。レビュー監視が劣化していることを人間に伝える。復旧すれば `POLL_RECOVERED` が届く
 - `POLL_RECOVERED` → 上記の劣化から復旧した。通常のレビュー監視に戻ってよい
 - 人間からの報告も同様に受け付ける

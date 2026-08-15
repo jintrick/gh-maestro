@@ -19,6 +19,18 @@ Inbox Supervisor（`inbox-supervisor.js`）側の重複を疑った場合も、�
 
 この通知を鵜呑みにせず、`workers.json`のPID生存確認かログの最終更新時刻で実際に死んでいるか確認してから人間に伝える。生存していれば誤通知として扱い、原因は調査しない。
 
+## 監視プロセスの異常終了通知（msg-poll / poll-pr / poll-reviews）
+
+常駐監視（`msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）が**非ゼロ終了**（クラッシュ等）で終わると、プロセス自身が `⚠️ 監視プロセス <script> が異常終了しました（exit code <N>）...` という通知を orchestrator の inbox に投稿する（正常終了 exit 0 = SIGINT/SIGTERM/親セッション消滅/`PR_MERGED`/`PR_CLOSED` では通知されない）。
+
+さらに、それらの監視プロセスを張った **Monitor が終了したことも、監視プロセスの異常終了のアラーム**である。`PR_MERGED` / `PR_CLOSED`（とそれに続く `PR_CLOSED_RESUMED`）を出力して終了したときだけ意図した終了であり、それ以外の終了（特に非ゼロ終了）は異常を意味する。Monitor の終了はバックグラウンドの task 通知として届くため、**見落としやすい**。`poll-pr.js` を張った Monitor が終了したのに `PR_CLOSED_RESUMED` も `PR_MERGED` も続いていない場合は、監視が止まったと疑う。
+
+通知を受けたら、どの監視が止まったかを特定してから確認する:
+
+1. `node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE --dry-run` で `script` 名（msg-poll.js / poll-pr.js / poll-reviews.js）を対象に、該当プロセスが実際に死んでいるかを確認する（誤通知の可能性を排除）。
+2. 止まった監視が本当に必要なら再起動する。`poll-pr.js` は下記「PR監視・Review Managerの再起動」、`msg-poll.js` は SKILL.md の「自分の inbox の監視」の起動規約に従う。
+3. 監視が止まっていた間の機能停止（検出し損ねた PR・届かなかったメッセージ）を確認し、人間に報告する。**機械は自動復旧しない**（再起動判断は orchestrator が行う）。
+
 ## ワーカーの実行ログ
 
 ワーカーは画面を持たない。標準出力/標準エラーは `$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log` へ**実行中から逐次**書かれる。1ワーカー1ファイルで、初回起動もresumeも同じファイルに追記される。
@@ -99,6 +111,8 @@ workerへの配送のうち、**相手のプロセスが稼働中（作業中）
 ## PR監視・Review Managerの再起動
 
 Monitor が落ちた等で `poll-pr.js` を再起動する必要があるが、**そのPRのレビューは既に済んでいる／再レビューは不要**という場合は、`--no-review-manager` を付けて起動する。PR検出時に Review Manager を起動せず、レビューコメント・マージ状態の監視だけを再開する。これを付けずに再起動すると、検出のたびにレビューが蒸し返されて quota を浪費する。
+
+監視中に該当PRが `CLOSED`（却下・キャンセル）された場合は、`poll-reviews.js` が `PR_CLOSED` を出力して終了し、`poll-pr.js` は新 PR の検出へ復帰する（`PR_CLOSED_RESUMED` を出力して同じ Monitor が継続する）。**CLOSED のために `poll-pr.js` を再起動する必要はない**——再起動すると、却下済みPRではなく新 PR の検出からやり直すことになり、機能は同じだが無駄になる。CLOSED は新 PR を待つ状態として扱う（Issue #289）。再起動が本当に必要なのは、監視プロセスが異常終了したとき（上記「監視プロセスの異常終了通知」）だけである。
 
 ```sh
 node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --no-review-manager --workspace $WORKSPACE --base-branch $BASE_BRANCH
