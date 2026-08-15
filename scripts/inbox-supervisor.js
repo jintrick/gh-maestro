@@ -65,7 +65,7 @@ const { ARTIFACTS, legacyWorkerOwner, recordPath, recordRoot } = require('./shar
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
 
-const DEFAULT_INTERVAL_SEC = 20;
+const DEFAULT_INTERVAL_SEC = 30;
 const GH_TIMEOUT_MS = 30000;
 const MAX_SEEN_IDS = 200;
 const MAX_RETRIES = 5;
