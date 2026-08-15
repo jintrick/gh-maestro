@@ -142,71 +142,151 @@ test('buildFinalizePrompt: incomplete 時に --mode incomplete で最終化す�
   assert.match(prompt, /complete.*incomplete/);
 });
 
-// ── runJobsDeterministically（決定論的ジョブ実行・モデル介入なし） ──────────
-// 実プロセス（run-review-jobs.js）はspawnせず、注入した終了コード分岐を検証する
+// ── runJobsDeterministically / judgeJobRun（決定論的ジョブ実行・モデル介入なし） ──
+// 実プロセス（run-review-jobs.js）はspawnせず、注入した終了結果 {status,error} 分岐を検証する
 // （.claude/rules/test-process-spawn-safety.md 準拠）。
+//
+// judgeJobRun は終了コード単独では判別できない曖昧さ（run-review-jobs.js は
+// manifest検証失敗と一部ジョブ失敗の両方を exit 2 で返す）を、副作用の有無で判別する:
+//   - 不完全センチネル存在 → incomplete（manifest検証失敗・再試行上限）
+//   - 結果JSON存在 → results-ready（ジョブは回って失敗が残っただけ。完否判断はフェーズ2 RM）
+//   - どちらも無い（or status null/error）→ exec-failed（フェーズ2へ進めてはならない）
+
+// 一時ディレクトリに ghDir/reviewWtDir/results/センチネル用パスを作る。
+function makeJobFixtures() {
+  const dir = fs.mkdtempSync(path.join(tmpBase, 'job-'));
+  const ghDir = path.join(dir, 'gh'); // findIncompleteSentinel は ghDir をワークスペースルートとみなし .gh-maestro を付ける
+  const reviewWtDir = path.join(dir, 'wt');
+  const pr = '5';
+  fs.mkdirSync(reviewWtDir, { recursive: true });
+  const resultsPath = path.join(reviewWtDir, 'review-results-5.json');
+  const sentinelPath = reviewArtifactPath(ghDir, pr, '.incomplete');
+  fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+  return { dir, ghDir, reviewWtDir, pr, resultsPath, sentinelPath };
+}
 
 test('runJobsDeterministically: 初回全成功(0)は再試行なしでresults-ready', () => {
+  const fx = makeJobFixtures();
   const calls = [];
-  _setRunReviewJobsOnce(({ log }) => { calls.push(1); log('injected'); return 0; });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: 'r', pr: '5', repo: 'o/r', ghDir: 'g', reviewWtDir: 'w', log: () => {} });
-    assert.equal(r, 'results-ready');
+    _setRunReviewJobsOnce(({ log }) => { calls.push(1); log('injected'); return { status: 0, error: null }; });
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    assert.equal(r.outcome, 'results-ready');
     assert.equal(calls.length, 1, 'should run exactly once (no retry)');
-  } finally { _setRunReviewJobsOnce(null); }
+  } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
 });
 
-test('runJobsDeterministically: 一部失敗(1)→再試行→成功(0)でresults-ready', () => {
+test('runJobsDeterministically: 一部失敗(1,結果JSONあり)→再試行→成功(0)でresults-ready', () => {
+  const fx = makeJobFixtures();
+  fs.writeFileSync(fx.resultsPath, '{}', 'utf8'); // ジョブ失敗経路では結果JSONが書かれる
   const calls = [];
   const codes = [1, 0];
-  _setRunReviewJobsOnce(() => { calls.push(1); return codes.shift(); });
+  _setRunReviewJobsOnce(() => { calls.push(1); return { status: codes.shift(), error: null }; });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: 'r', pr: '5', repo: 'o/r', ghDir: 'g', reviewWtDir: 'w', log: () => {} });
-    assert.equal(r, 'results-ready');
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    assert.equal(r.outcome, 'results-ready');
     assert.equal(calls.length, 2, 'should retry once after partial failure');
-  } finally { _setRunReviewJobsOnce(null); }
+  } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
 });
 
-test('runJobsDeterministically: 再試行後も失敗(1)は結果JSONが残るのでresults-ready（完否判断はフェーズ2 RM）', () => {
+test('runJobsDeterministically: 再試行後も失敗(1→1,結果JSONあり)はresults-ready（完否判断はフェーズ2 RM）', () => {
+  const fx = makeJobFixtures();
+  fs.writeFileSync(fx.resultsPath, '{}', 'utf8');
   const calls = [];
   const codes = [1, 1];
-  _setRunReviewJobsOnce(() => { calls.push(1); return codes.shift(); });
+  _setRunReviewJobsOnce(() => { calls.push(1); return { status: codes.shift(), error: null }; });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: 'r', pr: '5', repo: 'o/r', ghDir: 'g', reviewWtDir: 'w', log: () => {} });
-    assert.equal(r, 'results-ready');
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    assert.equal(r.outcome, 'results-ready');
     assert.equal(calls.length, 2);
-  } finally { _setRunReviewJobsOnce(null); }
+  } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
 });
 
-test('runJobsDeterministically: manifest検証失敗(2)は再試行せずincomplete', () => {
+test('runJobsDeterministically: manifest検証失敗(2,センチネル書く)は再試行せずincomplete', () => {
+  const fx = makeJobFixtures();
   const calls = [];
-  _setRunReviewJobsOnce(() => { calls.push(1); return 2; });
+  _setRunReviewJobsOnce(() => {
+    calls.push(1);
+    // run-review-jobs は manifest 検証失敗時に不完全センチネルを書いてから exit 2
+    fs.writeFileSync(fx.sentinelPath, JSON.stringify({ pr: fx.pr, reason: 'manifest-validation-failed' }), 'utf8');
+    return { status: 2, error: null };
+  });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: 'r', pr: '5', repo: 'o/r', ghDir: 'g', reviewWtDir: 'w', log: () => {} });
-    assert.equal(r, 'incomplete');
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    assert.equal(r.outcome, 'incomplete');
     assert.equal(calls.length, 1, 'manifest validation failure must not retry');
-  } finally { _setRunReviewJobsOnce(null); }
+  } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
 });
 
-test('runJobsDeterministically: 再試行上限(3)は再試行せずincomplete', () => {
+test('runJobsDeterministically: 再試行上限(3,センチネル書く)は再試行せずincomplete', () => {
+  const fx = makeJobFixtures();
   const calls = [];
-  _setRunReviewJobsOnce(() => { calls.push(1); return 3; });
+  _setRunReviewJobsOnce(() => {
+    calls.push(1);
+    // run-review-jobs は再試行上限時に finalize-review --mode incomplete がセンチネルを書く
+    fs.writeFileSync(fx.sentinelPath, JSON.stringify({ pr: fx.pr, reason: 'incomplete-review' }), 'utf8');
+    return { status: 3, error: null };
+  });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: 'r', pr: '5', repo: 'o/r', ghDir: 'g', reviewWtDir: 'w', log: () => {} });
-    assert.equal(r, 'incomplete');
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    assert.equal(r.outcome, 'incomplete');
     assert.equal(calls.length, 1);
-  } finally { _setRunReviewJobsOnce(null); }
+  } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
 });
 
 test('runJobsDeterministically: 再試行後のmanifest検証失敗(2)/上限(3)もincomplete', () => {
   for (const second of [2, 3]) {
+    const fx = makeJobFixtures();
+    fs.writeFileSync(fx.resultsPath, '{}', 'utf8'); // 初回の一時的ジョブ失敗で結果は残る
     const codes = [1, second];
-    _setRunReviewJobsOnce(() => codes.shift());
+    _setRunReviewJobsOnce(() => {
+      const code = codes.shift();
+      // 2/3 はその実行中にセンチネルを書く（manifest検証失敗・再試行上限）
+      if (code === 2 || code === 3) {
+        fs.writeFileSync(fx.sentinelPath, JSON.stringify({ pr: fx.pr, reason: 'incomplete-review' }), 'utf8');
+      }
+      return { status: code, error: null };
+    });
     try {
-      const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: 'r', pr: '5', repo: 'o/r', ghDir: 'g', reviewWtDir: 'w', log: () => {} });
-      assert.equal(r, 'incomplete', `code sequence [1,${second}] should be incomplete`);
-    } finally { _setRunReviewJobsOnce(null); }
+      const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+      assert.equal(r.outcome, 'incomplete', `code sequence [1,${second}] should be incomplete`);
+    } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
   }
+});
+
+test('runJobsDeterministically: 一部失敗(1)で結果JSONが無い(読めない)場合はexec-failedで進めない（Issue #292 レビュー指摘）', () => {
+  const fx = makeJobFixtures();
+  // 結果JSONを作らない。非0なのに結果が無い → 何らかの未知の失敗。results-ready を返さない。
+  const calls = [];
+  _setRunReviewJobsOnce(() => { calls.push(1); return { status: 1, error: null }; });
+  try {
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    assert.equal(r.outcome, 'exec-failed');
+    assert.equal(calls.length, 1, 'unknown failure must not retry');
+  } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
+});
+
+test('runJobsDeterministically: 起動失敗(status null)はexec-failedで再試行しない（Issue #292 レビュー指摘）', () => {
+  const fx = makeJobFixtures();
+  const calls = [];
+  _setRunReviewJobsOnce(() => { calls.push(1); return { status: null, error: 'spawn ENOENT' }; });
+  try {
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    assert.equal(r.outcome, 'exec-failed');
+    assert.equal(calls.length, 1, 'spawn failure must not be retried into results-ready');
+    assert.match(r.reason, /spawn 失敗/);
+  } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
+});
+
+test('runJobsDeterministically: シグナル終了(status null, error無し)もexec-failed', () => {
+  const fx = makeJobFixtures();
+  const calls = [];
+  _setRunReviewJobsOnce(() => { calls.push(1); return { status: null, error: null }; });
+  try {
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    assert.equal(r.outcome, 'exec-failed');
+    assert.equal(calls.length, 1);
+  } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
 });
 
 // ── mapAgentPhaseFailure（フェーズ結果 → 監督結果の写像） ───────────────────

@@ -606,7 +606,7 @@ module.exports = {
   pollForArtifact, validateArtifactContent,
   atomicCopyStaging, boundedCleanup,
   superviseReviewManager,
-  runReviewJobsOnce, runJobsDeterministically, superviseAgentPhase, mapAgentPhaseFailure,
+  runReviewJobsOnce, runJobsDeterministically, judgeJobRun, superviseAgentPhase, mapAgentPhaseFailure,
   clearStaleIncompleteSentinel,
   resetRetryCount,
   findIncompleteSentinel,
@@ -845,7 +845,10 @@ function persistReviewManifest({ reviewWtDir, workspace, pr, log }) {
 
 /**
  * run-review-jobs.js を1回同期実行する。
- * @returns {number|null} 終了コード（0=全成功, 1=一部失敗, 2=manifest検証失敗, 3=再試行上限）
+ *
+ * @returns {{status: number|null, error: string|null}}
+ *   status — 終了コード。起動失敗・シグナル終了では null。
+ *   error  — spawnSync が例外を返した場合の文字列（status が null になる主因）。正常時は null。
  */
 function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log }) {
   const r = spawnSync(process.execPath, [
@@ -864,31 +867,82 @@ function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewW
   });
   if (r.stdout) log(r.stdout);
   if (r.stderr) log(r.stderr);
-  return r.status;
+  return { status: r.status, error: r.error ? String(r.error) : null };
+}
+
+/**
+ * run-review-jobs の終了結果を意味づける。
+ *
+ * run-review-jobs.js の終了コード契約は曖昧で、終了コード単独では不全と成功を
+ * 分離できない。コード1/2/3は以下の意味を持つ（run-review-jobs.js の
+ * runJobsFromManifest の ok=allSuccess と main の exit 分岐から確定）:
+ *   - 0: 全ジョブ成功
+ *   - 1: 実質デッドコード（ok=true=allSuccess のとき failed=0 でしか 0 にならないため到達しない）
+ *   - 2: manifest検証失敗 と 一部ジョブ失敗（allSuccess=false）の両方
+ *   - 3: 再試行上限（finalize-review --mode incomplete が通知し、センチネルを書いた）
+ *
+ * 曖昧な 2 は、副作用の有無で判別する:
+ *   - 不完全センチネル存在 → manifest検証失敗・再試行上限（incomplete 確定）
+ *   - 結果JSON存在 → ジョブは回って失敗が残っただけ。結果を持ってフェーズ2へ進む
+ *   - どちらも無い → 判別不能（exec 失敗）
+ *
+ * @returns {{outcome:'results-ready'|'incomplete'|'exec-failed', reason:string}}
+ *   results-ready — 結果JSONが書かれた（全成功 or 再試行後も一部失敗。完否判断はフェーズ2 RMが行う）
+ *   incomplete    — run-review-jobs が不完全終了を確定（manifest検証失敗・再試行上限）。センチネルは書かれている
+ *   exec-failed   — 起動失敗・シグナル終了、または結果JSONが読めない未知の終了値。フェーズ2へ進めてはならない
+ */
+function judgeJobRun({ status, error }, { ghDir, reviewWtDir, pr, resultsPath }) {
+  // 起動失敗・シグナル終了は結果JSONを保証できないため、明示的な失敗として扱う。
+  if (status === null || error) {
+    return { outcome: 'exec-failed', reason: error ? `run-review-jobs spawn 失敗: ${error}` : 'run-review-jobs はシグナル等で終了（status null）' };
+  }
+  // 不完全センチネルは manifest検証失敗・再試行上限が書く。即時 incomplete に打ち切ってよい。
+  const sentinelPath = findIncompleteSentinel(ghDir, reviewWtDir, pr);
+  if (sentinelPath) {
+    return { outcome: 'incomplete', reason: `不完全センチネル検出: ${sentinelPath}` };
+  }
+  if (status === 0) {
+    return { outcome: 'results-ready', reason: '全ジョブ成功' };
+  }
+  // status 1/2（一部失敗・manifest検証失敗の残り）。結果JSONが書かれていればフェーズ2へ進む。
+  // ジョブ失敗経路では run-review-jobs が結果を書き出してから非0で抜けるため、JSON存在が「進んでよい」の根拠。
+  if (fs.existsSync(resultsPath)) {
+    return { outcome: 'results-ready', reason: `一部ジョブ失敗（status ${status}）だが結果JSONあり。完否判断はフェーズ2 RM` };
+  }
+  // 非0なのに結果JSONが無い → 何らかの未知の失敗。results-ready を返してフェーズ2を誤起動してはならない。
+  return { outcome: 'exec-failed', reason: `run-review-jobs が status ${status} で終了したが結果JSONが無い（${resultsPath}）` };
 }
 
 /**
  * manifest に基づき決定論的にジョブを実行する（モデルの wait なし）。
+ * 一時的なジョブ失敗（結果JSONあり）のみ上限2回まで再試行し、manifest検証失敗・
+ * 再試行上限は即時に incomplete へ打ち切る。exec 失敗は結果を保証できないため
+ * 再試行せず exec-failed を返す。
  *
- * @returns {'results-ready'|'incomplete'}
- *   'results-ready' — 結果JSONが書かれた（全成功 or 再試行後も一部失敗。完否判断はフェーズ2 RMが行う）
- *   'incomplete'    — run-review-jobs が不完全終了を確定（manifest検証失敗・再試行上限）。センチネルは書かれている
+ * @returns {{outcome:'results-ready'|'incomplete'|'exec-failed', reason:string}}
  */
 function runJobsDeterministically({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log }) {
   const exec = _injectedRunReviewJobsOnce || runReviewJobsOnce;
-  let code = exec({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log });
-  log(`run-review-jobs (attempt 1) exited with status ${code}`);
-  if (code === 0) return 'results-ready';
-  if (code === 2 || code === 3) return 'incomplete';
+  const runOnce = () => {
+    const run = exec({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log });
+    log(`run-review-jobs exited with status ${run.status}`);
+    return { run, judged: judgeJobRun(run, { ghDir, reviewWtDir, pr, resultsPath }) };
+  };
 
-  // code === 1: 一部失敗 → 上限2回まで再試行（applyRetryGate が attempt を消費し、3回目は exit 3 で拒否）
-  log('some jobs failed; retrying (attempt 2)');
-  code = exec({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log });
-  log(`run-review-jobs (attempt 2) exited with status ${code}`);
-  if (code === 0) return 'results-ready';
-  if (code === 2 || code === 3) return 'incomplete';
-  // code === 1: 再試行後も失敗。結果JSONは残るので、完否判断はフェーズ2のRMに委ねる。
-  return 'results-ready';
+  const attempt1 = runOnce();
+  // 全ジョブ成功(0)は再試行せず即 results-ready。
+  if (attempt1.judged.outcome !== 'results-ready' || attempt1.run.status === 0) {
+    return attempt1.judged;
+  }
+  // 結果JSONはあるが一部失敗（status 1/2, 非0）。一時的なジョブ失敗とみなし、上限2回まで再試行
+  // （applyRetryGate が attempt を消費し、3回目は exit 3 で拒否される）。
+  log(`some jobs failed (${attempt1.judged.reason}); retrying (attempt 2)`);
+  const attempt2 = runOnce();
+  if (attempt2.judged.outcome !== 'results-ready' || attempt2.run.status === 0) {
+    return attempt2.judged;
+  }
+  // 再試行後も一部失敗。結果JSONは残るので、完否判断はフェーズ2のRMに委ねる。
+  return attempt2.judged;
 }
 
 /**
@@ -1104,8 +1158,9 @@ async function superviseReviewManager({
 
   // ── フェーズB: 決定論的ジョブ実行（モデル介入なし） ────────────────────────────
   const phaseB = runJobsDeterministically({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log });
-  if (phaseB === 'incomplete') {
-    // run-review-jobs が不完全終了を確定（manifest検証失敗・再試行上限）。センチネルは書かれている。
+  if (phaseB.outcome === 'incomplete') {
+    // run-review-jobs が不完全終了を確定（manifest検証失敗・再試行上限）。judgeJobRun が
+    // センチネルを確認済み。念のため再取得して不完全レビュー通知経路へ繋ぐ。
     const sentinelPath = findIncompleteSentinel(ghDir, reviewWtDir, pr);
     if (sentinelPath) {
       const outcome = incompleteSentinelOutcome({ sentinelPath, agentPid: null, reviewWtDir });
@@ -1113,6 +1168,12 @@ async function superviseReviewManager({
       return outcome;
     }
     return { outcome: 'process-exit-no-artifact', exitCode: 1, artifact: null, agentPid: null, reviewWtDir, reason: 'run-review-jobs incomplete but no sentinel found' };
+  }
+  if (phaseB.outcome === 'exec-failed') {
+    // 起動失敗・シグナル終了・結果JSONが読めない未知の終了値。結果を保証できないため
+    // フェーズ2へ進めず、失敗を監督側へ上げる（受け入れ条件「結果JSONが無いのに
+    // results-ready を返さない」）。
+    return { outcome: 'process-exit-no-artifact', exitCode: 1, artifact: null, agentPid: null, reviewWtDir, reason: phaseB.reason };
   }
   log(`phase2 jobs done: results at ${resultsPath}`);
 
