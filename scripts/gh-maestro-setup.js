@@ -5,7 +5,7 @@
 
 const { spawnSync } = require('./child-process');
 const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, chmodSync } = require('fs');
-const { resolve } = require('path');
+const { resolve, relative, isAbsolute, sep } = require('path');
 
 const USAGE = `gh-maestro-setup.js — プロジェクトごとの前提条件チェックと初期セットアップ
 
@@ -15,9 +15,12 @@ Arguments:
   [WORKSPACE_ROOT]  対象プロジェクトのルート（デフォルト CWD）
 
 WezTerm稼働（assistant用）/ git リポジトリ / gh 認証を検証し、.gh-maestro ディレクトリと
-.gitignore・dev ブランチ・pre-commit/pre-push フック（sync-rules同期・lint/format/typecheck/test
-検証）を用意する。初回実行後は sentinel (.gh-maestro/setup-ok) で環境チェックのみスキップし、
-冪等なセットアップステップは毎回実行する。通常は /gh-maestro の起動フックが呼ぶ。`;
+.gitignore・dev ブランチ・コミット時の規約同期フックを用意する。フックは git が実際に
+使う置き場（core.hooksPath 解決先、未設定なら既定の git ディレクトリ配下）に導入する。
+その置き場がプロジェクトの管理対象（共有される）なら書き込まず、必要な呼び出しが既に
+存在するかを検証して正直に報告する。初回実行後は sentinel (.gh-maestro/setup-ok) で
+環境チェックのみスキップし、冪等なセットアップステップは毎回実行する。通常は
+/gh-maestro の起動フックが呼ぶ。`;
 
 const workspaceRoot = process.argv[2] ?? process.cwd();
 
@@ -34,6 +37,25 @@ function run(cmd, args, { capture } = {}) {
   const r = spawnSync(cmd, args, { cwd: workspaceRoot, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit' });
   if (r.status !== 0) return null;
   return capture ? r.stdout.trim() : true;
+}
+
+// フック置き場の判定に使う git の問い合わせ。GIT_* 位置変数の除去は ./child-process の
+// 共有ラッパーが実施済み。失敗時は null（呼び出し側がフェイルクローズの判断に使う）。
+function gitOutput(args) {
+  const r = spawnSync('git', args, { cwd: workspaceRoot, encoding: 'utf8', stdio: 'pipe' });
+  if (r.status !== 0) return null;
+  return r.stdout.trim();
+}
+
+// check-ignore のように exit コードを判定に使う git 呼び出し。`--` で operands を分離し、
+// 値が `-` 始まりでもオプションとして解釈されないようにする（git-arg-injection ルール）。
+function gitStatus(args) {
+  return spawnSync('git', args, { cwd: workspaceRoot, encoding: 'utf8', stdio: 'pipe' });
+}
+
+function isInsideDir(parent, child) {
+  const rel = relative(parent, child);
+  return rel === '' || (rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel));
 }
 
 function getRemoteRepo() {
@@ -321,7 +343,10 @@ function applyExecPermission(hookPath) {
   }
 }
 
-const SYNC_RULES_MARKER = 'gh-maestro:sync-rules:v1';
+// コミット時の規約同期フック。v2 から「規約文書そのものの同期（sync-agents-md）」と
+// 「その結果をコミットに含める処理（git add CLAUDE.md）」も含める。v1 は sync-rules
+// のみで、実際に動いているフックと中身が食い違っていた（Issue #282）。
+const SYNC_RULES_MARKER = 'gh-maestro:sync-rules:v2';
 const SYNC_RULES_MARKER_RE = /^# gh-maestro:sync-rules(:v\d+)?$/;
 // Issue #283: フックからのテスト実行は廃止した。git はフック実行時に GIT_DIR 等を
 // 環境へ注入し、それを継承したテストが cwd 指定を無視して実リポジトリを破壊しうる。
@@ -329,30 +354,167 @@ const SYNC_RULES_MARKER_RE = /^# gh-maestro:sync-rules(:v\d+)?$/;
 // フックでテストを走らせてはならない。既存の設置済みブロックはここで撤去する。
 const CHECKS_MARKER_RE = /^# gh-maestro:checks(:v\d+)?$/;
 
-function ensurePreCommitHook() {
-  const hookPath = resolve(workspaceRoot, '.git', 'hooks', 'pre-commit');
-  const syncScript = resolve(require('os').homedir(), '.gh-maestro', 'scripts', 'sync-rules.js');
+// 導入の対象になる「git が実際に使うフック置き場」を返す。
+// core.hooksPath があればその解決先（相対は git 同様、ワークツリーのトップレベル基準）、
+// 無ければ既定の git ディレクトリ配下の hooks。相対解決が cwd ではなくトップレベル
+// 基準であることは実地で確認済み。
+function resolveHooksDir() {
+  const hooksPath = gitOutput(['config', '--get', 'core.hooksPath']);
+  if (hooksPath) return resolve(workspaceRoot, hooksPath);
 
+  const gitDir = gitOutput(['rev-parse', '--git-dir']);
+  const base = gitDir ? (isAbsolute(gitDir) ? gitDir : resolve(workspaceRoot, gitDir))
+                      : resolve(workspaceRoot, '.git');
+  return resolve(base, 'hooks');
+}
+
+// 「そのフック置き場に書き込むと共有物（コミットされうるファイル）を汚すか」を判定する。
+// true なら書き込まず検証報告のみにする。判定は「今追跡ファイルがあるか」ではなく
+// 「ワークツリーの内側か（かつ無視対象でないか）」で行う（新規プロジェクトの空ディレクトリ
+// でも絶対パス入りファイルのコミット事故を防ぐ）。git 実行が失敗したら安全側（true）に倒す。
+function hooksDirNeedsVerification(dir) {
+  const toplevel = gitOutput(['rev-parse', '--show-toplevel']);
+  if (!toplevel) return true; // フェイルクローズ: 共有されないと確認できなければ書かない
+
+  // ワークツリー外（`..` 始まり・別ドライブの絶対パス）→ コミットされない → 書き込み可。
+  const rel = relative(toplevel, dir);
+  if (rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) return false;
+
+  // git ディレクトリ配下（既定 .git/hooks を含む）→ コミットされない → 書き込み可。
+  const gitDirs = [gitOutput(['rev-parse', '--absolute-git-dir']),
+                   gitOutput(['rev-parse', '--git-common-dir'])];
+  for (const g of gitDirs) {
+    if (!g) continue;
+    const abs = isAbsolute(g) ? g : resolve(toplevel, g);
+    if (isInsideDir(abs, dir)) return false;
+  }
+
+  // ここまで残った dir はワークツリー内・git ディレクトリ外 → 共有リスク。
+  // 無視対象（.gitignore）ならコミットされないので書き込み可、それ以外は書かない。
+  const r = gitStatus(['check-ignore', '-q', '--', dir]);
+  return !(r.status === 0);
+}
+
+// フック本文が「実行される内容」として規約同期を満たしているかを検証し、
+// 欠けている項目のラベルを返す。マーカーの有無やパス形式（絶対/相対）は問わず、
+// 実際の呼び出しが存在するかで判定する（追跡下の手書きフックはマーカー無し・相対パス）。
+// 文字列の部分一致だけでなく、コメント行（# 始まり・シバン）を除外したうえで各呼び出しが
+// 「行頭の実行コマンド」として存在するかを確認する。部分一致だけだと、コメントや
+// `echo sync-rules.js` のような実行されない文でも「導入済み」と誤報告してしまう
+// （この Issue が直そうとしている欠陥を、検証側で別の形で再現しないため）。
+function verifySyncInvocations(content) {
+  const checks = [
+    { label: 'sync-rules 呼び出し', re: /^\s*node\s+["']?[^"'\n]*sync-rules\.js\b/ },
+    { label: 'sync-agents-md 呼び出し', re: /^\s*node\s+["']?[^"'\n]*sync-agents-md\.js\b/ },
+    { label: '同期結果のコミット反映（git add CLAUDE.md）', re: /^\s*git\s+add\s+CLAUDE\.md\b/ },
+  ];
+  const executableLines = content.split('\n').filter(l => l.trim() !== '' && !l.trim().startsWith('#'));
+  return checks.filter(c => !executableLines.some(l => c.re.test(l))).map(c => c.label);
+}
+
+// シバン行を除いて本文が空白のみ（実コマンドが1行も無い）なら、廃止後に残った抜け殻と判定。
+function isEffectivelyEmptyHook(content) {
+  return content.replace(/^#!.*\n?/, '').trim() === '';
+}
+
+// 追跡下（共有リスク）のフックに絶対パスを書き込まないために、人間が手動追記すべき
+// ブロックを repo-relative パスで提示する（絶対パスは共有物を汚すため使わない）。
+function reportManualSyncBlock(hookPath) {
+  const toplevel = gitOutput(['rev-parse', '--show-toplevel']) || workspaceRoot;
+  let rel = relative(toplevel, hookPath).split(sep).join('/');
+  if (!rel.startsWith('.')) rel = `./${rel}`;
+  console.warn(
+    `\n  [warn] フック置き場がプロジェクトの管理対象のため、setup は書き込みません。` +
+    `\n         手動で ${rel} に以下を追記してください（同期の規約がコーダーに届くようにします）:`,
+  );
+  console.warn(
+    '         ```sh\n' +
+    '         # gh-maestro:sync-rules:v2\n' +
+    `         if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then\n` +
+    `           node "scripts/sync-rules.js"\n` +
+    '         fi\n' +
+    `         if git diff --cached --name-only | grep -q '^AGENTS\\.md$'; then\n` +
+    `           node "scripts/sync-agents-md.js"\n` +
+    '           git add CLAUDE.md\n' +
+    '         fi\n' +
+    '         ```',
+  );
+}
+
+function ensureSyncHook(hooksDir, verifyOnly) {
+  const hookPath = resolve(hooksDir, 'pre-commit');
+
+  if (verifyOnly) {
+    // 共有リスク → 書き込まず、実行される内容として必要な呼び出しが揃っているかを検証報告。
+    if (!existsSync(hookPath)) {
+      console.warn('  [warn] pre-commit hook (sync): 未導入です（ファイルがありません）。');
+      reportManualSyncBlock(hookPath);
+      return;
+    }
+    const missing = verifySyncInvocations(readFileSync(hookPath, 'utf8'));
+    if (missing.length === 0) {
+      ok('pre-commit hook (sync): 既に必要な同期の呼び出しが揃っています（tracked; untouched）');
+    } else {
+      console.warn(`  [warn] pre-commit hook (sync): 未導入: ${missing.join(', ')}`);
+      reportManualSyncBlock(hookPath);
+    }
+    return;
+  }
+
+  // 共有リスクなし → 従来どおり設置（v1 ブロックは v2 へ自動置換される）。
+  const homedir = require('os').homedir();
+  const syncScript = resolve(homedir, '.gh-maestro', 'scripts', 'sync-rules.js');
+  const syncAgentsMdScript = resolve(homedir, '.gh-maestro', 'scripts', 'sync-agents-md.js');
+  const entryLines = [
+    `if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then`,
+    `  node "${syncScript}"`,
+    `fi`,
+    `if git diff --cached --name-only | grep -q '^AGENTS\\.md$'; then`,
+    `  node "${syncAgentsMdScript}"`,
+    `  git add CLAUDE.md`,
+    `fi`,
+  ];
   const syncResult = upsertMarkerBlock(hookPath, {
     marker: SYNC_RULES_MARKER,
     markerRe: SYNC_RULES_MARKER_RE,
-    entryLines: [
-      `if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then`,
-      `  node "${syncScript}"`,
-      `fi`,
-    ],
+    entryLines,
   });
-  reportHookResult('pre-commit hook (sync-rules)', syncResult);
+  reportHookResult('pre-commit hook (sync)', syncResult);
 
   if (removeMarkerBlock(hookPath, { markerRe: CHECKS_MARKER_RE }) === 'removed') {
     ok('pre-commit hook (checks): 廃止したため撤去しました');
   }
 }
 
-function retireChecksHooks() {
-  const prePush = resolve(workspaceRoot, '.git', 'hooks', 'pre-push');
-  if (removeMarkerBlock(prePush, { markerRe: CHECKS_MARKER_RE }) === 'removed') {
-    ok('pre-push hook (checks): 廃止したため撤去しました');
+// 実効フック置き場の pre-push から廃止済みの checks ブロックを撤去する（冪等）。
+// 撤去後に実コマンドが残らなければ抜け殻なのでファイルごと削除する。
+function retireChecksHooks(hooksDir) {
+  const prePush = resolve(hooksDir, 'pre-push');
+  if (!existsSync(prePush)) return;
+  const removed = removeMarkerBlock(prePush, { markerRe: CHECKS_MARKER_RE });
+  if (removed === 'removed') ok('pre-push hook (checks): 廃止したため撤去しました');
+  if (isEffectivelyEmptyHook(readFileSync(prePush, 'utf8'))) {
+    unlinkSync(prePush);
+    ok('pre-push hook: 抜け殻（実コマンド無し）のため削除しました');
+  }
+}
+
+// 実効フック置き場が既定と異なるとき、死んだ既定 .git/hooks/{pre-commit,pre-push} を後始末する。
+// gh-maestro マーカー付きブロックを撤去し、実コマンドが残らなければファイルごと削除する。
+// 無関係なユーザーフックの中身は残す。
+function removeStaleDefaultHooks(hooksDir) {
+  const defaultHooks = resolve(workspaceRoot, '.git', 'hooks');
+  if (resolve(hooksDir) === resolve(defaultHooks)) return;
+
+  for (const name of ['pre-commit', 'pre-push']) {
+    const hookPath = resolve(defaultHooks, name);
+    if (!existsSync(hookPath)) continue;
+    removeMarkerBlock(hookPath, { markerRe: SYNC_RULES_MARKER_RE });
+    removeMarkerBlock(hookPath, { markerRe: CHECKS_MARKER_RE });
+    if (isEffectivelyEmptyHook(readFileSync(hookPath, 'utf8'))) {
+      unlinkSync(hookPath);
+      ok(`default ${name} hook: 実行されない置き場の残骸のため削除しました`);
+    }
   }
 }
 
@@ -395,8 +557,14 @@ function main() {
   prepareDirectories();
   ensureGitIgnore();
   ensureDevBranch();
-  ensurePreCommitHook();
-  retireChecksHooks();
+  // 実効フック置き場を一度だけ解決し、設置・撤去・後始末の各処理が同じ場所を扱う。
+  // 管理対象（書き込まない契約）の置き場では retireChecksHooks も実行しない——
+  // 追跡対象の pre-push を書き換え・削除してはいけない（レビュー指摘への対応）。
+  const hooksDir = resolveHooksDir();
+  const verifyOnly = hooksDirNeedsVerification(hooksDir);
+  ensureSyncHook(hooksDir, verifyOnly);
+  if (!verifyOnly) retireChecksHooks(hooksDir);
+  removeStaleDefaultHooks(hooksDir);
 
   if (firstRun) {
     mkdirSync(resolve(workspaceRoot, '.gh-maestro'), { recursive: true });
