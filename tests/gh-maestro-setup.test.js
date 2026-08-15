@@ -44,6 +44,31 @@ function runSetup(dir) {
   return spawnSync(process.execPath, [SCRIPT, dir], { cwd: dir, encoding: 'utf8' });
 }
 
+// withGitProject の内側で git を実行する（失敗時 assert）。
+function gitIn(dir, ...args) {
+  const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+  return r;
+}
+
+// 追跡下・無視対象でない .githooks に手書きの同期フック（マーカー無し・相対パス）を置く。
+function setUpTrackedGithooks(dir) {
+  fs.mkdirSync(path.join(dir, '.githooks'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.githooks', 'pre-commit'), [
+    '#!/bin/sh',
+    "if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then",
+    '  node scripts/sync-rules.js || exit 1',
+    'fi',
+    "if git diff --cached --name-only | grep -q '^AGENTS\\.md$'; then",
+    '  node scripts/sync-agents-md.js || exit 1',
+    '  git add CLAUDE.md || exit 1',
+    'fi',
+    '',
+  ].join('\n'), 'utf8');
+  gitIn(dir, 'add', '.githooks');
+  gitIn(dir, 'commit', '-qm', 'track githooks');
+}
+
 function readHook(dir, name) {
   return fs.readFileSync(path.join(dir, '.git', 'hooks', name), 'utf8');
 }
@@ -54,10 +79,13 @@ test('新規プロジェクトにはsync-rulesフックのみを設置し、chec
     assert.equal(r.status, 0, r.stderr);
 
     const preCommit = readHook(dir, 'pre-commit');
-    assert.match(preCommit, /# gh-maestro:sync-rules:v1/);
+    assert.match(preCommit, /# gh-maestro:sync-rules:v2/);
     // Issue #283: フックからのテスト実行は廃止した。
     assert.doesNotMatch(preCommit, /gh-maestro:checks/);
     assert.doesNotMatch(preCommit, /run-checks/);
+    // Issue #282: 設置するブロックには規約文書の同期とコミット反映も含める。
+    assert.match(preCommit, /sync-agents-md\.js/);
+    assert.match(preCommit, /git add CLAUDE\.md/);
 
     assert.equal(fs.existsSync(path.join(dir, '.git', 'hooks', 'pre-push')), false,
       'pre-push フックは作られないこと');
@@ -93,9 +121,8 @@ test('既に設置済みのchecksブロックは撤去され、無関係なブ�
     assert.match(preCommit, /# some-unrelated-marker/);
     assert.match(preCommit, /echo unrelated-block-must-survive/);
 
-    const prePush = fs.readFileSync(prePushPath, 'utf8');
-    assert.doesNotMatch(prePush, /gh-maestro:checks/);
-    assert.doesNotMatch(prePush, /run-checks/);
+    // checks撤去後に実コマンドが残らない pre-push は抜け殻として削除される。
+    assert.equal(fs.existsSync(prePushPath), false, 'checks撤去後に空になった pre-push は削除される');
   });
 });
 
@@ -170,8 +197,135 @@ test('手書きの既存pre-commitフックがあってもgh-maestroブロック
 
     const preCommit = readHook(dir, 'pre-commit');
     assert.match(preCommit, /custom-user-hook/);
-    assert.match(preCommit, /# gh-maestro:sync-rules:v1/);
+    assert.match(preCommit, /# gh-maestro:sync-rules:v2/);
     assert.doesNotMatch(preCommit, /gh-maestro:checks/);
+  });
+});
+
+// ── core.hooksPath（git が実際に使うフック置き場）への対応 ─────────────────────
+
+test('core.hooksPathが追跡下の.githooksを指し必要な呼び出しが揃っていれば、書き込まず導入済みと報告し、死んだ既定フックを削除する', () => {
+  withGitProject((dir) => {
+    setUpTrackedGithooks(dir);
+    // 既定 .git/hooks に死んだフックを残す（このリポジトリ相当）
+    fs.mkdirSync(path.join(dir, '.git', 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.git', 'hooks', 'pre-commit'),
+      '#!/bin/sh\n# gh-maestro:sync-rules:v1\nnode "/x/sync-rules.js"\n', 'utf8');
+    fs.writeFileSync(path.join(dir, '.git', 'hooks', 'pre-push'),
+      '#!/bin/sh\n', 'utf8');
+    gitIn(dir, 'config', 'core.hooksPath', '.githooks');
+
+    const before = fs.readFileSync(path.join(dir, '.githooks', 'pre-commit'), 'utf8');
+    const r = runSetup(dir);
+    assert.equal(r.status, 0, r.stderr);
+
+    // 追跡下フックは書き換えない（共有物を汚さない）
+    assert.equal(fs.readFileSync(path.join(dir, '.githooks', 'pre-commit'), 'utf8'), before);
+    assert.match(r.stdout, /tracked; untouched/);
+    // 実行されない既定置き場の死んだフックは削除される
+    assert.equal(fs.existsSync(path.join(dir, '.git', 'hooks', 'pre-commit')), false);
+    assert.equal(fs.existsSync(path.join(dir, '.git', 'hooks', 'pre-push')), false);
+  });
+});
+
+test('core.hooksPathが追跡下の.githooksを指すがsync-agents-md呼び出しが無い場合、未導入と警告し書き換えない', () => {
+  withGitProject((dir) => {
+    fs.mkdirSync(path.join(dir, '.githooks'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.githooks', 'pre-commit'), [
+      '#!/bin/sh',
+      "if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then",
+      '  node scripts/sync-rules.js || exit 1',
+      'fi',
+      '',
+    ].join('\n'), 'utf8');
+    gitIn(dir, 'add', '.githooks');
+    gitIn(dir, 'commit', '-qm', 'track githooks');
+    gitIn(dir, 'config', 'core.hooksPath', '.githooks');
+
+    const before = fs.readFileSync(path.join(dir, '.githooks', 'pre-commit'), 'utf8');
+    const r = runSetup(dir);
+    assert.equal(r.status, 0, r.stderr);
+
+    assert.equal(fs.readFileSync(path.join(dir, '.githooks', 'pre-commit'), 'utf8'), before);
+    assert.match(r.stderr, /未導入/);
+    assert.match(r.stderr, /sync-agents-md 呼び出し/);
+    assert.match(r.stderr, /追記してください/);
+  });
+});
+
+test('core.hooksPathが追跡下・無視対象でない空ディレクトリを指す場合、書き込まず未導入を警告する（絶対パス汚染を防ぐ）', () => {
+  withGitProject((dir) => {
+    // 新規プロジェクトが規約導入直後で、hooksPath の指すディレクトリがまだ何も含まない状態
+    fs.mkdirSync(path.join(dir, '.githooks'), { recursive: true });
+    gitIn(dir, 'config', 'core.hooksPath', '.githooks');
+
+    const r = runSetup(dir);
+    assert.equal(r.status, 0, r.stderr);
+
+    assert.equal(fs.existsSync(path.join(dir, '.githooks', 'pre-commit')), false,
+      '空の共有リスクディレクトリに絶対パス入りファイルを書き込んではならない');
+    assert.match(r.stderr, /未導入/);
+  });
+});
+
+test('core.hooksPathがgit無視対象のディレクトリを指す場合、そこに従来どおり設置する', () => {
+  withGitProject((dir) => {
+    fs.mkdirSync(path.join(dir, '.githooks-ignored'), { recursive: true });
+    fs.appendFileSync(path.join(dir, '.gitignore'), '.githooks-ignored/\n');
+    gitIn(dir, 'add', '.gitignore');
+    gitIn(dir, 'commit', '-qm', 'ignore githooks-ignored');
+    gitIn(dir, 'config', 'core.hooksPath', '.githooks-ignored');
+
+    const r = runSetup(dir);
+    assert.equal(r.status, 0, r.stderr);
+
+    const hook = fs.readFileSync(path.join(dir, '.githooks-ignored', 'pre-commit'), 'utf8');
+    assert.match(hook, /# gh-maestro:sync-rules:v2/);
+    assert.match(hook, /sync-agents-md\.js/);
+    assert.match(hook, /git add CLAUDE\.md/);
+  });
+});
+
+test('core.hooksPathがワークツリー外（絶対パス）を指す場合、そこに従来どおり設置する', () => {
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-outside-hooks-'));
+  try {
+    withGitProject((dir) => {
+      gitIn(dir, 'config', 'core.hooksPath', outside);
+      const r = runSetup(dir);
+      assert.equal(r.status, 0, r.stderr);
+      const hook = fs.readFileSync(path.join(outside, 'pre-commit'), 'utf8');
+      assert.match(hook, /# gh-maestro:sync-rules:v2/);
+      assert.match(hook, /sync-agents-md\.js/);
+    });
+  } finally {
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('死んだ既定フックからgh-maestroブロックだけ撤去し、無関係なユーザーフックの中身は残す', () => {
+  withGitProject((dir) => {
+    fs.mkdirSync(path.join(dir, '.git', 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.git', 'hooks', 'pre-commit'), [
+      '#!/bin/sh',
+      '# gh-maestro:sync-rules:v1',
+      'node "/x/sync-rules.js"',
+      '',
+      '# user-hook',
+      'echo keep-me',
+    ].join('\n') + '\n', 'utf8');
+    // アクティブ置き場を別の git 無視対象ディレクトリへ切り替える
+    fs.mkdirSync(path.join(dir, '.githooks-active'), { recursive: true });
+    fs.appendFileSync(path.join(dir, '.gitignore'), '.githooks-active/\n');
+    gitIn(dir, 'add', '.gitignore');
+    gitIn(dir, 'commit', '-qm', 'ignore');
+    gitIn(dir, 'config', 'core.hooksPath', '.githooks-active');
+
+    const r = runSetup(dir);
+    assert.equal(r.status, 0, r.stderr);
+
+    const pc = fs.readFileSync(path.join(dir, '.git', 'hooks', 'pre-commit'), 'utf8');
+    assert.doesNotMatch(pc, /gh-maestro:sync-rules/);
+    assert.match(pc, /echo keep-me/);
   });
 });
 
