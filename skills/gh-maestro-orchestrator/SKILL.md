@@ -613,15 +613,14 @@ echo $PENDING_ISSUE > $WORKSPACE/.gh-maestro/pending-$PR
 上記でゼロ件だったときに限り作成する。
 
 ```sh
-node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-draft.md --stdin <<'EOF'
-PRレビューのトリアージで保留判定されたSUGGESTION一覧。BLOCKERがゼロになったら人間に提示する。
-EOF
-
-node "{{SCRIPTS_PATH}}/create-issue.js" --title "保留SUGGESTION" \
-  --body-file /tmp/issue-draft.md --workspace $WORKSPACE
-# 出力された番号を PENDING_ISSUE として使い、gh issue edit で gh-maestro-pending ラベルを付ける
-gh issue edit $PENDING_ISSUE --repo $REPO --add-label gh-maestro-pending
-echo $PENDING_ISSUE > $WORKSPACE/.gh-maestro/pending-$PR
+if [ -z "$PENDING_ISSUE" ]; then
+  PENDING_ISSUE=$(gh issue create --repo $REPO \
+    --title "保留SUGGESTION" \
+    --body "PRレビューのトリアージで保留判定されたSUGGESTION一覧。BLOCKERがゼロになったら人間に提示する。" \
+    --label "gh-maestro-pending" \
+    --jq '.number')
+  echo $PENDING_ISSUE > $WORKSPACE/.gh-maestro/pending-$PR
+fi
 ```
 
 ### 保留Issueへの追記
@@ -639,18 +638,11 @@ gh issue comment $PENDING_ISSUE --repo $REPO \
 
 ```sh
 # 対応する項目をグループ化して新規Issueとして切り出す
-# 本文は write-draft.js で書き出し、create-issue.js（gh issue create の唯一の呼び出し口）で作成する
-node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-draft.md --stdin <<'EOF'
-## 概要（人間向け）
-
-Issue #<保留Issue番号> の保留項目から切り出し。
-
-<切り出した内容>
-EOF
-
-node "{{SCRIPTS_PATH}}/create-issue.js" --title "<切り出した対応内容の要約>" \
-  --body-file /tmp/issue-draft.md --workspace $WORKSPACE
-# 出力: ISSUE_CREATED:<番号> <URL>　→ この番号を NEW_ISSUE として使う
+NEW_ISSUE=$(gh issue create --repo $REPO \
+  --title "<切り出した対応内容の要約>" \
+  --body "Issue #$PENDING_ISSUE の保留項目から切り出し。
+- <path>:<line> — <内容>" \
+  --jq '.number')
 
 # 保留Issue側には、切り出し済みである旨をコメントで残す（削除はしない）
 gh issue comment $PENDING_ISSUE --repo $REPO \
