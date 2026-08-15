@@ -10,6 +10,9 @@ const msgPoll = require('../scripts/msg-poll');
 const readStateLib = require('../scripts/shared/read-state');
 const { spawnSync } = require('../scripts/child-process');
 const { cleanSpawnEnv } = require('./_spawn-env');
+const workerLease = require('../scripts/shared/worker-lease');
+
+workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
