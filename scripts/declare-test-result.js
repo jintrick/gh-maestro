@@ -172,8 +172,10 @@ function declareTestResult({ pr, commit, fail, pass, repo, workspace }, deps = {
 
   const fullBody = buildCommentBody({ commit: trimmedCommit, failCount, passCount });
 
-  // 4. 既存の申告コメント検索
-  const existingComment = comments.find(c => c && typeof c.body === 'string' && c.body.includes(TEST_RESULT_MARKER));
+  // 4. 既存の申告コメント検索（最新のコメントを対象にするため末尾から検索）
+  const existingComment = Array.isArray(comments)
+    ? [...comments].reverse().find(c => c && typeof c.body === 'string' && c.body.includes(TEST_RESULT_MARKER))
+    : undefined;
 
   if (existingComment) {
     // PATCH 更新

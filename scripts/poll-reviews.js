@@ -87,6 +87,7 @@ function extractTestDeclaration(body) {
  *
  * 判定ルール:
  * - declaration なし → NONE
+ * - headSha が空/未定義（PRのHEAD SHAが照合不能） → NONE
  * - SHAが一致しない（headShaと異なるコミットに対して実行された結果） → STALE
  * - SHAが一致し、fail === 0 → GREEN
  * - SHAが一致し、fail > 0 → RED
@@ -97,21 +98,34 @@ function extractTestDeclaration(body) {
  */
 function evaluateTestDeclaration(declaration, headSha) {
   if (!declaration) {
-    return { status: 'NONE', headSha };
+    return { status: 'NONE', headSha: headSha || undefined };
   }
   const declSha = declaration.commit;
+  const cleanHeadSha = typeof headSha === 'string' ? headSha.trim() : '';
+
+  // headSha が空の場合は照合不能のため STALE ではなく NONE として扱う
+  if (!cleanHeadSha) {
+    return {
+      status: 'NONE',
+      declaredSha: declSha,
+      headSha: undefined,
+      fail: declaration.fail,
+      pass: declaration.pass,
+    };
+  }
+
   // full SHA vs short SHA のプレフィックス一致、または完全一致を判定
-  const isMatch = headSha && declSha && (
-    headSha === declSha ||
-    headSha.startsWith(declSha) ||
-    declSha.startsWith(headSha)
+  const isMatch = declSha && (
+    cleanHeadSha === declSha ||
+    cleanHeadSha.startsWith(declSha) ||
+    declSha.startsWith(cleanHeadSha)
   );
 
   if (!isMatch) {
     return {
       status: 'STALE',
       declaredSha: declSha,
-      headSha,
+      headSha: cleanHeadSha,
       fail: declaration.fail,
       pass: declaration.pass,
     };
@@ -121,7 +135,7 @@ function evaluateTestDeclaration(declaration, headSha) {
     return {
       status: 'GREEN',
       declaredSha: declSha,
-      headSha,
+      headSha: cleanHeadSha,
       fail: declaration.fail,
       pass: declaration.pass,
     };
@@ -130,7 +144,7 @@ function evaluateTestDeclaration(declaration, headSha) {
   return {
     status: 'RED',
     declaredSha: declSha,
-    headSha,
+    headSha: cleanHeadSha,
     fail: declaration.fail,
     pass: declaration.pass,
   };
@@ -253,7 +267,6 @@ if (require.main === module) {
   }
 
   const inlineJq = `.[] | [(.id | tostring), .path, ((.original_line // "?") | tostring), .user.login, (.body | gsub("\\n"; " "))] | join("|")`;
-  const commentsJq = `.comments[] | [(.id | tostring), .author.login, (.body | gsub("\\n"; " "))] | join("|")`;
   const reviewsJq = `.[] | [(.id | tostring), .user.login, .state, (.body | gsub("\\n"; " "))] | join("|")`;
 
   // GitHubアクセスの失敗をサイレントに握り潰さない。stderr は Monitor に拾われるとは限らないため、
@@ -281,14 +294,14 @@ if (require.main === module) {
       }
 
       const prJson = ghCapture(['pr', 'view', pr, '--repo', repo,
-        '--json', 'state,headRefOid', '-q', '[.state, .headRefOid] | join("|")']);
+        '--json', 'state,headRefOid,author', '-q', '[.state, .headRefOid, (.author.login // "")] | join("|")']);
       // PR状態が取れないサイクルは以降を丸ごとスキップ（誤った差分検知・中継を防ぐ）。
       if (prJson === null) {
         noteCycleResult(true);
         await new Promise(r => setTimeout(r, intervalSec * 1000));
         continue;
       }
-      const [state, headSha] = prJson.trim().split('|');
+      const [state, headSha, prAuthor] = prJson.trim().split('|');
 
       if (state === 'MERGED') {
         process.stdout.write(`PR_MERGED:${pr}\n`);
@@ -333,10 +346,17 @@ if (require.main === module) {
           commentsList = parsed.comments || [];
         } catch {}
 
-        // 最新のテスト結果申告コメントを逆順で検索
+        // 最新のテスト結果申告コメントを逆順で検索。
+        // 第三者による偽の申告捏造（Issue #209）を防ぐため、PR作成者または権限保持者のコメントのみを採用する。
+        const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
         let latestDecl = null;
         for (let i = commentsList.length - 1; i >= 0; i--) {
           const c = commentsList[i];
+          const commentAuthor = c.author && c.author.login;
+          const isPrAuthor = prAuthor && commentAuthor && commentAuthor === prAuthor;
+          const isPrivileged = c.authorAssociation && TRUSTED_ASSOCIATIONS.has(c.authorAssociation);
+          if (!isPrAuthor && !isPrivileged) continue;
+
           const decl = extractTestDeclaration(c.body);
           if (decl) {
             latestDecl = decl;

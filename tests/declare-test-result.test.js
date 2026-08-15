@@ -154,6 +154,40 @@ test('declareTestResult: 既存の申告コメントあり → PATCH 更新す�
   assert.ok(updatedBody.includes('pass (fail: 0, pass: 50)'));
 });
 
+test('declareTestResult: 複数の申告コメントが存在する場合、最新（末尾）のコメントを PATCH 更新する', () => {
+  let updatedCommentId = null;
+  const oldDecl = {
+    id: 1001,
+    body: `${MARKER}\n### 🧪 テスト結果申告\n- **対象コミット**: \`1111111\`\n- **結果**: fail (fail: 1)`,
+    html_url: 'https://github.com/owner/repo/pull/42#issuecomment-1001',
+  };
+  const newDecl = {
+    id: 1002,
+    body: `${MARKER}\n### 🧪 テスト結果申告\n- **対象コミット**: \`2222222\`\n- **結果**: pass (fail: 0)`,
+    html_url: 'https://github.com/owner/repo/pull/42#issuecomment-1002',
+  };
+
+  const result = declareTestResult(
+    { pr: '42', commit: '3333333333', fail: 0, pass: 10, repo: 'owner/repo' },
+    {
+      ghRepoViewFn: () => ({ status: 0, stdout: 'owner/repo\n', stderr: '' }),
+      ghListCommentsFn: () => ({ status: 0, stdout: JSON.stringify([oldDecl, { id: 1005, body: 'other' }, newDecl]), stderr: '' }),
+      ghUpdateCommentFn: (commentId, repo, body) => {
+        updatedCommentId = commentId;
+        return {
+          status: 0,
+          stdout: JSON.stringify({ id: commentId, html_url: `https://github.com/owner/repo/pull/42#issuecomment-${commentId}` }),
+          stderr: '',
+        };
+      },
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.action, 'updated');
+  assert.equal(updatedCommentId, 1002);
+});
+
 // ── CLI main() ─────────────────────────────────────────────────────────────
 
 test('main: --help は終了コード0で usage を返す', () => {

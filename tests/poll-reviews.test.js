@@ -66,6 +66,38 @@ test('evaluateTestDeclaration: 申告なし → NONE', () => {
   assert.deepEqual(res, { status: 'NONE', headSha: 'a1b2c3d4e5' });
 });
 
+test('evaluateTestDeclaration: headSha が空文字/空白/null/undefined の場合は STALE ではなく NONE（照合不能扱い）', () => {
+  const decl = { commit: 'a1b2c3d', fail: 0, pass: 100 };
+  assert.deepEqual(evaluateTestDeclaration(decl, ''), {
+    status: 'NONE',
+    declaredSha: 'a1b2c3d',
+    headSha: undefined,
+    fail: 0,
+    pass: 100,
+  });
+  assert.deepEqual(evaluateTestDeclaration(decl, '   '), {
+    status: 'NONE',
+    declaredSha: 'a1b2c3d',
+    headSha: undefined,
+    fail: 0,
+    pass: 100,
+  });
+  assert.deepEqual(evaluateTestDeclaration(decl, null), {
+    status: 'NONE',
+    declaredSha: 'a1b2c3d',
+    headSha: undefined,
+    fail: 0,
+    pass: 100,
+  });
+  assert.deepEqual(evaluateTestDeclaration(decl, undefined), {
+    status: 'NONE',
+    declaredSha: 'a1b2c3d',
+    headSha: undefined,
+    fail: 0,
+    pass: 100,
+  });
+});
+
 test('evaluateTestDeclaration: コミット不一致（push後未申告） → STALE', () => {
   const decl = { commit: '1111111', fail: 0, pass: 100 };
   const res = evaluateTestDeclaration(decl, '2222222');
@@ -87,6 +119,13 @@ test('evaluateTestDeclaration: コミット一致 かつ fail > 0 → RED', () =
   const res = evaluateTestDeclaration(decl, 'a1b2c3d4e5f6');
   assert.equal(res.status, 'RED');
   assert.equal(res.fail, 1);
+});
+
+test('extractTestDeclaration: 形式不正や欠落のあるコメントを安全に弾く', () => {
+  assert.equal(extractTestDeclaration('<!-- gh-maestro-test-result:v1 -->\n対象コミットなし'), null);
+  assert.equal(extractTestDeclaration('<!-- gh-maestro-test-result:v1 -->\n- **対象コミット**: `1234567`\n- 結果: 不明'), null);
+  assert.equal(extractTestDeclaration({}), null);
+  assert.equal(extractTestDeclaration(123), null);
 });
 
 // ── CLI: workspace 解決（サブプロセス経由） ─────────────────────────────────
