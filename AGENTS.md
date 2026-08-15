@@ -86,6 +86,21 @@ A runaway loop inside a headless process is the worst failure mode this system h
 - Where a bound genuinely must live inside a process, it is enforced by deterministic code (a count or a deadline), never by the model's discretion.
 - Bounded, non-agentic retries around a single transient I/O operation (a file rename, one HTTP request) are not what this rule is about. The rule targets loops that re-run agent work.
 
+## Stopping Is A Human Or Orchestrator Decision, Never A Mechanism
+
+**Never gate commit, push, or merge on an automated check.** No pre-commit/pre-push hook that runs the test suite, no CI workflow that must pass, no branch protection rule that blocks merging. The orchestrator and the human decide when work stops. Machinery reports facts; it does not hold the gate.
+
+This is a design principle, not a preference, and it has been re-learned the hard way several times:
+
+- **Environment drift makes a second test run a different test run.** A hook or CI runs with different environment variables than the coder's own session, so a suite that is green in the coder's worktree can fail there. A coder told to fix a failure it cannot reproduce has nothing to converge on. This has happened: a coder spent 70 minutes trying to fix a test that was never broken in its own environment.
+- **Blocking push traps the coder.** A coder cannot finish its work without pushing. Gate the push and it cannot complete, cannot report, and loops — the failure mode described in "Headless Retry Is An Anti-Pattern".
+- **Blocking merge traps the human.** A branch protection rule that refuses a red merge also refuses the urgent fix that would make it green.
+- The pre-push test hook was introduced and then removed for exactly these reasons (plus hook environment variables leaking into tests and reaching the real repository, Issue #283). Do not reintroduce it in a new form.
+
+The replacement pattern is **declare and inspect, never re-run and block**: whoever ran the tests reports the result together with the commit it applies to, and the orchestrator surfaces that record — present, absent, or stale — without interpreting it. Nothing re-runs the suite, so no environment drift is possible, and nothing is ever mechanically refused.
+
+This also means the orchestrator must not launder a judgement into a fact. "That failure is unrelated to this change" is a judgement and must never gate a merge presentation.
+
 ## Change Discipline
 
 - Prefer existing project patterns over new abstractions.
