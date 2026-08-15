@@ -398,13 +398,18 @@ function hooksDirNeedsVerification(dir) {
 // フック本文が「実行される内容」として規約同期を満たしているかを検証し、
 // 欠けている項目のラベルを返す。マーカーの有無やパス形式（絶対/相対）は問わず、
 // 実際の呼び出しが存在するかで判定する（追跡下の手書きフックはマーカー無し・相対パス）。
+// 文字列の部分一致だけでなく、コメント行（# 始まり・シバン）を除外したうえで各呼び出しが
+// 「行頭の実行コマンド」として存在するかを確認する。部分一致だけだと、コメントや
+// `echo sync-rules.js` のような実行されない文でも「導入済み」と誤報告してしまう
+// （この Issue が直そうとしている欠陥を、検証側で別の形で再現しないため）。
 function verifySyncInvocations(content) {
   const checks = [
-    { label: 'sync-rules 呼び出し', re: /sync-rules\.js/ },
-    { label: 'sync-agents-md 呼び出し', re: /sync-agents-md\.js/ },
-    { label: '同期結果のコミット反映（git add CLAUDE.md）', re: /git add CLAUDE\.md/ },
+    { label: 'sync-rules 呼び出し', re: /^\s*node\s+["']?[^"'\n]*sync-rules\.js\b/ },
+    { label: 'sync-agents-md 呼び出し', re: /^\s*node\s+["']?[^"'\n]*sync-agents-md\.js\b/ },
+    { label: '同期結果のコミット反映（git add CLAUDE.md）', re: /^\s*git\s+add\s+CLAUDE\.md\b/ },
   ];
-  return checks.filter(c => !c.re.test(content)).map(c => c.label);
+  const executableLines = content.split('\n').filter(l => l.trim() !== '' && !l.trim().startsWith('#'));
+  return checks.filter(c => !executableLines.some(l => c.re.test(l))).map(c => c.label);
 }
 
 // シバン行を除いて本文が空白のみ（実コマンドが1行も無い）なら、廃止後に残った抜け殻と判定。
@@ -436,10 +441,10 @@ function reportManualSyncBlock(hookPath) {
   );
 }
 
-function ensureSyncHook(hooksDir) {
+function ensureSyncHook(hooksDir, verifyOnly) {
   const hookPath = resolve(hooksDir, 'pre-commit');
 
-  if (hooksDirNeedsVerification(hooksDir)) {
+  if (verifyOnly) {
     // 共有リスク → 書き込まず、実行される内容として必要な呼び出しが揃っているかを検証報告。
     if (!existsSync(hookPath)) {
       console.warn('  [warn] pre-commit hook (sync): 未導入です（ファイルがありません）。');
@@ -553,9 +558,12 @@ function main() {
   ensureGitIgnore();
   ensureDevBranch();
   // 実効フック置き場を一度だけ解決し、設置・撤去・後始末の各処理が同じ場所を扱う。
+  // 管理対象（書き込まない契約）の置き場では retireChecksHooks も実行しない——
+  // 追跡対象の pre-push を書き換え・削除してはいけない（レビュー指摘への対応）。
   const hooksDir = resolveHooksDir();
-  ensureSyncHook(hooksDir);
-  retireChecksHooks(hooksDir);
+  const verifyOnly = hooksDirNeedsVerification(hooksDir);
+  ensureSyncHook(hooksDir, verifyOnly);
+  if (!verifyOnly) retireChecksHooks(hooksDir);
   removeStaleDefaultHooks(hooksDir);
 
   if (firstRun) {

@@ -329,6 +329,87 @@ test('死んだ既定フックからgh-maestroブロックだけ撤去し、無�
   });
 });
 
+test('管理対象のフック置き場では、追跡下のpre-pushを書き換え・削除しない（retireChecksHooksを実行しない）', () => {
+  withGitProject((dir) => {
+    fs.mkdirSync(path.join(dir, '.githooks'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.githooks', 'pre-commit'), [
+      '#!/bin/sh',
+      "if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then",
+      '  node scripts/sync-rules.js || exit 1',
+      'fi',
+      "if git diff --cached --name-only | grep -q '^AGENTS\\.md$'; then",
+      '  node scripts/sync-agents-md.js || exit 1',
+      '  git add CLAUDE.md || exit 1',
+      'fi',
+      '',
+    ].join('\n'), 'utf8');
+    const prePushContent = [
+      '#!/bin/sh',
+      '# gh-maestro:checks:v1',
+      'node "/somewhere/run-checks.js" prepush || exit 1',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(dir, '.githooks', 'pre-push'), prePushContent, 'utf8');
+    gitIn(dir, 'add', '.githooks');
+    gitIn(dir, 'commit', '-qm', 'track githooks');
+    gitIn(dir, 'config', 'core.hooksPath', '.githooks');
+
+    const r = runSetup(dir);
+    assert.equal(r.status, 0, r.stderr);
+
+    // 管理対象（書き込まない契約）の置き場では追跡下の pre-push が不変のまま残る
+    assert.equal(fs.existsSync(path.join(dir, '.githooks', 'pre-push')), true);
+    assert.equal(fs.readFileSync(path.join(dir, '.githooks', 'pre-push'), 'utf8'), prePushContent);
+  });
+});
+
+test('同期呼び出しがコメント内だけにある追跡下フックは「導入済み」と誤報告しない', () => {
+  withGitProject((dir) => {
+    fs.mkdirSync(path.join(dir, '.githooks'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.githooks', 'pre-commit'), [
+      '#!/bin/sh',
+      '# node scripts/sync-rules.js',
+      '# node scripts/sync-agents-md.js && git add CLAUDE.md',
+      'echo custom-hook',
+      '',
+    ].join('\n'), 'utf8');
+    gitIn(dir, 'add', '.githooks');
+    gitIn(dir, 'commit', '-qm', 'track githooks');
+    gitIn(dir, 'config', 'core.hooksPath', '.githooks');
+
+    const r = runSetup(dir);
+    assert.equal(r.status, 0, r.stderr);
+
+    // 実行されない内容を「導入済み」と報告しない
+    assert.doesNotMatch(r.stdout, /tracked; untouched/);
+    assert.match(r.stderr, /未導入/);
+    // 追跡下フックは書き換えない
+    assert.match(fs.readFileSync(path.join(dir, '.githooks', 'pre-commit'), 'utf8'), /# node scripts\/sync-rules\.js/);
+  });
+});
+
+test('同期呼び出しがecho等の実行されない文として現れるだけでは導入済みと誤報告しない', () => {
+  withGitProject((dir) => {
+    fs.mkdirSync(path.join(dir, '.githooks'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.githooks', 'pre-commit'), [
+      '#!/bin/sh',
+      'echo "node scripts/sync-rules.js"',
+      'echo node scripts/sync-agents-md.js',
+      'echo "git add CLAUDE.md"',
+      '',
+    ].join('\n'), 'utf8');
+    gitIn(dir, 'add', '.githooks');
+    gitIn(dir, 'commit', '-qm', 'track githooks');
+    gitIn(dir, 'config', 'core.hooksPath', '.githooks');
+
+    const r = runSetup(dir);
+    assert.equal(r.status, 0, r.stderr);
+
+    assert.doesNotMatch(r.stdout, /tracked; untouched/);
+    assert.match(r.stderr, /未導入/);
+  });
+});
+
 // ── require.main ガード ───────────────────────────────────────────────────────
 // 実障害: 動作確認のつもりで require され、git hooks が書き換わった。
 // このスクリプトは gh api DELETE（旧CIファイル削除）まで走りうるため、
