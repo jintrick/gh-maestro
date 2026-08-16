@@ -432,6 +432,23 @@ test('ensureResidentDaemon: 原子的予約 - 2プロセスが同時に予約を
   assert.equal(reserved3, false, '予約直後はクールダウン中で拒否される');
 });
 
+test('ensureResidentDaemon: stale ロックファイル（10秒超）は自動回収され予約が成功する', () => {
+  const attemptName = 'stale-lock';
+  const lockFile = autostartLockPath(workspace, attemptName);
+
+  fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(lockFile, 'stale', 'utf8');
+
+  // mtime を 15 秒前に設定
+  const past = (Date.now() - 15000) / 1000;
+  fs.utimesSync(lockFile, past, past);
+
+  // stale ロックが回収されて予約に成功する
+  const reserved = tryReserveAutostartAttempt(workspace, attemptName);
+  assert.equal(reserved, true, 'stale ロックは回収されて予約成功する');
+  assert.ok(fs.existsSync(autostartAttemptPath(workspace, attemptName)));
+});
+
 // ── レビュー指摘 【2】: lease拒否シナリオ & 起動直後の異常終了シナリオ ────────
 
 test('ensureResidentDaemon: lease拒否シナリオ - spawnされた子がlease取得に失敗して即自滅した場合、次回のensure呼び出しはクールダウンで抑制される', () => {
