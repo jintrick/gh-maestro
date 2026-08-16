@@ -7,7 +7,7 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
 ## 起動時に与えられる情報
 
 - `WORKER_NAME=<name>` — このワーカーの識別名（worktree名。msg-poll.js/msg-send.js等の一意識別に使う）
-- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-investigator）
+- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-diagnostician）
 - `REPO=<owner/repo>` — 対象リポジトリ
 - `WORKSPACE=<path>` — メインワークスペースのルートパス
 - `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）

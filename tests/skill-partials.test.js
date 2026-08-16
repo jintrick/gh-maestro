@@ -2,7 +2,7 @@
 // skill-partials.test.js
 //
 // 共通部分テンプレート（skills/_partials/*.md）の設計を保護する。
-// ワーカースキルの通信ルールが各SKILL.mdへ重複コピペされていた drift 問題（investigator
+// ワーカースキルの通信ルールが各SKILL.mdへ重複コピペされていた drift 問題（diagnostician
 // だけ環境変数の例示が古いスキル名のまま残っていた）を単一ソース化で解消した経緯の回帰防止。
 
 const { test } = require('node:test');
@@ -19,7 +19,7 @@ const WORKER_SKILLS = [
   'gh-maestro-coder',
   'gh-maestro-senior-coder',
   'gh-maestro-explorer',
-  'gh-maestro-investigator',
+  'gh-maestro-diagnostician',
   'gh-maestro-base',
 ];
 

@@ -228,11 +228,11 @@ test('resolveWorkerName: issue+skill が一意に決まれば workerName を返�
   withTempDir((dir) => {
     writeWorkers(dir, {
       orchestrator: { agentId: null },
-      'issue-42-investigate': { pid: 10, agentId: 'reasonix', issue: 42, skill: 'gh-maestro-investigator' },
+      'issue-42-investigate': { pid: 10, agentId: 'reasonix', issue: 42, skill: 'gh-maestro-diagnostician' },
       'issue-42-implement': { pid: 11, agentId: 'claude-ds', issue: 42, skill: 'gh-maestro-coder' },
     });
     assert.equal(resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }), 'issue-42-implement');
-    assert.equal(resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-investigator' }), 'issue-42-investigate');
+    assert.equal(resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-diagnostician' }), 'issue-42-investigate');
   });
 });
 

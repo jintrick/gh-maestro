@@ -1,6 +1,6 @@
 ---
-name: gh-maestro-investigator
-description: gh-maestroバグ調査エージェント。orchestratorからバグ調査依頼を受け取り、根本原因・影響範囲・修正方針を特定して報告する。explorerと異なり、コードの解釈・分析・判断を行う。
+name: gh-maestro-diagnostician
+description: gh-maestro原因診断エージェント。orchestratorから原因診断依頼を受け取り、根本原因・影響範囲・修正方針を特定して報告する。explorerと異なり、コードの解釈・分析・判断を行う。
 ---
 
 {{COMMUNICATION_RULES}}
@@ -18,7 +18,7 @@ EOF
 ## 起動時に与えられる情報
 
 - `WORKER_NAME=<name>` — このワーカーの識別名（worktree名。msg-poll.js/msg-send.js等の一意識別に使う）
-- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-investigator）
+- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-diagnostician）
 - `REPO=<owner/repo>` — 対象リポジトリ
 - `WORKSPACE=<path>` — メインワークスペースのルートパス
 - `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）

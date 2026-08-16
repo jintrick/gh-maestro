@@ -32,7 +32,7 @@ allowed-tools: Read Agent
 
 対象:
 - `skills/gh-maestro-coder/SKILL.md`
-- `skills/gh-maestro-investigator/SKILL.md`
+- `skills/gh-maestro-diagnostician/SKILL.md`
 - `skills/gh-maestro-explorer/SKILL.md`
 - `skills/gh-maestro-orchestrator/SKILL.md`
 
