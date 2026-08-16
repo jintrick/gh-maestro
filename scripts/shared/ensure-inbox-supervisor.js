@@ -31,34 +31,23 @@
 // 自動起動をスキップする。移行中に復活すると、移行先の空状態で記録を上書きしかける
 // 事故が実際に起きたため（Issue #256）。マーカーの作成・削除は migrate-records.js が行う。
 //
+// 自動復活の有界化（Issue #303 / PR #302 同型）: この関数は spawn-worker.js と msg-send.js の
+// 通常処理から繰り返し呼ばれるため、inbox-supervisor が復活できない状態（自滅・lease拒否等）では
+// 無制限にプロセスとログが増加してしまう。そこで .gh-maestro/inbox-supervisor-autostart-attempt.json に
+// 最後に spawn を試みた時点を記録し、クールダウン中（既定5分）の再試行をスキップする。
+// 共通基盤 ensure-resident-daemon.js 経由で一本化。
+//
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
-const fs = require('fs');
-const path = require('path');
-const { spawn } = require('../child-process');
-const { isResidentLeaseLive, INBOX_SUPERVISOR_ROLE } = require('./worker-lease');
-const { isMigrationInProgress } = require('./migration-marker');
+const { INBOX_SUPERVISOR_ROLE } = require('./worker-lease');
+const {
+  ensureResidentDaemon,
+  createDaemonHooks,
+  AUTOSTART_COOLDOWN_MS,
+} = require('./ensure-resident-daemon');
 
-// process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。CLI 主経路
-// （require.main === module）から sweepRegistry 経由でこのモジュールが require される
-// 可能性を踏まえ、評価時に捕捉すると module.exports 未確定の undefined を掴むため、
-// 最初の呼び出し時まで解決を遅らせる。テスト注入（_set*）は注入値が優先される。
-let _injectedFindSessionRootPid = null;
-let _injectedFindRunningInstance = null;
-
-function _findSessionRootPid() {
-  const fn = _injectedFindSessionRootPid ?? require('../process-lifecycle').findSessionRootPid;
-  return fn();
-}
-
-function _findRunningInstance(workspace, opts) {
-  const fn = _injectedFindRunningInstance ?? require('../process-lifecycle').findRunningInstance;
-  return fn(workspace, opts);
-}
-
-let _spawn = (cmd, args, opts) => spawn(cmd, args, opts);
-let _isResidentLeaseLive = isResidentLeaseLive;
+const hooks = createDaemonHooks();
 
 /**
  * inbox-supervisor.js が稼働していなければ、detachedプロセスとして自動起動を試みる。
@@ -69,66 +58,27 @@ let _isResidentLeaseLive = isResidentLeaseLive;
  * @param {string} params.scriptsPath - inbox-supervisor.js が置かれているディレクトリ
  */
 function ensureInboxSupervisorRunning({ workspace, scriptsPath }) {
-  if (!workspace || !scriptsPath) return;
-
-  // migrate-records.js の移行実行中（マーカーファイル存在中）は自動起動を見送る。
-  // 移行中に復活すると移行先の空状態で記録を上書きしかけるため（Issue #256）。
-  // 既存の live 判定と同様、起動を見送るだけで例外は投げない。
-  if (isMigrationInProgress(workspace)) return;
-
-  try {
-    if (_findRunningInstance(workspace, { script: 'inbox-supervisor.js', workerName: null })) {
-      return; // 既に稼働中 → spawn・セッションPID解決とも不要
-    }
-    // registry に無くても role lease が live なら二重起動を避けて spawn しない。
-    // lease が排他の正本（Issue #240）。workspace 表記の差異は role lease 側の正規化で吸収される。
-    if (_isResidentLeaseLive({ workspace, role: INBOX_SUPERVISOR_ROLE })) {
-      return;
-    }
-  } catch {
-    // 判定失敗時はfail-openで従来通りspawnを試みる（多重起動はinbox-supervisor.js自身のlease取得が防ぐ）
-  }
-
-  let logFd;
-  try {
-    const ghDir = path.join(workspace, '.gh-maestro');
-    fs.mkdirSync(ghDir, { recursive: true });
-    logFd = fs.openSync(path.join(ghDir, 'inbox-supervisor-autostart.log'), 'a');
-
-    const args = [
-      path.join(scriptsPath, 'inbox-supervisor.js'),
-      '--workspace', workspace,
-    ];
-
-    try {
-      const sessionPid = _findSessionRootPid();
-      if (Number.isFinite(sessionPid) && sessionPid > 0) {
-        args.push('--session-pid', String(sessionPid));
-      }
-    } catch {
-      // 解決失敗時は従来通り子プロセス側の自動検出にフォールバックする
-    }
-
-    const child = _spawn(process.execPath, args, {
-      detached: true,
-      windowsHide: true,
-      stdio: ['ignore', logFd, logFd],
-    });
-    child.on('error', () => {});
-    child.unref();
-  } catch {
-    // best-effort起動なので失敗しても呼び出し元の処理は継続する
-  } finally {
-    if (logFd !== undefined) {
-      try { fs.closeSync(logFd); } catch {}
-    }
-  }
+  ensureResidentDaemon({
+    workspace,
+    scriptsPath,
+    scriptName: 'inbox-supervisor.js',
+    role: INBOX_SUPERVISOR_ROLE,
+    logFileName: 'inbox-supervisor-autostart.log',
+    attemptName: 'inbox-supervisor',
+    buildArgs: ({ workspace: ws, sessionPid }) => {
+      const args = ['--workspace', ws];
+      if (sessionPid) args.push('--session-pid', String(sessionPid));
+      return args;
+    },
+    hooks,
+  });
 }
 
 module.exports = {
   ensureInboxSupervisorRunning,
-  _setSpawn: (fn) => { _spawn = fn; },
-  _setFindSessionRootPid: (fn) => { _injectedFindSessionRootPid = fn; },
-  _setFindRunningInstance: (fn) => { _injectedFindRunningInstance = fn; },
-  _setIsResidentLeaseLive: (fn) => { _isResidentLeaseLive = fn; },
+  AUTOSTART_COOLDOWN_MS,
+  _setSpawn: hooks.setSpawn,
+  _setFindSessionRootPid: hooks.setFindSessionRootPid,
+  _setFindRunningInstance: hooks.setFindRunningInstance,
+  _setIsResidentLeaseLive: hooks.setIsResidentLeaseLive,
 };

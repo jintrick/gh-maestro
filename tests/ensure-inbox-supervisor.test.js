@@ -8,7 +8,7 @@ const fs = require('fs');
 const { EventEmitter } = require('events');
 
 const mod = require('../scripts/shared/ensure-inbox-supervisor');
-const { ensureInboxSupervisorRunning } = mod;
+const { ensureInboxSupervisorRunning, AUTOSTART_COOLDOWN_MS } = mod;
 const workerLease = require('../scripts/shared/worker-lease');
 const migrationMarker = require('../scripts/shared/migration-marker');
 const {
@@ -16,11 +16,22 @@ const {
   getProcessStartTime,
   verifyProcessIdentity,
 } = require('../scripts/process-lifecycle');
+const { readAutostartAttempt } = require('../scripts/shared/ensure-resident-daemon');
 
 function fakeChild() {
   const emitter = new EventEmitter();
   emitter.unref = () => {};
   return emitter;
+}
+
+// 自動復活クールダウン（Issue #303）の試行記録ファイルを直接書き込む。
+function attemptPath() {
+  return path.join(workspace, '.gh-maestro', 'inbox-supervisor-autostart-attempt.json');
+}
+
+function writeAttempt(lastAttemptAt) {
+  fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(attemptPath(), JSON.stringify({ lastAttemptAt }), 'utf8');
 }
 
 let workspace;
@@ -217,4 +228,135 @@ test('ensureInboxSupervisorRunning: .gh-maestro/inbox-supervisor-autostart.log �
   ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
   const logPath = path.join(workspace, '.gh-maestro', 'inbox-supervisor-autostart.log');
   assert.ok(fs.existsSync(logPath));
+});
+
+// ── 自動復活の有界化（Issue #303） ──────────────────────────────────────────
+
+test('ensureInboxSupervisorRunning: 直前の試行がクールダウン中なら再試行しない（1回/5分に有界）', () => {
+  // lease 拒否・起動直後の異常終了・spawn 失敗のいずれも「次のトリガー時点では稼働中でない」
+  // としか見えないため、単一のクールダウンに含まれる。
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' }); // 1回目: spawn する
+  assert.equal(spawnCount, 1);
+  assert.ok(fs.existsSync(attemptPath()), '試行記録が残る');
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' }); // クールダウン中: 再試行しない
+  assert.equal(spawnCount, 1);
+});
+
+test('ensureInboxSupervisorRunning: クールダウン期限経過後は再試行する', () => {
+  writeAttempt(Date.now() - (AUTOSTART_COOLDOWN_MS + 1000)); // 期限を超えた試行
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.equal(spawnCount, 1);
+});
+
+test('ensureInboxSupervisorRunning: クールダウンぎりぎり（期限内）は再試行しない', () => {
+  writeAttempt(Date.now() - (AUTOSTART_COOLDOWN_MS - 1000)); // まだ期限内
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.equal(spawnCount, 0);
+});
+
+test('ensureInboxSupervisorRunning: 生存（registry）を観測したら試行記録を消し、以後の試行を妨げない', () => {
+  writeAttempt(Date.now()); // 新鮮な記録 = クールダウンに掛かるはず
+  mod._setFindRunningInstance(() => ({ pid: 777, script: 'inbox-supervisor.js' }));
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.equal(spawnCount, 0);
+  assert.equal(fs.existsSync(attemptPath()), false, '生存観測で試行記録が消える');
+});
+
+test('ensureInboxSupervisorRunning: 生存（role lease live）を観測したら試行記録を消し、以後の試行を妨げない', () => {
+  writeAttempt(Date.now()); // 新鮮な記録 = クールダウンに掛かるはず
+  mod._setFindRunningInstance(() => null);
+  mod._setIsResidentLeaseLive(() => true);
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.equal(spawnCount, 0);
+  assert.equal(fs.existsSync(attemptPath()), false, '生存観測で試行記録が消える');
+});
+
+test('ensureInboxSupervisorRunning: 壊れた試行記録はクールダウンに掛からない（fail-open）', () => {
+  fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(attemptPath(), 'not-json', 'utf8');
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.equal(spawnCount, 1);
+});
+
+test('ensureInboxSupervisorRunning: 未来時刻の試行記録は信頼せず再試行する', () => {
+  writeAttempt(Date.now() + 60 * 1000);
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.equal(spawnCount, 1);
+});
+
+test('ensureInboxSupervisorRunning: spawnが例外を投げても試行記録が残り、次のトリガーはクールダウンで抑制される', () => {
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; throw new Error('boom'); });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' }); // 例外は握りつぶされる
+  assert.equal(spawnCount, 1);
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' }); // クールダウン → 再試行しない
+  assert.equal(spawnCount, 1);
+});
+
+test('ensureInboxSupervisorRunning: 生存判定とクールダウン判定の順序検証（クールダウン中であっても生存観測時は試行記録が消去される）', () => {
+  writeAttempt(Date.now()); // クールダウン中
+  mod._setFindRunningInstance(() => ({ pid: 777, script: 'inbox-supervisor.js' }));
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.equal(fs.existsSync(attemptPath()), false, 'クールダウン中でも生存観測で試行記録が消去される');
+});
+
+test('ensureInboxSupervisorRunning: 呼び出しシーケンス（順序）の厳密検証', () => {
+  const events = [];
+
+  mod._setFindRunningInstance(() => {
+    events.push('runningCheck');
+    return null;
+  });
+
+  mod._setIsResidentLeaseLive(() => {
+    events.push('leaseCheck');
+    return false;
+  });
+
+  mod._setFindSessionRootPid(() => {
+    events.push('resolvePid');
+    return 7777;
+  });
+
+  mod._setSpawn((cmd, args, opts) => {
+    const attempt = readAutostartAttempt(workspace, 'inbox-supervisor');
+    events.push(`spawn(recorded:${attempt !== null})`);
+    return fakeChild();
+  });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.deepEqual(events, [
+    'runningCheck',
+    'leaseCheck',
+    'resolvePid',
+    'spawn(recorded:true)',
+  ]);
 });
