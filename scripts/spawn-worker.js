@@ -43,7 +43,6 @@ const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree')
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
-const { ensureMsgPollOrchestratorRunning } = require('./shared/ensure-msg-poll-orchestrator');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
@@ -680,14 +679,12 @@ try {
   fail(`workers.json への書き込みに失敗しました: ${e.message}`);
 }
 
-// --- inbox-supervisor.js / msg-poll.js(orchestrator) の自動起動保証（best-effort） ---
-// エージェント種別を問わず毎回試みる。稼働中なら各常駐プロセス自身のロックが検知して
-// 即exitするため二重起動にはならない（ensure-inbox-supervisor.js / ensure-msg-poll-orchestrator.js
-// 参照）。orchestrator が手動起動を忘れても配送経路が失われないようにする。msg-poll.js は
-// オーケストレーターセッションの inbox 監視（Issue #301）。実起動は spawn を注入したテスト以外は
+// --- inbox-supervisor.js の自動起動保証（best-effort） ---
+// エージェント種別を問わず毎回試みる。稼働中なら常駐プロセス自身のロックが検知して
+// 即exitするため二重起動にはならない（ensure-inbox-supervisor.js 参照）。orchestrator が
+// 手動起動を忘れても配送経路が失われないようにする。実起動は spawn を注入したテスト以外は
 // NODE_TEST_CONTEXT 検知で拒否されないため、spawn-worker.js はテスト側のモック注入で抑止する。
 ensureInboxSupervisorRunning({ workspace, scriptsPath: __dirname });
-ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: __dirname });
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---
 console.log(workerName);

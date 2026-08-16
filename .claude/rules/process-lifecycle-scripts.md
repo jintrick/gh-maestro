@@ -14,7 +14,6 @@ paths:
   - "scripts/shared/workspace.js"
   - "scripts/shared/storage-layout.js"
   - "scripts/shared/ensure-inbox-supervisor.js"
-  - "scripts/shared/ensure-msg-poll-orchestrator.js"
   - "scripts/shared/ensure-resident-daemon.js"
 ---
 
