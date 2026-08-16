@@ -12,9 +12,11 @@ const {
   createDaemonHooks,
   AUTOSTART_COOLDOWN_MS,
   autostartAttemptPath,
+  autostartLockPath,
   readAutostartAttempt,
   recordAutostartAttempt,
   clearAutostartAttempt,
+  tryReserveAutostartAttempt,
 } = require('../scripts/shared/ensure-resident-daemon');
 const migrationMarker = require('../scripts/shared/migration-marker');
 const {
@@ -334,7 +336,7 @@ test('ensureResidentDaemon: spawn例外時も試行記録が残り、次のト�
 });
 
 test('ensureResidentDaemon: 生存判定とクールダウン判定の順序検証（クールダウン中であっても生存観測時はclearAutostartAttemptされる）', () => {
-  // クールダウン判定を生前判定より前に置いてしまうと、クールダウン中に生存プロセスが立ち上がっても
+  // クールダウン判定を生存判定より前に置いてしまうと、クールダウン中に生存プロセスが立ち上がっても
   // 試行記録が削除されずに早期 return してしまう。この順序不整合を検出する。
   const attemptFile = autostartAttemptPath(workspace, 'daemon-order');
   fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
@@ -356,7 +358,6 @@ test('ensureResidentDaemon: 生存判定とクールダウン判定の順序検�
 });
 
 test('ensureResidentDaemon: 呼び出しシーケンス（順序）の厳密検証', () => {
-  // 順序: migrationCheck -> runningCheck -> leaseCheck -> cooldownCheck -> resolvePid -> recordAttempt -> spawn
   const events = [];
 
   hooks.setIsMigrationInProgress((ws) => {
@@ -380,7 +381,6 @@ test('ensureResidentDaemon: 呼び出しシーケンス（順序）の厳密検�
   });
 
   hooks.setSpawn((cmd, args, opts) => {
-    // spawn 時点ですでに試行記録がファイルに書かれていることを確認
     const attempt = readAutostartAttempt(workspace, 'daemon-seq');
     events.push(`spawn(recorded:${attempt !== null})`);
     return fakeChild();
@@ -403,4 +403,109 @@ test('ensureResidentDaemon: 呼び出しシーケンス（順序）の厳密検�
     'resolvePid',
     'spawn(recorded:true)',
   ]);
+});
+
+// ── レビュー指摘 【1】: 原子的予約（Atomic Reservation）の検証 ────────────────
+
+test('ensureResidentDaemon: 原子的予約 - 2プロセスが同時に予約を試みた場合、1プロセスのみが成功してspawnする', () => {
+  const attemptName = 'atomic-claim';
+  const lockFile = autostartLockPath(workspace, attemptName);
+
+  // 1プロセス目がロックを取得中の状態をシミュレート
+  fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+  const lockFd = fs.openSync(lockFile, 'wx');
+
+  // 2プロセス目が予約を試みる -> ロック取得失敗で false
+  const reserved = tryReserveAutostartAttempt(workspace, attemptName);
+  assert.equal(reserved, false, 'ロック保持中は他の予約は拒否される');
+
+  fs.closeSync(lockFd);
+  fs.unlinkSync(lockFile);
+
+  // ロック解放後 -> 予約に成功する
+  const reserved2 = tryReserveAutostartAttempt(workspace, attemptName);
+  assert.equal(reserved2, true, 'ロック解放後は予約に成功する');
+  assert.ok(fs.existsSync(autostartAttemptPath(workspace, attemptName)));
+
+  // 予約成功直後の2回目 -> クールダウン中で拒否される
+  const reserved3 = tryReserveAutostartAttempt(workspace, attemptName);
+  assert.equal(reserved3, false, '予約直後はクールダウン中で拒否される');
+});
+
+// ── レビュー指摘 【2】: lease拒否シナリオ & 起動直後の異常終了シナリオ ────────
+
+test('ensureResidentDaemon: lease拒否シナリオ - spawnされた子がlease取得に失敗して即自滅した場合、次回のensure呼び出しはクールダウンで抑制される', () => {
+  let spawnCount = 0;
+  hooks.setSpawn(() => {
+    spawnCount += 1;
+    // 子プロセスが起動直後に role lease 取得で競合・拒否されて exit 1 自滅した状況をシミュレート:
+    // registry にも lease にも何も残らない
+    return fakeChild();
+  });
+
+  // 1回目の ensure（例: spawn-worker.js から）: spawn が試みられ、試行が原子的記録される
+  ensureResidentDaemon({
+    workspace,
+    scriptsPath: '/abs/scripts',
+    scriptName: 'supervisor.js',
+    role: 'supervisor-role',
+    logFileName: 'supervisor.log',
+    attemptName: 'supervisor',
+    hooks,
+  });
+  assert.equal(spawnCount, 1);
+
+  // 子プロセスは lease 拒否で自滅したため、生存状態は false のまま
+  hooks.setFindRunningInstance(() => null);
+  hooks.setIsResidentLeaseLive(() => false);
+
+  // 2回目の ensure（例: 直後に別の msg-send.js から）: クールダウンにより再 spawn されない
+  ensureResidentDaemon({
+    workspace,
+    scriptsPath: '/abs/scripts',
+    scriptName: 'supervisor.js',
+    role: 'supervisor-role',
+    logFileName: 'supervisor.log',
+    attemptName: 'supervisor',
+    hooks,
+  });
+  assert.equal(spawnCount, 1, 'lease拒否で自滅しても、クールダウンにより無制限 spawn は抑制される');
+});
+
+test('ensureResidentDaemon: 起動直後の異常終了シナリオ - spawnされた子が親セッション死等で即自滅した場合、次回のensure呼び出しはクールダウンで抑制される', () => {
+  let spawnCount = 0;
+  hooks.setSpawn(() => {
+    spawnCount += 1;
+    // 子プロセスが起動直後に dead-man switch で exit 3 自滅、あるいは例外クラッシュした状況:
+    // 生存状態は false のまま
+    return fakeChild();
+  });
+
+  // 1回目の ensure（例: msg-send.js から）: spawn される
+  ensureResidentDaemon({
+    workspace,
+    scriptsPath: '/abs/scripts',
+    scriptName: 'msg-poll.js',
+    role: 'msgpoll-role',
+    logFileName: 'msg-poll.log',
+    attemptName: 'msg-poll',
+    hooks,
+  });
+  assert.equal(spawnCount, 1);
+
+  // 子プロセスは即自滅したため、生存状態は false
+  hooks.setFindRunningInstance(() => null);
+  hooks.setIsResidentLeaseLive(() => false);
+
+  // 2回目の ensure（例: 次のアクションから）: クールダウンにより再 spawn されない
+  ensureResidentDaemon({
+    workspace,
+    scriptsPath: '/abs/scripts',
+    scriptName: 'msg-poll.js',
+    role: 'msgpoll-role',
+    logFileName: 'msg-poll.log',
+    attemptName: 'msg-poll',
+    hooks,
+  });
+  assert.equal(spawnCount, 1, '起動直後に異常終了しても、クールダウンにより無制限 spawn は抑制される');
 });

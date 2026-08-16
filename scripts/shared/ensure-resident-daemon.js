@@ -12,10 +12,10 @@
 // 2. migrate-records.js の移行実行中（.migration-in-progress）の自動起動スキップ（Issue #256）
 // 3. 稼働中判定（PID registry + role lease live）と二重起動防止
 // 4. 生存観測時の失敗試行記録クリア
-// 5. 自動復活の有界化（クールダウン判定。PR #302 / Issue #303）:
+// 5. 自動復活の有界化と原子的予約（クールダウン判定。PR #302 / Issue #303）:
 //    連続失敗時に呼び出しのたびに子プロセスとログが増え続けるのを防ぐため、
-//    最後に spawn を試みた時点を .gh-maestro/<attemptName>-autostart-attempt.json に記録し、
-//    クールダウン中（既定5分）の再試行をスキップする。
+//    排他ロック下で最後に spawn を試みた時点（.gh-maestro/<attemptName>-autostart-attempt.json）を
+//    原子的に予約更新し、クールダウン中（既定5分）の再試行をスキップする。
 //    破損記録・未来時刻は fail-open で再試行を妨げない。
 // 6. 親セッションPIDの同期解決（呼び出し元生存中の解決。Issue #256 実障害防止）
 // 7. detached + windowsHide + unref + ログファイル管理
@@ -38,6 +38,13 @@ const AUTOSTART_COOLDOWN_MS = 5 * 60 * 1000; // 5分
  */
 function autostartAttemptPath(workspace, attemptName) {
   return path.join(workspace, '.gh-maestro', `${attemptName}-autostart-attempt.json`);
+}
+
+/**
+ * 試行記録ロックファイルのパス。
+ */
+function autostartLockPath(workspace, attemptName) {
+  return path.join(workspace, '.gh-maestro', `${attemptName}-autostart.lock`);
 }
 
 /**
@@ -74,6 +81,65 @@ function recordAutostartAttempt(workspace, attemptName) {
  */
 function clearAutostartAttempt(workspace, attemptName) {
   try { fs.unlinkSync(autostartAttemptPath(workspace, attemptName)); } catch {}
+}
+
+/**
+ * 自動復活の試行を原子的に予約する（Issue #303 レビュー指摘 【1】）。
+ * 排他ロックを取得した上で、既存記録がクールダウン中かを判定し、
+ * クールダウン外であれば新しい時刻で記録を更新して true を返す。
+ * 他プロセスが既に予約済み、またはクールダウン中であれば false を返す。
+ */
+function tryReserveAutostartAttempt(workspace, attemptName) {
+  const ghDir = path.join(workspace, '.gh-maestro');
+  try {
+    fs.mkdirSync(ghDir, { recursive: true });
+  } catch {
+    // best-effort
+  }
+
+  const lockFile = autostartLockPath(workspace, attemptName);
+  const attemptFile = autostartAttemptPath(workspace, attemptName);
+
+  let lockFd;
+  try {
+    try {
+      lockFd = fs.openSync(lockFile, 'wx');
+    } catch (err) {
+      if (err && err.code === 'EEXIST') {
+        // stale lock 回収（10秒以上古いロックは回収）
+        try {
+          const stat = fs.statSync(lockFile);
+          if (Date.now() - stat.mtimeMs > 10000) {
+            try { fs.unlinkSync(lockFile); } catch {}
+            lockFd = fs.openSync(lockFile, 'wx');
+          } else {
+            return false; // 他プロセスが予約処理中
+          }
+        } catch {
+          return false;
+        }
+      } else {
+        return false;
+      }
+    }
+
+    // 排他ロック下で既存試行時刻を検査
+    const lastAttemptAt = readAutostartAttempt(workspace, attemptName);
+    if (lastAttemptAt !== null && Date.now() - lastAttemptAt < AUTOSTART_COOLDOWN_MS) {
+      return false; // クールダウン中
+    }
+
+    // クールダウン外（初回、期限切れ、破損、未来時刻） -> 原子的予約書き込み
+    fs.writeFileSync(attemptFile, JSON.stringify({ lastAttemptAt: Date.now() }), 'utf8');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (lockFd !== undefined) {
+      try { fs.closeSync(lockFd); } catch {}
+      try { fs.unlinkSync(lockFile); } catch {}
+    }
+  }
 }
 
 /**
@@ -151,8 +217,8 @@ function ensureResidentDaemon({
     // 判定失敗時は fail-open で spawn を試みる
   }
 
-  const lastAttemptAt = readAutostartAttempt(workspace, attemptName);
-  if (lastAttemptAt !== null && Date.now() - lastAttemptAt < AUTOSTART_COOLDOWN_MS) {
+  // クールダウン予約を原子的に実行（排他制御下での判定＋記録書き込み。Issue #303）
+  if (!tryReserveAutostartAttempt(workspace, attemptName)) {
     return;
   }
 
@@ -179,8 +245,6 @@ function ensureResidentDaemon({
       : ['--workspace', workspace, ...(sessionPid ? ['--session-pid', String(sessionPid)] : [])];
     const args = [scriptFullPath, ...customArgs];
 
-    recordAutostartAttempt(workspace, attemptName);
-
     const doSpawn = hooks ? hooks.getSpawn() : spawn;
     const child = doSpawn(process.execPath, args, {
       detached: true,
@@ -203,7 +267,9 @@ module.exports = {
   createDaemonHooks,
   AUTOSTART_COOLDOWN_MS,
   autostartAttemptPath,
+  autostartLockPath,
   readAutostartAttempt,
   recordAutostartAttempt,
   clearAutostartAttempt,
+  tryReserveAutostartAttempt,
 };
