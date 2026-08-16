@@ -2128,11 +2128,97 @@ describe('Stale report detection（居座り検知）', () => {
       assert.ok(notifyCalls[0].body.includes('456'));
       assert.ok(notifyCalls[0].body.includes('未コミット変更'), '未コミット変更の確認を促す文言が含まれること');
       assert.ok(!notifyCalls[0].body.includes('必要ならプロセスを終了してください'), '断定的な終了指示が含まれないこと');
+      assert.ok(/投稿から .+ 経過/.test(notifyCalls[0].body), '経過時間の表示が含まれること');
 
       const state = supervisor.readCursor(dir, 'issue-5-fix');
       assert.equal(state.staleReportNotifiedPid, 456);
       assert.equal(state.staleReportNotifiedStartTime, START_TIME, '重複排除キーに起動時刻も記録されること');
       assert.ok(typeof state.staleReportNotifiedAt === 'string');
+    });
+  });
+
+  test('居座り通知本文に報告投稿からの経過時間が人間可読形式で含まれる', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    // 起動時刻の5分後に投稿された報告コメント
+    supervisor._setGhApiComments(mockGhApiComments([reportComment({ createdAt: '2026-07-25T00:05:00Z' })]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.equal(notifyCalls.length, 1);
+      assert.ok(notifyCalls[0].body.includes('⚠️ ワーカー "issue-5-fix" は既に報告を投稿済み'));
+      assert.ok(notifyCalls[0].body.includes('経過）ですが、プロセス（PID 456）が生存しています'));
+      assert.match(notifyCalls[0].body, /投稿から \d+(秒|分\d+秒|時間\d+分\d+秒) 経過/);
+    });
+  });
+
+  test('居座り通知の経過時間はプロセス起動時刻ではなく報告コメントの投稿時刻（最新報告）を起点に計算される', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+
+    // プロセス起動: 1時間前
+    const now = Date.now();
+    const workerStartTime = new Date(now - 3600000).toISOString();
+    // 報告コメント1（古い報告）: 30分前
+    const oldReportTime = new Date(now - 1800000).toISOString();
+    // 報告コメント2（最新報告）: 10秒前
+    const latestReportTime = new Date(now - 10000).toISOString();
+
+    const comments = [
+      {
+        id: 701,
+        created_at: oldReportTime,
+        body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-5-fix"} -->\n> 中間報告',
+      },
+      {
+        id: 702,
+        created_at: latestReportTime,
+        body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-5-fix"} -->\n> 最終報告',
+      },
+    ];
+
+    supervisor._setGhApiComments(mockGhApiComments(comments));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: workerStartTime, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.equal(notifyCalls.length, 1);
+      const body = notifyCalls[0].body;
+
+      // 起点が最新報告コメント（約10秒前）であるため、秒単位の経過時間（例: 10秒, 9秒, 11秒など）になっていること
+      assert.match(body, /投稿から (9|10|11|12)秒 経過/, `通知本文の経過時間が最新報告（10秒前）起点であること: ${body}`);
+      // プロセス起動時刻起点（1時間...）や古い報告起点（30分...）になっていないこと
+      assert.ok(!body.includes('時間'), `プロセス起動時刻起点（1時間...）になっていないこと: ${body}`);
+      assert.ok(!body.includes('30分'), `古い報告コメント起点（30分...）になっていないこと: ${body}`);
     });
   });
 

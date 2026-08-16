@@ -3,7 +3,11 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { hasReportedSinceStart } = require('../scripts/shared/worker-report-check');
+const {
+  hasReportedSinceStart,
+  getLatestReportSinceStart,
+  formatElapsedTime,
+} = require('../scripts/shared/worker-report-check');
 
 function marker({ to = 'orchestrator', from }) {
   return `<!-- gh-maestro {"v":1,"to":"${to}","from":"${from}"} -->\n> hello`;
@@ -89,4 +93,54 @@ test('created_atが無いコメントは無視される', () => {
     { id: 1, body: marker({ from: 'issue-9-fix' }) },
   ];
   assert.equal(hasReportedSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z'), false);
+});
+
+test('getLatestReportSinceStart: 複数の報告がある場合は最新のコメントを返す', () => {
+  const comments = [
+    { id: 1, created_at: '2026-01-01T00:02:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 2, created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 3, created_at: '2026-01-01T00:03:00Z', body: marker({ from: 'issue-9-fix' }) },
+  ];
+  const latest = getLatestReportSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z');
+  assert.equal(latest?.id, 2);
+});
+
+test('getLatestReportSinceStart: 該当報告が無ければ null を返す', () => {
+  const comments = [
+    { id: 1, created_at: '2025-12-31T23:59:00Z', body: marker({ from: 'issue-9-fix' }) },
+  ];
+  const latest = getLatestReportSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z');
+  assert.equal(latest, null);
+});
+
+test('getLatestReportSinceStart: 不正な引数は null を返す', () => {
+  assert.equal(getLatestReportSinceStart(null, 'issue-9-fix', '2026-01-01T00:00:00.000Z'), null);
+  assert.equal(getLatestReportSinceStart([], 'issue-9-fix', null), null);
+  assert.equal(getLatestReportSinceStart([], 'issue-9-fix', 'invalid-date'), null);
+});
+
+test('formatElapsedTime: 各種秒数・分数・時間数を人間可読にフォーマットする', () => {
+  const base = new Date('2026-01-01T00:00:00.000Z').getTime();
+
+  // 秒のみ
+  assert.equal(formatElapsedTime(base, base), '0秒');
+  assert.equal(formatElapsedTime(base, base + 3000), '3秒');
+  assert.equal(formatElapsedTime(base, base + 59000), '59秒');
+
+  // 分秒
+  assert.equal(formatElapsedTime(base, base + 60000), '1分0秒');
+  assert.equal(formatElapsedTime(base, base + 312000), '5分12秒');
+  assert.equal(formatElapsedTime(base, base + 3599000), '59分59秒');
+
+  // 時間分秒
+  assert.equal(formatElapsedTime(base, base + 3600000), '1時間0分0秒');
+  assert.equal(formatElapsedTime(base, base + 3723000), '1時間2分3秒');
+  assert.equal(formatElapsedTime(base, base + 90605000), '25時間10分5秒');
+
+  // 負の差分（逆転）は0秒に丸める
+  assert.equal(formatElapsedTime(base + 5000, base), '0秒');
+
+  // 不正値は0秒
+  assert.equal(formatElapsedTime('invalid', base), '0秒');
+  assert.equal(formatElapsedTime(base, 'invalid'), '0秒');
 });

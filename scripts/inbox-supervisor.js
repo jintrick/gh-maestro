@@ -64,7 +64,11 @@ let _parentDeathExit = (code) => process.exit(code);
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // msg-poll.js のスキャンロジックを再利用（マーカーパースのみ）
 const { parseMarker } = require('./msg-poll');
-const { hasReportedSinceStart } = require('./shared/worker-report-check');
+const {
+  hasReportedSinceStart,
+  getLatestReportSinceStart,
+  formatElapsedTime,
+} = require('./shared/worker-report-check');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { readContract, clearContract } = require('./shared/response-contract');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
@@ -72,7 +76,7 @@ const { ARTIFACTS, legacyWorkerOwner, recordPath, recordRoot } = require('./shar
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
 
-const DEFAULT_INTERVAL_SEC = 30;
+const DEFAULT_INTERVAL_SEC = 20;
 const GH_TIMEOUT_MS = 30000;
 const MAX_SEEN_IDS = 200;
 const MAX_RETRIES = 5;
@@ -957,11 +961,13 @@ function main(argsOverride, opts = {}) {
       // 同一サイクル内であれば取りこぼさない。一度検知した後は pid+startTime ベースの重複
       // 排除で再通知しないため、翌サイクル以降 since がその報告コメントを過ぎても問題ない）。
       if (_isWorkerAlive(entry) && entry.startTime) {
-        const reported = hasReportedSinceStart(comments, workerName, entry.startTime);
+        const latestReport = getLatestReportSinceStart(comments, workerName, entry.startTime);
+        const reported = latestReport !== null;
         const alreadyNotified = cursor.staleReportNotifiedPid === entry.pid
           && cursor.staleReportNotifiedStartTime === entry.startTime;
         if (reported === true && !alreadyNotified) {
-          const body = `⚠️ ワーカー "${workerName}" は既に報告を投稿済みですが、プロセス（PID ${entry.pid}）が生存しています。終了処理中・作業継続中・プロセスの終了漏れの可能性があります。この状態の間、新しい指示は配送されず待機し続けます。作業状況（未コミット変更・ログ等）を確認し、不要な残留プロセスの場合は終了してください。`;
+          const elapsed = formatElapsedTime(latestReport.created_at);
+          const body = `⚠️ ワーカー "${workerName}" は既に報告を投稿済み（投稿から ${elapsed} 経過）ですが、プロセス（PID ${entry.pid}）が生存しています。終了処理中・作業継続中・プロセスの終了漏れの可能性があります。この状態の間、新しい指示は配送されず待機し続けます。作業状況（未コミット変更・ログ等）を確認し、不要な残留プロセスの場合は終了してください。`;
           let notified = false;
           try {
             const notifyResult = _notifyOrchestrator({ workspace, issue, body });
