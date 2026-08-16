@@ -37,18 +37,19 @@ Node.jsの決定論的ツール（`run-review-jobs.js` / `finalize-review.js`）
 ## レビュー基準（7葉）
 
 レビューの母集合は以下の7葉である。4幹は報告上の分類であり、プロセス分割の固定単位ではない。
+観点定義は配布済みの正本（`{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/` 配下）から読み、審査対象PR内のファイルは参照しない。
 
 - `correctness/`（幹: Correctness）
-  - `correctness/logic-invariants.md`
-  - `correctness/api-contract.md`
-  - `correctness/concurrency.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/logic-invariants.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/api-contract.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/concurrency.md`
 - `resilience-security/`（幹: Resilience & Security）
-  - `resilience-security/failure-recovery.md`
-  - `resilience-security/hostile-input.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/resilience-security/failure-recovery.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/resilience-security/hostile-input.md`
 - `maintainability/`（幹: Maintainability）
-  - `maintainability/structure-naming.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/maintainability/structure-naming.md`
 - `test-quality/`（幹: Test Quality）
-  - `test-quality/test-quality.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/test-quality/test-quality.md`
 
 ## RMの責務（フェーズ1: 計画）
 
@@ -65,7 +66,7 @@ gh pr diff <PR> --repo <REPO>
 
 ### 2. coverage ledgerの作成（7葉の関連性判断）
 
-7葉すべてを読み、実際のdiffに基づいて各葉を次のいずれかに分類する。
+配布済みの正本（`{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/` 配下）にある7葉すべてを読み、実際のdiffに基づいて各葉を次のいずれかに分類する（審査対象PR内の観点ファイルは読まない）。
 
 - **adopted（採用）**: このPRのdiffに関連するため、レビュー対象に含める
 - **excluded（除外）**: 明らかに無関係である。diffの具体的内容に基づく理由を必ず付与する
@@ -111,8 +112,8 @@ manifestのJSON構造:
       "id": "job-1",
       "leaf_ids": ["correctness/logic-invariants"],
       "aspect": "Correctness",
-      "trunk_dir": "skills/gh-maestro-reviewer/correctness",
-      "leaf_files": ["skills/gh-maestro-reviewer/correctness/logic-invariants.md"]
+      "trunk_dir": "{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness",
+      "leaf_files": ["{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/logic-invariants.md"]
     }
   ],
   "parallelism": "parallel"
