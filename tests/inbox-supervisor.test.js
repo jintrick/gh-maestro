@@ -2167,6 +2167,61 @@ describe('Stale report detection（居座り検知）', () => {
     });
   });
 
+  test('居座り通知の経過時間はプロセス起動時刻ではなく報告コメントの投稿時刻（最新報告）を起点に計算される', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+
+    // プロセス起動: 1時間前
+    const now = Date.now();
+    const workerStartTime = new Date(now - 3600000).toISOString();
+    // 報告コメント1（古い報告）: 30分前
+    const oldReportTime = new Date(now - 1800000).toISOString();
+    // 報告コメント2（最新報告）: 10秒前
+    const latestReportTime = new Date(now - 10000).toISOString();
+
+    const comments = [
+      {
+        id: 701,
+        created_at: oldReportTime,
+        body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-5-fix"} -->\n> 中間報告',
+      },
+      {
+        id: 702,
+        created_at: latestReportTime,
+        body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-5-fix"} -->\n> 最終報告',
+      },
+    ];
+
+    supervisor._setGhApiComments(mockGhApiComments(comments));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: workerStartTime, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.equal(notifyCalls.length, 1);
+      const body = notifyCalls[0].body;
+
+      // 起点が最新報告コメント（約10秒前）であるため、秒単位の経過時間（例: 10秒, 9秒, 11秒など）になっていること
+      assert.match(body, /投稿から (9|10|11|12)秒 経過/, `通知本文の経過時間が最新報告（10秒前）起点であること: ${body}`);
+      // プロセス起動時刻起点（1時間...）や古い報告起点（30分...）になっていないこと
+      assert.ok(!body.includes('時間'), `プロセス起動時刻起点（1時間...）になっていないこと: ${body}`);
+      assert.ok(!body.includes('30分'), `古い報告コメント起点（30分...）になっていないこと: ${body}`);
+    });
+  });
+
   // 居座り判定専用の追加のgh api呼び出しを行わない（レビュー指摘: 2重取得はAPIレート制限を
   // 通じて配送そのものを止めうる。本Issueの目的と矛盾するため必ず1回に抑える）。
   test('居座り判定は新着コメントスキャンと同じ取得結果を再利用し、追加のgh api呼び出しを行わない', () => {
