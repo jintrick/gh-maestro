@@ -327,54 +327,60 @@ const SHARED_SKILLS = ghMaestroPath('skills');
 // スクリプトはスキルdirには置かず、すべて SHARED_SCRIPTS に集約する（下の共有install参照）。
 
 for (const [agentName, config] of Object.entries(agents)) {
-  const dest = expandHome(config.dest);
-  step(`Installing skills for ${agentName}...`);
-  fs.mkdirSync(dest, { recursive: true });
+  const destList = (config.dests && config.dests.length > 0)
+    ? config.dests
+    : (config.dest ? [config.dest] : []);
 
-  // リポジトリに存在しない stale スキルディレクトリ・ファイルを削除する
-  if (fs.existsSync(dest)) {
-    for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
-      if (entry.isDirectory() && !skillDirs.includes(entry.name)) {
-        fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
-        ok(`removed stale skill: ${entry.name}`);
-      } else if (entry.isFile()) {
-        fs.unlinkSync(path.join(dest, entry.name));
-        ok(`removed stray file in agent skills: ${entry.name} (${agentName})`);
+  for (const rawDest of destList) {
+    const dest = expandHome(rawDest);
+    step(`Installing skills for ${agentName} (${dest})...`);
+    fs.mkdirSync(dest, { recursive: true });
+
+    // リポジトリに存在しない stale スキルディレクトリ・ファイルを削除する
+    if (fs.existsSync(dest)) {
+      for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
+        if (entry.isDirectory() && !skillDirs.includes(entry.name)) {
+          fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
+          ok(`removed stale skill: ${entry.name}`);
+        } else if (entry.isFile()) {
+          fs.unlinkSync(path.join(dest, entry.name));
+          ok(`removed stray file in agent skills: ${entry.name} (${agentName})`);
+        }
       }
     }
-  }
 
-  // {{SCRIPTS_PATH}} は集約先（SHARED_SCRIPTS）の絶対パスに統一する
-  const agentRulesSupported = rulesSupportedMap.get(agentName) !== false;
-  const substitutions = Object.assign({}, config.substitutions, {
-    SCRIPTS_PATH: SHARED_SCRIPTS,
-    SHARED_SKILLS_PATH: SHARED_SKILLS,
-    RULES_CHECK_STEP: agentRulesSupported ? '' : RULES_CHECK_STEP_CONTENT,
-    COMMUNICATION_RULES: COMMUNICATION_RULES_CONTENT,
-    CODER_WORKFLOW: CODER_WORKFLOW_CONTENT,
-    COMMENTS_AND_NAMING: COMMENTS_AND_NAMING_CONTENT,
-  });
+    // {{SCRIPTS_PATH}} は集約先（SHARED_SCRIPTS）の絶対パスに統一する
+    const agentRulesSupported = rulesSupportedMap.get(agentName) !== false;
+    const substitutions = Object.assign({}, config.substitutions, {
+      SCRIPTS_PATH: SHARED_SCRIPTS,
+      SHARED_SKILLS_PATH: SHARED_SKILLS,
+      RULES_CHECK_STEP: agentRulesSupported ? '' : RULES_CHECK_STEP_CONTENT,
+      COMMUNICATION_RULES: COMMUNICATION_RULES_CONTENT,
+      CODER_WORKFLOW: CODER_WORKFLOW_CONTENT,
+      COMMENTS_AND_NAMING: COMMENTS_AND_NAMING_CONTENT,
+    });
 
-  for (const skill of skillDirs) {
-    const templatePath = path.join(SKILLS_DIR, skill, 'SKILL.md');
-    if (!fs.existsSync(templatePath)) continue;
+    for (const skill of skillDirs) {
+      const templatePath = path.join(SKILLS_DIR, skill, 'SKILL.md');
+      if (!fs.existsSync(templatePath)) continue;
 
-    const destSkill = path.join(dest, skill);
-    fs.mkdirSync(destSkill, { recursive: true });
+      const destSkill = path.join(dest, skill);
+      fs.mkdirSync(destSkill, { recursive: true });
 
-    const template = fs.readFileSync(templatePath, 'utf8');
-    const content = applySubstitutions(template, substitutions);
-    fs.writeFileSync(path.join(destSkill, 'SKILL.md'), content, 'utf8');
-    copySkillAssets(path.join(SKILLS_DIR, skill), destSkill, substitutions);
+      const template = fs.readFileSync(templatePath, 'utf8');
+      const content = applySubstitutions(template, substitutions);
+      fs.writeFileSync(path.join(destSkill, 'SKILL.md'), content, 'utf8');
+      copySkillAssets(path.join(SKILLS_DIR, skill), destSkill, substitutions);
 
-    // 旧バージョンが配置していた per-skill の scripts/ を stale として削除する
-    const staleScripts = path.join(destSkill, 'scripts');
-    if (fs.existsSync(staleScripts)) {
-      fs.rmSync(staleScripts, { recursive: true, force: true });
-      ok(`removed stale per-skill scripts: ${path.join(skill, 'scripts')}`);
+      // 旧バージョンが配置していた per-skill の scripts/ を stale として削除する
+      const staleScripts = path.join(destSkill, 'scripts');
+      if (fs.existsSync(staleScripts)) {
+        fs.rmSync(staleScripts, { recursive: true, force: true });
+        ok(`removed stale per-skill scripts: ${path.join(skill, 'scripts')}`);
+      }
+
+      ok(`${skill} -> ${destSkill}`);
     }
-
-    ok(`${skill} -> ${destSkill}`);
   }
 }
 

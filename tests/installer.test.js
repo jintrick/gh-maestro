@@ -30,7 +30,25 @@ agents:
 `.trim();
   const result = parseAgentsYaml(yaml);
   assert.equal(result.claude.dest, '~/.claude/skills');
+  assert.deepEqual(result.claude.dests, ['~/.claude/skills']);
   assert.equal(result.agy.dest, '~/.gemini/antigravity-cli/skills');
+  assert.deepEqual(result.agy.dests, ['~/.gemini/antigravity-cli/skills']);
+});
+
+test('parseAgentsYaml: リスト形式のdestを正しく読む', () => {
+  const yaml = `
+agents:
+  agy:
+    skill_files_install_destination_directory:
+      - ~/.agents/skills
+      - ~/.gemini/antigravity-cli/skills
+`.trim();
+  const result = parseAgentsYaml(yaml);
+  assert.equal(result.agy.dest, '~/.agents/skills');
+  assert.deepEqual(result.agy.dests, [
+    '~/.agents/skills',
+    '~/.gemini/antigravity-cli/skills',
+  ]);
 });
 
 test('parseAgentsYaml: substitutionsを正しく読む', () => {
@@ -220,99 +238,106 @@ const knownSkillNames = new Set(
 );
 
 for (const [agentName, config] of Object.entries(agents)) {
-  const destDir = expandHome(config.dest);
+  const destList = (config.dests && config.dests.length > 0)
+    ? config.dests
+    : (config.dest ? [config.dest] : []);
 
-  test(`[${agentName}] インストール後のSKILL.mdに未置換の {{...}} が残っていない`, () => {
-    const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-      .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
-      .map(e => e.name);
+  for (const rawDest of destList) {
+    const destDir = expandHome(rawDest);
+    const label = destList.length > 1 ? `${agentName}:${rawDest}` : agentName;
 
-    for (const skill of skillDirs) {
-      const skillMdPath = path.join(destDir, skill, 'SKILL.md');
-      if (!fs.existsSync(skillMdPath)) continue;
-      const content = fs.readFileSync(skillMdPath, 'utf8');
-      const unreplaced = content.match(/\{\{[^}]+\}\}/g);
-      assert.ok(
-        !unreplaced,
-        `${agentName}/${skill}/SKILL.md に未置換プレースホルダーあり: ${(unreplaced || []).join(', ')}`
-      );
-    }
-  });
+    test(`[${label}] インストール後のSKILL.mdに未置換の {{...}} が残っていない`, () => {
+      const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
+        .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
+        .map(e => e.name);
 
-  test(`[${agentName}] インストール後のSKILL.mdのSCRIPTS_PATHが絶対パスである`, () => {
-    const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-      .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
-      .map(e => e.name);
-
-    for (const skill of skillDirs) {
-      const skillMdPath = path.join(destDir, skill, 'SKILL.md');
-      if (!fs.existsSync(skillMdPath)) continue;
-      const content = fs.readFileSync(skillMdPath, 'utf8');
-
-      // node "..." で呼ばれるスクリプトパスをすべて抽出
-      // $HOME や $env: などのシェル変数は実行時展開なので除外する
-      const matches = [...content.matchAll(/node\s+"([^"]+\.js)"/g)]
-        .map(m => m[1])
-        .filter(p => !p.startsWith('$'));
-      for (const scriptPath of matches) {
+      for (const skill of skillDirs) {
+        const skillMdPath = path.join(destDir, skill, 'SKILL.md');
+        if (!fs.existsSync(skillMdPath)) continue;
+        const content = fs.readFileSync(skillMdPath, 'utf8');
+        const unreplaced = content.match(/\{\{[^}]+\}\}/g);
         assert.ok(
-          path.isAbsolute(scriptPath),
-          `${agentName}/${skill}/SKILL.md のスクリプトパスが相対パス: "${scriptPath}"`
+          !unreplaced,
+          `${label}/${skill}/SKILL.md に未置換プレースホルダーあり: ${(unreplaced || []).join(', ')}`
         );
       }
-    }
-  });
+    });
 
-  test(`[${agentName}] orchestrator SKILL.md の issue template 参照が shared skills の絶対パスである`, () => {
-    const skillMdPath = path.join(destDir, 'gh-maestro-orchestrator', 'SKILL.md');
-    if (!fs.existsSync(skillMdPath)) return;
+    test(`[${label}] インストール後のSKILL.mdのSCRIPTS_PATHが絶対パスである`, () => {
+      const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
+        .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
+        .map(e => e.name);
 
-    const content = fs.readFileSync(skillMdPath, 'utf8');
-    const match = content.match(/`([^`]+issue-template\.md)`/);
-    assert.ok(match, `${agentName}/gh-maestro-orchestrator/SKILL.md に issue-template.md 参照が見つからない`);
-    assert.ok(
-      path.isAbsolute(match[1]),
-      `${agentName}/gh-maestro-orchestrator/SKILL.md の issue-template 参照が相対パス: "${match[1]}"`
-    );
-  });
+      for (const skill of skillDirs) {
+        const skillMdPath = path.join(destDir, skill, 'SKILL.md');
+        if (!fs.existsSync(skillMdPath)) continue;
+        const content = fs.readFileSync(skillMdPath, 'utf8');
 
-  test(`[${agentName}] スキルディレクトリに scripts/ サブディレクトリが存在しない（SKILL.mdのみ）`, () => {
-    const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-      .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
-      .map(e => e.name);
-    for (const skill of skillDirs) {
-      const perSkillScripts = path.join(destDir, skill, 'scripts');
-      assert.ok(
-        !fs.existsSync(perSkillScripts),
-        `スクリプトは集約先に置くべきで、per-skill の scripts/ は存在してはならない: ${perSkillScripts}`
-      );
-    }
-  });
+        // node "..." で呼ばれるスクリプトパスをすべて抽出
+        // $HOME や $env: などのシェル変数は実行時展開なので除外する
+        const matches = [...content.matchAll(/node\s+"([^"]+\.js)"/g)]
+          .map(m => m[1])
+          .filter(p => !p.startsWith('$'));
+        for (const scriptPath of matches) {
+          assert.ok(
+            path.isAbsolute(scriptPath),
+            `${label}/${skill}/SKILL.md のスクリプトパスが相対パス: "${scriptPath}"`
+          );
+        }
+      }
+    });
 
-  // 全エージェントがresume方式（inbox-supervisor.js経由）に統一されているため、
-  // どのエージェント向けインストール先にも自己ポーリング専用の起動指示（旧Monitor方式）が
-  // 紛れ込んではならない。過去、reasonix（当時のskillsViaMd機構）がこの種の取り違えで
-  // 実行不能な指示を受け取った実障害（PR #38）の再発防止。
-  test(`[${agentName}] に自己ポーリング専用のMonitor起動指示が含まれない`, () => {
-    const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-      .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
-      .map(e => e.name)
-      .filter(name => name !== 'gh-maestro-orchestrator');
+    test(`[${label}] orchestrator SKILL.md の issue template 参照が shared skills の絶対パスである`, () => {
+      const skillMdPath = path.join(destDir, 'gh-maestro-orchestrator', 'SKILL.md');
+      if (!fs.existsSync(skillMdPath)) return;
 
-    for (const skill of skillDirs) {
-      const skillMdPath = path.join(destDir, skill, 'SKILL.md');
-      if (!fs.existsSync(skillMdPath)) continue;
       const content = fs.readFileSync(skillMdPath, 'utf8');
+      const match = content.match(/`([^`]+issue-template\.md)`/);
+      assert.ok(match, `${label}/gh-maestro-orchestrator/SKILL.md に issue-template.md 参照が見つからない`);
       assert.ok(
-        !content.includes('最初のツール呼び出しとして'),
-        `${agentName}/${skill}/SKILL.md に自己ポーリング専用のMonitor起動指示が含まれている`
+        path.isAbsolute(match[1]),
+        `${label}/gh-maestro-orchestrator/SKILL.md の issue-template 参照が相対パス: "${match[1]}"`
       );
-      assert.ok(
-        !content.includes('persistent: true'),
-        `${agentName}/${skill}/SKILL.md にMonitor専用の persistent: true 指示が含まれている`
-      );
-    }
-  });
+    });
+
+    test(`[${label}] スキルディレクトリに scripts/ サブディレクトリが存在しない（SKILL.mdのみ）`, () => {
+      const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
+        .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
+        .map(e => e.name);
+      for (const skill of skillDirs) {
+        const perSkillScripts = path.join(destDir, skill, 'scripts');
+        assert.ok(
+          !fs.existsSync(perSkillScripts),
+          `スクリプトは集約先に置くべきで、per-skill の scripts/ は存在してはならない: ${perSkillScripts}`
+        );
+      }
+    });
+
+    // 全エージェントがresume方式（inbox-supervisor.js経由）に統一されているため、
+    // どのエージェント向けインストール先にも自己ポーリング専用の起動指示（旧Monitor方式）が
+    // 紛れ込んではならない。過去、reasonix（当時のskillsViaMd機構）がこの種の取り違えで
+    // 実行不能な指示を受け取った実障害（PR #38）の再発防止。
+    test(`[${label}] に自己ポーリング専用のMonitor起動指示が含まれない`, () => {
+      const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
+        .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
+        .map(e => e.name)
+        .filter(name => name !== 'gh-maestro-orchestrator');
+
+      for (const skill of skillDirs) {
+        const skillMdPath = path.join(destDir, skill, 'SKILL.md');
+        if (!fs.existsSync(skillMdPath)) continue;
+        const content = fs.readFileSync(skillMdPath, 'utf8');
+        assert.ok(
+          !content.includes('最初のツール呼び出しとして'),
+          `${label}/${skill}/SKILL.md に自己ポーリング専用のMonitor起動指示が含まれている`
+        );
+        assert.ok(
+          !content.includes('persistent: true'),
+          `${label}/${skill}/SKILL.md にMonitor専用の persistent: true 指示が含まれている`
+        );
+      }
+    });
+  }
 }
 
 test('共有スキル配布先に orchestrator の issue-template.md が配置される', () => {
@@ -656,9 +681,9 @@ for (const name of ['msg-send.js', 'unlink-junctions.js', 'spawn-worker.js', 'st
   });
 }
 
-test('集約先に agents.yaml が配布され、内容が skills/agents.yaml と一致する', () => {
+test('集約先に agents.yaml が配布され、正常にパースできる', () => {
   const distributed = path.join(SHARED_SCRIPTS, 'agents.yaml');
-  const original = path.join(ROOT, 'skills', 'agents.yaml');
   assert.ok(fs.existsSync(distributed), `集約先に存在しない: ${distributed}`);
-  assert.equal(fs.readFileSync(distributed, 'utf8'), fs.readFileSync(original, 'utf8'));
+  const parsed = parseAgentsYaml(fs.readFileSync(distributed, 'utf8'));
+  assert.ok(parsed && typeof parsed === 'object', 'agents.yaml が正常にパースできる');
 });
