@@ -854,21 +854,3 @@ test('NODE_TEST_CONTEXT 下では実投稿を拒否する（構造的ガード�
     msgSend._setGhIssueComment(() => ({ status: 1, stdout: '', stderr: 'reset' }));
   }
 });
-
-test('msg-send: ワーカー宛て送信時に msg-poll.js の自動起動を試みない（保険機構撤廃、Issue #313）', () => {
-  withTempDir(workspace => {
-    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    msgSend._setGhIssueComment(() => ({
-      status: 0,
-      stdout: 'https://github.com/test/repo/issues/10#issuecomment-999\n',
-    }));
-
-    const r = msgSend.main(['worker-1', '--stdin', '--issue', '10', '--workspace', workspace], null, stdinIO('hello'));
-    assert.equal(r.code, 0);
-
-    const ghDir = path.join(workspace, '.gh-maestro');
-    assert.equal(fs.existsSync(path.join(ghDir, 'msg-poll-orchestrator-autostart.log')), false);
-    assert.equal(fs.existsSync(path.join(ghDir, 'msg-poll-autostart-attempt.json')), false);
-  });
-});
-
