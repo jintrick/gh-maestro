@@ -31,6 +31,18 @@ Inbox Supervisor（`inbox-supervisor.js`）側の重複を疑った場合も、�
 2. 止まった監視が本当に必要なら再起動する。`poll-pr.js` は下記「PR監視・Review Managerの再起動」、`msg-poll.js` は SKILL.md の「自分の inbox の監視」の起動規約に従う。
 3. 監視が止まっていた間の機能停止（検出し損ねた PR・届かなかったメッセージ）を確認し、人間に報告する。**機械は自動復旧しない**（再起動判断は orchestrator が行う）。
 
+## inbox監視の沈黙（通知が鳴らないまま止まる）
+
+`msg-poll.js orchestrator` は親セッション死亡検知（dead-man's switch）で **exit 0** で自滅することがある。exit 0 は正常終了として扱われるため上記の異常終了通知は鳴らず、Monitor も静かに終わる。**このプロセスに自動復活機構は無い**（`inbox-supervisor.js` は `spawn-worker.js`/`msg-send.js` が自動で復活させるが、msg-poll には同等の仕組みが無い）。結果、受信が永久に止まったまま「まだ報告が来ないだけ」に見える。
+
+**この状態は「反応が無い」という体感からしか入れない。** ワーカーの報告・PR 作成・レビュー完了のいずれかを待っていて、来ないと感じたら以下を実行する。
+
+1. **生死を `pids/` で確認する。** `$WORKSPACE/.gh-maestro/pids/*.json` を読み、`script` が `msg-poll.js` のエントリが存在するか見る。無ければ死んでいる。
+   - **`ps` の node プロセス一覧や `.gh-maestro/inbox-supervisor-autostart.log` で判断してはならない。** それらは worker 配送を行う `inbox-supervisor.js` のもので、msg-poll が死んでいても正常に動き続ける（`SCAN_START` / `SCAN_END:<n>:0` を出し続ける）。この混同で「ポーラーは生きている」と誤報告した実例がある。
+2. **lease の残骸に騙されない。** `.gh-maestro/leases/resident-role-msgpoll-orchestrator.json` は dead-man's switch 経路では解放されずに残る。lease があってもプロセスは死んでいる。むしろ「PID registry に居ないのに lease が残っている」組合せは、この経路で死んだ証拠である。
+3. **再起動する。** SKILL.md「自分の inbox の監視」の起動規約に従い、Monitor で `msg-poll.js orchestrator` を起動し直す（「1回だけ起動」は生きている間の話であり、死んだ後の再起動はこれに反しない）。
+4. **止まっていた間に取りこぼした通知を確認し、人間に報告する。** 停止中に投稿されたコメントは既読にならないため、再起動後に順次 `NEW_MESSAGE` として届く。
+
 ## ワーカーの実行ログ
 
 ワーカーは画面を持たない。標準出力/標準エラーは `$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log` へ**実行中から逐次**書かれる。1ワーカー1ファイルで、初回起動もresumeも同じファイルに追記される。
