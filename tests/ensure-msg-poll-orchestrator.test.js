@@ -8,7 +8,7 @@ const fs = require('fs');
 const { EventEmitter } = require('events');
 
 const mod = require('../scripts/shared/ensure-msg-poll-orchestrator');
-const { ensureMsgPollOrchestratorRunning } = mod;
+const { ensureMsgPollOrchestratorRunning, AUTOSTART_COOLDOWN_MS } = mod;
 const workerLease = require('../scripts/shared/worker-lease');
 const migrationMarker = require('../scripts/shared/migration-marker');
 const {
@@ -16,6 +16,7 @@ const {
   getProcessStartTime,
   verifyProcessIdentity,
 } = require('../scripts/process-lifecycle');
+const { readAutostartAttempt } = require('../scripts/shared/ensure-resident-daemon');
 
 function fakeChild() {
   const emitter = new EventEmitter();
@@ -319,4 +320,50 @@ test('ensureMsgPollOrchestratorRunning: spawnが例外を投げても試行記�
 
   ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' }); // クールダウン → 再試行しない
   assert.equal(spawnCount, 1);
+});
+
+test('ensureMsgPollOrchestratorRunning: 生存判定とクールダウン判定の順序検証（クールダウン中であっても生存観測時は試行記録が消去される）', () => {
+  writeAttempt(Date.now()); // クールダウン中
+  mod._setFindRunningInstance(() => ({ pid: 777, script: 'msg-poll.js' }));
+
+  ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.equal(fs.existsSync(attemptPath()), false, 'クールダウン中でも生存観測で試行記録が消去される');
+});
+
+test('ensureMsgPollOrchestratorRunning: 呼び出しシーケンス（順序）の厳密検証', () => {
+  const events = [];
+  migrationMarker._setIsProcessAlive(() => {
+    events.push('migrationAliveCheck');
+    return false;
+  });
+
+  mod._setFindRunningInstance(() => {
+    events.push('runningCheck');
+    return null;
+  });
+
+  mod._setIsResidentLeaseLive(() => {
+    events.push('leaseCheck');
+    return false;
+  });
+
+  mod._setFindSessionRootPid(() => {
+    events.push('resolvePid');
+    return 8888;
+  });
+
+  mod._setSpawn((cmd, args, opts) => {
+    const attempt = readAutostartAttempt(workspace, 'msg-poll');
+    events.push(`spawn(recorded:${attempt !== null})`);
+    return fakeChild();
+  });
+
+  ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.deepEqual(events, [
+    'runningCheck',
+    'leaseCheck',
+    'resolvePid',
+    'spawn(recorded:true)',
+  ]);
 });

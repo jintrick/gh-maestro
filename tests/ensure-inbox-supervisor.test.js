@@ -16,6 +16,7 @@ const {
   getProcessStartTime,
   verifyProcessIdentity,
 } = require('../scripts/process-lifecycle');
+const { readAutostartAttempt } = require('../scripts/shared/ensure-resident-daemon');
 
 function fakeChild() {
   const emitter = new EventEmitter();
@@ -316,4 +317,46 @@ test('ensureInboxSupervisorRunning: spawnが例外を投げても試行記録が
 
   ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' }); // クールダウン → 再試行しない
   assert.equal(spawnCount, 1);
+});
+
+test('ensureInboxSupervisorRunning: 生存判定とクールダウン判定の順序検証（クールダウン中であっても生存観測時は試行記録が消去される）', () => {
+  writeAttempt(Date.now()); // クールダウン中
+  mod._setFindRunningInstance(() => ({ pid: 777, script: 'inbox-supervisor.js' }));
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.equal(fs.existsSync(attemptPath()), false, 'クールダウン中でも生存観測で試行記録が消去される');
+});
+
+test('ensureInboxSupervisorRunning: 呼び出しシーケンス（順序）の厳密検証', () => {
+  const events = [];
+
+  mod._setFindRunningInstance(() => {
+    events.push('runningCheck');
+    return null;
+  });
+
+  mod._setIsResidentLeaseLive(() => {
+    events.push('leaseCheck');
+    return false;
+  });
+
+  mod._setFindSessionRootPid(() => {
+    events.push('resolvePid');
+    return 7777;
+  });
+
+  mod._setSpawn((cmd, args, opts) => {
+    const attempt = readAutostartAttempt(workspace, 'inbox-supervisor');
+    events.push(`spawn(recorded:${attempt !== null})`);
+    return fakeChild();
+  });
+
+  ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.deepEqual(events, [
+    'runningCheck',
+    'leaseCheck',
+    'resolvePid',
+    'spawn(recorded:true)',
+  ]);
 });
