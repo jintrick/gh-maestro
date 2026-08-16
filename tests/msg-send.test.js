@@ -32,6 +32,18 @@ ensureInboxSupervisor._setFindRunningInstance(() => null);
 ensureInboxSupervisor._setIsResidentLeaseLive(() => false);
 ensureInboxSupervisor._setFindSessionRootPid(() => 12345);
 
+// msg-send.js は成功時に ensureMsgPollOrchestratorRunning() も呼ぶ（best-effort, Issue #301）。
+// 実プロセスを spawn しないよう同様にモックする（test-process-spawn-safety 参照）。
+const ensureMsgPollOrchestrator = require('../scripts/shared/ensure-msg-poll-orchestrator');
+ensureMsgPollOrchestrator._setSpawn(() => {
+  const child = new EventEmitter();
+  child.unref = () => {};
+  return child;
+});
+ensureMsgPollOrchestrator._setFindRunningInstance(() => null);
+ensureMsgPollOrchestrator._setIsResidentLeaseLive(() => false);
+ensureMsgPollOrchestrator._setFindSessionRootPid(() => 12345);
+
 // ワーカー起動コンテキストでは GH_MAESTRO_WORKER / GH_MAESTRO_WORKSPACE が注入され、
 // msg-send.js が「ワーカー扱い」になったり resolveWorkspace が --workspace 引数を
 // 無視したりして、テストが明示的に渡した一時dirと期待を踏み外す。テストは実ワークスペースの

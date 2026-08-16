@@ -198,15 +198,45 @@ function getProcessStartTime(pid) {
 }
 
 /**
+ * 2つのプロセス起動時刻（ISO 文字列）が同一プロセスのものであるかを判定する。
+ *
+ * 1秒の許容範囲（WMI と JS Date の精度差を吸収）。不正な日付文字列は getTime() が
+ * NaN を返すため、明示的に不一致扱いとする（NaN を無視すると常に一致に倒れて
+ * PID再利用の誤判定が静かに復活する）。verifyProcessIdentity と createDeadManSwitch の
+ * 両方がこの比較意味論を共有する。
+ *
+ * @param {string} a 起動時刻（ISO 文字列）
+ * @param {string} b 起動時刻（ISO 文字列）
+ * @returns {boolean} 同一プロセスの起動時刻なら true
+ */
+function startTimesMatch(a, b) {
+  if (!a || !b) return false;
+  const ta = new Date(a).getTime();
+  const tb = new Date(b).getTime();
+  if (Number.isNaN(ta) || Number.isNaN(tb)) return false;
+  return Math.abs(ta - tb) <= 1000;
+}
+
+/**
  * dead-man's switch のチェック関数を作成する。
  *
  * 返された関数をポーリングループの毎周回で呼び出す。
  * 親が死んだことを検出したら false を返す（呼び出し側は cleanup して exit）。
- * PID再利用の誤判定を緩和するため、3回連続で死を確認するまで false を返さない。
+ *
+ * 判定は2段:
+ * - PID が存在しない: isProcessAlive の一過性の誤検出を緩和するため、3回連続で
+ *   確認するまで false を返さない。
+ * - PID は存在するが起動時刻が期待値と不一致（同じ PID に別プロセスが再利用された）:
+ *   起動時刻の不一致は確定事実（同一プロセスは起動時刻を変えない）のため、初回検出で
+ *   即 false を返す。居座りを最大1ポーリング間隔で検出できる。
+ *   起動時刻の取得失敗（null / throw）は一過性の読取失敗が疑われるため生存扱いとし、
+ *   誤自滅しない（fail-open は誤自滅防止側に倒す。基本の isProcessAlive チェックは残る）。
  *
  * @param {number} monitorPid 監視対象PID
  * @param {object} [opts]
- * @param {string} [opts.expectedStartTime] 監視対象の期待起動時刻（PID再利用検知用）
+ * @param {string} [opts.expectedStartTime] 監視対象の起動時刻（PID再利用検知用。
+ *   呼び出し元が起動時に getProcessStartTime で捕捉して渡す。未指定なら従来の
+ *   isProcessAlive のみの判定にフォールバックする）
  * @returns {() => boolean} 親が生きていれば true、死んでいれば false
  */
 function createDeadManSwitch(monitorPid, opts = {}) {
@@ -222,24 +252,23 @@ function createDeadManSwitch(monitorPid, opts = {}) {
       if (consecutiveDead >= REQUIRED_CONSECUTIVE_DEAD) return false;
       return true; // 猶予期間中
     }
-    consecutiveDead = 0;
 
     // PID再利用チェック: 期待起動時刻と実起動時刻を比較
-    // 実装メモ: getProcessStartTime の WMI 呼び出しは高コストのため、
-    // 毎回ではなく 10 周回に 1 回だけ確認する（PID 再利用は頻繁ではない）。
-    if (expectedStartTime && consecutiveDead === 0) {
-      // PID再利用検知は best-effort。取得失敗時は registry sweep を保険とする。
+    if (expectedStartTime) {
+      let actualStart = null;
       try {
-        const actualStart = getProcessStartTime(monitorPid);
-        if (actualStart && actualStart !== expectedStartTime) {
-          // 同じPIDだが別プロセス → 元の親は死んだとみなす
-          return false;
-        }
+        actualStart = getProcessStartTime(monitorPid);
       } catch {
-        // 起動時刻取得失敗 → registry sweep に任せる
+        actualStart = null;
       }
+      if (actualStart && !startTimesMatch(expectedStartTime, actualStart)) {
+        // 同じPIDに別プロセスが居る → 元の親は死んだとみなす
+        return false;
+      }
+      // 取得失敗（null）→ 読取失敗の可能性があるため生存扱い（誤自滅しない）
     }
 
+    consecutiveDead = 0;
     return true;
   };
 }
@@ -403,19 +432,16 @@ function verifyProcessIdentity(pid, registeredMeta) {
     return { match: false, reason: 'cannot get process start time' };
   }
 
-  if (registeredMeta.startTime) {
+  if (registeredMeta.startTime && !startTimesMatch(registeredMeta.startTime, actualStartTime)) {
     const regTime = new Date(registeredMeta.startTime).getTime();
     const actualTime = new Date(actualStartTime).getTime();
     // 不正な日付文字列の場合 getTime() が NaN を返す。
     // NaN > 1000 は false のため誤って一致判定（match:true）に倒れてしまう。
-    // 明示的に NaN チェックを入れ、不正値は不一致扱いとする（PID再利用の誤kill防止）。
-    if (Number.isNaN(regTime) || Number.isNaN(actualTime)) {
-      return { match: false, reason: `invalid date: registered=${registeredMeta.startTime}, actual=${actualStartTime}` };
-    }
-    // 1秒の許容範囲（WMI と JS Date の精度差を吸収）
-    if (Math.abs(regTime - actualTime) > 1000) {
-      return { match: false, reason: `start time mismatch: registered=${registeredMeta.startTime}, actual=${actualStartTime}` };
-    }
+    // startTimesMatch が NaN を不一致扱いにするため、ここでは reason を区別して返す。
+    const reason = (Number.isNaN(regTime) || Number.isNaN(actualTime))
+      ? `invalid date: registered=${registeredMeta.startTime}, actual=${actualStartTime}`
+      : `start time mismatch: registered=${registeredMeta.startTime}, actual=${actualStartTime}`;
+    return { match: false, reason };
   }
 
   return { match: true };
@@ -854,6 +880,7 @@ module.exports = {
   resolveSessionPid,
   isProcessAlive,
   getProcessStartTime,
+  startTimesMatch,
   createDeadManSwitch,
   // PID registry
   pidsDir,

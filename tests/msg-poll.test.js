@@ -644,6 +644,52 @@ test('orchestrator モード: 複数 issue をスキャンする', () => {
   });
 });
 
+// ── 死のスイッチ配線（Issue #301） ────────────────────────────────────────
+// scanOnce が親セッションの死を検出したとき、role lease を解放して exit 3 で終了する
+// （受け入れ条件1: 死のスイッチ経路で lease が解放される）。scriptName と sessionPid が
+// stderr に出力される（沈黙しない）。
+
+test('死のスイッチ発火時: role lease を解放し exit 3 で終了する（配線）', () => {
+  const { createDeadManSwitch } = require('../scripts/process-lifecycle');
+  const { PARENT_DEATH_EXIT_CODE } = require('../scripts/shared/watchdog-exit-notify');
+  withTempDir(workspace => {
+    initOrchestratorState(workspace);
+    writeWorkers(workspace, { 'worker-1': { issue: 10 } });
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
+
+    const stderrLines = [];
+    const origStderr = process.stderr.write;
+    try {
+      // 死のスイッチを常時「死」と判定させる。checkParent は main() 内で生成されるため
+      // runMain より前に注入する（_setParentDeathExit は sentinel 例外で抜ける）。
+      msgPoll._setCreateDeadManSwitch(() => () => false);
+      let exitCode = null;
+      msgPoll._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
+      process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
+
+      // 継続モード（--once なし）で起動 → orchestrator の role lease を取得する
+      const r = runMain(['orchestrator', '--workspace', workspace]);
+      assert.equal(r.code, 0);
+      const leaseFile = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json');
+      assert.ok(fs.existsSync(leaseFile), '継続モードで role lease ファイルが作成される');
+
+      // scanOnce 1回で死のスイッチ発火 → lease 解放 + exit 3
+      assert.throws(() => r.scanOnce(), /parent-death-exit sentinel/);
+      assert.equal(exitCode, PARENT_DEATH_EXIT_CODE, '死のスイッチは exit 3 で終了する');
+      assert.equal(fs.existsSync(leaseFile), false, '死のスイッチ経路で role lease が解放される（受け入れ条件1）');
+      assert.ok(
+        stderrLines.some(l => l.includes('msg-poll.js') && l.includes(`pid ${TEST_SESSION_PID}`)),
+        `stderr に msg-poll.js と sessionPid が出力される: ${stderrLines.join('|')}`
+      );
+    } finally {
+      process.stderr.write = origStderr;
+      msgPoll._setCreateDeadManSwitch(createDeadManSwitch);
+      msgPoll._setParentDeathExit((code) => process.exit(code));
+    }
+  });
+});
+
 test('orchestrator モード: workers.json が無い場合もエラーにならず継続', () => {
   withTempDir(workspace => {
     initOrchestratorState(workspace);

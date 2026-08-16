@@ -944,6 +944,50 @@ describe('runOnce scan and deliver cycle', () => {
     });
   });
 
+  // ── 死のスイッチ配線（Issue #301） ─────────────────────────────────────
+  // runOnce が親セッションの死を検出したとき、role lease を解放して exit 3 で終了する
+  // （受け入れ条件1: 死のスイッチ経路で lease が解放される）。scriptName と sessionPid が
+  // stderr に出力される（沈黙しない）。resetAllMocks は死のスイッチの注入を戻さないため、
+  // このテスト自身の finally で必ず復元する。
+
+  test('死のスイッチ発火時: role lease を解放し exit 3 で終了する（配線）', () => {
+    const { createDeadManSwitch } = require('../scripts/process-lifecycle');
+    const { PARENT_DEATH_EXIT_CODE } = require('../scripts/shared/watchdog-exit-notify');
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      const stderrLines = [];
+      const origStderr = process.stderr.write;
+      try {
+        // 死のスイッチを常時「死」と判定させる。checkParent は main() 内で生成されるため
+        // runMain より前に注入する（_setParentDeathExit は sentinel 例外で抜ける）。
+        supervisor._setCreateDeadManSwitch(() => () => false);
+        let exitCode = null;
+        supervisor._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
+        process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
+
+        const r = runMain(['--workspace', dir]);
+        assert.equal(r.code, 0);
+        const leaseFile = path.join(dir, '.gh-maestro', 'leases', 'resident-role-inbox-supervisor.json');
+        assert.ok(fs.existsSync(leaseFile), 'role lease ファイルが作成される');
+
+        // runOnce 1回で死のスイッチ発火 → lease 解放 + exit 3
+        assert.throws(() => r.runOnce(), /parent-death-exit sentinel/);
+        assert.equal(exitCode, PARENT_DEATH_EXIT_CODE, '死のスイッチは exit 3 で終了する');
+        assert.equal(fs.existsSync(leaseFile), false, '死のスイッチ経路で role lease が解放される（受け入れ条件1）');
+        assert.ok(
+          stderrLines.some(l => l.includes('inbox-supervisor.js') && l.includes(`pid ${TEST_SESSION_PID}`)),
+          `stderr に inbox-supervisor.js と sessionPid が出力される: ${stderrLines.join('|')}`
+        );
+      } finally {
+        process.stderr.write = origStderr;
+        supervisor._setCreateDeadManSwitch(createDeadManSwitch);
+        supervisor._setParentDeathExit((code) => process.exit(code));
+      }
+    });
+  });
+
   test('新着メッセージを検出して配送する', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([

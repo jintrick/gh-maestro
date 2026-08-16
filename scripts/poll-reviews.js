@@ -19,6 +19,7 @@ const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
 const {
   resolveSessionPid,
   createDeadManSwitch,
+  getProcessStartTime,
   registerProcess,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
@@ -247,7 +248,11 @@ if (require.main === module) {
   // ── ライフサイクル管理 ─────────────────────────────────────────────────
 
   const sessionPid = resolveSessionPid(sessionPidArg);
-  const checkParent = createDeadManSwitch(sessionPid);
+
+  // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
+  // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
+  const expectedStartTime = getProcessStartTime(sessionPid);
+  const checkParent = createDeadManSwitch(sessionPid, { expectedStartTime });
 
   // PID registry に自己登録
   registerProcess(workspace, { script: 'poll-reviews.js' });

@@ -423,6 +423,9 @@ function activateLease(store, key, { pid, startTime }) {
 /** inbox-supervisor.js の固定 role 名。 */
 const INBOX_SUPERVISOR_ROLE = 'inbox-supervisor';
 
+/** orchestrator モードの msg-poll.js が自身に使う role lease 名（msgpoll-${self}）。 */
+const MSGPOLL_ORCHESTRATOR_ROLE = 'msgpoll-orchestrator';
+
 /** 引き継ぎ（--force）で所有者の終了を待つ上限時間（ms）。 */
 const HANDOFF_WAIT_MS = 10000;
 
@@ -612,6 +615,7 @@ module.exports = {
   isLeaseLive,
   // 常駐プロセス用 role lease（Issue #240）
   INBOX_SUPERVISOR_ROLE,
+  MSGPOLL_ORCHESTRATOR_ROLE,
   roleLeaseKey,
   isResidentLeaseLive,
   acquireResidentLease,
