@@ -865,3 +865,41 @@ test('NODE_TEST_CONTEXT 下では実投稿を拒否する（構造的ガード�
     msgSend._setGhIssueComment(() => ({ status: 1, stdout: '', stderr: 'reset' }));
   }
 });
+
+// ── inbox監視自動起動（保険機構）の警告検証（Issue #311） ─────────────────
+
+test('msg-send: msg-poll.js が保険機構により新規自動起動された場合は stderr に警告を出力する', () => {
+  msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+  msgSend._setGhIssueComment(() => ({ status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-100\n' }));
+
+  ensureMsgPollOrchestrator._setFindRunningInstance(() => null);
+  ensureMsgPollOrchestrator._setIsResidentLeaseLive(() => false);
+
+  withTempDir(workspace => {
+    const r = msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO('hello'));
+    assert.equal(r.code, 0);
+    assert.ok(
+      r.errLines.some(l => l.includes('msg-send: [警告] orchestratorのinbox監視(msg-poll.js)が未起動だったため保険機構により自動起動しました')),
+      `警告メッセージが含まれること: ${r.errLines.join('\n')}`
+    );
+  });
+});
+
+test('msg-send: msg-poll.js が既に稼働中の場合は警告を出力しない', () => {
+  msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+  msgSend._setGhIssueComment(() => ({ status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-101\n' }));
+
+  ensureMsgPollOrchestrator._setFindRunningInstance(() => ({ pid: 555, script: 'msg-poll.js' }));
+
+  withTempDir(workspace => {
+    const r = msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO('hello'));
+    assert.equal(r.code, 0);
+    assert.ok(
+      !r.errLines.some(l => l.includes('[警告]')),
+      `稼働中なら警告は出力されないこと: ${r.errLines.join('\n')}`
+    );
+  });
+
+  // モックを元に戻す
+  ensureMsgPollOrchestrator._setFindRunningInstance(() => null);
+});

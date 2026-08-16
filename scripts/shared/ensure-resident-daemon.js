@@ -185,6 +185,7 @@ function createDaemonHooks() {
  * @param {string} params.attemptName - 試行記録識別名（例: 'inbox-supervisor'）
  * @param {function} [params.buildArgs] - 引数構築関数 `({ workspace, sessionPid }) => string[]`
  * @param {object} [params.hooks]     - テスト用フックオブジェクト（createDaemonHooks 由来）
+ * @returns {{ spawned: boolean }}
  */
 function ensureResidentDaemon({
   workspace,
@@ -196,10 +197,10 @@ function ensureResidentDaemon({
   buildArgs,
   hooks = null,
 }) {
-  if (!workspace || !scriptsPath || !scriptName || !logFileName || !attemptName) return;
+  if (!workspace || !scriptsPath || !scriptName || !logFileName || !attemptName) return { spawned: false };
 
   const checkMigration = hooks ? hooks.getIsMigrationInProgress() : isMigrationInProgress;
-  if (checkMigration(workspace)) return;
+  if (checkMigration(workspace)) return { spawned: false };
 
   const findRunning = hooks ? hooks.getFindRunningInstance() : require('../process-lifecycle').findRunningInstance;
   const checkLease = hooks ? hooks.getIsResidentLeaseLive() : isResidentLeaseLive;
@@ -207,11 +208,11 @@ function ensureResidentDaemon({
   try {
     if (findRunning(workspace, { script: scriptName, workerName: null })) {
       clearAutostartAttempt(workspace, attemptName);
-      return;
+      return { spawned: false };
     }
     if (role && checkLease({ workspace, role })) {
       clearAutostartAttempt(workspace, attemptName);
-      return;
+      return { spawned: false };
     }
   } catch {
     // 判定失敗時は fail-open で spawn を試みる
@@ -219,10 +220,11 @@ function ensureResidentDaemon({
 
   // クールダウン予約を原子的に実行（排他制御下での判定＋記録書き込み。Issue #303）
   if (!tryReserveAutostartAttempt(workspace, attemptName)) {
-    return;
+    return { spawned: false };
   }
 
   let logFd;
+  let spawned = false;
   try {
     const ghDir = path.join(workspace, '.gh-maestro');
     fs.mkdirSync(ghDir, { recursive: true });
@@ -253,6 +255,7 @@ function ensureResidentDaemon({
     });
     child.on('error', () => {});
     child.unref();
+    spawned = true;
   } catch {
     // best-effort
   } finally {
@@ -260,6 +263,7 @@ function ensureResidentDaemon({
       try { fs.closeSync(logFd); } catch {}
     }
   }
+  return { spawned };
 }
 
 module.exports = {

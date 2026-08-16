@@ -56,9 +56,10 @@ const hooks = createDaemonHooks();
  * @param {object} params
  * @param {string} params.workspace   - ワークスペース絶対パス
  * @param {string} params.scriptsPath - inbox-supervisor.js が置かれているディレクトリ
+ * @returns {{ spawned: boolean }}
  */
 function ensureInboxSupervisorRunning({ workspace, scriptsPath }) {
-  ensureResidentDaemon({
+  return ensureResidentDaemon({
     workspace,
     scriptsPath,
     scriptName: 'inbox-supervisor.js',

@@ -367,3 +367,16 @@ test('ensureMsgPollOrchestratorRunning: 呼び出しシーケンス（順序）�
     'spawn(recorded:true)',
   ]);
 });
+
+// ── 戻り値（spawned: boolean）の検証（Issue #311） ─────────────────────────
+
+test('ensureMsgPollOrchestratorRunning: 新規プロセス起動時は { spawned: true } を返す', () => {
+  const result = ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.deepEqual(result, { spawned: true });
+});
+
+test('ensureMsgPollOrchestratorRunning: 稼働中判定時は { spawned: false } を返す', () => {
+  mod._setFindRunningInstance(() => ({ pid: 777, script: 'msg-poll.js' }));
+  const result = ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.deepEqual(result, { spawned: false });
+});

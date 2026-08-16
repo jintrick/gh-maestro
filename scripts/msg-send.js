@@ -516,7 +516,12 @@ function main(argsOverride, envOverride, ioOverride) {
   // ならない。msg-poll.js はオーケストレーターセッションの inbox 監視（Issue #301）。
   if (recipient !== 'orchestrator') {
     try { ensureInboxSupervisorRunning({ workspace, scriptsPath: __dirname }); } catch {}
-    try { ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: __dirname }); } catch {}
+    try {
+      const pollResult = ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: __dirname });
+      if (pollResult && pollResult.spawned) {
+        writeErr('msg-send: [警告] orchestratorのinbox監視(msg-poll.js)が未起動だったため保険機構により自動起動しました。このプロセスの通知はセッションに届きません。SKILL.mdに従いMonitorでinbox監視を起動してください。');
+      }
+    } catch {}
   }
 
   writeOut(commentUrl);

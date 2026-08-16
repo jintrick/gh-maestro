@@ -526,3 +526,54 @@ test('ensureResidentDaemon: 起動直後の異常終了シナリオ - spawnさ�
   });
   assert.equal(spawnCount, 1, '起動直後に異常終了しても、クールダウンにより無制限 spawn は抑制される');
 });
+
+// ── 戻り値（spawned: boolean）の検証（Issue #311） ─────────────────────────
+
+test('ensureResidentDaemon: 新規プロセス起動時は { spawned: true } を返す', () => {
+  const result = ensureResidentDaemon({
+    workspace,
+    scriptsPath: '/abs/scripts',
+    scriptName: 'test-daemon.js',
+    logFileName: 'test-daemon-autostart.log',
+    attemptName: 'test-daemon',
+    hooks,
+  });
+  assert.deepEqual(result, { spawned: true });
+});
+
+test('ensureResidentDaemon: 稼働中判定時は { spawned: false } を返す', () => {
+  hooks.setFindRunningInstance(() => ({ pid: 999, script: 'test-daemon.js' }));
+  const result = ensureResidentDaemon({
+    workspace,
+    scriptsPath: '/abs/scripts',
+    scriptName: 'test-daemon.js',
+    logFileName: 'test-daemon-autostart.log',
+    attemptName: 'test-daemon',
+    hooks,
+  });
+  assert.deepEqual(result, { spawned: false });
+});
+
+test('ensureResidentDaemon: クールダウン中・バリデーション失敗・例外時は { spawned: false } を返す', () => {
+  assert.deepEqual(ensureResidentDaemon({ workspace: null }), { spawned: false });
+
+  // 1回目で spawn 成功
+  assert.deepEqual(ensureResidentDaemon({
+    workspace,
+    scriptsPath: '/abs/scripts',
+    scriptName: 'test-daemon.js',
+    logFileName: 'test-daemon-autostart.log',
+    attemptName: 'test-daemon',
+    hooks,
+  }), { spawned: true });
+
+  // 2回目はクールダウン中
+  assert.deepEqual(ensureResidentDaemon({
+    workspace,
+    scriptsPath: '/abs/scripts',
+    scriptName: 'test-daemon.js',
+    logFileName: 'test-daemon-autostart.log',
+    attemptName: 'test-daemon',
+    hooks,
+  }), { spawned: false });
+});

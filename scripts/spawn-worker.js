@@ -687,7 +687,10 @@ try {
 // オーケストレーターセッションの inbox 監視（Issue #301）。実起動は spawn を注入したテスト以外は
 // NODE_TEST_CONTEXT 検知で拒否されないため、spawn-worker.js はテスト側のモック注入で抑止する。
 ensureInboxSupervisorRunning({ workspace, scriptsPath: __dirname });
-ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: __dirname });
+const pollResult = ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: __dirname });
+if (pollResult && pollResult.spawned) {
+  console.warn('spawn-worker: [警告] orchestratorのinbox監視(msg-poll.js)が未起動だったため保険機構により自動起動しました。このプロセスの通知はセッションに届きません。SKILL.mdに従いMonitorでinbox監視を起動してください。');
+}
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---
 console.log(workerName);

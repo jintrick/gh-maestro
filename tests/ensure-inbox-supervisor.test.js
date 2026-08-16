@@ -360,3 +360,16 @@ test('ensureInboxSupervisorRunning: 呼び出しシーケンス（順序）の�
     'spawn(recorded:true)',
   ]);
 });
+
+// ── 戻り値（spawned: boolean）の検証（Issue #311） ─────────────────────────
+
+test('ensureInboxSupervisorRunning: 新規プロセス起動時は { spawned: true } を返す', () => {
+  const result = ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.deepEqual(result, { spawned: true });
+});
+
+test('ensureInboxSupervisorRunning: 稼働中判定時は { spawned: false } を返す', () => {
+  mod._setFindRunningInstance(() => ({ pid: 888, script: 'inbox-supervisor.js' }));
+  const result = ensureInboxSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.deepEqual(result, { spawned: false });
+});

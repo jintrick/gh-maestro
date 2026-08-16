@@ -49,9 +49,10 @@ const hooks = createDaemonHooks();
  * @param {object} params
  * @param {string} params.workspace   - ワークスペース絶対パス
  * @param {string} params.scriptsPath - msg-poll.js が置かれているディレクトリ
+ * @returns {{ spawned: boolean }}
  */
 function ensureMsgPollOrchestratorRunning({ workspace, scriptsPath }) {
-  ensureResidentDaemon({
+  return ensureResidentDaemon({
     workspace,
     scriptsPath,
     scriptName: 'msg-poll.js',
