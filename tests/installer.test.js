@@ -14,11 +14,71 @@ const { execFileSync } = require('child_process');
 const ROOT = path.join(__dirname, '..');
 const {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
-  buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids,
+  buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
 } = require('../scripts/install.js');
 const { MANAGED_TOP_LEVEL } = require('../scripts/shared/storage-layout');
 
 // ── ユーティリティ関数のユニットテスト ──────────────────────────────────────
+
+test('installSkills: 複数宛先（dests配列）を持つエージェントですべての宛先にSKILL.mdが最新展開される', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-install-skills-test-'));
+  const destNew = path.join(tmpBase, 'agents-skills');
+  const destOld = path.join(tmpBase, 'gemini-skills');
+
+  try {
+    const testAgents = {
+      agy: {
+        dests: [destNew, destOld],
+        substitutions: {},
+      },
+    };
+
+    const sharedScriptsDir = path.join(tmpBase, 'shared-scripts');
+    const sharedSkillsDir = path.join(tmpBase, 'shared-skills');
+
+    installSkills(testAgents, {
+      skillsDir: path.join(ROOT, 'skills'),
+      sharedScripts: sharedScriptsDir,
+      sharedSkills: sharedSkillsDir,
+      rulesSupportedMap: new Map([['agy', false]]),
+      step: () => {},
+      ok: () => {},
+    });
+
+    const expectedSkillDirs = fs.readdirSync(path.join(ROOT, 'skills'), { withFileTypes: true })
+      .filter(e => e.isDirectory() && !e.name.startsWith('_'))
+      .map(e => e.name);
+
+    for (const dest of [destNew, destOld]) {
+      assert.ok(fs.existsSync(dest), `宛先ディレクトリが存在しない: ${dest}`);
+
+      for (const skill of expectedSkillDirs) {
+        const skillMd = path.join(dest, skill, 'SKILL.md');
+        assert.ok(fs.existsSync(skillMd), `${skill}/SKILL.md が生成されていない (${dest})`);
+
+        const content = fs.readFileSync(skillMd, 'utf8');
+        // 未置換プレースホルダーが残っていないこと
+        const unreplaced = content.match(/\{\{[^}]+\}\}/g);
+        assert.ok(!unreplaced, `未置換プレースホルダーあり (${skillMd}): ${(unreplaced || []).join(', ')}`);
+
+        // sharedScripts が埋め込まれていること
+        assert.ok(
+          content.includes(sharedScriptsDir) || !content.includes('node "'),
+          `SCRIPTS_PATH が正しく展開されていない (${skillMd})`
+        );
+      }
+    }
+
+    // 新旧両方の宛先に生成された全SKILL.mdの内容が完全に一致すること
+    for (const skill of expectedSkillDirs) {
+      const contentNew = fs.readFileSync(path.join(destNew, skill, 'SKILL.md'), 'utf8');
+      const contentOld = fs.readFileSync(path.join(destOld, skill, 'SKILL.md'), 'utf8');
+      assert.equal(contentNew, contentOld, `${skill}/SKILL.md の内容が新旧の宛先で一致しない`);
+    }
+  } finally {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
 
 test('parseAgentsYaml: エージェントとdestを正しく読む', () => {
   const yaml = `
