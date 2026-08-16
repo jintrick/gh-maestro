@@ -24,6 +24,7 @@ const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens }
 const { workerLogPath } = require('./shared/headless-launch');
 const { parseFlags } = require('./shared/workspace');
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS, FINDING_REQUIRED_FIELDS } = require('./shared/review-aspects');
+const { managedRoot } = require('./shared/storage-layout');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
 const DEFAULT_JOB_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes per job
@@ -228,31 +229,121 @@ function validateJobs(jobs, adoptedLeaves, errors) {
   }
 }
 
+// ── 観点定義の正本解決と封じ込め ──────────────────────────────────────────────
+
+/**
+ * 観点定義の正本ディレクトリを解決する。
+ * 通常実行時は ~/.gh-maestro/skills/gh-maestro-reviewer （managedRoot() 準拠）のみを返す。
+ * テスト時は options.reviewSkillsDir による注入を許可する。
+ * （リポジトリ内ディレクトリへのフォールバックは、gh-maestro 自身のリポジトリにおいて
+ * 審査対象PRを読んでしまうため行わない。環境変数による差し替えも行わない）。
+ *
+ * @param {object} [options]
+ * @param {string} [options.reviewSkillsDir]
+ * @returns {string}
+ */
+function resolveReviewSkillsDir(options = {}) {
+  if (options && typeof options.reviewSkillsDir === 'string' && options.reviewSkillsDir) {
+    return path.resolve(options.reviewSkillsDir);
+  }
+  return path.join(managedRoot(), 'skills', 'gh-maestro-reviewer');
+}
+
+/**
+ * 葉ファイルパスを正本ディレクトリ配下に解決し、封じ込め（path confinement）を検証する。
+ * 外部由来のパスが正本ディレクトリ外を指す場合は拒否する（.claude/rules/path-confinement.md 準拠）。
+ *
+ * @param {string} lfPath
+ * @param {string} skillsDir
+ * @returns {{ok: boolean, resolvedPath?: string, error?: string}}
+ */
+function resolveLeafPath(lfPath, skillsDir) {
+  const allowedRoot = path.resolve(skillsDir);
+  let rel = String(lfPath).replace(/\\/g, '/');
+
+  // skills/gh-maestro-reviewer/ または gh-maestro-reviewer/ プレフィックスが付いている場合は除去
+  if (rel.startsWith('skills/gh-maestro-reviewer/')) {
+    rel = rel.slice('skills/gh-maestro-reviewer/'.length);
+  } else if (rel.startsWith('gh-maestro-reviewer/')) {
+    rel = rel.slice('gh-maestro-reviewer/'.length);
+  }
+
+  let candidate;
+  if (path.isAbsolute(lfPath)) {
+    candidate = path.resolve(lfPath);
+  } else {
+    candidate = path.resolve(allowedRoot, rel);
+  }
+
+  const isWin = process.platform === 'win32';
+  const c = isWin ? candidate.toLowerCase() : candidate;
+  const root = isWin ? allowedRoot.toLowerCase() : allowedRoot;
+
+  const isWithin = c === root || c.startsWith(root + path.sep);
+  if (!isWithin) {
+    return {
+      ok: false,
+      error: `leaf file path escapes review skills root: ${lfPath}`,
+    };
+  }
+
+  return {
+    ok: true,
+    resolvedPath: candidate,
+  };
+}
+
+/**
+ * ジョブの全葉ファイルを正本ディレクトリから読み取り、検証する。
+ * 1件でも正本外を指すパス（path confinement違反）やファイル未存在・読み取り失敗があればエラーを返す（フェイルクローズ）。
+ *
+ * @param {object} job
+ * @param {string} skillsDir
+ * @returns {{ok: true, leaves: Array<{path: string, content: string}>} | {ok: false, error: string}}
+ */
+function readJobLeaves(job, skillsDir) {
+  if (!Array.isArray(job.leaf_files) || job.leaf_files.length === 0) {
+    return { ok: false, error: `job ${job.id}: leaf_files must be a non-empty array` };
+  }
+  const leaves = [];
+  for (const lfPath of job.leaf_files) {
+    const res = resolveLeafPath(lfPath, skillsDir);
+    if (!res.ok) {
+      return { ok: false, error: `job ${job.id}: leaf file path escapes review skills root (${lfPath})` };
+    }
+    let content;
+    try {
+      content = fs.readFileSync(res.resolvedPath, 'utf8');
+    } catch (e) {
+      return { ok: false, error: `job ${job.id}: cannot read leaf file from canonical copy (${lfPath}): ${e.message}` };
+    }
+    leaves.push({ path: lfPath, content });
+  }
+  return { ok: true, leaves };
+}
+
 // ── ジョブプロンプト生成 ──────────────────────────────────────────────────────
 
 /**
  * ジョブワーカーに渡すプロンプトを生成する。
- * RMがmanifestに含めたleaf_filesのパスから実際のファイル内容を読み取り、
- * プロンプトに埋め込む。
+ * 観点定義ファイル（leaf_files）は配布済みの正本ディレクトリから読み取り、プロンプトに埋め込む。
+ * 審査対象PRのworktree（reviewWtDir）からは決して観点定義を読み込まない（Issue #309）。
+ * 読み取り不能または正本外パスがある場合は例外を throw する（フェイルクローズ）。
  *
  * @param {object} job
  * @param {object} manifest
  * @param {string} reviewWtDir
+ * @param {object} [options]
  * @returns {string}
  */
-function buildJobPrompt(job, manifest, reviewWtDir) {
-  const leafContents = job.leaf_files.map(lfPath => {
-    const fullPath = path.resolve(reviewWtDir, lfPath);
-    let content;
-    try {
-      content = fs.readFileSync(fullPath, 'utf8');
-    } catch {
-      content = `[ファイルを読み取れませんでした: ${lfPath}]`;
-    }
-    return { path: lfPath, content };
-  });
+function buildJobPrompt(job, manifest, reviewWtDir, options = {}) {
+  const skillsDir = resolveReviewSkillsDir(options);
+  const leafRes = readJobLeaves(job, skillsDir);
+  if (!leafRes.ok) {
+    throw new Error(leafRes.error);
+  }
 
-  const leavesSection = leafContents.map(lc =>
+  const leavesSection = leafRes.leaves.map(lc =>
     `### ${lc.path}\n\n${lc.content}`
   ).join('\n\n---\n\n');
 
@@ -358,9 +449,11 @@ ${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)
  * @param {string} reviewWtDir
  * @param {string} workspace
  * @param {number} timeoutMs
+ * @param {object|null} childRef
+ * @param {object} options
  * @returns {Promise<{jobId: string, status: 'success'|'failed', leaf_ids: string[], attempt: number, findings?: object[], error?: string}>}
  */
-function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, timeoutMs, childRef = null) {
+function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, timeoutMs, childRef = null, options = {}) {
   return new Promise((resolve) => {
     // 非対話化トークン検証（フェイルクローズ、Issue #163 Review Manager指摘）。
     // ジョブワーカーは execArgs ?? extraArgs を起動引数に使うため、execArgs を対話
@@ -378,7 +471,34 @@ function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, tim
       });
       return;
     }
-    const promptText = buildJobPrompt(job, manifest, reviewWtDir);
+
+    // 観点定義（葉ファイル）の正本読み込みと検証（フェイルクローズ: 読めなければエージェントを起動しない、Issue #309）
+    const skillsDir = resolveReviewSkillsDir(options);
+    const leafRes = readJobLeaves(job, skillsDir);
+    if (!leafRes.ok) {
+      resolve({
+        jobId: job.id,
+        status: 'failed',
+        leaf_ids: job.leaf_ids,
+        attempt: 1,
+        error: leafRes.error,
+      });
+      return;
+    }
+
+    let promptText;
+    try {
+      promptText = buildJobPrompt(job, manifest, reviewWtDir, options);
+    } catch (e) {
+      resolve({
+        jobId: job.id,
+        status: 'failed',
+        leaf_ids: job.leaf_ids,
+        attempt: 1,
+        error: e.message,
+      });
+      return;
+    }
     const promptFile = path.join(os.tmpdir(), `review-job-${job.id}-${Date.now()}.md`);
 
     try {
@@ -1059,7 +1179,7 @@ function applyRetryGate({ ghDir, pr }) {
  *   永続化先）。CLI --gh-dir 由来。省略時（プログラム呼び出し）は再試行ゲートを適用しない。
  * @returns {Promise<{ok: boolean, summary: object}>}
  */
-async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo, ghDir) {
+async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo, ghDir, options = {}) {
   // 1. manifest読み込み
   let manifestRaw;
   try {
@@ -1157,7 +1277,7 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   const jobPromises = manifest.jobs.map(job => {
     const childRef = { child: null };
     activeChildren.push(childRef);
-    return launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, jobTimeoutMs, childRef);
+    return launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, jobTimeoutMs, childRef, options);
   });
 
   // 全体タイムアウト: 締切到達時に残っている子プロセスを実際に終了させる
@@ -1232,6 +1352,9 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
 module.exports = {
   validateManifest,
   validateJobs,
+  resolveReviewSkillsDir,
+  resolveLeafPath,
+  readJobLeaves,
   buildJobPrompt,
   launchJobWorker,
   runJobsFromManifest,
