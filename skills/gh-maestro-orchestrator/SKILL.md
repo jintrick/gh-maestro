@@ -413,6 +413,10 @@ pull が唯一の配送根拠である。届くのを待つ受動的な経路は
 
 まだ起動していなければ、Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" orchestrator --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。**このセクション以外の場所（「PR検出」「レビュー監視」等）で改めてこのコマンドを起動してはならない**。それらの節はこの1本の inbox 監視を通じて通知を受け取る前提で書かれている。
 
+**プロセスが動いていることは、この Monitor を張らなくてよい理由にはならない。** `msg-poll.js orchestrator` のプロセスは `spawn-worker.js` / `msg-send.js` の自動起動保証によって、自分が Monitor を張らなくても勝手に起動して動き続ける。しかしその出力（`NEW_MESSAGE`）はログファイルに書かれるだけで、**自分が Monitor を張っていなければ自分のセッションには一切届かない**。この Monitor は「プロセスを起こすため」ではなく「自分に届かせるため」に張るものである。既に稼働中のプロセスがあって起動が拒否された場合（`重複起動を検出しました` で exit 1）は、拒否メッセージが案内する `--watch-pid <pid>` の Monitor を張ること——判断を挟まず、案内されたコマンドをそのまま使う。
+
+**実障害**: この Monitor と `poll-pr.js` の Monitor をどちらも張らないままコーダーを起動し、報告も PR 作成も一切画面に出ないまま放置した。`pids/` にプロセスは居たため「ポーリングは生きています」と誤報告し、原因を配送側のバグと誤認した。**プロセスの生死を、通知が自分に届くことの根拠にしてはならない。**
+
 Monitorから届く通知を処理する：
 - `NEW_MESSAGE:<issue>:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を読む。内容に応じて処理する（PR_DETECTED → PR番号を記録 等）。**完了後は直ちにMonitorに戻る**
 
