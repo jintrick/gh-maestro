@@ -13,6 +13,7 @@ function parseAgentsYaml(content) {
   const agents = {};
   let currentAgent = null;
   let inSubstitutions = false;
+  let inDestList = false;
   let blockKey = null;
   let blockIndent = null;
   let blockLines = [];
@@ -40,7 +41,18 @@ function parseAgentsYaml(content) {
 
     if (!line || line.trimStart().startsWith('#')) continue;
 
-    const indent = line.length - line.trimStart().length;
+    const trimmed = line.trimStart();
+    const indent = line.length - trimmed.length;
+
+    if (inDestList && indent >= 4 && trimmed.startsWith('- ')) {
+      const item = trimmed.slice(2).trim();
+      agents[currentAgent].dests.push(item);
+      if (!agents[currentAgent].dest) {
+        agents[currentAgent].dest = item;
+      }
+      continue;
+    }
+
     const colonIdx = line.indexOf(':');
     if (colonIdx === -1) continue;
 
@@ -49,14 +61,26 @@ function parseAgentsYaml(content) {
 
     if (indent === 2 && !value) {
       currentAgent = key;
-      agents[key] = { substitutions: {} };
+      agents[key] = { substitutions: {}, dests: [] };
       inSubstitutions = false;
+      inDestList = false;
     } else if (indent === 4 && currentAgent) {
       if (key === 'skill_markdown_template_placeholder_substitutions') {
         inSubstitutions = true;
+        inDestList = false;
       } else if (key === 'skill_files_install_destination_directory') {
-        agents[currentAgent].dest = value;
         inSubstitutions = false;
+        if (value) {
+          agents[currentAgent].dest = value;
+          agents[currentAgent].dests = [value];
+          inDestList = false;
+        } else {
+          inDestList = true;
+          agents[currentAgent].dests = [];
+        }
+      } else {
+        inSubstitutions = false;
+        inDestList = false;
       }
     } else if (indent === 6 && currentAgent && inSubstitutions) {
       if (value === '|') {

@@ -56,8 +56,13 @@ function resolveSkillsFamilyKey(agentId, command, yamlAgentsMap) {
  */
 function computeSkillMdPath(yamlAgentsMap, agentId, command, skillName) {
   const family = resolveSkillsFamilyKey(agentId, command, yamlAgentsMap);
-  if (!family || !yamlAgentsMap[family] || !yamlAgentsMap[family].dest) return null;
-  return join(expandHome(yamlAgentsMap[family].dest), skillName, 'SKILL.md');
+  if (!family || !yamlAgentsMap[family]) return null;
+  const agentEntry = yamlAgentsMap[family];
+  const primaryDest = (agentEntry.dests && agentEntry.dests.length > 0)
+    ? agentEntry.dests[0]
+    : agentEntry.dest;
+  if (!primaryDest) return null;
+  return join(expandHome(primaryDest), skillName, 'SKILL.md');
 }
 
 /**

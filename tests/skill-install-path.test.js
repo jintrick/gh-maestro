@@ -55,3 +55,21 @@ test('computeSkillMdPath: destが定義されていないエントリではnull�
   const brokenMap = { agy: { substitutions: {} } }; // dest欠落
   assert.equal(computeSkillMdPath(brokenMap, 'agy', undefined, 'gh-maestro-explorer'), null);
 });
+
+test('computeSkillMdPath: dests 配列が設定されている場合は先頭のパスを返す', () => {
+  const dualDestMap = {
+    agy: {
+      dest: '~/.agents/skills',
+      dests: ['~/.agents/skills', '~/.gemini/antigravity-cli/skills'],
+      substitutions: {},
+    },
+  };
+  const result = computeSkillMdPath(dualDestMap, 'agy', undefined, 'gh-maestro-coder');
+  const expected = require('path').join(
+    require('../scripts/shared/agents-yaml').expandHome('~/.agents/skills'),
+    'gh-maestro-coder',
+    'SKILL.md'
+  );
+  assert.equal(result, expected);
+});
+
