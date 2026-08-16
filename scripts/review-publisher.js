@@ -15,19 +15,11 @@ Arguments:
 Options:
   --dry-run        GitHubへ投稿せず、解決結果JSONをstdoutへ出力する`;
 
-const REQUIRED_FINDING_FIELDS = [
-  'aspect',
-  'path',
-  'line_anchor',
-  'summary',
-  'severity',
-  'severity_rationale',
-  'body',
-  'verified_references',
-];
-
-const VALID_ASPECTS = new Set(['Correctness', 'Maintainability', 'Resilience & Security', 'Test Quality']);
-const VALID_SEVERITIES = new Set(['BLOCKER', 'MAJOR', 'SUGGESTION']);
+const {
+  VALID_ASPECTS,
+  VALID_SEVERITIES,
+  FINDING_REQUIRED_FIELDS: REQUIRED_FINDING_FIELDS,
+} = require('./shared/review-aspects');
 
 const SEVERITY_LABELS = {
   BLOCKER: '\u{1F534} **BLOCKER**',
