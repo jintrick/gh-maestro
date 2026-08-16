@@ -35,7 +35,7 @@ Inbox Supervisor（`inbox-supervisor.js`）側の重複を疑った場合も、�
 
 `msg-poll.js orchestrator` は親セッション死亡検知（dead-man's switch）で **exit 3** で自滅する。自滅の経路では role lease が解放され、watchdog が「親セッション消滅による自動終了」の専用通知を送り、Monitor も異常終了（FAILED）として終了するため、**通常は沈黙せず通知が届く**。死のスイッチの判定は PID の再利用（起動時刻照合）にも正しく反応し、親セッションが死んだ後にその PID が別プロセスに使い回されていても「生きている」と誤判定して居座り続けない。
 
-ただし、クラッシュ・強制終了（`taskkill /F` 等）は自滅経路を経ないため、通知も lease 解放も行われない。その場合でも `spawn-worker.js` / `msg-send.js` の自動起動保証（`scripts/shared/ensure-msg-poll-orchestrator.js`）が、次のアクション（ワーカー作成・ワーカー宛て送信）の時点で新プロセスを起動して復活させる。
+ただし、クラッシュ・強制終了（`taskkill /F` 等）は自滅経路を経ないため、通知も lease 解放も行われない。その場合でも `spawn-worker.js` / `msg-send.js` の自動起動保証（`scripts/shared/ensure-msg-poll-orchestrator.js`）が、次のアクション（ワーカー作成・ワーカー宛て送信）の時点で新プロセスを起動して復活させる。**この自動復活は有界である**: 起動を試みた時点を `.gh-maestro/msg-poll-autostart-attempt.json` に記録し、クールダウン（既定5分）中は再試行しない（連続失敗時に呼び出しのたびに子プロセスとログが増え続けるのを防ぐ。生存を観測したら記録は消える）。
 
 **この状態は「反応が無い」という体感からしか入れない。** ワーカーの報告・PR 作成・レビュー完了のいずれかを待っていて、来ないと感じたら以下を実行する。
 

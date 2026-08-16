@@ -23,6 +23,17 @@ function fakeChild() {
   return emitter;
 }
 
+// 自動復活クールダウン（PR #302 指摘）の試行記録ファイルを直接書き込む。
+// 時刻は実測でなく自由な値を与えて、クールダウン境界を決定的にテストする。
+function attemptPath() {
+  return path.join(workspace, '.gh-maestro', 'msg-poll-autostart-attempt.json');
+}
+
+function writeAttempt(lastAttemptAt) {
+  fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(attemptPath(), JSON.stringify({ lastAttemptAt }), 'utf8');
+}
+
 let workspace;
 
 beforeEach(() => {
@@ -218,4 +229,94 @@ test('ensureMsgPollOrchestratorRunning: .gh-maestro/msg-poll-orchestrator-autost
   ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' });
   const logPath = path.join(workspace, '.gh-maestro', 'msg-poll-orchestrator-autostart.log');
   assert.ok(fs.existsSync(logPath));
+});
+
+// ── 自動復活の有界化（PR #302 指摘） ───────────────────────────────────────
+
+test('ensureMsgPollOrchestratorRunning: 直前の試行がクールダウン中なら再試行しない（1回/5分に有界）', () => {
+  // lease 拒否・起動直後の異常終了・spawn 失敗のいずれも「次のトリガー時点では稼働中でない」
+  // としか見えないため、単一のクールダウンに含まれる（今回の本題）。
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' }); // 1回目: spawn する
+  assert.equal(spawnCount, 1);
+  assert.ok(fs.existsSync(attemptPath()), '試行記録が残る');
+
+  ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' }); // クールダウン中: 再試行しない
+  assert.equal(spawnCount, 1);
+});
+
+test('ensureMsgPollOrchestratorRunning: クールダウン期限経過後は再試行する', () => {
+  writeAttempt(Date.now() - (mod.AUTOSTART_COOLDOWN_MS + 1000)); // 期限を超えた試行
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.equal(spawnCount, 1);
+});
+
+test('ensureMsgPollOrchestratorRunning: クールダウンぎりぎり（期限内）は再試行しない', () => {
+  writeAttempt(Date.now() - (mod.AUTOSTART_COOLDOWN_MS - 1000)); // まだ期限内
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.equal(spawnCount, 0);
+});
+
+test('ensureMsgPollOrchestratorRunning: 生存（registry）を観測したら試行記録を消し、以後の試行を妨げない', () => {
+  writeAttempt(Date.now()); // 新鮮な記録 = クールダウンに掛かるはず
+  mod._setFindRunningInstance(() => ({ pid: 777, script: 'msg-poll.js' }));
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.equal(spawnCount, 0);
+  assert.equal(fs.existsSync(attemptPath()), false, '生存観測で試行記録が消える');
+});
+
+test('ensureMsgPollOrchestratorRunning: 生存（role lease live）を観測したら試行記録を消し、以後の試行を妨げない', () => {
+  writeAttempt(Date.now()); // 新鮮な記録 = クールダウンに掛かるはず
+  mod._setFindRunningInstance(() => null);
+  mod._setIsResidentLeaseLive(() => true);
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' });
+
+  assert.equal(spawnCount, 0);
+  assert.equal(fs.existsSync(attemptPath()), false, '生存観測で試行記録が消える');
+});
+
+test('ensureMsgPollOrchestratorRunning: 壊れた試行記録はクールダウンに掛からない（fail-open）', () => {
+  fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(attemptPath(), 'not-json', 'utf8');
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.equal(spawnCount, 1);
+});
+
+test('ensureMsgPollOrchestratorRunning: 未来時刻の試行記録は信頼せず再試行する', () => {
+  writeAttempt(Date.now() + 60 * 1000);
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; return fakeChild(); });
+
+  ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' });
+  assert.equal(spawnCount, 1);
+});
+
+test('ensureMsgPollOrchestratorRunning: spawnが例外を投げても試行記録が残り、次のトリガーはクールダウンで抑制される', () => {
+  // 記録は spawn の前に書く（PR #302 指摘の「起動直後の異常終了」を含めて同じ上限管理に乗せる）。
+  let spawnCount = 0;
+  mod._setSpawn(() => { spawnCount += 1; throw new Error('boom'); });
+
+  ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' }); // 例外は握りつぶされる
+  assert.equal(spawnCount, 1);
+
+  ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: '/abs/scripts' }); // クールダウン → 再試行しない
+  assert.equal(spawnCount, 1);
 });

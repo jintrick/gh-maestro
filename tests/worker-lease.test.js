@@ -652,6 +652,17 @@ test('roleLeaseKey: Windows パス無効文字をアンダースコアへ置換�
   assert.equal(lease.roleLeaseKey('a/b:c*d?e"f<g>h|i'), 'resident-role-a_b_c_d_e_f_g_h_i');
 });
 
+test('msgPollRole: MSGPOLL_ORCHESTRATOR_ROLE と msg-poll.js の role 構築が一箇所に集約されている（PR #302）', () => {
+  // msg-poll.js は msgPollRole(self)、ensure-msg-poll-orchestrator.js は MSGPOLL_ORCHESTRATOR_ROLE
+  // を参照する。両者が別々に組み立てると片方だけ変更された際に起動前チェックが生きた lease を
+  // 認識できなくなるため、MSGPOLL_ORCHESTRATOR_ROLE が msgPollRole('orchestrator') から導出されて
+  // いることを固定する。
+  assert.equal(typeof lease.msgPollRole, 'function');
+  assert.equal(lease.msgPollRole('orchestrator'), 'msgpoll-orchestrator');
+  assert.equal(lease.msgPollRole('worker-1'), 'msgpoll-worker-1');
+  assert.equal(lease.MSGPOLL_ORCHESTRATOR_ROLE, lease.msgPollRole('orchestrator'));
+});
+
 test('acquireResidentLease: live lease が無ければ取得して自PIDでアクティブ化する', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
   try {

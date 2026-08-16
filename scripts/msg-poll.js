@@ -35,7 +35,7 @@ const {
   findRunningInstance,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
-const { acquireResidentLease } = require('./shared/worker-lease');
+const { acquireResidentLease, msgPollRole } = require('./shared/worker-lease');
 const { listUnprocessedResidentAuditEvents, removeResidentAuditEvent } = require('./shared/resident-audit');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
 const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdog-exit-notify');
@@ -403,7 +403,7 @@ function main(argsOverride, opts = {}) {
   // よう、role lease は workspace を canonicalWorkspace で正規化して排他する（Issue #240）。
   // role は親セッション死亡時の lease 解放（handleParentSessionDeath）でも参照するため
   // --once でも算出する（lease 未取得なら解放は no-op）。
-  const role = `msgpoll-${self}`;
+  const role = msgPollRole(self);
   let residentLease = null;
   if (!onceMode) {
     const handoffTargets = () => {
