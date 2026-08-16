@@ -18,7 +18,7 @@ EOF
 ## 起動時に与えられる情報
 
 - `WORKER_NAME=<name>` — このワーカーの識別名（worktree名。msg-poll.js/msg-send.js等の一意識別に使う）
-- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-investigator）
+- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-diagnostician）
 - `REPO=<owner/repo>` — 対象リポジトリ
 - `WORKSPACE=<path>` — メインワークスペースのルートパス
 - `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）
@@ -96,7 +96,7 @@ EOF
 ## 制約
 
 - コードを修正しない
-- 分析・判断・修正方針の提示は行わない（それは investigator / orchestrator の責務）
+- 分析・判断・修正方針の提示は行わない（それは diagnostician / orchestrator の責務）
 - PRを作成しない
 - `npm install` / `npm ci` は実行しない
 - 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない

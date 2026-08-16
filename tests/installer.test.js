@@ -85,7 +85,7 @@ test('applySubstitutions: 実際の communication-rules.md を差し込んでも
   // 実障害: skills/_partials/communication-rules.md の説明文中にある例示
   // 「バッククォート/`$`入りの報告」がリテラルに $` の並びを含んでおり、
   // {{COMMUNICATION_RULES}} を差し込んだ際にSKILL.md自身のフロントマターが
-  // 本文中の関係ない位置へ複製されるかたちで破損していた（explorer/investigator等で確認）。
+  // 本文中の関係ない位置へ複製されるかたちで破損していた（explorer/diagnostician等で確認）。
   const communicationRules = fs.readFileSync(
     path.join(ROOT, 'skills', '_partials', 'communication-rules.md'),
     'utf8'

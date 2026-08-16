@@ -57,7 +57,7 @@ test('完了済み実行を再起動しても completed とコメントURLを保
 test('pruneExecutionsForIssue: 対象issueのレコードだけ消し、他issueとファイル自体は残す', () => {
   withWorkspace(workspace => {
     registry.startExecution(workspace, { executionId: 'issue-7-a', issue: 7, workerName: 'worker-a', skill: 'gh-maestro-coder' });
-    registry.startExecution(workspace, { executionId: 'issue-7-b', issue: 7, workerName: 'worker-b', skill: 'gh-maestro-investigator' });
+    registry.startExecution(workspace, { executionId: 'issue-7-b', issue: 7, workerName: 'worker-b', skill: 'gh-maestro-diagnostician' });
     registry.startExecution(workspace, { executionId: 'issue-9', issue: 9, workerName: 'worker-c', skill: 'gh-maestro-coder' });
 
     const removed = registry.pruneExecutionsForIssue(workspace, 7);

@@ -65,8 +65,8 @@ orchestrator: レビュー結果をトリアージ → あなたにマージを�
 
 # バグ調査の場合
 あなた: 「Issue #12 のバグを調査してほしい」
-orchestrator: investigator をアンカー Issue と共に起動（investigator は Issue 本文を読んで着手）
-investigator: 根本原因/影響範囲/修正方針を Issue コメントで報告
+orchestrator: diagnostician をアンカー Issue と共に起動（diagnostician は Issue 本文を読んで着手）
+diagnostician: 根本原因/影響範囲/修正方針を Issue コメントで報告
 orchestrator: 調査結果をあなたに提示 → 対応方針を判断
 ```
 
@@ -119,7 +119,7 @@ skills/
     SKILL.md                     # テンプレート（{{SCRIPTS_PATH}} を使用）
   gh-maestro-coder/              # 以下ワーカー系
   gh-maestro-senior-coder/
-  gh-maestro-investigator/
+  gh-maestro-diagnostician/
   gh-maestro-explorer/
   gh-maestro-architect/
   gh-maestro-base/               # 動的ワーカー生成の骨格

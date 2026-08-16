@@ -141,7 +141,7 @@
     "gh-maestro-coder": "claude-ds",
     "gh-maestro-base": "claude-ds",
     "gh-maestro-senior-coder": "claude-ds-pro",
-    "gh-maestro-investigator": "reasonix",
+    "gh-maestro-diagnostician": "reasonix",
     "gh-maestro-explorer": "agy",
     "gh-maestro-reviewer": "codex",
     "gh-maestro-architect": "codex-pro"

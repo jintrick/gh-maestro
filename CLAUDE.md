@@ -33,7 +33,7 @@ Keep role boundaries explicit:
 - Orchestrator: collaborates with the human, drafts Issues, starts workers, triages review output, and coordinates merge/retrospective.
 - Coder: implements one scoped Issue in its own worktree.
 - Explorer: gathers facts only.
-- Investigator: diagnoses bugs and reports root cause, impact, and fix direction.
+- Diagnostician: diagnoses bugs and reports root cause, impact, and fix direction.
 - Review Manager: coordinates independent review passes and emits structured findings; deterministic scripts handle posting.
 
 When adding or changing roles, prefer data-driven configuration and shared launch helpers over per-agent special cases.
@@ -83,7 +83,7 @@ The actual danger (Issue #214) is not the literal string `.gh-maestro` — dozen
 
 ## Headless Retry Is An Anti-Pattern
 
-**Do not introduce retry loops into headless processes.** When a headless worker (coder, Review Manager, explorer, investigator, or any agent launched without a visible pane) hits a failure it might resolve by trying again, it must surface that failure to the orchestrator instead of looping on its own.
+**Do not introduce retry loops into headless processes.** When a headless worker (coder, Review Manager, explorer, diagnostician, or any agent launched without a visible pane) hits a failure it might resolve by trying again, it must surface that failure to the orchestrator instead of looping on its own.
 
 A runaway loop inside a headless process is the worst failure mode this system has. Nobody sees it: the orchestrator reads the silence as "the report has not arrived yet" and keeps waiting, the human sees nothing at all, and the model burns quota the entire time. This has already happened in other forms (workers spinning at 100% CPU after their final report).
 

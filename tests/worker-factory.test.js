@@ -30,7 +30,7 @@ test('ROLE_LABEL_MAP: 全既知スキルが登録されている', () => {
     'gh-maestro-coder',
     'gh-maestro-senior-coder',
     'gh-maestro-explorer',
-    'gh-maestro-investigator',
+    'gh-maestro-diagnostician',
     'gh-maestro-architect',
     'gh-maestro-base',
     'gh-maestro-reviewer',
@@ -66,6 +66,10 @@ test('ROLE_LABEL_MAP: gh-maestro-coder → coder', () => {
   assert.equal(ROLE_LABEL_MAP['gh-maestro-coder'], 'coder');
 });
 
+test('ROLE_LABEL_MAP: gh-maestro-diagnostician → diagnostician', () => {
+  assert.equal(ROLE_LABEL_MAP['gh-maestro-diagnostician'], 'diagnostician');
+});
+
 // ── buildWorkerName ────────────────────────────────────────────────────────────
 
 test('buildWorkerName: 正規形式 issue-<issue>-<role>-<description> を組み立てる', () => {
@@ -84,8 +88,8 @@ test('buildWorkerName: descriptionにハイフンを含む場合も正しく組�
 
 test('buildWorkerName: descriptionにアンダースコアを含む場合も正しく組み立てる', () => {
   assert.equal(
-    buildWorkerName(7, 'investigator', 'crash_on_startup_v2'),
-    'issue-7-investigator-crash_on_startup_v2',
+    buildWorkerName(7, 'diagnostician', 'crash_on_startup_v2'),
+    'issue-7-diagnostician-crash_on_startup_v2',
   );
 });
 
@@ -113,7 +117,7 @@ test('buildNormalWorkerLaunchSpec: 各フィールドが正しく設定される
 
 test('buildNormalWorkerLaunchSpec: issue は文字列でも数値に変換される', () => {
   const spec = buildNormalWorkerLaunchSpec({
-    skill: 'gh-maestro-investigator',
+    skill: 'gh-maestro-diagnostician',
     issue: '42',
     description: 'debug-crash',
     repo: 'o/r',
@@ -205,7 +209,7 @@ test('buildNormalWorkerLaunchSpec: 全通常ワーカースキルで起動仕様
     'gh-maestro-coder',
     'gh-maestro-senior-coder',
     'gh-maestro-explorer',
-    'gh-maestro-investigator',
+    'gh-maestro-diagnostician',
     'gh-maestro-architect',
     'gh-maestro-base',
   ];

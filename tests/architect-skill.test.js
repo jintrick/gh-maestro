@@ -30,7 +30,7 @@ test('orchestrator skill は要件確定、調査、architect起動判断、抽�
   const planning = orchestratorSkill.indexOf('**計画評価**');
   const startImpl = orchestratorSkill.indexOf('**実装開始指示**');
   assert.ok(requirements < research && research < architect && architect < design && design < coder && coder < planning && planning < startImpl);
-  assert.match(orchestratorSkill, /必要な explorer\/investigator の再調査/);
+  assert.match(orchestratorSkill, /必要な explorer\/diagnostician の再調査/);
   assert.match(orchestratorSkill, /要件本文を変更できるのは人間との合意/);
   assert.match(orchestratorSkill, /既存の `msg-send\.js` 経路/);
   assert.match(orchestratorSkill, /反省会が完了した後にだけ実行/);

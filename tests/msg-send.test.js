@@ -141,7 +141,7 @@ function writeWorkersForSkill(workspace) {
     path.join(ghDir, 'workers.json'),
     JSON.stringify({
       orchestrator: { paneId: '1' },
-      'issue-42-investigate': { paneId: '10', agentId: 'reasonix', issue: 42, skill: 'gh-maestro-investigator' },
+      'issue-42-investigate': { paneId: '10', agentId: 'reasonix', issue: 42, skill: 'gh-maestro-diagnostician' },
       'issue-42-implement': { paneId: '11', agentId: 'claude-ds', issue: 42, skill: 'gh-maestro-coder' },
     }, null, 2),
     'utf8'
@@ -178,7 +178,7 @@ test('--skill: 同一issueでも役割で区別して別ワーカーに解決す
       return { status: 0, stdout: 'https://github.com/test/repo/issues/42#issuecomment-1\n' };
     });
 
-    const r = msgSend.main(['--issue', '42', '--skill', 'gh-maestro-investigator', '--workspace', workspace, '--stdin'], null, stdinIO('追加調査を'));
+    const r = msgSend.main(['--issue', '42', '--skill', 'gh-maestro-diagnostician', '--workspace', workspace, '--stdin'], null, stdinIO('追加調査を'));
     assert.equal(r.code, 0);
     assert.ok(capturedBody.includes('"to":"issue-42-investigate"'));
   });
@@ -376,7 +376,7 @@ test('ワーカーコンテキスト: --skill（orchestrator専用）はエラ�
   withTempDir(workspace => {
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     const r = msgSend.main(
-      ['--skill', 'gh-maestro-investigator', '--issue', '1', '--workspace', workspace, '--stdin'],
+      ['--skill', 'gh-maestro-diagnostician', '--issue', '1', '--workspace', workspace, '--stdin'],
       { GH_MAESTRO_WORKER: 'issue-1-investigate' },
       stdinIO('報告本文'),
     );

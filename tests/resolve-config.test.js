@@ -625,7 +625,7 @@ test('resolveSkillAgentMap: デフォルトのマッピングを返す', () => {
     assert.equal(map['gh-maestro-base'], 'claude-ds');
     assert.equal(map['gh-maestro-architect'], 'codex-pro');
     assert.equal(map['gh-maestro-senior-coder'], 'claude-ds-pro');
-    assert.equal(map['gh-maestro-investigator'], 'reasonix');
+    assert.equal(map['gh-maestro-diagnostician'], 'reasonix');
     assert.equal(map['gh-maestro-explorer'], 'agy');
     assert.equal(map['gh-maestro-reviewer'], 'codex');
   });
@@ -659,7 +659,7 @@ test('resolveSkillAgentMap: workspace config が global config を上書きす�
 
       const map = resolveSkillAgentMap({ homedir: home, workspace: ws });
       assert.equal(map['gh-maestro-coder'], 'workspace-agent', 'workspace should win over global');
-      assert.equal(map['gh-maestro-investigator'], 'reasonix', 'unrelated entry unchanged');
+      assert.equal(map['gh-maestro-diagnostician'], 'reasonix', 'unrelated entry unchanged');
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }

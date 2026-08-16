@@ -58,7 +58,7 @@ test('createSessionResumeAdapter: start がコマンドと引数を返す（reas
   const agent = getAgentMap().get('reasonix');
   const adapter = createSessionResumeAdapter(agent);
   const result = adapter.start({
-    skill: 'gh-maestro-investigator',
+    skill: 'gh-maestro-diagnostician',
     shortPrompt: '調査してください',
   });
 

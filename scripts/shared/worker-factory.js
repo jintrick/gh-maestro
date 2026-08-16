@@ -88,7 +88,7 @@ const ROLE_LABEL_MAP = Object.freeze({
   'gh-maestro-coder': 'coder',
   'gh-maestro-senior-coder': 'senior-coder',
   'gh-maestro-explorer': 'explorer',
-  'gh-maestro-investigator': 'investigator',
+  'gh-maestro-diagnostician': 'diagnostician',
   'gh-maestro-architect': 'architect',
   'gh-maestro-base': 'base',
   'gh-maestro-reviewer': 'review-manager',
@@ -219,7 +219,7 @@ function buildWorkerName(issue, role, description) {
 // ── LaunchSpec factory ─────────────────────────────────────────────────────────
 
 /**
- * 通常ワーカー（coder/senior-coder/explorer/investigator/architect/base）の
+ * 通常ワーカー（coder/senior-coder/explorer/diagnostician/architect/base）の
  * 起動仕様を生成する。
  *
  * worktreeキー・ブランチ名は正規IDと同一。

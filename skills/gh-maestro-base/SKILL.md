@@ -10,7 +10,7 @@ description: gh-maestroワーカーの共通骨格テンプレート。orchestra
 起動プロンプトに以下が含まれている：
 
 - `WORKER_NAME=<name>` — このワーカーの識別名（worktree名。msg-poll.js/msg-send.js等の一意識別に使う）
-- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-investigator）
+- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-diagnostician）
 - `REPO=<owner/repo>` — 対象リポジトリ
 - `WORKSPACE=<path>` — ワークスペースのルートパス
 - `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）
