@@ -14,6 +14,7 @@ const {
   validateJobs,
   resolveReviewSkillsDir,
   resolveLeafPath,
+  readJobLeaves,
   buildJobPrompt,
   launchJobWorker,
   runJobsFromManifest,
@@ -37,6 +38,7 @@ const {
 
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES } = require('../scripts/shared/review-aspects');
 const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
+const { managedRoot } = require('../scripts/shared/storage-layout');
 
 test('validateManifest: valid manifest passes', () => {
   const manifest = {
@@ -138,45 +140,46 @@ test('validateManifest: empty jobs when adopted leaves exist fails', () => {
   assert.ok(errors.some(e => e.includes('must not be empty')));
 });
 
-test('resolveReviewSkillsDir: 通常時は managedRoot() 配下を返し、options で注入可能', () => {
+test('resolveReviewSkillsDir: 通常時は managedRoot() 配下の正本パスを返し、options で注入可能（Issue #309）', () => {
   const defaultDir = resolveReviewSkillsDir();
-  assert.ok(defaultDir.includes('.gh-maestro'));
-  assert.ok(defaultDir.endsWith(path.join('skills', 'gh-maestro-reviewer')));
+  const expectedDefault = path.join(managedRoot(), 'skills', 'gh-maestro-reviewer');
+  assert.equal(defaultDir, expectedDefault, '既定の正本パスは managedRoot()/skills/gh-maestro-reviewer と一致しなければならない');
 
   const customDir = resolveReviewSkillsDir({ reviewSkillsDir: '/custom/skills/gh-maestro-reviewer' });
   assert.equal(customDir, path.resolve('/custom/skills/gh-maestro-reviewer'));
 });
 
-test('resolveLeafPath: 正本ディレクトリ配下の相対パス・絶対パスを解決し、脱出パスは拒否する', () => {
-  const skillsDir = path.resolve('/test/skills/gh-maestro-reviewer');
+test('resolveLeafPath: 既定の正本ディレクトリ基準で各観点ファイルパスが managedRoot 配下に正しく解決される（Issue #309）', () => {
+  const defaultSkillsDir = resolveReviewSkillsDir();
+  const expectedPrefix = path.join(managedRoot(), 'skills', 'gh-maestro-reviewer');
 
-  // 相対パス（プレフィックスあり・なし）
-  const r1 = resolveLeafPath('correctness/logic-invariants.md', skillsDir);
+  // 相対パス（プレフィックスあり・なし）がすべて managedRoot 配下に解決される
+  const r1 = resolveLeafPath('correctness/logic-invariants.md', defaultSkillsDir);
   assert.equal(r1.ok, true);
-  assert.equal(r1.resolvedPath, path.join(skillsDir, 'correctness', 'logic-invariants.md'));
+  assert.equal(r1.resolvedPath, path.join(expectedPrefix, 'correctness', 'logic-invariants.md'));
 
-  const r2 = resolveLeafPath('skills/gh-maestro-reviewer/correctness/logic-invariants.md', skillsDir);
+  const r2 = resolveLeafPath('skills/gh-maestro-reviewer/correctness/logic-invariants.md', defaultSkillsDir);
   assert.equal(r2.ok, true);
-  assert.equal(r2.resolvedPath, path.join(skillsDir, 'correctness', 'logic-invariants.md'));
+  assert.equal(r2.resolvedPath, path.join(expectedPrefix, 'correctness', 'logic-invariants.md'));
 
-  const r3 = resolveLeafPath('gh-maestro-reviewer/correctness/logic-invariants.md', skillsDir);
+  const r3 = resolveLeafPath('gh-maestro-reviewer/correctness/logic-invariants.md', defaultSkillsDir);
   assert.equal(r3.ok, true);
-  assert.equal(r3.resolvedPath, path.join(skillsDir, 'correctness', 'logic-invariants.md'));
+  assert.equal(r3.resolvedPath, path.join(expectedPrefix, 'correctness', 'logic-invariants.md'));
 
   // 正本ディレクトリ配下の絶対パス
-  const absInside = path.join(skillsDir, 'correctness', 'logic-invariants.md');
-  const r4 = resolveLeafPath(absInside, skillsDir);
+  const absInside = path.join(defaultSkillsDir, 'correctness', 'logic-invariants.md');
+  const r4 = resolveLeafPath(absInside, defaultSkillsDir);
   assert.equal(r4.ok, true);
   assert.equal(r4.resolvedPath, absInside);
 
-  // 脱出パス（../ による path traversal）
-  const r5 = resolveLeafPath('../../../etc/passwd', skillsDir);
+  // 脱出パス（../ による path traversal）は拒否
+  const r5 = resolveLeafPath('../../../etc/passwd', defaultSkillsDir);
   assert.equal(r5.ok, false);
   assert.ok(r5.error.includes('escapes review skills root'));
 
-  // 正本外の絶対パス
+  // 正本外の絶対パスは拒否
   const absOutside = path.resolve('/tmp/malicious-criteria.md');
-  const r6 = resolveLeafPath(absOutside, skillsDir);
+  const r6 = resolveLeafPath(absOutside, defaultSkillsDir);
   assert.equal(r6.ok, false);
   assert.ok(r6.error.includes('escapes review skills root'));
 });
@@ -239,47 +242,70 @@ test('buildJobPrompt: PR worktree 内に skills が存在しない場合でも�
     const prompt = buildJobPrompt(job, manifest, worktreeDir, { reviewSkillsDir: skillsDir });
 
     assert.match(prompt, /Other Repo Canonical Criteria/);
-    assert.doesNotMatch(prompt, /読み取れませんでした/);
   } finally {
     fs.rmSync(worktreeDir, { recursive: true, force: true });
     fs.rmSync(skillsDir, { recursive: true, force: true });
   }
 });
 
-test('buildJobPrompt: 正本ディレクトリ外のパスが指定された場合は拒否メッセージを埋め込み外部ファイルを読み込まない', () => {
+test('launchJobWorker: 正本の観点定義が存在しない場合はエージェントを起動せず failed で終了する（フェイルクローズ、Issue #309）', async () => {
   const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-wt-'));
-  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-skills-'));
-  const externalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-ext-'));
+  const nonExistentSkillsDir = path.join(os.tmpdir(), `non-existent-skills-${Date.now()}`);
   try {
-    // 外部ファイルを作成
-    const secretPath = path.join(externalDir, 'secret.md');
-    fs.writeFileSync(secretPath, '# SECRET_DATA', 'utf8');
-
     const job = {
       id: 'job-1',
       leaf_ids: ['correctness/logic-invariants'],
       aspect: 'Correctness',
       trunk_dir: 'skills/gh-maestro-reviewer/correctness',
-      leaf_files: [secretPath, '../../secret.md'],
+      leaf_files: ['correctness/logic-invariants.md'],
     };
     const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
+    const agentConfig = { id: 'codex', command: 'codex', extraArgs: ['--non-interactive'] };
 
-    const prompt = buildJobPrompt(job, manifest, worktreeDir, { reviewSkillsDir: skillsDir });
+    const result = await launchJobWorker(job, manifest, agentConfig, worktreeDir, worktreeDir, 5000, null, {
+      reviewSkillsDir: nonExistentSkillsDir,
+    });
 
-    assert.match(prompt, /観点定義ファイルのパスが不正です（正本ディレクトリ外）/);
-    assert.doesNotMatch(prompt, /SECRET_DATA/);
+    assert.equal(result.status, 'failed');
+    assert.equal(result.jobId, 'job-1');
+    assert.ok(result.error.includes('cannot read leaf file from canonical copy'));
   } finally {
     fs.rmSync(worktreeDir, { recursive: true, force: true });
-    fs.rmSync(skillsDir, { recursive: true, force: true });
-    fs.rmSync(externalDir, { recursive: true, force: true });
   }
 });
 
-test('buildJobPrompt: 正本にファイルが存在しない場合は未読込メッセージを埋め込む（fail-closed）', () => {
+test('launchJobWorker: 正本外を指すパスが指定された場合はエージェントを起動せず failed で終了する（フェイルクローズ、Issue #309）', async () => {
   const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-wt-'));
   const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-skills-'));
   try {
     const job = {
+      id: 'job-1',
+      leaf_ids: ['correctness/logic-invariants'],
+      aspect: 'Correctness',
+      trunk_dir: 'skills/gh-maestro-reviewer/correctness',
+      leaf_files: ['../../secret.md'],
+    };
+    const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
+    const agentConfig = { id: 'codex', command: 'codex', extraArgs: ['--non-interactive'] };
+
+    const result = await launchJobWorker(job, manifest, agentConfig, worktreeDir, worktreeDir, 5000, null, {
+      reviewSkillsDir: skillsDir,
+    });
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.jobId, 'job-1');
+    assert.ok(result.error.includes('escapes review skills root'));
+  } finally {
+    fs.rmSync(worktreeDir, { recursive: true, force: true });
+    fs.rmSync(skillsDir, { recursive: true, force: true });
+  }
+});
+
+test('buildJobPrompt: 正本定義が読めないまたは不正パスの場合は例外を throw する（fail-closed）', () => {
+  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-wt-'));
+  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-skills-'));
+  try {
+    const jobNonExistent = {
       id: 'job-1',
       leaf_ids: ['correctness/non-existent'],
       aspect: 'Correctness',
@@ -288,9 +314,23 @@ test('buildJobPrompt: 正本にファイルが存在しない場合は未読込�
     };
     const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
 
-    const prompt = buildJobPrompt(job, manifest, worktreeDir, { reviewSkillsDir: skillsDir });
+    assert.throws(
+      () => buildJobPrompt(jobNonExistent, manifest, worktreeDir, { reviewSkillsDir: skillsDir }),
+      /cannot read leaf file from canonical copy/,
+    );
 
-    assert.match(prompt, /観点定義ファイルを読み取れませんでした: correctness\/non-existent\.md/);
+    const jobEscape = {
+      id: 'job-2',
+      leaf_ids: ['correctness/escape'],
+      aspect: 'Correctness',
+      trunk_dir: 'skills/gh-maestro-reviewer/correctness',
+      leaf_files: ['../../outside.md'],
+    };
+
+    assert.throws(
+      () => buildJobPrompt(jobEscape, manifest, worktreeDir, { reviewSkillsDir: skillsDir }),
+      /escapes review skills root/,
+    );
   } finally {
     fs.rmSync(worktreeDir, { recursive: true, force: true });
     fs.rmSync(skillsDir, { recursive: true, force: true });

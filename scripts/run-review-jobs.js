@@ -293,12 +293,42 @@ function resolveLeafPath(lfPath, skillsDir) {
   };
 }
 
+/**
+ * ジョブの全葉ファイルを正本ディレクトリから読み取り、検証する。
+ * 1件でも正本外を指すパス（path confinement違反）やファイル未存在・読み取り失敗があればエラーを返す（フェイルクローズ）。
+ *
+ * @param {object} job
+ * @param {string} skillsDir
+ * @returns {{ok: true, leaves: Array<{path: string, content: string}>} | {ok: false, error: string}}
+ */
+function readJobLeaves(job, skillsDir) {
+  if (!Array.isArray(job.leaf_files) || job.leaf_files.length === 0) {
+    return { ok: false, error: `job ${job.id}: leaf_files must be a non-empty array` };
+  }
+  const leaves = [];
+  for (const lfPath of job.leaf_files) {
+    const res = resolveLeafPath(lfPath, skillsDir);
+    if (!res.ok) {
+      return { ok: false, error: `job ${job.id}: leaf file path escapes review skills root (${lfPath})` };
+    }
+    let content;
+    try {
+      content = fs.readFileSync(res.resolvedPath, 'utf8');
+    } catch (e) {
+      return { ok: false, error: `job ${job.id}: cannot read leaf file from canonical copy (${lfPath}): ${e.message}` };
+    }
+    leaves.push({ path: lfPath, content });
+  }
+  return { ok: true, leaves };
+}
+
 // ── ジョブプロンプト生成 ──────────────────────────────────────────────────────
 
 /**
  * ジョブワーカーに渡すプロンプトを生成する。
  * 観点定義ファイル（leaf_files）は配布済みの正本ディレクトリから読み取り、プロンプトに埋め込む。
  * 審査対象PRのworktree（reviewWtDir）からは決して観点定義を読み込まない（Issue #309）。
+ * 読み取り不能または正本外パスがある場合は例外を throw する（フェイルクローズ）。
  *
  * @param {object} job
  * @param {object} manifest
@@ -308,22 +338,12 @@ function resolveLeafPath(lfPath, skillsDir) {
  */
 function buildJobPrompt(job, manifest, reviewWtDir, options = {}) {
   const skillsDir = resolveReviewSkillsDir(options);
-  const leafContents = job.leaf_files.map(lfPath => {
-    const res = resolveLeafPath(lfPath, skillsDir);
-    let content;
-    if (!res.ok) {
-      content = `[観点定義ファイルのパスが不正です（正本ディレクトリ外）: ${lfPath}]`;
-    } else {
-      try {
-        content = fs.readFileSync(res.resolvedPath, 'utf8');
-      } catch {
-        content = `[観点定義ファイルを読み取れませんでした: ${lfPath}]`;
-      }
-    }
-    return { path: lfPath, content };
-  });
+  const leafRes = readJobLeaves(job, skillsDir);
+  if (!leafRes.ok) {
+    throw new Error(leafRes.error);
+  }
 
-  const leavesSection = leafContents.map(lc =>
+  const leavesSection = leafRes.leaves.map(lc =>
     `### ${lc.path}\n\n${lc.content}`
   ).join('\n\n---\n\n');
 
@@ -429,6 +449,8 @@ ${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)
  * @param {string} reviewWtDir
  * @param {string} workspace
  * @param {number} timeoutMs
+ * @param {object|null} childRef
+ * @param {object} options
  * @returns {Promise<{jobId: string, status: 'success'|'failed', leaf_ids: string[], attempt: number, findings?: object[], error?: string}>}
  */
 function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, timeoutMs, childRef = null, options = {}) {
@@ -449,7 +471,34 @@ function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, tim
       });
       return;
     }
-    const promptText = buildJobPrompt(job, manifest, reviewWtDir, options);
+
+    // 観点定義（葉ファイル）の正本読み込みと検証（フェイルクローズ: 読めなければエージェントを起動しない、Issue #309）
+    const skillsDir = resolveReviewSkillsDir(options);
+    const leafRes = readJobLeaves(job, skillsDir);
+    if (!leafRes.ok) {
+      resolve({
+        jobId: job.id,
+        status: 'failed',
+        leaf_ids: job.leaf_ids,
+        attempt: 1,
+        error: leafRes.error,
+      });
+      return;
+    }
+
+    let promptText;
+    try {
+      promptText = buildJobPrompt(job, manifest, reviewWtDir, options);
+    } catch (e) {
+      resolve({
+        jobId: job.id,
+        status: 'failed',
+        leaf_ids: job.leaf_ids,
+        attempt: 1,
+        error: e.message,
+      });
+      return;
+    }
     const promptFile = path.join(os.tmpdir(), `review-job-${job.id}-${Date.now()}.md`);
 
     try {
@@ -1305,6 +1354,7 @@ module.exports = {
   validateJobs,
   resolveReviewSkillsDir,
   resolveLeafPath,
+  readJobLeaves,
   buildJobPrompt,
   launchJobWorker,
   runJobsFromManifest,
