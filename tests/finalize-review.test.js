@@ -14,6 +14,7 @@ const {
 } = require('../scripts/finalize-review');
 
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES } = require('../scripts/shared/review-aspects');
+const { _validateAgainstSchema } = require('../scripts/shared/json-schema');
 
 test('checkCompleteness: all adopted leaves success passes', () => {
   const coverageLedger = {
@@ -406,6 +407,9 @@ test('finalizeReview(complete, --integrated): ドラフトがJSONパース不能
 });
 
 test('aggregateFindings accepts Test Quality aspect findings and validates schema', () => {
+  const schemaPath = path.join(__dirname, '../scripts/review-findings-schema.json');
+  const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
+
   const results = {
     manifest_ref: { pr: 10, repo: 'o/r', headRefOid: 'def' },
     jobs: [
@@ -432,5 +436,8 @@ test('aggregateFindings accepts Test Quality aspect findings and validates schem
   assert.equal(payload.pr, 10);
   assert.equal(payload.findings.length, 1);
   assert.equal(payload.findings[0].aspect, 'Test Quality');
+
+  const schemaErrors = _validateAgainstSchema(payload, schema);
+  assert.deepEqual(schemaErrors, [], 'payload should pass schema validation');
 });
 
