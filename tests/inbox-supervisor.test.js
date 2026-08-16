@@ -2128,11 +2128,42 @@ describe('Stale report detection（居座り検知）', () => {
       assert.ok(notifyCalls[0].body.includes('456'));
       assert.ok(notifyCalls[0].body.includes('未コミット変更'), '未コミット変更の確認を促す文言が含まれること');
       assert.ok(!notifyCalls[0].body.includes('必要ならプロセスを終了してください'), '断定的な終了指示が含まれないこと');
+      assert.ok(/投稿から .+ 経過/.test(notifyCalls[0].body), '経過時間の表示が含まれること');
 
       const state = supervisor.readCursor(dir, 'issue-5-fix');
       assert.equal(state.staleReportNotifiedPid, 456);
       assert.equal(state.staleReportNotifiedStartTime, START_TIME, '重複排除キーに起動時刻も記録されること');
       assert.ok(typeof state.staleReportNotifiedAt === 'string');
+    });
+  });
+
+  test('居座り通知本文に報告投稿からの経過時間が人間可読形式で含まれる', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    // 起動時刻の5分後に投稿された報告コメント
+    supervisor._setGhApiComments(mockGhApiComments([reportComment({ createdAt: '2026-07-25T00:05:00Z' })]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.equal(notifyCalls.length, 1);
+      assert.ok(notifyCalls[0].body.includes('⚠️ ワーカー "issue-5-fix" は既に報告を投稿済み'));
+      assert.ok(notifyCalls[0].body.includes('経過）ですが、プロセス（PID 456）が生存しています'));
+      assert.match(notifyCalls[0].body, /投稿から \d+(秒|分\d+秒|時間\d+分\d+秒) 経過/);
     });
   });
 
