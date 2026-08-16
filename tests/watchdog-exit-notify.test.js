@@ -129,3 +129,40 @@ test('送信先Issueが無い場合は投稿せず false（送信元を stderr �
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── 親セッション消滅（exit code 3）の専用通知（Issue #301） ──────────────
+
+test('exit code 3（親セッション消滅）では専用本文で投稿する', () => {
+  const saved = process.exitCode;
+  process.exitCode = 3;
+  const { mod, calls } = loadHelper(() => ({ status: 0, stdout: '', stderr: '' }));
+  try {
+    const posted = mod.notifyWatchdogExit({ workspace: '/ws', scriptName: 'msg-poll.js', issue: '5' });
+    assert.equal(posted, true);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].opts.input, /msg-poll\.js/);
+    assert.match(calls[0].opts.input, /親セッションの消滅を検出して自動終了しました/);
+    assert.doesNotMatch(calls[0].opts.input, /異常終了しました/);
+  } finally {
+    process.exitCode = saved;
+  }
+});
+
+test('exit code 1 は従来どおり異常終了本文で投稿する', () => {
+  const saved = process.exitCode;
+  process.exitCode = 1;
+  const { mod, calls } = loadHelper(() => ({ status: 0, stdout: '', stderr: '' }));
+  try {
+    const posted = mod.notifyWatchdogExit({ workspace: '/ws', scriptName: 'poll-pr.js', issue: '5' });
+    assert.equal(posted, true);
+    assert.match(calls[0].opts.input, /⚠️ 監視プロセス poll-pr\.js が異常終了しました/);
+    assert.doesNotMatch(calls[0].opts.input, /親セッションの消滅/);
+  } finally {
+    process.exitCode = saved;
+  }
+});
+
+test('PARENT_DEATH_EXIT_CODE は 3 として export される', () => {
+  const { mod } = loadHelper(() => ({ status: 0, stdout: '', stderr: '' }));
+  assert.equal(mod.PARENT_DEATH_EXIT_CODE, 3);
+});

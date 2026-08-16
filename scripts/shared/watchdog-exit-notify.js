@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 'use strict';
 // watchdog-exit-notify.js
-// 監視プロセス（msg-poll.js / poll-pr.js / poll-reviews.js）が非ゼロ終了したとき、
-// orchestrator へ異常終了を通知する共有ヘルパー。
+// 監視プロセス（msg-poll.js / poll-pr.js / poll-reviews.js / inbox-supervisor.js）が
+// 非ゼロ終了したとき、orchestrator へ終了を通知する共有ヘルパー。
 //
 // 各監視プロセスは process.on('exit') からこの関数を呼ぶ。best-effort であり、
 // 通知の失敗（msg-send の失敗・送信先Issueの欠如等）で throw せず、プロセスの終了を
-// 妨げない。正常終了（exit 0 = SIGINT / SIGTERM / 親セッション消滅 / MERGED / CLOSED）では
-// 何もしない。
+// 妨げない。正常終了（exit 0 = SIGINT / SIGTERM / MERGED / CLOSED）では何もしない。
+//
+// 親セッション消滅（dead-man's switch の検出）は exit 0 ではなく
+// PARENT_DEATH_EXIT_CODE（3）で終了し、この関数が専用の本文で通知する（Issue #301）。
+// exit 3 は非ゼロのため、Monitor の「非ゼロ終了 = 異常のアラーム」経路にも載る
+// （監視中に止まっても沈黙しない）。
 //
 // 監視プロセスは非ワーカーコンテキストで起動されるため、msg-send.js には
 // recipient=orchestrator と --from <script名> を明示する（worker コンテキストと違い、
@@ -19,7 +23,14 @@ const fs = require('fs');
 const { spawnSync } = require('../child-process');
 
 /**
- * orchestrator への監視プロセス異常終了通知。
+ * 親セッション消滅による自滅終了（dead-man's switch 検出）の終了コード。
+ * exit 0 にすると正常終了として扱われ、Monitor の異常終了アラーム経路と
+ * watchdog 通知の両方が無効化されるため、非ゼロコードを割り当てる（Issue #301）。
+ */
+const PARENT_DEATH_EXIT_CODE = 3;
+
+/**
+ * orchestrator への監視プロセス終了通知。
  * 非ゼロ終了時にのみ投稿する。best-effort（throwしない）。
  *
  * @param {object} params
@@ -39,7 +50,12 @@ function notifyWatchdogExit({ workspace, scriptName, issue }) {
     return false;
   }
 
-  const body = `⚠️ 監視プロセス ${scriptName} が異常終了しました（exit code ${exitCode}）。プロセスが予期せず終了したため、その監視は停止しています。`;
+  // exit 3（親セッション消滅）は設計された終了のため専用の本文にする。それ以外の
+  // 非ゼロは従来どおり異常終了として警告する。
+  const isParentDeath = exitCode === PARENT_DEATH_EXIT_CODE;
+  const body = isParentDeath
+    ? `監視プロセス ${scriptName} が親セッションの消滅を検出して自動終了しました（exit code ${PARENT_DEATH_EXIT_CODE}）。監視していたセッションが終了したため、その監視も停止しています。`
+    : `⚠️ 監視プロセス ${scriptName} が異常終了しました（exit code ${exitCode}）。プロセスが予期せず終了したため、その監視は停止しています。`;
   try {
     const r = spawnSync(process.execPath, [
       path.join(__dirname, '..', 'msg-send.js'),
@@ -78,4 +94,4 @@ function resolveNotifyIssue(workspace) {
   return null;
 }
 
-module.exports = { notifyWatchdogExit, resolveNotifyIssue };
+module.exports = { notifyWatchdogExit, resolveNotifyIssue, PARENT_DEATH_EXIT_CODE };

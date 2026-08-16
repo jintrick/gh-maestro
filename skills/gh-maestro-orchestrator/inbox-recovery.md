@@ -21,7 +21,7 @@ Inbox Supervisor（`inbox-supervisor.js`）側の重複を疑った場合も、�
 
 ## 監視プロセスの異常終了通知（msg-poll / poll-pr / poll-reviews）
 
-常駐監視（`msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）が**非ゼロ終了**（クラッシュ等）で終わると、プロセス自身が `⚠️ 監視プロセス <script> が異常終了しました（exit code <N>）...` という通知を orchestrator の inbox に投稿する（正常終了 exit 0 = SIGINT/SIGTERM/親セッション消滅/`PR_MERGED`/`PR_CLOSED` では通知されない）。
+常駐監視（`msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）が**非ゼロ終了**（クラッシュ等）で終わると、プロセス自身が `⚠️ 監視プロセス <script> が異常終了しました（exit code <N>）...` という通知を orchestrator の inbox に投稿する（正常終了 exit 0 = SIGINT/SIGTERM/`PR_MERGED`/`PR_CLOSED` では通知されない）。**`msg-poll.js`（orchestrator モード）と `inbox-supervisor.js` は親セッション消滅を exit 0 ではなく exit 3 で自滅し、watchdog が専用の「親セッション消滅による自動終了」通知を送る**（下記「inbox監視の沈黙」参照。`poll-pr.js` / `poll-reviews.js` は親セッション消滅を従来どおり exit 0 で終了し、通知は出ない）。
 
 さらに、それらの監視プロセスを張った **Monitor が終了したことも、監視プロセスの異常終了のアラーム**である。`PR_MERGED` / `PR_CLOSED`（とそれに続く `PR_CLOSED_RESUMED`）を出力して終了したときだけ意図した終了であり、それ以外の終了（特に非ゼロ終了）は異常を意味する。Monitor の終了はバックグラウンドの task 通知として届くため、**見落としやすい**。`poll-pr.js` を張った Monitor が終了したのに `PR_CLOSED_RESUMED` も `PR_MERGED` も続いていない場合は、監視が止まったと疑う。
 
@@ -33,14 +33,16 @@ Inbox Supervisor（`inbox-supervisor.js`）側の重複を疑った場合も、�
 
 ## inbox監視の沈黙（通知が鳴らないまま止まる）
 
-`msg-poll.js orchestrator` は親セッション死亡検知（dead-man's switch）で **exit 0** で自滅することがある。exit 0 は正常終了として扱われるため上記の異常終了通知は鳴らず、Monitor も静かに終わる。**このプロセスに自動復活機構は無い**（`inbox-supervisor.js` は `spawn-worker.js`/`msg-send.js` が自動で復活させるが、msg-poll には同等の仕組みが無い）。結果、受信が永久に止まったまま「まだ報告が来ないだけ」に見える。
+`msg-poll.js orchestrator` は親セッション死亡検知（dead-man's switch）で **exit 3** で自滅する。自滅の経路では role lease が解放され、watchdog が「親セッション消滅による自動終了」の専用通知を送り、Monitor も異常終了（FAILED）として終了するため、**通常は沈黙せず通知が届く**。死のスイッチの判定は PID の再利用（起動時刻照合）にも正しく反応し、親セッションが死んだ後にその PID が別プロセスに使い回されていても「生きている」と誤判定して居座り続けない。
+
+ただし、クラッシュ・強制終了（`taskkill /F` 等）は自滅経路を経ないため、通知も lease 解放も行われない。その場合でも `spawn-worker.js` / `msg-send.js` の自動起動保証（`scripts/shared/ensure-msg-poll-orchestrator.js`）が、次のアクション（ワーカー作成・ワーカー宛て送信）の時点で新プロセスを起動して復活させる。**この自動復活は有界である**: 起動を試みた時点を `.gh-maestro/msg-poll-autostart-attempt.json` に記録し、クールダウン（既定5分）中は再試行しない（連続失敗時に呼び出しのたびに子プロセスとログが増え続けるのを防ぐ。生存を観測したら記録は消える）。
 
 **この状態は「反応が無い」という体感からしか入れない。** ワーカーの報告・PR 作成・レビュー完了のいずれかを待っていて、来ないと感じたら以下を実行する。
 
 1. **生死を `pids/` で確認する。** `$WORKSPACE/.gh-maestro/pids/*.json` を読み、`script` が `msg-poll.js` のエントリが存在するか見る。無ければ死んでいる。
    - **`ps` の node プロセス一覧や `.gh-maestro/inbox-supervisor-autostart.log` で判断してはならない。** それらは worker 配送を行う `inbox-supervisor.js` のもので、msg-poll が死んでいても正常に動き続ける（`SCAN_START` / `SCAN_END:<n>:0` を出し続ける）。この混同で「ポーラーは生きている」と誤報告した実例がある。
-2. **lease の残骸に騙されない。** `.gh-maestro/leases/resident-role-msgpoll-orchestrator.json` は dead-man's switch 経路では解放されずに残る。lease があってもプロセスは死んでいる。むしろ「PID registry に居ないのに lease が残っている」組合せは、この経路で死んだ証拠である。
-3. **再起動する。** SKILL.md「自分の inbox の監視」の起動規約に従い、Monitor で `msg-poll.js orchestrator` を起動し直す（「1回だけ起動」は生きている間の話であり、死んだ後の再起動はこれに反しない）。
+2. **lease の残骸に騙されない。** `.gh-maestro/leases/resident-role-msgpoll-orchestrator.json` はクラッシュ・強制終了（自滅経路を経ない場合）で解放されずに残ることがある。lease があってもプロセスは死んでいる。むしろ「PID registry に居ないのに lease が残っている」組合せは、この経路で死んだ証拠である。
+3. **再起動する。** アラーム（watchdog 通知・Monitor の異常終了）を受けた場合は判断を挟まず、SKILL.md「自分の inbox の監視」の起動規約に従い、Monitor で `msg-poll.js orchestrator` を起動し直す（「1回だけ起動」は生きている間の話であり、死んだ後の再起動はこれに反しない）。
 4. **止まっていた間に取りこぼした通知を確認し、人間に報告する。** 停止中に投稿されたコメントは既読にならないため、再起動後に順次 `NEW_MESSAGE` として届く。
 
 ## ワーカーの実行ログ

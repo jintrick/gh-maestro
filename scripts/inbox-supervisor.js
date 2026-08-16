@@ -48,11 +48,18 @@ const { isWorkerAlive } = require('./shared/worker-liveness');
 const {
   resolveSessionPid,
   createDeadManSwitch,
+  getProcessStartTime,
   registerProcess,
   findRunningInstance,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
 const { acquireResidentLease, INBOX_SUPERVISOR_ROLE } = require('./shared/worker-lease');
+const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdog-exit-notify');
+const { handleParentSessionDeath } = require('./shared/resident-parent-death');
+
+// テスト注入（test-process-spawn-safety ルール準拠）。既定は実装。
+let _createDeadManSwitch = createDeadManSwitch;
+let _parentDeathExit = (code) => process.exit(code);
 
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // msg-poll.js のスキャンロジックを再利用（マーカーパースのみ）
@@ -629,7 +636,11 @@ function main(argsOverride, opts = {}) {
   }
 
   const sessionPid = resolveSessionPid(values['--session-pid']);
-  const checkParent = createDeadManSwitch(sessionPid);
+
+  // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
+  // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
+  const expectedStartTime = getProcessStartTime(sessionPid);
+  const checkParent = _createDeadManSwitch(sessionPid, { expectedStartTime });
 
   // リポジトリ解決
   const ghOpts = { cwd: workspace };
@@ -696,10 +707,13 @@ function main(argsOverride, opts = {}) {
    * 全ワーカーをスキャンし、新着メッセージの検出・配送を行う。
    */
   function runOnce() {
+    // dead-man's switch: 親が死んでいたら cleanup して非ゼロ終了（exit 3）
+    // exit 3 = 親セッション消滅。exit 0 にすると正常終了扱いとなり、Monitor の異常終了
+    // アラーム経路と watchdog 通知が両方無効化される（Issue #301）。
     if (!checkParent()) {
       lifecycleCleanup(workspace);
-      process.stderr.write(`inbox-supervisor: parent session (pid ${sessionPid}) is dead — exiting\n`);
-      process.exit(0);
+      handleParentSessionDeath({ workspace, scriptName: 'inbox-supervisor.js', role: INBOX_SUPERVISOR_ROLE, sessionPid });
+      _parentDeathExit(PARENT_DEATH_EXIT_CODE);
     }
 
     writeOut('SCAN_START');
@@ -1150,6 +1164,11 @@ if (require.main === module) {
     cleanup();
   } else {
     // 継続モード: 初回スキャンを即実行し、以降 intervalMs 間隔で継続
+    // 常駐監視の異常終了（非ゼロexit）を orchestrator へ通知する（Issue #301）。
+    // これまで inbox-supervisor は異常終了時に一切通知していなかった。
+    // 正常終了（exit 0 = SIGINT / SIGTERM）では何もしない。
+    // --once 完了も exit 0 のため通知されない。
+    process.on('exit', () => { notifyWatchdogExit({ workspace: result.workspace, scriptName: 'inbox-supervisor.js' }); });
     ru();
     setInterval(ru, result.intervalMs);
   }
@@ -1168,6 +1187,8 @@ module.exports = {
   _setNotifySpawn: (fn) => { _notifySpawn = fn; },
   _setReadContract: (fn) => { _readContract = fn; },
   _setClearContract: (fn) => { _clearContract = fn; },
+  _setCreateDeadManSwitch: (fn) => { _createDeadManSwitch = fn; },
+  _setParentDeathExit: (fn) => { _parentDeathExit = fn; },
   main,
   readCursor,
   writeCursor,

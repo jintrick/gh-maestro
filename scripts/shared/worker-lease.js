@@ -423,6 +423,21 @@ function activateLease(store, key, { pid, startTime }) {
 /** inbox-supervisor.js の固定 role 名。 */
 const INBOX_SUPERVISOR_ROLE = 'inbox-supervisor';
 
+/**
+ * msg-poll の role lease 名（msgpoll-<self>）を組み立てる。
+ * 構築をこの一箇所に集約する（PR #302 指摘）。msg-poll.js の `msgpoll-${self}` と
+ * ensure-msg-poll-orchestrator.js の MSGPOLL_ORCHESTRATOR_ROLE が別々に組み立てていると、
+ * 片方だけ変更された際に起動前チェックが生きた lease を認識できなくなる。
+ * @param {string} self 自分の名前（worker 名、または 'orchestrator'）
+ * @returns {string}
+ */
+function msgPollRole(self) {
+  return `msgpoll-${self}`;
+}
+
+/** orchestrator モードの msg-poll.js が自身に使う role lease 名。msgPollRole() から導出。 */
+const MSGPOLL_ORCHESTRATOR_ROLE = msgPollRole('orchestrator');
+
 /** 引き継ぎ（--force）で所有者の終了を待つ上限時間（ms）。 */
 const HANDOFF_WAIT_MS = 10000;
 
@@ -612,6 +627,8 @@ module.exports = {
   isLeaseLive,
   // 常駐プロセス用 role lease（Issue #240）
   INBOX_SUPERVISOR_ROLE,
+  MSGPOLL_ORCHESTRATOR_ROLE,
+  msgPollRole,
   roleLeaseKey,
   isResidentLeaseLive,
   acquireResidentLease,

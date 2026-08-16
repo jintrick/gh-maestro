@@ -26,6 +26,7 @@ const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 const { markCommentResult, readRegistry } = require('./shared/execution-registry');
 const { isRetryableGhFailure, graphqlAddComment } = require('./shared/gh-fallback');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
+const { ensureMsgPollOrchestratorRunning } = require('./shared/ensure-msg-poll-orchestrator');
 const { resolveWorkerName, readWorkersRaw } = require('./shared/workers-registry');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
@@ -509,11 +510,13 @@ function main(argsOverride, envOverride, ioOverride) {
     }
   }
 
-  // --- inbox-supervisor.js の自動起動保証（best-effort） ---
+  // --- inbox-supervisor.js / msg-poll.js(orchestrator) の自動起動保証（best-effort） ---
   // ワーカー宛て送信時のみ。orchestratorが手動起動を忘れても配送経路が失われないようにする
-  // （ensure-inbox-supervisor.js 参照）。稼働中なら二重起動にはならない。
+  // （ensure-inbox-supervisor.js / ensure-msg-poll-orchestrator.js 参照）。稼働中なら二重起動には
+  // ならない。msg-poll.js はオーケストレーターセッションの inbox 監視（Issue #301）。
   if (recipient !== 'orchestrator') {
     try { ensureInboxSupervisorRunning({ workspace, scriptsPath: __dirname }); } catch {}
+    try { ensureMsgPollOrchestratorRunning({ workspace, scriptsPath: __dirname }); } catch {}
   }
 
   writeOut(commentUrl);

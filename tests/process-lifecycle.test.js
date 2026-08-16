@@ -113,6 +113,50 @@ function mockWmiEmpty() {
   };
 }
 
+// PID再利用を模擬するときの「別プロセス」の起動時刻（MOCK_START_TIME と1秒以上離す）
+const OTHER_START_TIME = '2025-06-02T00:00:00.000Z';
+
+/**
+ * PID再利用を模擬する execSync モック。
+ * 同じPIDに対して WMI（CreationDate）の呼び出しが1回目は MOCK_START_TIME（=捕捉時の
+ * 期待値）、以後は OTHER_START_TIME（=再利用された別プロセス）を返す。
+ * 「捕捉後に同じPIDに別プロセスが居着いた」状況を呼び出し回数の切替で表現する。
+ */
+function mockWmiReuse() {
+  let calls = 0;
+  return (cmd, opts) => {
+    const cmdStr = typeof cmd === 'string' ? cmd : '';
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('CreationDate')) {
+      calls++;
+      return (calls === 1 ? MOCK_START_TIME : OTHER_START_TIME) + '\n';
+    }
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('ParentProcessId')) {
+      return '42\n';
+    }
+    throw new Error(`unexpected execSync call in test: ${cmdStr.slice(0, 80)}`);
+  };
+}
+
+/**
+ * 起動時刻の取得失敗を模擬する execSync モック。
+ * 捕捉時（1回目）は MOCK_START_TIME を返し、以後は空文字（=null 相当）を返す。
+ * expectedStartTime は捕捉できたが、ポーリング中の WMI 読取が一過性で失敗する状況。
+ */
+function mockWmiReuseToEmpty() {
+  let calls = 0;
+  return (cmd, opts) => {
+    const cmdStr = typeof cmd === 'string' ? cmd : '';
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('CreationDate')) {
+      calls++;
+      return (calls === 1 ? MOCK_START_TIME : '') + '\n';
+    }
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('ParentProcessId')) {
+      return '42\n';
+    }
+    throw new Error(`unexpected execSync call in test: ${cmdStr.slice(0, 80)}`);
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // isProcessAlive（実プロセスspawnなしでテスト可能）
 // ═══════════════════════════════════════════════════════════════════════════
@@ -189,6 +233,64 @@ test('createDeadManSwitch: 死亡カウンタは生存確認でリセットさ�
   assert.equal(check(), true);
   assert.equal(check(), true);
   assert.equal(check(), true);
+});
+
+// ── 受け入れ条件: PID 再利用でも生存と誤判定しない ──────────────────────
+
+test('createDeadManSwitch: PID が別プロセスに再利用された状況で生存と誤判定しない（受け入れ条件）', () => {
+  const plc = loadModule({ execSync: mockWmiReuse() });
+  // 捕捉時（1回目のWMI呼び出し）は MOCK_START_TIME が返る → これが期待値になる
+  const expectedStartTime = plc.getProcessStartTime(process.pid);
+  assert.equal(expectedStartTime, MOCK_START_TIME);
+  const check = plc.createDeadManSwitch(process.pid, { expectedStartTime });
+  // isProcessAlive(process.pid) は true（PID は存在する）が、起動時刻が OTHER_START_TIME に
+  // 切り替わっている = 同じPIDに別プロセスが居る。startTime 不一致は確定事実なので即 false。
+  assert.equal(check(), false, 'PID が再利用されていれば生存と誤判定しない');
+});
+
+test('createDeadManSwitch: expectedStartTime を渡さないと PID 再利用で居座る（対照・従来挙動）', () => {
+  // 修正は「expectedStartTime を渡すことで初めて効く」性質のものである。渡し忘れが
+  // 将来起きた場合、この対照テストが失敗として現れる（orchestrator 確認事項）。
+  const plc = loadModule({ execSync: mockWmiReuse() });
+  const check = plc.createDeadManSwitch(process.pid); // expectedStartTime なし
+  assert.equal(check(), true, 'PID 再利用があっても従来どおり生存扱い（居座り）');
+  assert.equal(check(), true);
+  assert.equal(check(), true);
+});
+
+test('createDeadManSwitch: 起動時刻が一致する場合は生存を維持する（誤自滅しない）', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const expectedStartTime = plc.getProcessStartTime(process.pid);
+  assert.equal(expectedStartTime, MOCK_START_TIME);
+  const check = plc.createDeadManSwitch(process.pid, { expectedStartTime });
+  assert.equal(check(), true, '起動時刻が一致すれば生存を維持');
+  assert.equal(check(), true);
+});
+
+test('createDeadManSwitch: 起動時刻の取得失敗（WMI 空）は生存扱い（fail-open・誤自滅しない）', () => {
+  // expectedStartTime は捕捉できたが、以後の WMI 読取が空文字（null 相当）を返す一過性の
+  // 失敗。fail-open を誤自滅防止側に倒し、生存扱いにする。
+  const plc = loadModule({ execSync: mockWmiReuseToEmpty() });
+  const expectedStartTime = plc.getProcessStartTime(process.pid);
+  assert.equal(expectedStartTime, MOCK_START_TIME);
+  const check = plc.createDeadManSwitch(process.pid, { expectedStartTime });
+  assert.equal(check(), true, '読取失敗は生存扱い');
+  assert.equal(check(), true);
+});
+
+// ── startTimesMatch ─────────────────────────────────────────────────────
+
+test('startTimesMatch: 1秒以内の差は同一プロセスとみなす', () => {
+  const plc = loadModule();
+  assert.equal(plc.startTimesMatch('2025-06-01T12:00:00.000Z', '2025-06-01T12:00:00.500Z'), true);
+  assert.equal(plc.startTimesMatch('2025-06-01T12:00:00.000Z', '2025-06-01T12:00:02.000Z'), false);
+});
+
+test('startTimesMatch: 不正な日付（NaN）・欠落は不一致として扱う', () => {
+  const plc = loadModule();
+  assert.equal(plc.startTimesMatch('not-a-date', MOCK_START_TIME), false);
+  assert.equal(plc.startTimesMatch(null, MOCK_START_TIME), false);
+  assert.equal(plc.startTimesMatch(undefined, MOCK_START_TIME), false);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

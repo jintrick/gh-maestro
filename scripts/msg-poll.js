@@ -30,15 +30,20 @@ const readStateLib = require('./shared/read-state');
 const {
   resolveSessionPid,
   createDeadManSwitch,
+  getProcessStartTime,
   registerProcess,
   findRunningInstance,
   cleanup: lifecycleCleanup,
-  isProcessAlive,
 } = require('./process-lifecycle');
-const { acquireResidentLease } = require('./shared/worker-lease');
+const { acquireResidentLease, msgPollRole } = require('./shared/worker-lease');
 const { listUnprocessedResidentAuditEvents, removeResidentAuditEvent } = require('./shared/resident-audit');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
-const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
+const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdog-exit-notify');
+const { handleParentSessionDeath } = require('./shared/resident-parent-death');
+
+// テスト注入（test-process-spawn-safety ルール準拠）。既定は実装。
+let _createDeadManSwitch = createDeadManSwitch;
+let _parentDeathExit = (code) => process.exit(code);
 
 const DEFAULT_INTERVAL_SEC = 20;
 const MARKER_RE = /^<!--\s*gh-maestro\s+(\{.*\})\s*-->/;
@@ -387,14 +392,20 @@ function main(argsOverride, opts = {}) {
 
   const sessionPid = resolveSessionPid(parsed.sessionPidArg);
 
+  // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
+  // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
+  const expectedStartTime = getProcessStartTime(sessionPid);
+
   // ── 常駐プロセス用 role lease（Issue #240） ───────────────────────────
   // 継続モード・--wait モードのみ排他する（--once は読み取り専用の一回実行のため）。
   // 取得は resolveWorkspace 直後・gh 呼び出しより前に行い、多重起動時は無駄な外部呼び出しを
   // 避けて即拒否する。workspace 表記の差異（大文字小文字・末尾スラッシュ等）でもすり抜けない
   // よう、role lease は workspace を canonicalWorkspace で正規化して排他する（Issue #240）。
+  // role は親セッション死亡時の lease 解放（handleParentSessionDeath）でも参照するため
+  // --once でも算出する（lease 未取得なら解放は no-op）。
+  const role = msgPollRole(self);
   let residentLease = null;
   if (!onceMode) {
-    const role = `msgpoll-${self}`;
     const handoffTargets = () => {
       const workerNameForRegistry = self !== 'orchestrator' ? self : null;
       const dup = findRunningInstance(workspace, { script: 'msg-poll.js', workerName: workerNameForRegistry });
@@ -444,8 +455,10 @@ function main(argsOverride, opts = {}) {
   const state = readState(workspace, self);
 
   // ── dead-man's switch: 毎周回で親セッションの生存を確認 ──────────
+  // expectedStartTime（起動時に捕捉）を渡し、同じ PID に別プロセスが再利用された場合も
+  // 死と判定できるようにする（isProcessAlive のみの判定にしない）。
 
-  const checkParent = createDeadManSwitch(sessionPid);
+  const checkParent = _createDeadManSwitch(sessionPid, { expectedStartTime });
 
   /**
    * 1回のスキャン。
@@ -473,12 +486,15 @@ function main(argsOverride, opts = {}) {
       ? { cwd: workspace, timeout: Math.min(GH_TIMEOUT_MS, Math.max(1000, maxGhTimeoutMs)) }
       : ghOpts;
 
-    // dead-man's switch: 親が死んでいたら cleanup して exit
+    // dead-man's switch: 親が死んでいたら cleanup して非ゼロ終了（exit 3）
+    // exit 3 = 親セッション消滅。exit 0 にすると正常終了扱いとなり、Monitor の異常終了
+    // アラーム経路と watchdog 通知が両方無効化される（Issue #301）。
+    // stdout は Monitor 通知チャンネルなので使わず、理由は lease 解放とともに
+    // handleParentSessionDeath が stderr へ出す。
     if (!checkParent()) {
       lifecycleCleanup(workspace);
-      // stderr に理由を出力して exit（stdout は Monitor 通知チャンネルなので使わない）
-      process.stderr.write(`msg-poll: parent session (pid ${sessionPid}) is dead — exiting\n`);
-      process.exit(0);
+      handleParentSessionDeath({ workspace, scriptName: 'msg-poll.js', role, sessionPid });
+      _parentDeathExit(PARENT_DEATH_EXIT_CODE);
     }
 
     // ── 監査イベントの処理（orchestrator のみ） ────────────────────────
@@ -845,14 +861,21 @@ if (require.main === module) {
     }
     const watchIntervalMs = (parseInt(watchValues['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
 
-    const checkWatchedPid = () => {
-      if (!isProcessAlive(watchPid)) {
+    // PID再利用検知のため、監視開始時に捕捉した起動時刻を dead-man's switch に渡す。
+    // 監視対象の PID が別プロセスに再利用された場合も即 PID_DIED を発火し、古いプロセスを
+    // 追いかけ続けることを防ぐ。実体が消えた場合は3周回連続で確認してから通知する
+    // （一過性の誤検出で PID_DIED を出さない。false positive は orchestrator の再起動を
+    // 誘導するため、通知は遅くても正しく倒す）。
+    const watchStartTime = getProcessStartTime(watchPid);
+    const checkWatchedPid = _createDeadManSwitch(watchPid, { expectedStartTime: watchStartTime });
+    const emitWatchResult = () => {
+      if (!checkWatchedPid()) {
         process.stdout.write(`PID_DIED:${watchPid}\n`);
         process.exit(0);
       }
     };
-    checkWatchedPid();
-    const watchIntervalHandle = setInterval(checkWatchedPid, watchIntervalMs);
+    emitWatchResult();
+    const watchIntervalHandle = setInterval(emitWatchResult, watchIntervalMs);
     process.on('SIGINT', () => { clearInterval(watchIntervalHandle); process.exit(0); });
     process.on('SIGTERM', () => { clearInterval(watchIntervalHandle); process.exit(0); });
     return;
@@ -973,6 +996,8 @@ module.exports = {
   // 実装を直接参照（テストが注入を戻す際の復元用。PR #251 の引数検証テストから使う）
   _notifyOrchestrator,
   _setNotifySpawn: (fn) => { _notifySpawn = fn; },
+  _setCreateDeadManSwitch: (fn) => { _createDeadManSwitch = fn; },
+  _setParentDeathExit: (fn) => { _parentDeathExit = fn; },
   main,
   runWaitMode,
   // 内部ロジックの単体テスト用
