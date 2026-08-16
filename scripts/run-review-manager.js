@@ -20,6 +20,7 @@ const {
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags } = require('./shared/workspace');
 const { _validateAgainstSchema } = require('./shared/json-schema');
+const { VALID_ASPECTS, VALID_SEVERITIES, FINDING_REQUIRED_FIELDS } = require('./shared/review-aspects');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
 const DEFAULT_ARTIFACT_POLL_INTERVAL_MS = 200;
@@ -451,14 +452,11 @@ function validateArtifactContent(jsonContent, schemaPath) {
 function _validateFindingShape(f) {
   const errors = [];
   if (!f || typeof f !== 'object') return ['must be an object'];
-  const required = ['aspect', 'path', 'line_anchor', 'summary', 'severity', 'severity_rationale', 'body', 'verified_references'];
-  for (const field of required) {
+  for (const field of FINDING_REQUIRED_FIELDS) {
     if (!(field in f)) errors.push(`${field} is required`);
   }
-  const validAspects = new Set(['Correctness', 'Maintainability', 'Resilience & Security']);
-  if (f.aspect && !validAspects.has(f.aspect)) errors.push(`invalid aspect: ${f.aspect}`);
-  const validSeverities = new Set(['BLOCKER', 'MAJOR', 'SUGGESTION']);
-  if (f.severity && !validSeverities.has(f.severity)) errors.push(`invalid severity: ${f.severity}`);
+  if (f.aspect && !VALID_ASPECTS.has(f.aspect)) errors.push(`invalid aspect: ${f.aspect}`);
+  if (f.severity && !VALID_SEVERITIES.has(f.severity)) errors.push(`invalid severity: ${f.severity}`);
   if (f.verified_references !== undefined && (!Array.isArray(f.verified_references) || f.verified_references.length === 0)) {
     errors.push('verified_references must be a non-empty array');
   }

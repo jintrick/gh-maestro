@@ -26,20 +26,21 @@ skills/gh-maestro-reviewer/
 ├── resilience-security/
 │   ├── failure-recovery.md
 │   └── hostile-input.md
-└── maintainability/
-    ├── structure-naming.md
+├── maintainability/
+│   └── structure-naming.md
+└── test-quality/
     └── test-quality.md
 ```
 
 - **葉** が観点1つ。今は7枚ある
-- **幹** が葉の束。今は3つ
+- **幹** が葉の束。今は4つ
 - 各葉には「確認順序」「重点」「禁止」が書かれている。レビュアーはこれを読んで判断する
 
 編集は必ずこのリポジトリ側で行う。インストール先（`~/.agents/skills/` 等）を直接編集しない。編集後は `dev` ブランチで `node scripts/install.js` を実行して反映する。
 
 ### 幹と葉の関係が費用に効く
 
-**同じ幹の葉は1回の実行にまとめられ、幹ごとに並列実行される。** 今は7葉が3実行になる。
+**同じ幹の葉は1回の実行にまとめられ、幹ごとに並列実行される。** 今は7葉が4実行になる。
 
 葉を増やしても実行回数は増えないが、幹を増やすと実行が1つ増える。逆に、同じ幹に葉を詰めると、1回の実行が複数の観点を同時に担当することになる。
 

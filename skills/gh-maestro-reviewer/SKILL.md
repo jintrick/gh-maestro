@@ -36,7 +36,7 @@ Node.jsの決定論的ツール（`run-review-jobs.js` / `finalize-review.js`）
 
 ## レビュー基準（7葉）
 
-レビューの母集合は以下の7葉である。3幹は報告上の分類であり、プロセス分割の固定単位ではない。
+レビューの母集合は以下の7葉である。4幹は報告上の分類であり、プロセス分割の固定単位ではない。
 
 - `correctness/`（幹: Correctness）
   - `correctness/logic-invariants.md`
@@ -47,7 +47,8 @@ Node.jsの決定論的ツール（`run-review-jobs.js` / `finalize-review.js`）
   - `resilience-security/hostile-input.md`
 - `maintainability/`（幹: Maintainability）
   - `maintainability/structure-naming.md`
-  - `maintainability/test-quality.md`
+- `test-quality/`（幹: Test Quality）
+  - `test-quality/test-quality.md`
 
 ## RMの責務（フェーズ1: 計画）
 
@@ -69,7 +70,7 @@ gh pr diff <PR> --repo <REPO>
 - **adopted（採用）**: このPRのdiffに関連するため、レビュー対象に含める
 - **excluded（除外）**: 明らかに無関係である。diffの具体的内容に基づく理由を必ず付与する
 
-この判断はファイル名や拡張子等の機械的規則ではなく、**実際のdiffを読んだ上でのあなた自身の判断**でなければならない。判断に迷う場合は excluded にせず adopted にする。葉単位の除外は許容するが、3幹そのものを丸ごと除外してはならない（粒度が粗すぎ、見逃しリスクが高いため）。
+この判断はファイル名や拡張子等の機械的規則ではなく、**実際のdiffを読んだ上でのあなた自身の判断**でなければならない。判断に迷う場合は excluded にせず adopted にする。葉単位の除外は許容するが、4幹そのものを丸ごと除外してはならない（粒度が粗すぎ、見逃しリスクが高いため）。
 
 ### 3. 実行manifestの作成
 
@@ -163,7 +164,7 @@ node <SCRIPTS>/finalize-review.js \
 ```
 
 `finalize-review.js --mode complete --integrated` は:
-- 完全性ゲート（7葉の会計・採用葉の結果・3幹の追跡可能性）を機械的に検証する
+- 完全性ゲート（7葉の会計・採用葉の結果・4幹の追跡可能性）を機械的に検証する
 - ゲート通過 → あなたが統合したfindingsをスキーマ検証し、`<OUTPUT>` にatomic writeする
 - ゲート失敗 → エラー終了する（completeモードでは不完全な結果を書き出さない）
 
@@ -187,7 +188,7 @@ node <SCRIPTS>/finalize-review.js \
 - OUTPUTファイルへ直接書き込まない。JSON生成のインラインスクリプトを書かない
 - **スコープ限定なしの全件テスト（`npm test` 等）および全体ビルド（`npm run build` 等）を実行しない。** diffで変更された特定のテストファイルのみを対象にしたピンポイント実行（例: `node --test tests/<file>.test.js`）は許容する
 - ファイル名・拡張子・glob等の機械的規則だけで葉の関連性を判断しない。必ず実際のdiffを読んで判断する
-- 3幹そのものを丸ごと除外しない（葉単位の除外のみ）
+- 4幹そのものを丸ごと除外しない（葉単位の除外のみ）
 - 同じ葉を複数ジョブに重複割り当てしない
 - **`msg-send.js`等でorchestratorへ完了報告や状況連絡をしない。** 完了はorchestrator側のポーリング（`poll-reviews.js`）が投稿済みレビューを検知することで判定する設計であり、RMからの能動的な報告は二重通知の原因になる。`SCRIPTS`ディレクトリには他ワーカー用のツールスクリプトも同居しているが、本ドキュメントで明示的に指示したスクリプト（`finalize-review.js`）以外は実行しない
 
