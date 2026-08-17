@@ -48,6 +48,14 @@ function withTempDir(fn) {
   }
 }
 
+function parseElapsedSeconds(line) {
+  const match = / elapsed=(?:(\d+)時間)?(?:(\d+)分)?(\d+)秒$/.exec(line);
+  assert.ok(match, `経過時間フィールドを解釈できること: ${line}`);
+  return (Number(match[1] || 0) * 3600)
+    + (Number(match[2] || 0) * 60)
+    + Number(match[3]);
+}
+
 /**
  * 親プロセスから継承されうる値として process.env.GH_MAESTRO_BASE_BRANCH を一時的に設定する。
  * `{ ...process.env, ...env }` のマージで親の値が残らないこと（Issue #269 レビュー指摘）を
@@ -940,7 +948,8 @@ describe('runOnce scan and deliver cycle', () => {
       r.runOnce();
 
       const lastLine = r.lines[r.lines.length - 1];
-      assert.ok(lastLine.includes('SCAN_END:0:0'), `Expected SCAN_END:0:0 but got: ${lastLine}`);
+      assert.equal(lastLine, 'SCAN_END:0:0 source=inbox-supervisor.js scope=worker-delivery-scan workers=0 detected=0 orchestrator-inbox=separate-msg-poll.js');
+      assert.equal(r.lines[0], 'SCAN_START source=inbox-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js');
     });
   });
 
@@ -1587,15 +1596,27 @@ describe('Hang detection', () => {
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.writeFileSync(logPath, 'old log content\n', 'utf8');
       // 閾値（既定1200秒=20分）を超える過去のmtimeに設定
-      const oldTime = new Date(Date.now() - 25 * 60 * 1000); // 25分前
+      const hangAgeMs = (25 * 60 + 7) * 1000;
+      const oldTime = new Date(Date.now() - hangAgeMs); // 25分7秒前
       fs.utimesSync(logPath, oldTime, oldTime);
+      const logMtimeMs = fs.statSync(logPath).mtimeMs;
 
       const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
+      const beforeScanMs = Date.now();
       r.runOnce();
+      const afterScanMs = Date.now();
 
-      assert.ok(r.lines.some(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')),
+      const hangLine = r.lines.find(l => l.startsWith('HANG_DETECTED:issue-5-fix:456'));
+      assert.ok(hangLine,
         `HANG_DETECTED が出力されること: ${r.lines.join('\n')}`);
+      const elapsedSeconds = parseElapsedSeconds(hangLine);
+      const expectedMinSeconds = Math.floor((beforeScanMs - logMtimeMs) / 1000);
+      const expectedMaxSeconds = Math.floor((afterScanMs - logMtimeMs) / 1000);
+      assert.ok(elapsedSeconds >= expectedMinSeconds && elapsedSeconds <= expectedMaxSeconds,
+        `HANG_DETECTED の経過時間が実際のログmtime起点の値であること: ${elapsedSeconds}秒, expected=${expectedMinSeconds}..${expectedMaxSeconds}`);
+      assert.ok(elapsedSeconds >= Math.floor(hangAgeMs / 1000),
+        `HANG_DETECTED が固定値ではなく25分7秒前のmtimeを反映すること: ${elapsedSeconds}秒`);
 
       assert.equal(notifyCalls.length, 1, 'orchestratorへ1回通知');
       assert.ok(notifyCalls[0].body.includes('ハング'));
@@ -1694,7 +1715,7 @@ describe('Hang detection', () => {
       assert.equal(r.code, 0);
       r.runOnce();
 
-      assert.ok(r.lines.some(l => l === 'HANG_RESUMED:issue-5-fix'),
+      assert.ok(r.lines.some(l => l === 'HANG_RESUMED:issue-5-fix:456'),
         `HANG_RESUMED が出力されること: ${r.lines.join('\n')}`);
 
       const state = supervisor.readCursor(dir, 'issue-5-fix');
@@ -1998,7 +2019,7 @@ describe('Hang detection', () => {
       r.runOnce();
 
       // 実際にはログは動いていないので「復帰した」という報告は誤り
-      assert.ok(!r.lines.some(l => l === 'HANG_RESUMED:issue-5-fix'),
+      assert.ok(!r.lines.some(l => l.startsWith('HANG_RESUMED:issue-5-fix')),
         `新プロセスへの切り替わりをHANG_RESUMEDとして誤報しないこと: ${r.lines.join('\n')}`);
       assert.ok(!r.lines.some(l => l.startsWith('HANG_DETECTED')),
         `新プロセスはstartTimeが新しいため通知もされないこと: ${r.lines.join('\n')}`);
@@ -2084,7 +2105,7 @@ describe('Hang detection', () => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 居座り検知（Issue #263）: 既に報告済みなのにプロセスが生存し続けている異常を検知する。
-// ハング検知（ログ更新時刻ベース）とは独立の判定軸で、経過時間を一切使わない。
+// ハング検知（ログ更新時刻ベース）とは独立の判定軸で、判定条件に経過時間を使わない。
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('Stale report detection（居座り検知）', () => {
@@ -2101,7 +2122,8 @@ describe('Stale report detection（居座り検知）', () => {
 
   test('居座り検知→通知: 起動以降に報告済みなのに生存中なら通知する', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
-    supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
+    const reportCreatedAt = new Date(Date.now() - (7 * 60 + 5) * 1000).toISOString();
+    supervisor._setGhApiComments(mockGhApiComments([reportComment({ createdAt: reportCreatedAt })]));
     supervisor._setIsWorkerAlive(() => true);
 
     const notifyCalls = [];
@@ -2119,10 +2141,21 @@ describe('Stale report detection（居座り検知）', () => {
 
       const r = runMain(['--workspace', dir]);
       assert.equal(r.code, 0);
+      const beforeScanMs = Date.now();
       r.runOnce();
+      const afterScanMs = Date.now();
 
-      assert.ok(r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED:issue-5-fix:456')),
+      const staleLine = r.lines.find(l => l.startsWith('STALE_REPORT_DETECTED:issue-5-fix:456'));
+      assert.ok(staleLine,
         `STALE_REPORT_DETECTED が出力されること: ${r.lines.join('\n')}`);
+      const elapsedSeconds = parseElapsedSeconds(staleLine);
+      const reportMs = Date.parse(reportCreatedAt);
+      const expectedMinSeconds = Math.floor((beforeScanMs - reportMs) / 1000);
+      const expectedMaxSeconds = Math.floor((afterScanMs - reportMs) / 1000);
+      assert.ok(elapsedSeconds >= expectedMinSeconds && elapsedSeconds <= expectedMaxSeconds,
+        `STALE_REPORT_DETECTED の経過時間が実際の報告時刻起点の値であること: ${elapsedSeconds}秒, expected=${expectedMinSeconds}..${expectedMaxSeconds}`);
+      assert.ok(elapsedSeconds >= 7 * 60 + 5,
+        `STALE_REPORT_DETECTED が固定値ではなく報告7分5秒前の時刻を反映すること: ${elapsedSeconds}秒`);
       assert.equal(notifyCalls.length, 1, 'orchestratorへ1回通知');
       assert.ok(notifyCalls[0].body.includes('issue-5-fix'));
       assert.ok(notifyCalls[0].body.includes('456'));

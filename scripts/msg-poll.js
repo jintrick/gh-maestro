@@ -85,9 +85,10 @@ Output (stdout):
   新着メッセージを1行ずつ出力:
     worker モード:       NEW_MESSAGE:<commentId>
     orchestrator モード: NEW_MESSAGE:<issue>:<commentId>
-    orchestrator モード: LOCK_DENIED:<role>[:<ownerPid>] / HANDOFF_WAIT:<role>[:<ownerPid>]
+    orchestrator モード: LOCK_DENIED:<role>[:<ownerPid>][:<reason>] / HANDOFF_WAIT:<role>[:<ownerPid>]
                           （常駐プロセスの role lease で起動が拒否された・引き継ぎ待機に
-                          入った監査イベント。各巡回で未処理分を処理済み化して出力する。
+                          入った監査イベント。LOCK_DENIED の reason は live-lease または
+                          handoff-timeout。各巡回で未処理分を処理済み化して出力する。
                           GitHub への投稿は行わない）
   --watch-pid モード:    PID_DIED:<pid>（監視対象PIDの死亡を検知した1回のみ）
 
@@ -513,8 +514,12 @@ function main(argsOverride, opts = {}) {
       try {
         const events = listUnprocessedResidentAuditEvents(workspace);
         for (const { file, event } of events) {
+          const eventType = event.type === 'lock-denied' ? 'LOCK_DENIED' : 'HANDOFF_WAIT';
           const ownerPid = event.detail && event.detail.ownerPid != null ? `:${event.detail.ownerPid}` : '';
-          writeOut(`${event.type === 'lock-denied' ? 'LOCK_DENIED' : 'HANDOFF_WAIT'}:${event.role}${ownerPid}`);
+          const reason = eventType === 'LOCK_DENIED' && event.detail && event.detail.reason
+            ? `:${event.detail.reason}`
+            : '';
+          writeOut(`${eventType}:${event.role}${ownerPid}${reason}`);
           removeResidentAuditEvent(workspace, file);
         }
       } catch (e) {

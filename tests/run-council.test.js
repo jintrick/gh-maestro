@@ -438,7 +438,7 @@ test('意見1名成功で続行: agent-b は欠席、投票は成功者のみ、
     });
     const r = await runAndCapture(() => mod.runCouncil(args(workspace)));
     assert.equal(r.code, 0);
-    assert.ok(r.out.includes('COUNCIL_FINISHED 0'));
+    assert.ok(r.out.includes('COUNCIL_FINISHED cleanupExit=0'));
     assert.ok(r.out.includes('COUNCIL_PHASE_DONE opinion 1/2 absent=1'));
     assert.ok(r.out.includes('COUNCIL_PHASE_DONE vote 1/1 absent=0'));
     assert.ok(r.out.includes('COUNCIL_WT_REMOVED '));
@@ -574,7 +574,7 @@ test('worktree 片付け失敗: 完走後でも exit 3・state に残存を記�
     const { mod } = loadModule({ spawn: spawn, resolveConfig: makeResolveConfig({ agents: ['agent-a'] }), phaseJobs: jobs });
     const r = await runAndCapture(() => mod.runCouncil(args(workspace)));
     assert.equal(r.code, 3);
-    assert.ok(r.out.includes('COUNCIL_FINISHED 0'), 'council 自体は完走している');
+    assert.ok(r.out.includes('COUNCIL_FINISHED cleanupExit=3'), 'cleanup の実結果が exit 3 として記録される');
     assert.ok(r.out.includes('COUNCIL_WT_REMOVED_FAILED '));
 
     const state = JSON.parse(fs.readFileSync(stateFile(workspace, AUTO_SESSION), 'utf8'));
@@ -702,7 +702,7 @@ test('--resume: 意見フェーズ途中で中断 → 未完了分のみ再開�
     const { mod: mod2 } = loadModule({ spawn: spawn2, resolveConfig: makeResolveConfig(), phaseJobs: jobs2 });
     const r2 = await runAndCapture(() => mod2.runCouncil(args(workspace, { session: AUTO_SESSION, resume: true })));
     assert.equal(r2.code, 0);
-    assert.ok(r2.out.includes('COUNCIL_FINISHED 0'));
+    assert.ok(r2.out.includes('COUNCIL_FINISHED cleanupExit=0'));
 
     // opinion の再開マニフェストは成功済み agent-a を含まない（完了済みジョブを再実行しない）
     const opinionCalls = jobs2.calls.filter((c) => c.manifest.phase === 'opinion');
@@ -767,7 +767,7 @@ test('全滅停止後の --resume: 停止フェーズを全参加者で再試行
     const { mod: mod2 } = loadModule({ spawn: spawn2, resolveConfig: makeResolveConfig(), phaseJobs: resumeJobs });
     const r1 = await runAndCapture(() => mod2.runCouncil(args(workspace, { session: AUTO_SESSION, resume: true })));
     assert.equal(r1.code, 0);
-    assert.ok(r1.out.includes('COUNCIL_FINISHED 0'));
+    assert.ok(r1.out.includes('COUNCIL_FINISHED cleanupExit=0'));
 
     // 再試行は「成功者のみ」ではなく全参加者（停止フェーズの進行がリセットされている）
     const opinionCalls = resumeJobs.calls.filter((c) => c.manifest.phase === 'opinion');
