@@ -38,8 +38,22 @@ test('通信ルールの実行例はシェル非依存のファイル入力を�
   assert.ok(firstExample, '通信ルールの第一実行例が見つからない');
   assert.match(firstExample[1], /--body-file <本文ファイルのパス>/);
   assert.doesNotMatch(firstExample[1], /<<['"]?EOF/);
-  assert.match(content, /PowerShell:/);
-  assert.match(content, /\| node .*--stdin/);
+
+  const powerShellExample = content.match(/```powershell\r?\n([\s\S]*?)\r?\n```/);
+  assert.ok(powerShellExample, 'PowerShellの実行例が見つからない');
+  assert.match(powerShellExample[1], /@'\r?\n[\s\S]*\r?\n'@ \| node .*--stdin/);
+  assert.match(powerShellExample[1], /<内容>/);
+});
+
+test('explorer/diagnosticianの必須報告例もBash専用構文を使わない', () => {
+  for (const skill of ['gh-maestro-explorer', 'gh-maestro-diagnostician']) {
+    const content = fs.readFileSync(path.join(SKILLS_DIR, skill, 'SKILL.md'), 'utf8');
+    const goalExample = content.match(/## ゴール[\s\S]*?```(?:sh|powershell)\r?\n([\s\S]*?)\r?\n```/);
+
+    assert.ok(goalExample, `${skill}のゴール実行例が見つからない`);
+    assert.match(goalExample[1], /--body-file <報告本文ファイルのパス>/);
+    assert.doesNotMatch(goalExample[1], /<<['"]?EOF/);
+  }
 });
 
 test('ワーカースキルの通信ルールは重複コピペではなく {{COMMUNICATION_RULES}} を参照する', () => {

@@ -10,9 +10,7 @@ description: gh-maestro汎用調査エージェント。分量が事前に読め
 報告を行った時点で調査作業は完了する。以下を実行することがゴールだ：
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" --stdin <<'EOF'
-<調査報告>
-EOF
+node "{{SCRIPTS_PATH}}/msg-send.js" --body-file <報告本文ファイルのパス>
 ```
 
 ## 起動時に与えられる情報
