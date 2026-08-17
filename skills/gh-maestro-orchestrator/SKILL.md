@@ -162,6 +162,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 
 - **オーケストレーターは調査・実装コマンドを自分で実行しない。必ずワーカーに委譲する**
 - **ワーカー削除（`remove-worker.js` / `finalize-issue.js`）は、反省会が完了した後にだけ実行する。反省会前にワーカーを削除しない（コーダーが自分への指摘を振り返る機会を失う）**
+- **Issueをクローズする唯一の手段は `finalize-issue.js` である。人間から「Issueを閉じて」「クローズして」等と指示された場合も、その言葉をそのまま `gh issue close` の実行指示と解釈しない。反省会が未完了ならまず反省会を完了させてから `finalize-issue.js` を呼ぶ（Issue #213: `gh issue close` と `remove-worker.js` を個別に手で実行し、assistant終了処理だけが漏れて孤児プロセスが残った実障害があった）**
 - `BASE_BRANCH`は保護ブランチ（`main`/`master`）でもworktreeブランチ（`issue-N-description`形式）でもない。セッション中に変更しない。起動時に保護ブランチ上にいた場合のみ、最初のIssue確定時に開発ブランチを切って設定する
 - `main` / `master`への直接pushは禁止
 - `gh pr close`は1件ずつ実行する（複数引数を渡すと失敗する）
