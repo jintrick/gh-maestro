@@ -8,6 +8,7 @@ const {
   resolveLineAnchor,
   parseRightLinesByPath,
   isLineInDiff,
+  formatFinalReviewBody,
   processFindings,
 } = require('../scripts/review-publisher');
 
@@ -147,4 +148,31 @@ test('processFindings rejects findings with missing severity', () => {
   assert.equal(result.posted.length, 0);
   assert.equal(result.rejected.length, 1);
   assert.ok(result.rejected[0].errors.some(e => e.includes('severity is required')));
+});
+
+test('formatFinalReviewBody preserves severity and detail for unresolved findings', () => {
+  const unresolvedFinding = finding({
+    severity: 'MAJOR',
+    summary: '保存失敗を呼び出し元へ通知できない',
+    severity_rationale: '失敗を隠すと利用者は処理成功と誤認する',
+    body: '保存処理の戻り値を確認し、失敗時は呼び出し元へエラーを返す。',
+  });
+
+  const body = formatFinalReviewBody({
+    posted: [],
+    unresolved: [{
+      finding: unresolvedFinding,
+      status: 'diff_outside_anchor',
+      resolved_line: 12,
+    }],
+    rejected: [],
+  });
+
+  assert.match(body, /位置未解決finding:/);
+  assert.match(body, /🟡 \*\*MAJOR\*\*: 保存失敗を呼び出し元へ通知できない/);
+  assert.match(body, /対象パス: `src\/foo\.ts`/);
+  assert.match(body, /位置解決状態: `diff_outside_anchor`/);
+  assert.match(body, /解決行: 12/);
+  assert.match(body, /判定根拠: 失敗を隠すと利用者は処理成功と誤認する/);
+  assert.match(body, /保存処理の戻り値を確認し、失敗時は呼び出し元へエラーを返す。/);
 });

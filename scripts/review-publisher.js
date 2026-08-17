@@ -160,13 +160,28 @@ function isLineInDiff(rightLinesByPath, filePath, line) {
   return Boolean(rightLinesByPath.get(filePath)?.has(line));
 }
 
-function formatFindingBody(finding) {
+function formatFindingHeading(finding) {
   const labels = (finding.aspects || [finding.aspect]).map(a => `[${a}]`).join('');
   const severityLabel = SEVERITY_LABELS[finding.severity] || finding.severity;
-  return `${labels} ${severityLabel}: ${finding.summary}
+  return `${labels} ${severityLabel}: ${finding.summary}`;
+}
+
+function formatFindingBody(finding) {
+  return `${formatFindingHeading(finding)}
 判定根拠: ${finding.severity_rationale}
 
 ${finding.body}`;
+}
+
+function formatUnresolvedFinding({ finding, status, resolved_line }) {
+  const lines = [
+    `### ${formatFindingHeading(finding)}`,
+    `- 対象パス: \`${finding.path}\``,
+    `- 位置解決状態: \`${status}\``,
+  ];
+  if (resolved_line !== undefined) lines.push(`- 解決行: ${resolved_line}`);
+  lines.push(`判定根拠: ${finding.severity_rationale}`, '', finding.body);
+  return lines.join('\n');
 }
 
 function formatFinalReviewBody({ posted, unresolved, rejected }) {
@@ -184,7 +199,8 @@ function formatFinalReviewBody({ posted, unresolved, rejected }) {
     lines.push('');
     lines.push('位置未解決finding:');
     for (const item of unresolved) {
-      lines.push(`- [${item.finding.aspect}] ${item.finding.path}: ${item.status} — ${item.finding.summary}`);
+      lines.push('');
+      lines.push(formatUnresolvedFinding(item));
     }
   }
   return lines.join('\n');
@@ -288,7 +304,9 @@ module.exports = {
   resolveLineAnchor,
   parseRightLinesByPath,
   isLineInDiff,
+  formatFindingHeading,
   formatFindingBody,
+  formatUnresolvedFinding,
   formatFinalReviewBody,
   processFindings,
   publish,
