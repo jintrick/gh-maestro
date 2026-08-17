@@ -2,13 +2,13 @@
 // worker-factory.js — ワーカー起動仕様（WorkerLaunchSpec）とライフサイクルポリシー
 // （LifecyclePolicy）のfactory
 //
-// Phase 1（本ファイル）:
-//   正規ワーカーID（issue-<issue>-<role>-<description>）と各リソースキー（worktreeキー/
-//   ブランチ名、Review Managerのreview-pr-<pr>/review-manager-<pr>等）を返すfactory、
-//   およびLifecyclePolicyを導入する。既存の起動ロジック（spawn-worker.js・
-//   start-review-manager.js・run-review-manager.js）は一切変更しない。
+// 正規ワーカーID（issue-<issue>-<role>-<description>）と各リソースキー（worktreeキー/
+// ブランチ名、Review Managerのreview-pr-<pr>/review-manager-<pr>等）を返すfactory、
+// およびLifecyclePolicyを提供する。
 //
-// 後続フェーズ（Phase 3-5、本PR対象外）で、既存の起動ロジックをこのfactoryへ差し替える。
+// spawn-worker.js（buildNormalWorkerLaunchSpec）・start-review-manager.js・
+// run-review-manager.js（いずれもbuildReviewManagerLaunchSpec）の起動ロジックは
+// 全てこのfactoryに一元化済み（Phase 5完了）。
 //
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
