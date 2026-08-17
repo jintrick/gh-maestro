@@ -15,6 +15,7 @@ const ROOT = path.join(__dirname, '..');
 const {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
   buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
+  installScripts, installSharedSkills,
 } = require('../scripts/install.js');
 const { MANAGED_TOP_LEVEL } = require('../scripts/shared/storage-layout');
 
@@ -75,6 +76,53 @@ test('installSkills: 複数宛先（dests配列）を持つエージェントで
       const contentOld = fs.readFileSync(path.join(destOld, skill, 'SKILL.md'), 'utf8');
       assert.equal(contentNew, contentOld, `${skill}/SKILL.md の内容が新旧の宛先で一致しない`);
     }
+  } finally {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('installSkills / installScripts / installSharedSkills: options省略時でもTDZエラーを起こさずSHARED_SCRIPTS等のデフォルト値を使う', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-default-opts-test-'));
+  const destDir = path.join(tmpBase, 'test-agent-skills');
+
+  try {
+    const testAgents = {
+      testAgent: {
+        dests: [destDir],
+        substitutions: {},
+      },
+    };
+
+    // options 省略（または空オブジェクト）で呼び出しても TDZ ReferenceError が発生しないこと
+    assert.doesNotThrow(() => {
+      installSkills(testAgents, { step: () => {}, ok: () => {} });
+    });
+
+    const coderSkillMd = path.join(destDir, 'gh-maestro-coder', 'SKILL.md');
+    assert.ok(fs.existsSync(coderSkillMd), 'installSkills がデフォルト設定で成果物を生成できること');
+    const coderContent = fs.readFileSync(coderSkillMd, 'utf8');
+    const defaultSharedScripts = path.join(expandHome('~/.gh-maestro'), 'scripts');
+    assert.ok(
+      coderContent.includes(defaultSharedScripts),
+      'options.sharedScripts 省略時に SHARED_SCRIPTS がデフォルト値として使われること'
+    );
+
+    const orchestratorSkillMd = path.join(destDir, 'gh-maestro-orchestrator', 'SKILL.md');
+    assert.ok(fs.existsSync(orchestratorSkillMd), 'gh-maestro-orchestrator/SKILL.md が生成されていること');
+    const orchestratorContent = fs.readFileSync(orchestratorSkillMd, 'utf8');
+    const defaultSharedSkills = path.join(expandHome('~/.gh-maestro'), 'skills');
+    assert.ok(
+      orchestratorContent.includes(defaultSharedSkills),
+      'options.sharedSkills 省略時に SHARED_SKILLS がデフォルト値として使われること'
+    );
+
+    // installScripts / installSharedSkills も options 省略で TDZ エラーなく実行できること
+    assert.doesNotThrow(() => {
+      installScripts({ sharedScripts: path.join(tmpBase, 'scripts'), step: () => {}, ok: () => {} });
+    });
+    assert.doesNotThrow(() => {
+      installSharedSkills(testAgents, { sharedSkills: path.join(tmpBase, 'skills'), step: () => {}, ok: () => {} });
+    });
   } finally {
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
@@ -280,61 +328,100 @@ test('buildRulesSupportedMap: 実際のagent-defaults.jsonでclaude-ds/claude-ds
 });
 
 // ── インストール後の成果物を検証（バグ再発防止の核心） ─────────────────────────
+// 実環境（~/.claude/skills 等）ではなく一時ディレクトリに対して installSkills / installScripts / installSharedSkills
+// を実行し、生成された成果物を検証する。
 
-const agentsYamlPath = path.join(ROOT, 'skills', 'agents.yaml');
-const agentsContent = fs.readFileSync(agentsYamlPath, 'utf8');
-const agents = parseAgentsYaml(agentsContent);
+test('インストーラー成果物検証: 全エージェント宛先・共有スキル・共有スクリプトが一時ディレクトリに正しく生成される', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-installer-e2e-test-'));
+  const tmpSharedScripts = path.join(tmpBase, 'shared-scripts');
+  const tmpSharedSkills = path.join(tmpBase, 'shared-skills');
 
-// destDir（例: ~/.claude/skills）はgh-maestroが専有するディレクトリではなく、
-// 同じマシンにインストールされた他の無関係なスキル（training-attendance-check等）も
-// 同居しうる共有ディレクトリである。destDir配下を無条件に全走査すると、gh-maestro管理外の
-// スキルが独自にscripts/等を持つだけで誤って失敗する。gh-maestro自身が実際にインストール
-// するスキル名（リポジトリのskills/配下のディレクトリ名。_partialsは実スキルではないので除外）
-// だけに走査対象を絞る。
-const knownSkillNames = new Set(
-  fs.readdirSync(path.join(ROOT, 'skills'), { withFileTypes: true })
-    .filter(e => e.isDirectory() && e.name !== '_partials')
-    .map(e => e.name)
-);
+  try {
+    const agentsYamlPath = path.join(ROOT, 'skills', 'agents.yaml');
+    const agents = parseAgentsYaml(fs.readFileSync(agentsYamlPath, 'utf8'));
 
-for (const [agentName, config] of Object.entries(agents)) {
-  const destList = (config.dests && config.dests.length > 0)
-    ? config.dests
-    : (config.dest ? [config.dest] : []);
+    const defaultsPath = path.join(ROOT, 'scripts', 'agent-defaults.json');
+    const agentDefaults = JSON.parse(fs.readFileSync(defaultsPath, 'utf8'));
+    const rulesSupportedMap = buildRulesSupportedMap(agentDefaults);
 
-  for (const rawDest of destList) {
-    const destDir = expandHome(rawDest);
-    const label = destList.length > 1 ? `${agentName}:${rawDest}` : agentName;
+    // テスト用に各エージェントの dest / dests を tmpBase 配下の個別ディレクトリに置き換えた agents 設定を作成
+    const testAgents = {};
+    const agentDestEntries = []; // { agentName, rawDest, destDir, label }
 
-    test(`[${label}] インストール後のSKILL.mdに未置換の {{...}} が残っていない`, () => {
-      const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-        .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
-        .map(e => e.name);
+    for (const [agentName, config] of Object.entries(agents)) {
+      const destList = (config.dests && config.dests.length > 0)
+        ? config.dests
+        : (config.dest ? [config.dest] : []);
 
-      for (const skill of skillDirs) {
+      const tmpDests = [];
+      for (let i = 0; i < destList.length; i++) {
+        const rawDest = destList[i];
+        const destDir = path.join(tmpBase, `dest-${agentName}-${i}`);
+        tmpDests.push(destDir);
+        const label = destList.length > 1 ? `${agentName}:${rawDest}` : agentName;
+        agentDestEntries.push({ agentName, rawDest, destDir, label });
+      }
+
+      testAgents[agentName] = {
+        dests: tmpDests,
+        dest: tmpDests[0],
+        substitutions: config.substitutions || {},
+      };
+    }
+
+    const skillsDir = path.join(ROOT, 'skills');
+    const knownSkillNames = new Set(
+      fs.readdirSync(skillsDir, { withFileTypes: true })
+        .filter(e => e.isDirectory() && !e.name.startsWith('_'))
+        .map(e => e.name)
+    );
+
+    // 1. エージェントスキルのインストール
+    installSkills(testAgents, {
+      skillsDir,
+      sharedScripts: tmpSharedScripts,
+      sharedSkills: tmpSharedSkills,
+      rulesSupportedMap,
+      step: () => {},
+      ok: () => {},
+    });
+
+    // 2. 共有スクリプトのミラーリング
+    installScripts({
+      scriptsDir: path.join(ROOT, 'scripts'),
+      sharedScripts: tmpSharedScripts,
+      agentsYaml: agentsYamlPath,
+      step: () => {},
+      ok: () => {},
+    });
+
+    // 3. 共有スキルのデプロイ
+    installSharedSkills(testAgents, {
+      skillsDir,
+      sharedSkills: tmpSharedSkills,
+      sharedScripts: tmpSharedScripts,
+      step: () => {},
+      ok: () => {},
+    });
+
+    // ── 各エージェント宛先の検証 ──
+    for (const { agentName, destDir, label } of agentDestEntries) {
+      assert.ok(fs.existsSync(destDir), `宛先ディレクトリが存在しない: ${destDir} (${label})`);
+
+      for (const skill of knownSkillNames) {
         const skillMdPath = path.join(destDir, skill, 'SKILL.md');
-        if (!fs.existsSync(skillMdPath)) continue;
+        assert.ok(fs.existsSync(skillMdPath), `${skill}/SKILL.md が生成されていない (${label})`);
+
         const content = fs.readFileSync(skillMdPath, 'utf8');
+
+        // 未置換プレースホルダーが残っていないこと
         const unreplaced = content.match(/\{\{[^}]+\}\}/g);
         assert.ok(
           !unreplaced,
           `${label}/${skill}/SKILL.md に未置換プレースホルダーあり: ${(unreplaced || []).join(', ')}`
         );
-      }
-    });
 
-    test(`[${label}] インストール後のSKILL.mdのSCRIPTS_PATHが絶対パスである`, () => {
-      const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-        .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
-        .map(e => e.name);
-
-      for (const skill of skillDirs) {
-        const skillMdPath = path.join(destDir, skill, 'SKILL.md');
-        if (!fs.existsSync(skillMdPath)) continue;
-        const content = fs.readFileSync(skillMdPath, 'utf8');
-
-        // node "..." で呼ばれるスクリプトパスをすべて抽出
-        // $HOME や $env: などのシェル変数は実行時展開なので除外する
+        // node "..." で呼ばれるスクリプトパスが tmpSharedScripts 配下の絶対パスであること
         const matches = [...content.matchAll(/node\s+"([^"]+\.js)"/g)]
           .map(m => m[1])
           .filter(p => !p.startsWith('$'));
@@ -343,91 +430,74 @@ for (const [agentName, config] of Object.entries(agents)) {
             path.isAbsolute(scriptPath),
             `${label}/${skill}/SKILL.md のスクリプトパスが相対パス: "${scriptPath}"`
           );
+          assert.ok(
+            scriptPath.startsWith(tmpSharedScripts),
+            `${label}/${skill}/SKILL.md のスクリプトパスが集約先を指していない: "${scriptPath}"`
+          );
         }
-      }
-    });
 
-    test(`[${label}] orchestrator SKILL.md の issue template 参照が shared skills の絶対パスである`, () => {
-      const skillMdPath = path.join(destDir, 'gh-maestro-orchestrator', 'SKILL.md');
-      if (!fs.existsSync(skillMdPath)) return;
+        // orchestrator SKILL.md の issue template 参照が shared skills の絶対パスであること
+        if (skill === 'gh-maestro-orchestrator') {
+          const tmplMatch = content.match(/`([^`]+issue-template\.md)`/);
+          assert.ok(tmplMatch, `${label}/gh-maestro-orchestrator/SKILL.md に issue-template.md 参照が見つからない`);
+          assert.ok(
+            path.isAbsolute(tmplMatch[1]),
+            `${label}/gh-maestro-orchestrator/SKILL.md の issue-template 参照が相対パス: "${tmplMatch[1]}"`
+          );
+          assert.ok(
+            tmplMatch[1].startsWith(tmpSharedSkills),
+            `${label}/gh-maestro-orchestrator/SKILL.md の issue-template 参照が共有スキル先を指していない: "${tmplMatch[1]}"`
+          );
+        }
 
-      const content = fs.readFileSync(skillMdPath, 'utf8');
-      const match = content.match(/`([^`]+issue-template\.md)`/);
-      assert.ok(match, `${label}/gh-maestro-orchestrator/SKILL.md に issue-template.md 参照が見つからない`);
-      assert.ok(
-        path.isAbsolute(match[1]),
-        `${label}/gh-maestro-orchestrator/SKILL.md の issue-template 参照が相対パス: "${match[1]}"`
-      );
-    });
-
-    test(`[${label}] スキルディレクトリに scripts/ サブディレクトリが存在しない（SKILL.mdのみ）`, () => {
-      const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-        .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
-        .map(e => e.name);
-      for (const skill of skillDirs) {
+        // スキルディレクトリに scripts/ サブディレクトリが存在しないこと
         const perSkillScripts = path.join(destDir, skill, 'scripts');
         assert.ok(
           !fs.existsSync(perSkillScripts),
           `スクリプトは集約先に置くべきで、per-skill の scripts/ は存在してはならない: ${perSkillScripts}`
         );
+
+        // 非orchestratorスキルに自己ポーリング専用のMonitor起動指示が含まれないこと
+        if (skill !== 'gh-maestro-orchestrator') {
+          assert.ok(
+            !content.includes('最初のツール呼び出しとして'),
+            `${label}/${skill}/SKILL.md に自己ポーリング専用のMonitor起動指示が含まれている`
+          );
+          assert.ok(
+            !content.includes('persistent: true'),
+            `${label}/${skill}/SKILL.md にMonitor専用の persistent: true 指示が含まれている`
+          );
+        }
       }
-    });
+    }
 
-    // 全エージェントがresume方式（inbox-supervisor.js経由）に統一されているため、
-    // どのエージェント向けインストール先にも自己ポーリング専用の起動指示（旧Monitor方式）が
-    // 紛れ込んではならない。過去、reasonix（当時のskillsViaMd機構）がこの種の取り違えで
-    // 実行不能な指示を受け取った実障害（PR #38）の再発防止。
-    test(`[${label}] に自己ポーリング専用のMonitor起動指示が含まれない`, () => {
-      const skillDirs = fs.readdirSync(destDir, { withFileTypes: true })
-        .filter(e => e.isDirectory() && knownSkillNames.has(e.name))
-        .map(e => e.name)
-        .filter(name => name !== 'gh-maestro-orchestrator');
+    // ── 共有スキルの検証 ──
+    const templatePath = path.join(tmpSharedSkills, 'gh-maestro-orchestrator', 'issue-template.md');
+    assert.ok(fs.existsSync(templatePath), `共有スキル配布先に issue-template.md が存在しない: ${templatePath}`);
 
-      for (const skill of skillDirs) {
-        const skillMdPath = path.join(destDir, skill, 'SKILL.md');
-        if (!fs.existsSync(skillMdPath)) continue;
-        const content = fs.readFileSync(skillMdPath, 'utf8');
-        assert.ok(
-          !content.includes('最初のツール呼び出しとして'),
-          `${label}/${skill}/SKILL.md に自己ポーリング専用のMonitor起動指示が含まれている`
-        );
-        assert.ok(
-          !content.includes('persistent: true'),
-          `${label}/${skill}/SKILL.md にMonitor専用の persistent: true 指示が含まれている`
-        );
-      }
-    });
-  }
-}
+    for (const skill of knownSkillNames) {
+      const skillMdPath = path.join(tmpSharedSkills, skill, 'SKILL.md');
+      assert.ok(fs.existsSync(skillMdPath), `共有スキル ${skill}/SKILL.md が存在しない`);
+      const content = fs.readFileSync(skillMdPath, 'utf8');
+      const unreplaced = content.match(/\{\{[^}]+\}\}/g);
+      assert.ok(
+        !unreplaced,
+        `共有スキル ${skill}/SKILL.md に未置換プレースホルダーあり: ${(unreplaced || []).join(', ')}`
+      );
+    }
 
-test('共有スキル配布先に orchestrator の issue-template.md が配置される', () => {
-  const sharedSkillsDir = expandHome('~/.gh-maestro/skills');
-  const templatePath = path.join(sharedSkillsDir, 'gh-maestro-orchestrator', 'issue-template.md');
-  assert.ok(fs.existsSync(templatePath), `共有スキル配布先に issue-template.md が存在しない: ${templatePath}`);
-});
+    // ── 共有スクリプトの検証 ──
+    for (const name of ['msg-send.js', 'unlink-junctions.js', 'spawn-worker.js', 'start-review-manager.js', 'poll-pr.js', 'review-publisher.js']) {
+      const p = path.join(tmpSharedScripts, name);
+      assert.ok(fs.existsSync(p), `集約先にスクリプトが存在しない: ${p}`);
+    }
 
-// 全エージェントはそれぞれのネイティブなスキル発見機構（skill_files_install_destination_directory）
-// でSKILL.mdを読む方式に統一済み（reasonixも含む）。~/.gh-maestro/skills/ 配下の共有コピーは
-// orchestrator専用の非SKILL.mdアセット配布用（issue-template.md等）であり、置換には常にclaude用
-// substitutionsを使う。ワーカーエージェントが直接読むことはないため、Monitor前提の指示が
-// 含まれていること自体は問題ではない（かつてreasonix等がこの共有コピーをAGENTS.md経由で読む
-// 特別扱いだった名残の検証はここでは行わない）。
-
-test('共有スキルのSKILL.mdに未置換の {{...}} が残っていない', () => {
-  const sharedSkillsDir = expandHome('~/.gh-maestro/skills');
-  const skillDirs = fs.readdirSync(sharedSkillsDir, { withFileTypes: true })
-    .filter(e => e.isDirectory())
-    .map(e => e.name);
-
-  for (const skill of skillDirs) {
-    const skillMdPath = path.join(sharedSkillsDir, skill, 'SKILL.md');
-    if (!fs.existsSync(skillMdPath)) continue;
-    const content = fs.readFileSync(skillMdPath, 'utf8');
-    const unreplaced = content.match(/\{\{[^}]+\}\}/g);
-    assert.ok(
-      !unreplaced,
-      `共有スキル ${skill}/SKILL.md に未置換プレースホルダーあり: ${(unreplaced || []).join(', ')}`
-    );
+    const distributedAgentsYaml = path.join(tmpSharedScripts, 'agents.yaml');
+    assert.ok(fs.existsSync(distributedAgentsYaml), `集約先に agents.yaml が存在しない: ${distributedAgentsYaml}`);
+    const parsed = parseAgentsYaml(fs.readFileSync(distributedAgentsYaml, 'utf8'));
+    assert.ok(parsed && typeof parsed === 'object', 'agents.yaml が正常にパースできる');
+  } finally {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
   }
 });
 
@@ -731,19 +801,3 @@ test('copySkillAssets: destに残った未知のファイルを削除する', ()
   }
 });
 
-const SHARED_SCRIPTS = expandHome('~/.gh-maestro/scripts');
-
-// スキル固有・base・lib・共有スクリプトが1か所に集約されている代表例
-for (const name of ['msg-send.js', 'unlink-junctions.js', 'spawn-worker.js', 'start-review-manager.js', 'poll-pr.js', 'review-publisher.js']) {
-  test(`集約先に ${name} が存在する`, () => {
-    const p = path.join(SHARED_SCRIPTS, name);
-    assert.ok(fs.existsSync(p), `集約先に存在しない: ${p}`);
-  });
-}
-
-test('集約先に agents.yaml が配布され、正常にパースできる', () => {
-  const distributed = path.join(SHARED_SCRIPTS, 'agents.yaml');
-  assert.ok(fs.existsSync(distributed), `集約先に存在しない: ${distributed}`);
-  const parsed = parseAgentsYaml(fs.readFileSync(distributed, 'utf8'));
-  assert.ok(parsed && typeof parsed === 'object', 'agents.yaml が正常にパースできる');
-});
