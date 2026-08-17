@@ -31,6 +31,44 @@ test('部分テンプレート本文は skills/_partials/*.md に単一ソース
   }
 });
 
+test('通信ルールの実行例はシェル非依存のファイル入力を第一に案内する', () => {
+  const content = fs.readFileSync(path.join(PARTIALS_DIR, 'communication-rules.md'), 'utf8');
+  const firstExample = content.match(/```sh\r?\n([\s\S]*?)\r?\n```/);
+
+  assert.ok(firstExample, '通信ルールの第一実行例が見つからない');
+  assert.match(firstExample[1], /--body-file <本文ファイルのパス>/);
+  assert.doesNotMatch(firstExample[1], /<<['"]?EOF/);
+
+  const powerShellExample = content.match(/```powershell\r?\n([\s\S]*?)\r?\n```/);
+  assert.ok(powerShellExample, 'PowerShellの実行例が見つからない');
+  assert.match(powerShellExample[1], /@'\r?\n[\s\S]*\r?\n'@ \| node .*--stdin/);
+  assert.match(powerShellExample[1], /<内容>/);
+});
+
+test('explorer/diagnosticianの必須報告例もBash専用構文を使わない', () => {
+  const fallbackHeadings = {
+    'gh-maestro-explorer': '## 調査しても情報が見つからない場合',
+    'gh-maestro-diagnostician': '## 調査しても特定できない場合',
+  };
+
+  for (const [skill, heading] of Object.entries(fallbackHeadings)) {
+    const content = fs.readFileSync(path.join(SKILLS_DIR, skill, 'SKILL.md'), 'utf8');
+    const goalExample = content.match(/## ゴール[\s\S]*?```(?:sh|powershell)\r?\n([\s\S]*?)\r?\n```/);
+    const sectionStart = content.indexOf(heading);
+    const nextSection = content.indexOf('\n## ', sectionStart + heading.length);
+    const fallbackSection = content.slice(sectionStart, nextSection === -1 ? content.length : nextSection);
+    const fallbackExample = fallbackSection.match(/```(?:sh|powershell)\r?\n([\s\S]*?)\r?\n```/);
+
+    assert.ok(goalExample, `${skill}のゴール実行例が見つからない`);
+    assert.match(goalExample[1], /--body-file <報告本文ファイルのパス>/);
+    assert.doesNotMatch(goalExample[1], /<<['"]?EOF/);
+    assert.notEqual(sectionStart, -1, `${skill}の調査失敗時節が見つからない`);
+    assert.ok(fallbackExample, `${skill}の調査失敗時実行例が見つからない`);
+    assert.match(fallbackExample[1], /--body-file <報告本文ファイルのパス>/);
+    assert.doesNotMatch(fallbackExample[1], /<<['"]?EOF/);
+  }
+});
+
 test('ワーカースキルの通信ルールは重複コピペではなく {{COMMUNICATION_RULES}} を参照する', () => {
   for (const skill of WORKER_SKILLS) {
     const content = fs.readFileSync(path.join(SKILLS_DIR, skill, 'SKILL.md'), 'utf8');
