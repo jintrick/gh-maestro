@@ -619,6 +619,8 @@ echo $PENDING_ISSUE > $WORKSPACE/.gh-maestro/pending-$PR
 
 上記でゼロ件だったときに限り作成する。
 
+**ここだけは意図的に `gh issue create` を直接使う例外。** `--label` の付与が必須だが `create-issue.js` は `--label` を持たない。ラベルで管理する使い捨てでないストックIssue（実装アンカーではない）なので、assistant自動起動も不要。「切り出し」（下記）は通常のアンカーIssueを作るため、この例外に倣わず必ず `create-issue.js` を使うこと。
+
 ```sh
 if [ -z "$PENDING_ISSUE" ]; then
   PENDING_ISSUE=$(gh issue create --repo $REPO \
@@ -643,13 +645,21 @@ gh issue comment $PENDING_ISSUE --repo $REPO \
 
 保留Issueは終わりのないストックであり、クローズという概念がない。対応することが決まった項目は、保留Issueから**切り出して新規Issueを作成**し、コーダーへの実装指示はその新規Issueに対して行う。実装が完了しクローズされるのは常にこの切り出し先Issueであり、保留Issue自体を操作することはない。
 
+切り出し先も通常のアンカーIssueなので、`gh issue create` を直接叩かない。唯一の呼び出し口は `create-issue.js`（「アセット」参照）——これを経由しないと切り出し先Issueにassistantが自動起動されない。
+
 ```sh
 # 対応する項目をグループ化して新規Issueとして切り出す
-NEW_ISSUE=$(gh issue create --repo $REPO \
+node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-extract.md --stdin <<EOF
+Issue #$PENDING_ISSUE の保留項目から切り出し。
+- <path>:<line> — <内容>
+EOF
+
+# --workspace は必ず明示する（省略するとassistant起動先がずれる。「Issue確定」参照）
+CREATE_OUTPUT=$(node "{{SCRIPTS_PATH}}/create-issue.js" \
   --title "<切り出した対応内容の要約>" \
-  --body "Issue #$PENDING_ISSUE の保留項目から切り出し。
-- <path>:<line> — <内容>" \
-  --jq '.number')
+  --body-file /tmp/issue-extract.md \
+  --repo $REPO --workspace $WORKSPACE)
+NEW_ISSUE=$(echo "$CREATE_OUTPUT" | sed -n 's/^ISSUE_CREATED:\([0-9]*\).*/\1/p')
 
 # 保留Issue側には、切り出し済みである旨をコメントで残す（削除はしない）
 gh issue comment $PENDING_ISSUE --repo $REPO \
