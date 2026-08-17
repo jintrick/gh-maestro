@@ -1153,6 +1153,8 @@ test('CLI_USAGE: 文字列が定義されている', () => {
   const plc = loadModule();
   assert.equal(typeof plc.CLI_USAGE, 'string');
   assert.ok(plc.CLI_USAGE.includes('sweep'));
+  assert.ok(plc.CLI_USAGE.includes('status'));
+  assert.ok(plc.CLI_USAGE.includes('--script'));
   assert.ok(plc.CLI_USAGE.includes('--workspace'));
 });
 
@@ -1166,6 +1168,26 @@ test('CLI_USAGE: 文字列が定義されている', () => {
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'process-lifecycle.js');
 const { cleanSpawnEnv } = require('./_spawn-env');
 
+function runCli(args) {
+  const { spawnSync } = require('child_process');
+  return spawnSync(process.execPath, [SCRIPT, ...args], {
+    encoding: 'utf8',
+    env: cleanSpawnEnv(),
+  });
+}
+
+function createStatusWorkspace() {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-status-cli-'));
+  const pidsDir = path.join(storageLayout.workspaceRuntimeDir(ws), 'pids');
+  fs.mkdirSync(pidsDir, { recursive: true });
+  return { ws, pidsDir };
+}
+
+function removeStatusWorkspace(ws) {
+  try { fs.rmSync(storageLayout.workspaceRuntimeDir(ws), { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(ws, { recursive: true, force: true }); } catch {}
+}
+
 test('サブプロセス経由: --help は終了コード0でCLI_USAGEを表示する', () => {
   const { spawnSync } = require('child_process');
   const r = spawnSync(process.execPath, [SCRIPT, '--help'], { encoding: 'utf8' });
@@ -1178,6 +1200,94 @@ test('サブプロセス経由: --workspace の値が"--help"文字列だと値�
   const r = spawnSync(process.execPath, [SCRIPT, 'sweep', '--workspace', '--help'], { encoding: 'utf8' });
   assert.notEqual(r.status, 0);
   assert.equal(r.stdout, '');
+});
+
+test('status: --script が無い場合は照会せずエラー終了する', () => {
+  const { ws } = createStatusWorkspace();
+  try {
+    const r = runCli(['status', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout, '');
+    assert.match(r.stderr, /--script/);
+  } finally {
+    removeStatusWorkspace(ws);
+  }
+});
+
+test('status: workspace を解決できない場合はエラー終了する', () => {
+  const r = runCli(['status', '--workspace', os.homedir(), '--script', 'msg-poll.js']);
+  assert.equal(r.status, 1);
+  assert.equal(r.stdout, '');
+  assert.match(r.stderr, /ワークスペースを解決できません/);
+});
+
+test('status: 停止したPID registryエントリは running:false として一意に判定する', () => {
+  const { ws, pidsDir } = createStatusWorkspace();
+  try {
+    fs.writeFileSync(path.join(pidsDir, '999999999.json'), JSON.stringify({
+      pid: 999999999,
+      script: 'msg-poll.js',
+      workerName: null,
+      workspace: ws,
+    }));
+
+    const r = runCli(['status', '--workspace', ws, '--script', 'msg-poll.js']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, '');
+    assert.deepEqual(JSON.parse(r.stdout), {
+      script: 'msg-poll.js',
+      workerName: null,
+      running: false,
+      pid: null,
+    });
+  } finally {
+    removeStatusWorkspace(ws);
+  }
+});
+
+test('status: script と workerName の組み合わせに一致する常駐プロセスだけを running と判定する', () => {
+  const { ws, pidsDir } = createStatusWorkspace();
+  try {
+    fs.writeFileSync(path.join(pidsDir, `${process.pid}.json`), JSON.stringify({
+      pid: process.pid,
+      script: 'msg-poll.js',
+      workerName: 'resident-worker',
+      workspace: ws,
+    }));
+
+    const matching = runCli([
+      'status', '--workspace', ws, '--script', 'msg-poll.js', '--worker-name', 'resident-worker',
+    ]);
+    assert.equal(matching.status, 0, matching.stderr);
+    assert.deepEqual(JSON.parse(matching.stdout), {
+      script: 'msg-poll.js',
+      workerName: 'resident-worker',
+      running: true,
+      pid: process.pid,
+    });
+
+    const wrongWorker = runCli(['status', '--workspace', ws, '--script', 'msg-poll.js']);
+    assert.equal(wrongWorker.status, 0, wrongWorker.stderr);
+    assert.deepEqual(JSON.parse(wrongWorker.stdout), {
+      script: 'msg-poll.js',
+      workerName: null,
+      running: false,
+      pid: null,
+    });
+
+    const wrongScript = runCli([
+      'status', '--workspace', ws, '--script', 'poll-pr.js', '--worker-name', 'resident-worker',
+    ]);
+    assert.equal(wrongScript.status, 0, wrongScript.stderr);
+    assert.deepEqual(JSON.parse(wrongScript.stdout), {
+      script: 'poll-pr.js',
+      workerName: 'resident-worker',
+      running: false,
+      pid: null,
+    });
+  } finally {
+    removeStatusWorkspace(ws);
+  }
 });
 
 // ── Issue #267 回帰: CLI 主経路（require.main === module）での循環 require ──

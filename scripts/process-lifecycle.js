@@ -18,15 +18,16 @@
 //   // ... polling loop with checkParent() ...
 //   plc.cleanup(workspace);
 //
-// Usage (CLI — sweep only):
+// Usage (CLI):
 //   node process-lifecycle.js sweep --workspace <path> [--worker-name <name>] [--dry-run]
+//   node process-lifecycle.js status --workspace <path> --script <name> [--worker-name <name>]
 
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('./child-process');
-const { parseFlags } = require('./shared/workspace');
+const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const storageLayout = require('./shared/storage-layout');
 
 const IS_WIN = process.platform === 'win32';
@@ -845,21 +846,28 @@ function cleanup(workspace, extraCleanup) {
   }
 }
 
-// ── CLI エントリポイント（sweep 操作） ─────────────────────────────────
+// ── CLI エントリポイント ───────────────────────────────────────────────
 
 const CLI_USAGE = `process-lifecycle.js — プロセスライフサイクル管理
 
-Usage: node process-lifecycle.js sweep --workspace <path> [--worker-name <name>] [--dry-run]
+Usage:
+  node process-lifecycle.js sweep --workspace <path> [--worker-name <name>] [--dry-run]
+  node process-lifecycle.js status --workspace <path> --script <name> [--worker-name <name>]
 
 Options:
   --workspace <path>     ワークスペースパス（必須）
-  --worker-name <name>   特定ワーカーのPIDのみsweep（省略時は全エントリ）
+  --script <name>        status 対象のスクリプト名（例: msg-poll.js）
+  --worker-name <name>   sweep/status 対象のworker名。status では省略時 null
   --dry-run              実際のkill/削除を行わず、対象のみ表示
 
 Description:
   PID registry を走査し、stale エントリを掃除する。
   各エントリは同一性確認（起動時刻比較）を経て、一致する場合のみ kill される。
   PID再利用が検出されたエントリはファイル削除のみ行う（無関係なプロセスを保護）。
+
+  status は指定した workspace・script・workerName の生存プロセスを読み取り専用で照会する。
+  stdout には {"script":...,"workerName":...,"running":true|false,"pid":...} を出力する。
+  running=false は照会成功（対象プロセスなし）を表し、終了コードは 0。
 
   終了コード: 0（成功）/ 1（エラー）。エラーには fail-closed も含まれる——
   稼働中ワーカーの除外リストを組み立てられない場合は、kill も housekeeping も
@@ -901,77 +909,146 @@ module.exports = {
   sweepRegistry,
   // 統合
   cleanup,
+  // CLI
+  main,
   CLI_USAGE,
 };
 
-if (require.main === module) {
-  const argv = process.argv.slice(2);
+/**
+ * process-lifecycle CLI を実行する。
+ *
+ * status は PID registry の読み取りだけを行い、対象がいない場合も
+ * running:false を返す。CLI の誤用や registry 読み取り失敗とは終了コードで区別する。
+ *
+ * @param {string[]} [argv] process.argv.slice(2) 相当
+ * @returns {{ code: number, lines: string[], errLines: string[] }}
+ */
+function main(argv = process.argv.slice(2)) {
+  const out = [];
+  const err = [];
+  const writeOut = (line) => out.push(line);
+  const writeErr = (line) => err.push(line);
+
   let values, rest;
   try {
     ({ values, rest } = parseFlags(argv, {
-      flags: { '--workspace': {}, '--worker-name': {} },
+      flags: { '--workspace': {}, '--script': {}, '--worker-name': {} },
       booleans: ['--dry-run', '--help', '-h'],
-      // サブコマンドはちょうど1つ（sweep）。未知フラグ・余剰位置引数はパーサ側で拒否。
+      // サブコマンドはちょうど1つ。未知フラグ・余剰位置引数はパーサ側で拒否。
       positionals: { min: 1, max: 1 },
     }));
-  } catch (err) {
-    if (err.name !== 'ArgsValidationError') throw err;
-    if (err.helpRequested) {
-      console.log(CLI_USAGE);
-      process.exit(0);
+  } catch (parseError) {
+    if (parseError.name !== 'ArgsValidationError') throw parseError;
+    if (parseError.helpRequested) {
+      writeOut(CLI_USAGE);
+      return { code: 0, lines: out, errLines: [] };
     }
-    for (const e of err.errors) console.error(`process-lifecycle: ${e.message}`);
-    console.error(CLI_USAGE);
-    process.exit(1);
+    for (const e of parseError.errors) writeErr(`process-lifecycle: ${e.message}`);
+    writeErr(CLI_USAGE);
+    return { code: 1, lines: out, errLines: err };
   }
 
   if (values['--help'] || values['-h']) {
-    console.log(CLI_USAGE);
-    process.exit(0);
+    writeOut(CLI_USAGE);
+    return { code: 0, lines: out, errLines: err };
   }
-
-  const workspace = values['--workspace'];
-  const workerName = values['--worker-name'];
-  const dryRun = values['--dry-run'] === true;
 
   const sub = rest[0];
-  if (sub !== 'sweep') {
-    console.error(CLI_USAGE);
-    process.exit(1);
+  if (sub !== 'sweep' && sub !== 'status') {
+    writeErr(CLI_USAGE);
+    return { code: 1, lines: out, errLines: err };
   }
 
+  if (!values['--workspace']) {
+    writeErr('process-lifecycle: --workspace が必要です');
+    writeErr(CLI_USAGE);
+    return { code: 1, lines: out, errLines: err };
+  }
+
+  const workspace = resolveWorkspace(values['--workspace']);
   if (!workspace) {
-    console.error('process-lifecycle: --workspace が必要です');
-    console.error(CLI_USAGE);
-    process.exit(1);
+    writeErr('process-lifecycle: ワークスペースを解決できません');
+    return { code: 1, lines: out, errLines: err };
   }
 
+  if (sub === 'status') {
+    const script = values['--script'];
+    if (!script) {
+      writeErr('process-lifecycle: status には --script が必要です');
+      writeErr(CLI_USAGE);
+      return { code: 1, lines: out, errLines: err };
+    }
+    if (values['--dry-run'] === true) {
+      writeErr('process-lifecycle: --dry-run は sweep でのみ使用できます');
+      writeErr(CLI_USAGE);
+      return { code: 1, lines: out, errLines: err };
+    }
+
+    const workerName = values['--worker-name'] ?? null;
+    let entry;
+    try {
+      entry = findRunningInstance(workspace, { script, workerName });
+    } catch (e) {
+      writeErr(`process-lifecycle: status の照会に失敗しました: ${e.message}`);
+      return { code: 1, lines: out, errLines: err };
+    }
+
+    writeOut(JSON.stringify({
+      script,
+      workerName,
+      running: Boolean(entry),
+      pid: entry ? entry.pid : null,
+    }));
+    return { code: 0, lines: out, errLines: err };
+  }
+
+  if (values['--script'] !== undefined) {
+    writeErr('process-lifecycle: --script は status でのみ使用できます');
+    writeErr(CLI_USAGE);
+    return { code: 1, lines: out, errLines: err };
+  }
+
+  const workerName = values['--worker-name'];
+  const dryRun = values['--dry-run'] === true;
   const matchFilter = workerName
     ? (entry) => entry.workerName === workerName
     : undefined;
 
-  const results = sweepRegistry(workspace, { match: matchFilter, dryRun });
+  let results;
+  try {
+    results = sweepRegistry(workspace, { match: matchFilter, dryRun });
+  } catch (e) {
+    writeErr(`process-lifecycle: sweep に失敗しました: ${e.message}`);
+    return { code: 1, lines: out, errLines: err };
+  }
 
-  if (dryRun) console.log('[dry-run] 実際のkill/削除は行いません');
+  if (dryRun) writeOut('[dry-run] 実際のkill/削除は行いません');
   if (results.killed.length > 0) {
-    console.log(`Killed (${results.killed.length}):`);
+    writeOut(`Killed (${results.killed.length}):`);
     for (const k of results.killed) {
-      console.log(`  pid=${k.pid} worker=${k.workerName || '-'} script=${k.script || '-'}`);
+      writeOut(`  pid=${k.pid} worker=${k.workerName || '-'} script=${k.script || '-'}`);
     }
   }
   if (results.cleaned.length > 0) {
-    console.log(`Cleaned stale entries (${results.cleaned.length}):`);
+    writeOut(`Cleaned stale entries (${results.cleaned.length}):`);
     for (const c of results.cleaned) {
-      console.log(`  pid=${c.pid || c.file} reason=${c.reason}`);
+      writeOut(`  pid=${c.pid || c.file} reason=${c.reason}`);
     }
   }
   if (results.errors.length > 0) {
-    console.error(`Errors (${results.errors.length}):`);
-    for (const e of results.errors) console.error(`  ${e}`);
+    writeErr(`Errors (${results.errors.length}):`);
+    for (const e of results.errors) writeErr(`  ${e}`);
   }
   if (results.killed.length === 0 && results.cleaned.length === 0 && results.errors.length === 0) {
-    console.log('No stale entries found.');
+    writeOut('No stale entries found.');
   }
 
-  process.exit(results.errors.length > 0 ? 1 : 0);
+  return { code: results.errors.length > 0 ? 1 : 0, lines: out, errLines: err };
+}
+
+if (require.main === module) {
+  const result = main();
+  for (const line of result.errLines) process.stderr.write(line + '\n');
+  for (const line of result.lines) process.stdout.write(line + '\n');
+  process.exit(result.code);
 }
