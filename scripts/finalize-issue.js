@@ -149,7 +149,7 @@ function defaultFindReviewPrs(issue, repo, workspace) {
 
 /**
  * Issue ライフサイクル終了時の、情報価値のない内部状態の後始末（best-effort）。
- * 価値ある記録（review-manager-<PR>.json 等）は対象にしない（受理基準c）。
+ * 価値ある記録（records/pr/<PR>/review/manager.json 等）は対象にしない（受理基準c）。
  *
  * - assistant-watch/<issue>.json を削除（Issue #248 項目2）
  * - 対象PRの review-manager-<PR>.incomplete を削除（項目4・終端削除）
