@@ -652,12 +652,11 @@ CREATE_OUTPUT=$(node "{{SCRIPTS_PATH}}/create-issue.js" \
   --repo $REPO --workspace $WORKSPACE)
 NEW_ISSUE=$(echo "$CREATE_OUTPUT" | sed -n 's/^ISSUE_CREATED:\([0-9]*\).*/\1/p')
 
-# 保留Issue側は、元の[保留]コメント自体を検索して直接書き換える（新規コメントは作らない・削除もしない）
+# 保留Issue側は、元の[保留]コメント自体を検索して削除する（新規コメントは作らない・書き換えない）
 PENDING_COMMENT_ID=$(gh api "repos/$REPO/issues/$PENDING_ISSUE/comments" --paginate \
   --jq '.[] | select(.body == "[保留] <path>:<line> — <内容>") | .id')
-# 該当コメントが1件に一意特定できない場合（0件・複数件）は書き換えず人間に確認する
-gh api "repos/$REPO/issues/comments/$PENDING_COMMENT_ID" -X PATCH \
-  -f body="[切り出し済み → #$NEW_ISSUE] <path>:<line> — <内容>"
+# 該当コメントが1件に一意特定できない場合（0件・複数件）は削除せず人間に確認する
+gh api -X DELETE "repos/$REPO/issues/comments/$PENDING_COMMENT_ID"
 ```
 
 コーダーへの実装指示・PR作成は `$NEW_ISSUE` に対して行い、そのIssueが実装完了時にクローズされる（通常のIssue対応フローと同じ）。`$WORKSPACE/.gh-maestro/pending-$PR` は次回セッションのキャッシュとして残してよく、削除しない。
