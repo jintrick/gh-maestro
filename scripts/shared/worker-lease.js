@@ -425,9 +425,7 @@ const INBOX_SUPERVISOR_ROLE = 'inbox-supervisor';
 
 /**
  * msg-poll の role lease 名（msgpoll-<self>）を組み立てる。
- * 構築をこの一箇所に集約する（PR #302 指摘）。msg-poll.js の `msgpoll-${self}` と
- * ensure-msg-poll-orchestrator.js の MSGPOLL_ORCHESTRATOR_ROLE が別々に組み立てていると、
- * 片方だけ変更された際に起動前チェックが生きた lease を認識できなくなる。
+ * 構築を一箇所に集約し、MSGPOLL_ORCHESTRATOR_ROLE もここから導出する。
  * @param {string} self 自分の名前（worker 名、または 'orchestrator'）
  * @returns {string}
  */
