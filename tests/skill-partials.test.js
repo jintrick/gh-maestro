@@ -31,6 +31,17 @@ test('部分テンプレート本文は skills/_partials/*.md に単一ソース
   }
 });
 
+test('通信ルールの実行例はシェル非依存のファイル入力を第一に案内する', () => {
+  const content = fs.readFileSync(path.join(PARTIALS_DIR, 'communication-rules.md'), 'utf8');
+  const firstExample = content.match(/```sh\r?\n([\s\S]*?)\r?\n```/);
+
+  assert.ok(firstExample, '通信ルールの第一実行例が見つからない');
+  assert.match(firstExample[1], /--body-file <本文ファイルのパス>/);
+  assert.doesNotMatch(firstExample[1], /<<['"]?EOF/);
+  assert.match(content, /PowerShell:/);
+  assert.match(content, /\| node .*--stdin/);
+});
+
 test('ワーカースキルの通信ルールは重複コピペではなく {{COMMUNICATION_RULES}} を参照する', () => {
   for (const skill of WORKER_SKILLS) {
     const content = fs.readFileSync(path.join(SKILLS_DIR, skill, 'SKILL.md'), 'utf8');
