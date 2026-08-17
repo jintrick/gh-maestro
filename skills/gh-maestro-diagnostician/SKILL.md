@@ -94,9 +94,7 @@ path/to/file.js:42 — <具体的に何が起きているか。コードの解�
 ## 調査しても特定できない場合
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" --stdin <<'EOF'
-調査完了。根本原因を特定できませんでした。【わかったこと】<絞り込めた範囲> 【行き詰まった理由】<理由> 【次の手がかり候補】<あれば>
-EOF
+node "{{SCRIPTS_PATH}}/msg-send.js" --body-file <報告本文ファイルのパス>
 ```
 
 ## 制約

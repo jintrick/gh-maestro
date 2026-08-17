@@ -86,9 +86,7 @@ git -C $WORKSPACE show <commit-hash>
 ## 調査しても情報が見つからない場合
 
 ```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" --stdin <<'EOF'
-調査完了。【わかったこと】<絞り込めた範囲> 【見つからなかったこと】<調査したが見つからなかった項目> 【次の手がかり候補】<あれば>
-EOF
+node "{{SCRIPTS_PATH}}/msg-send.js" --body-file <報告本文ファイルのパス>
 ```
 
 ## 制約
