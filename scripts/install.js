@@ -309,9 +309,137 @@ function installSkills(agents, options = {}) {
   }
 }
 
+/**
+ * scripts/ を集約先ディレクトリにミラーし、agents.yaml もコピーする。
+ * @param {object} [options]
+ * @param {string} [options.scriptsDir] スキル原本ディレクトリ（既定: scripts/）
+ * @param {string} [options.sharedScripts] 集約先スクリプトディレクトリ（既定: SHARED_SCRIPTS）
+ * @param {string} [options.agentsYaml] agents.yaml パス（既定: skills/agents.yaml）
+ * @param {function} [options.step] ログ用 step 関数
+ * @param {function} [options.ok] ログ用 ok 関数
+ */
+function installScripts(options = {}) {
+  const srcDir = options.scriptsDir || path.join(ROOT, 'scripts');
+  const destDir = options.sharedScripts || (typeof SHARED_SCRIPTS !== 'undefined' ? SHARED_SCRIPTS : '/dummy/scripts');
+  const agentsYamlPath = options.agentsYaml || AGENTS_YAML;
+  const logStep = options.step || step;
+  const logOk = options.ok || ok;
+
+  logStep('Installing all scripts into the shared directory...');
+  fs.mkdirSync(destDir, { recursive: true });
+
+  const INSTALL_EXCLUDE = new Set(['install.js']);
+  const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  const scriptFiles = entries
+    .filter(e => e.isFile() && (e.name.endsWith('.js') || e.name.endsWith('.md') || e.name.endsWith('.json')) && !INSTALL_EXCLUDE.has(e.name))
+    .map(e => e.name);
+  // サブディレクトリ（scripts/shared/ 等）も 1:1 でミラーする。
+  // これがないと shared/ を require するスクリプト（msg-send.js 等）が配布先で MODULE_NOT_FOUND になる。
+  const scriptSubdirs = entries.filter(e => e.isDirectory()).map(e => e.name);
+
+  // stale 削除: scripts/ に無いファイル・ディレクトリを集約先から除去する
+  // 'agents.yaml' は scripts/ 配下ではなく skills/agents.yaml からの配布分（下記参照）のため、
+  // scriptFiles の走査には含まれないが stale 削除対象からは除外する必要がある。
+  const expectedFiles = new Set([...scriptFiles, 'agents.yaml']);
+  const expectedDirs = new Set(scriptSubdirs);
+  for (const entry of fs.readdirSync(destDir, { withFileTypes: true })) {
+    const p = path.join(destDir, entry.name);
+    if (entry.isFile() && !expectedFiles.has(entry.name)) {
+      fs.unlinkSync(p);
+      logOk(`removed stale script: ${entry.name}`);
+    } else if (entry.isDirectory() && !expectedDirs.has(entry.name)) {
+      fs.rmSync(p, { recursive: true, force: true });
+      logOk(`removed stale script dir: ${entry.name}`);
+    }
+  }
+  for (const f of scriptFiles) {
+    fs.copyFileSync(path.join(srcDir, f), path.join(destDir, f));
+  }
+  for (const d of scriptSubdirs) {
+    const destSubdir = path.join(destDir, d);
+    // 型不一致（旧バージョンではファイル→新バージョンではディレクトリ、またはその逆）による
+    // fs.cpSync の ENOENT クラッシュを防ぐため、コピー先サブディレクトリを事前に除去する。
+    if (fs.existsSync(destSubdir)) {
+      fs.rmSync(destSubdir, { recursive: true, force: true });
+    }
+    fs.cpSync(path.join(srcDir, d), destSubdir, { recursive: true });
+  }
+  logOk(`${scriptFiles.length} scripts + ${scriptSubdirs.length} subdir(s) -> ${destDir}`);
+
+  // skills/agents.yaml も SHARED_SCRIPTS に配布する（単純コピー、値の変換・再計算はしない）。
+  // spawn-assistant.js 等ランタイム側が「agentIdに対応するSKILL.mdの実インストール先」を実行時に
+  // 解決するために必要（skills/agents.yaml 自体は従来 install.js 実行時にしか読まれず、
+  // ~/.gh-maestro/ 配下には一切配布されていなかった）。SSOTは引き続き skills/agents.yaml。
+  if (fs.existsSync(agentsYamlPath)) {
+    fs.copyFileSync(agentsYamlPath, path.join(destDir, 'agents.yaml'));
+    logOk(`agents.yaml -> ${path.join(destDir, 'agents.yaml')}`);
+  }
+}
+
+/**
+ * 共有スキルを共有ディレクトリ（~/.gh-maestro/skills/）にデプロイする。
+ * @param {object} agents parseAgentsYaml() の戻り値
+ * @param {object} [options]
+ * @param {string} [options.skillsDir] スキル原本ディレクトリ（既定: SKILLS_DIR）
+ * @param {string} [options.sharedSkills] 共有スキルディレクトリ（既定: SHARED_SKILLS）
+ * @param {string} [options.sharedScripts] 共有スクリプトパス
+ * @param {function} [options.step] ログ用 step 関数
+ * @param {function} [options.ok] ログ用 ok 関数
+ */
+function installSharedSkills(agents, options = {}) {
+  const skillsDir = options.skillsDir || SKILLS_DIR;
+  const sharedSkills = options.sharedSkills || (typeof SHARED_SKILLS !== 'undefined' ? SHARED_SKILLS : '/dummy/skills');
+  const sharedScripts = options.sharedScripts || (typeof SHARED_SCRIPTS !== 'undefined' ? SHARED_SCRIPTS : '/dummy/scripts');
+  const logStep = options.step || step;
+  const logOk = options.ok || ok;
+
+  logStep('Installing shared skill files into ~/.gh-maestro/skills/...');
+  fs.mkdirSync(sharedSkills, { recursive: true });
+
+  const skillDirs = fs.readdirSync(skillsDir, { withFileTypes: true })
+    .filter(e => e.isDirectory() && !e.name.startsWith('_'))
+    .map(e => e.name);
+
+  const COMMUNICATION_RULES_CONTENT = readPartial('communication-rules.md');
+  const CODER_WORKFLOW_CONTENT = readPartial('coder-workflow.md');
+  const COMMENTS_AND_NAMING_CONTENT = readPartial('comments-and-naming.md');
+
+  const canonicalAgent = agents && (agents['claude'] || agents[Object.keys(agents)[0]]);
+  const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {}, {
+    SCRIPTS_PATH: sharedScripts,
+    SHARED_SKILLS_PATH: sharedSkills,
+    RULES_CHECK_STEP: '',
+    COMMUNICATION_RULES: COMMUNICATION_RULES_CONTENT,
+    CODER_WORKFLOW: CODER_WORKFLOW_CONTENT,
+    COMMENTS_AND_NAMING: COMMENTS_AND_NAMING_CONTENT,
+  });
+
+  // stale 削除（ディレクトリと未知ファイルの両方）
+  for (const entry of fs.readdirSync(sharedSkills, { withFileTypes: true })) {
+    if (entry.isDirectory() && !skillDirs.includes(entry.name)) {
+      fs.rmSync(path.join(sharedSkills, entry.name), { recursive: true, force: true });
+      logOk(`removed stale shared skill: ${entry.name}`);
+    } else if (entry.isFile()) {
+      fs.unlinkSync(path.join(sharedSkills, entry.name));
+      logOk(`removed stray file in shared skills: ${entry.name}`);
+    }
+  }
+  for (const skill of skillDirs) {
+    const templatePath = path.join(skillsDir, skill, 'SKILL.md');
+    if (!fs.existsSync(templatePath)) continue;
+    const destSkillDir = path.join(sharedSkills, skill);
+    fs.mkdirSync(destSkillDir, { recursive: true });
+    const template = fs.readFileSync(templatePath, 'utf8');
+    fs.writeFileSync(path.join(destSkillDir, 'SKILL.md'), applySubstitutions(template, sharedSubstitutions), 'utf8');
+    copySkillAssets(path.join(skillsDir, skill), destSkillDir, sharedSubstitutions);
+    logOk(`${skill} -> ${destSkillDir} (shared)`);
+  }
+}
+
 module.exports = {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
   buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
+  installScripts, installSharedSkills,
 };
 
 if (require.main !== module) return;
@@ -425,55 +553,13 @@ installSkills(agents, {
 // リポジトリの scripts/ が、インストール先 ~/.gh-maestro/scripts/ と1:1で対応する。
 // CLIスクリプトもモジュール(link-node-modules等)も全て scripts/ に同居しているため、
 // 各スクリプトの require('./xxx') がリポジトリ実行・インストール先実行の両方で解決する。
-
-step('Installing all scripts into the shared directory...');
-fs.mkdirSync(SHARED_SCRIPTS, { recursive: true });
-
-const INSTALL_EXCLUDE = new Set(['install.js']);
-const scriptsDir = path.join(ROOT, 'scripts');
-const entries = fs.readdirSync(scriptsDir, { withFileTypes: true });
-const scriptFiles = entries
-  .filter(e => e.isFile() && (e.name.endsWith('.js') || e.name.endsWith('.md') || e.name.endsWith('.json')) && !INSTALL_EXCLUDE.has(e.name))
-  .map(e => e.name);
-// サブディレクトリ（scripts/shared/ 等）も 1:1 でミラーする。
-// これがないと shared/ を require するスクリプト（msg-send.js 等）が配布先で MODULE_NOT_FOUND になる。
-const scriptSubdirs = entries.filter(e => e.isDirectory()).map(e => e.name);
-
-// stale 削除: scripts/ に無いファイル・ディレクトリを集約先から除去する
-// 'agents.yaml' は scripts/ 配下ではなく skills/agents.yaml からの配布分（下記参照）のため、
-// scriptFiles の走査には含まれないが stale 削除対象からは除外する必要がある。
-const expectedFiles = new Set([...scriptFiles, 'agents.yaml']);
-const expectedDirs = new Set(scriptSubdirs);
-for (const entry of fs.readdirSync(SHARED_SCRIPTS, { withFileTypes: true })) {
-  const p = path.join(SHARED_SCRIPTS, entry.name);
-  if (entry.isFile() && !expectedFiles.has(entry.name)) {
-    fs.unlinkSync(p);
-    ok(`removed stale script: ${entry.name}`);
-  } else if (entry.isDirectory() && !expectedDirs.has(entry.name)) {
-    fs.rmSync(p, { recursive: true, force: true });
-    ok(`removed stale script dir: ${entry.name}`);
-  }
-}
-for (const f of scriptFiles) {
-  fs.copyFileSync(path.join(scriptsDir, f), path.join(SHARED_SCRIPTS, f));
-}
-for (const d of scriptSubdirs) {
-  const destSubdir = path.join(SHARED_SCRIPTS, d);
-  // 型不一致（旧バージョンではファイル→新バージョンではディレクトリ、またはその逆）による
-  // fs.cpSync の ENOENT クラッシュを防ぐため、コピー先サブディレクトリを事前に除去する。
-  if (fs.existsSync(destSubdir)) {
-    fs.rmSync(destSubdir, { recursive: true, force: true });
-  }
-  fs.cpSync(path.join(scriptsDir, d), destSubdir, { recursive: true });
-}
-ok(`${scriptFiles.length} scripts + ${scriptSubdirs.length} subdir(s) -> ${SHARED_SCRIPTS}`);
-
-// skills/agents.yaml も SHARED_SCRIPTS に配布する（単純コピー、値の変換・再計算はしない）。
-// spawn-assistant.js 等ランタイム側が「agentIdに対応するSKILL.mdの実インストール先」を実行時に
-// 解決するために必要（skills/agents.yaml 自体は従来 install.js 実行時にしか読まれず、
-// ~/.gh-maestro/ 配下には一切配布されていなかった）。SSOTは引き続き skills/agents.yaml。
-fs.copyFileSync(AGENTS_YAML, path.join(SHARED_SCRIPTS, 'agents.yaml'));
-ok(`agents.yaml -> ${path.join(SHARED_SCRIPTS, 'agents.yaml')}`);
+installScripts({
+  scriptsDir: path.join(ROOT, 'scripts'),
+  sharedScripts: SHARED_SCRIPTS,
+  agentsYaml: AGENTS_YAML,
+  step,
+  ok,
+});
 
 // ── 共有スキルを ~/.gh-maestro/skills/ にデプロイ ─────────────────────────────
 // 全エージェントがそれぞれのネイティブなスキル発見機構（skill_files_install_destination_directory）
@@ -481,39 +567,13 @@ ok(`agents.yaml -> ${path.join(SHARED_SCRIPTS, 'agents.yaml')}`);
 // ここで作る共有コピーは、orchestrator専用の非SKILL.mdアセット（issue-template.md等）を
 // 配布するためのものであり、orchestratorは常にClaude Code自身で動くため、置換にはclaude用
 // substitutionsを使う。
-step('Installing shared skill files into ~/.gh-maestro/skills/...');
-fs.mkdirSync(SHARED_SKILLS, { recursive: true });
-
-const canonicalAgent = agents['claude'] || agents[Object.keys(agents)[0]];
-const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {}, {
-  SCRIPTS_PATH: SHARED_SCRIPTS,
-  SHARED_SKILLS_PATH: SHARED_SKILLS,
-  RULES_CHECK_STEP: '',
-  COMMUNICATION_RULES: COMMUNICATION_RULES_CONTENT,
-  CODER_WORKFLOW: CODER_WORKFLOW_CONTENT,
-  COMMENTS_AND_NAMING: COMMENTS_AND_NAMING_CONTENT,
+installSharedSkills(agents, {
+  skillsDir: SKILLS_DIR,
+  sharedSkills: SHARED_SKILLS,
+  sharedScripts: SHARED_SCRIPTS,
+  step,
+  ok,
 });
-
-// stale 削除（ディレクトリと未知ファイルの両方）
-for (const entry of fs.readdirSync(SHARED_SKILLS, { withFileTypes: true })) {
-  if (entry.isDirectory() && !skillDirs.includes(entry.name)) {
-    fs.rmSync(path.join(SHARED_SKILLS, entry.name), { recursive: true, force: true });
-    ok(`removed stale shared skill: ${entry.name}`);
-  } else if (entry.isFile()) {
-    fs.unlinkSync(path.join(SHARED_SKILLS, entry.name));
-    ok(`removed stray file in shared skills: ${entry.name}`);
-  }
-}
-for (const skill of skillDirs) {
-  const templatePath = path.join(SKILLS_DIR, skill, 'SKILL.md');
-  if (!fs.existsSync(templatePath)) continue;
-  const destSkillDir = path.join(SHARED_SKILLS, skill);
-  fs.mkdirSync(destSkillDir, { recursive: true });
-  const template = fs.readFileSync(templatePath, 'utf8');
-  fs.writeFileSync(path.join(destSkillDir, 'SKILL.md'), applySubstitutions(template, sharedSubstitutions), 'utf8');
-  copySkillAssets(path.join(SKILLS_DIR, skill), destSkillDir, sharedSubstitutions);
-  ok(`${skill} -> ${destSkillDir} (shared)`);
-}
 
 // ── agents.json → config.json 移行 ──────────────────────────────────────────────
 // エージェント設定のSSOTは scripts/agent-defaults.json に移行した（Issue #41）。
