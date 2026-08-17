@@ -643,7 +643,7 @@ gh issue comment $PENDING_ISSUE --repo $REPO \
 
 過去PRを遡及して保留候補を探す場合は explorer ワーカーに委譲し、自分では手読みしない。
 
-保留Issueは終わりのないストックであり、クローズという概念がない。対応することが決まった項目は、保留Issueから**切り出して新規Issueを作成**し、コーダーへの実装指示はその新規Issueに対して行う。実装が完了しクローズされるのは常にこの切り出し先Issueであり、保留Issue自体を操作することはない。
+保留Issueは終わりのないストックであり、クローズという概念がない。対応することが決まった項目は、保留Issueから**切り出して新規Issueを作成**し、コーダーへの実装指示はその新規Issueに対して行う。実装が完了しクローズされるのは常にこの切り出し先Issueであり、保留Issue自体がクローズされることはない。
 
 切り出し先も通常のアンカーIssueなので、`gh issue create` を直接叩かない。唯一の呼び出し口は `create-issue.js`（「アセット」参照）——これを経由しないと切り出し先Issueにassistantが自動起動されない。
 
@@ -661,9 +661,12 @@ CREATE_OUTPUT=$(node "{{SCRIPTS_PATH}}/create-issue.js" \
   --repo $REPO --workspace $WORKSPACE)
 NEW_ISSUE=$(echo "$CREATE_OUTPUT" | sed -n 's/^ISSUE_CREATED:\([0-9]*\).*/\1/p')
 
-# 保留Issue側には、切り出し済みである旨をコメントで残す（削除はしない）
-gh issue comment $PENDING_ISSUE --repo $REPO \
-  --body "[切り出し済み → #$NEW_ISSUE] <path>:<line> — <内容>"
+# 保留Issue側は、元の[保留]コメント自体を検索して直接書き換える（新規コメントは作らない・削除もしない）
+PENDING_COMMENT_ID=$(gh api "repos/$REPO/issues/$PENDING_ISSUE/comments" --paginate \
+  --jq '.[] | select(.body == "[保留] <path>:<line> — <内容>") | .id')
+# 該当コメントが1件に一意特定できない場合（0件・複数件）は書き換えず人間に確認する
+gh api "repos/$REPO/issues/comments/$PENDING_COMMENT_ID" -X PATCH \
+  -f body="[切り出し済み → #$NEW_ISSUE] <path>:<line> — <内容>"
 ```
 
 コーダーへの実装指示・PR作成は `$NEW_ISSUE` に対して行い、そのIssueが実装完了時にクローズされる（通常のIssue対応フローと同じ）。`$WORKSPACE/.gh-maestro/pending-$PR` は次回セッションのキャッシュとして残してよく、削除しない。
