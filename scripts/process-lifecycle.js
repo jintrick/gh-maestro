@@ -459,6 +459,9 @@ function verifyProcessIdentity(pid, registeredMeta) {
  * @param {object} opts
  * @param {string} opts.script       スクリプト名（例: "msg-poll.js"）
  * @param {string|null} opts.workerName  worker名。orchestrator モードは null を渡す
+ * @param {boolean} [opts.failOnReadError=false] true の場合、registry ディレクトリ・個別
+ *   エントリの読み取りまたはJSON解析に失敗したら throw する。ディレクトリ自体が無い場合は
+ *   「エントリなし」として null を返す。
  * @returns {object|null} 一致する生存エントリ（最初の1件）、無ければ null
  */
 function findRunningInstance(workspace, opts = {}) {
@@ -468,12 +471,15 @@ function findRunningInstance(workspace, opts = {}) {
   const seenPids = new Set();
 
   for (const dir of dirs) {
-    if (!fs.existsSync(dir)) continue;
-
     let files;
     try {
       files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
-    } catch {
+    } catch (e) {
+      // registry がまだ作られていない状態は「対象なし」であり、読み取り失敗ではない。
+      if (e.code === 'ENOENT') continue;
+      if (opts.failOnReadError) {
+        throw new Error(`PID registry ディレクトリを読み取れません: ${dir}: ${e.message}`, { cause: e });
+      }
       continue;
     }
 
@@ -481,7 +487,10 @@ function findRunningInstance(workspace, opts = {}) {
       let entry;
       try {
         entry = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
-      } catch {
+      } catch (e) {
+        if (opts.failOnReadError) {
+          throw new Error(`PID registry エントリを読み取れません: ${path.join(dir, file)}: ${e.message}`, { cause: e });
+        }
         continue;
       }
       if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
@@ -987,7 +996,7 @@ function main(argv = process.argv.slice(2)) {
     const workerName = values['--worker-name'] ?? null;
     let entry;
     try {
-      entry = findRunningInstance(workspace, { script, workerName });
+      entry = findRunningInstance(workspace, { script, workerName, failOnReadError: true });
     } catch (e) {
       writeErr(`process-lifecycle: status の照会に失敗しました: ${e.message}`);
       return { code: 1, lines: out, errLines: err };

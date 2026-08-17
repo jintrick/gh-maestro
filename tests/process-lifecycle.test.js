@@ -1183,6 +1183,15 @@ function createStatusWorkspace() {
   return { ws, pidsDir };
 }
 
+function createBrokenStatusWorkspace() {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-status-cli-broken-'));
+  const runtimeDir = storageLayout.workspaceRuntimeDir(ws);
+  const pidsDir = path.join(runtimeDir, 'pids');
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.writeFileSync(pidsDir, 'not a directory');
+  return { ws, pidsDir };
+}
+
 function removeStatusWorkspace(ws) {
   try { fs.rmSync(storageLayout.workspaceRuntimeDir(ws), { recursive: true, force: true }); } catch {}
   try { fs.rmSync(ws, { recursive: true, force: true }); } catch {}
@@ -1219,6 +1228,34 @@ test('status: workspace を解決できない場合はエラー終了する', ()
   assert.equal(r.status, 1);
   assert.equal(r.stdout, '');
   assert.match(r.stderr, /ワークスペースを解決できません/);
+});
+
+test('status: PID registry ディレクトリの読み取り失敗は running:false に握り潰さずエラー終了する', () => {
+  const { ws } = createBrokenStatusWorkspace();
+  try {
+    const r = runCli(['status', '--workspace', ws, '--script', 'msg-poll.js']);
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout, '');
+    assert.match(r.stderr, /status の照会に失敗しました/);
+    assert.match(r.stderr, /PID registry ディレクトリ/);
+  } finally {
+    removeStatusWorkspace(ws);
+  }
+});
+
+test('status: 個別PID registryエントリのJSON解析失敗は running:false に握り潰さずエラー終了する', () => {
+  const { ws, pidsDir } = createStatusWorkspace();
+  try {
+    fs.writeFileSync(path.join(pidsDir, 'broken.json'), '{ invalid json');
+
+    const r = runCli(['status', '--workspace', ws, '--script', 'msg-poll.js']);
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout, '');
+    assert.match(r.stderr, /status の照会に失敗しました/);
+    assert.match(r.stderr, /PID registry エントリ/);
+  } finally {
+    removeStatusWorkspace(ws);
+  }
 });
 
 test('status: 停止したPID registryエントリは running:false として一意に判定する', () => {
