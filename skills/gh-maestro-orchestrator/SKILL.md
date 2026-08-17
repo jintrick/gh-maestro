@@ -112,7 +112,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - **msg-read.js** — コメントIDから本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE`
 - **remove-worker.js** — 個別ワーカーのプロセスをkillしてworktreeを削除する。対象は〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する。ライフサイクル終了後の情報価値のない内部状態（`assistant-watch/<N>.json`・対象PRの`review-manager-<PR>.incomplete`・`executions.json`の当該issueレコード）もbest-effortで後始末する
-- **start-review-manager.js** — PRにReview Managerを起動する（**位置引数**: `start-review-manager.js $PR $REPO $WORKSPACE $ISSUE`。詳細は`inbox-recovery.md`の「PR監視・Review Managerの再起動」参照）
+- **start-review-manager.js** — PRにReview Managerを起動する（**位置引数**: `start-review-manager.js $PR $REPO $WORKSPACE $ISSUE`。詳細は`monitor-recovery.md`の「PR監視・Review Managerの再起動」参照）
 - **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）。既読の正本は明示既読コメントID集合（Issue #207）。**msg-state が欠落・破損・旧形式・未初期化の場合、走査を停止し「reset-session.js での初期化が必要」と報告する**
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「PR検出」参照）
 - **process-lifecycle.js** — PID registryを走査しstaleなプロセスを掃除する（各「復旧手順」参照）
@@ -410,7 +410,7 @@ pull が唯一の配送根拠である。届くのを待つ受動的な経路は
 
 **この inbox 監視（`msg-poll.js orchestrator`）はセッション中に最初の1回だけ起動する。** 以後、待ちたい相手や場面（PR検出・レビュー監視・ワーカー起動待ち・本番公開（CI/CD）確認・反省会での応答待ちなど）が変わっても、新しいMonitorを起動し直さず、既存の1本をそのまま使い回す。ただしこの1本が死んだ場合は別で、自動復活機構は存在しないため、アラームを受けたらorchestrator自身がMonitorで起動し直す。
 
-**沈黙は「まだ来ていない」の証拠ではない。** このプロセスは親セッション死亡検知（dead-man's switch）で `exit 3` で自滅し、自滅の経路では lease 解放・watchdog の専用通知・Monitor の異常終了（FAILED）で表面化する（クラッシュ・強制終了の場合は通知は鳴らない。また自動復活機構は存在しない）。死のスイッチの判定は PID の再利用（起動時刻照合）にも正しく反応し、親セッションが死んだ後にその PID が別プロセスに使い回されていても居座り続けない。アラームを受けたら判断を挟まず Monitor で起動し直す。待っている相手の反応が無いと感じた時点で、待ち続けず `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/inbox-recovery.md` の「inbox監視の沈黙」を開くこと。**生死を `ps` や `inbox-supervisor-autostart.log` で判断してはならない**（あれは worker 配送を行う別プロセスであり、こちらが死んでいても正常に動き続ける）。
+**沈黙は「まだ来ていない」の証拠ではない。** このプロセスは親セッション死亡検知（dead-man's switch）で `exit 3` で自滅し、自滅の経路では lease 解放・watchdog の専用通知・Monitor の異常終了（FAILED）で表面化する（クラッシュ・強制終了の場合は通知は鳴らない。また自動復活機構は存在しない）。死のスイッチの判定は PID の再利用（起動時刻照合）にも正しく反応し、親セッションが死んだ後にその PID が別プロセスに使い回されていても居座り続けない。アラームを受けたら判断を挟まず Monitor で起動し直す。待っている相手の反応が無いと感じた時点で、待ち続けず `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` の「inbox監視の沈黙」を開くこと。**生死を `ps` や `inbox-supervisor-autostart.log` で判断してはならない**（あれは worker 配送を行う別プロセスであり、こちらが死んでいても正常に動き続ける）。
 
 まだ起動していなければ、Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" orchestrator --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。**このセクション以外の場所（「PR検出」「レビュー監視」等）で改めてこのコマンドを起動してはならない**。それらの節はこの1本の inbox 監視を通じて通知を受け取る前提で書かれている。
 
@@ -432,7 +432,7 @@ orchestrator が受け取るすべてのメッセージの受信経路である�
 
 ### 誤って複数起動してしまった場合の復旧手順（inbox監視）
 
-「重複しているかもしれない」と気づいた瞬間に片方を反射的に止めてはならない。復旧手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/inbox-recovery.md`の「inbox監視の重複復旧」を参照する。
+「重複しているかもしれない」と気づいた瞬間に片方を反射的に止めてはならない。復旧手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md`の「inbox監視の重複復旧」を参照する。
 
 ## worker への指示配送（Inbox Supervisor）
 
@@ -442,12 +442,12 @@ orchestrator から worker への追加指示（`msg-send.js` で送ったコメ
 
 ### 通知の種類と一次対応
 
-以下はワーカー・Inbox Supervisorから届く通知やマーカーの見分け方と一次対応。詳細な原因・復旧手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/inbox-recovery.md` を参照する。
+以下はワーカー・Inbox Supervisorから届く通知やマーカーの見分け方と一次対応。詳細な原因・復旧手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` を参照する。
 
 - **ワーカーの異常終了通知**（`⚠️ 起動失敗または異常終了: exit code <N>...`）: 終了フックが非ゼロ終了時に自動投稿する。そのワーカーは作業を完了できずに死んでいる。「まだ報告が来ないだけ」と待ち続けない。原因を切り分けて人間に伝える。
-- **監視プロセスの異常終了通知**（`⚠️ 監視プロセス <script> が異常終了しました（exit code <N>）...`）: 常駐監視（`msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）が非ゼロ終了したとき、プロセス自身が自動投稿する。その監視は停止している。「まだ何も来ないだけ」と待ち続けてはならない。どの監視が止まったかを確認し（`$WORKSPACE/.gh-maestro/pids/*.json`の`script`名で特定）、`poll-pr.js` / `poll-reviews.js` は `inbox-recovery.md` の再起動手順で再起動する。`msg-poll.js` は「自分の inbox の監視」の再起動規約に従う（アラーム→即再起動）。
-- **親セッション消滅による監視停止通知**（`監視プロセス <script> が親セッションの消滅を検出して自動終了しました（exit code 3）...`）: `msg-poll.js` / `inbox-supervisor.js` が親セッション死亡を検知して `exit 3` で自滅したときの専用通知。プロセスの不具合ではなく、オーケストレーターセッションの終了に追随する停止である。死のスイッチの判定は PID の再利用（起動時刻照合）にも正しく反応する（親セッションが死んだ後にその PID が別プロセスに使い回されていても居座らない）。監視は停止しているため、新しいセッションでは通常どおり起動する（inbox-supervisor は自動起動されるが、msg-poll は自動復活しないため自分で Monitor を起動する）。停止中の取りこぼし確認は `inbox-recovery.md` の「inbox監視の沈黙」参照。
-- **監視プロセスを張った Monitor の終了 = 異常のアラーム**: `poll-pr.js` / `poll-reviews.js` / `msg-poll.js` を張った Monitor が終了（exit 0 でない）したら、それは「監視が正常完了した」ことではなく、**監視プロセスの異常終了のアラーム**である。`PR_MERGED` / `PR_CLOSED` を読んで終了したときだけ、意図した終了として扱う。それ以外の終了（特に exit code 非ゼロ）を見落とすと、監視が止まったまま誰にも気づかれない。受信したら、対応する監視プロセスが停止していないか・その監視対象の機能が動いているかを確認する（手順は `inbox-recovery.md` の「監視プロセスの異常死」を参照）。
+- **監視プロセスの異常終了通知**（`⚠️ 監視プロセス <script> が異常終了しました（exit code <N>）...`）: 常駐監視（`msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）が非ゼロ終了したとき、プロセス自身が自動投稿する。その監視は停止している。「まだ何も来ないだけ」と待ち続けてはならない。どの監視が止まったかを確認し（`$WORKSPACE/.gh-maestro/pids/*.json`の`script`名で特定）、`poll-pr.js` / `poll-reviews.js` は `monitor-recovery.md` の再起動手順で再起動する。`msg-poll.js` は「自分の inbox の監視」の再起動規約に従う（アラーム→即再起動）。
+- **親セッション消滅による監視停止通知**（`監視プロセス <script> が親セッションの消滅を検出して自動終了しました（exit code 3）...`）: `msg-poll.js` / `inbox-supervisor.js` が親セッション死亡を検知して `exit 3` で自滅したときの専用通知。プロセスの不具合ではなく、オーケストレーターセッションの終了に追随する停止である。死のスイッチの判定は PID の再利用（起動時刻照合）にも正しく反応する（親セッションが死んだ後にその PID が別プロセスに使い回されていても居座らない）。監視は停止しているため、新しいセッションでは通常どおり起動する（inbox-supervisor は自動起動されるが、msg-poll は自動復活しないため自分で Monitor を起動する）。停止中の取りこぼし確認は `monitor-recovery.md` の「inbox監視の沈黙」参照。
+- **監視プロセスを張った Monitor の終了 = 異常のアラーム**: `poll-pr.js` / `poll-reviews.js` / `msg-poll.js` を張った Monitor が終了（exit 0 でない）したら、それは「監視が正常完了した」ことではなく、**監視プロセスの異常終了のアラーム**である。`PR_MERGED` / `PR_CLOSED` を読んで終了したときだけ、意図した終了として扱う。それ以外の終了（特に exit code 非ゼロ）を見落とすと、監視が止まったまま誰にも気づかれない。受信したら、対応する監視プロセスが停止していないか・その監視対象の機能が動いているかを確認する（手順は `monitor-recovery.md` の「監視プロセスの異常死」を参照）。
 - **配送断念の通知**（`⚠️ ワーカー "<name>" へのメッセージ配送に5回失敗し断念しました...`）: resume配送が5回リトライしても失敗したことをInbox Supervisor自身が通知する。上記と同様、そのワーカーは作業を完了できていない。
 - **自動代理送信のマーカー**（本文冒頭の`⚠️ [自動代理送信: ...]`）: ワーカーが`msg-send.js`の呼び出しを忘れただけで、内容自体は正しく応答できている。そのまま内容を評価してよい。
 - **ワーカーの実行ログ**（`$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log`）: 既定では読まない。上記の異常終了通知・配送断念通知を受けて原因を切り分けるとき、またはワーカーが長時間無反応で生死を確認したいときだけ`Read`で読む。
@@ -478,13 +478,13 @@ PR検出時の出力:
 PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`msg-send.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
 **通常コーダー（gh-maestro-coder）が実装に失敗してエスカレーションされた場合、人間が承認した段階で上位のシニアコーダー（gh-maestro-senior-coder）を適用して再起動することを検討せよ。**
 
-**`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、`inbox-recovery.md`の「PR監視・Review Managerの再起動」に従って自分で起動すること。
+**`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、`monitor-recovery.md`の「PR監視・Review Managerの再起動」に従って自分で起動すること。
 
-**Review Managerが起動直後または実行中にクラッシュした場合、通常ワーカーと同じ`⚠️ 起動失敗または異常終了: exit code <N>...`という`NEW_MESSAGE`が自分のinboxに届く**（`from`が`issue-<N>-review-manager-pr-<PR>`という名前になる。通常ワーカーの異常終了通知と同じ経路・同じ処理でよい）。これを受け取ったら、poll-pr.js自体は生きたままPR/レビュー監視を継続しているため慌てて再起動する必要はないが、「まだレビューが来ないだけ」と誤解して待ち続けてもいけない。`$WORKSPACE/.gh-maestro/worker-logs/issue-<N>-review-manager-pr-<PR>.log` で原因を確認し（`<N>`はcrash通知の`from`に含まれるIssue番号）、人間に報告した上で、原因を解消してから`inbox-recovery.md`の「PR監視・Review Managerの再起動」で仕切り直す（`poll-pr.js`自体の再起動は不要）。
+**Review Managerが起動直後または実行中にクラッシュした場合、通常ワーカーと同じ`⚠️ 起動失敗または異常終了: exit code <N>...`という`NEW_MESSAGE`が自分のinboxに届く**（`from`が`issue-<N>-review-manager-pr-<PR>`という名前になる。通常ワーカーの異常終了通知と同じ経路・同じ処理でよい）。これを受け取ったら、poll-pr.js自体は生きたままPR/レビュー監視を継続しているため慌てて再起動する必要はないが、「まだレビューが来ないだけ」と誤解して待ち続けてもいけない。`$WORKSPACE/.gh-maestro/worker-logs/issue-<N>-review-manager-pr-<PR>.log` で原因を確認し（`<N>`はcrash通知の`from`に含まれるIssue番号）、人間に報告した上で、原因を解消してから`monitor-recovery.md`の「PR監視・Review Managerの再起動」で仕切り直す（`poll-pr.js`自体の再起動は不要）。
 
 ### PR監視・Review Managerの再起動が必要なとき
 
-Monitorが落ちた場合の`poll-pr.js`再起動、Review Managerが起動しなかった／失敗した場合の再起動は、いずれも `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/inbox-recovery.md` の「PR監視・Review Managerの再起動」を参照する。**再レビューが不要な場合は`poll-pr.js`に`--no-review-manager`を付けること**（付け忘れると検出のたびにレビューが蒸し返されquotaを浪費する）。
+Monitorが落ちた場合の`poll-pr.js`再起動、Review Managerが起動しなかった／失敗した場合の再起動は、いずれも `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` の「PR監視・Review Managerの再起動」を参照する。**再レビューが不要な場合は`poll-pr.js`に`--no-review-manager`を付けること**（付け忘れると検出のたびにレビューが蒸し返されquotaを浪費する）。
 
 ## レビュー監視
 
