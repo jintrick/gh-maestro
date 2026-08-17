@@ -81,6 +81,53 @@ test('installSkills: 複数宛先（dests配列）を持つエージェントで
   }
 });
 
+test('installSkills / installScripts / installSharedSkills: options省略時でもTDZエラーを起こさずSHARED_SCRIPTS等のデフォルト値を使う', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-default-opts-test-'));
+  const destDir = path.join(tmpBase, 'test-agent-skills');
+
+  try {
+    const testAgents = {
+      testAgent: {
+        dests: [destDir],
+        substitutions: {},
+      },
+    };
+
+    // options 省略（または空オブジェクト）で呼び出しても TDZ ReferenceError が発生しないこと
+    assert.doesNotThrow(() => {
+      installSkills(testAgents, { step: () => {}, ok: () => {} });
+    });
+
+    const coderSkillMd = path.join(destDir, 'gh-maestro-coder', 'SKILL.md');
+    assert.ok(fs.existsSync(coderSkillMd), 'installSkills がデフォルト設定で成果物を生成できること');
+    const coderContent = fs.readFileSync(coderSkillMd, 'utf8');
+    const defaultSharedScripts = path.join(expandHome('~/.gh-maestro'), 'scripts');
+    assert.ok(
+      coderContent.includes(defaultSharedScripts),
+      'options.sharedScripts 省略時に SHARED_SCRIPTS がデフォルト値として使われること'
+    );
+
+    const orchestratorSkillMd = path.join(destDir, 'gh-maestro-orchestrator', 'SKILL.md');
+    assert.ok(fs.existsSync(orchestratorSkillMd), 'gh-maestro-orchestrator/SKILL.md が生成されていること');
+    const orchestratorContent = fs.readFileSync(orchestratorSkillMd, 'utf8');
+    const defaultSharedSkills = path.join(expandHome('~/.gh-maestro'), 'skills');
+    assert.ok(
+      orchestratorContent.includes(defaultSharedSkills),
+      'options.sharedSkills 省略時に SHARED_SKILLS がデフォルト値として使われること'
+    );
+
+    // installScripts / installSharedSkills も options 省略で TDZ エラーなく実行できること
+    assert.doesNotThrow(() => {
+      installScripts({ sharedScripts: path.join(tmpBase, 'scripts'), step: () => {}, ok: () => {} });
+    });
+    assert.doesNotThrow(() => {
+      installSharedSkills(testAgents, { sharedSkills: path.join(tmpBase, 'skills'), step: () => {}, ok: () => {} });
+    });
+  } finally {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
 test('parseAgentsYaml: エージェントとdestを正しく読む', () => {
   const yaml = `
 agents:

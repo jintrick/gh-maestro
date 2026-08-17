@@ -222,21 +222,39 @@ function quarantineLegacyHomePids(legacyHomePidsDir, quarantineDir) {
   return { ok: errors.length === 0, migrated, errors };
 }
 
+// ~/.gh-maestro/ は gh-maestro 専用ディレクトリ。install が書いたものだけを残し、
+// それ以外（旧バージョンの遺産）は最後に prune で除去する。
+// 「書いた＝残す」を保証するため、ここ配下のパスは必ず ghMaestroPath() で組み立てる。
+// パスを作る行為がそのままトップレベル名を keep に記録するので、登録し忘れる余地が無い。
+const ghMaestroDir = expandHome('~/.gh-maestro');
+const ghMaestroKeep = new Set();
+function ghMaestroPath(...segs) {
+  // Issue #214: 未宣言のトップレベル名（登録漏れ・実行時状態の誤混入）を早期に検知する。
+  assertManagedTopLevelName(segs[0]);
+  ghMaestroKeep.add(segs[0]);
+  return path.join(ghMaestroDir, ...segs);
+}
+
+// 全スクリプト（CLI・モジュール）を集約する単一ディレクトリ。
+// SKILL.md からは {{SCRIPTS_PATH}} がこの絶対パスに置換されて参照される。
+const SHARED_SCRIPTS = ghMaestroPath('scripts');
+const SHARED_SKILLS = ghMaestroPath('skills');
+
 /**
  * 各エージェントのスキルディレクトリに SKILL.md およびアセットを配置する。
  * @param {object} agents parseAgentsYaml() の戻り値
  * @param {object} [options]
  * @param {string} [options.skillsDir] スキル原本ディレクトリ（既定: SKILLS_DIR）
- * @param {string} [options.sharedScripts] 共有スクリプトパス
- * @param {string} [options.sharedSkills] 共有スキルパス
+ * @param {string} [options.sharedScripts] 共有スクリプトパス（既定: SHARED_SCRIPTS）
+ * @param {string} [options.sharedSkills] 共有スキルパス（既定: SHARED_SKILLS）
  * @param {Map} [options.rulesSupportedMap]
  * @param {function} [options.step] ログ用 step 関数
  * @param {function} [options.ok] ログ用 ok 関数
  */
 function installSkills(agents, options = {}) {
   const skillsDir = options.skillsDir || SKILLS_DIR;
-  const sharedScripts = options.sharedScripts || (typeof SHARED_SCRIPTS !== 'undefined' ? SHARED_SCRIPTS : '/dummy/scripts');
-  const sharedSkills = options.sharedSkills || (typeof SHARED_SKILLS !== 'undefined' ? SHARED_SKILLS : '/dummy/skills');
+  const sharedScripts = options.sharedScripts || SHARED_SCRIPTS;
+  const sharedSkills = options.sharedSkills || SHARED_SKILLS;
   const rulesMap = options.rulesSupportedMap || new Map();
   const logStep = options.step || step;
   const logOk = options.ok || ok;
@@ -320,7 +338,7 @@ function installSkills(agents, options = {}) {
  */
 function installScripts(options = {}) {
   const srcDir = options.scriptsDir || path.join(ROOT, 'scripts');
-  const destDir = options.sharedScripts || (typeof SHARED_SCRIPTS !== 'undefined' ? SHARED_SCRIPTS : '/dummy/scripts');
+  const destDir = options.sharedScripts || SHARED_SCRIPTS;
   const agentsYamlPath = options.agentsYaml || AGENTS_YAML;
   const logStep = options.step || step;
   const logOk = options.ok || ok;
@@ -382,14 +400,14 @@ function installScripts(options = {}) {
  * @param {object} [options]
  * @param {string} [options.skillsDir] スキル原本ディレクトリ（既定: SKILLS_DIR）
  * @param {string} [options.sharedSkills] 共有スキルディレクトリ（既定: SHARED_SKILLS）
- * @param {string} [options.sharedScripts] 共有スクリプトパス
+ * @param {string} [options.sharedScripts] 共有スクリプトパス（既定: SHARED_SCRIPTS）
  * @param {function} [options.step] ログ用 step 関数
  * @param {function} [options.ok] ログ用 ok 関数
  */
 function installSharedSkills(agents, options = {}) {
   const skillsDir = options.skillsDir || SKILLS_DIR;
-  const sharedSkills = options.sharedSkills || (typeof SHARED_SKILLS !== 'undefined' ? SHARED_SKILLS : '/dummy/skills');
-  const sharedScripts = options.sharedScripts || (typeof SHARED_SCRIPTS !== 'undefined' ? SHARED_SCRIPTS : '/dummy/scripts');
+  const sharedSkills = options.sharedSkills || SHARED_SKILLS;
+  const sharedScripts = options.sharedScripts || SHARED_SCRIPTS;
   const logStep = options.step || step;
   const logOk = options.ok || ok;
 
@@ -519,24 +537,6 @@ const RULES_CHECK_STEP_CONTENT = readPartial('rules-check-step.md');
 const COMMUNICATION_RULES_CONTENT = readPartial('communication-rules.md');
 const CODER_WORKFLOW_CONTENT = readPartial('coder-workflow.md');
 const COMMENTS_AND_NAMING_CONTENT = readPartial('comments-and-naming.md');
-
-// ~/.gh-maestro/ は gh-maestro 専用ディレクトリ。install が書いたものだけを残し、
-// それ以外（旧バージョンの遺産）は最後に prune で除去する。
-// 「書いた＝残す」を保証するため、ここ配下のパスは必ず ghMaestroPath() で組み立てる。
-// パスを作る行為がそのままトップレベル名を keep に記録するので、登録し忘れる余地が無い。
-const ghMaestroDir = expandHome('~/.gh-maestro');
-const ghMaestroKeep = new Set();
-function ghMaestroPath(...segs) {
-  // Issue #214: 未宣言のトップレベル名（登録漏れ・実行時状態の誤混入）を早期に検知する。
-  assertManagedTopLevelName(segs[0]);
-  ghMaestroKeep.add(segs[0]);
-  return path.join(ghMaestroDir, ...segs);
-}
-
-// 全スクリプト（CLI・モジュール）を集約する単一ディレクトリ。
-// SKILL.md からは {{SCRIPTS_PATH}} がこの絶対パスに置換されて参照される。
-const SHARED_SCRIPTS = ghMaestroPath('scripts');
-const SHARED_SKILLS = ghMaestroPath('skills');
 
 // ── 各エージェントのスキルディレクトリに SKILL.md のみを配置 ──────────────────
 // スクリプトはスキルdirには置かず、すべて SHARED_SCRIPTS に集約する（下の共有install参照）。
