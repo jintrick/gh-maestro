@@ -69,7 +69,7 @@ function printUsage(stream) {
   stream.write('Progress markers (stdout):\n');
   stream.write('  COUNCIL_SESSION <id> / COUNCIL_WT_READY <path> / COUNCIL_PREFLIGHT_OK ... / COUNCIL_CREATED <url>\n');
   stream.write('  COUNCIL_INVEST_POSTED <true|false> / COUNCIL_PHASE_START <phase> / COUNCIL_PHASE_DONE <phase> <ok>/<total> absent=<n>\n');
-  stream.write('  COUNCIL_FINISHED 0 / COUNCIL_WT_REMOVED <path> / COUNCIL_STOPPED <phase> <reason>\n');
+  stream.write('  COUNCIL_FINISHED cleanupExit=<0|3> / COUNCIL_WT_REMOVED <path> / COUNCIL_STOPPED <phase> <reason>\n');
   stream.write('\n');
   stream.write('Exit codes:\n');
   stream.write('  0  完了（少なくとも1名成功で全フェーズ完走＋要約投稿済み・worktree片付け済み）\n');
@@ -883,8 +883,9 @@ async function runCouncilLocked({ opts, workspace, homedir, session, statePath }
     // resume 時は投稿済みコメントのチェックポイントを渡し、再投稿を防ぐ（review指摘 #1）
     finalized: state.finalize || null,
   });
-  process.stdout.write('COUNCIL_FINISHED 0\n');
-  return cleanupWorktree({ state, statePath, session, worktreeDir, workspace, exitCode: 0 });
+  const cleanupExit = cleanupWorktree({ state, statePath, session, worktreeDir, workspace, exitCode: 0 });
+  process.stdout.write(`COUNCIL_FINISHED cleanupExit=${cleanupExit}\n`);
+  return cleanupExit;
 }
 
 module.exports = {

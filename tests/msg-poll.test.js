@@ -716,8 +716,9 @@ test('orchestrator モード: 未処理の lock-denied/handoff-wait 監査イベ
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
 
     const residentAudit = require('../scripts/shared/resident-audit');
-    residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'inbox-supervisor', detail: { ownerPid: 111 } });
+    residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'inbox-supervisor', detail: { ownerPid: 111, reason: 'live-lease' } });
     residentAudit.recordResidentAuditEvent({ workspace, type: 'handoff-wait', role: 'msgpoll-orchestrator', detail: { ownerPid: 222 } });
+    residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'msgpoll-orchestrator', detail: { ownerPid: 333, reason: 'handoff-timeout' } });
 
     // 監査キューを消費できるのは role lease 保持モードのみ（--once は lease を取得せず、
     // 共有キューを読み取ると他プロセスと重複出力しうる。Issue #240 レビュー指摘）。
@@ -725,8 +726,9 @@ test('orchestrator モード: 未処理の lock-denied/handoff-wait 監査イベ
     assert.equal(r.code, 0);
     r.scanOnce();
 
-    assert.ok(r.lines.includes('LOCK_DENIED:inbox-supervisor:111'), `lines: ${JSON.stringify(r.lines)}`);
+    assert.ok(r.lines.includes('LOCK_DENIED:inbox-supervisor:111:live-lease'), `lines: ${JSON.stringify(r.lines)}`);
     assert.ok(r.lines.includes('HANDOFF_WAIT:msgpoll-orchestrator:222'), `lines: ${JSON.stringify(r.lines)}`);
+    assert.ok(r.lines.includes('LOCK_DENIED:msgpoll-orchestrator:333:handoff-timeout'), `lines: ${JSON.stringify(r.lines)}`);
     // 処理済み化（削除）されている
     assert.deepEqual(residentAudit.listUnprocessedResidentAuditEvents(workspace), []);
   });

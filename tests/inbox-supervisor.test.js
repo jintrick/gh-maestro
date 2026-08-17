@@ -940,7 +940,8 @@ describe('runOnce scan and deliver cycle', () => {
       r.runOnce();
 
       const lastLine = r.lines[r.lines.length - 1];
-      assert.ok(lastLine.includes('SCAN_END:0:0'), `Expected SCAN_END:0:0 but got: ${lastLine}`);
+      assert.equal(lastLine, 'SCAN_END:0:0 source=inbox-supervisor.js scope=worker-delivery-scan workers=0 detected=0 orchestrator-inbox=separate-msg-poll.js');
+      assert.equal(r.lines[0], 'SCAN_START source=inbox-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js');
     });
   });
 
@@ -1596,6 +1597,8 @@ describe('Hang detection', () => {
 
       assert.ok(r.lines.some(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')),
         `HANG_DETECTED が出力されること: ${r.lines.join('\n')}`);
+      assert.match(r.lines.find(l => l.startsWith('HANG_DETECTED:issue-5-fix:456')), / elapsed=\d+(秒|分\d+秒|時間\d+分\d+秒)$/,
+        'HANG_DETECTED にログ更新停止からの経過時間が含まれること');
 
       assert.equal(notifyCalls.length, 1, 'orchestratorへ1回通知');
       assert.ok(notifyCalls[0].body.includes('ハング'));
@@ -1694,7 +1697,7 @@ describe('Hang detection', () => {
       assert.equal(r.code, 0);
       r.runOnce();
 
-      assert.ok(r.lines.some(l => l === 'HANG_RESUMED:issue-5-fix'),
+      assert.ok(r.lines.some(l => l === 'HANG_RESUMED:issue-5-fix:456'),
         `HANG_RESUMED が出力されること: ${r.lines.join('\n')}`);
 
       const state = supervisor.readCursor(dir, 'issue-5-fix');
@@ -1998,7 +2001,7 @@ describe('Hang detection', () => {
       r.runOnce();
 
       // 実際にはログは動いていないので「復帰した」という報告は誤り
-      assert.ok(!r.lines.some(l => l === 'HANG_RESUMED:issue-5-fix'),
+      assert.ok(!r.lines.some(l => l.startsWith('HANG_RESUMED:issue-5-fix')),
         `新プロセスへの切り替わりをHANG_RESUMEDとして誤報しないこと: ${r.lines.join('\n')}`);
       assert.ok(!r.lines.some(l => l.startsWith('HANG_DETECTED')),
         `新プロセスはstartTimeが新しいため通知もされないこと: ${r.lines.join('\n')}`);
@@ -2084,7 +2087,7 @@ describe('Hang detection', () => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 居座り検知（Issue #263）: 既に報告済みなのにプロセスが生存し続けている異常を検知する。
-// ハング検知（ログ更新時刻ベース）とは独立の判定軸で、経過時間を一切使わない。
+// ハング検知（ログ更新時刻ベース）とは独立の判定軸で、判定条件に経過時間を使わない。
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('Stale report detection（居座り検知）', () => {
@@ -2123,6 +2126,8 @@ describe('Stale report detection（居座り検知）', () => {
 
       assert.ok(r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED:issue-5-fix:456')),
         `STALE_REPORT_DETECTED が出力されること: ${r.lines.join('\n')}`);
+      assert.match(r.lines.find(l => l.startsWith('STALE_REPORT_DETECTED:issue-5-fix:456')), / elapsed=\d+(秒|分\d+秒|時間\d+分\d+秒)$/,
+        'STALE_REPORT_DETECTED に報告投稿からの経過時間が含まれること');
       assert.equal(notifyCalls.length, 1, 'orchestratorへ1回通知');
       assert.ok(notifyCalls[0].body.includes('issue-5-fix'));
       assert.ok(notifyCalls[0].body.includes('456'));

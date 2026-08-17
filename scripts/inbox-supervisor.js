@@ -100,15 +100,15 @@ Options:
 
 Output (stdout):
   検出・配送イベントを1行ずつ出力:
-    SCAN_START
+    SCAN_START source=inbox-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js
     DETECTED:<workerName>:<commentId>
     DELIVERED:<workerName>:<commentId>
     DELIVERY_FAILED:<workerName>:<commentId>:<reason>
     RETRYING:<workerName>:<commentId>:<attempt>
-    HANG_DETECTED:<workerName>:<pid>
-    HANG_RESUMED:<workerName>
-    STALE_REPORT_DETECTED:<workerName>:<pid>
-    SCAN_END:<workers>:<detected>
+    HANG_DETECTED:<workerName>:<pid> elapsed=<duration>
+    HANG_RESUMED:<workerName>:<pid>
+    STALE_REPORT_DETECTED:<workerName>:<pid> elapsed=<duration>
+    SCAN_END:<workers>:<detected> source=inbox-supervisor.js scope=worker-delivery-scan workers=<workers> detected=<detected> orchestrator-inbox=separate-msg-poll.js
 
 Description:
   workers.json に登録された全ワーカーのIssueを定期ポーリングし、
@@ -121,7 +121,7 @@ Description:
     起動時刻）が復帰した場合のみHANG_RESUMEDを出力する。同一プロセス（PID+起動時刻）
     への重複通知は防止される（PID再利用や新プロセスへの切り替わりによる誤抑止・
     誤った復帰報告を避けるため起動時刻も照合する）。
-  居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みなのにプロセスが終了せず生存し続けている場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（経過時間は使わず、報告コメントの有無だけで判定する。ハング検知とは独立）。同一プロセス（PID+起動時刻）への重複通知は防止される（PID再利用による誤抑止を避けるため起動時刻も照合する）。
+  居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みなのにプロセスが終了せず生存し続けている場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（判定は報告コメントの有無だけで行い、報告投稿からの経過時間は通知とログに記録する。ハング検知とは独立）。同一プロセス（PID+起動時刻）への重複通知は防止される（PID再利用による誤抑止を避けるため起動時刻も照合する）。
   ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
   消滅時はPID registryを解除して自動exitする。`;
 
@@ -720,7 +720,7 @@ function main(argsOverride, opts = {}) {
       _parentDeathExit(PARENT_DEATH_EXIT_CODE);
     }
 
-    writeOut('SCAN_START');
+    writeOut('SCAN_START source=inbox-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js');
 
     const workers = loadWorkers(workspace);
     let totalDetected = 0;
@@ -771,7 +771,8 @@ function main(argsOverride, opts = {}) {
               baselineMs = startTimeMs;
             }
           }
-          const staleMs = Date.now() - baselineMs;
+          const nowMs = Date.now();
+          const staleMs = nowMs - baselineMs;
           if (staleMs > hangThresholdMs) {
             // ハング状態 — 同一プロセス（pid+startTime）には1回だけ通知
             const alreadyNotified = cursor.hangNotifiedPid === entry.pid
@@ -794,7 +795,8 @@ function main(argsOverride, opts = {}) {
                 cursor.hangNotifiedPid = entry.pid;
                 cursor.hangNotifiedStartTime = entry.startTime;
                 cursor.hangNotifiedAt = new Date().toISOString();
-                writeOut(`HANG_DETECTED:${workerName}:${entry.pid}`);
+                const elapsed = formatElapsedTime(baselineMs, nowMs);
+                writeOut(`HANG_DETECTED:${workerName}:${entry.pid} elapsed=${elapsed}`);
                 // 後続処理（gh apiコメント取得等）が失敗してループがcontinueしても通知済み
                 // 状態が失われないよう、ここで先に永続化する。他プロセスがカーソルを掴んで
                 // いる等の EPERM でも停止せず、次サイクルの writeCursor 成功時にまとめて
@@ -820,7 +822,7 @@ function main(argsOverride, opts = {}) {
             cursor.hangNotifiedStartTime = null;
             cursor.hangNotifiedAt = null;
             if (isSameProcess) {
-              writeOut(`HANG_RESUMED:${workerName}`);
+              writeOut(`HANG_RESUMED:${workerName}:${entry.pid}`);
             }
             // クリア状態を後続処理より先に永続化する（上記HANG_DETECTEDと同じ理由）。
             // 他プロセスがカーソルを掴んでいる等の EPERM でも停止せず、次サイクルの
@@ -986,7 +988,7 @@ function main(argsOverride, opts = {}) {
             cursor.staleReportNotifiedPid = entry.pid;
             cursor.staleReportNotifiedStartTime = entry.startTime;
             cursor.staleReportNotifiedAt = new Date().toISOString();
-            writeOut(`STALE_REPORT_DETECTED:${workerName}:${entry.pid}`);
+            writeOut(`STALE_REPORT_DETECTED:${workerName}:${entry.pid} elapsed=${elapsed}`);
           }
         }
       }
@@ -1095,7 +1097,7 @@ function main(argsOverride, opts = {}) {
       }
     }
 
-    writeOut(`SCAN_END:${workers.size}:${totalDetected}`);
+    writeOut(`SCAN_END:${workers.size}:${totalDetected} source=inbox-supervisor.js scope=worker-delivery-scan workers=${workers.size} detected=${totalDetected} orchestrator-inbox=separate-msg-poll.js`);
   }
 
   return {
