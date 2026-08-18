@@ -63,7 +63,7 @@ gh-maestroの存在意義はquota経済である。コーダー起動・レビ�
 
 ワーカー起動前に、該当するアンカー Issue が存在することを必ず確認すること。存在しない場合は先に Issue を作成する。
 
-**調査アンカー Issue は調査完了後にクローズしない。** 同じ Issue を実装用に育てる。調査が完了し実装方針が固まったら、チャット上で人間に提示し承認を得た上で、`gh issue edit <N> --title "<正式タイトル>" --body-file /tmp/issue-<N>.md` により Issue を実装指示に更新する。新たに別の Issue を作成する必要はない（詳細は「Issue確定」参照）。
+**調査アンカー Issue は調査完了後にクローズしない。** 同じ Issue を実装用に育てる。調査が完了し実装方針が固まったら、チャット上で人間に提示し承認を得た上で、`update-issue.js --issue <N> --title "<正式タイトル>" --body-file /tmp/issue-<N>.md` により Issue を実装指示に更新する。新たに別の Issue を作成する必要はない（詳細は「Issue確定」参照）。
 
 調査アンカー Issue の暫定タイトルは「調査: <キーワード>」とする（例: `調査: 認証トークン検証の現状`）。実装方針確定後、正式タイトルに変更する。
 
@@ -127,6 +127,8 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする。`msg-state` は単純削除せず、wipe前の管理対象 Issue の既読ベースラインを再構築する（Issue #207）。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口でもある
 - **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「Issue確定」参照）
 - **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` を削除する（「Issue確定」参照）。成功時、あわせて対話型ワーカー**assistant**（`gh-maestro-assistant`スキル。issue/PRについての人間の質問に答える対話セッション）を新規WezTermウィンドウで自動起動する
+- **update-issue.js** — `gh issue edit` によるIssue本文更新の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、成功時に削除する（「Issue確定」参照）
+- **comment-issue.js** — `gh issue comment` による通常のIssueコメント投稿の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、成功時に削除する（反省会・保留リスト参照）
 - **publish-plan.js** — Issue の pin 済み計画コメントを管理する。pin済みコメントがあれば更新、なければ新規投稿してpinする（「計画評価と承認」参照）。`--issue <N> --body-file <path> [--workspace <path>]` で呼び出す
 - **run-council.js** — 複数モデル議論（council）の実行。議題から参加モデルの意見・投票をDiscussion上で集め、テンプレート要約を投稿する決定論的フェーズ機械（詳細は `council.md` 参照）
 - **run-council-investigation.js** — council の調査ジョブ。調査が必要と判断した場合のみ起動する使い捨てCLI（詳細は `council.md` 参照）
@@ -333,20 +335,21 @@ node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tm
 # 出力: ISSUE_CREATED:<番号> <URL>
 ```
 
-**既存Issueを更新する場合（調査アンカーから実装指示へ育てる）** — `gh issue edit` は `win-path.js` によるパス解決を行わないため、`write-draft.js` が出力した実体パスを `--body-file` に渡す。
+**既存Issueを更新する場合（調査アンカーから実装指示へ育てる）** — `update-issue.js` が論理パスを実体パスへ解決するため、`write-draft.js` の出力を解析せず、論理パスをそのまま `--body-file` に渡す。
 
 ```sh
-# 草案を書き出して実体パスを変数に保持
-DRAFT_OUTPUT=$(node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-<N>.md --stdin <<'EOF'
+# 草案を書き出す（実体パスを推論・抽出しない）
+node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-<N>.md --stdin <<'EOF'
 <Issue本文>
-EOF)
-BODY_PATH=${DRAFT_OUTPUT#DRAFT_WRITTEN:}
+EOF
 
 # 既存Issueを実装指示に更新
-gh issue edit <N> --title "<正式タイトル>" --body-file "$BODY_PATH"
+node "{{SCRIPTS_PATH}}/update-issue.js" \
+  --issue <N> --title "<正式タイトル>" --body-file /tmp/issue-<N>.md \
+  --repo $REPO --workspace $WORKSPACE
 ```
 
-`create-issue.js` は成功時に `--body-file` を自動削除する（論理パスから実体パスを解決して削除する）。`gh issue edit` はこの自動削除を行わないため、既存Issueの更新後は必要に応じて手動でファイルを削除してよい。
+`create-issue.js` と `update-issue.js` は、GitHub操作が成功した場合にだけ `--body-file` を自動削除する。失敗時は原案を保持する。
 
 ## 自分の inbox の監視
 
@@ -531,8 +534,12 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
 - **無視**: 何もしない。
 - **保留Issueに積む**:
   ```sh
-  gh issue comment $PENDING_ISSUE --repo $REPO \
-    --body "[保留] <path>:<line> — <内容>"
+  node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/pending-<N>.md --stdin <<'EOF'
+  [保留] <path>:<line> — <内容>
+  EOF
+  node "{{SCRIPTS_PATH}}/comment-issue.js" \
+    --issue $PENDING_ISSUE --repo $REPO --workspace $WORKSPACE \
+    --body-file /tmp/pending-<N>.md
   ```
 
 ## 保留リスト
