@@ -28,6 +28,7 @@ test('--help はUsageを表示して終了コード0', () => {
   const r = run(['--help']);
   assert.equal(r.status, 0);
   assert.match(r.stdout, /Usage: node remove-worker\.js/);
+  assert.match(r.stdout, /<workerName>/);
   assert.match(r.stdout, /--issue/);
   assert.match(r.stdout, /--skill/);
 });
@@ -38,10 +39,17 @@ test('引数なしはUsageエラーで終了コード1', () => {
   assert.match(r.stderr, /Usage: node remove-worker\.js/);
 });
 
-test('--worker-name と〈--issue+--skill〉の併用はエラー終了する', () => {
-  const r = run(['--worker-name', 'issue-5-x', '--issue', '5', '--skill', 'gh-maestro-coder']);
+test('workerName位置引数と〈--issue+--skill〉の併用はエラー終了する', () => {
+  const r = run(['issue-5-x', '--issue', '5', '--skill', 'gh-maestro-coder']);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /併用できません/);
+});
+
+test('旧来の--worker-name指定は未知フラグとして拒否する', () => {
+  const r = run(['--worker-name', 'issue-5-x']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /未知のフラグ/);
+  assert.match(r.stderr, /--worker-name/);
 });
 
 test('--issue のみ（--skill 欠落）はUsageエラーで終了コード1', () => {
@@ -84,14 +92,14 @@ test('--issue+--skill で複数該当なら候補付きエラーで終了する'
 });
 
 test('余剰な位置引数はエラー終了する（黙って無視しない）', () => {
-  const r = run(['--worker-name', 'issue-5-x', 'extra']);
+  const r = run(['issue-5-x', 'extra']);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /予期しない位置引数/);
   assert.match(r.stderr, /extra/);
 });
 
 test('未知のフラグはエラー終了する（黙って無視しない）', () => {
-  const r = run(['--worker-name', 'issue-5-x', '--bogus']);
+  const r = run(['issue-5-x', '--bogus']);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /未知のフラグ/);
   assert.match(r.stderr, /--bogus/);

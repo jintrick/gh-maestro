@@ -147,7 +147,7 @@ function updateWorkerProcess(workspace, workerName, { pid, startTime = null, log
  *
  * 一意に決まる場合だけ workerName を返す。0件・複数件は解決不能として Error を投げる
  * （複数件時はメッセージに候補 workerName を列挙する。曖昧な場合は呼び出し元が
- * --worker-name で明示する運用）。
+ * workerName を位置引数で明示する運用）。
  *
  * @param {string} workspace
  * @param {{issue: string|number, skill: string}} criteria
@@ -181,7 +181,7 @@ function resolveWorkerName(workspace, { issue, skill }) {
   if (matches.length > 1) {
     throw new Error(
       `issue=${wantIssue}, skill=${skill} に複数のワーカーが該当し一意に決まりません。` +
-      `--worker-name で明示してください。候補: ${matches.join(', ')}`
+      `workerName（位置引数）で明示してください。候補: ${matches.join(', ')}`
     );
   }
   return matches[0];

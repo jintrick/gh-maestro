@@ -203,6 +203,22 @@ test('--skill: 該当ワーカーが無いと候補解決エラーで code 1', (
   });
 });
 
+test('--skill と recipient位置引数の併用は本文ではなく宛先のエラーになる', () => {
+  withTempDir(workspace => {
+    writeWorkersForSkill(workspace);
+    const r = msgSend.main(
+      ['issue-42-implement', '--issue', '42', '--skill', 'gh-maestro-coder', '--workspace', workspace, '--stdin'],
+      null,
+      stdinIO('本文'),
+    );
+    assert.equal(r.code, 1);
+    const error = r.errLines.join('\n');
+    assert.match(error, /宛先/);
+    assert.match(error, /併用できません/);
+    assert.doesNotMatch(error, /本文は位置引数で渡せません/);
+  });
+});
+
 test('env ISSUE で Issue が解決される', () => {
   withTempDir(workspace => {
     let capturedIssue = null;
