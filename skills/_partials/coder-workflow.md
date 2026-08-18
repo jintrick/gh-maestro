@@ -49,9 +49,8 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
 ## 失敗時
 
 ```sh
-gh issue edit $ISSUE --add-label "human-escalation"
 node "{{SCRIPTS_PATH}}/msg-send.js" --stdin <<'EOF'
-実装に失敗しました。human-escalation ラベルを付与しました。
+実装に失敗しました。
 EOF
 ```
 

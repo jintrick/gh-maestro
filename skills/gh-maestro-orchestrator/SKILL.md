@@ -374,8 +374,7 @@ PR検出時の出力:
 
 `PR_BASE_MISMATCH` を受け取った場合、PR自体は作成されているため処理を中断する必要はないが、後続のマージフローに影響しうるため人間に伝える。
 
-PRが検出されないままコーダーの失敗が疑われる場合は、Issueに `human-escalation` ラベルが付いていないか確認する。
-**通常コーダー（gh-maestro-coder）が実装に失敗してエスカレーションされた場合、人間が承認した段階で上位のシニアコーダー（gh-maestro-senior-coder）を適用して再起動することを検討せよ。**
+**通常コーダー（gh-maestro-coder）から実装失敗の報告が届いた場合、人間が承認した段階で上位のシニアコーダー（gh-maestro-senior-coder）を適用して再起動することを検討せよ。**
 
 **`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、`monitor-recovery.md`の「PR監視・Review Managerの再起動」に従って自分で起動すること。
 
