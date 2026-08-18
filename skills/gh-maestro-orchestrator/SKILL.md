@@ -97,19 +97,12 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - **diagnostician**: 調査対象のバグIssue本文だけで観点が尽くせるなら `--prompt-file` を省略してよい。本文を超える補足（重点的に見る箇所・除外範囲など）がある場合のみ渡す。
 - **architect**: 起動には確定要件が前提。詳細は `architect.md` 参照（`--execution-id` を付ける）。
 
-### ワーカーの指し方（重要）
+### ワーカーの指定
 
-**起動後にワーカーへメッセージを送る・削除するときは、workerName を覚えず〈`--issue <N>` + `--skill <役割>`〉で指す。** workers.json から一意に解決される（`msg-send.js` / `remove-worker.js` が対応）。起動時の戻り値 workerName を変数に控える必要はない。
+**起動後にワーカーへメッセージを送る・削除するときは〈`--issue <N>` + `--skill <役割>`〉で指す。** `msg-send.js` / `remove-worker.js` が `workers.json` から一意に解決するため、起動時の戻り値を控えておく必要はない。
 
-例外は**同一Issue・同一役割で複数のワーカーを並列起動した場合**（下記「大規模タスクの分割」）だけ。この場合のみ一意に決まらず、スクリプトが候補一覧を表示してエラーにするので workerName（= `issue-<N>-<desc>`）で明示する。**`msg-send.js` / `remove-worker.js` のどちらも、workerName は位置引数で渡す**（`--skill` との併用は不可）。
+一意に決まらないのは、同一Issue・同一役割で複数のワーカーを並列起動した場合だけである（下記「大規模タスクの分割」）。
 
-- `msg-send.js`: `--skill` を外し、workerName を位置引数で渡す。Issue番号は workers.json から解決されるため `--issue` は不要。
-  ```sh
-  node "{{SCRIPTS_PATH}}/msg-send.js" issue-<N>-<desc> --workspace $WORKSPACE --stdin <<'EOF'
-  <本文>
-  EOF
-  ```
-- `remove-worker.js`: workerName を位置引数で渡す（`--issue` + `--skill` とは併用不可）。
 ### 大規模タスクの分割
 
 競合しない軸（ディレクトリ・ファイル種別・機能単位など）で分割し、複数ワーカーで並列処理する。
@@ -124,11 +117,17 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <hooks-prompt-file>      --issue 12 --description fix-hooks ...
 ```
 
-この並列分割は「同一issue・同一役割で複数ワーカー」の唯一の正当なケースであり、この場合のみ〈`--issue` + `--skill`〉で一意に決まらないため、workerName（= `issue-12-fix-utils`）で明示する。`msg-send.js` と `remove-worker.js` のどちらも位置引数で指定する。詳細は「ワーカーの指し方」参照。
+この並列分割は同一Issue・同一役割で複数ワーカーを立てる唯一の正当なケースであり、この場合だけ〈`--issue` + `--skill`〉で宛先が一意に決まらない。`msg-send.js` / `remove-worker.js` には、`--skill` を外してワーカー名（`issue-12-fix-utils` の形。`--description` に渡した値から組み立てられる）を**位置引数**で渡す。
+
+```sh
+node "{{SCRIPTS_PATH}}/msg-send.js" issue-12-fix-utils --workspace $WORKSPACE --stdin <<'EOF'
+<本文>
+EOF
+```
 
 ## アセット（`{{SCRIPTS_PATH}}/`）
 
-すべてのスクリプトは `{{SCRIPTS_PATH}}/`（インストール時に絶対パスへ置換）に集約され、`--help` で使い方を確認できる。ワーカー宛て（`msg-send.js` / `remove-worker.js`）の送信先指定は「ワーカーの指し方」を参照。
+すべてのスクリプトは `{{SCRIPTS_PATH}}/`（インストール時に絶対パスへ置換）に集約され、`--help` で使い方を確認できる。ワーカー宛て（`msg-send.js` / `remove-worker.js`）の送信先指定は「ワーカーの指定」を参照。
 
 - **spawn-worker.js** — worktreeを作りワーカーをバックグラウンドで起動する（画面は使わない。「ワーカーの起動」参照）
 - **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉。本文は位置引数では渡せず、`--stdin`（ヒアドキュメントは`<<'EOF'`とクォート付きにする）または `--body-file` で渡す
