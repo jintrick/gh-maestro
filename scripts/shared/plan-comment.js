@@ -6,17 +6,17 @@ const PLAN_MARKER = '<!-- gh-maestro-plan:v1 -->';
 
 /**
  * コメントオブジェクトが pin 済みの計画コメントであるかを判定する。
+ * マーカーは本文の1行目に単独で配置されている必要がある（引用や本文中での言及は対象外）。
  *
  * @param {object} comment
  * @returns {boolean}
  */
 function isPlanComment(comment) {
-  return Boolean(
-    comment &&
-    comment.pin != null &&
-    typeof comment.body === 'string' &&
-    comment.body.includes(PLAN_MARKER),
-  );
+  if (!comment || comment.pin == null || typeof comment.body !== 'string') {
+    return false;
+  }
+  const firstLine = comment.body.split('\n')[0].trim();
+  return firstLine === PLAN_MARKER;
 }
 
 /**
@@ -39,7 +39,7 @@ function findPlanComments(comments) {
 function stripPlanMarker(body) {
   if (!body) return '';
   const lines = body.split('\n');
-  if (lines.length > 0 && lines[0].includes(PLAN_MARKER)) {
+  if (lines.length > 0 && lines[0].trim() === PLAN_MARKER) {
     lines.shift();
   }
   return lines.join('\n');

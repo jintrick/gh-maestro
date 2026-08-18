@@ -2,7 +2,7 @@
 // msg-read.js — GitHub Issue コメントまたは計画の本文を読み出す
 //
 // Usage:
-//   node msg-read.js <commentId> [--workspace <path>]
+//   node msg-read.js <commentId> [--workspace <path>] [--issue <N>]
 //   node msg-read.js --plan --issue <N> [--workspace <path>]
 //
 // エージェントが repo 解決や jq クエリを手書きせず、1コマンドで本文を読めるようにする。
@@ -18,7 +18,7 @@ const { findPlanComments, stripPlanMarker } = require('./shared/plan-comment');
 const USAGE = `msg-read.js — GitHub Issue コメントまたは計画の本文を読み出す
 
 Usage:
-  node msg-read.js <commentId> [--workspace <path>]
+  node msg-read.js <commentId> [--workspace <path>] [--issue <N>]
   node msg-read.js --plan --issue <N> [--workspace <path>]
 
 Arguments:
@@ -26,7 +26,8 @@ Arguments:
 
 Options:
   --plan                Issue の pin 済み計画コメント本文を読み出す（--issue 必須）
-  --issue <N>           対象 Issue 番号（正の整数、--plan 指定時は必須）
+  --issue <N>           対象 Issue 番号。--plan 指定時は必須（正の整数）。
+                        通常指定時は REST 失敗時の GraphQL フォールバック用（任意）。
   --workspace <path>    ワークスペースパス（省略時は環境変数またはCWDから解決）
 
 Output (stdout):
@@ -41,7 +42,7 @@ let _ghRepoView = () => {
     { encoding: 'utf8' });
 };
 
-let _ghApiComment = (repo, commentId) => {
+let _ghApiComment = (repo, commentId, issue) => {
   const restResult = spawnSync('gh', ['api', `repos/${repo}/issues/comments/${commentId}`, '-q', '.body'],
     { encoding: 'utf8' });
 
@@ -50,7 +51,7 @@ let _ghApiComment = (repo, commentId) => {
   }
 
   process.stderr.write('msg-read: REST API失敗のためGraphQLにフォールバックします\n');
-  return graphqlCommentBody({ repo, commentId });
+  return graphqlCommentBody({ repo, commentId, issue });
 };
 
 let _ghListComments = (repo, issue, opts = {}) => {
@@ -126,11 +127,6 @@ function main(argsOverride) {
       return { code: 1, lines: out, errLines: err };
     }
   } else {
-    if (values['--issue']) {
-      writeErr('msg-read: --issue は --plan 指定時のみ使用できます。');
-      writeErr(USAGE);
-      return { code: 1, lines: out, errLines: err };
-    }
     if (rest.length !== 1) {
       writeErr(USAGE);
       return { code: 1, lines: out, errLines: err };
@@ -197,7 +193,7 @@ function main(argsOverride) {
   }
 
   const commentId = rest[0];
-  const result = _ghApiComment(repo, commentId);
+  const result = _ghApiComment(repo, commentId, values['--issue']);
 
   if (result.status !== 0) {
     writeErr(`msg-read: コメントの読み出しに失敗しました: ${result.stderr || '(empty)'}`);

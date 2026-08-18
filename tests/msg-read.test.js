@@ -63,12 +63,6 @@ test('単独の未知フラグは commentId として受理されず code 1', ()
   assert.ok(r.errLines.some(l => l.includes('未知のフラグ')));
 });
 
-test('非plan時に --issue を指定すると code 1（無意味なオプションの拒否）', () => {
-  const r = msgRead.main(['123', '--issue', '42']);
-  assert.equal(r.code, 1);
-  assert.ok(r.errLines.some(l => l.includes('--issue は --plan 指定時のみ使用できます')));
-});
-
 // ── 引数エラー（--plan モード） ─────────────────────────────────────────────
 
 test('--plan 指定時に --issue なしは code 1', () => {
@@ -139,6 +133,25 @@ test('成功時に本文を出力して code 0', () => {
   });
 });
 
+test('非plan時に --issue を渡すと _ghApiComment に issue が渡される', () => {
+  withTempDir(workspace => {
+    let receivedIssue = null;
+    msgRead._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgRead._setGhApiComment((repo, commentId, issue) => {
+      receivedIssue = issue;
+      return {
+        status: 0,
+        stdout: 'comment with fallback issue',
+      };
+    });
+
+    const r = msgRead.main(['123456789', '--issue', '99', '--workspace', workspace]);
+    assert.equal(r.code, 0);
+    assert.equal(receivedIssue, '99');
+    assert.equal(r.lines[0], 'comment with fallback issue');
+  });
+});
+
 test('マーカーなし本文はそのまま出力される', () => {
   withTempDir(workspace => {
     msgRead._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
@@ -198,6 +211,41 @@ test('--plan: 計画コメントが1件存在するとき本文をマーカー�
     const r = msgRead.main(['--plan', '--issue', '42', '--workspace', workspace]);
     assert.equal(r.code, 0);
     assert.equal(r.lines[0], '# 計画のタイトル\n計画の詳細内容');
+  });
+});
+
+test('--plan: 1行目にマーカーがある計画と、2行目以降にマーカーがある引用コメントが混在しても正しく1件の計画を認識する', () => {
+  withTempDir(workspace => {
+    msgRead._setGhRepoView(() => ({ status: 0, stdout: 'owner/repo\n' }));
+    msgRead._setGhListComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        { id: 1, body: `${PLAN_MARKER}\n# 本物の計画`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
+        { id: 2, body: `> ${PLAN_MARKER}\n> 計画を引用したコメント`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
+        { id: 3, body: `前置テキスト ${PLAN_MARKER}\n途中にマーカーがあるコメント`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
+      ]),
+    }));
+
+    const r = msgRead.main(['--plan', '--issue', '42', '--workspace', workspace]);
+    assert.equal(r.code, 0);
+    assert.equal(r.lines[0], '# 本物の計画');
+  });
+});
+
+test('--plan: マーカーが2行目や行途中にあるコメントのみの場合は計画なしで code 1', () => {
+  withTempDir(workspace => {
+    msgRead._setGhRepoView(() => ({ status: 0, stdout: 'owner/repo\n' }));
+    msgRead._setGhListComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        { id: 1, body: `> ${PLAN_MARKER}\n引用のみ`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
+        { id: 2, body: `prefix ${PLAN_MARKER}`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
+      ]),
+    }));
+
+    const r = msgRead.main(['--plan', '--issue', '42', '--workspace', workspace]);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('Issue #42 に計画コメントが見つかりません')));
   });
 });
 
