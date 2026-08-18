@@ -1,7 +1,7 @@
 ---
 paths:
   - "scripts/**"
-  - "tests/**"
+  - "tests/finalize-issue.test.js"
 ---
 
 # 手書きargvパースの落とし穴
