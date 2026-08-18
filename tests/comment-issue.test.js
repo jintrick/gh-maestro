@@ -85,6 +85,21 @@ test('commentIssue: gh失敗時はbody-fileを削除せず、コメント投稿�
   assert.match(result.stderr, /permission denied/);
 });
 
+test('commentIssue: コメント投稿成功後の削除失敗は投稿成功として警告し、原案を保持する', () => {
+  const result = commentIssue(
+    { issue: '42', bodyFile: 'C:\\Temp\\comment-42.md', workspace: 'C:\\workspace' },
+    {
+      ghCommentFn: () => ({ status: 0, stdout: 'https://github.com/owner/repo/issues/42#issuecomment-1\n', stderr: '' }),
+      unlinkBodyFileFn: () => { throw new Error('EPERM'); },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.url, 'https://github.com/owner/repo/issues/42#issuecomment-1');
+  assert.match(result.cleanupWarning, /原案を保持/);
+  assert.match(result.cleanupWarning, /EPERM/);
+});
+
 test('commentIssue: 成功レスポンスにURLがなければbody-fileを保持する', () => {
   let unlinkCalled = false;
   const result = commentIssue(
@@ -135,6 +150,23 @@ test('comment-issue CLI: gh失敗時は論理パスの入力を保持する', ()
 
     assert.equal(result.code, 1);
     assert.match(result.stderr, /保持/);
+    assert.equal(fs.existsSync(physicalPath), true);
+  }));
+});
+
+test('comment-issue CLI: 投稿成功後の削除失敗は成功終了し警告をstderrへ出し、入力を保持する', () => {
+  withTempWorkspace((workspace) => withLogicalBody('コメント', (logicalPath, physicalPath) => {
+    const result = main([
+      '--issue', '42', '--body-file', logicalPath, '--workspace', workspace,
+    ], {
+      ghCommentFn: () => ({ status: 0, stdout: 'https://github.com/owner/repo/issues/42#issuecomment-1\n', stderr: '' }),
+      unlinkBodyFileFn: () => { throw new Error('EPERM'); },
+    });
+
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout, 'https://github.com/owner/repo/issues/42#issuecomment-1');
+    assert.match(result.stderr, /原案を保持/);
+    assert.match(result.stderr, /EPERM/);
     assert.equal(fs.existsSync(physicalPath), true);
   }));
 });

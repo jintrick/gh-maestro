@@ -126,9 +126,9 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - **process-lifecycle.js** — PID registryを走査しstaleなプロセスを掃除する（各「復旧手順」参照）
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする。`msg-state` は単純削除せず、wipe前の管理対象 Issue の既読ベースラインを再構築する（Issue #207）。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口でもある
 - **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「Issue確定」参照）
-- **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` を削除する（「Issue確定」参照）。成功時、あわせて対話型ワーカー**assistant**（`gh-maestro-assistant`スキル。issue/PRについての人間の質問に答える対話セッション）を新規WezTermウィンドウで自動起動する
-- **update-issue.js** — `gh issue edit` によるIssue本文更新の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、成功時に削除する（「Issue確定」参照）
-- **comment-issue.js** — `gh issue comment` による通常のIssueコメント投稿の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、成功時に削除する（反省会・保留リスト参照）
+- **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` の削除を試み、失敗時は警告する（「Issue確定」参照）。成功時、あわせて対話型ワーカー**assistant**（`gh-maestro-assistant`スキル。issue/PRについての人間の質問に答える対話セッション）を新規WezTermウィンドウで自動起動する
+- **update-issue.js** — `gh issue edit` によるIssue本文更新の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、成功時に削除を試み、失敗時は警告する（「Issue確定」参照）
+- **comment-issue.js** — `gh issue comment` による通常のIssueコメント投稿の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、成功時に削除を試み、失敗時は警告する（反省会・保留リスト参照）
 - **publish-plan.js** — Issue の pin 済み計画コメントを管理する。pin済みコメントがあれば更新、なければ新規投稿してpinする（「計画評価と承認」参照）。`--issue <N> --body-file <path> [--workspace <path>]` で呼び出す
 - **run-council.js** — 複数モデル議論（council）の実行。議題から参加モデルの意見・投票をDiscussion上で集め、テンプレート要約を投稿する決定論的フェーズ機械（詳細は `council.md` 参照）
 - **run-council-investigation.js** — council の調査ジョブ。調査が必要と判断した場合のみ起動する使い捨てCLI（詳細は `council.md` 参照）
@@ -349,7 +349,7 @@ node "{{SCRIPTS_PATH}}/update-issue.js" \
   --repo $REPO --workspace $WORKSPACE
 ```
 
-`create-issue.js` と `update-issue.js` は、GitHub操作が成功した場合にだけ `--body-file` を自動削除する。失敗時は原案を保持する。
+`create-issue.js`、`update-issue.js`、`comment-issue.js` は、GitHub操作が成功した場合にだけ `--body-file` の削除を試みる。GitHub操作に失敗した場合は原案を保持し、操作成功後の削除だけに失敗した場合も、操作成功として扱った上で原案保持の警告を出す。
 
 ## 自分の inbox の監視
 

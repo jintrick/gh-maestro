@@ -92,7 +92,7 @@ node "{{SCRIPTS_PATH}}/comment-issue.js" \
   --body-file /tmp/retro-<N>.md
 ```
 
-（`comment-issue.js` が `win-path.js` による論理パス解決と、成功時の入力ファイル削除を行う。投稿に失敗した場合は原案を保持する）
+（`comment-issue.js` が `win-path.js` による論理パス解決と、成功時の入力ファイル削除を試みる。投稿に失敗した場合は原案を保持し、削除だけに失敗した場合は投稿成功として警告する）
 
 2. 投稿完了後、人間へのチャット提示は全文を再掲せず、以下の定型の短い一文だけにする：
 

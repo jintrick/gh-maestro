@@ -3,30 +3,32 @@
 //
 // 呼び出し側は /tmp/... 等の論理パスだけを渡す。GitHub CLIはWindows上で
 // Git Bashの論理パスを解決しないため、ここで実体パスへ変換してから渡す。
-// 投稿成功時だけbody-fileを削除し、失敗時は原案を残す。
+// 投稿成功時だけbody-fileの削除を試み、失敗時は警告して原案を残す。
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
+const { deleteInputFileBestEffort } = require('./shared/file-cleanup');
 const { toWinPath } = require('./win-path');
 
-const USAGE = `comment-issue.js — GitHub Issueへコメントを投稿し、成功時にbody-fileを削除する
+const USAGE = `comment-issue.js — GitHub Issueへコメントを投稿し、成功時にbody-fileの削除を試みる
 
 Usage:
   node comment-issue.js --issue <N> --body-file <path> [--repo <owner/repo>] [--workspace <path>]
 
 Options:
   --issue <N>           対象Issue番号（必須、正の整数）
-  --body-file <path>    コメント本文ファイルの論理パス（UTF-8）。成功時に削除される
+  --body-file <path>    コメント本文ファイルの論理パス（UTF-8）。成功時に削除を試み、失敗時は警告する
   --repo <owner/repo>   対象リポジトリ（省略時はworkspaceから解決）
   --workspace <path>    ワークスペースのルートパス（省略時は環境変数またはCWDから解決）
 
 Output (stdout):
   投稿されたコメントのURLを1行出力
 
-body-fileはこのスクリプトが論理パスから解決する。GitHub CLIが失敗した場合、またはURLを返さなかった場合は保持される。`;
+body-fileはこのスクリプトが論理パスから解決する。GitHub CLIが失敗した場合、またはURLを返さなかった場合は保持される。
+GitHub CLIが成功した後の削除だけが失敗した場合は、投稿成功として扱い、原案が残った旨を警告する。`;
 
 function defaultGhComment({ issue, bodyFile, repo, workspace }, spawnFn = spawnSync) {
   const args = ['issue', 'comment', String(issue), '--body-file', bodyFile];
@@ -40,7 +42,7 @@ function defaultGhComment({ issue, bodyFile, repo, workspace }, spawnFn = spawnS
  * @param {{issue: string|number, bodyFile: string, repo?: string, workspace: string}} params
  *   bodyFileは解決済みの実体パス。
  * @param {{ghCommentFn?: Function, unlinkBodyFileFn?: Function}} deps テスト用依存注入
- * @returns {{ok: boolean, url?: string, status?: number, stdout?: string, stderr?: string}}
+ * @returns {{ok: boolean, url?: string, status?: number, stdout?: string, stderr?: string, cleanupWarning?: string|null}}
  */
 function commentIssue({ issue, bodyFile, repo, workspace }, deps = {}) {
   const {
@@ -58,8 +60,8 @@ function commentIssue({ issue, bodyFile, repo, workspace }, deps = {}) {
     return { ok: false, status: 1, stdout: result.stdout || '', stderr: 'コメント投稿は成功しましたがURLが返されませんでした。' };
   }
 
-  unlinkBodyFileFn(bodyFile);
-  return { ok: true, url, stdout: result.stdout || '', stderr: result.stderr || '' };
+  const cleanupWarning = deleteInputFileBestEffort(bodyFile, unlinkBodyFileFn);
+  return { ok: true, url, stdout: result.stdout || '', stderr: result.stderr || '', cleanupWarning };
 }
 
 function main(argv = process.argv.slice(2), deps = {}) {
@@ -116,7 +118,11 @@ function main(argv = process.argv.slice(2), deps = {}) {
     };
   }
 
-  return { code: 0, stdout: result.url };
+  return {
+    code: 0,
+    stdout: result.url,
+    stderr: result.cleanupWarning ? `comment-issue: ${result.cleanupWarning}` : undefined,
+  };
 }
 
 if (require.main === module) {

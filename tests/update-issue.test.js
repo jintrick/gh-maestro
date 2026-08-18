@@ -89,6 +89,20 @@ test('updateIssue: gh失敗時はbody-fileを削除せず、更新成功扱い�
   assert.match(result.stderr, /permission denied/);
 });
 
+test('updateIssue: 更新成功後の削除失敗は更新成功として警告し、原案を保持する', () => {
+  const result = updateIssue(
+    { issue: '42', bodyFile: 'C:\\Temp\\issue-42.md', workspace: 'C:\\workspace' },
+    {
+      ghEditFn: () => ({ status: 0, stdout: '', stderr: '' }),
+      unlinkBodyFileFn: () => { throw new Error('EPERM'); },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(result.cleanupWarning, /原案を保持/);
+  assert.match(result.cleanupWarning, /EPERM/);
+});
+
 test('update-issue CLI: /tmpの論理パスを実体へ解決し、成功時に削除する', () => {
   withTempWorkspace((workspace) => withLogicalBody('本文 `$VALUE`\n', (logicalPath, physicalPath) => {
     let captured = null;
@@ -125,6 +139,23 @@ test('update-issue CLI: gh失敗時は論理パスの入力を保持する', () 
 
     assert.equal(result.code, 1);
     assert.match(result.stderr, /保持/);
+    assert.equal(fs.existsSync(physicalPath), true);
+  }));
+});
+
+test('update-issue CLI: 更新成功後の削除失敗は成功終了し警告をstderrへ出し、入力を保持する', () => {
+  withTempWorkspace((workspace) => withLogicalBody('本文', (logicalPath, physicalPath) => {
+    const result = main([
+      '--issue', '42', '--body-file', logicalPath, '--workspace', workspace,
+    ], {
+      ghEditFn: () => ({ status: 0, stdout: '', stderr: '' }),
+      unlinkBodyFileFn: () => { throw new Error('EPERM'); },
+    });
+
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout, 'ISSUE_UPDATED:42');
+    assert.match(result.stderr, /原案を保持/);
+    assert.match(result.stderr, /EPERM/);
     assert.equal(fs.existsSync(physicalPath), true);
   }));
 });

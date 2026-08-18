@@ -3,23 +3,24 @@
 //
 // 呼び出し側は /tmp/... 等の論理パスだけを渡す。GitHub CLIはWindows上で
 // Git Bashの論理パスを解決しないため、ここで実体パスへ変換してから渡す。
-// 更新成功時だけbody-fileを削除し、失敗時は原案を残す。
+// 更新成功時だけbody-fileの削除を試み、失敗時は警告して原案を残す。
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
+const { deleteInputFileBestEffort } = require('./shared/file-cleanup');
 const { toWinPath } = require('./win-path');
 
-const USAGE = `update-issue.js — GitHub Issue本文を更新し、成功時にbody-fileを削除する
+const USAGE = `update-issue.js — GitHub Issue本文を更新し、成功時にbody-fileの削除を試みる
 
 Usage:
   node update-issue.js --issue <N> --body-file <path> [--title <タイトル>] [--repo <owner/repo>] [--workspace <path>]
 
 Options:
   --issue <N>           対象Issue番号（必須、正の整数）
-  --body-file <path>    更新本文ファイルの論理パス（UTF-8）。成功時に削除される
+  --body-file <path>    更新本文ファイルの論理パス（UTF-8）。成功時に削除を試み、失敗時は警告する
   --title <タイトル>    Issueタイトル（省略時は変更しない）
   --repo <owner/repo>   対象リポジトリ（省略時はworkspaceから解決）
   --workspace <path>    ワークスペースのルートパス（省略時は環境変数またはCWDから解決）
@@ -27,7 +28,8 @@ Options:
 Output (stdout):
   ISSUE_UPDATED:<番号>  更新成功
 
-body-fileはこのスクリプトが論理パスから解決する。GitHub CLIが失敗した場合は保持される。`;
+body-fileはこのスクリプトが論理パスから解決する。GitHub CLIが失敗した場合は保持される。
+GitHub CLIが成功した後の削除だけが失敗した場合は、更新成功として扱い、原案が残った旨を警告する。`;
 
 function defaultGhEdit({ issue, title, bodyFile, repo, workspace }, spawnFn = spawnSync) {
   const args = ['issue', 'edit', String(issue)];
@@ -43,7 +45,7 @@ function defaultGhEdit({ issue, title, bodyFile, repo, workspace }, spawnFn = sp
  * @param {{issue: string|number, bodyFile: string, title?: string, repo?: string, workspace: string}} params
  *   bodyFileは解決済みの実体パス。
  * @param {{ghEditFn?: Function, unlinkBodyFileFn?: Function}} deps テスト用依存注入
- * @returns {{ok: boolean, status?: number, stdout?: string, stderr?: string}}
+ * @returns {{ok: boolean, status?: number, stdout?: string, stderr?: string, cleanupWarning?: string|null}}
  */
 function updateIssue({ issue, bodyFile, title, repo, workspace }, deps = {}) {
   const {
@@ -56,8 +58,8 @@ function updateIssue({ issue, bodyFile, title, repo, workspace }, deps = {}) {
     return { ok: false, status: result.status, stdout: result.stdout || '', stderr: result.stderr || '' };
   }
 
-  unlinkBodyFileFn(bodyFile);
-  return { ok: true, stdout: result.stdout || '', stderr: result.stderr || '' };
+  const cleanupWarning = deleteInputFileBestEffort(bodyFile, unlinkBodyFileFn);
+  return { ok: true, stdout: result.stdout || '', stderr: result.stderr || '', cleanupWarning };
 }
 
 function main(argv = process.argv.slice(2), deps = {}) {
@@ -116,7 +118,11 @@ function main(argv = process.argv.slice(2), deps = {}) {
     };
   }
 
-  return { code: 0, stdout: `ISSUE_UPDATED:${issue}` };
+  return {
+    code: 0,
+    stdout: `ISSUE_UPDATED:${issue}`,
+    stderr: result.cleanupWarning ? `update-issue: ${result.cleanupWarning}` : undefined,
+  };
 }
 
 if (require.main === module) {
