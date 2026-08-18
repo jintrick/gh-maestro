@@ -6,15 +6,13 @@
 
 ## 保留Issueの取得（PR検出のたびに毎回実行）
 
-PR番号に依存しない条件でラベル検索する。1件でも見つかればそれを使う。ファイル (`$WORKSPACE/.gh-maestro/pending-$PR`) はキャッシュに過ぎず、信頼できるソースはラベル検索。
+PR番号に依存しない条件でラベル検索する。1件でも見つかればそれを使う。取得は毎回このラベル検索で行い、結果をローカルにキャッシュしない（保留Issueはリポジトリ全体で1件のストックであり、ラベル検索が唯一の正本）。
 
 ```sh
 # 常にラベルのみで検索する（PR番号を条件に含めない — ストックIssueはPRと無関係な内容のため検索から漏れる）
 PENDING_ISSUE=$(gh issue list --repo $REPO \
   --label gh-maestro-pending --state open \
   --json number -q '.[0].number')
-
-echo $PENDING_ISSUE > $WORKSPACE/.gh-maestro/pending-$PR
 ```
 
 ## 見つからなかった場合のみ新規作成
@@ -30,7 +28,6 @@ if [ -z "$PENDING_ISSUE" ]; then
     --body "PRレビューのトリアージで保留判定されたSUGGESTION一覧。BLOCKERがゼロになったら人間に提示する。" \
     --label "gh-maestro-pending" \
     --jq '.number')
-  echo $PENDING_ISSUE > $WORKSPACE/.gh-maestro/pending-$PR
 fi
 ```
 
@@ -68,5 +65,5 @@ PENDING_COMMENT_ID=$(gh api "repos/$REPO/issues/$PENDING_ISSUE/comments" --pagin
 gh api -X DELETE "repos/$REPO/issues/comments/$PENDING_COMMENT_ID"
 ```
 
-コーダーへの実装指示・PR作成は `$NEW_ISSUE` に対して行い、そのIssueが実装完了時にクローズされる（通常のIssue対応フローと同じ）。`$WORKSPACE/.gh-maestro/pending-$PR` は次回セッションのキャッシュとして残してよく、削除しない。
+コーダーへの実装指示・PR作成は `$NEW_ISSUE` に対して行い、そのIssueが実装完了時にクローズされる（通常のIssue対応フローと同じ）。
 
