@@ -95,7 +95,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" \
 worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、workers.json に〈issue + skill〉付きで登録される。`--description <desc>` は `issue-<N>-<desc>` の形でworktreeディレクトリ名・gitブランチ名・`workers.json`のキーに使われるため、**英数字・ハイフン・アンダースコアのみ、1〜50文字**（例: `explore-auth`）。スペース・スラッシュ・ドット等は不可（`spawn-worker.js --help`参照）。
 
 - **diagnostician**: 調査対象のバグIssue本文だけで観点が尽くせるなら `--prompt-file` を省略してよい。本文を超える補足（重点的に見る箇所・除外範囲など）がある場合のみ渡す。
-- **architect**: 起動には確定要件が前提。詳細は「Architect による抽象設計の検討」参照（`--execution-id` を付ける）。
+- **architect**: 起動には確定要件が前提。詳細は `architect.md` 参照（`--execution-id` を付ける）。
 
 ### ワーカーの指し方（重要）
 
@@ -174,7 +174,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 
 1. **要件確定**: 人間と協働して対象 Issue を起草・作成し、目的・振る舞い・制約・対象外・受け入れ条件・既決事項・未決事項を Issue 本文で確定する。単独で要件を決めない。
 2. **必要な調査**: 確定した要件を入力として explorer または diagnostician に必要な事実だけを調査させ、結果を統合可能な形に圧縮する。architect を起動する場合だけ、その圧縮結果を入力に使う。調査結果から要件を勝手に変更しない。
-3. **Architect起動判断**: 「Architect 起動判断」に従い、抽象的な設計判断が必要な場合だけ architect を起動する。不要ならこの工程を省略する。
+3. **Architect起動判断**: 「Architect」節および `architect.md` に従い、抽象的な設計判断が必要な場合だけ architect を起動する。不要ならこの工程を省略する。
 4. **抽象設計の検討**: architect を起動した場合だけ、確定済み要件と圧縮済み調査コンテクストを渡し、対象 Issue への設計コメントを得る。不足情報・矛盾が返ったら、調査または人間確認へ戻る。
 5. **Coder起動**: `spawn-worker.js --skill gh-maestro-coder --issue <N> --description <desc>` または `--skill gh-maestro-senior-coder` で実装ワーカーを起動する。タスクの特長（設計上の複雑さや影響の大きさなど）を自律的に判断してどちらを使用するか選択する。**コーダーは実装に着手する前に、必ず計画をpin済みコメントとして投稿し、orchestratorに報告する。**
 6. **計画評価**: コーダーから計画報告が届いたら、以下「計画評価と承認」に従って計画を評価する。設計上の複雑さやリスクの大きさによっては architect に計画レビューを依頼する。最終的な承認は必ず人間が行う。
@@ -198,69 +198,11 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 
 一度起動したexplorerは、issueをクローズするまでの間再利用する。一つのissueに対して複数のexplorerを次々に起動してはならない。初期化のために無駄なトークンを浪費するためである。
 
-### Architect 起動判断
+### Architect
 
-architect には2つの起動契機がある：
+`gh-maestro-architect` は任意の相談役であり、**起動しないのが既定**である。規模や新規性だけを理由に必須起動してはならない。起動契機は「抽象設計の検討」（実装前）と「計画レビュー」（コーダーの計画報告後）の2つで、いずれも必須ゲートではない。
 
-1. **抽象設計の検討**（既存）: 具体的な実装手順を作るための必須ゲートではない。コードを読まなければ結論を出せない具体化を任せる先でもない。確定済み要件と圧縮済み調査コンテクストだけで扱える、抽象的な設計判断の価値がコストを上回る場合にだけ起動する。
-
-2. **計画レビュー**（新設）: コーダーが投稿したpin済み計画コメントのレビューを依頼する。設計上の複雑さやリスクの大きさが高い場合に起動を検討する。軽微な局所変更では省略してよい。
-
-抽象設計の起動を検討する典型例は次である。
-
-- 複数コンポーネントにまたがる大規模リファクタリングで、責務境界・移行戦略・互換性維持の判断が必要な場合
-- 新規案件または新規機能で、既存パターンだけでは責務分割・公開契約・状態遷移などの方針を決められない場合
-- 複数の抽象方針にプロダクト上またはアーキテクチャ上のトレードオフがあり、人間が選択する前に論点を整理する価値がある場合
-- 誤った構造判断の手戻りが大きく、守るべき境界・前提・リスクを明確にする必要がある場合
-
-次の場合は architect を起動しない。
-
-- 修正箇所と既存パターンが明確な局所変更
-- 調査結果を Issue 本文へ統合すれば coder が実装できる変更
-- コードや worktree を自由に調査しなければ結論を出せない問い
-- ファイル列挙、実施順、具体的なコード変更など、実装手順の詳細化だけが目的の場合
-
-計画レビューは、抽象設計と同じ起動可否判断（規模・複雑さ）で判断してよい。軽微な局所変更ではorchestrator自身が計画を評価すれば十分であり、architect の計画レビューは不要。
-
-規模や新規性だけを理由に必須起動してはならない。
-
-### Architect による抽象設計の検討
-
-要件定義（目的・振る舞い・制約・対象外・受け入れ条件・既決事項・未決事項）が Issue 本文で確定し、必要な調査結果を圧縮でき、かつ「Architect 起動判断」を満たす場合にだけ `gh-maestro-architect` を起動する。生の会話ログや未選別の探索結果を渡してはならない。
-
-architect のコメントは設計検討の記録であり、要件定義を変更する根拠にはならない。コメントに不足情報や矛盾の指摘があれば、必要な explorer/diagnostician の再調査または人間への確認を行い、結果を圧縮して architect を再実行する。要件本文を変更できるのは人間との合意がある場合だけである。
-
-architect 起動後は、コメントURLが投稿成功として記録されるまで完了扱いにしない。投稿に失敗した実行、プロセス異常終了した実行、完了済み実行IDの再試行は `executions.json` の状態を確認する。同じ完了済み実行では既存コメントを使い、重複投稿しない。
-
-architect は設計コメントの URL だけを既存の `msg-send.js` 経路で orchestrator に通知する。通知を受けたら URL の Issue コメントを読み、設計本文をメッセージ本文として受け取ったものと扱わない。不足情報・要件矛盾なら必要な調査または人間確認を行う。追加の設計成果物が必要なら、新しい実行IDで architect を起動する。
-
-architect は対象 Issue がクローズされるまで任意の相談役として維持する。Issue クローズ前に architect を削除してはならない。architect への相談を開始するかどうか、その時機、相談内容は人間が決める。
-
-起動は既存の共有ランチャーを使い、各試行に安定した `--execution-id` を付ける。再試行で同じ成果物を使う場合は同じIDを指定する。
-
-```sh
-node "{{SCRIPTS_PATH}}/spawn-worker.js" \
-  --skill gh-maestro-architect --issue <N> --description abstract-design \
-  --prompt-file <圧縮済み要件・調査コンテクストのファイル> \
-  --execution-id issue-<N>-architect-<attempt> \
-  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
-```
-
-architect の検討結果は Issue のコメントとして記録される（実装詳細をIssue本文に統合しない理由は「Issue確定」参照。下記「計画評価と承認」も参照）。
-
-### Architect による計画レビュー
-
-コーダーから計画報告が届き、かつ「Architect 起動判断」で計画レビューが必要と判断した場合、architect に計画レビューを依頼する。起動プロンプトにはレビュー対象のpin済み計画コメントURLを明記する。
-
-```sh
-node "{{SCRIPTS_PATH}}/spawn-worker.js" \
-  --skill gh-maestro-architect --issue <N> --description plan-review \
-  --prompt-file <計画コメントURLを含む指示のファイル> \
-  --execution-id issue-<N>-architect-plan-review-<attempt> \
-  --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
-```
-
-architect の計画レビュー結果（承認推奨または要修正）の扱いは、下記「計画評価と承認」の評価の流れに従う（あくまで推奨であり、最終承認ではない）。
+修正箇所と既存パターンが明確な局所変更、調査結果をIssue本文へ統合すればcoderが実装できる変更、実装手順の詳細化だけが目的の場合は起動しない。逆に、誤った構造判断の手戻りが大きい・責務境界や移行戦略の判断が要る・複数の抽象方針にトレードオフがある、といった場面に至ったら `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/architect.md` を開き、起動可否の判断基準・起動手順・運用規約（設計コメントの扱い、`--execution-id`、Issueクローズまで削除しない等）はそこに従う。
 
 ## 計画評価と承認
 
@@ -284,7 +226,7 @@ node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE
    - 受け入れ条件を満たせそうか
    - 明らかな見落としやリスクがないか
 
-2. **architect へのレビュー依頼（必要に応じて）**: 「Architect 起動判断」に従い、設計上の複雑さやリスクが高い場合は architect に計画レビューを依頼する。architect のレビュー結果は新規Issueコメントとして投稿され、`msg-send.js`経路でorchestratorに通知される。このレビューはあくまで推奨であり、最終承認ではない。
+2. **architect へのレビュー依頼（必要に応じて）**: 「Architect」節および `architect.md` に従い、設計上の複雑さやリスクが高い場合は architect に計画レビューを依頼する。architect のレビュー結果は新規Issueコメントとして投稿され、`msg-send.js`経路でorchestratorに通知される。このレビューはあくまで推奨であり、最終承認ではない。
 
 3. **人間への提示と承認依頼**: orchestrator自身の一次評価（および必要に応じて architect のレビュー結果）を踏まえ、以下の形式で人間に提示する：
 
