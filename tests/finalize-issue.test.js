@@ -71,6 +71,36 @@ test('finalizeIssue: 全ワーカーを削除してからIssueをクローズす
   });
 });
 
+test('finalizeIssue: 実物のremove-workerへworkerNameを位置引数で渡し、削除が成功する', () => {
+  withTempWorkspace({
+    'issue-5-coder': { issue: 5, skill: 'gh-maestro-coder' },
+  }, (dir) => {
+    // defaultRemoveWorker は子プロセスへ --workspace を渡すが、resolveWorkspace は
+    // GH_MAESTRO_WORKSPACE を優先するため、実ワークスペースへ誤着弾しないようにする。
+    const savedWorkspace = process.env.GH_MAESTRO_WORKSPACE;
+    delete process.env.GH_MAESTRO_WORKSPACE;
+    try {
+      const result = finalizeIssue(
+        { workspace: dir, issue: 5 },
+        {
+          // removeWorkerFn を注入しないことで、実物の defaultRemoveWorker と
+          // finalize-issue.js → remove-worker.js の引数境界を通す。
+          closeIssueFn: () => ({ ok: true }),
+          killAssistantFn: () => ({ ok: true }),
+          findReviewPrsFn: () => [],
+        }
+      );
+      assert.deepEqual(result.workers, [{ name: 'issue-5-coder', ok: true }]);
+      assert.equal(result.removedCount, 1);
+      assert.equal(result.closed, true);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(dir, '.gh-maestro', 'workers.json'), 'utf8'))['issue-5-coder'], undefined);
+    } finally {
+      if (savedWorkspace === undefined) delete process.env.GH_MAESTRO_WORKSPACE;
+      else process.env.GH_MAESTRO_WORKSPACE = savedWorkspace;
+    }
+  });
+});
+
 test('finalizeIssue: ワーカー削除が一部失敗してもIssueは閉じる（best-effort）', () => {
   withTempWorkspace({
     'issue-5-coder': { paneId: '1', issue: 5 },
