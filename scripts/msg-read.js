@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// msg-read.js — GitHub Issue コメントの本文を読み出す
+// msg-read.js — GitHub Issue コメントまたは計画の本文を読み出す
 //
 // Usage:
 //   node msg-read.js <commentId> [--workspace <path>]
+//   node msg-read.js --plan --issue <N> [--workspace <path>]
 //
 // エージェントが repo 解決や jq クエリを手書きせず、1コマンドで本文を読めるようにする。
 
@@ -11,23 +12,25 @@
 const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { isRetryableGhFailure, graphqlCommentBody } = require('./shared/gh-fallback');
+const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+const { findPlanComments, stripPlanMarker } = require('./shared/plan-comment');
 
-const USAGE = `msg-read.js — GitHub Issue コメントの本文を読み出す
+const USAGE = `msg-read.js — GitHub Issue コメントまたは計画の本文を読み出す
 
-Usage: node msg-read.js <commentId> [--workspace <path>] [--issue <N>]
+Usage:
+  node msg-read.js <commentId> [--workspace <path>]
+  node msg-read.js --plan --issue <N> [--workspace <path>]
 
 Arguments:
-  <commentId>           読み出すコメントの ID（数値）
+  <commentId>           読み出すコメントの ID（数値）。--plan 指定時は指定不可
 
 Options:
+  --plan                Issue の pin 済み計画コメント本文を読み出す（--issue 必須）
+  --issue <N>           対象 Issue 番号（正の整数、--plan 指定時は必須）
   --workspace <path>    ワークスペースパス（省略時は環境変数またはCWDから解決）
-  --issue <N>           コメントが投稿されている Issue 番号。REST APIが失敗した際の
-                        GraphQLフォールバック専用（GraphQLはコメントIDから直接本文を
-                        引くrootクエリを持たないため）。REST成功時は使用されない。
-                        省略時、フォールバックが必要になった場合はエラーで終了する。
 
 Output (stdout):
-  マーカー行を除いたコメント本文
+  マーカー行を除いたコメント本文または計画本文
 
 workspace 解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索`;
 
@@ -38,7 +41,7 @@ let _ghRepoView = () => {
     { encoding: 'utf8' });
 };
 
-let _ghApiComment = (repo, commentId, issue) => {
+let _ghApiComment = (repo, commentId) => {
   const restResult = spawnSync('gh', ['api', `repos/${repo}/issues/comments/${commentId}`, '-q', '.body'],
     { encoding: 'utf8' });
 
@@ -47,7 +50,11 @@ let _ghApiComment = (repo, commentId, issue) => {
   }
 
   process.stderr.write('msg-read: REST API失敗のためGraphQLにフォールバックします\n');
-  return graphqlCommentBody({ repo, issue, commentId });
+  return graphqlCommentBody({ repo, commentId });
+};
+
+let _ghListComments = (repo, issue, opts = {}) => {
+  return listComments(repo, issue, opts);
 };
 
 const MARKER_RE = /^<!--\s*gh-maestro\s+(\{.*\})\s*-->/;
@@ -81,11 +88,9 @@ function main(argsOverride) {
   try {
     ({ values, rest } = parseFlags(args, {
       flags: { '--workspace': {}, '--issue': {} },
-      booleans: ['--help', '-h'],
-      // commentId はちょうど1つの位置引数。未知フラグ（-- 始まり）・余剰位置引数は
-      // パーサ側で拒否される（Issue #14 / argv-parsing-pitfalls。未知フラグ単独が
-      // commentId として通ると意図しない gh api 呼び出しに進むため）。
-      positionals: { min: 1, max: 1 },
+      booleans: ['--plan', '--help', '-h'],
+      // commentId は通常時にちょうど1つの位置引数。--plan 指定時は0個。
+      positionals: { min: 0, max: 1 },
     }));
   } catch (e) {
     if (e.name !== 'ArgsValidationError') throw e;
@@ -103,11 +108,33 @@ function main(argsOverride) {
     return { code: 0, lines: out, errLines: err };
   }
 
-  const commentId = rest[0];
+  const isPlan = values['--plan'] === true;
 
-  if (!commentId) {
-    writeErr(USAGE);
-    return { code: 1, lines: out, errLines: err };
+  if (isPlan) {
+    if (rest.length > 0) {
+      writeErr('msg-read: --plan 指定時は commentId を指定できません。');
+      writeErr(USAGE);
+      return { code: 1, lines: out, errLines: err };
+    }
+    if (!values['--issue']) {
+      writeErr('msg-read: --plan 指定時は --issue <N> が必須です。');
+      writeErr(USAGE);
+      return { code: 1, lines: out, errLines: err };
+    }
+    if (!/^[1-9]\d*$/.test(values['--issue'])) {
+      writeErr('msg-read: --issue は正の整数で指定してください。');
+      return { code: 1, lines: out, errLines: err };
+    }
+  } else {
+    if (values['--issue']) {
+      writeErr('msg-read: --issue は --plan 指定時のみ使用できます。');
+      writeErr(USAGE);
+      return { code: 1, lines: out, errLines: err };
+    }
+    if (rest.length !== 1) {
+      writeErr(USAGE);
+      return { code: 1, lines: out, errLines: err };
+    }
   }
 
   const workspace = resolveWorkspace(values['--workspace']);
@@ -124,10 +151,53 @@ function main(argsOverride) {
     return { code: 1, lines: out, errLines: err };
   }
   const repo = repoResult.stdout.trim();
+  if (!repo) {
+    writeErr('msg-read: リポジトリを解決できません（空のレスポンス）');
+    return { code: 1, lines: out, errLines: err };
+  }
 
-  // ── コメント読み出し ─────────────────────────────────────────────────
+  // ── 読み出し処理 ─────────────────────────────────────────────────────
 
-  const result = _ghApiComment(repo, commentId, values['--issue']);
+  if (isPlan) {
+    const issue = values['--issue'];
+    const ghOpts = { cwd: workspace };
+    const listResult = _ghListComments(repo, issue, ghOpts);
+    if (listResult.status !== 0) {
+      writeErr(`msg-read: コメント一覧の取得に失敗しました: ${listResult.stderr || '(empty)'}`);
+      return { code: 1, lines: out, errLines: err };
+    }
+
+    let comments;
+    try {
+      comments = parseCommentsResponse(listResult.stdout);
+    } catch {
+      writeErr('msg-read: コメント一覧のJSONパースに失敗しました');
+      return { code: 1, lines: out, errLines: err };
+    }
+
+    if (!Array.isArray(comments)) {
+      writeErr('msg-read: コメント一覧の形式が不正です');
+      return { code: 1, lines: out, errLines: err };
+    }
+
+    const plans = findPlanComments(comments);
+    if (plans.length === 0) {
+      writeErr(`msg-read: Issue #${issue} に計画コメントが見つかりません。`);
+      return { code: 1, lines: out, errLines: err };
+    }
+    if (plans.length > 1) {
+      writeErr(`msg-read: Issue #${issue} に計画コメントが複数存在します（${plans.length}件）。`);
+      return { code: 1, lines: out, errLines: err };
+    }
+
+    const planBody = plans[0].body || '';
+    const stripped = stripPlanMarker(planBody);
+    writeOut(stripped);
+    return { code: 0, lines: out, errLines: err };
+  }
+
+  const commentId = rest[0];
+  const result = _ghApiComment(repo, commentId);
 
   if (result.status !== 0) {
     writeErr(`msg-read: コメントの読み出しに失敗しました: ${result.stderr || '(empty)'}`);
@@ -145,6 +215,7 @@ function main(argsOverride) {
 module.exports = {
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComment: (fn) => { _ghApiComment = fn; },
+  _setGhListComments: (fn) => { _ghListComments = fn; },
   main,
   stripMarker,
   USAGE,

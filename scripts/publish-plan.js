@@ -22,9 +22,7 @@ const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { toWinPath } = require('./win-path');
 const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
-
-// 計画コメントを識別するための機械可読マーカー。本文先頭行に埋め込む。
-const PLAN_MARKER = '<!-- gh-maestro-plan:v1 -->';
+const { PLAN_MARKER, isPlanComment } = require('./shared/plan-comment');
 
 const USAGE = `publish-plan.js — Issue の pin 済み計画コメントを管理する
 
@@ -138,10 +136,7 @@ function publishPlan({ issue, body, workspace }, deps = {}) {
 
   // 計画マーカーを持つ pin 済みコメントを探す。
   // マーカーで識別することで、他目的で pin されたコメントを誤って上書きしない。
-  const pinnedPlan = comments.find(c =>
-    c.pin != null &&
-    c.body && c.body.includes(PLAN_MARKER),
-  );
+  const pinnedPlan = comments.find(isPlanComment);
 
   // ── 既存の計画 pin コメントを更新 ───────────────────────────────────────
 
