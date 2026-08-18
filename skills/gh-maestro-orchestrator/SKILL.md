@@ -45,7 +45,7 @@ gh-maestroの存在意義はquota経済である。コーダー起動・レビ�
 |---|---|
 | `gh-maestro-explorer` | 調査を依頼するワーカー。**意見を必要としない事実**を求めるときに使う。集めた事実だけを報告し、分析・判断・修正方針の提示はしない。調べる対象が広く分量を事前に見積もれないときに使い、既知の1件を見るだけなら起動せず自分で実行する |
 | `gh-maestro-diagnostician` | 調査を依頼するワーカー。**意見**を求めるときに使う。コードを解釈・判断し、バグの根本原因・影響範囲・修正方針を述べる |
-| `gh-maestro-architect` | 抽象設計の論点・選択肢・トレードオフの整理、およびコーダーのpin済み計画コメントのレビュー。確定要件と圧縮済み事実だけで扱う相談役で、対象Issueにコメントする。具体的な実装手順・コード調査・要件変更・優先順位・実装開始・マージは決めない |
+| `gh-maestro-architect` | 抽象設計の論点・選択肢・トレードオフの整理、およびコーダーの計画のレビュー。確定要件と圧縮済み事実だけで扱う相談役で、対象Issueにコメントする。具体的な実装手順・コード調査・要件変更・優先順位・実装開始・マージは決めない |
 | `gh-maestro-coder` | 局所的でスコープの明確な実装・PR作成（コスト効率重視） |
 | `gh-maestro-senior-coder` | 広範な影響分析・複雑なロジック調整・設計判断を伴う実装・PR作成。高い自己検証能力を持つ |
 | `gh-maestro-base` | 上記以外の動的役職（必ず `--prompt-file` で役割を定義する） |
@@ -144,7 +144,6 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 - **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` の削除を試み、失敗時は警告する（「Issue確定」参照）。成功時、あわせて対話型ワーカー**assistant**（`gh-maestro-assistant`スキル。issue/PRについての人間の質問に答える対話セッション）を新規WezTermウィンドウで自動起動する
 - **update-issue.js** — `gh issue edit` によるIssue本文更新の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、成功時に削除を試み、失敗時は警告する（「Issue確定」参照）
 - **comment-issue.js** — `gh issue comment` による通常のIssueコメント投稿の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、成功時に削除を試み、失敗時は警告する（反省会・保留リスト参照）
-- **publish-plan.js** — Issue の pin 済み計画コメントを管理する。pin済みコメントがあれば更新、なければ新規投稿してpinする（「計画評価と承認」参照）。`--issue <N> --body-file <path> [--workspace <path>]` で呼び出す
 - **run-council.js** — 複数モデル議論（council）の実行。議題から参加モデルの意見・投票をDiscussion上で集め、テンプレート要約を投稿する決定論的フェーズ機械（詳細は `council.md` 参照）
 - **run-council-investigation.js** — council の調査ジョブ。調査が必要と判断した場合のみ起動する使い捨てCLI（詳細は `council.md` 参照）
 
@@ -173,9 +172,9 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 2. **必要な調査**: 確定した要件を入力として explorer または diagnostician に必要な事実だけを調査させ、結果を統合可能な形に圧縮する。architect を起動する場合だけ、その圧縮結果を入力に使う。調査結果から要件を勝手に変更しない。
 3. **Architect起動判断**: 「Architect」節および `architect.md` に従い、抽象的な設計判断が必要な場合だけ architect を起動する。不要ならこの工程を省略する。
 4. **抽象設計の検討**: architect を起動した場合だけ、確定済み要件と圧縮済み調査コンテクストを渡し、対象 Issue への設計コメントを得る。不足情報・矛盾が返ったら、調査または人間確認へ戻る。
-5. **Coder起動**: `spawn-worker.js --skill gh-maestro-coder --issue <N> --description <desc>` または `--skill gh-maestro-senior-coder` で実装ワーカーを起動する。タスクの特長（設計上の複雑さや影響の大きさなど）を自律的に判断してどちらを使用するか選択する。**コーダーは実装に着手する前に、必ず計画をpin済みコメントとして投稿し、orchestratorに報告する。**
+5. **Coder起動**: `spawn-worker.js --skill gh-maestro-coder --issue <N> --description <desc>` または `--skill gh-maestro-senior-coder` で実装ワーカーを起動する。タスクの特長（設計上の複雑さや影響の大きさなど）を自律的に判断してどちらを使用するか選択する。**コーダーは実装に着手する前に、必ず計画をorchestratorに報告する。**
 6. **計画評価**: コーダーから計画報告が届いたら、以下「計画評価と承認」に従って計画を評価する。設計上の複雑さやリスクの大きさによっては architect に計画レビューを依頼する。最終的な承認は必ず人間が行う。
-7. **実装開始指示**: 人間の承認を得たら、`msg-send.js` でコーダーに承認を伝える。差し戻しの場合は修正指示を伝え、コーダーは同じpinコメントを更新して再報告する（publish-plan.js が自動判定するため、コーダー側で分岐不要）。
+7. **実装開始指示**: 人間の承認を得たら、`msg-send.js` でコーダーに承認を伝える。差し戻しの場合は修正指示を伝える。コーダーは計画を更新して再報告する。
 8. **PR検出**: 下記「PR検出」に従い、コーダーが作成したPRを自律検出する
 9. **レビュー監視**: PR番号取得後、下記「レビュー監視」に従い、レビューコメントとマージ状態を監視する
 10. **コメントトリアージ**: 新しいレビューコメントを受信するたびに「レビューコメントのトリアージ」を実行する
@@ -187,7 +186,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 
 要件定義を Issue 本文で確定したら、「この Issue を渡されたコーダーが実装計画を立てられるか」を自問し、NO なら人間と要件を確認して修正する。
 
-**実装詳細（対象ファイル・変更方針・作業分割・検証条件）は Issue 本文には書かない。** これらはコーダーが実装着手前の計画フェーズで作成し、`publish-plan.js` でpin済みコメントとして投稿する。Issue本文は「何を実現したいか」（目的・振る舞い・制約・対象外・受け入れ条件）に徹する。
+**実装詳細（対象ファイル・変更方針・作業分割・検証条件）は Issue 本文には書かない。** これらはコーダーが実装着手前の計画フェーズで作成し、計画として投稿する。Issue本文は「何を実現したいか」（目的・振る舞い・制約・対象外・受け入れ条件）に徹する。
 
 Issue は依存関係が無い限り並列で進行させる。直列化してよいのは「AがBの入力になる」場合だけである。ただし同時進行するIssue間でファイル競合を起こしてはならない。競合の可能性があるなら、前のPRがマージされてから次を起票する。
 
@@ -232,7 +231,7 @@ node "{{SCRIPTS_PATH}}/update-issue.js" --issue <N> --title "<正式タイトル
 
 ## 計画評価と承認
 
-コーダーは実装着手前に必ず計画を `publish-plan.js` でpin済みIssueコメントとして投稿し、`msg-send.js`でorchestratorに報告する。orchestratorはこの計画報告を受け取ったら、以下の手順で評価と承認を行う。
+コーダーは実装着手前に必ず計画をorchestratorに報告する。orchestratorはこの計画報告を受け取ったら、以下の手順で評価と承認を行う。
 
 ### 計画の取得
 
@@ -258,7 +257,7 @@ node "{{SCRIPTS_PATH}}/msg-read.js" --plan --issue $ISSUE --workspace $WORKSPACE
 【計画承認依頼】 Issue #<N>
 
 コーダー（<coder/senior-coder>）が実装計画を投稿しました:
-  <pin済みコメントURL>
+  <計画コメントURL>
 
 計画概要:
   - 変更ファイル: <N>件
@@ -298,10 +297,10 @@ orchestrator評価: <承認推奨 or 要修正（理由）>
   EOF
   ```
 
-- **差し戻し（修正依頼）**: `msg-send.js` でコーダーに修正指示を伝える。コーダーは計画を修正後、同じ `publish-plan.js` コマンドでpin済みコメントを更新し、再度報告して待機する。
+- **差し戻し（修正依頼）**: `msg-send.js` でコーダーに修正指示を伝える。コーダーは計画を更新して再報告し、待機する。
   ```sh
   node "{{SCRIPTS_PATH}}/msg-send.js" --issue <N> --skill <gh-maestro-coder または gh-maestro-senior-coder> --workspace $WORKSPACE --stdin <<'EOF'
-  計画に以下の修正が必要です。修正後、再度publish-plan.jsで計画を更新して報告してください:
+  計画に以下の修正が必要です。修正後、計画を更新して報告してください:
   - <具体的な修正点1>
   - <具体的な修正点2>
   EOF
@@ -309,7 +308,7 @@ orchestrator評価: <承認推奨 or 要修正（理由）>
 
 ### 計画承認フローとPRレビューフローの区別
 
-- **計画承認**（本節）: 実装着手前の設計判断。コーダーのpin済み計画コメントを対象とする。評価者はorchestrator自身（＋必要に応じてarchitect）。最終判断は人間。
+- **計画承認**（本節）: 実装着手前の設計判断。コーダーの計画を対象とする。評価者はorchestrator自身（＋必要に応じてarchitect）。最終判断は人間。
 - **PRレビュー**（下記「レビュー監視」「レビューコメントのトリアージ」）: 実装完了後のコード品質判断。Review Managerのfindingsを対象とする。トリアージとフィードバックの主体はorchestrator。最終マージ判断は人間。
 
 両者はフェーズ・対象・判断者が異なるため、混同しないこと。計画承認は実装前、PRレビューは実装後に発生する。
