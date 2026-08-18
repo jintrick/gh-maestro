@@ -76,8 +76,9 @@ Arguments:
   --repo <owner/repo>     対象リポジトリ
   --prompt-file <path>    任意の役割・作業指示をファイルで指定する。
                           gh-maestro-base 使用時は必須。--short-prompt と同時指定不可。
-  --short-prompt <text>   例外的な短い補足メッセージ。1行・200文字以内で、文字・数字・空白と
-                          . _ : / - のみ使用可能。任意の指示には --prompt-file を使用する。
+  --short-prompt <text>   例外的な短い補足メッセージ。1行・200文字以内。シェルが解釈する
+                          文字（$ \` " ' \\ ; | &）と改行は使用不可。任意の指示には
+                          --prompt-file を使用する。
   --workspace <path>      ワークスペースパス（省略時は CWD）
   --base-branch <branch>  worktree のベースブランチ
   --agent <id>            エージェントID（省略時はスキルに応じたデフォルト）
@@ -231,8 +232,8 @@ if (description && !/^[A-Za-z0-9_-]{1,50}$/.test(description)) {
 }
 if (!repo)        fail('--repo が必要です');
 if (shortPromptText != null && promptFileArg != null) fail('--short-prompt と --prompt-file は同時に指定できません');
-if (shortPromptText != null && !/^[\p{L}\p{N}\p{M}\p{Zs}._:/-]{1,200}$/u.test(shortPromptText)) {
-  fail('--short-prompt は1行・200文字以内で、文字・数字・空白と . _ : / - のみ使用できます。任意の指示はファイルに書き出し、--prompt-file <path> を使用してください');
+if (shortPromptText != null && !/^[^\r\n$`"'\\;|&]{1,200}$/.test(shortPromptText)) {
+  fail('--short-prompt は1行・200文字以内で、シェルが解釈する文字（$ ` " \' \\ ; | &）と改行は使用できません。任意の指示はファイルに書き出し、--prompt-file <path> を使用してください');
 }
 let prompt;
 try {
