@@ -101,15 +101,15 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 
 **起動後にワーカーへメッセージを送る・削除するときは、workerName を覚えず〈`--issue <N>` + `--skill <役割>`〉で指す。** workers.json から一意に解決される（`msg-send.js` / `remove-worker.js` が対応）。起動時の戻り値 workerName を変数に控える必要はない。
 
-例外は**同一Issue・同一役割で複数のワーカーを並列起動した場合**（下記「大規模タスクの分割」）だけ。この場合のみ一意に決まらず、スクリプトが候補一覧を表示してエラーにするので workerName（= `issue-<N>-<desc>`）で明示する。**指定方法はスクリプトごとに異なる。**
+例外は**同一Issue・同一役割で複数のワーカーを並列起動した場合**（下記「大規模タスクの分割」）だけ。この場合のみ一意に決まらず、スクリプトが候補一覧を表示してエラーにするので workerName（= `issue-<N>-<desc>`）で明示する。**`msg-send.js` / `remove-worker.js` のどちらも、workerName は位置引数で渡す**（`--skill` との併用は不可）。
 
-- `msg-send.js`: `--skill` を外し、workerName を**位置引数**で渡す（`--skill` と位置引数は併用できず、併用すると「本文は位置引数で渡せません」というエラーになる）。Issue番号は workers.json から解決されるため `--issue` は不要。
+- `msg-send.js`: `--skill` を外し、workerName を位置引数で渡す。Issue番号は workers.json から解決されるため `--issue` は不要。
   ```sh
   node "{{SCRIPTS_PATH}}/msg-send.js" issue-<N>-<desc> --workspace $WORKSPACE --stdin <<'EOF'
   <本文>
   EOF
   ```
-- `remove-worker.js`: workerName（`issue-<N>-<desc>`）を**位置引数**で渡す（`--issue` + `--skill` とは併用不可）。
+- `remove-worker.js`: workerName を位置引数で渡す（`--issue` + `--skill` とは併用不可）。
 
 ## アセット（`{{SCRIPTS_PATH}}/`）
 
