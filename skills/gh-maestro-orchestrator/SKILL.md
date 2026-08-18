@@ -121,10 +121,10 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - **remove-worker.js** — 個別ワーカーのプロセスをkillしてworktreeを削除する。対象は workerName の位置引数または〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する。ライフサイクル終了後の情報価値のない内部状態（`assistant-watch/<N>.json`・対象PRの`review-manager-<PR>.incomplete`・`executions.json`の当該issueレコード）もbest-effortで後始末する
 - **start-review-manager.js** — PRにReview Managerを起動する（**位置引数**: `start-review-manager.js $PR $REPO $WORKSPACE $ISSUE`。詳細は`monitor-recovery.md`の「PR監視・Review Managerの再起動」参照）
-- **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）。既読の正本は明示既読コメントID集合（Issue #207）。**msg-state が欠落・破損・旧形式・未初期化の場合、走査を停止し「reset-session.js での初期化が必要」と報告する**
+- **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）。既読の正本は明示既読コメントID集合。**msg-state が欠落・破損・旧形式・未初期化の場合、走査を停止し「reset-session.js での初期化が必要」と報告する**
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「PR検出」参照）
 - **process-lifecycle.js** — PID registryを走査しstaleなプロセスを掃除する（各「復旧手順」参照）
-- **reset-session.js** — 壊れた状態からセッションを強制リセットする。`msg-state` は単純削除せず、wipe前の管理対象 Issue の既読ベースラインを再構築する（Issue #207）。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口でもある
+- **reset-session.js** — 壊れた状態からセッションを強制リセットする。`msg-state` は単純削除せず、wipe前の管理対象 Issue の既読ベースラインを再構築する。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口でもある
 - **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「Issue確定」参照）
 - **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` の削除を試み、失敗時は警告する（「Issue確定」参照）。成功時、あわせて対話型ワーカー**assistant**（`gh-maestro-assistant`スキル。issue/PRについての人間の質問に答える対話セッション）を新規WezTermウィンドウで自動起動する
 - **update-issue.js** — `gh issue edit` によるIssue本文更新の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、成功時に削除を試み、失敗時は警告する（「Issue確定」参照）
@@ -159,11 +159,11 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 
 - **オーケストレーターは調査・実装コマンドを自分で実行しない。必ずワーカーに委譲する**
 - **ワーカー削除（`remove-worker.js` / `finalize-issue.js`）は、反省会が完了した後にだけ実行する。反省会前にワーカーを削除しない（コーダーが自分への指摘を振り返る機会を失う）**
-- **Issueをクローズする唯一の手段は `finalize-issue.js` である。人間から「Issueを閉じて」「クローズして」等と指示された場合も、その言葉をそのまま `gh issue close` の実行指示と解釈しない。反省会が未完了ならまず反省会を完了させてから `finalize-issue.js` を呼ぶ（Issue #213: `gh issue close` と `remove-worker.js` を個別に手で実行し、assistant終了処理だけが漏れて孤児プロセスが残った実障害があった）**
+- **Issueをクローズする唯一の手段は `finalize-issue.js` である。人間から「Issueを閉じて」「クローズして」等と指示された場合も、その言葉をそのまま `gh issue close` の実行指示と解釈しない。反省会が未完了ならまず反省会を完了させてから `finalize-issue.js` を呼ぶ**
 - `BASE_BRANCH`は保護ブランチ（`main`/`master`）でもworktreeブランチ（`issue-N-description`形式）でもない。セッション中に変更しない。起動時に保護ブランチ上にいた場合のみ、最初のIssue確定時に開発ブランチを切って設定する
 - `main` / `master`への直接pushは禁止
 - `gh pr close`は1件ずつ実行する（複数引数を渡すと失敗する）
-- **`scripts/` 配下または `skills/agents.yaml` に触れた変更を install したら、そのセッションでは以後いかなるタスクにも着手せず、セッションを終了して orchestrator を再起動する。** 稼働中の常駐プロセス（`inbox-supervisor.js` / `msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）は起動時にロードしたJSを require キャッシュに保持し続けるため、install してもそれらには新しいコードが届かない。気づかないまま作業を続けると「コードは直っているのに実システムでは壊れたまま」の状態で判断することになる（Issue #280 で実害。丸一日気づかなかった）。プロセスを走らせたままスクリプトを更新する機構は Issue #280 で不実装と決定したため、セッション再起動が唯一の回避手段である。
+- **`scripts/` 配下または `skills/agents.yaml` に触れた変更を install したら、そのセッションでは以後いかなるタスクにも着手せず、セッションを終了して orchestrator を再起動する。** 稼働中の常駐プロセス（`inbox-supervisor.js` / `msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）は起動時にロードしたJSを require キャッシュに保持し続けるため、install してもそれらには新しいコードが届かない。気づかないまま作業を続けると「コードは直っているのに実システムでは壊れたまま」の状態で判断することになる。プロセスを走らせたままスクリプトを更新する機構は セッション再起動が唯一の回避手段である。
   - 変更したファイルが4種の require 閉包に入るかを毎回判定するのは非現実的なので、`scripts/` に触れたら一律で再起動する。都度起動のスクリプトしか変えていない場合も同じ扱いにする（判定コストの方が高い）。
   - **`skills/**` 配下のドキュメントだけを変更した場合、再起動は不要。** 常駐プロセスは SKILL.md を読まない。陳腐化するのは変更したエージェント自身のコンテクストだけなので、必要なら該当箇所を読み直せば足りる。ここを混同して不要な再起動をしない。
 
@@ -192,9 +192,35 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 Issue は依存関係が無い限り並列で進行させる。直列化してよいのは「AがBの入力になる」場合だけである。ただし同時進行するIssue間でファイル競合を起こしてはならない。競合の可能性があるなら、前のPRがマージされてから次を起票する。
 
 
+### Issue本文テンプレート
+
+Issueの本文骨格と起票前チェックは `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/issue-template.md` に従うこと。
+
+### 人間の承認とGitHubへの反映
+
+草案の内容を**チャット上で人間に提示し、承認を得てから** GitHub に反映する。調査アンカーとして使っていた既存Issueがあればそれを更新し、無ければ新規作成する。本文は「概要（人間向け）」のみで構成する。
+
+Issue本文は必ず `write-draft.js` で論理パス（`/tmp/issue-<N>.md`）に書き出してから `--body-file` で渡す。`--body` へのインライン渡しは禁止（エスケープ問題が発生する）。実体パスを推論・抽出してはならない。Issue番号をファイル名に含めることで並列起票時の衝突を防ぐ。
+
+```sh
+node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-<N>.md --stdin <<'EOF'
+<Issue本文>
+EOF
+
+# 新規作成 — 出力: ISSUE_CREATED:<番号> <URL>
+node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" \
+  --body-file /tmp/issue-<N>.md --repo $REPO --workspace $WORKSPACE
+
+# 既存Issueを実装指示に更新
+node "{{SCRIPTS_PATH}}/update-issue.js" --issue <N> --title "<正式タイトル>" \
+  --body-file /tmp/issue-<N>.md --repo $REPO --workspace $WORKSPACE
+```
+
+`--workspace` は必ず明示する（省略するとassistant起動先がずれる）。
+
 ### 既存パターンの事前調査（新規UI/ロジック実装・複数ファイルへの同一修正を伴うIssueで必須）
 
-確定済み要件に既存の設計判断・要件確認を伴う実装が含まれる場合（新規 UI コンポーネント、認証フロー、データ整形処理、または同種の修正を複数ファイルに横展開する場合など）は、類似の目的を持つ既存コンポーネント・パターン・共有ユーティリティ関数がコードベースに無いか `gh-maestro-explorer` に調査させること。「参考実装」として特定の1ファイルの実装だけを示すのではなく、`scripts/shared/` 配下等に既存の共有ヘルパーが無いかを必ず確認する。既存パターン・共有ヘルパーが見つかった場合は、その事実を圧縮して Issue 本文に統合し、Architect を起動する場合だけ設計検討にも渡す（PR #89 反省会: 既存の `scripts/shared/workspace.js::parseFlags` を調査せず、8スクリプトに独自パーサーが重複実装された）。
+確定済み要件に既存の設計判断・要件確認を伴う実装が含まれる場合（新規 UI コンポーネント、認証フロー、データ整形処理、または同種の修正を複数ファイルに横展開する場合など）は、類似の目的を持つ既存コンポーネント・パターン・共有ユーティリティ関数がコードベースに無いか `gh-maestro-explorer` に調査させること。「参考実装」として特定の1ファイルの実装だけを示すのではなく、`scripts/shared/` 配下等に既存の共有ヘルパーが無いかを必ず確認する。既存パターン・共有ヘルパーが見つかった場合は、その事実を圧縮して Issue 本文に統合し、Architect を起動する場合だけ設計検討にも渡す。
 
 一度起動したexplorerは、issueをクローズするまでの間再利用する。一つのissueに対して複数のexplorerを次々に起動してはならない。初期化のために無駄なトークンを浪費するためである。
 
@@ -224,7 +250,7 @@ node "{{SCRIPTS_PATH}}/msg-read.js" --plan --issue $ISSUE --workspace $WORKSPACE
    - 受け入れ条件を満たせそうか
    - 明らかな見落としやリスクがないか
 
-2. **architect へのレビュー依頼（必要に応じて）**: 「Architect」節および `architect.md` に従い、設計上の複雑さやリスクが高い場合は architect に計画レビューを依頼する。architect のレビュー結果は新規Issueコメントとして投稿され、`msg-send.js`経路でorchestratorに通知される。このレビューはあくまで推奨であり、最終承認ではない。
+2. **architect へのレビュー依頼（必要に応じて）**: 設計上の複雑さやリスクが高い場合は architect に計画レビューを依頼する。 「Architect」節参照。
 
 3. **人間への提示と承認依頼**: orchestrator自身の一次評価（および必要に応じて architect のレビュー結果）を踏まえ、以下の形式で人間に提示する：
 
@@ -288,59 +314,6 @@ orchestrator評価: <承認推奨 or 要修正（理由）>
 
 両者はフェーズ・対象・判断者が異なるため、混同しないこと。計画承認は実装前、PRレビューは実装後に発生する。
 
-### Issue本文テンプレート（人間向けのみ）
-
-Issueの読者は**承認判断を行う人間**だけである（実装詳細をIssue本文に書かない理由は「Issue確定」参照）。
-
-本文骨格と起票前チェックは `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/issue-template.md` に従うこと。
-
-`{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/issue-template.md` は単なる例文ではない。以下を強制するためのテンプレート兼チェックリストである。
-
-- 最上位見出しは `## 概要（人間向け）` に固定する（`## 実装詳細（コーダー向け）` は廃止された）
-- 「概要」は人間が承認判断するための情報だけを書く
-- 「実装詳細」はIssue本文に含めない（コーダーが計画フェーズでpin済みコメントとして作成する。詳細は「Issue確定」参照）
-- 起票前に `## 起票前チェック` を満たしているか確認する
-
-チャット上で人間に提示して承認を求めるのは「概要」セクションであり、人間は「概要」だけで承認判断ができる状態にする。「概要」に具体的なシンボル名が混入していたら草稿を修正してから提示する。
-
-### 人間の承認とGitHubへの反映
-
-草案の内容を**チャット上で人間に提示し、承認を得てから** GitHub に反映する。人間は GitHub 上で随時内容を確認できる。
-
-調査アンカーとして使っていた既存Issueがある場合はそのIssueを更新し、全く新規の作業で調査不要な場合は新規作成する。Issue本文は「概要（人間向け）」のみで構成する（実装詳細を含めない理由は「Issue確定」参照）。
-
-Issue本文は必ず `/tmp/issue-<N>.md`（例: `/tmp/issue-42.md`）という**論理パス**に書き出してから `--body-file` で渡す。`--body` へのインライン渡しは禁止（改行・特殊文字のエスケープ問題が発生する）。Issue番号をファイル名に含めることで並列起票時の衝突を防ぐ。論理パスの実体（Windows実パス）を推論してはならず、書き出しは必ず `write-draft.js` を経由する。
-
-```sh
-# 草案を書き出す（Issue番号確定前は issue-draft.md でよい）
-node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-draft.md --stdin <<'EOF'
-<Issue本文>
-EOF
-# 出力: DRAFT_WRITTEN:<実体パス>
-
-# 新規Issue作成（調査不要で全く新規の作業）— create-issue.js は内部で win-path.js を呼ぶため論理パスのままでよい
-# --workspace は必ず明示する（省略するとassistant起動先がずれ、finalize-issue.js側から見つからず
-# 終了できなくなる実障害があった。他のスクリプト呼び出しと同様に必ず $WORKSPACE を渡す）
-node "{{SCRIPTS_PATH}}/create-issue.js" --title "<タイトル>" --body-file /tmp/issue-draft.md --workspace $WORKSPACE
-# 出力: ISSUE_CREATED:<番号> <URL>
-```
-
-**既存Issueを更新する場合（調査アンカーから実装指示へ育てる）** — `update-issue.js` が論理パスを実体パスへ解決するため、`write-draft.js` の出力を解析せず、論理パスをそのまま `--body-file` に渡す。
-
-```sh
-# 草案を書き出す（実体パスを推論・抽出しない）
-node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-<N>.md --stdin <<'EOF'
-<Issue本文>
-EOF
-
-# 既存Issueを実装指示に更新
-node "{{SCRIPTS_PATH}}/update-issue.js" \
-  --issue <N> --title "<正式タイトル>" --body-file /tmp/issue-<N>.md \
-  --repo $REPO --workspace $WORKSPACE
-```
-
-`create-issue.js`、`update-issue.js`、`comment-issue.js` は、GitHub操作が成功した場合にだけ `--body-file` の削除を試みる。GitHub操作に失敗した場合は原案を保持し、操作成功後の削除だけに失敗した場合も、操作成功として扱った上で原案保持の警告を出す。
-
 ## 自分の inbox の監視
 
 worker からの報告はすべて GitHub Issue コメントとして投稿される。
@@ -357,17 +330,15 @@ pull が唯一の配送根拠である。届くのを待つ受動的な経路は
 
 **プロセスが動いていることは、この Monitor を張らなくてよい理由にはならない。** 前のセッション等のプロセスが仮に残っていても、その出力（`NEW_MESSAGE`）はログファイルに書かれるだけで、**自分が Monitor を張っていなければ自分のセッションには一切届かない**。この Monitor は「プロセスを起こすため」だけでなく「自分に届かせるため」に張るものである。既に稼働中のプロセスがあって起動が拒否された場合（`重複起動を検出しました` で exit 1）は、拒否メッセージが案内する `--watch-pid <pid>` の Monitor を張ること——判断を挟まず、案内されたコマンドをそのまま使う。
 
-**実障害**: この Monitor と `poll-pr.js` の Monitor をどちらも張らないままコーダーを起動し、報告も PR 作成も一切画面に出ないまま放置した。`pids/` にプロセスは居たため「ポーリングは生きています」と誤報告し、原因を配送側のバグと誤認した。**プロセスの生死を、通知が自分に届くことの根拠にしてはならない。**
-
 Monitorから届く通知を処理する：
 - `NEW_MESSAGE:<issue>:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を読む。内容に応じて処理する（PR_DETECTED → PR番号を記録 等）。**完了後は直ちにMonitorに戻る**
 
-**既読の仕組み（Issue #207）**: ワーカー生成時（spawn-worker.js）に、その Issue の既存コメントが既読ベースラインとして記録される。そのため、**ワーカー起動後に投稿されたコメントだけが `NEW_MESSAGE` として届く**。ワーカー生成前に存在した古いコメントが一括通知されることはない。もし msg-poll が `未初期化です。reset-session.js で初期化してください` や `旧形式(v1)です` を報告したら、セッション初期化・移行として `node "{{SCRIPTS_PATH}}/reset-session.js" --workspace $WORKSPACE` を実行してから再開する。
+**既読の仕組み**: ワーカー生成時（spawn-worker.js）に、その Issue の既存コメントが既読ベースラインとして記録される。そのため、**ワーカー起動後に投稿されたコメントだけが `NEW_MESSAGE` として届く**。ワーカー生成前に存在した古いコメントが一括通知されることはない。もし msg-poll が `未初期化です。reset-session.js で初期化してください` や `旧形式(v1)です` を報告したら、セッション初期化・移行として `node "{{SCRIPTS_PATH}}/reset-session.js" --workspace $WORKSPACE` を実行してから再開する。
 
 この inbox 監視は PR 検出・Review Manager 起動通知・本番公開（CI/CD）確認・反省会でのコーダーからの応答など、
 orchestrator が受け取るすべてのメッセージの受信経路である。セッション中は常に1本だけ稼働させること。
 
-**調査目的であっても、`NEW_MESSAGE` 通知を待たずに `gh api .../comments`・`gh issue view --comments`・`msg-read.js <commentId>` 等でコメントを先読みしてはならない。** `msg-state`（既読集合）を更新できるのは `msg-poll.js` の定期スキャン自身がそのコメントを初めて処理した瞬間だけであり、`msg-read.js` を含めどの読み出し手段も既読を記録しない。そのため、通知より先に内容を知ってしまうと、後続のスキャンでそのコメントに初めて到達した時点で必ず `NEW_MESSAGE` として届く（実際に二重投稿されたわけではなく、単に同じコメントを2回見ることになるだけだが、紛らわしいので避ける）。コメントの内容は必ず `NEW_MESSAGE` 通知を受けてから、その `commentId` で `msg-read.js` を呼んで確認すること。
+**調査目的であっても、`NEW_MESSAGE` 通知を待たずに `gh api .../comments`・`gh issue view --comments`・`msg-read.js <commentId>` 等でコメントを先読みしてはならない。** `msg-state`（既読集合）を更新できるのは `msg-poll.js` の定期スキャン自身がそのコメントを初めて処理した瞬間だけであり、`msg-read.js` を含めどの読み出し手段も既読を記録しない。そのため、通知より先に内容を知ってしまうと、後続のスキャンでそのコメントに初めて到達した時点で必ず `NEW_MESSAGE` として届く。コメントの内容は必ず `NEW_MESSAGE` 通知を受けてから、その `commentId` で `msg-read.js` を呼んで確認すること。
 
 `msg-poll.js` は継続モードで起動しようとした際、同じ inbox（`self=orchestrator`）を既に監視している生存プロセスを検知すると、新規プロセスを起動せずエラーで終了する（多重起動防止）。これはセーフガードであり、正常系では**起動前にこのセーフガードに頼らず**、自分がまだ起動していないかをまず思い出すこと。
 
