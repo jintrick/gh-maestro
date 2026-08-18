@@ -483,8 +483,8 @@ function cleanupWorktree({ state, statePath, session, worktreeDir, workspace, ex
 
 /**
  * フェーズ全滅（1名も成功せず）の停止処理。stopped state を永続化し、worktree を
- * 片付けて終了コード3を返す。失敗理由は state に永続化済み（plan: 終了コード3・
- * human-escalation 相当）。
+ * 片付けて終了コード3を返す。失敗理由は state に永続化済みで、自動再実行はしない
+ * （orchestrator が人間と再開可否を判断する）。
  *
  * @param {object} opts
  * @param {object} opts.state
