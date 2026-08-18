@@ -1,7 +1,6 @@
 ---
 paths:
   - "scripts/**"
-  - "tests/**"
 ---
 
 # 手書きargvパースの落とし穴
