@@ -330,7 +330,7 @@ orchestrator が受け取るすべてのメッセージの受信経路である�
 
 **調査目的であっても、`NEW_MESSAGE` 通知を待たずに `gh api .../comments`・`gh issue view --comments`・`msg-read.js <commentId>` 等でコメントを先読みしてはならない。** `msg-state`（既読集合）を更新できるのは `msg-poll.js` の定期スキャン自身がそのコメントを初めて処理した瞬間だけであり、`msg-read.js` を含めどの読み出し手段も既読を記録しない。そのため、通知より先に内容を知ってしまうと、後続のスキャンでそのコメントに初めて到達した時点で必ず `NEW_MESSAGE` として届く。コメントの内容は必ず `NEW_MESSAGE` 通知を受けてから、その `commentId` で `msg-read.js` を呼んで確認すること。
 
-`msg-poll.js` は継続モードで起動しようとした際、同じ inbox（`self=orchestrator`）を既に監視している生存プロセスを検知すると、新規プロセスを起動せずエラーで終了する（多重起動防止）。これはセーフガードであり、正常系では**起動前にこのセーフガードに頼らず**、自分がまだ起動していないかをまず思い出すこと。
+`msg-poll.js` は継続モードで起動しようとした際、同じ inbox（`self=orchestrator`）を既に監視している生存プロセスを検知すると、新規プロセスを起動せずエラーで終了する（多重起動防止）。
 
 ### 誤って複数起動してしまった場合の復旧手順（inbox監視）
 
@@ -346,8 +346,8 @@ orchestrator が受け取るすべてのメッセージの受信経路である�
 
 以下はワーカー・Inbox Supervisorから届く通知やマーカーの見分け方と一次対応。詳細な原因・復旧手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` を参照する。
 
-- **ワーカーの異常終了通知**（`⚠️ 起動失敗または異常終了: exit code <N>...`）: 終了フックが非ゼロ終了時に自動投稿する。そのワーカーは作業を完了できずに死んでいる。「まだ報告が来ないだけ」と待ち続けない。原因を切り分けて人間に伝える。
-- **監視プロセスの異常終了通知**（`⚠️ 監視プロセス <script> が異常終了しました（exit code <N>）...`）: 常駐監視（`msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）が非ゼロ終了したとき、プロセス自身が自動投稿する。その監視は停止している。「まだ何も来ないだけ」と待ち続けてはならない。どの監視が止まったかを確認し（`$WORKSPACE/.gh-maestro/pids/*.json`の`script`名で特定）、`poll-pr.js` / `poll-reviews.js` は `monitor-recovery.md` の再起動手順で再起動する。`msg-poll.js` は「自分の inbox の監視」の再起動規約に従う（アラーム→即再起動）。
+- **ワーカーの異常終了通知**（`⚠️ 起動失敗または異常終了: exit code <N>...`）: 終了フックが非ゼロ終了時に自動投稿する。そのワーカーは作業を完了できずに死んでいる。原因を切り分けて人間に伝える。
+- **監視プロセスの異常終了通知**（`⚠️ 監視プロセス <script> が異常終了しました（exit code <N>）...`）: 常駐監視（`msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）が非ゼロ終了したとき、プロセス自身が自動投稿する。その監視は停止している。どの監視が止まったかを確認し（`$WORKSPACE/.gh-maestro/pids/*.json`の`script`名で特定）、`poll-pr.js` / `poll-reviews.js` は `monitor-recovery.md` の再起動手順で再起動する。`msg-poll.js` は「自分の inbox の監視」の再起動規約に従う（アラーム→即再起動）。
 - **親セッション消滅による監視停止通知**（`監視プロセス <script> が親セッションの消滅を検出して自動終了しました（exit code 3）...`）: `msg-poll.js` / `inbox-supervisor.js` が親セッション死亡を検知して `exit 3` で自滅したときの専用通知。プロセスの不具合ではなく、オーケストレーターセッションの終了に追随する停止である。死のスイッチの判定は PID の再利用（起動時刻照合）にも正しく反応する（親セッションが死んだ後にその PID が別プロセスに使い回されていても居座らない）。監視は停止しているため、新しいセッションでは通常どおり起動する（inbox-supervisor は自動起動されるが、msg-poll は自動復活しないため自分で Monitor を起動する）。停止中の取りこぼし確認は `monitor-recovery.md` の「inbox監視の沈黙」参照。
 - **監視プロセスを張った Monitor の終了 = 異常のアラーム**: `poll-pr.js` / `poll-reviews.js` / `msg-poll.js` を張った Monitor が終了（exit 0 でない）したら、それは「監視が正常完了した」ことではなく、**監視プロセスの異常終了のアラーム**である。`PR_MERGED` / `PR_CLOSED` を読んで終了したときだけ、意図した終了として扱う。それ以外の終了（特に exit code 非ゼロ）を見落とすと、監視が止まったまま誰にも気づかれない。受信したら、対応する監視プロセスが停止していないか・その監視対象の機能が動いているかを確認する（手順は `monitor-recovery.md` の「監視プロセスの異常死」を参照）。
 - **配送断念の通知**（`⚠️ ワーカー "<name>" へのメッセージ配送に5回失敗し断念しました...`）: resume配送が5回リトライしても失敗したことをInbox Supervisor自身が通知する。上記と同様、そのワーカーは作業を完了できていない。
@@ -372,14 +372,14 @@ PR検出時の出力:
 - `PR_DETECTED:<PR>` — 通常通りPR番号が報告される
 - `PR_CLOSED_RESUMED:<PR>` — 監視していたPRがクローズされ、新PR検出に復帰した（この後 `PR_CLOSED` に続いて届く）
 
-`PR_BASE_MISMATCH` を受け取った場合、即座に処理を中断する必要はない（PR自体は作成されている）が、PRのベースブランチが想定外であることを認識しておくこと。後続のマージフローに影響を与える可能性があるため、人間にその旨伝えることを検討する。
+`PR_BASE_MISMATCH` を受け取った場合、PR自体は作成されているため処理を中断する必要はないが、後続のマージフローに影響しうるため人間に伝える。
 
-PRが長時間（目安: 10分）検出されない場合はコーダーが失敗した可能性がある。`msg-send.js` で状況確認するか、Issueに `human-escalation` ラベルが付いていないか確認する。
+PRが検出されないままコーダーの失敗が疑われる場合は、Issueに `human-escalation` ラベルが付いていないか確認する。
 **通常コーダー（gh-maestro-coder）が実装に失敗してエスカレーションされた場合、人間が承認した段階で上位のシニアコーダー（gh-maestro-senior-coder）を適用して再起動することを検討せよ。**
 
 **`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、`monitor-recovery.md`の「PR監視・Review Managerの再起動」に従って自分で起動すること。
 
-**Review Managerが起動直後または実行中にクラッシュした場合、通常ワーカーと同じ`⚠️ 起動失敗または異常終了: exit code <N>...`という`NEW_MESSAGE`が自分のinboxに届く**（`from`が`issue-<N>-review-manager-pr-<PR>`という名前になる。通常ワーカーの異常終了通知と同じ経路・同じ処理でよい）。これを受け取ったら、poll-pr.js自体は生きたままPR/レビュー監視を継続しているため慌てて再起動する必要はないが、「まだレビューが来ないだけ」と誤解して待ち続けてもいけない。`$WORKSPACE/.gh-maestro/worker-logs/issue-<N>-review-manager-pr-<PR>.log` で原因を確認し（`<N>`はcrash通知の`from`に含まれるIssue番号）、人間に報告した上で、原因を解消してから`monitor-recovery.md`の「PR監視・Review Managerの再起動」で仕切り直す（`poll-pr.js`自体の再起動は不要）。
+**Review Managerが起動直後または実行中にクラッシュした場合、通常ワーカーと同じ`⚠️ 起動失敗または異常終了: exit code <N>...`という`NEW_MESSAGE`が自分のinboxに届く**（`from`が`issue-<N>-review-manager-pr-<PR>`という名前になる。通常ワーカーの異常終了通知と同じ経路・同じ処理でよい）。これを受け取ったら、poll-pr.js自体は生きたままPR/レビュー監視を継続しているため再起動は不要である。`$WORKSPACE/.gh-maestro/worker-logs/issue-<N>-review-manager-pr-<PR>.log` で原因を確認し（`<N>`はcrash通知の`from`に含まれるIssue番号）、人間に報告した上で、原因を解消してから`monitor-recovery.md`の「PR監視・Review Managerの再起動」で仕切り直す（`poll-pr.js`自体の再起動は不要）。
 
 ### PR監視・Review Managerの再起動が必要なとき
 
@@ -397,7 +397,7 @@ PR番号が確定したら、レビューコメントとマージ状態の通知
 - `PR_PUSH:<sha>` → コーダーが修正コミットをPRにプッシュした。レビューは初回PR作成時のみ実行される（push後の再レビューはない）。マージ可否の確認は「マージ可否ゲート」通過時のみ。未通過なら残 BLOCKER の解消を待つ。**転送済みの BLOCKER/MAJOR への修正 push を検出したら、Review Manager を再起動せず、そのIssueの explorer（未起動なら新規起動、既存があれば再利用）に「指摘の再現条件が実際に解消されているか」の事実確認を依頼する。** 判断（対応として十分か）は explorer の報告を踏まえて orchestrator が行う（explorer は事実確認に徹し判断はしない）。**新規起動する場合、`spawn-worker.js` は既定で `base_branch` から新規ブランチを作るため、対象PRの変更を一切含まない。事実確認を依頼する前に、対象PRのブランチ/コミットを `git fetch` + `checkout` させてから確認させること**（これを怠り、未反映の`base_branch`を調査させて「修正が反映されていない」という誤った結果を得た実例がある）
 - `PR_MERGED:<PR番号>` → マージ完了。`git -C $WORKSPACE pull --ff-only` で `BASE_BRANCH` を最新化してから本番公開（CI/CD）確認（下記「本番公開（CI/CD）確認」参照）へ進む。CI/CD確認完了後に反省会を実施する。**この時点ではワーカープロセス・worktreeを削除しない**（後始末の `finalize-issue.js` は下記「反省会」完了後にのみ実行する）
 - `PR_CLOSED:<PR番号>` → 該当PRが却下・キャンセルでクローズされた（`CLOSED`）。マージはされない。この後 `poll-pr.js` が新 PR の検出に復帰する（`PR_CLOSED_RESUMED`）。クローズ理由を確認し、必要に応じてコーダーに再指示する。`PR_CLOSED_RESUMED:<PR番号>` は「監視プロセスが生きていて新 PR を待っている」という生存のシグナルでもあるため、**この通知以降は新 PR の `PR_DETECTED` を待つ**（無言のまま監視が止まったと誤解しない）
-- `POLL_ERROR:<detail>` → レビュー監視のGitHubアクセスが失敗し始めた（GitHub障害・一時的なネットワーク断など）。ポーラーは再試行を継続するので何かを起動し直す必要はないが、**「レビューがまだ来ないだけ」と解釈して待ち続けてはならない**。レビュー監視が劣化していることを人間に伝える。復旧すれば `POLL_RECOVERED` が届く
+- `POLL_ERROR:<detail>` → レビュー監視のGitHubアクセスが失敗し始めた（GitHub障害・一時的なネットワーク断など）。ポーラーは再試行を継続するため起動し直す必要はない。レビュー監視が劣化していることを人間に伝える。復旧すれば `POLL_RECOVERED` が届く
 - `POLL_RECOVERED` → 上記の劣化から復旧した。通常のレビュー監視に戻ってよい
 - 人間からの報告も同様に受け付ける
 - ポーリング間隔は30秒（`poll-reviews.js`の既定値）。アクティビティがなければ自動で間隔が延びる
