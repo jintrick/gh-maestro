@@ -5,8 +5,7 @@
 // 次回reset-session.jsがjunction非追跡で安全に掃除する。残骸を手動rmしないこと。
 //
 // Usage:
-//   node remove-worker.js \
-//     --worker-name <name> \
+//   node remove-worker.js <workerName> \
 //     --workspace <path>
 
 const { spawnSync, execSync } = require('./child-process');
@@ -24,18 +23,20 @@ const { ARTIFACTS, legacyWorkerOwner, recordPath } = require('./shared/record-pa
 
 const USAGE = `remove-worker.js — ワーカープロセスを kill し worktree を削除する
 
-Usage: node remove-worker.js --worker-name <name> [--workspace <path>]
+Usage: node remove-worker.js <workerName> [--workspace <path>]
        node remove-worker.js --issue <N> --skill <role> [--workspace <path>]
 
+Arguments:
+  <workerName>           削除するワーカー名。--issue+--skill と併用不可。
+
 Options:
-  --worker-name <name>  削除するワーカー名。--issue+--skill と併用不可。
   --issue <N>           削除対象ワーカーを workerName ではなく〈Issue番号 + 役割〉で指定する場合のIssue番号。
   --skill <role>        同上の役割（gh-maestro-coder等）。workers.json から一意に解決する。
-                        該当が複数ある場合は候補を表示してエラー終了するので --worker-name で明示する。
+                        該当が複数ある場合は候補を表示してエラー終了するので workerName（位置引数）で明示する。
   --workspace <path>    ワークスペース（省略時は GH_MAESTRO_WORKSPACE env または
                         CWDからの .gh-maestro/ 上方探索で解決）
 
---worker-name か〈--issue + --skill〉のいずれかで削除対象を指定する。
+workerName（位置引数）か〈--issue + --skill〉のいずれかで削除対象を指定する。
 ワーカープロセスツリーを kill し、worktree と同名ブランチを削除し、workers.json からエントリを除く。
 移行前セッションが残した WezTerm ペイン（レガシー paneId）があればそれも kill する。
 ディレクトリがロックで残っても次回 reset-session.js が junction 非追跡で安全に掃除する
@@ -46,11 +47,11 @@ if (require.main === module) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(argv, {
-      flags: { '--worker-name': {}, '--workspace': {}, '--issue': {}, '--skill': {} },
+      flags: { '--workspace': {}, '--issue': {}, '--skill': {} },
       booleans: ['--help', '-h'],
-      // このスクリプトは位置引数を取らない。余剰な位置引数・未知フラグはパーサ側で拒否される
+      // ワーカー名を1つだけ位置引数で受け取る。余剰な位置引数・未知フラグはパーサ側で拒否される
       // （spawn-worker.js / create-issue.js と同じ rest 検証パターン。argv-parsing-pitfalls参照）。
-      positionals: { min: 0, max: 0 },
+      positionals: { min: 0, max: 1 },
     }));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
@@ -76,10 +77,10 @@ if (require.main === module) {
   const workspace = resolveWorkspace(values['--workspace']);
   if (!workspace) fail('ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
 
-  // 削除対象の解決: --worker-name（明示）優先。無ければ〈--issue + --skill〉から逆引きする。
-  let workerName = values['--worker-name'];
+  // 削除対象の解決: workerName（位置引数）を優先。無ければ〈--issue + --skill〉から逆引きする。
+  let workerName = rest[0];
   if (workerName && (values['--issue'] || values['--skill'])) {
-    fail('--worker-name と〈--issue + --skill〉は併用できません。どちらか一方で指定してください。');
+    fail('workerName（位置引数）と〈--issue + --skill〉は併用できません。どちらか一方で指定してください。');
   }
   if (!workerName) {
     if (!values['--issue'] || !values['--skill']) {

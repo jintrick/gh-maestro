@@ -74,7 +74,7 @@ function collectWorkersForIssue(workspace, issue) {
 function defaultRemoveWorker(workspace, workerName) {
   const r = spawnSync(process.execPath, [
     path.join(__dirname, 'remove-worker.js'),
-    '--worker-name', workerName,
+    workerName,
     '--workspace', workspace,
   ], { encoding: 'utf8' });
   return { ok: r.status === 0, status: r.status, stderr: (r.stderr || '').trim() };

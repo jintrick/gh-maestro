@@ -53,7 +53,7 @@ Arguments:
 Options:
   --skill <role>        （orchestrator 専用）送信先ワーカーを〈--issue + 役割（gh-maestro-coder等）〉で指定する。
                         workers.json から一意に解決する。ワーカーコンテキストでは使用不可（エラー）。
-                        該当が複数ある場合は候補を表示してエラー終了するので --worker 名（位置引数）で明示する。
+                        該当が複数ある場合は候補を表示してエラー終了するので recipient（位置引数）で明示する。
   --from <name>         送信元名。ワーカーコンテキストでは無視され、常に GH_MAESTRO_WORKER の値になる。
   --issue <N>           投稿先の Issue 番号。--skill 使用時は必須。ワーカーコンテキストでは
                         ワーカー名 issue-<N>-<desc> から自動導出されるため通常は不要。
@@ -322,6 +322,11 @@ function main(argsOverride, envOverride, ioOverride) {
   } else if (skillFlag) {
     // （orchestrator が）--skill 指定時は〈--issue + 役割〉から workerName を逆引きする。
     // --skill モードでは位置引数に recipient を置かない。
+    if (rest.length > 0) {
+      writeErr('msg-send: 宛先は --skill（--issue + --skill）または位置引数のどちらか一方で指定してください。併用できません。');
+      writeErr(USAGE);
+      return { code: 1, lines: out, errLines: err };
+    }
     const skillIssue = values['--issue'] || env.ISSUE || null;
     if (!skillIssue) {
       writeErr('msg-send: --skill 使用時は --issue が必要です（送信先ワーカーを issue+役割で特定するため）。');

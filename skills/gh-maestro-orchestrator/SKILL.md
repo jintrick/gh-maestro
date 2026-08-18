@@ -109,7 +109,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
   <本文>
   EOF
   ```
-- `remove-worker.js`: `--worker-name issue-<N>-<desc>` を使う（`--issue` + `--skill` とは併用不可）。
+- `remove-worker.js`: workerName（`issue-<N>-<desc>`）を**位置引数**で渡す（`--issue` + `--skill` とは併用不可）。
 
 ## アセット（`{{SCRIPTS_PATH}}/`）
 
@@ -118,7 +118,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - **spawn-worker.js** — worktreeを作りワーカーをバックグラウンドで起動する（画面は使わない。「ワーカーの起動」参照）
 - **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉。本文は位置引数では渡せず、`--stdin`（ヒアドキュメントは`<<'EOF'`とクォート付きにする）または `--body-file` で渡す
 - **msg-read.js** — コメントIDまたは計画から本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE` または `msg-read.js --plan --issue <N> --workspace $WORKSPACE`
-- **remove-worker.js** — 個別ワーカーのプロセスをkillしてworktreeを削除する。対象は〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
+- **remove-worker.js** — 個別ワーカーのプロセスをkillしてworktreeを削除する。対象は workerName の位置引数または〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する。ライフサイクル終了後の情報価値のない内部状態（`assistant-watch/<N>.json`・対象PRの`review-manager-<PR>.incomplete`・`executions.json`の当該issueレコード）もbest-effortで後始末する
 - **start-review-manager.js** — PRにReview Managerを起動する（**位置引数**: `start-review-manager.js $PR $REPO $WORKSPACE $ISSUE`。詳細は`monitor-recovery.md`の「PR監視・Review Managerの再起動」参照）
 - **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）。既読の正本は明示既読コメントID集合（Issue #207）。**msg-state が欠落・破損・旧形式・未初期化の場合、走査を停止し「reset-session.js での初期化が必要」と報告する**
@@ -162,7 +162,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <hooks-prompt-file>      --issue 12 --description fix-hooks ...
 ```
 
-この並列分割は「同一issue・同一役割で複数ワーカー」の唯一の正当なケースであり、この場合のみ〈`--issue` + `--skill`〉で一意に決まらないため、workerName（= `issue-12-fix-utils`）で明示する。指定方法はスクリプトごとに異なる（`msg-send.js` は位置引数、`remove-worker.js` は `--worker-name`）。詳細は「ワーカーの指し方」参照。
+この並列分割は「同一issue・同一役割で複数ワーカー」の唯一の正当なケースであり、この場合のみ〈`--issue` + `--skill`〉で一意に決まらないため、workerName（= `issue-12-fix-utils`）で明示する。`msg-send.js` と `remove-worker.js` のどちらも位置引数で指定する。詳細は「ワーカーの指し方」参照。
 
 ## 不変条件
 
