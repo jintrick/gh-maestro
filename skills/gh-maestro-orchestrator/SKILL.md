@@ -101,7 +101,15 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 
 **起動後にワーカーへメッセージを送る・削除するときは、workerName を覚えず〈`--issue <N>` + `--skill <役割>`〉で指す。** workers.json から一意に解決される（`msg-send.js` / `remove-worker.js` が対応）。起動時の戻り値 workerName を変数に控える必要はない。
 
-例外は**同一Issue・同一役割で複数のワーカーを並列起動した場合**（下記「大規模タスクの分割」）だけ。この場合のみ一意に決まらず、スクリプトが候補一覧を表示してエラーにするので `--worker-name issue-<N>-<desc>` で明示する。
+例外は**同一Issue・同一役割で複数のワーカーを並列起動した場合**（下記「大規模タスクの分割」）だけ。この場合のみ一意に決まらず、スクリプトが候補一覧を表示してエラーにするので workerName（= `issue-<N>-<desc>`）で明示する。**指定方法はスクリプトごとに異なる。**
+
+- `msg-send.js`: `--skill` を外し、workerName を**位置引数**で渡す（`--skill` と位置引数は併用できず、併用すると「本文は位置引数で渡せません」というエラーになる）。Issue番号は workers.json から解決されるため `--issue` は不要。
+  ```sh
+  node "{{SCRIPTS_PATH}}/msg-send.js" issue-<N>-<desc> --workspace $WORKSPACE --stdin <<'EOF'
+  <本文>
+  EOF
+  ```
+- `remove-worker.js`: `--worker-name issue-<N>-<desc>` を使う（`--issue` + `--skill` とは併用不可）。
 
 ## アセット（`{{SCRIPTS_PATH}}/`）
 
@@ -154,7 +162,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <
 node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <hooks-prompt-file>      --issue 12 --description fix-hooks ...
 ```
 
-この並列分割は「同一issue・同一役割で複数ワーカー」の唯一の正当なケースであり、この場合のみ〈`--issue` + `--skill`〉で一意に決まらないため、`--worker-name issue-12-fix-utils` のように workerName（= `issue-<N>-<desc>`）で明示する（詳細は「ワーカーの指し方」参照）。
+この並列分割は「同一issue・同一役割で複数ワーカー」の唯一の正当なケースであり、この場合のみ〈`--issue` + `--skill`〉で一意に決まらないため、workerName（= `issue-12-fix-utils`）で明示する。指定方法はスクリプトごとに異なる（`msg-send.js` は位置引数、`remove-worker.js` は `--worker-name`）。詳細は「ワーカーの指し方」参照。
 
 ## 不変条件
 
