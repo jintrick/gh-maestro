@@ -8,6 +8,8 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const architectSkill = fs.readFileSync(path.join(root, 'skills', 'gh-maestro-architect', 'SKILL.md'), 'utf8');
 const orchestratorSkill = fs.readFileSync(path.join(root, 'skills', 'gh-maestro-orchestrator', 'SKILL.md'), 'utf8');
+const architectDoc = fs.readFileSync(path.join(root, 'skills', 'gh-maestro-orchestrator', 'architect.md'), 'utf8');
+const orchestratorFullDoc = orchestratorSkill + '\n' + architectDoc;
 
 test('architect skill は通信・完了・入力境界・手順・再試行を構造化して明記する', () => {
   for (const heading of ['通信規約', '起動時に与えられる情報', '入力の境界', '手順', '投稿失敗と再試行']) {
@@ -30,16 +32,16 @@ test('orchestrator skill は要件確定、調査、architect起動判断、抽�
   const planning = orchestratorSkill.indexOf('**計画評価**');
   const startImpl = orchestratorSkill.indexOf('**実装開始指示**');
   assert.ok(requirements < research && research < architect && architect < design && design < coder && coder < planning && planning < startImpl);
-  assert.match(orchestratorSkill, /必要な explorer\/diagnostician の再調査/);
-  assert.match(orchestratorSkill, /要件本文を変更できるのは人間との合意/);
-  assert.match(orchestratorSkill, /既存の `msg-send\.js` 経路/);
-  assert.match(orchestratorSkill, /反省会が完了した後にだけ実行/);
-  assert.match(orchestratorSkill, /architect は対象 Issue がクローズされるまで任意の相談役として維持/);
-  assert.match(orchestratorSkill, /相談を開始するかどうか、その時機、相談内容は人間が決める/);
-  assert.match(orchestratorSkill, /大規模リファクタリング/);
-  assert.match(orchestratorSkill, /新規案件または新規機能/);
-  assert.match(orchestratorSkill, /規模や新規性だけを理由に必須起動してはならない/);
-  assert.match(orchestratorSkill, /抽象設計の論点・選択肢・トレードオフ/);
-  assert.match(orchestratorSkill, /具体的な実装手順・コード調査/);
+  assert.match(orchestratorFullDoc, /必要な explorer\/diagnostician の再調査/);
+  assert.match(orchestratorFullDoc, /要件本文を変更できるのは人間との合意/);
+  assert.match(orchestratorFullDoc, /既存の `msg-send\.js` 経路/);
+  assert.match(orchestratorFullDoc, /反省会が完了した後にだけ実行/);
+  assert.match(orchestratorFullDoc, /architect は対象 Issue がクローズされるまで任意の相談役として維持/);
+  assert.match(orchestratorFullDoc, /相談を開始するかどうか、その時機、相談内容は人間が決める/);
+  assert.match(orchestratorFullDoc, /大規模リファクタリング/);
+  assert.match(orchestratorFullDoc, /新規案件または新規機能/);
+  assert.match(orchestratorFullDoc, /規模や新規性だけを理由に必須起動してはならない/);
+  assert.match(orchestratorFullDoc, /抽象設計の論点・選択肢・トレードオフ/);
+  assert.match(orchestratorFullDoc, /具体的な実装手順・コード調査/);
   assert.doesNotMatch(orchestratorSkill, /gh-maestro-architect` \|.*実装計画/);
 });
