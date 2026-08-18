@@ -49,9 +49,9 @@ gh-maestroの存在意義はquota経済である。コーダー起動・レビ�
 | `gh-maestro-coder` | 局所的でスコープの明確な実装・PR作成（コスト効率重視） |
 | `gh-maestro-senior-coder` | 広範な影響分析・複雑なロジック調整・設計判断を伴う実装・PR作成。高い自己検証能力を持つ |
 | `gh-maestro-base` | 上記以外の動的役職（必ず `--prompt-file` で役割を定義する） |
+## ワーカーの起動
 
-
-## アンカー Issue の確保
+### アンカー Issue の確保
 
 すべてのワーカーは GitHub Issue をアンカーとして持つ。`spawn-worker.js` の `--issue` は必須である。
 
@@ -68,7 +68,7 @@ gh-maestroの存在意義はquota経済である。コーダー起動・レビ�
 調査アンカー Issue の暫定タイトルは「調査: <キーワード>」とする（例: `調査: 認証トークン検証の現状`）。実装方針確定後、正式タイトルに変更する。
 
 
-### ワーカーへのプロンプト入力の原則
+### プロンプト入力の原則
 
 - 任意の役割・作業指示は、必ずファイルに書き出して `--prompt-file` で渡す。
 - 改行やシェル特殊文字を含まない200文字以下の短い補足メッセージに限り、`--short-prompt` を使うこともできる。
@@ -81,7 +81,7 @@ EOF
 # 出力された実体パスを --prompt-file に渡す
 ```
 
-### ワーカーの起動
+### 起動コマンド
 
 ```sh
 node "{{SCRIPTS_PATH}}/spawn-worker.js" \
@@ -110,6 +110,21 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
   EOF
   ```
 - `remove-worker.js`: workerName を位置引数で渡す（`--issue` + `--skill` とは併用不可）。
+### 大規模タスクの分割
+
+競合しない軸（ディレクトリ・ファイル種別・機能単位など）で分割し、複数ワーカーで並列処理する。
+
+```sh
+# アンチパターン: 1000件のLintエラーを1ワーカーに丸投げ
+node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue <N> --prompt-file <prompt-file> ...
+
+# 正しいパターン: ディレクトリ単位で分割し並列実行
+node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <components-prompt-file> --issue 12 --description fix-components ...
+node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <utils-prompt-file>      --issue 12 --description fix-utils ...
+node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <hooks-prompt-file>      --issue 12 --description fix-hooks ...
+```
+
+この並列分割は「同一issue・同一役割で複数ワーカー」の唯一の正当なケースであり、この場合のみ〈`--issue` + `--skill`〉で一意に決まらないため、workerName（= `issue-12-fix-utils`）で明示する。`msg-send.js` と `remove-worker.js` のどちらも位置引数で指定する。詳細は「ワーカーの指し方」参照。
 
 ## アセット（`{{SCRIPTS_PATH}}/`）
 
@@ -137,21 +152,6 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 
 `create-issue.js` は起票と同時に、`spawn-assistant.js` 経由でagy専用の対話型ワーカー「assistant」を自動起動する。**このワーカーはあなた（orchestrator）の管理対象外である。** `workers.json` に登録されず、あなたからは見えず、`msg-send.js`/`remove-worker.js`の対象にもならない。人間が直接そのウィンドウに向かって質問・雑務を依頼する専用の存在であり、あなたが起動・終了・監督を意識する必要は一切ない。終了も`finalize-issue.js`実行時に自動で行われる（`.gh-maestro/assistants.json`で管理。`workers.json`とは無関係）。あなたのセッション中に見慣れないWezTermウィンドウが開いても、それはassistantであり異常ではない。
 
-## 大規模タスクの分割
-
-競合しない軸（ディレクトリ・ファイル種別・機能単位など）で分割し、複数ワーカーで並列処理する。
-
-```sh
-# アンチパターン: 1000件のLintエラーを1ワーカーに丸投げ
-node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue <N> --prompt-file <prompt-file> ...
-
-# 正しいパターン: ディレクトリ単位で分割し並列実行
-node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <components-prompt-file> --issue 12 --description fix-components ...
-node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <utils-prompt-file>      --issue 12 --description fix-utils ...
-node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <hooks-prompt-file>      --issue 12 --description fix-hooks ...
-```
-
-この並列分割は「同一issue・同一役割で複数ワーカー」の唯一の正当なケースであり、この場合のみ〈`--issue` + `--skill`〉で一意に決まらないため、workerName（= `issue-12-fix-utils`）で明示する。`msg-send.js` と `remove-worker.js` のどちらも位置引数で指定する。詳細は「ワーカーの指し方」参照。
 
 ## 不変条件
 
