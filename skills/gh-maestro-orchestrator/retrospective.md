@@ -55,7 +55,7 @@ EOF
 
 GitHubへの投稿をチャット提示より先に行う。以下の手順で、構造化されたMarkdownを対象Issueへ投稿し、その後人間へ短く通知する。
 
-1. 以下のフォーマットで構造化されたMarkdownを `write-draft.js` で一時ファイルに書き出し、`gh issue comment` で対象Issueへ投稿する。`gh issue comment` は投稿したコメントのURLを標準出力に返すため、これを控えておく。投稿はチャットでの人間への提示より先に行う。
+1. 以下のフォーマットで構造化されたMarkdownを `write-draft.js` で一時ファイルに書き出し、`comment-issue.js` で対象Issueへ投稿する。`comment-issue.js` は投稿したコメントのURLを標準出力に返すため、これを控えておく。投稿はチャットでの人間への提示より先に行う。
 
 ```
 【反省会】 Issue #<N> / PR #<PR>
@@ -83,15 +83,16 @@ GitHubへの投稿をチャット提示より先に行う。以下の手順で�
 ```
 
 ```sh
-DRAFT_OUTPUT=$(node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/retro-<N>.md --stdin <<'EOF'
+node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/retro-<N>.md --stdin <<'EOF'
 <上記「提示フォーマット」の内容>
-EOF)
-BODY_PATH=${DRAFT_OUTPUT#DRAFT_WRITTEN:}
+EOF
 
-gh issue comment <N> --repo $REPO --body-file "$BODY_PATH"
+node "{{SCRIPTS_PATH}}/comment-issue.js" \
+  --issue <N> --repo $REPO --workspace $WORKSPACE \
+  --body-file /tmp/retro-<N>.md
 ```
 
-（`gh issue comment` は `win-path.js` によるパス解決を行わないため実体パスを渡す。詳細は「人間の承認とGitHubへの反映」参照）
+（`comment-issue.js` が `win-path.js` による論理パス解決と、成功時の入力ファイル削除を試みる。投稿に失敗した場合は原案を保持し、削除だけに失敗した場合は投稿成功として警告する）
 
 2. 投稿完了後、人間へのチャット提示は全文を再掲せず、以下の定型の短い一文だけにする：
 
@@ -116,7 +117,7 @@ issueコメント化することで、そのIssueに紐づくassistant（対話�
 
 ## 決定事項の記録
 
-承認後の対応が終わったら、決定内容（承認・却下・反映先）を別のフォローアップコメントとして対象Issueへ投稿する（素案コメントは編集しない）。投稿手順は素案コメントと同じ（`write-draft.js`で一時ファイルに書き出し、`gh issue comment`で投稿）。フォーマット：
+承認後の対応が終わったら、決定内容（承認・却下・反映先）を別のフォローアップコメントとして対象Issueへ投稿する（素案コメントは編集しない）。投稿手順は素案コメントと同じ（`write-draft.js`で一時ファイルに書き出し、`comment-issue.js`で投稿）。フォーマット：
 
 ```
 【反省会】決定事項 Issue #<N> / PR #<PR>

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // create-issue.js
-// gh issue create の唯一の呼び出し口。作成成功後に --body-file を必ず削除する。
+// gh issue create の唯一の呼び出し口。作成成功後に --body-file の削除を試みる。
 // tmp/issue-draft.md を使い回すと、次回起票時に「既存ファイルだから読み直す」という
 // 無駄なReadが発生する。削除をスクリプト側の必須処理にすることで、
 // orchestrator（LLM）の記憶に依存せず毎回クリーンな状態を保証する。
@@ -15,15 +15,16 @@ const fs = require('fs');
 const path = require('path');
 const { toWinPath } = require('./win-path');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
+const { deleteInputFileBestEffort } = require('./shared/file-cleanup');
 const { isRetryableGhFailure, graphqlCreateIssue } = require('./shared/gh-fallback');
 
-const USAGE = `create-issue.js — GitHub Issue を作成し、body-file を必ず削除する
+const USAGE = `create-issue.js — GitHub Issue を作成し、成功時にbody-fileの削除を試みる
 
 Usage: node create-issue.js --title <タイトル> --body-file <path> [--repo <owner/repo>] [--workspace <path>]
 
 Arguments:
   --title <タイトル>     Issue タイトル
-  --body-file <path>    Issue本文ファイル（/tmp 形式可）。作成成功後に削除される
+  --body-file <path>    Issue本文ファイル（/tmp 形式可）。作成成功後に削除を試み、失敗時は警告する
   --repo <owner/repo>   対象リポジトリ（省略時はカレントディレクトリのリポジトリ）
   --workspace <path>    ワークスペースのルートパス（省略時は環境変数またはCWDから上方探索で解決）。
                         issue作成成功時、このワークスペースを起点に対話型ワーカー「assistant」を自動起動する
@@ -31,8 +32,8 @@ Arguments:
 Output (stdout):
   ISSUE_CREATED:<番号>  作成成功。<URL> も併記される
 
-body-file は常にこのスクリプトが削除する。呼び出し側は削除を意識しなくてよい。
-gh issue create が失敗した場合は body-file を残す（原案を失わないため）。
+body-file は成功時にこのスクリプトが削除を試みる。削除に失敗した場合はIssue作成成功として扱い、
+原案が残った旨を警告する。gh issue create が失敗した場合もbody-fileを残す（原案を失わないため）。
 
 副作用: 作成成功時、spawn-assistant.js を呼び出し対話型ワーカー「assistant」をbest-effortで
 自動起動する（新規WezTermウィンドウ）。assistant起動が失敗してもissue作成自体は成功として扱う
@@ -65,7 +66,7 @@ function defaultSpawnAssistant({ issue, repo, workspace }) {
  * @param {{title: string, bodyFile: string, repo?: string|null, workspace: string}} params
  *   bodyFile は解決済みの実体パス（呼び出し元が toWinPath 済みであること）
  * @param {object} [deps]
- * @returns {{ok: boolean, number?: string, url?: string, status?: number, stderr?: string, assistantWarning?: string|null}}
+ * @returns {{ok: boolean, number?: string, url?: string, status?: number, stderr?: string, assistantWarning?: string|null, cleanupWarning?: string|null}}
  */
 function createIssue({ title, bodyFile, repo, workspace }, deps = {}) {
   const {
@@ -96,7 +97,7 @@ function createIssue({ title, bodyFile, repo, workspace }, deps = {}) {
   const match = url.match(/\/issues\/(\d+)/);
   const number = match ? match[1] : '?';
 
-  unlinkBodyFileFn(bodyFile);
+  const cleanupWarning = deleteInputFileBestEffort(bodyFile, unlinkBodyFileFn);
 
   const repoMatch = url.match(/github\.com\/([^/]+\/[^/]+)\/issues\/\d+/);
   const resolvedRepoForAssistant = repo || (repoMatch ? repoMatch[1] : null);
@@ -111,7 +112,7 @@ function createIssue({ title, bodyFile, repo, workspace }, deps = {}) {
     assistantWarning = 'repo/workspace を解決できずassistantを起動できませんでした';
   }
 
-  return { ok: true, number, url, assistantWarning };
+  return { ok: true, number, url, assistantWarning, cleanupWarning };
 }
 
 module.exports = { createIssue };
@@ -183,6 +184,10 @@ if (require.main === module) {
 
   if (result.assistantWarning) {
     console.error(`create-issue: assistant起動に失敗しました（issue作成自体は成功）: ${result.assistantWarning}`);
+  }
+
+  if (result.cleanupWarning) {
+    console.error(`create-issue: ${result.cleanupWarning}`);
   }
 
   console.log(`ISSUE_CREATED:${result.number} ${result.url}`);

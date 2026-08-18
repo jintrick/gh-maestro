@@ -38,6 +38,23 @@ test('createIssue: --repoを明示していればURLからの抽出より優先�
   assert.equal(spawnAssistantArgs.repo, 'explicit/repo');
 });
 
+test('createIssue: Issue作成成功後の削除失敗は作成成功として警告し、assistantを継続する', () => {
+  let spawnAssistantCalled = false;
+  const result = createIssue(
+    { title: 't', bodyFile: '/tmp/body.md', repo: 'o/r', workspace: '/tmp/ws' },
+    {
+      ghCreateFn: () => ({ status: 0, stdout: 'https://github.com/o/r/issues/42\n', stderr: '' }),
+      unlinkBodyFileFn: () => { throw new Error('EPERM'); },
+      spawnAssistantFn: () => { spawnAssistantCalled = true; return { status: 0 }; },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(spawnAssistantCalled, true);
+  assert.match(result.cleanupWarning, /原案を保持/);
+  assert.match(result.cleanupWarning, /EPERM/);
+});
+
 test('createIssue: gh issue create失敗時はunlinkせずok:falseを返す', () => {
   let unlinkCalled = false;
   let spawnAssistantCalled = false;

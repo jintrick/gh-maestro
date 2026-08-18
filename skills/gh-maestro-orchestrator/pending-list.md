@@ -36,8 +36,12 @@ fi
 人間が「保留Issueに積む」を選んだら、その場で追記する。「後で書く」は禁止。
 
 ```sh
-gh issue comment $PENDING_ISSUE --repo $REPO \
-  --body "[保留] <path>:<line> — <内容>"
+node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/pending-<N>.md --stdin <<'EOF'
+[保留] <path>:<line> — <内容>
+EOF
+node "{{SCRIPTS_PATH}}/comment-issue.js" \
+  --issue $PENDING_ISSUE --repo $REPO --workspace $WORKSPACE \
+  --body-file /tmp/pending-<N>.md
 ```
 
 ### 切り出し
