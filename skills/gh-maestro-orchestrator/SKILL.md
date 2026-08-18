@@ -532,5 +532,3 @@ node "{{SCRIPTS_PATH}}/finalize-issue.js" --issue <N> --repo $REPO --workspace $
 ## council（複数モデル議論）
 
 人間が提示した一つの議題について、複数の参加モデルが GitHub Discussions 上で意見を投稿し投票する独立機能。**基本フローには登場しない。** 人間から議題を提示されたときにだけ `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/council.md` を開き、そこに従う。
-
-council における orchestrator の責務は「議題の書き出し・調査要否の判断・参加グループの選択・Discussion URL の提示」の4点で完結する。意見/投票フェーズの進行・再試行・集計・要約投稿はすべて `run-council.js` が決定論的に行い、LLM 判断を挟まない。投票結果をどう使うかは人間の判断に属する。
