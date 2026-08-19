@@ -123,17 +123,11 @@ EOF
 - **msg-read.js** — コメントIDまたは計画から本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE` または `msg-read.js --plan --issue <N> --workspace $WORKSPACE`
 - **remove-worker.js** — 個別ワーカーのプロセスをkillしてworktreeを削除する。対象は workerName の位置引数または〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する
-- **start-review-manager.js** — PRにReview Managerを起動する（**位置引数**: `start-review-manager.js $PR $REPO $WORKSPACE $ISSUE`。詳細は`monitor-recovery.md`の「PR監視・Review Managerの再起動」参照）
 - **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「PR検出」参照）
-- **process-lifecycle.js** — PID registryを走査しstaleなプロセスを掃除する（各「復旧手順」参照）
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口
 - **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「Issue確定」参照）
-- **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` の削除を試み、失敗時は警告する（「Issue確定」参照）。成功時、あわせて対話型ワーカー**assistant**（`gh-maestro-assistant`スキル。issue/PRについての人間の質問に答える対話セッション）を新規WezTermウィンドウで自動起動する
-- **update-issue.js** — `gh issue edit` によるIssue本文更新の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、成功時に削除を試み、失敗時は警告する（「Issue確定」参照）
-- **comment-issue.js** — `gh issue comment` による通常のIssueコメント投稿の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、成功時に削除を試み、失敗時は警告する（反省会・保留リスト参照）
-- **run-council.js** — 複数モデル議論（council）の実行。議題から参加モデルの意見・投票をDiscussion上で集め、テンプレート要約を投稿する決定論的フェーズ機械（詳細は `council.md` 参照）
-- **run-council-investigation.js** — council の調査ジョブ。調査が必要と判断した場合のみ起動する使い捨てCLI（詳細は `council.md` 参照）
+- **create-issue.js** / **update-issue.js** / **comment-issue.js** — `gh issue create` / `gh issue edit` / `gh issue comment` の唯一の呼び出し口。`--body-file` は論理パスのまま渡す（「Issue確定」「反省会」「保留リスト」参照）
 
 ### assistant（対話型ワーカー）について
 
