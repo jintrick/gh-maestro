@@ -94,7 +94,7 @@ function main(argv = process.argv.slice(2), opts = {}) {
 
   for (const resident of result.results) {
     lines.push(formatResidentResult(resident));
-    const monitorCommands = resident.commands || (resident.command ? [resident.command] : []);
+    const monitorCommands = resident.commands || [];
     if (resident.monitorRequired) {
       for (const command of monitorCommands) {
         lines.push(`MONITOR_REATTACH_REQUIRED script=${resident.monitorScript || resident.script} command=${command}`);
@@ -106,11 +106,15 @@ function main(argv = process.argv.slice(2), opts = {}) {
   return { code: result.errors.length > 0 ? 1 : 0, lines, errLines };
 }
 
-module.exports = { main, USAGE, parsePositivePid };
+function writeResult(result, stdout = process.stdout, stderr = process.stderr) {
+  for (const line of result.errLines) stderr.write(line + '\n');
+  for (const line of result.lines) stdout.write(line + '\n');
+  return result.code;
+}
+
+module.exports = { main, USAGE, parsePositivePid, writeResult };
 
 if (require.main === module) {
   const result = main();
-  for (const line of result.errLines) process.stderr.write(line + '\n');
-  for (const line of result.lines) process.stdout.write(line + '\n');
-  process.exit(result.code);
+  process.exitCode = writeResult(result);
 }

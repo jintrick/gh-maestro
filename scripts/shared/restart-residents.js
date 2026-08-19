@@ -33,6 +33,7 @@ const RESIDENT_SPECS = Object.freeze([
 
 const DEFAULT_MAX_ATTEMPTS = 20;
 const DEFAULT_WAIT_MS = 100;
+const DEFAULT_STARTUP_CONFIRM_ATTEMPTS = 50;
 
 function isValidPid(pid) {
   return typeof pid === 'number' && Number.isInteger(pid) && pid > 0;
@@ -332,10 +333,9 @@ function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = 
     return { ok: false, error: `${spec.script} の起動後registry確認に失敗しました: ${e.message}` };
   }
 
-  const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+  const maxAttempts = opts.startupConfirmAttempts ?? opts.maxAttempts ?? DEFAULT_STARTUP_CONFIRM_ATTEMPTS;
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
   for (let attempt = 0; !replacement && attempt < maxAttempts; attempt++) {
-    if (!hooks.isProcessAlive(child.pid)) break;
     hooks.sleep(waitMs);
     try {
       replacement = findReplacementEntry(workspace, spec, oldPids, hooks);
@@ -370,6 +370,7 @@ function monitorCommandForEntry(scriptsPath, spec, entry, hooks = createResident
  * @param {string} opts.scriptsPath 現行スクリプトのディレクトリ
  * @param {object[]} [opts.preCapturedEntries] reset-sessionが停止前に捕捉したエントリ
  * @param {boolean} [opts.skipStop=false] preCapturedEntriesが既に停止済みの場合にtrue
+ * @param {number} [opts.startupConfirmAttempts] detached起動後のregistry確認回数
  * @param {object} [opts.hooks] テスト用依存注入
  * @returns {{results: object[], errors: string[], entries: object[]}}
  *   Monitor常駐のstatusは `monitor-required` となり、commandsにMonitorで実行する
@@ -493,7 +494,6 @@ function restartResidents(workspace, opts = {}) {
       result.monitorRequired = true;
       result.monitorScript = spec.script;
       result.commands = commands;
-      result.command = commands[0];
       result.sessionPids = readyEntries.map((entry) => plans.get(entry).sessionPid);
       continue;
     }
@@ -516,9 +516,7 @@ function restartResidents(workspace, opts = {}) {
     result.status = 'replaced';
     result.verified = true;
     result.newPids = startedEntries.map((started) => started.pid);
-    result.newPid = result.newPids.length === 1 ? result.newPids[0] : undefined;
     result.commands = startedEntries.map((started) => started.command);
-    result.command = result.commands[0];
     result.sessionPids = startedEntries.map((started) => started.sessionPid);
     result.sessionPidSources = startedEntries.map((started) => started.sessionPidSource);
   }
@@ -529,8 +527,7 @@ function restartResidents(workspace, opts = {}) {
 function formatResidentResult(result) {
   const fields = [`RESIDENT`, `script=${result.script}`, `status=${result.status}`];
   if (result.oldPids && result.oldPids.length) fields.push(`oldPid=${result.oldPids.join(',')}`);
-  if (result.newPid) fields.push(`newPid=${result.newPid}`);
-  if (result.newPids && result.newPids.length > 1) fields.push(`newPid=${result.newPids.join(',')}`);
+  if (result.newPids && result.newPids.length) fields.push(`newPid=${result.newPids.join(',')}`);
   if (result.verified !== undefined) fields.push(`verified=${result.verified}`);
   if (result.reason) fields.push(`reason=${JSON.stringify(result.reason)}`);
   return fields.join(' ');
@@ -540,6 +537,7 @@ module.exports = {
   RESIDENT_SPECS,
   DEFAULT_MAX_ATTEMPTS,
   DEFAULT_WAIT_MS,
+  DEFAULT_STARTUP_CONFIRM_ATTEMPTS,
   createResidentRestartHooks,
   captureResidentEntries,
   parseSessionPid,

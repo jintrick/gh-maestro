@@ -16,7 +16,7 @@ const {
   replaceSessionPid,
   restartResidents,
 } = require('../scripts/shared/restart-residents');
-const { main, USAGE } = require('../scripts/restart-residents');
+const { main, USAGE, writeResult } = require('../scripts/restart-residents');
 
 function makeWorkspace() {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-resident-restart-'));
@@ -284,6 +284,7 @@ test('restartResidents: 同一スクリプトの複数poll-prを停止数と同�
     assert.equal(result.results[2].status, 'monitor-required');
     assert.equal(result.results[2].oldPids.length, 2);
     assert.equal(result.results[2].commands.length, 2);
+    assert.equal('command' in result.results[2], false);
     assert.deepEqual(harness.unregistered.sort((a, b) => a - b), [103, 113]);
     assert.equal(harness.spawned.length, 0);
   } finally {
@@ -309,8 +310,57 @@ test('restartResidents: 同一inbox-supervisor複数件も停止数と同じ件�
     assert.equal(result.errors.length, 0);
     assert.equal(result.results[0].status, 'replaced');
     assert.deepEqual(result.results[0].newPids, [2000, 2001]);
+    assert.equal('newPid' in result.results[0], false);
+    assert.equal('command' in result.results[0], false);
     assert.equal(harness.spawned.length, 2);
     assert.equal(harness.unregistered.length, 2);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('restartResidents: detached起動直後にregistry登録が遅れても成功をfailedと報告しない', () => {
+  const workspace = makeWorkspace();
+  try {
+    const old = residentEntries(workspace).slice(0, 1);
+    const harness = makeHarness(workspace, {
+      entries: old,
+      spawn: (cmd, args, spawnOptions, state) => {
+        const child = new EventEmitter();
+        child.pid = 2000;
+        child.unref = () => {};
+        state.spawned.push({ cmd, args, spawnOptions, pid: child.pid });
+        return child;
+      },
+    });
+    const originalFind = harness.hooks.findRunningInstances;
+    let lookupCount = 0;
+    harness.hooks.findRunningInstances = (...args) => {
+      lookupCount += 1;
+      if (lookupCount === 3) {
+        harness.entries.push({
+          ...old[0],
+          pid: 2000,
+          startTime: 'new-2000',
+        });
+        harness.live.add(2000);
+      }
+      return originalFind(...args);
+    };
+
+    const result = restartResidents(workspace, {
+      scriptsPath: path.join(workspace, 'scripts'),
+      hooks: harness.hooks,
+      maxAttempts: 1,
+      waitMs: 0,
+    });
+
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.results[0].status, 'replaced');
+    assert.deepEqual(result.results[0].newPids, [2000]);
+    assert.equal('newPid' in result.results[0], false);
+    assert.equal('command' in result.results[0], false);
+    assert.equal(lookupCount, 3);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
@@ -357,8 +407,27 @@ test('restart-residents CLI: helpは0、引数不備は1、通常出力はMonito
 });
 
 test('formatResidentResult: statusと検証結果を機械可読な1行へ整形する', () => {
-  const line = formatResidentResult({
-    script: 'msg-poll.js', status: 'replaced', oldPids: [10], newPid: 20, verified: true,
+  const singleLine = formatResidentResult({
+    script: 'msg-poll.js', status: 'replaced', oldPids: [10], newPids: [20], verified: true,
   });
-  assert.match(line, /^RESIDENT script=msg-poll\.js status=replaced oldPid=10 newPid=20 verified=true$/);
+  assert.match(singleLine, /^RESIDENT script=msg-poll\.js status=replaced oldPid=10 newPid=20 verified=true$/);
+
+  const multipleLine = formatResidentResult({
+    script: 'msg-poll.js', status: 'replaced', oldPids: [10, 11], newPids: [20, 21], verified: true,
+  });
+  assert.match(multipleLine, /^RESIDENT script=msg-poll\.js status=replaced oldPid=10,11 newPid=20,21 verified=true$/);
+});
+
+test('restart-residents CLI: 結果行はstdout、診断行はstderrへ書き分ける', () => {
+  const stdout = [];
+  const stderr = [];
+  const code = writeResult({
+    code: 1,
+    lines: ['RESIDENT script=inbox-supervisor.js status=failed'],
+    errLines: ['restart-residents: 起動確認に失敗しました'],
+  }, { write: (line) => stdout.push(line) }, { write: (line) => stderr.push(line) });
+
+  assert.equal(code, 1);
+  assert.deepEqual(stdout, ['RESIDENT script=inbox-supervisor.js status=failed\n']);
+  assert.deepEqual(stderr, ['restart-residents: 起動確認に失敗しました\n']);
 });

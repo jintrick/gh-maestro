@@ -703,7 +703,7 @@ if (require.main === module) {
     const residentRestart = restartCapturedResidents(workspace, residentEntries, __dirname);
     for (const resident of residentRestart.results) {
       log(formatResidentResult(resident));
-      const monitorCommands = resident.commands || (resident.command ? [resident.command] : []);
+      const monitorCommands = resident.commands || [];
       if (resident.monitorRequired) {
         for (const command of monitorCommands) {
           log(`MONITOR_REATTACH_REQUIRED script=${resident.monitorScript || resident.script} command=${command}`);
