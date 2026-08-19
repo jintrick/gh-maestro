@@ -1,6 +1,6 @@
 # 監視・配送系の異常時対応（参照専用）
 
-このファイルは `SKILL.md` の「自分の inbox の監視」「worker への指示配送（Inbox Supervisor）」「PR検出」から参照される。**正常系ではこのファイルを読む必要はない。** 異常な通知を受け取った・多重起動を疑った・レビューが進まない、といった場面でだけ該当節を開く。
+このファイルは `SKILL.md` の「ワーカーからの報告の受信（msg-poll）」「worker への指示配送（Inbox Supervisor）」「PR検出」から参照される。**正常系ではこのファイルを読む必要はない。** 異常な通知を受け取った・多重起動を疑った・レビューが進まない、といった場面でだけ該当節を開く。
 
 ## inbox監視の重複復旧
 
@@ -28,7 +28,7 @@ Inbox Supervisor（`inbox-supervisor.js`）側の重複を疑った場合も、�
 通知を受けたら、どの監視が止まったかを特定してから確認する:
 
 1. `node "{{SCRIPTS_PATH}}/process-lifecycle.js" status --workspace $WORKSPACE --script <script名>`（msg-poll.js / poll-pr.js / poll-reviews.js）を実行し、`running:false` かどうかで該当プロセスが実際に死んでいるかを確認する（誤通知の可能性を排除）。
-2. 止まった監視が本当に必要なら再起動する。`poll-pr.js` は下記「PR監視・Review Managerの再起動」、`msg-poll.js` は SKILL.md の「自分の inbox の監視」の起動規約に従う。
+2. 止まった監視が本当に必要なら再起動する。`poll-pr.js` は下記「PR監視・Review Managerの再起動」、`msg-poll.js` は SKILL.md の「ワーカーからの報告の受信（msg-poll）」の起動規約に従う。
 3. 監視が止まっていた間の機能停止（検出し損ねた PR・届かなかったメッセージ）を確認し、人間に報告する。**機械は自動復旧しない**（再起動判断は orchestrator が行う）。
 
 ## inbox監視の沈黙（通知が鳴らないまま止まる）
@@ -39,7 +39,7 @@ Inbox Supervisor（`inbox-supervisor.js`）側の重複を疑った場合も、�
 
 **この状態は「反応が無い」という体感からしか入れない。** ワーカーの報告・PR 作成・レビュー完了のいずれかを待っていて、来ないと感じたら以下を実行する。
 
-0. **まず自分が Monitor を張ったかを確認する。プロセスの生死より先にこれを見る。** `msg-poll.js orchestrator` は orchestrator 自身が Monitor で起動する規約であり、自動起動は行われない。**プロセスが生きていることと、その出力が自分に届くことは全く別である。** 通知が自分のセッションに届くのは、SKILL.md「自分の inbox の監視」の規約どおり自分で Monitor を張った場合だけであり、張っていなければ画面には何も出ない。
+0. **まず自分が Monitor を張ったかを確認する。プロセスの生死より先にこれを見る。** `msg-poll.js orchestrator` は orchestrator 自身が Monitor で起動する規約であり、自動起動は行われない。**プロセスが生きていることと、その出力が自分に届くことは全く別である。** 通知が自分のセッションに届くのは、SKILL.md「ワーカーからの報告の受信（msg-poll）」の規約どおり自分で Monitor を張った場合だけであり、張っていなければ画面には何も出ない。
    - **判定方法**: このセッションで自分が Monitor ツールを呼んで `msg-poll.js orchestrator` を起動したか、記憶ではなく会話の履歴で確認する。同じく `poll-pr.js` の Monitor も張ったか確認する。張っていなければ、それが沈黙の原因である。以降の手順に進まず、SKILL.md の起動規約に従って張る。
    - **実障害**: orchestrator が Monitor を一本も張らないままコーダーを起動し、コーダーからの報告・PR 作成が一切画面に出ないまま放置した。`pids/` にプロセスは居たため「ポーリングは生きています」と報告し、原因を配送側のバグと誤認して diagnostician への委譲を提案した。実際は自分の起動規約違反であり、確認すべきだったのは自分が Monitor を張ったかどうかだけだった。**「プロセスは生きている」を「通知は届く」の根拠にしてはならない。**
 
@@ -47,7 +47,7 @@ Inbox Supervisor（`inbox-supervisor.js`）側の重複を疑った場合も、�
    - **`ps` の node プロセス一覧や `.gh-maestro/inbox-supervisor-autostart.log` で判断してはならない。** それらは worker 配送を行う `inbox-supervisor.js` のもので、msg-poll が死んでいても正常に動き続ける（`SCAN_START` / `SCAN_END:<n>:0` を出し続ける）。この混同で「ポーラーは生きている」と誤報告した実例がある。
    - **`running:true` であっても、それは「通知が自分に届く」ことを意味しない。** 手順 0 を飛ばしてここだけを見ると、Monitor 未起動という本当の原因を素通りする。
 2. **lease の残骸に騙されない。** `.gh-maestro/leases/resident-role-msgpoll-orchestrator.json` はクラッシュ・強制終了（自滅経路を経ない場合）で解放されずに残ることがある。lease があってもプロセスは死んでいる。むしろ「PID registry に居ないのに lease が残っている」組合せは、この経路で死んだ証拠である。
-3. **再起動する。** アラーム（watchdog 通知・Monitor の異常終了）を受けた場合は判断を挟まず、SKILL.md「自分の inbox の監視」の起動規約に従い、Monitor で `msg-poll.js orchestrator` を起動し直す（「1回だけ起動」は生きている間の話であり、死んだ後の再起動はこれに反しない）。
+3. **再起動する。** アラーム（watchdog 通知・Monitor の異常終了）を受けた場合は判断を挟まず、SKILL.md「ワーカーからの報告の受信（msg-poll）」の起動規約に従い、Monitor で `msg-poll.js orchestrator` を起動し直す（「1回だけ起動」は生きている間の話であり、死んだ後の再起動はこれに反しない）。
 4. **止まっていた間に取りこぼした通知を確認し、人間に報告する。** 停止中に投稿されたコメントは既読にならないため、再起動後に順次 `NEW_MESSAGE` として届く。
 
 ## ワーカーの実行ログ
@@ -64,7 +64,7 @@ Inbox Supervisor（`inbox-supervisor.js`）側の重複を疑った場合も、�
 
 このときは `Read` でログを読む。
 
-実行中の経過をどうしても追う必要がある場合（長時間ワーカーが本当に進んでいるかの確認等）に限り、**フィルタ付きで**一時的に Monitor を張る。用が済んだら `TaskStop` で止める。これは「自分の inbox の監視」の単一起動規約とは別枠の、使い捨ての監視である。
+実行中の経過をどうしても追う必要がある場合（長時間ワーカーが本当に進んでいるかの確認等）に限り、**フィルタ付きで**一時的に Monitor を張る。用が済んだら `TaskStop` で止める。これは「ワーカーからの報告の受信（msg-poll）」の単一起動規約とは別枠の、使い捨ての監視である。
 
 ```
 tail -f "$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log" \

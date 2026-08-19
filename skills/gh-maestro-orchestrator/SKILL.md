@@ -125,7 +125,7 @@ EOF
 - **msg-read.js** — コメントIDまたは計画から本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE` または `msg-read.js --plan --issue <N> --workspace $WORKSPACE`
 - **remove-worker.js** — 個別ワーカーのプロセスをkillしてworktreeを削除する。対象は workerName の位置引数または〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「13. 反省会と後始末」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する
-- **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）
+- **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「ワーカーからの報告の受信（msg-poll）」参照）
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「8. PR検出」参照）
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口
 - **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「1. 要件確定」参照）
@@ -147,30 +147,29 @@ EOF
   - `scripts/` に触れたら一律でこの扱いにする。どのファイルが常駐プロセスの require 閉包に入るかは判定しない（判定コストの方が高い）
   - `skills/**` 配下のドキュメントだけを変更した場合は依頼しない。常駐プロセスは SKILL.md を読まない
 
-### 自分の inbox の監視
+### ワーカーからの報告の受信（msg-poll）
 
-worker からの報告はすべて GitHub Issue コメントとして投稿される。orchestrator はそれを poll して受信する。届くのを待つ受動的な経路は存在しない。
+ワーカーからの報告はすべて Issue コメントとして投稿され、`msg-poll.js` を張った Monitor 経由で届く。
 
-#### 起動規約（単一起動）
+#### 起動
 
-**この inbox 監視（`msg-poll.js orchestrator`）はセッション中に1本だけ稼働させる。** PR検出・レビュー監視・本番公開（CI/CD）確認・反省会での応答待ちなど、待つ相手や場面が変わっても新しいMonitorを起動し直さず、既存の1本を使い回す。他の節はこの1本を通じて通知を受け取る前提で書かれている。
+**セッション開始時、他のどのタスクにも着手する前に張る。** Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" orchestrator --workspace $WORKSPACE` を直接指定する。`persistent: true` を設定すること。
 
-**セッション開始時、他のどのタスクにも着手する前に張る。**（`msg-poll.js` の自動起動機構は存在しない。張り忘れるとワーカーの報告が一切届かず、「まだ届いていない」と読んで待ち続けることになる。）Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" orchestrator --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。
+**自動起動も自動復活も存在しない。** 張り忘れても、張った1本が死んでも、代わりに張る者はいない。その間ワーカーの報告は一切届かず、「まだ届いていない」と読んで待ち続けることになる。アラームを受けたら自分で起動し直す。
 
 **プロセスが動いていることは、この Monitor を張らなくてよい理由にはならない。** 前のセッション等のプロセスが残っていても、その出力（`NEW_MESSAGE`）はログファイルに書かれるだけで、**自分が Monitor を張っていなければ自分のセッションには届かない**。既に稼働中のプロセスがあって起動が拒否された場合（`重複起動を検出しました` で exit 1）は、拒否メッセージが案内する `--watch-pid <pid>` の Monitor を張る——判断を挟まず、案内されたコマンドをそのまま使う。
 
-この1本が死んだ場合、自動復活機構は存在しない。アラームを受けたら自分で起動し直す。
+**セッション中に1本だけ稼働させる。** PR検出・レビュー監視・本番公開（CI/CD）確認・反省会での応答待ちなど、待つ相手や場面が変わっても新しいMonitorを起動し直さず、既存の1本を使い回す。他の節はこの1本を通じて通知を受け取る前提で書かれている。
 
-Monitorから届く通知を処理する：
+重複起動に気づいた場合、片方を反射的に止めてはならない。復旧手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md`の「inbox監視の重複復旧」を参照する。
+
+#### 届いた通知の処理
+
 - `NEW_MESSAGE:<issue>:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を読む。内容に応じて処理する（PR_DETECTED → PR番号を記録 等）。**完了後は直ちにMonitorに戻る**
 
 msg-poll が `未初期化です。reset-session.js で初期化してください` や `旧形式(v1)です` を報告したら、`node "{{SCRIPTS_PATH}}/reset-session.js" --workspace $WORKSPACE` を実行してから再開する。
 
 **`NEW_MESSAGE` 通知を待たずにコメントを先読みしてはならない**（`gh api .../comments`・`gh issue view --comments`・`msg-read.js <commentId>` 等。調査目的でも同じ）。先読みしても既読は記録されないため、後続のスキャンがそのコメントに到達した時点で `NEW_MESSAGE` として再び届く。内容は必ず通知を受けてから、その `commentId` で `msg-read.js` を呼んで確認する。
-
-#### 誤って複数起動してしまった場合の復旧手順（inbox監視）
-
-「重複しているかもしれない」と気づいた瞬間に片方を反射的に止めてはならない。復旧手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md`の「inbox監視の重複復旧」を参照する。
 
 ### worker への指示配送（Inbox Supervisor）
 
