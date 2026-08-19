@@ -450,7 +450,7 @@ function verifyProcessIdentity(pid, registeredMeta) {
 
 /**
  * 同一の inbox（script + workerName + workspace）を既に監視している
- * 生存プロセスを registry から探す（非破壊・読み取り専用）。
+ * 生存プロセスを registry から全件探す（非破壊・読み取り専用）。
  *
  * msg-poll.js 等の継続ポーリングスクリプトが、起動前に同じ監視対象の
  * 多重起動を検知するために使う。sweepRegistry と異なり kill もファイル削除も行わない。
@@ -461,14 +461,15 @@ function verifyProcessIdentity(pid, registeredMeta) {
  * @param {string|null} opts.workerName  worker名。orchestrator モードは null を渡す
  * @param {boolean} [opts.failOnReadError=false] true の場合、registry ディレクトリ・個別
  *   エントリの読み取りまたはJSON解析に失敗したら throw する。ディレクトリ自体が無い場合は
- *   「エントリなし」として null を返す。
- * @returns {object|null} 一致する生存エントリ（最初の1件）、無ければ null
+ *   「エントリなし」として空配列を返す。
+ * @returns {object[]} 一致する生存エントリ（PID重複は除外済み）
  */
-function findRunningInstance(workspace, opts = {}) {
+function findRunningInstances(workspace, opts = {}) {
   // bridge: 新旧両ロケーションを union して読む（旧コードのプロセスは
   // legacy にしか登録されていない可能性があるため）。
   const dirs = [pidsDir(workspace), legacyPidsDir(workspace)];
   const seenPids = new Set();
+  const matches = [];
 
   for (const dir of dirs) {
     let files;
@@ -495,7 +496,10 @@ function findRunningInstance(workspace, opts = {}) {
       }
       if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
       if (opts.script && entry.script !== opts.script) continue;
-      if ((entry.workerName ?? null) !== (opts.workerName ?? null)) continue;
+      // findRunningInstances で workerName が省略された場合は全workerを返す。
+      // 従来の findRunningInstance は省略時を orchestrator(null) と解釈するため、
+      // ラッパー側で明示的に null を補う。
+      if (opts.workerName !== undefined && (entry.workerName ?? null) !== opts.workerName) continue;
       if (entry.workspace !== workspace) continue;
 
       const entryPid = entry.pid;
@@ -513,11 +517,30 @@ function findRunningInstance(workspace, opts = {}) {
       const identity = verifyProcessIdentity(entryPid, entry);
       if (!identity.match) continue;
 
-      return entry;
+      matches.push(entry);
     }
   }
 
-  return null;
+  return matches;
+}
+
+/**
+ * 同一の inbox（script + workerName + workspace）を既に監視している
+ * 生存プロセスを registry から1件探す（非破壊・読み取り専用）。
+ *
+ * findRunningInstances と同じ同一性確認を使い、既存呼び出し元へは従来どおり
+ * 最初の1件だけを返す。複数の常駐プロセスを入れ替えるCLIなど、registryに保存された
+ * 引数を全件引き継ぐ必要がある呼び出し元は findRunningInstances を使う。
+ *
+ * @param {string} workspace
+ * @param {object} opts
+ * @returns {object|null} 一致する生存エントリ（無ければ null）
+ */
+function findRunningInstance(workspace, opts = {}) {
+  return findRunningInstances(workspace, {
+    ...opts,
+    workerName: opts.workerName ?? null,
+  })[0] || null;
 }
 
 // ── 単一起動ロック（check-then-register のTOCTOU対策） ─────────────────
@@ -906,6 +929,7 @@ module.exports = {
   legacyPidFilePath,
   registerProcess,
   unregisterProcess,
+  findRunningInstances,
   findRunningInstance,
   // 単一起動ロック
   startupLockPath,

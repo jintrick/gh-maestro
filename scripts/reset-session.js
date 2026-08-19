@@ -21,7 +21,26 @@ const { sweepRegistry } = require('./process-lifecycle');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+const {
+  captureResidentEntries,
+  restartResidents,
+  formatResidentResult,
+} = require('./shared/restart-residents');
 const readStateLib = require('./shared/read-state');
+
+/**
+ * 全体リセットのPID registry sweep後に、停止前に捕捉した常駐だけを立て直す。
+ * sweep前のエントリを受け取ることで、reset-sessionが削除したregistry情報を
+ * 再発見しようとして別プロセスを推測することを防ぐ。
+ */
+function restartCapturedResidents(workspace, entries, scriptsPath, opts = {}) {
+  return restartResidents(workspace, {
+    ...opts,
+    scriptsPath,
+    preCapturedEntries: entries,
+    skipStop: true,
+  });
+}
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
 
@@ -107,7 +126,7 @@ function rebuildOrchestratorBaseline(workspace, { workers = {}, repo, listCommen
   return { ok: true, generation, issues, counts };
 }
 
-module.exports = { rebuildOrchestratorBaseline, USAGE };
+module.exports = { rebuildOrchestratorBaseline, restartCapturedResidents, USAGE };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -152,6 +171,20 @@ if (require.main === module) {
   const warn = (msg) => console.warn(`[reset] ⚠ ${msg}`);
 
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+  // PID registryの全体sweepで常駐も停止するため、後で現行コードを立ち上げ直せるよう
+  // argsを含む同一性確認済みのエントリを先に捕捉する。読み取り不能な場合は、
+  // 不確かなPIDを起動情報として使わず、リセット後の自動再起動を行わない。
+  let residentEntries = [];
+  let residentCaptureError = null;
+  try {
+    residentEntries = captureResidentEntries(workspace);
+    log(`常駐プロセスの再起動情報を ${residentEntries.length} 件捕捉しました。`);
+  } catch (e) {
+    residentCaptureError = e;
+    warn(`常駐プロセスの再起動情報を捕捉できませんでした: ${e.message}`);
+    results.errors.push(`resident capture: ${e.message}`);
+  }
 
   // ── 現在 WezTerm に存在する pane_id の Set を返す ────────────────
 
@@ -656,7 +689,35 @@ if (require.main === module) {
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  // 10. サマリー
+  // 10. 常駐プロセスを現行コードで立て直す
+  //     PID registry sweepで停止した常駐について、捕捉済みargsを引き継いで再起動する。
+  //     Monitorの張り直しはCLIの責務外なので、必要なものを明示する。
+  // ═══════════════════════════════════════════════════════════════════
+
+  let residentRestartFailed = false;
+  if (residentCaptureError) {
+    warn('常駐プロセスは再起動情報を確認できなかったため、立て直しを実行しませんでした。');
+    residentRestartFailed = true;
+  } else if (residentEntries.length > 0) {
+    log('常駐プロセスを現行コードで立て直します...');
+    const residentRestart = restartCapturedResidents(workspace, residentEntries, __dirname);
+    for (const resident of residentRestart.results) {
+      log(formatResidentResult(resident));
+      if (resident.monitorRequired && resident.command) {
+        log(`MONITOR_REATTACH_REQUIRED script=${resident.monitorScript || resident.script} command=${resident.command}`);
+      }
+    }
+    for (const error of residentRestart.errors) {
+      warn(`常駐プロセスの立て直しに失敗しました: ${error}`);
+      results.errors.push(`resident restart: ${error}`);
+    }
+    residentRestartFailed = residentRestart.errors.length > 0;
+  } else {
+    log('稼働中の常駐プロセスはありません。立て直しをスキップします。');
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // 11. サマリー
   // ═══════════════════════════════════════════════════════════════════
 
   log('');
@@ -670,4 +731,5 @@ if (require.main === module) {
   } else {
     log('全項目正常に完了しました。');
   }
+  if (residentRestartFailed) process.exitCode = 1;
 }

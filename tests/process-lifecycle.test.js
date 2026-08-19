@@ -422,6 +422,51 @@ test('findRunningInstance: 新旧両方に同一pidのエントリがあって�
   }
 });
 
+test('findRunningInstances: 新旧registryを統合し、同一PIDを1件に重複排除する', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const newDir = plc.pidsDir(workspace);
+  const legacyDir = plc.legacyPidsDir(workspace);
+  fs.mkdirSync(newDir, { recursive: true });
+  fs.mkdirSync(legacyDir, { recursive: true });
+  const otherPid = process.ppid;
+  const entry = {
+    pid: otherPid,
+    script: 'poll-pr.js',
+    workerName: null,
+    workspace,
+    startTime: MOCK_START_TIME,
+    args: ['42', '--workspace', workspace, '--session-pid', String(otherPid)],
+  };
+  fs.writeFileSync(path.join(newDir, `${otherPid}.json`), JSON.stringify(entry));
+  fs.writeFileSync(path.join(legacyDir, `${otherPid}.json`), JSON.stringify(entry));
+
+  try {
+    const result = plc.findRunningInstances(workspace, { script: 'poll-pr.js', workerName: null });
+    assert.equal(result.length, 1);
+    assert.equal(result[0].pid, otherPid);
+    assert.deepEqual(result[0].args, entry.args);
+  } finally {
+    fs.unlinkSync(path.join(newDir, `${otherPid}.json`));
+    fs.unlinkSync(path.join(legacyDir, `${otherPid}.json`));
+  }
+});
+
+test('findRunningInstances: registry読み取り失敗をfailOnReadErrorで伝播する', () => {
+  const plc = loadModule();
+  const brokenWorkspace = path.join(tmpBase, 'broken-registry-workspace');
+  const legacyDir = plc.legacyPidsDir(brokenWorkspace);
+  fs.mkdirSync(path.dirname(legacyDir), { recursive: true });
+  fs.writeFileSync(legacyDir, 'not a directory', 'utf8');
+  try {
+    assert.throws(
+      () => plc.findRunningInstances(brokenWorkspace, { failOnReadError: true }),
+      /PID registry ディレクトリを読み取れません/,
+    );
+  } finally {
+    fs.unlinkSync(legacyDir);
+  }
+});
+
 test('sweepRegistry: legacyロケーションのみに存在する stale エントリも掃除される（union-read）', () => {
   const plc = loadModule();
   const legacyDir = plc.legacyPidsDir(workspace);
