@@ -106,7 +106,9 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue 12 --description fix-utils --prompt-file <utils-prompt-file> ...
 ```
 
-この並列分割は同一Issue・同一役割で複数ワーカーを立てる唯一の正当なケースであり、この場合だけ〈`--issue` + `--skill`〉で宛先が一意に決まらない。`msg-send.js` / `remove-worker.js` には、`--skill` を外してワーカー名（`issue-12-fix-utils` の形。`--description` に渡した値から組み立てられる）を**位置引数**で渡す。
+**分割以外の理由で、同一Issue・同一役割のワーカーを増やしてはならない。** 同じ役割に追加の作業をさせるなら、新しく起動せず既存ワーカーへ `msg-send.js` で指示する。
+
+分割して起動したときだけ、同じ Issue・同じ skill のワーカーが複数存在する状態になる。このとき〈`--issue` + `--skill`〉では宛先が一つに決まらないため、`msg-send.js` / `remove-worker.js` には `--skill` を外し、ワーカー名（`issue-12-fix-utils` の形。`--description` に渡した値から組み立てられる）を**位置引数**で渡す。
 
 ```sh
 node "{{SCRIPTS_PATH}}/msg-send.js" issue-12-fix-utils --workspace $WORKSPACE --stdin <<'EOF'
