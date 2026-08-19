@@ -139,6 +139,23 @@ test('buildRestartArgs: msg-pollはrestart CLIの親PIDを使わずregistryのse
   }
 });
 
+test('captureResidentEntries: session-pidなしでも対象常駐自身の親チェーンから解決する', () => {
+  const workspace = makeWorkspace();
+  try {
+    const entry = { ...residentEntries(workspace)[1], args: ['orchestrator', '--workspace', workspace] };
+    const harness = makeHarness(workspace, { entries: [entry] });
+    harness.hooks.findSessionRootPid = (pid) => {
+      assert.equal(pid, entry.pid, 'restart CLI自身ではなく停止前の常駐PIDを起点にする');
+      return 9000;
+    };
+    const captured = captureResidentEntries(workspace, harness.hooks);
+    assert.equal(captured[0].restartSessionPid, 9000);
+    assert.equal(captured[0].restartSessionPidSource, 'resident-parent-chain');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test('buildRestartArgs: inbox-supervisorの旧引数が無い場合だけ親チェーンをフォールバックに使う', () => {
   const workspace = makeWorkspace();
   try {
@@ -157,7 +174,7 @@ test('buildRestartArgs: inbox-supervisorの旧引数が無い場合だけ親チ�
   }
 });
 
-test('restartResidents: 4種を停止して現行スクリプトを起動し、poll-reviewsは親へ委譲する', () => {
+test('restartResidents: inboxだけdetached起動し、Monitor常駐は再接続要求、poll-reviewsは親へ委譲する', () => {
   const workspace = makeWorkspace();
   try {
     const harness = makeHarness(workspace, { entries: residentEntries(workspace) });
@@ -171,14 +188,16 @@ test('restartResidents: 4種を停止して現行スクリプトを起動し、p
     assert.deepEqual(result.errors, []);
     assert.equal(result.results.length, RESIDENT_SPECS.length);
     assert.deepEqual(result.results.map((item) => item.status), [
-      'replaced', 'replaced', 'replaced', 'delegated',
+      'replaced', 'monitor-required', 'monitor-required', 'delegated',
     ]);
     assert.equal(result.results[1].monitorRequired, true);
     assert.equal(result.results[2].monitorRequired, true);
-    assert.equal(result.results[3].verified, true);
+    assert.equal(result.results[1].commands.length, 1);
+    assert.equal(result.results[2].commands.length, 1);
+    assert.equal(result.results[3].monitorRequired, false);
     assert.equal(result.results[3].monitorScript, 'poll-pr.js');
-    assert.equal(harness.spawned.length, 3, 'poll-reviewsは単独spawnせずpoll-prへ委譲する');
-    assert.ok(harness.spawned.some((item) => path.basename(item.args[0]) === 'poll-pr.js'));
+    assert.equal(harness.spawned.length, 1, 'Monitor常駐はdetached起動せず、inboxだけ起動する');
+    assert.ok(harness.spawned.every((item) => path.basename(item.args[0]) === 'inbox-supervisor.js'));
     assert.ok(harness.unregistered.includes(101));
     assert.ok(harness.unregistered.includes(104));
   } finally {
@@ -225,11 +244,12 @@ test('restartResidents: 停止確認に失敗した場合は再起動せず、�
   }
 });
 
-test('restartResidents: session-pidを引き継げないMonitor常駐は推測起動せず失敗する', () => {
+test('restartResidents: session-pidも親チェーンも解決できないMonitor常駐は停止せず失敗する', () => {
   const workspace = makeWorkspace();
   try {
     const old = residentEntries(workspace).slice(1, 2).map((entry) => ({ ...entry, args: ['orchestrator', '--workspace', workspace] }));
     const harness = makeHarness(workspace, { entries: old });
+    harness.hooks.findSessionRootPid = () => null;
     const result = restartResidents(workspace, {
       scriptsPath: workspace,
       hooks: harness.hooks,
@@ -239,6 +259,58 @@ test('restartResidents: session-pidを引き継げないMonitor常駐は推測�
     assert.equal(harness.spawned.length, 0);
     assert.equal(result.results[1].status, 'failed');
     assert.match(result.results[1].reason, /Monitorから起動/);
+    assert.equal(harness.live.has(old[0].pid), true, '再起動不能な対象は停止しない');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('restartResidents: 同一スクリプトの複数poll-prを停止数と同じ件数でMonitor再接続要求する', () => {
+  const workspace = makeWorkspace();
+  try {
+    const entries = [0, 1].map((index) => ({
+      ...residentEntries(workspace)[2],
+      pid: 103 + index * 10,
+      args: [String(334 + index), '--workspace', workspace, '--session-pid', '9000'],
+    }));
+    const harness = makeHarness(workspace, { entries });
+    const result = restartResidents(workspace, {
+      scriptsPath: path.join(workspace, 'scripts'),
+      hooks: harness.hooks,
+      maxAttempts: 1,
+      waitMs: 0,
+    });
+    assert.equal(result.errors.length, 0);
+    assert.equal(result.results[2].status, 'monitor-required');
+    assert.equal(result.results[2].oldPids.length, 2);
+    assert.equal(result.results[2].commands.length, 2);
+    assert.deepEqual(harness.unregistered.sort((a, b) => a - b), [103, 113]);
+    assert.equal(harness.spawned.length, 0);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('restartResidents: 同一inbox-supervisor複数件も停止数と同じ件数をdetached起動する', () => {
+  const workspace = makeWorkspace();
+  try {
+    const entries = [0, 1].map((index) => ({
+      ...residentEntries(workspace)[0],
+      pid: 101 + index * 10,
+      args: ['--workspace', workspace, '--session-pid', '9000'],
+    }));
+    const harness = makeHarness(workspace, { entries });
+    const result = restartResidents(workspace, {
+      scriptsPath: path.join(workspace, 'scripts'),
+      hooks: harness.hooks,
+      maxAttempts: 1,
+      waitMs: 0,
+    });
+    assert.equal(result.errors.length, 0);
+    assert.equal(result.results[0].status, 'replaced');
+    assert.deepEqual(result.results[0].newPids, [2000, 2001]);
+    assert.equal(harness.spawned.length, 2);
+    assert.equal(harness.unregistered.length, 2);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
@@ -274,7 +346,7 @@ test('restart-residents CLI: helpは0、引数不備は1、通常出力はMonito
       waitMs: 0,
     });
     assert.equal(result.code, 0);
-    assert.ok(result.lines.some((line) => line.includes('script=msg-poll.js') && line.includes('status=replaced')));
+    assert.ok(result.lines.some((line) => line.includes('script=msg-poll.js') && line.includes('status=monitor-required')));
     assert.ok(result.lines.some((line) => line.startsWith('MONITOR_REATTACH_REQUIRED script=msg-poll.js')));
     assert.equal(USAGE.includes('resident-restart-logs'), true);
   } finally {

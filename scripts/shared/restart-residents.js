@@ -8,9 +8,9 @@
 //
 // poll-pr.js は poll-reviews.js を子プロセスとして起動するため、両方が登録されて
 // いた場合は poll-reviews.js を単独で二重起動しない。msg-poll.js と poll-pr.js は
-// stdout が呼び出し元の Monitor へ届く契約を持つため、detached CLI で入れ替えた
-// あとは Monitor の張り直しが必要になる。このモジュールはプロセスを再起動する
-// ところまでを担当し、Monitor の作成は orchestrator に返す。
+// stdout が呼び出し元の Monitor へ届く契約を持つため、Monitor常駐3種はdetached
+// 起動せず、停止後にMonitorから同じ引数で張り直すコマンドを返す。Monitorを持たない
+// inbox-supervisorだけはdetachedで直接入れ替える。
 
 const fs = require('fs');
 const path = require('path');
@@ -65,14 +65,65 @@ function isResidentEntry(entry) {
 /**
  * 常駐4種のうち、現在生存している registry エントリを捕捉する。
  * 読み取りに失敗した場合は空集合にせず例外を伝播し、kill/startを行わない。
+ * session-pidが引数に無い旧プロセスについては、停止前にそのPIDの親チェーンから
+ * 解決した値をエントリへ保持する。
  *
  * @param {string} workspace
  * @param {object} [hooks]
+ * @param {object} [opts]
  * @returns {object[]}
  */
-function captureResidentEntries(workspace, hooks = createResidentRestartHooks()) {
+function resolveResidentSessionPid(entry, spec, hooks, opts = {}) {
+  const argsPid = parseSessionPid(entry.args);
+  if (isValidPid(argsPid)) return { pid: argsPid, source: 'registry-args' };
+
+  if (isValidPid(entry.sessionPid)) {
+    return { pid: entry.sessionPid, source: 'registry-session-pid' };
+  }
+
+  // restart-residents自身の親ではなく、入れ替え対象だった常駐プロセスの
+  // 親チェーンを起点に解決する。これなら通常のMonitor起動でargvへ
+  // --session-pidが渡されていなくても、元プロセスと同じdead-man's switchの
+  // 対象を引き継げる。停止後は親チェーンを辿れないため、capture時に解決する。
+  if (isValidPid(entry.pid) && typeof hooks.findSessionRootPid === 'function') {
+    try {
+      const residentParentPid = hooks.findSessionRootPid(entry.pid);
+      if (isValidPid(residentParentPid)) {
+        return { pid: residentParentPid, source: 'resident-parent-chain' };
+      }
+    } catch {}
+  }
+
+  // inbox-supervisorの旧registryだけは、対象プロセスの親チェーンも解決できない
+  // 場合に限り従来のCLI親チェーンへフォールバックする。Monitor出力を持つ3種は
+  // 使い捨てCLIに紐づけると寿命契約を壊すため、ここでは推測起動しない。
+  if (spec.script === 'inbox-supervisor.js') {
+    const fallback = opts.fallbackSessionPid
+      ?? (typeof hooks.findSessionRootPid === 'function' ? hooks.findSessionRootPid() : null);
+    if (isValidPid(fallback)) return { pid: fallback, source: 'restart-cli-parent-chain' };
+  }
+  return null;
+}
+
+function prepareResidentEntry(entry, hooks, opts = {}) {
+  const spec = specForScript(entry.script);
+  if (!spec) return entry;
+  if (parseSessionPid(entry.args) || isValidPid(entry.sessionPid) || isValidPid(entry.restartSessionPid)) {
+    return entry;
+  }
+  const resolved = resolveResidentSessionPid(entry, spec, hooks, opts);
+  if (!resolved) return entry;
+  return {
+    ...entry,
+    restartSessionPid: resolved.pid,
+    restartSessionPidSource: resolved.source,
+  };
+}
+
+function captureResidentEntries(workspace, hooks = createResidentRestartHooks(), opts = {}) {
   return hooks.findRunningInstances(workspace, { failOnReadError: true })
-    .filter(isResidentEntry);
+    .filter(isResidentEntry)
+    .map((entry) => prepareResidentEntry(entry, hooks, opts));
 }
 
 function parseSessionPid(args) {
@@ -120,10 +171,10 @@ function fallbackArgs(spec, workspace) {
  * 起動対象の引数を構築する。
  *
  * 既存プロセスの --session-pid は、restart CLIの親チェーンではなく、対象プロセスが
- * 実際に使っていた値を引き継ぐ。使い捨てCLIから Monitor のPIDを再解決すると、
- * msg-poll等がCLIを起動したシェルに紐づき、Monitorの寿命契約を壊すためである。
- * inbox-supervisorだけは旧引数が無い場合に限り、既存のCLI自動起動と同じ親チェーン
- * フォールバックを使う。
+ * 実際に使っていた値を引き継ぐ。引数に無い場合も、停止前に対象プロセス自身の
+ * 親チェーンから解決した値を使う。使い捨てrestart CLIの親チェーンをmsg-poll等へ
+ * 渡すことはしない。inbox-supervisorだけは対象の親チェーンも解決できない旧形式に
+ * 限り、既存のCLI自動起動と同じ親チェーンをフォールバックに使う。
  */
 function buildRestartArgs(spec, entry, workspace, hooks, opts = {}) {
   const recordedArgs = Array.isArray(entry.args) && entry.args.every((arg) => typeof arg === 'string')
@@ -141,8 +192,18 @@ function buildRestartArgs(spec, entry, workspace, hooks, opts = {}) {
   let sessionPid = recordedSessionPid;
   let sessionPidSource = recordedSessionPid ? 'registry-args' : null;
 
+  if (!sessionPid && isValidPid(entry.sessionPid)) {
+    sessionPid = entry.sessionPid;
+    sessionPidSource = 'registry-session-pid';
+  }
+  if (!sessionPid && isValidPid(entry.restartSessionPid)) {
+    sessionPid = entry.restartSessionPid;
+    sessionPidSource = entry.restartSessionPidSource || 'resident-parent-chain';
+  }
+
   if (!sessionPid && spec.script === 'inbox-supervisor.js') {
-    const fallback = opts.fallbackSessionPid ?? hooks.findSessionRootPid();
+    const fallback = opts.fallbackSessionPid
+      ?? (typeof hooks.findSessionRootPid === 'function' ? hooks.findSessionRootPid() : null);
     if (!isValidPid(fallback)) {
       throw new Error('inbox-supervisor.js の --session-pid を親セッションから解決できません');
     }
@@ -231,12 +292,14 @@ function findReplacementEntry(workspace, spec, oldPids, hooks) {
   return entries.find((entry) => !oldPids.has(entry.pid)) || null;
 }
 
-function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = {}) {
-  let built;
-  try {
-    built = buildRestartArgs(spec, entry, workspace, hooks, opts);
-  } catch (e) {
-    return { ok: false, error: e.message };
+function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = {}, prebuilt = null) {
+  let built = prebuilt;
+  if (!built) {
+    try {
+      built = buildRestartArgs(spec, entry, workspace, hooks, opts);
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
   }
 
   const scriptPath = path.join(scriptsPath, spec.script);
@@ -294,9 +357,9 @@ function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = 
   };
 }
 
-function monitorCommandForEntry(scriptsPath, spec, entry) {
-  const args = Array.isArray(entry.args) ? entry.args.filter((arg) => typeof arg === 'string') : [];
-  return formatCommand(path.join(scriptsPath, spec.script), args);
+function monitorCommandForEntry(scriptsPath, spec, entry, hooks = createResidentRestartHooks(), opts = {}) {
+  const built = buildRestartArgs(spec, entry, opts.workspace || entry.workspace, hooks, opts);
+  return formatCommand(path.join(scriptsPath, spec.script), built.args);
 }
 
 /**
@@ -309,6 +372,8 @@ function monitorCommandForEntry(scriptsPath, spec, entry) {
  * @param {boolean} [opts.skipStop=false] preCapturedEntriesが既に停止済みの場合にtrue
  * @param {object} [opts.hooks] テスト用依存注入
  * @returns {{results: object[], errors: string[], entries: object[]}}
+ *   Monitor常駐のstatusは `monitor-required` となり、commandsにMonitorで実行する
+ *   コマンドを保持する。
  */
 function restartResidents(workspace, opts = {}) {
   if (!opts.scriptsPath) throw new Error('restartResidents: scriptsPath が必要です');
@@ -317,7 +382,7 @@ function restartResidents(workspace, opts = {}) {
   try {
     entries = opts.preCapturedEntries
       ? opts.preCapturedEntries.filter(isResidentEntry)
-      : captureResidentEntries(workspace, hooks);
+      : captureResidentEntries(workspace, hooks, { fallbackSessionPid: opts.fallbackSessionPid });
   } catch (e) {
     const reason = `常駐registryの読み取りに失敗したため入れ替えを中断しました: ${e.message}`;
     return {
@@ -326,6 +391,10 @@ function restartResidents(workspace, opts = {}) {
       results: RESIDENT_SPECS.map((spec) => ({ script: spec.script, status: 'failed', reason })),
     };
   }
+
+  entries = entries.map((entry) => prepareResidentEntry(entry, hooks, {
+    fallbackSessionPid: opts.fallbackSessionPid,
+  }));
 
   const entriesByScript = new Map();
   for (const entry of entries) {
@@ -344,6 +413,27 @@ function restartResidents(workspace, opts = {}) {
   const resultByScript = new Map(results.map((result) => [result.script, result]));
   const errors = [];
 
+  // stop前に全対象の再起動引数を構築する。session-pidを解決できない対象を
+  // 先に停止すると、再起動もMonitor再接続要求もできず常駐を失うためである。
+  const plans = new Map();
+  for (const entry of entries) {
+    const spec = specForScript(entry.script);
+    try {
+      const built = buildRestartArgs(spec, entry, workspace, hooks, opts);
+      plans.set(entry, {
+        ok: true,
+        ...built,
+        command: formatCommand(path.join(opts.scriptsPath, spec.script), built.args),
+      });
+    } catch (e) {
+      plans.set(entry, { ok: false, error: e.message });
+      const result = resultByScript.get(entry.script);
+      result.status = 'failed';
+      result.reason = e.message;
+      errors.push(`${entry.script}: ${e.message}`);
+    }
+  }
+
   if (opts.skipStop) {
     const stopError = ensureCapturedEntriesStopped(entries, hooks, opts);
     if (stopError) {
@@ -358,6 +448,8 @@ function restartResidents(workspace, opts = {}) {
     }
   } else {
     for (const entry of entries) {
+      const plan = plans.get(entry);
+      if (!plan || !plan.ok) continue;
       const stopResult = stopEntry(workspace, entry, hooks, opts);
       if (!stopResult.ok) {
         const result = resultByScript.get(entry.script);
@@ -368,7 +460,7 @@ function restartResidents(workspace, opts = {}) {
     }
   }
 
-  const pollPrWasRestarted = () => resultByScript.get('poll-pr.js').status === 'replaced';
+  const pollPrWasScheduled = () => ['replaced', 'monitor-required'].includes(resultByScript.get('poll-pr.js').status);
   for (const spec of RESIDENT_SPECS) {
     const result = resultByScript.get(spec.script);
     const oldEntries = entriesByScript.get(spec.script) || [];
@@ -376,32 +468,59 @@ function restartResidents(workspace, opts = {}) {
 
     // poll-pr が新しい poll-reviews を子として起動するため、旧構成に両方が
     // 登録されていた場合は、poll-reviewsを単独spawnして二重監視を作らない。
-    if (spec.script === 'poll-reviews.js' && entriesByScript.has('poll-pr.js') && pollPrWasRestarted()) {
+    const pollPrEntries = entriesByScript.get('poll-pr.js') || [];
+    if (spec.script === 'poll-reviews.js'
+      && pollPrEntries.length === oldEntries.length
+      && pollPrEntries.length > 0
+      && pollPrWasScheduled()) {
       result.status = 'delegated';
-      result.verified = true;
-      result.monitorRequired = true;
       result.monitorScript = 'poll-pr.js';
       result.reason = 'poll-pr.js が現行コードで子プロセスとして起動する';
-      result.command = monitorCommandForEntry(opts.scriptsPath, specForScript('poll-pr.js'), entriesByScript.get('poll-pr.js')[0]);
       continue;
     }
 
     const oldPids = new Set(entries.flatMap((entry) => entry.script === spec.script ? [entry.pid] : []));
-    const started = startEntry(workspace, opts.scriptsPath, spec, oldEntries[0], oldPids, hooks, opts);
-    if (!started.ok) {
-      result.status = 'failed';
-      result.reason = started.error;
-      errors.push(`${spec.script}: ${started.error}`);
+    const readyEntries = oldEntries.filter((entry) => plans.get(entry)?.ok);
+
+    if (spec.monitorRequired) {
+      const commands = readyEntries.map((entry) => plans.get(entry).command);
+      if (commands.length !== oldEntries.length) {
+        result.status = 'failed';
+        result.reason = result.reason || `${spec.script} のMonitor再接続コマンドを構築できません`;
+        continue;
+      }
+      result.status = 'monitor-required';
+      result.monitorRequired = true;
+      result.monitorScript = spec.script;
+      result.commands = commands;
+      result.command = commands[0];
+      result.sessionPids = readyEntries.map((entry) => plans.get(entry).sessionPid);
       continue;
     }
+
+    const startedEntries = [];
+    const replacementPids = new Set(oldPids);
+    for (const entry of readyEntries) {
+      const started = startEntry(workspace, opts.scriptsPath, spec, entry, replacementPids, hooks, opts, plans.get(entry));
+      if (!started.ok) {
+        result.status = 'failed';
+        result.reason = started.error;
+        errors.push(`${spec.script}: ${started.error}`);
+        break;
+      }
+      startedEntries.push(started);
+      replacementPids.add(started.pid);
+    }
+    if (result.status === 'failed') continue;
+
     result.status = 'replaced';
     result.verified = true;
-    result.newPid = started.pid;
-    result.monitorRequired = spec.monitorRequired;
-    result.monitorScript = spec.script;
-    result.command = started.command;
-    result.sessionPid = started.sessionPid;
-    result.sessionPidSource = started.sessionPidSource;
+    result.newPids = startedEntries.map((started) => started.pid);
+    result.newPid = result.newPids.length === 1 ? result.newPids[0] : undefined;
+    result.commands = startedEntries.map((started) => started.command);
+    result.command = result.commands[0];
+    result.sessionPids = startedEntries.map((started) => started.sessionPid);
+    result.sessionPidSources = startedEntries.map((started) => started.sessionPidSource);
   }
 
   return { entries, results, errors };
@@ -411,6 +530,7 @@ function formatResidentResult(result) {
   const fields = [`RESIDENT`, `script=${result.script}`, `status=${result.status}`];
   if (result.oldPids && result.oldPids.length) fields.push(`oldPid=${result.oldPids.join(',')}`);
   if (result.newPid) fields.push(`newPid=${result.newPid}`);
+  if (result.newPids && result.newPids.length > 1) fields.push(`newPid=${result.newPids.join(',')}`);
   if (result.verified !== undefined) fields.push(`verified=${result.verified}`);
   if (result.reason) fields.push(`reason=${JSON.stringify(result.reason)}`);
   return fields.join(' ');
@@ -430,4 +550,5 @@ module.exports = {
   formatCommand,
   formatResidentResult,
   monitorCommandForEntry,
+  resolveResidentSessionPid,
 };

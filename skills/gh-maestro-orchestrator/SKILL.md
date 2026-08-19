@@ -143,8 +143,8 @@ EOF
 - **Issueをクローズする唯一の手段は `finalize-issue.js` である。人間から「Issueを閉じて」「クローズして」等と指示された場合も、その言葉をそのまま `gh issue close` の実行指示と解釈しない。反省会が未完了ならまず反省会を完了させてから `finalize-issue.js` を呼ぶ**
 - `BASE_BRANCH`は保護ブランチ（`main`/`master`）でもworktreeブランチ（`issue-N-description`形式）でもない。セッション中に変更しない。起動時に保護ブランチ上にいた場合のみ、最初のIssue確定時に開発ブランチを切って設定する
 - `main` / `master`への直接pushは禁止
-- **`scripts/` 配下または `skills/agents.yaml` に触れた変更を install したら、`node "{{SCRIPTS_PATH}}/restart-residents.js" --workspace $WORKSPACE` を実行する。** 稼働中の常駐プロセスは起動時にロードしたJSを保持し続けるため、installだけでは新しいコードが届かない。コマンドはPIDと起動時刻を確認できた常駐4種を停止・現行コードで立て直し、`RESIDENT script=... status=... verified=true` の出力で各プロセスの結果を申告する
-  - `MONITOR_REATTACH_REQUIRED` が出た常駐は、コマンド欄の起動方法でMonitorを張り直す。特に `msg-poll.js` は出力先がMonitorであり、プロセスが生きているだけではワーカー報告は届かない。Monitorの張り直しまで完了させてから次のタスクへ進む
+- **`scripts/` 配下または `skills/agents.yaml` に触れた変更を install したら、`node "{{SCRIPTS_PATH}}/restart-residents.js" --workspace $WORKSPACE` を実行する。** 稼働中の常駐プロセスは起動時にロードしたJSを保持し続けるため、installだけでは新しいコードが届かない。コマンドはPIDと起動時刻を確認できた常駐4種を停止し、Monitorを持たない `inbox-supervisor.js` だけをdetachedで立て直す。`RESIDENT script=... status=replaced ... verified=true` は直接復旧済み、`status=monitor-required` は停止済みでMonitor再接続待ち、`delegated` は `poll-pr.js` が子プロセスとして引き継ぐことを表す
+  - `MONITOR_REATTACH_REQUIRED` が出た常駐は、各行の `command=` をMonitorで張り直す。CLIはMonitor出力を持つ `msg-poll.js` / `poll-pr.js` / `poll-reviews.js` をdetached起動しない。特に `msg-poll.js` は出力先がMonitorであり、プロセスが生きているだけではワーカー報告は届かない。Monitorの張り直しまで完了させてから次のタスクへ進む
   - registryの読み取り・停止・起動確認が失敗して終了コード1になった場合は、未確認の常駐が残っている可能性があるため、結果を人間に報告して判断を仰ぐ。人間へのセッション再起動依頼で置き換えない
   - `scripts/` に触れたら一律でこの手順を実行する。どのファイルが常駐プロセスの require 閉包に入るかは判定しない（判定コストの方が高い）
   - `skills/**` 配下のドキュメントだけを変更した場合は不要。常駐プロセスは SKILL.md を読まない

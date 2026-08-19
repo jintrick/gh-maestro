@@ -14,22 +14,23 @@ Usage:
 Options:
   --workspace <path>  ワークスペース（省略時は GH_MAESTRO_WORKSPACE env または
                       CWDからの .gh-maestro/ 上方探索で解決）
-  --session-pid <pid> inbox-supervisor のregistry引数にPIDが無い場合のフォールバック。
-                      既存プロセスのregistryに保存されたPIDがある場合はそちらを引き継ぐ。
+  --session-pid <pid> inbox-supervisorのregistry引数と対象プロセス親チェーンから
+                      PIDを解決できない旧形式に限るフォールバック。
   --help, -h          このヘルプを表示する
 
 対象:
   inbox-supervisor.js / msg-poll.js（orchestrator）/ poll-pr.js / poll-reviews.js
 
 Output (stdout):
-  RESIDENT script=<name> status=replaced|delegated|not-running|failed ...
+  RESIDENT script=<name> status=replaced|monitor-required|delegated|not-running|failed ...
   MONITOR_REATTACH_REQUIRED script=<name> command=<command>
-  Monitorで出力を受ける常駐をCLIから再起動した場合、上記の再接続指示を必ず実行する。
+  Monitorで出力を受ける常駐は停止後にdetached起動せず、上記の再接続指示を必ず実行する。
   poll-pr.js が poll-reviews.js を子として起動する構成では、後者は delegated と出力する。
 
 副作用:
-  PIDと起動時刻の同一性を確認できた対象だけを停止し、現行 scripts/ 配下のスクリプトを
-  detached 起動する。起動ログは <workspace>/.gh-maestro/resident-restart-logs/ に追記する。
+  PIDと起動時刻の同一性を確認できた対象だけを停止する。inbox-supervisorは現行
+  scripts/ 配下からdetached起動し、Monitor常駐3種はMonitorからの再接続を要求する。
+  inbox-supervisorの起動ログは <workspace>/.gh-maestro/resident-restart-logs/ に追記する。
   registryの読み取り・停止・起動確認に失敗した場合は、未確認のプロセスを削除せず終了コード1を返す。`;
 
 function parsePositivePid(value) {
@@ -93,8 +94,11 @@ function main(argv = process.argv.slice(2), opts = {}) {
 
   for (const resident of result.results) {
     lines.push(formatResidentResult(resident));
-    if (resident.monitorRequired && resident.command) {
-      lines.push(`MONITOR_REATTACH_REQUIRED script=${resident.monitorScript || resident.script} command=${resident.command}`);
+    const monitorCommands = resident.commands || (resident.command ? [resident.command] : []);
+    if (resident.monitorRequired) {
+      for (const command of monitorCommands) {
+        lines.push(`MONITOR_REATTACH_REQUIRED script=${resident.monitorScript || resident.script} command=${command}`);
+      }
     }
   }
   for (const error of result.errors) errLines.push(`restart-residents: ${error}`);

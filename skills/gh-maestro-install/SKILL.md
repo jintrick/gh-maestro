@@ -28,11 +28,13 @@ gh-maestroのグローバルインストールを実行する。
 node scripts/restart-residents.js --workspace $WORKSPACE
 ```
 
-出力の `RESIDENT script=<name> status=replaced ... verified=true` が各常駐を現行コードで
-立て直した事実である。`not-running` は入れ替え対象が無かったこと、`failed` は未確認のため
-入れ替えを完了扱いにしてはいけないことを表す。`MONITOR_REATTACH_REQUIRED` が出た場合は、
-同じ行の `command=` を使ってMonitorを張り直す。特に `msg-poll.js` は出力先がorchestratorの
-Monitorなので、プロセスが稼働していてもMonitorを張り直すまで通知は届かない。
+出力の `RESIDENT script=<name> status=replaced ... verified=true` はMonitorを持たない
+`inbox-supervisor.js` の立て直し完了を表す。`monitor-required` はCLIがdetached起動せず
+停止したMonitor常駐を、`MONITOR_REATTACH_REQUIRED` の各 `command=` でMonitorから張り直す
+必要がある状態である。`delegated` は `poll-pr.js` が `poll-reviews.js` を子として引き継ぐ。
+`not-running` は入れ替え対象が無かったこと、`failed` は未確認のため入れ替えを完了扱いにしては
+いけないことを表す。特に `msg-poll.js` は出力先がorchestratorのMonitorなので、プロセスが
+稼働していてもMonitorを張り直すまで通知は届かない。
 
 **`skills/**` のドキュメントだけを変更した場合は常駐入れ替え不要。** 常駐プロセスは SKILL.md を
 読まないため、陳腐化するのは変更したエージェント自身のコンテクストだけである。

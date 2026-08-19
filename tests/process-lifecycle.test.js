@@ -1190,6 +1190,11 @@ test('findSessionRootPid: 関数が存在し正の整数を返す（mockWmi使�
   assert.ok(rootPid > 0);
 });
 
+test('findSessionRootPid: 明示した別PIDの親が解決不能なら現在CLIのppidへフォールバックしない', () => {
+  const plc = loadModule({ execSync: mockWmiEmpty() });
+  assert.equal(plc.findSessionRootPid(99999), null);
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // CLI_USAGE
 // ═══════════════════════════════════════════════════════════════════════════

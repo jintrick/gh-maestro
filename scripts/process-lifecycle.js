@@ -82,11 +82,12 @@ function getParentPid(pid) {
  * 最大5階層まで遡り、init/systemプロセス（pid<=4）の直前で停止する。
  *
  * @param {number} [startPid] 起点PID（省略時は process.pid）
- * @returns {number} セッションルートPID（特定不能時は process.ppid）
+ * @returns {number|null} セッションルートPID（特定不能時は、起点省略なら process.ppid、
+ *   明示起点なら null）
  */
 function findSessionRootPid(startPid) {
   let pid = startPid || process.pid;
-  let found = process.ppid; // フォールバック
+  let found = startPid ? null : process.ppid; // 明示起点では別プロセスのppidを流用しない
   const maxDepth = 5;
 
   for (let i = 0; i < maxDepth; i++) {
