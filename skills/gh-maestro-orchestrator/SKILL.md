@@ -129,7 +129,7 @@ EOF
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「8. PR検出」参照）
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口
 - **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「1. 要件確定」参照）
-- **create-issue.js** / **update-issue.js** / **comment-issue.js** — `gh issue create` / `gh issue edit` / `gh issue comment` の唯一の呼び出し口。`--body-file` は論理パスのまま渡す（「1. 要件確定」「反省会」「保留リスト」参照）
+- **create-issue.js** / **update-issue.js** / **comment-issue.js** — `gh issue create` / `gh issue edit` / `gh issue comment` の唯一の呼び出し口。`--body-file` は論理パスのまま渡す（「1. 要件確定」「13. 反省会と後始末」参照）
 
 #### assistant（対話型ワーカー）について
 
@@ -200,24 +200,6 @@ msg-poll が `未初期化です。reset-session.js で初期化してくださ�
 ```
 
 コーダーへの追加転送はスパイラルを悪化させるだけである。人間が直接コードを見て判断するまで待機する。
-
-### 保留リスト
-
-SUGGESTION・軽微なDRY違反・スタイル指摘はコーダーへ即転送せず、**専用の保留Issue** に永続化する。チャットに書き留めるとセッションを跨いだ瞬間に蒸発する。
-
-`gh-maestro-pending` ラベルを持つIssueは**リポジトリ全体で常に1件のみ**（PR番号をまたいで使い回すストックIssue）。新規作成は禁止に近い最終手段であり、**PR検出のたびに必ず先にラベル検索する。**
-
-確保・追記・切り出しを含む具体的な操作手順はすべて `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/pending-list.md` にある。保留Issueを触るときはそこを開く。
-
-保留Issueは終わりのないストックであり、クローズという概念がない。対応することが決まった項目は保留Issueから**切り出して新規Issueを作成**し、コーダーへの実装指示はその新規Issueに対して行う。実装が完了しクローズされるのは常にこの切り出し先Issueであり、保留Issue自体がクローズされることはない。
-
-過去PRを遡及して保留候補を探す場合は explorer ワーカーに委譲し、自分では手読みしない。
-
-#### 切り出しの判断原則
-
-保留Issueは消化対象のバックログではない。切り出し=Issue=PR=Review Manager起動というコストを負うため、
-その負担に見合う塊に育つまで意図的に据え置く仕組みだ。人間から直接「保留を見てまとめてくれ」と
-言われた場合も、この原則に沿って切り出す単位を判断する。
 
 ### council（複数モデル議論）
 
@@ -473,7 +455,7 @@ Review Manager の findings が0件のPRではトリアージは発生しない�
 
 セッション中に蓄積した以下の記録を材料とする：
 - コーダーへ転送した BLOCKER・命名修正の一覧
-- 保留リストに積んだ SUGGESTION の一覧
+- 保留Issueに積んだ SUGGESTION の一覧
 - スパイラル検知が発動した場合その内容
 
 #### 実施判断（分析対象がゼロなら人間に確認して飛ばす）

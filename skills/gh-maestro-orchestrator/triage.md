@@ -59,7 +59,7 @@
   ```
   同一トリアージサイクルで他にも「コーダーに修正依頼」と決まった指摘があれば、まとめて1回のメッセージで送ってよい。
 - **無視**: 何もしない。
-- **保留Issueに積む**:
+- **保留Issueに積む**: 何を積むか・いつ切り出すかの判断原則と、`$PENDING_ISSUE` の取得手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/pending-list.md` にある。
   ```sh
   node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/pending-<N>.md --stdin <<'EOF'
   [保留] <path>:<line> — <内容>
