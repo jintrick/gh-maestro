@@ -102,13 +102,8 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 競合しない軸（ディレクトリ・ファイル種別・機能単位など）で分割し、複数ワーカーで並列処理する。
 
 ```sh
-# アンチパターン: 1000件のLintエラーを1ワーカーに丸投げ
-node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue <N> --prompt-file <prompt-file> ...
-
-# 正しいパターン: ディレクトリ単位で分割し並列実行
-node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <components-prompt-file> --issue 12 --description fix-components ...
-node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <utils-prompt-file>      --issue 12 --description fix-utils ...
-node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --prompt-file <hooks-prompt-file>      --issue 12 --description fix-hooks ...
+# 1000件のLintエラーを1ワーカーに丸投げせず、ディレクトリ単位で分割して並列に起動する
+node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue 12 --description fix-utils --prompt-file <utils-prompt-file> ...
 ```
 
 この並列分割は同一Issue・同一役割で複数ワーカーを立てる唯一の正当なケースであり、この場合だけ〈`--issue` + `--skill`〉で宛先が一意に決まらない。`msg-send.js` / `remove-worker.js` には、`--skill` を外してワーカー名（`issue-12-fix-utils` の形。`--description` に渡した値から組み立てられる）を**位置引数**で渡す。
@@ -127,12 +122,12 @@ EOF
 - **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉。本文は位置引数では渡せず、`--stdin`（ヒアドキュメントは`<<'EOF'`とクォート付きにする）または `--body-file` で渡す
 - **msg-read.js** — コメントIDまたは計画から本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE` または `msg-read.js --plan --issue <N> --workspace $WORKSPACE`
 - **remove-worker.js** — 個別ワーカーのプロセスをkillしてworktreeを削除する。対象は workerName の位置引数または〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
-- **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する。ライフサイクル終了後の情報価値のない内部状態（`assistant-watch/<N>.json`・対象PRの`review-manager-<PR>.incomplete`・`executions.json`の当該issueレコード）もbest-effortで後始末する
+- **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「反省会」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する
 - **start-review-manager.js** — PRにReview Managerを起動する（**位置引数**: `start-review-manager.js $PR $REPO $WORKSPACE $ISSUE`。詳細は`monitor-recovery.md`の「PR監視・Review Managerの再起動」参照）
-- **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）。既読の正本は明示既読コメントID集合。**msg-state が欠落・破損・旧形式・未初期化の場合、走査を停止し「reset-session.js での初期化が必要」と報告する**
+- **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「自分の inbox の監視」参照）
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「PR検出」参照）
 - **process-lifecycle.js** — PID registryを走査しstaleなプロセスを掃除する（各「復旧手順」参照）
-- **reset-session.js** — 壊れた状態からセッションを強制リセットする。`msg-state` は単純削除せず、wipe前の管理対象 Issue の既読ベースラインを再構築する。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口でもある
+- **reset-session.js** — 壊れた状態からセッションを強制リセットする。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口
 - **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「Issue確定」参照）
 - **create-issue.js** — `gh issue create` の唯一の呼び出し口。成功時に `--body-file` の削除を試み、失敗時は警告する（「Issue確定」参照）。成功時、あわせて対話型ワーカー**assistant**（`gh-maestro-assistant`スキル。issue/PRについての人間の質問に答える対話セッション）を新規WezTermウィンドウで自動起動する
 - **update-issue.js** — `gh issue edit` によるIssue本文更新の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、成功時に削除を試み、失敗時は警告する（「Issue確定」参照）
@@ -301,13 +296,6 @@ orchestrator評価: <承認推奨 or 要修正（理由）>
   EOF
   ```
 
-### 計画承認フローとPRレビューフローの区別
-
-- **計画承認**（本節）: 実装着手前の設計判断。コーダーの計画を対象とする。評価者はorchestrator自身（＋必要に応じてarchitect）。最終判断は人間。
-- **PRレビュー**（下記「レビュー監視」「レビューコメントのトリアージ」）: 実装完了後のコード品質判断。Review Managerのfindingsを対象とする。トリアージとフィードバックの主体はorchestrator。最終マージ判断は人間。
-
-両者はフェーズ・対象・判断者が異なるため、混同しないこと。計画承認は実装前、PRレビューは実装後に発生する。
-
 ## 自分の inbox の監視
 
 worker からの報告はすべて GitHub Issue コメントとして投稿される。orchestrator はそれを poll して受信する。届くのを待つ受動的な経路は存在しない。
@@ -344,9 +332,7 @@ msg-poll が `未初期化です。reset-session.js で初期化してくださ�
 以下はワーカー・Inbox Supervisorから届く通知やマーカーの見分け方と一次対応。詳細な原因・復旧手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` を参照する。
 
 - **ワーカーの異常終了通知**（`⚠️ 起動失敗または異常終了: exit code <N>...`）: 終了フックが非ゼロ終了時に自動投稿する。そのワーカーは作業を完了できずに死んでいる。原因を切り分けて人間に伝える。
-- **監視プロセスの異常終了通知**（`⚠️ 監視プロセス <script> が異常終了しました（exit code <N>）...`）: 常駐監視（`msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）が非ゼロ終了したとき、プロセス自身が自動投稿する。その監視は停止している。どの監視が止まったかを確認し（`$WORKSPACE/.gh-maestro/pids/*.json`の`script`名で特定）、`poll-pr.js` / `poll-reviews.js` は `monitor-recovery.md` の再起動手順で再起動する。`msg-poll.js` は「自分の inbox の監視」の再起動規約に従う（アラーム→即再起動）。
-- **親セッション消滅による監視停止通知**（`監視プロセス <script> が親セッションの消滅を検出して自動終了しました（exit code 3）...`）: `msg-poll.js` / `inbox-supervisor.js` が親セッション死亡を検知して `exit 3` で自滅したときの専用通知。プロセスの不具合ではなく、オーケストレーターセッションの終了に追随する停止である。監視は停止しているため、新しいセッションでは通常どおり起動する（inbox-supervisor は自動起動されるが、msg-poll は自動復活しないため自分で Monitor を起動する）。停止中の取りこぼし確認は `monitor-recovery.md` の「inbox監視の沈黙」参照。
-- **監視プロセスを張った Monitor の終了 = 異常のアラーム**: `poll-pr.js` / `poll-reviews.js` / `msg-poll.js` を張った Monitor が終了（exit 0 でない）したら、それは「監視が正常完了した」ことではなく、**監視プロセスの異常終了のアラーム**である。`PR_MERGED` / `PR_CLOSED` を読んで終了したときだけ、意図した終了として扱う。それ以外の終了（特に exit code 非ゼロ）を見落とすと、監視が止まったまま誰にも気づかれない。受信したら、対応する監視プロセスが停止していないか・その監視対象の機能が動いているかを確認する（手順は `monitor-recovery.md` の「監視プロセスの異常死」を参照）。
+- **監視プロセスの停止**: 異常終了通知、親セッション消滅による自動終了通知、または Monitor 自体の終了を受け取ったら、`monitor-recovery.md` を参照して対処する。
 - **配送断念の通知**（`⚠️ ワーカー "<name>" へのメッセージ配送に5回失敗し断念しました...`）: resume配送が5回リトライしても失敗したことをInbox Supervisor自身が通知する。上記と同様、そのワーカーは作業を完了できていない。
 - **自動代理送信のマーカー**（本文冒頭の`⚠️ [自動代理送信: ...]`）: ワーカーが`msg-send.js`の呼び出しを忘れただけで、内容自体は正しく応答できている。そのまま内容を評価してよい。
 - **ワーカーの実行ログ**（`$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log`）: 既定では読まない。上記の異常終了通知・配送断念通知を受けて原因を切り分けるとき、またはワーカーが長時間無反応で生死を確認したいときだけ`Read`で読む。
@@ -354,11 +340,10 @@ msg-poll が `未初期化です。reset-session.js で初期化してくださ�
 
 ## PR検出
 
-コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <N>` を起動してPRを監視する（`N` はコーダーのアンカー Issue 番号）。**`persistent: true` を設定すること。** `poll-pr.js` はPR検出後、内部で `poll-reviews.js` を子プロセスとして起動し、その出力（`REVIEW_COMMENT`/`PR_COMMENT`/`PR_REVIEW`/`PR_PUSH`/`PR_MERGED`/`PR_CLOSED`）をそのまま中継し続ける単一プロセスなので、**このMonitor 1本がPR検出からマージ検知まで完結する。** `persistent: true` を付け忘れると既定の5分でMonitorがタイムアウトし、レビュー中に通知が届かなくなる（下記「レビュー監視」はこの1本を継続して読む前提であり、別途起動し直すことはない）。
-PRが却下・キャンセルで `CLOSED` になり、かつ `poll-reviews.js` が正常終了（exit 0）した場合、`poll-pr.js` は**新 PR の検出に復帰する**（`PR_CLOSED_RESUMED:<PR>` を出力して同じ Monitor が新 PR を監視し続ける）。CLOSED された PR に監視が固定されて新 PR が見えなくなる機能死は起きない。CLOSED は却下・キャンセルを意味するため、必要に応じてコーダーに再指示する。逆に `poll-reviews.js` が非ゼロ終了・シグナル終了（SIGKILL等）した場合は、PR が `CLOSED` でも復帰せず `poll-pr.js` も異常終了する。これはSIGKILL等で子自身の exit 通知が実行できなくても、親の異常終了通知で監視停止が待機側へ届くようにするためである。
+コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <アンカーIssue番号>` を起動する。**`persistent: true` を設定すること**（付け忘れると既定の5分でMonitorがタイムアウトし、レビュー中に通知が届かなくなる）。**このMonitor 1本がPR検出からマージ検知まで完結する**ため、以後別途起動し直すことはない。
 `--base-branch` にはセッション変数 `$BASE_BRANCH` を渡すことで、PR作成時のベースブランチ不一致を検出できる。
 
-`poll-pr.js`はレビュー観点を一切選ばない。PR検出時に常にReview Managerを全観点で起動する。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。以前存在した「変更ファイルパスから観点を自動判定する」機構（`--review-aspects auto`）や、`heavy`/`directed`というモードの区別自体も、ファイル名に特定の文字列が含まれるだけで一部の観点だけに絞り込んでしまい他の観点のレビューが丸ごと欠落する実障害があったため廃止した。
+`poll-pr.js`はレビュー観点を一切選ばない。PR検出時に常にReview Managerを全観点で起動する。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。
 
 ```sh
 node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --workspace $WORKSPACE --base-branch $BASE_BRANCH
@@ -385,7 +370,7 @@ Monitorが落ちた場合の`poll-pr.js`再起動、Review Managerが起動し�
 
 PR番号が確定したら、レビューコメントとマージ状態の通知を処理する。
 
-**新しいMonitorやポーリングプロセスをここで起動してはならない。** 「PR検出」で `persistent: true` を付けて起動した `poll-pr.js` のMonitor 1本が、PR検出後は内部で `poll-reviews.js` の出力をそのまま中継し続けている。以下はすべてその同じMonitorから届く通知として処理する（`poll-reviews.js` を単独で別プロセスとして起動するのは二重ポーリング・二重通知の原因になるため厳禁）。
+**新しいMonitorやポーリングプロセスをここで起動してはならない。** 以下はすべて「PR検出」で起動した `poll-pr.js` のMonitorから届く通知として処理する（別プロセスを起動すると二重ポーリング・二重通知になる）。
 
 - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → インラインのレビュー指摘。コメントトリアージを実行する
 - `PR_COMMENT:<user>:<body>` → PR全体へのコメント。同様にトリアージする
