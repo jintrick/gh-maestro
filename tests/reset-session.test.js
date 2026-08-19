@@ -187,7 +187,9 @@ test('restartCapturedResidents: 全体掃除後は捕捉済み常駐だけを立
     assert.equal(killed, false, 'reset-session側で既に停止済みのPIDを再度killしない');
     assert.equal(result.errors.length, 0);
     assert.equal(result.results[0].status, 'replaced');
-    assert.equal(result.results[0].newPid, 200);
+    assert.deepEqual(result.results[0].newPids, [200]);
+    assert.equal('newPid' in result.results[0], false);
+    assert.equal('command' in result.results[0], false);
   });
 });
 
