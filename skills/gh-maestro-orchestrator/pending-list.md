@@ -55,7 +55,7 @@ Issue #$PENDING_ISSUE の保留項目から切り出し。
 - <path>:<line> — <内容>
 EOF
 
-# --workspace は必ず明示する（省略するとassistant起動先がずれる。「Issue確定」参照）
+# --workspace は必ず明示する（省略するとassistant起動先がずれる。「1. 要件確定」参照）
 CREATE_OUTPUT=$(node "{{SCRIPTS_PATH}}/create-issue.js" \
   --title "<切り出した対応内容の要約>" \
   --body-file /tmp/issue-extract.md \

@@ -50,7 +50,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
 ```
 
-architect の検討結果は Issue のコメントとして記録される（実装詳細をIssue本文に統合しない理由は「Issue確定」参照。下記「計画評価と承認」も参照）。
+architect の検討結果は Issue のコメントとして記録される（実装詳細をIssue本文に統合しない理由は「1. 要件確定」参照。下記「6. 計画評価」も参照）。
 
 ## Architect による計画レビュー
 
@@ -64,5 +64,5 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
 ```
 
-architect の計画レビュー結果（承認推奨または要修正）の扱いは、下記「計画評価と承認」の評価の流れに従う（あくまで推奨であり、最終承認ではない）。
+architect の計画レビュー結果（承認推奨または要修正）の扱いは、下記「6. 計画評価」の評価の流れに従う（あくまで推奨であり、最終承認ではない）。
 
