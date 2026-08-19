@@ -155,7 +155,7 @@ worker からの報告はすべて GitHub Issue コメントとして投稿さ�
 
 **この inbox 監視（`msg-poll.js orchestrator`）はセッション中に1本だけ稼働させる。** PR検出・レビュー監視・本番公開（CI/CD）確認・反省会での応答待ちなど、待つ相手や場面が変わっても新しいMonitorを起動し直さず、既存の1本を使い回す。他の節はこの1本を通じて通知を受け取る前提で書かれている。
 
-まだ起動していなければ、Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" orchestrator --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。
+**セッション開始時、他のどのタスクにも着手する前に張る。**（`msg-poll.js` の自動起動機構は存在しない。張り忘れるとワーカーの報告が一切届かず、「まだ届いていない」と読んで待ち続けることになる。）Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" orchestrator --workspace $WORKSPACE` を直接指定して起動する。`persistent: true` を設定すること。
 
 **プロセスが動いていることは、この Monitor を張らなくてよい理由にはならない。** 前のセッション等のプロセスが残っていても、その出力（`NEW_MESSAGE`）はログファイルに書かれるだけで、**自分が Monitor を張っていなければ自分のセッションには届かない**。既に稼働中のプロセスがあって起動が拒否された場合（`重複起動を検出しました` で exit 1）は、拒否メッセージが案内する `--watch-pid <pid>` の Monitor を張る——判断を挟まず、案内されたコマンドをそのまま使う。
 
