@@ -24,18 +24,18 @@ test('architect skill は通信・完了・入力境界・手順・再試行を�
 });
 
 test('orchestrator skill は要件確定、調査、architect起動判断、抽象設計の検討、coder起動、計画評価、実装開始指示の順で基本フローを定義する', () => {
-  const requirements = orchestratorSkill.indexOf('**要件確定**');
-  const research = orchestratorSkill.indexOf('**必要な調査**');
-  const architect = orchestratorSkill.indexOf('**Architect起動判断**');
-  const design = orchestratorSkill.indexOf('**抽象設計の検討**');
-  const coder = orchestratorSkill.indexOf('**Coder起動**');
-  const planning = orchestratorSkill.indexOf('**計画評価**');
-  const startImpl = orchestratorSkill.indexOf('**実装開始指示**');
+  const requirements = orchestratorSkill.indexOf('### 1. 要件確定');
+  const research = orchestratorSkill.indexOf('### 2. 必要な調査');
+  const architect = orchestratorSkill.indexOf('### 3. Architect起動判断');
+  const design = orchestratorSkill.indexOf('### 4. 抽象設計の検討');
+  const coder = orchestratorSkill.indexOf('### 5. Coder起動');
+  const planning = orchestratorSkill.indexOf('### 6. 計画評価');
+  const startImpl = orchestratorSkill.indexOf('### 7. 実装開始指示');
   assert.ok(requirements < research && research < architect && architect < design && design < coder && coder < planning && planning < startImpl);
   assert.match(orchestratorFullDoc, /必要な explorer\/diagnostician の再調査/);
   assert.match(orchestratorFullDoc, /要件本文を変更できるのは人間との合意/);
   assert.match(orchestratorFullDoc, /既存の `msg-send\.js` 経路/);
-  assert.match(orchestratorFullDoc, /反省会が完了した後にだけ実行/);
+  assert.match(orchestratorFullDoc, /下記「反省会」完了後にのみ実行/);
   assert.match(orchestratorFullDoc, /architect は対象 Issue がクローズされるまで任意の相談役として維持/);
   assert.match(orchestratorFullDoc, /相談を開始するかどうか、その時機、相談内容は人間が決める/);
   assert.match(orchestratorFullDoc, /大規模リファクタリング/);

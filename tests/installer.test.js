@@ -15,9 +15,56 @@ const ROOT = path.join(__dirname, '..');
 const {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
   buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
-  installScripts, installSharedSkills,
+  installScripts, installSharedSkills, restartResidentsAfterInstall,
 } = require('../scripts/install.js');
 const { MANAGED_TOP_LEVEL } = require('../scripts/shared/storage-layout');
+
+test('restartResidentsAfterInstall: 解決済みworkspaceに配布済みCLIを明示引数付きで呼び出す', () => {
+  const workspace = path.join(os.tmpdir(), 'gh-maestro-install-workspace');
+  const sharedScripts = path.join(os.tmpdir(), 'gh-maestro-installed-scripts');
+  const calls = [];
+
+  const result = restartResidentsAfterInstall({
+    workspace,
+    sharedScripts,
+    execFileSync: (...args) => calls.push(args),
+  });
+
+  assert.deepEqual(result, {
+    attempted: true,
+    code: 0,
+    workspace,
+    scriptPath: path.join(sharedScripts, 'restart-residents.js'),
+  });
+  assert.deepEqual(calls, [[
+    process.execPath,
+    [path.join(sharedScripts, 'restart-residents.js'), '--workspace', workspace],
+    { stdio: 'inherit' },
+  ]]);
+});
+
+test('restartResidentsAfterInstall: workspaceを解決できない場合は常駐操作を実行しない', () => {
+  let called = false;
+  const result = restartResidentsAfterInstall({
+    resolveWorkspace: () => null,
+    execFileSync: () => { called = true; },
+  });
+
+  assert.deepEqual(result, { attempted: false, code: 0, workspace: null });
+  assert.equal(called, false, '対象workspaceが無い場合はrestart CLIを呼び出さない');
+});
+
+test('restartResidentsAfterInstall: restart CLIの失敗を成功として握りつぶさない', () => {
+  const error = Object.assign(new Error('restart failed'), { status: 1 });
+  const result = restartResidentsAfterInstall({
+    workspace: path.join(os.tmpdir(), 'gh-maestro-install-workspace'),
+    execFileSync: () => { throw error; },
+  });
+
+  assert.equal(result.attempted, true);
+  assert.equal(result.code, 1);
+  assert.equal(result.error, error);
+});
 
 // ── ユーティリティ関数のユニットテスト ──────────────────────────────────────
 
