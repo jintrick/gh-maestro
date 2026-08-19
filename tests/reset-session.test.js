@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { rebuildOrchestratorBaseline } = require('../scripts/reset-session');
+const { rebuildOrchestratorBaseline, restartCapturedResidents } = require('../scripts/reset-session');
 const readStateLib = require('../scripts/shared/read-state');
 
 function withTempDir(fn) {
@@ -144,5 +144,78 @@ test('rebuildOrchestratorBaseline: 取得したIDは数値のみ（非数値ID�
     assert.equal(result.ok, true);
     const st = readStateLib.readState(workspace, 'orchestrator');
     assert.deepEqual(st.state.readByIssue['10'], [1]);
+  });
+});
+
+test('restartCapturedResidents: 全体掃除後は捕捉済み常駐だけを立て直し、再停止しない', () => {
+  withTempDir(workspace => {
+    const resident = {
+      pid: 101,
+      script: 'inbox-supervisor.js',
+      workerName: null,
+      workspace,
+      startTime: 'old',
+      args: ['--workspace', workspace, '--session-pid', '9000'],
+    };
+    let replacement = null;
+    let killed = false;
+    const hooks = {
+      findRunningInstances: () => replacement ? [replacement] : [],
+      isProcessAlive: (pid) => pid === 9000 || pid === replacement?.pid,
+      verifyProcessIdentity: () => ({ match: true }),
+      spawn: (cmd, args) => {
+        replacement = {
+          pid: 200,
+          script: 'inbox-supervisor.js',
+          workerName: null,
+          workspace,
+          args: args.slice(1),
+        };
+        return { pid: 200, unref() {} };
+      },
+      killProcessTree: () => { killed = true; },
+      unregisterProcess: () => {},
+      findSessionRootPid: () => 9000,
+      sleep: () => {},
+    };
+
+    const result = restartCapturedResidents(workspace, [resident], workspace, {
+      hooks,
+      maxAttempts: 1,
+      waitMs: 0,
+    });
+    assert.equal(killed, false, 'reset-session側で既に停止済みのPIDを再度killしない');
+    assert.equal(result.errors.length, 0);
+    assert.equal(result.results[0].status, 'replaced');
+    assert.equal(result.results[0].newPid, 200);
+  });
+});
+
+test('restartCapturedResidents: sweep後も旧常駐が生きている場合は重複起動を拒否する', () => {
+  withTempDir(workspace => {
+    const resident = {
+      pid: 101,
+      script: 'inbox-supervisor.js',
+      workerName: null,
+      workspace,
+      startTime: 'old',
+      args: ['--workspace', workspace, '--session-pid', '9000'],
+    };
+    let spawnCalled = false;
+    const hooks = {
+      findRunningInstances: () => [],
+      isProcessAlive: (pid) => pid === 101 || pid === 9000,
+      verifyProcessIdentity: () => ({ match: true }),
+      spawn: () => { spawnCalled = true; throw new Error('must not spawn'); },
+      killProcessTree: () => {},
+      unregisterProcess: () => {},
+      findSessionRootPid: () => 9000,
+      sleep: () => {},
+    };
+
+    const result = restartCapturedResidents(workspace, [resident], workspace, { hooks });
+    assert.equal(spawnCalled, false);
+    assert.equal(result.results[0].status, 'failed');
+    assert.match(result.errors[0], /重複起動/);
   });
 });
