@@ -3,7 +3,11 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { isValidCommentId } = require('../scripts/poll-reviews.js');
+const {
+  isValidCommentId,
+  isValidPrCommentId,
+  buildPrCommentRelayEvents,
+} = require('../scripts/poll-reviews.js');
 
 test('isValidCommentId: 正の整数IDだけを受理する', () => {
   assert.equal(isValidCommentId('12345'), true);
@@ -18,6 +22,32 @@ test('isValidCommentId: GitHubエラーレスポンス由来のゴミ断片を�
   assert.equal(isValidCommentId('  '), false);
   assert.equal(isValidCommentId('12a'), false);
   assert.equal(isValidCommentId('-1'), false);
+});
+
+test('isValidPrCommentId: GraphQLの不透明なPRコメントIDを受理する', () => {
+  assert.equal(isValidPrCommentId('IC_kwDOSr7Ezc8AAAABPxKo7g'), true);
+  assert.equal(isValidPrCommentId('opaque-global-node-id'), true);
+});
+
+test('isValidPrCommentId: 欠落・空白のPRコメントIDを拒否する', () => {
+  assert.equal(isValidPrCommentId(undefined), false);
+  assert.equal(isValidPrCommentId(null), false);
+  assert.equal(isValidPrCommentId(''), false);
+  assert.equal(isValidPrCommentId('  '), false);
+});
+
+test('buildPrCommentRelayEvents: GraphQL IDのPRコメントを中継し、既読・不正コメントは除外する', () => {
+  const known = new Set(['IC_known']);
+  const comments = [
+    { id: 'IC_new', author: { login: 'reviewer' }, body: 'レビュー\n停止理由' },
+    { id: 'IC_known', author: { login: 'reviewer' }, body: '既読' },
+    { id: '', author: { login: 'reviewer' }, body: 'IDなし' },
+    { author: { login: 'reviewer' }, body: 'ID欠落' },
+  ];
+
+  assert.deepEqual(buildPrCommentRelayEvents(comments, known), [
+    { id: 'IC_new', line: 'PR_COMMENT:reviewer:レビュー 停止理由' },
+  ]);
 });
 
 const { pollDegradationTransition } = require('../scripts/poll-reviews.js');

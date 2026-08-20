@@ -53,14 +53,48 @@ PR_MERGED または PR_CLOSED を検出するまで永続的にポーリング�
 消滅時はPID registryを解除して自動exitする。`;
 
 /**
- * GitHub のコメント/レビューIDは正の整数。gh のエラーレスポンス（404 JSON 等）や
- * 切れた出力の断片が state に記録されたり REVIEW_COMMENT として中継されたりするのを防ぐため、
- * 記録・中継の前に必ずこれで検証する。
+ * REST API が返す inline comment / formal review のIDは正の整数。gh のエラーレスポンス
+ *（404 JSON 等）や切れた出力の断片が state に記録されたり中継されたりするのを防ぐため、
+ * これらの経路では記録・中継の前に必ず検証する。
  * @param {string} id
  * @returns {boolean}
  */
 function isValidCommentId(id) {
   return /^[0-9]+$/.test(id);
+}
+
+/**
+ * `gh pr view --json comments` が返す PR 全体コメントのIDは、REST APIの数値IDではなく
+ * GraphQLの不透明なグローバルノードID（例: `IC_kw...`）。commentsJsonはghのstatus確認と
+ * JSON.parseを通過済みなので、ここでは空のIDだけを拒否する。REST由来の数値ID検証を
+ * GraphQL由来のコメントへ流用しない。
+ * @param {unknown} id
+ * @returns {boolean}
+ */
+function isValidPrCommentId(id) {
+  return typeof id === 'string' && id.trim().length > 0;
+}
+
+/**
+ * 新規の PR 全体コメントを中継イベントへ変換する純粋関数。
+ * REST由来のコメント/レビューとはID空間が異なるため、専用の検証を使う。
+ * @param {unknown} commentsList
+ * @param {Set<string>} known
+ * @returns {Array<{id: string, line: string}>}
+ */
+function buildPrCommentRelayEvents(commentsList, known) {
+  if (!Array.isArray(commentsList)) return [];
+
+  const events = [];
+  for (const c of commentsList) {
+    if (!c || typeof c !== 'object') continue;
+    const id = c.id;
+    if (!isValidPrCommentId(id) || known.has(id)) continue;
+    const author = (c.author && c.author.login) || 'unknown';
+    const singleLineBody = (c.body || '').replace(/\n/g, ' ');
+    events.push({ id, line: `PR_COMMENT:${author}:${singleLineBody}` });
+  }
+  return events;
 }
 
 /**
@@ -184,6 +218,8 @@ function reviewTerminalEvent(state, pr) {
 
 module.exports = {
   isValidCommentId,
+  isValidPrCommentId,
+  buildPrCommentRelayEvents,
   extractTestDeclaration,
   evaluateTestDeclaration,
   pollDegradationTransition,
@@ -407,13 +443,9 @@ if (require.main === module) {
           process.stdout.write(`TEST_STATUS:${testEvaluation.status}:${testEvaluation.declaredSha || 'none'}:${testEvaluation.headSha || 'none'}\n`);
         }
 
-        for (const c of commentsList) {
-          const id = String(c.id);
-          if (!isValidCommentId(id) || known.has(id)) continue;
-          recordId(id);
-          const author = (c.author && c.author.login) || 'unknown';
-          const singleLineBody = (c.body || '').replace(/\n/g, ' ');
-          process.stdout.write(`PR_COMMENT:${author}:${singleLineBody}\n`);
+        for (const event of buildPrCommentRelayEvents(commentsList, known)) {
+          recordId(event.id);
+          process.stdout.write(`${event.line}\n`);
         }
       } else {
         hadError = true;
