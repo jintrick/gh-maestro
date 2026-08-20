@@ -33,7 +33,7 @@ Options:
 Output (stdout):
   マーカー行を除いたコメント本文または計画本文
 
-workspace 解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索`;
+workspace 解決順: --workspace 引数 > GH_MAESTRO_WORKSPACE env > CWD から上方探索`;
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 

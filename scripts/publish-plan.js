@@ -13,7 +13,7 @@
 //   EOF
 //
 // workspace resolution order:
-//   GH_MAESTRO_WORKSPACE env > --workspace arg > CWD upward search
+//   --workspace arg > GH_MAESTRO_WORKSPACE env > CWD upward search
 
 'use strict';
 

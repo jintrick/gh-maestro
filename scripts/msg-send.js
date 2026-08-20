@@ -5,7 +5,7 @@
 //   node msg-send.js <recipient> [--from <name>] [--issue <N>] [--workspace <path>] (--body-file <path> | --stdin)
 //
 // workspace resolution order:
-//   GH_MAESTRO_WORKSPACE env > --workspace arg > CWD upward search
+//   --workspace arg > GH_MAESTRO_WORKSPACE env > CWD upward search
 //
 // from resolution order:
 //   --from arg > GH_MAESTRO_WORKER env > 'orchestrator'
@@ -73,7 +73,7 @@ Output (stdout):
 
 コンテキスト判定: GH_MAESTRO_WORKER 環境変数の有無でワーカー/orchestrator を判別する
   （spawn-worker.js / inbox-supervisor.js が起動時にワーカーへ注入する）。
-workspace 解決順: GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索
+workspace 解決順: --workspace 引数 > GH_MAESTRO_WORKSPACE env > CWD から上方探索
 
 拒否ガード（orchestrator からワーカー宛ての送信のみ）: 宛先ワーカーが稼働中（作業中）で、
   直近の起動以降まだ orchestrator へ報告していないと確定的に判定できた場合、GitHub には

@@ -16,8 +16,8 @@ const workerLease = require('../scripts/shared/worker-lease');
 // --session-pid を渡すため、テストでも常に自プロセスPIDを渡してこの探索を省く。
 const _realMain = supervisor.main;
 const TEST_SESSION_PID = String(process.pid);
-// GH_MAESTRO_WORKSPACE が設定されていると resolveWorkspace が env を優先し、
-// --workspace 引数が無視される。テスト中は一時的に除去する。
+// 明示した --workspace は環境変数より優先されるが、workspace引数を省略する
+// 経路も実workspaceへ向かわないよう、テスト中は環境変数を一時的に除去する。
 const _savedWorkspaceEnv = process.env.GH_MAESTRO_WORKSPACE;
 delete process.env.GH_MAESTRO_WORKSPACE;
 // GH_MAESTRO_BASE_BRANCH は resume 配送時に buildWorkerEnv が launchAgentHeadless env へ
