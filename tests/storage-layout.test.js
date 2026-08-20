@@ -195,6 +195,21 @@ test('listRegisteredWorkspaces: runtime rootに登録された全workspaceを返
   });
 });
 
+test('listRegisteredWorkspaces: manifestのないディレクトリを未登録としてスキップする', () => {
+  withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'manifestless-runtime') }, () => {
+    const workspace = fs.mkdtempSync(path.join(tmpBase, 'registered-with-residue-'));
+    sl.ensureWorkspaceRuntimeDir(workspace);
+
+    const manifestlessDir = path.join(sl.runtimeRoot(), 'workspaces', 'manifestless-residue');
+    fs.mkdirSync(manifestlessDir, { recursive: true });
+
+    assert.deepEqual(
+      sl.listRegisteredWorkspaces(),
+      [sl.canonicalWorkspace(workspace)],
+    );
+  });
+});
+
 test('listRegisteredWorkspaces: manifestの読取失敗を握りつぶさず停止する', () => {
   withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'invalid-manifest-runtime') }, () => {
     const runtimeWorkspaces = path.join(sl.runtimeRoot(), 'workspaces', 'broken');

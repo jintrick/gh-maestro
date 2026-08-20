@@ -105,7 +105,7 @@ function ensureWorkspaceRuntimeDir(p) {
  *
  * install.js は実行元の CWD ではなく、マシン共有の resident registry を更新する。
  * workspace.json の canonicalPath とディレクトリ名（workspaceKey）の両方を検証し、
- * 記録を読み取れない workspace を黙って見落とさない。
+ * 存在する記録を読み取れない workspace を黙って見落とさない。
  *
  * @returns {string[]} 正規化済みの workspace 絶対パス
  * @throws {Error} registry の列挙・manifest 読み取り・内容検証に失敗した場合
@@ -131,6 +131,7 @@ function listRegisteredWorkspaces() {
     try {
       manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     } catch (error) {
+      if (error && error.code === 'ENOENT') continue;
       throw new Error(`workspace registry を読み取れません: ${manifestPath}: ${error.message}`, { cause: error });
     }
 
