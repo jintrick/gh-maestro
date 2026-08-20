@@ -501,7 +501,13 @@ function findRunningInstances(workspace, opts = {}) {
       // 従来の findRunningInstance は省略時を orchestrator(null) と解釈するため、
       // ラッパー側で明示的に null を補う。
       if (opts.workerName !== undefined && (entry.workerName ?? null) !== opts.workerName) continue;
-      if (entry.workspace !== workspace) continue;
+      // registryには登録時の表記が保存される一方、検索側はruntime registryの列挙結果など
+      // から正規化済みのworkspaceを受け取ることがある。registryの配置キーと同じ正規化を
+      // フィールド比較にも適用し、表記差だけで稼働中プロセスを除外しない。
+      if (typeof entry.workspace !== 'string'
+        || storageLayout.canonicalWorkspace(entry.workspace) !== storageLayout.canonicalWorkspace(workspace)) {
+        continue;
+      }
 
       const entryPid = entry.pid;
       if (!entryPid || !Number.isFinite(entryPid)) continue;
