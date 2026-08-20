@@ -564,6 +564,20 @@ test('インストーラー成果物検証: 全エージェント宛先・共有
       }
     }
 
+    const reviewerPhaseFiles = ['phase1-planning.md', 'phase2-integration.md'];
+    for (const { destDir, label } of agentDestEntries) {
+      for (const file of reviewerPhaseFiles) {
+        const distributedPath = path.join(destDir, 'gh-maestro-reviewer', file);
+        assert.ok(fs.existsSync(distributedPath), `${label}/gh-maestro-reviewer/${file} が生成されていない`);
+        assert.equal(
+          fs.readFileSync(distributedPath, 'utf8'),
+          fs.readFileSync(path.join(skillsDir, 'gh-maestro-reviewer', file), 'utf8')
+            .replaceAll('{{SHARED_SKILLS_PATH}}', tmpSharedSkills),
+          `${label}/gh-maestro-reviewer/${file} の内容が正本と一致しない`
+        );
+      }
+    }
+
     // ── 共有スキルの検証 ──
     const templatePath = path.join(tmpSharedSkills, 'gh-maestro-orchestrator', 'issue-template.md');
     assert.ok(fs.existsSync(templatePath), `共有スキル配布先に issue-template.md が存在しない: ${templatePath}`);
@@ -576,6 +590,17 @@ test('インストーラー成果物検証: 全エージェント宛先・共有
       assert.ok(
         !unreplaced,
         `共有スキル ${skill}/SKILL.md に未置換プレースホルダーあり: ${(unreplaced || []).join(', ')}`
+      );
+    }
+
+    for (const file of reviewerPhaseFiles) {
+      const distributedPath = path.join(tmpSharedSkills, 'gh-maestro-reviewer', file);
+      assert.ok(fs.existsSync(distributedPath), `共有スキル gh-maestro-reviewer/${file} が存在しない`);
+      assert.equal(
+        fs.readFileSync(distributedPath, 'utf8'),
+        fs.readFileSync(path.join(skillsDir, 'gh-maestro-reviewer', file), 'utf8')
+          .replaceAll('{{SHARED_SKILLS_PATH}}', tmpSharedSkills),
+        `共有スキル gh-maestro-reviewer/${file} の内容が正本と一致しない`
       );
     }
 
