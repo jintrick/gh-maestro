@@ -15,7 +15,6 @@ const { validateAgentDefaults } = require(path.join(__dirname, 'shared', 'valida
 const { resolveExtends } = require(path.join(__dirname, 'shared', 'resolve-config'));
 const storageLayout = require(path.join(__dirname, 'shared', 'storage-layout'));
 const { parseAgentsYaml, expandHome } = require(path.join(__dirname, 'shared', 'agents-yaml'));
-const { resolveWorkspace } = require(path.join(__dirname, 'shared', 'workspace'));
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -460,37 +459,61 @@ function installSharedSkills(agents, options = {}) {
  * install後に、配布済みのrestart-residents.jsで常駐プロセスを現行コードへ入れ替える。
  *
  * install.jsはgh-maestroリポジトリから実行される一方、常駐プロセスのregistryは
- * 実ワークスペースごとに管理される。workspaceを解決できない単独インストールでは
- * 対象を推測せずrestartを行わない。解決できた場合は、installで更新した共有スクリプト
- * 側のCLIを別プロセスで呼び出し、そのstdout/stderrをinstallの出力へそのまま渡す。
+ * 実ワークスペースごとに管理される。runtime rootの記録から対象をすべて列挙し、
+ * installで更新した共有スクリプト側のCLIをworkspaceごとに呼び出す。各CLIの
+ * stdout/stderrはinstallの出力へそのまま渡す。
  *
  * @param {object} [options]
- * @param {string|null} [options.workspace] テスト用の解決済みworkspace
+ * @param {string[]} [options.workspaces] テスト用のworkspace一覧
  * @param {string} [options.sharedScripts] 配布済みスクリプトディレクトリ
- * @param {Function} [options.resolveWorkspace] workspace解決関数
+ * @param {Function} [options.listRegisteredWorkspaces] workspace列挙関数
  * @param {Function} [options.execFileSync] CLI実行関数
- * @returns {{attempted: boolean, code: number, workspace: string|null, scriptPath?: string, error?: Error}}
+ * @param {Function} [options.onWorkspace] workspaceごとの実行前通知
+ * @returns {{attempted: boolean, code: number, workspaces: string[], results?: object[], scriptPath?: string, error?: Error}}
  */
 function restartResidentsAfterInstall(options = {}) {
-  const workspace = Object.prototype.hasOwnProperty.call(options, 'workspace')
-    ? options.workspace
-    : (options.resolveWorkspace || resolveWorkspace)();
-  if (!workspace) {
-    return { attempted: false, code: 0, workspace: null };
+  let workspaces;
+  try {
+    workspaces = Object.prototype.hasOwnProperty.call(options, 'workspaces')
+      ? options.workspaces
+      : (options.listRegisteredWorkspaces || storageLayout.listRegisteredWorkspaces)();
+  } catch (error) {
+    return { attempted: false, code: 1, workspaces: [], error };
+  }
+
+  if (!Array.isArray(workspaces) || workspaces.some((workspace) => typeof workspace !== 'string' || !workspace)) {
+    return {
+      attempted: false,
+      code: 1,
+      workspaces: [],
+      error: new Error('workspace registryから不正なworkspace一覧が返されました'),
+    };
+  }
+
+  const uniqueWorkspaces = [...new Set(workspaces)];
+  if (uniqueWorkspaces.length === 0) {
+    return { attempted: false, code: 0, workspaces: [] };
   }
 
   const scriptsPath = options.sharedScripts || SHARED_SCRIPTS;
   const scriptPath = path.join(scriptsPath, 'restart-residents.js');
   const run = options.execFileSync || execFileSync;
-  try {
-    run(process.execPath, [scriptPath, '--workspace', workspace], { stdio: 'inherit' });
-    return { attempted: true, code: 0, workspace, scriptPath };
-  } catch (error) {
-    const code = Number.isInteger(error && error.status) && error.status !== 0
-      ? error.status
-      : 1;
-    return { attempted: true, code, workspace, scriptPath, error };
+  const results = [];
+  let code = 0;
+  for (const workspace of uniqueWorkspaces) {
+    if (typeof options.onWorkspace === 'function') options.onWorkspace(workspace);
+    try {
+      run(process.execPath, [scriptPath, '--workspace', workspace], { stdio: 'inherit' });
+      results.push({ workspace, code: 0 });
+    } catch (error) {
+      const workspaceCode = Number.isInteger(error && error.status) && error.status !== 0
+        ? error.status
+        : 1;
+      if (code === 0) code = workspaceCode;
+      results.push({ workspace, code: workspaceCode, error });
+    }
   }
+  return { attempted: true, code, workspaces: uniqueWorkspaces, results, scriptPath };
 }
 
 module.exports = {
@@ -821,16 +844,22 @@ if (hookResult.status === 0) {
 
 // installで共有スクリプトを更新した時点で、既存の常駐プロセスは古いrequire閉包を
 // 保持している。配布済みのCLIに停止・入れ替えを委ね、Monitorを持つ常駐の再接続要求も
-// installの出力へそのまま届ける。workspaceが無い場合だけ対象を推測せずスキップする。
+// installの出力へそのまま届ける。登録workspaceが無い場合だけ対象を推測せずスキップする。
 step('Restarting resident processes with the installed scripts...');
-const residentRestart = restartResidentsAfterInstall();
+const residentRestart = restartResidentsAfterInstall({
+  onWorkspace: (workspace) => step(`Restarting resident processes for workspace=${JSON.stringify(workspace)}`),
+});
 if (!residentRestart.attempted) {
-  ok('No workspace resolved — resident restart skipped');
+  if (residentRestart.code === 0) {
+    ok('No registered workspace — resident restart skipped');
+  } else {
+    fail(`常駐プロセスの対象workspace registryを読み取れませんでした: ${residentRestart.error.message}`);
+  }
 } else if (residentRestart.code !== 0) {
   const status = residentRestart.code === 1 ? '終了コード1' : `終了コード${residentRestart.code}`;
-  fail(`常駐プロセスの入れ替えに失敗しました（${status}）。未確認の常駐が残っている可能性があります。`);
+  fail(`常駐プロセスの入れ替えに失敗しました（${status}）。一部workspaceに未確認の常駐が残っている可能性があります。`);
 } else {
-  ok('Resident process restart completed');
+  ok(`Resident process restart completed for ${residentRestart.workspaces.length} workspace(s)`);
 }
 
 console.log('\ngh-maestro installed.\n');

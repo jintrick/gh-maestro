@@ -143,7 +143,7 @@ EOF
 - **Issueをクローズする唯一の手段は `finalize-issue.js` である。人間から「Issueを閉じて」「クローズして」等と指示された場合も、その言葉をそのまま `gh issue close` の実行指示と解釈しない。反省会が未完了ならまず反省会を完了させてから `finalize-issue.js` を呼ぶ**
 - `BASE_BRANCH`は保護ブランチ（`main`/`master`）でもworktreeブランチ（`issue-N-description`形式）でもない。セッション中に変更しない。起動時に保護ブランチ上にいた場合のみ、最初のIssue確定時に開発ブランチを切って設定する
 - `main` / `master`への直接pushは禁止
-- **`scripts/` 配下または `skills/agents.yaml` に触れた変更を install した後の常駐入れ替えは、install.js が配布済みの `restart-residents.js` を自動で呼び出す。更新後・障害時の結果確認とMonitor再接続の手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` を参照する。**
+- **`scripts/` 配下または `skills/agents.yaml` に触れた変更を install した後の常駐入れ替えは、install.js がruntime rootに登録された全workspaceについて配布済みの `restart-residents.js` を自動で呼び出す。更新後・障害時の結果確認とMonitor再接続の手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` を参照する。**
 - `skills/**` 配下のドキュメントだけを変更した場合は手動の常駐入れ替えは不要。常駐プロセスは SKILL.md を読まない
 
 ### ワーカーからの報告の受信（msg-poll）

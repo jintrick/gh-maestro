@@ -4,9 +4,9 @@
 
 ## install後の常駐入れ替え
 
-`node scripts/install.js` は、共有スクリプトの配布後に `restart-residents.js` を自動で呼び出す。稼働中の常駐は起動時にロードしたJSを保持するため、installだけで完了したと判断せず、installの出力を確認する。対象workspaceを解決できない単独インストールでは、常駐の対象を推測せず入れ替えをスキップする。
+`node scripts/install.js` は、共有スクリプトの配布後に、runtime rootへ登録された全workspaceを対象として `restart-residents.js` を自動で呼び出す。稼働中の常駐は起動時にロードしたJSを保持するため、installだけで完了したと判断せず、installの出力を確認する。登録workspaceが無い場合だけ、常駐の対象を推測せず入れ替えをスキップする。
 
-`restart-residents.js` の出力は、常駐ごとの `RESIDENT script=<name> status=<status>` 行と、Monitor再接続が必要な場合の `MONITOR_REATTACH_REQUIRED script=<name> command=<command>` 行で構成される。statusの詳細な意味は `node scripts/restart-residents.js --help` を一次情報とする。
+workspaceごとに `workspace="<absolute-path>"` の見出しが出力され、その直後に常駐ごとの `RESIDENT script=<name> status=<status>` 行と、Monitor再接続が必要な場合の `MONITOR_REATTACH_REQUIRED script=<name> command=<command>` 行が続く。statusの詳細な意味は `node scripts/restart-residents.js --help` を一次情報とする。
 
 `MONITOR_REATTACH_REQUIRED` が出た常駐は、各行の `command=` をMonitorで実行して同じ出力先へ張り直す。Monitor出力を持つ `msg-poll.js` / `poll-pr.js` / `poll-reviews.js` はdetachedで起動しない。特に `msg-poll.js` はプロセスが生きているだけではワーカー報告が届かず、Monitorの張り直し完了まで次のタスクへ進めない。
 

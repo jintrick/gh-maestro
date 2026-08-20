@@ -100,6 +100,60 @@ function ensureWorkspaceRuntimeDir(p) {
   return dir;
 }
 
+/**
+ * runtime root に登録されている workspace をすべて列挙する。
+ *
+ * install.js は実行元の CWD ではなく、マシン共有の resident registry を更新する。
+ * workspace.json の canonicalPath とディレクトリ名（workspaceKey）の両方を検証し、
+ * 記録を読み取れない workspace を黙って見落とさない。
+ *
+ * @returns {string[]} 正規化済みの workspace 絶対パス
+ * @throws {Error} registry の列挙・manifest 読み取り・内容検証に失敗した場合
+ */
+function listRegisteredWorkspaces() {
+  assertDisjointRoots();
+  const workspacesRoot = path.join(runtimeRoot(), 'workspaces');
+  let entries;
+  try {
+    entries = fs.readdirSync(workspacesRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw new Error(`workspace registry を列挙できません: ${workspacesRoot}: ${error.message}`, { cause: error });
+  }
+
+  const workspaces = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+
+    const workspaceDir = path.join(workspacesRoot, entry.name);
+    const manifestPath = path.join(workspaceDir, 'workspace.json');
+    let manifest;
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    } catch (error) {
+      throw new Error(`workspace registry を読み取れません: ${manifestPath}: ${error.message}`, { cause: error });
+    }
+
+    if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)
+      || manifest.schemaVersion !== 1 || typeof manifest.canonicalPath !== 'string'
+      || !path.isAbsolute(manifest.canonicalPath)) {
+      throw new Error(`workspace registry のmanifestが不正です: ${manifestPath}`);
+    }
+
+    const workspace = canonicalWorkspace(manifest.canonicalPath);
+    try {
+      assertValidWorkspace(workspace);
+    } catch (error) {
+      throw new Error(`workspace registry のworkspaceが不正です: ${manifestPath}: ${error.message}`, { cause: error });
+    }
+    if (workspaceKey(workspace) !== entry.name) {
+      throw new Error(`workspace registry のキーが一致しません: ${manifestPath}`);
+    }
+    workspaces.push(workspace);
+  }
+  return workspaces;
+}
+
 function samePath(a, b) {
   return IS_WIN ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
@@ -171,6 +225,7 @@ module.exports = {
   workspaceKey,
   workspaceRuntimeDir,
   ensureWorkspaceRuntimeDir,
+  listRegisteredWorkspaces,
   assertValidWorkspace,
   assertDisjointRoots,
   MANAGED_TOP_LEVEL,
