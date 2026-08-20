@@ -11,6 +11,7 @@ const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree')
 const { linkNodeModules } = require('./link-node-modules');
 const { unlinkJunctions } = require('./unlink-junctions');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
+const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { killProcessTree } = require('./kill-tree');
 const { isProcessAlive } = require('./process-lifecycle');
 const {
@@ -74,16 +75,17 @@ function generateStagingPath(finalPath) {
  *   workspace は RM専用worktree、mainGhDir はメインワークスペースの .gh-maestro。
  * @returns {{prompt: string}}
  */
-function buildPrompt({ pr, repo, issue, workspace, mainGhDir }) {
+function buildPrompt({ pr, repo, issue, workspace, mainGhDir, skillPath }) {
   const toUnix = p => p.replace(/\\/g, '/');
   const scriptsDir = toUnix(path.join(__dirname));
   const manifestFile = reviewArtifactPath(path.join(workspace, '.gh-maestro'), pr, '.manifest.json');
-  const prompt = `gh-maestro-reviewerスキルを発動し、Review ManagerとしてPRレビューの計画（フェーズ1）を実行してください。
+  const prompt = `${toUnix(skillPath)} を読み、Review ManagerとしてPRレビューの計画（フェーズ1）を実行してください。
 
 PR=${pr}
 REPO=${repo}
 WORKSPACE=${toUnix(workspace)}
 SCRIPTS=${scriptsDir}
+SKILL=${toUnix(skillPath)}
 ISSUE=${issue}
 GH_DIR=${toUnix(mainGhDir)}
 
@@ -112,11 +114,11 @@ GH_DIR=${toUnix(mainGhDir)}
  * @param {{pr: string, repo: string, issue: string|number, workspace: string, outputFile: string, mainGhDir: string, resultsFile: string}} params
  * @returns {{prompt: string}}
  */
-function buildFinalizePrompt({ pr, repo, issue, workspace, outputFile, mainGhDir, resultsFile }) {
+function buildFinalizePrompt({ pr, repo, issue, workspace, outputFile, mainGhDir, resultsFile, skillPath }) {
   const toUnix = p => p.replace(/\\/g, '/');
   const scriptsDir = toUnix(path.join(__dirname));
   const draftFile = generateStagingPath(outputFile);
-  const prompt = `gh-maestro-reviewerスキルを発動し、Review Managerとしてレビュー結果の統合（フェーズ2）を実行してください。
+  const prompt = `${toUnix(skillPath)} を読み、Review Managerとしてレビュー結果の統合（フェーズ2）を実行してください。
 
 PR=${pr}
 REPO=${repo}
@@ -124,6 +126,7 @@ WORKSPACE=${toUnix(workspace)}
 OUTPUT=${toUnix(outputFile)}
 RESULTS=${toUnix(resultsFile)}
 SCRIPTS=${scriptsDir}
+SKILL=${toUnix(skillPath)}
 ISSUE=${issue}
 GH_DIR=${toUnix(mainGhDir)}
 
@@ -1143,8 +1146,23 @@ async function superviseReviewManager({
   const resultsPath = path.join(worktreeGhDir, `review-results-${pr}.json`);
   const schemaPath = path.join(__dirname, 'review-findings-schema.json');
 
+  // RMに読ませるSKILL.mdは配布済み正本の絶対パスで指定する。スキル名だけを伝えると、
+  // 作業ディレクトリ（審査対象PRのworktree）にある同名ファイルが読まれうる（PR #350 で実障害）。
+  const rmSkill = 'gh-maestro-reviewer';
+  const rmSkillMap = resolveSkillAgentMap({ workspace: reviewWtDir });
+  const rmAgentId = rmSkillMap[rmSkill] ?? 'codex';
+  const rmHomedir = process.env.HOME || process.env.USERPROFILE || '';
+  const rmAgentConfig = resolveAgentConfig(rmAgentId, { workspace: reviewWtDir, homedir: rmHomedir });
+  const skillPath = rmAgentConfig
+    ? resolveSkillMdPath(rmAgentConfig.id, rmAgentConfig.command, rmSkill)
+    : null;
+  if (!skillPath || !fs.existsSync(skillPath)) {
+    log(`${rmSkill} の SKILL.md を解決できません（${skillPath || '未解決'}）。node scripts/install.js を実行してください。`);
+    return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir, reason: `skill md unresolved: ${skillPath || 'null'}` };
+  }
+
   // ── フェーズA: RM が計画（manifest書き出し） ──────────────────────────────────
-  const { prompt: phase1Prompt } = buildPrompt({ pr, repo, issue, workspace: reviewWtDir, mainGhDir: ghDir });
+  const { prompt: phase1Prompt } = buildPrompt({ pr, repo, issue, workspace: reviewWtDir, mainGhDir: ghDir, skillPath });
   const phase1 = await superviseAgentPhase({
     pr, repo, issue, ghDir, reviewWtDir, logFile, log, signal,
     promptText: phase1Prompt, promptFile, targetPath: manifestPath, watchSentinel: false, deadlineMs,
@@ -1177,7 +1195,7 @@ async function superviseReviewManager({
 
   // ── フェーズC: RM が結果統合・完否判断 ─────────────────────────────────────────
   const { prompt: phase2Prompt } = buildFinalizePrompt({
-    pr, repo, issue, workspace: reviewWtDir, outputFile: worktreeOutputFile, mainGhDir: ghDir, resultsFile: resultsPath,
+    pr, repo, issue, workspace: reviewWtDir, outputFile: worktreeOutputFile, mainGhDir: ghDir, resultsFile: resultsPath, skillPath,
   });
   const phase2 = await superviseAgentPhase({
     pr, repo, issue, ghDir, reviewWtDir, logFile, log, signal,
