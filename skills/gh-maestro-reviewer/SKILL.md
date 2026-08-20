@@ -37,19 +37,19 @@ Node.jsの決定論的ツール（`run-review-jobs.js` / `finalize-review.js`）
 ## レビュー基準（7葉）
 
 レビューの母集合は以下の7葉である。4幹は報告上の分類であり、プロセス分割の固定単位ではない。
-観点定義は配布済みの正本（`{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/` 配下）から読み、審査対象PR内のファイルは参照しない。
+観点定義は配布済みの正本（`{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/` 配下）から読み、審査対象PR内のファイルは参照しない。正本のファイル相対パスは葉の識別子に `.md` を付けて機械的に導出する。
 
 - `correctness/`（幹: Correctness）
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/logic-invariants.md`
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/api-contract.md`
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/concurrency.md`
+  - `correctness/logic-invariants`
+  - `correctness/api-contract`
+  - `correctness/concurrency`
 - `resilience-security/`（幹: Resilience & Security）
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/resilience-security/failure-recovery.md`
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/resilience-security/hostile-input.md`
+  - `resilience-security/failure-recovery`
+  - `resilience-security/hostile-input`
 - `maintainability/`（幹: Maintainability）
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/maintainability/structure-naming.md`
+  - `maintainability/structure-naming`
 - `test-quality/`（幹: Test Quality）
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/test-quality/test-quality.md`
+  - `test-quality/test-quality`
 
 ## RMの責務（フェーズ1: 計画）
 
@@ -80,7 +80,7 @@ gh pr diff <PR> --repo <REPO>
 ジョブ分割の指針:
 - 同じ観点（幹）に属する葉は、1つのジョブにまとめる。複数のジョブに分けると、互いの存在を知らないまま同じ箇所を独立に指摘し、重複した指摘が生成される
 - 異なる観点は別ジョブにし、並列実行で効率化する
-- 各ジョブには `id`、`leaf_ids`、`aspect`（幹名）、`trunk_dir`、`leaf_files` を指定する
+- 各ジョブには `id`、`leaf_ids`、`aspect`（幹名）だけを指定する。観点定義ファイルのパスや幹ディレクトリは書かない。
 
 manifestのJSON構造:
 
@@ -111,9 +111,7 @@ manifestのJSON構造:
     {
       "id": "job-1",
       "leaf_ids": ["correctness/logic-invariants"],
-      "aspect": "Correctness",
-      "trunk_dir": "{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness",
-      "leaf_files": ["{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/logic-invariants.md"]
+      "aspect": "Correctness"
     }
   ],
   "parallelism": "parallel"
@@ -124,8 +122,10 @@ manifestのJSON構造:
 - 7葉すべてが coverage_ledger.leaves に漏れなく出現しなければならない（`run-review-jobs.js` が機械的に検証する）
 - excluded には必ず rationale（diffに即した理由）を記述する
 - jobs[].leaf_ids は coverage_ledger 上の adopted 葉だけを参照する
+- jobs[].leaf_ids に7葉以外の識別子を含めない。未知の識別子は実行器がレビュー開始前に拒否する
 - 各 adopted 葉は少なくとも1つのジョブに割り当てる
 - 同じ葉を複数ジョブに重複割り当てしてはならない
+- jobsには観点定義ファイルの所在を含めない。所在はleaf_idsから決定論的に導出される
 
 manifestは起動プロンプトで指定された `MANIFEST` パス（`<WORKSPACE>/.gh-maestro/records/pr/<PR>/review/manifest.json`）に書き出す。
 

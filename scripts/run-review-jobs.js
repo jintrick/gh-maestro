@@ -23,7 +23,13 @@ const { buildLoginShellExecArgs } = require('./agent-exec');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { parseFlags } = require('./shared/workspace');
-const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS, FINDING_REQUIRED_FIELDS } = require('./shared/review-aspects');
+const {
+  ALL_LEAF_IDS,
+  TRUNK_TO_LEAVES,
+  VALID_ASPECTS,
+  FINDING_REQUIRED_FIELDS,
+  deriveLeafFilePath,
+} = require('./shared/review-aspects');
 const { managedRoot } = require('./shared/storage-layout');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
@@ -192,6 +198,9 @@ function validateJobs(jobs, adoptedLeaves, errors) {
       errors.push(`job ${job.id}: leaf_ids must be a non-empty array`);
     } else {
       for (const lid of job.leaf_ids) {
+        if (typeof lid !== 'string' || !ALL_LEAF_IDS.includes(lid)) {
+          errors.push(`job ${job.id}: unknown leaf id: ${JSON.stringify(lid)}`);
+        }
         if (!adoptedLeaves.has(lid)) {
           errors.push(`job ${job.id}: leaf_id "${lid}" is not in coverage_ledger adopted leaves`);
         }
@@ -205,11 +214,10 @@ function validateJobs(jobs, adoptedLeaves, errors) {
     if (typeof job.aspect !== 'string' || !VALID_ASPECTS.has(job.aspect)) {
       errors.push(`job ${job.id}: invalid or missing aspect "${job.aspect}"`);
     }
-    if (typeof job.trunk_dir !== 'string' || !job.trunk_dir) {
-      errors.push(`job ${job.id}: trunk_dir is required`);
-    }
-    if (!Array.isArray(job.leaf_files) || job.leaf_files.length === 0) {
-      errors.push(`job ${job.id}: leaf_files must be a non-empty array`);
+    for (const field of ['trunk_dir', 'leaf_files']) {
+      if (Object.prototype.hasOwnProperty.call(job, field)) {
+        errors.push(`job ${job.id}: ${field} is not supported; derive leaf paths from leaf_ids`);
+      }
     }
 
     // retry_policy は Issue #273 で廃止。上限は固定の MAX_REVIEW_ATTEMPTS に置き換わった。
@@ -294,7 +302,7 @@ function resolveLeafPath(lfPath, skillsDir) {
 }
 
 /**
- * ジョブの全葉ファイルを正本ディレクトリから読み取り、検証する。
+ * ジョブの全葉ファイルをleaf_idsから導出して正本ディレクトリから読み取り、検証する。
  * 1件でも正本外を指すパス（path confinement違反）やファイル未存在・読み取り失敗があればエラーを返す（フェイルクローズ）。
  *
  * @param {object} job
@@ -302,22 +310,29 @@ function resolveLeafPath(lfPath, skillsDir) {
  * @returns {{ok: true, leaves: Array<{path: string, content: string}>} | {ok: false, error: string}}
  */
 function readJobLeaves(job, skillsDir) {
-  if (!Array.isArray(job.leaf_files) || job.leaf_files.length === 0) {
-    return { ok: false, error: `job ${job.id}: leaf_files must be a non-empty array` };
+  if (!Array.isArray(job.leaf_ids) || job.leaf_ids.length === 0) {
+    return { ok: false, error: `job ${job.id}: leaf_ids must be a non-empty array` };
   }
   const leaves = [];
-  for (const lfPath of job.leaf_files) {
-    const res = resolveLeafPath(lfPath, skillsDir);
+  for (const leafId of job.leaf_ids) {
+    let leafPath;
+    try {
+      leafPath = deriveLeafFilePath(leafId);
+    } catch (e) {
+      return { ok: false, error: `job ${job.id}: ${e.message}` };
+    }
+
+    const res = resolveLeafPath(leafPath, skillsDir);
     if (!res.ok) {
-      return { ok: false, error: `job ${job.id}: leaf file path escapes review skills root (${lfPath})` };
+      return { ok: false, error: `job ${job.id}: leaf file path escapes review skills root (${leafPath})` };
     }
     let content;
     try {
       content = fs.readFileSync(res.resolvedPath, 'utf8');
     } catch (e) {
-      return { ok: false, error: `job ${job.id}: cannot read leaf file from canonical copy (${lfPath}): ${e.message}` };
+      return { ok: false, error: `job ${job.id}: cannot read leaf file from canonical copy (${leafPath}): ${e.message}` };
     }
-    leaves.push({ path: lfPath, content });
+    leaves.push({ path: leafPath, content });
   }
   return { ok: true, leaves };
 }
@@ -326,7 +341,7 @@ function readJobLeaves(job, skillsDir) {
 
 /**
  * ジョブワーカーに渡すプロンプトを生成する。
- * 観点定義ファイル（leaf_files）は配布済みの正本ディレクトリから読み取り、プロンプトに埋め込む。
+ * 観点定義ファイルはjob.leaf_idsから導出し、配布済みの正本ディレクトリから読み取り、プロンプトに埋め込む。
  * 審査対象PRのworktree（reviewWtDir）からは決して観点定義を読み込まない（Issue #309）。
  * 読み取り不能または正本外パスがある場合は例外を throw する（フェイルクローズ）。
  *
