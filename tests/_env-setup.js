@@ -18,6 +18,12 @@
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
+const { clearWorkerContextEnv } = require('./_spawn-env');
+
+// npm test はワーカーのシェルから起動されることがある。親のワーカー識別・workspace・
+// Issue・PRベースをテストプロセスへ残すと、env を省略した実spawnが実環境を向くため、
+// 子プロセス用ヘルパーと同じ一覧をテストスイートの入口で中立化する。
+clearWorkerContextEnv(process.env);
 
 if (!process.env.GH_MAESTRO_RUNTIME_DIR) {
   const dir = path.join(os.tmpdir(), 'gh-maestro-test-runtime-root-' + process.pid);

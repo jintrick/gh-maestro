@@ -7,7 +7,7 @@
     "start": "node src/daemon.js",
     "start:pm2": "pm2 start ecosystem.config.js",
     "test": "node --require ./tests/_env-setup.js --test tests/*.test.js",
-    "test:slow": "node --test tests/slow/*.test.js"
+    "test:slow": "node --require ./tests/_env-setup.js --test tests/slow/*.test.js"
   },
   "engines": {
     "node": ">=18"

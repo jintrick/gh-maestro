@@ -294,3 +294,52 @@ test('_env-setup.js プリロードが git 注入変数を除去する', () => {
     assert.equal(out[key], undefined, `_env-setup.js は ${key} を除去すること`);
   }
 });
+
+test('_env-setup.js プリロードがワーカー文脈変数を除去し、テストruntime rootを保持する', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'envleak-worker-context-'));
+  try {
+    const runtimeRoot = path.join(base, 'runtime-root');
+    const injected = {
+      GH_MAESTRO_WORKER: 'issue-342-worker',
+      GH_MAESTRO_WORKSPACE: path.join(base, 'real-workspace'),
+      GH_MAESTRO_BASE_BRANCH: 'dev',
+      GH_MAESTRO_ISSUE: '342',
+      ISSUE: '342',
+      NO_COLOR: '1',
+      GH_MAESTRO_RUNTIME_DIR: runtimeRoot,
+    };
+    const probe = 'console.log(JSON.stringify(process.env))';
+    const r = spawnSync(process.execPath, ['--require', path.join(__dirname, '_env-setup.js'), '-e', probe], {
+      env: { ...process.env, ...injected },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    for (const key of [
+      'GH_MAESTRO_WORKER',
+      'GH_MAESTRO_WORKSPACE',
+      'GH_MAESTRO_BASE_BRANCH',
+      'GH_MAESTRO_ISSUE',
+      'ISSUE',
+      'NO_COLOR',
+    ]) {
+      assert.equal(out[key], undefined, `_env-setup.js は ${key} を除去すること`);
+    }
+    assert.equal(out.GH_MAESTRO_RUNTIME_DIR, runtimeRoot, 'テスト専用runtime rootは子プロセスへ継承すること');
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('package.jsonの全テスト入口が_env-setup.jsをプリロードする', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  for (const scriptName of ['test', 'test:slow']) {
+    const command = packageJson.scripts?.[scriptName];
+    assert.equal(typeof command, 'string', `${scriptName} スクリプトが必要`);
+    assert.match(
+      command,
+      /node --require \.\/tests\/_env-setup\.js --test/,
+      `${scriptName} は _env-setup.js を --test より前にプリロードすること`,
+    );
+  }
+});
