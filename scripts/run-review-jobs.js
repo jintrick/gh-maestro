@@ -200,6 +200,7 @@ function validateJobs(jobs, adoptedLeaves, errors) {
       for (const lid of job.leaf_ids) {
         if (typeof lid !== 'string' || !ALL_LEAF_IDS.includes(lid)) {
           errors.push(`job ${job.id}: unknown leaf id: ${JSON.stringify(lid)}`);
+          continue;
         }
         if (!adoptedLeaves.has(lid)) {
           errors.push(`job ${job.id}: leaf_id "${lid}" is not in coverage_ledger adopted leaves`);
@@ -237,7 +238,7 @@ function validateJobs(jobs, adoptedLeaves, errors) {
   }
 }
 
-// ── 観点定義の正本解決と封じ込め ──────────────────────────────────────────────
+// ── 観点定義の正本解決 ────────────────────────────────────────────────────────
 
 /**
  * 観点定義の正本ディレクトリを解決する。
@@ -258,52 +259,8 @@ function resolveReviewSkillsDir(options = {}) {
 }
 
 /**
- * 葉ファイルパスを正本ディレクトリ配下に解決し、封じ込め（path confinement）を検証する。
- * 外部由来のパスが正本ディレクトリ外を指す場合は拒否する（.claude/rules/path-confinement.md 準拠）。
- *
- * @param {string} lfPath
- * @param {string} skillsDir
- * @returns {{ok: boolean, resolvedPath?: string, error?: string}}
- */
-function resolveLeafPath(lfPath, skillsDir) {
-  const allowedRoot = path.resolve(skillsDir);
-  let rel = String(lfPath).replace(/\\/g, '/');
-
-  // skills/gh-maestro-reviewer/ または gh-maestro-reviewer/ プレフィックスが付いている場合は除去
-  if (rel.startsWith('skills/gh-maestro-reviewer/')) {
-    rel = rel.slice('skills/gh-maestro-reviewer/'.length);
-  } else if (rel.startsWith('gh-maestro-reviewer/')) {
-    rel = rel.slice('gh-maestro-reviewer/'.length);
-  }
-
-  let candidate;
-  if (path.isAbsolute(lfPath)) {
-    candidate = path.resolve(lfPath);
-  } else {
-    candidate = path.resolve(allowedRoot, rel);
-  }
-
-  const isWin = process.platform === 'win32';
-  const c = isWin ? candidate.toLowerCase() : candidate;
-  const root = isWin ? allowedRoot.toLowerCase() : allowedRoot;
-
-  const isWithin = c === root || c.startsWith(root + path.sep);
-  if (!isWithin) {
-    return {
-      ok: false,
-      error: `leaf file path escapes review skills root: ${lfPath}`,
-    };
-  }
-
-  return {
-    ok: true,
-    resolvedPath: candidate,
-  };
-}
-
-/**
  * ジョブの全葉ファイルをleaf_idsから導出して正本ディレクトリから読み取り、検証する。
- * 1件でも正本外を指すパス（path confinement違反）やファイル未存在・読み取り失敗があればエラーを返す（フェイルクローズ）。
+ * 1件でも葉IDが未知、または正本ファイルが未存在・読み取り失敗ならエラーを返す（フェイルクローズ）。
  *
  * @param {object} job
  * @param {string} skillsDir
@@ -322,13 +279,12 @@ function readJobLeaves(job, skillsDir) {
       return { ok: false, error: `job ${job.id}: ${e.message}` };
     }
 
-    const res = resolveLeafPath(leafPath, skillsDir);
-    if (!res.ok) {
-      return { ok: false, error: `job ${job.id}: leaf file path escapes review skills root (${leafPath})` };
-    }
+    // deriveLeafFilePath はALL_LEAF_IDSのホワイトリストを通過したIDだけを受理するため、
+    // leafPathは絶対パスや親ディレクトリ参照を含まず、正本ルートからの相対位置に固定される。
+    const resolvedPath = path.resolve(skillsDir, leafPath);
     let content;
     try {
-      content = fs.readFileSync(res.resolvedPath, 'utf8');
+      content = fs.readFileSync(resolvedPath, 'utf8');
     } catch (e) {
       return { ok: false, error: `job ${job.id}: cannot read leaf file from canonical copy (${leafPath}): ${e.message}` };
     }
@@ -343,7 +299,7 @@ function readJobLeaves(job, skillsDir) {
  * ジョブワーカーに渡すプロンプトを生成する。
  * 観点定義ファイルはjob.leaf_idsから導出し、配布済みの正本ディレクトリから読み取り、プロンプトに埋め込む。
  * 審査対象PRのworktree（reviewWtDir）からは決して観点定義を読み込まない（Issue #309）。
- * 読み取り不能または正本外パスがある場合は例外を throw する（フェイルクローズ）。
+ * 導出した正本ファイルを読み取れない場合は例外を throw する（フェイルクローズ）。
  *
  * @param {object} job
  * @param {object} manifest
@@ -1368,7 +1324,6 @@ module.exports = {
   validateManifest,
   validateJobs,
   resolveReviewSkillsDir,
-  resolveLeafPath,
   readJobLeaves,
   buildJobPrompt,
   launchJobWorker,

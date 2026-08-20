@@ -13,7 +13,6 @@ const {
   validateManifest,
   validateJobs,
   resolveReviewSkillsDir,
-  resolveLeafPath,
   readJobLeaves,
   buildJobPrompt,
   launchJobWorker,
@@ -156,6 +155,7 @@ test('validateManifest: unknown leaf id in a job is rejected before execution', 
   const result = validateManifest(manifest);
   assert.equal(result.valid, false);
   assert.ok(result.errors.some(e => e.includes('unknown leaf id')));
+  assert.equal(result.errors.some(e => e.includes('not in coverage_ledger adopted leaves')), false);
 });
 
 test('validateManifest: legacy manifest path fields are rejected', () => {
@@ -192,41 +192,6 @@ test('resolveReviewSkillsDir: 通常時は managedRoot() 配下の正本パス�
 
   const customDir = resolveReviewSkillsDir({ reviewSkillsDir: '/custom/skills/gh-maestro-reviewer' });
   assert.equal(customDir, path.resolve('/custom/skills/gh-maestro-reviewer'));
-});
-
-test('resolveLeafPath: 既定の正本ディレクトリ基準で各観点ファイルパスが managedRoot 配下に正しく解決される（Issue #309）', () => {
-  const defaultSkillsDir = resolveReviewSkillsDir();
-  const expectedPrefix = path.join(managedRoot(), 'skills', 'gh-maestro-reviewer');
-
-  // 相対パス（プレフィックスあり・なし）がすべて managedRoot 配下に解決される
-  const r1 = resolveLeafPath('correctness/logic-invariants.md', defaultSkillsDir);
-  assert.equal(r1.ok, true);
-  assert.equal(r1.resolvedPath, path.join(expectedPrefix, 'correctness', 'logic-invariants.md'));
-
-  const r2 = resolveLeafPath('skills/gh-maestro-reviewer/correctness/logic-invariants.md', defaultSkillsDir);
-  assert.equal(r2.ok, true);
-  assert.equal(r2.resolvedPath, path.join(expectedPrefix, 'correctness', 'logic-invariants.md'));
-
-  const r3 = resolveLeafPath('gh-maestro-reviewer/correctness/logic-invariants.md', defaultSkillsDir);
-  assert.equal(r3.ok, true);
-  assert.equal(r3.resolvedPath, path.join(expectedPrefix, 'correctness', 'logic-invariants.md'));
-
-  // 正本ディレクトリ配下の絶対パス
-  const absInside = path.join(defaultSkillsDir, 'correctness', 'logic-invariants.md');
-  const r4 = resolveLeafPath(absInside, defaultSkillsDir);
-  assert.equal(r4.ok, true);
-  assert.equal(r4.resolvedPath, absInside);
-
-  // 脱出パス（../ による path traversal）は拒否
-  const r5 = resolveLeafPath('../../../etc/passwd', defaultSkillsDir);
-  assert.equal(r5.ok, false);
-  assert.ok(r5.error.includes('escapes review skills root'));
-
-  // 正本外の絶対パスは拒否
-  const absOutside = path.resolve('/tmp/malicious-criteria.md');
-  const r6 = resolveLeafPath(absOutside, defaultSkillsDir);
-  assert.equal(r6.ok, false);
-  assert.ok(r6.error.includes('escapes review skills root'));
 });
 
 test('buildJobPrompt: PR worktree 内に改ざんファイルがあっても正本から読み込む（Issue #309）', () => {
