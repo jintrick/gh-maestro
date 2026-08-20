@@ -2,6 +2,16 @@
 
 このファイルは `SKILL.md` の「ワーカーからの報告の受信（msg-poll）」「worker への指示配送（Inbox Supervisor）」「PR検出」から参照される。**正常系ではこのファイルを読む必要はない。** 異常な通知を受け取った・多重起動を疑った・レビューが進まない、といった場面でだけ該当節を開く。
 
+## install後の常駐入れ替え
+
+`node scripts/install.js` は、共有スクリプトの配布後に、runtime rootへ登録された全workspaceを対象として `restart-residents.js` を自動で呼び出す。稼働中の常駐は起動時にロードしたJSを保持するため、installだけで完了したと判断せず、installの出力を確認する。登録workspaceが無い場合だけ、常駐の対象を推測せず入れ替えをスキップする。
+
+workspaceごとに `workspace="<absolute-path>"` の見出しが出力され、その直後に常駐ごとの `RESIDENT script=<name> status=<status>` 行と、Monitor再接続が必要な場合の `MONITOR_REATTACH_REQUIRED script=<name> command=<command>` 行が続く。statusの詳細な意味は `node scripts/restart-residents.js --help` を一次情報とする。
+
+`MONITOR_REATTACH_REQUIRED` が出た常駐は、各行の `command=` をMonitorで実行して同じ出力先へ張り直す。Monitor出力を持つ `msg-poll.js` / `poll-pr.js` / `poll-reviews.js` はdetachedで起動しない。特に `msg-poll.js` はプロセスが生きているだけではワーカー報告が届かず、Monitorの張り直し完了まで次のタスクへ進めない。
+
+installまたはrestart CLIが非ゼロ終了した場合、registryの読み取り・停止・起動確認のいずれかが未確認である可能性がある。結果を人間に報告して判断を仰ぎ、セッション再起動依頼で置き換えない。
+
 ## inbox監視の重複復旧
 
 「重複しているかもしれない」と気づいた瞬間に片方を反射的に止めてはならない。以下の順で確認してから対処する：

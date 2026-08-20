@@ -9,15 +9,108 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execFileSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
   buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
-  installScripts, installSharedSkills,
+  installScripts, installSharedSkills, restartResidentsAfterInstall,
 } = require('../scripts/install.js');
 const { MANAGED_TOP_LEVEL } = require('../scripts/shared/storage-layout');
+
+test('restartResidentsAfterInstall: 登録済みの全workspaceに配布済みCLIを明示引数付きで呼び出す', () => {
+  const workspaces = [
+    path.join(os.tmpdir(), 'gh-maestro-install-workspace-a'),
+    path.join(os.tmpdir(), 'gh-maestro-install-workspace-b'),
+  ];
+  const sharedScripts = path.join(os.tmpdir(), 'gh-maestro-installed-scripts');
+  const calls = [];
+  const notices = [];
+
+  const result = restartResidentsAfterInstall({
+    listRegisteredWorkspaces: () => workspaces,
+    sharedScripts,
+    onWorkspace: (workspace) => notices.push(workspace),
+    execFileSync: (...args) => calls.push(args),
+  });
+
+  assert.deepEqual(result, {
+    attempted: true,
+    code: 0,
+    workspaces,
+    results: workspaces.map((workspace) => ({ workspace, code: 0 })),
+    scriptPath: path.join(sharedScripts, 'restart-residents.js'),
+  });
+  assert.deepEqual(notices, workspaces);
+  assert.deepEqual(calls, workspaces.map((workspace) => [
+    process.execPath,
+    [path.join(sharedScripts, 'restart-residents.js'), '--workspace', workspace],
+    { stdio: 'inherit' },
+  ]));
+});
+
+test('restartResidentsAfterInstall: 登録workspaceが無い場合は常駐操作を実行しない', () => {
+  let called = false;
+  const result = restartResidentsAfterInstall({
+    listRegisteredWorkspaces: () => [],
+    execFileSync: () => { called = true; },
+  });
+
+  assert.deepEqual(result, { attempted: false, code: 0, workspaces: [] });
+  assert.equal(called, false, '登録workspaceが無い場合はrestart CLIを呼び出さない');
+});
+
+test('restartResidentsAfterInstall: 1つのworkspaceの失敗後も残りを処理し、失敗を報告する', () => {
+  const error = Object.assign(new Error('restart failed'), { status: 1 });
+  const workspaces = [
+    path.join(os.tmpdir(), 'gh-maestro-install-workspace-failed'),
+    path.join(os.tmpdir(), 'gh-maestro-install-workspace-after-failed'),
+  ];
+  const calls = [];
+  const result = restartResidentsAfterInstall({
+    workspaces,
+    sharedScripts: path.join(os.tmpdir(), 'gh-maestro-installed-scripts'),
+    execFileSync: (...args) => {
+      calls.push(args);
+      if (calls.length === 1) throw error;
+    },
+  });
+
+  assert.equal(result.attempted, true);
+  assert.equal(result.code, 1);
+  assert.deepEqual(result.workspaces, workspaces);
+  assert.equal(result.results[0].error, error);
+  assert.equal(result.results[0].code, 1);
+  assert.deepEqual(result.results[1], { workspace: workspaces[1], code: 0 });
+  assert.equal(calls.length, 2, '1つ目の失敗で後続workspaceを飛ばさない');
+});
+
+test('restartResidentsAfterInstall: workspace registryの読取失敗を握りつぶさず、CLIを呼び出さない', () => {
+  const error = new Error('registry unreadable');
+  let called = false;
+  const result = restartResidentsAfterInstall({
+    listRegisteredWorkspaces: () => { throw error; },
+    execFileSync: () => { called = true; },
+  });
+
+  assert.equal(result.attempted, false);
+  assert.equal(result.code, 1);
+  assert.deepEqual(result.workspaces, []);
+  assert.equal(result.error, error);
+  assert.equal(called, false, 'registryを読めない場合は常駐操作を実行しない');
+});
+
+test('restartResidentsAfterInstall: 実際のrestart-residents.jsがworkspace引数を受理する', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-install-real-cli-'));
+  const result = restartResidentsAfterInstall({
+    workspaces: [workspace],
+    sharedScripts: path.join(ROOT, 'scripts'),
+  });
+
+  assert.equal(result.attempted, true);
+  assert.equal(result.code, 0);
+  assert.deepEqual(result.results, [{ workspace, code: 0 }]);
+});
 
 // ── ユーティリティ関数のユニットテスト ──────────────────────────────────────
 

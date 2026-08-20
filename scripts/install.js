@@ -3,6 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const SKILLS_DIR = path.join(ROOT, 'skills');
@@ -454,10 +455,71 @@ function installSharedSkills(agents, options = {}) {
   }
 }
 
+/**
+ * install後に、配布済みのrestart-residents.jsで常駐プロセスを現行コードへ入れ替える。
+ *
+ * install.jsはgh-maestroリポジトリから実行される一方、常駐プロセスのregistryは
+ * 実ワークスペースごとに管理される。runtime rootの記録から対象をすべて列挙し、
+ * installで更新した共有スクリプト側のCLIをworkspaceごとに呼び出す。各CLIの
+ * stdout/stderrはinstallの出力へそのまま渡す。
+ *
+ * @param {object} [options]
+ * @param {string[]} [options.workspaces] テスト用のworkspace一覧
+ * @param {string} [options.sharedScripts] 配布済みスクリプトディレクトリ
+ * @param {Function} [options.listRegisteredWorkspaces] workspace列挙関数
+ * @param {Function} [options.execFileSync] CLI実行関数
+ * @param {Function} [options.onWorkspace] workspaceごとの実行前通知
+ * @returns {{attempted: boolean, code: number, workspaces: string[], results?: object[], scriptPath?: string, error?: Error}}
+ */
+function restartResidentsAfterInstall(options = {}) {
+  let workspaces;
+  try {
+    workspaces = Object.prototype.hasOwnProperty.call(options, 'workspaces')
+      ? options.workspaces
+      : (options.listRegisteredWorkspaces || storageLayout.listRegisteredWorkspaces)();
+  } catch (error) {
+    return { attempted: false, code: 1, workspaces: [], error };
+  }
+
+  if (!Array.isArray(workspaces) || workspaces.some((workspace) => typeof workspace !== 'string' || !workspace)) {
+    return {
+      attempted: false,
+      code: 1,
+      workspaces: [],
+      error: new Error('workspace registryから不正なworkspace一覧が返されました'),
+    };
+  }
+
+  const uniqueWorkspaces = [...new Set(workspaces)];
+  if (uniqueWorkspaces.length === 0) {
+    return { attempted: false, code: 0, workspaces: [] };
+  }
+
+  const scriptsPath = options.sharedScripts || SHARED_SCRIPTS;
+  const scriptPath = path.join(scriptsPath, 'restart-residents.js');
+  const run = options.execFileSync || execFileSync;
+  const results = [];
+  let code = 0;
+  for (const workspace of uniqueWorkspaces) {
+    if (typeof options.onWorkspace === 'function') options.onWorkspace(workspace);
+    try {
+      run(process.execPath, [scriptPath, '--workspace', workspace], { stdio: 'inherit' });
+      results.push({ workspace, code: 0 });
+    } catch (error) {
+      const workspaceCode = Number.isInteger(error && error.status) && error.status !== 0
+        ? error.status
+        : 1;
+      if (code === 0) code = workspaceCode;
+      results.push({ workspace, code: workspaceCode, error });
+    }
+  }
+  return { attempted: true, code, workspaces: uniqueWorkspaces, results, scriptPath };
+}
+
 module.exports = {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
   buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
-  installScripts, installSharedSkills,
+  installScripts, installSharedSkills, restartResidentsAfterInstall,
 };
 
 if (require.main !== module) return;
@@ -778,6 +840,26 @@ if (hookResult.status === 0) {
   ok('git core.hooksPath -> .githooks (.claude/rules と AGENTS.md の同期のみ。テストは実行しない)');
 } else {
   console.log(`  \x1b[33m! git config core.hooksPath 失敗 — 手動で実行: git config core.hooksPath .githooks\x1b[0m`);
+}
+
+// installで共有スクリプトを更新した時点で、既存の常駐プロセスは古いrequire閉包を
+// 保持している。配布済みのCLIに停止・入れ替えを委ね、Monitorを持つ常駐の再接続要求も
+// installの出力へそのまま届ける。登録workspaceが無い場合だけ対象を推測せずスキップする。
+step('Restarting resident processes with the installed scripts...');
+const residentRestart = restartResidentsAfterInstall({
+  onWorkspace: (workspace) => step(`Restarting resident processes for workspace=${JSON.stringify(workspace)}`),
+});
+if (!residentRestart.attempted) {
+  if (residentRestart.code === 0) {
+    ok('No registered workspace — resident restart skipped');
+  } else {
+    fail(`常駐プロセスの対象workspace registryを読み取れませんでした: ${residentRestart.error.message}`);
+  }
+} else if (residentRestart.code !== 0) {
+  const status = residentRestart.code === 1 ? '終了コード1' : `終了コード${residentRestart.code}`;
+  fail(`常駐プロセスの入れ替えに失敗しました（${status}）。一部workspaceに未確認の常駐が残っている可能性があります。`);
+} else {
+  ok(`Resident process restart completed for ${residentRestart.workspaces.length} workspace(s)`);
 }
 
 console.log('\ngh-maestro installed.\n');

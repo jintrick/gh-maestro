@@ -180,6 +180,45 @@ test('ensureWorkspaceRuntimeDir: 既存の workspace.json を上書きしない�
   });
 });
 
+test('listRegisteredWorkspaces: runtime rootに登録された全workspaceを返す', () => {
+  withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'list-runtime') }, () => {
+    const workspaces = [
+      fs.mkdtempSync(path.join(tmpBase, 'registered-a-')),
+      fs.mkdtempSync(path.join(tmpBase, 'registered-b-')),
+    ];
+    for (const workspace of workspaces) sl.ensureWorkspaceRuntimeDir(workspace);
+
+    assert.deepEqual(
+      sl.listRegisteredWorkspaces().sort(),
+      workspaces.map((workspace) => sl.canonicalWorkspace(workspace)).sort(),
+    );
+  });
+});
+
+test('listRegisteredWorkspaces: manifestの読取失敗を握りつぶさず停止する', () => {
+  withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'invalid-manifest-runtime') }, () => {
+    const runtimeWorkspaces = path.join(sl.runtimeRoot(), 'workspaces', 'broken');
+    fs.mkdirSync(runtimeWorkspaces, { recursive: true });
+    fs.writeFileSync(path.join(runtimeWorkspaces, 'workspace.json'), '{not-json', 'utf8');
+
+    assert.throws(() => sl.listRegisteredWorkspaces(), /workspace registry を読み取れません/);
+  });
+});
+
+test('listRegisteredWorkspaces: manifestのworkspaceKey不一致を拒否する', () => {
+  withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'mismatched-key-runtime') }, () => {
+    const workspace = fs.mkdtempSync(path.join(tmpBase, 'mismatched-key-'));
+    const runtimeWorkspaces = path.join(sl.runtimeRoot(), 'workspaces', 'wrong-key');
+    fs.mkdirSync(runtimeWorkspaces, { recursive: true });
+    fs.writeFileSync(path.join(runtimeWorkspaces, 'workspace.json'), JSON.stringify({
+      schemaVersion: 1,
+      canonicalPath: sl.canonicalWorkspace(workspace),
+    }), 'utf8');
+
+    assert.throws(() => sl.listRegisteredWorkspaces(), /workspace registry のキーが一致しません/);
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // assertValidWorkspace（Issue #214 の根本原因ガード）
 // ═══════════════════════════════════════════════════════════════════════════
