@@ -23,7 +23,14 @@ const { buildLoginShellExecArgs } = require('./agent-exec');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { parseFlags } = require('./shared/workspace');
-const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS, FINDING_REQUIRED_FIELDS } = require('./shared/review-aspects');
+const {
+  ALL_LEAF_IDS,
+  REVIEW_ASPECT_FILES,
+  reviewFilesForLeaves,
+  TRUNK_TO_LEAVES,
+  VALID_ASPECTS,
+  FINDING_REQUIRED_FIELDS,
+} = require('./shared/review-aspects');
 const { managedRoot } = require('./shared/storage-layout');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
@@ -258,6 +265,12 @@ function resolveReviewSkillsDir(options = {}) {
  * @returns {{ok: boolean, resolvedPath?: string, error?: string}}
  */
 function resolveLeafPath(lfPath, skillsDir) {
+  if (typeof lfPath !== 'string' || lfPath.length === 0) {
+    return {
+      ok: false,
+      error: `leaf file path must be a non-empty string: ${lfPath}`,
+    };
+  }
   const allowedRoot = path.resolve(skillsDir);
   let rel = String(lfPath).replace(/\\/g, '/');
 
@@ -294,39 +307,89 @@ function resolveLeafPath(lfPath, skillsDir) {
 }
 
 /**
- * ジョブの全葉ファイルを正本ディレクトリから読み取り、検証する。
- * 1件でも正本外を指すパス（path confinement違反）やファイル未存在・読み取り失敗があればエラーを返す（フェイルクローズ）。
+ * ジョブの担当葉に対応する共通・事前・事後ファイルを正本ディレクトリから読み取り、検証する。
+ * job.leaf_files はmanifestの宣言として期待されるファイル集合と照合し、担当葉以外を
+ * プロンプトへ混入させない。1件でも正本外を指すパス（path confinement違反）やファイル未存在・
+ * 読み取り失敗があればエラーを返す（フェイルクローズ）。
  *
  * @param {object} job
  * @param {string} skillsDir
- * @returns {{ok: true, leaves: Array<{path: string, content: string}>} | {ok: false, error: string}}
+ * @returns {{ok: true, common: {path: string, content: string}, leaves: Array<{id: string, pre: {path: string, content: string}, post: {path: string, content: string}}>} | {ok: false, error: string}}
  */
 function readJobLeaves(job, skillsDir) {
+  if (!Array.isArray(job.leaf_ids) || job.leaf_ids.length === 0) {
+    return { ok: false, error: `job ${job.id}: leaf_ids must be a non-empty array` };
+  }
+  let expectedFiles;
+  try {
+    expectedFiles = reviewFilesForLeaves(job.leaf_ids);
+  } catch (e) {
+    return { ok: false, error: `job ${job.id}: ${e.message}` };
+  }
   if (!Array.isArray(job.leaf_files) || job.leaf_files.length === 0) {
     return { ok: false, error: `job ${job.id}: leaf_files must be a non-empty array` };
   }
-  const leaves = [];
+
+  const pathKey = (filePath) => {
+    const resolved = path.resolve(filePath);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  const expectedResolved = expectedFiles.map(file => resolveLeafPath(file, skillsDir));
+  if (expectedResolved.some(result => !result.ok)) {
+    return { ok: false, error: `job ${job.id}: cannot resolve canonical review aspect files` };
+  }
+
+  const declaredKeys = new Set();
   for (const lfPath of job.leaf_files) {
     const res = resolveLeafPath(lfPath, skillsDir);
     if (!res.ok) {
-      return { ok: false, error: `job ${job.id}: leaf file path escapes review skills root (${lfPath})` };
+      return { ok: false, error: `job ${job.id}: ${res.error}` };
+    }
+    declaredKeys.add(pathKey(res.resolvedPath));
+  }
+  const expectedKeys = new Set(expectedResolved.map(result => pathKey(result.resolvedPath)));
+  if (declaredKeys.size !== expectedKeys.size || [...expectedKeys].some(key => !declaredKeys.has(key))) {
+    return {
+      ok: false,
+      error: `job ${job.id}: leaf_files must list ${REVIEW_ASPECT_FILES.common} and both ${REVIEW_ASPECT_FILES.pre}/${REVIEW_ASPECT_FILES.post} files for every assigned leaf`,
+    };
+  }
+
+  const readCanonical = (filePath) => {
+    const res = resolveLeafPath(filePath, skillsDir);
+    if (!res.ok) {
+      return { ok: false, error: `job ${job.id}: leaf file path escapes review skills root (${filePath})` };
     }
     let content;
     try {
       content = fs.readFileSync(res.resolvedPath, 'utf8');
     } catch (e) {
-      return { ok: false, error: `job ${job.id}: cannot read leaf file from canonical copy (${lfPath}): ${e.message}` };
+      return { ok: false, error: `job ${job.id}: cannot read leaf file from canonical copy (${filePath}): ${e.message}` };
     }
-    leaves.push({ path: lfPath, content });
+    return { ok: true, value: { path: filePath, content } };
+  };
+
+  const commonRes = readCanonical(REVIEW_ASPECT_FILES.common);
+  if (!commonRes.ok) return commonRes;
+
+  const leaves = [];
+  for (const leafId of job.leaf_ids) {
+    const prePath = `${leafId}/${REVIEW_ASPECT_FILES.pre}`;
+    const postPath = `${leafId}/${REVIEW_ASPECT_FILES.post}`;
+    const preRes = readCanonical(prePath);
+    if (!preRes.ok) return preRes;
+    const postRes = readCanonical(postPath);
+    if (!postRes.ok) return postRes;
+    leaves.push({ id: leafId, pre: preRes.value, post: postRes.value });
   }
-  return { ok: true, leaves };
+  return { ok: true, common: commonRes.value, leaves };
 }
 
 // ── ジョブプロンプト生成 ──────────────────────────────────────────────────────
 
 /**
  * ジョブワーカーに渡すプロンプトを生成する。
- * 観点定義ファイル（leaf_files）は配布済みの正本ディレクトリから読み取り、プロンプトに埋め込む。
+ * 観点定義ファイルは配布済みの正本ディレクトリから読み取り、プロンプトに埋め込む。
  * 審査対象PRのworktree（reviewWtDir）からは決して観点定義を読み込まない（Issue #309）。
  * 読み取り不能または正本外パスがある場合は例外を throw する（フェイルクローズ）。
  *
@@ -343,8 +406,11 @@ function buildJobPrompt(job, manifest, reviewWtDir, options = {}) {
     throw new Error(leafRes.error);
   }
 
-  const leavesSection = leafRes.leaves.map(lc =>
-    `### ${lc.path}\n\n${lc.content}`
+  const preLeavesSection = leafRes.leaves.map(leaf =>
+    `### ${leaf.id} — ${leaf.pre.path}\n\n${leaf.pre.content}`
+  ).join('\n\n---\n\n');
+  const postLeavesSection = leafRes.leaves.map(leaf =>
+    `### ${leaf.id} — ${leaf.post.path}\n\n${leaf.post.content}`
   ).join('\n\n---\n\n');
 
   const acceptanceSection = Array.isArray(manifest.acceptanceCriteria) && manifest.acceptanceCriteria.length > 0
@@ -359,15 +425,23 @@ ${manifest.acceptanceCriteria.map(item => `- ${item}`).join('\n')}
     : '';
 
   return `あなたは gh-maestro のレビューワーカーです。担当観点「${job.aspect}」について、
-以下の葉ファイルの基準に従い、指定されたdiffをレビューしてください。
+以下の事前指示と事後確認表を使い、指定されたdiffをレビューしてください。
 
 ## 担当観点
 
 ${job.aspect}
 
-## 担当葉ファイル
+## 事前指示（diffを見る前に読む）
 
-${leavesSection}
+以下の共通禁止事項と担当葉の事前指示を最初に読んでください。
+
+### 全ジョブ共通
+
+${leafRes.common.content}
+
+### 担当葉
+
+${preLeavesSection}
 
 ## レビュー対象
 
@@ -390,11 +464,16 @@ ${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)
 
 (実際のdiffは作業ディレクトリ上で \`git diff\` またはファイル読み取りで確認してください)
 
+## レビュー手順
+
+1. 上記の共通禁止事項と担当葉の事前指示を読んだ後、作業ディレクトリのdiffと関連コードを自由に探索してください。
+2. 観測した事実に基づいて、担当観点の指摘をJSON配列として作成してください。
+3. **指摘を書き終えてJSON配列を完成させるまで、下記の「事後確認表」を読んではいけません。** 事後確認表を先に読むと探索がその列挙に引きずられるためです。
+4. 指摘を書き終えた後にだけ事後確認表を読み、完成した指摘と照合してください。
+5. 照合で取りこぼしが見つかった場合は、追加の指摘を作成してください。照合で追加事項がなければ、元の指摘を維持してください。
+
 ## 禁止事項
 
-- \`npm test\` 等のスコープ限定なしの全件テスト実行は禁止
-- \`npm run build\` 等の全体ビルド実行は禁止
-- diffで変更された特定のテストファイルのみを対象にしたピンポイント実行（例: \`node --test tests/<file>.test.js\`）は許容
 - 必要な裏取りは対象diffと関連コードに限定すること
 - レビュー範囲を無制限に拡大しない
 - ファイル書き込みは禁止
@@ -435,6 +514,16 @@ ${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)
 - \`severity_rationale\`: 判定根拠を1行で記述
 - \`body\`: 観測した事実・放置すると何が起きるか・修正の方向性を含める
 - \`verified_references\`: 実際に確認したファイルパスの配列（1件以上必須）
+
+## 事後確認表（指摘を書き終えた後に読む）
+
+以下は見落とし確認のための事後用です。上記のレビュー手順に従い、指摘のJSON配列を書き終えるまで読まないでください。読んだ後、既に作成した指摘と照合し、必要なら追加してください。
+
+${postLeavesSection}
+
+## 最終出力
+
+事後確認表との照合と必要な追加を終えた後、上記形式のJSON配列だけを標準出力へ返してください。JSON以外の説明・Markdown・コメントを混ぜないでください。指摘がない場合は空配列 \`[]\` を返してください。
 `;
 }
 

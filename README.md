@@ -164,17 +164,32 @@ Correctness / Maintainability / Resilience & Security / Test Quality の4観点�
 
 ```
 skills/gh-maestro-reviewer/
+  common.md                 # 全ジョブ共通の禁止事項
   correctness/              # Correctness観点
-    api-contract.md           API互換性・契約
-    concurrency.md            並行処理・競合
-    logic-invariants.md       不変条件・境界値
+    api-contract/             API互換性・契約
+      pre-review.md
+      post-review.md
+    concurrency/              並行処理・競合
+      pre-review.md
+      post-review.md
+    logic-invariants/         不変条件・境界値
+      pre-review.md
+      post-review.md
   maintainability/          # Maintainability観点
-    structure-naming.md       命名・構造・アンチパターン
+    structure-naming/         命名・構造・アンチパターン
+      pre-review.md
+      post-review.md
   resilience-security/      # Resilience & Security観点
-    failure-recovery.md       異常系・障害耐性
-    hostile-input.md          セキュリティ脆弱性・不正入力
+    failure-recovery/        異常系・障害耐性
+      pre-review.md
+      post-review.md
+    hostile-input/            セキュリティ脆弱性・不正入力
+      pre-review.md
+      post-review.md
   test-quality/             # Test Quality観点
-    test-quality.md           テスト品質
+    test-quality/             テスト品質
+      pre-review.md
+      post-review.md
 ```
 
 ## 設定（config.json）

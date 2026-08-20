@@ -17,6 +17,35 @@ const ALL_LEAF_IDS = Object.freeze([
   'test-quality/test-quality',
 ]);
 
+const REVIEW_ASPECT_FILES = Object.freeze({
+  common: 'common.md',
+  pre: 'pre-review.md',
+  post: 'post-review.md',
+});
+
+/**
+ * 指定された葉集合に対応する観点定義ファイルを、共通ファイル・葉ごとの事前用・
+ * 事後用の順に返す。葉IDはmanifest由来の値なので、正規の7葉以外をパス化しない。
+ *
+ * @param {string[]} leafIds
+ * @returns {string[]}
+ */
+function reviewFilesForLeaves(leafIds) {
+  if (!Array.isArray(leafIds) || leafIds.length === 0) {
+    throw new Error('leaf_ids must be a non-empty array');
+  }
+
+  const files = [REVIEW_ASPECT_FILES.common];
+  for (const leafId of leafIds) {
+    if (!ALL_LEAF_IDS.includes(leafId)) {
+      throw new Error(`unknown leaf id: ${leafId}`);
+    }
+    files.push(`${leafId}/${REVIEW_ASPECT_FILES.pre}`);
+    files.push(`${leafId}/${REVIEW_ASPECT_FILES.post}`);
+  }
+  return files;
+}
+
 const TRUNK_TO_LEAVES = Object.freeze({
   'Correctness': ['correctness/logic-invariants', 'correctness/api-contract', 'correctness/concurrency'],
   'Resilience & Security': ['resilience-security/failure-recovery', 'resilience-security/hostile-input'],
@@ -35,6 +64,8 @@ const FINDING_REQUIRED_FIELDS = [
 
 module.exports = {
   ALL_LEAF_IDS,
+  REVIEW_ASPECT_FILES,
+  reviewFilesForLeaves,
   TRUNK_TO_LEAVES,
   VALID_ASPECTS,
   VALID_SEVERITIES,

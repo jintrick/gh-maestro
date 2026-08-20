@@ -1,0 +1,21 @@
+# Resilience & Security / Failure Recovery
+
+目的: 異常系・外部障害からの回復性を評価する。この変更が失敗をどう扱うかを探る。
+
+## 担当境界
+
+await漏れ・未処理Promise・race condition・deadlockに起因する失敗は
+`correctness/concurrency/pre-review.md`が担当する。異常系調査でこれらの兆候を見つけた場合は、
+自分のaspectとしてではなく`concurrency`の観点として報告してよい。
+
+## 外部参照の裏取り
+
+diffが参照する外部API wrapper、DB関数、設定値は、
+判定前に実ファイルを読んで確認する。失敗時の戻り値・例外・タイムアウト設定を推測しない。
+
+## 禁止
+
+- UX議論
+- 純粋な保守性議論
+- テスト実行の要求
+- severity判定根拠を明示できない推測指摘

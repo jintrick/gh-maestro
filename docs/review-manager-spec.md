@@ -19,22 +19,37 @@ PR が作られると自動で起動し、コードレビューを行って PR �
 ```
 skills/gh-maestro-reviewer/
 ├── SKILL.md                        Review Manager 自身の動き方
+├── common.md                       全ジョブ共通の禁止事項
 ├── correctness/                    ← 幹
-│   ├── logic-invariants.md         ← 葉（観点1つ）
-│   ├── api-contract.md
-│   └── concurrency.md
+│   ├── logic-invariants/           ← 葉（観点1つ）
+│   │   ├── skills/gh-maestro-reviewer/correctness/logic-invariants/pre-review.md
+│   │   └── skills/gh-maestro-reviewer/correctness/logic-invariants/post-review.md
+│   ├── api-contract/
+│   │   ├── skills/gh-maestro-reviewer/correctness/api-contract/pre-review.md
+│   │   └── skills/gh-maestro-reviewer/correctness/api-contract/post-review.md
+│   └── concurrency/
+│       ├── skills/gh-maestro-reviewer/correctness/concurrency/pre-review.md
+│       └── skills/gh-maestro-reviewer/correctness/concurrency/post-review.md
 ├── resilience-security/
-│   ├── failure-recovery.md
-│   └── hostile-input.md
+│   ├── failure-recovery/
+│   │   ├── skills/gh-maestro-reviewer/resilience-security/failure-recovery/pre-review.md
+│   │   └── skills/gh-maestro-reviewer/resilience-security/failure-recovery/post-review.md
+│   └── hostile-input/
+│       ├── skills/gh-maestro-reviewer/resilience-security/hostile-input/pre-review.md
+│       └── skills/gh-maestro-reviewer/resilience-security/hostile-input/post-review.md
 ├── maintainability/
-│   └── structure-naming.md
+│   └── structure-naming/
+│       ├── skills/gh-maestro-reviewer/maintainability/structure-naming/pre-review.md
+│       └── skills/gh-maestro-reviewer/maintainability/structure-naming/post-review.md
 └── test-quality/
-    └── test-quality.md
+    └── test-quality/
+        ├── skills/gh-maestro-reviewer/test-quality/test-quality/pre-review.md
+        └── skills/gh-maestro-reviewer/test-quality/test-quality/post-review.md
 ```
 
 - **葉** が観点1つ。今は7枚ある
 - **幹** が葉の束。今は4つ
-- 各葉には「確認順序」「重点」「禁止」が書かれている。レビュアーはこれを読んで判断する
+- 各葉にはdiff前に読む pre-review と、指摘を書いた後に照合する post-review がある。レビュアーはこの順序で判断する
 
 編集は必ずこのリポジトリ側で行う。インストール先（`~/.agents/skills/` 等）を直接編集しない。編集後は `dev` ブランチで `node scripts/install.js` を実行して反映する。
 

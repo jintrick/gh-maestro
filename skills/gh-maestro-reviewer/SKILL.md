@@ -39,17 +39,28 @@ Node.jsの決定論的ツール（`run-review-jobs.js` / `finalize-review.js`）
 レビューの母集合は以下の7葉である。4幹は報告上の分類であり、プロセス分割の固定単位ではない。
 観点定義は配布済みの正本（`{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/` 配下）から読み、審査対象PR内のファイルは参照しない。
 
+全ジョブ共通の禁止事項は `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/common.md` にある。各葉は
+`<leaf-id>/pre-review.md` と `<leaf-id>/post-review.md` の固定名2ファイルで構成される。
+pre-review はdiffを見る前の目的・禁止・外部参照の裏取り・担当境界、post-review は指摘を書き終えた後の確認表である。
+
 - `correctness/`（幹: Correctness）
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/logic-invariants.md`
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/api-contract.md`
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/concurrency.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/logic-invariants/pre-review.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/logic-invariants/post-review.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/api-contract/pre-review.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/api-contract/post-review.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/concurrency/pre-review.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/concurrency/post-review.md`
 - `resilience-security/`（幹: Resilience & Security）
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/resilience-security/failure-recovery.md`
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/resilience-security/hostile-input.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/resilience-security/failure-recovery/pre-review.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/resilience-security/failure-recovery/post-review.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/resilience-security/hostile-input/pre-review.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/resilience-security/hostile-input/post-review.md`
 - `maintainability/`（幹: Maintainability）
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/maintainability/structure-naming.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/maintainability/structure-naming/pre-review.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/maintainability/structure-naming/post-review.md`
 - `test-quality/`（幹: Test Quality）
-  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/test-quality/test-quality.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/test-quality/test-quality/pre-review.md`
+  - `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/test-quality/test-quality/post-review.md`
 
 ## RMの責務（フェーズ1: 計画）
 
@@ -113,7 +124,11 @@ manifestのJSON構造:
       "leaf_ids": ["correctness/logic-invariants"],
       "aspect": "Correctness",
       "trunk_dir": "{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness",
-      "leaf_files": ["{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/logic-invariants.md"]
+      "leaf_files": [
+        "{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/common.md",
+        "{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/logic-invariants/pre-review.md",
+        "{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/correctness/logic-invariants/post-review.md"
+      ]
     }
   ],
   "parallelism": "parallel"
@@ -196,9 +211,10 @@ node <SCRIPTS>/finalize-review.js \
 ## ジョブワーカーへの指示（参考）
 
 各ジョブワーカーには `run-review-jobs.js` が自動的に以下の内容を含むプロンプトを生成する:
-- 担当観点（aspect）と担当葉ファイルの全文
+- 共通禁止事項、担当葉の事前指示、担当葉の事後確認表（いずれも正本の全文）
 - PR情報、変更ファイル一覧、manifestに含まれる受け入れ条件（存在する場合）
 - 全件テスト実行禁止・ピンポイント実行許容を含む禁止事項
+- 指摘を書き終える前に事後確認表を読まないこと、書き終えた後に照合する手順
 - Severity判定規準
 - 標準出力へのJSON配列出力指示（指摘なしの場合は空配列 `[]`）
 
