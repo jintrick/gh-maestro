@@ -13,7 +13,6 @@ const {
   validateManifest,
   validateJobs,
   resolveReviewSkillsDir,
-  resolveLeafPath,
   readJobLeaves,
   buildJobPrompt,
   launchJobWorker,
@@ -59,8 +58,6 @@ test('validateManifest: valid manifest passes', () => {
         id: 'job-1',
         leaf_ids: [...ALL_LEAF_IDS],
         aspect: 'Correctness',
-        trunk_dir: 'skills/gh-maestro-reviewer/correctness',
-        leaf_files: ALL_LEAF_IDS.map(id => 'skills/gh-maestro-reviewer/' + id + '.md'),
       },
     ],
     parallelism: 'parallel',
@@ -96,7 +93,7 @@ test('validateManifest: excluded leaf without rationale fails', () => {
   const manifest = {
     pr: 1, repo: 'o/r', headRefOid: 'abc',
     coverage_ledger: { leaves },
-    jobs: [{ id: 'job-1', leaf_ids: adoptedIds, aspect: 'Correctness', trunk_dir: 'd', leaf_files: ['f.md'] }],
+    jobs: [{ id: 'job-1', leaf_ids: adoptedIds, aspect: 'Correctness' }],
     parallelism: 'parallel',
   };
   const { valid, errors } = validateManifest(manifest);
@@ -114,7 +111,7 @@ test('validateManifest: adopted leaf not assigned to any job fails', () => {
   const manifest = {
     pr: 1, repo: 'o/r', headRefOid: 'abc',
     coverage_ledger: { leaves },
-    jobs: [{ id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness', trunk_dir: 'd', leaf_files: ['f.md'] }],
+    jobs: [{ id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' }],
     parallelism: 'parallel',
   };
   const { valid, errors } = validateManifest(manifest);
@@ -140,6 +137,54 @@ test('validateManifest: empty jobs when adopted leaves exist fails', () => {
   assert.ok(errors.some(e => e.includes('must not be empty')));
 });
 
+test('validateManifest: unknown leaf id in a job is rejected before execution', () => {
+  const leaves = ALL_LEAF_IDS.map(id => ({
+    id,
+    trunk: Object.entries(TRUNK_TO_LEAVES).find(([, lvs]) => lvs.includes(id))[0],
+    decision: id === 'correctness/logic-invariants' ? 'adopted' : 'excluded',
+    rationale: id === 'correctness/logic-invariants' ? null : 'not selected',
+  }));
+  const manifest = {
+    pr: 1,
+    repo: 'o/r',
+    headRefOid: 'abc',
+    coverage_ledger: { leaves },
+    jobs: [{ id: 'job-1', leaf_ids: ['correctness/unknown'], aspect: 'Correctness' }],
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some(e => e.includes('unknown leaf id')));
+  assert.equal(result.errors.some(e => e.includes('not in coverage_ledger adopted leaves')), false);
+});
+
+test('validateManifest: legacy manifest path fields are rejected', () => {
+  const leaves = ALL_LEAF_IDS.map(id => ({
+    id,
+    trunk: Object.entries(TRUNK_TO_LEAVES).find(([, lvs]) => lvs.includes(id))[0],
+    decision: 'adopted',
+    rationale: null,
+  }));
+  const manifest = {
+    pr: 1,
+    repo: 'o/r',
+    headRefOid: 'abc',
+    coverage_ledger: { leaves },
+    jobs: [{
+      id: 'job-1',
+      leaf_ids: [...ALL_LEAF_IDS],
+      aspect: 'Correctness',
+      trunk_dir: '/attacker-controlled/path',
+      leaf_files: ['/attacker-controlled/path/logic-invariants.md'],
+    }],
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some(e => e.includes('trunk_dir is not supported')));
+  assert.ok(result.errors.some(e => e.includes('leaf_files is not supported')));
+});
+
 test('resolveReviewSkillsDir: 通常時は managedRoot() 配下の正本パスを返し、options で注入可能（Issue #309）', () => {
   const defaultDir = resolveReviewSkillsDir();
   const expectedDefault = path.join(managedRoot(), 'skills', 'gh-maestro-reviewer');
@@ -147,41 +192,6 @@ test('resolveReviewSkillsDir: 通常時は managedRoot() 配下の正本パス�
 
   const customDir = resolveReviewSkillsDir({ reviewSkillsDir: '/custom/skills/gh-maestro-reviewer' });
   assert.equal(customDir, path.resolve('/custom/skills/gh-maestro-reviewer'));
-});
-
-test('resolveLeafPath: 既定の正本ディレクトリ基準で各観点ファイルパスが managedRoot 配下に正しく解決される（Issue #309）', () => {
-  const defaultSkillsDir = resolveReviewSkillsDir();
-  const expectedPrefix = path.join(managedRoot(), 'skills', 'gh-maestro-reviewer');
-
-  // 相対パス（プレフィックスあり・なし）がすべて managedRoot 配下に解決される
-  const r1 = resolveLeafPath('correctness/logic-invariants.md', defaultSkillsDir);
-  assert.equal(r1.ok, true);
-  assert.equal(r1.resolvedPath, path.join(expectedPrefix, 'correctness', 'logic-invariants.md'));
-
-  const r2 = resolveLeafPath('skills/gh-maestro-reviewer/correctness/logic-invariants.md', defaultSkillsDir);
-  assert.equal(r2.ok, true);
-  assert.equal(r2.resolvedPath, path.join(expectedPrefix, 'correctness', 'logic-invariants.md'));
-
-  const r3 = resolveLeafPath('gh-maestro-reviewer/correctness/logic-invariants.md', defaultSkillsDir);
-  assert.equal(r3.ok, true);
-  assert.equal(r3.resolvedPath, path.join(expectedPrefix, 'correctness', 'logic-invariants.md'));
-
-  // 正本ディレクトリ配下の絶対パス
-  const absInside = path.join(defaultSkillsDir, 'correctness', 'logic-invariants.md');
-  const r4 = resolveLeafPath(absInside, defaultSkillsDir);
-  assert.equal(r4.ok, true);
-  assert.equal(r4.resolvedPath, absInside);
-
-  // 脱出パス（../ による path traversal）は拒否
-  const r5 = resolveLeafPath('../../../etc/passwd', defaultSkillsDir);
-  assert.equal(r5.ok, false);
-  assert.ok(r5.error.includes('escapes review skills root'));
-
-  // 正本外の絶対パスは拒否
-  const absOutside = path.resolve('/tmp/malicious-criteria.md');
-  const r6 = resolveLeafPath(absOutside, defaultSkillsDir);
-  assert.equal(r6.ok, false);
-  assert.ok(r6.error.includes('escapes review skills root'));
 });
 
 test('buildJobPrompt: PR worktree 内に改ざんファイルがあっても正本から読み込む（Issue #309）', () => {
@@ -202,8 +212,6 @@ test('buildJobPrompt: PR worktree 内に改ざんファイルがあっても正�
       id: 'job-1',
       leaf_ids: ['correctness/logic-invariants'],
       aspect: 'Correctness',
-      trunk_dir: 'skills/gh-maestro-reviewer/correctness',
-      leaf_files: ['skills/gh-maestro-reviewer/correctness/logic-invariants.md'],
     };
     const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
 
@@ -234,8 +242,6 @@ test('buildJobPrompt: PR worktree 内に skills が存在しない場合でも�
       id: 'job-1',
       leaf_ids: ['correctness/logic-invariants'],
       aspect: 'Correctness',
-      trunk_dir: 'skills/gh-maestro-reviewer/correctness',
-      leaf_files: ['correctness/logic-invariants.md'],
     };
     const manifest = { pr: 456, repo: 'external/project', headRefOid: 'def456', changedFiles: ['index.js'] };
 
@@ -256,8 +262,6 @@ test('launchJobWorker: 正本の観点定義が存在しない場合はエージ
       id: 'job-1',
       leaf_ids: ['correctness/logic-invariants'],
       aspect: 'Correctness',
-      trunk_dir: 'skills/gh-maestro-reviewer/correctness',
-      leaf_files: ['correctness/logic-invariants.md'],
     };
     const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
     const agentConfig = { id: 'codex', command: 'codex', extraArgs: ['--non-interactive'] };
@@ -274,16 +278,14 @@ test('launchJobWorker: 正本の観点定義が存在しない場合はエージ
   }
 });
 
-test('launchJobWorker: 正本外を指すパスが指定された場合はエージェントを起動せず failed で終了する（フェイルクローズ、Issue #309）', async () => {
+test('launchJobWorker: 未知の葉IDが指定された場合はエージェントを起動せず failed で終了する（フェイルクローズ、Issue #353）', async () => {
   const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-wt-'));
   const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-skills-'));
   try {
     const job = {
       id: 'job-1',
-      leaf_ids: ['correctness/logic-invariants'],
+      leaf_ids: ['correctness/unknown'],
       aspect: 'Correctness',
-      trunk_dir: 'skills/gh-maestro-reviewer/correctness',
-      leaf_files: ['../../secret.md'],
     };
     const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
     const agentConfig = { id: 'codex', command: 'codex', extraArgs: ['--non-interactive'] };
@@ -294,23 +296,21 @@ test('launchJobWorker: 正本外を指すパスが指定された場合はエー
 
     assert.equal(result.status, 'failed');
     assert.equal(result.jobId, 'job-1');
-    assert.ok(result.error.includes('escapes review skills root'));
+    assert.ok(result.error.includes('unknown leaf id'));
   } finally {
     fs.rmSync(worktreeDir, { recursive: true, force: true });
     fs.rmSync(skillsDir, { recursive: true, force: true });
   }
 });
 
-test('buildJobPrompt: 正本定義が読めないまたは不正パスの場合は例外を throw する（fail-closed）', () => {
+test('buildJobPrompt: 正本定義が読めないまたは未知IDの場合は例外を throw する（fail-closed）', () => {
   const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-wt-'));
   const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-skills-'));
   try {
     const jobNonExistent = {
       id: 'job-1',
-      leaf_ids: ['correctness/non-existent'],
+      leaf_ids: ['correctness/logic-invariants'],
       aspect: 'Correctness',
-      trunk_dir: 'skills/gh-maestro-reviewer/correctness',
-      leaf_files: ['correctness/non-existent.md'],
     };
     const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
 
@@ -323,13 +323,11 @@ test('buildJobPrompt: 正本定義が読めないまたは不正パスの場合�
       id: 'job-2',
       leaf_ids: ['correctness/escape'],
       aspect: 'Correctness',
-      trunk_dir: 'skills/gh-maestro-reviewer/correctness',
-      leaf_files: ['../../outside.md'],
     };
 
     assert.throws(
       () => buildJobPrompt(jobEscape, manifest, worktreeDir, { reviewSkillsDir: skillsDir }),
-      /escapes review skills root/,
+      /unknown leaf id/,
     );
   } finally {
     fs.rmSync(worktreeDir, { recursive: true, force: true });
@@ -340,10 +338,10 @@ test('buildJobPrompt: 正本定義が読めないまたは不正パスの場合�
 test('buildJobPrompt includes aspect and prohibition text', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-'));
   try {
-    const leafPath = path.join(tmpDir, 'correctness/test-leaf.md');
+    const leafPath = path.join(tmpDir, 'correctness/logic-invariants.md');
     fs.mkdirSync(path.dirname(leafPath), { recursive: true });
     fs.writeFileSync(leafPath, '# Test Leaf\n\nTest content.', 'utf8');
-    const job = { id: 'job-1', leaf_ids: ['correctness/test-leaf'], aspect: 'Correctness', trunk_dir: 'skills/gh-maestro-reviewer/correctness', leaf_files: ['correctness/test-leaf.md'] };
+    const job = { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' };
     const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
     const prompt = buildJobPrompt(job, manifest, tmpDir, { reviewSkillsDir: tmpDir });
     assert.match(prompt, /Correctness/);
@@ -363,7 +361,7 @@ test('validateManifest: acceptanceCriteria is optional and validates non-empty s
   }));
   const base = {
     pr: 1, repo: 'o/r', headRefOid: 'abc', coverage_ledger: { leaves },
-    jobs: [{ id: 'job-1', leaf_ids: [...ALL_LEAF_IDS], aspect: 'Correctness', trunk_dir: 'd', leaf_files: ['f.md'] }],
+    jobs: [{ id: 'job-1', leaf_ids: [...ALL_LEAF_IDS], aspect: 'Correctness' }],
   };
   assert.equal(validateManifest(base).valid, true);
   assert.equal(validateManifest({ ...base, acceptanceCriteria: ['条件A', '条件B'] }).valid, true);
@@ -376,10 +374,11 @@ test('validateManifest: acceptanceCriteria is optional and validates non-empty s
 test('buildJobPrompt passes manifest acceptance criteria without external lookup', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-acceptance-'));
   try {
-    const leafPath = path.join(tmpDir, 'leaf.md');
+    const leafPath = path.join(tmpDir, 'correctness', 'logic-invariants.md');
+    fs.mkdirSync(path.dirname(leafPath), { recursive: true });
     fs.writeFileSync(leafPath, '# Leaf', 'utf8');
     const prompt = buildJobPrompt(
-      { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness', leaf_files: ['leaf.md'] },
+      { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' },
       {
         pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'],
         acceptanceCriteria: ['保存後に内容を保持する', '失敗時に状態を維持する'],
@@ -400,9 +399,10 @@ test('buildJobPrompt passes manifest acceptance criteria without external lookup
 test('buildJobPrompt keeps the legacy input when manifest has no acceptance criteria', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-no-acceptance-'));
   try {
-    fs.writeFileSync(path.join(tmpDir, 'leaf.md'), '# Leaf', 'utf8');
+    fs.mkdirSync(path.join(tmpDir, 'correctness'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, 'correctness', 'logic-invariants.md'), '# Leaf', 'utf8');
     const prompt = buildJobPrompt(
-      { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness', leaf_files: ['leaf.md'] },
+      { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' },
       { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] },
       tmpDir,
       { reviewSkillsDir: tmpDir },
@@ -584,6 +584,47 @@ test('runJobsFromManifest: 検証失敗時に通知を実行し ok:false で返�
       assert.ok(result.summary.notification, 'summaryに通知結果を含める');
       assert.equal(result.summary.notification.posted, true);
       assert.equal(ghCalls.length, 1, '検証失敗時に gh pr comment を1回呼ぶ');
+    } finally {
+      delete process.env.NODE_TEST_CONTEXT;
+    }
+  } finally {
+    _setGhForTest(null);
+    fs.rmSync(testDir, { recursive: true, force: true });
+  }
+});
+
+test('runJobsFromManifest: 未知の葉IDはレビュー開始前に拒否する', async () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-unknown-leaf-'));
+  try {
+    const manifestPath = path.join(testDir, 'manifest.json');
+    const resultsPath = path.join(testDir, 'results.json');
+    const leaves = ALL_LEAF_IDS.map(id => ({
+      id,
+      trunk: Object.entries(TRUNK_TO_LEAVES).find(([, lvs]) => lvs.includes(id))[0],
+      decision: id === 'correctness/logic-invariants' ? 'adopted' : 'excluded',
+      rationale: id === 'correctness/logic-invariants' ? null : 'not selected',
+    }));
+    fs.writeFileSync(manifestPath, JSON.stringify({
+      pr: 42,
+      repo: 'o/r',
+      headRefOid: 'abc',
+      coverage_ledger: { leaves },
+      jobs: [{ id: 'job-1', leaf_ids: ['correctness/unknown'], aspect: 'Correctness' }],
+    }), 'utf8');
+
+    const ghCalls = [];
+    _setGhForTest((args) => {
+      ghCalls.push(args);
+      return { status: 0, stdout: 'url\n' };
+    });
+    process.env.NODE_TEST_CONTEXT = '1';
+    try {
+      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, 42, 'o/r');
+      assert.equal(result.ok, false);
+      assert.equal(result.summary.error, 'manifest validation failed');
+      assert.ok(result.summary.details.some(e => e.includes('unknown leaf id')));
+      assert.equal(ghCalls.length, 1, '検証失敗の通知だけを行い、レビュージョブは起動しない');
+      assert.equal(fs.existsSync(resultsPath), false, 'レビュー開始前の拒否ではresultsを書かない');
     } finally {
       delete process.env.NODE_TEST_CONTEXT;
     }
@@ -1032,8 +1073,6 @@ test('runJobsFromManifest: ロック取得失敗でフェイルクローズ（{o
       },
       jobs: ALL_LEAF_IDS.map((id, i) => ({
         id: 'job-' + i, leaf_ids: [id], aspect: 'Correctness',
-        trunk_dir: 'skills/gh-maestro-reviewer/correctness',
-        leaf_files: ['skills/gh-maestro-reviewer/' + id + '.md'],
       })),
     };
     fs.writeFileSync(manifestPath, JSON.stringify(validManifest), 'utf8');
@@ -1095,8 +1134,6 @@ test('validateManifest: retry_policy を含むjobは検証に落ちる（廃止�
       id: 'job-1',
       leaf_ids: [...ALL_LEAF_IDS],
       aspect: 'Correctness',
-      trunk_dir: 'skills/gh-maestro-reviewer/correctness',
-      leaf_files: ALL_LEAF_IDS.map(id => 'skills/gh-maestro-reviewer/' + id + '.md'),
       retry_policy: { max_attempts: 99 },
     }],
   };
@@ -1126,8 +1163,6 @@ test('runJobsFromManifest: 上限到達時にジョブを起動せず finalizeRe
       },
       jobs: ALL_LEAF_IDS.map((id, i) => ({
         id: 'job-' + i, leaf_ids: [id], aspect: 'Correctness',
-        trunk_dir: 'skills/gh-maestro-reviewer/correctness',
-        leaf_files: ['skills/gh-maestro-reviewer/' + id + '.md'],
       })),
     };
     fs.writeFileSync(manifestPath, JSON.stringify(validManifest), 'utf8');

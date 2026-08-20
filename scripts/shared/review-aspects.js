@@ -33,10 +33,29 @@ const FINDING_REQUIRED_FIELDS = [
   'severity', 'severity_rationale', 'body', 'verified_references',
 ];
 
+/**
+ * 葉IDに対応する正本ファイルのスキルルート相対パスを導出する。
+ *
+ * 葉IDは正本のディレクトリとファイル名を兼ねるため、実行計画にファイルの
+ * 所在を書かせずとも一意に解決できる。未知のIDは正本の定義に対応しないため、
+ * パスへ変換せず拒否する。
+ *
+ * @param {string} leafId
+ * @returns {string}
+ * @throws {Error} leafIdが正規の葉IDでない場合
+ */
+function deriveLeafFilePath(leafId) {
+  if (typeof leafId !== 'string' || !ALL_LEAF_IDS.includes(leafId)) {
+    throw new Error(`unknown leaf id: ${JSON.stringify(leafId)}`);
+  }
+  return `${leafId}.md`;
+}
+
 module.exports = {
   ALL_LEAF_IDS,
   TRUNK_TO_LEAVES,
   VALID_ASPECTS,
   VALID_SEVERITIES,
   FINDING_REQUIRED_FIELDS,
+  deriveLeafFilePath,
 };
