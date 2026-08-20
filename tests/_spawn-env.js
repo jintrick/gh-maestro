@@ -12,7 +12,7 @@
 // 検出ガードがある（scripts/msg-send.js の testContextPostBlockReason 参照）。
 
 const WORKER_CONTEXT_ENV_VARS = [
-  'GH_MAESTRO_WORKSPACE', // resolveWorkspace が --workspace 引数より優先する（実ワークスペース解決の要）
+  'GH_MAESTRO_WORKSPACE', // workspace引数を省略した子プロセスが実workspaceへ向かわないよう除去する
   'GH_MAESTRO_WORKER',    // msg-send.js が「ワーカー扱い」にし、worker-exit-hook.js の通知分岐を発火させる要
   'GH_MAESTRO_ISSUE',     // 将来のIssue番号注入用（予約）
   'ISSUE',                // msg-send.js が --issue 未指定時のフォールバックに使う

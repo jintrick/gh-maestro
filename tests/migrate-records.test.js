@@ -234,8 +234,8 @@ test('main: --scope inbox-supervisor 実実行はexit 0でマーカーを残さ�
   inboxSupervisorControl._setIsLeaseLive(() => false);
   inboxSupervisorControl._setKillProcessTree(() => {});
 
-  // GH_MAESTRO_WORKSPACE が設定されていると resolveWorkspace が引数を無視するため、
-  // テスト実行環境の env から一時的に外して確実に --workspace を尊重させる。
+  // 明示した --workspace は環境変数より優先されるが、テスト実行環境の
+  // workspaceフォールバックが実workspaceへ向かわないよう env から一時的に外す。
   const savedEnv = process.env.GH_MAESTRO_WORKSPACE;
   delete process.env.GH_MAESTRO_WORKSPACE;
   let code;

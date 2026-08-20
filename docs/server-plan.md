@@ -108,7 +108,7 @@ ack = 「読んで受理した」。**タスク完了ではない**。完了検�
 - `queue-ack.js <messageId> [--workspace <path>]` — 全 inbox から messageId を検索して ack（messageId はユニークなので宛先指定不要）。
 - `queue-status.js [--workspace <path>]` — pending / delivered / stuck の件数と pending 一覧を表示。
 - 3 つとも `--help` / `-h` を実装する（`.claude/rules/skill-asset-help.md` 準拠: help は exit 0、誤用は usage を stderr に出して exit 1）。
-- workspace 解決順は send-pane.js と同じ: `GH_MAESTRO_WORKSPACE` env > `--workspace` > CWD 上方探索。
+- workspace 解決順は send-pane.js と同じ: `--workspace` > `GH_MAESTRO_WORKSPACE` env > CWD 上方探索。
 
 完了条件:
 

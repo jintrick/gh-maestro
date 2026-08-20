@@ -12,9 +12,8 @@ const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths')
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-assistant-watch-test-'));
-  // GH_MAESTRO_WORKSPACE が設定されていると resolveWorkspace が --workspace 引数より
-  // 環境変数を優先し、全テストが同一ファイルに書き込んで EPERM 競合を起こす（#187）。
-  // テンポラリディレクトリに設定することでテスト間の分離を確保する。
+  // workspace引数を省略する経路も一時ディレクトリへ隔離できるよう、
+  // GH_MAESTRO_WORKSPACE のフォールバックをテスト用ディレクトリにする。
   const origWorkspace = process.env.GH_MAESTRO_WORKSPACE;
   process.env.GH_MAESTRO_WORKSPACE = dir;
   const cleanup = () => {
@@ -100,10 +99,8 @@ describe('main: 引数検証', () => {
   });
 
   test('workspace を解決できなければエラー', async () => {
-    // GH_MAESTRO_WORKSPACE 環境変数が設定されている場合はこれが優先されるため、
-    // 非存在パスを --workspace で渡しても workspace 解決自体は成功する。
-    // 代わりにテンポラリディレクトリ（git repoではない）を workspace として渡し、
-    // _ghRepoView が失敗するパスを検証する。
+    // 明示した --workspace が使われることを確認するため、git repoではない
+    // テンポラリディレクトリを渡し、_ghRepoView が失敗するパスを検証する。
     await withTempDir(async (workspace) => {
       const r = await watch.main(['--issue', '5', '--workspace', workspace]);
       assert.equal(typeof r.code, 'number');

@@ -20,9 +20,8 @@ workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
 const _realMain = msgPoll.main;
 const TEST_SESSION_PID = String(process.pid);
 
-// ワーカー起動コンテキストでは GH_MAESTRO_WORKSPACE が注入され、resolveWorkspace が
-// env を優先して --workspace 引数を無視する（実ワークスペースの状態を破壊しうる）。
-// テストは必ず --workspace で渡した一時ディレクトリを使うため、main() の間だけ env を外す。
+// 明示した --workspace は環境変数より優先されるが、workspace引数を省略する
+// 経路も実workspaceへ向かわないよう、main() の間だけ env を外す。
 const runMain = (args, opts) => {
   const saved = process.env.GH_MAESTRO_WORKSPACE;
   delete process.env.GH_MAESTRO_WORKSPACE;

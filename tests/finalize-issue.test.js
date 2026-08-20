@@ -75,8 +75,8 @@ test('finalizeIssue: 実物のremove-workerへworkerNameを位置引数で渡し
   withTempWorkspace({
     'issue-5-coder': { issue: 5, skill: 'gh-maestro-coder' },
   }, (dir) => {
-    // defaultRemoveWorker は子プロセスへ --workspace を渡すが、resolveWorkspace は
-    // GH_MAESTRO_WORKSPACE を優先するため、実ワークスペースへ誤着弾しないようにする。
+    // defaultRemoveWorker は子プロセスへ --workspace を渡す。明示引数が優先される
+    // ことを固定しつつ、子プロセスが引数を省略する経路にも実workspaceを継承させない。
     const savedWorkspace = process.env.GH_MAESTRO_WORKSPACE;
     delete process.env.GH_MAESTRO_WORKSPACE;
     try {

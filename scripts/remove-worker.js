@@ -71,8 +71,8 @@ if (require.main === module) {
 
   const fail = (msg) => { console.error(`remove-worker: ${msg}`); process.exit(1); };
 
-  // 他スクリプト（poll-pr.js等）と同じ workspace 解決順（GH_MAESTRO_WORKSPACE env >
-  // --workspace > CWD探索）に統一する。素の process.cwd() フォールバックだと、CWD が
+  // 他スクリプト（poll-pr.js等）と同じ workspace 解決順（--workspace >
+  // GH_MAESTRO_WORKSPACE env > CWD探索）に統一する。素の process.cwd() フォールバックだと、CWD が
   // ホームディレクトリ配下等に誤解決される余地が残るため使わない（Issue #214）。
   const workspace = resolveWorkspace(values['--workspace']);
   if (!workspace) fail('ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');

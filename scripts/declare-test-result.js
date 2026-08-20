@@ -8,7 +8,7 @@
 //   node declare-test-result.js --pr <PR> --commit <sha> --fail <N> [--pass <N>] [--repo <owner/repo>] [--workspace <path>]
 //
 // workspace resolution order:
-//   GH_MAESTRO_WORKSPACE env > --workspace arg > CWD upward search
+//   --workspace arg > GH_MAESTRO_WORKSPACE env > CWD upward search
 
 'use strict';
 
