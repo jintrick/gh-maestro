@@ -330,3 +330,16 @@ test('_env-setup.js プリロードがワーカー文脈変数を除去し、テ
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+test('package.jsonの全テスト入口が_env-setup.jsをプリロードする', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  for (const scriptName of ['test', 'test:slow']) {
+    const command = packageJson.scripts?.[scriptName];
+    assert.equal(typeof command, 'string', `${scriptName} スクリプトが必要`);
+    assert.match(
+      command,
+      /node --require \.\/tests\/_env-setup\.js --test/,
+      `${scriptName} は _env-setup.js を --test より前にプリロードすること`,
+    );
+  }
+});
