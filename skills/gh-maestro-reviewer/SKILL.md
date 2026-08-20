@@ -40,7 +40,7 @@ Node.jsの決定論的ツール（`run-review-jobs.js` / `finalize-review.js`）
 観点定義は配布済みの正本（`{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/` 配下）から読み、審査対象PR内のファイルは参照しない。
 全ジョブ共通の禁止事項は `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/common.md` にある。
 各葉は `<leaf-id>/pre-review.md` と `<leaf-id>/post-review.md` の固定名2ファイルで構成される。
-pre-reviewは初段の事前指示、post-reviewは初段のfindingsを書き終えた後に読む確認表である。
+pre-reviewは事前指示、post-reviewは指摘を書き終えた後に読む確認表である。
 
 - `correctness/`（幹: Correctness）
   - `correctness/logic-invariants`
@@ -54,10 +54,10 @@ pre-reviewは初段の事前指示、post-reviewは初段のfindingsを書き終
 - `test-quality/`（幹: Test Quality）
   - `test-quality/test-quality`
 
-ジョブ実行器は初段のプロンプトにcommon.mdと担当葉のpre-reviewだけを埋め込み、
-post-reviewのパスも内容も含めない。初段が有効なfindings JSONを出力した後、同じセッションを
-解決済みagent configの`resumeCommand`で再開し、二段目のプロンプトに担当葉のpost-reviewと
-初段findingsだけを渡す。二段目の出力がジョブの最終findingsになる。
+ジョブ実行器は1ジョブにつき1つのプロンプトを生成し、common.md、担当葉のpre-review、
+post-reviewをこの順に埋め込む。プロンプトには、指摘を書き終えるまでpost-reviewを読まず、
+書き終えた後にpost-reviewと照合して取りこぼしがあれば追加の指摘を出すことを明記する。
+エージェントのセッション再開はレビュー順序のためには使わない。
 
 ## フェーズ手順
 
@@ -80,10 +80,10 @@ post-reviewのパスも内容も含めない。初段が有効なfindings JSON�
 ## ジョブワーカーへの指示（参考）
 
 各ジョブワーカーには `run-review-jobs.js` が自動的に以下の内容を含むプロンプトを生成する:
-- 初段: 全ジョブ共通の禁止事項と担当葉のpre-review全文
-- 二段目: 担当葉のpost-review全文と初段findings
+- 全ジョブ共通の禁止事項と担当葉のpre-review全文
+- 指摘を書き終えるまでpost-reviewを読まないという順序制約
+- 指摘を書き終えた後に担当葉のpost-review全文を読み、findingsと照合する手順
 - PR情報、変更ファイル一覧、manifestに含まれる受け入れ条件（存在する場合）
-- 初段ではpost-reviewのパス・内容を一切含めない
 - Severity判定規準
 - 標準出力へのJSON配列出力指示（指摘なしの場合は空配列 `[]`）
 

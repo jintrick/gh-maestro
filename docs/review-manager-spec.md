@@ -22,8 +22,8 @@ skills/gh-maestro-reviewer/
 ├── common.md                       全ジョブ共通の禁止事項
 ├── correctness/                    ← 幹
 │   ├── logic-invariants/           ← 葉（観点1つ）
-│   │   ├── pre-review.md           初段の事前指示
-│   │   └── post-review.md          二段目の事後確認表
+│   │   ├── pre-review.md           事前指示
+│   │   └── post-review.md          事後確認表
 │   ├── api-contract/
 │   │   ├── pre-review.md
 │   │   └── post-review.md
@@ -50,8 +50,8 @@ skills/gh-maestro-reviewer/
 - **葉** が観点1つ。今は7枚ある
 - **幹** が葉の束。今は4つ
 - 各葉にはdiff前に読むpre-reviewと、指摘を書いた後に照合するpost-reviewがある
-- 初段にはcommon.mdと担当葉のpre-reviewだけを渡し、findingsを出力した後に同じセッションを再開する
-- 二段目には担当葉のpost-reviewだけを渡し、初段のfindingsと照合して最終findingsを出力する
+- 1ジョブのプロンプトにはcommon.md、担当葉のpre-review、post-reviewをこの順で渡す
+- 指摘を書き終えるまでpost-reviewを読まず、書き終えた後にpost-reviewと照合して追加の指摘を出すことをプロンプトで明記する
 
 編集は必ずこのリポジトリ側で行う。インストール先（`~/.agents/skills/` 等）を直接編集しない。編集後は `dev` ブランチで `node scripts/install.js` を実行して反映する。
 
@@ -126,8 +126,8 @@ PR の差分を読み、7つの葉それぞれを「今回は見る／見ない�
 
 **黙って止まることはない。** 何も起きていないように見える場合、それは「まだ終わっていない」か「通知を見落としている」かのどちらか。
 
-レビューは最大30分で打ち切られる（1つの観点あたり10分）。各ジョブは初段と再開段を
-この制限内で実行する。
+レビューは最大30分で打ち切られる（1つの観点あたり10分）。各ジョブは単一の
+エージェントプロセスをこの制限内で実行する。
 
 ---
 

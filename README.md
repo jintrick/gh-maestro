@@ -162,8 +162,8 @@ Correctness / Maintainability / Resilience & Security / Test Quality の4観点�
 
 観点別基準は `skills/gh-maestro-reviewer/` 配下の各観点ディレクトリにある基準ファイルを編集する。
 全ジョブ共通の禁止事項は `common.md` に集約され、各葉は `pre-review.md` と
-`post-review.md` に分かれている。レビュー実行は同じセッションを二段階で起動し、
-初段にpre、再開後にpostを渡す。
+`post-review.md` に分かれている。1ジョブのプロンプトにはcommon、pre、postをこの順で
+渡し、指摘を書き終えるまでpostを読まず、その後にpostと照合する手順を明記する。
 
 ```
 skills/gh-maestro-reviewer/

@@ -17,7 +17,6 @@ const {
   resolveCanonicalReviewPath,
   readJobLeaves,
   buildJobPrompt,
-  buildJobResumePrompt,
   launchJobWorker,
   runJobsFromManifest,
   buildManifestValidationComment,
@@ -250,7 +249,7 @@ test('resolveCanonicalReviewPath: 正本ルート外へのパスを拒否する'
   }
 });
 
-test('buildJobPrompt: PR worktree 内に改ざんファイルがあっても初段は正本のcommon/preから読む（Issue #309）', () => {
+test('buildJobPrompt: PR worktree 内に改ざんファイルがあっても正本のcommon/pre/postから読む（Issue #309）', () => {
   const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-wt-'));
   const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-skills-'));
   try {
@@ -277,7 +276,7 @@ test('buildJobPrompt: PR worktree 内に改ざんファイルがあっても初�
     assert.match(prompt, /Strict invariant checks/);
     assert.doesNotMatch(prompt, /Tampered Criteria/);
     assert.doesNotMatch(prompt, /Do not report anything/);
-    assert.doesNotMatch(prompt, /post-review\.md/);
+    assert.match(prompt, /correctness\/logic-invariants\/post-review\.md/);
   } finally {
     fs.rmSync(worktreeDir, { recursive: true, force: true });
     fs.rmSync(skillsDir, { recursive: true, force: true });
@@ -325,7 +324,7 @@ test('launchJobWorker: 正本の観点定義が存在しない場合はエージ
     const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
     const agentConfig = {
       id: 'codex', command: 'codex', extraArgs: ['exec'], execArgs: ['exec'],
-      nonInteractiveTokens: ['exec'], promptDelivery: 'positional', resumeCommand: ['resume', '--last'],
+      nonInteractiveTokens: ['exec'], promptDelivery: 'positional',
     };
 
     const result = await launchJobWorker(job, manifest, agentConfig, worktreeDir, worktreeDir, 5000, null, {
@@ -352,7 +351,7 @@ test('launchJobWorker: 未知の葉IDが指定された場合はエージェン�
     const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
     const agentConfig = {
       id: 'codex', command: 'codex', extraArgs: ['exec'], execArgs: ['exec'],
-      nonInteractiveTokens: ['exec'], promptDelivery: 'positional', resumeCommand: ['resume', '--last'],
+      nonInteractiveTokens: ['exec'], promptDelivery: 'positional',
     };
 
     const result = await launchJobWorker(job, manifest, agentConfig, worktreeDir, worktreeDir, 5000, null, {
@@ -415,40 +414,22 @@ test('buildJobPrompt includes aspect and common prohibition text', () => {
     assert.match(prompt, /Test content/);
     assert.match(prompt, /PR #123/);
     assert.match(prompt, /Common Test Rules/);
-    assert.doesNotMatch(prompt, /Post Test Leaf/);
+    assert.match(prompt, /Post Test Leaf/);
+    const instructionIndex = prompt.indexOf('指摘を書き終えるまで');
+    const postContentIndex = prompt.indexOf('Post Test Leaf');
+    assert.ok(instructionIndex >= 0 && instructionIndex < postContentIndex);
+    assert.match(prompt, /指摘を書き終えるまで、post-review\.mdを読むことを禁じ/);
+    assert.match(prompt, /指摘を書き終えた後にだけpost-review\.mdを読み、既に書いた指摘と照合/);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 
-test('buildJobResumePrompt: 二段目だけがpost-reviewと初段findingsを読む', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-resume-'));
-  try {
-    writeReviewFixtures(tmpDir, ['correctness/logic-invariants'], {
-      'correctness/logic-invariants/pre-review.md': '# Pre content',
-      'correctness/logic-invariants/post-review.md': '# Post content',
-    });
-    const initialFindings = [{ aspect: 'Correctness', summary: 'initial finding' }];
-    const prompt = buildJobResumePrompt(
-      { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' },
-      { pr: 123, repo: 'o/r', headRefOid: 'abc', changedFiles: ['src/a.ts'] },
-      initialFindings,
-      { reviewSkillsDir: tmpDir },
-    );
-    assert.match(prompt, /post-review\.md/);
-    assert.match(prompt, /Post content/);
-    assert.match(prompt, /initial finding/);
-    assert.doesNotMatch(prompt, /Pre content/);
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test('launchJobWorker: Codexを初回execとresume --lastの二段で同一cwdから起動する', async () => {
-  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-two-stage-wt-'));
-  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-two-stage-skills-'));
+test('launchJobWorker: 単一プロセスを同一cwdから起動し、pre/postの順序指示を渡す', async () => {
+  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-single-stage-wt-'));
+  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-single-stage-skills-'));
   const calls = [];
-  const prompts = [];
+  let promptText;
   const finding = {
     aspect: 'Correctness',
     path: 'src/a.js',
@@ -471,18 +452,14 @@ test('launchJobWorker: Codexを初回execとresume --lastの二段で同一cwd�
     child.stdout = new EventEmitter();
     child.kill = () => {};
     process.nextTick(() => {
-      const stage = calls.length === 1 ? 'initial' : 'resume';
       const promptFile = fs.readdirSync(os.tmpdir())
-        .filter(name => name.startsWith(`review-job-job-1-${stage}-`) && name.endsWith('.md'))
+        .filter(name => name.startsWith('review-job-job-1-review-') && name.endsWith('.md'))
         .map(name => path.join(os.tmpdir(), name))
         .sort()
         .pop();
-      assert.ok(promptFile, `${stage} prompt file should exist while the stage runs`);
-      prompts.push(fs.readFileSync(promptFile, 'utf8'));
-      child.stdout.emit('data', Buffer.from(JSON.stringify([{
-        ...finding,
-        summary: stage === 'initial' ? 'initial stage finding' : 'final stage finding',
-      }])));
+      assert.ok(promptFile, 'review prompt file should exist while the process runs');
+      promptText = fs.readFileSync(promptFile, 'utf8');
+      child.stdout.emit('data', Buffer.from(JSON.stringify([finding])));
       child.emit('close', 0);
     });
     return child;
@@ -499,7 +476,6 @@ test('launchJobWorker: Codexを初回execとresume --lastの二段で同一cwd�
         extraArgs: ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'],
         nonInteractiveTokens: ['exec'],
         promptDelivery: 'positional',
-        resumeCommand: ['resume', '--last'],
       },
       worktreeDir,
       worktreeDir,
@@ -509,19 +485,16 @@ test('launchJobWorker: Codexを初回execとresume --lastの二段で同一cwd�
     );
 
     assert.equal(result.status, 'success');
-    assert.equal(result.findings[0].summary, 'final stage finding');
-    assert.equal(calls.length, 2, 'one initial spawn and one resume spawn');
-    assert.equal(calls[0].opts.cwd, calls[1].opts.cwd);
+    assert.equal(calls.length, 1, 'one review process is spawned per job');
+    assert.equal(calls[0].opts.cwd, worktreeDir);
     assert.match(shellCommandText(calls[0]), /exec/);
-    assert.doesNotMatch(shellCommandText(calls[0]), /resume/);
-    assert.match(shellCommandText(calls[1]), /resume/);
-    assert.match(shellCommandText(calls[1]), /--last/);
-    assert.doesNotMatch(shellCommandText(calls[1]), /--cd/);
-    assert.doesNotMatch(prompts[0], /post-review\.md|Post-only checklist/);
-    assert.match(prompts[0], /Pre-only instruction/);
-    assert.match(prompts[1], /post-review\.md/);
-    assert.match(prompts[1], /Post-only checklist/);
-    assert.match(prompts[1], /initial stage finding/);
+    assert.doesNotMatch(shellCommandText(calls[0]), /resume|--last/);
+    assert.match(promptText, /Pre-only instruction/);
+    assert.match(promptText, /post-review\.md/);
+    assert.match(promptText, /Post-only checklist/);
+    assert.match(promptText, /指摘を書き終えるまで/);
+    assert.match(promptText, /指摘を書き終えるまで、post-review\.mdを読むことを禁じ/);
+    assert.match(promptText, /指摘を書き終えた後にだけpost-review\.mdを読み、既に書いた指摘と照合/);
   } finally {
     _setSpawn(null);
     fs.rmSync(worktreeDir, { recursive: true, force: true });
@@ -529,9 +502,9 @@ test('launchJobWorker: Codexを初回execとresume --lastの二段で同一cwd�
   }
 });
 
-test('launchJobWorker: 初段が失敗したらresumeを起動せずfailedで終了する', async () => {
-  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-stage-fail-wt-'));
-  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-stage-fail-skills-'));
+test('launchJobWorker: エージェントが非0終了ならfailedで終了する', async () => {
+  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-process-fail-wt-'));
+  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-process-fail-skills-'));
   let spawnCount = 0;
   writeReviewFixtures(skillsDir, ['correctness/logic-invariants']);
   _setSpawn(() => {
@@ -549,35 +522,12 @@ test('launchJobWorker: 初段が失敗したらresumeを起動せずfailedで終
       {
         id: 'codex', command: 'codex',
         execArgs: ['exec'], extraArgs: ['exec'], nonInteractiveTokens: ['exec'],
-        promptDelivery: 'positional', resumeCommand: ['resume', '--last'],
+        promptDelivery: 'positional',
       }, worktreeDir, worktreeDir, 5000, null, { reviewSkillsDir: skillsDir },
     );
     assert.equal(result.status, 'failed');
-    assert.match(result.error, /initial stage/);
+    assert.match(result.error, /review agent exited with code 1/);
     assert.equal(spawnCount, 1);
-  } finally {
-    _setSpawn(null);
-    fs.rmSync(worktreeDir, { recursive: true, force: true });
-    fs.rmSync(skillsDir, { recursive: true, force: true });
-  }
-});
-
-test('launchJobWorker: resumeCommandが無い場合は起動前に拒否する', async () => {
-  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-no-resume-wt-'));
-  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-no-resume-skills-'));
-  let spawnCount = 0;
-  writeReviewFixtures(skillsDir, ['correctness/logic-invariants']);
-  _setSpawn(() => { spawnCount++; throw new Error('must not spawn'); });
-  try {
-    const result = await launchJobWorker(
-      { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' },
-      { pr: 1, repo: 'o/r', headRefOid: 'abc' },
-      { id: 'codex', command: 'codex', execArgs: ['exec'], nonInteractiveTokens: ['exec'], promptDelivery: 'positional' },
-      worktreeDir, worktreeDir, 5000, null, { reviewSkillsDir: skillsDir },
-    );
-    assert.equal(result.status, 'failed');
-    assert.match(result.error, /resumeCommand/);
-    assert.equal(spawnCount, 0);
   } finally {
     _setSpawn(null);
     fs.rmSync(worktreeDir, { recursive: true, force: true });

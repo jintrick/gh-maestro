@@ -18,7 +18,7 @@ const { spawn, spawnSync } = require('./child-process');
 const { writeSentinel, finalizeReview } = require('./finalize-review');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { atomicWriteJson } = require('./shared/atomic-write');
-const { buildAgentCommandArgs, buildAgentResumeCommandArgs } = require('./agent-launch');
+const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
@@ -323,8 +323,7 @@ function readCanonicalReviewFile(job, relativePath, skillsDir) {
 
 /**
  * 担当葉の正本ファイルが揃っていることを、内容をプロンプトへ渡す前に検証する。
- * post-review の内容はここでは読まず、存在・通常ファイル・読み取り可能性だけを確認する。
- * これにより、初段を実行した後に必須の二段目ファイル欠落で終わることを避ける。
+ * これにより、プロンプト生成後に必須の観点ファイル欠落で終わることを避ける。
  */
 function validateCanonicalReviewFiles(job, skillsDir) {
   let paths;
@@ -358,13 +357,9 @@ function validateCanonicalReviewFiles(job, skillsDir) {
 }
 
 /**
- * 観点定義を指定フェーズだけ正本から読む。初段では common + pre の内容だけを読み、
- * 二段目では post の内容だけを読む。`all` はテスト・診断用で、実ジョブでは使わない。
+ * 担当葉の共通・事前・事後の観点定義を正本から読む。
  */
-function readJobLeaves(job, skillsDir, phase = 'all') {
-  if (!['initial', 'post', 'all'].includes(phase)) {
-    return { ok: false, error: `job ${job.id}: unknown review phase: ${phase}` };
-  }
+function readJobLeaves(job, skillsDir) {
   let paths;
   try {
     paths = jobReviewFilePaths(job);
@@ -373,29 +368,22 @@ function readJobLeaves(job, skillsDir, phase = 'all') {
   }
 
   const read = (relativePath) => readCanonicalReviewFile(job, relativePath, skillsDir);
-  let common;
-  if (phase !== 'post') {
-    const commonRes = read(paths.common);
-    if (!commonRes.ok) return commonRes;
-    common = commonRes.value;
-  }
+  const commonRes = read(paths.common);
+  if (!commonRes.ok) return commonRes;
+  const common = commonRes.value;
 
   const leaves = [];
   for (const leaf of paths.leaves) {
     const entry = { id: leaf.id };
-    if (phase !== 'post') {
-      const preRes = read(leaf.pre);
-      if (!preRes.ok) return preRes;
-      entry.pre = preRes.value;
-    }
-    if (phase !== 'initial') {
-      const postRes = read(leaf.post);
-      if (!postRes.ok) return postRes;
-      entry.post = postRes.value;
-    }
+    const preRes = read(leaf.pre);
+    if (!preRes.ok) return preRes;
+    entry.pre = preRes.value;
+    const postRes = read(leaf.post);
+    if (!postRes.ok) return postRes;
+    entry.post = postRes.value;
     leaves.push(entry);
   }
-  return { ok: true, ...(common ? { common } : {}), leaves };
+  return { ok: true, common, leaves };
 }
 
 // ── ジョブプロンプト生成 ──────────────────────────────────────────────────────
@@ -483,16 +471,19 @@ function commonReviewRestrictions() {
 }
 
 /**
- * 初段のレビュー用プロンプトを生成する。post-review のパス・内容・存在をこの文字列へ
- * 含めないことが、このIssueの順序保証の中心である。
+ * 単段のレビュー用プロンプトを生成する。post-review はプロンプトの後半へ置き、
+ * 指摘を書き終える前に読まないことを文面で明示することで、確認順序を担保する。
  */
 function buildJobPrompt(job, manifest, reviewWtDir, options = {}) {
   const skillsDir = resolveReviewSkillsDir(options);
-  const leafRes = readJobLeaves(job, skillsDir, 'initial');
+  const leafRes = readJobLeaves(job, skillsDir);
   if (!leafRes.ok) throw new Error(leafRes.error);
 
   const preLeavesSection = leafRes.leaves.map(leaf =>
     `### ${leaf.id} — ${leaf.pre.path}\n\n${leaf.pre.content}`
+  ).join('\n\n---\n\n');
+  const postLeavesSection = leafRes.leaves.map(leaf =>
+    `### ${leaf.id} — ${leaf.post.path}\n\n${leaf.post.content}`
   ).join('\n\n---\n\n');
 
   return `あなたは gh-maestro のレビューワーカーです。担当観点「${job.aspect}」について、
@@ -516,36 +507,16 @@ ${reviewEvidenceSection(job, manifest)}
 
 ${commonReviewRestrictions()}
 
-まずdiffと関連コードを探索し、観測した事実に基づく指摘を作成してください。${findingsOutputSection(job.aspect)}`;
-}
+まずdiffと関連コードを探索し、観測した事実に基づく指摘を書き終えてください。
+指摘を書き終えるまで、post-review.mdを読むことを禁じます。以下にパスと内容が現れても参照してはいけません。
+指摘を書き終えた後にだけpost-review.mdを読み、既に書いた指摘と照合してください。
+照合で担当観点に該当する実際の問題の取りこぼしが見つかった場合だけ、追加の指摘を作成してください。
 
-/**
- * 初段のfindingsを受け取り、二段目の同一セッションで事後確認表との照合を依頼する。
- * post-review はこの関数のプロンプトにだけ含める。
- */
-function buildJobResumePrompt(job, manifest, initialFindings, options = {}) {
-  const skillsDir = resolveReviewSkillsDir(options);
-  const leafRes = readJobLeaves(job, skillsDir, 'post');
-  if (!leafRes.ok) throw new Error(leafRes.error);
-  const postLeavesSection = leafRes.leaves.map(leaf =>
-    `### ${leaf.id} — ${leaf.post.path}\n\n${leaf.post.content}`
-  ).join('\n\n---\n\n');
-
-  return `初回レビューで作成したfindingsは次のJSON配列です。
-
-\`\`\`json
-${JSON.stringify(initialFindings, null, 2)}
-\`\`\`
-
-以下の事後確認表を読み、初回findingsと照合してください。初回findingsにない実際の問題が見つかった場合だけ、追加の指摘を作成してください。${findingsOutputSection(job.aspect)}
-
-## 事後確認表
+## 事後確認表（指摘を書き終えた後に読む）
 
 ${postLeavesSection}
 
-${reviewEvidenceSection(job, manifest)}
-
-${commonReviewRestrictions()}`;
+${findingsOutputSection(job.aspect)}`;
 }
 
 function parseFindings(stdout, stage) {
@@ -586,7 +557,7 @@ function parseFindings(stdout, stage) {
   return findings;
 }
 
-function runReviewStage(agentArgs, reviewWtDir, stderrFd, childRef) {
+function runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef) {
   return new Promise((resolve) => {
     if (_spawn === spawn && process.env.NODE_TEST_CONTEXT) {
       resolve({ error: 'agent spawn refused during test execution; inject spawn for launch-path tests' });
@@ -628,7 +599,7 @@ function runReviewStage(agentArgs, reviewWtDir, stderrFd, childRef) {
 }
 
 /**
- * 1ジョブを同一エージェントセッションの二段階でheadless起動し、最終findingsを取得する。
+ * 1ジョブを単一のheadlessエージェントプロセスで実行し、findingsを取得する。
  */
 async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, timeoutMs, childRef = null, options = {}) {
   const failed = (error) => ({
@@ -646,24 +617,20 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
 
   const promptDelivery = agentConfig.execPromptDelivery ?? agentConfig.promptDelivery;
   const promptFlag = agentConfig.execPromptFlag ?? agentConfig.promptFlag;
-  if (!Array.isArray(agentConfig.resumeCommand) || agentConfig.resumeCommand.length === 0 ||
-      agentConfig.resumeCommand.some(arg => typeof arg !== 'string' || arg.length === 0)) {
-    return failed(`agent "${agentConfig.id}" has no usable resumeCommand; review jobs require a headless session resume command`);
-  }
   if (!['flag', 'positional', 'system-prompt-file'].includes(promptDelivery)) {
-    return failed(`agent "${agentConfig.id}" prompt delivery "${promptDelivery}" is not supported for headless review resume`);
+    return failed(`agent "${agentConfig.id}" prompt delivery "${promptDelivery}" is not supported for headless review`);
   }
   if (promptDelivery === 'flag' && !promptFlag) {
-    return failed(`agent "${agentConfig.id}" promptFlag is required for headless review resume`);
+    return failed(`agent "${agentConfig.id}" promptFlag is required for headless review`);
   }
 
   const skillsDir = resolveReviewSkillsDir(options);
   const fileCheck = validateCanonicalReviewFiles(job, skillsDir);
   if (!fileCheck.ok) return failed(fileCheck.error);
 
-  let initialPrompt;
+  let prompt;
   try {
-    initialPrompt = buildJobPrompt(job, manifest, reviewWtDir, options);
+    prompt = buildJobPrompt(job, manifest, reviewWtDir, options);
   } catch (e) {
     return failed(e.message);
   }
@@ -683,8 +650,8 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
   const promptFiles = new Set();
   let timeoutHandle;
   let timedOut = false;
-  const promptFileFor = (stage) => {
-    const promptFile = path.join(os.tmpdir(), `review-job-${job.id}-${stage}-${Date.now()}.md`);
+  const promptFileFor = () => {
+    const promptFile = path.join(os.tmpdir(), `review-job-${job.id}-review-${Date.now()}.md`);
     promptFiles.add(promptFile);
     return promptFile;
   };
@@ -700,20 +667,14 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
     promptFiles.delete(promptFile);
     try { fs.unlinkSync(promptFile); } catch {}
   };
-  const configuredInitialArgs = agentConfig.execArgs ?? agentConfig.extraArgs;
-  if (!Array.isArray(configuredInitialArgs) || configuredInitialArgs.some(arg => typeof arg !== 'string')) {
-    return failed(`agent "${agentConfig.id}" initial execArgs/extraArgs must be an array of strings`);
+  const configuredArgs = agentConfig.execArgs ?? agentConfig.extraArgs;
+  if (!Array.isArray(configuredArgs) || configuredArgs.some(arg => typeof arg !== 'string')) {
+    return failed(`agent "${agentConfig.id}" execArgs/extraArgs must be an array of strings`);
   }
-  const initialArgsConfig = {
+  const argsConfig = {
     ...agentConfig,
-    extraArgs: configuredInitialArgs
+    extraArgs: configuredArgs
       .map(arg => arg.replace(/\{workspace\}/g, reviewWtDir)),
-    promptDelivery,
-    promptFlag,
-  };
-  const resumeArgsConfig = {
-    ...agentConfig,
-    extraArgs: [],
     promptDelivery,
     promptFlag,
   };
@@ -725,68 +686,32 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
   }, timeoutMs);
 
   try {
-    const initialPromptFile = promptFileFor('initial');
-    const initialWriteError = writePrompt(initialPromptFile, initialPrompt);
-    if (initialWriteError) return failed(initialWriteError);
+    const promptFile = promptFileFor();
+    const promptWriteError = writePrompt(promptFile, prompt);
+    if (promptWriteError) return failed(promptWriteError);
 
-    let initialArgs;
+    let agentArgs;
     try {
-      initialArgs = buildAgentCommandArgs(initialArgsConfig, {
-        promptFile: initialPromptFile,
-        shortPrompt: shortPrompt(initialPromptFile),
+      agentArgs = buildAgentCommandArgs(argsConfig, {
+        promptFile,
+        shortPrompt: shortPrompt(promptFile),
         systemPromptText: `orchestratorです。レビューワーカーとして、担当観点「${job.aspect}」のレビューを実行してください。`,
       });
     } catch (e) {
-      return failed(`initial command construction failed: ${e.message}`);
+      return failed(`review command construction failed: ${e.message}`);
     }
 
-    const initialRun = await runReviewStage(initialArgs, reviewWtDir, stderrFd, childRef);
-    cleanupPrompt(initialPromptFile);
-    if (initialRun.error) return failed(`initial stage failed: ${initialRun.error}`);
-    if (timedOut) return failed('review job timeout (initial stage deadline reached)');
-    if (initialRun.code !== 0) {
-      return failed(`initial stage agent exited with code ${initialRun.code}${initialRun.stdout ? ': ' + initialRun.stdout.slice(0, 500) : ''}`);
-    }
-
-    let initialFindings;
-    try {
-      initialFindings = parseFindings(initialRun.stdout, 'initial stage');
-    } catch (e) {
-      return failed(e.message);
-    }
-
-    let resumePrompt;
-    try {
-      resumePrompt = buildJobResumePrompt(job, manifest, initialFindings, options);
-    } catch (e) {
-      return failed(`resume prompt construction failed: ${e.message}`);
-    }
-
-    const resumePromptFile = promptFileFor('resume');
-    const resumeWriteError = writePrompt(resumePromptFile, resumePrompt);
-    if (resumeWriteError) return failed(resumeWriteError);
-
-    let resumeArgs;
-    try {
-      // resumeCommandだけを使うconfig viewにし、初回のexecArgs/extraArgsを混ぜない。
-      resumeArgs = buildAgentResumeCommandArgs(resumeArgsConfig, agentConfig.resumeCommand, {
-        shortPrompt: shortPrompt(resumePromptFile),
-      }).argv;
-    } catch (e) {
-      return failed(`resume command construction failed: ${e.message}`);
-    }
-
-    const resumeRun = await runReviewStage(resumeArgs, reviewWtDir, stderrFd, childRef);
-    cleanupPrompt(resumePromptFile);
-    if (resumeRun.error) return failed(`resume stage failed: ${resumeRun.error}`);
-    if (timedOut) return failed('review job timeout (resume stage deadline reached)');
-    if (resumeRun.code !== 0) {
-      return failed(`resume stage agent exited with code ${resumeRun.code}${resumeRun.stdout ? ': ' + resumeRun.stdout.slice(0, 500) : ''}`);
+    const run = await runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef);
+    cleanupPrompt(promptFile);
+    if (run.error) return failed(`review process failed: ${run.error}`);
+    if (timedOut) return failed('review job timeout (review process deadline reached)');
+    if (run.code !== 0) {
+      return failed(`review agent exited with code ${run.code}${run.stdout ? ': ' + run.stdout.slice(0, 500) : ''}`);
     }
 
     let findings;
     try {
-      findings = parseFindings(resumeRun.stdout, 'resume stage');
+      findings = parseFindings(run.stdout, 'review process');
     } catch (e) {
       return failed(e.message);
     }
@@ -1478,7 +1403,6 @@ module.exports = {
   validateCanonicalReviewFiles,
   readJobLeaves,
   buildJobPrompt,
-  buildJobResumePrompt,
   launchJobWorker,
   runJobsFromManifest,
   buildManifestValidationComment,
