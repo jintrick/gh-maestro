@@ -547,7 +547,7 @@ async function runCouncilFlow(argv) {
   }
   const opts = parsed.opts;
 
-  const workspace = resolveWorkspace(opts.workspace || null);
+  const workspace = resolveWorkspace(opts.workspace ?? null);
   if (!workspace) {
     process.stderr.write('Error: workspace could not be resolved (env/CWD探索または --workspace 指定が不正です).\n');
     return 2;

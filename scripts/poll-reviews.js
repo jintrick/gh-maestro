@@ -225,8 +225,8 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  // 他スクリプト（poll-pr.js等）と同じ workspace 解決順（GH_MAESTRO_WORKSPACE env >
-  // 引数 > CWD探索）に統一する。素の process.cwd() フォールバックだと、CWD が
+  // 他スクリプト（poll-pr.js等）と同じ workspace 解決順（引数 >
+  // GH_MAESTRO_WORKSPACE env > CWD探索）に統一する。素の process.cwd() フォールバックだと、CWD が
   // ホームディレクトリ配下のどこか等に誤解決される余地が残るため使わない
   // （Issue #214: process-lifecycle.js の PID registry が managed root と衝突する事故の一因）。
   const workspace = resolveWorkspace(workspaceArg);

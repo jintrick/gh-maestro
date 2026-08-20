@@ -294,7 +294,7 @@ async function runCouncilInvestigation(argv) {
     return 1;
   }
 
-  const workspace = resolveWorkspace(values['--workspace'] || null);
+  const workspace = resolveWorkspace(values['--workspace'] ?? null);
   if (!workspace) {
     process.stderr.write('Error: workspace could not be resolved (env/CWD探索または --workspace 指定が不正です).\n');
     return 2;

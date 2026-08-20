@@ -113,20 +113,35 @@ test('findWorkspaceFromCwd: ホーム配下でも、子ディレクトリ自身�
 
 // ── resolveWorkspace ────────────────────────────────────────────────────
 
-test('resolveWorkspace: GH_MAESTRO_WORKSPACE env を最優先', () => {
-  withEnv({ GH_MAESTRO_WORKSPACE: '/env/path' }, () => {
-    // path.resolve('/env/path') は Windows では C:\env\path になる
-    assert.equal(resolveWorkspace('/arg/path'), path.resolve('/env/path'));
-  });
+test('resolveWorkspace: 明示的な --workspace 引数が GH_MAESTRO_WORKSPACE env より優先される', () => {
+  const envDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-env-'));
+  const argDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-arg-'));
+  try {
+    withEnv({ GH_MAESTRO_WORKSPACE: envDir }, () => {
+      assert.equal(resolveWorkspace(argDir), argDir);
+    });
+  } finally {
+    fs.rmSync(envDir, { recursive: true, force: true });
+    fs.rmSync(argDir, { recursive: true, force: true });
+  }
 });
 
-test('resolveWorkspace: --workspace 引数が次優先', () => {
-  // env がなければ --workspace が使われる（cwd に .gh-maestro がない前提）
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
+test('resolveWorkspace: 明示引数は無効な workspace env にも上書きされない', () => {
+  const argDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-arg-overrides-home-'));
   try {
-    withEnv({ GH_MAESTRO_WORKSPACE: undefined }, () => {
-      delete process.env.GH_MAESTRO_WORKSPACE;
-      assert.equal(resolveWorkspace(tmpDir), tmpDir);
+    withEnv({ GH_MAESTRO_WORKSPACE: os.homedir() }, () => {
+      assert.equal(resolveWorkspace(argDir), argDir);
+    });
+  } finally {
+    fs.rmSync(argDir, { recursive: true, force: true });
+  }
+});
+
+test('resolveWorkspace: --workspace 引数が無い場合は GH_MAESTRO_WORKSPACE env を使う', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-env-fallback-'));
+  try {
+    withEnv({ GH_MAESTRO_WORKSPACE: tmpDir }, () => {
+      assert.equal(resolveWorkspace(null), tmpDir);
     });
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -168,7 +183,7 @@ test('resolveWorkspace: --workspace 引数が明示的にホームディレク�
 
 test('resolveWorkspace: GH_MAESTRO_WORKSPACE env が明示的にホームディレクトリを指す場合も null', () => {
   withEnv({ GH_MAESTRO_WORKSPACE: os.homedir() }, () => {
-    assert.equal(resolveWorkspace('/some/other/arg'), null);
+    assert.equal(resolveWorkspace(null), null);
   });
 });
 

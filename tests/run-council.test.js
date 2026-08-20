@@ -238,7 +238,8 @@ function loadModule({ spawn, resolveConfig, phaseJobs, graphqlOpts = {} }) {
   return { mod: require(modPath), gqlCalls: gql.calls, phaseCalls: phaseJobs.calls, spawnCalls: spawnMock.calls };
 }
 
-// 一時ワークスペースを作り、GH_MAESTRO_WORKSPACE を消して実行する（--workspace 明示を確実化）。
+// 一時ワークスペースを作り、workspaceフォールバックが実workspaceへ向かわないよう
+// GH_MAESTRO_WORKSPACE を消して実行する（各呼び出しは --workspace を明示する）。
 // fn の完了を await してから workspace を削除する（try{return fn(...)}finally{rmSync} だと
 // finally が fn の Promise 完了前に走り、ワークスペースが消えてしまう）。
 async function withCouncilEnv(fn) {

@@ -5,7 +5,7 @@
 // ロジックを1箇所に集約する。
 //
 // workspace 解決順（全ツール共通）:
-//   GH_MAESTRO_WORKSPACE env > --workspace 引数 > CWD から上方探索
+//   --workspace 引数 > GH_MAESTRO_WORKSPACE env > CWD から上方探索
 
 const fs = require('fs');
 const os = require('os');
@@ -37,6 +37,9 @@ function findWorkspaceFromCwd() {
 
 /**
  * 引数・env・CWD探索から workspace 絶対パスを解決する。
+ * 解決順は、明示的な workspace 引数、GH_MAESTRO_WORKSPACE 環境変数、
+ * CWD からの上方探索の順とする。呼び出し側が明示した対象を、継承環境で
+ * 暗黙に上書きしない。
  *
  * 解決結果は必ず assertValidWorkspace で検証し、ホームディレクトリや managed root
  * （~/.gh-maestro/）と衝突する場合は null を返す（CWD探索由来だけでなく、
@@ -56,8 +59,9 @@ function findWorkspaceFromCwd() {
  */
 function resolveWorkspace(workspaceArg) {
   const fromEnv = process.env.GH_MAESTRO_WORKSPACE;
-  const candidate = fromEnv ? path.resolve(fromEnv)
-    : workspaceArg ? path.resolve(workspaceArg)
+  const candidate = workspaceArg !== null && workspaceArg !== undefined
+    ? path.resolve(workspaceArg)
+    : fromEnv ? path.resolve(fromEnv)
     : findWorkspaceFromCwd();
 
   if (!candidate) return null;
