@@ -664,6 +664,40 @@ test('findRunningInstance: 一致する生存エントリを返す（自PID以�
   }
 });
 
+test('findRunningInstance: registerProcessで保存した表記違いのworkspaceも見つかる', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const registeredWorkspace = process.platform === 'win32'
+    ? workspace.toUpperCase()
+    : `${workspace}${path.sep}..${path.sep}${path.basename(workspace)}`;
+  const registeredPid = process.pid;
+
+  plc.registerProcess(registeredWorkspace, {
+    script: 'msg-poll.js',
+    workerName: null,
+    startTime: MOCK_START_TIME,
+  });
+
+  try {
+    // registerProcess はテストランナー自身のPIDを書き込むため、検索時だけ
+    // 自PID除外の比較対象を親プロセスへ切り替える。registry自体は実装経路で生成する。
+    const originalPid = process.pid;
+    Object.defineProperty(process, 'pid', { value: process.ppid, configurable: true });
+    try {
+      const result = plc.findRunningInstance(storageLayout.canonicalWorkspace(workspace), {
+        script: 'msg-poll.js',
+        workerName: null,
+      });
+      assert.ok(result, '登録時と検索時のworkspace表記が異なっても見つかるはず');
+      assert.equal(result.pid, registeredPid);
+      assert.equal(result.workspace, registeredWorkspace);
+    } finally {
+      Object.defineProperty(process, 'pid', { value: originalPid, configurable: true });
+    }
+  } finally {
+    plc.unregisterProcess(registeredWorkspace, registeredPid);
+  }
+});
+
 test('findRunningInstance: 起動時刻が一致しない（PID再利用）場合は重複とみなさない', () => {
   // mockWmiSuccess は常に MOCK_START_TIME を返す。登録エントリのstartTimeを
   // それとは異なる値にすることで「別プロセスが同じPIDを再利用した」状況を模擬する。
