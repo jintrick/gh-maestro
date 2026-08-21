@@ -129,6 +129,7 @@ const m = {
   prCreate: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'create',
   commentList: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === '--method' && args[2] === 'GET',
   commentCreate: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === `repos/${REPO}/issues/${'5'}/comments` && args[2] === '-f',
+  commentUpdate: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === '-X' && args[2] === 'PATCH',
 };
 
 /** 変更あり → コミット → push → PR新規作成 → 申告 のフルパス用ハンドラ。 */
@@ -149,6 +150,57 @@ function fullPathHandlers(overrides = {}) {
     { matches: m.commentList(), result: overrides.commentList || { status: 0, stdout: '[]' } },
     { matches: m.commentCreate(), result: overrides.commentCreate || { status: 0, stdout: `{"html_url":"${DECL_URL}"}` } },
   ];
+}
+
+/** 再実行（同じ状態での2回目）を検証するためのステートフルなハンドラ群。
+ *  1回目の実行の副作用（コミット済み・PR作成済み・申告コメント投稿済み）を state に残し、
+ *  2回目の実行が同じ状態から収束する（新たなコミットを作らない・PRを再利用する・申告を
+ *  更新する）ことを再現する。実リポジトリでは 2回目の git add -A は何もステージせず、
+ *  quietDiff が status 0（変更なし）になることに対応する。 */
+function statefulHandlers(initial = {}) {
+  const state = {
+    changesPending: true,          // git diff --cached --quiet が status 1（変更あり）か
+    pr: null,                      // 既存PR（get-or-create の再利用判定）
+    comments: [],                  // 申告コメント一覧（declareTestResult の更新判定）
+    nextCommentId: 1,
+    declListFailuresRemaining: 0,  // 申告コメント一覧取得を一時的に失敗させる残回数（回復経路の検証用）
+    ...initial,
+  };
+  const handlers = [
+    { matches: m.branch(), result: { status: 0, stdout: BRANCH + '\n' } },
+    { matches: m.repoView(), result: { status: 0, stdout: REPO + '\n' } },
+    { matches: m.issueTitle(), result: { status: 0, stdout: TITLE + '\n' } },
+    { matches: m.add(), result: { status: 0, stdout: '' } },
+    { matches: m.nameOnly(), result: () => state.changesPending ? { status: 0, stdout: 'a.js\nb.js\n' } : { status: 0, stdout: '' } },
+    { matches: m.quietDiff(), result: () => ({ status: state.changesPending ? 1 : 0, stdout: '' }) },
+    { matches: m.commit(), result: () => { state.changesPending = false; return { status: 0, stdout: '' }; } },
+    { matches: m.push(), result: () => ({ status: 0, stdout: '' }) },
+    { matches: m.head(), result: { status: 0, stdout: SHA + '\n' } },
+    { matches: m.prList(), result: () => state.pr ? { status: 0, stdout: JSON.stringify(state.pr) } : { status: 0, stdout: '' } },
+    { matches: m.prCreate(), result: () => {
+        state.pr = { number: 5, url: PR_URL };
+        return { status: 0, stdout: PR_URL + '\n' };
+      } },
+    { matches: m.commentList(), result: () => {
+        if (state.declListFailuresRemaining > 0) {
+          state.declListFailuresRemaining--;
+          return { status: 1, stdout: '', stderr: 'gh api failed (transient)' };
+        }
+        return { status: 0, stdout: JSON.stringify(state.comments) };
+      } },
+    { matches: m.commentCreate(), result: (c) => {
+        const id = state.nextCommentId++;
+        const htmlUrl = `https://github.com/owner/repo/pull/5#issuecomment-${id}`;
+        const body = String(c.args[3] || '').replace(/^body=/, '');
+        state.comments.push({ id, body, html_url: htmlUrl });
+        return { status: 0, stdout: JSON.stringify({ html_url: htmlUrl }) };
+      } },
+    { matches: m.commentUpdate(), result: () => {
+        const last = state.comments[state.comments.length - 1];
+        return { status: 0, stdout: JSON.stringify({ html_url: last.html_url }) };
+      } },
+  ];
+  return { state, handlers };
 }
 
 function call(calls, predicate) {
@@ -241,6 +293,73 @@ test('収束: 既存PRがあれば再利用し、createPr（gh pr create）を�
   const prCreateCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'create');
   assert.equal(prCreateCall, undefined, '既存PRがある場合は gh pr create を呼ばない');
   assert.match(result.stdout, /PR: #5（既存を使用）/);
+});
+
+// ── 同じ状態での再実行（回復・冪等性） ────────────────────────────────────────
+// 受け入れ条件の中核: 「pushは成功したが申告だけ失敗した（exit 3）」状態から、同じコマンドの
+// 再実行だけで収束すること。同じ状態に対して2回実行しても新たなコミットが作られず、申告が
+// 壊れないこと。1回目の実行と同一のモジュール・同一の呼び出し記録・同一のPR/HEAD/コメント
+// 状態（ステートフルモック）を引き継いだ2回目を実行して検証する。
+
+test('再実行で回復: 申告失敗（exit 3）の状態から同じコマンドの再実行だけで収束する', () => {
+  const { state, handlers } = statefulHandlers({ declListFailuresRemaining: 1 });
+  const { mod, calls } = loadModule(dispatcher(handlers));
+  const ws = tempWorkspace();
+  const opts = { issue: 374, fail: 0, pass: 12, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } };
+
+  // 1回目: pushは成功したが申告のコメント一覧取得が一時的に失敗 → exit 3（リモートは進んだ）
+  const first = withGuardBypassed(() => mod.pushAndDeclare(opts));
+  assert.equal(first.exitCode, 3, '申告失敗を成功として終了しない（最重要不変条件）');
+  assert.match(first.stderr, /テスト結果の申告に失敗しました/);
+  assert.ok(call(calls, (cmd, args) => cmd === 'git' && args[0] === 'push'), 'pushは成功している（exit 2 と区別する境界）');
+  const commitCallsAfterFirst = calls.filter(c => c.cmd === 'git' && c.args[0] === 'commit').length;
+  assert.equal(commitCallsAfterFirst, 1, '1回目でコミットが作られている');
+  // コミット済みの状態が引き継がれる（2回目の quietDiff は status 0）
+  assert.equal(state.changesPending, false, '1回目のコミットでステージ済み変更が解消している');
+
+  // 2回目: 同じ状態・同じ引数のまま再実行 → 新たなコミットを作らず収束して exit 0
+  const second = withGuardBypassed(() => mod.pushAndDeclare(opts));
+  assert.equal(second.exitCode, 0, '同じ状態から同じコマンドの再実行だけで収束する');
+  assert.equal(state.changesPending, false, '2回目で新たな変更が発生しない');
+  const commitCallsTotal = calls.filter(c => c.cmd === 'git' && c.args[0] === 'commit').length;
+  assert.equal(commitCallsTotal, 1, '再実行で空コミットを作らない（git commit は全体で1回だけ）');
+  // PRは get-or-create: 1回目に作ったPRを使い、2回目は作成しない（全体で1回だけ）
+  const prCreateCount = calls.filter(c => c.cmd === 'gh' && c.args[0] === 'pr' && c.args[1] === 'create').length;
+  assert.equal(prCreateCount, 1, 'PR作成は1回目のみ（再実行では gh pr create を呼ばない）');
+  assert.match(second.stdout, /PR: #5（既存を使用）/);
+  // 申告は成功している
+  assert.match(second.stdout, /コミット: なし（ステージ済み変更が無いため、コミットは作成されませんでした）/);
+  assert.match(second.stdout, /申告: https:\/\/github.com\/owner\/repo\/pull\/5#issuecomment-\d+（対象コミット 0123456789/);
+});
+
+test('冪等性: 同じ状態に対して2回実行しても新たなコミットを作らず申告が壊れない', () => {
+  const { state, handlers } = statefulHandlers();
+  const { mod, calls } = loadModule(dispatcher(handlers));
+  const ws = tempWorkspace();
+  const opts = { issue: 374, fail: 0, pass: 12, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } };
+
+  const first = withGuardBypassed(() => mod.pushAndDeclare(opts));
+  assert.equal(first.exitCode, 0, `stderr: ${first.stderr}`);
+  assert.match(first.stdout, /コミット: 0123456789/);
+  assert.match(first.stdout, /PR: #5（新規作成）/);
+
+  const second = withGuardBypassed(() => mod.pushAndDeclare(opts));
+  assert.equal(second.exitCode, 0, `stderr: ${second.stderr}`);
+  // git commit は2回合わせて1回だけ（2回目で新たなコミットを作らない）
+  const commitCount = calls.filter(c => c.cmd === 'git' && c.args[0] === 'commit').length;
+  assert.equal(commitCount, 1, '同じ状態への2回目で空コミットを作らない');
+  assert.match(second.stdout, /コミット: なし（ステージ済み変更が無いため、コミットは作成されませんでした）/);
+  // PRは1回目の作成のみ。2回目は既存PRを再利用する
+  const prCreateCount = calls.filter(c => c.cmd === 'gh' && c.args[0] === 'pr' && c.args[1] === 'create').length;
+  assert.equal(prCreateCount, 1, 'PR作成は1回だけ（2回目は gh pr create を呼ばない）');
+  assert.match(second.stdout, /PR: #5（既存を使用）/);
+  // 申告は壊れない: 1回目は新規投稿、2回目は同じHEADに対して既存申告の更新（PATCH）が行われる
+  assert.equal(state.comments.length, 1, '申告コメントが重複して増えない');
+  const createCount = calls.filter(c => c.cmd === 'gh' && c.args[0] === 'api' && c.args[1] === `repos/${REPO}/issues/${'5'}/comments` && c.args[2] === '-f').length;
+  const updateCount = calls.filter(c => c.cmd === 'gh' && c.args[0] === 'api' && c.args[1] === '-X' && c.args[2] === 'PATCH').length;
+  assert.equal(createCount, 1, '申告コメントは1回目で1回新規投稿される');
+  assert.equal(updateCount, 1, '2回目は既存申告を更新する（重複投稿しない）');
+  assert.match(second.stdout, /申告: https:\/\/github.com\/owner\/repo\/pull\/5#issuecomment-\d+（対象コミット 0123456789/);
 });
 
 // ── 終了コード契約 ────────────────────────────────────────────────────────────
