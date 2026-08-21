@@ -1174,6 +1174,30 @@ test('runJobsFromManifest: パース不能JSONでも通知投稿＋成功セン�
   }
 });
 
+test('runJobsFromManifest: BOM付きmanifestを解析して検証へ進める', async () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-bom-manifest-'));
+  try {
+    const manifestPath = path.join(testDir, 'manifest.json');
+    const resultsPath = path.join(testDir, 'results.json');
+    fs.writeFileSync(manifestPath, '\uFEFF{}', 'utf8');
+
+    _setGhForTest(() => ({ status: 0, stdout: 'url\n' }));
+    process.env.NODE_TEST_CONTEXT = '1';
+    try {
+      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, '42', 'o/r');
+      assert.equal(result.ok, false);
+      assert.ok(result.summary.error.includes('manifest validation failed'));
+      assert.ok(!result.summary.error.includes('JSON parse failed'), result.summary.error);
+      assert.equal(result.summary.notification.posted, true);
+    } finally {
+      delete process.env.NODE_TEST_CONTEXT;
+    }
+  } finally {
+    _setGhForTest(null);
+    fs.rmSync(testDir, { recursive: true, force: true });
+  }
+});
+
 test('runJobsFromManifest: パース不能JSON＋投稿失敗はnotify-failedセンチネル（パースエラー）を書く', async () => {
   const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-parsefail-'));
   try {

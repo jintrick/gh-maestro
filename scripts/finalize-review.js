@@ -17,6 +17,7 @@ const { parseFlags } = require('./shared/workspace');
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS } = require('./shared/review-aspects');
 const { _validateAgainstSchema } = require('./shared/json-schema');
 const { atomicWriteJson } = require('./shared/atomic-write');
+const { readJsonFile } = require('./shared/json-file');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 
 // テスト用: gh 呼び出しを注入する（実プロセスを0個spawnするテストから使う。
@@ -382,18 +383,12 @@ function writeSentinel(workspace, pr, opts = {}) {
  */
 async function finalizeReview(resultsPath, mode, outputPath, workspace, integratedPath = null) {
   // 1. results読み込み
-  let resultsRaw;
-  try {
-    resultsRaw = fs.readFileSync(resultsPath, 'utf8');
-  } catch (e) {
-    return { ok: false, summary: { error: `results read failed: ${e.message}` } };
-  }
-
   let results;
   try {
-    results = JSON.parse(resultsRaw);
+    results = readJsonFile(resultsPath);
   } catch (e) {
-    return { ok: false, summary: { error: `results JSON parse failed: ${e.message}` } };
+    const kind = e && e.kind === 'parse' ? 'JSON parse' : 'read';
+    return { ok: false, summary: { error: `results ${kind} failed: ${e.message}` } };
   }
 
   if (!results.coverage_ledger || !Array.isArray(results.jobs)) {
@@ -422,17 +417,12 @@ async function finalizeReview(resultsPath, mode, outputPath, workspace, integrat
     //    指定がなければ全成功ジョブのfindingsを機械集約する。エンベロープは results 由来で確定。
     let findings;
     if (integratedPath) {
-      let draftRaw;
-      try {
-        draftRaw = fs.readFileSync(integratedPath, 'utf8');
-      } catch (e) {
-        return { ok: false, summary: { error: `integrated draft read failed: ${e.message}` } };
-      }
       let draft;
       try {
-        draft = JSON.parse(draftRaw);
+        draft = readJsonFile(integratedPath);
       } catch (e) {
-        return { ok: false, summary: { error: `integrated draft JSON parse failed: ${e.message}` } };
+        const kind = e && e.kind === 'parse' ? 'JSON parse' : 'read';
+        return { ok: false, summary: { error: `integrated draft ${kind} failed: ${e.message}` } };
       }
       if (!draft || typeof draft !== 'object' || !Array.isArray(draft.findings)) {
         return { ok: false, summary: { error: 'integrated draft must be an object with a findings array' } };

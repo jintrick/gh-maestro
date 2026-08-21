@@ -22,6 +22,7 @@ const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
+const { readJsonFile } = require('./shared/json-file');
 const { parseFlags } = require('./shared/workspace');
 const {
   ALL_LEAF_IDS,
@@ -527,21 +528,13 @@ ${findingsOutputSection(job.aspect, options.resultFile)}`;
 }
 
 function readFindingsFile(resultFile, stage) {
-  let text;
-  try {
-    if (!fs.statSync(resultFile).isFile()) throw new Error('not a regular file');
-    text = fs.readFileSync(resultFile, 'utf8');
-  } catch (e) {
-    throw new Error(`${stage}: result file read failed (${resultFile}): ${e.message}`);
-  }
-
   let findings;
   try {
-    // ジョブによってはBOM付きUTF-8で書き出す（agyがWindowsで実際にそうした）。
-    // JSON.parse は先頭BOMを受け付けないため、除去してから解釈する。
-    findings = JSON.parse(text.replace(/^\uFEFF/, ''));
+    if (!fs.statSync(resultFile).isFile()) throw new Error('not a regular file');
+    findings = readJsonFile(resultFile);
   } catch (e) {
-    throw new Error(`${stage}: result JSON parse failed (${resultFile}): ${e.message}`);
+    const kind = e && e.kind === 'parse' ? 'result JSON parse failed' : 'result file read failed';
+    throw new Error(`${stage}: ${kind} (${resultFile}): ${e.message}`);
   }
 
   if (!Array.isArray(findings)) throw new Error(`${stage}: output is not a JSON array`);
@@ -1252,40 +1245,25 @@ function applyRetryGate({ ghDir, pr }) {
  */
 async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo, ghDir, options = {}) {
   // 1. manifest読み込み
-  let manifestRaw;
-  try {
-    manifestRaw = fs.readFileSync(manifestPath, 'utf8');
-  } catch (e) {
-    // Issue #271: 読み込み失敗も通知経路へ流す（検証失敗と同じ「PRコメント＋センチネル」）。
-    // pr/repo は検証前の起動コンテキスト（CLI --pr / --repo）で、manifestが読めなくても通知は可能。
-    const loadError = e && e.message ? e.message : String(e);
-    const notification = notifyManifestProblem({
-      workspace,
-      pr,
-      repo,
-      commentBody: buildManifestLoadFailureComment('read', loadError, manifestPath, pr),
-      failureLabel: '読み込みエラー',
-      failureDetail: `manifest read failed: ${loadError} (path: ${manifestPath})`,
-    });
-    return { ok: false, summary: { error: `manifest read failed: ${loadError}`, notification } };
-  }
-
   let manifest;
   try {
-    manifest = JSON.parse(manifestRaw);
+    manifest = readJsonFile(manifestPath);
   } catch (e) {
-    // Issue #271: JSONパース失敗（モデルが書くJSONで最も起きやすい構文エラー）も通知経路へ流す。
-    // SyntaxError のメッセージ（壊れている位置を含む）と manifest パスを通知本文に載せる。
-    const parseError = e && e.message ? e.message : String(e);
+    const errorText = e && e.message ? e.message : String(e);
+    const kind = e && e.kind === 'parse' ? 'parse' : 'read';
+    const failureLabel = kind === 'parse' ? 'パースエラー' : '読み込みエラー';
+    const errorPrefix = kind === 'parse' ? 'manifest JSON parse failed' : 'manifest read failed';
+    // Issue #271: 読み込み失敗・JSONパース失敗のどちらも同じ通知経路へ流す。
+    // pr/repo は検証前の起動コンテキストで、manifestが読めなくても通知に使える。
     const notification = notifyManifestProblem({
       workspace,
       pr,
       repo,
-      commentBody: buildManifestLoadFailureComment('parse', parseError, manifestPath, pr),
-      failureLabel: 'パースエラー',
-      failureDetail: `manifest JSON parse failed: ${parseError} (path: ${manifestPath})`,
+      commentBody: buildManifestLoadFailureComment(kind, errorText, manifestPath, pr),
+      failureLabel,
+      failureDetail: `${errorPrefix}: ${errorText} (path: ${manifestPath})`,
     });
-    return { ok: false, summary: { error: `manifest JSON parse failed: ${parseError}`, notification } };
+    return { ok: false, summary: { error: `${errorPrefix}: ${errorText}`, notification } };
   }
 
   // 2. manifest検証

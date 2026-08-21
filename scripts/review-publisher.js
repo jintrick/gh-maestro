@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 'use strict';
 
-const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
+const { readJsonFile } = require('./shared/json-file');
 
 const USAGE = `review-publisher.js — RM finding JSONを検証し、PRレビューとして投稿する
 
@@ -325,7 +325,7 @@ if (require.main === module) {
     process.exit(1);
   }
   try {
-    const payload = JSON.parse(fs.readFileSync(path.resolve(file), 'utf8'));
+    const payload = readJsonFile(path.resolve(file));
     const result = publish(payload, { dryRun });
     if (dryRun) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (e) {

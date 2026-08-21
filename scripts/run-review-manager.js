@@ -20,6 +20,7 @@ const {
 } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags } = require('./shared/workspace');
+const { parseJsonText } = require('./shared/json-file');
 const { _validateAgainstSchema } = require('./shared/json-schema');
 const { VALID_ASPECTS, VALID_SEVERITIES, FINDING_REQUIRED_FIELDS } = require('./shared/review-aspects');
 
@@ -404,7 +405,7 @@ function validateArtifactContent(jsonContent, schemaPath) {
   // 1. JSONパース
   let payload;
   try {
-    payload = JSON.parse(jsonContent);
+    payload = parseJsonText(jsonContent);
   } catch (e) {
     return { valid: false, error: `JSON parse failed: ${e.message}` };
   }
