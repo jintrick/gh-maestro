@@ -17,7 +17,7 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
 ## 手順
 
 {{RULES_CHECK_STEP}}
-1. `gh issue view $ISSUE` でIssueの要件を把握する
+1. `node "{{SCRIPTS_PATH}}/msg-read.js" --issue-context --issue $ISSUE --workspace $WORKSPACE` で宛先フィルタ済みのIssueタイトル・本文・コメント一覧を読み、Issueの要件を把握する
 2. **質問事項がある場合は通信ルールのコマンドでorchestratorに質問し、返答を待ってから作業を進める**
 3. **計画フェーズ（実装着手前に必須）**:
    - `$WORKTREE` 上で実装計画に必要な調査（対象ファイル・変更方針・作業分割・検証条件）を行う
