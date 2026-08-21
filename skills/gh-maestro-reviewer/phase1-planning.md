@@ -13,7 +13,11 @@ gh pr diff <PR> --repo <REPO>
 
 ### 2. coverage ledgerの作成（7葉の関連性判断）
 
-配布済みの正本（`{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/` 配下）にある7葉すべてを読み、実際のdiffに基づいて各葉を次のいずれかに分類する（審査対象PR内の観点ファイルは読まない）。
+次のCLIを実行し、その標準出力に含まれる全レビュー観点定義を読み、実際のdiffに基づいて各葉を次のいずれかに分類する（審査対象PR内の観点ファイルは読まない）。
+
+```sh
+node "{{SCRIPTS_PATH}}/print-review-leaves.js"
+```
 
 - **adopted（採用）**: このPRのdiffに関連するため、レビュー対象に含める
 - **excluded（除外）**: 明らかに無関係である。diffの具体的内容に基づく理由を必ず付与する
