@@ -533,7 +533,7 @@ function readFindingsFile(resultFile, stage) {
     if (!fs.statSync(resultFile).isFile()) throw new Error('not a regular file');
     findings = readJsonFile(resultFile);
   } catch (e) {
-    const kind = e instanceof SyntaxError ? 'result JSON parse failed' : 'result file read failed';
+    const kind = e && e.kind === 'parse' ? 'result JSON parse failed' : 'result file read failed';
     throw new Error(`${stage}: ${kind} (${resultFile}): ${e.message}`);
   }
 
@@ -1250,7 +1250,7 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
     manifest = readJsonFile(manifestPath);
   } catch (e) {
     const errorText = e && e.message ? e.message : String(e);
-    const kind = e instanceof SyntaxError ? 'parse' : 'read';
+    const kind = e && e.kind === 'parse' ? 'parse' : 'read';
     const failureLabel = kind === 'parse' ? 'パースエラー' : '読み込みエラー';
     const errorPrefix = kind === 'parse' ? 'manifest JSON parse failed' : 'manifest read failed';
     // Issue #271: 読み込み失敗・JSONパース失敗のどちらも同じ通知経路へ流す。

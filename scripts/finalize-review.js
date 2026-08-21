@@ -387,7 +387,7 @@ async function finalizeReview(resultsPath, mode, outputPath, workspace, integrat
   try {
     results = readJsonFile(resultsPath);
   } catch (e) {
-    const kind = e instanceof SyntaxError ? 'JSON parse' : 'read';
+    const kind = e && e.kind === 'parse' ? 'JSON parse' : 'read';
     return { ok: false, summary: { error: `results ${kind} failed: ${e.message}` } };
   }
 
@@ -421,7 +421,7 @@ async function finalizeReview(resultsPath, mode, outputPath, workspace, integrat
       try {
         draft = readJsonFile(integratedPath);
       } catch (e) {
-        const kind = e instanceof SyntaxError ? 'JSON parse' : 'read';
+        const kind = e && e.kind === 'parse' ? 'JSON parse' : 'read';
         return { ok: false, summary: { error: `integrated draft ${kind} failed: ${e.message}` } };
       }
       if (!draft || typeof draft !== 'object' || !Array.isArray(draft.findings)) {

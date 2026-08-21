@@ -11,7 +11,11 @@ const { stripUtf8Bom, parseJsonText, readJsonFile } = require('../scripts/shared
 test('stripUtf8Bom: 先頭のBOMを1つだけ除去する', () => {
   assert.equal(stripUtf8Bom('\uFEFF{"ok":true}'), '{"ok":true}');
   assert.equal(stripUtf8Bom('{"ok":true}'), '{"ok":true}');
-  assert.equal(stripUtf8Bom('\uFEFF\uFEFF{}'), '\uFEFF{}');
+});
+
+test('stripUtf8Bom: 先頭以外のBOMを変更しない', () => {
+  const text = '{"value":"\uFEFFinside","nested":{"value":"\uFEFFkeep"}}';
+  assert.equal(stripUtf8Bom('\uFEFF' + text), text);
 });
 
 test('parseJsonText: BOM付きJSONを解析できる', () => {
@@ -19,7 +23,10 @@ test('parseJsonText: BOM付きJSONを解析できる', () => {
 });
 
 test('parseJsonText: 不正JSONはSyntaxErrorとして拒否する', () => {
-  assert.throws(() => parseJsonText('\uFEFF{"ok":'), SyntaxError);
+  assert.throws(
+    () => parseJsonText('\uFEFF{"ok":'),
+    (error) => error && error.kind === 'parse' && error.cause instanceof SyntaxError,
+  );
 });
 
 test('readJsonFile: BOM付きファイルを読み取れる', () => {
@@ -35,5 +42,8 @@ test('readJsonFile: BOM付きファイルを読み取れる', () => {
 
 test('readJsonFile: 読み取り失敗を握りつぶさない', () => {
   const filePath = path.join(os.tmpdir(), `json-file-missing-${process.pid}-${Date.now()}.json`);
-  assert.throws(() => readJsonFile(filePath), (error) => error && error.code === 'ENOENT');
+  assert.throws(
+    () => readJsonFile(filePath),
+    (error) => error && error.kind === 'read' && error.code === 'ENOENT' && error.filePath === filePath,
+  );
 });

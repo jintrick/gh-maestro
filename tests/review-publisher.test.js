@@ -2,9 +2,6 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
 
 const {
   validateFinding,
@@ -13,7 +10,6 @@ const {
   isLineInDiff,
   formatFinalReviewBody,
   processFindings,
-  readPayloadFile,
 } = require('../scripts/review-publisher');
 
 function finding(overrides = {}) {
@@ -29,18 +25,6 @@ function finding(overrides = {}) {
     ...overrides,
   };
 }
-
-test('readPayloadFile: manager.jsonのBOMを許容する', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-publisher-json-'));
-  try {
-    const filePath = path.join(dir, 'manager.json');
-    const payload = { pr: 1, repo: 'o/r', headRefOid: 'abc', findings: [] };
-    fs.writeFileSync(filePath, '\uFEFF' + JSON.stringify(payload), 'utf8');
-    assert.deepEqual(readPayloadFile(filePath), payload);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
 
 test('validateFinding rejects blank required fields and empty references', () => {
   const errors = validateFinding(finding({ summary: '...', verified_references: [] }));

@@ -542,9 +542,20 @@ test('validateArtifactContent: 有効なpayloadを合格とする', () => {
       },
     ],
   });
-  const result = validateArtifactContent('\uFEFF' + payload, null);
+  const result = validateArtifactContent(payload, null);
   assert.equal(result.valid, true);
   assert.notEqual(result.payload, null);
+});
+
+test('validateArtifactContent: BOM付きのReview Manager成果物を合格とする', () => {
+  const result = validateArtifactContent('\uFEFF' + JSON.stringify({
+    pr: 5,
+    repo: 'o/r',
+    headRefOid: 'abc',
+    findings: [],
+  }), null);
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.payload.findings, []);
 });
 
 test('validateArtifactContent: 不正なJSONは不合格', () => {

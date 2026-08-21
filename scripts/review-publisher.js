@@ -298,10 +298,6 @@ function publish(payload, options = {}) {
   return result;
 }
 
-function readPayloadFile(file) {
-  return readJsonFile(path.resolve(file));
-}
-
 module.exports = {
   validatePayload,
   validateFinding,
@@ -314,7 +310,6 @@ module.exports = {
   formatFinalReviewBody,
   processFindings,
   publish,
-  readPayloadFile,
 };
 
 if (require.main === module) {
@@ -330,7 +325,7 @@ if (require.main === module) {
     process.exit(1);
   }
   try {
-    const payload = readPayloadFile(file);
+    const payload = readJsonFile(path.resolve(file));
     const result = publish(payload, { dryRun });
     if (dryRun) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (e) {

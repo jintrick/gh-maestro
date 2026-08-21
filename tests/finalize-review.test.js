@@ -406,6 +406,19 @@ test('finalizeReview(complete, --integrated): ドラフトがJSONパース不能
   }
 });
 
+test('finalizeReview: resultsの読み取り失敗は後段へ進まず明示する', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-results-read-'));
+  try {
+    const outputPath = path.join(tmpDir, 'manager.json');
+    const res = await finalizeReview(path.join(tmpDir, 'missing-results.json'), 'complete', outputPath, tmpDir);
+    assert.equal(res.ok, false);
+    assert.match(res.summary.error, /results read failed/);
+    assert.ok(!fs.existsSync(outputPath), 'resultsが読めなければ出力を書かない');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('aggregateFindings accepts Test Quality aspect findings and validates schema', () => {
   const schemaPath = path.join(__dirname, '../scripts/review-findings-schema.json');
   const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
