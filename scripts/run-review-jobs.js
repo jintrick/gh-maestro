@@ -537,7 +537,9 @@ function readFindingsFile(resultFile, stage) {
 
   let findings;
   try {
-    findings = JSON.parse(text);
+    // ジョブによってはBOM付きUTF-8で書き出す（agyがWindowsで実際にそうした）。
+    // JSON.parse は先頭BOMを受け付けないため、除去してから解釈する。
+    findings = JSON.parse(text.replace(/^\uFEFF/, ''));
   } catch (e) {
     throw new Error(`${stage}: result JSON parse failed (${resultFile}): ${e.message}`);
   }

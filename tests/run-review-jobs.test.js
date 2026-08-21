@@ -615,6 +615,12 @@ test('launchJobWorker: 結果ファイルのfindingスキーマ違反はfailed�
   assert.match(result.error, /finding validation/);
 });
 
+test('launchJobWorker: BOM付きの結果ファイルを読める', async () => {
+  const { result } = await runReviewJobWithResult('\uFEFF[]');
+  assert.equal(result.status, 'success');
+  assert.deepEqual(result.findings, []);
+});
+
 test('launchJobWorker: 結果ファイルの空配列は成功として扱う', async () => {
   const { result } = await runReviewJobWithResult('[]');
   assert.equal(result.status, 'success');
