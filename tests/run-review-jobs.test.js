@@ -62,6 +62,81 @@ function shellCommandText(call) {
   return call.args.slice(3).join(' ');
 }
 
+function resultFileFromPrompt(prompt) {
+  const match = prompt.match(/結果ファイル:\s*`([^`]+)`/);
+  assert.ok(match, 'review prompt should specify a result file');
+  return path.normalize(match[1]);
+}
+
+function codexReviewAgentConfig() {
+  return {
+    id: 'codex',
+    command: 'codex',
+    execArgs: ['exec', '--skip-git-repo-check', '--cd', '{workspace}', '--dangerously-bypass-approvals-and-sandbox'],
+    extraArgs: ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'],
+    nonInteractiveTokens: ['exec'],
+    promptDelivery: 'positional',
+  };
+}
+
+async function runReviewJobWithResult(resultText, options = {}) {
+  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-result-wt-'));
+  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-result-skills-'));
+  const calls = [];
+  let promptText;
+  let resultFilePath;
+  const finding = {
+    aspect: 'Correctness',
+    path: 'src/a.js',
+    line_anchor: 'return value',
+    summary: 'A finding',
+    severity: 'SUGGESTION',
+    severity_rationale: 'verified',
+    body: 'body',
+    verified_references: ['src/a.js'],
+  };
+  writeReviewFixtures(skillsDir, ['correctness/logic-invariants']);
+
+  _setSpawn((command, args, opts) => {
+    calls.push({ command, args, opts });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.kill = () => {};
+    process.nextTick(() => {
+      const promptFile = fs.readdirSync(os.tmpdir())
+        .filter(name => name.startsWith('review-job-job-1-review-') && name.endsWith('.md'))
+        .map(name => path.join(os.tmpdir(), name))
+        .sort()
+        .pop();
+      assert.ok(promptFile, 'review prompt file should exist while the process runs');
+      promptText = fs.readFileSync(promptFile, 'utf8');
+      resultFilePath = resultFileFromPrompt(promptText);
+      if (resultText !== undefined) fs.writeFileSync(resultFilePath, resultText, 'utf8');
+      child.stdout.emit('data', Buffer.from(options.stdout || 'agent progress and JSONL events'));
+      child.emit('close', 0);
+    });
+    return child;
+  });
+
+  try {
+    const result = await launchJobWorker(
+      { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' },
+      { pr: 123, repo: 'o/r', headRefOid: 'abc', changedFiles: ['src/a.js'] },
+      options.agentConfig || codexReviewAgentConfig(),
+      worktreeDir,
+      worktreeDir,
+      5000,
+      null,
+      { reviewSkillsDir: skillsDir },
+    );
+    return { result, calls, promptText, resultFilePath, finding };
+  } finally {
+    _setSpawn(null);
+    fs.rmSync(worktreeDir, { recursive: true, force: true });
+    fs.rmSync(skillsDir, { recursive: true, force: true });
+  }
+}
+
 test('validateManifest: valid manifest passes', () => {
   const manifest = {
     pr: 123,
@@ -430,6 +505,7 @@ test('launchJobWorker: 単一プロセスを同一cwdから起動し、pre/post�
   const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-single-stage-skills-'));
   const calls = [];
   let promptText;
+  let resultFilePath;
   const finding = {
     aspect: 'Correctness',
     path: 'src/a.js',
@@ -459,7 +535,10 @@ test('launchJobWorker: 単一プロセスを同一cwdから起動し、pre/post�
         .pop();
       assert.ok(promptFile, 'review prompt file should exist while the process runs');
       promptText = fs.readFileSync(promptFile, 'utf8');
-      child.stdout.emit('data', Buffer.from(JSON.stringify([finding])));
+      resultFilePath = resultFileFromPrompt(promptText);
+      fs.writeFileSync(resultFilePath, JSON.stringify([finding]), 'utf8');
+      // stdout is deliberately ignored; this stream is not a review result.
+      child.stdout.emit('data', Buffer.from('{"type":"system","subtype":"init"}\nnot the result'));
       child.emit('close', 0);
     });
     return child;
@@ -485,6 +564,7 @@ test('launchJobWorker: 単一プロセスを同一cwdから起動し、pre/post�
     );
 
     assert.equal(result.status, 'success');
+    assert.deepEqual(result.findings, [finding]);
     assert.equal(calls.length, 1, 'one review process is spawned per job');
     assert.equal(calls[0].opts.cwd, worktreeDir);
     assert.match(shellCommandText(calls[0]), /exec/);
@@ -495,11 +575,86 @@ test('launchJobWorker: 単一プロセスを同一cwdから起動し、pre/post�
     assert.match(promptText, /指摘を書き終えるまで/);
     assert.match(promptText, /指摘を書き終えるまで、post-review\.mdを読むことを禁じ/);
     assert.match(promptText, /指摘を書き終えた後にだけpost-review\.mdを読み、既に書いた指摘と照合/);
+    assert.match(promptText, /標準出力の内容は実行器から解釈されません/);
+    assert.ok(resultFilePath, 'result file path should be captured from the prompt');
+    assert.equal(fs.existsSync(resultFilePath), false, 'temporary result file is cleaned up after the job');
   } finally {
     _setSpawn(null);
     fs.rmSync(worktreeDir, { recursive: true, force: true });
     fs.rmSync(skillsDir, { recursive: true, force: true });
   }
+});
+
+test('launchJobWorker: 結果ファイルが欠落するとstdoutに有効な配列があってもfailedになる', async () => {
+  const { result, resultFilePath } = await runReviewJobWithResult(undefined, {
+    stdout: JSON.stringify([{ aspect: 'Correctness' }]),
+  });
+  assert.equal(result.status, 'failed');
+  assert.match(result.error, /result file read failed/);
+  assert.equal(fs.existsSync(resultFilePath), false);
+});
+
+test('launchJobWorker: 結果ファイルの不正JSONはfailedになる', async () => {
+  const { result, resultFilePath } = await runReviewJobWithResult('[{"', {
+    stdout: '{"type":"result","result":"[valid-looking stdout]"}',
+  });
+  assert.equal(result.status, 'failed');
+  assert.match(result.error, /result JSON parse failed/);
+  assert.equal(fs.existsSync(resultFilePath), false);
+});
+
+test('launchJobWorker: 結果ファイルが配列でない場合はfailedになる', async () => {
+  const { result } = await runReviewJobWithResult(JSON.stringify({ findings: [] }));
+  assert.equal(result.status, 'failed');
+  assert.match(result.error, /output is not a JSON array/);
+});
+
+test('launchJobWorker: 結果ファイルのfindingスキーマ違反はfailedになる', async () => {
+  const { result } = await runReviewJobWithResult(JSON.stringify([{}]));
+  assert.equal(result.status, 'failed');
+  assert.match(result.error, /finding validation/);
+});
+
+test('launchJobWorker: 結果ファイルの空配列は成功として扱う', async () => {
+  const { result } = await runReviewJobWithResult('[]');
+  assert.equal(result.status, 'success');
+  assert.deepEqual(result.findings, []);
+});
+
+test('launchJobWorker: claudeのstream-json stdoutを無視して結果ファイルを読む', async () => {
+  const agentConfig = {
+    id: 'claude',
+    command: 'claude',
+    execArgs: ['--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose'],
+    extraArgs: ['--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose'],
+    nonInteractiveTokens: ['--print'],
+    promptDelivery: 'system-prompt-file',
+  };
+  const { result, calls } = await runReviewJobWithResult('[]', {
+    agentConfig,
+    stdout: '{"type":"system","subtype":"init"}\n{"type":"result","result":"[]"}',
+  });
+  assert.equal(result.status, 'success');
+  assert.equal(calls.length, 1);
+  assert.match(shellCommandText(calls[0]), /stream-json/);
+});
+
+test('launchJobWorker: agyのprintジョブも結果ファイル経由で成立する', async () => {
+  const agentConfig = {
+    id: 'agy',
+    command: 'agy',
+    execArgs: ['--dangerously-skip-permissions', '--print-timeout', '30m0s'],
+    extraArgs: ['--dangerously-skip-permissions', '--print-timeout', '30m0s'],
+    promptDelivery: 'flag',
+    promptFlag: '--print',
+  };
+  const { result, calls } = await runReviewJobWithResult('[]', {
+    agentConfig,
+    stdout: 'agy progress output',
+  });
+  assert.equal(result.status, 'success');
+  assert.equal(calls.length, 1);
+  assert.match(shellCommandText(calls[0]), /--print/);
 });
 
 test('launchJobWorker: エージェントが非0終了ならfailedで終了する', async () => {

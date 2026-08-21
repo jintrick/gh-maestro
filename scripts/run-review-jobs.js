@@ -401,12 +401,16 @@ ${manifest.acceptanceCriteria.map(item => `- ${item}`).join('\n')}
     : '';
 }
 
-function findingsOutputSection(aspect) {
+function findingsOutputSection(aspect, resultFile) {
+  const resultPath = resultFile
+    ? String(resultFile).replace(/\\/g, '/')
+    : '(ジョブ起動時に指定された結果ファイルのパス)';
   return `## 出力形式
 
-以下のJSON配列だけを標準出力に返してください。
-**JSON以外の説明・Markdown・コメントを絶対に混ぜないでください。**
-指摘がない場合は空配列 \`[]\` を返してください。
+レビュー完了後、以下のJSON配列を標準出力ではなく、指定された結果ファイルへUTF-8で書き出してください。
+結果ファイル: \`${resultPath}\`
+**結果ファイルにはJSON以外の説明・Markdown・コメントを絶対に混ぜないでください。**
+標準出力の内容は実行器から解釈されません。指摘がない場合も、結果ファイルへ空配列 \`[]\` を書き出してください。
 
 \`\`\`json
 [
@@ -454,12 +458,15 @@ ${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)
 (実際のdiffは作業ディレクトリ上で \`git diff\` またはファイル読み取りで確認してください)`;
 }
 
-function commonReviewRestrictions() {
+function commonReviewRestrictions(resultFile) {
+  const resultPath = resultFile
+    ? String(resultFile).replace(/\\/g, '/')
+    : '(ジョブ起動時に指定された結果ファイルのパス)';
   return `## 禁止事項
 
 - 必要な裏取りは対象diffと関連コードに限定すること
 - レビュー範囲を無制限に拡大しない
-- ファイル書き込みは禁止
+- ファイル書き込みは禁止。ただし、レビュー結果を指定された結果ファイル \`${resultPath}\` に書き出す場合だけ許可する
 - GitHubへの投稿は禁止
 
 ## Severity判定規準
@@ -505,7 +512,7 @@ ${preLeavesSection}
 
 ${reviewEvidenceSection(job, manifest)}
 
-${commonReviewRestrictions()}
+${commonReviewRestrictions(options.resultFile)}
 
 まずdiffと関連コードを探索し、観測した事実に基づく指摘を書き終えてください。
 指摘を書き終えるまで、post-review.mdを読むことを禁じます。以下にパスと内容が現れても参照してはいけません。
@@ -516,23 +523,23 @@ ${commonReviewRestrictions()}
 
 ${postLeavesSection}
 
-${findingsOutputSection(job.aspect)}`;
+${findingsOutputSection(job.aspect, options.resultFile)}`;
 }
 
-function parseFindings(stdout, stage) {
-  const text = stdout.trim();
-  const jsonMatch = text.match(/\[[\s\S]*\]/);
+function readFindingsFile(resultFile, stage) {
+  let text;
+  try {
+    if (!fs.statSync(resultFile).isFile()) throw new Error('not a regular file');
+    text = fs.readFileSync(resultFile, 'utf8');
+  } catch (e) {
+    throw new Error(`${stage}: result file read failed (${resultFile}): ${e.message}`);
+  }
+
   let findings;
-  if (jsonMatch) {
-    try {
-      findings = JSON.parse(jsonMatch[0]);
-    } catch (e) {
-      throw new Error(`${stage}: JSON parse failed. stdout preview: ${text.slice(0, 500)}`);
-    }
-  } else if (text === '' || text === '[]') {
-    findings = [];
-  } else {
-    throw new Error(`${stage}: no JSON array found in stdout. preview: ${text.slice(0, 500)}`);
+  try {
+    findings = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`${stage}: result JSON parse failed (${resultFile}): ${e.message}`);
   }
 
   if (!Array.isArray(findings)) throw new Error(`${stage}: output is not a JSON array`);
@@ -565,7 +572,6 @@ function runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef) {
     }
     let child;
     let settled = false;
-    const stdoutChunks = [];
     const finish = (result) => {
       if (settled) return;
       settled = true;
@@ -577,9 +583,11 @@ function runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef) {
       child = _spawn(shellArgs[0], shellArgs.slice(1), {
         cwd: reviewWtDir,
         env: process.env,
-        stdio: ['ignore', 'pipe', stderrFd],
+        // stdout is deliberately ignored. Review results are read from the file
+        // requested in the job prompt; parsing a mixed agent stream is unsafe.
+        stdio: ['ignore', 'ignore', stderrFd],
       });
-      if (!child || !child.stdout || typeof child.on !== 'function') {
+      if (!child || typeof child.on !== 'function') {
         finish({ error: 'spawn returned an invalid child process handle' });
         return;
       }
@@ -589,12 +597,8 @@ function runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef) {
       return;
     }
 
-    child.stdout.on('data', chunk => stdoutChunks.push(chunk));
     child.on('error', err => finish({ error: `agent process error: ${err.message}` }));
-    child.on('close', code => finish({
-      code,
-      stdout: Buffer.concat(stdoutChunks).toString('utf8').trim(),
-    }));
+    child.on('close', code => finish({ code }));
   });
 }
 
@@ -628,22 +632,46 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
   const fileCheck = validateCanonicalReviewFiles(job, skillsDir);
   if (!fileCheck.ok) return failed(fileCheck.error);
 
+  const configuredArgs = agentConfig.execArgs ?? agentConfig.extraArgs;
+  if (!Array.isArray(configuredArgs) || configuredArgs.some(arg => typeof arg !== 'string')) {
+    return failed(`agent "${agentConfig.id}" execArgs/extraArgs must be an array of strings`);
+  }
+
+  let resultDir;
+  try {
+    resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-job-result-'));
+  } catch (e) {
+    return failed(`result file setup failed: ${e.message}`);
+  }
+  const resultFile = path.join(resultDir, 'findings.json');
+  const cleanupResultDir = () => {
+    try { fs.rmSync(resultDir, { recursive: true, force: true }); } catch {}
+  };
+
   let prompt;
   try {
-    prompt = buildJobPrompt(job, manifest, reviewWtDir, options);
+    prompt = buildJobPrompt(job, manifest, reviewWtDir, { ...options, resultFile });
   } catch (e) {
+    cleanupResultDir();
     return failed(e.message);
   }
 
-  const logFile = workerLogPath(workspace, `review-job-${job.id}`, {
-    ownerKind: 'job', ownerId: job.id, workerName: `review-job-${job.id}`,
-  });
+  let logFile;
+  try {
+    logFile = workerLogPath(workspace, `review-job-${job.id}`, {
+      ownerKind: 'job', ownerId: job.id, workerName: `review-job-${job.id}`,
+    });
+  } catch (e) {
+    cleanupResultDir();
+    return failed(`log file path failed: ${e.message}`);
+  }
   try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); } catch {}
 
   let stderrFd;
   try {
     stderrFd = fs.openSync(logFile, 'a');
   } catch (e) {
+    cleanupResultDir();
     return failed(`log file open failed: ${e.message}`);
   }
 
@@ -667,10 +695,6 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
     promptFiles.delete(promptFile);
     try { fs.unlinkSync(promptFile); } catch {}
   };
-  const configuredArgs = agentConfig.execArgs ?? agentConfig.extraArgs;
-  if (!Array.isArray(configuredArgs) || configuredArgs.some(arg => typeof arg !== 'string')) {
-    return failed(`agent "${agentConfig.id}" execArgs/extraArgs must be an array of strings`);
-  }
   const argsConfig = {
     ...agentConfig,
     extraArgs: configuredArgs
@@ -706,12 +730,12 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
     if (run.error) return failed(`review process failed: ${run.error}`);
     if (timedOut) return failed('review job timeout (review process deadline reached)');
     if (run.code !== 0) {
-      return failed(`review agent exited with code ${run.code}${run.stdout ? ': ' + run.stdout.slice(0, 500) : ''}`);
+      return failed(`review agent exited with code ${run.code}`);
     }
 
     let findings;
     try {
-      findings = parseFindings(run.stdout, 'review process');
+      findings = readFindingsFile(resultFile, 'review process');
     } catch (e) {
       return failed(e.message);
     }
@@ -728,6 +752,7 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
       try { fs.unlinkSync(promptFile); } catch {}
     }
     try { fs.closeSync(stderrFd); } catch {}
+    cleanupResultDir();
   }
 }
 
