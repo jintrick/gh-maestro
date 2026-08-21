@@ -3,6 +3,11 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { spawnSync } = require('child_process');
+
+const { cleanSpawnEnv } = require('./_spawn-env');
+
+const SCRIPT = path.join(__dirname, '..', 'scripts', 'finalize-review.js');
 
 const {
   checkCompleteness,
@@ -15,6 +20,29 @@ const {
 
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES } = require('../scripts/shared/review-aspects');
 const { _validateAgainstSchema } = require('../scripts/shared/json-schema');
+
+test('CLI: --help は exit 0、用途エラーは exit 1', () => {
+  const help = spawnSync(process.execPath, [SCRIPT, '--help'], {
+    encoding: 'utf8',
+    env: cleanSpawnEnv(),
+  });
+  assert.equal(help.status, 0, `--help は exit 0: ${help.stderr}`);
+  assert.match(help.stdout, /finalize-review\.js/);
+
+  const missing = spawnSync(process.execPath, [SCRIPT], {
+    encoding: 'utf8',
+    env: cleanSpawnEnv(),
+  });
+  assert.equal(missing.status, 1, `引数不足は exit 1: ${missing.stderr}`);
+  assert.match(missing.stderr, /finalize-review\.js/);
+
+  const invalidMode = spawnSync(process.execPath, [SCRIPT, '--results', 'results.json', '--mode', 'invalid'], {
+    encoding: 'utf8',
+    env: cleanSpawnEnv(),
+  });
+  assert.equal(invalidMode.status, 1, `--mode 不正は exit 1: ${invalidMode.stderr}`);
+  assert.match(invalidMode.stderr, /--mode must be/);
+});
 
 test('checkCompleteness: all adopted leaves success passes', () => {
   const coverageLedger = {

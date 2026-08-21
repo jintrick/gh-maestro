@@ -148,11 +148,10 @@ test('buildFinalizePrompt: incomplete 時に --mode incomplete で最終化す�
 // 実プロセス（run-review-jobs.js）はspawnせず、注入した終了結果 {status,error} 分岐を検証する
 // （.claude/rules/test-process-spawn-safety.md 準拠）。
 //
-// judgeJobRun は終了コード単独では判別できない曖昧さ（run-review-jobs.js は
-// manifest検証失敗と一部ジョブ失敗の両方を exit 2 で返す）を、副作用の有無で判別する:
+// judgeJobRun は終了コードと副作用を組み合わせて監督結果を判定する:
+//   - status 1 + 結果JSON存在 → results-ready（ジョブが回って失敗が残った）
 //   - 不完全センチネル存在 → incomplete（manifest検証失敗・再試行上限）
-//   - 結果JSON存在 → results-ready（ジョブは回って失敗が残っただけ。完否判断はフェーズ2 RM）
-//   - どちらも無い（or status null/error）→ exec-failed（フェーズ2へ進めてはならない）
+//   - どちらも無い（or status 2/null/error）→ exec-failed（フェーズ2へ進めてはならない）
 
 // 一時ディレクトリに ghDir/reviewWtDir/results/センチネル用パスを作る。
 function makeJobFixtures() {
@@ -217,6 +216,18 @@ test('runJobsDeterministically: manifest検証失敗(2,センチネル書く)は
     const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
     assert.equal(r.outcome, 'incomplete');
     assert.equal(calls.length, 1, 'manifest validation failure must not retry');
+  } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
+});
+
+test('runJobsDeterministically: 構造的失敗(2)は結果JSONが残っていてもexec-failed', () => {
+  const fx = makeJobFixtures();
+  fs.writeFileSync(fx.resultsPath, '{}', 'utf8');
+  const calls = [];
+  _setRunReviewJobsOnce(() => { calls.push(1); return { status: 2, error: null }; });
+  try {
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    assert.equal(r.outcome, 'exec-failed');
+    assert.equal(calls.length, 1, '構造的失敗は再試行しない');
   } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
 });
 

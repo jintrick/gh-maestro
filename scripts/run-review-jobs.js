@@ -1399,6 +1399,24 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   };
 }
 
+/**
+ * CLI の実行結果を終了コードへ写像する。
+ *
+ * 用途エラーは CLI エントリポイントで 1 を返す。ここは実行開始後の結果だけを扱い、
+ * 一部ジョブ失敗（results が書かれた）は 1、構造的な実行失敗は 2、再試行上限は 3、
+ * 全ジョブ成功は 0 とする。
+ *
+ * @param {{ok?: boolean, summary?: object}|null|undefined} result
+ * @returns {number}
+ */
+function resolveRunJobsExitCode(result) {
+  const summary = result && typeof result.summary === 'object' ? result.summary : null;
+  if (summary && summary.retryLimitReached === true) return 3;
+  if (summary && Number.isInteger(summary.failed) && summary.failed > 0) return 1;
+  if (result && result.ok === true) return 0;
+  return 2;
+}
+
 // ── テスト用エクスポート ──────────────────────────────────────────────────────
 module.exports = {
   validateManifest,
@@ -1426,6 +1444,7 @@ module.exports = {
   MAX_REVIEW_ATTEMPTS,
   _setGhForTest,
   _setFinalizeReviewForTest,
+  resolveRunJobsExitCode,
   ALL_LEAF_IDS,
   TRUNK_TO_LEAVES,
   _setSpawn: (fn) => { _spawn = fn || spawn; },
@@ -1460,7 +1479,7 @@ if (require.main === module) {
       }
       for (const e of err.errors) console.error(`run-review-jobs: ${e.message}`);
       console.error(USAGE);
-      process.exit(2);
+      process.exit(1);
     }
 
     if (values['--help'] || values['-h']) {
@@ -1482,38 +1501,36 @@ if (require.main === module) {
     if (!/^[1-9]\d*$/.test(pr)) {
       console.error(`--pr は正整数でなければなりません: ${pr}`);
       console.error(USAGE);
-      process.exit(2);
+      process.exit(1);
     }
     const repo = values['--repo'];
     if (repo.trim() === '') {
       console.error('--repo は必須です（owner/repo）');
       console.error(USAGE);
-      process.exit(2);
+      process.exit(1);
     }
     const ghDir = values['--gh-dir'];
     if (String(ghDir).trim() === '') {
       console.error('--gh-dir は必須です（メインワークスペースの .gh-maestro ディレクトリ）');
       console.error(USAGE);
-      process.exit(2);
+      process.exit(1);
     }
     const jobTimeoutMs = values['--job-timeout'] ? parseInt(values['--job-timeout'], 10) : DEFAULT_JOB_TIMEOUT_MS;
     const totalTimeoutMs = values['--total-timeout'] ? parseInt(values['--total-timeout'], 10) : DEFAULT_TOTAL_TIMEOUT_MS;
 
     if (!manifestPath || !resultsPath) {
       console.error(USAGE);
-      process.exit(2);
+      process.exit(1);
     }
 
     const result = await runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo, ghDir);
 
     if (!result.ok) {
       console.error(JSON.stringify(result.summary));
-      // 再試行上限到達は既に不完全レビューとして通知済み。manifest検証失敗（exit 2）と
-      // 区別するため専用の終了コード3で終了する（RMはこれを見て再試行しない）。
-      process.exit(result.summary.retryLimitReached ? 3 : 2);
+      process.exit(resolveRunJobsExitCode(result));
     }
 
     console.log(JSON.stringify(result.summary));
-    process.exit(result.summary.failed > 0 ? 1 : 0);
+    process.exit(resolveRunJobsExitCode(result));
   })();
 }
