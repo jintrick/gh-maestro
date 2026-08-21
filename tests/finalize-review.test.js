@@ -337,7 +337,7 @@ test('finalizeReview(complete, --integrated): 統合ドラフトのfindingsを�
   copySchemaToWorkspace(tmpDir);
   try {
     const resultsPath = path.join(tmpDir, 'results.json');
-    fs.writeFileSync(resultsPath, JSON.stringify(completeGateResults()), 'utf8');
+    fs.writeFileSync(resultsPath, '\uFEFF' + JSON.stringify(completeGateResults()), 'utf8');
 
     // RMフェーズ2が重複を畳んだ統合ドラフト
     const draftPath = path.join(tmpDir, 'draft.json');
@@ -348,7 +348,7 @@ test('finalizeReview(complete, --integrated): 統合ドラフトのfindingsを�
         body: 'b', verified_references: ['src/foo.ts'],
       },
     ];
-    fs.writeFileSync(draftPath, JSON.stringify({ findings: integratedFindings }), 'utf8');
+    fs.writeFileSync(draftPath, '\uFEFF' + JSON.stringify({ findings: integratedFindings }), 'utf8');
 
     const outputPath = path.join(tmpDir, 'manager.json');
     const res = await finalizeReview(resultsPath, 'complete', outputPath, tmpDir, draftPath);

@@ -542,7 +542,7 @@ test('validateArtifactContent: 有効なpayloadを合格とする', () => {
       },
     ],
   });
-  const result = validateArtifactContent(payload, null);
+  const result = validateArtifactContent('\uFEFF' + payload, null);
   assert.equal(result.valid, true);
   assert.notEqual(result.payload, null);
 });
