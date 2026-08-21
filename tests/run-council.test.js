@@ -226,7 +226,7 @@ function loadModule({ spawn, resolveConfig, phaseJobs, graphqlOpts = {} }) {
     require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports };
   }
 
-  for (const mod of ['../scripts/git-worktree', '../scripts/shared/council-worktree']) {
+  for (const mod of ['../scripts/git-worktree', '../scripts/shared/council-worktree', '../scripts/shared/git-head']) {
     delete require.cache[require.resolve(mod)];
   }
 

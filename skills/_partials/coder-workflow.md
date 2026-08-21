@@ -21,7 +21,7 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
 2. **質問事項がある場合は通信ルールのコマンドでorchestratorに質問し、返答を待ってから作業を進める**
 3. **計画フェーズ（実装着手前に必須）**:
    - `$WORKTREE` 上で実装計画に必要な調査（対象ファイル・変更方針・作業分割・検証条件）を行う
-   - 実装計画をMarkdownファイルとして作成する
+   - 実装計画を `$WORKSPACE/.gh-maestro/plans/<issue>.md` にMarkdownファイルとして作成する（worktree は後で削除されるため、計画はworktree の外の per-workspace 領域に残す）
    - `publish-plan.js` で計画をIssueのpin済みコメントとして投稿する：
      ```sh
      node "{{SCRIPTS_PATH}}/publish-plan.js" --issue $ISSUE --body-file <計画ファイル> --workspace $WORKSPACE
@@ -34,17 +34,15 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
 5. **新規追加・修正したファイルに対応するテストケースを作成し、`npm test` で全passすることを確認する**
    - **失敗側・拒否側の経路を必ずテストする。** 検証・ガード・エラー分岐を追加したなら、「正しく通ること」だけでなく「**正しく拒否されること**」を検証するテストを書く。ロックが取れないとき、ファイルが読めないとき、外部コマンドが失敗したとき、必須の引数が無いとき——それぞれで処理が期待どおり中断し、危険な操作が実行されないことを固定する
    - 成功側だけを検証したテストは、フェイルクローズが実際に閉じることを保証しない。「テストは緑だが、守るべき性質は守られていない」状態を作る
-6. `git commit`/`git push` を行う
-7. `gh-create-pr.js` でPRを作成する：
+6. **初回実装完了時・レビュー指摘対応の修正push時に、ステージング・コミット・push・PR取得/作成・テスト結果申告を一つの操作にまとめた `push-and-declare.js` を実行する**:
    ```sh
-   node "{{SCRIPTS_PATH}}/gh-create-pr.js" --title "<PRタイトル>" --body "Closes #$ISSUE"
+   node "{{SCRIPTS_PATH}}/push-and-declare.js" --issue $ISSUE --fail <失敗件数> --pass <成功件数> --workspace $WORKSPACE
    ```
-   baseブランチはワーカー起動時に与えられた `BASE_BRANCH` が環境変数として自動注入され解決されるため、明示的に指定する必要はない（`--base` フラグは受け付けない。未設定ならPR作成は明確に失敗する）
-8. **PR作成後、またはレビュー指摘対応の修正push後に、手元で回したテスト結果を申告する**:
-   ```sh
-   node "{{SCRIPTS_PATH}}/declare-test-result.js" --pr <PR番号> --commit $(git rev-parse HEAD) --fail <失敗件数> --pass <成功件数>
-   ```
-   申告はPRの事実として記録され、orchestratorがマージ候補として人間に提示する際に参照される（申告がなくてもpushやPR作成が阻害されることはないが、事実として緑であることを伝えるために実行する）。修正pushを行った場合も、同様にテスト実行後に再申告すること。
+   - この一連の操作は「終状態への収束」として定義されており、同じコマンドの再実行だけで回復する（コミットすべき変更が無い場合は空コミットを作らず、その段をスキップする）
+   - コミットメッセージは `fix(issue-<N>): <Issueタイトル>` に固定される（モデル推論を挟まない）
+   - PRは get-or-create（既存PRがあれば使用、無ければ作成）。初回か修正かを自分で判定する必要はない
+   - 申告は常に行われる。`--fail` にテスト実行の失敗件数、`--pass` に成功件数を渡す（テストが赤でも終了コードは0）
+   - **素の `git commit` / `git push` / `gh pr create` を直接実行しない**（このスクリプトが一括で行う。個別実行すると申告を省く経路が生まれ、orchestratorがSTALE/NONE申告の検知で待たされる）
 
 ## 失敗時
 
@@ -57,6 +55,7 @@ EOF
 ## 制約
 
 - `main` への直接pushは禁止
+- 素の `git commit` / `git push` / `gh pr create` を直接実行しない（`push-and-declare.js` がステージング・コミット・push・PR取得/作成・テスト結果申告を一括で行う。個別実行は申告を省く経路を生む）
 - `$WORKTREE` ルートで `npm install` / `npm ci` は実行しない。ルートの `node_modules` はシステムがjunctionで自動リンク済みのため、ルートで npm install を実行するとワークスペース共有の `node_modules` を破壊する
 - 実装で新しいサブパッケージ（例: `gui/`）を追加した場合、そのディレクトリ内での `npm install` は許可する（`cd gui && npm install`）
 - 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない
