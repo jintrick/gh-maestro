@@ -564,6 +564,7 @@ test('launchJobWorker: 単一プロセスを同一cwdから起動し、pre/post�
     );
 
     assert.equal(result.status, 'success');
+    assert.deepEqual(result.findings, [finding]);
     assert.equal(calls.length, 1, 'one review process is spawned per job');
     assert.equal(calls[0].opts.cwd, worktreeDir);
     assert.match(shellCommandText(calls[0]), /exec/);
