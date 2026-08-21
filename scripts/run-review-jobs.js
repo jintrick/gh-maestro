@@ -27,8 +27,9 @@ const {
   ALL_LEAF_IDS,
   TRUNK_TO_LEAVES,
   VALID_ASPECTS,
+  VALID_SEVERITIES,
   FINDING_REQUIRED_FIELDS,
-  deriveLeafFilePath,
+  reviewFilesForLeaves,
 } = require('./shared/review-aspects');
 const { managedRoot } = require('./shared/storage-layout');
 
@@ -39,6 +40,9 @@ const DEFAULT_TOTAL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes total
 // （初回＋再試行）。council の MAX_PARTICIPANT_ATTEMPTS（=2）と同じ「合計試行回数」
 // セマンティクス: attempt 1,2 は許容し、attempt 3 を拒否する。
 const MAX_REVIEW_ATTEMPTS = 2;
+
+// テストでは spawn を注入し、NODE_TEST_CONTEXT 下で実プロセスを起動しない。
+let _spawn = spawn;
 
 const USAGE = `run-review-jobs.js — RMの実行manifestに従いレビュージョブをheadless起動する
 
@@ -259,66 +263,133 @@ function resolveReviewSkillsDir(options = {}) {
 }
 
 /**
- * ジョブの全葉ファイルをleaf_idsから導出して正本ディレクトリから読み取り、検証する。
- * 1件でも葉IDが未知、または正本ファイルが未存在・読み取り失敗ならエラーを返す（フェイルクローズ）。
+ * 正本ルートからの相対パスを解決する。パスは review-aspects.js のホワイトリストから
+ * 導出されるが、ルート外へ出ないこともここで確認して防御を一箇所に集約する。
  *
- * @param {object} job
+ * @param {string} relativePath
  * @param {string} skillsDir
- * @returns {{ok: true, leaves: Array<{path: string, content: string}>} | {ok: false, error: string}}
+ * @returns {{ok: true, resolvedPath: string} | {ok: false, error: string}}
+ */
+function resolveCanonicalReviewPath(relativePath, skillsDir) {
+  if (typeof relativePath !== 'string' || relativePath.length === 0) {
+    return { ok: false, error: `review file path must be a non-empty string: ${relativePath}` };
+  }
+  const root = path.resolve(skillsDir);
+  const resolvedPath = path.resolve(root, relativePath);
+  const rootPrefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  if (resolvedPath !== root && !resolvedPath.startsWith(rootPrefix)) {
+    return { ok: false, error: `review file path escapes canonical root (${relativePath})` };
+  }
+  return { ok: true, resolvedPath };
+}
+
+function jobReviewFilePaths(job) {
+  if (!Array.isArray(job.leaf_ids) || job.leaf_ids.length === 0) {
+    throw new Error(`job ${job.id}: leaf_ids must be a non-empty array`);
+  }
+  let files;
+  try {
+    files = reviewFilesForLeaves(job.leaf_ids);
+  } catch (e) {
+    throw new Error(`job ${job.id}: ${e.message}`);
+  }
+  return {
+    common: files[0],
+    leaves: job.leaf_ids.map((id, index) => ({
+      id,
+      pre: files[index * 2 + 1],
+      post: files[index * 2 + 2],
+    })),
+  };
+}
+
+function readCanonicalReviewFile(job, relativePath, skillsDir) {
+  const resolved = resolveCanonicalReviewPath(relativePath, skillsDir);
+  if (!resolved.ok) {
+    return { ok: false, error: `job ${job.id}: ${resolved.error}` };
+  }
+  try {
+    return {
+      ok: true,
+      value: { path: relativePath, content: fs.readFileSync(resolved.resolvedPath, 'utf8') },
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: `job ${job.id}: cannot read leaf file from canonical copy (${relativePath}): ${e.message}`,
+    };
+  }
+}
+
+/**
+ * 担当葉の正本ファイルが揃っていることを、内容をプロンプトへ渡す前に検証する。
+ * これにより、プロンプト生成後に必須の観点ファイル欠落で終わることを避ける。
+ */
+function validateCanonicalReviewFiles(job, skillsDir) {
+  let paths;
+  try {
+    paths = jobReviewFilePaths(job);
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+  const files = [paths.common, ...paths.leaves.flatMap(leaf => [leaf.pre, leaf.post])];
+  for (const relativePath of files) {
+    const resolved = resolveCanonicalReviewPath(relativePath, skillsDir);
+    if (!resolved.ok) return { ok: false, error: `job ${job.id}: ${resolved.error}` };
+    let fd;
+    try {
+      if (!fs.statSync(resolved.resolvedPath).isFile()) {
+        throw new Error('not a regular file');
+      }
+      fd = fs.openSync(resolved.resolvedPath, 'r');
+    } catch (e) {
+      return {
+        ok: false,
+        error: `job ${job.id}: cannot read leaf file from canonical copy (${relativePath}): ${e.message}`,
+      };
+    } finally {
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch {}
+      }
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * 担当葉の共通・事前・事後の観点定義を正本から読む。
  */
 function readJobLeaves(job, skillsDir) {
-  if (!Array.isArray(job.leaf_ids) || job.leaf_ids.length === 0) {
-    return { ok: false, error: `job ${job.id}: leaf_ids must be a non-empty array` };
+  let paths;
+  try {
+    paths = jobReviewFilePaths(job);
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
-  const leaves = [];
-  for (const leafId of job.leaf_ids) {
-    let leafPath;
-    try {
-      leafPath = deriveLeafFilePath(leafId);
-    } catch (e) {
-      return { ok: false, error: `job ${job.id}: ${e.message}` };
-    }
 
-    // deriveLeafFilePath はALL_LEAF_IDSのホワイトリストを通過したIDだけを受理するため、
-    // leafPathは絶対パスや親ディレクトリ参照を含まず、正本ルートからの相対位置に固定される。
-    const resolvedPath = path.resolve(skillsDir, leafPath);
-    let content;
-    try {
-      content = fs.readFileSync(resolvedPath, 'utf8');
-    } catch (e) {
-      return { ok: false, error: `job ${job.id}: cannot read leaf file from canonical copy (${leafPath}): ${e.message}` };
-    }
-    leaves.push({ path: leafPath, content });
+  const read = (relativePath) => readCanonicalReviewFile(job, relativePath, skillsDir);
+  const commonRes = read(paths.common);
+  if (!commonRes.ok) return commonRes;
+  const common = commonRes.value;
+
+  const leaves = [];
+  for (const leaf of paths.leaves) {
+    const entry = { id: leaf.id };
+    const preRes = read(leaf.pre);
+    if (!preRes.ok) return preRes;
+    entry.pre = preRes.value;
+    const postRes = read(leaf.post);
+    if (!postRes.ok) return postRes;
+    entry.post = postRes.value;
+    leaves.push(entry);
   }
-  return { ok: true, leaves };
+  return { ok: true, common, leaves };
 }
 
 // ── ジョブプロンプト生成 ──────────────────────────────────────────────────────
 
-/**
- * ジョブワーカーに渡すプロンプトを生成する。
- * 観点定義ファイルはjob.leaf_idsから導出し、配布済みの正本ディレクトリから読み取り、プロンプトに埋め込む。
- * 審査対象PRのworktree（reviewWtDir）からは決して観点定義を読み込まない（Issue #309）。
- * 導出した正本ファイルを読み取れない場合は例外を throw する（フェイルクローズ）。
- *
- * @param {object} job
- * @param {object} manifest
- * @param {string} reviewWtDir
- * @param {object} [options]
- * @returns {string}
- */
-function buildJobPrompt(job, manifest, reviewWtDir, options = {}) {
-  const skillsDir = resolveReviewSkillsDir(options);
-  const leafRes = readJobLeaves(job, skillsDir);
-  if (!leafRes.ok) {
-    throw new Error(leafRes.error);
-  }
-
-  const leavesSection = leafRes.leaves.map(lc =>
-    `### ${lc.path}\n\n${lc.content}`
-  ).join('\n\n---\n\n');
-
-  const acceptanceSection = Array.isArray(manifest.acceptanceCriteria) && manifest.acceptanceCriteria.length > 0
+function acceptanceCriteriaSection(manifest) {
+  return Array.isArray(manifest.acceptanceCriteria) && manifest.acceptanceCriteria.length > 0
     ? `## 受け入れ条件
 
 以下はReview Managerが対象Issueから忠実に列挙し、manifestに引き継いだ受け入れ条件です。判定の物差しとしてのみ使ってください。
@@ -328,57 +399,10 @@ ${manifest.acceptanceCriteria.map(item => `- ${item}`).join('\n')}
 
 `
     : '';
+}
 
-  return `あなたは gh-maestro のレビューワーカーです。担当観点「${job.aspect}」について、
-以下の葉ファイルの基準に従い、指定されたdiffをレビューしてください。
-
-## 担当観点
-
-${job.aspect}
-
-## 担当葉ファイル
-
-${leavesSection}
-
-## レビュー対象
-
-PR #${manifest.pr}
-リポジトリ: ${manifest.repo}
-HEAD: ${manifest.headRefOid}
-
-## 入力証拠
-
-作業ディレクトリはPR headにリセットされた専用worktreeです。
-以下のdiffと変更ファイル一覧、およびmanifestに存在する受け入れ条件だけを入力として使用してください。
-担当外の観点は評価しなくて構いません。
-
-${acceptanceSection}
-### 変更ファイル一覧
-
-${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)'}
-
-### diff
-
-(実際のdiffは作業ディレクトリ上で \`git diff\` またはファイル読み取りで確認してください)
-
-## 禁止事項
-
-- \`npm test\` 等のスコープ限定なしの全件テスト実行は禁止
-- \`npm run build\` 等の全体ビルド実行は禁止
-- diffで変更された特定のテストファイルのみを対象にしたピンポイント実行（例: \`node --test tests/<file>.test.js\`）は許容
-- 必要な裏取りは対象diffと関連コードに限定すること
-- レビュー範囲を無制限に拡大しない
-- ファイル書き込みは禁止
-- GitHubへの投稿は禁止
-
-## Severity判定規準
-
-- \`BLOCKER\`: マージすると本番で実害が発生する（データ破損・クラッシュ・セキュリティ侵害・機能不全）
-- \`MAJOR\`: 実害の直接発生はないが、放置コストが高い（再発性の高いバグ温床・保守困難化）
-- \`SUGGESTION\`: 任意の改善提案
-- 判定に迷う場合は低い方に倒す
-
-## 出力形式
+function findingsOutputSection(aspect) {
+  return `## 出力形式
 
 以下のJSON配列だけを標準出力に返してください。
 **JSON以外の説明・Markdown・コメントを絶対に混ぜないでください。**
@@ -387,7 +411,7 @@ ${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)
 \`\`\`json
 [
   {
-    "aspect": "${job.aspect}",
+    "aspect": "${aspect}",
     "path": "src/foo.ts",
     "line_anchor": "await saveUser(user)",
     "context_before": "if (!user.id) throw new Error('missing id')",
@@ -401,261 +425,310 @@ ${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)
 ]
 \`\`\`
 
-- \`aspect\`: 必ず \`"${job.aspect}"\` を設定してください
+- \`aspect\`: 必ず \`"${aspect}"\` を設定してください
 - \`line_anchor\`: PR head実ファイルに存在する連続したコード断片そのもの
 - \`severity_rationale\`: 判定根拠を1行で記述
 - \`body\`: 観測した事実・放置すると何が起きるか・修正の方向性を含める
-- \`verified_references\`: 実際に確認したファイルパスの配列（1件以上必須）
-`;
+- \`verified_references\`: 実際に確認したファイルパスの配列（1件以上必須)`;
 }
 
-// ── ジョブ起動・結果収集 ──────────────────────────────────────────────────────
+function reviewEvidenceSection(job, manifest) {
+  return `## レビュー対象
+
+PR #${manifest.pr}
+リポジトリ: ${manifest.repo}
+HEAD: ${manifest.headRefOid}
+
+## 入力証拠
+
+作業ディレクトリはPR headにリセットされた専用worktreeです。
+以下のdiffと変更ファイル一覧、およびmanifestに存在する受け入れ条件だけを入力として使用してください。
+担当外の観点は評価しなくて構いません。
+
+${acceptanceCriteriaSection(manifest)}### 変更ファイル一覧
+
+${(manifest.changedFiles || []).map(f => `- ${f}`).join('\n') || '(情報なし)'}
+
+### diff
+
+(実際のdiffは作業ディレクトリ上で \`git diff\` またはファイル読み取りで確認してください)`;
+}
+
+function commonReviewRestrictions() {
+  return `## 禁止事項
+
+- 必要な裏取りは対象diffと関連コードに限定すること
+- レビュー範囲を無制限に拡大しない
+- ファイル書き込みは禁止
+- GitHubへの投稿は禁止
+
+## Severity判定規準
+
+- \`BLOCKER\`: マージすると本番で実害が発生する（データ破損・クラッシュ・セキュリティ侵害・機能不全）
+- \`MAJOR\`: 実害の直接発生はないが、放置コストが高い（再発性の高いバグ温床・保守困難化）
+- \`SUGGESTION\`: 任意の改善提案
+- 判定に迷う場合は低い方に倒す`;
+}
 
 /**
- * 1ジョブをheadless起動し、標準出力からfindingsを取得する。
- *
- * @param {object} job
- * @param {object} manifest
- * @param {object} agentConfig
- * @param {string} reviewWtDir
- * @param {string} workspace
- * @param {number} timeoutMs
- * @param {object|null} childRef
- * @param {object} options
- * @returns {Promise<{jobId: string, status: 'success'|'failed', leaf_ids: string[], attempt: number, findings?: object[], error?: string}>}
+ * 単段のレビュー用プロンプトを生成する。post-review はプロンプトの後半へ置き、
+ * 指摘を書き終える前に読まないことを文面で明示することで、確認順序を担保する。
  */
-function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, timeoutMs, childRef = null, options = {}) {
+function buildJobPrompt(job, manifest, reviewWtDir, options = {}) {
+  const skillsDir = resolveReviewSkillsDir(options);
+  const leafRes = readJobLeaves(job, skillsDir);
+  if (!leafRes.ok) throw new Error(leafRes.error);
+
+  const preLeavesSection = leafRes.leaves.map(leaf =>
+    `### ${leaf.id} — ${leaf.pre.path}\n\n${leaf.pre.content}`
+  ).join('\n\n---\n\n');
+  const postLeavesSection = leafRes.leaves.map(leaf =>
+    `### ${leaf.id} — ${leaf.post.path}\n\n${leaf.post.content}`
+  ).join('\n\n---\n\n');
+
+  return `あなたは gh-maestro のレビューワーカーです。担当観点「${job.aspect}」について、
+以下の事前指示を踏まえ、指定されたdiffを自由にレビューしてください。
+
+## 担当観点
+
+${job.aspect}
+
+## 事前指示
+
+### 全ジョブ共通
+
+${leafRes.common.content}
+
+### 担当葉
+
+${preLeavesSection}
+
+${reviewEvidenceSection(job, manifest)}
+
+${commonReviewRestrictions()}
+
+まずdiffと関連コードを探索し、観測した事実に基づく指摘を書き終えてください。
+指摘を書き終えるまで、post-review.mdを読むことを禁じます。以下にパスと内容が現れても参照してはいけません。
+指摘を書き終えた後にだけpost-review.mdを読み、既に書いた指摘と照合してください。
+照合で担当観点に該当する実際の問題の取りこぼしが見つかった場合だけ、追加の指摘を作成してください。
+
+## 事後確認表（指摘を書き終えた後に読む）
+
+${postLeavesSection}
+
+${findingsOutputSection(job.aspect)}`;
+}
+
+function parseFindings(stdout, stage) {
+  const text = stdout.trim();
+  const jsonMatch = text.match(/\[[\s\S]*\]/);
+  let findings;
+  if (jsonMatch) {
+    try {
+      findings = JSON.parse(jsonMatch[0]);
+    } catch (e) {
+      throw new Error(`${stage}: JSON parse failed. stdout preview: ${text.slice(0, 500)}`);
+    }
+  } else if (text === '' || text === '[]') {
+    findings = [];
+  } else {
+    throw new Error(`${stage}: no JSON array found in stdout. preview: ${text.slice(0, 500)}`);
+  }
+
+  if (!Array.isArray(findings)) throw new Error(`${stage}: output is not a JSON array`);
+  const findingErrors = [];
+  for (let i = 0; i < findings.length; i++) {
+    const finding = findings[i];
+    if (!finding || typeof finding !== 'object' || Array.isArray(finding)) {
+      findingErrors.push(`finding[${i}] must be an object`);
+      continue;
+    }
+    for (const field of FINDING_REQUIRED_FIELDS) {
+      if (!(field in finding)) findingErrors.push(`finding[${i}].${field} is missing`);
+    }
+    if (finding.aspect && !VALID_ASPECTS.has(finding.aspect)) {
+      findingErrors.push(`finding[${i}].aspect invalid: ${finding.aspect}`);
+    }
+    if (finding.severity && !VALID_SEVERITIES.has(finding.severity)) {
+      findingErrors.push(`finding[${i}].severity invalid: ${finding.severity}`);
+    }
+  }
+  if (findingErrors.length > 0) throw new Error(`${stage}: finding validation: ${findingErrors.join('; ')}`);
+  return findings;
+}
+
+function runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef) {
   return new Promise((resolve) => {
-    // 非対話化トークン検証（フェイルクローズ、Issue #163 Review Manager指摘）。
-    // ジョブワーカーは execArgs ?? extraArgs を起動引数に使うため、execArgs を対話
-    // モード化した上書きを extraArgs 側の検証だけで素通りしないよう、実際に使われる
-    // 引数配列を検証してから spawn する（spawn 直前のガード。全ジョブが同じ
-    // agentConfig を共有するため、1件でも欠落すれば全ジョブが起動せず失敗する）。
-    const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
-    if (!tokenCheck.valid) {
-      resolve({
-        jobId: job.id,
-        status: 'failed',
-        leaf_ids: job.leaf_ids,
-        attempt: 1,
-        error: `agent "${agentConfig.id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (check ~/.gh-maestro/config.json agents["${agentConfig.id}"].execArgs / extraArgs)`,
-      });
+    if (_spawn === spawn && process.env.NODE_TEST_CONTEXT) {
+      resolve({ error: 'agent spawn refused during test execution; inject spawn for launch-path tests' });
       return;
     }
-
-    // 観点定義（葉ファイル）の正本読み込みと検証（フェイルクローズ: 読めなければエージェントを起動しない、Issue #309）
-    const skillsDir = resolveReviewSkillsDir(options);
-    const leafRes = readJobLeaves(job, skillsDir);
-    if (!leafRes.ok) {
-      resolve({
-        jobId: job.id,
-        status: 'failed',
-        leaf_ids: job.leaf_ids,
-        attempt: 1,
-        error: leafRes.error,
-      });
-      return;
-    }
-
-    let promptText;
-    try {
-      promptText = buildJobPrompt(job, manifest, reviewWtDir, options);
-    } catch (e) {
-      resolve({
-        jobId: job.id,
-        status: 'failed',
-        leaf_ids: job.leaf_ids,
-        attempt: 1,
-        error: e.message,
-      });
-      return;
-    }
-    const promptFile = path.join(os.tmpdir(), `review-job-${job.id}-${Date.now()}.md`);
-
-    try {
-      fs.writeFileSync(promptFile, promptText, 'utf8');
-    } catch (e) {
-      resolve({
-        jobId: job.id,
-        status: 'failed',
-        leaf_ids: job.leaf_ids,
-        attempt: 1,
-        error: `prompt file write failed: ${e.message}`,
-      });
-      return;
-    }
-
-    // エージェント引数を構築（run-review-manager.js の buildReviewManagerAgentArgs と同じパターン）
-    const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
-      .map(a => a.replace(/\{workspace\}/g, reviewWtDir));
-
-    const agentArgs = buildAgentCommandArgs({
-      ...agentConfig,
-      extraArgs,
-      promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
-      promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
-    }, {
-      promptFile,
-      shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
-      systemPromptText: `orchestratorです。レビューワーカーとして、担当観点「${job.aspect}」のレビューを実行してください。`,
-    });
-
-    const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
-
-    // ログファイル準備
-    const logFile = workerLogPath(workspace, `review-job-${job.id}`, {
-      ownerKind: 'job', ownerId: job.id, workerName: `review-job-${job.id}`,
-    });
-    try {
-      fs.mkdirSync(path.dirname(logFile), { recursive: true });
-    } catch {}
-
-    let stderrFd;
-    try {
-      stderrFd = fs.openSync(logFile, 'a');
-    } catch (e) {
-      try { fs.unlinkSync(promptFile); } catch {}
-      resolve({
-        jobId: job.id,
-        status: 'failed',
-        leaf_ids: job.leaf_ids,
-        attempt: 1,
-        error: `log file open failed: ${e.message}`,
-      });
-      return;
-    }
-
     let child;
+    let settled = false;
+    const stdoutChunks = [];
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (childRef) childRef.child = null;
+      resolve(result);
+    };
     try {
-      child = spawn(shellArgs[0], shellArgs.slice(1), {
+      const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
+      child = _spawn(shellArgs[0], shellArgs.slice(1), {
         cwd: reviewWtDir,
         env: process.env,
         stdio: ['ignore', 'pipe', stderrFd],
       });
+      if (!child || !child.stdout || typeof child.on !== 'function') {
+        finish({ error: 'spawn returned an invalid child process handle' });
+        return;
+      }
       if (childRef) childRef.child = child;
     } catch (e) {
-      try { fs.closeSync(stderrFd); } catch {}
-      try { fs.unlinkSync(promptFile); } catch {}
-      resolve({
-        jobId: job.id,
-        status: 'failed',
-        leaf_ids: job.leaf_ids,
-        attempt: 1,
-        error: `spawn failed: ${e.message}`,
-      });
+      finish({ error: `spawn failed: ${e.message}` });
       return;
     }
 
-    const stdoutChunks = [];
-    child.stdout.on('data', (chunk) => { stdoutChunks.push(chunk); });
-
-    const timer = setTimeout(() => {
-      try { child.kill(); } catch {}
-    }, timeoutMs);
-
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      try { fs.closeSync(stderrFd); } catch {}
-      try { fs.unlinkSync(promptFile); } catch {}
-
-      const stdout = Buffer.concat(stdoutChunks).toString('utf8').trim();
-
-      if (code !== 0) {
-        resolve({
-          jobId: job.id,
-          status: 'failed',
-          leaf_ids: job.leaf_ids,
-          attempt: 1,
-          error: `agent exited with code ${code}${stdout ? ': ' + stdout.slice(0, 500) : ''}`,
-        });
-        return;
-      }
-
-      // stdoutからJSON配列を抽出（前後の非JSONテキストを許容）
-      let findings;
-      const jsonMatch = stdout.match(/\[\s*\{[\s\S]*\}\s*\]/);
-      if (jsonMatch) {
-        try {
-          findings = JSON.parse(jsonMatch[0]);
-        } catch {
-          resolve({
-            jobId: job.id,
-            status: 'failed',
-            leaf_ids: job.leaf_ids,
-            attempt: 1,
-            error: `JSON parse failed. stdout preview: ${stdout.slice(0, 500)}`,
-          });
-          return;
-        }
-      } else if (stdout === '[]' || stdout === '') {
-        findings = [];
-      } else {
-        resolve({
-          jobId: job.id,
-          status: 'failed',
-          leaf_ids: job.leaf_ids,
-          attempt: 1,
-          error: `no JSON array found in stdout. preview: ${stdout.slice(0, 500)}`,
-        });
-        return;
-      }
-
-      if (!Array.isArray(findings)) {
-        resolve({
-          jobId: job.id,
-          status: 'failed',
-          leaf_ids: job.leaf_ids,
-          attempt: 1,
-          error: 'output is not a JSON array',
-        });
-        return;
-      }
-
-      // 個別findingの形状検証
-      const { VALID_SEVERITIES } = require('./shared/review-aspects');
-      const findingErrors = [];
-      for (let i = 0; i < findings.length; i++) {
-        const f = findings[i];
-        for (const field of FINDING_REQUIRED_FIELDS) {
-          if (!(field in f)) findingErrors.push(`finding[${i}].${field} is missing`);
-        }
-        if (f.aspect && !VALID_ASPECTS.has(f.aspect)) findingErrors.push(`finding[${i}].aspect invalid: ${f.aspect}`);
-        if (f.severity && !VALID_SEVERITIES.has(f.severity)) findingErrors.push(`finding[${i}].severity invalid: ${f.severity}`);
-      }
-
-      if (findingErrors.length > 0) {
-        resolve({
-          jobId: job.id,
-          status: 'failed',
-          leaf_ids: job.leaf_ids,
-          attempt: 1,
-          error: `finding validation: ${findingErrors.join('; ')}`,
-        });
-        return;
-      }
-
-      resolve({
-        jobId: job.id,
-        status: 'success',
-        leaf_ids: job.leaf_ids,
-        attempt: 1,
-        findings,
-      });
-    });
-
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      try { fs.closeSync(stderrFd); } catch {}
-      try { fs.unlinkSync(promptFile); } catch {}
-      resolve({
-        jobId: job.id,
-        status: 'failed',
-        leaf_ids: job.leaf_ids,
-        attempt: 1,
-        error: `agent process error: ${err.message}`,
-      });
-    });
+    child.stdout.on('data', chunk => stdoutChunks.push(chunk));
+    child.on('error', err => finish({ error: `agent process error: ${err.message}` }));
+    child.on('close', code => finish({
+      code,
+      stdout: Buffer.concat(stdoutChunks).toString('utf8').trim(),
+    }));
   });
+}
+
+/**
+ * 1ジョブを単一のheadlessエージェントプロセスで実行し、findingsを取得する。
+ */
+async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, timeoutMs, childRef = null, options = {}) {
+  const failed = (error) => ({
+    jobId: job.id,
+    status: 'failed',
+    leaf_ids: job.leaf_ids,
+    attempt: 1,
+    error,
+  });
+
+  const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
+  if (!tokenCheck.valid) {
+    return failed(`agent "${agentConfig.id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (check ~/.gh-maestro/config.json agents["${agentConfig.id}"].execArgs / extraArgs)`);
+  }
+
+  const promptDelivery = agentConfig.execPromptDelivery ?? agentConfig.promptDelivery;
+  const promptFlag = agentConfig.execPromptFlag ?? agentConfig.promptFlag;
+  if (!['flag', 'positional', 'system-prompt-file'].includes(promptDelivery)) {
+    return failed(`agent "${agentConfig.id}" prompt delivery "${promptDelivery}" is not supported for headless review`);
+  }
+  if (promptDelivery === 'flag' && !promptFlag) {
+    return failed(`agent "${agentConfig.id}" promptFlag is required for headless review`);
+  }
+
+  const skillsDir = resolveReviewSkillsDir(options);
+  const fileCheck = validateCanonicalReviewFiles(job, skillsDir);
+  if (!fileCheck.ok) return failed(fileCheck.error);
+
+  let prompt;
+  try {
+    prompt = buildJobPrompt(job, manifest, reviewWtDir, options);
+  } catch (e) {
+    return failed(e.message);
+  }
+
+  const logFile = workerLogPath(workspace, `review-job-${job.id}`, {
+    ownerKind: 'job', ownerId: job.id, workerName: `review-job-${job.id}`,
+  });
+  try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); } catch {}
+
+  let stderrFd;
+  try {
+    stderrFd = fs.openSync(logFile, 'a');
+  } catch (e) {
+    return failed(`log file open failed: ${e.message}`);
+  }
+
+  const promptFiles = new Set();
+  let timeoutHandle;
+  let timedOut = false;
+  const promptFileFor = () => {
+    const promptFile = path.join(os.tmpdir(), `review-job-${job.id}-review-${Date.now()}.md`);
+    promptFiles.add(promptFile);
+    return promptFile;
+  };
+  const writePrompt = (promptFile, text) => {
+    try {
+      fs.writeFileSync(promptFile, text, 'utf8');
+      return null;
+    } catch (e) {
+      return `prompt file write failed: ${e.message}`;
+    }
+  };
+  const cleanupPrompt = (promptFile) => {
+    promptFiles.delete(promptFile);
+    try { fs.unlinkSync(promptFile); } catch {}
+  };
+  const configuredArgs = agentConfig.execArgs ?? agentConfig.extraArgs;
+  if (!Array.isArray(configuredArgs) || configuredArgs.some(arg => typeof arg !== 'string')) {
+    return failed(`agent "${agentConfig.id}" execArgs/extraArgs must be an array of strings`);
+  }
+  const argsConfig = {
+    ...agentConfig,
+    extraArgs: configuredArgs
+      .map(arg => arg.replace(/\{workspace\}/g, reviewWtDir)),
+    promptDelivery,
+    promptFlag,
+  };
+  const shortPrompt = (promptFile) => `Read ${promptFile.replace(/\\/g, '/')} and execute it.`;
+
+  timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    try { if (childRef && childRef.child) childRef.child.kill(); } catch {}
+  }, timeoutMs);
+
+  try {
+    const promptFile = promptFileFor();
+    const promptWriteError = writePrompt(promptFile, prompt);
+    if (promptWriteError) return failed(promptWriteError);
+
+    let agentArgs;
+    try {
+      agentArgs = buildAgentCommandArgs(argsConfig, {
+        promptFile,
+        shortPrompt: shortPrompt(promptFile),
+        systemPromptText: `orchestratorです。レビューワーカーとして、担当観点「${job.aspect}」のレビューを実行してください。`,
+      });
+    } catch (e) {
+      return failed(`review command construction failed: ${e.message}`);
+    }
+
+    const run = await runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef);
+    cleanupPrompt(promptFile);
+    if (run.error) return failed(`review process failed: ${run.error}`);
+    if (timedOut) return failed('review job timeout (review process deadline reached)');
+    if (run.code !== 0) {
+      return failed(`review agent exited with code ${run.code}${run.stdout ? ': ' + run.stdout.slice(0, 500) : ''}`);
+    }
+
+    let findings;
+    try {
+      findings = parseFindings(run.stdout, 'review process');
+    } catch (e) {
+      return failed(e.message);
+    }
+    return {
+      jobId: job.id,
+      status: 'success',
+      leaf_ids: job.leaf_ids,
+      attempt: 1,
+      findings,
+    };
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    for (const promptFile of promptFiles) {
+      try { fs.unlinkSync(promptFile); } catch {}
+    }
+    try { fs.closeSync(stderrFd); } catch {}
+  }
 }
 
 // ── manifest検証失敗の通知 ────────────────────────────────────────────────────
@@ -1253,8 +1326,9 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
 
   // 全体タイムアウト: 締切到達時に残っている子プロセスを実際に終了させる
   let totalTimedOut = false;
+  let totalTimerHandle;
   const totalTimer = new Promise((resolve) => {
-    setTimeout(() => {
+    totalTimerHandle = setTimeout(() => {
       totalTimedOut = true;
       for (const ref of activeChildren) {
         try { if (ref.child) ref.child.kill(); } catch {}
@@ -1265,6 +1339,7 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
 
   const allJobsPromise = Promise.all(jobPromises);
   const raceResult = await Promise.race([allJobsPromise, totalTimer]);
+  if (!totalTimedOut && totalTimerHandle) clearTimeout(totalTimerHandle);
 
   let jobResults;
   if (raceResult === 'total-timeout') {
@@ -1324,6 +1399,8 @@ module.exports = {
   validateManifest,
   validateJobs,
   resolveReviewSkillsDir,
+  resolveCanonicalReviewPath,
+  validateCanonicalReviewFiles,
   readJobLeaves,
   buildJobPrompt,
   launchJobWorker,
@@ -1346,6 +1423,7 @@ module.exports = {
   _setFinalizeReviewForTest,
   ALL_LEAF_IDS,
   TRUNK_TO_LEAVES,
+  _setSpawn: (fn) => { _spawn = fn || spawn; },
 };
 
 // ── CLIエントリポイント ────────────────────────────────────────────────────────

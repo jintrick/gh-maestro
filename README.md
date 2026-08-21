@@ -161,20 +161,38 @@ Review Manager（`run-review-manager.js`）は `gh-maestro-reviewer` スキル�
 Correctness / Maintainability / Resilience & Security / Test Quality の4観点を独立Reviewerに分けてPRを評価する。
 
 観点別基準は `skills/gh-maestro-reviewer/` 配下の各観点ディレクトリにある基準ファイルを編集する。
+全ジョブ共通の禁止事項は `common.md` に集約され、各葉は `pre-review.md` と
+`post-review.md` に分かれている。1ジョブのプロンプトにはcommon、pre、postをこの順で
+渡し、指摘を書き終えるまでpostを読まず、その後にpostと照合する手順を明記する。
 
 ```
 skills/gh-maestro-reviewer/
+  common.md                 # 全ジョブ共通の禁止事項
   correctness/              # Correctness観点
-    api-contract.md           API互換性・契約
-    concurrency.md            並行処理・競合
-    logic-invariants.md       不変条件・境界値
+    api-contract/             API互換性・契約
+      pre-review.md           事前指示
+      post-review.md           事後確認表
+    concurrency/              並行処理・競合
+      pre-review.md
+      post-review.md
+    logic-invariants/         不変条件・境界値
+      pre-review.md
+      post-review.md
   maintainability/          # Maintainability観点
-    structure-naming.md       命名・構造・アンチパターン
+    structure-naming/
+      pre-review.md           命名・構造・アンチパターン（事前指示）
+      post-review.md          事後確認表
   resilience-security/      # Resilience & Security観点
-    failure-recovery.md       異常系・障害耐性
-    hostile-input.md          セキュリティ脆弱性・不正入力
+    failure-recovery/
+      pre-review.md           異常系・障害耐性
+      post-review.md
+    hostile-input/
+      pre-review.md           セキュリティ脆弱性・不正入力
+      post-review.md
   test-quality/             # Test Quality観点
-    test-quality.md           テスト品質
+    test-quality/
+      pre-review.md           テスト品質（事前指示）
+      post-review.md          事後確認表
 ```
 
 ## 設定（config.json）

@@ -1,6 +1,6 @@
 # Review Manager 動作仕様書
 
-反映時点: PR #293（Issue #292）マージ後
+反映時点: Issue #349 / PR #359 マージ後
 
 ---
 
@@ -19,22 +19,39 @@ PR が作られると自動で起動し、コードレビューを行って PR �
 ```
 skills/gh-maestro-reviewer/
 ├── SKILL.md                        Review Manager 自身の動き方
+├── common.md                       全ジョブ共通の禁止事項
 ├── correctness/                    ← 幹
-│   ├── logic-invariants.md         ← 葉（観点1つ）
-│   ├── api-contract.md
-│   └── concurrency.md
+│   ├── logic-invariants/           ← 葉（観点1つ）
+│   │   ├── pre-review.md           事前指示
+│   │   └── post-review.md          事後確認表
+│   ├── api-contract/
+│   │   ├── pre-review.md
+│   │   └── post-review.md
+│   └── concurrency/
+│       ├── pre-review.md
+│       └── post-review.md
 ├── resilience-security/
-│   ├── failure-recovery.md
-│   └── hostile-input.md
+│   ├── failure-recovery/
+│   │   ├── pre-review.md
+│   │   └── post-review.md
+│   └── hostile-input/
+│       ├── pre-review.md
+│       └── post-review.md
 ├── maintainability/
-│   └── structure-naming.md
+│   └── structure-naming/
+│       ├── pre-review.md
+│       └── post-review.md
 └── test-quality/
-    └── test-quality.md
+    └── test-quality/
+        ├── pre-review.md
+        └── post-review.md
 ```
 
 - **葉** が観点1つ。今は7枚ある
 - **幹** が葉の束。今は4つ
-- 各葉には「確認順序」「重点」「禁止」が書かれている。レビュアーはこれを読んで判断する
+- 各葉にはdiff前に読むpre-reviewと、指摘を書いた後に照合するpost-reviewがある
+- 1ジョブのプロンプトにはcommon.md、担当葉のpre-review、post-reviewをこの順で渡す
+- 指摘を書き終えるまでpost-reviewを読まず、書き終えた後にpost-reviewと照合して追加の指摘を出すことをプロンプトで明記する
 
 編集は必ずこのリポジトリ側で行う。インストール先（`~/.agents/skills/` 等）を直接編集しない。編集後は `dev` ブランチで `node scripts/install.js` を実行して反映する。
 
@@ -109,7 +126,8 @@ PR の差分を読み、7つの葉それぞれを「今回は見る／見ない�
 
 **黙って止まることはない。** 何も起きていないように見える場合、それは「まだ終わっていない」か「通知を見落としている」かのどちらか。
 
-レビューは最大30分で打ち切られる（1つの観点あたり10分）。
+レビューは最大30分で打ち切られる（1つの観点あたり10分）。各ジョブは単一の
+エージェントプロセスをこの制限内で実行する。
 
 ---
 
@@ -117,7 +135,7 @@ PR の差分を読み、7つの葉それぞれを「今回は見る／見ない�
 
 | やりたいこと | 触る場所 |
 |---|---|
-| 見る観点の中身を変えたい | `skills/gh-maestro-reviewer/<幹>/<葉>.md` |
+| 見る観点の中身を変えたい | `skills/gh-maestro-reviewer/<幹>/<葉>/pre-review.md` または同じ葉のpost-reviewファイル |
 | 観点を1つ増やしたい | 同じ幹に葉を足す（実行回数は増えない） |
 | ある観点を他と混ざらず独立に見せたい | 新しい幹を作る（実行が1つ増える） |
 | Review Manager 自身の動き方を変えたい | `skills/gh-maestro-reviewer/SKILL.md` |
