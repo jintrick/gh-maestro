@@ -572,7 +572,8 @@ test('インストーラー成果物検証: 全エージェント宛先・共有
         assert.equal(
           fs.readFileSync(distributedPath, 'utf8'),
           fs.readFileSync(path.join(skillsDir, 'gh-maestro-reviewer', file), 'utf8')
-            .replaceAll('{{SHARED_SKILLS_PATH}}', tmpSharedSkills),
+            .replaceAll('{{SHARED_SKILLS_PATH}}', tmpSharedSkills)
+            .replaceAll('{{SCRIPTS_PATH}}', tmpSharedScripts),
           `${label}/gh-maestro-reviewer/${file} の内容が正本と一致しない`
         );
       }
@@ -599,13 +600,14 @@ test('インストーラー成果物検証: 全エージェント宛先・共有
       assert.equal(
         fs.readFileSync(distributedPath, 'utf8'),
         fs.readFileSync(path.join(skillsDir, 'gh-maestro-reviewer', file), 'utf8')
-          .replaceAll('{{SHARED_SKILLS_PATH}}', tmpSharedSkills),
+          .replaceAll('{{SHARED_SKILLS_PATH}}', tmpSharedSkills)
+          .replaceAll('{{SCRIPTS_PATH}}', tmpSharedScripts),
         `共有スキル gh-maestro-reviewer/${file} の内容が正本と一致しない`
       );
     }
 
     // ── 共有スクリプトの検証 ──
-    for (const name of ['msg-send.js', 'unlink-junctions.js', 'spawn-worker.js', 'start-review-manager.js', 'poll-pr.js', 'review-publisher.js']) {
+    for (const name of ['msg-send.js', 'unlink-junctions.js', 'spawn-worker.js', 'start-review-manager.js', 'poll-pr.js', 'review-publisher.js', 'print-review-leaves.js']) {
       const p = path.join(tmpSharedScripts, name);
       assert.ok(fs.existsSync(p), `集約先にスクリプトが存在しない: ${p}`);
     }

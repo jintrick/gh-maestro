@@ -30,6 +30,8 @@ test('gh-maestro-reviewer: フェーズ1手順にフェーズ2手順を混在さ
 
   assert.match(phase1, /## RMの責務（フェーズ1: 計画）/);
   assert.match(phase1, /### 1\. 証拠の取得/);
+  assert.match(phase1, /node "\{\{SCRIPTS_PATH\}\}\/print-review-leaves\.js"/);
+  assert.doesNotMatch(phase1, /SHARED_SKILLS_PATH/);
   assert.match(phase1, /coverage ledger/);
   assert.match(phase1, /manifestのJSON構造/);
   assert.doesNotMatch(phase1, /## RMの責務（フェーズ2/);
