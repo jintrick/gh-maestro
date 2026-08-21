@@ -15,8 +15,7 @@
 const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { listComments } = require('./shared/gh-comments');
-
-const TEST_RESULT_MARKER = '<!-- gh-maestro-test-result:v1 -->';
+const { TEST_RESULT_MARKER } = require('./shared/test-declaration');
 
 const USAGE = `declare-test-result.js — PR に対するテスト実行結果（事実）を申告・更新する
 

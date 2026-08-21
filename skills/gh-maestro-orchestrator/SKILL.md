@@ -408,8 +408,9 @@ Review Manager の findings が0件のPRではトリアージは発生しない�
 - Review Manager 完了（`PR_REVIEW:...Posted inline findings: N` 到着 or `.gh-maestro/review-manager-<PR>.json` 生成）
 - 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER/MAJOR は、修正 push に対する explorer の事実確認が完了するまで未解消として扱う）
 - **テスト申告状態の確認と事実提示（Issue #209）**:
-  - `poll-reviews.js` またはPRコメントの最新テスト申告マーカー（`<!-- gh-maestro-test-result:v1 -->`）を確認する。
-  - 人間にマージ候補を提示する際、テスト申告の状態（「緑の申告あり」「申告なし」「申告が古い（STALE）」「赤の申告あり」）を**解釈を加えずそのまま事実として記載**する。
+  - `node "{{SCRIPTS_PATH}}/query-test-status.js" --pr <PR>` を実行し、成功時に返るJSON 1行をテスト申告状態の正本として確認する。このコマンドは現在のPRコメントとHEADをGitHubから取得するため、`poll-reviews.js` の内部状態ファイルや「新しいコメントがあるか」の推測を使わない。
+  - JSONの `status`（`GREEN`/`RED`/`STALE`/`NONE`）と、存在する `declaredSha`・`headSha`・`fail`・`pass` を**解釈を加えずそのまま事実として記載**する。`GREEN` は申告あり・SHA一致・fail 0、`RED` は申告あり・SHA一致・fail > 0、`STALE` はSHA不一致、`NONE` は申告なしまたは照合不能を表す。
+  - コマンドが非0終了した場合は、状態を `NONE` と取り違えず、テスト申告状態を照会できなかった事実を提示する。
   - **「無関係なテスト失敗だから」「今回は影響ないから」といった関係有無の判断や独自解釈を orchestrator が挟むことは禁止**。申告された事実（対象コミットSHA、fail件数、pass件数）をそのまま伝える。マージするかどうかの最終判断は人間に委ねる。
 
 #### 誤ってマージしてしまった場合の対処
