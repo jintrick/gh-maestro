@@ -560,7 +560,7 @@ if (require.main === module) {
       }
       for (const e of err.errors) console.error(`finalize-review: ${e.message}`);
       console.error(USAGE);
-      process.exit(2);
+      process.exit(1);
     }
 
     if (values['--help'] || values['-h']) {
@@ -576,12 +576,12 @@ if (require.main === module) {
 
     if (!resultsPath || !mode || (mode === 'complete' && !outputPath)) {
       console.error(USAGE);
-      process.exit(2);
+      process.exit(1);
     }
 
     if (mode !== 'complete' && mode !== 'incomplete') {
       console.error('--mode must be "complete" or "incomplete"');
-      process.exit(2);
+      process.exit(1);
     }
 
     const result = await finalizeReview(resultsPath, mode, outputPath || null, workspace, integratedPath);

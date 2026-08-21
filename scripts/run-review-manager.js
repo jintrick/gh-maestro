@@ -875,18 +875,15 @@ function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewW
 /**
  * run-review-jobs の終了結果を意味づける。
  *
- * run-review-jobs.js の終了コード契約は曖昧で、終了コード単独では不全と成功を
- * 分離できない。コード1/2/3は以下の意味を持つ（run-review-jobs.js の
- * runJobsFromManifest の ok=allSuccess と main の exit 分岐から確定）:
+ * run-review-jobs.js の終了コード契約は次の通り:
  *   - 0: 全ジョブ成功
- *   - 1: 実質デッドコード（ok=true=allSuccess のとき failed=0 でしか 0 にならないため到達しない）
- *   - 2: manifest検証失敗 と 一部ジョブ失敗（allSuccess=false）の両方
+ *   - 1: 一部ジョブ失敗（結果JSONが書かれている）
+ *   - 2: manifest検証・読み込み・構造的な起動失敗
  *   - 3: 再試行上限（finalize-review --mode incomplete が通知し、センチネルを書いた）
  *
- * 曖昧な 2 は、副作用の有無で判別する:
- *   - 不完全センチネル存在 → manifest検証失敗・再試行上限（incomplete 確定）
- *   - 結果JSON存在 → ジョブは回って失敗が残っただけ。結果を持ってフェーズ2へ進む
- *   - どちらも無い → 判別不能（exec 失敗）
+ * 2/3 の不完全レビュー経路はセンチネルで確定し、センチネルが無い構造的失敗は
+ * exec-failed として扱う。終了コードだけでなく成果物の存在も確認するのは、
+ * ヘッドレス実行の結果を保証できないままフェーズ2へ進めないためである。
  *
  * @returns {{outcome:'results-ready'|'incomplete'|'exec-failed', reason:string}}
  *   results-ready — 結果JSONが書かれた（全成功 or 再試行後も一部失敗。完否判断はフェーズ2 RMが行う）
@@ -906,10 +903,10 @@ function judgeJobRun({ status, error }, { ghDir, reviewWtDir, pr, resultsPath })
   if (status === 0) {
     return { outcome: 'results-ready', reason: '全ジョブ成功' };
   }
-  // status 1/2（一部失敗・manifest検証失敗の残り）。結果JSONが書かれていればフェーズ2へ進む。
-  // ジョブ失敗経路では run-review-jobs が結果を書き出してから非0で抜けるため、JSON存在が「進んでよい」の根拠。
-  if (fs.existsSync(resultsPath)) {
-    return { outcome: 'results-ready', reason: `一部ジョブ失敗（status ${status}）だが結果JSONあり。完否判断はフェーズ2 RM` };
+  // 一部ジョブ失敗だけが結果JSONを書き出して status 1 で終了する。
+  // 構造的失敗の status 2 を、残留した結果ファイルだけで通してはならない。
+  if (status === 1 && fs.existsSync(resultsPath)) {
+    return { outcome: 'results-ready', reason: '一部ジョブ失敗（status 1）だが結果JSONあり。完否判断はフェーズ2 RM' };
   }
   // 非0なのに結果JSONが無い → 何らかの未知の失敗。results-ready を返してフェーズ2を誤起動してはならない。
   return { outcome: 'exec-failed', reason: `run-review-jobs が status ${status} で終了したが結果JSONが無い（${resultsPath}）` };
@@ -936,7 +933,7 @@ function runJobsDeterministically({ manifestPath, resultsPath, pr, repo, ghDir, 
   if (attempt1.judged.outcome !== 'results-ready' || attempt1.run.status === 0) {
     return attempt1.judged;
   }
-  // 結果JSONはあるが一部失敗（status 1/2, 非0）。一時的なジョブ失敗とみなし、上限2回まで再試行
+  // 結果JSONはあるが一部失敗（status 1）。一時的なジョブ失敗とみなし、上限2回まで再試行
   // （applyRetryGate が attempt を消費し、3回目は exit 3 で拒否される）。
   log(`some jobs failed (${attempt1.judged.reason}); retrying (attempt 2)`);
   const attempt2 = runOnce();

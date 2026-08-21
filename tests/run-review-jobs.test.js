@@ -33,6 +33,7 @@ const {
   incrementRetryCount,
   applyRetryGate,
   MAX_REVIEW_ATTEMPTS,
+  resolveRunJobsExitCode,
   _setGhForTest,
   _setFinalizeReviewForTest,
   _setSpawn,
@@ -1300,7 +1301,15 @@ test('buildManifestLoadFailureComment: パース失敗の本文に SyntaxError �
   assert.match(readBody, /ENOENT: no such file/);
 });
 
-test('CLI: --pr / --repo は必須で、欠落・不正は作業前に exit 2（クラッシュさせない）', () => {
+test('resolveRunJobsExitCode: 成功・一部失敗・構造的失敗・再試行上限を区別する', () => {
+  assert.equal(resolveRunJobsExitCode({ ok: true, summary: { failed: 0 } }), 0);
+  assert.equal(resolveRunJobsExitCode({ ok: false, summary: { failed: 2 } }), 1);
+  assert.equal(resolveRunJobsExitCode({ ok: false, summary: { error: 'manifest validation failed' } }), 2);
+  assert.equal(resolveRunJobsExitCode({ ok: false, summary: { retryLimitReached: true } }), 3);
+  assert.equal(resolveRunJobsExitCode(null), 2);
+});
+
+test('CLI: --help は exit 0、--pr / --repo の用途エラーは exit 1（クラッシュさせない）', () => {
   const scriptPath = path.join(__dirname, '..', 'scripts', 'run-review-jobs.js');
   const baseArgs = ['--manifest', 'm.json', '--results', 'r.json'];
   const run = (args) => spawnSync(process.execPath, [scriptPath, ...args], {
@@ -1308,26 +1317,30 @@ test('CLI: --pr / --repo は必須で、欠落・不正は作業前に exit 2（
     env: cleanSpawnEnv(),
   });
 
-  // --pr 欠落 → exit 2 の明確なメッセージ（parseFlags は必須欠落を ArgsValidationError で
+  const help = run(['--help']);
+  assert.equal(help.status, 0, `--help は exit 0: ${help.stderr}`);
+  assert.match(help.stdout, /run-review-jobs\.js/);
+
+  // --pr 欠落 → exit 1 の明確なメッセージ（parseFlags は必須欠落を ArgsValidationError で
   // throw するため、null.trim() 等の TypeError クラッシュにしないことが本テストの趣旨）
   const noPr = run([...baseArgs, '--repo', 'o/r']);
-  assert.equal(noPr.status, 2, `--pr 欠落は exit 2: ${noPr.stderr}`);
+  assert.equal(noPr.status, 1, `--pr 欠落は exit 1: ${noPr.stderr}`);
   assert.match(noPr.stderr, /必須フラグがありません: --pr/);
 
-  // --pr 不正（非正整数）→ exit 2（--gh-dir は必須化されているため併せて渡す）
+  // --pr 不正（非正整数）→ exit 1（--gh-dir は必須化されているため併せて渡す）
   const badPr = run([...baseArgs, '--pr', 'abc', '--repo', 'o/r', '--gh-dir', 'g']);
-  assert.equal(badPr.status, 2, `--pr 不正は exit 2: ${badPr.stderr}`);
+  assert.equal(badPr.status, 1, `--pr 不正は exit 1: ${badPr.stderr}`);
   assert.match(badPr.stderr, /--pr は正整数でなければなりません/);
 
-  // --repo 欠落 → exit 2（TypeError クラッシュで exit 1 にならないこと）
+  // --repo 欠落 → exit 1（TypeError クラッシュにならないこと）
   const noRepo = run([...baseArgs, '--pr', '42']);
-  assert.equal(noRepo.status, 2, `--repo 欠落は exit 2（クラッシュではない）: ${noRepo.stderr}`);
+  assert.equal(noRepo.status, 1, `--repo 欠落は exit 1（クラッシュではない）: ${noRepo.stderr}`);
   assert.match(noRepo.stderr, /必須フラグがありません: --repo/);
   assert.doesNotMatch(noRepo.stderr, /TypeError/);
 
-  // --gh-dir 欠落 → exit 2（Issue #273。--repo と同型のクラッシュにしないこと）
+  // --gh-dir 欠落 → exit 1（Issue #273。--repo と同型のクラッシュにしないこと）
   const noGhDir = run([...baseArgs, '--pr', '42', '--repo', 'o/r']);
-  assert.equal(noGhDir.status, 2, `--gh-dir 欠落は exit 2（クラッシュではない）: ${noGhDir.stderr}`);
+  assert.equal(noGhDir.status, 1, `--gh-dir 欠落は exit 1（クラッシュではない）: ${noGhDir.stderr}`);
   assert.match(noGhDir.stderr, /必須フラグがありません: --gh-dir/);
   assert.doesNotMatch(noGhDir.stderr, /TypeError/);
 });
