@@ -18,6 +18,18 @@ function withTempDir(fn) {
   }
 }
 
+function withWorkerName(workerName, fn) {
+  const previous = process.env.GH_MAESTRO_WORKER;
+  if (workerName == null) delete process.env.GH_MAESTRO_WORKER;
+  else process.env.GH_MAESTRO_WORKER = workerName;
+  try {
+    return fn();
+  } finally {
+    if (previous == null) delete process.env.GH_MAESTRO_WORKER;
+    else process.env.GH_MAESTRO_WORKER = previous;
+  }
+}
+
 // ── --help / -h ────────────────────────────────────────────────────────────
 
 test('--help が usage を返して code 0', () => {
@@ -25,6 +37,7 @@ test('--help が usage を返して code 0', () => {
   assert.equal(r.code, 0);
   assert.ok(r.lines.join('\n').includes('msg-read.js'));
   assert.ok(r.lines.join('\n').includes('--plan'));
+  assert.ok(r.lines.join('\n').includes('--issue-context'));
   assert.ok(r.lines.join('\n').includes('--issue'));
   assert.equal(r.errLines.length, 0);
 });
@@ -34,6 +47,7 @@ test('-h が usage を返して code 0', () => {
   assert.equal(r.code, 0);
   assert.ok(r.lines.join('\n').includes('msg-read.js'));
   assert.ok(r.lines.join('\n').includes('--plan'));
+  assert.ok(r.lines.join('\n').includes('--issue-context'));
   assert.equal(r.errLines.length, 0);
 });
 
@@ -89,6 +103,32 @@ test('--plan 指定時に位置引数（commentId）が渡された場合は cod
   const r = msgRead.main(['--plan', '--issue', '42', '12345']);
   assert.equal(r.code, 1);
   assert.ok(r.errLines.some(l => l.includes('--plan 指定時は commentId を指定できません')));
+});
+
+// ── 引数エラー（--issue-context モード） ──────────────────────────────────
+
+test('--issue-context 指定時に --issue なしは code 1', () => {
+  const r = msgRead.main(['--issue-context']);
+  assert.equal(r.code, 1);
+  assert.ok(r.errLines.some(l => l.includes('--issue-context 指定時は --issue <N> が必須です')));
+});
+
+test('--issue-context 指定時に --issue が正の整数でない場合は code 1', () => {
+  const r = msgRead.main(['--issue-context', '--issue', '0']);
+  assert.equal(r.code, 1);
+  assert.ok(r.errLines.some(l => l.includes('--issue は正の整数で指定してください')));
+});
+
+test('--issue-context 指定時に位置引数（commentId）が渡された場合は code 1', () => {
+  const r = msgRead.main(['--issue-context', '--issue', '42', '12345']);
+  assert.equal(r.code, 1);
+  assert.ok(r.errLines.some(l => l.includes('--issue-context 指定時は commentId を指定できません')));
+});
+
+test('--plan と --issue-context は同時指定できない', () => {
+  const r = msgRead.main(['--plan', '--issue-context', '--issue', '42']);
+  assert.equal(r.code, 1);
+  assert.ok(r.errLines.some(l => l.includes('--plan と --issue-context は同時指定できません')));
 });
 
 // ── stripMarker ─────────────────────────────────────────────────────────────
@@ -188,6 +228,163 @@ test('repo 解決失敗時に code 1', () => {
     assert.equal(r.code, 1);
     assert.ok(r.errLines.some(l => l.includes('リポジトリを解決できません')));
   });
+});
+
+// ── メイン（--issue-context モード） ───────────────────────────────────────
+
+test('--issue-context: Issue本文と自分宛て・計画コメントだけを出力する', () => {
+  withWorkerName('worker-self', () => withTempDir(workspace => {
+    msgRead._setGhRepoView((opts) => {
+      assert.equal(opts.cwd, workspace);
+      return { status: 0, stdout: 'owner/repo\n' };
+    });
+    msgRead._setGhApiIssue((repo, issue, opts) => {
+      assert.equal(repo, 'owner/repo');
+      assert.equal(issue, '42');
+      assert.equal(opts.cwd, workspace);
+      return {
+        status: 0,
+        stdout: JSON.stringify({ title: 'Issue title', body: 'Issue requirements' }),
+      };
+    });
+    msgRead._setGhListComments((repo, issue, opts) => {
+      assert.equal(repo, 'owner/repo');
+      assert.equal(issue, '42');
+      assert.equal(opts.cwd, workspace);
+      return {
+        status: 0,
+        stdout: JSON.stringify([
+          {
+            id: 1,
+            body: '<!-- gh-maestro {"v":1,"to":"worker-self","from":"orchestrator"} -->\nApproved for this worker',
+          },
+          {
+            id: 2,
+            body: '<!-- gh-maestro {"v":1,"to":"other-worker","from":"orchestrator"} -->\nNot for this worker',
+          },
+          { id: 3, body: 'Third-party comment without a marker' },
+          { id: 5, body: '<!-- gh-maestro {broken json -->\nMalformed marker' },
+          {
+            id: 4,
+            body: `${PLAN_MARKER}\n# Approved plan\nPlan details`,
+            pin: { pinned_at: '2026-01-01T00:00:00Z' },
+          },
+        ]),
+      };
+    });
+
+    const r = msgRead.main(['--issue-context', '--issue', '42', '--workspace', workspace]);
+    assert.equal(r.code, 0);
+    const output = r.lines.join('\n');
+    assert.match(output, /Issue title/);
+    assert.match(output, /Issue requirements/);
+    assert.match(output, /Approved for this worker/);
+    assert.match(output, /# Approved plan/);
+    assert.match(output, /Plan details/);
+    assert.doesNotMatch(output, /Not for this worker/);
+    assert.doesNotMatch(output, /Third-party comment without a marker/);
+    assert.doesNotMatch(output, /Malformed marker/);
+    assert.doesNotMatch(output, /gh-maestro/);
+  }));
+});
+
+test('--issue-context: GH_MAESTRO_WORKER がない場合は取得処理を実行せず code 1', () => {
+  withWorkerName(null, () => withTempDir(workspace => {
+    let issueCalled = false;
+    let commentsCalled = false;
+    msgRead._setGhRepoView(() => ({ status: 0, stdout: 'owner/repo\n' }));
+    msgRead._setGhApiIssue(() => {
+      issueCalled = true;
+      return { status: 0, stdout: '{}' };
+    });
+    msgRead._setGhListComments(() => {
+      commentsCalled = true;
+      return { status: 0, stdout: '[]' };
+    });
+
+    const r = msgRead.main(['--issue-context', '--issue', '42', '--workspace', workspace]);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('GH_MAESTRO_WORKER')));
+    assert.equal(issueCalled, false);
+    assert.equal(commentsCalled, false);
+  }));
+});
+
+test('--issue-context: Issue本文の取得失敗時はコメント一覧を取得せず code 1', () => {
+  withWorkerName('worker-self', () => withTempDir(workspace => {
+    let commentsCalled = false;
+    msgRead._setGhRepoView(() => ({ status: 0, stdout: 'owner/repo\n' }));
+    msgRead._setGhApiIssue(() => ({ status: 1, stderr: 'gh: Not Found' }));
+    msgRead._setGhListComments(() => {
+      commentsCalled = true;
+      return { status: 0, stdout: '[]' };
+    });
+
+    const r = msgRead.main(['--issue-context', '--issue', '42', '--workspace', workspace]);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('Issue本文の取得に失敗しました')));
+    assert.equal(commentsCalled, false);
+  }));
+});
+
+test('--issue-context: Issue本文のJSONが不正な場合は code 1', () => {
+  withWorkerName('worker-self', () => withTempDir(workspace => {
+    let commentsCalled = false;
+    msgRead._setGhRepoView(() => ({ status: 0, stdout: 'owner/repo\n' }));
+    msgRead._setGhApiIssue(() => ({ status: 0, stdout: 'not json' }));
+    msgRead._setGhListComments(() => {
+      commentsCalled = true;
+      return { status: 0, stdout: '[]' };
+    });
+
+    const r = msgRead.main(['--issue-context', '--issue', '42', '--workspace', workspace]);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('Issue本文のJSONパースまたは形式検証に失敗しました')));
+    assert.equal(commentsCalled, false);
+  }));
+});
+
+test('--issue-context: コメント一覧のJSONが不正な場合は code 1', () => {
+  withWorkerName('worker-self', () => withTempDir(workspace => {
+    msgRead._setGhRepoView(() => ({ status: 0, stdout: 'owner/repo\n' }));
+    msgRead._setGhApiIssue(() => ({
+      status: 0,
+      stdout: JSON.stringify({ title: 'Issue title', body: 'Issue body' }),
+    }));
+    msgRead._setGhListComments(() => ({ status: 0, stdout: 'not json' }));
+
+    const r = msgRead.main(['--issue-context', '--issue', '42', '--workspace', workspace]);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('コメント一覧のJSONパースに失敗しました')));
+  }));
+});
+
+test('--issue-context: gh apiのIssue取得argvとworkspaceを実装経由で検証する', () => {
+  withWorkerName('worker-self', () => withTempDir(workspace => {
+    const calls = [];
+    msgRead._setSpawnSync((cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      if (args[0] === 'repo') return { status: 0, stdout: 'owner/repo\n' };
+      return {
+        status: 0,
+        stdout: JSON.stringify({ title: 'Issue title', body: 'Issue body' }),
+      };
+    });
+    msgRead._setGhListComments(() => ({ status: 0, stdout: '[]' }));
+    msgRead._setGhRepoView(null);
+    msgRead._setGhApiIssue(null);
+    try {
+      const r = msgRead.main(['--issue-context', '--issue', '42', '--workspace', workspace]);
+      assert.equal(r.code, 0);
+      assert.deepEqual(calls[0].args, ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner']);
+      assert.deepEqual(calls[1].args, ['api', '--method', 'GET', 'repos/owner/repo/issues/42']);
+      assert.equal(calls[1].opts.cwd, workspace);
+    } finally {
+      msgRead._setGhRepoView(null);
+      msgRead._setGhApiIssue(null);
+      msgRead._setSpawnSync(null);
+    }
+  }));
 });
 
 // ── メイン（--plan モード） ─────────────────────────────────────────────────
