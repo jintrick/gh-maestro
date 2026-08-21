@@ -40,7 +40,9 @@ function loadModule(spawnSyncImpl) {
   };
 
   const gitWorktreePath = require.resolve('../scripts/git-worktree');
+  const gitHeadPath = require.resolve('../scripts/shared/git-head');
   delete require.cache[gitWorktreePath];
+  delete require.cache[gitHeadPath];
   delete require.cache[councilWorktreePath];
   const mod = require(councilWorktreePath);
 

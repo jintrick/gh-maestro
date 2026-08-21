@@ -20,12 +20,12 @@ const path = require('path');
 const { spawnSync } = require('../child-process');
 const { assertWithinRoot } = require('./worker-factory');
 const { worktreeAddDetached, worktreeRemove } = require('../git-worktree');
+const { resolveGitHead, SHA_RE } = require('./git-head');
 
 const SESSION_RE = /^[A-Za-z0-9_-]{1,64}$/;
 // SESSION_RE の上限64文字から、collision接尾辞（-2, -3...）の余地を差し引いた
 // 自動生成スラッグの基本長。56文字 + "-2" 程度の接尾辞でも64を超えない。
 const MAX_SLUG_BASE_LEN = 56;
-const SHA_RE = /^[0-9a-f]{40}$/;
 
 /**
  * --session を厳密に形式検証する。形式外なら throw。
@@ -153,19 +153,12 @@ function resolveSession({ session, title, workspace }) {
 
 /**
  * ワークスペースの HEAD コミットを取得する。失敗時は throw。
+ * 実装は scripts/shared/git-head.js の resolveGitHead へ委譲する（Issue #374 で抽出・共有化）。
  * @param {string} workspace リポジトリルート
  * @returns {string} 40桁の sha
  */
 function resolveWorkspaceHead(workspace) {
-  const r = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' });
-  if (r.error || r.status !== 0) {
-    throw new Error(`git rev-parse HEAD failed: ${(r.stderr || '').toString().trim() || (r.error && r.error.message) || 'unknown error'}`);
-  }
-  const sha = String(r.stdout || '').trim();
-  if (!SHA_RE.test(sha)) {
-    throw new Error(`git rev-parse HEAD returned unexpected value: ${JSON.stringify(sha)}`);
-  }
-  return sha;
+  return resolveGitHead(workspace);
 }
 
 /**
