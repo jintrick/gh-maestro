@@ -223,6 +223,10 @@ Issue は依存関係が無い限り並列で進行させる。直列化して�
 
 **実装詳細（対象ファイル・変更方針・作業分割・検証条件）は Issue 本文には書かない。** これらはコーダーが実装着手前の計画フェーズで作成し、計画として投稿する。Issue本文は「何を実現したいか」（目的・振る舞い・制約・対象外・受け入れ条件）に徹する。
 
+#### 保留Issueから切り出す場合
+
+起票する内容が保留Issue（`gh-maestro-pending` ラベル）の項目に由来する場合は、`{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/pending-list.md` の「切り出し」に従う。新規Issueの作成と、元になった `[保留]` コメントの削除は一続きの手順である。削除の可否を人間に諮らない（対象コメントが一意に特定できない場合だけ確認する）。
+
 #### Issue本文テンプレート
 
 Issueの本文骨格と起票前チェックは `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/issue-template.md` に従うこと。
