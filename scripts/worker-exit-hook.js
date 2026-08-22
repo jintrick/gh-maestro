@@ -33,6 +33,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+const { listPrsByBranch, parsePrListResponse } = require('./shared/gh-pr');
 const { compactWorkerLog } = require('./shared/strip-thinking-token-lines');
 const { workerLogPath } = require('./shared/headless-launch');
 
@@ -50,12 +51,11 @@ let _ghApiComments = (repo, issue, since, opts = {}) => {
 };
 
 let _ghPrList = (repo, headBranch, opts = {}) => {
-  return spawnSync('gh', [
-    'pr', 'list', '--repo', repo,
-    '--head', headBranch,
-    '--state', 'open',
-    '--json', 'number,createdAt',
-  ], { encoding: 'utf8', timeout: 30000, ...opts });
+  return listPrsByBranch(repo, headBranch, {
+    state: 'open',
+    json: 'number,createdAt',
+    ...opts,
+  });
 };
 
 // msg-send.js自身が「本文は位置引数で渡せない」ガードを持つ（--stdin/--body-fileのみ許可。
@@ -104,14 +104,11 @@ function checkPrCreatedDuringResume({ repo, workerBranch, sinceTimestamp }) {
     return false;
   }
 
-  let prs;
-  try {
-    prs = JSON.parse(result.stdout || '[]');
-  } catch {
+  const prs = parsePrListResponse(result.stdout);
+  if (!prs) {
     process.stderr.write('worker-exit-hook: PR検索結果のJSON parseに失敗\n');
     return false;
   }
-  if (!Array.isArray(prs)) return false;
 
   // sinceTimestamp を秒精度に正規化。gh pr list の createdAt は秒精度であり、
   // ミリ秒精度のまま比較すると同一秒内で文字列比較の順序が不正確になる。

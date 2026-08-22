@@ -35,6 +35,8 @@ const SPAWN_CAPTURING_MODULES = [
   '../scripts/gh-create-pr',
   '../scripts/declare-test-result',
   '../scripts/shared/git-head',
+  '../scripts/shared/git-branch',
+  '../scripts/shared/gh-pr',
   '../scripts/shared/gh-comments',
 ];
 
@@ -116,7 +118,7 @@ function dispatcher(handlers) {
 }
 
 const m = {
-  branch: () => ({ cmd, args }) => cmd === 'git' && args[0] === 'rev-parse' && args[1] === '--abbrev-ref',
+  branch: () => ({ cmd, args }) => cmd === 'git' && args[0] === 'branch' && args[1] === '--show-current',
   repoView: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'repo' && args[1] === 'view',
   issueTitle: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'issue' && args[1] === 'view',
   add: () => ({ cmd, args }) => cmd === 'git' && args[0] === 'add',
@@ -145,7 +147,7 @@ function fullPathHandlers(overrides = {}) {
     { matches: m.commit(), result: { status: 0, stdout: '' } },
     { matches: m.push(), result: overrides.push || { status: 0, stdout: '' } },
     { matches: m.head(), result: { status: 0, stdout: SHA + '\n' } },
-    { matches: m.prList(), result: overrides.prList || { status: 0, stdout: '' } }, // 既存PRなし
+    { matches: m.prList(), result: overrides.prList || { status: 0, stdout: '[]' } }, // 既存PRなし
     { matches: m.prCreate(), result: overrides.prCreate || { status: 0, stdout: PR_URL + '\n' } },
     { matches: m.commentList(), result: overrides.commentList || { status: 0, stdout: '[]' } },
     { matches: m.commentCreate(), result: overrides.commentCreate || { status: 0, stdout: `{"html_url":"${DECL_URL}"}` } },
@@ -176,7 +178,7 @@ function statefulHandlers(initial = {}) {
     { matches: m.commit(), result: () => { state.changesPending = false; return { status: 0, stdout: '' }; } },
     { matches: m.push(), result: () => ({ status: 0, stdout: '' }) },
     { matches: m.head(), result: { status: 0, stdout: SHA + '\n' } },
-    { matches: m.prList(), result: () => state.pr ? { status: 0, stdout: JSON.stringify(state.pr) } : { status: 0, stdout: '' } },
+    { matches: m.prList(), result: () => state.pr ? { status: 0, stdout: JSON.stringify([state.pr]) } : { status: 0, stdout: '[]' } },
     { matches: m.prCreate(), result: () => {
         state.pr = { number: 5, url: PR_URL };
         return { status: 0, stdout: PR_URL + '\n' };
@@ -281,7 +283,7 @@ test('収束: ステージ済み変更が無ければ空コミットを作らず
 
 test('収束: 既存PRがあれば再利用し、createPr（gh pr create）を呼ばない', () => {
   const handlers = fullPathHandlers({
-    prList: { status: 0, stdout: `{"number":5,"url":"${PR_URL}"}` },
+    prList: { status: 0, stdout: JSON.stringify([{ number: 5, url: PR_URL }]) },
   });
   const { mod, calls } = loadModule(dispatcher(handlers));
   const ws = tempWorkspace();
@@ -411,6 +413,36 @@ test('終了コード: ブランチ名規約不一致は exit 1 で副作用ゼ�
 
   assert.equal(result.exitCode, 1);
   assert.match(result.stderr, /ブランチ名がIssue番号と一致しません/);
+  assert.equal(calls.length, 1, 'ブランチ検証以降の副作用（git add 等）を実行しない');
+});
+
+test('終了コード: detached HEAD 時は exit 2 で副作用ゼロ', () => {
+  const handlers = [
+    { matches: m.branch(), result: { status: 0, stdout: '\n' } }, // detached HEAD
+  ];
+  const { mod, calls } = loadModule(dispatcher(handlers));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, fail: 0, pass: 1, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+  }));
+
+  assert.equal(result.exitCode, 2);
+  assert.match(result.stderr, /現在のブランチを特定できません/);
+  assert.equal(calls.length, 1, 'ブランチ検証以降の副作用（git add 等）を実行しない');
+});
+
+test('終了コード: ブランチ取得失敗（git エラー）時は exit 2 で副作用ゼロ', () => {
+  const handlers = [
+    { matches: m.branch(), result: { status: 128, stdout: '', stderr: 'fatal: not a git repo' } },
+  ];
+  const { mod, calls } = loadModule(dispatcher(handlers));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, fail: 0, pass: 1, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+  }));
+
+  assert.equal(result.exitCode, 2);
+  assert.match(result.stderr, /現在のブランチを特定できません/);
   assert.equal(calls.length, 1, 'ブランチ検証以降の副作用（git add 等）を実行しない');
 });
 

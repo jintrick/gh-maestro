@@ -25,6 +25,8 @@
 const { spawnSync } = require('./child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { resolveGitHead } = require('./shared/git-head');
+const { getCurrentBranch } = require('./shared/git-branch');
+const { listPrsByBranch, parsePrListResponse } = require('./shared/gh-pr');
 const { createPr } = require('./gh-create-pr');
 const { declareTestResult } = require('./declare-test-result');
 
@@ -144,11 +146,15 @@ function pushAndDeclare({ issue, fail, pass, workspace, worktree, env = process.
   // ── 作業ツリー検証 ─────────────────────────────────────────────────────────────
   // このスクリプトは作業用worktree（cwd）から実行される前提。cwd のブランチ名が ^issue-<N>
   // と一致することを検証し、誤ったディレクトリ・誤ったIssue番号での実行を防ぐ。
-  const branchRes = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: worktree, encoding: 'utf8' });
-  if (branchRes.error || branchRes.status !== 0) {
-    return { exitCode: 2, stdout: '', stderr: `現在のブランチを特定できません: ${errText(branchRes)}` };
+  let branch;
+  try {
+    branch = getCurrentBranch(worktree);
+  } catch (e) {
+    return { exitCode: 2, stdout: '', stderr: `現在のブランチを特定できません: ${e.message}` };
   }
-  const branch = String(branchRes.stdout || '').trim();
+  if (!branch) {
+    return { exitCode: 2, stdout: '', stderr: '現在のブランチを特定できません: detached HEAD です' };
+  }
   // ブランチ名規約: worker-exit-hook.js と同じ `issue-<N>-<スラッグ>` 形式（例:
   // issue-374-senior-coder-test-declaration）。スラッグ部分の有無を許容する。
   const branchMatch = /^issue-(\d+)(?:-.*)?$/.exec(branch);
@@ -225,18 +231,21 @@ function pushAndDeclare({ issue, fail, pass, workspace, worktree, env = process.
   }
 
   // ── PR段（get-or-create。初回か修正かをコーダーは判定しない） ─────────────────
-  const prListRes = spawnSync('gh', ['pr', 'list', '--repo', repo, '--head', branch, '--state', 'OPEN', '--json', 'number,url', '--jq', '.[0]'], { cwd: worktree, encoding: 'utf8' });
+  const prListRes = listPrsByBranch(repo, branch, {
+    state: 'OPEN',
+    json: 'number,url',
+    cwd: worktree,
+  });
   if (prListRes.error || prListRes.status !== 0) {
     return { exitCode: 3, stdout: '', stderr: `既存PRの検索に失敗しました: ${errText(prListRes)}` };
   }
   let existingPr = null;
-  const prListRaw = String(prListRes.stdout || '').trim();
-  if (prListRaw) {
-    try {
-      existingPr = JSON.parse(prListRaw);
-    } catch (e) {
-      return { exitCode: 3, stdout: '', stderr: `既存PRの検索結果のJSON parseに失敗しました: ${e.message}` };
-    }
+  const prs = parsePrListResponse(prListRes.stdout);
+  if (!prs) {
+    return { exitCode: 3, stdout: '', stderr: '既存PRの検索結果のJSON parseに失敗しました' };
+  }
+  if (prs.length > 0) {
+    existingPr = prs[0];
   }
 
   let prNumber;

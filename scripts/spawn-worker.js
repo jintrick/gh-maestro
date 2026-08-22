@@ -51,6 +51,7 @@ const { startExecution, markLaunchFailure } = require('./shared/execution-regist
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const readStateLib = require('./shared/read-state');
 const { checkClosedPr } = require('./shared/closed-pr-guard');
+const { getCurrentBranch } = require('./shared/git-branch');
 
 const SPEC = {
   flags: {
@@ -476,8 +477,10 @@ if (baseBranch) {
     if (fetchR.status !== 0) {
       throw new Error(`git fetch origin ${baseBranch} 失敗: ${(fetchR.stderr || '').toString().trim()}`);
     }
-    const curR = spawnSync('git', ['branch', '--show-current'], { cwd: workspace, encoding: 'utf8' });
-    const cur = (curR.stdout || '').trim();
+    let cur = '';
+    try {
+      cur = getCurrentBranch(workspace);
+    } catch (_) {}
     if (cur === baseBranch) {
       try {
         const mergeR = spawnSync('git', ['merge', '--ff-only', '--', `origin/${baseBranch}`], { cwd: workspace, stdio: 'pipe' });

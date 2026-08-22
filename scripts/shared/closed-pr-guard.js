@@ -1,8 +1,6 @@
 'use strict';
 
-const { spawnSync } = require('../child-process');
-
-const GH_TIMEOUT_MS = 30000;
+const { listPrsByBranch, GH_TIMEOUT_MS } = require('./gh-pr');
 
 /**
  * 指定ブランチに紐づくPRのうち、クローズ済み（未マージ）のものを検出する。
@@ -61,10 +59,12 @@ function checkClosedPr({ repo, branch, cwd, listFn }) {
 }
 
 function defaultList(repo, branch, opts = {}) {
-  return spawnSync('gh', [
-    'pr', 'list', '--repo', repo, '--head', branch, '--state', 'all',
-    '--json', 'number,state',
-  ], { cwd: opts.cwd, encoding: 'utf8', timeout: GH_TIMEOUT_MS });
+  return listPrsByBranch(repo, branch, {
+    state: 'all',
+    json: 'number,state',
+    cwd: opts.cwd,
+    timeout: GH_TIMEOUT_MS,
+  });
 }
 
 module.exports = {

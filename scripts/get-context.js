@@ -4,6 +4,7 @@
 
 const { execSync } = require('child_process');
 const { resolve } = require('path');
+const { getCurrentBranch } = require('./shared/git-branch');
 
 const USAGE = `get-context.js — orchestrator の起動コンテキストをプロンプト注入用ブロックとして出力する
 
@@ -36,7 +37,7 @@ try {
 
 let baseBranch = '';
 try {
-  baseBranch = execSync('git branch --show-current', { encoding: 'utf8' }).trim();
+  baseBranch = getCurrentBranch(workspace);
 } catch {}
 
 const unixWorkspace = workspace.replace(/\\/g, '/');
