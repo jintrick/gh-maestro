@@ -9,7 +9,7 @@
 // （GraphQLフォールバック・エラー時continue等）を実装する。本モジュールは
 // REST API呼び出しと応答の平坦化のみを行い、ビジネスロジックは持ち込まない。
 
-let _spawnSync = require('../child-process').spawnSync;
+let _spawnSync = require('./child-process').spawnSync;
 
 const GH_TIMEOUT_MS = 30000;
 

@@ -14,7 +14,7 @@
 'use strict';
 
 const path = require('path');
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { startReviewManager } = require('./start-review-manager');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');

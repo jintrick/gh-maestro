@@ -3,7 +3,7 @@ paths:
   - "tests/**"
   - "scripts/spawn-worker.js"
   - "scripts/reset-session.js"
-  - "scripts/child-process.js"
+  - "scripts/shared/child-process.js"
   - "scripts/gh-maestro-setup.js"
   - ".githooks/**"
 ---
@@ -43,6 +43,6 @@ paths:
   1. **フックでテストを走らせない。** フック経由の実行結果がコーダー自身の実行結果と一致する保証が無い以上、フックからのテスト実行は禁止する。`gh-maestro-setup.js` は checks フックを設置せず、設置済みのものは撤去する。
   2. `.githooks/pre-commit` の冒頭で**リポジトリ位置系の変数だけ**を unset する（GIT_DIR / GIT_COMMON_DIR / GIT_WORK_TREE / GIT_OBJECT_DIRECTORY / GIT_ALTERNATE_OBJECT_DIRECTORIES / GIT_QUARANTINE_PATH）。**`GIT_INDEX_FILE` と `GIT_PREFIX` は落としてはならない**——`git commit -a` やパス指定コミットでは git が一時インデックスを渡すため、落とすとステージ判定が空に見え、同期処理が無言でスキップされる。
   3. `tests/_env-setup.js` の `--require` プリロードで注入変数を除去（テスト環境の中和。手動 `npm test` も守られる）。
-  4. `scripts/child-process.js` 共有ラッパーが **git を spawn するとき** リポジトリ位置系の変数を env から除去する（「cwd が正」を保証。テストはバイパス不要で既存テストが無改変のまま通る）。設定変数（GIT_CONFIG / GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT）は位置と無関係なので除去しない。git 以外の spawn は従来どおり。
+  4. `scripts/shared/child-process.js` 共有ラッパーが **git を spawn するとき** リポジトリ位置系の変数を env から除去する（「cwd が正」を保証。テストはバイパス不要で既存テストが無改変のまま通る）。設定変数（GIT_CONFIG / GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT）は位置と無関係なので除去しない。git 以外の spawn は従来どおり。
   - 外部副作用（GitHub API DELETE）: `gh-maestro-setup.js::retireAiReviewCi` に `NODE_TEST_CONTEXT` 検出時フェイルクローズガード。ローカル git 操作は上記3層で守られるためガード不要。
 - 受け入れ条件は「ガードが throw すること」ではなく「**実リポジトリが無傷であること**」。`tests/env-leak-guard.test.js` が GIT_DIR 注入下で各操作を呼び、victim リポジトリのスナップショット（for-each-ref / HEAD / config / worktree list / `.git/worktrees/` 列挙）が操作前後で不変であることを検証する。

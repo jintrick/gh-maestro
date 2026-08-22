@@ -8,10 +8,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { deleteInputFileBestEffort } = require('./shared/file-cleanup');
-const { toWinPath } = require('./win-path');
+const { toWinPath } = require('./shared/win-path');
 
 const USAGE = `update-issue.js — GitHub Issue本文を更新し、成功時にbody-fileの削除を試みる
 

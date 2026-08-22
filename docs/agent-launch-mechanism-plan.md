@@ -15,7 +15,7 @@
 > | `skillsViaMd` | 撤去済み。全エージェントがネイティブなスキル発見機構を持つことが判明したため（`.claude/rules/shared-skill-agent-tools.md` 参照） |
 > | `wezterm cli send-text` による注入 | ワーカー起動経路からWezTermは撤去済み。起動は `shared/headless-launch.js` |
 >
-> 起動基盤の現状は `scripts/shared/headless-launch.js` と `scripts/agent-exec.js` のファイル冒頭コメントを一次情報とすること。
+> 起動基盤の現状は `scripts/shared/headless-launch.js` と `scripts/shared/agent-exec.js` のファイル冒頭コメントを一次情報とすること。
 
 策定日: 2026-07-03
 ステータス: 策定時の実装は完了。上記のとおり一部が後続変更で置き換わっている

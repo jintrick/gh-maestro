@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 // finalize-council.js は外部プロセスを起動しない（投稿・state書き出しは注入関数）。
 // 純粋関数（集計・要約生成）と注入つきの finalizeCouncil を検証する。
 
-const m = require('../scripts/finalize-council.js');
+const m = require('../scripts/shared/finalize-council.js');
 
 const ORDER = ['alpha', 'beta', 'gamma'];
 

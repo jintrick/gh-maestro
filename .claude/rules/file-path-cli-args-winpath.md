@@ -10,7 +10,7 @@ paths:
 
 # ファイルパスを受け取るCLIオプションはtoWinPathを適用する
 
-`--body-file`・`--brief-file`・`--prompt-file`等、ファイルシステムパスを値に取るCLIオプションを新設・変更する際は、値を`fs.readFileSync`等に渡す前に必ず`scripts/win-path.js`の`toWinPath`でラップすること。
+`--body-file`・`--brief-file`・`--prompt-file`等、ファイルシステムパスを値に取るCLIオプションを新設・変更する際は、値を`fs.readFileSync`等に渡す前に必ず`scripts/shared/win-path.js`の`toWinPath`でラップすること。
 
 Git Bash等からUnixスタイルのパス（`/tmp/...`等）が渡されると、`toWinPath`を経由しない限りWindowsネイティブのNode.jsプロセスが正しく解決できない（PR #116 Review Manager指摘）。
 

@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildAgentCommandArgs, buildAgentResumeCommandArgs, RESUME_REPORTING_REMINDER } = require('../scripts/agent-launch');
+const { buildAgentCommandArgs, buildAgentResumeCommandArgs, RESUME_REPORTING_REMINDER } = require('../scripts/shared/agent-launch');
 
 test('buildAgentCommandArgs: system-prompt-file delivery', () => {
   const args = buildAgentCommandArgs({

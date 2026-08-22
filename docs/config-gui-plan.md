@@ -75,7 +75,7 @@ VS Code 内のカスタムエディタ（Webview Panel）として動作させ�
 2. **セキュリティ・フィードバック (重要)**:
    ワークスペース固有の `config.json` を編集している際、`command` や `extraArgs` に相当する入力フィールドは自動的に無効化（Disabled）し、ロックアイコンと共に「**実行コマンドの変更はグローバル設定でのみ許可されています**」という警告をトーストまたはツールチップで明示。
 3. **エージェント・テスター**:
-   エージェント定義ごとに「Test Launch」ボタンを配置し、バックエンドが実際にログインシェル上でその `command` が呼び出せるか（`scripts/agent-exec.js`の`checkAgentExists`）を非同期検証してステータスを表示。
+   エージェント定義ごとに「Test Launch」ボタンを配置し、バックエンドが実際にログインシェル上でその `command` が呼び出せるか（`scripts/shared/agent-exec.js`の`checkAgentExists`）を非同期検証してステータスを表示。
 
 ---
 

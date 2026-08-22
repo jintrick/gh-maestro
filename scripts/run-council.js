@@ -21,7 +21,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { resolveAgentConfig, resolveCouncilConfig, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const {
@@ -32,9 +32,9 @@ const {
   ensureCouncilWorktree,
   removeCouncilWorktree,
 } = require('./shared/council-worktree');
-const { runPhaseJobs } = require('./run-council-jobs');
+const { runPhaseJobs } = require('./shared/run-council-jobs');
 const { atomicWriteJson } = require('./shared/atomic-write');
-const { finalizeCouncil, buildStoppedState } = require('./finalize-council');
+const { finalizeCouncil, buildStoppedState } = require('./shared/finalize-council');
 const { acquireLeaseLock, releaseLeaseLock } = require('./shared/worker-lease');
 const {
   hasDiscussionsEnabled,

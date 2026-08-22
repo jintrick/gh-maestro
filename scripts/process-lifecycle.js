@@ -26,7 +26,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('./child-process');
+const { execSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const storageLayout = require('./shared/storage-layout');
 
@@ -835,7 +835,7 @@ function sweepRegistry(workspace, opts = {}) {
       excludedWorkerNames.add(entry.workerName);
     }
     if (!opts.dryRun) {
-      const { killProcessTree } = require('./kill-tree');
+      const { killProcessTree } = require('./shared/kill-tree');
       killProcessTree(entryPid);
       removeFiles(filePaths);
     }

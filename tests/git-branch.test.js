@@ -11,7 +11,7 @@ const { getCurrentBranch } = gitBranch;
 
 describe('git-branch (unit with mock)', () => {
   afterEach(() => {
-    gitBranch._setSpawnSync(require('../scripts/child-process').spawnSync);
+    gitBranch._setSpawnSync(require('../scripts/shared/child-process').spawnSync);
   });
 
   test('正常系: ブランチ名が正しく返される', () => {

@@ -14,8 +14,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('../child-process');
-const { killProcessTree } = require('../kill-tree');
+const { spawn } = require('./child-process');
+const { killProcessTree } = require('./kill-tree');
 const {
   findRunningInstances,
   unregisterProcess,

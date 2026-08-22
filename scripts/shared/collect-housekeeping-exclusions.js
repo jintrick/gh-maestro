@@ -27,7 +27,7 @@ const { readWorkersRaw } = require('./workers-registry');
 const { isWorkerAlive } = require('./worker-liveness');
 const { createNormalWorkerStore, isLeaseLive } = require('./worker-lease');
 const { reviewArtifactPath } = require('./review-manager-paths');
-const { normalizePid } = require('../worker-entry');
+const { normalizePid } = require('./worker-entry');
 
 // process-lifecycle 由来の関数のみ呼び出し時点で解決する（循環 require 対策、上記参照）。
 // テスト注入（_setIsProcessAlive）は注入値が優先される。

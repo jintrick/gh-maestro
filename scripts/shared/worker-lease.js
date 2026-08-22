@@ -25,7 +25,7 @@
 const path = require('path');
 const fs = require('fs');
 const { canonicalWorkspace, assertValidWorkspace } = require('./storage-layout');
-const { killProcessTree } = require('../kill-tree');
+const { killProcessTree } = require('./kill-tree');
 const { recordResidentAuditEvent } = require('./resident-audit');
 const { atomicWriteJson } = require('./atomic-write');
 

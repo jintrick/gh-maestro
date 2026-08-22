@@ -8,7 +8,7 @@
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
-let _spawnSync = require('../child-process').spawnSync;
+let _spawnSync = require('./child-process').spawnSync;
 
 const GH_TIMEOUT_MS = 30000;
 const DEFAULT_JSON_FIELDS = 'number,createdAt,url,state,headRefName,baseRefName';
@@ -93,5 +93,5 @@ module.exports = {
   _setListPrsByBranch: (fn) => { _listPrsByBranch = fn; },
   _resetListPrsByBranch: () => { _listPrsByBranch = listPrsByBranch; },
   _setSpawnSync: (fn) => { _spawnSync = fn; },
-  _resetSpawnSync: () => { _spawnSync = require('../child-process').spawnSync; },
+  _resetSpawnSync: () => { _spawnSync = require('./child-process').spawnSync; },
 };

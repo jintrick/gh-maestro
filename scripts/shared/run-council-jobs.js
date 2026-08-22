@@ -22,13 +22,13 @@ const os = require('os');
 const { spawn } = require('./child-process');
 const { buildAgentCommandArgs } = require('./agent-launch');
 const { buildLoginShellExecArgs } = require('./agent-exec');
-const { resolveAgentConfig, validateNonInteractiveTokens } = require('./shared/resolve-config');
-const { workerLogPath } = require('./shared/headless-launch');
-const { _validateAgainstSchema } = require('./shared/json-schema');
-const { waitChildExit } = require('./shared/child-wait');
+const { resolveAgentConfig, validateNonInteractiveTokens } = require('./resolve-config');
+const { workerLogPath } = require('./headless-launch');
+const { _validateAgainstSchema } = require('./json-schema');
+const { waitChildExit } = require('./child-wait');
 const { killProcessTree } = require('./kill-tree');
 
-const councilSchemas = require('./council-schemas.json');
+const councilSchemas = require('../council-schemas.json');
 
 const DEFAULT_JOB_TIMEOUT_MS = 10 * 60 * 1000; // ジョブごと10分
 const DEFAULT_TOTAL_TIMEOUT_MS = 30 * 60 * 1000; // 全体30分

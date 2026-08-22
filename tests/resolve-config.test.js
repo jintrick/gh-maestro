@@ -14,7 +14,7 @@ const {
   loadDefaults,
   validateNonInteractiveTokens,
 } = require('../scripts/shared/resolve-config');
-const { buildAgentCommandArgs } = require('../scripts/agent-launch');
+const { buildAgentCommandArgs } = require('../scripts/shared/agent-launch');
 const { createSessionResumeAdapter } = require('../scripts/shared/inbox-adapters/session-resume-adapter');
 
 // ── helpers ──────────────────────────────────────────────────────────────────

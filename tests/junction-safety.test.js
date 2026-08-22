@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { unlinkJunctions } = require('../scripts/unlink-junctions');
+const { unlinkJunctions } = require('../scripts/shared/unlink-junctions');
 
 function withDirs(fn) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-junction-test-'));

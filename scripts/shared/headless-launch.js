@@ -18,8 +18,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('../child-process');
-const { buildLoginShellExecArgs } = require('../agent-exec');
+const { spawn } = require('./child-process');
+const { buildLoginShellExecArgs } = require('./agent-exec');
 const { ARTIFACTS, legacyWorkerLogPath, recordPath } = require('./record-paths');
 
 const SHIM_PATH = path.join(__dirname, 'headless-shim.js');

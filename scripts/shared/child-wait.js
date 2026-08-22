@@ -16,7 +16,7 @@
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
-const { killProcessTree } = require('../kill-tree');
+const { killProcessTree } = require('./kill-tree');
 
 /**
  * 子プロセスの close / error を待つ。timeoutMs 到達時はプロセスツリーごと終了させる。

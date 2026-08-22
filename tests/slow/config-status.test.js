@@ -1,7 +1,7 @@
 'use strict';
 
 // config.js の `status` サブコマンドは、スキルごとに解決したエージェントコマンドを
-// checkAgentExists()（scripts/agent-exec.js）で実在確認する。Windows では未知コマンド
+// checkAgentExists()（scripts/shared/agent-exec.js）で実在確認する。Windows では未知コマンド
 // 1件につき pwsh を最大2回起動するため、config.js status を実サブプロセスとして
 // 起動するテストは1件あたり数十秒かかる（デフォルト `npm test` の総実行時間の大半を
 // 占めていた）。デフォルトの `npm test`（tests/*.test.js）からは除外し、

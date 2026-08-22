@@ -8,7 +8,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { normalizeWorkerEntry, normalizePid } = require('../worker-entry');
+const { normalizeWorkerEntry, normalizePid } = require('./worker-entry');
 
 /**
  * workspace の workers.json パスを返す。

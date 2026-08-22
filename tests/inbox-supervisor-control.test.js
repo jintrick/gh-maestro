@@ -8,7 +8,7 @@ const path = require('path');
 
 const control = require('../scripts/shared/inbox-supervisor-control');
 const { findRunningInstance } = require('../scripts/process-lifecycle');
-const { killProcessTree } = require('../scripts/kill-tree');
+const { killProcessTree } = require('../scripts/shared/kill-tree');
 const workerLease = require('../scripts/shared/worker-lease');
 
 let workspace;

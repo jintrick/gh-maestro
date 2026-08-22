@@ -25,7 +25,7 @@ const fs = require('fs');
 const path = require('path');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // parseMarker は副作用の無い純粋なパース関数（gh呼び出し・state永続化・

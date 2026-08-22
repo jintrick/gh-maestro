@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const supervisor = require('../scripts/inbox-supervisor');
-const { spawnSync } = require('../scripts/child-process');
+const { spawnSync } = require('../scripts/shared/child-process');
 const headlessLaunch = require('../scripts/shared/headless-launch');
 const workerLease = require('../scripts/shared/worker-lease');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');

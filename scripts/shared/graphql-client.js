@@ -9,7 +9,7 @@
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
-const { spawnSync } = require('../child-process');
+const { spawnSync } = require('./child-process');
 
 // ── 低レベル実行（テストで注入可能） ──────────────────────────────────────────
 

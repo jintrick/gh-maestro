@@ -55,7 +55,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  headlessLaunch._setSpawn(require('../scripts/child-process').spawn);
+  headlessLaunch._setSpawn(require('../scripts/shared/child-process').spawn);
   headlessLaunch._setGetProcessStartTime(require('../scripts/process-lifecycle').getProcessStartTime);
 });
 

@@ -17,9 +17,9 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('../child-process');
+const { spawnSync } = require('./child-process');
 const { assertWithinRoot } = require('./worker-factory');
-const { worktreeAddDetached, worktreeRemove } = require('../git-worktree');
+const { worktreeAddDetached, worktreeRemove } = require('./git-worktree');
 const { resolveGitHead, SHA_RE } = require('./git-head');
 
 const SESSION_RE = /^[A-Za-z0-9_-]{1,64}$/;

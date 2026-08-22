@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { resolveAgentConfig, agentsJsonPath } = require('../scripts/resolve-agent');
+const { resolveAgentConfig, agentsJsonPath } = require('../scripts/shared/resolve-agent');
 
 /**
  * 一時ディレクトリを作成し fn(home) を実行、終了後に削除する。

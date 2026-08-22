@@ -8,7 +8,7 @@ const path = require('path');
 
 const msgPoll = require('../scripts/msg-poll');
 const readStateLib = require('../scripts/shared/read-state');
-const { spawnSync } = require('../scripts/child-process');
+const { spawnSync } = require('../scripts/shared/child-process');
 const { cleanSpawnEnv } = require('./_spawn-env');
 const workerLease = require('../scripts/shared/worker-lease');
 

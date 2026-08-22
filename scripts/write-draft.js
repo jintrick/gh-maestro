@@ -6,7 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { toWinPath } = require('./win-path');
+const { toWinPath } = require('./shared/win-path');
 const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 
 const USAGE = `write-draft.js — 論理パスへ草案ファイルを書き出す（/tmp 等の論理パスを実体パスへ解決してから書き込む）

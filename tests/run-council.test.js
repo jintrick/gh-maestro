@@ -210,7 +210,7 @@ function loadModule({ spawn, resolveConfig, phaseJobs, graphqlOpts = {} }) {
   const spawnMock = spawn || makeSpawnSync();
   const exportMocks = [
     {
-      mod: '../scripts/child-process',
+      mod: '../scripts/shared/child-process',
       exports: {
         spawn: () => { throw new Error('spawn must not be called in tests'); },
         spawnSync: spawnMock.impl,
@@ -218,7 +218,7 @@ function loadModule({ spawn, resolveConfig, phaseJobs, graphqlOpts = {} }) {
       },
     },
     { mod: '../scripts/shared/resolve-config', exports: resolveConfig },
-    { mod: '../scripts/run-council-jobs', exports: { runPhaseJobs: phaseJobs.runPhaseJobs } },
+    { mod: '../scripts/shared/run-council-jobs', exports: { runPhaseJobs: phaseJobs.runPhaseJobs } },
   ];
   for (const { mod, exports } of exportMocks) {
     const resolved = require.resolve(mod);
@@ -226,7 +226,7 @@ function loadModule({ spawn, resolveConfig, phaseJobs, graphqlOpts = {} }) {
     require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports };
   }
 
-  for (const mod of ['../scripts/git-worktree', '../scripts/shared/council-worktree', '../scripts/shared/git-head']) {
+  for (const mod of ['../scripts/shared/git-worktree', '../scripts/shared/council-worktree', '../scripts/shared/git-head']) {
     delete require.cache[require.resolve(mod)];
   }
 

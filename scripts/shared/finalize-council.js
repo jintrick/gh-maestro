@@ -9,8 +9,8 @@
 // 書き出しは副作用のため、呼び出し元（run-council.js）が postComment / writeState を
 // 注入する。
 
-const { _validateAgainstSchema } = require('./shared/json-schema');
-const councilSchemas = require('./council-schemas.json');
+const { _validateAgainstSchema } = require('./json-schema');
+const councilSchemas = require('../council-schemas.json');
 
 // ── 投票集計（純粋関数・決定論的） ─────────────────────────────────────────────
 

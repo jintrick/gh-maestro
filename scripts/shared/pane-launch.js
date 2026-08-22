@@ -12,8 +12,8 @@
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
-const { spawnSync } = require('../child-process');
-const { buildLoginShellExecArgs } = require('../agent-exec');
+const { spawnSync } = require('./child-process');
+const { buildLoginShellExecArgs } = require('./agent-exec');
 
 // wezterm 呼び出し（テストで注入可能）
 let _weztermSpawnWindow = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });

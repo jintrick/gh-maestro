@@ -26,7 +26,7 @@ function loadModule(spawnSyncImpl) {
     return impl;
   };
 
-  const childProcessPath = require.resolve('../scripts/child-process');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
   delete require.cache[childProcessPath];
   require.cache[childProcessPath] = {
     id: childProcessPath,
@@ -39,7 +39,7 @@ function loadModule(spawnSyncImpl) {
     },
   };
 
-  const gitWorktreePath = require.resolve('../scripts/git-worktree');
+  const gitWorktreePath = require.resolve('../scripts/shared/git-worktree');
   const gitHeadPath = require.resolve('../scripts/shared/git-head');
   delete require.cache[gitWorktreePath];
   delete require.cache[gitHeadPath];

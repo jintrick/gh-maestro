@@ -11,7 +11,7 @@
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
-const { normalizeWorkerEntry } = require('../worker-entry');
+const { normalizeWorkerEntry } = require('./worker-entry');
 
 // process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。
 // process-lifecycle.js は CLI 主経路（require.main === module）から sweepRegistry 経由で

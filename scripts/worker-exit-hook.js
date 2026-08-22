@@ -31,7 +31,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const { listPrsByBranch, parsePrListResponse } = require('./shared/gh-pr');
 const { compactWorkerLog } = require('./shared/strip-thinking-token-lines');

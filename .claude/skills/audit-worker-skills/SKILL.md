@@ -14,7 +14,7 @@ allowed-tools: Read Agent
 以下のファイルを読み、ワーカー起動時にシステムが**保証する**事項を網羅的に抽出してください：
 
 - `scripts/spawn-worker.js` — ワーカー起動フロー全体
-- `scripts/link-node-modules.js` — node_modules自動リンクの動作
+- `scripts/shared/link-node-modules.js` — node_modules自動リンクの動作
 - `scripts/install.js` — エージェント設定（agents.json）の初期値と更新ロジック
 
 抽出すべき内容:

@@ -607,7 +607,26 @@ test('インストーラー成果物検証: 全エージェント宛先・共有
     }
 
     // ── 共有スクリプトの検証 ──
-    for (const name of ['msg-send.js', 'unlink-junctions.js', 'spawn-worker.js', 'start-review-manager.js', 'poll-pr.js', 'review-publisher.js', 'print-review-leaves.js']) {
+    for (const name of [
+      'msg-send.js',
+      'shared/agent-exec.js',
+      'shared/agent-launch.js',
+      'shared/child-process.js',
+      'shared/finalize-council.js',
+      'shared/git-worktree.js',
+      'shared/kill-tree.js',
+      'shared/link-node-modules.js',
+      'shared/resolve-agent.js',
+      'shared/run-council-jobs.js',
+      'shared/unlink-junctions.js',
+      'shared/win-path.js',
+      'shared/worker-entry.js',
+      'spawn-worker.js',
+      'start-review-manager.js',
+      'poll-pr.js',
+      'review-publisher.js',
+      'print-review-leaves.js',
+    ]) {
       const p = path.join(tmpSharedScripts, name);
       assert.ok(fs.existsSync(p), `集約先にスクリプトが存在しない: ${p}`);
     }
