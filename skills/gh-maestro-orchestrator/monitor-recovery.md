@@ -29,6 +29,24 @@ Inbox Supervisor（`inbox-supervisor.js`）側の重複を疑った場合も、�
 
 この通知を鵜呑みにせず、`node "{{SCRIPTS_PATH}}/worker-status.js" status --workspace $WORKSPACE --worker-name <workerName>` で実際に死んでいるか確認してから人間に伝える。生存していれば誤通知として扱い、原因は調査しない。
 
+## 居座りワーカー（報告投稿後のプロセス残留）およびハングの停止
+
+Inbox Supervisor は、ワーカーが報告コメントを投稿済みであるにもかかわらずプロセスが生存し続けている場合、残留警告（`⚠️ ワーカー "<name>" は既に報告を投稿済み...`）を orchestrator に通知する。また、ワーカーのログ更新が一定時間止まっている場合はハング検知（`⚠️ ワーカー "<name>" がハングしている疑いがあります...`）を通知する。
+
+**この状態の間、そのワーカー宛ての新しいメッセージは「作業中」とみなされて配送されず待機し続ける。**
+
+対処手順:
+1. ワーカーの未コミット変更や作業ログを確認し、不要な残留プロセス・無応答の場合は **`stop-worker.js`** でプロセスのみを停止する:
+   ```sh
+   node "{{SCRIPTS_PATH}}/stop-worker.js" <workerName> --workspace $WORKSPACE
+   ```
+   または〈`--issue` + `--skill`〉で指定する:
+   ```sh
+   node "{{SCRIPTS_PATH}}/stop-worker.js" --issue <N> --skill <role> --workspace $WORKSPACE
+   ```
+2. **`remove-worker.js` を使ってはならない。** `remove-worker.js` はプロセスだけでなく作業ツリー（worktree）・ブランチ・workers.json エントリまで破棄する完全削除コマンドである。居座りやハングの解消のために呼ぶと、ワーカーの作業成果が失われ、後から resume で再開できなくなる。プロセスのみを止めて再開可能な状態を保つ正規手段は `stop-worker.js` である。
+3. `stop-worker.js` 実行後はプロセスが停止（休止状態）となり、次に `msg-send.js` で指示を送った際に Inbox Supervisor が自動的にワーカーを再開（resume）してメッセージを配送する。
+
 ## 監視プロセスの異常終了通知（msg-poll / poll-pr / poll-reviews）
 
 常駐監視（`msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）が**非ゼロ終了**（クラッシュ等）で終わると、プロセス自身が `⚠️ 監視プロセス <script> が異常終了しました（exit code <N>）...` という通知を orchestrator の inbox に投稿する（正常終了 exit 0 = SIGINT/SIGTERM/`PR_MERGED`/`PR_CLOSED` では通知されない）。**`msg-poll.js`（orchestrator モード）と `inbox-supervisor.js` は親セッション消滅を exit 0 ではなく exit 3 で自滅し、watchdog が専用の「親セッション消滅による自動終了」通知を送る**（下記「inbox監視の沈黙」参照。`poll-pr.js` / `poll-reviews.js` は親セッション消滅を従来どおり exit 0 で終了し、通知は出ない）。

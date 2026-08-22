@@ -108,7 +108,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue 12 --de
 
 **分割以外の理由で、同一Issue・同一役割のワーカーを増やしてはならない。** 同じ役割に追加の作業をさせるなら、新しく起動せず既存ワーカーへ `msg-send.js` で指示する。
 
-分割して起動したときだけ、同じ Issue・同じ skill のワーカーが複数存在する状態になる。このとき〈`--issue` + `--skill`〉では宛先が一つに決まらないため、`msg-send.js` / `remove-worker.js` には `--skill` を外し、ワーカー名（`issue-12-fix-utils` の形。`--description` に渡した値から組み立てられる）を**位置引数**で渡す。
+分割して起動したときだけ、同じ Issue・同じ skill のワーカーが複数存在する状態になる。このとき〈`--issue` + `--skill`〉では宛先が一つに決まらないため、`msg-send.js` / `stop-worker.js` / `remove-worker.js` には `--skill` を外し、ワーカー名（`issue-12-fix-utils` の形。`--description` に渡した値から組み立てられる）を**位置引数**で渡す。
 
 ```sh
 node "{{SCRIPTS_PATH}}/msg-send.js" issue-12-fix-utils --workspace $WORKSPACE --stdin <<'EOF'
@@ -123,7 +123,8 @@ EOF
 - **spawn-worker.js** — worktreeを作りワーカーをバックグラウンドで起動する（画面は使わない。「ワーカーの起動」参照）
 - **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉。本文は位置引数では渡せず、`--stdin`（ヒアドキュメントは`<<'EOF'`とクォート付きにする）または `--body-file` で渡す
 - **msg-read.js** — コメントIDまたは計画から本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE` または `msg-read.js --plan --issue <N> --workspace $WORKSPACE`
-- **remove-worker.js** — 個別ワーカーのプロセスをkillしてworktreeを削除する。対象は workerName の位置引数または〈`--issue` + `--skill`〉。反省会後の一括後始末には代わりに finalize-issue.js を使う
+- **stop-worker.js** — ワーカーのプロセスツリーのみを同一性確認の上で停止する（worktree・ブランチ・workers.json エントリは維持する）。対象は workerName の位置引数または〈`--issue` + `--skill`〉。報告投稿後にプロセスが終了せず残留（居座り）しているワーカーやハングしたワーカーを停止させる正規手段（再開可能な状態を保つ）。worktree ごと破棄する `remove-worker.js` と使い分ける
+- **remove-worker.js** — 個別ワーカーのプロセスを同一性確認の上でkillし、worktree とブランチを削除し、workers.json からエントリを除去する（完全破棄）。対象は workerName の位置引数または〈`--issue` + `--skill`〉。作業ツリーごと消えるため再開はできない。反省会後の一括後始末には代わりに finalize-issue.js を使う
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「13. 反省会と後始末」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する
 - **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「ワーカーからの報告の受信（msg-poll）」参照）
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「8. PR検出」参照）
@@ -184,8 +185,15 @@ msg-poll が `未初期化です。reset-session.js で初期化してくださ�
 - **監視プロセスの停止**: 異常終了通知、親セッション消滅による自動終了通知、または Monitor 自体の終了を受け取ったら、`monitor-recovery.md` を参照して対処する。
 - **配送断念の通知**（`⚠️ ワーカー "<name>" へのメッセージ配送に5回失敗し断念しました...`）: resume配送が5回リトライしても失敗したことをInbox Supervisor自身が通知する。上記と同様、そのワーカーは作業を完了できていない。
 - **自動代理送信のマーカー**（本文冒頭の`⚠️ [自動代理送信: ...]`）: ワーカーが`msg-send.js`の呼び出しを忘れただけで、内容自体は正しく応答できている。そのまま内容を評価してよい。
+- **居座り通知（報告投稿後のプロセス残留）**（`⚠️ ワーカー "<name>" は既に報告を投稿済みですが、プロセス（PID ...）が生存しています...`）: ワーカーが報告投稿後にプロセスを終了せず残っている状態。この状態の間は次の指示が配送されないため、`node "{{SCRIPTS_PATH}}/stop-worker.js" <workerName> --workspace $WORKSPACE`（または〈`--issue` + `--skill`〉）でプロセスのみを停止する。**`remove-worker.js` を使ってはならない**（作業ツリーごと消えて再開できなくなる）。
+- **ハング通知**（`⚠️ ワーカー "<name>" がハングしている疑いがあります...`）: ログ更新が一定時間以上止まっている状態。無応答が継続している場合は `stop-worker.js` でプロセスを停止し、再開（resume）を促す。
 - **ワーカーの実行ログ**（`$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log`）: 既定では読まない。上記の異常終了通知・配送断念通知を受けて原因を切り分けるとき、またはワーカーが長時間無反応で生死を確認したいときだけ`Read`で読む。
 - **新規起動での投稿漏れ**（プロセスは終了しているのに報告コメントが見当たらない）: ログを読んで代理投稿しない。短いresumeメッセージを送り、ワーカー自身に報告させる。
+
+#### ワーカーの停止と削除の使い分け（stop-worker vs remove-worker）
+
+- **`stop-worker.js`（停止・再開可能）**: ワーカーのプロセスツリーのみを同一性確認の上で停止する。worktree・ブランチ・workers.json の登録情報は保持される。居座り通知・ハング時など、後から `msg-send.js` 等で再開（resume）させて作業を継続させたいワーカーに対して使う正規手段。
+- **`remove-worker.js`（完全破棄）**: ワーカーのプロセスを停止し、worktree・同名ブランチ・workers.json エントリまで完全に削除する。対象の作業成果ごと破棄されるため、再開はできない。反省会完了後の後始末には `finalize-issue.js` を使うため、通常セッション中に安易にワーカーを削除してはならない。
 
 ### スパイラル検知
 
