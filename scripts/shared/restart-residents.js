@@ -313,6 +313,10 @@ function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = 
       detached: true,
       windowsHide: true,
       stdio: ['ignore', logFd, logFd],
+      env: {
+        ...process.env,
+        GH_MAESTRO_WORKER: process.env.GH_MAESTRO_WORKER || 'orchestrator',
+      },
     });
     if (!child || !isValidPid(child.pid)) {
       return { ok: false, error: `${spec.script} のspawn結果から有効なPIDを取得できません` };

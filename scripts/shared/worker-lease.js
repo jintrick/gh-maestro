@@ -28,6 +28,7 @@ const { canonicalWorkspace, assertValidWorkspace } = require('./storage-layout')
 const { killProcessTree } = require('./kill-tree');
 const { recordResidentAuditEvent } = require('./resident-audit');
 const { atomicWriteJson } = require('./atomic-write');
+const { checkResidentForceGuard } = require('./resident-force-guard');
 
 // process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。
 // process-lifecycle.js は CLI 主経路（require.main === module）から sweepRegistry 経由で
@@ -533,6 +534,7 @@ function acquireResidentLease({
   handoff = false,
   handoffStopTargets = () => [],
   deadlineMs = HANDOFF_WAIT_MS,
+  env = process.env,
 }) {
   const store = createResidentLeaseStore(workspace);
   const key = roleLeaseKey(role);
@@ -553,6 +555,16 @@ function acquireResidentLease({
 
   // ── --force: 既存所有者へ停止要求 → 同じ lease を期限付きで再取得 ──
   if (handoff && liveExisting) {
+    // 実行文脈ガード（Issue #384 多層防御）
+    const guardRes = checkResidentForceGuard(env);
+    if (!guardRes.allowed) {
+      recordAudit(workspace, 'lock-denied', role, {
+        ownerPid: existing.pid,
+        reason: 'force-disallowed-context',
+      });
+      throw new Error(guardRes.message);
+    }
+
     recordAudit(workspace, 'handoff-wait', role, { ownerPid: existing.pid });
     const deadline = Date.now() + deadlineMs;
     while (Date.now() < deadline) {

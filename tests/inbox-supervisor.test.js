@@ -21,6 +21,8 @@ const TEST_SESSION_PID = String(process.pid);
 // 経路も実workspaceへ向かわないよう、テスト中は環境変数を一時的に除去する。
 const _savedWorkspaceEnv = process.env.GH_MAESTRO_WORKSPACE;
 delete process.env.GH_MAESTRO_WORKSPACE;
+const _savedWorkerEnv = process.env.GH_MAESTRO_WORKER;
+delete process.env.GH_MAESTRO_WORKER;
 // GH_MAESTRO_BASE_BRANCH は resume 配送時に buildWorkerEnv が launchAgentHeadless env へ
 // マージする（Issue #269）。外側の環境に偶然設定されている値が注入有無の検証を狂わせないよう、
 // テスト中は一時的に除去する。
@@ -244,6 +246,24 @@ describe('CLI argument validation', () => {
     const r = runMain(['--workspace', '/nonexistent/path/12345']);
     assert.equal(r.code, 1);
     assert.equal(r.runOnce, null);
+  });
+
+  test('--force: 名乗りなしのときは code 1（Issue #384）', () => {
+    const r = withTempDir((dir) => {
+      setupWorkspace(dir);
+      return runMain(['--workspace', dir, '--force'], { env: {} });
+    });
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('GH_MAESTRO_WORKER')));
+  });
+
+  test('--force: ワーカー名乗りのときは code 1（Issue #384）', () => {
+    const r = withTempDir((dir) => {
+      setupWorkspace(dir);
+      return runMain(['--workspace', dir, '--force'], { env: { GH_MAESTRO_WORKER: 'issue-384-coder-force-guard' } });
+    });
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('issue-384-coder-force-guard')));
   });
 
   test('リポジトリ解決失敗で code 1', () => {
@@ -2681,17 +2701,22 @@ function writeLiveSupervisorLease(dir, pid, startTime) {
 }
 
 /** ヘルパー: inbox-supervisor.js を子プロセスとして起動 */
-function runSupervisor(args, cwd) {
+function runSupervisor(args, cwd, envOverride = {}) {
   // --session-pid を渡し、子プロセス側の親プロセスツリー探索（Windowsでは高コスト）を省く。
   // timeout はこのプロセス自体の処理時間ではなく、フルスイート実行時のシステム負荷下での
   // OSスケジューリング遅延に対する余裕を持たせる（実障害: 5000msだと、他のテストファイルが
   // 実プロセス（pwsh等）を並行して起動している状況で、ワークスペース未解決による即時
   // exit(1)しかしないこのプロセスすら5秒以内にスケジュールされずtimeout killされ、
   // status: null になることがあった）。
+  const spawnEnv = {
+    ...process.env,
+    ...envOverride,
+  };
   return realSpawnSync(process.execPath, [SUPERVISOR_SCRIPT, ...args, '--session-pid', String(process.pid)], {
     cwd,
     encoding: 'utf8',
     timeout: 15000,
+    env: spawnEnv,
   });
 }
 
@@ -2754,7 +2779,7 @@ describe('CLI integration (subprocess)', () => {
     });
   });
 
-  test('--force は重複レース判定を無効化せず、既存所有者を停止させて引き継ぐ', () => {
+  test('--force は GH_MAESTRO_WORKER=orchestrator なら既存所有者を停止させて引き継ぐ（Issue #384）', () => {
     withTempDir((dir) => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
@@ -2776,7 +2801,11 @@ describe('CLI integration (subprocess)', () => {
         }
         writeLiveSupervisorLease(dir, owner.pid, startTime);
 
-        const r = runSupervisor(['--once', '--force', '--workspace', dir], dir);
+        const r = runSupervisor(
+          ['--once', '--force', '--workspace', dir],
+          dir,
+          { GH_MAESTRO_WORKER: 'orchestrator' }
+        );
         assert.notEqual(r.status, 0, `should exit non-zero (gh failure), got ${r.status}`);
         assert.ok(!r.stderr.includes('重複起動'),
           `stderr should NOT mention 重複起動: ${r.stderr}`);
@@ -2788,6 +2817,84 @@ describe('CLI integration (subprocess)', () => {
           try { owner.kill(); } catch {}
         }
         assert.equal(leakedOwner, false, '--force の引き継ぎで既存所有者プロセスが停止されること');
+      }
+    });
+  });
+
+  test('--force は GH_MAESTRO_WORKER がワーカー名なら拒否され、既存所有者を停止させない（Issue #384）', () => {
+    withTempDir((dir) => {
+      const maestroDir = path.join(dir, '.gh-maestro');
+      fs.mkdirSync(maestroDir, { recursive: true });
+
+      const owner = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      let ownerRemainedAlive = false;
+      try {
+        let startTime = getProcessStartTime(owner.pid);
+        for (let i = 0; !startTime && i < 20; i++) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+          startTime = getProcessStartTime(owner.pid);
+        }
+        writeLiveSupervisorLease(dir, owner.pid, startTime);
+
+        const r = runSupervisor(
+          ['--once', '--force', '--workspace', dir],
+          dir,
+          { GH_MAESTRO_WORKER: 'issue-384-coder-force-guard' }
+        );
+        assert.equal(r.status, 1, `exit 1, got ${r.status}, stderr: ${r.stderr}`);
+        assert.ok(r.stderr.includes('ワーカー "issue-384-coder-force-guard" からの常駐プロセスの強制置き換え（--force）は禁止されています'),
+          `stderr should contain rejection: ${r.stderr}`);
+        assert.ok(r.stderr.includes('【理由】'), `stderr should contain reason: ${r.stderr}`);
+        assert.ok(r.stderr.includes('【代替手順】'), `stderr should contain alternative: ${r.stderr}`);
+        assert.ok(r.stderr.includes('【禁止事項】'), `stderr should contain prohibition: ${r.stderr}`);
+
+        // 所有者は生存し続けていること
+        if (owner.exitCode === null && owner.signalCode === null) {
+          ownerRemainedAlive = true;
+        }
+      } finally {
+        try { owner.kill(); } catch {}
+        assert.equal(ownerRemainedAlive, true, 'ワーカーからの --force で既存プロセスが停止されてはならない');
+      }
+    });
+  });
+
+  test('--force は GH_MAESTRO_WORKER が未設定なら拒否され、既存所有者を停止させない（Issue #384）', () => {
+    withTempDir((dir) => {
+      const maestroDir = path.join(dir, '.gh-maestro');
+      fs.mkdirSync(maestroDir, { recursive: true });
+
+      const owner = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      let ownerRemainedAlive = false;
+      try {
+        let startTime = getProcessStartTime(owner.pid);
+        for (let i = 0; !startTime && i < 20; i++) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+          startTime = getProcessStartTime(owner.pid);
+        }
+        writeLiveSupervisorLease(dir, owner.pid, startTime);
+
+        const r = runSupervisor(
+          ['--once', '--force', '--workspace', dir],
+          dir,
+          { GH_MAESTRO_WORKER: '' }
+        );
+        assert.equal(r.status, 1, `exit 1, got ${r.status}, stderr: ${r.stderr}`);
+        assert.ok(r.stderr.includes('実行主体の名乗り（GH_MAESTRO_WORKER）が設定されていません'),
+          `stderr should contain missing identity message: ${r.stderr}`);
+
+        if (owner.exitCode === null && owner.signalCode === null) {
+          ownerRemainedAlive = true;
+        }
+      } finally {
+        try { owner.kill(); } catch {}
+        assert.equal(ownerRemainedAlive, true, '名乗り無しでの --force で既存プロセスが停止されてはならない');
       }
     });
   });

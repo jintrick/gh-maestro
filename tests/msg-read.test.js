@@ -310,6 +310,28 @@ test('--issue-context: GH_MAESTRO_WORKER がない場合は取得処理を実行
   }));
 });
 
+test('--issue-context: GH_MAESTRO_WORKER=orchestrator の場合はワーカーではないため code 1（Issue #384）', () => {
+  withWorkerName('orchestrator', () => withTempDir(workspace => {
+    let issueCalled = false;
+    let commentsCalled = false;
+    msgRead._setGhRepoView(() => ({ status: 0, stdout: 'owner/repo\n' }));
+    msgRead._setGhApiIssue(() => {
+      issueCalled = true;
+      return { status: 0, stdout: '{}' };
+    });
+    msgRead._setGhListComments(() => {
+      commentsCalled = true;
+      return { status: 0, stdout: '[]' };
+    });
+
+    const r = msgRead.main(['--issue-context', '--issue', '42', '--workspace', workspace]);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('GH_MAESTRO_WORKER')));
+    assert.equal(issueCalled, false);
+    assert.equal(commentsCalled, false);
+  }));
+});
+
 test('--issue-context: Issue本文の取得失敗時はコメント一覧を取得せず code 1', () => {
   withWorkerName('worker-self', () => withTempDir(workspace => {
     let commentsCalled = false;

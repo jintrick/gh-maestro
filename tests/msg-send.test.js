@@ -896,3 +896,53 @@ test('NODE_TEST_CONTEXT 下では実投稿を拒否する（構造的ガード�
     msgSend._setGhIssueComment(() => ({ status: 1, stdout: '', stderr: 'reset' }));
   }
 });
+
+test('GH_MAESTRO_WORKER=orchestrator のときは --skill が許可される（Issue #384）', () => {
+  withTempDir(workspace => {
+    const ghDir = path.join(workspace, '.gh-maestro');
+    fs.mkdirSync(ghDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(ghDir, 'workers.json'),
+      JSON.stringify({
+        orchestrator: { agentId: null },
+        'issue-5-coder-impl': { issue: 5, skill: 'coder' },
+      }, null, 2),
+      'utf8'
+    );
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment(() => ({ status: 0, stdout: 'https://github.com/test/repo/issues/5#issuecomment-123\n' }));
+
+    const r = msgSend.main(
+      ['--issue', '5', '--skill', 'coder', '--workspace', workspace, '--stdin'],
+      { GH_MAESTRO_WORKER: 'orchestrator' },
+      stdinIO('orchestrator instruction')
+    );
+    assert.equal(r.code, 0, `エラーが発生しないこと: ${r.errLines.join('\n')}`);
+  });
+});
+
+test('GH_MAESTRO_WORKER=issue-xxx のときは --skill が拒否される（Issue #384）', () => {
+  withTempDir(workspace => {
+    const ghDir = path.join(workspace, '.gh-maestro');
+    fs.mkdirSync(ghDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(ghDir, 'workers.json'),
+      JSON.stringify({
+        orchestrator: { agentId: null },
+        'issue-5-coder-impl': { issue: 5, skill: 'gh-maestro-coder' },
+      }, null, 2),
+      'utf8'
+    );
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+
+    const r = msgSend.main(
+      ['--issue', '5', '--skill', 'coder', '--workspace', workspace, '--stdin'],
+      { GH_MAESTRO_WORKER: 'issue-5-coder-impl' },
+      stdinIO('worker body')
+    );
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some(l => l.includes('--skill は orchestrator 専用です')));
+  });
+});
+
+

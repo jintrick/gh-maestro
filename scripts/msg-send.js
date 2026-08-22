@@ -33,6 +33,7 @@ const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const { hasReportedSinceStart } = require('./shared/worker-report-check');
 const { main: writeDraftMain } = require('./write-draft');
 const closedPrGuard = require('./shared/closed-pr-guard');
+const { isWorkerIdentity } = require('./shared/resident-force-guard');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
@@ -48,7 +49,7 @@ Usage (orchestrator からワーカーへ送信):
 
 Arguments:
   <recipient>           送信先（worker 名、または "orchestrator"）。--skill 使用時は指定しない。
-                        ワーカーコンテキスト（GH_MAESTRO_WORKER 有り）では常に orchestrator 宛に固定され、
+                        ワーカーコンテキスト（GH_MAESTRO_WORKER がワーカー名）では常に orchestrator 宛に固定され、
                         recipient を書く必要はない。
 
 Options:
@@ -72,8 +73,8 @@ Options:
 Output (stdout):
   投稿されたコメントの URL を1行出力
 
-コンテキスト判定: GH_MAESTRO_WORKER 環境変数の有無でワーカー/orchestrator を判別する
-  （spawn-worker.js / inbox-supervisor.js が起動時にワーカーへ注入する）。
+コンテキスト判定: GH_MAESTRO_WORKER 環境変数の値（ワーカー名か orchestrator/human か）で判別する
+  （spawn-worker.js / inbox-supervisor.js が起動時にワーカーへ注入し、orchestrator は orchestrator を名乗る）。
 workspace 解決順: --workspace 引数 > GH_MAESTRO_WORKSPACE env > CWD から上方探索
 
 拒否ガード（orchestrator からワーカー宛ての送信のみ）: 宛先ワーカーが稼働中（作業中）で、
@@ -289,12 +290,14 @@ function main(argsOverride, envOverride, ioOverride) {
   }
 
   // ── コンテキスト判定 ────────────────────────────────────────────────────
-  // GH_MAESTRO_WORKER が環境にあれば「ワーカーとして実行中」。ワーカーは常に orchestrator へ
+  // GH_MAESTRO_WORKER がワーカー名であれば「ワーカーとして実行中」。ワーカーは常に orchestrator へ
   // 自分の名を from として報告するだけであり、orchestrator 専用の宛先解決機構（--skill）は
   // 使えない。この判定で成りすまし（from が silent に orchestrator へ化ける）と誤配送
   // （自分自身や他ワーカーを宛先にする）を構造的に不可能にする。
+  // orchestrator や human の名乗りでは isWorker は false になり、--skill や送信元解決が
+  // 従来どおり正常に機能する（Issue #384）。
   const workerIdentity = env.GH_MAESTRO_WORKER || null;
-  const isWorker = !!workerIdentity;
+  const isWorker = isWorkerIdentity(workerIdentity);
 
   // ── 送信先の解決 ────────────────────────────────────────────────────────
   // recipient（宛先）の位置引数解釈は本文入力方式の変更と無関係に維持する。

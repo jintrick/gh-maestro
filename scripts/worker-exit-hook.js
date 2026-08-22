@@ -36,6 +36,7 @@ const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const { listPrsByBranch, parsePrListResponse } = require('./shared/gh-pr');
 const { compactWorkerLog } = require('./shared/strip-thinking-token-lines');
 const { workerLogPath } = require('./shared/headless-launch');
+const { isWorkerIdentity } = require('./shared/resident-force-guard');
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -244,7 +245,8 @@ if (require.main === module) {
   //    headless-shimが子のclose後に独立プロセスとして起動しているため、ログへの追記は
   //    発生し得ない区間で安全に置き換えられる。ベストエフォート:
   //    失敗しても他のステップ（返信確認・代理送信等）を止めない。
-  if (workspace && workerName) {
+  //    オーケストレーターや人間にはワーカーログが存在しないため、ワーカー名の場合のみ実行する（Issue #384）。
+  if (workspace && isWorkerIdentity(workerName)) {
     try {
       compactWorkerLog(workerLogPath(workspace, workerName));
     } catch (error) {

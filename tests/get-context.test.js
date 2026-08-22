@@ -17,6 +17,20 @@ test('REPO と WORKSPACE を正しいフォーマットで出力する', () => {
   // フォーマット: クォートなし、owner/repo形式
   assert.match(r.stdout, /^REPO=[^/\s]+\/[^\s]+/m);
   assert.match(r.stdout, /^WORKSPACE=.+/m);
+  assert.match(r.stdout, /^GH_MAESTRO_WORKER=orchestrator$/m);
+});
+
+test('GH_MAESTRO_WORKER=orchestrator がセッション変数として出力される（Issue #384）', () => {
+  const r = spawnSync(process.execPath, [SCRIPT], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+  });
+  assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+  const lines = r.stdout.split(/\r?\n/);
+  assert.ok(
+    lines.includes('GH_MAESTRO_WORKER=orchestrator'),
+    `出力に GH_MAESTRO_WORKER=orchestrator が含まれること: ${r.stdout}`
+  );
 });
 
 test('WORKSPACE はカレントディレクトリと一致する（Unixスラッシュ）', () => {
