@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const hook = require('../scripts/worker-exit-hook');
+const { workerLogPath } = require('../scripts/shared/headless-launch');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-exit-hook-test-'));
@@ -459,9 +460,16 @@ describe('CLI引数の解釈', () => {
 
   test('GH_MAESTRO_WORKER=orchestrator のときはワーカーログ圧縮をスキップする（Issue #384）', () => {
     withTempDir((dir) => {
+      // orchestrator はワーカー名形式（issue-<N>-...）ではないため、
+      // 以前の有無判定（if (workspace && workerName)）では workerLogPath が例外を投げ、
+      // stderr に「ログ圧縮に失敗: cannot infer record owner...」が出力されていた。
+      // isWorkerIdentity による値判定ではそもそもログ圧縮がスキップされるため、
+      // stderr に圧縮失敗エラーが出力されず正常終了することを検証する。
       const env = { ...cleanSpawnEnv(), GH_MAESTRO_WORKER: 'orchestrator' };
       const r = realSpawnSync(process.execPath, [HOOK_SCRIPT, dir, '', '0'], { encoding: 'utf8', timeout: 10000, env });
+
       assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+      assert.doesNotMatch(r.stderr, /ログ圧縮に失敗/, 'orchestrator名乗り時はログ圧縮が試みられずエラーが出ないこと');
     });
   });
 

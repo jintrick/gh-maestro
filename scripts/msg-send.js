@@ -49,7 +49,7 @@ Usage (orchestrator からワーカーへ送信):
 
 Arguments:
   <recipient>           送信先（worker 名、または "orchestrator"）。--skill 使用時は指定しない。
-                        ワーカーコンテキスト（GH_MAESTRO_WORKER 有り）では常に orchestrator 宛に固定され、
+                        ワーカーコンテキスト（GH_MAESTRO_WORKER がワーカー名）では常に orchestrator 宛に固定され、
                         recipient を書く必要はない。
 
 Options:
@@ -73,8 +73,8 @@ Options:
 Output (stdout):
   投稿されたコメントの URL を1行出力
 
-コンテキスト判定: GH_MAESTRO_WORKER 環境変数の有無でワーカー/orchestrator を判別する
-  （spawn-worker.js / inbox-supervisor.js が起動時にワーカーへ注入する）。
+コンテキスト判定: GH_MAESTRO_WORKER 環境変数の値（ワーカー名か orchestrator/human か）で判別する
+  （spawn-worker.js / inbox-supervisor.js が起動時にワーカーへ注入し、orchestrator は orchestrator を名乗る）。
 workspace 解決順: --workspace 引数 > GH_MAESTRO_WORKSPACE env > CWD から上方探索
 
 拒否ガード（orchestrator からワーカー宛ての送信のみ）: 宛先ワーカーが稼働中（作業中）で、

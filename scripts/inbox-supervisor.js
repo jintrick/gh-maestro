@@ -648,7 +648,7 @@ function main(argsOverride, opts = {}) {
       return dup ? [dup.pid] : [];
     };
     try {
-      const res = acquireResidentLease({ workspace, role, handoff: force, handoffStopTargets: handoffTargets });
+      const res = acquireResidentLease({ workspace, role, handoff: force, handoffStopTargets: handoffTargets, env });
       if (!res.acquired) {
         // 引き継ぎ期限超過（--force で既存所有者が終了しなかった）
         writeErr(
