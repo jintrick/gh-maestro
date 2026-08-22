@@ -50,6 +50,7 @@ const { toWinPath } = require('./win-path');
 const { startExecution, markLaunchFailure } = require('./shared/execution-registry');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const readStateLib = require('./shared/read-state');
+const { checkClosedPr } = require('./shared/closed-pr-guard');
 
 const SPEC = {
   flags: {
@@ -337,6 +338,16 @@ try {
 const workerName   = spec.workerName;
 const worktreeDir  = spec.worktreeDir;
 const logPath      = spec.logPath;
+
+// 同名のクローズ済みPRが残るブランチは再提出先にならないため、リース取得や
+// worktree作成などの副作用より前に起動を止める。照会不能も安全側へ倒す。
+const closedPr = checkClosedPr({ repo, branch: workerName, cwd: workspace });
+if (closedPr.blocked) {
+  const detail = closedPr.number
+    ? `ブランチ "${workerName}" にはクローズ済みPR #${closedPr.number} があります。`
+    : `ブランチ "${workerName}" のPR状態を確認できませんでした。`;
+  fail(`${detail} ${closedPr.reason || ''}`.trim());
+}
 
 // --- 移行安全策: 旧形式（issue-<issue>-<description>、role無し）のワーカー重複チェック ---
 // Phase 3 で workerName 形式が issue-<issue>-<role>-<description> に変わった。

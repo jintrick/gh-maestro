@@ -18,6 +18,7 @@ const processLifecycle = require('../scripts/process-lifecycle');
 afterEach(() => {
   workerLiveness._setIsProcessAlive(processLifecycle.isProcessAlive);
   workerLiveness._setVerifyProcessIdentity(processLifecycle.verifyProcessIdentity);
+  msgSend._setGhPrList(() => ({ status: 0, stdout: '[]', stderr: '' }));
 });
 
 // msg-send.js は成功時にensureInboxSupervisorRunning()を呼ぶ（best-effort）。
@@ -31,6 +32,7 @@ ensureInboxSupervisor._setSpawn(() => {
 ensureInboxSupervisor._setFindRunningInstance(() => null);
 ensureInboxSupervisor._setIsResidentLeaseLive(() => false);
 ensureInboxSupervisor._setFindSessionRootPid(() => 12345);
+msgSend._setGhPrList(() => ({ status: 0, stdout: '[]', stderr: '' }));
 
 
 // ワーカー起動コンテキストでは GH_MAESTRO_WORKER / GH_MAESTRO_WORKSPACE が注入され、
@@ -130,6 +132,29 @@ test('--issue で指定した Issue が使われる', () => {
     assert.ok(capturedBody.includes('"v":1'));
     assert.ok(capturedBody.includes('"to":"worker-1"'));
     assert.ok(r.lines[0].includes('github.com'));
+  });
+});
+
+test('クローズ済みPRのブランチ宛て送信はコメント投稿前に拒否する', () => {
+  withTempDir(workspace => {
+    let postCalls = 0;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhPrList((repo, branch) => {
+      assert.equal(repo, 'test/repo');
+      assert.equal(branch, 'issue-42-coder-fix');
+      return { status: 0, stdout: JSON.stringify([{ number: 376, state: 'CLOSED' }]) };
+    });
+    msgSend._setGhIssueComment(() => { postCalls++; return { status: 0, stdout: 'unexpected' }; });
+
+    const r = msgSend.main(
+      ['issue-42-coder-fix', '--stdin', '--issue', '42', '--workspace', workspace],
+      null,
+      stdinIO('追加指示'),
+    );
+    assert.equal(r.code, 1);
+    assert.equal(postCalls, 0);
+    assert.match(r.errLines.join('\n'), /issue-42-coder-fix/);
+    assert.match(r.errLines.join('\n'), /#376/);
   });
 });
 

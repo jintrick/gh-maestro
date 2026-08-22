@@ -72,6 +72,7 @@ const {
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { readContract, clearContract } = require('./shared/response-contract');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
+const { checkClosedPr } = require('./shared/closed-pr-guard');
 const { ARTIFACTS, legacyWorkerOwner, recordPath, recordRoot } = require('./shared/record-paths');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
@@ -131,6 +132,10 @@ let _ghRepoView = (opts = {}) => {
   return spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
     { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
 };
+
+let _ghPrList = (repo, branch, opts = {}) => spawnSync('gh', [
+  'pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--json', 'number,state',
+], { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
 
 let _ghApiComments = (repo, issue, since, opts = {}) => {
   const callOpts = { ...opts, per_page: 100 };
@@ -310,12 +315,13 @@ function loadWorkers(workspace) {
  * @param {object} params.message    - { from, body }
  * @param {string} params.workspace
  * @param {string} params.homedir
+ * @param {string} [params.repo] - main() が解決済みのリポジトリ名
  * @param {string|null} params.baseBranch - workers.json に永続化されたこのワーカーのPRベースブランチ。
  *   初回起動（spawn-worker.js）が登録し、resume 時に GH_MAESTRO_BASE_BRANCH として再注入する
  *   （Issue #269）。レガシーレコードでは null。
  * @returns {{ success: boolean, method: string, error?: string, newPaneId?: string }}
  */
-function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir, baseBranch }) {
+function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir, baseBranch, repo }) {
   let agentConfig;
   try {
     agentConfig = agentId ? resolveAgentConfig(agentId, { workspace, homedir }) : null;
@@ -327,6 +333,17 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir,
     // 'pending'のままだとshouldRetry()のisAwaitingIdleがtrueになり無限リトライ＋通知未発火になる。
     return { success: false, method: 'config-unresolvable', error: `agentId "${agentId}" のconfigを解決できません` };
   }
+
+  if (repo) {
+    const closedPr = checkClosedPr({ repo, branch: workerName, cwd: workspace, listFn: _ghPrList });
+    if (closedPr.blocked) {
+      const detail = closedPr.number
+        ? `ブランチ "${workerName}" にはクローズ済みPR #${closedPr.number} があります。`
+        : `ブランチ "${workerName}" のPR状態を確認できませんでした。`;
+      return { success: false, method: 'resume-failed', error: `${detail} ${closedPr.reason || ''}`.trim() };
+    }
+  }
+
   const worktreeDir = path.join(workspace, '.gh-maestro', 'worktrees', workerName);
   if (!fs.existsSync(worktreeDir)) {
     return { success: false, method: 'resume-failed', error: `worktree ${worktreeDir} が存在しません（resume不可能）` };
@@ -472,9 +489,10 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir,
  * @param {string} params.workspace
  * @param {string} params.homedir
  * @param {string} params.issue      - Issue 番号（文字列）
+ * @param {string} [params.repo]     - main() が解決済みのリポジトリ名
  * @returns {{ success: boolean, method: string, error?: string }}
  */
-function deliverMessage({ workerName, entry, message, workspace, homedir, issue }) {
+function deliverMessage({ workerName, entry, message, workspace, homedir, issue, repo }) {
   if (_isWorkerAlive(entry)) {
     return {
       success: false,
@@ -484,7 +502,7 @@ function deliverMessage({ workerName, entry, message, workspace, homedir, issue 
   }
 
   const resumeResult = tryResumeAndDeliver({
-    workerName, agentId: entry.agentId, message, workspace, homedir, baseBranch: entry.baseBranch,
+    workerName, agentId: entry.agentId, message, workspace, homedir, baseBranch: entry.baseBranch, repo,
   });
   if (resumeResult.method !== 'pending') {
     // resumeを試みた結果（成功 or 明確な失敗）。既存のpendingDeliveries/バックオフ機構にそのまま乗る。
@@ -878,6 +896,7 @@ function main(argsOverride, opts = {}) {
           workspace,
           homedir,
           issue,
+          repo,
         });
 
         if (deliveryResult.success) {
@@ -1051,6 +1070,7 @@ function main(argsOverride, opts = {}) {
           workspace,
           homedir,
           issue,
+          repo,
         });
 
         cursor.seenIds.push(candidate.cid);
@@ -1186,6 +1206,7 @@ if (require.main === module) {
 
 module.exports = {
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
+  _setGhPrList: (fn) => { _ghPrList = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setIsWorkerAlive: (fn) => { _isWorkerAlive = fn; },
   _setSleep: (fn) => { _sleep = fn; },
