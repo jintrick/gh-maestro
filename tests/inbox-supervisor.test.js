@@ -10,6 +10,7 @@ const supervisor = require('../scripts/inbox-supervisor');
 const { spawnSync } = require('../scripts/child-process');
 const headlessLaunch = require('../scripts/shared/headless-launch');
 const workerLease = require('../scripts/shared/worker-lease');
+const closedPrGuard = require('../scripts/shared/closed-pr-guard');
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
@@ -142,7 +143,7 @@ function resetGhRepoView() {
 }
 
 function resetGhPrList() {
-  supervisor._setGhPrList(() => ({ status: 0, stdout: '[]', stderr: '' }));
+  closedPrGuard._setListFn(() => ({ status: 0, stdout: '[]', stderr: '' }));
 }
 
 /** resumeモックが返すPID。既存ワーカーのPIDと区別するために使う */
@@ -559,7 +560,7 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
   test('tryResumeAndDeliver: クローズ済みPRのブランチではresumeを起動しない', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
-      supervisor._setGhPrList(() => ({
+      closedPrGuard._setListFn(() => ({
         status: 0,
         stdout: JSON.stringify([{ number: 376, state: 'CLOSED' }]),
         stderr: '',

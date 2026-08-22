@@ -32,7 +32,7 @@ const { isWorkerAlive } = require('./shared/worker-liveness');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const { hasReportedSinceStart } = require('./shared/worker-report-check');
 const { main: writeDraftMain } = require('./write-draft');
-const { checkClosedPr } = require('./shared/closed-pr-guard');
+const closedPrGuard = require('./shared/closed-pr-guard');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
@@ -128,9 +128,6 @@ let _ghIssueComment = defaultGhIssueComment;
 
 // テストで注入可能（実gh呼び出しを避けるため）。既定は shared/gh-comments.js の実装。
 let _ghListComments = (repo, issue, opts = {}) => listComments(repo, issue, opts);
-let _ghPrList = (repo, branch, opts = {}) => spawnSync('gh', [
-  'pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--json', 'number,state',
-], { cwd: opts.cwd, encoding: 'utf8', timeout: 30000 });
 
 /**
  * 送信しようとした本文を /tmp 配下の一時ファイルへ退避する。
@@ -457,7 +454,7 @@ function main(argsOverride, envOverride, ioOverride) {
   // クローズ済みPRのブランチへ指示を送ると、配送側で止めてもこのコメント自体は残り、
   // 送信者は「送れた」と誤認する。GitHub投稿の直前に送信側で確定的に止める。
   if (!isWorker && recipient !== 'orchestrator') {
-    const closedPr = checkClosedPr({ repo, branch: recipient, cwd: workspace, listFn: _ghPrList });
+    const closedPr = closedPrGuard.checkClosedPr({ repo, branch: recipient, cwd: workspace });
     if (closedPr.blocked) {
       const detail = closedPr.number
         ? `ブランチ "${recipient}" にはクローズ済みPR #${closedPr.number} があります。`
@@ -549,7 +546,6 @@ module.exports = {
   _setGhIssueComment: (fn) => { _ghIssueComment = fn; },
   _resetGhIssueComment: () => { _ghIssueComment = defaultGhIssueComment; },
   _setGhListComments: (fn) => { _ghListComments = fn; },
-  _setGhPrList: (fn) => { _ghPrList = fn; },
   testContextPostBlockReason,
   checkWorkerBusyRejection,
   main,

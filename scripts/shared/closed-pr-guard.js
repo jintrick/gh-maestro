@@ -17,10 +17,13 @@ const GH_TIMEOUT_MS = 30000;
  * @param {(repo: string, branch: string, opts?: object) => object} [params.listFn]
  * @returns {{ blocked: boolean, number?: number, reason?: string }}
  */
-function checkClosedPr({ repo, branch, cwd, listFn = defaultList }) {
+let _listFn = defaultList;
+
+function checkClosedPr({ repo, branch, cwd, listFn }) {
+  const list = listFn || _listFn;
   let result;
   try {
-    result = listFn(repo, branch, { cwd });
+    result = list(repo, branch, { cwd });
   } catch (e) {
     return { blocked: true, reason: `クローズ済みPRの照会に失敗しました: ${e.message}` };
   }
@@ -64,4 +67,8 @@ function defaultList(repo, branch, opts = {}) {
   ], { cwd: opts.cwd, encoding: 'utf8', timeout: GH_TIMEOUT_MS });
 }
 
-module.exports = { checkClosedPr };
+module.exports = {
+  checkClosedPr,
+  _setListFn: (fn) => { _listFn = fn; },
+  _resetListFn: () => { _listFn = defaultList; },
+};

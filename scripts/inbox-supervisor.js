@@ -72,7 +72,7 @@ const {
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { readContract, clearContract } = require('./shared/response-contract');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
-const { checkClosedPr } = require('./shared/closed-pr-guard');
+const closedPrGuard = require('./shared/closed-pr-guard');
 const { ARTIFACTS, legacyWorkerOwner, recordPath, recordRoot } = require('./shared/record-paths');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
@@ -132,10 +132,6 @@ let _ghRepoView = (opts = {}) => {
   return spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
     { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
 };
-
-let _ghPrList = (repo, branch, opts = {}) => spawnSync('gh', [
-  'pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--json', 'number,state',
-], { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...opts });
 
 let _ghApiComments = (repo, issue, since, opts = {}) => {
   const callOpts = { ...opts, per_page: 100 };
@@ -335,7 +331,7 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir,
   }
 
   if (repo) {
-    const closedPr = checkClosedPr({ repo, branch: workerName, cwd: workspace, listFn: _ghPrList });
+    const closedPr = closedPrGuard.checkClosedPr({ repo, branch: workerName, cwd: workspace });
     if (closedPr.blocked) {
       const detail = closedPr.number
         ? `ブランチ "${workerName}" にはクローズ済みPR #${closedPr.number} があります。`
@@ -1206,7 +1202,6 @@ if (require.main === module) {
 
 module.exports = {
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
-  _setGhPrList: (fn) => { _ghPrList = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setIsWorkerAlive: (fn) => { _isWorkerAlive = fn; },
   _setSleep: (fn) => { _sleep = fn; },
