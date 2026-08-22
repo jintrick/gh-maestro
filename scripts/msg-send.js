@@ -32,6 +32,7 @@ const { isWorkerAlive } = require('./shared/worker-liveness');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const { hasReportedSinceStart } = require('./shared/worker-report-check');
 const { main: writeDraftMain } = require('./write-draft');
+const closedPrGuard = require('./shared/closed-pr-guard');
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
@@ -448,6 +449,19 @@ function main(argsOverride, envOverride, ioOverride) {
   if (!repo) {
     writeErr('msg-send: リポジトリを解決できません（空のレスポンス）。');
     return { code: 1, lines: out, errLines: err };
+  }
+
+  // クローズ済みPRのブランチへ指示を送ると、配送側で止めてもこのコメント自体は残り、
+  // 送信者は「送れた」と誤認する。GitHub投稿の直前に送信側で確定的に止める。
+  if (!isWorker && recipient !== 'orchestrator') {
+    const closedPr = closedPrGuard.checkClosedPr({ repo, branch: recipient, cwd: workspace });
+    if (closedPr.blocked) {
+      const detail = closedPr.number
+        ? `ブランチ "${recipient}" にはクローズ済みPR #${closedPr.number} があります。`
+        : `ブランチ "${recipient}" のPR状態を確認できませんでした。`;
+      writeErr(`msg-send: 送信を拒否しました。${detail} ${closedPr.reason || ''}`.trim());
+      return { code: 1, lines: out, errLines: err };
+    }
   }
 
   // ── 作業中で未報告のワーカーへの送信を拒否する（Issue #263） ────────────────

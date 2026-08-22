@@ -10,6 +10,7 @@ const supervisor = require('../scripts/inbox-supervisor');
 const { spawnSync } = require('../scripts/child-process');
 const headlessLaunch = require('../scripts/shared/headless-launch');
 const workerLease = require('../scripts/shared/worker-lease');
+const closedPrGuard = require('../scripts/shared/closed-pr-guard');
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
@@ -141,6 +142,10 @@ function resetGhRepoView() {
   });
 }
 
+function resetGhPrList() {
+  closedPrGuard._setListFn(() => ({ status: 0, stdout: '[]', stderr: '' }));
+}
+
 /** resumeモックが返すPID。既存ワーカーのPIDと区別するために使う */
 const RESUMED_PID = 999;
 
@@ -174,6 +179,7 @@ function resetHeadlessLaunchMocks({ pid = RESUMED_PID } = {}) {
 
 function resetAllMocks() {
   resetGhRepoView();
+  resetGhPrList();
   resetGhApiComments();
   resetHeadlessLaunchMocks();
   setWorkersIdle();
@@ -548,6 +554,28 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
       const cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
       assert.ok(cmd.includes('--continue'));
       assert.ok(cmd.includes('claude宛メッセージ'));
+    });
+  });
+
+  test('tryResumeAndDeliver: クローズ済みPRのブランチではresumeを起動しない', () => {
+    withTempDir((dir) => {
+      setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
+      closedPrGuard._setListFn(() => ({
+        status: 0,
+        stdout: JSON.stringify([{ number: 376, state: 'CLOSED' }]),
+        stderr: '',
+      }));
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName: 'issue-7-fix', agentId: 'agy',
+        message: { from: 'orch', body: '送信しない' }, workspace: dir, homedir: '/home',
+        repo: 'test/repo',
+      });
+      assert.equal(result.success, false);
+      assert.equal(result.method, 'resume-failed');
+      assert.match(result.error, /issue-7-fix/);
+      assert.match(result.error, /#376/);
+      assert.equal(lastSpawnCalls.length, 0);
     });
   });
 
