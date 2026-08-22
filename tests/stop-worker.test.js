@@ -20,6 +20,33 @@ function withTempDir(fn) {
   try { return fn(dir); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
+/**
+ * 実際のワーカー構造（親プロセス＋子プロセス）を模したプロセスツリーを起動する。
+ * 親プロセス（シム役）の下に子プロセス（エージェント役）がぶら下がる木構造を作る。
+ */
+function spawnProcessTree(dir) {
+  const childInfoFile = path.join(dir, `child-pid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.txt`);
+  const parent = spawn(process.execPath, ['-e', `
+    const { spawn } = require('child_process');
+    const fs = require('fs');
+    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], { stdio: 'ignore' });
+    fs.writeFileSync(process.argv[1], String(child.pid), 'utf8');
+    setInterval(() => {}, 1000);
+  `, childInfoFile], { detached: true, stdio: 'ignore' });
+
+  const parentPid = parent.pid;
+  const deadline = Date.now() + 5000;
+  while (!fs.existsSync(childInfoFile) && Date.now() < deadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  if (!fs.existsSync(childInfoFile)) {
+    try { process.kill(parentPid, 'SIGKILL'); } catch {}
+    throw new Error('子プロセスの起動・PID取得に失敗しました');
+  }
+  const childPid = parseInt(fs.readFileSync(childInfoFile, 'utf8'), 10);
+  return { parentPid, childPid };
+}
+
 test('stop-worker: --help はUsageを表示して終了コード0', () => {
   const r = run(['--help']);
   assert.equal(r.status, 0);
@@ -102,29 +129,26 @@ test('stop-worker: プロセスが既に停止している場合は終了コー�
   });
 });
 
-test('stop-worker: 正常系: 同一性が一致するプロセスを停止し、worktreeとworkers.jsonを保持する', () => {
+test('stop-worker: 正常系: 同一性が一致するプロセスツリー（親＋子）を停止し、worktreeとworkers.jsonを保持する', () => {
   withTempDir((dir) => {
     const worktreeDir = path.join(dir, '.gh-maestro', 'worktrees', 'test-worker');
     fs.mkdirSync(worktreeDir, { recursive: true });
     fs.writeFileSync(path.join(worktreeDir, 'sample.txt'), 'hello', 'utf8');
 
-    // 長時間動くダミー子プロセスを起動
-    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
-      detached: true,
-      stdio: 'ignore',
-    });
-    const pid = child.pid;
-    assert.ok(pid > 0);
+    // 親子関係を持つプロセスツリーを起動
+    const { parentPid, childPid } = spawnProcessTree(dir);
+    assert.ok(parentPid > 0);
+    assert.ok(childPid > 0);
 
     try {
-      const startTime = getProcessStartTime(pid);
-      assert.ok(startTime, 'ダミープロセスの起動時刻を取得できること');
+      const startTime = getProcessStartTime(parentPid);
+      assert.ok(startTime, '親プロセスの起動時刻を取得できること');
 
       fs.writeFileSync(
         path.join(dir, '.gh-maestro', 'workers.json'),
         JSON.stringify({
           'test-worker': {
-            pid,
+            pid: parentPid,
             startTime,
             issue: 10,
             skill: 'gh-maestro-coder',
@@ -137,8 +161,9 @@ test('stop-worker: 正常系: 同一性が一致するプロセスを停止し�
       assert.equal(r.status, 0);
       assert.match(r.stderr, /終了しました/);
 
-      // プロセスが停止していることを確認
-      assert.equal(isProcessAlive(pid), false, 'プロセスが終了していること');
+      // 親プロセスだけでなく配下の子プロセスまで終了していることを検証（プロセスツリー全体の停止）
+      assert.equal(isProcessAlive(parentPid), false, '親プロセスが終了していること');
+      assert.equal(isProcessAlive(childPid), false, '子プロセス（配下のエージェント）が終了していること');
 
       // worktreeディレクトリと中身が残っていることを確認
       assert.ok(fs.existsSync(worktreeDir), 'worktreeディレクトリが残っていること');
@@ -148,23 +173,21 @@ test('stop-worker: 正常系: 同一性が一致するプロセスを停止し�
       const workers = JSON.parse(fs.readFileSync(path.join(dir, '.gh-maestro', 'workers.json'), 'utf8'));
       assert.ok('test-worker' in workers, 'workers.jsonにエントリが残っていること');
     } finally {
-      try { process.kill(pid, 'SIGKILL'); } catch {}
+      try { process.kill(parentPid, 'SIGKILL'); } catch {}
+      try { process.kill(childPid, 'SIGKILL'); } catch {}
     }
   });
 });
 
-test('stop-worker: 拒否側: PIDは生存しているが起動時刻が不一致（PID再利用）の場合、プロセスをkillせずエラー終了する', () => {
+test('stop-worker: 拒否側: PIDは生存しているが起動時刻が不一致（PID再利用）の場合、プロセスツリーをkillせずエラー終了する', () => {
   withTempDir((dir) => {
     const worktreeDir = path.join(dir, '.gh-maestro', 'worktrees', 'mismatch-worker');
     fs.mkdirSync(worktreeDir, { recursive: true });
 
-    // 長時間動くダミー子プロセスを起動
-    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
-      detached: true,
-      stdio: 'ignore',
-    });
-    const pid = child.pid;
-    assert.ok(pid > 0);
+    // 親子関係を持つプロセスツリーを起動
+    const { parentPid, childPid } = spawnProcessTree(dir);
+    assert.ok(parentPid > 0);
+    assert.ok(childPid > 0);
 
     try {
       // 意図的に全く異なる過去の起動時刻を登録
@@ -174,7 +197,7 @@ test('stop-worker: 拒否側: PIDは生存しているが起動時刻が不一�
         path.join(dir, '.gh-maestro', 'workers.json'),
         JSON.stringify({
           'mismatch-worker': {
-            pid,
+            pid: parentPid,
             startTime: fakeStartTime,
             issue: 20,
             skill: 'gh-maestro-coder',
@@ -187,34 +210,32 @@ test('stop-worker: 拒否側: PIDは生存しているが起動時刻が不一�
       assert.notEqual(r.status, 0, '同一性不一致時は終了コード1でエラーになること');
       assert.match(r.stderr, /同一性確認に失敗しました/);
 
-      // プロセスが kill されず生存し続けていることを検証（最重要の拒否側テスト）
-      assert.equal(isProcessAlive(pid), true, '同一性不一致のプロセスはkillされず生存し続けること');
+      // 親・子ともに kill されず生存し続けていることを検証（巻き添え防止の検証）
+      assert.equal(isProcessAlive(parentPid), true, '同一性不一致の親プロセスはkillされず生存し続けること');
+      assert.equal(isProcessAlive(childPid), true, '同一性不一致の子プロセスはkillされず生存し続けること');
 
       // worktree と workers.json も残っていること
       assert.ok(fs.existsSync(worktreeDir), 'worktreeディレクトリが残っていること');
       const workers = JSON.parse(fs.readFileSync(path.join(dir, '.gh-maestro', 'workers.json'), 'utf8'));
       assert.ok('mismatch-worker' in workers, 'workers.jsonにエントリが残っていること');
     } finally {
-      try { process.kill(pid, 'SIGKILL'); } catch {}
+      try { process.kill(parentPid, 'SIGKILL'); } catch {}
+      try { process.kill(childPid, 'SIGKILL'); } catch {}
     }
   });
 });
 
 test('stop-worker: 〈--issue + --skill〉指定で解決して停止できる', () => {
   withTempDir((dir) => {
-    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
-      detached: true,
-      stdio: 'ignore',
-    });
-    const pid = child.pid;
+    const { parentPid, childPid } = spawnProcessTree(dir);
     try {
-      const startTime = getProcessStartTime(pid);
+      const startTime = getProcessStartTime(parentPid);
       fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
       fs.writeFileSync(
         path.join(dir, '.gh-maestro', 'workers.json'),
         JSON.stringify({
           'issue-30-coder': {
-            pid,
+            pid: parentPid,
             startTime,
             issue: 30,
             skill: 'gh-maestro-coder',
@@ -225,9 +246,11 @@ test('stop-worker: 〈--issue + --skill〉指定で解決して停止できる',
 
       const r = run(['--issue', '30', '--skill', 'gh-maestro-coder', '--workspace', dir]);
       assert.equal(r.status, 0);
-      assert.equal(isProcessAlive(pid), false, 'プロセスが終了していること');
+      assert.equal(isProcessAlive(parentPid), false, '親プロセスが終了していること');
+      assert.equal(isProcessAlive(childPid), false, '子プロセスが終了していること');
     } finally {
-      try { process.kill(pid, 'SIGKILL'); } catch {}
+      try { process.kill(parentPid, 'SIGKILL'); } catch {}
+      try { process.kill(childPid, 'SIGKILL'); } catch {}
     }
   });
 });
