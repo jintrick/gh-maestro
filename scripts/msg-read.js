@@ -16,6 +16,7 @@ const { isRetryableGhFailure, graphqlCommentBody } = require('./shared/gh-fallba
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const { findPlanComments, isPlanComment, stripPlanMarker } = require('./shared/plan-comment');
 const { parseMarker } = require('./msg-poll');
+const { isWorkerIdentity } = require('./shared/resident-force-guard');
 
 const USAGE = `msg-read.js — GitHub Issue コメント、計画、Issueコンテキストを読み出す
 
@@ -233,8 +234,8 @@ function main(argsOverride) {
     }
   }
 
-  const workerName = isIssueContext ? process.env.GH_MAESTRO_WORKER : null;
-  if (isIssueContext && !workerName) {
+  const workerName = isIssueContext ? (process.env.GH_MAESTRO_WORKER || null) : null;
+  if (isIssueContext && !isWorkerIdentity(workerName)) {
     writeErr('msg-read: --issue-context は GH_MAESTRO_WORKER が設定されたワーカーから実行してください。');
     return { code: 1, lines: out, errLines: err };
   }

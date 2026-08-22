@@ -56,6 +56,7 @@ const {
 const { acquireResidentLease, INBOX_SUPERVISOR_ROLE } = require('./shared/worker-lease');
 const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdog-exit-notify');
 const { handleParentSessionDeath } = require('./shared/resident-parent-death');
+const { checkResidentForceGuard } = require('./shared/resident-force-guard');
 
 // テスト注入（test-process-spawn-safety ルール準拠）。既定は実装。
 let _createDeadManSwitch = createDeadManSwitch;
@@ -569,7 +570,7 @@ function shouldRetry(pendingEntry, nowMs) {
  * }}
  */
 function main(argsOverride, opts = {}) {
-  const { streamOutput = false } = opts;
+  const { streamOutput = false, env = process.env } = opts;
   const out = [];
   const err = [];
 
@@ -610,6 +611,18 @@ function main(argsOverride, opts = {}) {
 
   const onceMode = values['--once'] === true;
   const force = values['--force'] === true;
+
+  // ── 強制置き換えガード（Issue #384） ──────────────────────────────────
+  // 本番の常駐プロセスはワーカーの作業対象ではない。オーケストレーターまたは人間
+  // （GH_MAESTRO_WORKER=orchestrator / human）の名乗りがある場合のみ許可し、
+  // 名乗りが無い場合やワーカー名乗りは role lease 取得や停止要求の前に即座に拒否する。
+  if (force) {
+    const guardRes = checkResidentForceGuard(env);
+    if (!guardRes.allowed) {
+      writeErr(guardRes.message);
+      return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '', residentLease: null };
+    }
+  }
 
   const workspace = resolveWorkspace(values['--workspace']);
   if (!workspace) {

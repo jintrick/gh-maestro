@@ -1171,7 +1171,7 @@ test('継続モード: --force は重複レース判定を無効化せず、既�
 
       const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
       const r = spawnSync(process.execPath, [script, 'orchestrator', '--workspace', workspace, '--force'],
-        { encoding: 'utf8', timeout: 15000, env: cleanSpawnEnv() });
+        { encoding: 'utf8', timeout: 15000, env: { ...cleanSpawnEnv(), GH_MAESTRO_WORKER: 'orchestrator' } });
 
       assert.doesNotMatch(r.stderr, /重複起動/);
       // 引き継ぎは lease を再取得して本稼働へ進む（本テストでは gh 解決に失敗して

@@ -37,6 +37,7 @@ gh-maestroの存在意義はquota経済である。コーダー起動・レビ�
 - `REPO` — GitHub リポジトリ（owner/repo 形式）
 - `WORKSPACE` — ローカルワークスペースの絶対パス
 - `BASE_BRANCH` — ベースブランチ名
+- `GH_MAESTRO_WORKER` — 実行主体の識別名（オーケストレーターでは `orchestrator`）
 
 ### ワーカーの使い分け
 

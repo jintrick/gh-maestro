@@ -46,3 +46,4 @@ console.log('[gh-maestro session context]');
 console.log(`REPO=${repo}`);
 console.log(`WORKSPACE=${unixWorkspace}`);
 if (baseBranch) console.log(`BASE_BRANCH=${baseBranch}`);
+console.log('GH_MAESTRO_WORKER=orchestrator');

@@ -457,6 +457,14 @@ describe('CLI引数の解釈', () => {
     });
   });
 
+  test('GH_MAESTRO_WORKER=orchestrator のときはワーカーログ圧縮をスキップする（Issue #384）', () => {
+    withTempDir((dir) => {
+      const env = { ...cleanSpawnEnv(), GH_MAESTRO_WORKER: 'orchestrator' };
+      const r = realSpawnSync(process.execPath, [HOOK_SCRIPT, dir, '', '0'], { encoding: 'utf8', timeout: 10000, env });
+      assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+    });
+  });
+
   test('ワーカー終了フック経由で rename の一時的な EPERM をリトライで乗り越えて圧縮できる', () => {
     withTempDir((dir) => {
       const workerName = 'issue-5-fix';

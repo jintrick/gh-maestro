@@ -9,6 +9,17 @@ const os = require('os');
 const lease = require('../scripts/shared/worker-lease');
 const processLifecycle = require('../scripts/process-lifecycle');
 
+// テスト実行環境から GH_MAESTRO_WORKER / GH_MAESTRO_WORKSPACE を退避し、
+// 単体テストが親ワーカー文テキストの影響を受けないようにする。
+const SAVED_MAESTRO_ENV = {};
+for (const k of ['GH_MAESTRO_WORKER', 'GH_MAESTRO_WORKSPACE']) {
+  if (process.env[k] !== undefined) SAVED_MAESTRO_ENV[k] = process.env[k];
+  delete process.env[k];
+}
+process.on('exit', () => {
+  for (const [k, v] of Object.entries(SAVED_MAESTRO_ENV)) process.env[k] = v;
+});
+
 // 実プロセスには一切触れない（.claude/rules/test-process-spawn-safety.md）
 afterEach(() => {
   lease._setIsProcessAlive(processLifecycle.isProcessAlive);
@@ -798,7 +809,13 @@ test('acquireResidentLease: --force は既存所有者を停止させて同じ l
       pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
     }), 'utf8');
 
-    const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor', handoff: true, deadlineMs: 1000 });
+    const res = lease.acquireResidentLease({
+      workspace: tmp,
+      role: 'inbox-supervisor',
+      handoff: true,
+      deadlineMs: 1000,
+      env: { GH_MAESTRO_WORKER: 'orchestrator' },
+    });
     try {
       assert.equal(res.acquired, true);
       assert.deepEqual(kills, [ownerPid]);
@@ -831,7 +848,13 @@ test('acquireResidentLease: startTime 欠落の細工リースは --force の停
       pid: ownerPid, workerName: 'inbox-supervisor', phase: 'active',
     }), 'utf8');
 
-    const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor', handoff: true, deadlineMs: 50 });
+    const res = lease.acquireResidentLease({
+      workspace: tmp,
+      role: 'inbox-supervisor',
+      handoff: true,
+      deadlineMs: 50,
+      env: { GH_MAESTRO_WORKER: 'orchestrator' },
+    });
     try {
       // isLeaseLive が false のため停止対象にならず、stale として回収して取得できる
       assert.equal(res.acquired, true);
@@ -859,7 +882,7 @@ test('acquireResidentLease: --force でも所有者が終了しなければ期�
       pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
     }), 'utf8');
 
-    const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor', handoff: true, deadlineMs: 50 });
+    const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor', handoff: true, deadlineMs: 50, env: { GH_MAESTRO_WORKER: 'orchestrator' } });
     assert.equal(res.acquired, false);
     assert.equal(res.reason, 'handoff-timeout');
     assert.equal(res.ownerPid, ownerPid);
@@ -872,3 +895,66 @@ test('acquireResidentLease: --force でも所有者が終了しなければ期�
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('acquireResidentLease: GH_MAESTRO_WORKER がワーカー名のときは handoff を拒否し kill しない（Issue #384）', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  try {
+    mockLiveness({ alive: true });
+    const ownerPid = 424242;
+    const kills = [];
+    lease._setKillProcessTree((pid) => { kills.push(pid); });
+
+    const canonical = storageLayout.canonicalWorkspace(tmp);
+    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
+      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
+    }), 'utf8');
+
+    assert.throws(
+      () => lease.acquireResidentLease({
+        workspace: tmp,
+        role: 'inbox-supervisor',
+        handoff: true,
+        env: { GH_MAESTRO_WORKER: 'issue-384-coder-force-guard' },
+      }),
+      /ワーカー "issue-384-coder-force-guard" からの常駐プロセスの強制置き換え/
+    );
+
+    assert.deepEqual(kills, [], 'ワーカーからの要求で既存プロセスを kill してはならない');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('acquireResidentLease: GH_MAESTRO_WORKER が未設定のときは handoff を拒否し kill しない（Issue #384）', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  try {
+    mockLiveness({ alive: true });
+    const ownerPid = 424242;
+    const kills = [];
+    lease._setKillProcessTree((pid) => { kills.push(pid); });
+
+    const canonical = storageLayout.canonicalWorkspace(tmp);
+    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
+      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
+    }), 'utf8');
+
+    assert.throws(
+      () => lease.acquireResidentLease({
+        workspace: tmp,
+        role: 'inbox-supervisor',
+        handoff: true,
+        env: {},
+      }),
+      /GH_MAESTRO_WORKER/
+    );
+
+    assert.deepEqual(kills, [], '名乗り無しでの要求で既存プロセスを kill してはならない');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
