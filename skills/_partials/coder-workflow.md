@@ -39,7 +39,7 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
    node "{{SCRIPTS_PATH}}/push-and-declare.js" --issue $ISSUE --fail <失敗件数> --pass <成功件数> --workspace $WORKSPACE
    ```
    - この一連の操作は「終状態への収束」として定義されており、同じコマンドの再実行だけで回復する（コミットすべき変更が無い場合は空コミットを作らず、その段をスキップする）
-   - コミットメッセージは `fix(issue-<N>): <Issueタイトル>` に固定される（モデル推論を挟まない）
+   - コミットメッセージは `impl(issue-<N>): <Issueタイトル>` に固定される（モデル推論を挟まない）
    - PRは get-or-create（既存PRがあれば使用、無ければ作成）。初回か修正かを自分で判定する必要はない
    - 申告は常に行われる。`--fail` にテスト実行の失敗件数、`--pass` に成功件数を渡す（テストが赤でも終了コードは0）
    - **素の `git commit` / `git push` / `gh pr create` を直接実行しない**（このスクリプトが一括で行う。個別実行すると申告を省く経路が生まれ、orchestratorがSTALE/NONE申告の検知で待たされる）

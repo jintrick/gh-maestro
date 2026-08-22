@@ -238,7 +238,7 @@ test('収束: 変更あり→コミット→push→PR新規作成→申告で ex
   assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
   // コミットメッセージは定型（モデル推論を挟まない）
   const commitCall = call(calls, (cmd, args) => cmd === 'git' && args[0] === 'commit');
-  assert.deepEqual(commitCall.args, ['commit', '-m', `fix(issue-374): ${TITLE}`]);
+  assert.deepEqual(commitCall.args, ['commit', '-m', `impl(issue-374): ${TITLE}`]);
   // pushは upstream を明示して押す
   const pushCall = call(calls, (cmd, args) => cmd === 'git' && args[0] === 'push');
   assert.deepEqual(pushCall.args, ['push', '-u', 'origin', BRANCH]);

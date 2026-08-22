@@ -17,7 +17,7 @@
 //
 // 実行ディレクトリは作業用worktree（$WORKTREE）。ブランチ名 ^issue-<N> との一致を検証する。
 //
-// コミットメッセージは `fix(issue-<N>): <Issueタイトル>` で固定（モデル推論を挟まない）。
+// コミットメッセージは `impl(issue-<N>): <Issueタイトル>` で固定（モデル推論を挟まない）。
 // PRは get-or-create（既存PRがあれば使用、無ければ作成）。PRタイトルは Issueタイトル、
 // PR本文は `関連Issue: #<N>`（GitHubのマージ時自動クローズキーワードを含めない。Issueの
 // クローズは finalize-issue.js だけが行う）。
@@ -50,7 +50,7 @@ Arguments:
      本文=関連Issue: #<N>）
   7. 解決したHEADに対するテスト結果を申告（declare-test-result.js と同じ形式）
 
-コミットメッセージは \`fix(issue-<N>): <Issueタイトル>\` で固定（モデル推論を挟まない）。
+コミットメッセージは \`impl(issue-<N>): <Issueタイトル>\` で固定（モデル推論を挟まない）。
 素の git commit / git push / gh pr create を直接実行しないこと（このスクリプトが一括で行う）。
 
 Output (stdout):
@@ -194,7 +194,7 @@ function pushAndDeclare({ issue, fail, pass, workspace, worktree, env = process.
 
   let commitCreated = false;
   if (hasStagedChanges) {
-    const commitMsg = `fix(issue-${issueNum}): ${issueTitle}`;
+    const commitMsg = `impl(issue-${issueNum}): ${issueTitle}`;
     const commitRes = spawnSync('git', ['commit', '-m', commitMsg], { cwd: worktree, encoding: 'utf8' });
     if (commitRes.error || commitRes.status !== 0) {
       return { exitCode: 2, stdout: '', stderr: `git commit に失敗しました: ${errText(commitRes)}` };
