@@ -22,31 +22,31 @@
 //
 // 標準出力: ワーカー名（例: issue-5-coder-implement）
 
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { existsSync, mkdirSync, readFileSync, writeFileSync,
         lstatSync, rmdirSync, rmSync, readdirSync } = require('fs');
 const { resolve, relative } = require('path');
 // link-node-modules は常に同一ディレクトリに同居する（リポジトリの scripts/ もインストール先 ~/.gh-maestro/scripts/ も）。
-const { linkNodeModules } = require('./link-node-modules');
-const { normalizeWorkerEntry } = require('./worker-entry');
+const { linkNodeModules } = require('./shared/link-node-modules');
+const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { buildWorkerEnv } = require('./shared/worker-env');
-const { buildAgentCommandArgs } = require('./agent-launch');
-const { checkAgentExists } = require('./agent-exec');
+const { buildAgentCommandArgs } = require('./shared/agent-launch');
+const { checkAgentExists } = require('./shared/agent-exec');
 const { launchAgentHeadless } = require('./shared/headless-launch');
 const { buildNormalWorkerLaunchSpec } = require('./shared/worker-factory');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { createNormalWorkerStore, acquireLease: acquireWorkerLease,
         activateLease: activateWorkerLease, releaseLease: releaseWorkerLease,
         isLeaseLive } = require('./shared/worker-lease');
-const { killProcessTree } = require('./kill-tree');
-const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
+const { killProcessTree } = require('./shared/kill-tree');
+const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
-const { toWinPath } = require('./win-path');
+const { toWinPath } = require('./shared/win-path');
 const { startExecution, markLaunchFailure } = require('./shared/execution-registry');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const readStateLib = require('./shared/read-state');

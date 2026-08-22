@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const { main, updateIssue, defaultGhEdit, USAGE } = require('../scripts/update-issue');
-const { toWinPath } = require('../scripts/win-path');
+const { toWinPath } = require('../scripts/shared/win-path');
 
 function withTempWorkspace(fn) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-update-issue-'));

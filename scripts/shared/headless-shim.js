@@ -19,7 +19,7 @@
 //   node headless-shim.js <shell-args-json> <log-path>
 
 const fs = require('fs');
-const { spawn, spawnSync } = require('../child-process');
+const { spawn, spawnSync } = require('./child-process');
 
 const USAGE = `headless-shim.js — headlessワーカーの中継プロセス（gh-maestro内部用）
 

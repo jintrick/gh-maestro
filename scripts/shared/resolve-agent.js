@@ -10,7 +10,7 @@
 // ファイル欠落・パース失敗・該当エージェントなしのいずれも例外を投げず null を返す。
 
 const { resolve } = require('path');
-const { resolveAgentConfig: resolveFromConfig } = require('./shared/resolve-config');
+const { resolveAgentConfig: resolveFromConfig } = require('./resolve-config');
 
 /**
  * @param {string|null} agentId

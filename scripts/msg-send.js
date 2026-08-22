@@ -19,15 +19,15 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
-const { toWinPath } = require('./win-path');
+const { toWinPath } = require('./shared/win-path');
 const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 const { markCommentResult, readRegistry } = require('./shared/execution-registry');
 const { isRetryableGhFailure, graphqlAddComment } = require('./shared/gh-fallback');
 const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
 const { resolveWorkerName, readWorkersRaw } = require('./shared/workers-registry');
-const { normalizeWorkerEntry } = require('./worker-entry');
+const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const { hasReportedSinceStart } = require('./shared/worker-report-check');

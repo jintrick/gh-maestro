@@ -10,10 +10,10 @@
 // 成功として終了する（assistantはあくまで補助的な存在で、issue作成のcritical pathではない）。
 'use strict';
 
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const fs = require('fs');
 const path = require('path');
-const { toWinPath } = require('./win-path');
+const { toWinPath } = require('./shared/win-path');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { deleteInputFileBestEffort } = require('./shared/file-cleanup');
 const { isRetryableGhFailure, graphqlCreateIssue } = require('./shared/gh-fallback');

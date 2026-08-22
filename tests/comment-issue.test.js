@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const { main, commentIssue, defaultGhComment, USAGE } = require('../scripts/comment-issue');
-const { toWinPath } = require('../scripts/win-path');
+const { toWinPath } = require('../scripts/shared/win-path');
 
 function withTempWorkspace(fn) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-comment-issue-'));

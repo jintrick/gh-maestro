@@ -7,16 +7,16 @@
 // Usage:
 //   node reset-session.js [--workspace <path>]
 
-const { spawnSync, execSync } = require('./child-process');
+const { spawnSync, execSync } = require('./shared/child-process');
 const path = require('path');
 const { resolve } = path;
 const { existsSync, readFileSync, rmSync,
         readdirSync, statSync, renameSync, unlinkSync } = require('fs');
-const { unlinkJunctions } = require('./unlink-junctions');
-const { normalizeWorkerEntry } = require('./worker-entry');
-const { killProcessTree } = require('./kill-tree');
+const { unlinkJunctions } = require('./shared/unlink-junctions');
+const { normalizeWorkerEntry } = require('./shared/worker-entry');
+const { killProcessTree } = require('./shared/kill-tree');
 const { isWorkerAlive } = require('./shared/worker-liveness');
-const { worktreeRemove, worktreePrune } = require('./git-worktree');
+const { worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { sweepRegistry } = require('./process-lifecycle');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');

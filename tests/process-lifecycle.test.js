@@ -59,7 +59,7 @@ function loadModule(overrides = {}) {
 
   // execSync のモック注入（実プロセス spawn 回避）
   if (overrides.execSync) {
-    const childProcessPath = require.resolve('../scripts/child-process');
+    const childProcessPath = require.resolve('../scripts/shared/child-process');
     delete require.cache[childProcessPath];
     require.cache[childProcessPath] = {
       id: childProcessPath,

@@ -21,7 +21,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { validateField } = require('./shared/validate');
 const { isRetryableGhFailure, graphqlListComments } = require('./shared/gh-fallback');

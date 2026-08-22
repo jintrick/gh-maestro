@@ -11,7 +11,7 @@
 // 対策の3層:
 //   1. .githooks の冒頭で unset（注入源の遮断）
 //   2. tests/_env-setup.js プリロードで除去（テスト環境の中和）
-//   3. scripts/child-process.js 共有ラッパーが git spawn 時に除去（「cwd が正」を保証。
+//   3. scripts/shared/child-process.js 共有ラッパーが git spawn 時に除去（「cwd が正」を保証。
 //      テストはバイパス不要で既存テストが無改変のまま通る）
 //
 // 受け入れ条件は「ガードで throw すること」ではなく「実リポジトリが無傷であること」。
@@ -24,8 +24,8 @@ const path = require('path');
 const os = require('os');
 const { spawnSync } = require('child_process'); // 生 child_process（GIT_* を除去しない＝リーク再現の対照実験用）
 
-const { worktreeAdd } = require('../scripts/git-worktree');
-const { spawnSync: wrappedSpawnSync } = require('../scripts/child-process');
+const { worktreeAdd } = require('../scripts/shared/git-worktree');
+const { spawnSync: wrappedSpawnSync } = require('../scripts/shared/child-process');
 const { superviseReviewManager } = require('../scripts/run-review-manager');
 
 const SETUP_SCRIPT = path.join(__dirname, '..', 'scripts', 'gh-maestro-setup.js');

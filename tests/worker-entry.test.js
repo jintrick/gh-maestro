@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeWorkerEntry, normalizePid } = require('../scripts/worker-entry');
+const { normalizeWorkerEntry, normalizePid } = require('../scripts/shared/worker-entry');
 
 const EMPTY = {
   pid: null, startTime: null, logPath: null,

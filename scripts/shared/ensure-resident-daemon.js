@@ -26,7 +26,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('../child-process');
+const { spawn } = require('./child-process');
 const { isResidentLeaseLive } = require('./worker-lease');
 const { isMigrationInProgress } = require('./migration-marker');
 

@@ -7,7 +7,7 @@
 
 'use strict';
 
-const { normalizeWorkerEntry } = require('./worker-entry');
+const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');

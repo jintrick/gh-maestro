@@ -13,7 +13,7 @@
 // 標準出力: PR のURL（1行）
 // 終了コード: 0=成功、1=エラー
 
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { parseFlags } = require('./shared/workspace');
 
 const USAGE = `Usage:

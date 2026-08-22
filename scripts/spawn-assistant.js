@@ -15,14 +15,14 @@
 
 'use strict';
 
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { existsSync } = require('fs');
 const { join } = require('path');
 const { resolveAgentConfig } = require('./shared/resolve-config');
 const { workspaceKey } = require('./shared/storage-layout');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
-const { checkAgentExists } = require('./agent-exec');
-const { buildAgentCommandArgs } = require('./agent-launch');
+const { checkAgentExists } = require('./shared/agent-exec');
+const { buildAgentCommandArgs } = require('./shared/agent-launch');
 const { launchAgentInWindow } = require('./shared/pane-launch');
 const { setAssistant } = require('./shared/assistants-registry');
 const { parseFlags } = require('./shared/workspace');

@@ -12,7 +12,7 @@
 
 'use strict';
 
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { listComments } = require('./shared/gh-comments');
 const { TEST_RESULT_MARKER } = require('./shared/test-declaration');

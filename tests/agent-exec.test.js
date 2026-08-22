@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('child_process');
 
-const { buildLoginShellExecArgs, checkAgentExists } = require('../scripts/agent-exec');
+const { buildLoginShellExecArgs, checkAgentExists } = require('../scripts/shared/agent-exec');
 
 /**
  * bash 経由で command -v を実行し、指定コマンドが解決可能か確認する。
@@ -234,7 +234,7 @@ test('buildLoginShellExecArgs: captureLogPath 相当の第5引数はもう受け
 });
 
 test('agent-exec: buildPwshCaptureClauses はエクスポートされていない', () => {
-  const agentExec = require('../scripts/agent-exec');
+  const agentExec = require('../scripts/shared/agent-exec');
   assert.equal(agentExec.buildPwshCaptureClauses, undefined);
 });
 

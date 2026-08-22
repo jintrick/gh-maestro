@@ -22,7 +22,7 @@ const assert = require('node:assert/strict');
 const ghCreatePrPath = require.resolve('../scripts/gh-create-pr');
 
 /**
- * scripts/child-process.js の spawnSync をモックした状態で gh-create-pr.js を再ロードする。
+ * scripts/shared/child-process.js の spawnSync をモックした状態で gh-create-pr.js を再ロードする。
  * @param {Function} spawnSyncImpl (cmd, args, opts) => result
  */
 function loadModule(spawnSyncImpl) {
@@ -32,7 +32,7 @@ function loadModule(spawnSyncImpl) {
     return spawnSyncImpl ? spawnSyncImpl(cmd, args, opts) : { status: 0, stdout: '' };
   };
 
-  const childProcessPath = require.resolve('../scripts/child-process');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
   delete require.cache[childProcessPath];
   require.cache[childProcessPath] = {
     id: childProcessPath,

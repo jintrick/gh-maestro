@@ -323,7 +323,7 @@ test('WEZTERM_PANE が未設定でも WEZTERM 由来の理由では失敗しな�
 // ── link-node-modules の解決 ──────────────────────────────────────────────────
 
 test('link-node-modules がリポジトリ内パスから解決できる', () => {
-  const nm = path.join(__dirname, '..', 'scripts', 'link-node-modules');
+  const nm = path.join(__dirname, '..', 'scripts', 'shared', 'link-node-modules');
   assert.doesNotThrow(() => {
     const resolved = require.resolve(nm);
     assert.ok(resolved.endsWith('link-node-modules.js'));
@@ -339,7 +339,7 @@ test('link-node-modules がインストール先と同構造のディレクト�
   const { rmSync } = require('fs');
   const tmp = mkdtempSync(path.join(tmpdir, 'gh-maestro-test-linknm-'));
   try {
-    const srcNm = path.join(__dirname, '..', 'scripts', 'link-node-modules.js');
+    const srcNm = path.join(__dirname, '..', 'scripts', 'shared', 'link-node-modules.js');
     const destNm = path.join(tmp, 'link-node-modules.js');
     copyFileSync(srcNm, destNm);
 
@@ -364,7 +364,7 @@ test('link-node-modules がインストール先と同構造のディレクト�
 // ここでは workers.json に実際に書き込まれる形（観測可能な振る舞い）を検証する。
 
 test('新規ワーカー登録エントリは pid/startTime/logPath/agentId/issue を含む', () => {
-  const { normalizeWorkerEntry } = require('../scripts/worker-entry');
+  const { normalizeWorkerEntry } = require('../scripts/shared/worker-entry');
   const entry = normalizeWorkerEntry({
     pid: 123, startTime: '2026-07-25T00:00:00.000Z', logPath: 'C:/ws/w.log', agentId: 'claude', issue: 51,
   });
@@ -377,20 +377,20 @@ test('新規ワーカー登録エントリは pid/startTime/logPath/agentId/issu
 });
 
 test('新規ワーカー登録エントリは issue を数値に変換する（文字列で渡されても Number() される）', () => {
-  const { normalizeWorkerEntry } = require('../scripts/worker-entry');
+  const { normalizeWorkerEntry } = require('../scripts/shared/worker-entry');
   const entry = normalizeWorkerEntry({ pid: 456, agentId: 'agy', issue: '99' });
   assert.equal(entry.issue, 99);
   assert.equal(typeof entry.issue, 'number');
 });
 
 test('新規ワーカー登録エントリは paneId を持たない（null）ためレガシーkill-pane経路が誤発火しない', () => {
-  const { normalizeWorkerEntry } = require('../scripts/worker-entry');
+  const { normalizeWorkerEntry } = require('../scripts/shared/worker-entry');
   const entry = normalizeWorkerEntry({ pid: 1, agentId: 'claude', issue: 7 });
   assert.equal(entry.paneId, null);
 });
 
 test('新規ワーカー登録エントリは notifierPid を持たない（null）ため remove-worker等がレガシーnotifierをkillしようとしない', () => {
-  const { normalizeWorkerEntry } = require('../scripts/worker-entry');
+  const { normalizeWorkerEntry } = require('../scripts/shared/worker-entry');
   const entry = normalizeWorkerEntry({ pid: 1, agentId: 'claude', issue: 7 });
   assert.equal(entry.notifierPid, null);
 });

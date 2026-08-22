@@ -19,9 +19,9 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn } = require('./child-process');
-const { buildAgentCommandArgs } = require('./agent-launch');
-const { buildLoginShellExecArgs } = require('./agent-exec');
+const { spawn } = require('./shared/child-process');
+const { buildAgentCommandArgs } = require('./shared/agent-launch');
+const { buildLoginShellExecArgs } = require('./shared/agent-exec');
 const { resolveAgentConfig, resolveCouncilConfig, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { _validateAgainstSchema } = require('./shared/json-schema');
@@ -32,7 +32,7 @@ const {
   resolveWorkspaceHead,
   ensureCouncilWorktree,
 } = require('./shared/council-worktree');
-const { extractJsonObject, PHASE_REQUIRED_KEYS, fencedData, DEFAULT_JOB_TIMEOUT_MS } = require('./run-council-jobs');
+const { extractJsonObject, PHASE_REQUIRED_KEYS, fencedData, DEFAULT_JOB_TIMEOUT_MS } = require('./shared/run-council-jobs');
 const { waitChildExit } = require('./shared/child-wait');
 const councilSchemas = require('./council-schemas.json');
 

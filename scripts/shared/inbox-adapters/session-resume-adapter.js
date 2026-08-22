@@ -9,7 +9,7 @@
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
-const { buildAgentCommandArgs } = require('../../agent-launch');
+const { buildAgentCommandArgs } = require('../agent-launch');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
 

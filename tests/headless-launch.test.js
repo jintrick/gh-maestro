@@ -60,7 +60,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  headlessLaunch._setSpawn(require('../scripts/child-process').spawn);
+  headlessLaunch._setSpawn(require('../scripts/shared/child-process').spawn);
   headlessLaunch._setGetProcessStartTime(require('../scripts/process-lifecycle').getProcessStartTime);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
@@ -345,7 +345,7 @@ test('launchAgentHeadless: spawnを注入していなければテスト中は実
   assert.ok(process.env.NODE_TEST_CONTEXT, '前提: テストランナー配下で実行されている');
 
   // spawn を実装に戻す（=注入されていない状態）
-  headlessLaunch._setSpawn(require('../scripts/child-process').spawn);
+  headlessLaunch._setSpawn(require('../scripts/shared/child-process').spawn);
 
   assert.throws(
     () => launchAgentHeadless({ argv: ['codex', 'exec'], cwd: tmpDir, logPath: path.join(tmpDir, 'w.log') }),

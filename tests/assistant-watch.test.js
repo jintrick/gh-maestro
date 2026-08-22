@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const watch = require('../scripts/assistant-watch');
-const { spawnSync } = require('../scripts/child-process');
+const { spawnSync } = require('../scripts/shared/child-process');
 const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
 
 function withTempDir(fn) {

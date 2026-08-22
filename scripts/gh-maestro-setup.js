@@ -3,7 +3,7 @@
 // Validates prerequisites on first run; always applies idempotent setup steps.
 // Sentinel (.gh-maestro/setup-ok) only gates expensive environment checks.
 
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, chmodSync } = require('fs');
 const { resolve, relative, isAbsolute, sep } = require('path');
 

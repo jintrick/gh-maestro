@@ -22,7 +22,7 @@
 // PR本文は `関連Issue: #<N>`（GitHubのマージ時自動クローズキーワードを含めない。Issueの
 // クローズは finalize-issue.js だけが行う）。
 
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { resolveGitHead } = require('./shared/git-head');
 const { getCurrentBranch } = require('./shared/git-branch');

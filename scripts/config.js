@@ -24,7 +24,7 @@ const path = require('path');
 
 const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, resolveExtends, isValidAgentConfig, validateNonInteractiveTokens, resolveCouncilConfig, EXEC_SENSITIVE_FIELDS } = require('./shared/resolve-config');
 const { isPlainObject } = require('./shared/object');
-const { checkAgentExists } = require('./agent-exec');
+const { checkAgentExists } = require('./shared/agent-exec');
 
 const HOMEDIR = process.env.HOME || process.env.USERPROFILE || '';
 const CONFIG_PATH = path.resolve(HOMEDIR, '.gh-maestro', 'config.json');

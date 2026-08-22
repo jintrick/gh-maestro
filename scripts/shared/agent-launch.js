@@ -10,7 +10,7 @@ const path = require('path');
 // msg-send.jsを一度も呼ばずにチャット出力だけで終える実障害があった。
 // resumeは全エージェント共通経路（buildAgentResumeCommandArgs）なので、ここで一度だけ
 // 定義し、system-prompt-file配送（claude系）の全resumeに機械的に乗せる。
-const MSG_SEND_PATH = path.join(__dirname, 'msg-send.js').replace(/\\/g, '/');
+const MSG_SEND_PATH = path.join(__dirname, '..', 'msg-send.js').replace(/\\/g, '/');
 const RESUME_REPORTING_REMINDER = [
   '[gh-maestro] セッション再開時のリマインダーです。作業結果・質問・報告は、チャットへの回答だけでは',
   'orchestratorに届きません。必ず次のコマンドをツール呼び出しとして実行して伝えてください：',

@@ -11,7 +11,7 @@
 //   POLL_RECOVERED       (失敗から復旧したとき。遷移時のみ)
 'use strict';
 
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const fs = require('fs');
 const path = require('path');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');

@@ -17,9 +17,9 @@
 
 'use strict';
 
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
-const { toWinPath } = require('./win-path');
+const { toWinPath } = require('./shared/win-path');
 const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const { PLAN_MARKER, isPlanComment } = require('./shared/plan-comment');

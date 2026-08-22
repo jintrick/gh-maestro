@@ -12,7 +12,7 @@
 
 const path = require('path');
 const { readFileSync, existsSync, rmSync } = require('fs');
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { parseFlags } = require('./shared/workspace');
 const { getAssistant, removeAssistant } = require('./shared/assistants-registry');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');

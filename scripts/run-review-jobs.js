@@ -14,12 +14,12 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn, spawnSync } = require('./child-process');
+const { spawn, spawnSync } = require('./shared/child-process');
 const { writeSentinel, finalizeReview } = require('./finalize-review');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { atomicWriteJson } = require('./shared/atomic-write');
-const { buildAgentCommandArgs } = require('./agent-launch');
-const { buildLoginShellExecArgs } = require('./agent-exec');
+const { buildAgentCommandArgs } = require('./shared/agent-launch');
+const { buildLoginShellExecArgs } = require('./shared/agent-exec');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { readJsonFile } = require('./shared/json-file');

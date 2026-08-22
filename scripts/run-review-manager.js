@@ -4,15 +4,15 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn, spawnSync } = require('./child-process');
-const { buildAgentCommandArgs } = require('./agent-launch');
-const { buildLoginShellExecArgs } = require('./agent-exec');
-const { worktreeAdd, worktreeRemove, worktreePrune } = require('./git-worktree');
-const { linkNodeModules } = require('./link-node-modules');
-const { unlinkJunctions } = require('./unlink-junctions');
+const { spawn, spawnSync } = require('./shared/child-process');
+const { buildAgentCommandArgs } = require('./shared/agent-launch');
+const { buildLoginShellExecArgs } = require('./shared/agent-exec');
+const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-worktree');
+const { linkNodeModules } = require('./shared/link-node-modules');
+const { unlinkJunctions } = require('./shared/unlink-junctions');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
-const { killProcessTree } = require('./kill-tree');
+const { killProcessTree } = require('./shared/kill-tree');
 const { isProcessAlive } = require('./process-lifecycle');
 const {
   assertValidPr, reviewArtifactPath,

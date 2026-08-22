@@ -7,10 +7,10 @@ const assert = require('node:assert/strict');
 // これをモックして実プロセスを0個spawnする。
 // （.claude/rules/test-process-spawn-safety.md 準拠）
 
-const gitWorktreePath = require.resolve('../scripts/git-worktree');
+const gitWorktreePath = require.resolve('../scripts/shared/git-worktree');
 
 /**
- * scripts/child-process.js の spawnSync をモックした状態で git-worktree.js を再ロードする。
+ * scripts/shared/child-process.js の spawnSync をモックした状態で git-worktree.js を再ロードする。
  * @param {Function} spawnSyncImpl (cmd, args, opts) => result - 呼び出し順に応じた戻り値を返す
  */
 function loadModule(spawnSyncImpl) {
@@ -23,7 +23,7 @@ function loadModule(spawnSyncImpl) {
     return impl;
   };
 
-  const childProcessPath = require.resolve('../scripts/child-process');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
   delete require.cache[childProcessPath];
   require.cache[childProcessPath] = {
     id: childProcessPath,

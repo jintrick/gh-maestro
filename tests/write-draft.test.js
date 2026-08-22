@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { main } = require('../scripts/write-draft');
-const { toWinPath } = require('../scripts/win-path');
+const { toWinPath } = require('../scripts/shared/win-path');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'write-draft.js');
 

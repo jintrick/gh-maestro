@@ -12,10 +12,10 @@ const { EventEmitter } = require('events');
 // spawn するため、両者をモックして再ロードする
 // （.claude/rules/test-process-spawn-safety.md 準拠）。
 
-const jobsPath = require.resolve('../scripts/run-council-jobs');
-const childProcessPath = require.resolve('../scripts/child-process');
-const agentLaunchPath = require.resolve('../scripts/agent-launch');
-const agentExecPath = require.resolve('../scripts/agent-exec');
+const jobsPath = require.resolve('../scripts/shared/run-council-jobs');
+const childProcessPath = require.resolve('../scripts/shared/child-process');
+const agentLaunchPath = require.resolve('../scripts/shared/agent-launch');
+const agentExecPath = require.resolve('../scripts/shared/agent-exec');
 const resolveConfigPath = require.resolve('../scripts/shared/resolve-config');
 
 /** 既定のフェイクエージェント設定（非対話化トークン検証を素通りさせる） */
@@ -80,7 +80,7 @@ function loadModule(opts = {}) {
   // run-council-jobs.js → child-wait.js → kill-tree.js が child-process.js の spawnSync を
   // ロード時点で捕捉するため、キャッシュを必ず消して現在のモックを反映させる
   // （kill-tree だけでなく、killProcessTree 参照を保持する child-wait も毎回再ロードする）
-  const killTreePath = require.resolve('../scripts/kill-tree');
+  const killTreePath = require.resolve('../scripts/shared/kill-tree');
   const childWaitPath = require.resolve('../scripts/shared/child-wait');
   for (const p of [childProcessPath, agentLaunchPath, agentExecPath, resolveConfigPath, jobsPath, killTreePath, childWaitPath]) {
     delete require.cache[p];

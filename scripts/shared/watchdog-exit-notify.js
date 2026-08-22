@@ -20,7 +20,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const { spawnSync } = require('../child-process');
+const { spawnSync } = require('./child-process');
 
 /**
  * 親セッション消滅による自滅終了（dead-man's switch 検出）の終了コード。

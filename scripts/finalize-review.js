@@ -12,7 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { parseFlags } = require('./shared/workspace');
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS } = require('./shared/review-aspects');
 const { _validateAgainstSchema } = require('./shared/json-schema');

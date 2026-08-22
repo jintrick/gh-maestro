@@ -4,7 +4,7 @@
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
-let _spawnSync = require('../child-process').spawnSync;
+let _spawnSync = require('./child-process').spawnSync;
 
 /**
  * 指定ディレクトリの現在のブランチ名を取得する。

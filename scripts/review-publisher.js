@@ -2,7 +2,7 @@
 'use strict';
 
 const path = require('path');
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { readJsonFile } = require('./shared/json-file');
 
 const USAGE = `review-publisher.js — RM finding JSONを検証し、PRレビューとして投稿する

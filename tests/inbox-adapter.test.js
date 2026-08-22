@@ -38,7 +38,7 @@ const {
 
 const {
   buildAgentResumeCommandArgs,
-} = require('../scripts/agent-launch');
+} = require('../scripts/shared/agent-launch');
 
 // ═══════════════════════════════════════════════════════════════════════════
 // adapter-base: インターフェース検証

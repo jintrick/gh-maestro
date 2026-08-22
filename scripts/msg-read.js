@@ -10,7 +10,7 @@
 
 'use strict';
 
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { isRetryableGhFailure, graphqlCommentBody } = require('./shared/gh-fallback');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');

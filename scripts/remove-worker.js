@@ -8,13 +8,13 @@
 //   node remove-worker.js <workerName> \
 //     --workspace <path>
 
-const { spawnSync, execSync } = require('./child-process');
+const { spawnSync, execSync } = require('./shared/child-process');
 const { resolve } = require('path');
 const { readFileSync, existsSync, rmSync } = require('fs');
-const { unlinkJunctions } = require('./unlink-junctions');
-const { normalizeWorkerEntry } = require('./worker-entry');
-const { worktreeRemove, worktreePrune } = require('./git-worktree');
-const { killProcessTree } = require('./kill-tree');
+const { unlinkJunctions } = require('./shared/unlink-junctions');
+const { normalizeWorkerEntry } = require('./shared/worker-entry');
+const { worktreeRemove, worktreePrune } = require('./shared/git-worktree');
+const { killProcessTree } = require('./shared/kill-tree');
 const { sweepRegistry } = require('./process-lifecycle');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');

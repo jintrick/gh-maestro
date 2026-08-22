@@ -46,7 +46,7 @@ function fakeChild() {
  */
 function loadModule({ spawnImpl, spawnSyncImpl, councilResolve, resolveAgent, validateTokens, resolveSessionCalls = [] } = {}) {
   const spawnSyncCalls = [];
-  const childProcessPath = require.resolve('../scripts/child-process');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
   delete require.cache[childProcessPath];
   require.cache[childProcessPath] = {
     id: childProcessPath,
@@ -96,7 +96,7 @@ function loadModule({ spawnImpl, spawnSyncImpl, councilResolve, resolveAgent, va
   // run-council-investigation.js → child-wait.js → kill-tree.js が child-process.js の
   // spawnSync をロード時点で捕捉するため、キャッシュを必ず消して現在のモックを
   // 反映させる（kill-tree だけでなく、killProcessTree 参照を保持する child-wait も再ロード）
-  const killTreePath = require.resolve('../scripts/kill-tree');
+  const killTreePath = require.resolve('../scripts/shared/kill-tree');
   const childWaitPath = require.resolve('../scripts/shared/child-wait');
   delete require.cache[killTreePath];
   delete require.cache[childWaitPath];

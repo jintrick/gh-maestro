@@ -23,7 +23,7 @@ function loadHelper(spawnSyncImpl) {
     calls.push({ cmd, args, opts });
     return spawnSyncImpl ? spawnSyncImpl(cmd, args, opts) : { status: 0, stdout: '', stderr: '' };
   };
-  const childProcessPath = require.resolve('../scripts/child-process');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
   delete require.cache[childProcessPath];
   require.cache[childProcessPath] = {
     id: childProcessPath,

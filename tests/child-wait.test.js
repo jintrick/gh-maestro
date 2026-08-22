@@ -11,8 +11,8 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('events');
 
 const childWaitPath = require.resolve('../scripts/shared/child-wait');
-const childProcessPath = require.resolve('../scripts/child-process');
-const killTreePath = require.resolve('../scripts/kill-tree');
+const childProcessPath = require.resolve('../scripts/shared/child-process');
+const killTreePath = require.resolve('../scripts/shared/kill-tree');
 
 /** spawn 済み ChildProcess のフェイク（stdout + pid + kill を持つ EventEmitter）。 */
 function fakeChild() {

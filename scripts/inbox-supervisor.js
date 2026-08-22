@@ -35,12 +35,12 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('./child-process');
+const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
-const { normalizeWorkerEntry } = require('./worker-entry');
+const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { resolveAgentConfig } = require('./shared/resolve-config');
 const { resolveAdapter } = require('./shared/inbox-adapters');
-const { buildAgentResumeCommandArgs } = require('./agent-launch');
+const { buildAgentResumeCommandArgs } = require('./shared/agent-launch');
 const { launchAgentHeadless, workerLogPath } = require('./shared/headless-launch');
 const { buildWorkerEnv } = require('./shared/worker-env');
 const { updateWorkerProcess } = require('./shared/workers-registry');
