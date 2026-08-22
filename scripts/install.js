@@ -15,6 +15,7 @@ const { validateAgentDefaults } = require(path.join(__dirname, 'shared', 'valida
 const { resolveExtends } = require(path.join(__dirname, 'shared', 'resolve-config'));
 const storageLayout = require(path.join(__dirname, 'shared', 'storage-layout'));
 const { parseAgentsYaml, expandHome } = require(path.join(__dirname, 'shared', 'agents-yaml'));
+const { getCurrentBranch } = require(path.join(__dirname, 'shared', 'git-branch'));
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -532,8 +533,7 @@ if (require.main !== module) return;
 // --force で明示的に許可可能。
 const forceFlag = process.argv.includes('--force');
 try {
-  const { execFileSync: execGit } = require('child_process');
-  const currentBranch = execGit('git', ['branch', '--show-current'], { cwd: ROOT, encoding: 'utf8' }).trim();
+  const currentBranch = getCurrentBranch(ROOT);
   const PROTECTED_BRANCHES = new Set(['dev', 'main']);
   if (!PROTECTED_BRANCHES.has(currentBranch) && !forceFlag) {
     console.error(`\x1b[31m[gh-maestro-install] エラー: 現在のブランチ "${currentBranch}" は保護ブランチではありません。`);
