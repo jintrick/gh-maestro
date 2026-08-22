@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // remove-worker.js
-// ワーカープロセスをkillし、worktreeを即座に削除し、workers.jsonからエントリを削除する。
+// ワーカープロセスを同一性確認の上でkillし、worktreeを即座に削除し、workers.jsonからエントリを削除する。
 // ディレクトリ実体がロックで残っても（kill直後のハンドル未解放。Windowsでは正常）
 // 次回reset-session.jsがjunction非追跡で安全に掃除する。残骸を手動rmしないこと。
 //
@@ -12,14 +12,12 @@ const { spawnSync, execSync } = require('./shared/child-process');
 const { resolve } = require('path');
 const { readFileSync, existsSync, rmSync } = require('fs');
 const { unlinkJunctions } = require('./shared/unlink-junctions');
-const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { worktreeRemove, worktreePrune } = require('./shared/git-worktree');
-const { killProcessTree } = require('./shared/kill-tree');
-const { sweepRegistry } = require('./process-lifecycle');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { resolveWorkerName } = require('./shared/workers-registry');
 const { ARTIFACTS, legacyWorkerOwner, recordPath } = require('./shared/record-paths');
+const { stopWorkerProcess } = require('./shared/stop-worker-process');
 
 const USAGE = `remove-worker.js — ワーカープロセスを kill し worktree を削除する
 
@@ -37,13 +35,13 @@ Options:
                         CWDからの .gh-maestro/ 上方探索で解決）
 
 workerName（位置引数）か〈--issue + --skill〉のいずれかで削除対象を指定する。
-ワーカープロセスツリーを kill し、worktree と同名ブランチを削除し、workers.json からエントリを除く。
+対象プロセスの同一性を確認したうえでプロセスツリーを kill し（PID再利用時は kill をスキップ）、
+worktree と同名ブランチを削除し、workers.json からエントリを除く。
 移行前セッションが残した WezTerm ペイン（レガシー paneId）があればそれも kill する。
 ディレクトリがロックで残っても次回 reset-session.js が junction 非追跡で安全に掃除する
 （残骸を手動 rm しないこと。node_modules junction を辿って共有ファイルを壊す）。`;
 
-if (require.main === module) {
-  const argv = process.argv.slice(2);
+function main(argv = process.argv.slice(2)) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(argv, {
@@ -57,40 +55,40 @@ if (require.main === module) {
     if (err.name !== 'ArgsValidationError') throw err;
     if (err.helpRequested) {
       console.log(USAGE);
-      process.exit(0);
+      return 0;
     }
     for (const e of err.errors) console.error(`remove-worker: ${e.message}`);
     console.error(USAGE);
-    process.exit(1);
+    return 1;
   }
 
   if (values['--help'] || values['-h']) {
     console.log(USAGE);
-    process.exit(0);
+    return 0;
   }
 
-  const fail = (msg) => { console.error(`remove-worker: ${msg}`); process.exit(1); };
+  const fail = (msg) => { console.error(`remove-worker: ${msg}`); return 1; };
 
   // 他スクリプト（poll-pr.js等）と同じ workspace 解決順（--workspace >
   // GH_MAESTRO_WORKSPACE env > CWD探索）に統一する。素の process.cwd() フォールバックだと、CWD が
   // ホームディレクトリ配下等に誤解決される余地が残るため使わない（Issue #214）。
   const workspace = resolveWorkspace(values['--workspace']);
-  if (!workspace) fail('ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
+  if (!workspace) return fail('ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
 
   // 削除対象の解決: workerName（位置引数）を優先。無ければ〈--issue + --skill〉から逆引きする。
   let workerName = rest[0];
   if (workerName && (values['--issue'] || values['--skill'])) {
-    fail('workerName（位置引数）と〈--issue + --skill〉は併用できません。どちらか一方で指定してください。');
+    return fail('workerName（位置引数）と〈--issue + --skill〉は併用できません。どちらか一方で指定してください。');
   }
   if (!workerName) {
     if (!values['--issue'] || !values['--skill']) {
       console.error(USAGE);
-      process.exit(1);
+      return 1;
     }
     try {
       workerName = resolveWorkerName(workspace, { issue: values['--issue'], skill: values['--skill'] });
     } catch (e) {
-      fail(e.message);
+      return fail(e.message);
     }
   }
 
@@ -98,76 +96,29 @@ if (require.main === module) {
   const worktreeDir  = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
   const IS_WIN       = process.platform === 'win32';
 
-  if (!existsSync(workersJson)) fail(`workers.json が見つかりません: ${workersJson}`);
+  if (!existsSync(workersJson)) return fail(`workers.json が見つかりません: ${workersJson}`);
 
   let workers;
   try {
     workers = JSON.parse(readFileSync(workersJson, 'utf8'));
   } catch (e) {
-    fail(`workers.json のパースに失敗しました: ${e.message}`);
+    return fail(`workers.json のパースに失敗しました: ${e.message}`);
   }
 
-  // ── ワーカープロセスを終了 ─────────────────────────────────────────────
-
-  const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-
-  const workerEntry = normalizeWorkerEntry(workers[workerName]);
-
-  // ── 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill ──────
-  // 過去のセッションの workers.json には notifierPid が残っている可能性がある。
-  // 現在の spawn では notifier は起動されないが、移行過渡期の後方互換として残す。
-  if (workerEntry.notifierPid) {
-    killProcessTree(workerEntry.notifierPid);
-    console.warn(`remove-worker: レガシー notifier (pid ${workerEntry.notifierPid}) を終了しました`);
+  if (!workers || typeof workers !== 'object' || !(workerName in workers)) {
+    return fail(`ワーカー "${workerName}" のエントリが workers.json に見つかりません`);
   }
 
-  // headless ワーカーのプロセスツリーを終了する。登録PIDは中継シム（headless-shim.js）の
-  // ものであり、その配下にログインシェルとエージェント本体がぶら下がるため、
-  // 単体killではなくツリー全体を落とす必要がある。
-  if (workerEntry.pid) {
-    killProcessTree(workerEntry.pid);
-    console.warn(`remove-worker: ワーカープロセス (pid ${workerEntry.pid}) を終了しました`);
-    // プロセスがハンドルを解放するまで少し待つ（worktree削除がロックで失敗するのを減らす）
-    sleep(500);
-  }
+  // ── ワーカープロセスを終了（同一性確認付き） ─────────────────────────────
 
-  // ── 後方互換: 移行前セッションが残した WezTerm ペインを kill ──────────────
-  // Issue #151 以前に起動されたワーカーのエントリには paneId が残っている。
-  // 起動経路が headless に変わってもこの掃除は必要である（起動元コードを消したから
-  // kill ロジックも不要、という判断は過去2回手戻りを起こしている。
-  // .claude/rules/legacy-process-cleanup-safety.md 参照）。
-  if (workerEntry.paneId) {
-    const killResult = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', workerEntry.paneId], { encoding: 'utf8' });
-    if (killResult.status !== 0) {
-      console.warn(`remove-worker: レガシーpane ${workerEntry.paneId} のkill-pane 失敗: ${(killResult.stderr || '').trim()}`);
-    } else {
-      console.warn(`remove-worker: レガシーpane ${workerEntry.paneId} を終了しました`);
-    }
-    sleep(500);
-  }
-
-  if (!workerEntry.pid && !workerEntry.paneId) {
-    console.warn(`remove-worker: ワーカー "${workerName}" に終了対象のプロセスが記録されていません — worktree削除のみ実行します`);
-  }
-
-  // ── PID registry sweep: ワーカーの登録PIDを同一性確認の上で kill ─────
-  // req.9: workerName に紐づく登録PIDを発見し、同一性確認後にkillする
-  {
-    const sweepResults = sweepRegistry(workspace, {
-      match: (entry) => entry.workerName === workerName,
+  try {
+    stopWorkerProcess(workspace, workerName, {
+      isRemoveMode: true,
+      logWarn: (msg) => console.warn(msg),
+      _injectedWorkers: workers,
     });
-    if (sweepResults.killed.length > 0) {
-      console.warn(`remove-worker: PID registry: ${sweepResults.killed.length} 件のプロセスを終了しました`);
-      for (const k of sweepResults.killed) {
-        console.warn(`remove-worker:   pid=${k.pid} script=${k.script || '-'}`);
-      }
-    }
-    if (sweepResults.cleaned.length > 0) {
-      console.warn(`remove-worker: PID registry: ${sweepResults.cleaned.length} 件のstaleエントリを掃除しました`);
-    }
-    for (const e of sweepResults.errors) {
-      console.warn(`remove-worker: PID registry error: ${e}`);
-    }
+  } catch (e) {
+    console.warn(`remove-worker: プロセス終了処理で警告が発生しました: ${e.message}`);
   }
 
   // ── worktreeを即座に削除 ──────────────────────────────────────────────
@@ -253,10 +204,10 @@ if (require.main === module) {
   // ワーカー宛てメッセージの処理カーソルを削除する。ワーカーが消えた以上、この
   // カーソルは以後使われない（ベストエフォート、ENOENT は成功扱い。Issue #248 項目6）。
   {
-    const cursorFile = recordPath(workspace, {
-      ...legacyWorkerOwner(workerName), artifact: ARTIFACTS.CURSOR,
-    });
     try {
+      const cursorFile = recordPath(workspace, {
+        ...legacyWorkerOwner(workerName), artifact: ARTIFACTS.CURSOR,
+      });
       if (existsSync(cursorFile)) {
         rmSync(cursorFile);
         console.warn(`remove-worker: inbox-supervisor cursor "${workerName}.json" を削除しました`);
@@ -274,4 +225,13 @@ if (require.main === module) {
   // 並行書き込み競合でも破損JSONを作らないようアトミック書き込みに統一する
   // （Issue #248 項目11）。
   atomicWriteJson(workersJson, workers);
+
+  return 0;
 }
+
+if (require.main === module) {
+  const code = main();
+  process.exit(code);
+}
+
+module.exports = { main, USAGE };
