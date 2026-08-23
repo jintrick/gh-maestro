@@ -2317,6 +2317,44 @@ describe('Stale report detection（居座り検知）', () => {
     });
   });
 
+  test('猶予中にカーソルが報告を追い越しても、次巡回で10秒経過後に発火する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    const reportCreatedAt = new Date(Date.now() - 1000).toISOString();
+    supervisor._setGhApiComments(mockGhApiComments([reportComment({ createdAt: reportCreatedAt })]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+      assert.equal(notifyCalls.length, 0, '猶予中は通知しない');
+      const pending = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(pending.staleReportPendingPid, 456);
+
+      // 実運用では時間経過を待つ。このテストでは永続化された保留時刻を進めて、
+      // 次巡回がコメントを再取得できなくても猶予後判定へ到達することを検証する。
+      pending.staleReportPendingCreatedAt = new Date(Date.now() - 11000).toISOString();
+      supervisor.writeCursor(dir, 'issue-5-fix', pending);
+      supervisor._setGhApiComments(mockGhApiComments([]));
+
+      r.runOnce();
+      assert.equal(notifyCalls.length, 1, '次巡回で猶予後の通知が発火する');
+      assert.ok(r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED:issue-5-fix:456')));
+    });
+  });
+
   // 居座り判定専用の追加のgh api呼び出しを行わない（レビュー指摘: 2重取得はAPIレート制限を
   // 通じて配送そのものを止めうる。本Issueの目的と矛盾するため必ず1回に抑える）。
   test('居座り判定は新着コメントスキャンと同じ取得結果を再利用し、追加のgh api呼び出しを行わない', () => {

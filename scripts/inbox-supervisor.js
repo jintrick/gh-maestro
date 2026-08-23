@@ -191,7 +191,7 @@ function cursorPath(workspace, workerName) {
  *
  * @param {string} workspace
  * @param {string} workerName
- * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object, hangNotifiedPid: number|null, hangNotifiedStartTime: string|null, hangNotifiedAt: string|null, staleReportNotifiedPid: number|null, staleReportNotifiedStartTime: string|null, staleReportNotifiedAt: string|null }}
+ * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object, hangNotifiedPid: number|null, hangNotifiedStartTime: string|null, hangNotifiedAt: string|null, staleReportPendingPid: number|null, staleReportPendingStartTime: string|null, staleReportPendingCreatedAt: string|null, staleReportNotifiedPid: number|null, staleReportNotifiedStartTime: string|null, staleReportNotifiedAt: string|null }}
  */
 function readCursor(workspace, workerName) {
   const cp = cursorPath(workspace, workerName);
@@ -200,6 +200,7 @@ function readCursor(workspace, workerName) {
       return {
         since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {},
         hangNotifiedPid: null, hangNotifiedStartTime: null, hangNotifiedAt: null,
+        staleReportPendingPid: null, staleReportPendingStartTime: null, staleReportPendingCreatedAt: null,
         staleReportNotifiedPid: null, staleReportNotifiedStartTime: null, staleReportNotifiedAt: null,
       };
     }
@@ -215,6 +216,9 @@ function readCursor(workspace, workerName) {
       hangNotifiedPid: typeof parsed.hangNotifiedPid === 'number' ? parsed.hangNotifiedPid : null,
       hangNotifiedStartTime: typeof parsed.hangNotifiedStartTime === 'string' ? parsed.hangNotifiedStartTime : null,
       hangNotifiedAt: typeof parsed.hangNotifiedAt === 'string' ? parsed.hangNotifiedAt : null,
+      staleReportPendingPid: typeof parsed.staleReportPendingPid === 'number' ? parsed.staleReportPendingPid : null,
+      staleReportPendingStartTime: typeof parsed.staleReportPendingStartTime === 'string' ? parsed.staleReportPendingStartTime : null,
+      staleReportPendingCreatedAt: typeof parsed.staleReportPendingCreatedAt === 'string' ? parsed.staleReportPendingCreatedAt : null,
       staleReportNotifiedPid: typeof parsed.staleReportNotifiedPid === 'number' ? parsed.staleReportNotifiedPid : null,
       staleReportNotifiedStartTime: typeof parsed.staleReportNotifiedStartTime === 'string' ? parsed.staleReportNotifiedStartTime : null,
       staleReportNotifiedAt: typeof parsed.staleReportNotifiedAt === 'string' ? parsed.staleReportNotifiedAt : null,
@@ -223,6 +227,7 @@ function readCursor(workspace, workerName) {
     return {
       since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {},
       hangNotifiedPid: null, hangNotifiedStartTime: null, hangNotifiedAt: null,
+      staleReportPendingPid: null, staleReportPendingStartTime: null, staleReportPendingCreatedAt: null,
       staleReportNotifiedPid: null, staleReportNotifiedStartTime: null, staleReportNotifiedAt: null,
     };
   }
@@ -248,6 +253,9 @@ function writeCursor(workspace, workerName, state) {
     hangNotifiedPid: typeof state.hangNotifiedPid === 'number' ? state.hangNotifiedPid : null,
     hangNotifiedStartTime: typeof state.hangNotifiedStartTime === 'string' ? state.hangNotifiedStartTime : null,
     hangNotifiedAt: typeof state.hangNotifiedAt === 'string' ? state.hangNotifiedAt : null,
+    staleReportPendingPid: typeof state.staleReportPendingPid === 'number' ? state.staleReportPendingPid : null,
+    staleReportPendingStartTime: typeof state.staleReportPendingStartTime === 'string' ? state.staleReportPendingStartTime : null,
+    staleReportPendingCreatedAt: typeof state.staleReportPendingCreatedAt === 'string' ? state.staleReportPendingCreatedAt : null,
     staleReportNotifiedPid: typeof state.staleReportNotifiedPid === 'number' ? state.staleReportNotifiedPid : null,
     staleReportNotifiedStartTime: typeof state.staleReportNotifiedStartTime === 'string' ? state.staleReportNotifiedStartTime : null,
     staleReportNotifiedAt: typeof state.staleReportNotifiedAt === 'string' ? state.staleReportNotifiedAt : null,
@@ -986,12 +994,24 @@ function main(argsOverride, opts = {}) {
       // 同一サイクル内であれば取りこぼさない。一度検知した後は pid+startTime ベースの重複
       // 排除で再通知しないため、翌サイクル以降 since がその報告コメントを過ぎても問題ない）。
       if (_isWorkerAlive(entry) && entry.startTime) {
-        const latestReport = getLatestReportSinceStart(comments, workerName, entry.startTime);
+        const commentReport = getLatestReportSinceStart(comments, workerName, entry.startTime);
+        const pendingReportMatches = cursor.staleReportPendingPid === entry.pid
+          && cursor.staleReportPendingStartTime === entry.startTime
+          && cursor.staleReportPendingCreatedAt;
+        const latestReport = commentReport || (pendingReportMatches
+          ? { created_at: cursor.staleReportPendingCreatedAt }
+          : null);
         const reported = latestReport !== null;
         const alreadyNotified = cursor.staleReportNotifiedPid === entry.pid
           && cursor.staleReportNotifiedStartTime === entry.startTime;
         const reportAgeMs = latestReport ? Date.now() - new Date(latestReport.created_at).getTime() : 0;
-        if (reported === true && reportAgeMs >= STALE_REPORT_GRACE_MS && !alreadyNotified) {
+        if (reported === true && reportAgeMs < STALE_REPORT_GRACE_MS && !alreadyNotified) {
+          // 報告コメントが cursor.since を追い越しても、猶予後の巡回で再評価できるよう
+          // 報告時刻をカーソルとは独立して保存する（Issue #386）。
+          cursor.staleReportPendingPid = entry.pid;
+          cursor.staleReportPendingStartTime = entry.startTime;
+          cursor.staleReportPendingCreatedAt = latestReport.created_at;
+        } else if (reported === true && reportAgeMs >= STALE_REPORT_GRACE_MS && !alreadyNotified) {
           const elapsed = formatElapsedTime(latestReport.created_at);
           const body = `⚠️ ワーカー "${workerName}" は既に報告を投稿済み（投稿から ${elapsed} 経過）ですが、プロセス（PID ${entry.pid}）が生存しています。終了処理中・作業継続中・プロセスの終了漏れの可能性があります。この状態の間、新しい指示は配送されず待機し続けます。作業状況（未コミット変更・ログ等）を確認し、不要な残留プロセスの場合は終了してください。`;
           let notified = false;
@@ -1009,12 +1029,20 @@ function main(argsOverride, opts = {}) {
           // 新着メッセージのスキャン・配送でも同じ cursor オブジェクトを書き換えるため、
           // ここで個別に保存すると二重書き込みになる）。
           if (notified) {
+            cursor.staleReportPendingPid = null;
+            cursor.staleReportPendingStartTime = null;
+            cursor.staleReportPendingCreatedAt = null;
             cursor.staleReportNotifiedPid = entry.pid;
             cursor.staleReportNotifiedStartTime = entry.startTime;
             cursor.staleReportNotifiedAt = new Date().toISOString();
             writeOut(`STALE_REPORT_DETECTED:${workerName}:${entry.pid} elapsed=${elapsed}`);
           }
         }
+      } else {
+        // プロセスが終了した保留報告は次のPIDへ持ち越さない。
+        cursor.staleReportPendingPid = null;
+        cursor.staleReportPendingStartTime = null;
+        cursor.staleReportPendingCreatedAt = null;
       }
 
       // ── 新着候補の抽出 ─────────────────────────────────────────────

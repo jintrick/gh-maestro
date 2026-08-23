@@ -62,13 +62,23 @@ test('poll-pr.js の異常終了はIssueコメントではなく監査イベン�
 test('msg-poll.js 自身の異常終了はstdoutへ直接通知する', () => {
   withExitCode(1, () => withTempDir(workspace => {
     const captured = captureStdout(() => helper.notifyWatchdogExit({
-      workspace, scriptName: 'msg-poll.js',
+      workspace, scriptName: 'msg-poll.js', isOrchestrator: true,
     }));
     assert.equal(captured.result, true);
     assert.match(captured.output, /^RESIDENT_NOTIFICATION:/);
     assert.match(captured.output, /msg-poll\.js/);
     assert.match(captured.output, /exit code 1/);
     assert.deepEqual(residentAudit.listUnprocessedResidentAuditEvents(workspace), []);
+  }));
+});
+
+test('workerモードのmsg-poll異常終了は監査イベントへ記録する', () => {
+  withExitCode(1, () => withTempDir(workspace => {
+    assert.equal(helper.notifyWatchdogExit({ workspace, scriptName: 'msg-poll.js', issue: '5' }), true);
+    const events = residentAudit.listUnprocessedResidentAuditEvents(workspace);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].event.role, 'msg-poll.js');
+    assert.match(events[0].event.detail.body, /exit code 1/);
   }));
 });
 
@@ -101,7 +111,7 @@ test('送信先Issueが無い場合は通知せずstderrへ理由を出す', () 
 test('exit code 3（親セッション消滅）はmsg-poll stdout通知に専用本文を使う', () => {
   withExitCode(3, () => withTempDir(workspace => {
     const captured = captureStdout(() => helper.notifyWatchdogExit({
-      workspace, scriptName: 'msg-poll.js',
+      workspace, scriptName: 'msg-poll.js', isOrchestrator: true,
     }));
     assert.equal(captured.result, true);
     assert.match(captured.output, /親セッションの消滅を検出して自動終了しました/);

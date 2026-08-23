@@ -565,7 +565,7 @@ test('resident-audit が I/O 失敗で throw しても scanOnce はクラッシ�
   });
 });
 
-test('_notifyOrchestrator はIssueコメントではなくstdoutへ通知する（連続失敗警告）', () => {
+test('workerモードの _notifyOrchestrator はIssueコメントやworker stdoutではなく監査へ通知する', () => {
   withTempDir(workspace => {
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgPoll._setGhApiComments(() => ({
@@ -576,9 +576,7 @@ test('_notifyOrchestrator はIssueコメントではなくstdoutへ通知する�
     }));
 
     msgPoll._setNotifyOrchestrator(msgPoll._notifyOrchestrator);
-    const originalStdoutWrite = process.stdout.write;
-    const output = [];
-    process.stdout.write = (value) => { output.push(String(value)); return true; };
+    const residentAudit = require('../scripts/shared/resident-audit');
 
     const originalMarkReadMany = readStateLib.markReadMany;
     readStateLib.markReadMany = () => {
@@ -593,12 +591,13 @@ test('_notifyOrchestrator はIssueコメントではなくstdoutへ通知する�
       // 次回も同じコメントを再検出し、毎回 onFailure に到達する）
       for (let i = 0; i < 5; i++) r.scanOnce();
 
-      assert.equal(output.length, 1, `通知が1回: ${JSON.stringify(output)}`);
-      assert.match(output[0], /^RESIDENT_NOTIFICATION:/);
-      assert.ok(output[0].includes('連続で失敗しています'), 'stdout本文に警告が含まれること');
+      const events = residentAudit.listUnprocessedResidentAuditEvents(workspace);
+      assert.equal(events.length, 1, `監査通知が1回: ${JSON.stringify(events)}`);
+      assert.equal(events[0].event.type, 'notification');
+      assert.equal(events[0].event.role, 'msg-poll');
+      assert.ok(events[0].event.detail.body.includes('連続で失敗しています'), '監査本文に警告が含まれること');
     } finally {
       readStateLib.markReadMany = originalMarkReadMany;
-      process.stdout.write = originalStdoutWrite;
       msgPoll._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
     }
   });

@@ -14,8 +14,8 @@
 // （監視中に止まっても沈黙しない）。
 //
 // 監視プロセスの内部通知は Issue コメントへ投稿せず、poller が消費する監査キューへ
-// 記録する。msg-poll.js 自身だけは終了直前に自分の監査キューを読めないため、Monitorの
-// stdoutへ直接出力する。
+// 記録する。orchestrator モードの msg-poll.js だけは終了直前に自分の監査キューを読めない
+// ためMonitorのstdoutへ直接出力し、worker モードの msg-poll.js は監査キューへ記録する。
 
 const path = require('path');
 const fs = require('fs');
@@ -34,24 +34,29 @@ const PARENT_DEATH_EXIT_CODE = 3;
  *
  * @param {object} params
  * @param {string} params.workspace ワークスペース
- * @param {string} params.scriptName この監視プロセスのスクリプト名（--from に使う）
- * @param {string} [params.issue] 送信先Issue番号（省略時は workers.json の先頭ワーカーのIssueを解決）
- * @returns {boolean} 通知を投稿したか（正常終了・送信先なし・投稿失敗は false）
+ * @param {string} params.scriptName この監視プロセスのスクリプト名
+ * @param {string} [params.issue] 通知発生元が監視するIssue番号
+ * @param {boolean} [params.isOrchestrator=false] orchestratorモードのmsg-pollか
+ * @returns {boolean} 通知を出力または監査記録できたか
  */
-function notifyWatchdogExit({ workspace, scriptName, issue }) {
+function notifyWatchdogExit({ workspace, scriptName, issue, isOrchestrator = false }) {
   // 非ゼロ終了のときだけ通知する。正常終了（exit 0）は何もしない。
   const exitCode = Number.isFinite(process.exitCode) ? process.exitCode : 0;
   if (exitCode === 0) return false;
 
-  const resolvedIssue = issue || resolveNotifyIssue(workspace);
-  if (scriptName === 'msg-poll.js') {
-    const isParentDeath = exitCode === PARENT_DEATH_EXIT_CODE;
-    const body = isParentDeath
-      ? `監視プロセス ${scriptName} が親セッションの消滅を検出して自動終了しました（exit code ${PARENT_DEATH_EXIT_CODE}）。監視していたセッションが終了したため、その監視も停止しています。`
-      : `⚠️ 監視プロセス ${scriptName} が異常終了しました（exit code ${exitCode}）。プロセスが予期せず終了したため、その監視は停止しています。`;
+  const body = buildWatchdogNotificationBody(scriptName, exitCode);
+  if (scriptName === 'msg-poll.js' && !isOrchestrator) {
     try {
-      // msg-poll自身の監査ファイルは、異常終了した本人が読むため届かない。
-      // 終了フックからMonitorのstdoutへ同期出力し、Issueコメントには投稿しない。
+      recordResidentNotification({ workspace, source: scriptName, issue, body });
+      return true;
+    } catch (e) {
+      process.stderr.write(`watchdog-exit-notify: ${scriptName} 異常終了通知の記録に失敗: ${e.message}\n`);
+      return false;
+    }
+  }
+  if (scriptName === 'msg-poll.js' && isOrchestrator) {
+    try {
+      // orchestratorのMonitorだけがmsg-poll自身の終了直前stdoutを受信する。
       process.stdout.write(`${formatResidentNotification(scriptName, body)}\n`);
       return true;
     } catch (e) {
@@ -59,17 +64,12 @@ function notifyWatchdogExit({ workspace, scriptName, issue }) {
       return false;
     }
   }
+  const resolvedIssue = issue || resolveNotifyIssue(workspace);
   if (!resolvedIssue) {
     process.stderr.write(`watchdog-exit-notify: ${scriptName} 異常終了（exit ${exitCode}）ですが送信先Issueがありません。通知を送信できません。\n`);
     return false;
   }
 
-  // exit 3（親セッション消滅）は設計された終了のため専用の本文にする。それ以外の
-  // 非ゼロは従来どおり異常終了として警告する。
-  const isParentDeath = exitCode === PARENT_DEATH_EXIT_CODE;
-  const body = isParentDeath
-    ? `監視プロセス ${scriptName} が親セッションの消滅を検出して自動終了しました（exit code ${PARENT_DEATH_EXIT_CODE}）。監視していたセッションが終了したため、その監視も停止しています。`
-    : `⚠️ 監視プロセス ${scriptName} が異常終了しました（exit code ${exitCode}）。プロセスが予期せず終了したため、その監視は停止しています。`;
   try {
     recordResidentNotification({ workspace, source: scriptName, issue: resolvedIssue, body });
     return true;
@@ -77,6 +77,19 @@ function notifyWatchdogExit({ workspace, scriptName, issue }) {
     process.stderr.write(`watchdog-exit-notify: ${scriptName} 異常終了通知の記録に失敗: ${e.message}\n`);
     return false;
   }
+}
+
+/**
+ * watchdog の終了コードに対応する通知本文を一箇所で構築する。
+ * @param {string} scriptName
+ * @param {number} exitCode
+ * @returns {string}
+ */
+function buildWatchdogNotificationBody(scriptName, exitCode) {
+  if (exitCode === PARENT_DEATH_EXIT_CODE) {
+    return `監視プロセス ${scriptName} が親セッションの消滅を検出して自動終了しました（exit code ${PARENT_DEATH_EXIT_CODE}）。監視していたセッションが終了したため、その監視も停止しています。`;
+  }
+  return `⚠️ 監視プロセス ${scriptName} が異常終了しました（exit code ${exitCode}）。プロセスが予期せず終了したため、その監視は停止しています。`;
 }
 
 /**
@@ -97,4 +110,4 @@ function resolveNotifyIssue(workspace) {
   return null;
 }
 
-module.exports = { notifyWatchdogExit, resolveNotifyIssue, PARENT_DEATH_EXIT_CODE };
+module.exports = { notifyWatchdogExit, resolveNotifyIssue, buildWatchdogNotificationBody, PARENT_DEATH_EXIT_CODE };

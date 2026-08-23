@@ -39,6 +39,7 @@ const { acquireResidentLease, msgPollRole } = require('./shared/worker-lease');
 const {
   listUnprocessedResidentAuditEvents,
   removeResidentAuditEvent,
+  recordResidentNotification,
   formatResidentNotification,
 } = require('./shared/resident-audit');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
@@ -367,7 +368,7 @@ function main(argsOverride, opts = {}) {
     const body = `⚠️ msg-poll の既読状態の書き込みが ${count} 回連続で失敗しています（他プロセスが msg-state を掴んでいる可能性）。最新のエラー: ${detail}`;
       let res;
       try {
-        res = _notifyOrchestrator({ workspace, issue, body });
+        res = _notifyOrchestrator({ workspace, issue, body, isOrchestrator });
       } catch (e) {
         writeErr(`msg-poll: 書き込み連続失敗の警告の送信に失敗: ${e.message}`);
         return;
@@ -805,13 +806,14 @@ function main(argsOverride, opts = {}) {
 
 // ── --wait モード ────────────────────────────────────────────────────────
 
-// orchestrator への書き込み連続失敗の警告（Issue #250）。テストで注入可能。
-// inbox-supervisor.js の _notifyOrchestrator と同型。msg-send.js は本文を位置引数で
-// 受け付けない（--stdin / --body-file のみ）ため、spawnSync の input で stdin 経由に渡す。
-let _notifyOrchestrator = ({ workspace, issue, body }) => {
-  // msg-poll自身の出力はorchestrator Monitorへ届くため、内部通知をIssueコメントにせず
-  // 同じstdoutイベントストリームへ直接出力する。
-  process.stdout.write(`${formatResidentNotification('msg-poll', body)}\n`);
+// msg-poll自身の内部通知。orchestratorモードのstdoutはMonitorへ届くが、workerモードの
+// stdoutはorchestratorへ接続されていないため、workerモードはresident-auditへ記録する。
+let _notifyOrchestrator = ({ workspace, issue, body, isOrchestrator = false }) => {
+  if (isOrchestrator) {
+    process.stdout.write(`${formatResidentNotification('msg-poll', body)}\n`);
+  } else {
+    recordResidentNotification({ workspace, source: 'msg-poll', issue, body });
+  }
   return { status: 0, stdout: '', stderr: '' };
 };
 
@@ -948,7 +950,14 @@ if (require.main === module) {
   // 推測フォールバックに落とすと、別 Issue へ誤配送されたり宛先不明で破棄されたりして
   // 監視停止が待機側へ届かない（Issue #289 レビュー指摘）。orchestrator 専用モードなど
   // Issue が本当に無い場合だけ、ヘルパー側のフォールバックが使われる。
-  process.on('exit', () => { notifyWatchdogExit({ workspace: result.workspace, scriptName: 'msg-poll.js', issue: result.issueArg }); });
+  process.on('exit', () => {
+    notifyWatchdogExit({
+      workspace: result.workspace,
+      scriptName: 'msg-poll.js',
+      issue: result.issueArg,
+      isOrchestrator: result.self === 'orchestrator',
+    });
+  });
 
   // ── PID registry に自己登録（継続モード・--wait モード） ────────────
   // worker モードの場合は workerName を含めて登録する。
