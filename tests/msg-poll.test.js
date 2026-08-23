@@ -565,12 +565,7 @@ test('resident-audit が I/O 失敗で throw しても scanOnce はクラッシ�
   });
 });
 
-// ── PR #251: _notifyOrchestrator が実 msg-send.js コマンドを正しく構築する ──
-// 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
-// 省略すると recipient が undefined になり usage エラーで必ず送信失敗するため、
-// 「呼ばれたこと」だけでなく「構築されるコマンドライン引数」を検証する。
-
-test('_notifyOrchestrator が msg-send.js に宛先(orchestrator)を含む実引数を渡す（連続失敗警告）', () => {
+test('_notifyOrchestrator はIssueコメントではなくstdoutへ通知する（連続失敗警告）', () => {
   withTempDir(workspace => {
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgPoll._setGhApiComments(() => ({
@@ -580,14 +575,10 @@ test('_notifyOrchestrator が msg-send.js に宛先(orchestrator)を含む実引
       ]),
     }));
 
-    // 先行テストが _setNotifyOrchestrator を丸ごと差し替えたまま残すと、実関数経由の
-    // 引数検証が素通しするため、実装を復元してから spawn だけを記録モックに差し替える。
     msgPoll._setNotifyOrchestrator(msgPoll._notifyOrchestrator);
-    const spawnCalls = [];
-    msgPoll._setNotifySpawn((cmd, args, opts) => {
-      spawnCalls.push({ cmd, args, opts });
-      return { status: 0, stdout: '', stderr: '' };
-    });
+    const originalStdoutWrite = process.stdout.write;
+    const output = [];
+    process.stdout.write = (value) => { output.push(String(value)); return true; };
 
     const originalMarkReadMany = readStateLib.markReadMany;
     readStateLib.markReadMany = () => {
@@ -602,20 +593,13 @@ test('_notifyOrchestrator が msg-send.js に宛先(orchestrator)を含む実引
       // 次回も同じコメントを再検出し、毎回 onFailure に到達する）
       for (let i = 0; i < 5; i++) r.scanOnce();
 
-      assert.equal(spawnCalls.length, 1, `警告の msg-send.js spawn が1回: ${JSON.stringify(spawnCalls)}`);
-      const { cmd, args, opts } = spawnCalls[0];
-      assert.equal(cmd, process.execPath);
-      assert.ok(args[0].endsWith('msg-send.js'), `args[0]=msg-send.js であること: ${args.join(' ')}`);
-      assert.equal(args[1], 'orchestrator', `recipient が位置引数で渡されること: ${args.join(' ')}`);
-      assert.equal(args[args.indexOf('--from') + 1], 'msg-poll');
-      assert.equal(args[args.indexOf('--issue') + 1], '1');
-      assert.equal(args[args.indexOf('--workspace') + 1], workspace);
-      assert.ok(opts.input.includes('連続で失敗しています'), `stdin 本文に警告が含まれること`);
+      assert.equal(output.length, 1, `通知が1回: ${JSON.stringify(output)}`);
+      assert.match(output[0], /^RESIDENT_NOTIFICATION:/);
+      assert.ok(output[0].includes('連続で失敗しています'), 'stdout本文に警告が含まれること');
     } finally {
       readStateLib.markReadMany = originalMarkReadMany;
-      // 先行テストが残していた状態（高レベルで実spawnしないモック）に戻す
+      process.stdout.write = originalStdoutWrite;
       msgPoll._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
-      msgPoll._setNotifySpawn(spawnSync);
     }
   });
 });
@@ -747,6 +731,53 @@ test('orchestrator モード: 監査イベントは ownerPid が無ければ rol
     r.scanOnce();
 
     assert.ok(r.lines.includes('LOCK_DENIED:inbox-supervisor'), `lines: ${JSON.stringify(r.lines)}`);
+  });
+});
+
+test('orchestrator モード: 内部通知監査イベントを専用行で出力し処理済み化する', () => {
+  withTempDir(workspace => {
+    initOrchestratorState(workspace);
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
+
+    const residentAudit = require('../scripts/shared/resident-audit');
+    residentAudit.recordResidentNotification({
+      workspace,
+      source: 'inbox-supervisor',
+      issue: 5,
+      body: '配送断念\n詳細',
+    });
+
+    const r = runMain(['orchestrator', '--workspace', workspace, '--wait', '30']);
+    assert.equal(r.code, 0);
+    r.scanOnce();
+
+    assert.deepEqual(r.lines, [
+      'RESIDENT_NOTIFICATION:{"source":"inbox-supervisor","body":"配送断念\\n詳細"}',
+    ]);
+    assert.deepEqual(residentAudit.listUnprocessedResidentAuditEvents(workspace), []);
+  });
+});
+
+test('orchestrator モード: 未知の監査イベントは誤ってHANDOFF_WAITとして消費しない', () => {
+  withTempDir(workspace => {
+    initOrchestratorState(workspace);
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
+
+    const residentAudit = require('../scripts/shared/resident-audit');
+    const dir = residentAudit.auditDir(workspace);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'unknown.json');
+    fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, type: 'future', role: 'x', detail: {} }));
+
+    const r = runMain(['orchestrator', '--workspace', workspace, '--wait', '30']);
+    assert.equal(r.code, 0);
+    r.scanOnce();
+
+    assert.ok(r.errLines.some(line => line.includes('未知の監査イベント種別')));
+    assert.equal(fs.existsSync(file), true);
+    assert.ok(!r.lines.some(line => line.includes('HANDOFF_WAIT')));
   });
 });
 

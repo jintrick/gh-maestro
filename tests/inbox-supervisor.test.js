@@ -11,6 +11,7 @@ const { spawnSync } = require('../scripts/shared/child-process');
 const headlessLaunch = require('../scripts/shared/headless-launch');
 const workerLease = require('../scripts/shared/worker-lease');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
+const residentAudit = require('../scripts/shared/resident-audit');
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
@@ -194,7 +195,6 @@ function resetAllMocks() {
   // _notifyOrchestrator は実装を復元する（先行テストの _setNotifyOrchestrator 注入が残留すると、
   // 実関数経由の引数検証テストが素通ししてしまう）。
   supervisor._setNotifyOrchestrator(supervisor._notifyOrchestrator);
-  supervisor._setNotifySpawn(() => ({ status: 0, stdout: '', stderr: '' }));
 }
 
 resetAllMocks();
@@ -1934,21 +1934,10 @@ describe('Hang detection', () => {
     });
   });
 
-  // ── PR #251: _notifyOrchestrator が実 msg-send.js コマンドを正しく構築する ──
-  // 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
-  // 省略すると recipient が undefined になり usage エラーで必ず送信失敗するため、
-  // 「呼ばれたこと」だけでなく「構築されるコマンドライン引数」を検証する。
-
-  test('_notifyOrchestrator が msg-send.js に宛先(orchestrator)を含む実引数を渡す', () => {
+  test('_notifyOrchestrator はIssueコメントではなく監査イベントへ通知する', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
     supervisor._setIsWorkerAlive(() => true);
-
-    const spawnCalls = [];
-    supervisor._setNotifySpawn((cmd, args, opts) => {
-      spawnCalls.push({ cmd, args, opts });
-      return { status: 0, stdout: '', stderr: '' };
-    });
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
@@ -1957,7 +1946,7 @@ describe('Hang detection', () => {
         },
       });
 
-      // 60秒前のログ → ハング検知され、実 _notifyOrchestrator が msg-send.js を spawn する
+      // 60秒前のログ → ハング検知され、実 _notifyOrchestrator が監査へ記録する
       const logPath = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-fix', 'worker.log');
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.writeFileSync(logPath, 'old log\n', 'utf8');
@@ -1968,15 +1957,11 @@ describe('Hang detection', () => {
       assert.equal(r.code, 0);
       r.runOnce();
 
-      assert.equal(spawnCalls.length, 1, `msg-send.js spawn が1回: ${JSON.stringify(spawnCalls)}`);
-      const { cmd, args, opts } = spawnCalls[0];
-      assert.equal(cmd, process.execPath);
-      assert.ok(args[0].endsWith('msg-send.js'), `args[0]=msg-send.js であること: ${args.join(' ')}`);
-      assert.equal(args[1], 'orchestrator', `recipient が位置引数で渡されること: ${args.join(' ')}`);
-      assert.equal(args[args.indexOf('--from') + 1], 'inbox-supervisor');
-      assert.equal(args[args.indexOf('--issue') + 1], '5');
-      assert.equal(args[args.indexOf('--workspace') + 1], dir);
-      assert.ok(opts.input.includes('ハング'), `stdin 本文にハング警告が含まれること`);
+      const events = residentAudit.listUnprocessedResidentAuditEvents(dir);
+      assert.equal(events.length, 1);
+      assert.equal(events[0].event.type, 'notification');
+      assert.equal(events[0].event.role, 'inbox-supervisor');
+      assert.ok(events[0].event.detail.body.includes('ハング'));
     });
   });
 
@@ -2153,7 +2138,7 @@ describe('Hang detection', () => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 居座り検知（Issue #263）: 既に報告済みなのにプロセスが生存し続けている異常を検知する。
-// ハング検知（ログ更新時刻ベース）とは独立の判定軸で、判定条件に経過時間を使わない。
+// ハング検知（ログ更新時刻ベース）とは独立の判定軸で、報告投稿から10秒の猶予を持つ。
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('Stale report detection（居座り検知）', () => {
@@ -2256,8 +2241,8 @@ describe('Stale report detection（居座り検知）', () => {
     const workerStartTime = new Date(now - 3600000).toISOString();
     // 報告コメント1（古い報告）: 30分前
     const oldReportTime = new Date(now - 1800000).toISOString();
-    // 報告コメント2（最新報告）: 10秒前
-    const latestReportTime = new Date(now - 10000).toISOString();
+    // 報告コメント2（最新報告）: 11秒前（10秒猶予を超過）
+    const latestReportTime = new Date(now - 11000).toISOString();
 
     const comments = [
       {
@@ -2295,11 +2280,40 @@ describe('Stale report detection（居座り検知）', () => {
       assert.equal(notifyCalls.length, 1);
       const body = notifyCalls[0].body;
 
-      // 起点が最新報告コメント（約10秒前）であるため、秒単位の経過時間（例: 10秒, 9秒, 11秒など）になっていること
-      assert.match(body, /投稿から (9|10|11|12)秒 経過/, `通知本文の経過時間が最新報告（10秒前）起点であること: ${body}`);
+      // 起点が最新報告コメント（約11秒前）であるため、10秒猶予後の通知になること
+      assert.match(body, /投稿から (11|12|13)秒 経過/, `通知本文の経過時間が最新報告（11秒前）起点であること: ${body}`);
       // プロセス起動時刻起点（1時間...）や古い報告起点（30分...）になっていないこと
       assert.ok(!body.includes('時間'), `プロセス起動時刻起点（1時間...）になっていないこと: ${body}`);
       assert.ok(!body.includes('30分'), `古い報告コメント起点（30分...）になっていないこと: ${body}`);
+    });
+  });
+
+  test('報告投稿から10秒未満は居座り通知を発火しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    const reportCreatedAt = new Date(Date.now() - 1000).toISOString();
+    supervisor._setGhApiComments(mockGhApiComments([reportComment({ createdAt: reportCreatedAt })]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED')));
+      assert.equal(notifyCalls.length, 0);
+      assert.equal(supervisor.readCursor(dir, 'issue-5-fix').staleReportNotifiedPid, null);
     });
   });
 

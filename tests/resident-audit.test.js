@@ -46,6 +46,31 @@ test('recordResidentAuditEvent: 1イベント1ファイルをworkspace runtime�
   });
 });
 
+test('recordResidentNotification: 本文と送信元を監査イベントへ記録する', () => {
+  withTempDir(workspace => {
+    const file = audit.recordResidentNotification({
+      workspace,
+      source: 'inbox-supervisor',
+      issue: 42,
+      body: '内部エラー\n詳細',
+    });
+    const event = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.equal(event.type, 'notification');
+    assert.equal(event.role, 'inbox-supervisor');
+    assert.deepEqual(event.detail, { issue: '42', body: '内部エラー\n詳細' });
+  });
+});
+
+test('recordResidentNotification: 本文が空なら記録しない', () => {
+  withTempDir(workspace => {
+    assert.throws(
+      () => audit.recordResidentNotification({ workspace, source: 'inbox-supervisor', body: '' }),
+      /通知本文が必要/
+    );
+    assert.deepEqual(audit.listUnprocessedResidentAuditEvents(workspace), []);
+  });
+});
+
 test('recordResidentAuditEvent: 未知のイベント種別は fail closed で throw する', () => {
   withTempDir(workspace => {
     assert.throws(

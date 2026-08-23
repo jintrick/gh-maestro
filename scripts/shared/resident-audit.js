@@ -23,7 +23,7 @@ const fs = require('fs');
 const { workspaceRuntimeDir, assertValidWorkspace, assertDisjointRoots } = require('./storage-layout');
 
 /** 記録するイベント種別（取得側が未知種別を誤って受理しないよう固定値で宣言する）。 */
-const EVENT_TYPES = Object.freeze(['lock-denied', 'handoff-wait']);
+const EVENT_TYPES = Object.freeze(['lock-denied', 'handoff-wait', 'notification']);
 
 // 同一プロセス内でのファイル名一意化用。プロセス間は pid + Date.now() で分離する。
 let _seq = 0;
@@ -138,10 +138,42 @@ function removeResidentAuditEvent(workspace, file) {
   }
 }
 
+/**
+ * 常駐プロセスの内部通知を監査キューへ記録する。
+ * @param {object} opt
+ * @param {string} opt.workspace
+ * @param {string} opt.source 通知元スクリプトまたは常駐プロセス名
+ * @param {string} opt.body 通知本文
+ * @param {string|number} [opt.issue] 通知発生時点の対象Issue
+ * @returns {string} 記録したファイルの絶対パス
+ */
+function recordResidentNotification({ workspace, source, body, issue }) {
+  if (typeof source !== 'string' || !source) throw new Error('resident-audit: 通知元が必要です');
+  if (typeof body !== 'string' || !body) throw new Error('resident-audit: 通知本文が必要です');
+  return recordResidentAuditEvent({
+    workspace,
+    type: 'notification',
+    role: source,
+    detail: { issue: issue == null ? null : String(issue), body },
+  });
+}
+
+/**
+ * Monitor が1行イベントとして扱えるよう、本文を可逆なJSON文字列にする。
+ * @param {string} source
+ * @param {string} body
+ * @returns {string}
+ */
+function formatResidentNotification(source, body) {
+  return `RESIDENT_NOTIFICATION:${JSON.stringify({ source, body })}`;
+}
+
 module.exports = {
   EVENT_TYPES,
   recordResidentAuditEvent,
   listUnprocessedResidentAuditEvents,
   removeResidentAuditEvent,
+  recordResidentNotification,
+  formatResidentNotification,
   auditDir,
 };

@@ -21,7 +21,7 @@
 //   - resume直後の生存確認（spawnの成功=プロセス生存し続けることではないため、短い猶予後に
 //     PIDで再確認する。消えていればDELIVEREDにせずresume-failedとして扱う）
 //   - リトライ断念時のorchestrator通知（stderrへのログだけでは誰も気づけないため、
-//     msg-send.js経由でorchestratorのinboxに直接投稿する）
+//     resident-audit経由でorchestratorの監視へ届ける）
 //   - 未報告のまま居座るワーカーの通知（Issue #263。ワーカーが直近の起動以降に既に報告を
 //     投稿しているのにプロセスが生存し続けている異常を、経過時間ではなく報告コメントの
 //     有無で検知しorchestratorへ通知する。msg-send.js側の追伸拒否ガードと対になる）
@@ -55,6 +55,7 @@ const {
 } = require('./process-lifecycle');
 const { acquireResidentLease, INBOX_SUPERVISOR_ROLE } = require('./shared/worker-lease');
 const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdog-exit-notify');
+const { recordResidentNotification } = require('./shared/resident-audit');
 const { handleParentSessionDeath } = require('./shared/resident-parent-death');
 const { checkResidentForceGuard } = require('./shared/resident-force-guard');
 
@@ -84,6 +85,7 @@ const MAX_SEEN_IDS = 200;
 const MAX_RETRIES = 5;
 const RETRY_BASE_DELAY_MS = 10000;
 const DEFAULT_HANG_THRESHOLD_MS = 20 * 60 * 1000; // 20分
+const STALE_REPORT_GRACE_MS = 10 * 1000;
 
 const USAGE = `inbox-supervisor.js — 全ワーカーのGitHub Issueインボックスを監視し新着メッセージを配送する
 
@@ -123,7 +125,7 @@ Description:
     起動時刻）が復帰した場合のみHANG_RESUMEDを出力する。同一プロセス（PID+起動時刻）
     への重複通知は防止される（PID再利用や新プロセスへの切り替わりによる誤抑止・
     誤った復帰報告を避けるため起動時刻も照合する）。
-  居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みなのにプロセスが終了せず生存し続けている場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（判定は報告コメントの有無だけで行い、報告投稿からの経過時間は通知とログに記録する。ハング検知とは独立）。同一プロセス（PID+起動時刻）への重複通知は防止される（PID再利用による誤抑止を避けるため起動時刻も照合する）。
+  居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みで、報告から10秒以上経過してもプロセスが生存し続けている場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（ハング検知とは独立）。同一プロセス（PID+起動時刻）への重複通知は防止される（PID再利用による誤抑止を避けるため起動時刻も照合する）。
   ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
   消滅時はPID registryを解除して自動exitする。`;
 
@@ -156,16 +158,9 @@ const RESUME_LIVENESS_GRACE_MS = 2000;
 // spawnSync の input で stdin 経由に渡す。
 // 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
 // 省略すると recipient が undefined になり usage エラーで必ず送信失敗する（PR #251 レビュー指摘）。
-let _notifySpawn = spawnSync;
 let _notifyOrchestrator = ({ workspace, issue, body }) => {
-  return _notifySpawn(process.execPath, [
-    path.join(__dirname, 'msg-send.js'),
-    'orchestrator',
-    '--stdin',
-    '--from', 'inbox-supervisor',
-    '--issue', issue,
-    '--workspace', workspace,
-  ], { encoding: 'utf8', input: body });
+  recordResidentNotification({ workspace, source: 'inbox-supervisor', issue, body });
+  return { status: 0, stdout: '', stderr: '' };
 };
 
 // ── 状態管理 ──────────────────────────────────────────────────────────────
@@ -973,8 +968,8 @@ function main(argsOverride, opts = {}) {
       // ── 未報告のまま居座るワーカーの検知（Issue #263） ─────────────────
       // ハング検知（ログ更新時刻ベース）とは独立の判定軸。ワーカーが自分の直近の起動
       // （entry.startTime）以降に既に orchestrator へ報告を投稿しているのに、プロセスが
-      // 終了せず生存し続けている状態を「居座り」として異常通知する。経過時間・ログ更新は
-      // 一切使わず、報告コメントの有無という事実だけで判定する。
+      // 終了せず生存し続けている状態を「居座り」として異常通知する。正常な終了処理の
+      // 猶予として、報告コメントの投稿から10秒経過するまでは判定しない。
       //
       // 重複通知防止キーは pid 単独ではなく pid + startTime（起動時刻）の組で同一プロセスを
       // 識別する。同一ファイル内の生存判定（_isWorkerAlive → verifyProcessIdentity）と同じ
@@ -995,7 +990,8 @@ function main(argsOverride, opts = {}) {
         const reported = latestReport !== null;
         const alreadyNotified = cursor.staleReportNotifiedPid === entry.pid
           && cursor.staleReportNotifiedStartTime === entry.startTime;
-        if (reported === true && !alreadyNotified) {
+        const reportAgeMs = latestReport ? Date.now() - new Date(latestReport.created_at).getTime() : 0;
+        if (reported === true && reportAgeMs >= STALE_REPORT_GRACE_MS && !alreadyNotified) {
           const elapsed = formatElapsedTime(latestReport.created_at);
           const body = `⚠️ ワーカー "${workerName}" は既に報告を投稿済み（投稿から ${elapsed} 経過）ですが、プロセス（PID ${entry.pid}）が生存しています。終了処理中・作業継続中・プロセスの終了漏れの可能性があります。この状態の間、新しい指示は配送されず待機し続けます。作業状況（未コミット変更・ログ等）を確認し、不要な残留プロセスの場合は終了してください。`;
           let notified = false;
@@ -1221,7 +1217,6 @@ module.exports = {
   _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
   // 実装を直接参照（テストが注入を戻す際の復元用。PR #251 の引数検証テストから使う）
   _notifyOrchestrator,
-  _setNotifySpawn: (fn) => { _notifySpawn = fn; },
   _setReadContract: (fn) => { _readContract = fn; },
   _setClearContract: (fn) => { _clearContract = fn; },
   _setCreateDeadManSwitch: (fn) => { _createDeadManSwitch = fn; },
