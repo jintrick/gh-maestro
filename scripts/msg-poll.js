@@ -36,7 +36,12 @@ const {
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
 const { acquireResidentLease, msgPollRole } = require('./shared/worker-lease');
-const { listUnprocessedResidentAuditEvents, removeResidentAuditEvent } = require('./shared/resident-audit');
+const {
+  listUnprocessedResidentAuditEvents,
+  removeResidentAuditEvent,
+  recordResidentNotification,
+  formatResidentNotification,
+} = require('./shared/resident-audit');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
 const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdog-exit-notify');
 const { handleParentSessionDeath } = require('./shared/resident-parent-death');
@@ -89,6 +94,9 @@ Output (stdout):
                           （常駐プロセスの role lease で起動が拒否された・引き継ぎ待機に
                           入った監査イベント。LOCK_DENIED の reason は live-lease または
                           handoff-timeout。各巡回で未処理分を処理済み化して出力する。
+                          GitHub への投稿は行わない）
+    orchestrator モード: RESIDENT_NOTIFICATION:<JSON>
+                          （常駐プロセスの内部通知。各巡回で未処理分を処理済み化して出力し、
                           GitHub への投稿は行わない）
   --watch-pid モード:    PID_DIED:<pid>（監視対象PIDの死亡を検知した1回のみ）
 
@@ -356,15 +364,11 @@ function main(argsOverride, opts = {}) {
   // orchestrator 自身は Issue を持たないため workers.json の先頭ワーカーを使う。
   const writeFailureMonitor = createWriteFailureMonitor({
     notify: ({ count, detail }) => {
-      const issue = resolveNotifyIssue();
-      const body = `⚠️ msg-poll の既読状態の書き込みが ${count} 回連続で失敗しています（他プロセスが msg-state を掴んでいる可能性）。最新のエラー: ${detail}`;
-      if (!issue) {
-        writeErr(`msg-poll: 書き込み連続失敗の警告を送信できません（送信先Issueがありません）: ${body}`);
-        return;
-      }
+    const issue = resolveNotifyIssue();
+    const body = `⚠️ msg-poll の既読状態の書き込みが ${count} 回連続で失敗しています（他プロセスが msg-state を掴んでいる可能性）。最新のエラー: ${detail}`;
       let res;
       try {
-        res = _notifyOrchestrator({ workspace, issue, body });
+        res = _notifyOrchestrator({ workspace, issue, body, isOrchestrator });
       } catch (e) {
         writeErr(`msg-poll: 書き込み連続失敗の警告の送信に失敗: ${e.message}`);
         return;
@@ -514,12 +518,22 @@ function main(argsOverride, opts = {}) {
       try {
         const events = listUnprocessedResidentAuditEvents(workspace);
         for (const { file, event } of events) {
-          const eventType = event.type === 'lock-denied' ? 'LOCK_DENIED' : 'HANDOFF_WAIT';
-          const ownerPid = event.detail && event.detail.ownerPid != null ? `:${event.detail.ownerPid}` : '';
-          const reason = eventType === 'LOCK_DENIED' && event.detail && event.detail.reason
-            ? `:${event.detail.reason}`
-            : '';
-          writeOut(`${eventType}:${event.role}${ownerPid}${reason}`);
+          let line;
+          if (event.type === 'lock-denied' || event.type === 'handoff-wait') {
+            const eventType = event.type === 'lock-denied' ? 'LOCK_DENIED' : 'HANDOFF_WAIT';
+            const ownerPid = event.detail && event.detail.ownerPid != null ? `:${event.detail.ownerPid}` : '';
+            const reason = eventType === 'LOCK_DENIED' && event.detail && event.detail.reason
+              ? `:${event.detail.reason}`
+              : '';
+            line = `${eventType}:${event.role}${ownerPid}${reason}`;
+          } else if (event.type === 'notification'
+            && event.detail && typeof event.detail.body === 'string'
+            && typeof event.role === 'string' && event.role) {
+            line = formatResidentNotification(event.role, event.detail.body);
+          } else {
+            throw new Error(`未知の監査イベント種別です: ${event.type}`);
+          }
+          writeOut(line);
           removeResidentAuditEvent(workspace, file);
         }
       } catch (e) {
@@ -792,21 +806,15 @@ function main(argsOverride, opts = {}) {
 
 // ── --wait モード ────────────────────────────────────────────────────────
 
-// orchestrator への書き込み連続失敗の警告（Issue #250）。テストで注入可能。
-// inbox-supervisor.js の _notifyOrchestrator と同型。msg-send.js は本文を位置引数で
-// 受け付けない（--stdin / --body-file のみ）ため、spawnSync の input で stdin 経由に渡す。
-let _notifySpawn = spawnSync;
-let _notifyOrchestrator = ({ workspace, issue, body }) => {
-  // 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
-  // 省略すると recipient が undefined になり usage エラーで必ず送信失敗する（PR #251 レビュー指摘）。
-  return _notifySpawn(process.execPath, [
-    path.join(__dirname, 'msg-send.js'),
-    'orchestrator',
-    '--stdin',
-    '--from', 'msg-poll',
-    '--issue', issue,
-    '--workspace', workspace,
-  ], { encoding: 'utf8', input: body });
+// msg-poll自身の内部通知。orchestratorモードのstdoutはMonitorへ届くが、workerモードの
+// stdoutはorchestratorへ接続されていないため、workerモードはresident-auditへ記録する。
+let _notifyOrchestrator = ({ workspace, issue, body, isOrchestrator = false }) => {
+  if (isOrchestrator) {
+    process.stdout.write(`${formatResidentNotification('msg-poll', body)}\n`);
+  } else {
+    recordResidentNotification({ workspace, source: 'msg-poll', issue, body });
+  }
+  return { status: 0, stdout: '', stderr: '' };
 };
 
 let _sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -942,7 +950,14 @@ if (require.main === module) {
   // 推測フォールバックに落とすと、別 Issue へ誤配送されたり宛先不明で破棄されたりして
   // 監視停止が待機側へ届かない（Issue #289 レビュー指摘）。orchestrator 専用モードなど
   // Issue が本当に無い場合だけ、ヘルパー側のフォールバックが使われる。
-  process.on('exit', () => { notifyWatchdogExit({ workspace: result.workspace, scriptName: 'msg-poll.js', issue: result.issueArg }); });
+  process.on('exit', () => {
+    notifyWatchdogExit({
+      workspace: result.workspace,
+      scriptName: 'msg-poll.js',
+      issue: result.issueArg,
+      isOrchestrator: result.self === 'orchestrator',
+    });
+  });
 
   // ── PID registry に自己登録（継続モード・--wait モード） ────────────
   // worker モードの場合は workerName を含めて登録する。
@@ -1000,7 +1015,6 @@ module.exports = {
   _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
   // 実装を直接参照（テストが注入を戻す際の復元用。PR #251 の引数検証テストから使う）
   _notifyOrchestrator,
-  _setNotifySpawn: (fn) => { _notifySpawn = fn; },
   _setCreateDeadManSwitch: (fn) => { _createDeadManSwitch = fn; },
   _setParentDeathExit: (fn) => { _parentDeathExit = fn; },
   main,
