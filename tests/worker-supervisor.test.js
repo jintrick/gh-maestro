@@ -13,6 +13,10 @@ const workerLease = require('../scripts/shared/worker-lease');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
 const residentAudit = require('../scripts/shared/resident-audit');
 
+// main() のセッションPID検証では起動時刻を省略し、WindowsのWMI起動を避ける。
+// 実起動時刻の一致そのものを検証するCLIケースは下流の実プロセス経路で維持する。
+supervisor._setGetProcessStartTime(() => null);
+
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
 // --session-pid を渡すため、テストでも常に自プロセスPIDを渡してこの探索を省く。

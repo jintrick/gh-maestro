@@ -63,6 +63,12 @@ const { runningLegacyWorkerSupervisorPids } = require('./shared/worker-superviso
 // テスト注入（test-process-spawn-safety ルール準拠）。既定は実装。
 let _createDeadManSwitch = createDeadManSwitch;
 let _parentDeathExit = (code) => process.exit(code);
+let _injectedGetProcessStartTime;
+
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime ?? getProcessStartTime;
+  return fn(pid);
+}
 
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // msg-poll.js のスキャンロジックを再利用（マーカーパースのみ）
@@ -684,7 +690,7 @@ function main(argsOverride, opts = {}) {
 
   // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
   // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
-  const expectedStartTime = getProcessStartTime(sessionPid);
+  const expectedStartTime = _getProcessStartTime(sessionPid);
   const checkParent = _createDeadManSwitch(sessionPid, { expectedStartTime });
 
   // リポジトリ解決
@@ -1249,6 +1255,7 @@ if (require.main === module) {
 // ── テスト用 export ──────────────────────────────────────────────────────
 
 module.exports = {
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setIsWorkerAlive: (fn) => { _isWorkerAlive = fn; },

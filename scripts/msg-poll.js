@@ -49,6 +49,12 @@ const { handleParentSessionDeath } = require('./shared/resident-parent-death');
 // テスト注入（test-process-spawn-safety ルール準拠）。既定は実装。
 let _createDeadManSwitch = createDeadManSwitch;
 let _parentDeathExit = (code) => process.exit(code);
+let _injectedGetProcessStartTime;
+
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime ?? getProcessStartTime;
+  return fn(pid);
+}
 
 const DEFAULT_INTERVAL_SEC = 20;
 const MARKER_RE = /^<!--\s*gh-maestro\s+(\{.*\})\s*-->/;
@@ -399,7 +405,7 @@ function main(argsOverride, opts = {}) {
 
   // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
   // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
-  const expectedStartTime = getProcessStartTime(sessionPid);
+  const expectedStartTime = _getProcessStartTime(sessionPid);
 
   // ── 常駐プロセス用 role lease（Issue #240） ───────────────────────────
   // 継続モード・--wait モードのみ排他する（--once は読み取り専用の一回実行のため）。
@@ -879,7 +885,7 @@ if (require.main === module) {
     // 追いかけ続けることを防ぐ。実体が消えた場合は3周回連続で確認してから通知する
     // （一過性の誤検出で PID_DIED を出さない。false positive は orchestrator の再起動を
     // 誘導するため、通知は遅くても正しく倒す）。
-    const watchStartTime = getProcessStartTime(watchPid);
+    const watchStartTime = _getProcessStartTime(watchPid);
     const checkWatchedPid = _createDeadManSwitch(watchPid, { expectedStartTime: watchStartTime });
     const emitWatchResult = () => {
       if (!checkWatchedPid()) {
@@ -1009,6 +1015,7 @@ if (require.main === module) {
 // ── テスト用 export ──────────────────────────────────────────────────────
 
 module.exports = {
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setSleep: (fn) => { _sleep = fn; },

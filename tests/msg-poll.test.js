@@ -13,6 +13,9 @@ const { cleanSpawnEnv } = require('./_spawn-env');
 const workerLease = require('../scripts/shared/worker-lease');
 
 workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+// main() のセッションPID検証では起動時刻を省略し、WindowsのWMI起動を避ける。
+// 実起動時刻の一致そのものを検証するCLIケースは下流の実プロセス経路で維持する。
+msgPoll._setGetProcessStartTime(() => null);
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
