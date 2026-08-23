@@ -35,6 +35,20 @@ const {
   createResidentLeaseStore,
 } = require('./worker-lease');
 
+// migrate-records.js keeps the old scope as a source-layout compatibility
+// alias, while the public name is canonical.  Keep this mapping here so the
+// CLI validation and process-control decision cannot drift apart.
+const WORKER_SUPERVISOR_MIGRATION_SCOPE = 'worker-supervisor';
+const LEGACY_INBOX_SUPERVISOR_MIGRATION_SCOPE = 'inbox-supervisor';
+const SUPERVISOR_MIGRATION_SCOPES = Object.freeze([
+  WORKER_SUPERVISOR_MIGRATION_SCOPE,
+  LEGACY_INBOX_SUPERVISOR_MIGRATION_SCOPE,
+]);
+
+function isWorkerSupervisorMigrationScope(scope) {
+  return SUPERVISOR_MIGRATION_SCOPES.includes(scope);
+}
+
 // process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。CLI 主経路
 // （require.main === module）から sweepRegistry 経由でこのモジュールが require される
 // 可能性を踏まえ、評価時に捕捉すると module.exports 未確定の undefined を掴むため、
@@ -125,6 +139,10 @@ function stopRunningWorkerSupervisors(workspace) {
 }
 
 module.exports = {
+  WORKER_SUPERVISOR_MIGRATION_SCOPE,
+  LEGACY_INBOX_SUPERVISOR_MIGRATION_SCOPE,
+  SUPERVISOR_MIGRATION_SCOPES,
+  isWorkerSupervisorMigrationScope,
   runningWorkerSupervisorPids,
   runningLegacyWorkerSupervisorPids,
   stopRunningWorkerSupervisors,

@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const migrateRecords = require('../scripts/migrate-records');
+const workerSupervisor = require('../scripts/worker-supervisor');
 const { planMigration } = migrateRecords;
 const inboxSupervisorControl = require('../scripts/shared/worker-supervisor-control');
 const { findRunningInstance } = require('../scripts/process-lifecycle');
@@ -107,7 +108,30 @@ test('migration classifies inbox-supervisor cursors vs contracts by their direct
   const oldContract = path.join(dir, '.gh-maestro', 'inbox-supervisor', 'contracts', 'issue-5-coder-fix.json');
   fs.mkdirSync(path.dirname(oldCursor), { recursive: true });
   fs.mkdirSync(path.dirname(oldContract), { recursive: true });
-  fs.writeFileSync(oldCursor, '{"cursor":1}');
+  const cursorState = {
+    since: '2026-08-23T01:00:00.000Z',
+    seenIds: [101, 102],
+    deliveredIds: [100],
+    pendingDeliveries: {
+      '103': {
+        retries: 1,
+        lastAttempt: '2026-08-23T01:01:00.000Z',
+        lastError: 'resume-failed',
+        lastMethod: 'resume-failed',
+        lastBody: 'undelivered instruction',
+      },
+    },
+    hangNotifiedPid: 4242,
+    hangNotifiedStartTime: '2026-08-23T00:00:00.000Z',
+    hangNotifiedAt: '2026-08-23T01:02:00.000Z',
+    staleReportPendingPid: null,
+    staleReportPendingStartTime: null,
+    staleReportPendingCreatedAt: null,
+    staleReportNotifiedPid: null,
+    staleReportNotifiedStartTime: null,
+    staleReportNotifiedAt: null,
+  };
+  fs.writeFileSync(oldCursor, JSON.stringify(cursorState));
   fs.writeFileSync(oldContract, '{"contract":1}');
 
   const preview = planMigration(dir, 'inbox-supervisor', { dryRun: true });
@@ -123,6 +147,9 @@ test('migration classifies inbox-supervisor cursors vs contracts by their direct
   assert.equal(fs.existsSync(oldContract), false);
   assert.equal(fs.existsSync(path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-coder-fix', 'cursor.json')), true);
   assert.equal(fs.existsSync(path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-coder-fix', 'contract.json')), true);
+  const cursorDestination = path.join(dir, '.gh-maestro', 'records', 'issue', '5', 'workers', 'issue-5-coder-fix', 'cursor.json');
+  assert.deepEqual(JSON.parse(fs.readFileSync(cursorDestination, 'utf8')), cursorState);
+  assert.deepEqual(workerSupervisor.readCursor(dir, 'issue-5-coder-fix'), cursorState);
 });
 
 test('migration holds an assistant-watch record whose issue has a registered assistant（対話型assistantは強制終了しない）', () => {
@@ -162,6 +189,7 @@ test('migration moves an assistant-watch record when the assistant is not regist
 
 test('shouldControlInboxSupervisor: all / inbox-supervisor のみ制御対象', () => {
   assert.equal(migrateRecords.shouldControlInboxSupervisor('all'), true);
+  assert.equal(migrateRecords.shouldControlInboxSupervisor('worker-supervisor'), true);
   assert.equal(migrateRecords.shouldControlInboxSupervisor('inbox-supervisor'), true);
   assert.equal(migrateRecords.shouldControlInboxSupervisor('worker-log'), false);
   assert.equal(migrateRecords.shouldControlInboxSupervisor('review-manager'), false);
