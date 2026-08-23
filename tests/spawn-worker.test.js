@@ -6,7 +6,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'spawn-worker.js');
-const { shouldPruneStaleWorker, establishOrchestratorBaseline } = require(SCRIPT);
+const { shouldPruneStaleWorker, establishOrchestratorBaseline, parseWorkerArgs } = require(SCRIPT);
 const readStateLib = require('../scripts/shared/read-state');
 const fs = require('fs');
 const os = require('os');
@@ -16,6 +16,12 @@ function run(args, env = {}) {
     encoding: 'utf8',
     env: { ...process.env, ...env },
   });
+}
+
+function parseRejects(args, pattern) {
+  const result = parseWorkerArgs(args);
+  assert.ok(result.errors.length > 0, `expected parse error for ${args.join(' ')}`);
+  assert.match(result.errors.map(e => e.message).join('\n'), pattern);
 }
 
 // headless起動になったため WEZTERM_PANE は不要。引数バリデーションの検証には追加の環境変数は要らない。
@@ -69,15 +75,11 @@ test('shouldPruneStaleWorker: pidが無くagentIdも解決できなければ除�
 });
 
 test('--skill がないとエラー終了する', () => {
-  const r = run(['--issue', '1', '--description', 'test', '--repo', 'o/r'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /--skill/);
+  parseRejects(['--issue', '1', '--description', 'test', '--repo', 'o/r'], /--skill/);
 });
 
 test('--description がないとエラー終了する', () => {
-  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--repo', 'o/r'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /--description/);
+  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--repo', 'o/r'], /--description/);
 });
 
 // ── --description のバリデーション ────────────────────────────────────────────
@@ -88,28 +90,20 @@ test('--description がないとエラー終了する', () => {
 // git branch作成が壊れる等の危険があった。
 
 test('--description にパストラバーサル文字列(../)を含むとエラー終了する', () => {
-  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', '../../../etc', '--repo', 'o/r'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /--description/);
+  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', '../../../etc', '--repo', 'o/r'], /--description/);
 });
 
 test('--description にスラッシュを含むとエラー終了する', () => {
-  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'foo/bar', '--repo', 'o/r'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /--description/);
+  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'foo/bar', '--repo', 'o/r'], /--description/);
 });
 
 test('--description にスペースを含むとエラー終了する', () => {
-  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'foo bar', '--repo', 'o/r'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /--description/);
+  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'foo bar', '--repo', 'o/r'], /--description/);
 });
 
 test('--description が51文字以上だとエラー終了する', () => {
   const tooLong = 'a'.repeat(51);
-  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', tooLong, '--repo', 'o/r'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /--description/);
+  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', tooLong, '--repo', 'o/r'], /--description/);
 });
 
 test('--description の英数字・ハイフン・アンダースコアはバリデーションを通過する', () => {
@@ -125,33 +119,23 @@ test('--description の英数字・ハイフン・アンダースコアはバリ
 });
 
 test('--issue がないとエラー終了する', () => {
-  const r = run(['--skill', 'gh-maestro-coder', '--description', 'test', '--repo', 'o/r'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /--issue/);
+  parseRejects(['--skill', 'gh-maestro-coder', '--description', 'test', '--repo', 'o/r'], /--issue/);
 });
 
 test('--issue が非数値だとエラー終了する', () => {
-  const r = run(['--skill', 'gh-maestro-coder', '--issue', 'abc', '--description', 'test', '--repo', 'o/r'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /正の整数/);
+  parseRejects(['--skill', 'gh-maestro-coder', '--issue', 'abc', '--description', 'test', '--repo', 'o/r'], /正の整数/);
 });
 
 test('--issue が 0 だとエラー終了する', () => {
-  const r = run(['--skill', 'gh-maestro-coder', '--issue', '0', '--description', 'test', '--repo', 'o/r'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /正の整数/);
+  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '0', '--description', 'test', '--repo', 'o/r'], /正の整数/);
 });
 
 test('--issue が負数だとエラー終了する', () => {
-  const r = run(['--skill', 'gh-maestro-coder', '--issue', '-1', '--description', 'test', '--repo', 'o/r'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /正の整数/);
+  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '-1', '--description', 'test', '--repo', 'o/r'], /正の整数/);
 });
 
 test('--repo がないとエラー終了する', () => {
-  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'test'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /--repo/);
+  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'test'], /--repo/);
 });
 
 test('クローズ済みPRのブランチは新規起動せず、副作用も発生させない（実リポジトリ状態）', () => {
