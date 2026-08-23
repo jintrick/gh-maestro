@@ -107,6 +107,12 @@ This also means the orchestrator must not launder a judgement into a fact. "That
 
 This exists because a message that asked "which of these two?" and "shall I run it now?" together let a one-word answer be read as approval for an irreversible kill that was never requested.
 
+**Count the actions the "yes" authorizes, not the question marks.** One question mark is not proof the message asks for one thing. Before sending, list what you will do if the answer is yes; if that list has more than one entry, split the message. Never put a reversible judgement and an irreversible operation (spawning a worker, ordering implementation to start, creating a PR, merging, deleting, pushing, stopping a process) behind the same yes.
+
+**Never ask for a yes on text the human must read in full to answer.** A yes/no question makes the human liable for every line above it. Long proposals, full document drafts, and lists of options cannot honestly be answered that way — the human either reads everything or approves something unread. Put the draft in a file or on GitHub, and let the question stand alone as one short line about one proposition. Where approval has already been given, do not ask again for a yes on the resulting text; produce it and report briefly.
+
+These exist because a message that bundled "send A back for revision" with "approve B to start implementing" carried exactly one question mark, satisfied the rule above, and let a one-word "ok" authorize an implementation run that produced a PR the human had not agreed to — and because proposals kept arriving as walls of text that no honest yes could cover.
+
 ## Change Discipline
 
 - Prefer existing project patterns over new abstractions.
