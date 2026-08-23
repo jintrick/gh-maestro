@@ -1,7 +1,7 @@
 'use strict';
 // gh-create-pr.js
 // gh pr create のラッパー。baseブランチを環境変数 GH_MAESTRO_BASE_BRANCH から解決する
-// （ワーカー起動時に spawn-worker.js / inbox-supervisor.js が注入）。
+// （ワーカー起動時に spawn-worker.js / worker-supervisor.js が注入）。
 // git upstream tracking には依存しない。upstream はコーダーの標準的な `git push -u` で
 // 自ブランチへ書き換わるため、これに依存すると base==head でPR作成が壊れる（Issue #269）。
 // コーダーが --base を明示的に指定できず、誤ったbaseブランチでPRが作成されるのを防止する。
@@ -27,7 +27,7 @@ Arguments:
   --repo <owner/repo>       リポジトリ指定（省略可、git remoteから自動検出）
 
 baseブランチは環境変数 GH_MAESTRO_BASE_BRANCH から解決されます（ワーカー起動時に
-spawn-worker.js / inbox-supervisor.js が注入。未設定なら明確に失敗します）。
+spawn-worker.js / worker-supervisor.js が注入。未設定なら明確に失敗します）。
 --base フラグは受け付けません。
 
 Output:

@@ -2,7 +2,7 @@
 // worker-env.js — ワーカー起動時に注入する環境変数を組み立てる唯一の関数
 //
 // ワーカー識別（GH_MAESTRO_WORKER / GH_MAESTRO_WORKSPACE）は、初回起動（spawn-worker.js）と
-// resume配送（inbox-supervisor.js）の両方で注入される。これらは同じ値でなければならず、
+// resume配送（worker-supervisor.js）の両方で注入される。これらは同じ値でなければならず、
 // 片方だけにしか入らないと、resume後のワーカーが自分を識別できず msg-send.js を誤用する。
 //
 // GH_MAESTRO_BASE_BRANCH も同じ原則に従う。PR作成時（gh-create-pr.js）のベースブランチは
@@ -13,7 +13,7 @@
 //
 // 重要: 起動環境は launchAgentHeadless が `{ ...process.env, ...launchEnv }` として構築するため、
 // この返り値から「キーを省く」だけでは、親プロセスから継承した値（例: 報告のために msg-send.js
-// を呼んだワーカーの値が、その子として起動される inbox-supervisor 経由で混入する）を消せない。
+// を呼んだワーカーの値が、その子として起動される worker-supervisor 経由で混入する）を消せない。
 // そこで baseBranch 未指定時は明示的に空文字で上書きし、後段の gh-create-pr.js が
 // フェイルクローズするようにする（起動境界での除去 = マージ入力に含めることで除去を実現）。
 //

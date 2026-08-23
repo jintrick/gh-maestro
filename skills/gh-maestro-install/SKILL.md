@@ -14,7 +14,7 @@ gh-maestroのグローバルインストールを実行する。
 
 ## install後の常駐プロセス
 
-稼働中の常駐プロセス（`inbox-supervisor.js` / `msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）は
+稼働中の常駐プロセス（`worker-supervisor.js` / `msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）は
 起動時にロードしたJSを require キャッシュに保持し続ける。`install.js` はインストール完了後に
 配布済みの `restart-residents.js` を自動で呼び出し、必要な常駐を入れ替える。
 

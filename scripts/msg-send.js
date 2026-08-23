@@ -25,7 +25,7 @@ const { toWinPath } = require('./shared/win-path');
 const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 const { markCommentResult, readRegistry } = require('./shared/execution-registry');
 const { isRetryableGhFailure, graphqlAddComment } = require('./shared/gh-fallback');
-const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
+const { ensureWorkerSupervisorRunning } = require('./shared/ensure-worker-supervisor');
 const { resolveWorkerName, readWorkersRaw } = require('./shared/workers-registry');
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
@@ -74,7 +74,7 @@ Output (stdout):
   投稿されたコメントの URL を1行出力
 
 コンテキスト判定: GH_MAESTRO_WORKER 環境変数の値（ワーカー名か orchestrator/human か）で判別する
-  （spawn-worker.js / inbox-supervisor.js が起動時にワーカーへ注入し、orchestrator は orchestrator を名乗る）。
+  （spawn-worker.js / worker-supervisor.js が起動時にワーカーへ注入し、orchestrator は orchestrator を名乗る）。
 workspace 解決順: --workspace 引数 > GH_MAESTRO_WORKSPACE env > CWD から上方探索
 
 拒否ガード（orchestrator からワーカー宛ての送信のみ）: 宛先ワーカーが稼働中（作業中）で、
@@ -82,7 +82,7 @@ workspace 解決順: --workspace 引数 > GH_MAESTRO_WORKSPACE env > CWD から�
   一切投稿せず、その場で送信を拒否し code 1 で理由を返す。送ろうとした本文は /tmp 配下へ
   退避され、そのパスが拒否メッセージに含まれる。判定に必要な事実（起動時刻・GitHub APIの
   応答）を確認できない場合は拒否せず通す（フェイルオープン。通常どおり休止待ちキューへ積む）。
-  既に報告済みのまま稼働中（居座り）の場合も拒否しない（inbox-supervisor が異常として通知する）。`;
+  既に報告済みのまま稼働中（居座り）の場合も拒否しない（worker-supervisor が異常として通知する）。`;
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -183,7 +183,7 @@ function buildBusyRejectionMessage({ workerName, entry, issue, draftPath }) {
  * 「作業中に思いついた追伸」を無条件にキューへ積むと、送り手はそれが届いていないことに
  * 気づけない。相手が休止中（isWorkerAlive===false）なら通常どおり配送経路（resume）に
  * 任せるためここでは何もしない。相手が生存中でも、既に報告済みなら「居座り」であり
- * 送り手の誤りではないため拒否しない（inbox-supervisor が異常として通知する）。
+ * 送り手の誤りではないため拒否しない（worker-supervisor が異常として通知する）。
  *
  * 判定に必要な事実（起動時刻・報告コメントの有無）を確認できない場合は拒否せず通す
  * （フェイルオープン）。ここで通しても起きるのは「メッセージが休止待ちキューへ積まれ、
@@ -192,7 +192,7 @@ function buildBusyRejectionMessage({ workerName, entry, issue, draftPath }) {
  * エントリには恒久的に送信不能になる——主要ワークフローが止まる方が損害が大きい。
  * `.claude/rules/fail-closed-safety-guards.md` は「通すと損害が出るガード」に適用するもので
  * あり、本件はその前提を満たさない。「報告が届かないまま誰も気づけない」という本Issueの
- * 核心は、この送信ガードではなく inbox-supervisor 側の居座り通知（STALE_REPORT_DETECTED）
+ * 核心は、この送信ガードではなく worker-supervisor 側の居座り通知（STALE_REPORT_DETECTED）
  * が担う。
  *
  * @param {object} params
@@ -470,7 +470,7 @@ function main(argsOverride, envOverride, ioOverride) {
   // ── 作業中で未報告のワーカーへの送信を拒否する（Issue #263） ────────────────
   // orchestrator コンテキスト（!isWorker）から「ワーカー」宛て（recipient !== 'orchestrator'）
   // の送信にのみ適用する。ワーカー→orchestrator の報告（isWorker時は recipient が常に
-  // 'orchestrator' に固定される）、inbox-supervisor からの通知（recipient='orchestrator'
+  // 'orchestrator' に固定される）、worker-supervisor からの通知（recipient='orchestrator'
   // 固定）はこの条件に入らず影響を受けない。
   if (!isWorker && recipient !== 'orchestrator') {
     const rejectionMessage = checkWorkerBusyRejection({ workspace, workerName: recipient, repo, issue, ghOpts, body });
@@ -531,11 +531,11 @@ function main(argsOverride, envOverride, ioOverride) {
     }
   }
 
-  // --- inbox-supervisor.js の自動起動保証（best-effort） ---
+  // --- worker-supervisor.js の自動起動保証（best-effort） ---
   // ワーカー宛て送信時のみ。orchestratorが手動起動を忘れても配送経路が失われないようにする
-  // （ensure-inbox-supervisor.js 参照）。稼働中なら二重起動にはならない。
+  // （ensure-worker-supervisor.js 参照）。稼働中なら二重起動にはならない。
   if (recipient !== 'orchestrator') {
-    try { ensureInboxSupervisorRunning({ workspace, scriptsPath: __dirname }); } catch {}
+    try { ensureWorkerSupervisorRunning({ workspace, scriptsPath: __dirname }); } catch {}
   }
 
   writeOut(commentUrl);

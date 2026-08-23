@@ -336,7 +336,7 @@ function parseArgs(args) {
 // ── メインロジック ──────────────────────────────────────────────────────
 
 // orchestrator への書き込み連続失敗の警告（Issue #250）。テストで注入可能。
-// inbox-supervisor.js の _notifyOrchestrator と同型。msg-send.js は本文を位置引数で
+// worker-supervisor.js の _notifyOrchestrator と同型。msg-send.js は本文を位置引数で
 // 受け付けない（--stdin / --body-file のみ）ため、spawnSync の input で stdin 経由に渡す。
 let _notifySpawn = spawnSync;
 let _notifyOrchestrator = ({ workspace, issue, body }) => {

@@ -13,7 +13,7 @@ const processLifecycle = require('../scripts/process-lifecycle');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
 
 // 稼働中ワーカーへの拒否ガード（Issue #263）のテストは worker-liveness を直接モックする。
-// msg-send.js は inbox-supervisor.js のような独自の注入ポイントを持たず、実体（シングルトン
+// msg-send.js は worker-supervisor.js のような独自の注入ポイントを持たず、実体（シングルトン
 // モジュール）を直接呼ぶため、実体側のセッターで差し替える（tests/worker-liveness.test.js と
 // 同じパターン）。実プロセスには一切触れない（.claude/rules/test-process-spawn-safety.md）。
 afterEach(() => {
@@ -22,17 +22,17 @@ afterEach(() => {
   closedPrGuard._setListFn(() => ({ status: 0, stdout: '[]', stderr: '' }));
 });
 
-// msg-send.js は成功時にensureInboxSupervisorRunning()を呼ぶ（best-effort）。
+// msg-send.js は成功時にensureWorkerSupervisorRunning()を呼ぶ（best-effort）。
 // テストでは実プロセスをspawnせず外部照会も行わないようモックする（test-process-spawn-safety参照）。
-const ensureInboxSupervisor = require('../scripts/shared/ensure-inbox-supervisor');
-ensureInboxSupervisor._setSpawn(() => {
+const ensureWorkerSupervisor = require('../scripts/shared/ensure-worker-supervisor');
+ensureWorkerSupervisor._setSpawn(() => {
   const child = new EventEmitter();
   child.unref = () => {};
   return child;
 });
-ensureInboxSupervisor._setFindRunningInstance(() => null);
-ensureInboxSupervisor._setIsResidentLeaseLive(() => false);
-ensureInboxSupervisor._setFindSessionRootPid(() => 12345);
+ensureWorkerSupervisor._setFindRunningInstance(() => null);
+ensureWorkerSupervisor._setIsResidentLeaseLive(() => false);
+ensureWorkerSupervisor._setFindSessionRootPid(() => 12345);
 closedPrGuard._setListFn(() => ({ status: 0, stdout: '[]', stderr: '' }));
 
 

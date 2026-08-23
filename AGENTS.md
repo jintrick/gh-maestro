@@ -103,7 +103,7 @@ This also means the orchestrator must not launder a judgement into a fact. "That
 
 ## Asking The Human
 
-**Never put two questions in one message.** Exactly one question may appear at the end of a message, and never more. Approval for an irreversible action must stand alone — never in the same message as options, explanations, or another question. Get the answer to the options first, then ask for approval naming the target and the operation explicitly ("Stop inbox-supervisor (PID 22040)?"). A short reply — a number, "that one", "yes" — counts as approval only when exactly one question preceded it; if there were two, ask which one it answered.
+**Never put two questions in one message.** Exactly one question may appear at the end of a message, and never more. Approval for an irreversible action must stand alone — never in the same message as options, explanations, or another question. Get the answer to the options first, then ask for approval naming the target and the operation explicitly ("Stop worker-supervisor (PID 22040)?"). A short reply — a number, "that one", "yes" — counts as approval only when exactly one question preceded it; if there were two, ask which one it answered.
 
 This exists because a message that asked "which of these two?" and "shall I run it now?" together let a one-word answer be read as approval for an irreversible kill that was never requested.
 

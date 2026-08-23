@@ -4,7 +4,7 @@
 // dead-man's switch が親セッションの死を検出したとき、常駐プロセスが終了前に
 // 実行する共通処理。
 //
-// 呼び出し元（msg-poll.js / inbox-supervisor.js）は、scanOnce / runOnce 内で
+// 呼び出し元（msg-poll.js / worker-supervisor.js）は、scanOnce / runOnce 内で
 // checkParent() が false を返したとき次の順で処理する:
 //   1. lifecycleCleanup(workspace)           — PID registry からの解除
 //   2. handleParentSessionDeath(...)          — role lease 解放 + stderr に理由出力

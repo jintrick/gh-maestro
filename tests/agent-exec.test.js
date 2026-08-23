@@ -312,7 +312,7 @@ test('buildLoginShellExecArgs: Unix の終了フックがresume時の7引数と�
   }
 
   // 7個の onExit.args: bash -c の仕組み3個（-c/script/hook-shim）+
-  // resumeデータ4個（ws/execId/logPath/sinceTimestamp ≒ inbox-supervisor.js）
+  // resumeデータ4個（ws/execId/logPath/sinceTimestamp ≒ worker-supervisor.js）
   const hook = {
     command: 'bash',
     args: [

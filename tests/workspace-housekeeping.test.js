@@ -114,14 +114,14 @@ test('sweepWorkspaceFiles: 保護されないログでも圧縮は行われな�
   }
 });
 
-// ── Issue #248 項目5: inbox-supervisor-autostart.log の世代ローテーション ─────
+// ── Issue #248 項目5: worker-supervisor-autostart.log の世代ローテーション ─────
 
-test('sweepWorkspaceFiles: 肥大した inbox-supervisor-autostart.log を世代ローテーションする', () => {
+test('sweepWorkspaceFiles: 肥大した worker-supervisor-autostart.log を世代ローテーションする', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-housekeeping-'));
   try {
     const maestro = path.join(workspace, '.gh-maestro');
     fs.mkdirSync(maestro, { recursive: true });
-    const autostart = path.join(maestro, 'inbox-supervisor-autostart.log');
+    const autostart = path.join(maestro, 'worker-supervisor-autostart.log');
     fs.writeFileSync(autostart, 'y'.repeat(MAX_WORKER_LOG_BYTES + 1));
     const result = sweepWorkspaceFiles(workspace);
     assert.ok(result.rotated.includes(autostart));
@@ -132,12 +132,12 @@ test('sweepWorkspaceFiles: 肥大した inbox-supervisor-autostart.log を世代
   }
 });
 
-test('sweepWorkspaceFiles: 小さな inbox-supervisor-autostart.log はローテーションされない', () => {
+test('sweepWorkspaceFiles: 小さな worker-supervisor-autostart.log はローテーションされない', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-housekeeping-'));
   try {
     const maestro = path.join(workspace, '.gh-maestro');
     fs.mkdirSync(maestro, { recursive: true });
-    const autostart = path.join(maestro, 'inbox-supervisor-autostart.log');
+    const autostart = path.join(maestro, 'worker-supervisor-autostart.log');
     fs.writeFileSync(autostart, 'small');
     const result = sweepWorkspaceFiles(workspace);
     assert.ok(!result.rotated.includes(autostart));

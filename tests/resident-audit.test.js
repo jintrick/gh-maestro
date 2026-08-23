@@ -27,11 +27,11 @@ function withTempDir(fn) {
 
 test('recordResidentAuditEvent: 1イベント1ファイルをworkspace runtimeへ同期記録する', () => {
   withTempDir(workspace => {
-    const file = audit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'inbox-supervisor', detail: { ownerPid: 1 } });
+    const file = audit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'worker-supervisor', detail: { ownerPid: 1 } });
     const event = JSON.parse(fs.readFileSync(file, 'utf8'));
     assert.equal(event.schemaVersion, 1);
     assert.equal(event.type, 'lock-denied');
-    assert.equal(event.role, 'inbox-supervisor');
+    assert.equal(event.role, 'worker-supervisor');
     assert.equal(event.detail.ownerPid, 1);
     assert.ok(event.createdAt);
 
@@ -50,13 +50,13 @@ test('recordResidentNotification: 本文と送信元を監査イベントへ記�
   withTempDir(workspace => {
     const file = audit.recordResidentNotification({
       workspace,
-      source: 'inbox-supervisor',
+      source: 'worker-supervisor',
       issue: 42,
       body: '内部エラー\n詳細',
     });
     const event = JSON.parse(fs.readFileSync(file, 'utf8'));
     assert.equal(event.type, 'notification');
-    assert.equal(event.role, 'inbox-supervisor');
+    assert.equal(event.role, 'worker-supervisor');
     assert.deepEqual(event.detail, { issue: '42', body: '内部エラー\n詳細' });
   });
 });
@@ -64,7 +64,7 @@ test('recordResidentNotification: 本文と送信元を監査イベントへ記�
 test('recordResidentNotification: 本文が空なら記録しない', () => {
   withTempDir(workspace => {
     assert.throws(
-      () => audit.recordResidentNotification({ workspace, source: 'inbox-supervisor', body: '' }),
+      () => audit.recordResidentNotification({ workspace, source: 'worker-supervisor', body: '' }),
       /通知本文が必要/
     );
     assert.deepEqual(audit.listUnprocessedResidentAuditEvents(workspace), []);
@@ -74,7 +74,7 @@ test('recordResidentNotification: 本文が空なら記録しない', () => {
 test('recordResidentAuditEvent: 未知のイベント種別は fail closed で throw する', () => {
   withTempDir(workspace => {
     assert.throws(
-      () => audit.recordResidentAuditEvent({ workspace, type: 'mystery', role: 'inbox-supervisor' }),
+      () => audit.recordResidentAuditEvent({ workspace, type: 'mystery', role: 'worker-supervisor' }),
       /未知のイベント種別/
     );
   });
@@ -83,7 +83,7 @@ test('recordResidentAuditEvent: 未知のイベント種別は fail closed で t
 test('recordResidentAuditEvent: workspace がホームディレクトリに解決される場合は throw する（fail closed）', () => {
   // assertValidWorkspace が home 衝突を検知して throw する
   assert.throws(
-    () => audit.recordResidentAuditEvent({ workspace: os.homedir(), type: 'lock-denied', role: 'inbox-supervisor' }),
+    () => audit.recordResidentAuditEvent({ workspace: os.homedir(), type: 'lock-denied', role: 'worker-supervisor' }),
     /assertValidWorkspace/
   );
 });

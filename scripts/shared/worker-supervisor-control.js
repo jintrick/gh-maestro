@@ -1,15 +1,15 @@
 'use strict';
-// inbox-supervisor-control.js — 稼働中の inbox-supervisor の検知・停止。
+// worker-supervisor-control.js — 稼働中の worker-supervisor の検知・停止。
 //
-// migrate-records.js が `--scope inbox-supervisor`（または all）で記録を移行する際、
-// 既に稼働中の inbox-supervisor が移行対象の記録を書き続けないよう、ツール自身が
+// migrate-records.js が `--scope worker-supervisor`（または all）で記録を移行する際、
+// 既に稼働中の worker-supervisor が移行対象の記録を書き続けないよう、ツール自身が
 // プロセスを検知して停止するために使う（Issue #256）。停止後はマーカー
-// （migration-marker.js）で自動起動を抑制し、移行完了後に削除する。inbox-supervisor の
-// 再開は既存の自動起動機構（ensure-inbox-supervisor.js）が次の必要時に引き受ける。
+// （migration-marker.js）で自動起動を抑制し、移行完了後に削除する。worker-supervisor の
+// 再開は既存の自動起動機構（ensure-worker-supervisor.js）が次の必要時に引き受ける。
 //
 // 検知は2つの既存機構を併用する:
 //   - PID registry: process-lifecycle.js::findRunningInstance
-//     （inbox-supervisor.js が起動時に registerProcess で自己登録する）
+//     （worker-supervisor.js が起動時に registerProcess で自己登録する）
 //   - role lease（排他の正本、Issue #240）: worker-lease.js
 //     （acquireResidentLease で取得。プロセスが死ねば isLeaseLive が false になるため、
 //       stale lease を誤って kill 対象にすることはない）
@@ -28,7 +28,8 @@
 
 const { killProcessTree } = require('./kill-tree');
 const {
-  INBOX_SUPERVISOR_ROLE,
+  WORKER_SUPERVISOR_ROLE,
+  LEGACY_INBOX_SUPERVISOR_ROLE,
   roleLeaseKey,
   isLeaseLive,
   createResidentLeaseStore,
@@ -54,30 +55,33 @@ function isValidPid(pid) {
 }
 
 /**
- * 稼働中の inbox-supervisor の PID を検知する（registry と role lease の両方を参照、
+ * 稼働中の worker-supervisor の PID を検知する（registry と role lease の両方を参照、
  * 重複排除済み）。検知不能・検知失敗時は空配列を返す（fail-open）。
  *
  * @param {string} workspace
  * @returns {number[]}
  */
-function runningInboxSupervisorPids(workspace) {
+function runningPidsForScriptsAndRoles(workspace, scriptNames, roles) {
   const pids = new Set();
 
-  // PID registry。registerProcess で script='inbox-supervisor.js' / workerName=null として
-  // 登録される（ensure-inbox-supervisor.js の既存の稼働中判定と同条件）。
-  try {
-    const entry = _findRunningInstance(workspace, { script: 'inbox-supervisor.js', workerName: null });
-    if (entry && isValidPid(entry.pid)) pids.add(entry.pid);
-  } catch {
-    // registry 読取失敗時は role lease 側で拾えれば拾う
+  // PID registry。旧script名も移行期間だけ union して読む。
+  for (const script of scriptNames) {
+    try {
+      const entry = _findRunningInstance(workspace, { script, workerName: null });
+      if (entry && isValidPid(entry.pid)) pids.add(entry.pid);
+    } catch {
+      // registry 読取失敗時は role lease 側で拾えれば拾う
+    }
   }
 
   // role lease（排他の正本）。isLeaseLive が startTime 照合まで行うため、PID 再利用や
   // 改ざんされた lease を停止対象にすることはない。
   try {
     const store = _createResidentLeaseStore(workspace);
-    const entry = store.read(roleLeaseKey(INBOX_SUPERVISOR_ROLE));
-    if (_isLeaseLive(entry) && isValidPid(entry.pid)) pids.add(entry.pid);
+    for (const role of roles) {
+      const entry = store.read(roleLeaseKey(role));
+      if (_isLeaseLive(entry) && isValidPid(entry.pid)) pids.add(entry.pid);
+    }
   } catch {
     // role lease 読取失敗時も停止対象なしとして続行
   }
@@ -85,15 +89,31 @@ function runningInboxSupervisorPids(workspace) {
   return [...pids];
 }
 
+function runningLegacyWorkerSupervisorPids(workspace) {
+  return runningPidsForScriptsAndRoles(
+    workspace,
+    ['inbox-supervisor.js'],
+    [LEGACY_INBOX_SUPERVISOR_ROLE],
+  );
+}
+
+function runningWorkerSupervisorPids(workspace) {
+  return runningPidsForScriptsAndRoles(
+    workspace,
+    ['worker-supervisor.js', 'inbox-supervisor.js'],
+    [WORKER_SUPERVISOR_ROLE, LEGACY_INBOX_SUPERVISOR_ROLE],
+  );
+}
+
 /**
- * 稼働中の inbox-supervisor を全て停止する。best-effort（個別の kill 失敗は無視）。
+ * 稼働中の worker-supervisor を全て停止する。best-effort（個別の kill 失敗は無視）。
  *
  * @param {string} workspace
  * @returns {number[]} 停止処理を行った PID の一覧
  */
-function stopRunningInboxSupervisors(workspace) {
+function stopRunningWorkerSupervisors(workspace) {
   const stopped = [];
-  for (const pid of runningInboxSupervisorPids(workspace)) {
+  for (const pid of runningWorkerSupervisorPids(workspace)) {
     try {
       _killProcessTree(pid);
       stopped.push(pid);
@@ -105,8 +125,12 @@ function stopRunningInboxSupervisors(workspace) {
 }
 
 module.exports = {
-  runningInboxSupervisorPids,
-  stopRunningInboxSupervisors,
+  runningWorkerSupervisorPids,
+  runningLegacyWorkerSupervisorPids,
+  stopRunningWorkerSupervisors,
+  // migrate-records.js の既存API名。移行処理を二重化せず既存契約を保つための別名。
+  runningInboxSupervisorPids: runningWorkerSupervisorPids,
+  stopRunningInboxSupervisors: stopRunningWorkerSupervisors,
   // テスト用注入（test-process-spawn-safety ルール準拠。実プロセスは起動・killしない）
   _setFindRunningInstance: (fn) => { _injectedFindRunningInstance = fn; },
   _setCreateResidentLeaseStore: (fn) => { _createResidentLeaseStore = fn; },

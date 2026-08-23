@@ -137,12 +137,12 @@ function sweepWorkspaceFiles(workspace, { excludedWorkerNames = new Set(), exclu
     }
   }
 
-  // inbox-supervisor-autostart.log は supervisor 起動時に stdout/stderr の向き先として
+  // worker-supervisor-autostart.log は supervisor 起動時に stdout/stderr の向き先として
   // 開かれ、無制限に肥大化しうる。worker-logs と同一の rotateLog（MAX_LOG_GENERATIONS=3）
   // でサイズ超過時に世代ローテーションする（Issue #248 項目5）。supervisor 稼働中は
   // ログfdが掴まれたままのため、Windows では rename が失敗し results.errors に記録される
   // が、非破壊の best-effort である。停止中（次回起動前）の sweep では確実に回転できる。
-  const autostartLog = path.join(maestro, 'inbox-supervisor-autostart.log');
+  const autostartLog = path.join(maestro, 'worker-supervisor-autostart.log');
   if (isRegularFile(autostartLog)) {
     try {
       if (fs.statSync(autostartLog).size > MAX_WORKER_LOG_BYTES) rotateLog(autostartLog, results, dryRun);

@@ -12,7 +12,7 @@
 //   - リース解放・アクティベート
 //
 // Phase 5（本ファイル、Issue #240）:
-//   - 常駐プロセス用 role lease（msg-poll.js / inbox-supervisor.js の多重起動を、
+//   - 常駐プロセス用 role lease（msg-poll.js / worker-supervisor.js の多重起動を、
 //     workspace 表記の差異に依存せず workspace の正規化 + 固定role で排他する）
 //   - 拒否・引き継ぎ（handoff）時の監査イベント記録（resident-audit.js）
 //
@@ -411,7 +411,7 @@ function activateLease(store, key, { pid, startTime }) {
 
 // ── 常駐プロセス用 role lease（Issue #240） ────────────────────────────────
 //
-// msg-poll.js / inbox-supervisor.js などの常駐プロセスは、固定の role 名を
+// msg-poll.js / worker-supervisor.js などの常駐プロセスは、固定の role 名を
 // リースキーとして workspace ごとに排他する。通常ワーカー lease と異なり
 // 起動元（launcher）がいないため、lease の PID/startTime は実際に稼働する
 // プロセス自身（= このコードを実行するプロセス）が記録する。
@@ -421,8 +421,13 @@ function activateLease(store, key, { pid, startTime }) {
 // storage-layout.js の canonicalWorkspace() で正規化する。createNormalWorkerStore は
 // 生の workspace 文字列でディレクトリを組むため、この層で必ず正規化してから渡す。
 
-/** inbox-supervisor.js の固定 role 名。 */
-const INBOX_SUPERVISOR_ROLE = 'inbox-supervisor';
+/** worker-supervisor.js の固定 role 名。 */
+const WORKER_SUPERVISOR_ROLE = 'worker-supervisor';
+
+// Upgrade bridge for processes started before the rename.  This role is read
+// only by the compatibility checks; new processes always acquire the
+// WORKER_SUPERVISOR_ROLE lease.
+const LEGACY_INBOX_SUPERVISOR_ROLE = 'inbox-supervisor';
 
 /**
  * msg-poll の role lease 名（msgpoll-<self>）を組み立てる。
@@ -449,7 +454,7 @@ const INVALID_PATH_CHAR_RE = /[/\\:*?"<>|\x00-\x1f]/g;
 /**
  * 固定 role から role lease のリースキーを生成する。
  *
- * role は内部定数（inbox-supervisor, msgpoll-<self>）由来のため通常は安全だが、
+ * role は内部定数（worker-supervisor, msgpoll-<self>）由来のため通常は安全だが、
  * Windows パスに使えない文字を置換して、store のファイル名として常に安全にする。
  *
  * @param {string} role
@@ -478,7 +483,7 @@ function createResidentLeaseStore(workspace) {
 /**
  * 指定 role の lease が live（生存プロセスが保持）か確認する。
  *
- * ensure-inbox-supervisor.js などが registry とは独立に二重起動を事前検知するための
+ * ensure-worker-supervisor.js などが registry とは独立に二重起動を事前検知するための
  * 読み取り専用チェック。書き込みはしない。
  *
  * @param {object} opt
@@ -636,7 +641,8 @@ module.exports = {
   activateLease,
   isLeaseLive,
   // 常駐プロセス用 role lease（Issue #240）
-  INBOX_SUPERVISOR_ROLE,
+  WORKER_SUPERVISOR_ROLE,
+  LEGACY_INBOX_SUPERVISOR_ROLE,
   MSGPOLL_ORCHESTRATOR_ROLE,
   msgPollRole,
   roleLeaseKey,

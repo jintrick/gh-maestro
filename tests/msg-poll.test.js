@@ -698,7 +698,7 @@ test('orchestrator モード: 未処理の lock-denied/handoff-wait 監査イベ
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
 
     const residentAudit = require('../scripts/shared/resident-audit');
-    residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'inbox-supervisor', detail: { ownerPid: 111, reason: 'live-lease' } });
+    residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'worker-supervisor', detail: { ownerPid: 111, reason: 'live-lease' } });
     residentAudit.recordResidentAuditEvent({ workspace, type: 'handoff-wait', role: 'msgpoll-orchestrator', detail: { ownerPid: 222 } });
     residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'msgpoll-orchestrator', detail: { ownerPid: 333, reason: 'handoff-timeout' } });
 
@@ -708,7 +708,7 @@ test('orchestrator モード: 未処理の lock-denied/handoff-wait 監査イベ
     assert.equal(r.code, 0);
     r.scanOnce();
 
-    assert.ok(r.lines.includes('LOCK_DENIED:inbox-supervisor:111:live-lease'), `lines: ${JSON.stringify(r.lines)}`);
+    assert.ok(r.lines.includes('LOCK_DENIED:worker-supervisor:111:live-lease'), `lines: ${JSON.stringify(r.lines)}`);
     assert.ok(r.lines.includes('HANDOFF_WAIT:msgpoll-orchestrator:222'), `lines: ${JSON.stringify(r.lines)}`);
     assert.ok(r.lines.includes('LOCK_DENIED:msgpoll-orchestrator:333:handoff-timeout'), `lines: ${JSON.stringify(r.lines)}`);
     // 処理済み化（削除）されている
@@ -723,13 +723,13 @@ test('orchestrator モード: 監査イベントは ownerPid が無ければ rol
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
 
     const residentAudit = require('../scripts/shared/resident-audit');
-    residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'inbox-supervisor', detail: {} });
+    residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'worker-supervisor', detail: {} });
 
     const r = runMain(['orchestrator', '--workspace', workspace, '--wait', '30']);
     assert.equal(r.code, 0);
     r.scanOnce();
 
-    assert.ok(r.lines.includes('LOCK_DENIED:inbox-supervisor'), `lines: ${JSON.stringify(r.lines)}`);
+    assert.ok(r.lines.includes('LOCK_DENIED:worker-supervisor'), `lines: ${JSON.stringify(r.lines)}`);
   });
 });
 
@@ -742,7 +742,7 @@ test('orchestrator モード: 内部通知監査イベントを専用行で出�
     const residentAudit = require('../scripts/shared/resident-audit');
     residentAudit.recordResidentNotification({
       workspace,
-      source: 'inbox-supervisor',
+      source: 'worker-supervisor',
       issue: 5,
       body: '配送断念\n詳細',
     });
@@ -752,7 +752,7 @@ test('orchestrator モード: 内部通知監査イベントを専用行で出�
     r.scanOnce();
 
     assert.deepEqual(r.lines, [
-      'RESIDENT_NOTIFICATION:{"source":"inbox-supervisor","body":"配送断念\\n詳細"}',
+      'RESIDENT_NOTIFICATION:{"source":"worker-supervisor","body":"配送断念\\n詳細"}',
     ]);
     assert.deepEqual(residentAudit.listUnprocessedResidentAuditEvents(workspace), []);
   });
@@ -787,7 +787,7 @@ test('orchestrator モード: --wait の singleMessage 走査では監査行を�
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
 
     const residentAudit = require('../scripts/shared/resident-audit');
-    residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'inbox-supervisor', detail: { ownerPid: 111 } });
+    residentAudit.recordResidentAuditEvent({ workspace, type: 'lock-denied', role: 'worker-supervisor', detail: { ownerPid: 111 } });
 
     // --wait モードは監査行の出力を「新着検出」と誤判定しないよう出力しない
     const r = runMain(['orchestrator', '--workspace', workspace, '--wait', '30']);

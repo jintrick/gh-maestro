@@ -12,7 +12,7 @@ const { readWorkersRaw } = require('./shared/workers-registry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { getAssistant } = require('./shared/assistants-registry');
 const { markMigrationInProgress, clearMigrationInProgress } = require('./shared/migration-marker');
-const { runningInboxSupervisorPids, stopRunningInboxSupervisors } = require('./shared/inbox-supervisor-control');
+const { runningInboxSupervisorPids, stopRunningInboxSupervisors } = require('./shared/worker-supervisor-control');
 const {
   ARTIFACTS, assertWithinRoot, legacyWorkerOwner, recordPath, recordRoot,
 } = require('./shared/record-paths');

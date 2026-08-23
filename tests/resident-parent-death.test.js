@@ -82,7 +82,7 @@ test('handleParentSessionDeath: leaseが無い状態でも throw しない（bes
   const workspace = tmpWorkspace();
   assert.doesNotThrow(() => {
     captureStderr(() => {
-      handleParentSessionDeath({ workspace, scriptName: 'inbox-supervisor.js', role: 'inbox-supervisor', sessionPid: 5678 });
+      handleParentSessionDeath({ workspace, scriptName: 'worker-supervisor.js', role: 'worker-supervisor', sessionPid: 5678 });
     });
   });
   fs.rmSync(workspace, { recursive: true, force: true });

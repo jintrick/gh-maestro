@@ -42,7 +42,7 @@ const { killProcessTree } = require('./shared/kill-tree');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
-const { ensureInboxSupervisorRunning } = require('./shared/ensure-inbox-supervisor');
+const { ensureWorkerSupervisorRunning } = require('./shared/ensure-worker-supervisor');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
@@ -641,7 +641,7 @@ try {
     // msg-send.js は GH_MAESTRO_WORKER を見て自分がワーカーだと判定し、送信元を自動確定して
     // orchestrator 専用の宛先指定機構（--skill）を拒否する（成りすまし・誤配送の防止）。
     // GH_MAESTRO_BASE_BRANCH は PR作成時（gh-create-pr.js）のベースブランチ解決に使う
-    // （Issue #269）。resume配送（inbox-supervisor.js）も workers.json の baseBranch から
+    // （Issue #269）。resume配送（worker-supervisor.js）も workers.json の baseBranch から
     // 同じ値を注入するため、初回とresumeで env が一致する。
     env: buildWorkerEnv({ workerName, workspace, baseBranch }),
     // 全ワーカーに終了フックを付ける。非ゼロ終了（起動失敗・クラッシュ）を orchestrator へ通知し、
@@ -679,7 +679,7 @@ try {
     agentId: agentConfig.id,
     issue,
     skill,
-    // resume配送（inbox-supervisor.js）が GH_MAESTRO_BASE_BRANCH として再注入できるよう、
+    // resume配送（worker-supervisor.js）が GH_MAESTRO_BASE_BRANCH として再注入できるよう、
     // ベースブランチをワーカーレコードに永続化する（Issue #269）。
     baseBranch,
   });
@@ -694,12 +694,12 @@ try {
   fail(`workers.json への書き込みに失敗しました: ${e.message}`);
 }
 
-// --- inbox-supervisor.js の自動起動保証（best-effort） ---
+// --- worker-supervisor.js の自動起動保証（best-effort） ---
 // エージェント種別を問わず毎回試みる。稼働中なら常駐プロセス自身のロックが検知して
-// 即exitするため二重起動にはならない（ensure-inbox-supervisor.js 参照）。orchestrator が
+// 即exitするため二重起動にはならない（ensure-worker-supervisor.js 参照）。orchestrator が
 // 手動起動を忘れても配送経路が失われないようにする。実起動は spawn を注入したテスト以外は
 // NODE_TEST_CONTEXT 検知で拒否されないため、spawn-worker.js はテスト側のモック注入で抑止する。
-ensureInboxSupervisorRunning({ workspace, scriptsPath: __dirname });
+ensureWorkerSupervisorRunning({ workspace, scriptsPath: __dirname });
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---
 console.log(workerName);

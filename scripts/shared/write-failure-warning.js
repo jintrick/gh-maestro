@@ -2,7 +2,7 @@
 // write-failure-warning.js — 常駐プロセスが状態ファイル書き込みに連続失敗したときに
 // 人間へ警告を送るための共有ヘルパー（Issue #250）。
 //
-// 常駐プロセス（msg-poll.js / inbox-supervisor.js / assistant-watch.js）は、他プロセスが
+// 常駐プロセス（msg-poll.js / worker-supervisor.js / assistant-watch.js）は、他プロセスが
 // 状態ファイルを掴んでいる等の理由で書き込みが失敗しても停止せず、次サイクルで再試行する
 // （atomic-write.js の短時間リトライが救えるのは一瞬の競合のみで、開きっぱなしの競合は
 // 呼び出し元の try-catch + 次サイクル再試行が受け止める）。しかし失敗が継続すると状態が

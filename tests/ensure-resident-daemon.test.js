@@ -187,9 +187,9 @@ test('ensureResidentDaemon: 判定失敗時はfail-openでspawnを試みる', ()
 });
 
 test('ensureResidentDaemon: 試行記録ファイルのパスが規則 .gh-maestro/<attemptName>-autostart-attempt.json と完全一致する', () => {
-  const p1 = autostartAttemptPath(workspace, 'inbox-supervisor');
+  const p1 = autostartAttemptPath(workspace, 'worker-supervisor');
   const p2 = autostartAttemptPath(workspace, 'custom-daemon');
-  assert.equal(p1, path.join(workspace, '.gh-maestro', 'inbox-supervisor-autostart-attempt.json'));
+  assert.equal(p1, path.join(workspace, '.gh-maestro', 'worker-supervisor-autostart-attempt.json'));
   assert.equal(p2, path.join(workspace, '.gh-maestro', 'custom-daemon-autostart-attempt.json'));
 });
 

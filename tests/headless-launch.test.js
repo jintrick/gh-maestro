@@ -183,7 +183,7 @@ test('launchAgentHeadless: 初回起動で base 未指定なら継承した GH_M
 });
 
 test('launchAgentHeadless: 初回起動で base 指定なら継承値を上書きして GH_MAESTRO_BASE_BRANCH に渡る', () => {
-  // 初回起動（spawn-worker.js）と resume配送（inbox-supervisor.js）で同じ buildWorkerEnv を
+  // 初回起動（spawn-worker.js）と resume配送（worker-supervisor.js）で同じ buildWorkerEnv を
   // 通すため、どちらの経路でも最終envに base が入る。親から継承した値（main）を指定値（dev）が
   // 上書きすることも最終的なspawn envで検証する。
   headlessLaunch._setSpawn(fakeSpawn());

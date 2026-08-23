@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 // watchdog-exit-notify.js
-// 監視プロセス（msg-poll.js / poll-pr.js / poll-reviews.js / inbox-supervisor.js）が
+// 監視プロセス（msg-poll.js / poll-pr.js / poll-reviews.js / worker-supervisor.js）が
 // 非ゼロ終了したとき、orchestrator へ終了を通知する共有ヘルパー。
 //
 // 各監視プロセスは process.on('exit') からこの関数を呼ぶ。best-effort であり、

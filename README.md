@@ -29,7 +29,7 @@ gh-maestro は **GitHub Issue のコメント** をメッセージバスとし�
 
 orchestrator の手順は Claude Code の **Monitor ツール**（バックグラウンドスクリプトの出力を通知として受け取る）と `TaskStop` を前提に組み立てられている。inbox 監視（`msg-poll.js`）・PR 監視（`poll-pr.js`）・ワーカーログの追尾がいずれもこれに依存するため、Monitor を持たないエージェントでは orchestrator を務められない。
 
-worker は Monitor を必要としない。orchestrator からの追加指示は `inbox-supervisor.js` がプロセスの再開（resume）として配送するため、worker 側はポーリングを一切行わない。したがって worker には agy / codex / reasonix を自由に割り当てられる（`skillAgentMap` 参照）。
+worker は Monitor を必要としない。orchestrator からの追加指示は `worker-supervisor.js` がプロセスの再開（resume）として配送するため、worker 側はポーリングを一切行わない。したがって worker には agy / codex / reasonix を自由に割り当てられる（`skillAgentMap` 参照）。
 
 ## インストール
 

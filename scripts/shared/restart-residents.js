@@ -10,7 +10,7 @@
 // いた場合は poll-reviews.js を単独で二重起動しない。msg-poll.js と poll-pr.js は
 // stdout が呼び出し元の Monitor へ届く契約を持つため、Monitor常駐3種はdetached
 // 起動せず、停止後にMonitorから同じ引数で張り直すコマンドを返す。Monitorを持たない
-// inbox-supervisorだけはdetachedで直接入れ替える。
+// worker-supervisorだけはdetachedで直接入れ替える。
 
 const fs = require('fs');
 const path = require('path');
@@ -25,11 +25,15 @@ const {
 } = require('../process-lifecycle');
 
 const RESIDENT_SPECS = Object.freeze([
-  Object.freeze({ script: 'inbox-supervisor.js', workerName: null, monitorRequired: false }),
+  Object.freeze({ script: 'worker-supervisor.js', workerName: null, monitorRequired: false }),
   Object.freeze({ script: 'msg-poll.js', workerName: null, monitorRequired: true }),
   Object.freeze({ script: 'poll-pr.js', workerName: null, monitorRequired: true }),
   Object.freeze({ script: 'poll-reviews.js', workerName: null, monitorRequired: true }),
 ]);
+
+const LEGACY_RESIDENT_SCRIPT_ALIASES = Object.freeze(new Map([
+  ['inbox-supervisor.js', 'worker-supervisor.js'],
+]));
 
 const DEFAULT_MAX_ATTEMPTS = 20;
 const DEFAULT_WAIT_MS = 100;
@@ -53,7 +57,8 @@ function createResidentRestartHooks() {
 }
 
 function specForScript(script) {
-  return RESIDENT_SPECS.find((spec) => spec.script === script) || null;
+  const canonicalScript = LEGACY_RESIDENT_SCRIPT_ALIASES.get(script) || script;
+  return RESIDENT_SPECS.find((spec) => spec.script === canonicalScript) || null;
 }
 
 function isResidentEntry(entry) {
@@ -95,10 +100,10 @@ function resolveResidentSessionPid(entry, spec, hooks, opts = {}) {
     } catch {}
   }
 
-  // inbox-supervisorの旧registryだけは、対象プロセスの親チェーンも解決できない
+  // worker-supervisorの旧registryだけは、対象プロセスの親チェーンも解決できない
   // 場合に限り従来のCLI親チェーンへフォールバックする。Monitor出力を持つ3種は
   // 使い捨てCLIに紐づけると寿命契約を壊すため、ここでは推測起動しない。
-  if (spec.script === 'inbox-supervisor.js') {
+  if (spec.script === 'worker-supervisor.js') {
     const fallback = opts.fallbackSessionPid
       ?? (typeof hooks.findSessionRootPid === 'function' ? hooks.findSessionRootPid() : null);
     if (isValidPid(fallback)) return { pid: fallback, source: 'restart-cli-parent-chain' };
@@ -163,7 +168,7 @@ function replaceSessionPid(args, sessionPid) {
 }
 
 function fallbackArgs(spec, workspace) {
-  if (spec.script === 'inbox-supervisor.js') return ['--workspace', workspace];
+  if (spec.script === 'worker-supervisor.js') return ['--workspace', workspace];
   if (spec.script === 'msg-poll.js') return ['orchestrator', '--workspace', workspace];
   return null;
 }
@@ -174,7 +179,7 @@ function fallbackArgs(spec, workspace) {
  * 既存プロセスの --session-pid は、restart CLIの親チェーンではなく、対象プロセスが
  * 実際に使っていた値を引き継ぐ。引数に無い場合も、停止前に対象プロセス自身の
  * 親チェーンから解決した値を使う。使い捨てrestart CLIの親チェーンをmsg-poll等へ
- * 渡すことはしない。inbox-supervisorだけは対象の親チェーンも解決できない旧形式に
+ * 渡すことはしない。worker-supervisorだけは対象の親チェーンも解決できない旧形式に
  * 限り、既存のCLI自動起動と同じ親チェーンをフォールバックに使う。
  */
 function buildRestartArgs(spec, entry, workspace, hooks, opts = {}) {
@@ -202,11 +207,11 @@ function buildRestartArgs(spec, entry, workspace, hooks, opts = {}) {
     sessionPidSource = entry.restartSessionPidSource || 'resident-parent-chain';
   }
 
-  if (!sessionPid && spec.script === 'inbox-supervisor.js') {
+  if (!sessionPid && spec.script === 'worker-supervisor.js') {
     const fallback = opts.fallbackSessionPid
       ?? (typeof hooks.findSessionRootPid === 'function' ? hooks.findSessionRootPid() : null);
     if (!isValidPid(fallback)) {
-      throw new Error('inbox-supervisor.js の --session-pid を親セッションから解決できません');
+      throw new Error('worker-supervisor.js の --session-pid を親セッションから解決できません');
     }
     sessionPid = fallback;
     sessionPidSource = 'restart-cli-parent-chain';

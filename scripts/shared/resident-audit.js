@@ -2,7 +2,7 @@
 // resident-audit.js — 常駐プロセスの排他制御（role lease）の監査イベント記録
 //
 // 責務:
-//   msg-poll.js / inbox-supervisor.js などの常駐プロセスが role lease の排他制御で
+//   msg-poll.js / worker-supervisor.js などの常駐プロセスが role lease の排他制御で
 //   「起動を拒否された（lock-denied）」「既存所有者の終了を待って引き継ぎに入った
 //   （handoff-wait）」場合に、その事実を workspace runtime の共通領域へ同期記録する。
 //
@@ -49,7 +49,7 @@ function auditDir(workspace) {
  * @param {object} opt
  * @param {string} opt.workspace ワークスペース絶対パス
  * @param {string} opt.type      EVENT_TYPES のいずれか
- * @param {string} opt.role      固定role名（例: inbox-supervisor, msgpoll-orchestrator）
+ * @param {string} opt.role      固定role名（例: worker-supervisor, msgpoll-orchestrator）
  * @param {object} [opt.detail]  監査に残す付加情報（ownerPid 等）
  * @returns {string} 書き込んだファイルの絶対パス
  * @throws {Error} 未知の種別 / workspace 検証失敗 / I/O失敗

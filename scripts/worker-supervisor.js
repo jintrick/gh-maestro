@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// inbox-supervisor.js — 全ワーカーのGitHub Issueインボックスを監視し、
+// worker-supervisor.js — 全ワーカーのGitHub Issueインボックスを監視し、
 // 新着メッセージを検出して各エージェントに配送する常駐プロセス
 //
 // Usage:
-//   node inbox-supervisor.js --workspace <path> [--interval <sec>] [--session-pid <pid>]
+//   node worker-supervisor.js --workspace <path> [--interval <sec>] [--session-pid <pid>]
 //
 // アーキテクチャ:
 //   - 各ワーカーのIssueをポーリングし、自分宛ての新着コメントを検出する
@@ -53,11 +53,12 @@ const {
   findRunningInstance,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
-const { acquireResidentLease, INBOX_SUPERVISOR_ROLE } = require('./shared/worker-lease');
+const { acquireResidentLease, WORKER_SUPERVISOR_ROLE } = require('./shared/worker-lease');
 const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdog-exit-notify');
 const { recordResidentNotification } = require('./shared/resident-audit');
 const { handleParentSessionDeath } = require('./shared/resident-parent-death');
 const { checkResidentForceGuard } = require('./shared/resident-force-guard');
+const { runningLegacyWorkerSupervisorPids } = require('./shared/worker-supervisor-control');
 
 // テスト注入（test-process-spawn-safety ルール準拠）。既定は実装。
 let _createDeadManSwitch = createDeadManSwitch;
@@ -87,9 +88,9 @@ const RETRY_BASE_DELAY_MS = 10000;
 const DEFAULT_HANG_THRESHOLD_MS = 20 * 60 * 1000; // 20分
 const STALE_REPORT_GRACE_MS = 10 * 1000;
 
-const USAGE = `inbox-supervisor.js — 全ワーカーのGitHub Issueインボックスを監視し新着メッセージを配送する
+const USAGE = `worker-supervisor.js — 全ワーカーのGitHub Issueインボックスを監視し新着メッセージを配送する
 
-Usage: node inbox-supervisor.js --workspace <path> [--interval <sec>] [--session-pid <pid>] [--force] [--once]
+Usage: node worker-supervisor.js --workspace <path> [--interval <sec>] [--session-pid <pid>] [--force] [--once]
 
 Options:
   --workspace <path>     ワークスペースパス（必須）
@@ -104,7 +105,7 @@ Options:
 
 Output (stdout):
   検出・配送イベントを1行ずつ出力:
-    SCAN_START source=inbox-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js
+    SCAN_START source=worker-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js
     DETECTED:<workerName>:<commentId>
     DELIVERED:<workerName>:<commentId>
     DELIVERY_FAILED:<workerName>:<commentId>:<reason>
@@ -112,13 +113,14 @@ Output (stdout):
     HANG_DETECTED:<workerName>:<pid> elapsed=<duration>
     HANG_RESUMED:<workerName>:<pid>
     STALE_REPORT_DETECTED:<workerName>:<pid> elapsed=<duration>
-    SCAN_END:<workers>:<detected> source=inbox-supervisor.js scope=worker-delivery-scan workers=<workers> detected=<detected> orchestrator-inbox=separate-msg-poll.js
+    SCAN_END:<workers>:<detected> source=worker-supervisor.js scope=worker-delivery-scan workers=<workers> detected=<detected> orchestrator-inbox=separate-msg-poll.js
 
 Description:
   workers.json に登録された全ワーカーのIssueを定期ポーリングし、
   各ワーカー宛ての新着メッセージを検出・配送する。
-  カーソル・配送状態は .gh-maestro/inbox-supervisor/ に永続化され、
-  プロセス再起動後も未配送メッセージを失わずに再開できる。
+  カーソル・配送状態は .gh-maestro/records/ 配下に永続化され、
+  プロセス再起動後も未配送メッセージを失わずに再開できる。旧配置からの移行は
+  migrate-records.js が単一の責務として扱う。
   ハング検知: ワーカーのログファイル更新（ただし現在のプロセスの起動時刻より前の
     更新は基準にしない）が一定時間（--hang-threshold-sec）以上止まっている場合、
     HANG_DETECTEDを出力しorchestratorへ通知する。その後、通知した本人（同一PID+
@@ -152,14 +154,14 @@ let _sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0,
 // resume 直後にプロセスが即死していないかを確認するまでの猶予。
 const RESUME_LIVENESS_GRACE_MS = 2000;
 
-// 配送を断念した際に orchestrator へ通知する（テストで注入可能）。inbox-supervisor.js は
+// 配送を断念した際に orchestrator へ通知する（テストで注入可能）。worker-supervisor.js は
 // ワーカーではないため GH_MAESTRO_WORKER は設定せず、--from/--issue を明示して投稿する。
 // msg-send.js は本文を位置引数で受け付けない（--stdin / --body-file のみ）ため、
 // spawnSync の input で stdin 経由に渡す。
 // 非ワーカーコンテキストの msg-send.js は宛先を位置引数（recipient）で受け取る。
 // 省略すると recipient が undefined になり usage エラーで必ず送信失敗する（PR #251 レビュー指摘）。
 let _notifyOrchestrator = ({ workspace, issue, body }) => {
-  recordResidentNotification({ workspace, source: 'inbox-supervisor', issue, body });
+  recordResidentNotification({ workspace, source: 'worker-supervisor', issue, body });
   return { status: 0, stdout: '', stderr: '' };
 };
 
@@ -602,7 +604,7 @@ function main(argsOverride, opts = {}) {
       writeOut(USAGE);
       return { code: 0, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
     }
-    for (const ve of e.errors) writeErr(`inbox-supervisor: ${ve.message}`);
+    for (const ve of e.errors) writeErr(`worker-supervisor: ${ve.message}`);
     writeErr(USAGE);
     return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
   }
@@ -629,7 +631,7 @@ function main(argsOverride, opts = {}) {
 
   const workspace = resolveWorkspace(values['--workspace']);
   if (!workspace) {
-    writeErr('inbox-supervisor: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
+    writeErr('worker-supervisor: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
     return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '' };
   }
 
@@ -638,6 +640,15 @@ function main(argsOverride, opts = {}) {
   const intervalMs = (parseInt(values['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
   const hangThresholdMs = (parseInt(values['--hang-threshold-sec'] || String(Math.round(DEFAULT_HANG_THRESHOLD_MS / 1000))) || DEFAULT_HANG_THRESHOLD_MS / 1000) * 1000;
 
+  // Upgrade bridge: the old process uses a different script/role identity,
+  // so acquiring the new lease alone cannot prevent overlap.
+  let legacyPids = [];
+  try { legacyPids = runningLegacyWorkerSupervisorPids(workspace); } catch {}
+  if (legacyPids.length > 0 && !force) {
+    writeErr(`worker-supervisor: 改名前の常駐プロセスを検出したため起動を拒否しました（pid: ${legacyPids.join(', ')}）。`);
+    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode, intervalMs, workspace, residentLease: null };
+  }
+
   // ── 常駐プロセス用 role lease（Issue #240） ─────────────────────────────
   // 外部副作用（新着配送）を持つため --once でも排他する。取得は workspace 解決直後・
   // gh 呼び出しより前に行い、多重起動時は無駄な外部呼び出しを避けて即拒否する。
@@ -645,17 +656,17 @@ function main(argsOverride, opts = {}) {
   // role lease は workspace を canonicalWorkspace で正規化して排他する（Issue #240）。
   let residentLease = null;
   {
-    const role = INBOX_SUPERVISOR_ROLE;
+    const role = WORKER_SUPERVISOR_ROLE;
     const handoffTargets = () => {
-      const dup = findRunningInstance(workspace, { script: 'inbox-supervisor.js', workerName: null });
-      return dup ? [dup.pid] : [];
+      const dup = findRunningInstance(workspace, { script: 'worker-supervisor.js', workerName: null });
+      return [...new Set([...(dup ? [dup.pid] : []), ...legacyPids])];
     };
     try {
       const res = acquireResidentLease({ workspace, role, handoff: force, handoffStopTargets: handoffTargets, env });
       if (!res.acquired) {
         // 引き継ぎ期限超過（--force で既存所有者が終了しなかった）
         writeErr(
-          `inbox-supervisor: role "${role}" を引き継げませんでした（${res.reason}）` +
+          `worker-supervisor: role "${role}" を引き継げませんでした（${res.reason}）` +
           (res.ownerPid ? `。既存プロセス pid=${res.ownerPid} が終了しません` : '') +
           `。既存プロセスを終了させてから再試行してください。`
         );
@@ -663,7 +674,7 @@ function main(argsOverride, opts = {}) {
       }
       residentLease = res;
     } catch (e) {
-      writeErr(`inbox-supervisor: 重複起動を検出しました。${e.message}`);
+      writeErr(`worker-supervisor: 重複起動を検出しました。${e.message}`);
       writeErr('既存プロセスを終了させてから再起動するか、--force で引き継いでください。');
       return { code: 1, lines: out, errLines: err, runOnce: null, onceMode, intervalMs, workspace, residentLease: null };
     }
@@ -680,12 +691,12 @@ function main(argsOverride, opts = {}) {
   const ghOpts = { cwd: workspace };
   const repoResult = _ghRepoView(ghOpts);
   if (repoResult.status !== 0) {
-    writeErr(`inbox-supervisor: リポジトリを解決できません: ${repoResult.stderr || '(empty)'}`);
+    writeErr(`worker-supervisor: リポジトリを解決できません: ${repoResult.stderr || '(empty)'}`);
     return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '', residentLease };
   }
   const repo = repoResult.stdout.trim();
   if (!repo) {
-    writeErr('inbox-supervisor: リポジトリを解決できません（空のレスポンス）。');
+    writeErr('worker-supervisor: リポジトリを解決できません（空のレスポンス）。');
     return { code: 1, lines: out, errLines: err, runOnce: null, onceMode: false, intervalMs: 0, workspace: '', residentLease };
   }
 
@@ -709,11 +720,11 @@ function main(argsOverride, opts = {}) {
           try {
             res = _notifyOrchestrator({ workspace, issue, body });
           } catch (e) {
-            writeErr(`inbox-supervisor: 書き込み連続失敗の警告の送信に失敗: ${e.message}`);
+            writeErr(`worker-supervisor: 書き込み連続失敗の警告の送信に失敗: ${e.message}`);
             return;
           }
           if (res.status !== 0) {
-            writeErr(`inbox-supervisor: 書き込み連続失敗の警告の送信に失敗: ${(res.stderr || '').trim()}`);
+            writeErr(`worker-supervisor: 書き込み連続失敗の警告の送信に失敗: ${(res.stderr || '').trim()}`);
           }
         },
       });
@@ -746,11 +757,11 @@ function main(argsOverride, opts = {}) {
     // アラーム経路と watchdog 通知が両方無効化される（Issue #301）。
     if (!checkParent()) {
       lifecycleCleanup(workspace);
-      handleParentSessionDeath({ workspace, scriptName: 'inbox-supervisor.js', role: INBOX_SUPERVISOR_ROLE, sessionPid });
+      handleParentSessionDeath({ workspace, scriptName: 'worker-supervisor.js', role: WORKER_SUPERVISOR_ROLE, sessionPid });
       _parentDeathExit(PARENT_DEATH_EXIT_CODE);
     }
 
-    writeOut('SCAN_START source=inbox-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js');
+    writeOut('SCAN_START source=worker-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js');
 
     const workers = loadWorkers(workspace);
     let totalDetected = 0;
@@ -815,10 +826,10 @@ function main(argsOverride, opts = {}) {
                 const notifyResult = _notifyOrchestrator({ workspace, issue, body });
                 notified = notifyResult.status === 0;
                 if (!notified) {
-                  writeErr(`inbox-supervisor: hang通知の投稿に失敗: ${(notifyResult.stderr || '').trim()}`);
+                  writeErr(`worker-supervisor: hang通知の投稿に失敗: ${(notifyResult.stderr || '').trim()}`);
                 }
               } catch (e) {
-                writeErr(`inbox-supervisor: hang通知の投稿に失敗: ${e.message}`);
+                writeErr(`worker-supervisor: hang通知の投稿に失敗: ${e.message}`);
               }
               // 通知成功時のみ通知済み状態を更新・永続化する。
               if (notified) {
@@ -834,7 +845,7 @@ function main(argsOverride, opts = {}) {
                 try {
                   writeCursor(workspace, workerName, cursor);
                 } catch (e) {
-                  writeErr(`inbox-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
+                  writeErr(`worker-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
                   getWriteFailureMonitor(workerName, issue).onFailure(e.message);
                 }
               }
@@ -860,7 +871,7 @@ function main(argsOverride, opts = {}) {
             try {
               writeCursor(workspace, workerName, cursor);
             } catch (e) {
-              writeErr(`inbox-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
+              writeErr(`worker-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
               getWriteFailureMonitor(workerName, issue).onFailure(e.message);
             }
           }
@@ -928,17 +939,17 @@ function main(argsOverride, opts = {}) {
           writeOut(`DELIVERY_FAILED:${workerName}:${commentId}:${deliveryResult.error || 'unknown'}`);
 
           if (deliveryResult.method !== 'pending' && pending.retries + 1 >= MAX_RETRIES) {
-            writeErr(`inbox-supervisor: ${workerName} comment ${commentId} — max retries (${MAX_RETRIES}) exceeded, giving up`);
+            writeErr(`worker-supervisor: ${workerName} comment ${commentId} — max retries (${MAX_RETRIES}) exceeded, giving up`);
             // 断念を stderr に書くだけでは誰も読まない（detachedプロセスのstderrは通常誰も
             // 監視していない）。orchestrator自身のinboxに投稿し、確実に気づけるようにする。
             const giveUpBody = `⚠️ ワーカー "${workerName}" へのメッセージ配送に${MAX_RETRIES}回失敗し断念しました（comment ${commentId}）。最後のエラー: ${deliveryResult.error || 'unknown'}。ワーカーが応答不能になっている可能性があります。状態を確認し、必要なら再起動を検討してください。`;
             try {
               const notifyResult = _notifyOrchestrator({ workspace, issue, body: giveUpBody });
               if (notifyResult.status !== 0) {
-                writeErr(`inbox-supervisor: 配送断念のorchestrator通知に失敗: ${(notifyResult.stderr || '').trim()}`);
+                writeErr(`worker-supervisor: 配送断念のorchestrator通知に失敗: ${(notifyResult.stderr || '').trim()}`);
               }
             } catch (e) {
-              writeErr(`inbox-supervisor: 配送断念のorchestrator通知に失敗: ${e.message}`);
+              writeErr(`worker-supervisor: 配送断念のorchestrator通知に失敗: ${e.message}`);
             }
             // 5回のリトライを尽くした配送断念は確定的な終着点 → 契約を消費する。
             // これにより、別の新着メッセージで次回resumeされるときに不要な契約が残留しない。
@@ -957,7 +968,7 @@ function main(argsOverride, opts = {}) {
       const apiResult = _ghApiComments(repo, issue, workerSince, { cwd: workspace });
 
       if (apiResult.status !== 0) {
-        writeErr(`inbox-supervisor: gh api エラー (worker ${workerName}, issue ${issue}): ${apiResult.stderr || apiResult.error?.message || '(empty)'}`);
+        writeErr(`worker-supervisor: gh api エラー (worker ${workerName}, issue ${issue}): ${apiResult.stderr || apiResult.error?.message || '(empty)'}`);
         continue;
       }
 
@@ -965,11 +976,11 @@ function main(argsOverride, opts = {}) {
       try {
         comments = parseCommentsResponse(apiResult.stdout);
       } catch {
-        writeErr(`inbox-supervisor: JSON parse エラー (worker ${workerName}, issue ${issue})`);
+        writeErr(`worker-supervisor: JSON parse エラー (worker ${workerName}, issue ${issue})`);
         continue;
       }
       if (comments === null) {
-        writeErr(`inbox-supervisor: gh api の応答が配列ではありません (worker ${workerName}, issue ${issue})`);
+        writeErr(`worker-supervisor: gh api の応答が配列ではありません (worker ${workerName}, issue ${issue})`);
         continue;
       }
 
@@ -1019,10 +1030,10 @@ function main(argsOverride, opts = {}) {
             const notifyResult = _notifyOrchestrator({ workspace, issue, body });
             notified = notifyResult.status === 0;
             if (!notified) {
-              writeErr(`inbox-supervisor: 居座り通知の投稿に失敗: ${(notifyResult.stderr || '').trim()}`);
+              writeErr(`worker-supervisor: 居座り通知の投稿に失敗: ${(notifyResult.stderr || '').trim()}`);
             }
           } catch (e) {
-            writeErr(`inbox-supervisor: 居座り通知の投稿に失敗: ${e.message}`);
+            writeErr(`worker-supervisor: 居座り通知の投稿に失敗: ${e.message}`);
           }
           // 通知成功時のみ通知済み状態を更新する（HANG_DETECTEDと同じ扱い）。永続化は
           // このワーカーの処理末尾にある共通の writeCursor に任せる（このブロックの後、
@@ -1144,13 +1155,13 @@ function main(argsOverride, opts = {}) {
         writeCursor(workspace, workerName, cursor);
         getWriteFailureMonitor(workerName, issue).onSuccess();
       } catch (e) {
-        writeErr(`inbox-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
+        writeErr(`worker-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
         getWriteFailureMonitor(workerName, issue).onFailure(e.message);
         continue;
       }
     }
 
-    writeOut(`SCAN_END:${workers.size}:${totalDetected} source=inbox-supervisor.js scope=worker-delivery-scan workers=${workers.size} detected=${totalDetected} orchestrator-inbox=separate-msg-poll.js`);
+    writeOut(`SCAN_END:${workers.size}:${totalDetected} source=worker-supervisor.js scope=worker-delivery-scan workers=${workers.size} detected=${totalDetected} orchestrator-inbox=separate-msg-poll.js`);
   }
 
   return {
@@ -1206,7 +1217,7 @@ if (require.main === module) {
   }
 
   // PID registry に自己登録（表示・診断用途。排他の正本は role lease であり、二重化しない）
-  registerProcess(result.workspace, { script: 'inbox-supervisor.js' });
+  registerProcess(result.workspace, { script: 'worker-supervisor.js' });
 
   const ru = result.runOnce;
 
@@ -1226,10 +1237,10 @@ if (require.main === module) {
   } else {
     // 継続モード: 初回スキャンを即実行し、以降 intervalMs 間隔で継続
     // 常駐監視の異常終了（非ゼロexit）を orchestrator へ通知する（Issue #301）。
-    // これまで inbox-supervisor は異常終了時に一切通知していなかった。
+    // これまで worker-supervisor は異常終了時に一切通知していなかった。
     // 正常終了（exit 0 = SIGINT / SIGTERM）では何もしない。
     // --once 完了も exit 0 のため通知されない。
-    process.on('exit', () => { notifyWatchdogExit({ workspace: result.workspace, scriptName: 'inbox-supervisor.js' }); });
+    process.on('exit', () => { notifyWatchdogExit({ workspace: result.workspace, scriptName: 'worker-supervisor.js' }); });
     ru();
     setInterval(ru, result.intervalMs);
   }

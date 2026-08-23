@@ -1,7 +1,7 @@
 'use strict';
 // resident-force-guard.js — 常駐プロセスの強制置き換え（--force）実行文脈ガード
 //
-// 本番ワークスペースで稼働している常駐プロセス（inbox-supervisor）はシステムの基盤であり、
+// 本番ワークスペースで稼働している常駐プロセス（worker-supervisor）はシステムの基盤であり、
 // ワーカーの作業対象ではない。ワーカーが検証等の目的で本番の常駐プロセスを置き換えると、
 // 指示配送が停止するなどシステム全体が停止する（Issue #384）。
 //
@@ -45,7 +45,7 @@ function isAllowedForceIdentity(name) {
  */
 function buildMissingIdentityErrorMessage() {
   return [
-    'inbox-supervisor: 常駐プロセスの強制置き換え（--force）が拒否されました。実行主体の名乗り（GH_MAESTRO_WORKER）が設定されていません。',
+    'worker-supervisor: 常駐プロセスの強制置き換え（--force）が拒否されました。実行主体の名乗り（GH_MAESTRO_WORKER）が設定されていません。',
     '【理由】本番ワークスペースの常駐監視プロセスは gh-maestro の動作基盤であり、ワーカーの作業対象ではありません。置き換えを行うとワーカーへの指示配送が停止し、システム全体が停止します。',
     '【代替手順】常駐監視プロセスの内部動作やハング検知等を検証する必要がある場合は、本番ワークスペースではなく自分専用の一時ワークスペース（os.tmpdir() 配下のディレクトリ等）を作成し、その一時ワークスペースに対して検証を実行してください。',
     '【禁止事項】環境変数を未設定・偽装するなどの方法で本ガードを回避して本番ワークスペースの常駐プロセスを置き換えてはなりません。',
@@ -60,7 +60,7 @@ function buildMissingIdentityErrorMessage() {
  */
 function buildWorkerRejectionErrorMessage(workerName) {
   return [
-    `inbox-supervisor: ワーカー "${workerName}" からの常駐プロセスの強制置き換え（--force）は禁止されています。`,
+    `worker-supervisor: ワーカー "${workerName}" からの常駐プロセスの強制置き換え（--force）は禁止されています。`,
     '【理由】本番ワークスペースの常駐監視プロセスは gh-maestro の動作基盤であり、ワーカーの作業対象ではありません。置き換えを行うとワーカーへの指示配送が停止し、システム全体が停止します。',
     '【代替手順】常駐監視プロセスの内部動作やハング検知等を検証する必要がある場合は、本番ワークスペースではなく自分専用の一時ワークスペース（os.tmpdir() 配下のディレクトリ等）を作成し、その一時ワークスペースに対して検証を実行してください。',
     '【禁止事項】GH_MAESTRO_WORKER 環境変数を手動で unset / 偽装するなどの方法で本ガードを回避して本番ワークスペースの常駐プロセスを置き換えてはなりません。',
