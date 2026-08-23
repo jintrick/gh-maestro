@@ -257,9 +257,6 @@ let fail = (msg) => {
   console.error(`    ${resetCmd}`);
   process.exit(1);
 };
-if (!skill) fail('--skill が必要です');
-if (!description) fail('--description が必要です');
-if (!repo) fail('--repo が必要です');
 if (shortPromptText != null && promptFileArg != null) fail('--short-prompt と --prompt-file は同時に指定できません');
 let prompt;
 try {

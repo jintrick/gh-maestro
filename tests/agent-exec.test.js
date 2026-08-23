@@ -238,8 +238,22 @@ test('buildLoginShellExecArgs: デフォルトプラットフォームが proces
 // ── checkAgentExists ─────────────────────────────────────────────────────────
 
 test('checkAgentExists: node は存在する', () => {
-  agentExec._setSpawnSync(() => ({ status: 0 }));
+  const calls = [];
+  agentExec._setSpawnSync((command, args, options) => {
+    calls.push({ command, args, options });
+    return { status: 0 };
+  });
   assert.equal(checkAgentExists('node'), true);
+  assert.equal(calls.length, 1);
+  if (process.platform === 'win32') {
+    assert.equal(calls[0].command, 'pwsh');
+    assert.deepEqual(calls[0].args, [
+      '-NoLogo', '-NoProfile', '-Command', "Get-Command 'node' -ErrorAction Stop",
+    ]);
+  } else {
+    assert.equal(calls[0].command, 'bash');
+    assert.deepEqual(calls[0].args, ['-lc', "command -v 'node' 2>/dev/null"]);
+  }
 });
 
 test('checkAgentExists: 存在しないコマンドは false を返す', () => {
