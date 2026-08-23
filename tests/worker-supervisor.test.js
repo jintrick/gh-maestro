@@ -12,6 +12,15 @@ const headlessLaunch = require('../scripts/shared/headless-launch');
 const workerLease = require('../scripts/shared/worker-lease');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
 const residentAudit = require('../scripts/shared/resident-audit');
+const { getProcessStartTime } = require('../scripts/process-lifecycle');
+
+// 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
+// PIDを誤って渡す回帰は即座に検出する。
+const TEST_SESSION_START_TIME = getProcessStartTime(process.pid);
+supervisor._setGetProcessStartTime((pid) => {
+  assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
+  return TEST_SESSION_START_TIME;
+});
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
@@ -1015,17 +1024,23 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir);
       const stderrLines = [];
+      let capturedExpectedStartTime;
       const origStderr = process.stderr.write;
       try {
         // 死のスイッチを常時「死」と判定させる。checkParent は main() 内で生成されるため
         // runMain より前に注入する（_setParentDeathExit は sentinel 例外で抜ける）。
-        supervisor._setCreateDeadManSwitch(() => () => false);
+        supervisor._setCreateDeadManSwitch((_pid, options) => {
+          capturedExpectedStartTime = options.expectedStartTime;
+          return () => false;
+        });
         let exitCode = null;
         supervisor._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
         process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
 
         const r = runMain(['--workspace', dir]);
         assert.equal(r.code, 0);
+        assert.equal(capturedExpectedStartTime, TEST_SESSION_START_TIME,
+          'main() が捕捉した起動時刻を createDeadManSwitch に渡す');
         const leaseFile = path.join(dir, '.gh-maestro', 'leases', 'resident-role-worker-supervisor.json');
         assert.ok(fs.existsSync(leaseFile), 'role lease ファイルが作成される');
 
@@ -2738,7 +2753,6 @@ describe('Cursor type safety', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const { spawnSync: realSpawnSync, spawn } = require('child_process');
-const { getProcessStartTime } = require('../scripts/process-lifecycle');
 
 const SUPERVISOR_SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-supervisor.js');
 
