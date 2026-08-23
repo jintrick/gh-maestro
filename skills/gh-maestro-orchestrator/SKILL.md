@@ -98,24 +98,13 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - **diagnostician**: 調査対象のバグIssue本文だけで観点が尽くせるなら `--prompt-file` を省略してよい。本文を超える補足（重点的に見る箇所・除外範囲など）がある場合のみ渡す。
 - **architect**: 起動には確定要件が前提。詳細は `architect.md` 参照（`--execution-id` を付ける）。
 
-#### 大規模タスクの分割
+#### 同一Issueに同一役割のワーカーを複数起動してはならない
 
-競合しない軸（ディレクトリ・ファイル種別・機能単位など）で分割し、複数ワーカーで並列処理する。
+**1つのIssueに対して、同じ役割のワーカーは常に1つだけである。** タスクが大きくても分割起動しない。同じ役割に追加の作業をさせるなら、新しく起動せず既存ワーカーへ `msg-send.js` で指示する。
 
-```sh
-# 1000件のLintエラーを1ワーカーに丸投げせず、ディレクトリ単位で分割して並列に起動する
-node "{{SCRIPTS_PATH}}/spawn-worker.js" --skill gh-maestro-coder --issue 12 --description fix-utils --prompt-file <utils-prompt-file> ...
-```
+分割起動を支える機構が存在しないためである。実装計画の投稿先コメントはIssueに1つしかなく、2人目が投稿すると1人目の計画が消え、差し戻しを受けた側が他人の計画を自分の計画として取り込む。`set-response-contract.js` は〈`--issue` + `--skill`〉でしか宛先を取れず、複数いると設定自体ができない。`msg-send.js` の宛先も一意に決まらなくなる。
 
-**分割以外の理由で、同一Issue・同一役割のワーカーを増やしてはならない。** 同じ役割に追加の作業をさせるなら、新しく起動せず既存ワーカーへ `msg-send.js` で指示する。
-
-分割して起動したときだけ、同じ Issue・同じ skill のワーカーが複数存在する状態になる。このとき〈`--issue` + `--skill`〉では宛先が一つに決まらないため、`msg-send.js` / `stop-worker.js` / `remove-worker.js` には `--skill` を外し、ワーカー名（`issue-12-fix-utils` の形。`--description` に渡した値から組み立てられる）を**位置引数**で渡す。
-
-```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" issue-12-fix-utils --workspace $WORKSPACE --stdin <<'EOF'
-<本文>
-EOF
-```
+タスクが1人には大きすぎる場合は、並列ではなくIssueを分けて順に回す。
 
 ### アセット（`{{SCRIPTS_PATH}}/`）
 
