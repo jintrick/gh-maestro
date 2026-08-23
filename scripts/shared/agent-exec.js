@@ -18,6 +18,7 @@
 //   - config.json / agent-defaults.json の command カスタマイズと衝突しないこと
 
 const { spawnSync } = require('./child-process');
+let _spawnSync = spawnSync;
 
 /**
  * エージェント起動 argv をログインシェル経由にラップする。
@@ -168,7 +169,7 @@ function checkPwshExists(command) {
   //   実起動は profile 込みで行うため、profile-defined 関数の場合は実起動側で解決される。
   //   ただし、関数が $PROFILE でのみ定義されている場合、このチェックは false を返す。
   //   そこで、一度 -NoProfile で失敗した場合は profile 込みでも試す。
-  const r1 = spawnSync('pwsh', [
+  const r1 = _spawnSync('pwsh', [
     '-NoLogo', '-NoProfile',
     '-Command', `Get-Command '${command.replace(/'/g, "''")}' -ErrorAction Stop`,
   ], { encoding: 'utf8', stdio: 'pipe' });
@@ -180,7 +181,7 @@ function checkPwshExists(command) {
     `Get-Command '${command.replace(/'/g, "''")}' -ErrorAction Stop`,
     'utf16le',
   ).toString('base64');
-  const r2 = spawnSync('pwsh', ['-NoLogo', '-EncodedCommand', encoded], {
+  const r2 = _spawnSync('pwsh', ['-NoLogo', '-EncodedCommand', encoded], {
     encoding: 'utf8', stdio: 'pipe',
   });
   return r2.status === 0;
@@ -195,10 +196,14 @@ function checkBashExists(command) {
   // シングルクォートで囲み、内部の ' は '\'' でエスケープ（bash の方法）
   // シングルクォート内では $ / ` / " はすべてリテラルとして扱われる
   const escaped = command.replace(/'/g, "'\\''");
-  const r = spawnSync('bash', ['-lc', `command -v '${escaped}' 2>/dev/null`], {
+  const r = _spawnSync('bash', ['-lc', `command -v '${escaped}' 2>/dev/null`], {
     encoding: 'utf8', stdio: 'pipe',
   });
   return r.status === 0;
 }
 
-module.exports = { buildLoginShellExecArgs, checkAgentExists };
+module.exports = {
+  buildLoginShellExecArgs,
+  checkAgentExists,
+  _setSpawnSync: (fn) => { _spawnSync = fn; },
+};

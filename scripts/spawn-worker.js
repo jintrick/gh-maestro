@@ -93,6 +93,44 @@ Output (stdout):
 <workspace>/.gh-maestro/records/issue/<N>/workers/<worker>/worker.log へ実行中から逐次書き込まれる。`;
 
 /**
+ * CLI引数の構文・値だけを検証する。worktree、git、agent、外部プロセスには触れない。
+ * 起動前の入力契約をCLIと単体テストで共有するための純粋な境界。
+ */
+function parseWorkerArgs(argv) {
+  let values;
+  try {
+    ({ values } = parseFlags(argv, SPEC));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    return { help: Boolean(err.helpRequested), values: null, errors: err.errors };
+  }
+  if (values['--help'] || values['-h']) return { help: true, values, errors: [] };
+
+  const errors = [];
+  const skill = values['--skill'];
+  const description = values['--description'];
+  const repo = values['--repo'];
+  const issue = values['--issue'];
+  const shortPromptText = values['--short-prompt'];
+  const promptFileArg = values['--prompt-file'];
+  if (!skill) errors.push({ message: '--skill が必要です' });
+  if (!description) errors.push({ message: '--description が必要です' });
+  if (description && !/^[A-Za-z0-9_-]{1,50}$/.test(description)) {
+    errors.push({ message: '--description は英数字・ハイフン・アンダースコアのみ、1〜50文字である必要があります（例: explore-auth）。この値は worktreeディレクトリ名・gitブランチ名にそのまま使われるため、スペース・スラッシュ・ドット等は使用できません' });
+  }
+  if (!repo) errors.push({ message: '--repo が必要です' });
+  if (shortPromptText != null && promptFileArg != null) {
+    errors.push({ message: '--short-prompt と --prompt-file は同時に指定できません' });
+  }
+  if (shortPromptText != null && !/^[^\r\n$`"'\\;|&]{1,200}$/.test(shortPromptText)) {
+    errors.push({ message: '--short-prompt は1行・200文字以内で、シェルが解釈する文字（$ ` " \' \\ ; | &）と改行は使用できません。任意の指示はファイルに書き出し、--prompt-file <path> を使用してください' });
+  }
+  if (!issue) errors.push({ message: '--issue が必要です（ワーカーのアンカー Issue）' });
+  if (issue && !/^[1-9][0-9]*$/.test(issue)) errors.push({ message: '--issue は正の整数である必要があります' });
+  return { help: false, values, errors };
+}
+
+/**
  * ワーカーエントリをworkers.jsonから除去すべき（stale）か判定する。
  *
  * プロセスが生存していれば除去しない。生存していなくても、エージェント設定が解決できる限り
@@ -183,30 +221,22 @@ function establishOrchestratorBaseline(workspace, { repo, issue, listCommentsFn 
   return { ok: true, count: ids.length };
 }
 
-module.exports = { shouldPruneStaleWorker, establishOrchestratorBaseline };
+module.exports = { shouldPruneStaleWorker, establishOrchestratorBaseline, parseWorkerArgs };
 
 if (require.main === module) {
 
-// --- 引数パース ---
 const argv = process.argv.slice(2);
-let values, rest;
-try {
-  ({ values, rest } = parseFlags(argv, SPEC));
-} catch (err) {
-  if (err.name !== 'ArgsValidationError') throw err;
-  if (err.helpRequested) {
-    console.log(USAGE);
-    process.exit(0);
-  }
-  for (const e of err.errors) console.error(`spawn-worker: ${e.message}`);
-  console.error(USAGE);
-  process.exit(1);
-}
-
-if (values['--help'] || values['-h']) {
+const parsedArgs = parseWorkerArgs(argv);
+if (parsedArgs.help) {
   console.log(USAGE);
   process.exit(0);
 }
+if (parsedArgs.errors.length > 0) {
+  for (const e of parsedArgs.errors) console.error(`spawn-worker: ${e.message}`);
+  console.error(USAGE);
+  process.exit(1);
+}
+const { values } = parsedArgs;
 
 const skill       = values['--skill'];
 const shortPromptText = values['--short-prompt'];
@@ -227,16 +257,7 @@ let fail = (msg) => {
   console.error(`    ${resetCmd}`);
   process.exit(1);
 };
-if (!skill)       fail('--skill が必要です');
-if (!description) fail('--description が必要です');
-if (description && !/^[A-Za-z0-9_-]{1,50}$/.test(description)) {
-  fail('--description は英数字・ハイフン・アンダースコアのみ、1〜50文字である必要があります（例: explore-auth）。この値は worktreeディレクトリ名・gitブランチ名にそのまま使われるため、スペース・スラッシュ・ドット等は使用できません');
-}
-if (!repo)        fail('--repo が必要です');
 if (shortPromptText != null && promptFileArg != null) fail('--short-prompt と --prompt-file は同時に指定できません');
-if (shortPromptText != null && !/^[^\r\n$`"'\\;|&]{1,200}$/.test(shortPromptText)) {
-  fail('--short-prompt は1行・200文字以内で、シェルが解釈する文字（$ ` " \' \\ ; | &）と改行は使用できません。任意の指示はファイルに書き出し、--prompt-file <path> を使用してください');
-}
 let prompt;
 try {
   prompt = resolveTextInput({ inlineValue: shortPromptText ?? null, filePath: promptFileArg ? toWinPath(promptFileArg) : null });

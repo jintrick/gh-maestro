@@ -40,9 +40,12 @@ function stubOk(overrides = {}) {
   watch._setGhIssueComments(() => ({ status: 0, stdout: JSON.stringify([]), stderr: '' }));
   watch._setGhFindPr(() => []);
   watch._setGhPrView(() => ({ status: 0, stdout: JSON.stringify({ state: 'OPEN', mergedAt: null }), stderr: '' }));
-  // 実待機の上限を20msに抑えつつ、リアルタイムを少しずつ進める（msg-poll.test.jsと同じ
-  // パターン。ゼロ遅延だとタイムアウト判定がDate.now()基準のためビジーループになる）。
-  watch._setSleep(async (ms) => { await new Promise((resolve) => setTimeout(resolve, Math.min(ms, 20))); });
+  // テスト用時計を進めるだけにし、実時間のtimeout待機を発生させない。
+  let now = 0;
+  watch._setNow(() => now);
+  // 500msずつ進めることで、3秒の論理待機内に閾値(5回)だけを通過させる。
+  watch._setSleep(async () => { now += 500; });
+  watch._setWriteState(watch.writeState);
   Object.entries(overrides).forEach(([k, v]) => {
     if (k === 'ghRepoView') watch._setGhRepoView(v);
     if (k === 'ghIssueComments') watch._setGhIssueComments(v);
@@ -204,18 +207,14 @@ describe('main: worker_report検知', () => {
 });
 
 // ── Issue #250: writeState の EPERM 失敗への耐性 ────────────────────────────
-// state ファイルの位置をディレクトリ化すると rename（writeState）が必ず失敗する。
-// Windows では EPERM（リトライ対象）で約500ms粘ってから throw、Linux では即 throw と
-// 差異はあるが、いずれも「プロセスを止めず次サイクルで再試行する」ことが目的なので
-// プラットフォーム非依存のテストとして両OSで実行する。
+// writeState の失敗を注入し、OS依存のatomic-writeリトライ待機をテストへ持ち込まない。
 
 describe('main: writeState失敗耐性', () => {
   test('writeState が失敗してもプロセスはクラッシュせず TIMEOUT で終了する', async () => {
     await withTempDir(async (workspace) => {
       watch._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
       stubOk();
-      // state ファイルの位置をディレクトリ化 → writeState（rename）が常に失敗する
-      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'records', 'issue', '5', 'assistant-watch.json'), { recursive: true });
+      watch._setWriteState(() => { throw new Error('injected write failure'); });
 
       const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '1']);
       assert.equal(r.code, 0);
@@ -244,8 +243,7 @@ describe('main: writeState失敗耐性', () => {
           };
         },
       });
-      // state ファイルの位置をディレクトリ化 → writeState（rename）が常に失敗する
-      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'records', 'issue', '5', 'assistant-watch.json'), { recursive: true });
+      watch._setWriteState(() => { throw new Error('injected write failure'); });
 
       const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '5']);
       assert.equal(r.code, 0);
@@ -272,9 +270,8 @@ describe('main: writeState失敗耐性', () => {
         spawnCalls.push({ cmd, args, opts });
         return { status: 0, stdout: '', stderr: '' };
       });
-      // state ファイルの位置をディレクトリ化 → writeState が常に失敗し、連続失敗が閾値(5)に達する
-      // （Windows では EPERM リトライで1回約500ms のため、--wait 3 で約5回積もる）。
-      fs.mkdirSync(path.join(workspace, '.gh-maestro', 'records', 'issue', '5', 'assistant-watch.json'), { recursive: true });
+      // 連続失敗の警告契約だけを検証し、atomic-writeのOS依存リトライは実行しない。
+      watch._setWriteState(() => { throw new Error('injected write failure'); });
 
       const r = await watch.main(['--issue', '5', '--workspace', workspace, '--wait', '3']);
       assert.equal(r.code, 0);

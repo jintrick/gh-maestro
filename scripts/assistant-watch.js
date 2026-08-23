@@ -353,6 +353,8 @@ let _notifyOrchestrator = ({ workspace, issue, body }) => {
 };
 
 let _sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let _now = () => Date.now();
+let _writeState = writeState;
 
 /**
  * @param {string[]} [argsOverride]
@@ -435,7 +437,7 @@ async function main(argsOverride) {
 
   const waitMs = waitSec * 1000;
   const intervalMs = intervalSec * 1000;
-  const start = Date.now();
+  const start = _now();
   let isBaseline = isFirstEverRun;
 
   while (true) {
@@ -445,7 +447,7 @@ async function main(argsOverride) {
     // 状態の永続化は他プロセスが state ファイルを掴んでいる等で EPERM 失敗しうる
     // （Issue #250）。例外はここで捕捉してプロセスを止めず、次サイクルで再試行する。
     try {
-      writeState(workspace, issue, state);
+      _writeState(workspace, issue, state);
       writeFailureMonitor.onSuccess();
     } catch (e) {
       err.push(`assistant-watch: 状態の保存に失敗しました: ${e.message}`);
@@ -463,7 +465,7 @@ async function main(argsOverride) {
       return { code: 0, lines: out, errLines: err };
     }
 
-    const elapsed = Date.now() - start;
+    const elapsed = _now() - start;
     if (elapsed >= waitMs) {
       out.push('TIMEOUT');
       return { code: 0, lines: out, errLines: err };
@@ -488,6 +490,8 @@ module.exports = {
   _setGhFindPr: (fn) => { _ghFindPr = fn; },
   _setGhPrView: (fn) => { _ghPrView = fn; },
   _setSleep: (fn) => { _sleep = fn; },
+  _setNow: (fn) => { _now = fn; },
+  _setWriteState: (fn) => { _writeState = fn; },
   _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
   // 実装を直接参照（テストが注入を戻す際の復元用。PR #251 の引数検証テストから使う）
   _notifyOrchestrator,

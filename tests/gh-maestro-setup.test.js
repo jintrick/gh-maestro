@@ -20,24 +20,33 @@ const SCRIPT = path.join(__dirname, '..', 'scripts', 'gh-maestro-setup.js');
 function withGitProject(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-setup-test-'));
   try {
-    const git = (...args) => {
-      const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
-      assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
-      return r;
-    };
-    git('init', '-q');
-    git('config', 'user.email', 'test@test.com');
-    git('config', 'user.name', 'test');
-    fs.writeFileSync(path.join(dir, 'README.md'), 'x', 'utf8');
-    git('add', 'README.md');
-    git('commit', '-qm', 'init');
-    git('branch', '-m', 'main');
-    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(path.join(dir, '.gh-maestro', 'setup-ok'), '', 'utf8');
+    ensureGitTemplate();
+    fs.cpSync(gitTemplate, dir, { recursive: true });
     return fn(dir);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+let gitTemplate;
+function ensureGitTemplate() {
+  if (gitTemplate) return;
+  gitTemplate = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-setup-template-'));
+  const git = (...args) => {
+    const r = spawnSync('git', args, { cwd: gitTemplate, encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+    return r;
+  };
+  git('init', '-q');
+  git('config', 'user.email', 'test@test.com');
+  git('config', 'user.name', 'test');
+  fs.writeFileSync(path.join(gitTemplate, 'README.md'), 'x', 'utf8');
+  git('add', 'README.md');
+  git('commit', '-qm', 'init');
+  git('branch', '-m', 'main');
+  fs.mkdirSync(path.join(gitTemplate, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(path.join(gitTemplate, '.gh-maestro', 'setup-ok'), '', 'utf8');
+  process.once('exit', () => fs.rmSync(gitTemplate, { recursive: true, force: true }));
 }
 
 function runSetup(dir) {
