@@ -11,11 +11,16 @@ const readStateLib = require('../scripts/shared/read-state');
 const { spawnSync } = require('../scripts/shared/child-process');
 const { cleanSpawnEnv } = require('./_spawn-env');
 const workerLease = require('../scripts/shared/worker-lease');
+const { getProcessStartTime } = require('../scripts/process-lifecycle');
 
 workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
-// main() のセッションPID検証では起動時刻を省略し、WindowsのWMI起動を避ける。
-// 実起動時刻の一致そのものを検証するCLIケースは下流の実プロセス経路で維持する。
-msgPoll._setGetProcessStartTime(() => null);
+// 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
+// PIDを誤って渡す回帰は即座に検出する。
+const TEST_SESSION_START_TIME = getProcessStartTime(process.pid);
+msgPoll._setGetProcessStartTime((pid) => {
+  assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
+  return TEST_SESSION_START_TIME;
+});
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず

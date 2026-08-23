@@ -12,10 +12,15 @@ const headlessLaunch = require('../scripts/shared/headless-launch');
 const workerLease = require('../scripts/shared/worker-lease');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
 const residentAudit = require('../scripts/shared/resident-audit');
+const { getProcessStartTime } = require('../scripts/process-lifecycle');
 
-// main() のセッションPID検証では起動時刻を省略し、WindowsのWMI起動を避ける。
-// 実起動時刻の一致そのものを検証するCLIケースは下流の実プロセス経路で維持する。
-supervisor._setGetProcessStartTime(() => null);
+// 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
+// PIDを誤って渡す回帰は即座に検出する。
+const TEST_SESSION_START_TIME = getProcessStartTime(process.pid);
+supervisor._setGetProcessStartTime((pid) => {
+  assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
+  return TEST_SESSION_START_TIME;
+});
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
@@ -2742,7 +2747,6 @@ describe('Cursor type safety', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const { spawnSync: realSpawnSync, spawn } = require('child_process');
-const { getProcessStartTime } = require('../scripts/process-lifecycle');
 
 const SUPERVISOR_SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-supervisor.js');
 
