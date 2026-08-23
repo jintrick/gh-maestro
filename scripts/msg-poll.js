@@ -557,7 +557,7 @@ function main(argsOverride, opts = {}) {
       }
       state = stateResult.state;
     } else {
-      // worker モード（レガシー経路。inbox-supervisor.js に置き換え済み）:
+      // worker モード（レガシー経路。worker-supervisor.js に置き換え済み）:
       // 欠落・破損時は空状態で初期化して再通知する従来挙動を維持する（Q3承認）。
       // 後段の markReadMany が state の初期化を要求するため、ここで明示的に初期化する。
       if (stateResult.status === 'ok') {

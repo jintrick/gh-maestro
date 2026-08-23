@@ -4,7 +4,7 @@
 // PID registry 等の runtime root（scripts/shared/storage-layout.js の runtimeRoot()）は
 // 既定で OS の共有領域（Windows: %LOCALAPPDATA%\gh-maestro、Linux: $XDG_STATE_HOME/gh-maestro）
 // を指す。CLIスクリプトを実プロセスとしてサブプロセス起動するテスト（msg-poll.test.js /
-// poll-pr.test.js / inbox-supervisor.test.js 等）が GH_MAESTRO_RUNTIME_DIR を明示せずに
+// poll-pr.test.js / worker-supervisor.test.js 等）が GH_MAESTRO_RUNTIME_DIR を明示せずに
 // 実行すると、テスト用の一時ワークスペースごとに開発機の実 runtime root へ空の
 // workspaces/<hash>/ ディレクトリが残留し続ける（一時ワークスペース自体は各テストの
 // 後始末で削除されるが、runtime root 側のエントリは削除されないため）。

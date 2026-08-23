@@ -21,7 +21,7 @@ installまたはrestart CLIが非ゼロ終了した場合、registryの読み取
 3. 停止した分の registry エントリ（`.gh-maestro/pids/<PID>.json`）は、プロセスが死ねば次回の生存確認で自動的に無視される。**`sweep`（`--dry-run` なし）を対象を絞らずに実行しない**こと。無条件のsweepは他のMonitor（poll-pr.js・poll-reviews.js等）を含む登録済みの生存プロセスも巻き込んで停止させる。
 4. 残った1本が生きていることを確認してからセッションを継続する。届いていたはずのメッセージを見逃していないか、`gh issue view <N> --comments` で直近のワーカー報告を確認する。
 
-Inbox Supervisor（`inbox-supervisor.js`）側の重複を疑った場合も、自動起動のため通常は発生しないが、疑いがあれば上記と全く同じ手順を `script=inbox-supervisor.js` を対象に行う。
+Inbox Supervisor（`worker-supervisor.js`）側の重複を疑った場合も、自動起動のため通常は発生しないが、疑いがあれば上記と全く同じ手順を `script=worker-supervisor.js` を対象に行う。
 
 ## ワーカーの異常終了通知
 
@@ -49,7 +49,7 @@ Inbox Supervisor は、ワーカーが報告コメントを投稿済みである
 
 ## 監視プロセスの異常終了通知（msg-poll / poll-pr / poll-reviews）
 
-常駐監視（`msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）が**非ゼロ終了**（クラッシュ等）で終わると、プロセス自身が `⚠️ 監視プロセス <script> が異常終了しました（exit code <N>）...` という通知を orchestrator の inbox に投稿する（正常終了 exit 0 = SIGINT/SIGTERM/`PR_MERGED`/`PR_CLOSED` では通知されない）。**`msg-poll.js`（orchestrator モード）と `inbox-supervisor.js` は親セッション消滅を exit 0 ではなく exit 3 で自滅し、watchdog が専用の「親セッション消滅による自動終了」通知を送る**（下記「inbox監視の沈黙」参照。`poll-pr.js` / `poll-reviews.js` は親セッション消滅を従来どおり exit 0 で終了し、通知は出ない）。
+常駐監視（`msg-poll.js` / `poll-pr.js` / `poll-reviews.js`）が**非ゼロ終了**（クラッシュ等）で終わると、プロセス自身が `⚠️ 監視プロセス <script> が異常終了しました（exit code <N>）...` という通知を orchestrator の inbox に投稿する（正常終了 exit 0 = SIGINT/SIGTERM/`PR_MERGED`/`PR_CLOSED` では通知されない）。**`msg-poll.js`（orchestrator モード）と `worker-supervisor.js` は親セッション消滅を exit 0 ではなく exit 3 で自滅し、watchdog が専用の「親セッション消滅による自動終了」通知を送る**（下記「inbox監視の沈黙」参照。`poll-pr.js` / `poll-reviews.js` は親セッション消滅を従来どおり exit 0 で終了し、通知は出ない）。
 
 さらに、それらの監視プロセスを張った **Monitor が終了したことも、監視プロセスの異常終了のアラーム**である。`PR_MERGED` / `PR_CLOSED`（とそれに続く `PR_CLOSED_RESUMED`）を出力して終了したときだけ意図した終了であり、それ以外の終了（特に非ゼロ終了）は異常を意味する。Monitor の終了はバックグラウンドの task 通知として届くため、**見落としやすい**。`poll-pr.js` を張った Monitor が終了したのに `PR_CLOSED_RESUMED` も `PR_MERGED` も続いていない場合は、監視が止まったと疑う。
 
@@ -72,7 +72,7 @@ Inbox Supervisor は、ワーカーが報告コメントを投稿済みである
    - **実障害**: orchestrator が Monitor を一本も張らないままコーダーを起動し、コーダーからの報告・PR 作成が一切画面に出ないまま放置した。`pids/` にプロセスは居たため「ポーリングは生きています」と報告し、原因を配送側のバグと誤認して diagnostician への委譲を提案した。実際は自分の起動規約違反であり、確認すべきだったのは自分が Monitor を張ったかどうかだけだった。**「プロセスは生きている」を「通知は届く」の根拠にしてはならない。**
 
 1. **生死を `process-lifecycle.js status` で確認する。** `node "{{SCRIPTS_PATH}}/process-lifecycle.js" status --workspace $WORKSPACE --script msg-poll.js` を実行する。`running:false` なら死んでいる。
-   - **`ps` の node プロセス一覧や `.gh-maestro/inbox-supervisor-autostart.log` で判断してはならない。** それらは worker 配送を行う `inbox-supervisor.js` のもので、msg-poll が死んでいても正常に動き続ける（`SCAN_START` / `SCAN_END:<n>:0` を出し続ける）。この混同で「ポーラーは生きている」と誤報告した実例がある。
+   - **`ps` の node プロセス一覧や `.gh-maestro/worker-supervisor-autostart.log` で判断してはならない。** それらは worker 配送を行う `worker-supervisor.js` のもので、msg-poll が死んでいても正常に動き続ける（`SCAN_START` / `SCAN_END:<n>:0` を出し続ける）。この混同で「ポーラーは生きている」と誤報告した実例がある。
    - **`running:true` であっても、それは「通知が自分に届く」ことを意味しない。** 手順 0 を飛ばしてここだけを見ると、Monitor 未起動という本当の原因を素通りする。
 2. **lease の残骸に騙されない。** `.gh-maestro/leases/resident-role-msgpoll-orchestrator.json` はクラッシュ・強制終了（自滅経路を経ない場合）で解放されずに残ることがある。lease があってもプロセスは死んでいる。むしろ「PID registry に居ないのに lease が残っている」組合せは、この経路で死んだ証拠である。
 3. **再起動する。** アラーム（watchdog 通知・Monitor の異常終了）を受けた場合は判断を挟まず、SKILL.md「ワーカーからの報告の受信（msg-poll）」の起動規約に従い、Monitor で `msg-poll.js orchestrator` を起動し直す（「1回だけ起動」は生きている間の話であり、死んだ後の再起動はこれに反しない）。
@@ -111,7 +111,7 @@ Monitor のコマンドは Bash 環境で実行される（Windows でも Git Ba
 
 ## 配送断念の通知（Inbox Supervisor 自身による検知）
 
-`inbox-supervisor.js` はresumeでプロセスを起動した直後、短い猶予を置いてからPIDで生存を再確認する。**spawnが成功しPIDが返ったことは、プロセスが生存し続けることを保証しない**（実障害: 起動コマンド自体は成功と報告されたのに、起動直後のクラッシュやホスト環境自体の不安定化で直後に消滅し、`DELIVERED`と誤記録されたままワーカーが無応答で放置された）。この再確認で消失が判明した場合はresume失敗として扱い、バックオフしながらリトライする。**リトライを最大回数（5回）まで尽くしても配送できなかった場合、`inbox-supervisor.js` 自身が `msg-send.js` 経由でorchestratorのinboxに配送断念を通知する**（`⚠️ ワーカー "<name>" へのメッセージ配送に5回失敗し断念しました...`）。
+`worker-supervisor.js` はresumeでプロセスを起動した直後、短い猶予を置いてからPIDで生存を再確認する。**spawnが成功しPIDが返ったことは、プロセスが生存し続けることを保証しない**（実障害: 起動コマンド自体は成功と報告されたのに、起動直後のクラッシュやホスト環境自体の不安定化で直後に消滅し、`DELIVERED`と誤記録されたままワーカーが無応答で放置された）。この再確認で消失が判明した場合はresume失敗として扱い、バックオフしながらリトライする。**リトライを最大回数（5回）まで尽くしても配送できなかった場合、`worker-supervisor.js` 自身が `msg-send.js` 経由でorchestratorのinboxに配送断念を通知する**（`⚠️ ワーカー "<name>" へのメッセージ配送に5回失敗し断念しました...`）。
 
 これは「ワーカーの異常終了通知」（終了フックによる非ゼロ終了検知）とは別の検知経路である。終了フックはワーカープロセスが**自分でexitできた場合**にしか働かない。プロセスが強制終了された、あるいはホスト環境ごと突然消滅して終了フックが実行される機会すら無かった場合はこの経路では検知できず、配送断念通知が最後の砦になる。どちらの通知を受け取った場合も、そのワーカーは作業を完了できていない。「まだ報告が来ないだけ」と待たず、原因を切り分けて人間に伝える。
 
@@ -141,19 +141,19 @@ EOF
 
 ## Inbox Supervisorの起動は自動（手動起動は不要）
 
-**`inbox-supervisor.js` の起動はorchestratorが覚えて手動で行うものではない。** `spawn-worker.js`（ワーカー作成時）と `msg-send.js`（ワーカー宛て送信時）の両方が、内部で自動的に起動を確認・保証する（`scripts/shared/ensure-inbox-supervisor.js`）。orchestratorはこのプロセスの起動を意識する必要がない——Bashツールで明示的に起動する手順は存在しない。
+**`worker-supervisor.js` の起動はorchestratorが覚えて手動で行うものではない。** `spawn-worker.js`（ワーカー作成時）と `msg-send.js`（ワーカー宛て送信時）の両方が、内部で自動的に起動を確認・保証する（`scripts/shared/ensure-worker-supervisor.js`）。orchestratorはこのプロセスの起動を意識する必要がない——Bashツールで明示的に起動する手順は存在しない。
 
 これは意図的な設計変更である。以前は「worker起動前にBashツールで手動起動すること」という指示だったが、**起動を怠ると配送が一切行われず、しかもエージェントの記憶に依存する経路だったため、実際に起動を忘れて配送が長期間止まる実障害が発生した**。決定的なコード（spawn-worker.js/msg-send.js）側で起動を保証する形に修正済み。
 
-`spawn-worker.js`/`msg-send.js`は起動を試みる前に、同じworkspaceを監視中の生存プロセスがいないか（`ensureInboxSupervisorRunning`内で）確認し、いれば起動そのものをスキップする。万一この事前チェックをすり抜けても、`inbox-supervisor.js`自身が起動時に同じ確認を行い、既に監視中のプロセスを検知すれば新規プロセスを起動せずexit 1で終了する（多重起動防止の二重の安全網）。**この自動復活は有界である**: 起動を試みた時点を `.gh-maestro/inbox-supervisor-autostart-attempt.json` に記録し、クールダウン（既定5分）中は再試行しない（連続失敗時に呼び出しのたびに子プロセスとログが増え続けるのを防ぐ。生存を観測したら記録は消える）。
+`spawn-worker.js`/`msg-send.js`は起動を試みる前に、同じworkspaceを監視中の生存プロセスがいないか（`ensureWorkerSupervisorRunning`内で）確認し、いれば起動そのものをスキップする。万一この事前チェックをすり抜けても、`worker-supervisor.js`自身が起動時に同じ確認を行い、既に監視中のプロセスを検知すれば新規プロセスを起動せずexit 1で終了する（多重起動防止の二重の安全網）。**この自動復活は有界である**: 起動を試みた時点を `.gh-maestro/worker-supervisor-autostart-attempt.json` に記録し、クールダウン（既定5分）中は再試行しない（連続失敗時に呼び出しのたびに子プロセスとログが増え続けるのを防ぐ。生存を観測したら記録は消える）。
 
-**dead-man's switch（親セッション死活監視）が監視するPIDは、起動を呼び出した`spawn-worker.js`/`msg-send.js`自身が、まだ生存しているうちに解決して`--session-pid`で明示的に子へ渡す。** `inbox-supervisor.js`はdetachedかつfire-and-forgetで起動されるため、起動直後には呼び出し元（使い捨てのCLIプロセス）が既に終了していることがある。もし子自身に解決を委ねると、子の直近の親（=その使い捨てCLI）が消えた時点でそこより上のセッション本体への遡行が失敗し、消えて当然の使い捨てCLIを「オーケストレーターセッション本体」と誤認して、オーケストレーターが生きているにもかかわらず起動直後（3スキャン周期以内）に自滅する実障害があった。この理由により、この解決処理を子（`inbox-supervisor.js`）側に戻す変更は行わないこと。
+**dead-man's switch（親セッション死活監視）が監視するPIDは、起動を呼び出した`spawn-worker.js`/`msg-send.js`自身が、まだ生存しているうちに解決して`--session-pid`で明示的に子へ渡す。** `worker-supervisor.js`はdetachedかつfire-and-forgetで起動されるため、起動直後には呼び出し元（使い捨てのCLIプロセス）が既に終了していることがある。もし子自身に解決を委ねると、子の直近の親（=その使い捨てCLI）が消えた時点でそこより上のセッション本体への遡行が失敗し、消えて当然の使い捨てCLIを「オーケストレーターセッション本体」と誤認して、オーケストレーターが生きているにもかかわらず起動直後（3スキャン周期以内）に自滅する実障害があった。この理由により、この解決処理を子（`worker-supervisor.js`）側に戻す変更は行わないこと。
 
-**`migrate-records.js` の移行実行中は、inbox-supervisor の自動起動が一時的に抑制される（Issue #256）。** 移行対象の scope が `inbox-supervisor` または `all` のとき、移行ツール自身が稼働中の inbox-supervisor を検知・停止し、`.gh-maestro/.migration-in-progress` マーカー（所有プロセスの pid・起動時刻を記録）を立てて自動起動を抑止した状態で移行し、完了時にマーカーを削除する。マーカーが存在する間、`ensureInboxSupervisorRunning`（spawn-worker.js / msg-send.js 経由）は起動を見送る。マーカーは所有プロセスの生存を確認するため、移行プロセスが強制終了（クラッシュ・OS終了等）してマーカーが残った場合は stale として無視され、自動起動は永久に抑止されず自己回復する。移行後の再開は既存の自動起動機構が次に必要とした時点で行われるため、orchestrator・人間がプロセスを手動で止めたり立ち上げたりする必要はない。`--dry-run` では停止もマーカー作成も行われない（プレビューのみ）。
+**`migrate-records.js` の移行実行中は、worker-supervisor の自動起動が一時的に抑制される（Issue #256）。** 移行対象の scope が `worker-supervisor` または `all` のとき、移行ツール自身が稼働中の worker-supervisor を検知・停止し、`.gh-maestro/.migration-in-progress` マーカー（所有プロセスの pid・起動時刻を記録）を立てて自動起動を抑止した状態で移行し、完了時にマーカーを削除する。マーカーが存在する間、`ensureWorkerSupervisorRunning`（spawn-worker.js / msg-send.js 経由）は起動を見送る。マーカーは所有プロセスの生存を確認するため、移行プロセスが強制終了（クラッシュ・OS終了等）してマーカーが残った場合は stale として無視され、自動起動は永久に抑止されず自己回復する。移行後の再開は既存の自動起動機構が次に必要とした時点で行われるため、orchestrator・人間がプロセスを手動で止めたり立ち上げたりする必要はない。`--dry-run` では停止もマーカー作成も行われない（プレビューのみ）。
 
 ## resume配送の失敗
 
-workerへの配送のうち、**相手のプロセスが稼働中（作業中）で見送っているだけの状態は、いくら長引いても「失敗」としてカウントされない**（休止するまで無期限に待つ）。resumeを実際に試みて失敗した場合（worktree消失・プロセス起動失敗等）のみ、5回の指数バックオフ再試行の末に配送を諦める。workerに指示を送ったのに長時間反応しない場合、`.gh-maestro/inbox-supervisor-autostart.log`（自動起動時のログ）または起動元セッションのバックグラウンド出力を確認し、`DELIVERY_FAILED:<workerName>:<commentId>:resume-failed`（`pending`ではなく`resume-failed`であること）の有無とエラー内容を確認すること。
+workerへの配送のうち、**相手のプロセスが稼働中（作業中）で見送っているだけの状態は、いくら長引いても「失敗」としてカウントされない**（休止するまで無期限に待つ）。resumeを実際に試みて失敗した場合（worktree消失・プロセス起動失敗等）のみ、5回の指数バックオフ再試行の末に配送を諦める。workerに指示を送ったのに長時間反応しない場合、`.gh-maestro/worker-supervisor-autostart.log`（自動起動時のログ）または起動元セッションのバックグラウンド出力を確認し、`DELIVERY_FAILED:<workerName>:<commentId>:resume-failed`（`pending`ではなく`resume-failed`であること）の有無とエラー内容を確認すること。
 
 ## PR監視・Review Managerの再起動
 

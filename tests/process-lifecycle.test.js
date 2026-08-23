@@ -1508,21 +1508,21 @@ test('sweepRegistry: role lease 保持者および稼働中ワーカーは PID r
   fs.mkdirSync(leasesDir, { recursive: true });
 
   const residentPid = process.pid;
-  const residentPidFile = path.join(pidsDir, `inbox-supervisor.js-${residentPid}.json`);
-  const residentLeaseFile = path.join(leasesDir, 'resident-role-inbox-supervisor.json');
+  const residentPidFile = path.join(pidsDir, `worker-supervisor.js-${residentPid}.json`);
+  const residentLeaseFile = path.join(leasesDir, 'resident-role-worker-supervisor.json');
   const stalePidFile = path.join(pidsDir, 'stale.json');
 
-  // inbox-supervisor の PID registry 登録（workerName なし、表示・診断用）
+  // worker-supervisor の PID registry 登録（workerName なし、表示・診断用）
   fs.writeFileSync(residentPidFile, JSON.stringify({
     pid: residentPid,
-    script: 'inbox-supervisor.js',
+    script: 'worker-supervisor.js',
     startTime: MOCK_START_TIME,
   }));
 
-  // inbox-supervisor の role lease（排他の正本）
+  // worker-supervisor の role lease（排他の正本）
   fs.writeFileSync(residentLeaseFile, JSON.stringify({
     pid: residentPid,
-    workerName: 'inbox-supervisor',
+    workerName: 'worker-supervisor',
     startTime: MOCK_START_TIME,
   }));
 

@@ -4,13 +4,13 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { buildWorkerEnv } = require('../scripts/shared/worker-env');
 
-// buildWorkerEnv は初回起動（spawn-worker.js）と resume配送（inbox-supervisor.js）の両方で
+// buildWorkerEnv は初回起動（spawn-worker.js）と resume配送（worker-supervisor.js）の両方で
 // ワーカー起動envを組み立てる唯一の関数（Issue #269）。両経路が同じ値を注入できることを
 // 純粋関数として決定的に検証する。
 //
 // 注: ここで検証するのは「マージ入力」の形だけであり、ワーカーが実際に受け取る最終env
 // （`{ ...process.env, ...launchEnv }` のマージ結果）ではない。親から継承した値の除去まで
-// 含めた最終envは、spawn境界（headless-launch.test.js）とresume境界（inbox-supervisor.test.js）
+// 含めた最終envは、spawn境界（headless-launch.test.js）とresume境界（worker-supervisor.test.js）
 // のテストで検証する。ここでは「baseBranch 未指定時にキーを『含めない』ではなく『空文字で
 // 上書きする』」こと（= マージで親の値が残らない）を純粋関数の契約として固定する。
 

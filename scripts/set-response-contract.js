@@ -50,7 +50,7 @@ Output (stdout):
 Description:
   orchestratorがコーダー/シニアコーダーの計画を承認し実装フェーズに進める際に、
   msg-send.js で承認指示を送る前にこのスクリプトで応答契約を設定する。
-  契約は inbox-supervisor.js が resume 時に読み取り、設定された完了シグナル
+  契約は worker-supervisor.js が resume 時に読み取り、設定された完了シグナル
   （メッセージ送信 または PR作成）に基づいて代理送信の要否を判定する。`;
 
 function main(argsOverride) {

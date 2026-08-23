@@ -49,7 +49,7 @@ function findWorkspaceFromCwd() {
  * こうして無効化を resolveWorkspace() 側で一元化することで、この関数の戻り値を
  * `if (!workspace) { ...エラー...; process.exit(1); }` という既存の定型パターンで
  * 使っている全呼び出し元（poll-pr.js / poll-reviews.js / msg-poll.js /
- * inbox-supervisor.js 等）が、個別に try/catch を書かなくても自動的に
+ * worker-supervisor.js 等）が、個別に try/catch を書かなくても自動的に
  * 「ワークスペースを解決できません」という通常のエラーパスへ倒れる
  * （process-lifecycle.js の pidsDir()/legacyPidsDir() 内の assertValidWorkspace throw を、
  * 呼び出し側ごとに捕捉し忘れるリスクを構造的に無くす）。

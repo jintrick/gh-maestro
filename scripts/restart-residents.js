@@ -14,12 +14,12 @@ Usage:
 Options:
   --workspace <path>  ワークスペース（省略時は GH_MAESTRO_WORKSPACE env または
                       CWDからの .gh-maestro/ 上方探索で解決）
-  --session-pid <pid> inbox-supervisorのregistry引数と対象プロセス親チェーンから
+  --session-pid <pid> worker-supervisorのregistry引数と対象プロセス親チェーンから
                       PIDを解決できない旧形式に限るフォールバック。
   --help, -h          このヘルプを表示する
 
 対象:
-  inbox-supervisor.js / msg-poll.js（orchestrator）/ poll-pr.js / poll-reviews.js
+  worker-supervisor.js / msg-poll.js（orchestrator）/ poll-pr.js / poll-reviews.js
 
 Output (stdout):
   RESIDENT script=<name> status=replaced|monitor-required|delegated|not-running|failed ...
@@ -28,9 +28,9 @@ Output (stdout):
   poll-pr.js が poll-reviews.js を子として起動する構成では、後者は delegated と出力する。
 
 副作用:
-  PIDと起動時刻の同一性を確認できた対象だけを停止する。inbox-supervisorは現行
+  PIDと起動時刻の同一性を確認できた対象だけを停止する。worker-supervisorは現行
   scripts/ 配下からdetached起動し、Monitor常駐3種はMonitorからの再接続を要求する。
-  inbox-supervisorの起動ログは <workspace>/.gh-maestro/resident-restart-logs/ に追記する。
+  worker-supervisorの起動ログは <workspace>/.gh-maestro/resident-restart-logs/ に追記する。
   registryの読み取り・停止・起動確認に失敗した場合は、未確認のプロセスを削除せず終了コード1を返す。`;
 
 function parsePositivePid(value) {

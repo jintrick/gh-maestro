@@ -7,7 +7,7 @@ paths:
 # 常駐プロセスの起動・排他制御はマルチプロセス前提で書く
 
 `msg-send.js` は orchestrator だけが叩くものではない。ワーカーが報告を投稿するときにも、
-inbox-supervisor が配送断念通知・居座り通知を送るときにも実行される。`spawn-worker.js` と
+worker-supervisor が配送断念通知・居座り通知を送るときにも実行される。`spawn-worker.js` と
 `msg-send.js` が別プロセスとして同時に走る状況は実際に発生する。
 
 したがって「orchestrator が逐次的に呼ぶ」というシングルアクターの実行モデルを前提にしてはならない。

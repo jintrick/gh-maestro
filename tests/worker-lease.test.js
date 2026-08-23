@@ -657,7 +657,7 @@ test('シナリオ: staleロック保持者がいる場合、死亡していれ�
 const storageLayout = require('../scripts/shared/storage-layout');
 
 test('roleLeaseKey: Windows パス無効文字をアンダースコアへ置換する', () => {
-  assert.equal(lease.roleLeaseKey('inbox-supervisor'), 'resident-role-inbox-supervisor');
+  assert.equal(lease.roleLeaseKey('worker-supervisor'), 'resident-role-worker-supervisor');
   assert.equal(lease.roleLeaseKey('msgpoll-orchestrator'), 'resident-role-msgpoll-orchestrator');
   // Windows のファイル名に使えない文字が混入しても安全なキーになる
   assert.equal(lease.roleLeaseKey('a/b:c*d?e"f<g>h|i'), 'resident-role-a_b_c_d_e_f_g_h_i');
@@ -676,20 +676,20 @@ test('acquireResidentLease: live lease が無ければ取得して自PIDでア�
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
   try {
     mockLiveness({ alive: true });
-    const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor' });
+    const res = lease.acquireResidentLease({ workspace: tmp, role: 'worker-supervisor' });
     try {
       assert.equal(res.acquired, true);
       const canonical = storageLayout.canonicalWorkspace(tmp);
       const entry = JSON.parse(fs.readFileSync(
-        path.join(canonical, '.gh-maestro', 'leases', lease.roleLeaseKey('inbox-supervisor') + '.json'), 'utf8'));
+        path.join(canonical, '.gh-maestro', 'leases', lease.roleLeaseKey('worker-supervisor') + '.json'), 'utf8'));
       // 起動元（launcher）ではなく、実際に稼働するプロセス自身のPID/startTime を記録する
       assert.equal(entry.pid, process.pid);
       assert.equal(entry.phase, 'active');
-      assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'inbox-supervisor' }), true);
+      assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'worker-supervisor' }), true);
     } finally {
       res.release();
     }
-    assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'inbox-supervisor' }), false);
+    assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'worker-supervisor' }), false);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -713,7 +713,7 @@ test('acquireResidentLease: アクティベート（update）失敗時も警告�
     };
     console.warn = (msg) => { warnings.push(String(msg)); };
     try {
-      const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor' });
+      const res = lease.acquireResidentLease({ workspace: tmp, role: 'worker-supervisor' });
       try {
         assert.equal(res.acquired, true);
         // 黙って素通りせず、アクティベート失敗が警告されている
@@ -722,16 +722,16 @@ test('acquireResidentLease: アクティベート（update）失敗時も警告�
         // リース本体は acquireLease で作成済みのまま残る（phase は initializing のまま）
         const canonical = storageLayout.canonicalWorkspace(tmp);
         const entry = JSON.parse(fs.readFileSync(
-          path.join(canonical, '.gh-maestro', 'leases', lease.roleLeaseKey('inbox-supervisor') + '.json'), 'utf8'));
+          path.join(canonical, '.gh-maestro', 'leases', lease.roleLeaseKey('worker-supervisor') + '.json'), 'utf8'));
         assert.equal(entry.pid, process.pid);
         assert.equal(entry.phase, 'initializing');
         // 稼働中は正しく live とみなされ、重複起動防止は維持される
-        assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'inbox-supervisor' }), true);
+        assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'worker-supervisor' }), true);
       } finally {
         res.release();
       }
       // クリーン終了時はリースが解放される
-      assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'inbox-supervisor' }), false);
+      assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'worker-supervisor' }), false);
     } finally {
       fs.renameSync = origRenameSync;
       console.warn = origWarn;
@@ -748,12 +748,12 @@ test('acquireResidentLease: live lease があれば lock-denied を監査記録�
     const canonical = storageLayout.canonicalWorkspace(tmp);
     const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
     fs.mkdirSync(leasesDir, { recursive: true });
-    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
-      pid: 424242, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
+      pid: 424242, startTime: '2026-07-29T00:00:00.424Z', workerName: 'worker-supervisor', phase: 'active',
     }), 'utf8');
 
     assert.throws(
-      () => lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor' }),
+      () => lease.acquireResidentLease({ workspace: tmp, role: 'worker-supervisor' }),
       /重複起動できません/
     );
 
@@ -762,7 +762,7 @@ test('acquireResidentLease: live lease があれば lock-denied を監査記録�
     const events = residentAudit.listUnprocessedResidentAuditEvents(canonical);
     const denied = events.filter(e => e.event.type === 'lock-denied');
     assert.equal(denied.length, 1);
-    assert.equal(denied[0].event.role, 'inbox-supervisor');
+    assert.equal(denied[0].event.role, 'worker-supervisor');
     assert.equal(denied[0].event.detail.ownerPid, 424242);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -776,13 +776,13 @@ test('acquireResidentLease: workspace 表記の差異（末尾スラッシュ）
     const canonical = storageLayout.canonicalWorkspace(tmp);
     const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
     fs.mkdirSync(leasesDir, { recursive: true });
-    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
-      pid: 424242, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
+      pid: 424242, startTime: '2026-07-29T00:00:00.424Z', workerName: 'worker-supervisor', phase: 'active',
     }), 'utf8');
 
     // 生パスと「末尾スラッシュ付き」の表記が異なっても、同じ canonical へ正規化され同一排他領域になる
     assert.throws(
-      () => lease.acquireResidentLease({ workspace: tmp + path.sep, role: 'inbox-supervisor' }),
+      () => lease.acquireResidentLease({ workspace: tmp + path.sep, role: 'worker-supervisor' }),
       /重複起動できません/
     );
   } finally {
@@ -805,13 +805,13 @@ test('acquireResidentLease: --force は既存所有者を停止させて同じ l
     const canonical = storageLayout.canonicalWorkspace(tmp);
     const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
     fs.mkdirSync(leasesDir, { recursive: true });
-    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
-      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
+      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'worker-supervisor', phase: 'active',
     }), 'utf8');
 
     const res = lease.acquireResidentLease({
       workspace: tmp,
-      role: 'inbox-supervisor',
+      role: 'worker-supervisor',
       handoff: true,
       deadlineMs: 1000,
       env: { GH_MAESTRO_WORKER: 'orchestrator' },
@@ -844,13 +844,13 @@ test('acquireResidentLease: startTime 欠落の細工リースは --force の停
     const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
     fs.mkdirSync(leasesDir, { recursive: true });
     // 攻撃者が workspace に置ける細工リース: startTime 無し・PID のみ
-    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
-      pid: ownerPid, workerName: 'inbox-supervisor', phase: 'active',
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
+      pid: ownerPid, workerName: 'worker-supervisor', phase: 'active',
     }), 'utf8');
 
     const res = lease.acquireResidentLease({
       workspace: tmp,
-      role: 'inbox-supervisor',
+      role: 'worker-supervisor',
       handoff: true,
       deadlineMs: 50,
       env: { GH_MAESTRO_WORKER: 'orchestrator' },
@@ -878,11 +878,11 @@ test('acquireResidentLease: --force でも所有者が終了しなければ期�
     const canonical = storageLayout.canonicalWorkspace(tmp);
     const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
     fs.mkdirSync(leasesDir, { recursive: true });
-    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
-      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
+      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'worker-supervisor', phase: 'active',
     }), 'utf8');
 
-    const res = lease.acquireResidentLease({ workspace: tmp, role: 'inbox-supervisor', handoff: true, deadlineMs: 50, env: { GH_MAESTRO_WORKER: 'orchestrator' } });
+    const res = lease.acquireResidentLease({ workspace: tmp, role: 'worker-supervisor', handoff: true, deadlineMs: 50, env: { GH_MAESTRO_WORKER: 'orchestrator' } });
     assert.equal(res.acquired, false);
     assert.equal(res.reason, 'handoff-timeout');
     assert.equal(res.ownerPid, ownerPid);
@@ -907,14 +907,14 @@ test('acquireResidentLease: GH_MAESTRO_WORKER がワーカー名のときは han
     const canonical = storageLayout.canonicalWorkspace(tmp);
     const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
     fs.mkdirSync(leasesDir, { recursive: true });
-    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
-      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
+      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'worker-supervisor', phase: 'active',
     }), 'utf8');
 
     assert.throws(
       () => lease.acquireResidentLease({
         workspace: tmp,
-        role: 'inbox-supervisor',
+        role: 'worker-supervisor',
         handoff: true,
         env: { GH_MAESTRO_WORKER: 'issue-384-coder-force-guard' },
       }),
@@ -938,14 +938,14 @@ test('acquireResidentLease: GH_MAESTRO_WORKER が未設定のときは handoff �
     const canonical = storageLayout.canonicalWorkspace(tmp);
     const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
     fs.mkdirSync(leasesDir, { recursive: true });
-    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('inbox-supervisor') + '.json'), JSON.stringify({
-      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'inbox-supervisor', phase: 'active',
+    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
+      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'worker-supervisor', phase: 'active',
     }), 'utf8');
 
     assert.throws(
       () => lease.acquireResidentLease({
         workspace: tmp,
-        role: 'inbox-supervisor',
+        role: 'worker-supervisor',
         handoff: true,
         env: {},
       }),

@@ -4,7 +4,7 @@
 // 責務:
 //   契約ファイル（.gh-maestro/records/<owner>/<id>/workers/<worker>/contract.json）の
 //   読み書きと削除。契約のビジネスロジック（充足判定）は持たない（それは worker-exit-hook.js の責務）。
-//   契約のライフサイクル管理（いつクリアするか）も持たない（それは inbox-supervisor.js の責務）。
+//   契約のライフサイクル管理（いつクリアするか）も持たない（それは worker-supervisor.js の責務）。
 //
 // 契約型:
 //   message-required（既定）: msg-send.js による明示的返信のみで充足

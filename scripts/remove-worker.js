@@ -200,7 +200,7 @@ function main(argv = process.argv.slice(2)) {
     }
   }
 
-  // ── inbox-supervisor カーソルの削除 ─────────────────────────────────────
+  // ── worker-supervisor カーソルの削除 ─────────────────────────────────────
   // ワーカー宛てメッセージの処理カーソルを削除する。ワーカーが消えた以上、この
   // カーソルは以後使われない（ベストエフォート、ENOENT は成功扱い。Issue #248 項目6）。
   {
@@ -210,11 +210,11 @@ function main(argv = process.argv.slice(2)) {
       });
       if (existsSync(cursorFile)) {
         rmSync(cursorFile);
-        console.warn(`remove-worker: inbox-supervisor cursor "${workerName}.json" を削除しました`);
+        console.warn(`remove-worker: worker-supervisor cursor "${workerName}.json" を削除しました`);
       }
     } catch (e) {
       if (e.code !== 'ENOENT') {
-        console.warn(`remove-worker: inbox-supervisor cursor 削除に失敗しました（ワーカー削除は続行します）: ${e.message}`);
+        console.warn(`remove-worker: worker-supervisor cursor 削除に失敗しました（ワーカー削除は続行します）: ${e.message}`);
       }
     }
   }

@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const supervisor = require('../scripts/inbox-supervisor');
+const supervisor = require('../scripts/worker-supervisor');
 const { spawnSync } = require('../scripts/shared/child-process');
 const headlessLaunch = require('../scripts/shared/headless-launch');
 const workerLease = require('../scripts/shared/worker-lease');
@@ -207,7 +207,7 @@ describe('CLI usage', () => {
   test('--help が usage を返して code 0', () => {
     const r = runMain(['--help']);
     assert.equal(r.code, 0);
-    assert.ok(r.lines.join('\n').includes('inbox-supervisor.js'));
+    assert.ok(r.lines.join('\n').includes('worker-supervisor.js'));
     assert.equal(r.errLines.length, 0);
     assert.equal(r.runOnce, null);
   });
@@ -215,7 +215,7 @@ describe('CLI usage', () => {
   test('-h が usage を返して code 0', () => {
     const r = runMain(['-h']);
     assert.equal(r.code, 0);
-    assert.ok(r.lines.join('\n').includes('inbox-supervisor.js'));
+    assert.ok(r.lines.join('\n').includes('worker-supervisor.js'));
     assert.equal(r.runOnce, null);
   });
 });
@@ -996,8 +996,8 @@ describe('runOnce scan and deliver cycle', () => {
       r.runOnce();
 
       const lastLine = r.lines[r.lines.length - 1];
-      assert.equal(lastLine, 'SCAN_END:0:0 source=inbox-supervisor.js scope=worker-delivery-scan workers=0 detected=0 orchestrator-inbox=separate-msg-poll.js');
-      assert.equal(r.lines[0], 'SCAN_START source=inbox-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js');
+      assert.equal(lastLine, 'SCAN_END:0:0 source=worker-supervisor.js scope=worker-delivery-scan workers=0 detected=0 orchestrator-inbox=separate-msg-poll.js');
+      assert.equal(r.lines[0], 'SCAN_START source=worker-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js');
     });
   });
 
@@ -1026,7 +1026,7 @@ describe('runOnce scan and deliver cycle', () => {
 
         const r = runMain(['--workspace', dir]);
         assert.equal(r.code, 0);
-        const leaseFile = path.join(dir, '.gh-maestro', 'leases', 'resident-role-inbox-supervisor.json');
+        const leaseFile = path.join(dir, '.gh-maestro', 'leases', 'resident-role-worker-supervisor.json');
         assert.ok(fs.existsSync(leaseFile), 'role lease ファイルが作成される');
 
         // runOnce 1回で死のスイッチ発火 → lease 解放 + exit 3
@@ -1034,8 +1034,8 @@ describe('runOnce scan and deliver cycle', () => {
         assert.equal(exitCode, PARENT_DEATH_EXIT_CODE, '死のスイッチは exit 3 で終了する');
         assert.equal(fs.existsSync(leaseFile), false, '死のスイッチ経路で role lease が解放される（受け入れ条件1）');
         assert.ok(
-          stderrLines.some(l => l.includes('inbox-supervisor.js') && l.includes(`pid ${TEST_SESSION_PID}`)),
-          `stderr に inbox-supervisor.js と sessionPid が出力される: ${stderrLines.join('|')}`
+          stderrLines.some(l => l.includes('worker-supervisor.js') && l.includes(`pid ${TEST_SESSION_PID}`)),
+          `stderr に worker-supervisor.js と sessionPid が出力される: ${stderrLines.join('|')}`
         );
       } finally {
         process.stderr.write = origStderr;
@@ -1960,7 +1960,7 @@ describe('Hang detection', () => {
       const events = residentAudit.listUnprocessedResidentAuditEvents(dir);
       assert.equal(events.length, 1);
       assert.equal(events[0].event.type, 'notification');
-      assert.equal(events[0].event.role, 'inbox-supervisor');
+      assert.equal(events[0].event.role, 'worker-supervisor');
       assert.ok(events[0].event.detail.body.includes('ハング'));
     });
   });
@@ -2740,19 +2740,19 @@ describe('Cursor type safety', () => {
 const { spawnSync: realSpawnSync, spawn } = require('child_process');
 const { getProcessStartTime } = require('../scripts/process-lifecycle');
 
-const SUPERVISOR_SCRIPT = path.join(__dirname, '..', 'scripts', 'inbox-supervisor.js');
+const SUPERVISOR_SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-supervisor.js');
 
 // 排他の正本は role lease（Issue #240）。既存所有者を再現する live lease を
-// <workspace>/.gh-maestro/leases/resident-role-inbox-supervisor.json に書く。
+// <workspace>/.gh-maestro/leases/resident-role-worker-supervisor.json に書く。
 function writeLiveSupervisorLease(dir, pid, startTime) {
   const leasesDir = path.join(dir, '.gh-maestro', 'leases');
   fs.mkdirSync(leasesDir, { recursive: true });
-  fs.writeFileSync(path.join(leasesDir, 'resident-role-inbox-supervisor.json'), JSON.stringify({
-    pid, startTime, workerName: 'inbox-supervisor', phase: 'active',
+  fs.writeFileSync(path.join(leasesDir, 'resident-role-worker-supervisor.json'), JSON.stringify({
+    pid, startTime, workerName: 'worker-supervisor', phase: 'active',
   }), 'utf8');
 }
 
-/** ヘルパー: inbox-supervisor.js を子プロセスとして起動 */
+/** ヘルパー: worker-supervisor.js を子プロセスとして起動 */
 function runSupervisor(args, cwd, envOverride = {}) {
   // --session-pid を渡し、子プロセス側の親プロセスツリー探索（Windowsでは高コスト）を省く。
   // timeout はこのプロセス自体の処理時間ではなく、フルスイート実行時のシステム負荷下での
@@ -2778,7 +2778,7 @@ describe('CLI integration (subprocess)', () => {
       const r = runSupervisor(['--help'], dir);
       assert.equal(r.status, 0, `exit 0, got ${r.status}, stderr: ${r.stderr}`);
       assert.ok(r.stdout.includes('Usage'), `stdout should include Usage: ${r.stdout}`);
-      assert.ok(r.stdout.includes('inbox-supervisor.js'));
+      assert.ok(r.stdout.includes('worker-supervisor.js'));
     });
   });
 

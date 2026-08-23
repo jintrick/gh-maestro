@@ -151,7 +151,7 @@ test('restartCapturedResidents: 全体掃除後は捕捉済み常駐だけを立
   withTempDir(workspace => {
     const resident = {
       pid: 101,
-      script: 'inbox-supervisor.js',
+      script: 'worker-supervisor.js',
       workerName: null,
       workspace,
       startTime: 'old',
@@ -166,7 +166,7 @@ test('restartCapturedResidents: 全体掃除後は捕捉済み常駐だけを立
       spawn: (cmd, args) => {
         replacement = {
           pid: 200,
-          script: 'inbox-supervisor.js',
+          script: 'worker-supervisor.js',
           workerName: null,
           workspace,
           args: args.slice(1),
@@ -197,7 +197,7 @@ test('restartCapturedResidents: sweep後も旧常駐が生きている場合は�
   withTempDir(workspace => {
     const resident = {
       pid: 101,
-      script: 'inbox-supervisor.js',
+      script: 'worker-supervisor.js',
       workerName: null,
       workspace,
       startTime: 'old',

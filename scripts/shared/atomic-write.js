@@ -15,7 +15,7 @@
 // rename の短時間リトライ（Issue #250）:
 //   Windows では、他プロセスが対象ファイルを開いている（Zed 等のエディタが開いた
 //   state ファイルを掴んでいる）だけで rename が EPERM で失敗し、それが未捕捉例外に
-//   なると常駐プロセス（msg-poll.js / inbox-supervisor.js / assistant-watch.js）を
+//   なると常駐プロセス（msg-poll.js / worker-supervisor.js / assistant-watch.js）を
 //   クラッシュさせる。graceful-fs の Windows 向け polyfill（polyfills.js の fs.rename
 //   ラッパー）を参考に、EACCES/EPERM/EBUSY の間だけ合計予算の範囲でリトライする。
 //   ただし graceful-fs の 60 秒リトライは常駐プロセスの応答性を損なうため、
@@ -27,7 +27,7 @@
 //   実際に成功済み（エラーは誤検出）＝成功扱いで返す。
 //   このリトライが救えるのは一瞬の競合のみで、実機で確認した「開きっぱなし」の競合は
 //   予算を使い切って失敗する。それでもプロセスを止めないのは、各呼び出し元（msg-poll /
-//   inbox-supervisor / assistant-watch）の try-catch + 次サイクル再試行の責務であり、
+//   worker-supervisor / assistant-watch）の try-catch + 次サイクル再試行の責務であり、
 //   本モジュールはその失敗を「即時 throw」ではなく「短時間粘った後の throw」に変えるだけ。
 //   renameSyncWithRetry はエクスポートされており、ワーカーログ圧縮
 //   （strip-thinking-token-lines.js の compactWorkerLog）も同じ rename リトライを
@@ -49,7 +49,7 @@ const RENAME_RETRY_BACKOFF_STEP_MS = 10;
 const RENAME_RETRY_MAX_BACKOFF_MS = 100;
 
 // 同期sleep用の共有バッファ（Atomics.wait は SharedArrayBuffer 上の値待ちのみ可）。
-// inbox-supervisor.js の _sleep と同型。
+// worker-supervisor.js の _sleep と同型。
 const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
 function sleepSync(ms) {
   Atomics.wait(sleepBuffer, 0, 0, ms);

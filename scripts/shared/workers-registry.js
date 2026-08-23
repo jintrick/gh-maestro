@@ -1,7 +1,7 @@
 'use strict';
 // workers-registry.js — workers.json への書き込みヘルパー
 //
-// inbox-supervisor.js は元々 workers.json を読み取り専用で扱っていたが（loadWorkers()）、
+// worker-supervisor.js は元々 workers.json を読み取り専用で扱っていたが（loadWorkers()）、
 // resumeによるプロセス再起動後は新しいpid/startTimeを書き戻す必要がある。
 // spawn-worker.js の新規登録とは異なり、既存エントリのプロセス識別フィールドのみを
 // 更新する用途に絞った、最小限の共有ヘルパー。
@@ -105,7 +105,7 @@ function readWorkersRaw(workspace, {
  * @returns {boolean} エントリが存在し更新に成功した場合は true、エントリ不在の場合は false。
  *   readWorkersRaw の契約どおり、レジストリ破損・読み取り不能は throw する（Issue #275 項目1）。
  *   呼び出し側は false を「エントリ不在」として扱い、破損は例外として区別して報告すること。
- *   破損を false に潰すと、呼び出し側（inbox-supervisor の resume）が「ワーカーが見つから
+ *   破損を false に潰すと、呼び出し側（worker-supervisor の resume）が「ワーカーが見つから
  *   ない」と誤報告し、診断を誤誘導する。
  */
 function updateWorkerProcess(workspace, workerName, { pid, startTime = null, logPath = null }) {

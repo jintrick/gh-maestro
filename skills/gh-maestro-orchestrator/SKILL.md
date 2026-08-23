@@ -174,7 +174,7 @@ msg-poll が `未初期化です。reset-session.js で初期化してくださ�
 
 ### worker への指示配送（Inbox Supervisor）
 
-`msg-send.js` で送った追加指示は、worker のエージェント種別によらず `inbox-supervisor.js` が配送する。orchestrator が手動で介入する必要はない。
+`msg-send.js` で送った追加指示は、worker のエージェント種別によらず `worker-supervisor.js` が配送する。orchestrator が手動で介入する必要はない。
 
 **ただし作業中でまだ報告を出していない worker には追加指示を送れない。** `msg-send.js` が投稿せずに拒否し、本文をファイルへ退避する。作業中の worker は既に受け取った指示に基づいて動いており、そこへ追伸を足すと指示が分断され、worker は断片ごとに判断することになるからである。報告を待ち、その内容と退避した本文を統合して一度に送ること。ワーカーを終了させてから送る、`gh issue comment` で直接投稿する、といった迂回はしない（どちらも指示の分断とセッションの破壊を招く）。
 

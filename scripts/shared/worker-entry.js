@@ -11,7 +11,7 @@
 //     指せるようにするための識別子（resolveWorkerName 参照）。agentId は役割と1対1で
 //     ないため判別に使えない。
 //   baseBranch — このワーカーのPRのベースブランチ。初回起動（spawn-worker.js）が登録し、
-//     resume配送（inbox-supervisor.js）が GH_MAESTRO_BASE_BRANCH 環境変数として再注入する
+//     resume配送（worker-supervisor.js）が GH_MAESTRO_BASE_BRANCH 環境変数として再注入する
 //     ために使う（Issue #269）。本変更以前に起動したレガシーレコードには無い。
 //
 // レガシー: paneId / notifierPid は、WezTermペイン運用時代（Issue #151 以前）に

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 // worker-exit-hook.js
-// 全ワーカーの onExit フック（spawn-worker.js / inbox-supervisor.js が起動コマンド末尾に仕込む）。
+// 全ワーカーの onExit フック（spawn-worker.js / worker-supervisor.js が起動コマンド末尾に仕込む）。
 // エージェントプロセスが終了し、標準出力/標準エラーのログfdが閉じた後に、その終了コードを
 // 引数末尾に付けてheadless-shimから呼ばれる。
 //   1. ワーカーログから thinking_tokens 進捗イベント行（claude-ds系が大量出力する
@@ -21,7 +21,7 @@
 //
 // Usage (フック側が仕込む固定形):
 //   node worker-exit-hook.js <workspace> <execution-id|""> [<log-path> <since-timestamp> <log-offset> [<contract-spec-json>]] <exit-code>
-//   log-path/since-timestamp/log-offset は resume 起動（inbox-supervisor.js）時のみ渡される。
+//   log-path/since-timestamp/log-offset は resume 起動（worker-supervisor.js）時のみ渡される。
 //   新規起動（spawn-worker.js）では渡されず、3.は動作しない。
 //   contract-spec-json は応答契約（artifact-or-message 等）のJSON文字列。resume時のみ。
 //   存在しないか空文字列の場合は従来通り message-required として動作する。
@@ -74,7 +74,7 @@ const MAX_RELAY_CHARS = 8000;
 
 /**
  * ISO 8601 タイムスタンプを秒精度に正規化する（ミリ秒部分を除去）。
- * gh pr list の createdAt は秒精度だが inbox-supervisor の sinceTimestamp は
+ * gh pr list の createdAt は秒精度だが worker-supervisor の sinceTimestamp は
  * ミリ秒精度（new Date().toISOString()）のため、同一秒内の文字列比較で
  * 精度差による誤判定が起きるのを防ぐ。
  *

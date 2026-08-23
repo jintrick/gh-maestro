@@ -12,7 +12,12 @@ const { readWorkersRaw } = require('./shared/workers-registry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { getAssistant } = require('./shared/assistants-registry');
 const { markMigrationInProgress, clearMigrationInProgress } = require('./shared/migration-marker');
-const { runningInboxSupervisorPids, stopRunningInboxSupervisors } = require('./shared/inbox-supervisor-control');
+const {
+  runningInboxSupervisorPids,
+  stopRunningInboxSupervisors,
+  SUPERVISOR_MIGRATION_SCOPES,
+  isWorkerSupervisorMigrationScope,
+} = require('./shared/worker-supervisor-control');
 const {
   ARTIFACTS, assertWithinRoot, legacyWorkerOwner, recordPath, recordRoot,
 } = require('./shared/record-paths');
@@ -20,7 +25,7 @@ const {
 const USAGE = `migrate-records.js — 旧配置の番号所有レコードを records/ 配下へ移動する
 
 Usage: node migrate-records.js [--workspace <path>] [--dry-run]
-                              [--scope <all|worker-log|review-manager|inbox-supervisor|assistant-watch>]
+                              [--scope <all|worker-log|review-manager|worker-supervisor|inbox-supervisor|assistant-watch>]
 
 Options:
   --workspace <path>  対象ワークスペース（省略時は共通workspace解決規則を使用）
@@ -31,7 +36,7 @@ Options:
 出力分類: moved, already-migrated, held, conflict, unparseable, unprocessed。
 対象は指定workspaceの .gh-maestro/ 配下だけで、記録内容・保持期間・削除条件は変更しない。
 
---scope が inbox-supervisor または all の場合:
+--scope が worker-supervisor（旧名 inbox-supervisor）または all の場合:
   - 稼働中の inbox-supervisor を検知し、ツール自身が停止してから移行する
     （--dry-run では停止せず、notices に「実実行時に停止する」旨を出す）
   - 実行中は .gh-maestro/.migration-in-progress マーカーを作成して inbox-supervisor の
@@ -40,7 +45,7 @@ assistant-watch は、対象issueのassistantが assistants.json に登録され
 held（assistant agent is running）となり移行しない（対話型assistantは強制終了しない）。
 出力JSONには notices 配列が含まれ、プロセスの停止・検知情報が記録される。`;
 
-const SCOPES = new Set(['all', 'worker-log', 'review-manager', 'inbox-supervisor', 'assistant-watch']);
+const SCOPES = new Set(['all', 'worker-log', 'review-manager', ...SUPERVISOR_MIGRATION_SCOPES, 'assistant-watch']);
 
 function result() {
   return { moved: [], alreadyMigrated: [], held: [], conflicts: [], unparseable: [], unprocessed: [] };
@@ -219,7 +224,7 @@ function planMigration(workspace, scope, { dryRun = false } = {}) {
   if (scope === 'all' || scope === 'worker-log') processFiles(path.join(gh, 'worker-logs'), 'worker-log');
   if (scope === 'all' || scope === 'review-manager') processFiles(gh, 'review-manager');
   if (scope === 'all' || scope === 'assistant-watch') processFiles(path.join(gh, 'assistant-watch'), 'assistant-watch');
-  if (scope === 'all' || scope === 'inbox-supervisor') {
+  if (scope === 'all' || isWorkerSupervisorMigrationScope(scope)) {
     processFiles(path.join(gh, 'inbox-supervisor', 'cursors'), 'inbox-supervisor');
     processFiles(path.join(gh, 'inbox-supervisor', 'contracts'), 'inbox-supervisor');
   }
@@ -238,7 +243,7 @@ function printResult(workspace, scope, dryRun, out, notices = []) {
 }
 
 function shouldControlInboxSupervisor(scope) {
-  return scope === 'all' || scope === 'inbox-supervisor';
+  return scope === 'all' || isWorkerSupervisorMigrationScope(scope);
 }
 
 /**

@@ -1,7 +1,7 @@
 'use strict';
 // ensure-resident-daemon.js
 //
-// 常駐デーモン（inbox-supervisor.js, msg-poll.js orchestrator 等）の自動起動共通基盤。
+// 常駐デーモン（worker-supervisor.js, msg-poll.js orchestrator 等）の自動起動共通基盤。
 //
 // 稼働中でなければ detached プロセスとして自動起動する。
 // エージェントの記憶に頼らず、決定的なコード（spawn-worker.js / msg-send.js 等）から
@@ -179,10 +179,12 @@ function createDaemonHooks() {
  * @param {object} params
  * @param {string} params.workspace   - ワークスペース絶対パス
  * @param {string} params.scriptsPath - スクリプトが置かれているディレクトリ
- * @param {string} params.scriptName  - スクリプトファイル名（例: 'inbox-supervisor.js'）
+ * @param {string} params.scriptName  - スクリプトファイル名（例: 'worker-supervisor.js'）
  * @param {string} [params.role]      - role lease名（指定時のみlease確認を行う）
- * @param {string} params.logFileName - ログファイル名（例: 'inbox-supervisor-autostart.log'）
- * @param {string} params.attemptName - 試行記録識別名（例: 'inbox-supervisor'）
+ * @param {string} params.logFileName - ログファイル名（例: 'worker-supervisor-autostart.log'）
+ * @param {string} params.attemptName - 試行記録識別名（例: 'worker-supervisor'）
+ * @param {string[]} [params.legacyScriptNames] - 改名前の常駐script名（移行期間のみ検知）
+ * @param {string[]} [params.legacyRoles] - 改名前のrole名（移行期間のみ検知）
  * @param {function} [params.buildArgs] - 引数構築関数 `({ workspace, sessionPid }) => string[]`
  * @param {object} [params.hooks]     - テスト用フックオブジェクト（createDaemonHooks 由来）
  */
@@ -193,6 +195,8 @@ function ensureResidentDaemon({
   role = null,
   logFileName,
   attemptName,
+  legacyScriptNames = [],
+  legacyRoles = [],
   buildArgs,
   hooks = null,
 }) {
@@ -205,11 +209,13 @@ function ensureResidentDaemon({
   const checkLease = hooks ? hooks.getIsResidentLeaseLive() : isResidentLeaseLive;
 
   try {
-    if (findRunning(workspace, { script: scriptName, workerName: null })) {
+    const scriptNames = [scriptName, ...legacyScriptNames];
+    if (scriptNames.some((script) => findRunning(workspace, { script, workerName: null }))) {
       clearAutostartAttempt(workspace, attemptName);
       return;
     }
-    if (role && checkLease({ workspace, role })) {
+    const roles = role ? [role, ...legacyRoles] : legacyRoles;
+    if (roles.some((candidate) => checkLease({ workspace, role: candidate }))) {
       clearAutostartAttempt(workspace, attemptName);
       return;
     }

@@ -268,8 +268,8 @@ test('collectHousekeepingExclusions: 生存プロセスの PID を pids 集合�
     liveness._setIsProcessAlive((pid) => pid === 1001);
 
     // 2. lease 由来 (resident role lease を含む)
-    fs.writeFileSync(path.join(leasesDir, 'resident-role-inbox-supervisor.json'), JSON.stringify({
-      pid: 2002, startTime: '2025-01-01T00:00:00.000Z', workerName: 'inbox-supervisor',
+    fs.writeFileSync(path.join(leasesDir, 'resident-role-worker-supervisor.json'), JSON.stringify({
+      pid: 2002, startTime: '2025-01-01T00:00:00.000Z', workerName: 'worker-supervisor',
     }));
     lease._setIsProcessAlive((pid) => pid === 2002);
     lease._setVerifyProcessIdentity(() => ({ match: true }));
@@ -280,7 +280,7 @@ test('collectHousekeepingExclusions: 生存プロセスの PID を pids 集合�
 
     const { workerNames, reviewPrs, pids } = che.collectHousekeepingExclusions(ws);
     assert.ok(workerNames.has('worker-1'));
-    assert.ok(workerNames.has('inbox-supervisor'));
+    assert.ok(workerNames.has('worker-supervisor'));
     assert.ok(reviewPrs.has('42'));
     assert.ok(pids.has(1001), 'workers.json の生存 PID（文字列から正規化）が含まれること');
     assert.ok(pids.has(2002), 'lease の生存 PID（文字列から正規化）が含まれること');
