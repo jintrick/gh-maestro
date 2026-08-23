@@ -649,11 +649,15 @@ test('死のスイッチ発火時: role lease を解放し exit 3 で終了す�
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
 
     const stderrLines = [];
+    let capturedExpectedStartTime;
     const origStderr = process.stderr.write;
     try {
       // 死のスイッチを常時「死」と判定させる。checkParent は main() 内で生成されるため
       // runMain より前に注入する（_setParentDeathExit は sentinel 例外で抜ける）。
-      msgPoll._setCreateDeadManSwitch(() => () => false);
+      msgPoll._setCreateDeadManSwitch((_pid, options) => {
+        capturedExpectedStartTime = options.expectedStartTime;
+        return () => false;
+      });
       let exitCode = null;
       msgPoll._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
       process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
@@ -661,6 +665,8 @@ test('死のスイッチ発火時: role lease を解放し exit 3 で終了す�
       // 継続モード（--once なし）で起動 → orchestrator の role lease を取得する
       const r = runMain(['orchestrator', '--workspace', workspace]);
       assert.equal(r.code, 0);
+      assert.equal(capturedExpectedStartTime, TEST_SESSION_START_TIME,
+        'main() が捕捉した起動時刻を createDeadManSwitch に渡す');
       const leaseFile = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json');
       assert.ok(fs.existsSync(leaseFile), '継続モードで role lease ファイルが作成される');
 

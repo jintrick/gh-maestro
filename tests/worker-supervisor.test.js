@@ -1024,17 +1024,23 @@ describe('runOnce scan and deliver cycle', () => {
     withTempDir((dir) => {
       setupWorkspace(dir);
       const stderrLines = [];
+      let capturedExpectedStartTime;
       const origStderr = process.stderr.write;
       try {
         // 死のスイッチを常時「死」と判定させる。checkParent は main() 内で生成されるため
         // runMain より前に注入する（_setParentDeathExit は sentinel 例外で抜ける）。
-        supervisor._setCreateDeadManSwitch(() => () => false);
+        supervisor._setCreateDeadManSwitch((_pid, options) => {
+          capturedExpectedStartTime = options.expectedStartTime;
+          return () => false;
+        });
         let exitCode = null;
         supervisor._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
         process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
 
         const r = runMain(['--workspace', dir]);
         assert.equal(r.code, 0);
+        assert.equal(capturedExpectedStartTime, TEST_SESSION_START_TIME,
+          'main() が捕捉した起動時刻を createDeadManSwitch に渡す');
         const leaseFile = path.join(dir, '.gh-maestro', 'leases', 'resident-role-worker-supervisor.json');
         assert.ok(fs.existsSync(leaseFile), 'role lease ファイルが作成される');
 
