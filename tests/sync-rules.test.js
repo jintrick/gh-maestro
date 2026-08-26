@@ -220,3 +220,56 @@ test('syncRules: 同期成功時に既存の .gh-maestro/sync-failures/sync-rule
     assert.ok(!fs.existsSync(failureFile), '同期成功後に sync-rules.yaml が削除されていること');
   });
 });
+
+test('syncRules: fs例外（.agents/rules がファイルで mkdir/write 失敗）でも recordSyncFailure が呼ばれて記録が残る', () => {
+  withGitWorkspace(base => {
+    const src = path.join(base, '.claude', 'rules');
+    fs.mkdirSync(src, { recursive: true });
+    fs.writeFileSync(path.join(src, 'rule.md'),
+      `---\npaths:\n  - "src/**/*.js"\n---\n\nbody text`);
+
+    // .agents ディレクトリ内に rules を通常ファイルとして作成（mkdirSyncがEEXIST / ENOTDIRで失敗する）
+    fs.mkdirSync(path.join(base, '.agents'), { recursive: true });
+    fs.writeFileSync(path.join(base, '.agents', 'rules'), 'not-a-directory');
+
+    const r = runScript(base);
+    assert.notEqual(r.status, 0);
+
+    const failureFile = path.join(base, '.gh-maestro', 'sync-failures', 'sync-rules.yaml');
+    assert.ok(fs.existsSync(failureFile), 'fs例外時にも sync-rules.yaml が生成されていること');
+    const content = fs.readFileSync(failureFile, 'utf8');
+    assert.match(content, /^error:\s*".*"/m);
+  });
+});
+
+test('pre-commit フック経由: .claude/rules/ 配下の同期失敗でもコミットは成立し、sync-rules.yaml が生成される', () => {
+  withGitWorkspace(base => {
+    // フック配置（.githooks/pre-commit 相当）
+    const hooksDir = path.join(base, '.git', 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    const preCommitHook = path.join(hooksDir, 'pre-commit');
+    fs.writeFileSync(preCommitHook, [
+      '#!/bin/sh',
+      `node "${SCRIPT.split(path.sep).join('/')}" || true`,
+    ].join('\n'), 'utf8');
+    try { fs.chmodSync(preCommitHook, 0o755); } catch {}
+
+    // 不正なルールの追加
+    const rulesDir = path.join(base, '.claude', 'rules');
+    fs.mkdirSync(rulesDir, { recursive: true });
+    fs.writeFileSync(path.join(rulesDir, 'invalid-rule.md'), '# No frontmatter');
+
+    const env = { ...process.env };
+    delete env.GH_MAESTRO_WORKSPACE;
+    const git = (...args) => spawnSync('git', args, { cwd: base, env, encoding: 'utf8' });
+    git('add', '.claude/rules');
+    const commitRes = git('commit', '-m', 'commit with invalid rule');
+
+    // コミットは成立する
+    assert.equal(commitRes.status, 0, `同期失敗でもコミットが成立すること: ${commitRes.stderr}`);
+
+    // sync-rules.yaml が生成されていること
+    const failureFile = path.join(base, '.gh-maestro', 'sync-failures', 'sync-rules.yaml');
+    assert.ok(fs.existsSync(failureFile), 'コミット成立後も sync-rules.yaml が生成されていること');
+  });
+});

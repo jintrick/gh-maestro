@@ -148,16 +148,32 @@ test('syncAgentsMd: 同期成功時に既存の .gh-maestro/sync-failures/sync-a
   });
 });
 
+test('syncAgentsMd: fs例外（CLAUDE.md書き込み失敗等）でも recordSyncFailure が呼ばれて記録が残る', () => {
+  withGitWorkspace(base => {
+    fs.writeFileSync(path.join(base, 'AGENTS.md'), '# Agent Guide\n\nrule');
+    // CLAUDE.md をディレクトリとして作成しておくことで writeFileSync が EISDIR / EPERM で失敗する
+    fs.mkdirSync(path.join(base, 'CLAUDE.md'));
+
+    const r = runScript(base);
+    assert.notEqual(r.status, 0);
+
+    const failureFile = path.join(base, '.gh-maestro', 'sync-failures', 'sync-agents-md.yaml');
+    assert.ok(fs.existsSync(failureFile), 'fs例外時にも sync-agents-md.yaml が生成されていること');
+    const content = fs.readFileSync(failureFile, 'utf8');
+    assert.match(content, /^error:\s*".*"/m);
+  });
+});
+
 test('pre-commit フック経由: 同期失敗してもコミットは成立し、sync-agents-md.yaml が生成される', () => {
   withGitWorkspace(base => {
-    // フック配置
+    // フック配置（.githooks/pre-commit 相当）
     const hooksDir = path.join(base, '.git', 'hooks');
     fs.mkdirSync(hooksDir, { recursive: true });
     const preCommitHook = path.join(hooksDir, 'pre-commit');
     fs.writeFileSync(preCommitHook, [
       '#!/bin/sh',
-      `node "${SCRIPT.split(path.sep).join('/')}"`,
-      'git add CLAUDE.md',
+      `node "${SCRIPT.split(path.sep).join('/')}" || true`,
+      'git add CLAUDE.md 2>/dev/null || true',
     ].join('\n'), 'utf8');
     try { fs.chmodSync(preCommitHook, 0o755); } catch {}
 
@@ -177,5 +193,35 @@ test('pre-commit フック経由: 同期失敗してもコミットは成立し�
     // sync-agents-md.yaml が生成されていること
     const failureFile = path.join(base, '.gh-maestro', 'sync-failures', 'sync-agents-md.yaml');
     assert.ok(fs.existsSync(failureFile), 'コミット成立後も sync-agents-md.yaml が生成されていること');
+  });
+});
+
+test('pre-commit フック経由: CLAUDE.md 不在時でも git add CLAUDE.md で止まらずコミットが成立する', () => {
+  withGitWorkspace(base => {
+    const hooksDir = path.join(base, '.git', 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    const preCommitHook = path.join(hooksDir, 'pre-commit');
+    fs.writeFileSync(preCommitHook, [
+      '#!/bin/sh',
+      `node "${SCRIPT.split(path.sep).join('/')}" || true`,
+      'git add CLAUDE.md 2>/dev/null || true',
+    ].join('\n'), 'utf8');
+    try { fs.chmodSync(preCommitHook, 0o755); } catch {}
+
+    // CLAUDE.md は存在しない
+    fs.writeFileSync(path.join(base, 'AGENTS.md'), '# AGENTS only');
+
+    const env = { ...process.env };
+    delete env.GH_MAESTRO_WORKSPACE;
+    const git = (...args) => spawnSync('git', args, { cwd: base, env, encoding: 'utf8' });
+    git('add', 'AGENTS.md');
+    const commitRes = git('commit', '-m', 'commit without claude md');
+
+    // コミットは成立する
+    assert.equal(commitRes.status, 0, `CLAUDE.md不在でもコミットが成立すること: ${commitRes.stderr}`);
+
+    // sync-agents-md.yaml が生成されていること
+    const failureFile = path.join(base, '.gh-maestro', 'sync-failures', 'sync-agents-md.yaml');
+    assert.ok(fs.existsSync(failureFile), 'CLAUDE.md不在の失敗が記録されていること');
   });
 });

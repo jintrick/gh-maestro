@@ -36,40 +36,33 @@ function syncAgentsMd() {
     process.exit(0);
   }
 
-  if (!fs.existsSync(AGENTS_MD)) {
-    const msg = 'sync-agents-md: AGENTS.md not found';
-    recordSyncFailure('sync-agents-md', msg);
-    console.error(msg);
-    process.exit(1);
-  }
-  if (!fs.existsSync(CLAUDE_MD)) {
-    const msg = 'sync-agents-md: CLAUDE.md not found';
-    recordSyncFailure('sync-agents-md', msg);
-    console.error(msg);
-    process.exit(1);
-  }
-
-  const agentsContent = fs.readFileSync(AGENTS_MD, 'utf8');
-  const claudeContent = fs.readFileSync(CLAUDE_MD, 'utf8');
-
-  let next;
   try {
-    next = buildSyncedClaudeMd(claudeContent, agentsContent);
+    if (!fs.existsSync(AGENTS_MD)) {
+      throw new Error('sync-agents-md: AGENTS.md not found');
+    }
+    if (!fs.existsSync(CLAUDE_MD)) {
+      throw new Error('sync-agents-md: CLAUDE.md not found');
+    }
+
+    const agentsContent = fs.readFileSync(AGENTS_MD, 'utf8');
+    const claudeContent = fs.readFileSync(CLAUDE_MD, 'utf8');
+
+    const next = buildSyncedClaudeMd(claudeContent, agentsContent);
+
+    if (next === claudeContent) {
+      clearSyncFailure('sync-agents-md');
+      console.log('sync-agents-md: no changes');
+      return;
+    }
+
+    fs.writeFileSync(CLAUDE_MD, next, 'utf8');
+    clearSyncFailure('sync-agents-md');
+    console.log('sync-agents-md: synced AGENTS.md -> CLAUDE.md');
   } catch (e) {
     recordSyncFailure('sync-agents-md', e.message);
     console.error(e.message);
     process.exit(1);
   }
-
-  if (next === claudeContent) {
-    clearSyncFailure('sync-agents-md');
-    console.log('sync-agents-md: no changes');
-    return;
-  }
-
-  fs.writeFileSync(CLAUDE_MD, next, 'utf8');
-  clearSyncFailure('sync-agents-md');
-  console.log('sync-agents-md: synced AGENTS.md -> CLAUDE.md');
 }
 
 module.exports = { buildSyncedClaudeMd, syncAgentsMd, BEGIN, END };
