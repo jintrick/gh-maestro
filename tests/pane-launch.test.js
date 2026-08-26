@@ -110,3 +110,89 @@ test('launchInSplitPane: pane-idが空ならthrow', () => {
   );
 });
 
+test('getAlivePaneIds: listのJSON出力からSet<string>を構築する', () => {
+  paneLaunch._setWeztermListPanes(() => ({
+    status: 0,
+    stdout: JSON.stringify([{ pane_id: 1 }, { pane_id: '42' }, { pane_id: 99 }]),
+    stderr: '',
+  }));
+
+  const result = paneLaunch.getAlivePaneIds();
+  assert.equal(result.size, 3);
+  assert.ok(result.has('1'));
+  assert.ok(result.has('42'));
+  assert.ok(result.has('99'));
+  assert.ok(!result.has('100'));
+});
+
+test('getAlivePaneIds: status!=0 の場合はwarnを呼び null を返す（0件生存と区別）', () => {
+  let warned = null;
+  paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'wezterm not running' }));
+
+  const result = paneLaunch.getAlivePaneIds((msg) => { warned = msg; });
+  assert.equal(result, null);
+  assert.match(warned, /wezterm cli list 失敗: wezterm not running/);
+});
+
+test('getAlivePaneIds: JSONパース失敗時はwarnを呼び null を返す', () => {
+  let warned = null;
+  paneLaunch._setWeztermListPanes(() => ({ status: 0, stdout: 'not json', stderr: '' }));
+
+  const result = paneLaunch.getAlivePaneIds((msg) => { warned = msg; });
+  assert.equal(result, null);
+  assert.match(warned, /wezterm cli list の出力パース失敗/);
+});
+
+test('isPaneAlive: paneIdの生存を正しく判定する', () => {
+  paneLaunch._setWeztermListPanes(() => ({
+    status: 0,
+    stdout: JSON.stringify([{ pane_id: 10 }]),
+    stderr: '',
+  }));
+
+  assert.equal(paneLaunch.isPaneAlive('10'), true);
+  assert.equal(paneLaunch.isPaneAlive(10), true);
+  assert.equal(paneLaunch.isPaneAlive('999'), false);
+  assert.equal(paneLaunch.isPaneAlive(''), false);
+  assert.equal(paneLaunch.isPaneAlive(null), false);
+  assert.equal(paneLaunch.isPaneAlive(undefined), false);
+
+  // 一覧取得失敗時は false
+  paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'error' }));
+  assert.equal(paneLaunch.isPaneAlive('10'), false);
+});
+
+test('killPane: paneIdを指定して正常にkillできる', () => {
+  let capturedArgs = null;
+  paneLaunch._setWeztermKillPane((args) => {
+    capturedArgs = args;
+    return { status: 0, stdout: '', stderr: '' };
+  });
+
+  const result = paneLaunch.killPane('42');
+  assert.equal(result.ok, true);
+  assert.equal(result.status, 0);
+  assert.deepEqual(capturedArgs, ['cli', '--no-auto-start', 'kill-pane', '--pane-id', '42']);
+});
+
+test('killPane: 空のpaneIdはエラー結果を返す', () => {
+  const result = paneLaunch.killPane('');
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /paneId is required/);
+});
+
+test('killPane: kill失敗時はステータスとstderrを返す', () => {
+  paneLaunch._setWeztermKillPane(() => ({
+    status: 1,
+    stdout: '',
+    stderr: 'pane not found',
+  }));
+
+  const result = paneLaunch.killPane('99');
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, 'pane not found');
+});
+
+

@@ -18,6 +18,8 @@ const { buildLoginShellExecArgs } = require('./agent-exec');
 // wezterm 呼び出し（テストで注入可能）
 let _weztermSpawnWindow = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
 let _weztermSplitPane = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
+let _weztermListPanes = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
+let _weztermKillPane = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
 
 /**
  * argv を実行する新規WezTermウィンドウを作成する（ログインシェル経由）。
@@ -98,9 +100,73 @@ function launchInSplitPane({ argv, cwd, direction = 'bottom', percent = 15, env 
   return { paneId };
 }
 
+/**
+ * 現在 WezTerm に存在する pane_id の Set<string> を返す。
+ * 取得に失敗した場合は warn を呼び null を返す（0件存在とは区別する）。
+ *
+ * @param {Function} [warn]
+ * @returns {Set<string>|null}
+ */
+function getAlivePaneIds(warn = () => {}) {
+  const r = _weztermListPanes(['cli', '--no-auto-start', 'list', '--format', 'json']);
+  if (r.status !== 0) {
+    warn(`wezterm cli list 失敗: ${(r.stderr || '').toString().trim()} — pane生存確認をスキップします`);
+    return null;
+  }
+  try {
+    const list = JSON.parse((r.stdout || '').toString());
+    if (!Array.isArray(list)) {
+      warn(`wezterm cli list の出力が配列ではありません — pane生存確認をスキップします`);
+      return null;
+    }
+    return new Set(list.map(p => String(p.pane_id)));
+  } catch (e) {
+    warn(`wezterm cli list の出力パース失敗: ${e.message} — pane生存確認をスキップします`);
+    return null;
+  }
+}
+
+/**
+ * 指定した paneId が生存しているかを判定する。
+ *
+ * @param {string|number} paneId
+ * @param {Function} [warn]
+ * @returns {boolean}
+ */
+function isPaneAlive(paneId, warn = () => {}) {
+  if (paneId === null || paneId === undefined || paneId === '') return false;
+  const alivePanes = getAlivePaneIds(warn);
+  if (alivePanes === null) return false;
+  return alivePanes.has(String(paneId));
+}
+
+/**
+ * 指定した paneId の WezTerm ペインを終了する。
+ *
+ * @param {string|number} paneId
+ * @returns {{ ok: boolean, status: number, stderr: string, stdout: string }}
+ */
+function killPane(paneId) {
+  if (paneId === null || paneId === undefined || paneId === '') {
+    return { ok: false, status: 1, stderr: 'paneId is required', stdout: '' };
+  }
+  const r = _weztermKillPane(['cli', '--no-auto-start', 'kill-pane', '--pane-id', String(paneId)]);
+  return {
+    ok: r.status === 0,
+    status: r.status ?? (r.status === 0 ? 0 : 1),
+    stderr: (r.stderr || '').toString().trim(),
+    stdout: (r.stdout || '').toString().trim(),
+  };
+}
+
 module.exports = {
   launchAgentInWindow,
   launchInSplitPane,
+  getAlivePaneIds,
+  isPaneAlive,
+  killPane,
   _setWeztermSpawnWindow: (fn) => { _weztermSpawnWindow = fn; },
   _setWeztermSplitPane: (fn) => { _weztermSplitPane = fn; },
+  _setWeztermListPanes: (fn) => { _weztermListPanes = fn; },
+  _setWeztermKillPane: (fn) => { _weztermKillPane = fn; },
 };

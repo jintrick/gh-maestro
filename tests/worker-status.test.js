@@ -551,6 +551,153 @@ test('main: pane の split-pane 失敗時はエラー行を出力して code 1',
   }
 });
 
+test('main: pane は初回起動時に status-pane.json を保存し、2回目の実行時は既存ペインを再利用する', () => {
+  const workspace = createWorkspace();
+  let launchCallCount = 0;
+  workerStatus._setLaunchInSplitPane((params) => {
+    launchCallCount++;
+    return { paneId: '201' };
+  });
+
+  const aliveSet = new Set(['201']);
+  workerStatus._setIsPaneAlive((id) => aliveSet.has(String(id)));
+
+  try {
+    // 1回目の実行: split-pane が呼ばれ、status-pane.json が保存される
+    const result1 = runMain(['pane', '--workspace', workspace]);
+    assert.equal(result1.code, 0);
+    assert.equal(result1.paneId, '201');
+    assert.equal(result1.reused, false);
+    assert.equal(launchCallCount, 1);
+    assert.match(result1.lines[0], /STATUS_PANE_LAUNCHED: pane=201/);
+
+    // 2回目の実行: 既存ペインが生存しているため launchInSplitPane は呼ばれず再利用される
+    const result2 = runMain(['pane', '--workspace', workspace]);
+    assert.equal(result2.code, 0);
+    assert.equal(result2.paneId, '201');
+    assert.equal(result2.reused, true);
+    assert.equal(launchCallCount, 1); // 呼ばれていないことを検証
+    assert.match(result2.lines[0], /STATUS_PANE_LAUNCHED: pane=201/);
+  } finally {
+    workerStatus._setLaunchInSplitPane(null);
+    workerStatus._setIsPaneAlive(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('main: pane は記録されたペインが既に死亡している場合、新しく作成し記録を更新する', () => {
+  const workspace = createWorkspace();
+  let createdPaneId = '301';
+  let launchCallCount = 0;
+  workerStatus._setLaunchInSplitPane(() => {
+    launchCallCount++;
+    return { paneId: createdPaneId };
+  });
+
+  const aliveSet = new Set(['301']);
+  workerStatus._setIsPaneAlive((id) => aliveSet.has(String(id)));
+
+  try {
+    // 初回起動
+    const result1 = runMain(['pane', '--workspace', workspace]);
+    assert.equal(result1.code, 0);
+    assert.equal(result1.paneId, '301');
+    assert.equal(launchCallCount, 1);
+
+    // 人が手でペインを閉じた（死亡）
+    aliveSet.delete('301');
+    createdPaneId = '302';
+    aliveSet.add('302');
+
+    // 2回目実行: 死んだペインを検知し、新しく作り直す
+    const result2 = runMain(['pane', '--workspace', workspace]);
+    assert.equal(result2.code, 0);
+    assert.equal(result2.paneId, '302');
+    assert.equal(result2.reused, false);
+    assert.equal(launchCallCount, 2);
+    assert.match(result2.lines[0], /STATUS_PANE_LAUNCHED: pane=302/);
+  } finally {
+    workerStatus._setLaunchInSplitPane(null);
+    workerStatus._setIsPaneAlive(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('main: close-pane は開いている監視ペインを kill して記録を削除する', () => {
+  const workspace = createWorkspace();
+  workerStatus._setLaunchInSplitPane(() => ({ paneId: '401' }));
+  const aliveSet = new Set(['401']);
+  workerStatus._setIsPaneAlive((id) => aliveSet.has(String(id)));
+
+  let killedId = null;
+  workerStatus._setKillPane((id) => {
+    killedId = id;
+    aliveSet.delete(String(id));
+    return { ok: true, status: 0, stderr: '' };
+  });
+
+  try {
+    // 起動
+    runMain(['pane', '--workspace', workspace]);
+
+    // close-pane
+    const result = runMain(['close-pane', '--workspace', workspace]);
+    assert.equal(result.code, 0);
+    assert.equal(result.paneId, '401');
+    assert.equal(killedId, '401');
+    assert.match(result.lines[0], /STATUS_PANE_CLOSED: pane=401/);
+
+    // 再度 close-pane: 既に削除済みなので NOT_FOUND で終了
+    const resultNotFound = runMain(['close-pane', '--workspace', workspace]);
+    assert.equal(resultNotFound.code, 0);
+    assert.match(resultNotFound.lines[0], /STATUS_PANE_NOT_FOUND/);
+  } finally {
+    workerStatus._setLaunchInSplitPane(null);
+    workerStatus._setIsPaneAlive(null);
+    workerStatus._setKillPane(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('main: close-pane で kill に失敗した場合は code 1 を返す（フェイルクローズ）', () => {
+  const workspace = createWorkspace();
+  workerStatus._setLaunchInSplitPane(() => ({ paneId: '501' }));
+  workerStatus._setIsPaneAlive(() => true);
+  workerStatus._setKillPane(() => ({ ok: false, status: 1, stderr: 'permission denied' }));
+
+  try {
+    runMain(['pane', '--workspace', workspace]);
+    const result = runMain(['close-pane', '--workspace', workspace]);
+    assert.equal(result.code, 1);
+    assert.match(result.errLines.join('\n'), /permission denied/);
+  } finally {
+    workerStatus._setLaunchInSplitPane(null);
+    workerStatus._setIsPaneAlive(null);
+    workerStatus._setKillPane(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('main: pane は status-pane.json の保存に失敗した場合にエラーを出力し code 1 を返す', () => {
+  const workspace = createWorkspace();
+  workerStatus._setLaunchInSplitPane(() => ({ paneId: '601' }));
+  workerStatus._setSaveStatusPane(() => {
+    throw new Error('disk full');
+  });
+
+  try {
+    const result = runMain(['pane', '--workspace', workspace]);
+    assert.equal(result.code, 1);
+    assert.match(result.errLines.join('\n'), /監視ペイン状態の保存に失敗しました: disk full/);
+  } finally {
+    workerStatus._setLaunchInSplitPane(null);
+    workerStatus._setSaveStatusPane(null);
+    removeWorkspace(workspace);
+  }
+});
+
+
+
 test('サブプロセス: list は全ワーカーの横棒グラフを表示する', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-list-cli-');
   try {
