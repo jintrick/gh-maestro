@@ -169,6 +169,26 @@ function renderUptimeBars(workers, opts = {}) {
   return lines;
 }
 
+const MIN_INTERVAL_SEC = 1;
+const MAX_INTERVAL_SEC = 3600;
+const DEFAULT_INTERVAL_SEC = 3;
+
+/**
+ * --interval の値を検証・数値化する。
+ *
+ * @param {string|undefined} rawValue
+ * @returns {number}
+ * @throws {Error} 1〜3600の数値でない場合
+ */
+function parseInterval(rawValue) {
+  if (rawValue === undefined) return DEFAULT_INTERVAL_SEC;
+  const n = Number(rawValue);
+  if (!Number.isFinite(n) || n < MIN_INTERVAL_SEC || n > MAX_INTERVAL_SEC) {
+    throw new Error(`--interval には ${MIN_INTERVAL_SEC}〜${MAX_INTERVAL_SEC} の数値を指定してください: ${rawValue}`);
+  }
+  return n;
+}
+
 /**
  * worker-status CLIを実行する。
  *
@@ -285,15 +305,13 @@ function main(argv = process.argv.slice(2)) {
   }
 
   if (sub === 'watch') {
-    let interval = 3;
-    if (values['--interval'] !== undefined) {
-      const n = Number(values['--interval']);
-      if (!Number.isFinite(n) || n <= 0) {
-        writeErr(`worker-status: --interval には正の数値を指定してください: ${values['--interval']}`);
-        writeErr(CLI_USAGE);
-        return { code: 1, lines: out, errLines: err };
-      }
-      interval = n;
+    let interval;
+    try {
+      interval = parseInterval(values['--interval']);
+    } catch (e) {
+      writeErr(`worker-status: ${e.message}`);
+      writeErr(CLI_USAGE);
+      return { code: 1, lines: out, errLines: err };
     }
 
     let workers;
@@ -313,15 +331,13 @@ function main(argv = process.argv.slice(2)) {
   }
 
   if (sub === 'pane') {
-    let interval = 3;
-    if (values['--interval'] !== undefined) {
-      const n = Number(values['--interval']);
-      if (!Number.isFinite(n) || n <= 0) {
-        writeErr(`worker-status: --interval には正の数値を指定してください: ${values['--interval']}`);
-        writeErr(CLI_USAGE);
-        return { code: 1, lines: out, errLines: err };
-      }
-      interval = n;
+    let interval;
+    try {
+      interval = parseInterval(values['--interval']);
+    } catch (e) {
+      writeErr(`worker-status: ${e.message}`);
+      writeErr(CLI_USAGE);
+      return { code: 1, lines: out, errLines: err };
     }
 
     const direction = values['--direction'] || 'bottom';
@@ -363,27 +379,40 @@ function main(argv = process.argv.slice(2)) {
   return { code: 0, lines: out, errLines: err };
 }
 
-function runWatchLoop(workspace, interval) {
+function runWatchLoop(workspace, interval, opts = {}) {
   const intervalMs = interval * 1000;
+  const outStream = opts.stdout || process.stdout;
+  const errStream = opts.stderr || process.stderr;
+  const setIntervalFn = opts.setIntervalFn || setInterval;
+  const clearIntervalFn = opts.clearIntervalFn || clearInterval;
+  const onSignalFn = opts.onSignalFn || ((sig, handler) => process.on(sig, handler));
+  const exitFn = opts.exitFn || process.exit;
+
   const render = () => {
     try {
-      const workers = collectWorkersStatus(workspace);
-      const bars = renderUptimeBars(workers);
+      const workers = collectWorkersStatus(workspace, opts);
+      const bars = renderUptimeBars(workers, opts);
       const timestamp = new Date(_now()).toISOString();
-      process.stdout.write('\x1b[2J\x1b[H');
-      process.stdout.write(`=== gh-maestro worker status (${timestamp}, interval: ${interval}s) ===\n`);
+      outStream.write('\x1b[2J\x1b[H');
+      outStream.write(`=== gh-maestro worker status (${timestamp}, interval: ${interval}s) ===\n`);
       for (const line of bars) {
-        process.stdout.write(line + '\n');
+        outStream.write(line + '\n');
       }
     } catch (e) {
-      process.stderr.write(`worker-status: watch 更新エラー: ${e.message}\n`);
+      errStream.write(`worker-status: watch 更新エラー: ${e.message}\n`);
     }
   };
 
   render();
-  const timer = setInterval(render, intervalMs);
-  process.on('SIGINT', () => { clearInterval(timer); process.exit(0); });
-  process.on('SIGTERM', () => { clearInterval(timer); process.exit(0); });
+  const timer = setIntervalFn(render, intervalMs);
+  const handleSignal = () => {
+    clearIntervalFn(timer);
+    exitFn(0);
+  };
+  onSignalFn('SIGINT', handleSignal);
+  onSignalFn('SIGTERM', handleSignal);
+
+  return { timer, render, handleSignal };
 }
 
 module.exports = {
@@ -392,6 +421,11 @@ module.exports = {
   formatDuration,
   collectWorkersStatus,
   renderUptimeBars,
+  parseInterval,
+  runWatchLoop,
+  MIN_INTERVAL_SEC,
+  MAX_INTERVAL_SEC,
+  DEFAULT_INTERVAL_SEC,
   _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setIsWorkerAlive: (fn) => { _injectedIsWorkerAlive = fn; },
   _setNow: (fn) => { _injectedNow = fn; },

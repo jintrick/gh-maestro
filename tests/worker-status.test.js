@@ -322,6 +322,113 @@ test('main: list に --worker-name を指定すると code 1', () => {
   }
 });
 
+test('parseInterval: 既定値・正常値・範囲外値・不正値を検証する', () => {
+  assert.equal(workerStatus.parseInterval(undefined), 3);
+  assert.equal(workerStatus.parseInterval('1'), 1);
+  assert.equal(workerStatus.parseInterval('5'), 5);
+  assert.equal(workerStatus.parseInterval('3600'), 3600);
+
+  // 下限違反 (0, 0.0001, -1)
+  assert.throws(() => workerStatus.parseInterval('0'), /--interval には 1〜3600 の数値を指定してください/);
+  assert.throws(() => workerStatus.parseInterval('0.0001'), /--interval には 1〜3600 の数値を指定してください/);
+  assert.throws(() => workerStatus.parseInterval('-5'), /--interval には 1〜3600 の数値を指定してください/);
+
+  // 上限違反 (3601, 2147484)
+  assert.throws(() => workerStatus.parseInterval('3601'), /--interval には 1〜3600 の数値を指定してください/);
+  assert.throws(() => workerStatus.parseInterval('2147484'), /--interval には 1〜3600 の数値を指定してください/);
+
+  // 不正値 (NaN, 空文字, 文字列)
+  assert.throws(() => workerStatus.parseInterval('abc'), /--interval には 1〜3600 の数値を指定してください/);
+  assert.throws(() => workerStatus.parseInterval(''), /--interval には 1〜3600 の数値を指定してください/);
+});
+
+test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・エラー耐性を検証する', () => {
+  const workspace = createWorkspace();
+  const stdoutChunks = [];
+  const stderrChunks = [];
+  const fakeStdout = { write: (chunk) => stdoutChunks.push(chunk) };
+  const fakeStderr = { write: (chunk) => stderrChunks.push(chunk) };
+
+  let timerCallback = null;
+  let timerIntervalMs = null;
+  let clearedTimer = null;
+  const fakeSetInterval = (cb, ms) => {
+    timerCallback = cb;
+    timerIntervalMs = ms;
+    return 12345;
+  };
+  const fakeClearInterval = (id) => {
+    clearedTimer = id;
+  };
+
+  const signalHandlers = {};
+  const fakeOnSignal = (sig, handler) => {
+    signalHandlers[sig] = handler;
+  };
+
+  let exitCode = null;
+  const fakeExit = (code) => {
+    exitCode = code;
+  };
+
+  let currentTime = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => currentTime);
+  workerStatus._setIsWorkerAlive((rawEntry) => rawEntry && rawEntry.pid === 111);
+  workerStatus._setGetProcessStartTime((pid) => (pid === 111 ? '2026-08-26T11:55:00.000Z' : null));
+
+  try {
+    writeWorkers(workspace, { 'worker-a': { pid: 111 } });
+
+    // ループ開始
+    const handle = workerStatus.runWatchLoop(workspace, 2, {
+      stdout: fakeStdout,
+      stderr: fakeStderr,
+      setIntervalFn: fakeSetInterval,
+      clearIntervalFn: fakeClearInterval,
+      onSignalFn: fakeOnSignal,
+      exitFn: fakeExit,
+    });
+
+    // 1. 初回描画の検証（intervalMs, 画面クリア, ヘッダー, バー）
+    assert.equal(timerIntervalMs, 2000);
+    assert.equal(handle.timer, 12345);
+    const initialOutput = stdoutChunks.join('');
+    assert.match(initialOutput, /\x1b\[2J\x1b\[H/); // ANSI画面クリア
+    assert.match(initialOutput, /=== gh-maestro worker status \(2026-08-26T12:00:00\.000Z, interval: 2s\) ===/);
+    assert.match(initialOutput, /worker-a.*\[running\].*5m 0s/);
+
+    // 2. タイマーコールバック実行（定期再描画）
+    stdoutChunks.length = 0;
+    currentTime += 2000; // 2秒経過
+    assert.ok(typeof timerCallback === 'function');
+    timerCallback();
+
+    const secondOutput = stdoutChunks.join('');
+    assert.match(secondOutput, /\x1b\[2J\x1b\[H/);
+    assert.match(secondOutput, /=== gh-maestro worker status \(2026-08-26T12:00:02\.000Z, interval: 2s\) ===/);
+    assert.match(secondOutput, /worker-a.*\[running\].*5m 2s/);
+
+    // 3. エラー耐性（workers.json 破損時もループが落ちず stderr に書く）
+    stdoutChunks.length = 0;
+    fs.writeFileSync(workersPath(workspace), '{ broken json', 'utf8');
+    timerCallback();
+    assert.match(stderrChunks.join(''), /worker-status: watch 更新エラー/);
+
+    // 4. シグナルハンドラ（SIGINT / SIGTERM でタイマー解除と exit(0)）
+    assert.ok(typeof signalHandlers['SIGINT'] === 'function');
+    assert.ok(typeof signalHandlers['SIGTERM'] === 'function');
+
+    signalHandlers['SIGINT']();
+    assert.equal(clearedTimer, 12345);
+    assert.equal(exitCode, 0);
+  } finally {
+    workerStatus._setNow(null);
+    workerStatus._setIsWorkerAlive(null);
+    workerStatus._setGetProcessStartTime(null);
+    removeWorkspace(workspace);
+  }
+});
+
 test('main: watch はスナップショットとヘッダーを出力する', () => {
   const workspace = createWorkspace();
   try {
@@ -343,9 +450,28 @@ test('main: watch はスナップショットとヘッダーを出力する', ()
 test('main: watch に無効な --interval を渡すと code 1', () => {
   const workspace = createWorkspace();
   try {
-    const result = runMain(['watch', '--workspace', workspace, '--interval', '-5']);
+    const result1 = runMain(['watch', '--workspace', workspace, '--interval', '-5']);
+    assert.equal(result1.code, 1);
+    assert.match(result1.errLines.join('\n'), /--interval には 1〜3600 の数値を指定してください/);
+
+    const result2 = runMain(['watch', '--workspace', workspace, '--interval', '0.0001']);
+    assert.equal(result2.code, 1);
+    assert.match(result2.errLines.join('\n'), /--interval には 1〜3600 の数値を指定してください/);
+
+    const result3 = runMain(['watch', '--workspace', workspace, '--interval', '2147484']);
+    assert.equal(result3.code, 1);
+    assert.match(result3.errLines.join('\n'), /--interval には 1〜3600 の数値を指定してください/);
+  } finally {
+    removeWorkspace(workspace);
+  }
+});
+
+test('main: pane に無効な --interval を渡すと code 1', () => {
+  const workspace = createWorkspace();
+  try {
+    const result = runMain(['pane', '--workspace', workspace, '--interval', '99999']);
     assert.equal(result.code, 1);
-    assert.match(result.errLines.join('\n'), /--interval には正の数値を指定してください/);
+    assert.match(result.errLines.join('\n'), /--interval には 1〜3600 の数値を指定してください/);
   } finally {
     removeWorkspace(workspace);
   }
