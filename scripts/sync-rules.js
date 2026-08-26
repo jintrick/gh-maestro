@@ -3,6 +3,14 @@
 
 const fs = require('fs');
 const path = require('path');
+const { recordSyncFailure, clearSyncFailure } = require('./shared/sync-failure');
+
+const USAGE = `sync-rules.js — .claude/rules/*.md を .agents/rules/*.md に変換・同期する
+
+Usage: node sync-rules.js
+
+.claude/rules/ 配下のルール定義を Antigravity (agy) 形式に変換し .agents/rules/ へ同期します。
+同期失敗時は <workspace>/.gh-maestro/sync-failures/sync-rules.yaml に失敗理由を記録します。`;
 
 const ROOT = process.cwd();
 const CLAUDE_RULES = path.join(ROOT, '.claude', 'rules');
@@ -35,44 +43,50 @@ function toAgyFrontmatter(paths, file) {
 }
 
 function syncRules() {
-  if (!fs.existsSync(CLAUDE_RULES)) {
-    console.error('sync-rules: .claude/rules/ not found');
-    process.exit(1);
+  if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
+    console.log(USAGE);
+    process.exit(0);
   }
-  fs.mkdirSync(AGENTS_RULES, { recursive: true });
 
-  const srcFiles = new Set(
-    fs.readdirSync(CLAUDE_RULES).filter(f => f.endsWith('.md'))
-  );
-
-  // Sync source files
-  for (const file of srcFiles) {
-    const src = path.join(CLAUDE_RULES, file);
-    const dst = path.join(AGENTS_RULES, file);
-    const content = fs.readFileSync(src, 'utf8');
-    const { paths, body } = parseFrontmatter(content);
-    let frontmatter;
-    try {
-      frontmatter = toAgyFrontmatter(paths, file);
-    } catch (e) {
-      console.error(e.message);
-      process.exit(1);
+  try {
+    if (!fs.existsSync(CLAUDE_RULES)) {
+      throw new Error('sync-rules: .claude/rules/ not found');
     }
-    fs.writeFileSync(dst, frontmatter + body, 'utf8');
-    console.log(`  synced: .claude/rules/${file} -> .agents/rules/${file}`);
-  }
+    fs.mkdirSync(AGENTS_RULES, { recursive: true });
 
-  // Remove orphaned files in .agents/rules/ that no longer exist in .claude/rules/
-  if (fs.existsSync(AGENTS_RULES)) {
-    for (const file of fs.readdirSync(AGENTS_RULES).filter(f => f.endsWith('.md'))) {
-      if (!srcFiles.has(file)) {
-        fs.unlinkSync(path.join(AGENTS_RULES, file));
-        console.log(`  removed orphan: .agents/rules/${file}`);
+    const srcFiles = new Set(
+      fs.readdirSync(CLAUDE_RULES).filter(f => f.endsWith('.md'))
+    );
+
+    // Sync source files
+    for (const file of srcFiles) {
+      const src = path.join(CLAUDE_RULES, file);
+      const dst = path.join(AGENTS_RULES, file);
+      const content = fs.readFileSync(src, 'utf8');
+      const { paths, body } = parseFrontmatter(content);
+      const frontmatter = toAgyFrontmatter(paths, file);
+      fs.writeFileSync(dst, frontmatter + body, 'utf8');
+      console.log(`  synced: .claude/rules/${file} -> .agents/rules/${file}`);
+    }
+
+    // Remove orphaned files in .agents/rules/ that no longer exist in .claude/rules/
+    if (fs.existsSync(AGENTS_RULES)) {
+      for (const file of fs.readdirSync(AGENTS_RULES).filter(f => f.endsWith('.md'))) {
+        if (!srcFiles.has(file)) {
+          fs.unlinkSync(path.join(AGENTS_RULES, file));
+          console.log(`  removed orphan: .agents/rules/${file}`);
+        }
       }
     }
+
+    clearSyncFailure('sync-rules');
+  } catch (e) {
+    recordSyncFailure('sync-rules', e.message);
+    console.error(e.message);
+    process.exit(1);
   }
 }
 
-module.exports = { parseFrontmatter, toAgyFrontmatter };
+module.exports = { parseFrontmatter, toAgyFrontmatter, syncRules };
 
 if (require.main === module) syncRules();

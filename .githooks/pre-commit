@@ -7,12 +7,12 @@ unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE \
       GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_QUARANTINE_PATH 2>/dev/null || true
 
 if git diff --cached --name-only | grep -q '^\.claude/rules/'; then
-  node scripts/sync-rules.js || exit 1
+  node scripts/sync-rules.js || true
   # .agents/rules/ は .gitignore 対象で追跡外のため stage 不要。
 fi
 if git diff --cached --name-only | grep -q '^AGENTS\.md$'; then
-  node scripts/sync-agents-md.js || exit 1
+  node scripts/sync-agents-md.js || true
   # 同期結果を必ずコミットに含める。stage しないと AGENTS.md だけが進み、
   # CLAUDE.md が取り残されて規約がコーダーに届かない。
-  git add CLAUDE.md || exit 1
+  git add CLAUDE.md 2>/dev/null || true
 fi

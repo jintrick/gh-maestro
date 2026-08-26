@@ -161,6 +161,12 @@ msg-poll が `未初期化です。reset-session.js で初期化してくださ�
 
 **`NEW_MESSAGE` 通知を待たずにコメントを先読みしてはならない**（`gh api .../comments`・`gh issue view --comments`・`msg-read.js <commentId>` 等。調査目的でも同じ）。先読みしても既読は記録されないため、後続のスキャンがそのコメントに到達した時点で `NEW_MESSAGE` として再び届く。内容は必ず通知を受けてから、その `commentId` で `msg-read.js` を呼んで確認する。
 
+#### セッション開始時の同期失敗確認（sync-failures）
+
+セッション開始時、Monitor（`msg-poll`）の起動とあわせて `$WORKSPACE/.gh-maestro/sync-failures/` ディレクトリを確認する。
+ファイルが存在する場合（例: `sync-agents-md.yaml`, `sync-rules.yaml`）、過去のコミット時に規約同期スクリプトが失敗したまま残っている状態である。ファイルの内容（失敗時刻・理由・HEAD SHA等）を読み、人間に「規約同期が失敗した記録があります」と報告して手動での対処（AGENTS.md / CLAUDE.md / .claude/rules の確認・再同期）を促す。
+
+
 ### worker への指示配送（Inbox Supervisor）
 
 `msg-send.js` で送った追加指示は、worker のエージェント種別によらず `worker-supervisor.js` が配送する。orchestrator が手動で介入する必要はない。

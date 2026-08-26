@@ -3,6 +3,14 @@
 
 const fs = require('fs');
 const path = require('path');
+const { recordSyncFailure, clearSyncFailure } = require('./shared/sync-failure');
+
+const USAGE = `sync-agents-md.js — AGENTS.md の内容を CLAUDE.md に同期する
+
+Usage: node sync-agents-md.js
+
+AGENTS.md を読み、CLAUDE.md のマーカー間に同期します。
+同期失敗時は <workspace>/.gh-maestro/sync-failures/sync-agents-md.yaml に失敗理由を記録します。`;
 
 const ROOT = process.cwd();
 const AGENTS_MD = path.join(ROOT, 'AGENTS.md');
@@ -23,35 +31,40 @@ function buildSyncedClaudeMd(claudeContent, agentsContent) {
 }
 
 function syncAgentsMd() {
-  if (!fs.existsSync(AGENTS_MD)) {
-    console.error('sync-agents-md: AGENTS.md not found');
-    process.exit(1);
-  }
-  if (!fs.existsSync(CLAUDE_MD)) {
-    console.error('sync-agents-md: CLAUDE.md not found');
-    process.exit(1);
+  if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
+    console.log(USAGE);
+    process.exit(0);
   }
 
-  const agentsContent = fs.readFileSync(AGENTS_MD, 'utf8');
-  const claudeContent = fs.readFileSync(CLAUDE_MD, 'utf8');
-
-  let next;
   try {
-    next = buildSyncedClaudeMd(claudeContent, agentsContent);
+    if (!fs.existsSync(AGENTS_MD)) {
+      throw new Error('sync-agents-md: AGENTS.md not found');
+    }
+    if (!fs.existsSync(CLAUDE_MD)) {
+      throw new Error('sync-agents-md: CLAUDE.md not found');
+    }
+
+    const agentsContent = fs.readFileSync(AGENTS_MD, 'utf8');
+    const claudeContent = fs.readFileSync(CLAUDE_MD, 'utf8');
+
+    const next = buildSyncedClaudeMd(claudeContent, agentsContent);
+
+    if (next === claudeContent) {
+      clearSyncFailure('sync-agents-md');
+      console.log('sync-agents-md: no changes');
+      return;
+    }
+
+    fs.writeFileSync(CLAUDE_MD, next, 'utf8');
+    clearSyncFailure('sync-agents-md');
+    console.log('sync-agents-md: synced AGENTS.md -> CLAUDE.md');
   } catch (e) {
+    recordSyncFailure('sync-agents-md', e.message);
     console.error(e.message);
     process.exit(1);
   }
-
-  if (next === claudeContent) {
-    console.log('sync-agents-md: no changes');
-    return;
-  }
-
-  fs.writeFileSync(CLAUDE_MD, next, 'utf8');
-  console.log('sync-agents-md: synced AGENTS.md -> CLAUDE.md');
 }
 
-module.exports = { buildSyncedClaudeMd, BEGIN, END };
+module.exports = { buildSyncedClaudeMd, syncAgentsMd, BEGIN, END };
 
 if (require.main === module) syncAgentsMd();
