@@ -17,6 +17,7 @@ const { buildLoginShellExecArgs } = require('./agent-exec');
 
 // wezterm 呼び出し（テストで注入可能）
 let _weztermSpawnWindow = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
+let _weztermSplitPane = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
 
 /**
  * argv を実行する新規WezTermウィンドウを作成する（ログインシェル経由）。
@@ -53,7 +54,53 @@ function launchAgentInWindow({ argv, cwd, env = {}, onExit = null }) {
   return { paneId };
 }
 
+/**
+ * argv を実行するWezTermスプリットペインを作成する（ログインシェル経由）。
+ *
+ * @param {object} params
+ * @param {string[]} params.argv           - 実行コマンド + 全引数
+ * @param {string} params.cwd              - ペインの作業ディレクトリ
+ * @param {string} [params.direction='bottom'] - 分割方向 ('bottom' | 'right' | 'top' | 'left')
+ * @param {number} [params.percent=15]     - 画面占有率（%）
+ * @param {object} [params.env={}]         - 起動プロセスに注入する環境変数
+ * @param {object} [params.onExit=null]    - agent-exec.js の buildLoginShellExecArgs に渡す終了フック
+ * @returns {{ paneId: string }}
+ * @throws {Error} ペイン作成に失敗した場合
+ */
+function launchInSplitPane({ argv, cwd, direction = 'bottom', percent = 15, env = {}, onExit = null }) {
+  const loginShellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, env);
+  const validDirections = new Set(['bottom', 'right', 'top', 'left']);
+  const dir = validDirections.has(direction) ? direction : 'bottom';
+  const pct = Number.isFinite(Number(percent)) && Number(percent) > 0 && Number(percent) < 100 ? Number(percent) : 15;
+
+  const spawnArgs = [
+    'cli', '--no-auto-start', 'split-pane',
+    `--${dir}`,
+    '--percent', String(pct),
+    '--cwd', cwd,
+    '--',
+    ...loginShellArgs,
+  ];
+
+  const result = _weztermSplitPane(spawnArgs);
+  if (result.status !== 0) {
+    throw new Error(`WezTermペインの分割起動に失敗しました: ${(result.stderr || '').toString().trim()}`);
+  }
+
+  const paneId = (result.stdout ?? '').toString().trim();
+  if (!paneId) {
+    throw new Error(
+      `wezterm cli split-pane の pane-id を取得できませんでした（ペインが作成された可能性があります）: ` +
+      `stdout=${JSON.stringify(result.stdout)} stderr=${(result.stderr || '').toString().trim()}`
+    );
+  }
+
+  return { paneId };
+}
+
 module.exports = {
   launchAgentInWindow,
+  launchInSplitPane,
   _setWeztermSpawnWindow: (fn) => { _weztermSpawnWindow = fn; },
+  _setWeztermSplitPane: (fn) => { _weztermSplitPane = fn; },
 };
