@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// worker-status.js — ワーカーの生死を照会するCLI
+// worker-status.js — ワーカーの稼働状況・連続稼働時間の確認
 //
-// workers.json の指定エントリを既存の worker-liveness 述語へ渡し、
-// ワーカー本体が現在稼働中かを読み取り専用で返す。常駐プロセスのPID registryとは
-// 別の仕組みであり、workers.json に記録されたワーカープロセスだけを対象にする。
+// workers.json の指定エントリまたは全エントリを照会し、
+// ワーカーの生死および実起動時刻に基づく連続稼働時間を返す。
+// 一覧（list）では横棒グラフ（または --json）を出力し、
+// 常駐表示（watch / pane）では画面クリア・WezTermスプリットペインで自動更新する。
 
 'use strict';
 
@@ -12,30 +13,167 @@ const { isWorkerAlive } = require('./shared/worker-liveness');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 
-const CLI_USAGE = `worker-status.js — ワーカーの生死確認
+const CLI_USAGE = `worker-status.js — ワーカーの稼働状況・連続稼働時間の確認
 
 Usage:
   node worker-status.js status --workspace <path> --worker-name <name>
+  node worker-status.js list --workspace <path> [--json]
+  node worker-status.js watch --workspace <path> [--interval <sec>]
+  node worker-status.js pane --workspace <path> [--interval <sec>] [--direction <dir>] [--percent <pct>]
+
+Commands:
+  status                 指定ワーカーの生死状態をJSONで照会する
+  list                   全ワーカーの稼働状況と連続稼働時間の横棒グラフを表示する
+  watch                  横棒グラフを画面クリアしながら定期更新（自動再描画）する
+  pane                   WezTermスプリットペインを下部に開き、watchモードを常駐表示する
 
 Options:
   --workspace <path>     ワークスペースパス（必須）
-  --worker-name <name>   生死を照会するワーカー名（必須）
+  --worker-name <name>   照会するワーカー名（status で必須）
+  --json                 list で機械可読な JSON 配列を出力する
+  --interval <sec>       watch / pane の更新間隔（秒、既定: 3）
+  --direction <dir>      pane の分割方向 (bottom|right|top|left、既定: bottom)
+  --percent <pct>        pane の画面占有率 (%、既定: 15)
   --help, -h             このヘルプを表示する
 
 Output (stdout):
-  {"workerName":...,"running":true|false,"pid":...}
+  status:
+    {"workerName":...,"running":true|false,"pid":...}
+  list:
+    横棒グラフ、または --json 指定時は [{"workerName":...,"pid":...,"running":...,"startTime":...,"elapsedSeconds":...}]
+  pane:
+    STATUS_PANE_LAUNCHED: pane=<paneId>
 
 Description:
-  workers.json の指定ワーカーを読み取り、既存の isWorkerAlive で生死を判定する。
-  対象ワーカーが未登録、PIDが停止中、または生死判定が false の場合も、照会成功として
-  running:false・終了コード0を返す。workspaceの解決失敗や workers.json の読み取り・
-  解析失敗、引数の誤用は終了コード1を返し、状態JSONは出力しない。`;
+  workers.json のワーカーを読み取り、プロセスの実起動時刻（process-lifecycle.getProcessStartTime）
+  に基づいて連続稼働時間を算出する。一覧モードは最長稼働のワーカーを基準にした相対長で横棒グラフを描く。
+  pane サブコマンドは WezTerm の専用ペイン（既定: bottom 15%）を分割作成し、独立して自動更新し続ける。`;
+
+let _injectedGetProcessStartTime = null;
+let _injectedIsWorkerAlive = null;
+let _injectedNow = null;
+let _injectedLaunchInSplitPane = null;
+
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime ?? require('./process-lifecycle').getProcessStartTime;
+  return fn(pid);
+}
+
+function _isWorkerAlive(entry) {
+  const fn = _injectedIsWorkerAlive ?? require('./shared/worker-liveness').isWorkerAlive;
+  return fn(entry);
+}
+
+function _now() {
+  const fn = _injectedNow ?? Date.now;
+  return fn();
+}
+
+function _launchInSplitPane(params) {
+  const fn = _injectedLaunchInSplitPane ?? require('./shared/pane-launch').launchInSplitPane;
+  return fn(params);
+}
+
+/**
+ * 秒数を読みやすい時間表記にフォーマットする。
+ *
+ * @param {number} seconds
+ * @returns {string}
+ */
+function formatDuration(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s}s`;
+  const mins = Math.floor(s / 60);
+  const remSec = s % 60;
+  if (mins < 60) return `${mins}m ${remSec}s`;
+  const hours = Math.floor(mins / 60);
+  const remMin = mins % 60;
+  return `${hours}h ${remMin}m ${remSec}s`;
+}
+
+/**
+ * 全ワーカーの稼働状態と経過秒数を集計する。
+ *
+ * @param {string} workspace
+ * @param {object} [opts]
+ * @returns {Array<{workerName: string, pid: number|null, running: boolean, startTime: string|null, elapsedSeconds: number}>}
+ */
+function collectWorkersStatus(workspace, opts = {}) {
+  const now = (opts.nowFn || _now)();
+  const getStartTime = opts.getProcessStartTimeFn || _getProcessStartTime;
+  const isAlive = opts.isWorkerAliveFn || _isWorkerAlive;
+
+  const rawWorkers = readWorkersRaw(workspace);
+  if (!rawWorkers) return [];
+
+  const results = [];
+  for (const [workerName, rawEntry] of Object.entries(rawWorkers)) {
+    if (workerName === 'orchestrator') continue;
+    const entry = normalizeWorkerEntry(rawEntry);
+    const running = isAlive(rawEntry);
+    let startTime = null;
+    let elapsedSeconds = 0;
+
+    if (running && entry.pid) {
+      startTime = getStartTime(entry.pid) || entry.startTime || null;
+      if (startTime) {
+        const startMs = new Date(startTime).getTime();
+        if (!Number.isNaN(startMs)) {
+          elapsedSeconds = Math.max(0, Math.floor((now - startMs) / 1000));
+        }
+      }
+    }
+
+    results.push({
+      workerName,
+      pid: entry.pid,
+      running,
+      startTime,
+      elapsedSeconds,
+    });
+  }
+  return results;
+}
+
+/**
+ * ワーカー一覧から横棒グラフのテキスト行を生成する。
+ *
+ * @param {Array<{workerName: string, pid: number|null, running: boolean, startTime: string|null, elapsedSeconds: number}>} workers
+ * @param {object} [opts]
+ * @param {number} [opts.maxBarWidth=30]
+ * @returns {string[]}
+ */
+function renderUptimeBars(workers, opts = {}) {
+  if (!workers || workers.length === 0) {
+    return ['No workers registered.'];
+  }
+
+  const maxBarWidth = opts.maxBarWidth ?? 30;
+  const maxElapsed = Math.max(0, ...workers.map(w => w.elapsedSeconds));
+  const maxNameLen = Math.max(...workers.map(w => w.workerName.length), 0);
+
+  const lines = [];
+  for (const w of workers) {
+    const nameCol = w.workerName.padEnd(maxNameLen, ' ');
+    const statusCol = w.running ? '[running]' : '[stopped]';
+    const timeCol = w.running ? formatDuration(w.elapsedSeconds) : '-';
+    let bar = '';
+    if (w.running && maxElapsed > 0 && w.elapsedSeconds > 0) {
+      const barLen = Math.max(1, Math.round((w.elapsedSeconds / maxElapsed) * maxBarWidth));
+      bar = '█'.repeat(barLen);
+    }
+    const pidStr = w.pid ? `(pid: ${w.pid})` : '';
+    const line = `${nameCol}  ${statusCol.padEnd(9, ' ')}  ${timeCol.padStart(8, ' ')}  ${bar ? bar + ' ' : ''}${pidStr}`.trimEnd();
+    lines.push(line);
+  }
+  return lines;
+}
 
 /**
  * worker-status CLIを実行する。
  *
  * @param {string[]} [argv] process.argv.slice(2) 相当
- * @returns {{code: number, lines: string[], errLines: string[]}}
+ * @returns {{code: number, lines: string[], errLines: string[], isWatch?: boolean, workspace?: string, interval?: number, paneId?: string}}
  */
 function main(argv = process.argv.slice(2)) {
   const out = [];
@@ -46,9 +184,14 @@ function main(argv = process.argv.slice(2)) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(argv, {
-      flags: { '--workspace': {}, '--worker-name': {} },
-      booleans: ['--help', '-h'],
-      // サブコマンドはちょうど1つ。未知フラグ・余剰位置引数はパーサ側で拒否する。
+      flags: {
+        '--workspace': {},
+        '--worker-name': {},
+        '--interval': {},
+        '--direction': {},
+        '--percent': {},
+      },
+      booleans: ['--help', '-h', '--json'],
       positionals: { min: 1, max: 1 },
     }));
   } catch (parseError) {
@@ -67,19 +210,16 @@ function main(argv = process.argv.slice(2)) {
     return { code: 0, lines: out, errLines: err };
   }
 
-  if (rest[0] !== 'status') {
-    writeErr(`worker-status: 未知のサブコマンドです: ${rest[0]}`);
+  const sub = rest[0];
+  const validSubs = new Set(['status', 'list', 'watch', 'pane']);
+  if (!validSubs.has(sub)) {
+    writeErr(`worker-status: 未知のサブコマンドです: ${sub}`);
     writeErr(CLI_USAGE);
     return { code: 1, lines: out, errLines: err };
   }
 
   if (!values['--workspace']) {
     writeErr('worker-status: --workspace が必要です');
-    writeErr(CLI_USAGE);
-    return { code: 1, lines: out, errLines: err };
-  }
-  if (!values['--worker-name']) {
-    writeErr('worker-status: status には --worker-name が必要です');
     writeErr(CLI_USAGE);
     return { code: 1, lines: out, errLines: err };
   }
@@ -90,33 +230,185 @@ function main(argv = process.argv.slice(2)) {
     return { code: 1, lines: out, errLines: err };
   }
 
-  const workerName = values['--worker-name'];
-  let rawWorkers;
-  try {
-    rawWorkers = readWorkersRaw(workspace);
-  } catch (e) {
-    writeErr(`worker-status: status の照会に失敗しました: ${e.message}`);
+  if (sub === 'status') {
+    if (!values['--worker-name']) {
+      writeErr('worker-status: status には --worker-name が必要です');
+      writeErr(CLI_USAGE);
+      return { code: 1, lines: out, errLines: err };
+    }
+
+    const workerName = values['--worker-name'];
+    let rawWorkers;
+    try {
+      rawWorkers = readWorkersRaw(workspace);
+    } catch (e) {
+      writeErr(`worker-status: status の照会に失敗しました: ${e.message}`);
+      return { code: 1, lines: out, errLines: err };
+    }
+
+    const rawEntry = rawWorkers && Object.prototype.hasOwnProperty.call(rawWorkers, workerName)
+      ? rawWorkers[workerName]
+      : undefined;
+    const entry = normalizeWorkerEntry(rawEntry);
+
+    writeOut(JSON.stringify({
+      workerName,
+      running: _isWorkerAlive(rawEntry),
+      pid: entry.pid,
+    }));
+    return { code: 0, lines: out, errLines: err };
+  }
+
+  // list / watch / pane では --worker-name は使用不可
+  if (values['--worker-name']) {
+    writeErr(`worker-status: --worker-name は ${sub} では使用できません`);
+    writeErr(CLI_USAGE);
     return { code: 1, lines: out, errLines: err };
   }
 
-  const rawEntry = rawWorkers && Object.prototype.hasOwnProperty.call(rawWorkers, workerName)
-    ? rawWorkers[workerName]
-    : undefined;
-  const entry = normalizeWorkerEntry(rawEntry);
+  if (sub === 'list') {
+    let workers;
+    try {
+      workers = collectWorkersStatus(workspace);
+    } catch (e) {
+      writeErr(`worker-status: list の照会に失敗しました: ${e.message}`);
+      return { code: 1, lines: out, errLines: err };
+    }
 
-  writeOut(JSON.stringify({
-    workerName,
-    running: isWorkerAlive(rawEntry),
-    pid: entry.pid,
-  }));
+    if (values['--json']) {
+      writeOut(JSON.stringify(workers, null, 2));
+    } else {
+      const bars = renderUptimeBars(workers);
+      for (const line of bars) writeOut(line);
+    }
+    return { code: 0, lines: out, errLines: err };
+  }
+
+  if (sub === 'watch') {
+    let interval = 3;
+    if (values['--interval'] !== undefined) {
+      const n = Number(values['--interval']);
+      if (!Number.isFinite(n) || n <= 0) {
+        writeErr(`worker-status: --interval には正の数値を指定してください: ${values['--interval']}`);
+        writeErr(CLI_USAGE);
+        return { code: 1, lines: out, errLines: err };
+      }
+      interval = n;
+    }
+
+    let workers;
+    try {
+      workers = collectWorkersStatus(workspace);
+    } catch (e) {
+      writeErr(`worker-status: watch の照会に失敗しました: ${e.message}`);
+      return { code: 1, lines: out, errLines: err };
+    }
+
+    const timestamp = new Date(_now()).toISOString();
+    writeOut(`=== gh-maestro worker status (${timestamp}, interval: ${interval}s) ===`);
+    const bars = renderUptimeBars(workers);
+    for (const line of bars) writeOut(line);
+
+    return { code: 0, lines: out, errLines: err, isWatch: true, workspace, interval };
+  }
+
+  if (sub === 'pane') {
+    let interval = 3;
+    if (values['--interval'] !== undefined) {
+      const n = Number(values['--interval']);
+      if (!Number.isFinite(n) || n <= 0) {
+        writeErr(`worker-status: --interval には正の数値を指定してください: ${values['--interval']}`);
+        writeErr(CLI_USAGE);
+        return { code: 1, lines: out, errLines: err };
+      }
+      interval = n;
+    }
+
+    const direction = values['--direction'] || 'bottom';
+    const validDirs = new Set(['bottom', 'right', 'top', 'left']);
+    if (!validDirs.has(direction)) {
+      writeErr(`worker-status: --direction は bottom|right|top|left のいずれかを指定してください: ${direction}`);
+      writeErr(CLI_USAGE);
+      return { code: 1, lines: out, errLines: err };
+    }
+
+    let percent = 15;
+    if (values['--percent'] !== undefined) {
+      const p = Number(values['--percent']);
+      if (!Number.isFinite(p) || p <= 0 || p >= 100) {
+        writeErr(`worker-status: --percent は 1〜99 の数値を指定してください: ${values['--percent']}`);
+        writeErr(CLI_USAGE);
+        return { code: 1, lines: out, errLines: err };
+      }
+      percent = p;
+    }
+
+    let paneResult;
+    try {
+      paneResult = _launchInSplitPane({
+        argv: [process.execPath, __filename, 'watch', '--workspace', workspace, '--interval', String(interval)],
+        cwd: workspace,
+        direction,
+        percent,
+      });
+    } catch (e) {
+      writeErr(`worker-status: pane の分割起動に失敗しました: ${e.message}`);
+      return { code: 1, lines: out, errLines: err };
+    }
+
+    writeOut(`STATUS_PANE_LAUNCHED: pane=${paneResult.paneId}`);
+    return { code: 0, lines: out, errLines: err, paneId: paneResult.paneId };
+  }
+
   return { code: 0, lines: out, errLines: err };
 }
 
-module.exports = { main, CLI_USAGE };
+function runWatchLoop(workspace, interval) {
+  const intervalMs = interval * 1000;
+  const render = () => {
+    try {
+      const workers = collectWorkersStatus(workspace);
+      const bars = renderUptimeBars(workers);
+      const timestamp = new Date(_now()).toISOString();
+      process.stdout.write('\x1b[2J\x1b[H');
+      process.stdout.write(`=== gh-maestro worker status (${timestamp}, interval: ${interval}s) ===\n`);
+      for (const line of bars) {
+        process.stdout.write(line + '\n');
+      }
+    } catch (e) {
+      process.stderr.write(`worker-status: watch 更新エラー: ${e.message}\n`);
+    }
+  };
+
+  render();
+  const timer = setInterval(render, intervalMs);
+  process.on('SIGINT', () => { clearInterval(timer); process.exit(0); });
+  process.on('SIGTERM', () => { clearInterval(timer); process.exit(0); });
+}
+
+module.exports = {
+  main,
+  CLI_USAGE,
+  formatDuration,
+  collectWorkersStatus,
+  renderUptimeBars,
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
+  _setIsWorkerAlive: (fn) => { _injectedIsWorkerAlive = fn; },
+  _setNow: (fn) => { _injectedNow = fn; },
+  _setLaunchInSplitPane: (fn) => { _injectedLaunchInSplitPane = fn; },
+};
 
 if (require.main === module) {
   const result = main();
   for (const line of result.errLines) process.stderr.write(line + '\n');
-  for (const line of result.lines) process.stdout.write(line + '\n');
-  process.exit(result.code);
+  if (result.code !== 0) {
+    process.exit(result.code);
+  }
+  if (result.isWatch) {
+    runWatchLoop(result.workspace, result.interval);
+  } else {
+    for (const line of result.lines) process.stdout.write(line + '\n');
+    process.exit(result.code);
+  }
 }
+

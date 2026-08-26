@@ -115,6 +115,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、wo
 - **msg-read.js** — コメントIDまたは計画から本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE` または `msg-read.js --plan --issue <N> --workspace $WORKSPACE`
 - **stop-worker.js** — ワーカーのプロセスツリーのみを同一性確認の上で停止する（worktree・ブランチ・workers.json エントリは維持する）。対象は workerName の位置引数または〈`--issue` + `--skill`〉。報告投稿後にプロセスが終了せず残留（居座り）しているワーカーやハングしたワーカーを停止させる正規手段（再開可能な状態を保つ）。worktree ごと破棄する `remove-worker.js` と使い分ける
 - **remove-worker.js** — 個別ワーカーのプロセスを同一性確認の上でkillし、worktree とブランチを削除し、workers.json からエントリを除去する（完全破棄）。対象は workerName の位置引数または〈`--issue` + `--skill`〉。作業ツリーごと消えるため再開はできない。反省会後の一括後始末には代わりに finalize-issue.js を使う
+- **worker-status.js** — ワーカーの稼働状況・連続稼働時間の確認。`worker-status.js pane --workspace $WORKSPACE` で画面下部に専用WezTermペインを開き、全ワーカーの連続稼働時間（横棒グラフ）を自動更新で常時表示する。ワンショット確認は `worker-status.js list --workspace $WORKSPACE`（`--json` でJSON出力）。単一ワーカーの生死確認は `worker-status.js status --workspace $WORKSPACE --worker-name <name>`
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「13. 反省会と後始末」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する
 - **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「ワーカーからの報告の受信（msg-poll）」参照）
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「8. PR検出」参照）
@@ -190,6 +191,19 @@ msg-poll が `未初期化です。reset-session.js で初期化してくださ�
 
 - **`stop-worker.js`（停止・再開可能）**: ワーカーのプロセスツリーのみを同一性確認の上で停止する。worktree・ブランチ・workers.json の登録情報は保持される。居座り通知・ハング時など、後から `msg-send.js` 等で再開（resume）させて作業を継続させたいワーカーに対して使う正規手段。
 - **`remove-worker.js`（完全破棄）**: ワーカーのプロセスを停止し、worktree・同名ブランチ・workers.json エントリまで完全に削除する。対象の作業成果ごと破棄されるため、再開はできない。反省会完了後の後始末には `finalize-issue.js` を使うため、通常セッション中に安易にワーカーを削除してはならない。
+
+#### ワーカーの連続稼働時間と暴走監視（worker-status）
+
+ヘッドレスで稼働するワーカーの暴走ループ・ハングを早期発見するため、WezTerm専用ペインまたはワンショットコマンドで稼働状況を監視できる。
+
+- **いつ実行するか**:
+  - セッション開始時やワーカー起動時に `node "{{SCRIPTS_PATH}}/worker-status.js" pane --workspace $WORKSPACE` を実行し、画面下部に専用監視ペインを開いておく（または必要に応じて `node "{{SCRIPTS_PATH}}/worker-status.js" list --workspace $WORKSPACE` でワンショット確認する）。
+- **何を不審と見なすか**:
+  - 他のワーカーと比較して突出して長い横棒グラフを持つワーカー、またはタスクの規模（軽微な調査や局所修正など）に対して不自然に長時間の連続稼働を続けているワーカー。
+- **不審な場合に何をするか**:
+  - 該当ワーカーの実行ログ（`$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log`）を `Read` で確認し、実際に進捗があるか（処理中か、暴走ループ／無応答か）を切り分ける。
+  - 暴走やハングと判断した場合は `node "{{SCRIPTS_PATH}}/stop-worker.js" <workerName> --workspace $WORKSPACE` でプロセスを停止し、人間に状況を報告するか、必要に応じて追加指示で再開（resume）を促す。
+  - 閾値による機械的な自動停止は行わず、停止・再開の判断は orchestrator が行う。
 
 ### スパイラル検知
 
