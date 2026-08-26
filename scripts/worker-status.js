@@ -12,6 +12,7 @@ const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
+const { loadStatusPane, saveStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
 
 const CLI_USAGE = `worker-status.js — ワーカーの稼働状況・連続稼働時間の確認
 
@@ -20,12 +21,14 @@ Usage:
   node worker-status.js list --workspace <path> [--json]
   node worker-status.js watch --workspace <path> [--interval <sec>]
   node worker-status.js pane --workspace <path> [--interval <sec>] [--direction <dir>] [--percent <pct>]
+  node worker-status.js close-pane --workspace <path>
 
 Commands:
   status                 指定ワーカーの生死状態をJSONで照会する
   list                   全ワーカーの稼働状況と連続稼働時間の横棒グラフを表示する
   watch                  横棒グラフを画面クリアしながら定期更新（自動再描画）する
-  pane                   WezTermスプリットペインを下部に開き、watchモードを常駐表示する
+  pane                   WezTermスプリットペインを下部に開き、watchモードを常駐表示する（既存ペインがあれば再利用）
+  close-pane             開いているWezTerm監視ペインを終了する
 
 Options:
   --workspace <path>     ワークスペースパス（必須）
@@ -43,16 +46,22 @@ Output (stdout):
     横棒グラフ、または --json 指定時は [{"workerName":...,"pid":...,"running":...,"startTime":...,"elapsedSeconds":...}]
   pane:
     STATUS_PANE_LAUNCHED: pane=<paneId>
+  close-pane:
+    STATUS_PANE_CLOSED: pane=<paneId>
 
 Description:
   workers.json のワーカーを読み取り、プロセスの実起動時刻（process-lifecycle.getProcessStartTime）
   に基づいて連続稼働時間を算出する。一覧モードは最長稼働のワーカーを基準にした相対長で横棒グラフを描く。
-  pane サブコマンドは WezTerm の専用ペイン（既定: bottom 15%）を分割作成し、独立して自動更新し続ける。`;
+  pane サブコマンドは WezTerm の専用ペイン（既定: bottom 15%）を分割作成し、独立して自動更新し続ける。
+  既存ペインが生存している場合は新しく作らず既存ペインを再利用する。
+  close-pane サブコマンドは記録された監視ペインを終了して記録を削除する。`;
 
 let _injectedGetProcessStartTime = null;
 let _injectedIsWorkerAlive = null;
 let _injectedNow = null;
 let _injectedLaunchInSplitPane = null;
+let _injectedIsPaneAlive = null;
+let _injectedKillPane = null;
 
 function _getProcessStartTime(pid) {
   const fn = _injectedGetProcessStartTime ?? require('./process-lifecycle').getProcessStartTime;
@@ -72,6 +81,16 @@ function _now() {
 function _launchInSplitPane(params) {
   const fn = _injectedLaunchInSplitPane ?? require('./shared/pane-launch').launchInSplitPane;
   return fn(params);
+}
+
+function _isPaneAlive(paneId) {
+  const fn = _injectedIsPaneAlive ?? require('./shared/pane-launch').isPaneAlive;
+  return fn(paneId);
+}
+
+function _killPane(paneId) {
+  const fn = _injectedKillPane ?? require('./shared/pane-launch').killPane;
+  return fn(paneId);
 }
 
 /**
@@ -231,7 +250,7 @@ function main(argv = process.argv.slice(2)) {
   }
 
   const sub = rest[0];
-  const validSubs = new Set(['status', 'list', 'watch', 'pane']);
+  const validSubs = new Set(['status', 'list', 'watch', 'pane', 'close-pane']);
   if (!validSubs.has(sub)) {
     writeErr(`worker-status: 未知のサブコマンドです: ${sub}`);
     writeErr(CLI_USAGE);
@@ -279,7 +298,7 @@ function main(argv = process.argv.slice(2)) {
     return { code: 0, lines: out, errLines: err };
   }
 
-  // list / watch / pane では --worker-name は使用不可
+  // list / watch / pane / close-pane では --worker-name は使用不可
   if (values['--worker-name']) {
     writeErr(`worker-status: --worker-name は ${sub} では使用できません`);
     writeErr(CLI_USAGE);
@@ -359,6 +378,13 @@ function main(argv = process.argv.slice(2)) {
       percent = p;
     }
 
+    // 既存ペインの確認・再利用
+    const existingPane = loadStatusPane(workspace);
+    if (existingPane && existingPane.paneId && _isPaneAlive(existingPane.paneId)) {
+      writeOut(`STATUS_PANE_LAUNCHED: pane=${existingPane.paneId}`);
+      return { code: 0, lines: out, errLines: err, paneId: existingPane.paneId, reused: true };
+    }
+
     let paneResult;
     try {
       paneResult = _launchInSplitPane({
@@ -372,8 +398,38 @@ function main(argv = process.argv.slice(2)) {
       return { code: 1, lines: out, errLines: err };
     }
 
+    try {
+      saveStatusPane(workspace, {
+        paneId: paneResult.paneId,
+        launchedAt: new Date(_now()).toISOString(),
+      });
+    } catch (e) {
+      writeErr(`worker-status: 監視ペイン状態の保存に失敗しました: ${e.message}`);
+    }
+
     writeOut(`STATUS_PANE_LAUNCHED: pane=${paneResult.paneId}`);
-    return { code: 0, lines: out, errLines: err, paneId: paneResult.paneId };
+    return { code: 0, lines: out, errLines: err, paneId: paneResult.paneId, reused: false };
+  }
+
+  if (sub === 'close-pane') {
+    const existingPane = loadStatusPane(workspace);
+    if (!existingPane || !existingPane.paneId) {
+      writeOut('STATUS_PANE_NOT_FOUND');
+      return { code: 0, lines: out, errLines: err };
+    }
+
+    const paneId = existingPane.paneId;
+    if (_isPaneAlive(paneId)) {
+      const killResult = _killPane(paneId);
+      if (!killResult.ok) {
+        writeErr(`worker-status: 監視ペイン ${paneId} の終了に失敗しました: ${killResult.stderr}`);
+        return { code: 1, lines: out, errLines: err };
+      }
+    }
+
+    removeStatusPane(workspace);
+    writeOut(`STATUS_PANE_CLOSED: pane=${paneId}`);
+    return { code: 0, lines: out, errLines: err, paneId };
   }
 
   return { code: 0, lines: out, errLines: err };
@@ -430,6 +486,8 @@ module.exports = {
   _setIsWorkerAlive: (fn) => { _injectedIsWorkerAlive = fn; },
   _setNow: (fn) => { _injectedNow = fn; },
   _setLaunchInSplitPane: (fn) => { _injectedLaunchInSplitPane = fn; },
+  _setIsPaneAlive: (fn) => { _injectedIsPaneAlive = fn; },
+  _setKillPane: (fn) => { _injectedKillPane = fn; },
 };
 
 if (require.main === module) {

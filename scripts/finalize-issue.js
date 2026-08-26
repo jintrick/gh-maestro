@@ -15,6 +15,7 @@ const { readFileSync, existsSync, rmSync } = require('fs');
 const { spawnSync } = require('./shared/child-process');
 const { parseFlags } = require('./shared/workspace');
 const { getAssistant, removeAssistant } = require('./shared/assistants-registry');
+const { killPane } = require('./shared/pane-launch');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { ARTIFACTS, recordPath } = require('./shared/record-paths');
 const { pruneExecutionsForIssue } = require('./shared/execution-registry');
@@ -93,9 +94,9 @@ function defaultCloseIssue(issue, repo, workspace) {
 function defaultKillAssistant(workspace, issue) {
   const entry = getAssistant(workspace, issue);
   if (!entry || !entry.paneId) return { ok: true, skipped: true };
-  const r = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', entry.paneId], { encoding: 'utf8' });
+  const r = killPane(entry.paneId);
   removeAssistant(workspace, issue);
-  return { ok: r.status === 0, status: r.status, stderr: (r.stderr || '').trim() };
+  return { ok: r.ok, status: r.status, stderr: (r.stderr || '').trim() };
 }
 
 /**

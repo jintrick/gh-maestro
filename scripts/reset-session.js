@@ -18,6 +18,8 @@ const { killProcessTree } = require('./shared/kill-tree');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { sweepRegistry } = require('./process-lifecycle');
+const { getAlivePaneIds, killPane } = require('./shared/pane-launch');
+const { loadStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
@@ -185,22 +187,6 @@ if (require.main === module) {
     warn(`常駐プロセスの再起動情報を捕捉できませんでした: ${e.message}`);
     results.errors.push(`resident capture: ${e.message}`);
   }
-
-  // ── 現在 WezTerm に存在する pane_id の Set を返す ────────────────
-
-  const getAlivePaneIds = () => {
-    const r = spawnSync('wezterm', ['cli', '--no-auto-start', 'list', '--format', 'json'], { encoding: 'utf8' });
-    if (r.status !== 0) {
-      warn(`wezterm cli list 失敗: ${r.stderr.trim()} — pane生存確認をスキップします`);
-      return new Set();
-    }
-    try {
-      return new Set(JSON.parse(r.stdout).map(p => String(p.pane_id)));
-    } catch (e) {
-      warn(`wezterm cli list の出力パース失敗: ${e.message} — pane生存確認をスキップします`);
-      return new Set();
-    }
-  };
 
   // ── workers.json を安全に読む ─────────────────────────────────────
 
@@ -372,7 +358,7 @@ if (require.main === module) {
 
   log('ワーカープロセスをkillします...');
   const workers = loadWorkers();
-  const alivePanes = getAlivePaneIds();
+  const alivePanes = getAlivePaneIds(warn);
 
   for (const [name, entry] of Object.entries(workers)) {
     if (name === 'orchestrator') continue;
@@ -410,12 +396,12 @@ if (require.main === module) {
         log(`"${name}" のレガシーpane ${id} は既に存在しません。スキップ。`);
         if (!handled) results.skipped.push(name);
       } else {
-        const r = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', id], { encoding: 'utf8' });
-        if (r.status === 0) {
+        const r = killPane(id);
+        if (r.ok) {
           log(`"${name}" のレガシーpane ${id} をkillしました。`);
           if (!handled) results.killed.push(name);
         } else {
-          warn(`"${name}" のレガシーpane ${id} のkillに失敗しました: ${(r.stderr || '').trim()}`);
+          warn(`"${name}" のレガシーpane ${id} のkillに失敗しました: ${r.stderr}`);
           if (!handled) results.skipped.push(name);
         }
       }
@@ -426,6 +412,23 @@ if (require.main === module) {
       warn(`"${name}" に終了対象のプロセスが記録されていません。スキップ。`);
       results.skipped.push(name);
     }
+  }
+
+  // ── 監視ペイン（status-pane.json）を終了・削除 ────────────────────────
+  const statusPane = loadStatusPane(workspace);
+  if (statusPane && statusPane.paneId) {
+    if (alivePanes.size > 0 && !alivePanes.has(statusPane.paneId)) {
+      log(`監視pane ${statusPane.paneId} は既に存在しません。スキップ。`);
+    } else {
+      const r = killPane(statusPane.paneId);
+      if (r.ok) {
+        log(`監視pane ${statusPane.paneId} を終了しました。`);
+        results.killed.push(`status-pane-${statusPane.paneId}`);
+      } else {
+        warn(`監視pane ${statusPane.paneId} のkillに失敗しました: ${r.stderr}`);
+      }
+    }
+    removeStatusPane(workspace);
   }
 
   // ═══════════════════════════════════════════════════════════════════

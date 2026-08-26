@@ -221,3 +221,21 @@ test('restartCapturedResidents: sweep後も旧常駐が生きている場合は�
     assert.match(result.errors[0], /重複起動/);
   });
 });
+
+test('reset-session: status-pane.json が存在する場合にセッションリセットで削除される', () => {
+  withTempDir(workspace => {
+    const { saveStatusPane, loadStatusPane } = require('../scripts/shared/status-pane-registry');
+    const { spawnSync } = require('child_process');
+
+    saveStatusPane(workspace, { paneId: '9999', launchedAt: '2026-08-26T09:00:00.000Z' });
+    assert.ok(loadStatusPane(workspace) !== null);
+
+    const scriptPath = path.join(__dirname, '..', 'scripts', 'reset-session.js');
+    const r = spawnSync(process.execPath, [scriptPath, '--workspace', workspace, '--quiet'], {
+      encoding: 'utf8',
+    });
+
+    assert.equal(loadStatusPane(workspace), null, 'status-pane.json が削除されていること');
+  });
+});
+

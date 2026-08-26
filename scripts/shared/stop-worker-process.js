@@ -14,6 +14,7 @@
 const path = require('path');
 const fs = require('fs');
 const { spawnSync } = require('./child-process');
+const { killPane } = require('./pane-launch');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { killProcessTree } = require('./kill-tree');
 const { sweepRegistry, isProcessAlive, verifyProcessIdentity } = require('../process-lifecycle');
@@ -93,9 +94,9 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
 
   // ── 後方互換: 移行前セッションが残した WezTerm ペインを kill ──────────────
   if (workerEntry.paneId) {
-    const killResult = spawnSync('wezterm', ['cli', '--no-auto-start', 'kill-pane', '--pane-id', workerEntry.paneId], { encoding: 'utf8' });
+    const killResult = killPane(workerEntry.paneId);
     const prefix = isRemoveMode ? 'remove-worker' : 'stop-worker';
-    if (killResult.status !== 0) {
+    if (!killResult.ok) {
       logWarn(`${prefix}: レガシーpane ${workerEntry.paneId} のkill-pane 失敗: ${(killResult.stderr || '').trim()}`);
     } else {
       logWarn(`${prefix}: レガシーpane ${workerEntry.paneId} を終了しました`);
