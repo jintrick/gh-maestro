@@ -29,10 +29,10 @@ function spawnProcessTree(dir) {
   const parent = spawn(process.execPath, ['-e', `
     const { spawn } = require('child_process');
     const fs = require('fs');
-    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], { stdio: 'ignore' });
+    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], { stdio: 'ignore', windowsHide: true });
     fs.writeFileSync(process.argv[1], String(child.pid), 'utf8');
     setInterval(() => {}, 1000);
-  `, childInfoFile], { detached: true, stdio: 'ignore' });
+  `, childInfoFile], { detached: true, stdio: 'ignore', windowsHide: true });
 
   const parentPid = parent.pid;
   const deadline = Date.now() + 5000;
