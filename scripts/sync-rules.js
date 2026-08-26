@@ -3,6 +3,14 @@
 
 const fs = require('fs');
 const path = require('path');
+const { recordSyncFailure, clearSyncFailure } = require('./shared/sync-failure');
+
+const USAGE = `sync-rules.js — .claude/rules/*.md を .agents/rules/*.md に変換・同期する
+
+Usage: node sync-rules.js
+
+.claude/rules/ 配下のルール定義を Antigravity (agy) 形式に変換し .agents/rules/ へ同期します。
+同期失敗時は <workspace>/.gh-maestro/sync-failures/sync-rules.yaml に失敗理由を記録します。`;
 
 const ROOT = process.cwd();
 const CLAUDE_RULES = path.join(ROOT, '.claude', 'rules');
@@ -35,8 +43,15 @@ function toAgyFrontmatter(paths, file) {
 }
 
 function syncRules() {
+  if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+
   if (!fs.existsSync(CLAUDE_RULES)) {
-    console.error('sync-rules: .claude/rules/ not found');
+    const msg = 'sync-rules: .claude/rules/ not found';
+    recordSyncFailure('sync-rules', msg);
+    console.error(msg);
     process.exit(1);
   }
   fs.mkdirSync(AGENTS_RULES, { recursive: true });
@@ -55,6 +70,7 @@ function syncRules() {
     try {
       frontmatter = toAgyFrontmatter(paths, file);
     } catch (e) {
+      recordSyncFailure('sync-rules', e.message);
       console.error(e.message);
       process.exit(1);
     }
@@ -71,8 +87,10 @@ function syncRules() {
       }
     }
   }
+
+  clearSyncFailure('sync-rules');
 }
 
-module.exports = { parseFrontmatter, toAgyFrontmatter };
+module.exports = { parseFrontmatter, toAgyFrontmatter, syncRules };
 
 if (require.main === module) syncRules();
