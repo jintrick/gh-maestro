@@ -44,13 +44,15 @@ test('開発サイクルの13工程が順番どおり必須／任意に区分さ
 test('中項目が工程内の総数を含む一意な番号で連番になっている', () => {
   const cycle = readDevelopmentCycle();
   const matches = [
-    ...cycle.matchAll(/^(?:#### |- \*\*)(\d+)-\[(\d+)\/(\d+)\][^\r\n]*$/gm)
+    ...cycle.matchAll(/^\s*(?:#### |- \*\*|\*\*)(\d+)-\[(\d+)\/(\d+)\][^\r\n]*$/gm)
   ];
   const expectedTotals = new Map([
     [1, 3],
+    [2, 1],
     [6, 5],
     [7, 2],
     [8, 1],
+    [10, 1],
     [11, 1],
     [12, 2],
     [13, 3]
@@ -75,6 +77,21 @@ test('中項目が工程内の総数を含む一意な番号で連番になっ�
     assert.equal(items.length, total, `工程${stage}の中項目総数が一致すること`);
     assert.deepEqual(items.map(item => item.index), Array.from({ length: total }, (_, index) => index + 1));
     assert.ok(items.every(item => item.total === total), `工程${stage}の総数表記が統一されていること`);
+  }
+});
+
+test('工程の進路を分ける条件分岐が中項目として採番されている', () => {
+  const cycle = readDevelopmentCycle();
+  const expectedBranches = [
+    ['調査すべき事実がない場合', '2-[1/1]'],
+    ['Review Manager の findings が0件のPRでは', '10-[1/1]'],
+    ['分析対象がゼロなら人間に確認して飛ばす', '13-[2/3]']
+  ];
+
+  for (const [phrase, id] of expectedBranches) {
+    const line = cycle.split(/\r?\n/).find(candidate => candidate.includes(phrase));
+    assert.ok(line, `条件分岐「${phrase}」が存在すること`);
+    assert.ok(line.includes(id), `条件分岐「${phrase}」が${id}として採番されていること`);
   }
 });
 
