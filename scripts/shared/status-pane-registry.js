@@ -7,12 +7,15 @@
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
-const { existsSync, readFileSync, unlinkSync, mkdirSync } = require('fs');
-const { resolve, dirname } = require('path');
+const { existsSync, readFileSync, unlinkSync } = require('fs');
+const path = require('path');
 const { atomicWriteJson } = require('./atomic-write');
+const storageLayout = require('./storage-layout');
 
 function statusPanePath(workspace) {
-  return resolve(workspace, '.gh-maestro', 'status-pane.json');
+  storageLayout.assertValidWorkspace(workspace);
+  storageLayout.assertDisjointRoots();
+  return path.join(storageLayout.workspaceRuntimeDir(workspace), 'status-pane.json');
 }
 
 /**
@@ -22,7 +25,12 @@ function statusPanePath(workspace) {
  * @returns {{paneId: string, launchedAt: string}|null}
  */
 function loadStatusPane(workspace) {
-  const p = statusPanePath(workspace);
+  let p;
+  try {
+    p = statusPanePath(workspace);
+  } catch {
+    return null;
+  }
   if (!existsSync(p)) return null;
   try {
     const parsed = JSON.parse(readFileSync(p, 'utf8'));
@@ -45,8 +53,8 @@ function loadStatusPane(workspace) {
  * @param {{paneId: string|number, launchedAt?: string}} entry
  */
 function saveStatusPane(workspace, entry) {
+  storageLayout.ensureWorkspaceRuntimeDir(workspace);
   const p = statusPanePath(workspace);
-  mkdirSync(dirname(p), { recursive: true });
   atomicWriteJson(p, {
     paneId: String(entry.paneId),
     launchedAt: entry.launchedAt || new Date().toISOString(),
@@ -60,7 +68,12 @@ function saveStatusPane(workspace, entry) {
  * @returns {boolean} ファイルが存在し削除されたか
  */
 function removeStatusPane(workspace) {
-  const p = statusPanePath(workspace);
+  let p;
+  try {
+    p = statusPanePath(workspace);
+  } catch {
+    return false;
+  }
   if (!existsSync(p)) return false;
   try {
     unlinkSync(p);

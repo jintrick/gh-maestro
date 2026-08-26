@@ -678,6 +678,25 @@ test('main: close-pane で kill に失敗した場合は code 1 を返す（フ�
   }
 });
 
+test('main: pane は status-pane.json の保存に失敗した場合にエラーを出力し code 1 を返す', () => {
+  const workspace = createWorkspace();
+  workerStatus._setLaunchInSplitPane(() => ({ paneId: '601' }));
+  workerStatus._setSaveStatusPane(() => {
+    throw new Error('disk full');
+  });
+
+  try {
+    const result = runMain(['pane', '--workspace', workspace]);
+    assert.equal(result.code, 1);
+    assert.match(result.errLines.join('\n'), /監視ペイン状態の保存に失敗しました: disk full/);
+  } finally {
+    workerStatus._setLaunchInSplitPane(null);
+    workerStatus._setSaveStatusPane(null);
+    removeWorkspace(workspace);
+  }
+});
+
+
 
 test('サブプロセス: list は全ワーカーの横棒グラフを表示する', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-list-cli-');

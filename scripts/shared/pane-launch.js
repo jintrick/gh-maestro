@@ -102,26 +102,27 @@ function launchInSplitPane({ argv, cwd, direction = 'bottom', percent = 15, env 
 
 /**
  * 現在 WezTerm に存在する pane_id の Set<string> を返す。
+ * 取得に失敗した場合は warn を呼び null を返す（0件存在とは区別する）。
  *
  * @param {Function} [warn]
- * @returns {Set<string>}
+ * @returns {Set<string>|null}
  */
 function getAlivePaneIds(warn = () => {}) {
   const r = _weztermListPanes(['cli', '--no-auto-start', 'list', '--format', 'json']);
   if (r.status !== 0) {
     warn(`wezterm cli list 失敗: ${(r.stderr || '').toString().trim()} — pane生存確認をスキップします`);
-    return new Set();
+    return null;
   }
   try {
     const list = JSON.parse((r.stdout || '').toString());
     if (!Array.isArray(list)) {
       warn(`wezterm cli list の出力が配列ではありません — pane生存確認をスキップします`);
-      return new Set();
+      return null;
     }
     return new Set(list.map(p => String(p.pane_id)));
   } catch (e) {
     warn(`wezterm cli list の出力パース失敗: ${e.message} — pane生存確認をスキップします`);
-    return new Set();
+    return null;
   }
 }
 
@@ -135,6 +136,7 @@ function getAlivePaneIds(warn = () => {}) {
 function isPaneAlive(paneId, warn = () => {}) {
   if (paneId === null || paneId === undefined || paneId === '') return false;
   const alivePanes = getAlivePaneIds(warn);
+  if (alivePanes === null) return false;
   return alivePanes.has(String(paneId));
 }
 

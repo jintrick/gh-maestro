@@ -125,21 +125,21 @@ test('getAlivePaneIds: listのJSON出力からSet<string>を構築する', () =>
   assert.ok(!result.has('100'));
 });
 
-test('getAlivePaneIds: status!=0 の場合はwarnを呼び空Setを返す（fail-closed）', () => {
+test('getAlivePaneIds: status!=0 の場合はwarnを呼び null を返す（0件生存と区別）', () => {
   let warned = null;
   paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'wezterm not running' }));
 
   const result = paneLaunch.getAlivePaneIds((msg) => { warned = msg; });
-  assert.equal(result.size, 0);
+  assert.equal(result, null);
   assert.match(warned, /wezterm cli list 失敗: wezterm not running/);
 });
 
-test('getAlivePaneIds: JSONパース失敗時はwarnを呼び空Setを返す', () => {
+test('getAlivePaneIds: JSONパース失敗時はwarnを呼び null を返す', () => {
   let warned = null;
   paneLaunch._setWeztermListPanes(() => ({ status: 0, stdout: 'not json', stderr: '' }));
 
   const result = paneLaunch.getAlivePaneIds((msg) => { warned = msg; });
-  assert.equal(result.size, 0);
+  assert.equal(result, null);
   assert.match(warned, /wezterm cli list の出力パース失敗/);
 });
 
@@ -156,6 +156,10 @@ test('isPaneAlive: paneIdの生存を正しく判定する', () => {
   assert.equal(paneLaunch.isPaneAlive(''), false);
   assert.equal(paneLaunch.isPaneAlive(null), false);
   assert.equal(paneLaunch.isPaneAlive(undefined), false);
+
+  // 一覧取得失敗時は false
+  paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'error' }));
+  assert.equal(paneLaunch.isPaneAlive('10'), false);
 });
 
 test('killPane: paneIdを指定して正常にkillできる', () => {

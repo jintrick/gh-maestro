@@ -417,18 +417,19 @@ if (require.main === module) {
   // ── 監視ペイン（status-pane.json）を終了・削除 ────────────────────────
   const statusPane = loadStatusPane(workspace);
   if (statusPane && statusPane.paneId) {
-    if (alivePanes.size > 0 && !alivePanes.has(statusPane.paneId)) {
+    if (alivePanes !== null && !alivePanes.has(statusPane.paneId)) {
       log(`監視pane ${statusPane.paneId} は既に存在しません。スキップ。`);
+      removeStatusPane(workspace);
     } else {
       const r = killPane(statusPane.paneId);
       if (r.ok) {
         log(`監視pane ${statusPane.paneId} を終了しました。`);
         results.killed.push(`status-pane-${statusPane.paneId}`);
+        removeStatusPane(workspace);
       } else {
         warn(`監視pane ${statusPane.paneId} のkillに失敗しました: ${r.stderr}`);
       }
     }
-    removeStatusPane(workspace);
   }
 
   // ═══════════════════════════════════════════════════════════════════

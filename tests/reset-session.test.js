@@ -239,3 +239,42 @@ test('reset-session: status-pane.json が存在する場合にセッションリ
   });
 });
 
+test('reset-session: killPane に失敗した場合は status-pane.json を削除せず残す', () => {
+  withTempDir(workspace => {
+    const { saveStatusPane, loadStatusPane } = require('../scripts/shared/status-pane-registry');
+    const paneLaunch = require('../scripts/shared/pane-launch');
+
+    saveStatusPane(workspace, { paneId: '8888', launchedAt: '2026-08-26T09:00:00.000Z' });
+    assert.ok(loadStatusPane(workspace) !== null);
+
+    // list は生存中と判定し、killPane は失敗するモックを設定
+    paneLaunch._setWeztermListPanes(() => ({
+      status: 0,
+      stdout: JSON.stringify([{ pane_id: '8888' }]),
+      stderr: '',
+    }));
+    paneLaunch._setWeztermKillPane(() => ({
+      status: 1,
+      stdout: '',
+      stderr: 'kill failed',
+    }));
+
+    try {
+      const alivePanes = paneLaunch.getAlivePaneIds();
+      const statusPane = loadStatusPane(workspace);
+      assert.ok(statusPane && statusPane.paneId);
+
+      // killPane 失敗時は removeStatusPane は呼ばれない
+      const r = paneLaunch.killPane(statusPane.paneId);
+      assert.equal(r.ok, false);
+      // ファイルが残っていることを確認
+      assert.ok(loadStatusPane(workspace) !== null);
+    } finally {
+      paneLaunch._setWeztermListPanes(null);
+      paneLaunch._setWeztermKillPane(null);
+    }
+  });
+});
+
+
+

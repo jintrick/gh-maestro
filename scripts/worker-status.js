@@ -62,6 +62,7 @@ let _injectedNow = null;
 let _injectedLaunchInSplitPane = null;
 let _injectedIsPaneAlive = null;
 let _injectedKillPane = null;
+let _injectedSaveStatusPane = null;
 
 function _getProcessStartTime(pid) {
   const fn = _injectedGetProcessStartTime ?? require('./process-lifecycle').getProcessStartTime;
@@ -91,6 +92,11 @@ function _isPaneAlive(paneId) {
 function _killPane(paneId) {
   const fn = _injectedKillPane ?? require('./shared/pane-launch').killPane;
   return fn(paneId);
+}
+
+function _saveStatusPane(workspace, entry) {
+  const fn = _injectedSaveStatusPane ?? require('./shared/status-pane-registry').saveStatusPane;
+  return fn(workspace, entry);
 }
 
 /**
@@ -399,12 +405,13 @@ function main(argv = process.argv.slice(2)) {
     }
 
     try {
-      saveStatusPane(workspace, {
+      _saveStatusPane(workspace, {
         paneId: paneResult.paneId,
         launchedAt: new Date(_now()).toISOString(),
       });
     } catch (e) {
       writeErr(`worker-status: 監視ペイン状態の保存に失敗しました: ${e.message}`);
+      return { code: 1, lines: out, errLines: err };
     }
 
     writeOut(`STATUS_PANE_LAUNCHED: pane=${paneResult.paneId}`);
@@ -488,6 +495,7 @@ module.exports = {
   _setLaunchInSplitPane: (fn) => { _injectedLaunchInSplitPane = fn; },
   _setIsPaneAlive: (fn) => { _injectedIsPaneAlive = fn; },
   _setKillPane: (fn) => { _injectedKillPane = fn; },
+  _setSaveStatusPane: (fn) => { _injectedSaveStatusPane = fn; },
 };
 
 if (require.main === module) {

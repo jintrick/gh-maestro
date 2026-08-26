@@ -30,22 +30,24 @@ test('loadStatusPane: status-pane.jsonが無ければnull', () => {
 
 test('loadStatusPane: 壊れたJSONはnullとして扱う', () => {
   withTempWorkspace((dir) => {
-    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(statusPanePath(dir), '{not json', 'utf8');
+    const p = statusPanePath(dir);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, '{not json', 'utf8');
     assert.equal(loadStatusPane(dir), null);
   });
 });
 
 test('loadStatusPane: 配列やpaneId欠落オブジェクトはnullとして扱う', () => {
   withTempWorkspace((dir) => {
-    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(statusPanePath(dir), '[1,2,3]', 'utf8');
+    const p = statusPanePath(dir);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, '[1,2,3]', 'utf8');
     assert.equal(loadStatusPane(dir), null);
 
-    fs.writeFileSync(statusPanePath(dir), '{"foo":"bar"}', 'utf8');
+    fs.writeFileSync(p, '{"foo":"bar"}', 'utf8');
     assert.equal(loadStatusPane(dir), null);
 
-    fs.writeFileSync(statusPanePath(dir), '{"paneId":""}', 'utf8');
+    fs.writeFileSync(p, '{"paneId":""}', 'utf8');
     assert.equal(loadStatusPane(dir), null);
   });
 });
@@ -84,3 +86,15 @@ test('removeStatusPane: 存在しない場合はfalseを返す', () => {
     assert.equal(existed, false);
   });
 });
+
+test('statusPanePath: storage-layout の workspaceRuntimeDir 配下に置かれ、不正なワークスペースは拒否する', () => {
+  const storageLayout = require('../scripts/shared/storage-layout');
+  withTempWorkspace((dir) => {
+    const expected = path.join(storageLayout.workspaceRuntimeDir(dir), 'status-pane.json');
+    assert.equal(statusPanePath(dir), expected);
+
+    // ホームディレクトリ等の不正なワークスペースは throw
+    assert.throws(() => statusPanePath(os.homedir()), /assertValidWorkspace/);
+  });
+});
+
