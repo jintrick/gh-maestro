@@ -853,3 +853,268 @@ test('サブプロセス: list --json は機械可読な JSON 配列を返す', 
   }
 });
 
+test('collectWorkersStatus: 稼働中 Review Manager を収集し、PR番号・ワーカー名・agentId を設定する', () => {
+  const workspace = createWorkspace('gh-maestro-ws-rm-');
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  workerStatus._setIsProcessAlive((pid) => pid === 5001);
+  workerStatus._setGetProcessStartTime((pid) => (pid === 5001 ? '2026-08-26T11:50:00.000Z' : null));
+
+  try {
+    const reviewDir = path.join(workspace, '.gh-maestro', 'records', 'pr', '404', 'review');
+    fs.mkdirSync(reviewDir, { recursive: true });
+    fs.writeFileSync(path.join(reviewDir, 'manager.running'), '5001\n', 'utf8');
+
+    // workspace config で reviewer agent をカスタマイズ
+    fs.writeFileSync(path.join(workspace, '.gh-maestro', 'config.json'), JSON.stringify({
+      skillAgentMap: { 'gh-maestro-reviewer': 'codex-custom' },
+    }), 'utf8');
+
+    const results = workerStatus.collectWorkersStatus(workspace);
+    assert.equal(results.length, 1);
+    assert.deepEqual(results[0], {
+      workerName: 'review-manager-pr-404',
+      pid: 5001,
+      running: true,
+      startTime: '2026-08-26T11:50:00.000Z',
+      elapsedSeconds: 600,
+      issue: null,
+      pr: 404,
+      agentId: 'codex-custom',
+    });
+  } finally {
+    workerStatus._setNow(null);
+    workerStatus._setIsProcessAlive(null);
+    workerStatus._setGetProcessStartTime(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('collectWorkersStatus / renderUptimeBars: resolveSkillAgentMap が例外を投げた場合に agentId が null / - となる縮退動作を検証する', () => {
+  const workspace = createWorkspace('gh-maestro-ws-rm-throw-');
+  workerStatus._setIsProcessAlive((pid) => pid === 6001);
+  workerStatus._setResolveSkillAgentMap(() => {
+    throw new Error('config parse error');
+  });
+
+  try {
+    const reviewDir = path.join(workspace, '.gh-maestro', 'records', 'pr', '501', 'review');
+    fs.mkdirSync(reviewDir, { recursive: true });
+    fs.writeFileSync(path.join(reviewDir, 'manager.running'), '6001\n', 'utf8');
+
+    const results = workerStatus.collectWorkersStatus(workspace);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].agentId, null);
+
+    const lines = workerStatus.renderUptimeBars(results);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /^PR#501\s+review-manager-pr-501\s+-\s+\[running\]/);
+  } finally {
+    workerStatus._setIsProcessAlive(null);
+    workerStatus._setResolveSkillAgentMap(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('collectWorkersStatus / renderUptimeBars: skillAgentMap[\'gh-maestro-reviewer\'] が未設定・null・非文字列の場合に agentId が null / - となる縮退動作を検証する', () => {
+  const workspace = createWorkspace('gh-maestro-ws-rm-unset-');
+  workerStatus._setIsProcessAlive(() => true);
+
+  try {
+    const reviewDir1 = path.join(workspace, '.gh-maestro', 'records', 'pr', '601', 'review');
+    const reviewDir2 = path.join(workspace, '.gh-maestro', 'records', 'pr', '602', 'review');
+    const reviewDir3 = path.join(workspace, '.gh-maestro', 'records', 'pr', '603', 'review');
+    fs.mkdirSync(reviewDir1, { recursive: true });
+    fs.mkdirSync(reviewDir2, { recursive: true });
+    fs.mkdirSync(reviewDir3, { recursive: true });
+    fs.writeFileSync(path.join(reviewDir1, 'manager.running'), '7001\n', 'utf8');
+    fs.writeFileSync(path.join(reviewDir2, 'manager.running'), '7002\n', 'utf8');
+    fs.writeFileSync(path.join(reviewDir3, 'manager.running'), '7003\n', 'utf8');
+
+    // 1. 未設定（空オブジェクト）
+    workerStatus._setResolveSkillAgentMap(() => ({}));
+    const res1 = workerStatus.collectWorkersStatus(workspace);
+    const rm1 = res1.find((r) => r.pr === 601);
+    assert.ok(rm1);
+    assert.equal(rm1.agentId, null);
+    assert.match(workerStatus.renderUptimeBars([rm1])[0], /^PR#601\s+review-manager-pr-601\s+-\s+\[running\]/);
+
+    // 2. null
+    workerStatus._setResolveSkillAgentMap(() => ({ 'gh-maestro-reviewer': null }));
+    const res2 = workerStatus.collectWorkersStatus(workspace);
+    const rm2 = res2.find((r) => r.pr === 602);
+    assert.ok(rm2);
+    assert.equal(rm2.agentId, null);
+    assert.match(workerStatus.renderUptimeBars([rm2])[0], /^PR#602\s+review-manager-pr-602\s+-\s+\[running\]/);
+
+    // 3. 非文字列（数値）
+    workerStatus._setResolveSkillAgentMap(() => ({ 'gh-maestro-reviewer': 12345 }));
+    const res3 = workerStatus.collectWorkersStatus(workspace);
+    const rm3 = res3.find((r) => r.pr === 603);
+    assert.ok(rm3);
+    assert.equal(rm3.agentId, null);
+    assert.match(workerStatus.renderUptimeBars([rm3])[0], /^PR#603\s+review-manager-pr-603\s+-\s+\[running\]/);
+  } finally {
+    workerStatus._setIsProcessAlive(null);
+    workerStatus._setResolveSkillAgentMap(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('collectWorkersStatus: 死亡した Review Manager の PID は収集しない', () => {
+  const workspace = createWorkspace('gh-maestro-ws-rm-dead-');
+  workerStatus._setIsProcessAlive(() => false);
+
+  try {
+    const reviewDir = path.join(workspace, '.gh-maestro', 'records', 'pr', '404', 'review');
+    fs.mkdirSync(reviewDir, { recursive: true });
+    fs.writeFileSync(path.join(reviewDir, 'manager.running'), '999999999\n', 'utf8');
+
+    const results = workerStatus.collectWorkersStatus(workspace);
+    assert.equal(results.length, 0);
+  } finally {
+    workerStatus._setIsProcessAlive(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('collectWorkersStatus: manager.running が破損・空・非数値でも全体が失敗せず既存ワーカーを返す (tolerant)', () => {
+  const workspace = createWorkspace('gh-maestro-ws-rm-corrupt-');
+  workerStatus._setIsWorkerAlive((rawEntry) => rawEntry && rawEntry.pid === 111);
+
+  try {
+    writeWorkers(workspace, {
+      'issue-100-worker-a': { pid: 111, issue: 100, agentId: 'agent-1' },
+    });
+
+    const badReviewDir1 = path.join(workspace, '.gh-maestro', 'records', 'pr', '401', 'review');
+    const badReviewDir2 = path.join(workspace, '.gh-maestro', 'records', 'pr', '402', 'review');
+    fs.mkdirSync(badReviewDir1, { recursive: true });
+    fs.mkdirSync(badReviewDir2, { recursive: true });
+    fs.writeFileSync(path.join(badReviewDir1, 'manager.running'), 'not-a-number\n', 'utf8');
+    fs.writeFileSync(path.join(badReviewDir2, 'manager.running'), '', 'utf8');
+
+    const results = workerStatus.collectWorkersStatus(workspace);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].workerName, 'issue-100-worker-a');
+  } finally {
+    workerStatus._setIsWorkerAlive(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('collectWorkersStatus: 複数 PR の Review Manager が同時に存在する場合それぞれ収集する', () => {
+  const workspace = createWorkspace('gh-maestro-ws-rm-multi-');
+  workerStatus._setIsProcessAlive((pid) => pid === 101 || pid === 102);
+  workerStatus._setGetProcessStartTime(() => '2026-08-26T11:55:00.000Z');
+
+  try {
+    const reviewDir1 = path.join(workspace, '.gh-maestro', 'records', 'pr', '10', 'review');
+    const reviewDir2 = path.join(workspace, '.gh-maestro', 'records', 'pr', '20', 'review');
+    fs.mkdirSync(reviewDir1, { recursive: true });
+    fs.mkdirSync(reviewDir2, { recursive: true });
+    fs.writeFileSync(path.join(reviewDir1, 'manager.running'), '101\n', 'utf8');
+    fs.writeFileSync(path.join(reviewDir2, 'manager.running'), '102\n', 'utf8');
+
+    const results = workerStatus.collectWorkersStatus(workspace);
+    assert.equal(results.length, 2);
+    assert.ok(results.some((r) => r.workerName === 'review-manager-pr-10' && r.pr === 10 && r.pid === 101));
+    assert.ok(results.some((r) => r.workerName === 'review-manager-pr-20' && r.pr === 20 && r.pid === 102));
+  } finally {
+    workerStatus._setIsProcessAlive(null);
+    workerStatus._setGetProcessStartTime(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('renderUptimeBars: Review Manager の行が PR#<PR> および review-manager-pr-<PR> 形式で描画される', () => {
+  const workers = [
+    {
+      workerName: 'issue-403-worker-1',
+      issue: 403,
+      pr: null,
+      agentId: 'claude-code',
+      pid: 1001,
+      running: true,
+      startTime: '2026-08-26T00:00:00Z',
+      elapsedSeconds: 300,
+    },
+    {
+      workerName: 'review-manager-pr-404',
+      issue: null,
+      pr: 404,
+      agentId: 'codex',
+      pid: 1002,
+      running: true,
+      startTime: '2026-08-26T00:00:00Z',
+      elapsedSeconds: 600,
+    },
+  ];
+
+  const lines = workerStatus.renderUptimeBars(workers, { maxBarWidth: 10 });
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^#403\s+worker-1\s+claude-code\s+\[running\]\s+5m 0s\s+█████\s+\(pid: 1001\)$/);
+  assert.match(lines[1], /^PR#404\s+review-manager-pr-404\s+codex\s+\[running\]\s+10m 0s\s+██████████\s+\(pid: 1002\)$/);
+});
+
+test('main: list および list --json で Review Manager を表示する', () => {
+  const workspace = createWorkspace('gh-maestro-ws-rm-main-');
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  workerStatus._setIsWorkerAlive((rawEntry) => rawEntry && rawEntry.pid === 111);
+  workerStatus._setIsProcessAlive((pid) => pid === 222);
+  workerStatus._setGetProcessStartTime((pid) => {
+    if (pid === 111) return '2026-08-26T11:50:00.000Z'; // 600s
+    if (pid === 222) return '2026-08-26T11:55:00.000Z'; // 300s
+    return null;
+  });
+
+  try {
+    writeWorkers(workspace, {
+      'issue-100-worker-a': { pid: 111, issue: 100, agentId: 'agent-1' },
+    });
+
+    fs.writeFileSync(path.join(workspace, '.gh-maestro', 'config.json'), JSON.stringify({
+      skillAgentMap: { 'gh-maestro-reviewer': 'codex' },
+    }), 'utf8');
+
+    const reviewDir = path.join(workspace, '.gh-maestro', 'records', 'pr', '405', 'review');
+    fs.mkdirSync(reviewDir, { recursive: true });
+    fs.writeFileSync(path.join(reviewDir, 'manager.running'), '222\n', 'utf8');
+
+    // 1. list (テキスト行)
+    const listResult = runMain(['list', '--workspace', workspace]);
+    assert.equal(listResult.code, 0);
+    assert.equal(listResult.lines.length, 2);
+    assert.match(listResult.lines[0], /#100\s+worker-a\s+agent-1\s+\[running\]\s+10m 0s/);
+    assert.match(listResult.lines[1], /PR#405\s+review-manager-pr-405\s+codex\s+\[running\]\s+5m 0s/);
+
+    // 2. list --json (機械可読JSON)
+    const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
+    assert.equal(jsonResult.code, 0);
+    const parsed = JSON.parse(jsonResult.lines.join('\n'));
+    assert.equal(parsed.length, 2);
+    assert.deepEqual(parsed[0], {
+      workerName: 'issue-100-worker-a',
+      pid: 111,
+      running: true,
+      startTime: '2026-08-26T11:50:00.000Z',
+      elapsedSeconds: 600,
+    });
+    assert.deepEqual(parsed[1], {
+      workerName: 'review-manager-pr-405',
+      pid: 222,
+      running: true,
+      startTime: '2026-08-26T11:55:00.000Z',
+      elapsedSeconds: 300,
+    });
+  } finally {
+    workerStatus._setNow(null);
+    workerStatus._setIsWorkerAlive(null);
+    workerStatus._setIsProcessAlive(null);
+    workerStatus._setGetProcessStartTime(null);
+    removeWorkspace(workspace);
+  }
+});
+
+
