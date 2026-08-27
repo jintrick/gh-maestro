@@ -638,6 +638,33 @@ test('verifyProcessIdentity: getProcessStartTime が空文字を返した場合�
     `expected 'cannot get' reason, got: ${result.reason}`);
 });
 
+test('verifyProcessIdentity: actualStartTime 指定時はその値で比較し、再観測しない', () => {
+  let execCalls = 0;
+  const plc = loadModule({
+    execSync: () => {
+      execCalls++;
+      throw new Error('actual start time should already be supplied');
+    },
+  });
+
+  const matched = plc.verifyProcessIdentity(process.pid, {
+    startTime: MOCK_START_TIME,
+  }, {
+    actualStartTime: MOCK_START_TIME,
+  });
+  assert.equal(matched.match, true);
+  assert.equal(execCalls, 0);
+
+  const mismatched = plc.verifyProcessIdentity(process.pid, {
+    startTime: MOCK_START_TIME,
+  }, {
+    actualStartTime: OTHER_START_TIME,
+  });
+  assert.equal(mismatched.match, false);
+  assert.match(mismatched.reason, /start time mismatch/);
+  assert.equal(execCalls, 0);
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // findRunningInstance
 // ═══════════════════════════════════════════════════════════════════════════
