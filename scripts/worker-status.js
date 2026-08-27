@@ -13,6 +13,8 @@ const { isWorkerAlive } = require('./shared/worker-liveness');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { loadStatusPane, saveStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
+const { resolveSkillAgentMap } = require('./shared/resolve-config');
+const { listRunningReviewManagers } = require('./shared/running-review-managers');
 
 const CLI_USAGE = `worker-status.js — ワーカーの稼働状況・連続稼働時間の確認
 
@@ -58,6 +60,7 @@ Description:
 
 let _injectedGetProcessStartTime = null;
 let _injectedIsWorkerAlive = null;
+let _injectedIsProcessAlive = null;
 let _injectedNow = null;
 let _injectedLaunchInSplitPane = null;
 let _injectedIsPaneAlive = null;
@@ -72,6 +75,11 @@ function _getProcessStartTime(pid) {
 function _isWorkerAlive(entry) {
   const fn = _injectedIsWorkerAlive ?? require('./shared/worker-liveness').isWorkerAlive;
   return fn(entry);
+}
+
+function _isProcessAlive(pid) {
+  const fn = _injectedIsProcessAlive ?? require('./process-lifecycle').isProcessAlive;
+  return fn(pid);
 }
 
 function _now() {
@@ -154,38 +162,78 @@ function collectWorkersStatus(workspace, opts = {}) {
   const now = (opts.nowFn || _now)();
   const getStartTime = opts.getProcessStartTimeFn || _getProcessStartTime;
   const isAlive = opts.isWorkerAliveFn || _isWorkerAlive;
+  const isProcAlive = opts.isProcessAliveFn || _isProcessAlive;
+
+  // Review Manager 用の agentId を 1 回だけ解決（PRごとのループ内でファイル読み込みを繰り返さない）
+  let reviewerAgentId = null;
+  try {
+    const skillMap = resolveSkillAgentMap({ workspace });
+    if (skillMap && typeof skillMap['gh-maestro-reviewer'] === 'string') {
+      reviewerAgentId = skillMap['gh-maestro-reviewer'];
+    }
+  } catch {
+    reviewerAgentId = null;
+  }
 
   const rawWorkers = readWorkersRaw(workspace);
-  if (!rawWorkers) return [];
-
   const results = [];
-  for (const [workerName, rawEntry] of Object.entries(rawWorkers)) {
-    if (workerName === 'orchestrator') continue;
-    const entry = normalizeWorkerEntry(rawEntry);
-    const running = isAlive(rawEntry);
-    let startTime = null;
-    let elapsedSeconds = 0;
+  if (rawWorkers) {
+    for (const [workerName, rawEntry] of Object.entries(rawWorkers)) {
+      if (workerName === 'orchestrator') continue;
+      const entry = normalizeWorkerEntry(rawEntry);
+      const running = isAlive(rawEntry);
+      let startTime = null;
+      let elapsedSeconds = 0;
 
-    if (running && entry.pid) {
-      startTime = getStartTime(entry.pid) || entry.startTime || null;
-      if (startTime) {
-        const startMs = new Date(startTime).getTime();
-        if (!Number.isNaN(startMs)) {
-          elapsedSeconds = Math.max(0, Math.floor((now - startMs) / 1000));
+      if (running && entry.pid) {
+        startTime = getStartTime(entry.pid) || entry.startTime || null;
+        if (startTime) {
+          const startMs = new Date(startTime).getTime();
+          if (!Number.isNaN(startMs)) {
+            elapsedSeconds = Math.max(0, Math.floor((now - startMs) / 1000));
+          }
         }
+      }
+
+      results.push({
+        workerName,
+        pid: entry.pid,
+        running,
+        startTime,
+        elapsedSeconds,
+        issue: entry.issue,
+        agentId: entry.agentId,
+      });
+    }
+  }
+
+  // 稼働中の Review Manager を収集（破損ファイル等は tolerant にスキップ）
+  const runningManagers = listRunningReviewManagers(workspace, {
+    isProcessAliveFn: isProcAlive,
+    onError: 'skip',
+  });
+  for (const manager of runningManagers) {
+    const startTime = getStartTime(manager.pid) || null;
+    let elapsedSeconds = 0;
+    if (startTime) {
+      const startMs = new Date(startTime).getTime();
+      if (!Number.isNaN(startMs)) {
+        elapsedSeconds = Math.max(0, Math.floor((now - startMs) / 1000));
       }
     }
 
     results.push({
-      workerName,
-      pid: entry.pid,
-      running,
+      workerName: `review-manager-pr-${manager.pr}`,
+      pid: manager.pid,
+      running: true,
       startTime,
       elapsedSeconds,
-      issue: entry.issue,
-      agentId: entry.agentId,
+      issue: null,
+      pr: Number(manager.pr),
+      agentId: reviewerAgentId,
     });
   }
+
   return results;
 }
 
@@ -206,7 +254,12 @@ function renderUptimeBars(workers, opts = {}) {
   const maxElapsed = Math.max(0, ...workers.map(w => w.elapsedSeconds));
 
   const rows = workers.map(w => {
-    const issueCol = w.issue != null ? `#${w.issue}` : '-';
+    let issueCol = '-';
+    if (w.pr != null) {
+      issueCol = `PR#${w.pr}`;
+    } else if (w.issue != null) {
+      issueCol = `#${w.issue}`;
+    }
     const shortName = stripWorkerNamePrefix(w.workerName);
     const agentCol = w.agentId ? String(w.agentId) : '-';
     const statusCol = w.running ? '[running]' : '[stopped]';
@@ -553,6 +606,7 @@ module.exports = {
   DEFAULT_INTERVAL_SEC,
   _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setIsWorkerAlive: (fn) => { _injectedIsWorkerAlive = fn; },
+  _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
   _setNow: (fn) => { _injectedNow = fn; },
   _setLaunchInSplitPane: (fn) => { _injectedLaunchInSplitPane = fn; },
   _setIsPaneAlive: (fn) => { _injectedIsPaneAlive = fn; },

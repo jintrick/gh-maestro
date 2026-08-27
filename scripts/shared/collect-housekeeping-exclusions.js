@@ -26,7 +26,7 @@ const fs = require('fs');
 const { readWorkersRaw } = require('./workers-registry');
 const { isWorkerAlive } = require('./worker-liveness');
 const { createNormalWorkerStore, isLeaseLive } = require('./worker-lease');
-const { reviewArtifactPath } = require('./review-manager-paths');
+const { listRunningReviewManagers } = require('./running-review-managers');
 const { normalizePid } = require('./worker-entry');
 
 // process-lifecycle 由来の関数のみ呼び出し時点で解決する（循環 require 対策、上記参照）。
@@ -108,30 +108,12 @@ function collectHousekeepingExclusions(workspace) {
   // 通常ワーカー以外の Review Manager は PID registry に登録されず、専用の
   // review manager の .running lease だけを持つ。既存の lease 契約（PID 生存）を
   // 再利用して、対応する records/pr/<PR>/review/manager.log を保護する。
-  const prDir = path.join(ghDir, 'records', 'pr');
-  if (fs.existsSync(prDir)) {
-    for (const entry of fs.readdirSync(prDir, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
-      const runningPath = reviewArtifactPath(ghDir, entry.name, '.running');
-      let raw;
-      try {
-        raw = fs.readFileSync(runningPath, 'utf8');
-      } catch (e) {
-        // ENOENT = RM 未起動（または終了済み）→ 対象外。それ以外の読み取り不能
-        // （存在するのに読めない）は RM の生存を判定できないため fail-closed で伝播
-        // （PR #268 レビュー指摘）。
-        if (e.code === 'ENOENT') continue;
-        throw new Error(`manager.running の読み取りに失敗しました: ${runningPath}: ${e.message}`);
-      }
-      const pid = Number(raw.trim());
-      if (!Number.isInteger(pid) || pid <= 0) {
-        // 有効な PID 文字列でない = 解析不能。RM の生存を判定できないため fail-closed。
-        throw new Error(`manager.running の PID が不正です（解析不能）: ${runningPath}`);
-      }
-      if (_isProcessAlive(pid)) {
-        reviewPrs.add(entry.name);
-      }
-    }
+  const runningManagers = listRunningReviewManagers(workspace, {
+    isProcessAliveFn: _isProcessAlive,
+    onError: 'throw',
+  });
+  for (const manager of runningManagers) {
+    reviewPrs.add(manager.pr);
   }
 
   return { workerNames, reviewPrs, pids };
