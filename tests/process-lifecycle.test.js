@@ -665,6 +665,31 @@ test('verifyProcessIdentity: actualStartTime 指定時はその値で比較し�
   assert.equal(execCalls, 0);
 });
 
+test('verifyProcessIdentity: actualStartTime:null は未指定時の空観測と同じく不一致にする', () => {
+  let execCalls = 0;
+  const plc = loadModule({
+    execSync: () => {
+      execCalls++;
+      return '\n';
+    },
+  });
+
+  const suppliedNull = plc.verifyProcessIdentity(process.pid, {
+    startTime: MOCK_START_TIME,
+  }, {
+    actualStartTime: null,
+  });
+  assert.equal(suppliedNull.match, false);
+  assert.equal(suppliedNull.reason, 'cannot get process start time');
+  assert.equal(execCalls, 0, 'actualStartTime:null の指定時は OS 観測しない');
+
+  const observedNull = plc.verifyProcessIdentity(process.pid, {
+    startTime: MOCK_START_TIME,
+  });
+  assert.deepEqual(observedNull, suppliedNull);
+  assert.equal(execCalls, 1, '未指定時だけ実観測して同じ不一致結果になる');
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // findRunningInstance
 // ═══════════════════════════════════════════════════════════════════════════

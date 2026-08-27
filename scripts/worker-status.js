@@ -211,7 +211,11 @@ function createProcessStartTimeCache(getStartTimeFn = _getProcessStartTime, opts
       && age >= 0
       && age < maxAgeMs;
     const expectedMatches = !expectedStartTime
-      || (cached && cached.startTime && _startTimesMatch(expectedStartTime, cached.startTime));
+      || (cached && (
+        cached.startTime
+          ? _startTimesMatch(expectedStartTime, cached.startTime)
+          : cached.expectedStartTime && _startTimesMatch(expectedStartTime, cached.expectedStartTime)
+      ));
 
     if (fresh && expectedMatches) {
       currentObservation.set(key, cached);
@@ -219,7 +223,7 @@ function createProcessStartTimeCache(getStartTimeFn = _getProcessStartTime, opts
     }
 
     const startTime = getStartTimeFn(key) || null;
-    const next = { startTime, observedAt: now };
+    const next = { startTime, expectedStartTime: expectedStartTime || null, observedAt: now };
     entries.set(key, next);
     currentObservation.set(key, next);
     return startTime;
@@ -249,13 +253,18 @@ function collectWorkersStatus(workspace, opts = {}) {
   const getStartTime = opts.getProcessStartTimeFn || _getProcessStartTime;
   const isProcAlive = opts.isProcessAliveFn || _isProcessAlive;
   const startTimeCache = opts.startTimeCache || createProcessStartTimeCache(getStartTime);
+  const observedStartTimes = new Map();
   startTimeCache.begin(now);
 
   const isAlive = opts.isWorkerAliveFn || ((rawEntry) => {
     const entry = normalizeWorkerEntry(rawEntry);
     if (!entry.startTime) return _isWorkerAlive(rawEntry);
     return _isWorkerAlive(rawEntry, {
-      getProcessStartTimeFn: (pid) => startTimeCache.get(pid, entry.startTime, now),
+      getProcessStartTimeFn: (pid) => {
+        const actualStartTime = startTimeCache.get(pid, entry.startTime, now);
+        observedStartTimes.set(_cachePid(pid), actualStartTime);
+        return actualStartTime;
+      },
     });
   });
 
@@ -278,7 +287,13 @@ function collectWorkersStatus(workspace, opts = {}) {
       if (workerName === 'orchestrator') continue;
       const entry = normalizeWorkerEntry(rawEntry);
       const running = isAlive(rawEntry);
-      if (!running && entry.pid) startTimeCache.invalidate(entry.pid);
+      if (!running && entry.pid) {
+        // 起動時刻の観測失敗（null）は同一性確認を安全側で停止扱いにするが、
+        // TTL 内は null 自体を観測済み値として保持し、毎描画の再取得を避ける。
+        // 非null の不一致や PID 消滅はキャッシュを破棄して次回に再観測する。
+        const observedStartTime = observedStartTimes.get(_cachePid(entry.pid));
+        if (observedStartTime !== null) startTimeCache.invalidate(entry.pid);
+      }
       let startTime = null;
       let elapsedSeconds = 0;
 

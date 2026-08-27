@@ -549,6 +549,61 @@ test('collectWorkersStatus: 上限間隔内は同じ観測値を使い、期限�
   }
 });
 
+test('collectWorkersStatus: 起動時刻取得がnullでもTTL内は再取得せず、期限到達時に再観測する', () => {
+  const workspace = createWorkspace('gh-maestro-worker-status-start-cache-null-');
+  const registeredStartTime = '2026-08-26T11:55:00.000Z';
+  let startTimeCalls = 0;
+  let verifyCalls = 0;
+  const cache = workerStatus.createProcessStartTimeCache(() => {
+    startTimeCalls++;
+    return null;
+  });
+
+  workerStatus._setIsWorkerAlive(null);
+  workerLiveness._setIsProcessAlive(() => true);
+  workerLiveness._setVerifyProcessIdentity((pid, meta, opts) => {
+    verifyCalls++;
+    assert.equal(pid, 114);
+    assert.equal(meta.startTime, registeredStartTime);
+    assert.equal(opts.actualStartTime, null);
+    return { match: false, reason: 'cannot get process start time' };
+  });
+
+  try {
+    writeWorkers(workspace, {
+      'worker-a': { pid: 114, startTime: registeredStartTime },
+    });
+
+    const collectAt = (now) => workerStatus.collectWorkersStatus(workspace, {
+      nowFn: () => now,
+      startTimeCache: cache,
+    });
+
+    const first = collectAt(0);
+    assert.equal(first[0].running, false);
+    assert.equal(first[0].startTime, null);
+    assert.equal(startTimeCalls, 1);
+    assert.equal(verifyCalls, 1);
+
+    const beforeExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS - 1);
+    assert.equal(beforeExpiry[0].running, false);
+    assert.equal(beforeExpiry[0].startTime, null);
+    assert.equal(startTimeCalls, 1, 'null の観測値も上限未到達では再利用する');
+    assert.equal(verifyCalls, 2, 'キャッシュした null は verifyProcessIdentity に渡す');
+
+    const atExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS);
+    assert.equal(atExpiry[0].running, false);
+    assert.equal(atExpiry[0].startTime, null);
+    assert.equal(startTimeCalls, 2, '上限到達時は null でも再観測する');
+    assert.equal(verifyCalls, 3);
+  } finally {
+    workerStatus._setIsWorkerAlive(null);
+    workerLiveness._setIsProcessAlive(null);
+    workerLiveness._setVerifyProcessIdentity(null);
+    removeWorkspace(workspace);
+  }
+});
+
 test('collectWorkersStatus: プロセス終了時はキャッシュを破棄して停止表示にする', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-start-cache-dead-');
   const startTime = '2026-08-26T11:55:00.000Z';
