@@ -93,7 +93,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
 ```
 
-worktreeは `.gh-maestro/worktrees/issue-<N>-<desc>/` に自動作成され、workers.json に〈issue + skill〉付きで登録される。`--description <desc>` は `issue-<N>-<desc>` の形でworktreeディレクトリ名・gitブランチ名・`workers.json`のキーに使われるため、**英数字・ハイフン・アンダースコアのみ、1〜50文字**（例: `explore-auth`）。スペース・スラッシュ・ドット等は不可（`spawn-worker.js --help`参照）。
+worktreeは `.gh-maestro/worktrees/issue-<N>-<role>-<desc>/` に自動作成され、workers.json に〈issue + skill〉付きで登録される。`<role>` はスキル名から自動導出されて挿入される部分であり、`--description` には含めない（`--skill gh-maestro-senior-coder --description manager-running` → `issue-409-senior-coder-manager-running`）。実在のブランチ名から `issue-<N>-` だけを取り除いた文字列をそのまま `--description` に渡すと役職が二重になる。`--description <desc>` はworktreeディレクトリ名・gitブランチ名・`workers.json`のキーに使われるため、**英数字・ハイフン・アンダースコアのみ、1〜50文字**（例: `explore-auth`）。スペース・スラッシュ・ドット等は不可（`spawn-worker.js --help`参照）。
 
 - **diagnostician**: 調査対象のバグIssue本文だけで観点が尽くせるなら `--prompt-file` を省略してよい。本文を超える補足（重点的に見る箇所・除外範囲など）がある場合のみ渡す。
 - **architect**: 起動には確定要件が前提。詳細は `architect.md` 参照（`--execution-id` を付ける）。
