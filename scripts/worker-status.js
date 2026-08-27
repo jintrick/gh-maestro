@@ -68,14 +68,20 @@ let _injectedIsPaneAlive = null;
 let _injectedKillPane = null;
 let _injectedSaveStatusPane = null;
 
+// Windows の起動時刻取得は PowerShell 子プロセスを起動するため、既定の3秒再描画より
+// 長いが、PID再利用を長時間見逃さない間隔にする。watch ループ内だけで使い、他の
+// process-lifecycle 呼び出しには影響させない。
+const PROCESS_START_TIME_CACHE_MAX_AGE_MS = 6_000;
+
 function _getProcessStartTime(pid) {
   const fn = _injectedGetProcessStartTime ?? require('./process-lifecycle').getProcessStartTime;
   return fn(pid);
 }
 
-function _isWorkerAlive(entry) {
+function _isWorkerAlive(entry, opts) {
   const fn = _injectedIsWorkerAlive ?? require('./shared/worker-liveness').isWorkerAlive;
-  return fn(entry);
+  if (opts === undefined) return fn(entry);
+  return fn(entry, opts);
 }
 
 function _isProcessAlive(pid) {
@@ -157,6 +163,84 @@ function formatDuration(seconds) {
   return `${hours}h ${remMin}m ${remSec}s`;
 }
 
+function _startTimesMatch(a, b) {
+  return require('./process-lifecycle').startTimesMatch(a, b);
+}
+
+function _cachePid(pid) {
+  const n = parseInt(pid, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * worker-status の再描画間で共有するプロセス起動時刻キャッシュを作成する。
+ *
+ * キャッシュは無期限ではない。観測から上限間隔に達したら必ず再観測し、
+ * `verifyProcessIdentity` が新しい実起動時刻を登録値と比較できるようにする。
+ * `begin()` から次の `begin()` までの1集計内では、同じ PID に対する再取得も抑止する。
+ *
+ * @param {(pid: number) => (string|null)} getStartTimeFn
+ * @param {object} [opts]
+ * @param {number} [opts.maxAgeMs=PROCESS_START_TIME_CACHE_MAX_AGE_MS] テスト用の上限値
+ * @returns {{begin: (now: number) => void, get: (pid: number, expectedStartTime: string|null, now: number) => (string|null), invalidate: (pid: number) => void}}
+ */
+function createProcessStartTimeCache(getStartTimeFn = _getProcessStartTime, opts = {}) {
+  const maxAgeMs = opts.maxAgeMs ?? PROCESS_START_TIME_CACHE_MAX_AGE_MS;
+  const entries = new Map();
+  const currentObservation = new Map();
+  let currentNow = null;
+
+  function begin(now) {
+    currentNow = now;
+    currentObservation.clear();
+  }
+
+  function get(pid, expectedStartTime, now) {
+    const key = _cachePid(pid);
+    if (key === null) return null;
+
+    if (currentObservation.has(key)) {
+      return currentObservation.get(key).startTime;
+    }
+
+    const cached = entries.get(key);
+    const age = cached ? now - cached.observedAt : Infinity;
+    const fresh = cached
+      && Number.isFinite(now)
+      && Number.isFinite(cached.observedAt)
+      && age >= 0
+      && age < maxAgeMs;
+    const expectedMatches = !expectedStartTime
+      || (cached && (
+        cached.startTime
+          ? _startTimesMatch(expectedStartTime, cached.startTime)
+          : cached.expectedStartTime && _startTimesMatch(expectedStartTime, cached.expectedStartTime)
+      ));
+
+    if (fresh && expectedMatches) {
+      currentObservation.set(key, cached);
+      return cached.startTime;
+    }
+
+    const startTime = getStartTimeFn(key) || null;
+    const next = { startTime, expectedStartTime: expectedStartTime || null, observedAt: now };
+    entries.set(key, next);
+    currentObservation.set(key, next);
+    return startTime;
+  }
+
+  function invalidate(pid) {
+    const key = _cachePid(pid);
+    if (key === null) return;
+    entries.delete(key);
+    // 1集計内の別行が同じ PID を持っていても、invalidate 後に2回目の OS 観測を
+    // 発生させない。次の begin() でこの番兵を捨て、必要なら再観測する。
+    currentObservation.set(key, { startTime: null, observedAt: currentNow });
+  }
+
+  return { begin, get, invalidate };
+}
+
 /**
  * 全ワーカーの稼働状態と経過秒数を集計する。
  *
@@ -167,8 +251,22 @@ function formatDuration(seconds) {
 function collectWorkersStatus(workspace, opts = {}) {
   const now = (opts.nowFn || _now)();
   const getStartTime = opts.getProcessStartTimeFn || _getProcessStartTime;
-  const isAlive = opts.isWorkerAliveFn || _isWorkerAlive;
   const isProcAlive = opts.isProcessAliveFn || _isProcessAlive;
+  const startTimeCache = opts.startTimeCache || createProcessStartTimeCache(getStartTime);
+  const observedStartTimes = new Map();
+  startTimeCache.begin(now);
+
+  const isAlive = opts.isWorkerAliveFn || ((rawEntry) => {
+    const entry = normalizeWorkerEntry(rawEntry);
+    if (!entry.startTime) return _isWorkerAlive(rawEntry);
+    return _isWorkerAlive(rawEntry, {
+      getProcessStartTimeFn: (pid) => {
+        const actualStartTime = startTimeCache.get(pid, entry.startTime, now);
+        observedStartTimes.set(_cachePid(pid), actualStartTime);
+        return actualStartTime;
+      },
+    });
+  });
 
   // Review Manager 用の agentId を 1 回だけ解決（PRごとのループ内でファイル読み込みを繰り返さない）
   let reviewerAgentId = null;
@@ -189,11 +287,18 @@ function collectWorkersStatus(workspace, opts = {}) {
       if (workerName === 'orchestrator') continue;
       const entry = normalizeWorkerEntry(rawEntry);
       const running = isAlive(rawEntry);
+      if (!running && entry.pid) {
+        // 起動時刻の観測失敗（null）は同一性確認を安全側で停止扱いにするが、
+        // TTL 内は null 自体を観測済み値として保持し、毎描画の再取得を避ける。
+        // 非null の不一致や PID 消滅はキャッシュを破棄して次回に再観測する。
+        const observedStartTime = observedStartTimes.get(_cachePid(entry.pid));
+        if (observedStartTime !== null) startTimeCache.invalidate(entry.pid);
+      }
       let startTime = null;
       let elapsedSeconds = 0;
 
       if (running && entry.pid) {
-        startTime = getStartTime(entry.pid) || entry.startTime || null;
+        startTime = startTimeCache.get(entry.pid, entry.startTime, now) || entry.startTime || null;
         if (startTime) {
           const startMs = new Date(startTime).getTime();
           if (!Number.isNaN(startMs)) {
@@ -215,12 +320,17 @@ function collectWorkersStatus(workspace, opts = {}) {
   }
 
   // 稼働中の Review Manager を収集（破損ファイル等は tolerant にスキップ）
+  const isManagerProcessAlive = (pid) => {
+    const alive = isProcAlive(pid);
+    if (!alive) startTimeCache.invalidate(pid);
+    return alive;
+  };
   const runningManagers = listRunningReviewManagers(workspace, {
-    isProcessAliveFn: isProcAlive,
+    isProcessAliveFn: isManagerProcessAlive,
     onError: 'skip',
   });
   for (const manager of runningManagers) {
-    const startTime = getStartTime(manager.pid) || null;
+    const startTime = startTimeCache.get(manager.pid, null, now) || null;
     let elapsedSeconds = 0;
     if (startTime) {
       const startMs = new Date(startTime).getTime();
@@ -459,9 +569,10 @@ function main(argv = process.argv.slice(2)) {
       return { code: 1, lines: out, errLines: err };
     }
 
+    const startTimeCache = createProcessStartTimeCache(_getProcessStartTime);
     let workers;
     try {
-      workers = collectWorkersStatus(workspace);
+      workers = collectWorkersStatus(workspace, { startTimeCache });
     } catch (e) {
       writeErr(`worker-status: watch の照会に失敗しました: ${e.message}`);
       return { code: 1, lines: out, errLines: err };
@@ -472,7 +583,7 @@ function main(argv = process.argv.slice(2)) {
     const bars = renderUptimeBars(workers);
     for (const line of bars) writeOut(line);
 
-    return { code: 0, lines: out, errLines: err, isWatch: true, workspace, interval };
+    return { code: 0, lines: out, errLines: err, isWatch: true, workspace, interval, startTimeCache };
   }
 
   if (sub === 'pane') {
@@ -570,10 +681,13 @@ function runWatchLoop(workspace, interval, opts = {}) {
   const clearIntervalFn = opts.clearIntervalFn || clearInterval;
   const onSignalFn = opts.onSignalFn || ((sig, handler) => process.on(sig, handler));
   const exitFn = opts.exitFn || process.exit;
+  const startTimeCache = opts.startTimeCache
+    || createProcessStartTimeCache(opts.getProcessStartTimeFn || _getProcessStartTime);
+  const collectOpts = { ...opts, startTimeCache };
 
   const render = () => {
     try {
-      const workers = collectWorkersStatus(workspace, opts);
+      const workers = collectWorkersStatus(workspace, collectOpts);
       const bars = renderUptimeBars(workers, opts);
       const timeStr = formatJstTime(_now());
       outStream.write('\x1b[2J\x1b[H');
@@ -595,7 +709,7 @@ function runWatchLoop(workspace, interval, opts = {}) {
   onSignalFn('SIGINT', handleSignal);
   onSignalFn('SIGTERM', handleSignal);
 
-  return { timer, render, handleSignal };
+  return { timer, render, handleSignal, startTimeCache };
 }
 
 module.exports = {
@@ -608,6 +722,8 @@ module.exports = {
   renderUptimeBars,
   parseInterval,
   runWatchLoop,
+  createProcessStartTimeCache,
+  PROCESS_START_TIME_CACHE_MAX_AGE_MS,
   MIN_INTERVAL_SEC,
   MAX_INTERVAL_SEC,
   DEFAULT_INTERVAL_SEC,
@@ -629,7 +745,7 @@ if (require.main === module) {
     process.exit(result.code);
   }
   if (result.isWatch) {
-    runWatchLoop(result.workspace, result.interval);
+    runWatchLoop(result.workspace, result.interval, { startTimeCache: result.startTimeCache });
   } else {
     for (const line of result.lines) process.stdout.write(line + '\n');
     process.exit(result.code);

@@ -420,14 +420,19 @@ function unregisterProcess(workspace, pid) {
  *
  * @param {number} pid
  * @param {object} registeredMeta  registry エントリ（registerProcess の戻り値）
+ * @param {object} [opts]
+ * @param {string|null} [opts.actualStartTime] 今回の判定用に呼び出し側が観測した実起動時刻。
+ *   指定時は `getProcessStartTime(pid)` を呼ばず、この値を登録値と比較する。
  * @returns {{ match: boolean, reason?: string }}
  */
-function verifyProcessIdentity(pid, registeredMeta) {
+function verifyProcessIdentity(pid, registeredMeta, opts = {}) {
   if (!isProcessAlive(pid)) {
     return { match: false, reason: 'process not alive' };
   }
 
-  const actualStartTime = getProcessStartTime(pid);
+  const actualStartTime = Object.prototype.hasOwnProperty.call(opts, 'actualStartTime')
+    ? opts.actualStartTime
+    : getProcessStartTime(pid);
   if (!actualStartTime) {
     // 起動時刻が取得できない → 同一性確認不能
     // 安全のため「一致しない」と判定（無関係なプロセスを kill しない）

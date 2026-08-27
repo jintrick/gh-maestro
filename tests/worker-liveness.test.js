@@ -16,8 +16,8 @@ afterEach(() => {
 function mock({ alive = true, identityMatch = true } = {}) {
   const calls = { alive: [], verify: [] };
   liveness._setIsProcessAlive((pid) => { calls.alive.push(pid); return alive; });
-  liveness._setVerifyProcessIdentity((pid, meta) => {
-    calls.verify.push({ pid, meta });
+  liveness._setVerifyProcessIdentity((pid, meta, opts) => {
+    calls.verify.push({ pid, meta, opts });
     return identityMatch ? { match: true } : { match: false, reason: 'start time mismatch' };
   });
   return calls;
@@ -65,6 +65,24 @@ test('isWorkerAlive: startTime が無ければPID生存のみで判定する（�
   const calls = mock({ alive: true, identityMatch: false });
   assert.equal(isWorkerAlive({ pid: 4242 }), true);
   assert.equal(calls.verify.length, 0, '同一性確認は行わない');
+});
+
+test('isWorkerAlive: 起動時刻供給関数の値を verifyProcessIdentity に渡す', () => {
+  const calls = mock({ alive: true, identityMatch: true });
+  const suppliedStartTime = '2026-07-25T00:00:00.000Z';
+  const result = isWorkerAlive(
+    { pid: 4242, startTime: suppliedStartTime },
+    { getProcessStartTimeFn: (pid) => {
+      assert.equal(pid, 4242);
+      return suppliedStartTime;
+    } }
+  );
+
+  assert.equal(result, true);
+  assert.equal(calls.verify.length, 1);
+  assert.equal(calls.verify[0].pid, 4242);
+  assert.equal(calls.verify[0].meta.startTime, suppliedStartTime);
+  assert.equal(calls.verify[0].opts.actualStartTime, suppliedStartTime);
 });
 
 // ── 入力の正規化 ─────────────────────────────────────────────────────────────

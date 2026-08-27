@@ -26,9 +26,10 @@ function _isProcessAlive(pid) {
   return fn(pid);
 }
 
-function _verifyProcessIdentity(pid, identity) {
+function _verifyProcessIdentity(pid, identity, opts) {
   const fn = _injectedVerifyProcessIdentity ?? require('../process-lifecycle').verifyProcessIdentity;
-  return fn(pid, identity);
+  if (opts === undefined) return fn(pid, identity);
+  return fn(pid, identity, opts);
 }
 
 /**
@@ -43,9 +44,13 @@ function _verifyProcessIdentity(pid, identity) {
  * 小さい——前者は配送が永久に止まるが、後者はresumeが1回余分に走るだけで済む。
  *
  * @param {object|string|null} entry workers.json のエントリ（正規化前でよい）
+ * @param {object} [opts]
+ * @param {(pid: number) => (string|null)} [opts.getProcessStartTimeFn]
+ *   同一性確認に使う実起動時刻の供給関数。指定時も同一性確認は
+ *   `verifyProcessIdentity` を通して行う。
  * @returns {boolean}
  */
-function isWorkerAlive(entry) {
+function isWorkerAlive(entry, opts = {}) {
   const e = normalizeWorkerEntry(entry);
   if (!e.pid) return false;
   if (!_isProcessAlive(e.pid)) return false;
@@ -53,6 +58,15 @@ function isWorkerAlive(entry) {
   // startTime が無いエントリ（移行前・取得失敗時）は同一性を確認できない。
   // PID生存のみを根拠に稼働中と判断する。
   if (!e.startTime) return true;
+
+  if (typeof opts.getProcessStartTimeFn === 'function') {
+    const actualStartTime = opts.getProcessStartTimeFn(e.pid);
+    return _verifyProcessIdentity(
+      e.pid,
+      { startTime: e.startTime },
+      { actualStartTime }
+    ).match === true;
+  }
 
   return _verifyProcessIdentity(e.pid, { startTime: e.startTime }).match === true;
 }

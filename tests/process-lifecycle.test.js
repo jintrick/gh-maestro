@@ -638,6 +638,58 @@ test('verifyProcessIdentity: getProcessStartTime が空文字を返した場合�
     `expected 'cannot get' reason, got: ${result.reason}`);
 });
 
+test('verifyProcessIdentity: actualStartTime 指定時はその値で比較し、再観測しない', () => {
+  let execCalls = 0;
+  const plc = loadModule({
+    execSync: () => {
+      execCalls++;
+      throw new Error('actual start time should already be supplied');
+    },
+  });
+
+  const matched = plc.verifyProcessIdentity(process.pid, {
+    startTime: MOCK_START_TIME,
+  }, {
+    actualStartTime: MOCK_START_TIME,
+  });
+  assert.equal(matched.match, true);
+  assert.equal(execCalls, 0);
+
+  const mismatched = plc.verifyProcessIdentity(process.pid, {
+    startTime: MOCK_START_TIME,
+  }, {
+    actualStartTime: OTHER_START_TIME,
+  });
+  assert.equal(mismatched.match, false);
+  assert.match(mismatched.reason, /start time mismatch/);
+  assert.equal(execCalls, 0);
+});
+
+test('verifyProcessIdentity: actualStartTime:null は未指定時の空観測と同じく不一致にする', () => {
+  let execCalls = 0;
+  const plc = loadModule({
+    execSync: () => {
+      execCalls++;
+      return '\n';
+    },
+  });
+
+  const suppliedNull = plc.verifyProcessIdentity(process.pid, {
+    startTime: MOCK_START_TIME,
+  }, {
+    actualStartTime: null,
+  });
+  assert.equal(suppliedNull.match, false);
+  assert.equal(suppliedNull.reason, 'cannot get process start time');
+  assert.equal(execCalls, 0, 'actualStartTime:null の指定時は OS 観測しない');
+
+  const observedNull = plc.verifyProcessIdentity(process.pid, {
+    startTime: MOCK_START_TIME,
+  });
+  assert.deepEqual(observedNull, suppliedNull);
+  assert.equal(execCalls, 1, '未指定時だけ実観測して同じ不一致結果になる');
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // findRunningInstance
 // ═══════════════════════════════════════════════════════════════════════════
