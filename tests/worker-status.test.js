@@ -890,6 +890,77 @@ test('collectWorkersStatus: 稼働中 Review Manager を収集し、PR番号・�
   }
 });
 
+test('collectWorkersStatus / renderUptimeBars: resolveSkillAgentMap が例外を投げた場合に agentId が null / - となる縮退動作を検証する', () => {
+  const workspace = createWorkspace('gh-maestro-ws-rm-throw-');
+  workerStatus._setIsProcessAlive((pid) => pid === 6001);
+  workerStatus._setResolveSkillAgentMap(() => {
+    throw new Error('config parse error');
+  });
+
+  try {
+    const reviewDir = path.join(workspace, '.gh-maestro', 'records', 'pr', '501', 'review');
+    fs.mkdirSync(reviewDir, { recursive: true });
+    fs.writeFileSync(path.join(reviewDir, 'manager.running'), '6001\n', 'utf8');
+
+    const results = workerStatus.collectWorkersStatus(workspace);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].agentId, null);
+
+    const lines = workerStatus.renderUptimeBars(results);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /^PR#501\s+review-manager-pr-501\s+-\s+\[running\]/);
+  } finally {
+    workerStatus._setIsProcessAlive(null);
+    workerStatus._setResolveSkillAgentMap(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('collectWorkersStatus / renderUptimeBars: skillAgentMap[\'gh-maestro-reviewer\'] が未設定・null・非文字列の場合に agentId が null / - となる縮退動作を検証する', () => {
+  const workspace = createWorkspace('gh-maestro-ws-rm-unset-');
+  workerStatus._setIsProcessAlive(() => true);
+
+  try {
+    const reviewDir1 = path.join(workspace, '.gh-maestro', 'records', 'pr', '601', 'review');
+    const reviewDir2 = path.join(workspace, '.gh-maestro', 'records', 'pr', '602', 'review');
+    const reviewDir3 = path.join(workspace, '.gh-maestro', 'records', 'pr', '603', 'review');
+    fs.mkdirSync(reviewDir1, { recursive: true });
+    fs.mkdirSync(reviewDir2, { recursive: true });
+    fs.mkdirSync(reviewDir3, { recursive: true });
+    fs.writeFileSync(path.join(reviewDir1, 'manager.running'), '7001\n', 'utf8');
+    fs.writeFileSync(path.join(reviewDir2, 'manager.running'), '7002\n', 'utf8');
+    fs.writeFileSync(path.join(reviewDir3, 'manager.running'), '7003\n', 'utf8');
+
+    // 1. 未設定（空オブジェクト）
+    workerStatus._setResolveSkillAgentMap(() => ({}));
+    const res1 = workerStatus.collectWorkersStatus(workspace);
+    const rm1 = res1.find((r) => r.pr === 601);
+    assert.ok(rm1);
+    assert.equal(rm1.agentId, null);
+    assert.match(workerStatus.renderUptimeBars([rm1])[0], /^PR#601\s+review-manager-pr-601\s+-\s+\[running\]/);
+
+    // 2. null
+    workerStatus._setResolveSkillAgentMap(() => ({ 'gh-maestro-reviewer': null }));
+    const res2 = workerStatus.collectWorkersStatus(workspace);
+    const rm2 = res2.find((r) => r.pr === 602);
+    assert.ok(rm2);
+    assert.equal(rm2.agentId, null);
+    assert.match(workerStatus.renderUptimeBars([rm2])[0], /^PR#602\s+review-manager-pr-602\s+-\s+\[running\]/);
+
+    // 3. 非文字列（数値）
+    workerStatus._setResolveSkillAgentMap(() => ({ 'gh-maestro-reviewer': 12345 }));
+    const res3 = workerStatus.collectWorkersStatus(workspace);
+    const rm3 = res3.find((r) => r.pr === 603);
+    assert.ok(rm3);
+    assert.equal(rm3.agentId, null);
+    assert.match(workerStatus.renderUptimeBars([rm3])[0], /^PR#603\s+review-manager-pr-603\s+-\s+\[running\]/);
+  } finally {
+    workerStatus._setIsProcessAlive(null);
+    workerStatus._setResolveSkillAgentMap(null);
+    removeWorkspace(workspace);
+  }
+});
+
 test('collectWorkersStatus: 死亡した Review Manager の PID は収集しない', () => {
   const workspace = createWorkspace('gh-maestro-ws-rm-dead-');
   workerStatus._setIsProcessAlive(() => false);

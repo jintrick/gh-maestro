@@ -61,6 +61,7 @@ Description:
 let _injectedGetProcessStartTime = null;
 let _injectedIsWorkerAlive = null;
 let _injectedIsProcessAlive = null;
+let _injectedResolveSkillAgentMap = null;
 let _injectedNow = null;
 let _injectedLaunchInSplitPane = null;
 let _injectedIsPaneAlive = null;
@@ -80,6 +81,11 @@ function _isWorkerAlive(entry) {
 function _isProcessAlive(pid) {
   const fn = _injectedIsProcessAlive ?? require('./process-lifecycle').isProcessAlive;
   return fn(pid);
+}
+
+function _resolveSkillAgentMap(opts) {
+  const fn = _injectedResolveSkillAgentMap ?? require('./shared/resolve-config').resolveSkillAgentMap;
+  return fn(opts);
 }
 
 function _now() {
@@ -167,7 +173,8 @@ function collectWorkersStatus(workspace, opts = {}) {
   // Review Manager 用の agentId を 1 回だけ解決（PRごとのループ内でファイル読み込みを繰り返さない）
   let reviewerAgentId = null;
   try {
-    const skillMap = resolveSkillAgentMap({ workspace });
+    const resolveMapFn = opts.resolveSkillAgentMapFn || _resolveSkillAgentMap;
+    const skillMap = resolveMapFn({ workspace });
     if (skillMap && typeof skillMap['gh-maestro-reviewer'] === 'string') {
       reviewerAgentId = skillMap['gh-maestro-reviewer'];
     }
@@ -607,6 +614,7 @@ module.exports = {
   _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setIsWorkerAlive: (fn) => { _injectedIsWorkerAlive = fn; },
   _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
+  _setResolveSkillAgentMap: (fn) => { _injectedResolveSkillAgentMap = fn; },
   _setNow: (fn) => { _injectedNow = fn; },
   _setLaunchInSplitPane: (fn) => { _injectedLaunchInSplitPane = fn; },
   _setIsPaneAlive: (fn) => { _injectedIsPaneAlive = fn; },
