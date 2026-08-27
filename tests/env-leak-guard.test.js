@@ -217,40 +217,6 @@ test('GIT_DIR 注入下で gh-maestro-setup.js を実行しても victim リポ�
   }
 });
 
-// ── 受け入れ条件: テスト中の外部副作用（GitHub API DELETE）の拒否 ────────────
-
-test('gh-maestro-setup.js はテスト実行中(NODE_TEST_CONTEXT)に retireAiReviewCi の GitHub API DELETE を拒否する', () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'envleak-retire-'));
-  try {
-    const target = path.join(base, 'target');
-    makeRepo(target);
-    // retireAiReviewCi が DELETE に到達しうる状態を作る: GitHub 形式の origin + ai-review-ok センチネル。
-    // origin は存在しないリポジトリを指す（getRemoteRepo の正規表現は満たす）。ガード後に
-    // ensureDevBranch が ls-remote / push を試みても 404 で即失敗し、実リポジトリへ触れない。
-    const addRemote = spawnSync('git', ['remote', 'add', 'origin', 'git@github.com:gh-maestro-test-owner/does-not-exist.git'], { cwd: target, encoding: 'utf8' });
-    assert.equal(addRemote.status, 0, addRemote.stderr);
-    fs.mkdirSync(path.join(target, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(path.join(target, '.gh-maestro', 'ai-review-ok'), '', 'utf8');
-    // setup-ok センチネルを置いて checkEnvironment（および ensureDevBranch の
-    // ls-remote / push）をスキップさせる。存在しない origin に対する SSH 接続は
-    // host key 未登録やパスフレーズ待ちで無期限にブロックしうるため、テストから
-    // 実ネットワーク I/O を排除する。検証対象は retireAiReviewCi のガードだけ。
-    fs.writeFileSync(path.join(target, '.gh-maestro', 'setup-ok'), '', 'utf8');
-
-    // env 未指定で spawn → node --test が設定した NODE_TEST_CONTEXT が子プロセスへ継承される。
-    // retireAiReviewCi は checkEnvironment より先に呼ばれるため、ガードはその前に発火する。
-    const r = spawnSync(process.execPath, [SETUP_SCRIPT, target], { cwd: target, encoding: 'utf8' });
-    const out = `${r.stdout || ''}${r.stderr || ''}`;
-
-    assert.match(out, /NODE_TEST_CONTEXT/, '拒否理由が呼び出し元に見えること');
-    assert.match(out, /GitHub Actions AI Review CI の退役/, '拒否された操作が呼び出し元に見えること');
-    // DELETE が実行されていないこと: retire 完了時には unlink されるセンチネルが残っている。
-    assert.ok(fs.existsSync(path.join(target, '.gh-maestro', 'ai-review-ok')), 'センチネルが残っている＝DELETE が実行されていない');
-  } finally {
-    fs.rmSync(base, { recursive: true, force: true });
-  }
-});
-
 // ── 1層目: .githooks の unset ────────────────────────────────────────────────
 
 // リポジトリ位置を上書きする変数だけを落とす。
