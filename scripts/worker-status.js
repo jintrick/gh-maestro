@@ -100,6 +100,33 @@ function _saveStatusPane(workspace, entry) {
 }
 
 /**
+ * エポックミリ秒を日本時間 (UTC+9) の HH:mm:ss 形式にフォーマットする。
+ *
+ * @param {number} [ms]
+ * @returns {string}
+ */
+function formatJstTime(ms = _now()) {
+  const d = new Date(ms);
+  const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
+  const h = String(jst.getUTCHours()).padStart(2, '0');
+  const m = String(jst.getUTCMinutes()).padStart(2, '0');
+  const s = String(jst.getUTCSeconds()).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+
+/**
+ * ワーカー名から先頭の "issue-<N>-" プレフィックスを取り除く。
+ * パターンに合致しない場合は元の名前をそのまま返す。
+ *
+ * @param {string} workerName
+ * @returns {string}
+ */
+function stripWorkerNamePrefix(workerName) {
+  if (typeof workerName !== 'string') return '';
+  return workerName.replace(/^issue-\d+-/, '');
+}
+
+/**
  * 秒数を読みやすい時間表記にフォーマットする。
  *
  * @param {number} seconds
@@ -121,7 +148,7 @@ function formatDuration(seconds) {
  *
  * @param {string} workspace
  * @param {object} [opts]
- * @returns {Array<{workerName: string, pid: number|null, running: boolean, startTime: string|null, elapsedSeconds: number}>}
+ * @returns {Array<{workerName: string, pid: number|null, running: boolean, startTime: string|null, elapsedSeconds: number, issue: number|null, agentId: string|null}>}
  */
 function collectWorkersStatus(workspace, opts = {}) {
   const now = (opts.nowFn || _now)();
@@ -155,6 +182,8 @@ function collectWorkersStatus(workspace, opts = {}) {
       running,
       startTime,
       elapsedSeconds,
+      issue: entry.issue,
+      agentId: entry.agentId,
     });
   }
   return results;
@@ -163,7 +192,7 @@ function collectWorkersStatus(workspace, opts = {}) {
 /**
  * ワーカー一覧から横棒グラフのテキスト行を生成する。
  *
- * @param {Array<{workerName: string, pid: number|null, running: boolean, startTime: string|null, elapsedSeconds: number}>} workers
+ * @param {Array<{workerName: string, pid: number|null, running: boolean, startTime: string|null, elapsedSeconds: number, issue?: number|null, agentId?: string|null}>} workers
  * @param {object} [opts]
  * @param {number} [opts.maxBarWidth=30]
  * @returns {string[]}
@@ -175,11 +204,11 @@ function renderUptimeBars(workers, opts = {}) {
 
   const maxBarWidth = opts.maxBarWidth ?? 30;
   const maxElapsed = Math.max(0, ...workers.map(w => w.elapsedSeconds));
-  const maxNameLen = Math.max(...workers.map(w => w.workerName.length), 0);
 
-  const lines = [];
-  for (const w of workers) {
-    const nameCol = w.workerName.padEnd(maxNameLen, ' ');
+  const rows = workers.map(w => {
+    const issueCol = w.issue != null ? `#${w.issue}` : '-';
+    const shortName = stripWorkerNamePrefix(w.workerName);
+    const agentCol = w.agentId ? String(w.agentId) : '-';
     const statusCol = w.running ? '[running]' : '[stopped]';
     const timeCol = w.running ? formatDuration(w.elapsedSeconds) : '-';
     let bar = '';
@@ -188,7 +217,31 @@ function renderUptimeBars(workers, opts = {}) {
       bar = '█'.repeat(barLen);
     }
     const pidStr = w.pid ? `(pid: ${w.pid})` : '';
-    const line = `${nameCol}  ${statusCol.padEnd(9, ' ')}  ${timeCol.padStart(8, ' ')}  ${bar ? bar + ' ' : ''}${pidStr}`.trimEnd();
+
+    return {
+      issueCol,
+      shortName,
+      agentCol,
+      statusCol,
+      timeCol,
+      bar,
+      pidStr,
+    };
+  });
+
+  const maxIssueLen = Math.max(...rows.map(r => r.issueCol.length), 0);
+  const maxNameLen = Math.max(...rows.map(r => r.shortName.length), 0);
+  const maxAgentLen = Math.max(...rows.map(r => r.agentCol.length), 0);
+
+  const lines = [];
+  for (const r of rows) {
+    const issuePart = r.issueCol.padEnd(maxIssueLen, ' ');
+    const namePart = r.shortName.padEnd(maxNameLen, ' ');
+    const agentPart = r.agentCol.padEnd(maxAgentLen, ' ');
+    const statusPart = r.statusCol.padEnd(9, ' ');
+    const timePart = r.timeCol.padStart(8, ' ');
+    const barPart = r.bar ? `${r.bar} ` : '';
+    const line = `${issuePart}  ${namePart}  ${agentPart}  ${statusPart}  ${timePart}  ${barPart}${r.pidStr}`.trimEnd();
     lines.push(line);
   }
   return lines;
@@ -321,7 +374,14 @@ function main(argv = process.argv.slice(2)) {
     }
 
     if (values['--json']) {
-      writeOut(JSON.stringify(workers, null, 2));
+      const jsonEntries = workers.map(w => ({
+        workerName: w.workerName,
+        pid: w.pid,
+        running: w.running,
+        startTime: w.startTime,
+        elapsedSeconds: w.elapsedSeconds,
+      }));
+      writeOut(JSON.stringify(jsonEntries, null, 2));
     } else {
       const bars = renderUptimeBars(workers);
       for (const line of bars) writeOut(line);
@@ -347,8 +407,8 @@ function main(argv = process.argv.slice(2)) {
       return { code: 1, lines: out, errLines: err };
     }
 
-    const timestamp = new Date(_now()).toISOString();
-    writeOut(`=== gh-maestro worker status (${timestamp}, interval: ${interval}s) ===`);
+    const timeStr = formatJstTime(_now());
+    writeOut(`=== gh-maestro worker status (${timeStr}, interval: ${interval}s) ===`);
     const bars = renderUptimeBars(workers);
     for (const line of bars) writeOut(line);
 
@@ -455,9 +515,9 @@ function runWatchLoop(workspace, interval, opts = {}) {
     try {
       const workers = collectWorkersStatus(workspace, opts);
       const bars = renderUptimeBars(workers, opts);
-      const timestamp = new Date(_now()).toISOString();
+      const timeStr = formatJstTime(_now());
       outStream.write('\x1b[2J\x1b[H');
-      outStream.write(`=== gh-maestro worker status (${timestamp}, interval: ${interval}s) ===\n`);
+      outStream.write(`=== gh-maestro worker status (${timeStr}, interval: ${interval}s) ===\n`);
       for (const line of bars) {
         outStream.write(line + '\n');
       }
@@ -481,6 +541,8 @@ function runWatchLoop(workspace, interval, opts = {}) {
 module.exports = {
   main,
   CLI_USAGE,
+  formatJstTime,
+  stripWorkerNamePrefix,
   formatDuration,
   collectWorkersStatus,
   renderUptimeBars,
