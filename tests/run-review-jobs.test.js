@@ -1573,3 +1573,123 @@ test('runJobsFromManifest: 上限到達時にジョブを起動せず finalizeRe
     fs.rmSync(testDir, { recursive: true, force: true });
   }
 });
+
+test('launchJobWorker: ジョブ起動時に registerProcess を呼び、正常終了時に unregisterProcess を呼ぶ', async () => {
+  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjb-reg-wt-'));
+  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjb-reg-skills-'));
+  writeReviewFixtures(skillsDir, ['correctness/logic-invariants']);
+
+  const registered = [];
+  const unregistered = [];
+
+  const fakeChild = new EventEmitter();
+  fakeChild.pid = 8888;
+  fakeChild.kill = () => {};
+
+  _setSpawn((cmd, args, opts) => {
+    setImmediate(() => {
+      // 結果ファイルを書く
+      const promptFile = fs.readdirSync(os.tmpdir())
+        .filter(name => name.startsWith('review-job-job-test-review-') && name.endsWith('.md'))
+        .map(name => path.join(os.tmpdir(), name))
+        .sort()
+        .pop();
+      if (promptFile && fs.existsSync(promptFile)) {
+        const prompt = fs.readFileSync(promptFile, 'utf8');
+        const resFile = resultFileFromPrompt(prompt);
+        fs.writeFileSync(resFile, JSON.stringify([]), 'utf8');
+      }
+      fakeChild.emit('close', 0);
+    });
+    return fakeChild;
+  });
+
+  try {
+    const job = { id: 'job-test', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' };
+    const manifest = { pr: 415, repo: 'owner/repo', headRefOid: 'abc' };
+    const agentConfig = codexReviewAgentConfig();
+
+    const result = await launchJobWorker(
+      job,
+      manifest,
+      agentConfig,
+      worktreeDir,
+      worktreeDir,
+      10000,
+      null,
+      {
+        reviewSkillsDir: skillsDir,
+        getProcessStartTimeFn: () => '2026-08-28T04:00:00.000Z',
+        registerProcessFn: (ws, meta) => registered.push({ ws, meta }),
+        unregisterProcessFn: (ws, pid) => unregistered.push({ ws, pid }),
+      }
+    );
+
+    assert.equal(result.status, 'success');
+    assert.equal(registered.length, 1, 'registerProcess が1回呼ばれる');
+    assert.equal(registered[0].meta.pid, 8888);
+    assert.equal(registered[0].meta.script, 'review-job');
+    assert.equal(registered[0].meta.pr, 415);
+    assert.equal(registered[0].meta.jobId, 'job-test');
+    assert.equal(registered[0].meta.aspect, 'Correctness');
+
+    assert.equal(unregistered.length, 1, 'unregisterProcess が1回呼ばれる');
+    assert.equal(unregistered[0].pid, 8888);
+  } finally {
+    _setSpawn(null);
+    fs.rmSync(worktreeDir, { recursive: true, force: true });
+    fs.rmSync(skillsDir, { recursive: true, force: true });
+  }
+});
+
+test('launchJobWorker: ジョブ異常終了時（非0終了・エラー）でも unregisterProcess が呼ばれる', async () => {
+  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjb-reg-fail-'));
+  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjb-reg-skills-fail-'));
+  writeReviewFixtures(skillsDir, ['correctness/logic-invariants']);
+
+  const registered = [];
+  const unregistered = [];
+
+  const fakeChild = new EventEmitter();
+  fakeChild.pid = 9999;
+  fakeChild.kill = () => {};
+
+  _setSpawn((cmd, args, opts) => {
+    setImmediate(() => {
+      fakeChild.emit('close', 1);
+    });
+    return fakeChild;
+  });
+
+  try {
+    const job = { id: 'job-fail', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' };
+    const manifest = { pr: 415, repo: 'owner/repo', headRefOid: 'abc' };
+    const agentConfig = codexReviewAgentConfig();
+
+    const result = await launchJobWorker(
+      job,
+      manifest,
+      agentConfig,
+      worktreeDir,
+      worktreeDir,
+      10000,
+      null,
+      {
+        reviewSkillsDir: skillsDir,
+        getProcessStartTimeFn: () => '2026-08-28T04:00:00.000Z',
+        registerProcessFn: (ws, meta) => registered.push({ ws, meta }),
+        unregisterProcessFn: (ws, pid) => unregistered.push({ ws, pid }),
+      }
+    );
+
+    assert.equal(result.status, 'failed');
+    assert.equal(registered.length, 1);
+    assert.equal(registered[0].meta.pid, 9999);
+    assert.equal(unregistered.length, 1, '異常終了時でも unregisterProcess が呼ばれる');
+    assert.equal(unregistered[0].pid, 9999);
+  } finally {
+    _setSpawn(null);
+    fs.rmSync(worktreeDir, { recursive: true, force: true });
+    fs.rmSync(skillsDir, { recursive: true, force: true });
+  }
+});

@@ -1691,4 +1691,77 @@ test('sweepRegistry: 生存中の旧PID-only manager.running は例外にせず�
   }
 });
 
+test('registerProcess: meta.pid と追加メタデータを指定して登録・取得・解除できる', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const customPid = process.pid;
+  const entry = plc.registerProcess(workspace, {
+    pid: customPid,
+    script: 'review-job',
+    workerName: 'review-job-pr-415-job-1',
+    pr: 415,
+    jobId: 'job-1',
+    aspect: 'correctness',
+    leafIds: ['leaf-1'],
+    startTime: MOCK_START_TIME,
+  });
+
+  assert.equal(entry.pid, customPid);
+  assert.equal(entry.script, 'review-job');
+  assert.equal(entry.pr, 415);
+  assert.equal(entry.jobId, 'job-1');
+  assert.equal(entry.aspect, 'correctness');
+
+  const instances = plc.findRunningInstances(workspace, { script: 'review-job', allowSelf: true });
+  assert.equal(instances.length, 1);
+  assert.equal(instances[0].jobId, 'job-1');
+  assert.equal(instances[0].pr, 415);
+
+  plc.unregisterProcess(workspace, customPid);
+  const instancesAfter = plc.findRunningInstances(workspace, { script: 'review-job', allowSelf: true });
+  assert.equal(instancesAfter.length, 0);
+});
+
+test('registerProcess: 不正な meta.pid は throw する', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  assert.throws(() => plc.registerProcess(workspace, { pid: 0 }));
+  assert.throws(() => plc.registerProcess(workspace, { pid: -1 }));
+  assert.throws(() => plc.registerProcess(workspace, { pid: 'abc' }));
+});
+
+test('sweepRegistry: 稼働中 Review Manager PR に属する review-job は保護される', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const pidsDir = plc.pidsDir(workspace);
+  const ghDir = path.join(workspace, '.gh-maestro');
+  const reviewDir = path.join(ghDir, 'records', 'pr', '415', 'review');
+  fs.mkdirSync(pidsDir, { recursive: true });
+  fs.mkdirSync(reviewDir, { recursive: true });
+
+  const activePid = process.pid;
+  const runningFile = path.join(reviewDir, 'manager.running');
+  const jobPidFile = path.join(pidsDir, `${activePid}.json`);
+
+  // Review Manager を生存として記録
+  fs.writeFileSync(runningFile, JSON.stringify({ pid: activePid, startTime: MOCK_START_TIME }));
+
+  // review-job を PID registry に登録
+  fs.writeFileSync(jobPidFile, JSON.stringify({
+    pid: activePid,
+    script: 'review-job',
+    pr: 415,
+    jobId: 'job-1',
+    startTime: MOCK_START_TIME,
+  }));
+
+  try {
+    const results = plc.sweepRegistry(workspace, { dryRun: false });
+    assert.ok(!results.killed.some(k => k.pid === activePid), '稼働中 RM 配下のジョブは kill されない');
+    assert.ok(fs.existsSync(jobPidFile), '稼働中 RM 配下のジョブレコードは保護される');
+  } finally {
+    for (const p of [jobPidFile, runningFile]) {
+      try { fs.unlinkSync(p); } catch {}
+    }
+  }
+});
+
+
 

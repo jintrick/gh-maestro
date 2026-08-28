@@ -355,14 +355,20 @@ function registerProcess(workspace, meta = {}) {
   storageLayout.ensureWorkspaceRuntimeDir(workspace);
   fs.mkdirSync(dir, { recursive: true });
 
+  const targetPid = (meta && meta.pid != null) ? parseInt(meta.pid, 10) : process.pid;
+  if (!Number.isFinite(targetPid) || targetPid <= 0) {
+    throw new Error(`registerProcess: 不正な PID です: ${meta && meta.pid}`);
+  }
+
   // 起動時刻は実際のプロセス開始時刻を使用する。
   // Node起動レイテンシが1秒を超えるとverifyProcessIdentityの閾値(1秒)で
   // 誤動作するため、new Date()（登録時の現在時刻）では不十分。
   // 取得失敗時のみ現在時刻をフォールバックとする。
-  const actualStartTime = meta.startTime || getProcessStartTime(process.pid) || new Date().toISOString();
+  const actualStartTime = meta.startTime || getProcessStartTime(targetPid) || new Date().toISOString();
 
   const entry = {
-    pid: process.pid,
+    ...meta,
+    pid: targetPid,
     script: meta.script || path.basename(process.argv[1] || 'unknown'),
     args: meta.args || process.argv.slice(2),
     workerName: meta.workerName || null,
@@ -371,7 +377,7 @@ function registerProcess(workspace, meta = {}) {
     registeredAt: new Date().toISOString(),
   };
 
-  const filePath = pidFilePath(workspace, process.pid);
+  const filePath = pidFilePath(workspace, targetPid);
   fs.writeFileSync(filePath, JSON.stringify(entry, null, 2), 'utf8');
 
   // bridge: 旧ロケーションへの dual-write（best-effort）。
@@ -379,7 +385,7 @@ function registerProcess(workspace, meta = {}) {
   try {
     const legacyDir = legacyPidsDir(workspace);
     fs.mkdirSync(legacyDir, { recursive: true });
-    fs.writeFileSync(legacyPidFilePath(workspace, process.pid), JSON.stringify(entry, null, 2), 'utf8');
+    fs.writeFileSync(legacyPidFilePath(workspace, targetPid), JSON.stringify(entry, null, 2), 'utf8');
   } catch {}
 
   return entry;
@@ -516,17 +522,22 @@ function findRunningInstances(workspace, opts = {}) {
 
       const entryPid = entry.pid;
       if (!entryPid || !Number.isFinite(entryPid)) continue;
-      if (entryPid === process.pid) continue;
+      if (opts.allowSelf !== true && entryPid === process.pid) continue;
       // dual-write により同一pidが新旧両方に存在しうる。既に判定済みならスキップ。
       if (seenPids.has(entryPid)) continue;
       seenPids.add(entryPid);
-      if (!isProcessAlive(entryPid)) continue;
+      const isAliveFn = opts.isProcessAliveFn || isProcessAlive;
+      if (!isAliveFn(entryPid)) continue;
 
       // PID再利用対策: 生存はしているが、起動時刻が registry の記録と一致しない場合は
       // OSが同じPIDを無関係な別プロセスに再割り当てしただけであり、重複起動ではない。
       // ここで「重複」と誤判定すると、以後の起動が永久にブロックされてしまう
       // （sweepRegistry と同じ verifyProcessIdentity を用いる）。
-      const identity = verifyProcessIdentity(entryPid, entry);
+      const verifyIdentityFn = opts.verifyProcessIdentityFn || verifyProcessIdentity;
+      const verifyOpts = opts.getProcessStartTimeFn
+        ? { actualStartTime: opts.getProcessStartTimeFn(entryPid, entry.startTime) }
+        : undefined;
+      const identity = verifyIdentityFn(entryPid, entry, verifyOpts);
       if (!identity.match) continue;
 
       matches.push(entry);
@@ -831,8 +842,10 @@ function sweepRegistry(workspace, opts = {}) {
       continue;
     }
 
-    // 除外対象（role lease 保持者、稼働中ワーカーなど）の PID または workerName は kill しない
-    if (excludedPids.has(entryPid) || (entry.workerName && excludedWorkerNames.has(entry.workerName))) {
+    // 除外対象（role lease 保持者、稼働中ワーカー、稼働中Review ManagerのPRなど）の PID、workerName、PRは kill しない
+    if (excludedPids.has(entryPid)
+      || (entry.workerName && excludedWorkerNames.has(entry.workerName))
+      || (entry.pr != null && excludedReviewPrs.has(String(entry.pr)))) {
       continue;
     }
 

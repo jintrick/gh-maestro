@@ -63,6 +63,7 @@ let _injectedIsWorkerAlive = null;
 let _injectedIsProcessAlive = null;
 let _injectedVerifyProcessIdentity = null;
 let _injectedResolveSkillAgentMap = null;
+let _injectedFindRunningInstances = null;
 let _injectedNow = null;
 let _injectedLaunchInSplitPane = null;
 let _injectedIsPaneAlive = null;
@@ -77,6 +78,11 @@ const PROCESS_START_TIME_CACHE_MAX_AGE_MS = 6_000;
 function _getProcessStartTime(pid) {
   const fn = _injectedGetProcessStartTime ?? require('./process-lifecycle').getProcessStartTime;
   return fn(pid);
+}
+
+function _findRunningInstances(workspace, opts) {
+  const fn = _injectedFindRunningInstances ?? require('./process-lifecycle').findRunningInstances;
+  return fn(workspace, opts);
 }
 
 function _isWorkerAlive(entry, opts) {
@@ -344,6 +350,23 @@ function collectWorkersStatus(workspace, opts = {}) {
     onError: 'skip',
     cleanupStale: false,
   });
+
+  const findInstancesFn = opts.findRunningInstancesFn || _findRunningInstances;
+  let runningReviewJobs = [];
+  try {
+    runningReviewJobs = findInstancesFn(workspace, {
+      script: 'review-job',
+      isProcessAliveFn: isManagerProcessAlive,
+      verifyProcessIdentityFn: verifyProcessIdentity,
+      getProcessStartTimeFn: (pid, expectedStartTime) => (
+        startTimeCache.get(pid, expectedStartTime || null, now) || null
+      ),
+      allowSelf: true,
+    });
+  } catch {
+    runningReviewJobs = [];
+  }
+
   for (const manager of runningManagers) {
     const startTime = manager.startTime || null;
     let elapsedSeconds = 0;
@@ -354,16 +377,45 @@ function collectWorkersStatus(workspace, opts = {}) {
       }
     }
 
-    results.push({
+    const prNum = Number(manager.pr);
+    const jobsForManager = runningReviewJobs.filter(j => (
+      j.pr === prNum || String(j.pr) === String(manager.pr)
+    ));
+    const jobEntries = jobsForManager.map(job => {
+      const jobStartTime = job.startTime || null;
+      let jobElapsedSeconds = 0;
+      if (jobStartTime) {
+        const startMs = new Date(jobStartTime).getTime();
+        if (!Number.isNaN(startMs)) {
+          jobElapsedSeconds = Math.max(0, Math.floor((now - startMs) / 1000));
+        }
+      }
+      return {
+        jobId: job.jobId || 'unknown',
+        aspect: job.aspect || '-',
+        leafIds: job.leafIds || job.leaf_ids || [],
+        pid: job.pid,
+        running: true,
+        startTime: jobStartTime,
+        elapsedSeconds: jobElapsedSeconds,
+        agentId: job.agentId || reviewerAgentId,
+      };
+    });
+
+    const managerEntry = {
       workerName: `review-manager-pr-${manager.pr}`,
       pid: manager.pid,
       running: true,
       startTime,
       elapsedSeconds,
       issue: null,
-      pr: Number(manager.pr),
+      pr: prNum,
       agentId: reviewerAgentId,
-    });
+    };
+    if (jobEntries.length > 0) {
+      managerEntry.jobs = jobEntries;
+    }
+    results.push(managerEntry);
   }
 
   return results;
@@ -383,9 +435,17 @@ function renderUptimeBars(workers, opts = {}) {
   }
 
   const maxBarWidth = opts.maxBarWidth ?? 30;
-  const maxElapsed = Math.max(0, ...workers.map(w => w.elapsedSeconds));
+  const allEntriesForMax = [];
+  for (const w of workers) {
+    allEntriesForMax.push(w);
+    if (w.jobs && Array.isArray(w.jobs)) {
+      for (const j of w.jobs) allEntriesForMax.push(j);
+    }
+  }
+  const maxElapsed = Math.max(0, ...allEntriesForMax.map(w => w.elapsedSeconds));
 
-  const rows = workers.map(w => {
+  const rows = [];
+  for (const w of workers) {
     let issueCol = '-';
     if (w.pr != null) {
       issueCol = `PR#${w.pr}`;
@@ -403,7 +463,7 @@ function renderUptimeBars(workers, opts = {}) {
     }
     const pidStr = w.pid ? `(pid: ${w.pid})` : '';
 
-    return {
+    rows.push({
       issueCol,
       shortName,
       agentCol,
@@ -411,8 +471,33 @@ function renderUptimeBars(workers, opts = {}) {
       timeCol,
       bar,
       pidStr,
-    };
-  });
+    });
+
+    if (w.jobs && Array.isArray(w.jobs)) {
+      for (const j of w.jobs) {
+        const childShortName = `  └─ ${j.jobId} (${j.aspect})`;
+        const childAgentCol = j.agentId ? String(j.agentId) : '-';
+        const childStatusCol = j.running ? '[running]' : '[stopped]';
+        const childTimeCol = j.running ? formatDuration(j.elapsedSeconds) : '-';
+        let childBar = '';
+        if (j.running && maxElapsed > 0 && j.elapsedSeconds > 0) {
+          const barLen = Math.max(1, Math.round((j.elapsedSeconds / maxElapsed) * maxBarWidth));
+          childBar = '█'.repeat(barLen);
+        }
+        const childPidStr = j.pid ? `(pid: ${j.pid})` : '';
+
+        rows.push({
+          issueCol: '',
+          shortName: childShortName,
+          agentCol: childAgentCol,
+          statusCol: childStatusCol,
+          timeCol: childTimeCol,
+          bar: childBar,
+          pidStr: childPidStr,
+        });
+      }
+    }
+  }
 
   const maxIssueLen = Math.max(...rows.map(r => r.issueCol.length), 0);
   const maxNameLen = Math.max(...rows.map(r => r.shortName.length), 0);
@@ -559,13 +644,28 @@ function main(argv = process.argv.slice(2)) {
     }
 
     if (values['--json']) {
-      const jsonEntries = workers.map(w => ({
-        workerName: w.workerName,
-        pid: w.pid,
-        running: w.running,
-        startTime: w.startTime,
-        elapsedSeconds: w.elapsedSeconds,
-      }));
+      const jsonEntries = workers.map(w => {
+        const entry = {
+          workerName: w.workerName,
+          pid: w.pid,
+          running: w.running,
+          startTime: w.startTime,
+          elapsedSeconds: w.elapsedSeconds,
+        };
+        if (w.jobs) {
+          entry.jobs = w.jobs.map(j => ({
+            jobId: j.jobId,
+            aspect: j.aspect,
+            leafIds: j.leafIds,
+            pid: j.pid,
+            running: j.running,
+            startTime: j.startTime,
+            elapsedSeconds: j.elapsedSeconds,
+            agentId: j.agentId,
+          }));
+        }
+        return entry;
+      });
       writeOut(JSON.stringify(jsonEntries, null, 2));
     } else {
       const bars = renderUptimeBars(workers);
@@ -747,6 +847,7 @@ module.exports = {
   _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
   _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
   _setResolveSkillAgentMap: (fn) => { _injectedResolveSkillAgentMap = fn; },
+  _setFindRunningInstances: (fn) => { _injectedFindRunningInstances = fn; },
   _setNow: (fn) => { _injectedNow = fn; },
   _setLaunchInSplitPane: (fn) => { _injectedLaunchInSplitPane = fn; },
   _setIsPaneAlive: (fn) => { _injectedIsPaneAlive = fn; },

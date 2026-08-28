@@ -33,6 +33,11 @@ const {
   reviewFilesForLeaves,
 } = require('./shared/review-aspects');
 const { managedRoot } = require('./shared/storage-layout');
+const {
+  registerProcess,
+  unregisterProcess,
+  getProcessStartTime,
+} = require('./process-lifecycle');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
 const DEFAULT_JOB_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes per job
@@ -41,6 +46,10 @@ const DEFAULT_TOTAL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes total
 // （初回＋再試行）。council の MAX_PARTICIPANT_ATTEMPTS（=2）と同じ「合計試行回数」
 // セマンティクス: attempt 1,2 は許容し、attempt 3 を拒否する。
 const MAX_REVIEW_ATTEMPTS = 2;
+
+let _injectedGetProcessStartTime = null;
+let _injectedRegisterProcess = null;
+let _injectedUnregisterProcess = null;
 
 // テストでは spawn を注入し、NODE_TEST_CONTEXT 下で実プロセスを起動しない。
 let _spawn = spawn;
@@ -559,7 +568,7 @@ function readFindingsFile(resultFile, stage) {
   return findings;
 }
 
-function runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef) {
+function runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef, onSpawn) {
   return new Promise((resolve) => {
     if (_spawn === spawn && process.env.NODE_TEST_CONTEXT) {
       resolve({ error: 'agent spawn refused during test execution; inject spawn for launch-path tests' });
@@ -587,6 +596,9 @@ function runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef) {
         return;
       }
       if (childRef) childRef.child = child;
+      if (typeof onSpawn === 'function') {
+        try { onSpawn(child); } catch {}
+      }
     } catch (e) {
       finish({ error: `spawn failed: ${e.message}` });
       return;
@@ -704,6 +716,31 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
     try { if (childRef && childRef.child) childRef.child.kill(); } catch {}
   }, timeoutMs);
 
+  let registeredPid = null;
+  const targetWorkspace = (options && options.mainWorkspace)
+    || (options && options.ghDir ? path.dirname(path.resolve(options.ghDir)) : null)
+    || workspace;
+
+  const onSpawn = (child) => {
+    if (child && child.pid) {
+      registeredPid = child.pid;
+      const startTimeFn = (options && options.getProcessStartTimeFn) || _injectedGetProcessStartTime || getProcessStartTime;
+      const startTime = startTimeFn(child.pid) || new Date().toISOString();
+      const registerFn = (options && options.registerProcessFn) || _injectedRegisterProcess || registerProcess;
+      registerFn(targetWorkspace, {
+        pid: child.pid,
+        script: 'review-job',
+        workerName: `review-job-pr-${manifest.pr}-${job.id}`,
+        pr: Number(manifest.pr),
+        jobId: job.id,
+        aspect: job.aspect,
+        leafIds: job.leaf_ids,
+        agentId: agentConfig.id,
+        startTime,
+      });
+    }
+  };
+
   try {
     const promptFile = promptFileFor();
     const promptWriteError = writePrompt(promptFile, prompt);
@@ -720,7 +757,7 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
       return failed(`review command construction failed: ${e.message}`);
     }
 
-    const run = await runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef);
+    const run = await runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef, onSpawn);
     cleanupPrompt(promptFile);
     if (run.error) return failed(`review process failed: ${run.error}`);
     if (timedOut) return failed('review job timeout (review process deadline reached)');
@@ -742,6 +779,12 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
       findings,
     };
   } finally {
+    if (registeredPid) {
+      try {
+        const unregisterFn = (options && options.unregisterProcessFn) || _injectedUnregisterProcess || unregisterProcess;
+        unregisterFn(targetWorkspace, registeredPid);
+      } catch {}
+    }
     if (timeoutHandle) clearTimeout(timeoutHandle);
     for (const promptFile of promptFiles) {
       try { fs.unlinkSync(promptFile); } catch {}
@@ -1326,7 +1369,7 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   const jobPromises = manifest.jobs.map(job => {
     const childRef = { child: null };
     activeChildren.push(childRef);
-    return launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, jobTimeoutMs, childRef, options);
+    return launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, jobTimeoutMs, childRef, { ...options, ghDir });
   });
 
   // 全体タイムアウト: 締切到達時に残っている子プロセスを実際に終了させる
@@ -1448,6 +1491,9 @@ module.exports = {
   ALL_LEAF_IDS,
   TRUNK_TO_LEAVES,
   _setSpawn: (fn) => { _spawn = fn || spawn; },
+  _setRegisterProcess: (fn) => { _injectedRegisterProcess = fn; },
+  _setUnregisterProcess: (fn) => { _injectedUnregisterProcess = fn; },
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
 };
 
 // ── CLIエントリポイント ────────────────────────────────────────────────────────
