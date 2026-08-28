@@ -115,7 +115,12 @@ test('isLockValid returns false when no lock file exists', () => {
 test('isLockValid returns true and keeps the file for a live pid', () => {
   const mod = loadModule();
   const lockFile = path.join(freshWorkspace('lock-live'), 'lock.running');
-  fs.writeFileSync(lockFile, String(process.pid));
+  fs.writeFileSync(lockFile, JSON.stringify({
+    pid: process.pid,
+    startTime: '2026-07-25T00:00:00.000Z',
+  }));
+  mod._setIsProcessAlive(() => true);
+  mod._setVerifyProcessIdentity(() => ({ match: true }));
   assert.equal(mod.isLockValid(lockFile), true);
   assert.equal(fs.existsSync(lockFile), true);
 });
@@ -129,13 +134,26 @@ test('isLockValid returns false and removes the file for a stale pid', () => {
   assert.equal(fs.existsSync(lockFile), false);
 });
 
+test('isLockValid は生存中の旧PID-onlyを削除せず起動をfail-closedにする', () => {
+  const mod = loadModule();
+  const lockFile = path.join(freshWorkspace('lock-legacy-live'), 'lock.running');
+  fs.writeFileSync(lockFile, '12345\n', 'utf8');
+  mod._setIsProcessAlive(() => true);
+  assert.throws(() => mod.isLockValid(lockFile), /旧形式.*同一性を確認できません/);
+  assert.equal(fs.readFileSync(lockFile, 'utf8'), '12345\n');
+});
+
 test('_setIsProcessAlive で注入した判定関数が isLockValid に使われる', () => {
   const mod = loadModule();
   const lockFile = path.join(freshWorkspace('lock-injected'), 'lock.running');
   // 実PIDの生死に頼らず、注入した関数の戻り値だけで isLockValid の判定が決まることを確認する。
-  fs.writeFileSync(lockFile, '12345');
+  fs.writeFileSync(lockFile, JSON.stringify({
+    pid: 12345,
+    startTime: '2026-07-25T00:00:00.000Z',
+  }));
   try {
     mod._setIsProcessAlive(() => true);
+    mod._setVerifyProcessIdentity(() => ({ match: true }));
     assert.equal(mod.isLockValid(lockFile), true);
     assert.equal(fs.existsSync(lockFile), true);
 
@@ -144,6 +162,7 @@ test('_setIsProcessAlive で注入した判定関数が isLockValid に使われ
     assert.equal(fs.existsSync(lockFile), false);
   } finally {
     mod._setIsProcessAlive(require('../scripts/process-lifecycle').isProcessAlive);
+    mod._setVerifyProcessIdentity(require('../scripts/process-lifecycle').verifyProcessIdentity);
   }
 });
 
@@ -156,7 +175,12 @@ test('startReviewManager returns ALREADY_RUNNING and does not launch when locked
   fs.mkdirSync(ghDir, { recursive: true });
   const lockFile = path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.running');
   fs.mkdirSync(path.dirname(lockFile), { recursive: true });
-  fs.writeFileSync(lockFile, String(process.pid));
+  fs.writeFileSync(lockFile, JSON.stringify({
+    pid: process.pid,
+    startTime: '2026-07-25T00:00:00.000Z',
+  }));
+  mod._setIsProcessAlive(() => true);
+  mod._setVerifyProcessIdentity(() => ({ match: true }));
 
   const result = mod.startReviewManager('42', 'o/r', workspace, '5');
   assert.equal(result, 'REVIEW_MANAGER_ALREADY_RUNNING');
@@ -224,7 +248,10 @@ test('startReviewManager: ロックファイルにlaunchAgentHeadlessが返し�
   mod.startReviewManager('8', 'o/r', workspace, '55');
 
   const lockFile = path.join(workspace, '.gh-maestro', 'records', 'pr', '8', 'review', 'manager.running');
-  assert.equal(fs.readFileSync(lockFile, 'utf8'), '77701');
+  assert.deepEqual(JSON.parse(fs.readFileSync(lockFile, 'utf8')), {
+    pid: 77701,
+    startTime: '2026-07-25T00:00:00.000Z',
+  });
 });
 
 test('startReviewManager: onExitフックへexecutionIdを渡さない（execution registryのcompleted遷移手段が無く、常にprocess_failedへ誤記録されるのを避けるため）', () => {

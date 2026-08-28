@@ -12,10 +12,19 @@ function _isProcessAlive(pid) {
   const fn = _injectedIsProcessAlive ?? require('./process-lifecycle').isProcessAlive;
   return fn(pid);
 }
+let _injectedVerifyProcessIdentity = null;
+function _verifyProcessIdentity(pid, identity, opts) {
+  const fn = _injectedVerifyProcessIdentity ?? require('./process-lifecycle').verifyProcessIdentity;
+  return fn(pid, identity, opts);
+}
 const { launchAgentHeadless } = require('./shared/headless-launch');
 const { assertValidPr } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags } = require('./shared/workspace');
+const {
+  inspectRunningReviewManager,
+  writeRunningReviewManager,
+} = require('./shared/running-review-managers');
 
 const USAGE = `start-review-manager.js — PRに対してReview Managerを起動する
 
@@ -47,8 +56,10 @@ Review Managerは通常ワーカーと同じ起動基盤（shared/headless-launc
 
 /**
  * lock ファイルが有効かチェックする。
- * lock ファイルに記録されたPIDが生存していれば true（既に起動済み）。
- * PIDが死んでいる（stale）場合は lock ファイルを削除して false を返す。
+ * lock ファイルに記録された新形式のPID＋起動時刻が同一プロセスなら true。
+ * PIDが死んでいる、またはPID再利用で同一性が不一致な場合は lock ファイルを
+ * 内容比較後に削除して false を返す。旧PID-onlyや同一性確認不能なレコードは
+ * 削除せず例外（fail-closed）とする。
  *
  * req.13: lock に PID を記録し、生存＋同一性確認で stale 判定
  *
@@ -56,28 +67,19 @@ Review Managerは通常ワーカーと同じ起動基盤（shared/headless-launc
  * @returns {boolean} true = 有効なlock（既に起動済み）, false = stale または lock なし
  */
 function isLockValid(lockFile) {
-  if (!fs.existsSync(lockFile)) return false;
-
-  let lockPid;
-  try {
-    const raw = fs.readFileSync(lockFile, 'utf8').trim();
-    lockPid = parseInt(raw, 10);
-  } catch {
-    // lock ファイル破損 → stale 扱い
-    try { fs.unlinkSync(lockFile); } catch {}
-    return false;
+  const result = inspectRunningReviewManager(lockFile, {
+    onError: 'throw',
+    cleanupStale: true,
+    isProcessAliveFn: _isProcessAlive,
+    verifyProcessIdentityFn: _verifyProcessIdentity,
+  });
+  if (result.status === 'legacy-live') {
+    throw new Error(
+      `既存のmanager.runningが旧形式で生存中のため、Review Managerの同一性を確認できません。` +
+      `ファイルを削除せず起動を中止します: ${lockFile}`
+    );
   }
-
-  if (!Number.isFinite(lockPid) || lockPid <= 0) {
-    try { fs.unlinkSync(lockFile); } catch {}
-    return false;
-  }
-
-  if (_isProcessAlive(lockPid)) return true;
-
-  // プロセスは死んでいる → stale lock
-  try { fs.unlinkSync(lockFile); } catch {}
-  return false;
+  return result.status === 'live';
 }
 
 /**
@@ -134,8 +136,10 @@ function startReviewManager(pr, repo, workspace, issue) {
     },
   });
 
-  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
-  fs.writeFileSync(lockFile, String(launched.pid));
+  writeRunningReviewManager(lockFile, {
+    pid: launched.pid,
+    startTime: launched.startTime,
+  });
   return 'REVIEW_MANAGER_STARTED';
 }
 
@@ -143,6 +147,7 @@ module.exports = {
   startReviewManager,
   isLockValid,
   _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
+  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
 };
 
 if (require.main === module) {

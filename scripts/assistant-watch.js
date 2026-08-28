@@ -32,13 +32,24 @@ const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // プロセスレジストリ登録は一切含まない）なので、上記の「msg-poll.js を流用しない」制約とは
 // 矛盾しない。DRYのため素直に再利用する。
 const { parseMarker } = require('./msg-poll');
-const { reviewArtifactPath } = require('./shared/review-manager-paths');
+const { listRunningReviewManagers } = require('./shared/running-review-managers');
 const { ARTIFACTS, recordPath } = require('./shared/record-paths');
 
 const DEFAULT_INTERVAL_SEC = 20;
 const DEFAULT_WAIT_SEC = 1200;
 const GH_TIMEOUT_MS = 30000;
 const ISSUE_RE = /^[1-9]\d*$/;
+
+let _injectedIsProcessAlive = null;
+let _injectedVerifyProcessIdentity = null;
+function _isProcessAlive(pid) {
+  const fn = _injectedIsProcessAlive ?? require('./process-lifecycle').isProcessAlive;
+  return fn(pid);
+}
+function _verifyProcessIdentity(pid, identity, opts) {
+  const fn = _injectedVerifyProcessIdentity ?? require('./process-lifecycle').verifyProcessIdentity;
+  return fn(pid, identity, opts);
+}
 
 const USAGE = `assistant-watch.js — assistant向け、issueの進行状況を検知する読み取り専用ポーリング
 
@@ -190,12 +201,27 @@ function firstLine(body) {
 
 /**
  * @param {{ workspace: string, ghDir: string, repo: string, issue: string, state: object,
- *   isBaseline: boolean, ghOpts: object }} params
+ *   isBaseline: boolean, ghOpts: object, isProcessAliveFn?: Function,
+ *   verifyProcessIdentityFn?: Function, getProcessStartTimeFn?: Function }} params
  * @returns {{ events: object[], errors: string[] }}
  */
-function scanOnce({ workspace, ghDir, repo, issue, state, isBaseline, ghOpts }) {
+function scanOnce({ workspace, ghDir, repo, issue, state, isBaseline, ghOpts,
+                    isProcessAliveFn, verifyProcessIdentityFn, getProcessStartTimeFn }) {
   const events = [];
   const errors = [];
+
+  // manager.running は存在だけでなく、PID＋起動時刻の同一性まで確認する。ここは
+  // assistant-watch の読み取り専用契約を守るため stale 回収を行わない。旧PID-onlyや
+  // 同一性確認不能のファイルは稼働中と断定せず、次のPR状態更新へ進む。
+  const reviewRunningPrs = new Set(
+    listRunningReviewManagers(workspace, {
+      isProcessAliveFn: isProcessAliveFn || _isProcessAlive,
+      verifyProcessIdentityFn: verifyProcessIdentityFn || _verifyProcessIdentity,
+      getProcessStartTimeFn,
+      onError: 'skip',
+      cleanupStale: false,
+    }).map((manager) => String(manager.pr))
+  );
 
   // ── Issueコメント（worker_report / hanseikai） ──────────────────────────
   const commentsResult = _ghIssueComments(repo, issue, ghOpts);
@@ -247,7 +273,7 @@ function scanOnce({ workspace, ghDir, repo, issue, state, isBaseline, ghOpts }) 
       continue;
     }
     const merged = prData.state === 'MERGED' || !!prData.mergedAt;
-    const reviewRunning = fs.existsSync(reviewArtifactPath(ghDir, prNumber, '.running'));
+    const reviewRunning = reviewRunningPrs.has(String(prNumber));
 
     if (isBaseline) {
       prState.merged = merged;
@@ -291,7 +317,7 @@ function scanOnce({ workspace, ghDir, repo, issue, state, isBaseline, ghOpts }) 
       continue;
     }
     const merged = prData.state === 'MERGED' || !!prData.mergedAt;
-    const reviewRunning = fs.existsSync(reviewArtifactPath(ghDir, prNumber, '.running'));
+    const reviewRunning = reviewRunningPrs.has(String(prNumber));
     // 新規PR発見時にpr_createdイベントを発行する（コーダーは完了報告を投稿しないため、
     // このイベントが唯一の通知経路となる。#187）。
     if (!isBaseline) {
@@ -504,4 +530,6 @@ module.exports = {
   statePath,
   extractPreview,
   USAGE,
+  _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
+  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
 };

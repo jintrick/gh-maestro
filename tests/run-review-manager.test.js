@@ -823,6 +823,33 @@ test('boundedCleanup: cleanup結果が独立して診断可能', async () => {
   assert.ok(Array.isArray(result.errors));
 });
 
+test('boundedCleanup: manager.running は所有者と起動時刻が一致する場合だけ解放する', async () => {
+  const testDir = path.join(tmpBase, 'cleanup-owner');
+  fs.mkdirSync(testDir, { recursive: true });
+  const ownedFile = path.join(testDir, 'owned.running');
+  const foreignFile = path.join(testDir, 'foreign.running');
+  const owner = { pid: process.pid, startTime: '2026-08-28T00:00:00.000Z' };
+  fs.writeFileSync(ownedFile, JSON.stringify(owner), 'utf8');
+  fs.writeFileSync(foreignFile, JSON.stringify({
+    pid: 67890,
+    startTime: '2026-08-28T00:01:00.000Z',
+  }), 'utf8');
+
+  const owned = await boundedCleanup({
+    pid: null, worktreeDir: null, workspace: null, pr: null,
+    lockFile: ownedFile, lockOwner: owner, log: () => {}, gracefulShutdownMs: 0,
+  });
+  assert.equal(owned.leaseReleased, true);
+  assert.ok(!fs.existsSync(ownedFile));
+
+  const foreign = await boundedCleanup({
+    pid: null, worktreeDir: null, workspace: null, pr: null,
+    lockFile: foreignFile, lockOwner: owner, log: () => {}, gracefulShutdownMs: 0,
+  });
+  assert.equal(foreign.leaseReleased, false);
+  assert.ok(fs.existsSync(foreignFile), '別所有者のmanager.runningを残す');
+});
+
 // ── superviseReviewManager: spawn error 即時検出 ─────────────────────────
 // Issue: 非同期spawn失敗（ENOENT等）でerrorイベントが発火しても、監督ループが
 // processExitedを知らず30分deadlineを待ち続けていた。errorハンドラが
@@ -860,6 +887,9 @@ test('superviseReviewManager: spawn error時は即座にprocess-exit-no-artifact
   // エラー結果であること
   assert.equal(result.outcome, 'setup-failed');
   assert.notEqual(result.exitCode, 0);
+  const marker = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+  assert.equal(marker.pid, process.pid);
+  assert.ok(marker.startTime === null || typeof marker.startTime === 'string');
 });
 
 // ── superviseReviewManager: pollForArtifact 呼び出し検証 ─────────────────

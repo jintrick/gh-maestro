@@ -61,6 +61,7 @@ Description:
 let _injectedGetProcessStartTime = null;
 let _injectedIsWorkerAlive = null;
 let _injectedIsProcessAlive = null;
+let _injectedVerifyProcessIdentity = null;
 let _injectedResolveSkillAgentMap = null;
 let _injectedNow = null;
 let _injectedLaunchInSplitPane = null;
@@ -87,6 +88,11 @@ function _isWorkerAlive(entry, opts) {
 function _isProcessAlive(pid) {
   const fn = _injectedIsProcessAlive ?? require('./process-lifecycle').isProcessAlive;
   return fn(pid);
+}
+
+function _verifyProcessIdentity(pid, identity, opts) {
+  const fn = _injectedVerifyProcessIdentity ?? require('./process-lifecycle').verifyProcessIdentity;
+  return fn(pid, identity, opts);
 }
 
 function _resolveSkillAgentMap(opts) {
@@ -252,6 +258,7 @@ function collectWorkersStatus(workspace, opts = {}) {
   const now = (opts.nowFn || _now)();
   const getStartTime = opts.getProcessStartTimeFn || _getProcessStartTime;
   const isProcAlive = opts.isProcessAliveFn || _isProcessAlive;
+  const verifyProcessIdentity = opts.verifyProcessIdentityFn || _verifyProcessIdentity;
   const startTimeCache = opts.startTimeCache || createProcessStartTimeCache(getStartTime);
   const observedStartTimes = new Map();
   startTimeCache.begin(now);
@@ -327,10 +334,18 @@ function collectWorkersStatus(workspace, opts = {}) {
   };
   const runningManagers = listRunningReviewManagers(workspace, {
     isProcessAliveFn: isManagerProcessAlive,
+    verifyProcessIdentityFn: verifyProcessIdentity,
+    // 通常ワーカーと同じ startTime キャッシュを共有する。キャッシュされた値は
+    // helper の verifyProcessIdentity に actualStartTime として渡されるため、
+    // Review Manager もPID再利用を検出しつつ、#407の再描画間隔を維持できる。
+    getProcessStartTimeFn: (pid, expectedStartTime) => (
+      startTimeCache.get(pid, expectedStartTime || null, now) || null
+    ),
     onError: 'skip',
+    cleanupStale: false,
   });
   for (const manager of runningManagers) {
-    const startTime = startTimeCache.get(manager.pid, null, now) || null;
+    const startTime = manager.startTime || null;
     let elapsedSeconds = 0;
     if (startTime) {
       const startMs = new Date(startTime).getTime();
@@ -730,6 +745,7 @@ module.exports = {
   _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setIsWorkerAlive: (fn) => { _injectedIsWorkerAlive = fn; },
   _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
+  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
   _setResolveSkillAgentMap: (fn) => { _injectedResolveSkillAgentMap = fn; },
   _setNow: (fn) => { _injectedNow = fn; },
   _setLaunchInSplitPane: (fn) => { _injectedLaunchInSplitPane = fn; },
