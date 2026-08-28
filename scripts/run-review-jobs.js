@@ -33,6 +33,12 @@ const {
   reviewFilesForLeaves,
 } = require('./shared/review-aspects');
 const { managedRoot } = require('./shared/storage-layout');
+const {
+  pidsDir,
+  registerProcess,
+  unregisterProcess,
+  getProcessStartTime,
+} = require('./process-lifecycle');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
 const DEFAULT_JOB_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes per job
@@ -41,6 +47,10 @@ const DEFAULT_TOTAL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes total
 // （初回＋再試行）。council の MAX_PARTICIPANT_ATTEMPTS（=2）と同じ「合計試行回数」
 // セマンティクス: attempt 1,2 は許容し、attempt 3 を拒否する。
 const MAX_REVIEW_ATTEMPTS = 2;
+
+let _injectedGetProcessStartTime = null;
+let _injectedRegisterProcess = null;
+let _injectedUnregisterProcess = null;
 
 // テストでは spawn を注入し、NODE_TEST_CONTEXT 下で実プロセスを起動しない。
 let _spawn = spawn;
@@ -559,7 +569,7 @@ function readFindingsFile(resultFile, stage) {
   return findings;
 }
 
-function runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef) {
+function runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef, onSpawn) {
   return new Promise((resolve) => {
     if (_spawn === spawn && process.env.NODE_TEST_CONTEXT) {
       resolve({ error: 'agent spawn refused during test execution; inject spawn for launch-path tests' });
@@ -587,6 +597,9 @@ function runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef) {
         return;
       }
       if (childRef) childRef.child = child;
+      if (typeof onSpawn === 'function') {
+        try { onSpawn(child); } catch {}
+      }
     } catch (e) {
       finish({ error: `spawn failed: ${e.message}` });
       return;
@@ -704,6 +717,39 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
     try { if (childRef && childRef.child) childRef.child.kill(); } catch {}
   }, timeoutMs);
 
+  let registeredPid = null;
+  const targetWorkspace = (options && options.mainWorkspace)
+    || (options && options.ghDir ? path.dirname(path.resolve(options.ghDir)) : null)
+    || workspace;
+
+  const onSpawn = (child) => {
+    if (child && child.pid) {
+      try {
+        const startTimeFn = (options && options.getProcessStartTimeFn) || _injectedGetProcessStartTime || getProcessStartTime;
+        const startTime = startTimeFn(child.pid) || new Date().toISOString();
+        const registerFn = (options && options.registerProcessFn) || _injectedRegisterProcess || registerProcess;
+        registerFn(targetWorkspace, {
+          pid: child.pid,
+          script: 'review-job',
+          workerName: `review-job-pr-${manifest.pr}-${job.id}`,
+          pr: Number(manifest.pr),
+          jobId: job.id,
+          aspect: job.aspect,
+          leafIds: job.leaf_ids,
+          agentId: agentConfig.id,
+          startTime,
+        });
+        registeredPid = child.pid;
+      } catch (err) {
+        // 観測は付帯機能であり、その失敗でレビュー本体を落とすことはしない。
+        // ただし失敗した事実をジョブログ（stderrFd）および stderr に明示して記録に残す。
+        const msg = `[review-job] PID registry 登録に失敗しました (job: ${job.id}, pid: ${child.pid}): ${err.message}\n`;
+        try { if (stderrFd != null) fs.writeSync(stderrFd, msg); } catch {}
+        try { process.stderr.write(msg); } catch {}
+      }
+    }
+  };
+
   try {
     const promptFile = promptFileFor();
     const promptWriteError = writePrompt(promptFile, prompt);
@@ -720,7 +766,7 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
       return failed(`review command construction failed: ${e.message}`);
     }
 
-    const run = await runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef);
+    const run = await runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef, onSpawn);
     cleanupPrompt(promptFile);
     if (run.error) return failed(`review process failed: ${run.error}`);
     if (timedOut) return failed('review job timeout (review process deadline reached)');
@@ -742,6 +788,16 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
       findings,
     };
   } finally {
+    if (registeredPid != null) {
+      try {
+        const unregisterFn = (options && options.unregisterProcessFn) || _injectedUnregisterProcess || unregisterProcess;
+        unregisterFn(targetWorkspace, registeredPid);
+      } catch (err) {
+        const msg = `[review-job] PID registry 解除に失敗しました (job: ${job.id}, pid: ${registeredPid}): ${err.message}\n`;
+        try { if (stderrFd != null) fs.writeSync(stderrFd, msg); } catch {}
+        try { process.stderr.write(msg); } catch {}
+      }
+    }
     if (timeoutHandle) clearTimeout(timeoutHandle);
     for (const promptFile of promptFiles) {
       try { fs.unlinkSync(promptFile); } catch {}
@@ -1318,6 +1374,21 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
     return { ok: false, summary: { error: `agent config resolve failed for "${agentId}"` } };
   }
 
+  // 3.5 PID registry 構成の事前検証（fail-fast）
+  // registerProcess が throw する現実的な経路（assertValidWorkspace / assertDisjointRoots /
+  // GH_MAESTRO_RUNTIME_DIR 設定不正）は全ジョブ一斉に該当するため、ジョブ起動前に1回検証する。
+  const targetWorkspace = (options && options.mainWorkspace)
+    || (ghDir ? path.dirname(path.resolve(ghDir)) : null)
+    || workspace;
+  try {
+    pidsDir(targetWorkspace);
+  } catch (e) {
+    return {
+      ok: false,
+      summary: { error: `PID registry workspace/runtime validation failed: ${e.message}` },
+    };
+  }
+
   const reviewWtDir = workspace; // ジョブワーカーは呼び出し元（RM）のworktreeを共有
 
   // 4. 全ジョブを並列起動
@@ -1326,7 +1397,7 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   const jobPromises = manifest.jobs.map(job => {
     const childRef = { child: null };
     activeChildren.push(childRef);
-    return launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, jobTimeoutMs, childRef, options);
+    return launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, jobTimeoutMs, childRef, { ...options, ghDir });
   });
 
   // 全体タイムアウト: 締切到達時に残っている子プロセスを実際に終了させる
@@ -1448,6 +1519,9 @@ module.exports = {
   ALL_LEAF_IDS,
   TRUNK_TO_LEAVES,
   _setSpawn: (fn) => { _spawn = fn || spawn; },
+  _setRegisterProcess: (fn) => { _injectedRegisterProcess = fn; },
+  _setUnregisterProcess: (fn) => { _injectedUnregisterProcess = fn; },
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
 };
 
 // ── CLIエントリポイント ────────────────────────────────────────────────────────

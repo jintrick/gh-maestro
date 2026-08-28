@@ -1321,4 +1321,140 @@ test('main: list および list --json で Review Manager を表示する', () =
   }
 });
 
+test('renderUptimeBars: Review Manager 配下にレビュージョブをインデントして表示する', () => {
+  const workers = [
+    {
+      workerName: 'review-manager-pr-415',
+      pr: 415,
+      agentId: 'codex',
+      pid: 5678,
+      running: true,
+      startTime: '2026-08-26T00:00:00Z',
+      elapsedSeconds: 300,
+      jobs: [
+        {
+          jobId: 'job-1',
+          aspect: 'design',
+          agentId: 'codex',
+          pid: 5680,
+          running: true,
+          startTime: '2026-08-26T00:02:00Z',
+          elapsedSeconds: 180,
+        },
+        {
+          jobId: 'job-2',
+          aspect: 'correctness',
+          agentId: 'codex',
+          pid: 5681,
+          running: true,
+          startTime: '2026-08-26T00:03:00Z',
+          elapsedSeconds: 120,
+        },
+      ],
+    },
+  ];
+
+  const lines = workerStatus.renderUptimeBars(workers, { maxBarWidth: 10 });
+  assert.equal(lines.length, 3);
+  assert.match(lines[0], /^PR#415\s+review-manager-pr-415\s+codex\s+\[running\]\s+5m 0s\s+██████████\s+\(pid: 5678\)$/);
+  assert.match(lines[1], /^\s+└─ job-1 \(design\)\s+codex\s+\[running\]\s+3m 0s\s+██████\s+\(pid: 5680\)$/);
+  assert.match(lines[2], /^\s+└─ job-2 \(correctness\)\s+codex\s+\[running\]\s+2m 0s\s+████\s+\(pid: 5681\)$/);
+});
+
+test('collectWorkersStatus & main: list / --json でレビュージョブを収集・出力する', () => {
+  const workspace = createWorkspace('gh-maestro-ws-rm-jobs-');
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  workerStatus._setIsProcessAlive((pid) => pid === 222 || pid === 333 || pid === 444);
+  workerStatus._setVerifyProcessIdentity(() => ({ match: true }));
+  workerStatus._setGetProcessStartTime((pid) => {
+    if (pid === 222) return '2026-08-26T11:55:00.000Z'; // 300s
+    if (pid === 333) return '2026-08-26T11:57:00.000Z'; // 180s
+    if (pid === 444) return '2026-08-26T11:58:00.000Z'; // 120s
+    return null;
+  });
+  workerStatus._setFindRunningInstances((ws, opts) => {
+    return [
+      {
+        pid: 333,
+        script: 'review-job',
+        pr: 415,
+        jobId: 'job-1',
+        aspect: 'Design',
+        leafIds: ['leaf-1'],
+        agentId: 'codex',
+        startTime: '2026-08-26T11:57:00.000Z',
+      },
+      {
+        pid: 444,
+        script: 'review-job',
+        pr: 415,
+        jobId: 'job-2',
+        aspect: 'Correctness',
+        leafIds: ['leaf-2'],
+        agentId: 'codex',
+        startTime: '2026-08-26T11:58:00.000Z',
+      },
+      {
+        pid: 555,
+        script: 'review-job',
+        pr: 999, // 別PRのジョブ
+        jobId: 'job-other',
+        aspect: 'Security',
+        startTime: '2026-08-26T11:59:00.000Z',
+      },
+    ];
+  });
+
+  try {
+    writeReviewManager(workspace, 415, 222, '2026-08-26T11:55:00.000Z');
+
+    // 1. collectWorkersStatus
+    const collected = workerStatus.collectWorkersStatus(workspace);
+    assert.equal(collected.length, 1);
+    assert.equal(collected[0].workerName, 'review-manager-pr-415');
+    assert.equal(collected[0].jobs.length, 2);
+    assert.equal(collected[0].jobs[0].jobId, 'job-1');
+    assert.equal(collected[0].jobs[0].aspect, 'Design');
+    assert.equal(collected[0].jobs[0].pid, 333);
+    assert.equal(collected[0].jobs[0].elapsedSeconds, 180);
+    assert.equal(collected[0].jobs[1].jobId, 'job-2');
+    assert.equal(collected[0].jobs[1].pid, 444);
+    assert.equal(collected[0].jobs[1].elapsedSeconds, 120);
+
+    // 2. list (テキスト行)
+    const listResult = runMain(['list', '--workspace', workspace]);
+    assert.equal(listResult.code, 0);
+    assert.equal(listResult.lines.length, 3);
+    assert.match(listResult.lines[0], /PR#415\s+review-manager-pr-415/);
+    assert.match(listResult.lines[1], /└─ job-1 \(Design\)/);
+    assert.match(listResult.lines[2], /└─ job-2 \(Correctness\)/);
+
+    // 3. list --json
+    const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
+    assert.equal(jsonResult.code, 0);
+    const parsed = JSON.parse(jsonResult.lines.join('\n'));
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0].jobs.length, 2);
+    assert.deepEqual(parsed[0].jobs[0], {
+      jobId: 'job-1',
+      aspect: 'Design',
+      leafIds: ['leaf-1'],
+      pid: 333,
+      running: true,
+      startTime: '2026-08-26T11:57:00.000Z',
+      elapsedSeconds: 180,
+      agentId: 'codex',
+    });
+  } finally {
+    workerStatus._setNow(null);
+    workerStatus._setIsProcessAlive(null);
+    workerStatus._setGetProcessStartTime(null);
+    workerStatus._setVerifyProcessIdentity(null);
+    workerStatus._setFindRunningInstances(null);
+    removeWorkspace(workspace);
+  }
+});
+
+
 
