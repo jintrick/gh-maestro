@@ -30,7 +30,7 @@ const { resolveWorkerName, readWorkersRaw } = require('./shared/workers-registry
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
-const { hasReportedSinceStart } = require('./shared/worker-report-check');
+const { getReportStatusSinceStart } = require('./shared/worker-report-check');
 const { main: writeDraftMain } = require('./write-draft');
 const closedPrGuard = require('./shared/closed-pr-guard');
 const { isWorkerIdentity } = require('./shared/resident-force-guard');
@@ -228,8 +228,8 @@ function checkWorkerBusyRejection({ workspace, workerName, repo, issue, ghOpts, 
   }
   if (!comments) return null; // 判定不能（応答解釈失敗）→ 通す
 
-  const reported = hasReportedSinceStart(comments, workerName, entry.startTime);
-  if (reported.status !== 'not-reported') return null; // 'reported'(居座り) / 'unknown'(判定不能) は拒否しない
+  const reportStatus = getReportStatusSinceStart(comments, workerName, entry.startTime);
+  if (reportStatus.status !== 'not-reported') return null; // 'reported'(居座り) / 'unknown'(判定不能) は拒否しない
 
   const draft = saveRejectedBody(workerName, body);
   return buildBusyRejectionMessage({ workerName, entry, issue, draftPath: draft.ok ? draft.path : null });
