@@ -133,6 +133,9 @@ test('migration classifies inbox-supervisor cursors vs contracts by their direct
     stoppedNotifiedPid: null,
     stoppedNotifiedStartTime: null,
     stoppedNotifiedAt: null,
+    reportedPid: null,
+    reportedStartTime: null,
+    reportedCreatedAt: null,
   };
   fs.writeFileSync(oldCursor, JSON.stringify(cursorState));
   fs.writeFileSync(oldContract, '{"contract":1}');

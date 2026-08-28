@@ -2623,6 +2623,53 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
       assert.equal(state.stoppedNotifiedPid, 456);
       assert.equal(state.stoppedNotifiedStartTime, START_TIME);
       assert.ok(state.stoppedNotifiedAt);
+      assert.equal(state.reportedPid, 456);
+      assert.equal(state.reportedStartTime, START_TIME);
+    });
+  });
+
+  test('過去報告の永続化: 生存中に報告観測後、cursor.since が進んだ次巡回でワーカーが停止しても「報告済み」と判定する（指摘1）', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      // サイクル1: ワーカーは生存中、報告コメントを投稿
+      supervisor._setIsWorkerAlive(() => true);
+      supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
+
+      const r1 = runMain(['--workspace', dir]);
+      r1.runOnce();
+
+      // サイクル1終了時点でカーソルが報告コメントの created_at まで進み、reported* が永続化されている
+      const state1 = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state1.reportedPid, 456);
+      assert.equal(state1.reportedStartTime, START_TIME);
+      assert.equal(state1.since, '2026-07-25T00:00:15.000Z');
+
+      // サイクル2: ワーカー停止。新着コメントは空（cursor.since 以降の新規なし）
+      supervisor._setIsWorkerAlive(() => false);
+      supervisor._setGhApiComments(mockGhApiComments([]));
+
+      const r2 = runMain(['--workspace', dir]);
+      r2.runOnce();
+
+      assert.ok(r2.lines.some(l => l.startsWith('STOP_DETECTED:issue-5-fix:456')),
+        `STOP_DETECTED が出力されること: ${r2.lines.join('\n')}`);
+      const stopNotify = notifyCalls.find(c => c.body.includes('停止しています'));
+      assert.ok(stopNotify, '停止通知が送信されること');
+      assert.ok(stopNotify.body.includes('報告状況: 報告済み'),
+        `cursor.since 進行後でも報告済みと判定されること: ${stopNotify.body}`);
     });
   });
 
@@ -2701,6 +2748,55 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
     });
   });
 
+  test('通知キー保持: 同一プロセス（同一PID+同一起動時刻）が生存と観測されても stoppedNotified が消えず再通知されない（指摘3）', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+        cursors: {
+          'issue-5-fix': {
+            since: null,
+            seenIds: [],
+            deliveredIds: [],
+            pendingDeliveries: {},
+            stoppedNotifiedPid: 456,
+            stoppedNotifiedStartTime: START_TIME,
+            stoppedNotifiedAt: '2026-07-25T00:10:00.000Z',
+          },
+        },
+      });
+
+      // 1回目の run: 同一プロセスが生存中と観測される
+      supervisor._setIsWorkerAlive(() => true);
+      const r1 = runMain(['--workspace', dir]);
+      r1.runOnce();
+
+      // 生存観測後も同一プロセスの停止通知キーが維持されていること
+      const state1 = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state1.stoppedNotifiedPid, 456);
+      assert.equal(state1.stoppedNotifiedStartTime, START_TIME);
+
+      // 2回目の run: 再度停止
+      supervisor._setIsWorkerAlive(() => false);
+      const r2 = runMain(['--workspace', dir]);
+      r2.runOnce();
+
+      assert.ok(!r2.lines.some(l => l.startsWith('STOP_DETECTED')),
+        `同一プロセスに再通知されないこと: ${r2.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 0);
+    });
+  });
+
   test('PID再利用: 同一PIDでも起動時刻が異なれば別プロセスとして再通知する', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
@@ -2772,7 +2868,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
     });
   });
 
-  test('起動時刻が無いエントリでも entry.pid があれば停止通知する（報告状況: 未投稿）', () => {
+  test('起動時刻が無いエントリは判定不能として停止通知する（報告状況: 判定不能（起動時刻なし・不正））（指摘2）', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
     supervisor._setIsWorkerAlive(() => false);
@@ -2797,7 +2893,8 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
       assert.ok(r.lines.some(l => l.startsWith('STOP_DETECTED:issue-5-fix:456')),
         `startTimeが無くてもSTOP_DETECTEDが出力されること: ${r.lines.join('\n')}`);
       assert.equal(notifyCalls.length, 1);
-      assert.ok(notifyCalls[0].body.includes('報告状況: 未投稿'));
+      assert.ok(notifyCalls[0].body.includes('報告状況: 判定不能（起動時刻なし・不正）'),
+        `通知本文に判定不能が含まれること: ${notifyCalls[0].body}`);
 
       const state = supervisor.readCursor(dir, 'issue-5-fix');
       assert.equal(state.stoppedNotifiedPid, 456);
@@ -3030,6 +3127,28 @@ describe('Cursor type safety', () => {
       assert.equal(state.stoppedNotifiedPid, null);
       assert.equal(state.stoppedNotifiedStartTime, null);
       assert.equal(state.stoppedNotifiedAt, null);
+    });
+  });
+
+  test('reportedPid/StartTime/CreatedAt の型検証', () => {
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        cursors: {
+          'issue-1-bad-reported': {
+            since: null,
+            seenIds: [],
+            deliveredIds: [],
+            pendingDeliveries: {},
+            reportedPid: 'not-a-number',
+            reportedStartTime: 12345,
+            reportedCreatedAt: {},
+          },
+        },
+      });
+      const state = supervisor.readCursor(dir, 'issue-1-bad-reported');
+      assert.equal(state.reportedPid, null);
+      assert.equal(state.reportedStartTime, null);
+      assert.equal(state.reportedCreatedAt, null);
     });
   });
 });
