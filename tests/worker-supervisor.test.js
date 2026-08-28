@@ -2902,6 +2902,40 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
     });
   });
 
+  test('起動時刻が不正な文字列のエントリは判定不能として停止通知する（報告状況: 判定不能（起動時刻なし・不正））（Issue #413）', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => false);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: 'invalid-date', agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('STOP_DETECTED:issue-5-fix:456')),
+        `startTimeが不正でもSTOP_DETECTEDが出力されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1);
+      assert.ok(notifyCalls[0].body.includes('報告状況: 判定不能（起動時刻なし・不正）'),
+        `通知本文に判定不能が含まれること: ${notifyCalls[0].body}`);
+
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state.stoppedNotifiedPid, 456);
+      assert.equal(state.stoppedNotifiedStartTime, 'invalid-date');
+    });
+  });
+
   test('停止検知時に worktree や workers.json が変更・削除されないこと', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));

@@ -229,7 +229,7 @@ function checkWorkerBusyRejection({ workspace, workerName, repo, issue, ghOpts, 
   if (!comments) return null; // 判定不能（応答解釈失敗）→ 通す
 
   const reported = hasReportedSinceStart(comments, workerName, entry.startTime);
-  if (reported !== false) return null; // true(居座り) / null(判定不能) は拒否しない
+  if (reported.status !== 'not-reported') return null; // 'reported'(居座り) / 'unknown'(判定不能) は拒否しない
 
   const draft = saveRejectedBody(workerName, body);
   return buildBusyRejectionMessage({ workerName, entry, issue, draftPath: draft.ok ? draft.path : null });

@@ -19,13 +19,13 @@ const { parseMarker } = require('../msg-poll');
  * @param {object[]} comments    - gh api の comments 応答（id/created_at/body を含む）
  * @param {string} workerName
  * @param {string|null} startTime  - ワーカープロセスの起動時刻（ISO 8601文字列）
- * @returns {object|null}  最新の報告コメントオブジェクト。該当なしまたは判定不能時は null
+ * @returns {{ status: 'reported', report: object } | { status: 'not-reported', report: null } | { status: 'unknown', report: null }}
  */
 function getLatestReportSinceStart(comments, workerName, startTime) {
-  if (!startTime) return null;
+  if (!startTime) return { status: 'unknown', report: null };
   const startMs = new Date(startTime).getTime();
-  if (!Number.isFinite(startMs)) return null;
-  if (!Array.isArray(comments)) return null;
+  if (!Number.isFinite(startMs)) return { status: 'unknown', report: null };
+  if (!Array.isArray(comments)) return { status: 'unknown', report: null };
 
   let latest = null;
   let latestMs = -1;
@@ -46,7 +46,10 @@ function getLatestReportSinceStart(comments, workerName, startTime) {
       }
     }
   }
-  return latest;
+  if (latest) {
+    return { status: 'reported', report: latest };
+  }
+  return { status: 'not-reported', report: null };
 }
 
 /**
@@ -61,15 +64,10 @@ function getLatestReportSinceStart(comments, workerName, startTime) {
  * @param {object[]} comments    - gh api の comments 応答（id/created_at/body を含む）
  * @param {string} workerName
  * @param {string|null} startTime  - ワーカープロセスの起動時刻（ISO 8601文字列）
- * @returns {boolean|null}  true=報告済み, false=未報告, null=startTimeが無い/不正で判定不能
+ * @returns {{ status: 'reported', report: object } | { status: 'not-reported', report: null } | { status: 'unknown', report: null }}
  */
 function hasReportedSinceStart(comments, workerName, startTime) {
-  if (!startTime) return null;
-  const startMs = new Date(startTime).getTime();
-  if (!Number.isFinite(startMs)) return null;
-  if (!Array.isArray(comments)) return null;
-
-  return getLatestReportSinceStart(comments, workerName, startTime) !== null;
+  return getLatestReportSinceStart(comments, workerName, startTime);
 }
 
 /**

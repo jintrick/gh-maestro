@@ -74,7 +74,6 @@ const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // msg-poll.js のスキャンロジックを再利用（マーカーパースのみ）
 const { parseMarker } = require('./msg-poll');
 const {
-  hasReportedSinceStart,
   getLatestReportSinceStart,
   formatElapsedTime,
 } = require('./shared/worker-report-check');
@@ -1041,7 +1040,8 @@ function main(argsOverride, opts = {}) {
           }
         }
 
-        const commentReport = getLatestReportSinceStart(comments, workerName, entry.startTime);
+        const reportResult = getLatestReportSinceStart(comments, workerName, entry.startTime);
+        const commentReport = reportResult.status === 'reported' ? reportResult.report : null;
         if (commentReport) {
           cursor.reportedPid = entry.pid;
           cursor.reportedStartTime = entry.startTime;
@@ -1127,12 +1127,14 @@ function main(argsOverride, opts = {}) {
           if (!alreadyNotified) {
             let reported = null;
             if (entry.startTime) {
-              const commentReport = getLatestReportSinceStart(comments, workerName, entry.startTime);
-              if (commentReport) {
+              const reportResult = getLatestReportSinceStart(comments, workerName, entry.startTime);
+              if (reportResult.status === 'reported') {
                 reported = true;
                 cursor.reportedPid = entry.pid;
                 cursor.reportedStartTime = entry.startTime;
-                cursor.reportedCreatedAt = commentReport.created_at;
+                cursor.reportedCreatedAt = reportResult.report.created_at;
+              } else if (reportResult.status === 'unknown') {
+                reported = null;
               } else if (cursor.reportedPid === entry.pid && cursor.reportedStartTime === entry.startTime && cursor.reportedCreatedAt) {
                 reported = true;
               } else {
