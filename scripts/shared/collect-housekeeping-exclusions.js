@@ -37,6 +37,12 @@ function _isProcessAlive(pid) {
   return fn(pid);
 }
 
+let _injectedVerifyProcessIdentity = null;
+function _verifyProcessIdentity(pid, identity, opts) {
+  const fn = _injectedVerifyProcessIdentity ?? require('../process-lifecycle').verifyProcessIdentity;
+  return fn(pid, identity, opts);
+}
+
 /**
  * housekeeping から除外する稼働中ワーカーを収集する。
  *
@@ -55,11 +61,13 @@ function _isProcessAlive(pid) {
  * あり、取り違えはない。
  *
  * @param {string} workspace ワークスペース絶対パス
+ * @param {object} [opts]
+ * @param {boolean} [opts.cleanupStale=true] staleなmanager.runningを回収するか
  * @returns {{ workerNames: Set<string>, reviewPrs: Set<string>, pids: Set<number> }}
  *   除外対象のワーカー名（通常 headless ワーカー）、Review Manager 対象 PR 番号、および稼働中プロセスの PID
  * @throws {Error} いずれかの情報源が「存在するのに読み取り・解析不能」の場合
  */
-function collectHousekeepingExclusions(workspace) {
+function collectHousekeepingExclusions(workspace, opts = {}) {
   const workerNames = new Set();
   const reviewPrs = new Set();
   const pids = new Set();
@@ -106,11 +114,23 @@ function collectHousekeepingExclusions(workspace) {
   }
 
   // 通常ワーカー以外の Review Manager は PID registry に登録されず、専用の
-  // review manager の .running lease だけを持つ。既存の lease 契約（PID 生存）を
-  // 再利用して、対応する records/pr/<PR>/review/manager.log を保護する。
+  // manager.running だけを持つ。新形式は PID＋起動時刻の同一性まで確認して、
+  // 対応する records/pr/<PR>/review/manager.log を保護する。
+  //
+  // 旧形式の生存PIDは同一性を確認できないので live 一覧には入れない。ただし
+  // アップグレード直後に旧RMがまだ動いている間だけは、当該PRの成果物を掃除から
+  // 守る必要がある。onLegacyLive はその保護集合だけを更新し、例外を投げずに次のPRへ
+  // 進めるための経路である。旧PIDを pids 集合へ入れることはしない。
   const runningManagers = listRunningReviewManagers(workspace, {
     isProcessAliveFn: _isProcessAlive,
+    // 注入が明示されたテスト時だけこのモジュールの関数を渡す。通常は
+    // running-review-managers.js 自身の遅延解決（およびその注入点）を使う。
+    verifyProcessIdentityFn: _injectedVerifyProcessIdentity || undefined,
     onError: 'throw',
+    cleanupStale: opts.cleanupStale !== false,
+    onLegacyLive: ({ pr }) => {
+      if (pr != null) reviewPrs.add(pr);
+    },
   });
   for (const manager of runningManagers) {
     reviewPrs.add(manager.pr);
@@ -123,4 +143,5 @@ module.exports = {
   collectHousekeepingExclusions,
   // テスト用注入（test-process-spawn-safety ルール準拠。実プロセス確認を回避する）
   _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
+  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
 };

@@ -29,6 +29,7 @@ const {
 
 const SKILL_MD = 'C:\\canonical\\skills\\gh-maestro-reviewer\\SKILL.md';
 const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
+const { reviewManagerStartingPath } = require('../scripts/shared/running-review-managers');
 const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'run-review-manager.js');
 
@@ -823,6 +824,33 @@ test('boundedCleanup: cleanup結果が独立して診断可能', async () => {
   assert.ok(Array.isArray(result.errors));
 });
 
+test('boundedCleanup: manager.running は所有者と起動時刻が一致する場合だけ解放する', async () => {
+  const testDir = path.join(tmpBase, 'cleanup-owner');
+  fs.mkdirSync(testDir, { recursive: true });
+  const ownedFile = path.join(testDir, 'owned.running');
+  const foreignFile = path.join(testDir, 'foreign.running');
+  const owner = { pid: process.pid, startTime: '2026-08-28T00:00:00.000Z' };
+  fs.writeFileSync(ownedFile, JSON.stringify(owner), 'utf8');
+  fs.writeFileSync(foreignFile, JSON.stringify({
+    pid: 67890,
+    startTime: '2026-08-28T00:01:00.000Z',
+  }), 'utf8');
+
+  const owned = await boundedCleanup({
+    pid: null, worktreeDir: null, workspace: null, pr: null,
+    lockFile: ownedFile, lockOwner: owner, log: () => {}, gracefulShutdownMs: 0,
+  });
+  assert.equal(owned.leaseReleased, true);
+  assert.ok(!fs.existsSync(ownedFile));
+
+  const foreign = await boundedCleanup({
+    pid: null, worktreeDir: null, workspace: null, pr: null,
+    lockFile: foreignFile, lockOwner: owner, log: () => {}, gracefulShutdownMs: 0,
+  });
+  assert.equal(foreign.leaseReleased, false);
+  assert.ok(fs.existsSync(foreignFile), '別所有者のmanager.runningを残す');
+});
+
 // ── superviseReviewManager: spawn error 即時検出 ─────────────────────────
 // Issue: 非同期spawn失敗（ENOENT等）でerrorイベントが発火しても、監督ループが
 // processExitedを知らず30分deadlineを待ち続けていた。errorハンドラが
@@ -836,6 +864,7 @@ test('superviseReviewManager: spawn error時は即座にprocess-exit-no-artifact
   const logFile = path.join(testDir, 'rm.log');
   const promptFile = path.join(testDir, 'prompt.md');
   const lockFile = path.join(ghDir, 'records', 'pr', '999', 'review', 'manager.running');
+  const startingFile = reviewManagerStartingPath(lockFile);
   const outputFile = path.join(ghDir, 'records', 'pr', '999', 'review', 'manager.json');
 
   const logs = [];
@@ -844,15 +873,35 @@ test('superviseReviewManager: spawn error時は即座にprocess-exit-no-artifact
   // 存在しない実行ファイルで spawn する → error イベントが発火
   // (superviseReviewManager は setupReviewWorktree の前に落ちるが、
   // その前に ghDir 作成・ロック書き込みまで到達する)
+  // 起動側が先に作った予約を、本体がmanager.runningを書いた直後に解放する
+  // 順序を模擬する（PR #410の二重writer回帰）。
+  const startupToken = 'startup-token-for-test';
+  fs.mkdirSync(path.dirname(startingFile), { recursive: true });
+  fs.writeFileSync(startingFile, JSON.stringify({
+    pid: process.pid,
+    startTime: null,
+    token: startupToken,
+  }), 'utf8');
+  const previousStartupToken = process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN;
+  process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN = startupToken;
 
   const start = Date.now();
-  const result = await superviseReviewManager({
-    pr: '999', repo: 'o/r', workspace: testDir,
-    ghDir, lockFile, logFile, outputFile, promptFile,
-    deadlineMs: 30000,
-    log,
-    signal: { aborted: false },
-  });
+  let result;
+  try {
+    result = await superviseReviewManager({
+      pr: '999', repo: 'o/r', workspace: testDir,
+      ghDir, lockFile, logFile, outputFile, promptFile,
+      deadlineMs: 30000,
+      log,
+      signal: { aborted: false },
+    });
+  } finally {
+    if (previousStartupToken === undefined) {
+      delete process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN;
+    } else {
+      process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN = previousStartupToken;
+    }
+  }
   const elapsed = Date.now() - start;
 
   // 30分ではなく数秒以内に戻る
@@ -860,6 +909,10 @@ test('superviseReviewManager: spawn error時は即座にprocess-exit-no-artifact
   // エラー結果であること
   assert.equal(result.outcome, 'setup-failed');
   assert.notEqual(result.exitCode, 0);
+  const marker = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+  assert.equal(marker.pid, process.pid);
+  assert.ok(marker.startTime === null || typeof marker.startTime === 'string');
+  assert.equal(fs.existsSync(startingFile), false, '本体書き込み後に自分の起動予約を解放する');
 });
 
 // ── superviseReviewManager: pollForArtifact 呼び出し検証 ─────────────────

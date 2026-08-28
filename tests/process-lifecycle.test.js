@@ -1107,14 +1107,19 @@ test('sweepRegistry: dryRun では実際の削除を行わない', () => {
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
   fs.writeFileSync(path.join(pidsDir, 'dryrun.json'), 'not valid json {{{');
+  const runningFile = path.join(workspace, '.gh-maestro', 'records', 'pr', '409', 'review', 'manager.running');
+  fs.mkdirSync(path.dirname(runningFile), { recursive: true });
+  fs.writeFileSync(runningFile, '999999999\n', 'utf8');
 
   const results = plc.sweepRegistry(workspace, { dryRun: true });
 
   const corrupt = results.cleaned.filter(c => c.reason.includes('corrupt JSON'));
   assert.ok(corrupt.length >= 1);
   assert.ok(fs.existsSync(path.join(pidsDir, 'dryrun.json')), 'file should still exist in dryRun');
+  assert.ok(fs.existsSync(runningFile), 'manager.running のstale回収もdryRunでは行わない');
 
   fs.unlinkSync(path.join(pidsDir, 'dryrun.json'));
+  fs.unlinkSync(runningFile);
 });
 
 test('sweepRegistry: matchフィルタで特定エントリのみ対象', () => {
@@ -1660,6 +1665,27 @@ test('sweepRegistry: manager.running の PID は stale registry エントリを�
     assert.ok(!fs.existsSync(stalePidFile), 'stale ファイルは回収・削除される');
   } finally {
     for (const p of [stalePidFile, runningFile]) {
+      try { fs.unlinkSync(p); } catch {}
+    }
+  }
+});
+
+test('sweepRegistry: 生存中の旧PID-only manager.running は例外にせず当該PRのhousekeepingだけ保護する', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const ghDir = path.join(workspace, '.gh-maestro');
+  const reviewDir = path.join(ghDir, 'records', 'pr', '409', 'review');
+  const runningFile = path.join(reviewDir, 'manager.running');
+  const reviewLog = path.join(reviewDir, 'manager.log');
+  fs.mkdirSync(reviewDir, { recursive: true });
+  fs.writeFileSync(runningFile, `${process.pid}\n`, 'utf8');
+  fs.writeFileSync(reviewLog, 'review manager log\n', 'utf8');
+
+  try {
+    assert.doesNotThrow(() => plc.sweepRegistry(workspace, { dryRun: false }));
+    assert.ok(fs.existsSync(runningFile), '生存中の旧形式markerは削除しない');
+    assert.ok(fs.existsSync(reviewLog), '旧形式markerのPRだけhousekeepingから保護する');
+  } finally {
+    for (const p of [runningFile, reviewLog]) {
       try { fs.unlinkSync(p); } catch {}
     }
   }

@@ -361,15 +361,23 @@ describe('main: review_done検知', () => {
 
       // 2周目のレビューが開始（ロック再作成）。1周目の reviewReported:true を引きずらず
       // リセットされることを確認する（リセットが無いと2回目の review_done が永久に発火しない）。
-      fs.writeFileSync(lockPath, String(process.pid));
-      let r = watch.scanOnce({ workspace, ghDir, repo: 'owner/repo', issue: '5', state, isBaseline: false, ghOpts: {} });
+      fs.writeFileSync(lockPath, JSON.stringify({
+        pid: process.pid,
+        startTime: '2026-07-28T00:00:00.000Z',
+      }));
+      const scanOpts = {
+        workspace, ghDir, repo: 'owner/repo', issue: '5', state, isBaseline: false, ghOpts: {},
+        isProcessAliveFn: () => true,
+        verifyProcessIdentityFn: () => ({ match: true }),
+      };
+      let r = watch.scanOnce(scanOpts);
       assert.equal(r.events.length, 0);
       assert.equal(state.prs['42'].reviewReported, false);
       assert.equal(state.prs['42'].reviewSeenRunning, true);
 
       // 2周目のレビューが完了（ロック消失）。
       fs.unlinkSync(lockPath);
-      r = watch.scanOnce({ workspace, ghDir, repo: 'owner/repo', issue: '5', state, isBaseline: false, ghOpts: {} });
+      r = watch.scanOnce(scanOpts);
       assert.equal(r.events.length, 1);
       assert.equal(r.events[0].type, 'review_done');
       assert.equal(r.events[0].pr, 42);

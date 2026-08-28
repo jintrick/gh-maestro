@@ -798,7 +798,10 @@ function sweepRegistry(workspace, opts = {}) {
   if (!opts.match) {
     try {
       const { collectHousekeepingExclusions } = require('./shared/collect-housekeeping-exclusions');
-      const { workerNames, reviewPrs, pids } = collectHousekeepingExclusions(workspace);
+      const { workerNames, reviewPrs, pids } = collectHousekeepingExclusions(workspace, {
+        // --dry-run は manager.running の stale 回収も含めて書き込みを行わない。
+        cleanupStale: !opts.dryRun,
+      });
       for (const name of workerNames) excludedWorkerNames.add(name);
       for (const pr of reviewPrs) excludedReviewPrs.add(pr);
       if (pids) {

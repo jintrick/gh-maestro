@@ -13,7 +13,12 @@ const { unlinkJunctions } = require('./shared/unlink-junctions');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { killProcessTree } = require('./shared/kill-tree');
-const { isProcessAlive } = require('./process-lifecycle');
+const { isProcessAlive, getProcessStartTime } = require('./process-lifecycle');
+const {
+  writeRunningReviewManager,
+  removeRunningReviewManagerIfOwned,
+  releaseReviewManagerStartup,
+} = require('./shared/running-review-managers');
 const {
   assertValidPr, reviewArtifactPath,
   reviewWorktreeBranchName, reviewWorktreeFetchRef, reviewWorktreeDir,
@@ -28,6 +33,12 @@ const { VALID_ASPECTS, VALID_SEVERITIES, FINDING_REQUIRED_FIELDS } = require('./
 const DEFAULT_ARTIFACT_POLL_INTERVAL_MS = 200;
 const DEFAULT_DEADLINE_MS = 30 * 60 * 1000; // 30 minutes
 const GRACEFUL_SHUTDOWN_GRACE_MS = 5000; // 5 seconds for child process to exit normally
+
+let _injectedGetProcessStartTime = null;
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime || getProcessStartTime;
+  return fn(pid);
+}
 
 const USAGE = `run-review-manager.js — Review Managerをheadless起動してPRレビューを実行する
 
@@ -511,12 +522,13 @@ function atomicCopyStaging(srcPath, dstPath) {
  * @param {string} opts.workspace メインワークスペース
  * @param {string} opts.pr PR番号
  * @param {string} opts.lockFile .running ロックファイルのパス
+ * @param {{pid:number,startTime:string|null}} [opts.lockOwner] この監督プロセスが書いた所有者情報
  * @param {(msg: string) => void} opts.log ログ関数
  * @param {number} [opts.gracefulShutdownMs] 正常終了猶予（ms）。デフォルト5000
  * @returns {Promise<{processStopped: boolean, worktreeCleaned: boolean, leaseReleased: boolean, errors: string[]}>}
  */
 async function boundedCleanup({ pid, worktreeDir, workspace, pr, lockFile, log,
-                                 gracefulShutdownMs }) {
+                                 gracefulShutdownMs, lockOwner }) {
   const graceMs = gracefulShutdownMs ?? GRACEFUL_SHUTDOWN_GRACE_MS;
   const results = {
     processStopped: false,
@@ -576,8 +588,16 @@ async function boundedCleanup({ pid, worktreeDir, workspace, pr, lockFile, log,
   if (lockFile) {
     if (results.processStopped || pid == null) {
       try {
-        if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
-        results.leaseReleased = true;
+        const owner = lockOwner || { pid: process.pid, startTime: null };
+        const release = removeRunningReviewManagerIfOwned(lockFile, owner);
+        if (release.released) {
+          results.leaseReleased = true;
+        } else {
+          results.errors.push(
+            `leaseを解放しません（所有者確認に失敗しました）。` +
+            `lockFile=${lockFile}: ${release.reason || 'unknown reason'}`
+          );
+        }
       } catch (e) {
         results.errors.push(`lease 解放失敗: ${e.message}`);
       }
@@ -619,6 +639,7 @@ module.exports = {
   _validateFindingShape, _validateAgainstSchema,
   _setPollForArtifact: (fn) => { _injectedPollForArtifact = fn; },
   _setRunReviewJobsOnce: (fn) => { _injectedRunReviewJobsOnce = fn; },
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
 };
 
 /**
@@ -1102,14 +1123,28 @@ function mapAgentPhaseFailure(phase, reviewWtDir) {
  */
 async function superviseReviewManager({
   pr, repo, workspace, ghDir, lockFile, logFile,
-  outputFile, promptFile, deadlineMs, log, signal, issue,
+  outputFile, promptFile, deadlineMs, log, signal, issue, lockOwner,
 }) {
   // 1. ディレクトリ作成・ロック
   try {
     fs.mkdirSync(ghDir, { recursive: true });
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
     fs.mkdirSync(path.dirname(lockFile), { recursive: true });
-    fs.writeFileSync(lockFile, String(process.pid));
+    const owner = lockOwner || {
+      pid: process.pid,
+      startTime: _getProcessStartTime(process.pid) || null,
+    };
+    writeRunningReviewManager(lockFile, owner);
+    const startupToken = process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN;
+    if (startupToken) {
+      const released = releaseReviewManagerStartup(lockFile, startupToken);
+      if (!released.released && !released.missing) {
+        // manager.runningは既に本体所有者で書けているため、予約の解放失敗で
+        // Review Manager自体を失敗扱いにしない。残った予約は次回起動時に
+        // stale判定される（予約のトークンが一致する場合だけ解放可能）。
+        log(`起動予約の解放に失敗しました: ${released.reason || 'unknown reason'}`);
+      }
+    }
   } catch (e) {
     return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir: null, reason: `初期化失敗: ${e.message}` };
   }
@@ -1298,6 +1333,10 @@ if (require.main === module) {
     const logFile = spec.logPath;
     const outputFile = reviewArtifactPath(ghDir, pr, '.json');
     const promptFile = path.join(os.tmpdir(), `review-manager-prompt-${pr}-${Date.now()}.md`);
+    const lockOwner = {
+      pid: process.pid,
+      startTime: _getProcessStartTime(process.pid) || null,
+    };
 
     function log(msg) {
       try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`); } catch {}
@@ -1313,6 +1352,7 @@ if (require.main === module) {
         pr, repo, workspace, ghDir, lockFile, logFile,
         outputFile, promptFile,
         issue,
+        lockOwner,
         deadlineMs: DEFAULT_DEADLINE_MS,
         log, signal,
       });
@@ -1334,6 +1374,7 @@ if (require.main === module) {
         worktreeDir: supervisionResult.reviewWtDir,
         workspace, pr, lockFile,
         log,
+        lockOwner,
         gracefulShutdownMs: GRACEFUL_SHUTDOWN_GRACE_MS,
       });
     } catch (e) {

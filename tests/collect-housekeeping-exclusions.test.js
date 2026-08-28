@@ -16,13 +16,15 @@ const os = require('os');
 const CHE = require.resolve('../scripts/shared/collect-housekeeping-exclusions');
 const LIVENESS = require.resolve('../scripts/shared/worker-liveness');
 const LEASE = require.resolve('../scripts/shared/worker-lease');
+const RRM = require.resolve('../scripts/shared/running-review-managers');
 
 function fresh() {
-  for (const p of [CHE, LIVENESS, LEASE]) delete require.cache[p];
+  for (const p of [CHE, LIVENESS, LEASE, RRM]) delete require.cache[p];
   return {
     che: require(CHE),
     liveness: require(LIVENESS),
     lease: require(LEASE),
+    rrm: require(RRM),
   };
 }
 
@@ -129,14 +131,18 @@ test('collectHousekeepingExclusions: 死んだ lease は収集しない', () => 
   }
 });
 
-test('collectHousekeepingExclusions: Review Manager が生存中の PR を収集する', () => {
-  const { che } = fresh();
+test('collectHousekeepingExclusions: 同一性確認済みの Review Manager が生存中の PR を収集する', () => {
+  const { che, rrm } = fresh();
   const ws = tmpWorkspace();
   try {
     const reviewDir = path.join(ws, '.gh-maestro', 'records', 'pr', '42', 'review');
     fs.mkdirSync(reviewDir, { recursive: true });
-    fs.writeFileSync(path.join(reviewDir, 'manager.running'), '12345');
+    fs.writeFileSync(path.join(reviewDir, 'manager.running'), JSON.stringify({
+      pid: 12345,
+      startTime: '2026-08-28T00:00:00.000Z',
+    }));
     che._setIsProcessAlive(() => true);
+    rrm._setVerifyProcessIdentity(() => ({ match: true }));
     const { reviewPrs } = che.collectHousekeepingExclusions(ws);
     assert.ok(reviewPrs.has('42'));
   } finally {
@@ -144,15 +150,46 @@ test('collectHousekeepingExclusions: Review Manager が生存中の PR を収集
   }
 });
 
-test('collectHousekeepingExclusions: Review Manager が死んでいれば PR を収集しない', () => {
+test('collectHousekeepingExclusions: 死んだ旧形式Review Managerは収集せず回収する', () => {
   const { che } = fresh();
   const ws = tmpWorkspace();
   try {
     const reviewDir = path.join(ws, '.gh-maestro', 'records', 'pr', '42', 'review');
     fs.mkdirSync(reviewDir, { recursive: true });
-    fs.writeFileSync(path.join(reviewDir, 'manager.running'), '999999999');
+    const file = path.join(reviewDir, 'manager.running');
+    fs.writeFileSync(file, '999999999');
     const { reviewPrs } = che.collectHousekeepingExclusions(ws);
     assert.equal(reviewPrs.size, 0);
+    assert.ok(!fs.existsSync(file));
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('collectHousekeepingExclusions: 生存中の旧形式PIDは例外にせず当該PRだけ保護して他PRの処理を続ける', () => {
+  const { che, rrm } = fresh();
+  const ws = tmpWorkspace();
+  try {
+    const legacyFile = path.join(ws, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.running');
+    const newFile = path.join(ws, '.gh-maestro', 'records', 'pr', '43', 'review', 'manager.running');
+    fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+    fs.mkdirSync(path.dirname(newFile), { recursive: true });
+    fs.writeFileSync(legacyFile, '12345\n', 'utf8');
+    fs.writeFileSync(newFile, JSON.stringify({
+      pid: 67890,
+      startTime: '2026-08-28T00:01:00.000Z',
+    }), 'utf8');
+
+    che._setIsProcessAlive((pid) => pid === 12345 || pid === 67890);
+    rrm._setVerifyProcessIdentity(() => ({ match: true }));
+
+    assert.doesNotThrow(() => {
+      const result = che.collectHousekeepingExclusions(ws);
+      assert.ok(result.reviewPrs.has('42'), '旧形式の生存PIDは当該PRだけ保護する');
+      assert.ok(result.reviewPrs.has('43'), '後続の新形式PRも処理を続ける');
+      assert.ok(!result.pids.has(12345), '旧形式PIDは稼働PID集合へ入れない');
+    });
+    assert.equal(fs.readFileSync(legacyFile, 'utf8'), '12345\n', '生存中の旧形式は削除しない');
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }
