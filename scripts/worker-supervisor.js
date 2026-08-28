@@ -119,6 +119,7 @@ Output (stdout):
     HANG_DETECTED:<workerName>:<pid> elapsed=<duration>
     HANG_RESUMED:<workerName>:<pid>
     STALE_REPORT_DETECTED:<workerName>:<pid> elapsed=<duration>
+    STOP_DETECTED:<workerName>:<pid>
     SCAN_END:<workers>:<detected> source=worker-supervisor.js scope=worker-delivery-scan workers=<workers> detected=<detected> orchestrator-inbox=separate-msg-poll.js
 
 Description:
@@ -134,6 +135,7 @@ Description:
     への重複通知は防止される（PID再利用や新プロセスへの切り替わりによる誤抑止・
     誤った復帰報告を避けるため起動時刻も照合する）。
   居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みで、報告から10秒以上経過してもプロセスが生存し続けている場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（ハング検知とは独立）。同一プロセス（PID+起動時刻）への重複通知は防止される（PID再利用による誤抑止を避けるため起動時刻も照合する）。
+  停止検知: workers.json に登録されたワーカーのプロセスが生存していないことを検知した場合、STOP_DETECTEDを出力しorchestratorへ通知する。通知本文には hasReportedSinceStart による報告状況（報告済み/未投稿）が明記される。同一プロセス（PID+起動時刻）への重複通知は防止される。プロセスの停止・再起動・削除等の自動介入は行わない。
   ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
   消滅時はPID registryを解除して自動exitする。`;
 
@@ -199,7 +201,7 @@ function cursorPath(workspace, workerName) {
  *
  * @param {string} workspace
  * @param {string} workerName
- * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object, hangNotifiedPid: number|null, hangNotifiedStartTime: string|null, hangNotifiedAt: string|null, staleReportPendingPid: number|null, staleReportPendingStartTime: string|null, staleReportPendingCreatedAt: string|null, staleReportNotifiedPid: number|null, staleReportNotifiedStartTime: string|null, staleReportNotifiedAt: string|null }}
+ * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object, hangNotifiedPid: number|null, hangNotifiedStartTime: string|null, hangNotifiedAt: string|null, staleReportPendingPid: number|null, staleReportPendingStartTime: string|null, staleReportPendingCreatedAt: string|null, staleReportNotifiedPid: number|null, staleReportNotifiedStartTime: string|null, staleReportNotifiedAt: string|null, stoppedNotifiedPid: number|null, stoppedNotifiedStartTime: string|null, stoppedNotifiedAt: string|null }}
  */
 function readCursor(workspace, workerName) {
   const cp = cursorPath(workspace, workerName);
@@ -210,6 +212,7 @@ function readCursor(workspace, workerName) {
         hangNotifiedPid: null, hangNotifiedStartTime: null, hangNotifiedAt: null,
         staleReportPendingPid: null, staleReportPendingStartTime: null, staleReportPendingCreatedAt: null,
         staleReportNotifiedPid: null, staleReportNotifiedStartTime: null, staleReportNotifiedAt: null,
+        stoppedNotifiedPid: null, stoppedNotifiedStartTime: null, stoppedNotifiedAt: null,
       };
     }
     const raw = fs.readFileSync(cp, 'utf8');
@@ -230,6 +233,9 @@ function readCursor(workspace, workerName) {
       staleReportNotifiedPid: typeof parsed.staleReportNotifiedPid === 'number' ? parsed.staleReportNotifiedPid : null,
       staleReportNotifiedStartTime: typeof parsed.staleReportNotifiedStartTime === 'string' ? parsed.staleReportNotifiedStartTime : null,
       staleReportNotifiedAt: typeof parsed.staleReportNotifiedAt === 'string' ? parsed.staleReportNotifiedAt : null,
+      stoppedNotifiedPid: typeof parsed.stoppedNotifiedPid === 'number' ? parsed.stoppedNotifiedPid : null,
+      stoppedNotifiedStartTime: typeof parsed.stoppedNotifiedStartTime === 'string' ? parsed.stoppedNotifiedStartTime : null,
+      stoppedNotifiedAt: typeof parsed.stoppedNotifiedAt === 'string' ? parsed.stoppedNotifiedAt : null,
     };
   } catch {
     return {
@@ -237,6 +243,7 @@ function readCursor(workspace, workerName) {
       hangNotifiedPid: null, hangNotifiedStartTime: null, hangNotifiedAt: null,
       staleReportPendingPid: null, staleReportPendingStartTime: null, staleReportPendingCreatedAt: null,
       staleReportNotifiedPid: null, staleReportNotifiedStartTime: null, staleReportNotifiedAt: null,
+      stoppedNotifiedPid: null, stoppedNotifiedStartTime: null, stoppedNotifiedAt: null,
     };
   }
 }
@@ -267,6 +274,9 @@ function writeCursor(workspace, workerName, state) {
     staleReportNotifiedPid: typeof state.staleReportNotifiedPid === 'number' ? state.staleReportNotifiedPid : null,
     staleReportNotifiedStartTime: typeof state.staleReportNotifiedStartTime === 'string' ? state.staleReportNotifiedStartTime : null,
     staleReportNotifiedAt: typeof state.staleReportNotifiedAt === 'string' ? state.staleReportNotifiedAt : null,
+    stoppedNotifiedPid: typeof state.stoppedNotifiedPid === 'number' ? state.stoppedNotifiedPid : null,
+    stoppedNotifiedStartTime: typeof state.stoppedNotifiedStartTime === 'string' ? state.stoppedNotifiedStartTime : null,
+    stoppedNotifiedAt: typeof state.stoppedNotifiedAt === 'string' ? state.stoppedNotifiedAt : null,
   });
 }
 
@@ -1010,7 +1020,13 @@ function main(argsOverride, opts = {}) {
       // （cursor.since はこのサイクルの終わりに comments の最大 created_at まで進むため、
       // 同一サイクル内であれば取りこぼさない。一度検知した後は pid+startTime ベースの重複
       // 排除で再通知しないため、翌サイクル以降 since がその報告コメントを過ぎても問題ない）。
-      if (_isWorkerAlive(entry) && entry.startTime) {
+      const isAlive = _isWorkerAlive(entry);
+      if (isAlive && entry.startTime) {
+        // 生存中なので過去プロセスの停止通知キーをクリア
+        cursor.stoppedNotifiedPid = null;
+        cursor.stoppedNotifiedStartTime = null;
+        cursor.stoppedNotifiedAt = null;
+
         const commentReport = getLatestReportSinceStart(comments, workerName, entry.startTime);
         const pendingReportMatches = cursor.staleReportPendingPid === entry.pid
           && cursor.staleReportPendingStartTime === entry.startTime
@@ -1055,11 +1071,53 @@ function main(argsOverride, opts = {}) {
             writeOut(`STALE_REPORT_DETECTED:${workerName}:${entry.pid} elapsed=${elapsed}`);
           }
         }
+      } else if (isAlive) {
+        // startTime が無い生存中プロセスも停止通知キーをクリア
+        cursor.stoppedNotifiedPid = null;
+        cursor.stoppedNotifiedStartTime = null;
+        cursor.stoppedNotifiedAt = null;
       } else {
         // プロセスが終了した保留報告は次のPIDへ持ち越さない。
         cursor.staleReportPendingPid = null;
         cursor.staleReportPendingStartTime = null;
         cursor.staleReportPendingCreatedAt = null;
+
+        // ── 停止したワーカーの検知（Issue #411） ─────────────────────────
+        // ワーカーのプロセスが生存していないことを検知した場合、orchestrator へ通知する。
+        // 発火条件は「プロセスが生存していない」という事実のみとし、報告の有無を発火条件に
+        // 含めない（停止と報告のタイムラグによる取りこぼしを防ぐため）。
+        // 報告状況は hasReportedSinceStart の評価結果として通知本文に明記する。
+        //
+        // entry.startTime が null/未記録の場合でも、entry.pid があれば通知する（startTime が
+        // 取得失敗等で欠落したエントリであっても停止検知が永久に沈黙する穴を防ぐため）。
+        // 重複通知防止キーは pid と startTime の組で照合する（同一PIDでも起動時刻が異なれば
+        // 別プロセスとして再通知する）。
+        // プロセスの停止・再起動・削除等の自動介入は一切行わない。
+        if (entry.pid) {
+          const alreadyNotified = cursor.stoppedNotifiedPid === entry.pid
+            && cursor.stoppedNotifiedStartTime === (entry.startTime ?? null);
+          if (!alreadyNotified) {
+            const reported = entry.startTime ? hasReportedSinceStart(comments, workerName, entry.startTime) : false;
+            const reportStatus = reported === true ? '報告済み' : '未投稿';
+            const body = `⚠️ ワーカー "${workerName}" のプロセス（PID ${entry.pid}）が停止しています。報告状況: ${reportStatus}。`;
+            let notified = false;
+            try {
+              const notifyResult = _notifyOrchestrator({ workspace, issue, body });
+              notified = notifyResult.status === 0;
+              if (!notified) {
+                writeErr(`worker-supervisor: 停止通知の投稿に失敗: ${(notifyResult.stderr || '').trim()}`);
+              }
+            } catch (e) {
+              writeErr(`worker-supervisor: 停止通知の投稿に失敗: ${e.message}`);
+            }
+            if (notified) {
+              cursor.stoppedNotifiedPid = entry.pid;
+              cursor.stoppedNotifiedStartTime = entry.startTime ?? null;
+              cursor.stoppedNotifiedAt = new Date().toISOString();
+              writeOut(`STOP_DETECTED:${workerName}:${entry.pid}`);
+            }
+          }
+        }
       }
 
       // ── 新着候補の抽出 ─────────────────────────────────────────────

@@ -1278,11 +1278,12 @@ describe('runOnce scan and deliver cycle', () => {
       assert.ok(r.lines.some(l => l.startsWith('DELIVERY_FAILED:issue-5-fix:200') && l.includes('configを解決できません')),
         `DELIVERY_FAILED に本当のエラーが含まれること: ${r.lines.join('\n')}`);
 
-      assert.equal(notifyCalls.length, 1, '配送断念の通知が1回呼ばれる');
-      assert.ok(notifyCalls[0].body.includes('issue-5-fix'),
-        `giveUpBody にワーカー名が含まれる: ${notifyCalls[0].body}`);
-      assert.ok(notifyCalls[0].body.includes('configを解決できません'),
-        `giveUpBody に本当のエラーが含まれる: ${notifyCalls[0].body}`);
+      const giveUpCall = notifyCalls.find(c => c.body.includes('断念しました'));
+      assert.ok(giveUpCall, '配送断念の通知が呼ばれる');
+      assert.ok(giveUpCall.body.includes('issue-5-fix'),
+        `giveUpBody にワーカー名が含まれる: ${giveUpCall.body}`);
+      assert.ok(giveUpCall.body.includes('configを解決できません'),
+        `giveUpBody に本当のエラーが含まれる: ${giveUpCall.body}`);
 
       // カーソルにも本当のエラーが残る
       const state = supervisor.readCursor(dir, 'issue-5-fix');
@@ -1466,11 +1467,12 @@ describe('runOnce scan and deliver cycle', () => {
       assert.ok(r.errLines.some(l => l.includes('max retries (5) exceeded')),
         `errLines: ${r.errLines.join('\n')}`);
 
-      assert.equal(notifyCalls.length, 1, 'orchestratorへの断念通知が1回呼ばれる');
-      assert.equal(notifyCalls[0].workspace, dir);
-      assert.equal(notifyCalls[0].issue, '5');
-      assert.ok(notifyCalls[0].body.includes('issue-5-fix'));
-      assert.ok(notifyCalls[0].body.includes('999'));
+      const giveUpCall = notifyCalls.find(c => c.body.includes('断念しました'));
+      assert.ok(giveUpCall, 'orchestratorへの断念通知が呼ばれる');
+      assert.equal(giveUpCall.workspace, dir);
+      assert.equal(giveUpCall.issue, '5');
+      assert.ok(giveUpCall.body.includes('issue-5-fix'));
+      assert.ok(giveUpCall.body.includes('999'));
     });
   });
 
@@ -1518,7 +1520,7 @@ describe('runOnce scan and deliver cycle', () => {
       assert.equal(r.code, 0);
       r.runOnce();
 
-      assert.ok(!r.lines.some(l => l.includes('DETECTED')), 'No messages for this worker');
+      assert.ok(!r.lines.some(l => l.startsWith('DETECTED:')), 'No messages for this worker');
 
       const state = supervisor.readCursor(dir, 'issue-5-fix');
       // カーソルは全コメントの最大 created_at まで進む（非マッチも含む）
@@ -2566,7 +2568,269 @@ describe('Stale report detection（居座り検知）', () => {
       r.runOnce();
 
       assert.ok(!r.lines.some(l => l.startsWith('STALE_REPORT_DETECTED')));
+      assert.ok(!notifyCalls.some(c => c.body.includes('既に報告を投稿済み')));
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 停止したワーカーの検知（Issue #411）
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('Stopped worker detection（停止ワーカー検知）', () => {
+  const START_TIME = '2026-07-25T00:00:00.000Z';
+
+  function reportComment({ createdAt = '2026-07-25T00:00:15.000Z' } = {}) {
+    return {
+      id: 801,
+      created_at: createdAt,
+      body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-5-fix"} -->\n作業が完了しました。',
+    };
+  }
+
+  beforeEach(() => resetAllMocks());
+
+  test('停止ワーカー検知→通知: 報告済みの停止ワーカーを検知して通知する（報告状況: 報告済み）', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
+    supervisor._setIsWorkerAlive(() => false);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('STOP_DETECTED:issue-5-fix:456')),
+        `STOP_DETECTED が出力されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1);
+      assert.equal(notifyCalls[0].issue, '5');
+      assert.ok(notifyCalls[0].body.includes('報告状況: 報告済み'),
+        `通知本文に報告状況（報告済み）が含まれること: ${notifyCalls[0].body}`);
+
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state.stoppedNotifiedPid, 456);
+      assert.equal(state.stoppedNotifiedStartTime, START_TIME);
+      assert.ok(state.stoppedNotifiedAt);
+    });
+  });
+
+  test('停止ワーカー検知→通知: 未報告の停止ワーカーを検知して通知する（報告状況: 未投稿）', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => false);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('STOP_DETECTED:issue-5-fix:456')),
+        `STOP_DETECTED が出力されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1);
+      assert.equal(notifyCalls[0].issue, '5');
+      assert.ok(notifyCalls[0].body.includes('報告状況: 未投稿'),
+        `通知本文に報告状況（未投稿）が含まれること: ${notifyCalls[0].body}`);
+
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state.stoppedNotifiedPid, 456);
+      assert.equal(state.stoppedNotifiedStartTime, START_TIME);
+      assert.ok(state.stoppedNotifiedAt);
+    });
+  });
+
+  test('重複通知防止: 同一プロセス（同一PID+同一起動時刻）で2回目のrunOnceでは通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
+    supervisor._setIsWorkerAlive(() => false);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+        cursors: {
+          'issue-5-fix': {
+            since: null,
+            seenIds: [],
+            deliveredIds: [],
+            pendingDeliveries: {},
+            stoppedNotifiedPid: 456,
+            stoppedNotifiedStartTime: START_TIME,
+            stoppedNotifiedAt: '2026-07-25T00:10:00.000Z',
+          },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('STOP_DETECTED')),
+        `再通知されないこと: ${r.lines.join('\n')}`);
       assert.equal(notifyCalls.length, 0);
+    });
+  });
+
+  test('PID再利用: 同一PIDでも起動時刻が異なれば別プロセスとして再通知する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => false);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    const NEW_START_TIME = '2026-07-26T00:00:00.000Z';
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: NEW_START_TIME, agentId: 'agy', issue: 5 },
+        },
+        cursors: {
+          'issue-5-fix': {
+            since: null,
+            seenIds: [],
+            deliveredIds: [],
+            pendingDeliveries: {},
+            stoppedNotifiedPid: 456,
+            stoppedNotifiedStartTime: START_TIME,
+            stoppedNotifiedAt: '2026-07-25T00:10:00.000Z',
+          },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('STOP_DETECTED:issue-5-fix:456')),
+        `startTimeが変われば別プロセスとして再通知されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1);
+
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state.stoppedNotifiedStartTime, NEW_START_TIME, '通知済みキーが新プロセスの起動時刻に更新されること');
+    });
+  });
+
+  test('ワーカー生存中（_isWorkerAlive=true）は停止通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => true);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(!r.lines.some(l => l.startsWith('STOP_DETECTED')));
+      assert.equal(notifyCalls.length, 0);
+    });
+  });
+
+  test('起動時刻が無いエントリでも entry.pid があれば停止通知する（報告状況: 未投稿）', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => false);
+
+    const notifyCalls = [];
+    supervisor._setNotifyOrchestrator((opts) => {
+      notifyCalls.push(opts);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: null, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+
+      assert.ok(r.lines.some(l => l.startsWith('STOP_DETECTED:issue-5-fix:456')),
+        `startTimeが無くてもSTOP_DETECTEDが出力されること: ${r.lines.join('\n')}`);
+      assert.equal(notifyCalls.length, 1);
+      assert.ok(notifyCalls[0].body.includes('報告状況: 未投稿'));
+
+      const state = supervisor.readCursor(dir, 'issue-5-fix');
+      assert.equal(state.stoppedNotifiedPid, 456);
+      assert.equal(state.stoppedNotifiedStartTime, null);
+    });
+  });
+
+  test('停止検知時に worktree や workers.json が変更・削除されないこと', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    supervisor._setIsWorkerAlive(() => false);
+
+    supervisor._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: START_TIME, agentId: 'agy', issue: 5 },
+        },
+      });
+
+      const worktreePath = path.join(dir, '.gh-maestro', 'worktrees', 'issue-5-fix');
+      const workersJsonPath = path.join(dir, '.gh-maestro', 'workers.json');
+      assert.ok(fs.existsSync(worktreePath));
+      assert.ok(fs.existsSync(workersJsonPath));
+
+      const r = runMain(['--workspace', dir]);
+      r.runOnce();
+
+      assert.ok(fs.existsSync(worktreePath), 'worktreeが削除されていないこと');
+      assert.ok(fs.existsSync(workersJsonPath), 'workers.jsonが削除されていないこと');
+      const workers = JSON.parse(fs.readFileSync(workersJsonPath, 'utf8'));
+      assert.ok(workers['issue-5-fix'], 'workers.json から除去されていないこと');
     });
   });
 });
@@ -2712,7 +2976,7 @@ describe('Duplicate delivery prevention', () => {
       r.runOnce();
 
       // seenIds にあるので検出自体されない
-      assert.ok(!r.lines.some(l => l.includes('DETECTED')));
+      assert.ok(!r.lines.some(l => l.startsWith('DETECTED:')));
     });
   });
 });
@@ -2744,6 +3008,28 @@ describe('Cursor type safety', () => {
       const state = supervisor.readCursor(dir, 'issue-1-bad-ids');
       assert.deepEqual(state.seenIds, []);
       assert.deepEqual(state.deliveredIds, []);
+    });
+  });
+
+  test('stoppedNotifiedPid/StartTime/At の型検証', () => {
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        cursors: {
+          'issue-1-bad-stopped': {
+            since: null,
+            seenIds: [],
+            deliveredIds: [],
+            pendingDeliveries: {},
+            stoppedNotifiedPid: 'not-a-number',
+            stoppedNotifiedStartTime: 12345,
+            stoppedNotifiedAt: {},
+          },
+        },
+      });
+      const state = supervisor.readCursor(dir, 'issue-1-bad-stopped');
+      assert.equal(state.stoppedNotifiedPid, null);
+      assert.equal(state.stoppedNotifiedStartTime, null);
+      assert.equal(state.stoppedNotifiedAt, null);
     });
   });
 });
