@@ -61,7 +61,9 @@ afterEach(() => {
 
 function loadModule() {
   delete require.cache[require.resolve('../scripts/start-review-manager')];
-  return require('../scripts/start-review-manager');
+  const mod = require('../scripts/start-review-manager');
+  mod._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+  return mod;
 }
 
 function freshWorkspace(name) {
@@ -240,7 +242,7 @@ test('startReviewManager launches run-review-manager.js via launchAgentHeadless�
   assert.match(exitHook.args[0], /worker-exit-hook\.js/);
 });
 
-test('startReviewManager: ロックファイルにlaunchAgentHeadlessが返した実pidを書く', () => {
+test('startReviewManager: 起動側はmanager.runningを書かず、起動予約へshimを引き渡す', () => {
   headlessLaunch._setSpawn(fakeSpawn({ pid: 77701 }));
   const mod = loadModule();
   const workspace = freshWorkspace('lock-pid');
@@ -248,10 +250,28 @@ test('startReviewManager: ロックファイルにlaunchAgentHeadlessが返し�
   mod.startReviewManager('8', 'o/r', workspace, '55');
 
   const lockFile = path.join(workspace, '.gh-maestro', 'records', 'pr', '8', 'review', 'manager.running');
-  assert.deepEqual(JSON.parse(fs.readFileSync(lockFile, 'utf8')), {
+  const startingFile = path.join(workspace, '.gh-maestro', 'records', 'pr', '8', 'review', 'manager.starting');
+  assert.equal(fs.existsSync(lockFile), false, '起動側は本体所有のmanager.runningを書かない');
+  const marker = JSON.parse(fs.readFileSync(startingFile, 'utf8'));
+  assert.deepEqual({ pid: marker.pid, startTime: marker.startTime }, {
     pid: 77701,
     startTime: '2026-07-25T00:00:00.000Z',
   });
+  assert.match(marker.token, /^[0-9a-f]{32}$/);
+});
+
+test('startReviewManager: manager.runningが本体書き込み前でも起動予約で二重起動を拒否する', () => {
+  const mod = loadModule();
+  const workspace = freshWorkspace('startup-window');
+  mod._setIsProcessAlive(() => true);
+  mod._setVerifyProcessIdentity(() => ({ match: true }));
+
+  assert.equal(mod.startReviewManager('11', 'o/r', workspace, '55'), 'REVIEW_MANAGER_STARTED');
+  const runningFile = path.join(workspace, '.gh-maestro', 'records', 'pr', '11', 'review', 'manager.running');
+  assert.equal(fs.existsSync(runningFile), false, '本体がまだmanager.runningを書いていない状態');
+
+  assert.equal(mod.startReviewManager('11', 'o/r', workspace, '55'), 'REVIEW_MANAGER_ALREADY_RUNNING');
+  assert.equal(spawnCalls.length, 1, '起動予約がある間は2本目を起動しない');
 });
 
 test('startReviewManager: onExitフックへexecutionIdを渡さない（execution registryのcompleted遷移手段が無く、常にprocess_failedへ誤記録されるのを避けるため）', () => {

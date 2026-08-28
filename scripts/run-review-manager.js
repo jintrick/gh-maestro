@@ -17,6 +17,7 @@ const { isProcessAlive, getProcessStartTime } = require('./process-lifecycle');
 const {
   writeRunningReviewManager,
   removeRunningReviewManagerIfOwned,
+  releaseReviewManagerStartup,
 } = require('./shared/running-review-managers');
 const {
   assertValidPr, reviewArtifactPath,
@@ -1134,6 +1135,16 @@ async function superviseReviewManager({
       startTime: _getProcessStartTime(process.pid) || null,
     };
     writeRunningReviewManager(lockFile, owner);
+    const startupToken = process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN;
+    if (startupToken) {
+      const released = releaseReviewManagerStartup(lockFile, startupToken);
+      if (!released.released && !released.missing) {
+        // manager.runningは既に本体所有者で書けているため、予約の解放失敗で
+        // Review Manager自体を失敗扱いにしない。残った予約は次回起動時に
+        // stale判定される（予約のトークンが一致する場合だけ解放可能）。
+        log(`起動予約の解放に失敗しました: ${released.reason || 'unknown reason'}`);
+      }
+    }
   } catch (e) {
     return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir: null, reason: `初期化失敗: ${e.message}` };
   }

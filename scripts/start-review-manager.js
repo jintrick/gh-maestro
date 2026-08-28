@@ -17,13 +17,20 @@ function _verifyProcessIdentity(pid, identity, opts) {
   const fn = _injectedVerifyProcessIdentity ?? require('./process-lifecycle').verifyProcessIdentity;
   return fn(pid, identity, opts);
 }
+let _injectedGetProcessStartTime = null;
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime ?? require('./process-lifecycle').getProcessStartTime;
+  return fn(pid);
+}
 const { launchAgentHeadless } = require('./shared/headless-launch');
 const { assertValidPr } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags } = require('./shared/workspace');
 const {
   inspectRunningReviewManager,
-  writeRunningReviewManager,
+  acquireReviewManagerStartup,
+  transferReviewManagerStartup,
+  releaseReviewManagerStartup,
 } = require('./shared/running-review-managers');
 
 const USAGE = `start-review-manager.js — PRに対してReview Managerを起動する
@@ -106,8 +113,27 @@ function startReviewManager(pr, repo, workspace, issue) {
   const ghDir = path.join(workspace, '.gh-maestro');
   fs.mkdirSync(ghDir, { recursive: true });
 
-  // req.13: stale 判定付きで lock チェック
-  if (isLockValid(lockFile)) return 'REVIEW_MANAGER_ALREADY_RUNNING';
+  // manager.runningはReview Manager本体だけが書く。起動側がshimのPIDを
+  // manager.runningへ書くと、本体終了時の所有者判定と競合して残留するため、
+  // 起動側は隣接するmanager.startingだけを原子的に予約する。
+  // manager.runningが本体書き込み前の窓でも、予約を持つ起動だけが先へ進める。
+  const startup = acquireReviewManagerStartup(lockFile, {
+    pid: process.pid,
+    startTime: _getProcessStartTime(process.pid) || null,
+    isProcessAliveFn: _isProcessAlive,
+    verifyProcessIdentityFn: _verifyProcessIdentity,
+  });
+  if (!startup.acquired) {
+    if (startup.error) throw startup.error;
+    return 'REVIEW_MANAGER_ALREADY_RUNNING';
+  }
+
+  try {
+    // req.13: stale 判定付きで lock チェック
+    if (isLockValid(lockFile)) {
+      releaseReviewManagerStartup(lockFile, startup.token);
+      return 'REVIEW_MANAGER_ALREADY_RUNNING';
+    }
 
   // 通常ワーカーと同じ execution registry（.gh-maestro/executions.json）には乗せない。
   // registryの'completed'はmarkCommentResult（msg-send.js --execution-id経由の投稿成功）
@@ -129,18 +155,33 @@ function startReviewManager(pr, repo, workspace, issue) {
     argv: [process.execPath, path.join(__dirname, 'run-review-manager.js'), pr, repo, workspace, String(issue)],
     cwd: workspace,
     logPath,
-    env: { GH_MAESTRO_WORKER: workerName, GH_MAESTRO_WORKSPACE: workspace },
+    env: {
+      GH_MAESTRO_WORKER: workerName,
+      GH_MAESTRO_WORKSPACE: workspace,
+      GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN: startup.token,
+    },
     onExit: {
       command: process.execPath,
       args: [path.join(__dirname, 'worker-exit-hook.js'), workspace, ''],
     },
   });
 
-  writeRunningReviewManager(lockFile, {
+  // manager.runningはここでは書かない。本体が書き込んだ後に起動予約を
+  // 解放できるよう、shimのPIDだけをmanager.startingへ引き渡す。
+  const transferred = transferReviewManagerStartup(lockFile, startup.token, {
     pid: launched.pid,
     startTime: launched.startTime,
   });
+  // 本体が先にmanager.runningを書いて予約を解放した場合はmissingになる。
+  // それは正常な並行実行なので、二重起動扱いにはしない。
+  if (!transferred.transferred && !transferred.missing) {
+    throw new Error(transferred.reason || 'Review Manager起動予約の引き渡しに失敗しました');
+  }
   return 'REVIEW_MANAGER_STARTED';
+  } catch (e) {
+    releaseReviewManagerStartup(lockFile, startup.token);
+    throw e;
+  }
 }
 
 module.exports = {
@@ -148,6 +189,7 @@ module.exports = {
   isLockValid,
   _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
   _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
 };
 
 if (require.main === module) {

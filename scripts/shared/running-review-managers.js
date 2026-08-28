@@ -13,9 +13,12 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { atomicWriteJson } = require('./atomic-write');
 const { normalizePid } = require('./worker-entry');
 const { reviewArtifactPath } = require('./review-manager-paths');
+
+const STARTING_FILE_NAME = 'manager.starting';
 
 let _injectedIsProcessAlive = null;
 let _injectedVerifyProcessIdentity = null;
@@ -38,6 +41,176 @@ function _getProcessStartTime(pid) {
 
 function _startTimesMatch(a, b) {
   return require('../process-lifecycle').startTimesMatch(a, b);
+}
+
+/**
+ * Review Managerの起動中だけ使う予約ファイルのパスを返す。
+ *
+ * manager.runningはReview Manager本体だけが所有するため、detachしたshimを
+ * 起動側が記録することはできない。起動側と本体がmanager.runningへ所有権を
+ * 引き渡すまでの短い空白は、隣接する専用予約ファイルで排他する。
+ *
+ * @param {string} runningPath manager.runningのパス
+ * @returns {string}
+ */
+function reviewManagerStartingPath(runningPath) {
+  return path.join(path.dirname(runningPath), STARTING_FILE_NAME);
+}
+
+function createStartupToken() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+function normalizeStartupMarker({ pid, startTime, token }) {
+  const normalizedPid = normalizePid(pid);
+  if (normalizedPid === null) throw new Error('Review Manager起動予約のPIDが不正です');
+  if (startTime != null && (typeof startTime !== 'string' || startTime.trim() === '')) {
+    throw new Error('Review Manager起動予約の起動時刻が不正です');
+  }
+  if (typeof token !== 'string' || token === '') {
+    throw new Error('Review Manager起動予約のトークンが不正です');
+  }
+  return { pid: normalizedPid, startTime: startTime || null, token };
+}
+
+function writeStartupMarkerExclusive(startingPath, marker) {
+  fs.mkdirSync(path.dirname(startingPath), { recursive: true });
+  fs.writeFileSync(startingPath, JSON.stringify(marker), { encoding: 'utf8', flag: 'wx' });
+}
+
+/**
+ * Review Managerの起動予約を原子的に取得する。
+ *
+ * 既存manager.runningがまだ無い状態でも、manager.startingのwx作成に成功した
+ * 起動だけが先へ進む。既存予約の保持者が生存・同一性一致なら呼び出し元は
+ * ALREADY_RUNNINGへ戻り、同一性を確認できない場合はfail-closedで例外にする。
+ * stale予約は内容比較付きで回収してから一度だけ再取得を試みる。
+ *
+ * @param {string} runningPath manager.runningのパス
+ * @param {object} [opts]
+ * @param {number|string} [opts.pid] 予約を作るプロセスのPID
+ * @param {string|null} [opts.startTime] 予約を作るプロセスの起動時刻
+ * @param {string} [opts.token] 本体へ引き渡すトークン
+ * @param {(pid:number)=>boolean} [opts.isProcessAliveFn]
+ * @param {(pid:number,meta:object,opts?:object)=>object} [opts.verifyProcessIdentityFn]
+ * @returns {{acquired:boolean,active?:boolean,error?:Error,path:string,token?:string}}
+ */
+function acquireReviewManagerStartup(runningPath, opts = {}) {
+  const startingPath = reviewManagerStartingPath(runningPath);
+  const marker = normalizeStartupMarker({
+    pid: opts.pid == null ? process.pid : opts.pid,
+    startTime: opts.startTime,
+    token: opts.token || createStartupToken(),
+  });
+
+  try {
+    writeStartupMarkerExclusive(startingPath, marker);
+    return { acquired: true, path: startingPath, token: marker.token };
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+  }
+
+  const existing = inspectRunningReviewManager(startingPath, {
+    onError: 'skip',
+    cleanupStale: true,
+    isProcessAliveFn: opts.isProcessAliveFn,
+    verifyProcessIdentityFn: opts.verifyProcessIdentityFn,
+  });
+  if (existing.status === 'live' || existing.status === 'legacy-live') {
+    return { acquired: false, active: true, path: startingPath };
+  }
+  if (existing.status === 'error') {
+    return { acquired: false, error: existing.error, path: startingPath };
+  }
+
+  // stale回収後に別の起動が先に予約を取り直していた場合は、その起動を優先する。
+  try {
+    writeStartupMarkerExclusive(startingPath, marker);
+    return { acquired: true, path: startingPath, token: marker.token };
+  } catch (e) {
+    if (e.code === 'EEXIST') return { acquired: false, active: true, path: startingPath };
+    throw e;
+  }
+}
+
+/**
+ * 起動予約の所有者をdetach shimへ引き渡す。
+ * manager.runningは変更せず、予約ファイルだけを更新する。
+ *
+ * @param {string} runningPath manager.runningのパス
+ * @param {string} token 起動側が作成した予約トークン
+ * @param {{pid:number|string,startTime?:string|null}} owner shimのPID・起動時刻
+ * @returns {{transferred:boolean,missing?:boolean,reason?:string}}
+ */
+function transferReviewManagerStartup(runningPath, token, owner) {
+  const startingPath = reviewManagerStartingPath(runningPath);
+  let raw;
+  try {
+    raw = fs.readFileSync(startingPath, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return { transferred: false, missing: true };
+    return { transferred: false, reason: `起動予約の読み取りに失敗しました: ${e.message}` };
+  }
+
+  let marker;
+  try {
+    marker = JSON.parse(raw);
+  } catch (e) {
+    return { transferred: false, reason: `起動予約の解析に失敗しました: ${e.message}` };
+  }
+  if (!marker || marker.token !== token) {
+    return { transferred: false, reason: '起動予約の所有者が変わりました' };
+  }
+
+  let next;
+  try {
+    next = { ...marker, ...normalizeStartupMarker({ ...owner, token }) };
+  } catch (e) {
+    return { transferred: false, reason: e.message };
+  }
+
+  try {
+    atomicWriteJson(startingPath, next);
+    return { transferred: true };
+  } catch (e) {
+    return { transferred: false, reason: `起動予約の引き渡しに失敗しました: ${e.message}` };
+  }
+}
+
+/**
+ * 本体がmanager.runningを書いた後、対応する起動予約だけを解放する。
+ *
+ * @param {string} runningPath manager.runningのパス
+ * @param {string} token 起動側が作成した予約トークン
+ * @returns {{released:boolean,missing?:boolean,changed?:boolean,reason?:string}}
+ */
+function releaseReviewManagerStartup(runningPath, token) {
+  const startingPath = reviewManagerStartingPath(runningPath);
+  let raw;
+  try {
+    raw = fs.readFileSync(startingPath, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return { released: true, missing: true };
+    return { released: false, reason: `起動予約の読み取りに失敗しました: ${e.message}` };
+  }
+
+  let marker;
+  try {
+    marker = JSON.parse(raw);
+  } catch (e) {
+    return { released: false, reason: `起動予約の解析に失敗しました: ${e.message}` };
+  }
+  if (!marker || marker.token !== token) {
+    return { released: false, reason: '起動予約の所有者が変わりました' };
+  }
+
+  try {
+    const cleanup = removeIfUnchanged(startingPath, raw);
+    if (cleanup.changed) return { released: false, changed: true, reason: 'record changed' };
+    return { released: true, missing: cleanup.disappeared };
+  } catch (e) {
+    return { released: false, reason: e.message };
+  }
 }
 
 /**
@@ -385,6 +558,10 @@ module.exports = {
   listRunningReviewManagers,
   writeRunningReviewManager,
   removeRunningReviewManagerIfOwned,
+  reviewManagerStartingPath,
+  acquireReviewManagerStartup,
+  transferReviewManagerStartup,
+  releaseReviewManagerStartup,
   _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
   _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
   _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
