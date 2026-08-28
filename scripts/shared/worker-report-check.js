@@ -14,18 +14,18 @@ const { parseMarker } = require('../msg-poll');
 /**
  * 与えられたコメント一覧の中に、対象ワーカー自身から orchestrator 宛ての報告
  * （marker の from === workerName かつ to === 'orchestrator'）で、直近の起動時刻
- * （startTime）以降に投稿された最新のコメントを取得する。
+ * （startTime）以降に投稿された最新のコメントを探索し、報告ステータス（3値）と最新コメントを返す。
  *
  * @param {object[]} comments    - gh api の comments 応答（id/created_at/body を含む）
  * @param {string} workerName
  * @param {string|null} startTime  - ワーカープロセスの起動時刻（ISO 8601文字列）
- * @returns {object|null}  最新の報告コメントオブジェクト。該当なしまたは判定不能時は null
+ * @returns {{ status: 'reported', report: object } | { status: 'not-reported', report: null } | { status: 'unknown', report: null }}
  */
-function getLatestReportSinceStart(comments, workerName, startTime) {
-  if (!startTime) return null;
+function getReportStatusSinceStart(comments, workerName, startTime) {
+  if (!startTime) return { status: 'unknown', report: null };
   const startMs = new Date(startTime).getTime();
-  if (!Number.isFinite(startMs)) return null;
-  if (!Array.isArray(comments)) return null;
+  if (!Number.isFinite(startMs)) return { status: 'unknown', report: null };
+  if (!Array.isArray(comments)) return { status: 'unknown', report: null };
 
   let latest = null;
   let latestMs = -1;
@@ -46,30 +46,44 @@ function getLatestReportSinceStart(comments, workerName, startTime) {
       }
     }
   }
-  return latest;
+  if (latest) {
+    return { status: 'reported', report: latest };
+  }
+  return { status: 'not-reported', report: null };
 }
 
 /**
  * 与えられたコメント一覧の中に、対象ワーカー自身から orchestrator 宛ての報告
  * （marker の from === workerName かつ to === 'orchestrator'）で、直近の起動時刻
- * （startTime）以降に投稿されたものが含まれるか判定する。
+ * （startTime）以降に投稿された最新のコメントを取得する（raw コメントまたは null）。
  *
- * to を確認しないと、他ワーカー宛てに転送・言及されただけのコメントや、たまたま
- * from が一致する無関係なマーカー付きコメントまで「orchestratorへの報告」として
- * 誤認しうる。
+ * 判定不能（startTime欠落・不正、comments非配列）または未報告時は null を返す。
+ * 判定不能と未投稿を区別して判定したい場合は getReportStatusSinceStart を使用すること。
  *
  * @param {object[]} comments    - gh api の comments 応答（id/created_at/body を含む）
  * @param {string} workerName
  * @param {string|null} startTime  - ワーカープロセスの起動時刻（ISO 8601文字列）
- * @returns {boolean|null}  true=報告済み, false=未報告, null=startTimeが無い/不正で判定不能
+ * @returns {object|null}  最新の報告コメントオブジェクト。該当なしまたは判定不能時は null
+ */
+function getLatestReportSinceStart(comments, workerName, startTime) {
+  return getReportStatusSinceStart(comments, workerName, startTime).report;
+}
+
+/**
+ * 与えられたコメント一覧の中に、対象ワーカー自身から orchestrator 宛ての報告
+ * （marker の from === workerName かつ to === 'orchestrator'）で、直近の起動時刻
+ * （startTime）以降に投稿されたものが含まれるか判定する真偽値述語。
+ *
+ * 報告済みの場合のみ true を返し、未投稿および判定不能時は false を返す。
+ * 判定不能と未投稿を区別して判定したい場合は getReportStatusSinceStart を使用すること。
+ *
+ * @param {object[]} comments    - gh api の comments 応答（id/created_at/body を含む）
+ * @param {string} workerName
+ * @param {string|null} startTime  - ワーカープロセスの起動時刻（ISO 8601文字列）
+ * @returns {boolean}  true=報告済み, false=未報告または判定不能
  */
 function hasReportedSinceStart(comments, workerName, startTime) {
-  if (!startTime) return null;
-  const startMs = new Date(startTime).getTime();
-  if (!Number.isFinite(startMs)) return null;
-  if (!Array.isArray(comments)) return null;
-
-  return getLatestReportSinceStart(comments, workerName, startTime) !== null;
+  return getReportStatusSinceStart(comments, workerName, startTime).status === 'reported';
 }
 
 /**
@@ -101,6 +115,7 @@ function formatElapsedTime(from, to = Date.now()) {
 }
 
 module.exports = {
+  getReportStatusSinceStart,
   hasReportedSinceStart,
   getLatestReportSinceStart,
   formatElapsedTime,
