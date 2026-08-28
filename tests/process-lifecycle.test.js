@@ -1691,9 +1691,9 @@ test('sweepRegistry: 生存中の旧PID-only manager.running は例外にせず�
   }
 });
 
-test('registerProcess: meta.pid と追加メタデータを指定して登録・取得・解除できる', () => {
+test('registerProcess: meta.pid と追加メタデータを指定して登録・取得・解除できる（process.pidと異なる子PIDを直接検証）', () => {
   const plc = loadModule({ execSync: mockWmiSuccess() });
-  const customPid = process.pid;
+  const customPid = process.pid + 50000;
   const entry = plc.registerProcess(workspace, {
     pid: customPid,
     script: 'review-job',
@@ -1711,13 +1711,38 @@ test('registerProcess: meta.pid と追加メタデータを指定して登録・
   assert.equal(entry.jobId, 'job-1');
   assert.equal(entry.aspect, 'correctness');
 
-  const instances = plc.findRunningInstances(workspace, { script: 'review-job', allowSelf: true });
+  // 保存先ファイル名と保存された pid の値を直接検証
+  const customPidFile = path.join(plc.pidsDir(workspace), `${customPid}.json`);
+  const selfPidFile = path.join(plc.pidsDir(workspace), `${process.pid}.json`);
+  assert.ok(fs.existsSync(customPidFile), 'meta.pid のファイル名で保存される');
+  assert.ok(!fs.existsSync(selfPidFile), 'process.pid のファイル名では保存されない');
+
+  const fileData = JSON.parse(fs.readFileSync(customPidFile, 'utf8'));
+  assert.equal(fileData.pid, customPid);
+  assert.equal(fileData.script, 'review-job');
+  assert.equal(fileData.workerName, 'review-job-pr-415-job-1');
+  assert.equal(fileData.pr, 415);
+  assert.equal(fileData.jobId, 'job-1');
+
+  // findRunningInstances で子PID・メタデータが照合できること（allowSelfなしで取得可能）
+  const instances = plc.findRunningInstances(workspace, {
+    script: 'review-job',
+    isProcessAliveFn: (pid) => pid === customPid,
+    verifyProcessIdentityFn: () => ({ match: true }),
+  });
   assert.equal(instances.length, 1);
+  assert.equal(instances[0].pid, customPid);
   assert.equal(instances[0].jobId, 'job-1');
   assert.equal(instances[0].pr, 415);
 
+  // 解除
   plc.unregisterProcess(workspace, customPid);
-  const instancesAfter = plc.findRunningInstances(workspace, { script: 'review-job', allowSelf: true });
+  assert.ok(!fs.existsSync(customPidFile), 'unregisterProcess で customPid のファイルが削除される');
+  const instancesAfter = plc.findRunningInstances(workspace, {
+    script: 'review-job',
+    isProcessAliveFn: (pid) => pid === customPid,
+    verifyProcessIdentityFn: () => ({ match: true }),
+  });
   assert.equal(instancesAfter.length, 0);
 });
 

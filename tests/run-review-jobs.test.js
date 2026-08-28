@@ -1693,3 +1693,106 @@ test('launchJobWorker: ジョブ異常終了時（非0終了・エラー）で�
     fs.rmSync(skillsDir, { recursive: true, force: true });
   }
 });
+
+test('launchJobWorker: registerProcess 失敗時もジョブ実行を継続し、未登録時は unregisterProcess を呼ばない', async () => {
+  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjb-reg-err-wt-'));
+  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjb-reg-err-skills-'));
+  writeReviewFixtures(skillsDir, ['correctness/logic-invariants']);
+
+  const unregistered = [];
+  const fakeChild = new EventEmitter();
+  fakeChild.pid = 7777;
+  fakeChild.kill = () => {};
+
+  _setSpawn((cmd, args, opts) => {
+    setImmediate(() => {
+      const promptFile = fs.readdirSync(os.tmpdir())
+        .filter(name => name.startsWith('review-job-job-reg-err-review-') && name.endsWith('.md'))
+        .map(name => path.join(os.tmpdir(), name))
+        .sort()
+        .pop();
+      if (promptFile && fs.existsSync(promptFile)) {
+        const prompt = fs.readFileSync(promptFile, 'utf8');
+        const resFile = resultFileFromPrompt(prompt);
+        fs.writeFileSync(resFile, JSON.stringify([]), 'utf8');
+      }
+      fakeChild.emit('close', 0);
+    });
+    return fakeChild;
+  });
+
+  try {
+    const job = { id: 'job-reg-err', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' };
+    const manifest = { pr: 415, repo: 'owner/repo', headRefOid: 'abc' };
+    const agentConfig = codexReviewAgentConfig();
+
+    const result = await launchJobWorker(
+      job,
+      manifest,
+      agentConfig,
+      worktreeDir,
+      worktreeDir,
+      10000,
+      null,
+      {
+        reviewSkillsDir: skillsDir,
+        getProcessStartTimeFn: () => '2026-08-28T04:00:00.000Z',
+        registerProcessFn: () => { throw new Error('disk full in registry'); },
+        unregisterProcessFn: (ws, pid) => unregistered.push({ ws, pid }),
+      }
+    );
+
+    // 登録失敗でもジョブ自体は成功する（観測障害でレビュー本体を落とさない）
+    assert.equal(result.status, 'success');
+    // 登録が失敗しているため、unregisterProcess は呼ばれない
+    assert.equal(unregistered.length, 0, '未登録時は unregisterProcess を呼ばない');
+  } finally {
+    _setSpawn(null);
+    fs.rmSync(worktreeDir, { recursive: true, force: true });
+    fs.rmSync(skillsDir, { recursive: true, force: true });
+  }
+});
+
+test('runJobsFromManifest: PID registry 構成検証（pidsDir）失敗時にジョブを起動せず fail-fast で終了する', async () => {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-pids-err-'));
+  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-pids-err-skills-'));
+  writeReviewFixtures(skillsDir, ['correctness/logic-invariants']);
+  try {
+    const manifestPath = path.join(testDir, 'manifest.json');
+    const resultsPath = path.join(testDir, 'results.json');
+    const validManifest = {
+      pr: 415, repo: 'o/r', headRefOid: 'abc',
+      coverage_ledger: {
+        leaves: ALL_LEAF_IDS.map(id => ({
+          id,
+          trunk: Object.entries(TRUNK_TO_LEAVES).find(([, lvs]) => lvs.includes(id))[0],
+          decision: id === 'correctness/logic-invariants' ? 'adopted' : 'excluded',
+          rationale: id === 'correctness/logic-invariants' ? null : 'excluded in test',
+        })),
+      },
+      jobs: [{ id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' }],
+    };
+    fs.writeFileSync(manifestPath, JSON.stringify(validManifest), 'utf8');
+
+    // 無効な workspace（例: 不正な相対パスやホームディレクトリ直下等）または managedRoot
+    // を options.mainWorkspace に渡すことで pidsDir の assertValidWorkspace を失敗させる
+    const invalidWorkspace = managedRoot();
+    const result = await runJobsFromManifest(
+      manifestPath,
+      resultsPath,
+      testDir,
+      10000,
+      10000,
+      415,
+      'o/r',
+      null,
+      { mainWorkspace: invalidWorkspace, reviewSkillsDir: skillsDir }
+    );
+
+    assert.equal(result.ok, false);
+    assert.match(result.summary.error, /PID registry workspace\/runtime validation failed/);
+  } finally {
+    fs.rmSync(testDir, { recursive: true, force: true });
+    fs.rmSync(skillsDir, { recursive: true, force: true });
+  }
+});

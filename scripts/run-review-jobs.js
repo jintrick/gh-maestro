@@ -34,6 +34,7 @@ const {
 } = require('./shared/review-aspects');
 const { managedRoot } = require('./shared/storage-layout');
 const {
+  pidsDir,
   registerProcess,
   unregisterProcess,
   getProcessStartTime,
@@ -723,21 +724,29 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
 
   const onSpawn = (child) => {
     if (child && child.pid) {
-      registeredPid = child.pid;
-      const startTimeFn = (options && options.getProcessStartTimeFn) || _injectedGetProcessStartTime || getProcessStartTime;
-      const startTime = startTimeFn(child.pid) || new Date().toISOString();
-      const registerFn = (options && options.registerProcessFn) || _injectedRegisterProcess || registerProcess;
-      registerFn(targetWorkspace, {
-        pid: child.pid,
-        script: 'review-job',
-        workerName: `review-job-pr-${manifest.pr}-${job.id}`,
-        pr: Number(manifest.pr),
-        jobId: job.id,
-        aspect: job.aspect,
-        leafIds: job.leaf_ids,
-        agentId: agentConfig.id,
-        startTime,
-      });
+      try {
+        const startTimeFn = (options && options.getProcessStartTimeFn) || _injectedGetProcessStartTime || getProcessStartTime;
+        const startTime = startTimeFn(child.pid) || new Date().toISOString();
+        const registerFn = (options && options.registerProcessFn) || _injectedRegisterProcess || registerProcess;
+        registerFn(targetWorkspace, {
+          pid: child.pid,
+          script: 'review-job',
+          workerName: `review-job-pr-${manifest.pr}-${job.id}`,
+          pr: Number(manifest.pr),
+          jobId: job.id,
+          aspect: job.aspect,
+          leafIds: job.leaf_ids,
+          agentId: agentConfig.id,
+          startTime,
+        });
+        registeredPid = child.pid;
+      } catch (err) {
+        // 観測は付帯機能であり、その失敗でレビュー本体を落とすことはしない。
+        // ただし失敗した事実をジョブログ（stderrFd）および stderr に明示して記録に残す。
+        const msg = `[review-job] PID registry 登録に失敗しました (job: ${job.id}, pid: ${child.pid}): ${err.message}\n`;
+        try { if (stderrFd != null) fs.writeSync(stderrFd, msg); } catch {}
+        try { process.stderr.write(msg); } catch {}
+      }
     }
   };
 
@@ -779,11 +788,15 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
       findings,
     };
   } finally {
-    if (registeredPid) {
+    if (registeredPid != null) {
       try {
         const unregisterFn = (options && options.unregisterProcessFn) || _injectedUnregisterProcess || unregisterProcess;
         unregisterFn(targetWorkspace, registeredPid);
-      } catch {}
+      } catch (err) {
+        const msg = `[review-job] PID registry 解除に失敗しました (job: ${job.id}, pid: ${registeredPid}): ${err.message}\n`;
+        try { if (stderrFd != null) fs.writeSync(stderrFd, msg); } catch {}
+        try { process.stderr.write(msg); } catch {}
+      }
     }
     if (timeoutHandle) clearTimeout(timeoutHandle);
     for (const promptFile of promptFiles) {
@@ -1359,6 +1372,21 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
 
   if (!agentConfig) {
     return { ok: false, summary: { error: `agent config resolve failed for "${agentId}"` } };
+  }
+
+  // 3.5 PID registry 構成の事前検証（fail-fast）
+  // registerProcess が throw する現実的な経路（assertValidWorkspace / assertDisjointRoots /
+  // GH_MAESTRO_RUNTIME_DIR 設定不正）は全ジョブ一斉に該当するため、ジョブ起動前に1回検証する。
+  const targetWorkspace = (options && options.mainWorkspace)
+    || (ghDir ? path.dirname(path.resolve(ghDir)) : null)
+    || workspace;
+  try {
+    pidsDir(targetWorkspace);
+  } catch (e) {
+    return {
+      ok: false,
+      summary: { error: `PID registry workspace/runtime validation failed: ${e.message}` },
+    };
   }
 
   const reviewWtDir = workspace; // ジョブワーカーは呼び出し元（RM）のworktreeを共有
