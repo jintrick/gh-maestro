@@ -35,8 +35,9 @@ test('coder-workflow.md: push-and-declare.js のコード実行例が存在す�
   assert.ok(fences.length > 0, 'コード実行例が見つからない');
   const finalizeStep = fences.find(f => f.includes('push-and-declare.js'));
   assert.ok(finalizeStep, 'push-and-declare.js のコード実行例が見つからない');
-  // 実行例は収束型単一入口の呼び出し（--issue/--fail/--pass を渡す）
-  assert.match(finalizeStep, /node "{{SCRIPTS_PATH}}\/push-and-declare\.js" --issue \$ISSUE --fail <失敗件数> --pass <成功件数> --workspace \$WORKSPACE/);
+  // 実行例は収束型単一入口の呼び出し。テスト件数は成果物から自動取得する。
+  assert.match(finalizeStep, /node "{{SCRIPTS_PATH}}\/push-and-declare\.js" --issue \$ISSUE --workspace \$WORKSPACE/);
+  assert.doesNotMatch(finalizeStep, /--(?:fail|pass)\b/);
 });
 
 test('coder-workflow.md: コード実行例のフェンス内に素の git commit / git push / gh pr create が無い', () => {

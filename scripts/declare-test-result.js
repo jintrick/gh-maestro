@@ -1,50 +1,52 @@
 #!/usr/bin/env node
 // declare-test-result.js — PR に対するテスト実行結果（事実）を申告・更新するスクリプト
 //
-// コーダーが手元で実行したテスト結果（対象コミットSHA・pass数・fail数）を
-// PR コメント（機械可読マーカー付き）として投稿または更新する。
+// fail/pass はコマンドラインから受け取らず、同じ worktree で test runner が runtime root
+// に生成した成果物だけから取得する。対象コミットも手入力せず、実行時のHEADを使う。
+// 成果物が無い・壊れている場合は unknown の申告へ縮退し、push/PR/申告そのものは止めない。
 //
 // Usage:
-//   node declare-test-result.js --pr <PR> --commit <sha> --fail <N> [--pass <N>] [--repo <owner/repo>] [--workspace <path>]
-//
-// workspace resolution order:
-//   --workspace arg > GH_MAESTRO_WORKSPACE env > CWD upward search
+//   node declare-test-result.js --pr <PR> [--repo <owner/repo>] [--workspace <path>]
 
 'use strict';
 
 const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
-const { listComments } = require('./shared/gh-comments');
-const { TEST_RESULT_MARKER } = require('./shared/test-declaration');
+const { resolveGitHead } = require('./shared/git-head');
+const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+const {
+  TEST_CONTENT_HASH_RE,
+  calculateCommitContentHash,
+  readTestResultArtifact,
+} = require('./shared/test-result');
+const {
+  TEST_RESULT_MARKER,
+  hasTestDeclarationMarker,
+} = require('./shared/test-declaration');
 
 const USAGE = `declare-test-result.js — PR に対するテスト実行結果（事実）を申告・更新する
 
 Usage:
-  node declare-test-result.js --pr <PR> --commit <sha> --fail <N> [--pass <N>] [--repo <owner/repo>] [--workspace <path>]
+  node declare-test-result.js --pr <PR> [--repo <owner/repo>] [--workspace <path>]
 
 Options:
   --pr <PR>             対象 PR 番号（必須、正の整数）
-  --commit <sha>        テストを実行したコミットSHA（必須、7〜40文字の16進数）
-  --fail <N>            失敗テスト数（必須、0以上の整数）
-  --pass <N>            成功テスト数（任意、0以上の整数）
-  --repo <owner/repo>   リポジトリ指定（省略可、git remoteから自動検出）
-  --workspace <path>    ワークスペースのルートパス（省略時は環境変数またはCWDから上方探索で解決）
+  --repo <owner/repo>   リポジトリ指定（省略可、workspaceからgh repo viewで特定）
+  --workspace <path>    ワークスペースのルートパス（--repo省略時に使用）
 
 動作:
-  1. 対象 PR の全コメントから、テスト結果マーカー（${TEST_RESULT_MARKER}）を持つコメントを検索
-  2. 見つかればそのコメント本文を更新する（最新のテスト結果に上書き）
-  3. 見つからなければ新規コメントを投稿する
+  1. 同じ worktree の runtime root にあるテスト結果成果物を読み取る（値の手入力は不可）
+  2. worktree の現在のHEADを対象コミットとして解決する
+  3. 対象 PR の既存申告コメントを更新、または新規投稿する
+  4. 成果物が欠落・破損している場合も unknown として申告する
 
 Output (stdout):
   投稿または更新されたコメントの URL を1行出力
-  exit 0 = 成功、exit 1 = エラー`;
+  exit 0 = 成功、exit 1 = 引数・HEAD・GitHubアクセス・コメント処理のエラー`;
 
 const SPEC = {
   flags: {
     '--pr': { required: true },
-    '--commit': { required: true },
-    '--fail': { required: true },
-    '--pass': {},
     '--repo': {},
     '--workspace': {},
   },
@@ -52,7 +54,7 @@ const SPEC = {
   positionals: { min: 0, max: 0 },
 };
 
-// ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
+// ── gh / git 呼び出し（テストで注入可能） ────────────────────────────────────
 
 let _ghRepoView = (opts = {}) => {
   return spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
@@ -73,27 +75,55 @@ let _ghUpdateComment = (commentId, repo, body, opts = {}) => {
     '-f', `body=${body}`], { encoding: 'utf8', ...opts });
 };
 
+function isKnownTestResult(testResult) {
+  return testResult
+    && testResult.provenance === 'test-runner'
+    && (testResult.scope === 'full' || testResult.scope === 'partial')
+    && Number.isSafeInteger(testResult.fail)
+    && Number.isSafeInteger(testResult.pass)
+    && typeof testResult.testedContentHash === 'string'
+    && TEST_CONTENT_HASH_RE.test(testResult.testedContentHash);
+}
+
+function unknownTestResult(reason) {
+  return {
+    provenance: 'unknown',
+    scope: 'unknown',
+    reason: typeof reason === 'string' && reason ? reason : 'unavailable',
+  };
+}
+
 // ── コメント本文生成 ────────────────────────────────────────────────────────
 
 /**
- * 申告コメントの本文を組み立てる純粋関数。
- * @param {{ commit: string, failCount: number, passCount?: number }} params
+ * 申告コメントの本文を組み立てる純粋関数。fail/pass は testResult からのみ参照する。
+ * @param {{commit:string, testResult:object}} params
  * @returns {string}
  */
-function buildCommentBody({ commit, failCount, passCount }) {
-  const isGreen = failCount === 0;
-  const statusLabel = isGreen ? 'pass' : 'fail';
-  const counts = [];
-  counts.push(`fail: ${failCount}`);
-  if (passCount !== undefined && passCount !== null) {
-    counts.push(`pass: ${passCount}`);
-  }
-  const countsStr = counts.length > 0 ? ` (${counts.join(', ')})` : '';
+function buildCommentBody({ commit, testResult }) {
+  const known = isKnownTestResult(testResult);
+  const lines = [
+    TEST_RESULT_MARKER,
+    '### 🧪 テスト結果申告',
+    `- **対象コミット**: \`${commit}\``,
+  ];
 
-  return `${TEST_RESULT_MARKER}
-### 🧪 テスト結果申告
-- **対象コミット**: \`${commit}\`
-- **結果**: ${statusLabel}${countsStr}`;
+  if (known) {
+    const statusLabel = testResult.fail === 0 ? 'pass' : 'fail';
+    lines.push(`- **結果**: ${statusLabel} (fail: ${testResult.fail}, pass: ${testResult.pass})`);
+    if (Number.isSafeInteger(testResult.tests)) {
+      lines.push(`- **実行件数**: \`${testResult.tests}\``);
+    }
+    lines.push(`- **実行元**: \`${testResult.provenance}\``);
+    lines.push(`- **実行範囲**: \`${testResult.scope}\``);
+  } else {
+    lines.push('- **結果**: unknown');
+    lines.push('- **実行元**: `unknown`');
+    lines.push('- **実行範囲**: `unknown`');
+    lines.push(`- **実行記録**: unavailable (${testResult && testResult.reason ? testResult.reason : 'unavailable'})`);
+  }
+
+  return lines.join('\n');
 }
 
 // ── コアロジック ──────────────────────────────────────────────────────────
@@ -101,138 +131,177 @@ function buildCommentBody({ commit, failCount, passCount }) {
 /**
  * PR にテスト結果コメントがあれば更新、なければ新規投稿する。
  *
- * @param {{ pr: string, commit: string, fail: number, pass?: number, repo?: string, workspace?: string }} params
- * @param {object} [deps]  テスト用の依存注入
+ * @param {{pr:string, repo?:string, workspace?:string, worktree?:string, headSha?:string}} params
+ * @param {object} [deps] テスト用の依存注入
  * @param {function} [deps.ghRepoViewFn]
  * @param {function} [deps.ghListCommentsFn]
  * @param {function} [deps.ghCreateCommentFn]
  * @param {function} [deps.ghUpdateCommentFn]
- * @returns {{ ok: boolean, url?: string, error?: string, action?: 'created'|'updated' }}
+ * @param {function} [deps.gitHeadFn]
+ * @param {function} [deps.readTestResultFn]
+ * @param {function} [deps.commitContentHashFn]
+ * @returns {{ok:boolean, url?:string, error?:string, action?:'created'|'updated', provenance?:string, scope?:string}}
  */
-function declareTestResult({ pr, commit, fail, pass, repo, workspace }, deps = {}) {
+function declareTestResult(params = {}, deps = {}) {
+  const {
+    pr,
+    repo,
+    workspace,
+    worktree = process.cwd(),
+    headSha,
+  } = params;
   const {
     ghRepoViewFn = _ghRepoView,
     ghListCommentsFn = _ghListComments,
     ghCreateCommentFn = _ghCreateComment,
     ghUpdateCommentFn = _ghUpdateComment,
+    gitHeadFn = resolveGitHead,
+    readTestResultFn = readTestResultArtifact,
+    commitContentHashFn = calculateCommitContentHash,
   } = deps;
 
-  // 1. バリデーション
+  // API利用者が旧形式の数字やSHAを渡しても、それを申告へ流さない。CLIでは parseFlags
+  // が未知フラグとして拒否するが、require経由の呼び出しにも同じ境界を置く。
+  for (const obsolete of ['fail', 'pass', 'commit']) {
+    if (Object.prototype.hasOwnProperty.call(params, obsolete)) {
+      return { ok: false, error: `旧形式の ${obsolete} 指定は受け付けません。テスト成果物と現在のHEADを使用してください` };
+    }
+  }
+
+  // 1. PR番号と対象HEADのバリデーション
   const prNum = parseInt(pr, 10);
   if (isNaN(prNum) || prNum <= 0 || String(prNum) !== String(pr).trim()) {
     return { ok: false, error: `--pr は正の整数で指定してください: ${pr}` };
   }
 
-  const trimmedCommit = (commit || '').trim();
-  if (!/^[0-9a-fA-F]{7,40}$/.test(trimmedCommit)) {
-    return { ok: false, error: `--commit は7〜40文字のコミットSHA（16進数）で指定してください: ${commit}` };
-  }
-
-  const failCount = parseInt(fail, 10);
-  if (isNaN(failCount) || failCount < 0 || String(failCount) !== String(fail).trim()) {
-    return { ok: false, error: `--fail は0以上の整数で指定してください: ${fail}` };
-  }
-
-  let passCount = undefined;
-  if (pass !== undefined && pass !== null && pass !== '') {
-    passCount = parseInt(pass, 10);
-    if (isNaN(passCount) || passCount < 0 || String(passCount) !== String(pass).trim()) {
-      return { ok: false, error: `--pass は0以上の整数で指定してください: ${pass}` };
+  const cwd = typeof worktree === 'string' && worktree.trim() ? worktree : process.cwd();
+  let trimmedHead;
+  if (headSha !== undefined && headSha !== null && String(headSha).trim()) {
+    trimmedHead = String(headSha).trim();
+    if (!/^[0-9a-fA-F]{7,40}$/.test(trimmedHead)) {
+      return { ok: false, error: `対象HEADのSHAが不正です: ${headSha}` };
     }
+  } else {
+    try {
+      trimmedHead = String(gitHeadFn(cwd) || '').trim();
+    } catch (error) {
+      return { ok: false, error: `対象コミットのHEAD解決に失敗しました: ${error.message}` };
+    }
+    if (!/^[0-9a-fA-F]{7,40}$/.test(trimmedHead)) {
+      return { ok: false, error: `対象コミットのHEAD解決結果が不正です: ${trimmedHead || '(empty)'}` };
+    }
+  }
+
+  // 成果物の失敗は外部操作の停止条件にしない。readTestResultArtifact は欠落・破損を
+  // ok=falseで返し、ここでは unknown の本文へ変換する。
+  let artifactRead;
+  try {
+    artifactRead = readTestResultFn(cwd);
+  } catch {
+    artifactRead = { ok: false, reason: 'unreadable' };
+  }
+  let testResult = unknownTestResult(artifactRead && artifactRead.reason);
+  if (artifactRead && artifactRead.ok && isKnownTestResult(artifactRead.result)) {
+    try {
+      const commitContentHash = commitContentHashFn(cwd, trimmedHead);
+      if (commitContentHash === artifactRead.result.testedContentHash) {
+        testResult = artifactRead.result;
+      } else {
+        testResult = unknownTestResult('content-mismatch');
+      }
+    } catch {
+      // コミット内容を検証できない場合も、申告自体は unknown として継続する。
+      testResult = unknownTestResult('content-verification-unavailable');
+    }
+  } else if (artifactRead && artifactRead.ok) {
+    testResult = unknownTestResult('invalid-artifact');
   }
 
   // 2. リポジトリ特定
-  let targetRepo = repo;
+  let targetRepo = typeof repo === 'string' ? repo.trim() : '';
   if (!targetRepo) {
     const ws = resolveWorkspace(workspace);
-    const repoRes = ghRepoViewFn(ws ? { cwd: ws } : {});
-    if (repoRes.status !== 0) {
-      return { ok: false, error: `リポジトリの特定に失敗しました: ${repoRes.stderr || '(no stderr)'}` };
+    if (!ws) {
+      return { ok: false, error: 'ワークスペースを解決できません。--repoを指定するか、.gh-maestro/のあるディレクトリで実行してください。' };
     }
-    targetRepo = (repoRes.stdout || '').trim();
+    const repoRes = ghRepoViewFn({ cwd: ws });
+    if (!repoRes || repoRes.status !== 0) {
+      return { ok: false, error: `リポジトリの特定に失敗しました: ${(repoRes && repoRes.stderr) || '(no stderr)'}` };
+    }
+    targetRepo = String(repoRes.stdout || '').trim();
   }
-  if (!targetRepo) {
-    return { ok: false, error: 'リポジトリ名が空です' };
-  }
+  if (!targetRepo) return { ok: false, error: 'リポジトリ名が空です' };
 
   // 3. コメント一覧取得
   const listRes = ghListCommentsFn(String(prNum), targetRepo);
-  if (listRes.status !== 0) {
-    return { ok: false, error: `PR コメント一覧の取得に失敗しました: ${listRes.stderr || '(no stderr)'}` };
+  if (!listRes || listRes.status !== 0) {
+    return { ok: false, error: `PR コメント一覧の取得に失敗しました: ${(listRes && listRes.stderr) || '(no stderr)'}` };
   }
 
-  let comments = [];
+  let comments;
   try {
-    const raw = JSON.parse(listRes.stdout || '[]');
-    comments = Array.isArray(raw) ? (raw.length > 0 && Array.isArray(raw[0]) ? raw.flat() : raw) : [];
-  } catch (e) {
-    return { ok: false, error: `コメント一覧のJSONパースに失敗しました: ${e.message}` };
+    comments = parseCommentsResponse(listRes.stdout || '[]');
+  } catch (error) {
+    return { ok: false, error: `コメント一覧のJSONパースに失敗しました: ${error.message}` };
   }
+  if (!comments) return { ok: false, error: 'コメント一覧のJSON形式が不正です' };
 
-  const fullBody = buildCommentBody({ commit: trimmedCommit, failCount, passCount });
+  const fullBody = buildCommentBody({ commit: trimmedHead, testResult });
 
   // 4. 既存の申告コメント検索（最新のコメントを対象にするため末尾から検索）
-  const existingComment = Array.isArray(comments)
-    ? [...comments].reverse().find(c => c && typeof c.body === 'string' && c.body.includes(TEST_RESULT_MARKER))
-    : undefined;
+  const existingComment = [...comments].reverse()
+    .find(comment => comment && hasTestDeclarationMarker(comment.body));
 
   if (existingComment) {
-    // PATCH 更新
     const updateRes = ghUpdateCommentFn(existingComment.id, targetRepo, fullBody);
-    if (updateRes.status !== 0) {
-      return { ok: false, error: `申告コメントの更新に失敗しました: ${updateRes.stderr || '(no stderr)'}` };
+    if (!updateRes || updateRes.status !== 0) {
+      return { ok: false, error: `申告コメントの更新に失敗しました: ${(updateRes && updateRes.stderr) || '(no stderr)'}` };
     }
     let url = existingComment.html_url;
     try {
       const parsed = JSON.parse(updateRes.stdout || '{}');
-      if (parsed.html_url) url = parsed.html_url;
-    } catch {}
-    return { ok: true, url, action: 'updated' };
-  } else {
-    // 新規 POST
-    const createRes = ghCreateCommentFn(String(prNum), targetRepo, fullBody);
-    if (createRes.status !== 0) {
-      return { ok: false, error: `申告コメントの投稿に失敗しました: ${createRes.stderr || '(no stderr)'}` };
+      if (parsed && parsed.html_url) url = parsed.html_url;
+    } catch {
+      // 更新成功後のURL応答だけが壊れている場合は、既存コメントのURLを返す。
     }
-    let url;
-    try {
-      const parsed = JSON.parse(createRes.stdout || '{}');
-      url = parsed.html_url;
-    } catch {}
-    return { ok: true, url, action: 'created' };
+    return { ok: true, url, action: 'updated', provenance: testResult.provenance, scope: testResult.scope };
   }
+
+  const createRes = ghCreateCommentFn(String(prNum), targetRepo, fullBody);
+  if (!createRes || createRes.status !== 0) {
+    return { ok: false, error: `申告コメントの投稿に失敗しました: ${(createRes && createRes.stderr) || '(no stderr)'}` };
+  }
+  let url;
+  try {
+    const parsed = JSON.parse(createRes.stdout || '{}');
+    if (parsed && parsed.html_url) url = parsed.html_url;
+  } catch {
+    // 投稿成功後にURL JSONだけが壊れていても、投稿自体を失敗へ戻さない。
+  }
+  return { ok: true, url, action: 'created', provenance: testResult.provenance, scope: testResult.scope };
 }
 
 // ── CLI エントリポイント ──────────────────────────────────────────────────
 
 function main(argv) {
-  let values, rest;
+  let values;
   try {
-    ({ values, rest } = parseFlags(argv, SPEC));
+    ({ values } = parseFlags(argv, SPEC));
   } catch (err) {
     if (err.name !== 'ArgsValidationError') throw err;
-    if (err.helpRequested) {
-      return { exitCode: 0, stdout: USAGE };
-    }
+    if (err.helpRequested) return { exitCode: 0, stdout: USAGE };
     return { exitCode: 1, stderr: `declare-test-result: ${err.errors.map(e => e.message).join('\n')}\n${USAGE}` };
   }
 
-  if (values['--help'] || values['-h']) {
-    return { exitCode: 0, stdout: USAGE };
-  }
+  if (values['--help'] || values['-h']) return { exitCode: 0, stdout: USAGE };
 
-  const pr = values['--pr'];
-  const commit = values['--commit'];
-  const fail = values['--fail'];
-  const pass = values['--pass'];
-  const repo = values['--repo'];
-  const workspace = values['--workspace'];
-
-  const result = declareTestResult({ pr, commit, fail, pass, repo, workspace });
-  if (!result.ok) {
-    return { exitCode: 1, stderr: `declare-test-result: ${result.error}` };
-  }
-
+  const result = declareTestResult({
+    pr: values['--pr'],
+    repo: values['--repo'],
+    workspace: values['--workspace'],
+    worktree: process.cwd(),
+  });
+  if (!result.ok) return { exitCode: 1, stderr: `declare-test-result: ${result.error}` };
   return { exitCode: 0, stdout: result.url || '' };
 }
 
