@@ -297,15 +297,13 @@ test('_env-setup.js プリロードがワーカー文脈変数を除去し、テ
   }
 });
 
-test('package.jsonの全テスト入口が_env-setup.jsをプリロードする', () => {
+test('package.jsonの全テスト入口が成果物生成runnerを経由し、runnerが_env-setup.jsをプリロードする', () => {
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  const runner = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'run-tests.js'), 'utf8');
   for (const scriptName of ['test', 'test:slow']) {
     const command = packageJson.scripts?.[scriptName];
     assert.equal(typeof command, 'string', `${scriptName} スクリプトが必要`);
-    assert.match(
-      command,
-      /node --require \.\/tests\/_env-setup\.js --test/,
-      `${scriptName} は _env-setup.js を --test より前にプリロードすること`,
-    );
+    assert.match(command, /node scripts\/run-tests\.js (?:full|slow)/, `${scriptName} は run-tests.js を経由すること`);
   }
+  assert.match(runner, /'--require', '\.\/tests\/_env-setup\.js', '--test'/, 'run-tests.js は _env-setup.js を --test より前に渡すこと');
 });

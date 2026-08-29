@@ -47,7 +47,8 @@ Output (stdout):
   PR_COMMENT:<user>:<body>                    PR 全体コメント
   PR_REVIEW:<user>:<state>:<body>             正式レビュー提出（APPROVED/CHANGES_REQUESTED/COMMENTED）
   PR_PUSH:<sha>                               新しいコミットが push された
-  TEST_STATUS:<state>:<declaredSha>:<headSha> テスト申告状態（GREEN/RED/STALE/NONE）
+  TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>
+                                              テスト申告状態と実行記録
   PR_MERGED:<PR>                              マージ完了（このとき終了する）
   PR_CLOSED:<PR>                              却下・キャンセルでクローズ（このとき終了する）
   POLL_ERROR:<detail>                         GitHubアクセスが失敗し始めた（遷移時のみ。再試行は継続）
@@ -130,6 +131,25 @@ function reviewTerminalEvent(state, pr) {
   return null;
 }
 
+/**
+ * テスト申告の評価を、orchestrator が解釈できる固定形式の通知へ変換する。
+ * provenance/scope を status と同じイベントに含め、v1/unknown と v2 full/partial を
+ * 通知だけでも区別できるようにする。
+ *
+ * @param {{status?:string, declaredSha?:string, headSha?:string, provenance?:string, scope?:string}} evaluation
+ * @returns {string}
+ */
+function formatTestStatusEvent(evaluation = {}) {
+  return [
+    'TEST_STATUS',
+    evaluation.status || 'NONE',
+    evaluation.declaredSha || 'none',
+    evaluation.headSha || 'none',
+    evaluation.provenance || 'unknown',
+    evaluation.scope || 'unknown',
+  ].join(':');
+}
+
 module.exports = {
   isValidCommentId,
   isValidPrCommentId,
@@ -138,6 +158,7 @@ module.exports = {
   evaluateTestDeclaration,
   pollDegradationTransition,
   reviewTerminalEvent,
+  formatTestStatusEvent,
 };
 
 if (require.main === module) {
@@ -334,12 +355,20 @@ if (require.main === module) {
         // 最新の有効なコメントだけを共有ヘルパー経由で採用する。
         const latestDecl = findLatestTrustedTestDeclaration(commentsList, prAuthor);
         const testEvaluation = evaluateTestDeclaration(latestDecl, headSha);
-        const evalKey = `${testEvaluation.status}:${testEvaluation.declaredSha || ''}:${testEvaluation.headSha || ''}`;
+        const evalKey = [
+          testEvaluation.status,
+          testEvaluation.declaredSha || '',
+          testEvaluation.headSha || '',
+          testEvaluation.provenance || 'unknown',
+          testEvaluation.scope || 'unknown',
+          testEvaluation.fail === undefined ? '' : testEvaluation.fail,
+          testEvaluation.pass === undefined ? '' : testEvaluation.pass,
+        ].join(':');
         const prevEvalKey = fs.existsSync(testStatusFile) ? fs.readFileSync(testStatusFile, 'utf8').trim() : '';
 
         if (evalKey !== prevEvalKey || isPushEvent) {
           fs.writeFileSync(testStatusFile, evalKey);
-          process.stdout.write(`TEST_STATUS:${testEvaluation.status}:${testEvaluation.declaredSha || 'none'}:${testEvaluation.headSha || 'none'}\n`);
+          process.stdout.write(formatTestStatusEvent(testEvaluation) + '\n');
         }
 
         for (const event of buildPrCommentRelayEvents(commentsList, known)) {

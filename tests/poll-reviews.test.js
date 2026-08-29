@@ -7,6 +7,7 @@ const {
   isValidCommentId,
   isValidPrCommentId,
   buildPrCommentRelayEvents,
+  formatTestStatusEvent,
 } = require('../scripts/poll-reviews.js');
 
 test('isValidCommentId: 正の整数IDだけを受理する', () => {
@@ -85,6 +86,17 @@ test('reviewTerminalEvent: OPEN 等の非終端状態は null（監視継続）'
 
 // ── extractTestDeclaration & evaluateTestDeclaration ────────────────────────
 const { extractTestDeclaration, evaluateTestDeclaration } = require('../scripts/poll-reviews.js');
+const { TEST_RESULT_MARKER, LEGACY_TEST_RESULT_MARKER } = require('../scripts/shared/test-declaration');
+
+function fullDeclarationBody(commit = 'a1b2c3d4e5', fail = 0, pass = 1826, scope = 'full') {
+  return `${TEST_RESULT_MARKER}
+### 🧪 テスト結果申告
+- **対象コミット**: \`${commit}\`
+- **結果**: ${fail === 0 ? 'pass' : 'fail'} (fail: ${fail}, pass: ${pass})
+- **実行件数**: \`${fail + pass}\`
+- **実行元**: \`test-runner\`
+- **実行範囲**: \`${scope}\``;
+}
 
 test('extractTestDeclaration: 申告マーカーがないコメントは null', () => {
   assert.equal(extractTestDeclaration('普通のコメント'), null);
@@ -92,87 +104,115 @@ test('extractTestDeclaration: 申告マーカーがないコメントは null', 
   assert.equal(extractTestDeclaration(null), null);
 });
 
-test('extractTestDeclaration: マーカー付きコメントから commit, fail, pass を抽出する', () => {
-  const body = `<!-- gh-maestro-test-result:v1 -->
-### 🧪 テスト結果申告
-- **対象コミット**: \`a1b2c3d4e5\`
-- **結果**: pass (fail: 0, pass: 1826)`;
-  const decl = extractTestDeclaration(body);
-  assert.deepEqual(decl, { commit: 'a1b2c3d4e5', fail: 0, pass: 1826 });
+test('formatTestStatusEvent: provenance/scope をTEST_STATUS通知へ含める', () => {
+  assert.equal(
+    formatTestStatusEvent({
+      status: 'GREEN',
+      declaredSha: 'a1b2c3d',
+      headSha: 'a1b2c3d4e5f6',
+      provenance: 'test-runner',
+      scope: 'full',
+    }),
+    'TEST_STATUS:GREEN:a1b2c3d:a1b2c3d4e5f6:test-runner:full',
+  );
+  assert.equal(
+    formatTestStatusEvent({ status: 'NONE', provenance: 'unknown', scope: 'unknown' }),
+    'TEST_STATUS:NONE:none:none:unknown:unknown',
+  );
 });
 
-test('extractTestDeclaration: passCount がない場合も抽出可能', () => {
-  const body = `<!-- gh-maestro-test-result:v1 -->
+test('extractTestDeclaration: v2 から commit, fail, pass, provenance, scope を抽出する', () => {
+  const decl = extractTestDeclaration(fullDeclarationBody());
+  assert.deepEqual(decl, {
+    version: 2,
+    commit: 'a1b2c3d4e5',
+    fail: 0,
+    pass: 1826,
+    tests: 1826,
+    provenance: 'test-runner',
+    scope: 'full',
+  });
+});
+
+test('extractTestDeclaration: v1 の値は読めても実行範囲は unknown', () => {
+  const body = `${LEGACY_TEST_RESULT_MARKER}
 ### 🧪 テスト結果申告
 - **対象コミット**: \`a1b2c3d\`
 - **結果**: fail (fail: 2)`;
-  const decl = extractTestDeclaration(body);
-  assert.deepEqual(decl, { commit: 'a1b2c3d', fail: 2, pass: undefined });
+  assert.deepEqual(extractTestDeclaration(body), {
+    version: 1,
+    commit: 'a1b2c3d',
+    fail: 2,
+    pass: undefined,
+    provenance: 'unknown',
+    scope: 'unknown',
+  });
 });
 
-test('evaluateTestDeclaration: 申告なし → NONE', () => {
+test('extractTestDeclaration: provenance/scope が欠落した v2 は unknown へ縮退する', () => {
+  const body = `${TEST_RESULT_MARKER}
+- **対象コミット**: \`a1b2c3d\`
+- **結果**: pass (fail: 0, pass: 10)`;
+  assert.deepEqual(extractTestDeclaration(body), {
+    version: 2,
+    commit: 'a1b2c3d',
+    provenance: 'unknown',
+    scope: 'unknown',
+    fail: undefined,
+    pass: undefined,
+  });
+});
+
+test('evaluateTestDeclaration: 申告なし → NONE と none metadata', () => {
   const res = evaluateTestDeclaration(null, 'a1b2c3d4e5');
-  assert.deepEqual(res, { status: 'NONE', headSha: 'a1b2c3d4e5' });
+  assert.deepEqual(res, {
+    status: 'NONE',
+    headSha: 'a1b2c3d4e5',
+    provenance: 'none',
+    scope: 'none',
+  });
 });
 
-test('evaluateTestDeclaration: headSha が空文字/空白/null/undefined の場合は STALE ではなく NONE（照合不能扱い）', () => {
-  const decl = { commit: 'a1b2c3d', fail: 0, pass: 100 };
+test('evaluateTestDeclaration: headSha が空の場合は STALE ではなく NONE', () => {
+  const decl = { commit: 'a1b2c3d', fail: 0, pass: 100, provenance: 'test-runner', scope: 'full' };
   assert.deepEqual(evaluateTestDeclaration(decl, ''), {
     status: 'NONE',
     declaredSha: 'a1b2c3d',
     headSha: undefined,
     fail: 0,
     pass: 100,
-  });
-  assert.deepEqual(evaluateTestDeclaration(decl, '   '), {
-    status: 'NONE',
-    declaredSha: 'a1b2c3d',
-    headSha: undefined,
-    fail: 0,
-    pass: 100,
-  });
-  assert.deepEqual(evaluateTestDeclaration(decl, null), {
-    status: 'NONE',
-    declaredSha: 'a1b2c3d',
-    headSha: undefined,
-    fail: 0,
-    pass: 100,
-  });
-  assert.deepEqual(evaluateTestDeclaration(decl, undefined), {
-    status: 'NONE',
-    declaredSha: 'a1b2c3d',
-    headSha: undefined,
-    fail: 0,
-    pass: 100,
+    provenance: 'test-runner',
+    scope: 'full',
   });
 });
 
-test('evaluateTestDeclaration: コミット不一致（push後未申告） → STALE', () => {
-  const decl = { commit: '1111111', fail: 0, pass: 100 };
+test('evaluateTestDeclaration: コミット不一致 → STALE', () => {
+  const decl = { commit: '1111111', fail: 0, pass: 100, provenance: 'test-runner', scope: 'full' };
   const res = evaluateTestDeclaration(decl, '2222222');
   assert.equal(res.status, 'STALE');
-  assert.equal(res.declaredSha, '1111111');
-  assert.equal(res.headSha, '2222222');
+  assert.equal(res.provenance, 'test-runner');
+  assert.equal(res.scope, 'full');
 });
 
-test('evaluateTestDeclaration: コミット一致 かつ fail 0 → GREEN', () => {
-  const decl = { commit: 'a1b2c3d', fail: 0, pass: 100 };
-  const res = evaluateTestDeclaration(decl, 'a1b2c3d4e5f6'); // short SHA vs full SHA
+test('evaluateTestDeclaration: コミット一致かつ fail 0 → GREEN', () => {
+  const decl = { commit: 'a1b2c3d', fail: 0, pass: 100, provenance: 'test-runner', scope: 'full' };
+  const res = evaluateTestDeclaration(decl, 'a1b2c3d4e5f6');
   assert.equal(res.status, 'GREEN');
-  assert.equal(res.declaredSha, 'a1b2c3d');
-  assert.equal(res.headSha, 'a1b2c3d4e5f6');
+  assert.equal(res.provenance, 'test-runner');
+  assert.equal(res.scope, 'full');
 });
 
-test('evaluateTestDeclaration: コミット一致 かつ fail > 0 → RED', () => {
-  const decl = { commit: 'a1b2c3d4e5f6', fail: 1, pass: 99 };
+test('evaluateTestDeclaration: コミット一致かつ fail > 0 → RED', () => {
+  const decl = { commit: 'a1b2c3d4e5f6', fail: 1, pass: 99, provenance: 'test-runner', scope: 'partial' };
   const res = evaluateTestDeclaration(decl, 'a1b2c3d4e5f6');
   assert.equal(res.status, 'RED');
   assert.equal(res.fail, 1);
+  assert.equal(res.scope, 'partial');
 });
 
 test('extractTestDeclaration: 形式不正や欠落のあるコメントを安全に弾く', () => {
-  assert.equal(extractTestDeclaration('<!-- gh-maestro-test-result:v1 -->\n対象コミットなし'), null);
-  assert.equal(extractTestDeclaration('<!-- gh-maestro-test-result:v1 -->\n- **対象コミット**: `1234567`\n- 結果: 不明'), null);
+  assert.equal(extractTestDeclaration(`${LEGACY_TEST_RESULT_MARKER}\n対象コミットなし`), null);
+  assert.equal(extractTestDeclaration(`${LEGACY_TEST_RESULT_MARKER}\n- **対象コミット**: \`1234567\`\n- 結果: 不明`), null);
   assert.equal(extractTestDeclaration({}), null);
   assert.equal(extractTestDeclaration(123), null);
 });

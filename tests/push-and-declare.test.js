@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { testResultPath, writeTestResultArtifact } = require('../scripts/shared/test-result');
 
 // push-and-declare.js は「ステージング・コミット・push・PR取得/作成・テスト結果申告」を
 // 一つの操作にまとめた収束型の単一入口（Issue #374）。テストは child-process.js の
@@ -14,7 +15,8 @@ const path = require('path');
 // モックするのは child-process.spawnSync の1点だけ。createPr（gh-create-pr.js）と
 // declareTestResult（declare-test-result.js）は依存注入せず実物を通し、argvと実際の受理を
 // 一緒に固定する（.claude/rules/test-child-process-argv-boundary.md: 子プロセス境界のargvを
-// 注入モックで飛ばしたままにしない）。
+// 注入モックで飛ばしたままにしない）。テスト結果は push 側へ数値を渡さず、
+// runner成果物が無い場合の unknown 縮退も実経路で確認する。
 //
 // pushAndDeclare の NODE_TEST_CONTEXT ガードは「テスト実行中の外部副作用（git操作・gh操作・
 // 投稿）を機械的に拒否する」構造的対策（Issue #202）。ガード自体の動作は「NODE_TEST_CONTEXT
@@ -234,7 +236,7 @@ test('収束: 変更あり→コミット→push→PR新規作成→申告で ex
   const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
   const ws = tempWorkspace();
   const result = withGuardBypassed(() => mod.pushAndDeclare({
-    issue: 374, fail: 0, pass: 12, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
   }));
 
   assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
@@ -258,9 +260,29 @@ test('収束: 変更あり→コミット→push→PR新規作成→申告で ex
   assert.match(result.stdout, /コミット: 0123456789/);
   assert.match(result.stdout, /PR: #5（新規作成）/);
   assert.match(result.stdout, /申告: https:\/\/github.com\/owner\/repo\/pull\/5#issuecomment-1/);
+  assert.match(result.stdout, /テスト証跡: unknown \/ unknown/);
   assert.match(result.stdout, /コミット対象ファイル:/);
   assert.match(result.stdout, /  a\.js/);
   assert.match(result.stdout, /  b\.js/);
+});
+
+test('収束: 破損した成果物でも unknown 申告まで到達し、push/PRを止めない', () => {
+  const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
+  const ws = tempWorkspace();
+  const resultPath = testResultPath(ws);
+  fs.mkdirSync(path.dirname(resultPath), { recursive: true });
+  fs.writeFileSync(resultPath, '{not-json', 'utf8');
+
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+  }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  assert.ok(call(calls, (cmd, args) => cmd === 'git' && args[0] === 'push'));
+  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
+  assert.ok(createCall, '破損成果物でも申告コメントを投稿する');
+  assert.match(createCall.args[3], /結果.*unknown/);
+  assert.match(result.stdout, /テスト証跡: unknown \/ unknown/);
 });
 
 test('収束: ステージ済み変更が無ければ空コミットを作らず、コミット段をスキップして push→申告で exit 0', () => {
@@ -269,7 +291,7 @@ test('収束: ステージ済み変更が無ければ空コミットを作らず
   const { mod, calls } = loadModule(dispatcher(handlers));
   const ws = tempWorkspace();
   const result = withGuardBypassed(() => mod.pushAndDeclare({
-    issue: 374, fail: 1, pass: 11, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
   }));
 
   assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
@@ -288,7 +310,7 @@ test('収束: 既存PRがあれば再利用し、createPr（gh pr create）を�
   const { mod, calls } = loadModule(dispatcher(handlers));
   const ws = tempWorkspace();
   const result = withGuardBypassed(() => mod.pushAndDeclare({
-    issue: 374, fail: 0, pass: 8, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
   }));
 
   assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
@@ -307,7 +329,7 @@ test('再実行で回復: 申告失敗（exit 3）の状態から同じコマン
   const { state, handlers } = statefulHandlers({ declListFailuresRemaining: 1 });
   const { mod, calls } = loadModule(dispatcher(handlers));
   const ws = tempWorkspace();
-  const opts = { issue: 374, fail: 0, pass: 12, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } };
+  const opts = { issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } };
 
   // 1回目: pushは成功したが申告のコメント一覧取得が一時的に失敗 → exit 3（リモートは進んだ）
   const first = withGuardBypassed(() => mod.pushAndDeclare(opts));
@@ -338,7 +360,7 @@ test('冪等性: 同じ状態に対して2回実行しても新たなコミッ�
   const { state, handlers } = statefulHandlers();
   const { mod, calls } = loadModule(dispatcher(handlers));
   const ws = tempWorkspace();
-  const opts = { issue: 374, fail: 0, pass: 12, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } };
+  const opts = { issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' } };
 
   const first = withGuardBypassed(() => mod.pushAndDeclare(opts));
   assert.equal(first.exitCode, 0, `stderr: ${first.stderr}`);
@@ -373,7 +395,7 @@ test('終了コード: push失敗は exit 2（リモート未変更）', () => {
   const { mod, calls } = loadModule(dispatcher(handlers));
   const ws = tempWorkspace();
   const result = withGuardBypassed(() => mod.pushAndDeclare({
-    issue: 374, fail: 0, pass: 1, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
   }));
 
   assert.equal(result.exitCode, 2);
@@ -392,7 +414,7 @@ test('終了コード: pushは成功したが申告が失敗したら exit 3（�
   const { mod, calls } = loadModule(dispatcher(handlers));
   const ws = tempWorkspace();
   const result = withGuardBypassed(() => mod.pushAndDeclare({
-    issue: 374, fail: 0, pass: 1, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
   }));
 
   assert.equal(result.exitCode, 3, '申告失敗を成功として終了しない（最重要不変条件）');
@@ -408,7 +430,7 @@ test('終了コード: ブランチ名規約不一致は exit 1 で副作用ゼ�
   const { mod, calls } = loadModule(dispatcher(handlers));
   const ws = tempWorkspace();
   const result = withGuardBypassed(() => mod.pushAndDeclare({
-    issue: 374, fail: 0, pass: 1, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
   }));
 
   assert.equal(result.exitCode, 1);
@@ -423,7 +445,7 @@ test('終了コード: detached HEAD 時は exit 2 で副作用ゼロ', () => {
   const { mod, calls } = loadModule(dispatcher(handlers));
   const ws = tempWorkspace();
   const result = withGuardBypassed(() => mod.pushAndDeclare({
-    issue: 374, fail: 0, pass: 1, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
   }));
 
   assert.equal(result.exitCode, 2);
@@ -438,7 +460,7 @@ test('終了コード: ブランチ取得失敗（git エラー）時は exit 2 
   const { mod, calls } = loadModule(dispatcher(handlers));
   const ws = tempWorkspace();
   const result = withGuardBypassed(() => mod.pushAndDeclare({
-    issue: 374, fail: 0, pass: 1, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
   }));
 
   assert.equal(result.exitCode, 2);
@@ -450,7 +472,7 @@ test('終了コード: 引数不正（--issue が整数でない）は exit 1 �
   const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
   const ws = tempWorkspace();
   const result = withGuardBypassed(() => mod.pushAndDeclare({
-    issue: 'abc', fail: 0, pass: 1, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    issue: 'abc', workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
   }));
 
   assert.equal(result.exitCode, 1);
@@ -461,16 +483,33 @@ test('終了コード: 引数不正（--issue が整数でない）は exit 1 �
 test('終了コード: テストが赤（fail>0）でも exit 0 で完走し、赤として申告される', () => {
   const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
   const ws = tempWorkspace();
+  writeTestResultArtifact(ws, {
+    schemaVersion: 1,
+    producer: 'gh-maestro-test-runner',
+    provenance: 'test-runner',
+    scope: 'full',
+    status: 'complete',
+    command: 'npm test',
+    recordedAt: '2026-08-29T00:00:00.000Z',
+    testedHead: SHA,
+    tests: 12,
+    pass: 9,
+    fail: 3,
+    cancelled: 0,
+    skipped: 0,
+    todo: 0,
+  });
   const result = withGuardBypassed(() => mod.pushAndDeclare({
-    issue: 374, fail: 3, pass: 9, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
   }));
 
   assert.equal(result.exitCode, 0, '赤でも一連は完走して赤を申告する（関門を設けない）');
   // 申告本体（declareTestResult のコメント投稿）が失敗件数を載せている
   const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
   assert.ok(createCall, '申告コメント投稿が呼ばれる');
-  assert.match(createCall.args[3], /fail: 3/);
-  assert.match(createCall.args[3], /pass: 9/);
+  assert.match(createCall.args[3], /結果.*fail.*fail: 3, pass: 9/);
+  assert.match(createCall.args[3], /実行元.*test-runner/);
+  assert.match(createCall.args[3], /実行範囲.*full/);
 });
 
 // ── NODE_TEST_CONTEXT ガード（Issue #202 の構造的対策） ────────────────────────
@@ -481,7 +520,7 @@ test('NODE_TEST_CONTEXT 設定時は実副作用を実行せず拒否する（�
   process.env.NODE_TEST_CONTEXT = '1';
   try {
     const result = mod.pushAndDeclare({
-      issue: 374, fail: 0, pass: 1, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+      issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
     });
     assert.equal(result.exitCode, 1);
     assert.match(result.stderr, /NODE_TEST_CONTEXT/);
@@ -513,13 +552,12 @@ test('main: 必須引数欠落は exit 1（usage は stderr）', () => {
   const result = mod.main([]);
   assert.equal(result.exitCode, 1);
   assert.ok(result.stderr.includes('--issue'));
-  assert.ok(result.stderr.includes('--fail'));
-  assert.ok(result.stderr.includes('--pass'));
+  assert.doesNotMatch(result.stderr, /--(?:fail|pass)\b/);
 });
 
 test('main: 未知フラグ・余分な位置引数は exit 1', () => {
   const { mod } = loadModule();
-  const result = mod.main(['--issue', '374', '--fail', '0', '--pass', '1', '--bogus']);
+  const result = mod.main(['--issue', '374', '--bogus']);
   assert.equal(result.exitCode, 1);
   assert.ok(result.stderr.includes('未知のフラグ'));
 });
@@ -529,7 +567,7 @@ test('main: NODE_TEST_CONTEXT 環境下では実副作用を実行せず拒否�
   const ws = tempWorkspace();
   process.env.NODE_TEST_CONTEXT = '1';
   try {
-    const result = mod.main(['--issue', '374', '--fail', '0', '--pass', '1', '--workspace', ws]);
+    const result = mod.main(['--issue', '374', '--workspace', ws]);
     assert.equal(result.exitCode, 1);
     assert.match(result.stderr, /NODE_TEST_CONTEXT/);
   } finally {

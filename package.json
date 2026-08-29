@@ -6,8 +6,8 @@
   "scripts": {
     "start": "node src/daemon.js",
     "start:pm2": "pm2 start ecosystem.config.js",
-    "test": "node --require ./tests/_env-setup.js --test tests/*.test.js",
-    "test:slow": "node --require ./tests/_env-setup.js --test tests/slow/*.test.js"
+    "test": "node scripts/run-tests.js full",
+    "test:slow": "node scripts/run-tests.js slow"
   },
   "engines": {
     "node": ">=18"

@@ -13,7 +13,7 @@
 // 「その段は既に満たされている」）。
 //
 // Usage:
-//   node push-and-declare.js --issue <N> --fail <N> --pass <N> [--workspace <path>]
+//   node push-and-declare.js --issue <N> [--workspace <path>]
 //
 // 実行ディレクトリは作業用worktree（$WORKTREE）。ブランチ名 ^issue-<N> との一致を検証する。
 //
@@ -33,12 +33,10 @@ const { declareTestResult } = require('./declare-test-result');
 const USAGE = `push-and-declare.js — ステージング・コミット・push・PR取得/作成・テスト結果申告を一つの操作にまとめる
 
 Usage:
-  node push-and-declare.js --issue <N> --fail <N> --pass <N> [--workspace <path>]
+  node push-and-declare.js --issue <N> [--workspace <path>]
 
 Arguments:
   --issue <N>          Issue番号（必須、正の整数。実行ブランチ名 ^issue-<N> と一致する必要がある）
-  --fail <N>           失敗テスト数（必須、0以上の整数）
-  --pass <N>           成功テスト数（必須、0以上の整数）
   --workspace <path>   ワークスペースのルートパス（省略時は環境変数 WORKSPACE、次に
                        GH_MAESTRO_WORKSPACE、次にCWD上方探索で解決）
 
@@ -50,7 +48,8 @@ Arguments:
   5. 現在のHEADを解決
   6. PRは get-or-create（既存PRがあれば使用、無ければ作成。タイトル=Issueタイトル、
      本文=関連Issue: #<N>）
-  7. 解決したHEADに対するテスト結果を申告（declare-test-result.js と同じ形式）
+  7. runtime root のテスト成果物を読み、解決したHEADに対するテスト結果を申告。
+     成果物が欠落・破損していても unknown として申告する
 
 コミットメッセージは \`impl(issue-<N>): <Issueタイトル>\` で固定（モデル推論を挟まない）。
 素の git commit / git push / gh pr create を直接実行しないこと（このスクリプトが一括で行う）。
@@ -68,8 +67,6 @@ Output (stdout):
 const SPEC = {
   flags: {
     '--issue': { required: true },
-    '--fail': { required: true },
-    '--pass': { required: true },
     '--workspace': {},
   },
   booleans: ['--help', '-h'],
@@ -108,14 +105,12 @@ function errText(r) {
  *
  * @param {object} params
  * @param {number|string} params.issue   Issue番号
- * @param {number|string} params.fail    失敗テスト数
- * @param {number|string} params.pass    成功テスト数
  * @param {string} [params.workspace]    workspace解決の引数（--workspace または環境変数 WORKSPACE の値）
  * @param {string} params.worktree       作業用worktree（git操作の実行ディレクトリ）
  * @param {object} [params.env]          環境変数（createPr の base 解決に使う。既定 process.env）
  * @returns {{ exitCode: number, stdout: string, stderr: string }}
  */
-function pushAndDeclare({ issue, fail, pass, workspace, worktree, env = process.env }) {
+function pushAndDeclare({ issue, workspace, worktree, env = process.env }) {
   // テスト実行中は実副作用（git操作・gh操作・投稿）を機械的に拒否する（Issue #202 の構造的対策）。
   // ワーカーenvがテスト配下の子プロセスへ漏れた場合でも、実リポジトリへ誤ってpush/申告されるのを防ぐ。
   if (process.env.NODE_TEST_CONTEXT) {
@@ -129,15 +124,6 @@ function pushAndDeclare({ issue, fail, pass, workspace, worktree, env = process.
   if (isNaN(issueNum) || issueNum <= 0 || String(issueNum) !== String(issue).trim()) {
     return { exitCode: 1, stdout: '', stderr: `--issue は正の整数で指定してください: ${issue}` };
   }
-  const failNum = parseInt(fail, 10);
-  if (isNaN(failNum) || failNum < 0 || String(failNum) !== String(fail).trim()) {
-    return { exitCode: 1, stdout: '', stderr: `--fail は0以上の整数で指定してください: ${fail}` };
-  }
-  const passNum = parseInt(pass, 10);
-  if (isNaN(passNum) || passNum < 0 || String(passNum) !== String(pass).trim()) {
-    return { exitCode: 1, stdout: '', stderr: `--pass は0以上の整数で指定してください: ${pass}` };
-  }
-
   const ws = resolveWorkspace(workspace);
   if (!ws) {
     return { exitCode: 1, stdout: '', stderr: 'ワークスペースを解決できません（--workspace または環境変数 WORKSPACE を確認してください）' };
@@ -273,7 +259,13 @@ function pushAndDeclare({ issue, fail, pass, workspace, worktree, env = process.
   }
 
   // ── 申告段（これが成功するまで exit 0 を返さない） ───────────────────────────
-  const declResult = declareTestResult({ pr: prNumber, commit: sha, fail: failNum, pass: passNum, repo, workspace: ws });
+  const declResult = declareTestResult({
+    pr: prNumber,
+    headSha: sha,
+    repo,
+    workspace: ws,
+    worktree,
+  });
   if (!declResult.ok) {
     return { exitCode: 3, stdout: '', stderr: `テスト結果の申告に失敗しました: ${declResult.error}` };
   }
@@ -285,6 +277,7 @@ function pushAndDeclare({ issue, fail, pass, workspace, worktree, env = process.
     : 'コミット: なし（ステージ済み変更が無いため、コミットは作成されませんでした）');
   stdoutLines.push(`PR: #${prNumber}（${prAction === 'created' ? '新規作成' : '既存を使用'}） ${prUrl}`);
   stdoutLines.push(`申告: ${declResult.url || ''}（対象コミット ${sha}）`);
+  stdoutLines.push(`テスト証跡: ${declResult.provenance || 'unknown'} / ${declResult.scope || 'unknown'}`);
   if (stagedFiles.length > 0) {
     stdoutLines.push('コミット対象ファイル:');
     for (const f of stagedFiles) stdoutLines.push(`  ${f}`);
@@ -316,8 +309,6 @@ function main(argv) {
   const workspace = values['--workspace'] || process.env.WORKSPACE || null;
   const result = pushAndDeclare({
     issue: values['--issue'],
-    fail: values['--fail'],
-    pass: values['--pass'],
     workspace,
     worktree: process.cwd(),
     env: process.env,
