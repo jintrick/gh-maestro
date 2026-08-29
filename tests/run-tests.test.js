@@ -14,6 +14,7 @@ const {
 } = require('../scripts/run-tests');
 
 const SHA = '0123456789abcdef0123456789abcdef01234567';
+const CONTENT_HASH = 'a'.repeat(64);
 
 function tempWorktree() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-run-tests-'));
@@ -36,6 +37,7 @@ function runWithChild({ suite = 'full', child, writeArtifactFn, extraDeps = {} }
         calls.push({ type: 'head', worktree });
         return SHA;
       },
+      calculateWorktreeContentHashFn: () => CONTENT_HASH,
       spawnSyncFn: (command, args, options) => {
         calls.push({ type: 'spawn', command, args, options });
         return child;
@@ -63,6 +65,7 @@ test('runTests: full suiteを一度だけ起動し、成功結果をfullとし�
   assert.equal(fixture.artifacts[0].pass, 5);
   assert.equal(fixture.artifacts[0].fail, 0);
   assert.equal(fixture.artifacts[0].testedHead, SHA);
+  assert.equal(fixture.artifacts[0].testedContentHash, CONTENT_HASH);
   assert.equal(fixture.calls.filter((call) => call.type === 'spawn').length, 1);
   const spawnCall = fixture.calls.find((call) => call.type === 'spawn');
   assert.equal(spawnCall.command, process.execPath);
@@ -124,6 +127,20 @@ test('runTests: 成果物の書き出し失敗はrunner結果を隠さず、申�
   assert.equal(fixture.result.exitCode, 0);
   assert.equal(fixture.result.artifactWritten, false);
   assert.match(fixture.stderr, /runtime root unavailable/);
+});
+
+test('runTests: テスト対象内容の指紋取得失敗はunavailableとして記録する', () => {
+  const fixture = runWithChild({
+    child: { status: 0, stdout: tapSummary({ tests: 1, pass: 1, fail: 0 }), stderr: '' },
+    extraDeps: {
+      calculateWorktreeContentHashFn: () => { throw new Error('worktree snapshot failed'); },
+    },
+  });
+
+  assert.equal(fixture.result.exitCode, 0);
+  assert.equal(fixture.artifacts[0].status, 'unavailable');
+  assert.equal(fixture.artifacts[0].reason, 'content-snapshot-failed');
+  assert.match(fixture.stderr, /worktree snapshot failed/);
 });
 
 test('runTests: 未知のsuiteはrunnerを起動せずエラーにする', () => {

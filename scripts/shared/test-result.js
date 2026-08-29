@@ -10,6 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 const { atomicWriteJson } = require('./atomic-write');
+const { calculateWorktreeContentHash, calculateCommitContentHash } = require('./test-content');
 const {
   workspaceRuntimeDir,
   ensureWorkspaceRuntimeDir,
@@ -24,6 +25,7 @@ const TEST_RESULT_FILE_NAME = 'test-result.json';
 const TEST_RESULT_SCOPES = Object.freeze(new Set(['full', 'partial']));
 const TEST_RESULT_STATUSES = Object.freeze(new Set(['complete', 'unavailable']));
 const TAP_COUNT_FIELDS = Object.freeze(['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo']);
+const TEST_CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -154,6 +156,9 @@ function validateTestResultArtifact(value) {
     if (value.fail + value.pass > value.tests) {
       return { ok: false, error: 'test result counts exceed tests count' };
     }
+    if (typeof value.testedContentHash !== 'string' || !TEST_CONTENT_HASH_RE.test(value.testedContentHash)) {
+      return { ok: false, error: 'complete test result must include a testedContentHash' };
+    }
   } else {
     if (typeof value.reason !== 'string' || !value.reason.trim()) {
       return { ok: false, error: 'unavailable test result must include a reason' };
@@ -238,6 +243,7 @@ function readTestResultArtifact(worktree = process.cwd()) {
       command: parsed.command,
       recordedAt: parsed.recordedAt,
       testedHead: parsed.testedHead || undefined,
+      testedContentHash: parsed.testedContentHash,
     },
   };
 }
@@ -250,6 +256,9 @@ module.exports = {
   TEST_RESULT_SCOPES,
   TEST_RESULT_STATUSES,
   TAP_COUNT_FIELDS,
+  TEST_CONTENT_HASH_RE,
+  calculateWorktreeContentHash,
+  calculateCommitContentHash,
   testResultPath,
   parseTapSummary,
   validateTestResultArtifact,

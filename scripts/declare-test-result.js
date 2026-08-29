@@ -14,7 +14,11 @@ const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { resolveGitHead } = require('./shared/git-head');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
-const { readTestResultArtifact } = require('./shared/test-result');
+const {
+  TEST_CONTENT_HASH_RE,
+  calculateCommitContentHash,
+  readTestResultArtifact,
+} = require('./shared/test-result');
 const {
   TEST_RESULT_MARKER,
   hasTestDeclarationMarker,
@@ -76,7 +80,9 @@ function isKnownTestResult(testResult) {
     && testResult.provenance === 'test-runner'
     && (testResult.scope === 'full' || testResult.scope === 'partial')
     && Number.isSafeInteger(testResult.fail)
-    && Number.isSafeInteger(testResult.pass);
+    && Number.isSafeInteger(testResult.pass)
+    && typeof testResult.testedContentHash === 'string'
+    && TEST_CONTENT_HASH_RE.test(testResult.testedContentHash);
 }
 
 function unknownTestResult(reason) {
@@ -133,6 +139,7 @@ function buildCommentBody({ commit, testResult }) {
  * @param {function} [deps.ghUpdateCommentFn]
  * @param {function} [deps.gitHeadFn]
  * @param {function} [deps.readTestResultFn]
+ * @param {function} [deps.commitContentHashFn]
  * @returns {{ok:boolean, url?:string, error?:string, action?:'created'|'updated', provenance?:string, scope?:string}}
  */
 function declareTestResult(params = {}, deps = {}) {
@@ -150,6 +157,7 @@ function declareTestResult(params = {}, deps = {}) {
     ghUpdateCommentFn = _ghUpdateComment,
     gitHeadFn = resolveGitHead,
     readTestResultFn = readTestResultArtifact,
+    commitContentHashFn = calculateCommitContentHash,
   } = deps;
 
   // API利用者が旧形式の数字やSHAを渡しても、それを申告へ流さない。CLIでは parseFlags
@@ -192,9 +200,22 @@ function declareTestResult(params = {}, deps = {}) {
   } catch {
     artifactRead = { ok: false, reason: 'unreadable' };
   }
-  const testResult = artifactRead && artifactRead.ok && isKnownTestResult(artifactRead.result)
-    ? artifactRead.result
-    : unknownTestResult(artifactRead && artifactRead.reason);
+  let testResult = unknownTestResult(artifactRead && artifactRead.reason);
+  if (artifactRead && artifactRead.ok && isKnownTestResult(artifactRead.result)) {
+    try {
+      const commitContentHash = commitContentHashFn(cwd, trimmedHead);
+      if (commitContentHash === artifactRead.result.testedContentHash) {
+        testResult = artifactRead.result;
+      } else {
+        testResult = unknownTestResult('content-mismatch');
+      }
+    } catch {
+      // コミット内容を検証できない場合も、申告自体は unknown として継続する。
+      testResult = unknownTestResult('content-verification-unavailable');
+    }
+  } else if (artifactRead && artifactRead.ok) {
+    testResult = unknownTestResult('invalid-artifact');
+  }
 
   // 2. リポジトリ特定
   let targetRepo = typeof repo === 'string' ? repo.trim() : '';

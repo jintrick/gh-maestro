@@ -41,6 +41,7 @@ function completeArtifact(overrides = {}) {
     command: 'npm test',
     recordedAt: '2026-08-29T00:00:00.000Z',
     testedHead: '0123456789abcdef0123456789abcdef01234567',
+    testedContentHash: 'a'.repeat(64),
     tests: 3,
     pass: 2,
     fail: 1,
@@ -90,6 +91,7 @@ test('validateTestResultArtifact: producer/provenance/scope/count の不正を�
     { scope: 'unknown' },
     { fail: -1 },
     { tests: 1, pass: 2 },
+    { testedContentHash: 'not-a-content-hash' },
   ]) {
     assert.equal(validateTestResultArtifact({ ...completeArtifact(), ...change }).ok, false);
   }
@@ -120,6 +122,7 @@ test('write/readTestResultArtifact: runtime rootへ原子的に保存し、workt
       command: 'npm test',
       recordedAt: '2026-08-29T00:00:00.000Z',
       testedHead: '0123456789abcdef0123456789abcdef01234567',
+      testedContentHash: 'a'.repeat(64),
     },
   });
 });

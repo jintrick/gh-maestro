@@ -108,9 +108,16 @@ function errText(r) {
  * @param {string} [params.workspace]    workspace解決の引数（--workspace または環境変数 WORKSPACE の値）
  * @param {string} params.worktree       作業用worktree（git操作の実行ディレクトリ）
  * @param {object} [params.env]          環境変数（createPr の base 解決に使う。既定 process.env）
+ * @param {object} [deps]                 テスト用の依存注入
+ * @param {Function} [deps.declareTestResultFn]
+ * @param {Function} [deps.commitContentHashFn]
  * @returns {{ exitCode: number, stdout: string, stderr: string }}
  */
-function pushAndDeclare({ issue, workspace, worktree, env = process.env }) {
+function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps = {}) {
+  const declareTestResultFn = deps.declareTestResultFn || declareTestResult;
+  const declareDeps = deps.commitContentHashFn
+    ? { commitContentHashFn: deps.commitContentHashFn }
+    : undefined;
   // テスト実行中は実副作用（git操作・gh操作・投稿）を機械的に拒否する（Issue #202 の構造的対策）。
   // ワーカーenvがテスト配下の子プロセスへ漏れた場合でも、実リポジトリへ誤ってpush/申告されるのを防ぐ。
   if (process.env.NODE_TEST_CONTEXT) {
@@ -259,13 +266,13 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }) {
   }
 
   // ── 申告段（これが成功するまで exit 0 を返さない） ───────────────────────────
-  const declResult = declareTestResult({
+  const declResult = declareTestResultFn({
     pr: prNumber,
     headSha: sha,
     repo,
     workspace: ws,
     worktree,
-  });
+  }, declareDeps);
   if (!declResult.ok) {
     return { exitCode: 3, stdout: '', stderr: `テスト結果の申告に失敗しました: ${declResult.error}` };
   }

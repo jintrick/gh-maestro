@@ -15,6 +15,7 @@ const {
   TEST_RESULT_SCHEMA_VERSION,
   TEST_RESULT_PRODUCER,
   TEST_RESULT_PROVENANCE,
+  calculateWorktreeContentHash,
   parseTapSummary,
   testResultPath,
   writeTestResultArtifact,
@@ -78,6 +79,7 @@ function outputText(value) {
  * @param {object} [deps]
  * @param {Function} [deps.spawnSyncFn]
  * @param {Function} [deps.resolveGitHeadFn]
+ * @param {Function} [deps.calculateWorktreeContentHashFn]
  * @param {Function} [deps.clearArtifactFn]
  * @param {Function} [deps.writeArtifactFn] (worktree, artifact) => void
  * @param {Function} [deps.writeStdoutFn]
@@ -98,6 +100,7 @@ function runTests({ suite, cwd = process.cwd(), env = process.env } = {}, deps =
 
   const spawnSyncFn = deps.spawnSyncFn || spawnSync;
   const resolveGitHeadFn = deps.resolveGitHeadFn || resolveGitHead;
+  const calculateWorktreeContentHashFn = deps.calculateWorktreeContentHashFn || calculateWorktreeContentHash;
   const clearArtifactFn = deps.clearArtifactFn || clearPreviousArtifact;
   const writeArtifactFn = deps.writeArtifactFn || writeTestResultArtifact;
   const writeStdoutFn = deps.writeStdoutFn || ((text) => process.stdout.write(text));
@@ -118,6 +121,17 @@ function runTests({ suite, cwd = process.cwd(), env = process.env } = {}, deps =
     // テスト結果の集計にHEAD解決は不要。対象SHAは申告入口が現在のHEADから解決する。
   }
 
+  let testedContentHash = null;
+  let contentSnapshotError = null;
+  try {
+    // コマンド起動前の内容を記録する。テスト中に worktree が変更された場合、その変更を
+    // 後続の git add -A がコミットしても、申告時のコミット内容照合で unknown になる。
+    testedContentHash = calculateWorktreeContentHashFn(cwd);
+  } catch (error) {
+    contentSnapshotError = error;
+    writeStderrFn(`テスト対象内容の指紋を取得できません: ${error.message}\n`);
+  }
+
   const child = spawnSyncFn(process.execPath, testArgsFor(selected), {
     cwd,
     env,
@@ -131,7 +145,7 @@ function runTests({ suite, cwd = process.cwd(), env = process.env } = {}, deps =
   const summary = parseTapSummary(`${stdout}${stderr ? `\n${stderr}` : ''}`);
   const recordedAt = new Date().toISOString();
   let artifact;
-  if (summary.ok) {
+  if (summary.ok && testedContentHash) {
     artifact = {
       schemaVersion: TEST_RESULT_SCHEMA_VERSION,
       producer: TEST_RESULT_PRODUCER,
@@ -141,6 +155,7 @@ function runTests({ suite, cwd = process.cwd(), env = process.env } = {}, deps =
       command: selected.command,
       recordedAt,
       testedHead,
+      testedContentHash,
       ...summary.summary,
     };
   } else {
@@ -153,7 +168,9 @@ function runTests({ suite, cwd = process.cwd(), env = process.env } = {}, deps =
       command: selected.command,
       recordedAt,
       testedHead,
-      reason: child.error ? 'runner-start-failed' : 'tap-summary-invalid',
+      reason: contentSnapshotError
+        ? 'content-snapshot-failed'
+        : child.error ? 'runner-start-failed' : 'tap-summary-invalid',
     };
   }
 

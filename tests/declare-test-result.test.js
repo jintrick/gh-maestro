@@ -13,12 +13,14 @@ const {
 
 const MARKER = TEST_RESULT_MARKER;
 const SHA = 'a1b2c3d4e5f67890123456789012345678901234';
+const CONTENT_HASH = 'a'.repeat(64);
 const RESULT = {
   provenance: 'test-runner',
   scope: 'full',
   tests: 1826,
   pass: 1826,
   fail: 0,
+  testedContentHash: CONTENT_HASH,
 };
 
 function githubResult(htmlUrl) {
@@ -32,6 +34,7 @@ function baseDeps(overrides = {}) {
     ghListCommentsFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
     ghCreateCommentFn: () => githubResult('https://github.com/owner/repo/pull/42#issuecomment-1'),
     ghUpdateCommentFn: () => githubResult('https://github.com/owner/repo/pull/42#issuecomment-1'),
+    commitContentHashFn: () => CONTENT_HASH,
     ...overrides,
   };
 }
@@ -190,6 +193,46 @@ test('declareTestResult: 成果物の欠落・破損でも unknown を投稿し�
   assert.match(createdBody, /結果.*unknown/);
   assert.match(createdBody, /実行記録.*invalid-json/);
   assert.doesNotMatch(createdBody, /fail: \d/);
+});
+
+test('declareTestResult: テスト対象の内容と申告先コミットが不一致ならunknownで継続する', () => {
+  let createdBody = null;
+  const result = declareTestResult(
+    { pr: '42', repo: 'owner/repo', headSha: SHA },
+    baseDeps({
+      commitContentHashFn: () => 'b'.repeat(64),
+      ghCreateCommentFn: (_pr, _repo, body) => {
+        createdBody = body;
+        return githubResult('https://github.com/owner/repo/pull/42#issuecomment-1005');
+      },
+    }),
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.provenance, 'unknown');
+  assert.equal(result.scope, 'unknown');
+  assert.match(createdBody, /結果.*unknown/);
+  assert.match(createdBody, /content-mismatch/);
+  assert.doesNotMatch(createdBody, /fail: \d/);
+});
+
+test('declareTestResult: テスト時のHEADが違っていても内容指紋が一致すればfullを維持する', () => {
+  let createdBody = null;
+  const result = declareTestResult(
+    { pr: '42', repo: 'owner/repo', headSha: SHA },
+    baseDeps({
+      readTestResultFn: () => ({ ok: true, result: { ...RESULT, testedHead: 'b'.repeat(40) } }),
+      ghCreateCommentFn: (_pr, _repo, body) => {
+        createdBody = body;
+        return githubResult('https://github.com/owner/repo/pull/42#issuecomment-1006');
+      },
+    }),
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.provenance, 'test-runner');
+  assert.equal(result.scope, 'full');
+  assert.match(createdBody, /fail: 0, pass: 1826/);
 });
 
 test('declareTestResult: GitHub の既存コメント取得失敗は申告失敗として返す', () => {

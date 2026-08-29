@@ -100,6 +100,7 @@ function tempWorkspace() {
 }
 
 const SHA = '0123456789abcdef0123456789abcdef01234567'; // 40桁の16進数
+const CONTENT_HASH = 'a'.repeat(64);
 const BRANCH = 'issue-374-senior-coder-test-declaration';
 const REPO = 'owner/repo';
 const TITLE = '修正pushのたびにテスト結果の申告を既定で行えるようにする';
@@ -498,10 +499,11 @@ test('終了コード: テストが赤（fail>0）でも exit 0 で完走し、�
     cancelled: 0,
     skipped: 0,
     todo: 0,
+    testedContentHash: CONTENT_HASH,
   });
   const result = withGuardBypassed(() => mod.pushAndDeclare({
     issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
-  }));
+  }, { commitContentHashFn: () => CONTENT_HASH }));
 
   assert.equal(result.exitCode, 0, '赤でも一連は完走して赤を申告する（関門を設けない）');
   // 申告本体（declareTestResult のコメント投稿）が失敗件数を載せている
