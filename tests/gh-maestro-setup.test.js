@@ -68,10 +68,6 @@ function setUpTrackedGithooks(dir) {
     "if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then",
     '  node scripts/sync-rules.js || exit 1',
     'fi',
-    "if git diff --cached --name-only | grep -q '^AGENTS\\.md$'; then",
-    '  node scripts/sync-agents-md.js || exit 1',
-    '  git add CLAUDE.md || exit 1',
-    'fi',
     '',
   ].join('\n'), 'utf8');
   gitIn(dir, 'add', '.githooks');
@@ -92,9 +88,9 @@ test('新規プロジェクトにはsync-rulesフックのみを設置し、chec
     // Issue #283: フックからのテスト実行は廃止した。
     assert.doesNotMatch(preCommit, /gh-maestro:checks/);
     assert.doesNotMatch(preCommit, /run-checks/);
-    // Issue #282: 設置するブロックには規約文書の同期とコミット反映も含める。
-    assert.match(preCommit, /sync-agents-md\.js/);
-    assert.match(preCommit, /git add CLAUDE\.md/);
+    // Issue #419: AGENTS.md と CLAUDE.md の同期ブロックは設置しない。
+    assert.doesNotMatch(preCommit, /sync-agents-md\.js/);
+    assert.doesNotMatch(preCommit, /git add CLAUDE\.md/);
 
     assert.equal(fs.existsSync(path.join(dir, '.git', 'hooks', 'pre-push')), false,
       'pre-push フックは作られないこと');
@@ -237,13 +233,13 @@ test('core.hooksPathが追跡下の.githooksを指し必要な呼び出しが揃
   });
 });
 
-test('core.hooksPathが追跡下の.githooksを指すがsync-agents-md呼び出しが無い場合、未導入と警告し書き換えない', () => {
+test('core.hooksPathが追跡下の.githooksを指すがsync-rules呼び出しが無い場合、未導入と警告し書き換えない', () => {
   withGitProject((dir) => {
     fs.mkdirSync(path.join(dir, '.githooks'), { recursive: true });
     fs.writeFileSync(path.join(dir, '.githooks', 'pre-commit'), [
       '#!/bin/sh',
-      "if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then",
-      '  node scripts/sync-rules.js || exit 1',
+      "if git diff --cached --name-only | grep -q '^AGENTS\\.md$'; then",
+      '  echo old AGENTS synchronization',
       'fi',
       '',
     ].join('\n'), 'utf8');
@@ -257,7 +253,8 @@ test('core.hooksPathが追跡下の.githooksを指すがsync-agents-md呼び出�
 
     assert.equal(fs.readFileSync(path.join(dir, '.githooks', 'pre-commit'), 'utf8'), before);
     assert.match(r.stderr, /未導入/);
-    assert.match(r.stderr, /sync-agents-md 呼び出し/);
+    assert.match(r.stderr, /sync-rules 呼び出し/);
+    assert.doesNotMatch(r.stderr, /sync-agents-md/);
     assert.match(r.stderr, /追記してください/);
   });
 });
@@ -290,8 +287,8 @@ test('core.hooksPathがgit無視対象のディレクトリを指す場合、そ
 
     const hook = fs.readFileSync(path.join(dir, '.githooks-ignored', 'pre-commit'), 'utf8');
     assert.match(hook, /# gh-maestro:sync-rules:v2/);
-    assert.match(hook, /sync-agents-md\.js/);
-    assert.match(hook, /git add CLAUDE\.md/);
+    assert.doesNotMatch(hook, /sync-agents-md\.js/);
+    assert.doesNotMatch(hook, /git add CLAUDE\.md/);
   });
 });
 
@@ -304,7 +301,8 @@ test('core.hooksPathがワークツリー外（絶対パス）を指す場合、
       assert.equal(r.status, 0, r.stderr);
       const hook = fs.readFileSync(path.join(outside, 'pre-commit'), 'utf8');
       assert.match(hook, /# gh-maestro:sync-rules:v2/);
-      assert.match(hook, /sync-agents-md\.js/);
+      assert.doesNotMatch(hook, /sync-agents-md\.js/);
+      assert.doesNotMatch(hook, /git add CLAUDE\.md/);
     });
   } finally {
     fs.rmSync(outside, { recursive: true, force: true });
@@ -346,10 +344,6 @@ test('管理対象のフック置き場では、追跡下のpre-pushを書き換
       "if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then",
       '  node scripts/sync-rules.js || exit 1',
       'fi',
-      "if git diff --cached --name-only | grep -q '^AGENTS\\.md$'; then",
-      '  node scripts/sync-agents-md.js || exit 1',
-      '  git add CLAUDE.md || exit 1',
-      'fi',
       '',
     ].join('\n'), 'utf8');
     const prePushContent = [
@@ -378,7 +372,6 @@ test('同期呼び出しがコメント内だけにある追跡下フックは�
     fs.writeFileSync(path.join(dir, '.githooks', 'pre-commit'), [
       '#!/bin/sh',
       '# node scripts/sync-rules.js',
-      '# node scripts/sync-agents-md.js && git add CLAUDE.md',
       'echo custom-hook',
       '',
     ].join('\n'), 'utf8');
@@ -403,8 +396,6 @@ test('同期呼び出しがecho等の実行されない文として現れるだ�
     fs.writeFileSync(path.join(dir, '.githooks', 'pre-commit'), [
       '#!/bin/sh',
       'echo "node scripts/sync-rules.js"',
-      'echo node scripts/sync-agents-md.js',
-      'echo "git add CLAUDE.md"',
       '',
     ].join('\n'), 'utf8');
     gitIn(dir, 'add', '.githooks');

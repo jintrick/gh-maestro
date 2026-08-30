@@ -1,5 +1,5 @@
 'use strict';
-// sync-failure.js — 同期スクリプト（sync-agents-md.js / sync-rules.js）の失敗記録と削除（Issue #393）。
+// sync-failure.js — 同期スクリプトの失敗記録と削除（Issue #393）。
 //
 // pre-commit フックでの同期スクリプト実行時、コミットを中断させずに失敗した事実を
 // <workspace>/.gh-maestro/sync-failures/<kind>.yaml に永続化する。
@@ -29,7 +29,7 @@ function getHeadSha(cwd, workspace) {
 /**
  * 同期スクリプトの失敗を <workspace>/.gh-maestro/sync-failures/<kind>.yaml に記録する。
  *
- * @param {string} kind 'sync-agents-md' | 'sync-rules' 等
+ * @param {string} kind 同期処理を識別する名前
  * @param {string} errorMsg 失敗理由のエラーメッセージ
  * @param {string} [cwd=process.cwd()] HEAD SHA解決に試行するcwd
  */
@@ -59,7 +59,7 @@ function recordSyncFailure(kind, errorMsg, cwd = process.cwd()) {
 /**
  * 同期成功時に <workspace>/.gh-maestro/sync-failures/<kind>.yaml が存在すれば削除する。
  *
- * @param {string} kind 'sync-agents-md' | 'sync-rules' 等
+ * @param {string} kind 同期処理を識別する名前
  */
 function clearSyncFailure(kind) {
   const workspace = resolveWorkspace();

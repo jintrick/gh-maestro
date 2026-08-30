@@ -3,7 +3,7 @@
 // worktreeを準備し、ワーカーをheadless（画面なし）で起動する
 //
 // ⚠️  このファイルでフロー変更（環境変数・自動前処理・プロンプト配信方法）をコミットするとき、
-//    コミット前に /audit-worker-skills を実行すること（CLAUDE.md「スキルとスクリプトの整合性ルール」参照）
+//    コミット前に /audit-worker-skills を実行すること（AGENTS.md「スキルとスクリプトの整合性ルール」参照）
 //
 // Usage:
 //   node spawn-worker.js \
