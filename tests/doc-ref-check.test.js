@@ -40,12 +40,24 @@ function listMarkdownFiles(dir, out) {
   return out;
 }
 
-function checkFiles(files) {
+// リポジトリ直下の規範文書（AGENTS.md・GLOSSARY.md 等）。ADRを参照するのはここが
+// 中心であり、削除・改番したADRへの参照が残ったままでも検出されなかった（Issue #421）。
+// 直下のみを見る（node_modules 等へ降りない）。
+function listRootMarkdownFiles() {
+  return fs
+    .readdirSync(REPO_ROOT, { withFileTypes: true })
+    .filter(entry => entry.isFile() && entry.name.endsWith('.md'))
+    .filter(entry => !EXCLUDED_FILES.includes(entry.name))
+    .map(entry => path.join(REPO_ROOT, entry.name));
+}
+
+function checkFiles(files, acceptRef = () => true) {
   const failures = [];
   for (const file of files) {
     const content = fs.readFileSync(file, 'utf8');
     const refs = extractMdRefs(content);
     for (const ref of refs) {
+      if (!acceptRef(ref)) continue;
       if (!resolveRefExists(REPO_ROOT, file, ref.target, { isAbsolute: ref.isAbsolute })) {
         failures.push(`${path.relative(REPO_ROOT, file)}:${ref.line} -> ${ref.target}`);
       }
@@ -203,6 +215,15 @@ test('docs/**/*.md と skills/**/*.md 内の.md言及が実在するファイル
   assert.ok(files.length > 0, 'ドキュメント/スキルファイルが1件も見つからなかった');
   const failures = checkFiles(files);
   assert.deepEqual(failures, [], `存在しないパスへの言及が見つかりました:\n${failures.join('\n')}`);
+});
+
+test('リポジトリ直下の規範文書からのパス言及が実在するファイルを指している', () => {
+  const files = listRootMarkdownFiles();
+  assert.ok(files.length > 0, 'リポジトリ直下のMarkdownが1件も見つからなかった');
+  // 直下の文書では `SKILL.md` のような裸のファイル名が、特定のファイルではなく
+  // 種類を指す一般名詞として使われる。パス区切りを含む言及だけを実在検証する。
+  const failures = checkFiles(files, ref => ref.target.includes('/'));
+  assert.deepEqual(failures, [], `存在しないパスへの言及が見つかりました: ${failures.join(' / ')}`);
 });
 
 test('意図的に壊れたパスへの言及を含むフィクスチャで失敗を検出できる', () => {
