@@ -1,6 +1,7 @@
 ---
 paths:
-  - "skills/**"
+  - "skills/gh-maestro-orchestrator/SKILL.md"
+  - "tests/orchestrator-step-numbering.test.js"
 ---
 
 # 工程の構造宣言を更新する
