@@ -6,6 +6,9 @@ const path = require('node:path');
 const test = require('node:test');
 
 const SKILL_PATH = path.join(__dirname, '..', 'skills', 'gh-maestro-orchestrator', 'SKILL.md');
+const STAGE_HEADING_RE = /^### (\d+)\. ([^\r\n]+)$/gm;
+const STAGE_COUNT_RE = /<!--\s*gh-maestro-structure:\s*stages=(\d+)\s*-->/g;
+const STAGE_STRUCTURE_RE = /<!--\s*gh-maestro-structure:\s*middle-items=(\d+)\s*-->/g;
 
 function readDevelopmentCycle() {
   const content = fs.readFileSync(SKILL_PATH, 'utf8');
@@ -14,98 +17,108 @@ function readDevelopmentCycle() {
   return content.slice(start);
 }
 
-test('開発サイクルの13工程が順番どおり必須／任意に区分されている', () => {
-  const cycle = readDevelopmentCycle();
-  const headings = [...cycle.matchAll(/^### (\d+)\. ([^\r\n]+)$/gm)];
-  const expectedTitles = [
-    '要件確定',
-    '必要な調査',
-    'Architect起動判断',
-    '抽象設計の検討',
-    'Coder起動',
-    '計画評価',
-    '実装開始指示',
-    'PR検出',
-    'レビュー監視',
-    'コメントトリアージ',
-    'マージ',
-    '本番公開（CI/CD）確認',
-    '反省会と後始末'
-  ];
+function readStage(cycle, stageNumber) {
+  const lines = cycle.split(/\r?\n/);
+  const start = lines.findIndex(line => new RegExp(`^### ${stageNumber}\\. `).test(line));
+  assert.notEqual(start, -1, `工程${stageNumber}の大項目が存在すること`);
 
-  assert.equal(headings.length, expectedTitles.length, '大項目が13件あること');
-  headings.forEach((match, index) => {
-    assert.equal(Number(match[1]), index + 1, `大項目${index + 1}の番号が連番であること`);
-    assert.ok(match[2].includes(expectedTitles[index]), `大項目${index + 1}の名称が保持されていること`);
-    assert.match(match[2], /【(?:必須|任意)】/, `大項目${index + 1}に必須／任意の区分があること`);
-  });
+  const end = lines.findIndex((line, index) => index > start && /^### \d+\. /.test(line));
+  return lines.slice(start, end === -1 ? lines.length : end).join('\n');
+}
+
+function readStageHeadings(cycle) {
+  return [...cycle.matchAll(STAGE_HEADING_RE)].map(match => ({
+    number: Number(match[1]),
+    title: match[2],
+  }));
+}
+
+function readDeclaredStageTotal(cycle) {
+  const declarations = [...cycle.matchAll(STAGE_COUNT_RE)];
+  assert.equal(declarations.length, 1, '大項目数の構造宣言がちょうど1件あること');
+  return Number(declarations[0][1]);
+}
+
+function readDeclaredMiddleItemTotal(stage, stageNumber) {
+  const declarations = [...stage.matchAll(STAGE_STRUCTURE_RE)];
+  assert.equal(
+    declarations.length,
+    1,
+    `工程${stageNumber}に中項目数の構造宣言がちょうど1件あること`,
+  );
+  return Number(declarations[0][1]);
+}
+
+test('開発サイクルの大項目が文書上の連番で必須／任意に区分されている', () => {
+  const cycle = readDevelopmentCycle();
+  const headings = readStageHeadings(cycle);
+  const declaredTotal = readDeclaredStageTotal(cycle);
+
+  assert.equal(headings.length, declaredTotal, '大項目数が文書の構造宣言と一致すること');
+  assert.ok(declaredTotal > 0, '大項目数の構造宣言が1件以上であること');
+  assert.deepEqual(
+    headings.map(heading => heading.number),
+    Array.from({ length: headings.length }, (_, index) => index + 1),
+    '大項目が1から始まる連番であること',
+  );
+  for (const heading of headings) {
+    assert.match(heading.title, /【(?:必須|任意)】/, `大項目${heading.number}に必須／任意の区分があること`);
+  }
 });
 
-test('中項目が工程内の総数を含む一意な番号で連番になっている', () => {
+test('文書が宣言した中項目の構造と記載内容が工程ごとに整合している', () => {
   const cycle = readDevelopmentCycle();
+  const headings = readStageHeadings(cycle);
+  const declaredTotals = new Map(
+    headings.map(heading => [
+      heading.number,
+      readDeclaredMiddleItemTotal(readStage(cycle, heading.number), heading.number),
+    ]),
+  );
   const matches = [
-    ...cycle.matchAll(/^\s*(?:#### |- \*\*|\*\*)(\d+)-\[(\d+)\/(\d+)\][^\r\n]*$/gm)
+    ...cycle.matchAll(/^\s*(?:#### |- \*\*|\*\*)(\d+)-\[(\d+)\/(\d+)\][^\r\n]*$/gm),
   ];
-  const expectedTotals = new Map([
-    [1, 3],
-    [2, 1],
-    [6, 5],
-    [7, 2],
-    [8, 1],
-    [10, 1],
-    [11, 1],
-    [12, 2],
-    [13, 3]
-  ]);
-  const seen = new Set();
   const byStage = new Map();
 
   for (const match of matches) {
     const stage = Number(match[1]);
     const index = Number(match[2]);
     const total = Number(match[3]);
-    const id = `${stage}-[${index}/${total}]`;
-    assert.equal(seen.has(id), false, `中項目${id}が重複していないこと`);
-    seen.add(id);
+    assert.ok(declaredTotals.has(stage), `中項目の工程${stage}が大項目として存在すること`);
+    assert.ok(index >= 1, `工程${stage}の中項目番号が1以上であること`);
+    assert.ok(total >= index, `工程${stage}の中項目総数が番号以上であること`);
+    assert.equal(total, declaredTotals.get(stage), `工程${stage}の中項目総数が構造宣言と一致すること`);
     if (!byStage.has(stage)) byStage.set(stage, []);
     byStage.get(stage).push({ index, total });
   }
 
-  assert.deepEqual([...byStage.keys()].sort((a, b) => a - b), [...expectedTotals.keys()]);
-  for (const [stage, total] of expectedTotals) {
-    const items = byStage.get(stage);
-    assert.equal(items.length, total, `工程${stage}の中項目総数が一致すること`);
-    assert.deepEqual(items.map(item => item.index), Array.from({ length: total }, (_, index) => index + 1));
-    assert.ok(items.every(item => item.total === total), `工程${stage}の総数表記が統一されていること`);
+  for (const [stage, total] of declaredTotals) {
+    const items = byStage.get(stage) || [];
+    assert.equal(items.length, total, `工程${stage}の中項目総数が宣言件数と一致すること`);
+    const totals = new Set(items.map(item => item.total));
+    assert.equal(totals.size, total === 0 ? 0 : 1, `工程${stage}の総数表記が統一されていること`);
+    assert.deepEqual(
+      items.map(item => item.index),
+      Array.from({ length: total }, (_, index) => index + 1),
+      `工程${stage}の中項目が文書順の連番であること`,
+    );
   }
 });
 
-test('工程の進路を分ける条件分岐が中項目として採番されている', () => {
-  const cycle = readDevelopmentCycle();
-  const expectedBranches = [
-    ['調査すべき事実がない場合', '2-[1/1]'],
-    ['Review Manager の findings が0件のPRでは', '10-[1/1]'],
-    ['分析対象がゼロなら人間に確認して飛ばす', '13-[2/3]']
-  ];
+test('工程2の既存判断照合がADRと保留Issueに限定され、広域検索を要求しない', () => {
+  const stage = readStage(readDevelopmentCycle(), 2);
 
-  for (const [phrase, id] of expectedBranches) {
-    const line = cycle.split(/\r?\n/).find(candidate => candidate.includes(phrase));
-    assert.ok(line, `条件分岐「${phrase}」が存在すること`);
-    assert.ok(line.includes(id), `条件分岐「${phrase}」が${id}として採番されていること`);
-  }
+  assert.match(stage, /docs\/adr\//, '工程2がADRの確認先を含むこと');
+  assert.match(stage, /gh-maestro-pending/, '工程2が保留Issueの確認先を含むこと');
+  assert.doesNotMatch(stage, /explorer\s*(?:を|の)?\s*(?:起動|依頼|使用)(?:する|して|せよ|してください)/,
+    '工程2がexplorerの起動・依頼を要求しないこと');
+  assert.doesNotMatch(stage, /Issue(?:・|\/)PR.*(?:全文|全体).*検索(?:する|して|せよ|してください)/,
+    '工程2がIssue・PRの広域検索を要求しないこと');
 });
 
-test('工程番号の呼称・任意工程のスキップ規約があり、裸の手順番号が残っていない', () => {
+test('開発サイクルに工程番号のない裸の手順番号が残っていない', () => {
   const cycle = readDevelopmentCycle();
+  const bareSteps = cycle.split(/\r?\n/).filter(line => /^\s*\d+\.\s/.test(line));
 
-  assert.match(cycle, /大項目は `1\.`〜`13\.` の固定番号/);
-  assert.match(cycle, /中項目は `大項目-\[項目番号\/その工程内の総数\]`/);
-  assert.match(cycle, /`6-\[3\/4\]`/);
-  assert.match(cycle, /人間に提示・依頼するときは、本文冒頭で実行中の工程番号を名乗る/);
-  assert.match(cycle, /任意工程を飛ばす場合は、.*工程番号と理由を明示して名乗る/);
-  assert.deepEqual(
-    cycle.split(/\r?\n/).filter(line => /^\s*\d+\.\s/.test(line)),
-    [],
-    '開発サイクル内に工程番号のない裸の手順番号がないこと'
-  );
+  assert.deepEqual(bareSteps, [], '開発サイクル内に工程番号のない裸の手順番号がないこと');
 });

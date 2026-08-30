@@ -165,7 +165,7 @@ msg-poll が `未初期化です。reset-session.js で初期化してくださ�
 #### セッション開始時の同期失敗確認（sync-failures）
 
 セッション開始時、Monitor（`msg-poll`）の起動とあわせて `$WORKSPACE/.gh-maestro/sync-failures/` ディレクトリを確認する。
-ファイルが存在する場合（例: `sync-agents-md.yaml`, `sync-rules.yaml`）、過去のコミット時に規約同期スクリプトが失敗したまま残っている状態である。ファイルの内容（失敗時刻・理由・HEAD SHA等）を読み、人間に「規約同期が失敗した記録があります」と報告して手動での対処（AGENTS.md / CLAUDE.md / .claude/rules の確認・再同期）を促す。
+ファイルが存在する場合（例: `sync-rules.yaml`）、過去のコミット時に規約同期スクリプトが失敗したまま残っている状態である。ファイルの内容（失敗時刻・理由・HEAD SHA等）を読み、人間に「規約同期が失敗した記録があります」と報告して手動での対処（`.claude/rules/` の確認・再同期）を促す。
 
 
 ### worker への指示配送（Inbox Supervisor）
@@ -229,6 +229,7 @@ msg-poll が `未初期化です。reset-session.js で初期化してくださ�
 ## 開発サイクル
 
 本節配下の13工程を順に回す。
+<!-- gh-maestro-structure: stages=13 -->
 
 **番号と呼称の規約**:
 - 大項目は `1.`〜`13.` の固定番号で表し、各工程見出しに必須／任意を明記する。
@@ -236,11 +237,14 @@ msg-poll が `未初期化です。reset-session.js で初期化してくださ�
 - 人間に提示・依頼するときは、本文冒頭で実行中の工程番号を名乗る。大項目だけを示す場合は `工程6`、中項目まで特定できる場合は `工程6-[3/4]` とする。
 - 任意工程を飛ばす場合は、`工程2（任意）をスキップ：<理由>` のように工程番号と理由を明示して名乗る。
 
+中項目数の構造宣言は各大項目の見出し直下に置く。中項目を追加・削除したときは、対応する宣言も同時に更新する。
+
 **これは上から順に自分の意思で実行する手順書ではなく、イベント駆動のループである。** 工程6は計画報告の `NEW_MESSAGE`、工程9は `PR_DETECTED`、工程10は `REVIEW_COMMENT` / `PR_COMMENT` / `PR_REVIEW`、工程12は `PR_MERGED` の到着で入る。通知を待たずに先回りして実行しない。
 
 **同時に進行させる Issue は常に1件だけである。** 進行中の Issue が終わるまで、別の Issue を起票してはならない。進行中に別の問題が見つかった場合は、その場で起票せず保留Issue（`gh-maestro-pending` ラベル）に積む。保留Issueはそのためにある。ワーカーの応答を待っている時間も、別件に着手してよい時間ではない。
 
 ### 1. 要件確定【必須】
+<!-- gh-maestro-structure: middle-items=3 -->
 
 人間と協働して対象 Issue を起草・作成し、目的・振る舞い・制約・対象外・受け入れ条件・既決事項・未決事項を Issue 本文で確定する。単独で要件を決めない。
 
@@ -279,6 +283,7 @@ node "{{SCRIPTS_PATH}}/update-issue.js" --issue <N> --title "<正式タイトル
 `--workspace` は必ず明示する（省略するとassistant起動先がずれる）。
 
 ### 2. 必要な調査【任意】
+<!-- gh-maestro-structure: middle-items=0 -->
 
 確定した要件を入力として適切なワーカーに必要な事実だけを調査させ、結果を統合可能な形に圧縮する（どのワーカーを使うかは「ワーカーの使い分け」参照）。architect を起動する場合だけ、その圧縮結果を入力に使う。調査結果から要件を勝手に変更しない。
 
@@ -286,9 +291,12 @@ node "{{SCRIPTS_PATH}}/update-issue.js" --issue <N> --title "<正式タイトル
 
 explorerは1つのIssueにつき1つ。クローズまで再利用し、次々に起動しない（起動のたびに初期化でトークンを浪費するため）。
 
+追加調査の有無にかかわらず、確定した要件と同じ提案が過去に決まっていないか、または見送られていないかを設計開始時に確認する。確認先は `docs/adr/` と保留Issue #14（`gh-maestro-pending`）だけとし、Issue・PRの全文検索はしない。どちらも既知で量が限定されているため、explorer を起動しない。該当する判断があれば理由をIssue本文に統合して人間に提示し、要件を取り下げるかどうかは人間に委ねる。
+
 調査すべき事実がない場合は、`工程2（任意）をスキップ：追加調査が不要` のように理由を明示して次へ進む。
 
 ### 3. Architect起動判断【必須】
+<!-- gh-maestro-structure: middle-items=0 -->
 
 Architectを起動するかどうかの判断自体は必須である。`gh-maestro-architect` は任意の相談役であり、**起動しないのが既定**である。規模や新規性だけを理由に必須起動してはならない。起動契機は「4. 抽象設計の検討」（実装前）と「6. 計画評価」での計画レビューの2つで、いずれも必須ゲートではない。
 
@@ -297,14 +305,17 @@ Architectを起動するかどうかの判断自体は必須である。`gh-maes
 作業の分割単位・PRの粒度・コミットの積み方・着手順序といった進め方は orchestrator 自身の責務である。architect はワーカーの作業手順に関する情報を持たないため、これらを相談してはならない。architect の設計コメントが進め方に言及していても、既決事項として Issue 本文に書き写さない。
 
 ### 4. 抽象設計の検討【任意】
+<!-- gh-maestro-structure: middle-items=0 -->
 
 architect を起動した場合だけ、確定済み要件と圧縮済み調査コンテクストを渡し、対象 Issue への設計コメントを得る。不足情報・矛盾が返ったら、調査または人間確認へ戻る。手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/architect.md` に従う。
 
 ### 5. Coder起動【必須】
+<!-- gh-maestro-structure: middle-items=0 -->
 
 実装ワーカーを起動する。タスクの特長（設計上の複雑さや影響の大きさなど）を自律的に判断して `gh-maestro-coder` と `gh-maestro-senior-coder` のどちらを使うか選択する（「ワーカーの使い分け」「ワーカーの起動」参照）。**コーダーは実装に着手する前に、必ず計画をorchestratorに報告する。**
 
 ### 6. 計画評価【必須】
+<!-- gh-maestro-structure: middle-items=5 -->
 
 計画報告を受け取ったら、以下の手順で評価する。最終的な承認は必ず人間が行う。
 
@@ -355,6 +366,7 @@ orchestrator評価: <承認推奨 or 要修正（理由）>
 ```
 
 ### 7. 実装開始指示【必須】
+<!-- gh-maestro-structure: middle-items=2 -->
 
 人間の判断を受けて：
 
@@ -384,6 +396,7 @@ orchestrator評価: <承認推奨 or 要修正（理由）>
   ```
 
 ### 8. PR検出【必須】
+<!-- gh-maestro-structure: middle-items=1 -->
 
 コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <アンカーIssue番号>` を起動する。**`persistent: true` を設定すること**（付け忘れると既定の5分でMonitorがタイムアウトし、レビュー中に通知が届かなくなる）。**このMonitor 1本がPR検出からマージ検知まで完結する**ため、以後別途起動し直すことはない。
 `--base-branch` にはセッション変数 `$BASE_BRANCH` を渡すことで、PR作成時のベースブランチ不一致を検出できる。
@@ -412,6 +425,7 @@ PR検出時の出力:
 Monitorが落ちた場合の`poll-pr.js`再起動、Review Managerが起動しなかった／失敗した場合の再起動は、いずれも `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` の「PR監視・Review Managerの再起動」を参照する。**再レビューが不要な場合は`poll-pr.js`に`--no-review-manager`を付けること**（付け忘れると検出のたびにレビューが蒸し返されquotaを浪費する）。
 
 ### 9. レビュー監視【必須】
+<!-- gh-maestro-structure: middle-items=0 -->
 
 PR番号が確定したら、レビューコメントとマージ状態の通知を処理する。
 
@@ -430,12 +444,14 @@ PR番号が確定したら、レビューコメントとマージ状態の通知
 - ポーリング間隔は30秒（`poll-reviews.js`の既定値）。アクティビティがなければ自動で間隔が延びる
 
 ### 10. コメントトリアージ【任意】
+<!-- gh-maestro-structure: middle-items=1 -->
 
 PRに新しいレビューコメントが届くたびに、orchestratorは指摘を分類・評価するところまでを行う。**実際にコーダーに修正依頼する／無視する／保留Issueに積むという実行アクションは、分類やスコアの値に関わらず、必ず人間の明示的な決定を経てから行う。** 「バグ・セキュリティだから」「命名は機械的判定だから」という理由で人間の確認を省略してよい経路は存在しない。
 
 **10-[1/1] findings の有無による分岐**: Review Manager の findings が0件のPRではトリアージは発生しない。1件以上あるときにだけ `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/triage.md` を開き、そこに従って分類・実害度スコア／対応コストの付与・人間への提示・回答に従った実行を行う。
 
 ### 11. マージ【必須】
+<!-- gh-maestro-structure: middle-items=1 -->
 
 `REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の条件を満たすときだけ：
 
@@ -456,6 +472,7 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
 - どうしても元のブランチをmerge/rebaseで復元させる場合、**revert後に一切触っていない新規追加ファイルは、コンフリクト一覧に出ないまま3-way mergeが無言で「削除」を採用することがある**（共通祖先＝revert前のマージ元コミット、BASE_BRANCH側＝削除、ブランチ側＝無変更、という組み合わせで自動的に削除が選ばれるため）。復元後はコーダーに`git diff <revert前の直前コミット> -- <変更ファイル一覧>`で無差分を確認させてからcommitさせること。
 
 ### 12. 本番公開（CI/CD）確認【必須】
+<!-- gh-maestro-structure: middle-items=2 -->
 
 `PR_MERGED` を検出し `BASE_BRANCH` を最新化した後、反省会に進む前に必ず本番公開（CI/CD）ワークフローの実行結果を自動で確認する。
 
@@ -478,6 +495,7 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
     - 本番公開（CI/CD）ワークフローが未設定・存在しない旨を確認し、そのまま反省会へ進む。
 
 ### 13. 反省会と後始末【必須】
+<!-- gh-maestro-structure: middle-items=3 -->
 
 `PR_MERGED` を検出し、本番公開（CI/CD）確認が完了したら、Issue クローズ・worktree 削除の前に反省会を実施する。目的は「同じ指摘を次回のコーダーが最初から回避できるようにすること」であり、個人の批判ではない。
 

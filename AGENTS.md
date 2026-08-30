@@ -1,141 +1,153 @@
-# gh-maestro Agent Guide
+# gh-maestro エージェントガイド
 
-gh-maestro is a local orchestration system that uses GitHub as durable state and coordinates multiple AI agents across planning, implementation, review, merge, and retrospective.
+gh-maestro は、GitHubを永続的な状態として使い、複数のAIエージェントを計画・実装・レビュー・マージ・反省会まで調整するローカルオーケストレーションシステムである。
 
-This file is for agent-facing operating rules and project intent. Do not use it as a script inventory or architecture dump; details that are obvious from the code should stay in the code.
+このファイルには、エージェントが従う運用規則とプロジェクトの意図を書く。スクリプト一覧やアーキテクチャのダンプにはしない。コードを読めば分かる細部はコードに残す。
 
-## Getting Oriented
+## 最初に確認すること
 
-Treat yourself like a new team member joining the project: before diagnosing anything, orient yourself in what has actually happened recently.
+診断を始める前に最近実際に起きたことを確認し、インストール済みコピーの鮮度は実測する。
 
-- Check recent merged PRs and issue activity (`gh pr list --state merged --limit 15`, `gh issue list ...`) before asserting what state the code or config is in. Not knowing the recent issues/PRs is not an acceptable starting point for any agent working on this project — it's the baseline, not an optional deep-dive.
-- If something looks broken or stale, check whether a recent PR already addressed it (or explicitly didn't) before concluding it's an unaddressed gap.
+- コードや設定がどの状態かを断定する前に、最近マージされたPRとIssueの動きを確認する（`gh pr list --state merged --limit 15`、`gh issue list ...`）。最近のIssue/PRを知らずに作業を始めることは、深掘り調査を省略することではなく、開始条件を満たしていない。
+- 壊れている、または古いように見えるものがあれば、未対応と決める前に最近のPRで既に直っていないか、明示的に見送られていないかを確認する。
+- 判断の背景と採用理由: `docs/adr/0002-recent-context-before-diagnosis.md`
 
-## Operating Model
+## 運用モデル
 
-gh-maestro is built around quota economics.
+gh-maestroは割り当て可能なモデル資源を、判断の価値に応じて使い分ける。
 
-- Use expensive models for judgment: requirements, design tradeoffs, review triage, and human collaboration.
-- Use cheaper or faster workers for bounded execution: implementation, search-heavy investigation, log reading, and mechanical review passes.
-- Workers do not own product decisions, merge decisions, or priority calls. They report facts, produce code, or emit structured findings.
-- The orchestrator and the human own approval, rejection, prioritization, and final merge judgment.
+- 要件、設計上のトレードオフ、レビュー結果のトリアージ、人間との協働には高価なモデルを使う。
+- 範囲が限定された実行、検索量の多い調査、ログの読解、機械的なレビューには安価または高速なワーカーを使う。
+- ワーカーは製品判断、マージ判断、優先順位の判断を持たない。事実、コード、構造化された指摘を返す。
+- 承認、却下、優先順位、最終的なマージ判断はorchestratorと人間が持つ。
+- 判断の背景と採用理由: `docs/adr/0003-value-based-agent-allocation.md`
 
-## Agent Roles
+## エージェントの役割
 
-Keep role boundaries explicit:
+役割の境界を明確に保つ。
 
-- Orchestrator: collaborates with the human, drafts Issues, starts workers, triages review output, and coordinates merge/retrospective.
-- Coder: implements one scoped Issue in its own worktree.
-- Explorer: gathers facts only.
-- Diagnostician: diagnoses bugs and reports root cause, impact, and fix direction.
-- Review Manager: coordinates independent review passes and emits structured findings; deterministic scripts handle posting.
+- orchestrator: 人間と協働し、Issueを起草し、ワーカーを起動し、レビュー結果をトリアージし、マージと反省会を調整する。
+- coder: 1つの範囲が定まったIssueを自分のworktreeで実装する。
+- explorer: 事実だけを収集する。
+- diagnostician: バグの根本原因、影響範囲、修正方針を診断する。
+- Review Manager: 独立したレビュー観点を調整し、構造化された指摘を返す。投稿は決定論的なスクリプトが行う。
 
-When adding or changing roles, prefer data-driven configuration and shared launch helpers over per-agent special cases.
+役割を追加・変更する場合は、役割ごとの特殊処理ではなく、データ駆動の設定と共有起動ヘルパーを優先する。
 
-## Review Policy
+判断の背景と採用理由: `docs/adr/0008-data-driven-agent-launch.md`
 
-Automated review is advisory.
+## レビュー方針
 
-- Automated review must not approve PRs.
-- Keep review findings structured, reproducible, and anchored to changed code when possible.
-- Do not rely on a single agent's judgment for broad review coverage; preserve independent review perspectives.
-- Deterministic validation and publishing should stay outside model prompts where practical.
+自動レビューは助言である。
 
-## Source Of Truth
+- 自動レビューでPRを承認してはならない。
+- レビュー指摘は構造化し、可能な限り変更箇所に結び付け、再現可能にする。
+- 広い範囲をレビューするとき、1つのエージェントの判断だけに依存しない。独立した観点を保つ。
+- 決定論的な検証と公開は、可能な限りモデルのプロンプトの外に置く。
 
-Canonical sources live in the repository, not installed copies.
+## 正本
 
-- Edit skill sources under `skills/`.
-- Do not hand-edit installed copies under user-level skill directories or generated agent directories.
-- Prefer updating `skills/agents.yaml` for default agent configuration.
-- Keep scripts in `scripts/`; do not hide executable logic inside skill directories.
+正本はリポジトリ内にあり、インストール済みコピーにはない。
 
-After changing skills, script distribution, or agent defaults, run **from the `dev` branch** (after the changes are merged):
+- 編集するスキルはリポジトリの`skills/`配下にあるものとする。
+- ユーザー領域のインストール済みコピーや生成されたエージェントディレクトリを直接編集しない。
+- 既定のエージェント設定を変更するときは、`skills/agents.yaml`の更新を優先する。
+- 実行可能な処理はスキルディレクトリに隠さず、`scripts/`に置く。
+- 判断の背景と採用理由: `docs/adr/0004-repository-skills-source-of-truth.md`
+
+スキル、スクリプト配布、エージェントの既定値を変更した場合は、変更をマージした後、`dev`ブランチから次を実行する。
 
 ```sh
 node scripts/install.js
 ```
 
-**Never run `node scripts/install.js` from a WIP/unmerged feature branch.** It writes to the machine-global `~/.gh-maestro/` shared directory and will overwrite installed state with unreviewed, unmerged code.
+**WIPまたは未マージのブランチから`node scripts/install.js`を実行してはならない。** このコマンドはマシン全体で共有される`~/.gh-maestro/`を書き換え、レビュー前のコードをインストール済み状態にしてしまう。
 
-**Before claiming the installed copy (`~/.gh-maestro/`) is stale relative to `dev`, verify it concretely — do not assume.** A quick `diff` between an installed file and `git show dev:<path>` piped through process substitution can produce a misleading wall of differences on Windows/Git Bash for reasons unrelated to actual content drift (line-ending handling, fifo/process-substitution quirks). Before concluding "install.js hasn't been run" or blaming stale code for an error:
-- Compare actual resolved *behavior*, not raw file diff output — e.g., call the relevant function directly (`resolveAgentConfig(...)`) and inspect the real result.
-- Cross-check file mtimes against the actual merge timestamps of the commits in question (`git show -s --format=%ci <sha>` vs the installed file's mtime), not vibes.
-- If a diff looks suspiciously total (entire file "replaced" rather than a few lines changed), suspect the diff invocation itself before suspecting the file.
-Getting this wrong wastes the human's time chasing a diagnosis that was never real, and undermines trust in the orchestrator's judgment on questions the human cannot easily verify themselves.
+インストール済みコピーが`dev`に対して古いと主張する前に、具体的な事実を確認する。プロセス置換を使った`diff`をそのまま信じてはならない。Windowsでは改行、FIFO、プロセス置換の挙動により、内容の一部変更がファイル全体の差分に見えることがある。関係する関数（例: `resolveAgentConfig(...)`）を直接呼び、実際の結果を確認する。さらに、対象コミットのマージ時刻（`git show -s --format=%ci <sha>`）とインストール済みファイルの更新時刻を照合する。
 
-## Runtime State vs Managed Storage
+## 実行時状態と管理領域
 
-`~/.gh-maestro/` (home-relative) is installer-managed: `install.js` treats it as authoritative and deletes any top-level entry it did not write itself during that run. `<workspace>/.gh-maestro/` (per-workspace: `workers.json`, `assistants.json`, cursors, etc.) is a different, install.js-untouched location and is fine to write to directly — most of the codebase already does.
+`~/.gh-maestro/`（ホーム相対）はインストーラーの管理領域である。`install.js`は実行時に書き込んだもの以外の最上位項目を削除する。`<workspace>/.gh-maestro/`（`workers.json`、`assistants.json`、カーソルなど）は別の領域で、通常ここへ直接書いてよい。
 
-The actual danger (Issue #214) is not the literal string `.gh-maestro` — dozens of call sites use it legitimately. It's a `workspace` value that, through some resolution bug, becomes equal to (or nested inside) the home directory, which silently turns `<workspace>/.gh-maestro/` into `~/.gh-maestro/` and collides with the managed root. The code that broke looked identical to every other correct call site; only the runtime value of `workspace` was wrong. This is not visible by scanning source code for patterns, so there is no static/CI check for it — grepping for `.gh-maestro` would false-positive on nearly every file that legitimately uses it.
+- `workspace`は必ず`scripts/shared/workspace.js`の`resolveWorkspace()`から取得する。この関数は衝突を検証し、不正なら`null`を返す。独自の解決処理を作らない。
+- `install.js`に削除されてはならない実行時状態（PIDレジストリ、ロックなど）は、`<workspace>/.gh-maestro/`ではなく`scripts/shared/storage-layout.js`の`runtimeRoot()`または`workspaceRuntimeDir()`に置く。`process-lifecycle.js`のPIDレジストリを基準にする。
+- `install.js`が`~/.gh-maestro/`の新しい最上位項目を管理する必要がある場合、先に`storage-layout.js`の`MANAGED_TOP_LEVEL`へ宣言する。宣言なしで`ghMaestroPath()`を呼ぶと即時に失敗する。
+- 確認時は`.gh-maestro`という文字列だけを探さず、対象の`workspace`が`resolveWorkspace()`で得られた値かどうかを確認する。
+- 判断の背景と採用理由: `docs/adr/0005-separate-runtime-and-managed-storage.md`
 
-- Always obtain `workspace` via `scripts/shared/workspace.js`'s `resolveWorkspace()` (which validates against exactly this collision and returns `null` if invalid) rather than inventing new resolution logic.
-- Anything that is live process/runtime state that must never be pruned by `install.js` (PID registries, locks) belongs in `scripts/shared/storage-layout.js`'s `runtimeRoot()` / `workspaceRuntimeDir()`, not `<workspace>/.gh-maestro/` — this keeps it physically separate from the managed root even if the collision above recurs. `process-lifecycle.js`'s PID registry is the reference implementation.
-- If `install.js` itself needs to own a new top-level entry under `~/.gh-maestro/`, declare it in `storage-layout.js`'s `MANAGED_TOP_LEVEL` first — `ghMaestroPath()` throws immediately if a new top-level name isn't declared there.
-- Review checkpoint: don't look for the string `.gh-maestro` (too common to be meaningful); check whether the `workspace` value in play was actually obtained from `resolveWorkspace()`.
+## ヘッドレス処理で再試行ループを作らない
 
-## Headless Retry Is An Anti-Pattern
+**ヘッドレスプロセスにエージェント作業の再試行ループを導入してはならない。** ヘッドレスワーカー（coder、Review Manager、explorer、diagnostician、画面なしで起動されたエージェント）が再試行で解決できそうな失敗に遭遇したら、もう一度実行するのではなく、orchestratorへ1回返す。
 
-**Do not introduce retry loops into headless processes.** When a headless worker (coder, Review Manager, explorer, diagnostician, or any agent launched without a visible pane) hits a failure it might resolve by trying again, it must surface that failure to the orchestrator instead of looping on its own.
+- 失敗は必ず1回orchestratorへ返す。再試行、再起動、人間へのエスカレーション、放棄はorchestratorが決める。
+- これはモデル自身の試行にも、スクリプト内の`while`ループにも適用する。「モデルはいずれ諦める」は上限ではない。
+- プロセス内に上限が必要なら、モデルの裁量ではなく、回数または期限を決定論的なコードで強制する。
+- ファイル名変更や1回のHTTP要求のような、単一の一時的なI/O操作への限定的な再試行は対象外である。禁止するのはエージェント作業を繰り返すループである。
+- 判断の背景と採用理由: `docs/adr/0006-no-headless-agent-retry.md`
 
-A runaway loop inside a headless process is the worst failure mode this system has. Nobody sees it: the orchestrator reads the silence as "the report has not arrived yet" and keeps waiting, the human sees nothing at all, and the model burns quota the entire time. This has already happened in other forms (workers spinning at 100% CPU after their final report).
+## 停止を自動機構に委ねない
 
-- Failures always route to the orchestrator once. The orchestrator decides whether to retry, restart, escalate to the human, or abandon.
-- This applies to the model's own agentic retries as much as to `while` loops in scripts. "The model will give up eventually" is not a bound.
-- Where a bound genuinely must live inside a process, it is enforced by deterministic code (a count or a deadline), never by the model's discretion.
-- Bounded, non-agentic retries around a single transient I/O operation (a file rename, one HTTP request) are not what this rule is about. The rule targets loops that re-run agent work.
+**自動検査でcommit、push、mergeを止めてはならない。** pre-commit / pre-pushでテストを走らせない。CI通過を必須にしない。ブランチ保護で止めない。停止の判断はorchestratorと人間が行い、機械は事実を報告するだけにする。
 
-## Stopping Is A Human Or Orchestrator Decision, Never A Mechanism
+実行者はテスト結果と適用先のcommitを申告し、orchestratorは存在・不在・古さを確認する。環境差を生む再実行を自動化せず、機械的に拒否もしない。失敗が変更と無関係だという判断を、merge提示の機械的な条件にしてはならない。
 
-**Never gate commit, push, or merge on an automated check.** No pre-commit/pre-push hook that runs the test suite, no CI workflow that must pass, no branch protection rule that blocks merging. The orchestrator and the human decide when work stops. Machinery reports facts; it does not hold the gate.
+判断の背景と採用理由: `docs/adr/0001-no-test-gate-on-push.md`
 
-This is a design principle, not a preference, and it has been re-learned the hard way several times:
+## 人間への質問
 
-- **Environment drift makes a second test run a different test run.** A hook or CI runs with different environment variables than the coder's own session, so a suite that is green in the coder's worktree can fail there. A coder told to fix a failure it cannot reproduce has nothing to converge on. This has happened: a coder spent 70 minutes trying to fix a test that was never broken in its own environment.
-- **Blocking push traps the coder.** A coder cannot finish its work without pushing. Gate the push and it cannot complete, cannot report, and loops — the failure mode described in "Headless Retry Is An Anti-Pattern".
-- **Blocking merge traps the human.** A branch protection rule that refuses a red merge also refuses the urgent fix that would make it green.
-- The pre-push test hook was introduced and then removed for exactly these reasons (plus hook environment variables leaking into tests and reaching the real repository, Issue #283). Do not reintroduce it in a new form.
+**1つの発言に質問を2つ含めてはならない。** 質問は発言の末尾に1つだけ置く。取り消せない操作の承認は、選択肢や説明と同じ発言で求めない。まず選択肢の回答を得てから、対象と操作を明示した承認を別に求める（例:「worker-supervisor（PID 22040）を停止しますか？」）。直前に質問が1つだけある場合に限り、「はい」や番号だけの短い返答を承認として扱う。
 
-The replacement pattern is **declare and inspect, never re-run and block**: whoever ran the tests reports the result together with the commit it applies to, and the orchestrator surfaces that record — present, absent, or stale — without interpreting it. Nothing re-runs the suite, so no environment drift is possible, and nothing is ever mechanically refused.
+質問を1つに見せるために疑問符の数だけを数えてはならない。「はい」の返答で実行する操作を数え、複数あるなら発言を分ける。ワーカー起動、実装開始、PR作成、merge、削除、push、プロセス停止などの不可逆操作を、別の判断と同じ承認に含めない。
 
-This also means the orchestrator must not launder a judgement into a fact. "That failure is unrelated to this change" is a judgement and must never gate a merge presentation.
+人間が全文を読まないと答えられない内容について、短い「はい／いいえ」を求めない。長い提案や文書案はファイルまたはGitHubへ置き、承認対象を1つの短い命題にする。承認済みの内容について、同じ文章への再承認を求めない。
 
-## Asking The Human
+判断の背景と採用理由: `docs/adr/0007-one-question-per-human-message.md`
 
-**Never put two questions in one message.** Exactly one question may appear at the end of a message, and never more. Approval for an irreversible action must stand alone — never in the same message as options, explanations, or another question. Get the answer to the options first, then ask for approval naming the target and the operation explicitly ("Stop worker-supervisor (PID 22040)?"). A short reply — a number, "that one", "yes" — counts as approval only when exactly one question preceded it; if there were two, ask which one it answered.
+## コミット操作の規則
 
-This exists because a message that asked "which of these two?" and "shall I run it now?" together let a one-word answer be read as approval for an irreversible kill that was never requested.
+- ファイル変更が承認されたら、追加の指示を待たず同じターンでcommitとpushまで行う。
+- `git reset --hard`を実行する前には、必ず人間へ確認する。予告なしに実行してはならない。
+- pushがnon-fast-forwardで失敗した場合、`git reset --hard`を使わず、状況を報告してから進め方を確認する。
+- コミットフックはテストを実行してcommitを止める仕組みにしない。`.claude/rules/`の同期が失敗してもcommitを止めず、失敗記録（`sync-failures/`）を残して次のセッションで確認できるようにする。
+- 判断の背景と採用理由: `docs/adr/0022-record-sync-failures-without-gating-commits.md`
 
-**Count the actions the "yes" authorizes, not the question marks.** One question mark is not proof the message asks for one thing. Before sending, list what you will do if the answer is yes; if that list has more than one entry, split the message. Never put a reversible judgement and an irreversible operation (spawning a worker, ordering implementation to start, creating a PR, merging, deleting, pushing, stopping a process) behind the same yes.
+## インストールの規則
 
-**Never ask for a yes on text the human must read in full to answer.** A yes/no question makes the human liable for every line above it. Long proposals, full document drafts, and lists of options cannot honestly be answered that way — the human either reads everything or approves something unread. Put the draft in a file or on GitHub, and let the question stand alone as one short line about one proposition. Where approval has already been given, do not ask again for a yes on the resulting text; produce it and report briefly.
+- `node scripts/install.js`はマシン全体で共有される`~/.gh-maestro/`を書き換える。
+- **WIPまたは未マージのブランチから実行してはならない。** `dev`（または`main`）へ変更をマージした後、そのブランチから実行する。
+- エージェントの動作を変える変更では、対応する`skills/**/SKILL.md`も更新されているか、インストール前に確認する。`SKILL.md`を更新せずにスクリプトだけを変更してはならない。
 
-These exist because a message that bundled "send A back for revision" with "approve B to start implementing" carried exactly one question mark, satisfied the rule above, and let a one-word "ok" authorize an implementation run that produced a PR the human had not agreed to — and because proposals kept arriving as walls of text that no honest yes could cover.
+## プロセス統合の規則
 
-## Change Discipline
+- このプロジェクトでは`SKILL.md`がエージェントの実際の動作を定義する。`scripts/`の実装は、`SKILL.md`から呼び出される道具である。スクリプトを変更しただけでは、エージェントの動作変更は完了しない。
+- 常駐・バックグラウンドプロセスを変更する場合、単体テストが成功しただけでは完了としない。
+- 完了を宣言する前に、次の両方を確認する。
+  1. 実環境でプロセスが正しく起動し、配送、通知、再開などの意図した効果が届くこと。
+  2. 影響を受ける`SKILL.md`の説明が実際の動作と一致していること。`SKILL.md`の更新を後回しにしない。
 
-- Prefer existing project patterns over new abstractions.
-- Keep worker launch behavior shared and data-driven.
-- Avoid reintroducing removed legacy review paths unless explicitly requested.
-- Keep local/generated state out of commits unless it is intentionally tracked.
-- Do not use destructive git or filesystem cleanup commands unless the user explicitly asks for them.
+## 変更規律
 
-## Checks
+- 新しい抽象化より、既存のプロジェクトパターンを優先する。
+- ワーカー起動の挙動は共有化し、データ駆動に保つ。
+- 明示的に求められない限り、廃止された古いレビュー経路を復活させない。
+- ローカルまたは生成された状態を、意図して追跡する場合を除きcommitへ含めない。
+- 人間から明示的に依頼されない限り、破壊的なgit操作やファイル削除で掃除しない。
 
-- Run `npm test` for code or installer changes.
-- Run `node scripts/install.js` after skill, script distribution, or `skills/agents.yaml` changes **— only from the `dev` branch after changes are merged. Never from a WIP branch.**
-- If CLI launch flags, subcommands, or argument combinations change, execute a minimal real command for that CLI path, not only `--help`.
-- For doc-only changes, do not run `npm test` unnecessarily.
-- **`dev` must never be in a state where `npm test` has any failures.** A failing test blocks merge no matter how unrelated it looks to the change under review — "unrelated" is a rationalization, not a valid reason to proceed. Do not accept a coder's prose summary ("tests pass") as evidence; read the actual test-runner summary line (`# fail`) yourself before presenting anything as merge-ready. If a failing test already exists on `dev`, fixing it takes priority over other work — do not work around it or defer it.
+## 確認
 
-## Local Reference Docs
+- コードまたはインストーラーを変更した場合は`npm test`を実行する。
+- スキル、スクリプト配布、`skills/agents.yaml`を変更した場合の`node scripts/install.js`は、変更がマージされた後に`dev`から実行する。WIPブランチから実行してはならない。
+- CLIの起動フラグ、サブコマンド、引数の組み合わせを変更した場合は、`--help`だけでなくそのCLI経路の最小限の実コマンドも実行する。
+- 文書だけの変更であれば、必要のない`npm test`を実行しない。
+- **`dev`は`npm test`が失敗した状態にしてはならない。** 変更との関係が薄そうでも、失敗はmergeを止める。coderの「成功した」という説明だけを証拠にせず、テストランナーの実際の`# fail`行を読む。`dev`に既存の失敗がある場合は、その修正を他の作業より優先する。
 
-Use local RAG docs before implementing or answering about tool behavior:
+## ローカル参照文書
+
+ツールの挙動について実装または回答を行う前に、次のローカルRAG文書を読む。
 
 - Codex: `docs/rag/codex/`
 - Claude Code: `docs/rag/claude-code/`
 - Antigravity CLI: `docs/rag/antigravity/`
 - WezTerm: `docs/rag/wezterm/`
 
-Do not infer CLI paths, flags, config files, skill locations, or sandbox behavior from memory when local RAG docs exist. If empirical behavior contradicts RAG docs, prioritize real behavior and update the docs.
+ローカルRAGに記載があるCLIのパス、フラグ、設定ファイル、サンドボックスの挙動を記憶から推測しない。実測結果がRAG文書と異なる場合は、実際の挙動を優先し、文書を更新する。

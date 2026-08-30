@@ -810,8 +810,8 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
 // ── manifest検証失敗の通知 ────────────────────────────────────────────────────
 // 実行manifestの機械検証に失敗した場合、レビュー担当（RM）はこの事実を既存の
 // 「不完全レビュー」経路（PRへのプレーンコメント + .incompleteセンチネル）に載せて
-// 通知し、そのまま停止する。再試行はしない（ヘッドレス再試行はアンチパターン。
-// AGENTS.md「Headless Retry Is An Anti-Pattern」/ Issue #271）。
+// 通知し、そのまま停止する。再試行はしない（ヘッドレス再試行は禁止。
+// AGENTS.md「ヘッドレス処理で再試行ループを作らない」/ Issue #271）。
 // 計画の書き直し・再実行の判断はオーケストレーターが行う。
 
 let _ghForTest = null;
@@ -1076,7 +1076,7 @@ function _setFinalizeReviewForTest(impl) {
 
 // ── 再試行カウンタ（決定的上限） ────────────────────────────────────────────────
 // レビュージョブ再試行の回数上限を、モデルの自己申告ではなく決定的コードで強制する
-// （Issue #273 / AGENTS.md「Headless Retry Is An Anti-Pattern」）。
+// （Issue #273 / AGENTS.md「ヘッドレス処理で再試行ループを作らない」）。
 //
 // カウンタは「1レビュー周回あたりに run-review-jobs.js が実行計画を実行した回数」を
 // ラウンド単位で記録する。RMの再試行は「全ジョブを含むmanifestの再実行」であるため、

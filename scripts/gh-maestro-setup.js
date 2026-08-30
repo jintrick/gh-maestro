@@ -343,9 +343,8 @@ function applyExecPermission(hookPath) {
   }
 }
 
-// コミット時の規約同期フック。v2 から「規約文書そのものの同期（sync-agents-md）」と
-// 「その結果をコミットに含める処理（git add CLAUDE.md）」も含める。v1 は sync-rules
-// のみで、実際に動いているフックと中身が食い違っていた（Issue #282）。
+// コミット時の規約同期フック。v2 は .claude/rules/ の sync-rules を導入する。
+// AGENTS.md と CLAUDE.md は同期せず、CLAUDE.md は AGENTS.md への参照だけを持つ。
 const SYNC_RULES_MARKER = 'gh-maestro:sync-rules:v2';
 const SYNC_RULES_MARKER_RE = /^# gh-maestro:sync-rules(:v\d+)?$/;
 // Issue #283: フックからのテスト実行は廃止した。git はフック実行時に GIT_DIR 等を
@@ -405,8 +404,6 @@ function hooksDirNeedsVerification(dir) {
 function verifySyncInvocations(content) {
   const checks = [
     { label: 'sync-rules 呼び出し', re: /^\s*node\s+["']?[^"'\n]*sync-rules\.js\b/ },
-    { label: 'sync-agents-md 呼び出し', re: /^\s*node\s+["']?[^"'\n]*sync-agents-md\.js\b/ },
-    { label: '同期結果のコミット反映（git add CLAUDE.md）', re: /^\s*git\s+add\s+CLAUDE\.md\b/ },
   ];
   const executableLines = content.split('\n').filter(l => l.trim() !== '' && !l.trim().startsWith('#'));
   return checks.filter(c => !executableLines.some(l => c.re.test(l))).map(c => c.label);
@@ -432,10 +429,6 @@ function reportManualSyncBlock(hookPath) {
     '         # gh-maestro:sync-rules:v2\n' +
     `         if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then\n` +
     `           node "scripts/sync-rules.js"\n` +
-    '         fi\n' +
-    `         if git diff --cached --name-only | grep -q '^AGENTS\\.md$'; then\n` +
-    `           node "scripts/sync-agents-md.js"\n` +
-    '           git add CLAUDE.md\n' +
     '         fi\n' +
     '         ```',
   );
@@ -464,14 +457,9 @@ function ensureSyncHook(hooksDir, verifyOnly) {
   // 共有リスクなし → 従来どおり設置（v1 ブロックは v2 へ自動置換される）。
   const homedir = require('os').homedir();
   const syncScript = resolve(homedir, '.gh-maestro', 'scripts', 'sync-rules.js');
-  const syncAgentsMdScript = resolve(homedir, '.gh-maestro', 'scripts', 'sync-agents-md.js');
   const entryLines = [
     `if git diff --cached --name-only | grep -q '^\\.claude/rules/'; then`,
     `  node "${syncScript}"`,
-    `fi`,
-    `if git diff --cached --name-only | grep -q '^AGENTS\\.md$'; then`,
-    `  node "${syncAgentsMdScript}"`,
-    `  git add CLAUDE.md`,
     `fi`,
   ];
   const syncResult = upsertMarkerBlock(hookPath, {
