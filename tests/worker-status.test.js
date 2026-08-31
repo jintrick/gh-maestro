@@ -821,6 +821,27 @@ test('main: pane の split-pane 失敗時はエラー行を出力して code 1',
   }
 });
 
+test('main: pane の保証ロックを取得できない場合は起動せず code 1', () => {
+  const workspace = createWorkspace();
+  let launchCalled = false;
+  workerStatus._setAcquireStatusPaneLock(() => false);
+  workerStatus._setLaunchInSplitPane(() => {
+    launchCalled = true;
+    return { paneId: 'never' };
+  });
+
+  try {
+    const result = runMain(['pane', '--workspace', workspace]);
+    assert.equal(result.code, 1);
+    assert.match(result.errLines.join('\n'), /監視ペインの保証に失敗しました/);
+    assert.equal(launchCalled, false);
+  } finally {
+    workerStatus._setAcquireStatusPaneLock(null);
+    workerStatus._setLaunchInSplitPane(null);
+    removeWorkspace(workspace);
+  }
+});
+
 test('main: pane は初回起動時に status-pane.json を保存し、2回目の実行時は既存ペインを再利用する', () => {
   const workspace = createWorkspace();
   let launchCallCount = 0;

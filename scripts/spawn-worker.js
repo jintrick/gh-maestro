@@ -43,6 +43,7 @@ const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-wor
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { ensureWorkerSupervisorRunning } = require('./shared/ensure-worker-supervisor');
+const { ensureStatusPane: ensureStatusPaneLib } = require('./shared/ensure-status-pane');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
@@ -52,6 +53,29 @@ const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const readStateLib = require('./shared/read-state');
 const { checkClosedPr } = require('./shared/closed-pr-guard');
 const { getCurrentBranch } = require('./shared/git-branch');
+
+const defaultEnsureStatusPane = ensureStatusPaneLib;
+let _ensureStatusPane = defaultEnsureStatusPane;
+
+/**
+ * ワークスペースの監視ペインをbest-effortで存在保証する。
+ *
+ * ペイン保証はワーカー起動の付随設備であり、WezTermが無い・停止している環境でも
+ * ワーカー本体の起動結果を失敗にしてはならない。実際の保証処理の失敗は共有ヘルパーの
+ * 戻り値に残すが、CLIの主処理はその値で分岐しない。
+ *
+ * @param {string} workspace
+ * @returns {object} ensure-status-pane.js の結果
+ */
+function ensureStatusPaneForWorkspace(workspace) {
+  try {
+    return _ensureStatusPane({ workspace, scriptsPath: __dirname });
+  } catch (error) {
+    // 共有ヘルパーは通常すべての運用エラーを結果へ変換する。ここは予期しない
+    // 注入・実装エラーがワーカー起動へ波及しないための最終境界である。
+    return { ok: false, stage: 'unknown', error: error.message };
+  }
+}
 
 const SPEC = {
   flags: {
@@ -221,7 +245,13 @@ function establishOrchestratorBaseline(workspace, { repo, issue, listCommentsFn 
   return { ok: true, count: ids.length };
 }
 
-module.exports = { shouldPruneStaleWorker, establishOrchestratorBaseline, parseWorkerArgs };
+module.exports = {
+  shouldPruneStaleWorker,
+  establishOrchestratorBaseline,
+  parseWorkerArgs,
+  ensureStatusPaneForWorkspace,
+  _setEnsureStatusPane: (fn) => { _ensureStatusPane = fn || defaultEnsureStatusPane; },
+};
 
 if (require.main === module) {
 
@@ -714,6 +744,11 @@ try {
   rollbackWorktree();
   fail(`workers.json への書き込みに失敗しました: ${e.message}`);
 }
+
+// --- 監視ペインの自動存在保証（best-effort） ---
+// ワーカー起動時に必ず試みる。WezTermが利用できなくても、保証結果でワーカー起動を
+// 分岐・失敗させない（ensure-status-pane.js 参照）。
+ensureStatusPaneForWorkspace(workspace);
 
 // --- worker-supervisor.js の自動起動保証（best-effort） ---
 // エージェント種別を問わず毎回試みる。稼働中なら常駐プロセス自身のロックが検知して

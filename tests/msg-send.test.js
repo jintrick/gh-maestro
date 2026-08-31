@@ -11,6 +11,12 @@ const msgSend = require('../scripts/msg-send');
 const workerLiveness = require('../scripts/shared/worker-liveness');
 const processLifecycle = require('../scripts/process-lifecycle');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
+const ensureStatusPaneCalls = [];
+const mockEnsureStatusPane = (params) => {
+  ensureStatusPaneCalls.push(params);
+  return { ok: false, stage: 'launch', error: 'WezTerm unavailable in unit test' };
+};
+msgSend._setEnsureStatusPane(mockEnsureStatusPane);
 
 // 稼働中ワーカーへの拒否ガード（Issue #263）のテストは worker-liveness を直接モックする。
 // msg-send.js は worker-supervisor.js のような独自の注入ポイントを持たず、実体（シングルトン
@@ -20,6 +26,8 @@ afterEach(() => {
   workerLiveness._setIsProcessAlive(processLifecycle.isProcessAlive);
   workerLiveness._setVerifyProcessIdentity(processLifecycle.verifyProcessIdentity);
   closedPrGuard._setListFn(() => ({ status: 0, stdout: '[]', stderr: '' }));
+  ensureStatusPaneCalls.length = 0;
+  msgSend._setEnsureStatusPane(mockEnsureStatusPane);
 });
 
 // msg-send.js は成功時にensureWorkerSupervisorRunning()を呼ぶ（best-effort）。
@@ -133,6 +141,36 @@ test('--issue で指定した Issue が使われる', () => {
     assert.ok(capturedBody.includes('"v":1'));
     assert.ok(capturedBody.includes('"to":"worker-1"'));
     assert.ok(r.lines[0].includes('github.com'));
+  });
+});
+
+test('コメント投稿成功時は送信先を問わず監視ペイン保証を呼び、保証失敗を送信失敗に変換しない', () => {
+  withTempDir(workspace => {
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment(() => ({
+      status: 0,
+      stdout: 'https://github.com/test/repo/issues/1#issuecomment-pane-1\n',
+    }));
+
+    const orchestratorSend = msgSend.main(
+      ['worker-1', '--stdin', '--issue', '1', '--workspace', workspace],
+      null,
+      stdinIO('hello'),
+    );
+    assert.equal(orchestratorSend.code, 0);
+    assert.equal(ensureStatusPaneCalls.length, 1);
+    assert.equal(ensureStatusPaneCalls[0].workspace, workspace);
+    assert.ok(ensureStatusPaneCalls[0].scriptsPath.endsWith(`${path.sep}scripts`));
+
+    ensureStatusPaneCalls.length = 0;
+    const workerSend = msgSend.main(
+      ['--stdin', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-1-worker' },
+      stdinIO('報告'),
+    );
+    assert.equal(workerSend.code, 0);
+    assert.equal(ensureStatusPaneCalls.length, 1);
+    assert.equal(ensureStatusPaneCalls[0].workspace, workspace);
   });
 });
 

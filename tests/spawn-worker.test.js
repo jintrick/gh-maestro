@@ -6,7 +6,13 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'spawn-worker.js');
-const { shouldPruneStaleWorker, establishOrchestratorBaseline, parseWorkerArgs } = require(SCRIPT);
+const {
+  shouldPruneStaleWorker,
+  establishOrchestratorBaseline,
+  parseWorkerArgs,
+  ensureStatusPaneForWorkspace,
+  _setEnsureStatusPane,
+} = require(SCRIPT);
 const readStateLib = require('../scripts/shared/read-state');
 const fs = require('fs');
 const os = require('os');
@@ -30,6 +36,37 @@ const BASE_ENV = {};
 // 生存判定を注入して、実プロセスに触れずに stale 判定だけを検証する
 const ALIVE = () => true;
 const DEAD = () => false;
+
+test('ensureStatusPaneForWorkspace: 起動時に保証ヘルパーを呼び、失敗結果を起動失敗へ変換しない', () => {
+  let captured = null;
+  _setEnsureStatusPane((params) => {
+    captured = params;
+    return { ok: false, stage: 'launch', error: 'WezTerm unavailable' };
+  });
+  try {
+    const result = ensureStatusPaneForWorkspace('C:\\workspace');
+    assert.deepEqual(result, { ok: false, stage: 'launch', error: 'WezTerm unavailable' });
+    assert.deepEqual(captured, {
+      workspace: 'C:\\workspace',
+      scriptsPath: path.dirname(SCRIPT),
+    });
+  } finally {
+    _setEnsureStatusPane(null);
+  }
+});
+
+test('ensureStatusPaneForWorkspace: 予期しない例外も吸収する', () => {
+  _setEnsureStatusPane(() => { throw new Error('unexpected'); });
+  try {
+    assert.deepEqual(ensureStatusPaneForWorkspace('C:\\workspace'), {
+      ok: false,
+      stage: 'unknown',
+      error: 'unexpected',
+    });
+  } finally {
+    _setEnsureStatusPane(null);
+  }
+});
 
 // ── shouldPruneStaleWorker（stale worker除去判定） ────────────────────────────
 // 実障害: 新規ワーカー起動のたびに、たまたま休止中（正常）だったセッション再開系
