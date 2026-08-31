@@ -8,8 +8,11 @@ const path = require('path');
 
 const {
   statusPanePath,
+  statusPaneRecoveryPath,
   loadStatusPane,
   saveStatusPane,
+  saveStatusPaneRecovery,
+  removeStatusPaneRecovery,
   removeStatusPane,
 } = require('../scripts/shared/status-pane-registry');
 
@@ -62,6 +65,34 @@ test('saveStatusPane / loadStatusPane: 登録した内容を取得できる（�
   });
 });
 
+test('saveStatusPaneRecovery / loadStatusPane: 通常記録がなくても回復記録を読み込める', () => {
+  withTempWorkspace((dir) => {
+    saveStatusPaneRecovery(dir, { paneId: 'recovery-42', launchedAt: '2026-08-26T09:00:00.000Z' });
+    assert.deepEqual(loadStatusPane(dir), {
+      paneId: 'recovery-42',
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    });
+  });
+});
+
+test('loadStatusPane: 通常記録と回復記録があれば新しい方を返す', () => {
+  withTempWorkspace((dir) => {
+    saveStatusPane(dir, { paneId: 'primary-old', launchedAt: '2026-08-26T09:00:00.000Z' });
+    saveStatusPaneRecovery(dir, { paneId: 'recovery-new', launchedAt: '2026-08-26T09:01:00.000Z' });
+    assert.deepEqual(loadStatusPane(dir), {
+      paneId: 'recovery-new',
+      launchedAt: '2026-08-26T09:01:00.000Z',
+    });
+
+    saveStatusPane(dir, { paneId: 'primary-new', launchedAt: '2026-08-26T09:02:00.000Z' });
+    assert.deepEqual(loadStatusPane(dir), {
+      paneId: 'primary-new',
+      launchedAt: '2026-08-26T09:02:00.000Z',
+    });
+    assert.equal(removeStatusPaneRecovery(dir), false);
+  });
+});
+
 test('saveStatusPane: launchedAt省略時は現在時刻で補完される', () => {
   withTempWorkspace((dir) => {
     saveStatusPane(dir, { paneId: 100 });
@@ -76,6 +107,17 @@ test('removeStatusPane: 存在するファイルを削除しtrueを返す', () =
     saveStatusPane(dir, { paneId: '99' });
     const existed = removeStatusPane(dir);
     assert.equal(existed, true);
+    assert.equal(loadStatusPane(dir), null);
+  });
+});
+
+test('removeStatusPane: 通常記録と回復記録をまとめて削除する', () => {
+  withTempWorkspace((dir) => {
+    saveStatusPane(dir, { paneId: 'primary' });
+    saveStatusPaneRecovery(dir, { paneId: 'recovery' });
+    assert.equal(removeStatusPane(dir), true);
+    assert.equal(fs.existsSync(statusPanePath(dir)), false);
+    assert.equal(fs.existsSync(statusPaneRecoveryPath(dir)), false);
     assert.equal(loadStatusPane(dir), null);
   });
 });

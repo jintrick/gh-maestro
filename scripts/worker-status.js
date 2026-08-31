@@ -151,6 +151,7 @@ function _ensureStatusPane(params) {
     loadStatusPaneFn: loadStatusPane,
     saveStatusPaneFn: _saveStatusPane,
     launchInSplitPaneFn: _launchInSplitPane,
+    killPaneFn: _killPane,
     acquireLockFn: _acquireStatusPaneLock,
     releaseLockFn: _releaseStatusPaneLock,
     nowFn: _now,

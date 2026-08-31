@@ -55,6 +55,7 @@ function injectedDeps(overrides = {}) {
       calls.launch++;
       return { paneId: '123' };
     },
+    killPaneFn: () => ({ ok: true }),
     saveStatusPaneFn: () => { calls.save++; },
     nowFn: () => 1760000000000,
   };
@@ -239,6 +240,93 @@ test('ensureStatusPane: 保存失敗は save の失敗結果になり作成後�
   assert.deepEqual(result, { ok: false, stage: 'save', error: 'disk full' });
   assert.equal(calls.launch, 1);
   assert.equal(calls.release, 1);
+});
+
+test('ensureStatusPane: 保存失敗時は作成済みペインを補償的に終了する', () => {
+  let killedPaneId = null;
+  const { deps } = injectedDeps({
+    killPaneFn: (paneId) => {
+      killedPaneId = paneId;
+      return { ok: true, status: 0 };
+    },
+    saveStatusPaneFn: () => {
+      throw new Error('disk full');
+    },
+  });
+
+  const result = ensureStatusPane(baseParams(), deps);
+
+  assert.deepEqual(result, { ok: false, stage: 'save', error: 'disk full' });
+  assert.equal(killedPaneId, '123');
+});
+
+test('ensureStatusPane: 補償終了失敗時は回復記録を残し、次回呼び出しでペインを再利用する', () => {
+  withTempWorkspace((workspace) => {
+    let launchCalls = 0;
+    const firstResult = ensureStatusPane({
+      workspace,
+      scriptsPath: path.join(__dirname, '..', 'scripts'),
+    }, {
+      loadStatusPaneFn: () => null,
+      isPaneAliveFn: () => false,
+      launchInSplitPaneFn: () => {
+        launchCalls++;
+        return { paneId: 'recovery-pane' };
+      },
+      saveStatusPaneFn: () => {
+        throw new Error('status record unavailable');
+      },
+      killPaneFn: () => ({ ok: false, status: 1, stderr: 'kill failed' }),
+      nowFn: () => 1760000000000,
+    });
+
+    assert.deepEqual(firstResult, {
+      ok: false,
+      stage: 'save',
+      error: 'status record unavailable',
+    });
+
+    const { loadStatusPane } = require('../scripts/shared/status-pane-registry');
+    assert.deepEqual(loadStatusPane(workspace), {
+      paneId: 'recovery-pane',
+      launchedAt: '2025-10-09T08:53:20.000Z',
+    });
+
+    const secondResult = ensureStatusPane({
+      workspace,
+      scriptsPath: path.join(__dirname, '..', 'scripts'),
+    }, {
+      isPaneAliveFn: () => true,
+      launchInSplitPaneFn: () => {
+        launchCalls++;
+        return { paneId: 'unexpected-duplicate' };
+      },
+      nowFn: () => 1760000000000,
+    });
+
+    assert.deepEqual(secondResult, { ok: true, paneId: 'recovery-pane', reused: true });
+    assert.equal(launchCalls, 1);
+  });
+});
+
+test('ensureStatusPane: 補償終了と回復記録がともに失敗しても保存失敗として返す', () => {
+  const { deps } = injectedDeps({
+    saveStatusPaneFn: () => {
+      throw new Error('disk full');
+    },
+    killPaneFn: () => ({ ok: false, status: 1, stderr: 'kill denied' }),
+    saveStatusPaneRecoveryFn: () => {
+      throw new Error('recovery disk full');
+    },
+  });
+
+  const result = ensureStatusPane(baseParams(), deps);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, 'save');
+  assert.match(result.error, /disk full/);
+  assert.match(result.error, /補償終了に失敗しました/);
+  assert.match(result.error, /回復記録にも失敗しました/);
 });
 
 test('ensureStatusPane: 保持中ロックへの再入entrant呼び出しは二重起動せず拒否する', () => {

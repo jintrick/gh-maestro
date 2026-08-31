@@ -28,6 +28,10 @@ function defaultSaveStatusPane(workspace, entry) {
   return require('./status-pane-registry').saveStatusPane(workspace, entry);
 }
 
+function defaultSaveStatusPaneRecovery(workspace, entry) {
+  return require('./status-pane-registry').saveStatusPaneRecovery(workspace, entry);
+}
+
 function defaultIsPaneAlive(paneId) {
   const alivePanes = require('./pane-launch').getAlivePaneIds();
   if (alivePanes === null) {
@@ -41,6 +45,10 @@ function defaultIsPaneAlive(paneId) {
 
 function defaultLaunchInSplitPane(params) {
   return require('./pane-launch').launchInSplitPane(params);
+}
+
+function defaultKillPane(paneId) {
+  return require('./pane-launch').killPane(paneId);
 }
 
 function defaultAcquireLock(workspace) {
@@ -68,6 +76,65 @@ function validPaneId(paneId) {
   return paneId !== null && paneId !== undefined && String(paneId) !== '';
 }
 
+function killPaneSucceeded(result) {
+  return result === true || Boolean(result && result.ok === true);
+}
+
+function describeCleanupFailure(result, error) {
+  if (error) return error instanceof Error ? error.message : String(error);
+  if (result && typeof result.stderr === 'string' && result.stderr) return result.stderr;
+  if (result && result.status !== undefined) return `kill-pane status=${result.status}`;
+  return 'kill-pane が成功結果を返しませんでした';
+}
+
+/**
+ * 作成済みペインの保存失敗を補償する。
+ *
+ * kill が成功した場合は孤立ペインを残さない。kill も失敗した場合は、通常記録とは
+ * 別の回復記録へ paneId を保存し、次回の保証呼び出しが同じペインを再利用できる
+ * ようにする。回復記録の保存も失敗した場合だけ、原因を元の保存失敗へ付加する。
+ *
+ * @returns {{ok:false,stage:string,error:string}}
+ */
+function compensatePersistenceFailure({
+  workspace,
+  paneId,
+  entry,
+  saveError,
+  killPaneFn,
+  saveStatusPaneRecoveryFn,
+}) {
+  let killResult;
+  let killError = null;
+  try {
+    killResult = killPaneFn(paneId);
+  } catch (error) {
+    killError = error;
+  }
+
+  if (killError === null && killPaneSucceeded(killResult)) {
+    return failure('save', saveError);
+  }
+
+  const cleanupError = describeCleanupFailure(killResult, killError);
+  try {
+    saveStatusPaneRecoveryFn(workspace, entry);
+    // saveStatusPane の失敗は呼び出し元の契約どおり返す。補償終了に失敗した事実は
+    // 回復記録により次回へ渡されるため、ここで別の起動成功扱いにはしない。
+    return failure('save', saveError);
+  } catch (recoveryError) {
+    const saveMessage = saveError instanceof Error ? saveError.message : String(saveError);
+    const recoveryMessage = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+    return failure(
+      'save',
+      new Error(
+        `${saveMessage}（監視ペインの補償終了に失敗しました: ${cleanupError}; ` +
+        `回復記録にも失敗しました: ${recoveryMessage}）`,
+      ),
+    );
+  }
+}
+
 /**
  * 監視ペインの存在を保証する。
  *
@@ -80,8 +147,10 @@ function validPaneId(paneId) {
  * @param {object} [deps] テスト用依存注入
  * @param {Function} [deps.loadStatusPaneFn]
  * @param {Function} [deps.saveStatusPaneFn]
+ * @param {Function} [deps.saveStatusPaneRecoveryFn]
  * @param {Function} [deps.isPaneAliveFn]
  * @param {Function} [deps.launchInSplitPaneFn]
+ * @param {Function} [deps.killPaneFn]
  * @param {Function} [deps.acquireLockFn] `(workspace) => boolean`
  * @param {Function} [deps.releaseLockFn] `(workspace) => void`
  * @param {Function} [deps.nowFn]
@@ -99,8 +168,10 @@ function ensureStatusPane(params = {}, deps = {}) {
   const percent = params.percent ?? DEFAULT_PERCENT;
   const loadStatusPaneFn = deps.loadStatusPaneFn || defaultLoadStatusPane;
   const saveStatusPaneFn = deps.saveStatusPaneFn || defaultSaveStatusPane;
+  const saveStatusPaneRecoveryFn = deps.saveStatusPaneRecoveryFn || defaultSaveStatusPaneRecovery;
   const isPaneAliveFn = deps.isPaneAliveFn || defaultIsPaneAlive;
   const launchInSplitPaneFn = deps.launchInSplitPaneFn || defaultLaunchInSplitPane;
+  const killPaneFn = deps.killPaneFn || defaultKillPane;
   const acquireLockFn = deps.acquireLockFn || defaultAcquireLock;
   const releaseLockFn = deps.releaseLockFn || defaultReleaseLock;
   const nowFn = deps.nowFn || Date.now;
@@ -158,17 +229,33 @@ function ensureStatusPane(params = {}, deps = {}) {
     }
 
     const paneId = String(paneResult.paneId);
+    const entry = { paneId };
     let launchedAt;
     try {
       launchedAt = new Date(nowFn()).toISOString();
     } catch (error) {
-      return failure('save', error);
+      return compensatePersistenceFailure({
+        workspace,
+        paneId,
+        entry,
+        saveError: error,
+        killPaneFn,
+        saveStatusPaneRecoveryFn,
+      });
     }
+    entry.launchedAt = launchedAt;
 
     try {
-      saveStatusPaneFn(workspace, { paneId, launchedAt });
+      saveStatusPaneFn(workspace, entry);
     } catch (error) {
-      return failure('save', error);
+      return compensatePersistenceFailure({
+        workspace,
+        paneId,
+        entry,
+        saveError: error,
+        killPaneFn,
+        saveStatusPaneRecoveryFn,
+      });
     }
 
     return { ok: true, paneId, reused: false };

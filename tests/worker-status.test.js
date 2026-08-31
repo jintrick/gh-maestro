@@ -972,6 +972,7 @@ test('main: close-pane で kill に失敗した場合は code 1 を返す（フ�
 test('main: pane は status-pane.json の保存に失敗した場合にエラーを出力し code 1 を返す', () => {
   const workspace = createWorkspace();
   workerStatus._setLaunchInSplitPane(() => ({ paneId: '601' }));
+  workerStatus._setKillPane(() => ({ ok: true, status: 0, stderr: '' }));
   workerStatus._setSaveStatusPane(() => {
     throw new Error('disk full');
   });
@@ -982,6 +983,7 @@ test('main: pane は status-pane.json の保存に失敗した場合にエラー
     assert.match(result.errLines.join('\n'), /監視ペイン状態の保存に失敗しました: disk full/);
   } finally {
     workerStatus._setLaunchInSplitPane(null);
+    workerStatus._setKillPane(null);
     workerStatus._setSaveStatusPane(null);
     removeWorkspace(workspace);
   }
