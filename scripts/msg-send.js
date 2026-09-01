@@ -26,6 +26,7 @@ const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 const { markCommentResult, readRegistry } = require('./shared/execution-registry');
 const { isRetryableGhFailure, graphqlAddComment } = require('./shared/gh-fallback');
 const { ensureWorkerSupervisorRunning } = require('./shared/ensure-worker-supervisor');
+const { ensureStatusPane: ensureStatusPaneLib } = require('./shared/ensure-status-pane');
 const { resolveWorkerName, readWorkersRaw } = require('./shared/workers-registry');
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
@@ -34,6 +35,26 @@ const { getReportStatusSinceStart } = require('./shared/worker-report-check');
 const { main: writeDraftMain } = require('./write-draft');
 const closedPrGuard = require('./shared/closed-pr-guard');
 const { isWorkerIdentity } = require('./shared/resident-force-guard');
+
+const defaultEnsureStatusPane = ensureStatusPaneLib;
+let _ensureStatusPane = defaultEnsureStatusPane;
+
+/**
+ * ワークスペースの監視ペインをbest-effortで存在保証する。
+ *
+ * 監視ペインはメッセージ送信の付随設備なので、WezTermが利用できない場合もコメント投稿の
+ * 成否へ影響させない。予期しない例外もこの境界で吸収する。
+ *
+ * @param {string} workspace
+ * @returns {object} ensure-status-pane.js の結果
+ */
+function ensureStatusPaneForWorkspace(workspace) {
+  try {
+    return _ensureStatusPane({ workspace, scriptsPath: __dirname });
+  } catch (error) {
+    return { ok: false, stage: 'unknown', error: error.message };
+  }
+}
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
 
@@ -531,6 +552,11 @@ function main(argsOverride, envOverride, ioOverride) {
     }
   }
 
+  // --- 監視ペインの自動存在保証（best-effort） ---
+  // 宛先を問わず、成功したメッセージ送信のたびに保証を試みる。結果で送信成否を
+  // 分岐しないため、WezTermが利用できないheadless環境でもコメント送信は成立する。
+  ensureStatusPaneForWorkspace(workspace);
+
   // --- worker-supervisor.js の自動起動保証（best-effort） ---
   // ワーカー宛て送信時のみ。orchestratorが手動起動を忘れても配送経路が失われないようにする
   // （ensure-worker-supervisor.js 参照）。稼働中なら二重起動にはならない。
@@ -549,6 +575,7 @@ module.exports = {
   _setGhIssueComment: (fn) => { _ghIssueComment = fn; },
   _resetGhIssueComment: () => { _ghIssueComment = defaultGhIssueComment; },
   _setGhListComments: (fn) => { _ghListComments = fn; },
+  _setEnsureStatusPane: (fn) => { _ensureStatusPane = fn || defaultEnsureStatusPane; },
   testContextPostBlockReason,
   checkWorkerBusyRejection,
   main,

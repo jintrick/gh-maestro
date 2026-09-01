@@ -821,6 +821,27 @@ test('main: pane の split-pane 失敗時はエラー行を出力して code 1',
   }
 });
 
+test('main: pane の保証ロックを取得できない場合は起動せず code 1', () => {
+  const workspace = createWorkspace();
+  let launchCalled = false;
+  workerStatus._setAcquireStatusPaneLock(() => false);
+  workerStatus._setLaunchInSplitPane(() => {
+    launchCalled = true;
+    return { paneId: 'never' };
+  });
+
+  try {
+    const result = runMain(['pane', '--workspace', workspace]);
+    assert.equal(result.code, 1);
+    assert.match(result.errLines.join('\n'), /監視ペインの保証に失敗しました/);
+    assert.equal(launchCalled, false);
+  } finally {
+    workerStatus._setAcquireStatusPaneLock(null);
+    workerStatus._setLaunchInSplitPane(null);
+    removeWorkspace(workspace);
+  }
+});
+
 test('main: pane は初回起動時に status-pane.json を保存し、2回目の実行時は既存ペインを再利用する', () => {
   const workspace = createWorkspace();
   let launchCallCount = 0;
@@ -951,6 +972,7 @@ test('main: close-pane で kill に失敗した場合は code 1 を返す（フ�
 test('main: pane は status-pane.json の保存に失敗した場合にエラーを出力し code 1 を返す', () => {
   const workspace = createWorkspace();
   workerStatus._setLaunchInSplitPane(() => ({ paneId: '601' }));
+  workerStatus._setKillPane(() => ({ ok: true, status: 0, stderr: '' }));
   workerStatus._setSaveStatusPane(() => {
     throw new Error('disk full');
   });
@@ -961,6 +983,7 @@ test('main: pane は status-pane.json の保存に失敗した場合にエラー
     assert.match(result.errLines.join('\n'), /監視ペイン状態の保存に失敗しました: disk full/);
   } finally {
     workerStatus._setLaunchInSplitPane(null);
+    workerStatus._setKillPane(null);
     workerStatus._setSaveStatusPane(null);
     removeWorkspace(workspace);
   }

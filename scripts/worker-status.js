@@ -12,7 +12,8 @@ const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
-const { loadStatusPane, saveStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
+const { loadStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
+const { ensureStatusPane: ensureStatusPaneLib } = require('./shared/ensure-status-pane');
 const { resolveSkillAgentMap } = require('./shared/resolve-config');
 const { listRunningReviewManagers } = require('./shared/running-review-managers');
 
@@ -69,6 +70,8 @@ let _injectedLaunchInSplitPane = null;
 let _injectedIsPaneAlive = null;
 let _injectedKillPane = null;
 let _injectedSaveStatusPane = null;
+let _injectedAcquireStatusPaneLock = null;
+let _injectedReleaseStatusPaneLock = null;
 
 // Windows の起動時刻取得は PowerShell 子プロセスを起動するため、既定の3秒再描画より
 // 長いが、PID再利用を長時間見逃さない間隔にする。watch ループ内だけで使い、他の
@@ -129,6 +132,34 @@ function _killPane(paneId) {
 function _saveStatusPane(workspace, entry) {
   const fn = _injectedSaveStatusPane ?? require('./shared/status-pane-registry').saveStatusPane;
   return fn(workspace, entry);
+}
+
+function _acquireStatusPaneLock(workspace) {
+  const fn = _injectedAcquireStatusPaneLock
+    ?? ((ws) => require('./process-lifecycle').acquireStartupLock(ws, 'status-pane', null));
+  return fn(workspace);
+}
+
+function _releaseStatusPaneLock(workspace) {
+  const fn = _injectedReleaseStatusPaneLock
+    ?? ((ws) => require('./process-lifecycle').releaseStartupLock(ws, 'status-pane', null));
+  return fn(workspace);
+}
+
+function _ensureStatusPane(params) {
+  const deps = {
+    loadStatusPaneFn: loadStatusPane,
+    saveStatusPaneFn: _saveStatusPane,
+    launchInSplitPaneFn: _launchInSplitPane,
+    killPaneFn: _killPane,
+    acquireLockFn: _acquireStatusPaneLock,
+    releaseLockFn: _releaseStatusPaneLock,
+    nowFn: _now,
+  };
+  // 実運用では共有ヘルパー自身の照会（list失敗時は起動せず失敗）が使われる。
+  // 既存テストの生存判定注入がある場合だけ、注入値を明示的に優先する。
+  if (_injectedIsPaneAlive) deps.isPaneAliveFn = _isPaneAlive;
+  return ensureStatusPaneLib(params, deps);
 }
 
 /**
@@ -730,38 +761,32 @@ function main(argv = process.argv.slice(2)) {
       percent = p;
     }
 
-    // 既存ペインの確認・再利用
-    const existingPane = loadStatusPane(workspace);
-    if (existingPane && existingPane.paneId && _isPaneAlive(existingPane.paneId)) {
-      writeOut(`STATUS_PANE_LAUNCHED: pane=${existingPane.paneId}`);
-      return { code: 0, lines: out, errLines: err, paneId: existingPane.paneId, reused: true };
-    }
-
-    let paneResult;
-    try {
-      paneResult = _launchInSplitPane({
-        argv: [process.execPath, __filename, 'watch', '--workspace', workspace, '--interval', String(interval)],
-        cwd: workspace,
-        direction,
-        percent,
-      });
-    } catch (e) {
-      writeErr(`worker-status: pane の分割起動に失敗しました: ${e.message}`);
-      return { code: 1, lines: out, errLines: err };
-    }
-
-    try {
-      _saveStatusPane(workspace, {
-        paneId: paneResult.paneId,
-        launchedAt: new Date(_now()).toISOString(),
-      });
-    } catch (e) {
-      writeErr(`worker-status: 監視ペイン状態の保存に失敗しました: ${e.message}`);
+    const paneResult = _ensureStatusPane({
+      workspace,
+      scriptsPath: __dirname,
+      interval,
+      direction,
+      percent,
+    });
+    if (!paneResult.ok) {
+      if (paneResult.stage === 'save') {
+        writeErr(`worker-status: 監視ペイン状態の保存に失敗しました: ${paneResult.error}`);
+      } else if (paneResult.stage === 'launch') {
+        writeErr(`worker-status: pane の分割起動に失敗しました: ${paneResult.error}`);
+      } else {
+        writeErr(`worker-status: 監視ペインの保証に失敗しました: ${paneResult.error}`);
+      }
       return { code: 1, lines: out, errLines: err };
     }
 
     writeOut(`STATUS_PANE_LAUNCHED: pane=${paneResult.paneId}`);
-    return { code: 0, lines: out, errLines: err, paneId: paneResult.paneId, reused: false };
+    return {
+      code: 0,
+      lines: out,
+      errLines: err,
+      paneId: paneResult.paneId,
+      reused: paneResult.reused,
+    };
   }
 
   if (sub === 'close-pane') {
@@ -853,6 +878,8 @@ module.exports = {
   _setIsPaneAlive: (fn) => { _injectedIsPaneAlive = fn; },
   _setKillPane: (fn) => { _injectedKillPane = fn; },
   _setSaveStatusPane: (fn) => { _injectedSaveStatusPane = fn; },
+  _setAcquireStatusPaneLock: (fn) => { _injectedAcquireStatusPaneLock = fn; },
+  _setReleaseStatusPaneLock: (fn) => { _injectedReleaseStatusPaneLock = fn; },
 };
 
 if (require.main === module) {
