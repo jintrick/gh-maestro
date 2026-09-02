@@ -9,7 +9,7 @@ const os = require('os');
 const storageLayout = require('../scripts/shared/storage-layout');
 
 // process-lifecycle.js は child-process.js の execSync に依存する（Windows WMI）。
-// テストは実プロセスを0個spawnする（.claude/rules/test-process-spawn-safety.md 準拠）。
+// テストは実プロセスを0個spawnする。
 // プラットフォーム依存の execSync 呼び出しを含む関数はモックで置き換える。
 
 // ── テスト用の一時ワークスペース ─────────────────────────────────────────
@@ -1485,7 +1485,7 @@ test('サブプロセス経由: sweep は CLI 主経路でも除外リストを�
     // 除外リスト組み立てで process-lifecycle の生存述語（isProcessAlive 等）が実際に呼ばれる
     // 状態を作る。修復前は CLI 主経路でのみ循環 require により undefined 捕捉が TypeError を
     // 起こし、sweep 全体が落ちた（Issue #267）。死んだPIDなら WMI/PowerShell を起動しない
-    // （test-process-spawn-safety ルール準拠）。
+    //
     fs.writeFileSync(path.join(ghDir, 'workers.json'), JSON.stringify({
       'issue-1-coder': { pid: 999999999, startTime: '2025-01-01T00:00:00.000Z' },
     }));

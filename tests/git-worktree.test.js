@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 
 // git-worktree.js は child-process.js の spawnSync に依存するため、
 // これをモックして実プロセスを0個spawnする。
-// （.claude/rules/test-process-spawn-safety.md 準拠）
+//
 
 const gitWorktreePath = require.resolve('../scripts/shared/git-worktree');
 

@@ -21,7 +21,7 @@ msgSend._setEnsureStatusPane(mockEnsureStatusPane);
 // 稼働中ワーカーへの拒否ガード（Issue #263）のテストは worker-liveness を直接モックする。
 // msg-send.js は worker-supervisor.js のような独自の注入ポイントを持たず、実体（シングルトン
 // モジュール）を直接呼ぶため、実体側のセッターで差し替える（tests/worker-liveness.test.js と
-// 同じパターン）。実プロセスには一切触れない（.claude/rules/test-process-spawn-safety.md）。
+// 同じパターン）。実プロセスには一切触れない。
 afterEach(() => {
   workerLiveness._setIsProcessAlive(processLifecycle.isProcessAlive);
   workerLiveness._setVerifyProcessIdentity(processLifecycle.verifyProcessIdentity);
@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 // msg-send.js は成功時にensureWorkerSupervisorRunning()を呼ぶ（best-effort）。
-// テストでは実プロセスをspawnせず外部照会も行わないようモックする（test-process-spawn-safety参照）。
+// テストでは実プロセスをspawnせず外部照会も行わないようモックする。
 const ensureWorkerSupervisor = require('../scripts/shared/ensure-worker-supervisor');
 ensureWorkerSupervisor._setSpawn(() => {
   const child = new EventEmitter();

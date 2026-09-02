@@ -100,7 +100,7 @@ gh issue view $ISSUE --repo $REPO --json comments --jq '.comments[] | select(.bo
 
   | 分類 | 提案内容 | 判断 |
   |---|---|---|
-  | .claude/rules化 | test-process-spawn-safety.mdにNODE_TEST_CONTEXTガードの一般化を追記 | 未承認 |
+  | .claude/rules化 | test-child-process-argv-boundary.mdにNODE_TEST_CONTEXTガードの一般化を追記 | 未承認 |
 
 - 「判断」列は常に「未承認」で埋める（あなたが判断するのではなく、人間が承認・却下を書き込むための欄）。
 - 本文の末尾に「別枠の懸念」（スコープ外だが記録、のような追記）があれば、表の下に別項目として残す。省略しない。

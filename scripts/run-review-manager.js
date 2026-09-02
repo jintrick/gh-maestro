@@ -616,7 +616,7 @@ async function boundedCleanup({ pid, worktreeDir, workspace, pr, lockFile, log,
 let _injectedPollForArtifact = null;
 // runJobsDeterministically の実spawn（run-review-jobs.js）をテスト時のみ差し替える注入点。
 // 実プロセスをspawnせずに exit コード分岐（0/1/2/3）と再試行回数を検証できる
-// （.claude/rules/test-process-spawn-safety.md 準拠）。
+//
 let _injectedRunReviewJobsOnce = null;
 
 module.exports = {

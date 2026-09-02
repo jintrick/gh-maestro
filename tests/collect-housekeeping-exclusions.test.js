@@ -8,7 +8,7 @@ const os = require('os');
 
 // collect-housekeeping-exclusions.js のユニットテスト。
 //
-// 実プロセス確認は行わない（.claude/rules/test-process-spawn-safety.md 準拠）。生存判定は
+// 実プロセス確認は行わない。生存判定は
 // 各モジュールの _set* 注入で制御する。注入しない場合は死んだ PID（999999999 等）を使い、
 // isProcessAlive が WMI/PowerShell を起動せず false を返す経路だけを踏ませる。
 

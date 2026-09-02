@@ -10,7 +10,7 @@ const { EventEmitter } = require('events');
 // run-council-jobs.js は child-process.js の spawn と shared/resolve-config.js の
 // resolveAgentConfig / validateNonInteractiveTokens に依存する。実プロセスを0個
 // spawn するため、両者をモックして再ロードする
-// （.claude/rules/test-process-spawn-safety.md 準拠）。
+//
 
 const jobsPath = require.resolve('../scripts/shared/run-council-jobs');
 const childProcessPath = require.resolve('../scripts/shared/child-process');

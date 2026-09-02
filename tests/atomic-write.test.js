@@ -2,7 +2,7 @@
 // tests/atomic-write.test.js
 //
 // 共有 atomic write ヘルパー（scripts/shared/atomic-write.js）の単体テスト。
-// 実プロセスを spawn しない（.claude/rules/test-process-spawn-safety.md 準拠）。
+// 実プロセスを spawn しない。
 // ただし項目11の並行書き込みテストは「一度きりで自然終了する node サブプロセス」だけを
 // spawn する（remove-worker.test.js / worker-exit-hook.test.js と同じ許容範囲）。
 // 常駐ポーラー・エージェントCLI・トークン消費は伴わない。
@@ -172,7 +172,7 @@ test('atomicWriteText: リトライ中に対象の掴みが解けたら成功す
     // 別プロセスが対象を掴み、400ms後にハンドルを閉じる。atomicWriteText の同期リトライ
     // （Atomics.wait はメインスレッドのイベントループをブロックするため、同プロセスの
     // timer では解放できない）中にロック解放を観測できる。子プロセスは一度きりで自然
-    // 終了する（.claude/rules/test-process-spawn-safety.md の許容範囲）。
+    // 終了する。
     const child = spawn(process.execPath, ['-e', `
       const fs = require('fs');
       const fd = fs.openSync(process.env.ATOMIC_TEST_TARGET, 'r');

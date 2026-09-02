@@ -60,7 +60,7 @@ const { handleParentSessionDeath } = require('./shared/resident-parent-death');
 const { checkResidentForceGuard } = require('./shared/resident-force-guard');
 const { runningLegacyWorkerSupervisorPids } = require('./shared/worker-supervisor-control');
 
-// テスト注入（test-process-spawn-safety ルール準拠）。既定は実装。
+// テスト注入。既定は実装。
 let _createDeadManSwitch = createDeadManSwitch;
 let _parentDeathExit = (code) => process.exit(code);
 let _injectedGetProcessStartTime;

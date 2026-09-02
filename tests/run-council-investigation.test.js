@@ -3,7 +3,7 @@
 //
 // run-council-investigation.js は child-process.js の spawn / resolve-config.js /
 // council-worktree.js（git 操作）に依存する。すべてモックして実プロセスを0個spawnする
-// （.claude/rules/test-process-spawn-safety.md 準拠）。
+//
 // 明示した --workspace は環境変数より優先されるが、テスト中のworkspace
 // フォールバックが実ワークスペースへ書き込まないようにこの env を無効化する。
 

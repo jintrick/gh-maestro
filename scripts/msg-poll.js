@@ -46,7 +46,7 @@ const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
 const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdog-exit-notify');
 const { handleParentSessionDeath } = require('./shared/resident-parent-death');
 
-// テスト注入（test-process-spawn-safety ルール準拠）。既定は実装。
+// テスト注入。既定は実装。
 let _createDeadManSwitch = createDeadManSwitch;
 let _parentDeathExit = (code) => process.exit(code);
 let _injectedGetProcessStartTime;

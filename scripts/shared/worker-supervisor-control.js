@@ -149,7 +149,7 @@ module.exports = {
   // migrate-records.js の既存API名。移行処理を二重化せず既存契約を保つための別名。
   runningInboxSupervisorPids: runningWorkerSupervisorPids,
   stopRunningInboxSupervisors: stopRunningWorkerSupervisors,
-  // テスト用注入（test-process-spawn-safety ルール準拠。実プロセスは起動・killしない）
+  // テスト用注入（実プロセスは起動・killしない）
   _setFindRunningInstance: (fn) => { _injectedFindRunningInstance = fn; },
   _setCreateResidentLeaseStore: (fn) => { _createResidentLeaseStore = fn; },
   _setIsLeaseLive: (fn) => { _isLeaseLive = fn; },

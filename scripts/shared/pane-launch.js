@@ -16,7 +16,7 @@ const { spawnSync } = require('./child-process');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 
 // テスト中に実WezTermペイン・ウィンドウを起動してしまう事故を構造的に防ぐガード。
-// .claude/rules/test-process-spawn-safety.md が求める「実spawnをenvフラグでゲートする」の
+// 「実spawnをenvフラグでゲートする」の
 // 実装であり、headless-launch.js と同型のガード。
 const REAL_SPAWN_DISABLED_ENV = 'GH_MAESTRO_DISABLE_REAL_SPAWN';
 

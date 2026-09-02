@@ -2,7 +2,7 @@
 // tests/child-wait.test.js
 //
 // 共有 waitChildExit（scripts/shared/child-wait.js）の単体テスト。
-// 実プロセスを spawn しない（.claude/rules/test-process-spawn-safety.md 準拠）。
+// 実プロセスを spawn しない。
 // killProcessTree の観測は child-process.js の spawnSync（Windows: taskkill）と
 // process.kill（Unix: プロセスグループ）をモックして行う。
 

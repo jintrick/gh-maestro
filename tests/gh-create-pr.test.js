@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 // gh-create-pr.js は require.main===module 時のみCLIを実行するため、
 // resolveBaseBranch/createPr は純粋関数としてrequireで検証する。
 // child-process.js の spawnSync をモックし、実プロセスを0個spawnする
-// （.claude/rules/test-process-spawn-safety.md 準拠）。
+//
 
 // createPr の NODE_TEST_CONTEXT ガードは「テスト実行中の外部副作用（実PR作成）を機械的に
 // 拒否する」構造的対策（Issue #202）。実PR作成の引数組み立てを検証する各テストは、

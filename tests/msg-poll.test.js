@@ -1149,7 +1149,7 @@ test('gh api が null を返した場合にクラッシュしない', () => {
 // ── 継続モードの多重起動検知（サブプロセス経由） ────────────────────────────
 // scanOnce() を呼ばないため gh 呼び出しは発生しない。重複検知で即 exit(1) するため
 // interval ループには入らず、実ポーリングプロセスは生成されない
-// （.claude/rules/test-process-spawn-safety.md 準拠）。
+//
 // GH_MAESTRO_WORKSPACE を外した env で起動し、必ず --workspace の一時dirを使う。
 
 test('継続モード: 同じ self を監視中の生存プロセスがいれば exit 1 して起動しない', (t) => {
