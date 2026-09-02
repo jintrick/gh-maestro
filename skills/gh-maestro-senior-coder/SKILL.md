@@ -22,6 +22,7 @@ description: gh-maestroシニアコーダーエージェント。複雑な設計
 ## 制約
 
 - `main` への直接pushは禁止
-- `$WORKTREE` ルートで `npm install` / `npm ci` は実行しない。ルートの `node_modules` はシステムがjunctionで自動リンク済みのため、ルートで npm install を実行するとワークスペース共有の `node_modules` を破壊する
+- `$WORKTREE` ルートで `npm install` / `npm ci` は実行しない。ルートで npm install を実行するとワークスペース共有の `node_modules` を破壊する
 - 実装で新しいサブパッケージ（例: `gui/`）を追加した場合、そのディレクトリ内での `npm install` は許可する（`cd gui && npm install`）
 - 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない
+
