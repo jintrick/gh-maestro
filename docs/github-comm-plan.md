@@ -32,7 +32,7 @@ orchestrator / worker 間のメッセージ配送を、ファイルシステム�
 3. **GitHub が真実、ローカルは使い捨てカーシー（cursor）。** ローカル状態ファイルの破損・消失は「再通知が起きる」以上の被害を生まない設計にする。
 4. **ack 機構は作らない。** メッセージへの応答は「返信コメント」で表現する。無応答はタイムアウトでエスカレートする（現行の「PR 10分未検出で確認」ルールと同型）。
 5. **gh コマンドへのユーザー由来値の受け渡しは注入安全に。** コメント本文は必ず `--body-file -`（stdin）経由。`.claude/rules/git-arg-injection.md` は gh にも適用する。
-6. **既存の命名・パターンを踏襲する**（`--help` 必須 = `.claude/rules/skill-asset-help.md`、`parseFlags` / `resolveWorkspace` の再利用、テストでの実プロセス spawn 禁止 = `.claude/rules/test-process-spawn-safety.md`）。
+6. **既存の命名・パターンを踏襲する**（`--help` 必須 = `.claude/rules/skill-asset-help.md`、`parseFlags` / `resolveWorkspace` の再利用、テストで実プロセスを spawn しない）。
 
 ---
 
@@ -225,7 +225,7 @@ REST APIがサーバ・ネットワーク起因（5xx/タイムアウト等）�
 
 **削除しない**もの: `poll-pr.js`（存続・起動方法のみ変更）、`poll-reviews.js`（無変更）、`wezterm-cli.js` / `send-pane` 以外のペイン起動系（spawn-worker が使用）、`kill-tree.js`（remove-worker のペイン kill で使用が残るか確認し、未使用になった場合のみ削除）。
 
-`.claude/rules/test-process-spawn-safety.md` は**残す**が、queue-poller 固有の記述（poller.json の pid:0 等）を削除し、「detached プロセスをそもそも作らない」原則を追記する。
+テストでの実プロセス spawn 禁止は、当時これを専用のルールファイルへ置く前提で書かれていた。そのルールはコミット a273a35 で削除済みである（`paths:` 方式では新規ファイルの著者に届かず予防できなかったため）。代替の機構は Issue #427 で扱う。
 
 ---
 
