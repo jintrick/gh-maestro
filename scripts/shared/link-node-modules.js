@@ -41,8 +41,8 @@ function linkNodeModules(worktreeDir, workspace) {
         if (existsSync(dest)) {
           skipped.push(dest);
         } else {
-          mkdirSync(resolve(dest, '..'), { recursive: true });
           try {
+            mkdirSync(resolve(dest, '..'), { recursive: true });
             symlinkSync(srcChild, dest, 'junction');
             linked.push(dest);
           } catch (e) {

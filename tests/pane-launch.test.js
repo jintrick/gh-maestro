@@ -195,4 +195,51 @@ test('killPane: kill失敗時はステータスとstderrを返す', () => {
   assert.equal(result.stderr, 'pane not found');
 });
 
+// ── テスト中の実プロセス・ペイン起動ガード (Issue #425) ──────────────────────────
+
+test('launchAgentInWindow: 未注入時に NODE_TEST_CONTEXT があると実起動を拒否する (Issue #425)', () => {
+  assert.ok(process.env.NODE_TEST_CONTEXT, '前提: テストランナー配下で実行されている');
+  paneLaunch._setWeztermSpawnWindow(null);
+
+  assert.throws(
+    () => launchAgentInWindow({ argv: ['agy'], cwd: '/tmp/ws' }),
+    /WezTermウィンドウを起動しません.*NODE_TEST_CONTEXT/,
+  );
+});
+
+test('launchInSplitPane: 未注入時に NODE_TEST_CONTEXT があると実起動を拒否する (Issue #425)', () => {
+  assert.ok(process.env.NODE_TEST_CONTEXT, '前提: テストランナー配下で実行されている');
+  paneLaunch._setWeztermSplitPane(null);
+
+  assert.throws(
+    () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws' }),
+    /WezTermペインを起動しません.*NODE_TEST_CONTEXT/,
+  );
+});
+
+test('launchAgentInWindow / launchInSplitPane: GH_MAESTRO_DISABLE_REAL_SPAWN で実起動を拒否する (Issue #425)', () => {
+  paneLaunch._setWeztermSpawnWindow(null);
+  paneLaunch._setWeztermSplitPane(null);
+  const savedContext = process.env.NODE_TEST_CONTEXT;
+  const savedDisabled = process.env.GH_MAESTRO_DISABLE_REAL_SPAWN;
+  delete process.env.NODE_TEST_CONTEXT;
+  process.env.GH_MAESTRO_DISABLE_REAL_SPAWN = '1';
+  try {
+    assert.throws(
+      () => launchAgentInWindow({ argv: ['agy'], cwd: '/tmp/ws' }),
+      /GH_MAESTRO_DISABLE_REAL_SPAWN/,
+    );
+    assert.throws(
+      () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws' }),
+      /GH_MAESTRO_DISABLE_REAL_SPAWN/,
+    );
+  } finally {
+    if (savedContext !== undefined) process.env.NODE_TEST_CONTEXT = savedContext;
+    else delete process.env.NODE_TEST_CONTEXT;
+    if (savedDisabled !== undefined) process.env.GH_MAESTRO_DISABLE_REAL_SPAWN = savedDisabled;
+    else delete process.env.GH_MAESTRO_DISABLE_REAL_SPAWN;
+  }
+});
+
+
 

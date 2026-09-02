@@ -568,11 +568,6 @@ try {
   }
 }
 
-// --- node_modules junctionを作成（最大3階層） ---
-const nmResult = linkNodeModules(worktreeDir, workspace);
-for (const p of nmResult.linked)   console.warn(`spawn-worker: junction作成: ${p}`);
-for (const p of nmResult.missing)  console.warn(`spawn-worker: [要対応] junction作成に失敗しました: ${p}`);
-
 // --- worktree のロールバック関数（以降の処理が失敗したときに使う） ---
 const rollbackWorktree = () => {
   console.warn('spawn-worker: worktreeをロールバックします...');
@@ -608,6 +603,22 @@ const rollbackWorktree = () => {
     if (delR.status !== 0) throw new Error(`git branch -d 失敗: ${(delR.stderr || '').toString().trim()}`);
   } catch (e) { console.warn(`  rollback: git branch -d 失敗: ${e.message.split('\n')[0]}`); }
 };
+
+// --- node_modules junctionを作成（最大3階層） ---
+let nmResult;
+try {
+  nmResult = linkNodeModules(worktreeDir, workspace);
+} catch (e) {
+  console.error(`spawn-worker: junction作成処理で予期しない例外が発生しました: ${e.message}`);
+  rollbackWorktree();
+  fail(`node_modules の junction 作成に失敗したため、ワーカーの起動を中止しました: ${e.message}`);
+}
+for (const p of nmResult.linked)   console.warn(`spawn-worker: junction作成: ${p}`);
+if (nmResult.missing.length > 0) {
+  for (const p of nmResult.missing) console.error(`spawn-worker: junction作成失敗: ${p}`);
+  rollbackWorktree();
+  fail(`node_modules の junction 作成に失敗したため、ワーカーの起動を中止しました (${nmResult.missing.join(', ')})`);
+}
 
 // --- 初期プロンプトをファイルに書き出す ---
 // WindowsのspawnSyncは改行を含むargvを正しく渡せないため、argvではなく

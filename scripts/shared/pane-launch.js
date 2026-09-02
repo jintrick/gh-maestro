@@ -15,11 +15,27 @@
 const { spawnSync } = require('./child-process');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 
+// テスト中に実WezTermペイン・ウィンドウを起動してしまう事故を構造的に防ぐガード。
+// .claude/rules/test-process-spawn-safety.md が求める「実spawnをenvフラグでゲートする」の
+// 実装であり、headless-launch.js と同型のガード。
+const REAL_SPAWN_DISABLED_ENV = 'GH_MAESTRO_DISABLE_REAL_SPAWN';
+
+function realSpawnDisabledReason() {
+  if (process.env.NODE_TEST_CONTEXT) return 'テスト実行中（NODE_TEST_CONTEXT が設定されています）';
+  if (process.env[REAL_SPAWN_DISABLED_ENV]) return `${REAL_SPAWN_DISABLED_ENV} が設定されています`;
+  return null;
+}
+
+const defaultWeztermSpawnWindow = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
+const defaultWeztermSplitPane = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
+const defaultWeztermListPanes = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
+const defaultWeztermKillPane = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
+
 // wezterm 呼び出し（テストで注入可能）
-let _weztermSpawnWindow = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
-let _weztermSplitPane = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
-let _weztermListPanes = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
-let _weztermKillPane = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
+let _weztermSpawnWindow = defaultWeztermSpawnWindow;
+let _weztermSplitPane = defaultWeztermSplitPane;
+let _weztermListPanes = defaultWeztermListPanes;
+let _weztermKillPane = defaultWeztermKillPane;
 
 /**
  * argv を実行する新規WezTermウィンドウを作成する（ログインシェル経由）。
@@ -37,6 +53,14 @@ let _weztermKillPane = (args) => spawnSync('wezterm', args, { encoding: 'utf8' }
  * @throws {Error} ウィンドウ作成に失敗した場合
  */
 function launchAgentInWindow({ argv, cwd, env = {}, onExit = null }) {
+  const disabledReason = _weztermSpawnWindow === defaultWeztermSpawnWindow ? realSpawnDisabledReason() : null;
+  if (disabledReason) {
+    throw new Error(
+      `WezTermウィンドウを起動しません: ${disabledReason}。` +
+      `起動経路をテストから検証する場合は _setWeztermSpawnWindow で注入してください。`
+    );
+  }
+
   const loginShellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, env);
   const spawnArgs = ['cli', '--no-auto-start', 'spawn', '--new-window', '--cwd', cwd, '--', ...loginShellArgs];
 
@@ -70,6 +94,14 @@ function launchAgentInWindow({ argv, cwd, env = {}, onExit = null }) {
  * @throws {Error} ペイン作成に失敗した場合
  */
 function launchInSplitPane({ argv, cwd, direction = 'bottom', percent = 15, env = {}, onExit = null }) {
+  const disabledReason = _weztermSplitPane === defaultWeztermSplitPane ? realSpawnDisabledReason() : null;
+  if (disabledReason) {
+    throw new Error(
+      `WezTermペインを起動しません: ${disabledReason}。` +
+      `起動経路をテストから検証する場合は _setWeztermSplitPane で注入してください。`
+    );
+  }
+
   const loginShellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, env);
   const validDirections = new Set(['bottom', 'right', 'top', 'left']);
   const dir = validDirections.has(direction) ? direction : 'bottom';
@@ -165,8 +197,9 @@ module.exports = {
   getAlivePaneIds,
   isPaneAlive,
   killPane,
-  _setWeztermSpawnWindow: (fn) => { _weztermSpawnWindow = fn; },
-  _setWeztermSplitPane: (fn) => { _weztermSplitPane = fn; },
-  _setWeztermListPanes: (fn) => { _weztermListPanes = fn; },
-  _setWeztermKillPane: (fn) => { _weztermKillPane = fn; },
+  REAL_SPAWN_DISABLED_ENV,
+  _setWeztermSpawnWindow: (fn) => { _weztermSpawnWindow = fn ?? defaultWeztermSpawnWindow; },
+  _setWeztermSplitPane: (fn) => { _weztermSplitPane = fn ?? defaultWeztermSplitPane; },
+  _setWeztermListPanes: (fn) => { _weztermListPanes = fn ?? defaultWeztermListPanes; },
+  _setWeztermKillPane: (fn) => { _weztermKillPane = fn ?? defaultWeztermKillPane; },
 };

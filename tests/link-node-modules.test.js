@@ -103,3 +103,23 @@ test('node_modulesディレクトリ自体には再帰しない', () => {
     assert.equal(linked.length, 1);
   });
 });
+
+test('親ディレクトリ作成でエラーが発生した場合は例外を送出せず missing に記録する (Issue #425)', () => {
+  withDirs((workspace, worktree) => {
+    // サブパッケージに node_modules を作成
+    const subWs = path.join(workspace, 'packages', 'app');
+    fs.mkdirSync(path.join(subWs, 'node_modules'), { recursive: true });
+
+    // worktree 側で packages をファイルとして作成し、mkdirSync(packages/app) が ENOTDIR/EEXIST 等で失敗するようにする
+    fs.writeFileSync(path.join(worktree, 'packages'), 'not-a-directory');
+
+    const { linked, skipped, missing } = linkNodeModules(worktree, workspace);
+
+    assert.equal(linked.length, 0);
+    assert.equal(skipped.length, 0);
+    assert.equal(missing.length, 1);
+    assert.match(missing[0], /packages[/\\]app[/\\]node_modules/);
+    assert.match(missing[0], /error:/);
+  });
+});
+

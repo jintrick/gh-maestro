@@ -83,3 +83,21 @@ test('_partials は skills の走査で `_` 始まりとしてスキル扱いさ
   // 部分テンプレートがスキルとして誤インストールされる。
   assert.ok(path.basename(PARTIALS_DIR).startsWith('_'), '部分テンプレート置き場は `_` 始まりである必要がある');
 });
+
+test('コーダースキル・共通テンプレートの npm install 禁止制約に自動リンク済みの前提記述が含まれない (Issue #425)', () => {
+  const targets = [
+    path.join(SKILLS_DIR, 'gh-maestro-coder', 'SKILL.md'),
+    path.join(SKILLS_DIR, 'gh-maestro-senior-coder', 'SKILL.md'),
+    path.join(PARTIALS_DIR, 'coder-workflow.md'),
+  ];
+  for (const target of targets) {
+    const content = fs.readFileSync(target, 'utf8');
+    assert.doesNotMatch(content, /自動リンク済み/, `${path.basename(target)} に「自動リンク済み」の記述が残っている`);
+    assert.match(
+      content,
+      /-\s+`\$WORKTREE`\s+ルートで\s+`npm install`\s+\/\s+`npm ci`\s+は実行しない。ルートで\s+npm install\s+を実行するとワークスペース共有の\s+`node_modules`\s+を破壊する/,
+      `${path.basename(target)} の npm install 禁止制約が期待形式と一致しない`,
+    );
+  }
+});
+
