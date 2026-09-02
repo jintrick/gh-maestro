@@ -235,6 +235,8 @@ test('reset-session: status-pane.json が存在する場合にセッションリ
       encoding: 'utf8',
     });
 
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /WezTermのpane一覧取得をテスト中のため拒否しました/);
     assert.equal(loadStatusPane(workspace), null, 'status-pane.json が削除されていること');
   });
 });

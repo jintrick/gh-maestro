@@ -197,14 +197,16 @@ test('killPane: kill失敗時はステータスとstderrを返す', () => {
 
 // ── テスト中の実プロセス・ペイン起動ガード (Issue #425) ──────────────────────────
 
-test('launchAgentInWindow: 未注入時に NODE_TEST_CONTEXT があると実起動を拒否する (Issue #425)', () => {
+test('launchAgentInWindow: 未注入時に NODE_TEST_CONTEXT があると claude / agy / codex の実起動を拒否する (Issue #430)', () => {
   assert.ok(process.env.NODE_TEST_CONTEXT, '前提: テストランナー配下で実行されている');
   paneLaunch._setWeztermSpawnWindow(null);
 
-  assert.throws(
-    () => launchAgentInWindow({ argv: ['agy'], cwd: '/tmp/ws' }),
-    /WezTermウィンドウを起動しません.*NODE_TEST_CONTEXT/,
-  );
+  for (const command of ['claude', 'agy', 'codex']) {
+    assert.throws(
+      () => launchAgentInWindow({ argv: [command], cwd: '/tmp/ws' }),
+      /WezTermウィンドウを起動しません.*NODE_TEST_CONTEXT/,
+    );
+  }
 });
 
 test('launchInSplitPane: 未注入時に NODE_TEST_CONTEXT があると実起動を拒否する (Issue #425)', () => {
@@ -215,6 +217,22 @@ test('launchInSplitPane: 未注入時に NODE_TEST_CONTEXT があると実起動
     () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws' }),
     /WezTermペインを起動しません.*NODE_TEST_CONTEXT/,
   );
+});
+
+test('launchInSplitPane: 未注入時に NODE_TEST_CONTEXT があると claude / agy / codex の実起動を拒否する (Issue #430)', () => {
+  assert.ok(process.env.NODE_TEST_CONTEXT, '前提: テストランナー配下で実行されている');
+  paneLaunch._setWeztermSplitPane(null);
+
+  try {
+    for (const command of ['claude', 'agy', 'codex']) {
+      assert.throws(
+        () => paneLaunch.launchInSplitPane({ argv: [command], cwd: '/tmp/ws' }),
+        /WezTermペインを起動しません.*NODE_TEST_CONTEXT/,
+      );
+    }
+  } finally {
+    paneLaunch._setWeztermSplitPane(null);
+  }
 });
 
 test('launchAgentInWindow / launchInSplitPane: GH_MAESTRO_DISABLE_REAL_SPAWN で実起動を拒否する (Issue #425)', () => {

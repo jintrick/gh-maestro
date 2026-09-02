@@ -3,7 +3,7 @@
 // Validates prerequisites on first run; always applies idempotent setup steps.
 // Sentinel (.gh-maestro/setup-ok) only gates expensive environment checks.
 
-const { spawnSync } = require('./shared/child-process');
+const { spawnSync, REAL_SPAWN_DISABLED_ERROR_CODE } = require('./shared/child-process');
 const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, chmodSync } = require('fs');
 const { resolve, relative, isAbsolute, sep } = require('path');
 
@@ -34,7 +34,16 @@ function fail(msg, ...hints) {
 }
 
 function run(cmd, args, { capture } = {}) {
-  const r = spawnSync(cmd, args, { cwd: workspaceRoot, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit' });
+  let r;
+  try {
+    r = spawnSync(cmd, args, { cwd: workspaceRoot, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit' });
+  } catch (error) {
+    if (error?.code !== REAL_SPAWN_DISABLED_ERROR_CODE) throw error;
+    // テスト時の WezTerm 拒否は、前提条件チェックの通常の失敗として扱う。ただし
+    // エラーを捨てずに出力し、呼び出し元の fail() で非ゼロ終了させる。
+    console.error(`  [error] ${error.message}`);
+    return null;
+  }
   if (r.status !== 0) return null;
   return capture ? r.stdout.trim() : true;
 }

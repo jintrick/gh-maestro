@@ -338,7 +338,7 @@ test('launchAgentHeadless: ログファイルを準備できなければ throw �
 
 // ── テスト中の実プロセス起動ガード ───────────────────────────────────────────
 
-test('launchAgentHeadless: spawnを注入していなければテスト中は実起動を拒否する', () => {
+test('launchAgentHeadless: spawnを注入していなければテスト中は claude / agy / codex の実起動を拒否する', () => {
   // 実障害: 引数バリデーションを検証するだけのテストが worktree 作成とエージェント起動まで
   // 到達し、実際に claude.exe が4本起動してトークンを消費した。ここが最後の砦になる。
   // このテスト自体が node --test 配下なので NODE_TEST_CONTEXT が立っている。
@@ -347,10 +347,12 @@ test('launchAgentHeadless: spawnを注入していなければテスト中は実
   // spawn を実装に戻す（=注入されていない状態）
   headlessLaunch._setSpawn(require('../scripts/shared/child-process').spawn);
 
-  assert.throws(
-    () => launchAgentHeadless({ argv: ['codex', 'exec'], cwd: tmpDir, logPath: path.join(tmpDir, 'w.log') }),
-    /実ワーカーを起動しません/,
-  );
+  for (const command of ['claude', 'agy', 'codex']) {
+    assert.throws(
+      () => launchAgentHeadless({ argv: [command], cwd: tmpDir, logPath: path.join(tmpDir, `${command}.log`) }),
+      /実ワーカーを起動しません/,
+    );
+  }
 });
 
 test('launchAgentHeadless: argv が空なら throw する（agent-exec のバリデーションが効く）', () => {
