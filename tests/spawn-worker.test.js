@@ -968,8 +968,6 @@ test('junction 作成で missing が空かつ skipped が非空の場合、ワ�
         unref: () => {},
         on: () => {},
       }));
-      const statusPane = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'ensure-status-pane.js'))});
-      statusPane.ensureStatusPane = () => ({ ok: true, paneId: 'mock-pane', reused: true });
       const mod = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'link-node-modules.js'))});
       mod.linkNodeModules = (worktreeDir, workspace) => {
         return {
@@ -1069,8 +1067,6 @@ test('junction 作成で linked / skipped / missing がいずれも空の場合�
         unref: () => {},
         on: () => {},
       }));
-      const statusPane = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'ensure-status-pane.js'))});
-      statusPane.ensureStatusPane = () => ({ ok: true, paneId: 'mock-pane', reused: true });
       const mod = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'link-node-modules.js'))});
       mod.linkNodeModules = () => {
         return {
