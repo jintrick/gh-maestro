@@ -20,7 +20,7 @@ function runCli(args) {
 // run-review-manager.js を起動する（通常ワーカーと同じ起動基盤・同じ終了フック機構。
 // PR #172レビュー指摘: 独自の時間ベースヒューリスティックによる生存確認は、
 // worktree構築時間がリポジトリごとに変わるため本質的に脆いと判明し撤去した）。
-// テストは実プロセスを0個spawnする（.claude/rules/test-process-spawn-safety.md 準拠）。
+// テストは実プロセスを0個spawnする。
 // headless-launch.js 自身の spawn 注入機構（_setSpawn）をそのまま使う
 // （headless-launch.test.js と同じパターン）。
 

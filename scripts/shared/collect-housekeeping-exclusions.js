@@ -141,7 +141,7 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
 
 module.exports = {
   collectHousekeepingExclusions,
-  // テスト用注入（test-process-spawn-safety ルール準拠。実プロセス確認を回避する）
+  // テスト用注入（実プロセス確認を回避する）
   _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
   _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
 };

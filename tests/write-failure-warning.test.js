@@ -2,7 +2,7 @@
 // tests/write-failure-warning.test.js
 //
 // 書き込み連続失敗の警告モニター（scripts/shared/write-failure-warning.js）の単体テスト。
-// 実プロセスを spawn しない（.claude/rules/test-process-spawn-safety.md 準拠）。
+// 実プロセスを spawn しない。
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');

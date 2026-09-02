@@ -11,7 +11,7 @@ const { launchAgentHeadless, workerLogPath, SHIM_PATH } = headlessLaunch;
 const { runShim } = require('../scripts/shared/headless-shim');
 const { buildWorkerEnv } = require('../scripts/shared/worker-env');
 
-// 実プロセスは 0 個 spawn する（.claude/rules/test-process-spawn-safety.md）。
+// 実プロセスは 0 個 spawn する。
 // spawn は必ず注入したフェイクへ差し替えてから呼ぶ。
 
 let tmpDir;

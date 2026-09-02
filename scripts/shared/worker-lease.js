@@ -54,7 +54,7 @@ function _getProcessStartTime(pid) {
   return fn(pid);
 }
 
-// テストで注入可能にする（実プロセスに触れない。test-process-spawn-safety ルール準拠）。
+// テストで注入可能にする（実プロセスに触れない）。
 let _killProcessTree = killProcessTree;
 let _sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
@@ -649,7 +649,7 @@ module.exports = {
   isResidentLeaseLive,
   acquireResidentLease,
   releaseResidentLease,
-  // テスト用注入（test-process-spawn-safety ルール準拠）
+  // テスト用注入
   _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
   _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
   _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },

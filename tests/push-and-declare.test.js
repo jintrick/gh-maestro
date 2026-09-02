@@ -10,7 +10,7 @@ const { testResultPath, writeTestResultArtifact } = require('../scripts/shared/t
 // push-and-declare.js は「ステージング・コミット・push・PR取得/作成・テスト結果申告」を
 // 一つの操作にまとめた収束型の単一入口（Issue #374）。テストは child-process.js の
 // spawnSync をモックし、実プロセス（git / gh）を0個spawnする
-// （.claude/rules/test-process-spawn-safety.md 準拠）。
+//
 //
 // モックするのは child-process.spawnSync の1点だけ。createPr（gh-create-pr.js）と
 // declareTestResult（declare-test-result.js）は依存注入せず実物を通し、argvと実際の受理を

@@ -8,7 +8,7 @@ const { spawnSync } = require('child_process');
 // poll-pr.js は require.main===module 時のみCLIを実行するため、
 // getPrBaseBranch/formatBaseBranchMismatch/spawnPollReviews は純粋関数としてrequireで検証する。
 // spawnPollReviews は child-process.js の spawnSync をモックし、実プロセスを0個spawnする
-// （.claude/rules/test-process-spawn-safety.md 準拠）。CLI起動時の即時エラー終了パス
+// CLI起動時の即時エラー終了パス
 // （--help）のみ、ループに入らず即exitすることを利用して実プロセスをspawnSyncで同期実行する
 // （detachedポーラーは起動しない）。
 //

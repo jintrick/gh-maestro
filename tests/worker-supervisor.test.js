@@ -177,7 +177,7 @@ function setWorkersBusy() {
 
 /**
  * resumeによるheadless起動が既定で成功するようにspawnをモックする。
- * 実プロセスは1つも起動しない（.claude/rules/test-process-spawn-safety.md）。
+ * 実プロセスは1つも起動しない。
  */
 let lastSpawnCalls = [];
 function resetHeadlessLaunchMocks({ pid = RESUMED_PID } = {}) {

@@ -569,7 +569,7 @@ test('send-text-after-launch の拒否は worktree を作る前に起きる（�
 // ── establishOrchestratorBaseline（Issue #207: ワーカー生成時のベースライン既読化） ──
 // ワーカー起動前に、対象 Issue の既存コメントIDを orchestrator の既読集合へ追加する。
 // 実プロセス spawn はせず、gh-comments の取得と markRead を注入して検証する
-// （test-process-spawn-safety ルール準拠）。
+//
 
 test('establishOrchestratorBaseline: 既存コメントIDが orchestrator 既読集合に記録され、取得最適化カーソルも設定される', () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline-'));

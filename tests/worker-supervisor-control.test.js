@@ -15,7 +15,7 @@ let workspace;
 
 // _set... 注入はモジュール内のモジュール変数を書き換えるため、テスト間で
 // 実装を跨いで持ち越さないよう、beforeEach/afterEach で必ず実装へ戻す
-// （.claude/rules/test-process-spawn-safety.md 準拠。実プロセスは起動・killしない）。
+// （実プロセスは起動・killしない）。
 function resetInjectables() {
   control._setFindRunningInstance(findRunningInstance);
   control._setCreateResidentLeaseStore(workerLease.createResidentLeaseStore);

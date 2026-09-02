@@ -1,7 +1,7 @@
 'use strict';
 // run-council.test.js — run-council.js（council の決定論的フェーズ機械）のテスト
 //
-// 方針: テストは実プロセスを 0 個 spawn する（test-process-spawn-safety ルール）。
+// 方針: テストは実プロセスを 0 個 spawn する。
 //   - child-process.js を require.cache でモック（spawn は throw / spawnSync はディスパッチャ）
 //   - resolve-config.js をモック（グループ定義・参加者を注入）
 //   - run-council-jobs.js をモック（runPhaseJobs を executor 注入。計画: 終了コードは
@@ -18,7 +18,7 @@ const os = require('os');
 const path = require('path');
 
 // セッション排他ロックのテストで worker-lease の生存確認・同一性確認を注入する
-// （実プロセスに触れない。test-process-spawn-safety ルール準拠）。
+// （実プロセスに触れない）。
 const workerLease = require('../scripts/shared/worker-lease');
 const processLifecycle = require('../scripts/process-lifecycle');
 workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
@@ -830,7 +830,7 @@ test('セッションロック: 他プロセスが保持中は exit 2 で拒否�
     fs.writeFileSync(lockPath, JSON.stringify({ pid: 424242, startTime: new Date().toISOString() }), 'utf8');
 
     // テスト中は実プロセス生存確認をしない。保持者を「生存・同一プロセス」とみなして
-    // ビジー拒否を検証する（test-process-spawn-safety ルール準拠）
+    // ビジー拒否を検証する
     workerLease._setIsProcessAlive(() => true);
     workerLease._setVerifyProcessIdentity(() => ({ match: true }));
     try {

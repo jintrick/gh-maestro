@@ -8,7 +8,7 @@ const os = require('os');
 
 // run-review-manager.js の CLI 実行部は require.main === module でガードされているため、
 // require するだけでは実プロセスをspawnしない
-// （.claude/rules/test-process-spawn-safety.md 準拠）。
+//
 //
 // レビュー観点の選択（旧 heavy/directed モード、MODE=/ASPECTS=/--brief-file、
 // review-manager-<PR>.meta.json）は廃止した。ファイルパターンでの機械的な観点自動判定が
@@ -147,7 +147,7 @@ test('buildFinalizePrompt: incomplete 時に --mode incomplete で最終化す�
 
 // ── runJobsDeterministically / judgeJobRun（決定論的ジョブ実行・モデル介入なし） ──
 // 実プロセス（run-review-jobs.js）はspawnせず、注入した終了結果 {status,error} 分岐を検証する
-// （.claude/rules/test-process-spawn-safety.md 準拠）。
+//
 //
 // judgeJobRun は終了コードと副作用を組み合わせて監督結果を判定する:
 //   - status 1 + 結果JSON存在 → results-ready（ジョブが回って失敗が残った）
@@ -356,7 +356,7 @@ test('サブプロセス経由: 位置引数が不足しているとUsageエラ�
 // ── runAgentHeadless ─────────────────────────────────────────────────────
 // Codex実行そのものはネットワーク/実エージェント依存のため統合テスト対象外。
 // ここではspawnしても即終了する軽量コマンドだけを使う
-// （.claude/rules/test-process-spawn-safety.md 準拠: detachしない同期spawnのみ）。
+// （detachしない同期spawnのみ）。
 //
 // 可視ペイン実行（runAgentVisible / buildVisiblePaneArgs）はIssue #151で廃止した。
 // RMの実行記録はfd直接リダイレクトによるログ追記へ一本化されている。

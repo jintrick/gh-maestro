@@ -40,7 +40,7 @@ beforeEach(() => {
   workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ensure-supervisor-'));
   mod._setSpawn(() => fakeChild());
   // findSessionRootPid は実装がWMI/execSyncを呼ぶため、テストでは常にモックする
-  // （.claude/rules/test-process-spawn-safety.md 準拠。実プロセスを起動しない）。
+  // （実プロセスを起動しない）。
   mod._setFindSessionRootPid(() => 12345);
   mod._setFindRunningInstance(() => null);
   // 既定は実装（worker-lease.isResidentLeaseLive）。テスト用 temp workspace には

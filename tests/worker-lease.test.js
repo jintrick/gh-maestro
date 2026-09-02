@@ -20,7 +20,7 @@ process.on('exit', () => {
   for (const [k, v] of Object.entries(SAVED_MAESTRO_ENV)) process.env[k] = v;
 });
 
-// 実プロセスには一切触れない（.claude/rules/test-process-spawn-safety.md）
+// 実プロセスには一切触れない
 afterEach(() => {
   lease._setIsProcessAlive(processLifecycle.isProcessAlive);
   lease._setVerifyProcessIdentity(processLifecycle.verifyProcessIdentity);

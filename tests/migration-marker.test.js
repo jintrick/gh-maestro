@@ -17,7 +17,7 @@ let workspace;
 
 // _set... 注入はモジュール内のモジュール変数を書き換えるため、テスト間で
 // 実装を跨いで持ち越さないよう、afterEach で必ず実装へ戻す
-// （.claude/rules/test-process-spawn-safety.md 準拠。実プロセス確認は行わない）。
+// （実プロセス確認は行わない）。
 afterEach(() => {
   marker._setIsProcessAlive(isProcessAlive);
   marker._setGetProcessStartTime(getProcessStartTime);

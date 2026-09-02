@@ -8,7 +8,7 @@ const fs = require('fs');
 
 // resident-parent-death.js — dead-man's switch 検出時の共通終了前処理（Issue #301）
 // 実 worker-lease を使って lease 解放の前後を検証する。実プロセスは spawn しない
-// （test-process-spawn-safety 準拠。liveness 判定は注入でモックする）。
+// （liveness 判定は注入でモックする）。
 
 const { handleParentSessionDeath } = require('../scripts/shared/resident-parent-death');
 const lease = require('../scripts/shared/worker-lease');

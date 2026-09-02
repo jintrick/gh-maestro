@@ -38,7 +38,7 @@ const SHIM_PATH = path.join(__dirname, 'headless-shim.js');
 const HEADLESS_ENV = Object.freeze({ NO_COLOR: '1' });
 
 // テスト中に実ワーカー（エージェントCLI）を起動してしまう事故を構造的に防ぐガード。
-// .claude/rules/test-process-spawn-safety.md が求める「実spawnをenvフラグでゲートする」の
+// 「実spawnをenvフラグでゲートする」の
 // 実装であり、ここが最後の砦になる。
 //
 // 実障害: 引数バリデーションを検証するだけのテストが、ガードの無い状態では worktree 作成と
@@ -56,7 +56,7 @@ function realSpawnDisabledReason() {
   return null;
 }
 
-// テストで注入可能にする（実プロセスを spawn しない。test-process-spawn-safety ルール準拠）。
+// テストで注入可能にする（実プロセスを spawn しない）。
 let _spawn = spawn;
 
 // process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。CLI 主経路

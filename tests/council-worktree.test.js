@@ -8,7 +8,7 @@ const path = require('path');
 
 // git を伴う関数（ensureCouncilWorktree / removeCouncilWorktree / resolveWorkspaceHead）は
 // child-process.js の spawnSync をモックして実プロセスを0個spawnする
-// （.claude/rules/test-process-spawn-safety.md 準拠）。
+//
 const councilWorktreePath = require.resolve('../scripts/shared/council-worktree');
 
 /**

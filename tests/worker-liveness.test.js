@@ -7,7 +7,7 @@ const liveness = require('../scripts/shared/worker-liveness');
 const { isWorkerAlive } = liveness;
 const processLifecycle = require('../scripts/process-lifecycle');
 
-// 実プロセスには一切触れない（.claude/rules/test-process-spawn-safety.md）
+// 実プロセスには一切触れない
 afterEach(() => {
   liveness._setIsProcessAlive(processLifecycle.isProcessAlive);
   liveness._setVerifyProcessIdentity(processLifecycle.verifyProcessIdentity);
