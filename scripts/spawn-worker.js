@@ -605,7 +605,14 @@ const rollbackWorktree = () => {
 };
 
 // --- node_modules junctionを作成（最大3階層） ---
-const nmResult = linkNodeModules(worktreeDir, workspace);
+let nmResult;
+try {
+  nmResult = linkNodeModules(worktreeDir, workspace);
+} catch (e) {
+  console.error(`spawn-worker: junction作成処理で予期しない例外が発生しました: ${e.message}`);
+  rollbackWorktree();
+  fail(`node_modules の junction 作成に失敗したため、ワーカーの起動を中止しました: ${e.message}`);
+}
 for (const p of nmResult.linked)   console.warn(`spawn-worker: junction作成: ${p}`);
 if (nmResult.missing.length > 0) {
   for (const p of nmResult.missing) console.error(`spawn-worker: junction作成失敗: ${p}`);

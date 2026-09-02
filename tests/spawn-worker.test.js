@@ -839,7 +839,85 @@ test('junction 作成失敗時 (missing 非空) はワーカーを起動せず�
   }
 });
 
-test('junction 作成で missing が空で skipped のみ、または全て空の場合は junction 理由で失敗しない (Issue #425)', () => {
+test('linkNodeModules の予期しない例外発生時もワーカーを起動せず、worktree をロールバックして非ゼロ終了する (Issue #425)', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-nm-throw-ws-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-nm-throw-home-'));
+  const preload = path.join(home, 'preload-link-throw.js');
+  try {
+    spawnSync('git', ['init'], { cwd: ws, stdio: 'pipe' });
+    spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ws, stdio: 'pipe' });
+    spawnSync('git', ['config', 'user.name', 'test'], { cwd: ws, stdio: 'pipe' });
+    fs.writeFileSync(path.join(ws, 'README.md'), '# test\n');
+    spawnSync('git', ['add', '.'], { cwd: ws, stdio: 'pipe' });
+    spawnSync('git', ['commit', '-m', 'initial commit'], { cwd: ws, stdio: 'pipe' });
+    readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.gh-maestro', 'config.json'),
+      JSON.stringify({
+        agents: {
+          'test-agent': {
+            id: 'test-agent',
+            command: process.execPath,
+            extraArgs: [],
+            promptDelivery: 'positional',
+          },
+        },
+      }),
+      'utf8',
+    );
+
+    fs.writeFileSync(
+      preload,
+      `
+      const closedGuard = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'closed-pr-guard.js'))});
+      closedGuard.checkClosedPr = () => ({ ok: true, closed: false, prNumber: null });
+      const ghComments = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'gh-comments.js'))});
+      ghComments.listComments = () => ({ status: 0, stdout: '[]' });
+      const mod = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'link-node-modules.js'))});
+      mod.linkNodeModules = () => {
+        throw new Error('simulated unexpected filesystem crash');
+      };
+      `,
+      'utf8',
+    );
+
+    const workerName = 'issue-425-coder-throwjunction';
+    const worktreeDir = path.join(ws, '.gh-maestro', 'worktrees', workerName);
+    const workersPath = path.join(ws, '.gh-maestro', 'workers.json');
+
+    const r = spawnSync(
+      process.execPath,
+      ['-r', preload, SCRIPT,
+        '--skill', 'gh-maestro-coder',
+        '--issue', '425',
+        '--description', 'throwjunction',
+        '--repo', 'o/r',
+        '--workspace', ws,
+        '--agent', 'test-agent',
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+      },
+    );
+
+    assert.notEqual(r.status, 0, `非ゼロ終了であること: ${r.stderr}`);
+    assert.match(r.stderr, /spawn-worker: junction作成処理で予期しない例外が発生しました/);
+    assert.match(r.stderr, /simulated unexpected filesystem crash/);
+    assert.equal(fs.existsSync(worktreeDir), false, 'worktreeディレクトリがロールバックで削除されていること');
+    if (fs.existsSync(workersPath)) {
+      const workers = JSON.parse(fs.readFileSync(workersPath, 'utf8'));
+      assert.equal(workers[workerName], undefined, 'workers.json にワーカーが登録されていないこと');
+    }
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test('junction 作成で missing が空かつ skipped が非空の場合、ワーカーを正常起動しワーカー名を出力して終了コード0になる (Issue #425 / 受入条件6・8)', () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-nm-skip-ws-'));
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-nm-skip-home-'));
   const preload = path.join(home, 'preload-link-skip.js');
@@ -877,6 +955,21 @@ test('junction 作成で missing が空で skipped のみ、または全て空�
       closedGuard.checkClosedPr = () => ({ ok: true, closed: false, prNumber: null });
       const ghComments = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'gh-comments.js'))});
       ghComments.listComments = () => ({ status: 0, stdout: '[]' });
+      const headless = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'headless-launch.js'))});
+      headless._setSpawn(() => ({
+        pid: 99991,
+        unref: () => {},
+        on: () => {},
+      }));
+      headless._setGetProcessStartTime(() => new Date().toISOString());
+      const supervisor = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'ensure-worker-supervisor.js'))});
+      supervisor._setSpawn(() => ({
+        pid: 99992,
+        unref: () => {},
+        on: () => {},
+      }));
+      const statusPane = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'ensure-status-pane.js'))});
+      statusPane.ensureStatusPane = () => ({ ok: true, paneId: 'mock-pane', reused: true });
       const mod = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'link-node-modules.js'))});
       mod.linkNodeModules = (worktreeDir, workspace) => {
         return {
@@ -888,6 +981,10 @@ test('junction 作成で missing が空で skipped のみ、または全て空�
       `,
       'utf8',
     );
+
+    const workerName = 'issue-425-coder-skipjunction';
+    const worktreeDir = path.join(ws, '.gh-maestro', 'worktrees', workerName);
+    const workersPath = path.join(ws, '.gh-maestro', 'workers.json');
 
     const r = spawnSync(
       process.execPath,
@@ -905,14 +1002,117 @@ test('junction 作成で missing が空で skipped のみ、または全て空�
       },
     );
 
-    // NODE_TEST_CONTEXT により launchAgentHeadless が実起動を拒否するが、junction エラーでは落ちないこと
-    assert.doesNotMatch(r.stderr, /junction作成失敗/);
-    assert.doesNotMatch(r.stderr, /junction 作成に失敗したため/);
+    assert.equal(r.status, 0, `終了コード0であること: ${r.stderr}`);
+    const stdoutLines = r.stdout.trim().split(/\r?\n/);
+    assert.equal(stdoutLines[stdoutLines.length - 1], workerName, '標準出力にワーカー名が出力されること');
+    assert.equal(fs.existsSync(worktreeDir), true, 'worktreeディレクトリが存在すること');
+    assert.equal(fs.existsSync(workersPath), true, 'workers.jsonが存在すること');
+    const workers = JSON.parse(fs.readFileSync(workersPath, 'utf8'));
+    assert.equal(workers[workerName].pid, 99991, 'workers.jsonにワーカーが登録されていること');
   } finally {
-    fs.rmSync(ws, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-    fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(ws, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
+
+test('junction 作成で linked / skipped / missing がいずれも空の場合、ワーカーを正常起動しワーカー名を出力して終了コード0になる (Issue #425 / 受入条件7・8)', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-nm-empty-ws-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-nm-empty-home-'));
+  const preload = path.join(home, 'preload-link-empty.js');
+  const workerName = 'issue-425-coder-emptyjunction';
+  const worktreeDir = path.join(ws, '.gh-maestro', 'worktrees', workerName);
+  const workersPath = path.join(ws, '.gh-maestro', 'workers.json');
+  try {
+    spawnSync('git', ['init'], { cwd: ws, stdio: 'pipe' });
+    spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ws, stdio: 'pipe' });
+    spawnSync('git', ['config', 'user.name', 'test'], { cwd: ws, stdio: 'pipe' });
+    fs.writeFileSync(path.join(ws, 'README.md'), '# test\n');
+    spawnSync('git', ['add', '.'], { cwd: ws, stdio: 'pipe' });
+    spawnSync('git', ['commit', '-m', 'initial commit'], { cwd: ws, stdio: 'pipe' });
+    readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.gh-maestro', 'config.json'),
+      JSON.stringify({
+        agents: {
+          'test-agent': {
+            id: 'test-agent',
+            command: process.execPath,
+            extraArgs: [],
+            promptDelivery: 'positional',
+          },
+        },
+      }),
+      'utf8',
+    );
+
+    // 全て空
+    fs.writeFileSync(
+      preload,
+      `
+      const path = require('path');
+      const closedGuard = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'closed-pr-guard.js'))});
+      closedGuard.checkClosedPr = () => ({ ok: true, closed: false, prNumber: null });
+      const ghComments = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'gh-comments.js'))});
+      ghComments.listComments = () => ({ status: 0, stdout: '[]' });
+      const headless = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'headless-launch.js'))});
+      headless._setSpawn(() => ({
+        pid: 99993,
+        unref: () => {},
+        on: () => {},
+      }));
+      headless._setGetProcessStartTime(() => new Date().toISOString());
+      const supervisor = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'ensure-worker-supervisor.js'))});
+      supervisor._setSpawn(() => ({
+        pid: 99994,
+        unref: () => {},
+        on: () => {},
+      }));
+      const statusPane = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'ensure-status-pane.js'))});
+      statusPane.ensureStatusPane = () => ({ ok: true, paneId: 'mock-pane', reused: true });
+      const mod = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'link-node-modules.js'))});
+      mod.linkNodeModules = () => {
+        return {
+          linked: [],
+          skipped: [],
+          missing: [],
+        };
+      };
+      `,
+      'utf8',
+    );
+
+    const r = spawnSync(
+      process.execPath,
+      ['-r', preload, SCRIPT,
+        '--skill', 'gh-maestro-coder',
+        '--issue', '425',
+        '--description', 'emptyjunction',
+        '--repo', 'o/r',
+        '--workspace', ws,
+        '--agent', 'test-agent',
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+      },
+    );
+
+    assert.equal(r.status, 0, `終了コード0であること: ${r.stderr}`);
+    const stdoutLines = r.stdout.trim().split(/\r?\n/);
+    assert.equal(stdoutLines[stdoutLines.length - 1], workerName, '標準出力にワーカー名が出力されること');
+    assert.equal(fs.existsSync(worktreeDir), true, 'worktreeディレクトリが存在すること');
+    assert.equal(fs.existsSync(workersPath), true, 'workers.jsonが存在すること');
+    const workers = JSON.parse(fs.readFileSync(workersPath, 'utf8'));
+    assert.equal(workers[workerName].pid, 99993, 'workers.jsonにワーカーが登録されていること');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+
 
 
 
