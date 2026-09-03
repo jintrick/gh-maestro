@@ -16,6 +16,7 @@ const { resolveExtends } = require(path.join(__dirname, 'shared', 'resolve-confi
 const storageLayout = require(path.join(__dirname, 'shared', 'storage-layout'));
 const { parseAgentsYaml, expandHome } = require(path.join(__dirname, 'shared', 'agents-yaml'));
 const { getCurrentBranch } = require(path.join(__dirname, 'shared', 'git-branch'));
+const { resolveWorkspace } = require(path.join(__dirname, 'shared', 'workspace'));
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -462,15 +463,20 @@ function installSharedSkills(agents, options = {}) {
  * install.jsはgh-maestroリポジトリから実行される一方、常駐プロセスのregistryは
  * 実ワークスペースごとに管理される。runtime rootの記録から対象をすべて列挙し、
  * installで更新した共有スクリプト側のCLIをworkspaceごとに呼び出す。各CLIの
- * stdout/stderrはinstallの出力へそのまま渡す。
+ * stdout/stderrはinstallの出力へそのまま届ける。
+ * 呼び出し元workspaceにMONITOR_REATTACH_REQUIREDが出た場合はcallerReattachLinesに
+ * 収集し、install.jsの末尾で再掲できるようにする。
  *
  * @param {object} [options]
  * @param {string[]} [options.workspaces] テスト用のworkspace一覧
  * @param {string} [options.sharedScripts] 配布済みスクリプトディレクトリ
+ * @param {string|null} [options.callerWorkspace] 呼び出し元workspace（既定: resolveWorkspace()）
+ * @param {Function} [options.resolveWorkspace] workspace解決関数
  * @param {Function} [options.listRegisteredWorkspaces] workspace列挙関数
  * @param {Function} [options.execFileSync] CLI実行関数
  * @param {Function} [options.onWorkspace] workspaceごとの実行前通知
- * @returns {{attempted: boolean, code: number, workspaces: string[], results?: object[], scriptPath?: string, error?: Error}}
+ * @param {object} [options.stdout] 出力先Stream（既定: process.stdout）
+ * @returns {{attempted: boolean, code: number, workspaces: string[], results?: object[], scriptPath?: string, callerWorkspace?: string|null, callerReattachLines?: string[], error?: Error}}
  */
 function restartResidentsAfterInstall(options = {}) {
   let workspaces;
@@ -493,7 +499,28 @@ function restartResidentsAfterInstall(options = {}) {
 
   const uniqueWorkspaces = [...new Set(workspaces)];
   if (uniqueWorkspaces.length === 0) {
-    return { attempted: false, code: 0, workspaces: [] };
+    return { attempted: false, code: 0, workspaces: [], callerReattachLines: [] };
+  }
+
+  let callerWorkspace;
+  if (Object.prototype.hasOwnProperty.call(options, 'callerWorkspace')) {
+    callerWorkspace = options.callerWorkspace;
+  } else {
+    try {
+      const resolver = options.resolveWorkspace || resolveWorkspace;
+      callerWorkspace = resolver();
+    } catch {
+      callerWorkspace = null;
+    }
+  }
+
+  let canonicalCaller = null;
+  if (callerWorkspace && typeof callerWorkspace === 'string') {
+    try {
+      canonicalCaller = storageLayout.canonicalWorkspace(callerWorkspace);
+    } catch {
+      canonicalCaller = null;
+    }
   }
 
   const scriptsPath = options.sharedScripts || SHARED_SCRIPTS;
@@ -501,26 +528,98 @@ function restartResidentsAfterInstall(options = {}) {
   const run = options.execFileSync || execFileSync;
   const results = [];
   let code = 0;
+  const callerReattachLines = [];
+  const outStream = options.stdout || (typeof process !== 'undefined' ? process.stdout : null);
+
   for (const workspace of uniqueWorkspaces) {
     if (typeof options.onWorkspace === 'function') options.onWorkspace(workspace);
+    const isCaller = Boolean(canonicalCaller && storageLayout.canonicalWorkspace(workspace) === canonicalCaller);
+    let output = '';
     try {
-      run(process.execPath, [scriptPath, '--workspace', workspace], { stdio: 'inherit' });
+      const runResult = run(process.execPath, [scriptPath, '--workspace', workspace], {
+        encoding: 'utf8',
+        stdio: ['inherit', 'pipe', 'inherit'],
+      });
+      if (typeof runResult === 'string') {
+        output = runResult;
+        if (outStream && typeof outStream.write === 'function') {
+          outStream.write(output);
+        }
+      } else if (Buffer.isBuffer(runResult)) {
+        output = runResult.toString('utf8');
+        if (outStream && typeof outStream.write === 'function') {
+          outStream.write(output);
+        }
+      }
       results.push({ workspace, code: 0 });
     } catch (error) {
       const workspaceCode = Number.isInteger(error && error.status) && error.status !== 0
         ? error.status
         : 1;
       if (code === 0) code = workspaceCode;
+      if (typeof error.stdout === 'string') {
+        output = error.stdout;
+        if (outStream && typeof outStream.write === 'function') {
+          outStream.write(output);
+        }
+      } else if (Buffer.isBuffer(error.stdout)) {
+        output = error.stdout.toString('utf8');
+        if (outStream && typeof outStream.write === 'function') {
+          outStream.write(output);
+        }
+      }
       results.push({ workspace, code: workspaceCode, error });
     }
+
+    if (isCaller && output) {
+      const matches = output.match(/^MONITOR_REATTACH_REQUIRED\s+.+$/gm);
+      if (matches) {
+        callerReattachLines.push(...matches.map((m) => m.trim()));
+      }
+    }
   }
-  return { attempted: true, code, workspaces: uniqueWorkspaces, results, scriptPath };
+  return {
+    attempted: true,
+    code,
+    workspaces: uniqueWorkspaces,
+    results,
+    scriptPath,
+    callerWorkspace,
+    callerReattachLines,
+  };
+}
+
+/**
+ * install完了メッセージおよび呼び出し元workspaceのMONITOR_REATTACH_REQUIRED再掲を出力する。
+ *
+ * @param {object} [residentRestart] restartResidentsAfterInstallの戻り値
+ * @param {object|Function} [options] 出力オプションまたはlog関数
+ */
+function printInstallCompletion(residentRestart = {}, options = {}) {
+  const log = typeof options === 'function'
+    ? options
+    : (options.log || console.log);
+  const callerReattachLines = Array.isArray(residentRestart)
+    ? residentRestart
+    : (residentRestart && residentRestart.callerReattachLines) || [];
+
+  log('\ngh-maestro installed.\n');
+  log('Usage:');
+  log('  1. Open wezterm and navigate to your project root');
+  log('  2. Start claude or agy');
+  log('  3. Type: /gh-maestro\n');
+
+  if (callerReattachLines.length > 0) {
+    for (const line of callerReattachLines) {
+      log(line);
+    }
+  }
 }
 
 module.exports = {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
   buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
-  installScripts, installSharedSkills, restartResidentsAfterInstall,
+  installScripts, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
 };
 
 if (require.main !== module) return;
@@ -862,8 +961,4 @@ if (!residentRestart.attempted) {
   ok(`Resident process restart completed for ${residentRestart.workspaces.length} workspace(s)`);
 }
 
-console.log('\ngh-maestro installed.\n');
-console.log('Usage:');
-console.log('  1. Open wezterm and navigate to your project root');
-console.log('  2. Start claude or agy');
-console.log('  3. Type: /gh-maestro\n');
+printInstallCompletion(residentRestart);
