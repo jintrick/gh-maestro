@@ -20,8 +20,14 @@ description: gh-maestroワーカーの共通骨格テンプレート。orchestra
 
 `$WORKTREE` 内に `package.json` が存在し `node_modules` がない場合、`$WORKSPACE` の対応する `node_modules` をシンボリックリンクで参照させる。サブディレクトリ構成の場合も同様に探して対処する。
 
+## 質問ターンの終了規約
+
+- 実装中に判断が必要になったら、通信ルールの既存コマンド `node "{{SCRIPTS_PATH}}/msg-send.js" --body-file <質問本文ファイルのパス>` でorchestratorへ質問を投稿する。
+- 質問の投稿が成功したら、そのターンで追加の調査・実装・計画・完了報告を続けず、ワーカー自身の手順を終了する。回答は次の resume で受け取る。
+
+理由と経緯: `docs/adr/0027-question-is-turn-end-not-completion.md`
+
 ## 制約
 
 - `npm install` / `npm ci` は実行しない。`node_modules` はシンボリックリンクで用意済み
 - ゴール達成時・失敗時を問わず、必ず通信ルールのコマンドでorchestratorに報告すること（地の文で報告しない）
-- 判断に迷ったらorchestratorに相談し、自分で止まらない

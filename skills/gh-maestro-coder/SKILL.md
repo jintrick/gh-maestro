@@ -9,6 +9,13 @@ description: gh-maestroコーダーエージェント。orchestratorから実装
 
 {{COMMENTS_AND_NAMING}}
 
+## 質問ターンの終了規約
+
+- 実装中にorchestratorの判断が必要になった場合は、通信ルールの既存コマンド `node "{{SCRIPTS_PATH}}/msg-send.js" --body-file <質問本文ファイルのパス>` で質問を投稿する。
+- 質問の投稿が成功したら、そのターンで追加の調査・実装・計画・完了報告を続けず、ワーカー自身の手順を終了する。回答は次の resume で受け取る。
+
+理由と経緯: `docs/adr/0027-question-is-turn-end-not-completion.md`
+
 ## 実装時の注意
 
 - DOM/外部API/ライブラリの戻り値がnullable・optionalな場合、型アサーション（`as T`、非nullアサーション`!`など）でnullチェックを迂回しない。早期return・throw・assertで明示的にnullを排除してから使う
@@ -24,5 +31,3 @@ description: gh-maestroコーダーエージェント。orchestratorから実装
 - `main` への直接pushは禁止
 - `$WORKTREE` ルートで `npm install` / `npm ci` は実行しない。ルートで npm install を実行するとワークスペース共有の `node_modules` を破壊する
 - 実装で新しいサブパッケージ（例: `gui/`）を追加した場合、そのディレクトリ内での `npm install` は許可する（`cd gui && npm install`）
-- 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない
-
