@@ -45,7 +45,7 @@ const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { ensureWorkerSupervisorRunning } = require('./shared/ensure-worker-supervisor');
 const { ensureStatusPane: ensureStatusPaneLib } = require('./shared/ensure-status-pane');
 const { atomicWriteJson } = require('./shared/atomic-write');
-const { parseFlags } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
 const { toWinPath } = require('./shared/win-path');
 const { startExecution, markLaunchFailure } = require('./shared/execution-registry');
@@ -105,7 +105,8 @@ Arguments:
   --short-prompt <text>   例外的な短い補足メッセージ。1行・200文字以内。シェルが解釈する
                           文字（$ \` " ' \\ ; | &）と改行は使用不可。任意の指示には
                           --prompt-file を使用する。
-  --workspace <path>      ワークスペースパス（省略時は CWD）
+  --workspace <path>      ワークスペースパス（省略時は GH_MAESTRO_WORKSPACE env または
+                          CWD から上方探索で解決）
   --base-branch <branch>  worktree のベースブランチ
   --agent <id>            エージェントID（省略時はスキルに応じたデフォルト）
   --execution-id <id>     外部成果物と紐付ける実行ID。指定時だけ実行状態を追跡する。
@@ -274,19 +275,21 @@ const promptFileArg   = values['--prompt-file'];
 const issue       = values['--issue'];
 const description = values['--description'];
 const repo        = values['--repo'];
-const workspace   = values['--workspace'] ?? process.cwd();
+const workspaceArg = values['--workspace'];
+const workspace   = resolveWorkspace(workspaceArg);
 const baseBranch  = values['--base-branch'];
 const explicitAgentId = values['--agent'];
 const executionId = values['--execution-id'] || null;
 
 // --- バリデーション ---
-const resetCmd = `node "${resolve(__dirname, 'reset-session.js')}" --workspace "${workspace}"`;
+const resetCmd = `node "${resolve(__dirname, 'reset-session.js')}" --workspace "${workspace || workspaceArg || '<workspace>'}"`;
 let fail = (msg) => {
   console.error(`spawn-worker: ${msg}`);
   console.error(`  → セッション状態が壊れている可能性があります。次のコマンドでリセットしてください:`);
   console.error(`    ${resetCmd}`);
   process.exit(1);
 };
+if (!workspace) fail('ワークスペースを解決できません。--workspace を指定するか、GH_MAESTRO_WORKSPACE または .gh-maestro/ のあるディレクトリで実行してください');
 if (shortPromptText != null && promptFileArg != null) fail('--short-prompt と --prompt-file は同時に指定できません');
 let prompt;
 try {

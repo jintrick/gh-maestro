@@ -23,7 +23,7 @@ const { buildLoginShellExecArgs } = require('./shared/agent-exec');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { readJsonFile } = require('./shared/json-file');
-const { parseFlags } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const {
   ALL_LEAF_IDS,
   TRUNK_TO_LEAVES,
@@ -67,7 +67,8 @@ Options:
                        解析に失敗した場合でも通知先として使う（manifest.repo は取れないため）
   --gh-dir <path>      必須。メインワークスペースの .gh-maestro ディレクトリ（再試行カウンタの
                        永続化先。RMのworktreeではなくメインワークスペース側を渡すこと）
-  --workspace <path>   ワークスペースの絶対パス（デフォルト: cwd）
+  --workspace <path>   レビュー用ワークスペースの絶対パス（省略時は GH_MAESTRO_WORKSPACE env または
+                       CWD から上方探索で解決）
   --job-timeout <ms>   ジョブごとのタイムアウト（ms、デフォルト: 600000）
   --total-timeout <ms> 全体のタイムアウト（ms、デフォルト: 1800000）
 
@@ -718,9 +719,7 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
   }, timeoutMs);
 
   let registeredPid = null;
-  const targetWorkspace = (options && options.mainWorkspace)
-    || (options && options.ghDir ? path.dirname(path.resolve(options.ghDir)) : null)
-    || workspace;
+  const targetWorkspace = (options && options.mainWorkspace) || workspace;
 
   const onSpawn = (child) => {
     if (child && child.pid) {
@@ -968,7 +967,7 @@ function notifyManifestProblem({ workspace, pr, repo, commentBody, failureLabel,
     };
   }
 
-  const sentinelPath = reviewArtifactPath(path.join(workspace, '.gh-maestro'), notifyPr, '.incomplete');
+  const sentinelPath = reviewArtifactPath(workspace, notifyPr, '.incomplete');
 
   // 冪等: 「通知済み」センチネルのみスキップ対象。notify-failed は再投稿して回復を試みる
   if (fs.existsSync(sentinelPath) && readSentinelReason(sentinelPath) === 'incomplete-review') {
@@ -1096,12 +1095,12 @@ function _setFinalizeReviewForTest(impl) {
 
 /**
  * 再試行カウンタファイルのパスを解決する。
- * @param {string} ghDir メインワークスペースの .gh-maestro ディレクトリ
+ * @param {string} workspace メインワークスペース
  * @param {string|number} pr 正整数のPR番号
  * @returns {string}
  */
-function retryCountPath(ghDir, pr) {
-  return reviewArtifactPath(ghDir, pr, '.retries.json');
+function retryCountPath(workspace, pr) {
+  return reviewArtifactPath(workspace, pr, '.retries.json');
 }
 
 /**
@@ -1114,13 +1113,13 @@ function retryCountPath(ghDir, pr) {
  * 同じ「不在と失敗の取り違え」を新しいコードに入れない。Windows の一時的な読み取り失敗は
  * 実在の事象: PR #251/#253/#259）。
  *
- * @param {string} ghDir
+ * @param {string} workspace
  * @param {string|number} pr
  * @returns {number} これまでの実行回数（非負整数）
  * @throws {Error} 読み取り失敗・JSON解析失敗・形式不正（上限を保証できないため）
  */
-function readRetryCount(ghDir, pr) {
-  const counterPath = retryCountPath(ghDir, pr);
+function readRetryCount(workspace, pr) {
+  const counterPath = retryCountPath(workspace, pr);
   let raw;
   try {
     raw = fs.readFileSync(counterPath, 'utf8');
@@ -1147,13 +1146,13 @@ function readRetryCount(ghDir, pr) {
  * フェイルクローズで処理する。カウンタを進められないままジョブを実行すると、
  * 次回以降も同じ回数と判定され上限が効かなくなるため、黙って続行しない）。
  *
- * @param {string} ghDir
+ * @param {string} workspace
  * @param {string|number} pr
  * @returns {number} 更新後の実行回数
  */
-function incrementRetryCount(ghDir, pr) {
-  const next = readRetryCount(ghDir, pr) + 1;
-  atomicWriteJson(retryCountPath(ghDir, pr), {
+function incrementRetryCount(workspace, pr) {
+  const next = readRetryCount(workspace, pr) + 1;
+  atomicWriteJson(retryCountPath(workspace, pr), {
     pr: Number(pr),
     attempts: next,
     updated_at: new Date().toISOString(),
@@ -1192,12 +1191,12 @@ function _sleepSync(ms) {
 
 /**
  * 再試行カウンタの排他ロックファイルのパス。
- * @param {string} ghDir
+ * @param {string} workspace
  * @param {string} pr
  * @returns {string}
  */
-function retryCountLockPath(ghDir, pr) {
-  return retryCountPath(ghDir, pr) + '.lock';
+function retryCountLockPath(workspace, pr) {
+  return retryCountPath(workspace, pr) + '.lock';
 }
 
 /**
@@ -1250,7 +1249,7 @@ function releaseRetryCountLock(lockPath) {
  * 再試行上限を判定し、未達ならカウンタを進める（ゲート）。
  *
  * read-modify-write は acquireRetryCountLock の排他ロック下で行う（並列呼び出しでも
- * 上限を素通りしない）。ghDir / pr のどちらかが使えない場合（プログラム呼び出しで省略）は
+ * 上限を素通りしない）。workspace / pr のどちらかが使えない場合（プログラム呼び出しで省略）は
  * ゲートを適用せず gated:false を返す。本番（CLI）では --gh-dir / --pr が必須のため
  * 常に適用される。
  *
@@ -1258,23 +1257,23 @@ function releaseRetryCountLock(lockPath) {
  * 拒否する。黙ってジョブを実行すると上限が効かないため）。
  *
  * @param {object} opts
- * @param {string|null} opts.ghDir メインワークスペースの .gh-maestro（nullならゲートしない）
+ * @param {string|null} opts.workspace メインワークスペース（nullならゲートしない）
  * @param {string|number|null} opts.pr
  * @returns {{gated: boolean, reason?: string, attempts?: number}}
  */
-function applyRetryGate({ ghDir, pr }) {
+function applyRetryGate({ workspace, pr }) {
   const notifyPr = resolveNotifyPr([pr]);
-  if (!ghDir || !notifyPr) {
+  if (!workspace || !notifyPr) {
     return { gated: false };
   }
-  const lockPath = retryCountLockPath(ghDir, notifyPr);
+  const lockPath = retryCountLockPath(workspace, notifyPr);
   acquireRetryCountLock(lockPath);
   try {
-    const count = readRetryCount(ghDir, notifyPr);
+    const count = readRetryCount(workspace, notifyPr);
     if (count >= MAX_REVIEW_ATTEMPTS) {
       return { gated: true, reason: 'retry-limit-reached', attempts: count };
     }
-    return { gated: false, attempts: incrementRetryCount(ghDir, notifyPr) };
+    return { gated: false, attempts: incrementRetryCount(workspace, notifyPr) };
   } finally {
     releaseRetryCountLock(lockPath);
   }
@@ -1295,8 +1294,9 @@ function applyRetryGate({ ghDir, pr }) {
  *   通知を中断しない）。
  * @param {string} [repo] 検証前の起動コンテキスト（CLI --repo）由来のリポジトリ。
  *   manifestの読み込み・解析失敗時は manifest.repo が取れないため、これを使う。
- * @param {string} [ghDir] メインワークスペースの .gh-maestro ディレクトリ（再試行カウンタの
- *   永続化先）。CLI --gh-dir 由来。省略時（プログラム呼び出し）は再試行ゲートを適用しない。
+ * @param {string} [ghDir] メインワークスペースの .gh-maestro ディレクトリ。CLIの起動契約として
+ *   受け取り、workspace解決結果との整合性を確認する。再試行カウンタのパス自体は
+ *   `options.mainWorkspace`（省略時はレビューworkspace）から構築する。
  * @returns {Promise<{ok: boolean, summary: object}>}
  */
 async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo, ghDir, options = {}) {
@@ -1341,7 +1341,16 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   // レビュー経路（finalizeReview --mode incomplete）で通知してから拒否する。
   let gate;
   try {
-    gate = applyRetryGate({ ghDir, pr });
+    const mainWorkspace = (options && options.mainWorkspace) || workspace;
+    if (ghDir) {
+      if (path.resolve(ghDir) !== path.resolve(path.join(mainWorkspace, '.gh-maestro'))) {
+        return { ok: false, summary: { error: 'メインworkspaceと--gh-dirの対応が不正です' } };
+      }
+      gate = applyRetryGate({ workspace: mainWorkspace, pr });
+    } else {
+      // プログラム呼び出しで --gh-dir が省略された場合は、従来どおり再試行ゲートを適用しない。
+      gate = { gated: false };
+    }
   } catch (e) {
     // カウンタの排他ロック取得・読み取り・インクリメントのいずれかに失敗。上限を保証できない
     // ままジョブを実行すると上限が効かなくなるため、フェイルクローズで拒否する。
@@ -1377,9 +1386,7 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   // 3.5 PID registry 構成の事前検証（fail-fast）
   // registerProcess が throw する現実的な経路（assertValidWorkspace / assertDisjointRoots /
   // GH_MAESTRO_RUNTIME_DIR 設定不正）は全ジョブ一斉に該当するため、ジョブ起動前に1回検証する。
-  const targetWorkspace = (options && options.mainWorkspace)
-    || (ghDir ? path.dirname(path.resolve(ghDir)) : null)
-    || workspace;
+  const targetWorkspace = (options && options.mainWorkspace) || workspace;
   try {
     pidsDir(targetWorkspace);
   } catch (e) {
@@ -1397,7 +1404,10 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   const jobPromises = manifest.jobs.map(job => {
     const childRef = { child: null };
     activeChildren.push(childRef);
-    return launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, jobTimeoutMs, childRef, { ...options, ghDir });
+    return launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, jobTimeoutMs, childRef, {
+      ...options,
+      mainWorkspace: targetWorkspace,
+    });
   });
 
   // 全体タイムアウト: 締切到達時に残っている子プロセスを実際に終了させる
@@ -1563,7 +1573,8 @@ if (require.main === module) {
 
     const manifestPath = values['--manifest'];
     const resultsPath = values['--results'];
-    const workspace = values['--workspace'] || process.cwd();
+    const workspace = resolveWorkspace(values['--workspace']);
+    const mainWorkspace = resolveWorkspace();
     // --pr / --repo / --gh-dir は検証前の起動コンテキスト由来（RMのプロンプトに含まれる PR / REPO）。
     // 必須化し、作業を始める前にフェイルクローズで検証する。--pr は path traversal対策で
     // 正整数のみ受理（PR #84）。--repo は manifest の読み込み・解析に失敗した場合の通知先に
@@ -1589,6 +1600,21 @@ if (require.main === module) {
       console.error(USAGE);
       process.exit(1);
     }
+    if (!workspace) {
+      console.error('run-review-jobs: レビュー用ワークスペースを解決できません。--workspace を指定するか、GH_MAESTRO_WORKSPACE または .gh-maestro/ のあるディレクトリで実行してください');
+      console.error(USAGE);
+      process.exit(1);
+    }
+    if (!mainWorkspace) {
+      console.error('run-review-jobs: メインワークスペースを解決できません。GH_MAESTRO_WORKSPACE または .gh-maestro/ のあるディレクトリで実行してください');
+      console.error(USAGE);
+      process.exit(1);
+    }
+    if (path.resolve(ghDir) !== path.resolve(path.join(mainWorkspace, '.gh-maestro'))) {
+      console.error('run-review-jobs: --gh-dir は解決したメインワークスペースの .gh-maestro である必要があります');
+      console.error(USAGE);
+      process.exit(1);
+    }
     const jobTimeoutMs = values['--job-timeout'] ? parseInt(values['--job-timeout'], 10) : DEFAULT_JOB_TIMEOUT_MS;
     const totalTimeoutMs = values['--total-timeout'] ? parseInt(values['--total-timeout'], 10) : DEFAULT_TOTAL_TIMEOUT_MS;
 
@@ -1597,7 +1623,10 @@ if (require.main === module) {
       process.exit(1);
     }
 
-    const result = await runJobsFromManifest(manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo, ghDir);
+    const result = await runJobsFromManifest(
+      manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo, ghDir,
+      { mainWorkspace },
+    );
 
     if (!result.ok) {
       console.error(JSON.stringify(result.summary));

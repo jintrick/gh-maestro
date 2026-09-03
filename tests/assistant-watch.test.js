@@ -353,7 +353,7 @@ describe('main: review_done検知', () => {
   test('新しいレビュー周回（close→reopen等）が始まるとreviewReportedがリセットされ、2回目の完了も検知できる', async () => {
     await withTempDir(async (workspace) => {
       const ghDir = path.join(workspace, '.gh-maestro');
-      const lockPath = reviewArtifactPath(ghDir, 42, '.running');
+      const lockPath = reviewArtifactPath(workspace, 42, '.running');
       fs.mkdirSync(path.dirname(lockPath), { recursive: true });
 
       const state = { lastCommentId: 0, prs: { 42: { merged: false, reviewSeenRunning: true, reviewReported: true } } };

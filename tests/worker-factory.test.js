@@ -397,14 +397,13 @@ test('buildReviewManagerLaunchSpec: leaseKey は review-manager-<pr>（.running�
   assert.equal(spec.leaseKey, 'review-manager-42');
 });
 
-test('buildReviewManagerLaunchSpec: leaseStore は reviewArtifactPath(ghDir, pr, ".running") と一致する', () => {
+test('buildReviewManagerLaunchSpec: leaseStore は reviewArtifactPath(workspace, pr, ".running") と一致する', () => {
   const workspace = 'C:/ws';
-  const ghDir = path.join(workspace, '.gh-maestro');
   const spec = buildReviewManagerLaunchSpec({
     issue: 174, pr: '42', repo: 'o/r', workspace,
   });
 
-  const expected = reviewArtifactPath(ghDir, '42', '.running');
+  const expected = reviewArtifactPath(workspace, '42', '.running');
   assert.equal(spec.leaseStore, expected);
   assert.match(spec.leaseStore, /records[\\/]pr[\\/]42[\\/]review[\\/]manager\.running$/);
 });
@@ -468,16 +467,15 @@ test('現行一致: Review ManagerのworkerNameがstart-review-manager.jsのGH_M
 
 test('現行一致: Review ManagerのleaseStoreがstart-review-manager.jsのlockFileと一致する', () => {
   // start-review-manager.js line 92:
-  //   const lockFile = reviewArtifactPath(ghDir, pr, '.running');
+  //   const lockFile = reviewArtifactPath(workspace, pr, '.running');
   const workspace = 'C:/ws';
-  const ghDir = path.join(workspace, '.gh-maestro');
 
   const spec = buildReviewManagerLaunchSpec({
     issue: 174, pr: '42', repo: 'o/r', workspace,
   });
 
   // 現行コードの lockFile 構築と完全に一致
-  const expectedLockFile = reviewArtifactPath(ghDir, '42', '.running');
+  const expectedLockFile = reviewArtifactPath(workspace, '42', '.running');
   assert.equal(spec.leaseStore, expectedLockFile);
 });
 
@@ -512,17 +510,16 @@ test('現行一致: 通常ワーカーのlogKeyがworkerLogPathの第二引数�
 
 test('現行一致: Review Managerのfindings成果物キーはreview-manager-<pr>で変わらない', () => {
   // review-manager-paths.js:
-  //   reviewArtifactPath(ghDir, pr, '.json') → <ghDir>/review-manager-<pr>.json
+  //   reviewArtifactPath(workspace, pr, '.json') → workspaceのrecords/pr/<PR>/review/manager.json
   // このキーはfactoryのleaseKeyと同一のベース名（review-manager-<pr>）を使う。
   const workspace = 'C:/ws';
-  const ghDir = path.join(workspace, '.gh-maestro');
   const spec = buildReviewManagerLaunchSpec({
     issue: 174, pr: '42', repo: 'o/r', workspace,
   });
 
   // findings JSON のパス（現行のまま）
-  const findingsPath = reviewArtifactPath(ghDir, '42', '.json');
-  assert.equal(findingsPath, path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.json'));
+  const findingsPath = reviewArtifactPath(workspace, '42', '.json');
+  assert.equal(findingsPath, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.json'));
   assert.match(findingsPath, /records[\\/]pr[\\/]42[\\/]review[\\/]manager\.json$/);
 });
 

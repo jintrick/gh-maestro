@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./shared/child-process');
-const { parseFlags } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS } = require('./shared/review-aspects');
 const { _validateAgainstSchema } = require('./shared/json-schema');
 const { atomicWriteJson } = require('./shared/atomic-write');
@@ -42,7 +42,7 @@ Options:
                        （省略時は全成功ジョブのfindingsを機械集約）。ドラフトは findings 配列を
                        持つJSON。エンベロープ（pr/repo/headRefOid）は results 由来で確定。
                        完全性ゲート・スキーマ検証・atomic writeは常に決定論的に行う。
-  --workspace <path>   ワークスペースの絶対パス（デフォルト: cwd）
+  --workspace <path>   ワークスペースの絶対パス（省略時は GH_MAESTRO_WORKSPACE env または CWD から上方探索で解決）
 
 Output:
   complete 終了コード0: 完全性ゲート通過。OUTPUTにfindings.jsonをatomic write
@@ -353,7 +353,7 @@ function buildIncompleteComment(results, gateResult) {
  *   reason を省略すると 'incomplete-review'（通知済みの不完全完了）。
  */
 function writeSentinel(workspace, pr, opts = {}) {
-  const sentinelPath = reviewArtifactPath(path.join(workspace, '.gh-maestro'), pr, '.incomplete');
+  const sentinelPath = reviewArtifactPath(workspace, pr, '.incomplete');
   try {
     fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
     fs.writeFileSync(sentinelPath, JSON.stringify({
@@ -571,11 +571,16 @@ if (require.main === module) {
     const resultsPath = values['--results'];
     const mode = values['--mode'];
     const outputPath = values['--output'];
-    const workspace = values['--workspace'] || process.cwd();
+    const workspace = resolveWorkspace(values['--workspace']);
     const integratedPath = values['--integrated'] || null;
 
     if (!resultsPath || !mode || (mode === 'complete' && !outputPath)) {
       console.error(USAGE);
+      process.exit(1);
+    }
+
+    if (!workspace) {
+      console.error('finalize-review: ワークスペースを解決できません。--workspace を指定するか、GH_MAESTRO_WORKSPACE または .gh-maestro/ のあるディレクトリで実行してください');
       process.exit(1);
     }
 

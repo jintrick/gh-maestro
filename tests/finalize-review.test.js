@@ -44,6 +44,39 @@ test('CLI: --help は exit 0、用途エラーは exit 1', () => {
   assert.match(invalidMode.stderr, /--mode must be/);
 });
 
+test('CLI: --workspace省略時は環境変数のメインworkspaceへセンチネルを書き、CWDのreview worktreeへ書かない', () => {
+  const mainWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-cli-main-'));
+  const reviewWorktree = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-cli-review-'));
+  try {
+    const resultsPath = path.join(reviewWorktree, 'results.json');
+    fs.writeFileSync(resultsPath, JSON.stringify({
+      manifest_ref: { pr: 438, repo: 'o/r', headRefOid: 'abc' },
+      coverage_ledger: { leaves: [] },
+      jobs: [],
+    }), 'utf8');
+
+    const env = cleanSpawnEnv();
+    env.GH_MAESTRO_WORKSPACE = mainWorkspace;
+    const result = spawnSync(process.execPath, [
+      SCRIPT, '--results', resultsPath, '--mode', 'incomplete',
+    ], {
+      cwd: reviewWorktree,
+      env,
+      encoding: 'utf8',
+    });
+
+    // NODE_TEST_CONTEXT による投稿拒否は想定内だが、センチネルの配置は完了する。
+    assert.equal(result.status, 1, `投稿拒否以外で失敗していないこと: ${result.stderr}`);
+    const mainSentinel = path.join(mainWorkspace, '.gh-maestro', 'records', 'pr', '438', 'review', 'manager.incomplete');
+    const reviewSentinel = path.join(reviewWorktree, '.gh-maestro', 'records', 'pr', '438', 'review', 'manager.incomplete');
+    assert.ok(fs.existsSync(mainSentinel), `メインworkspaceにセンチネルが作成されること: ${mainSentinel}`);
+    assert.ok(!fs.existsSync(reviewSentinel), 'CWDのreview worktreeにはセンチネルを作成しない');
+  } finally {
+    fs.rmSync(mainWorkspace, { recursive: true, force: true });
+    fs.rmSync(reviewWorktree, { recursive: true, force: true });
+  }
+});
+
 test('checkCompleteness: all adopted leaves success passes', () => {
   const coverageLedger = {
     leaves: ALL_LEAF_IDS.map(id => ({

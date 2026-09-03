@@ -34,37 +34,36 @@ test('assertValidPr rejects path-traversal payloads', () => {
 // ── reviewArtifactPath ───────────────────────────────────────────────────
 
 test('reviewArtifactPath builds a PR-owned records path', () => {
-  const ghDir = path.resolve('C:/ws/.gh-maestro');
-  const result = reviewArtifactPath(ghDir, '42', '.running');
-  assert.equal(result, path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.running'));
+  const workspace = path.resolve('C:/ws');
+  const result = reviewArtifactPath(workspace, '42', '.running');
+  assert.equal(result, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.running'));
 });
 
 test('reviewArtifactPath rejects a path-traversal pr before building any path', () => {
-  const ghDir = path.resolve('C:/ws/.gh-maestro');
-  assert.throws(() => reviewArtifactPath(ghDir, '../../evil', '.running'), /invalid PR number/);
+  const workspace = path.resolve('C:/ws');
+  assert.throws(() => reviewArtifactPath(workspace, '../../evil', '.running'), /invalid PR number/);
 });
 
 test('reviewArtifactPath: .log はPR recordsのreview配下に置く', () => {
   const workspace = path.resolve('C:/ws');
-  const ghDir = path.join(workspace, '.gh-maestro');
-  const result = reviewArtifactPath(ghDir, '42', '.log');
+  const result = reviewArtifactPath(workspace, '42', '.log');
   assert.equal(result, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.log'));
 });
 
 test('reviewArtifactPath: .log でもpath-traversalなprは拒否される', () => {
-  const ghDir = path.resolve('C:/ws/.gh-maestro');
-  assert.throws(() => reviewArtifactPath(ghDir, '../../evil', '.log'), /invalid PR number/);
+  const workspace = path.resolve('C:/ws');
+  assert.throws(() => reviewArtifactPath(workspace, '../../evil', '.log'), /invalid PR number/);
 });
 
 test('reviewArtifactPath: .retries.json はPR recordsのreview配下に置く', () => {
-  const ghDir = path.resolve('C:/ws/.gh-maestro');
-  const result = reviewArtifactPath(ghDir, '42', '.retries.json');
-  assert.equal(result, path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.retries.json'));
+  const workspace = path.resolve('C:/ws');
+  const result = reviewArtifactPath(workspace, '42', '.retries.json');
+  assert.equal(result, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.retries.json'));
 });
 
 test('reviewArtifactPath: .retries.json でもpath-traversalなprは拒否される', () => {
-  const ghDir = path.resolve('C:/ws/.gh-maestro');
-  assert.throws(() => reviewArtifactPath(ghDir, '../../evil', '.retries.json'), /invalid PR number/);
+  const workspace = path.resolve('C:/ws');
+  assert.throws(() => reviewArtifactPath(workspace, '../../evil', '.retries.json'), /invalid PR number/);
 });
 
 // ── reviewWorktreeBranchName / reviewWorktreeFetchRef ───────────────────
