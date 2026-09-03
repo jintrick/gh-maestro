@@ -23,4 +23,4 @@ paths:
 - autonomy レベルを `strict` にすると最大限に適用される
 - ファイルシステムアクセス・ツール実行・ブラウザ操作などの許可／禁止を記述するもの
 
-**`AGENTS.md` は agy がデフォルトで読むファイルではない。** agy にはプロジェクト指示書の自動ロード機能がない（`.agents/rules/` はあくまで制約定義）。Claude Code 側は `CLAUDE.md` に `@AGENTS.md` と書くことでインポートできる（`docs/rag/claude-code/guide/guide/claude_code_memory_guide.md` 参照）。
+**`AGENTS.md` はすべてのエージェントが読む。** プロジェクト共通の規範はここに書く。
