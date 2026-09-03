@@ -90,7 +90,7 @@ function generateStagingPath(finalPath) {
 function buildPrompt({ pr, repo, issue, workspace, mainGhDir, skillPath }) {
   const toUnix = p => p.replace(/\\/g, '/');
   const scriptsDir = toUnix(path.join(__dirname));
-  const manifestFile = reviewArtifactPath(path.join(workspace, '.gh-maestro'), pr, '.manifest.json');
+  const manifestFile = reviewArtifactPath(workspace, pr, '.manifest.json');
   const prompt = `${toUnix(skillPath)} を読み、Review ManagerとしてPRレビューの計画（フェーズ1）を実行してください。
 
 PR=${pr}
@@ -652,11 +652,11 @@ module.exports = {
  * しまうため、新たなレビュー周回の開始（.running ロック作成）時に必ず消す
  * （Issue #248 項目4）。best-effort: 存在しなければ何もしない。
  *
- * @param {string} ghDir   .gh-maestro ディレクトリ
+ * @param {string} workspace メインワークスペース
  * @param {string|number} pr レビュー対象 PR 番号（reviewArtifactPath が正整数検証する）
  */
-function clearStaleIncompleteSentinel(ghDir, pr) {
-  const sentinelPath = reviewArtifactPath(ghDir, pr, '.incomplete');
+function clearStaleIncompleteSentinel(workspace, pr) {
+  const sentinelPath = reviewArtifactPath(workspace, pr, '.incomplete');
   try {
     if (fs.existsSync(sentinelPath)) {
       fs.unlinkSync(sentinelPath);
@@ -686,12 +686,12 @@ function clearStaleIncompleteSentinel(ghDir, pr) {
  * 不完全レビューとしてしか届かない）。Windows の一時的なファイルロック（PR #251/#253/#259 で
  * 対処済みの実在事象）で unlinkSync が EPERM/EACCES になるケースを黙って流さない。
  *
- * @param {string} ghDir   .gh-maestro ディレクトリ（メインワークスペース）
+ * @param {string} workspace メインワークスペース
  * @param {string|number} pr レビュー対象 PR 番号（reviewArtifactPath が正整数検証する）
  * @throws {Error} カウンタ削除に失敗した場合（続行すると新周回が上限到達と誤判定される）
  */
-function resetRetryCount(ghDir, pr) {
-  const counterPath = reviewArtifactPath(ghDir, pr, '.retries.json');
+function resetRetryCount(workspace, pr) {
+  const counterPath = reviewArtifactPath(workspace, pr, '.retries.json');
   try {
     if (fs.existsSync(counterPath)) {
       fs.unlinkSync(counterPath);
@@ -714,15 +714,15 @@ function resetRetryCount(ghDir, pr) {
  * どちらか一方しか見ないと検出漏れになる（Issue #271: 検証失敗時はworktree側へ書かれるのに
  * main側だけを見て検出できず、黙って process-exit-no-artifact になっていた）。
  *
- * @param {string} ghDir メインworkspaceの .gh-maestro ディレクトリ
+ * @param {string} workspace メインworkspace
  * @param {string} reviewWtDir レビュー専用worktreeの絶対パス（nullならworktree側は確認しない）
  * @param {string|number} pr
  * @returns {string|null} 最初に見つかったセンチネルの絶対パス（なければnull）
  */
-function findIncompleteSentinel(ghDir, reviewWtDir, pr) {
-  const candidates = [reviewArtifactPath(ghDir, pr, '.incomplete')];
+function findIncompleteSentinel(workspace, reviewWtDir, pr) {
+  const candidates = [reviewArtifactPath(workspace, pr, '.incomplete')];
   if (reviewWtDir) {
-    candidates.push(reviewArtifactPath(path.join(reviewWtDir, '.gh-maestro'), pr, '.incomplete'));
+    candidates.push(reviewArtifactPath(reviewWtDir, pr, '.incomplete'));
   }
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
@@ -801,12 +801,12 @@ function incompleteSentinelOutcome({ sentinelPath, agentPid, reviewWtDir }) {
  * @returns {{persisted: boolean, sourcePath: string|null, targetPath: string}}
  */
 function persistReviewManifest({ reviewWtDir, workspace, pr, log }) {
-  const targetPath = reviewArtifactPath(path.join(workspace, '.gh-maestro'), pr, '.manifest.json');
+  const targetPath = reviewArtifactPath(workspace, pr, '.manifest.json');
 
   // 取り出し候補: RMが書き込んだ可能性があるパス。SKILL.md改訂前のlegacyパスも含める。
   const candidates = [];
   if (reviewWtDir) {
-    candidates.push(reviewArtifactPath(path.join(reviewWtDir, '.gh-maestro'), pr, '.manifest.json'));
+    candidates.push(reviewArtifactPath(reviewWtDir, pr, '.manifest.json'));
     candidates.push(path.join(reviewWtDir, '.gh-maestro', `review-manifest-${pr}.json`));
   }
 
@@ -911,13 +911,13 @@ function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewW
  *   incomplete    — run-review-jobs が不完全終了を確定（manifest検証失敗・再試行上限）。センチネルは書かれている
  *   exec-failed   — 起動失敗・シグナル終了、または結果JSONが読めない未知の終了値。フェーズ2へ進めてはならない
  */
-function judgeJobRun({ status, error }, { ghDir, reviewWtDir, pr, resultsPath }) {
+function judgeJobRun({ status, error }, { workspace, reviewWtDir, pr, resultsPath }) {
   // 起動失敗・シグナル終了は結果JSONを保証できないため、明示的な失敗として扱う。
   if (status === null || error) {
     return { outcome: 'exec-failed', reason: error ? `run-review-jobs spawn 失敗: ${error}` : 'run-review-jobs はシグナル等で終了（status null）' };
   }
   // 不完全センチネルは manifest検証失敗・再試行上限が書く。即時 incomplete に打ち切ってよい。
-  const sentinelPath = findIncompleteSentinel(ghDir, reviewWtDir, pr);
+  const sentinelPath = findIncompleteSentinel(workspace, reviewWtDir, pr);
   if (sentinelPath) {
     return { outcome: 'incomplete', reason: `不完全センチネル検出: ${sentinelPath}` };
   }
@@ -941,12 +941,12 @@ function judgeJobRun({ status, error }, { ghDir, reviewWtDir, pr, resultsPath })
  *
  * @returns {{outcome:'results-ready'|'incomplete'|'exec-failed', reason:string}}
  */
-function runJobsDeterministically({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log }) {
+function runJobsDeterministically({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log }) {
   const exec = _injectedRunReviewJobsOnce || runReviewJobsOnce;
   const runOnce = () => {
-    const run = exec({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log });
+    const run = exec({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log });
     log(`run-review-jobs exited with status ${run.status}`);
-    return { run, judged: judgeJobRun(run, { ghDir, reviewWtDir, pr, resultsPath }) };
+    return { run, judged: judgeJobRun(run, { workspace, reviewWtDir, pr, resultsPath }) };
   };
 
   const attempt1 = runOnce();
@@ -979,7 +979,7 @@ function runJobsDeterministically({ manifestPath, resultsPath, pr, repo, ghDir, 
  *   { outcome:'setup-failed'|'agent-config-failed', exitCode, agentPid, reason }
  */
 async function superviseAgentPhase({
-  pr, repo, issue, ghDir, reviewWtDir, logFile, log, signal,
+  pr, repo, issue, workspace, reviewWtDir, logFile, log, signal,
   promptText, promptFile, targetPath, watchSentinel, deadlineMs,
 }) {
   try {
@@ -1066,7 +1066,7 @@ async function superviseAgentPhase({
 
     // watchSentinel 時は、プロセス生存中でもセンチネルがあれば即時終了（不完全完了の決定打）。
     if (watchSentinel) {
-      const sentinelPath = findIncompleteSentinel(ghDir, reviewWtDir, pr);
+      const sentinelPath = findIncompleteSentinel(workspace, reviewWtDir, pr);
       if (sentinelPath) {
         log(`incomplete sentinel detected (${path.basename(sentinelPath)})`);
         return { outcome: 'incomplete', sentinelPath, agentPid };
@@ -1151,12 +1151,12 @@ async function superviseReviewManager({
   // 新レビュー周回の開始＝.running ロック作成。前周回が不完全終了した場合の
   // 古い .incomplete センチネルが残っていると、今回の途中結果を誤って
   // 「不完全完了」と判定してしまうため、ここで必ず消す（Issue #248 項目4）。
-  clearStaleIncompleteSentinel(ghDir, pr);
+  clearStaleIncompleteSentinel(workspace, pr);
   // 再試行カウンタも同じ周回開始タイミングでリセットする（Issue #273）。
   // リセット失敗はフェイルクローズ（resetRetryCount が throw）。黙って続行すると
   // 新周回がジョブを1件も実行しないため、setup-failed として異常終了する。
   try {
-    resetRetryCount(ghDir, pr);
+    resetRetryCount(workspace, pr);
   } catch (e) {
     return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir: null, reason: e.message };
   }
@@ -1174,8 +1174,8 @@ async function superviseReviewManager({
 
   const worktreeGhDir = path.join(reviewWtDir, '.gh-maestro');
   fs.mkdirSync(worktreeGhDir, { recursive: true });
-  const worktreeOutputFile = reviewArtifactPath(worktreeGhDir, pr, '.json');
-  const manifestPath = reviewArtifactPath(worktreeGhDir, pr, '.manifest.json');
+  const worktreeOutputFile = reviewArtifactPath(reviewWtDir, pr, '.json');
+  const manifestPath = reviewArtifactPath(reviewWtDir, pr, '.manifest.json');
   const resultsPath = path.join(worktreeGhDir, `review-results-${pr}.json`);
   const schemaPath = path.join(__dirname, 'review-findings-schema.json');
 
@@ -1197,7 +1197,7 @@ async function superviseReviewManager({
   // ── フェーズA: RM が計画（manifest書き出し） ──────────────────────────────────
   const { prompt: phase1Prompt } = buildPrompt({ pr, repo, issue, workspace: reviewWtDir, mainGhDir: ghDir, skillPath });
   const phase1 = await superviseAgentPhase({
-    pr, repo, issue, ghDir, reviewWtDir, logFile, log, signal,
+    pr, repo, issue, workspace, reviewWtDir, logFile, log, signal,
     promptText: phase1Prompt, promptFile, targetPath: manifestPath, watchSentinel: false, deadlineMs,
   });
   if (phase1.outcome !== 'target') {
@@ -1206,11 +1206,11 @@ async function superviseReviewManager({
   log(`phase1 complete: manifest at ${manifestPath}`);
 
   // ── フェーズB: 決定論的ジョブ実行（モデル介入なし） ────────────────────────────
-  const phaseB = runJobsDeterministically({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log });
+  const phaseB = runJobsDeterministically({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log });
   if (phaseB.outcome === 'incomplete') {
     // run-review-jobs が不完全終了を確定（manifest検証失敗・再試行上限）。judgeJobRun が
     // センチネルを確認済み。念のため再取得して不完全レビュー通知経路へ繋ぐ。
-    const sentinelPath = findIncompleteSentinel(ghDir, reviewWtDir, pr);
+    const sentinelPath = findIncompleteSentinel(workspace, reviewWtDir, pr);
     if (sentinelPath) {
       const outcome = incompleteSentinelOutcome({ sentinelPath, agentPid: null, reviewWtDir });
       log(`incomplete review sentinel detected (${path.basename(sentinelPath)}) — ${outcome.reason}`);
@@ -1231,7 +1231,7 @@ async function superviseReviewManager({
     pr, repo, issue, workspace: reviewWtDir, outputFile: worktreeOutputFile, mainGhDir: ghDir, resultsFile: resultsPath, skillPath,
   });
   const phase2 = await superviseAgentPhase({
-    pr, repo, issue, ghDir, reviewWtDir, logFile, log, signal,
+    pr, repo, issue, workspace, reviewWtDir, logFile, log, signal,
     promptText: phase2Prompt, promptFile, targetPath: worktreeOutputFile, watchSentinel: true, deadlineMs,
   });
   if (phase2.outcome === 'incomplete') {
@@ -1331,7 +1331,7 @@ if (require.main === module) {
     const ghDir = path.join(workspace, '.gh-maestro');
     const lockFile = spec.leaseStore;
     const logFile = spec.logPath;
-    const outputFile = reviewArtifactPath(ghDir, pr, '.json');
+    const outputFile = reviewArtifactPath(workspace, pr, '.json');
     const promptFile = path.join(os.tmpdir(), `review-manager-prompt-${pr}-${Date.now()}.md`);
     const lockOwner = {
       pid: process.pid,

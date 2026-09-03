@@ -13,7 +13,7 @@
 const path = require('path');
 const { readFileSync, existsSync, rmSync } = require('fs');
 const { spawnSync } = require('./shared/child-process');
-const { parseFlags } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { getAssistant, removeAssistant } = require('./shared/assistants-registry');
 const { killPane } = require('./shared/pane-launch');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
@@ -27,7 +27,7 @@ Usage: node finalize-issue.js --issue <N> [--repo <owner/repo>] [--workspace <pa
 Options:
   --issue <N>          クローズ対象の Issue 番号（正の整数）
   --repo <owner/repo>  対象リポジトリ（省略時は workspace の git remote から解決）
-  --workspace <path>   ワークスペース（デフォルト CWD）
+  --workspace <path>   ワークスペース（省略時は GH_MAESTRO_WORKSPACE env または CWD から上方探索で解決）
 
 反省会が完了した後にだけ呼ぶこと。Issueに紐づく全ワーカーを remove-worker.js 経由で削除し、
 そのあと Issue をクローズする。ワーカー削除は best-effort（一部失敗しても続行し、Issueは閉じる）。
@@ -162,7 +162,6 @@ function defaultFindReviewPrs(issue, repo, workspace) {
  * @returns {{watchRemoved: boolean, incompleteRemoved: number[], executionsPruned: number}}
  */
 function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn = defaultFindReviewPrs } = {}) {
-  const ghDir = path.join(workspace, '.gh-maestro');
   const result = { watchRemoved: false, incompleteRemoved: [], executionsPruned: 0 };
 
   // item2: assistant-watch/<issue>.json 削除。issue はファイル名に使うため正整数検証してから
@@ -181,7 +180,7 @@ function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn 
     }
   }
 
-  // item4: 対象PRの .incomplete 削除。reviewArtifactPath が PR の正整数検証 + ghDir封じ込めを担う。
+  // item4: 対象PRの .incomplete 削除。reviewArtifactPath が PR の正整数検証 + workspace封じ込めを担う。
   let prs = [];
   try {
     prs = findReviewPrsFn(issue, repo, workspace) || [];
@@ -191,7 +190,7 @@ function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn 
   for (const pr of prs) {
     let sentinel;
     try {
-      sentinel = reviewArtifactPath(ghDir, pr, '.incomplete');
+      sentinel = reviewArtifactPath(workspace, pr, '.incomplete');
     } catch (e) {
       process.stderr.write(`finalize-issue: 不正なPR番号 ${JSON.stringify(pr)} はスキップします: ${e.message}\n`);
       continue;
@@ -297,7 +296,7 @@ if (require.main === module) {
 
   const issue = values['--issue'];
   const repo = values['--repo'] || null;
-  const workspace = values['--workspace'] || process.cwd();
+  const workspace = resolveWorkspace(values['--workspace']);
 
   if (!issue) {
     console.error('finalize-issue: --issue が必要です');
@@ -306,6 +305,10 @@ if (require.main === module) {
   }
   if (!/^[1-9][0-9]*$/.test(issue)) {
     console.error('finalize-issue: --issue は正の整数である必要があります');
+    process.exit(1);
+  }
+  if (!workspace) {
+    console.error('finalize-issue: ワークスペースを解決できません。--workspace を指定するか、GH_MAESTRO_WORKSPACE または .gh-maestro/ のあるディレクトリで実行してください');
     process.exit(1);
   }
 

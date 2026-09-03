@@ -162,7 +162,7 @@ function makeJobFixtures() {
   const pr = '5';
   fs.mkdirSync(reviewWtDir, { recursive: true });
   const resultsPath = path.join(reviewWtDir, 'review-results-5.json');
-  const sentinelPath = reviewArtifactPath(ghDir, pr, '.incomplete');
+  const sentinelPath = reviewArtifactPath(dir, pr, '.incomplete');
   fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
   return { dir, ghDir, reviewWtDir, pr, resultsPath, sentinelPath };
 }
@@ -172,7 +172,7 @@ test('runJobsDeterministically: 初回全成功(0)は再試行なしでresults-r
   const calls = [];
   try {
     _setRunReviewJobsOnce(({ log }) => { calls.push(1); log('injected'); return { status: 0, error: null }; });
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
     assert.equal(r.outcome, 'results-ready');
     assert.equal(calls.length, 1, 'should run exactly once (no retry)');
   } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
@@ -185,7 +185,7 @@ test('runJobsDeterministically: 一部失敗(1,結果JSONあり)→再試行→�
   const codes = [1, 0];
   _setRunReviewJobsOnce(() => { calls.push(1); return { status: codes.shift(), error: null }; });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
     assert.equal(r.outcome, 'results-ready');
     assert.equal(calls.length, 2, 'should retry once after partial failure');
   } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
@@ -198,7 +198,7 @@ test('runJobsDeterministically: 再試行後も失敗(1→1,結果JSONあり)は
   const codes = [1, 1];
   _setRunReviewJobsOnce(() => { calls.push(1); return { status: codes.shift(), error: null }; });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
     assert.equal(r.outcome, 'results-ready');
     assert.equal(calls.length, 2);
   } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
@@ -214,7 +214,7 @@ test('runJobsDeterministically: manifest検証失敗(2,センチネル書く)は
     return { status: 2, error: null };
   });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
     assert.equal(r.outcome, 'incomplete');
     assert.equal(calls.length, 1, 'manifest validation failure must not retry');
   } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
@@ -226,7 +226,7 @@ test('runJobsDeterministically: 構造的失敗(2)は結果JSONが残ってい�
   const calls = [];
   _setRunReviewJobsOnce(() => { calls.push(1); return { status: 2, error: null }; });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
     assert.equal(r.outcome, 'exec-failed');
     assert.equal(calls.length, 1, '構造的失敗は再試行しない');
   } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
@@ -242,7 +242,7 @@ test('runJobsDeterministically: 再試行上限(3,センチネル書く)は再�
     return { status: 3, error: null };
   });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
     assert.equal(r.outcome, 'incomplete');
     assert.equal(calls.length, 1);
   } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
@@ -262,7 +262,7 @@ test('runJobsDeterministically: 再試行後のmanifest検証失敗(2)/上限(3)
       return { status: code, error: null };
     });
     try {
-      const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+      const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
       assert.equal(r.outcome, 'incomplete', `code sequence [1,${second}] should be incomplete`);
     } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
   }
@@ -274,7 +274,7 @@ test('runJobsDeterministically: 一部失敗(1)で結果JSONが無い(読めな�
   const calls = [];
   _setRunReviewJobsOnce(() => { calls.push(1); return { status: 1, error: null }; });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
     assert.equal(r.outcome, 'exec-failed');
     assert.equal(calls.length, 1, 'unknown failure must not retry');
   } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
@@ -285,7 +285,7 @@ test('runJobsDeterministically: 起動失敗(status null)はexec-failedで再試
   const calls = [];
   _setRunReviewJobsOnce(() => { calls.push(1); return { status: null, error: 'spawn ENOENT' }; });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
     assert.equal(r.outcome, 'exec-failed');
     assert.equal(calls.length, 1, 'spawn failure must not be retried into results-ready');
     assert.match(r.reason, /spawn 失敗/);
@@ -297,7 +297,7 @@ test('runJobsDeterministically: シグナル終了(status null, error無し)もe
   const calls = [];
   _setRunReviewJobsOnce(() => { calls.push(1); return { status: null, error: null }; });
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
     assert.equal(r.outcome, 'exec-failed');
     assert.equal(calls.length, 1);
   } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
@@ -1029,7 +1029,7 @@ test('clearStaleIncompleteSentinel: 存在するセンチネルを削除する',
   const sentinel = path.join(ghDir, 'records', 'pr', '123', 'review', 'manager.incomplete');
   fs.mkdirSync(path.dirname(sentinel), { recursive: true });
   fs.writeFileSync(sentinel, 'done');
-  clearStaleIncompleteSentinel(ghDir, 123);
+  clearStaleIncompleteSentinel(testDir, 123);
   assert.ok(!fs.existsSync(sentinel), 'sentinel should be removed');
 });
 
@@ -1039,7 +1039,7 @@ test('clearStaleIncompleteSentinel: 存在しなければno-op（エラーにし
   const ghDir = path.join(testDir, '.gh-maestro');
   fs.mkdirSync(ghDir, { recursive: true });
   // 例外が投げられなければok
-  clearStaleIncompleteSentinel(ghDir, 456);
+  clearStaleIncompleteSentinel(testDir, 456);
 });
 
 test('clearStaleIncompleteSentinel: 別PRのセンチネルは残す', () => {
@@ -1050,7 +1050,7 @@ test('clearStaleIncompleteSentinel: 別PRのセンチネルは残す', () => {
   const other = path.join(ghDir, 'records', 'pr', '999', 'review', 'manager.incomplete');
   fs.mkdirSync(path.dirname(other), { recursive: true });
   fs.writeFileSync(other, 'done');
-  clearStaleIncompleteSentinel(ghDir, 123);
+  clearStaleIncompleteSentinel(testDir, 123);
   assert.ok(fs.existsSync(other), 'unrelated PR sentinel should remain');
 });
 
@@ -1067,7 +1067,7 @@ test('resetRetryCount: 存在するカウンタを削除する', () => {
   const counter = path.join(ghDir, 'records', 'pr', '123', 'review', 'manager.retries.json');
   fs.mkdirSync(path.dirname(counter), { recursive: true });
   fs.writeFileSync(counter, '{"attempts":2}');
-  resetRetryCount(ghDir, 123);
+  resetRetryCount(testDir, 123);
   assert.ok(!fs.existsSync(counter), 'counter should be removed');
 });
 
@@ -1076,7 +1076,7 @@ test('resetRetryCount: 存在しなければno-op（エラーにしない）', (
   fs.mkdirSync(testDir, { recursive: true });
   const ghDir = path.join(testDir, '.gh-maestro');
   fs.mkdirSync(ghDir, { recursive: true });
-  resetRetryCount(ghDir, 456); // 例外が投げられなければok
+  resetRetryCount(testDir, 456); // 例外が投げられなければok
 });
 
 test('resetRetryCount: 別PRのカウンタは残す', () => {
@@ -1087,7 +1087,7 @@ test('resetRetryCount: 別PRのカウンタは残す', () => {
   const other = path.join(ghDir, 'records', 'pr', '999', 'review', 'manager.retries.json');
   fs.mkdirSync(path.dirname(other), { recursive: true });
   fs.writeFileSync(other, '{"attempts":2}');
-  resetRetryCount(ghDir, 123);
+  resetRetryCount(testDir, 123);
   assert.ok(fs.existsSync(other), 'unrelated PR counter should remain');
 });
 
@@ -1101,7 +1101,7 @@ test('resetRetryCount: 削除失敗（ディレクトリ等）は throw する�
   const counter = path.join(ghDir, 'records', 'pr', '123', 'review', 'manager.retries.json');
   fs.mkdirSync(counter, { recursive: true });
   assert.throws(
-    () => resetRetryCount(ghDir, 123),
+    () => resetRetryCount(testDir, 123),
     /再試行カウンタのリセットに失敗しました/,
   );
 });
@@ -1121,7 +1121,7 @@ test('findIncompleteSentinel: メインworkspaceのセンチネルを検出す�
   fs.mkdirSync(path.dirname(mainSentinel), { recursive: true });
   fs.writeFileSync(mainSentinel, '{}', 'utf8');
 
-  const found = findIncompleteSentinel(ghDir, path.join(testDir, 'wt'), 321);
+  const found = findIncompleteSentinel(testDir, path.join(testDir, 'wt'), 321);
   assert.equal(found, mainSentinel);
 });
 
@@ -1136,7 +1136,7 @@ test('findIncompleteSentinel: worktree側のセンチネルも検出する（Iss
   fs.mkdirSync(path.dirname(wtSentinel), { recursive: true });
   fs.writeFileSync(wtSentinel, '{}', 'utf8');
 
-  const found = findIncompleteSentinel(ghDir, wtDir, 654);
+  const found = findIncompleteSentinel(testDir, wtDir, 654);
   assert.equal(found, wtSentinel);
 });
 
@@ -1154,12 +1154,12 @@ test('findIncompleteSentinel: mainを優先し、どちらにも無ければnull
   const wtSentinel = path.join(wtDir, '.gh-maestro', 'records', 'pr', '777', 'review', 'manager.incomplete');
   fs.mkdirSync(path.dirname(wtSentinel), { recursive: true });
   fs.writeFileSync(wtSentinel, '{}', 'utf8');
-  assert.equal(findIncompleteSentinel(ghDir, wtDir, 777), mainSentinel);
+  assert.equal(findIncompleteSentinel(testDir, wtDir, 777), mainSentinel);
 
   // どちらにも存在しない → null
-  assert.equal(findIncompleteSentinel(ghDir, wtDir, 999), null);
+  assert.equal(findIncompleteSentinel(testDir, wtDir, 999), null);
   // reviewWtDir が null でも例外を投げず main だけ確認する
-  assert.equal(findIncompleteSentinel(ghDir, null, 999), null);
+  assert.equal(findIncompleteSentinel(testDir, null, 999), null);
 });
 
 test('persistReviewManifest: worktreeのrecordsパスからmainのrecordへ永続化する', () => {
@@ -1223,7 +1223,7 @@ test('persistReviewManifest: 候補が無ければpersisted:false（エラーに
 test('incompleteSentinelOutcome: notify-failed センチネルは exit 1 の失敗として返す', () => {
   const testDir = path.join(tmpBase, 'sentinel-notify-failed');
   fs.mkdirSync(testDir, { recursive: true });
-  const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 42, '.incomplete');
+  const sentinelPath = reviewArtifactPath(testDir, 42, '.incomplete');
   fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
   fs.writeFileSync(sentinelPath, JSON.stringify({
     pr: 42,
@@ -1246,7 +1246,7 @@ test('incompleteSentinelOutcome: notify-failed センチネルは exit 1 の失�
 test('incompleteSentinelOutcome: 旧形式（validationErrors配列のみ）センチネルもフォールバック表示する', () => {
   const testDir = path.join(tmpBase, 'sentinel-notify-failed-old');
   fs.mkdirSync(testDir, { recursive: true });
-  const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 45, '.incomplete');
+  const sentinelPath = reviewArtifactPath(testDir, 45, '.incomplete');
   fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
   // 前回マージ時点の notify-failed センチネル形式（validationErrors のみ）。互換のため読めること
   fs.writeFileSync(sentinelPath, JSON.stringify({
@@ -1267,7 +1267,7 @@ test('incompleteSentinelOutcome: 旧形式（validationErrors配列のみ）セ�
 test('incompleteSentinelOutcome: 通知済み（incomplete-review）センチネルは exit 0 の不完全完了', () => {
   const testDir = path.join(tmpBase, 'sentinel-incomplete-ok');
   fs.mkdirSync(testDir, { recursive: true });
-  const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 43, '.incomplete');
+  const sentinelPath = reviewArtifactPath(testDir, 43, '.incomplete');
   fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
   fs.writeFileSync(sentinelPath, JSON.stringify({ pr: 43, reason: 'incomplete-review', completed_at: 'x' }), 'utf8');
 
@@ -1279,7 +1279,7 @@ test('incompleteSentinelOutcome: 通知済み（incomplete-review）センチネ
 test('readIncompleteSentinel: 解釈できないセンチネルは null（notify-failed判定にしない）', () => {
   const testDir = path.join(tmpBase, 'sentinel-unreadable');
   fs.mkdirSync(testDir, { recursive: true });
-  const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 44, '.incomplete');
+  const sentinelPath = reviewArtifactPath(testDir, 44, '.incomplete');
   fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
   fs.writeFileSync(sentinelPath, 'not-json', 'utf8');
 

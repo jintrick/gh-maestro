@@ -4,6 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const fs = require('fs');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'get-context.js');
 const REPO_ROOT = path.join(__dirname, '..');
@@ -33,9 +34,12 @@ test('GH_MAESTRO_WORKER=orchestrator がセッション変数として出力さ�
   );
 });
 
-test('WORKSPACE はカレントディレクトリと一致する（Unixスラッシュ）', () => {
+test('WORKSPACE はGH_MAESTRO_WORKSPACEが無い場合にCWD上方探索で解決される（Unixスラッシュ）', () => {
+  const env = { ...process.env };
+  delete env.GH_MAESTRO_WORKSPACE;
   const r = spawnSync(process.execPath, [SCRIPT], {
     cwd: REPO_ROOT,
+    env,
     encoding: 'utf8',
   });
   assert.equal(r.status, 0);
@@ -58,6 +62,7 @@ test('BASE_BRANCH が出力に含まれる', () => {
     // git init のみでデフォルトブランチ（main）が作られ、commit は不要。
     execSync('git init', { cwd: tmp, stdio: 'pipe' });
     execSync('git remote add origin https://github.com/test/repo.git', { cwd: tmp, stdio: 'pipe' });
+    fs.mkdirSync(path.join(tmp, '.gh-maestro'));
 
     const r = spawnSync(process.execPath, [SCRIPT], {
       cwd: tmp,

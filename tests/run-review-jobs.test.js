@@ -848,7 +848,7 @@ test('notifyManifestValidationFailure: 通知済みセンチネル既存時は�
   try {
     // 事前に「通知済み」センチネルを作成（同一PRでの再実行を模す）。
     // reason 'incomplete-review' のときだけスキップ対象（notify-failed は再投稿する）。
-    const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 7, '.incomplete');
+    const sentinelPath = reviewArtifactPath(testDir, 7, '.incomplete');
     fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
     fs.writeFileSync(sentinelPath, JSON.stringify({ pr: 7, reason: 'incomplete-review', completed_at: 'x' }), 'utf8');
 
@@ -1024,7 +1024,7 @@ test('notifyManifestValidationFailure: notify-failedセンチネル残存時は�
   const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nvmf-recover-'));
   try {
     // 前回の投稿失敗で notify-failed センチネルが残っている（認証切れ等の一時障害を想定）
-    const sentinelPath = reviewArtifactPath(path.join(testDir, '.gh-maestro'), 7, '.incomplete');
+    const sentinelPath = reviewArtifactPath(testDir, 7, '.incomplete');
     fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
     fs.writeFileSync(sentinelPath, JSON.stringify({ pr: 7, reason: 'notify-failed', postError: 'auth failed', validationErrors: ['bad'] }), 'utf8');
 
@@ -1347,26 +1347,25 @@ test('CLI: --help は exit 0、--pr / --repo の用途エラーは exit 1（ク�
 
 // ── Issue #273: 再試行カウンタ（決定的上限） ───────────────────────────────────
 
-test('retryCountPath: ghDir配下のrecords/pr/<PR>/review/manager.retries.jsonを解決する', () => {
-  const ghDir = path.resolve('C:/ws/.gh-maestro');
+test('retryCountPath: workspace配下のrecords/pr/<PR>/review/manager.retries.jsonを解決する', () => {
+  const workspace = path.resolve('C:/ws');
   assert.equal(
-    retryCountPath(ghDir, 42),
-    path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.retries.json'),
+    retryCountPath(workspace, 42),
+    path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.retries.json'),
   );
 });
 
 test('readRetryCount: 不在は0、壊れ・非整数・負数は throw（フェイルクローズ、Issue #273 レビュー指摘）', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rrc-'));
-  const ghDir = path.join(workspace, '.gh-maestro');
   try {
-    assert.equal(readRetryCount(ghDir, 42), 0); // 不在 → 0（初回）
-    fs.mkdirSync(path.dirname(retryCountPath(ghDir, 42)), { recursive: true });
-    fs.writeFileSync(retryCountPath(ghDir, 42), '{ not json', 'utf8');
-    assert.throws(() => readRetryCount(ghDir, 42), /壊れています/); // 壊れ → throw
-    fs.writeFileSync(retryCountPath(ghDir, 42), JSON.stringify({ attempts: 'x' }), 'utf8');
-    assert.throws(() => readRetryCount(ghDir, 42), /形式が不正/); // 非整数 → throw
-    fs.writeFileSync(retryCountPath(ghDir, 42), JSON.stringify({ attempts: -1 }), 'utf8');
-    assert.throws(() => readRetryCount(ghDir, 42), /形式が不正/); // 負数 → throw
+    assert.equal(readRetryCount(workspace, 42), 0); // 不在 → 0（初回）
+    fs.mkdirSync(path.dirname(retryCountPath(workspace, 42)), { recursive: true });
+    fs.writeFileSync(retryCountPath(workspace, 42), '{ not json', 'utf8');
+    assert.throws(() => readRetryCount(workspace, 42), /壊れています/); // 壊れ → throw
+    fs.writeFileSync(retryCountPath(workspace, 42), JSON.stringify({ attempts: 'x' }), 'utf8');
+    assert.throws(() => readRetryCount(workspace, 42), /形式が不正/); // 非整数 → throw
+    fs.writeFileSync(retryCountPath(workspace, 42), JSON.stringify({ attempts: -1 }), 'utf8');
+    assert.throws(() => readRetryCount(workspace, 42), /形式が不正/); // 負数 → throw
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
@@ -1374,12 +1373,11 @@ test('readRetryCount: 不在は0、壊れ・非整数・負数は throw（フェ
 
 test('incrementRetryCount: 1から始まり1ずつ増える', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'irc-'));
-  const ghDir = path.join(workspace, '.gh-maestro');
   try {
-    assert.equal(incrementRetryCount(ghDir, 42), 1);
-    assert.equal(incrementRetryCount(ghDir, 42), 2);
-    assert.equal(readRetryCount(ghDir, 42), 2);
-    const data = JSON.parse(fs.readFileSync(retryCountPath(ghDir, 42), 'utf8'));
+    assert.equal(incrementRetryCount(workspace, 42), 1);
+    assert.equal(incrementRetryCount(workspace, 42), 2);
+    assert.equal(readRetryCount(workspace, 42), 2);
+    const data = JSON.parse(fs.readFileSync(retryCountPath(workspace, 42), 'utf8'));
     assert.equal(data.attempts, 2);
     assert.equal(data.pr, 42);
   } finally {
@@ -1389,9 +1387,8 @@ test('incrementRetryCount: 1から始まり1ずつ増える', () => {
 
 test('acquireRetryCountLock/releaseRetryCountLock: ロックを取得・解放でき、解放後に残留しない', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rl-'));
-  const ghDir = path.join(workspace, '.gh-maestro');
   try {
-    const lockPath = retryCountLockPath(ghDir, 42);
+    const lockPath = retryCountLockPath(workspace, 42);
     acquireRetryCountLock(lockPath);
     assert.ok(fs.existsSync(lockPath), 'ロック取得でロックファイルが作られる');
     releaseRetryCountLock(lockPath);
@@ -1406,11 +1403,10 @@ test('acquireRetryCountLock/releaseRetryCountLock: ロックを取得・解放�
 
 test('applyRetryGate: ゲート通過後にロックファイルが残留しない', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'arglock-'));
-  const ghDir = path.join(workspace, '.gh-maestro');
   try {
-    applyRetryGate({ ghDir, pr: 42 });
-    applyRetryGate({ ghDir, pr: 42 });
-    assert.ok(!fs.existsSync(retryCountLockPath(ghDir, 42)), 'ゲート後にロックファイルが残留しない');
+    applyRetryGate({ workspace, pr: 42 });
+    applyRetryGate({ workspace, pr: 42 });
+    assert.ok(!fs.existsSync(retryCountLockPath(workspace, 42)), 'ゲート後にロックファイルが残留しない');
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
@@ -1418,9 +1414,8 @@ test('applyRetryGate: ゲート通過後にロックファイルが残留しな�
 
 test('acquireRetryCountLock: ロック取得できずタイムアウトで throw する（フェイルクローズ）', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rlt-'));
-  const ghDir = path.join(workspace, '.gh-maestro');
   try {
-    const lockPath = retryCountLockPath(ghDir, 42);
+    const lockPath = retryCountLockPath(workspace, 42);
     // 別プロセスがロックを保持している状態を模す（fresh なロックファイル＝stale ではない）
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     fs.writeFileSync(lockPath, String(99999), 'utf8');
@@ -1438,7 +1433,8 @@ test('runJobsFromManifest: ロック取得失敗でフェイルクローズ（{o
   try {
     const manifestPath = path.join(testDir, 'manifest.json');
     const resultsPath = path.join(testDir, 'results.json');
-    const ghDir = path.join(testDir, 'main', '.gh-maestro');
+    const mainWorkspace = path.join(testDir, 'main');
+    const ghDir = path.join(mainWorkspace, '.gh-maestro');
     const validManifest = {
       pr: 42, repo: 'o/r', headRefOid: 'abc',
       coverage_ledger: {
@@ -1455,13 +1451,13 @@ test('runJobsFromManifest: ロック取得失敗でフェイルクローズ（{o
     fs.writeFileSync(manifestPath, JSON.stringify(validManifest), 'utf8');
 
     // ロックを別プロセスが保持している状態を模す（fresh なロックファイル）
-    const lockPath = retryCountLockPath(ghDir, 42);
+    const lockPath = retryCountLockPath(mainWorkspace, 42);
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     fs.writeFileSync(lockPath, String(99999), 'utf8');
 
     _setRetryCountLockWaitMs(100); // 短い待ちでタイムアウトさせる
     try {
-      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, 42, 'o/r', ghDir);
+      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, 42, 'o/r', ghDir, { mainWorkspace });
       assert.equal(result.ok, false);
       assert.ok(!result.summary.retryLimitReached, '上限到達ではなくゲート失敗');
       assert.match(result.summary.error, /retry counter gate failed/);
@@ -1475,11 +1471,10 @@ test('runJobsFromManifest: ロック取得失敗でフェイルクローズ（{o
 
 test('applyRetryGate: 上限未満は gated:false でインクリメント、上限到達で gated:true', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'arg-'));
-  const ghDir = path.join(workspace, '.gh-maestro');
   try {
-    assert.deepEqual(applyRetryGate({ ghDir, pr: 42 }), { gated: false, attempts: 1 });
-    assert.deepEqual(applyRetryGate({ ghDir, pr: 42 }), { gated: false, attempts: 2 });
-    const gated = applyRetryGate({ ghDir, pr: 42 });
+    assert.deepEqual(applyRetryGate({ workspace, pr: 42 }), { gated: false, attempts: 1 });
+    assert.deepEqual(applyRetryGate({ workspace, pr: 42 }), { gated: false, attempts: 2 });
+    const gated = applyRetryGate({ workspace, pr: 42 });
     assert.equal(gated.gated, true);
     assert.equal(gated.reason, 'retry-limit-reached');
     assert.equal(gated.attempts, MAX_REVIEW_ATTEMPTS);
@@ -1488,10 +1483,10 @@ test('applyRetryGate: 上限未満は gated:false でインクリメント、上
   }
 });
 
-test('applyRetryGate: ghDir または pr が欠落・不正なら gated:false（プログラム呼び出しはゲートしない）', () => {
-  assert.deepEqual(applyRetryGate({ ghDir: null, pr: 42 }), { gated: false });
-  assert.deepEqual(applyRetryGate({ ghDir: '/x/.gh-maestro', pr: null }), { gated: false });
-  assert.deepEqual(applyRetryGate({ ghDir: '/x/.gh-maestro', pr: 'abc' }), { gated: false });
+test('applyRetryGate: workspace または pr が欠落・不正なら gated:false（プログラム呼び出しはゲートしない）', () => {
+  assert.deepEqual(applyRetryGate({ workspace: null, pr: 42 }), { gated: false });
+  assert.deepEqual(applyRetryGate({ workspace: '/x', pr: null }), { gated: false });
+  assert.deepEqual(applyRetryGate({ workspace: '/x', pr: 'abc' }), { gated: false });
 });
 
 test('validateManifest: retry_policy を含むjobは検証に落ちる（廃止設定は受理しない、Issue #273）', () => {
@@ -1527,7 +1522,8 @@ test('runJobsFromManifest: 上限到達時にジョブを起動せず finalizeRe
   try {
     const manifestPath = path.join(testDir, 'manifest.json');
     const resultsPath = path.join(testDir, 'results.json');
-    const ghDir = path.join(testDir, 'main', '.gh-maestro');
+    const mainWorkspace = path.join(testDir, 'main');
+    const ghDir = path.join(mainWorkspace, '.gh-maestro');
 
     const validManifest = {
       pr: 42, repo: 'o/r', headRefOid: 'abc',
@@ -1545,9 +1541,9 @@ test('runJobsFromManifest: 上限到達時にジョブを起動せず finalizeRe
     fs.writeFileSync(manifestPath, JSON.stringify(validManifest), 'utf8');
 
     // カウンタを上限まで進める（2回実行済み）
-    incrementRetryCount(ghDir, 42);
-    incrementRetryCount(ghDir, 42);
-    assert.equal(readRetryCount(ghDir, 42), MAX_REVIEW_ATTEMPTS);
+    incrementRetryCount(mainWorkspace, 42);
+    incrementRetryCount(mainWorkspace, 42);
+    assert.equal(readRetryCount(mainWorkspace, 42), MAX_REVIEW_ATTEMPTS);
 
     const finalizeCalls = [];
     _setFinalizeReviewForTest(async (rp, mode, out, ws) => {
@@ -1556,7 +1552,7 @@ test('runJobsFromManifest: 上限到達時にジョブを起動せず finalizeRe
     });
 
     try {
-      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, 42, 'o/r', ghDir);
+      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, 42, 'o/r', ghDir, { mainWorkspace });
       assert.equal(result.ok, false);
       assert.equal(result.summary.retryLimitReached, true);
       assert.match(result.summary.error, /retry limit reached/);
@@ -1565,7 +1561,7 @@ test('runJobsFromManifest: 上限到達時にジョブを起動せず finalizeRe
       assert.equal(finalizeCalls[0].rp, resultsPath);
       assert.equal(finalizeCalls[0].ws, testDir);
       // カウンタは上限のまま増えない（拒否時にインクリメントしない）
-      assert.equal(readRetryCount(ghDir, 42), MAX_REVIEW_ATTEMPTS);
+      assert.equal(readRetryCount(mainWorkspace, 42), MAX_REVIEW_ATTEMPTS);
     } finally {
       _setFinalizeReviewForTest(null);
     }

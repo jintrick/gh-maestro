@@ -538,7 +538,7 @@ function listRunningReviewManagers(workspace, opts = {}) {
   const results = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || !/^[1-9]\d*$/.test(entry.name)) continue;
-    const runningPath = reviewArtifactPath(ghDir, entry.name, '.running');
+    const runningPath = reviewArtifactPath(workspace, entry.name, '.running');
     const inspection = inspectRunningReviewManager(runningPath, {
       ...opts,
       pr: entry.name,

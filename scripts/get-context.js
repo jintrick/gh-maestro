@@ -3,14 +3,15 @@
 // orchestratorの起動コンテキストを取得してプロンプト注入用ブロックとして出力する
 
 const { execSync } = require('child_process');
-const { resolve } = require('path');
 const { getCurrentBranch } = require('./shared/git-branch');
+const { resolveWorkspace } = require('./shared/workspace');
 
 const USAGE = `get-context.js — orchestrator の起動コンテキストをプロンプト注入用ブロックとして出力する
 
 Usage: node get-context.js
 
-引数は取らない。CWD を WORKSPACE とし、git remote から REPO、現在のブランチから
+引数は取らない。「--workspace」引数相当の指定がないため、GH_MAESTRO_WORKSPACE env、
+次にCWDから上方探索して WORKSPACE を解決し、git remote から REPO、現在のブランチから
 BASE_BRANCH を解決して [gh-maestro session context] ブロックを stdout に出力する。
 通常は /gh-maestro の起動フックが呼ぶ。`;
 
@@ -23,7 +24,11 @@ if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
   process.exit(0);
 }
 
-const workspace = process.cwd();
+const workspace = resolveWorkspace();
+if (!workspace) {
+  console.error('ERROR: ワークスペースを解決できません。GH_MAESTRO_WORKSPACE または .gh-maestro/ のあるディレクトリで実行してください。');
+  process.exit(1);
+}
 
 let repo = '';
 try {

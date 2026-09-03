@@ -333,7 +333,7 @@ function buildReviewManagerLaunchSpec({ issue, pr, repo, workspace }) {
     // リースキーは .running ファイルのベース名（review-manager-<pr>）。
     // 現行の start-review-manager.js / run-review-manager.js の契約を維持。
     leaseKey: `review-manager-${validPr}`,
-    leaseStore: reviewArtifactPath(ghDir, validPr, '.running'),
+    leaseStore: reviewArtifactPath(workspace, validPr, '.running'),
     worktreeDir,
     logPath,
   });

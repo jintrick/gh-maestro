@@ -37,8 +37,8 @@ Usage:
 
 Arguments:
   --issue <N>          Issue番号（必須、正の整数。実行ブランチ名 ^issue-<N> と一致する必要がある）
-  --workspace <path>   ワークスペースのルートパス（省略時は環境変数 WORKSPACE、次に
-                       GH_MAESTRO_WORKSPACE、次にCWD上方探索で解決）
+  --workspace <path>   ワークスペースのルートパス（省略時は GH_MAESTRO_WORKSPACE、次に
+                       CWD上方探索で解決）
 
 動作（終状態への収束。同じコマンドの再実行だけで回復する）:
   1. ブランチ検証（^issue-<N>）・リポジトリ特定・Issueタイトル取得
@@ -105,7 +105,7 @@ function errText(r) {
  *
  * @param {object} params
  * @param {number|string} params.issue   Issue番号
- * @param {string} [params.workspace]    workspace解決の引数（--workspace または環境変数 WORKSPACE の値）
+ * @param {string} [params.workspace]    workspace解決の引数（--workspace の値）
  * @param {string} params.worktree       作業用worktree（git操作の実行ディレクトリ）
  * @param {object} [params.env]          環境変数（createPr の base 解決に使う。既定 process.env）
  * @param {object} [deps]                 テスト用の依存注入
@@ -133,7 +133,7 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
   }
   const ws = resolveWorkspace(workspace);
   if (!ws) {
-    return { exitCode: 1, stdout: '', stderr: 'ワークスペースを解決できません（--workspace または環境変数 WORKSPACE を確認してください）' };
+    return { exitCode: 1, stdout: '', stderr: 'ワークスペースを解決できません（--workspace、GH_MAESTRO_WORKSPACE、またはCWDを確認してください）' };
   }
 
   // ── 作業ツリー検証 ─────────────────────────────────────────────────────────────
@@ -311,9 +311,8 @@ function main(argv) {
     return { exitCode: 0, stdout: USAGE };
   }
 
-  // --workspace 引数 > 環境変数 WORKSPACE（ワーカー起動時に注入）の順で解決し、
-  // resolveWorkspace が残りのフォールバック（GH_MAESTRO_WORKSPACE / CWD探索）を担う。
-  const workspace = values['--workspace'] || process.env.WORKSPACE || null;
+  // resolveWorkspace が --workspace > GH_MAESTRO_WORKSPACE > CWD探索の順で解決する。
+  const workspace = values['--workspace'];
   const result = pushAndDeclare({
     issue: values['--issue'],
     workspace,

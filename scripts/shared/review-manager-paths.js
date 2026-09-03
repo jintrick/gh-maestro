@@ -25,21 +25,18 @@ function assertValidPr(pr) {
 }
 
 /**
- * ghDir配下に限定したreview-manager成果物のパスを構築する。
- * prを検証した上でファイル名を組み立て、解決後のパスがghDir配下に
- * 収まることも確認する（prの検証漏れに対する多層防御）。
+ * workspace配下に限定したreview-manager成果物のパスを構築する。
+ * prを検証した上でファイル名を組み立て、recordPathの封じ込め検証を通す。
  *
  * ログ・ロック・成果物をすべて records/pr/<PR>/review/ 配下へ集約する。
  *
- * @param {string} ghDir
+ * @param {string} workspace
  * @param {string|number} pr
  * @param {string} suffix 例: '.running', '.log', '.json'
  * @returns {string} 解決済みの絶対パス
  */
-function reviewArtifactPath(ghDir, pr, suffix) {
+function reviewArtifactPath(workspace, pr, suffix) {
   const validPr = assertValidPr(pr);
-  const resolvedGhDir = path.resolve(ghDir);
-  const workspace = path.dirname(resolvedGhDir);
   const artifactBySuffix = {
     '.log': ARTIFACTS.REVIEW_MANAGER_LOG,
     '.json': ARTIFACTS.REVIEW_MANAGER_JSON,
