@@ -589,10 +589,37 @@ function restartResidentsAfterInstall(options = {}) {
   };
 }
 
+/**
+ * install完了メッセージおよび呼び出し元workspaceのMONITOR_REATTACH_REQUIRED再掲を出力する。
+ *
+ * @param {object} [residentRestart] restartResidentsAfterInstallの戻り値
+ * @param {object|Function} [options] 出力オプションまたはlog関数
+ */
+function printInstallCompletion(residentRestart = {}, options = {}) {
+  const log = typeof options === 'function'
+    ? options
+    : (options.log || console.log);
+  const callerReattachLines = Array.isArray(residentRestart)
+    ? residentRestart
+    : (residentRestart && residentRestart.callerReattachLines) || [];
+
+  log('\ngh-maestro installed.\n');
+  log('Usage:');
+  log('  1. Open wezterm and navigate to your project root');
+  log('  2. Start claude or agy');
+  log('  3. Type: /gh-maestro\n');
+
+  if (callerReattachLines.length > 0) {
+    for (const line of callerReattachLines) {
+      log(line);
+    }
+  }
+}
+
 module.exports = {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
   buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
-  installScripts, installSharedSkills, restartResidentsAfterInstall,
+  installScripts, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
 };
 
 if (require.main !== module) return;
@@ -934,14 +961,4 @@ if (!residentRestart.attempted) {
   ok(`Resident process restart completed for ${residentRestart.workspaces.length} workspace(s)`);
 }
 
-console.log('\ngh-maestro installed.\n');
-console.log('Usage:');
-console.log('  1. Open wezterm and navigate to your project root');
-console.log('  2. Start claude or agy');
-console.log('  3. Type: /gh-maestro\n');
-
-if (residentRestart.callerReattachLines && residentRestart.callerReattachLines.length > 0) {
-  for (const line of residentRestart.callerReattachLines) {
-    console.log(line);
-  }
-}
+printInstallCompletion(residentRestart);
