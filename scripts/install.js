@@ -473,6 +473,7 @@ function installSharedSkills(agents, options = {}) {
  * @param {string|null} [options.callerWorkspace] 呼び出し元workspace（既定: resolveWorkspace()）
  * @param {Function} [options.resolveWorkspace] workspace解決関数
  * @param {Function} [options.listRegisteredWorkspaces] workspace列挙関数
+ * @param {Function} [options.workspaceExists] workspaceが現存ディレクトリかの判定関数
  * @param {Function} [options.execFileSync] CLI実行関数
  * @param {Function} [options.onWorkspace] workspaceごとの実行前通知
  * @param {object} [options.stdout] 出力先Stream（既定: process.stdout）
@@ -498,7 +499,30 @@ function restartResidentsAfterInstall(options = {}) {
   }
 
   const uniqueWorkspaces = [...new Set(workspaces)];
-  if (uniqueWorkspaces.length === 0) {
+  const workspaceExists = options.workspaceExists || storageLayout.isExistingWorkspaceDirectory;
+  if (typeof workspaceExists !== 'function') {
+    return {
+      attempted: false,
+      code: 1,
+      workspaces: [],
+      error: new Error('workspaceの存在確認関数が不正です'),
+    };
+  }
+
+  const existingWorkspaces = [];
+  try {
+    for (const workspace of uniqueWorkspaces) {
+      const exists = workspaceExists(workspace);
+      if (typeof exists !== 'boolean') {
+        throw new Error(`workspaceの存在確認関数がbooleanを返しません: ${workspace}`);
+      }
+      if (exists) existingWorkspaces.push(workspace);
+    }
+  } catch (error) {
+    return { attempted: false, code: 1, workspaces: [], error };
+  }
+
+  if (existingWorkspaces.length === 0) {
     return { attempted: false, code: 0, workspaces: [], callerReattachLines: [] };
   }
 
@@ -531,7 +555,7 @@ function restartResidentsAfterInstall(options = {}) {
   const callerReattachLines = [];
   const outStream = options.stdout || (typeof process !== 'undefined' ? process.stdout : null);
 
-  for (const workspace of uniqueWorkspaces) {
+  for (const workspace of existingWorkspaces) {
     if (typeof options.onWorkspace === 'function') options.onWorkspace(workspace);
     const isCaller = Boolean(canonicalCaller && storageLayout.canonicalWorkspace(workspace) === canonicalCaller);
     let output = '';
@@ -581,7 +605,7 @@ function restartResidentsAfterInstall(options = {}) {
   return {
     attempted: true,
     code,
-    workspaces: uniqueWorkspaces,
+    workspaces: existingWorkspaces,
     results,
     scriptPath,
     callerWorkspace,

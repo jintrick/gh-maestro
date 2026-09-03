@@ -180,6 +180,17 @@ test('ensureWorkspaceRuntimeDir: 既存の workspace.json を上書きしない�
   });
 });
 
+test('ensureWorkspaceRuntimeDir: register:false ではruntimeディレクトリだけ作成しregistryへ登録しない', () => {
+  withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'ewrd-unregistered-runtime') }, () => {
+    const workspace = fs.mkdtempSync(path.join(tmpBase, 'ewrd-unregistered-ws-'));
+    const dir = sl.ensureWorkspaceRuntimeDir(workspace, { register: false });
+
+    assert.ok(fs.existsSync(dir));
+    assert.ok(!fs.existsSync(path.join(dir, 'workspace.json')));
+    assert.deepEqual(sl.listRegisteredWorkspaces(), []);
+  });
+});
+
 test('listRegisteredWorkspaces: runtime rootに登録された全workspaceを返す', () => {
   withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'list-runtime') }, () => {
     const workspaces = [
@@ -192,6 +203,56 @@ test('listRegisteredWorkspaces: runtime rootに登録された全workspaceを返
       sl.listRegisteredWorkspaces().sort(),
       workspaces.map((workspace) => sl.canonicalWorkspace(workspace)).sort(),
     );
+  });
+});
+
+test('removeStaleWorkspaceRegistrations: 消滅した登録だけを削除し、現存workspaceを保持する', () => {
+  withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'cleanup-runtime') }, () => {
+    const existing = fs.mkdtempSync(path.join(tmpBase, 'cleanup-existing-'));
+    const stale = fs.mkdtempSync(path.join(tmpBase, 'cleanup-stale-'));
+    sl.ensureWorkspaceRuntimeDir(existing);
+    sl.ensureWorkspaceRuntimeDir(stale);
+    const staleRuntimeDir = sl.workspaceRuntimeDir(stale);
+    fs.rmSync(stale, { recursive: true, force: true });
+
+    const result = sl.removeStaleWorkspaceRegistrations();
+
+    assert.deepEqual(result.removed.map((entry) => entry.workspace), [sl.canonicalWorkspace(stale)]);
+    assert.deepEqual(result.retained.map((entry) => entry.workspace), [sl.canonicalWorkspace(existing)]);
+    assert.deepEqual(sl.listRegisteredWorkspaces(), [sl.canonicalWorkspace(existing)]);
+    assert.ok(!fs.existsSync(staleRuntimeDir), 'staleなregistryディレクトリも削除される');
+    assert.ok(fs.existsSync(sl.workspaceRuntimeDir(existing)), '現存workspaceのregistryは残る');
+  });
+});
+
+test('removeStaleWorkspaceRegistrations: dryRunではstale登録を削除しない', () => {
+  withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'cleanup-dry-run-runtime') }, () => {
+    const stale = fs.mkdtempSync(path.join(tmpBase, 'cleanup-dry-run-'));
+    sl.ensureWorkspaceRuntimeDir(stale);
+    const staleRuntimeDir = sl.workspaceRuntimeDir(stale);
+    fs.rmSync(stale, { recursive: true, force: true });
+
+    const result = sl.removeStaleWorkspaceRegistrations({ dryRun: true });
+
+    assert.equal(result.removed.length, 1);
+    assert.ok(fs.existsSync(staleRuntimeDir), 'dry-runではregistryディレクトリを残す');
+    assert.deepEqual(sl.listRegisteredWorkspaces(), [sl.canonicalWorkspace(stale)]);
+  });
+});
+
+test('removeStaleWorkspaceRegistrations: workspace存在確認に失敗した場合は削除しない', () => {
+  withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'cleanup-failure-runtime') }, () => {
+    const stale = fs.mkdtempSync(path.join(tmpBase, 'cleanup-failure-'));
+    sl.ensureWorkspaceRuntimeDir(stale);
+    const staleRuntimeDir = sl.workspaceRuntimeDir(stale);
+    fs.rmSync(stale, { recursive: true, force: true });
+    const error = new Error('workspace stat failed');
+
+    assert.throws(
+      () => sl.removeStaleWorkspaceRegistrations({ workspaceExists: () => { throw error; } }),
+      error,
+    );
+    assert.ok(fs.existsSync(staleRuntimeDir), '存在確認不能時は削除を開始しない');
   });
 });
 

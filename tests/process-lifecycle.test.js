@@ -1746,6 +1746,30 @@ test('registerProcess: meta.pid と追加メタデータを指定して登録・
   assert.equal(instancesAfter.length, 0);
 });
 
+test('registerProcess: テスト実行中はPID registryを作成してもworkspace登録を残さない', () => {
+  assert.equal(storageLayout.isNodeTestContext(), true, '前提: Node test runnerのコンテキストで実行されている');
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const testWorkspace = path.join(tmpBase, 'register-unregistered-workspace');
+  const customPid = process.pid + 50001;
+  const entry = plc.registerProcess(testWorkspace, {
+    pid: customPid,
+    script: 'test-register-unregistered',
+    startTime: MOCK_START_TIME,
+  });
+
+  const runtimeDir = storageLayout.workspaceRuntimeDir(testWorkspace);
+  assert.equal(entry.workspace, testWorkspace);
+  assert.ok(fs.existsSync(path.join(runtimeDir, 'pids', `${customPid}.json`)), 'PIDレコードは作成される');
+  assert.ok(!fs.existsSync(path.join(runtimeDir, 'workspace.json')), 'workspace登録manifestは作成されない');
+  assert.equal(
+    storageLayout.listRegisteredWorkspaces().includes(storageLayout.canonicalWorkspace(testWorkspace)),
+    false,
+    'テストworkspaceを常駐registryへ追加しない',
+  );
+
+  plc.unregisterProcess(testWorkspace, customPid);
+});
+
 test('registerProcess: 不正な meta.pid は throw する', () => {
   const plc = loadModule({ execSync: mockWmiSuccess() });
   assert.throws(() => plc.registerProcess(workspace, { pid: 0 }));
