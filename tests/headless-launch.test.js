@@ -355,6 +355,25 @@ test('launchAgentHeadless: spawnを注入していなければテスト中は cl
   }
 });
 
+test('launchAgentHeadless: GH_MAESTRO_DISABLE_REAL_SPAWN で実起動を拒否する', () => {
+  headlessLaunch._setSpawn(require('../scripts/shared/child-process').spawn);
+  const savedContext = process.env.NODE_TEST_CONTEXT;
+  const savedDisabled = process.env.GH_MAESTRO_DISABLE_REAL_SPAWN;
+  delete process.env.NODE_TEST_CONTEXT;
+  process.env.GH_MAESTRO_DISABLE_REAL_SPAWN = '1';
+  try {
+    assert.throws(
+      () => launchAgentHeadless({ argv: ['claude'], cwd: tmpDir, logPath: path.join(tmpDir, 'claude.log') }),
+      /GH_MAESTRO_DISABLE_REAL_SPAWN/,
+    );
+  } finally {
+    if (savedContext !== undefined) process.env.NODE_TEST_CONTEXT = savedContext;
+    else delete process.env.NODE_TEST_CONTEXT;
+    if (savedDisabled !== undefined) process.env.GH_MAESTRO_DISABLE_REAL_SPAWN = savedDisabled;
+    else delete process.env.GH_MAESTRO_DISABLE_REAL_SPAWN;
+  }
+});
+
 test('launchAgentHeadless: argv が空なら throw する（agent-exec のバリデーションが効く）', () => {
   headlessLaunch._setSpawn(fakeSpawn());
 

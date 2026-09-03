@@ -133,3 +133,39 @@ test('child-process: NODE_TEST_CONTEXT が無い本番相当の環境では wezt
     else process.env.GH_MAESTRO_DISABLE_REAL_SPAWN = savedDisabled;
   }
 });
+
+test('child-process: realSpawnDisabledReason は環境変数に応じた抑止理由を返し、未設定時は null を返す', () => {
+  const { realSpawnDisabledReason, REAL_SPAWN_DISABLED_ENV } = require('../scripts/shared/child-process');
+  assert.equal(REAL_SPAWN_DISABLED_ENV, 'GH_MAESTRO_DISABLE_REAL_SPAWN');
+
+  const savedContext = process.env.NODE_TEST_CONTEXT;
+  const savedDisabled = process.env.GH_MAESTRO_DISABLE_REAL_SPAWN;
+
+  try {
+    // 1. NODE_TEST_CONTEXT のみ
+    process.env.NODE_TEST_CONTEXT = '1';
+    delete process.env.GH_MAESTRO_DISABLE_REAL_SPAWN;
+    assert.equal(realSpawnDisabledReason(), 'テスト実行中（NODE_TEST_CONTEXT が設定されています）');
+
+    // 2. GH_MAESTRO_DISABLE_REAL_SPAWN のみ
+    delete process.env.NODE_TEST_CONTEXT;
+    process.env.GH_MAESTRO_DISABLE_REAL_SPAWN = '1';
+    assert.equal(realSpawnDisabledReason(), 'GH_MAESTRO_DISABLE_REAL_SPAWN が設定されています');
+
+    // 3. 両方設定時は NODE_TEST_CONTEXT が優先
+    process.env.NODE_TEST_CONTEXT = '1';
+    process.env.GH_MAESTRO_DISABLE_REAL_SPAWN = '1';
+    assert.equal(realSpawnDisabledReason(), 'テスト実行中（NODE_TEST_CONTEXT が設定されています）');
+
+    // 4. いずれも未設定時は null
+    delete process.env.NODE_TEST_CONTEXT;
+    delete process.env.GH_MAESTRO_DISABLE_REAL_SPAWN;
+    assert.equal(realSpawnDisabledReason(), null);
+  } finally {
+    if (savedContext !== undefined) process.env.NODE_TEST_CONTEXT = savedContext;
+    else delete process.env.NODE_TEST_CONTEXT;
+    if (savedDisabled !== undefined) process.env.GH_MAESTRO_DISABLE_REAL_SPAWN = savedDisabled;
+    else delete process.env.GH_MAESTRO_DISABLE_REAL_SPAWN;
+  }
+});
+

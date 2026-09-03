@@ -18,7 +18,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('./child-process');
+const { spawn, realSpawnDisabledReason } = require('./child-process');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 const { ARTIFACTS, legacyWorkerLogPath, recordPath } = require('./record-paths');
 
@@ -38,23 +38,10 @@ const SHIM_PATH = path.join(__dirname, 'headless-shim.js');
 const HEADLESS_ENV = Object.freeze({ NO_COLOR: '1' });
 
 // テスト中に実ワーカー（エージェントCLI）を起動してしまう事故を構造的に防ぐガード。
-// 「実spawnをenvフラグでゲートする」の
-// 実装であり、ここが最後の砦になる。
-//
 // 実障害: 引数バリデーションを検証するだけのテストが、ガードの無い状態では worktree 作成と
 // エージェント起動まで到達し、実際に claude.exe が4本起動してトークンを消費した
 // （WEZTERM_PANE 必須チェックが偶然の安全弁になっており、headless化で失われたため）。
-//
-// NODE_TEST_CONTEXT は node --test がテストファイルへ自動的に設定し、そこから spawn された
-// 子プロセスにも継承される。テスト側の設定漏れに依存せず効くため、これを主たる判定に使う。
-// GH_MAESTRO_DISABLE_REAL_SPAWN は、別のテストランナーや手動確認で明示的に抑止したい場合の口。
-const REAL_SPAWN_DISABLED_ENV = 'GH_MAESTRO_DISABLE_REAL_SPAWN';
-
-function realSpawnDisabledReason() {
-  if (process.env.NODE_TEST_CONTEXT) return 'テスト実行中（NODE_TEST_CONTEXT が設定されています）';
-  if (process.env[REAL_SPAWN_DISABLED_ENV]) return `${REAL_SPAWN_DISABLED_ENV} が設定されています`;
-  return null;
-}
+// 抑止判定の正本は child-process.js::realSpawnDisabledReason を利用する。
 
 // テストで注入可能にする（実プロセスを spawn しない）。
 let _spawn = spawn;
@@ -186,7 +173,6 @@ module.exports = {
   launchAgentHeadless,
   workerLogPath,
   SHIM_PATH,
-  REAL_SPAWN_DISABLED_ENV,
   _setSpawn: (fn) => { _spawn = fn; },
   _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
 };
