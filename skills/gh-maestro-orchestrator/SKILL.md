@@ -416,11 +416,13 @@ orchestrator評価: <承認推奨 or 要修正（理由）>
 ```
 
 ### 7. 実装開始指示【必須】
-<!-- gh-maestro-structure: middle-items=2 -->
+<!-- gh-maestro-structure: middle-items=1 -->
 
-人間の判断を受けて：
+#### 7-[1/1] 人間の判断をコーダーへ伝える
 
-- **7-[1/2] 承認**: `msg-send.js` でコーダーに承認を伝え、実装着手を指示する。
+人間の判断を受けて、承認と差し戻しのどちらか一方だけを実行する。両方が通ることはない。
+
+- **承認**: `msg-send.js` でコーダーに承認を伝え、実装着手を指示する。
   コーダー／シニアコーダーの場合、承認指示を送る**前に** `set-response-contract.js` で応答契約を設定すること。
   これにより、実装完了後に `msg-send.js` が呼ばれなくても PR 作成をもって完了とみなされ、
   誤った自動代理送信が発生しなくなる。
@@ -436,7 +438,7 @@ orchestrator評価: <承認推奨 or 要修正（理由）>
   EOF
   ```
 
-- **7-[2/2] 差し戻し（修正依頼）**: `msg-send.js` でコーダーに修正指示を伝える。コーダーは計画を更新して再報告し、待機する。
+- **差し戻し（修正依頼）**: `msg-send.js` でコーダーに修正指示を伝える。コーダーは計画を更新して再報告し、待機する。
   ```sh
   node "{{SCRIPTS_PATH}}/msg-send.js" --issue <N> --skill <gh-maestro-coder または gh-maestro-senior-coder> --workspace $WORKSPACE --stdin <<'EOF'
   計画に以下の修正が必要です。修正後、計画を更新して報告してください:
