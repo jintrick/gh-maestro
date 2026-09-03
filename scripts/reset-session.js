@@ -7,7 +7,11 @@
 // Usage:
 //   node reset-session.js [--workspace <path>]
 
-const { spawnSync, execSync } = require('./shared/child-process');
+const {
+  spawnSync,
+  execSync,
+  REAL_SPAWN_DISABLED_ERROR_CODE,
+} = require('./shared/child-process');
 const path = require('path');
 const { resolve } = path;
 const { existsSync, readFileSync, rmSync,
@@ -358,7 +362,18 @@ if (require.main === module) {
 
   log('ワーカープロセスをkillします...');
   const workers = loadWorkers();
-  const alivePanes = getAlivePaneIds(warn);
+  let alivePanes;
+  try {
+    alivePanes = getAlivePaneIds(warn);
+  } catch (e) {
+    if (e?.code !== REAL_SPAWN_DISABLED_ERROR_CODE || !process.env.NODE_TEST_CONTEXT) throw e;
+    // node --test 配下では child-process の共有ガードが WezTerm の実呼び出しを拒否する。
+    // このプロセスから作成されたペインは存在しないため、テスト用の stale registry を
+    // 生存中と誤認しないよう空の一覧として扱う。実行時のコマンド失敗や、テスト外で
+    // 明示的に設定された抑止環境はここで握り潰さず、従来どおり呼び出し元へ返す。
+    warn(`WezTermのpane一覧取得をテスト中のため拒否しました: ${e.message}`);
+    alivePanes = new Set();
+  }
 
   for (const [name, entry] of Object.entries(workers)) {
     if (name === 'orchestrator') continue;
@@ -392,7 +407,7 @@ if (require.main === module) {
     // （.claude/rules/legacy-process-cleanup-safety.md 参照）。
     const id = normalized.paneId ?? '';
     if (id) {
-      if (alivePanes.size > 0 && !alivePanes.has(id)) {
+      if (alivePanes !== null && !alivePanes.has(id)) {
         log(`"${name}" のレガシーpane ${id} は既に存在しません。スキップ。`);
         if (!handled) results.skipped.push(name);
       } else {

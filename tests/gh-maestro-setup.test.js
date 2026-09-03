@@ -53,6 +53,21 @@ function runSetup(dir) {
   return spawnSync(process.execPath, [SCRIPT, dir], { cwd: dir, encoding: 'utf8' });
 }
 
+test('テスト実行中のWezTerm前提チェック拒否はsetupの失敗として顕在化し、未処理例外にならない', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-setup-wezterm-guard-'));
+  try {
+    const env = { ...process.env, NODE_TEST_CONTEXT: 'node-test', WEZTERM_PANE: 'test-pane' };
+    delete env.GH_MAESTRO_DISABLE_REAL_SPAWN;
+    const r = spawnSync(process.execPath, [SCRIPT, dir], { cwd: dir, env, encoding: 'utf8' });
+
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /WezTermを起動しません.*NODE_TEST_CONTEXT/);
+    assert.match(r.stderr, /wezterm CLI が PATH に見つかりません/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // withGitProject の内側で git を実行する（失敗時 assert）。
 function gitIn(dir, ...args) {
   const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
