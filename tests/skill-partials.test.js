@@ -101,3 +101,21 @@ test('コーダースキル・共通テンプレートの npm install 禁止制�
   }
 });
 
+test('質問投稿後のターン終了規約が対象スキルと共通ワークフローで一致する', () => {
+  const turnEndRule = '質問の投稿が成功したら、そのターンで追加の調査・実装・計画・完了報告を続けず、ワーカー自身の手順を終了する。回答は次の resume で受け取る。';
+  const targets = [
+    path.join(SKILLS_DIR, 'gh-maestro-coder', 'SKILL.md'),
+    path.join(SKILLS_DIR, 'gh-maestro-senior-coder', 'SKILL.md'),
+    path.join(SKILLS_DIR, 'gh-maestro-base', 'SKILL.md'),
+    path.join(PARTIALS_DIR, 'coder-workflow.md'),
+  ];
+
+  for (const target of targets) {
+    const content = fs.readFileSync(target, 'utf8');
+    assert.match(content, /msg-send\.js"? --body-file <質問本文ファイルのパス>/, `${path.basename(target)} が既存の質問送信コマンドを案内していない`);
+    assert.ok(content.includes(turnEndRule), `${path.basename(target)} の質問後ターン終了規約が共通文言と一致しない`);
+    assert.doesNotMatch(content, /--question/, `${path.basename(target)} が新しい質問オプションに依存している`);
+    assert.doesNotMatch(content, /自分で止まらない/, `${path.basename(target)} に質問後停止と矛盾する文言が残っている`);
+  }
+});
+

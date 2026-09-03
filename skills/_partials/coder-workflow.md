@@ -18,7 +18,9 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
 
 {{RULES_CHECK_STEP}}
 1. `node "{{SCRIPTS_PATH}}/msg-read.js" --issue-context --issue $ISSUE --workspace $WORKSPACE` で宛先フィルタ済みのIssueタイトル・本文・コメント一覧を読み、Issueの要件を把握する
-2. **質問事項がある場合は通信ルールのコマンドでorchestratorに質問し、返答を待ってから作業を進める**
+2. **作業前に質問事項がある場合は通信ルールのコマンドでorchestratorに質問し、返答を待ってから作業を進める**
+   実装中に追加の判断が必要になった場合も、通信ルールの既存コマンド `node "{{SCRIPTS_PATH}}/msg-send.js" --body-file <質問本文ファイルのパス>` で質問を投稿する。質問の投稿が成功したら、そのターンで追加の調査・実装・計画・完了報告を続けず、ワーカー自身の手順を終了する。回答は次の resume で受け取る。
+   理由と経緯: `docs/adr/0027-question-is-turn-end-not-completion.md`
 3. **計画フェーズ（実装着手前に必須）**:
    - `$WORKTREE` 上で実装計画に必要な調査（対象ファイル・変更方針・作業分割・検証条件）を行う
    - 実装計画を `$WORKSPACE/.gh-maestro/plans/<issue>.md` にMarkdownファイルとして作成する（worktree は後で削除されるため、計画はworktree の外の per-workspace 領域に残す）
@@ -61,5 +63,4 @@ EOF
 - 素の `git commit` / `git push` / `gh pr create` を直接実行しない（`push-and-declare.js` がステージング・コミット・push・PR取得/作成・テスト結果申告を一括で行う。個別実行は申告を省く経路を生む）
 - `$WORKTREE` ルートで `npm install` / `npm ci` は実行しない。ルートで npm install を実行するとワークスペース共有の `node_modules` を破壊する
 - 実装で新しいサブパッケージ（例: `gui/`）を追加した場合、そのディレクトリ内での `npm install` は許可する（`cd gui && npm install`）
-- 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない
 
