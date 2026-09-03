@@ -50,7 +50,7 @@ gh pr list --repo $REPO --state all --search "<エラーメッセージの一部
 Issue本文で見つけたエラーメッセージや関数名をそのままgrepする。推測ではなく、Issue本文の文字列を起点にする：
 
 ```sh
-cd $WORKSPACE
+cd $WORKTREE
 grep -r "<エラーメッセージの一部>" --include="*.js" --include="*.ts" -l
 grep -r "<関数名や変数名>" --include="*.js" --include="*.ts" -n
 ```
@@ -63,10 +63,10 @@ grep -r "<関数名や変数名>" --include="*.js" --include="*.ts" -n
 
 ```sh
 # 特定ファイルの直近コミット
-git -C $WORKSPACE log --oneline -20 -- path/to/file.js
+git -C $WORKTREE log --oneline -20 -- path/to/file.js
 
 # バグが特定バージョン以降に発生しているなら差分を確認
-git -C $WORKSPACE show <commit-hash>
+git -C $WORKTREE show <commit-hash>
 ```
 
 ### フェーズ4: 報告

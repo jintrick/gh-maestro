@@ -46,7 +46,7 @@ gh pr list --repo $REPO --state all --search "<キーワード>"
 grep で該当箇所を特定する。推測ではなく、Issue 本文と起動時の指示で与えられた文字列を起点にする：
 
 ```sh
-cd $WORKSPACE
+cd $WORKTREE
 grep -r "<キーワード>" --include="*.js" --include="*.ts" -l
 grep -r "<関数名や変数名>" --include="*.js" --include="*.ts" -n
 ```
@@ -57,10 +57,10 @@ grep -r "<関数名や変数名>" --include="*.js" --include="*.ts" -n
 
 ```sh
 # 特定ファイルの直近コミット
-git -C $WORKSPACE log --oneline -20 -- path/to/file.js
+git -C $WORKTREE log --oneline -20 -- path/to/file.js
 
 # 特定コミットの差分
-git -C $WORKSPACE show <commit-hash>
+git -C $WORKTREE show <commit-hash>
 ```
 
 ### フェーズ4: 報告
