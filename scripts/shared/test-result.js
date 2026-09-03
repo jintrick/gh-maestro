@@ -13,7 +13,6 @@ const { atomicWriteJson } = require('./atomic-write');
 const { calculateWorktreeContentHash, calculateCommitContentHash } = require('./test-content');
 const {
   workspaceRuntimeDir,
-  ensureWorkspaceRuntimeDir,
   assertValidWorkspace,
   assertDisjointRoots,
 } = require('./storage-layout');
@@ -187,7 +186,11 @@ function writeTestResultArtifact(worktree, artifact) {
   if (!validated.ok) throw new Error(validated.error);
   const base = normalizedWorktree(worktree);
   const resultPath = testResultPath(base);
-  ensureWorkspaceRuntimeDir(base);
+  // テスト結果はruntime rootに置くが、常駐registryの対象ではない。run-tests.jsの
+  // 親プロセスはNODE_TEST_CONTEXTを持たないため、テスト側の環境隔離だけに依存すると
+  // workspace.jsonが実runtime rootへ残る。結果ディレクトリだけを作成し、登録manifestは
+  // 作成しない。
+  fs.mkdirSync(path.dirname(resultPath), { recursive: true });
   return atomicWriteJson(resultPath, artifact);
 }
 

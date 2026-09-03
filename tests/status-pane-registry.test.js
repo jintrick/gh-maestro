@@ -15,6 +15,7 @@ const {
   removeStatusPaneRecovery,
   removeStatusPane,
 } = require('../scripts/shared/status-pane-registry');
+const storageLayout = require('../scripts/shared/storage-layout');
 
 function withTempWorkspace(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-status-pane-'));
@@ -63,6 +64,26 @@ test('saveStatusPane / loadStatusPane: 登録した内容を取得できる（�
       launchedAt: '2026-08-26T09:00:00.000Z',
     });
   });
+});
+
+test('status-pane保存: テスト実行中はruntimeディレクトリを作成してもworkspace registryへ登録しない', () => {
+  assert.equal(storageLayout.isNodeTestContext(), true, '前提: Node test runnerのコンテキストで実行されている');
+  for (const [label, save] of [
+    ['通常記録', saveStatusPane],
+    ['回復記録', saveStatusPaneRecovery],
+  ]) {
+    withTempWorkspace((dir) => {
+      save(dir, { paneId: label });
+      const runtimeDir = storageLayout.workspaceRuntimeDir(dir);
+      assert.ok(fs.existsSync(runtimeDir), `${label}: runtimeディレクトリは作成される`);
+      assert.ok(!fs.existsSync(path.join(runtimeDir, 'workspace.json')), `${label}: registry manifestは作成されない`);
+      assert.equal(
+        storageLayout.listRegisteredWorkspaces().includes(storageLayout.canonicalWorkspace(dir)),
+        false,
+        `${label}: workspace registryへ追加されない`,
+      );
+    });
+  }
 });
 
 test('saveStatusPaneRecovery / loadStatusPane: 通常記録がなくても回復記録を読み込める', () => {

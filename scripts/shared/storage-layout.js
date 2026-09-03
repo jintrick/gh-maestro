@@ -81,17 +81,38 @@ function workspaceRuntimeDir(p) {
 }
 
 /**
+ * Nodeの組み込みtest runnerから実行されているかを返す。
+ *
+ * テスト中もruntimeディレクトリ自体は使うが、マシン共有の常駐registryへ
+ * workspace.jsonを登録してはならない。NODE_TEST_CONTEXTはnode --testと、そこから
+ * 起動された子プロセスへ継承される実行コンテキストである。
+ *
+ * @returns {boolean}
+ */
+function isNodeTestContext() {
+  return Boolean(process.env.NODE_TEST_CONTEXT);
+}
+
+/**
  * workspace runtime ディレクトリを作成し、診断用の workspace.json（正規パスの記録）を
- * まだ無ければ書き込む。
+ * まだ無ければ書き込む。runtimeファイルだけを置く呼び出し元は `register: false` を
+ * 指定することで、workspaceの常駐registryへ登録せずに同じディレクトリを使える。
  *
  * @param {string} p
+ * @param {object} [options]
+ * @param {boolean} [options.register=true] workspace.jsonをregistryへ作成するか
  * @returns {string} 作成したディレクトリパス
  */
-function ensureWorkspaceRuntimeDir(p) {
+function ensureWorkspaceRuntimeDir(p, options = {}) {
+  const register = options.register ?? true;
+  if (typeof register !== 'boolean') {
+    throw new Error(`ensureWorkspaceRuntimeDir: register はbooleanで指定してください: ${register}`);
+  }
+
   const dir = workspaceRuntimeDir(p);
   fs.mkdirSync(dir, { recursive: true });
   const manifestPath = path.join(dir, 'workspace.json');
-  if (!fs.existsSync(manifestPath)) {
+  if (register && !fs.existsSync(manifestPath)) {
     fs.writeFileSync(manifestPath, JSON.stringify({
       schemaVersion: 1,
       canonicalPath: canonicalWorkspace(p),
@@ -101,16 +122,34 @@ function ensureWorkspaceRuntimeDir(p) {
 }
 
 /**
+ * workspaceがディスク上に存在するディレクトリかを確認する。
+ * 存在しない・途中の親がディレクトリでない場合だけfalseを返し、権限等の
+ * 確認不能なエラーは安全側へ倒すためthrowする。
+ *
+ * @param {string} workspace
+ * @returns {boolean}
+ * @throws {Error} 存在確認に失敗した場合（ENOENT/ENOTDIRを除く）
+ */
+function isExistingWorkspaceDirectory(workspace) {
+  try {
+    return fs.statSync(workspace).isDirectory();
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return false;
+    throw new Error(`workspaceの存在を確認できません: ${workspace}: ${error.message}`, { cause: error });
+  }
+}
+
+/**
  * runtime root に登録されている workspace をすべて列挙する。
  *
  * install.js は実行元の CWD ではなく、マシン共有の resident registry を更新する。
  * workspace.json の canonicalPath とディレクトリ名（workspaceKey）の両方を検証し、
  * 存在する記録を読み取れない workspace を黙って見落とさない。
  *
- * @returns {string[]} 正規化済みの workspace 絶対パス
+ * @returns {{workspace:string, registryDir:string, manifestPath:string}[]} 検証済みregistryエントリ
  * @throws {Error} registry の列挙・manifest 読み取り・内容検証に失敗した場合
  */
-function listRegisteredWorkspaces() {
+function listRegisteredWorkspaceEntries() {
   assertDisjointRoots();
   const workspacesRoot = path.join(runtimeRoot(), 'workspaces');
   let entries;
@@ -150,9 +189,87 @@ function listRegisteredWorkspaces() {
     if (workspaceKey(workspace) !== entry.name) {
       throw new Error(`workspace registry のキーが一致しません: ${manifestPath}`);
     }
-    workspaces.push(workspace);
+    workspaces.push({ workspace, registryDir: workspaceDir, manifestPath });
   }
   return workspaces;
+}
+
+/**
+ * runtime root に登録された workspace をすべて列挙する。
+ *
+ * @returns {string[]} 正規化済みの workspace 絶対パス
+ * @throws {Error} registry の列挙・manifest 読み取り・内容検証に失敗した場合
+ */
+function listRegisteredWorkspaces() {
+  return listRegisteredWorkspaceEntries().map((entry) => entry.workspace);
+}
+
+/**
+ * 現存しない workspace に対応するregistryディレクトリを削除する。
+ *
+ * 全manifestの検証とworkspace存在確認を削除開始前に完了させる。削除対象は
+ * listRegisteredWorkspaceEntries()が検証したruntime root直下の対応ディレクトリだけで、
+ * 現存するworkspaceの登録は変更しない。registryディレクトリが競合や差し替えで
+ * ディレクトリでなくなっていた場合は、危険な再帰削除を行わずthrowする。
+ *
+ * @param {object} [options]
+ * @param {boolean} [options.dryRun=false] 対象を返すだけで削除しない
+ * @param {(workspace:string) => boolean} [options.workspaceExists]
+ * @returns {{removed: object[], retained: object[]}}
+ * @throws {Error} registryまたは存在確認・削除対象の安全確認に失敗した場合
+ */
+function removeStaleWorkspaceRegistrations(options = {}) {
+  const dryRun = options.dryRun ?? false;
+  if (typeof dryRun !== 'boolean') {
+    throw new Error(`removeStaleWorkspaceRegistrations: dryRun はbooleanで指定してください: ${dryRun}`);
+  }
+
+  const workspaceExists = options.workspaceExists || isExistingWorkspaceDirectory;
+  if (typeof workspaceExists !== 'function') {
+    throw new Error('removeStaleWorkspaceRegistrations: workspaceExists は関数で指定してください');
+  }
+
+  const entries = listRegisteredWorkspaceEntries();
+  const decisions = entries.map((entry) => {
+    const exists = workspaceExists(entry.workspace);
+    if (typeof exists !== 'boolean') {
+      throw new Error(`removeStaleWorkspaceRegistrations: workspaceExists はbooleanを返してください: ${entry.workspace}`);
+    }
+    return { entry, exists };
+  });
+
+  const removed = [];
+  const retained = [];
+  for (const { entry, exists } of decisions) {
+    if (exists) {
+      retained.push(entry);
+      continue;
+    }
+
+    const expectedDir = workspaceRuntimeDir(entry.workspace);
+    if (path.resolve(entry.registryDir) !== path.resolve(expectedDir)) {
+      throw new Error(`workspace registry の削除対象が一致しません: ${entry.registryDir}`);
+    }
+
+    if (!dryRun) {
+      let stat;
+      try {
+        stat = fs.lstatSync(entry.registryDir);
+      } catch (error) {
+        if (!error || error.code !== 'ENOENT') {
+          throw new Error(`workspace registry を削除できません: ${entry.registryDir}: ${error.message}`, { cause: error });
+        }
+        stat = null;
+      }
+      if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) {
+        throw new Error(`workspace registry の削除対象がディレクトリではありません: ${entry.registryDir}`);
+      }
+      if (stat) fs.rmSync(entry.registryDir, { recursive: true, force: false });
+    }
+    removed.push(entry);
+  }
+
+  return { removed, retained };
 }
 
 function samePath(a, b) {
@@ -225,8 +342,12 @@ module.exports = {
   canonicalWorkspace,
   workspaceKey,
   workspaceRuntimeDir,
+  isNodeTestContext,
   ensureWorkspaceRuntimeDir,
+  isExistingWorkspaceDirectory,
+  listRegisteredWorkspaceEntries,
   listRegisteredWorkspaces,
+  removeStaleWorkspaceRegistrations,
   assertValidWorkspace,
   assertDisjointRoots,
   MANAGED_TOP_LEVEL,

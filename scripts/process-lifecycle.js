@@ -352,7 +352,9 @@ function registerProcess(workspace, meta = {}) {
   // pidsDir() が assertValidWorkspace を呼ぶため、無効な workspace は
   // 以下のいかなる書き込みよりも先に throw する（fail-closed）。
   const dir = pidsDir(workspace);
-  storageLayout.ensureWorkspaceRuntimeDir(workspace);
+  storageLayout.ensureWorkspaceRuntimeDir(workspace, {
+    register: !storageLayout.isNodeTestContext(),
+  });
   fs.mkdirSync(dir, { recursive: true });
 
   const targetPid = (meta && meta.pid != null) ? parseInt(meta.pid, 10) : process.pid;

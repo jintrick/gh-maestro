@@ -106,7 +106,9 @@ function loadStatusPane(workspace) {
  * @param {{paneId: string|number, launchedAt?: string}} entry
  */
 function saveStatusPane(workspace, entry) {
-  storageLayout.ensureWorkspaceRuntimeDir(workspace);
+  storageLayout.ensureWorkspaceRuntimeDir(workspace, {
+    register: !storageLayout.isNodeTestContext(),
+  });
   const p = statusPanePath(workspace);
   atomicWriteJson(p, {
     paneId: String(entry.paneId),
@@ -124,7 +126,9 @@ function saveStatusPane(workspace, entry) {
  * @param {{paneId: string|number, launchedAt?: string}} entry
  */
 function saveStatusPaneRecovery(workspace, entry) {
-  storageLayout.ensureWorkspaceRuntimeDir(workspace);
+  storageLayout.ensureWorkspaceRuntimeDir(workspace, {
+    register: !storageLayout.isNodeTestContext(),
+  });
   const p = statusPaneRecoveryPath(workspace);
   atomicWriteJson(p, {
     paneId: String(entry.paneId),

@@ -15,7 +15,7 @@ const {
   writeTestResultArtifact,
   readTestResultArtifact,
 } = require('../scripts/shared/test-result');
-const { runtimeRoot, workspaceRuntimeDir } = require('../scripts/shared/storage-layout');
+const { listRegisteredWorkspaces, runtimeRoot, workspaceRuntimeDir } = require('../scripts/shared/storage-layout');
 
 const savedRuntimeDir = process.env.GH_MAESTRO_RUNTIME_DIR;
 const isolatedRuntimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-result-runtime-'));
@@ -107,6 +107,7 @@ test('write/readTestResultArtifact: runtime rootへ原子的に保存し、workt
   assert.equal(path.dirname(resultPath), workspaceRuntimeDir(worktree));
   assert.ok(path.relative(resolvedWorktree, resultPath).startsWith('..'), '成果物はworktree外に置く');
   assert.ok(path.relative(runtimeRoot(), resultPath) !== resultPath);
+  assert.deepEqual(listRegisteredWorkspaces(), [], 'テスト結果の保存だけではworkspace registryへ登録しない');
   assert.deepEqual(readTestResultArtifact(worktree), {
     ok: true,
     path: resultPath,

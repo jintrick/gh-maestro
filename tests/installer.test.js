@@ -29,6 +29,7 @@ test('restartResidentsAfterInstall: 登録済みの全workspaceに配布済みCL
 
   const result = restartResidentsAfterInstall({
     listRegisteredWorkspaces: () => workspaces,
+    workspaceExists: () => true,
     callerWorkspace: null,
     sharedScripts,
     onWorkspace: (workspace) => notices.push(workspace),
@@ -63,6 +64,48 @@ test('restartResidentsAfterInstall: 登録workspaceが無い場合は常駐操�
   assert.equal(called, false, '登録workspaceが無い場合はrestart CLIを呼び出さない');
 });
 
+test('restartResidentsAfterInstall: ディスク上にないworkspaceは通知・restart CLI呼び出し・結果から除外する', () => {
+  const missing = path.join(os.tmpdir(), `gh-maestro-install-missing-${process.pid}-${Date.now()}`);
+  const existing = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-install-existing-'));
+  const calls = [];
+  const notices = [];
+
+  try {
+    const result = restartResidentsAfterInstall({
+      workspaces: [missing, existing],
+      callerWorkspace: null,
+      sharedScripts: path.join(os.tmpdir(), 'gh-maestro-installed-scripts'),
+      onWorkspace: (workspace) => notices.push(workspace),
+      execFileSync: (...args) => calls.push(args),
+    });
+
+    assert.equal(result.attempted, true);
+    assert.deepEqual(result.workspaces, [existing]);
+    assert.deepEqual(result.results, [{ workspace: existing, code: 0 }]);
+    assert.deepEqual(notices, [existing], '存在しないworkspaceの通知を出さない');
+    assert.equal(calls.length, 1, '存在しないworkspaceのrestart CLIを呼び出さない');
+    assert.equal(calls[0][1][2], existing);
+  } finally {
+    fs.rmSync(existing, { recursive: true, force: true });
+  }
+});
+
+test('restartResidentsAfterInstall: workspace存在確認に失敗した場合は常駐操作を開始しない', () => {
+  const error = new Error('workspace stat failed');
+  let called = false;
+  const result = restartResidentsAfterInstall({
+    workspaces: [path.join(os.tmpdir(), 'gh-maestro-install-stat-failure')],
+    workspaceExists: () => { throw error; },
+    execFileSync: () => { called = true; },
+  });
+
+  assert.equal(result.attempted, false);
+  assert.equal(result.code, 1);
+  assert.deepEqual(result.workspaces, []);
+  assert.equal(result.error, error);
+  assert.equal(called, false, '存在確認不能時はrestart CLIを呼び出さない');
+});
+
 test('restartResidentsAfterInstall: 1つのworkspaceの失敗後も残りを処理し、失敗を報告する', () => {
   const error = Object.assign(new Error('restart failed'), { status: 1 });
   const workspaces = [
@@ -72,6 +115,7 @@ test('restartResidentsAfterInstall: 1つのworkspaceの失敗後も残りを処�
   const calls = [];
   const result = restartResidentsAfterInstall({
     workspaces,
+    workspaceExists: () => true,
     callerWorkspace: null,
     sharedScripts: path.join(os.tmpdir(), 'gh-maestro-installed-scripts'),
     execFileSync: (...args) => {
@@ -128,6 +172,7 @@ test('末尾再掲: 呼び出し元 workspace に再接続要求があるとき�
 
   const result = restartResidentsAfterInstall({
     workspaces: [callerWs, otherWs],
+    workspaceExists: () => true,
     callerWorkspace: callerWs,
     stdout: mockStdout,
     sharedScripts: path.join(os.tmpdir(), 'gh-maestro-installed-scripts'),
@@ -166,6 +211,7 @@ test('末尾再掲: 再接続要求が無いとき、何も追加されない', 
   const callerWs = path.join(os.tmpdir(), 'gh-maestro-caller-ws-clean');
   const result = restartResidentsAfterInstall({
     workspaces: [callerWs],
+    workspaceExists: () => true,
     callerWorkspace: callerWs,
     sharedScripts: path.join(os.tmpdir(), 'gh-maestro-installed-scripts'),
     execFileSync: () => 'RESIDENT script=msg-poll.js status=not-running\n',
@@ -188,6 +234,7 @@ test('末尾再掲: 呼び出し元以外の workspace の再接続要求は再�
   const otherWs = path.join(os.tmpdir(), 'gh-maestro-other-ws-only');
   const result = restartResidentsAfterInstall({
     workspaces: [otherWs],
+    workspaceExists: () => true,
     callerWorkspace: callerWs,
     sharedScripts: path.join(os.tmpdir(), 'gh-maestro-installed-scripts'),
     execFileSync: () => 'RESIDENT script=msg-poll.js status=monitor-required\nMONITOR_REATTACH_REQUIRED script=msg-poll.js command="node" "other"\n',
@@ -206,6 +253,7 @@ test('末尾再掲: 呼び出し元 workspace が特定できないとき、何�
   const ws = path.join(os.tmpdir(), 'gh-maestro-ws-unresolved');
   const result = restartResidentsAfterInstall({
     workspaces: [ws],
+    workspaceExists: () => true,
     callerWorkspace: null,
     sharedScripts: path.join(os.tmpdir(), 'gh-maestro-installed-scripts'),
     execFileSync: () => 'RESIDENT script=msg-poll.js status=monitor-required\nMONITOR_REATTACH_REQUIRED script=msg-poll.js command="node"\n',
