@@ -12,19 +12,11 @@
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
-const { spawnSync } = require('./child-process');
+const { spawnSync, realSpawnDisabledReason } = require('./child-process');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 
 // テスト中に実WezTermペイン・ウィンドウを起動してしまう事故を構造的に防ぐガード。
-// 「実spawnをenvフラグでゲートする」の
-// 実装であり、headless-launch.js と同型のガード。
-const REAL_SPAWN_DISABLED_ENV = 'GH_MAESTRO_DISABLE_REAL_SPAWN';
-
-function realSpawnDisabledReason() {
-  if (process.env.NODE_TEST_CONTEXT) return 'テスト実行中（NODE_TEST_CONTEXT が設定されています）';
-  if (process.env[REAL_SPAWN_DISABLED_ENV]) return `${REAL_SPAWN_DISABLED_ENV} が設定されています`;
-  return null;
-}
+// 抑止判定の正本は child-process.js::realSpawnDisabledReason を利用する。
 
 const defaultWeztermSpawnWindow = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
 const defaultWeztermSplitPane = (args) => spawnSync('wezterm', args, { encoding: 'utf8' });
@@ -197,7 +189,6 @@ module.exports = {
   getAlivePaneIds,
   isPaneAlive,
   killPane,
-  REAL_SPAWN_DISABLED_ENV,
   _setWeztermSpawnWindow: (fn) => { _weztermSpawnWindow = fn ?? defaultWeztermSpawnWindow; },
   _setWeztermSplitPane: (fn) => { _weztermSplitPane = fn ?? defaultWeztermSplitPane; },
   _setWeztermListPanes: (fn) => { _weztermListPanes = fn ?? defaultWeztermListPanes; },

@@ -251,4 +251,5 @@ module.exports = {
   execSync,
   REAL_SPAWN_DISABLED_ENV,
   REAL_SPAWN_DISABLED_ERROR_CODE,
+  realSpawnDisabledReason,
 };
