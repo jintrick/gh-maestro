@@ -15,6 +15,7 @@ const {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
   buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
   installScripts, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
+  buildUserPromptExpansionHook, registerUserPromptExpansionHook,
 } = require('../scripts/install.js');
 const { MANAGED_TOP_LEVEL } = require('../scripts/shared/storage-layout');
 
@@ -268,6 +269,63 @@ test('末尾再掲: 呼び出し元 workspace が特定できないとき、何�
     printInstallCompletion(result, (line) => outputLines.push(line));
   });
   assert.ok(!outputLines.some((l) => l.includes('MONITOR_REATTACH_REQUIRED')), '再接続要求は追加されないこと');
+});
+
+test('UserPromptExpansion hook: 一時settingsへ単一の絶対パスhandlerを登録し、無関係なhandlerを保持する', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-user-settings-hook-test-'));
+  const settingsPath = path.join(tmpBase, 'claude', 'settings.json');
+  const sharedScripts = path.join(tmpBase, 'installed-scripts');
+  const unrelatedHook = {
+    matcher: '^other-command$',
+    hooks: [{ type: 'command', command: 'node', args: ['other.js'] }],
+  };
+
+  try {
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify({
+      hooks: {
+        UserPromptExpansion: [
+          { matcher: '^gh-maestro$', hooks: [{ type: 'command', command: 'node', args: ['old.js'] }] },
+          unrelatedHook,
+        ],
+      },
+    }), 'utf8');
+
+    const result = registerUserPromptExpansionHook({
+      settingsPath,
+      sharedScripts,
+      step: () => {},
+      ok: () => {},
+    });
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    const entries = settings.hooks.UserPromptExpansion;
+    const ghMaestroEntries = entries.filter((entry) => entry.matcher === '^gh-maestro$');
+
+    assert.equal(ghMaestroEntries.length, 1, 'gh-maestro matcherは1つだけ登録されること');
+    assert.equal(ghMaestroEntries[0].hooks.length, 1, 'handlerは単一エントリポイントだけであること');
+    assert.equal(ghMaestroEntries[0].hooks[0].type, 'command');
+    assert.equal(ghMaestroEntries[0].hooks[0].command, 'node');
+    assert.equal(ghMaestroEntries[0].hooks[0].args[0], path.join(sharedScripts, 'gh-maestro-session-hook.js'));
+    assert.equal(path.isAbsolute(ghMaestroEntries[0].hooks[0].args[0]), true, 'handlerのスクリプトパスが絶対パスであること');
+    assert.deepEqual(ghMaestroEntries[0].hooks[0].args.slice(1), [
+      '--workspace', '${CLAUDE_PROJECT_DIR}',
+    ]);
+    assert.deepEqual(entries.find((entry) => entry.matcher === '^other-command$'), unrelatedHook,
+      '無関係なUserPromptExpansion handlerは保持すること');
+    assert.deepEqual(result.hook, ghMaestroEntries[0]);
+  } finally {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('buildUserPromptExpansionHook: 配布先を絶対パスとして単一handlerへ埋め込む', () => {
+  const sharedScripts = path.join(os.tmpdir(), 'ghm-hook-shared-scripts');
+  const hook = buildUserPromptExpansionHook(sharedScripts);
+
+  assert.equal(hook.matcher, '^gh-maestro$');
+  assert.equal(hook.hooks.length, 1);
+  assert.equal(hook.hooks[0].args[0], path.join(sharedScripts, 'gh-maestro-session-hook.js'));
+  assert.equal(hook.hooks[0].statusMessage, 'gh-maestro セッション初期化中...');
 });
 
 // ── ユーティリティ関数のユニットテスト ──────────────────────────────────────
@@ -779,6 +837,7 @@ test('インストーラー成果物検証: 全エージェント宛先・共有
       'shared/unlink-junctions.js',
       'shared/win-path.js',
       'shared/worker-entry.js',
+      'gh-maestro-session-hook.js',
       'spawn-worker.js',
       'start-review-manager.js',
       'poll-pr.js',

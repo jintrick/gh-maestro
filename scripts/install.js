@@ -640,10 +640,86 @@ function printInstallCompletion(residentRestart = {}, options = {}) {
   }
 }
 
+/**
+ * /gh-maestro の UserPromptExpansion matcher に登録する単一handlerを構築する。
+ *
+ * Claude Code は一致するhandlerを並列実行するため、setup・reset・get-contextを
+ * 個別に登録せず、順序制御を担う共有エントリポイントだけを登録する。
+ * @param {string} sharedScripts 配布済み共有スクリプトの絶対パス
+ * @returns {object} UserPromptExpansionのmatcher group
+ */
+function buildUserPromptExpansionHook(sharedScripts) {
+  return {
+    matcher: '^gh-maestro$',
+    hooks: [
+      {
+        type: 'command',
+        command: 'node',
+        args: [
+          path.join(sharedScripts, 'gh-maestro-session-hook.js'),
+          '--workspace',
+          '${CLAUDE_PROJECT_DIR}',
+        ],
+        statusMessage: 'gh-maestro セッション初期化中...',
+      },
+    ],
+  };
+}
+
+/**
+ * ~/.claude/settings.json（またはテスト用に指定されたsettings path）へ、
+ * /gh-maestro のUserPromptExpansion handlerを冪等に登録する。
+ * @param {object} [options]
+ * @param {string} [options.settingsPath] settings.jsonのパス
+ * @param {string} [options.sharedScripts] 配布済み共有スクリプトのパス
+ * @param {function} [options.step] ログ用step関数
+ * @param {function} [options.ok] ログ用ok関数
+ * @returns {{settingsPath:string, settings:object, hook:object}}
+ */
+function registerUserPromptExpansionHook(options = {}) {
+  const settingsPath = options.settingsPath || expandHome('~/.claude/settings.json');
+  const sharedScripts = options.sharedScripts || SHARED_SCRIPTS;
+  const logStep = options.step || step;
+  const logOk = options.ok || ok;
+
+  logStep('Registering UserPromptExpansion hook in ~/.claude/settings.json...');
+
+  let userSettings = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      userSettings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    } catch (e) {
+      fail(`Cannot parse ${settingsPath}: ${e.message}`);
+    }
+  }
+
+  if (!userSettings.hooks) userSettings.hooks = {};
+  if (!Array.isArray(userSettings.hooks.UserPromptExpansion)) {
+    userSettings.hooks.UserPromptExpansion = [];
+  }
+
+  // 既存のgh-maestroエントリを除去（重複防止）。無関係なmatcherは保持する。
+  userSettings.hooks.UserPromptExpansion =
+    userSettings.hooks.UserPromptExpansion.filter(g => !/gh-maestro/.test(g?.matcher ?? ''));
+
+  userSettings.hooks.UserPromptExpansion.push(buildUserPromptExpansionHook(sharedScripts));
+
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(settingsPath, JSON.stringify(userSettings, null, 2) + '\n', 'utf8');
+  logOk(`UserPromptExpansion hook -> ${settingsPath}`);
+
+  return {
+    settingsPath,
+    settings: userSettings,
+    hook: userSettings.hooks.UserPromptExpansion[userSettings.hooks.UserPromptExpansion.length - 1],
+  };
+}
+
 module.exports = {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
   buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
   installScripts, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
+  buildUserPromptExpansionHook, registerUserPromptExpansionHook,
 };
 
 if (require.main !== module) return;
@@ -904,53 +980,7 @@ for (const entry of fs.readdirSync(ghMaestroDir)) {
 
 // ── UserPromptExpansion hook を ~/.claude/settings.json に登録 ────────────────
 
-step('Registering UserPromptExpansion hook in ~/.claude/settings.json...');
-
-const userSettingsPath = expandHome('~/.claude/settings.json');
-let userSettings = {};
-if (fs.existsSync(userSettingsPath)) {
-  try {
-    userSettings = JSON.parse(fs.readFileSync(userSettingsPath, 'utf8'));
-  } catch (e) {
-    fail(`Cannot parse ${userSettingsPath}: ${e.message}`);
-  }
-}
-
-if (!userSettings.hooks) userSettings.hooks = {};
-if (!userSettings.hooks.UserPromptExpansion) userSettings.hooks.UserPromptExpansion = [];
-
-// 既存の gh-maestro エントリを除去（重複防止）
-userSettings.hooks.UserPromptExpansion =
-  userSettings.hooks.UserPromptExpansion.filter(g => !/gh-maestro/.test(g.matcher ?? ''));
-
-// フックが呼ぶスクリプトはすべて集約先（SHARED_SCRIPTS）の絶対パスで配線する
-// （インストール時に解決し、シェル展開に依存しない）。
-userSettings.hooks.UserPromptExpansion.push({
-  matcher: '^gh-maestro$',
-  hooks: [
-    {
-      type: 'command',
-      command: 'node',
-      args: [path.join(SHARED_SCRIPTS, 'gh-maestro-setup.js')],
-      statusMessage: 'gh-maestro 前提条件チェック中...',
-    },
-    {
-      type: 'command',
-      command: 'node',
-      args: [path.join(SHARED_SCRIPTS, 'reset-session.js'), '--workspace', '${CLAUDE_PROJECT_DIR}', '--quiet'],
-      statusMessage: 'セッションリセット中...',
-    },
-    {
-      type: 'command',
-      command: 'node',
-      args: [path.join(SHARED_SCRIPTS, 'get-context.js')],
-    },
-  ],
-});
-
-fs.mkdirSync(path.dirname(userSettingsPath), { recursive: true });
-fs.writeFileSync(userSettingsPath, JSON.stringify(userSettings, null, 2) + '\n', 'utf8');
-ok(`UserPromptExpansion hook -> ${userSettingsPath}`);
+registerUserPromptExpansionHook({ sharedScripts: SHARED_SCRIPTS });
 
 // --- git pre-commit hook (core.hooksPath) を設定 ---
 step('Configuring git pre-commit hook...');
