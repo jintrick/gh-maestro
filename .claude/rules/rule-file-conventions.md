@@ -14,6 +14,12 @@ paths:
 - `paths` frontmatter あり → 該当パターンのファイルを開いた時のみロード（path-scoped）
 - 200行超えると adherence が下がる。詳細は `docs/rag/claude-code/guide/claude_code_memory_guide.md` 参照
 
+# 何を書くか
+
+やってはならないこと・やらなければならないことだけを書く。コーダーが従うために必要な最小限に絞る。
+
+事故の経緯、PR番号、設計判断の理由、スクリプトの挙動の解説は書かない。理由が必要な場合は ADR への参照1行に留める。
+
 # agy の `.agents/rules/` について
 
 `.agents/rules/*.md` はプロジェクトルートに置くワークスペースルールファイル。
