@@ -82,13 +82,13 @@ test('readState: v2 正常は ok で正規化状態を返す', () => {
     writeRaw(workspace, 'orchestrator', {
       schemaVersion: 2,
       initialized: true,
-      generation: 'reset-123',
+      sessionId: 'reset-123',
       readByIssue: { 10: [1, 2, 3] },
       sinceByIssue: { 10: '2026-07-07T00:00:00Z' },
     });
     const r = rs.readState(workspace, 'orchestrator');
     assert.equal(r.status, 'ok');
-    assert.equal(r.state.generation, 'reset-123');
+    assert.equal(r.state.sessionId, 'reset-123');
     assert.deepEqual(r.state.readByIssue['10'], [1, 2, 3]);
     assert.equal(r.state.sinceByIssue['10'], '2026-07-07T00:00:00Z');
   });
@@ -98,14 +98,14 @@ test('readState: v2 の readByIssue が破損（非数値ID混入・配列でな
   withTempDir(workspace => {
     // 非数値ID混入
     writeRaw(workspace, 'orchestrator', {
-      schemaVersion: 2, initialized: true, generation: 'g',
+      schemaVersion: 2, initialized: true, sessionId: 's',
       readByIssue: { 10: [1, 'not-a-number'] },
     });
     assert.equal(rs.readState(workspace, 'orchestrator').status, 'corrupt');
 
     // 配列でない値
     writeRaw(workspace, 'orchestrator', {
-      schemaVersion: 2, initialized: true, generation: 'g',
+      schemaVersion: 2, initialized: true, sessionId: 's',
       readByIssue: { 10: 'not-an-array' },
     });
     assert.equal(rs.readState(workspace, 'orchestrator').status, 'corrupt');
@@ -281,22 +281,22 @@ test('破損ロック（JSONでない）は stale とみなし奪取して更新
 
 // ── initializeState ─────────────────────────────────────────────────────────
 
-test('initializeState: generation・readByIssue 付きで初期化される', () => {
+test('initializeState: sessionId・readByIssue 付きで初期化される', () => {
   withTempDir(workspace => {
     const r = rs.initializeState(workspace, 'orchestrator', {
       byIssue: { 10: [1, 2], 20: [3] },
-      generation: 'reset-abc',
+      sessionId: 'reset-abc',
     });
     assert.equal(r.ok, true);
     assert.equal(r.state.initialized, true);
-    assert.equal(r.state.generation, 'reset-abc');
+    assert.equal(r.state.sessionId, 'reset-abc');
     assert.deepEqual(r.state.readByIssue['10'], [1, 2]);
   });
 });
 
 test('initializeState: byIssue が空でも initialized=true（空状態で再開しない）', () => {
   withTempDir(workspace => {
-    const r = rs.initializeState(workspace, 'orchestrator', { generation: 'reset-empty' });
+    const r = rs.initializeState(workspace, 'orchestrator', { sessionId: 'reset-empty' });
     assert.equal(r.ok, true);
     assert.equal(r.state.initialized, true);
     assert.deepEqual(r.state.readByIssue, {});
@@ -310,7 +310,7 @@ test('initializeState: sinceByIssue（取得最適化カーソル）付きで初
     const r = rs.initializeState(workspace, 'orchestrator', {
       byIssue: { 10: [1] },
       sinceByIssue: { 10: '2026-07-07T12:00:00Z', 20: 12345 }, // 非stringは無視
-      generation: 'reset-abc',
+      sessionId: 'reset-abc',
     });
     assert.equal(r.ok, true);
     assert.deepEqual(r.state.sinceByIssue, { 10: '2026-07-07T12:00:00Z' });
@@ -321,7 +321,7 @@ test('initializeState: sinceByIssue（取得最適化カーソル）付きで初
 
 test('requireInitialized: v2 正常時は状態を返す', () => {
   withTempDir(workspace => {
-    rs.initializeState(workspace, 'orchestrator', { generation: 'g' });
+    rs.initializeState(workspace, 'orchestrator', { sessionId: 's' });
     const r = rs.requireInitialized(workspace, 'orchestrator');
     assert.equal(r.ok, true);
     assert.equal(r.state.initialized, true);

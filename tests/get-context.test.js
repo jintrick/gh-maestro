@@ -75,17 +75,68 @@ test('BASE_BRANCH が出力に含まれる', () => {
   }
 });
 
-test('git remote がないディレクトリでは非0終了する', () => {
-  const { mkdtempSync } = require('fs');
+test('orchestrator.json に sessionId がある場合は SESSION_ID が出力される', () => {
+  const { mkdtempSync, rmSync, mkdirSync, writeFileSync } = require('fs');
+  const { execSync } = require('child_process');
   const os = require('os');
-  const tmp = mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-no-git-'));
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-session-'));
+  const env = { ...process.env };
+  delete env.GH_MAESTRO_WORKSPACE;
   try {
+    execSync('git init', { cwd: tmp, stdio: 'pipe' });
+    execSync('git remote add origin https://github.com/test/repo.git', { cwd: tmp, stdio: 'pipe' });
+    const msgStateDir = path.join(tmp, '.gh-maestro', 'msg-state');
+    mkdirSync(msgStateDir, { recursive: true });
+    writeFileSync(
+      path.join(msgStateDir, 'orchestrator.json'),
+      JSON.stringify({
+        schemaVersion: 2,
+        initialized: true,
+        sessionId: 'test-uuid-abc-123',
+        readByIssue: {},
+        sinceByIssue: {},
+      }),
+      'utf8'
+    );
+
     const r = spawnSync(process.execPath, [SCRIPT], {
       cwd: tmp,
+      env,
       encoding: 'utf8',
     });
-    assert.notEqual(r.status, 0);
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^SESSION_ID=test-uuid-abc-123$/m);
   } finally {
-    require('fs').rmSync(tmp, { recursive: true, force: true });
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('orchestrator.json に sessionId が空文字または存在しない場合は SESSION_ID が出力されない', () => {
+  const { mkdtempSync, rmSync, mkdirSync, writeFileSync } = require('fs');
+  const { execSync } = require('child_process');
+  const os = require('os');
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-nosession-'));
+  const env = { ...process.env };
+  delete env.GH_MAESTRO_WORKSPACE;
+  try {
+    execSync('git init', { cwd: tmp, stdio: 'pipe' });
+    execSync('git remote add origin https://github.com/test/repo.git', { cwd: tmp, stdio: 'pipe' });
+    const msgStateDir = path.join(tmp, '.gh-maestro', 'msg-state');
+    mkdirSync(msgStateDir, { recursive: true });
+    writeFileSync(
+      path.join(msgStateDir, 'orchestrator.json'),
+      JSON.stringify({ schemaVersion: 2, initialized: true, sessionId: '' }),
+      'utf8'
+    );
+
+    const r = spawnSync(process.execPath, [SCRIPT], {
+      cwd: tmp,
+      env,
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.equal(r.stdout.includes('SESSION_ID='), false, '空文字の sessionId は出力されないこと');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
 });

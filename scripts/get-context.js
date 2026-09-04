@@ -5,6 +5,7 @@
 const { execSync } = require('child_process');
 const { getCurrentBranch } = require('./shared/git-branch');
 const { resolveWorkspace } = require('./shared/workspace');
+const { readState } = require('./shared/read-state');
 
 const USAGE = `get-context.js — orchestrator の起動コンテキストをプロンプト注入用ブロックとして出力する
 
@@ -45,6 +46,14 @@ try {
   baseBranch = getCurrentBranch(workspace);
 } catch {}
 
+let sessionId = '';
+try {
+  const stateResult = readState(workspace, 'orchestrator');
+  if (stateResult.status === 'ok' && typeof stateResult.state.sessionId === 'string' && stateResult.state.sessionId) {
+    sessionId = stateResult.state.sessionId;
+  }
+} catch {}
+
 const unixWorkspace = workspace.replace(/\\/g, '/');
 
 console.log('[gh-maestro session context]');
@@ -52,3 +61,4 @@ console.log(`REPO=${repo}`);
 console.log(`WORKSPACE=${unixWorkspace}`);
 if (baseBranch) console.log(`BASE_BRANCH=${baseBranch}`);
 console.log('GH_MAESTRO_WORKER=orchestrator');
+if (sessionId) console.log(`SESSION_ID=${sessionId}`);

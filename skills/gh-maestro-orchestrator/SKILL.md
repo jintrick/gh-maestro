@@ -87,6 +87,7 @@ ADRにしないことは、記録しないことではない。
 - `WORKSPACE` — ローカルワークスペースの絶対パス
 - `BASE_BRANCH` — ベースブランチ名
 - `GH_MAESTRO_WORKER` — 実行主体の識別名（オーケストレーターでは `orchestrator`）
+- `SESSION_ID` — orchestrator のセッションID（`spawn-worker.js` の起動に必須）
 
 ### ワーカーの使い分け
 
@@ -138,9 +139,12 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --skill <skill-name> \
   --issue <N> \
   --description <desc> \
+  --session-id $SESSION_ID \
   --prompt-file <上で書き出した実体パス> \
   --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
 ```
+
+`spawn-worker.js` は正規の `/gh-maestro` セッションからのみ実行可能である。`--session-id` の未指定、値の不一致、スキル未ロードのセッション（`/gh-maestro` 未実行）、あるいは過去セッションの古いIDの使い回しはいずれも非ゼロ終了で拒否される。拒否された場合は `/gh-maestro` を実行してセッションを開始し直すこと。`GH_MAESTRO_WORKER` などの環境変数を手動設定・偽装してもガードは回避できない。
 
 worktreeは `.gh-maestro/worktrees/issue-<N>-<role>-<desc>/` に自動作成され、workers.json に〈issue + skill〉付きで登録される。`<role>` はスキル名から自動導出されて挿入される部分であり、`--description` には含めない（`--skill gh-maestro-senior-coder --description manager-running` → `issue-409-senior-coder-manager-running`）。実在のブランチ名から `issue-<N>-` だけを取り除いた文字列をそのまま `--description` に渡すと役職が二重になる。`--description <desc>` はworktreeディレクトリ名・gitブランチ名・`workers.json`のキーに使われるため、**英数字・ハイフン・アンダースコアのみ、1〜50文字**（例: `explore-auth`）。スペース・スラッシュ・ドット等は不可（`spawn-worker.js --help`参照）。
 
@@ -159,7 +163,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<role>-<desc>/` に自動作成さ�
 
 すべてのスクリプトは `{{SCRIPTS_PATH}}/`（インストール時に絶対パスへ置換）に集約され、`--help` で使い方を確認できる。
 
-- **spawn-worker.js** — worktreeを作りワーカーをバックグラウンドで起動する（画面は使わない。「ワーカーの起動」参照）
+- **spawn-worker.js** — worktreeを作りワーカーをバックグラウンドで起動する（画面は使わない。「ワーカーの起動」参照）。`--session-id` が必須で、正規の `/gh-maestro` 起動セッションでのみ実行できる（未ロード・古いセッションからは拒否され、`/gh-maestro` で復旧する）
 - **msg-send.js** — ワーカーにメッセージを送る（GitHub Issueコメント経由）。送信先は〈`--issue` + `--skill`〉。本文は位置引数では渡せず、`--stdin`（ヒアドキュメントは`<<'EOF'`とクォート付きにする）または `--body-file` で渡す
 - **msg-read.js** — コメントIDまたは計画から本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE` または `msg-read.js --plan --issue <N> --workspace $WORKSPACE`
 - **stop-worker.js** — ワーカーのプロセスツリーのみを同一性確認の上で停止する（worktree・ブランチ・workers.json エントリは維持する）。対象は workerName の位置引数または〈`--issue` + `--skill`〉。報告投稿後にプロセスが終了せず残留（居座り）しているワーカーやハングしたワーカーを停止させる正規手段（再開可能な状態を保つ）。worktree ごと破棄する `remove-worker.js` と使い分ける

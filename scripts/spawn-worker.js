@@ -81,6 +81,7 @@ const SPEC = {
   flags: {
     '--skill': {}, '--short-prompt': {}, '--prompt-file': {}, '--issue': {}, '--description': {},
     '--repo': {}, '--workspace': {}, '--base-branch': {}, '--agent': {}, '--execution-id': {},
+    '--session-id': {},
   },
   booleans: ['--help', '-h'],
   positionals: { min: 0, max: 0 },
@@ -89,6 +90,7 @@ const SPEC = {
 const USAGE = `spawn-worker.js — worktreeを準備し、ワーカーをheadless（画面なし）で起動する
 
 Usage: node spawn-worker.js --skill <skill-name> --issue <N> --description <desc> --repo <owner/repo>
+                            --session-id <id>
                             [--short-prompt <text> | --prompt-file <path>] [--workspace <path>]
                             [--base-branch <branch>] [--agent <id>] [--execution-id <id>]
 
@@ -100,6 +102,8 @@ Arguments:
                           role はスキルから導出される（例: coder, senior-coder, explorer）。
 	                          英数字・ハイフン・アンダースコアのみ、1〜50文字（例: explore-auth）。
   --repo <owner/repo>     対象リポジトリ
+  --session-id <id>       orchestrator のセッションID（必須）。/gh-maestro 起動時に
+                          [gh-maestro session context] で発行された値を指定する。
   --prompt-file <path>    任意の役割・作業指示をファイルで指定する。
                           gh-maestro-base 使用時は必須。--short-prompt と同時指定不可。
   --short-prompt <text>   例外的な短い補足メッセージ。1行・200文字以内。シェルが解釈する
@@ -138,12 +142,14 @@ function parseWorkerArgs(argv) {
   const issue = values['--issue'];
   const shortPromptText = values['--short-prompt'];
   const promptFileArg = values['--prompt-file'];
+  const sessionId = values['--session-id'];
   if (!skill) errors.push({ message: '--skill が必要です' });
   if (!description) errors.push({ message: '--description が必要です' });
   if (description && !/^[A-Za-z0-9_-]{1,50}$/.test(description)) {
     errors.push({ message: '--description は英数字・ハイフン・アンダースコアのみ、1〜50文字である必要があります（例: explore-auth）。この値は worktreeディレクトリ名・gitブランチ名にそのまま使われるため、スペース・スラッシュ・ドット等は使用できません' });
   }
   if (!repo) errors.push({ message: '--repo が必要です' });
+  if (!sessionId) errors.push({ message: '--session-id が必要です（/gh-maestro を実行してセッションを開始し直してください）' });
   if (shortPromptText != null && promptFileArg != null) {
     errors.push({ message: '--short-prompt と --prompt-file は同時に指定できません' });
   }
@@ -280,6 +286,7 @@ const workspace   = resolveWorkspace(workspaceArg);
 const baseBranch  = values['--base-branch'];
 const explicitAgentId = values['--agent'];
 const executionId = values['--execution-id'] || null;
+const sessionId   = values['--session-id'];
 
 // --- バリデーション ---
 const resetCmd = `node "${resolve(__dirname, 'reset-session.js')}" --workspace "${workspace || workspaceArg || '<workspace>'}"`;
@@ -290,6 +297,20 @@ let fail = (msg) => {
   process.exit(1);
 };
 if (!workspace) fail('ワークスペースを解決できません。--workspace を指定するか、GH_MAESTRO_WORKSPACE または .gh-maestro/ のあるディレクトリで実行してください');
+
+// --- セッション同一性検証（Issue #444） ---
+// スキル未ロードのセッションからの直接実行や古いセッションIDの使い回しを防ぐため、
+// 外部コマンド実行（checkAgentExists）や lease 獲得、worktree 作成などの一切の副作用の前に
+// msg-state/orchestrator.json の sessionId と厳密照合する。
+const orchestratorState = readStateLib.readState(workspace, 'orchestrator');
+const validSession = orchestratorState.status === 'ok' &&
+  Boolean(orchestratorState.state.sessionId) &&
+  orchestratorState.state.sessionId === sessionId;
+if (!validSession) {
+  console.error('spawn-worker: セッションIDが無効または一致しません。');
+  console.error('  → /gh-maestro を実行してセッションを開始し直してください。');
+  process.exit(1);
+}
 if (shortPromptText != null && promptFileArg != null) fail('--short-prompt と --prompt-file は同時に指定できません');
 let prompt;
 try {
