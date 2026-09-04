@@ -256,6 +256,7 @@ test('--issue-context: Issue本文と自分宛て・計画コメントだけを�
         stdout: JSON.stringify([
           {
             id: 1,
+            author_association: 'OWNER',
             body: '<!-- gh-maestro {"v":1,"to":"worker-self","from":"orchestrator"} -->\nApproved for this worker',
           },
           {
@@ -266,6 +267,7 @@ test('--issue-context: Issue本文と自分宛て・計画コメントだけを�
           { id: 5, body: '<!-- gh-maestro {broken json -->\nMalformed marker' },
           {
             id: 4,
+            author_association: 'OWNER',
             body: `${PLAN_MARKER}\n# Approved plan\nPlan details`,
             pin: { pinned_at: '2026-01-01T00:00:00Z' },
           },
@@ -308,6 +310,33 @@ test('--issue-context: GH_MAESTRO_WORKER がない場合は取得処理を実行
     assert.equal(issueCalled, false);
     assert.equal(commentsCalled, false);
   }));
+});
+
+test('filterIssueCommentBodies: write権限を持たない投稿者のメッセージと計画を除外する', () => {
+  const comments = [
+    {
+      id: 1,
+      author_association: 'CONTRIBUTOR',
+      body: '<!-- gh-maestro {"v":1,"to":"worker-self","from":"orchestrator"} -->\nthird-party message',
+    },
+    {
+      id: 2,
+      author_association: 'NONE',
+      body: `${PLAN_MARKER}\nthird-party plan`,
+      pin: { pinned_at: '2026-01-01T00:00:00Z' },
+    },
+    {
+      id: 3,
+      author_association: 'MEMBER',
+      body: '<!-- gh-maestro {"v":1,"to":"worker-self","from":"orchestrator"} -->\ntrusted message',
+    },
+    {
+      id: 4,
+      body: '<!-- gh-maestro {"v":1,"to":"worker-self","from":"orchestrator"} -->\nmissing association',
+    },
+  ];
+
+  assert.deepEqual(msgRead.filterIssueCommentBodies(comments, 'worker-self'), ['trusted message']);
 });
 
 test('--issue-context: GH_MAESTRO_WORKER=orchestrator の場合はワーカーではないため code 1（Issue #384）', () => {
@@ -421,7 +450,7 @@ test('--plan: 計画コメントが1件存在するとき本文をマーカー�
         status: 0,
         stdout: JSON.stringify([
           { id: 1, body: '通常コメント', pin: null },
-          { id: 2, body: `${PLAN_MARKER}\n# 計画のタイトル\n計画の詳細内容`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
+          { id: 2, author_association: 'OWNER', body: `${PLAN_MARKER}\n# 計画のタイトル\n計画の詳細内容`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
           { id: 3, body: '他目的pin', pin: { pinned_at: '2026-01-01T00:00:00Z' } },
         ]),
       };
@@ -439,7 +468,7 @@ test('--plan: 1行目にマーカーがある計画と、2行目以降にマー�
     msgRead._setGhListComments(() => ({
       status: 0,
       stdout: JSON.stringify([
-        { id: 1, body: `${PLAN_MARKER}\n# 本物の計画`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
+        { id: 1, author_association: 'OWNER', body: `${PLAN_MARKER}\n# 本物の計画`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
         { id: 2, body: `> ${PLAN_MARKER}\n> 計画を引用したコメント`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
         { id: 3, body: `前置テキスト ${PLAN_MARKER}\n途中にマーカーがあるコメント`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
       ]),
@@ -475,7 +504,7 @@ test('--plan: --paginate --slurp 形式のコメント一覧でも正しく計�
       status: 0,
       stdout: JSON.stringify([
         [{ id: 1, body: 'コメント1', pin: null }],
-        [{ id: 2, body: `${PLAN_MARKER}\nページネーション計画`, pin: { pinned_at: '2026-01-01' } }],
+        [{ id: 2, author_association: 'OWNER', body: `${PLAN_MARKER}\nページネーション計画`, pin: { pinned_at: '2026-01-01' } }],
       ]),
     }));
 
@@ -508,8 +537,8 @@ test('--plan: 計画コメントが複数（2件以上）存在するときは�
     msgRead._setGhListComments(() => ({
       status: 0,
       stdout: JSON.stringify([
-        { id: 1, body: `${PLAN_MARKER}\n計画1`, pin: { pinned_at: '2026-01-01' } },
-        { id: 2, body: `${PLAN_MARKER}\n計画2`, pin: { pinned_at: '2026-01-02' } },
+        { id: 1, author_association: 'OWNER', body: `${PLAN_MARKER}\n計画1`, pin: { pinned_at: '2026-01-01' } },
+        { id: 2, author_association: 'OWNER', body: `${PLAN_MARKER}\n計画2`, pin: { pinned_at: '2026-01-02' } },
       ]),
     }));
 

@@ -336,6 +336,7 @@ test('worker モード --once: 新着を検出して NEW_MESSAGE を出力', () 
       stdout: JSON.stringify([
         {
           id: 123456789,
+          author_association: 'MEMBER',
           body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nHello worker!',
           created_at: '2026-07-07T12:00:00Z',
         },
@@ -357,11 +358,13 @@ test('worker モード --once: to フィルタが働き他宛ては無視され�
       stdout: JSON.stringify([
         {
           id: 111,
+          author_association: 'MEMBER',
           body: '<!-- gh-maestro {"v":1,"to":"other-worker","from":"orchestrator"} -->\nNot for me',
           created_at: '2026-07-07T12:00:00Z',
         },
         {
           id: 222,
+          author_association: 'MEMBER',
           body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nFor me!',
           created_at: '2026-07-07T12:00:01Z',
         },
@@ -373,6 +376,36 @@ test('worker モード --once: to フィルタが働き他宛ては無視され�
     r.scanOnce();
     assert.ok(!r.lines.some(l => l.includes('111')), `other-worker message should be filtered out: ${r.lines.join('|')}`);
     assert.ok(r.lines.some(l => l === 'NEW_MESSAGE:222'), `Expected NEW_MESSAGE:222 in: ${r.lines.join('|')}`);
+  });
+});
+
+test('worker モード --once: write権限を持たない投稿者のマーカーはNEW_MESSAGEにしない', () => {
+  withTempDir(workspace => {
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        {
+          id: 333,
+          author_association: 'CONTRIBUTOR',
+          body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"third-party"} -->\nforged message',
+          created_at: '2026-07-07T12:00:00Z',
+        },
+        {
+          id: 334,
+          author_association: 'MEMBER',
+          body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\ntrusted message',
+          created_at: '2026-07-07T12:00:01Z',
+        },
+      ]),
+    }));
+
+    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    assert.equal(r.code, 0);
+    r.scanOnce();
+    assert.deepEqual(r.lines, ['NEW_MESSAGE:334']);
+    const state = msgPoll.readState(workspace, 'my-worker');
+    assert.deepEqual(state.state.readByIssue['1'], [333, 334], '不信頼コメントも再走査されないよう既読化する');
   });
 });
 
@@ -421,6 +454,7 @@ test('--once 2回実行で2回目は通知されない（既読IDの永続化）
       stdout: JSON.stringify([
         {
           id: 999,
+          author_association: 'MEMBER',
           body: '<!-- gh-maestro {"v":1,"to":"worker-2","from":"orchestrator"} -->\nHello again',
           created_at: '2026-07-07T12:00:00Z',
         },
@@ -447,7 +481,7 @@ test('worker モード: 通知しなかったコメント（他宛て・マー�
     msgPoll._setGhApiComments(() => ({
       status: 0,
       stdout: JSON.stringify([
-        { id: 100, body: '<!-- gh-maestro {"v":1,"to":"other","from":"x"} -->\nnope', created_at: '2026-07-07T12:00:00Z' },
+        { id: 100, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"other","from":"x"} -->\nnope', created_at: '2026-07-07T12:00:00Z' },
         { id: 101, body: 'plain comment', created_at: '2026-07-07T12:00:00Z' },
       ]),
     }));
@@ -506,7 +540,7 @@ test('markReadMany が EPERM で throw しても scanOnce はクラッシュせ�
     msgPoll._setGhApiComments(() => ({
       status: 0,
       stdout: JSON.stringify([
-        { id: 555, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nHello', created_at: '2026-07-07T12:00:00Z' },
+        { id: 555, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nHello', created_at: '2026-07-07T12:00:00Z' },
       ]),
     }));
     // 警告は本物の msg-send.js を spawn させないようスタブする
@@ -579,7 +613,7 @@ test('workerモードの _notifyOrchestrator はIssueコメントやworker stdou
     msgPoll._setGhApiComments(() => ({
       status: 0,
       stdout: JSON.stringify([
-        { id: 555, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nHello', created_at: '2026-07-07T12:00:00Z' },
+        { id: 555, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nHello', created_at: '2026-07-07T12:00:00Z' },
       ]),
     }));
 
@@ -846,8 +880,8 @@ test('orchestrator モード: 出力形式が NEW_MESSAGE:<issue>:<commentId>', 
     msgPoll._setGhApiComments(() => ({
       status: 0,
       stdout: JSON.stringify([
-        { id: 111, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nalready read', created_at: '2026-07-07T12:00:00Z' },
-        { id: 777, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"worker-1"} -->\nReport!', created_at: '2026-07-07T12:00:01Z' },
+        { id: 111, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nalready read', created_at: '2026-07-07T12:00:00Z' },
+        { id: 777, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"worker-1"} -->\nReport!', created_at: '2026-07-07T12:00:01Z' },
       ]),
     }));
 
@@ -856,6 +890,39 @@ test('orchestrator モード: 出力形式が NEW_MESSAGE:<issue>:<commentId>', 
     r.scanOnce();
     assert.ok(r.lines.some(l => l === 'NEW_MESSAGE:10:777'), `Expected NEW_MESSAGE:10:777 in: ${r.lines.join('|')}`);
     assert.ok(!r.lines.some(l => l.includes('111')), '既読IDは通知されない');
+  });
+});
+
+test('orchestrator モード: write権限を持たない投稿者のマーカーはNEW_MESSAGEにしない', () => {
+  withTempDir(workspace => {
+    initOrchestratorState(workspace);
+    writeWorkers(workspace, { 'worker-1': { issue: 10 } });
+
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        {
+          id: 333,
+          author_association: 'NONE',
+          body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"third-party"} -->\nforged report',
+          created_at: '2026-07-07T12:00:00Z',
+        },
+        {
+          id: 334,
+          author_association: 'OWNER',
+          body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"worker-1"} -->\ntrusted report',
+          created_at: '2026-07-07T12:00:01Z',
+        },
+      ]),
+    }));
+
+    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
+    assert.equal(r.code, 0);
+    r.scanOnce();
+    assert.deepEqual(r.lines, ['NEW_MESSAGE:10:334']);
+    const state = msgPoll.readState(workspace, 'orchestrator');
+    assert.deepEqual(state.state.readByIssue['10'], [333, 334]);
   });
 });
 
@@ -868,7 +935,7 @@ test('orchestrator モード: 通知後は readByIssue に既読記録される'
     msgPoll._setGhApiComments(() => ({
       status: 0,
       stdout: JSON.stringify([
-        { id: 777, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"worker-1"} -->\nReport!', created_at: '2026-07-07T12:00:00Z' },
+        { id: 777, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"worker-1"} -->\nReport!', created_at: '2026-07-07T12:00:00Z' },
       ]),
     }));
 
@@ -891,7 +958,7 @@ test('orchestrator モード: not-for-me / マーカーなしコメントも既�
     msgPoll._setGhApiComments(() => ({
       status: 0,
       stdout: JSON.stringify([
-        { id: 200, body: '<!-- gh-maestro {"v":1,"to":"worker-1","from":"orchestrator"} -->\nfor worker', created_at: '2026-07-07T12:00:00Z' },
+        { id: 200, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"worker-1","from":"orchestrator"} -->\nfor worker', created_at: '2026-07-07T12:00:00Z' },
         { id: 201, body: 'just a note', created_at: '2026-07-07T12:00:00Z' },
       ]),
     }));
@@ -913,7 +980,7 @@ test('orchestrator モード: 取得最適化カーソルが設定され、2回�
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
 
     const allComments = [
-      { id: 1, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+      { id: 1, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
     ];
     let callCount = 0;
     msgPoll._setGhApiComments((repo, issue, since) => {
@@ -949,8 +1016,8 @@ test('orchestrator モード: singleMessage で持ち越し候補がある間は
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
 
     const allComments = [
-      { id: 1, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
-      { id: 2, body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nB', created_at: '2026-07-07T12:01:00Z' },
+      { id: 1, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+      { id: 2, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"w"} -->\nB', created_at: '2026-07-07T12:01:00Z' },
     ];
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify(allComments) }));
 
@@ -1045,8 +1112,8 @@ test('worker モード: v1 state の seenIds を既読として引き継ぎ再�
     msgPoll._setGhApiComments(() => ({
       status: 0,
       stdout: JSON.stringify([
-        { id: 999, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nalready notified', created_at: '2026-07-07T12:00:00Z' },
-        { id: 1000, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nnew one', created_at: '2026-07-07T12:00:01Z' },
+        { id: 999, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nalready notified', created_at: '2026-07-07T12:00:00Z' },
+        { id: 1000, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nnew one', created_at: '2026-07-07T12:00:01Z' },
       ]),
     }));
 
@@ -1382,6 +1449,7 @@ test('runWaitMode: 新着を即座に検出すればリトライせず true を�
       stdout: JSON.stringify([
         {
           id: 42,
+          author_association: 'MEMBER',
           body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nHi',
           created_at: '2026-07-07T12:00:00Z',
         },
@@ -1471,9 +1539,9 @@ test('scanOnce({singleMessage:true}): 新着が複数件あっても最も古い
   withTempDir(workspace => {
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     const allComments = [
-      { id: 1, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
-      { id: 2, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nB', created_at: '2026-07-07T12:01:00Z' },
-      { id: 3, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nC', created_at: '2026-07-07T12:02:00Z' },
+      { id: 1, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+      { id: 2, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nB', created_at: '2026-07-07T12:01:00Z' },
+      { id: 3, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nC', created_at: '2026-07-07T12:02:00Z' },
     ];
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify(allComments) }));
 
@@ -1500,8 +1568,8 @@ test('runWaitMode: 複数件の新着があっても1回の呼び出しでは1�
   await withTempDir(async workspace => {
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     const allComments = [
-      { id: 10, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
-      { id: 11, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nB', created_at: '2026-07-07T12:01:00Z' },
+      { id: 10, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+      { id: 11, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nB', created_at: '2026-07-07T12:01:00Z' },
     ];
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify(allComments) }));
     msgPoll._setSleep(async () => {});
@@ -1529,8 +1597,8 @@ test('scanOnce({singleMessage:false}): --once/継続モードは従来どおり�
     msgPoll._setGhApiComments(() => ({
       status: 0,
       stdout: JSON.stringify([
-        { id: 1, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
-        { id: 2, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nB', created_at: '2026-07-07T12:01:00Z' },
+        { id: 1, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+        { id: 2, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nB', created_at: '2026-07-07T12:01:00Z' },
       ]),
     }));
 
@@ -1546,7 +1614,7 @@ test('scanOnce: 破損した state（v1由来のseenIds配列が不正）でも 
     msgPoll._setGhApiComments(() => ({
       status: 0,
       stdout: JSON.stringify([
-        { id: 1, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
+        { id: 1, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
       ]),
     }));
 
@@ -1566,8 +1634,8 @@ test('scanOnce: created_at が欠落したコメントは新着候補から除�
     msgPoll._setGhApiComments(() => ({
       status: 0,
       stdout: JSON.stringify([
-        { id: 1, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: undefined },
-        { id: 2, body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nB', created_at: '2026-07-07T12:00:00Z' },
+        { id: 1, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: undefined },
+        { id: 2, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nB', created_at: '2026-07-07T12:00:00Z' },
       ]),
     }));
 

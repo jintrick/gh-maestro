@@ -96,7 +96,7 @@ function graphqlAddComment({ repo, issue, body, opts = {} }) {
 function graphqlListComments({ repo, issue, since = null, opts = {} }) {
   const [owner, name] = String(repo).split('/');
   const result = graphqlExec([
-    '-f', 'query=query($owner:String!,$name:String!,$num:Int!){repository(owner:$owner,name:$name){issue(number:$num){comments(last:100){nodes{databaseId body createdAt}}}}}',
+    '-f', 'query=query($owner:String!,$name:String!,$num:Int!){repository(owner:$owner,name:$name){issue(number:$num){comments(last:100){nodes{databaseId body createdAt authorAssociation}}}}}',
     '-f', `owner=${owner}`,
     '-f', `name=${name}`,
     '-F', `num=${issue}`,
@@ -109,7 +109,13 @@ function graphqlListComments({ repo, issue, since = null, opts = {} }) {
     return { status: 1, stdout: '', stderr: 'gh-fallback: GraphQL応答からコメント一覧を取得できませんでした' };
   }
   const filtered = since ? nodes.filter((n) => n.createdAt > since) : nodes;
-  const comments = filtered.map((n) => ({ id: n.databaseId, body: n.body, created_at: n.createdAt }));
+  const comments = filtered.map((n) => {
+    const comment = { id: n.databaseId, body: n.body, created_at: n.createdAt };
+    if (typeof n.authorAssociation === 'string') {
+      comment.author_association = n.authorAssociation;
+    }
+    return comment;
+  });
   return { status: 0, stdout: JSON.stringify(comments), stderr: '' };
 }
 

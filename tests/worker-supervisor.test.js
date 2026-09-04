@@ -2165,7 +2165,7 @@ describe('Stale report detection（居座り検知）', () => {
 
   function reportComment({ from = 'issue-5-fix', createdAt = '2026-07-25T00:05:00Z' } = {}) {
     return {
-      id: 700, created_at: createdAt,
+      id: 700, author_association: 'MEMBER', created_at: createdAt,
       body: `<!-- gh-maestro {"v":1,"to":"orchestrator","from":"${from}"} -->\n> 完了しました`,
     };
   }
@@ -2264,11 +2264,13 @@ describe('Stale report detection（居座り検知）', () => {
     const comments = [
       {
         id: 701,
+        author_association: 'MEMBER',
         created_at: oldReportTime,
         body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-5-fix"} -->\n> 中間報告',
       },
       {
         id: 702,
+        author_association: 'MEMBER',
         created_at: latestReportTime,
         body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-5-fix"} -->\n> 最終報告',
       },
@@ -2583,6 +2585,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
   function reportComment({ createdAt = '2026-07-25T00:00:15.000Z' } = {}) {
     return {
       id: 801,
+      author_association: 'MEMBER',
       created_at: createdAt,
       body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-5-fix"} -->\n作業が完了しました。',
     };
