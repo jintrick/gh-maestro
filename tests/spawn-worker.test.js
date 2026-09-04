@@ -17,8 +17,32 @@ const readStateLib = require('../scripts/shared/read-state');
 const fs = require('fs');
 const os = require('os');
 
+const TEST_WORKSPACE = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-test-ws-'));
+const TEST_SESSION_ID = 'test-valid-session-uuid';
+readStateLib.initializeState(TEST_WORKSPACE, 'orchestrator', { sessionId: TEST_SESSION_ID });
+
+process.on('exit', () => {
+  try {
+    fs.rmSync(TEST_WORKSPACE, { recursive: true, force: true });
+  } catch {}
+});
+
 function run(args, env = {}) {
-  return spawnSync(process.execPath, [SCRIPT, ...args], {
+  const hasSessionId = args.includes('--session-id');
+  const wsIdx = args.indexOf('--workspace');
+  const targetWs = wsIdx !== -1 && args[wsIdx + 1] ? args[wsIdx + 1] : TEST_WORKSPACE;
+  const effectiveArgs = [...args];
+  if (wsIdx === -1 && !args.includes('--help') && !args.includes('-h')) {
+    effectiveArgs.push('--workspace', TEST_WORKSPACE);
+  }
+  if (!hasSessionId && !args.includes('--help') && !args.includes('-h')) {
+    // Ensure the target workspace has valid orchestrator session initialized
+    if (!readStateLib.readState(targetWs, 'orchestrator').state?.sessionId) {
+      readStateLib.initializeState(targetWs, 'orchestrator', { sessionId: TEST_SESSION_ID });
+    }
+    effectiveArgs.push('--session-id', TEST_SESSION_ID);
+  }
+  return spawnSync(process.execPath, [SCRIPT, ...effectiveArgs], {
     encoding: 'utf8',
     env: { ...process.env, ...env },
   });
@@ -184,18 +208,26 @@ test('クローズ済みPRのブランチは新規起動せず、副作用も発
   const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
   const workersBefore = fs.existsSync(workersPath) ? fs.readFileSync(workersPath, 'utf8') : null;
 
-  const r = run([
-    '--skill', 'gh-maestro-senior-coder', '--short-prompt', 'test',
-    '--issue', '349', '--description', 'split-review-aspects', '--repo', 'jintrick/gh-maestro',
-    '--workspace', workspace, '--agent', 'agy',
-  ], BASE_ENV);
+  readStateLib.initializeState(workspace, 'orchestrator', { sessionId: 'valid-test-session' });
+  try {
+    const r = run([
+      '--skill', 'gh-maestro-senior-coder', '--short-prompt', 'test',
+      '--issue', '349', '--description', 'split-review-aspects', '--repo', 'jintrick/gh-maestro',
+      '--workspace', workspace, '--agent', 'agy',
+      '--session-id', 'valid-test-session',
+    ], BASE_ENV);
 
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /issue-349-senior-coder-split-review-aspects/);
-  assert.match(r.stderr, /クローズ済みPR #350/);
-  assert.equal(fs.existsSync(worktreeDir), false, '遮断時はworktreeを作成しない');
-  const workersAfter = fs.existsSync(workersPath) ? fs.readFileSync(workersPath, 'utf8') : null;
-  assert.equal(workersAfter, workersBefore, '遮断時はリース・workers.jsonを書き換えない');
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /issue-349-senior-coder-split-review-aspects/);
+    assert.match(r.stderr, /クローズ済みPR #350/);
+    assert.equal(fs.existsSync(worktreeDir), false, '遮断時はworktreeを作成しない');
+    const workersAfter = fs.existsSync(workersPath) ? fs.readFileSync(workersPath, 'utf8') : null;
+    assert.equal(workersAfter, workersBefore, '遮断時はリース・workers.jsonを書き換えない');
+  } finally {
+    try {
+      fs.rmSync(path.join(workspace, '.gh-maestro', 'msg-state', 'orchestrator.json'), { force: true });
+    } catch {}
+  }
 });
 
 test('gh-maestro-base で --prompt-file がないとエラー終了する', () => {
@@ -426,14 +458,11 @@ test('--agent で存在しないエージェントを指定した場合はエラ
     fs.mkdirSync(path.join(tmp, '.gh-maestro'), { recursive: true });
     // config.json を意図的に作らない → デフォルトにも無いエージェントIDはエラー
 
-    const r = spawnSync(process.execPath, [SCRIPT,
+    const r = run([
       '--skill', 'gh-maestro-coder',
       '--issue', '1', '--description', 'test', '--repo', 'o/r',
       '--agent', 'nonexistent',
-    ], {
-      encoding: 'utf8',
-      env: { ...process.env, HOME: tmp },
-    });
+    ], { HOME: tmp, USERPROFILE: tmp });
 
     assert.notEqual(r.status, 0, 'exit code should be non-zero');
     assert.match(r.stderr, /nonexistent/, 'error should name the missing agent');
@@ -471,14 +500,11 @@ test('config.json に定義されていてもバイナリが PATH になけれ�
       }),
     );
 
-    const r = spawnSync(process.execPath, [SCRIPT,
+    const r = run([
       '--skill', 'gh-maestro-coder',
       '--issue', '1', '--description', 'test', '--repo', 'o/r',
       '--agent', 'claude',
-    ], {
-      encoding: 'utf8',
-      env: { ...process.env, HOME: tmp },
-    });
+    ], { HOME: tmp, USERPROFILE: tmp });
 
     assert.notEqual(r.status, 0, 'exit code should be non-zero');
     assert.match(r.stderr, /見つかりません/, 'error should be about missing agent command');
@@ -574,7 +600,7 @@ test('send-text-after-launch の拒否は worktree を作る前に起きる（�
 test('establishOrchestratorBaseline: 既存コメントIDが orchestrator 既読集合に記録され、取得最適化カーソルも設定される', () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline-'));
   try {
-    const init = readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+    const init = readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
     assert.equal(init.ok, true);
 
     const listCommentsFn = () => ({
@@ -599,7 +625,7 @@ test('establishOrchestratorBaseline: 既存コメントIDが orchestrator 既読
 test('establishOrchestratorBaseline: 冪等（再実行しても重複しない）', () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline2-'));
   try {
-    readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
     const listCommentsFn = () => ({ status: 0, stdout: JSON.stringify([{ id: 1 }]) });
 
     const r1 = establishOrchestratorBaseline(ws, { repo: 'o/r', issue: '207', listCommentsFn });
@@ -648,7 +674,7 @@ test('establishOrchestratorBaseline: v1（旧形式）state でも失敗する�
 test('establishOrchestratorBaseline: コメント一覧の取得失敗時は失敗し状態を変更しない', () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline5-'));
   try {
-    readStateLib.initializeState(ws, 'orchestrator', { byIssue: { 207: [99] }, generation: 'g' });
+    readStateLib.initializeState(ws, 'orchestrator', { byIssue: { 207: [99] }, sessionId: 'valid-test-session' });
 
     const result = establishOrchestratorBaseline(ws, {
       repo: 'o/r', issue: '207',
@@ -667,7 +693,7 @@ test('establishOrchestratorBaseline: コメント一覧の取得失敗時は失�
 test('establishOrchestratorBaseline: 応答が配列でない場合に失敗する', () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline6-'));
   try {
-    readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
     const result = establishOrchestratorBaseline(ws, {
       repo: 'o/r', issue: '207',
       listCommentsFn: () => ({ status: 0, stdout: JSON.stringify({ not: 'array' }) }),
@@ -682,7 +708,7 @@ test('establishOrchestratorBaseline: 応答が配列でない場合に失敗す�
 test('establishOrchestratorBaseline: markRead が失敗すれば失敗として報告される', () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline7-'));
   try {
-    readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
     const result = establishOrchestratorBaseline(ws, {
       repo: 'o/r', issue: '207',
       listCommentsFn: () => ({ status: 0, stdout: JSON.stringify([{ id: 1 }]) }),
@@ -759,7 +785,7 @@ test('junction 作成失敗時 (missing 非空) はワーカーを起動せず�
     fs.writeFileSync(path.join(ws, 'README.md'), '# test\n');
     spawnSync('git', ['add', '.'], { cwd: ws, stdio: 'pipe' });
     spawnSync('git', ['commit', '-m', 'initial commit'], { cwd: ws, stdio: 'pipe' });
-    readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
 
     // 2. ~/.gh-maestro/config.json にテスト用エージェント定義
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
@@ -813,6 +839,7 @@ test('junction 作成失敗時 (missing 非空) はワーカーを起動せず�
         '--repo', 'o/r',
         '--workspace', ws,
         '--agent', 'test-agent',
+        '--session-id', 'valid-test-session',
       ],
       {
         encoding: 'utf8',
@@ -850,7 +877,7 @@ test('linkNodeModules の予期しない例外発生時もワーカーを起動�
     fs.writeFileSync(path.join(ws, 'README.md'), '# test\n');
     spawnSync('git', ['add', '.'], { cwd: ws, stdio: 'pipe' });
     spawnSync('git', ['commit', '-m', 'initial commit'], { cwd: ws, stdio: 'pipe' });
-    readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
 
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(
@@ -896,6 +923,7 @@ test('linkNodeModules の予期しない例外発生時もワーカーを起動�
         '--repo', 'o/r',
         '--workspace', ws,
         '--agent', 'test-agent',
+        '--session-id', 'valid-test-session',
       ],
       {
         encoding: 'utf8',
@@ -928,7 +956,7 @@ test('junction 作成で missing が空かつ skipped が非空の場合、ワ�
     fs.writeFileSync(path.join(ws, 'README.md'), '# test\n');
     spawnSync('git', ['add', '.'], { cwd: ws, stdio: 'pipe' });
     spawnSync('git', ['commit', '-m', 'initial commit'], { cwd: ws, stdio: 'pipe' });
-    readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
 
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(
@@ -993,6 +1021,7 @@ test('junction 作成で missing が空かつ skipped が非空の場合、ワ�
         '--repo', 'o/r',
         '--workspace', ws,
         '--agent', 'test-agent',
+        '--session-id', 'valid-test-session',
       ],
       {
         encoding: 'utf8',
@@ -1027,7 +1056,7 @@ test('junction 作成で linked / skipped / missing がいずれも空の場合�
     fs.writeFileSync(path.join(ws, 'README.md'), '# test\n');
     spawnSync('git', ['add', '.'], { cwd: ws, stdio: 'pipe' });
     spawnSync('git', ['commit', '-m', 'initial commit'], { cwd: ws, stdio: 'pipe' });
-    readStateLib.initializeState(ws, 'orchestrator', { generation: 'g' });
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
 
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(
@@ -1088,6 +1117,7 @@ test('junction 作成で linked / skipped / missing がいずれも空の場合�
         '--repo', 'o/r',
         '--workspace', ws,
         '--agent', 'test-agent',
+        '--session-id', 'valid-test-session',
       ],
       {
         encoding: 'utf8',
@@ -1108,9 +1138,142 @@ test('junction 作成で linked / skipped / missing がいずれも空の場合�
   }
 });
 
+// ── セッション同一性検証（Issue #444） ─────────────────────────────────────────
+// スキル未ロードのセッションからの直接実行や古いセッションIDの使い回しを防ぐため、
+// 副作用の前に msg-state/orchestrator.json の sessionId と厳密照合する。
 
+test('Issue #444 受入条件1・2: --session-id がない場合は副作用前に非ゼロ終了し、/gh-maestro への誘導を出力する', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-guard-noid-'));
+  try {
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-uuid' });
+    const r = spawnSync(process.execPath, [SCRIPT,
+      '--skill', 'gh-maestro-coder',
+      '--issue', '444',
+      '--description', 'test-guard',
+      '--repo', 'o/r',
+      '--workspace', ws,
+    ], { encoding: 'utf8' });
 
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /--session-id が必要です/);
+    assert.match(r.stderr, /\/gh-maestro を実行して/);
+    assert.equal(fs.existsSync(path.join(ws, '.gh-maestro', 'worktrees')), false, 'worktreeディレクトリを作らない');
+    assert.equal(fs.existsSync(path.join(ws, '.gh-maestro', 'workers.json')), false, 'workers.jsonを作らない');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
 
+test('Issue #444 受入条件1・2: 不一致の --session-id の場合は副作用前に非ゼロ終了し、/gh-maestro への誘導を出力する', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-guard-mismatch-'));
+  try {
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'actual-uuid-1111' });
+    const r = spawnSync(process.execPath, [SCRIPT,
+      '--skill', 'gh-maestro-coder',
+      '--issue', '444',
+      '--description', 'test-guard',
+      '--repo', 'o/r',
+      '--workspace', ws,
+      '--session-id', 'wrong-uuid-2222',
+    ], { encoding: 'utf8' });
 
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /セッションIDが無効または一致しません/);
+    assert.match(r.stderr, /\/gh-maestro を実行して/);
+    assert.equal(fs.existsSync(path.join(ws, '.gh-maestro', 'worktrees')), false, 'worktreeディレクトリを作らない');
+    assert.equal(fs.existsSync(path.join(ws, '.gh-maestro', 'workers.json')), false, 'workers.jsonを作らない');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
 
+test('Issue #444 受入条件1・2: orchestrator.json の sessionId が空の場合は拒否する', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-guard-empty-'));
+  try {
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: '' });
+    const r = spawnSync(process.execPath, [SCRIPT,
+      '--skill', 'gh-maestro-coder',
+      '--issue', '444',
+      '--description', 'test-guard',
+      '--repo', 'o/r',
+      '--workspace', ws,
+      '--session-id', 'some-uuid',
+    ], { encoding: 'utf8' });
 
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /セッションIDが無効または一致しません/);
+    assert.match(r.stderr, /\/gh-maestro を実行して/);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('Issue #444 受入条件4: 環境変数の偽装（例: GH_MAESTRO_WORKER）でもガードを迂回できない', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-guard-forge-'));
+  try {
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'real-session-uuid' });
+    const r = spawnSync(process.execPath, [SCRIPT,
+      '--skill', 'gh-maestro-coder',
+      '--issue', '444',
+      '--description', 'test-guard',
+      '--repo', 'o/r',
+      '--workspace', ws,
+      '--session-id', 'forged-session-uuid',
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GH_MAESTRO_WORKER: 'orchestrator',
+        GH_MAESTRO_SESSION: 'real-session-uuid',
+      },
+    });
+
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /セッションIDが無効または一致しません/);
+    assert.equal(fs.existsSync(path.join(ws, '.gh-maestro', 'worktrees')), false, 'worktreeディレクトリを作らない');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('Issue #444 受入条件5: 古いセッションIDは新しいセッションで再利用できない（決定論的失効）', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-guard-expiry-'));
+  try {
+    const oldSessionId = 'old-session-uuid-1';
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: oldSessionId });
+
+    // 新セッションへの更新（reset-session相当）
+    const newSessionId = 'new-session-uuid-2';
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: newSessionId });
+
+    // 古い sessionId での実行は拒否される
+    const rOld = spawnSync(process.execPath, [SCRIPT,
+      '--skill', 'gh-maestro-coder',
+      '--issue', '444',
+      '--description', 'test-guard',
+      '--repo', 'o/r',
+      '--workspace', ws,
+      '--session-id', oldSessionId,
+    ], { encoding: 'utf8' });
+
+    assert.notEqual(rOld.status, 0);
+    assert.match(rOld.stderr, /セッションIDが無効または一致しません/);
+
+    // 新しい sessionId はセッション同一性検証を通過する（後段のエージェント解決エラーで止まる）
+    const rNew = spawnSync(process.execPath, [SCRIPT,
+      '--skill', 'gh-maestro-coder',
+      '--issue', '444',
+      '--description', 'test-guard',
+      '--repo', 'o/r',
+      '--workspace', ws,
+      '--agent', 'nonexistent-agent',
+      '--session-id', newSessionId,
+    ], { encoding: 'utf8' });
+
+    assert.notEqual(rNew.status, 0);
+    assert.doesNotMatch(rNew.stderr, /セッションIDが無効または一致しません/);
+    assert.match(rNew.stderr, /nonexistent-agent/);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});

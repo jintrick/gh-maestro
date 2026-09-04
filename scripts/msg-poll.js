@@ -160,7 +160,7 @@ let _ghApiComments = (repo, issue, since, opts = {}) => {
 // ── ヘルパー ──────────────────────────────────────────────────────────────
 //
 // 既読状態（msg-state/<self>.json）の読み書きは scripts/shared/read-state.js に集約した。
-// v2 スキーマ（{ schemaVersion, initialized, generation, readByIssue }）で、既読判定は
+// v2 スキーマ（{ schemaVersion, initialized, sessionId, readByIssue }）で、既読判定は
 // 時刻カーソルではなく「明示的に既読化されたコメントID集合」を使う（Issue #207）。
 // statePath / readState / writeState はテスト互換のため共有モジュールを再エクスポートする。
 
@@ -575,12 +575,12 @@ function main(argsOverride, opts = {}) {
           const legacySeen = Array.isArray(stateResult.state && stateResult.state.seenIds) ? stateResult.state.seenIds : [];
           initState = readStateLib.initializeState(workspace, self, {
             byIssue: { [String(issueArg)]: legacySeen.filter((x) => typeof x === 'number' && Number.isFinite(x)) },
-            generation: 'legacy-migration',
+            sessionId: 'legacy-migration',
           });
         } else {
           initState = readStateLib.initializeState(workspace, self, {
             byIssue: {},
-            generation: 'worker-init',
+            sessionId: 'worker-init',
           });
         }
         if (!initState.ok) {

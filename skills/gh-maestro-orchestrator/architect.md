@@ -43,6 +43,7 @@ architect は対象 Issue がクローズされるまで任意の相談役とし
 ```sh
 node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --skill gh-maestro-architect --issue <N> --description abstract-design \
+  --session-id $SESSION_ID \
   --prompt-file <圧縮済み要件・調査コンテクストのファイル> \
   --execution-id issue-<N>-architect-<attempt> \
   --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
@@ -57,6 +58,7 @@ architect の検討結果は Issue のコメントとして記録される（実
 ```sh
 node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --skill gh-maestro-architect --issue <N> --description plan-review \
+  --session-id $SESSION_ID \
   --prompt-file <計画コメントURLを含む指示のファイル> \
   --execution-id issue-<N>-architect-plan-review-<attempt> \
   --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH

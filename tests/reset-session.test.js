@@ -41,14 +41,14 @@ test('rebuildOrchestratorBaseline: workers.json の Issue 分が readByIssue に
     });
 
     assert.equal(result.ok, true);
-    assert.ok(result.generation.startsWith('reset-'), `generation: ${result.generation}`);
+    assert.match(result.sessionId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, `sessionId: ${result.sessionId}`);
     assert.deepEqual(result.issues, ['10', '20']);
     assert.deepEqual(result.counts, { 10: 2, 20: 1 });
 
     const st = readStateLib.readState(workspace, 'orchestrator');
     assert.equal(st.status, 'ok');
     assert.equal(st.state.initialized, true);
-    assert.equal(st.state.generation, result.generation);
+    assert.equal(st.state.sessionId, result.sessionId);
     assert.deepEqual(st.state.readByIssue['10'], [1, 2]);
     assert.deepEqual(st.state.readByIssue['20'], [100]);
     assert.equal(st.state.sinceByIssue['10'], '2026-07-07T11:00:00Z', '直近 created_at が取得最適化カーソルになる');
@@ -77,7 +77,7 @@ test('rebuildOrchestratorBaseline: 管理対象 Issue が無くても initialize
 test('rebuildOrchestratorBaseline: 一部の Issue 取得失敗時は新状態を書き込まない', () => {
   withTempDir(workspace => {
     // 事前に既存状態を置く（成功時は置き換えられるはず）
-    readStateLib.initializeState(workspace, 'orchestrator', { byIssue: { 10: [1] }, generation: 'old' });
+    readStateLib.initializeState(workspace, 'orchestrator', { byIssue: { 10: [1] }, sessionId: 'old' });
 
     const result = rebuildOrchestratorBaseline(workspace, {
       workers: WORKERS,
@@ -93,7 +93,7 @@ test('rebuildOrchestratorBaseline: 一部の Issue 取得失敗時は新状態�
 
     const st = readStateLib.readState(workspace, 'orchestrator');
     assert.equal(st.status, 'ok');
-    assert.equal(st.state.generation, 'old', '失敗時は既存状態を置き換えない');
+    assert.equal(st.state.sessionId, 'old', '失敗時は既存状態を置き換えない');
     assert.deepEqual(st.state.readByIssue['10'], [1]);
   });
 });
@@ -278,5 +278,29 @@ test('reset-session: killPane に失敗した場合は status-pane.json を削�
   });
 });
 
+test('reset-session: リポジトリ解決失敗時やベースライン再構築失敗時に既存の readByIssue を保持しつつ sessionId を空文字に無効化する', () => {
+  withTempDir(workspace => {
+    const { spawnSync } = require('child_process');
+    const sp = readStateLib.statePath(workspace, 'orchestrator');
+    fs.mkdirSync(path.dirname(sp), { recursive: true });
+    readStateLib.writeState(workspace, 'orchestrator', {
+      schemaVersion: 2,
+      initialized: true,
+      sessionId: 'test-session-uuid-1234',
+      readByIssue: { '10': [1, 2, 3] },
+      sinceByIssue: { '10': '2026-09-01T00:00:00Z' },
+    });
 
+    const scriptPath = path.join(__dirname, '..', 'scripts', 'reset-session.js');
+    const r = spawnSync(process.execPath, [scriptPath, '--workspace', workspace, '--quiet'], {
+      encoding: 'utf8',
+    });
 
+    assert.equal(r.status, 0, r.stderr);
+    const st = readStateLib.readState(workspace, 'orchestrator');
+    assert.equal(st.status, 'ok');
+    assert.equal(st.state.sessionId, '', 'sessionId が空文字にクリアされること');
+    assert.deepEqual(st.state.readByIssue, { '10': [1, 2, 3] }, 'readByIssue は維持されること');
+    assert.deepEqual(st.state.sinceByIssue, { '10': '2026-09-01T00:00:00Z' }, 'sinceByIssue は維持されること');
+  });
+});

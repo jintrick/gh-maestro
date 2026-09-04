@@ -12,6 +12,7 @@ const {
   execSync,
   REAL_SPAWN_DISABLED_ERROR_CODE,
 } = require('./shared/child-process');
+const crypto = require('crypto');
 const path = require('path');
 const { resolve } = path;
 const { existsSync, readFileSync, rmSync,
@@ -66,7 +67,7 @@ msg-state は単純削除せず、管理対象 Issue の既読ベースライン
  * orchestrator の msg-state を「既読ベースライン再構築」する（Issue #207）。
  *
  * 単純削除はやめ、wipe 前の workers.json から管理対象 Issue 集合を確定し、
- * 各 Issue の既存コメントIDを取得して initialized 状態（generation 付き）を原子的に
+ * 各 Issue の既存コメントIDを取得して initialized 状態（sessionId 付き）を原子的に
  * 再構築する。スナップショットに含まれなかった（取得中に投稿された）コメントは
  * 未読として通知される。
  *
@@ -77,7 +78,7 @@ msg-state は単純削除せず、管理対象 Issue の既読ベースライン
  * @param {{ workers?: object, repo: string, listCommentsFn?: Function }} params
  *   workers: リセット時点（wipe前）の workers.json オブジェクト
  *   repo:    対象リポジトリ（owner/repo）
- * @returns {{ ok: boolean, generation?: string, issues?: string[], counts?: object, error?: string }}
+ * @returns {{ ok: boolean, sessionId?: string, issues?: string[], counts?: object, error?: string }}
  */
 function rebuildOrchestratorBaseline(workspace, { workers = {}, repo, listCommentsFn = listComments }) {
   // 管理対象 Issue 集合 = wipe 前の workers.json の全ワーカー Issue（Q1: orchestrator 確定）
@@ -123,13 +124,13 @@ function rebuildOrchestratorBaseline(workspace, { workers = {}, repo, listCommen
     counts[issue] = ids.length;
   }
 
-  const generation = `reset-${Date.now()}`;
-  const initResult = readStateLib.initializeState(workspace, 'orchestrator', { byIssue, sinceByIssue, generation });
+  const sessionId = crypto.randomUUID();
+  const initResult = readStateLib.initializeState(workspace, 'orchestrator', { byIssue, sinceByIssue, sessionId });
   if (!initResult.ok) {
     return { ok: false, error: `msg-state 再構築に失敗: ${initResult.error}` };
   }
 
-  return { ok: true, generation, issues, counts };
+  return { ok: true, sessionId, issues, counts };
 }
 
 module.exports = { rebuildOrchestratorBaseline, restartCapturedResidents, USAGE };
@@ -554,17 +555,29 @@ if (require.main === module) {
   if (!resetRepo) {
     warn('リポジトリを解決できないため msg-state のベースライン再構築をスキップします（既存状態は変更しません）。');
     warn('msg-state が欠落・未初期化のままなら、msg-poll は走査を停止して「明示初期化が必要」と報告します。');
+    // 既読状態（readByIssue / sinceByIssue）を保ったまま、古い sessionId だけを無効化する
+    const current = readStateLib.readState(workspace, 'orchestrator');
+    if (current.status === 'ok') {
+      current.state.sessionId = '';
+      readStateLib.writeState(workspace, 'orchestrator', current.state);
+    }
     results.errors.push('msg-state baseline: リポジトリ未解決のため再構築しませんでした');
   } else {
     const baselineResult = rebuildOrchestratorBaseline(workspace, { workers, repo: resetRepo });
     if (baselineResult.ok) {
-      log(`msg-state を再構築しました（generation=${baselineResult.generation}, Issues=${(baselineResult.issues || []).join(',') || '(なし)'}）`);
+      log(`msg-state を再構築しました（sessionId=${baselineResult.sessionId}, Issues=${(baselineResult.issues || []).join(',') || '(なし)'}）`);
       for (const [issue, count] of Object.entries(baselineResult.counts || {})) {
         log(`  Issue ${issue}: ${count} 件を既読ベースラインに含めました`);
       }
     } else {
       warn(`msg-state のベースライン再構築に失敗: ${baselineResult.error}`);
       warn('新状態は書き込まれていません（既存状態を保持 or 欠落のまま）。空状態でポーラーを再開しません。');
+      // 既読状態（readByIssue / sinceByIssue）を保ったまま、古い sessionId だけを無効化する
+      const current = readStateLib.readState(workspace, 'orchestrator');
+      if (current.status === 'ok') {
+        current.state.sessionId = '';
+        readStateLib.writeState(workspace, 'orchestrator', current.state);
+      }
       results.errors.push(`msg-state baseline: ${baselineResult.error}`);
     }
   }

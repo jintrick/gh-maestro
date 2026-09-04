@@ -7,7 +7,7 @@
 // （msg-poll.js / spawn-worker.js / reset-session.js）で同じ更新APIを使う。
 //
 // 責務:
-//   - v2スキーマ（{ schemaVersion, initialized, generation, readByIssue, sinceByIssue }）の読み書き
+//   - v2スキーマ（{ schemaVersion, initialized, sessionId, readByIssue, sinceByIssue }）の読み書き
 //   - 欠落(missing)/破損(corrupt)/旧形式v1(legacy)/正常(ok) の判別
 //     （暗黙の空状態生成はしない。欠落・破損は呼び出し元が「明示初期化が必要」と報告する）
 //   - ロック下での「再読込 → 集合和 → 原子的保存」による冪等な既読追加（markRead / markReadMany）
@@ -43,14 +43,14 @@ function statePath(workspace, self) {
 
 /**
  * v2 の空状態を作る（呼び出し元が明示的に初期化する場合のみ使用）。
- * @param {string} [generation]
+ * @param {string} [sessionId]
  * @returns {object}
  */
-function emptyState(generation = '') {
+function emptyState(sessionId = '') {
   return {
     schemaVersion: SCHEMA_VERSION,
     initialized: true,
-    generation,
+    sessionId,
     readByIssue: {},
     sinceByIssue: {},
   };
@@ -91,7 +91,7 @@ function normalize(parsed) {
   return {
     schemaVersion: SCHEMA_VERSION,
     initialized: true,
-    generation: typeof parsed.generation === 'string' ? parsed.generation : '',
+    sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : '',
     readByIssue,
     sinceByIssue,
   };
@@ -355,18 +355,18 @@ function markRead(workspace, self, { issue, ids, since }) {
 /**
  * 状態を明示的に初期化（全置換）する。reset / 初回初期化の共通入口。
  *
- * 新状態（initialized=true・generation・readByIssue）を一時ファイルに構築し、
+ * 新状態（initialized=true・sessionId・readByIssue）を一時ファイルに構築し、
  * 原子的に置換する。呼び出し元は「スナップショット取得の全件成功」を確認した上で
  * 呼ぶこと（一部失敗なら呼ばず、空状態で再開しない）。byIssue が空でも initialized=true。
  *
  * @param {string} workspace
  * @param {string} self
- * @param {{ byIssue?: object, sinceByIssue?: object, generation?: string }} params
+ * @param {{ byIssue?: object, sinceByIssue?: object, sessionId?: string }} params
  *   sinceByIssue: 初期化時に確定した取得最適化カーソル（Issueごとの直近 created_at。
  *                 既読判定には使わない）
  * @returns {{ ok: boolean, error?: string, state?: object }}
  */
-function initializeState(workspace, self, { byIssue = {}, sinceByIssue = {}, generation = '' } = {}) {
+function initializeState(workspace, self, { byIssue = {}, sinceByIssue = {}, sessionId = '' } = {}) {
   const lockAcquired = acquireStateLock(workspace, self);
   if (!lockAcquired) {
     return { ok: false, error: `msg-state(${self}) の初期化ロックを取得できませんでした` };
@@ -382,7 +382,7 @@ function initializeState(workspace, self, { byIssue = {}, sinceByIssue = {}, gen
     for (const [issue, ts] of Object.entries(sinceByIssue)) {
       if (typeof ts === 'string' && ts) cleanSince[String(issue)] = ts;
     }
-    const state = emptyState(typeof generation === 'string' ? generation : '');
+    const state = emptyState(typeof sessionId === 'string' ? sessionId : '');
     state.readByIssue = readByIssue;
     state.sinceByIssue = cleanSince;
     writeState(workspace, self, state);

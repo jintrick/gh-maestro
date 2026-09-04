@@ -294,7 +294,7 @@ test('writeState → readState ラウンドトリップ（v2スキーマ）', ()
 
     const restored = msgPoll.readState(workspace, 'test-worker');
     assert.equal(restored.status, 'ok');
-    assert.equal(restored.state.generation, 'g');
+    assert.equal(restored.state.sessionId, 'g');
     assert.deepEqual(restored.state.readByIssue['10'], [1, 2, 3]);
   });
 });
