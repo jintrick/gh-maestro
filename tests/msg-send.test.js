@@ -628,7 +628,7 @@ test('稼働中でも既に報告済みのワーカー宛て送信は拒否さ�
     // 起動時刻(2026-01-01T00:00:00.000Z)より後にワーカー自身が報告済み
     msgSend._setGhListComments(mockCommentsResponse([
       {
-        id: 1, created_at: '2026-01-01T00:05:00Z',
+        id: 1, author_association: 'MEMBER', created_at: '2026-01-01T00:05:00Z',
         body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-9-fix"} -->\n> 完了しました',
       },
     ]));

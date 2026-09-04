@@ -16,12 +16,36 @@ function marker({ to = 'orchestrator', from }) {
 
 test('getReportStatusSinceStart: startTime以降に自分自身からの報告があれば status: reported', () => {
   const comments = [
-    { id: 1, created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 1, author_association: 'MEMBER', created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
   ];
   assert.deepEqual(getReportStatusSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z'), {
     status: 'reported',
     report: comments[0],
   });
+});
+
+test('getReportStatusSinceStart: write権限を持たない投稿者の報告は採用せず、信頼済み報告を上書きしない', () => {
+  const untrusted = {
+    id: 2,
+    author_association: 'CONTRIBUTOR',
+    created_at: '2026-01-01T00:06:00Z',
+    body: marker({ from: 'issue-9-fix' }),
+  };
+  assert.deepEqual(getReportStatusSinceStart([untrusted], 'issue-9-fix', '2026-01-01T00:00:00.000Z'), {
+    status: 'not-reported',
+    report: null,
+  });
+
+  const trusted = {
+    id: 1,
+    author_association: 'MEMBER',
+    created_at: '2026-01-01T00:05:00Z',
+    body: marker({ from: 'issue-9-fix' }),
+  };
+  assert.equal(
+    getReportStatusSinceStart([trusted, untrusted], 'issue-9-fix', '2026-01-01T00:00:00.000Z').report,
+    trusted,
+  );
 });
 
 test('getReportStatusSinceStart: 報告コメントが無ければ status: not-reported', () => {
@@ -33,7 +57,7 @@ test('getReportStatusSinceStart: 報告コメントが無ければ status: not-r
 
 test('getReportStatusSinceStart: 起動時刻より前の報告（前回セッションの古い報告）は無視して status: not-reported', () => {
   const comments = [
-    { id: 1, created_at: '2025-12-31T23:59:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 1, author_association: 'MEMBER', created_at: '2025-12-31T23:59:00Z', body: marker({ from: 'issue-9-fix' }) },
   ];
   assert.deepEqual(getReportStatusSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z'), {
     status: 'not-reported',
@@ -43,7 +67,7 @@ test('getReportStatusSinceStart: 起動時刻より前の報告（前回セッ�
 
 test('getReportStatusSinceStart: 別ワーカーからの報告は対象外で status: not-reported', () => {
   const comments = [
-    { id: 1, created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-other' }) },
+    { id: 1, author_association: 'MEMBER', created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-other' }) },
   ];
   assert.deepEqual(getReportStatusSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z'), {
     status: 'not-reported',
@@ -53,7 +77,7 @@ test('getReportStatusSinceStart: 別ワーカーからの報告は対象外で s
 
 test('getReportStatusSinceStart: 宛先がorchestrator以外の報告（他ワーカー宛の転送・言及等）は対象外で status: not-reported', () => {
   const comments = [
-    { id: 1, created_at: '2026-01-01T00:05:00Z', body: marker({ to: 'issue-9-other', from: 'issue-9-fix' }) },
+    { id: 1, author_association: 'MEMBER', created_at: '2026-01-01T00:05:00Z', body: marker({ to: 'issue-9-other', from: 'issue-9-fix' }) },
   ];
   assert.deepEqual(getReportStatusSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z'), {
     status: 'not-reported',
@@ -73,7 +97,7 @@ test('getReportStatusSinceStart: マーカーが無いコメントは無視さ�
 
 test('getReportStatusSinceStart: startTimeが無ければ status: unknown（判定不能）', () => {
   const comments = [
-    { id: 1, created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 1, author_association: 'MEMBER', created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
   ];
   assert.deepEqual(getReportStatusSinceStart(comments, 'issue-9-fix', null), {
     status: 'unknown',
@@ -87,7 +111,7 @@ test('getReportStatusSinceStart: startTimeが無ければ status: unknown（判�
 
 test('getReportStatusSinceStart: startTimeが不正な文字列（Dateでパース不能）なら status: unknown（判定不能）', () => {
   const comments = [
-    { id: 1, created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 1, author_association: 'MEMBER', created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
   ];
   assert.deepEqual(getReportStatusSinceStart(comments, 'issue-9-fix', 'old'), {
     status: 'unknown',
@@ -114,7 +138,7 @@ test('getReportStatusSinceStart: commentsが配列でなければ status: unknow
 // 「起動より後（=報告済み）」と誤判定する。数値化してから比較すればこの誤りを引き継がない。
 test('getReportStatusSinceStart: 起動時刻に秒未満の端数があっても、素朴な文字列比較の誤りを引き継がない', () => {
   const comments = [
-    { id: 1, created_at: '2026-01-01T00:00:05Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 1, author_association: 'MEMBER', created_at: '2026-01-01T00:00:05Z', body: marker({ from: 'issue-9-fix' }) },
   ];
   const naiveStringComparisonResult = '2026-01-01T00:00:05Z' >= '2026-01-01T00:00:05.900Z';
   assert.equal(naiveStringComparisonResult, true, '素朴な文字列比較は誤ってtrueになる（この誤りの実例）');
@@ -126,7 +150,7 @@ test('getReportStatusSinceStart: 起動時刻に秒未満の端数があって�
 
 test('getReportStatusSinceStart: created_atが無いコメントは無視される', () => {
   const comments = [
-    { id: 1, body: marker({ from: 'issue-9-fix' }) },
+    { id: 1, author_association: 'MEMBER', body: marker({ from: 'issue-9-fix' }) },
   ];
   assert.deepEqual(getReportStatusSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z'), {
     status: 'not-reported',
@@ -136,9 +160,9 @@ test('getReportStatusSinceStart: created_atが無いコメントは無視され�
 
 test('getReportStatusSinceStart: 複数の報告がある場合は最新のコメントを返す', () => {
   const comments = [
-    { id: 1, created_at: '2026-01-01T00:02:00Z', body: marker({ from: 'issue-9-fix' }) },
-    { id: 2, created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
-    { id: 3, created_at: '2026-01-01T00:03:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 1, author_association: 'MEMBER', created_at: '2026-01-01T00:02:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 2, author_association: 'MEMBER', created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 3, author_association: 'MEMBER', created_at: '2026-01-01T00:03:00Z', body: marker({ from: 'issue-9-fix' }) },
   ];
   const latest = getReportStatusSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z');
   assert.equal(latest.status, 'reported');
@@ -147,7 +171,7 @@ test('getReportStatusSinceStart: 複数の報告がある場合は最新のコ�
 
 test('getReportStatusSinceStart: 該当報告が無ければ not-reported を返す', () => {
   const comments = [
-    { id: 1, created_at: '2025-12-31T23:59:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 1, author_association: 'MEMBER', created_at: '2025-12-31T23:59:00Z', body: marker({ from: 'issue-9-fix' }) },
   ];
   const latest = getReportStatusSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z');
   assert.deepEqual(latest, {
@@ -173,7 +197,7 @@ test('getReportStatusSinceStart: 不正な引数は unknown を返す', () => {
 
 test('hasReportedSinceStart: 報告済みなら true, 未報告・判定不能なら false を返す述語', () => {
   const reportedComments = [
-    { id: 1, created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 1, author_association: 'MEMBER', created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
   ];
   assert.equal(hasReportedSinceStart(reportedComments, 'issue-9-fix', '2026-01-01T00:00:00.000Z'), true);
   assert.equal(hasReportedSinceStart([], 'issue-9-fix', '2026-01-01T00:00:00.000Z'), false);
@@ -184,8 +208,8 @@ test('hasReportedSinceStart: 報告済みなら true, 未報告・判定不能�
 
 test('getLatestReportSinceStart: 報告済みなら最新コメントオブジェクト、未報告・判定不能なら null を返す', () => {
   const comments = [
-    { id: 1, created_at: '2026-01-01T00:02:00Z', body: marker({ from: 'issue-9-fix' }) },
-    { id: 2, created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 1, author_association: 'MEMBER', created_at: '2026-01-01T00:02:00Z', body: marker({ from: 'issue-9-fix' }) },
+    { id: 2, author_association: 'MEMBER', created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
   ];
   assert.equal(getLatestReportSinceStart(comments, 'issue-9-fix', '2026-01-01T00:00:00.000Z')?.id, 2);
   assert.equal(getLatestReportSinceStart([], 'issue-9-fix', '2026-01-01T00:00:00.000Z'), null);

@@ -15,6 +15,7 @@ const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { isRetryableGhFailure, graphqlCommentBody } = require('./shared/gh-fallback');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const { findPlanComments, isPlanComment, stripPlanMarker } = require('./shared/plan-comment');
+const { isTrustedCommentAuthor } = require('./shared/comment-author-trust');
 const { parseMarker } = require('./msg-poll');
 const { isWorkerIdentity } = require('./shared/resident-force-guard');
 
@@ -111,6 +112,7 @@ function filterIssueCommentBodies(comments, workerName) {
   const bodies = [];
   for (const comment of comments) {
     if (!comment || typeof comment.body !== 'string') continue;
+    if (!isTrustedCommentAuthor(comment)) continue;
 
     if (isPlanComment(comment)) {
       const planBody = stripPlanMarker(comment.body);
@@ -283,7 +285,7 @@ function main(argsOverride) {
       return { code: 1, lines: out, errLines: err };
     }
 
-    const plans = findPlanComments(comments);
+    const plans = findPlanComments(comments).filter(isTrustedCommentAuthor);
     if (plans.length === 0) {
       writeErr(`msg-read: Issue #${issue} に計画コメントが見つかりません。`);
       return { code: 1, lines: out, errLines: err };

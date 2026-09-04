@@ -10,6 +10,7 @@
 // （skill-asset-help ルール準拠）。
 
 const { parseMarker } = require('../msg-poll');
+const { isTrustedCommentAuthor } = require('./comment-author-trust');
 
 /**
  * 与えられたコメント一覧の中に、対象ワーカー自身から orchestrator 宛ての報告
@@ -32,6 +33,7 @@ function getReportStatusSinceStart(comments, workerName, startTime) {
 
   for (const c of comments) {
     if (!c || !c.created_at) continue;
+    if (!isTrustedCommentAuthor(c)) continue;
     const meta = parseMarker(c.body);
     if (!meta || meta.from !== workerName || meta.to !== 'orchestrator') continue;
 

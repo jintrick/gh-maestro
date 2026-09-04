@@ -26,6 +26,7 @@ const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { validateField } = require('./shared/validate');
 const { isRetryableGhFailure, graphqlListComments } = require('./shared/gh-fallback');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+const { isTrustedCommentAuthor } = require('./shared/comment-author-trust');
 const readStateLib = require('./shared/read-state');
 const {
   resolveSessionPid,
@@ -706,6 +707,11 @@ function main(argsOverride, opts = {}) {
       // created_at 欠落は候補から除外し、既読として記録（毎走査の再処理を避ける）
       if (!c.created_at) {
         addRecord(recordReadByIssue, issueKey, cid);
+        continue;
+      }
+
+      if (!isTrustedCommentAuthor(c)) {
+        addRecord(recordReadByIssue, issueKey, cid); // write権限を確認できない投稿者は無視
         continue;
       }
 

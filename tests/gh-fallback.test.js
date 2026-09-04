@@ -78,7 +78,7 @@ test('graphqlAddComment: issue node ID解決に失敗したらそのまま返す
 
 // ── graphqlListComments ──────────────────────────────────────────────────
 
-test('graphqlListComments: databaseId/body/createdAtを持つ配列に変換する', () => {
+test('graphqlListComments: databaseId/body/createdAt/authorAssociationをREST互換配列に変換する', () => {
   ghFallback._setGraphqlExec(() => ({
     status: 0,
     stdout: JSON.stringify({
@@ -87,8 +87,8 @@ test('graphqlListComments: databaseId/body/createdAtを持つ配列に変換す�
           issue: {
             comments: {
               nodes: [
-                { databaseId: 111, body: 'old', createdAt: '2026-07-17T10:00:00Z' },
-                { databaseId: 222, body: 'new', createdAt: '2026-07-17T12:00:00Z' },
+                { databaseId: 111, body: 'old', createdAt: '2026-07-17T10:00:00Z', authorAssociation: 'MEMBER' },
+                { databaseId: 222, body: 'new', createdAt: '2026-07-17T12:00:00Z', authorAssociation: 'OWNER' },
               ],
             },
           },
@@ -101,8 +101,8 @@ test('graphqlListComments: databaseId/body/createdAtを持つ配列に変換す�
   assert.equal(result.status, 0);
   const comments = JSON.parse(result.stdout);
   assert.deepEqual(comments, [
-    { id: 111, body: 'old', created_at: '2026-07-17T10:00:00Z' },
-    { id: 222, body: 'new', created_at: '2026-07-17T12:00:00Z' },
+    { id: 111, body: 'old', created_at: '2026-07-17T10:00:00Z', author_association: 'MEMBER' },
+    { id: 222, body: 'new', created_at: '2026-07-17T12:00:00Z', author_association: 'OWNER' },
   ]);
 });
 

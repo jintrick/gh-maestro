@@ -6,7 +6,10 @@
 
 const TEST_RESULT_MARKER = '<!-- gh-maestro-test-result:v2 -->';
 const LEGACY_TEST_RESULT_MARKER = '<!-- gh-maestro-test-result:v1 -->';
-const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+const {
+  TRUSTED_ASSOCIATIONS,
+  isTrustedCommentAuthor,
+} = require('./comment-author-trust');
 
 const KNOWN_PROVENANCE = 'test-runner';
 const FULL_SCOPE = 'full';
@@ -197,8 +200,7 @@ function findLatestTrustedTestDeclaration(commentsList, prAuthor) {
 
     const commentAuthor = comment.author && comment.author.login;
     const isPrAuthor = prAuthor && commentAuthor && commentAuthor === prAuthor;
-    const isPrivileged = typeof comment.authorAssociation === 'string'
-      && TRUSTED_ASSOCIATIONS.has(comment.authorAssociation);
+    const isPrivileged = isTrustedCommentAuthor(comment);
     if (!isPrAuthor && !isPrivileged) continue;
 
     const declaration = extractTestDeclaration(comment.body);
