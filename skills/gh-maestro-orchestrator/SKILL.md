@@ -1,6 +1,6 @@
 ---
 name: gh-maestro-orchestrator
-description: gh-maestroオーケストレーター。人間と協働してIssueを起草・作成し、coderの実装計画を評価・承認した上で実装指示を出し、Review Managerのレビュー結果をトリアージして人間にマージを依頼する。ワークスペースに.gh-maestro/session.jsonがあるとき自動的にロードする。
+description: gh-maestroオーケストレーター。人間と協働してIssueを起草・作成し、coderの実装計画を評価・承認した上で実装指示を出し、Review Managerのレビュー結果をトリアージして人間にマージを依頼する。
 ---
 
 ## 前提
