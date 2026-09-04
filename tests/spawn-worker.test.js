@@ -199,36 +199,39 @@ test('--repo がないとエラー終了する', () => {
   parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'test'], /--repo/);
 });
 
-test('クローズ済みPRのブランチは新規起動せず、副作用も発生させない（実リポジトリ状態）', () => {
-  // PR #350 はこのリポジトリで CLOSED のまま残る既知のブランチ。
-  // 実際の gh pr list --state all を使い、spawn-worker.js のガード位置そのものを検証する。
-  const workerName = 'issue-349-senior-coder-split-review-aspects';
-  const workspace = path.resolve(__dirname, '..');
-  const worktreeDir = path.join(workspace, '.gh-maestro', 'worktrees', workerName);
-  const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
-  const workersBefore = fs.existsSync(workersPath) ? fs.readFileSync(workersPath, 'utf8') : null;
-
-  readStateLib.initializeState(workspace, 'orchestrator', { sessionId: 'valid-test-session' });
-  try {
-    const r = run([
-      '--skill', 'gh-maestro-senior-coder', '--short-prompt', 'test',
-      '--issue', '349', '--description', 'split-review-aspects', '--repo', 'jintrick/gh-maestro',
-      '--workspace', workspace, '--agent', 'agy',
-      '--session-id', 'valid-test-session',
-    ], BASE_ENV);
-
-    assert.notEqual(r.status, 0);
-    assert.match(r.stderr, /issue-349-senior-coder-split-review-aspects/);
-    assert.match(r.stderr, /クローズ済みPR #350/);
-    assert.equal(fs.existsSync(worktreeDir), false, '遮断時はworktreeを作成しない');
-    const workersAfter = fs.existsSync(workersPath) ? fs.readFileSync(workersPath, 'utf8') : null;
-    assert.equal(workersAfter, workersBefore, '遮断時はリース・workers.jsonを書き換えない');
-  } finally {
-    try {
-      fs.rmSync(path.join(workspace, '.gh-maestro', 'msg-state', 'orchestrator.json'), { force: true });
-    } catch {}
-  }
-});
+// [無効化] このテストは実リポジトリを workspace として使い、実ワークスペースの
+// .gh-maestro/msg-state/orchestrator.json を上書き・削除する（既読状態が失われ
+// msg-poll が過去コメントを再送する実害が発生した）。安全な形に書き直すまで無効化する。
+// test('クローズ済みPRのブランチは新規起動せず、副作用も発生させない（実リポジトリ状態）', () => {
+//   // PR #350 はこのリポジトリで CLOSED のまま残る既知のブランチ。
+//   // 実際の gh pr list --state all を使い、spawn-worker.js のガード位置そのものを検証する。
+//   const workerName = 'issue-349-senior-coder-split-review-aspects';
+//   const workspace = path.resolve(__dirname, '..');
+//   const worktreeDir = path.join(workspace, '.gh-maestro', 'worktrees', workerName);
+//   const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
+//   const workersBefore = fs.existsSync(workersPath) ? fs.readFileSync(workersPath, 'utf8') : null;
+// 
+//   readStateLib.initializeState(workspace, 'orchestrator', { sessionId: 'valid-test-session' });
+//   try {
+//     const r = run([
+//       '--skill', 'gh-maestro-senior-coder', '--short-prompt', 'test',
+//       '--issue', '349', '--description', 'split-review-aspects', '--repo', 'jintrick/gh-maestro',
+//       '--workspace', workspace, '--agent', 'agy',
+//       '--session-id', 'valid-test-session',
+//     ], BASE_ENV);
+// 
+//     assert.notEqual(r.status, 0);
+//     assert.match(r.stderr, /issue-349-senior-coder-split-review-aspects/);
+//     assert.match(r.stderr, /クローズ済みPR #350/);
+//     assert.equal(fs.existsSync(worktreeDir), false, '遮断時はworktreeを作成しない');
+//     const workersAfter = fs.existsSync(workersPath) ? fs.readFileSync(workersPath, 'utf8') : null;
+//     assert.equal(workersAfter, workersBefore, '遮断時はリース・workers.jsonを書き換えない');
+//   } finally {
+//     try {
+//       fs.rmSync(path.join(workspace, '.gh-maestro', 'msg-state', 'orchestrator.json'), { force: true });
+//     } catch {}
+//   }
+// });
 
 test('gh-maestro-base で --prompt-file がないとエラー終了する', () => {
   const r = run([
