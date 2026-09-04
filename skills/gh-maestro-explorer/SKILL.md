@@ -81,7 +81,9 @@ git -C $WORKTREE show <commit-hash>
 
 ## 疑問点がある場合
 
-調査範囲の解釈など、Issue 本文や起動時の指示だけでは判断できない点は通信ルールのコマンドで質問し、返答を待ってから結論を出す。
+調査範囲の解釈など、Issue 本文や起動時の指示だけでは判断できない点は通信ルールのコマンドで質問する。質問の投稿が成功したら、そのターンで調査・報告を続けず、ワーカー自身の手順を終了する。回答は次の resume で受け取る。
+
+理由と経緯: `docs/adr/0027-question-is-turn-end-not-completion.md`
 
 ## 調査しても情報が見つからない場合
 
@@ -95,4 +97,3 @@ node "{{SCRIPTS_PATH}}/msg-send.js" --body-file <報告本文ファイルのパ�
 - 分析・判断・修正方針の提示は行わない（それは diagnostician / orchestrator の責務）
 - PRを作成しない
 - `npm install` / `npm ci` は実行しない
-- 判断に迷ったら通信ルールのコマンドでorchestratorに相談し、自分で止まらない
