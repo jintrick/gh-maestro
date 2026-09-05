@@ -53,9 +53,11 @@ const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const readStateLib = require('./shared/read-state');
 const { checkClosedPr } = require('./shared/closed-pr-guard');
 const { getCurrentBranch } = require('./shared/git-branch');
+const { recordCycleEvent } = require('./shared/cycle-metrics');
 
 const defaultEnsureStatusPane = ensureStatusPaneLib;
 let _ensureStatusPane = defaultEnsureStatusPane;
+let _recordCycleEvent = recordCycleEvent;
 
 /**
  * ワークスペースの監視ペインをbest-effortで存在保証する。
@@ -67,9 +69,11 @@ let _ensureStatusPane = defaultEnsureStatusPane;
  * @param {string} workspace
  * @returns {object} ensure-status-pane.js の結果
  */
-function ensureStatusPaneForWorkspace(workspace) {
+function ensureStatusPaneForWorkspace(workspace, issue = undefined) {
   try {
-    return _ensureStatusPane({ workspace, scriptsPath: __dirname });
+    const params = { workspace, scriptsPath: __dirname };
+    if (issue !== undefined && issue !== null && String(issue) !== '') params.issue = issue;
+    return _ensureStatusPane(params);
   } catch (error) {
     // 共有ヘルパーは通常すべての運用エラーを結果へ変換する。ここは予期しない
     // 注入・実装エラーがワーカー起動へ波及しないための最終境界である。
@@ -258,6 +262,7 @@ module.exports = {
   parseWorkerArgs,
   ensureStatusPaneForWorkspace,
   _setEnsureStatusPane: (fn) => { _ensureStatusPane = fn || defaultEnsureStatusPane; },
+  _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
 };
 
 if (require.main === module) {
@@ -770,6 +775,16 @@ try {
     baseBranch,
   });
   atomicWriteJson(workersJson, workers);
+  try {
+    _recordCycleEvent(workspace, issue, 'worker-started', {
+      workerName,
+      role: spec.role,
+      skill,
+      agentId: agentConfig.id,
+      pid: launched.pid,
+      startTime: launched.startTime,
+    });
+  } catch { /* best-effort; the launched worker remains authoritative */ }
   console.warn(`spawn-worker: worker "${workerName}" を pid ${launched.pid} として workers.json に登録しました`);
   console.warn(`spawn-worker: 実行ログ: ${launched.logPath}`);
 } catch (e) {
@@ -783,7 +798,7 @@ try {
 // --- 監視ペインの自動存在保証（best-effort） ---
 // ワーカー起動時に必ず試みる。WezTermが利用できなくても、保証結果でワーカー起動を
 // 分岐・失敗させない（ensure-status-pane.js 参照）。
-ensureStatusPaneForWorkspace(workspace);
+ensureStatusPaneForWorkspace(workspace, issue);
 
 // --- worker-supervisor.js の自動起動保証（best-effort） ---
 // エージェント種別を問わず毎回試みる。稼働中なら常駐プロセス自身のロックが検知して

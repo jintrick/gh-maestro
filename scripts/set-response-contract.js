@@ -22,6 +22,7 @@
 const { resolveWorkerName } = require('./shared/workers-registry');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { CONTRACT_TYPES, writeContract, clearContract } = require('./shared/response-contract');
+const { recordCycleEvent } = require('./shared/cycle-metrics');
 
 const SPEC = {
   flags: { '--issue': {}, '--skill': {}, '--type': {}, '--artifact': {}, '--workspace': {} },
@@ -53,7 +54,7 @@ Description:
   契約は worker-supervisor.js が resume 時に読み取り、設定された完了シグナル
   （メッセージ送信 または PR作成）に基づいて代理送信の要否を判定する。`;
 
-function main(argsOverride) {
+function main(argsOverride, deps = {}) {
   const out = [];
   const err = [];
 
@@ -61,6 +62,7 @@ function main(argsOverride) {
   const writeErr = (s) => err.push(s);
 
   const args = argsOverride || process.argv.slice(2);
+  const recordCycleEventFn = deps.recordCycleEventFn || recordCycleEvent;
 
   let values, rest;
   try {
@@ -141,6 +143,16 @@ function main(argsOverride) {
   // artifact-or-message 契約を書き込み
   const contract = { type, artifact, issue: parseInt(issue, 10) };
   writeContract(workspace, workerName, contract);
+  if (skill === 'gh-maestro-coder' || skill === 'gh-maestro-senior-coder'
+    || skill === 'coder' || skill === 'senior-coder') {
+    try {
+      recordCycleEventFn(workspace, issue, 'implementation-approved', {
+        workerName,
+        role: skill.replace(/^gh-maestro-/, ''),
+        skill,
+      });
+    } catch { /* best-effort */ }
+  }
   writeOut(`CONTRACT_SET:${workerName} -> ${type}(${artifact})`);
 
   return { code: 0, lines: out, errLines: err };

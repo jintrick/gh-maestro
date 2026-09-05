@@ -37,6 +37,9 @@ const { listPrsByBranch, parsePrListResponse } = require('./shared/gh-pr');
 const { compactWorkerLog } = require('./shared/strip-thinking-token-lines');
 const { workerLogPath } = require('./shared/headless-launch');
 const { isWorkerIdentity } = require('./shared/resident-force-guard');
+const { normalizeWorkerEntry } = require('./shared/worker-entry');
+const { deriveRoleFromSkill } = require('./shared/worker-factory');
+const { recordCycleEvent } = require('./shared/cycle-metrics');
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -69,6 +72,46 @@ function buildMsgSendRelayArgs(workspace) {
 let _relayMessage = (workspace, body) => {
   return spawnSync(process.execPath, buildMsgSendRelayArgs(workspace), { encoding: 'utf8', input: body });
 };
+
+let _recordCycleEvent = recordCycleEvent;
+
+function readWorkerEntry(workspace, workerName) {
+  try {
+    const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
+    const workers = JSON.parse(fs.readFileSync(workersPath, 'utf8'));
+    return workers && Object.prototype.hasOwnProperty.call(workers, workerName)
+      ? normalizeWorkerEntry(workers[workerName])
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function recordWorkerStopped({ workspace, workerName, exitCode, at, pid = undefined } = {}) {
+  const match = /^issue-(\d+)-/.exec(String(workerName || ''));
+  if (!workspace || !match) return { ok: false, skipped: true };
+  const entry = readWorkerEntry(workspace, workerName);
+  const hookPid = pid === undefined
+    ? (entry && entry.pid)
+    : (Number.isInteger(Number(pid)) && Number(pid) > 0 ? Number(pid) : null);
+  const entryMatchesPid = entry && hookPid && entry.pid === hookPid;
+  const details = {
+    workerName,
+    skill: entry && entry.skill,
+    role: entry && entry.skill ? deriveRoleFromSkill(entry.skill) : undefined,
+    agentId: entry && entry.agentId,
+    pid: hookPid || (entry && entry.pid),
+    startTime: entryMatchesPid ? entry.startTime : undefined,
+    at,
+    abnormal: Number.isFinite(exitCode) && exitCode !== 0,
+  };
+  if (Number.isFinite(exitCode)) details.exitCode = exitCode;
+  try {
+    return _recordCycleEvent(workspace, match[1], 'worker-stopped', details);
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
 
 const MAX_RELAY_CHARS = 8000;
 
@@ -241,6 +284,15 @@ if (require.main === module) {
   const exitCode = parseInt(exitCodeRaw, 10);
   const workerName = process.env.GH_MAESTRO_WORKER || null;
 
+  // 終了フックはペインの有無に依存しない正本側の停止打刻点。
+  if (workspace && workerName) {
+    try {
+      recordWorkerStopped({ workspace, workerName, exitCode, pid: process.ppid });
+    } catch (error) {
+      process.stderr.write(`worker-exit-hook: 稼働区間の記録に失敗: ${error.message}\n`);
+    }
+  }
+
   // 1. ワーカーログの圧縮（thinking_tokens進捗イベント行の除去）。
   //    headless-shimが子のclose後に独立プロセスとして起動しているため、ログへの追記は
   //    発生し得ない区間で安全に置き換えられる。ベストエフォート:
@@ -301,6 +353,8 @@ module.exports = {
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setGhPrList: (fn) => { _ghPrList = fn; },
   _setRelayMessage: (fn) => { _relayMessage = fn; },
+  _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
+  recordWorkerStopped,
   verifyReplyAndRelayIfMissing,
   checkPrCreatedDuringResume,
   normalizeToSecondPrecision,

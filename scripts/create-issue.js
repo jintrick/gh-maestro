@@ -17,6 +17,7 @@ const { toWinPath } = require('./shared/win-path');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { deleteInputFileBestEffort } = require('./shared/file-cleanup');
 const { isRetryableGhFailure, graphqlCreateIssue } = require('./shared/gh-fallback');
+const { recordCycleEvent } = require('./shared/cycle-metrics');
 
 const USAGE = `create-issue.js — GitHub Issue を作成し、成功時にbody-fileの削除を試みる
 
@@ -77,6 +78,7 @@ function createIssue({ title, bodyFile, repo, workspace }, deps = {}) {
     readBodyFileFn = (p) => fs.readFileSync(p, 'utf8'),
     unlinkBodyFileFn = (p) => fs.unlinkSync(p),
     spawnAssistantFn = defaultSpawnAssistant,
+    recordCycleEventFn = recordCycleEvent,
   } = deps;
 
   let result = ghCreateFn({ title, bodyFile, repo });
@@ -96,6 +98,13 @@ function createIssue({ title, bodyFile, repo, workspace }, deps = {}) {
   const url = result.stdout.trim();
   const match = url.match(/\/issues\/(\d+)/);
   const number = match ? match[1] : '?';
+
+  // Issue作成の成功境界。記録は補助情報なので、失敗してもIssue作成結果を変えない。
+  if (number !== '?' && workspace) {
+    try {
+      recordCycleEventFn(workspace, number, 'issue-created', { url });
+    } catch { /* best-effort */ }
+  }
 
   const cleanupWarning = deleteInputFileBestEffort(bodyFile, unlinkBodyFileFn);
 

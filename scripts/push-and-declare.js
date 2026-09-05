@@ -29,6 +29,7 @@ const { getCurrentBranch } = require('./shared/git-branch');
 const { listPrsByBranch, parsePrListResponse } = require('./shared/gh-pr');
 const { createPr } = require('./gh-create-pr');
 const { declareTestResult } = require('./declare-test-result');
+const { recordCycleEvent } = require('./shared/cycle-metrics');
 
 const USAGE = `push-and-declare.js — ステージング・コミット・push・PR取得/作成・テスト結果申告を一つの操作にまとめる
 
@@ -115,6 +116,7 @@ function errText(r) {
  */
 function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps = {}) {
   const declareTestResultFn = deps.declareTestResultFn || declareTestResult;
+  const recordCycleEventFn = deps.recordCycleEventFn || recordCycleEvent;
   const declareDeps = deps.commitContentHashFn
     ? { commitContentHashFn: deps.commitContentHashFn }
     : undefined;
@@ -263,6 +265,11 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
     prNumber = urlMatch ? urlMatch[1] : '';
     prUrl = urlText;
     prAction = 'created';
+    if (prNumber) {
+      try {
+        recordCycleEventFn(ws, issueNum, 'pr-created', { pr: prNumber });
+      } catch { /* best-effort; PR remains authoritative */ }
+    }
   }
 
   // ── 申告段（これが成功するまで exit 0 を返さない） ───────────────────────────

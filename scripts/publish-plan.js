@@ -23,6 +23,7 @@ const { toWinPath } = require('./shared/win-path');
 const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const { PLAN_MARKER, isPlanComment } = require('./shared/plan-comment');
+const { recordCycleEvent } = require('./shared/cycle-metrics');
 
 const USAGE = `publish-plan.js — Issue の pin 済み計画コメントを管理する
 
@@ -99,7 +100,12 @@ function publishPlan({ issue, body, workspace }, deps = {}) {
     ghCreateCommentFn = _ghCreateComment,
     ghUpdateCommentFn = _ghUpdateComment,
     ghPinCommentFn = _ghPinComment,
+    recordCycleEventFn = recordCycleEvent,
   } = deps;
+
+  const recordPlanReported = () => {
+    try { recordCycleEventFn(workspace, issue, 'plan-reported'); } catch { /* best-effort */ }
+  };
 
   const ghOpts = { cwd: workspace };
   // 本文にマーカーを付加する（呼び出し元が意識する必要をなくす）
@@ -157,6 +163,7 @@ function publishPlan({ issue, body, workspace }, deps = {}) {
       return { ok: false, error: '更新レスポンスからURLを抽出できませんでした' };
     }
 
+    recordPlanReported();
     return { ok: true, url: updated.html_url, action: 'updated' };
   }
 
@@ -187,6 +194,7 @@ function publishPlan({ issue, body, workspace }, deps = {}) {
     return { ok: false, error: `コメントは作成されましたがpinに失敗しました（commentId=${commentId}）。再実行で同じコメントを対象に再試行してください: ${pinResult.stderr || '(empty)'}` };
   }
 
+  recordPlanReported();
   return { ok: true, url, action: 'created' };
 }
 
