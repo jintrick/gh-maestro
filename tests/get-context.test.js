@@ -5,12 +5,43 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'get-context.js');
 const REPO_ROOT = path.join(__dirname, '..');
 
+// get-context の実CLI境界とGit照会は維持する。一方、読み込まれる read-state の
+// 自プロセス起動時刻取得だけは、各ケースでPowerShell/WMIを起動しない固定値へ差し替える。
+const FAST_CONTEXT_PRELOAD = (() => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-get-context-preload-'));
+  const file = path.join(dir, 'preload.js');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
+  const lifecyclePath = require.resolve('../scripts/process-lifecycle');
+  const source = [
+    "'use strict';",
+    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
+    "const fixedStartTime = '2026-07-25T00:00:00.000Z';",
+    'const realExecSync = childProcess.execSync;',
+    'childProcess.execSync = (command, opts) => {',
+    "  if (String(command).includes('Get-CimInstance Win32_Process')) return `${fixedStartTime}\\n`;",
+    '  return realExecSync(command, opts);',
+    '};',
+    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
+    'lifecycle.getProcessStartTime = () => fixedStartTime;',
+  ].join('\n');
+  fs.writeFileSync(file, source, 'utf8');
+  process.once('exit', () => {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  });
+  return file;
+})();
+
+function runContext(options = {}) {
+  return spawnSync(process.execPath, ['-r', FAST_CONTEXT_PRELOAD, SCRIPT], options);
+}
+
 test('REPO と WORKSPACE を正しいフォーマットで出力する', () => {
-  const r = spawnSync(process.execPath, [SCRIPT], {
+  const r = runContext({
     cwd: REPO_ROOT,
     encoding: 'utf8',
   });
@@ -22,7 +53,7 @@ test('REPO と WORKSPACE を正しいフォーマットで出力する', () => {
 });
 
 test('GH_MAESTRO_WORKER=orchestrator がセッション変数として出力される（Issue #384）', () => {
-  const r = spawnSync(process.execPath, [SCRIPT], {
+  const r = runContext({
     cwd: REPO_ROOT,
     encoding: 'utf8',
   });
@@ -37,7 +68,7 @@ test('GH_MAESTRO_WORKER=orchestrator がセッション変数として出力さ�
 test('WORKSPACE はGH_MAESTRO_WORKSPACEが無い場合にCWD上方探索で解決される（Unixスラッシュ）', () => {
   const env = { ...process.env };
   delete env.GH_MAESTRO_WORKSPACE;
-  const r = spawnSync(process.execPath, [SCRIPT], {
+  const r = runContext({
     cwd: REPO_ROOT,
     env,
     encoding: 'utf8',
@@ -64,7 +95,7 @@ test('BASE_BRANCH が出力に含まれる', () => {
     execSync('git remote add origin https://github.com/test/repo.git', { cwd: tmp, stdio: 'pipe' });
     fs.mkdirSync(path.join(tmp, '.gh-maestro'));
 
-    const r = spawnSync(process.execPath, [SCRIPT], {
+    const r = runContext({
       cwd: tmp,
       encoding: 'utf8',
     });
@@ -99,7 +130,7 @@ test('orchestrator.json に sessionId がある場合は SESSION_ID が出力さ
       'utf8'
     );
 
-    const r = spawnSync(process.execPath, [SCRIPT], {
+    const r = runContext({
       cwd: tmp,
       env,
       encoding: 'utf8',
@@ -129,7 +160,7 @@ test('orchestrator.json に sessionId が空文字または存在しない場合
       'utf8'
     );
 
-    const r = spawnSync(process.execPath, [SCRIPT], {
+    const r = runContext({
       cwd: tmp,
       env,
       encoding: 'utf8',

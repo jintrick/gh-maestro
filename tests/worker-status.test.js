@@ -5,13 +5,59 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const test = require('node:test');
+const { beforeEach, test } = require('node:test');
 
 const workerStatus = require('../scripts/worker-status');
 const workerLiveness = require('../scripts/shared/worker-liveness');
 const { cleanSpawnEnv } = require('./_spawn-env');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-status.js');
+
+// status/list の実CLI境界は維持する。各子プロセスの初期化で発生する
+// process-lifecycle のWindows WMI照会だけを固定観測へ差し替え、PIDだけの
+// 表示ケースを不要なPowerShell待ちから分離する。PID再利用の同一性は
+// process-lifecycle.test.js とこのファイルの明示的なidentityケースで検証する。
+const FAST_STATUS_PRELOAD = (() => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-worker-status-preload-'));
+  const file = path.join(dir, 'preload.js');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
+  const lifecyclePath = require.resolve('../scripts/process-lifecycle');
+  const source = [
+    "'use strict';",
+    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
+    "const fixedStartTime = '2026-07-25T00:00:00.000Z';",
+    'const realExecSync = childProcess.execSync;',
+    'childProcess.execSync = (command, opts) => {',
+    "  if (String(command).includes('Get-CimInstance Win32_Process')) return `${fixedStartTime}\\n`;",
+    '  return realExecSync(command, opts);',
+    '};',
+    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
+    'lifecycle.getProcessStartTime = () => fixedStartTime;',
+    'lifecycle.findRunningInstances = () => [];',
+  ].join('\n');
+  fs.writeFileSync(file, source, 'utf8');
+  process.once('exit', () => {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  });
+  return file;
+})();
+
+// Most unit-style collectWorkersStatus cases do not exercise review-job
+// discovery.  Avoid launching the platform process scanner for those cases;
+// the final review-job integration case injects its own representative data.
+beforeEach(() => {
+  workerStatus._setFindRunningInstances(() => []);
+  // Review-manager fixtures below inject identity verification themselves; a
+  // null observation here keeps the non-identity-focused cases from invoking
+  // the platform WMI probe.  PID-reuse behavior remains covered by the
+  // dedicated process-lifecycle tests and the explicit cache tests above.
+  workerStatus._setGetProcessStartTime(() => null);
+  // pane の各入力・出力ケースは、明示的な lock 拒否ケース以外では
+  // ロック取得のOS照会を検証対象にしない。実際の lock 拒否は専用ケースで
+  // false を注入して確認する。
+  workerStatus._setAcquireStatusPaneLock(() => true);
+  workerStatus._setReleaseStatusPaneLock(() => {});
+});
 
 function createWorkspace(prefix = 'gh-maestro-worker-status-') {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -39,7 +85,7 @@ function removeWorkspace(workspace) {
 }
 
 function runCli(args) {
-  return spawnSync(process.execPath, [SCRIPT, ...args], {
+  return spawnSync(process.execPath, ['-r', FAST_STATUS_PRELOAD, SCRIPT, ...args], {
     encoding: 'utf8',
     env: cleanSpawnEnv(),
   });

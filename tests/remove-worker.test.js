@@ -13,8 +13,45 @@ const SCRIPT = path.join(__dirname, '..', 'scripts', 'remove-worker.js');
 // 明示した --workspace は GH_MAESTRO_WORKSPACE env より優先される。
 // （共通ヘルパー tests/_spawn-env.js の cleanSpawnEnv。ワーカー文脈環境変数も除去する）。
 const { cleanSpawnEnv } = require('./_spawn-env');
-function run(args) {
-  return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env: cleanSpawnEnv() });
+const TEST_START_TIME_ENV = 'GHM_TEST_WORKER_START_TIME';
+const FAST_WORKER_CLI_PRELOAD = (() => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-remove-worker-preload-'));
+  const file = path.join(dir, 'preload.js');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
+  const lifecyclePath = require.resolve('../scripts/process-lifecycle');
+  const source = [
+    "'use strict';",
+    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
+    'const realExecSync = childProcess.execSync;',
+    'const isAlive = (pid) => {',
+    '  try { process.kill(Number(pid), 0); return true; }',
+    "  catch (e) { return e && e.code !== 'ESRCH'; }",
+    '};',
+    'childProcess.execSync = (command, opts) => {',
+    "  if (String(command).includes('Get-CimInstance Win32_Process')) {",
+    '    const match = /ProcessId=(\\d+)/.exec(String(command));',
+    '    const startTime = process.env.GHM_TEST_WORKER_START_TIME;',
+    '    return match && startTime && isAlive(Number(match[1])) ? `${startTime}\\n` : "";',
+    '  }',
+    '  return realExecSync(command, opts);',
+    '};',
+    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
+    'lifecycle.getProcessStartTime = (pid) => {',
+    '  const value = process.env.GHM_TEST_WORKER_START_TIME;',
+    '  return value && isAlive(pid) ? value : null;',
+    '};',
+  ].join('\n');
+  fs.writeFileSync(file, source, 'utf8');
+  process.once('exit', () => {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  });
+  return file;
+})();
+
+function run(args, env = {}) {
+  return spawnSync(process.execPath, ['-r', FAST_WORKER_CLI_PRELOAD, SCRIPT, ...args], {
+    encoding: 'utf8', env: { ...cleanSpawnEnv(), ...env },
+  });
 }
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-rmw-'));
@@ -146,7 +183,7 @@ test('remove-worker: 同一性一致のプロセスツリー（親＋子）を�
         }),
         'utf8'
       );
-      const r = run(['issue-50-coder', '--workspace', dir]);
+      const r = run(['issue-50-coder', '--workspace', dir], { [TEST_START_TIME_ENV]: startTime });
       assert.equal(r.status, 0);
       assert.equal(isProcessAlive(parentPid), false, '同一性が一致した親プロセスはkillされること');
       assert.equal(isProcessAlive(childPid), false, '同一性が一致した子プロセスもkillされること');
@@ -177,7 +214,9 @@ test('remove-worker: 拒否側: 起動時刻不一致（PID再利用）のプロ
         }),
         'utf8'
       );
-      const r = run(['issue-51-coder', '--workspace', dir]);
+      const actualStartTime = getProcessStartTime(parentPid);
+      assert.ok(actualStartTime, '実プロセスの起動時刻を取得できること');
+      const r = run(['issue-51-coder', '--workspace', dir], { [TEST_START_TIME_ENV]: actualStartTime });
       assert.equal(r.status, 0);
       assert.match(r.stderr, /同一性確認に失敗しました/);
       assert.match(r.stderr, /kill をスキップします/);

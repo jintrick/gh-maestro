@@ -5,6 +5,9 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
+const lifecycle = require('../scripts/process-lifecycle');
+const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
+lifecycle.getProcessStartTime = () => TEST_PROCESS_START_TIME;
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'spawn-worker.js');
 const {
   shouldPruneStaleWorker,
@@ -20,6 +23,79 @@ const os = require('os');
 const TEST_WORKSPACE = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-test-ws-'));
 const TEST_SESSION_ID = 'test-valid-session-uuid';
 readStateLib.initializeState(TEST_WORKSPACE, 'orchestrator', { sessionId: TEST_SESSION_ID });
+
+// 実CLIのargv境界は維持しつつ、各子プロセスのモジュール初期化で発生する
+// WindowsのWMI照会だけを固定値へ差し替える。PID再利用を含む実照合は
+// tests/process-lifecycle.test.js の専用ケースで実行する。
+const FAST_CLI_PRELOAD = (() => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-spawn-cli-preload-'));
+  const file = path.join(dir, 'preload.js');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
+  const lifecyclePath = require.resolve('../scripts/process-lifecycle');
+  const leasePath = require.resolve('../scripts/shared/worker-lease');
+  const statusPanePath = require.resolve('../scripts/shared/ensure-status-pane');
+  const supervisorPath = require.resolve('../scripts/shared/ensure-worker-supervisor');
+  const source = [
+    "'use strict';",
+    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
+    `const fixedStartTime = ${JSON.stringify(TEST_PROCESS_START_TIME)};`,
+    'const realExecSync = childProcess.execSync;',
+    'const isAlive = (pid) => {',
+    '  try { process.kill(Number(pid), 0); return true; }',
+    "  catch (e) { return e && e.code !== 'ESRCH'; }",
+    '};',
+    'childProcess.execSync = (command, opts) => {',
+    "  if (String(command).includes('Get-CimInstance Win32_Process')) {",
+    '    const match = /ProcessId=(\\d+)/.exec(String(command));',
+    '    return match && isAlive(Number(match[1])) ? `${fixedStartTime}\\n` : "";',
+    '  }',
+    '  return realExecSync(command, opts);',
+    '};',
+    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
+    'lifecycle.getProcessStartTime = () => fixedStartTime;',
+    `const lease = require(${JSON.stringify(leasePath)});`,
+    'lease._setGetProcessStartTime(() => fixedStartTime);',
+    `const statusPane = require(${JSON.stringify(statusPanePath)});`,
+    "statusPane.ensureStatusPane = () => ({ ok: false, stage: 'test', error: 'injected' });",
+    `const supervisor = require(${JSON.stringify(supervisorPath)});`,
+    'supervisor._setSpawn(() => ({ pid: 99990, on: () => {}, unref: () => {} }));',
+    'supervisor._setFindRunningInstance(() => null);',
+    'supervisor._setFindSessionRootPid(() => null);',
+    'supervisor._setIsResidentLeaseLive(() => false);',
+  ].join('\n');
+  fs.writeFileSync(file, source, 'utf8');
+  process.once('exit', () => {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  });
+  return file;
+})();
+
+// Issue #425 のCLI統合テストは各ケースのworkspaceを分離したまま、同じ最小Git fixtureを
+// コピーして使う。ケースごとの git init/config/add/commit は、検証対象ではない固定準備であり、
+// Windowsでは子プロセス待ちを積み上げる。実プロセス・実argv・失敗時のrollback検証は維持する。
+let gitTemplate;
+function ensureGitTemplate() {
+  if (gitTemplate) return;
+  gitTemplate = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-spawn-git-template-'));
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: gitTemplate, encoding: 'utf8' });
+    assert.equal(result.status, 0, `git ${args.join(' ')} failed: ${result.stderr}`);
+  };
+  git('init', '-q');
+  git('config', 'user.email', 'test@example.com');
+  git('config', 'user.name', 'test');
+  fs.writeFileSync(path.join(gitTemplate, 'README.md'), '# test\n', 'utf8');
+  git('add', '.');
+  git('commit', '-qm', 'initial commit');
+  process.once('exit', () => {
+    try { fs.rmSync(gitTemplate, { recursive: true, force: true }); } catch {}
+  });
+}
+
+function copyGitTemplate(workspace) {
+  ensureGitTemplate();
+  fs.cpSync(gitTemplate, workspace, { recursive: true });
+}
 
 process.on('exit', () => {
   try {
@@ -42,7 +118,7 @@ function run(args, env = {}) {
     }
     effectiveArgs.push('--session-id', TEST_SESSION_ID);
   }
-  return spawnSync(process.execPath, [SCRIPT, ...effectiveArgs], {
+  return spawnSync(process.execPath, ['-r', FAST_CLI_PRELOAD, SCRIPT, ...effectiveArgs], {
     encoding: 'utf8',
     env: { ...process.env, ...env },
   });
@@ -253,9 +329,9 @@ test('--help はUsageを表示して終了コード0', () => {
 });
 
 test('-h はUsageを表示して終了コード0', () => {
-  const r = run(['-h'], BASE_ENV);
-  assert.equal(r.status, 0);
-  assert.match(r.stdout, /Usage: node spawn-worker\.js/);
+  const r = parseWorkerArgs(['-h']);
+  assert.equal(r.help, true);
+  assert.deepEqual(r.errors, []);
 });
 
 // ── --prompt-file ─────────────────────────────────────────────────────────
@@ -274,23 +350,15 @@ test('--prompt-file で存在しないファイルを指定するとエラー終
 });
 
 test('--short-prompt と --prompt-file を同時指定するとエラー終了する', () => {
-  const fs = require('fs');
-  const os = require('os');
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-promptfile-'));
-  const promptFile = path.join(tmp, 'prompt.md');
-  fs.writeFileSync(promptFile, 'こんにちは');
-  try {
-    const r = run([
-      '--skill', 'gh-maestro-base',
-      '--issue', '1', '--description', 'test', '--repo', 'o/r',
-      '--short-prompt', 'inline prompt',
-      '--prompt-file', promptFile,
-    ], BASE_ENV);
-    assert.notEqual(r.status, 0);
-    assert.match(r.stderr, /--short-prompt と --prompt-file は同時に指定できません/);
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
+  const r = parseWorkerArgs([
+    '--skill', 'gh-maestro-base',
+    '--issue', '1', '--description', 'test', '--repo', 'o/r',
+    '--short-prompt', 'inline prompt',
+    '--prompt-file', 'C:\\tmp\\prompt.md',
+    '--session-id', TEST_SESSION_ID,
+  ]);
+  assert.equal(r.help, false);
+  assert.match(r.errors.map(e => e.message).join('\n'), /--short-prompt と --prompt-file は同時に指定できません/);
 });
 
 test('--prompt-file の内容が gh-maestro-base の必須チェックを満たす（バリデーションを通過する）', () => {
@@ -330,46 +398,48 @@ test('--short-prompt は短い安全なメッセージを受け付ける', () =>
 
 test('--short-prompt は改行またはシェル特殊文字を拒否して --prompt-file へ誘導する', () => {
   for (const prompt of ['first\nsecond', 'run `command`', 'value $HOME', 'quote "text"', 'path\\name']) {
-    const r = run([
+    const r = parseWorkerArgs([
       '--skill', 'gh-maestro-coder',
       '--issue', '1', '--description', 'test', '--repo', 'o/r',
       '--short-prompt', prompt,
+      '--session-id', TEST_SESSION_ID,
     ], BASE_ENV);
-    assert.notEqual(r.status, 0, prompt);
-    assert.match(r.stderr, /--short-prompt は1行/);
-    assert.match(r.stderr, /--prompt-file/);
+    assert.equal(r.help, false, prompt);
+    assert.match(r.errors.map(e => e.message).join('\n'), /--short-prompt は1行/, prompt);
+    assert.match(r.errors.map(e => e.message).join('\n'), /--prompt-file/, prompt);
   }
 });
 
 test('廃止した --prompt は未知のフラグとして拒否する', () => {
-  const r = run([
+  const r = parseWorkerArgs([
     '--skill', 'gh-maestro-coder',
     '--issue', '1', '--description', 'test', '--repo', 'o/r',
     '--prompt', 'legacy prompt',
+    '--session-id', TEST_SESSION_ID,
   ], BASE_ENV);
-  assert.notEqual(r.status, 0);
-
-  assert.match(r.stderr, /未知のフラグ/);
-  assert.match(r.stderr, /--prompt/);
+  assert.equal(r.help, false);
+  assert.match(r.errors.map(e => e.message).join('\n'), /未知のフラグ/);
+  assert.match(r.errors.map(e => e.message).join('\n'), /--prompt/);
 });
 // ── 未知フラグの拒否 ──────────────────────────────────────────────────────────
 
 test('未知のフラグを指定するとエラー終了する（黙って無視しない）', () => {
-  const r = run([
+  const r = parseWorkerArgs([
     '--skill', 'gh-maestro-coder',
     '--issue', '1', '--description', 'test', '--repo', 'o/r',
     '--typo-flag', 'value',
+    '--session-id', TEST_SESSION_ID,
   ], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /未知のフラグ/);
-  assert.match(r.stderr, /--typo-flag/);
+  assert.equal(r.help, false);
+  assert.match(r.errors.map(e => e.message).join('\n'), /未知のフラグ/);
+  assert.match(r.errors.map(e => e.message).join('\n'), /--typo-flag/);
 });
 
 test('WEZTERM_PANE が未設定でも WEZTERM 由来の理由では失敗しない（headless化で不要になった）', () => {
   const envWithoutPane = { ...process.env };
   delete envWithoutPane.WEZTERM_PANE;
   // 副作用（worktree作成・エージェント起動）の手前で止めるため、実在しない --agent を渡す
-  const r = spawnSync(process.execPath, [SCRIPT, '--skill', 'gh-maestro-coder', '--issue', '1',
+  const r = spawnSync(process.execPath, ['-r', FAST_CLI_PRELOAD, SCRIPT, '--skill', 'gh-maestro-coder', '--issue', '1',
     '--description', 'test', '--repo', 'o/r', '--agent', 'nonexistent-agent-for-test'],
   { encoding: 'utf8', env: envWithoutPane });
 
@@ -482,15 +552,19 @@ test('--agent で存在しないエージェントを指定した場合はエラ
 test('--description の値が"--issue"文字列と一致する場合、値欠落として安全にエラー終了する（フラグ誤認しない）', () => {
   // parseFlags は '--'始まりの値を許容しない設計（safe-by-default）。
   // 誤ってフラグとして解釈されるのではなく、値欠落エラーとして扱われることを確認する。
-  const r = run(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', '--issue', '--repo', 'o/r'], BASE_ENV);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /--description/);
+  const r = parseWorkerArgs([
+    '--skill', 'gh-maestro-coder', '--issue', '1', '--description', '--issue', '--repo', 'o/r',
+    '--session-id', TEST_SESSION_ID,
+  ]);
+  assert.equal(r.help, false);
+  assert.match(r.errors.map(e => e.message).join('\n'), /--description/);
 });
 
 test('config.json に定義されていてもバイナリが PATH になければエラー終了する', () => {
   const fs = require('fs');
   const os = require('os');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-bin-'));
+  const preload = path.join(tmp, 'preload-agent-exec.js');
   try {
     fs.mkdirSync(path.join(tmp, '.gh-maestro'), { recursive: true });
     // agent-defaults.json にある claude を上書きして存在しないバイナリを指定
@@ -503,11 +577,44 @@ test('config.json に定義されていてもバイナリが PATH になけれ�
       }),
     );
 
-    const r = run([
+    // checkAgentExists のログインシェル境界は別テストで実プロセスを検証するため、
+    // ここでは「spawn-worker が設定したコマンドを存在確認へ渡す」経路だけを保ち、
+    // 高価な pwsh 起動は引数を検証する注入モックに置き換える。
+    fs.writeFileSync(
+      preload,
+      `
+      const agentExec = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'agent-exec.js'))});
+      let calls = 0;
+      agentExec._setSpawnSync((command, args) => {
+        calls++;
+        if (process.platform === 'win32') {
+          if (command !== 'pwsh' || !Array.isArray(args) || args[0] !== '-NoLogo') {
+            throw new Error('unexpected checkAgentExists argv');
+          }
+          if (calls === 1 && (args[1] !== '-NoProfile' || args[2] !== '-Command'
+            || !String(args[3]).includes("Get-Command 'nonexistent-cmd-xyz'"))) {
+            throw new Error('unexpected pwsh no-profile argv');
+          }
+          if (calls === 2 && (args[1] !== '-EncodedCommand' || !args[2])) {
+            throw new Error('unexpected pwsh profile argv');
+          }
+        } else if (command !== 'bash' || args[0] !== '-lc'
+          || !String(args[1]).includes("command -v 'nonexistent-cmd-xyz'")) {
+          throw new Error('unexpected shell check argv');
+        }
+        return { status: 1 };
+      });
+      `,
+      'utf8',
+    );
+
+    const r = spawnSync(process.execPath, ['-r', FAST_CLI_PRELOAD, '-r', preload, SCRIPT,
       '--skill', 'gh-maestro-coder',
       '--issue', '1', '--description', 'test', '--repo', 'o/r',
       '--agent', 'claude',
-    ], { HOME: tmp, USERPROFILE: tmp });
+      '--workspace', TEST_WORKSPACE,
+      '--session-id', TEST_SESSION_ID,
+    ], { encoding: 'utf8', env: { ...process.env, HOME: tmp, USERPROFILE: tmp } });
 
     assert.notEqual(r.status, 0, 'exit code should be non-zero');
     assert.match(r.stderr, /見つかりません/, 'error should be about missing agent command');
@@ -781,13 +888,8 @@ test('junction 作成失敗時 (missing 非空) はワーカーを起動せず�
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-nm-fail-home-'));
   const preload = path.join(home, 'preload-link-fail.js');
   try {
-    // 1. git repo 初期化 & orchestrator msg-state 初期化
-    spawnSync('git', ['init'], { cwd: ws, stdio: 'pipe' });
-    spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ws, stdio: 'pipe' });
-    spawnSync('git', ['config', 'user.name', 'test'], { cwd: ws, stdio: 'pipe' });
-    fs.writeFileSync(path.join(ws, 'README.md'), '# test\n');
-    spawnSync('git', ['add', '.'], { cwd: ws, stdio: 'pipe' });
-    spawnSync('git', ['commit', '-m', 'initial commit'], { cwd: ws, stdio: 'pipe' });
+    // 1. 共有fixtureをコピー & orchestrator msg-state 初期化
+    copyGitTemplate(ws);
     readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
 
     // 2. ~/.gh-maestro/config.json にテスト用エージェント定義
@@ -812,6 +914,8 @@ test('junction 作成失敗時 (missing 非空) はワーカーを起動せず�
       preload,
       `
       const path = require('path');
+      const workerLease = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'worker-lease.js'))});
+      workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
       const closedGuard = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'closed-pr-guard.js'))});
       closedGuard.checkClosedPr = () => ({ ok: true, closed: false, prNumber: null });
       const ghComments = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'gh-comments.js'))});
@@ -835,7 +939,7 @@ test('junction 作成失敗時 (missing 非空) はワーカーを起動せず�
 
     const r = spawnSync(
       process.execPath,
-      ['-r', preload, SCRIPT,
+      ['-r', FAST_CLI_PRELOAD, '-r', preload, SCRIPT,
         '--skill', 'gh-maestro-coder',
         '--issue', '425',
         '--description', 'failjunction',
@@ -874,12 +978,7 @@ test('linkNodeModules の予期しない例外発生時もワーカーを起動�
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-nm-throw-home-'));
   const preload = path.join(home, 'preload-link-throw.js');
   try {
-    spawnSync('git', ['init'], { cwd: ws, stdio: 'pipe' });
-    spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ws, stdio: 'pipe' });
-    spawnSync('git', ['config', 'user.name', 'test'], { cwd: ws, stdio: 'pipe' });
-    fs.writeFileSync(path.join(ws, 'README.md'), '# test\n');
-    spawnSync('git', ['add', '.'], { cwd: ws, stdio: 'pipe' });
-    spawnSync('git', ['commit', '-m', 'initial commit'], { cwd: ws, stdio: 'pipe' });
+    copyGitTemplate(ws);
     readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
 
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
@@ -901,6 +1000,8 @@ test('linkNodeModules の予期しない例外発生時もワーカーを起動�
     fs.writeFileSync(
       preload,
       `
+      const workerLease = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'worker-lease.js'))});
+      workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
       const closedGuard = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'closed-pr-guard.js'))});
       closedGuard.checkClosedPr = () => ({ ok: true, closed: false, prNumber: null });
       const ghComments = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'gh-comments.js'))});
@@ -919,7 +1020,7 @@ test('linkNodeModules の予期しない例外発生時もワーカーを起動�
 
     const r = spawnSync(
       process.execPath,
-      ['-r', preload, SCRIPT,
+      ['-r', FAST_CLI_PRELOAD, '-r', preload, SCRIPT,
         '--skill', 'gh-maestro-coder',
         '--issue', '425',
         '--description', 'throwjunction',
@@ -953,12 +1054,7 @@ test('junction 作成で missing が空かつ skipped が非空の場合、ワ�
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-nm-skip-home-'));
   const preload = path.join(home, 'preload-link-skip.js');
   try {
-    spawnSync('git', ['init'], { cwd: ws, stdio: 'pipe' });
-    spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ws, stdio: 'pipe' });
-    spawnSync('git', ['config', 'user.name', 'test'], { cwd: ws, stdio: 'pipe' });
-    fs.writeFileSync(path.join(ws, 'README.md'), '# test\n');
-    spawnSync('git', ['add', '.'], { cwd: ws, stdio: 'pipe' });
-    spawnSync('git', ['commit', '-m', 'initial commit'], { cwd: ws, stdio: 'pipe' });
+    copyGitTemplate(ws);
     readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
 
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
@@ -982,6 +1078,8 @@ test('junction 作成で missing が空かつ skipped が非空の場合、ワ�
       preload,
       `
       const path = require('path');
+      const workerLease = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'worker-lease.js'))});
+      workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
       const closedGuard = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'closed-pr-guard.js'))});
       closedGuard.checkClosedPr = () => ({ ok: true, closed: false, prNumber: null });
       const ghComments = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'gh-comments.js'))});
@@ -1017,7 +1115,7 @@ test('junction 作成で missing が空かつ skipped が非空の場合、ワ�
 
     const r = spawnSync(
       process.execPath,
-      ['-r', preload, SCRIPT,
+      ['-r', FAST_CLI_PRELOAD, '-r', preload, SCRIPT,
         '--skill', 'gh-maestro-coder',
         '--issue', '425',
         '--description', 'skipjunction',
@@ -1053,12 +1151,7 @@ test('junction 作成で linked / skipped / missing がいずれも空の場合�
   const worktreeDir = path.join(ws, '.gh-maestro', 'worktrees', workerName);
   const workersPath = path.join(ws, '.gh-maestro', 'workers.json');
   try {
-    spawnSync('git', ['init'], { cwd: ws, stdio: 'pipe' });
-    spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ws, stdio: 'pipe' });
-    spawnSync('git', ['config', 'user.name', 'test'], { cwd: ws, stdio: 'pipe' });
-    fs.writeFileSync(path.join(ws, 'README.md'), '# test\n');
-    spawnSync('git', ['add', '.'], { cwd: ws, stdio: 'pipe' });
-    spawnSync('git', ['commit', '-m', 'initial commit'], { cwd: ws, stdio: 'pipe' });
+    copyGitTemplate(ws);
     readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
 
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
@@ -1082,6 +1175,8 @@ test('junction 作成で linked / skipped / missing がいずれも空の場合�
       preload,
       `
       const path = require('path');
+      const workerLease = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'worker-lease.js'))});
+      workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
       const closedGuard = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'closed-pr-guard.js'))});
       closedGuard.checkClosedPr = () => ({ ok: true, closed: false, prNumber: null });
       const ghComments = require(${JSON.stringify(path.join(__dirname, '..', 'scripts', 'shared', 'gh-comments.js'))});
@@ -1113,7 +1208,7 @@ test('junction 作成で linked / skipped / missing がいずれも空の場合�
 
     const r = spawnSync(
       process.execPath,
-      ['-r', preload, SCRIPT,
+      ['-r', FAST_CLI_PRELOAD, '-r', preload, SCRIPT,
         '--skill', 'gh-maestro-coder',
         '--issue', '425',
         '--description', 'emptyjunction',
@@ -1149,7 +1244,7 @@ test('Issue #444 受入条件1・2: --session-id がない場合は副作用前�
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-guard-noid-'));
   try {
     readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-uuid' });
-    const r = spawnSync(process.execPath, [SCRIPT,
+    const r = spawnSync(process.execPath, ['-r', FAST_CLI_PRELOAD, SCRIPT,
       '--skill', 'gh-maestro-coder',
       '--issue', '444',
       '--description', 'test-guard',
@@ -1171,7 +1266,7 @@ test('Issue #444 受入条件1・2: 不一致の --session-id の場合は副作
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-guard-mismatch-'));
   try {
     readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'actual-uuid-1111' });
-    const r = spawnSync(process.execPath, [SCRIPT,
+    const r = spawnSync(process.execPath, ['-r', FAST_CLI_PRELOAD, SCRIPT,
       '--skill', 'gh-maestro-coder',
       '--issue', '444',
       '--description', 'test-guard',
@@ -1194,7 +1289,7 @@ test('Issue #444 受入条件1・2: orchestrator.json の sessionId が空の場
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-guard-empty-'));
   try {
     readStateLib.initializeState(ws, 'orchestrator', { sessionId: '' });
-    const r = spawnSync(process.execPath, [SCRIPT,
+    const r = spawnSync(process.execPath, ['-r', FAST_CLI_PRELOAD, SCRIPT,
       '--skill', 'gh-maestro-coder',
       '--issue', '444',
       '--description', 'test-guard',
@@ -1215,7 +1310,7 @@ test('Issue #444 受入条件4: 環境変数の偽装（例: GH_MAESTRO_WORKER�
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-guard-forge-'));
   try {
     readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'real-session-uuid' });
-    const r = spawnSync(process.execPath, [SCRIPT,
+    const r = spawnSync(process.execPath, ['-r', FAST_CLI_PRELOAD, SCRIPT,
       '--skill', 'gh-maestro-coder',
       '--issue', '444',
       '--description', 'test-guard',
@@ -1250,7 +1345,7 @@ test('Issue #444 受入条件5: 古いセッションIDは新しいセッショ�
     readStateLib.initializeState(ws, 'orchestrator', { sessionId: newSessionId });
 
     // 古い sessionId での実行は拒否される
-    const rOld = spawnSync(process.execPath, [SCRIPT,
+    const rOld = spawnSync(process.execPath, ['-r', FAST_CLI_PRELOAD, SCRIPT,
       '--skill', 'gh-maestro-coder',
       '--issue', '444',
       '--description', 'test-guard',
@@ -1263,7 +1358,7 @@ test('Issue #444 受入条件5: 古いセッションIDは新しいセッショ�
     assert.match(rOld.stderr, /セッションIDが無効または一致しません/);
 
     // 新しい sessionId はセッション同一性検証を通過する（後段のエージェント解決エラーで止まる）
-    const rNew = spawnSync(process.execPath, [SCRIPT,
+    const rNew = spawnSync(process.execPath, ['-r', FAST_CLI_PRELOAD, SCRIPT,
       '--skill', 'gh-maestro-coder',
       '--issue', '444',
       '--description', 'test-guard',

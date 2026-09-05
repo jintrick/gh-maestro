@@ -29,9 +29,13 @@ function withGitProject(fn) {
 }
 
 let gitTemplate;
+let gitOrigin;
 function ensureGitTemplate() {
   if (gitTemplate) return;
   gitTemplate = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-setup-template-'));
+  gitOrigin = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-setup-origin-'));
+  const origin = spawnSync('git', ['init', '--bare', '-q'], { cwd: gitOrigin, encoding: 'utf8' });
+  assert.equal(origin.status, 0, `git init --bare failed: ${origin.stderr}`);
   const git = (...args) => {
     const r = spawnSync('git', args, { cwd: gitTemplate, encoding: 'utf8' });
     assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
@@ -44,12 +48,59 @@ function ensureGitTemplate() {
   git('add', 'README.md');
   git('commit', '-qm', 'init');
   git('branch', '-m', 'main');
+  git('remote', 'add', 'origin', gitOrigin);
+  git('push', '-q', 'origin', 'main');
+  git('branch', 'dev');
+  git('push', '-q', 'origin', 'dev');
   fs.mkdirSync(path.join(gitTemplate, '.gh-maestro'), { recursive: true });
   fs.writeFileSync(path.join(gitTemplate, '.gh-maestro', 'setup-ok'), '', 'utf8');
-  process.once('exit', () => fs.rmSync(gitTemplate, { recursive: true, force: true }));
+  process.once('exit', () => {
+    try { fs.rmSync(gitTemplate, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(gitOrigin, { recursive: true, force: true }); } catch {}
+  });
 }
 
 function runSetup(dir) {
+  const originalArgv = process.argv;
+  const originalExit = process.exit;
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  let stdout = '';
+  let stderr = '';
+  const scriptModule = require.resolve(SCRIPT);
+  process.argv = [process.execPath, SCRIPT, dir];
+  console.log = (...args) => { stdout += `${args.join(' ')}\n`; };
+  console.warn = (...args) => { stderr += `${args.join(' ')}\n`; };
+  console.error = (...args) => { stderr += `${args.join(' ')}\n`; };
+  process.exit = (code = 0) => {
+    const error = new Error(`process.exit(${code})`);
+    error.exitCode = code;
+    throw error;
+  };
+  try {
+    delete require.cache[scriptModule];
+    require(scriptModule).main();
+    return { status: 0, stdout, stderr };
+  } catch (error) {
+    if (error && Number.isInteger(error.exitCode)) {
+      return { status: error.exitCode, stdout, stderr };
+    }
+    throw error;
+  } finally {
+    delete require.cache[scriptModule];
+    process.argv = originalArgv;
+    process.exit = originalExit;
+    console.log = originalLog;
+    console.warn = originalWarn;
+    console.error = originalError;
+  }
+}
+
+// 少なくとも1件は実CLIのargv・require.main経路を維持する。その他の成功系は
+// 同じ main() をテストプロセス内で呼び、各ケースのGit fixtureと副作用の検証を
+// 残したままNodeプロセス起動の固定費だけを省く。
+function runSetupCli(dir) {
   return spawnSync(process.execPath, [SCRIPT, dir], { cwd: dir, encoding: 'utf8' });
 }
 
@@ -95,7 +146,7 @@ function readHook(dir, name) {
 
 test('新規プロジェクトにはsync-rulesフックのみを設置し、checksフックは設置しない', () => {
   withGitProject((dir) => {
-    const r = runSetup(dir);
+    const r = runSetupCli(dir);
     assert.equal(r.status, 0, r.stderr);
 
     const preCommit = readHook(dir, 'pre-commit');

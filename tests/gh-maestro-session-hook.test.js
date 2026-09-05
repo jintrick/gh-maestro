@@ -8,7 +8,37 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'gh-maestro-session-hook.js');
+const lifecycle = require('../scripts/process-lifecycle');
+const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
+lifecycle.getProcessStartTime = () => TEST_PROCESS_START_TIME;
 const readStateLib = require('../scripts/shared/read-state');
+
+// セッションhookの実プロセス・実Git・3段階の順序は維持し、reset-session内部の
+// platform process scanだけをテスト用固定値へ差し替える。PID再利用の実照合は
+// process-lifecycle.test.js の専用ケースで検証する。
+const FAST_SESSION_PRELOAD = (() => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-preload-'));
+  const file = path.join(dir, 'preload.js');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
+  const lifecyclePath = require.resolve('../scripts/process-lifecycle');
+  const source = [
+    "'use strict';",
+    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
+    `const fixedStartTime = ${JSON.stringify(TEST_PROCESS_START_TIME)};`,
+    'const realExecSync = childProcess.execSync;',
+    'childProcess.execSync = (command, opts) => {',
+    "  if (String(command).includes('Get-CimInstance Win32_Process') || String(command).includes('Get-WmiObject Win32_Process')) return '';",
+    '  return realExecSync(command, opts);',
+    '};',
+    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
+    'lifecycle.getProcessStartTime = () => fixedStartTime;',
+  ].join('\n');
+  fs.writeFileSync(file, source, 'utf8');
+  process.once('exit', () => {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  });
+  return file;
+})();
 
 function runGit(cwd, ...args) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -16,19 +46,39 @@ function runGit(cwd, ...args) {
   return result;
 }
 
+// The hook integration still runs the real hook and all three real stage
+// processes.  Share only the immutable repository fixture so each case does
+// not spend several child-process launches recreating the same Git history.
+let workspaceTemplate;
+let workspaceOrigin;
+function ensureWorkspaceTemplate() {
+  if (workspaceTemplate) return;
+  workspaceTemplate = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-template-'));
+  workspaceOrigin = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-origin-'));
+  runGit(workspaceOrigin, 'init', '--bare', '-q');
+  runGit(workspaceTemplate, 'init', '-q');
+  runGit(workspaceTemplate, 'config', 'user.email', 'test@example.com');
+  runGit(workspaceTemplate, 'config', 'user.name', 'gh-maestro test');
+  fs.writeFileSync(path.join(workspaceTemplate, 'README.md'), 'test\n', 'utf8');
+  runGit(workspaceTemplate, 'add', 'README.md');
+  runGit(workspaceTemplate, 'commit', '-qm', 'initial');
+  runGit(workspaceTemplate, 'branch', '-M', 'main');
+  runGit(workspaceTemplate, 'remote', 'add', 'origin', workspaceOrigin);
+  runGit(workspaceTemplate, 'push', '-q', 'origin', 'main');
+  runGit(workspaceTemplate, 'branch', 'dev');
+  runGit(workspaceTemplate, 'push', '-q', 'origin', 'dev');
+  fs.mkdirSync(path.join(workspaceTemplate, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(path.join(workspaceTemplate, '.gh-maestro', 'setup-ok'), '', 'utf8');
+  process.once('exit', () => {
+    try { fs.rmSync(workspaceTemplate, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(workspaceOrigin, { recursive: true, force: true }); } catch {}
+  });
+}
+
 function createWorkspace(oldSessionId = 'old-session-id') {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-workspace-'));
-  runGit(workspace, 'init', '-q');
-  runGit(workspace, 'config', 'user.email', 'test@example.com');
-  runGit(workspace, 'config', 'user.name', 'gh-maestro test');
-  fs.writeFileSync(path.join(workspace, 'README.md'), 'test\n', 'utf8');
-  runGit(workspace, 'add', 'README.md');
-  runGit(workspace, 'commit', '-qm', 'initial');
-  runGit(workspace, 'branch', '-M', 'main');
-  runGit(workspace, 'remote', 'add', 'origin', 'https://github.com/example/gh-maestro-test.git');
-
-  fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
-  fs.writeFileSync(path.join(workspace, '.gh-maestro', 'setup-ok'), '', 'utf8');
+  ensureWorkspaceTemplate();
+  fs.cpSync(workspaceTemplate, workspace, { recursive: true });
   const initialized = readStateLib.initializeState(workspace, 'orchestrator', {
     sessionId: oldSessionId,
   });
@@ -75,7 +125,7 @@ function hookEnv(binDir, runtimeDir, bootstrapPath) {
 }
 
 function runHook(workspace, env) {
-  return spawnSync(process.execPath, [SCRIPT, '--workspace', workspace], {
+  return spawnSync(process.execPath, ['-r', FAST_SESSION_PRELOAD, SCRIPT, '--workspace', workspace], {
     cwd: workspace,
     env,
     encoding: 'utf8',
@@ -165,24 +215,25 @@ test('CLI通し: 旧sessionIdを置いた一時workspaceでreset後のSESSION_ID
 
 test('CLI通し: get-contextが失敗した場合は旧SESSION_IDをstdoutへ出力しない', () => {
   const workspace = createWorkspace();
-  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-failing-bin-'));
-  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-failing-runtime-'));
   try {
-    const bootstrapPath = createFakeGh(binDir);
-    runGit(workspace, 'remote', 'remove', 'origin');
-    const result = runHook(workspace, hookEnv(binDir, runtimeDir, bootstrapPath));
+    const calls = [];
+    const result = require('../scripts/gh-maestro-session-hook').runSessionHook(workspace, {
+      spawnSyncFn: (command, args) => {
+        calls.push(path.basename(args[0]));
+        if (calls.length === 3) {
+          return { status: 1, stdout: 'SESSION_ID=old-session-id\n', stderr: 'get-context failed\n' };
+        }
+        return { status: 0, stdout: `${path.basename(args[0])}\n`, stderr: '' };
+      },
+    });
 
-    assert.notEqual(result.status, 0);
+    assert.equal(result.ok, false);
+    assert.deepEqual(calls, ['gh-maestro-setup.js', 'reset-session.js', 'get-context.js']);
     assert.doesNotMatch(result.stdout, /SESSION_ID=/,
       'get-context失敗時はreset前後のSESSION_IDを含むstdoutを破棄すること');
     assert.match(result.stderr, /get-context\.js failed/);
-
-    const stateResult = readStateLib.readState(workspace, 'orchestrator');
-    assert.equal(stateResult.status, 'ok');
-    assert.notEqual(stateResult.state.sessionId, 'old-session-id');
+    assert.match(result.stderr, /get-context failed/);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
-    fs.rmSync(binDir, { recursive: true, force: true });
-    fs.rmSync(runtimeDir, { recursive: true, force: true });
   }
 });

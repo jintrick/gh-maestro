@@ -11,8 +11,50 @@ const { cleanSpawnEnv } = require('./_spawn-env');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'stop-worker.js');
 
-function run(args) {
-  return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env: cleanSpawnEnv() });
+// 停止対象の実プロセスツリーとtaskkill境界は実際に通す。一方、子CLI内部の
+// 起動時刻取得は、親テストが対象PIDについて一度だけ取得した値を環境経由で
+// 渡して再利用する。これによりWMIのプロセス起動コストを削減しつつ、通常系は
+// 実PIDの起動時刻一致、拒否系は同じ実PIDと過去時刻の不一致を検証できる。
+const TEST_START_TIME_ENV = 'GHM_TEST_WORKER_START_TIME';
+const FAST_WORKER_CLI_PRELOAD = (() => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-stop-worker-preload-'));
+  const file = path.join(dir, 'preload.js');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
+  const lifecyclePath = require.resolve('../scripts/process-lifecycle');
+  const source = [
+    "'use strict';",
+    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
+    'const realExecSync = childProcess.execSync;',
+    'const isAlive = (pid) => {',
+    '  try { process.kill(Number(pid), 0); return true; }',
+    "  catch (e) { return e && e.code !== 'ESRCH'; }",
+    '};',
+    'childProcess.execSync = (command, opts) => {',
+    "  if (String(command).includes('Get-CimInstance Win32_Process')) {",
+    '    const match = /ProcessId=(\\d+)/.exec(String(command));',
+    '    const startTime = process.env.GHM_TEST_WORKER_START_TIME;',
+    '    return match && startTime && isAlive(Number(match[1])) ? `${startTime}\\n` : "";',
+    '  }',
+    '  return realExecSync(command, opts);',
+    '};',
+    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
+    'lifecycle.getProcessStartTime = (pid) => {',
+    '  const value = process.env.GHM_TEST_WORKER_START_TIME;',
+    '  return value && isAlive(pid) ? value : null;',
+    '};',
+  ].join('\n');
+  fs.writeFileSync(file, source, 'utf8');
+  process.once('exit', () => {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  });
+  return file;
+})();
+
+function run(args, env = {}) {
+  return spawnSync(process.execPath, ['-r', FAST_WORKER_CLI_PRELOAD, SCRIPT, ...args], {
+    encoding: 'utf8',
+    env: { ...cleanSpawnEnv(), ...env },
+  });
 }
 
 function withTempDir(fn) {
@@ -157,7 +199,7 @@ test('stop-worker: 正常系: 同一性が一致するプロセスツリー（�
         'utf8'
       );
 
-      const r = run(['test-worker', '--workspace', dir]);
+      const r = run(['test-worker', '--workspace', dir], { [TEST_START_TIME_ENV]: startTime });
       assert.equal(r.status, 0);
       assert.match(r.stderr, /終了しました/);
 
@@ -206,7 +248,9 @@ test('stop-worker: 拒否側: PIDは生存しているが起動時刻が不一�
         'utf8'
       );
 
-      const r = run(['mismatch-worker', '--workspace', dir]);
+      const actualStartTime = getProcessStartTime(parentPid);
+      assert.ok(actualStartTime, '実プロセスの起動時刻を取得できること');
+      const r = run(['mismatch-worker', '--workspace', dir], { [TEST_START_TIME_ENV]: actualStartTime });
       assert.notEqual(r.status, 0, '同一性不一致時は終了コード1でエラーになること');
       assert.match(r.stderr, /同一性確認に失敗しました/);
 
@@ -244,7 +288,9 @@ test('stop-worker: 〈--issue + --skill〉指定で解決して停止できる',
         'utf8'
       );
 
-      const r = run(['--issue', '30', '--skill', 'gh-maestro-coder', '--workspace', dir]);
+      const r = run(['--issue', '30', '--skill', 'gh-maestro-coder', '--workspace', dir], {
+        [TEST_START_TIME_ENV]: startTime,
+      });
       assert.equal(r.status, 0);
       assert.equal(isProcessAlive(parentPid), false, '親プロセスが終了していること');
       assert.equal(isProcessAlive(childPid), false, '子プロセスが終了していること');

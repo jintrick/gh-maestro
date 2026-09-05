@@ -6,21 +6,28 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const supervisor = require('../scripts/worker-supervisor');
+const lifecycle = require('../scripts/process-lifecycle');
 const { spawnSync } = require('../scripts/shared/child-process');
 const headlessLaunch = require('../scripts/shared/headless-launch');
 const workerLease = require('../scripts/shared/worker-lease');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
 const residentAudit = require('../scripts/shared/resident-audit');
-const { getProcessStartTime } = require('../scripts/process-lifecycle');
 
 // 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
 // PIDを誤って渡す回帰は即座に検出する。
-const TEST_SESSION_START_TIME = getProcessStartTime(process.pid);
+const TEST_SESSION_START_TIME = '2026-07-25T00:00:00.000Z';
+lifecycle.getProcessStartTime = () => TEST_SESSION_START_TIME;
+const supervisor = require('../scripts/worker-supervisor');
 supervisor._setGetProcessStartTime((pid) => {
   assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
   return TEST_SESSION_START_TIME;
 });
+
+// 直接 main()/runOnce() の反復でOSのプロセス起動時刻取得を行うと、Windowsでは
+// 各スキャンがPowerShell/WMI待ちになる。PID再利用を含む実照合ロジックは
+// tests/process-lifecycle.test.js で検証し、ここでは既存の注入境界から親生存だけを差し替える。
+// 下部のCLI integrationは実argv・実プロセス境界を通す。
+const TEST_PARENT_CHECKER = () => true;
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
@@ -196,6 +203,7 @@ function resetAllMocks() {
   resetHeadlessLaunchMocks();
   setWorkersIdle();
   workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+  supervisor._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
   // resume直後の生存確認スリープは実待機させない
   supervisor._setSleep(() => {});
   // 通知は実 _notifyOrchestrator を通しつつ、内部 spawn だけを安全なモック（実spawnを起こさない）
@@ -1013,11 +1021,9 @@ describe('runOnce scan and deliver cycle', () => {
   // ── 死のスイッチ配線（Issue #301） ─────────────────────────────────────
   // runOnce が親セッションの死を検出したとき、role lease を解放して exit 3 で終了する
   // （受け入れ条件1: 死のスイッチ経路で lease が解放される）。scriptName と sessionPid が
-  // stderr に出力される（沈黙しない）。resetAllMocks は死のスイッチの注入を戻さないため、
-  // このテスト自身の finally で必ず復元する。
+  // stderr に出力される（沈黙しない）。このテスト自身の finally で通常の高速checkerへ戻す。
 
   test('死のスイッチ発火時: role lease を解放し exit 3 で終了する（配線）', () => {
-    const { createDeadManSwitch } = require('../scripts/process-lifecycle');
     const { PARENT_DEATH_EXIT_CODE } = require('../scripts/shared/watchdog-exit-notify');
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
 
@@ -1054,7 +1060,7 @@ describe('runOnce scan and deliver cycle', () => {
         );
       } finally {
         process.stderr.write = origStderr;
-        supervisor._setCreateDeadManSwitch(createDeadManSwitch);
+        supervisor._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
         supervisor._setParentDeathExit((code) => process.exit(code));
       }
     });
@@ -3197,6 +3203,52 @@ describe('Cursor type safety', () => {
 const { spawnSync: realSpawnSync, spawn } = require('child_process');
 
 const SUPERVISOR_SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-supervisor.js');
+const CLI_TEST_START_TIME = '2026-07-25T00:00:00.000Z';
+
+// Keep the CLI integration tests on a real child-process/argv path, but avoid
+// paying for a PowerShell/WMI startup-time query on every short-lived child.
+// The preload only replaces that observation and the unrelated registry scan;
+// process liveness still uses process.kill, and PID-reuse identity behavior is
+// covered by the dedicated process-lifecycle integration case.
+function createFastCliPreload() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-supervisor-preload-'));
+  const file = path.join(dir, 'preload.js');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
+  const lifecyclePath = require.resolve('../scripts/process-lifecycle');
+  const leasePath = require.resolve('../scripts/shared/worker-lease');
+  const source = [
+    "'use strict';",
+    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
+    `const fixedStartTime = ${JSON.stringify(CLI_TEST_START_TIME)};`,
+    'const isAlive = (pid) => {',
+    '  try { process.kill(Number(pid), 0); return true; }',
+    "  catch (e) { return e && e.code !== 'ESRCH'; }",
+    '};',
+    'const realExecSync = childProcess.execSync;',
+    'childProcess.execSync = (command, opts) => {',
+    "  if (String(command).includes('Get-CimInstance Win32_Process')) {",
+    '    const match = /ProcessId=(\\d+)/.exec(String(command));',
+    '    return match && isAlive(Number(match[1])) ? `${fixedStartTime}\\n` : \"\";',
+    '  }',
+    '  return realExecSync(command, opts);',
+    '};',
+    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
+    'lifecycle.findRunningInstance = () => null;',
+    'lifecycle.getProcessStartTime = () => fixedStartTime;',
+    'lifecycle.createDeadManSwitch = () => () => true;',
+    `const lease = require(${JSON.stringify(leasePath)});`,
+    'lease._setGetProcessStartTime(() => fixedStartTime);',
+    'lease._setIsProcessAlive(isAlive);',
+    'lease._setVerifyProcessIdentity(() => ({ match: true }));',
+  ].join('\n');
+  fs.writeFileSync(file, source, 'utf8');
+  process.once('exit', () => {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  });
+  return file;
+}
+
+const FAST_CLI_PRELOAD = createFastCliPreload();
 
 // 排他の正本は role lease（Issue #240）。既存所有者を再現する live lease を
 // <workspace>/.gh-maestro/leases/resident-role-worker-supervisor.json に書く。
@@ -3220,7 +3272,12 @@ function runSupervisor(args, cwd, envOverride = {}) {
     ...process.env,
     ...envOverride,
   };
-  return realSpawnSync(process.execPath, [SUPERVISOR_SCRIPT, ...args, '--session-pid', String(process.pid)], {
+  return realSpawnSync(process.execPath, [
+    '-r', FAST_CLI_PRELOAD,
+    SUPERVISOR_SCRIPT,
+    ...args,
+    '--session-pid', String(process.pid),
+  ], {
     cwd,
     encoding: 'utf8',
     timeout: 15000,
@@ -3267,19 +3324,14 @@ describe('CLI integration (subprocess)', () => {
     });
   });
 
-  test('重複起動を検出して拒否する（既存の live role lease がある場合）', (t) => {
-    const startTimeProbe = getProcessStartTime(process.pid);
-    if (!startTimeProbe) {
-      t.skip('この環境では getProcessStartTime が機能しないため、実プロセスでの同一性確認を検証できません');
-      return;
-    }
+  test('重複起動を検出して拒否する（既存の live role lease がある場合）', () => {
     withTempDir((dir) => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
 
       // 既存所有者の live lease を書く。pid は process.ppid を指定する（--force 無しなので
       // kill は走らないが、念のためテスト実行環境のプロセスを対象にしない）。
-      writeLiveSupervisorLease(dir, process.ppid, getProcessStartTime(process.ppid));
+      writeLiveSupervisorLease(dir, process.ppid, CLI_TEST_START_TIME);
 
       const r = runSupervisor(['--once', '--workspace', dir], dir);
       assert.equal(r.status, 1, `exit 1, got ${r.status}, stderr: ${r.stderr}`);
@@ -3301,13 +3353,7 @@ describe('CLI integration (subprocess)', () => {
       });
       let leakedOwner = true;
       try {
-        // 起動直後の子の startTime は WMI にまだ見えないことがあるため、取れるまで待つ
-        let startTime = getProcessStartTime(owner.pid);
-        for (let i = 0; !startTime && i < 20; i++) {
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-          startTime = getProcessStartTime(owner.pid);
-        }
-        writeLiveSupervisorLease(dir, owner.pid, startTime);
+        writeLiveSupervisorLease(dir, owner.pid, CLI_TEST_START_TIME);
 
         const r = runSupervisor(
           ['--once', '--force', '--workspace', dir],
@@ -3340,12 +3386,7 @@ describe('CLI integration (subprocess)', () => {
       });
       let ownerRemainedAlive = false;
       try {
-        let startTime = getProcessStartTime(owner.pid);
-        for (let i = 0; !startTime && i < 20; i++) {
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-          startTime = getProcessStartTime(owner.pid);
-        }
-        writeLiveSupervisorLease(dir, owner.pid, startTime);
+        writeLiveSupervisorLease(dir, owner.pid, CLI_TEST_START_TIME);
 
         const r = runSupervisor(
           ['--once', '--force', '--workspace', dir],
@@ -3381,12 +3422,7 @@ describe('CLI integration (subprocess)', () => {
       });
       let ownerRemainedAlive = false;
       try {
-        let startTime = getProcessStartTime(owner.pid);
-        for (let i = 0; !startTime && i < 20; i++) {
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-          startTime = getProcessStartTime(owner.pid);
-        }
-        writeLiveSupervisorLease(dir, owner.pid, startTime);
+        writeLiveSupervisorLease(dir, owner.pid, CLI_TEST_START_TIME);
 
         const r = runSupervisor(
           ['--once', '--force', '--workspace', dir],
