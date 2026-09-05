@@ -37,11 +37,12 @@ const SUITES = Object.freeze({
 const USAGE = `run-tests.js — Node test runnerを実行し、結果成果物を生成する
 
 Usage:
-  node run-tests.js <full|slow>
+  node run-tests.js <full|slow> [tests/slow/<name>.test.js ...]
 
 Arguments:
   full                  npm test 相当。tests/*.test.js を全件実行し、scope=fullで記録
   slow                  npm run test:slow 相当。tests/slow/*.test.jsを実行し、scope=partialで記録
+                        tests/slow/<name>.test.js を指定した場合は、そのファイルだけを実行
 
 Output:
   Node test runner の出力をそのまま標準出力/標準エラーへ中継します。
@@ -52,8 +53,22 @@ Output:
 const SPEC = {
   flags: {},
   booleans: ['--help', '-h'],
-  positionals: { min: 1, max: 1 },
+  positionals: { min: 1, max: 65 },
 };
+
+function normalizeSlowTestFiles(testFiles) {
+  if (!Array.isArray(testFiles) || testFiles.length === 0) return { ok: true, files: [] };
+
+  const files = testFiles.map((file) => String(file).replaceAll('\\', '/'));
+  const invalid = files.find((file) => !/^tests\/slow\/[^/]+\.test\.js$/.test(file));
+  if (invalid) {
+    return {
+      ok: false,
+      error: `slow suite の個別指定は tests/slow/<name>.test.js の形式で必要です: ${invalid}`,
+    };
+  }
+  return { ok: true, files };
+}
 
 function clearPreviousArtifact(worktree) {
   try {
@@ -75,7 +90,7 @@ function outputText(value) {
 /**
  * 指定されたテストスイートを1回実行し、TAP summaryから成果物を作る。
  *
- * @param {{suite:string, cwd?:string, env?:object}} params
+ * @param {{suite:string, testFiles?:string[], cwd?:string, env?:object}} params
  * @param {object} [deps]
  * @param {Function} [deps.spawnSyncFn]
  * @param {Function} [deps.resolveGitHeadFn]
@@ -86,7 +101,7 @@ function outputText(value) {
  * @param {Function} [deps.writeStderrFn]
  * @returns {{exitCode:number, artifact:object, artifactWritten:boolean, stdout:string, stderr:string}}
  */
-function runTests({ suite, cwd = process.cwd(), env = process.env } = {}, deps = {}) {
+function runTests({ suite, testFiles = [], cwd = process.cwd(), env = process.env } = {}, deps = {}) {
   const selected = SUITES[suite];
   if (!selected) {
     return {
@@ -95,6 +110,19 @@ function runTests({ suite, cwd = process.cwd(), env = process.env } = {}, deps =
       artifactWritten: false,
       stdout: '',
       stderr: `未知のテストスイートです: ${suite}`,
+    };
+  }
+
+  let testArgs;
+  try {
+    testArgs = testArgsFor(selected, testFiles);
+  } catch (error) {
+    return {
+      exitCode: 1,
+      artifact: null,
+      artifactWritten: false,
+      stdout: '',
+      stderr: error.message,
     };
   }
 
@@ -132,7 +160,7 @@ function runTests({ suite, cwd = process.cwd(), env = process.env } = {}, deps =
     writeStderrFn(`テスト対象内容の指紋を取得できません: ${error.message}\n`);
   }
 
-  const child = spawnSyncFn(process.execPath, testArgsFor(selected), {
+  const child = spawnSyncFn(process.execPath, testArgs, {
     cwd,
     env,
     encoding: 'utf8',
@@ -193,8 +221,14 @@ function runTests({ suite, cwd = process.cwd(), env = process.env } = {}, deps =
   };
 }
 
-function testArgsFor(selected) {
-  return [...selected.testArgs];
+function testArgsFor(selected, testFiles = []) {
+  const normalized = normalizeSlowTestFiles(testFiles);
+  if (!normalized.ok) throw new Error(normalized.error);
+  if (normalized.files.length === 0) return [...selected.testArgs];
+  if (selected !== SUITES.slow) {
+    throw new Error('個別のテストファイル指定は slow suite でのみ使用できます');
+  }
+  return [...selected.testArgs.slice(0, -1), ...normalized.files];
 }
 
 function main(argv) {
@@ -209,7 +243,12 @@ function main(argv) {
 
   if (values['--help'] || values['-h']) return { exitCode: 0, stdout: USAGE };
 
-  const result = runTests({ suite: rest[0], cwd: process.cwd(), env: process.env });
+  const result = runTests({
+    suite: rest[0],
+    testFiles: rest.slice(1),
+    cwd: process.cwd(),
+    env: process.env,
+  });
   return {
     exitCode: result.exitCode,
     stdout: '',
