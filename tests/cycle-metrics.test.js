@@ -101,6 +101,21 @@ test('projectCycleMetrics: 6区間、停止時間、異常終了の重複を同�
   assert.equal(projected.workers[0].abnormal, true);
 });
 
+test('workerProjection: 識別情報のない停止は同名runの直近未停止runへ対応付ける', () => {
+  const events = [
+    { schemaVersion: 1, issue: 450, event: 'worker-started', at: '2026-09-05T00:00:00Z', workerName: 'issue-450-senior-coder', role: 'senior-coder', agentId: 'codex', pid: 10, startTime: '2026-09-05T00:00:00Z' },
+    { schemaVersion: 1, issue: 450, event: 'worker-started', at: '2026-09-05T00:05:00Z', workerName: 'issue-450-senior-coder', role: 'senior-coder', agentId: 'codex', pid: 11, startTime: '2026-09-05T00:05:00Z' },
+    { schemaVersion: 1, issue: 450, event: 'worker-stopped', at: '2026-09-05T00:10:00Z', workerName: 'issue-450-senior-coder', exitCode: 0, abnormal: false },
+  ];
+
+  const workers = metrics.workerProjection(events, Date.parse('2026-09-05T00:20:00Z'));
+  assert.equal(workers.length, 2);
+  assert.deepEqual(workers.map(worker => ({ pid: worker.pid, running: worker.running, elapsedSeconds: worker.elapsedSeconds })), [
+    { pid: 10, running: true, elapsedSeconds: 1200 },
+    { pid: 11, running: false, elapsedSeconds: 300 },
+  ]);
+});
+
 test('recordCycleEvent: 書き込み失敗は呼び出し元へ投げず引数を保持した失敗結果を返す', () => {
   const calls = [];
   const result = metrics.recordCycleEvent('C:/workspace', 450, 'plan-reported', {}, {

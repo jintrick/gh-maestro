@@ -178,7 +178,7 @@ function firstEvent(events, event) {
     .sort((a, b) => timestampMs(a.at) - timestampMs(b.at))[0] || null;
 }
 
-function intervalProjection(events, now = Date.now()) {
+function intervalProjection(events) {
   const normalized = Array.isArray(events) ? events.filter(Boolean) : [];
   const intervals = INTERVALS.map(spec => {
     const start = firstEvent(normalized, spec.start);
@@ -214,10 +214,17 @@ function sameStartTime(left, right) {
   return a !== null && b !== null && a === b;
 }
 
+function stopHasIdentity(stop) {
+  return Boolean(stop && (stop.pid != null || stop.startTime));
+}
+
 function stopMatches(start, stop) {
   if (start.workerName && stop.workerName && start.workerName !== stop.workerName) return false;
   if (start.pid != null && stop.pid != null && !samePid(start.pid, stop.pid)) return false;
   if (start.startTime && stop.startTime && !sameStartTime(start.startTime, stop.startTime)) return false;
+  // A stop without PID/startTime is only useful when both sides carry the
+  // worker name. An otherwise anonymous stop is not safe to assign to a run.
+  if (!stopHasIdentity(stop) && (!start.workerName || !stop.workerName)) return false;
   const startMs = timestampMs(start.startTime || start.at);
   const stopMs = timestampMs(stop.at);
   return startMs !== null && stopMs !== null && stopMs >= startMs;
@@ -231,24 +238,55 @@ function workerProjection(events, now = Date.now()) {
   const stops = normalized
     .filter(item => item.event === 'worker-stopped')
     .sort((a, b) => timestampMs(a.at) - timestampMs(b.at));
-  const usedStops = new Set();
   const nowMs = timestampMs(now) ?? Date.now();
   const roleCounts = new Map();
 
-  return starts.map(start => {
-    const matchingStopIndices = [];
-    for (let i = 0; i < stops.length; i++) {
-      if (usedStops.has(i) || !stopMatches(start, stops[i])) continue;
-      matchingStopIndices.push(i);
-    }
-    const stopIndex = matchingStopIndices.length > 0 ? matchingStopIndices[0] : -1;
-    const stop = stopIndex >= 0 ? stops[stopIndex] : null;
-    // worker-exit-hook と forced kill の両方が同じrunを打刻することがある。
-    // PIDまたはstartTimeがあるrunでは、その重複停止記録も同じrunへ折り畳む。
-    const relatedStops = (start.pid != null || start.startTime)
-      ? matchingStopIndices.map(index => stops[index])
-      : (stop ? [stop] : []);
-    for (const index of matchingStopIndices) usedStops.add(index);
+  // Assign stops in chronological order. A stop with PID/startTime is matched
+  // to its identified run (and repeated identified stops fold into that same
+  // run). A legacy stop without those fields uses an explicit LIFO rule: the
+  // latest still-unmatched run with the same worker name. This avoids silently
+  // stopping the oldest run merely because names are equal.
+  const assignedStops = new Map();
+  const assignedRuns = new Set();
+  const latestStartIndex = (indices) => indices.reduce((latest, index) => {
+    if (latest < 0) return index;
+    const latestMs = timestampMs(starts[latest].startTime || starts[latest].at);
+    const candidateMs = timestampMs(starts[index].startTime || starts[index].at);
+    if (candidateMs > latestMs || (candidateMs === latestMs && index > latest)) return index;
+    return latest;
+  }, -1);
+
+  for (let stopIndex = 0; stopIndex < stops.length; stopIndex++) {
+    const stop = stops[stopIndex];
+    const candidates = starts
+      .map((start, index) => ({ start, index }))
+      .filter(({ start }) => stopMatches(start, stop));
+    if (candidates.length === 0) continue;
+
+    const assignedCandidates = candidates
+      .map(({ index }) => index)
+      .filter(index => assignedStops.has(index));
+    const unmatchedCandidates = candidates
+      .map(({ index }) => index)
+      .filter(index => !assignedRuns.has(index));
+    const candidatePool = stopHasIdentity(stop) && assignedCandidates.length > 0
+      ? assignedCandidates
+      : unmatchedCandidates;
+    const startIndex = latestStartIndex(candidatePool);
+    if (startIndex < 0) continue;
+
+    const stopIndices = assignedStops.get(startIndex) || [];
+    stopIndices.push(stopIndex);
+    assignedStops.set(startIndex, stopIndices);
+    assignedRuns.add(startIndex);
+  }
+
+  return starts.map((start, startIndex) => {
+    const matchingStopIndices = assignedStops.get(startIndex) || [];
+    const stop = matchingStopIndices.length > 0
+      ? stops[matchingStopIndices[0]]
+      : null;
+    const relatedStops = matchingStopIndices.map(index => stops[index]);
 
     const startedAt = start.startTime || start.at;
     const endedAt = stop ? stop.at : null;
@@ -285,7 +323,7 @@ function projectCycleMetrics(events, opts = {}) {
   const issue = opts.issue == null ? null : assertIssue(opts.issue);
   const now = opts.now == null ? Date.now() : opts.now;
   const normalized = Array.isArray(events) ? events.filter(Boolean) : [];
-  const interval = intervalProjection(normalized, now);
+  const interval = intervalProjection(normalized);
   const workers = workerProjection(normalized, now);
   const prEvent = firstEvent(normalized, 'pr-created');
   return {

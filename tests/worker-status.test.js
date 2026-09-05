@@ -344,7 +344,7 @@ test('cycle snapshot: 区間だけを1行バーで表示し、ワーカーは最
 
   // A directly constructed projection is used for the width boundary below; the
   // assertion is intentionally about the rendered boundary, not the event fixture.
-  const intervalProjection = require('../scripts/shared/cycle-metrics').intervalProjection(events, start + 3600000);
+  const intervalProjection = require('../scripts/shared/cycle-metrics').intervalProjection(events);
   const narrowLine = workerStatus.renderUptimeBars(intervalProjection.intervals, {
     mode: 'interval', issue: 450, totalSeconds: intervalProjection.totalSeconds, maxLineWidth: 60,
   })[0];
@@ -356,6 +356,41 @@ test('cycle snapshot: 区間だけを1行バーで表示し、ワーカーは最
     mode: 'interval', issue: 450, totalSeconds: intervalProjection.totalSeconds, maxLineWidth: 120,
   })[0];
   assert.equal(Array.from(fullLine).length, 120);
+
+  const ratioIntervals = [
+    { label: '準備', seconds: 10, recorded: true },
+    { label: '計画', seconds: 20, recorded: true },
+    { label: '承認', seconds: 30, recorded: true },
+    { label: '実装', seconds: null, recorded: false },
+    { label: '査読', seconds: null, recorded: false },
+    { label: '統合', seconds: null, recorded: false },
+  ];
+  const ratioLine = workerStatus.renderUptimeBars(ratioIntervals, {
+    mode: 'interval', issue: 450, totalSeconds: 60, maxLineWidth: 100,
+  })[0];
+  const ratioBarCells = ratioLine.split('   ').slice(1, 7).map(token => (
+    (token.match(/█/g) || []).length
+  ));
+  // The first cell is reserved for each recorded interval; the remaining
+  // cells follow the independent 1:2:3 duration ratio after rounding.
+  assert.deepEqual(ratioBarCells.slice(0, 3), [5, 9, 12]);
+
+  const minimumCellLine = workerStatus.renderUptimeBars([
+    { label: '準備', seconds: 1, recorded: true },
+    { label: '計画', seconds: 1, recorded: true },
+    { label: '承認', seconds: 100000, recorded: true },
+    { label: '実装', seconds: null, recorded: false },
+    { label: '査読', seconds: null, recorded: false },
+    { label: '統合', seconds: null, recorded: false },
+  ], {
+    mode: 'interval', issue: 450, totalSeconds: 100002, maxLineWidth: 100,
+  })[0];
+  const minimumBarCells = minimumCellLine.split('   ').slice(1, 7).map(token => (
+    (token.match(/█/g) || []).length
+  ));
+  assert.ok(minimumBarCells[0] >= 1);
+  assert.ok(minimumBarCells[1] >= 1);
+  assert.ok(minimumBarCells[2] > minimumBarCells[0]);
 });
 
 test('renderWorkerRows: 稼働優先・run番号・状態ドット色・残数を表示する', () => {

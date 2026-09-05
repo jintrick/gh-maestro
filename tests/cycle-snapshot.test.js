@@ -112,3 +112,34 @@ test('recordMergeAndSnapshot: MERGEDだけがIssue/PRを打刻と投稿へ渡し
   });
   assert.equal(closed.merged, false);
 });
+
+test('recordMergeAndSnapshot: 打刻失敗でもスナップショット投稿とMERGED結果を保持する', () => {
+  const calls = [];
+  const result = recordMergeAndSnapshot({
+    prState: 'MERGED', issue: '450', pr: '99', repo: 'o/r', workspace: 'C:/workspace', exitCode: 7,
+  }, {
+    recordCycleEventFn: () => { throw new Error('record failed'); },
+    postCycleSnapshotFn: (args) => { calls.push(args); },
+  });
+
+  assert.equal(result.merged, true);
+  assert.equal(result.exitCode, 7);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], { issue: '450', pr: '99', repo: 'o/r', workspace: 'C:/workspace' });
+  assert.match(result.warnings.join('\n'), /merged event: record failed/);
+});
+
+test('recordMergeAndSnapshot: スナップショット失敗でも打刻とMERGED結果を保持する', () => {
+  const events = [];
+  const result = recordMergeAndSnapshot({
+    prState: 'MERGED', issue: '450', pr: '99', repo: 'o/r', workspace: 'C:/workspace', exitCode: 0,
+  }, {
+    recordCycleEventFn: (...args) => { events.push(args); },
+    postCycleSnapshotFn: () => { throw new Error('post failed'); },
+  });
+
+  assert.equal(result.merged, true);
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(events, [['C:/workspace', '450', 'merged', { pr: '99' }]]);
+  assert.match(result.warnings.join('\n'), /cycle snapshot: post failed/);
+});
