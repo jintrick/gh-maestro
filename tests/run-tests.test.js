@@ -24,13 +24,13 @@ function tapSummary({ tests, pass, fail, cancelled = 0, skipped = 0, todo = 0 })
   return `# tests ${tests}\n# pass ${pass}\n# fail ${fail}\n# cancelled ${cancelled}\n# skipped ${skipped}\n# todo ${todo}\n`;
 }
 
-function runWithChild({ suite = 'full', child, writeArtifactFn, extraDeps = {} }) {
+function runWithChild({ suite = 'full', testFiles = [], child, writeArtifactFn, extraDeps = {} }) {
   const stdout = [];
   const stderr = [];
   const calls = [];
   const artifacts = [];
   const result = runTests(
-    { suite, cwd: tempWorktree(), env: { TEST_RUNNER_FIXTURE: '1' } },
+    { suite, testFiles, cwd: tempWorktree(), env: { TEST_RUNNER_FIXTURE: '1' } },
     {
       clearArtifactFn: (worktree) => calls.push({ type: 'clear', worktree }),
       resolveGitHeadFn: (worktree) => {
@@ -96,6 +96,50 @@ test('runTests: slow suiteはpartialとして記録する', () => {
   assert.equal(fixture.artifacts[0].command, 'npm run test:slow');
   const spawnCall = fixture.calls.find((call) => call.type === 'spawn');
   assert.deepEqual(spawnCall.args, SUITES.slow.testArgs);
+});
+
+test('runTests: slow suiteは指定された分離側テストだけを起動する', () => {
+  const testFiles = ['tests/slow/process-lifecycle.test.js', 'tests/slow/config.test.js'];
+  const fixture = runWithChild({
+    suite: 'slow',
+    testFiles,
+    child: { status: 0, stdout: tapSummary({ tests: 2, pass: 2, fail: 0 }), stderr: '' },
+  });
+
+  const spawnCall = fixture.calls.find((call) => call.type === 'spawn');
+  assert.deepEqual(spawnCall.args, [...SUITES.slow.testArgs.slice(0, -1), ...testFiles]);
+  assert.equal(fixture.artifacts[0].scope, 'partial');
+  assert.equal(fixture.artifacts[0].command, 'npm run test:slow');
+});
+
+test('runTests: slow suiteの個別指定はtests/slow直下以外を起動しない', () => {
+  for (const testFiles of [
+    ['tests/process-lifecycle.test.js'],
+    ['tests/slow/../process-lifecycle.test.js'],
+    ['C:/repo/tests/slow/process-lifecycle.test.js'],
+  ]) {
+    let spawned = false;
+    const result = runTests(
+      { suite: 'slow', testFiles, cwd: tempWorktree(), env: {} },
+      { spawnSyncFn: () => { spawned = true; return { status: 0 }; } },
+    );
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.artifact, null);
+    assert.equal(spawned, false);
+    assert.match(result.stderr, /tests\/slow\/\<name\>\.test\.js/);
+  }
+});
+
+test('runTests: full suiteへの個別ファイル指定は起動しない', () => {
+  let spawned = false;
+  const result = runTests(
+    { suite: 'full', testFiles: ['tests/slow/process-lifecycle.test.js'], cwd: tempWorktree(), env: {} },
+    { spawnSyncFn: () => { spawned = true; return { status: 0 }; } },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.artifact, null);
+  assert.equal(spawned, false);
+  assert.match(result.stderr, /slow suite/);
 });
 
 test('runTests: summaryが欠落した場合はunavailable成果物を作る', () => {
