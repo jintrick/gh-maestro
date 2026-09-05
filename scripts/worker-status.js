@@ -3,7 +3,7 @@
 //
 // workers.json の指定エントリまたは全エントリを照会し、
 // ワーカーの生死および実起動時刻に基づく連続稼働時間を返す。
-// 一覧（list）では横棒グラフ（または --json）を出力し、
+// 一覧（list）ではサイクル行とワーカー行（または --json）を出力し、
 // 常駐表示（watch / pane）では画面クリア・WezTermスプリットペインで自動更新する。
 
 'use strict';
@@ -16,25 +16,33 @@ const { loadStatusPane, removeStatusPane } = require('./shared/status-pane-regis
 const { ensureStatusPane: ensureStatusPaneLib } = require('./shared/ensure-status-pane');
 const { resolveSkillAgentMap } = require('./shared/resolve-config');
 const { listRunningReviewManagers } = require('./shared/running-review-managers');
+const { deriveRoleFromSkill } = require('./shared/worker-factory');
+const { formatElapsedTime } = require('./shared/worker-report-check');
+const {
+  INTERVALS,
+  readCycleEvents,
+  projectCycleMetrics,
+} = require('./shared/cycle-metrics');
 
 const CLI_USAGE = `worker-status.js — ワーカーの稼働状況・連続稼働時間の確認
 
 Usage:
   node worker-status.js status --workspace <path> --worker-name <name>
-  node worker-status.js list --workspace <path> [--json]
-  node worker-status.js watch --workspace <path> [--interval <sec>]
-  node worker-status.js pane --workspace <path> [--interval <sec>] [--direction <dir>] [--percent <pct>]
+  node worker-status.js list --workspace <path> [--issue <N>] [--json]
+  node worker-status.js watch --workspace <path> [--issue <N>] [--interval <sec>]
+  node worker-status.js pane --workspace <path> [--issue <N>] [--interval <sec>] [--direction <dir>] [--percent <pct>]
   node worker-status.js close-pane --workspace <path>
 
 Commands:
   status                 指定ワーカーの生死状態をJSONで照会する
-  list                   全ワーカーの稼働状況と連続稼働時間の横棒グラフを表示する
-  watch                  横棒グラフを画面クリアしながら定期更新（自動再描画）する
+  list                   6区間のサイクル行とワーカーの稼働状況を表示する
+  watch                  サイクル行とワーカー行を画面クリアしながら定期更新する
   pane                   WezTermスプリットペインを下部に開き、watchモードを常駐表示する（既存ペインがあれば再利用）
   close-pane             開いているWezTerm監視ペインを終了する
 
 Options:
   --workspace <path>     ワークスペースパス（必須）
+  --issue <N>            表示対象Issue（省略時はworkers.jsonから推測）
   --worker-name <name>   照会するワーカー名（status で必須）
   --json                 list で機械可読な JSON 配列を出力する
   --interval <sec>       watch / pane の更新間隔（秒、既定: 3）
@@ -46,15 +54,15 @@ Output (stdout):
   status:
     {"workerName":...,"running":true|false,"pid":...}
   list:
-    横棒グラフ、または --json 指定時は [{"workerName":...,"pid":...,"running":...,"startTime":...,"elapsedSeconds":...}]
+    6区間のサイクル行とワーカー行、または --json 指定時は [{"workerName":...,"pid":...,"running":...,"startTime":...,"elapsedSeconds":...}]
   pane:
     STATUS_PANE_LAUNCHED: pane=<paneId>
   close-pane:
     STATUS_PANE_CLOSED: pane=<paneId>
 
 Description:
-  workers.json のワーカーを読み取り、プロセスの実起動時刻（process-lifecycle.getProcessStartTime）
-  に基づいて連続稼働時間を算出する。一覧モードは最長稼働のワーカーを基準にした相対長で横棒グラフを描く。
+  workers.json とIssue単位のcycle metricsを読み取り、6区間を1行へ畳んで表示する。
+  --json は既存のworkers.json由来の配列契約を維持する。
   pane サブコマンドは WezTerm の専用ペイン（既定: bottom 15%）を分割作成し、独立して自動更新し続ける。
   既存ペインが生存している場合は新しく作らず既存ペインを再利用する。
   close-pane サブコマンドは記録された監視ペインを終了して記録を削除する。`;
@@ -72,6 +80,7 @@ let _injectedKillPane = null;
 let _injectedSaveStatusPane = null;
 let _injectedAcquireStatusPaneLock = null;
 let _injectedReleaseStatusPaneLock = null;
+let _injectedReadCycleEvents = null;
 
 // Windows の起動時刻取得は PowerShell 子プロセスを起動するため、既定の3秒再描画より
 // 長いが、PID再利用を長時間見逃さない間隔にする。watch ループ内だけで使い、他の
@@ -144,6 +153,11 @@ function _releaseStatusPaneLock(workspace) {
   const fn = _injectedReleaseStatusPaneLock
     ?? ((ws) => require('./process-lifecycle').releaseStartupLock(ws, 'status-pane', null));
   return fn(workspace);
+}
+
+function _readCycleEvents(workspace, issue, opts = {}) {
+  const fn = _injectedReadCycleEvents || readCycleEvents;
+  return fn(workspace, issue, opts);
 }
 
 function _ensureStatusPane(params) {
@@ -359,6 +373,9 @@ function collectWorkersStatus(workspace, opts = {}) {
         elapsedSeconds,
         issue: entry.issue,
         agentId: entry.agentId,
+        skill: entry.skill,
+        role: entry.skill ? deriveRoleFromSkill(entry.skill) : null,
+        durationKnown: Boolean(running && startTime),
       });
     }
   }
@@ -461,6 +478,9 @@ function collectWorkersStatus(workspace, opts = {}) {
  * @returns {string[]}
  */
 function renderUptimeBars(workers, opts = {}) {
+  if (opts.mode === 'interval') {
+    return [renderCycleLine(workers, opts)];
+  }
   if (!workers || workers.length === 0) {
     return ['No workers registered.'];
   }
@@ -548,6 +568,291 @@ function renderUptimeBars(workers, opts = {}) {
   return lines;
 }
 
+function stripAnsi(text) {
+  return String(text).replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+function visibleLength(text) {
+  return Array.from(stripAnsi(text)).length;
+}
+
+function colorizeText(text, code, enabled) {
+  return enabled ? `\x1b[${code}m${text}\x1b[0m` : text;
+}
+
+function formatIntervalSeconds(seconds) {
+  if (seconds == null) return '未記録';
+  // formatElapsedTime is intentionally used as the single elapsed-time formatter for
+  // cycle intervals. Its public API takes two instants, so use an epoch pair here.
+  return formatElapsedTime(0, Math.max(0, Number(seconds)) * 1000);
+}
+
+function intervalBarLengths(intervals, budget) {
+  const recorded = intervals
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item && item.recorded && Number(item.seconds) >= 0);
+  if (recorded.length === 0 || budget < recorded.length) return null;
+
+  const lengths = new Map(recorded.map(({ index }) => [index, 1]));
+  let remaining = budget - recorded.length;
+  const weights = recorded.map(({ item }) => Math.max(0, Number(item.seconds)));
+  const weightTotal = weights.reduce((sum, value) => sum + value, 0);
+
+  if (remaining > 0 && weightTotal > 0) {
+    const fractions = recorded.map(({ index }, position) => {
+      const exact = remaining * (weights[position] / weightTotal);
+      return { index, whole: Math.floor(exact), fraction: exact - Math.floor(exact) };
+    });
+    for (const part of fractions) lengths.set(part.index, lengths.get(part.index) + part.whole);
+    let assigned = fractions.reduce((sum, part) => sum + part.whole, 0);
+    fractions.sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+    for (let i = assigned; i < remaining; i++) {
+      const part = fractions[(i - assigned) % fractions.length];
+      lengths.set(part.index, lengths.get(part.index) + 1);
+    }
+  } else if (remaining > 0) {
+    for (let i = 0; i < remaining; i++) {
+      const part = recorded[i % recorded.length];
+      lengths.set(part.index, lengths.get(part.index) + 1);
+    }
+  }
+  return lengths;
+}
+
+/**
+ * 6区間を1行へ畳む。既存の renderUptimeBars 入口から呼び出すことで、
+ * 区間の棒だけをここで描画し、ワーカー行へ棒を持ち込まない。
+ */
+function renderCycleLine(projection, opts = {}) {
+  const intervals = Array.isArray(projection) ? projection : [];
+  const issue = opts.issue == null ? '?' : String(opts.issue);
+  const totalSeconds = opts.totalSeconds == null
+    ? intervals.reduce((sum, item) => item.recorded ? sum + Number(item.seconds || 0) : sum, 0)
+    : Number(opts.totalSeconds);
+  const prefix = `#${issue} 計${formatDuration(totalSeconds)}`;
+  const colorize = Boolean(opts.colorize);
+  const maxLineWidth = Number.isFinite(Number(opts.maxLineWidth))
+    ? Math.max(1, Math.floor(Number(opts.maxLineWidth)))
+    : 120;
+  const specs = INTERVALS.map((spec, index) => ({
+    ...spec,
+    ...(intervals[index] || {}),
+    label: (intervals[index] && intervals[index].label) || spec.label,
+    recorded: intervals[index]
+      ? (intervals[index].recorded !== undefined
+        ? Boolean(intervals[index].recorded)
+        : intervals[index].seconds != null)
+      : false,
+  }));
+  const palette = [31, 36, 33, 34, 35, 32];
+  const plainToken = (item) => item.recorded
+    ? `${item.label} ${formatIntervalSeconds(item.seconds)}`
+    : `${item.label} ┈ 未記録`;
+  const separators = '   ';
+  const baseTokens = specs.map(plainToken);
+  const baseLine = `${prefix}   ${baseTokens.join(separators)}`;
+
+  let line = baseLine;
+  if (visibleLength(baseLine) <= maxLineWidth) {
+    const recordedCount = specs.filter(item => item.recorded).length;
+    const free = maxLineWidth - visibleLength(baseLine);
+    // The plain token already contains one separator between its label and
+    // duration. Adding a bar introduces one additional separator per recorded
+    // interval; reserve those cells before allocating the normalized bar
+    // lengths so the complete line, rather than just the bar cells, fits the
+    // terminal width.
+    const barPadding = recordedCount;
+    const lengths = intervalBarLengths(specs, free - barPadding);
+    if (lengths) {
+      const tokens = specs.map((item, index) => {
+        const length = lengths.get(index);
+        const token = length
+          ? `${item.label} ${'█'.repeat(length)} ${formatIntervalSeconds(item.seconds)}`
+          : plainToken(item);
+        return colorizeText(token, palette[index], colorize);
+      });
+      line = `${prefix}   ${tokens.join(separators)}`;
+    } else {
+      line = `${prefix}   ${specs.map((item, index) => (
+        colorizeText(plainToken(item), palette[index], colorize)
+      )).join(separators)}`;
+    }
+  }
+
+  if (visibleLength(line) > maxLineWidth) {
+    const plain = stripAnsi(line);
+    const width = Math.max(1, maxLineWidth);
+    line = width === 1 ? '…' : `${Array.from(plain).slice(0, width - 1).join('')}…`;
+  }
+  return line;
+}
+
+function roleFromWorker(worker) {
+  if (worker && worker.role) {
+    const role = String(worker.role);
+    if (role.startsWith('gh-maestro-')) {
+      try { return deriveRoleFromSkill(role); } catch { /* keep the recorded role */ }
+    }
+    return role;
+  }
+  if (worker && worker.skill) {
+    try { return deriveRoleFromSkill(worker.skill); } catch { /* fall through */ }
+  }
+  const name = stripWorkerNamePrefix(worker && worker.workerName);
+  const match = /^(review-manager|senior-coder|diagnostician|explorer|architect|coder|base)(?:-|$)/.exec(name);
+  return match ? match[1] : (name || 'worker');
+}
+
+function workerRunKey(worker) {
+  return [
+    worker.workerName || '',
+    worker.pid == null ? '' : String(worker.pid),
+    worker.startTime || '',
+  ].join('|');
+}
+
+function workerDurationKnown(worker) {
+  if (!worker) return false;
+  if (worker.durationKnown !== undefined) return Boolean(worker.durationKnown);
+  return worker.elapsedSeconds != null
+    && Boolean(worker.running ? worker.startTime : (worker.stopTime || worker.startTime));
+}
+
+function reviewManagerPr(worker) {
+  if (worker && worker.pr != null && Number(worker.pr) > 0) return String(worker.pr);
+  const match = /review-manager-pr-(\d+)$/.exec(String(worker && worker.workerName || ''));
+  return match ? match[1] : null;
+}
+
+function mergeCycleWorkers(projectedWorkers, currentWorkers) {
+  const merged = Array.isArray(projectedWorkers) ? projectedWorkers.map(item => ({ ...item })) : [];
+  const byKey = new Map(merged.map(item => [workerRunKey(item), item]));
+  for (const current of Array.isArray(currentWorkers) ? currentWorkers : []) {
+    const currentKey = workerRunKey(current);
+    const exact = byKey.get(currentKey);
+    // A legacy event may not have carried a startTime. Match the worker name and
+    // PID in that case. Stopped workers are intentionally included here: the
+    // live registry drops startTime once the process is gone, while the event
+    // history still has the authoritative stop duration.
+    const sameIdentity = (item) => (
+      (
+        item.workerName === current.workerName
+        || (roleFromWorker(item) === 'review-manager'
+          && roleFromWorker(current) === 'review-manager'
+          && reviewManagerPr(item) !== null
+          && reviewManagerPr(item) === reviewManagerPr(current))
+      )
+      && (item.pid == null || current.pid == null || Number(item.pid) === Number(current.pid))
+      && (!item.startTime || !current.startTime || item.startTime === current.startTime)
+    );
+    const candidates = merged.filter(sameIdentity);
+    const fallback = exact || (current.running
+      ? candidates.find(item => item.running)
+      : candidates.slice().reverse().find(item => !item.running) || candidates.slice().reverse()[0]);
+    if (fallback) {
+      const currentDurationKnown = workerDurationKnown(current);
+      Object.assign(fallback, {
+        agentId: current.agentId || fallback.agentId,
+        role: current.role || fallback.role,
+        skill: current.skill || fallback.skill,
+        pid: current.pid || fallback.pid,
+        running: current.running,
+        abnormal: fallback.abnormal && !current.running ? fallback.abnormal : Boolean(fallback.abnormal),
+        elapsedSeconds: current.running || currentDurationKnown
+          ? current.elapsedSeconds
+          : (fallback.stopTime ? fallback.elapsedSeconds : null),
+        durationKnown: currentDurationKnown || Boolean(fallback.stopTime),
+      });
+      if (!current.running && !currentDurationKnown && !fallback.stopTime) fallback.elapsedSeconds = null;
+    } else {
+      const durationKnown = workerDurationKnown(current);
+      merged.push({
+        ...current,
+        role: current.role || roleFromWorker(current),
+        elapsedSeconds: durationKnown ? current.elapsedSeconds : null,
+        durationKnown,
+      });
+    }
+  }
+  return merged.map(item => ({ ...item, role: roleFromWorker(item) }));
+}
+
+function renderWorkerRows(workers, opts = {}) {
+  const input = Array.isArray(workers) ? workers : [];
+  const sorted = input.slice().sort((a, b) => {
+    if (Boolean(a.running) !== Boolean(b.running)) return a.running ? -1 : 1;
+    if (Boolean(a.abnormal) !== Boolean(b.abnormal)) return a.abnormal ? -1 : 1;
+    return String(a.startTime || '').localeCompare(String(b.startTime || ''));
+  });
+  const usedRunNumbers = new Map();
+  const prepared = sorted.map((worker) => {
+    const role = roleFromWorker(worker);
+    const knownOrdinal = Number(worker.runNumber);
+    const used = usedRunNumbers.get(role) || new Set();
+    let ordinal = Number.isInteger(knownOrdinal) && knownOrdinal > 0 ? knownOrdinal : 1;
+    while (used.has(ordinal)) ordinal += 1;
+    used.add(ordinal);
+    usedRunNumbers.set(role, used);
+    return { worker, role, ordinal };
+  });
+  const maxRows = Math.max(0, Number(opts.maxRows ?? 4));
+  const visible = prepared.slice(0, maxRows);
+  const hidden = Math.max(0, prepared.length - visible.length);
+  const colorize = Boolean(opts.colorize);
+  const lines = visible.map(({ worker, role, ordinal }) => {
+    const dot = worker.abnormal
+      ? colorizeText('●', 31, colorize)
+      : worker.running
+        ? colorizeText('●', 32, colorize)
+        : colorizeText('○', 90, colorize);
+    const runSuffix = ordinal > 1 ? ` #${ordinal}` : '';
+    const agent = worker.agentId ? String(worker.agentId) : '-';
+    const elapsed = worker.elapsedSeconds == null || !workerDurationKnown(worker)
+      ? '-'
+      : formatDuration(worker.elapsedSeconds);
+    const pid = worker.pid == null ? '-' : String(worker.pid);
+    return `${dot} ${role}${runSuffix} [${agent}] ${elapsed} (pid: ${pid})`;
+  });
+  if (hidden > 0) {
+    if (lines.length > 0) lines[lines.length - 1] += ` +${hidden}件`;
+    else lines.push(`+${hidden}件`);
+  }
+  return lines;
+}
+
+function inferIssue(workers) {
+  for (const worker of Array.isArray(workers) ? workers : []) {
+    const value = Number(worker.issue);
+    if (Number.isInteger(value) && value > 0) return String(value);
+  }
+  return null;
+}
+
+function renderSnapshotLines(workspace, issue, opts = {}) {
+  const currentWorkers = opts.currentWorkers || collectWorkersStatus(workspace, opts.collectOpts || opts);
+  const explicitIssue = issue != null && String(issue) !== '';
+  const selectedIssue = explicitIssue ? String(issue) : inferIssue(currentWorkers);
+  const events = selectedIssue
+    ? (opts.cycleEvents || _readCycleEvents(workspace, selectedIssue))
+    : [];
+
+  const projected = projectCycleMetrics(events, {
+    issue: selectedIssue || null,
+    now: opts.now == null ? _now() : opts.now,
+  });
+  const workers = mergeCycleWorkers(projected.workers, currentWorkers.filter(worker => (
+    selectedIssue == null || worker.issue == null || String(worker.issue) === selectedIssue
+  )));
+  const cycleLine = renderUptimeBars(projected.intervals, {
+    mode: 'interval',
+    issue: selectedIssue || '?',
+    totalSeconds: projected.totalSeconds,
+    maxLineWidth: opts.maxLineWidth,
+    colorize: opts.colorize,
+  })[0];
+  return [cycleLine, ...renderWorkerRows(workers, opts)];
+}
+
 const MIN_INTERVAL_SEC = 1;
 const MAX_INTERVAL_SEC = 3600;
 const DEFAULT_INTERVAL_SEC = 3;
@@ -585,6 +890,7 @@ function main(argv = process.argv.slice(2)) {
     ({ values, rest } = parseFlags(argv, {
       flags: {
         '--workspace': {},
+        '--issue': {},
         '--worker-name': {},
         '--interval': {},
         '--direction': {},
@@ -626,6 +932,13 @@ function main(argv = process.argv.slice(2)) {
   const workspace = resolveWorkspace(values['--workspace']);
   if (!workspace) {
     writeErr('worker-status: ワークスペースを解決できません');
+    return { code: 1, lines: out, errLines: err };
+  }
+
+  const issueArg = values['--issue'];
+  if (issueArg !== undefined && !/^[1-9]\d*$/.test(String(issueArg))) {
+    writeErr(`worker-status: --issue は正の整数で指定してください: ${issueArg}`);
+    writeErr(CLI_USAGE);
     return { code: 1, lines: out, errLines: err };
   }
 
@@ -699,8 +1012,13 @@ function main(argv = process.argv.slice(2)) {
       });
       writeOut(JSON.stringify(jsonEntries, null, 2));
     } else {
-      const bars = renderUptimeBars(workers);
-      for (const line of bars) writeOut(line);
+      const lines = renderSnapshotLines(workspace, issueArg, {
+        currentWorkers: workers,
+        now: _now(),
+        maxLineWidth: process.stdout.columns,
+        colorize: Boolean(process.stdout.isTTY && process.env.NO_COLOR !== '1'),
+      });
+      for (const line of lines) writeOut(line);
     }
     return { code: 0, lines: out, errLines: err };
   }
@@ -726,10 +1044,15 @@ function main(argv = process.argv.slice(2)) {
 
     const timeStr = formatJstTime(_now());
     writeOut(`=== gh-maestro worker status (${timeStr}, interval: ${interval}s) ===`);
-    const bars = renderUptimeBars(workers);
-    for (const line of bars) writeOut(line);
+    const lines = renderSnapshotLines(workspace, issueArg, {
+      currentWorkers: workers,
+      now: _now(),
+      maxLineWidth: process.stdout.columns,
+      colorize: Boolean(process.stdout.isTTY && process.env.NO_COLOR !== '1'),
+    });
+    for (const line of lines) writeOut(line);
 
-    return { code: 0, lines: out, errLines: err, isWatch: true, workspace, interval, startTimeCache };
+    return { code: 0, lines: out, errLines: err, isWatch: true, workspace, interval, issue: issueArg, startTimeCache };
   }
 
   if (sub === 'pane') {
@@ -764,6 +1087,7 @@ function main(argv = process.argv.slice(2)) {
     const paneResult = _ensureStatusPane({
       workspace,
       scriptsPath: __dirname,
+      issue: issueArg,
       interval,
       direction,
       percent,
@@ -828,11 +1152,20 @@ function runWatchLoop(workspace, interval, opts = {}) {
   const render = () => {
     try {
       const workers = collectWorkersStatus(workspace, collectOpts);
-      const bars = renderUptimeBars(workers, opts);
+      const lines = renderSnapshotLines(workspace, opts.issue, {
+        ...opts,
+        currentWorkers: workers,
+        collectOpts,
+        now: _now(),
+        maxLineWidth: opts.maxLineWidth ?? outStream.columns,
+        colorize: opts.colorize !== undefined
+          ? Boolean(opts.colorize)
+          : Boolean(outStream.isTTY && process.env.NO_COLOR !== '1'),
+      });
       const timeStr = formatJstTime(_now());
       outStream.write('\x1b[2J\x1b[H');
       outStream.write(`=== gh-maestro worker status (${timeStr}, interval: ${interval}s) ===\n`);
-      for (const line of bars) {
+      for (const line of lines) {
         outStream.write(line + '\n');
       }
     } catch (e) {
@@ -860,6 +1193,10 @@ module.exports = {
   formatDuration,
   collectWorkersStatus,
   renderUptimeBars,
+  renderCycleLine,
+  renderWorkerRows,
+  renderSnapshotLines,
+  mergeCycleWorkers,
   parseInterval,
   runWatchLoop,
   createProcessStartTimeCache,
@@ -880,6 +1217,7 @@ module.exports = {
   _setSaveStatusPane: (fn) => { _injectedSaveStatusPane = fn; },
   _setAcquireStatusPaneLock: (fn) => { _injectedAcquireStatusPaneLock = fn; },
   _setReleaseStatusPaneLock: (fn) => { _injectedReleaseStatusPaneLock = fn; },
+  _setReadCycleEvents: (fn) => { _injectedReadCycleEvents = fn; },
 };
 
 if (require.main === module) {
@@ -889,7 +1227,10 @@ if (require.main === module) {
     process.exit(result.code);
   }
   if (result.isWatch) {
-    runWatchLoop(result.workspace, result.interval, { startTimeCache: result.startTimeCache });
+    runWatchLoop(result.workspace, result.interval, {
+      issue: result.issue,
+      startTimeCache: result.startTimeCache,
+    });
   } else {
     for (const line of result.lines) process.stdout.write(line + '\n');
     process.exit(result.code);

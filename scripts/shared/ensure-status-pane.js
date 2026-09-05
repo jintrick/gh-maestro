@@ -142,6 +142,7 @@ function compensatePersistenceFailure({
  * @param {string} params.workspace ワークスペース絶対パス
  * @param {string} params.scriptsPath worker-status.js が置かれたディレクトリ
  * @param {number} [params.interval=3] watch の更新間隔
+ * @param {string|number} [params.issue] 表示対象Issue（省略時はworkers.jsonから推測）
  * @param {string} [params.direction='bottom'] ペインの分割方向
  * @param {number} [params.percent=15] ペインの画面占有率
  * @param {object} [deps] テスト用依存注入
@@ -206,16 +207,21 @@ function ensureStatusPane(params = {}, deps = {}) {
       }
     }
 
+    const watchArgs = [
+      process.execPath,
+      path.join(scriptsPath, 'worker-status.js'),
+      'watch',
+      '--workspace', workspace,
+      '--interval', String(interval),
+    ];
+    if (params.issue !== undefined && params.issue !== null && String(params.issue) !== '') {
+      watchArgs.push('--issue', String(params.issue));
+    }
+
     let paneResult;
     try {
       paneResult = launchInSplitPaneFn({
-        argv: [
-          process.execPath,
-          path.join(scriptsPath, 'worker-status.js'),
-          'watch',
-          '--workspace', workspace,
-          '--interval', String(interval),
-        ],
+        argv: watchArgs,
         cwd: workspace,
         direction,
         percent,

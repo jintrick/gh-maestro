@@ -28,6 +28,7 @@ const { parseFlags } = require('./shared/workspace');
 const { parseJsonText } = require('./shared/json-file');
 const { _validateAgainstSchema } = require('./shared/json-schema');
 const { VALID_ASPECTS, VALID_SEVERITIES, FINDING_REQUIRED_FIELDS } = require('./shared/review-aspects');
+const { recordCycleEvent } = require('./shared/cycle-metrics');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
 const DEFAULT_ARTIFACT_POLL_INTERVAL_MS = 200;
@@ -35,6 +36,7 @@ const DEFAULT_DEADLINE_MS = 30 * 60 * 1000; // 30 minutes
 const GRACEFUL_SHUTDOWN_GRACE_MS = 5000; // 5 seconds for child process to exit normally
 
 let _injectedGetProcessStartTime = null;
+let _recordCycleEvent = recordCycleEvent;
 function _getProcessStartTime(pid) {
   const fn = _injectedGetProcessStartTime || getProcessStartTime;
   return fn(pid);
@@ -640,6 +642,7 @@ module.exports = {
   _setPollForArtifact: (fn) => { _injectedPollForArtifact = fn; },
   _setRunReviewJobsOnce: (fn) => { _injectedRunReviewJobsOnce = fn; },
   _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
+  _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
 };
 
 /**
@@ -1272,6 +1275,17 @@ async function superviseReviewManager({
   if (publish.stderr) log(publish.stderr);
   log(`review-publisher exited with status ${publish.status}`);
 
+  if (publish.status === 0) {
+    try {
+      _recordCycleEvent(workspace, issue, 'review-completed', {
+        workerName: buildReviewManagerLaunchSpec({ issue, pr, repo, workspace }).workerName,
+        role: 'review-manager',
+        skill: 'gh-maestro-reviewer',
+        pr,
+      });
+    } catch { /* best-effort */ }
+  }
+
   return {
     outcome: 'artifact-published',
     exitCode: publish.status ?? 0,
@@ -1338,6 +1352,27 @@ if (require.main === module) {
       startTime: _getProcessStartTime(process.pid) || null,
     };
 
+    const reviewManagerWorkerName = spec.workerName;
+    const reviewManagerAgentId = (() => {
+      try {
+        return resolveSkillAgentMap({ workspace })['gh-maestro-reviewer'] || null;
+      } catch {
+        return null;
+      }
+    })();
+    const reviewManagerStartTime = new Date().toISOString();
+    try {
+      _recordCycleEvent(workspace, issue, 'worker-started', {
+        workerName: reviewManagerWorkerName,
+        role: 'review-manager',
+        skill: 'gh-maestro-reviewer',
+        agentId: reviewManagerAgentId,
+        pid: process.pid,
+        startTime: reviewManagerStartTime,
+        pr,
+      });
+    } catch { /* best-effort */ }
+
     function log(msg) {
       try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`); } catch {}
     }
@@ -1393,6 +1428,22 @@ if (require.main === module) {
           log(`cleanup error: ${err}`);
         }
       }
+      try {
+        const exitCode = supervisionResult && Number.isInteger(supervisionResult.exitCode)
+          ? supervisionResult.exitCode
+          : 1;
+        _recordCycleEvent(workspace, issue, 'worker-stopped', {
+          workerName: reviewManagerWorkerName,
+          role: 'review-manager',
+          skill: 'gh-maestro-reviewer',
+          agentId: reviewManagerAgentId,
+          pid: process.pid,
+          startTime: reviewManagerStartTime,
+          exitCode,
+          abnormal: exitCode !== 0,
+          pr,
+        });
+      } catch { /* best-effort */ }
     }
 
     process.exit(supervisionResult ? supervisionResult.exitCode : 1);

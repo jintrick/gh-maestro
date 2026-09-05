@@ -18,6 +18,8 @@ const { spawnSync } = require('./shared/child-process');
 const { startReviewManager } = require('./start-review-manager');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
+const { recordCycleEvent } = require('./shared/cycle-metrics');
+const { postCycleSnapshot } = require('./shared/cycle-snapshot');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -140,6 +142,28 @@ function resolvePostReviewDecision(prState, exitCode) {
 }
 
 /**
+ * MERGED確認時の打刻とスナップショット投稿。両方ともbest-effortで、
+ * poll-pr本体の終了判断・終了コードには影響させない。
+ */
+function recordMergeAndSnapshot({ prState, issue, pr, repo, workspace, exitCode }, deps = {}) {
+  if (prState !== 'MERGED') return { merged: false };
+  const recordCycleEventFn = deps.recordCycleEventFn || recordCycleEvent;
+  const postCycleSnapshotFn = deps.postCycleSnapshotFn || postCycleSnapshot;
+  const warnings = [];
+  try {
+    recordCycleEventFn(workspace, issue, 'merged', { pr });
+  } catch (error) {
+    warnings.push(`merged event: ${error.message}`);
+  }
+  try {
+    postCycleSnapshotFn({ issue, pr, repo, workspace }, deps.snapshotDeps || {});
+  } catch (error) {
+    warnings.push(`cycle snapshot: ${error.message}`);
+  }
+  return { merged: true, exitCode, warnings };
+}
+
+/**
  * PR検出時にベースブランチの不一致を検出する（純粋関数）。
  * @param {string} expectedBaseBranch --base-branch で指定された想定ブランチ
  * @param {string} actualBaseBranch   PRの実際のベースブランチ
@@ -154,7 +178,14 @@ function formatBaseBranchMismatch(expectedBaseBranch, actualBaseBranch, pr) {
   return 'PR_BASE_MISMATCH:' + pr + ':' + expectedBaseBranch + ':' + actualBaseBranch;
 }
 
-module.exports = { getPrBaseBranch, formatBaseBranchMismatch, getPrState, resolvePostReviewDecision, spawnPollReviews };
+module.exports = {
+  getPrBaseBranch,
+  formatBaseBranchMismatch,
+  getPrState,
+  resolvePostReviewDecision,
+  recordMergeAndSnapshot,
+  spawnPollReviews,
+};
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -289,6 +320,7 @@ if (require.main === module) {
         // CLOSED でも復帰せず、親も非ゼロで終了して異常を通知する（Issue #289 受け入れ条件3。
         // SIGKILL等で子自身の exit 通知が実行できなくても、親の exit 通知が監視停止を届ける）。
         const prState = getPrState(pr, repo);
+        recordMergeAndSnapshot({ prState, issue, pr, repo, workspace, exitCode });
         if (resolvePostReviewDecision(prState, exitCode) === 'resume') {
           // 子が正常終了し、かつ却下・キャンセルで CLOSED された PR を掴んだまま無言で
           // 居座り続けない（Issue #289）。findPR ループへ戻り、新 PR の検出を継続する。

@@ -18,6 +18,8 @@ const { killPane } = require('./pane-launch');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { killProcessTree } = require('./kill-tree');
 const { sweepRegistry, isProcessAlive, verifyProcessIdentity } = require('../process-lifecycle');
+const { deriveRoleFromSkill } = require('./worker-factory');
+const { recordCycleEvent } = require('./cycle-metrics');
 
 const defaultSleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
@@ -39,6 +41,7 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
   const logWarn = opts.logWarn ?? console.warn;
   const sleepFn = opts.sleepFn ?? defaultSleep;
   const sleepMs = opts.sleepMs ?? 500;
+  const recordCycleEventFn = opts.recordCycleEventFn || recordCycleEvent;
 
   let workers = opts._injectedWorkers;
   if (!workers) {
@@ -107,6 +110,24 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
   if (!workerEntry.pid && !workerEntry.paneId) {
     const prefix = isRemoveMode ? 'remove-worker' : 'stop-worker';
     logWarn(`${prefix}: ワーカー "${workerName}" に終了対象のプロセスが記録されていません`);
+  }
+
+  if (stoppedPid) {
+    const issueMatch = /^issue-(\d+)-/.exec(workerName);
+    const issue = workerEntry.issue || (issueMatch && issueMatch[1]);
+    if (issue) {
+      try {
+        recordCycleEventFn(workspace, issue, 'worker-stopped', {
+          workerName,
+          role: workerEntry.skill ? deriveRoleFromSkill(workerEntry.skill) : undefined,
+          skill: workerEntry.skill,
+          agentId: workerEntry.agentId,
+          pid: stoppedPid,
+          startTime: workerEntry.startTime,
+          abnormal: true,
+        });
+      } catch { /* best-effort */ }
+    }
   }
 
   // ── PID registry sweep: ワーカーの登録PIDを同一性確認の上で kill ─────

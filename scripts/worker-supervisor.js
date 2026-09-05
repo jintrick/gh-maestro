@@ -44,6 +44,8 @@ const { buildAgentResumeCommandArgs } = require('./shared/agent-launch');
 const { launchAgentHeadless, workerLogPath } = require('./shared/headless-launch');
 const { buildWorkerEnv } = require('./shared/worker-env');
 const { updateWorkerProcess } = require('./shared/workers-registry');
+const { deriveRoleFromSkill } = require('./shared/worker-factory');
+const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const {
   resolveSessionPid,
@@ -64,6 +66,7 @@ const { runningLegacyWorkerSupervisorPids } = require('./shared/worker-superviso
 let _createDeadManSwitch = createDeadManSwitch;
 let _parentDeathExit = (code) => process.exit(code);
 let _injectedGetProcessStartTime;
+let _recordCycleEvent = recordCycleEvent;
 
 function _getProcessStartTime(pid) {
   const fn = _injectedGetProcessStartTime ?? getProcessStartTime;
@@ -346,7 +349,7 @@ function loadWorkers(workspace) {
  *   （Issue #269）。レガシーレコードでは null。
  * @returns {{ success: boolean, method: string, error?: string, newPaneId?: string }}
  */
-function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir, baseBranch, repo }) {
+function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, workspace, homedir, baseBranch, repo }) {
   let agentConfig;
   try {
     agentConfig = agentId ? resolveAgentConfig(agentId, { workspace, homedir }) : null;
@@ -496,6 +499,20 @@ function tryResumeAndDeliver({ workerName, agentId, message, workspace, homedir,
     _clearContract(workspace, workerName);
   }
 
+  const inferredIssue = issue || (/^issue-(\d+)-/.exec(workerName)?.[1] || null);
+  if (inferredIssue) {
+    try {
+      _recordCycleEvent(workspace, inferredIssue, 'worker-started', {
+        workerName,
+        role: skill ? deriveRoleFromSkill(skill) : undefined,
+        skill,
+        agentId,
+        pid: launched.pid,
+        startTime: launched.startTime,
+      });
+    } catch { /* best-effort */ }
+  }
+
   return { success: true, method: 'resume', pid: launched.pid };
 }
 
@@ -527,7 +544,15 @@ function deliverMessage({ workerName, entry, message, workspace, homedir, issue,
   }
 
   const resumeResult = tryResumeAndDeliver({
-    workerName, agentId: entry.agentId, message, workspace, homedir, baseBranch: entry.baseBranch, repo,
+    workerName,
+    agentId: entry.agentId,
+    skill: entry.skill,
+    issue,
+    message,
+    workspace,
+    homedir,
+    baseBranch: entry.baseBranch,
+    repo,
   });
   if (resumeResult.method !== 'pending') {
     // resumeを試みた結果（成功 or 明確な失敗）。既存のpendingDeliveries/バックオフ機構にそのまま乗る。
@@ -1371,6 +1396,7 @@ module.exports = {
   _setClearContract: (fn) => { _clearContract = fn; },
   _setCreateDeadManSwitch: (fn) => { _createDeadManSwitch = fn; },
   _setParentDeathExit: (fn) => { _parentDeathExit = fn; },
+  _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
   main,
   readCursor,
   writeCursor,

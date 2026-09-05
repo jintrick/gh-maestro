@@ -20,6 +20,7 @@ const ARTIFACTS = Object.freeze({
   REVIEW_MANAGER_INCOMPLETE: 'reviewManagerIncomplete',
   REVIEW_MANAGER_RETRY_COUNT: 'reviewManagerRetryCount',
   REVIEW_MANIFEST: 'reviewManifest',
+  CYCLE_METRICS: 'cycleMetrics',
 });
 
 function assertWithinRoot(root, candidate) {
@@ -116,6 +117,12 @@ function recordPath(workspace, params) {
       break;
     case ARTIFACTS.REVIEW_MANIFEST:
       candidate = path.join(base, 'review', 'manifest.json');
+      break;
+    case ARTIFACTS.CYCLE_METRICS:
+      if (params.ownerKind !== 'issue' || params.workerName !== undefined) {
+        throw new Error('cycleMetrics records require an issue owner and no worker name');
+      }
+      candidate = path.join(base, 'cycle-metrics.jsonl');
       break;
     default:
       throw new Error(`invalid record artifact: ${JSON.stringify(params.artifact)}`);
