@@ -1299,61 +1299,6 @@ test('CLI_USAGE: 文字列が定義されている', () => {
   assert.ok(plc.CLI_USAGE.includes('--workspace'));
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// CLI引数パース（scripts/shared/workspace.js の parseFlags に委譲）
-// parseFlags 自体の網羅的なエッジケースは tests/workspace.test.js でカバー済み。
-// ここでは実際のCLI起動でフラグ/値衝突が安全に処理される
-// （誤ってhelp表示にならない）ことだけをサブプロセス経由で確認する。
-// ═══════════════════════════════════════════════════════════════════════════
-
-const SCRIPT = path.join(__dirname, '..', 'scripts', 'process-lifecycle.js');
-const { cleanSpawnEnv } = require('./_spawn-env');
-
-function runCli(args) {
-  const { spawnSync } = require('child_process');
-  return spawnSync(process.execPath, [SCRIPT, ...args], {
-    encoding: 'utf8',
-    env: cleanSpawnEnv(),
-  });
-}
-
-function createStatusWorkspace() {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-status-cli-'));
-  const pidsDir = path.join(storageLayout.workspaceRuntimeDir(ws), 'pids');
-  fs.mkdirSync(pidsDir, { recursive: true });
-  return { ws, pidsDir };
-}
-
-function createBrokenStatusWorkspace() {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-status-cli-broken-'));
-  const runtimeDir = storageLayout.workspaceRuntimeDir(ws);
-  const pidsDir = path.join(runtimeDir, 'pids');
-  fs.mkdirSync(runtimeDir, { recursive: true });
-  fs.writeFileSync(pidsDir, 'not a directory');
-  return { ws, pidsDir };
-}
-
-function removeStatusWorkspace(ws) {
-  try { fs.rmSync(storageLayout.workspaceRuntimeDir(ws), { recursive: true, force: true }); } catch {}
-  try { fs.rmSync(ws, { recursive: true, force: true }); } catch {}
-}
-
-
-
-
-
-
-
-
-
-// ── Issue #267 回帰: CLI 主経路（require.main === module）での循環 require ──
-// process-lifecycle.js は module.exports の代入を CLI ブロックより先に行うことで、
-// sweepRegistry が require する shared モジュール群（worker-liveness / worker-lease /
-// collect-housekeeping-exclusions）へ完全な exports を渡す。CLI 主経路でしか顕在化し
-// ないため、ユニットテストではなく実サブプロセス起動で検証する。
-
-
-
 test('sweepRegistry: 除外リスト構築失敗時は fail-closed で kill も housekeeping も実行しない', () => {
   const plc = loadModule();
   const pidsDir = plc.pidsDir(workspace);

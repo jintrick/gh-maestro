@@ -7,10 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const lifecycle = require('../scripts/process-lifecycle');
-const { spawnSync } = require('../scripts/shared/child-process');
-const { cleanSpawnEnv } = require('./_spawn-env');
 const workerLease = require('../scripts/shared/worker-lease');
-const { spawnSync: nativeSpawnSync } = require('node:child_process');
 
 workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
 // 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
@@ -27,7 +24,8 @@ msgPoll._setGetProcessStartTime((pid) => {
 // 直接 main()/scanOnce() を呼ぶケースでは、親セッションの死活確認自体は
 // process-lifecycle.test.js の実照合テストで検証する。ここでは各スキャンで
 // WindowsのPowerShell/WMIを起動しないよう、既存の注入境界から生存checkerだけを差し替える。
-// 実CLI統合テスト（重複lease/--force/--watch-pid）は実際のプロセス境界を通す。
+// 実CLI統合テスト（重複lease/--force/--watch-pid）は tests/slow/msg-poll.test.js で
+// 実際のプロセス境界を通す。
 const TEST_PARENT_CHECKER = () => true;
 const useFastParentChecker = () => {
   msgPoll._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
@@ -39,7 +37,6 @@ useFastParentChecker();
 // --session-pid を渡すため、テストでも常に自プロセスPIDを渡してこの探索を省く。
 const _realMain = msgPoll.main;
 const TEST_SESSION_PID = String(process.pid);
-const TEST_CLI_START_TIME = '2026-07-25T00:00:00.000Z';
 
 // 明示した --workspace は環境変数より優先されるが、workspace引数を省略する
 // 経路も実workspaceへ向かわないよう、main() の間だけ env を外す。
@@ -68,68 +65,6 @@ function withTempDir(fn) {
   }
   cleanup();
   return result;
-}
-
-// 実CLI統合テストは子プロセス・argv・leaseのI/O境界を維持する。一方、Windowsの
-// process-lifecycle は起動時刻取得のたびにPowerShell/WMIを起動するため、同じ境界の
-// 中で使うテスト用preloadだけがその観測を固定値へ差し替える。PIDの生存確認は
-// process.kill(pid, 0) を通し、実際のPID再利用判定そのものは process-lifecycle.test.js
-// で実照合する（そちらではこのpreloadを使わない）。
-function createFastCliPreload({ parentAlive = true } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-cli-preload-'));
-  const file = path.join(dir, 'preload.js');
-  const childProcessPath = require.resolve('../scripts/shared/child-process');
-  const lifecyclePath = require.resolve('../scripts/process-lifecycle');
-  const leasePath = require.resolve('../scripts/shared/worker-lease');
-  const source = [
-    "'use strict';",
-    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
-    `const fixedStartTime = ${JSON.stringify(TEST_CLI_START_TIME)};`,
-    'const isAlive = (pid) => {',
-    '  try { process.kill(Number(pid), 0); return true; }',
-    "  catch (e) { return e && e.code !== 'ESRCH'; }",
-    '};',
-    'const realExecSync = childProcess.execSync;',
-    'childProcess.execSync = (command, opts) => {',
-    "  if (String(command).includes('Get-CimInstance Win32_Process')) {",
-    '    const match = /ProcessId=(\\d+)/.exec(String(command));',
-    '    return match && isAlive(Number(match[1])) ? `${fixedStartTime}\\n` : \"\";',
-    '  }',
-    '  return realExecSync(command, opts);',
-    '};',
-    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
-    // The role lease tests create no registry owner.  Keep the force path in
-    // the real CLI while avoiding an unrelated registry/WMI scan.
-    'lifecycle.findRunningInstance = () => null;',
-    'lifecycle.getProcessStartTime = () => fixedStartTime;',
-    `lifecycle.createDeadManSwitch = () => () => ${parentAlive ? 'true' : 'false'};`,
-    `const lease = require(${JSON.stringify(leasePath)});`,
-    'lease._setGetProcessStartTime(() => fixedStartTime);',
-    'lease._setIsProcessAlive(isAlive);',
-    'lease._setVerifyProcessIdentity(() => ({ match: true }));',
-  ].join('\n');
-  fs.writeFileSync(file, source, 'utf8');
-  process.once('exit', () => {
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-  });
-  return file;
-}
-
-const FAST_CLI_PRELOAD = createFastCliPreload();
-const FAST_DEAD_WATCH_PRELOAD = createFastCliPreload({ parentAlive: false });
-
-function runMsgPollCli(args, { parentAlive = true, ...opts } = {}) {
-  const preload = parentAlive ? FAST_CLI_PRELOAD : FAST_DEAD_WATCH_PRELOAD;
-  const childArgs = ['-r', preload, path.join(__dirname, '..', 'scripts', 'msg-poll.js'), ...args];
-  if (!args.includes('--watch-pid') && !args.includes('--session-pid')) {
-    childArgs.push('--session-pid', TEST_SESSION_PID);
-  }
-  return nativeSpawnSync(process.execPath, childArgs, {
-    encoding: 'utf8',
-    timeout: 10000,
-    env: cleanSpawnEnv(),
-    ...opts,
-  });
 }
 
 // orchestrator の msg-state を v2 initialized 状態に初期化する。
@@ -1292,67 +1227,6 @@ test('gh api が null を返した場合にクラッシュしない', () => {
 // interval ループには入らず、実ポーリングプロセスは生成されない
 //
 // GH_MAESTRO_WORKSPACE を外した env で起動し、必ず --workspace の一時dirを使う。
-
-test('継続モード: 同じ self を監視中の生存プロセスがいれば exit 1 して起動しない', () => {
-  withTempDir(workspace => {
-    // 排他の正本は role lease（Issue #240）。registry エントリでなく
-    // <workspace>/.gh-maestro/leases/resident-role-msgpoll-orchestrator.json を用意する。
-    // pid はテストランナー自身ではなく ppid を指定する（--force 無しなので kill は走らないが、
-    // 念のためテスト環境のプロセスを対象にしない）。
-    const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
-    fs.mkdirSync(leasesDir, { recursive: true });
-    const otherPid = process.ppid;
-    fs.writeFileSync(path.join(leasesDir, 'resident-role-msgpoll-orchestrator.json'), JSON.stringify({
-      pid: otherPid, startTime: TEST_CLI_START_TIME, workerName: 'msgpoll-orchestrator', phase: 'active',
-    }));
-
-    const r = runMsgPollCli(['orchestrator', '--workspace', workspace]);
-
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /重複起動/);
-  });
-});
-
-
-test('継続モード: --workspace がホームディレクトリと衝突する場合、生の例外ではなくワークスペース解決エラーで exit 1 する（Issue #214）', () => {
-  // resolveWorkspace() が workspace の home 衝突を検知して null を返すため、
-  // registerProcess/role lease 等の assertValidWorkspace throw が
-  // 子プロセスの生スタックトレースとして漏れ出ることなく、通常のエラーメッセージ
-  // + exit 1 に倒れることを実プロセス起動で確認する。
-  const { spawnSync } = require('child_process');
-  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-fakehome-'));
-  try {
-    const script = path.join(__dirname, '..', 'scripts', 'msg-poll.js');
-    const envKey = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
-    const env = { ...cleanSpawnEnv(), [envKey]: fakeHome };
-
-    const r = spawnSync(process.execPath, [script, 'orchestrator', '--workspace', fakeHome],
-      { encoding: 'utf8', timeout: 10000, env });
-
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /ワークスペースを解決できません/);
-    assert.doesNotMatch(r.stderr, /assertValidWorkspace/, `生の例外スタックトレースが漏れてはならない: ${r.stderr}`);
-  } finally {
-    fs.rmSync(fakeHome, { recursive: true, force: true });
-  }
-});
-
-test('継続モード: 重複起動検出時のエラーに、判断不要でそのまま使えるwatch-pidコマンドが含まれる', () => {
-  withTempDir(workspace => {
-    const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
-    fs.mkdirSync(leasesDir, { recursive: true });
-    const otherPid = process.ppid;
-    fs.writeFileSync(path.join(leasesDir, 'resident-role-msgpoll-orchestrator.json'), JSON.stringify({
-      pid: otherPid, startTime: TEST_CLI_START_TIME, workerName: 'msgpoll-orchestrator', phase: 'active',
-    }));
-
-    const r = runMsgPollCli(['orchestrator', '--workspace', workspace]);
-
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, new RegExp(`--watch-pid ${otherPid}\\b`));
-    assert.match(r.stderr, /PID_DIED/);
-  });
-});
 
 // ── buildWatchPidCommand ─────────────────────────────────────────────────────
 
