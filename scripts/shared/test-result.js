@@ -136,9 +136,9 @@ function validateCountFields(value, required) {
   return { ok: true };
 }
 
-function validateLayerResult(value, fieldPrefix = 'test result') {
+function validateResultFields(value, fieldPrefix, { requireLayer = false } = {}) {
   if (!isPlainObject(value)) return { ok: false, error: `${fieldPrefix} must be a JSON object` };
-  if (typeof value.layer !== 'string' || !value.layer.trim()) return { ok: false, error: `${fieldPrefix} layer is required` };
+  if (requireLayer && (typeof value.layer !== 'string' || !value.layer.trim())) return { ok: false, error: `${fieldPrefix} layer is required` };
   if (typeof value.scope !== 'string' || !TEST_RESULT_SCOPES.has(value.scope)) return { ok: false, error: `${fieldPrefix} scope is invalid` };
   if (typeof value.status !== 'string' || !TEST_RESULT_STATUSES.has(value.status)) return { ok: false, error: `${fieldPrefix} status is invalid` };
   if (typeof value.command !== 'string' || !value.command.trim()) return { ok: false, error: `${fieldPrefix} command is required` };
@@ -164,32 +164,16 @@ function validateLayerResult(value, fieldPrefix = 'test result') {
   return { ok: true, value };
 }
 
+function validateLayerResult(value, fieldPrefix = 'test result') {
+  return validateResultFields(value, fieldPrefix, { requireLayer: true });
+}
+
 function validateLegacyTestResultArtifact(value) {
   if (!isPlainObject(value)) return { ok: false, error: 'test result artifact must be a JSON object' };
   if (value.schemaVersion !== TEST_RESULT_SCHEMA_VERSION) return { ok: false, error: `unsupported test result schemaVersion: ${JSON.stringify(value.schemaVersion)}` };
   if (value.producer !== TEST_RESULT_PRODUCER) return { ok: false, error: 'test result artifact producer is invalid' };
   if (value.provenance !== TEST_RESULT_PROVENANCE) return { ok: false, error: 'test result artifact provenance is invalid' };
-  if (typeof value.scope !== 'string' || !TEST_RESULT_SCOPES.has(value.scope)) return { ok: false, error: 'test result artifact scope is invalid' };
-  if (typeof value.status !== 'string' || !TEST_RESULT_STATUSES.has(value.status)) return { ok: false, error: 'test result artifact status is invalid' };
-  if (typeof value.command !== 'string' || !value.command.trim()) return { ok: false, error: 'test result artifact command is required' };
-  if (typeof value.recordedAt !== 'string' || !value.recordedAt.trim()) return { ok: false, error: 'test result artifact recordedAt is required' };
-  if (value.status === 'complete') {
-    if (value.outcome !== undefined && (typeof value.outcome !== 'string' || !TEST_RESULT_OUTCOMES.has(value.outcome))) return { ok: false, error: 'complete test result outcome is invalid' };
-    const counts = validateCountFields(value, []);
-    if (!counts.ok) return counts;
-    const hasFail = Object.prototype.hasOwnProperty.call(value, 'fail');
-    const hasPass = Object.prototype.hasOwnProperty.call(value, 'pass');
-    if (hasFail !== hasPass) return { ok: false, error: 'test result fail and pass must be provided together' };
-    if (value.outcome === undefined && !hasFail) return { ok: false, error: 'complete test result must include outcome or fail/pass counts' };
-    if (hasFail && Object.prototype.hasOwnProperty.call(value, 'tests') && value.fail + value.pass > value.tests) return { ok: false, error: 'test result counts exceed tests count' };
-    if (typeof value.testedContentHash !== 'string' || !TEST_CONTENT_HASH_RE.test(value.testedContentHash)) return { ok: false, error: 'complete test result must include a testedContentHash' };
-  } else {
-    if (typeof value.reason !== 'string' || !value.reason.trim()) return { ok: false, error: 'unavailable test result must include a reason' };
-    const counts = validateCountFields(value, []);
-    if (!counts.ok) return counts;
-  }
-  if (value.testedHead !== undefined && value.testedHead !== null && (typeof value.testedHead !== 'string' || !/^[0-9a-fA-F]{7,40}$/.test(value.testedHead))) return { ok: false, error: 'test result artifact testedHead is invalid' };
-  return { ok: true, value };
+  return validateResultFields(value, 'test result artifact');
 }
 
 function validateAggregateTestResultArtifact(value) {

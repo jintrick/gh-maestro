@@ -83,3 +83,12 @@ test('waitChildExit: error と close の両方が発火しても onCleanup は1�
   await assert.rejects(pending, /boom/);
   assert.equal(cleanupCount, 1);
 });
+
+test('waitChildExit: kill後にcloseが届かなくてもkill猶予後にrejectして完了する', async () => {
+  const { waitChildExit } = loadChildWait();
+  const child = fakeChild();
+  let cleanupCount = 0;
+  const pending = waitChildExit({ child, timeoutMs: 1, killGraceMs: 5, onCleanup: () => { cleanupCount++; } });
+  await assert.rejects(pending, /did not exit after timeout/);
+  assert.equal(cleanupCount, 1);
+});

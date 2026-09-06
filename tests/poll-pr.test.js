@@ -3,8 +3,14 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const {
+  readTestResultArtifact,
+  writeTestResultLayer,
+} = require('../scripts/shared/test-result');
 
 // poll-pr.js は require.main===module 時のみCLIを実行するため、
 // getPrBaseBranch/formatBaseBranchMismatch/spawnPollReviews は純粋関数としてrequireで検証する。
@@ -113,6 +119,11 @@ test("getPrBaseBranch returns empty string for empty gh output", () => {
   assert.equal(mod.getPrBaseBranch("42", "o/r"), "");
 });
 
+test('getPrHead rejects an empty or malformed gh response', () => {
+  const { mod } = loadModule(() => ({ status: 0, stdout: 'not-a-sha\n' }));
+  assert.equal(mod.getPrHead('42', 'o/r'), '');
+});
+
 // ── getPrState（Issue #289: poll-reviews 終了後の続行判断用） ─────────────
 
 test("getPrState parses state from gh pr view output", () => {
@@ -189,6 +200,213 @@ test("formatBaseBranchMismatch returns null when expected is empty", () => {
 test("formatBaseBranchMismatch reports (unknown) when actual is empty (fail-closed)", () => {
   const { mod } = loadModule();
   assert.equal(mod.formatBaseBranchMismatch("dev", "", "42"), "PR_BASE_MISMATCH:42:dev:(unknown)");
+});
+
+function temporaryWorkspace(prefix) {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+  return workspace;
+}
+
+function captureStdout() {
+  const chunks = [];
+  const originalWrite = process.stdout.write;
+  process.stdout.write = (chunk, ...args) => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  return {
+    output: () => chunks.join(''),
+    restore: () => { process.stdout.write = originalWrite; },
+  };
+}
+
+test('recordHeadUnavailable persists a reachable log and state record', () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-head-unavailable-');
+  const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
+  const output = captureStdout();
+  try {
+    const result = mod.recordHeadUnavailable({
+      pr: '42',
+      repo: 'fixture/repo',
+      workspace,
+      reason: 'pr-head-unavailable',
+    });
+    assert.equal(result.status, 'unavailable');
+    assert.equal(result.artifactPath, result.statePath);
+    assert.ok(fs.existsSync(result.artifactPath));
+    assert.ok(fs.existsSync(result.executionLogPath));
+    assert.match(fs.readFileSync(result.executionLogPath, 'utf8'), /pr-head-unavailable/);
+
+    const state = JSON.parse(fs.readFileSync(result.statePath, 'utf8'));
+    assert.equal(state.runs['head-unavailable'].status, 'unavailable');
+    assert.equal(state.runs['head-unavailable'].result.executionLogPath, result.executionLogPath);
+    const event = JSON.parse(output.output().trim().slice('SLOW_TEST_RESULT:'.length));
+    assert.equal(event.artifactPath, result.artifactPath);
+    assert.equal(event.executionLogPath, result.executionLogPath);
+    assert.equal(event.statePath, result.statePath);
+  } finally {
+    output.restore();
+    if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
+  }
+});
+
+test('resolveSlowWorktree resolves the unique senior-coder worktree for an issue', () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-worktree-');
+  const workerName = 'fixture-senior';
+  const worktree = path.join(workspace, '.gh-maestro', 'worktrees', workerName);
+  fs.mkdirSync(worktree, { recursive: true });
+  fs.writeFileSync(path.join(workspace, '.gh-maestro', 'workers.json'), JSON.stringify({
+    [workerName]: { issue: 461, skill: 'gh-maestro-senior-coder' },
+  }), 'utf8');
+
+  assert.deepEqual(mod.resolveSlowWorktree(workspace, 461), { workerName, worktree });
+});
+
+function completeLayer(layer, head) {
+  return {
+    layer,
+    scope: layer === 'full' ? 'full' : 'partial',
+    status: 'complete',
+    outcome: 'pass',
+    command: layer === 'full' ? 'npm test' : 'npm run test:slow',
+    recordedAt: '2026-09-06T00:00:00.000Z',
+    executor: layer === 'full' ? 'local' : 'poll-pr',
+    testedHead: head,
+    testedContentHash: 'a'.repeat(64),
+    tests: 1,
+    pass: 1,
+    fail: 0,
+  };
+}
+
+test('runSlowTest starts the child, preserves the full layer, and declares the aggregate', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-run-slow-');
+  const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'fixture-senior');
+  fs.mkdirSync(worktree, { recursive: true });
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
+  const head = '0123456789abcdef0123456789abcdef01234567';
+  const child = new EventEmitter();
+  child.pid = 1234;
+  const declareCalls = [];
+  let spawnOptions;
+  try {
+    writeTestResultLayer(worktree, completeLayer('full', head));
+    const result = await mod.runSlowTest({
+      pr: '42', issue: 461, repo: 'fixture/repo', workspace, headSha: head,
+    }, {
+      resolveSlowWorktreeFn: () => ({ workerName: 'fixture-senior', worktree }),
+      resolveGitHeadFn: () => head,
+      spawnFn: (_command, _args, options) => {
+        spawnOptions = options;
+        return child;
+      },
+      waitChildExitFn: async ({ onCleanup }) => {
+        writeTestResultLayer(worktree, {
+          ...completeLayer('slow', head),
+          executionLogPath: spawnOptions.env.GH_MAESTRO_TEST_LOG_PATH,
+        });
+        onCleanup();
+        return 0;
+      },
+      declareTestResultFn: (args) => {
+        declareCalls.push(args);
+        return { ok: true };
+      },
+    });
+
+    assert.equal(result.status, 'pass');
+    assert.equal(result.testedHead, head);
+    assert.equal(declareCalls.length, 1);
+    assert.equal(declareCalls[0].headSha, head);
+    assert.equal(spawnOptions.env.GH_MAESTRO_TEST_ACTOR, 'poll-pr');
+    assert.equal(spawnOptions.env.GH_MAESTRO_TEST_LOG_PATH, result.executionLogPath);
+    assert.ok(fs.existsSync(result.artifactPath));
+    assert.equal(readTestResultArtifact(worktree).result.layers.full.outcome, 'pass');
+    assert.equal(readTestResultArtifact(worktree).result.layers.slow.outcome, 'pass');
+  } finally {
+    if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
+  }
+});
+
+test('runSlowTest records a worktree resolution failure before a child or log handle exists', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-resolve-failure-');
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
+  const head = '1234567890abcdef1234567890abcdef12345678';
+  try {
+    const result = await mod.runSlowTest({
+      pr: '44', issue: 461, repo: 'fixture/repo', workspace, headSha: head,
+    }, {
+      resolveSlowWorktreeFn: () => { throw new Error('slow worktree missing'); },
+    });
+    assert.equal(result.status, 'unavailable');
+    assert.equal(result.artifactPath, result.statePath);
+    assert.ok(fs.existsSync(result.artifactPath));
+    assert.ok(fs.existsSync(result.executionLogPath));
+    assert.match(fs.readFileSync(result.executionLogPath, 'utf8'), /slow worktree missing/);
+    const state = JSON.parse(fs.readFileSync(result.statePath, 'utf8'));
+    assert.equal(state.runs[head].status, 'unavailable');
+    assert.equal(state.runs[head].result.executionLogPath, result.executionLogPath);
+  } finally {
+    if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
+  }
+});
+
+test('runSlowTest records timeout/startup failures and does not retry a completed unavailable run', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-run-failure-');
+  const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'fixture-senior');
+  fs.mkdirSync(worktree, { recursive: true });
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
+  const head = 'abcdefabcdefabcdefabcdefabcdefabcdefabcd';
+  const child = new EventEmitter();
+  let spawnCount = 0;
+  const declareCalls = [];
+  try {
+    const deps = {
+      resolveSlowWorktreeFn: () => ({ workerName: 'fixture-senior', worktree }),
+      resolveGitHeadFn: () => head,
+      spawnFn: () => { spawnCount++; return child; },
+      waitChildExitFn: async () => { throw new Error('child did not exit after timeout'); },
+      declareTestResultFn: (args) => {
+        declareCalls.push(args);
+        return { ok: true };
+      },
+    };
+    const result = await mod.runSlowTest({
+      pr: '43', issue: 461, repo: 'fixture/repo', workspace, headSha: head,
+    }, deps);
+    assert.equal(result.status, 'unavailable');
+    assert.ok(fs.existsSync(result.executionLogPath));
+    assert.match(fs.readFileSync(result.executionLogPath, 'utf8'), /child did not exit after timeout/);
+    assert.ok(fs.existsSync(result.artifactPath));
+    assert.equal(readTestResultArtifact(worktree).result.layers.slow.status, 'unavailable');
+    assert.equal(declareCalls.length, 1);
+
+    const second = await mod.runSlowTest({
+      pr: '43', issue: 461, repo: 'fixture/repo', workspace, headSha: head,
+    }, deps);
+    assert.equal(second.status, 'unavailable');
+    assert.equal(spawnCount, 1);
+  } finally {
+    if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
+  }
 });
 
 // ── CLI起動時の即時エラー終了パス（ループに入る前にexitするため実プロセスspawn可） ──
