@@ -14,6 +14,7 @@ const {
 const KNOWN_PROVENANCE = 'test-runner';
 const FULL_SCOPE = 'full';
 const PARTIAL_SCOPE = 'partial';
+const AGGREGATE_SCOPE = 'aggregate';
 
 function matchCommit(body) {
   const match = body.match(/-\s+\*\*対象コミット\*\*:\s*`([0-9a-fA-F]{7,40})`/);
@@ -67,7 +68,7 @@ function extractV2Declaration(body) {
   // 宣言は件数が無くても known として扱う。片方だけ残った件数は、手入力や壊れた
   // コメントと区別できないため unknown に縮退させる。
   const isKnown = provenance === KNOWN_PROVENANCE
-    && (scope === FULL_SCOPE || scope === PARTIAL_SCOPE)
+    && (scope === FULL_SCOPE || scope === PARTIAL_SCOPE || scope === AGGREGATE_SCOPE)
     && (resultLabel === 'pass' || resultLabel === 'fail')
     && !hasPartialCounts;
 

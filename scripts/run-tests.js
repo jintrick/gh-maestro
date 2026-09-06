@@ -7,7 +7,6 @@
 // 数えて申告コマンドへ入力する経路はない。子プロセスの終了コードを結果の正本とし、
 // 読めるテスト件数は付加情報として保存する。
 
-const fs = require('fs');
 const { spawnSync } = require('./shared/child-process');
 const { resolveGitHead } = require('./shared/git-head');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
@@ -18,10 +17,8 @@ const {
   TEST_RESULT_PROVENANCE,
   calculateWorktreeContentHash,
   parseTapSummary,
-  testResultPath,
-  clearTestResultInvalidation,
   invalidateTestResultArtifact,
-  writeTestResultArtifact,
+  writeTestResultLayer,
 } = require('./shared/test-result');
 
 const USAGE = `run-tests.js — 宣言されたテスト層を実行し、結果成果物を生成する
@@ -154,12 +151,22 @@ function commandDisplay(command, displayCommand) {
 }
 
 function clearPreviousArtifact(worktree) {
-  try {
-    fs.unlinkSync(testResultPath(worktree));
-  } catch (error) {
-    if (!error || error.code !== 'ENOENT') throw error;
+  // 層別成果物の他層を壊さない。古い成果物の無効化は、実行結果を原子的に書けた
+  // writeTestResultLayer 側でのみ解除する。
+  void worktree;
+}
+
+function isSlowLayer(layerName) {
+  return layerName === 'slow';
+}
+
+function authorizeLayerExecution(layerName, env) {
+  if (!isSlowLayer(layerName)) return null;
+  const actor = env && env.GH_MAESTRO_TEST_ACTOR;
+  if (actor !== 'poll-pr') {
+    return 'slow 層はコーダーの通常経路から実行できません。PR検出後の poll-pr.js だけが実行主体です';
   }
-  clearTestResultInvalidation(worktree);
+  return null;
 }
 
 function exitCodeForChild(result) {
@@ -204,6 +211,16 @@ function resolveConfigWorkspace(cwd, workspace) {
  */
 function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = process.cwd(), workspace, env = process.env, homedir } = {}, deps = {}) {
   const layerName = layer || suite;
+  const authorizationError = authorizeLayerExecution(layerName, env);
+  if (authorizationError) {
+    return {
+      exitCode: 1,
+      artifact: null,
+      artifactWritten: false,
+      stdout: '',
+      stderr: authorizationError,
+    };
+  }
   const resolveTestConfigFn = deps.resolveTestConfigFn || resolveTestConfig;
   let executionWorkspace;
   let testConfig;
@@ -285,7 +302,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   const calculateWorktreeContentHashFn = deps.calculateWorktreeContentHashFn || calculateWorktreeContentHash;
   const clearArtifactFn = deps.clearArtifactFn || clearPreviousArtifact;
   const invalidateArtifactFn = deps.invalidateArtifactFn || invalidateTestResultArtifact;
-  const writeArtifactFn = deps.writeArtifactFn || writeTestResultArtifact;
+  const writeArtifactFn = deps.writeArtifactFn || writeTestResultLayer;
   const writeStdoutFn = deps.writeStdoutFn || ((text) => process.stdout.write(text));
   const writeStderrFn = deps.writeStderrFn || ((text) => process.stderr.write(text));
 
@@ -364,8 +381,10 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
       scope: selected.scope,
       status: 'complete',
       outcome: childExitCode === 0 ? 'pass' : 'fail',
+      layer: layerName,
       command: displayCommand,
       recordedAt,
+      executor: env.GH_MAESTRO_TEST_ACTOR || env.GH_MAESTRO_WORKER || 'local',
       testedHead,
       testedContentHash,
       ...summaryFields,
@@ -377,14 +396,17 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
       provenance: TEST_RESULT_PROVENANCE,
       scope: selected.scope,
       status: 'unavailable',
+      layer: layerName,
       command: displayCommand,
       recordedAt,
+      executor: env.GH_MAESTRO_TEST_ACTOR || env.GH_MAESTRO_WORKER || 'local',
       testedHead,
       reason: contentSnapshotError
         ? 'content-snapshot-failed'
         : (child.error || childExitCode === null ? 'runner-start-failed' : 'tap-summary-invalid'),
     };
   }
+  if (env.GH_MAESTRO_TEST_LOG_PATH) artifact.executionLogPath = env.GH_MAESTRO_TEST_LOG_PATH;
 
   let artifactWritten = false;
   try {

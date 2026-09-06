@@ -76,6 +76,15 @@ let _ghUpdateComment = (commentId, repo, body, opts = {}) => {
 };
 
 function isKnownTestResult(testResult) {
+  if (testResult && testResult.scope === 'aggregate' && testResult.layers) {
+    const layers = Object.values(testResult.layers);
+    return layers.length > 0 && layers.every(layer => (
+      layer && layer.status === 'complete'
+      && (layer.outcome === 'pass' || layer.outcome === 'fail')
+      && typeof layer.testedContentHash === 'string'
+      && TEST_CONTENT_HASH_RE.test(layer.testedContentHash)
+    ));
+  }
   if (!testResult
       || testResult.provenance !== 'test-runner'
       || (testResult.scope !== 'full' && testResult.scope !== 'partial')
@@ -99,6 +108,38 @@ function unknownTestResult(reason) {
   };
 }
 
+function aggregateLayerStatus(layer) {
+  if (!layer || layer.status !== 'complete') return 'unknown';
+  if (layer.outcome === 'pass' || layer.outcome === 'fail') return layer.outcome;
+  if (Number.isSafeInteger(layer.fail)) return layer.fail === 0 ? 'pass' : 'fail';
+  return 'unknown';
+}
+
+function aggregateResultForCommit(result, commitSha, commitContentHash) {
+  if (!result || result.scope !== 'aggregate' || !result.layers) return null;
+  const layers = Object.fromEntries(Object.entries(result.layers).map(([name, layer]) => {
+    const headMatches = !layer.testedHead
+      || layer.testedHead.toLowerCase() === commitSha.toLowerCase()
+      || commitSha.toLowerCase().startsWith(layer.testedHead.toLowerCase())
+      || layer.testedHead.toLowerCase().startsWith(commitSha.toLowerCase());
+    const contentMatches = headMatches && layer && typeof layer.testedContentHash === 'string'
+      && layer.testedContentHash === commitContentHash;
+    return [name, contentMatches ? layer : {
+      ...(layer || {}),
+      status: 'unavailable',
+      reason: contentMatches ? (layer.reason || 'unavailable') : 'content-mismatch',
+    }];
+  }));
+  const statuses = Object.values(layers).map(aggregateLayerStatus);
+  const outcome = statuses.includes('fail') ? 'fail'
+    : (statuses.length > 0 && statuses.every(status => status === 'pass') ? 'pass' : undefined);
+  return {
+    ...result,
+    layers,
+    ...(outcome ? { outcome } : {}),
+  };
+}
+
 // ── コメント本文生成 ────────────────────────────────────────────────────────
 
 /**
@@ -107,6 +148,31 @@ function unknownTestResult(reason) {
  * @returns {string}
  */
 function buildCommentBody({ commit, testResult }) {
+  if (testResult && testResult.scope === 'aggregate' && testResult.layers) {
+    const layers = Object.entries(testResult.layers);
+    const statuses = layers.map(([, layer]) => aggregateLayerStatus(layer));
+    const outcome = statuses.includes('fail') ? 'fail'
+      : (statuses.length > 0 && statuses.every(status => status === 'pass') ? 'pass' : 'unknown');
+    const lines = [
+      TEST_RESULT_MARKER,
+      '### 🧪 テスト結果申告',
+      `- **対象コミット**: \`${commit}\``,
+      `- **結果**: ${outcome}`,
+      '- **実行元**: `test-runner`',
+      '- **実行範囲**: `aggregate`',
+      '- **層別結果**:',
+    ];
+    for (const [name, layer] of layers) {
+      const status = aggregateLayerStatus(layer);
+      const countSuffix = Number.isSafeInteger(layer.fail) && Number.isSafeInteger(layer.pass)
+        ? ` (fail: ${layer.fail}, pass: ${layer.pass})` : '';
+      const count = Number.isSafeInteger(layer.tests) ? `, tests: ${layer.tests}` : '';
+      const record = layer.executionLogPath ? `, 実行記録: \`${layer.executionLogPath}\`` : '';
+      const reason = status === 'unknown' && layer.reason ? `, reason: ${layer.reason}` : '';
+      lines.push(`  - **${name}**: ${status}${countSuffix}${count}${record}${reason}`);
+    }
+    return lines.join('\n');
+  }
   const known = isKnownTestResult(testResult);
   const lines = [
     TEST_RESULT_MARKER,
@@ -209,16 +275,21 @@ function declareTestResult(params = {}, deps = {}) {
     artifactRead = { ok: false, reason: 'unreadable' };
   }
   let testResult = unknownTestResult(artifactRead && artifactRead.reason);
-  if (artifactRead && artifactRead.ok && isKnownTestResult(artifactRead.result)) {
+  if (artifactRead && artifactRead.ok && artifactRead.result && artifactRead.result.scope === 'aggregate') {
     try {
       const commitContentHash = commitContentHashFn(cwd, trimmedHead);
-      if (commitContentHash === artifactRead.result.testedContentHash) {
-        testResult = artifactRead.result;
-      } else {
-        testResult = unknownTestResult('content-mismatch');
-      }
+      testResult = aggregateResultForCommit(artifactRead.result, trimmedHead, commitContentHash)
+        || unknownTestResult('invalid-artifact');
     } catch {
       // コミット内容を検証できない場合も、申告自体は unknown として継続する。
+      testResult = unknownTestResult('content-verification-unavailable');
+    }
+  } else if (artifactRead && artifactRead.ok && isKnownTestResult(artifactRead.result)) {
+    try {
+      const commitContentHash = commitContentHashFn(cwd, trimmedHead);
+      if (commitContentHash === artifactRead.result.testedContentHash) testResult = artifactRead.result;
+      else testResult = unknownTestResult('content-mismatch');
+    } catch {
       testResult = unknownTestResult('content-verification-unavailable');
     }
   } else if (artifactRead && artifactRead.ok) {

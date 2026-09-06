@@ -2,12 +2,13 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
 // poll-pr.js は require.main===module 時のみCLIを実行するため、
 // getPrBaseBranch/formatBaseBranchMismatch/spawnPollReviews は純粋関数としてrequireで検証する。
-// spawnPollReviews は child-process.js の spawnSync をモックし、実プロセスを0個spawnする
+// spawnPollReviews は child-process.js の spawn をモックし、実プロセスを0個spawnする
 // CLI起動時の即時エラー終了パス
 // （--help）のみ、ループに入らず即exitすることを利用して実プロセスをspawnSyncで同期実行する
 // （detachedポーラーは起動しない）。
@@ -30,6 +31,13 @@ function loadModule(spawnSyncImpl) {
     calls.push({ cmd, args, opts });
     return spawnSyncImpl ? spawnSyncImpl(cmd, args, opts) : { status: 0, stdout: '' };
   };
+  const fakeSpawn = (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    const child = new EventEmitter();
+    const result = spawnSyncImpl ? spawnSyncImpl(cmd, args, opts) : { status: 0 };
+    process.nextTick(() => child.emit('close', result && result.status));
+    return child;
+  };
 
   const childProcessPath = require.resolve('../scripts/shared/child-process');
   delete require.cache[childProcessPath];
@@ -37,7 +45,7 @@ function loadModule(spawnSyncImpl) {
     id: childProcessPath,
     filename: childProcessPath,
     loaded: true,
-    exports: { spawn: () => { throw new Error('spawn should not be called in this test'); }, spawnSync: fakeSpawnSync, execSync: () => '' },
+    exports: { spawn: fakeSpawn, spawnSync: fakeSpawnSync, execSync: () => '' },
   };
 
   delete require.cache[pollPrPath];
@@ -49,9 +57,9 @@ function loadModule(spawnSyncImpl) {
 
 // ── spawnPollReviews ─────────────────────────────────────────────────────
 
-test('spawnPollReviews launches poll-reviews.js as a child with inherited stdio', () => {
+test('spawnPollReviews launches poll-reviews.js as an asynchronous child with inherited stdio', async () => {
   const { mod, calls } = loadModule(() => ({ status: 0 }));
-  const code = mod.spawnPollReviews('12', '/workspace', 4321);
+  const code = await mod.spawnPollReviews('12', '/workspace', 4321);
   assert.equal(code, 0);
   assert.equal(calls.length, 1);
   const [call] = calls;
@@ -64,14 +72,14 @@ test('spawnPollReviews launches poll-reviews.js as a child with inherited stdio'
   assert.equal(call.opts.stdio, 'inherit');
 });
 
-test('spawnPollReviews returns 1 when poll-reviews.js exits without a status', () => {
+test('spawnPollReviews returns 1 when poll-reviews.js exits without a status', async () => {
   const { mod } = loadModule(() => ({ status: null }));
-  assert.equal(mod.spawnPollReviews('12', '/workspace', 4321), 1);
+  assert.equal(await mod.spawnPollReviews('12', '/workspace', 4321), 1);
 });
 
-test('spawnPollReviews propagates a non-zero exit code', () => {
+test('spawnPollReviews propagates a non-zero exit code', async () => {
   const { mod } = loadModule(() => ({ status: 3 }));
-  assert.equal(mod.spawnPollReviews('12', '/workspace', 4321), 3);
+  assert.equal(await mod.spawnPollReviews('12', '/workspace', 4321), 3);
 });
 
 

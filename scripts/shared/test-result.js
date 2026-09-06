@@ -1,11 +1,7 @@
 'use strict';
 
 // test-result.js — test runner が作成する実行結果成果物の共通契約。
-//
-// 成果物は worktree ではなく storage-layout.js の runtime root に置く。push-and-declare.js
-// は git add -A で worktree 全体をステージするため、リポジトリ内へ成果物を置くと実装
-// コミットへ混入しうる。worktree ごとの runtime directory を使うことで、実行記録を
-// 作業ツリーから分離しつつ、同じ worktree の npm test と申告入口だけで共有できる。
+// v1 は従来の単一結果として読み書きを維持し、通常経路は v2 の層別集合を使う。
 
 const fs = require('fs');
 const path = require('path');
@@ -18,10 +14,12 @@ const {
 } = require('./storage-layout');
 
 const TEST_RESULT_SCHEMA_VERSION = 1;
+const TEST_RESULT_AGGREGATE_SCHEMA_VERSION = 2;
 const TEST_RESULT_PRODUCER = 'gh-maestro-test-runner';
 const TEST_RESULT_PROVENANCE = 'test-runner';
 const TEST_RESULT_FILE_NAME = 'test-result.json';
 const TEST_RESULT_INVALIDATION_FILE_NAME = 'test-result.invalidated';
+const TEST_RESULT_LOCK_FILE_NAME = `${TEST_RESULT_FILE_NAME}.lock`;
 const TEST_RESULT_SCOPES = Object.freeze(new Set(['full', 'partial']));
 const TEST_RESULT_STATUSES = Object.freeze(new Set(['complete', 'unavailable']));
 const TEST_RESULT_OUTCOMES = Object.freeze(new Set(['pass', 'fail']));
@@ -32,13 +30,6 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/**
- * worktree 固有の成果物パスを返す。runtime root 配下なので git の対象外であり、
- * `push-and-declare.js` の git add -A によって実装コミットへ混入しない。
- *
- * @param {string} worktree
- * @returns {string}
- */
 function normalizedWorktree(worktree = process.cwd()) {
   const base = typeof worktree === 'string' && worktree.trim() ? worktree : process.cwd();
   return path.resolve(base);
@@ -60,6 +51,10 @@ function testResultInvalidationPath(worktree = process.cwd()) {
   return path.join(path.dirname(testResultPath(worktree)), TEST_RESULT_INVALIDATION_FILE_NAME);
 }
 
+function testResultLockPath(worktree = process.cwd()) {
+  return path.join(path.dirname(testResultPath(worktree)), TEST_RESULT_LOCK_FILE_NAME);
+}
+
 function clearTestResultInvalidation(worktree) {
   try {
     fs.unlinkSync(testResultInvalidationPath(worktree));
@@ -68,15 +63,6 @@ function clearTestResultInvalidation(worktree) {
   }
 }
 
-/**
- * 成果物の更新に失敗したことを runtime root に記録する。readTestResultArtifact はこの
- * マーカーを成果物本体より先に見るため、古い complete 成果物が残っていても unknown
- * へ縮退する。
- *
- * @param {string} worktree
- * @param {string} reason
- * @returns {string}
- */
 function invalidateTestResultArtifact(worktree, reason = 'artifact-refresh-failed') {
   const markerPath = testResultInvalidationPath(worktree);
   return atomicWriteJson(markerPath, {
@@ -94,12 +80,10 @@ function readTestResultInvalidation(markerPath) {
     if (error && error.code === 'ENOENT') return null;
     return 'artifact-invalidated';
   }
-
   try {
     const parsed = JSON.parse(raw);
     return isPlainObject(parsed) && typeof parsed.reason === 'string' && parsed.reason.trim()
-      ? parsed.reason
-      : 'artifact-invalidated';
+      ? parsed.reason : 'artifact-invalidated';
   } catch {
     return 'artifact-invalidated';
   }
@@ -112,47 +96,29 @@ function parseNonNegativeInteger(value, field) {
   return { ok: true, value };
 }
 
-/**
- * Node test runner の TAP summary を解析する。必須 summary が一つでも欠けている場合は
- * 件数を採用せず、呼び出し側が終了コードだけの結果を作れる形で返す。
- *
- * @param {string} output stdout/stderr を結合した test runner 出力
- * @returns {{ok:true, summary:object}|{ok:false, error:string}}
- */
 function parseTapSummary(output) {
-  if (typeof output !== 'string' || !output) {
-    return { ok: false, error: 'test runner output is empty' };
-  }
-
+  if (typeof output !== 'string' || !output) return { ok: false, error: 'test runner output is empty' };
   const summary = {};
   const seen = new Set();
-  // 複数ファイルを node --test で実行すると、各サブテストの集計がインデント付きで
-  // 出力され、最後にトップレベルの総計が出る。トップレベルだけを拾うことで、
-  // サブテストの件数を重複扱いしない。
   const re = /^#\s+(tests|pass|fail|cancelled|skipped|todo)\s+([0-9]+)\s*$/gm;
   let match;
   while ((match = re.exec(output)) !== null) {
     const field = match[1];
-    if (seen.has(field)) {
-      return { ok: false, error: `duplicate TAP summary field: ${field}` };
-    }
+    if (seen.has(field)) return { ok: false, error: `duplicate TAP summary field: ${field}` };
     seen.add(field);
     const value = Number(match[2]);
     const parsed = parseNonNegativeInteger(value, field);
     if (!parsed.ok) return parsed;
     summary[field] = value;
   }
-
   for (const field of ['tests', 'pass', 'fail']) {
     if (!Object.prototype.hasOwnProperty.call(summary, field)) {
       return { ok: false, error: `missing TAP summary field: ${field}` };
     }
   }
-
   for (const field of ['cancelled', 'skipped', 'todo']) {
     if (!Object.prototype.hasOwnProperty.call(summary, field)) summary[field] = 0;
   }
-
   return { ok: true, summary };
 }
 
@@ -170,147 +136,199 @@ function validateCountFields(value, required) {
   return { ok: true };
 }
 
-/**
- * 成果物のスキーマを検証する。検証できない JSON は呼び出し側で unknown として扱う。
- *
- * @param {unknown} value
- * @returns {{ok:true,value:object}|{ok:false,error:string}}
- */
-function validateTestResultArtifact(value) {
-  if (!isPlainObject(value)) return { ok: false, error: 'test result artifact must be a JSON object' };
-  if (value.schemaVersion !== TEST_RESULT_SCHEMA_VERSION) {
-    return { ok: false, error: `unsupported test result schemaVersion: ${JSON.stringify(value.schemaVersion)}` };
-  }
-  if (value.producer !== TEST_RESULT_PRODUCER) {
-    return { ok: false, error: 'test result artifact producer is invalid' };
-  }
-  if (value.provenance !== TEST_RESULT_PROVENANCE) {
-    return { ok: false, error: 'test result artifact provenance is invalid' };
-  }
-  if (typeof value.scope !== 'string' || !TEST_RESULT_SCOPES.has(value.scope)) {
-    return { ok: false, error: 'test result artifact scope is invalid' };
-  }
-  if (typeof value.status !== 'string' || !TEST_RESULT_STATUSES.has(value.status)) {
-    return { ok: false, error: 'test result artifact status is invalid' };
-  }
-  if (typeof value.command !== 'string' || !value.command.trim()) {
-    return { ok: false, error: 'test result artifact command is required' };
-  }
-  if (typeof value.recordedAt !== 'string' || !value.recordedAt.trim()) {
-    return { ok: false, error: 'test result artifact recordedAt is required' };
-  }
-
+function validateLayerResult(value, fieldPrefix = 'test result') {
+  if (!isPlainObject(value)) return { ok: false, error: `${fieldPrefix} must be a JSON object` };
+  if (typeof value.layer !== 'string' || !value.layer.trim()) return { ok: false, error: `${fieldPrefix} layer is required` };
+  if (typeof value.scope !== 'string' || !TEST_RESULT_SCOPES.has(value.scope)) return { ok: false, error: `${fieldPrefix} scope is invalid` };
+  if (typeof value.status !== 'string' || !TEST_RESULT_STATUSES.has(value.status)) return { ok: false, error: `${fieldPrefix} status is invalid` };
+  if (typeof value.command !== 'string' || !value.command.trim()) return { ok: false, error: `${fieldPrefix} command is required` };
+  if (typeof value.recordedAt !== 'string' || !value.recordedAt.trim()) return { ok: false, error: `${fieldPrefix} recordedAt is required` };
   if (value.status === 'complete') {
-    if (value.outcome !== undefined
-        && (typeof value.outcome !== 'string' || !TEST_RESULT_OUTCOMES.has(value.outcome))) {
-      return { ok: false, error: 'complete test result outcome is invalid' };
-    }
+    if (value.outcome !== undefined && (typeof value.outcome !== 'string' || !TEST_RESULT_OUTCOMES.has(value.outcome))) return { ok: false, error: `${fieldPrefix} complete outcome is invalid` };
     const counts = validateCountFields(value, []);
     if (!counts.ok) return counts;
     const hasFail = Object.prototype.hasOwnProperty.call(value, 'fail');
     const hasPass = Object.prototype.hasOwnProperty.call(value, 'pass');
-    if (hasFail !== hasPass) {
-      return { ok: false, error: 'test result fail and pass must be provided together' };
-    }
-    // schemaVersion 1 の旧成果物は outcome が無くても受理する。ただし、終了コードを
-    // 復元できる fail/pass が無い旧形式まで complete として受け入れると、結果の正本が
-    // 無くなるため拒否する。新しい runner は outcome だけでも complete を生成できる。
-    if (value.outcome === undefined && !hasFail) {
-      return { ok: false, error: 'complete test result must include outcome or fail/pass counts' };
-    }
-    if (hasFail && Object.prototype.hasOwnProperty.call(value, 'tests')
-        && value.fail + value.pass > value.tests) {
-      return { ok: false, error: 'test result counts exceed tests count' };
-    }
-    if (typeof value.testedContentHash !== 'string' || !TEST_CONTENT_HASH_RE.test(value.testedContentHash)) {
-      return { ok: false, error: 'complete test result must include a testedContentHash' };
-    }
+    if (hasFail !== hasPass) return { ok: false, error: `${fieldPrefix} fail and pass must be provided together` };
+    if (value.outcome === undefined && !hasFail) return { ok: false, error: `${fieldPrefix} complete must include outcome or fail/pass counts` };
+    if (hasFail && Object.prototype.hasOwnProperty.call(value, 'tests') && value.fail + value.pass > value.tests) return { ok: false, error: `${fieldPrefix} counts exceed tests count` };
+    if (typeof value.testedContentHash !== 'string' || !TEST_CONTENT_HASH_RE.test(value.testedContentHash)) return { ok: false, error: `${fieldPrefix} complete must include a testedContentHash` };
   } else {
-    if (typeof value.reason !== 'string' || !value.reason.trim()) {
-      return { ok: false, error: 'unavailable test result must include a reason' };
-    }
+    if (typeof value.reason !== 'string' || !value.reason.trim()) return { ok: false, error: `${fieldPrefix} unavailable must include a reason` };
     const counts = validateCountFields(value, []);
     if (!counts.ok) return counts;
   }
-
-  if (value.testedHead !== undefined && value.testedHead !== null
-      && (typeof value.testedHead !== 'string' || !/^[0-9a-fA-F]{7,40}$/.test(value.testedHead))) {
-    return { ok: false, error: 'test result artifact testedHead is invalid' };
-  }
-
+  if (value.testedHead !== undefined && value.testedHead !== null && (typeof value.testedHead !== 'string' || !/^[0-9a-fA-F]{7,40}$/.test(value.testedHead))) return { ok: false, error: `${fieldPrefix} testedHead is invalid` };
+  if (value.executionLogPath !== undefined && (typeof value.executionLogPath !== 'string' || !value.executionLogPath.trim())) return { ok: false, error: `${fieldPrefix} executionLogPath is invalid` };
+  if (value.executor !== undefined && (typeof value.executor !== 'string' || !value.executor.trim())) return { ok: false, error: `${fieldPrefix} executor is invalid` };
   return { ok: true, value };
 }
 
-/**
- * ランナーが作成した成果物を runtime root へ原子的に書き出す。
- * @param {string} worktree
- * @param {object} artifact
- * @returns {string}
- * @throws {Error} 成果物が不正、または書き出しに失敗した場合
- */
+function validateLegacyTestResultArtifact(value) {
+  if (!isPlainObject(value)) return { ok: false, error: 'test result artifact must be a JSON object' };
+  if (value.schemaVersion !== TEST_RESULT_SCHEMA_VERSION) return { ok: false, error: `unsupported test result schemaVersion: ${JSON.stringify(value.schemaVersion)}` };
+  if (value.producer !== TEST_RESULT_PRODUCER) return { ok: false, error: 'test result artifact producer is invalid' };
+  if (value.provenance !== TEST_RESULT_PROVENANCE) return { ok: false, error: 'test result artifact provenance is invalid' };
+  if (typeof value.scope !== 'string' || !TEST_RESULT_SCOPES.has(value.scope)) return { ok: false, error: 'test result artifact scope is invalid' };
+  if (typeof value.status !== 'string' || !TEST_RESULT_STATUSES.has(value.status)) return { ok: false, error: 'test result artifact status is invalid' };
+  if (typeof value.command !== 'string' || !value.command.trim()) return { ok: false, error: 'test result artifact command is required' };
+  if (typeof value.recordedAt !== 'string' || !value.recordedAt.trim()) return { ok: false, error: 'test result artifact recordedAt is required' };
+  if (value.status === 'complete') {
+    if (value.outcome !== undefined && (typeof value.outcome !== 'string' || !TEST_RESULT_OUTCOMES.has(value.outcome))) return { ok: false, error: 'complete test result outcome is invalid' };
+    const counts = validateCountFields(value, []);
+    if (!counts.ok) return counts;
+    const hasFail = Object.prototype.hasOwnProperty.call(value, 'fail');
+    const hasPass = Object.prototype.hasOwnProperty.call(value, 'pass');
+    if (hasFail !== hasPass) return { ok: false, error: 'test result fail and pass must be provided together' };
+    if (value.outcome === undefined && !hasFail) return { ok: false, error: 'complete test result must include outcome or fail/pass counts' };
+    if (hasFail && Object.prototype.hasOwnProperty.call(value, 'tests') && value.fail + value.pass > value.tests) return { ok: false, error: 'test result counts exceed tests count' };
+    if (typeof value.testedContentHash !== 'string' || !TEST_CONTENT_HASH_RE.test(value.testedContentHash)) return { ok: false, error: 'complete test result must include a testedContentHash' };
+  } else {
+    if (typeof value.reason !== 'string' || !value.reason.trim()) return { ok: false, error: 'unavailable test result must include a reason' };
+    const counts = validateCountFields(value, []);
+    if (!counts.ok) return counts;
+  }
+  if (value.testedHead !== undefined && value.testedHead !== null && (typeof value.testedHead !== 'string' || !/^[0-9a-fA-F]{7,40}$/.test(value.testedHead))) return { ok: false, error: 'test result artifact testedHead is invalid' };
+  return { ok: true, value };
+}
+
+function validateAggregateTestResultArtifact(value) {
+  if (!isPlainObject(value)) return { ok: false, error: 'test result aggregate must be a JSON object' };
+  if (value.schemaVersion !== TEST_RESULT_AGGREGATE_SCHEMA_VERSION) return { ok: false, error: 'unsupported aggregate schemaVersion' };
+  if (value.producer !== TEST_RESULT_PRODUCER) return { ok: false, error: 'test result aggregate producer is invalid' };
+  if (value.provenance !== TEST_RESULT_PROVENANCE) return { ok: false, error: 'test result aggregate provenance is invalid' };
+  if (typeof value.recordedAt !== 'string' || !value.recordedAt.trim()) return { ok: false, error: 'test result aggregate recordedAt is required' };
+  if (!isPlainObject(value.layers) || Object.keys(value.layers).length === 0) return { ok: false, error: 'test result aggregate layers are required' };
+  for (const [name, rawLayer] of Object.entries(value.layers)) {
+    const layer = isPlainObject(rawLayer) ? { ...rawLayer, layer: rawLayer.layer || name } : rawLayer;
+    const validated = validateLayerResult(layer, `layer ${name}`);
+    if (!validated.ok) return validated;
+    if (validated.value.layer !== name) return { ok: false, error: `layer ${name} has a mismatched name` };
+  }
+  if (value.testedHead !== undefined && value.testedHead !== null && (typeof value.testedHead !== 'string' || !/^[0-9a-fA-F]{7,40}$/.test(value.testedHead))) return { ok: false, error: 'test result aggregate testedHead is invalid' };
+  return { ok: true, value };
+}
+
+function validateTestResultArtifact(value) {
+  return value && value.schemaVersion === TEST_RESULT_AGGREGATE_SCHEMA_VERSION
+    ? validateAggregateTestResultArtifact(value)
+    : validateLegacyTestResultArtifact(value);
+}
+
 function writeTestResultArtifact(worktree, artifact) {
-  const validated = validateTestResultArtifact(artifact);
+  const validated = validateLegacyTestResultArtifact(artifact);
   if (!validated.ok) throw new Error(validated.error);
   const base = normalizedWorktree(worktree);
   const resultPath = testResultPath(base);
-  // テスト結果はruntime rootに置くが、常駐registryの対象ではない。run-tests.jsの
-  // 親プロセスはNODE_TEST_CONTEXTを持たないため、テスト側の環境隔離だけに依存すると
-  // workspace.jsonが実runtime rootへ残る。結果ディレクトリだけを作成し、登録manifestは
-  // 作成しない。
   fs.mkdirSync(path.dirname(resultPath), { recursive: true });
   const writtenPath = atomicWriteJson(resultPath, artifact);
-  // 直前の削除・書込み失敗を示すマーカーを、完全な成果物を書けた場合だけ消す。
-  // ここで消せなければ呼び出し元は書込み失敗として扱い、read側はunknownを維持する。
   clearTestResultInvalidation(base);
   return writtenPath;
 }
 
-/**
- * runtime root の成果物を読み取り、完全な結果だけを申告へ渡す。
- * 欠落・読み取り不能・JSON破損・スキーマ不正・unavailable はすべて ok=false だが、
- * 呼び出し側はこれを副作用停止条件にせず unknown 申告へ縮退する。
- *
- * @param {string} worktree
- * @returns {{ok:true,result:object,path:string}|{ok:false,kind:string,reason:string,path:string}}
- */
+function acquireResultLock(worktree) {
+  const lockPath = testResultLockPath(worktree);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  let fd;
+  try { fd = fs.openSync(lockPath, 'wx'); } catch (error) { throw new Error(`test result aggregate lock is unavailable: ${error.message}`); }
+  return { fd, lockPath };
+}
+
+function releaseResultLock(lock) {
+  try { if (lock && Number.isInteger(lock.fd)) fs.closeSync(lock.fd); } catch {}
+  try { if (lock && lock.lockPath) fs.unlinkSync(lock.lockPath); } catch (error) { if (!error || error.code !== 'ENOENT') throw error; }
+}
+
+function readAggregateFromDisk(resultPath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+    const validated = validateAggregateTestResultArtifact(parsed);
+    return validated.ok ? validated.value : null;
+  } catch { return null; }
+}
+
+/** 同じ対象HEADの他層を保持したまま、1層だけを原子的に更新する。 */
+function writeTestResultLayer(worktree, layerArtifact) {
+  const layer = { ...layerArtifact };
+  if (typeof layer.layer !== 'string' || !layer.layer.trim()) throw new Error('test result layer is required');
+  layer.layer = layer.layer.trim();
+  const validatedLayer = validateLayerResult(layer, `layer ${layer.layer}`);
+  if (!validatedLayer.ok) throw new Error(validatedLayer.error);
+  const base = normalizedWorktree(worktree);
+  const resultPath = testResultPath(base);
+  const lock = acquireResultLock(base);
+  try {
+    const current = readAggregateFromDisk(resultPath);
+    const currentHead = current && current.testedHead;
+    const incomingHead = layer.testedHead || null;
+    const sameHead = current && currentHead && incomingHead && currentHead.toLowerCase() === incomingHead.toLowerCase();
+    const layers = sameHead ? { ...current.layers } : {};
+    layers[layer.layer] = layer;
+    const aggregate = {
+      schemaVersion: TEST_RESULT_AGGREGATE_SCHEMA_VERSION,
+      producer: TEST_RESULT_PRODUCER,
+      provenance: TEST_RESULT_PROVENANCE,
+      recordedAt: new Date().toISOString(),
+      testedHead: incomingHead,
+      layers,
+    };
+    const validated = validateAggregateTestResultArtifact(aggregate);
+    if (!validated.ok) throw new Error(validated.error);
+    fs.mkdirSync(path.dirname(resultPath), { recursive: true });
+    const writtenPath = atomicWriteJson(resultPath, aggregate);
+    clearTestResultInvalidation(base);
+    return writtenPath;
+  } finally {
+    releaseResultLock(lock);
+  }
+}
+
+function layerForRead(layer) {
+  return {
+    layer: layer.layer,
+    scope: layer.scope,
+    status: layer.status,
+    ...(layer.outcome !== undefined ? { outcome: layer.outcome } : {}),
+    ...Object.fromEntries(TAP_COUNT_FIELDS.filter(field => Object.prototype.hasOwnProperty.call(layer, field)).map(field => [field, layer[field]])),
+    command: layer.command,
+    recordedAt: layer.recordedAt,
+    testedHead: layer.testedHead || undefined,
+    ...(layer.testedContentHash ? { testedContentHash: layer.testedContentHash } : {}),
+    ...(layer.reason ? { reason: layer.reason } : {}),
+    ...(layer.executor ? { executor: layer.executor } : {}),
+    ...(layer.executionLogPath ? { executionLogPath: layer.executionLogPath } : {}),
+  };
+}
+
 function readTestResultArtifact(worktree = process.cwd()) {
   const resultPath = testResultPath(worktree);
   const invalidationReason = readTestResultInvalidation(testResultInvalidationPath(worktree));
-  if (invalidationReason) {
-    return {
-      ok: false,
-      kind: 'unavailable',
-      reason: invalidationReason,
-      path: resultPath,
-    };
-  }
+  if (invalidationReason) return { ok: false, kind: 'unavailable', reason: invalidationReason, path: resultPath };
   let raw;
   try {
     raw = fs.readFileSync(resultPath, 'utf8');
   } catch (error) {
+    return { ok: false, kind: error && error.code === 'ENOENT' ? 'missing' : 'unreadable', reason: error && error.code === 'ENOENT' ? 'missing' : 'unreadable', path: resultPath };
+  }
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return { ok: false, kind: 'invalid', reason: 'invalid-json', path: resultPath }; }
+  const validated = validateTestResultArtifact(parsed);
+  if (!validated.ok) return { ok: false, kind: 'invalid', reason: 'invalid-artifact', path: resultPath };
+  if (parsed.schemaVersion === TEST_RESULT_AGGREGATE_SCHEMA_VERSION) {
     return {
-      ok: false,
-      kind: error && error.code === 'ENOENT' ? 'missing' : 'unreadable',
-      reason: error && error.code === 'ENOENT' ? 'missing' : 'unreadable',
+      ok: true,
       path: resultPath,
+      result: {
+        provenance: parsed.provenance,
+        scope: 'aggregate',
+        command: 'layered test execution',
+        recordedAt: parsed.recordedAt,
+        testedHead: parsed.testedHead || undefined,
+        layers: Object.fromEntries(Object.entries(parsed.layers).map(([name, layer]) => [name, layerForRead(layer)])),
+      },
     };
   }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { ok: false, kind: 'invalid', reason: 'invalid-json', path: resultPath };
-  }
-
-  const validated = validateTestResultArtifact(parsed);
-  if (!validated.ok) {
-    return { ok: false, kind: 'invalid', reason: 'invalid-artifact', path: resultPath };
-  }
-  if (parsed.status !== 'complete') {
-    return { ok: false, kind: 'unavailable', reason: parsed.reason, path: resultPath };
-  }
-
+  if (parsed.status !== 'complete') return { ok: false, kind: 'unavailable', reason: parsed.reason, path: resultPath };
   return {
     ok: true,
     path: resultPath,
@@ -318,9 +336,7 @@ function readTestResultArtifact(worktree = process.cwd()) {
       provenance: parsed.provenance,
       scope: parsed.scope,
       ...(parsed.outcome !== undefined ? { outcome: parsed.outcome } : {}),
-      ...Object.fromEntries(TAP_COUNT_FIELDS
-        .filter(field => Object.prototype.hasOwnProperty.call(parsed, field))
-        .map(field => [field, parsed[field]])),
+      ...Object.fromEntries(TAP_COUNT_FIELDS.filter(field => Object.prototype.hasOwnProperty.call(parsed, field)).map(field => [field, parsed[field]])),
       command: parsed.command,
       recordedAt: parsed.recordedAt,
       testedHead: parsed.testedHead || undefined,
@@ -331,10 +347,12 @@ function readTestResultArtifact(worktree = process.cwd()) {
 
 module.exports = {
   TEST_RESULT_SCHEMA_VERSION,
+  TEST_RESULT_AGGREGATE_SCHEMA_VERSION,
   TEST_RESULT_PRODUCER,
   TEST_RESULT_PROVENANCE,
   TEST_RESULT_FILE_NAME,
   TEST_RESULT_INVALIDATION_FILE_NAME,
+  TEST_RESULT_LOCK_FILE_NAME,
   TEST_RESULT_SCOPES,
   TEST_RESULT_STATUSES,
   TEST_RESULT_OUTCOMES,
@@ -344,10 +362,13 @@ module.exports = {
   calculateCommitContentHash,
   testResultPath,
   testResultInvalidationPath,
+  testResultLockPath,
   clearTestResultInvalidation,
   invalidateTestResultArtifact,
   parseTapSummary,
+  validateLayerResult,
   validateTestResultArtifact,
   writeTestResultArtifact,
+  writeTestResultLayer,
   readTestResultArtifact,
 };
