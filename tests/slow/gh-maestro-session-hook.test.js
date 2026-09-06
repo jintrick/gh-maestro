@@ -5,9 +5,11 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'gh-maestro-session-hook.js');
+const SUPERVISOR_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'worker-supervisor.js');
+const PROCESS_LIFECYCLE_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'process-lifecycle.js');
 const lifecycle = require('../../scripts/process-lifecycle');
 const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
 lifecycle.getProcessStartTime = () => TEST_PROCESS_START_TIME;
@@ -132,6 +134,44 @@ function runHook(workspace, env) {
   });
 }
 
+function waitFor(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForRunningSupervisors(workspace, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  let entries = [];
+  while (Date.now() < deadline) {
+    entries = lifecycle.findRunningInstances(workspace, {
+      script: 'worker-supervisor.js',
+      workerName: null,
+      allowSelf: true,
+    });
+    if (entries.length > 0) return entries;
+    await waitFor(100);
+  }
+  throw new Error(`worker-supervisor の起動を確認できません: ${JSON.stringify(entries)}`);
+}
+
+async function stopRunningSupervisors(workspace, processHandle) {
+  const { killProcessTree } = require('../../scripts/shared/kill-tree');
+  if (processHandle && processHandle.pid && processHandle.exitCode === null) {
+    killProcessTree(processHandle.pid);
+  }
+
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    const entries = lifecycle.findRunningInstances(workspace, {
+      script: 'worker-supervisor.js',
+      workerName: null,
+      allowSelf: true,
+    });
+    for (const entry of entries) killProcessTree(entry.pid);
+    if (entries.length === 0) return;
+    await waitFor(100);
+  }
+}
+
 test('runSessionHook: setup → reset-session → get-contextを同期順に実行する', () => {
   const workspace = path.join(os.tmpdir(), 'ghm-session-hook-order-workspace');
   const scriptsDir = path.join(os.tmpdir(), 'ghm-session-hook-scripts');
@@ -207,6 +247,67 @@ test('CLI通し: 旧sessionIdを置いた一時workspaceでreset後のSESSION_ID
     assert.equal(outputSessionId, stateResult.state.sessionId,
       'get-contextのSESSION_IDはreset後のorchestrator.jsonと一致すること');
   } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(binDir, { recursive: true, force: true });
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test('CLI通し: 生存中のworker-supervisorを維持したままhookがreset・再起動を完了する', async () => {
+  const workspace = createWorkspace();
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-resident-bin-'));
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-resident-runtime-'));
+  const previousRuntimeDir = process.env.GH_MAESTRO_RUNTIME_DIR;
+  let supervisor = null;
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtimeDir;
+  try {
+    const bootstrapPath = createFakeGh(binDir);
+    const env = hookEnv(binDir, runtimeDir, bootstrapPath);
+    supervisor = spawn(process.execPath, [SUPERVISOR_SCRIPT, '--workspace', workspace, '--interval', '1', '--session-pid', String(process.pid)], {
+      cwd: workspace,
+      env: { ...env, GH_MAESTRO_WORKER: 'orchestrator' },
+      stdio: 'ignore',
+    });
+
+    const initialEntries = await waitForRunningSupervisors(workspace);
+    assert.equal(initialEntries.length, 1, 'hook開始前にworker-supervisorが1つだけ生存している');
+
+    const sweepResult = spawnSync(process.execPath, [PROCESS_LIFECYCLE_SCRIPT, 'sweep', '--workspace', workspace], {
+      cwd: workspace,
+      env,
+      encoding: 'utf8',
+    });
+    assert.equal(sweepResult.status, 0, `稼働中常駐を含むsweepが成功する: ${sweepResult.stderr}`);
+    const afterSweepEntries = await waitForRunningSupervisors(workspace);
+    assert.equal(afterSweepEntries.length, 1, '単独sweep後もworker-supervisorが1つだけ生存する');
+
+    const result = runHook(workspace, env);
+    assert.equal(result.status, 0, `hookは常駐生存中でも成功する: ${result.stderr}`);
+
+    const context = result.stdout.slice(result.stdout.lastIndexOf('[gh-maestro session context]'))
+      .trim().split(/\r?\n/);
+    assert.deepEqual(context.slice(0, 6).map((line) => line.split('=')[0]), [
+      '[gh-maestro session context]',
+      'REPO',
+      'WORKSPACE',
+      'BASE_BRANCH',
+      'GH_MAESTRO_WORKER',
+      'SESSION_ID',
+    ]);
+
+    const outputSessionId = context.find((line) => line.startsWith('SESSION_ID='))?.slice('SESSION_ID='.length);
+    assert.ok(outputSessionId, `SESSION_IDがcontextに含まれる: ${result.stdout}`);
+    const stateResult = readStateLib.readState(workspace, 'orchestrator');
+    assert.equal(stateResult.status, 'ok');
+    assert.equal(outputSessionId, stateResult.state.sessionId);
+
+    const replacementEntries = await waitForRunningSupervisors(workspace);
+    assert.equal(replacementEntries.length, 1, 'hook後のworker-supervisorは1つだけ生存する');
+    assert.equal(lifecycle.isProcessAlive(replacementEntries[0].pid), true);
+  } finally {
+    await stopRunningSupervisors(workspace, supervisor);
+    if (previousRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntimeDir;
     fs.rmSync(workspace, { recursive: true, force: true });
     fs.rmSync(binDir, { recursive: true, force: true });
     fs.rmSync(runtimeDir, { recursive: true, force: true });
