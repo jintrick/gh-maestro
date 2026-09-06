@@ -401,6 +401,7 @@ function collectWorkersStatus(workspace, opts = {}) {
 
   const findInstancesFn = opts.findRunningInstancesFn || _findRunningInstances;
   let runningReviewJobs = [];
+  let reviewJobsUnavailable = false;
   try {
     runningReviewJobs = findInstancesFn(workspace, {
       script: 'review-job',
@@ -413,6 +414,7 @@ function collectWorkersStatus(workspace, opts = {}) {
     });
   } catch {
     runningReviewJobs = [];
+    reviewJobsUnavailable = true;
   }
 
   for (const manager of runningManagers) {
@@ -463,6 +465,7 @@ function collectWorkersStatus(workspace, opts = {}) {
     if (jobEntries.length > 0) {
       managerEntry.jobs = jobEntries;
     }
+    if (reviewJobsUnavailable) managerEntry.jobsError = true;
     results.push(managerEntry);
   }
 
@@ -825,7 +828,7 @@ function mergeCycleWorkers(projectedWorkers, currentWorkers) {
     const merged = {
       workerName: current?.workerName || latestWorker.workerName || '',
       role: current?.role || latestWorker.role || roleFromWorker(latestWorker),
-      runCount: runs.length,
+      runNumber: runs.length,
       agentId: current?.agentId || latestWorker.agentId || null,
       skill: current?.skill || latestWorker.skill || null,
       pid: current && current.pid != null ? current.pid : (latestWorker.pid ?? null),
@@ -839,6 +842,7 @@ function mergeCycleWorkers(projectedWorkers, currentWorkers) {
       durationKnown,
     };
     if (Array.isArray(current?.jobs)) merged.jobs = current.jobs.map(job => ({ ...job }));
+    if (current?.jobsError) merged.jobsError = true;
     return merged;
   });
 }
@@ -856,23 +860,24 @@ function renderWorkerRows(workers, opts = {}) {
   const hidden = Math.max(0, prepared.length - visible.length);
   const colorize = Boolean(opts.colorize);
   const lines = [];
-  for (const { worker, role } of visible) {
+  for (const [visibleIndex, { worker, role }] of visible.entries()) {
     const dot = worker.abnormal
       ? colorizeText('●', 31, colorize)
       : worker.running
         ? colorizeText('●', 32, colorize)
         : colorizeText('○', 90, colorize);
-    const runCount = Number(worker.runCount);
-    const runSuffix = Number.isInteger(runCount) && runCount > 1 ? ` ×${runCount}` : '';
+    const runNumber = Number(worker.runNumber);
+    const runSuffix = Number.isInteger(runNumber) && runNumber > 1 ? ` ×${runNumber}` : '';
     const agent = worker.agentId ? String(worker.agentId) : '-';
     const elapsed = worker.elapsedSeconds == null || !workerDurationKnown(worker)
       ? '-'
       : formatDuration(worker.elapsedSeconds);
     const pid = worker.pid == null ? '-' : String(worker.pid);
     let line = `${dot} ${role}${runSuffix} [${agent}] ${elapsed} (pid: ${pid})`;
-    if (hidden > 0 && lines.length === visible.length - 1) line += ` +${hidden}件`;
+    if (hidden > 0 && visibleIndex === visible.length - 1) line += ` +${hidden}件`;
     lines.push(line);
 
+    if (worker.jobsError) lines.push('  └─ review jobs unavailable (取得失敗)');
     for (const job of Array.isArray(worker.jobs) ? worker.jobs : []) {
       const jobName = `  └─ ${job.jobId || 'unknown'} (${job.aspect || '-'})`;
       const jobAgent = job.agentId ? String(job.agentId) : '-';
@@ -1077,6 +1082,7 @@ function main(argv = process.argv.slice(2)) {
             agentId: j.agentId,
           }));
         }
+        if (w.jobsError) entry.jobsError = true;
         return entry;
       });
       writeOut(JSON.stringify(jsonEntries, null, 2));
