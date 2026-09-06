@@ -38,14 +38,16 @@ const readStateLib = require('./shared/read-state');
 /**
  * 全体リセットのPID registry sweep後に、停止前に捕捉した常駐だけを立て直す。
  * sweep前のエントリを受け取ることで、reset-sessionが削除したregistry情報を
- * 再発見しようとして別プロセスを推測することを防ぐ。
+ * 再発見しようとして別プロセスを推測することを防ぐ。sweepは稼働中の常駐を
+ * kill対象から除外するため、既定ではここで既存プロセスを停止してから現行コードを
+ * 起動する。既に別経路で停止済みの場合だけ、呼び出し元が skipStop を明示できる。
  */
 function restartCapturedResidents(workspace, entries, scriptsPath, opts = {}) {
   return restartResidents(workspace, {
     ...opts,
     scriptsPath,
     preCapturedEntries: entries,
-    skipStop: true,
+    skipStop: opts.skipStop ?? false,
   });
 }
 
@@ -179,9 +181,9 @@ if (require.main === module) {
 
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-  // PID registryの全体sweepで常駐も停止するため、後で現行コードを立ち上げ直せるよう
-  // argsを含む同一性確認済みのエントリを先に捕捉する。読み取り不能な場合は、
-  // 不確かなPIDを起動情報として使わず、リセット後の自動再起動を行わない。
+  // PID registryの全体sweepは稼働中の常駐を保護するため、後で現行コードへ入れ替え
+  // られるよう argsを含む同一性確認済みのエントリを先に捕捉する。読み取り不能な
+  // 場合は、不確かなPIDを起動情報として使わず、リセット後の自動再起動を行わない。
   let residentEntries = [];
   let residentCaptureError = null;
   try {
@@ -722,8 +724,9 @@ if (require.main === module) {
 
   // ═══════════════════════════════════════════════════════════════════
   // 10. 常駐プロセスを現行コードで立て直す
-  //     PID registry sweepで停止した常駐について、捕捉済みargsを引き継いで再起動する。
-  //     Monitorの張り直しはCLIの責務外なので、必要なものを明示する。
+  //     PID registry sweepが保護した常駐について、捕捉済みargsを引き継いで
+  //     既存プロセスを停止し、現行コードで再起動する。Monitorの張り直しはCLIの
+  //     責務外なので、必要なものを明示する。
   // ═══════════════════════════════════════════════════════════════════
 
   let residentRestartFailed = false;

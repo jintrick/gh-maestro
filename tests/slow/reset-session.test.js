@@ -147,7 +147,7 @@ test('rebuildOrchestratorBaseline: 取得したIDは数値のみ（非数値ID�
   });
 });
 
-test('restartCapturedResidents: 全体掃除後は捕捉済み常駐だけを立て直し、再停止しない', () => {
+test('restartCapturedResidents: 全体掃除後も生存する捕捉済み常駐を停止してから立て直す', () => {
   withTempDir(workspace => {
     const resident = {
       pid: 101,
@@ -158,10 +158,11 @@ test('restartCapturedResidents: 全体掃除後は捕捉済み常駐だけを立
       args: ['--workspace', workspace, '--session-pid', '9000'],
     };
     let replacement = null;
+    let oldAlive = true;
     let killed = false;
     const hooks = {
       findRunningInstances: () => replacement ? [replacement] : [],
-      isProcessAlive: (pid) => pid === 9000 || pid === replacement?.pid,
+      isProcessAlive: (pid) => (pid === 101 && oldAlive) || pid === 9000 || pid === replacement?.pid,
       verifyProcessIdentity: () => ({ match: true }),
       spawn: (cmd, args) => {
         replacement = {
@@ -173,7 +174,7 @@ test('restartCapturedResidents: 全体掃除後は捕捉済み常駐だけを立
         };
         return { pid: 200, unref() {} };
       },
-      killProcessTree: () => { killed = true; },
+      killProcessTree: () => { killed = true; oldAlive = false; },
       unregisterProcess: () => {},
       findSessionRootPid: () => 9000,
       sleep: () => {},
@@ -184,7 +185,7 @@ test('restartCapturedResidents: 全体掃除後は捕捉済み常駐だけを立
       maxAttempts: 1,
       waitMs: 0,
     });
-    assert.equal(killed, false, 'reset-session側で既に停止済みのPIDを再度killしない');
+    assert.equal(killed, true, 'sweepが保護した常駐はreset-session側で停止してから立て直す');
     assert.equal(result.errors.length, 0);
     assert.equal(result.results[0].status, 'replaced');
     assert.deepEqual(result.results[0].newPids, [200]);
@@ -193,7 +194,7 @@ test('restartCapturedResidents: 全体掃除後は捕捉済み常駐だけを立
   });
 });
 
-test('restartCapturedResidents: sweep後も旧常駐が生きている場合は重複起動を拒否する', () => {
+test('restartCapturedResidents: skipStopを明示すると旧常駐の生存時は重複起動を拒否する', () => {
   withTempDir(workspace => {
     const resident = {
       pid: 101,
@@ -215,7 +216,7 @@ test('restartCapturedResidents: sweep後も旧常駐が生きている場合は�
       sleep: () => {},
     };
 
-    const result = restartCapturedResidents(workspace, [resident], workspace, { hooks });
+    const result = restartCapturedResidents(workspace, [resident], workspace, { hooks, skipStop: true });
     assert.equal(spawnCalled, false);
     assert.equal(result.results[0].status, 'failed');
     assert.match(result.errors[0], /重複起動/);
