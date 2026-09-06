@@ -88,9 +88,12 @@ test('run-tests.js: 別構成のworkspace宣言で独自コマンドを実行し
     const passArtifact = readTestResultArtifact(project);
     assert.equal(passArtifact.ok, true);
     assert.equal(passArtifact.result.provenance, 'test-runner');
-    assert.equal(passArtifact.result.scope, 'full');
-    assert.equal(passArtifact.result.outcome, 'pass');
-    assert.equal('tests' in passArtifact.result, false);
+    // 成果物は層ごとの結果集合になった（Issue #461 / PR #462）。最上位の scope は
+    // aggregate で、宣言された層の scope は layers 側に入る。
+    assert.equal(passArtifact.result.scope, 'aggregate');
+    assert.equal(passArtifact.result.layers.every.scope, 'full');
+    assert.equal(passArtifact.result.layers.every.outcome, 'pass');
+    assert.equal('tests' in passArtifact.result.layers.every, false);
     assert.match(buildCommentBody({
       commit: resolveGitHead(project),
       testResult: passArtifact.result,
@@ -100,7 +103,7 @@ test('run-tests.js: 別構成のworkspace宣言で独自コマンドを実行し
     assert.equal(failed.status, 7, `runner did not preserve exit code: ${failed.stderr}`);
     const failArtifact = readTestResultArtifact(project);
     assert.equal(failArtifact.ok, true);
-    assert.equal(failArtifact.result.outcome, 'fail');
+    assert.equal(failArtifact.result.layers.every.outcome, 'fail');
     assert.match(buildCommentBody({
       commit: resolveGitHead(project),
       testResult: failArtifact.result,
