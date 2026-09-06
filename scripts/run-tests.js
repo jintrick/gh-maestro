@@ -21,6 +21,8 @@ const {
   writeTestResultLayer,
 } = require('./shared/test-result');
 
+const SLOW_TEST_ACTORS = Object.freeze(new Set(['poll-pr', 'run-slow-tests']));
+
 const USAGE = `run-tests.js — 宣言されたテスト層を実行し、結果成果物を生成する
 
 Usage:
@@ -163,8 +165,8 @@ function isSlowLayer(layerName) {
 function authorizeLayerExecution(layerName, env) {
   if (!isSlowLayer(layerName)) return null;
   const actor = env && env.GH_MAESTRO_TEST_ACTOR;
-  if (actor !== 'poll-pr') {
-    return 'slow 層はコーダーの通常経路から実行できません。PR検出後の poll-pr.js だけが実行主体です';
+  if (!SLOW_TEST_ACTORS.has(actor)) {
+    return 'slow 層はコーダーの通常経路から実行できません。認可された実行主体だけが実行できます';
   }
   return null;
 }
@@ -460,6 +462,8 @@ function main(argv, deps = {}) {
 module.exports = {
   USAGE,
   SPEC,
+  SLOW_TEST_ACTORS,
+  authorizeLayerExecution,
   normalizeRelativeTestFile,
   normalizeTestFiles,
   mapChangedFilesToTests,

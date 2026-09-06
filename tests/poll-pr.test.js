@@ -3,6 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const { PassThrough } = require('node:stream');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -40,8 +41,12 @@ function loadModule(spawnSyncImpl) {
   const fakeSpawn = (cmd, args, opts) => {
     calls.push({ cmd, args, opts });
     const child = new EventEmitter();
+    child.stdout = new PassThrough();
     const result = spawnSyncImpl ? spawnSyncImpl(cmd, args, opts) : { status: 0 };
-    process.nextTick(() => child.emit('close', result && result.status));
+    process.nextTick(() => {
+      child.stdout.end(result && result.stdout ? result.stdout : '');
+      child.emit('close', result && result.status);
+    });
     return child;
   };
 
@@ -63,7 +68,7 @@ function loadModule(spawnSyncImpl) {
 
 // ── spawnPollReviews ─────────────────────────────────────────────────────
 
-test('spawnPollReviews launches poll-reviews.js as an asynchronous child with inherited stdio', async () => {
+test('spawnPollReviews launches poll-reviews.js asynchronously and relays stdout', async () => {
   const { mod, calls } = loadModule(() => ({ status: 0 }));
   const code = await mod.spawnPollReviews('12', '/workspace', 4321);
   assert.equal(code, 0);
@@ -75,7 +80,21 @@ test('spawnPollReviews launches poll-reviews.js as an asynchronous child with in
   assert.ok(call.args.includes('/workspace'));
   assert.ok(call.args.includes('--session-pid'));
   assert.ok(call.args.includes('4321'));
-  assert.equal(call.opts.stdio, 'inherit');
+  assert.deepEqual(call.opts.stdio, ['ignore', 'pipe', 'inherit']);
+});
+
+test('spawnPollReviews sends relayed PR_PUSH lines to the callback', async () => {
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'PR_PUSH:0123456789abcdef0123456789abcdef01234567\n' }));
+  const lines = [];
+  await mod.spawnPollReviews('12', '/workspace', 4321, 30, (line) => lines.push(line));
+  assert.deepEqual(lines, ['PR_PUSH:0123456789abcdef0123456789abcdef01234567']);
+  assert.equal(calls.length, 1);
+});
+
+test('parsePrPushLine accepts a SHA and rejects unrelated or malformed output', () => {
+  assert.equal(modParsePrPushLine('PR_PUSH:0123456789abcdef0123456789abcdef01234567'), '0123456789abcdef0123456789abcdef01234567');
+  assert.equal(modParsePrPushLine('PR_COMMENT:owner:hello'), null);
+  assert.equal(modParsePrPushLine('PR_PUSH:not-a-sha'), null);
 });
 
 test('spawnPollReviews returns 1 when poll-reviews.js exits without a status', async () => {
@@ -150,7 +169,10 @@ test("getPrState returns empty string when gh pr view fails (fail-closed)", () =
 });
 
 // ── resolvePostReviewDecision（Issue #289: CLOSED → findPR 復帰） ────────────
-const { resolvePostReviewDecision } = require('../scripts/poll-pr');
+const {
+  resolvePostReviewDecision,
+  parsePrPushLine: modParsePrPushLine,
+} = require('../scripts/poll-pr');
 
 test("resolvePostReviewDecision: 子が正常終了かつ CLOSED は findPR へ復帰（resume）", () => {
   // 子（poll-reviews.js）が exit 0 で正常終了し、却下・キャンセルで CLOSED された PR は
@@ -285,6 +307,101 @@ function completeLayer(layer, head) {
   };
 }
 
+test('runPollPr connects PR detection, PR_PUSH slow launches, deduplication, and pending completion', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-control-loop-');
+  const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'fixture-senior');
+  fs.mkdirSync(worktree, { recursive: true });
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
+  const firstHead = '1111111111111111111111111111111111111111';
+  const pushedHead = '2222222222222222222222222222222222222222';
+  const headChecks = [firstHead, firstHead, pushedHead, pushedHead];
+  let headIndex = 0;
+  let childStarts = 0;
+  let h2Started = false;
+  let releasePushedSlow;
+  const pushedSlowRelease = new Promise((resolve) => { releasePushedSlow = resolve; });
+  let cleanupCode;
+  let pollCall;
+  const output = [];
+  try {
+    const runPromise = mod.runPollPr({
+      issue: 465,
+      repo: 'fixture/repo',
+      workspace,
+      sessionPid: 4321,
+      noReviewManager: true,
+      intervalMs: 0,
+      intervalArg: '0',
+    }, {
+      checkParentFn: () => true,
+      findPrFn: () => '42',
+      getPrHeadFn: () => firstHead,
+      spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine) => {
+        pollCall = { pr, reviewWorkspace, sessionPid, interval };
+        onOutputLine(`PR_PUSH:${pushedHead}`);
+        onOutputLine(`PR_PUSH:${pushedHead}`);
+        return 0;
+      },
+      getPrStateFn: () => 'OPEN',
+      recordMergeAndSnapshotFn: () => {},
+      cleanupFn: (code) => { cleanupCode = code; },
+      writeStdoutFn: (text) => output.push(text),
+      slowTestDeps: {
+        resolveSlowWorktreeFn: () => ({ workerName: 'fixture-senior', worktree }),
+        resolveGitHeadFn: () => headChecks[headIndex++],
+        spawnFn: () => ({ pid: 9000 + childStarts }),
+        waitChildExitFn: async ({ onCleanup }) => {
+          childStarts += 1;
+          const currentHead = childStarts === 1 ? firstHead : pushedHead;
+          if (currentHead === pushedHead) {
+            h2Started = true;
+            await pushedSlowRelease;
+          }
+          writeTestResultLayer(worktree, completeLayer('slow', currentHead));
+          onCleanup();
+          return 0;
+        },
+        declareTestResultFn: () => ({ ok: true }),
+      },
+    });
+
+    // Allow the real control loop to reach the pushed slow child without sleeping.
+    for (let i = 0; i < 20 && !h2Started; i += 1) await Promise.resolve();
+    assert.equal(h2Started, true);
+
+    let settled = false;
+    runPromise.then(() => { settled = true; }, () => { settled = true; });
+    await Promise.resolve();
+    assert.equal(settled, false, 'poll-pr must wait for pending slow work');
+
+    releasePushedSlow();
+    const result = await runPromise;
+    assert.deepEqual(result, { exitCode: 0 });
+    assert.equal(cleanupCode, 0);
+    assert.deepEqual(pollCall, {
+      pr: '42',
+      reviewWorkspace: workspace,
+      sessionPid: 4321,
+      interval: '0',
+    });
+    assert.equal(childStarts, 2, 'initial HEAD and one pushed HEAD should execute once each');
+    assert.deepEqual(
+      output.filter((line) => line.startsWith('SLOW_TEST_STARTED:')).map((line) => JSON.parse(line.slice('SLOW_TEST_STARTED:'.length)).testedHead),
+      [firstHead, pushedHead],
+    );
+    const state = JSON.parse(fs.readFileSync(mod.slowStatePath(workspace, '42'), 'utf8'));
+    assert.equal(state.runs[firstHead].status, 'pass');
+    assert.equal(state.runs[pushedHead].status, 'pass');
+  } finally {
+    if (releasePushedSlow) releasePushedSlow();
+    if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
+  }
+});
+
 test('runSlowTest starts the child, preserves the full layer, and declares the aggregate', async () => {
   const { mod } = loadModule();
   const workspace = temporaryWorkspace('gh-maestro-poll-pr-run-slow-');
@@ -297,6 +414,7 @@ test('runSlowTest starts the child, preserves the full layer, and declares the a
   const child = new EventEmitter();
   child.pid = 1234;
   const declareCalls = [];
+  const reserved = [];
   let spawnOptions;
   try {
     writeTestResultLayer(worktree, completeLayer('full', head));
@@ -321,10 +439,12 @@ test('runSlowTest starts the child, preserves the full layer, and declares the a
         declareCalls.push(args);
         return { ok: true };
       },
+      onReserved: (event) => reserved.push(event),
     });
 
     assert.equal(result.status, 'pass');
     assert.equal(result.testedHead, head);
+    assert.deepEqual(reserved, [{ pr: '42', layer: 'slow', testedHead: head }]);
     assert.equal(declareCalls.length, 1);
     assert.equal(declareCalls[0].headSha, head);
     assert.equal(spawnOptions.env.GH_MAESTRO_TEST_ACTOR, 'poll-pr');
@@ -403,6 +523,48 @@ test('runSlowTest records timeout/startup failures and does not retry a complete
     }, deps);
     assert.equal(second.status, 'unavailable');
     assert.equal(spawnCount, 1);
+  } finally {
+    if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
+  }
+});
+
+test('runSlowTest does not let an older HEAD overwrite a newer worktree result', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-stale-head-');
+  const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'fixture-senior');
+  fs.mkdirSync(worktree, { recursive: true });
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
+  const head = '1111111111111111111111111111111111111111';
+  const newerHead = '2222222222222222222222222222222222222222';
+  const child = new EventEmitter();
+  child.pid = 1234;
+  let headCalls = 0;
+  let artifactWrites = 0;
+  let declareCalls = 0;
+  try {
+    const result = await mod.runSlowTest({
+      pr: '45', issue: 461, repo: 'fixture/repo', workspace, headSha: head,
+    }, {
+      resolveSlowWorktreeFn: () => ({ workerName: 'fixture-senior', worktree }),
+      resolveGitHeadFn: () => {
+        headCalls += 1;
+        return headCalls === 1 ? head : newerHead;
+      },
+      spawnFn: () => child,
+      waitChildExitFn: async () => 0,
+      writeTestResultLayerFn: () => { artifactWrites += 1; },
+      declareTestResultFn: () => { declareCalls += 1; return { ok: true }; },
+    });
+
+    assert.equal(result.status, 'unavailable');
+    assert.match(result.error, /HEADが実行中に変更/);
+    assert.equal(artifactWrites, 0);
+    assert.equal(declareCalls, 0);
+    const state = JSON.parse(fs.readFileSync(mod.slowStatePath(workspace, '45'), 'utf8'));
+    assert.equal(state.runs[head].status, 'unavailable');
   } finally {
     if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
     else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;

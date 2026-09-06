@@ -27,7 +27,7 @@ function tapSummary({ tests, pass, fail, cancelled = 0, skipped = 0, todo = 0 })
 }
 
 function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = [], child, writeArtifactFn,
-  cwd = tempWorktree(), workspace, extraDeps = {} }) {
+  cwd = tempWorktree(), workspace, actor, extraDeps = {} }) {
   const stdout = [];
   const stderr = [];
   const calls = [];
@@ -44,7 +44,9 @@ function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = []
       workspace,
       env: {
         TEST_RUNNER_FIXTURE: '1',
-        ...(suite === 'slow' ? { GH_MAESTRO_TEST_ACTOR: 'poll-pr' } : {}),
+        ...((actor || suite === 'slow')
+          ? { GH_MAESTRO_TEST_ACTOR: actor || 'poll-pr' }
+          : {}),
       },
     },
     {
@@ -164,6 +166,19 @@ test('runTests: slow suiteはpoll-pr以外の主体から起動しない', () =>
   assert.equal(result.artifact, null);
   assert.equal(spawned, false);
   assert.match(result.stderr, /slow/);
+});
+
+test('runTests: 専用の全件実行主体はslow層を起動できる', () => {
+  const fixture = runWithChild({
+    suite: 'slow',
+    actor: 'run-slow-tests',
+    child: { status: 0, stdout: tapSummary({ tests: 2, pass: 2, fail: 0 }), stderr: '' },
+  });
+
+  assert.equal(fixture.result.exitCode, 0);
+  assert.equal(fixture.artifacts[0].layer, 'slow');
+  assert.equal(fixture.artifacts[0].executor, 'run-slow-tests');
+  assert.equal(fixture.calls.filter((call) => call.type === 'spawn').length, 1);
 });
 
 test('runTests: slow suiteの個別指定はtests/slow直下以外を起動しない', () => {
