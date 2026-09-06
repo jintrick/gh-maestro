@@ -10,8 +10,8 @@ const fs = require('fs');
 // 実 worker-lease を使って lease 解放の前後を検証する。実プロセスは spawn しない
 // （liveness 判定は注入でモックする）。
 
-const { handleParentSessionDeath } = require('../../scripts/shared/resident-parent-death');
-const lease = require('../../scripts/shared/worker-lease');
+const { handleParentSessionDeath } = require('../scripts/shared/resident-parent-death');
+const lease = require('../scripts/shared/worker-lease');
 const { MSGPOLL_ORCHESTRATOR_ROLE } = lease;
 
 function tmpWorkspace() {

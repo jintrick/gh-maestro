@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { testResultPath, writeTestResultArtifact } = require('../../scripts/shared/test-result');
+const { testResultPath, writeTestResultArtifact } = require('../scripts/shared/test-result');
 
 // push-and-declare.js は「ステージング・コミット・push・PR取得/作成・テスト結果申告」を
 // 一つの操作にまとめた収束型の単一入口（Issue #374）。テストは child-process.js の
@@ -27,19 +27,19 @@ const { testResultPath, writeTestResultArtifact } = require('../../scripts/share
 // ファイル読み込み時点でこの環境変数の状態を見て子プロセス分離するか決めるため、
 // 読み込み時の除去は集計数を壊す。Issue #269）。
 
-const pushAndDeclarePath = require.resolve('../../scripts/push-and-declare');
+const pushAndDeclarePath = require.resolve('../scripts/push-and-declare');
 
 // spawnSync をキャプチャして再ロードが必要なモジュール（spawnSync を load 時に捕捉する）。
 // child-process.js 自体は require.cache にモックを挿入して制御するためこの一覧に含めない
 // （含めると挿入したモックが delete で消える）。
 const SPAWN_CAPTURING_MODULES = [
-  '../../scripts/push-and-declare',
-  '../../scripts/gh-create-pr',
-  '../../scripts/declare-test-result',
-  '../../scripts/shared/git-head',
-  '../../scripts/shared/git-branch',
-  '../../scripts/shared/gh-pr',
-  '../../scripts/shared/gh-comments',
+  '../scripts/push-and-declare',
+  '../scripts/gh-create-pr',
+  '../scripts/declare-test-result',
+  '../scripts/shared/git-head',
+  '../scripts/shared/git-branch',
+  '../scripts/shared/gh-pr',
+  '../scripts/shared/gh-comments',
 ];
 
 /**
@@ -56,7 +56,7 @@ function loadModule(spawnSyncImpl) {
     return impl;
   };
 
-  const childProcessPath = require.resolve('../../scripts/shared/child-process');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
   delete require.cache[childProcessPath];
   require.cache[childProcessPath] = {
     id: childProcessPath,

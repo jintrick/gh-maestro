@@ -10,14 +10,14 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const ROOT = path.join(__dirname, '..', '..');
+const ROOT = path.join(__dirname, '..');
 const {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
   buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
   installScripts, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
   buildUserPromptExpansionHook, registerUserPromptExpansionHook,
-} = require('../../scripts/install.js');
-const { MANAGED_TOP_LEVEL } = require('../../scripts/shared/storage-layout');
+} = require('../scripts/install.js');
+const { MANAGED_TOP_LEVEL } = require('../scripts/shared/storage-layout');
 
 test('restartResidentsAfterInstall: 登録済みの全workspaceに配布済みCLIを明示引数付きで呼び出す', () => {
   const workspaces = [

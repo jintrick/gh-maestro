@@ -17,13 +17,13 @@ const {
   recordAutostartAttempt,
   clearAutostartAttempt,
   tryReserveAutostartAttempt,
-} = require('../../scripts/shared/ensure-resident-daemon');
-const migrationMarker = require('../../scripts/shared/migration-marker');
+} = require('../scripts/shared/ensure-resident-daemon');
+const migrationMarker = require('../scripts/shared/migration-marker');
 const {
   isProcessAlive,
   getProcessStartTime,
   verifyProcessIdentity,
-} = require('../../scripts/process-lifecycle');
+} = require('../scripts/process-lifecycle');
 
 function fakeChild() {
   const emitter = new EventEmitter();

@@ -6,8 +6,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const ensureStatusPaneLib = require('../../scripts/shared/ensure-status-pane');
-const paneLaunch = require('../../scripts/shared/pane-launch');
+const ensureStatusPaneLib = require('../scripts/shared/ensure-status-pane');
+const paneLaunch = require('../scripts/shared/pane-launch');
 
 const { ensureStatusPane } = ensureStatusPaneLib;
 
@@ -203,7 +203,7 @@ test('ensureStatusPane: pane一覧取得に失敗した場合は新規起動せ�
     try {
       const result = ensureStatusPane({
         workspace,
-        scriptsPath: path.join(__dirname, '..', '..', 'scripts'),
+        scriptsPath: path.join(__dirname, '..', 'scripts'),
       }, {
         acquireLockFn: () => true,
         releaseLockFn: () => {},
@@ -265,7 +265,7 @@ test('ensureStatusPane: 補償終了失敗時は回復記録を残し、次回�
     let launchCalls = 0;
     const firstResult = ensureStatusPane({
       workspace,
-      scriptsPath: path.join(__dirname, '..', '..', 'scripts'),
+      scriptsPath: path.join(__dirname, '..', 'scripts'),
     }, {
       loadStatusPaneFn: () => null,
       isPaneAliveFn: () => false,
@@ -286,7 +286,7 @@ test('ensureStatusPane: 補償終了失敗時は回復記録を残し、次回�
       error: 'status record unavailable',
     });
 
-    const { loadStatusPane } = require('../../scripts/shared/status-pane-registry');
+    const { loadStatusPane } = require('../scripts/shared/status-pane-registry');
     assert.deepEqual(loadStatusPane(workspace), {
       paneId: 'recovery-pane',
       launchedAt: '2025-10-09T08:53:20.000Z',
@@ -294,7 +294,7 @@ test('ensureStatusPane: 補償終了失敗時は回復記録を残し、次回�
 
     const secondResult = ensureStatusPane({
       workspace,
-      scriptsPath: path.join(__dirname, '..', '..', 'scripts'),
+      scriptsPath: path.join(__dirname, '..', 'scripts'),
     }, {
       isPaneAliveFn: () => true,
       launchInSplitPaneFn: () => {
@@ -364,7 +364,7 @@ test('ensureStatusPane: 保持中ロックへの再入entrant呼び出しは二�
 
 test('ensureStatusPane: 既存startup lockのstale保持者を回収して一度だけ起動する', () => {
   withTempWorkspace((workspace) => {
-    const processLifecycle = require('../../scripts/process-lifecycle');
+    const processLifecycle = require('../scripts/process-lifecycle');
     const lockPath = processLifecycle.startupLockPath(
       workspace,
       ensureStatusPaneLib.STATUS_PANE_LOCK_SCRIPT,
@@ -384,7 +384,7 @@ test('ensureStatusPane: 既存startup lockのstale保持者を回収して一度
     try {
       const result = ensureStatusPane({
         workspace,
-        scriptsPath: path.join(__dirname, '..', '..', 'scripts'),
+        scriptsPath: path.join(__dirname, '..', 'scripts'),
       }, {
         loadStatusPaneFn: () => null,
         isPaneAliveFn: () => false,
@@ -408,7 +408,7 @@ test('ensureStatusPane: 既存startup lockのstale保持者を回収して一度
 
 test('ensureStatusPane: 既存 process-lifecycle のstartup lockを専用キーで再利用する', () => {
   withTempWorkspace((workspace) => {
-    const processLifecycle = require('../../scripts/process-lifecycle');
+    const processLifecycle = require('../scripts/process-lifecycle');
     const lockPath = processLifecycle.startupLockPath(
       workspace,
       ensureStatusPaneLib.STATUS_PANE_LOCK_SCRIPT,
@@ -418,7 +418,7 @@ test('ensureStatusPane: 既存 process-lifecycle のstartup lockを専用キー�
 
     const result = ensureStatusPane({
       workspace,
-        scriptsPath: path.join(__dirname, '..', '..', 'scripts'),
+        scriptsPath: path.join(__dirname, '..', 'scripts'),
     }, {
       loadStatusPaneFn: () => null,
       isPaneAliveFn: () => false,

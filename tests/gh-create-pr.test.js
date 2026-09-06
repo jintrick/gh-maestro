@@ -19,7 +19,7 @@ const assert = require('node:assert/strict');
 // 副作用を生む（Issue #269 レビュー確認で判明。実際に dev との差分で集計数が -11 になった）。
 // ガードの除去は必ずテストコールバック内・実行時に限定し、呼び出し後に元の値へ戻す。
 
-const ghCreatePrPath = require.resolve('../../scripts/gh-create-pr');
+const ghCreatePrPath = require.resolve('../scripts/gh-create-pr');
 
 /**
  * scripts/shared/child-process.js の spawnSync をモックした状態で gh-create-pr.js を再ロードする。
@@ -32,7 +32,7 @@ function loadModule(spawnSyncImpl) {
     return spawnSyncImpl ? spawnSyncImpl(cmd, args, opts) : { status: 0, stdout: '' };
   };
 
-  const childProcessPath = require.resolve('../../scripts/shared/child-process');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
   delete require.cache[childProcessPath];
   require.cache[childProcessPath] = {
     id: childProcessPath,

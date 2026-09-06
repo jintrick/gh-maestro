@@ -19,8 +19,8 @@ const path = require('path');
 
 // セッション排他ロックのテストで worker-lease の生存確認・同一性確認を注入する
 // （実プロセスに触れない）。
-const workerLease = require('../../scripts/shared/worker-lease');
-const processLifecycle = require('../../scripts/process-lifecycle');
+const workerLease = require('../scripts/shared/worker-lease');
+const processLifecycle = require('../scripts/process-lifecycle');
 workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
 
 const SHA = 'a'.repeat(40);
@@ -29,7 +29,7 @@ const AGENDA = '# 議題\n\nRAG構成の採用可否について';
 // --title "Test Council" から自動生成されるセッションID。
 // slugifyTitle はタイトル全体のハッシュ接尾辞を常に付与する（review指摘 #2）ため、
 // ハードコードせず実モジュールから算出する（自動生成セッションを期待するテスト用）。
-const { slugifyTitle } = require('../../scripts/shared/council-worktree');
+const { slugifyTitle } = require('../scripts/shared/council-worktree');
 const AUTO_SESSION = slugifyTitle('Test Council');
 
 // ── モック部品 ────────────────────────────────────────────────────────────────
@@ -210,15 +210,15 @@ function loadModule({ spawn, resolveConfig, phaseJobs, graphqlOpts = {} }) {
   const spawnMock = spawn || makeSpawnSync();
   const exportMocks = [
     {
-      mod: '../../scripts/shared/child-process',
+      mod: '../scripts/shared/child-process',
       exports: {
         spawn: () => { throw new Error('spawn must not be called in tests'); },
         spawnSync: spawnMock.impl,
         execSync: () => '',
       },
     },
-    { mod: '../../scripts/shared/resolve-config', exports: resolveConfig },
-    { mod: '../../scripts/shared/run-council-jobs', exports: { runPhaseJobs: phaseJobs.runPhaseJobs } },
+    { mod: '../scripts/shared/resolve-config', exports: resolveConfig },
+    { mod: '../scripts/shared/run-council-jobs', exports: { runPhaseJobs: phaseJobs.runPhaseJobs } },
   ];
   for (const { mod, exports } of exportMocks) {
     const resolved = require.resolve(mod);
@@ -226,14 +226,14 @@ function loadModule({ spawn, resolveConfig, phaseJobs, graphqlOpts = {} }) {
     require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports };
   }
 
-  for (const mod of ['../../scripts/shared/git-worktree', '../../scripts/shared/council-worktree', '../../scripts/shared/git-head']) {
+  for (const mod of ['../scripts/shared/git-worktree', '../scripts/shared/council-worktree', '../scripts/shared/git-head']) {
     delete require.cache[require.resolve(mod)];
   }
 
   const gql = makeGraphqlExec(graphqlOpts);
-  require('../../scripts/shared/graphql-client')._setGraphqlExec(gql.exec);
+  require('../scripts/shared/graphql-client')._setGraphqlExec(gql.exec);
 
-  const modPath = require.resolve('../../scripts/run-council');
+  const modPath = require.resolve('../scripts/run-council');
   delete require.cache[modPath];
   return { mod: require(modPath), gqlCalls: gql.calls, phaseCalls: phaseJobs.calls, spawnCalls: spawnMock.calls };
 }

@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('assert');
-const ghComments = require('../../scripts/shared/gh-comments');
+const ghComments = require('../scripts/shared/gh-comments');
 
 // ── parseCommentsResponse（gh api --paginate --slurp 応答のフラット化） ────
 

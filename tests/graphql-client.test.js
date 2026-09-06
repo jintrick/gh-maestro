@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const gql = require('../../scripts/shared/graphql-client');
+const gql = require('../scripts/shared/graphql-client');
 
 test('graphqlExec: デフォルト実装は gh api graphql を spawnSync で呼ぶ（未注入時は実ghへの引数構築を検証）', () => {
   // 実ghを起動したくないため、setterで注入して呼び出しを観測する。
