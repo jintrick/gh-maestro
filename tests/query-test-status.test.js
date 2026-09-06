@@ -31,6 +31,19 @@ function fullDeclarationBody(commit = 'a1b2c3d', fail = 0, pass = 1826, scope = 
 - **実行範囲**: \`${scope}\``;
 }
 
+function aggregateDeclarationBody(commit = SHA, includeSlow = true) {
+  const slow = includeSlow ? `
+  - **slow**: fail (fail: 1, pass: 9), tests: 10, executor: \`poll-pr\`, scope: \`partial\`, 実行記録: \`C:/runtime/slow.log\`` : '';
+  return `${TEST_RESULT_MARKER}
+### 🧪 テスト結果申告
+- **対象コミット**: \`${commit}\`
+- **結果**: pass
+- **実行元**: \`test-runner\`
+- **実行範囲**: \`aggregate\`
+- **層別結果**:
+  - **full**: pass (fail: 0, pass: 1826), tests: 1826, executor: \`test-runner\`, scope: \`full\`${slow}`;
+}
+
 function outcomeOnlyDeclarationBody(commit = 'a1b2c3d', outcome = 'pass', scope = 'full') {
   return `${TEST_RESULT_MARKER}
 ### 🧪 テスト結果申告
@@ -116,6 +129,66 @@ test('共有ルール: v2 full の provenance/scope と件数を抽出する', (
     provenance: 'test-runner',
     scope: 'full',
   });
+});
+
+test('共有ルール: aggregate は層別結果と全層充足性を抽出する', () => {
+  const declaration = extractTestDeclaration(aggregateDeclarationBody());
+  assert.deepEqual(declaration, {
+    version: 2,
+    commit: SHA,
+    outcome: 'pass',
+    provenance: 'test-runner',
+    scope: 'aggregate',
+    layers: {
+      full: {
+        layer: 'full', outcome: 'pass', fail: 0, pass: 1826, tests: 1826,
+        executor: 'test-runner', scope: 'full',
+      },
+      slow: {
+        layer: 'slow', outcome: 'fail', fail: 1, pass: 9, tests: 10,
+        executor: 'poll-pr', scope: 'partial', executionLogPath: 'C:/runtime/slow.log',
+      },
+    },
+    allLayersPresent: true,
+    allLayersComplete: true,
+  });
+  assert.deepEqual(evaluateTestDeclaration(declaration, SHA), {
+    status: 'GREEN',
+    declaredSha: SHA,
+    headSha: SHA,
+    provenance: 'test-runner',
+    scope: 'aggregate',
+    layers: declaration.layers,
+    allLayersPresent: true,
+    allLayersComplete: true,
+  });
+});
+
+test('queryTestStatus: aggregate はfull/slowの層別結果と不足層を返す', () => {
+  const complete = queryTestStatus(
+    { pr: '42', repo: 'owner/repo' },
+    { ghPrViewFn: () => prView([prComment(aggregateDeclarationBody())]) },
+  );
+  assert.equal(complete.status, 'GREEN');
+  assert.equal(complete.scope, 'aggregate');
+  assert.equal(complete.layers.full.pass, 1826);
+  assert.equal(complete.layers.slow.fail, 1);
+  assert.equal(complete.allLayersPresent, true);
+  assert.equal(complete.allLayersComplete, true);
+
+  const partial = queryTestStatus(
+    { pr: '42', repo: 'owner/repo' },
+    { ghPrViewFn: () => prView([prComment(aggregateDeclarationBody(SHA, false))]) },
+  );
+  assert.equal(partial.status, 'GREEN');
+  assert.deepEqual(partial.layers, {
+    full: {
+      layer: 'full', outcome: 'pass', fail: 0, pass: 1826, tests: 1826,
+      executor: 'test-runner', scope: 'full',
+    },
+  });
+  assert.equal(partial.allLayersPresent, false);
+  assert.equal(partial.allLayersComplete, false);
 });
 
 test('共有ルール: v1 は値を読めても provenance/scope が unknown になる', () => {
@@ -316,6 +389,21 @@ test('main: 成功時JSONに provenance/scope を含め、1行で返す', () => 
     fail: 0,
     pass: 1826,
   }));
+  assert.doesNotMatch(result.stdout, /\n/);
+});
+
+test('main: aggregate申告の層別結果と充足性をJSONへ含める', () => {
+  const result = main(
+    ['--pr', '42', '--repo', 'owner/repo'],
+    { ghPrViewFn: () => prView([prComment(aggregateDeclarationBody())]) },
+  );
+  assert.equal(result.exitCode, 0);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.scope, 'aggregate');
+  assert.equal(parsed.layers.full.executor, 'test-runner');
+  assert.equal(parsed.layers.slow.scope, 'partial');
+  assert.equal(parsed.allLayersPresent, true);
+  assert.equal(parsed.allLayersComplete, true);
   assert.doesNotMatch(result.stdout, /\n/);
 });
 

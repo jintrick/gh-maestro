@@ -29,7 +29,8 @@ Output (stdout):
   成功時、テスト申告状態と照合に使った事実をJSON 1行で出力
   status: GREEN / RED / STALE / NONE
   provenance: test-runner / unknown / none
-  scope: full / partial / unknown / none
+  scope: full / partial / aggregate / unknown / none
+  aggregate scope includes layers, allLayersPresent, and allLayersComplete
   exit 0 = 成功、exit 1 = 引数・GitHubアクセス・応答解釈のエラー`;
 
 const SPEC = {
@@ -131,7 +132,7 @@ function parsePrViewResponse(stdout) {
  * @param {object} [deps] テスト用の依存注入
  * @param {function} [deps.ghRepoViewFn]
  * @param {function} [deps.ghPrViewFn]
- * @returns {{ ok: true, status: string, declaredSha?: string, headSha?: string, fail?: number, pass?: number, provenance:string, scope:string } | { ok: false, error: string }}
+ * @returns {{ ok: true, status: string, declaredSha?: string, headSha?: string, fail?: number, pass?: number, provenance:string, scope:string, layers?: object, allLayersPresent?: boolean, allLayersComplete?: boolean } | { ok: false, error: string }}
  */
 function queryTestStatus({ pr, repo, workspace }, deps = {}) {
   const {
@@ -217,6 +218,9 @@ function main(argv, deps = {}) {
     ...(result.headSha !== undefined ? { headSha: result.headSha } : {}),
     ...(result.fail !== undefined ? { fail: result.fail } : {}),
     ...(result.pass !== undefined ? { pass: result.pass } : {}),
+    ...(result.layers !== undefined ? { layers: result.layers } : {}),
+    ...(result.allLayersPresent !== undefined ? { allLayersPresent: result.allLayersPresent } : {}),
+    ...(result.allLayersComplete !== undefined ? { allLayersComplete: result.allLayersComplete } : {}),
   }) };
 }
 

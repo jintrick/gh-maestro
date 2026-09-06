@@ -167,9 +167,11 @@ function buildCommentBody({ commit, testResult }) {
       const countSuffix = Number.isSafeInteger(layer.fail) && Number.isSafeInteger(layer.pass)
         ? ` (fail: ${layer.fail}, pass: ${layer.pass})` : '';
       const count = Number.isSafeInteger(layer.tests) ? `, tests: ${layer.tests}` : '';
+      const executor = layer.executor ? `, executor: \`${layer.executor}\`` : '';
+      const scope = layer.scope ? `, scope: \`${layer.scope}\`` : '';
       const record = layer.executionLogPath ? `, 実行記録: \`${layer.executionLogPath}\`` : '';
       const reason = status === 'unknown' && layer.reason ? `, reason: ${layer.reason}` : '';
-      lines.push(`  - **${name}**: ${status}${countSuffix}${count}${record}${reason}`);
+      lines.push(`  - **${name}**: ${status}${countSuffix}${count}${executor}${scope}${record}${reason}`);
     }
     return lines.join('\n');
   }

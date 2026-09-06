@@ -2,7 +2,7 @@
 
 // テスト申告コメントの形式・信頼性・HEAD照合を共有する純粋関数群。
 // poll-reviews.js と query-test-status.js が同じ v1/v2 解釈を使い、申告入口が生成した
-// provenance/scope を失わずに扱えるようにする。
+// provenance/scope と aggregate の層別事実を失わずに扱えるようにする。
 
 const TEST_RESULT_MARKER = '<!-- gh-maestro-test-result:v2 -->';
 const LEGACY_TEST_RESULT_MARKER = '<!-- gh-maestro-test-result:v1 -->';
@@ -15,6 +15,7 @@ const KNOWN_PROVENANCE = 'test-runner';
 const FULL_SCOPE = 'full';
 const PARTIAL_SCOPE = 'partial';
 const AGGREGATE_SCOPE = 'aggregate';
+const EXPECTED_AGGREGATE_LAYERS = Object.freeze(['full', 'slow']);
 
 function matchCommit(body) {
   const match = body.match(/-\s+\*\*対象コミット\*\*:\s*`([0-9a-fA-F]{7,40})`/);
@@ -37,6 +38,56 @@ function matchBacktickField(body, label) {
   return match ? match[1].trim() : undefined;
 }
 
+function matchInlineBacktickField(body, label) {
+  const match = body.match(new RegExp(`${label}\\s*:\\s*` + '`([^`]*)`'));
+  return match ? match[1].trim() : undefined;
+}
+
+function parseAggregateLayerLine(line, provenance) {
+  const header = line.match(/^\s{2,}-\s+\*\*([^*]+)\*\*:\s*(pass|fail|unknown)\b/i);
+  if (!header) return null;
+
+  const layer = header[1].trim();
+  if (!layer) return null;
+  const outcome = header[2].toLowerCase();
+  const fail = matchCount(line, 'fail');
+  const pass = matchCount(line, 'pass');
+  const tests = matchCount(line, 'tests');
+  const executor = matchInlineBacktickField(line, 'executor') || provenance || 'unknown';
+  const explicitScope = matchInlineBacktickField(line, 'scope');
+  const scope = explicitScope || (layer === 'full' ? FULL_SCOPE : layer === 'slow' ? PARTIAL_SCOPE : 'unknown');
+  const recordMatch = line.match(/実行記録\s*:\s*`([^`]*)`/);
+  const reasonMatch = line.match(/reason\s*:\s*(.+)$/);
+
+  return {
+    layer,
+    outcome,
+    ...(fail !== undefined ? { fail } : {}),
+    ...(pass !== undefined ? { pass } : {}),
+    ...(tests !== undefined ? { tests } : {}),
+    executor,
+    scope,
+    ...(recordMatch ? { executionLogPath: recordMatch[1] } : {}),
+    ...(reasonMatch ? { reason: reasonMatch[1].trim() } : {}),
+  };
+}
+
+function parseAggregateLayers(body, provenance) {
+  const layers = {};
+  for (const line of body.split(/\r?\n/)) {
+    const parsed = parseAggregateLayerLine(line, provenance);
+    if (!parsed || Object.prototype.hasOwnProperty.call(layers, parsed.layer)) continue;
+    layers[parsed.layer] = parsed;
+  }
+  const layerNames = Object.keys(layers);
+  const allLayersPresent = EXPECTED_AGGREGATE_LAYERS.every(name => layerNames.includes(name));
+  const allLayersComplete = allLayersPresent && EXPECTED_AGGREGATE_LAYERS.every((name) => {
+    const layer = layers[name];
+    return layer && (layer.outcome === 'pass' || layer.outcome === 'fail');
+  });
+  return { layers, allLayersPresent, allLayersComplete };
+}
+
 /**
  * 申告コメント本文に v1/v2 のマーカーがあるかを判定する。
  * @param {unknown} body
@@ -51,15 +102,17 @@ function extractV2Declaration(body) {
   const commit = matchCommit(body);
   if (!commit) return null;
 
-  const resultMatch = body.match(/-\s+\*\*結果\*\*:\s*(pass|fail|unknown)\b/i);
+  const resultLine = body.split(/\r?\n/).find(line => /^\s*-\s+\*\*結果\*\*:/i.test(line)) || '';
+  const resultMatch = resultLine.match(/-\s+\*\*結果\*\*:\s*(pass|fail|unknown)\b/i);
   if (!resultMatch) return null;
 
   const provenance = matchBacktickField(body, '実行元');
   const scope = matchBacktickField(body, '実行範囲');
-  const fail = matchCount(body, 'fail');
-  const pass = matchCount(body, 'pass');
+  const fail = matchCount(resultLine, 'fail');
+  const pass = matchCount(resultLine, 'pass');
   const tests = matchCount(body, '実行件数');
   const resultLabel = resultMatch[1].toLowerCase();
+  const aggregate = scope === AGGREGATE_SCOPE ? parseAggregateLayers(body, provenance) : null;
 
   const hasCounts = fail !== undefined && pass !== undefined;
   const hasPartialCounts = (fail === undefined) !== (pass === undefined);
@@ -70,7 +123,8 @@ function extractV2Declaration(body) {
   const isKnown = provenance === KNOWN_PROVENANCE
     && (scope === FULL_SCOPE || scope === PARTIAL_SCOPE || scope === AGGREGATE_SCOPE)
     && (resultLabel === 'pass' || resultLabel === 'fail')
-    && !hasPartialCounts;
+    && !hasPartialCounts
+    && (!aggregate || Object.keys(aggregate.layers).length > 0);
 
   if (!isKnown) {
     return {
@@ -78,6 +132,7 @@ function extractV2Declaration(body) {
       commit,
       provenance: 'unknown',
       scope: 'unknown',
+      ...(aggregate ? aggregate : {}),
       fail: undefined,
       pass: undefined,
     };
@@ -91,6 +146,7 @@ function extractV2Declaration(body) {
     outcome: resultLabel,
     ...(hasCounts ? { fail, pass } : {}),
     ...(tests !== undefined ? { tests } : {}),
+    ...(aggregate ? aggregate : {}),
   };
 }
 
@@ -114,7 +170,7 @@ function extractV1Declaration(body) {
  * v1 は値を読めても実行記録を持たないため provenance/scope を unknown とする。
  *
  * @param {string} body コメント本文
- * @returns {{version:number, commit:string, outcome?:'pass'|'fail', fail?:number, pass?:number, tests?:number, provenance:string, scope:string}|null}
+ * @returns {{version:number, commit:string, outcome?:'pass'|'fail', fail?:number, pass?:number, tests?:number, provenance:string, scope:string, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}|null}
  */
 function extractTestDeclaration(body) {
   if (!hasTestDeclarationMarker(body)) return null;
@@ -142,14 +198,23 @@ function declarationCounts(declaration) {
   return counts;
 }
 
+function declarationLayers(declaration) {
+  if (!declaration || declaration.scope !== AGGREGATE_SCOPE || !declaration.layers) return {};
+  return {
+    layers: declaration.layers,
+    allLayersPresent: declaration.allLayersPresent === true,
+    allLayersComplete: declaration.allLayersComplete === true,
+  };
+}
+
 /**
  * テスト申告の事実とPRのheadShaを突き合わせてステータスを判定する純粋関数。
  * provenance/scope はステータスとは独立した事実として常に返す。したがって、旧 v1 の
  * fail=0 は GREEN でも scope=unknown となり、v2 full の GREEN と区別できる。
  *
- * @param {{commit:string, outcome?:'pass'|'fail', fail?:number, pass?:number, provenance?:string, scope?:string}|null} declaration
+ * @param {{commit:string, outcome?:'pass'|'fail', fail?:number, pass?:number, provenance?:string, scope?:string, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}|null} declaration
  * @param {string} headSha PRの現在のHEADコミットSHA
- * @returns {{status:'GREEN'|'RED'|'STALE'|'NONE', declaredSha?:string, headSha?:string, fail?:number, pass?:number, provenance:string, scope:string}}
+ * @returns {{status:'GREEN'|'RED'|'STALE'|'NONE', declaredSha?:string, headSha?:string, fail?:number, pass?:number, provenance:string, scope:string, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}}
  */
 function evaluateTestDeclaration(declaration, headSha) {
   const cleanHead = cleanHeadSha(headSha);
@@ -169,6 +234,7 @@ function evaluateTestDeclaration(declaration, headSha) {
     headSha: cleanHead || undefined,
     ...counts,
     ...metadata,
+    ...declarationLayers(declaration),
   };
 
   // headSha が空の場合は照合不能のため STALE ではなく NONE として扱う。
