@@ -26,18 +26,22 @@ const SLOW_TEST_ACTORS = Object.freeze(new Set(['poll-pr', 'run-slow-tests']));
 const USAGE = `run-tests.js — 宣言されたテスト層を実行し、結果成果物を生成する
 
 Usage:
+  node run-tests.js [--workspace <path>] --list
   node run-tests.js [--workspace <path>] [--changed] <layer> [path ...]
 
 Arguments:
-  layer                 config.json の test.layers にある層名。既定値は full / slow
+  layer                 宣言されたテスト層の名前
   path                  通常は partial 層へ渡す相対テストファイル（任意）。--changed
                         指定時は変更した相対ファイルとして mapping へ渡す
 
 Options:
-  --workspace <path>   test.layers を読むプロジェクトのworkspace（省略時は環境/CWDから解決）
+  --workspace <path>   テスト層を解決するworkspace（省略時は環境/CWDから解決）
+  --list               宣言された層の名前とscopeをJSONで一覧表示する。層は実行しない
   --changed             後続の path を変更ファイルとして mapping でテストへ変換する
 
 Output:
+  --list は status と層ごとの name / scope だけをJSONで出力します。
+  --list の exit 0 = 宣言あり、exit 2 = 宣言なし、exit 1 = 解決失敗です。
   宣言されたコマンドの出力をそのまま標準出力/標準エラーへ中継します。
   結果は storage-layout.js の runtime root に worktree 単位で保存します。
   テストが失敗しても、終了コードと成果物の生成に成功した場合はその結果を保存します。
@@ -45,8 +49,8 @@ Output:
 
 const SPEC = {
   flags: { '--workspace': {} },
-  booleans: ['--help', '-h', '--changed'],
-  positionals: { min: 1, max: 65 },
+  booleans: ['--help', '-h', '--changed', '--list'],
+  positionals: { min: 0, max: 65 },
 };
 
 function normalizeRelativeTestFile(file) {
@@ -194,6 +198,51 @@ function resolveConfigWorkspace(cwd, workspace) {
   if (workspace !== undefined) return resolveWorkspace(workspace);
   if (process.env.GH_MAESTRO_WORKSPACE) return resolveWorkspace(null);
   return cwd;
+}
+
+function layerListResult(status, layers, exitCode, stderr = '') {
+  return {
+    exitCode,
+    stdout: `${JSON.stringify({ status, layers })}\n`,
+    stderr,
+  };
+}
+
+/**
+ * 宣言されたテスト層を、実行に必要な最小限の情報だけで一覧表示する。
+ *
+ * 組み込み既定値だけが解決された場合は、コーダーが宣言済み層と誤認しないよう
+ * 層を返さず missing とする。層の実行主体認可は実行入口の runTests() に限り、
+ * この読み取り専用入口では行わない。
+ *
+ * @param {{cwd?:string, workspace?:string, homedir?:string}} params
+ * @param {{resolveTestConfigFn?:Function}} deps
+ * @returns {{exitCode:number, stdout:string, stderr:string}}
+ */
+function listTestLayers({ cwd = process.cwd(), workspace, homedir } = {}, deps = {}) {
+  const resolveTestConfigFn = deps.resolveTestConfigFn || resolveTestConfig;
+  let executionWorkspace;
+  try {
+    executionWorkspace = resolveConfigWorkspace(cwd, workspace);
+  } catch {
+    return layerListResult('invalid', [], 1, 'テスト層を解決できません');
+  }
+  if (!executionWorkspace) {
+    return layerListResult('invalid', [], 1, 'テスト層を解決するworkspaceを特定できません');
+  }
+
+  let testConfig;
+  try {
+    testConfig = resolveTestConfigFn({ workspace: executionWorkspace, homedir });
+  } catch {
+    testConfig = null;
+  }
+  if (!testConfig) return layerListResult('invalid', [], 1, 'テスト層の宣言を解決できません');
+  if (testConfig.source !== 'declared') return layerListResult('missing', [], 2);
+
+  const layers = Object.entries(testConfig.layers || {})
+    .map(([name, layer]) => ({ name, scope: layer.scope }));
+  return layerListResult('declared', layers, 0);
 }
 
 /**
@@ -444,6 +493,26 @@ function main(argv, deps = {}) {
 
   if (values['--help'] || values['-h']) return { exitCode: 0, stdout: USAGE };
 
+  if (values['--list']) {
+    if (values['--changed'] || rest.length > 0) {
+      return {
+        exitCode: 1,
+        stderr: `run-tests: --list は --changed や層名と併用できません\n${USAGE}`,
+      };
+    }
+    const result = listTestLayers({
+      workspace: values['--workspace'],
+      cwd: process.cwd(),
+      env: process.env,
+      homedir: deps.homedir,
+    }, deps);
+    return result;
+  }
+
+  if (rest.length === 0) {
+    return { exitCode: 1, stderr: `run-tests: 層名が必要です\n${USAGE}` };
+  }
+
   const result = runTests({
     suite: rest[0],
     testFiles: values['--changed'] ? [] : rest.slice(1),
@@ -464,6 +533,7 @@ module.exports = {
   SPEC,
   SLOW_TEST_ACTORS,
   authorizeLayerExecution,
+  listTestLayers,
   normalizeRelativeTestFile,
   normalizeTestFiles,
   mapChangedFilesToTests,

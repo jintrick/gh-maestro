@@ -8,6 +8,7 @@ const path = require('path');
 
 const {
   USAGE,
+  listTestLayers,
   runTests,
   main,
 } = require('../scripts/run-tests');
@@ -20,6 +21,12 @@ const CONTENT_HASH = 'a'.repeat(64);
 
 function tempWorktree() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-run-tests-'));
+}
+
+function writeWorkspaceConfig(workspace, config) {
+  const configDir = path.join(workspace, '.gh-maestro');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify(config), 'utf8');
 }
 
 function tapSummary({ tests, pass, fail, cancelled = 0, skipped = 0, todo = 0 }) {
@@ -383,6 +390,8 @@ test('main: --helpは実runnerを起動せずusageを返す', () => {
   const result = main(['--help']);
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout, USAGE);
+  assert.match(result.stdout, /--list/);
+  assert.doesNotMatch(result.stdout, /config\.json/);
 
   const calls = [];
   const changed = main(['--changed', 'changed', 'src/widget.js'], {
@@ -411,6 +420,106 @@ test('main: --helpは実runnerを起動せずusageを返す', () => {
     command: 'partial-runner',
     args: ['--partial', 'checks/widget.test.js'],
   }]);
+});
+
+test('listTestLayers: 宣言済み層のnameとscopeだけをJSONで返す', () => {
+  const workspace = tempWorktree();
+  const home = tempWorktree();
+  writeWorkspaceConfig(workspace, {
+    test: {
+      layers: {
+        all: {
+          scope: 'full',
+          command: ['secret-runner', '--secret-arg'],
+          defaultTestFiles: ['tests/SECRET_DEFAULT.test.js'],
+        },
+        changed: {
+          scope: 'partial',
+          command: ['partial-secret-runner'],
+          defaultTestFiles: ['tests/SECRET_DEFAULT_PARTIAL.test.js'],
+          mapping: [{
+            changed: 'src/SECRET_CHANGED.js',
+            test: 'tests/SECRET_CHANGED.test.js',
+          }],
+        },
+      },
+    },
+  });
+
+  const result = listTestLayers({ workspace, homedir: home });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    status: 'declared',
+    layers: [
+      { name: 'all', scope: 'full' },
+      { name: 'changed', scope: 'partial' },
+    ],
+  });
+  for (const secret of [
+    'secret-runner',
+    '--secret-arg',
+    'partial-secret-runner',
+    'SECRET_DEFAULT',
+    'SECRET_CHANGED',
+    'mapping',
+  ]) {
+    assert.doesNotMatch(result.stdout, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+});
+
+test('listTestLayers: 宣言が無いworkspaceはmissingと終了コード2を返す', () => {
+  const result = listTestLayers({ workspace: tempWorktree(), homedir: tempWorktree() });
+
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(JSON.parse(result.stdout), { status: 'missing', layers: [] });
+  assert.equal(result.stderr, '');
+});
+
+test('listTestLayers: 不正な宣言は詳細を出さずinvalidと終了コード1を返す', () => {
+  const workspace = tempWorktree();
+  const home = tempWorktree();
+  writeWorkspaceConfig(workspace, { test: { layers: [] } });
+
+  const result = listTestLayers({ workspace, homedir: home });
+
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(JSON.parse(result.stdout), { status: 'invalid', layers: [] });
+  assert.match(result.stderr, /解決できません/);
+  assert.doesNotMatch(result.stderr, /config\.json/);
+});
+
+test('main: --listは層を実行せず、slow層の認可経路を通らない', () => {
+  let spawned = false;
+  const result = main(['--list'], {
+    resolveTestConfigFn: () => ({
+      source: 'declared',
+      layers: { slow: { scope: 'partial', command: ['slow-runner'] } },
+    }),
+    spawnSyncFn: () => {
+      spawned = true;
+      return { status: 0 };
+    },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    status: 'declared',
+    layers: [{ name: 'slow', scope: 'partial' }],
+  });
+  assert.equal(spawned, false);
+});
+
+test('main: --listは層名や--changedとの併用を拒否する', () => {
+  for (const argv of [
+    ['--list', 'full'],
+    ['--list', '--changed'],
+  ]) {
+    const result = main(argv);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /--list/);
+    assert.match(result.stderr, /Usage/);
+  }
 });
 
 test('main: 未知のsuiteはエラーをstderrへ返す', () => {
