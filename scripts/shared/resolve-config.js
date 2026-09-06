@@ -35,6 +35,13 @@ const { isPlainObject } = require('./object');
 // resolveAgentConfig と config.js（cmdStatusの警告表示）の両方から参照する単一のSSOT。
 const EXEC_SENSITIVE_FIELDS = ['command', 'extraArgs', 'execArgs', 'execPromptDelivery', 'execPromptFlag', 'resumeCommand', 'extends', 'nonInteractiveTokens'];
 
+// テスト宣言は agent 設定とは別のセクションで解決する。agent 設定の command 等を
+// workspace 段から除去する既存の境界を変更せず、テスト宣言については組み込み既定値、
+// global、workspace の順に明示的にマージする。
+const TEST_SCOPES = new Set(['full', 'partial']);
+const TEST_LAYER_NAME_RE = /^[^\x00-\x1f/\\]+$/;
+const TEST_MAPPING_PLACEHOLDER = '<name>';
+
 // ── デフォルト読み込み ──────────────────────────────────────────────────────
 
 const DEFAULTS_PATH = resolve(__dirname, '..', 'agent-defaults.json');
@@ -61,6 +68,220 @@ function loadConfigFile(configPath) {
   } catch {
     return {};
   }
+}
+
+function isSafeTestLayerName(value) {
+  return typeof value === 'string'
+    && value.length > 0
+    && value !== '.'
+    && value !== '..'
+    && value !== '__proto__'
+    && value !== 'constructor'
+    && value !== 'prototype'
+    && TEST_LAYER_NAME_RE.test(value);
+}
+
+function validateTestArgv(value, field) {
+  if (!Array.isArray(value) || value.length === 0 || value.some((arg) => (
+    typeof arg !== 'string' || arg.includes('\0')
+  ))) {
+    return { ok: false, error: `${field} must be an array of strings` };
+  }
+  if (!value[0].trim()) return { ok: false, error: `${field}[0] must be a non-empty executable` };
+  return { ok: true, value: [...value] };
+}
+
+function validateTestFileArgs(value) {
+  if (!Array.isArray(value) || value.some((arg) => typeof arg !== 'string' || arg.includes('\0'))) {
+    return { ok: false, error: 'test layer fileArgs must be an array of strings' };
+  }
+  return { ok: true, value: [...value] };
+}
+
+function validateTestPathPattern(value, field) {
+  if (typeof value !== 'string' || !value.trim() || value.includes('\0') || /[\r\n]/.test(value)) {
+    return { ok: false, error: `${field} must be a non-empty relative path pattern` };
+  }
+  const normalized = value.replaceAll('\\', '/');
+  if (normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized)) {
+    return { ok: false, error: `${field} must be relative to the worktree` };
+  }
+  const segments = normalized.split('/');
+  if (segments.some((segment) => segment === '.' || segment === '..' || !segment)) {
+    return { ok: false, error: `${field} must not contain empty or traversal path segments` };
+  }
+  const placeholders = normalized.split(TEST_MAPPING_PLACEHOLDER).length - 1;
+  if (placeholders > 1) return { ok: false, error: `${field} may contain at most one ${TEST_MAPPING_PLACEHOLDER} placeholder` };
+  return { ok: true, value: normalized };
+}
+
+function validateTestMapping(value) {
+  if (!Array.isArray(value)) return { ok: false, error: 'test layer mapping must be an array' };
+  const mapping = [];
+  for (const entry of value) {
+    if (!isPlainObject(entry)) return { ok: false, error: 'test layer mapping entries must be objects' };
+    const changed = validateTestPathPattern(entry.changed, 'test layer mapping.changed');
+    if (!changed.ok) return changed;
+    const test = validateTestPathPattern(entry.test, 'test layer mapping.test');
+    if (!test.ok) return test;
+    mapping.push({ changed: changed.value, test: test.value });
+  }
+  return { ok: true, value: mapping };
+}
+
+/**
+ * テスト層の設定片を検証する。ここではカスケード途中の層も扱うため command は
+ * 必須にしないが、指定された command/fileArgs は常に argv 配列として検証する。
+ * @param {unknown} raw
+ * @returns {{ok:true,value:object}|{ok:false,error:string}}
+ */
+function validateTestLayerOverride(raw) {
+  if (!isPlainObject(raw)) return { ok: false, error: 'test layer must be a JSON object' };
+  const value = {};
+
+  if (raw.shell !== undefined) {
+    return { ok: false, error: 'test layer shell execution is not supported; use an argv command' };
+  }
+
+  if (raw.scope !== undefined) {
+    if (typeof raw.scope !== 'string' || !TEST_SCOPES.has(raw.scope)) {
+      return { ok: false, error: 'test layer scope must be full or partial' };
+    }
+    value.scope = raw.scope;
+  }
+  if (raw.command !== undefined) {
+    const command = validateTestArgv(raw.command, 'test layer command');
+    if (!command.ok) return command;
+    value.command = command.value;
+  }
+  if (raw.fileArgs !== undefined) {
+    const fileArgs = validateTestFileArgs(raw.fileArgs);
+    if (!fileArgs.ok) return fileArgs;
+    value.fileArgs = fileArgs.value;
+  }
+  if (raw.displayCommand !== undefined) {
+    if (typeof raw.displayCommand !== 'string' || !raw.displayCommand.trim()
+        || raw.displayCommand.includes('\0') || /[\r\n]/.test(raw.displayCommand)) {
+      return { ok: false, error: 'test layer displayCommand must be a non-empty string' };
+    }
+    value.displayCommand = raw.displayCommand;
+  }
+  if (raw.mapping !== undefined) {
+    const mapping = validateTestMapping(raw.mapping);
+    if (!mapping.ok) return mapping;
+    value.mapping = mapping.value;
+  }
+
+  return { ok: true, value };
+}
+
+function readTestLayers(config) {
+  if (!Object.prototype.hasOwnProperty.call(config, 'test')) return { ok: true, defined: false };
+  if (!isPlainObject(config.test)) return { ok: false, error: 'test config must be a JSON object' };
+  if (!Object.prototype.hasOwnProperty.call(config.test, 'layers')) return { ok: true, defined: false };
+  if (!isPlainObject(config.test.layers)) return { ok: false, error: 'test.layers must be a JSON object' };
+  return { ok: true, defined: true, layers: config.test.layers };
+}
+
+function mergeTestLayerOverrides(base, overrides) {
+  const result = { ...base };
+  for (const [layerName, rawLayer] of Object.entries(overrides)) {
+    if (!isSafeTestLayerName(layerName)) {
+      return { ok: false, error: `invalid test layer name: ${layerName}` };
+    }
+    const layer = validateTestLayerOverride(rawLayer);
+    if (!layer.ok) return layer;
+    result[layerName] = {
+      ...(result[layerName] || {}),
+      ...layer.value,
+    };
+  }
+  return { ok: true, value: result };
+}
+
+function createBuiltinTestConfig() {
+  return {
+    source: 'builtin',
+    layers: {
+      full: {
+        scope: 'full',
+        command: [process.execPath, '--require', './tests/_env-setup.js', '--test', 'tests/*.test.js'],
+        displayCommand: 'npm test',
+      },
+      slow: {
+        scope: 'partial',
+        command: [process.execPath, '--require', './tests/_env-setup.js', '--test', 'tests/slow/*.test.js'],
+        displayCommand: 'npm run test:slow',
+        mapping: [{ changed: 'scripts/<name>.js', test: 'tests/slow/<name>.test.js' }],
+      },
+    },
+  };
+}
+
+function validateResolvedTestLayers(layers) {
+  if (!isPlainObject(layers) || Object.keys(layers).length === 0) {
+    return { ok: false, error: 'test.layers must contain at least one layer' };
+  }
+  const resolved = {};
+  for (const [layerName, rawLayer] of Object.entries(layers)) {
+    if (!isSafeTestLayerName(layerName)) return { ok: false, error: `invalid test layer name: ${layerName}` };
+    const layer = validateTestLayerOverride(rawLayer);
+    if (!layer.ok) return layer;
+    if (!layer.value.command) return { ok: false, error: `test layer command is required: ${layerName}` };
+    resolved[layerName] = {
+      scope: layer.value.scope || 'full',
+      ...layer.value,
+    };
+  }
+  return { ok: true, value: resolved };
+}
+
+/**
+ * テスト宣言を組み込み既定値 → global → workspace の順で解決する。
+ * `test.layers` が最初に現れた時点で、プロジェクトが宣言した層集合を使う。
+ * これにより、分離側を宣言しないプロジェクトへ gh-maestro 固有の slow 層を推測して
+ * 追加しない。後段の config は同名層のフィールドを上書きできる。
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.workspace]
+ * @param {string} [opts.homedir]
+ * @returns {{source:'builtin'|'declared', layers:object}|null}
+ */
+function resolveTestConfig(opts = {}) {
+  const homedir = opts.homedir || process.env.HOME || process.env.USERPROFILE || '';
+  const builtin = createBuiltinTestConfig();
+  let layers = builtin.layers;
+  let declared = false;
+
+  const configs = [
+    loadConfigFile(resolve(homedir, '.gh-maestro', 'config.json')),
+    opts.workspace ? loadConfigFile(resolve(opts.workspace, '.gh-maestro', 'config.json')) : {},
+  ];
+
+  for (const config of configs) {
+    const read = readTestLayers(config);
+    if (!read.ok) return null;
+    if (!read.defined) continue;
+    if (!declared) {
+      // 最初の宣言が既定層の一部を上書きする場合は、その同名層の未指定フィールドを
+      // 既定値から継承する。一方、宣言されなかった既定層（例: 外部プロジェクトが
+      // every だけ宣言した場合の gh-maestro 固有 slow）は持ち込まない。
+      layers = Object.fromEntries(Object.keys(read.layers)
+        .filter(layerName => Object.prototype.hasOwnProperty.call(builtin.layers, layerName))
+        .map(layerName => [layerName, builtin.layers[layerName]]));
+      declared = true;
+    }
+    const merged = mergeTestLayerOverrides(layers, read.layers);
+    if (!merged.ok) return null;
+    layers = merged.value;
+  }
+
+  const validated = validateResolvedTestLayers(layers);
+  if (!validated.ok) return null;
+  return {
+    source: declared ? 'declared' : 'builtin',
+    layers: validated.value,
+  };
 }
 
 // ── reasonix 動的コマンド解決 ──────────────────────────────────────────────
@@ -478,6 +699,10 @@ function resolveCouncilConfig(opts = {}) {
 
 module.exports = {
   resolveAgentConfig,
+  resolveTestConfig,
+  createBuiltinTestConfig,
+  validateTestLayerOverride,
+  validateTestMapping,
   resolveSkillAgentMap,
   resolveCouncilConfig,
   resolveExtends,

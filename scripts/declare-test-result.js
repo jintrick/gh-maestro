@@ -76,13 +76,19 @@ let _ghUpdateComment = (commentId, repo, body, opts = {}) => {
 };
 
 function isKnownTestResult(testResult) {
-  return testResult
-    && testResult.provenance === 'test-runner'
-    && (testResult.scope === 'full' || testResult.scope === 'partial')
-    && Number.isSafeInteger(testResult.fail)
-    && Number.isSafeInteger(testResult.pass)
-    && typeof testResult.testedContentHash === 'string'
-    && TEST_CONTENT_HASH_RE.test(testResult.testedContentHash);
+  if (!testResult
+      || testResult.provenance !== 'test-runner'
+      || (testResult.scope !== 'full' && testResult.scope !== 'partial')
+      || typeof testResult.testedContentHash !== 'string'
+      || !TEST_CONTENT_HASH_RE.test(testResult.testedContentHash)) {
+    return false;
+  }
+  if (testResult.outcome !== undefined && testResult.outcome !== 'pass' && testResult.outcome !== 'fail') {
+    return false;
+  }
+  const hasCounts = Number.isSafeInteger(testResult.fail) && Number.isSafeInteger(testResult.pass);
+  const hasOutcome = testResult.outcome === 'pass' || testResult.outcome === 'fail';
+  return hasOutcome || hasCounts;
 }
 
 function unknownTestResult(reason) {
@@ -96,7 +102,7 @@ function unknownTestResult(reason) {
 // ── コメント本文生成 ────────────────────────────────────────────────────────
 
 /**
- * 申告コメントの本文を組み立てる純粋関数。fail/pass は testResult からのみ参照する。
+ * 申告コメントの本文を組み立てる純粋関数。結果と件数は testResult からのみ参照する。
  * @param {{commit:string, testResult:object}} params
  * @returns {string}
  */
@@ -109,8 +115,10 @@ function buildCommentBody({ commit, testResult }) {
   ];
 
   if (known) {
-    const statusLabel = testResult.fail === 0 ? 'pass' : 'fail';
-    lines.push(`- **結果**: ${statusLabel} (fail: ${testResult.fail}, pass: ${testResult.pass})`);
+    const statusLabel = testResult.outcome || (testResult.fail === 0 ? 'pass' : 'fail');
+    const hasCounts = Number.isSafeInteger(testResult.fail) && Number.isSafeInteger(testResult.pass);
+    const countSuffix = hasCounts ? ` (fail: ${testResult.fail}, pass: ${testResult.pass})` : '';
+    lines.push(`- **結果**: ${statusLabel}${countSuffix}`);
     if (Number.isSafeInteger(testResult.tests)) {
       lines.push(`- **実行件数**: \`${testResult.tests}\``);
     }

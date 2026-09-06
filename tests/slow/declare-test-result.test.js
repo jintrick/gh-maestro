@@ -58,6 +58,22 @@ test('buildCommentBody: fail > 0 は runner の値から fail として出力す
   assert.ok(body.includes('- **実行範囲**: `partial`'));
 });
 
+test('buildCommentBody: 件数が無くてもrunnerのoutcomeをknownとして出力する', () => {
+  const body = buildCommentBody({
+    commit: SHA,
+    testResult: {
+      provenance: 'test-runner',
+      scope: 'partial',
+      outcome: 'fail',
+      testedContentHash: CONTENT_HASH,
+    },
+  });
+  assert.ok(body.includes('- **結果**: fail'));
+  assert.doesNotMatch(body, /fail: \d/);
+  assert.ok(body.includes('- **実行元**: `test-runner`'));
+  assert.ok(body.includes('- **実行範囲**: `partial`'));
+});
+
 test('buildCommentBody: 成果物が無い場合は unknown と実行記録不在を出力する', () => {
   const body = buildCommentBody({
     commit: SHA,
@@ -135,6 +151,29 @@ test('declareTestResult: 既存コメントなし → runner の証跡を新規�
   assert.match(createdBody, /gh-maestro-test-result:v2/);
   assert.match(createdBody, /fail: 0, pass: 1826/);
   assert.match(createdBody, /実行範囲.*full/);
+});
+
+test('declareTestResult: 件数なしのoutcomeでもknown結果を新規投稿する', () => {
+  let createdBody = null;
+  const result = declareTestResult(
+    { pr: '42', repo: 'owner/repo', headSha: SHA, worktree: '/worktree' },
+    baseDeps({
+      readTestResultFn: () => ({ ok: true, result: {
+        provenance: 'test-runner',
+        scope: 'full',
+        outcome: 'pass',
+        testedContentHash: CONTENT_HASH,
+      } }),
+      ghCreateCommentFn: (_pr, _repo, body) => {
+        createdBody = body;
+        return githubResult('https://github.com/owner/repo/pull/42#issuecomment-1007');
+      },
+    }),
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(createdBody, /結果.*pass/);
+  assert.doesNotMatch(createdBody, /fail: \d/);
 });
 
 test('declareTestResult: 既存の v1/v2 コメントは最新のものを PATCH 更新する', () => {

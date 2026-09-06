@@ -60,14 +60,16 @@ function extractV2Declaration(body) {
   const tests = matchCount(body, '実行件数');
   const resultLabel = resultMatch[1].toLowerCase();
 
-  // known として扱うのは、ランナー由来・範囲既知・両カウント既知・結果ラベル整合の
-  // 全条件を満たす v2 だけ。不完全な v2 は、数字が残っていても手入力の結果と同じく
-  // unknown に縮退させ、full 実行と同じ見え方にしない。
+  const hasCounts = fail !== undefined && pass !== undefined;
+  const hasPartialCounts = (fail === undefined) !== (pass === undefined);
+  // known として扱うのは、ランナー由来・範囲既知・結果ラベル既知に加えて、
+  // 両カウントまたは「件数なし」のどちらかが揃う v2。終了コードだけを記録した
+  // 宣言は件数が無くても known として扱う。片方だけ残った件数は、手入力や壊れた
+  // コメントと区別できないため unknown に縮退させる。
   const isKnown = provenance === KNOWN_PROVENANCE
     && (scope === FULL_SCOPE || scope === PARTIAL_SCOPE)
-    && fail !== undefined
-    && pass !== undefined
-    && resultLabel === (fail === 0 ? 'pass' : 'fail');
+    && (resultLabel === 'pass' || resultLabel === 'fail')
+    && !hasPartialCounts;
 
   if (!isKnown) {
     return {
@@ -85,9 +87,9 @@ function extractV2Declaration(body) {
     commit,
     provenance,
     scope,
-    fail,
-    pass,
-    tests,
+    outcome: resultLabel,
+    ...(hasCounts ? { fail, pass } : {}),
+    ...(tests !== undefined ? { tests } : {}),
   };
 }
 
@@ -111,7 +113,7 @@ function extractV1Declaration(body) {
  * v1 は値を読めても実行記録を持たないため provenance/scope を unknown とする。
  *
  * @param {string} body コメント本文
- * @returns {{version:number, commit:string, fail?:number, pass?:number, tests?:number, provenance:string, scope:string}|null}
+ * @returns {{version:number, commit:string, outcome?:'pass'|'fail', fail?:number, pass?:number, tests?:number, provenance:string, scope:string}|null}
  */
 function extractTestDeclaration(body) {
   if (!hasTestDeclarationMarker(body)) return null;
@@ -144,7 +146,7 @@ function declarationCounts(declaration) {
  * provenance/scope はステータスとは独立した事実として常に返す。したがって、旧 v1 の
  * fail=0 は GREEN でも scope=unknown となり、v2 full の GREEN と区別できる。
  *
- * @param {{commit:string, fail?:number, pass?:number, provenance?:string, scope?:string}|null} declaration
+ * @param {{commit:string, outcome?:'pass'|'fail', fail?:number, pass?:number, provenance?:string, scope?:string}|null} declaration
  * @param {string} headSha PRの現在のHEADコミットSHA
  * @returns {{status:'GREEN'|'RED'|'STALE'|'NONE', declaredSha?:string, headSha?:string, fail?:number, pass?:number, provenance:string, scope:string}}
  */
@@ -179,8 +181,16 @@ function evaluateTestDeclaration(declaration, headSha) {
   );
 
   if (!isMatch) return { status: 'STALE', ...result };
-  if (!Number.isSafeInteger(declaration.fail)) return { status: 'NONE', ...result };
-  return { status: declaration.fail === 0 ? 'GREEN' : 'RED', ...result };
+  if (declaration.outcome === 'pass' || declaration.outcome === 'fail') {
+    return { status: declaration.outcome === 'pass' ? 'GREEN' : 'RED', ...result };
+  }
+  // 旧形式を直接渡す呼び出し元との互換性のため、outcomeが無い場合だけfailへ
+  // フォールバックする。v2の申告ではrunnerの終了コードを表すoutcomeを正本とし、
+  // frameworkの件数が食い違ってもGREEN/REDを反転させない。
+  if (Number.isSafeInteger(declaration.fail)) {
+    return { status: declaration.fail === 0 ? 'GREEN' : 'RED', ...result };
+  }
+  return { status: 'NONE', ...result };
 }
 
 /**

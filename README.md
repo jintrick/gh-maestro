@@ -239,6 +239,35 @@ gh-maestroが実際に細かい起動設定を必要とするのは claude / cod
 
 配列フィールドのうち `extraArgs`・`execArgs`・`nonInteractiveTokens` は、継承元の配列内容に自分の内容を**末尾追記（マージ）**する。順序は「継承元の配列 → 自分の配列」の連結で、継承元で指定していた非対話トークン（`--print` 等）は失われない。`resumeCommand` は追記対象外で、上書き時は従来どおり完全置換される（再開時に末尾要素をセッション参照で置き換える挙動と整合）。`extends` を使わない通常のオーバーライド（前述の `agents` の例）では従来どおり全配列フィールドが完全置換される。**完全置換**（継承元の配列を捨てて自分の配列だけにする）したい場合は `extends` を使わずに定義する。`extends` は `agent-defaults.json` 内のエージェントのみを対象にでき、`config.json` だけで定義した別のカスタムエージェントを連鎖して継承することはできない。
 
+### test.layers
+
+テスト実行方法をプロジェクトの `config.json` に宣言する。`test.layers` は組み込み既定値、`~/.gh-maestro/config.json`、`<workspace>/.gh-maestro/config.json` の順に層単位・フィールド単位で解決され、3段すべてが実行コマンドを指定できる。`test.layers` を宣言した場合は、そのプロジェクトが宣言した層だけを使い、未宣言の分離側を推測しない。
+
+`command` は shell 文字列ではなく、実行ファイルを先頭に置く argv 配列で指定する。`fileArgs` は分離側へテストファイルを渡す前に挿入する固定引数である。`mapping` は変更ファイルの `<name>` を対応するテストファイルへ展開する規則である。宣言した層はインストール済み `scripts/run-tests.js` で実行し、変更ファイルから対応する分離側テストを選ぶ場合は `--changed` を付ける。
+
+```json
+{
+  "test": {
+    "layers": {
+      "every": {
+        "scope": "full",
+        "command": ["npm", "test"]
+      },
+      "changed": {
+        "scope": "partial",
+        "command": ["npm", "run", "test:changed"],
+        "fileArgs": ["--"],
+        "mapping": [
+          { "changed": "src/<name>.js", "test": "test/<name>.test.js" }
+        ]
+      }
+    }
+  }
+}
+```
+
+コーダーは宣言された層を `run-tests.js` で実行する。worktreeから実行する場合は `--workspace <workspace>` で設定を置いたworkspaceを指定する。ランナーは終了コード（0はpass、それ以外はfail）を必ず成果物へ記録し、テストフレームワークの件数を読み取れた場合だけ件数を追加する。`push-and-declare.js` は成果物を再生成するためにテストを実行しない。
+
 ### skillAgentMap
 
 スキル名→エージェントIDのマッピングを定義する。`gh-maestro-orchestrator` がワーカー起動時に使用する。確認・変更は `scripts/config.js` を使用する。

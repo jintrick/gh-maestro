@@ -24,13 +24,13 @@ function tapSummary({ tests, pass, fail, cancelled = 0, skipped = 0, todo = 0 })
   return `# tests ${tests}\n# pass ${pass}\n# fail ${fail}\n# cancelled ${cancelled}\n# skipped ${skipped}\n# todo ${todo}\n`;
 }
 
-function runWithChild({ suite = 'full', testFiles = [], child, writeArtifactFn, extraDeps = {} }) {
+function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = [], child, writeArtifactFn, extraDeps = {} }) {
   const stdout = [];
   const stderr = [];
   const calls = [];
   const artifacts = [];
   const result = runTests(
-    { suite, testFiles, cwd: tempWorktree(), env: { TEST_RUNNER_FIXTURE: '1' } },
+    { suite, layer, testFiles, changedFiles, cwd: tempWorktree(), env: { TEST_RUNNER_FIXTURE: '1' } },
     {
       clearArtifactFn: (worktree) => calls.push({ type: 'clear', worktree }),
       resolveGitHeadFn: (worktree) => {
@@ -61,6 +61,7 @@ test('runTests: full suiteを一度だけ起動し、成功結果をfullとし�
   assert.equal(fixture.artifacts.length, 1);
   assert.equal(fixture.artifacts[0].scope, 'full');
   assert.equal(fixture.artifacts[0].status, 'complete');
+  assert.equal(fixture.artifacts[0].outcome, 'pass');
   assert.equal(fixture.artifacts[0].tests, 5);
   assert.equal(fixture.artifacts[0].pass, 5);
   assert.equal(fixture.artifacts[0].fail, 0);
@@ -80,6 +81,7 @@ test('runTests: runnerが赤でもsummaryを保存し、runnerの終了コード
 
   assert.equal(fixture.result.exitCode, 1);
   assert.equal(fixture.artifacts[0].status, 'complete');
+  assert.equal(fixture.artifacts[0].outcome, 'fail');
   assert.equal(fixture.artifacts[0].fail, 1);
   assert.equal(fixture.artifacts[0].pass, 3);
   assert.match(fixture.stdout, /not ok|# tests/);
@@ -142,14 +144,34 @@ test('runTests: full suiteへの個別ファイル指定は起動しない', () 
   assert.match(result.stderr, /slow suite/);
 });
 
-test('runTests: summaryが欠落した場合はunavailable成果物を作る', () => {
+test('runTests: summaryが欠落しても終了コード0なら件数なしのpass成果物を作る', () => {
   const fixture = runWithChild({
-    child: { status: 1, stdout: 'runner crashed before TAP summary\n', stderr: 'fatal\n' },
+    child: { status: 0, stdout: 'runner does not emit TAP\n', stderr: '' },
   });
 
-  assert.equal(fixture.result.exitCode, 1);
-  assert.equal(fixture.artifacts[0].status, 'unavailable');
-  assert.equal(fixture.artifacts[0].reason, 'tap-summary-invalid');
+  assert.equal(fixture.result.exitCode, 0);
+  assert.equal(fixture.artifacts[0].status, 'complete');
+  assert.equal(fixture.artifacts[0].outcome, 'pass');
+  assert.equal('tests' in fixture.artifacts[0], false);
+  assert.equal('pass' in fixture.artifacts[0], false);
+  assert.equal('fail' in fixture.artifacts[0], false);
+
+  const failed = runWithChild({
+    child: { status: 3, stdout: 'runner reports failure in its own format\n', stderr: '' },
+  });
+  assert.equal(failed.result.exitCode, 3);
+  assert.equal(failed.artifacts[0].status, 'complete');
+  assert.equal(failed.artifacts[0].outcome, 'fail');
+  assert.equal('tests' in failed.artifacts[0], false);
+  assert.equal('pass' in failed.artifacts[0], false);
+  assert.equal('fail' in failed.artifacts[0], false);
+
+  const inconsistentSummary = runWithChild({
+    child: { status: 0, stdout: tapSummary({ tests: 2, pass: 2, fail: 1 }), stderr: '' },
+  });
+  assert.equal(inconsistentSummary.result.exitCode, 0);
+  assert.equal(inconsistentSummary.artifacts[0].outcome, 'pass');
+  assert.equal('tests' in inconsistentSummary.artifacts[0], false);
 });
 
 test('runTests: runner起動失敗もunavailableとして記録し、終了コード1を返す', () => {
@@ -187,7 +209,7 @@ test('runTests: テスト対象内容の指紋取得失敗はunavailableとし�
   assert.match(fixture.stderr, /worktree snapshot failed/);
 });
 
-test('runTests: 未知のsuiteはrunnerを起動せずエラーにする', () => {
+test('runTests: 未知のsuiteを拒否し、宣言されたargv/mapping/fallbackを使う', () => {
   let spawned = false;
   const result = runTests(
     { suite: 'unknown', cwd: tempWorktree(), env: {} },
@@ -196,12 +218,104 @@ test('runTests: 未知のsuiteはrunnerを起動せずエラーにする', () =>
   assert.equal(result.exitCode, 1);
   assert.equal(spawned, false);
   assert.match(result.stderr, /未知のテストスイート/);
+
+  const custom = runWithChild({
+    layer: 'every',
+    child: { status: 0, stdout: 'custom runner passed\n', stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: () => ({
+        source: 'declared',
+        layers: {
+          every: { scope: 'full', command: ['custom-runner', '--ci', 'value with spaces'] },
+        },
+      }),
+    },
+  });
+  const customCall = custom.calls.find((call) => call.type === 'spawn');
+  assert.equal(customCall.command, 'custom-runner');
+  assert.deepEqual(customCall.args, ['--ci', 'value with spaces']);
+  assert.equal(customCall.options.shell, false);
+  assert.equal(custom.artifacts[0].outcome, 'pass');
+
+  const partial = runWithChild({
+    layer: 'changed',
+    changedFiles: ['src/widget.js'],
+    child: { status: 0, stdout: 'partial runner passed\n', stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: () => ({
+        source: 'declared',
+        layers: {
+          changed: {
+            scope: 'partial',
+            command: ['partial-runner', '--partial'],
+            fileArgs: ['--files'],
+            mapping: [{ changed: 'src/<name>.js', test: 'checks/<name>.test.js' }],
+          },
+        },
+      }),
+    },
+  });
+  const partialCall = partial.calls.find((call) => call.type === 'spawn');
+  assert.equal(partialCall.command, 'partial-runner');
+  assert.deepEqual(partialCall.args, ['--partial', '--files', 'checks/widget.test.js']);
+  assert.equal(partial.artifacts[0].scope, 'partial');
+
+  const fallback = runWithChild({
+    layer: 'changed',
+    changedFiles: ['docs/readme.md'],
+    child: { status: 0, stdout: 'full runner passed\n', stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: () => ({
+        source: 'declared',
+        layers: {
+          every: { scope: 'full', command: ['full-runner', '--all'] },
+          changed: {
+            scope: 'partial',
+            command: ['partial-runner', '--changed'],
+            mapping: [{ changed: 'src/<name>.js', test: 'checks/<name>.test.js' }],
+          },
+        },
+      }),
+    },
+  });
+  const fallbackCall = fallback.calls.find((call) => call.type === 'spawn');
+  assert.equal(fallbackCall.command, 'full-runner');
+  assert.deepEqual(fallbackCall.args, ['--all']);
+  assert.equal(fallback.artifacts[0].scope, 'full');
 });
 
 test('main: --helpは実runnerを起動せずusageを返す', () => {
   const result = main(['--help']);
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout, USAGE);
+
+  const calls = [];
+  const changed = main(['--changed', 'changed', 'src/widget.js'], {
+    resolveTestConfigFn: () => ({
+      source: 'declared',
+      layers: {
+        every: { scope: 'full', command: ['full-runner'] },
+        changed: {
+          scope: 'partial',
+          command: ['partial-runner', '--partial'],
+          mapping: [{ changed: 'src/<name>.js', test: 'checks/<name>.test.js' }],
+        },
+      },
+    }),
+    clearArtifactFn: () => {},
+    resolveGitHeadFn: () => SHA,
+    calculateWorktreeContentHashFn: () => CONTENT_HASH,
+    spawnSyncFn: (command, args) => {
+      calls.push({ command, args });
+      return { status: 0, stdout: '', stderr: '' };
+    },
+    writeArtifactFn: () => {},
+  });
+  assert.equal(changed.exitCode, 0);
+  assert.deepEqual(calls, [{
+    command: 'partial-runner',
+    args: ['--partial', 'checks/widget.test.js'],
+  }]);
 });
 
 test('main: 未知のsuiteはエラーをstderrへ返す', () => {

@@ -23,6 +23,7 @@ const TEST_RESULT_PROVENANCE = 'test-runner';
 const TEST_RESULT_FILE_NAME = 'test-result.json';
 const TEST_RESULT_SCOPES = Object.freeze(new Set(['full', 'partial']));
 const TEST_RESULT_STATUSES = Object.freeze(new Set(['complete', 'unavailable']));
+const TEST_RESULT_OUTCOMES = Object.freeze(new Set(['pass', 'fail']));
 const TAP_COUNT_FIELDS = Object.freeze(['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo']);
 const TEST_CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
 
@@ -63,7 +64,7 @@ function parseNonNegativeInteger(value, field) {
 
 /**
  * Node test runner の TAP summary を解析する。必須 summary が一つでも欠けている場合は
- * 部分的な出力を成功結果へ丸めず、呼び出し側が unknown 成果物を作れる形で返す。
+ * 件数を採用せず、呼び出し側が終了コードだけの結果を作れる形で返す。
  *
  * @param {string} output stdout/stderr を結合した test runner 出力
  * @returns {{ok:true, summary:object}|{ok:false, error:string}}
@@ -150,9 +151,25 @@ function validateTestResultArtifact(value) {
   }
 
   if (value.status === 'complete') {
-    const counts = validateCountFields(value, TAP_COUNT_FIELDS);
+    if (value.outcome !== undefined
+        && (typeof value.outcome !== 'string' || !TEST_RESULT_OUTCOMES.has(value.outcome))) {
+      return { ok: false, error: 'complete test result outcome is invalid' };
+    }
+    const counts = validateCountFields(value, []);
     if (!counts.ok) return counts;
-    if (value.fail + value.pass > value.tests) {
+    const hasFail = Object.prototype.hasOwnProperty.call(value, 'fail');
+    const hasPass = Object.prototype.hasOwnProperty.call(value, 'pass');
+    if (hasFail !== hasPass) {
+      return { ok: false, error: 'test result fail and pass must be provided together' };
+    }
+    // schemaVersion 1 の旧成果物は outcome が無くても受理する。ただし、終了コードを
+    // 復元できる fail/pass が無い旧形式まで complete として受け入れると、結果の正本が
+    // 無くなるため拒否する。新しい runner は outcome だけでも complete を生成できる。
+    if (value.outcome === undefined && !hasFail) {
+      return { ok: false, error: 'complete test result must include outcome or fail/pass counts' };
+    }
+    if (hasFail && Object.prototype.hasOwnProperty.call(value, 'tests')
+        && value.fail + value.pass > value.tests) {
       return { ok: false, error: 'test result counts exceed tests count' };
     }
     if (typeof value.testedContentHash !== 'string' || !TEST_CONTENT_HASH_RE.test(value.testedContentHash)) {
@@ -237,12 +254,10 @@ function readTestResultArtifact(worktree = process.cwd()) {
     result: {
       provenance: parsed.provenance,
       scope: parsed.scope,
-      tests: parsed.tests,
-      pass: parsed.pass,
-      fail: parsed.fail,
-      cancelled: parsed.cancelled,
-      skipped: parsed.skipped,
-      todo: parsed.todo,
+      ...(parsed.outcome !== undefined ? { outcome: parsed.outcome } : {}),
+      ...Object.fromEntries(TAP_COUNT_FIELDS
+        .filter(field => Object.prototype.hasOwnProperty.call(parsed, field))
+        .map(field => [field, parsed[field]])),
       command: parsed.command,
       recordedAt: parsed.recordedAt,
       testedHead: parsed.testedHead || undefined,
@@ -258,6 +273,7 @@ module.exports = {
   TEST_RESULT_FILE_NAME,
   TEST_RESULT_SCOPES,
   TEST_RESULT_STATUSES,
+  TEST_RESULT_OUTCOMES,
   TAP_COUNT_FIELDS,
   TEST_CONTENT_HASH_RE,
   calculateWorktreeContentHash,
