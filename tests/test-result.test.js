@@ -11,6 +11,8 @@ const {
   TEST_RESULT_PROVENANCE,
   parseTapSummary,
   testResultPath,
+  testResultInvalidationPath,
+  invalidateTestResultArtifact,
   validateTestResultArtifact,
   writeTestResultArtifact,
   readTestResultArtifact,
@@ -193,4 +195,17 @@ test('readTestResultArtifact: unavailable 成果物は完全な結果として�
       testedContentHash: 'a'.repeat(64),
     },
   });
+
+  const invalidatedWorktree = tempWorktree();
+  writeTestResultArtifact(invalidatedWorktree, completeArtifact({ outcome: 'pass' }));
+  invalidateTestResultArtifact(invalidatedWorktree, 'artifact-write-failed');
+  assert.deepEqual(readTestResultArtifact(invalidatedWorktree), {
+    ok: false,
+    kind: 'unavailable',
+    reason: 'artifact-write-failed',
+    path: testResultPath(invalidatedWorktree),
+  });
+  writeTestResultArtifact(invalidatedWorktree, completeArtifact({ outcome: 'pass' }));
+  assert.equal(fs.existsSync(testResultInvalidationPath(invalidatedWorktree)), false);
+  assert.equal(readTestResultArtifact(invalidatedWorktree).ok, true);
 });

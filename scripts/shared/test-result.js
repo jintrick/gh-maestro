@@ -21,6 +21,7 @@ const TEST_RESULT_SCHEMA_VERSION = 1;
 const TEST_RESULT_PRODUCER = 'gh-maestro-test-runner';
 const TEST_RESULT_PROVENANCE = 'test-runner';
 const TEST_RESULT_FILE_NAME = 'test-result.json';
+const TEST_RESULT_INVALIDATION_FILE_NAME = 'test-result.invalidated';
 const TEST_RESULT_SCOPES = Object.freeze(new Set(['full', 'partial']));
 const TEST_RESULT_STATUSES = Object.freeze(new Set(['complete', 'unavailable']));
 const TEST_RESULT_OUTCOMES = Object.freeze(new Set(['pass', 'fail']));
@@ -53,6 +54,55 @@ function testResultPath(worktree = process.cwd()) {
     throw new Error(`test result artifact path must be outside the worktree: ${resultPath}`);
   }
   return resultPath;
+}
+
+function testResultInvalidationPath(worktree = process.cwd()) {
+  return path.join(path.dirname(testResultPath(worktree)), TEST_RESULT_INVALIDATION_FILE_NAME);
+}
+
+function clearTestResultInvalidation(worktree) {
+  try {
+    fs.unlinkSync(testResultInvalidationPath(worktree));
+  } catch (error) {
+    if (!error || error.code !== 'ENOENT') throw error;
+  }
+}
+
+/**
+ * 成果物の更新に失敗したことを runtime root に記録する。readTestResultArtifact はこの
+ * マーカーを成果物本体より先に見るため、古い complete 成果物が残っていても unknown
+ * へ縮退する。
+ *
+ * @param {string} worktree
+ * @param {string} reason
+ * @returns {string}
+ */
+function invalidateTestResultArtifact(worktree, reason = 'artifact-refresh-failed') {
+  const markerPath = testResultInvalidationPath(worktree);
+  return atomicWriteJson(markerPath, {
+    schemaVersion: TEST_RESULT_SCHEMA_VERSION,
+    reason: typeof reason === 'string' && reason.trim() ? reason : 'artifact-refresh-failed',
+    recordedAt: new Date().toISOString(),
+  });
+}
+
+function readTestResultInvalidation(markerPath) {
+  let raw;
+  try {
+    raw = fs.readFileSync(markerPath, 'utf8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return null;
+    return 'artifact-invalidated';
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    return isPlainObject(parsed) && typeof parsed.reason === 'string' && parsed.reason.trim()
+      ? parsed.reason
+      : 'artifact-invalidated';
+  } catch {
+    return 'artifact-invalidated';
+  }
 }
 
 function parseNonNegativeInteger(value, field) {
@@ -208,7 +258,11 @@ function writeTestResultArtifact(worktree, artifact) {
   // workspace.jsonが実runtime rootへ残る。結果ディレクトリだけを作成し、登録manifestは
   // 作成しない。
   fs.mkdirSync(path.dirname(resultPath), { recursive: true });
-  return atomicWriteJson(resultPath, artifact);
+  const writtenPath = atomicWriteJson(resultPath, artifact);
+  // 直前の削除・書込み失敗を示すマーカーを、完全な成果物を書けた場合だけ消す。
+  // ここで消せなければ呼び出し元は書込み失敗として扱い、read側はunknownを維持する。
+  clearTestResultInvalidation(base);
+  return writtenPath;
 }
 
 /**
@@ -221,6 +275,15 @@ function writeTestResultArtifact(worktree, artifact) {
  */
 function readTestResultArtifact(worktree = process.cwd()) {
   const resultPath = testResultPath(worktree);
+  const invalidationReason = readTestResultInvalidation(testResultInvalidationPath(worktree));
+  if (invalidationReason) {
+    return {
+      ok: false,
+      kind: 'unavailable',
+      reason: invalidationReason,
+      path: resultPath,
+    };
+  }
   let raw;
   try {
     raw = fs.readFileSync(resultPath, 'utf8');
@@ -271,6 +334,7 @@ module.exports = {
   TEST_RESULT_PRODUCER,
   TEST_RESULT_PROVENANCE,
   TEST_RESULT_FILE_NAME,
+  TEST_RESULT_INVALIDATION_FILE_NAME,
   TEST_RESULT_SCOPES,
   TEST_RESULT_STATUSES,
   TEST_RESULT_OUTCOMES,
@@ -279,6 +343,9 @@ module.exports = {
   calculateWorktreeContentHash,
   calculateCommitContentHash,
   testResultPath,
+  testResultInvalidationPath,
+  clearTestResultInvalidation,
+  invalidateTestResultArtifact,
   parseTapSummary,
   validateTestResultArtifact,
   writeTestResultArtifact,

@@ -7,7 +7,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { readTestResultArtifact } = require('../../scripts/shared/test-result');
+const {
+  readTestResultArtifact,
+  testResultPath,
+} = require('../../scripts/shared/test-result');
+const { workspaceRuntimeDir } = require('../../scripts/shared/storage-layout');
 const { resolveGitHead } = require('../../scripts/shared/git-head');
 const { buildCommentBody } = require('../../scripts/declare-test-result');
 
@@ -76,6 +80,8 @@ function runDeclaredTests(project, marker, mode, exitCode) {
 
 test('run-tests.js: 別構成のworkspace宣言で独自コマンドを実行し、件数なしでもpass/failを申告できる', () => {
   const { project, marker } = createProject();
+  const resultPath = testResultPath(project);
+  const runtimeDir = workspaceRuntimeDir(project);
   try {
     const passed = runDeclaredTests(project, marker, 'pass', 0);
     assert.equal(passed.status, 0, `runner failed: ${passed.stderr}`);
@@ -102,6 +108,8 @@ test('run-tests.js: 別構成のworkspace宣言で独自コマンドを実行し
 
     assert.deepEqual(fs.readFileSync(marker, 'utf8').trim().split(/\r?\n/), ['pass', 'fail']);
   } finally {
+    try { fs.rmSync(resultPath, { force: true }); } catch {}
+    try { fs.rmSync(runtimeDir, { recursive: true, force: true }); } catch {}
     fs.rmSync(project, { recursive: true, force: true });
     try { fs.rmSync(marker, { force: true }); } catch {}
   }

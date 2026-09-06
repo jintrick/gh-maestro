@@ -19,21 +19,10 @@ const {
   calculateWorktreeContentHash,
   parseTapSummary,
   testResultPath,
+  clearTestResultInvalidation,
+  invalidateTestResultArtifact,
   writeTestResultArtifact,
 } = require('./shared/test-result');
-
-const SUITES = Object.freeze({
-  full: Object.freeze({
-    scope: 'full',
-    command: 'npm test',
-    testArgs: ['--require', './tests/_env-setup.js', '--test', 'tests/*.test.js'],
-  }),
-  slow: Object.freeze({
-    scope: 'partial',
-    command: 'npm run test:slow',
-    testArgs: ['--require', './tests/_env-setup.js', '--test', 'tests/slow/*.test.js'],
-  }),
-});
 
 const USAGE = `run-tests.js — 宣言されたテスト層を実行し、結果成果物を生成する
 
@@ -61,20 +50,6 @@ const SPEC = {
   positionals: { min: 1, max: 65 },
 };
 
-function normalizeSlowTestFiles(testFiles) {
-  if (!Array.isArray(testFiles) || testFiles.length === 0) return { ok: true, files: [] };
-
-  const files = testFiles.map((file) => String(file).replaceAll('\\', '/'));
-  const invalid = files.find((file) => !/^tests\/slow\/[^/]+\.test\.js$/.test(file));
-  if (invalid) {
-    return {
-      ok: false,
-      error: `slow suite の個別指定は tests/slow/<name>.test.js の形式で必要です: ${invalid}`,
-    };
-  }
-  return { ok: true, files };
-}
-
 function normalizeRelativeTestFile(file) {
   if (typeof file !== 'string' || !file.trim()) {
     return { ok: false, error: `テストファイルは空でない相対パスで指定してください: ${file}` };
@@ -91,19 +66,35 @@ function normalizeRelativeTestFile(file) {
   return { ok: true, value: normalized };
 }
 
-function normalizeTestFiles(testFiles) {
+function normalizeTestFiles(testFiles, layer = {}) {
   if (!Array.isArray(testFiles)) return { ok: false, error: 'testFiles must be an array' };
   const files = [];
   const seen = new Set();
   for (const file of testFiles) {
     const normalized = normalizeRelativeTestFile(file);
     if (!normalized.ok) return normalized;
+    if (layer.testFilePattern && !matchesTestFilePattern(layer.testFilePattern, normalized.value)) {
+      return {
+        ok: false,
+        error: `テストファイルは${layer.testFilePattern}の形式で必要です: ${file}`,
+      };
+    }
     if (!seen.has(normalized.value)) {
       seen.add(normalized.value);
       files.push(normalized.value);
     }
   }
   return { ok: true, files };
+}
+
+function matchesTestFilePattern(pattern, file) {
+  if (pattern.includes('<name>')) return matchChangedFile(pattern, file) !== null;
+  const wildcardIndex = pattern.indexOf('*');
+  if (wildcardIndex < 0) return pattern === file;
+  const prefix = pattern.slice(0, wildcardIndex);
+  const suffix = pattern.slice(wildcardIndex + 1);
+  const middle = file.slice(prefix.length, file.length - suffix.length);
+  return file.startsWith(prefix) && file.endsWith(suffix) && Boolean(middle) && !middle.includes('/');
 }
 
 function matchChangedFile(pattern, changedFile) {
@@ -168,6 +159,7 @@ function clearPreviousArtifact(worktree) {
   } catch (error) {
     if (!error || error.code !== 'ENOENT') throw error;
   }
+  clearTestResultInvalidation(worktree);
 }
 
 function exitCodeForChild(result) {
@@ -183,7 +175,10 @@ function configuredTestArgs(layer, testFiles) {
   if (testFiles.length > 0 && layer.scope !== 'partial') {
     throw new Error('個別のテストファイル指定は partial 層でのみ使用できます');
   }
-  return [...(layer.command || []).slice(1), ...(layer.fileArgs || []), ...testFiles];
+  const files = testFiles.length > 0
+    ? testFiles
+    : (Array.isArray(layer.defaultTestFiles) ? layer.defaultTestFiles : []);
+  return [...(layer.command || []).slice(1), ...(layer.fileArgs || []), ...files];
 }
 
 function resolveConfigWorkspace(cwd, workspace) {
@@ -210,10 +205,11 @@ function resolveConfigWorkspace(cwd, workspace) {
 function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = process.cwd(), workspace, env = process.env, homedir } = {}, deps = {}) {
   const layerName = layer || suite;
   const resolveTestConfigFn = deps.resolveTestConfigFn || resolveTestConfig;
+  let executionWorkspace;
   let testConfig;
   try {
-    const configWorkspace = resolveConfigWorkspace(cwd, workspace);
-    if (!configWorkspace) {
+    executionWorkspace = resolveConfigWorkspace(cwd, workspace);
+    if (!executionWorkspace) {
       return {
         exitCode: 1,
         artifact: null,
@@ -222,12 +218,11 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
         stderr: 'テスト設定を読むworkspaceを解決できません',
       };
     }
-    testConfig = resolveTestConfigFn({ workspace: configWorkspace, homedir });
+    testConfig = resolveTestConfigFn({ workspace: executionWorkspace, homedir });
   } catch {
     testConfig = null;
   }
   let selected = testConfig && testConfig.layers && testConfig.layers[layerName];
-  let selectedLayerName = layerName;
   if (!selected) {
     return {
       exitCode: 1,
@@ -244,20 +239,19 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
       const mapped = mapChangedFilesToTests(changedFiles, selected.mapping);
       if (!mapped.ok) throw new Error(mapped.error);
       if (mapped.files.length > 0) {
-        normalizedFiles = mapped.files;
+        const normalizedMapped = normalizeTestFiles(mapped.files, selected);
+        if (!normalizedMapped.ok) throw new Error(normalizedMapped.error);
+        normalizedFiles = normalizedMapped.files;
       } else {
         const fallback = findFullLayer(testConfig);
         if (!fallback) {
           throw new Error('変更に対応するテストがなく、利用可能な唯一のfull層も解決できません');
         }
-        selectedLayerName = fallback.name;
         selected = fallback.layer;
         normalizedFiles = [];
       }
     } else {
-      const normalized = testConfig.source === 'builtin' && layerName === 'slow'
-        ? normalizeSlowTestFiles(testFiles)
-        : normalizeTestFiles(testFiles);
+      const normalized = normalizeTestFiles(testFiles, selected);
       if (!normalized.ok) throw new Error(normalized.error);
       normalizedFiles = normalized.files;
     }
@@ -274,13 +268,8 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   let command;
   let commandArgs;
   try {
-    if (testConfig.source === 'builtin' && SUITES[selectedLayerName]) {
-      command = process.execPath;
-      commandArgs = testArgsFor(SUITES[selectedLayerName], normalizedFiles);
-    } else {
-      command = selected.command[0];
-      commandArgs = configuredTestArgs(selected, normalizedFiles);
-    }
+    command = selected.command[0];
+    commandArgs = configuredTestArgs(selected, normalizedFiles);
   } catch (error) {
     return {
       exitCode: 1,
@@ -295,21 +284,32 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   const resolveGitHeadFn = deps.resolveGitHeadFn || resolveGitHead;
   const calculateWorktreeContentHashFn = deps.calculateWorktreeContentHashFn || calculateWorktreeContentHash;
   const clearArtifactFn = deps.clearArtifactFn || clearPreviousArtifact;
+  const invalidateArtifactFn = deps.invalidateArtifactFn || invalidateTestResultArtifact;
   const writeArtifactFn = deps.writeArtifactFn || writeTestResultArtifact;
   const writeStdoutFn = deps.writeStdoutFn || ((text) => process.stdout.write(text));
   const writeStderrFn = deps.writeStderrFn || ((text) => process.stderr.write(text));
 
   try {
-    clearArtifactFn(cwd);
+    clearArtifactFn(executionWorkspace);
   } catch (error) {
-    // 古い成果物を消せなくても runner 自体は実行する。新しい成果物を書けなければ、
-    // 申告入口は欠落した成果物として unknown へ縮退する。
+    try {
+      invalidateArtifactFn(executionWorkspace, 'artifact-clear-failed');
+    } catch (markerError) {
+      writeStderrFn(`テスト結果成果物の失敗マーカーを書き出せません: ${markerError.message}\n`);
+    }
     writeStderrFn(`テスト結果成果物の旧ファイルを削除できません: ${error.message}\n`);
+    return {
+      exitCode: 1,
+      artifact: null,
+      artifactWritten: false,
+      stdout: '',
+      stderr: `テスト結果成果物の旧ファイルを削除できません: ${error.message}`,
+    };
   }
 
   let testedHead = null;
   try {
-    testedHead = resolveGitHeadFn(cwd);
+    testedHead = resolveGitHeadFn(executionWorkspace);
   } catch {
     // テストの成否にHEAD解決は不要。対象SHAは申告入口が現在のHEADから解決する。
   }
@@ -319,7 +319,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   try {
     // コマンド起動前の内容を記録する。テスト中に worktree が変更された場合、その変更を
     // 後続の git add -A がコミットしても、申告時の内容照合で unknown になる。
-    testedContentHash = calculateWorktreeContentHashFn(cwd);
+    testedContentHash = calculateWorktreeContentHashFn(executionWorkspace);
   } catch (error) {
     contentSnapshotError = error;
     writeStderrFn(`テスト対象内容の指紋を取得できません: ${error.message}\n`);
@@ -328,7 +328,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   let child;
   try {
     child = spawnSyncFn(command, commandArgs, {
-      cwd,
+      cwd: executionWorkspace,
       env,
       encoding: 'utf8',
       shell: false,
@@ -388,11 +388,14 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
 
   let artifactWritten = false;
   try {
-    writeArtifactFn(cwd, artifact);
+    writeArtifactFn(executionWorkspace, artifact);
     artifactWritten = true;
   } catch (error) {
-    // 成果物生成失敗で runner の終了コードを隠さない。申告側はファイル欠落として
-    // unknown を投稿し、push/PR/申告を止めない。
+    try {
+      invalidateArtifactFn(executionWorkspace, 'artifact-write-failed');
+    } catch (markerError) {
+      writeStderrFn(`テスト結果成果物の失敗マーカーを書き出せません: ${markerError.message}\n`);
+    }
     writeStderrFn(`テスト結果成果物を書き出せません: ${error.message}\n`);
   }
 
@@ -403,16 +406,6 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
     stdout,
     stderr,
   };
-}
-
-function testArgsFor(selected, testFiles = []) {
-  const normalized = normalizeSlowTestFiles(testFiles);
-  if (!normalized.ok) throw new Error(normalized.error);
-  if (normalized.files.length === 0) return [...selected.testArgs];
-  if (selected !== SUITES.slow) {
-    throw new Error('個別のテストファイル指定は slow suite でのみ使用できます');
-  }
-  return [...selected.testArgs.slice(0, -1), ...normalized.files];
 }
 
 function main(argv, deps = {}) {
@@ -443,10 +436,8 @@ function main(argv, deps = {}) {
 }
 
 module.exports = {
-  SUITES,
   USAGE,
   SPEC,
-  testArgsFor,
   normalizeRelativeTestFile,
   normalizeTestFiles,
   mapChangedFilesToTests,

@@ -98,6 +98,19 @@ function validateTestFileArgs(value) {
   return { ok: true, value: [...value] };
 }
 
+function validateTestFilePatterns(value) {
+  if (!Array.isArray(value)) {
+    return { ok: false, error: 'test layer defaultTestFiles must be an array' };
+  }
+  const patterns = [];
+  for (const pattern of value) {
+    const validated = validateTestPathPattern(pattern, 'test layer defaultTestFiles');
+    if (!validated.ok) return validated;
+    patterns.push(validated.value);
+  }
+  return { ok: true, value: patterns };
+}
+
 function validateTestPathPattern(value, field) {
   if (typeof value !== 'string' || !value.trim() || value.includes('\0') || /[\r\n]/.test(value)) {
     return { ok: false, error: `${field} must be a non-empty relative path pattern` };
@@ -159,6 +172,16 @@ function validateTestLayerOverride(raw) {
     if (!fileArgs.ok) return fileArgs;
     value.fileArgs = fileArgs.value;
   }
+  if (raw.defaultTestFiles !== undefined) {
+    const defaultTestFiles = validateTestFilePatterns(raw.defaultTestFiles);
+    if (!defaultTestFiles.ok) return defaultTestFiles;
+    value.defaultTestFiles = defaultTestFiles.value;
+  }
+  if (raw.testFilePattern !== undefined) {
+    const testFilePattern = validateTestPathPattern(raw.testFilePattern, 'test layer testFilePattern');
+    if (!testFilePattern.ok) return testFilePattern;
+    value.testFilePattern = testFilePattern.value;
+  }
   if (raw.displayCommand !== undefined) {
     if (typeof raw.displayCommand !== 'string' || !raw.displayCommand.trim()
         || raw.displayCommand.includes('\0') || /[\r\n]/.test(raw.displayCommand)) {
@@ -205,12 +228,15 @@ function createBuiltinTestConfig() {
     layers: {
       full: {
         scope: 'full',
-        command: [process.execPath, '--require', './tests/_env-setup.js', '--test', 'tests/*.test.js'],
+        command: [process.execPath, '--require', './tests/_env-setup.js', '--test'],
+        defaultTestFiles: ['tests/*.test.js'],
         displayCommand: 'npm test',
       },
       slow: {
         scope: 'partial',
-        command: [process.execPath, '--require', './tests/_env-setup.js', '--test', 'tests/slow/*.test.js'],
+        command: [process.execPath, '--require', './tests/_env-setup.js', '--test'],
+        defaultTestFiles: ['tests/slow/*.test.js'],
+        testFilePattern: 'tests/slow/<name>.test.js',
         displayCommand: 'npm run test:slow',
         mapping: [{ changed: 'scripts/<name>.js', test: 'tests/slow/<name>.test.js' }],
       },
