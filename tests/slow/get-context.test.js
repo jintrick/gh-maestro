@@ -40,6 +40,13 @@ function runContext(options = {}) {
   return spawnSync(process.execPath, ['-r', FAST_CONTEXT_PRELOAD, SCRIPT], options);
 }
 
+function isolatedHome() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-get-context-home-'));
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  delete env.GH_MAESTRO_WORKSPACE;
+  return { home, env };
+}
+
 test('REPO と WORKSPACE を正しいフォーマットで出力する', () => {
   const r = runContext({
     cwd: REPO_ROOT,
@@ -63,6 +70,60 @@ test('GH_MAESTRO_WORKER=orchestrator がセッション変数として出力さ�
     lines.includes('GH_MAESTRO_WORKER=orchestrator'),
     `出力に GH_MAESTRO_WORKER=orchestrator が含まれること: ${r.stdout}`
   );
+});
+
+test('test.layers宣言が無い場合はmissingをsession contextへ出力する', () => {
+  const { home, env } = isolatedHome();
+  try {
+    const r = runContext({ cwd: REPO_ROOT, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^TEST_LAYERS_STATUS=missing$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('有効なtest.layers宣言がある場合はdeclaredをsession contextへ出力する', () => {
+  const { home, env } = isolatedHome();
+  try {
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.gh-maestro', 'config.json'),
+      JSON.stringify({
+        test: {
+          layers: {
+            every: { scope: 'full', command: [process.execPath, '--version'] },
+          },
+        },
+      }),
+      'utf8',
+    );
+
+    const r = runContext({ cwd: REPO_ROOT, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^TEST_LAYERS_STATUS=declared$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('壊れたtest.layersでもcontextを出力し、終了コード0で完了する', () => {
+  const { home, env } = isolatedHome();
+  try {
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.gh-maestro', 'config.json'),
+      JSON.stringify({ test: { layers: [] } }),
+      'utf8',
+    );
+
+    const r = runContext({ cwd: REPO_ROOT, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^\[gh-maestro session context\]$/m);
+    assert.match(r.stdout, /^TEST_LAYERS_STATUS=invalid$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('WORKSPACE はGH_MAESTRO_WORKSPACEが無い場合にCWD上方探索で解決される（Unixスラッシュ）', () => {

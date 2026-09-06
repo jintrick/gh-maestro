@@ -9,6 +9,7 @@ const path = require('path');
 const {
   resolveAgentConfig,
   resolveTestConfig,
+  getTestLayerDeclarationStatus,
   resolveSkillAgentMap,
   resolveCouncilConfig,
   resolveExtends,
@@ -117,6 +118,46 @@ function assertTestConfigResolution(home) {
     assert.equal(resolveTestConfig({ homedir: home }), null);
   }
 }
+
+test('getTestLayerDeclarationStatus: 組み込み値だけならmissingを返す', () => {
+  withTempHome(home => {
+    assert.equal(getTestLayerDeclarationStatus({ homedir: home }), 'missing');
+  });
+});
+
+test('getTestLayerDeclarationStatus: global/workspaceの有効な宣言をdeclaredとして返す', () => {
+  withTempHome(home => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-status-ws-'));
+    try {
+      writeConfig(home, {
+        test: {
+          layers: {
+            every: { command: ['node', 'global-runner.js'] },
+          },
+        },
+      });
+      assert.equal(getTestLayerDeclarationStatus({ homedir: home, workspace }), 'declared');
+
+      writeWorkspaceConfig(workspace, {
+        test: {
+          layers: {
+            every: { command: ['node', 'workspace-runner.js'] },
+          },
+        },
+      });
+      assert.equal(getTestLayerDeclarationStatus({ homedir: home, workspace }), 'declared');
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+});
+
+test('getTestLayerDeclarationStatus: 壊れたtest.layersはinvalidを返し、例外を外へ出さない', () => {
+  withTempHome(home => {
+    writeConfig(home, { test: { layers: [] } });
+    assert.equal(getTestLayerDeclarationStatus({ homedir: home }), 'invalid');
+  });
+});
 
 // ── loadDefaults ─────────────────────────────────────────────────────────────
 

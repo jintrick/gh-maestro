@@ -310,6 +310,25 @@ function resolveTestConfig(opts = {}) {
   };
 }
 
+/**
+ * テスト層宣言の有無を、resolveTestConfig() のカスケード結果から判定する。
+ *
+ * `missing` は組み込み既定値だけが使われている状態であり、対象プロジェクトが
+ * test.layers を宣言していないことを表す。`invalid` は宣言の読み取り・マージ・
+ * 検証に失敗した状態で、呼び出し元はセッション初期化を止めずに人間へ知らせる。
+ * @param {object} [opts]
+ * @returns {'declared'|'missing'|'invalid'}
+ */
+function getTestLayerDeclarationStatus(opts = {}) {
+  try {
+    const resolved = resolveTestConfig(opts);
+    if (!resolved) return 'invalid';
+    return resolved.source === 'declared' ? 'declared' : 'missing';
+  } catch {
+    return 'invalid';
+  }
+}
+
 // ── reasonix 動的コマンド解決 ──────────────────────────────────────────────
 
 /**
@@ -726,6 +745,7 @@ function resolveCouncilConfig(opts = {}) {
 module.exports = {
   resolveAgentConfig,
   resolveTestConfig,
+  getTestLayerDeclarationStatus,
   createBuiltinTestConfig,
   validateTestLayerOverride,
   validateTestMapping,
