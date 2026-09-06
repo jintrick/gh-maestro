@@ -22,7 +22,6 @@ supervisor._setGetProcessStartTime((pid) => {
   assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
   return TEST_SESSION_START_TIME;
 });
-
 // 直接 main()/runOnce() の反復でOSのプロセス起動時刻取得を行うと、Windowsでは
 // 各スキャンがPowerShell/WMI待ちになる。PID再利用を含む実照合ロジックは
 // tests/process-lifecycle.test.js で検証し、ここでは既存の注入境界から親生存だけを差し替える。
@@ -236,7 +235,6 @@ describe('CLI usage', () => {
     assert.equal(r.runOnce, null);
   });
 });
-
 // ═══════════════════════════════════════════════════════════════════════════
 // 引数エラー
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3194,104 +3192,4 @@ describe('Cursor type safety', () => {
       assert.equal(state.reportedCreatedAt, null);
     });
   });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CLI integration: 実プロセス起動での動作確認
-// ═══════════════════════════════════════════════════════════════════════════
-
-const { spawnSync: realSpawnSync, spawn } = require('child_process');
-
-const SUPERVISOR_SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-supervisor.js');
-const CLI_TEST_START_TIME = '2026-07-25T00:00:00.000Z';
-
-// Keep the CLI integration tests on a real child-process/argv path, but avoid
-// paying for a PowerShell/WMI startup-time query on every short-lived child.
-// The preload only replaces that observation and the unrelated registry scan;
-// process liveness still uses process.kill, and PID-reuse identity behavior is
-// covered by the dedicated process-lifecycle integration case.
-function createFastCliPreload() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-supervisor-preload-'));
-  const file = path.join(dir, 'preload.js');
-  const childProcessPath = require.resolve('../scripts/shared/child-process');
-  const lifecyclePath = require.resolve('../scripts/process-lifecycle');
-  const leasePath = require.resolve('../scripts/shared/worker-lease');
-  const source = [
-    "'use strict';",
-    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
-    `const fixedStartTime = ${JSON.stringify(CLI_TEST_START_TIME)};`,
-    'const isAlive = (pid) => {',
-    '  try { process.kill(Number(pid), 0); return true; }',
-    "  catch (e) { return e && e.code !== 'ESRCH'; }",
-    '};',
-    'const realExecSync = childProcess.execSync;',
-    'childProcess.execSync = (command, opts) => {',
-    "  if (String(command).includes('Get-CimInstance Win32_Process')) {",
-    '    const match = /ProcessId=(\\d+)/.exec(String(command));',
-    '    return match && isAlive(Number(match[1])) ? `${fixedStartTime}\\n` : \"\";',
-    '  }',
-    '  return realExecSync(command, opts);',
-    '};',
-    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
-    'lifecycle.findRunningInstance = () => null;',
-    'lifecycle.getProcessStartTime = () => fixedStartTime;',
-    'lifecycle.createDeadManSwitch = () => () => true;',
-    `const lease = require(${JSON.stringify(leasePath)});`,
-    'lease._setGetProcessStartTime(() => fixedStartTime);',
-    'lease._setIsProcessAlive(isAlive);',
-    'lease._setVerifyProcessIdentity(() => ({ match: true }));',
-  ].join('\n');
-  fs.writeFileSync(file, source, 'utf8');
-  process.once('exit', () => {
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-  });
-  return file;
-}
-
-const FAST_CLI_PRELOAD = createFastCliPreload();
-
-// 排他の正本は role lease（Issue #240）。既存所有者を再現する live lease を
-// <workspace>/.gh-maestro/leases/resident-role-worker-supervisor.json に書く。
-function writeLiveSupervisorLease(dir, pid, startTime) {
-  const leasesDir = path.join(dir, '.gh-maestro', 'leases');
-  fs.mkdirSync(leasesDir, { recursive: true });
-  fs.writeFileSync(path.join(leasesDir, 'resident-role-worker-supervisor.json'), JSON.stringify({
-    pid, startTime, workerName: 'worker-supervisor', phase: 'active',
-  }), 'utf8');
-}
-
-/** ヘルパー: worker-supervisor.js を子プロセスとして起動 */
-function runSupervisor(args, cwd, envOverride = {}) {
-  // --session-pid を渡し、子プロセス側の親プロセスツリー探索（Windowsでは高コスト）を省く。
-  // timeout はこのプロセス自体の処理時間ではなく、フルスイート実行時のシステム負荷下での
-  // OSスケジューリング遅延に対する余裕を持たせる（実障害: 5000msだと、他のテストファイルが
-  // 実プロセス（pwsh等）を並行して起動している状況で、ワークスペース未解決による即時
-  // exit(1)しかしないこのプロセスすら5秒以内にスケジュールされずtimeout killされ、
-  // status: null になることがあった）。
-  const spawnEnv = {
-    ...process.env,
-    ...envOverride,
-  };
-  return realSpawnSync(process.execPath, [
-    '-r', FAST_CLI_PRELOAD,
-    SUPERVISOR_SCRIPT,
-    ...args,
-    '--session-pid', String(process.pid),
-  ], {
-    cwd,
-    encoding: 'utf8',
-    timeout: 15000,
-    env: spawnEnv,
-  });
-}
-
-describe('CLI integration (subprocess)', () => {
-
-
-
-
-
-
-
-
 });

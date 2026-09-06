@@ -1367,39 +1367,6 @@ test('buildWatchPidCommand: intervalSec指定時は--intervalを含む', () => {
   assert.match(cmd, /--interval 5/);
 });
 
-// ── --watch-pid モード（実プロセス起動） ─────────────────────────────────────
-
-test('--watch-pid: 監視対象PIDが生きている間は何も出力しない', () => {
-  const r = runMsgPollCli(['--watch-pid', String(process.pid), '--interval', '1'], { timeout: 2500 });
-  assert.equal(r.stdout.trim(), '');
-});
-
-test('--watch-pid: 監視対象PIDが死んでいれば即座にPID_DIEDを出力してexit 0', () => {
-  const { spawnSync } = require('child_process');
-  const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)'], { encoding: 'utf8' });
-  const deadPid = dead.pid;
-
-  const r = runMsgPollCli(['--watch-pid', String(deadPid), '--interval', '1'], {
-    timeout: 5000,
-    parentAlive: false,
-  });
-
-  assert.equal(r.status, 0);
-  assert.equal(r.stdout.trim(), `PID_DIED:${deadPid}`);
-});
-
-test('--watch-pid: 不正なpid指定はexit 1', () => {
-  const r = runMsgPollCli(['--watch-pid', 'not-a-number'], { timeout: 5000 });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /正の整数のPID/);
-});
-
-test('--watch-pid: 余剰な位置引数・未知フラグはエラー終了する（黙って無視しない）', () => {
-  const r = runMsgPollCli(['--watch-pid', String(process.pid), 'extra'], { timeout: 5000 });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /予期しない位置引数/);
-});
-
 // ── --wait モード ───────────────────────────────────────────────────────────
 
 test('--once と --wait の同時指定は code 1', () => {

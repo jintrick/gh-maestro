@@ -2,10 +2,6 @@
 
 const { test, describe, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
-const path = require('path');
-const fs = require('fs');
-const os = require('os');
-const { execSync } = require('child_process');
 const gitBranch = require('../scripts/shared/git-branch');
 const { getCurrentBranch } = gitBranch;
 
@@ -56,7 +52,4 @@ describe('git-branch (unit with mock)', () => {
     assert.throws(() => getCurrentBranch(null), /有効なディレクトリパスが必要です/);
     assert.throws(() => getCurrentBranch(123), /有効なディレクトリパスが必要です/);
   });
-});
-
-describe('git-branch (integration with real git repo)', () => {
 });
