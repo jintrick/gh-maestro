@@ -9,7 +9,7 @@ const path = require('path');
 // git を伴う関数（ensureCouncilWorktree / removeCouncilWorktree / resolveWorkspaceHead）は
 // child-process.js の spawnSync をモックして実プロセスを0個spawnする
 //
-const councilWorktreePath = require.resolve('../../scripts/shared/council-worktree');
+const councilWorktreePath = require.resolve('../scripts/shared/council-worktree');
 
 /**
  * child-process.js の spawnSync をモックした状態で council-worktree.js を再ロードする。
@@ -26,7 +26,7 @@ function loadModule(spawnSyncImpl) {
     return impl;
   };
 
-  const childProcessPath = require.resolve('../../scripts/shared/child-process');
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
   delete require.cache[childProcessPath];
   require.cache[childProcessPath] = {
     id: childProcessPath,
@@ -39,8 +39,8 @@ function loadModule(spawnSyncImpl) {
     },
   };
 
-  const gitWorktreePath = require.resolve('../../scripts/shared/git-worktree');
-  const gitHeadPath = require.resolve('../../scripts/shared/git-head');
+  const gitWorktreePath = require.resolve('../scripts/shared/git-worktree');
+  const gitHeadPath = require.resolve('../scripts/shared/git-head');
   delete require.cache[gitWorktreePath];
   delete require.cache[gitHeadPath];
   delete require.cache[councilWorktreePath];

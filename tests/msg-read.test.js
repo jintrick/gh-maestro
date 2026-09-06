@@ -6,8 +6,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const msgRead = require('../../scripts/msg-read');
-const { PLAN_MARKER } = require('../../scripts/shared/plan-comment');
+const msgRead = require('../scripts/msg-read');
+const { PLAN_MARKER } = require('../scripts/shared/plan-comment');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));

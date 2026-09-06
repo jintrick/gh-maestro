@@ -6,10 +6,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const headlessLaunch = require('../../scripts/shared/headless-launch');
+const headlessLaunch = require('../scripts/shared/headless-launch');
 const { launchAgentHeadless, workerLogPath, SHIM_PATH } = headlessLaunch;
-const { runShim } = require('../../scripts/shared/headless-shim');
-const { buildWorkerEnv } = require('../../scripts/shared/worker-env');
+const { runShim } = require('../scripts/shared/headless-shim');
+const { buildWorkerEnv } = require('../scripts/shared/worker-env');
 
 // 実プロセスは 0 個 spawn する。
 // spawn は必ず注入したフェイクへ差し替えてから呼ぶ。
@@ -60,8 +60,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  headlessLaunch._setSpawn(require('../../scripts/shared/child-process').spawn);
-  headlessLaunch._setGetProcessStartTime(require('../../scripts/process-lifecycle').getProcessStartTime);
+  headlessLaunch._setSpawn(require('../scripts/shared/child-process').spawn);
+  headlessLaunch._setGetProcessStartTime(require('../scripts/process-lifecycle').getProcessStartTime);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -345,7 +345,7 @@ test('launchAgentHeadless: spawnを注入していなければテスト中は cl
   assert.ok(process.env.NODE_TEST_CONTEXT, '前提: テストランナー配下で実行されている');
 
   // spawn を実装に戻す（=注入されていない状態）
-  headlessLaunch._setSpawn(require('../../scripts/shared/child-process').spawn);
+  headlessLaunch._setSpawn(require('../scripts/shared/child-process').spawn);
 
   for (const command of ['claude', 'agy', 'codex']) {
     assert.throws(
@@ -356,7 +356,7 @@ test('launchAgentHeadless: spawnを注入していなければテスト中は cl
 });
 
 test('launchAgentHeadless: GH_MAESTRO_DISABLE_REAL_SPAWN で実起動を拒否する', () => {
-  headlessLaunch._setSpawn(require('../../scripts/shared/child-process').spawn);
+  headlessLaunch._setSpawn(require('../scripts/shared/child-process').spawn);
   const savedContext = process.env.NODE_TEST_CONTEXT;
   const savedDisabled = process.env.GH_MAESTRO_DISABLE_REAL_SPAWN;
   delete process.env.NODE_TEST_CONTEXT;

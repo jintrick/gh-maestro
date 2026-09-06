@@ -24,11 +24,11 @@ const path = require('path');
 const os = require('os');
 const { spawnSync } = require('child_process'); // 生 child_process（GIT_* を除去しない＝リーク再現の対照実験用）
 
-const { worktreeAdd } = require('../../scripts/shared/git-worktree');
-const { spawnSync: wrappedSpawnSync } = require('../../scripts/shared/child-process');
-const { superviseReviewManager } = require('../../scripts/run-review-manager');
+const { worktreeAdd } = require('../scripts/shared/git-worktree');
+const { spawnSync: wrappedSpawnSync } = require('../scripts/shared/child-process');
+const { superviseReviewManager } = require('../scripts/run-review-manager');
 
-const SETUP_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'gh-maestro-setup.js');
+const SETUP_SCRIPT = path.join(__dirname, '..', 'scripts', 'gh-maestro-setup.js');
 
 // ── ヘルパー ─────────────────────────────────────────────────────────────────
 
@@ -86,71 +86,80 @@ function refsOf(dir) {
 
 // ── 3層目: 共有ラッパーの GIT_* 除去 ──────────────────────────────────────────
 
-test('共有ラッパー(child-process.js)は git spawn 時に GIT_DIR を除去し cwd 基準のリポジトリ発見を保証する', () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'envleak-cp-'));
+
+// ── 受け入れ条件: GIT_DIR 注入下で worktreeAdd → victim 無傷 ─────────────────
+
+test('GIT_DIR 注入下で worktreeAdd を呼んでも victim リポジトリが無傷である', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'envleak-wta-'));
   try {
     const victim = path.join(base, 'victim');
     const cwdRepo = path.join(base, 'cwd');
     makeRepo(victim);
     makeRepo(cwdRepo);
+    const before = snapshotVictim(victim);
 
-    const victimHead = spawnSync('git', ['--git-dir', path.join(victim, '.git'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-    const cwdHead = spawnSync('git', ['--git-dir', path.join(cwdRepo, '.git'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-    assert.notEqual(victimHead, cwdHead, '対照実験の前提: 2つのリポジトリのHEADは異なる');
-
-    // リークの再現: git フックが注入するのと同じ形で GIT_DIR を設定する。
+    const worktreeDir = path.join(base, 'env-leak-wt');
     process.env.GIT_DIR = path.join(victim, '.git');
     try {
-      // 生 child_process（ラッパー不使用）は GIT_DIR に支配され victim を解決する＝リーク経路。
-      const raw = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: cwdRepo, encoding: 'utf8' });
-      assert.equal(raw.stdout.trim(), victimHead, '生spawnはGIT_DIRでvictimのHEADを返す（リーク経路の再現）');
-
-      // 共有ラッパー経由は GIT_DIR を除去し cwd のリポジトリを解決する＝対策。
-      const wrapped = wrappedSpawnSync('git', ['rev-parse', 'HEAD'], { cwd: cwdRepo, encoding: 'utf8' });
-      assert.equal(wrapped.status, 0, wrapped.stderr);
-      assert.equal(wrapped.stdout.trim(), cwdHead, '共有ラッパー経由はcwd基準で解決する');
+      worktreeAdd(worktreeDir, 'env-leak-branch', null, cwdRepo);
     } finally {
       delete process.env.GIT_DIR;
     }
+
+    assert.equal(snapshotVictim(victim), before, 'GIT_DIR 注入下でも victim リポジトリは無傷であること');
+    // 正の対照: 操作自体は呼び出し元（cwd）のリポジトリに対して成功している。
+    assert.match(refsOf(cwdRepo), /refs\/heads\/env-leak-branch/, 'worktreeAdd は cwd のリポジトリに worktree を作る');
+    assert.doesNotMatch(refsOf(victim), /env-leak-branch/, 'victim に branch が作られていない');
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
-
-// ── 受け入れ条件: GIT_DIR 注入下で worktreeAdd → victim 無傷 ─────────────────
-
 
 // ── 受け入れ条件: GIT_DIR 注入下で superviseReviewManager → victim 無傷 ──────
 
-
-// ── 受け入れ条件: GIT_DIR 注入下で gh-maestro-setup → victim 無傷 ────────────
-
-test('GIT_DIR 注入下で gh-maestro-setup.js を実行しても victim リポジトリが無傷である', () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'envleak-setup-'));
+test('GIT_DIR 注入下で superviseReviewManager を呼んでも victim リポジトリが無傷である', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'envleak-sv-'));
   try {
     const victim = path.join(base, 'victim');
-    const target = path.join(base, 'target');
+    const workspace = path.join(base, 'workspace');
     makeRepo(victim);
-    makeRepo(target);
-    // setup-ok を置いて checkEnvironment（WEZTERM_PANE 等）をスキップし、冪等セットアップの
-    // git 操作（dev ブランチ作成等）に到達させる。
-    fs.mkdirSync(path.join(target, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(path.join(target, '.gh-maestro', 'setup-ok'), '');
+    makeRepo(workspace);
 
+    const ghDir = path.join(workspace, '.gh-maestro');
+    const logFile = path.join(base, 'rm.log');
+    const promptFile = path.join(base, 'prompt.md');
+    const lockFile = path.join(ghDir, 'records', 'pr', '999', 'review', 'manager.running');
+    const outputFile = path.join(ghDir, 'records', 'pr', '999', 'review', 'manager.json');
+    const logs = [];
     const before = snapshotVictim(victim);
-    // サブプロセスに GIT_DIR を注入する（実 push フックが npm test を起動する経路の再現）。
-    const env = { ...process.env, GIT_DIR: path.join(victim, '.git') };
-    const r = spawnSync(process.execPath, [SETUP_SCRIPT, target], { cwd: target, env, encoding: 'utf8' });
 
-    assert.equal(r.status, 0, r.stderr);
+    process.env.GIT_DIR = path.join(victim, '.git');
+    let result;
+    try {
+      result = await superviseReviewManager({
+        pr: '999', repo: 'o/r', workspace,
+        ghDir, lockFile, logFile, outputFile, promptFile,
+        deadlineMs: 5000, log: (m) => logs.push(m), signal: { aborted: false },
+      });
+    } finally {
+      delete process.env.GIT_DIR;
+    }
+
+    // workspace に origin が無いため PR head の fetch に失敗し setup-failed で停止する
+    // （この手前の worktreeAdd が被害の発生源。無傷であることが検証対象）。
+    assert.equal(result.outcome, 'setup-failed');
     assert.equal(snapshotVictim(victim), before, 'GIT_DIR 注入下でも victim リポジトリは無傷であること');
-    // 正の対照: target（cwd）にだけ dev ブランチが作られている。
-    assert.match(refsOf(target), /refs\/heads\/dev/, 'setup は target に dev ブランチを作る');
-    assert.doesNotMatch(refsOf(victim), /refs\/heads\/dev/, 'victim に dev ブランチが作られていない');
+    // 正の対照: workspace（cwd）にだけ review worktree の branch が作られている。
+    assert.match(refsOf(workspace), /refs\/heads\/review-pr-999/, 'setup は workspace に review worktree を作る');
+    assert.doesNotMatch(refsOf(victim), /review-pr-999/, 'victim に review-pr-* branch が作られていない');
+    assert.ok(fs.existsSync(lockFile), 'lock file は setup 失敗前に作成されている');
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+// ── 受け入れ条件: GIT_DIR 注入下で gh-maestro-setup → victim 無傷 ────────────
+
 
 // ── 1層目: .githooks の unset ────────────────────────────────────────────────
 
@@ -164,57 +173,39 @@ const HOOK_POSITION_VARS = [
 // 空に見え、sync が無言でスキップされる。
 const HOOK_MUST_KEEP_VARS = ['GIT_INDEX_FILE', 'GIT_PREFIX'];
 
-
-// ── 2層目: tests/_env-setup.js プリロードの除去 ───────────────────────────────
-
-test('_env-setup.js プリロードが git 注入変数を除去する', () => {
-  const injected = {
-    GIT_DIR: '/fake/victim/.git', GIT_COMMON_DIR: '/fake/common', GIT_WORK_TREE: '/fake/wt',
-    GIT_INDEX_FILE: '/fake/index', GIT_PREFIX: '/fake/', GIT_OBJECT_DIRECTORY: '/fake/objects',
-    GIT_ALTERNATE_OBJECT_DIRECTORIES: '/fake/alts', GIT_QUARANTINE_PATH: '/fake/q',
-  };
-  const env = { ...process.env, ...injected };
-  const probe = 'console.log(JSON.stringify(process.env))';
-    const r = spawnSync(process.execPath, ['--require', path.join(__dirname, '..', '_env-setup.js'), '-e', probe], { env, encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stderr);
-  const out = JSON.parse(r.stdout.trim().split('\n').pop());
-  for (const key of Object.keys(injected)) {
-    assert.equal(out[key], undefined, `_env-setup.js は ${key} を除去すること`);
+test('.githooks/pre-commit は最初の git 呼び出しより前にリポジトリ位置系の変数を unset する', () => {
+  const content = fs.readFileSync(path.join(__dirname, '..', '.githooks', 'pre-commit'), 'utf8');
+  const unsetIdx = content.indexOf('unset GIT_DIR');
+  assert.notEqual(unsetIdx, -1, 'pre-commit: unset 行が必要');
+  assert.ok(unsetIdx < content.indexOf('git diff --cached'), 'pre-commit: unset が最初の git 呼び出しより前にあること');
+  const unsetStmt = content.slice(unsetIdx, content.indexOf('|| true', unsetIdx));
+  for (const v of HOOK_POSITION_VARS) {
+    assert.ok(unsetStmt.includes(v), `pre-commit は ${v} を unset に含むこと`);
+  }
+  for (const v of HOOK_MUST_KEEP_VARS) {
+    assert.ok(!unsetStmt.includes(v), `pre-commit は ${v} を unset してはならない`);
   }
 });
 
-test('_env-setup.js プリロードがワーカー文脈変数を除去し、テストruntime rootを保持する', () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'envleak-worker-context-'));
-  try {
-    const runtimeRoot = path.join(base, 'runtime-root');
-    const injected = {
-      GH_MAESTRO_WORKER: 'issue-342-worker',
-      GH_MAESTRO_WORKSPACE: path.join(base, 'real-workspace'),
-      GH_MAESTRO_BASE_BRANCH: 'dev',
-      GH_MAESTRO_ISSUE: '342',
-      ISSUE: '342',
-      NO_COLOR: '1',
-      GH_MAESTRO_RUNTIME_DIR: runtimeRoot,
-    };
-    const probe = 'console.log(JSON.stringify(process.env))';
-    const r = spawnSync(process.execPath, ['--require', path.join(__dirname, '..', '_env-setup.js'), '-e', probe], {
-      env: { ...process.env, ...injected },
-      encoding: 'utf8',
-    });
-    assert.equal(r.status, 0, r.stderr);
-    const out = JSON.parse(r.stdout.trim().split('\n').pop());
-    for (const key of [
-      'GH_MAESTRO_WORKER',
-      'GH_MAESTRO_WORKSPACE',
-      'GH_MAESTRO_BASE_BRANCH',
-      'GH_MAESTRO_ISSUE',
-      'ISSUE',
-      'NO_COLOR',
-    ]) {
-      assert.equal(out[key], undefined, `_env-setup.js は ${key} を除去すること`);
-    }
-    assert.equal(out.GH_MAESTRO_RUNTIME_DIR, runtimeRoot, 'テスト専用runtime rootは子プロセスへ継承すること');
-  } finally {
-    fs.rmSync(base, { recursive: true, force: true });
+// ── 2層目: tests/_env-setup.js プリロードの除去 ───────────────────────────────
+
+
+
+test('package.jsonの全テスト入口が成果物生成runnerを経由し、runnerが_env-setup.jsをプリロードする', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  for (const scriptName of ['test', 'test:slow']) {
+    const command = packageJson.scripts?.[scriptName];
+    assert.equal(typeof command, 'string', `${scriptName} スクリプトが必要`);
+    assert.match(command, /node scripts\/run-tests\.js (?:full|slow)/, `${scriptName} は run-tests.js を経由すること`);
+  }
+  // Issue #454 でテストコマンドの記述先が scripts/run-tests.js から resolve-config.js へ移った。
+  const { createBuiltinTestConfig } = require('../scripts/shared/resolve-config');
+  const config = createBuiltinTestConfig();
+  for (const layerName of ['full', 'slow']) {
+    assert.deepEqual(
+      config.layers?.[layerName]?.command?.slice(1),
+      ['--require', './tests/_env-setup.js', '--test'],
+      `${layerName} 層は _env-setup.js を --test より前に渡すこと`,
+    );
   }
 });

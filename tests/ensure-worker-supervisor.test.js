@@ -7,16 +7,16 @@ const path = require('path');
 const fs = require('fs');
 const { EventEmitter } = require('events');
 
-const mod = require('../../scripts/shared/ensure-worker-supervisor');
+const mod = require('../scripts/shared/ensure-worker-supervisor');
 const { ensureWorkerSupervisorRunning, AUTOSTART_COOLDOWN_MS } = mod;
-const workerLease = require('../../scripts/shared/worker-lease');
-const migrationMarker = require('../../scripts/shared/migration-marker');
+const workerLease = require('../scripts/shared/worker-lease');
+const migrationMarker = require('../scripts/shared/migration-marker');
 const {
   isProcessAlive,
   getProcessStartTime,
   verifyProcessIdentity,
-} = require('../../scripts/process-lifecycle');
-const { readAutostartAttempt } = require('../../scripts/shared/ensure-resident-daemon');
+} = require('../scripts/process-lifecycle');
+const { readAutostartAttempt } = require('../scripts/shared/ensure-resident-daemon');
 
 function fakeChild() {
   const emitter = new EventEmitter();

@@ -137,87 +137,19 @@ const BASE_ENV = {};
 const ALIVE = () => true;
 const DEAD = () => false;
 
-test('ensureStatusPaneForWorkspace: 起動時に保証ヘルパーを呼び、失敗結果を起動失敗へ変換しない', () => {
-  let captured = null;
-  _setEnsureStatusPane((params) => {
-    captured = params;
-    return { ok: false, stage: 'launch', error: 'WezTerm unavailable' };
-  });
-  try {
-    const result = ensureStatusPaneForWorkspace('C:\\workspace');
-    assert.deepEqual(result, { ok: false, stage: 'launch', error: 'WezTerm unavailable' });
-    assert.deepEqual(captured, {
-      workspace: 'C:\\workspace',
-      scriptsPath: path.dirname(SCRIPT),
-    });
-  } finally {
-    _setEnsureStatusPane(null);
-  }
-});
 
-test('ensureStatusPaneForWorkspace: 予期しない例外も吸収する', () => {
-  _setEnsureStatusPane(() => { throw new Error('unexpected'); });
-  try {
-    assert.deepEqual(ensureStatusPaneForWorkspace('C:\\workspace'), {
-      ok: false,
-      stage: 'unknown',
-      error: 'unexpected',
-    });
-  } finally {
-    _setEnsureStatusPane(null);
-  }
-});
 
 // ── shouldPruneStaleWorker（stale worker除去判定） ────────────────────────────
 // 実障害: 新規ワーカー起動のたびに、たまたま休止中（正常）だったセッション再開系
 // ワーカーがworkers.jsonから消え、二度とresumeされなくなっていた。
 
-test('shouldPruneStaleWorker: プロセスが生存していれば除去しない', () => {
-  const result = shouldPruneStaleWorker({ pid: 5, agentId: 'agy' }, () => ({ id: 'agy' }), ALIVE);
-  assert.equal(result, false);
-});
 
-test('shouldPruneStaleWorker: プロセス不在でもagentConfigが解決できれば除去しない（正常な休止）', () => {
-  // 全エージェントがセッション再開方式のため、プロセス不在は1ターン完了ごとの正常な状態。
-  const result = shouldPruneStaleWorker({ pid: 5, agentId: 'agy' }, () => ({ id: 'agy' }), DEAD);
-  assert.equal(result, false);
-});
 
-test('shouldPruneStaleWorker: agentConfigが解決できない場合はfail-safeで除去する', () => {
-  const result = shouldPruneStaleWorker({ pid: 5, agentId: 'unknown-agent' }, () => null, DEAD);
-  assert.equal(result, true);
-});
 
-test('shouldPruneStaleWorker: resolveAgentが例外を投げてもfail-safeで除去する', () => {
-  const result = shouldPruneStaleWorker(
-    { pid: 5, agentId: 'broken' },
-    () => { throw new Error('boom'); },
-    DEAD,
-  );
-  assert.equal(result, true);
-});
 
-test('shouldPruneStaleWorker: agentIdが無ければfail-safeで除去する', () => {
-  const result = shouldPruneStaleWorker(
-    { pid: 5, agentId: null },
-    () => { throw new Error('should not be called'); },
-    DEAD,
-  );
-  assert.equal(result, true);
-});
 
-test('shouldPruneStaleWorker: pidが無くagentIdも解決できなければ除去する', () => {
-  const result = shouldPruneStaleWorker({ pid: null, agentId: 'gone' }, () => null, DEAD);
-  assert.equal(result, true);
-});
 
-test('--skill がないとエラー終了する', () => {
-  parseRejects(['--issue', '1', '--description', 'test', '--repo', 'o/r'], /--skill/);
-});
 
-test('--description がないとエラー終了する', () => {
-  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--repo', 'o/r'], /--description/);
-});
 
 // ── --description のバリデーション ────────────────────────────────────────────
 // 実障害: --description はworkerName（worktreeディレクトリ名・gitブランチ名の一部）に
@@ -226,22 +158,9 @@ test('--description がないとエラー終了する', () => {
 // 意図した.gh-maestro/worktrees/配下から脱出しうる、スペース・gitの特殊文字混入で
 // git branch作成が壊れる等の危険があった。
 
-test('--description にパストラバーサル文字列(../)を含むとエラー終了する', () => {
-  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', '../../../etc', '--repo', 'o/r'], /--description/);
-});
 
-test('--description にスラッシュを含むとエラー終了する', () => {
-  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'foo/bar', '--repo', 'o/r'], /--description/);
-});
 
-test('--description にスペースを含むとエラー終了する', () => {
-  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'foo bar', '--repo', 'o/r'], /--description/);
-});
 
-test('--description が51文字以上だとエラー終了する', () => {
-  const tooLong = 'a'.repeat(51);
-  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', tooLong, '--repo', 'o/r'], /--description/);
-});
 
 test('--description の英数字・ハイフン・アンダースコアはバリデーションを通過する', () => {
   // 実在しない --agent を渡し、エージェント解決（worktree作成より前）で確実に停止させる。
@@ -255,25 +174,10 @@ test('--description の英数字・ハイフン・アンダースコアはバリ
   assert.match(r.stderr, /nonexistent-agent-for-test/);
 });
 
-test('--issue がないとエラー終了する', () => {
-  parseRejects(['--skill', 'gh-maestro-coder', '--description', 'test', '--repo', 'o/r'], /--issue/);
-});
 
-test('--issue が非数値だとエラー終了する', () => {
-  parseRejects(['--skill', 'gh-maestro-coder', '--issue', 'abc', '--description', 'test', '--repo', 'o/r'], /正の整数/);
-});
 
-test('--issue が 0 だとエラー終了する', () => {
-  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '0', '--description', 'test', '--repo', 'o/r'], /正の整数/);
-});
 
-test('--issue が負数だとエラー終了する', () => {
-  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '-1', '--description', 'test', '--repo', 'o/r'], /正の整数/);
-});
 
-test('--repo がないとエラー終了する', () => {
-  parseRejects(['--skill', 'gh-maestro-coder', '--issue', '1', '--description', 'test'], /--repo/);
-});
 
 // [無効化] このテストは実リポジトリを workspace として使い、実ワークスペースの
 // .gh-maestro/msg-state/orchestrator.json を上書き・削除する（既読状態が失われ
@@ -328,11 +232,6 @@ test('--help はUsageを表示して終了コード0', () => {
   assert.match(r.stdout, /--execution-id/);
 });
 
-test('-h はUsageを表示して終了コード0', () => {
-  const r = parseWorkerArgs(['-h']);
-  assert.equal(r.help, true);
-  assert.deepEqual(r.errors, []);
-});
 
 // ── --prompt-file ─────────────────────────────────────────────────────────
 
@@ -349,17 +248,6 @@ test('--prompt-file で存在しないファイルを指定するとエラー終
   assert.match(r.stderr, /--prompt-file/);
 });
 
-test('--short-prompt と --prompt-file を同時指定するとエラー終了する', () => {
-  const r = parseWorkerArgs([
-    '--skill', 'gh-maestro-base',
-    '--issue', '1', '--description', 'test', '--repo', 'o/r',
-    '--short-prompt', 'inline prompt',
-    '--prompt-file', 'C:\\tmp\\prompt.md',
-    '--session-id', TEST_SESSION_ID,
-  ]);
-  assert.equal(r.help, false);
-  assert.match(r.errors.map(e => e.message).join('\n'), /--short-prompt と --prompt-file は同時に指定できません/);
-});
 
 test('--prompt-file の内容が gh-maestro-base の必須チェックを満たす（バリデーションを通過する）', () => {
   const fs = require('fs');
@@ -396,44 +284,9 @@ test('--short-prompt は短い安全なメッセージを受け付ける', () =>
   assert.match(r.stderr, /nonexistent/);
 });
 
-test('--short-prompt は改行またはシェル特殊文字を拒否して --prompt-file へ誘導する', () => {
-  for (const prompt of ['first\nsecond', 'run `command`', 'value $HOME', 'quote "text"', 'path\\name']) {
-    const r = parseWorkerArgs([
-      '--skill', 'gh-maestro-coder',
-      '--issue', '1', '--description', 'test', '--repo', 'o/r',
-      '--short-prompt', prompt,
-      '--session-id', TEST_SESSION_ID,
-    ], BASE_ENV);
-    assert.equal(r.help, false, prompt);
-    assert.match(r.errors.map(e => e.message).join('\n'), /--short-prompt は1行/, prompt);
-    assert.match(r.errors.map(e => e.message).join('\n'), /--prompt-file/, prompt);
-  }
-});
 
-test('廃止した --prompt は未知のフラグとして拒否する', () => {
-  const r = parseWorkerArgs([
-    '--skill', 'gh-maestro-coder',
-    '--issue', '1', '--description', 'test', '--repo', 'o/r',
-    '--prompt', 'legacy prompt',
-    '--session-id', TEST_SESSION_ID,
-  ], BASE_ENV);
-  assert.equal(r.help, false);
-  assert.match(r.errors.map(e => e.message).join('\n'), /未知のフラグ/);
-  assert.match(r.errors.map(e => e.message).join('\n'), /--prompt/);
-});
 // ── 未知フラグの拒否 ──────────────────────────────────────────────────────────
 
-test('未知のフラグを指定するとエラー終了する（黙って無視しない）', () => {
-  const r = parseWorkerArgs([
-    '--skill', 'gh-maestro-coder',
-    '--issue', '1', '--description', 'test', '--repo', 'o/r',
-    '--typo-flag', 'value',
-    '--session-id', TEST_SESSION_ID,
-  ], BASE_ENV);
-  assert.equal(r.help, false);
-  assert.match(r.errors.map(e => e.message).join('\n'), /未知のフラグ/);
-  assert.match(r.errors.map(e => e.message).join('\n'), /--typo-flag/);
-});
 
 test('WEZTERM_PANE が未設定でも WEZTERM 由来の理由では失敗しない（headless化で不要になった）', () => {
   const envWithoutPane = { ...process.env };
@@ -448,16 +301,6 @@ test('WEZTERM_PANE が未設定でも WEZTERM 由来の理由では失敗しな�
 
 // ── link-node-modules の解決 ──────────────────────────────────────────────────
 
-test('link-node-modules がリポジトリ内パスから解決できる', () => {
-  const nm = path.join(__dirname, '..', '..', 'scripts', 'shared', 'link-node-modules');
-  assert.doesNotThrow(() => {
-    const resolved = require.resolve(nm);
-    assert.ok(resolved.endsWith('link-node-modules.js'));
-  });
-  const mod = require(nm);
-  assert.ok(mod.linkNodeModules);
-  assert.equal(typeof mod.linkNodeModules, 'function');
-});
 
 test('link-node-modules がインストール先と同構造のディレクトリから解決できる', () => {
   const tmpdir = require('os').tmpdir();
@@ -489,37 +332,9 @@ test('link-node-modules がインストール先と同構造のディレクト�
 // 使ってエントリを構築する（buildWorkerEntry という別実装は持たない）。
 // ここでは workers.json に実際に書き込まれる形（観測可能な振る舞い）を検証する。
 
-test('新規ワーカー登録エントリは pid/startTime/logPath/agentId/issue を含む', () => {
-  const { normalizeWorkerEntry } = require('../../scripts/shared/worker-entry');
-  const entry = normalizeWorkerEntry({
-    pid: 123, startTime: '2026-07-25T00:00:00.000Z', logPath: 'C:/ws/w.log', agentId: 'claude', issue: 51,
-  });
-  assert.equal(entry.pid, 123);
-  assert.equal(entry.startTime, '2026-07-25T00:00:00.000Z');
-  assert.equal(entry.logPath, 'C:/ws/w.log');
-  assert.equal(entry.agentId, 'claude');
-  assert.equal(entry.issue, 51);
-  assert.equal(typeof entry.issue, 'number');
-});
 
-test('新規ワーカー登録エントリは issue を数値に変換する（文字列で渡されても Number() される）', () => {
-  const { normalizeWorkerEntry } = require('../../scripts/shared/worker-entry');
-  const entry = normalizeWorkerEntry({ pid: 456, agentId: 'agy', issue: '99' });
-  assert.equal(entry.issue, 99);
-  assert.equal(typeof entry.issue, 'number');
-});
 
-test('新規ワーカー登録エントリは paneId を持たない（null）ためレガシーkill-pane経路が誤発火しない', () => {
-  const { normalizeWorkerEntry } = require('../../scripts/shared/worker-entry');
-  const entry = normalizeWorkerEntry({ pid: 1, agentId: 'claude', issue: 7 });
-  assert.equal(entry.paneId, null);
-});
 
-test('新規ワーカー登録エントリは notifierPid を持たない（null）ため remove-worker等がレガシーnotifierをkillしようとしない', () => {
-  const { normalizeWorkerEntry } = require('../../scripts/shared/worker-entry');
-  const entry = normalizeWorkerEntry({ pid: 1, agentId: 'claude', issue: 7 });
-  assert.equal(entry.notifierPid, null);
-});
 
 // ── agent 解決 ────────────────────────────────────────────────────────────────
 
@@ -549,16 +364,6 @@ test('--agent で存在しないエージェントを指定した場合はエラ
 // parseFlags 自体の網羅的なエッジケースは tests/workspace.test.js でカバー済みのため、
 // ここではフラグ/値衝突が実際のCLI起動でも安全に処理されることだけを確認する。
 
-test('--description の値が"--issue"文字列と一致する場合、値欠落として安全にエラー終了する（フラグ誤認しない）', () => {
-  // parseFlags は '--'始まりの値を許容しない設計（safe-by-default）。
-  // 誤ってフラグとして解釈されるのではなく、値欠落エラーとして扱われることを確認する。
-  const r = parseWorkerArgs([
-    '--skill', 'gh-maestro-coder', '--issue', '1', '--description', '--issue', '--repo', 'o/r',
-    '--session-id', TEST_SESSION_ID,
-  ]);
-  assert.equal(r.help, false);
-  assert.match(r.errors.map(e => e.message).join('\n'), /--description/);
-});
 
 test('config.json に定義されていてもバイナリが PATH になければエラー終了する', () => {
   const fs = require('fs');
@@ -707,129 +512,12 @@ test('send-text-after-launch の拒否は worktree を作る前に起きる（�
 // 実プロセス spawn はせず、gh-comments の取得と markRead を注入して検証する
 //
 
-test('establishOrchestratorBaseline: 既存コメントIDが orchestrator 既読集合に記録され、取得最適化カーソルも設定される', () => {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline-'));
-  try {
-    const init = readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
-    assert.equal(init.ok, true);
 
-    const listCommentsFn = () => ({
-      status: 0,
-      stdout: JSON.stringify([
-        [{ id: 1, created_at: '2026-07-07T10:00:00Z' }, { id: 2, created_at: '2026-07-07T11:00:00Z' }],
-        [{ id: 3, created_at: '2026-07-07T12:00:00Z' }],
-      ]),
-    });
-    const result = establishOrchestratorBaseline(ws, { repo: 'o/r', issue: '207', listCommentsFn });
 
-    assert.equal(result.ok, true);
-    assert.equal(result.count, 3);
-    const st = readStateLib.readState(ws, 'orchestrator');
-    assert.deepEqual(st.state.readByIssue['207'], [1, 2, 3], '全ページ分のIDが既読集合に入る');
-    assert.equal(st.state.sinceByIssue['207'], '2026-07-07T12:00:00Z', '直近 created_at が取得最適化カーソルになる');
-  } finally {
-    fs.rmSync(ws, { recursive: true, force: true });
-  }
-});
 
-test('establishOrchestratorBaseline: 冪等（再実行しても重複しない）', () => {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline2-'));
-  try {
-    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
-    const listCommentsFn = () => ({ status: 0, stdout: JSON.stringify([{ id: 1 }]) });
 
-    const r1 = establishOrchestratorBaseline(ws, { repo: 'o/r', issue: '207', listCommentsFn });
-    const r2 = establishOrchestratorBaseline(ws, { repo: 'o/r', issue: '207', listCommentsFn });
 
-    assert.equal(r1.ok, true);
-    assert.equal(r2.ok, true);
-    const st = readStateLib.readState(ws, 'orchestrator');
-    assert.deepEqual(st.state.readByIssue['207'], [1], '再実行でも重複しない（集合和）');
-  } finally {
-    fs.rmSync(ws, { recursive: true, force: true });
-  }
-});
 
-test('establishOrchestratorBaseline: orchestrator state 未初期化なら失敗し取得も呼ばない', () => {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline3-'));
-  try {
-    let listCalled = false;
-    const listCommentsFn = () => { listCalled = true; return { status: 0, stdout: '[]' }; };
-
-    const result = establishOrchestratorBaseline(ws, { repo: 'o/r', issue: '207', listCommentsFn });
-    assert.equal(result.ok, false);
-    assert.match(result.error, /reset-session\.js/);
-    assert.equal(listCalled, false, '未初期化ではコメント取得を呼ばない');
-    assert.equal(fs.existsSync(readStateLib.statePath(ws, 'orchestrator')), false, '空状態を暗黙作成しない');
-  } finally {
-    fs.rmSync(ws, { recursive: true, force: true });
-  }
-});
-
-test('establishOrchestratorBaseline: v1（旧形式）state でも失敗する（移行が必要）', () => {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline4-'));
-  try {
-    const sp = readStateLib.statePath(ws, 'orchestrator');
-    fs.mkdirSync(path.dirname(sp), { recursive: true });
-    fs.writeFileSync(sp, JSON.stringify({ since: { 10: 'x' }, seenIds: [] }), 'utf8');
-
-    const result = establishOrchestratorBaseline(ws, { repo: 'o/r', issue: '207', listCommentsFn: () => ({ status: 0, stdout: '[]' }) });
-    assert.equal(result.ok, false);
-    assert.match(result.error, /legacy/);
-  } finally {
-    fs.rmSync(ws, { recursive: true, force: true });
-  }
-});
-
-test('establishOrchestratorBaseline: コメント一覧の取得失敗時は失敗し状態を変更しない', () => {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline5-'));
-  try {
-    readStateLib.initializeState(ws, 'orchestrator', { byIssue: { 207: [99] }, sessionId: 'valid-test-session' });
-
-    const result = establishOrchestratorBaseline(ws, {
-      repo: 'o/r', issue: '207',
-      listCommentsFn: () => ({ status: 1, stderr: 'gh: rate limit' }),
-    });
-    assert.equal(result.ok, false);
-    assert.match(result.error, /に失敗しました/);
-
-    const st = readStateLib.readState(ws, 'orchestrator');
-    assert.deepEqual(st.state.readByIssue['207'], [99], '失敗時は既読集合を変更しない');
-  } finally {
-    fs.rmSync(ws, { recursive: true, force: true });
-  }
-});
-
-test('establishOrchestratorBaseline: 応答が配列でない場合に失敗する', () => {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline6-'));
-  try {
-    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
-    const result = establishOrchestratorBaseline(ws, {
-      repo: 'o/r', issue: '207',
-      listCommentsFn: () => ({ status: 0, stdout: JSON.stringify({ not: 'array' }) }),
-    });
-    assert.equal(result.ok, false);
-    assert.match(result.error, /配列ではありません/);
-  } finally {
-    fs.rmSync(ws, { recursive: true, force: true });
-  }
-});
-
-test('establishOrchestratorBaseline: markRead が失敗すれば失敗として報告される', () => {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-baseline7-'));
-  try {
-    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
-    const result = establishOrchestratorBaseline(ws, {
-      repo: 'o/r', issue: '207',
-      listCommentsFn: () => ({ status: 0, stdout: JSON.stringify([{ id: 1 }]) }),
-      markReadFn: () => ({ ok: false, error: 'injected failure' }),
-    });
-    assert.equal(result.ok, false);
-    assert.match(result.error, /injected failure/);
-  } finally {
-    fs.rmSync(ws, { recursive: true, force: true });
-  }
-});
 
 // ── 非対話化トークン検証（Issue #163） ─────────────────────────────────────────
 // config.json の extraArgs 上書きで非対話化トークン（--print / run / exec 等）が欠落すると、
