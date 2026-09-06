@@ -87,8 +87,6 @@ let _injectedReadCycleEvents = null;
 // 長いが、PID再利用を長時間見逃さない間隔にする。watch ループ内だけで使い、他の
 // process-lifecycle 呼び出しには影響させない。
 const PROCESS_START_TIME_CACHE_MAX_AGE_MS = 6_000;
-const WATCH_PID_RECORD_MAX_ATTEMPTS = 20;
-const WATCH_PID_RECORD_RETRY_MS = 50;
 
 function _getProcessStartTime(pid) {
   const fn = _injectedGetProcessStartTime ?? require('./process-lifecycle').getProcessStartTime;
@@ -144,54 +142,6 @@ function _killPane(paneId) {
 function _saveStatusPane(workspace, entry) {
   const fn = _injectedSaveStatusPane ?? require('./shared/status-pane-registry').saveStatusPane;
   return fn(workspace, entry);
-}
-
-/**
- * watchプロセス自身のPIDを、ensure-status-paneが作成した記録へ反映する。
- * 起動直後の記録失敗は表示プロセスの責務ではないため、watchの継続を優先する。
- *
- * @param {string} workspace
- * @param {string|number|null|undefined} issue
- * @param {object} [opts]
- * @param {number} [opts.maxAttempts=20]
- * @param {number} [opts.retryMs=50]
- * @param {Function} [opts.setTimeoutFn]
- */
-function recordWatchProcess(workspace, issue, opts = {}) {
-  const maxAttempts = Math.max(1, Number(opts.maxAttempts ?? WATCH_PID_RECORD_MAX_ATTEMPTS));
-  const retryMs = Math.max(0, Number(opts.retryMs ?? WATCH_PID_RECORD_RETRY_MS));
-  const setTimeoutFn = opts.setTimeoutFn || setTimeout;
-  let attempt = 0;
-
-  const record = () => {
-    attempt += 1;
-    let pane;
-    try {
-      pane = loadStatusPane(workspace);
-    } catch {
-      pane = null;
-    }
-    if (!pane || pane.paneId == null) {
-      if (attempt < maxAttempts) setTimeoutFn(record, retryMs);
-      return;
-    }
-
-    const entry = { ...pane, pid: process.pid };
-    if (issue !== undefined && issue !== null && String(issue) !== '') {
-      entry.issue = String(issue);
-    }
-    try {
-      _saveStatusPane(workspace, entry);
-    } catch {
-      // WezTerm/表示処理の補助記録が壊れてもwatch自体は継続する。
-    }
-  };
-
-  try {
-    record();
-  } catch {
-    // setTimeoutの実装差による補助記録の失敗もwatch自体は継続する。
-  }
 }
 
 function _acquireStatusPaneLock(workspace) {
@@ -1371,7 +1321,6 @@ module.exports = {
   renderWorkerRows,
   renderSnapshotLines,
   alignStatusRows,
-  recordWatchProcess,
   mergeCycleWorkers,
   parseInterval,
   runWatchLoop,
@@ -1403,7 +1352,6 @@ if (require.main === module) {
     process.exit(result.code);
   }
   if (result.isWatch) {
-    recordWatchProcess(result.workspace, result.issue);
     runWatchLoop(result.workspace, result.interval, {
       issue: result.issue,
       startTimeCache: result.startTimeCache,

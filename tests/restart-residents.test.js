@@ -401,6 +401,7 @@ test('restart-residents CLI: helpは0、引数不備は1、通常出力はMonito
     assert.ok(result.lines.some((line) => line.includes('script=msg-poll.js') && line.includes('status=monitor-required')));
     assert.ok(result.lines.some((line) => line.startsWith('MONITOR_REATTACH_REQUIRED script=msg-poll.js')));
     assert.equal(USAGE.includes('resident-restart-logs'), true);
+    assert.equal(USAGE.includes('oldPaneId=<id> newPaneId=<id>'), true);
   } finally {
     if (oldEnv === undefined) delete process.env.GH_MAESTRO_WORKSPACE;
     else process.env.GH_MAESTRO_WORKSPACE = oldEnv;
@@ -420,10 +421,10 @@ test('formatResidentResult: statusと検証結果を機械可読な1行へ整形
   assert.match(multipleLine, /^RESIDENT script=msg-poll\.js status=replaced oldPid=10,11 newPid=20,21 verified=true$/);
 });
 
-test('restartStatusPane: 既存ペインをclose-pane後に同じIssueでpane起動しPID変更を確認する', () => {
+test('restartStatusPane: 既存ペインをclose-pane後に同じIssueでpane起動しpaneId変更を確認する', () => {
   const workspace = makeWorkspace();
   try {
-    let registry = { paneId: 'old-pane', issue: '471', pid: 1001 };
+    let registry = { paneId: 'old-pane', issue: '471' };
     const calls = [];
     const result = restartStatusPane(workspace, path.join(workspace, 'scripts'), {
       loadStatusPaneFn: () => registry,
@@ -433,7 +434,7 @@ test('restartStatusPane: 既存ペインをclose-pane後に同じIssueでpane起
         if (subcommand === 'close-pane') registry = null;
         if (subcommand === 'pane') {
           const issue = args[args.indexOf('--issue') + 1];
-          registry = { paneId: 'new-pane', issue, pid: 2002 };
+          registry = { paneId: 'new-pane', issue };
         }
         return { ok: true, status: 0, stdout: '', stderr: '' };
       },
@@ -455,21 +456,21 @@ test('restartStatusPane: 既存ペインをclose-pane後に同じIssueでpane起
     ]);
     assert.deepEqual(result, {
       status: 'replaced',
-      oldPids: [1001],
-      newPids: [2002],
+      oldPaneIds: ['old-pane'],
+      newPaneIds: ['new-pane'],
       verified: true,
     });
-    assert.equal(formatStatusPaneResult(result), 'STATUS_PANE status=replaced oldPid=1001 newPid=2002 verified=true');
+    assert.equal(formatStatusPaneResult(result), 'STATUS_PANE status=replaced oldPaneId=old-pane newPaneId=new-pane verified=true');
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
 
-test('restartStatusPane: 旧PIDのままの場合はfailedになりrestartResidentsのerrorsへ伝播する', () => {
+test('restartStatusPane: 旧paneIdのままの場合はfailedになりrestartResidentsのerrorsへ伝播する', () => {
   const workspace = makeWorkspace();
   try {
     const statusPane = restartStatusPane(workspace, workspace, {
-      loadStatusPaneFn: () => ({ paneId: 'old-pane', issue: '471', pid: 1001 }),
+      loadStatusPaneFn: () => ({ paneId: 'old-pane', issue: '471' }),
       runStatusPaneCommandFn: ({ subcommand }) => {
         if (subcommand === 'pane') return { ok: true, status: 0, stdout: '', stderr: '' };
         return { ok: true, status: 0, stdout: '', stderr: '' };
@@ -479,36 +480,36 @@ test('restartStatusPane: 旧PIDのままの場合はfailedになりrestartReside
     });
     assert.deepEqual(statusPane, {
       status: 'failed',
-      oldPids: [1001],
-      newPids: [1001],
+      oldPaneIds: ['old-pane'],
+      newPaneIds: ['old-pane'],
       verified: false,
-      reason: '新しい監視ペインのPIDが旧PIDから変わりませんでした',
+      reason: '新しい監視ペインのpaneIdが旧paneIdから変わりませんでした',
     });
 
     const residents = restartResidents(workspace, {
       scriptsPath: workspace,
       preCapturedEntries: [],
       restartStatusPane: true,
-      loadStatusPaneFn: () => ({ paneId: 'old-pane', issue: '471', pid: 1001 }),
+      loadStatusPaneFn: () => ({ paneId: 'old-pane', issue: '471' }),
       runStatusPaneCommandFn: () => ({ ok: true, status: 0, stdout: '', stderr: '' }),
       statusPaneConfirmAttempts: 1,
       statusPaneWaitMs: 0,
     });
     assert.equal(residents.statusPane.status, 'failed');
-    assert.match(residents.errors.join('\n'), /status-pane: 新しい監視ペインのPIDが旧PIDから変わりませんでした/);
+    assert.match(residents.errors.join('\n'), /status-pane: 新しい監視ペインのpaneIdが旧paneIdから変わりませんでした/);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
 
-test('restartStatusPane: 新PIDを確認できない場合はfailedを返す', () => {
+test('restartStatusPane: 新paneIdを確認できない場合はfailedを返す', () => {
   const workspace = makeWorkspace();
   try {
     let loadCount = 0;
     const result = restartStatusPane(workspace, workspace, {
       loadStatusPaneFn: () => {
         loadCount += 1;
-        return loadCount === 1 ? { paneId: 'old-pane', issue: '471', pid: 1001 } : null;
+        return loadCount === 1 ? { paneId: 'old-pane', issue: '471' } : null;
       },
       runStatusPaneCommandFn: () => ({ ok: true, status: 0, stdout: '', stderr: '' }),
       statusPaneConfirmAttempts: 1,
@@ -517,10 +518,10 @@ test('restartStatusPane: 新PIDを確認できない場合はfailedを返す', (
 
     assert.deepEqual(result, {
       status: 'failed',
-      oldPids: [1001],
-      newPids: [],
+      oldPaneIds: ['old-pane'],
+      newPaneIds: [],
       verified: false,
-      reason: '監視ペインの旧PIDまたは新PIDを確認できませんでした',
+      reason: '監視ペインの旧paneIdまたは新paneIdを確認できませんでした',
     });
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
@@ -531,11 +532,11 @@ test('restartStatusPane: WezTermの終了失敗はunavailableとして返し、i
   const workspace = makeWorkspace();
   try {
     const result = restartStatusPane(workspace, workspace, {
-      loadStatusPaneFn: () => ({ paneId: 'old-pane', issue: '471', pid: 1001 }),
+      loadStatusPaneFn: () => ({ paneId: 'old-pane', issue: '471' }),
       runStatusPaneCommandFn: () => ({ ok: false, status: 1, stderr: 'wezterm unavailable' }),
     });
     assert.equal(result.status, 'unavailable');
-    assert.deepEqual(result.oldPids, [1001]);
+    assert.deepEqual(result.oldPaneIds, ['old-pane']);
     assert.match(result.reason, /wezterm unavailable/);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });

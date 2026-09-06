@@ -1148,6 +1148,11 @@ test('main: pane は初回起動時に status-pane.json を保存し、2回目�
     assert.equal(result1.reused, false);
     assert.equal(launchCallCount, 1);
     assert.match(result1.lines[0], /STATUS_PANE_LAUNCHED: pane=201/);
+    const registry = require('../scripts/shared/status-pane-registry').loadStatusPane(workspace);
+    assert.deepEqual(registry, { paneId: '201', launchedAt: registry.launchedAt });
+    assert.equal(Object.hasOwn(JSON.parse(
+      fs.readFileSync(require('../scripts/shared/status-pane-registry').statusPanePath(workspace), 'utf8'),
+    ), 'pid'), false);
 
     // 2回目の実行: 既存ペインが生存しているため launchInSplitPane は呼ばれず再利用される
     const result2 = runMain(['pane', '--workspace', workspace]);
@@ -1261,59 +1266,6 @@ test('main: close-pane は異なるIssueの監視ペインを終了せず記録�
     workerStatus._setLaunchInSplitPane(null);
     workerStatus._setIsPaneAlive(null);
     workerStatus._setKillPane(null);
-    removeWorkspace(workspace);
-  }
-});
-
-test('recordWatchProcess: watch自身のPIDとIssueをstatus-pane registryへ記録する', () => {
-  const workspace = createWorkspace();
-  const { saveStatusPane } = require('../scripts/shared/status-pane-registry');
-  saveStatusPane(workspace, { paneId: '701', issue: 471 });
-  let saved = null;
-  workerStatus._setSaveStatusPane((ws, entry) => {
-    saved = { ws, entry };
-  });
-  try {
-    workerStatus.recordWatchProcess(workspace, '471');
-    assert.equal(saved.ws, workspace);
-    assert.deepEqual(saved.entry, {
-      paneId: '701',
-      issue: '471',
-      launchedAt: saved.entry.launchedAt,
-      pid: process.pid,
-    });
-  } finally {
-    workerStatus._setSaveStatusPane(null);
-    removeWorkspace(workspace);
-  }
-});
-
-test('recordWatchProcess: 親のregistry保存が後でも再試行してPIDを記録する', () => {
-  const workspace = createWorkspace();
-  const { saveStatusPane } = require('../scripts/shared/status-pane-registry');
-  let saved = null;
-  workerStatus._setSaveStatusPane((ws, entry) => {
-    saved = { ws, entry };
-  });
-  let scheduled = null;
-  try {
-    workerStatus.recordWatchProcess(workspace, '471', {
-      maxAttempts: 2,
-      retryMs: 0,
-      setTimeoutFn: (callback) => { scheduled = callback; },
-    });
-    assert.equal(saved, null, '初回にregistryが無い場合は後続試行へ進む');
-    assert.equal(typeof scheduled, 'function');
-
-    saveStatusPane(workspace, { paneId: '702', issue: 471 });
-    scheduled();
-
-    assert.equal(saved.ws, workspace);
-    assert.equal(saved.entry.paneId, '702');
-    assert.equal(saved.entry.issue, '471');
-    assert.equal(saved.entry.pid, process.pid);
-  } finally {
-    workerStatus._setSaveStatusPane(null);
     removeWorkspace(workspace);
   }
 });

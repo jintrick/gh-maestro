@@ -47,8 +47,6 @@ function readStatusPaneEntry(filePath) {
         launchedAt: typeof parsed.launchedAt === 'string' ? parsed.launchedAt : '',
       };
       if (/^[1-9]\d*$/.test(String(parsed.issue))) entry.issue = String(parsed.issue);
-      const pid = Number(parsed.pid);
-      if (Number.isInteger(pid) && pid > 0) entry.pid = pid;
       return entry;
     }
     return null;
@@ -119,8 +117,6 @@ function saveStatusPane(workspace, entry) {
     launchedAt: entry.launchedAt || new Date().toISOString(),
   };
   if (/^[1-9]\d*$/.test(String(entry.issue))) record.issue = String(entry.issue);
-  const pid = Number(entry.pid);
-  if (Number.isInteger(pid) && pid > 0) record.pid = pid;
   atomicWriteJson(p, record);
   // 通常記録に成功したら、不要になった回復記録を掃除する。掃除だけの失敗は
   // 次回 loadStatusPane の時刻比較で安全に扱えるため、主記録の成功を覆さない。
@@ -143,8 +139,6 @@ function saveStatusPaneRecovery(workspace, entry) {
     launchedAt: entry.launchedAt || new Date().toISOString(),
   };
   if (/^[1-9]\d*$/.test(String(entry.issue))) record.issue = String(entry.issue);
-  const pid = Number(entry.pid);
-  if (Number.isInteger(pid) && pid > 0) record.pid = pid;
   atomicWriteJson(p, record);
 }
 

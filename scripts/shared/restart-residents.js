@@ -387,9 +387,10 @@ function defaultRunStatusPaneCommand({ scriptsPath, subcommand, workspace, issue
   };
 }
 
-function statusPanePid(entry) {
-  const pid = Number(entry && entry.pid);
-  return Number.isInteger(pid) && pid > 0 ? pid : null;
+function statusPaneId(entry) {
+  return entry && entry.paneId != null && String(entry.paneId) !== ''
+    ? String(entry.paneId)
+    : null;
 }
 
 /**
@@ -399,7 +400,7 @@ function statusPanePid(entry) {
  * @param {string} workspace
  * @param {string} scriptsPath
  * @param {object} [opts]
- * @returns {{status:string, oldPids?:number[], newPids?:number[], verified?:boolean, reason?:string}}
+ * @returns {{status:string, oldPaneIds?:string[], newPaneIds?:string[], verified?:boolean, reason?:string}}
  */
 function restartStatusPane(workspace, scriptsPath, opts = {}) {
   const loadStatusPaneFn = opts.loadStatusPaneFn || loadStatusPane;
@@ -415,21 +416,21 @@ function restartStatusPane(workspace, scriptsPath, opts = {}) {
   }
   if (!existing || !existing.paneId) return { status: 'not-running' };
 
-  const oldPid = statusPanePid(existing);
+  const oldPaneId = statusPaneId(existing);
   let closed;
   try {
     closed = runCommand({ scriptsPath, subcommand: 'close-pane', workspace });
   } catch (error) {
     return {
       status: 'unavailable',
-      oldPids: oldPid ? [oldPid] : [],
+      oldPaneIds: oldPaneId ? [oldPaneId] : [],
       reason: `監視ペインの終了に失敗しました: ${error.message}`,
     };
   }
   if (!closed || !closed.ok) {
     return {
       status: 'unavailable',
-      oldPids: oldPid ? [oldPid] : [],
+      oldPaneIds: oldPaneId ? [oldPaneId] : [],
       reason: `監視ペインの終了に失敗しました: ${(closed && closed.stderr) || 'unknown'}`,
     };
   }
@@ -445,14 +446,14 @@ function restartStatusPane(workspace, scriptsPath, opts = {}) {
   } catch (error) {
     return {
       status: 'unavailable',
-      oldPids: oldPid ? [oldPid] : [],
+      oldPaneIds: oldPaneId ? [oldPaneId] : [],
       reason: `監視ペインの再起動に失敗しました: ${error.message}`,
     };
   }
   if (!launched || !launched.ok) {
     return {
       status: 'unavailable',
-      oldPids: oldPid ? [oldPid] : [],
+      oldPaneIds: oldPaneId ? [oldPaneId] : [],
       reason: `監視ペインの再起動に失敗しました: ${(launched && launched.stderr) || 'unknown'}`,
     };
   }
@@ -467,27 +468,27 @@ function restartStatusPane(workspace, scriptsPath, opts = {}) {
     } catch {
       replacement = null;
     }
-    const newPid = statusPanePid(replacement);
-    if (newPid !== null && (oldPid === null || newPid !== oldPid)) break;
+    const newPaneId = statusPaneId(replacement);
+    if (newPaneId !== null && (oldPaneId === null || newPaneId !== oldPaneId)) break;
     sleep(waitMs);
   }
-  const newPid = statusPanePid(replacement);
-  const verified = oldPid !== null && newPid !== null && oldPid !== newPid;
+  const newPaneId = statusPaneId(replacement);
+  const verified = oldPaneId !== null && newPaneId !== null && oldPaneId !== newPaneId;
   if (!verified) {
     return {
       status: 'failed',
-      oldPids: oldPid ? [oldPid] : [],
-      newPids: newPid ? [newPid] : [],
+      oldPaneIds: oldPaneId ? [oldPaneId] : [],
+      newPaneIds: newPaneId ? [newPaneId] : [],
       verified: false,
-      reason: oldPid !== null && newPid !== null
-        ? '新しい監視ペインのPIDが旧PIDから変わりませんでした'
-        : '監視ペインの旧PIDまたは新PIDを確認できませんでした',
+      reason: oldPaneId !== null && newPaneId !== null
+        ? '新しい監視ペインのpaneIdが旧paneIdから変わりませんでした'
+        : '監視ペインの旧paneIdまたは新paneIdを確認できませんでした',
     };
   }
   return {
     status: 'replaced',
-    oldPids: oldPid ? [oldPid] : [],
-    newPids: newPid ? [newPid] : [],
+    oldPaneIds: oldPaneId ? [oldPaneId] : [],
+    newPaneIds: newPaneId ? [newPaneId] : [],
     verified: true,
   };
 }
@@ -679,8 +680,8 @@ function formatResidentResult(result) {
 
 function formatStatusPaneResult(result) {
   const fields = ['STATUS_PANE', `status=${result.status}`];
-  if (result.oldPids && result.oldPids.length) fields.push(`oldPid=${result.oldPids.join(',')}`);
-  if (result.newPids && result.newPids.length) fields.push(`newPid=${result.newPids.join(',')}`);
+  if (result.oldPaneIds && result.oldPaneIds.length) fields.push(`oldPaneId=${result.oldPaneIds.join(',')}`);
+  if (result.newPaneIds && result.newPaneIds.length) fields.push(`newPaneId=${result.newPaneIds.join(',')}`);
   if (result.verified !== undefined) fields.push(`verified=${result.verified}`);
   if (result.reason) fields.push(`reason=${JSON.stringify(result.reason)}`);
   return fields.join(' ');

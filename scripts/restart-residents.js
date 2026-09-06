@@ -25,6 +25,7 @@ Options:
 
 Output (stdout):
   RESIDENT script=<name> status=replaced|monitor-required|delegated|not-running|failed ...
+  STATUS_PANE status=replaced|not-running|unavailable|failed oldPaneId=<id> newPaneId=<id> verified=<bool>
   MONITOR_REATTACH_REQUIRED script=<name> command=<command>
   Monitorで出力を受ける常駐は停止後にdetached起動せず、上記の再接続指示を必ず実行する。
   poll-pr.js が poll-reviews.js を子として起動する構成では、後者は delegated と出力する。
