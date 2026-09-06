@@ -70,6 +70,28 @@ function loadConfigFile(configPath) {
   }
 }
 
+/**
+ * テスト層解決用に config.json の読み込み結果を保持する。
+ *
+ * agent 設定の既存ローダーは、壊れた config.json を空設定として扱う契約を
+ * 持つため変更しない。テスト層宣言は未宣言と不正設定を区別する必要があるため、
+ * この経路だけは JSON 構文とトップレベル型の失敗を呼び出し元へ返す。
+ * @param {string} configPath
+ * @returns {{ok:true,config:object}|{ok:false,error:string}}
+ */
+function loadTestConfigFile(configPath) {
+  if (!existsSync(configPath)) return { ok: true, config: {} };
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
+    if (!isPlainObject(parsed)) {
+      return { ok: false, error: 'config.json must be a JSON object' };
+    }
+    return { ok: true, config: parsed };
+  } catch (error) {
+    return { ok: false, error: `config.json could not be parsed: ${error.message}` };
+  }
+}
+
 function isSafeTestLayerName(value) {
   return typeof value === 'string'
     && value.length > 0
@@ -321,6 +343,11 @@ function resolveTestConfig(opts = {}) {
  */
 function getTestLayerDeclarationStatus(opts = {}) {
   try {
+    const homedir = opts.homedir || process.env.HOME || process.env.USERPROFILE || '';
+    const configPaths = [resolve(homedir, '.gh-maestro', 'config.json')];
+    if (opts.workspace) configPaths.push(resolve(opts.workspace, '.gh-maestro', 'config.json'));
+    if (configPaths.some(configPath => !loadTestConfigFile(configPath).ok)) return 'invalid';
+
     const resolved = resolveTestConfig(opts);
     if (!resolved) return 'invalid';
     return resolved.source === 'declared' ? 'declared' : 'missing';

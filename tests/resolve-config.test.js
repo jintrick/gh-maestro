@@ -159,6 +159,19 @@ test('getTestLayerDeclarationStatus: 壊れたtest.layersはinvalidを返し、�
   });
 });
 
+test('getTestLayerDeclarationStatus: config.jsonのJSON破損とトップレベル非objectはinvalidを返す', () => {
+  withTempHome(home => {
+    const configPath = path.join(home, '.gh-maestro', 'config.json');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+
+    fs.writeFileSync(configPath, '{ broken', 'utf8');
+    assert.equal(getTestLayerDeclarationStatus({ homedir: home }), 'invalid');
+
+    fs.writeFileSync(configPath, JSON.stringify([]), 'utf8');
+    assert.equal(getTestLayerDeclarationStatus({ homedir: home }), 'invalid');
+  });
+});
+
 // ── loadDefaults ─────────────────────────────────────────────────────────────
 
 test('loadDefaults: agent-defaults.json を読める', () => {

@@ -47,6 +47,23 @@ function isolatedHome() {
   return { home, env };
 }
 
+function createContextWorkspace(configText) {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-get-context-workspace-'));
+  const init = spawnSync('git', ['init', '-q'], { cwd: workspace, encoding: 'utf8' });
+  assert.equal(init.status, 0, `git init failed: ${init.stderr}`);
+  const remote = spawnSync(
+    'git',
+    ['remote', 'add', 'origin', 'https://github.com/test/repo.git'],
+    { cwd: workspace, encoding: 'utf8' },
+  );
+  assert.equal(remote.status, 0, `git remote add failed: ${remote.stderr}`);
+  fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+  if (configText !== undefined) {
+    fs.writeFileSync(path.join(workspace, '.gh-maestro', 'config.json'), configText, 'utf8');
+  }
+  return workspace;
+}
+
 test('REPO と WORKSPACE を正しいフォーマットで出力する', () => {
   const r = runContext({
     cwd: REPO_ROOT,
@@ -74,55 +91,47 @@ test('GH_MAESTRO_WORKER=orchestrator がセッション変数として出力さ�
 
 test('test.layers宣言が無い場合はmissingをsession contextへ出力する', () => {
   const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace();
   try {
-    const r = runContext({ cwd: REPO_ROOT, env, encoding: 'utf8' });
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
     assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
     assert.match(r.stdout, /^TEST_LAYERS_STATUS=missing$/m);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
 
 test('有効なtest.layers宣言がある場合はdeclaredをsession contextへ出力する', () => {
   const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace(JSON.stringify({
+    test: {
+      layers: {
+        every: { scope: 'full', command: [process.execPath, '--version'] },
+      },
+    },
+  }));
   try {
-    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(
-      path.join(home, '.gh-maestro', 'config.json'),
-      JSON.stringify({
-        test: {
-          layers: {
-            every: { scope: 'full', command: [process.execPath, '--version'] },
-          },
-        },
-      }),
-      'utf8',
-    );
-
-    const r = runContext({ cwd: REPO_ROOT, env, encoding: 'utf8' });
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
     assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
     assert.match(r.stdout, /^TEST_LAYERS_STATUS=declared$/m);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
 
 test('壊れたtest.layersでもcontextを出力し、終了コード0で完了する', () => {
   const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace('{ broken');
   try {
-    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(
-      path.join(home, '.gh-maestro', 'config.json'),
-      JSON.stringify({ test: { layers: [] } }),
-      'utf8',
-    );
-
-    const r = runContext({ cwd: REPO_ROOT, env, encoding: 'utf8' });
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
     assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
     assert.match(r.stdout, /^\[gh-maestro session context\]$/m);
     assert.match(r.stdout, /^TEST_LAYERS_STATUS=invalid$/m);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
 
