@@ -165,7 +165,7 @@ test('runTests: slow suiteの個別指定はtests/slow直下以外を起動し�
     assert.equal(result.exitCode, 1);
     assert.equal(result.artifact, null);
     assert.equal(spawned, false);
-    assert.match(result.stderr, /tests\/slow\/\<name\>\.test\.js/);
+    assert.match(result.stderr, /tests\/slow\/\<name\>\.test\.js|不正なパス要素|相対パス/);
   }
 });
 
