@@ -20,4 +20,11 @@ gh issue list --repo $REPO --state open --limit 20
 gh pr list --repo $REPO --state merged --limit 15
 ```
 
-3. `gh-maestro-orchestrator` スキルのゴール定義に従ってorchestratorとして動作を開始する。
+3. **テスト層宣言の確認**: セッションコンテキストの `TEST_LAYERS_STATUS` を確認する。
+
+   - `declared` の場合は、既存の宣言されたテスト層を使う。
+   - `missing` または `invalid` の場合は、`gh-maestro-test-setup` スキルを読み、その手順に従う。提案を人間へ提示して承認を得るまで、対象プロジェクトのテストや設定を変更してはならない。承認後の設定・テスト配置・実行結果の確認まで終えてから次へ進む。
+
+   セッション初期化が `invalid` を報告していても、それだけを理由に初期化やコンテキストの出力をやり直してはならない。出力された状態を使って人間へ状況を提示する。
+
+4. `gh-maestro-orchestrator` スキルのゴール定義に従ってorchestratorとして動作を開始する。

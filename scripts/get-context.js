@@ -6,6 +6,7 @@ const { execSync } = require('child_process');
 const { getCurrentBranch } = require('./shared/git-branch');
 const { resolveWorkspace } = require('./shared/workspace');
 const { readState } = require('./shared/read-state');
+const { getTestLayerDeclarationStatus } = require('./shared/resolve-config');
 
 const USAGE = `get-context.js — orchestrator の起動コンテキストをプロンプト注入用ブロックとして出力する
 
@@ -13,7 +14,7 @@ Usage: node get-context.js
 
 引数は取らない。「--workspace」引数相当の指定がないため、GH_MAESTRO_WORKSPACE env、
 次にCWDから上方探索して WORKSPACE を解決し、git remote から REPO、現在のブランチから
-BASE_BRANCH を解決して [gh-maestro session context] ブロックを stdout に出力する。
+BASE_BRANCH とテスト層宣言の状態を解決して [gh-maestro session context] ブロックを stdout に出力する。
 通常は /gh-maestro の起動フックが呼ぶ。`;
 
 // CLI として実行されたときだけ動く。require されただけで git を叩き stdout を汚さないため。
@@ -54,6 +55,13 @@ try {
   }
 } catch {}
 
+let testLayersStatus = 'invalid';
+try {
+  testLayersStatus = getTestLayerDeclarationStatus({ workspace });
+} catch {
+  // 設定状態の通知は補助情報であり、セッション初期化を止めない。
+}
+
 const unixWorkspace = workspace.replace(/\\/g, '/');
 
 console.log('[gh-maestro session context]');
@@ -62,3 +70,4 @@ console.log(`WORKSPACE=${unixWorkspace}`);
 if (baseBranch) console.log(`BASE_BRANCH=${baseBranch}`);
 console.log('GH_MAESTRO_WORKER=orchestrator');
 if (sessionId) console.log(`SESSION_ID=${sessionId}`);
+console.log(`TEST_LAYERS_STATUS=${testLayersStatus}`);
