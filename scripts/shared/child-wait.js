@@ -24,28 +24,35 @@ const { killProcessTree } = require('./kill-tree');
  * @param {object} opts
  * @param {object} opts.child      spawn 済みの ChildProcess（stdout 等は呼び出し側が事前に購読する）
  * @param {number} opts.timeoutMs  この時間内に close / error が来なければ killProcessTree(child.pid)
+ * @param {number} [opts.killGraceMs=1000] kill 後に close / error を待つ上限
  * @param {Function} [opts.onCleanup] close / error のどちらかで丁度1回だけ呼ばれる後始末
  *   （clearTimeout はヘルパー内で行う。呼び出し側は独自の掃除だけを渡す）
  * @returns {Promise<number>} 子プロセスの終了コード（close）
  * @throws {Error} child 'error' イベント（spawn 後の起動失敗など）
  */
-function waitChildExit({ child, timeoutMs, onCleanup }) {
+function waitChildExit({ child, timeoutMs, killGraceMs = 1000, onCleanup }) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer = null;
+    let killTimer = null;
 
     const finish = (fn, arg) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(killTimer);
       try { if (onCleanup) onCleanup(); } catch {}
       fn(arg);
     };
 
     timer = setTimeout(() => {
       // タイムアウト: プロセスツリーごと終了（Windows で子孫が孤児化しない）。
-      // kill 後は child 'close' イベントで resolve される。
+      // kill が失敗したり close が届かなかったりしても、親の完了処理を止めない。
       try { killProcessTree(child.pid); } catch {}
+      const graceMs = Number.isFinite(killGraceMs) && killGraceMs >= 0 ? killGraceMs : 1000;
+      killTimer = setTimeout(() => {
+        finish(reject, new Error(`child process did not exit after timeout (${graceMs}ms grace)`));
+      }, graceMs);
     }, timeoutMs);
 
     child.on('close', (code) => finish(resolve, code));

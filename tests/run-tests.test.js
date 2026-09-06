@@ -42,7 +42,10 @@ function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = []
       changedFiles,
       cwd,
       workspace,
-      env: { TEST_RUNNER_FIXTURE: '1' },
+      env: {
+        TEST_RUNNER_FIXTURE: '1',
+        ...(suite === 'slow' ? { GH_MAESTRO_TEST_ACTOR: 'poll-pr' } : {}),
+      },
     },
     {
       clearArtifactFn: (worktree) => calls.push({ type: 'clear', worktree }),
@@ -151,6 +154,18 @@ test('runTests: slow suiteは指定された分離側テストだけを起動す
   assert.equal(fixture.artifacts[0].command, 'npm run test:slow');
 });
 
+test('runTests: slow suiteはpoll-pr以外の主体から起動しない', () => {
+  let spawned = false;
+  const result = runTests(
+    { suite: 'slow', cwd: tempWorktree(), env: { GH_MAESTRO_WORKER: 'issue-461-coder' } },
+    { spawnSyncFn: () => { spawned = true; return { status: 0 }; } },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.artifact, null);
+  assert.equal(spawned, false);
+  assert.match(result.stderr, /slow/);
+});
+
 test('runTests: slow suiteの個別指定はtests/slow直下以外を起動しない', () => {
   for (const testFiles of [
     ['tests/process-lifecycle.test.js'],
@@ -159,7 +174,7 @@ test('runTests: slow suiteの個別指定はtests/slow直下以外を起動し�
   ]) {
     let spawned = false;
     const result = runTests(
-      { suite: 'slow', testFiles, cwd: tempWorktree(), env: {} },
+      { suite: 'slow', testFiles, cwd: tempWorktree(), env: { GH_MAESTRO_TEST_ACTOR: 'poll-pr' } },
       { spawnSyncFn: () => { spawned = true; return { status: 0 }; } },
     );
     assert.equal(result.exitCode, 1);

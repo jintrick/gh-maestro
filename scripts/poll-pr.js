@@ -14,9 +14,18 @@
 'use strict';
 
 const path = require('path');
-const { spawnSync } = require('./shared/child-process');
+const fs = require('fs');
+const { spawn, spawnSync } = require('./shared/child-process');
 const { startReviewManager } = require('./start-review-manager');
+const { waitChildExit } = require('./shared/child-wait');
+const { killProcessTree } = require('./shared/kill-tree');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
+const { resolveGitHead } = require('./shared/git-head');
+const { atomicWriteJson } = require('./shared/atomic-write');
+const { workspaceRuntimeDir } = require('./shared/storage-layout');
+const { readWorkersRaw, resolveWorkerName } = require('./shared/workers-registry');
+const { readTestResultArtifact, testResultPath, writeTestResultLayer } = require('./shared/test-result');
+const { declareTestResult } = require('./declare-test-result');
 const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { postCycleSnapshot } = require('./shared/cycle-snapshot');
@@ -51,6 +60,8 @@ Output (stdout):
   REVIEW_MANAGER_STARTED:<PR>          Review Manager を起動した
   REVIEW_MANAGER_ALREADY_RUNNING:<PR>  Review Manager は既に稼働中
   PR_CLOSED_RESUMED:<PR>               監視していたPRがクローズされ、新PR検出に復帰した
+  SLOW_TEST_STARTED:<json>             PR検出後のslow層を非同期で開始した
+  SLOW_TEST_RESULT:<json>              slow層の完了または失敗を記録した
   以降、poll-reviews.js を子プロセスとして起動し、その標準出力（REVIEW_COMMENT/PR_COMMENT/
   PR_REVIEW/PR_PUSH/PR_MERGED/PR_CLOSED）をそのまま中継する。poll-reviews.js が正常終了
   （exit 0）かつ PR_CLOSED で終了したときは、新 PR の検出（findPR ループ）へ復帰して監視を
@@ -67,7 +78,8 @@ PR が見つかるまでブロックし、見つけたら Review Manager(start-r
 Review Manager自身が実際のdiffを見た上で行う（本スクリプトはファイルパターン等による
 機械的な観点選定を一切行わない。ファイル名に基づく自動判定が一部の観点だけに絞り込んでしまい
 他の観点のレビューが丸ごと欠落する実障害があったため、この責務はオーケストレーター側からは
-完全に排除した）。
+完全に排除した）。slow層はPR検出後に対象worktreeで一度だけ非同期実行し、レビュー監視を
+ブロックせず、完了時に層別成果物と申告コメントを更新する。
 ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
 消滅時はPID registryを解除して自動exitする。`;
 
@@ -79,12 +91,391 @@ Review Manager自身が実際のdiffを見た上で行う（本スクリプト�
  * @param {string} pr
  * @param {string} workspace
  * @param {string|number} sessionPid
- * @returns {number} poll-reviews.js の終了コード（不明な場合は1）
+ * @param {string|number} [intervalSeconds]
+ * @returns {Promise<number>} poll-reviews.js の終了コード（不明な場合は1）
  */
-function spawnPollReviews(pr, workspace, sessionPid) {
-  const args = [path.join(__dirname, 'poll-reviews.js'), pr, workspace, '--session-pid', String(sessionPid)];
-  const result = spawnSync(process.execPath, args, { stdio: 'inherit' });
-  return typeof result.status === 'number' ? result.status : 1;
+function spawnPollReviews(pr, workspace, sessionPid, intervalSeconds = 30) {
+  const args = [path.join(__dirname, 'poll-reviews.js'), pr, workspace, String(intervalSeconds), '--session-pid', String(sessionPid)];
+  let child;
+  try {
+    child = spawn(process.execPath, args, { stdio: 'inherit' });
+  } catch {
+    return Promise.resolve(1);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (code) => {
+      if (settled) return;
+      settled = true;
+      resolve(typeof code === 'number' ? code : 1);
+    };
+    child.on('close', finish);
+    child.on('error', () => finish(1));
+  });
+}
+
+function getPrHead(pr, repo) {
+  const r = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
+    '--json', 'headRefOid', '-q', '.headRefOid'], { encoding: 'utf8' });
+  if (!r || r.status !== 0) {
+    console.error('poll-pr: PR #' + pr + ' のHEAD取得に失敗しました（gh pr view）: ' + ((r && r.stderr) || '').toString().trim());
+    return '';
+  }
+  const head = (r.stdout || '').toString().trim();
+  return /^[0-9a-fA-F]{7,40}$/.test(head) ? head : '';
+}
+
+const SLOW_TEST_TIMEOUT_MS = 30 * 60 * 1000;
+const SLOW_UNKNOWN_HEAD_KEY = 'head-unavailable';
+
+function slowStatePath(workspace, pr) {
+  if (!/^[0-9]+$/.test(String(pr))) throw new Error(`PR番号が不正です: ${pr}`);
+  return path.join(workspace, '.gh-maestro', `poll-slow-test-${String(pr)}.json`);
+}
+
+function readSlowState(statePath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+        || !parsed.runs || typeof parsed.runs !== 'object' || Array.isArray(parsed.runs)) {
+      throw new Error('slow state format is invalid');
+    }
+    return parsed;
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { schemaVersion: 1, runs: {} };
+    throw error;
+  }
+}
+
+function withSlowStateLock(statePath, action) {
+  const lockPath = `${statePath}.lock`;
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  let fd;
+  try { fd = fs.openSync(lockPath, 'wx'); } catch (error) { throw new Error(`slow state lock is unavailable: ${error.message}`); }
+  try { return action(); } finally {
+    try { fs.closeSync(fd); } catch {}
+    try { fs.unlinkSync(lockPath); } catch (error) { if (!error || error.code !== 'ENOENT') throw error; }
+  }
+}
+
+function reserveSlowRun(workspace, pr, headSha, now = new Date().toISOString()) {
+  const statePath = slowStatePath(workspace, pr);
+  const runKey = headSha || SLOW_UNKNOWN_HEAD_KEY;
+  return withSlowStateLock(statePath, () => {
+    const state = readSlowState(statePath);
+    const existing = state.runs[runKey];
+    if (existing) return { statePath, runKey, existing, reserved: false };
+    state.schemaVersion = 1;
+    state.pr = String(pr);
+    state.layer = 'slow';
+    state.runs[runKey] = {
+      status: 'running',
+      startedAt: now,
+      ...(headSha ? { testedHead: headSha } : {}),
+    };
+    atomicWriteJson(statePath, state);
+    return { statePath, runKey, existing: state.runs[runKey], reserved: true };
+  });
+}
+
+function updateSlowRun(statePath, runKey, update) {
+  return withSlowStateLock(statePath, () => {
+    const state = readSlowState(statePath);
+    if (!state.runs[runKey]) throw new Error(`slow state run is missing: ${runKey}`);
+    state.runs[runKey] = { ...state.runs[runKey], ...update };
+    atomicWriteJson(statePath, state);
+    return state.runs[runKey];
+  });
+}
+
+function resolveSlowWorktree(workspace, issue) {
+  const raw = readWorkersRaw(workspace);
+  if (!raw) throw new Error(`workers.json を読み込めません（${workspace}）`);
+  let skill = null;
+  for (const candidate of ['gh-maestro-senior-coder', 'gh-maestro-coder']) {
+    try {
+      resolveWorkerName(workspace, { issue, skill: candidate });
+      skill = candidate;
+      break;
+    } catch (error) {
+      if (String(error.message).includes('複数のワーカー')) throw error;
+    }
+  }
+  if (!skill) throw new Error(`slow層の対象ワーカーが見つかりません（issue=${issue}）`);
+  const workerName = resolveWorkerName(workspace, { issue, skill });
+  const worktree = path.join(workspace, '.gh-maestro', 'worktrees', workerName);
+  if (!fs.existsSync(worktree) || !fs.statSync(worktree).isDirectory()) {
+    throw new Error(`slow層の対象worktreeが見つかりません: ${worktree}`);
+  }
+  return { workerName, worktree };
+}
+
+function sameHead(actual, expected) {
+  return Boolean(actual && expected && (actual.toLowerCase() === expected.toLowerCase()
+    || actual.toLowerCase().startsWith(expected.toLowerCase())
+    || expected.toLowerCase().startsWith(actual.toLowerCase())));
+}
+
+function emitSlowResult(pr, result) {
+  process.stdout.write(`SLOW_TEST_RESULT:${JSON.stringify({ pr: String(pr), layer: 'slow', ...result })}\n`);
+}
+
+function unavailableSlowLayer(headSha, logPath, reason) {
+  return {
+    layer: 'slow',
+    scope: 'partial',
+    status: 'unavailable',
+    command: 'npm run test:slow',
+    recordedAt: new Date().toISOString(),
+    testedHead: headSha,
+    executor: 'poll-pr',
+    executionLogPath: logPath,
+    reason,
+  };
+}
+
+function slowLogPath(workspace, pr, headSha) {
+  const token = headSha || SLOW_UNKNOWN_HEAD_KEY;
+  return path.join(workspaceRuntimeDir(workspace), 'test-results', `slow-pr-${String(pr)}-${token}.log`);
+}
+
+function appendSlowFailureLog(logPath, reason) {
+  fs.mkdirSync(path.dirname(logPath), { recursive: true });
+  fs.appendFileSync(logPath, `[gh-maestro slow unavailable] ${new Date().toISOString()}\n${reason}\n`, 'utf8');
+  return logPath;
+}
+
+function closeLogFd(logFd) {
+  if (logFd === null || logFd === undefined) return;
+  try { fs.closeSync(logFd); } catch {}
+}
+
+function writeUnavailableLayer(target, headSha, logPath, reason, deps = {}) {
+  if (!target || !target.worktree) return null;
+  const writeLayerFn = deps.writeTestResultLayerFn || writeTestResultLayer;
+  const testResultPathFn = deps.testResultPathFn || testResultPath;
+  try {
+    writeLayerFn(target.worktree, unavailableSlowLayer(headSha, logPath, reason));
+    return testResultPathFn(target.worktree);
+  } catch {
+    return null;
+  }
+}
+
+function declareSlowResult({ pr, repo, workspace, target, headSha, statePath, runKey }, deps = {}) {
+  if (!target || !target.worktree || !headSha) return;
+  const declareFn = deps.declareTestResultFn || declareTestResult;
+  try {
+    const declared = declareFn({ pr, repo, workspace, worktree: target.worktree, headSha });
+    updateSlowRun(statePath, runKey, {
+      declaration: declared.ok ? 'updated' : 'failed',
+      ...(declared.ok ? {} : { declarationError: declared.error }),
+    });
+  } catch (error) {
+    try { updateSlowRun(statePath, runKey, { declaration: 'failed', declarationError: error.message }); } catch {}
+  }
+}
+
+function finishSlowFailure({ pr, repo, workspace, target, headSha, statePath, runKey, logPath, child, reason, closeLog }, deps = {}) {
+  if (child && child.pid) {
+    try { killProcessTree(child.pid); } catch {}
+  }
+  if (closeLog) closeLog();
+  const resolvedLogPath = logPath || slowLogPath(workspace, pr, headSha);
+  let logError;
+  try { appendSlowFailureLog(resolvedLogPath, reason); } catch (error) { logError = error.message; }
+  const artifactPath = writeUnavailableLayer(target, headSha, resolvedLogPath, reason, deps)
+    || (statePath && fs.existsSync(statePath) ? statePath : resolvedLogPath);
+  const result = {
+    status: 'unavailable',
+    ...(headSha ? { testedHead: headSha } : {}),
+    executionLogPath: resolvedLogPath,
+    artifactPath,
+    statePath,
+    error: reason,
+    ...(logError ? { logError } : {}),
+  };
+  if (statePath && runKey) {
+    try {
+      updateSlowRun(statePath, runKey, {
+        status: 'unavailable',
+        completedAt: new Date().toISOString(),
+        logPath: resolvedLogPath,
+        result,
+        ...(logError ? { logError } : {}),
+      });
+    } catch (error) {
+      result.stateError = error.message;
+    }
+  }
+  emitSlowResult(pr, result);
+  declareSlowResult({ pr, repo, workspace, target, headSha, statePath, runKey }, deps);
+  return result;
+}
+
+function finishSlowRun({ pr, repo, workspace, target, headSha, statePath, runKey, logPath, exitCode }, deps = {}) {
+  const readArtifactFn = deps.readTestResultArtifactFn || readTestResultArtifact;
+  const writeLayerFn = deps.writeTestResultLayerFn || writeTestResultLayer;
+  let read = readArtifactFn(target.worktree);
+  const layer = read.ok && read.result.scope === 'aggregate' ? read.result.layers.slow : null;
+  if (!layer || !sameHead(layer.testedHead, headSha)) {
+    try {
+      writeLayerFn(target.worktree, unavailableSlowLayer(
+        headSha,
+        logPath,
+        exitCode === 0 ? 'slow-result-missing' : 'runner-abnormal-exit',
+      ));
+    } catch {}
+  }
+  read = readArtifactFn(target.worktree);
+  const finalLayer = read.ok && read.result.scope === 'aggregate' && read.result.layers.slow
+    ? read.result.layers.slow : unavailableSlowLayer(headSha, logPath, 'slow-result-unavailable');
+  const status = finalLayer.status === 'complete' ? finalLayer.outcome : 'unavailable';
+  const result = {
+    status,
+    ...(finalLayer.outcome !== undefined ? { outcome: finalLayer.outcome } : {}),
+    exitCode,
+    testedHead: headSha,
+    ...(finalLayer.tests !== undefined ? { tests: finalLayer.tests } : {}),
+    ...(finalLayer.pass !== undefined ? { pass: finalLayer.pass } : {}),
+    ...(finalLayer.fail !== undefined ? { fail: finalLayer.fail } : {}),
+    executionLogPath: finalLayer.executionLogPath || logPath,
+    artifactPath: read.path || testResultPath(target.worktree),
+    statePath,
+  };
+  try {
+    updateSlowRun(statePath, runKey, { status, completedAt: new Date().toISOString(), exitCode, result });
+  } catch (error) {
+    result.stateError = error.message;
+  }
+  emitSlowResult(pr, result);
+  declareSlowResult({ pr, repo, workspace, target, headSha, statePath, runKey }, deps);
+  return result;
+}
+
+async function executeSlowChild({ target, logPath, childEnv, onSpawn }, deps = {}) {
+  const spawnFn = deps.spawnFn || spawn;
+  const waitChildExitFn = deps.waitChildExitFn || waitChildExit;
+  let logFd;
+  let child;
+  const closeLog = () => {
+    closeLogFd(logFd);
+    logFd = null;
+  };
+  try {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    logFd = fs.openSync(logPath, 'a');
+    child = spawnFn(process.execPath, [path.join(__dirname, 'run-tests.js'), '--workspace', target.worktree, 'slow'], {
+      cwd: target.worktree,
+      env: childEnv,
+      stdio: ['ignore', logFd, logFd],
+    });
+    if (onSpawn) onSpawn(child);
+    const exitCode = await waitChildExitFn({
+      child,
+      timeoutMs: SLOW_TEST_TIMEOUT_MS,
+      onCleanup: closeLog,
+    });
+    closeLog();
+    return { exitCode, child: null, closeLog };
+  } catch (error) {
+    closeLog();
+    error.child = child;
+    throw error;
+  }
+}
+
+function recordHeadUnavailable({ pr, repo, workspace, reason }, deps = {}) {
+  const statePath = slowStatePath(workspace, pr);
+  let reservation;
+  try {
+    reservation = reserveSlowRun(workspace, pr, null);
+  } catch (error) {
+    return finishSlowFailure({
+      pr, repo, workspace, statePath, reason: `${reason}; state reservation failed: ${error.message}`,
+    }, deps);
+  }
+  if (!reservation.reserved) {
+    const result = reservation.existing.result || {
+      status: reservation.existing.status,
+      artifactPath: statePath,
+      statePath,
+      executionLogPath: reservation.existing.logPath || slowLogPath(workspace, pr, null),
+    };
+    emitSlowResult(pr, result);
+    return result;
+  }
+  return finishSlowFailure({
+    pr,
+    repo,
+    workspace,
+    statePath: reservation.statePath,
+    runKey: reservation.runKey,
+    reason,
+  }, deps);
+}
+
+async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
+  const statePath = slowStatePath(workspace, pr);
+  const runKey = headSha || SLOW_UNKNOWN_HEAD_KEY;
+  let target;
+  let logPath;
+  let child;
+  let closeLog;
+  try {
+    const reservation = reserveSlowRun(workspace, pr, headSha);
+    if (!reservation.reserved) {
+      const result = reservation.existing.result || {
+        status: reservation.existing.status,
+        ...(headSha ? { testedHead: headSha } : {}),
+        artifactPath: statePath,
+        statePath,
+        executionLogPath: reservation.existing.logPath,
+      };
+      process.stdout.write(`SLOW_TEST_ALREADY_RECORDED:${JSON.stringify({ pr: String(pr), layer: 'slow', ...(headSha ? { testedHead: headSha } : {}), status: reservation.existing.status })}\n`);
+      return result;
+    }
+    const resolveWorktreeFn = deps.resolveSlowWorktreeFn || resolveSlowWorktree;
+    const resolveHeadFn = deps.resolveGitHeadFn || resolveGitHead;
+    target = resolveWorktreeFn(workspace, issue);
+    const localHead = resolveHeadFn(target.worktree);
+    if (!sameHead(localHead, headSha)) throw new Error(`PR HEADとslow対象worktreeのHEADが不一致です: ${localHead || '(empty)'} != ${headSha}`);
+    logPath = slowLogPath(target.worktree, pr, headSha);
+    const childEnv = {
+      ...process.env,
+      GH_MAESTRO_WORKSPACE: target.worktree,
+      GH_MAESTRO_TEST_ACTOR: 'poll-pr',
+      GH_MAESTRO_TEST_LOG_PATH: logPath,
+    };
+    const childResult = await executeSlowChild({
+      target,
+      logPath,
+      childEnv,
+      onSpawn: (spawned) => {
+        child = spawned;
+        updateSlowRun(statePath, runKey, { pid: spawned.pid || null, logPath });
+      },
+    }, deps);
+    child = childResult.child;
+    closeLog = childResult.closeLog;
+    return finishSlowRun({
+      pr, repo, workspace, target, headSha, statePath, runKey, logPath, exitCode: childResult.exitCode,
+    }, deps);
+  } catch (error) {
+    return finishSlowFailure({
+      pr,
+      repo,
+      workspace,
+      target,
+      headSha,
+      statePath,
+      runKey,
+      logPath,
+      child: error.child || child,
+      closeLog,
+      reason: error && error.message ? error.message : 'slow-run-failed',
+    }, deps);
+  }
 }
 
 
@@ -179,12 +570,18 @@ function formatBaseBranchMismatch(expectedBaseBranch, actualBaseBranch, pr) {
 }
 
 module.exports = {
+  getPrHead,
   getPrBaseBranch,
   formatBaseBranchMismatch,
   getPrState,
   resolvePostReviewDecision,
   recordMergeAndSnapshot,
   spawnPollReviews,
+  slowStatePath,
+  reserveSlowRun,
+  resolveSlowWorktree,
+  runSlowTest,
+  recordHeadUnavailable,
 };
 
 if (require.main === module) {
@@ -276,6 +673,27 @@ if (require.main === module) {
     return r.stdout.trim().split('\n').find(s => s.trim()) || '';
   }
 
+  const pendingSlowTests = new Set();
+
+  function launchSlowTest(pr) {
+    const headSha = getPrHead(pr, repo);
+    if (!headSha) {
+      const failed = Promise.resolve().then(() => recordHeadUnavailable({
+        pr,
+        repo,
+        workspace,
+        reason: 'pr-head-unavailable',
+      }));
+      pendingSlowTests.add(failed);
+      failed.then(() => pendingSlowTests.delete(failed), () => pendingSlowTests.delete(failed));
+      return;
+    }
+    process.stdout.write(`SLOW_TEST_STARTED:${JSON.stringify({ pr: String(pr), layer: 'slow', testedHead: headSha })}\n`);
+    const task = runSlowTest({ pr, issue, repo, workspace, headSha });
+    pendingSlowTests.add(task);
+    task.then(() => pendingSlowTests.delete(task), () => pendingSlowTests.delete(task));
+  }
+
   (async () => {
     while (true) {
       // dead-man's switch: 親セッション生存確認
@@ -299,6 +717,10 @@ if (require.main === module) {
 
         process.stdout.write(`PR_DETECTED:${pr}\n`);
 
+        // slow層はレビュー監視の子を同期的に待たせない。対象HEADごとの予約を先に
+        // runtime状態へ記録し、同じPR/commit/layerでは再起動後も二重実行しない。
+        launchSlowTest(pr);
+
         // --no-review-manager のときは Review Manager を起動せず、レビュー監視だけを再開する。
         if (!noReviewManager) {
           // 常に全観点で起動する。観点を絞り込むかどうかの判断は
@@ -314,7 +736,10 @@ if (require.main === module) {
 
         // poll-pr.js と poll-reviews.js は内部ロジックを統合せず、それぞれ独立に保つ。
         // 代わりにここで poll-reviews.js を子プロセスとして起動し、終了まで中継する（Issue #111）。
-        const exitCode = spawnPollReviews(pr, workspace, sessionPid);
+        const exitCode = await spawnPollReviews(pr, workspace, sessionPid, intervalArg || '30');
+        // レビュー監視が先に終わっても、slowの完了通知と成果物・申告更新を回収してから
+        // poll-prを終了する。slowの実行中にレビュー監視を止めることはない。
+        if (pendingSlowTests.size > 0) await Promise.all([...pendingSlowTests]);
         // poll-reviews.js が終了したあと、PR の実状態を inspect して続行判断する（declare-and-inspect）。
         // PR状態に加えて子の終了コードも見る：子が非ゼロ終了・シグナル終了した場合は PR状態が
         // CLOSED でも復帰せず、親も非ゼロで終了して異常を通知する（Issue #289 受け入れ条件3。

@@ -98,6 +98,18 @@ function fullDeclarationBody(commit = 'a1b2c3d4e5', fail = 0, pass = 1826, scope
 - **実行範囲**: \`${scope}\``;
 }
 
+function aggregateDeclarationBody(commit = 'a1b2c3d4e5f6') {
+  return `${TEST_RESULT_MARKER}
+### 🧪 テスト結果申告
+- **対象コミット**: \`${commit}\`
+- **結果**: pass
+- **実行元**: \`test-runner\`
+- **実行範囲**: \`aggregate\`
+- **層別結果**:
+  - **full**: pass (fail: 0, pass: 1826), tests: 1826, executor: \`test-runner\`, scope: \`full\`
+  - **slow**: pass (fail: 0, pass: 10), tests: 10, executor: \`poll-pr\`, scope: \`partial\`, 実行記録: \`C:/runtime/slow.log\``;
+}
+
 test('extractTestDeclaration: 申告マーカーがないコメントは null', () => {
   assert.equal(extractTestDeclaration('普通のコメント'), null);
   assert.equal(extractTestDeclaration(''), null);
@@ -119,6 +131,26 @@ test('formatTestStatusEvent: provenance/scope をTEST_STATUS通知へ含める',
     formatTestStatusEvent({ status: 'NONE', provenance: 'unknown', scope: 'unknown' }),
     'TEST_STATUS:NONE:none:none:unknown:unknown',
   );
+  const aggregateEvaluation = evaluateTestDeclaration(
+    extractTestDeclaration(aggregateDeclarationBody()),
+    'a1b2c3d4e5f6',
+  );
+  assert.equal(
+    formatTestStatusEvent(aggregateEvaluation),
+    'TEST_STATUS:GREEN:a1b2c3d4e5f6:a1b2c3d4e5f6:test-runner:aggregate',
+  );
+});
+
+test('poll-reviews: aggregate通知と共有評価は層別結果を保持する', () => {
+  const evaluation = evaluateTestDeclaration(
+    extractTestDeclaration(aggregateDeclarationBody()),
+    'a1b2c3d4e5f6',
+  );
+  assert.equal(evaluation.scope, 'aggregate');
+  assert.equal(evaluation.layers.full.pass, 1826);
+  assert.equal(evaluation.layers.slow.executor, 'poll-pr');
+  assert.equal(evaluation.allLayersPresent, true);
+  assert.equal(evaluation.allLayersComplete, true);
 });
 
 test('extractTestDeclaration: v2 から commit, fail, pass, provenance, scope を抽出する', () => {

@@ -465,6 +465,8 @@ orchestrator評価: <承認推奨 or 要修正（理由）。懸念が無けれ�
 
 `poll-pr.js`はレビュー観点を一切選ばない。PR検出時に常にReview Managerを全観点で起動する。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。
 
+PR検出後、`poll-pr.js` は対象PRのHEADと対応するcoder/senior-coder worktreeを照合して `slow` 層を一度だけ非同期起動する。レビュー監視の起動・通知をslow完了まで同期的に待たせてはならない。slow結果は同じworktreeの単一層別成果物へ保存され、完了時にテスト申告コメントを更新する。対象HEADの照合不能、worktree不在、子プロセス異常終了は `unavailable` として実行ログ識別子を残し、自動再試行・自動診断を行わない。
+
 ```sh
 node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --workspace $WORKSPACE --base-branch $BASE_BRANCH
 ```
@@ -472,6 +474,8 @@ node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --workspace $WORKSPACE --base-branch 
 PR検出時の出力:
 - `PR_BASE_MISMATCH:<PR>:<expected>:<actual>` — ベースブランチ不一致（想定と実際が異なる場合は出力される。処理は継続）
 - `PR_DETECTED:<PR>` — 通常通りPR番号が報告される
+- `SLOW_TEST_STARTED:<json>` — PRの対象HEADに対するslow層を、レビュー監視をブロックせずに開始した。対象HEADごとに一度だけ予約され、同じPR/HEAD/layerを再実行しない
+- `SLOW_TEST_RESULT:<json>` — slow層の pass/fail/unavailable、対象HEAD、テスト件数、実行ログ識別子を含む完了通知。完了時は層別成果物を正本としてテスト申告コメントを更新する
 - `PR_CLOSED_RESUMED:<PR>` — 監視していたPRがクローズされ、新PR検出に復帰した（この後 `PR_CLOSED` に続いて届く）
 
 `PR_BASE_MISMATCH` を受け取った場合、PR自体は作成されているため処理を中断する必要はないが、後続のマージフローに影響しうるため人間に伝える。
@@ -496,12 +500,14 @@ PR番号が確定したら、レビューコメントとマージ状態の通知
 - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → インラインのレビュー指摘。コメントトリアージを実行する
 - `PR_COMMENT:<user>:<body>` → PR全体へのコメント。同様にトリアージする
 - `PR_REVIEW:<user>:<state>:<body>` → 正式レビュー提出（GitHubの「Submit review」ボタン経由）。jintrickのレビューはこの形式で届く。stateで分岐：APPROVED → 人間にマージ許可シグナルとして提示、CHANGES_REQUESTED → bodyをトリアージしてコーダーにフィードバック、COMMENTED → PR_COMMENTと同様にトリアージ
+- `SLOW_TEST_RESULT:<json>` → PR検出後に `poll-pr.js` が非同期起動したslow層の結果。JSONのPR番号・対象HEAD・層・結果・件数・実行ログ識別子を事実として記録する。`status=unavailable` や宣言更新失敗を自動再試行・自動診断せず、レビュー結果とともに人間へ提示する。レビュー監視はslow実行中も継続する
 - `PR_PUSH:<sha>` → コーダーが修正コミットをPRにプッシュした。レビューは初回PR作成時のみ実行される（push後の再レビューはない）。マージ可否の確認は「マージ可否ゲート」通過時のみ。未通過なら残 BLOCKER の解消を待つ。**転送済みの BLOCKER/MAJOR への修正 push を検出したら、Review Manager を再起動せず、そのIssueの explorer（未起動なら新規起動、既存があれば再利用）に「指摘の再現条件が実際に解消されているか」の事実確認を依頼する。** 判断（対応として十分か）は explorer の報告を踏まえて orchestrator が行う（explorer は事実確認に徹し判断はしない）。**新規起動する場合、`spawn-worker.js` は既定で `base_branch` から新規ブランチを作るため、対象PRの変更を一切含まない。事実確認を依頼する前に、対象PRのブランチ/コミットを `git fetch` + `checkout` させてから確認させること**（これを怠り、未反映の`base_branch`を調査させて「修正が反映されていない」という誤った結果を得た実例がある）
-- `TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>` → テスト申告状態の遷移通知（`poll-reviews.js` が発行）。state は `GREEN`（申告あり・SHA一致・fail 0）/ `RED`（申告あり・SHA一致・fail > 0）/ `STALE`（SHA不一致）/ `NONE`（申告なし）を表し、`provenance` は実行結果の出所、`scope` は実行範囲（`full`/`partial`/`unknown`/`none`）を表す。**push と申告は `push-and-declare.js` により一体の操作として行われるため、コーダーの操作後は GREEN/RED が届くのが既定**（修正pushのたびに申告が必ず行われる）。STALE/NONE を受信した場合は申告を催促せず、`query-test-status.js` で正本を確認して事実を提示する（正本確認の手順は下記「11. マージ」参照）
+- `TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>` → テスト申告状態の遷移通知（`poll-reviews.js` が発行）。state は `GREEN`（申告あり・SHA一致・fail 0）/ `RED`（申告あり・SHA一致・fail > 0）/ `STALE`（SHA不一致）/ `NONE`（申告なし）を表し、`provenance` は実行結果の出所、`scope` は実行範囲（`full`/`partial`/`aggregate`/`unknown`/`none`）を表す。`aggregate` の場合は申告コメントの層別結果で `full` と `slow` を個別に確認する。**push と申告は `push-and-declare.js` により一体の操作として行われるため、コーダーの操作後は GREEN/RED が届くのが既定**（修正pushのたびに申告が必ず行われる）。STALE/NONE を受信した場合は申告を催促せず、`query-test-status.js` で正本を確認して事実を提示する（正本確認の手順は下記「11. マージ」参照）
 - `PR_MERGED:<PR番号>` → マージ完了。`git -C $WORKSPACE pull --ff-only` で `BASE_BRANCH` を最新化してから本番公開（CI/CD）確認（下記「本番公開（CI/CD）確認」参照）へ進む。CI/CD確認完了後に反省会を実施する。**この時点ではワーカープロセス・worktreeを削除しない**（後始末の `finalize-issue.js` は下記「反省会」完了後にのみ実行する）
 - `PR_CLOSED:<PR番号>` → 該当PRが却下・キャンセルでクローズされた（`CLOSED`）。マージはされない。この後 `poll-pr.js` が新 PR の検出に復帰する（`PR_CLOSED_RESUMED`）。クローズ理由を確認し、必要に応じてコーダーに再指示する。`PR_CLOSED_RESUMED:<PR番号>` は「監視プロセスが生きていて新 PR を待っている」という生存のシグナルでもあるため、**この通知以降は新 PR の `PR_DETECTED` を待つ**（無言のまま監視が止まったと誤解しない）
 - `POLL_ERROR:<detail>` → レビュー監視のGitHubアクセスが失敗し始めた（GitHub障害・一時的なネットワーク断など）。ポーラーは再試行を継続するため起動し直す必要はない。レビュー監視が劣化していることを人間に伝える。復旧すれば `POLL_RECOVERED` が届く
 - `POLL_RECOVERED` → 上記の劣化から復旧した。通常のレビュー監視に戻ってよい
+- `SLOW_TEST_RESULT` とレビュー完了通知の両方が揃うまで、テスト申告の層別結果（`full`/`slow`）と実行記録を突き合わせる。片方だけ届いた場合は利用できる事実を保持し、欠落側の自動再実行や診断は行わない。結果の確認が済むまでコーダーのrollback・worktree削除へ進まない
 - 人間からの報告も同様に受け付ける
 - ポーリング間隔は30秒（`poll-reviews.js`の既定値）。アクティビティがなければ自動で間隔が延びる
 

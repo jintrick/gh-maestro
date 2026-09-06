@@ -133,10 +133,10 @@ function reviewTerminalEvent(state, pr) {
 
 /**
  * テスト申告の評価を、orchestrator が解釈できる固定形式の通知へ変換する。
- * provenance/scope を status と同じイベントに含め、v1/unknown と v2 full/partial を
- * 通知だけでも区別できるようにする。
+ * provenance/scope を status と同じイベントに含め、v1/unknown と v2 full/partial/aggregate を
+ * 通知だけでも区別できるようにする。aggregate の層別事実は query-test-status.js で照会する。
  *
- * @param {{status?:string, declaredSha?:string, headSha?:string, provenance?:string, scope?:string}} evaluation
+ * @param {{status?:string, declaredSha?:string, headSha?:string, provenance?:string, scope?:string, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}} evaluation
  * @returns {string}
  */
 function formatTestStatusEvent(evaluation = {}) {

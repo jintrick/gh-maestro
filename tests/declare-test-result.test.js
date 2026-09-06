@@ -86,6 +86,34 @@ test('buildCommentBody: 成果物が無い場合は unknown と実行記録不�
   assert.doesNotMatch(body, /fail: \d/);
 });
 
+test('buildCommentBody: 層別aggregateはfull/slowの結果とslowの実行記録を同時に出力する', () => {
+  const body = buildCommentBody({
+    commit: SHA,
+    testResult: {
+      provenance: 'test-runner',
+      scope: 'aggregate',
+      layers: {
+        full: {
+          status: 'complete', outcome: 'pass', tests: 10, pass: 10, fail: 0,
+          executor: 'test-runner', scope: 'full',
+        },
+        slow: {
+          status: 'complete', outcome: 'fail', tests: 2, pass: 1, fail: 1,
+          executor: 'poll-pr', scope: 'partial',
+          executionLogPath: 'C:/runtime/slow.log',
+        },
+      },
+    },
+  });
+  assert.ok(body.includes('- **実行範囲**: `aggregate`'));
+  assert.ok(body.includes('**full**: pass'));
+  assert.ok(body.includes('**slow**: fail'));
+  assert.ok(body.includes('executor: `test-runner`, scope: `full`'));
+  assert.ok(body.includes('executor: `poll-pr`, scope: `partial`'));
+  assert.ok(body.includes('C:/runtime/slow.log'));
+  assert.ok(body.includes('- **結果**: fail'));
+});
+
 test('declareTestResult: 手入力の commit/fail/pass を API 境界で拒否する', () => {
   let externalCall = false;
   const deps = baseDeps({ ghListCommentsFn: () => { externalCall = true; return { status: 0, stdout: '[]' }; } });

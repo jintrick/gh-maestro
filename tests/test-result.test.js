@@ -15,6 +15,8 @@ const {
   invalidateTestResultArtifact,
   validateTestResultArtifact,
   writeTestResultArtifact,
+  writeTestResultLayer,
+  testResultLockPath,
   readTestResultArtifact,
 } = require('../scripts/shared/test-result');
 const { listRegisteredWorkspaces, runtimeRoot, workspaceRuntimeDir } = require('../scripts/shared/storage-layout');
@@ -208,4 +210,51 @@ test('readTestResultArtifact: unavailable 成果物は完全な結果として�
   writeTestResultArtifact(invalidatedWorktree, completeArtifact({ outcome: 'pass' }));
   assert.equal(fs.existsSync(testResultInvalidationPath(invalidatedWorktree)), false);
   assert.equal(readTestResultArtifact(invalidatedWorktree).ok, true);
+});
+
+test('writeTestResultLayer: 同じHEADのfull/slowを単一成果物へ層別保存し、HEAD混在を拒む', () => {
+  const worktree = tempWorktree();
+  const head = '0123456789abcdef0123456789abcdef01234567';
+  const layer = (name, testedHead = head) => ({
+    layer: name,
+    scope: name === 'full' ? 'full' : 'partial',
+    status: 'complete',
+    outcome: 'pass',
+    command: name === 'full' ? 'npm test' : 'npm run test:slow',
+    recordedAt: '2026-08-29T00:00:00.000Z',
+    executor: name === 'slow' ? 'poll-pr' : 'local',
+    testedHead,
+    testedContentHash: 'a'.repeat(64),
+    tests: 1,
+    pass: 1,
+    fail: 0,
+  });
+
+  writeTestResultLayer(worktree, layer('full'));
+  writeTestResultLayer(worktree, layer('slow'));
+  const aggregate = readTestResultArtifact(worktree);
+  assert.equal(aggregate.ok, true);
+  assert.deepEqual(Object.keys(aggregate.result.layers).sort(), ['full', 'slow']);
+
+  writeTestResultLayer(worktree, layer('slow', 'abcdefabcdefabcdefabcdefabcdefabcdefabcd'));
+  const replaced = readTestResultArtifact(worktree);
+  assert.equal(replaced.ok, true);
+  assert.deepEqual(Object.keys(replaced.result.layers), ['slow']);
+});
+
+test('writeTestResultLayer: 集約ロック取得失敗は既存成果物を変更しない', () => {
+  const worktree = tempWorktree();
+  const lockPath = testResultLockPath(worktree);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  fs.writeFileSync(lockPath, 'locked', 'utf8');
+  assert.throws(() => writeTestResultLayer(worktree, {
+    layer: 'full',
+    scope: 'full',
+    status: 'complete',
+    outcome: 'pass',
+    command: 'npm test',
+    recordedAt: '2026-08-29T00:00:00.000Z',
+    testedHead: '0123456789abcdef0123456789abcdef01234567',
+    testedContentHash: 'a'.repeat(64),
+  }), /lock is unavailable/);
 });
