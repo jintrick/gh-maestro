@@ -38,8 +38,9 @@ test('coder-workflow.md: push-and-declare.js のコード実行例が存在す�
   // 実行例は収束型単一入口の呼び出し。テスト件数は成果物から自動取得する。
   assert.match(finalizeStep, /node "{{SCRIPTS_PATH}}\/push-and-declare\.js" --issue \$ISSUE --workspace \$WORKSPACE/);
   assert.doesNotMatch(finalizeStep, /--(?:fail|pass)\b/);
-  assert.match(content, /test\.layers/);
-  assert.match(content, /run-tests\.js" --workspace \$WORKSPACE <宣言された層名>/);
+  assert.match(content, /run-tests\.js" --workspace \$WORKSPACE --list/);
+  assert.match(content, /run-tests\.js" --workspace \$WORKSPACE <一覧で確認した層名>/);
+  assert.doesNotMatch(content, /config\.json/);
   assert.doesNotMatch(content, /`npm test`/);
   assert.doesNotMatch(content, /`npm run test:slow`/);
   assert.doesNotMatch(content, /tests\/slow/);
