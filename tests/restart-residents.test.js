@@ -15,6 +15,8 @@ const {
   parseSessionPid,
   replaceSessionPid,
   restartResidents,
+  restartStatusPane,
+  formatStatusPaneResult,
 } = require('../scripts/shared/restart-residents');
 const { main, USAGE, writeResult } = require('../scripts/restart-residents');
 
@@ -416,6 +418,53 @@ test('formatResidentResult: statusと検証結果を機械可読な1行へ整形
     script: 'msg-poll.js', status: 'replaced', oldPids: [10, 11], newPids: [20, 21], verified: true,
   });
   assert.match(multipleLine, /^RESIDENT script=msg-poll\.js status=replaced oldPid=10,11 newPid=20,21 verified=true$/);
+});
+
+test('restartStatusPane: 既存ペインをclose-pane後に同じIssueでpane起動しPID変更を確認する', () => {
+  const workspace = makeWorkspace();
+  try {
+    let registry = { paneId: 'old-pane', issue: '471', pid: 1001 };
+    const calls = [];
+    const result = restartStatusPane(workspace, path.join(workspace, 'scripts'), {
+      loadStatusPaneFn: () => registry,
+      runStatusPaneCommandFn: ({ subcommand, issue }) => {
+        calls.push({ subcommand, issue });
+        if (subcommand === 'pane') registry = { paneId: 'new-pane', issue: String(issue), pid: 2002 };
+        return { ok: true, status: 0, stdout: '', stderr: '' };
+      },
+      statusPaneConfirmAttempts: 1,
+      statusPaneWaitMs: 0,
+    });
+
+    assert.deepEqual(calls, [
+      { subcommand: 'close-pane', issue: undefined },
+      { subcommand: 'pane', issue: '471' },
+    ]);
+    assert.deepEqual(result, {
+      status: 'replaced',
+      oldPids: [1001],
+      newPids: [2002],
+      verified: true,
+    });
+    assert.equal(formatStatusPaneResult(result), 'STATUS_PANE status=replaced oldPid=1001 newPid=2002 verified=true');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('restartStatusPane: WezTermの終了失敗はunavailableとして返し、installの常駐結果を壊さない', () => {
+  const workspace = makeWorkspace();
+  try {
+    const result = restartStatusPane(workspace, workspace, {
+      loadStatusPaneFn: () => ({ paneId: 'old-pane', issue: '471', pid: 1001 }),
+      runStatusPaneCommandFn: () => ({ ok: false, status: 1, stderr: 'wezterm unavailable' }),
+    });
+    assert.equal(result.status, 'unavailable');
+    assert.deepEqual(result.oldPids, [1001]);
+    assert.match(result.reason, /wezterm unavailable/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test('restart-residents CLI: 結果行はstdout、診断行はstderrへ書き分ける', () => {

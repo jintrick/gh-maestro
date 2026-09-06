@@ -42,10 +42,14 @@ function readStatusPaneEntry(filePath) {
   try {
     const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.paneId != null && parsed.paneId !== '') {
-      return {
+      const entry = {
         paneId: String(parsed.paneId),
         launchedAt: typeof parsed.launchedAt === 'string' ? parsed.launchedAt : '',
       };
+      if (/^[1-9]\d*$/.test(String(parsed.issue))) entry.issue = String(parsed.issue);
+      const pid = Number(parsed.pid);
+      if (Number.isInteger(pid) && pid > 0) entry.pid = pid;
+      return entry;
     }
     return null;
   } catch {
@@ -110,10 +114,14 @@ function saveStatusPane(workspace, entry) {
     register: !storageLayout.isNodeTestContext(),
   });
   const p = statusPanePath(workspace);
-  atomicWriteJson(p, {
+  const record = {
     paneId: String(entry.paneId),
     launchedAt: entry.launchedAt || new Date().toISOString(),
-  });
+  };
+  if (/^[1-9]\d*$/.test(String(entry.issue))) record.issue = String(entry.issue);
+  const pid = Number(entry.pid);
+  if (Number.isInteger(pid) && pid > 0) record.pid = pid;
+  atomicWriteJson(p, record);
   // 通常記録に成功したら、不要になった回復記録を掃除する。掃除だけの失敗は
   // 次回 loadStatusPane の時刻比較で安全に扱えるため、主記録の成功を覆さない。
   removeStatusPaneRecovery(workspace);
@@ -130,10 +138,14 @@ function saveStatusPaneRecovery(workspace, entry) {
     register: !storageLayout.isNodeTestContext(),
   });
   const p = statusPaneRecoveryPath(workspace);
-  atomicWriteJson(p, {
+  const record = {
     paneId: String(entry.paneId),
     launchedAt: entry.launchedAt || new Date().toISOString(),
-  });
+  };
+  if (/^[1-9]\d*$/.test(String(entry.issue))) record.issue = String(entry.issue);
+  const pid = Number(entry.pid);
+  if (Number.isInteger(pid) && pid > 0) record.pid = pid;
+  atomicWriteJson(p, record);
 }
 
 /**

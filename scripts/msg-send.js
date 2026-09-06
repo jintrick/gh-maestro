@@ -48,9 +48,11 @@ let _ensureStatusPane = defaultEnsureStatusPane;
  * @param {string} workspace
  * @returns {object} ensure-status-pane.js の結果
  */
-function ensureStatusPaneForWorkspace(workspace) {
+function ensureStatusPaneForWorkspace(workspace, issue = undefined) {
   try {
-    return _ensureStatusPane({ workspace, scriptsPath: __dirname });
+    const params = { workspace, scriptsPath: __dirname };
+    if (issue !== undefined && issue !== null && String(issue) !== '') params.issue = issue;
+    return _ensureStatusPane(params);
   } catch (error) {
     return { ok: false, stage: 'unknown', error: error.message };
   }
@@ -555,7 +557,7 @@ function main(argsOverride, envOverride, ioOverride) {
   // --- 監視ペインの自動存在保証（best-effort） ---
   // 宛先を問わず、成功したメッセージ送信のたびに保証を試みる。結果で送信成否を
   // 分岐しないため、WezTermが利用できないheadless環境でもコメント送信は成立する。
-  ensureStatusPaneForWorkspace(workspace);
+  ensureStatusPaneForWorkspace(workspace, issue);
 
   // --- worker-supervisor.js の自動起動保証（best-effort） ---
   // ワーカー宛て送信時のみ。orchestratorが手動起動を忘れても配送経路が失われないようにする

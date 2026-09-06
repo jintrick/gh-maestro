@@ -236,6 +236,9 @@ function ensureStatusPane(params = {}, deps = {}) {
 
     const paneId = String(paneResult.paneId);
     const entry = { paneId };
+    if (params.issue !== undefined && params.issue !== null && String(params.issue) !== '') {
+      entry.issue = String(params.issue);
+    }
     let launchedAt;
     try {
       launchedAt = new Date(nowFn()).toISOString();

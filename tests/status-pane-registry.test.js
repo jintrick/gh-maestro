@@ -58,9 +58,16 @@ test('loadStatusPane: 配列やpaneId欠落オブジェクトはnullとして扱
 
 test('saveStatusPane / loadStatusPane: 登録した内容を取得できる（ディレクトリ自動作成）', () => {
   withTempWorkspace((dir) => {
-    saveStatusPane(dir, { paneId: '42', launchedAt: '2026-08-26T09:00:00.000Z' });
+    saveStatusPane(dir, {
+      paneId: '42',
+      issue: 471,
+      pid: 12345,
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    });
     assert.deepEqual(loadStatusPane(dir), {
       paneId: '42',
+      issue: '471',
+      pid: 12345,
       launchedAt: '2026-08-26T09:00:00.000Z',
     });
   });

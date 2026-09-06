@@ -560,7 +560,11 @@ function restartResidentsAfterInstall(options = {}) {
     const isCaller = Boolean(canonicalCaller && storageLayout.canonicalWorkspace(workspace) === canonicalCaller);
     let output = '';
     try {
-      const runResult = run(process.execPath, [scriptPath, '--workspace', workspace], {
+      const runResult = run(process.execPath, [
+        scriptPath,
+        '--workspace', workspace,
+        '--restart-status-pane',
+      ], {
         encoding: 'utf8',
         stdio: ['inherit', 'pipe', 'inherit'],
       });

@@ -117,6 +117,7 @@ test('ensureStatusPane: 未記録ペインを起動し status-pane.json の記�
 
   const result = ensureStatusPane({
     ...baseParams(),
+    issue: 471,
     interval: 5,
     direction: 'right',
     percent: 20,
@@ -134,10 +135,12 @@ test('ensureStatusPane: 未記録ペインを起動し status-pane.json の記�
     'C:\\workspace',
     '--interval',
     '5',
+    '--issue',
+    '471',
   ]);
   assert.deepEqual(saved, {
     workspace: 'C:\\workspace',
-    entry: { paneId: '77', launchedAt: '2025-10-09T08:53:20.000Z' },
+    entry: { paneId: '77', issue: '471', launchedAt: '2025-10-09T08:53:20.000Z' },
   });
   assert.equal(calls.acquire, 1);
   assert.equal(calls.release, 1);

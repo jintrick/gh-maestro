@@ -12,7 +12,7 @@ const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
-const { loadStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
+const { loadStatusPane, saveStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
 const { ensureStatusPane: ensureStatusPaneLib } = require('./shared/ensure-status-pane');
 const { resolveSkillAgentMap } = require('./shared/resolve-config');
 const { listRunningReviewManagers } = require('./shared/running-review-managers');
@@ -31,14 +31,14 @@ Usage:
   node worker-status.js list --workspace <path> [--issue <N>] [--json]
   node worker-status.js watch --workspace <path> [--issue <N>] [--interval <sec>]
   node worker-status.js pane --workspace <path> [--issue <N>] [--interval <sec>] [--direction <dir>] [--percent <pct>]
-  node worker-status.js close-pane --workspace <path>
+  node worker-status.js close-pane --workspace <path> [--issue <N>]
 
 Commands:
   status                 指定ワーカーの生死状態をJSONで照会する
   list                   6区間のサイクル行とワーカーの稼働状況を表示する
   watch                  サイクル行とワーカー行を画面クリアしながら定期更新する
   pane                   WezTermスプリットペインを下部に開き、watchモードを常駐表示する（既存ペインがあれば再利用）
-  close-pane             開いているWezTerm監視ペインを終了する
+  close-pane             開いているWezTerm監視ペインを終了する（--issue指定時は対象を検証）
 
 Options:
   --workspace <path>     ワークスペースパス（必須）
@@ -65,7 +65,8 @@ Description:
   --json は既存のworkers.json由来の配列契約を維持する。
   pane サブコマンドは WezTerm の専用ペイン（既定: bottom 15%）を分割作成し、独立して自動更新し続ける。
   既存ペインが生存している場合は新しく作らず既存ペインを再利用する。
-  close-pane サブコマンドは記録された監視ペインを終了して記録を削除する。`;
+  close-pane サブコマンドは記録された監視ペインを終了して記録を削除する。
+  --issue を指定した場合は、監視ペイン起動時の --issue と一致するときだけ実行する。`;
 
 let _injectedGetProcessStartTime = null;
 let _injectedIsWorkerAlive = null;
@@ -141,6 +142,33 @@ function _killPane(paneId) {
 function _saveStatusPane(workspace, entry) {
   const fn = _injectedSaveStatusPane ?? require('./shared/status-pane-registry').saveStatusPane;
   return fn(workspace, entry);
+}
+
+/**
+ * watchプロセス自身のPIDを、ensure-status-paneが作成した記録へ反映する。
+ * 起動直後の記録失敗は表示プロセスの責務ではないため、watchの継続を優先する。
+ *
+ * @param {string} workspace
+ * @param {string|number|null|undefined} issue
+ */
+function recordWatchProcess(workspace, issue) {
+  let pane;
+  try {
+    pane = loadStatusPane(workspace);
+  } catch {
+    return;
+  }
+  if (!pane || pane.paneId == null) return;
+
+  const entry = { ...pane, pid: process.pid };
+  if (issue !== undefined && issue !== null && String(issue) !== '') {
+    entry.issue = String(issue);
+  }
+  try {
+    _saveStatusPane(workspace, entry);
+  } catch {
+    // WezTerm/表示処理の補助記録が壊れてもwatch自体は継続する。
+  }
 }
 
 function _acquireStatusPaneLock(workspace) {
@@ -473,6 +501,28 @@ function collectWorkersStatus(workspace, opts = {}) {
 }
 
 /**
+ * 既存の一覧描画で使っていた列幅計算を、監視ペインのワーカー行でも共有する。
+ * 行の意味や表示内容は呼び出し側が決め、ここでは最大幅とpadだけを担当する。
+ *
+ * @param {Array<object>} rows
+ * @returns {Array<object>}
+ */
+function alignStatusRows(rows) {
+  const maxIssueLen = Math.max(...rows.map(r => String(r.issueCol ?? '').length), 0);
+  const maxNameLen = Math.max(...rows.map(r => String(r.shortName ?? '').length), 0);
+  const maxAgentLen = Math.max(...rows.map(r => String(r.agentCol ?? '').length), 0);
+
+  return rows.map((row) => ({
+    ...row,
+    issuePart: String(row.issueCol ?? '').padEnd(maxIssueLen, ' '),
+    namePart: String(row.shortName ?? '').padEnd(maxNameLen, ' '),
+    agentPart: String(row.agentCol ?? '').padEnd(maxAgentLen, ' '),
+    statusPart: String(row.statusCol ?? '').padEnd(9, ' '),
+    timePart: String(row.timeCol ?? '').padStart(8, ' '),
+  }));
+}
+
+/**
  * ワーカー一覧から横棒グラフのテキスト行を生成する。
  *
  * @param {Array<{workerName: string, pid: number|null, running: boolean, startTime: string|null, elapsedSeconds: number, issue?: number|null, agentId?: string|null}>} workers
@@ -553,19 +603,10 @@ function renderUptimeBars(workers, opts = {}) {
     }
   }
 
-  const maxIssueLen = Math.max(...rows.map(r => r.issueCol.length), 0);
-  const maxNameLen = Math.max(...rows.map(r => r.shortName.length), 0);
-  const maxAgentLen = Math.max(...rows.map(r => r.agentCol.length), 0);
-
   const lines = [];
-  for (const r of rows) {
-    const issuePart = r.issueCol.padEnd(maxIssueLen, ' ');
-    const namePart = r.shortName.padEnd(maxNameLen, ' ');
-    const agentPart = r.agentCol.padEnd(maxAgentLen, ' ');
-    const statusPart = r.statusCol.padEnd(9, ' ');
-    const timePart = r.timeCol.padStart(8, ' ');
+  for (const r of alignStatusRows(rows)) {
     const barPart = r.bar ? `${r.bar} ` : '';
-    const line = `${issuePart}  ${namePart}  ${agentPart}  ${statusPart}  ${timePart}  ${barPart}${r.pidStr}`.trimEnd();
+    const line = `${r.issuePart}  ${r.namePart}  ${r.agentPart}  ${r.statusPart}  ${r.timePart}  ${barPart}${r.pidStr}`.trimEnd();
     lines.push(line);
   }
   return lines;
@@ -859,7 +900,7 @@ function renderWorkerRows(workers, opts = {}) {
   const visible = prepared.slice(0, maxRows);
   const hidden = Math.max(0, prepared.length - visible.length);
   const colorize = Boolean(opts.colorize);
-  const lines = [];
+  const entries = [];
   for (const [visibleIndex, { worker, role }] of visible.entries()) {
     const dot = worker.abnormal
       ? colorizeText('●', 31, colorize)
@@ -867,17 +908,26 @@ function renderWorkerRows(workers, opts = {}) {
         ? colorizeText('●', 32, colorize)
         : colorizeText('○', 90, colorize);
     const runNumber = Number(worker.runNumber);
-    const runSuffix = Number.isInteger(runNumber) && runNumber > 1 ? ` ×${runNumber}` : '';
+    const runSuffix = Number.isInteger(runNumber) && runNumber > 1 ? ` x${runNumber}` : '';
     const agent = worker.agentId ? String(worker.agentId) : '-';
     const elapsed = worker.elapsedSeconds == null || !workerDurationKnown(worker)
       ? '-'
       : formatDuration(worker.elapsedSeconds);
     const pid = worker.pid == null ? '-' : String(worker.pid);
-    let line = `${dot} ${role}${runSuffix} [${agent}] ${elapsed} (pid: ${pid})`;
-    if (hidden > 0 && visibleIndex === visible.length - 1) line += ` +${hidden}件`;
-    lines.push(line);
+    const row = {
+      issueCol: '',
+      shortName: `${role}${runSuffix}`,
+      agentCol: agent,
+      statusCol: '',
+      timeCol: elapsed,
+      bar: '',
+      pidStr: `(pid: ${pid})`,
+      prefix: `${dot} `,
+      hiddenSuffix: hidden > 0 && visibleIndex === visible.length - 1 ? ` +${hidden}件` : '',
+    };
+    entries.push({ type: 'row', row });
 
-    if (worker.jobsError) lines.push('  └─ review jobs unavailable (取得失敗)');
+    if (worker.jobsError) entries.push({ type: 'plain', line: '  └─ review jobs unavailable (取得失敗)' });
     for (const job of Array.isArray(worker.jobs) ? worker.jobs : []) {
       const jobName = `  └─ ${job.jobId || 'unknown'} (${job.aspect || '-'})`;
       const jobAgent = job.agentId ? String(job.agentId) : '-';
@@ -885,11 +935,36 @@ function renderWorkerRows(workers, opts = {}) {
         ? '-'
         : formatDuration(job.elapsedSeconds);
       const jobPid = job.pid == null ? '-' : String(job.pid);
-      lines.push(`${jobName} [${jobAgent}] ${jobElapsed} (pid: ${jobPid})`);
+      entries.push({
+        type: 'row',
+        row: {
+          issueCol: '',
+          shortName: jobName,
+          agentCol: jobAgent,
+          statusCol: '',
+          timeCol: jobElapsed,
+          bar: '',
+          pidStr: `(pid: ${jobPid})`,
+          prefix: '',
+          hiddenSuffix: '',
+        },
+      });
     }
   }
   if (hidden > 0) {
-    if (lines.length === 0) lines.push(`+${hidden}件`);
+    if (entries.length === 0) entries.push({ type: 'plain', line: `+${hidden}件` });
+  }
+
+  const alignedRows = alignStatusRows(entries.filter(entry => entry.type === 'row').map(entry => entry.row));
+  let alignedIndex = 0;
+  const lines = [];
+  for (const entry of entries) {
+    if (entry.type === 'plain') {
+      lines.push(entry.line);
+      continue;
+    }
+    const row = alignedRows[alignedIndex++];
+    lines.push(`${row.prefix}${row.namePart} [${row.agentPart}] ${row.timePart} ${row.pidStr}${row.hiddenSuffix}`.trimEnd());
   }
   return lines;
 }
@@ -1117,8 +1192,6 @@ function main(argv = process.argv.slice(2)) {
       return { code: 1, lines: out, errLines: err };
     }
 
-    const timeStr = formatJstTime(_now());
-    writeOut(`=== gh-maestro worker status (${timeStr}, interval: ${interval}s) ===`);
     const lines = renderSnapshotLines(workspace, issueArg, {
       currentWorkers: workers,
       now: _now(),
@@ -1195,6 +1268,11 @@ function main(argv = process.argv.slice(2)) {
       return { code: 0, lines: out, errLines: err };
     }
 
+    if (issueArg !== undefined && String(existingPane.issue) !== String(issueArg)) {
+      writeOut('STATUS_PANE_NOT_FOUND');
+      return { code: 0, lines: out, errLines: err };
+    }
+
     const paneId = existingPane.paneId;
     if (_isPaneAlive(paneId)) {
       const killResult = _killPane(paneId);
@@ -1237,9 +1315,7 @@ function runWatchLoop(workspace, interval, opts = {}) {
           ? Boolean(opts.colorize)
           : Boolean(outStream.isTTY && process.env.NO_COLOR !== '1'),
       });
-      const timeStr = formatJstTime(_now());
       outStream.write('\x1b[2J\x1b[H');
-      outStream.write(`=== gh-maestro worker status (${timeStr}, interval: ${interval}s) ===\n`);
       for (const line of lines) {
         outStream.write(line + '\n');
       }
@@ -1271,6 +1347,8 @@ module.exports = {
   renderCycleLine,
   renderWorkerRows,
   renderSnapshotLines,
+  alignStatusRows,
+  recordWatchProcess,
   mergeCycleWorkers,
   parseInterval,
   runWatchLoop,
@@ -1302,6 +1380,7 @@ if (require.main === module) {
     process.exit(result.code);
   }
   if (result.isWatch) {
+    recordWatchProcess(result.workspace, result.issue);
     runWatchLoop(result.workspace, result.interval, {
       issue: result.issue,
       startTimeCache: result.startTimeCache,

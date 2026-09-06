@@ -14,8 +14,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('./child-process');
+const { spawn, spawnSync } = require('./child-process');
 const { killProcessTree } = require('./kill-tree');
+const { loadStatusPane } = require('./status-pane-registry');
 const {
   findRunningInstances,
   unregisterProcess,
@@ -371,6 +372,114 @@ function monitorCommandForEntry(scriptsPath, spec, entry, hooks = createResident
   return formatCommand(path.join(scriptsPath, spec.script), built.args);
 }
 
+function defaultRunStatusPaneCommand({ scriptsPath, subcommand, workspace, issue }) {
+  const args = [path.join(scriptsPath, 'worker-status.js'), subcommand, '--workspace', workspace];
+  if (subcommand === 'pane' && issue != null) args.push('--issue', String(issue));
+  const result = spawnSync(process.execPath, args, {
+    cwd: workspace,
+    encoding: 'utf8',
+  });
+  return {
+    ok: result.status === 0,
+    status: result.status,
+    stdout: (result.stdout || '').toString().trim(),
+    stderr: (result.stderr || '').toString().trim(),
+  };
+}
+
+function statusPanePid(entry) {
+  const pid = Number(entry && entry.pid);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * install時だけ、既存の監視ペインを同じIssueで張り直す。
+ * 監視UIはWezTermの外部設備なので、失敗は常駐4種の交換結果を失敗扱いにしない。
+ *
+ * @param {string} workspace
+ * @param {string} scriptsPath
+ * @param {object} [opts]
+ * @returns {{status:string, oldPids?:number[], newPids?:number[], verified?:boolean, reason?:string}}
+ */
+function restartStatusPane(workspace, scriptsPath, opts = {}) {
+  const loadStatusPaneFn = opts.loadStatusPaneFn || loadStatusPane;
+  const runCommand = opts.runStatusPaneCommandFn || defaultRunStatusPaneCommand;
+  let existing;
+  try {
+    existing = loadStatusPaneFn(workspace);
+  } catch (error) {
+    return { status: 'unavailable', reason: `status-pane registryの読み取りに失敗しました: ${error.message}` };
+  }
+  if (!existing || !existing.paneId) return { status: 'not-running' };
+
+  const oldPid = statusPanePid(existing);
+  let closed;
+  try {
+    closed = runCommand({ scriptsPath, subcommand: 'close-pane', workspace });
+  } catch (error) {
+    return {
+      status: 'unavailable',
+      oldPids: oldPid ? [oldPid] : [],
+      reason: `監視ペインの終了に失敗しました: ${error.message}`,
+    };
+  }
+  if (!closed || !closed.ok) {
+    return {
+      status: 'unavailable',
+      oldPids: oldPid ? [oldPid] : [],
+      reason: `監視ペインの終了に失敗しました: ${(closed && closed.stderr) || 'unknown'}`,
+    };
+  }
+
+  let launched;
+  try {
+    launched = runCommand({
+      scriptsPath,
+      subcommand: 'pane',
+      workspace,
+      issue: existing.issue,
+    });
+  } catch (error) {
+    return {
+      status: 'unavailable',
+      oldPids: oldPid ? [oldPid] : [],
+      reason: `監視ペインの再起動に失敗しました: ${error.message}`,
+    };
+  }
+  if (!launched || !launched.ok) {
+    return {
+      status: 'unavailable',
+      oldPids: oldPid ? [oldPid] : [],
+      reason: `監視ペインの再起動に失敗しました: ${(launched && launched.stderr) || 'unknown'}`,
+    };
+  }
+
+  const maxAttempts = opts.statusPaneConfirmAttempts ?? DEFAULT_STARTUP_CONFIRM_ATTEMPTS;
+  const waitMs = opts.statusPaneWaitMs ?? DEFAULT_WAIT_MS;
+  const sleep = opts.sleepFn || (() => {});
+  let replacement = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      replacement = loadStatusPaneFn(workspace);
+    } catch {
+      replacement = null;
+    }
+    const newPid = statusPanePid(replacement);
+    if (newPid !== null && (oldPid === null || newPid !== oldPid)) break;
+    sleep(waitMs);
+  }
+  const newPid = statusPanePid(replacement);
+  return {
+    status: 'replaced',
+    oldPids: oldPid ? [oldPid] : [],
+    newPids: newPid ? [newPid] : [],
+    verified: oldPid !== null && newPid !== null && oldPid !== newPid,
+    ...(oldPid !== null && newPid !== null && oldPid === newPid
+      ? { reason: '新しい監視ペインのPIDが旧PIDから変わりませんでした' }
+      : {}),
+  };
+}
+
 /**
  * 常駐4種を入れ替える。
  *
@@ -530,11 +639,30 @@ function restartResidents(workspace, opts = {}) {
     result.sessionPidSources = startedEntries.map((started) => started.sessionPidSource);
   }
 
-  return { entries, results, errors };
+  const result = { entries, results, errors };
+  if (opts.restartStatusPane) {
+    result.statusPane = restartStatusPane(workspace, opts.scriptsPath, {
+      loadStatusPaneFn: opts.loadStatusPaneFn,
+      runStatusPaneCommandFn: opts.runStatusPaneCommandFn,
+      statusPaneConfirmAttempts: opts.statusPaneConfirmAttempts,
+      statusPaneWaitMs: opts.statusPaneWaitMs,
+      sleepFn: opts.statusPaneSleepFn || hooks.sleep,
+    });
+  }
+  return result;
 }
 
 function formatResidentResult(result) {
   const fields = [`RESIDENT`, `script=${result.script}`, `status=${result.status}`];
+  if (result.oldPids && result.oldPids.length) fields.push(`oldPid=${result.oldPids.join(',')}`);
+  if (result.newPids && result.newPids.length) fields.push(`newPid=${result.newPids.join(',')}`);
+  if (result.verified !== undefined) fields.push(`verified=${result.verified}`);
+  if (result.reason) fields.push(`reason=${JSON.stringify(result.reason)}`);
+  return fields.join(' ');
+}
+
+function formatStatusPaneResult(result) {
+  const fields = ['STATUS_PANE', `status=${result.status}`];
   if (result.oldPids && result.oldPids.length) fields.push(`oldPid=${result.oldPids.join(',')}`);
   if (result.newPids && result.newPids.length) fields.push(`newPid=${result.newPids.join(',')}`);
   if (result.verified !== undefined) fields.push(`verified=${result.verified}`);
@@ -558,4 +686,6 @@ module.exports = {
   formatResidentResult,
   monitorCommandForEntry,
   resolveResidentSessionPid,
+  restartStatusPane,
+  formatStatusPaneResult,
 };
