@@ -280,10 +280,29 @@ test('収束: 破損した成果物でも unknown 申告まで到達し、push/P
 
   assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
   assert.ok(call(calls, (cmd, args) => cmd === 'git' && args[0] === 'push'));
+  assert.equal(
+    calls.some(({ cmd }) => cmd === process.execPath),
+    false,
+    '成果物が壊れていてもテストrunnerを補完実行しない',
+  );
   const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
   assert.ok(createCall, '破損成果物でも申告コメントを投稿する');
   assert.match(createCall.args[3], /結果.*unknown/);
   assert.match(result.stdout, /テスト証跡: unknown \/ unknown/);
+});
+
+test('収束: 成果物が無い場合もunknown申告だけを行い、テストrunnerを起動しない', () => {
+  const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+  }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  assert.equal(calls.some(({ cmd }) => cmd === process.execPath), false);
+  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[2] === '-f');
+  assert.ok(createCall);
+  assert.match(createCall.args[3], /結果.*unknown/);
 });
 
 test('収束: ステージ済み変更が無ければ空コミットを作らず、コミット段をスキップして push→申告で exit 0', () => {

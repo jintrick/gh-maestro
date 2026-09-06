@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 'use strict';
 
-// run-tests.js — Node test runner の実行とテスト結果成果物の生成を一体化する。
+// run-tests.js — 宣言されたテスト層の実行と結果成果物の生成を一体化する。
 //
-// このスクリプト自身が TAP summary を解析して runtime root へ成果物を書き出すため、
-// コーダーが fail/pass を数えて申告コマンドへ入力する経路はない。子プロセスの終了
-// コードはそのまま返すが、テストが赤くても summary が読める限り成果物は保存する。
+// このスクリプト自身が runtime root へ成果物を書き出すため、コーダーが fail/pass を
+// 数えて申告コマンドへ入力する経路はない。子プロセスの終了コードを結果の正本とし、
+// 読めるテスト件数は付加情報として保存する。
 
 const fs = require('fs');
 const { spawnSync } = require('./shared/child-process');
 const { resolveGitHead } = require('./shared/git-head');
-const { parseFlags } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
+const { resolveTestConfig } = require('./shared/resolve-config');
 const {
   TEST_RESULT_SCHEMA_VERSION,
   TEST_RESULT_PRODUCER,
@@ -18,56 +19,138 @@ const {
   calculateWorktreeContentHash,
   parseTapSummary,
   testResultPath,
+  clearTestResultInvalidation,
+  invalidateTestResultArtifact,
   writeTestResultArtifact,
 } = require('./shared/test-result');
 
-const SUITES = Object.freeze({
-  full: Object.freeze({
-    scope: 'full',
-    command: 'npm test',
-    testArgs: ['--require', './tests/_env-setup.js', '--test', 'tests/*.test.js'],
-  }),
-  slow: Object.freeze({
-    scope: 'partial',
-    command: 'npm run test:slow',
-    testArgs: ['--require', './tests/_env-setup.js', '--test', 'tests/slow/*.test.js'],
-  }),
-});
-
-const USAGE = `run-tests.js — Node test runnerを実行し、結果成果物を生成する
+const USAGE = `run-tests.js — 宣言されたテスト層を実行し、結果成果物を生成する
 
 Usage:
-  node run-tests.js <full|slow> [tests/slow/<name>.test.js ...]
+  node run-tests.js [--workspace <path>] [--changed] <layer> [path ...]
 
 Arguments:
-  full                  npm test 相当。tests/*.test.js を全件実行し、scope=fullで記録
-  slow                  npm run test:slow 相当。tests/slow/*.test.jsを実行し、scope=partialで記録
-                        tests/slow/<name>.test.js を指定した場合は、そのファイルだけを実行
+  layer                 config.json の test.layers にある層名。既定値は full / slow
+  path                  通常は partial 層へ渡す相対テストファイル（任意）。--changed
+                        指定時は変更した相対ファイルとして mapping へ渡す
+
+Options:
+  --workspace <path>   test.layers を読むプロジェクトのworkspace（省略時は環境/CWDから解決）
+  --changed             後続の path を変更ファイルとして mapping でテストへ変換する
 
 Output:
-  Node test runner の出力をそのまま標準出力/標準エラーへ中継します。
+  宣言されたコマンドの出力をそのまま標準出力/標準エラーへ中継します。
   結果は storage-layout.js の runtime root に worktree 単位で保存します。
-  テストが失敗しても、成果物が生成できた場合はその結果を保存して同じ終了コードを返します。
-  exit 0 = test runner成功、exit 1以上 = test runner失敗または起動失敗`;
+  テストが失敗しても、終了コードと成果物の生成に成功した場合はその結果を保存します。
+  exit 0 = 宣言コマンド成功、exit 1以上 = 宣言コマンド失敗または起動失敗`;
 
 const SPEC = {
-  flags: {},
-  booleans: ['--help', '-h'],
+  flags: { '--workspace': {} },
+  booleans: ['--help', '-h', '--changed'],
   positionals: { min: 1, max: 65 },
 };
 
-function normalizeSlowTestFiles(testFiles) {
-  if (!Array.isArray(testFiles) || testFiles.length === 0) return { ok: true, files: [] };
+function normalizeRelativeTestFile(file) {
+  if (typeof file !== 'string' || !file.trim()) {
+    return { ok: false, error: `テストファイルは空でない相対パスで指定してください: ${file}` };
+  }
+  const normalized = file.replaceAll('\\', '/');
+  if (normalized.includes('\0') || /[\r\n]/.test(normalized)
+      || normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized)) {
+    return { ok: false, error: `テストファイルはworktree内の相対パスで指定してください: ${file}` };
+  }
+  const segments = normalized.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+    return { ok: false, error: `テストファイルに不正なパス要素があります: ${file}` };
+  }
+  return { ok: true, value: normalized };
+}
 
-  const files = testFiles.map((file) => String(file).replaceAll('\\', '/'));
-  const invalid = files.find((file) => !/^tests\/slow\/[^/]+\.test\.js$/.test(file));
-  if (invalid) {
-    return {
-      ok: false,
-      error: `slow suite の個別指定は tests/slow/<name>.test.js の形式で必要です: ${invalid}`,
-    };
+function normalizeTestFiles(testFiles, layer = {}) {
+  if (!Array.isArray(testFiles)) return { ok: false, error: 'testFiles must be an array' };
+  const files = [];
+  const seen = new Set();
+  for (const file of testFiles) {
+    const normalized = normalizeRelativeTestFile(file);
+    if (!normalized.ok) return normalized;
+    if (layer.testFilePattern && !matchesTestFilePattern(layer.testFilePattern, normalized.value)) {
+      return {
+        ok: false,
+        error: `テストファイルは${layer.testFilePattern}の形式で必要です: ${file}`,
+      };
+    }
+    if (!seen.has(normalized.value)) {
+      seen.add(normalized.value);
+      files.push(normalized.value);
+    }
   }
   return { ok: true, files };
+}
+
+function matchesTestFilePattern(pattern, file) {
+  if (pattern.includes('<name>')) return matchChangedFile(pattern, file) !== null;
+  const wildcardIndex = pattern.indexOf('*');
+  if (wildcardIndex < 0) return pattern === file;
+  const prefix = pattern.slice(0, wildcardIndex);
+  const suffix = pattern.slice(wildcardIndex + 1);
+  const middle = file.slice(prefix.length, file.length - suffix.length);
+  return file.startsWith(prefix) && file.endsWith(suffix) && Boolean(middle) && !middle.includes('/');
+}
+
+function matchChangedFile(pattern, changedFile) {
+  const placeholderIndex = pattern.indexOf('<name>');
+  if (placeholderIndex < 0) return pattern === changedFile ? '' : null;
+  const prefix = pattern.slice(0, placeholderIndex);
+  const suffix = pattern.slice(placeholderIndex + '<name>'.length);
+  if (!changedFile.startsWith(prefix) || !changedFile.endsWith(suffix)) return null;
+  const name = changedFile.slice(prefix.length, changedFile.length - suffix.length);
+  if (!name || name.includes('/')) return null;
+  return name;
+}
+
+/**
+ * 変更ファイル一覧を宣言済みmappingからpartialテストファイル一覧へ変換する。
+ * この関数はファイルを実行せず、相対パスの検証と `<name>` 展開だけを行う。
+ * @param {string[]} changedFiles
+ * @param {Array<{changed:string,test:string}>} mapping
+ * @returns {{ok:true,files:string[]}|{ok:false,error:string}}
+ */
+function mapChangedFilesToTests(changedFiles, mapping) {
+  if (!Array.isArray(changedFiles)) return { ok: false, error: 'changedFiles must be an array' };
+  if (!Array.isArray(mapping)) return { ok: true, files: [] };
+
+  const files = [];
+  const seen = new Set();
+  for (const rawChangedFile of changedFiles) {
+    const changed = normalizeRelativeTestFile(rawChangedFile);
+    if (!changed.ok) return changed;
+    for (const rule of mapping) {
+      if (!rule || typeof rule.changed !== 'string' || typeof rule.test !== 'string') continue;
+      const name = matchChangedFile(rule.changed, changed.value);
+      if (name === null) continue;
+      const testFile = rule.test.replace('<name>', name);
+      const normalizedTest = normalizeRelativeTestFile(testFile);
+      if (!normalizedTest.ok) return normalizedTest;
+      if (!seen.has(normalizedTest.value)) {
+        seen.add(normalizedTest.value);
+        files.push(normalizedTest.value);
+      }
+    }
+  }
+  return { ok: true, files };
+}
+
+function findFullLayer(testConfig) {
+  const candidates = Object.entries(testConfig?.layers || {})
+    .filter(([, layer]) => layer && layer.scope === 'full');
+  return candidates.length === 1
+    ? { name: candidates[0][0], layer: candidates[0][1] }
+    : null;
+}
+
+function commandDisplay(command, displayCommand) {
+  if (typeof displayCommand === 'string' && displayCommand.trim()) return displayCommand;
+  return command.map((arg) => /[\s"']/.test(arg) ? JSON.stringify(arg) : arg).join(' ');
 }
 
 function clearPreviousArtifact(worktree) {
@@ -76,6 +159,7 @@ function clearPreviousArtifact(worktree) {
   } catch (error) {
     if (!error || error.code !== 'ENOENT') throw error;
   }
+  clearTestResultInvalidation(worktree);
 }
 
 function exitCodeForChild(result) {
@@ -87,35 +171,105 @@ function outputText(value) {
   return value === undefined || value === null ? '' : String(value);
 }
 
+function configuredTestArgs(layer, testFiles) {
+  if (testFiles.length > 0 && layer.scope !== 'partial') {
+    throw new Error('個別のテストファイル指定は partial 層でのみ使用できます');
+  }
+  const files = testFiles.length > 0
+    ? testFiles
+    : (Array.isArray(layer.defaultTestFiles) ? layer.defaultTestFiles : []);
+  return [...(layer.command || []).slice(1), ...(layer.fileArgs || []), ...files];
+}
+
+function resolveConfigWorkspace(cwd, workspace) {
+  if (workspace !== undefined) return resolveWorkspace(workspace);
+  if (process.env.GH_MAESTRO_WORKSPACE) return resolveWorkspace(null);
+  return cwd;
+}
+
 /**
- * 指定されたテストスイートを1回実行し、TAP summaryから成果物を作る。
+ * 宣言されたテスト層を1回実行し、終了コードを結果の正本として成果物を作る。
  *
- * @param {{suite:string, testFiles?:string[], cwd?:string, env?:object}} params
+ * @param {{suite?:string, layer?:string, testFiles?:string[], changedFiles?:string[], cwd?:string, workspace?:string, env?:object, homedir?:string}} params
  * @param {object} [deps]
  * @param {Function} [deps.spawnSyncFn]
+ * @param {Function} [deps.resolveTestConfigFn]
  * @param {Function} [deps.resolveGitHeadFn]
  * @param {Function} [deps.calculateWorktreeContentHashFn]
  * @param {Function} [deps.clearArtifactFn]
  * @param {Function} [deps.writeArtifactFn] (worktree, artifact) => void
  * @param {Function} [deps.writeStdoutFn]
  * @param {Function} [deps.writeStderrFn]
- * @returns {{exitCode:number, artifact:object, artifactWritten:boolean, stdout:string, stderr:string}}
+ * @returns {{exitCode:number, artifact:object|null, artifactWritten:boolean, stdout:string, stderr:string}}
  */
-function runTests({ suite, testFiles = [], cwd = process.cwd(), env = process.env } = {}, deps = {}) {
-  const selected = SUITES[suite];
+function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = process.cwd(), workspace, env = process.env, homedir } = {}, deps = {}) {
+  const layerName = layer || suite;
+  const resolveTestConfigFn = deps.resolveTestConfigFn || resolveTestConfig;
+  let executionWorkspace;
+  let testConfig;
+  try {
+    executionWorkspace = resolveConfigWorkspace(cwd, workspace);
+    if (!executionWorkspace) {
+      return {
+        exitCode: 1,
+        artifact: null,
+        artifactWritten: false,
+        stdout: '',
+        stderr: 'テスト設定を読むworkspaceを解決できません',
+      };
+    }
+    testConfig = resolveTestConfigFn({ workspace: executionWorkspace, homedir });
+  } catch {
+    testConfig = null;
+  }
+  let selected = testConfig && testConfig.layers && testConfig.layers[layerName];
   if (!selected) {
     return {
       exitCode: 1,
       artifact: null,
       artifactWritten: false,
       stdout: '',
-      stderr: `未知のテストスイートです: ${suite}`,
+      stderr: `未知のテストスイートまたはテスト層です: ${layerName}`,
     };
   }
 
-  let testArgs;
+  let normalizedFiles;
   try {
-    testArgs = testArgsFor(selected, testFiles);
+    if (testFiles.length === 0 && changedFiles.length > 0 && selected.scope === 'partial') {
+      const mapped = mapChangedFilesToTests(changedFiles, selected.mapping);
+      if (!mapped.ok) throw new Error(mapped.error);
+      if (mapped.files.length > 0) {
+        const normalizedMapped = normalizeTestFiles(mapped.files, selected);
+        if (!normalizedMapped.ok) throw new Error(normalizedMapped.error);
+        normalizedFiles = normalizedMapped.files;
+      } else {
+        const fallback = findFullLayer(testConfig);
+        if (!fallback) {
+          throw new Error('変更に対応するテストがなく、利用可能な唯一のfull層も解決できません');
+        }
+        selected = fallback.layer;
+        normalizedFiles = [];
+      }
+    } else {
+      const normalized = normalizeTestFiles(testFiles, selected);
+      if (!normalized.ok) throw new Error(normalized.error);
+      normalizedFiles = normalized.files;
+    }
+  } catch (error) {
+    return {
+      exitCode: 1,
+      artifact: null,
+      artifactWritten: false,
+      stdout: '',
+      stderr: error.message,
+    };
+  }
+
+  let command;
+  let commandArgs;
+  try {
+    command = selected.command[0];
+    commandArgs = configuredTestArgs(selected, normalizedFiles);
   } catch (error) {
     return {
       exitCode: 1,
@@ -130,61 +284,91 @@ function runTests({ suite, testFiles = [], cwd = process.cwd(), env = process.en
   const resolveGitHeadFn = deps.resolveGitHeadFn || resolveGitHead;
   const calculateWorktreeContentHashFn = deps.calculateWorktreeContentHashFn || calculateWorktreeContentHash;
   const clearArtifactFn = deps.clearArtifactFn || clearPreviousArtifact;
+  const invalidateArtifactFn = deps.invalidateArtifactFn || invalidateTestResultArtifact;
   const writeArtifactFn = deps.writeArtifactFn || writeTestResultArtifact;
   const writeStdoutFn = deps.writeStdoutFn || ((text) => process.stdout.write(text));
   const writeStderrFn = deps.writeStderrFn || ((text) => process.stderr.write(text));
 
   try {
-    clearArtifactFn(cwd);
+    clearArtifactFn(executionWorkspace);
   } catch (error) {
-    // 古い成果物を消せなくても test runner 自体は実行する。新しい成果物の書き出しに
-    // 失敗した場合は申告入口が unknown へ縮退するため、古い値を成功結果として使わない。
+    try {
+      invalidateArtifactFn(executionWorkspace, 'artifact-clear-failed');
+    } catch (markerError) {
+      writeStderrFn(`テスト結果成果物の失敗マーカーを書き出せません: ${markerError.message}\n`);
+    }
     writeStderrFn(`テスト結果成果物の旧ファイルを削除できません: ${error.message}\n`);
+    return {
+      exitCode: 1,
+      artifact: null,
+      artifactWritten: false,
+      stdout: '',
+      stderr: `テスト結果成果物の旧ファイルを削除できません: ${error.message}`,
+    };
   }
 
   let testedHead = null;
   try {
-    testedHead = resolveGitHeadFn(cwd);
+    testedHead = resolveGitHeadFn(executionWorkspace);
   } catch {
-    // テスト結果の集計にHEAD解決は不要。対象SHAは申告入口が現在のHEADから解決する。
+    // テストの成否にHEAD解決は不要。対象SHAは申告入口が現在のHEADから解決する。
   }
 
   let testedContentHash = null;
   let contentSnapshotError = null;
   try {
     // コマンド起動前の内容を記録する。テスト中に worktree が変更された場合、その変更を
-    // 後続の git add -A がコミットしても、申告時のコミット内容照合で unknown になる。
-    testedContentHash = calculateWorktreeContentHashFn(cwd);
+    // 後続の git add -A がコミットしても、申告時の内容照合で unknown になる。
+    testedContentHash = calculateWorktreeContentHashFn(executionWorkspace);
   } catch (error) {
     contentSnapshotError = error;
     writeStderrFn(`テスト対象内容の指紋を取得できません: ${error.message}\n`);
   }
 
-  const child = spawnSyncFn(process.execPath, testArgs, {
-    cwd,
-    env,
-    encoding: 'utf8',
-  }) || {};
+  let child;
+  try {
+    child = spawnSyncFn(command, commandArgs, {
+      cwd: executionWorkspace,
+      env,
+      encoding: 'utf8',
+      shell: false,
+    }) || {};
+  } catch (error) {
+    child = { status: null, error, stdout: '', stderr: '' };
+  }
   const stdout = outputText(child.stdout);
   const stderr = outputText(child.stderr);
   if (stdout) writeStdoutFn(stdout);
   if (stderr) writeStderrFn(stderr);
 
   const summary = parseTapSummary(`${stdout}${stderr ? `\n${stderr}` : ''}`);
+  // TAPの必須欄が揃っていても、framework固有の集計が成果物契約に収まらない場合は
+  // 件数だけを捨てる。終了コード由来のoutcomeは、そのようなsummaryでも保持する。
+  const summaryFields = summary.ok
+    && summary.summary.pass + summary.summary.fail <= summary.summary.tests
+    ? summary.summary
+    : {};
+  const childExitCode = child && Number.isInteger(child.status) && child.status >= 0
+    ? child.status : null;
   const recordedAt = new Date().toISOString();
+  const displayCommand = commandDisplay(
+    [command, ...commandArgs],
+    selected.displayCommand,
+  );
   let artifact;
-  if (summary.ok && testedContentHash) {
+  if (childExitCode !== null && testedContentHash) {
     artifact = {
       schemaVersion: TEST_RESULT_SCHEMA_VERSION,
       producer: TEST_RESULT_PRODUCER,
       provenance: TEST_RESULT_PROVENANCE,
       scope: selected.scope,
       status: 'complete',
-      command: selected.command,
+      outcome: childExitCode === 0 ? 'pass' : 'fail',
+      command: displayCommand,
       recordedAt,
       testedHead,
       testedContentHash,
-      ...summary.summary,
+      ...summaryFields,
     };
   } else {
     artifact = {
@@ -193,22 +377,25 @@ function runTests({ suite, testFiles = [], cwd = process.cwd(), env = process.en
       provenance: TEST_RESULT_PROVENANCE,
       scope: selected.scope,
       status: 'unavailable',
-      command: selected.command,
+      command: displayCommand,
       recordedAt,
       testedHead,
       reason: contentSnapshotError
         ? 'content-snapshot-failed'
-        : child.error ? 'runner-start-failed' : 'tap-summary-invalid',
+        : (child.error || childExitCode === null ? 'runner-start-failed' : 'tap-summary-invalid'),
     };
   }
 
   let artifactWritten = false;
   try {
-    writeArtifactFn(cwd, artifact);
+    writeArtifactFn(executionWorkspace, artifact);
     artifactWritten = true;
   } catch (error) {
-    // 成果物生成失敗で test runner の終了コードを隠さない。申告側はファイル欠落として
-    // unknown を投稿し、push/PR/申告を止めない。
+    try {
+      invalidateArtifactFn(executionWorkspace, 'artifact-write-failed');
+    } catch (markerError) {
+      writeStderrFn(`テスト結果成果物の失敗マーカーを書き出せません: ${markerError.message}\n`);
+    }
     writeStderrFn(`テスト結果成果物を書き出せません: ${error.message}\n`);
   }
 
@@ -221,17 +408,7 @@ function runTests({ suite, testFiles = [], cwd = process.cwd(), env = process.en
   };
 }
 
-function testArgsFor(selected, testFiles = []) {
-  const normalized = normalizeSlowTestFiles(testFiles);
-  if (!normalized.ok) throw new Error(normalized.error);
-  if (normalized.files.length === 0) return [...selected.testArgs];
-  if (selected !== SUITES.slow) {
-    throw new Error('個別のテストファイル指定は slow suite でのみ使用できます');
-  }
-  return [...selected.testArgs.slice(0, -1), ...normalized.files];
-}
-
-function main(argv) {
+function main(argv, deps = {}) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(argv, SPEC));
@@ -245,10 +422,12 @@ function main(argv) {
 
   const result = runTests({
     suite: rest[0],
-    testFiles: rest.slice(1),
+    testFiles: values['--changed'] ? [] : rest.slice(1),
+    changedFiles: values['--changed'] ? rest.slice(1) : [],
+    workspace: values['--workspace'],
     cwd: process.cwd(),
     env: process.env,
-  });
+  }, deps);
   return {
     exitCode: result.exitCode,
     stdout: '',
@@ -257,10 +436,11 @@ function main(argv) {
 }
 
 module.exports = {
-  SUITES,
   USAGE,
   SPEC,
-  testArgsFor,
+  normalizeRelativeTestFile,
+  normalizeTestFiles,
+  mapChangedFilesToTests,
   runTests,
   main,
 };

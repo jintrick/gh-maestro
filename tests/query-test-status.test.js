@@ -31,6 +31,15 @@ function fullDeclarationBody(commit = 'a1b2c3d', fail = 0, pass = 1826, scope = 
 - **実行範囲**: \`${scope}\``;
 }
 
+function outcomeOnlyDeclarationBody(commit = 'a1b2c3d', outcome = 'pass', scope = 'full') {
+  return `${TEST_RESULT_MARKER}
+### 🧪 テスト結果申告
+- **対象コミット**: \`${commit}\`
+- **結果**: ${outcome}
+- **実行元**: \`test-runner\`
+- **実行範囲**: \`${scope}\``;
+}
+
 function legacyDeclarationBody(commit, fail, pass) {
   const passPart = pass === undefined ? '' : `, pass: ${pass}`;
   return `${LEGACY_TEST_RESULT_MARKER}
@@ -75,6 +84,7 @@ test('共有ルール: v2 full の provenance/scope と件数を抽出する', (
   assert.deepEqual(declaration, {
     version: 2,
     commit: 'a1b2c3d',
+    outcome: 'pass',
     fail: 0,
     pass: 1826,
     tests: 1826,
@@ -87,6 +97,22 @@ test('共有ルール: v2 full の provenance/scope と件数を抽出する', (
     headSha: SHA,
     fail: 0,
     pass: 1826,
+    provenance: 'test-runner',
+    scope: 'full',
+  });
+
+  const outcomeOnly = extractTestDeclaration(outcomeOnlyDeclarationBody());
+  assert.deepEqual(outcomeOnly, {
+    version: 2,
+    commit: 'a1b2c3d',
+    outcome: 'pass',
+    provenance: 'test-runner',
+    scope: 'full',
+  });
+  assert.deepEqual(evaluateTestDeclaration(outcomeOnly, SHA), {
+    status: 'GREEN',
+    declaredSha: 'a1b2c3d',
+    headSha: SHA,
     provenance: 'test-runner',
     scope: 'full',
   });
@@ -155,6 +181,27 @@ test('queryTestStatus: v2 partial のfail > 0 → RED と partial を返す', ()
     provenance: 'test-runner',
     scope: 'partial',
   });
+
+  const outcomeOnly = queryTestStatus(
+    { pr: '42', repo: 'owner/repo' },
+    { ghPrViewFn: () => prView([prComment(outcomeOnlyDeclarationBody(SHA, 'fail', 'partial'))]) },
+  );
+  assert.deepEqual(outcomeOnly, {
+    ok: true,
+    status: 'RED',
+    declaredSha: SHA,
+    headSha: SHA,
+    provenance: 'test-runner',
+    scope: 'partial',
+  });
+
+  const exitCodeAuthoritative = queryTestStatus(
+    { pr: '42', repo: 'owner/repo' },
+    { ghPrViewFn: () => prView([prComment(
+      fullDeclarationBody(SHA, 0, 10, 'partial').replace('**結果**: pass', '**結果**: fail'),
+    )]) },
+  );
+  assert.equal(exitCodeAuthoritative.status, 'RED');
 });
 
 test('queryTestStatus: v1 と不完全なv2を full と取り違えず unknown として返す', () => {

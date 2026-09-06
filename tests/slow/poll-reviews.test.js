@@ -126,6 +126,7 @@ test('extractTestDeclaration: v2 から commit, fail, pass, provenance, scope �
   assert.deepEqual(decl, {
     version: 2,
     commit: 'a1b2c3d4e5',
+    outcome: 'pass',
     fail: 0,
     pass: 1826,
     tests: 1826,

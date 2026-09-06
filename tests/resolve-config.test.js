@@ -8,6 +8,7 @@ const path = require('path');
 
 const {
   resolveAgentConfig,
+  resolveTestConfig,
   resolveSkillAgentMap,
   resolveCouncilConfig,
   resolveExtends,
@@ -44,6 +45,77 @@ function writeWorkspaceConfig(ws, data) {
     JSON.stringify(data, null, 2),
     'utf8',
   );
+}
+
+function assertTestConfigResolution(home) {
+  const builtin = resolveTestConfig({ homedir: home });
+  assert.equal(builtin.source, 'builtin');
+  assert.deepEqual(Object.keys(builtin.layers), ['full', 'slow']);
+  assert.equal(builtin.layers.full.scope, 'full');
+  assert.equal(builtin.layers.full.displayCommand, 'npm test');
+  assert.equal(builtin.layers.full.command[0], process.execPath);
+  assert.equal(builtin.layers.slow.scope, 'partial');
+  assert.equal(builtin.layers.slow.displayCommand, 'npm run test:slow');
+
+  writeConfig(home, {
+    test: {
+      layers: {
+        full: { command: ['node', 'custom-full-runner.js'] },
+      },
+    },
+  });
+  const builtinLayerOverride = resolveTestConfig({ homedir: home });
+  assert.deepEqual(Object.keys(builtinLayerOverride.layers), ['full']);
+  assert.deepEqual(builtinLayerOverride.layers.full.command, ['node', 'custom-full-runner.js']);
+  assert.equal(builtinLayerOverride.layers.full.scope, 'full');
+  assert.equal(builtinLayerOverride.layers.full.displayCommand, 'npm test');
+
+  writeConfig(home, {
+    test: {
+      layers: {
+        every: {
+          scope: 'full',
+          command: ['node', 'global-runner.js'],
+          displayCommand: 'node global-runner.js',
+          fileArgs: ['--project'],
+        },
+      },
+    },
+  });
+  const global = resolveTestConfig({ homedir: home });
+  assert.equal(global.source, 'declared');
+  assert.deepEqual(Object.keys(global.layers), ['every']);
+  assert.deepEqual(global.layers.every.command, ['node', 'global-runner.js']);
+  assert.deepEqual(global.layers.every.fileArgs, ['--project']);
+
+  const workspace = path.join(home, 'workspace');
+  writeWorkspaceConfig(workspace, {
+    test: {
+      layers: {
+        every: {
+          command: [process.execPath, 'workspace-runner.js'],
+          mapping: [{ changed: 'src/<name>.js', test: 'tests/<name>.test.js' }],
+        },
+      },
+    },
+  });
+  const cascaded = resolveTestConfig({ homedir: home, workspace });
+  assert.deepEqual(cascaded.layers.every.command, [process.execPath, 'workspace-runner.js']);
+  assert.equal(cascaded.layers.every.displayCommand, 'node global-runner.js');
+  assert.deepEqual(cascaded.layers.every.fileArgs, ['--project']);
+  assert.deepEqual(cascaded.layers.every.mapping, [
+    { changed: 'src/<name>.js', test: 'tests/<name>.test.js' },
+  ]);
+
+  for (const layer of [
+    { every: { command: 'node runner.js' } },
+    { every: { command: [] } },
+    { every: { command: ['node', 'runner.js'], shell: true } },
+    { every: { command: ['node', 'runner.js'], mapping: [{ changed: '../src/<name>.js', test: 'tests/<name>.test.js' }] } },
+  ]) {
+    writeConfig(home, { test: { layers: layer } });
+    assert.equal(resolveTestConfig({ homedir: home }), null);
+  }
 }
 
 // ── loadDefaults ─────────────────────────────────────────────────────────────
@@ -613,6 +685,8 @@ test('resolveAgentConfig: config.json が配列の場合はデフォルトにフ
 
     const agent = resolveAgentConfig('agy', { homedir: home });
     assert.ok(agent, 'should fall back to defaults for array config');
+
+    assertTestConfigResolution(home);
   });
 });
 

@@ -11,6 +11,8 @@ const {
   TEST_RESULT_PROVENANCE,
   parseTapSummary,
   testResultPath,
+  testResultInvalidationPath,
+  invalidateTestResultArtifact,
   validateTestResultArtifact,
   writeTestResultArtifact,
   readTestResultArtifact,
@@ -82,6 +84,12 @@ test('parseTapSummary: 必須項目欠落・重複・空出力を拒否する', 
 test('validateTestResultArtifact: runnerが作成した complete 成果物を受理する', () => {
   const artifact = completeArtifact();
   assert.deepEqual(validateTestResultArtifact(artifact), { ok: true, value: artifact });
+
+  const outcomeOnly = completeArtifact({ outcome: 'fail' });
+  for (const field of ['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo']) {
+    delete outcomeOnly[field];
+  }
+  assert.deepEqual(validateTestResultArtifact(outcomeOnly), { ok: true, value: outcomeOnly });
 });
 
 test('validateTestResultArtifact: producer/provenance/scope/count の不正を拒否する', () => {
@@ -91,6 +99,7 @@ test('validateTestResultArtifact: producer/provenance/scope/count の不正を�
     { scope: 'unknown' },
     { fail: -1 },
     { tests: 1, pass: 2 },
+    { outcome: 'unknown' },
     { testedContentHash: 'not-a-content-hash' },
   ]) {
     assert.equal(validateTestResultArtifact({ ...completeArtifact(), ...change }).ok, false);
@@ -166,4 +175,37 @@ test('readTestResultArtifact: unavailable 成果物は完全な結果として�
     reason: 'tap-summary-invalid',
     path: testResultPath(worktree),
   });
+
+  const outcomeWorktree = tempWorktree();
+  const outcomeOnly = completeArtifact({ outcome: 'pass' });
+  for (const field of ['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo']) {
+    delete outcomeOnly[field];
+  }
+  const outcomePath = writeTestResultArtifact(outcomeWorktree, outcomeOnly);
+  assert.deepEqual(readTestResultArtifact(outcomeWorktree), {
+    ok: true,
+    path: outcomePath,
+    result: {
+      provenance: 'test-runner',
+      scope: 'full',
+      outcome: 'pass',
+      command: 'npm test',
+      recordedAt: '2026-08-29T00:00:00.000Z',
+      testedHead: '0123456789abcdef0123456789abcdef01234567',
+      testedContentHash: 'a'.repeat(64),
+    },
+  });
+
+  const invalidatedWorktree = tempWorktree();
+  writeTestResultArtifact(invalidatedWorktree, completeArtifact({ outcome: 'pass' }));
+  invalidateTestResultArtifact(invalidatedWorktree, 'artifact-write-failed');
+  assert.deepEqual(readTestResultArtifact(invalidatedWorktree), {
+    ok: false,
+    kind: 'unavailable',
+    reason: 'artifact-write-failed',
+    path: testResultPath(invalidatedWorktree),
+  });
+  writeTestResultArtifact(invalidatedWorktree, completeArtifact({ outcome: 'pass' }));
+  assert.equal(fs.existsSync(testResultInvalidationPath(invalidatedWorktree)), false);
+  assert.equal(readTestResultArtifact(invalidatedWorktree).ok, true);
 });
