@@ -155,8 +155,14 @@ async function waitForRunningSupervisors(workspace, timeoutMs = 20000) {
 
 async function stopRunningSupervisors(workspace, processHandle) {
   const { killProcessTree } = require('../../scripts/shared/kill-tree');
+  const targetPids = new Set();
+  const killTarget = (pid) => {
+    if (!Number.isInteger(pid) || pid <= 0) return;
+    targetPids.add(pid);
+    killProcessTree(pid);
+  };
   if (processHandle && processHandle.pid && processHandle.exitCode === null) {
-    killProcessTree(processHandle.pid);
+    killTarget(processHandle.pid);
   }
 
   const deadline = Date.now() + 20000;
@@ -166,10 +172,16 @@ async function stopRunningSupervisors(workspace, processHandle) {
       workerName: null,
       allowSelf: true,
     });
-    for (const entry of entries) killProcessTree(entry.pid);
-    if (entries.length === 0) return;
-    await waitFor(100);
+    for (const entry of entries) killTarget(entry.pid);
+
+    const alivePids = [...targetPids].filter((pid) => lifecycle.isProcessAlive(pid));
+    if (alivePids.length === 0) return;
+    await waitFor(Math.min(100, Math.max(0, deadline - Date.now())));
   }
+
+  const remainingPids = [...targetPids].filter((pid) => lifecycle.isProcessAlive(pid));
+  if (remainingPids.length === 0) return;
+  throw new Error(`worker-supervisor の停止確認がタイムアウトしました。残存PID: ${JSON.stringify(remainingPids)}`);
 }
 
 test('runSessionHook: setup → reset-session → get-contextを同期順に実行する', () => {
@@ -305,12 +317,25 @@ test('CLI通し: 生存中のworker-supervisorを維持したままhookがreset�
     assert.equal(replacementEntries.length, 1, 'hook後のworker-supervisorは1つだけ生存する');
     assert.equal(lifecycle.isProcessAlive(replacementEntries[0].pid), true);
   } finally {
-    await stopRunningSupervisors(workspace, supervisor);
+    let stopError = null;
+    try {
+      await stopRunningSupervisors(workspace, supervisor);
+    } catch (error) {
+      stopError = error;
+    }
     if (previousRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
     else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntimeDir;
-    fs.rmSync(workspace, { recursive: true, force: true });
-    fs.rmSync(binDir, { recursive: true, force: true });
-    fs.rmSync(runtimeDir, { recursive: true, force: true });
+
+    let cleanupError = null;
+    for (const directory of [workspace, binDir, runtimeDir]) {
+      try {
+        fs.rmSync(directory, { recursive: true, force: true });
+      } catch (error) {
+        cleanupError ||= error;
+      }
+    }
+    if (stopError) throw stopError;
+    if (cleanupError) throw cleanupError;
   }
 });
 
