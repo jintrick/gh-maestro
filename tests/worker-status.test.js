@@ -403,9 +403,8 @@ test('cycle snapshot: 区間だけを1行バーで表示し、ワーカーは最
   assert.ok(minimumBarCells[2] > minimumBarCells[0]);
 });
 
-test('renderWorkerRows: 稼働優先・run番号・状態ドット色・残数を表示する', () => {
+test('renderWorkerRows: 稼働優先・resume回数・状態ドット色・残数を表示する', () => {
   const lines = workerStatus.renderWorkerRows([
-    { role: 'senior-coder', runNumber: 1, agentId: 'codex', running: false, durationKnown: true, elapsedSeconds: 720, pid: 1, startTime: '2026-08-26T00:00:00Z' },
     { role: 'senior-coder', runNumber: 2, agentId: 'codex', running: true, durationKnown: true, elapsedSeconds: 180, pid: 2, startTime: '2026-08-26T01:00:00Z' },
     { role: 'explorer', agentId: 'agy', running: true, durationKnown: true, elapsedSeconds: 60, pid: 3, startTime: '2026-08-26T01:10:00Z' },
     { role: 'review-manager', agentId: 'agy', running: false, abnormal: true, durationKnown: true, elapsedSeconds: 30, pid: 4, startTime: '2026-08-26T01:20:00Z' },
@@ -414,11 +413,137 @@ test('renderWorkerRows: 稼働優先・run番号・状態ドット色・残数�
   ], { maxRows: 4, colorize: true });
 
   assert.equal(lines.length, 4);
-  assert.match(lines[0], /^\x1b\[32m●\x1b\[0m senior-coder #2 \[codex\] 3m 0s \(pid: 2\)$/);
+  assert.match(lines[0], /^\x1b\[32m●\x1b\[0m senior-coder ×2 \[codex\] 3m 0s \(pid: 2\)$/);
   assert.match(lines[1], /^\x1b\[32m●\x1b\[0m explorer \[agy\] 1m 0s \(pid: 3\)$/);
   assert.match(lines[2], /^\x1b\[31m●\x1b\[0m review-manager \[agy\] 30s \(pid: 4\)$/);
-  assert.match(lines[3], /\x1b\[90m○\x1b\[0m senior-coder \[codex\] 12m 0s \(pid: 1\) \+2件$/);
+  assert.match(lines[3], /\x1b\[90m○\x1b\[0m architect \[agy\] 30s \(pid: 5\) \+1件$/);
   assert.ok(lines.every(line => !line.includes('[running]') && !line.includes('[stopped]') && !line.includes('█')));
+});
+
+test('renderWorkerRows: 子行があっても最後の表示ワーカーに非表示件数を付ける', () => {
+  const lines = workerStatus.renderWorkerRows([
+    {
+      role: 'review-manager',
+      agentId: 'codex',
+      running: true,
+      durationKnown: true,
+      elapsedSeconds: 300,
+      pid: 222,
+      startTime: '2026-08-26T00:00:00Z',
+      jobs: [{
+        jobId: 'job-1',
+        aspect: 'Correctness',
+        agentId: 'codex',
+        running: true,
+        durationKnown: true,
+        elapsedSeconds: 120,
+        pid: 333,
+        startTime: '2026-08-26T00:03:00Z',
+      }],
+    },
+    {
+      role: 'explorer',
+      agentId: 'codex',
+      running: true,
+      durationKnown: true,
+      elapsedSeconds: 60,
+      pid: 444,
+      startTime: '2026-08-26T00:04:00Z',
+    },
+  ], { maxRows: 1 });
+
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /review-manager \[codex\] 5m 0s \(pid: 222\) \+1件$/);
+  assert.match(lines[1], /^  └─ job-1 \(Correctness\)/);
+});
+
+test('renderSnapshotLines: 同一ワーカーのrunを1行へ畳み、最新PID・実状態・合計時間を表示する', () => {
+  const base = Date.parse('2026-08-26T00:00:00.000Z');
+  const events = [
+    { schemaVersion: 1, issue: 467, event: 'worker-started', at: new Date(base).toISOString(), workerName: 'issue-467-senior-coder-status-rows', role: 'senior-coder', agentId: 'codex', pid: 101, startTime: new Date(base).toISOString() },
+    { schemaVersion: 1, issue: 467, event: 'worker-stopped', at: new Date(base + 300000).toISOString(), workerName: 'issue-467-senior-coder-status-rows', pid: 101, exitCode: 0, abnormal: false },
+    { schemaVersion: 1, issue: 467, event: 'worker-started', at: new Date(base + 600000).toISOString(), workerName: 'issue-467-senior-coder-status-rows', role: 'senior-coder', agentId: 'codex', pid: 202, startTime: new Date(base + 600000).toISOString() },
+  ];
+  const lines = workerStatus.renderSnapshotLines('C:/temporary-workspace', 467, {
+    cycleEvents: events,
+    currentWorkers: [{
+      workerName: 'issue-467-senior-coder-status-rows',
+      role: 'senior-coder',
+      agentId: 'codex',
+      pid: 202,
+      running: true,
+      startTime: new Date(base + 600000).toISOString(),
+      elapsedSeconds: 60,
+      durationKnown: true,
+      issue: 467,
+    }],
+    now: base + 660000,
+  });
+
+  assert.equal(lines.length, 2);
+  assert.match(lines[1], /^● senior-coder ×2 \[codex\] 6m 0s \(pid: 202\)$/);
+  assert.equal((lines[1].match(/senior-coder/g) || []).length, 1);
+
+  const workspace = createWorkspace('gh-maestro-worker-status-no-stop-event-');
+  workerStatus._setNow(() => base + 660000);
+  workerStatus._setReadCycleEvents(() => [{
+    schemaVersion: 1,
+    issue: 467,
+    event: 'worker-started',
+    at: new Date(base).toISOString(),
+    workerName: 'issue-467-senior-coder-status-rows',
+    role: 'senior-coder',
+    agentId: 'codex',
+    pid: 999999999,
+    startTime: new Date(base).toISOString(),
+  }]);
+  workerStatus._setIsWorkerAlive(null);
+  try {
+    writeWorkers(workspace, {
+      'issue-467-senior-coder-status-rows': {
+        pid: 999999999,
+        issue: 467,
+        agentId: 'codex',
+      },
+    });
+
+    const stoppedWithoutEvent = runMain([
+      'watch', '--workspace', workspace, '--issue', '467', '--interval', '5',
+    ]);
+    assert.equal(stoppedWithoutEvent.code, 0);
+    assert.match(stoppedWithoutEvent.lines[2], /^○ senior-coder \[codex\] - \(pid: 999999999\)$/);
+  } finally {
+    workerStatus._setNow(null);
+    workerStatus._setReadCycleEvents(null);
+    workerStatus._setIsWorkerAlive(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('renderWorkerRows: Review Managerのジョブを監視用の子行として描画する', () => {
+  const lines = workerStatus.renderWorkerRows([{
+    role: 'review-manager',
+    agentId: 'codex',
+    running: true,
+    durationKnown: true,
+    elapsedSeconds: 300,
+    pid: 222,
+    startTime: '2026-08-26T00:00:00Z',
+    jobs: [{
+      jobId: 'job-1',
+      aspect: 'Correctness',
+      agentId: 'codex',
+      running: true,
+      durationKnown: true,
+      elapsedSeconds: 120,
+      pid: 333,
+      startTime: '2026-08-26T00:03:00Z',
+    }],
+  }]);
+
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^● review-manager \[codex\] 5m 0s \(pid: 222\)$/);
+  assert.match(lines[1], /^  └─ job-1 \(Correctness\) \[codex\] 2m 0s \(pid: 333\)$/);
 });
 
 test('main: list はサイクル行と最大4件のワーカー行を出力する', () => {
@@ -832,6 +957,36 @@ test('main: watch はスナップショットとJSTヘッダー（時刻のみ�
     assert.match(result.lines[2], /● worker-a \[gemini\]/);
   } finally {
     workerStatus._setNow(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('main: list --json と watch は同じ収集結果のワーカー集合・生死を表示する', () => {
+  const workspace = createWorkspace('gh-maestro-worker-status-list-watch-');
+  const fixedNow = new Date('2026-08-26T03:15:30.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  workerStatus._setIsWorkerAlive(() => false);
+
+  try {
+    writeWorkers(workspace, {
+      'issue-467-stopped-worker': { pid: 999, issue: 467, agentId: 'codex' },
+    });
+
+    const listResult = runMain(['list', '--workspace', workspace, '--json']);
+    assert.equal(listResult.code, 0);
+    const listed = JSON.parse(listResult.lines.join('\n'));
+    assert.deepEqual(listed.map(worker => ({ workerName: worker.workerName, running: worker.running })), [
+      { workerName: 'issue-467-stopped-worker', running: false },
+    ]);
+
+    const watchResult = runMain(['watch', '--workspace', workspace, '--interval', '5']);
+    assert.equal(watchResult.code, 0);
+    const workerLines = watchResult.lines.slice(2);
+    assert.equal(workerLines.length, 1);
+    assert.match(workerLines[0], /^○ stopped-worker \[codex\] - \(pid: 999\)$/);
+  } finally {
+    workerStatus._setNow(null);
+    workerStatus._setIsWorkerAlive(null);
     removeWorkspace(workspace);
   }
 });
@@ -1537,9 +1692,11 @@ test('collectWorkersStatus & main: list / --json でレビュージョブを収�
     // 2. list (テキスト行)
     const listResult = runMain(['list', '--workspace', workspace]);
     assert.equal(listResult.code, 0);
-    assert.equal(listResult.lines.length, 2);
+    assert.equal(listResult.lines.length, 4);
     assert.match(listResult.lines[0], /^#\? 計0s .*統合 ┈ 未記録/);
     assert.match(listResult.lines[1], /^● review-manager \[[^\]]+\] 5m 0s \(pid: 222\)$/);
+    assert.match(listResult.lines[2], /^  └─ job-1 \(Design\) \[codex\] 3m 0s \(pid: 333\)$/);
+    assert.match(listResult.lines[3], /^  └─ job-2 \(Correctness\) \[codex\] 2m 0s \(pid: 444\)$/);
 
     // 3. list --json
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
@@ -1557,6 +1714,44 @@ test('collectWorkersStatus & main: list / --json でレビュージョブを収�
       elapsedSeconds: 180,
       agentId: 'codex',
     });
+  } finally {
+    workerStatus._setNow(null);
+    workerStatus._setIsProcessAlive(null);
+    workerStatus._setGetProcessStartTime(null);
+    workerStatus._setVerifyProcessIdentity(null);
+    workerStatus._setFindRunningInstances(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('collectWorkersStatus: レビュージョブ取得失敗をReview Manager行に表示する', () => {
+  const workspace = createWorkspace('gh-maestro-ws-rm-jobs-error-');
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  workerStatus._setIsProcessAlive((pid) => pid === 222);
+  workerStatus._setVerifyProcessIdentity(() => ({ match: true }));
+  workerStatus._setGetProcessStartTime(() => '2026-08-26T11:55:00.000Z');
+  workerStatus._setFindRunningInstances(() => {
+    throw new Error('review-job scanner failed');
+  });
+
+  try {
+    writeReviewManager(workspace, 416, 222, '2026-08-26T11:55:00.000Z');
+
+    const collected = workerStatus.collectWorkersStatus(workspace);
+    assert.equal(collected.length, 1);
+    assert.equal(collected[0].jobsError, true);
+    assert.equal(collected[0].jobs, undefined);
+
+    const listResult = runMain(['list', '--workspace', workspace]);
+    assert.equal(listResult.code, 0);
+    assert.match(listResult.lines[1], /^● review-manager \[[^\]]+\] 5m 0s \(pid: 222\)$/);
+    assert.match(listResult.lines[2], /^  └─ review jobs unavailable \(取得失敗\)$/);
+
+    const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
+    assert.equal(jsonResult.code, 0);
+    const parsed = JSON.parse(jsonResult.lines.join('\n'));
+    assert.equal(parsed[0].jobsError, true);
   } finally {
     workerStatus._setNow(null);
     workerStatus._setIsProcessAlive(null);
