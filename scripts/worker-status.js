@@ -703,14 +703,6 @@ function roleFromWorker(worker) {
   return match ? match[1] : (name || 'worker');
 }
 
-function workerRunKey(worker) {
-  return [
-    worker.workerName || '',
-    worker.pid == null ? '' : String(worker.pid),
-    worker.startTime || '',
-  ].join('|');
-}
-
 function workerDurationKnown(worker) {
   if (!worker) return false;
   if (worker.durationKnown !== undefined) return Boolean(worker.durationKnown);
@@ -718,63 +710,137 @@ function workerDurationKnown(worker) {
     && Boolean(worker.running ? worker.startTime : (worker.stopTime || worker.startTime));
 }
 
-function reviewManagerPr(worker) {
-  if (worker && worker.pr != null && Number(worker.pr) > 0) return String(worker.pr);
-  const match = /review-manager-pr-(\d+)$/.exec(String(worker && worker.workerName || ''));
-  return match ? match[1] : null;
+function workerDisplayKey(worker) {
+  if (worker && worker.workerName) return `worker:${worker.workerName}`;
+  const role = worker && worker.role || '';
+  const pr = worker && worker.pr != null ? String(worker.pr) : '';
+  const pid = worker && worker.pid != null ? String(worker.pid) : '';
+  return [
+    'anonymous',
+    role,
+    pr,
+    pid,
+  ].join('|');
+}
+
+function workerRunMatches(left, right) {
+  if (!left || !right) return false;
+  if (left.workerName !== right.workerName) return false;
+  if (left.pid != null && right.pid != null && Number(left.pid) !== Number(right.pid)) return false;
+  if (left.startTime && right.startTime && left.startTime !== right.startTime) return false;
+  return true;
+}
+
+function workerRunOrder(worker, fallback) {
+  const value = Date.parse(worker && (worker.startTime || worker.stopTime || ''));
+  return Number.isNaN(value) ? fallback : value;
 }
 
 function mergeCycleWorkers(projectedWorkers, currentWorkers) {
-  const merged = Array.isArray(projectedWorkers) ? projectedWorkers.map(item => ({ ...item })) : [];
-  const byKey = new Map(merged.map(item => [workerRunKey(item), item]));
-  for (const current of Array.isArray(currentWorkers) ? currentWorkers : []) {
-    const currentKey = workerRunKey(current);
-    const exact = byKey.get(currentKey);
-    // A legacy event may not have carried a startTime. Match the worker name and
-    // PID in that case. Stopped workers are intentionally included here: the
-    // live registry drops startTime once the process is gone, while the event
-    // history still has the authoritative stop duration.
-    const sameIdentity = (item) => (
-      (
-        item.workerName === current.workerName
-        || (roleFromWorker(item) === 'review-manager'
-          && roleFromWorker(current) === 'review-manager'
-          && reviewManagerPr(item) !== null
-          && reviewManagerPr(item) === reviewManagerPr(current))
-      )
-      && (item.pid == null || current.pid == null || Number(item.pid) === Number(current.pid))
-      && (!item.startTime || !current.startTime || item.startTime === current.startTime)
-    );
-    const candidates = merged.filter(sameIdentity);
-    const fallback = exact || (current.running
-      ? candidates.find(item => item.running)
-      : candidates.slice().reverse().find(item => !item.running) || candidates.slice().reverse()[0]);
-    if (fallback) {
-      const currentDurationKnown = workerDurationKnown(current);
-      Object.assign(fallback, {
-        agentId: current.agentId || fallback.agentId,
-        role: current.role || fallback.role,
-        skill: current.skill || fallback.skill,
-        pid: current.pid || fallback.pid,
-        running: current.running,
-        abnormal: fallback.abnormal && !current.running ? fallback.abnormal : Boolean(fallback.abnormal),
-        elapsedSeconds: current.running || currentDurationKnown
-          ? current.elapsedSeconds
-          : (fallback.stopTime ? fallback.elapsedSeconds : null),
-        durationKnown: currentDurationKnown || Boolean(fallback.stopTime),
-      });
-      if (!current.running && !currentDurationKnown && !fallback.stopTime) fallback.elapsedSeconds = null;
-    } else {
-      const durationKnown = workerDurationKnown(current);
-      merged.push({
-        ...current,
-        role: current.role || roleFromWorker(current),
-        elapsedSeconds: durationKnown ? current.elapsedSeconds : null,
-        durationKnown,
-      });
+  const groups = new Map();
+  const addToGroup = (worker, source, order) => {
+    const key = workerDisplayKey(worker);
+    let group = groups.get(key);
+    if (!group) {
+      group = { projected: [], current: null };
+      groups.set(key, group);
     }
+    if (source === 'projected') {
+      group.projected.push({ worker: { ...worker }, order });
+    } else {
+      group.current = { ...worker };
+    }
+  };
+
+  for (const [index, worker] of (Array.isArray(projectedWorkers) ? projectedWorkers : []).entries()) {
+    addToGroup(worker, 'projected', index);
   }
-  return merged.map(item => ({ ...item, role: roleFromWorker(item) }));
+
+  for (const current of Array.isArray(currentWorkers) ? currentWorkers : []) {
+    if (!groups.has(workerDisplayKey(current))) addToGroup(current, 'current', Number.MAX_SAFE_INTEGER);
+    else groups.get(workerDisplayKey(current)).current = { ...current };
+  }
+
+  return [...groups.values()].map((group) => {
+    const runs = group.projected
+      .slice()
+      .sort((left, right) => (
+        workerRunOrder(left.worker, left.order) - workerRunOrder(right.worker, right.order)
+        || left.order - right.order
+      ));
+    const current = group.current;
+    let currentRun = null;
+
+    if (current && runs.length > 0) {
+      const exact = runs.find(item => (
+        item.worker.workerName === current.workerName
+        && item.worker.pid != null && current.pid != null
+        && Number(item.worker.pid) === Number(current.pid)
+        && item.worker.startTime && current.startTime
+        && item.worker.startTime === current.startTime
+      ));
+      currentRun = exact || runs.slice().reverse().find(item => workerRunMatches(item.worker, current)) || null;
+    }
+
+    // A current registry entry with a new PID/startTime is a run whose start
+    // event has not been projected yet. Include it during that hand-off window.
+    if (current && !currentRun) {
+      const currentOrder = runs.length > 0 ? runs[runs.length - 1].order + 1 : 0;
+      currentRun = { worker: { ...current }, order: currentOrder, currentOnly: true };
+      runs.push(currentRun);
+    }
+
+    const knownDurations = [];
+    let totalElapsed = 0;
+    for (const run of runs) {
+      let elapsed = run.worker.elapsedSeconds;
+      let durationKnown = workerDurationKnown(run.worker);
+
+      if (run === currentRun && current) {
+        if (workerDurationKnown(current)) {
+          elapsed = current.elapsedSeconds;
+          durationKnown = true;
+        } else if (!current.running && !run.worker.stopTime) {
+          // The registry proves that this PID is gone, but without a stop event
+          // there is no trustworthy end timestamp for the latest run.
+          elapsed = null;
+          durationKnown = false;
+        }
+      }
+
+      if (durationKnown && Number.isFinite(Number(elapsed))) {
+        totalElapsed += Number(elapsed);
+        knownDurations.push(true);
+      } else {
+        knownDurations.push(false);
+      }
+      run.elapsed = elapsed;
+      run.durationKnown = durationKnown;
+    }
+
+    const latest = runs[runs.length - 1] || (current ? { worker: current } : { worker: {} });
+    const latestWorker = latest.worker || {};
+    const latestIsCurrent = current && currentRun === latest;
+    const durationKnown = runs.length > 0 && knownDurations.every(Boolean);
+    const merged = {
+      workerName: current?.workerName || latestWorker.workerName || '',
+      role: current?.role || latestWorker.role || roleFromWorker(latestWorker),
+      runCount: runs.length,
+      agentId: current?.agentId || latestWorker.agentId || null,
+      skill: current?.skill || latestWorker.skill || null,
+      pid: current && current.pid != null ? current.pid : (latestWorker.pid ?? null),
+      issue: current?.issue ?? latestWorker.issue ?? null,
+      pr: current?.pr ?? latestWorker.pr ?? null,
+      startTime: latestIsCurrent && current.startTime ? current.startTime : (latestWorker.startTime || null),
+      stopTime: latestWorker.stopTime || null,
+      running: current ? Boolean(current.running) : false,
+      abnormal: Boolean(current?.abnormal || runs.some(run => run.worker.abnormal)),
+      elapsedSeconds: durationKnown ? totalElapsed : null,
+      durationKnown,
+    };
+    if (Array.isArray(current?.jobs)) merged.jobs = current.jobs.map(job => ({ ...job }));
+    return merged;
+  });
 }
 
 function renderWorkerRows(workers, opts = {}) {
@@ -784,38 +850,41 @@ function renderWorkerRows(workers, opts = {}) {
     if (Boolean(a.abnormal) !== Boolean(b.abnormal)) return a.abnormal ? -1 : 1;
     return String(a.startTime || '').localeCompare(String(b.startTime || ''));
   });
-  const usedRunNumbers = new Map();
-  const prepared = sorted.map((worker) => {
-    const role = roleFromWorker(worker);
-    const knownOrdinal = Number(worker.runNumber);
-    const used = usedRunNumbers.get(role) || new Set();
-    let ordinal = Number.isInteger(knownOrdinal) && knownOrdinal > 0 ? knownOrdinal : 1;
-    while (used.has(ordinal)) ordinal += 1;
-    used.add(ordinal);
-    usedRunNumbers.set(role, used);
-    return { worker, role, ordinal };
-  });
+  const prepared = sorted.map(worker => ({ worker, role: roleFromWorker(worker) }));
   const maxRows = Math.max(0, Number(opts.maxRows ?? 4));
   const visible = prepared.slice(0, maxRows);
   const hidden = Math.max(0, prepared.length - visible.length);
   const colorize = Boolean(opts.colorize);
-  const lines = visible.map(({ worker, role, ordinal }) => {
+  const lines = [];
+  for (const { worker, role } of visible) {
     const dot = worker.abnormal
       ? colorizeText('●', 31, colorize)
       : worker.running
         ? colorizeText('●', 32, colorize)
         : colorizeText('○', 90, colorize);
-    const runSuffix = ordinal > 1 ? ` #${ordinal}` : '';
+    const runCount = Number(worker.runCount);
+    const runSuffix = Number.isInteger(runCount) && runCount > 1 ? ` ×${runCount}` : '';
     const agent = worker.agentId ? String(worker.agentId) : '-';
     const elapsed = worker.elapsedSeconds == null || !workerDurationKnown(worker)
       ? '-'
       : formatDuration(worker.elapsedSeconds);
     const pid = worker.pid == null ? '-' : String(worker.pid);
-    return `${dot} ${role}${runSuffix} [${agent}] ${elapsed} (pid: ${pid})`;
-  });
+    let line = `${dot} ${role}${runSuffix} [${agent}] ${elapsed} (pid: ${pid})`;
+    if (hidden > 0 && lines.length === visible.length - 1) line += ` +${hidden}件`;
+    lines.push(line);
+
+    for (const job of Array.isArray(worker.jobs) ? worker.jobs : []) {
+      const jobName = `  └─ ${job.jobId || 'unknown'} (${job.aspect || '-'})`;
+      const jobAgent = job.agentId ? String(job.agentId) : '-';
+      const jobElapsed = job.elapsedSeconds == null || !workerDurationKnown(job)
+        ? '-'
+        : formatDuration(job.elapsedSeconds);
+      const jobPid = job.pid == null ? '-' : String(job.pid);
+      lines.push(`${jobName} [${jobAgent}] ${jobElapsed} (pid: ${jobPid})`);
+    }
+  }
   if (hidden > 0) {
-    if (lines.length > 0) lines[lines.length - 1] += ` +${hidden}件`;
-    else lines.push(`+${hidden}件`);
+    if (lines.length === 0) lines.push(`+${hidden}件`);
   }
   return lines;
 }
