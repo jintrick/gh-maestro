@@ -194,9 +194,9 @@ function configuredTestArgs(layer, testFiles) {
   return [...(layer.command || []).slice(1), ...(layer.fileArgs || []), ...files];
 }
 
-function resolveConfigWorkspace(cwd, workspace) {
+function resolveConfigWorkspace(cwd, workspace, env = process.env) {
   if (workspace !== undefined) return resolveWorkspace(workspace);
-  if (process.env.GH_MAESTRO_WORKSPACE) return resolveWorkspace(null);
+  if (env && env.GH_MAESTRO_WORKSPACE) return resolveWorkspace(env.GH_MAESTRO_WORKSPACE);
   return cwd;
 }
 
@@ -215,15 +215,15 @@ function layerListResult(status, layers, exitCode, stderr = '') {
  * 層を返さず missing とする。層の実行主体認可は実行入口の runTests() に限り、
  * この読み取り専用入口では行わない。
  *
- * @param {{cwd?:string, workspace?:string, homedir?:string}} params
+ * @param {{cwd?:string, workspace?:string, homedir?:string, env?:object}} params
  * @param {{resolveTestConfigFn?:Function}} deps
  * @returns {{exitCode:number, stdout:string, stderr:string}}
  */
-function listTestLayers({ cwd = process.cwd(), workspace, homedir } = {}, deps = {}) {
+function listTestLayers({ cwd = process.cwd(), workspace, homedir, env = process.env } = {}, deps = {}) {
   const resolveTestConfigFn = deps.resolveTestConfigFn || resolveTestConfig;
   let executionWorkspace;
   try {
-    executionWorkspace = resolveConfigWorkspace(cwd, workspace);
+    executionWorkspace = resolveConfigWorkspace(cwd, workspace, env);
   } catch {
     return layerListResult('invalid', [], 1, 'テスト層を解決できません');
   }
@@ -276,7 +276,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   let executionWorkspace;
   let testConfig;
   try {
-    executionWorkspace = resolveConfigWorkspace(cwd, workspace);
+    executionWorkspace = resolveConfigWorkspace(cwd, workspace, env);
     if (!executionWorkspace) {
       return {
         exitCode: 1,

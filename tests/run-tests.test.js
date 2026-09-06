@@ -468,6 +468,33 @@ test('listTestLayers: 宣言済み層のnameとscopeだけをJSONで返す', () 
   }
 });
 
+test('listTestLayers: 呼び出し側のenvからworkspaceを解決する', () => {
+  const workspace = tempWorktree();
+  const home = tempWorktree();
+  writeWorkspaceConfig(workspace, {
+    test: {
+      layers: {
+        custom: {
+          scope: 'full',
+          command: ['custom-runner'],
+        },
+      },
+    },
+  });
+
+  const result = listTestLayers({
+    cwd: tempWorktree(),
+    homedir: home,
+    env: { GH_MAESTRO_WORKSPACE: workspace },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    status: 'declared',
+    layers: [{ name: 'custom', scope: 'full' }],
+  });
+});
+
 test('listTestLayers: 宣言が無いworkspaceはmissingと終了コード2を返す', () => {
   const result = listTestLayers({ workspace: tempWorktree(), homedir: tempWorktree() });
 
