@@ -87,6 +87,8 @@ let _injectedReadCycleEvents = null;
 // 長いが、PID再利用を長時間見逃さない間隔にする。watch ループ内だけで使い、他の
 // process-lifecycle 呼び出しには影響させない。
 const PROCESS_START_TIME_CACHE_MAX_AGE_MS = 6_000;
+const WATCH_PID_RECORD_MAX_ATTEMPTS = 20;
+const WATCH_PID_RECORD_RETRY_MS = 50;
 
 function _getProcessStartTime(pid) {
   const fn = _injectedGetProcessStartTime ?? require('./process-lifecycle').getProcessStartTime;
@@ -150,24 +152,45 @@ function _saveStatusPane(workspace, entry) {
  *
  * @param {string} workspace
  * @param {string|number|null|undefined} issue
+ * @param {object} [opts]
+ * @param {number} [opts.maxAttempts=20]
+ * @param {number} [opts.retryMs=50]
+ * @param {Function} [opts.setTimeoutFn]
  */
-function recordWatchProcess(workspace, issue) {
-  let pane;
-  try {
-    pane = loadStatusPane(workspace);
-  } catch {
-    return;
-  }
-  if (!pane || pane.paneId == null) return;
+function recordWatchProcess(workspace, issue, opts = {}) {
+  const maxAttempts = Math.max(1, Number(opts.maxAttempts ?? WATCH_PID_RECORD_MAX_ATTEMPTS));
+  const retryMs = Math.max(0, Number(opts.retryMs ?? WATCH_PID_RECORD_RETRY_MS));
+  const setTimeoutFn = opts.setTimeoutFn || setTimeout;
+  let attempt = 0;
 
-  const entry = { ...pane, pid: process.pid };
-  if (issue !== undefined && issue !== null && String(issue) !== '') {
-    entry.issue = String(issue);
-  }
+  const record = () => {
+    attempt += 1;
+    let pane;
+    try {
+      pane = loadStatusPane(workspace);
+    } catch {
+      pane = null;
+    }
+    if (!pane || pane.paneId == null) {
+      if (attempt < maxAttempts) setTimeoutFn(record, retryMs);
+      return;
+    }
+
+    const entry = { ...pane, pid: process.pid };
+    if (issue !== undefined && issue !== null && String(issue) !== '') {
+      entry.issue = String(issue);
+    }
+    try {
+      _saveStatusPane(workspace, entry);
+    } catch {
+      // WezTerm/表示処理の補助記録が壊れてもwatch自体は継続する。
+    }
+  };
+
   try {
-    _saveStatusPane(workspace, entry);
+    record();
   } catch {
-    // WezTerm/表示処理の補助記録が壊れてもwatch自体は継続する。
+    // setTimeoutの実装差による補助記録の失敗もwatch自体は継続する。
   }
 }
 

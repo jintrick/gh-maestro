@@ -427,9 +427,14 @@ test('restartStatusPane: 既存ペインをclose-pane後に同じIssueでpane起
     const calls = [];
     const result = restartStatusPane(workspace, path.join(workspace, 'scripts'), {
       loadStatusPaneFn: () => registry,
-      runStatusPaneCommandFn: ({ subcommand, issue }) => {
-        calls.push({ subcommand, issue });
-        if (subcommand === 'pane') registry = { paneId: 'new-pane', issue: String(issue), pid: 2002 };
+      spawnSyncFn: (command, args, options) => {
+        calls.push({ command, args, options });
+        const subcommand = args[1];
+        if (subcommand === 'close-pane') registry = null;
+        if (subcommand === 'pane') {
+          const issue = args[args.indexOf('--issue') + 1];
+          registry = { paneId: 'new-pane', issue, pid: 2002 };
+        }
         return { ok: true, status: 0, stdout: '', stderr: '' };
       },
       statusPaneConfirmAttempts: 1,
@@ -437,8 +442,16 @@ test('restartStatusPane: 既存ペインをclose-pane後に同じIssueでpane起
     });
 
     assert.deepEqual(calls, [
-      { subcommand: 'close-pane', issue: undefined },
-      { subcommand: 'pane', issue: '471' },
+      {
+        command: process.execPath,
+        args: [path.join(workspace, 'scripts', 'worker-status.js'), 'close-pane', '--workspace', workspace],
+        options: { cwd: workspace, encoding: 'utf8' },
+      },
+      {
+        command: process.execPath,
+        args: [path.join(workspace, 'scripts', 'worker-status.js'), 'pane', '--workspace', workspace, '--issue', '471'],
+        options: { cwd: workspace, encoding: 'utf8' },
+      },
     ]);
     assert.deepEqual(result, {
       status: 'replaced',
@@ -447,6 +460,68 @@ test('restartStatusPane: 既存ペインをclose-pane後に同じIssueでpane起
       verified: true,
     });
     assert.equal(formatStatusPaneResult(result), 'STATUS_PANE status=replaced oldPid=1001 newPid=2002 verified=true');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('restartStatusPane: 旧PIDのままの場合はfailedになりrestartResidentsのerrorsへ伝播する', () => {
+  const workspace = makeWorkspace();
+  try {
+    const statusPane = restartStatusPane(workspace, workspace, {
+      loadStatusPaneFn: () => ({ paneId: 'old-pane', issue: '471', pid: 1001 }),
+      runStatusPaneCommandFn: ({ subcommand }) => {
+        if (subcommand === 'pane') return { ok: true, status: 0, stdout: '', stderr: '' };
+        return { ok: true, status: 0, stdout: '', stderr: '' };
+      },
+      statusPaneConfirmAttempts: 1,
+      statusPaneWaitMs: 0,
+    });
+    assert.deepEqual(statusPane, {
+      status: 'failed',
+      oldPids: [1001],
+      newPids: [1001],
+      verified: false,
+      reason: '新しい監視ペインのPIDが旧PIDから変わりませんでした',
+    });
+
+    const residents = restartResidents(workspace, {
+      scriptsPath: workspace,
+      preCapturedEntries: [],
+      restartStatusPane: true,
+      loadStatusPaneFn: () => ({ paneId: 'old-pane', issue: '471', pid: 1001 }),
+      runStatusPaneCommandFn: () => ({ ok: true, status: 0, stdout: '', stderr: '' }),
+      statusPaneConfirmAttempts: 1,
+      statusPaneWaitMs: 0,
+    });
+    assert.equal(residents.statusPane.status, 'failed');
+    assert.match(residents.errors.join('\n'), /status-pane: 新しい監視ペインのPIDが旧PIDから変わりませんでした/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('restartStatusPane: 新PIDを確認できない場合はfailedを返す', () => {
+  const workspace = makeWorkspace();
+  try {
+    let loadCount = 0;
+    const result = restartStatusPane(workspace, workspace, {
+      loadStatusPaneFn: () => {
+        loadCount += 1;
+        return loadCount === 1 ? { paneId: 'old-pane', issue: '471', pid: 1001 } : null;
+      },
+      runStatusPaneCommandFn: () => ({ ok: true, status: 0, stdout: '', stderr: '' }),
+      statusPaneConfirmAttempts: 1,
+      statusPaneWaitMs: 0,
+    });
+
+    assert.deepEqual(result, {
+      status: 'failed',
+      oldPids: [1001],
+      newPids: [],
+      verified: false,
+      reason: '監視ペインの旧PIDまたは新PIDを確認できませんでした',
+    });
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }

@@ -372,10 +372,10 @@ function monitorCommandForEntry(scriptsPath, spec, entry, hooks = createResident
   return formatCommand(path.join(scriptsPath, spec.script), built.args);
 }
 
-function defaultRunStatusPaneCommand({ scriptsPath, subcommand, workspace, issue }) {
+function defaultRunStatusPaneCommand({ scriptsPath, subcommand, workspace, issue, spawnSyncFn = spawnSync }) {
   const args = [path.join(scriptsPath, 'worker-status.js'), subcommand, '--workspace', workspace];
   if (subcommand === 'pane' && issue != null) args.push('--issue', String(issue));
-  const result = spawnSync(process.execPath, args, {
+  const result = spawnSyncFn(process.execPath, args, {
     cwd: workspace,
     encoding: 'utf8',
   });
@@ -403,7 +403,10 @@ function statusPanePid(entry) {
  */
 function restartStatusPane(workspace, scriptsPath, opts = {}) {
   const loadStatusPaneFn = opts.loadStatusPaneFn || loadStatusPane;
-  const runCommand = opts.runStatusPaneCommandFn || defaultRunStatusPaneCommand;
+  const runCommand = opts.runStatusPaneCommandFn || ((params) => defaultRunStatusPaneCommand({
+    ...params,
+    spawnSyncFn: opts.spawnSyncFn,
+  }));
   let existing;
   try {
     existing = loadStatusPaneFn(workspace);
@@ -469,14 +472,23 @@ function restartStatusPane(workspace, scriptsPath, opts = {}) {
     sleep(waitMs);
   }
   const newPid = statusPanePid(replacement);
+  const verified = oldPid !== null && newPid !== null && oldPid !== newPid;
+  if (!verified) {
+    return {
+      status: 'failed',
+      oldPids: oldPid ? [oldPid] : [],
+      newPids: newPid ? [newPid] : [],
+      verified: false,
+      reason: oldPid !== null && newPid !== null
+        ? '新しい監視ペインのPIDが旧PIDから変わりませんでした'
+        : '監視ペインの旧PIDまたは新PIDを確認できませんでした',
+    };
+  }
   return {
     status: 'replaced',
     oldPids: oldPid ? [oldPid] : [],
     newPids: newPid ? [newPid] : [],
-    verified: oldPid !== null && newPid !== null && oldPid !== newPid,
-    ...(oldPid !== null && newPid !== null && oldPid === newPid
-      ? { reason: '新しい監視ペインのPIDが旧PIDから変わりませんでした' }
-      : {}),
+    verified: true,
   };
 }
 
@@ -644,10 +656,14 @@ function restartResidents(workspace, opts = {}) {
     result.statusPane = restartStatusPane(workspace, opts.scriptsPath, {
       loadStatusPaneFn: opts.loadStatusPaneFn,
       runStatusPaneCommandFn: opts.runStatusPaneCommandFn,
+      spawnSyncFn: opts.spawnStatusPaneSyncFn,
       statusPaneConfirmAttempts: opts.statusPaneConfirmAttempts,
       statusPaneWaitMs: opts.statusPaneWaitMs,
       sleepFn: opts.statusPaneSleepFn || hooks.sleep,
     });
+    if (result.statusPane.status === 'failed') {
+      errors.push(`status-pane: ${result.statusPane.reason}`);
+    }
   }
   return result;
 }

@@ -1288,6 +1288,36 @@ test('recordWatchProcess: watch自身のPIDとIssueをstatus-pane registryへ記
   }
 });
 
+test('recordWatchProcess: 親のregistry保存が後でも再試行してPIDを記録する', () => {
+  const workspace = createWorkspace();
+  const { saveStatusPane } = require('../scripts/shared/status-pane-registry');
+  let saved = null;
+  workerStatus._setSaveStatusPane((ws, entry) => {
+    saved = { ws, entry };
+  });
+  let scheduled = null;
+  try {
+    workerStatus.recordWatchProcess(workspace, '471', {
+      maxAttempts: 2,
+      retryMs: 0,
+      setTimeoutFn: (callback) => { scheduled = callback; },
+    });
+    assert.equal(saved, null, '初回にregistryが無い場合は後続試行へ進む');
+    assert.equal(typeof scheduled, 'function');
+
+    saveStatusPane(workspace, { paneId: '702', issue: 471 });
+    scheduled();
+
+    assert.equal(saved.ws, workspace);
+    assert.equal(saved.entry.paneId, '702');
+    assert.equal(saved.entry.issue, '471');
+    assert.equal(saved.entry.pid, process.pid);
+  } finally {
+    workerStatus._setSaveStatusPane(null);
+    removeWorkspace(workspace);
+  }
+});
+
 test('main: close-pane で kill に失敗した場合は code 1 を返す（フェイルクローズ）', () => {
   const workspace = createWorkspace();
   workerStatus._setLaunchInSplitPane(() => ({ paneId: '501' }));
