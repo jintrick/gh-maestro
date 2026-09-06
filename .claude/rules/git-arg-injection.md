@@ -1,6 +1,18 @@
 ---
 paths:
-  - "scripts/**"
+  - "scripts/gh-maestro-setup.js"
+  - "scripts/install.js"
+  - "scripts/push-and-declare.js"
+  - "scripts/remove-worker.js"
+  - "scripts/review-publisher.js"
+  - "scripts/run-review-manager.js"
+  - "scripts/spawn-worker.js"
+  - "scripts/shared/child-process.js"
+  - "scripts/shared/council-worktree.js"
+  - "scripts/shared/git-branch.js"
+  - "scripts/shared/git-head.js"
+  - "scripts/shared/git-worktree.js"
+  - "scripts/shared/test-content.js"
 ---
 
 # git コマンドへのユーザー由来値と引数注入

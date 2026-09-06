@@ -32,7 +32,7 @@ orchestrator / worker 間のメッセージ配送を、ファイルシステム�
 3. **GitHub が真実、ローカルは使い捨てカーシー（cursor）。** ローカル状態ファイルの破損・消失は「再通知が起きる」以上の被害を生まない設計にする。
 4. **ack 機構は作らない。** メッセージへの応答は「返信コメント」で表現する。無応答はタイムアウトでエスカレートする（現行の「PR 10分未検出で確認」ルールと同型）。
 5. **gh コマンドへのユーザー由来値の受け渡しは注入安全に。** コメント本文は必ず `--body-file -`（stdin）経由。`.claude/rules/git-arg-injection.md` は gh にも適用する。
-6. **既存の命名・パターンを踏襲する**（`--help` 必須 = `.claude/rules/skill-asset-help.md`、`parseFlags` / `resolveWorkspace` の再利用、テストで実プロセスを spawn しない）。
+6. **既存の命名・パターンを踏襲する**（`--help` 必須 = `AGENTS.md` の「実装規範 / CLIスクリプトの引数と `--help`」、`parseFlags` / `resolveWorkspace` の再利用、テストで実プロセスを spawn しない）。
 
 ---
 
@@ -136,7 +136,7 @@ Usage: node msg-send.js <recipient> [--issue <N>] [--workspace <path>] "<本文>
 ```
 
 - `<recipient>`: worker 名または `orchestrator`。
-- `--issue` 省略時: `<recipient>` が worker 名なら `.gh-maestro/workers.json` の該当エントリから `issue` を解決する。解決できなければ exit 1（フェイルクローズ。`.claude/rules/fail-closed-safety-guards.md`）。`orchestrator` 宛の場合は送信者が自分のアンカー Issue を知っているため `--issue`（または env `ISSUE`）必須。
+- `--issue` 省略時: `<recipient>` が worker 名なら `.gh-maestro/workers.json` の該当エントリから `issue` を解決する。解決できなければ exit 1（フェイルクローズ。`AGENTS.md` の「実装規範 / 安全ガードはフェイルクローズにする」）。`orchestrator` 宛の場合は送信者が自分のアンカー Issue を知っているため `--issue`（または env `ISSUE`）必須。
 - 動作: マーカー行（`from` は env `WORKER_NAME`、無ければ `orchestrator`）+ 空行なしで本文を連結し、`gh issue comment <N> --body-file -` の stdin に渡す。
 - 出力: 成功時、投稿されたコメント URL を stdout に1行。exit 0。gh が非0で終了したら stderr をそのまま流して exit 1。**リトライ・lazy-start は実装しない。**
 - **GraphQLフォールバック（2026-07-17改訂）**: REST APIが5xx/タイムアウト等サーバ・ネットワーク起因で失敗した場合のみ、`shared/gh-fallback.js` の `graphqlAddComment` 経由で `gh api graphql` によるコメント投稿にフォールバックする。4xx等のクライアントエラー（存在しない Issue・権限なし等）はフォールバックせずそのままエラー返却する（同じ理由で失敗するため無駄な二度手間を避ける）。改訂理由は §8 参照。
@@ -237,7 +237,7 @@ REST APIがサーバ・ネットワーク起因（5xx/タイムアウト等）�
 
 - `shared/validate.js`（queue.js からの移設）、`msg-send.js`、`msg-poll.js`、`msg-read.js` とテストを追加。
 - テスト方針: **gh を実行しない。** gh 呼び出しは関数として注入可能にし（`queue-poller` テストのモック注入と同じパターン）、テストはモックで応答を返す。カーソルの永続化・マーカー解析・`to` フィルタ・破損 state ファイル回復・`<self>` の path-safety を単体テストで網羅する。実プロセス spawn 0 個（既存 rule 準拠）。
-- 完了条件: `npm test` 緑 + 手動で実 Issue に対する `msg-send.js` → `msg-poll.js --once` → `msg-read.js` の一往復を実行して確認（`.claude/rules/agent-test-before-commit.md`: --help だけでは不十分）。
+- 完了条件: `npm test` 緑 + 手動で実 Issue に対する `msg-send.js` → `msg-poll.js --once` → `msg-read.js` の一往復を実行して確認（`AGENTS.md` の「実装規範 / エージェントCLIの変更は実機で確認する」: --help だけでは不十分）。
 
 ### Phase 2: 切り替え（spawn-worker + skills + agents.yaml）
 

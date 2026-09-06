@@ -1,6 +1,16 @@
 ---
 paths:
-  - "scripts/**"
+  - "scripts/assistant-watch.js"
+  - "scripts/declare-test-result.js"
+  - "scripts/msg-poll.js"
+  - "scripts/msg-read.js"
+  - "scripts/msg-send.js"
+  - "scripts/publish-plan.js"
+  - "scripts/reset-session.js"
+  - "scripts/spawn-worker.js"
+  - "scripts/worker-exit-hook.js"
+  - "scripts/worker-supervisor.js"
+  - "scripts/shared/gh-comments.js"
 ---
 
 # GitHub Issue/PR コメント一覧取得は共有ヘルパーを使う

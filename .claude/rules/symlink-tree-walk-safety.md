@@ -1,6 +1,15 @@
 ---
 paths:
-  - "scripts/**"
+  - "scripts/cleanup-worker-logs.js"
+  - "scripts/install.js"
+  - "scripts/migrate-records.js"
+  - "scripts/process-lifecycle.js"
+  - "scripts/reset-session.js"
+  - "scripts/spawn-worker.js"
+  - "scripts/shared/link-node-modules.js"
+  - "scripts/shared/storage-layout.js"
+  - "scripts/shared/unlink-junctions.js"
+  - "scripts/shared/workspace-housekeeping.js"
 ---
 
 # ファイルツリーの再帰処理は lstat を使う

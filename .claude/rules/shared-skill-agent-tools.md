@@ -1,7 +1,7 @@
 ---
 paths:
-  - "skills/**/*.md"
   - "scripts/install.js"
+  - "skills/agents.yaml"
 ---
 
 # 共有スキルのテンプレート置換とエージェント別ツール差

@@ -1,6 +1,12 @@
 ---
 paths:
-  - "scripts/**"
+  - "scripts/migrate-records.js"
+  - "scripts/write-draft.js"
+  - "scripts/shared/safe-path.js"
+  - "scripts/shared/council-worktree.js"
+  - "scripts/shared/record-paths.js"
+  - "scripts/shared/worker-factory.js"
+  - "scripts/shared/review-manager-paths.js"
 ---
 
 # 外部由来の識別子・論理パスをファイルパス化する処理は封じ込め必須
