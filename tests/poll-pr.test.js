@@ -307,6 +307,101 @@ function completeLayer(layer, head) {
   };
 }
 
+test('runPollPr connects PR detection, PR_PUSH slow launches, deduplication, and pending completion', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-control-loop-');
+  const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'fixture-senior');
+  fs.mkdirSync(worktree, { recursive: true });
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
+  const firstHead = '1111111111111111111111111111111111111111';
+  const pushedHead = '2222222222222222222222222222222222222222';
+  const headChecks = [firstHead, firstHead, pushedHead, pushedHead];
+  let headIndex = 0;
+  let childStarts = 0;
+  let h2Started = false;
+  let releasePushedSlow;
+  const pushedSlowRelease = new Promise((resolve) => { releasePushedSlow = resolve; });
+  let cleanupCode;
+  let pollCall;
+  const output = [];
+  try {
+    const runPromise = mod.runPollPr({
+      issue: 465,
+      repo: 'fixture/repo',
+      workspace,
+      sessionPid: 4321,
+      noReviewManager: true,
+      intervalMs: 0,
+      intervalArg: '0',
+    }, {
+      checkParentFn: () => true,
+      findPrFn: () => '42',
+      getPrHeadFn: () => firstHead,
+      spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine) => {
+        pollCall = { pr, reviewWorkspace, sessionPid, interval };
+        onOutputLine(`PR_PUSH:${pushedHead}`);
+        onOutputLine(`PR_PUSH:${pushedHead}`);
+        return 0;
+      },
+      getPrStateFn: () => 'OPEN',
+      recordMergeAndSnapshotFn: () => {},
+      cleanupFn: (code) => { cleanupCode = code; },
+      writeStdoutFn: (text) => output.push(text),
+      slowTestDeps: {
+        resolveSlowWorktreeFn: () => ({ workerName: 'fixture-senior', worktree }),
+        resolveGitHeadFn: () => headChecks[headIndex++],
+        spawnFn: () => ({ pid: 9000 + childStarts }),
+        waitChildExitFn: async ({ onCleanup }) => {
+          childStarts += 1;
+          const currentHead = childStarts === 1 ? firstHead : pushedHead;
+          if (currentHead === pushedHead) {
+            h2Started = true;
+            await pushedSlowRelease;
+          }
+          writeTestResultLayer(worktree, completeLayer('slow', currentHead));
+          onCleanup();
+          return 0;
+        },
+        declareTestResultFn: () => ({ ok: true }),
+      },
+    });
+
+    // Allow the real control loop to reach the pushed slow child without sleeping.
+    for (let i = 0; i < 20 && !h2Started; i += 1) await Promise.resolve();
+    assert.equal(h2Started, true);
+
+    let settled = false;
+    runPromise.then(() => { settled = true; }, () => { settled = true; });
+    await Promise.resolve();
+    assert.equal(settled, false, 'poll-pr must wait for pending slow work');
+
+    releasePushedSlow();
+    const result = await runPromise;
+    assert.deepEqual(result, { exitCode: 0 });
+    assert.equal(cleanupCode, 0);
+    assert.deepEqual(pollCall, {
+      pr: '42',
+      reviewWorkspace: workspace,
+      sessionPid: 4321,
+      interval: '0',
+    });
+    assert.equal(childStarts, 2, 'initial HEAD and one pushed HEAD should execute once each');
+    assert.deepEqual(
+      output.filter((line) => line.startsWith('SLOW_TEST_STARTED:')).map((line) => JSON.parse(line.slice('SLOW_TEST_STARTED:'.length)).testedHead),
+      [firstHead, pushedHead],
+    );
+    const state = JSON.parse(fs.readFileSync(mod.slowStatePath(workspace, '42'), 'utf8'));
+    assert.equal(state.runs[firstHead].status, 'pass');
+    assert.equal(state.runs[pushedHead].status, 'pass');
+  } finally {
+    if (releasePushedSlow) releasePushedSlow();
+    if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
+  }
+});
+
 test('runSlowTest starts the child, preserves the full layer, and declares the aggregate', async () => {
   const { mod } = loadModule();
   const workspace = temporaryWorkspace('gh-maestro-poll-pr-run-slow-');

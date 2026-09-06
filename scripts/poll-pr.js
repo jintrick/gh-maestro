@@ -645,6 +645,144 @@ function formatBaseBranchMismatch(expectedBaseBranch, actualBaseBranch, pr) {
   return 'PR_BASE_MISMATCH:' + pr + ':' + expectedBaseBranch + ':' + actualBaseBranch;
 }
 
+/**
+ * PR検出からレビュー監視終了までの制御ループ。
+ *
+ * CLIのライフサイクル／外部境界を依存性として受け取れるようにし、PR検出・
+ * PR_PUSH・slowの重複抑止・完了待ちを、実際の制御接続のままテストできるようにする。
+ * @param {{issue:string|number,repo:string,workspace:string,sessionPid:string|number,baseBranch?:string,noReviewManager?:boolean,intervalMs?:number,intervalArg?:string}} params
+ * @param {object} [deps]
+ * @returns {Promise<{exitCode:number}>}
+ */
+async function runPollPr(params, deps = {}) {
+  const {
+    issue,
+    repo,
+    workspace,
+    sessionPid,
+    baseBranch,
+    noReviewManager = false,
+    intervalMs = 30 * 1000,
+    intervalArg,
+  } = params;
+  const checkParentFn = deps.checkParentFn || (() => true);
+  const findPrFn = deps.findPrFn || (() => {
+    let r = spawnSync('gh', ['pr', 'list', '--repo', repo,
+      '--search', `head:issue-${issue}`, '--state', 'open',
+      '--json', 'number', '-q', '.[0].number'], { encoding: 'utf8' });
+    const pr = r.stdout.trim();
+    if (pr) return pr;
+
+    r = spawnSync('gh', ['pr', 'list', '--repo', repo, '--state', 'open',
+      '--json', 'number,body', '-q',
+      `.[] | select(.body | strings | contains("#${issue}")) | .number`],
+    { encoding: 'utf8' });
+    return r.stdout.trim().split('\n').find(s => s.trim()) || '';
+  });
+  const getPrHeadFn = deps.getPrHeadFn || getPrHead;
+  const getPrBaseBranchFn = deps.getPrBaseBranchFn || getPrBaseBranch;
+  const startReviewManagerFn = deps.startReviewManagerFn || startReviewManager;
+  const spawnPollReviewsFn = deps.spawnPollReviewsFn || spawnPollReviews;
+  const getPrStateFn = deps.getPrStateFn || getPrState;
+  const recordMergeAndSnapshotFn = deps.recordMergeAndSnapshotFn || recordMergeAndSnapshot;
+  const cleanupFn = deps.cleanupFn || (() => {});
+  const runSlowTestFn = deps.runSlowTestFn || runSlowTest;
+  const recordHeadUnavailableFn = deps.recordHeadUnavailableFn || recordHeadUnavailable;
+  const writeStdoutFn = deps.writeStdoutFn || ((text) => process.stdout.write(text));
+  const writeStderrFn = deps.writeStderrFn || ((text) => process.stderr.write(text));
+  const sleepFn = deps.sleepFn || ((ms) => new Promise(resolve => setTimeout(resolve, ms)));
+  const slowTestDeps = deps.slowTestDeps || {};
+
+  const pendingSlowTests = new Set();
+  const slowQueues = new Map();
+
+  function queueSlowTask(pr, operation) {
+    const queueKey = String(pr);
+    const previous = slowQueues.get(queueKey) || Promise.resolve();
+    const task = previous.catch(() => {}).then(operation);
+    slowQueues.set(queueKey, task);
+    pendingSlowTests.add(task);
+    const remove = () => {
+      pendingSlowTests.delete(task);
+      if (slowQueues.get(queueKey) === task) slowQueues.delete(queueKey);
+    };
+    task.then(remove, remove);
+    return task;
+  }
+
+  function launchSlowTest(pr, suppliedHeadSha) {
+    const headSha = suppliedHeadSha || getPrHeadFn(pr, repo);
+    if (!headSha) {
+      queueSlowTask(pr, () => recordHeadUnavailableFn({
+        pr,
+        repo,
+        workspace,
+        reason: 'pr-head-unavailable',
+      }, slowTestDeps));
+      return;
+    }
+    queueSlowTask(pr, () => runSlowTestFn(
+      { pr, issue, repo, workspace, headSha },
+      {
+        ...slowTestDeps,
+        onReserved: (event) => {
+          writeStdoutFn(`SLOW_TEST_STARTED:${JSON.stringify({ pr: String(pr), layer: 'slow', testedHead: event.testedHead })}\n`);
+          if (slowTestDeps.onReserved) slowTestDeps.onReserved(event);
+        },
+      },
+    ));
+  }
+
+  while (true) {
+    if (!checkParentFn()) {
+      writeStderrFn(`poll-pr: parent session (pid ${sessionPid}) is dead — exiting\n`);
+      cleanupFn();
+      return { exitCode: 0 };
+    }
+
+    const pr = findPrFn();
+    if (!pr) {
+      await sleepFn(intervalMs);
+      continue;
+    }
+
+    if (baseBranch) {
+      const actualBase = getPrBaseBranchFn(pr, repo);
+      const mismatch = formatBaseBranchMismatch(baseBranch, actualBase, pr);
+      if (mismatch) writeStdoutFn(mismatch + '\n');
+    }
+
+    writeStdoutFn(`PR_DETECTED:${pr}\n`);
+    launchSlowTest(pr);
+
+    if (!noReviewManager) {
+      const reviewStatus = startReviewManagerFn(pr, repo, workspace, issue);
+      writeStdoutFn(`${reviewStatus}:${pr}\n`);
+    }
+
+    const exitCode = await spawnPollReviewsFn(
+      pr,
+      workspace,
+      sessionPid,
+      intervalArg || String(Math.round(intervalMs / 1000)),
+      (line) => {
+        const pushedHead = parsePrPushLine(line);
+        if (pushedHead) launchSlowTest(pr, pushedHead);
+      },
+    );
+    if (pendingSlowTests.size > 0) await Promise.all([...pendingSlowTests]);
+
+    const prState = getPrStateFn(pr, repo);
+    recordMergeAndSnapshotFn({ prState, issue, pr, repo, workspace, exitCode });
+    if (resolvePostReviewDecision(prState, exitCode) === 'resume') {
+      writeStdoutFn(`PR_CLOSED_RESUMED:${pr}\n`);
+      continue;
+    }
+    cleanupFn(exitCode);
+    return { exitCode };
+  }
+}
+
 module.exports = {
   getPrHead,
   getPrBaseBranch,
@@ -659,6 +797,7 @@ module.exports = {
   resolveSlowWorktree,
   runSlowTest,
   recordHeadUnavailable,
+  runPollPr,
 };
 
 if (require.main === module) {
@@ -735,130 +874,20 @@ if (require.main === module) {
   // フォールバックに落とすと、別 Issue へ誤配送されたり宛先不明で破棄されたりして
   // 監視停止が待機側へ届かない（Issue #289 レビュー指摘）。orchestrator に確実に届ける。
   process.on('exit', () => { notifyWatchdogExit({ workspace, scriptName: 'poll-pr.js', issue }); });
-
-  function findPR() {
-    let r = spawnSync('gh', ['pr', 'list', '--repo', repo,
-      '--search', `head:issue-${issue}`, '--state', 'open',
-      '--json', 'number', '-q', '.[0].number'], { encoding: 'utf8' });
-    const pr = r.stdout.trim();
-    if (pr) return pr;
-
-    r = spawnSync('gh', ['pr', 'list', '--repo', repo, '--state', 'open',
-      '--json', 'number,body', '-q',
-      `.[] | select(.body | strings | contains("#${issue}")) | .number`],
-      { encoding: 'utf8' });
-    return r.stdout.trim().split('\n').find(s => s.trim()) || '';
-  }
-
-  const pendingSlowTests = new Set();
-  const slowQueues = new Map();
-
-  function queueSlowTask(pr, operation) {
-    const queueKey = String(pr);
-    const previous = slowQueues.get(queueKey) || Promise.resolve();
-    const task = previous.catch(() => {}).then(operation);
-    slowQueues.set(queueKey, task);
-    pendingSlowTests.add(task);
-    const remove = () => {
-      pendingSlowTests.delete(task);
-      if (slowQueues.get(queueKey) === task) slowQueues.delete(queueKey);
-    };
-    task.then(remove, remove);
-    return task;
-  }
-
-  function launchSlowTest(pr, suppliedHeadSha) {
-    const headSha = suppliedHeadSha || getPrHead(pr, repo);
-    if (!headSha) {
-      queueSlowTask(pr, () => recordHeadUnavailable({
-        pr,
-        repo,
-        workspace,
-        reason: 'pr-head-unavailable',
-      }));
-      return;
-    }
-    queueSlowTask(pr, () => runSlowTest(
-      { pr, issue, repo, workspace, headSha },
-      {
-        onReserved: ({ testedHead }) => {
-          process.stdout.write(`SLOW_TEST_STARTED:${JSON.stringify({ pr: String(pr), layer: 'slow', testedHead })}\n`);
-        },
-      },
-    ));
-  }
-
-  (async () => {
-    while (true) {
-      // dead-man's switch: 親セッション生存確認
-      if (!checkParent()) {
-        console.error(`poll-pr: parent session (pid ${sessionPid}) is dead — exiting`);
-        cleanup();
-        return; // unreachable（cleanup が process.exit する）
-      }
-
-      const pr = findPR();
-      if (pr) {
-        // ベースブランチ検証: --base-branch が指定されていれば検出したPRの
-        // 実際のベースブランチと比較し、不一致なら警告を出力する（処理は継続）。
-        if (baseBranch) {
-          const actualBase = getPrBaseBranch(pr, repo);
-          const mismatch = formatBaseBranchMismatch(baseBranch, actualBase, pr);
-          if (mismatch) {
-            process.stdout.write(mismatch + "\n");
-          }
-        }
-
-        process.stdout.write(`PR_DETECTED:${pr}\n`);
-
-        // slow層はレビュー監視の子を同期的に待たせない。対象HEADごとの予約を先に
-        // runtime状態へ記録し、同じPR/commit/layerでは再起動後も二重実行しない。
-        launchSlowTest(pr);
-
-        // --no-review-manager のときは Review Manager を起動せず、レビュー監視だけを再開する。
-        if (!noReviewManager) {
-          // 常に全観点で起動する。観点を絞り込むかどうかの判断は
-          // Review Manager自身が実際のdiffを見た上で行う（skills/gh-maestro-reviewer/SKILL.md参照）。
-          // オーケストレーター側・本スクリプト側でファイルパターン等から機械的に観点を
-          // 決定することは行わない。
-          // 起動後のクラッシュはここでは判定しない（終了フック経由でIssueコメントとして
-          // 非同期に通知される。start-review-manager.js参照）。本スクリプトはそれを待たず
-          // 常にPR/レビュー監視（poll-reviews.js）へ進む。
-          const reviewStatus = startReviewManager(pr, repo, workspace, issue);
-          process.stdout.write(`${reviewStatus}:${pr}\n`);
-        }
-
-        // poll-pr.js と poll-reviews.js は内部ロジックを統合せず、それぞれ独立に保つ。
-        // 代わりにここで poll-reviews.js を子プロセスとして起動し、終了まで中継する（Issue #111）。
-        const exitCode = await spawnPollReviews(
-          pr,
-          workspace,
-          sessionPid,
-          intervalArg || '30',
-          (line) => {
-            const pushedHead = parsePrPushLine(line);
-            if (pushedHead) launchSlowTest(pr, pushedHead);
-          },
-        );
-        // レビュー監視が先に終わっても、slowの完了通知と成果物・申告更新を回収してから
-        // poll-prを終了する。slowの実行中にレビュー監視を止めることはない。
-        if (pendingSlowTests.size > 0) await Promise.all([...pendingSlowTests]);
-        // poll-reviews.js が終了したあと、PR の実状態を inspect して続行判断する（declare-and-inspect）。
-        // PR状態に加えて子の終了コードも見る：子が非ゼロ終了・シグナル終了した場合は PR状態が
-        // CLOSED でも復帰せず、親も非ゼロで終了して異常を通知する（Issue #289 受け入れ条件3。
-        // SIGKILL等で子自身の exit 通知が実行できなくても、親の exit 通知が監視停止を届ける）。
-        const prState = getPrState(pr, repo);
-        recordMergeAndSnapshot({ prState, issue, pr, repo, workspace, exitCode });
-        if (resolvePostReviewDecision(prState, exitCode) === 'resume') {
-          // 子が正常終了し、かつ却下・キャンセルで CLOSED された PR を掴んだまま無言で
-          // 居座り続けない（Issue #289）。findPR ループへ戻り、新 PR の検出を継続する。
-          process.stdout.write(`PR_CLOSED_RESUMED:${pr}\n`);
-          continue;
-        }
-        cleanup(exitCode);
-        return; // unreachable
-      }
-      await new Promise(r => setTimeout(r, interval));
-    }
-  })();
+  runPollPr({
+    issue,
+    repo,
+    workspace,
+    sessionPid,
+    baseBranch,
+    noReviewManager,
+    intervalMs: interval,
+    intervalArg: intervalArg || '30',
+  }, {
+    checkParentFn: checkParent,
+    cleanupFn: cleanup,
+  }).catch((error) => {
+    console.error(`poll-pr: ${error.message}`);
+    cleanup(1);
+  });
 }
