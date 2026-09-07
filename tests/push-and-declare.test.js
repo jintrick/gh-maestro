@@ -359,6 +359,47 @@ test('収束: 文書だけの変更は宣言済みfull層の成果物なしで�
   assert.match(createCall.args[3], /結果.*unknown/);
 });
 
+test('収束: 文書だけの変更でも存在する不一致成果物の検査は省略しない', () => {
+  const { mod, calls } = loadModule(dispatcher(fullPathHandlers({
+    nameOnly: { status: 0, stdout: 'README.md\n' },
+  })));
+  const ws = tempWorkspace();
+  writeTestLayerConfig(ws);
+  writeTestResultArtifact(ws, {
+    schemaVersion: 1,
+    producer: 'gh-maestro-test-runner',
+    provenance: 'test-runner',
+    scope: 'full',
+    status: 'complete',
+    command: 'npm test',
+    recordedAt: '2026-08-29T00:00:00.000Z',
+    testedHead: SHA,
+    tests: 12,
+    pass: 12,
+    fail: 0,
+    cancelled: 0,
+    skipped: 0,
+    todo: 0,
+    testedContentHash: CONTENT_HASH,
+  });
+
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+  }, {
+    commitContentHashFn: () => 'b'.repeat(64),
+    listTestLayersFn: listTestLayers,
+  }));
+
+  assert.equal(result.exitCode, 3, `stderr: ${result.stderr}`);
+  assert.match(result.stderr, /必須テスト層の結果が揃っていません.*full/);
+  assert.ok(call(calls, (cmd, args) => cmd === 'git' && args[0] === 'push'), '文書変更でもpushは完了する');
+  assert.equal(
+    calls.some(({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f'),
+    false,
+    '不一致成果物をunknownとして申告しない',
+  );
+});
+
 test('収束: 宣言済みfull層のcompleteなfail結果は既存照合を通過して申告する', () => {
   const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
   const ws = tempWorkspace();

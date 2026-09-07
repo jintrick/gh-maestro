@@ -52,8 +52,8 @@ Arguments:
      本文=関連Issue: #<N>）
   7. 宣言された毎回側（scope=full）の層名を解決し、runtime root のテスト成果物を
      読んで解決したHEADに対するテスト結果を申告。必須層の結果が欠落・unavailable
-     の場合は申告を失敗として返す。文書だけの変更、またはテスト層未宣言の場合は
-     必須層を要求しない
+     の場合は申告を失敗として返す。文書だけの変更は未実行の層だけを許容し、
+     存在する成果物の照合は行う。テスト層未宣言の場合は必須層を要求しない
 
 コミットメッセージは \`impl(issue-<N>): <Issueタイトル>\` で固定（モデル推論を挟まない）。
 素の git commit / git push / gh pr create を直接実行しないこと（このスクリプトが一括で行う）。
@@ -126,10 +126,10 @@ function isDocumentationOnly(stagedFiles) {
  * テスト結果の読み取り・内容照合は declare-test-result.js に委譲する。
  *
  * @param {{workspace:string, worktree:string, env:object, stagedFiles:string[]}} params
- * @returns {{ok:true, requiredLayers:string[]}|{ok:false, error:string}}
+ * @returns {{ok:true, requiredLayers:string[], allowMissingRequiredLayers:boolean}|{ok:false, error:string}}
  */
 function resolveRequiredTestLayers({ workspace, worktree, env, stagedFiles }, listTestLayersFn = listTestLayers) {
-  if (isDocumentationOnly(stagedFiles)) return { ok: true, requiredLayers: [] };
+  const allowMissingRequiredLayers = isDocumentationOnly(stagedFiles);
 
   let listed;
   try {
@@ -137,7 +137,9 @@ function resolveRequiredTestLayers({ workspace, worktree, env, stagedFiles }, li
   } catch (error) {
     return { ok: false, error: `宣言されたテスト層を解決できません: ${error.message}` };
   }
-  if (!listed || listed.exitCode === 2) return { ok: true, requiredLayers: [] };
+  if (!listed || listed.exitCode === 2) {
+    return { ok: true, requiredLayers: [], allowMissingRequiredLayers };
+  }
   if (listed.exitCode !== 0) {
     return { ok: false, error: `宣言されたテスト層を解決できません: ${listed.stderr || '(no stderr)'}` };
   }
@@ -155,7 +157,11 @@ function resolveRequiredTestLayers({ workspace, worktree, env, stagedFiles }, li
   const requiredLayers = parsed.layers
     .filter((layer) => layer && layer.scope === 'full' && typeof layer.name === 'string' && layer.name.trim())
     .map((layer) => layer.name.trim());
-  return { ok: true, requiredLayers: [...new Set(requiredLayers)] };
+  return {
+    ok: true,
+    requiredLayers: [...new Set(requiredLayers)],
+    allowMissingRequiredLayers,
+  };
 }
 
 /**
@@ -350,6 +356,7 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
     workspace: ws,
     worktree,
     requiredLayers: requiredLayersResult.requiredLayers,
+    allowMissingRequiredLayers: requiredLayersResult.allowMissingRequiredLayers,
   }, declareDeps);
   if (!declResult.ok) {
     return { exitCode: 3, stdout: '', stderr: `テスト結果の申告に失敗しました: ${declResult.error}` };
