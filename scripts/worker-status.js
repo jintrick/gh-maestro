@@ -205,20 +205,18 @@ function stripWorkerNamePrefix(workerName) {
 }
 
 /**
- * 秒数を読みやすい時間表記にフォーマットする。
+ * 秒数を h:mm:ss にフォーマットする。表記が揺れると桁が揃わず、
+ * 複数行を並べたときに長さを比べられなくなるため、常にこの形にする。
  *
  * @param {number} seconds
  * @returns {string}
  */
 function formatDuration(seconds) {
   const s = Math.max(0, Math.floor(seconds));
-  if (s < 60) return `${s}s`;
-  const mins = Math.floor(s / 60);
-  const remSec = s % 60;
-  if (mins < 60) return `${mins}m ${remSec}s`;
-  const hours = Math.floor(mins / 60);
-  const remMin = mins % 60;
-  return `${hours}h ${remMin}m ${remSec}s`;
+  const hours = Math.floor(s / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  const secs = s % 60;
+  return `${hours}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
 function _startTimesMatch(a, b) {

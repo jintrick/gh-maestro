@@ -253,12 +253,12 @@ test('stripWorkerNamePrefix: 先頭の issue-<N>- を除去し、パターン外
 });
 
 test('formatDuration: 秒数を適切にフォーマットする', () => {
-  assert.equal(workerStatus.formatDuration(0), '0s');
-  assert.equal(workerStatus.formatDuration(45), '45s');
-  assert.equal(workerStatus.formatDuration(60), '1m 0s');
-  assert.equal(workerStatus.formatDuration(125), '2m 5s');
-  assert.equal(workerStatus.formatDuration(3600), '1h 0m 0s');
-  assert.equal(workerStatus.formatDuration(3665), '1h 1m 5s');
+  assert.equal(workerStatus.formatDuration(0), '0:00:00');
+  assert.equal(workerStatus.formatDuration(45), '0:00:45');
+  assert.equal(workerStatus.formatDuration(60), '0:01:00');
+  assert.equal(workerStatus.formatDuration(125), '0:02:05');
+  assert.equal(workerStatus.formatDuration(3600), '1:00:00');
+  assert.equal(workerStatus.formatDuration(3665), '1:01:05');
 });
 
 test('renderUptimeBars: 空ワーカー・単一ワーカー・複数ワーカーの横棒グラフを生成する（Issue番号・短縮名・agentId含む）', () => {
@@ -278,7 +278,7 @@ test('renderUptimeBars: 空ワーカー・単一ワーカー・複数ワーカ�
     },
   ], { maxBarWidth: 10 });
   assert.equal(single.length, 1);
-  assert.match(single[0], /^#403\s+worker-1\s+claude-code\s+\[running\]\s+5m 0s\s+██████████\s+\(pid: 1001\)$/);
+  assert.match(single[0], /^#403\s+worker-1\s+claude-code\s+\[running\]\s+0:05:00\s+██████████\s+\(pid: 1001\)$/);
 
   // 複数ワーカー（相対長、nullフォールバック、パターン外ワーカー名）
   const multi = workerStatus.renderUptimeBars([
@@ -311,8 +311,8 @@ test('renderUptimeBars: 空ワーカー・単一ワーカー・複数ワーカ�
     },
   ], { maxBarWidth: 10 });
   assert.equal(multi.length, 3);
-  assert.match(multi[0], /#403\s+long-worker\s+gemini-cli\s+\[running\]\s+16m 40s\s+██████████\s+\(pid: 1001\)/);
-  assert.match(multi[1], /#403\s+half-worker\s+codex\s+\[running\]\s+8m 20s\s+█████\s+\(pid: 1002\)/);
+  assert.match(multi[0], /#403\s+long-worker\s+gemini-cli\s+\[running\]\s+0:16:40\s+██████████\s+\(pid: 1001\)/);
+  assert.match(multi[1], /#403\s+half-worker\s+codex\s+\[running\]\s+0:08:20\s+█████\s+\(pid: 1002\)/);
   assert.match(multi[2], /-\s+legacy-w\s+-\s+\[stopped\]\s+-\s+\(pid: 1003\)/);
 });
 
@@ -347,7 +347,7 @@ test('cycle snapshot: 区間だけを1行バーで表示し、ワーカーは最
   for (const label of ['準備', '計画', '承認', '実装', '査読', '統合']) assert.match(lines[0], new RegExp(label));
   assert.match(lines[0], /█/);
   assert.match(lines[0], /統合.*未記録/);
-  assert.match(lines[1], /^○ senior-coder\s+\[codex-luna-max\]\s+12m 0s \(pid: 16924\)$/);
+  assert.match(lines[1], /^○ senior-coder\s+\[codex-luna-max\]\s+0:12:00 \(pid: 16924\)$/);
   assert.ok(!lines[1].includes('issue-450-'));
   assert.ok(!lines[1].includes('[running]'));
   assert.ok(!lines[1].includes('█'));
@@ -383,7 +383,9 @@ test('cycle snapshot: 区間だけを1行バーで表示し、ワーカーは最
   ));
   // The first cell is reserved for each recorded interval; the remaining
   // cells follow the independent 1:2:3 duration ratio after rounding.
-  assert.deepEqual(ratioBarCells.slice(0, 3), [5, 9, 12]);
+  // The h:mm:ss total in the prefix is 2 characters wider than the previous
+  // "1m 0s" form, so the two largest cells each give up one column.
+  assert.deepEqual(ratioBarCells.slice(0, 3), [5, 8, 11]);
 
   const minimumCellLine = workerStatus.renderUptimeBars([
     { label: '準備', seconds: 1, recorded: true },
@@ -413,10 +415,10 @@ test('renderWorkerRows: 稼働優先・resume回数・状態ドット色・残�
   ], { maxRows: 4, colorize: true });
 
   assert.equal(lines.length, 4);
-  assert.match(lines[0], /^\x1b\[32m●\x1b\[0m senior-coder x2\s+\[codex\]\s+3m 0s \(pid: 2\)$/);
-  assert.match(lines[1], /^\x1b\[32m●\x1b\[0m explorer\s+\[agy\s*\]\s+1m 0s \(pid: 3\)$/);
-  assert.match(lines[2], /^\x1b\[31m●\x1b\[0m review-manager\s+\[agy\s*\]\s+30s \(pid: 4\)$/);
-  assert.match(lines[3], /\x1b\[90m○\x1b\[0m architect\s+\[agy\s*\]\s+30s \(pid: 5\) \+1件$/);
+  assert.match(lines[0], /^\x1b\[32m●\x1b\[0m senior-coder x2\s+\[codex\]\s+0:03:00 \(pid: 2\)$/);
+  assert.match(lines[1], /^\x1b\[32m●\x1b\[0m explorer\s+\[agy\s*\]\s+0:01:00 \(pid: 3\)$/);
+  assert.match(lines[2], /^\x1b\[31m●\x1b\[0m review-manager\s+\[agy\s*\]\s+0:00:30 \(pid: 4\)$/);
+  assert.match(lines[3], /\x1b\[90m○\x1b\[0m architect\s+\[agy\s*\]\s+0:00:30 \(pid: 5\) \+1件$/);
   assert.ok(lines.every(line => !line.includes('×')));
   assert.ok(lines.every(line => !line.includes('[running]') && !line.includes('[stopped]') && !line.includes('█')));
 });
@@ -454,7 +456,7 @@ test('renderWorkerRows: 子行があっても最後の表示ワーカーに非�
   ], { maxRows: 1 });
 
   assert.equal(lines.length, 2);
-  assert.match(lines[0], /review-manager\s+\[codex\]\s+5m 0s \(pid: 222\) \+1件$/);
+  assert.match(lines[0], /review-manager\s+\[codex\]\s+0:05:00 \(pid: 222\) \+1件$/);
   assert.match(lines[1], /^  └─ job-1 \(Correctness\)/);
 });
 
@@ -465,7 +467,7 @@ test('renderWorkerRows: role/suffix列とagent列を既存の桁揃え経路で�
   ]);
   const plain = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ''));
   assert.equal(plain[0].indexOf('['), plain[1].indexOf('['));
-  assert.equal(plain[0].indexOf('1m 0s'), plain[1].indexOf('2m 0s'));
+  assert.equal(plain[0].indexOf('0:01:00'), plain[1].indexOf('0:02:00'));
   assert.match(plain[1], /senior-coder x2/);
   assert.ok(!plain.join('\n').includes('×'));
 });
@@ -494,7 +496,7 @@ test('renderSnapshotLines: 同一ワーカーのrunを1行へ畳み、最新PID�
   });
 
   assert.equal(lines.length, 2);
-  assert.match(lines[1], /^● senior-coder x2\s+\[codex\]\s+6m 0s \(pid: 202\)$/);
+  assert.match(lines[1], /^● senior-coder x2\s+\[codex\]\s+0:06:00 \(pid: 202\)$/);
   assert.equal((lines[1].match(/senior-coder/g) || []).length, 1);
 
   const workspace = createWorkspace('gh-maestro-worker-status-no-stop-event-');
@@ -555,8 +557,8 @@ test('renderWorkerRows: Review Managerのジョブを監視用の子行として
   }]);
 
   assert.equal(lines.length, 2);
-  assert.match(lines[0], /^● review-manager\s+\[codex\]\s+5m 0s \(pid: 222\)$/);
-  assert.match(lines[1], /^  └─ job-1 \(Correctness\)\s+\[codex\]\s+2m 0s \(pid: 333\)$/);
+  assert.match(lines[0], /^● review-manager\s+\[codex\]\s+0:05:00 \(pid: 222\)$/);
+  assert.match(lines[1], /^  └─ job-1 \(Correctness\)\s+\[codex\]\s+0:02:00 \(pid: 333\)$/);
 });
 
 test('main: list はサイクル行と最大4件のワーカー行を出力する', () => {
@@ -581,9 +583,9 @@ test('main: list はサイクル行と最大4件のワーカー行を出力す�
     assert.equal(result.code, 0);
     assert.equal(result.errLines.length, 0);
     assert.equal(result.lines.length, 4);
-    assert.match(result.lines[0], /^#100 計0s .*準備.*未記録/);
-    assert.match(result.lines[1], /^● worker-a\s+\[agent-1\]\s+10m 0s \(pid: 111\)$/);
-    assert.match(result.lines[2], /^● worker-b\s+\[agent-2\]\s+5m 0s \(pid: 222\)$/);
+    assert.match(result.lines[0], /^#100 計0:00:00 .*準備.*未記録/);
+    assert.match(result.lines[1], /^● worker-a\s+\[agent-1\]\s+0:10:00 \(pid: 111\)$/);
+    assert.match(result.lines[2], /^● worker-b\s+\[agent-2\]\s+0:05:00 \(pid: 222\)$/);
     assert.match(result.lines[3], /^○ worker-c\s+\[-\s*\]\s+- \(pid: 999999999\)$/);
   } finally {
     workerStatus._setNow(null);
@@ -717,8 +719,8 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
     const initialOutput = stdoutChunks.join('');
     assert.match(initialOutput, /\x1b\[2J\x1b\[H/); // ANSI画面クリア
     assert.doesNotMatch(initialOutput, /=== gh-maestro worker status|interval:|21:00:00/);
-    assert.match(initialOutput, /#\? 計0s .*統合 ┈ 未記録/);
-    assert.match(initialOutput, /● worker-a\s+\[-\]\s+5m 0s \(pid: 111\)/);
+    assert.match(initialOutput, /#\? 計0:00:00 .*統合 ┈ 未記録/);
+    assert.match(initialOutput, /● worker-a\s+\[-\]\s+0:05:00 \(pid: 111\)/);
     assert.equal(startTimeCalls, 1, '同一描画内の起動時刻取得は1回');
 
     // 2. タイマーコールバック実行（定期再描画）
@@ -730,8 +732,8 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
     const secondOutput = stdoutChunks.join('');
     assert.match(secondOutput, /\x1b\[2J\x1b\[H/);
     assert.doesNotMatch(secondOutput, /=== gh-maestro worker status|interval:|21:00:02/);
-    assert.match(secondOutput, /#\? 計0s .*統合 ┈ 未記録/);
-    assert.match(secondOutput, /● worker-a\s+\[-\]\s+5m 2s \(pid: 111\)/);
+    assert.match(secondOutput, /#\? 計0:00:00 .*統合 ┈ 未記録/);
+    assert.match(secondOutput, /● worker-a\s+\[-\]\s+0:05:02 \(pid: 111\)/);
     assert.equal(startTimeCalls, 1, '上限間隔未満の再描画では再取得しない');
 
     // 3. エラー耐性（workers.json 破損時もループが落ちず stderr に書く）
@@ -965,7 +967,7 @@ test('main: watch はスナップショットを先頭行から出力し、現�
     assert.equal(result.code, 0);
     assert.ok(result.isWatch);
     assert.equal(result.interval, 5);
-    assert.match(result.lines[0], /^#403 計0s .*統合 ┈ 未記録/);
+    assert.match(result.lines[0], /^#403 計0:00:00 .*統合 ┈ 未記録/);
     assert.match(result.lines[1], /● worker-a\s+\[gemini\]/);
     assert.doesNotMatch(result.lines.join('\n'), /gh-maestro worker status|interval:|12:15:30/);
   } finally {
@@ -1365,10 +1367,10 @@ test('renderUptimeBars: skill(役割)が独立列として出力されないこ�
   const lines = workerStatus.renderUptimeBars(workers);
   assert.equal(lines.length, 2);
 
-  // 1行目: #403 coder-pane-display claude-code [running] 1m 0s ...
+  // 1行目: #403 coder-pane-display claude-code [running] 0:01:00 ...
   // skill 名 'gh-maestro-coder' そのものが独立列として含まれていないことを確認
   assert.ok(!lines[0].includes('gh-maestro-coder'));
-  assert.match(lines[0], /^#403\s+coder-pane-display\s+claude-code\s+\[running\]\s+1m 0s/);
+  assert.match(lines[0], /^#403\s+coder-pane-display\s+claude-code\s+\[running\]\s+0:01:00/);
 
   // 2行目: - unknown-prefix-worker - [stopped] -
   assert.match(lines[1], /^-\s+unknown-prefix-worker\s+-\s+\[stopped\]\s+-$/);
@@ -1569,8 +1571,8 @@ test('renderUptimeBars: Review Manager の行が PR#<PR> および review-manage
 
   const lines = workerStatus.renderUptimeBars(workers, { maxBarWidth: 10 });
   assert.equal(lines.length, 2);
-  assert.match(lines[0], /^#403\s+worker-1\s+claude-code\s+\[running\]\s+5m 0s\s+█████\s+\(pid: 1001\)$/);
-  assert.match(lines[1], /^PR#404\s+review-manager-pr-404\s+codex\s+\[running\]\s+10m 0s\s+██████████\s+\(pid: 1002\)$/);
+  assert.match(lines[0], /^#403\s+worker-1\s+claude-code\s+\[running\]\s+0:05:00\s+█████\s+\(pid: 1001\)$/);
+  assert.match(lines[1], /^PR#404\s+review-manager-pr-404\s+codex\s+\[running\]\s+0:10:00\s+██████████\s+\(pid: 1002\)$/);
 });
 
 test('main: list および list --json で Review Manager を表示する', () => {
@@ -1601,9 +1603,9 @@ test('main: list および list --json で Review Manager を表示する', () =
     const listResult = runMain(['list', '--workspace', workspace]);
     assert.equal(listResult.code, 0);
     assert.equal(listResult.lines.length, 3);
-    assert.match(listResult.lines[0], /^#100 計0s .*統合 ┈ 未記録/);
-    assert.match(listResult.lines[1], /^● worker-a\s+\[agent-1\s*\]\s+10m 0s \(pid: 111\)$/);
-    assert.match(listResult.lines[2], /^● review-manager\s+\[[^\]]+\]\s+5m 0s \(pid: 222\)$/);
+    assert.match(listResult.lines[0], /^#100 計0:00:00 .*統合 ┈ 未記録/);
+    assert.match(listResult.lines[1], /^● worker-a\s+\[agent-1\s*\]\s+0:10:00 \(pid: 111\)$/);
+    assert.match(listResult.lines[2], /^● review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
 
     // 2. list --json (機械可読JSON)
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
@@ -1669,9 +1671,9 @@ test('renderUptimeBars: Review Manager 配下にレビュージョブをイン�
 
   const lines = workerStatus.renderUptimeBars(workers, { maxBarWidth: 10 });
   assert.equal(lines.length, 3);
-  assert.match(lines[0], /^PR#415\s+review-manager-pr-415\s+codex\s+\[running\]\s+5m 0s\s+██████████\s+\(pid: 5678\)$/);
-  assert.match(lines[1], /^\s+└─ job-1 \(design\)\s+codex\s+\[running\]\s+3m 0s\s+██████\s+\(pid: 5680\)$/);
-  assert.match(lines[2], /^\s+└─ job-2 \(correctness\)\s+codex\s+\[running\]\s+2m 0s\s+████\s+\(pid: 5681\)$/);
+  assert.match(lines[0], /^PR#415\s+review-manager-pr-415\s+codex\s+\[running\]\s+0:05:00\s+██████████\s+\(pid: 5678\)$/);
+  assert.match(lines[1], /^\s+└─ job-1 \(design\)\s+codex\s+\[running\]\s+0:03:00\s+██████\s+\(pid: 5680\)$/);
+  assert.match(lines[2], /^\s+└─ job-2 \(correctness\)\s+codex\s+\[running\]\s+0:02:00\s+████\s+\(pid: 5681\)$/);
 });
 
 test('collectWorkersStatus & main: list / --json でレビュージョブを収集・出力する', () => {
@@ -1739,10 +1741,10 @@ test('collectWorkersStatus & main: list / --json でレビュージョブを収�
     const listResult = runMain(['list', '--workspace', workspace]);
     assert.equal(listResult.code, 0);
     assert.equal(listResult.lines.length, 4);
-    assert.match(listResult.lines[0], /^#\? 計0s .*統合 ┈ 未記録/);
-    assert.match(listResult.lines[1], /^● review-manager\s+\[[^\]]+\]\s+5m 0s \(pid: 222\)$/);
-    assert.match(listResult.lines[2], /^  └─ job-1 \(Design\)\s+\[codex\s*\]\s+3m 0s \(pid: 333\)$/);
-    assert.match(listResult.lines[3], /^  └─ job-2 \(Correctness\)\s+\[codex\s*\]\s+2m 0s \(pid: 444\)$/);
+    assert.match(listResult.lines[0], /^#\? 計0:00:00 .*統合 ┈ 未記録/);
+    assert.match(listResult.lines[1], /^● review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
+    assert.match(listResult.lines[2], /^  └─ job-1 \(Design\)\s+\[codex\s*\]\s+0:03:00 \(pid: 333\)$/);
+    assert.match(listResult.lines[3], /^  └─ job-2 \(Correctness\)\s+\[codex\s*\]\s+0:02:00 \(pid: 444\)$/);
 
     // 3. list --json
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
@@ -1791,7 +1793,7 @@ test('collectWorkersStatus: レビュージョブ取得失敗をReview Manager�
 
     const listResult = runMain(['list', '--workspace', workspace]);
     assert.equal(listResult.code, 0);
-    assert.match(listResult.lines[1], /^● review-manager\s+\[[^\]]+\]\s+5m 0s \(pid: 222\)$/);
+    assert.match(listResult.lines[1], /^● review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
     assert.match(listResult.lines[2], /^  └─ review jobs unavailable \(取得失敗\)$/);
 
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
