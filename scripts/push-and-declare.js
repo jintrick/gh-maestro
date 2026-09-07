@@ -30,6 +30,7 @@ const { listPrsByBranch, parsePrListResponse } = require('./shared/gh-pr');
 const { createPr } = require('./gh-create-pr');
 const { declareTestResult } = require('./declare-test-result');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
+const { listTestLayers } = require('./run-tests');
 
 const USAGE = `push-and-declare.js — ステージング・コミット・push・PR取得/作成・テスト結果申告を一つの操作にまとめる
 
@@ -49,8 +50,10 @@ Arguments:
   5. 現在のHEADを解決
   6. PRは get-or-create（既存PRがあれば使用、無ければ作成。タイトル=Issueタイトル、
      本文=関連Issue: #<N>）
-  7. runtime root のテスト成果物を読み、解決したHEADに対するテスト結果を申告。
-     成果物が欠落・破損していても unknown として申告する
+  7. 宣言された毎回側（scope=full）の層名を解決し、runtime root のテスト成果物を
+     読んで解決したHEADに対するテスト結果を申告。必須層の結果が欠落・unavailable
+     の場合は申告を失敗として返す。文書だけの変更は未実行の層だけを許容し、
+     存在する成果物の照合は行う。テスト層未宣言の場合は必須層を要求しない
 
 コミットメッセージは \`impl(issue-<N>): <Issueタイトル>\` で固定（モデル推論を挟まない）。
 素の git commit / git push / gh pr create を直接実行しないこと（このスクリプトが一括で行う）。
@@ -63,7 +66,8 @@ Output (stdout):
   0 = 終状態に到達（テストが赤でも0）
   1 = 用途エラー（引数不正・ブランチ名不一致・テスト実行中。副作用ゼロ）
   2 = 申告に到達する前の失敗（push失敗等。リモート未変更）
-  3 = pushは成功したが申告に到達しなかった（リモートは進んだ。再実行で回復）`;
+  3 = pushは成功したが申告に到達しなかった、または必須テスト層の結果が揃わない
+      （リモートは進んだ。再実行で回復）`;
 
 const SPEC = {
   flags: {
@@ -100,6 +104,66 @@ function errText(r) {
   return (r.error && r.error.message) || 'unknown error';
 }
 
+const DOCUMENTATION_EXTENSIONS = Object.freeze(new Set(['.md', '.mdx', '.txt', '.rst', '.adoc']));
+
+function isDocumentationPath(file) {
+  if (typeof file !== 'string' || !file.trim()) return false;
+  const normalized = file.replaceAll('\\', '/');
+  const lower = normalized.toLowerCase();
+  const base = lower.slice(lower.lastIndexOf('/') + 1);
+  if (/^(?:readme|agents|glossary)(?:\.[^/]*)?$/.test(base)) return true;
+  return [...DOCUMENTATION_EXTENSIONS].some((extension) => lower.endsWith(extension));
+}
+
+function isDocumentationOnly(stagedFiles) {
+  return Array.isArray(stagedFiles)
+    && stagedFiles.length > 0
+    && stagedFiles.every(isDocumentationPath);
+}
+
+/**
+ * push後の申告で必須にする、宣言済みの毎回側層を解決する。
+ * テスト結果の読み取り・内容照合は declare-test-result.js に委譲する。
+ *
+ * @param {{workspace:string, worktree:string, env:object, stagedFiles:string[]}} params
+ * @returns {{ok:true, requiredLayers:string[], allowMissingRequiredLayers:boolean}|{ok:false, error:string}}
+ */
+function resolveRequiredTestLayers({ workspace, worktree, env, stagedFiles }, listTestLayersFn = listTestLayers) {
+  const allowMissingRequiredLayers = isDocumentationOnly(stagedFiles);
+
+  let listed;
+  try {
+    listed = listTestLayersFn({ cwd: worktree, workspace, env });
+  } catch (error) {
+    return { ok: false, error: `宣言されたテスト層を解決できません: ${error.message}` };
+  }
+  if (!listed || listed.exitCode === 2) {
+    return { ok: true, requiredLayers: [], allowMissingRequiredLayers };
+  }
+  if (listed.exitCode !== 0) {
+    return { ok: false, error: `宣言されたテスト層を解決できません: ${listed.stderr || '(no stderr)'}` };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(String(listed.stdout || ''));
+  } catch (error) {
+    return { ok: false, error: `宣言されたテスト層のJSONを解釈できません: ${error.message}` };
+  }
+  if (!parsed || parsed.status !== 'declared' || !Array.isArray(parsed.layers)) {
+    return { ok: false, error: '宣言されたテスト層の一覧が不正です' };
+  }
+
+  const requiredLayers = parsed.layers
+    .filter((layer) => layer && layer.scope === 'full' && typeof layer.name === 'string' && layer.name.trim())
+    .map((layer) => layer.name.trim());
+  return {
+    ok: true,
+    requiredLayers: [...new Set(requiredLayers)],
+    allowMissingRequiredLayers,
+  };
+}
+
 /**
  * 収束型の単一入口。終状態に到達するまで各段を「まだ満たされていなければ実行」で進める。
  * 申告段が成功するまで exit 0 を返さない（最重要不変条件）。
@@ -112,11 +176,13 @@ function errText(r) {
  * @param {object} [deps]                 テスト用の依存注入
  * @param {Function} [deps.declareTestResultFn]
  * @param {Function} [deps.commitContentHashFn]
+ * @param {Function} [deps.listTestLayersFn]
  * @returns {{ exitCode: number, stdout: string, stderr: string }}
  */
 function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps = {}) {
   const declareTestResultFn = deps.declareTestResultFn || declareTestResult;
   const recordCycleEventFn = deps.recordCycleEventFn || recordCycleEvent;
+  const listTestLayersFn = deps.listTestLayersFn || listTestLayers;
   const declareDeps = deps.commitContentHashFn
     ? { commitContentHashFn: deps.commitContentHashFn }
     : undefined;
@@ -225,6 +291,16 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
     return { exitCode: 3, stdout: '', stderr: `HEADの解決に失敗しました: ${e.message}` };
   }
 
+  const requiredLayersResult = resolveRequiredTestLayers({
+    workspace: ws,
+    worktree,
+    env,
+    stagedFiles,
+  }, listTestLayersFn);
+  if (!requiredLayersResult.ok) {
+    return { exitCode: 3, stdout: '', stderr: `テスト結果の申告に失敗しました: ${requiredLayersResult.error}` };
+  }
+
   // ── PR段（get-or-create。初回か修正かをコーダーは判定しない） ─────────────────
   const prListRes = listPrsByBranch(repo, branch, {
     state: 'OPEN',
@@ -279,6 +355,8 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
     repo,
     workspace: ws,
     worktree,
+    requiredLayers: requiredLayersResult.requiredLayers,
+    allowMissingRequiredLayers: requiredLayersResult.allowMissingRequiredLayers,
   }, declareDeps);
   if (!declResult.ok) {
     return { exitCode: 3, stdout: '', stderr: `テスト結果の申告に失敗しました: ${declResult.error}` };
