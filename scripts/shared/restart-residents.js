@@ -14,8 +14,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('./child-process');
+const { spawn, spawnSync } = require('./child-process');
 const { killProcessTree } = require('./kill-tree');
+const { loadStatusPane } = require('./status-pane-registry');
 const {
   findRunningInstances,
   unregisterProcess,
@@ -371,6 +372,127 @@ function monitorCommandForEntry(scriptsPath, spec, entry, hooks = createResident
   return formatCommand(path.join(scriptsPath, spec.script), built.args);
 }
 
+function defaultRunStatusPaneCommand({ scriptsPath, subcommand, workspace, issue, spawnSyncFn = spawnSync }) {
+  const args = [path.join(scriptsPath, 'worker-status.js'), subcommand, '--workspace', workspace];
+  if (subcommand === 'pane' && issue != null) args.push('--issue', String(issue));
+  const result = spawnSyncFn(process.execPath, args, {
+    cwd: workspace,
+    encoding: 'utf8',
+  });
+  return {
+    ok: result.status === 0,
+    status: result.status,
+    stdout: (result.stdout || '').toString().trim(),
+    stderr: (result.stderr || '').toString().trim(),
+  };
+}
+
+function statusPaneId(entry) {
+  return entry && entry.paneId != null && String(entry.paneId) !== ''
+    ? String(entry.paneId)
+    : null;
+}
+
+/**
+ * install時だけ、既存の監視ペインを同じIssueで張り直す。
+ * 監視UIはWezTermの外部設備なので、失敗は常駐4種の交換結果を失敗扱いにしない。
+ *
+ * @param {string} workspace
+ * @param {string} scriptsPath
+ * @param {object} [opts]
+ * @returns {{status:string, oldPaneIds?:string[], newPaneIds?:string[], verified?:boolean, reason?:string}}
+ */
+function restartStatusPane(workspace, scriptsPath, opts = {}) {
+  const loadStatusPaneFn = opts.loadStatusPaneFn || loadStatusPane;
+  const runCommand = opts.runStatusPaneCommandFn || ((params) => defaultRunStatusPaneCommand({
+    ...params,
+    spawnSyncFn: opts.spawnSyncFn,
+  }));
+  let existing;
+  try {
+    existing = loadStatusPaneFn(workspace);
+  } catch (error) {
+    return { status: 'unavailable', reason: `status-pane registryの読み取りに失敗しました: ${error.message}` };
+  }
+  if (!existing || !existing.paneId) return { status: 'not-running' };
+
+  const oldPaneId = statusPaneId(existing);
+  let closed;
+  try {
+    closed = runCommand({ scriptsPath, subcommand: 'close-pane', workspace });
+  } catch (error) {
+    return {
+      status: 'unavailable',
+      oldPaneIds: oldPaneId ? [oldPaneId] : [],
+      reason: `監視ペインの終了に失敗しました: ${error.message}`,
+    };
+  }
+  if (!closed || !closed.ok) {
+    return {
+      status: 'unavailable',
+      oldPaneIds: oldPaneId ? [oldPaneId] : [],
+      reason: `監視ペインの終了に失敗しました: ${(closed && closed.stderr) || 'unknown'}`,
+    };
+  }
+
+  let launched;
+  try {
+    launched = runCommand({
+      scriptsPath,
+      subcommand: 'pane',
+      workspace,
+      issue: existing.issue,
+    });
+  } catch (error) {
+    return {
+      status: 'unavailable',
+      oldPaneIds: oldPaneId ? [oldPaneId] : [],
+      reason: `監視ペインの再起動に失敗しました: ${error.message}`,
+    };
+  }
+  if (!launched || !launched.ok) {
+    return {
+      status: 'unavailable',
+      oldPaneIds: oldPaneId ? [oldPaneId] : [],
+      reason: `監視ペインの再起動に失敗しました: ${(launched && launched.stderr) || 'unknown'}`,
+    };
+  }
+
+  const maxAttempts = opts.statusPaneConfirmAttempts ?? DEFAULT_STARTUP_CONFIRM_ATTEMPTS;
+  const waitMs = opts.statusPaneWaitMs ?? DEFAULT_WAIT_MS;
+  const sleep = opts.sleepFn || (() => {});
+  let replacement = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      replacement = loadStatusPaneFn(workspace);
+    } catch {
+      replacement = null;
+    }
+    const newPaneId = statusPaneId(replacement);
+    if (newPaneId !== null && (oldPaneId === null || newPaneId !== oldPaneId)) break;
+    sleep(waitMs);
+  }
+  const newPaneId = statusPaneId(replacement);
+  const verified = oldPaneId !== null && newPaneId !== null && oldPaneId !== newPaneId;
+  if (!verified) {
+    return {
+      status: 'failed',
+      oldPaneIds: oldPaneId ? [oldPaneId] : [],
+      newPaneIds: newPaneId ? [newPaneId] : [],
+      verified: false,
+      reason: oldPaneId !== null && newPaneId !== null
+        ? '新しい監視ペインのpaneIdが旧paneIdから変わりませんでした'
+        : '監視ペインの旧paneIdまたは新paneIdを確認できませんでした',
+    };
+  }
+  return {
+    status: 'replaced',
+    oldPaneIds: oldPaneId ? [oldPaneId] : [],
+    newPaneIds: newPaneId ? [newPaneId] : [],
+    verified: true,
+  };
+}
+
 /**
  * 常駐4種を入れ替える。
  *
@@ -530,13 +652,36 @@ function restartResidents(workspace, opts = {}) {
     result.sessionPidSources = startedEntries.map((started) => started.sessionPidSource);
   }
 
-  return { entries, results, errors };
+  const result = { entries, results, errors };
+  if (opts.restartStatusPane) {
+    result.statusPane = restartStatusPane(workspace, opts.scriptsPath, {
+      loadStatusPaneFn: opts.loadStatusPaneFn,
+      runStatusPaneCommandFn: opts.runStatusPaneCommandFn,
+      spawnSyncFn: opts.spawnStatusPaneSyncFn,
+      statusPaneConfirmAttempts: opts.statusPaneConfirmAttempts,
+      statusPaneWaitMs: opts.statusPaneWaitMs,
+      sleepFn: opts.statusPaneSleepFn || hooks.sleep,
+    });
+    if (result.statusPane.status === 'failed') {
+      errors.push(`status-pane: ${result.statusPane.reason}`);
+    }
+  }
+  return result;
 }
 
 function formatResidentResult(result) {
   const fields = [`RESIDENT`, `script=${result.script}`, `status=${result.status}`];
   if (result.oldPids && result.oldPids.length) fields.push(`oldPid=${result.oldPids.join(',')}`);
   if (result.newPids && result.newPids.length) fields.push(`newPid=${result.newPids.join(',')}`);
+  if (result.verified !== undefined) fields.push(`verified=${result.verified}`);
+  if (result.reason) fields.push(`reason=${JSON.stringify(result.reason)}`);
+  return fields.join(' ');
+}
+
+function formatStatusPaneResult(result) {
+  const fields = ['STATUS_PANE', `status=${result.status}`];
+  if (result.oldPaneIds && result.oldPaneIds.length) fields.push(`oldPaneId=${result.oldPaneIds.join(',')}`);
+  if (result.newPaneIds && result.newPaneIds.length) fields.push(`newPaneId=${result.newPaneIds.join(',')}`);
   if (result.verified !== undefined) fields.push(`verified=${result.verified}`);
   if (result.reason) fields.push(`reason=${JSON.stringify(result.reason)}`);
   return fields.join(' ');
@@ -558,4 +703,6 @@ module.exports = {
   formatResidentResult,
   monitorCommandForEntry,
   resolveResidentSessionPid,
+  restartStatusPane,
+  formatStatusPaneResult,
 };

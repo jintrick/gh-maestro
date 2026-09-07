@@ -58,9 +58,36 @@ test('loadStatusPane: 配列やpaneId欠落オブジェクトはnullとして扱
 
 test('saveStatusPane / loadStatusPane: 登録した内容を取得できる（ディレクトリ自動作成）', () => {
   withTempWorkspace((dir) => {
-    saveStatusPane(dir, { paneId: '42', launchedAt: '2026-08-26T09:00:00.000Z' });
+    saveStatusPane(dir, {
+      paneId: '42',
+      issue: 471,
+      pid: 12345,
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    });
     assert.deepEqual(loadStatusPane(dir), {
       paneId: '42',
+      issue: '471',
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    });
+    const record = JSON.parse(fs.readFileSync(statusPanePath(dir), 'utf8'));
+    assert.equal(Object.hasOwn(record, 'pid'), false);
+  });
+});
+
+test('loadStatusPane: 旧形式のpidを読み込まずpane情報だけ返す', () => {
+  withTempWorkspace((dir) => {
+    const p = statusPanePath(dir);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({
+      paneId: 'legacy-pane',
+      issue: '471',
+      pid: 12345,
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    }), 'utf8');
+
+    assert.deepEqual(loadStatusPane(dir), {
+      paneId: 'legacy-pane',
+      issue: '471',
       launchedAt: '2026-08-26T09:00:00.000Z',
     });
   });
@@ -88,11 +115,17 @@ test('status-pane保存: テスト実行中はruntimeディレクトリを作成
 
 test('saveStatusPaneRecovery / loadStatusPane: 通常記録がなくても回復記録を読み込める', () => {
   withTempWorkspace((dir) => {
-    saveStatusPaneRecovery(dir, { paneId: 'recovery-42', launchedAt: '2026-08-26T09:00:00.000Z' });
+    saveStatusPaneRecovery(dir, {
+      paneId: 'recovery-42',
+      pid: 12345,
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    });
     assert.deepEqual(loadStatusPane(dir), {
       paneId: 'recovery-42',
       launchedAt: '2026-08-26T09:00:00.000Z',
     });
+    const record = JSON.parse(fs.readFileSync(statusPaneRecoveryPath(dir), 'utf8'));
+    assert.equal(Object.hasOwn(record, 'pid'), false);
   });
 });
 

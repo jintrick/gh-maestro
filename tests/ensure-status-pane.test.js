@@ -100,6 +100,62 @@ test('ensureStatusPane: 生存中の記録済みペインを再利用し起動�
   assert.equal(calls.save, 0);
 });
 
+test('ensureStatusPane: 要求Issueと異なる生存ペインは終了して対象Issueで張り直す', () => {
+  const calls = [];
+  let saved = null;
+  const { deps } = injectedDeps({
+    loadStatusPaneFn: () => ({ paneId: 'old', issue: '470' }),
+    isPaneAliveFn: () => true,
+    killPaneFn: (paneId) => {
+      calls.push(['kill', paneId]);
+      return { ok: true, status: 0, stderr: '' };
+    },
+    removeStatusPaneFn: (workspace) => calls.push(['remove', workspace]),
+    launchInSplitPaneFn: (params) => {
+      calls.push(['launch', params.argv]);
+      return { paneId: 'new' };
+    },
+    saveStatusPaneFn: (workspace, entry) => { saved = { workspace, entry }; },
+  });
+
+  const result = ensureStatusPane({ ...baseParams(), issue: 471 }, deps);
+
+  assert.deepEqual(result, { ok: true, paneId: 'new', reused: false });
+  assert.deepEqual(calls.map(([kind, value]) => [kind, typeof value === 'string' ? value : undefined]), [
+    ['kill', 'old'],
+    ['remove', 'C:\\workspace'],
+    ['launch', undefined],
+  ]);
+  assert.equal(calls[2][1].at(-1), '471');
+  assert.deepEqual(saved.entry, {
+    paneId: 'new',
+    issue: '471',
+    launchedAt: '2025-10-09T08:53:20.000Z',
+  });
+});
+
+test('ensureStatusPane: Issue不一致ペインの終了に失敗した場合は再起動しない', () => {
+  let launchCalled = false;
+  const { deps } = injectedDeps({
+    loadStatusPaneFn: () => ({ paneId: 'old', issue: '470' }),
+    isPaneAliveFn: () => true,
+    killPaneFn: () => ({ ok: false, status: 1, stderr: 'permission denied' }),
+    launchInSplitPaneFn: () => {
+      launchCalled = true;
+      return { paneId: 'must-not-launch' };
+    },
+  });
+
+  const result = ensureStatusPane({ ...baseParams(), issue: 471 }, deps);
+
+  assert.deepEqual(result, {
+    ok: false,
+    stage: 'close',
+    error: 'permission denied',
+  });
+  assert.equal(launchCalled, false);
+});
+
 test('ensureStatusPane: 未記録ペインを起動し status-pane.json の記録を更新する', () => {
   let launchParams = null;
   let saved = null;
@@ -117,6 +173,7 @@ test('ensureStatusPane: 未記録ペインを起動し status-pane.json の記�
 
   const result = ensureStatusPane({
     ...baseParams(),
+    issue: 471,
     interval: 5,
     direction: 'right',
     percent: 20,
@@ -134,10 +191,12 @@ test('ensureStatusPane: 未記録ペインを起動し status-pane.json の記�
     'C:\\workspace',
     '--interval',
     '5',
+    '--issue',
+    '471',
   ]);
   assert.deepEqual(saved, {
     workspace: 'C:\\workspace',
-    entry: { paneId: '77', launchedAt: '2025-10-09T08:53:20.000Z' },
+    entry: { paneId: '77', issue: '471', launchedAt: '2025-10-09T08:53:20.000Z' },
   });
   assert.equal(calls.acquire, 1);
   assert.equal(calls.release, 1);

@@ -36,6 +36,9 @@ Options:
 workers.json とは別管理）が存在すれば、あわせて強制終了（kill-pane）する。assistantが
 存在しなくてもエラー扱いにしない。
 
+さらに、このIssueの --issue で起動された監視ペインを best-effort で close-pane 経由で終了する。
+別Issueのペインや起動Issueを確認できない旧形式の記録は終了しない。
+
 さらに、ライフサイクル終了後の情報価値のない内部状態を後始末する（Issue #248・すべて best-effort）:
 - .gh-maestro/assistant-watch/<N>.json を削除
 - このIssueに紐づくPRの .gh-maestro/review-manager-<PR>.incomplete を削除
@@ -97,6 +100,18 @@ function defaultKillAssistant(workspace, issue) {
   const r = killPane(entry.paneId);
   removeAssistant(workspace, issue);
   return { ok: r.ok, status: r.status, stderr: (r.stderr || '').trim() };
+}
+
+// 既定の監視ペイン終了処理。worker-status.js側で起動時Issueを検証するため、
+// finalize-issueがstatus-pane.jsonを直接kill・削除する経路は持たない。
+function defaultCloseStatusPane(workspace, issue) {
+  const r = spawnSync(process.execPath, [
+    path.join(__dirname, 'worker-status.js'),
+    'close-pane',
+    '--workspace', workspace,
+    '--issue', String(issue),
+  ], { cwd: workspace, encoding: 'utf8' });
+  return { ok: r.status === 0, status: r.status, stderr: (r.stderr || '').trim() };
 }
 
 /**
@@ -220,8 +235,8 @@ function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn 
  * あわせて、情報価値のない内部状態（assistant-watch/<issue>.json・対象PRの .incomplete・
  * executions.json の当該issueレコード）を後始末する（Issue #248 項目2/4/7）。
  * @param {{workspace: string, issue: string|number, repo?: string|null}} params
- * @param {{removeWorkerFn?: Function, closeIssueFn?: Function, killAssistantFn?: Function, findReviewPrsFn?: Function}} [deps] テスト用に spawn を注入する
- * @returns {{workers: {name: string, ok: boolean}[], removedCount: number, closed: boolean, assistantKilled: boolean|null, artifacts: object}}
+ * @param {{removeWorkerFn?: Function, closeIssueFn?: Function, killAssistantFn?: Function, closeStatusPaneFn?: Function, findReviewPrsFn?: Function}} [deps] テスト用に処理を注入する
+ * @returns {{workers: {name: string, ok: boolean}[], removedCount: number, closed: boolean, assistantKilled: boolean|null, statusPaneClosed: boolean, artifacts: object}}
  *   assistantKilled: true=正常終了, false=終了処理に失敗, null=対象となるassistantが無かった（skipped）
  *   artifacts: cleanupIssueArtifacts() の結果（watchRemoved / incompleteRemoved / executionsPruned）
  */
@@ -229,6 +244,7 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
   const removeWorkerFn = deps.removeWorkerFn || defaultRemoveWorker;
   const closeIssueFn = deps.closeIssueFn || defaultCloseIssue;
   const killAssistantFn = deps.killAssistantFn || defaultKillAssistant;
+  const closeStatusPaneFn = deps.closeStatusPaneFn || defaultCloseStatusPane;
 
   const names = collectWorkersForIssue(workspace, issue);
   const workers = [];
@@ -252,6 +268,16 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
   }
   const assistantKilled = assistantResult.skipped ? null : assistantResult.ok;
 
+  let statusPaneResult;
+  try {
+    statusPaneResult = closeStatusPaneFn(workspace, issue);
+  } catch (error) {
+    statusPaneResult = { ok: false, stderr: error.message };
+  }
+  if (!statusPaneResult || !statusPaneResult.ok) {
+    process.stderr.write(`finalize-issue: 監視ペインの終了に失敗しました: ${statusPaneResult && statusPaneResult.stderr || 'unknown'}\n`);
+  }
+
   // 情報価値のない内部状態の後始末（best-effort）。テストでは findReviewPrsFn を注入し、
   // gh spawn が実環境で走らないようにする。
   const artifacts = cleanupIssueArtifacts(workspace, issue, {
@@ -264,6 +290,7 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
     removedCount: workers.filter(w => w.ok).length,
     closed: close.ok,
     assistantKilled,
+    statusPaneClosed: Boolean(statusPaneResult && statusPaneResult.ok),
     artifacts,
   };
 }

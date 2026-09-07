@@ -4,25 +4,28 @@
 // restart-residents.js — install後の常駐4種を一括で入れ替えるCLI。
 
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
-const { restartResidents, formatResidentResult } = require('./shared/restart-residents');
+const { restartResidents, formatResidentResult, formatStatusPaneResult } = require('./shared/restart-residents');
 
 const USAGE = `restart-residents.js — 常駐プロセス4種を現行コードへ入れ替える
 
 Usage:
-  node restart-residents.js [--workspace <path>] [--session-pid <pid>]
+  node restart-residents.js [--workspace <path>] [--session-pid <pid>] [--restart-status-pane]
 
 Options:
   --workspace <path>  ワークスペース（省略時は GH_MAESTRO_WORKSPACE env または
                       CWDからの .gh-maestro/ 上方探索で解決）
   --session-pid <pid> worker-supervisorのregistry引数と対象プロセス親チェーンから
                       PIDを解決できない旧形式に限るフォールバック。
+  --restart-status-pane install後に監視ペインを現行worker-status.jsで張り直す。
   --help, -h          このヘルプを表示する
 
 対象:
   worker-supervisor.js / msg-poll.js（orchestrator）/ poll-pr.js / poll-reviews.js
+  --restart-status-pane指定時は、status-pane registryに記録された監視ペインも対象。
 
 Output (stdout):
   RESIDENT script=<name> status=replaced|monitor-required|delegated|not-running|failed ...
+  STATUS_PANE status=replaced|not-running|unavailable|failed oldPaneId=<id> newPaneId=<id> verified=<bool>
   MONITOR_REATTACH_REQUIRED script=<name> command=<command>
   Monitorで出力を受ける常駐は停止後にdetached起動せず、上記の再接続指示を必ず実行する。
   poll-pr.js が poll-reviews.js を子として起動する構成では、後者は delegated と出力する。
@@ -53,7 +56,7 @@ function main(argv = process.argv.slice(2), opts = {}) {
   try {
     ({ values } = parseFlags(argv, {
       flags: { '--workspace': {}, '--session-pid': {} },
-      booleans: ['--help', '-h'],
+      booleans: ['--help', '-h', '--restart-status-pane'],
       positionals: { min: 0, max: 0 },
     }));
   } catch (err) {
@@ -86,6 +89,12 @@ function main(argv = process.argv.slice(2), opts = {}) {
       hooks: opts.hooks,
       maxAttempts: opts.maxAttempts,
       waitMs: opts.waitMs,
+      restartStatusPane: values['--restart-status-pane'] === true,
+      runStatusPaneCommandFn: opts.runStatusPaneCommandFn,
+      loadStatusPaneFn: opts.loadStatusPaneFn,
+      statusPaneConfirmAttempts: opts.statusPaneConfirmAttempts,
+      statusPaneWaitMs: opts.statusPaneWaitMs,
+      statusPaneSleepFn: opts.statusPaneSleepFn,
     });
   } catch (e) {
     errLines.push(`restart-residents: ${e.message}`);
@@ -101,6 +110,7 @@ function main(argv = process.argv.slice(2), opts = {}) {
       }
     }
   }
+  if (result.statusPane) lines.push(formatStatusPaneResult(result.statusPane));
   for (const error of result.errors) errLines.push(`restart-residents: ${error}`);
 
   return { code: result.errors.length > 0 ? 1 : 0, lines, errLines };

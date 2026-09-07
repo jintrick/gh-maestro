@@ -347,7 +347,7 @@ test('cycle snapshot: 区間だけを1行バーで表示し、ワーカーは最
   for (const label of ['準備', '計画', '承認', '実装', '査読', '統合']) assert.match(lines[0], new RegExp(label));
   assert.match(lines[0], /█/);
   assert.match(lines[0], /統合.*未記録/);
-  assert.match(lines[1], /^○ senior-coder \[codex-luna-max\] 12m 0s \(pid: 16924\)$/);
+  assert.match(lines[1], /^○ senior-coder\s+\[codex-luna-max\]\s+12m 0s \(pid: 16924\)$/);
   assert.ok(!lines[1].includes('issue-450-'));
   assert.ok(!lines[1].includes('[running]'));
   assert.ok(!lines[1].includes('█'));
@@ -413,10 +413,11 @@ test('renderWorkerRows: 稼働優先・resume回数・状態ドット色・残�
   ], { maxRows: 4, colorize: true });
 
   assert.equal(lines.length, 4);
-  assert.match(lines[0], /^\x1b\[32m●\x1b\[0m senior-coder ×2 \[codex\] 3m 0s \(pid: 2\)$/);
-  assert.match(lines[1], /^\x1b\[32m●\x1b\[0m explorer \[agy\] 1m 0s \(pid: 3\)$/);
-  assert.match(lines[2], /^\x1b\[31m●\x1b\[0m review-manager \[agy\] 30s \(pid: 4\)$/);
-  assert.match(lines[3], /\x1b\[90m○\x1b\[0m architect \[agy\] 30s \(pid: 5\) \+1件$/);
+  assert.match(lines[0], /^\x1b\[32m●\x1b\[0m senior-coder x2\s+\[codex\]\s+3m 0s \(pid: 2\)$/);
+  assert.match(lines[1], /^\x1b\[32m●\x1b\[0m explorer\s+\[agy\s*\]\s+1m 0s \(pid: 3\)$/);
+  assert.match(lines[2], /^\x1b\[31m●\x1b\[0m review-manager\s+\[agy\s*\]\s+30s \(pid: 4\)$/);
+  assert.match(lines[3], /\x1b\[90m○\x1b\[0m architect\s+\[agy\s*\]\s+30s \(pid: 5\) \+1件$/);
+  assert.ok(lines.every(line => !line.includes('×')));
   assert.ok(lines.every(line => !line.includes('[running]') && !line.includes('[stopped]') && !line.includes('█')));
 });
 
@@ -453,8 +454,20 @@ test('renderWorkerRows: 子行があっても最後の表示ワーカーに非�
   ], { maxRows: 1 });
 
   assert.equal(lines.length, 2);
-  assert.match(lines[0], /review-manager \[codex\] 5m 0s \(pid: 222\) \+1件$/);
+  assert.match(lines[0], /review-manager\s+\[codex\]\s+5m 0s \(pid: 222\) \+1件$/);
   assert.match(lines[1], /^  └─ job-1 \(Correctness\)/);
+});
+
+test('renderWorkerRows: role/suffix列とagent列を既存の桁揃え経路でそろえ、suffixはASCII xNにする', () => {
+  const lines = workerStatus.renderWorkerRows([
+    { role: 'coder', agentId: 'a', running: true, durationKnown: true, elapsedSeconds: 60, pid: 1 },
+    { role: 'senior-coder', runNumber: 2, agentId: 'long-agent', running: true, durationKnown: true, elapsedSeconds: 120, pid: 2 },
+  ]);
+  const plain = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ''));
+  assert.equal(plain[0].indexOf('['), plain[1].indexOf('['));
+  assert.equal(plain[0].indexOf('1m 0s'), plain[1].indexOf('2m 0s'));
+  assert.match(plain[1], /senior-coder x2/);
+  assert.ok(!plain.join('\n').includes('×'));
 });
 
 test('renderSnapshotLines: 同一ワーカーのrunを1行へ畳み、最新PID・実状態・合計時間を表示する', () => {
@@ -481,7 +494,7 @@ test('renderSnapshotLines: 同一ワーカーのrunを1行へ畳み、最新PID�
   });
 
   assert.equal(lines.length, 2);
-  assert.match(lines[1], /^● senior-coder ×2 \[codex\] 6m 0s \(pid: 202\)$/);
+  assert.match(lines[1], /^● senior-coder x2\s+\[codex\]\s+6m 0s \(pid: 202\)$/);
   assert.equal((lines[1].match(/senior-coder/g) || []).length, 1);
 
   const workspace = createWorkspace('gh-maestro-worker-status-no-stop-event-');
@@ -511,7 +524,7 @@ test('renderSnapshotLines: 同一ワーカーのrunを1行へ畳み、最新PID�
       'watch', '--workspace', workspace, '--issue', '467', '--interval', '5',
     ]);
     assert.equal(stoppedWithoutEvent.code, 0);
-    assert.match(stoppedWithoutEvent.lines[2], /^○ senior-coder \[codex\] - \(pid: 999999999\)$/);
+    assert.match(stoppedWithoutEvent.lines[1], /^○ senior-coder\s+\[codex\]\s+- \(pid: 999999999\)$/);
   } finally {
     workerStatus._setNow(null);
     workerStatus._setReadCycleEvents(null);
@@ -542,8 +555,8 @@ test('renderWorkerRows: Review Managerのジョブを監視用の子行として
   }]);
 
   assert.equal(lines.length, 2);
-  assert.match(lines[0], /^● review-manager \[codex\] 5m 0s \(pid: 222\)$/);
-  assert.match(lines[1], /^  └─ job-1 \(Correctness\) \[codex\] 2m 0s \(pid: 333\)$/);
+  assert.match(lines[0], /^● review-manager\s+\[codex\]\s+5m 0s \(pid: 222\)$/);
+  assert.match(lines[1], /^  └─ job-1 \(Correctness\)\s+\[codex\]\s+2m 0s \(pid: 333\)$/);
 });
 
 test('main: list はサイクル行と最大4件のワーカー行を出力する', () => {
@@ -569,9 +582,9 @@ test('main: list はサイクル行と最大4件のワーカー行を出力す�
     assert.equal(result.errLines.length, 0);
     assert.equal(result.lines.length, 4);
     assert.match(result.lines[0], /^#100 計0s .*準備.*未記録/);
-    assert.match(result.lines[1], /^● worker-a \[agent-1\] 10m 0s \(pid: 111\)$/);
-    assert.match(result.lines[2], /^● worker-b \[agent-2\] 5m 0s \(pid: 222\)$/);
-    assert.match(result.lines[3], /^○ worker-c \[-\] - \(pid: 999999999\)$/);
+    assert.match(result.lines[1], /^● worker-a\s+\[agent-1\]\s+10m 0s \(pid: 111\)$/);
+    assert.match(result.lines[2], /^● worker-b\s+\[agent-2\]\s+5m 0s \(pid: 222\)$/);
+    assert.match(result.lines[3], /^○ worker-c\s+\[-\s*\]\s+- \(pid: 999999999\)$/);
   } finally {
     workerStatus._setNow(null);
     workerStatus._setIsWorkerAlive(null);
@@ -703,9 +716,9 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
     assert.equal(handle.timer, 12345);
     const initialOutput = stdoutChunks.join('');
     assert.match(initialOutput, /\x1b\[2J\x1b\[H/); // ANSI画面クリア
-    assert.match(initialOutput, /=== gh-maestro worker status \(21:00:00, interval: 2s\) ===/);
+    assert.doesNotMatch(initialOutput, /=== gh-maestro worker status|interval:|21:00:00/);
     assert.match(initialOutput, /#\? 計0s .*統合 ┈ 未記録/);
-    assert.match(initialOutput, /● worker-a \[-\] 5m 0s \(pid: 111\)/);
+    assert.match(initialOutput, /● worker-a\s+\[-\]\s+5m 0s \(pid: 111\)/);
     assert.equal(startTimeCalls, 1, '同一描画内の起動時刻取得は1回');
 
     // 2. タイマーコールバック実行（定期再描画）
@@ -716,9 +729,9 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
 
     const secondOutput = stdoutChunks.join('');
     assert.match(secondOutput, /\x1b\[2J\x1b\[H/);
-    assert.match(secondOutput, /=== gh-maestro worker status \(21:00:02, interval: 2s\) ===/);
+    assert.doesNotMatch(secondOutput, /=== gh-maestro worker status|interval:|21:00:02/);
     assert.match(secondOutput, /#\? 計0s .*統合 ┈ 未記録/);
-    assert.match(secondOutput, /● worker-a \[-\] 5m 2s \(pid: 111\)/);
+    assert.match(secondOutput, /● worker-a\s+\[-\]\s+5m 2s \(pid: 111\)/);
     assert.equal(startTimeCalls, 1, '上限間隔未満の再描画では再取得しない');
 
     // 3. エラー耐性（workers.json 破損時もループが落ちず stderr に書く）
@@ -938,7 +951,7 @@ test('collectWorkersStatus: Review Manager もワーカーと同じTTLキャッ�
   }
 });
 
-test('main: watch はスナップショットとJSTヘッダー（時刻のみ）を出力する', () => {
+test('main: watch はスナップショットを先頭行から出力し、現在時刻ヘッダーを含めない', () => {
   const workspace = createWorkspace();
   const fixedNow = new Date('2026-08-26T03:15:30.000Z').getTime(); // JST 12:15:30
   workerStatus._setNow(() => fixedNow);
@@ -952,9 +965,9 @@ test('main: watch はスナップショットとJSTヘッダー（時刻のみ�
     assert.equal(result.code, 0);
     assert.ok(result.isWatch);
     assert.equal(result.interval, 5);
-    assert.equal(result.lines[0], '=== gh-maestro worker status (12:15:30, interval: 5s) ===');
-    assert.match(result.lines[1], /^#403 計0s .*統合 ┈ 未記録/);
-    assert.match(result.lines[2], /● worker-a \[gemini\]/);
+    assert.match(result.lines[0], /^#403 計0s .*統合 ┈ 未記録/);
+    assert.match(result.lines[1], /● worker-a\s+\[gemini\]/);
+    assert.doesNotMatch(result.lines.join('\n'), /gh-maestro worker status|interval:|12:15:30/);
   } finally {
     workerStatus._setNow(null);
     removeWorkspace(workspace);
@@ -981,9 +994,9 @@ test('main: list --json と watch は同じ収集結果のワーカー集合・�
 
     const watchResult = runMain(['watch', '--workspace', workspace, '--interval', '5']);
     assert.equal(watchResult.code, 0);
-    const workerLines = watchResult.lines.slice(2);
+    const workerLines = watchResult.lines.slice(1);
     assert.equal(workerLines.length, 1);
-    assert.match(workerLines[0], /^○ stopped-worker \[codex\] - \(pid: 999\)$/);
+    assert.match(workerLines[0], /^○ stopped-worker\s+\[codex\]\s+- \(pid: 999\)$/);
   } finally {
     workerStatus._setNow(null);
     workerStatus._setIsWorkerAlive(null);
@@ -1135,6 +1148,11 @@ test('main: pane は初回起動時に status-pane.json を保存し、2回目�
     assert.equal(result1.reused, false);
     assert.equal(launchCallCount, 1);
     assert.match(result1.lines[0], /STATUS_PANE_LAUNCHED: pane=201/);
+    const registry = require('../scripts/shared/status-pane-registry').loadStatusPane(workspace);
+    assert.deepEqual(registry, { paneId: '201', launchedAt: registry.launchedAt });
+    assert.equal(Object.hasOwn(JSON.parse(
+      fs.readFileSync(require('../scripts/shared/status-pane-registry').statusPanePath(workspace), 'utf8'),
+    ), 'pid'), false);
 
     // 2回目の実行: 既存ペインが生存しているため launchInSplitPane は呼ばれず再利用される
     const result2 = runMain(['pane', '--workspace', workspace]);
@@ -1203,19 +1221,47 @@ test('main: close-pane は開いている監視ペインを kill して記録を
 
   try {
     // 起動
-    runMain(['pane', '--workspace', workspace]);
+    runMain(['pane', '--workspace', workspace, '--issue', '471']);
 
     // close-pane
-    const result = runMain(['close-pane', '--workspace', workspace]);
+    const result = runMain(['close-pane', '--workspace', workspace, '--issue', '471']);
     assert.equal(result.code, 0);
     assert.equal(result.paneId, '401');
     assert.equal(killedId, '401');
     assert.match(result.lines[0], /STATUS_PANE_CLOSED: pane=401/);
 
     // 再度 close-pane: 既に削除済みなので NOT_FOUND で終了
-    const resultNotFound = runMain(['close-pane', '--workspace', workspace]);
+    const resultNotFound = runMain(['close-pane', '--workspace', workspace, '--issue', '471']);
     assert.equal(resultNotFound.code, 0);
     assert.match(resultNotFound.lines[0], /STATUS_PANE_NOT_FOUND/);
+  } finally {
+    workerStatus._setLaunchInSplitPane(null);
+    workerStatus._setIsPaneAlive(null);
+    workerStatus._setKillPane(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('main: close-pane は異なるIssueの監視ペインを終了せず記録を維持する', () => {
+  const workspace = createWorkspace();
+  workerStatus._setLaunchInSplitPane(() => ({ paneId: '451' }));
+  workerStatus._setIsPaneAlive(() => true);
+  let killed = false;
+  workerStatus._setKillPane(() => {
+    killed = true;
+    return { ok: true, status: 0, stderr: '' };
+  });
+
+  try {
+    const launched = runMain(['pane', '--workspace', workspace, '--issue', '471']);
+    assert.equal(launched.code, 0);
+
+    const result = runMain(['close-pane', '--workspace', workspace, '--issue', '472']);
+    assert.equal(result.code, 0);
+    assert.match(result.lines[0], /STATUS_PANE_NOT_FOUND/);
+    assert.equal(killed, false);
+    const registry = require('../scripts/shared/status-pane-registry').loadStatusPane(workspace);
+    assert.deepEqual(registry, { paneId: '451', issue: '471', launchedAt: registry.launchedAt });
   } finally {
     workerStatus._setLaunchInSplitPane(null);
     workerStatus._setIsPaneAlive(null);
@@ -1556,8 +1602,8 @@ test('main: list および list --json で Review Manager を表示する', () =
     assert.equal(listResult.code, 0);
     assert.equal(listResult.lines.length, 3);
     assert.match(listResult.lines[0], /^#100 計0s .*統合 ┈ 未記録/);
-    assert.match(listResult.lines[1], /^● worker-a \[agent-1\] 10m 0s \(pid: 111\)$/);
-    assert.match(listResult.lines[2], /^● review-manager \[[^\]]+\] 5m 0s \(pid: 222\)$/);
+    assert.match(listResult.lines[1], /^● worker-a\s+\[agent-1\s*\]\s+10m 0s \(pid: 111\)$/);
+    assert.match(listResult.lines[2], /^● review-manager\s+\[[^\]]+\]\s+5m 0s \(pid: 222\)$/);
 
     // 2. list --json (機械可読JSON)
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
@@ -1694,9 +1740,9 @@ test('collectWorkersStatus & main: list / --json でレビュージョブを収�
     assert.equal(listResult.code, 0);
     assert.equal(listResult.lines.length, 4);
     assert.match(listResult.lines[0], /^#\? 計0s .*統合 ┈ 未記録/);
-    assert.match(listResult.lines[1], /^● review-manager \[[^\]]+\] 5m 0s \(pid: 222\)$/);
-    assert.match(listResult.lines[2], /^  └─ job-1 \(Design\) \[codex\] 3m 0s \(pid: 333\)$/);
-    assert.match(listResult.lines[3], /^  └─ job-2 \(Correctness\) \[codex\] 2m 0s \(pid: 444\)$/);
+    assert.match(listResult.lines[1], /^● review-manager\s+\[[^\]]+\]\s+5m 0s \(pid: 222\)$/);
+    assert.match(listResult.lines[2], /^  └─ job-1 \(Design\)\s+\[codex\s*\]\s+3m 0s \(pid: 333\)$/);
+    assert.match(listResult.lines[3], /^  └─ job-2 \(Correctness\)\s+\[codex\s*\]\s+2m 0s \(pid: 444\)$/);
 
     // 3. list --json
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
@@ -1745,7 +1791,7 @@ test('collectWorkersStatus: レビュージョブ取得失敗をReview Manager�
 
     const listResult = runMain(['list', '--workspace', workspace]);
     assert.equal(listResult.code, 0);
-    assert.match(listResult.lines[1], /^● review-manager \[[^\]]+\] 5m 0s \(pid: 222\)$/);
+    assert.match(listResult.lines[1], /^● review-manager\s+\[[^\]]+\]\s+5m 0s \(pid: 222\)$/);
     assert.match(listResult.lines[2], /^  └─ review jobs unavailable \(取得失敗\)$/);
 
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);

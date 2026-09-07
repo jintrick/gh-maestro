@@ -32,6 +32,10 @@ function defaultSaveStatusPaneRecovery(workspace, entry) {
   return require('./status-pane-registry').saveStatusPaneRecovery(workspace, entry);
 }
 
+function defaultRemoveStatusPane(workspace) {
+  return require('./status-pane-registry').removeStatusPane(workspace);
+}
+
 function defaultIsPaneAlive(paneId) {
   const alivePanes = require('./pane-launch').getAlivePaneIds();
   if (alivePanes === null) {
@@ -149,6 +153,7 @@ function compensatePersistenceFailure({
  * @param {Function} [deps.loadStatusPaneFn]
  * @param {Function} [deps.saveStatusPaneFn]
  * @param {Function} [deps.saveStatusPaneRecoveryFn]
+ * @param {Function} [deps.removeStatusPaneFn]
  * @param {Function} [deps.isPaneAliveFn]
  * @param {Function} [deps.launchInSplitPaneFn]
  * @param {Function} [deps.killPaneFn]
@@ -170,6 +175,7 @@ function ensureStatusPane(params = {}, deps = {}) {
   const loadStatusPaneFn = deps.loadStatusPaneFn || defaultLoadStatusPane;
   const saveStatusPaneFn = deps.saveStatusPaneFn || defaultSaveStatusPane;
   const saveStatusPaneRecoveryFn = deps.saveStatusPaneRecoveryFn || defaultSaveStatusPaneRecovery;
+  const removeStatusPaneFn = deps.removeStatusPaneFn || defaultRemoveStatusPane;
   const isPaneAliveFn = deps.isPaneAliveFn || defaultIsPaneAlive;
   const launchInSplitPaneFn = deps.launchInSplitPaneFn || defaultLaunchInSplitPane;
   const killPaneFn = deps.killPaneFn || defaultKillPane;
@@ -203,7 +209,35 @@ function ensureStatusPane(params = {}, deps = {}) {
         return failure('lookup', error);
       }
       if (alive) {
-        return { ok: true, paneId: String(existingPane.paneId), reused: true };
+        const requestedIssue = params.issue === undefined || params.issue === null || String(params.issue) === ''
+          ? null
+          : String(params.issue);
+        const existingIssue = /^[1-9]\d*$/.test(String(existingPane.issue))
+          ? String(existingPane.issue)
+          : null;
+        if (requestedIssue === null || requestedIssue === existingIssue) {
+          return { ok: true, paneId: String(existingPane.paneId), reused: true };
+        }
+
+        // A workspace has one shared status pane.  Once the caller supplies an
+        // Issue, reusing an alive pane whose launch Issue is different would
+        // silently keep displaying the old Issue.  The lock covers this
+        // close-and-relaunch sequence so concurrent ensure calls cannot both
+        // decide to replace the same pane.
+        let killResult;
+        try {
+          killResult = killPaneFn(existingPane.paneId);
+        } catch (error) {
+          return failure('close', error);
+        }
+        if (!killPaneSucceeded(killResult)) {
+          return failure('close', new Error(describeCleanupFailure(killResult)));
+        }
+        try {
+          removeStatusPaneFn(workspace);
+        } catch (error) {
+          return failure('close', error);
+        }
       }
     }
 
@@ -236,6 +270,9 @@ function ensureStatusPane(params = {}, deps = {}) {
 
     const paneId = String(paneResult.paneId);
     const entry = { paneId };
+    if (params.issue !== undefined && params.issue !== null && String(params.issue) !== '') {
+      entry.issue = String(params.issue);
+    }
     let launchedAt;
     try {
       launchedAt = new Date(nowFn()).toISOString();

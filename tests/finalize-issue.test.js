@@ -56,18 +56,37 @@ test('finalizeIssue: 全ワーカーを削除してからIssueをクローズす
   }, (dir) => {
     const removed = [];
     let closedIssue = null;
+    let closedStatusPane = null;
     const result = finalizeIssue(
       { workspace: dir, issue: 5, repo: 'o/r' },
       {
         removeWorkerFn: (ws, name) => { removed.push(name); return { ok: true }; },
         closeIssueFn: (issue, repo, ws) => { closedIssue = { issue, repo }; return { ok: true }; },
+        closeStatusPaneFn: (ws, issue) => { closedStatusPane = { ws, issue }; return { ok: true }; },
         findReviewPrsFn: () => [],
       }
     );
     assert.deepEqual(removed.sort(), ['issue-5-coder', 'issue-5-explore']);
     assert.deepEqual(closedIssue, { issue: 5, repo: 'o/r' });
+    assert.deepEqual(closedStatusPane, { ws: dir, issue: 5 });
     assert.equal(result.removedCount, 2);
     assert.equal(result.closed, true);
+    assert.equal(result.statusPaneClosed, true);
+  });
+});
+
+test('finalizeIssue: 監視ペイン終了の失敗はIssueクローズを失敗扱いにしない', () => {
+  withTempWorkspace({}, (dir) => {
+    const result = finalizeIssue(
+      { workspace: dir, issue: 471 },
+      {
+        closeIssueFn: () => ({ ok: true }),
+        closeStatusPaneFn: () => ({ ok: false, stderr: 'wezterm unavailable' }),
+        findReviewPrsFn: () => [],
+      },
+    );
+    assert.equal(result.closed, true);
+    assert.equal(result.statusPaneClosed, false);
   });
 });
 

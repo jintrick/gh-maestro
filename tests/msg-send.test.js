@@ -160,6 +160,7 @@ test('コメント投稿成功時は送信先を問わず監視ペイン保証�
     assert.equal(orchestratorSend.code, 0);
     assert.equal(ensureStatusPaneCalls.length, 1);
     assert.equal(ensureStatusPaneCalls[0].workspace, workspace);
+    assert.equal(ensureStatusPaneCalls[0].issue, '1');
     assert.ok(ensureStatusPaneCalls[0].scriptsPath.endsWith(`${path.sep}scripts`));
 
     ensureStatusPaneCalls.length = 0;
@@ -171,6 +172,7 @@ test('コメント投稿成功時は送信先を問わず監視ペイン保証�
     assert.equal(workerSend.code, 0);
     assert.equal(ensureStatusPaneCalls.length, 1);
     assert.equal(ensureStatusPaneCalls[0].workspace, workspace);
+    assert.equal(ensureStatusPaneCalls[0].issue, '1');
   });
 });
 
