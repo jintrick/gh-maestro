@@ -99,6 +99,13 @@ function renameSyncWithRetry(stagingPath, filePath) {
  * @returns {string} 出力先ファイルパス
  * @throws {Error} 親ディレクトリ作成・一時ファイル書込み・rename のいずれかが失敗した場合
  */
+/*
+ * ここで書く JSON は状態の記録であり、プロセス間の連絡手段ではない。
+ * 書き手は常に1つに保つこと。子プロセスが親の書いた記録を読んで自分の値を
+ * 書き足す形にすると、読み込みと書き戻しの間に順序が生まれて競合する。
+ *
+ * 理由と経緯: docs/adr/0032-json-state-files-have-a-single-writer.md
+ */
 function atomicWriteJson(filePath, data) {
   return atomicWriteText(filePath, JSON.stringify(data, null, 2));
 }
