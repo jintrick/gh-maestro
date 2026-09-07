@@ -69,6 +69,18 @@ function resultFileFromPrompt(prompt) {
   return path.normalize(match[1]);
 }
 
+function promptFileInOwnedDir(prefix) {
+  const candidates = fs.readdirSync(os.tmpdir())
+    .filter(name => name.startsWith(prefix))
+    .map(name => {
+      const directory = path.join(os.tmpdir(), name);
+      return { file: path.join(directory, 'prompt.md'), mtimeMs: fs.statSync(directory).mtimeMs };
+    })
+    .filter(({ file }) => fs.existsSync(file))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return candidates[0]?.file;
+}
+
 function codexReviewAgentConfig() {
   return {
     id: 'codex',
@@ -104,11 +116,7 @@ async function runReviewJobWithResult(resultText, options = {}) {
     child.stdout = new EventEmitter();
     child.kill = () => {};
     process.nextTick(() => {
-      const promptFile = fs.readdirSync(os.tmpdir())
-        .filter(name => name.startsWith('review-job-job-1-review-') && name.endsWith('.md'))
-        .map(name => path.join(os.tmpdir(), name))
-        .sort()
-        .pop();
+      const promptFile = promptFileInOwnedDir('review-job-job-1-review-');
       assert.ok(promptFile, 'review prompt file should exist while the process runs');
       promptText = fs.readFileSync(promptFile, 'utf8');
       resultFilePath = resultFileFromPrompt(promptText);
@@ -529,11 +537,7 @@ test('launchJobWorker: 単一プロセスを同一cwdから起動し、pre/post�
     child.stdout = new EventEmitter();
     child.kill = () => {};
     process.nextTick(() => {
-      const promptFile = fs.readdirSync(os.tmpdir())
-        .filter(name => name.startsWith('review-job-job-1-review-') && name.endsWith('.md'))
-        .map(name => path.join(os.tmpdir(), name))
-        .sort()
-        .pop();
+      const promptFile = promptFileInOwnedDir('review-job-job-1-review-');
       assert.ok(promptFile, 'review prompt file should exist while the process runs');
       promptText = fs.readFileSync(promptFile, 'utf8');
       resultFilePath = resultFileFromPrompt(promptText);
@@ -1550,11 +1554,7 @@ test('launchJobWorker: ジョブ起動時に registerProcess を呼び、正常�
   _setSpawn((cmd, args, opts) => {
     setImmediate(() => {
       // 結果ファイルを書く
-      const promptFile = fs.readdirSync(os.tmpdir())
-        .filter(name => name.startsWith('review-job-job-test-review-') && name.endsWith('.md'))
-        .map(name => path.join(os.tmpdir(), name))
-        .sort()
-        .pop();
+      const promptFile = promptFileInOwnedDir('review-job-job-test-review-');
       if (promptFile && fs.existsSync(promptFile)) {
         const prompt = fs.readFileSync(promptFile, 'utf8');
         const resFile = resultFileFromPrompt(prompt);
@@ -1667,11 +1667,7 @@ test('launchJobWorker: registerProcess 失敗時もジョブ実行を継続し�
 
   _setSpawn((cmd, args, opts) => {
     setImmediate(() => {
-      const promptFile = fs.readdirSync(os.tmpdir())
-        .filter(name => name.startsWith('review-job-job-reg-err-review-') && name.endsWith('.md'))
-        .map(name => path.join(os.tmpdir(), name))
-        .sort()
-        .pop();
+      const promptFile = promptFileInOwnedDir('review-job-job-reg-err-review-');
       if (promptFile && fs.existsSync(promptFile)) {
         const prompt = fs.readFileSync(promptFile, 'utf8');
         const resFile = resultFileFromPrompt(prompt);

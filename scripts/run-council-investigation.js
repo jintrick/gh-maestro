@@ -9,7 +9,7 @@
 //
 // spawn-worker.js・workers.json・Issueコメント報告は使わない（使い捨てジョブのため）。
 // 起動パターンは run-council-jobs.js の launchParticipantJob に倣う:
-//   buildAgentCommandArgs → buildLoginShellExecArgs → child-process.js spawn
+//   shared/agent-launch.js の共通入口 → child-process.js spawn
 //   （stdout をパイプで回収し JSON 抽出 → スキーマ検証）。
 // 計画上の「launchAgentHeadless 使用」は意図的に踏襲しない。launchAgentHeadless は
 // stdout/stderr をログファイルへ直接リダイレクトして detached 起動するため、stdout の
@@ -18,10 +18,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { spawn } = require('./shared/child-process');
-const { buildAgentCommandArgs } = require('./shared/agent-launch');
-const { buildLoginShellExecArgs } = require('./shared/agent-exec');
+const { runAgentWithPrompt } = require('./shared/agent-launch');
 const { resolveAgentConfig, resolveCouncilConfig, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { _validateAgainstSchema } = require('./shared/json-schema');
@@ -128,30 +126,6 @@ async function launchInvestigationJob({ title, agenda, question, agentConfig, wo
   }
 
   const promptText = buildInvestigationPrompt({ title, agenda, question });
-  const promptFile = path.join(os.tmpdir(), `council-investigation-${Date.now()}.md`);
-  try {
-    fs.writeFileSync(promptFile, promptText, 'utf8');
-  } catch (e) {
-    return { ok: false, error: `prompt file write failed: ${e.message}` };
-  }
-
-  // `{workspace}` プレースホルダーはジョブcwd（議論用worktree）へ置換する
-  const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
-    .map(a => a.replace(/\{workspace\}/g, worktreeDir));
-
-  const agentArgs = buildAgentCommandArgs({
-    ...agentConfig,
-    extraArgs,
-    promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
-    promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
-  }, {
-    promptFile,
-    // Windowsパス（バックスラッシュ）がシェルでエスケープとして解釈されないよう / へ正規化する
-    shortPrompt: `Read ${promptFile.replace(new RegExp(BS + BS, 'g'), '/')} and execute it.`,
-    systemPromptText: `あなたは gh-maestro council の調査担当エージェントです。${title}の議論に必要な事実を調査してください。`,
-  });
-
-  const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
 
   const logFile = workerLogPath(workspace, 'council-investigation', {
     ownerKind: 'job', ownerId: jobId, workerName: 'council-investigation',
@@ -162,46 +136,33 @@ async function launchInvestigationJob({ title, agenda, question, agentConfig, wo
   try {
     stderrFd = fs.openSync(logFile, 'a');
   } catch (e) {
-    try { fs.unlinkSync(promptFile); } catch {}
     return { ok: false, error: `log file open failed: ${e.message}` };
   }
 
-  let child;
-  try {
-    child = spawn(shellArgs[0], shellArgs.slice(1), {
-      cwd: worktreeDir,
-      env: process.env,
-      stdio: ['ignore', 'pipe', stderrFd],
-    });
-  } catch (e) {
-    try { fs.closeSync(stderrFd); } catch {}
-    try { fs.unlinkSync(promptFile); } catch {}
-    return { ok: false, error: `spawn failed: ${e.message}` };
-  }
-
   const stdoutChunks = [];
-  child.stdout.on('data', (chunk) => { stdoutChunks.push(chunk); });
-
-  // タイムアウト時は子プロセスだけでなく、そのプロセスツリー全体を終了させる。
-  // Windows では pwsh → agent CLI の親子構造が残り得るため、child.kill() だけだと
-  // agent CLI が孤児として残る。タイマー・クリーンアップ登録・close/error 解決は
-  // 共有ヘルパー waitChildExit に委譲し、close 後の stdout 抽出・検証を本関数で行う
-  // （run-council-jobs.js の launchParticipantJob と同じ対策、Issue #232 共有化）。
-  let code;
+  let run;
   try {
-    code = await waitChildExit({
-      child,
-      timeoutMs,
-      onCleanup: () => {
-        try { fs.closeSync(stderrFd); } catch {}
-        try { fs.unlinkSync(promptFile); } catch {}
+    run = await runAgentWithPrompt({
+      agentConfig,
+      promptText,
+      cwd: worktreeDir,
+      tempPrefix: 'council-investigation-',
+      systemPromptText: `あなたは gh-maestro council の調査担当エージェントです。${title}の議論に必要な事実を調査してください。`,
+      spawnFn: spawn,
+      spawnOptions: { stdio: ['ignore', 'pipe', stderrFd] },
+      observe: (child) => {
+        child.stdout.on('data', (chunk) => { stdoutChunks.push(chunk); });
+        return waitChildExit({ child, timeoutMs });
+      },
+      cleanup: () => {
+        fs.closeSync(stderrFd);
       },
     });
-  } catch (err) {
-    // 起動失敗（child 'error'）。onCleanup は waitChildExit 内で実行済み
-    return { ok: false, error: `agent process error: ${err.message}` };
+  } catch (e) {
+    return { ok: false, error: `agent launch failed: ${e.message}` };
   }
 
+  const code = run.observed;
   const stdout = Buffer.concat(stdoutChunks).toString('utf8').trim();
 
   if (code !== 0) {

@@ -2,11 +2,9 @@
 'use strict';
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('./shared/child-process');
-const { buildAgentCommandArgs } = require('./shared/agent-launch');
-const { buildLoginShellExecArgs } = require('./shared/agent-exec');
+const { runAgentWithPrompt } = require('./shared/agent-launch');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { linkNodeModules } = require('./shared/link-node-modules');
 const { unlinkJunctions } = require('./shared/unlink-junctions');
@@ -252,104 +250,6 @@ function teardownReviewWorktree(workspace, pr, log) {
   try {
     spawnSync('git', ['update-ref', '-d', fetchRef], { cwd: workspace, stdio: 'pipe' });
   } catch {}
-}
-
-/**
- * Review Manager用の非対話起動argvを組み立てる。
- * 通常ワーカー用のプロンプト配送を維持したまま、execPromptDeliveryがあればRMだけで使う。
- *
- * @param {object} agentConfig
- * @param {{reviewWtDir: string, promptFile: string, skill: string}} options
- * @returns {string[]}
- */
-function buildReviewManagerAgentArgs(agentConfig, { reviewWtDir, promptFile, skill }) {
-  const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
-    .map(a => a.replace(/\{workspace\}/g, reviewWtDir));
-
-  return buildAgentCommandArgs({
-    ...agentConfig,
-    extraArgs,
-    promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
-    promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
-  }, {
-    promptFile,
-    shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
-    systemPromptText: `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
-  });
-}
-
-/**
- * headless でエージェントを起動し、完了まで同期ブロックする。
- *
- * 標準出力/標準エラーはファイル記述子として logFile へ直接リダイレクトする。
- * これによりRM自身の発言（どの観点をどう判断・除外したか等）が**実行中から逐次**
- * ログに残り、完了を待たずに追跡できる（`Get-Content -Wait` / Monitor）。
- *
- * 以前は出力をメモリにバッファして完了後にまとめて書いていたため、実行中は何も
- * 見えなかった。パイプ（Tee-Object / tee）は使わない——非対話execモードのcodex/agyと
- * 非互換で本番クラッシュを起こした実績がある（Issue #150）。fdリダイレクトはシェルの
- * 文字列パイプライン層を通らないため、その障害も文字化けも構造的に起こらない。
- *
- * agentArgs はそのまま spawn せず buildLoginShellExecArgs でログインシェル経由に
- * ラップする（headless-launch.js の通常ワーカー起動と同じ抽象）。agentArgs[0] が
- * PATH上の実行ファイルとは限らず、$PROFILE で定義されたpwsh関数（例:
- * "codex-terra" のようなモデル違いラッパー。config.json の extends 機能で
- * command として指定できる）でありうるため、生spawnだとENOENTになる
- * （実障害: Review Manager役にpwsh関数エージェントを割り当てるとspawn error:
- * spawnSync <command> ENOENT で即失敗していた）。
- *
- * spawnSync のままなので呼び出し元は従来どおり完了を同期待ちできる。
- *
- * @param {string[]} agentArgs
- * @param {string} cwd
- * @param {string} logFile 標準出力/標準エラーの追記先
- * @returns {{status: number|null, error?: Error}}
- */
-function runAgentHeadless(agentArgs, cwd, logFile) {
-  const fd = fs.openSync(logFile, 'a');
-  try {
-    const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
-    return spawnSync(shellArgs[0], shellArgs.slice(1), {
-      cwd,
-      env: process.env,
-      // stdin は pipe で受け、input: '' により起動直後にEOFを明示送信する（Issue #246）。
-      // 'ignore'（WindowsではNUL）にすると codex 等のCLIがEOFを認識できず追加入力待ちで
-      // ハングすることがある（Issue #244）。spawnSync は同期のため、pipeを閉じる手段は
-      // input のみ。空文字列を書いて閉じることで即時EOFになる（実機検証済み）。
-      stdio: ['pipe', fd, fd],
-      input: '',
-    });
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-/**
- * エージェントを非同期spawnし、起動直後にstdinへEOFを送る（Issue #246）。
- *
- * stdout/stderr はログfdへ直接リダイレクトする（パイプ経由の複製はしない）。
- * stdin は pipe で受け、起動直後に閉じてEOFを明示送信する。'ignore'（WindowsではNUL）だと
- * codex 等のCLIがEOFを認識できず追加入力待ちでハングしうる（Issue #244）。headless-shim.js
- * の runShim と同一方式。
- *
- * @param {string[]} shellArgs ログインシェル経由にラップ済みの起動argv
- * @param {{cwd: string, env: object, logFd: number}} opts 起動オプション（logFd はログの追記fd）
- * @param {Function} [spawnFn=spawn] テスト用のspawn注入口（headless-shim.js と同じパターン）
- * @returns {object} 起動した子プロセスハンドル（stdinへのEOF送信済み）
- */
-function spawnAgentWithStdinEof(shellArgs, { cwd, env, logFd }, spawnFn = spawn) {
-  const child = spawnFn(shellArgs[0], shellArgs.slice(1), {
-    cwd,
-    env,
-    stdio: ['pipe', logFd, logFd],
-  });
-
-  // 子へEOFを明示的に送る。pipe で受け、起動直後に閉じて入力終了（EOF）を確実に伝える。
-  // spawn 失敗時等 child.stdin が無い場合は無視する。
-  if (child.stdin) {
-    try { child.stdin.end(); } catch { /* 起動失敗等で閉じられない場合は無視 */ }
-  }
-  return child;
 }
 
 // ── 成果物ポーリング ────────────────────────────────────────────────────────────
@@ -626,7 +526,6 @@ module.exports = {
   buildFinalizePrompt,
   generateStagingPath,
   setupReviewWorktree, teardownReviewWorktree,
-  buildReviewManagerAgentArgs, runAgentHeadless, spawnAgentWithStdinEof,
   pollForArtifact, validateArtifactContent,
   atomicCopyStaging, boundedCleanup,
   superviseReviewManager,
@@ -858,7 +757,6 @@ function persistReviewManifest({ reviewWtDir, workspace, pr, log }) {
  * @param {string} opts.lockFile
  * @param {string} opts.logFile
  * @param {string} opts.outputFile メインワークスペース側の最終成果物パス
- * @param {string} opts.promptFile
  * @param {number} opts.deadlineMs 監督タイムアウト（ms）
  * @param {(msg: string) => void} opts.log
  * @param {{aborted: boolean}} opts.signal 外部からの中止シグナル
@@ -983,14 +881,8 @@ function runJobsDeterministically({ manifestPath, resultsPath, pr, repo, workspa
  */
 async function superviseAgentPhase({
   pr, repo, issue, workspace, reviewWtDir, logFile, log, signal,
-  promptText, promptFile, targetPath, watchSentinel, deadlineMs,
+  promptText, targetPath, watchSentinel, deadlineMs,
 }) {
-  try {
-    fs.writeFileSync(promptFile, promptText, 'utf8');
-  } catch (e) {
-    return { outcome: 'setup-failed', exitCode: 1, agentPid: null, reason: `prompt file書き込み失敗: ${e.message}` };
-  }
-
   const skill = 'gh-maestro-reviewer';
   const skillMap = resolveSkillAgentMap({ workspace: reviewWtDir });
   const agentId = skillMap[skill] ?? 'codex';
@@ -1009,10 +901,6 @@ async function superviseAgentPhase({
     return { outcome: 'agent-config-failed', exitCode: 1, agentPid: null, reason: `non-interactive token missing: ${execTokenCheck.missing.join(', ')}` };
   }
 
-  const agentArgs = buildReviewManagerAgentArgs(agentConfig, { reviewWtDir, promptFile, skill });
-  log(`spawning ${agentArgs.join(' ')}`);
-
-  const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
   let agentFd;
   try {
     agentFd = fs.openSync(logFile, 'a');
@@ -1020,80 +908,118 @@ async function superviseAgentPhase({
     return { outcome: 'setup-failed', exitCode: 1, agentPid: null, reason: `ログファイルを開けません: ${e.message}` };
   }
 
-  let agentChild;
-  try {
-    agentChild = spawnAgentWithStdinEof(shellArgs, { cwd: reviewWtDir, env: process.env, logFd: agentFd });
-  } catch (e) {
+  let agentFdClosed = false;
+  let childEndWatcherInstalled = false;
+  const closeAgentFd = () => {
+    if (agentFdClosed) return;
+    agentFdClosed = true;
     try { fs.closeSync(agentFd); } catch {}
+  };
+  const watchChildEnd = (child) => {
+    if (!child || typeof child.on !== 'function') {
+      closeAgentFd();
+      return;
+    }
+    if (childEndWatcherInstalled) return;
+    childEndWatcherInstalled = true;
+    const onChildEnd = () => closeAgentFd();
+    if (typeof child.once === 'function') {
+      child.once('close', onChildEnd);
+      child.once('error', onChildEnd);
+    } else {
+      child.on('close', onChildEnd);
+      child.on('error', onChildEnd);
+    }
+  };
+
+  let run;
+  try {
+    run = await runAgentWithPrompt({
+      agentConfig,
+      promptText,
+      cwd: reviewWtDir,
+      tempPrefix: `review-manager-${pr}-`,
+      systemPromptText: `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
+      spawnFn: spawn,
+      spawnOptions: { stdio: ['pipe', agentFd, agentFd] },
+      onSpawn: (child) => {
+        // 成果物を先に検出して observe が戻っても、子プロセスが終了するまでは
+        // stdout/stderr の出力先を閉じない。終了後の診断ログを失わないためである。
+        watchChildEnd(child);
+        if (child.stdin) child.stdin.end();
+      },
+      observe: async (agentChild) => {
+        const agentPid = agentChild.pid;
+
+        // プロセス終了を phaseSignal で表現し、pollForArtifact を即座に中断させる。
+        // 呼び出し元の共有 signal は外部中止用であり、ここでは変更しない。
+        const phaseSignal = { aborted: false };
+        let processExited = false;
+        let processExitCode = null;
+        let processExitReason = null;
+        let processFinalized = false;
+        const markProcessDone = (code, reason) => {
+          if (processFinalized) return;
+          processFinalized = true;
+          processExited = true;
+          processExitCode = code;
+          processExitReason = reason;
+          phaseSignal.aborted = true;
+        };
+        agentChild.on('exit', (code) => markProcessDone(code, null));
+        agentChild.on('error', (err) => markProcessDone(null, err.message));
+
+        const pollStart = Date.now();
+        while (true) {
+          const remaining = deadlineMs - (Date.now() - pollStart);
+          if (remaining <= 0) {
+            log(`deadline reached after ${deadlineMs}ms`);
+            break;
+          }
+          if (signal && signal.aborted) {
+            log('aborted by external signal');
+            break;
+          }
+
+          // watchSentinel 時は、プロセス生存中でもセンチネルがあれば即時終了（不完全完了の決定打）。
+          if (watchSentinel) {
+            const sentinelPath = findIncompleteSentinel(workspace, reviewWtDir, pr);
+            if (sentinelPath) {
+              log(`incomplete sentinel detected (${path.basename(sentinelPath)})`);
+              return { outcome: 'incomplete', sentinelPath, agentPid };
+            }
+          }
+
+          const pollFn = _injectedPollForArtifact || pollForArtifact;
+          const pollResult = await pollFn(targetPath, remaining, DEFAULT_ARTIFACT_POLL_INTERVAL_MS, phaseSignal);
+          if (pollResult.found && pollResult.content) {
+            log(`target detected at ${targetPath} (${pollResult.content.length} bytes)`);
+            return { outcome: 'target', content: pollResult.content, targetPath, agentPid };
+          }
+
+          if (processExited) {
+            const reason = processExitReason
+              ? `プロセス起動/実行エラー（status ${processExitCode}）: ${processExitReason}`
+              : `プロセス終了（status ${processExitCode}）、成果物未検出`;
+            log(reason);
+            return { outcome: 'exit', exitCode: processExitCode || 1, agentPid, reason };
+          }
+        }
+
+        log('timeout: neither target nor process exit detected');
+        return { outcome: 'timeout', exitCode: 1, agentPid, reason: `deadline (${deadlineMs}ms) reached without target or process exit` };
+      },
+      cleanup: (child) => {
+        // cleanup は observe の終了直後に呼ばれることがある。fdの寿命は
+        // エージェントの close/error イベントまで延長し、spawn失敗時だけ即時解放する。
+        watchChildEnd(child);
+      },
+    });
+  } catch (e) {
     log(`spawn error: ${e.message}`);
     return { outcome: 'setup-failed', exitCode: 1, agentPid: null, reason: `spawn失敗: ${e.message}` };
   }
-
-  let agentFdClosed = false;
-  const closeAgentFd = () => {
-    if (!agentFdClosed) { try { fs.closeSync(agentFd); } catch {} agentFdClosed = true; }
-  };
-  agentChild.on('close', closeAgentFd);
-
-  const agentPid = agentChild.pid;
-
-  // プロセス終了を phaseSignal で表現し、pollForArtifact を即座に中断させる。
-  // 呼び出し元の共有 signal は外部中止用であり、ここでは変更しない。
-  const phaseSignal = { aborted: false };
-  let processExited = false;
-  let processExitCode = null;
-  let processExitReason = null;
-  let processFinalized = false;
-  const markProcessDone = (code, reason) => {
-    if (processFinalized) return;
-    processFinalized = true;
-    processExited = true;
-    processExitCode = code;
-    processExitReason = reason;
-    phaseSignal.aborted = true;
-  };
-  agentChild.on('exit', (code) => markProcessDone(code, null));
-  agentChild.on('error', (err) => { markProcessDone(null, err.message); closeAgentFd(); });
-
-  const pollStart = Date.now();
-  while (true) {
-    const remaining = deadlineMs - (Date.now() - pollStart);
-    if (remaining <= 0) {
-      log(`deadline reached after ${deadlineMs}ms`);
-      break;
-    }
-    if (signal && signal.aborted) {
-      log('aborted by external signal');
-      break;
-    }
-
-    // watchSentinel 時は、プロセス生存中でもセンチネルがあれば即時終了（不完全完了の決定打）。
-    if (watchSentinel) {
-      const sentinelPath = findIncompleteSentinel(workspace, reviewWtDir, pr);
-      if (sentinelPath) {
-        log(`incomplete sentinel detected (${path.basename(sentinelPath)})`);
-        return { outcome: 'incomplete', sentinelPath, agentPid };
-      }
-    }
-
-    const pollFn = _injectedPollForArtifact || pollForArtifact;
-    const pollResult = await pollFn(targetPath, remaining, DEFAULT_ARTIFACT_POLL_INTERVAL_MS, phaseSignal);
-    if (pollResult.found && pollResult.content) {
-      log(`target detected at ${targetPath} (${pollResult.content.length} bytes)`);
-      return { outcome: 'target', content: pollResult.content, targetPath, agentPid };
-    }
-
-    if (processExited) {
-      const reason = processExitReason
-        ? `プロセス起動/実行エラー（status ${processExitCode}）: ${processExitReason}`
-        : `プロセス終了（status ${processExitCode}）、成果物未検出`;
-      log(reason);
-      return { outcome: 'exit', exitCode: processExitCode || 1, agentPid, reason };
-    }
-  }
-
-  log('timeout: neither target nor process exit detected');
-  return { outcome: 'timeout', exitCode: 1, agentPid, reason: `deadline (${deadlineMs}ms) reached without target or process exit` };
+  return run.observed;
 }
 
 /**
@@ -1126,7 +1052,7 @@ function mapAgentPhaseFailure(phase, reviewWtDir) {
  */
 async function superviseReviewManager({
   pr, repo, workspace, ghDir, lockFile, logFile,
-  outputFile, promptFile, deadlineMs, log, signal, issue, lockOwner,
+  outputFile, deadlineMs, log, signal, issue, lockOwner,
 }) {
   // 1. ディレクトリ作成・ロック
   try {
@@ -1201,7 +1127,7 @@ async function superviseReviewManager({
   const { prompt: phase1Prompt } = buildPrompt({ pr, repo, issue, workspace: reviewWtDir, mainGhDir: ghDir, skillPath });
   const phase1 = await superviseAgentPhase({
     pr, repo, issue, workspace, reviewWtDir, logFile, log, signal,
-    promptText: phase1Prompt, promptFile, targetPath: manifestPath, watchSentinel: false, deadlineMs,
+    promptText: phase1Prompt, targetPath: manifestPath, watchSentinel: false, deadlineMs,
   });
   if (phase1.outcome !== 'target') {
     return mapAgentPhaseFailure(phase1, reviewWtDir);
@@ -1235,7 +1161,7 @@ async function superviseReviewManager({
   });
   const phase2 = await superviseAgentPhase({
     pr, repo, issue, workspace, reviewWtDir, logFile, log, signal,
-    promptText: phase2Prompt, promptFile, targetPath: worktreeOutputFile, watchSentinel: true, deadlineMs,
+    promptText: phase2Prompt, targetPath: worktreeOutputFile, watchSentinel: true, deadlineMs,
   });
   if (phase2.outcome === 'incomplete') {
     // RM が incomplete 判断 → finalize-review --mode incomplete がセンチネルを書いた
@@ -1346,7 +1272,6 @@ if (require.main === module) {
     const lockFile = spec.leaseStore;
     const logFile = spec.logPath;
     const outputFile = reviewArtifactPath(workspace, pr, '.json');
-    const promptFile = path.join(os.tmpdir(), `review-manager-prompt-${pr}-${Date.now()}.md`);
     const lockOwner = {
       pid: process.pid,
       startTime: _getProcessStartTime(process.pid) || null,
@@ -1385,7 +1310,7 @@ if (require.main === module) {
     try {
       supervisionResult = await superviseReviewManager({
         pr, repo, workspace, ghDir, lockFile, logFile,
-        outputFile, promptFile,
+        outputFile,
         issue,
         lockOwner,
         deadlineMs: DEFAULT_DEADLINE_MS,
@@ -1416,9 +1341,6 @@ if (require.main === module) {
       log(`fatal error: ${e.message}`);
       supervisionResult = { outcome: 'setup-failed', exitCode: 1, artifact: null, reason: e.message };
     } finally {
-      // promptファイルは必ず削除
-      try { fs.unlinkSync(promptFile); } catch {}
-
       // 監督結果・cleanup結果をログに記録
       if (supervisionResult) {
         log(`final outcome: ${supervisionResult.outcome} exitCode=${supervisionResult.exitCode}`);

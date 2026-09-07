@@ -13,13 +13,11 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { spawn, spawnSync } = require('./shared/child-process');
 const { writeSentinel, finalizeReview } = require('./finalize-review');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { atomicWriteJson } = require('./shared/atomic-write');
-const { buildAgentCommandArgs } = require('./shared/agent-launch');
-const { buildLoginShellExecArgs } = require('./shared/agent-exec');
+const { runAgentWithPrompt, RESULT_FILE_TOKEN } = require('./shared/agent-launch');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { readJsonFile } = require('./shared/json-file');
@@ -538,14 +536,15 @@ ${postLeavesSection}
 ${findingsOutputSection(job.aspect, options.resultFile)}`;
 }
 
-function readFindingsFile(resultFile, stage) {
+function parseFindingsText(resultText, stage) {
   let findings;
+  if (typeof resultText !== 'string') {
+    throw new Error(`${stage}: result file read failed: result file was not produced`);
+  }
   try {
-    if (!fs.statSync(resultFile).isFile()) throw new Error('not a regular file');
-    findings = readJsonFile(resultFile);
+    findings = JSON.parse(resultText.replace(/^\uFEFF/, ''));
   } catch (e) {
-    const kind = e && e.kind === 'parse' ? 'result JSON parse failed' : 'result file read failed';
-    throw new Error(`${stage}: ${kind} (${resultFile}): ${e.message}`);
+    throw new Error(`${stage}: result JSON parse failed: ${e.message}`);
   }
 
   if (!Array.isArray(findings)) throw new Error(`${stage}: output is not a JSON array`);
@@ -570,47 +569,6 @@ function readFindingsFile(resultFile, stage) {
   return findings;
 }
 
-function runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef, onSpawn) {
-  return new Promise((resolve) => {
-    if (_spawn === spawn && process.env.NODE_TEST_CONTEXT) {
-      resolve({ error: 'agent spawn refused during test execution; inject spawn for launch-path tests' });
-      return;
-    }
-    let child;
-    let settled = false;
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      if (childRef) childRef.child = null;
-      resolve(result);
-    };
-    try {
-      const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
-      child = _spawn(shellArgs[0], shellArgs.slice(1), {
-        cwd: reviewWtDir,
-        env: process.env,
-        // stdout is deliberately ignored. Review results are read from the file
-        // requested in the job prompt; parsing a mixed agent stream is unsafe.
-        stdio: ['ignore', 'ignore', stderrFd],
-      });
-      if (!child || typeof child.on !== 'function') {
-        finish({ error: 'spawn returned an invalid child process handle' });
-        return;
-      }
-      if (childRef) childRef.child = child;
-      if (typeof onSpawn === 'function') {
-        try { onSpawn(child); } catch {}
-      }
-    } catch (e) {
-      finish({ error: `spawn failed: ${e.message}` });
-      return;
-    }
-
-    child.on('error', err => finish({ error: `agent process error: ${err.message}` }));
-    child.on('close', code => finish({ code }));
-  });
-}
-
 /**
  * 1ジョブを単一のheadlessエージェントプロセスで実行し、findingsを取得する。
  */
@@ -628,40 +586,17 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
     return failed(`agent "${agentConfig.id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (check ~/.gh-maestro/config.json agents["${agentConfig.id}"].execArgs / extraArgs)`);
   }
 
-  const promptDelivery = agentConfig.execPromptDelivery ?? agentConfig.promptDelivery;
-  const promptFlag = agentConfig.execPromptFlag ?? agentConfig.promptFlag;
-  if (!['flag', 'positional', 'system-prompt-file'].includes(promptDelivery)) {
-    return failed(`agent "${agentConfig.id}" prompt delivery "${promptDelivery}" is not supported for headless review`);
-  }
-  if (promptDelivery === 'flag' && !promptFlag) {
-    return failed(`agent "${agentConfig.id}" promptFlag is required for headless review`);
-  }
-
   const skillsDir = resolveReviewSkillsDir(options);
   const fileCheck = validateCanonicalReviewFiles(job, skillsDir);
   if (!fileCheck.ok) return failed(fileCheck.error);
 
-  const configuredArgs = agentConfig.execArgs ?? agentConfig.extraArgs;
-  if (!Array.isArray(configuredArgs) || configuredArgs.some(arg => typeof arg !== 'string')) {
-    return failed(`agent "${agentConfig.id}" execArgs/extraArgs must be an array of strings`);
-  }
-
-  let resultDir;
-  try {
-    resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-job-result-'));
-  } catch (e) {
-    return failed(`result file setup failed: ${e.message}`);
-  }
-  const resultFile = path.join(resultDir, 'findings.json');
-  const cleanupResultDir = () => {
-    try { fs.rmSync(resultDir, { recursive: true, force: true }); } catch {}
-  };
-
   let prompt;
   try {
-    prompt = buildJobPrompt(job, manifest, reviewWtDir, { ...options, resultFile });
+    prompt = buildJobPrompt(job, manifest, reviewWtDir, {
+      ...options,
+      resultFile: RESULT_FILE_TOKEN,
+    });
   } catch (e) {
-    cleanupResultDir();
     return failed(e.message);
   }
 
@@ -671,7 +606,6 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
       ownerKind: 'job', ownerId: job.id, workerName: `review-job-${job.id}`,
     });
   } catch (e) {
-    cleanupResultDir();
     return failed(`log file path failed: ${e.message}`);
   }
   try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); } catch {}
@@ -680,39 +614,11 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
   try {
     stderrFd = fs.openSync(logFile, 'a');
   } catch (e) {
-    cleanupResultDir();
     return failed(`log file open failed: ${e.message}`);
   }
 
-  const promptFiles = new Set();
   let timeoutHandle;
   let timedOut = false;
-  const promptFileFor = () => {
-    const promptFile = path.join(os.tmpdir(), `review-job-${job.id}-review-${Date.now()}.md`);
-    promptFiles.add(promptFile);
-    return promptFile;
-  };
-  const writePrompt = (promptFile, text) => {
-    try {
-      fs.writeFileSync(promptFile, text, 'utf8');
-      return null;
-    } catch (e) {
-      return `prompt file write failed: ${e.message}`;
-    }
-  };
-  const cleanupPrompt = (promptFile) => {
-    promptFiles.delete(promptFile);
-    try { fs.unlinkSync(promptFile); } catch {}
-  };
-  const argsConfig = {
-    ...agentConfig,
-    extraArgs: configuredArgs
-      .map(arg => arg.replace(/\{workspace\}/g, reviewWtDir)),
-    promptDelivery,
-    promptFlag,
-  };
-  const shortPrompt = (promptFile) => `Read ${promptFile.replace(/\\/g, '/')} and execute it.`;
-
   timeoutHandle = setTimeout(() => {
     timedOut = true;
     try { if (childRef && childRef.child) childRef.child.kill(); } catch {}
@@ -748,34 +654,47 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
       }
     }
   };
-
   try {
-    const promptFile = promptFileFor();
-    const promptWriteError = writePrompt(promptFile, prompt);
-    if (promptWriteError) return failed(promptWriteError);
-
-    let agentArgs;
-    try {
-      agentArgs = buildAgentCommandArgs(argsConfig, {
-        promptFile,
-        shortPrompt: shortPrompt(promptFile),
-        systemPromptText: `orchestratorです。レビューワーカーとして、担当観点「${job.aspect}」のレビューを実行してください。`,
-      });
-    } catch (e) {
-      return failed(`review command construction failed: ${e.message}`);
+    if (_spawn === spawn && process.env.NODE_TEST_CONTEXT) {
+      return failed('agent spawn refused during test execution; inject spawn for launch-path tests');
     }
 
-    const run = await runReviewProcess(agentArgs, reviewWtDir, stderrFd, childRef, onSpawn);
-    cleanupPrompt(promptFile);
-    if (run.error) return failed(`review process failed: ${run.error}`);
+    const run = await runAgentWithPrompt({
+      agentConfig,
+      promptText: prompt,
+      cwd: reviewWtDir,
+      tempPrefix: `review-job-${job.id}-review-`,
+      resultFileName: 'findings.json',
+      systemPromptText: `orchestratorです。レビューワーカーとして、担当観点「${job.aspect}」のレビューを実行してください。`,
+      spawnFn: _spawn,
+      spawnOptions: {
+        // stdout is deliberately ignored. Review results are read from the file
+        // requested in the job prompt; parsing a mixed agent stream is unsafe.
+        stdio: ['ignore', 'ignore', stderrFd],
+      },
+      onSpawn: (child) => {
+        if (childRef) childRef.child = child;
+        onSpawn(child);
+      },
+      observe: (child) => new Promise((resolve) => {
+        child.on('error', err => resolve({ error: `agent process error: ${err.message}` }));
+        child.on('close', code => resolve({ code }));
+      }),
+      cleanup: () => {
+        if (childRef) childRef.child = null;
+      },
+    });
+
+    const processResult = run.observed || {};
+    if (processResult.error) return failed(`review process failed: ${processResult.error}`);
     if (timedOut) return failed('review job timeout (review process deadline reached)');
-    if (run.code !== 0) {
-      return failed(`review agent exited with code ${run.code}`);
+    if (processResult.code !== 0) {
+      return failed(`review agent exited with code ${processResult.code}`);
     }
 
     let findings;
     try {
-      findings = readFindingsFile(resultFile, 'review process');
+      findings = parseFindingsText(run.resultFileText, 'review process');
     } catch (e) {
       return failed(e.message);
     }
@@ -786,6 +705,9 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
       attempt: 1,
       findings,
     };
+  } catch (e) {
+    if (e && e.code === 'ERR_AGENT_LAUNCH_CONFIG') return failed(e.message);
+    throw e;
   } finally {
     if (registeredPid != null) {
       try {
@@ -798,11 +720,7 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
       }
     }
     if (timeoutHandle) clearTimeout(timeoutHandle);
-    for (const promptFile of promptFiles) {
-      try { fs.unlinkSync(promptFile); } catch {}
-    }
     try { fs.closeSync(stderrFd); } catch {}
-    cleanupResultDir();
   }
 }
 

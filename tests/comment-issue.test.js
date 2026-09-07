@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { main, commentIssue, defaultGhComment, USAGE } = require('../scripts/comment-issue');
+const { main, commentIssue, commentIssueBody, defaultGhComment, USAGE } = require('../scripts/comment-issue');
 const { toWinPath } = require('../scripts/shared/win-path');
 
 function withTempWorkspace(fn) {
@@ -113,6 +113,22 @@ test('commentIssue: 成功レスポンスにURLがなければbody-fileを保持
   assert.equal(result.ok, false);
   assert.equal(unlinkCalled, false);
   assert.match(result.stderr, /URL/);
+});
+
+test('commentIssueBody: 本文APIのスコープ内だけbody-fileを作り、投稿後にディレクトリごと閉じる', () => {
+  let captured;
+  const result = commentIssueBody({ issue: '42', body: '本文', workspace: 'C:\\workspace' }, {
+    ghCommentFn: ({ bodyFile }) => {
+      captured = bodyFile;
+      assert.equal(fs.readFileSync(bodyFile, 'utf8'), '本文');
+      return { status: 0, stdout: 'https://github.com/owner/repo/issues/42#issuecomment-1\n', stderr: '' };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.ok(captured);
+  assert.equal(fs.existsSync(captured), false);
+  assert.equal(fs.existsSync(path.dirname(captured)), false);
 });
 
 test('comment-issue CLI: /tmpの論理パスを実体へ解決し、成功時に削除する', () => {
