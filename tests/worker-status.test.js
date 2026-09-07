@@ -428,6 +428,70 @@ test('renderWorkerRows: 稼働優先・resume回数・状態ドット色・残�
   assert.ok(lines.every(line => !line.includes('[running]') && !line.includes('[stopped]') && !line.includes('█')));
 });
 
+test('mergeCycleWorkers: PID変更後は現在runの状態だけを採用し、履歴の異常停止を持ち越さない', () => {
+  const resumedWorkerName = 'issue-478-coder-pane-dot-state';
+  const resumedStart = '2026-09-07T05:00:00.000Z';
+  const activeStart = '2026-09-07T05:10:00.000Z';
+  const stoppedWorkerName = 'issue-478-abnormal-stop';
+  const stoppedStart = '2026-09-07T05:20:00.000Z';
+
+  const merged = workerStatus.mergeCycleWorkers([
+    {
+      workerName: resumedWorkerName,
+      pid: 101,
+      startTime: resumedStart,
+      running: false,
+      abnormal: true,
+      elapsedSeconds: 60,
+    },
+    {
+      workerName: resumedWorkerName,
+      pid: 202,
+      startTime: activeStart,
+      running: true,
+      abnormal: false,
+      elapsedSeconds: 120,
+    },
+    {
+      workerName: stoppedWorkerName,
+      pid: 303,
+      startTime: stoppedStart,
+      running: false,
+      abnormal: true,
+      elapsedSeconds: 30,
+    },
+  ], [
+    {
+      workerName: resumedWorkerName,
+      pid: 202,
+      startTime: activeStart,
+      running: true,
+      elapsedSeconds: 45,
+    },
+    {
+      workerName: stoppedWorkerName,
+      pid: 303,
+      startTime: null,
+      running: false,
+      elapsedSeconds: 0,
+    },
+  ]);
+
+  const resumed = merged.find(worker => worker.workerName === resumedWorkerName);
+  assert.equal(resumed.running, true);
+  assert.equal(resumed.abnormal, false);
+
+  const stopped = merged.find(worker => worker.workerName === stoppedWorkerName);
+  assert.equal(stopped.running, false);
+  assert.equal(stopped.abnormal, true);
+});
+
+test('workerStatusKind: 稼働状態を異常状態より優先する', () => {
+  assert.equal(workerStatus.workerStatusKind({ running: true, abnormal: true }), 'running');
+  assert.equal(workerStatus.workerStatusKind({ running: false, abnormal: true }), 'abnormal');
+  assert.equal(workerStatus.workerStatusKind({ running: false, abnormal: false }), 'stopped');
+});
+
 test('renderWorkerRows: 子行があっても最後の表示ワーカーに非表示件数を付ける', () => {
   const lines = workerStatus.renderWorkerRows([
     {
