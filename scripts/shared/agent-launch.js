@@ -8,6 +8,12 @@ const { withTempDir } = require('./temp-directory');
 
 const RESULT_FILE_TOKEN = '{{GH_MAESTRO_RESULT_FILE}}';
 
+function agentLaunchConfigError(message) {
+  const error = new Error(message);
+  error.code = 'ERR_AGENT_LAUNCH_CONFIG';
+  return error;
+}
+
 // resume起動（--continue）はメッセージ履歴を復元するが、システムプロンプトは復元しない
 // （Claude Code公式ドキュメント: 「These flags apply only to the current invocation」）。
 // 初回spawn時にsystem-prompt-file配送で注入した報告プロトコル（msg-send.js経由での報告義務・
@@ -85,7 +91,7 @@ function buildAgentCommandArgs(agentConfig, opts = {}) {
  */
 function normalizeAgentLaunchConfig(agentConfig, cwd) {
   if (!agentConfig || typeof agentConfig !== 'object') {
-    throw new Error('agentConfig is required');
+    throw agentLaunchConfigError('agentConfig is required');
   }
   if (typeof cwd !== 'string' || cwd.length === 0) {
     throw new TypeError('cwd must be a non-empty string');
@@ -93,14 +99,23 @@ function normalizeAgentLaunchConfig(agentConfig, cwd) {
 
   const configuredArgs = agentConfig.execArgs ?? agentConfig.extraArgs ?? [];
   if (!Array.isArray(configuredArgs) || configuredArgs.some(arg => typeof arg !== 'string')) {
-    throw new TypeError('agentConfig execArgs/extraArgs must be an array of strings');
+    throw agentLaunchConfigError('agentConfig execArgs/extraArgs must be an array of strings');
+  }
+
+  const promptDelivery = agentConfig.execPromptDelivery ?? agentConfig.promptDelivery;
+  const promptFlag = agentConfig.execPromptFlag ?? agentConfig.promptFlag;
+  if (!['flag', 'positional', 'system-prompt-file'].includes(promptDelivery)) {
+    throw agentLaunchConfigError(`agent "${agentConfig.id}" prompt delivery "${promptDelivery}" is not supported for headless review`);
+  }
+  if (promptDelivery === 'flag' && !promptFlag) {
+    throw agentLaunchConfigError(`agent "${agentConfig.id}" promptFlag is required for headless review`);
   }
 
   return {
     ...agentConfig,
     extraArgs: configuredArgs.map(arg => arg.replace(/\{workspace\}/g, cwd)),
-    promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
-    promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
+    promptDelivery,
+    promptFlag,
   };
 }
 
@@ -173,10 +188,6 @@ function runAgentWithPrompt({
       fs.writeFileSync(promptFile, resolvedPrompt, 'utf8');
 
       const launchConfig = normalizeAgentLaunchConfig(agentConfig, cwd);
-      const promptDelivery = launchConfig.promptDelivery;
-      if (promptDelivery === 'send-text-after-launch') {
-        throw new Error('send-text-after-launch is not supported by runAgentWithPrompt; use file delivery');
-      }
       const agentArgs = buildAgentCommandArgs(launchConfig, {
         promptFile,
         // Windowsパスを短い指示文へ埋め込む場合もシェルの再解釈を避ける。

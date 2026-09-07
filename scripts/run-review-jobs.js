@@ -586,15 +586,6 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
     return failed(`agent "${agentConfig.id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (check ~/.gh-maestro/config.json agents["${agentConfig.id}"].execArgs / extraArgs)`);
   }
 
-  const promptDelivery = agentConfig.execPromptDelivery ?? agentConfig.promptDelivery;
-  const promptFlag = agentConfig.execPromptFlag ?? agentConfig.promptFlag;
-  if (!['flag', 'positional', 'system-prompt-file'].includes(promptDelivery)) {
-    return failed(`agent "${agentConfig.id}" prompt delivery "${promptDelivery}" is not supported for headless review`);
-  }
-  if (promptDelivery === 'flag' && !promptFlag) {
-    return failed(`agent "${agentConfig.id}" promptFlag is required for headless review`);
-  }
-
   const skillsDir = resolveReviewSkillsDir(options);
   const fileCheck = validateCanonicalReviewFiles(job, skillsDir);
   if (!fileCheck.ok) return failed(fileCheck.error);
@@ -714,6 +705,9 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
       attempt: 1,
       findings,
     };
+  } catch (e) {
+    if (e && e.code === 'ERR_AGENT_LAUNCH_CONFIG') return failed(e.message);
+    throw e;
   } finally {
     if (registeredPid != null) {
       try {
