@@ -1,5 +1,12 @@
 'use strict';
 
+// 描画された文字列の見た目（区切り記号・バーの本数・空白の詰め方・時間の書式・
+// 見出しの文言）は検証しない。見た目の正否を判断できるのは人間であり、固定すると
+// 表示を変えるたびにテストを直すことになる。ここで守るのは、画面を見ても分からない
+// もの（行数・識別子・状態・幅に収まること・大小関係）だけである。
+//
+// 理由と経緯: docs/adr/0033-do-not-pin-rendered-appearance-in-tests.md
+
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
