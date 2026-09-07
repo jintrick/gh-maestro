@@ -412,7 +412,8 @@ function statusPaneId(entry) {
 }
 
 /**
- * install時だけ、既存の監視ペインを同じIssueで張り直す。
+ * 対象の窓から手動で実行された場合に、既存の監視ペインを同じIssueで張り直す。
+ * （install.js からは別窓のペインを奪う事故を防ぐため除外されており、人間が対象の窓から明示的に実行する手動経路として提供される）
  * 監視UIはWezTermの外部設備なので、失敗は常駐4種の交換結果を失敗扱いにしない。
  *
  * @param {string} workspace

@@ -12,6 +12,12 @@ workspaceごとに `workspace="<absolute-path>"` の見出しが出力され、�
 
 installまたはrestart CLIが非ゼロ終了した場合、registryの読み取り・停止・起動確認のいずれかが未確認である可能性がある。結果を人間に報告して判断を仰ぎ、セッション再起動依頼で置き換えない。
 
+なお、`node scripts/install.js` は監視ペイン（`status-pane`）の停止・再生成を行わない（別ウィンドウや他ワークスペースの監視ペインを奪う事故を防ぐため）。install 後に監視ペインを現行コードへ張り直す場合は、**対象のワークスペースを開いている端末ウィンドウから**人間が次のコマンドを実行する:
+
+```sh
+node "{{SCRIPTS_PATH}}/restart-residents.js" --workspace $WORKSPACE --restart-status-pane
+```
+
 ## inbox監視の重複復旧
 
 「重複しているかもしれない」と気づいた瞬間に片方を反射的に止めてはならない。以下の順で確認してから対処する：
