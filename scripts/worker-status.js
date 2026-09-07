@@ -846,7 +846,11 @@ function mergeCycleWorkers(projectedWorkers, currentWorkers) {
       startTime: latestIsCurrent && current.startTime ? current.startTime : (latestWorker.startTime || null),
       stopTime: latestWorker.stopTime || null,
       running: current ? Boolean(current.running) : false,
-      abnormal: Boolean(current?.abnormal || runs.some(run => run.worker.abnormal)),
+      // A current registry entry identifies the run that owns the live state.
+      // Do not carry an older run's abnormal stop into a newly resumed PID.
+      abnormal: current
+        ? Boolean(current.abnormal || currentRun?.worker?.abnormal)
+        : Boolean(latestWorker.abnormal),
       elapsedSeconds: durationKnown ? totalElapsed : null,
       durationKnown,
     };
@@ -854,6 +858,12 @@ function mergeCycleWorkers(projectedWorkers, currentWorkers) {
     if (current?.jobsError) merged.jobsError = true;
     return merged;
   });
+}
+
+function workerStatusKind(worker) {
+  if (Boolean(worker?.running)) return 'running';
+  if (Boolean(worker?.abnormal)) return 'abnormal';
+  return 'stopped';
 }
 
 function renderWorkerRows(workers, opts = {}) {
@@ -870,9 +880,10 @@ function renderWorkerRows(workers, opts = {}) {
   const colorize = Boolean(opts.colorize);
   const entries = [];
   for (const [visibleIndex, { worker, role }] of visible.entries()) {
-    const dot = worker.abnormal
+    const statusKind = workerStatusKind(worker);
+    const dot = statusKind === 'abnormal'
       ? colorizeText('●', 31, colorize)
-      : worker.running
+      : statusKind === 'running'
         ? colorizeText('●', 32, colorize)
         : colorizeText('○', 90, colorize);
     const runNumber = Number(worker.runNumber);
@@ -1329,6 +1340,7 @@ module.exports = {
   renderUptimeBars,
   renderCycleLine,
   renderWorkerRows,
+  workerStatusKind,
   renderSnapshotLines,
   buildStatusHeader,
   alignStatusRows,
