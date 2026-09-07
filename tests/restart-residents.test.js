@@ -368,6 +368,103 @@ test('restartResidents: detached起動直後にregistry登録が遅れても成�
   }
 });
 
+test('restartResidents: 子プロセスがregistry登録前に終了した場合は終了診断を残して失敗する', () => {
+  const workspace = makeWorkspace();
+  try {
+    const old = residentEntries(workspace).slice(0, 1);
+    const harness = makeHarness(workspace, {
+      entries: old,
+      spawn: (cmd, args, spawnOptions, state) => {
+        const child = new EventEmitter();
+        child.pid = 2000;
+        child.unref = () => {};
+        state.spawned.push({ cmd, args, spawnOptions, pid: child.pid });
+        return child;
+      },
+    });
+    const result = restartResidents(workspace, {
+      scriptsPath: path.join(workspace, 'scripts'),
+      hooks: harness.hooks,
+      maxAttempts: 1,
+      waitMs: 0,
+    });
+
+    assert.equal(result.errors.length, 1);
+    assert.equal(result.results[0].status, 'failed');
+    assert.match(result.results[0].reason, /起動PID 2000 はregistry登録を確認する前に終了しました/);
+    assert.match(result.results[0].reason, /起動ログ: .+resident-restart-logs/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('restartResidents: 子プロセスが生存したままregistry登録されない場合は遅延診断を残して失敗する', () => {
+  const workspace = makeWorkspace();
+  try {
+    const old = residentEntries(workspace).slice(0, 1);
+    const harness = makeHarness(workspace, {
+      entries: old,
+      spawn: (cmd, args, spawnOptions, state) => {
+        const child = new EventEmitter();
+        child.pid = 2000;
+        child.unref = () => {};
+        state.live.add(child.pid);
+        state.spawned.push({ cmd, args, spawnOptions, pid: child.pid });
+        return child;
+      },
+    });
+    const result = restartResidents(workspace, {
+      scriptsPath: path.join(workspace, 'scripts'),
+      hooks: harness.hooks,
+      maxAttempts: 2,
+      waitMs: 0,
+    });
+
+    assert.equal(result.errors.length, 1);
+    assert.equal(result.results[0].status, 'failed');
+    assert.match(result.results[0].reason, /起動PID 2000 は生存していますが/);
+    assert.match(result.results[0].reason, /登録遅延またはregistry可視化遅延/);
+    assert.match(result.results[0].reason, /起動ログ: .+resident-restart-logs/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('restartResidents: 起動PIDの生存確認に失敗した場合は判定不能として失敗する', () => {
+  const workspace = makeWorkspace();
+  try {
+    const old = residentEntries(workspace).slice(0, 1);
+    const harness = makeHarness(workspace, {
+      entries: old,
+      spawn: (cmd, args, spawnOptions, state) => {
+        const child = new EventEmitter();
+        child.pid = 2000;
+        child.unref = () => {};
+        state.spawned.push({ cmd, args, spawnOptions, pid: child.pid });
+        return child;
+      },
+    });
+    const originalIsProcessAlive = harness.hooks.isProcessAlive;
+    harness.hooks.isProcessAlive = (pid) => {
+      if (pid === 2000) throw new Error('liveness unavailable');
+      return originalIsProcessAlive(pid);
+    };
+    const result = restartResidents(workspace, {
+      scriptsPath: path.join(workspace, 'scripts'),
+      hooks: harness.hooks,
+      maxAttempts: 1,
+      waitMs: 0,
+    });
+
+    assert.equal(result.errors.length, 1);
+    assert.equal(result.results[0].status, 'failed');
+    assert.match(result.results[0].reason, /生存確認にも失敗したため/);
+    assert.match(result.results[0].reason, /登録前終了か登録遅延か判定できません/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test('captureResidentEntries: worker modeのmsg-pollは常駐対象から除外する', () => {
   const workspace = makeWorkspace();
   try {

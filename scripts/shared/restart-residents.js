@@ -299,6 +299,20 @@ function findReplacementEntry(workspace, spec, oldPids, hooks) {
   return entries.find((entry) => !oldPids.has(entry.pid)) || null;
 }
 
+function missingReplacementError(spec, childPid, logPath, hooks) {
+  let alive;
+  try {
+    alive = hooks.isProcessAlive(childPid);
+  } catch (e) {
+    return `${spec.script} の新しいregistry登録を確認できませんでした（起動PID ${childPid} の生存確認にも失敗したため、登録前終了か登録遅延か判定できません。${e.message}。起動ログ: ${logPath}）`;
+  }
+
+  if (alive) {
+    return `${spec.script} の起動PID ${childPid} は生存していますが、新しいregistry登録を確認できませんでした（登録遅延またはregistry可視化遅延。起動ログ: ${logPath}）`;
+  }
+  return `${spec.script} の起動PID ${childPid} はregistry登録を確認する前に終了しました（起動ログ: ${logPath}）`;
+}
+
 function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = {}, prebuilt = null) {
   let built = prebuilt;
   if (!built) {
@@ -310,10 +324,11 @@ function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = 
   }
 
   const scriptPath = path.join(scriptsPath, spec.script);
+  let logPath;
   let logFd;
   let child;
   try {
-    const logPath = residentLogPath(workspace, spec.script);
+    logPath = residentLogPath(workspace, spec.script);
     logFd = fs.openSync(logPath, 'a');
     child = hooks.spawn(process.execPath, [scriptPath, ...built.args], {
       detached: true,
@@ -355,7 +370,10 @@ function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = 
   }
 
   if (!replacement) {
-    return { ok: false, error: `${spec.script} の新しいregistry登録を確認できませんでした（起動ログを確認してください）` };
+    return {
+      ok: false,
+      error: missingReplacementError(spec, child.pid, logPath, hooks),
+    };
   }
   return {
     ok: true,
