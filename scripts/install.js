@@ -563,7 +563,6 @@ function restartResidentsAfterInstall(options = {}) {
       const runResult = run(process.execPath, [
         scriptPath,
         '--workspace', workspace,
-        '--restart-status-pane',
       ], {
         encoding: 'utf8',
         stdio: ['inherit', 'pipe', 'inherit'],

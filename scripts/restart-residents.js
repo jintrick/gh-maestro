@@ -16,7 +16,7 @@ Options:
                       CWDからの .gh-maestro/ 上方探索で解決）
   --session-pid <pid> worker-supervisorのregistry引数と対象プロセス親チェーンから
                       PIDを解決できない旧形式に限るフォールバック。
-  --restart-status-pane install後に監視ペインを現行worker-status.jsで張り直す。
+  --restart-status-pane 対象の窓から監視ペインを現行worker-status.jsで張り直す。
   --help, -h          このヘルプを表示する
 
 対象:
