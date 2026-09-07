@@ -11,6 +11,7 @@ const path = require('path');
 const { spawnSync } = require('./shared/child-process');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { deleteInputFileBestEffort } = require('./shared/file-cleanup');
+const { withTempDir } = require('./shared/temp-directory');
 const { toWinPath } = require('./shared/win-path');
 
 const USAGE = `comment-issue.js — GitHub Issueへコメントを投稿し、成功時にbody-fileの削除を試みる
@@ -48,6 +49,7 @@ function commentIssue({ issue, bodyFile, repo, workspace }, deps = {}) {
   const {
     ghCommentFn = defaultGhComment,
     unlinkBodyFileFn = (p) => fs.unlinkSync(p),
+    cleanupBodyFile = true,
   } = deps;
 
   const result = ghCommentFn({ issue, bodyFile, repo, workspace });
@@ -60,8 +62,25 @@ function commentIssue({ issue, bodyFile, repo, workspace }, deps = {}) {
     return { ok: false, status: 1, stdout: result.stdout || '', stderr: 'コメント投稿は成功しましたがURLが返されませんでした。' };
   }
 
-  const cleanupWarning = deleteInputFileBestEffort(bodyFile, unlinkBodyFileFn);
+  const cleanupWarning = cleanupBodyFile
+    ? deleteInputFileBestEffort(bodyFile, unlinkBodyFileFn)
+    : null;
   return { ok: true, url, stdout: result.stdout || '', stderr: result.stderr || '', cleanupWarning };
+}
+
+/**
+ * コメント本文を内部の一時ファイルへ書き、投稿完了まで所有するテキストAPI。
+ * 呼び出し側へbody-fileのパスを返さず、ディレクトリの後始末は共有スコープに委ねる。
+ */
+function commentIssueBody({ issue, body, repo, workspace }, deps = {}) {
+  return withTempDir('gh-maestro-comment-', (tempDir) => {
+    const bodyFile = path.join(tempDir, 'body.md');
+    fs.writeFileSync(bodyFile, body, 'utf8');
+    return commentIssue({ issue, bodyFile, repo, workspace }, {
+      ...deps,
+      cleanupBodyFile: false,
+    });
+  });
 }
 
 function main(argv = process.argv.slice(2), deps = {}) {
@@ -132,4 +151,4 @@ if (require.main === module) {
   process.exit(result.code);
 }
 
-module.exports = { main, commentIssue, defaultGhComment, USAGE };
+module.exports = { main, commentIssue, commentIssueBody, defaultGhComment, USAGE };

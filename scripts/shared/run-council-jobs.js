@@ -18,10 +18,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { spawn } = require('./child-process');
-const { buildAgentCommandArgs } = require('./agent-launch');
-const { buildLoginShellExecArgs } = require('./agent-exec');
+const { runAgentWithPrompt } = require('./agent-launch');
 const { resolveAgentConfig, validateNonInteractiveTokens } = require('./resolve-config');
 const { workerLogPath } = require('./headless-launch');
 const { _validateAgainstSchema } = require('./json-schema');
@@ -402,29 +400,16 @@ async function launchParticipantJob({ participant, manifest, agentConfig, worktr
   }
 
   const promptText = buildPhasePrompt(participant, manifest);
-  const promptFile = path.join(os.tmpdir(), `council-${manifest.session}-${participantId}-${Date.now()}.md`);
-  try {
-    fs.writeFileSync(promptFile, promptText, 'utf8');
-  } catch (e) {
-    return { participant_id: participantId, status: 'failed', attempt, error: `prompt file write failed: ${e.message}` };
-  }
 
   // `{workspace}` プレースホルダーはジョブcwd（議論用worktree）へ置換する
   const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
     .map(a => a.replace(/\{workspace\}/g, worktreeDir));
-
-  const agentArgs = buildAgentCommandArgs({
+  const argsConfig = {
     ...agentConfig,
     extraArgs,
     promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
     promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
-  }, {
-    promptFile,
-    shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
-    systemPromptText: `あなたは gh-maestro council の参加者です（participant_id: ${participantId}）。${manifest.title}の議論に参加してください。`,
-  });
-
-  const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
+  };
 
   const workerName = `council-${manifest.session}-${participantId}`;
   const logFile = workerLogPath(workspace, workerName, {
@@ -436,47 +421,37 @@ async function launchParticipantJob({ participant, manifest, agentConfig, worktr
   try {
     stderrFd = fs.openSync(logFile, 'a');
   } catch (e) {
-    try { fs.unlinkSync(promptFile); } catch {}
     return { participant_id: participantId, status: 'failed', attempt, error: `log file open failed: ${e.message}` };
   }
 
-  let child;
-  try {
-    child = spawn(shellArgs[0], shellArgs.slice(1), {
-      cwd: worktreeDir,
-      env: process.env,
-      stdio: ['ignore', 'pipe', stderrFd],
-    });
-    if (childRef) childRef.child = child;
-  } catch (e) {
-    try { fs.closeSync(stderrFd); } catch {}
-    try { fs.unlinkSync(promptFile); } catch {}
-    return { participant_id: participantId, status: 'failed', attempt, error: `spawn failed: ${e.message}` };
-  }
-
   const stdoutChunks = [];
-  child.stdout.on('data', (chunk) => { stdoutChunks.push(chunk); });
-
-  // タイムアウト時は子プロセスとその子孫（ログインシェル → エージェントCLI）を
-  // まとめて終了する。Windows で親シェルのみ kill すると子孫が孤児化するため
-  // killProcessTree（Windows: taskkill /T、Unix: プロセスグループ）を使う。
-  // タイマー・クリーンアップ登録・close/error 解決は共有ヘルパー waitChildExit に
-  // 委譲し、close 後の stdout 抽出・検証を本関数で行う（Issue #232 共有化）。
-  let code;
+  let run;
   try {
-    code = await waitChildExit({
-      child,
-      timeoutMs,
-      onCleanup: () => {
-        try { fs.closeSync(stderrFd); } catch {}
-        try { fs.unlinkSync(promptFile); } catch {}
+    run = await runAgentWithPrompt({
+      agentConfig: argsConfig,
+      promptText,
+      cwd: worktreeDir,
+      tempPrefix: `council-${manifest.session}-${participantId}-`,
+      systemPromptText: `あなたは gh-maestro council の参加者です（participant_id: ${participantId}）。${manifest.title}の議論に参加してください。`,
+      spawnFn: spawn,
+      spawnOptions: { stdio: ['ignore', 'pipe', stderrFd] },
+      onSpawn: (child) => {
+        if (childRef) childRef.child = child;
+      },
+      observe: (child) => {
+        child.stdout.on('data', (chunk) => { stdoutChunks.push(chunk); });
+        return waitChildExit({ child, timeoutMs });
+      },
+      cleanup: () => {
+        fs.closeSync(stderrFd);
+        if (childRef) childRef.child = null;
       },
     });
-  } catch (err) {
-    // 起動失敗（child 'error'）。onCleanup は waitChildExit 内で実行済み
-    return { participant_id: participantId, status: 'failed', attempt, error: `agent process error: ${err.message}` };
+  } catch (e) {
+    return { participant_id: participantId, status: 'failed', attempt, error: `agent launch failed: ${e.message}` };
   }
 
+  const code = run.observed;
   const stdout = Buffer.concat(stdoutChunks).toString('utf8').trim();
 
   if (code !== 0) {

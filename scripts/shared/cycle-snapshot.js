@@ -3,12 +3,9 @@
 // マージ時のサイクル記録を、リポジトリ共通の metrics Issue へ保存する処理。
 // 検索・作成・重複確認・投稿はここへ集約し、poll-pr.js の終了判断とは分離する。
 
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
 const { spawnSync } = require('./child-process');
 const { listComments, parseCommentsResponse } = require('./gh-comments');
-const { commentIssue } = require('../comment-issue');
+const { commentIssueBody } = require('../comment-issue');
 const { readCycleEvents, projectCycleMetrics } = require('./cycle-metrics');
 const { formatElapsedTime } = require('./worker-report-check');
 
@@ -82,14 +79,7 @@ function defaultCreateMetricsIssue({ repo, workspace }) {
 }
 
 function defaultPostComment({ issue, repo, workspace, body }) {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-cycle-snapshot-'));
-  const bodyFile = path.join(tempRoot, 'body.md');
-  try {
-    fs.writeFileSync(bodyFile, body, 'utf8');
-    return commentIssue({ issue, repo, workspace, bodyFile });
-  } finally {
-    try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
-  }
+  return commentIssueBody({ issue, repo, workspace, body });
 }
 
 function defaultAcquireLock(workspace) {

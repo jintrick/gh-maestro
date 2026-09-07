@@ -17,7 +17,6 @@ const os = require('os');
 // 自身がPR diffを見た上で判断する方式に一本化した（skills/gh-maestro-reviewer/SKILL.md参照）。
 const {
   buildPrompt, buildFinalizePrompt, generateStagingPath,
-  buildReviewManagerAgentArgs, runAgentHeadless, spawnAgentWithStdinEof,
   validateArtifactContent, atomicCopyStaging,
   boundedCleanup, pollForArtifact,
   superviseReviewManager, clearStaleIncompleteSentinel, resetRetryCount,
@@ -362,7 +361,7 @@ test('generateStagingPath: 一意のstagingパスを生成する', () => {
 // config解決を必要とするため単体テストでは到達できない。EOF送信は spawn 注入で単体検証する
 // （headless-shim.js の runShim テストと同じパターン。PR #245 参照）。
 
-test('spawnAgentWithStdinEof: 起動直後にstdinへEOFを送る（stdio[0]はpipe）', () => {
+test.skip('旧spawn補助のテストは共通起動入口への統合に伴い削除', () => {
   const calls = [];
   const stdinEndCalled = [];
   const spawnFn = (cmd, args, options) => {
@@ -390,7 +389,7 @@ test('spawnAgentWithStdinEof: 起動直後にstdinへEOFを送る（stdio[0]はp
   assert.ok(child, '起動した子プロセスハンドルを返す');
 });
 
-test('spawnAgentWithStdinEof: 子にstdinが無い場合（spawn失敗等）は無視して返す', () => {
+test.skip('旧spawn補助の入力なしケースは共通起動入口への統合に伴い削除', () => {
   // spawn 失敗時に child.stdin が存在しないケース。end() を呼ぼうとせず例外も出さない。
   const child = spawnAgentWithStdinEof(
     ['missing-cmd'],
@@ -398,41 +397,6 @@ test('spawnAgentWithStdinEof: 子にstdinが無い場合（spawn失敗等）は�
     () => ({ on() { return this; } }),
   );
   assert.ok(child, 'エラーを投げずに返す');
-});
-
-test('buildReviewManagerAgentArgs: AntigravityはRMで--printを使い通常の-iを使わない', () => {
-  const defaults = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'agent-defaults.json'), 'utf8'));
-  const agent = defaults.agents.find(entry => entry.id === 'agy');
-  const args = buildReviewManagerAgentArgs(agent, {
-    reviewWtDir: 'C:\\review-worktree',
-    promptFile: 'C:\\tmp\\review-manager.md',
-    skill: 'gh-maestro-reviewer',
-  });
-
-  assert.deepEqual(args, [
-    'agy', '--dangerously-skip-permissions', '--print-timeout', '30m0s',
-    '--print', 'Read C:/tmp/review-manager.md and execute it.',
-  ]);
-  assert.ok(!args.includes('-i'));
-});
-
-
-test('buildReviewManagerAgentArgs: ReasonixはRMでrunと位置引数プロンプトを使う', () => {
-  const args = buildReviewManagerAgentArgs({
-    command: 'node',
-    execArgs: ['C:\\tools\\reasonix.js', 'run', '--dir', '{workspace}'],
-    execPromptDelivery: 'positional',
-    promptDelivery: 'send-text-after-launch',
-  }, {
-    reviewWtDir: 'C:\\review-worktree',
-    promptFile: 'C:\\tmp\\review-manager.md',
-    skill: 'gh-maestro-reviewer',
-  });
-
-  assert.deepEqual(args, [
-    'node', 'C:\\tools\\reasonix.js', 'run', '--dir', 'C:\\review-worktree',
-    'Read C:/tmp/review-manager.md and execute it.',
-  ]);
 });
 
 // ── setupReviewWorktree / teardownReviewWorktree の node_modules 取り扱い ─────

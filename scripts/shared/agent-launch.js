@@ -1,6 +1,12 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
+const { spawn } = require('./child-process');
+const { buildLoginShellExecArgs } = require('./agent-exec');
+const { withTempDir } = require('./temp-directory');
+
+const RESULT_FILE_TOKEN = '{{GH_MAESTRO_RESULT_FILE}}';
 
 // resume起動（--continue）はメッセージ履歴を復元するが、システムプロンプトは復元しない
 // （Claude Code公式ドキュメント: 「These flags apply only to the current invocation」）。
@@ -65,6 +71,125 @@ function buildAgentCommandArgs(agentConfig, opts = {}) {
     default:
       throw new Error(`unknown promptDelivery: ${promptDelivery}`);
   }
+}
+
+/**
+ * プロンプトを一時ファイル経由で配送してエージェントを1回起動する。
+ *
+ * プロンプトファイル、結果ファイル、起動argvはこの関数のスコープ内だけで扱う。
+ * 呼び出し側には子プロセスの観測結果と、任意の結果ファイル本文だけを返す。
+ * withTempDir は非同期 callback の完了後に所有ディレクトリを必ず閉じるため、
+ * 正常終了・spawn失敗・例外・タイムアウトのどの経路でも同じ寿命境界になる。
+ *
+ * @param {object} opts
+ * @param {object} opts.agentConfig 解決済みエージェント設定（extraArgsは置換済みでよい）
+ * @param {string} opts.promptText 指示文本文
+ * @param {string} opts.cwd エージェントの作業ディレクトリ
+ * @param {string} [opts.systemPromptText] system-prompt-file配送時の補助システム文
+ * @param {string} [opts.resultFileName] 結果ファイル名。指定時は結果本文を戻り値へ含める
+ * @param {string} [opts.tempPrefix='gh-maestro-agent-'] 一時ディレクトリ接頭辞
+ * @param {object} [opts.tempDirOptions] 既存temp-directory.jsへ渡すテスト/実行オプション
+ * @param {object} [opts.spawnOptions] child-process spawn options（cwd/env/stdio等）
+ * @param {Function} [opts.spawnFn=spawn] テスト用spawn注入口
+ * @param {Function} [opts.onSpawn] spawn直後に子プロセスを受け取るobserver
+ * @param {Function} [opts.observe] 子プロセスの完了・監督を待つcallback
+ * @param {Function} [opts.cleanup] プロセス側リソースの後始末callback
+ * @param {Function} [opts.log] 内部で構築した起動内容を記録するcallback
+ * @returns {Promise<{observed: *, resultFileText?: string|null}>}
+ */
+function runAgentWithPrompt({
+  agentConfig,
+  promptText,
+  cwd,
+  systemPromptText,
+  resultFileName,
+  tempPrefix = 'gh-maestro-agent-',
+  tempDirOptions,
+  spawnOptions = {},
+  spawnFn = spawn,
+  onSpawn,
+  observe,
+  cleanup,
+  log,
+}) {
+  if (typeof promptText !== 'string') throw new TypeError('promptText must be a string');
+  if (typeof cwd !== 'string' || cwd.length === 0) throw new TypeError('cwd must be a non-empty string');
+  if (typeof spawnFn !== 'function') throw new TypeError('spawnFn must be a function');
+  if (onSpawn !== undefined && typeof onSpawn !== 'function') throw new TypeError('onSpawn must be a function');
+  if (observe !== undefined && typeof observe !== 'function') throw new TypeError('observe must be a function');
+  if (cleanup !== undefined && typeof cleanup !== 'function') throw new TypeError('cleanup must be a function');
+  if (resultFileName !== undefined && (
+    typeof resultFileName !== 'string' ||
+    resultFileName.length === 0 ||
+    path.basename(resultFileName) !== resultFileName
+  )) {
+    throw new TypeError('resultFileName must be a non-empty file name');
+  }
+  if (resultFileName === undefined && promptText.includes(RESULT_FILE_TOKEN)) {
+    throw new Error('prompt contains RESULT_FILE_TOKEN but resultFileName is not configured');
+  }
+
+  return withTempDir(tempPrefix, async (tempDir) => {
+    const promptFile = path.join(tempDir, 'prompt.md');
+    const resultFile = resultFileName ? path.join(tempDir, resultFileName) : null;
+    const resolvedPrompt = resultFile
+      ? promptText.split(RESULT_FILE_TOKEN).join(resultFile)
+      : promptText;
+    let child;
+
+    try {
+      // このディレクトリとその中のファイルの所有は withTempDir に限定する。
+      fs.writeFileSync(promptFile, resolvedPrompt, 'utf8');
+
+      const promptDelivery = agentConfig.execPromptDelivery ?? agentConfig.promptDelivery;
+      const promptFlag = agentConfig.execPromptFlag ?? agentConfig.promptFlag;
+      if (promptDelivery === 'send-text-after-launch') {
+        throw new Error('send-text-after-launch is not supported by runAgentWithPrompt; use file delivery');
+      }
+      const argsConfig = {
+        ...agentConfig,
+        promptDelivery,
+        promptFlag,
+      };
+      const agentArgs = buildAgentCommandArgs(argsConfig, {
+        promptFile,
+        // Windowsパスを短い指示文へ埋め込む場合もシェルの再解釈を避ける。
+        shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,
+        systemPromptText,
+      });
+      const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
+      if (typeof log === 'function') log(agentArgs);
+
+      try {
+        child = spawnFn(shellArgs[0], shellArgs.slice(1), {
+          cwd,
+          env: process.env,
+          ...spawnOptions,
+        });
+      } catch (error) {
+        const spawnError = new Error(`spawn failed: ${error.message}`);
+        spawnError.cause = error;
+        throw spawnError;
+      }
+      if (!child || typeof child.on !== 'function') {
+        throw new Error('spawn returned an invalid child process handle');
+      }
+      if (typeof onSpawn === 'function') onSpawn(child);
+      const observed = typeof observe === 'function' ? await observe(child) : undefined;
+
+      let resultFileText;
+      if (resultFile) {
+        try {
+          resultFileText = fs.readFileSync(resultFile, 'utf8');
+        } catch {
+          resultFileText = null;
+        }
+      }
+      return { observed, resultFileText };
+    } finally {
+      if (typeof cleanup === 'function') await cleanup(child);
+    }
+  }, tempDirOptions);
 }
 
 /**
@@ -141,4 +266,10 @@ function buildAgentResumeCommandArgs(agentConfig, resumeArgs, opts = {}) {
   }
 }
 
-module.exports = { buildAgentCommandArgs, buildAgentResumeCommandArgs, RESUME_REPORTING_REMINDER };
+module.exports = {
+  buildAgentCommandArgs,
+  buildAgentResumeCommandArgs,
+  runAgentWithPrompt,
+  RESULT_FILE_TOKEN,
+  RESUME_REPORTING_REMINDER,
+};
