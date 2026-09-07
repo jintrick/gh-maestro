@@ -7,11 +7,15 @@ const path = require('path');
 const os = require('os');
 
 const sl = require('../scripts/shared/storage-layout');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
 const IS_WIN = process.platform === 'win32';
 
 // ── テスト用の一時ディレクトリ ─────────────────────────────────────────
-const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-storage-layout-'));
+const tempDirScope = createTempDirScope();
+const tmpBase = tempDirScope.mkdtemp('gh-maestro-test-storage-layout-');
+
+test.after(() => tempDirScope.cleanup());
 
 function withEnv(overrides, fn) {
   const saved = {};
@@ -102,14 +106,14 @@ test('canonicalWorkspace: 存在しないパスは resolve のみ行う（realpa
 });
 
 test('canonicalWorkspace: 実在するディレクトリは realpath される', () => {
-  const real = fs.mkdtempSync(path.join(tmpBase, 'real-'));
+  const real = tempDirScope.mkdtempAt(tmpBase, 'real-');
   const expected = IS_WIN ? fs.realpathSync(real).toLowerCase() : fs.realpathSync(real);
   assert.equal(sl.canonicalWorkspace(real), expected);
 });
 
 if (IS_WIN) {
   test('canonicalWorkspace (Windows): 大小文字の差異を吸収する', () => {
-    const real = fs.mkdtempSync(path.join(tmpBase, 'CaseTest-'));
+    const real = tempDirScope.mkdtempAt(tmpBase, 'CaseTest-');
     const upper = real.toUpperCase();
     const lower = real.toLowerCase();
     assert.equal(sl.canonicalWorkspace(upper), sl.canonicalWorkspace(lower));
@@ -117,25 +121,25 @@ if (IS_WIN) {
 }
 
 test('workspaceKey: 同一workspaceは同一キーを返す', () => {
-  const real = fs.mkdtempSync(path.join(tmpBase, 'key-'));
+  const real = tempDirScope.mkdtempAt(tmpBase, 'key-');
   assert.equal(sl.workspaceKey(real), sl.workspaceKey(real));
 });
 
 test('workspaceKey: 異なるworkspaceは異なるキーを返す', () => {
-  const a = fs.mkdtempSync(path.join(tmpBase, 'key-a-'));
-  const b = fs.mkdtempSync(path.join(tmpBase, 'key-b-'));
+  const a = tempDirScope.mkdtempAt(tmpBase, 'key-a-');
+  const b = tempDirScope.mkdtempAt(tmpBase, 'key-b-');
   assert.notEqual(sl.workspaceKey(a), sl.workspaceKey(b));
 });
 
 test('workspaceKey: 64桁のhex文字列（SHA-256）を返す', () => {
-  const real = fs.mkdtempSync(path.join(tmpBase, 'key-hex-'));
+  const real = tempDirScope.mkdtempAt(tmpBase, 'key-hex-');
   const key = sl.workspaceKey(real);
   assert.match(key, /^[0-9a-f]{64}$/);
 });
 
 if (IS_WIN) {
   test('workspaceKey (Windows): 大小文字違いでも同一キーになる', () => {
-    const real = fs.mkdtempSync(path.join(tmpBase, 'KeyCase-'));
+    const real = tempDirScope.mkdtempAt(tmpBase, 'KeyCase-');
     assert.equal(sl.workspaceKey(real.toUpperCase()), sl.workspaceKey(real.toLowerCase()));
   });
 }
@@ -146,7 +150,7 @@ if (IS_WIN) {
 
 test('workspaceRuntimeDir: runtimeRoot()/workspaces/<key> を返す（副作用なし）', () => {
   withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'wrd-runtime') }, () => {
-    const workspace = fs.mkdtempSync(path.join(tmpBase, 'wrd-ws-'));
+    const workspace = tempDirScope.mkdtempAt(tmpBase, 'wrd-ws-');
     const expected = path.join(sl.runtimeRoot(), 'workspaces', sl.workspaceKey(workspace));
     assert.equal(sl.workspaceRuntimeDir(workspace), expected);
     assert.ok(!fs.existsSync(expected), 'workspaceRuntimeDir は副作用を持たない純粋関数のはず');
@@ -155,7 +159,7 @@ test('workspaceRuntimeDir: runtimeRoot()/workspaces/<key> を返す（副作用�
 
 test('ensureWorkspaceRuntimeDir: ディレクトリと workspace.json を作成する', () => {
   withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'ewrd-runtime') }, () => {
-    const workspace = fs.mkdtempSync(path.join(tmpBase, 'ewrd-ws-'));
+    const workspace = tempDirScope.mkdtempAt(tmpBase, 'ewrd-ws-');
     const dir = sl.ensureWorkspaceRuntimeDir(workspace);
     assert.ok(fs.existsSync(dir));
 
@@ -169,7 +173,7 @@ test('ensureWorkspaceRuntimeDir: ディレクトリと workspace.json を作成�
 
 test('ensureWorkspaceRuntimeDir: 既存の workspace.json を上書きしない（冪等）', () => {
   withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'ewrd2-runtime') }, () => {
-    const workspace = fs.mkdtempSync(path.join(tmpBase, 'ewrd2-ws-'));
+    const workspace = tempDirScope.mkdtempAt(tmpBase, 'ewrd2-ws-');
     const dir = sl.ensureWorkspaceRuntimeDir(workspace);
     const manifestPath = path.join(dir, 'workspace.json');
     fs.writeFileSync(manifestPath, JSON.stringify({ schemaVersion: 1, canonicalPath: 'sentinel' }));
@@ -182,7 +186,7 @@ test('ensureWorkspaceRuntimeDir: 既存の workspace.json を上書きしない�
 
 test('ensureWorkspaceRuntimeDir: register:false ではruntimeディレクトリだけ作成しregistryへ登録しない', () => {
   withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'ewrd-unregistered-runtime') }, () => {
-    const workspace = fs.mkdtempSync(path.join(tmpBase, 'ewrd-unregistered-ws-'));
+    const workspace = tempDirScope.mkdtempAt(tmpBase, 'ewrd-unregistered-ws-');
     const dir = sl.ensureWorkspaceRuntimeDir(workspace, { register: false });
 
     assert.ok(fs.existsSync(dir));
@@ -194,8 +198,8 @@ test('ensureWorkspaceRuntimeDir: register:false ではruntimeディレクトリ�
 test('listRegisteredWorkspaces: runtime rootに登録された全workspaceを返す', () => {
   withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'list-runtime') }, () => {
     const workspaces = [
-      fs.mkdtempSync(path.join(tmpBase, 'registered-a-')),
-      fs.mkdtempSync(path.join(tmpBase, 'registered-b-')),
+      tempDirScope.mkdtempAt(tmpBase, 'registered-a-'),
+      tempDirScope.mkdtempAt(tmpBase, 'registered-b-'),
     ];
     for (const workspace of workspaces) sl.ensureWorkspaceRuntimeDir(workspace);
 
@@ -208,8 +212,8 @@ test('listRegisteredWorkspaces: runtime rootに登録された全workspaceを返
 
 test('removeStaleWorkspaceRegistrations: 消滅した登録だけを削除し、現存workspaceを保持する', () => {
   withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'cleanup-runtime') }, () => {
-    const existing = fs.mkdtempSync(path.join(tmpBase, 'cleanup-existing-'));
-    const stale = fs.mkdtempSync(path.join(tmpBase, 'cleanup-stale-'));
+    const existing = tempDirScope.mkdtempAt(tmpBase, 'cleanup-existing-');
+    const stale = tempDirScope.mkdtempAt(tmpBase, 'cleanup-stale-');
     sl.ensureWorkspaceRuntimeDir(existing);
     sl.ensureWorkspaceRuntimeDir(stale);
     const staleRuntimeDir = sl.workspaceRuntimeDir(stale);
@@ -227,7 +231,7 @@ test('removeStaleWorkspaceRegistrations: 消滅した登録だけを削除し、
 
 test('removeStaleWorkspaceRegistrations: dryRunではstale登録を削除しない', () => {
   withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'cleanup-dry-run-runtime') }, () => {
-    const stale = fs.mkdtempSync(path.join(tmpBase, 'cleanup-dry-run-'));
+    const stale = tempDirScope.mkdtempAt(tmpBase, 'cleanup-dry-run-');
     sl.ensureWorkspaceRuntimeDir(stale);
     const staleRuntimeDir = sl.workspaceRuntimeDir(stale);
     fs.rmSync(stale, { recursive: true, force: true });
@@ -242,7 +246,7 @@ test('removeStaleWorkspaceRegistrations: dryRunではstale登録を削除しな�
 
 test('removeStaleWorkspaceRegistrations: workspace存在確認に失敗した場合は削除しない', () => {
   withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'cleanup-failure-runtime') }, () => {
-    const stale = fs.mkdtempSync(path.join(tmpBase, 'cleanup-failure-'));
+    const stale = tempDirScope.mkdtempAt(tmpBase, 'cleanup-failure-');
     sl.ensureWorkspaceRuntimeDir(stale);
     const staleRuntimeDir = sl.workspaceRuntimeDir(stale);
     fs.rmSync(stale, { recursive: true, force: true });
@@ -258,7 +262,7 @@ test('removeStaleWorkspaceRegistrations: workspace存在確認に失敗した場
 
 test('listRegisteredWorkspaces: manifestのないディレクトリを未登録としてスキップする', () => {
   withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'manifestless-runtime') }, () => {
-    const workspace = fs.mkdtempSync(path.join(tmpBase, 'registered-with-residue-'));
+    const workspace = tempDirScope.mkdtempAt(tmpBase, 'registered-with-residue-');
     sl.ensureWorkspaceRuntimeDir(workspace);
 
     const manifestlessDir = path.join(sl.runtimeRoot(), 'workspaces', 'manifestless-residue');
@@ -283,7 +287,7 @@ test('listRegisteredWorkspaces: manifestの読取失敗を握りつぶさず停�
 
 test('listRegisteredWorkspaces: manifestのworkspaceKey不一致を拒否する', () => {
   withEnv({ GH_MAESTRO_RUNTIME_DIR: path.join(tmpBase, 'mismatched-key-runtime') }, () => {
-    const workspace = fs.mkdtempSync(path.join(tmpBase, 'mismatched-key-'));
+    const workspace = tempDirScope.mkdtempAt(tmpBase, 'mismatched-key-');
     const runtimeWorkspaces = path.join(sl.runtimeRoot(), 'workspaces', 'wrong-key');
     fs.mkdirSync(runtimeWorkspaces, { recursive: true });
     fs.writeFileSync(path.join(runtimeWorkspaces, 'workspace.json'), JSON.stringify({
@@ -300,7 +304,7 @@ test('listRegisteredWorkspaces: manifestのworkspaceKey不一致を拒否する'
 // ═══════════════════════════════════════════════════════════════════════════
 
 test('assertValidWorkspace: 通常のworkspaceは throw しない', () => {
-  const workspace = fs.mkdtempSync(path.join(tmpBase, 'valid-ws-'));
+  const workspace = tempDirScope.mkdtempAt(tmpBase, 'valid-ws-');
   assert.doesNotThrow(() => sl.assertValidWorkspace(workspace));
 });
 

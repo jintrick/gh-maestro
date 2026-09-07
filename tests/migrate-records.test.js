@@ -3,7 +3,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const migrateRecords = require('../scripts/migrate-records');
 const workerSupervisor = require('../scripts/worker-supervisor');
@@ -12,12 +11,17 @@ const inboxSupervisorControl = require('../scripts/shared/worker-supervisor-cont
 const { findRunningInstance } = require('../scripts/process-lifecycle');
 const { killProcessTree } = require('../scripts/shared/kill-tree');
 const workerLease = require('../scripts/shared/worker-lease');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
+
+const tempDirScope = createTempDirScope();
 
 function workspace() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-migrate-records-'));
+  const dir = tempDirScope.mkdtemp('gh-maestro-migrate-records-');
   fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
   return dir;
 }
+
+test.after(() => tempDirScope.cleanup());
 
 // inbox-supervisor-control の注入（_set...）はモジュール内のモジュール変数を書き換えるため、
 // テスト間で実装を跨いで持ち越さないよう、各テスト後に必ず実装へ戻す。

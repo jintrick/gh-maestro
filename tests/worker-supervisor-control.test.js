@@ -3,8 +3,8 @@
 const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
 const control = require('../scripts/shared/worker-supervisor-control');
 const { findRunningInstance } = require('../scripts/process-lifecycle');
@@ -12,6 +12,7 @@ const { killProcessTree } = require('../scripts/shared/kill-tree');
 const workerLease = require('../scripts/shared/worker-lease');
 
 let workspace;
+let tempDirScope;
 
 // _set... 注入はモジュール内のモジュール変数を書き換えるため、テスト間で
 // 実装を跨いで持ち越さないよう、beforeEach/afterEach で必ず実装へ戻す
@@ -24,12 +25,17 @@ function resetInjectables() {
 }
 
 beforeEach(() => {
-  workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-supervisor-control-'));
+  tempDirScope = createTempDirScope();
+  workspace = tempDirScope.mkdtemp('worker-supervisor-control-');
   resetInjectables();
 });
 
 afterEach(() => {
-  resetInjectables();
+  try {
+    resetInjectables();
+  } finally {
+    tempDirScope.cleanup();
+  }
 });
 
 test('runningWorkerSupervisorPids: registry エントリからPIDを検知する', () => {

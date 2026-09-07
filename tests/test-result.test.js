@@ -3,7 +3,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
 const {
@@ -20,19 +19,21 @@ const {
   readTestResultArtifact,
 } = require('../scripts/shared/test-result');
 const { listRegisteredWorkspaces, runtimeRoot, workspaceRuntimeDir } = require('../scripts/shared/storage-layout');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
 const savedRuntimeDir = process.env.GH_MAESTRO_RUNTIME_DIR;
-const isolatedRuntimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-result-runtime-'));
+const tempDirScope = createTempDirScope();
+const isolatedRuntimeDir = tempDirScope.mkdtemp('gh-maestro-test-result-runtime-');
 process.env.GH_MAESTRO_RUNTIME_DIR = isolatedRuntimeDir;
 
-process.on('exit', () => {
+test.after(() => {
   if (savedRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
   else process.env.GH_MAESTRO_RUNTIME_DIR = savedRuntimeDir;
-  try { fs.rmSync(isolatedRuntimeDir, { recursive: true, force: true }); } catch {}
+  tempDirScope.cleanup();
 });
 
 function tempWorktree() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-result-worktree-'));
+  return tempDirScope.mkdtemp('gh-maestro-test-result-worktree-');
 }
 
 function completeArtifact(overrides = {}) {

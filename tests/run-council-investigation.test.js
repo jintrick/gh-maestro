@@ -10,9 +10,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
+const { withTempDir } = require('../scripts/shared/temp-directory');
 
 const modulePath = require.resolve('../scripts/run-council-investigation');
 
@@ -89,7 +89,7 @@ function loadModule({ spawnImpl, spawnSyncImpl, councilResolve, resolveAgent, va
       },
       councilInvestigationPath: (ws, session) => path.join(ws, '.gh-maestro', `council-${session}.investigation.json`),
       resolveWorkspaceHead: () => SHA,
-      ensureCouncilWorktree: () => path.join(os.tmpdir(), 'council-wt-test'),
+      ensureCouncilWorktree: () => 'council-wt-test',
     },
   };
 
@@ -122,13 +122,10 @@ function withEnvClean(fn) {
 
 /** 一時ワークスペースを作り、後始末する。 */
 function withTempWorkspace(fn) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-invest-test-'));
-  try {
+  return withTempDir('ghm-invest-test-', (dir) => {
     fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
     return fn(dir);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  });
 }
 
 // ── buildInvestigationPrompt ───────────────────────────────────────────────────
@@ -279,22 +276,22 @@ test('runCouncilInvestigation: 必須フラグ欠落は 1（usage）', async () 
 
 test('runCouncilInvestigation: council解決失敗は 2（fail-closed）', async () => {
   const { mod } = loadModule({ councilResolve: () => null });
-  assert.equal(await withEnvClean(() => mod.runCouncilInvestigation(['--title', 'T', '--agenda-file', 'a.md', '--workspace', path.join(os.tmpdir(), 'x')])), 2);
+  assert.equal(await withEnvClean(() => mod.runCouncilInvestigation(['--title', 'T', '--agenda-file', 'a.md', '--workspace', path.join(process.cwd(), 'ghm-council-missing-x')])), 2);
 });
 
 test('runCouncilInvestigation: investigationAgent未設定は 2（fail-closed）', async () => {
   const { mod } = loadModule({ councilResolve: () => ({ groups: { default: { agents: ['a'] } }, investigationAgent: null }) });
-  assert.equal(await withEnvClean(() => mod.runCouncilInvestigation(['--title', 'T', '--agenda-file', 'a.md', '--workspace', path.join(os.tmpdir(), 'x')])), 2);
+  assert.equal(await withEnvClean(() => mod.runCouncilInvestigation(['--title', 'T', '--agenda-file', 'a.md', '--workspace', path.join(process.cwd(), 'ghm-council-missing-x')])), 2);
 });
 
 test('runCouncilInvestigation: agendaファイルが読めないのは 2（事前確認）', async () => {
   const { mod } = loadModule();
-  const code = await withEnvClean(() => mod.runCouncilInvestigation(['--title', 'T', '--agenda-file', path.join(os.tmpdir(), 'nope.md'), '--workspace', path.join(os.tmpdir(), 'x')]));
+  const code = await withEnvClean(() => mod.runCouncilInvestigation(['--title', 'T', '--agenda-file', path.join(process.cwd(), 'ghm-council-missing-agenda.md'), '--workspace', path.join(process.cwd(), 'ghm-council-missing-x')]));
   assert.equal(code, 2);
 });
 
 test('runCouncilInvestigation: 成功時は結果を書き出し 0 を返す', async () => {
-  withTempWorkspace((ws) => {
+  await withTempWorkspace((ws) => {
     const child = fakeChild();
     const sessionCalls = [];
     const { mod } = loadModule({ spawnImpl: () => child, resolveSessionCalls: sessionCalls });
@@ -332,7 +329,7 @@ test('runCouncilInvestigation: 成功時は結果を書き出し 0 を返す', a
 });
 
 test('runCouncilInvestigation: 明示 --session は共有 resolveSession へそのまま渡る', async () => {
-  withTempWorkspace((ws) => {
+  await withTempWorkspace((ws) => {
     const child = fakeChild();
     const sessionCalls = [];
     const { mod } = loadModule({ spawnImpl: () => child, resolveSessionCalls: sessionCalls });
@@ -353,7 +350,7 @@ test('runCouncilInvestigation: 明示 --session は共有 resolveSession へそ�
 });
 
 test('runCouncilInvestigation: 調査ジョブ失敗は 2 で結果ファイルを書かない', async () => {
-  withTempWorkspace((ws) => {
+  await withTempWorkspace((ws) => {
     const child = fakeChild();
     const { mod } = loadModule({ spawnImpl: () => child });
     const agendaFile = path.join(ws, 'agenda.md');

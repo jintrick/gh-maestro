@@ -2,10 +2,10 @@
 
 const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
-const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { EventEmitter } = require('events');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
 const mod = require('../scripts/shared/ensure-worker-supervisor');
 const { ensureWorkerSupervisorRunning, AUTOSTART_COOLDOWN_MS } = mod;
@@ -35,9 +35,11 @@ function writeAttempt(lastAttemptAt) {
 }
 
 let workspace;
+let tempDirScope;
 
 beforeEach(() => {
-  workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ensure-supervisor-'));
+  tempDirScope = createTempDirScope();
+  workspace = tempDirScope.mkdtemp('ensure-supervisor-');
   mod._setSpawn(() => fakeChild());
   // findSessionRootPid は実装がWMI/execSyncを呼ぶため、テストでは常にモックする
   // （実プロセスを起動しない）。
@@ -49,10 +51,14 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  // マーカーの生存確認注入を実装へ戻す（テスト間で持ち越さない）
-  migrationMarker._setIsProcessAlive(isProcessAlive);
-  migrationMarker._setGetProcessStartTime(getProcessStartTime);
-  migrationMarker._setVerifyProcessIdentity(verifyProcessIdentity);
+  try {
+    // マーカーの生存確認注入を実装へ戻す（テスト間で持ち越さない）
+    migrationMarker._setIsProcessAlive(isProcessAlive);
+    migrationMarker._setGetProcessStartTime(getProcessStartTime);
+    migrationMarker._setVerifyProcessIdentity(verifyProcessIdentity);
+  } finally {
+    tempDirScope.cleanup();
+  }
 });
 
 test('ensureWorkerSupervisorRunning: detached・windowsHide付きでworker-supervisor.jsをspawnする', () => {

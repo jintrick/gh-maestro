@@ -2,10 +2,10 @@
 
 const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
-const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { EventEmitter } = require('events');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
 const {
   ensureResidentDaemon,
@@ -33,9 +33,11 @@ function fakeChild() {
 
 let workspace;
 let hooks;
+let tempDirScope;
 
 beforeEach(() => {
-  workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ensure-daemon-'));
+  tempDirScope = createTempDirScope();
+  workspace = tempDirScope.mkdtemp('ensure-daemon-');
   hooks = createDaemonHooks();
   hooks.setSpawn(() => fakeChild());
   hooks.setFindSessionRootPid(() => 12345);
@@ -44,9 +46,13 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  migrationMarker._setIsProcessAlive(isProcessAlive);
-  migrationMarker._setGetProcessStartTime(getProcessStartTime);
-  migrationMarker._setVerifyProcessIdentity(verifyProcessIdentity);
+  try {
+    migrationMarker._setIsProcessAlive(isProcessAlive);
+    migrationMarker._setGetProcessStartTime(getProcessStartTime);
+    migrationMarker._setVerifyProcessIdentity(verifyProcessIdentity);
+  } finally {
+    tempDirScope.cleanup();
+  }
 });
 
 test('ensureResidentDaemon: 基本動作 - detached・windowsHide付きでスクリプトをspawnする', () => {

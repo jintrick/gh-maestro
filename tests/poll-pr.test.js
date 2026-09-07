@@ -5,13 +5,13 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const {
   readTestResultArtifact,
   writeTestResultLayer,
 } = require('../scripts/shared/test-result');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
 // poll-pr.js は require.main===module 時のみCLIを実行するため、
 // getPrBaseBranch/formatBaseBranchMismatch/spawnPollReviews は純粋関数としてrequireで検証する。
@@ -224,8 +224,12 @@ test("formatBaseBranchMismatch reports (unknown) when actual is empty (fail-clos
   assert.equal(mod.formatBaseBranchMismatch("dev", "", "42"), "PR_BASE_MISMATCH:42:dev:(unknown)");
 });
 
+const tempDirScope = createTempDirScope();
+
+test.after(() => tempDirScope.cleanup());
+
 function temporaryWorkspace(prefix) {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const workspace = tempDirScope.mkdtemp(prefix);
   fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
   return workspace;
 }
@@ -247,7 +251,7 @@ test('recordHeadUnavailable persists a reachable log and state record', () => {
   const { mod } = loadModule();
   const workspace = temporaryWorkspace('gh-maestro-poll-pr-head-unavailable-');
   const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
-  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  const runtime = tempDirScope.mkdtemp('gh-maestro-poll-pr-runtime-');
   process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
   const output = captureStdout();
   try {
@@ -312,7 +316,7 @@ test('runPollPr connects PR detection, PR_PUSH slow launches, deduplication, and
   const workspace = temporaryWorkspace('gh-maestro-poll-pr-control-loop-');
   const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'fixture-senior');
   fs.mkdirSync(worktree, { recursive: true });
-  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  const runtime = tempDirScope.mkdtemp('gh-maestro-poll-pr-runtime-');
   const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
   process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
   const firstHead = '1111111111111111111111111111111111111111';
@@ -407,7 +411,7 @@ test('runSlowTest starts the child, preserves the full layer, and declares the a
   const workspace = temporaryWorkspace('gh-maestro-poll-pr-run-slow-');
   const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'fixture-senior');
   fs.mkdirSync(worktree, { recursive: true });
-  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  const runtime = tempDirScope.mkdtemp('gh-maestro-poll-pr-runtime-');
   const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
   process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
   const head = '0123456789abcdef0123456789abcdef01234567';
@@ -461,7 +465,7 @@ test('runSlowTest starts the child, preserves the full layer, and declares the a
 test('runSlowTest records a worktree resolution failure before a child or log handle exists', async () => {
   const { mod } = loadModule();
   const workspace = temporaryWorkspace('gh-maestro-poll-pr-resolve-failure-');
-  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  const runtime = tempDirScope.mkdtemp('gh-maestro-poll-pr-runtime-');
   const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
   process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
   const head = '1234567890abcdef1234567890abcdef12345678';
@@ -490,7 +494,7 @@ test('runSlowTest records timeout/startup failures and does not retry a complete
   const workspace = temporaryWorkspace('gh-maestro-poll-pr-run-failure-');
   const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'fixture-senior');
   fs.mkdirSync(worktree, { recursive: true });
-  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  const runtime = tempDirScope.mkdtemp('gh-maestro-poll-pr-runtime-');
   const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
   process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
   const head = 'abcdefabcdefabcdefabcdefabcdefabcdefabcd';
@@ -534,7 +538,7 @@ test('runSlowTest does not let an older HEAD overwrite a newer worktree result',
   const workspace = temporaryWorkspace('gh-maestro-poll-pr-stale-head-');
   const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'fixture-senior');
   fs.mkdirSync(worktree, { recursive: true });
-  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-poll-pr-runtime-'));
+  const runtime = tempDirScope.mkdtemp('gh-maestro-poll-pr-runtime-');
   const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
   process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
   const head = '1111111111111111111111111111111111111111';
