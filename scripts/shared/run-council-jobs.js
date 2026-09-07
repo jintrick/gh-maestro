@@ -401,16 +401,6 @@ async function launchParticipantJob({ participant, manifest, agentConfig, worktr
 
   const promptText = buildPhasePrompt(participant, manifest);
 
-  // `{workspace}` プレースホルダーはジョブcwd（議論用worktree）へ置換する
-  const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
-    .map(a => a.replace(/\{workspace\}/g, worktreeDir));
-  const argsConfig = {
-    ...agentConfig,
-    extraArgs,
-    promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
-    promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
-  };
-
   const workerName = `council-${manifest.session}-${participantId}`;
   const logFile = workerLogPath(workspace, workerName, {
     ownerKind: 'job', ownerId: manifest.session, workerName,
@@ -428,7 +418,7 @@ async function launchParticipantJob({ participant, manifest, agentConfig, worktr
   let run;
   try {
     run = await runAgentWithPrompt({
-      agentConfig: argsConfig,
+      agentConfig,
       promptText,
       cwd: worktreeDir,
       tempPrefix: `council-${manifest.session}-${participantId}-`,

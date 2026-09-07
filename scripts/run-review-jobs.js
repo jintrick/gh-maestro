@@ -599,11 +599,6 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
   const fileCheck = validateCanonicalReviewFiles(job, skillsDir);
   if (!fileCheck.ok) return failed(fileCheck.error);
 
-  const configuredArgs = agentConfig.execArgs ?? agentConfig.extraArgs;
-  if (!Array.isArray(configuredArgs) || configuredArgs.some(arg => typeof arg !== 'string')) {
-    return failed(`agent "${agentConfig.id}" execArgs/extraArgs must be an array of strings`);
-  }
-
   let prompt;
   try {
     prompt = buildJobPrompt(job, manifest, reviewWtDir, {
@@ -633,14 +628,6 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
 
   let timeoutHandle;
   let timedOut = false;
-  const argsConfig = {
-    ...agentConfig,
-    extraArgs: configuredArgs
-      .map(arg => arg.replace(/\{workspace\}/g, reviewWtDir)),
-    promptDelivery,
-    promptFlag,
-  };
-
   timeoutHandle = setTimeout(() => {
     timedOut = true;
     try { if (childRef && childRef.child) childRef.child.kill(); } catch {}
@@ -682,7 +669,7 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
     }
 
     const run = await runAgentWithPrompt({
-      agentConfig: argsConfig,
+      agentConfig,
       promptText: prompt,
       cwd: reviewWtDir,
       tempPrefix: `review-job-${job.id}-review-`,

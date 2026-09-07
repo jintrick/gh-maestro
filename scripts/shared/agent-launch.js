@@ -74,6 +74,37 @@ function buildAgentCommandArgs(agentConfig, opts = {}) {
 }
 
 /**
+ * 起動入口で使うエージェント設定を正規化する。
+ * exec用の設定を優先し、ジョブのcwdを `{workspace}` へ埋め込む。
+ * 呼び出し側が配送方式や引数を組み立てると、エージェントごとの差分が
+ * 複数箇所へ漏れるため、この入口だけで解決する。
+ *
+ * @param {object} agentConfig
+ * @param {string} cwd
+ * @returns {object}
+ */
+function normalizeAgentLaunchConfig(agentConfig, cwd) {
+  if (!agentConfig || typeof agentConfig !== 'object') {
+    throw new Error('agentConfig is required');
+  }
+  if (typeof cwd !== 'string' || cwd.length === 0) {
+    throw new TypeError('cwd must be a non-empty string');
+  }
+
+  const configuredArgs = agentConfig.execArgs ?? agentConfig.extraArgs ?? [];
+  if (!Array.isArray(configuredArgs) || configuredArgs.some(arg => typeof arg !== 'string')) {
+    throw new TypeError('agentConfig execArgs/extraArgs must be an array of strings');
+  }
+
+  return {
+    ...agentConfig,
+    extraArgs: configuredArgs.map(arg => arg.replace(/\{workspace\}/g, cwd)),
+    promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
+    promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
+  };
+}
+
+/**
  * プロンプトを一時ファイル経由で配送してエージェントを1回起動する。
  *
  * プロンプトファイル、結果ファイル、起動argvはこの関数のスコープ内だけで扱う。
@@ -82,7 +113,7 @@ function buildAgentCommandArgs(agentConfig, opts = {}) {
  * 正常終了・spawn失敗・例外・タイムアウトのどの経路でも同じ寿命境界になる。
  *
  * @param {object} opts
- * @param {object} opts.agentConfig 解決済みエージェント設定（extraArgsは置換済みでよい）
+ * @param {object} opts.agentConfig 解決済みエージェント設定
  * @param {string} opts.promptText 指示文本文
  * @param {string} opts.cwd エージェントの作業ディレクトリ
  * @param {string} [opts.systemPromptText] system-prompt-file配送時の補助システム文
@@ -141,17 +172,12 @@ function runAgentWithPrompt({
       // このディレクトリとその中のファイルの所有は withTempDir に限定する。
       fs.writeFileSync(promptFile, resolvedPrompt, 'utf8');
 
-      const promptDelivery = agentConfig.execPromptDelivery ?? agentConfig.promptDelivery;
-      const promptFlag = agentConfig.execPromptFlag ?? agentConfig.promptFlag;
+      const launchConfig = normalizeAgentLaunchConfig(agentConfig, cwd);
+      const promptDelivery = launchConfig.promptDelivery;
       if (promptDelivery === 'send-text-after-launch') {
         throw new Error('send-text-after-launch is not supported by runAgentWithPrompt; use file delivery');
       }
-      const argsConfig = {
-        ...agentConfig,
-        promptDelivery,
-        promptFlag,
-      };
-      const agentArgs = buildAgentCommandArgs(argsConfig, {
+      const agentArgs = buildAgentCommandArgs(launchConfig, {
         promptFile,
         // Windowsパスを短い指示文へ埋め込む場合もシェルの再解釈を避ける。
         shortPrompt: `Read ${promptFile.replace(/\\/g, '/')} and execute it.`,

@@ -901,14 +901,6 @@ async function superviseAgentPhase({
     return { outcome: 'agent-config-failed', exitCode: 1, agentPid: null, reason: `non-interactive token missing: ${execTokenCheck.missing.join(', ')}` };
   }
 
-  const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
-    .map(a => a.replace(/\{workspace\}/g, reviewWtDir));
-  const launchConfig = {
-    ...agentConfig,
-    extraArgs,
-    promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
-    promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
-  };
   let agentFd;
   try {
     agentFd = fs.openSync(logFile, 'a');
@@ -916,10 +908,34 @@ async function superviseAgentPhase({
     return { outcome: 'setup-failed', exitCode: 1, agentPid: null, reason: `ログファイルを開けません: ${e.message}` };
   }
 
+  let agentFdClosed = false;
+  let childEndWatcherInstalled = false;
+  const closeAgentFd = () => {
+    if (agentFdClosed) return;
+    agentFdClosed = true;
+    try { fs.closeSync(agentFd); } catch {}
+  };
+  const watchChildEnd = (child) => {
+    if (!child || typeof child.on !== 'function') {
+      closeAgentFd();
+      return;
+    }
+    if (childEndWatcherInstalled) return;
+    childEndWatcherInstalled = true;
+    const onChildEnd = () => closeAgentFd();
+    if (typeof child.once === 'function') {
+      child.once('close', onChildEnd);
+      child.once('error', onChildEnd);
+    } else {
+      child.on('close', onChildEnd);
+      child.on('error', onChildEnd);
+    }
+  };
+
   let run;
   try {
     run = await runAgentWithPrompt({
-      agentConfig: launchConfig,
+      agentConfig,
       promptText,
       cwd: reviewWtDir,
       tempPrefix: `review-manager-${pr}-`,
@@ -927,6 +943,9 @@ async function superviseAgentPhase({
       spawnFn: spawn,
       spawnOptions: { stdio: ['pipe', agentFd, agentFd] },
       onSpawn: (child) => {
+        // 成果物を先に検出して observe が戻っても、子プロセスが終了するまでは
+        // stdout/stderr の出力先を閉じない。終了後の診断ログを失わないためである。
+        watchChildEnd(child);
         if (child.stdin) child.stdin.end();
       },
       observe: async (agentChild) => {
@@ -990,8 +1009,10 @@ async function superviseAgentPhase({
         log('timeout: neither target nor process exit detected');
         return { outcome: 'timeout', exitCode: 1, agentPid, reason: `deadline (${deadlineMs}ms) reached without target or process exit` };
       },
-      cleanup: () => {
-        fs.closeSync(agentFd);
+      cleanup: (child) => {
+        // cleanup は observe の終了直後に呼ばれることがある。fdの寿命は
+        // エージェントの close/error イベントまで延長し、spawn失敗時だけ即時解放する。
+        watchChildEnd(child);
       },
     });
   } catch (e) {

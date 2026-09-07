@@ -127,16 +127,6 @@ async function launchInvestigationJob({ title, agenda, question, agentConfig, wo
 
   const promptText = buildInvestigationPrompt({ title, agenda, question });
 
-  // `{workspace}` プレースホルダーはジョブcwd（議論用worktree）へ置換する
-  const extraArgs = (agentConfig.execArgs ?? agentConfig.extraArgs ?? [])
-    .map(a => a.replace(/\{workspace\}/g, worktreeDir));
-  const argsConfig = {
-    ...agentConfig,
-    extraArgs,
-    promptDelivery: agentConfig.execPromptDelivery ?? agentConfig.promptDelivery,
-    promptFlag: agentConfig.execPromptFlag ?? agentConfig.promptFlag,
-  };
-
   const logFile = workerLogPath(workspace, 'council-investigation', {
     ownerKind: 'job', ownerId: jobId, workerName: 'council-investigation',
   });
@@ -153,7 +143,7 @@ async function launchInvestigationJob({ title, agenda, question, agentConfig, wo
   let run;
   try {
     run = await runAgentWithPrompt({
-      agentConfig: argsConfig,
+      agentConfig,
       promptText,
       cwd: worktreeDir,
       tempPrefix: 'council-investigation-',
