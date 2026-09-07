@@ -2,7 +2,6 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const os = require('os');
 const fs = require('fs');
 const path = require('path');
 
@@ -13,14 +12,18 @@ const {
   main,
 } = require('../scripts/run-tests');
 const { createBuiltinTestConfig } = require('../scripts/shared/resolve-config');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
 const BUILTIN_TEST_LAYERS = createBuiltinTestConfig().layers;
 
 const SHA = '0123456789abcdef0123456789abcdef01234567';
 const CONTENT_HASH = 'a'.repeat(64);
+const tempDirScope = createTempDirScope();
+
+test.after(() => tempDirScope.cleanup());
 
 function tempWorktree() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-run-tests-'));
+  return tempDirScope.mkdtemp('gh-maestro-run-tests-');
 }
 
 function writeWorkspaceConfig(workspace, config) {

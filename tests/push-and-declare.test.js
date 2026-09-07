@@ -3,10 +3,10 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { testResultPath, writeTestResultArtifact } = require('../scripts/shared/test-result');
 const { listTestLayers } = require('../scripts/run-tests');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
 // push-and-declare.js は「ステージング・コミット・push・PR取得/作成・テスト結果申告」を
 // 一つの操作にまとめた収束型の単一入口（Issue #374）。テストは child-process.js の
@@ -103,10 +103,13 @@ function withGuardBypassed(fn) {
   }
 }
 
-/** 一時ワークスペースのパスを作る（存在は不要。git/gh はすべてモックされる）。 */
+const tempDirScope = createTempDirScope();
+
+test.after(() => tempDirScope.cleanup());
+
+/** 一時ワークスペースのパスを作り、ファイル終了時に共有スコープで回収する。 */
 function tempWorkspace() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-pad-test-'));
-  return dir;
+  return tempDirScope.mkdtemp('ghm-pad-test-');
 }
 
 function writeTestLayerConfig(workspace, layers = {

@@ -18,6 +18,7 @@ const {
   buildUserPromptExpansionHook, registerUserPromptExpansionHook,
 } = require('../scripts/install.js');
 const { MANAGED_TOP_LEVEL } = require('../scripts/shared/storage-layout');
+const { withTempDir } = require('../scripts/shared/temp-directory');
 
 test('restartResidentsAfterInstall: 登録済みの全workspaceに配布済みCLIを明示引数付きで呼び出す', () => {
   const workspaces = [
@@ -150,17 +151,18 @@ test('restartResidentsAfterInstall: workspace registryの読取失敗を握り�
 });
 
 test('restartResidentsAfterInstall: 実際のrestart-residents.jsがworkspace引数を受理する', () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-install-real-cli-'));
-  const result = restartResidentsAfterInstall({
-    workspaces: [workspace],
-    callerWorkspace: null,
-    sharedScripts: path.join(ROOT, 'scripts'),
-  });
+  return withTempDir('gh-maestro-install-real-cli-', (workspace) => {
+    const result = restartResidentsAfterInstall({
+      workspaces: [workspace],
+      callerWorkspace: null,
+      sharedScripts: path.join(ROOT, 'scripts'),
+    });
 
-  assert.equal(result.attempted, true);
-  assert.equal(result.code, 0);
-  assert.deepEqual(result.results, [{ workspace, code: 0 }]);
-  assert.deepEqual(result.callerReattachLines, []);
+    assert.equal(result.attempted, true);
+    assert.equal(result.code, 0);
+    assert.deepEqual(result.results, [{ workspace, code: 0 }]);
+    assert.deepEqual(result.callerReattachLines, []);
+  });
 });
 
 test('末尾再掲: 呼び出し元 workspace に再接続要求があるとき、gh-maestro installed. より後にその行が出る', () => {
