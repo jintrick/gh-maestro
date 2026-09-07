@@ -3,7 +3,8 @@
 //
 // fail/pass はコマンドラインから受け取らず、同じ worktree で test runner が runtime root
 // に生成した成果物だけから取得する。対象コミットも手入力せず、実行時のHEADを使う。
-// 成果物が無い・壊れている場合は unknown の申告へ縮退し、push/PR/申告そのものは止めない。
+// 成果物が無い・壊れている場合は通常の単体申告では unknown へ縮退する。
+// push-and-declare.js から必須層を渡された場合だけ、照合後に層の欠落をエラーとして返す。
 //
 // Usage:
 //   node declare-test-result.js --pr <PR> [--repo <owner/repo>] [--workspace <path>]
@@ -38,7 +39,7 @@ Options:
   1. 同じ worktree の runtime root にあるテスト結果成果物を読み取る（値の手入力は不可）
   2. worktree の現在のHEADを対象コミットとして解決する
   3. 対象 PR の既存申告コメントを更新、または新規投稿する
-  4. 成果物が欠落・破損している場合も unknown として申告する
+  4. 成果物が欠落・破損している場合は通常経路では unknown として申告する
 
 Output (stdout):
   投稿または更新されたコメントの URL を1行出力
@@ -140,6 +141,35 @@ function aggregateResultForCommit(result, commitSha, commitContentHash) {
   };
 }
 
+/**
+ * 既存のHEAD・内容指紋照合後の結果から、呼び出し元が要求した層が
+ * completeなpass/failとして揃っているかを判定する。ここでは成果物の読み取りや
+ * 指紋計算を行わず、aggregateResultForCommit() が unavailable へ変換した結果を使う。
+ *
+ * @param {object} testResult
+ * @param {string[]} requiredLayers
+ * @returns {string[]} 欠落・unavailableな層名
+ */
+function missingRequiredLayers(testResult, requiredLayers) {
+  if (!Array.isArray(requiredLayers) || requiredLayers.length === 0) return [];
+  const names = [...new Set(requiredLayers.filter((name) => typeof name === 'string' && name.trim()))];
+  if (names.length === 0) return [];
+
+  if (testResult && testResult.scope === 'aggregate' && testResult.layers) {
+    return names.filter((name) => aggregateLayerStatus(testResult.layers[name]) === 'unknown');
+  }
+
+  // 旧形式の単一成果物は層名を持たないため、full層が1つだけ要求される場合だけ
+  // その成果物を対応する層として扱う。複数層の要求はaggregateでなければ満たせない。
+  if (names.length === 1
+      && testResult
+      && testResult.scope === 'full'
+      && isKnownTestResult(testResult)) {
+    return [];
+  }
+  return names;
+}
+
 // ── コメント本文生成 ────────────────────────────────────────────────────────
 
 /**
@@ -207,7 +237,7 @@ function buildCommentBody({ commit, testResult }) {
 /**
  * PR にテスト結果コメントがあれば更新、なければ新規投稿する。
  *
- * @param {{pr:string, repo?:string, workspace?:string, worktree?:string, headSha?:string}} params
+ * @param {{pr:string, repo?:string, workspace?:string, worktree?:string, headSha?:string, requiredLayers?:string[]}} params
  * @param {object} [deps] テスト用の依存注入
  * @param {function} [deps.ghRepoViewFn]
  * @param {function} [deps.ghListCommentsFn]
@@ -225,6 +255,7 @@ function declareTestResult(params = {}, deps = {}) {
     workspace,
     worktree = process.cwd(),
     headSha,
+    requiredLayers = [],
   } = params;
   const {
     ghRepoViewFn = _ghRepoView,
@@ -268,8 +299,8 @@ function declareTestResult(params = {}, deps = {}) {
     }
   }
 
-  // 成果物の失敗は外部操作の停止条件にしない。readTestResultArtifact は欠落・破損を
-  // ok=falseで返し、ここでは unknown の本文へ変換する。
+  // 通常の単体申告では成果物の失敗を unknown の本文へ変換する。必須層を指定した
+  // push-and-declare 経路では、この照合後に欠落・unavailableを申告前に拒否する。
   let artifactRead;
   try {
     artifactRead = readTestResultFn(cwd);
@@ -296,6 +327,14 @@ function declareTestResult(params = {}, deps = {}) {
     }
   } else if (artifactRead && artifactRead.ok) {
     testResult = unknownTestResult('invalid-artifact');
+  }
+
+  const missingLayers = missingRequiredLayers(testResult, requiredLayers);
+  if (missingLayers.length > 0) {
+    return {
+      ok: false,
+      error: `必須テスト層の結果が揃っていません: ${missingLayers.join(', ')}`,
+    };
   }
 
   // 2. リポジトリ特定

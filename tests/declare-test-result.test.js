@@ -262,6 +262,80 @@ test('declareTestResult: 成果物の欠落・破損でも unknown を投稿し�
   assert.doesNotMatch(createdBody, /fail: \d/);
 });
 
+test('declareTestResult: 必須層指定時は成果物の欠落を申告前に拒否する', () => {
+  let listed = false;
+  const result = declareTestResult(
+    { pr: '42', repo: 'owner/repo', headSha: SHA, requiredLayers: ['full'] },
+    baseDeps({
+      readTestResultFn: () => ({ ok: false, kind: 'missing', reason: 'missing' }),
+      ghListCommentsFn: () => { listed = true; return { status: 0, stdout: '[]' }; },
+    }),
+  );
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /必須テスト層の結果が揃っていません.*full/);
+  assert.equal(listed, false, '不足した成果物ではGitHubコメントを取得しない');
+});
+
+test('declareTestResult: 必須層指定時は既存の内容照合でunavailableになった結果を拒否する', () => {
+  const result = declareTestResult(
+    { pr: '42', repo: 'owner/repo', headSha: SHA, requiredLayers: ['full'] },
+    baseDeps({
+      readTestResultFn: () => ({ ok: true, result: {
+        provenance: 'test-runner',
+        scope: 'aggregate',
+        layers: {
+          full: {
+            layer: 'full', scope: 'full', status: 'complete', outcome: 'pass',
+            testedContentHash: CONTENT_HASH,
+          },
+        },
+      } }),
+      commitContentHashFn: () => 'b'.repeat(64),
+    }),
+  );
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /必須テスト層の結果が揃っていません.*full/);
+});
+
+test('declareTestResult: 必須aggregate層の欠落を拒否し、completeなfailは受理する', () => {
+  const incomplete = declareTestResult(
+    { pr: '42', repo: 'owner/repo', headSha: SHA, requiredLayers: ['full'] },
+    baseDeps({
+      readTestResultFn: () => ({ ok: true, result: {
+        provenance: 'test-runner',
+        scope: 'aggregate',
+        layers: {
+          slow: {
+            layer: 'slow', scope: 'partial', status: 'complete', outcome: 'pass',
+            testedContentHash: CONTENT_HASH,
+          },
+        },
+      } }),
+    }),
+  );
+  assert.equal(incomplete.ok, false);
+  assert.match(incomplete.error, /必須テスト層の結果が揃っていません.*full/);
+
+  const completeFail = declareTestResult(
+    { pr: '42', repo: 'owner/repo', headSha: SHA, requiredLayers: ['full'] },
+    baseDeps({
+      readTestResultFn: () => ({ ok: true, result: {
+        provenance: 'test-runner',
+        scope: 'aggregate',
+        layers: {
+          full: {
+            layer: 'full', scope: 'full', status: 'complete', outcome: 'fail',
+            testedContentHash: CONTENT_HASH,
+          },
+        },
+      } }),
+    }),
+  );
+  assert.equal(completeFail.ok, true);
+});
+
 test('declareTestResult: テスト対象の内容と申告先コミットが不一致ならunknownで継続する', () => {
   let createdBody = null;
   const result = declareTestResult(

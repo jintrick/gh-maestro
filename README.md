@@ -266,7 +266,7 @@ gh-maestroが実際に細かい起動設定を必要とするのは claude / cod
 }
 ```
 
-コーダーは宣言された層を `run-tests.js` で実行する。worktreeから実行する場合は `--workspace <workspace>` で設定を置いたworkspaceを指定する。ランナーは終了コード（0はpass、それ以外はfail）を必ず成果物へ記録し、テストフレームワークの件数を読み取れた場合だけ件数を追加する。`push-and-declare.js` は成果物を再生成するためにテストを実行しない。
+コーダーは宣言された層を `run-tests.js` で実行する。worktreeから実行する場合は `--workspace <workspace>` で設定を置いたworkspaceを指定する。ランナーは終了コード（0はpass、それ以外はfail）を必ず成果物へ記録し、テストフレームワークの件数を読み取れた場合だけ件数を追加する。`push-and-declare.js` は成果物を再生成するためにテストを実行せず、文書だけの変更を除いて宣言された毎回側の成果物が欠落・破損している場合は push 後に非ゼロ終了する。
 
 ### skillAgentMap
 

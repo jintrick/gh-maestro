@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { testResultPath, writeTestResultArtifact } = require('../scripts/shared/test-result');
+const { listTestLayers } = require('../scripts/run-tests');
 
 // push-and-declare.js は「ステージング・コミット・push・PR取得/作成・テスト結果申告」を
 // 一つの操作にまとめた収束型の単一入口（Issue #374）。テストは child-process.js の
@@ -34,6 +35,7 @@ const pushAndDeclarePath = require.resolve('../scripts/push-and-declare');
 // （含めると挿入したモックが delete で消える）。
 const SPAWN_CAPTURING_MODULES = [
   '../scripts/push-and-declare',
+  '../scripts/run-tests',
   '../scripts/gh-create-pr',
   '../scripts/declare-test-result',
   '../scripts/shared/git-head',
@@ -74,6 +76,14 @@ function loadModule(spawnSyncImpl) {
   }
   const mod = require(pushAndDeclarePath);
 
+  // 既存の収束テストは宣言なしworkspaceの挙動を対象にする。実際の宣言解決を
+  // 検証するケースだけ、呼び出し時に listTestLayersFn を明示して実装を通す。
+  const originalPushAndDeclare = mod.pushAndDeclare;
+  mod.pushAndDeclare = (params, deps = {}) => originalPushAndDeclare(params, {
+    listTestLayersFn: () => ({ exitCode: 2, stdout: '{"status":"missing","layers":[]}\n', stderr: '' }),
+    ...deps,
+  });
+
   delete require.cache[childProcessPath];
   return { mod, calls };
 }
@@ -97,6 +107,14 @@ function withGuardBypassed(fn) {
 function tempWorkspace() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-pad-test-'));
   return dir;
+}
+
+function writeTestLayerConfig(workspace, layers = {
+  full: { scope: 'full', command: ['test-runner'] },
+}) {
+  const configDir = path.join(workspace, '.gh-maestro');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ test: { layers } }), 'utf8');
 }
 
 const SHA = '0123456789abcdef0123456789abcdef01234567'; // 40桁の16進数
@@ -144,7 +162,7 @@ function fullPathHandlers(overrides = {}) {
     { matches: m.repoView(), result: { status: 0, stdout: REPO + '\n' } },
     { matches: m.issueTitle(), result: { status: 0, stdout: TITLE + '\n' } },
     { matches: m.add(), result: { status: 0, stdout: '' } },
-    { matches: m.nameOnly(), result: { status: 0, stdout: 'a.js\nb.js\n' } },
+    { matches: m.nameOnly(), result: overrides.nameOnly || { status: 0, stdout: 'a.js\nb.js\n' } },
     // quietDiff: 既定は status 1（ステージ済み変更あり）。overrides.quietDiff で変更なしを注入できる
     { matches: m.quietDiff(), result: overrides.quietDiff || { status: 1, stdout: '' } },
     { matches: m.commit(), result: { status: 0, stdout: '' } },
@@ -303,6 +321,74 @@ test('収束: 成果物が無い場合もunknown申告だけを行い、テス�
   const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[2] === '-f');
   assert.ok(createCall);
   assert.match(createCall.args[3], /結果.*unknown/);
+});
+
+test('収束: 宣言済みfull層の成果物が無い場合はpush後にexit 3で申告を拒否する', () => {
+  const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
+  const ws = tempWorkspace();
+  writeTestLayerConfig(ws);
+
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+  }, { listTestLayersFn: listTestLayers }));
+
+  assert.equal(result.exitCode, 3, `stderr: ${result.stderr}`);
+  assert.match(result.stderr, /必須テスト層の結果が揃っていません.*full/);
+  assert.ok(call(calls, (cmd, args) => cmd === 'git' && args[0] === 'push'), '成果物が無くてもpushは完了する');
+  assert.equal(
+    calls.some(({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f'),
+    false,
+    '不足した成果物をunknownとして申告しない',
+  );
+});
+
+test('収束: 文書だけの変更は宣言済みfull層の成果物なしでも従来どおり進む', () => {
+  const { mod, calls } = loadModule(dispatcher(fullPathHandlers({
+    nameOnly: { status: 0, stdout: 'README.md\n' },
+  })));
+  const ws = tempWorkspace();
+  writeTestLayerConfig(ws);
+
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+  }, { listTestLayersFn: listTestLayers }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
+  assert.ok(createCall, '文書だけの変更は従来どおりunknown申告へ進む');
+  assert.match(createCall.args[3], /結果.*unknown/);
+});
+
+test('収束: 宣言済みfull層のcompleteなfail結果は既存照合を通過して申告する', () => {
+  const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
+  const ws = tempWorkspace();
+  writeTestLayerConfig(ws);
+  writeTestResultArtifact(ws, {
+    schemaVersion: 1,
+    producer: 'gh-maestro-test-runner',
+    provenance: 'test-runner',
+    scope: 'full',
+    status: 'complete',
+    command: 'npm test',
+    recordedAt: '2026-08-29T00:00:00.000Z',
+    testedHead: SHA,
+    tests: 12,
+    pass: 9,
+    fail: 3,
+    cancelled: 0,
+    skipped: 0,
+    todo: 0,
+    testedContentHash: CONTENT_HASH,
+  });
+
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+  }, { commitContentHashFn: () => CONTENT_HASH, listTestLayersFn: listTestLayers }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
+  assert.ok(createCall, '既存の内容照合を通過した結果を申告する');
+  assert.match(createCall.args[3], /結果.*fail.*fail: 3, pass: 9/);
 });
 
 test('収束: ステージ済み変更が無ければ空コミットを作らず、コミット段をスキップして push→申告で exit 0', () => {
