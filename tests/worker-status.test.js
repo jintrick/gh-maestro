@@ -582,11 +582,12 @@ test('main: list はサイクル行と最大4件のワーカー行を出力す�
     const result = runMain(['list', '--workspace', workspace]);
     assert.equal(result.code, 0);
     assert.equal(result.errLines.length, 0);
-    assert.equal(result.lines.length, 4);
-    assert.match(result.lines[0], /^#100 計0:00:00 .*準備.*未記録/);
-    assert.match(result.lines[1], /^● worker-a\s+\[agent-1\]\s+0:10:00 \(pid: 111\)$/);
-    assert.match(result.lines[2], /^● worker-b\s+\[agent-2\]\s+0:05:00 \(pid: 222\)$/);
-    assert.match(result.lines[3], /^○ worker-c\s+\[-\s*\]\s+- \(pid: 999999999\)$/);
+    assert.equal(result.lines.length, 5);
+    assert.equal(result.lines[0], '=== gh-maestro worker status ===');
+    assert.match(result.lines[1], /^#100 計0:00:00 .*準備.*未記録/);
+    assert.match(result.lines[2], /^● worker-a\s+\[agent-1\]\s+0:10:00 \(pid: 111\)$/);
+    assert.match(result.lines[3], /^● worker-b\s+\[agent-2\]\s+0:05:00 \(pid: 222\)$/);
+    assert.match(result.lines[4], /^○ worker-c\s+\[-\s*\]\s+- \(pid: 999999999\)$/);
   } finally {
     workerStatus._setNow(null);
     workerStatus._setIsWorkerAlive(null);
@@ -718,7 +719,8 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
     assert.equal(handle.timer, 12345);
     const initialOutput = stdoutChunks.join('');
     assert.match(initialOutput, /\x1b\[2J\x1b\[H/); // ANSI画面クリア
-    assert.doesNotMatch(initialOutput, /=== gh-maestro worker status|interval:|21:00:00/);
+    assert.match(initialOutput, /=== gh-maestro worker status ===/);
+    assert.doesNotMatch(initialOutput, /interval:|21:00:00/);
     assert.match(initialOutput, /#\? 計0:00:00 .*統合 ┈ 未記録/);
     assert.match(initialOutput, /● worker-a\s+\[-\]\s+0:05:00 \(pid: 111\)/);
     assert.equal(startTimeCalls, 1, '同一描画内の起動時刻取得は1回');
@@ -731,7 +733,8 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
 
     const secondOutput = stdoutChunks.join('');
     assert.match(secondOutput, /\x1b\[2J\x1b\[H/);
-    assert.doesNotMatch(secondOutput, /=== gh-maestro worker status|interval:|21:00:02/);
+    assert.match(secondOutput, /=== gh-maestro worker status ===/);
+    assert.doesNotMatch(secondOutput, /interval:|21:00:02/);
     assert.match(secondOutput, /#\? 計0:00:00 .*統合 ┈ 未記録/);
     assert.match(secondOutput, /● worker-a\s+\[-\]\s+0:05:02 \(pid: 111\)/);
     assert.equal(startTimeCalls, 1, '上限間隔未満の再描画では再取得しない');
@@ -1602,10 +1605,11 @@ test('main: list および list --json で Review Manager を表示する', () =
     // 1. list (テキスト行)
     const listResult = runMain(['list', '--workspace', workspace]);
     assert.equal(listResult.code, 0);
-    assert.equal(listResult.lines.length, 3);
-    assert.match(listResult.lines[0], /^#100 計0:00:00 .*統合 ┈ 未記録/);
-    assert.match(listResult.lines[1], /^● worker-a\s+\[agent-1\s*\]\s+0:10:00 \(pid: 111\)$/);
-    assert.match(listResult.lines[2], /^● review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
+    assert.equal(listResult.lines.length, 4);
+    assert.equal(listResult.lines[0], '=== gh-maestro worker status ===');
+    assert.match(listResult.lines[1], /^#100 計0:00:00 .*統合 ┈ 未記録/);
+    assert.match(listResult.lines[2], /^● worker-a\s+\[agent-1\s*\]\s+0:10:00 \(pid: 111\)$/);
+    assert.match(listResult.lines[3], /^● review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
 
     // 2. list --json (機械可読JSON)
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
@@ -1740,11 +1744,12 @@ test('collectWorkersStatus & main: list / --json でレビュージョブを収�
     // 2. list (テキスト行)
     const listResult = runMain(['list', '--workspace', workspace]);
     assert.equal(listResult.code, 0);
-    assert.equal(listResult.lines.length, 4);
-    assert.match(listResult.lines[0], /^#\? 計0:00:00 .*統合 ┈ 未記録/);
-    assert.match(listResult.lines[1], /^● review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
-    assert.match(listResult.lines[2], /^  └─ job-1 \(Design\)\s+\[codex\s*\]\s+0:03:00 \(pid: 333\)$/);
-    assert.match(listResult.lines[3], /^  └─ job-2 \(Correctness\)\s+\[codex\s*\]\s+0:02:00 \(pid: 444\)$/);
+    assert.equal(listResult.lines.length, 5);
+    assert.equal(listResult.lines[0], '=== gh-maestro worker status ===');
+    assert.match(listResult.lines[1], /^#\? 計0:00:00 .*統合 ┈ 未記録/);
+    assert.match(listResult.lines[2], /^● review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
+    assert.match(listResult.lines[3], /^  └─ job-1 \(Design\)\s+\[codex\s*\]\s+0:03:00 \(pid: 333\)$/);
+    assert.match(listResult.lines[4], /^  └─ job-2 \(Correctness\)\s+\[codex\s*\]\s+0:02:00 \(pid: 444\)$/);
 
     // 3. list --json
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
@@ -1793,8 +1798,8 @@ test('collectWorkersStatus: レビュージョブ取得失敗をReview Manager�
 
     const listResult = runMain(['list', '--workspace', workspace]);
     assert.equal(listResult.code, 0);
-    assert.match(listResult.lines[1], /^● review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
-    assert.match(listResult.lines[2], /^  └─ review jobs unavailable \(取得失敗\)$/);
+    assert.match(listResult.lines[2], /^● review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
+    assert.match(listResult.lines[3], /^  └─ review jobs unavailable \(取得失敗\)$/);
 
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
     assert.equal(jsonResult.code, 0);

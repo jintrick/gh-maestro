@@ -948,6 +948,8 @@ function inferIssue(workers) {
   return null;
 }
 
+const STATUS_HEADER = '=== gh-maestro worker status ===';
+
 function renderSnapshotLines(workspace, issue, opts = {}) {
   const currentWorkers = opts.currentWorkers || collectWorkersStatus(workspace, opts.collectOpts || opts);
   const explicitIssue = issue != null && String(issue) !== '';
@@ -1139,6 +1141,7 @@ function main(argv = process.argv.slice(2)) {
         maxLineWidth: process.stdout.columns,
         colorize: Boolean(process.stdout.isTTY && process.env.NO_COLOR !== '1'),
       });
+      writeOut(STATUS_HEADER);
       for (const line of lines) writeOut(line);
     }
     return { code: 0, lines: out, errLines: err };
@@ -1287,6 +1290,7 @@ function runWatchLoop(workspace, interval, opts = {}) {
           : Boolean(outStream.isTTY && process.env.NO_COLOR !== '1'),
       });
       outStream.write('\x1b[2J\x1b[H');
+      outStream.write(`${STATUS_HEADER}\n`);
       for (const line of lines) {
         outStream.write(line + '\n');
       }
@@ -1318,6 +1322,7 @@ module.exports = {
   renderCycleLine,
   renderWorkerRows,
   renderSnapshotLines,
+  STATUS_HEADER,
   alignStatusRows,
   mergeCycleWorkers,
   parseInterval,
