@@ -210,7 +210,12 @@ function buildCommentBody({ commit, testResult }) {
       const count = Number.isSafeInteger(layer.tests) ? `, tests: ${layer.tests}` : '';
       const executor = layer.executor ? `, executor: \`${layer.executor}\`` : '';
       const scope = layer.scope ? `, scope: \`${layer.scope}\`` : '';
-      const record = layer.executionLogPath ? `, 実行記録: \`${layer.executionLogPath}\`` : '';
+      // 公開先はGitHubであり、ローカルの絶対パスは他の環境から辿れずユーザー名を含む。
+      // 実行記録を特定できるファイル名だけを載せる（正本はローカルのファイル側にある）。
+      const recordName = layer.executionLogPath
+        ? String(layer.executionLogPath).split(/[\\/]/).filter(Boolean).pop() || ''
+        : '';
+      const record = recordName ? `, 実行記録: \`${recordName}\`` : '';
       const reason = status === 'unknown' && layer.reason ? `, reason: ${layer.reason}` : '';
       lines.push(`  - **${name}**: ${status}${countSuffix}${count}${executor}${scope}${record}${reason}`);
     }

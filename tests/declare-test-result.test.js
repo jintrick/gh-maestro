@@ -110,7 +110,8 @@ test('buildCommentBody: 層別aggregateはfull/slowの結果とslowの実行記�
   assert.ok(body.includes('**slow**: fail'));
   assert.ok(body.includes('executor: `test-runner`, scope: `full`'));
   assert.ok(body.includes('executor: `poll-pr`, scope: `partial`'));
-  assert.ok(body.includes('C:/runtime/slow.log'));
+  assert.ok(body.includes('実行記録: `slow.log`'));
+  assert.ok(!body.includes('C:/runtime/'), '公開先のコメントにローカルの絶対パスを載せない');
   assert.ok(body.includes('- **結果**: fail'));
 });
 
