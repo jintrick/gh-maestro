@@ -3,9 +3,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
+const { withTempDir } = require('../scripts/shared/temp-directory');
 
 const {
   buildAgentCommandArgs,
@@ -20,14 +20,6 @@ function fakeChild() {
   child.pid = 4242;
   child.stdin = { end() {} };
   return child;
-}
-
-function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'agent-launch-test-'));
-}
-
-function removeTree(directory) {
-  fs.rmSync(directory, { recursive: true, force: true });
 }
 
 function promptInRoot(root) {
@@ -56,14 +48,13 @@ async function observeClose(child, callback) {
 
 test('runAgentWithPrompt: 配送方式に関係なく本文を内部ファイルへ書き、完了後に所有ディレクトリを閉じる', async () => {
   for (const promptDelivery of ['system-prompt-file', 'flag', 'positional']) {
-    const root = tempRoot();
-    let capturedPrompt;
-    let capturedPromptFile;
-    const child = fakeChild();
-    const config = fileDeliveryConfig(promptDelivery, promptDelivery === 'system-prompt-file'
-      ? { promptDelivery, extraArgs: ['--print'] }
-      : {});
-    try {
+    await withTempDir('agent-launch-test-', async (root) => {
+      let capturedPrompt;
+      let capturedPromptFile;
+      const child = fakeChild();
+      const config = fileDeliveryConfig(promptDelivery, promptDelivery === 'system-prompt-file'
+        ? { promptDelivery, extraArgs: ['--print'] }
+        : {});
       const runPromise = runAgentWithPrompt({
         agentConfig: config,
         promptText: '本文です',
@@ -84,33 +75,30 @@ test('runAgentWithPrompt: 配送方式に関係なく本文を内部ファイル
       assert.equal(capturedPrompt, '本文です');
       assert.ok(capturedPromptFile);
       assert.deepEqual(fs.readdirSync(root), []);
-    } finally {
-      removeTree(root);
-    }
+    });
   }
 });
 
 test('runAgentWithPrompt: 結果本文だけを返し、同時実行中の別スコープを消さない', async () => {
-  const root = tempRoot();
-  const children = [fakeChild(), fakeChild()];
-  let firstObserved;
-  let releaseSecond;
-  const secondDone = new Promise((resolve) => { releaseSecond = resolve; });
-  const spawnFn = () => {
-    const child = children.shift();
-    const promptFile = promptInRoot(root);
-    const prompt = fs.readFileSync(promptFile, 'utf8');
-    const resultPath = prompt.match(/結果: (.+)$/m)[1];
-    if (!firstObserved) {
-      firstObserved = true;
-      fs.writeFileSync(resultPath, '{"ok":true}', 'utf8');
-      process.nextTick(() => child.emit('close', 0));
-    } else {
-      secondDone.then(() => child.emit('close', 0));
-    }
-    return child;
-  };
-  try {
+  await withTempDir('agent-launch-test-', async (root) => {
+    const children = [fakeChild(), fakeChild()];
+    let firstObserved;
+    let releaseSecond;
+    const secondDone = new Promise((resolve) => { releaseSecond = resolve; });
+    const spawnFn = () => {
+      const child = children.shift();
+      const promptFile = promptInRoot(root);
+      const prompt = fs.readFileSync(promptFile, 'utf8');
+      const resultPath = prompt.match(/結果: (.+)$/m)[1];
+      if (!firstObserved) {
+        firstObserved = true;
+        fs.writeFileSync(resultPath, '{"ok":true}', 'utf8');
+        process.nextTick(() => child.emit('close', 0));
+      } else {
+        secondDone.then(() => child.emit('close', 0));
+      }
+      return child;
+    };
     const first = runAgentWithPrompt({
       agentConfig: fileDeliveryConfig('positional'),
       promptText: `結果: ${RESULT_FILE_TOKEN}`,
@@ -139,9 +127,7 @@ test('runAgentWithPrompt: 結果本文だけを返し、同時実行中の別ス
     releaseSecond();
     await second;
     assert.deepEqual(fs.readdirSync(root), []);
-  } finally {
-    removeTree(root);
-  }
+  });
 });
 
 test('runAgentWithPrompt: spawn失敗・observer例外・timeout相当の拒否でもスコープを閉じる', async () => {
@@ -149,8 +135,7 @@ test('runAgentWithPrompt: spawn失敗・observer例外・timeout相当の拒否�
     { spawnFn: () => { throw new Error('spawn failed'); }, observe: () => Promise.reject(new Error('unused')) },
     { spawnFn: () => fakeChild(), observe: () => Promise.reject(new Error('observer failed')) },
   ]) {
-    const root = tempRoot();
-    try {
+    await withTempDir('agent-launch-test-', async (root) => {
       await assert.rejects(runAgentWithPrompt({
         agentConfig: fileDeliveryConfig('positional'),
         promptText: '本文',
@@ -161,14 +146,11 @@ test('runAgentWithPrompt: spawn失敗・observer例外・timeout相当の拒否�
         observe: scenario.observe,
       }), /failed|observer/);
       assert.deepEqual(fs.readdirSync(root), []);
-    } finally {
-      removeTree(root);
-    }
+    });
   }
 
-  const root = tempRoot();
-  const child = fakeChild();
-  try {
+  await withTempDir('agent-launch-test-', async (root) => {
+    const child = fakeChild();
     await assert.rejects(runAgentWithPrompt({
       agentConfig: fileDeliveryConfig('positional'),
       promptText: '本文',
@@ -179,9 +161,7 @@ test('runAgentWithPrompt: spawn失敗・observer例外・timeout相当の拒否�
       observe: () => Promise.reject(new Error('timeout')),
     }), /timeout/);
     assert.deepEqual(fs.readdirSync(root), []);
-  } finally {
-    removeTree(root);
-  }
+  });
 });
 
 test('buildAgentCommandArgs: system-prompt-file delivery', () => {
