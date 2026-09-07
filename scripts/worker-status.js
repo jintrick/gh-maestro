@@ -596,10 +596,8 @@ function colorizeText(text, code, enabled) {
 }
 
 function formatIntervalSeconds(seconds) {
-  if (seconds == null) return '未記録';
-  // formatElapsedTime is intentionally used as the single elapsed-time formatter for
-  // cycle intervals. Its public API takes two instants, so use an epoch pair here.
-  return formatElapsedTime(0, Math.max(0, Number(seconds)) * 1000);
+  if (seconds == null) return '';
+  return formatDuration(Math.max(0, Number(seconds)));
 }
 
 function intervalBarLengths(intervals, budget) {
@@ -644,7 +642,6 @@ function renderCycleLine(projection, opts = {}) {
   const totalSeconds = opts.totalSeconds == null
     ? intervals.reduce((sum, item) => item.recorded ? sum + Number(item.seconds || 0) : sum, 0)
     : Number(opts.totalSeconds);
-  const prefix = `#${issue} 計${formatDuration(totalSeconds)}`;
   const colorize = Boolean(opts.colorize);
   const maxLineWidth = Number.isFinite(Number(opts.maxLineWidth))
     ? Math.max(1, Math.floor(Number(opts.maxLineWidth)))
@@ -660,12 +657,12 @@ function renderCycleLine(projection, opts = {}) {
       : false,
   }));
   const palette = [31, 36, 33, 34, 35, 32];
-  const plainToken = (item) => item.recorded
+  const plainToken = (item) => (item.recorded
     ? `${item.label} ${formatIntervalSeconds(item.seconds)}`
-    : `${item.label} ┈ 未記録`;
-  const separators = '   ';
+    : item.label);
+  const separators = ' | ';
   const baseTokens = specs.map(plainToken);
-  const baseLine = `${prefix}   ${baseTokens.join(separators)}`;
+  const baseLine = baseTokens.join(separators);
 
   let line = baseLine;
   if (visibleLength(baseLine) <= maxLineWidth) {
@@ -686,11 +683,11 @@ function renderCycleLine(projection, opts = {}) {
           : plainToken(item);
         return colorizeText(token, palette[index], colorize);
       });
-      line = `${prefix}   ${tokens.join(separators)}`;
+      line = tokens.join(separators);
     } else {
-      line = `${prefix}   ${specs.map((item, index) => (
+      line = specs.map((item, index) => (
         colorizeText(plainToken(item), palette[index], colorize)
-      )).join(separators)}`;
+      )).join(separators);
     }
   }
 
@@ -948,7 +945,19 @@ function inferIssue(workers) {
   return null;
 }
 
-const STATUS_HEADER = '=== gh-maestro worker status ===';
+/**
+ * 監視ペインの見出し行。対象Issue・PR・記録済み区間の合計時間を示す。
+ *
+ * @param {string|null} issue
+ * @param {number|null} pr
+ * @param {number} totalSeconds
+ * @returns {string}
+ */
+function buildStatusHeader(issue, pr, totalSeconds) {
+  const issueText = issue == null || issue === '' ? '#?' : `#${issue}`;
+  const prText = pr == null || pr === '' ? '' : ` PR#${pr}`;
+  return `=== gh-maestro ${issueText}${prText} 計${formatDuration(totalSeconds)} ===`;
+}
 
 function renderSnapshotLines(workspace, issue, opts = {}) {
   const currentWorkers = opts.currentWorkers || collectWorkersStatus(workspace, opts.collectOpts || opts);
@@ -972,7 +981,8 @@ function renderSnapshotLines(workspace, issue, opts = {}) {
     maxLineWidth: opts.maxLineWidth,
     colorize: opts.colorize,
   })[0];
-  return [cycleLine, ...renderWorkerRows(workers, opts)];
+  const header = buildStatusHeader(selectedIssue, projected.pr, projected.totalSeconds);
+  return [header, cycleLine, ...renderWorkerRows(workers, opts)];
 }
 
 const MIN_INTERVAL_SEC = 1;
@@ -1141,7 +1151,6 @@ function main(argv = process.argv.slice(2)) {
         maxLineWidth: process.stdout.columns,
         colorize: Boolean(process.stdout.isTTY && process.env.NO_COLOR !== '1'),
       });
-      writeOut(STATUS_HEADER);
       for (const line of lines) writeOut(line);
     }
     return { code: 0, lines: out, errLines: err };
@@ -1290,7 +1299,6 @@ function runWatchLoop(workspace, interval, opts = {}) {
           : Boolean(outStream.isTTY && process.env.NO_COLOR !== '1'),
       });
       outStream.write('\x1b[2J\x1b[H');
-      outStream.write(`${STATUS_HEADER}\n`);
       for (const line of lines) {
         outStream.write(line + '\n');
       }
@@ -1322,7 +1330,7 @@ module.exports = {
   renderCycleLine,
   renderWorkerRows,
   renderSnapshotLines,
-  STATUS_HEADER,
+  buildStatusHeader,
   alignStatusRows,
   mergeCycleWorkers,
   parseInterval,
