@@ -637,7 +637,7 @@ test('renderWorkerRows: Review Managerのジョブを監視用の子行として
   }]);
 
   assert.equal(lines.length, 2);
-  assert.match(lines[0], /^● review-manager\s+\[codex\]\s+0:05:00 \(pid: 222\)$/);
+  assert.match(lines[0], /review-manager\s+\[codex\]\s+0:05:00 \(pid: 222\)$/);
   assert.match(lines[1], /^  └─ job-1 \(Correctness\)\s+\[codex\]\s+0:02:00 \(pid: 333\)$/);
 });
 
@@ -665,9 +665,9 @@ test('main: list はサイクル行と最大4件のワーカー行を出力す�
     assert.equal(result.lines.length, 5);
     assert.match(result.lines[0], /^=== gh-maestro #100 計0:00:00 ===$/);
     assert.match(result.lines[1], /^準備 \| 計画 \| 承認 \| 実装 \| 査読 \| 統合$/);
-    assert.match(result.lines[2], /^● worker-a\s+\[agent-1\]\s+0:10:00 \(pid: 111\)$/);
-    assert.match(result.lines[3], /^● worker-b\s+\[agent-2\]\s+0:05:00 \(pid: 222\)$/);
-    assert.match(result.lines[4], /^○ worker-c\s+\[-\s*\]\s+- \(pid: 999999999\)$/);
+    assert.match(result.lines[2], /worker-a\s+\[agent-1\]\s+0:10:00 \(pid: 111\)$/);
+    assert.match(result.lines[3], /worker-b\s+\[agent-2\]\s+0:05:00 \(pid: 222\)$/);
+    assert.match(result.lines[4], /worker-c\s+\[-\s*\]\s+- \(pid: 999999999\)$/);
   } finally {
     workerStatus._setNow(null);
     workerStatus._setIsWorkerAlive(null);
@@ -1689,8 +1689,8 @@ test('main: list および list --json で Review Manager を表示する', () =
     assert.equal(listResult.lines.length, 4);
     assert.match(listResult.lines[0], /^=== gh-maestro #\S* 計0:00:00 ===$/);
     assert.match(listResult.lines[1], /^準備 \| 計画 \| 承認 \| 実装 \| 査読 \| 統合$/);
-    assert.match(listResult.lines[2], /^● worker-a\s+\[agent-1\s*\]\s+0:10:00 \(pid: 111\)$/);
-    assert.match(listResult.lines[3], /^● review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
+    assert.match(listResult.lines[2], /worker-a\s+\[agent-1\s*\]\s+0:10:00 \(pid: 111\)$/);
+    assert.match(listResult.lines[3], /review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
 
     // 2. list --json (機械可読JSON)
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
@@ -1828,7 +1828,7 @@ test('collectWorkersStatus & main: list / --json でレビュージョブを収�
     assert.equal(listResult.lines.length, 5);
     assert.match(listResult.lines[0], /^=== gh-maestro #\S* 計0:00:00 ===$/);
     assert.match(listResult.lines[1], /^準備 \| 計画 \| 承認 \| 実装 \| 査読 \| 統合$/);
-    assert.match(listResult.lines[2], /^● review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
+    assert.match(listResult.lines[2], /review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
     assert.match(listResult.lines[3], /^  └─ job-1 \(Design\)\s+\[codex\s*\]\s+0:03:00 \(pid: 333\)$/);
     assert.match(listResult.lines[4], /^  └─ job-2 \(Correctness\)\s+\[codex\s*\]\s+0:02:00 \(pid: 444\)$/);
 
@@ -1879,7 +1879,7 @@ test('collectWorkersStatus: レビュージョブ取得失敗をReview Manager�
 
     const listResult = runMain(['list', '--workspace', workspace]);
     assert.equal(listResult.code, 0);
-    assert.match(listResult.lines[2], /^● review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
+    assert.match(listResult.lines[2], /review-manager\s+\[[^\]]+\]\s+0:05:00 \(pid: 222\)$/);
     assert.match(listResult.lines[3], /^  └─ review jobs unavailable \(取得失敗\)$/);
 
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);

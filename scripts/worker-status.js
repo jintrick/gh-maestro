@@ -87,6 +87,8 @@ let _injectedReadCycleEvents = null;
 // 長いが、PID再利用を長時間見逃さない間隔にする。watch ループ内だけで使い、他の
 // process-lifecycle 呼び出しには影響させない。
 const PROCESS_START_TIME_CACHE_MAX_AGE_MS = 6_000;
+// ワーカー行の先頭に並べる状態ドットの個数
+const DOT_COUNT = 3;
 
 function _getProcessStartTime(pid) {
   const fn = _injectedGetProcessStartTime ?? require('./process-lifecycle').getProcessStartTime;
@@ -878,11 +880,6 @@ function renderWorkerRows(workers, opts = {}) {
   const visible = prepared.slice(0, maxRows);
   const hidden = Math.max(0, prepared.length - visible.length);
   const colorize = Boolean(opts.colorize);
-  const dotCountOf = (entry) => {
-    const runNumber = Number(entry.runNumber);
-    return Number.isInteger(runNumber) && runNumber > 1 ? runNumber : 1;
-  };
-  const maxDotCount = visible.reduce((max, { worker }) => Math.max(max, dotCountOf(worker)), 1);
   const entries = [];
   for (const [visibleIndex, { worker, role }] of visible.entries()) {
     const statusKind = workerStatusKind(worker);
@@ -893,10 +890,7 @@ function renderWorkerRows(workers, opts = {}) {
         : colorizeText('○', 90, colorize);
     const runNumber = Number(worker.runNumber);
     const runSuffix = Number.isInteger(runNumber) && runNumber > 1 ? ` x${runNumber}` : '';
-    const dotCount = dotCountOf(worker);
-    // 丸印の欄は行ごとに幅が変わらないよう最大個数へ揃える（揃えないと以降の列がずれる）
-    const dots = Array.from({ length: dotCount }, () => dot).join(' ')
-      + ' '.repeat((maxDotCount - dotCount) * 2);
+    const dots = Array.from({ length: DOT_COUNT }, () => dot).join(' ');
     const agent = worker.agentId ? String(worker.agentId) : '-';
     const elapsed = worker.elapsedSeconds == null || !workerDurationKnown(worker)
       ? '-'
