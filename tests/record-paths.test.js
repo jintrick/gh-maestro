@@ -15,6 +15,9 @@ test('recordPath resolves distinct issue/pr/job owners without collisions', () =
     ownerKind: 'pr', ownerId: 7, artifact: ARTIFACTS.REVIEW_MANAGER_JSON,
   }), /records[\\/]pr[\\/]7[\\/]review[\\/]manager\.json$/);
   assert.match(recordPath('C:/workspace', {
+    ownerKind: 'pr', ownerId: 7, artifact: ARTIFACTS.REVIEW_MANAGER_CLAIM,
+  }), /records[\\/]pr[\\/]7[\\/]review[\\/]manager\.claim$/);
+  assert.match(recordPath('C:/workspace', {
     ownerKind: 'job', ownerId: 'job-1', artifact: ARTIFACTS.WORKER_LOG,
     workerName: 'review-job-job-1',
   }), /records[\\/]job[\\/]job-1[\\/]workers[\\/]review-job-job-1[\\/]worker\.log$/);
@@ -26,6 +29,9 @@ test('recordPath rejects invalid owners and incompatible artifacts', () => {
   }));
   assert.throws(() => recordPath('C:/workspace', {
     ownerKind: 'issue', ownerId: 7, artifact: ARTIFACTS.REVIEW_MANAGER_JSON,
+  }));
+  assert.throws(() => recordPath('C:/workspace', {
+    ownerKind: 'issue', ownerId: 7, artifact: ARTIFACTS.REVIEW_MANAGER_CLAIM,
   }));
   assert.throws(() => recordPath('C:/workspace', {
     ownerKind: 'issue', ownerId: 7, artifact: ARTIFACTS.WORKER_LOG,

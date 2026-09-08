@@ -39,6 +39,12 @@ test('reviewArtifactPath builds a PR-owned records path', () => {
   assert.equal(result, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.running'));
 });
 
+test('reviewArtifactPath: .claim は空のPR単位claimセンチネルのパスを返す', () => {
+  const workspace = path.resolve('C:/ws');
+  const result = reviewArtifactPath(workspace, '42', '.claim');
+  assert.equal(result, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.claim'));
+});
+
 test('reviewArtifactPath rejects a path-traversal pr before building any path', () => {
   const workspace = path.resolve('C:/ws');
   assert.throws(() => reviewArtifactPath(workspace, '../../evil', '.running'), /invalid PR number/);

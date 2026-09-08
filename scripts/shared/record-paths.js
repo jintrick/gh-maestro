@@ -15,6 +15,7 @@ const ARTIFACTS = Object.freeze({
   CONTRACT: 'contract',
   ASSISTANT_WATCH: 'assistantWatch',
   REVIEW_MANAGER_JSON: 'reviewManagerJson',
+  REVIEW_MANAGER_CLAIM: 'reviewManagerClaim',
   REVIEW_MANAGER_LOG: 'reviewManagerLog',
   REVIEW_MANAGER_RUNNING: 'reviewManagerRunning',
   REVIEW_MANAGER_INCOMPLETE: 'reviewManagerIncomplete',
@@ -102,6 +103,9 @@ function recordPath(workspace, params) {
       break;
     case ARTIFACTS.REVIEW_MANAGER_JSON:
       candidate = path.join(base, 'review', 'manager.json');
+      break;
+    case ARTIFACTS.REVIEW_MANAGER_CLAIM:
+      candidate = path.join(base, 'review', 'manager.claim');
       break;
     case ARTIFACTS.REVIEW_MANAGER_LOG:
       candidate = path.join(base, 'review', 'manager.log');

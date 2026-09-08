@@ -483,6 +483,9 @@ node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --workspace $WORKSPACE --base-branch 
 PR検出時の出力:
 - `PR_BASE_MISMATCH:<PR>:<expected>:<actual>` — ベースブランチ不一致（想定と実際が異なる場合は出力される。処理は継続）
 - `PR_DETECTED:<PR>` — 通常通りPR番号が報告される
+- `REVIEW_MANAGER_STARTED:<PR>` — Review Managerを起動した
+- `REVIEW_MANAGER_ALREADY_RUNNING:<PR>` — Review Managerは既に稼働中のため起動要求を受け付けなかった
+- `REVIEW_MANAGER_ALREADY_CLAIMED:<PR>` — このPRの自動Review Manager起動は既にclaim済みのためスキップした
 - `SLOW_TEST_STARTED:<json>` — PRの対象HEADに対するslow層を、レビュー監視をブロックせずに開始した。初回検出と各修正pushのHEADごとに予約され、同じPR/HEAD/layerを再実行しない
 - `SLOW_TEST_RESULT:<json>` — slow層の pass/fail/unavailable、対象HEAD、テスト件数、実行ログ識別子を含む完了通知。完了時は層別成果物を正本としてテスト申告コメントを更新する
 - `PR_CLOSED_RESUMED:<PR>` — 監視していたPRがクローズされ、新PR検出に復帰した（この後 `PR_CLOSED` に続いて届く）
@@ -491,7 +494,7 @@ PR検出時の出力:
 
 **通常コーダー（gh-maestro-coder）から実装失敗の報告が届いた場合、人間が承認した段階で上位のシニアコーダー（gh-maestro-senior-coder）を適用して再起動することを検討せよ。**
 
-**`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING` のどちらも来ない場合はReview Managerが起動していない**ので、`monitor-recovery.md`の「PR監視・Review Managerの再起動」に従って自分で起動すること。
+**`REVIEW_MANAGER_STARTED`/`REVIEW_MANAGER_ALREADY_RUNNING`/`REVIEW_MANAGER_ALREADY_CLAIMED` のいずれも来ない場合はReview Managerの起動結果を受け取れていない**ので、`monitor-recovery.md`の「PR監視・Review Managerの再起動」に従って確認すること。
 
 **Review Managerが起動直後または実行中にクラッシュした場合、通常ワーカーと同じ`⚠️ 起動失敗または異常終了: exit code <N>...`という`NEW_MESSAGE`が自分のinboxに届く**（`from`が`issue-<N>-review-manager-pr-<PR>`という名前になる。通常ワーカーの異常終了通知と同じ経路・同じ処理でよい）。これを受け取ったら、poll-pr.js自体は生きたままPR/レビュー監視を継続しているため再起動は不要である。`$WORKSPACE/.gh-maestro/worker-logs/issue-<N>-review-manager-pr-<PR>.log` で原因を確認し（`<N>`はcrash通知の`from`に含まれるIssue番号）、人間に報告した上で、原因を解消してから`monitor-recovery.md`の「PR監視・Review Managerの再起動」で仕切り直す（`poll-pr.js`自体の再起動は不要）。
 
@@ -532,7 +535,7 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
 
 `REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の条件を満たすときだけ：
 
-- Review Manager 完了（`PR_REVIEW:...Posted inline findings: N` 到着 or `.gh-maestro/review-manager-<PR>.json` 生成）
+- Review Manager 完了（`PR_REVIEW:...Posted inline findings: N` 到着 or `records/pr/<PR>/review/manager.json` 生成）
 - 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER/MAJOR は、修正 push に対する explorer の事実確認が完了するまで未解消として扱う）
 - **テスト申告状態の確認と事実提示（Issue #209）**:
   - `node "{{SCRIPTS_PATH}}/query-test-status.js" --pr <PR>` を実行し、成功時に返るJSON 1行をテスト申告状態の正本として確認する。このコマンドは現在のPRコメントとHEADをGitHubから取得するため、`poll-reviews.js` の内部状態ファイルや「新しいコメントがあるか」の推測を使わない。
