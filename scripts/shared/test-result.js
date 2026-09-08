@@ -231,7 +231,7 @@ function readAggregateFromDisk(resultPath) {
   } catch { return null; }
 }
 
-/** 同じ対象HEADの他層を保持したまま、1層だけを原子的に更新する。 */
+/** 内容指紋が一致する（または判定不能な）他層を保持したまま、1層だけを原子的に更新する。 */
 function writeTestResultLayer(worktree, layerArtifact) {
   const layer = { ...layerArtifact };
   if (typeof layer.layer !== 'string' || !layer.layer.trim()) throw new Error('test result layer is required');
@@ -243,10 +243,29 @@ function writeTestResultLayer(worktree, layerArtifact) {
   const lock = acquireResultLock(base);
   try {
     const current = readAggregateFromDisk(resultPath);
-    const currentHead = current && current.testedHead;
+    // トップレベル testedHead は最後に書き込んだプロセスの HEAD を記録する参考値であり、
+    // 層の保持判定や妥当性判定などの判断ロジックには使用されない。
+    // 層の同一性保持判定および妥当性判定はいずれも testedContentHash で判定する。
     const incomingHead = layer.testedHead || null;
-    const sameHead = current && currentHead && incomingHead && currentHead.toLowerCase() === incomingHead.toLowerCase();
-    const layers = sameHead ? { ...current.layers } : {};
+    const incomingHash = typeof layer.testedContentHash === 'string' && layer.testedContentHash.trim()
+      ? layer.testedContentHash.trim().toLowerCase()
+      : null;
+    const layers = {};
+    if (current && isPlainObject(current.layers)) {
+      for (const [name, existingLayer] of Object.entries(current.layers)) {
+        if (!isPlainObject(existingLayer)) continue;
+        const existingHash = typeof existingLayer.testedContentHash === 'string' && existingLayer.testedContentHash.trim()
+          ? existingLayer.testedContentHash.trim().toLowerCase()
+          : null;
+        // 既存の層を捨てるのは、既存と今回の層の testedContentHash が両方存在し、
+        // かつ異なると積極的に判定できたときだけとする。片方でも指紋を持たない場合
+        // （poll-pr が書く unavailable 層など）や指紋が一致する場合は保持する。
+        const discard = Boolean(incomingHash && existingHash && incomingHash !== existingHash);
+        if (!discard) {
+          layers[name] = existingLayer;
+        }
+      }
+    }
     layers[layer.layer] = layer;
     const aggregate = {
       schemaVersion: TEST_RESULT_AGGREGATE_SCHEMA_VERSION,
