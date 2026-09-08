@@ -213,10 +213,13 @@ test('readTestResultArtifact: unavailable 成果物は完全な結果として�
   assert.equal(readTestResultArtifact(invalidatedWorktree).ok, true);
 });
 
-test('writeTestResultLayer: 同じHEADのfull/slowを単一成果物へ層別保存し、HEAD混在を拒む', () => {
+test('writeTestResultLayer: 内容指紋が一致すればtestedHeadが異なっても層別保存し、指紋不一致の既存層は破棄する', () => {
   const worktree = tempWorktree();
-  const head = '0123456789abcdef0123456789abcdef01234567';
-  const layer = (name, testedHead = head) => ({
+  const headA = '0123456789abcdef0123456789abcdef01234567';
+  const headB = 'abcdefabcdefabcdefabcdefabcdefabcdefabcd';
+  const hashA = 'a'.repeat(64);
+  const hashB = 'b'.repeat(64);
+  const layer = (name, testedHead = headA, testedContentHash = hashA) => ({
     layer: name,
     scope: name === 'full' ? 'full' : 'partial',
     status: 'complete',
@@ -225,22 +228,106 @@ test('writeTestResultLayer: 同じHEADのfull/slowを単一成果物へ層別保
     recordedAt: '2026-08-29T00:00:00.000Z',
     executor: name === 'slow' ? 'poll-pr' : 'local',
     testedHead,
-    testedContentHash: 'a'.repeat(64),
+    testedContentHash,
     tests: 1,
     pass: 1,
     fail: 0,
   });
 
-  writeTestResultLayer(worktree, layer('full'));
-  writeTestResultLayer(worktree, layer('slow'));
+  // full をコミット前（親コミット headA）で実行し、slow を PR の HEAD（headB）で実行した場合でも、
+  // 内容指紋 hashA が一致していれば両層が保持される
+  writeTestResultLayer(worktree, layer('full', headA, hashA));
+  writeTestResultLayer(worktree, layer('slow', headB, hashA));
   const aggregate = readTestResultArtifact(worktree);
   assert.equal(aggregate.ok, true);
   assert.deepEqual(Object.keys(aggregate.result.layers).sort(), ['full', 'slow']);
 
-  writeTestResultLayer(worktree, layer('slow', 'abcdefabcdefabcdefabcdefabcdefabcdefabcd'));
+  // 内容指紋が異なる層が書き込まれた場合は、指紋不一致の既存層が破棄される
+  writeTestResultLayer(worktree, layer('slow', headB, hashB));
   const replaced = readTestResultArtifact(worktree);
   assert.equal(replaced.ok, true);
   assert.deepEqual(Object.keys(replaced.result.layers), ['slow']);
+});
+
+test('writeTestResultLayer: incoming が unavailable（testedContentHash なし）のとき既存層が保持される', () => {
+  const worktree = tempWorktree();
+  const headA = '0123456789abcdef0123456789abcdef01234567';
+  const headB = 'abcdefabcdefabcdefabcdefabcdefabcdefabcd';
+  const hashA = 'a'.repeat(64);
+
+  // full 層（complete、testedContentHash あり）
+  writeTestResultLayer(worktree, {
+    layer: 'full',
+    scope: 'full',
+    status: 'complete',
+    outcome: 'pass',
+    command: 'npm test',
+    recordedAt: '2026-08-29T00:00:00.000Z',
+    testedHead: headA,
+    testedContentHash: hashA,
+    tests: 1,
+    pass: 1,
+    fail: 0,
+  });
+
+  // poll-pr.js の unavailableSlowLayer に相当する層（testedContentHash なし）
+  writeTestResultLayer(worktree, {
+    layer: 'slow',
+    scope: 'partial',
+    status: 'unavailable',
+    command: 'npm run test:slow',
+    recordedAt: '2026-08-29T00:01:00.000Z',
+    testedHead: headB,
+    executor: 'poll-pr',
+    executionLogPath: '/tmp/slow.log',
+    reason: 'runner-abnormal-exit',
+  });
+
+  const aggregate = readTestResultArtifact(worktree);
+  assert.equal(aggregate.ok, true);
+  assert.deepEqual(Object.keys(aggregate.result.layers).sort(), ['full', 'slow']);
+  assert.equal(aggregate.result.layers.full.status, 'complete');
+  assert.equal(aggregate.result.layers.slow.status, 'unavailable');
+});
+
+test('writeTestResultLayer: 既存層に testedContentHash がない場合も incoming 層追加で破棄されない', () => {
+  const worktree = tempWorktree();
+  const headA = '0123456789abcdef0123456789abcdef01234567';
+  const headB = 'abcdefabcdefabcdefabcdefabcdefabcdefabcd';
+  const hashB = 'b'.repeat(64);
+
+  // 既存層が unavailable（testedContentHash なし）
+  writeTestResultLayer(worktree, {
+    layer: 'slow',
+    scope: 'partial',
+    status: 'unavailable',
+    command: 'npm run test:slow',
+    recordedAt: '2026-08-29T00:00:00.000Z',
+    testedHead: headA,
+    executor: 'poll-pr',
+    reason: 'slow-result-missing',
+  });
+
+  // incoming 層（complete、testedContentHash あり）
+  writeTestResultLayer(worktree, {
+    layer: 'full',
+    scope: 'full',
+    status: 'complete',
+    outcome: 'pass',
+    command: 'npm test',
+    recordedAt: '2026-08-29T00:01:00.000Z',
+    testedHead: headB,
+    testedContentHash: hashB,
+    tests: 2,
+    pass: 2,
+    fail: 0,
+  });
+
+  const aggregate = readTestResultArtifact(worktree);
+  assert.equal(aggregate.ok, true);
+  assert.deepEqual(Object.keys(aggregate.result.layers).sort(), ['full', 'slow']);
+  assert.equal(aggregate.result.layers.slow.status, 'unavailable');
+  assert.equal(aggregate.result.layers.full.status, 'complete');
 });
 
 test('writeTestResultLayer: 集約ロック取得失敗は既存成果物を変更しない', () => {
