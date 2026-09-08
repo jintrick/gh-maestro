@@ -136,19 +136,26 @@ test('壊れたtest.layersでもcontextを出力し、終了コード0で完了�
 });
 
 test('WORKSPACE はGH_MAESTRO_WORKSPACEが無い場合にCWD上方探索で解決される（Unixスラッシュ）', () => {
+  const workspace = createContextWorkspace();
+  const subDir = path.join(workspace, 'sub', 'deep');
+  fs.mkdirSync(subDir, { recursive: true });
   const env = { ...process.env };
   delete env.GH_MAESTRO_WORKSPACE;
-  const r = runContext({
-    cwd: REPO_ROOT,
-    env,
-    encoding: 'utf8',
-  });
-  assert.equal(r.status, 0);
-  const match = r.stdout.match(/^WORKSPACE=(.+)/m);
-  assert.ok(match, 'WORKSPACEが出力に含まれない');
-  // スクリプトはWindowsパスをUnixスラッシュに変換して出力する
-  const expected = REPO_ROOT.replace(/\\/g, '/');
-  assert.equal(match[1].trim(), expected);
+  try {
+    const r = runContext({
+      cwd: subDir,
+      env,
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    const match = r.stdout.match(/^WORKSPACE=(.+)/m);
+    assert.ok(match, 'WORKSPACEが出力に含まれない');
+    // スクリプトはWindowsパスをUnixスラッシュに変換して出力する
+    const expected = workspace.replace(/\\/g, '/');
+    assert.equal(match[1].trim(), expected);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test('BASE_BRANCH が出力に含まれる', () => {
