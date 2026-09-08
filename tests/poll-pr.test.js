@@ -634,6 +634,7 @@ test('runSlowTest treats detached dependency preparation failure as unavailable'
   const events = [];
   let detachedWorktree;
   let spawnCount = 0;
+  const declareCalls = [];
   try {
     const result = await mod.runSlowTest({
       pr: '47', issue: 461, repo: 'fixture/repo', workspace, headSha: head,
@@ -655,6 +656,14 @@ test('runSlowTest treats detached dependency preparation failure as unavailable'
       },
       spawnFn: () => { spawnCount += 1; return new EventEmitter(); },
       getPrHeadFn: () => head,
+      declareTestResultFn: (args) => {
+        declareCalls.push(args);
+        events.push('declare');
+        assert.equal(args.pr, '47');
+        assert.equal(args.headSha, head);
+        assert.equal(args.worktree, detachedWorktree);
+        return { ok: true };
+      },
       unlinkJunctionsFn: (worktreeDir) => {
         events.push('junctions.unlink');
         assert.equal(worktreeDir, detachedWorktree);
@@ -667,9 +676,11 @@ test('runSlowTest treats detached dependency preparation failure as unavailable'
     assert.equal(result.status, 'unavailable');
     assert.match(result.error, /node_modules/);
     assert.equal(spawnCount, 0);
+    assert.equal(declareCalls.length, 1);
     assert.deepEqual(events, [
       'worktree.add',
       'link-node-modules',
+      'declare',
       'junctions.unlink',
       'worktree.remove',
       'scope.cleanup',
@@ -717,6 +728,53 @@ test('runSlowTest keeps a non-zero slow test outcome as fail', async () => {
   } finally {
     if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
     else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
+  }
+});
+
+test('runSlowTest treats PR HEAD lookup failures as unknown, not stale', async (t) => {
+  for (const { name, pr, getPrHeadFn } of [
+    { name: 'empty response', pr: '50', getPrHeadFn: () => '' },
+    { name: 'thrown exception', pr: '51', getPrHeadFn: () => { throw new Error('gh unavailable'); } },
+  ]) {
+    await t.test(name, async () => {
+      const { mod } = loadModule();
+      const workspace = temporaryWorkspace(`gh-maestro-poll-pr-pr-head-${pr}-`);
+      const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'fixture-senior');
+      fs.mkdirSync(worktree, { recursive: true });
+      const runtime = tempDirScope.mkdtemp(`gh-maestro-poll-pr-runtime-${pr}-`);
+      const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
+      process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
+      const head = '5555555555555555555555555555555555555555';
+      const child = new EventEmitter();
+      child.pid = 1238;
+      let declareCalls = 0;
+      try {
+        const result = await mod.runSlowTest({
+          pr, issue: 461, repo: 'fixture/repo', workspace, headSha: head,
+        }, {
+          resolveSlowWorktreeFn: () => ({ workerName: 'fixture-senior', worktree }),
+          resolveGitHeadFn: () => head,
+          spawnFn: () => child,
+          waitChildExitFn: async ({ onCleanup }) => {
+            writeTestResultLayer(worktree, completeLayer('slow', head));
+            onCleanup();
+            return 0;
+          },
+          getPrHeadFn,
+          declareTestResultFn: (args) => {
+            declareCalls += 1;
+            assert.equal(args.headSha, head);
+            return { ok: true };
+          },
+        });
+        assert.equal(result.status, 'pass');
+        assert.equal(result.testedHead, head);
+        assert.equal(declareCalls, 1);
+      } finally {
+        if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+        else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
+      }
+    });
   }
 });
 

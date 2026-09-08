@@ -249,6 +249,15 @@ function sameHead(actual, expected) {
     || expected.toLowerCase().startsWith(actual.toLowerCase())));
 }
 
+function currentPrHead(pr, repo, getPrHeadFn) {
+  try {
+    const value = getPrHeadFn(pr, repo);
+    return typeof value === 'string' ? value.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
 function emitSlowResult(pr, result) {
   process.stdout.write(`SLOW_TEST_RESULT:${JSON.stringify({ pr: String(pr), layer: 'slow', ...result })}\n`);
 }
@@ -299,10 +308,9 @@ function declareSlowResult({ pr, repo, workspace, target, headSha, statePath, ru
   if (!target || !target.worktree || !headSha) return { status: 'not-attempted' };
   const declareFn = deps.declareTestResultFn || declareTestResult;
   const getPrHeadFn = deps.getPrHeadFn || getPrHead;
-  let currentPrHead = '';
-  try { currentPrHead = getPrHeadFn(pr, repo); } catch {}
-  if (!sameHead(currentPrHead, headSha)) {
-    const reason = `PR HEADが実行対象SHAと一致しないため申告をスキップしました: ${currentPrHead || '(empty)'} != ${headSha}`;
+  const prHead = currentPrHead(pr, repo, getPrHeadFn);
+  if (prHead && !sameHead(prHead, headSha)) {
+    const reason = `PR HEADが実行対象SHAと一致しないため申告をスキップしました: ${prHead} != ${headSha}`;
     try {
       updateSlowRun(statePath, runKey, {
         declaration: 'skipped',
@@ -580,6 +588,10 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
       worktreeDir = path.join(tempRoot, 'worktree');
       worktreeAddDetachedFn(worktreeDir, headSha, workspace);
       worktreeAdded = true;
+      // Keep the created worktree as the failure target before dependency
+      // preparation. A setup failure must still produce an unavailable layer
+      // and declaration from this same SHA-pinned worktree.
+      target = { worktree: worktreeDir };
       const localHead = resolveHeadFn(worktreeDir);
       if (!sameHead(localHead, headSha)) {
         throw new Error(`PR HEADとslow対象detached worktreeのHEADが不一致です: ${localHead || '(empty)'} != ${headSha}`);
@@ -594,7 +606,6 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
       if (nmResult.missing.length > 0) {
         throw new Error(`node_modules の junction 作成に失敗しました: ${nmResult.missing.join(', ')}`);
       }
-      target = { worktree: worktreeDir };
     }
 
     logPath = slowLogPath(target.worktree, pr, headSha);
@@ -630,9 +641,8 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
       });
     } else {
       const getPrHeadFn = deps.getPrHeadFn || getPrHead;
-      let currentPrHead = '';
-      try { currentPrHead = getPrHeadFn(pr, repo); } catch {}
-      if (!sameHead(currentPrHead, headSha)) {
+      const prHead = currentPrHead(pr, repo, getPrHeadFn);
+      if (prHead && !sameHead(prHead, headSha)) {
         result = finishSlowStale({
           pr,
           workspace,
@@ -641,7 +651,7 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
           statePath,
           runKey,
           logPath,
-          reason: `PRのHEADが実行中に変更されました: ${currentPrHead || '(empty)'} != ${headSha}`,
+          reason: `PRのHEADが実行中に変更されました: ${prHead} != ${headSha}`,
         });
       } else {
         result = finishSlowRun({
