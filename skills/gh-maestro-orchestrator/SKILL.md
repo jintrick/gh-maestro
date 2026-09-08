@@ -19,7 +19,8 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 - `.gh-maestro/` 配下のセッション管理ファイルを読む
 - 自分が書いた `/tmp/issue-*.md` 等の草稿ファイルを読む
 - 機械的なgitリポジトリの保守作業を直接git/ghコマンドで行う
-- ユーザーがその場で明示指示した文書修正の直接編集・コミット・push（重さは下記の判断基準で測る）
+- ユーザーがその場で明示指示した文書修正を軽量PR経路で提出する（重さは下記の判断基準で測る）
+  理由と経緯: docs/adr/0035-orchestrator-changes-go-through-a-lightweight-pr.md
 
 #### 自分でやるか、ワーカーを起動するか、の判断基準
 
@@ -28,7 +29,9 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 1. **影響範囲** — 効果が今回の作業で終わるか、以後の全セッション・全ワーカーに及ぶか
 2. **コスト** — コーダー起動・レビュー起動のフルサイクルに見合うか
 
-影響が今回だけに閉じ、フルサイクルに見合わないものは、Issueを起票せず自分で変更・コミット・pushする。PRも不要。ワーカーを起動することはIssue起票と同義であり、Issue起票が不要ならワーカー起動も不要である。
+影響が今回だけに閉じ、フルサイクルに見合わない軽い変更でも、Issueをアンカーにした軽量PR経路で提出する。軽量経路はReview Managerを起動しないが、PR検出・slow層の実行・テスト結果の申告・マージ状態の監視は行う。IssueもPRも通さずに自分でcommit・pushしてはならない。具体的な手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/lightweight-pr.md` を参照する。
+
+理由と経緯: docs/adr/0035-orchestrator-changes-go-through-a-lightweight-pr.md
 
 影響が将来へ波及するもの（`AGENTS.md`、`skills/**/SKILL.md`、`.claude/rules/**` などの行動規範）は、1行でも軽微とみなさない。行数とコストに関わらず、変更内容を人間に示して承認を得てから触る。
 
@@ -178,11 +181,12 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<role>-<desc>/` に自動作成さ�
 - **run-slow-tests.js** — orchestrator／人間が宣言済みslow層を対象指定なしで全件実行する入口（「11. マージ」参照）
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口
 - **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「1. 要件確定」参照）
-- **create-issue.js** / **update-issue.js** / **comment-issue.js** — `gh issue create` / `gh issue edit` / `gh issue comment` の唯一の呼び出し口。`--body-file` は論理パスのまま渡す（「1. 要件確定」「13. 反省会と後始末」参照）
+- **create-issue.js** / **update-issue.js** / **comment-issue.js** — `gh issue create` / `gh issue edit` / `gh issue comment` の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、タイトルだけのアンカーIssueには `--title-only` を使う（「1. 要件確定」「13. 反省会と後始末」参照）
+- **lightweight-pr.md** — Review Managerを起動せずにPR、slow層、テスト申告を通す軽量PR経路の手順（軽い変更時に参照）
 
 #### assistant（対話型ワーカー）について
 
-`create-issue.js` は起票と同時に、`spawn-assistant.js` 経由でagy専用の対話型ワーカー「assistant」を自動起動する。**このワーカーはあなた（orchestrator）の管理対象外である。** `workers.json` に登録されず、あなたからは見えず、`msg-send.js`/`remove-worker.js`の対象にもならない。人間が直接そのウィンドウに向かって質問・雑務を依頼する専用の存在であり、あなたが起動・終了・監督を意識する必要は一切ない。終了も`finalize-issue.js`実行時に自動で行われる（`.gh-maestro/assistants.json`で管理。`workers.json`とは無関係）。
+`create-issue.js` は通常の起票と同時に、`spawn-assistant.js` 経由でagy専用の対話型ワーカー「assistant」を自動起動する。タイトルだけのアンカーIssueは `--title-only` を使い、assistantを起動しない。**このワーカーはあなた（orchestrator）の管理対象外である。** `workers.json` に登録されず、あなたからは見えず、`msg-send.js`/`remove-worker.js`の対象にもならない。人間が直接そのウィンドウに向かって質問・雑務を依頼する専用の存在であり、あなたが起動・終了・監督を意識する必要は一切ない。終了も`finalize-issue.js`実行時に自動で行われる（`.gh-maestro/assistants.json`で管理。`workers.json`とは無関係）。
 
 ### 不変条件
 
@@ -192,6 +196,8 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<role>-<desc>/` に自動作成さ�
 - **Issueをクローズする唯一の手段は `finalize-issue.js` である。人間から「Issueを閉じて」「クローズして」等と指示された場合も、その言葉をそのまま `gh issue close` の実行指示と解釈しない。反省会が未完了ならまず反省会を完了させてから `finalize-issue.js` を呼ぶ**
 - `BASE_BRANCH`は保護ブランチ（`main`/`master`）でもworktreeブランチ（`issue-N-description`形式）でもない。セッション中に変更しない。起動時に保護ブランチ上にいた場合のみ、最初のIssue確定時に開発ブランチを切って設定する
 - `main` / `master`への直接pushは禁止
+- `BASE_BRANCH`への直接commit / pushは禁止。orchestrator自身の変更も、Issueアンカー付きの軽量PR経路で提出する。
+  理由と経緯: docs/adr/0035-orchestrator-changes-go-through-a-lightweight-pr.md
 - **`scripts/` 配下または `skills/agents.yaml` に触れた変更を install した後の常駐入れ替えは、install.js がruntime rootに登録された全workspaceについて配布済みの `restart-residents.js` を自動で呼び出す。更新後・障害時の結果確認とMonitor再接続の手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` を参照する。**
 - `skills/**` 配下のドキュメントだけを変更した場合は手動の常駐入れ替えは不要。常駐プロセスは SKILL.md を読まない
 
@@ -539,8 +545,8 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
 
 人間から「マージを取り消したい」（レビュー未完了のまま早くマージされた等）と言われた場合：
 
-- まず**revertが本当に必要か**を切り分ける。実装自体に問題があるのではなく、レビュー指摘への対応が終わる前に早くマージされただけなら、revertせずに残りの指摘対応を通常の追いPRとしてBASE_BRANCHに直接積む方が安全（コンフリクトが原理的に発生しない）。
-- 実装自体を一旦取り下げたい等、revertが本当に必要な場合は`git revert -m 1 <mergeCommit> --no-edit`でBASE_BRANCHに打ち消しコミットを追加する。**このとき、元になった作業ブランチをそのまま延長させて指摘対応や再提出をさせてはならない。** そのブランチはrevertされたコミットの子孫であり続けるため、BASE_BRANCH側の「削除」とブランチ側の「追記」が同じファイルで必ず衝突する。revert後に作業を続けさせる場合は、revert後のBASE_BRANCHから新しくブランチを切って必要な差分を再適用させること。
+- まず**revertが本当に必要か**を切り分ける。実装自体に問題があるのではなく、レビュー指摘への対応が終わる前に早くマージされただけなら、revertせずに残りの指摘対応を軽量PR経路の追いPRとして提出する方が安全（コンフリクトが原理的に発生しない）。
+- 実装自体を一旦取り下げたい等、revertが本当に必要な場合は、タイトルだけのアンカーIssueを作成し、BASE_BRANCHからrevert用ブランチを切る。`git revert -m 1 <mergeCommit> --no-edit` はそのブランチ上で実行し、commit・push・PR作成後に `poll-pr.js --no-review-manager` で監視する。具体的なコマンドは `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/lightweight-pr.md` に従う。BASE_BRANCHへrevertコミットを直接追加してはならない。**このとき、元になった作業ブランチをそのまま延長させて指摘対応や再提出をさせてはならない。** そのブランチはrevertされたコミットの子孫であり続けるため、BASE_BRANCH側の「削除」とブランチ側の「追記」が同じファイルで必ず衝突する。revert後に作業を続けさせる場合は、revert後のBASE_BRANCHから新しくブランチを切って必要な差分を再適用させること。
 - どうしても元のブランチをmerge/rebaseで復元させる場合、**revert後に一切触っていない新規追加ファイルは、コンフリクト一覧に出ないまま3-way mergeが無言で「削除」を採用することがある**（共通祖先＝revert前のマージ元コミット、BASE_BRANCH側＝削除、ブランチ側＝無変更、という組み合わせで自動的に削除が選ばれるため）。復元後はコーダーに`git diff <revert前の直前コミット> -- <変更ファイル一覧>`で無差分を確認させてからcommitさせること。
 
 ### 12. 本番公開（CI/CD）確認【必須】
