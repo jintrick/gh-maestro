@@ -24,7 +24,11 @@ const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { resolveGitHead } = require('./shared/git-head');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { workspaceRuntimeDir } = require('./shared/storage-layout');
-const { readWorkersRaw, resolveWorkerName } = require('./shared/workers-registry');
+const { resolveWorkerName } = require('./shared/workers-registry');
+const { worktreeAddDetached, worktreeRemove } = require('./shared/git-worktree');
+const { createTempDirScope } = require('./shared/temp-directory');
+const { linkNodeModules } = require('./shared/link-node-modules');
+const { unlinkJunctions } = require('./shared/unlink-junctions');
 const { readTestResultArtifact, testResultPath, writeTestResultLayer } = require('./shared/test-result');
 const { declareTestResult } = require('./declare-test-result');
 const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
@@ -158,6 +162,7 @@ function getPrHead(pr, repo) {
 
 const SLOW_TEST_TIMEOUT_MS = 30 * 60 * 1000;
 const SLOW_UNKNOWN_HEAD_KEY = 'head-unavailable';
+const SLOW_WORKTREE_PREFIX = 'gh-maestro-slow-pr-';
 
 function slowStatePath(workspace, pr) {
   if (!/^[0-9]+$/.test(String(pr))) throw new Error(`PR番号が不正です: ${pr}`);
@@ -220,25 +225,22 @@ function updateSlowRun(statePath, runKey, update) {
 }
 
 function resolveSlowWorktree(workspace, issue) {
-  const raw = readWorkersRaw(workspace);
-  if (!raw) throw new Error(`workers.json を読み込めません（${workspace}）`);
-  let skill = null;
   for (const candidate of ['gh-maestro-senior-coder', 'gh-maestro-coder']) {
+    let workerName;
     try {
-      resolveWorkerName(workspace, { issue, skill: candidate });
-      skill = candidate;
-      break;
-    } catch (error) {
-      if (String(error.message).includes('複数のワーカー')) throw error;
+      workerName = resolveWorkerName(workspace, { issue, skill: candidate });
+    } catch {
+      // workers.json is only an optional hint for preserving the existing
+      // coder path. Missing, stale, or ambiguous entries fall through to the
+      // SHA-pinned detached-worktree path owned by runSlowTest().
+      continue;
+    }
+    const worktree = path.join(workspace, '.gh-maestro', 'worktrees', workerName);
+    if (fs.existsSync(worktree) && fs.statSync(worktree).isDirectory()) {
+      return { workerName, worktree };
     }
   }
-  if (!skill) throw new Error(`slow層の対象ワーカーが見つかりません（issue=${issue}）`);
-  const workerName = resolveWorkerName(workspace, { issue, skill });
-  const worktree = path.join(workspace, '.gh-maestro', 'worktrees', workerName);
-  if (!fs.existsSync(worktree) || !fs.statSync(worktree).isDirectory()) {
-    throw new Error(`slow層の対象worktreeが見つかりません: ${worktree}`);
-  }
-  return { workerName, worktree };
+  return null;
 }
 
 function sameHead(actual, expected) {
@@ -294,16 +296,31 @@ function writeUnavailableLayer(target, headSha, logPath, reason, deps = {}) {
 }
 
 function declareSlowResult({ pr, repo, workspace, target, headSha, statePath, runKey }, deps = {}) {
-  if (!target || !target.worktree || !headSha) return;
+  if (!target || !target.worktree || !headSha) return { status: 'not-attempted' };
   const declareFn = deps.declareTestResultFn || declareTestResult;
+  const getPrHeadFn = deps.getPrHeadFn || getPrHead;
+  let currentPrHead = '';
+  try { currentPrHead = getPrHeadFn(pr, repo); } catch {}
+  if (!sameHead(currentPrHead, headSha)) {
+    const reason = `PR HEADが実行対象SHAと一致しないため申告をスキップしました: ${currentPrHead || '(empty)'} != ${headSha}`;
+    try {
+      updateSlowRun(statePath, runKey, {
+        declaration: 'skipped',
+        declarationError: reason,
+      });
+    } catch {}
+    return { status: 'stale', reason };
+  }
   try {
     const declared = declareFn({ pr, repo, workspace, worktree: target.worktree, headSha });
     updateSlowRun(statePath, runKey, {
       declaration: declared.ok ? 'updated' : 'failed',
       ...(declared.ok ? {} : { declarationError: declared.error }),
     });
+    return { status: declared.ok ? 'updated' : 'failed' };
   } catch (error) {
     try { updateSlowRun(statePath, runKey, { declaration: 'failed', declarationError: error.message }); } catch {}
+    return { status: 'failed', error: error.message };
   }
 }
 
@@ -408,9 +425,52 @@ function finishSlowRun({ pr, repo, workspace, target, headSha, statePath, runKey
   } catch (error) {
     result.stateError = error.message;
   }
+  const declaration = declareSlowResult({ pr, repo, workspace, target, headSha, statePath, runKey }, deps);
+  if (declaration.status === 'stale') {
+    return finishSlowStale({
+      pr,
+      workspace,
+      target,
+      headSha,
+      statePath,
+      runKey,
+      logPath,
+      reason: declaration.reason,
+    });
+  }
   emitSlowResult(pr, result);
-  declareSlowResult({ pr, repo, workspace, target, headSha, statePath, runKey }, deps);
   return result;
+}
+
+function cleanupDetachedSlowWorktree({ scope, worktree, workspace, worktreeAdded }, deps = {}) {
+  if (!scope) return;
+  const unlinkJunctionsFn = deps.unlinkJunctionsFn || unlinkJunctions;
+  const worktreeRemoveFn = deps.worktreeRemoveFn || worktreeRemove;
+  const errors = [];
+
+  // Junctions must be removed before Git or the temp-directory scope recursively
+  // removes the worktree. The Git registration is removed before the owning
+  // temp scope is closed so a failed test cannot leave stale worktree metadata.
+  if (worktreeAdded) {
+    try { unlinkJunctionsFn(worktree); } catch (error) { errors.push(error); }
+    try { worktreeRemoveFn(worktree, workspace); } catch (error) { errors.push(error); }
+  }
+
+  try { scope.cleanup(); } catch (error) { errors.push(error); }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, 'slow worktree cleanup failed');
+}
+
+function recordSlowCleanupFailure(statePath, runKey, error) {
+  if (!statePath || !runKey) return;
+  try {
+    updateSlowRun(statePath, runKey, {
+      cleanup: {
+        status: 'failed',
+        error: error && error.message ? error.message : String(error),
+      },
+    });
+  } catch {}
 }
 
 async function executeSlowChild({ target, logPath, childEnv, onSpawn }, deps = {}) {
@@ -479,9 +539,13 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
   let statePath;
   const runKey = headSha || SLOW_UNKNOWN_HEAD_KEY;
   let target;
+  let worktreeDir;
+  let worktreeAdded = false;
+  let tempScope;
   let logPath;
   let child;
   let closeLog;
+  let result;
   try {
     statePath = slowStatePath(workspace, pr);
     const reservation = reserveSlowRun(workspace, pr, headSha);
@@ -499,9 +563,40 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
     if (deps.onReserved) deps.onReserved({ pr: String(pr), layer: 'slow', testedHead: headSha });
     const resolveWorktreeFn = deps.resolveSlowWorktreeFn || resolveSlowWorktree;
     const resolveHeadFn = deps.resolveGitHeadFn || resolveGitHead;
-    target = resolveWorktreeFn(workspace, issue);
-    const localHead = resolveHeadFn(target.worktree);
-    if (!sameHead(localHead, headSha)) throw new Error(`PR HEADとslow対象worktreeのHEADが不一致です: ${localHead || '(empty)'} != ${headSha}`);
+    let existingTarget = null;
+    try { existingTarget = resolveWorktreeFn(workspace, issue); } catch {}
+    if (existingTarget && existingTarget.worktree) {
+      let localHead = '';
+      try { localHead = resolveHeadFn(existingTarget.worktree); } catch {}
+      if (sameHead(localHead, headSha)) target = existingTarget;
+    }
+
+    if (!target) {
+      const createTempDirScopeFn = deps.createTempDirScopeFn || createTempDirScope;
+      const worktreeAddDetachedFn = deps.worktreeAddDetachedFn || worktreeAddDetached;
+      const linkNodeModulesFn = deps.linkNodeModulesFn || linkNodeModules;
+      tempScope = createTempDirScopeFn();
+      const tempRoot = tempScope.mkdtemp(SLOW_WORKTREE_PREFIX);
+      worktreeDir = path.join(tempRoot, 'worktree');
+      worktreeAddDetachedFn(worktreeDir, headSha, workspace);
+      worktreeAdded = true;
+      const localHead = resolveHeadFn(worktreeDir);
+      if (!sameHead(localHead, headSha)) {
+        throw new Error(`PR HEADとslow対象detached worktreeのHEADが不一致です: ${localHead || '(empty)'} != ${headSha}`);
+      }
+      let nmResult;
+      try { nmResult = linkNodeModulesFn(worktreeDir, workspace); } catch (error) {
+        throw new Error(`node_modules の junction 作成に失敗しました: ${error.message}`);
+      }
+      if (!nmResult || !Array.isArray(nmResult.missing)) {
+        throw new Error('node_modules の junction 作成結果が不正です');
+      }
+      if (nmResult.missing.length > 0) {
+        throw new Error(`node_modules の junction 作成に失敗しました: ${nmResult.missing.join(', ')}`);
+      }
+      target = { worktree: worktreeDir };
+    }
+
     logPath = slowLogPath(target.worktree, pr, headSha);
     const childEnv = {
       ...process.env,
@@ -523,7 +618,7 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
     let finalLocalHead = '';
     try { finalLocalHead = resolveHeadFn(target.worktree); } catch {}
     if (!sameHead(finalLocalHead, headSha)) {
-      return finishSlowStale({
+      result = finishSlowStale({
         pr,
         workspace,
         target,
@@ -533,12 +628,29 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
         logPath,
         reason: `slow対象worktreeのHEADが実行中に変更されました: ${finalLocalHead || '(empty)'} != ${headSha}`,
       });
+    } else {
+      const getPrHeadFn = deps.getPrHeadFn || getPrHead;
+      let currentPrHead = '';
+      try { currentPrHead = getPrHeadFn(pr, repo); } catch {}
+      if (!sameHead(currentPrHead, headSha)) {
+        result = finishSlowStale({
+          pr,
+          workspace,
+          target,
+          headSha,
+          statePath,
+          runKey,
+          logPath,
+          reason: `PRのHEADが実行中に変更されました: ${currentPrHead || '(empty)'} != ${headSha}`,
+        });
+      } else {
+        result = finishSlowRun({
+          pr, repo, workspace, target, headSha, statePath, runKey, logPath, exitCode: childResult.exitCode,
+        }, deps);
+      }
     }
-    return finishSlowRun({
-      pr, repo, workspace, target, headSha, statePath, runKey, logPath, exitCode: childResult.exitCode,
-    }, deps);
   } catch (error) {
-    return finishSlowFailure({
+    result = finishSlowFailure({
       pr,
       repo,
       workspace,
@@ -551,7 +663,21 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
       closeLog,
       reason: error && error.message ? error.message : 'slow-run-failed',
     }, deps);
+  } finally {
+    if (tempScope) {
+      try {
+        cleanupDetachedSlowWorktree({
+          scope: tempScope,
+          worktree: worktreeDir,
+          workspace,
+          worktreeAdded,
+        }, deps);
+      } catch (error) {
+        recordSlowCleanupFailure(statePath, runKey, error);
+      }
+    }
   }
+  return result;
 }
 
 
