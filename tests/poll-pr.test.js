@@ -324,6 +324,7 @@ test('runPollPr connects PR detection, PR_PUSH slow launches, deduplication, and
   const headChecks = [firstHead, firstHead, pushedHead, pushedHead];
   let headIndex = 0;
   let childStarts = 0;
+  let managerStarts = 0;
   let h2Started = false;
   let releasePushedSlow;
   const pushedSlowRelease = new Promise((resolve) => { releasePushedSlow = resolve; });
@@ -336,13 +337,17 @@ test('runPollPr connects PR detection, PR_PUSH slow launches, deduplication, and
       repo: 'fixture/repo',
       workspace,
       sessionPid: 4321,
-      noReviewManager: true,
+      noReviewManager: false,
       intervalMs: 0,
       intervalArg: '0',
     }, {
       checkParentFn: () => true,
       findPrFn: () => '42',
       getPrHeadFn: () => firstHead,
+      startReviewManagerFn: () => {
+        managerStarts += 1;
+        return 'REVIEW_MANAGER_STARTED';
+      },
       spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine) => {
         pollCall = { pr, reviewWorkspace, sessionPid, interval };
         onOutputLine(`PR_PUSH:${pushedHead}`);
@@ -386,6 +391,7 @@ test('runPollPr connects PR detection, PR_PUSH slow launches, deduplication, and
     const result = await runPromise;
     assert.deepEqual(result, { exitCode: 0 });
     assert.equal(cleanupCode, 0);
+    assert.equal(managerStarts, 1, 'Review Manager is claimed and started once for the PR');
     assert.deepEqual(pollCall, {
       pr: '42',
       reviewWorkspace: workspace,
@@ -397,6 +403,7 @@ test('runPollPr connects PR detection, PR_PUSH slow launches, deduplication, and
       output.filter((line) => line.startsWith('SLOW_TEST_STARTED:')).map((line) => JSON.parse(line.slice('SLOW_TEST_STARTED:'.length)).testedHead),
       [firstHead, pushedHead],
     );
+    assert.ok(output.includes('REVIEW_MANAGER_STARTED:42\n'));
     const state = JSON.parse(fs.readFileSync(mod.slowStatePath(workspace, '42'), 'utf8'));
     assert.equal(state.runs[firstHead].status, 'pass');
     assert.equal(state.runs[pushedHead].status, 'pass');
@@ -405,6 +412,158 @@ test('runPollPr connects PR detection, PR_PUSH slow launches, deduplication, and
     if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
     else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
   }
+});
+
+test('runPollPr skips automatic Review Manager restart after the same PR is detected again', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-claim-redetect-');
+  const states = ['CLOSED', 'OPEN'];
+  const output = [];
+  let managerStarts = 0;
+  let childStarts = 0;
+  const result = await mod.runPollPr({
+    issue: 507,
+    repo: 'fixture/repo',
+    workspace,
+    sessionPid: 4321,
+    intervalMs: 0,
+    intervalArg: '0',
+  }, {
+    checkParentFn: () => true,
+    findPrFn: () => '42',
+    getPrHeadFn: () => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    startReviewManagerFn: () => {
+      managerStarts += 1;
+      return 'REVIEW_MANAGER_STARTED';
+    },
+    spawnPollReviewsFn: async () => {
+      childStarts += 1;
+      return 0;
+    },
+    getPrStateFn: () => states.shift() || 'OPEN',
+    recordMergeAndSnapshotFn: () => {},
+    runSlowTestFn: async () => {},
+    cleanupFn: () => {},
+    writeStdoutFn: (text) => output.push(text),
+  });
+
+  assert.deepEqual(result, { exitCode: 0 });
+  assert.equal(childStarts, 2);
+  assert.equal(managerStarts, 1);
+  assert.ok(output.includes('REVIEW_MANAGER_STARTED:42\n'));
+  assert.ok(output.includes('REVIEW_MANAGER_ALREADY_CLAIMED:42\n'));
+  assert.equal(fs.existsSync(mod.reviewManagerClaimPath(workspace, '42')), true);
+});
+
+test('runPollPr claims and starts a different PR after the previous PR closes', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-claim-distinct-');
+  const prs = ['42', '43'];
+  const states = ['CLOSED', 'OPEN'];
+  const started = [];
+  const output = [];
+  const result = await mod.runPollPr({
+    issue: 507,
+    repo: 'fixture/repo',
+    workspace,
+    sessionPid: 4321,
+    intervalMs: 0,
+    intervalArg: '0',
+  }, {
+    checkParentFn: () => true,
+    findPrFn: () => prs.shift() || '43',
+    getPrHeadFn: () => 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    startReviewManagerFn: (pr) => {
+      started.push(String(pr));
+      return 'REVIEW_MANAGER_STARTED';
+    },
+    spawnPollReviewsFn: async () => 0,
+    getPrStateFn: () => states.shift() || 'OPEN',
+    recordMergeAndSnapshotFn: () => {},
+    runSlowTestFn: async () => {},
+    cleanupFn: () => {},
+    writeStdoutFn: (text) => output.push(text),
+  });
+
+  assert.deepEqual(result, { exitCode: 0 });
+  assert.deepEqual(started, ['42', '43']);
+  assert.ok(output.includes('REVIEW_MANAGER_STARTED:42\n'));
+  assert.ok(output.includes('REVIEW_MANAGER_STARTED:43\n'));
+  assert.equal(fs.existsSync(mod.reviewManagerClaimPath(workspace, '42')), true);
+  assert.equal(fs.existsSync(mod.reviewManagerClaimPath(workspace, '43')), true);
+});
+
+test('runPollPr --no-review-manager does not claim, start, or emit Review Manager output', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-no-review-manager-');
+  const output = [];
+  let managerStarts = 0;
+  const result = await mod.runPollPr({
+    issue: 507,
+    repo: 'fixture/repo',
+    workspace,
+    sessionPid: 4321,
+    noReviewManager: true,
+    intervalMs: 0,
+    intervalArg: '0',
+  }, {
+    checkParentFn: () => true,
+    findPrFn: () => '42',
+    getPrHeadFn: () => 'cccccccccccccccccccccccccccccccccccccccc',
+    startReviewManagerFn: () => {
+      managerStarts += 1;
+      return 'REVIEW_MANAGER_STARTED';
+    },
+    spawnPollReviewsFn: async () => 0,
+    getPrStateFn: () => 'OPEN',
+    recordMergeAndSnapshotFn: () => {},
+    runSlowTestFn: async () => {},
+    cleanupFn: () => {},
+    writeStdoutFn: (text) => output.push(text),
+  });
+
+  assert.deepEqual(result, { exitCode: 0 });
+  assert.equal(managerStarts, 0);
+  assert.equal(output.some((line) => line.includes('REVIEW_MANAGER_')), false);
+  assert.equal(fs.existsSync(mod.reviewManagerClaimPath(workspace, '42')), false);
+});
+
+test('runPollPr leaves the claim sentinel when automatic Review Manager startup fails', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-claim-failure-');
+  await assert.rejects(() => mod.runPollPr({
+    issue: 507,
+    repo: 'fixture/repo',
+    workspace,
+    sessionPid: 4321,
+    intervalMs: 0,
+    intervalArg: '0',
+  }, {
+    checkParentFn: () => true,
+    findPrFn: () => '42',
+    getPrHeadFn: () => 'dddddddddddddddddddddddddddddddddddddddd',
+    startReviewManagerFn: () => { throw new Error('startup failed'); },
+    spawnPollReviewsFn: async () => { throw new Error('must not monitor after startup failure'); },
+    getPrStateFn: () => 'OPEN',
+    recordMergeAndSnapshotFn: () => {},
+    runSlowTestFn: async () => {},
+    cleanupFn: () => {},
+  }), /startup failed/);
+
+  const claimPath = mod.reviewManagerClaimPath(workspace, '42');
+  assert.equal(fs.existsSync(claimPath), true);
+  assert.equal(fs.readFileSync(claimPath, 'utf8'), '');
+});
+
+test('claimReviewManagerLaunch creates one empty sentinel and rejects the second claim', () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-claim-sentinel-');
+  const first = mod.claimReviewManagerLaunch(workspace, '42');
+  const second = mod.claimReviewManagerLaunch(workspace, '42');
+
+  assert.deepEqual(first, { claimed: true, claimPath: mod.reviewManagerClaimPath(workspace, '42') });
+  assert.deepEqual(second, { claimed: false, claimPath: mod.reviewManagerClaimPath(workspace, '42') });
+  assert.equal(fs.readFileSync(first.claimPath, 'utf8'), '');
 });
 
 test('runSlowTest uses a matching existing worktree and preserves the full layer', async () => {

@@ -6,7 +6,8 @@
 // and bridges into poll-reviews.js as a child process. Prints:
 //   PR_BASE_MISMATCH:<PR>:<expected>:<actual>  (only when --base-branch and actual base branch mismatch)
 //   PR_DETECTED:<number>
-//   REVIEW_MANAGER_STARTED:<number> | REVIEW_MANAGER_ALREADY_RUNNING:<number>
+//   REVIEW_MANAGER_STARTED:<number> | REVIEW_MANAGER_ALREADY_RUNNING:<number> |
+//   REVIEW_MANAGER_ALREADY_CLAIMED:<number>
 //   ...poll-reviews.js の出力がそのまま続く（REVIEW_COMMENT / PR_COMMENT / PR_REVIEW / PR_PUSH / PR_MERGED / PR_CLOSED / POLL_ERROR / POLL_RECOVERED）。
 //   PR_PUSHを受け取るたび、そのSHAのslow層を非同期で予約する。
 //   Review Managerの起動後のクラッシュ（エージェントCLI起動失敗等）は、本スクリプトの
@@ -34,6 +35,7 @@ const { declareTestResult } = require('./declare-test-result');
 const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { postCycleSnapshot } = require('./shared/cycle-snapshot');
+const { ARTIFACTS, recordPath } = require('./shared/record-paths');
 const {
   resolveSessionPid,
   createDeadManSwitch,
@@ -64,6 +66,7 @@ Output (stdout):
   PR_DETECTED:<PR>                     PR を検出した
   REVIEW_MANAGER_STARTED:<PR>          Review Manager を起動した
   REVIEW_MANAGER_ALREADY_RUNNING:<PR>  Review Manager は既に稼働中
+  REVIEW_MANAGER_ALREADY_CLAIMED:<PR>  このPRの自動Review Manager起動は完了済みのためスキップした
   PR_CLOSED_RESUMED:<PR>               監視していたPRがクローズされ、新PR検出に復帰した
   SLOW_TEST_STARTED:<json>             PR検出後のslow層を非同期で開始した
   SLOW_TEST_RESULT:<json>              slow層の完了または失敗を記録した
@@ -167,6 +170,46 @@ const SLOW_WORKTREE_PREFIX = 'gh-maestro-slow-pr-';
 function slowStatePath(workspace, pr) {
   if (!/^[0-9]+$/.test(String(pr))) throw new Error(`PR番号が不正です: ${pr}`);
   return path.join(workspace, '.gh-maestro', `poll-slow-test-${String(pr)}.json`);
+}
+
+function reviewManagerClaimPath(workspace, pr) {
+  return recordPath(workspace, {
+    ownerKind: 'pr',
+    ownerId: pr,
+    artifact: ARTIFACTS.REVIEW_MANAGER_CLAIM,
+  });
+}
+
+/**
+ * PR単位の自動Review Manager起動を一度だけ予約する。
+ * claim自体がwxによる排他的なセンチネル作成であり、存在確認と作成を分離しない。
+ * claimは解除しないため、起動処理が失敗しても自動経路から暗黙に再試行しない。
+ *
+ * @param {string} workspace
+ * @param {string|number} pr
+ * @returns {{claimed:boolean, claimPath:string}}
+ */
+function claimReviewManagerLaunch(workspace, pr) {
+  const claimPath = reviewManagerClaimPath(workspace, pr);
+  fs.mkdirSync(path.dirname(claimPath), { recursive: true });
+  let fd;
+  let created = false;
+  try {
+    fd = fs.openSync(claimPath, 'wx');
+    created = true;
+    fs.closeSync(fd);
+    fd = undefined;
+    return { claimed: true, claimPath };
+  } catch (error) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch {}
+    }
+    if (error && error.code === 'EEXIST') return { claimed: false, claimPath };
+    if (created) {
+      try { fs.unlinkSync(claimPath); } catch {}
+    }
+    throw error;
+  }
 }
 
 function readSlowState(statePath) {
@@ -892,8 +935,13 @@ async function runPollPr(params, deps = {}) {
     launchSlowTest(pr);
 
     if (!noReviewManager) {
-      const reviewStatus = startReviewManagerFn(pr, repo, workspace, issue);
-      writeStdoutFn(`${reviewStatus}:${pr}\n`);
+      const claim = claimReviewManagerLaunch(workspace, pr);
+      if (!claim.claimed) {
+        writeStdoutFn(`REVIEW_MANAGER_ALREADY_CLAIMED:${pr}\n`);
+      } else {
+        const reviewStatus = startReviewManagerFn(pr, repo, workspace, issue);
+        writeStdoutFn(`${reviewStatus}:${pr}\n`);
+      }
     }
 
     const exitCode = await spawnPollReviewsFn(
@@ -933,6 +981,8 @@ module.exports = {
   resolveSlowWorktree,
   runSlowTest,
   recordHeadUnavailable,
+  reviewManagerClaimPath,
+  claimReviewManagerLaunch,
   runPollPr,
 };
 
