@@ -66,7 +66,7 @@ Output (stdout):
   PR_DETECTED:<PR>                     PR を検出した
   REVIEW_MANAGER_STARTED:<PR>          Review Manager を起動した
   REVIEW_MANAGER_ALREADY_RUNNING:<PR>  Review Manager は既に稼働中
-  REVIEW_MANAGER_ALREADY_CLAIMED:<PR>  このPRの自動Review Manager起動は完了済みのためスキップした
+  REVIEW_MANAGER_ALREADY_CLAIMED:<PR>  このPRの自動Review Manager起動は既にclaim済みのためスキップした
   PR_CLOSED_RESUMED:<PR>               監視していたPRがクローズされ、新PR検出に復帰した
   SLOW_TEST_STARTED:<json>             PR検出後のslow層を非同期で開始した
   SLOW_TEST_RESULT:<json>              slow層の完了または失敗を記録した
