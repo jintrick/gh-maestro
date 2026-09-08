@@ -420,10 +420,15 @@ test('renderWorkerRows: 稼働優先・resume回数・状態ドット色・残�
   ], { maxRows: 4, colorize: true });
 
   assert.equal(lines.length, 4);
-  assert.match(lines[0], /^\x1b\[32m●\x1b\[0m senior-coder x2\s+\[codex\]\s+0:03:00 \(pid: 2\)$/);
-  assert.match(lines[1], /^\x1b\[32m●\x1b\[0m explorer\s+\[agy\s*\]\s+0:01:00 \(pid: 3\)$/);
-  assert.match(lines[2], /^\x1b\[31m●\x1b\[0m review-manager\s+\[agy\s*\]\s+0:00:30 \(pid: 4\)$/);
-  assert.match(lines[3], /\x1b\[90m○\x1b\[0m architect\s+\[agy\s*\]\s+0:00:30 \(pid: 5\) \+1件$/);
+  // 見た目（丸印の個数・空白の詰め方・書式）は固定しない（docs/adr/0033）。状態と識別子だけを見る。
+  assert.match(lines[0], /\x1b\[32m●\x1b\[0m/);
+  assert.ok(lines[0].includes('senior-coder x2') && lines[0].includes('[codex]') && lines[0].includes('(pid: 2)'));
+  assert.match(lines[1], /\x1b\[32m●\x1b\[0m/);
+  assert.ok(lines[1].includes('explorer') && lines[1].includes('(pid: 3)'));
+  assert.match(lines[2], /\x1b\[31m●\x1b\[0m/);
+  assert.ok(lines[2].includes('review-manager') && lines[2].includes('(pid: 4)'));
+  assert.match(lines[3], /\x1b\[90m○\x1b\[0m/);
+  assert.ok(lines[3].includes('architect') && lines[3].includes('(pid: 5)') && lines[3].includes('+1件'));
   assert.ok(lines.every(line => !line.includes('×')));
   assert.ok(lines.every(line => !line.includes('[running]') && !line.includes('[stopped]') && !line.includes('█')));
 });
