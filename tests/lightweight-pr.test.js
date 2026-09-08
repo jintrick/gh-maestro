@@ -19,11 +19,14 @@ function shellFences(content) {
 test('lightweight-pr.md: タイトルだけのIssueからPR作成までの具体的な入口がある', () => {
   const content = readDocument();
   const fences = shellFences(content);
+  const powershellFences = [...content.matchAll(/^[ \t]*```powershell\r?\n([\s\S]*?)\r?\n[ \t]*```/gm)]
+    .map((match) => match[1]);
 
   assert.ok(fences.some((fence) => /create-issue\.js/.test(fence) && /--title-only/.test(fence)));
   assert.ok(fences.some((fence) => /git switch --create/.test(fence) && /\$BASE_BRANCH/.test(fence)));
   assert.ok(fences.some((fence) => /git commit/.test(fence) && /git push/.test(fence)));
   assert.ok(fences.some((fence) => /gh-create-pr\.js/.test(fence)));
+  assert.ok(powershellFences.some((fence) => /\$env:GH_MAESTRO_BASE_BRANCH/.test(fence) && /gh-create-pr\.js/.test(fence)));
 });
 
 test('lightweight-pr.md: PR監視はReview Managerを起動せず、slow層と申告確認を残す', () => {

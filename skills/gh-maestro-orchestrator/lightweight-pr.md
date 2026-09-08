@@ -45,13 +45,28 @@ BASE_BRANCHへ直接commit・pushしない。変更がドキュメントだけ�
 
 ### 3. Review ManagerなしでPRを作成する
 
-`gh-create-pr.js` はPRのbaseを環境変数から解決するため、セッションの `$BASE_BRANCH` を渡す。
+`gh-create-pr.js` はPRのbaseを環境変数から解決するため、セッションの `$BASE_BRANCH` を渡す。実行するシェルに応じて環境変数を設定してから `node` を呼ぶ。
+
+POSIXシェル:
 
 ```sh
-GH_MAESTRO_BASE_BRANCH="$BASE_BRANCH" node "{{SCRIPTS_PATH}}/gh-create-pr.js" \
+export GH_MAESTRO_BASE_BRANCH="$BASE_BRANCH"
+node "{{SCRIPTS_PATH}}/gh-create-pr.js" \
   --title "<変更内容の短いタイトル>" \
   --body "関連Issue: #$ISSUE" \
   --repo "$REPO"
+unset GH_MAESTRO_BASE_BRANCH
+```
+
+PowerShell:
+
+```powershell
+$env:GH_MAESTRO_BASE_BRANCH = $BASE_BRANCH
+node "{{SCRIPTS_PATH}}/gh-create-pr.js" `
+  --title "<変更内容の短いタイトル>" `
+  --body "関連Issue: #$ISSUE" `
+  --repo $REPO
+Remove-Item Env:GH_MAESTRO_BASE_BRANCH
 ```
 
 PR本文にはIssueを自動クローズするキーワードを入れない。Issueのクローズは通常の後始末で行う。
