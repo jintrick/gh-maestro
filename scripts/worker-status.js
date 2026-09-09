@@ -207,8 +207,7 @@ function stripWorkerNamePrefix(workerName) {
 }
 
 /**
- * 秒数を h:mm:ss にフォーマットする。表記が揺れると桁が揃わず、
- * 複数行を並べたときに長さを比べられなくなるため、常にこの形にする。
+ * 連続稼働時間を、1時間未満は mm:ss、1時間以上は h:mm:ss にする。
  *
  * @param {number} seconds
  * @returns {string}
@@ -218,6 +217,9 @@ function formatDuration(seconds) {
   const hours = Math.floor(s / 3600);
   const mins = Math.floor((s % 3600) / 60);
   const secs = s % 60;
+  if (hours === 0) {
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
   return `${hours}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
@@ -500,7 +502,7 @@ function alignStatusRows(rows) {
  *
  * @param {Array<{workerName: string, pid: number|null, running: boolean, startTime: string|null, elapsedSeconds: number, issue?: number|null, agentId?: string|null}>} workers
  * @param {object} [opts]
- * @param {number} [opts.maxBarWidth=30]
+ * @param {number} [opts.maxBarWidth=20]
  * @returns {string[]}
  */
 function renderUptimeBars(workers, opts = {}) {
@@ -511,7 +513,7 @@ function renderUptimeBars(workers, opts = {}) {
     return ['No workers registered.'];
   }
 
-  const maxBarWidth = opts.maxBarWidth ?? 30;
+  const maxBarWidth = opts.maxBarWidth ?? 20;
   const allEntriesForMax = [];
   for (const w of workers) {
     allEntriesForMax.push(w);
@@ -884,10 +886,10 @@ function renderWorkerRows(workers, opts = {}) {
   for (const [visibleIndex, { worker, role }] of visible.entries()) {
     const statusKind = workerStatusKind(worker);
     const dot = statusKind === 'abnormal'
-      ? colorizeText('●', 31, colorize)
+      ? colorizeText('■', 31, colorize)
       : statusKind === 'running'
-        ? colorizeText('●', 32, colorize)
-        : colorizeText('○', 90, colorize);
+        ? colorizeText('■', 32, colorize)
+        : colorizeText('□', 90, colorize);
     const runNumber = Number(worker.runNumber);
     const runSuffix = Number.isInteger(runNumber) && runNumber > 1 ? ` x${runNumber}` : '';
     const dots = Array.from({ length: DOT_COUNT }, () => dot).join(' ');

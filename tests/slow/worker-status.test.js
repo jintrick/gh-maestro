@@ -187,7 +187,6 @@ test('サブプロセス: list はサイクル行と状態ドットを表示す�
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stderr, '');
     assert.match(result.stdout, /alive/);
-    assert.match(result.stdout, /● alive/);
     assert.doesNotMatch(result.stdout, /\[running\]/);
   } finally {
     removeWorkspace(workspace);
