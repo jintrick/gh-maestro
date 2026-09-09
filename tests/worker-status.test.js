@@ -322,13 +322,12 @@ test('renderUptimeBars: 空ワーカー・単一ワーカー・複数ワーカ�
   const barLength = line => (line.match(/█+/) || [''])[0].length;
   assert.ok(barLength(multi[0]) > barLength(multi[1]));
 
-  const defaultWidth = workerStatus.renderUptimeBars([{
-    workerName: 'issue-403-default-width',
-    running: true,
-    elapsedSeconds: 600,
-    pid: 1004,
-  }])[0];
-  assert.equal(barLength(defaultWidth), 20);
+  const defaultWidthLines = workerStatus.renderUptimeBars([
+    { workerName: 'issue-403-default-long', running: true, elapsedSeconds: 600, pid: 1004 },
+    { workerName: 'issue-403-default-short', running: true, elapsedSeconds: 300, pid: 1005 },
+  ]);
+  assert.ok(barLength(defaultWidthLines[0]) > barLength(defaultWidthLines[1]));
+  assert.ok(defaultWidthLines.every(line => Array.from(line).length <= 120));
 });
 
 test('cycle snapshot: 区間だけを1行バーで表示し、ワーカーは最大4行の役職・モデル・時間・PIDにする', () => {
