@@ -2,6 +2,8 @@
 
 影響範囲が限定的でReview Managerのレビューを起動するコストに見合わない変更でも、ベースブランチへ直接commit・pushしてはならない。タイトルだけのアンカーIssueを作成し、通常のPR監視からReview Managerだけを外す。この経路でもPR検出、slow層、テスト結果の申告、マージ状態の監視は残る。
 
+例外: `adr.md`が定義するADRの追加・改訂は、この経路を使わずベースブランチへ直接commit・pushしてよい。
+
 ## 実行前の前提
 
 - セッション変数 `$REPO`、`$WORKSPACE`、`$BASE_BRANCH` が設定されていること。
@@ -41,7 +43,7 @@ git commit -m "<変更内容の短いタイトル>"
 git push -u origin "$BRANCH"
 ```
 
-BASE_BRANCHへ直接commit・pushしない。変更がドキュメントだけでも、この経路を省略しない。
+BASE_BRANCHへ直接commit・pushしない（`adr.md`が定義するADRの追加・改訂を除く）。変更がドキュメントだけでも、この経路を省略しない。
 
 ### 3. Review ManagerなしでPRを作成する
 
