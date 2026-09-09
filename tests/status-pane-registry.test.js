@@ -32,34 +32,48 @@ test('loadStatusPane: status-pane.jsonが無ければnull', () => {
   });
 });
 
-test('loadStatusPane: 壊れたJSONは警告して不在として扱う（相方なし）', () => {
+test('loadStatusPane: 壊れたJSONと相方不在は有効な記録なしとしてthrowする', () => {
   withTempWorkspace((dir) => {
     const p = statusPanePath(dir);
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, '{not json', 'utf8');
     const warnings = [];
-    assert.equal(loadStatusPane(dir, (message) => warnings.push(message)), null);
+    assert.throws(
+      () => loadStatusPane(dir, (message) => warnings.push(message)),
+      (error) => {
+        assert.match(error.message, /有効な記録を取得できません/);
+        assert.match(error.message, /JSON構文エラー/);
+        assert.match(error.message, new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        return true;
+      },
+    );
     assert.match(warnings.join('\n'), /JSON構文エラー/);
     assert.match(warnings.join('\n'), new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   });
 });
 
-test('loadStatusPane: 配列やpaneId欠落オブジェクトは警告して不在として扱う（相方なし）', () => {
+test('loadStatusPane: 配列やpaneId欠落オブジェクトは有効な記録なしとしてthrowする', () => {
   withTempWorkspace((dir) => {
     const p = statusPanePath(dir);
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, '[1,2,3]', 'utf8');
     const warnings = [];
-    assert.equal(loadStatusPane(dir, (message) => warnings.push(message)), null);
-    assert.match(warnings.join('\n'), /JSONとしては妥当だがオブジェクトでない/);
+    assert.throws(
+      () => loadStatusPane(dir, (message) => warnings.push(message)),
+      /JSONとしては妥当だがオブジェクトでない/,
+    );
 
     fs.writeFileSync(p, '{"foo":"bar"}', 'utf8');
-    assert.equal(loadStatusPane(dir, (message) => warnings.push(message)), null);
-    assert.match(warnings.join('\n'), /型不正（paneId がありません）/);
+    assert.throws(
+      () => loadStatusPane(dir, (message) => warnings.push(message)),
+      /型不正（paneId がありません）/,
+    );
 
     fs.writeFileSync(p, '{"paneId":""}', 'utf8');
-    assert.equal(loadStatusPane(dir, (message) => warnings.push(message)), null);
-    assert.match(warnings.join('\n'), /型不正（paneId がありません）/);
+    assert.throws(
+      () => loadStatusPane(dir, (message) => warnings.push(message)),
+      /型不正（paneId がありません）/,
+    );
   });
 });
 
@@ -108,7 +122,7 @@ test('loadStatusPane: primaryとrecoveryの両方が壊れていれば両方の�
     assert.throws(
       () => loadStatusPane(dir, (message) => warnings.push(message)),
       (error) => {
-        assert.match(error.message, /両方のファイルが判定不能/);
+        assert.match(error.message, /有効な記録を取得できません/);
         assert.match(error.message, new RegExp(primary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
         assert.match(error.message, new RegExp(recovery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
         assert.match(error.message, /JSON構文エラー/);
@@ -119,14 +133,35 @@ test('loadStatusPane: primaryとrecoveryの両方が壊れていれば両方の�
   });
 });
 
-test('loadStatusPane: 読み取り失敗は片側なら警告してnullを返す', () => {
+test('loadStatusPane: 読み取り失敗と相方不在は有効な記録なしとしてthrowする', () => {
   withTempWorkspace((dir) => {
     const p = statusPanePath(dir);
     fs.mkdirSync(p, { recursive: true });
     const warnings = [];
-    assert.equal(loadStatusPane(dir, (message) => warnings.push(message)), null);
+    assert.throws(
+      () => loadStatusPane(dir, (message) => warnings.push(message)),
+      /有効な記録を取得できません.*読み取り失敗/,
+    );
     assert.match(warnings.join('\n'), /読み取り失敗/);
     assert.match(warnings.join('\n'), new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  });
+});
+
+test('loadStatusPane: 読み取り失敗の相方が有効なら警告付きで相方を使う', () => {
+  withTempWorkspace((dir) => {
+    const p = statusPanePath(dir);
+    fs.mkdirSync(p, { recursive: true });
+    const recovery = statusPaneRecoveryPath(dir);
+    saveStatusPaneRecovery(dir, { paneId: 'recovery-readable', launchedAt: '2026-08-26T09:00:00.000Z' });
+
+    const warnings = [];
+    assert.deepEqual(loadStatusPane(dir, (message) => warnings.push(message)), {
+      paneId: 'recovery-readable',
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    });
+    assert.match(warnings.join('\n'), /読み取り失敗/);
+    assert.match(warnings.join('\n'), new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.doesNotMatch(warnings.join('\n'), new RegExp(recovery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   });
 });
 

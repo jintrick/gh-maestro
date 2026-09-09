@@ -317,6 +317,79 @@ test('ensureStatusPane: primaryだけが壊れていればrecoveryを警告付�
   });
 });
 
+test('ensureStatusPane: primaryの読み取り失敗でもrecoveryを警告付きで再利用し二重起動しない', () => {
+  withTempWorkspace((workspace) => {
+    const primary = statusPaneRegistry.statusPanePath(workspace);
+    fs.mkdirSync(primary, { recursive: true });
+    statusPaneRegistry.saveStatusPaneRecovery(workspace, {
+      paneId: 'recovery-readable',
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    });
+    const warnings = [];
+    let aliveCalled = false;
+    let launchCalled = false;
+
+    const result = ensureStatusPane({
+      workspace,
+      scriptsPath: path.join(__dirname, '..', 'scripts'),
+    }, {
+      acquireLockFn: () => true,
+      releaseLockFn: () => {},
+      loadStatusPaneFn: (ws) => statusPaneRegistry.loadStatusPane(ws, (message) => warnings.push(message)),
+      isPaneAliveFn: () => {
+        aliveCalled = true;
+        return true;
+      },
+      launchInSplitPaneFn: () => {
+        launchCalled = true;
+        return { paneId: 'must-not-launch' };
+      },
+      saveStatusPaneFn: () => {},
+    });
+
+    assert.deepEqual(result, { ok: true, paneId: 'recovery-readable', reused: true });
+    assert.equal(aliveCalled, true);
+    assert.equal(launchCalled, false);
+    assert.match(warnings.join('\n'), /読み取り失敗/);
+    assert.match(warnings.join('\n'), new RegExp(primary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  });
+});
+
+test('ensureStatusPane: primary破損とrecovery不在なら起動せずload失敗を返す', () => {
+  withTempWorkspace((workspace) => {
+    const primary = statusPaneRegistry.statusPanePath(workspace);
+    fs.mkdirSync(path.dirname(primary), { recursive: true });
+    fs.writeFileSync(primary, '{not json', 'utf8');
+    let aliveCalled = false;
+    let launchCalled = false;
+
+    const result = ensureStatusPane({
+      workspace,
+      scriptsPath: path.join(__dirname, '..', 'scripts'),
+    }, {
+      acquireLockFn: () => true,
+      releaseLockFn: () => {},
+      isPaneAliveFn: () => {
+        aliveCalled = true;
+        return true;
+      },
+      launchInSplitPaneFn: () => {
+        launchCalled = true;
+        return { paneId: 'must-not-launch' };
+      },
+      saveStatusPaneFn: () => {},
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.stage, 'load');
+    assert.match(result.error, /有効な記録を取得できません/);
+    assert.match(result.error, /JSON構文エラー/);
+    assert.match(result.error, new RegExp(primary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.equal(aliveCalled, false);
+    assert.equal(launchCalled, false);
+  });
+});
+
 test('ensureStatusPane: primaryとrecoveryの両方が壊れていれば起動せずload失敗を返す', () => {
   withTempWorkspace((workspace) => {
     const primary = statusPaneRegistry.statusPanePath(workspace);
@@ -341,7 +414,7 @@ test('ensureStatusPane: primaryとrecoveryの両方が壊れていれば起動�
 
     assert.equal(result.ok, false);
     assert.equal(result.stage, 'load');
-    assert.match(result.error, /両方のファイルが判定不能/);
+    assert.match(result.error, /有効な記録を取得できません/);
     assert.match(result.error, /JSON構文エラー/);
     assert.equal(launchCalled, false);
   });

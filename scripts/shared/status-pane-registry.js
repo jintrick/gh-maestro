@@ -103,12 +103,12 @@ function removeFile(filePath) {
 /**
  * status-pane.json と status-pane-recovery.json を安全に読み込む。
  * 両方が無い場合は null を返す。片方だけが壊れている場合は警告して有効な方を返し、
- * 両方が壊れている場合は throw する。
+ * 有効な記録を得られない場合（片方の破損と相方の不在を含む）は throw する。
  *
  * @param {string} workspace
  * @param {(message: string) => void} [warn]
  * @returns {{paneId: string, launchedAt: string}|null}
- * @throws {Error} 両方のレジストリが判定不能、またはパス解決失敗
+ * @throws {Error} 有効な記録を得られない、またはパス解決失敗
  */
 function loadStatusPane(workspace, warn = (message) => process.stderr.write(`Warning: ${message}\n`)) {
   let primaryPath;
@@ -133,9 +133,9 @@ function loadStatusPane(workspace, warn = (message) => process.stderr.write(`War
 
   const selected = selectNewestEntry(readEntry(primaryPath), readEntry(recoveryPath));
   if (selected) return selected;
-  if (errors.length >= 2) {
+  if (errors.length > 0) {
     throw new Error(
-      `status-pane レジストリは両方のファイルが判定不能です: ${errors.map((error) => error.message).join(' / ')}`,
+      `status-pane レジストリから有効な記録を取得できません: ${errors.map((error) => error.message).join(' / ')}`,
     );
   }
   return null;
