@@ -37,22 +37,39 @@ function statusPaneRecoveryPath(workspace) {
   return path.join(storageLayout.workspaceRuntimeDir(workspace), STATUS_PANE_RECOVERY_FILE);
 }
 
+function readError(kind, filePath, error = null) {
+  const detail = error && error.message ? `: ${error.message}` : '';
+  return new Error(`status-pane レジストリの${kind}（${filePath}）${detail}`);
+}
+
 function readStatusPaneEntry(filePath) {
-  if (!existsSync(filePath)) return null;
+  let raw;
   try {
-    const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.paneId != null && parsed.paneId !== '') {
-      const entry = {
-        paneId: String(parsed.paneId),
-        launchedAt: typeof parsed.launchedAt === 'string' ? parsed.launchedAt : '',
-      };
-      if (/^[1-9]\d*$/.test(String(parsed.issue))) entry.issue = String(parsed.issue);
-      return entry;
-    }
-    return null;
-  } catch {
-    return null;
+    raw = readFileSync(filePath, 'utf8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return null;
+    throw readError('読み取り失敗', filePath, error);
   }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw readError('JSON構文エラー', filePath, error);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw readError('JSONとしては妥当だがオブジェクトでない', filePath);
+  }
+  if (parsed.paneId == null || parsed.paneId === '') {
+    throw readError('型不正（paneId がありません）', filePath);
+  }
+
+  const entry = {
+    paneId: String(parsed.paneId),
+    launchedAt: typeof parsed.launchedAt === 'string' ? parsed.launchedAt : '',
+  };
+  if (/^[1-9]\d*$/.test(String(parsed.issue))) entry.issue = String(parsed.issue);
+  return entry;
 }
 
 function entryTimestamp(entry) {
@@ -84,21 +101,44 @@ function removeFile(filePath) {
 }
 
 /**
- * status-pane.json を安全に読み込む。存在しない・壊れている場合は null を返す。
+ * status-pane.json と status-pane-recovery.json を安全に読み込む。
+ * 両方が無い場合は null を返す。片方だけが壊れている場合は警告して有効な方を返し、
+ * 有効な記録を得られない場合（片方の破損と相方の不在を含む）は throw する。
  *
  * @param {string} workspace
+ * @param {(message: string) => void} [warn]
  * @returns {{paneId: string, launchedAt: string}|null}
+ * @throws {Error} 有効な記録を得られない、またはパス解決失敗
  */
-function loadStatusPane(workspace) {
+function loadStatusPane(workspace, warn = (message) => process.stderr.write(`Warning: ${message}\n`)) {
   let primaryPath;
   let recoveryPath;
   try {
     primaryPath = statusPanePath(workspace);
     recoveryPath = statusPaneRecoveryPath(workspace);
-  } catch {
-    return null;
+  } catch (error) {
+    throw readError('パス解決失敗', workspace, error);
   }
-  return selectNewestEntry(readStatusPaneEntry(primaryPath), readStatusPaneEntry(recoveryPath));
+
+  const errors = [];
+  const readEntry = (filePath) => {
+    try {
+      return readStatusPaneEntry(filePath);
+    } catch (error) {
+      errors.push(error);
+      warn(error.message);
+      return null;
+    }
+  };
+
+  const selected = selectNewestEntry(readEntry(primaryPath), readEntry(recoveryPath));
+  if (selected) return selected;
+  if (errors.length > 0) {
+    throw new Error(
+      `status-pane レジストリから有効な記録を取得できません: ${errors.map((error) => error.message).join(' / ')}`,
+    );
+  }
+  return null;
 }
 
 /**

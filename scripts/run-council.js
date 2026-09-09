@@ -112,16 +112,33 @@ function parseArgs(argv) {
 // ── state 永続化 ───────────────────────────────────────────────────────────────
 
 /**
- * state ファイルを読み込む。無い・壊れている場合は null（resume 判定・冪等性の根拠）。
+ * state ファイルを読み込む。ファイルが無い場合だけ null を返し、壊れている場合は
+ * 読み取り不能のまま新規セッション扱いにしないため throw する。
  * @param {string} statePath
- * @returns {object|null}
+ * @returns {object|null} ファイルが無い場合は null
+ * @throws {Error} JSON構文エラー・オブジェクト以外・読み取り失敗
  */
 function loadState(statePath) {
+  let raw;
   try {
-    return JSON.parse(fs.readFileSync(statePath, 'utf8'));
-  } catch {
-    return null;
+    raw = fs.readFileSync(statePath, 'utf8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return null;
+    throw new Error(`council state の読み取り失敗（${statePath}）: ${error.message}`);
   }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`council state のJSON構文エラー（${statePath}）: ${error.message}`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(
+      `council state はJSONとしては妥当だがオブジェクトでない（${statePath}）`,
+    );
+  }
+  return parsed;
 }
 
 /**

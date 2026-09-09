@@ -63,10 +63,11 @@ function readWorkersRaw(workspace, {
       content = readFileFn(p);
     } catch (e) {
       // ENOENT（ファイル不在）のみ null。それ以外の読み取りエラー（権限・ディレクトリ等）は
-      // throw して呼び出し側に知らせる。不在を null にするのは正常な空状態だが、存在するのに
-      // 読めない状態を null に握りつぶすと「ワーカーが誰もいない」と誤判断される。
+      // 対象パスと「読み取り失敗」を付けて throw する。不在を null にするのは正常な空状態
+      // だが、存在するのに読めない状態を null に握りつぶすと「ワーカーが誰もいない」と
+      // 誤判断される。
       if (e && e.code === 'ENOENT') return null;
-      throw e;
+      throw new Error(`workers.json の読み取り失敗（${p}）: ${e.message}`);
     }
     let raw;
     try {
@@ -77,10 +78,10 @@ function readWorkersRaw(workspace, {
         sleepFn(delayMs);
         continue;
       }
-      throw new Error(`workers.json を解析できません（${p}）`);
+      throw new Error(`workers.json のJSON構文エラー（${p}）`);
     }
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      throw new Error(`workers.json の形式が不正です（オブジェクトでない）: ${p}`);
+      throw new Error(`workers.json はJSONとしては妥当だがオブジェクトでない（${p}）`);
     }
     return raw;
   }

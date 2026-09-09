@@ -25,6 +25,7 @@ const { worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { sweepRegistry } = require('./process-lifecycle');
 const { getAlivePaneIds, killPane } = require('./shared/pane-launch');
 const { loadStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
+const { readWorkersRaw } = require('./shared/workers-registry');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
@@ -175,6 +176,7 @@ if (require.main === module) {
   const IS_WIN = process.platform === 'win32';
 
   const results = { killed: [], skipped: [], worktrees: [], errors: [] };
+  let stateReadFailed = false;
 
   const log  = (msg) => { if (!quiet) console.log(`[reset] ${msg}`); };
   const warn = (msg) => console.warn(`[reset] ⚠ ${msg}`);
@@ -198,16 +200,8 @@ if (require.main === module) {
   // ── workers.json を安全に読む ─────────────────────────────────────
 
   const loadWorkers = () => {
-    if (!existsSync(workersJson)) return {};
-    try {
-      const parsed = JSON.parse(readFileSync(workersJson, 'utf8'));
-      if (typeof parsed === 'object' && parsed !== null) return parsed;
-      warn(`workers.json の内容が不正です（型: ${typeof parsed}）。空として扱います。`);
-      return {};
-    } catch (e) {
-      warn(`workers.json のパースに失敗しました: ${e.message} — 空として扱います。`);
-      return {};
-    }
+    const workers = readWorkersRaw(workspace);
+    return workers || {};
   };
 
   // ── junction/symlinkを除去する（unlink-junctions.js 参照） ──────
@@ -364,7 +358,14 @@ if (require.main === module) {
   // ═══════════════════════════════════════════════════════════════════
 
   log('ワーカープロセスをkillします...');
-  const workers = loadWorkers();
+  let workers = null;
+  try {
+    workers = loadWorkers();
+  } catch (e) {
+    stateReadFailed = true;
+    warn(`workers.json の読み取りを中止しました: ${e.message}`);
+    results.errors.push(`workers.json read: ${e.message}`);
+  }
   let alivePanes;
   try {
     alivePanes = getAlivePaneIds(warn);
@@ -378,62 +379,71 @@ if (require.main === module) {
     alivePanes = new Set();
   }
 
-  for (const [name, entry] of Object.entries(workers)) {
-    if (name === 'orchestrator') continue;
-    const normalized = normalizeWorkerEntry(entry);
+  if (workers !== null) {
+    for (const [name, entry] of Object.entries(workers)) {
+      if (name === 'orchestrator') continue;
+      const normalized = normalizeWorkerEntry(entry);
 
-    // 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill
-    // 過去のセッションの workers.json には notifierPid が残っている可能性がある。
-    if (normalized.notifierPid) {
-      killProcessTree(normalized.notifierPid);
-      log(`"${name}" のレガシー notifier (pid ${normalized.notifierPid}) を終了しました。`);
-    }
+      // 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill
+      // 過去のセッションの workers.json には notifierPid が残っている可能性がある。
+      if (normalized.notifierPid) {
+        killProcessTree(normalized.notifierPid);
+        log(`"${name}" のレガシー notifier (pid ${normalized.notifierPid}) を終了しました。`);
+      }
 
-    let handled = false;
+      let handled = false;
 
-    // headless ワーカー: 登録PIDは中継シムのもの。配下にログインシェルとエージェント本体が
-    // ぶら下がるためツリー全体を落とす。
-    if (normalized.pid) {
-      if (isWorkerAlive(normalized)) {
-        killProcessTree(normalized.pid);
-        log(`"${name}" (pid ${normalized.pid}) をkillしました。`);
-        results.killed.push(name);
-      } else {
-        log(`"${name}" (pid ${normalized.pid}) は既に終了しています。スキップ。`);
+      // headless ワーカー: 登録PIDは中継シムのもの。配下にログインシェルとエージェント本体が
+      // ぶら下がるためツリー全体を落とす。
+      if (normalized.pid) {
+        if (isWorkerAlive(normalized)) {
+          killProcessTree(normalized.pid);
+          log(`"${name}" (pid ${normalized.pid}) をkillしました。`);
+          results.killed.push(name);
+        } else {
+          log(`"${name}" (pid ${normalized.pid}) は既に終了しています。スキップ。`);
+          results.skipped.push(name);
+        }
+        handled = true;
+      }
+
+      // 後方互換: 移行前セッション（Issue #151 以前）が残した WezTerm ペインを kill。
+      // 起動経路が headless に変わってもこの掃除経路は必要である
+      // （.claude/rules/legacy-process-cleanup-safety.md 参照）。
+      const id = normalized.paneId ?? '';
+      if (id) {
+        if (alivePanes !== null && !alivePanes.has(id)) {
+          log(`"${name}" のレガシーpane ${id} は既に存在しません。スキップ。`);
+          if (!handled) results.skipped.push(name);
+        } else {
+          const r = killPane(id);
+          if (r.ok) {
+            log(`"${name}" のレガシーpane ${id} をkillしました。`);
+            if (!handled) results.killed.push(name);
+          } else {
+            warn(`"${name}" のレガシーpane ${id} のkillに失敗しました: ${r.stderr}`);
+            if (!handled) results.skipped.push(name);
+          }
+        }
+        handled = true;
+      }
+
+      if (!handled) {
+        warn(`"${name}" に終了対象のプロセスが記録されていません。スキップ。`);
         results.skipped.push(name);
       }
-      handled = true;
-    }
-
-    // 後方互換: 移行前セッション（Issue #151 以前）が残した WezTerm ペインを kill。
-    // 起動経路が headless に変わってもこの掃除経路は必要である
-    // （.claude/rules/legacy-process-cleanup-safety.md 参照）。
-    const id = normalized.paneId ?? '';
-    if (id) {
-      if (alivePanes !== null && !alivePanes.has(id)) {
-        log(`"${name}" のレガシーpane ${id} は既に存在しません。スキップ。`);
-        if (!handled) results.skipped.push(name);
-      } else {
-        const r = killPane(id);
-        if (r.ok) {
-          log(`"${name}" のレガシーpane ${id} をkillしました。`);
-          if (!handled) results.killed.push(name);
-        } else {
-          warn(`"${name}" のレガシーpane ${id} のkillに失敗しました: ${r.stderr}`);
-          if (!handled) results.skipped.push(name);
-        }
-      }
-      handled = true;
-    }
-
-    if (!handled) {
-      warn(`"${name}" に終了対象のプロセスが記録されていません。スキップ。`);
-      results.skipped.push(name);
     }
   }
 
   // ── 監視ペイン（status-pane.json）を終了・削除 ────────────────────────
-  const statusPane = loadStatusPane(workspace);
+  let statusPane = null;
+  try {
+    statusPane = loadStatusPane(workspace);
+  } catch (e) {
+    stateReadFailed = true;
+    warn(`監視ペイン状態の読み取りを中止しました: ${e.message}`);
+    results.errors.push(`status-pane read: ${e.message}`);
+  }
   if (statusPane && statusPane.paneId) {
     if (alivePanes !== null && !alivePanes.has(statusPane.paneId)) {
       log(`監視pane ${statusPane.paneId} は既に存在しません。スキップ。`);
@@ -554,7 +564,10 @@ if (require.main === module) {
     { cwd: workspace, encoding: 'utf8' });
   const resetRepo = repoResult.status === 0 ? repoResult.stdout.trim() : '';
 
-  if (!resetRepo) {
+  if (workers === null) {
+    warn('workers.json が判定不能なため msg-state のベースライン再構築をスキップします（破損からの自動回復は行いません）。');
+    results.errors.push('msg-state baseline: workers.json が判定不能のため再構築しませんでした');
+  } else if (!resetRepo) {
     warn('リポジトリを解決できないため msg-state のベースライン再構築をスキップします（既存状態は変更しません）。');
     warn('msg-state が欠落・未初期化のままなら、msg-poll は走査を停止して「明示初期化が必要」と報告します。');
     // 既読状態（readByIssue / sinceByIssue）を保ったまま、古い sessionId だけを無効化する
@@ -712,14 +725,18 @@ if (require.main === module) {
   // orchestrator エントリはワーカー走査時に一律スキップされる予約キー。
   // WezTerm脱却によりペインIDを持たなくなったため、存在だけを保持する。
   const fresh = { orchestrator: { agentId: null } };
-  try {
-    // 並行書き込み競合でも破損JSONを作らないようアトミック書き込みに統一する
-    // （Issue #248 項目11）。
-    atomicWriteJson(workersJson, fresh);
-    log('workers.json をリセットしました。');
-  } catch (e) {
-    warn(`workers.json の書き込みに失敗しました: ${e.message}`);
-    results.errors.push(`workers.json write: ${e.message}`);
+  if (workers === null) {
+    warn('workers.json が判定不能なためリセットせず、ファイルを保持します。破損からの自動回復は行いません。');
+  } else {
+    try {
+      // 並行書き込み競合でも破損JSONを作らないようアトミック書き込みに統一する
+      // （Issue #248 項目11）。
+      atomicWriteJson(workersJson, fresh);
+      log('workers.json をリセットしました。');
+    } catch (e) {
+      warn(`workers.json の書き込みに失敗しました: ${e.message}`);
+      results.errors.push(`workers.json write: ${e.message}`);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -769,5 +786,5 @@ if (require.main === module) {
   } else {
     log('全項目正常に完了しました。');
   }
-  if (residentRestartFailed) process.exitCode = 1;
+  if (residentRestartFailed || stateReadFailed) process.exitCode = 1;
 }

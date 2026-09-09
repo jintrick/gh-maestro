@@ -156,11 +156,21 @@ function getAlivePaneIds(warn = () => {}) {
  * @param {string|number} paneId
  * @param {Function} [warn]
  * @returns {boolean}
+ * @throws {Error} WezTerm の pane 一覧を照会できない場合
  */
 function isPaneAlive(paneId, warn = () => {}) {
   if (paneId === null || paneId === undefined || paneId === '') return false;
-  const alivePanes = getAlivePaneIds(warn);
-  if (alivePanes === null) return false;
+  let warning = '';
+  const alivePanes = getAlivePaneIds((message) => {
+    warning = message;
+    warn(message);
+  });
+  if (alivePanes === null) {
+    throw new Error(
+      `WezTerm pane一覧の外部コマンドの照会失敗（wezterm cli list --format json）: `
+      + (warning || 'pane生存確認を判定できません'),
+    );
+  }
   return alivePanes.has(String(paneId));
 }
 

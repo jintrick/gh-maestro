@@ -19,6 +19,7 @@ const { killPane } = require('./shared/pane-launch');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { ARTIFACTS, recordPath } = require('./shared/record-paths');
 const { pruneExecutionsForIssue } = require('./shared/execution-registry');
+const { readWorkersRaw } = require('./shared/workers-registry');
 
 const USAGE = `finalize-issue.js — Issue をクローズし、そのIssueの全ワーカーを削除する
 
@@ -55,15 +56,8 @@ Output (stdout):
  * @returns {string[]}
  */
 function collectWorkersForIssue(workspace, issue) {
-  const workersJson = path.join(workspace, '.gh-maestro', 'workers.json');
-  if (!existsSync(workersJson)) return [];
-  let workers;
-  try {
-    workers = JSON.parse(readFileSync(workersJson, 'utf8'));
-  } catch {
-    return [];
-  }
-  if (!workers || typeof workers !== 'object' || Array.isArray(workers)) return [];
+  const workers = readWorkersRaw(workspace);
+  if (!workers) return [];
   const target = String(issue);
   const names = [];
   for (const [name, entry] of Object.entries(workers)) {

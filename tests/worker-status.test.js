@@ -16,6 +16,7 @@ const { beforeEach, test } = require('node:test');
 
 const workerStatus = require('../scripts/worker-status');
 const workerLiveness = require('../scripts/shared/worker-liveness');
+const paneLaunch = require('../scripts/shared/pane-launch');
 const { cleanSpawnEnv } = require('./_spawn-env');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-status.js');
@@ -1370,6 +1371,35 @@ test('main: close-pane で kill に失敗した場合は code 1 を返す（フ�
   } finally {
     workerStatus._setLaunchInSplitPane(null);
     workerStatus._setIsPaneAlive(null);
+    workerStatus._setKillPane(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('main: close-pane のWezTerm pane一覧照会失敗時はregistryを削除せず閉鎖成功を報告しない', () => {
+  const workspace = createWorkspace();
+  const statusRegistry = require('../scripts/shared/status-pane-registry');
+  statusRegistry.saveStatusPane(workspace, { paneId: '551', issue: 471 });
+  paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'wezterm unavailable' }));
+  let killCalled = false;
+  workerStatus._setIsPaneAlive(null);
+  workerStatus._setKillPane(() => {
+    killCalled = true;
+    return { ok: true, status: 0, stderr: '' };
+  });
+
+  try {
+    const result = runMain(['close-pane', '--workspace', workspace, '--issue', '471']);
+    assert.equal(result.code, 1);
+    assert.equal(killCalled, false);
+    assert.equal(result.lines.some((line) => line.includes('STATUS_PANE_CLOSED')), false);
+    assert.match(result.errLines.join('\n'), /外部コマンドの照会失敗/);
+    const remaining = statusRegistry.loadStatusPane(workspace);
+    assert.equal(remaining.paneId, '551');
+    assert.equal(remaining.issue, '471');
+    assert.equal(typeof remaining.launchedAt, 'string');
+  } finally {
+    paneLaunch._setWeztermListPanes(null);
     workerStatus._setKillPane(null);
     removeWorkspace(workspace);
   }
