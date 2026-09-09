@@ -32,27 +32,101 @@ test('loadStatusPane: status-pane.jsonが無ければnull', () => {
   });
 });
 
-test('loadStatusPane: 壊れたJSONはnullとして扱う', () => {
+test('loadStatusPane: 壊れたJSONは警告して不在として扱う（相方なし）', () => {
   withTempWorkspace((dir) => {
     const p = statusPanePath(dir);
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, '{not json', 'utf8');
-    assert.equal(loadStatusPane(dir), null);
+    const warnings = [];
+    assert.equal(loadStatusPane(dir, (message) => warnings.push(message)), null);
+    assert.match(warnings.join('\n'), /JSON構文エラー/);
+    assert.match(warnings.join('\n'), new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   });
 });
 
-test('loadStatusPane: 配列やpaneId欠落オブジェクトはnullとして扱う', () => {
+test('loadStatusPane: 配列やpaneId欠落オブジェクトは警告して不在として扱う（相方なし）', () => {
   withTempWorkspace((dir) => {
     const p = statusPanePath(dir);
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, '[1,2,3]', 'utf8');
-    assert.equal(loadStatusPane(dir), null);
+    const warnings = [];
+    assert.equal(loadStatusPane(dir, (message) => warnings.push(message)), null);
+    assert.match(warnings.join('\n'), /JSONとしては妥当だがオブジェクトでない/);
 
     fs.writeFileSync(p, '{"foo":"bar"}', 'utf8');
-    assert.equal(loadStatusPane(dir), null);
+    assert.equal(loadStatusPane(dir, (message) => warnings.push(message)), null);
+    assert.match(warnings.join('\n'), /型不正（paneId がありません）/);
 
     fs.writeFileSync(p, '{"paneId":""}', 'utf8');
-    assert.equal(loadStatusPane(dir), null);
+    assert.equal(loadStatusPane(dir, (message) => warnings.push(message)), null);
+    assert.match(warnings.join('\n'), /型不正（paneId がありません）/);
+  });
+});
+
+test('loadStatusPane: primaryだけが壊れていればrecoveryを警告付きで使う', () => {
+  withTempWorkspace((dir) => {
+    const p = statusPanePath(dir);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, '{not json', 'utf8');
+    saveStatusPaneRecovery(dir, { paneId: 'recovery-42', launchedAt: '2026-08-26T09:00:00.000Z' });
+
+    const warnings = [];
+    assert.deepEqual(loadStatusPane(dir, (message) => warnings.push(message)), {
+      paneId: 'recovery-42',
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    });
+    assert.match(warnings.join('\n'), /JSON構文エラー/);
+    assert.match(warnings.join('\n'), new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  });
+});
+
+test('loadStatusPane: recoveryだけが壊れていればprimaryを警告付きで使う', () => {
+  withTempWorkspace((dir) => {
+    saveStatusPane(dir, { paneId: 'primary-42', launchedAt: '2026-08-26T09:00:00.000Z' });
+    const p = statusPaneRecoveryPath(dir);
+    fs.writeFileSync(p, '{not json', 'utf8');
+
+    const warnings = [];
+    assert.deepEqual(loadStatusPane(dir, (message) => warnings.push(message)), {
+      paneId: 'primary-42',
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    });
+    assert.match(warnings.join('\n'), /JSON構文エラー/);
+    assert.match(warnings.join('\n'), new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  });
+});
+
+test('loadStatusPane: primaryとrecoveryの両方が壊れていれば両方のパス付きでthrow', () => {
+  withTempWorkspace((dir) => {
+    const primary = statusPanePath(dir);
+    const recovery = statusPaneRecoveryPath(dir);
+    fs.mkdirSync(path.dirname(primary), { recursive: true });
+    fs.writeFileSync(primary, '{not json', 'utf8');
+    fs.writeFileSync(recovery, '{also not json', 'utf8');
+
+    const warnings = [];
+    assert.throws(
+      () => loadStatusPane(dir, (message) => warnings.push(message)),
+      (error) => {
+        assert.match(error.message, /両方のファイルが判定不能/);
+        assert.match(error.message, new RegExp(primary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        assert.match(error.message, new RegExp(recovery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        assert.match(error.message, /JSON構文エラー/);
+        return true;
+      },
+    );
+    assert.equal(warnings.length, 2);
+  });
+});
+
+test('loadStatusPane: 読み取り失敗は片側なら警告してnullを返す', () => {
+  withTempWorkspace((dir) => {
+    const p = statusPanePath(dir);
+    fs.mkdirSync(p, { recursive: true });
+    const warnings = [];
+    assert.equal(loadStatusPane(dir, (message) => warnings.push(message)), null);
+    assert.match(warnings.join('\n'), /読み取り失敗/);
+    assert.match(warnings.join('\n'), new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   });
 });
 

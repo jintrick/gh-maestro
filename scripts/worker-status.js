@@ -1259,7 +1259,13 @@ function main(argv = process.argv.slice(2)) {
   }
 
   if (sub === 'close-pane') {
-    const existingPane = loadStatusPane(workspace);
+    let existingPane;
+    try {
+      existingPane = loadStatusPane(workspace);
+    } catch (error) {
+      writeErr(`worker-status: close-pane の状態照会に失敗しました: ${error.message}`);
+      return { code: 1, lines: out, errLines: err };
+    }
     if (!existingPane || !existingPane.paneId) {
       writeOut('STATUS_PANE_NOT_FOUND');
       return { code: 0, lines: out, errLines: err };
@@ -1271,7 +1277,14 @@ function main(argv = process.argv.slice(2)) {
     }
 
     const paneId = existingPane.paneId;
-    if (_isPaneAlive(paneId)) {
+    let paneAlive;
+    try {
+      paneAlive = _isPaneAlive(paneId);
+    } catch (error) {
+      writeErr(`worker-status: close-pane の外部コマンドの照会に失敗しました: ${error.message}`);
+      return { code: 1, lines: out, errLines: err };
+    }
+    if (paneAlive) {
       const killResult = _killPane(paneId);
       if (!killResult.ok) {
         writeErr(`worker-status: 監視ペイン ${paneId} の終了に失敗しました: ${killResult.stderr}`);

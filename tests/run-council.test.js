@@ -324,6 +324,51 @@ test('parseArgs: 正常系で opts を組み立てる', () => {
   });
 });
 
+test('loadState: 不在だけnull、JSON構文エラー・オブジェクト以外・読み取り失敗は診断付きthrow', async () => {
+  await withCouncilEnv(async ({ workspace }) => {
+    const { mod } = moduleFor();
+    const missing = path.join(workspace, 'missing-state.json');
+    assert.equal(mod.loadState(missing), null);
+
+    const malformed = path.join(workspace, 'malformed-state.json');
+    fs.writeFileSync(malformed, '{not json', 'utf8');
+    assert.throws(() => mod.loadState(malformed), (error) => {
+      assert.match(error.message, /JSON構文エラー/);
+      assert.match(error.message, new RegExp(malformed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      return true;
+    });
+
+    const nonObject = path.join(workspace, 'non-object-state.json');
+    fs.writeFileSync(nonObject, '[]', 'utf8');
+    assert.throws(() => mod.loadState(nonObject), (error) => {
+      assert.match(error.message, /JSONとしては妥当だがオブジェクトでない/);
+      assert.match(error.message, new RegExp(nonObject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      return true;
+    });
+
+    const unreadable = path.join(workspace, 'unreadable-state.json');
+    fs.mkdirSync(unreadable);
+    assert.throws(() => mod.loadState(unreadable), (error) => {
+      assert.match(error.message, /読み取り失敗/);
+      assert.match(error.message, new RegExp(unreadable.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      return true;
+    });
+  });
+});
+
+test('runCouncil: 破損したstateは新規Discussionを作成せずfail-closed', async () => {
+  await withCouncilEnv(async ({ workspace }) => {
+    fs.mkdirSync(path.dirname(stateFile(workspace, AUTO_SESSION)), { recursive: true });
+    fs.writeFileSync(stateFile(workspace, AUTO_SESSION), '{not json', 'utf8');
+    const { mod, gqlCalls, spawnCalls } = moduleFor({ spawn: makeSpawnSync() });
+    const result = await runAndCapture(() => mod.runCouncil(args(workspace, { session: AUTO_SESSION })));
+    assert.equal(result.code, 2);
+    assert.match(result.err, /JSON構文エラー/);
+    assert.equal(gqlCalls.some((call) => call.args.some((arg) => arg.includes('createDiscussion'))), false);
+    assert.equal(spawnCalls.some((call) => call.cmd === 'git' && call.args.includes('worktree')), false);
+  });
+});
+
 test('runCouncil: usage エラーは exit 1（help とは区別）', async () => {
   await withCouncilEnv(async ({ workspace }) => {
     const { mod } = moduleFor();

@@ -228,7 +228,7 @@ test('collectHousekeepingExclusions: 解析不能な workers.json は例外を�
     fs.mkdirSync(ghDir, { recursive: true });
     fs.writeFileSync(path.join(ghDir, 'workers.json'), '{broken json');
     // readWorkersRaw が parse を maxAttempts 回リトライして throw する。
-    assert.throws(() => che.collectHousekeepingExclusions(ws), /workers\.json を解析できません/);
+    assert.throws(() => che.collectHousekeepingExclusions(ws), /workers\.json のJSON構文エラー/);
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }
@@ -241,7 +241,7 @@ test('collectHousekeepingExclusions: 型不正（配列）な workers.json は�
     const ghDir = path.join(ws, '.gh-maestro');
     fs.mkdirSync(ghDir, { recursive: true });
     fs.writeFileSync(path.join(ghDir, 'workers.json'), '[]');
-    assert.throws(() => che.collectHousekeepingExclusions(ws), /workers\.json の形式が不正です/);
+    assert.throws(() => che.collectHousekeepingExclusions(ws), /workers\.json はJSONとしては妥当だがオブジェクトでない/);
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }

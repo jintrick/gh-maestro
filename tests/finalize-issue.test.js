@@ -48,6 +48,47 @@ test('collectWorkersForIssue: workers.jsonが無ければ空配列', () => {
   });
 });
 
+test('collectWorkersForIssue: malformed JSONは対象パス付きのJSON構文エラーでthrow', () => {
+  withTempWorkspace(null, (dir) => {
+    const file = path.join(dir, '.gh-maestro', 'workers.json');
+    fs.writeFileSync(file, '{not json', 'utf8');
+    assert.throws(() => collectWorkersForIssue(dir, 5), (error) => {
+      assert.match(error.message, /JSON構文エラー/);
+      assert.match(error.message, new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      return true;
+    });
+  });
+});
+
+test('collectWorkersForIssue: JSONとして妥当でも配列はオブジェクトでないエラーでthrow', () => {
+  withTempWorkspace([], (dir) => {
+    assert.throws(() => collectWorkersForIssue(dir, 5), /JSONとしては妥当だがオブジェクトでない/);
+  });
+});
+
+test('finalizeIssue: workers.jsonの読み取り失敗時はIssueをクローズしない', () => {
+  withTempWorkspace(null, (dir) => {
+    const file = path.join(dir, '.gh-maestro', 'workers.json');
+    fs.mkdirSync(file);
+    let closeCalled = false;
+    assert.throws(
+      () => finalizeIssue(
+        { workspace: dir, issue: 5 },
+        {
+          closeIssueFn: () => { closeCalled = true; return { ok: true }; },
+          findReviewPrsFn: () => [],
+        },
+      ),
+      (error) => {
+        assert.match(error.message, /読み取り失敗/);
+        assert.match(error.message, new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        return true;
+      },
+    );
+    assert.equal(closeCalled, false);
+  });
+});
+
 test('finalizeIssue: 全ワーカーを削除してからIssueをクローズする（spawnはモック注入）', () => {
   withTempWorkspace({
     orchestrator: { paneId: '0' },

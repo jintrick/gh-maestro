@@ -8,6 +8,7 @@ const path = require('path');
 
 const ensureStatusPaneLib = require('../scripts/shared/ensure-status-pane');
 const paneLaunch = require('../scripts/shared/pane-launch');
+const statusPaneRegistry = require('../scripts/shared/status-pane-registry');
 
 const { ensureStatusPane } = ensureStatusPaneLib;
 
@@ -274,15 +275,75 @@ test('ensureStatusPane: pane一覧取得に失敗した場合は新規起動せ�
         saveStatusPaneFn: () => {},
       });
 
-      assert.deepEqual(result, {
-        ok: false,
-        stage: 'lookup',
-        error: 'WezTermのpane一覧を取得できませんでした',
-      });
+      assert.equal(result.ok, false);
+      assert.equal(result.stage, 'lookup');
+      assert.match(result.error, /外部コマンドの照会失敗/);
+      assert.match(result.error, /wezterm cli list --format json/);
       assert.equal(launchCalled, false);
     } finally {
       paneLaunch._setWeztermListPanes(null);
     }
+  });
+});
+
+test('ensureStatusPane: primaryだけが壊れていればrecoveryを警告付きで再利用し二重起動しない', () => {
+  withTempWorkspace((workspace) => {
+    const primary = statusPaneRegistry.statusPanePath(workspace);
+    fs.mkdirSync(path.dirname(primary), { recursive: true });
+    fs.writeFileSync(primary, '{not json', 'utf8');
+    statusPaneRegistry.saveStatusPaneRecovery(workspace, { paneId: 'recovery-pane' });
+    const warnings = [];
+    let launchCalled = false;
+
+    const result = ensureStatusPane({
+      workspace,
+      scriptsPath: path.join(__dirname, '..', 'scripts'),
+    }, {
+      acquireLockFn: () => true,
+      releaseLockFn: () => {},
+      loadStatusPaneFn: (ws) => statusPaneRegistry.loadStatusPane(ws, (message) => warnings.push(message)),
+      isPaneAliveFn: () => true,
+      launchInSplitPaneFn: () => {
+        launchCalled = true;
+        return { paneId: 'must-not-launch' };
+      },
+      saveStatusPaneFn: () => {},
+    });
+
+    assert.deepEqual(result, { ok: true, paneId: 'recovery-pane', reused: true });
+    assert.equal(launchCalled, false);
+    assert.match(warnings.join('\n'), /JSON構文エラー/);
+    assert.match(warnings.join('\n'), new RegExp(primary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  });
+});
+
+test('ensureStatusPane: primaryとrecoveryの両方が壊れていれば起動せずload失敗を返す', () => {
+  withTempWorkspace((workspace) => {
+    const primary = statusPaneRegistry.statusPanePath(workspace);
+    const recovery = statusPaneRegistry.statusPaneRecoveryPath(workspace);
+    fs.mkdirSync(path.dirname(primary), { recursive: true });
+    fs.writeFileSync(primary, '{not json', 'utf8');
+    fs.writeFileSync(recovery, '{also not json', 'utf8');
+    let launchCalled = false;
+
+    const result = ensureStatusPane({
+      workspace,
+      scriptsPath: path.join(__dirname, '..', 'scripts'),
+    }, {
+      acquireLockFn: () => true,
+      releaseLockFn: () => {},
+      launchInSplitPaneFn: () => {
+        launchCalled = true;
+        return { paneId: 'must-not-launch' };
+      },
+      saveStatusPaneFn: () => {},
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.stage, 'load');
+    assert.match(result.error, /両方のファイルが判定不能/);
+    assert.match(result.error, /JSON構文エラー/);
+    assert.equal(launchCalled, false);
   });
 });
 

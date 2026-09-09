@@ -37,14 +37,7 @@ function defaultRemoveStatusPane(workspace) {
 }
 
 function defaultIsPaneAlive(paneId) {
-  const alivePanes = require('./pane-launch').getAlivePaneIds();
-  if (alivePanes === null) {
-    // `isPaneAlive()` は既存の close-pane 契約として照会不能を false に縮退するが、
-    // ここで false と解釈して split-pane を続けると、一覧取得の一時失敗時に重複作成する。
-    // 存在保証では照会不能を明示的な失敗として扱い、危険な起動へ進まない。
-    throw new Error('WezTermのpane一覧を取得できませんでした');
-  }
-  return alivePanes.has(String(paneId));
+  return require('./pane-launch').isPaneAlive(paneId);
 }
 
 function defaultLaunchInSplitPane(params) {

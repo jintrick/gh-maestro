@@ -16,10 +16,17 @@ function readRegistry(workspace) {
   const file = registryPath(workspace);
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error(`JSONとしては妥当だがオブジェクトでない（${file}）`);
+    }
+    return data;
   } catch (error) {
     if (error.code === 'ENOENT') return {};
-    throw new Error(`executions.json を読み込めません: ${error.message}`);
+    if (error.message && error.message.includes('JSONとしては妥当だがオブジェクトでない')) throw error;
+    if (error instanceof SyntaxError) {
+      throw new Error(`executions.json のJSON構文エラー（${file}）: ${error.message}`);
+    }
+    throw new Error(`executions.json の読み取り失敗（${file}）: ${error.message}`);
   }
 }
 

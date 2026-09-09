@@ -157,9 +157,12 @@ test('isPaneAlive: paneIdの生存を正しく判定する', () => {
   assert.equal(paneLaunch.isPaneAlive(null), false);
   assert.equal(paneLaunch.isPaneAlive(undefined), false);
 
-  // 一覧取得失敗時は false
+  // 一覧取得失敗時は死亡へ縮退せず判定不能としてthrow
   paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'error' }));
-  assert.equal(paneLaunch.isPaneAlive('10'), false);
+  assert.throws(
+    () => paneLaunch.isPaneAlive('10'),
+    /外部コマンドの照会失敗.*wezterm cli list --format json/,
+  );
 });
 
 test('killPane: paneIdを指定して正常にkillできる', () => {

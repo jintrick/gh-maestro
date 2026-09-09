@@ -12,6 +12,63 @@ function withWorkspace(fn) {
   try { return fn(workspace); } finally { fs.rmSync(workspace, { recursive: true, force: true }); }
 }
 
+test('readRegistry: executions.jsonが無ければ空オブジェクト', () => {
+  withWorkspace(workspace => {
+    assert.deepEqual(registry.readRegistry(workspace), {});
+  });
+});
+
+test('readRegistry: malformed JSONは対象パス付きのJSON構文エラーでthrow', () => {
+  withWorkspace(workspace => {
+    const file = registry.registryPath(workspace);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{not json', 'utf8');
+    assert.throws(() => registry.readRegistry(workspace), (error) => {
+      assert.match(error.message, /JSON構文エラー/);
+      assert.match(error.message, new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      return true;
+    });
+  });
+});
+
+test('readRegistry: JSONとして妥当でも配列やnullはオブジェクトでないエラーでthrow', () => {
+  withWorkspace(workspace => {
+    const file = registry.registryPath(workspace);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    for (const value of ['[]', 'null', '1']) {
+      fs.writeFileSync(file, value, 'utf8');
+      assert.throws(() => registry.readRegistry(workspace), /JSONとしては妥当だがオブジェクトでない/);
+    }
+  });
+});
+
+test('readRegistry: 読み取り失敗は対象パス付きの読み取り失敗でthrow', () => {
+  withWorkspace(workspace => {
+    const file = registry.registryPath(workspace);
+    fs.mkdirSync(file, { recursive: true });
+    assert.throws(() => registry.readRegistry(workspace), (error) => {
+      assert.match(error.message, /読み取り失敗/);
+      assert.match(error.message, new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      return true;
+    });
+  });
+});
+
+test('startExecution: JSONとして妥当だがオブジェクトでないレジストリを上書きしない', () => {
+  withWorkspace(workspace => {
+    const file = registry.registryPath(workspace);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '[]', 'utf8');
+    assert.throws(
+      () => registry.startExecution(workspace, {
+        executionId: 'exec-1', issue: 142, workerName: 'worker', skill: 'gh-maestro-coder',
+      }),
+      /JSONとしては妥当だがオブジェクトでない/,
+    );
+    assert.equal(fs.readFileSync(file, 'utf8'), '[]');
+  });
+});
+
 test('コメントURLが記録された実行だけが completed になる', () => {
   withWorkspace(workspace => {
     registry.startExecution(workspace, { executionId: 'exec-1', issue: 142, workerName: 'worker', skill: 'gh-maestro-architect' });

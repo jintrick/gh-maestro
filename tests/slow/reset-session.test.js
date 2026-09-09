@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const { rebuildOrchestratorBaseline, restartCapturedResidents } = require('../../scripts/reset-session');
 const readStateLib = require('../../scripts/shared/read-state');
@@ -35,7 +36,6 @@ const WORKERS = {
 test('reset-session: status-pane.json が存在する場合にセッションリセットで削除される', () => {
   withTempDir(workspace => {
     const { saveStatusPane, loadStatusPane } = require('../../scripts/shared/status-pane-registry');
-    const { spawnSync } = require('child_process');
 
     saveStatusPane(workspace, { paneId: '9999', launchedAt: '2026-08-26T09:00:00.000Z' });
     assert.ok(loadStatusPane(workspace) !== null);
@@ -48,6 +48,41 @@ test('reset-session: status-pane.json が存在する場合にセッションリ
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /WezTermのpane一覧取得をテスト中のため拒否しました/);
     assert.equal(loadStatusPane(workspace), null, 'status-pane.json が削除されていること');
+  });
+});
+
+test('reset-session: malformed workers.json は0件扱いにせず、破損ファイルを保持して失敗する', () => {
+  withTempDir(workspace => {
+    const workersFile = path.join(workspace, '.gh-maestro', 'workers.json');
+    fs.mkdirSync(path.dirname(workersFile), { recursive: true });
+    fs.writeFileSync(workersFile, '{not json', 'utf8');
+
+    const scriptPath = path.join(__dirname, '..', '..', 'scripts', 'reset-session.js');
+    const r = spawnSync(process.execPath, [scriptPath, '--workspace', workspace, '--quiet'], {
+      encoding: 'utf8',
+    });
+
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /workers\.json のJSON構文エラー/);
+    assert.match(r.stderr, new RegExp(workersFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.equal(fs.readFileSync(workersFile, 'utf8'), '{not json');
+  });
+});
+
+test('reset-session: workers.json の読み取り失敗は0件扱いにせず対象を保持して失敗する', () => {
+  withTempDir(workspace => {
+    const workersFile = path.join(workspace, '.gh-maestro', 'workers.json');
+    fs.mkdirSync(workersFile, { recursive: true });
+
+    const scriptPath = path.join(__dirname, '..', '..', 'scripts', 'reset-session.js');
+    const r = spawnSync(process.execPath, [scriptPath, '--workspace', workspace, '--quiet'], {
+      encoding: 'utf8',
+    });
+
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /workers\.json の読み取り失敗/);
+    assert.match(r.stderr, new RegExp(workersFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.equal(fs.statSync(workersFile).isDirectory(), true);
   });
 });
 
