@@ -265,7 +265,8 @@ test('runTests: モジュール解決エラーでテスト開始前に終了し�
   assert.equal(fixture.artifacts[0].status, 'unavailable');
   assert.match(fixture.artifacts[0].reason, /runner-abnormal-exit/);
   assert.match(fixture.artifacts[0].reason, /command: npm test/);
-  assert.match(fixture.artifacts[0].reason, /Cannot find module/);
+  assert.match(fixture.artifacts[0].reason, /cause: module-not-found/);
+  assert.doesNotMatch(fixture.artifacts[0].reason, /Cannot find module|_env-setup/);
 });
 
 test('runTests: テスト件数ありのTAP失敗は起動エラー文言を含んでもfailのまま保持する', () => {
@@ -291,7 +292,7 @@ test('runTests: 出力のない非0終了はunavailableとして記録する', (
   assert.equal(fixture.result.exitCode, 9);
   assert.equal(fixture.artifacts[0].status, 'unavailable');
   assert.match(fixture.artifacts[0].reason, /runner-abnormal-exit/);
-  assert.match(fixture.artifacts[0].reason, /exit code: 9/);
+  assert.match(fixture.artifacts[0].reason, /cause: no-test-output/);
 });
 
 test('runTests: 0件のTAPで非0終了した場合はunavailableとして記録する', () => {
@@ -313,7 +314,8 @@ test('runTests: runner起動失敗もunavailableとして記録し、終了コ�
   assert.equal(fixture.artifacts[0].status, 'unavailable');
   assert.match(fixture.artifacts[0].reason, /runner-start-failed/);
   assert.match(fixture.artifacts[0].reason, /command: npm test/);
-  assert.match(fixture.artifacts[0].reason, /node executable missing/);
+  assert.match(fixture.artifacts[0].reason, /cause: runner-start-failed/);
+  assert.doesNotMatch(fixture.artifacts[0].reason, /node executable missing/);
 });
 
 test('runTests: 成果物の削除・書き出し失敗はrunner結果を隠さず、unknownマーカーを残す', () => {

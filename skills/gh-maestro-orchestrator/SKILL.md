@@ -487,7 +487,7 @@ PR検出時の出力:
 - `REVIEW_MANAGER_ALREADY_RUNNING:<PR>` — Review Managerは既に稼働中のため起動要求を受け付けなかった
 - `REVIEW_MANAGER_ALREADY_CLAIMED:<PR>` — このPRの自動Review Manager起動は既にclaim済みのためスキップした
 - `SLOW_TEST_STARTED:<json>` — PRの対象HEADに対するslow層を、レビュー監視をブロックせずに開始した。初回検出と各修正pushのHEADごとに予約され、同じPR/HEAD/layerを再実行しない
-- `SLOW_TEST_RESULT:<json>` — slow層の pass/fail/unavailable、対象HEAD、テスト件数、実行コマンド、unavailable時のreason、実行ログ識別子を含む完了通知。テストを1件も実行する前のモジュール解決・spawn失敗・空出力の非0終了は `unavailable` として記録し、実行後の失敗は `fail` のまま保持する。完了時は層別成果物を正本としてテスト申告コメントを更新する
+- `SLOW_TEST_RESULT:<json>` — slow層の pass/fail/unavailable、対象HEAD、テスト件数、実行コマンド、unavailable時の分類済みreason、実行ログ識別子を含む完了通知。テストを1件も実行する前のモジュール解決・テストファイル不在・spawn失敗・空出力の非0終了は `unavailable` として記録し、実行後の失敗は `fail` のまま保持する。子プロセスのstdout/stderrやログ本文は申告コメントへ転記せず、公開するcommand/reasonは固定の許可リストから生成する。完了時は層別成果物を正本としてテスト申告コメントを更新する
 - `PR_CLOSED_RESUMED:<PR>` — 監視していたPRがクローズされ、新PR検出に復帰した（この後 `PR_CLOSED` に続いて届く）
 
 `PR_BASE_MISMATCH` を受け取った場合、PR自体は作成されているため処理を中断する必要はないが、後続のマージフローに影響しうるため人間に伝える。

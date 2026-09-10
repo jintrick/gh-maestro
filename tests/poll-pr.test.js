@@ -929,11 +929,11 @@ test('runSlowTest propagates unavailable command and reason to SLOW_TEST_RESULT'
 
     assert.equal(result.status, 'unavailable');
     assert.equal(result.command, 'npm run test:slow');
-    assert.equal(result.reason, reason);
+    assert.equal(result.reason, 'module-not-found');
     const event = JSON.parse(output.output().trim().slice('SLOW_TEST_RESULT:'.length));
     assert.equal(event.status, 'unavailable');
     assert.equal(event.command, 'npm run test:slow');
-    assert.equal(event.reason, reason);
+    assert.equal(event.reason, 'module-not-found');
   } finally {
     output.restore();
     if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
@@ -1017,8 +1017,9 @@ test('runSlowTest records timeout/startup failures and does not retry a complete
     }, deps);
     assert.equal(result.status, 'unavailable');
     assert.equal(result.command, 'npm run test:slow');
-    assert.equal(result.reason, 'child did not exit after timeout');
+    assert.equal(result.reason, 'unavailable');
     assert.ok(fs.existsSync(result.executionLogPath));
+    assert.match(fs.readFileSync(result.executionLogPath, 'utf8'), /unavailable/);
     assert.match(fs.readFileSync(result.executionLogPath, 'utf8'), /child did not exit after timeout/);
     assert.ok(fs.existsSync(result.artifactPath));
     assert.equal(readTestResultArtifact(worktree).result.layers.slow.status, 'unavailable');

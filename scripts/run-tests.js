@@ -18,6 +18,7 @@ const {
   TEST_RESULT_PROVENANCE,
   calculateWorktreeContentHash,
   parseTapSummary,
+  publicTestCommand,
   invalidateTestResultArtifact,
   writeTestResultLayer,
 } = require('./shared/test-result');
@@ -152,43 +153,21 @@ function findFullLayer(testConfig) {
     : null;
 }
 
-function commandDisplay(command, displayCommand) {
-  if (typeof displayCommand === 'string' && displayCommand.trim()) return displayCommand;
-  return command.map((arg) => /[\s"']/.test(arg) ? JSON.stringify(arg) : arg).join(' ');
-}
-
 const STARTUP_FAILURE_PATTERNS = Object.freeze([
-  /\bCannot find module\b/i,
-  /\bCannot find package\b/i,
-  /\bMODULE_NOT_FOUND\b/i,
-  /\bERR_MODULE_NOT_FOUND\b/i,
-  /\bModuleNotFoundError\b/i,
-  /\bspawn(?:Sync)?\b[^\r\n]*\bENOENT\b/i,
-  /\bcommand not found\b/i,
-  /\bexecutable file not found\b/i,
-  /\bNo such file or directory\b/i,
+  { pattern: /\b(?:Cannot find module|Cannot find package|MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|ModuleNotFoundError)\b/i, reason: 'module-not-found' },
+  { pattern: /\bCould not find\b/i, reason: 'test-file-not-found' },
+  { pattern: /\bNo such file or directory\b/i, reason: 'test-file-not-found' },
+  { pattern: /\bspawn(?:Sync)?\b[^\r\n]*\bENOENT\b/i, reason: 'runner-start-failed' },
+  { pattern: /\b(?:command not found|executable file not found)\b/i, reason: 'runner-start-failed' },
 ]);
 
-function truncateDiagnostic(value, maxLength = 4000) {
-  const text = outputText(value).trim();
-  if (text.length <= maxLength) return text;
-  return `${text.slice(0, maxLength)}…`;
+function runnerDiagnostic({ displayCommand, reason }) {
+  return `command: ${displayCommand}; cause: ${reason}`;
 }
 
-function runnerDiagnostic({ displayCommand, child, stdout, stderr }) {
-  const details = [`command: ${displayCommand}`];
-  if (child && child.error) {
-    const errorMessage = child.error && child.error.message
-      ? child.error.message : String(child.error);
-    details.push(`error: ${truncateDiagnostic(errorMessage)}`);
-  }
-  if (child && Number.isInteger(child.status)) details.push(`exit code: ${child.status}`);
-  if (child && child.signal) details.push(`signal: ${child.signal}`);
-  const stderrText = truncateDiagnostic(stderr);
-  const stdoutText = truncateDiagnostic(stdout);
-  if (stderrText) details.push(`stderr: ${stderrText}`);
-  if (stdoutText) details.push(`stdout: ${stdoutText}`);
-  return details.join('; ');
+function startupFailureReason(output) {
+  const match = STARTUP_FAILURE_PATTERNS.find(({ pattern }) => pattern.test(output));
+  return match ? match.reason : null;
 }
 
 /**
@@ -198,20 +177,26 @@ function runnerDiagnostic({ displayCommand, child, stdout, stderr }) {
  */
 function classifyRunnerUnavailable({ child, childExitCode, stdout, stderr, summary, summaryFields, displayCommand }) {
   if (child && child.error) {
-    return `runner-start-failed: ${runnerDiagnostic({ displayCommand, child, stdout, stderr })}`;
+    return `runner-start-failed: ${runnerDiagnostic({ displayCommand, reason: 'runner-start-failed' })}`;
   }
   if (childExitCode === null) {
-    return `runner-start-failed: ${runnerDiagnostic({ displayCommand, child, stdout, stderr })}`;
+    return `runner-start-failed: ${runnerDiagnostic({ displayCommand, reason: 'runner-start-failed' })}`;
   }
   if (childExitCode === 0) return null;
 
   const combinedOutput = `${stdout}\n${stderr}`;
   const hasTestExecutionEvidence = summary.ok && summaryFields.tests > 0;
   if (hasTestExecutionEvidence) return null;
-  const hasKnownStartupFailure = STARTUP_FAILURE_PATTERNS.some((pattern) => pattern.test(combinedOutput));
+  const knownStartupFailure = startupFailureReason(combinedOutput);
   const hasZeroTestSummary = summary.ok && summaryFields.tests === 0;
-  if (!combinedOutput.trim() || hasKnownStartupFailure || hasZeroTestSummary) {
-    return `runner-abnormal-exit: ${runnerDiagnostic({ displayCommand, child, stdout, stderr })}`;
+  if (!combinedOutput.trim()) {
+    return `runner-abnormal-exit: ${runnerDiagnostic({ displayCommand, reason: 'no-test-output' })}`;
+  }
+  if (knownStartupFailure) {
+    return `runner-abnormal-exit: ${runnerDiagnostic({ displayCommand, reason: knownStartupFailure })}`;
+  }
+  if (hasZeroTestSummary) {
+    return `runner-abnormal-exit: ${runnerDiagnostic({ displayCommand, reason: 'no-tests-executed' })}`;
   }
   return null;
 }
@@ -480,10 +465,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   const childExitCode = child && Number.isInteger(child.status) && child.status >= 0
     ? child.status : null;
   const recordedAt = new Date().toISOString();
-  const displayCommand = commandDisplay(
-    [command, ...commandArgs],
-    selected.displayCommand,
-  );
+  const displayCommand = publicTestCommand(layerName, selected.scope);
   const runnerUnavailableReason = classifyRunnerUnavailable({
     child,
     childExitCode,

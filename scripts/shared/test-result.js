@@ -25,6 +25,50 @@ const TEST_RESULT_STATUSES = Object.freeze(new Set(['complete', 'unavailable']))
 const TEST_RESULT_OUTCOMES = Object.freeze(new Set(['pass', 'fail']));
 const TAP_COUNT_FIELDS = Object.freeze(['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo']);
 const TEST_CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
+const PUBLIC_TEST_COMMANDS = Object.freeze({
+  full: 'npm test',
+  slow: 'npm run test:slow',
+  fallback: 'test runner',
+});
+
+const PUBLIC_TEST_REASON_CODES = Object.freeze(new Set([
+  'content-mismatch',
+  'content-snapshot-failed',
+  'module-not-found',
+  'test-file-not-found',
+  'no-test-output',
+  'no-tests-executed',
+  'runner-start-failed',
+  'runner-abnormal-exit',
+  'slow-result-missing',
+  'unavailable',
+]));
+
+function publicTestCommand(layerOrName, scope) {
+  const name = typeof layerOrName === 'string'
+    ? layerOrName
+    : layerOrName && typeof layerOrName.layer === 'string' ? layerOrName.layer : '';
+  const layerScope = typeof layerOrName === 'object' && layerOrName
+    ? layerOrName.scope
+    : scope;
+  if (name === 'slow') return PUBLIC_TEST_COMMANDS.slow;
+  if (name === 'full' || layerScope === 'full') return PUBLIC_TEST_COMMANDS.full;
+  return PUBLIC_TEST_COMMANDS.fallback;
+}
+
+function publicTestReason(reason, fallback = 'unavailable') {
+  const text = typeof reason === 'string' ? reason : '';
+  const known = [...PUBLIC_TEST_REASON_CODES].find((code) => text === code);
+  if (known) return known;
+  if (/\b(?:Cannot find module|Cannot find package|MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|ModuleNotFoundError)\b/i.test(text)) return 'module-not-found';
+  if (/\b(?:Could not find|No such file or directory)\b/i.test(text)) return 'test-file-not-found';
+  if (/\bno[- ]test[- ]output\b/i.test(text)) return 'no-test-output';
+  if (/\bno[- ]tests[- ]executed\b/i.test(text)) return 'no-tests-executed';
+  if (/\brunner-start-failed\b/i.test(text)) return 'runner-start-failed';
+  if (/\brunner-abnormal-exit\b/i.test(text)) return 'runner-abnormal-exit';
+  if (/\bslow-result-missing\b/i.test(text)) return 'slow-result-missing';
+  return PUBLIC_TEST_REASON_CODES.has(fallback) ? fallback : 'unavailable';
+}
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -361,6 +405,10 @@ module.exports = {
   TEST_RESULT_OUTCOMES,
   TAP_COUNT_FIELDS,
   TEST_CONTENT_HASH_RE,
+  PUBLIC_TEST_COMMANDS,
+  PUBLIC_TEST_REASON_CODES,
+  publicTestCommand,
+  publicTestReason,
   calculateWorktreeContentHash,
   calculateCommitContentHash,
   testResultPath,

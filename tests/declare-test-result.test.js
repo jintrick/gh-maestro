@@ -82,7 +82,7 @@ test('buildCommentBody: 成果物が無い場合は unknown と実行記録不�
   assert.ok(body.includes('- **結果**: unknown'));
   assert.ok(body.includes('- **実行元**: `unknown`'));
   assert.ok(body.includes('- **実行範囲**: `unknown`'));
-  assert.ok(body.includes('- **実行記録**: unavailable (invalid-json)'));
+  assert.ok(body.includes('- **実行記録**: unavailable (unavailable)'));
   assert.doesNotMatch(body, /fail: \d/);
 });
 
@@ -129,7 +129,7 @@ test('buildCommentBody: unavailable層はcommandと具体的なreasonをunknown�
         slow: {
           status: 'unavailable',
           command: 'npm run test:slow',
-          reason: "runner-abnormal-exit: command: npm run test:slow; stderr: Cannot find module './tests/_env-setup.js'",
+          reason: "runner-abnormal-exit: command: npm run test:slow; stderr: Cannot find module './tests/_env-setup.js'; GH_TOKEN=should-not-appear",
           executor: 'poll-pr',
           scope: 'partial',
           executionLogPath: 'C:/runtime/slow.log',
@@ -140,7 +140,8 @@ test('buildCommentBody: unavailable層はcommandと具体的なreasonをunknown�
 
   assert.ok(body.includes('**slow**: unknown'));
   assert.ok(body.includes('command: `npm run test:slow`'));
-  assert.ok(body.includes("Cannot find module './tests/_env-setup.js'"));
+  assert.ok(body.includes('reason: module-not-found'));
+  assert.doesNotMatch(body, /Cannot find module|_env-setup|GH_TOKEN|should-not-appear/);
   assert.ok(body.includes('- **結果**: unknown'));
   assert.doesNotMatch(body, /\*\*slow\*\*: fail/);
 });
@@ -289,7 +290,7 @@ test('declareTestResult: 成果物の欠落・破損でも unknown を投稿し�
   assert.equal(result.provenance, 'unknown');
   assert.equal(result.scope, 'unknown');
   assert.match(createdBody, /結果.*unknown/);
-  assert.match(createdBody, /実行記録.*invalid-json/);
+  assert.match(createdBody, /実行記録.*unavailable/);
   assert.doesNotMatch(createdBody, /fail: \d/);
 });
 
