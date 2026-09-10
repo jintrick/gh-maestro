@@ -45,7 +45,7 @@ SUGGESTION には「その提案を採用しなかった場合に何が起きる
 - **コーダーに修正依頼**:
   ```sh
   node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE --stdin <<'EOF'
-  修正依頼: <path>:<line> — <問題の説明>。<修正方針>。（PR #<PR番号> のレビュー指摘より）CIの確認は不要。pushしたら即報告してください。
+  修正依頼: <path>:<line> — <問題の説明>。<修正方針>。（PR #<PR番号> のレビュー指摘より）修正後は `push-and-declare.js` で push とテスト結果申告まで行い、完了したら即報告してください。
   EOF
   # senior-coder を使っていた場合は --skill gh-maestro-senior-coder
   ```
