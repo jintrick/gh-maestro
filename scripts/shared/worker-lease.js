@@ -638,7 +638,8 @@ function releaseResidentLease({ workspace, role, pid }) {
  * 強制終了では対象プロセスの exit handler が走らず、通常の
  * releaseResidentLease() が呼ばれないことがある。停止処理側から回収する場合も、
  * PIDだけでなく registry と同じ startTime を照合し、PID再利用後の別プロセスの
- * leaseを削除しない。削除後に再読込して、leaseが残っていれば成功を返さない。
+ * leaseを削除しない。別プロセスの lease は停止対象の解放失敗とはみなさず、
+ * 削除後に再読込して残存を確認するのは自分の leaseだけに限定する。
  *
  * @param {object} opt
  * @param {string} opt.workspace
@@ -667,7 +668,7 @@ function releaseResidentLeaseForProcess({ workspace, role, pid, startTime }) {
     if (existing.pid !== pid || existing.startTime !== startTime) {
       return {
         released: false,
-        remaining: true,
+        remaining: false,
         reason: 'lease owner identity does not match the stopped process',
       };
     }

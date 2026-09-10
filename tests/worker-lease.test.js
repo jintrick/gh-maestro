@@ -515,9 +515,10 @@ test('releaseResidentLeaseForProcess: 停止済みプロセスとPID/startTime�
   }
 });
 
-test('releaseResidentLeaseForProcess: PIDまたはstartTime不一致の新しいleaseを削除しない', () => {
+test('releaseResidentLeaseForProcess: 別PIDの生存中leaseは削除せずno-op成功にする', () => {
   const store = tempStore();
   const tmp = store._tmpDir;
+  const calls = mockLiveness({ alive: true });
   try {
     const role = 'worker-supervisor';
     const replacement = {
@@ -535,10 +536,92 @@ test('releaseResidentLeaseForProcess: PIDまたはstartTime不一致の新しい
       startTime: '2026-07-29T00:00:00.424Z',
     });
 
-    assert.equal(result.released, false);
-    assert.equal(result.remaining, true);
+    assert.deepEqual(result, {
+      released: false,
+      remaining: false,
+      reason: 'lease owner identity does not match the stopped process',
+    });
+    assert.deepEqual(calls.alive, [], 'identity不一致のleaseでは生存確認を行わない');
+    assert.deepEqual(calls.verify, [], 'identity不一致のleaseではPID同一性確認を行わない');
     assert.deepEqual(store.read(lease.roleLeaseKey(role)), replacement);
   } finally {
+    cleanupStore(store);
+  }
+});
+
+test('releaseResidentLeaseForProcess: 別PIDの死亡済みstale leaseもno-op成功にする', () => {
+  const store = tempStore();
+  const tmp = store._tmpDir;
+  const calls = mockLiveness({ alive: false });
+  try {
+    const role = 'worker-supervisor';
+    const stale = {
+      pid: 6262,
+      startTime: '2026-07-29T00:00:00.626Z',
+      workerName: role,
+      phase: 'active',
+    };
+    store.write(lease.roleLeaseKey(role), stale);
+
+    const result = lease.releaseResidentLeaseForProcess({
+      workspace: tmp,
+      role,
+      pid: 4242,
+      startTime: '2026-07-29T00:00:00.424Z',
+    });
+
+    assert.deepEqual(result, {
+      released: false,
+      remaining: false,
+      reason: 'lease owner identity does not match the stopped process',
+    });
+    assert.deepEqual(calls.alive, [], 'identity不一致のleaseでは生存確認を行わない');
+    assert.deepEqual(calls.verify, [], 'identity不一致のleaseではPID同一性確認を行わない');
+    assert.deepEqual(store.read(lease.roleLeaseKey(role)), stale,
+      '停止対象ではないstale leaseはacquire側の回収に委ねる');
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('releaseResidentLeaseForProcess: 自分のleaseが削除後も残れば失敗扱いにする', () => {
+  const store = tempStore();
+  const tmp = store._tmpDir;
+  const role = 'worker-supervisor';
+  const leaseFileName = `${lease.roleLeaseKey(role)}.json`;
+  const originalUnlinkSync = fs.unlinkSync;
+  try {
+    store.write(lease.roleLeaseKey(role), {
+      pid: 4242,
+      startTime: '2026-07-29T00:00:00.424Z',
+      workerName: role,
+      phase: 'active',
+    });
+    fs.unlinkSync = (filePath) => {
+      if (path.basename(filePath) === leaseFileName) return;
+      return originalUnlinkSync(filePath);
+    };
+
+    const result = lease.releaseResidentLeaseForProcess({
+      workspace: tmp,
+      role,
+      pid: 4242,
+      startTime: '2026-07-29T00:00:00.424Z',
+    });
+
+    assert.deepEqual(result, {
+      released: false,
+      remaining: true,
+      reason: 'lease remains after removal',
+    });
+    assert.deepEqual(store.read(lease.roleLeaseKey(role)), {
+      pid: 4242,
+      startTime: '2026-07-29T00:00:00.424Z',
+      workerName: role,
+      phase: 'active',
+    });
+  } finally {
+    fs.unlinkSync = originalUnlinkSync;
     cleanupStore(store);
   }
 });
