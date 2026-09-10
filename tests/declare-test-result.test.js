@@ -82,7 +82,7 @@ test('buildCommentBody: 成果物が無い場合は unknown と実行記録不�
   assert.ok(body.includes('- **結果**: unknown'));
   assert.ok(body.includes('- **実行元**: `unknown`'));
   assert.ok(body.includes('- **実行範囲**: `unknown`'));
-  assert.ok(body.includes('- **実行記録**: unavailable (invalid-json)'));
+  assert.ok(body.includes('- **実行記録**: unavailable (unavailable)'));
   assert.doesNotMatch(body, /fail: \d/);
 });
 
@@ -113,6 +113,37 @@ test('buildCommentBody: 層別aggregateはfull/slowの結果とslowの実行記�
   assert.ok(body.includes('実行記録: `slow.log`'));
   assert.ok(!body.includes('C:/runtime/'), '公開先のコメントにローカルの絶対パスを載せない');
   assert.ok(body.includes('- **結果**: fail'));
+});
+
+test('buildCommentBody: unavailable層はcommandと具体的なreasonをunknownとして申告する', () => {
+  const body = buildCommentBody({
+    commit: SHA,
+    testResult: {
+      provenance: 'test-runner',
+      scope: 'aggregate',
+      layers: {
+        full: {
+          status: 'complete', outcome: 'pass', tests: 10, pass: 10, fail: 0,
+          executor: 'test-runner', scope: 'full',
+        },
+        slow: {
+          status: 'unavailable',
+          command: 'npm run test:slow',
+          reason: "runner-abnormal-exit: command: npm run test:slow; stderr: Cannot find module './tests/_env-setup.js'; GH_TOKEN=should-not-appear",
+          executor: 'poll-pr',
+          scope: 'partial',
+          executionLogPath: 'C:/runtime/slow.log',
+        },
+      },
+    },
+  });
+
+  assert.ok(body.includes('**slow**: unknown'));
+  assert.ok(body.includes('command: `npm run test:slow`'));
+  assert.ok(body.includes('reason: module-not-found'));
+  assert.doesNotMatch(body, /Cannot find module|_env-setup|GH_TOKEN|should-not-appear/);
+  assert.ok(body.includes('- **結果**: unknown'));
+  assert.doesNotMatch(body, /\*\*slow\*\*: fail/);
 });
 
 test('declareTestResult: 手入力の commit/fail/pass を API 境界で拒否する', () => {
@@ -259,7 +290,7 @@ test('declareTestResult: 成果物の欠落・破損でも unknown を投稿し�
   assert.equal(result.provenance, 'unknown');
   assert.equal(result.scope, 'unknown');
   assert.match(createdBody, /結果.*unknown/);
-  assert.match(createdBody, /実行記録.*invalid-json/);
+  assert.match(createdBody, /実行記録.*unavailable/);
   assert.doesNotMatch(createdBody, /fail: \d/);
 });
 

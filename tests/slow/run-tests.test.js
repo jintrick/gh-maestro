@@ -78,6 +78,27 @@ function runDeclaredTests(project, marker, mode, exitCode) {
   });
 }
 
+function createMissingNodeTestProject() {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-missing-node-test-'));
+  fs.mkdirSync(path.join(project, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(path.join(project, '.gh-maestro', 'config.json'), JSON.stringify({
+    test: {
+      layers: {
+        every: {
+          scope: 'full',
+          command: [process.execPath, '--test', 'tests/does-not-exist.test.js'],
+        },
+      },
+    },
+  }, null, 2), 'utf8');
+  runGit(project, ['init', '-q']);
+  runGit(project, ['config', 'user.email', 'test@example.invalid']);
+  runGit(project, ['config', 'user.name', 'gh-maestro test']);
+  runGit(project, ['add', '-A']);
+  runGit(project, ['commit', '-qm', 'fixture']);
+  return project;
+}
+
 test('run-tests.js: 別構成のworkspace宣言で独自コマンドを実行し、件数なしでもpass/failを申告できる', () => {
   const { project, marker } = createProject();
   const resultPath = testResultPath(project);
@@ -115,5 +136,32 @@ test('run-tests.js: 別構成のworkspace宣言で独自コマンドを実行し
     try { fs.rmSync(runtimeDir, { recursive: true, force: true }); } catch {}
     fs.rmSync(project, { recursive: true, force: true });
     try { fs.rmSync(marker, { force: true }); } catch {}
+  }
+});
+
+test('run-tests.js: 実在しないNodeテストファイルはtest-file-not-foundとしてunavailableになる', () => {
+  const project = createMissingNodeTestProject();
+  const resultPath = testResultPath(project);
+  const runtimeDir = workspaceRuntimeDir(project);
+  try {
+    const result = spawnSync(process.execPath, [RUN_TESTS, '--workspace', project, 'every'], {
+      cwd: project,
+      env: cleanChildEnv(),
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 1, `run-tests.js failed unexpectedly: ${result.stderr}`);
+    assert.match(`${result.stdout}\n${result.stderr}`, /Could not find/);
+
+    const artifact = readTestResultArtifact(project);
+    assert.equal(artifact.ok, true);
+    const layer = artifact.result.layers.every;
+    assert.equal(layer.status, 'unavailable');
+    assert.equal(layer.command, 'npm test');
+    assert.match(layer.reason, /cause: test-file-not-found/);
+    assert.doesNotMatch(layer.reason, /Could not find|does-not-exist/);
+  } finally {
+    try { fs.rmSync(resultPath, { force: true }); } catch {}
+    try { fs.rmSync(runtimeDir, { recursive: true, force: true }); } catch {}
+    fs.rmSync(project, { recursive: true, force: true });
   }
 });

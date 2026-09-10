@@ -252,6 +252,59 @@ test('runTests: summaryが欠落しても終了コード0なら件数なしのpa
   assert.equal('tests' in inconsistentSummary.artifacts[0], false);
 });
 
+test('runTests: モジュール解決エラーでテスト開始前に終了したらunavailableと診断を保存する', () => {
+  const fixture = runWithChild({
+    child: {
+      status: 1,
+      stdout: '',
+      stderr: "Error: Cannot find module './tests/_env-setup.js'\n",
+    },
+  });
+
+  assert.equal(fixture.result.exitCode, 1);
+  assert.equal(fixture.artifacts[0].status, 'unavailable');
+  assert.match(fixture.artifacts[0].reason, /runner-abnormal-exit/);
+  assert.match(fixture.artifacts[0].reason, /command: npm test/);
+  assert.match(fixture.artifacts[0].reason, /cause: module-not-found/);
+  assert.doesNotMatch(fixture.artifacts[0].reason, /Cannot find module|_env-setup/);
+});
+
+test('runTests: テスト件数ありのTAP失敗は起動エラー文言を含んでもfailのまま保持する', () => {
+  const fixture = runWithChild({
+    child: {
+      status: 1,
+      stdout: tapSummary({ tests: 1, pass: 0, fail: 1 }),
+      stderr: "not ok 1 - test body reports Cannot find module\n",
+    },
+  });
+
+  assert.equal(fixture.result.exitCode, 1);
+  assert.equal(fixture.artifacts[0].status, 'complete');
+  assert.equal(fixture.artifacts[0].outcome, 'fail');
+  assert.equal(fixture.artifacts[0].tests, 1);
+});
+
+test('runTests: 出力のない非0終了はunavailableとして記録する', () => {
+  const fixture = runWithChild({
+    child: { status: 9, stdout: '', stderr: '' },
+  });
+
+  assert.equal(fixture.result.exitCode, 9);
+  assert.equal(fixture.artifacts[0].status, 'unavailable');
+  assert.match(fixture.artifacts[0].reason, /runner-abnormal-exit/);
+  assert.match(fixture.artifacts[0].reason, /cause: no-test-output/);
+});
+
+test('runTests: 0件のTAPで非0終了した場合はunavailableとして記録する', () => {
+  const fixture = runWithChild({
+    child: { status: 1, stdout: tapSummary({ tests: 0, pass: 0, fail: 0 }), stderr: '' },
+  });
+
+  assert.equal(fixture.result.exitCode, 1);
+  assert.equal(fixture.artifacts[0].status, 'unavailable');
+  assert.match(fixture.artifacts[0].reason, /runner-abnormal-exit/);
+});
+
 test('runTests: runner起動失敗もunavailableとして記録し、終了コード1を返す', () => {
   const fixture = runWithChild({
     child: { status: null, error: new Error('node executable missing'), stdout: '', stderr: '' },
@@ -259,7 +312,10 @@ test('runTests: runner起動失敗もunavailableとして記録し、終了コ�
 
   assert.equal(fixture.result.exitCode, 1);
   assert.equal(fixture.artifacts[0].status, 'unavailable');
-  assert.equal(fixture.artifacts[0].reason, 'runner-start-failed');
+  assert.match(fixture.artifacts[0].reason, /runner-start-failed/);
+  assert.match(fixture.artifacts[0].reason, /command: npm test/);
+  assert.match(fixture.artifacts[0].reason, /cause: runner-start-failed/);
+  assert.doesNotMatch(fixture.artifacts[0].reason, /node executable missing/);
 });
 
 test('runTests: 成果物の削除・書き出し失敗はrunner結果を隠さず、unknownマーカーを残す', () => {

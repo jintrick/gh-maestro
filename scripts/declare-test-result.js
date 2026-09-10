@@ -19,6 +19,8 @@ const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const {
   TEST_CONTENT_HASH_RE,
   calculateCommitContentHash,
+  publicTestCommand,
+  publicTestReason,
   readTestResultArtifact,
 } = require('./shared/test-result');
 const {
@@ -216,8 +218,9 @@ function buildCommentBody({ commit, testResult }) {
         ? String(layer.executionLogPath).split(/[\\/]/).filter(Boolean).pop() || ''
         : '';
       const record = recordName ? `, 実行記録: \`${recordName}\`` : '';
-      const reason = status === 'unknown' && layer.reason ? `, reason: ${layer.reason}` : '';
-      lines.push(`  - **${name}**: ${status}${countSuffix}${count}${executor}${scope}${record}${reason}`);
+      const command = status === 'unknown' ? `, command: \`${publicTestCommand(name, layer && layer.scope)}\`` : '';
+      const reason = status === 'unknown' && layer.reason ? `, reason: ${publicTestReason(layer.reason)}` : '';
+      lines.push(`  - **${name}**: ${status}${countSuffix}${count}${executor}${scope}${record}${command}${reason}`);
     }
     return lines.join('\n');
   }
@@ -242,7 +245,7 @@ function buildCommentBody({ commit, testResult }) {
     lines.push('- **結果**: unknown');
     lines.push('- **実行元**: `unknown`');
     lines.push('- **実行範囲**: `unknown`');
-    lines.push(`- **実行記録**: unavailable (${testResult && testResult.reason ? testResult.reason : 'unavailable'})`);
+    lines.push(`- **実行記録**: unavailable (${publicTestReason(testResult && testResult.reason)})`);
   }
 
   return lines.join('\n');

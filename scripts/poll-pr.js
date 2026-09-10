@@ -30,7 +30,13 @@ const { worktreeAddDetached, worktreeRemove } = require('./shared/git-worktree')
 const { createTempDirScope } = require('./shared/temp-directory');
 const { linkNodeModules } = require('./shared/link-node-modules');
 const { unlinkJunctions } = require('./shared/unlink-junctions');
-const { readTestResultArtifact, testResultPath, writeTestResultLayer } = require('./shared/test-result');
+const {
+  readTestResultArtifact,
+  testResultPath,
+  writeTestResultLayer,
+  publicTestCommand,
+  publicTestReason,
+} = require('./shared/test-result');
 const { declareTestResult } = require('./declare-test-result');
 const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
@@ -310,12 +316,12 @@ function unavailableSlowLayer(headSha, logPath, reason) {
     layer: 'slow',
     scope: 'partial',
     status: 'unavailable',
-    command: 'npm run test:slow',
+    command: publicTestCommand('slow', 'partial'),
     recordedAt: new Date().toISOString(),
     testedHead: headSha,
     executor: 'poll-pr',
     executionLogPath: logPath,
-    reason,
+    reason: publicTestReason(reason),
   };
 }
 
@@ -381,6 +387,7 @@ function finishSlowFailure({ pr, repo, workspace, target, headSha, statePath, ru
   }
   if (closeLog) closeLog();
   const resolvedLogPath = logPath || slowLogPath(workspace, pr, headSha);
+  const fallbackLayer = unavailableSlowLayer(headSha, resolvedLogPath, reason);
   let logError;
   try { appendSlowFailureLog(resolvedLogPath, reason); } catch (error) { logError = error.message; }
   const artifactPath = writeUnavailableLayer(target, headSha, resolvedLogPath, reason, deps)
@@ -388,6 +395,8 @@ function finishSlowFailure({ pr, repo, workspace, target, headSha, statePath, ru
   const result = {
     status: 'unavailable',
     ...(headSha ? { testedHead: headSha } : {}),
+    command: fallbackLayer.command,
+    reason: publicTestReason(reason),
     executionLogPath: resolvedLogPath,
     artifactPath,
     statePath,
@@ -420,6 +429,8 @@ function finishSlowStale({ pr, workspace, target, headSha, statePath, runKey, lo
   const result = {
     status: 'unavailable',
     ...(headSha ? { testedHead: headSha } : {}),
+    command: publicTestCommand('slow', 'partial'),
+    reason: publicTestReason(reason),
     executionLogPath: logPath,
     artifactPath,
     statePath,
@@ -447,11 +458,12 @@ function finishSlowRun({ pr, repo, workspace, target, headSha, statePath, runKey
   let read = readArtifactFn(target.worktree);
   const layer = read.ok && read.result.scope === 'aggregate' ? read.result.layers.slow : null;
   if (!layer || !sameHead(layer.testedHead, headSha)) {
+    const fallbackReason = exitCode === 0 ? 'slow-result-missing' : 'runner-abnormal-exit';
     try {
       writeLayerFn(target.worktree, unavailableSlowLayer(
         headSha,
         logPath,
-        exitCode === 0 ? 'slow-result-missing' : 'runner-abnormal-exit',
+        fallbackReason,
       ));
     } catch {}
   }
@@ -467,6 +479,8 @@ function finishSlowRun({ pr, repo, workspace, target, headSha, statePath, runKey
     ...(finalLayer.tests !== undefined ? { tests: finalLayer.tests } : {}),
     ...(finalLayer.pass !== undefined ? { pass: finalLayer.pass } : {}),
     ...(finalLayer.fail !== undefined ? { fail: finalLayer.fail } : {}),
+    command: publicTestCommand(finalLayer),
+    ...(finalLayer.reason ? { reason: publicTestReason(finalLayer.reason) } : {}),
     executionLogPath: finalLayer.executionLogPath || logPath,
     artifactPath: read.path || testResultPath(target.worktree),
     statePath,
