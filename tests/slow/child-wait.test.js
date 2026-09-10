@@ -28,7 +28,7 @@ function fakeChild() {
  * kill-tree.js が spawnSync をロード時点で捕捉するため、キャッシュを必ず消す。
  * @returns {{ waitChildExit: Function, taskkillCalls: Array<Array<string>> }}
  */
-function loadChildWait() {
+function loadChildWait(rootPid = 9999) {
   const taskkillCalls = [];
   delete require.cache[childWaitPath];
   delete require.cache[killTreePath];
@@ -41,6 +41,7 @@ function loadChildWait() {
       spawn: () => { throw new Error('spawn should not be called in child-wait tests'); },
       spawnSync: (cmd, args) => {
         if (cmd === 'taskkill') taskkillCalls.push(args);
+        if (cmd === 'ps') return { status: 0, stdout: `${rootPid} 1 ${rootPid}\n`, stderr: '' };
         return { status: 0, stdout: '', stderr: '' };
       },
       execSync: () => '',
@@ -55,12 +56,20 @@ function loadChildWait() {
 
 
 test('waitChildExit: タイムアウトで killProcessTree でプロセスツリーを終了し、close で解決する', async () => {
-  const { waitChildExit, taskkillCalls } = loadChildWait();
+  const { waitChildExit, taskkillCalls } = loadChildWait(4242);
   const child = fakeChild();
   child.pid = 4242;
   const origKill = process.kill;
   let processKillCalled = false;
-  process.kill = () => { processKillCalled = true; return true; };
+  process.kill = (pid, signal) => {
+    if (signal === 0) {
+      const error = new Error('process is not alive');
+      error.code = 'ESRCH';
+      throw error;
+    }
+    processKillCalled = true;
+    return true;
+  };
   try {
     const pending = waitChildExit({ child, timeoutMs: 5, onCleanup: () => {} });
     // タイマー発火を待つ（実closeを待つとタイマーはクリアされるため、先に発火を確認）

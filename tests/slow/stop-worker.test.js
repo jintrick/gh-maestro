@@ -8,6 +8,7 @@ const os = require('os');
 const { spawnSync, spawn } = require('child_process');
 const { getProcessStartTime, isProcessAlive } = require('../../scripts/process-lifecycle');
 const { killProcessTree } = require('../../scripts/shared/kill-tree');
+const stopWorkerCli = require('../../scripts/stop-worker');
 const { cleanSpawnEnv } = require('../_spawn-env');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'stop-worker.js');
@@ -113,6 +114,95 @@ test('stop-worker: -h もUsageを表示して終了コード0', () => {
   const r = run(['-h']);
   assert.equal(r.status, 0);
   assert.match(r.stdout, /Usage: node stop-worker\.js/);
+});
+
+test('killProcessTree: Windowsでtaskkillが自然終了を報告しても全PID停止後は成功する', () => {
+  const calls = [];
+  const spawnSyncFn = (command, args) => {
+    calls.push({ command, args });
+    if (command === 'powershell') return { status: 0, stdout: '[7101,7102]', stderr: '' };
+    if (command === 'taskkill') return { status: 1, stdout: '', stderr: 'process already exited' };
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  const result = killProcessTree(7101, {
+    platform: 'win32',
+    spawnSyncFn,
+    isProcessAliveFn: () => false,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+    sleepFn: () => {},
+  });
+
+  assert.deepEqual(result, { ok: true, pids: [7101, 7102] });
+  assert.deepEqual(calls.map(({ command }) => command), ['powershell', 'taskkill']);
+});
+
+test('killProcessTree: Windowsでtaskkill成功後も子PIDが残れば期限超過として例外になる', () => {
+  const spawnSyncFn = (command) => {
+    if (command === 'powershell') return { status: 0, stdout: '[7201,7202]', stderr: '' };
+    if (command === 'taskkill') return { status: 0, stdout: '', stderr: 'taskkill warning' };
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  assert.throws(() => killProcessTree(7201, {
+    platform: 'win32',
+    spawnSyncFn,
+    isProcessAliveFn: (pid) => pid === 7202,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+    sleepFn: () => {},
+  }), (error) => {
+    assert.match(error.message, /残存PID: 7202/);
+    assert.match(error.message, /taskkill: taskkill warning/);
+    return true;
+  });
+});
+
+test('killProcessTree: Unixでもプロセスグループと子孫PIDを停止確認し、子PID残存時は例外になる', () => {
+  const signals = [];
+  const spawnSyncFn = (command) => {
+    if (command === 'ps') {
+      return {
+        status: 0,
+        stdout: '7301 0 7301\n7302 7301 7301\n7303 7302 7301\n',
+        stderr: '',
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  assert.throws(() => killProcessTree(7301, {
+    platform: 'linux',
+    spawnSyncFn,
+    killFn: (pid, signal) => signals.push([pid, signal]),
+    isProcessAliveFn: (pid) => pid === 7302,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+    sleepFn: () => {},
+  }), /残存PID: 7302/);
+  assert.deepEqual(signals, [[-7301, 'SIGTERM'], [7301, 'SIGTERM']]);
+});
+
+test('killProcessTree: Unixのプロセス列挙不能時は成功へ縮退しない', () => {
+  assert.throws(() => killProcessTree(7401, {
+    platform: 'linux',
+    spawnSyncFn: () => ({ status: null, error: new Error('ps unavailable') }),
+    killFn: () => { throw new Error('kill must not be called'); },
+    timeoutMs: 5,
+    sleepFn: () => {},
+  }), /Unixプロセスツリーの列挙に失敗しました/);
+});
+
+test('stop-worker: killProcessTreeの停止確認失敗はCLI境界で非0 statusになる', () => {
+  const errors = [];
+  const status = stopWorkerCli.main(['test-worker', '--workspace', process.cwd()], {
+    stopWorkerProcessFn: () => { throw new Error('子プロセスの停止確認に失敗しました'); },
+    errorFn: (message) => errors.push(message),
+  });
+
+  assert.equal(status, 1);
+  assert.deepEqual(errors, ['stop-worker: 子プロセスの停止確認に失敗しました']);
 });
 
 test('stop-worker: 引数なしはUsageエラーで終了コード1', () => {

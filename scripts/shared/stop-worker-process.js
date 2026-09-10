@@ -35,6 +35,9 @@ const defaultSleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4
  * @param {number} [opts.stopTimeoutMs=5000] プロセス停止確認の上限ミリ秒
  * @param {number} [opts.pollIntervalMs=50] プロセス停止確認の間隔ミリ秒
  * @param {number} [opts.sleepMs=500] レガシーpaneの解放待ちミリ秒
+ * @param {Function} [opts.killProcessTreeFn] プロセス停止関数（テスト用）
+ * @param {Function} [opts.waitForPidsToExitFn] 停止確認関数（テスト用）
+ * @param {Function} [opts.isProcessAliveFn] 生存確認関数（テスト用）
  * @param {object} [opts._injectedWorkers] テスト用 workers オブジェクト注入
  * @returns {{ success: boolean, stoppedPid: number|null, skippedReason?: string, workerEntry: object }}
  */
@@ -46,20 +49,24 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
   const pollIntervalMs = opts.pollIntervalMs ?? 50;
   const paneWaitMs = opts.sleepMs ?? 500;
   const recordCycleEventFn = opts.recordCycleEventFn || recordCycleEvent;
+  const killProcessTreeFn = opts.killProcessTreeFn || killProcessTree;
+  const waitForPidsToExitFn = opts.waitForPidsToExitFn || waitForPidsToExit;
+  const isProcessAliveFn = opts.isProcessAliveFn || isProcessAlive;
 
   const killAndConfirm = (pid) => {
-    const killResult = killProcessTree(pid, {
+    const killResult = killProcessTreeFn(pid, {
       timeoutMs: stopTimeoutMs,
       pollIntervalMs,
       sleepFn,
+      isProcessAliveFn,
     });
     // WindowsではkillProcessTreeが親子孫全体を確認する。Unixでは同じAPIを
     // 親PIDにも適用して、少なくとも呼び出し元が停止完了を観測するまで返さない。
-    const stopped = waitForPidsToExit(killResult?.pids || [pid], {
+    const stopped = waitForPidsToExitFn(killResult?.pids || [pid], {
       timeoutMs: stopTimeoutMs,
       pollIntervalMs,
       sleepFn,
-      isProcessAliveFn: isProcessAlive,
+      isProcessAliveFn,
     });
     if (!stopped.ok) {
       throw new Error(
@@ -93,7 +100,7 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
 
   // ── 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill ──────
   if (workerEntry.notifierPid) {
-    if (isProcessAlive(workerEntry.notifierPid)) {
+    if (isProcessAliveFn(workerEntry.notifierPid)) {
       killAndConfirm(workerEntry.notifierPid);
       logWarn(`stop-worker: レガシー notifier (pid ${workerEntry.notifierPid}) を終了しました`);
     } else {
@@ -103,7 +110,7 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
 
   // ── headless ワーカーのプロセスツリーを終了（同一性確認付き） ──────────────────
   if (workerEntry.pid) {
-    const pidAlive = isProcessAlive(workerEntry.pid);
+    const pidAlive = isProcessAliveFn(workerEntry.pid);
     if (pidAlive) {
       const identity = verifyProcessIdentity(workerEntry.pid, workerEntry);
       if (!identity.match) {

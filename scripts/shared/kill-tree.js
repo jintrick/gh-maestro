@@ -2,8 +2,9 @@
 // kill-tree.js
 // pid とその子孫プロセスをまとめて終了する。
 // Windows は親子関係を辿らない SIGTERM 相当（process.kill）では子孫が孤児化するため
-// taskkill /T を使う。Unix は detached spawn によるプロセスグループを前提に
-// 負のpidでグループ全体へ送る。
+// taskkill /T を使い、kill前に取得したPID集合の停止を確認する。Unix は detached spawn
+// によるプロセスグループを前提に負のpidでグループ全体へ送ったうえで、psで取得した
+// グループ／子孫PIDの停止を確認する。
 
 const { spawnSync } = require('./child-process');
 
@@ -74,6 +75,62 @@ function processTreePidsWindows(rootPid, spawnSyncFn = spawnSync) {
   return pids;
 }
 
+function processTreePidsUnix(rootPid, spawnSyncFn = spawnSync) {
+  let result;
+  try {
+    result = spawnSyncFn('ps', [
+      '-o', 'pid=,ppid=,pgid=',
+      '-e',
+    ], { encoding: 'utf8', stdio: 'pipe', timeout: 5000 });
+  } catch (error) {
+    throw new Error(`Unixプロセスツリーの列挙に失敗しました: ${error.message}`, { cause: error });
+  }
+
+  if (!result || result.error || result.status !== 0) {
+    const detail = result?.error?.message || String(result?.stderr || '').trim() || `exit ${result?.status}`;
+    throw new Error(`Unixプロセスツリーの列挙に失敗しました: ${detail}`);
+  }
+
+  const rows = [];
+  const output = String(result.stdout || '');
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const fields = line.trim().split(/\s+/);
+    if (fields.length !== 3 || fields.some((field) => !/^\d+$/.test(field))) {
+      throw new Error(`Unixプロセスツリーの列挙結果を解析できません: ${line.trim()}`);
+    }
+    const [pid, ppid, pgid] = fields.map(Number);
+    if (!validPid(pid) || !Number.isInteger(ppid) || ppid < 0 || !validPid(pgid)) {
+      throw new Error(`Unixプロセスツリーの列挙結果に不正なPIDがあります: ${line.trim()}`);
+    }
+    rows.push({ pid, ppid, pgid });
+  }
+
+  const root = rows.find((row) => row.pid === rootPid);
+  if (!root) {
+    throw new Error(`Unixプロセスツリーの列挙結果にroot PID ${rootPid} がありません`);
+  }
+
+  // detached rootのプロセスグループと、そこから外れても親子関係を維持する
+  // 子孫の両方を追跡する。kill対象をrootだけに縮退させない。
+  const targets = new Set(rows
+    .filter((row) => row.pgid === root.pgid)
+    .map((row) => row.pid));
+  const pending = [rootPid];
+  const descendants = new Set([rootPid]);
+  while (pending.length > 0) {
+    const parentPid = pending.shift();
+    for (const row of rows) {
+      if (row.ppid !== parentPid || descendants.has(row.pid)) continue;
+      descendants.add(row.pid);
+      pending.push(row.pid);
+    }
+  }
+  for (const pid of descendants) targets.add(pid);
+  if (!targets.has(rootPid)) targets.add(rootPid);
+  return [...targets];
+}
+
 /**
  * 指定されたPIDが全て停止するまで、上限付きで確認する。
  *
@@ -115,35 +172,64 @@ function waitForPidsToExit(pids, options = {}) {
  * @param {(ms:number) => void} [options.sleepFn]
  * @param {(pid:number) => boolean} [options.isProcessAliveFn]
  * @param {(cmd:string,args:string[],options:object) => object} [options.spawnSyncFn]
+ * @param {(pid:number, signal:string) => void} [options.killFn]
+ * @param {string} [options.platform=process.platform] テスト用の対象プラットフォーム
  * @returns {{ok:boolean, pids:number[]}}
  */
 function killProcessTree(pid, options = {}) {
   const rootPid = Number(pid);
   if (!validPid(rootPid)) return { ok: true, pids: [] };
+  const platform = options.platform ?? process.platform;
 
-  if (process.platform === 'win32') {
-    const treePids = processTreePidsWindows(rootPid, options.spawnSyncFn || spawnSync);
-    const result = (options.spawnSyncFn || spawnSync)('taskkill', [
-      '/F', '/T', '/PID', String(rootPid),
-    ], { stdio: 'pipe', encoding: 'utf8' });
-    if (!result || result.error || result.status !== 0) {
-      const detail = result?.error?.message || String(result?.stderr || '').trim() || `exit ${result?.status}`;
-      throw new Error(`プロセスツリーの終了に失敗しました (pid ${rootPid}): ${detail}`);
+  if (platform === 'win32') {
+    const spawnSyncFn = options.spawnSyncFn || spawnSync;
+    const treePids = processTreePidsWindows(rootPid, spawnSyncFn);
+    let result;
+    let taskkillError = null;
+    try {
+      result = spawnSyncFn('taskkill', [
+        '/F', '/T', '/PID', String(rootPid),
+      ], { stdio: 'pipe', encoding: 'utf8' });
+    } catch (error) {
+      taskkillError = error;
     }
 
+    const taskkillFailed = taskkillError
+      || !result
+      || result.error
+      || result.status !== 0;
     const stopped = waitForPidsToExit(treePids, options);
-    if (!stopped.ok) {
-      throw new Error(
-        `プロセスツリーの停止確認が期限内に完了しませんでした `
-        + `(pid ${rootPid}, 残存PID: ${stopped.alivePids.join(',')})`,
-      );
-    }
-    return { ok: true, pids: treePids };
+    if (stopped.ok) return { ok: true, pids: treePids };
+
+    const taskkillStderr = String(result?.stderr || '').trim();
+    const taskkillDetail = [
+      taskkillError?.message,
+      result?.error?.message,
+      taskkillStderr,
+      result ? `exit ${result.status}` : 'spawn failed',
+    ].filter(Boolean).join('; ');
+    const taskkillMessage = taskkillFailed || taskkillStderr
+      ? `; taskkill: ${taskkillDetail}`
+      : '';
+    throw new Error(
+      `プロセスツリーの停止確認が期限内に完了しませんでした `
+      + `(pid ${rootPid}, 残存PID: ${stopped.alivePids.join(',')}${taskkillMessage})`,
+    );
   }
 
-  try { process.kill(-rootPid, 'SIGTERM'); } catch { /* プロセスグループ無し等 */ }
-  try { process.kill(rootPid, 'SIGTERM'); } catch { /* 既に終了済み */ }
-  return { ok: true, pids: [rootPid] };
+  const treePids = processTreePidsUnix(rootPid, options.spawnSyncFn || spawnSync);
+  const killFn = options.killFn || process.kill.bind(process);
+  const killErrors = [];
+  try { killFn(-rootPid, 'SIGTERM'); } catch (error) { killErrors.push(`group: ${error.message}`); }
+  try { killFn(rootPid, 'SIGTERM'); } catch (error) { killErrors.push(`root: ${error.message}`); }
+
+  const stopped = waitForPidsToExit(treePids, options);
+  if (stopped.ok) return { ok: true, pids: treePids };
+  const killMessage = killErrors.length > 0 ? `; SIGTERM: ${killErrors.join('; ')}` : '';
+  throw new Error(
+    `プロセスツリーの停止確認が期限内に完了しませんでした `
+    + `(pid ${rootPid}, 残存PID: ${stopped.alivePids.join(',')}${killMessage})`,
+  );
 }
 
 module.exports = {
