@@ -216,8 +216,9 @@ function buildCommentBody({ commit, testResult }) {
         ? String(layer.executionLogPath).split(/[\\/]/).filter(Boolean).pop() || ''
         : '';
       const record = recordName ? `, 実行記録: \`${recordName}\`` : '';
+      const command = status === 'unknown' && layer.command ? `, command: \`${layer.command}\`` : '';
       const reason = status === 'unknown' && layer.reason ? `, reason: ${layer.reason}` : '';
-      lines.push(`  - **${name}**: ${status}${countSuffix}${count}${executor}${scope}${record}${reason}`);
+      lines.push(`  - **${name}**: ${status}${countSuffix}${count}${executor}${scope}${record}${command}${reason}`);
     }
     return lines.join('\n');
   }

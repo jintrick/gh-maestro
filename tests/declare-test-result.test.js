@@ -115,6 +115,36 @@ test('buildCommentBody: 層別aggregateはfull/slowの結果とslowの実行記�
   assert.ok(body.includes('- **結果**: fail'));
 });
 
+test('buildCommentBody: unavailable層はcommandと具体的なreasonをunknownとして申告する', () => {
+  const body = buildCommentBody({
+    commit: SHA,
+    testResult: {
+      provenance: 'test-runner',
+      scope: 'aggregate',
+      layers: {
+        full: {
+          status: 'complete', outcome: 'pass', tests: 10, pass: 10, fail: 0,
+          executor: 'test-runner', scope: 'full',
+        },
+        slow: {
+          status: 'unavailable',
+          command: 'npm run test:slow',
+          reason: "runner-abnormal-exit: command: npm run test:slow; stderr: Cannot find module './tests/_env-setup.js'",
+          executor: 'poll-pr',
+          scope: 'partial',
+          executionLogPath: 'C:/runtime/slow.log',
+        },
+      },
+    },
+  });
+
+  assert.ok(body.includes('**slow**: unknown'));
+  assert.ok(body.includes('command: `npm run test:slow`'));
+  assert.ok(body.includes("Cannot find module './tests/_env-setup.js'"));
+  assert.ok(body.includes('- **結果**: unknown'));
+  assert.doesNotMatch(body, /\*\*slow\*\*: fail/);
+});
+
 test('declareTestResult: 手入力の commit/fail/pass を API 境界で拒否する', () => {
   let externalCall = false;
   const deps = baseDeps({ ghListCommentsFn: () => { externalCall = true; return { status: 0, stdout: '[]' }; } });

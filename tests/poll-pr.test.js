@@ -890,6 +890,57 @@ test('runSlowTest keeps a non-zero slow test outcome as fail', async () => {
   }
 });
 
+test('runSlowTest propagates unavailable command and reason to SLOW_TEST_RESULT', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-slow-unavailable-');
+  const worktree = path.join(workspace, '.gh-maestro', 'worktrees', 'fixture-senior');
+  fs.mkdirSync(worktree, { recursive: true });
+  const runtime = tempDirScope.mkdtemp('gh-maestro-poll-pr-runtime-');
+  const previousRuntime = process.env.GH_MAESTRO_RUNTIME_DIR;
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtime;
+  const head = '8888888888888888888888888888888888888888';
+  const child = new EventEmitter();
+  const output = captureStdout();
+  const reason = "runner-abnormal-exit: command: npm run test:slow; stderr: Cannot find module './tests/_env-setup.js'";
+  try {
+    const result = await mod.runSlowTest({
+      pr: '481', issue: 461, repo: 'fixture/repo', workspace, headSha: head,
+    }, {
+      resolveSlowWorktreeFn: () => ({ workerName: 'fixture-senior', worktree }),
+      resolveGitHeadFn: () => head,
+      getPrHeadFn: () => head,
+      spawnFn: () => child,
+      waitChildExitFn: async ({ onCleanup }) => {
+        writeTestResultLayer(worktree, {
+          layer: 'slow',
+          scope: 'partial',
+          status: 'unavailable',
+          command: 'npm run test:slow',
+          recordedAt: '2026-09-10T00:00:00.000Z',
+          executor: 'poll-pr',
+          testedHead: head,
+          reason,
+        });
+        onCleanup();
+        return 1;
+      },
+      declareTestResultFn: () => ({ ok: true }),
+    });
+
+    assert.equal(result.status, 'unavailable');
+    assert.equal(result.command, 'npm run test:slow');
+    assert.equal(result.reason, reason);
+    const event = JSON.parse(output.output().trim().slice('SLOW_TEST_RESULT:'.length));
+    assert.equal(event.status, 'unavailable');
+    assert.equal(event.command, 'npm run test:slow');
+    assert.equal(event.reason, reason);
+  } finally {
+    output.restore();
+    if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
+  }
+});
+
 test('runSlowTest treats PR HEAD lookup failures as unknown, not stale', async (t) => {
   for (const { name, pr, getPrHeadFn } of [
     { name: 'empty response', pr: '50', getPrHeadFn: () => '' },

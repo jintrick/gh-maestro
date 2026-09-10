@@ -330,6 +330,17 @@ function appendSlowFailureLog(logPath, reason) {
   return logPath;
 }
 
+function readSlowFailureDiagnostic(logPath) {
+  if (!logPath) return '';
+  try {
+    const content = fs.readFileSync(logPath, 'utf8').trim();
+    if (!content) return '';
+    return content.length <= 4000 ? content : `${content.slice(0, 4000)}…`;
+  } catch {
+    return '';
+  }
+}
+
 function closeLogFd(logFd) {
   if (logFd === null || logFd === undefined) return;
   try { fs.closeSync(logFd); } catch {}
@@ -447,11 +458,13 @@ function finishSlowRun({ pr, repo, workspace, target, headSha, statePath, runKey
   let read = readArtifactFn(target.worktree);
   const layer = read.ok && read.result.scope === 'aggregate' ? read.result.layers.slow : null;
   if (!layer || !sameHead(layer.testedHead, headSha)) {
+    const fallbackReason = exitCode === 0 ? 'slow-result-missing' : 'runner-abnormal-exit';
+    const diagnostic = exitCode === 0 ? '' : readSlowFailureDiagnostic(logPath);
     try {
       writeLayerFn(target.worktree, unavailableSlowLayer(
         headSha,
         logPath,
-        exitCode === 0 ? 'slow-result-missing' : 'runner-abnormal-exit',
+        diagnostic ? `${fallbackReason}: ${diagnostic}` : fallbackReason,
       ));
     } catch {}
   }
@@ -467,6 +480,8 @@ function finishSlowRun({ pr, repo, workspace, target, headSha, statePath, runKey
     ...(finalLayer.tests !== undefined ? { tests: finalLayer.tests } : {}),
     ...(finalLayer.pass !== undefined ? { pass: finalLayer.pass } : {}),
     ...(finalLayer.fail !== undefined ? { fail: finalLayer.fail } : {}),
+    command: finalLayer.command,
+    ...(finalLayer.reason ? { reason: finalLayer.reason } : {}),
     executionLogPath: finalLayer.executionLogPath || logPath,
     artifactPath: read.path || testResultPath(target.worktree),
     statePath,

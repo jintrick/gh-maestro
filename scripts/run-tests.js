@@ -4,7 +4,8 @@
 // run-tests.js — 宣言されたテスト層の実行と結果成果物の生成を一体化する。
 //
 // このスクリプト自身が runtime root へ成果物を書き出すため、コーダーが fail/pass を
-// 数えて申告コマンドへ入力する経路はない。子プロセスの終了コードを結果の正本とし、
+// 数えて申告コマンドへ入力する経路はない。子プロセスの終了コードを基本の結果とし、
+// 起動前異常終了を示すプロセス／出力の証拠がある場合だけ unavailable として保存する。
 // 読めるテスト件数は付加情報として保存する。
 
 const { spawnSync } = require('./shared/child-process');
@@ -154,6 +155,65 @@ function findFullLayer(testConfig) {
 function commandDisplay(command, displayCommand) {
   if (typeof displayCommand === 'string' && displayCommand.trim()) return displayCommand;
   return command.map((arg) => /[\s"']/.test(arg) ? JSON.stringify(arg) : arg).join(' ');
+}
+
+const STARTUP_FAILURE_PATTERNS = Object.freeze([
+  /\bCannot find module\b/i,
+  /\bCannot find package\b/i,
+  /\bMODULE_NOT_FOUND\b/i,
+  /\bERR_MODULE_NOT_FOUND\b/i,
+  /\bModuleNotFoundError\b/i,
+  /\bspawn(?:Sync)?\b[^\r\n]*\bENOENT\b/i,
+  /\bcommand not found\b/i,
+  /\bexecutable file not found\b/i,
+  /\bNo such file or directory\b/i,
+]);
+
+function truncateDiagnostic(value, maxLength = 4000) {
+  const text = outputText(value).trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}…`;
+}
+
+function runnerDiagnostic({ displayCommand, child, stdout, stderr }) {
+  const details = [`command: ${displayCommand}`];
+  if (child && child.error) {
+    const errorMessage = child.error && child.error.message
+      ? child.error.message : String(child.error);
+    details.push(`error: ${truncateDiagnostic(errorMessage)}`);
+  }
+  if (child && Number.isInteger(child.status)) details.push(`exit code: ${child.status}`);
+  if (child && child.signal) details.push(`signal: ${child.signal}`);
+  const stderrText = truncateDiagnostic(stderr);
+  const stdoutText = truncateDiagnostic(stdout);
+  if (stderrText) details.push(`stderr: ${stderrText}`);
+  if (stdoutText) details.push(`stdout: ${stdoutText}`);
+  return details.join('; ');
+}
+
+/**
+ * 子プロセスがテストを実行する前に異常終了したことを示す場合だけ、
+ * complete/fail の分類を unavailable へ倒す。TAP以外のランナーについては、
+ * 非空の独自失敗出力を実行後の失敗として保持し、出力形式を仮定しない。
+ */
+function classifyRunnerUnavailable({ child, childExitCode, stdout, stderr, summary, summaryFields, displayCommand }) {
+  if (child && child.error) {
+    return `runner-start-failed: ${runnerDiagnostic({ displayCommand, child, stdout, stderr })}`;
+  }
+  if (childExitCode === null) {
+    return `runner-start-failed: ${runnerDiagnostic({ displayCommand, child, stdout, stderr })}`;
+  }
+  if (childExitCode === 0) return null;
+
+  const combinedOutput = `${stdout}\n${stderr}`;
+  const hasTestExecutionEvidence = summary.ok && summaryFields.tests > 0;
+  if (hasTestExecutionEvidence) return null;
+  const hasKnownStartupFailure = STARTUP_FAILURE_PATTERNS.some((pattern) => pattern.test(combinedOutput));
+  const hasZeroTestSummary = summary.ok && summaryFields.tests === 0;
+  if (!combinedOutput.trim() || hasKnownStartupFailure || hasZeroTestSummary) {
+    return `runner-abnormal-exit: ${runnerDiagnostic({ displayCommand, child, stdout, stderr })}`;
+  }
+  return null;
 }
 
 function clearPreviousArtifact(worktree) {
@@ -411,7 +471,8 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
 
   const summary = parseTapSummary(`${stdout}${stderr ? `\n${stderr}` : ''}`);
   // TAPの必須欄が揃っていても、framework固有の集計が成果物契約に収まらない場合は
-  // 件数だけを捨てる。終了コード由来のoutcomeは、そのようなsummaryでも保持する。
+  // 件数だけを捨てる。テスト実行後の非0終了は、summaryが不正でも終了コード由来の
+  // failとして保持する。
   const summaryFields = summary.ok
     && summary.summary.pass + summary.summary.fail <= summary.summary.tests
     ? summary.summary
@@ -423,8 +484,17 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
     [command, ...commandArgs],
     selected.displayCommand,
   );
+  const runnerUnavailableReason = classifyRunnerUnavailable({
+    child,
+    childExitCode,
+    stdout,
+    stderr,
+    summary,
+    summaryFields,
+    displayCommand,
+  });
   let artifact;
-  if (childExitCode !== null && testedContentHash) {
+  if (childExitCode !== null && testedContentHash && !runnerUnavailableReason) {
     artifact = {
       schemaVersion: TEST_RESULT_SCHEMA_VERSION,
       producer: TEST_RESULT_PRODUCER,
@@ -454,7 +524,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
       testedHead,
       reason: contentSnapshotError
         ? 'content-snapshot-failed'
-        : (child.error || childExitCode === null ? 'runner-start-failed' : 'tap-summary-invalid'),
+        : (runnerUnavailableReason || 'tap-summary-invalid'),
     };
   }
   if (env.GH_MAESTRO_TEST_LOG_PATH) artifact.executionLogPath = env.GH_MAESTRO_TEST_LOG_PATH;
