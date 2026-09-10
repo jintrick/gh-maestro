@@ -16,7 +16,7 @@ const fs = require('fs');
 const { spawnSync } = require('./child-process');
 const { killPane } = require('./pane-launch');
 const { normalizeWorkerEntry } = require('./worker-entry');
-const { killProcessTree } = require('./kill-tree');
+const { killProcessTree, waitForPidsToExit } = require('./kill-tree');
 const { sweepRegistry, isProcessAlive, verifyProcessIdentity } = require('../process-lifecycle');
 const { deriveRoleFromSkill } = require('./worker-factory');
 const { recordCycleEvent } = require('./cycle-metrics');
@@ -31,8 +31,13 @@ const defaultSleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4
  * @param {object} [opts]
  * @param {boolean} [opts.isRemoveMode=false] true の場合、同一性不一致時に throw せず警告を出して kill をスキップ
  * @param {(msg: string) => void} [opts.logWarn=console.warn] 警告・情報ログ出力関数
- * @param {(ms: number) => void} [opts.sleepFn=defaultSleep] スリープ関数
- * @param {number} [opts.sleepMs=500] kill後のハンドル解放待機ミリ秒
+ * @param {(ms: number) => void} [opts.sleepFn=defaultSleep] pane解放待ちにも使うスリープ関数
+ * @param {number} [opts.stopTimeoutMs=5000] プロセス停止確認の上限ミリ秒
+ * @param {number} [opts.pollIntervalMs=50] プロセス停止確認の間隔ミリ秒
+ * @param {number} [opts.sleepMs=500] レガシーpaneの解放待ちミリ秒
+ * @param {Function} [opts.killProcessTreeFn] プロセス停止関数（テスト用）
+ * @param {Function} [opts.waitForPidsToExitFn] 停止確認関数（テスト用）
+ * @param {Function} [opts.isProcessAliveFn] 生存確認関数（テスト用）
  * @param {object} [opts._injectedWorkers] テスト用 workers オブジェクト注入
  * @returns {{ success: boolean, stoppedPid: number|null, skippedReason?: string, workerEntry: object }}
  */
@@ -40,8 +45,37 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
   const isRemoveMode = opts.isRemoveMode ?? false;
   const logWarn = opts.logWarn ?? console.warn;
   const sleepFn = opts.sleepFn ?? defaultSleep;
-  const sleepMs = opts.sleepMs ?? 500;
+  const stopTimeoutMs = opts.stopTimeoutMs ?? 5000;
+  const pollIntervalMs = opts.pollIntervalMs ?? 50;
+  const paneWaitMs = opts.sleepMs ?? 500;
   const recordCycleEventFn = opts.recordCycleEventFn || recordCycleEvent;
+  const killProcessTreeFn = opts.killProcessTreeFn || killProcessTree;
+  const waitForPidsToExitFn = opts.waitForPidsToExitFn || waitForPidsToExit;
+  const isProcessAliveFn = opts.isProcessAliveFn || isProcessAlive;
+
+  const killAndConfirm = (pid) => {
+    const killResult = killProcessTreeFn(pid, {
+      timeoutMs: stopTimeoutMs,
+      pollIntervalMs,
+      sleepFn,
+      isProcessAliveFn,
+    });
+    // WindowsではkillProcessTreeが親子孫全体を確認する。Unixでは同じAPIを
+    // 親PIDにも適用して、少なくとも呼び出し元が停止完了を観測するまで返さない。
+    const stopped = waitForPidsToExitFn(killResult?.pids || [pid], {
+      timeoutMs: stopTimeoutMs,
+      pollIntervalMs,
+      sleepFn,
+      isProcessAliveFn,
+    });
+    if (!stopped.ok) {
+      throw new Error(
+        `プロセスツリーの停止確認が期限内に完了しませんでした `
+        + `(pid ${pid}, 残存PID: ${stopped.alivePids.join(',')})`,
+      );
+    }
+    return killResult;
+  };
 
   let workers = opts._injectedWorkers;
   if (!workers) {
@@ -66,13 +100,17 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
 
   // ── 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill ──────
   if (workerEntry.notifierPid) {
-    killProcessTree(workerEntry.notifierPid);
-    logWarn(`stop-worker: レガシー notifier (pid ${workerEntry.notifierPid}) を終了しました`);
+    if (isProcessAliveFn(workerEntry.notifierPid)) {
+      killAndConfirm(workerEntry.notifierPid);
+      logWarn(`stop-worker: レガシー notifier (pid ${workerEntry.notifierPid}) を終了しました`);
+    } else {
+      logWarn(`stop-worker: レガシー notifier (pid ${workerEntry.notifierPid}) は既に停止しています`);
+    }
   }
 
   // ── headless ワーカーのプロセスツリーを終了（同一性確認付き） ──────────────────
   if (workerEntry.pid) {
-    const pidAlive = isProcessAlive(workerEntry.pid);
+    const pidAlive = isProcessAliveFn(workerEntry.pid);
     if (pidAlive) {
       const identity = verifyProcessIdentity(workerEntry.pid, workerEntry);
       if (!identity.match) {
@@ -83,11 +121,10 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
           throw new Error(`ワーカー "${workerName}" のプロセス同一性確認に失敗しました（PID ${workerEntry.pid} は別プロセスに再利用されています: ${identity.reason}）。安全のためプロセス終了を中断します。`);
         }
       } else {
-        killProcessTree(workerEntry.pid);
+        killAndConfirm(workerEntry.pid);
         stoppedPid = workerEntry.pid;
         const prefix = isRemoveMode ? 'remove-worker' : 'stop-worker';
         logWarn(`${prefix}: ワーカープロセス (pid ${workerEntry.pid}) を終了しました`);
-        sleepFn(sleepMs);
       }
     } else {
       const prefix = isRemoveMode ? 'remove-worker' : 'stop-worker';
@@ -104,7 +141,7 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
     } else {
       logWarn(`${prefix}: レガシーpane ${workerEntry.paneId} を終了しました`);
     }
-    sleepFn(sleepMs);
+    sleepFn(paneWaitMs);
   }
 
   if (!workerEntry.pid && !workerEntry.paneId) {

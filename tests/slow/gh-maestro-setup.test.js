@@ -8,6 +8,7 @@ const os = require('os');
 const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'gh-maestro-setup.js');
+const setupModule = require(SCRIPT);
 
 // セットアップの副作用（git hooks 書き換え・.gitignore 追記・dev ブランチ作成・
 // GitHub API での旧CIファイル削除）はすべて main() の内側に閉じており、
@@ -103,6 +104,30 @@ function runSetup(dir) {
 function runSetupCli(dir) {
   return spawnSync(process.execPath, [SCRIPT, dir], { cwd: dir, encoding: 'utf8' });
 }
+
+test('git問い合わせ: core.hooksPathの未設定と問い合わせ不能（status=null）を区別する', () => {
+  const unavailable = setupModule.gitOutput(
+    ['config', '--get', 'core.hooksPath'],
+    () => ({ status: null, error: { message: 'git spawn failed' }, stdout: '', stderr: '' }),
+  );
+  assert.deepEqual(unavailable, { status: 'unavailable', detail: 'git spawn failed' });
+
+  const unset = setupModule.gitOutput(
+    ['config', '--get', 'core.hooksPath'],
+    () => ({ status: 1, stdout: '', stderr: '' }),
+  );
+  assert.deepEqual(unset, { status: 'unset', value: '' });
+
+  assert.throws(
+    () => setupModule.resolveHooksDir(
+      (cmd, args) => args[0] === 'config'
+        ? { status: null, error: { message: 'git spawn failed' }, stdout: '', stderr: '' }
+        : { status: 0, stdout: '.git\n', stderr: '' },
+    ),
+    /core\.hooksPath の問い合わせに失敗しました: git spawn failed/,
+    '判定不能なhooksPathを既定.git/hooksへ縮退させてはならない',
+  );
+});
 
 test('テスト実行中のWezTerm前提チェック拒否はsetupの失敗として顕在化し、未処理例外にならない', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-setup-wezterm-guard-'));
@@ -366,6 +391,7 @@ test('core.hooksPathがワークツリー外（絶対パス）を指す場合、
       const r = runSetup(dir);
       assert.equal(r.status, 0, r.stderr);
       const hook = fs.readFileSync(path.join(outside, 'pre-commit'), 'utf8');
+      assert.match(r.stdout, /pre-commit hook \(sync\): installed/);
       assert.match(hook, /# gh-maestro:sync-rules:v2/);
       assert.doesNotMatch(hook, /sync-agents-md\.js/);
       assert.doesNotMatch(hook, /git add CLAUDE\.md/);

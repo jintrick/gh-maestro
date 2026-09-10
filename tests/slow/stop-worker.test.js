@@ -7,6 +7,8 @@ const fs = require('fs');
 const os = require('os');
 const { spawnSync, spawn } = require('child_process');
 const { getProcessStartTime, isProcessAlive } = require('../../scripts/process-lifecycle');
+const { killProcessTree } = require('../../scripts/shared/kill-tree');
+const stopWorkerCli = require('../../scripts/stop-worker');
 const { cleanSpawnEnv } = require('../_spawn-env');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'stop-worker.js');
@@ -59,7 +61,12 @@ function run(args, env = {}) {
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-stop-'));
-  try { return fn(dir); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  try { return fn(dir); } finally {
+    // fixtureプロセスのcwdをdirへ固定しているため、Windowsではkill直後の
+    // current-directoryハンドル解放がrmdirより遅れることがある。bounded retryで
+    // teardownを同期し、失敗を次のテストへ持ち越さない。
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
 }
 
 /**
@@ -74,7 +81,12 @@ function spawnProcessTree(dir) {
     const child = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], { stdio: 'ignore', windowsHide: true });
     fs.writeFileSync(process.argv[1], String(child.pid), 'utf8');
     setInterval(() => {}, 1000);
-  `, childInfoFile], { detached: true, stdio: 'ignore', windowsHide: true });
+  `, childInfoFile], {
+    cwd: dir,
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
 
   const parentPid = parent.pid;
   const deadline = Date.now() + 5000;
@@ -82,7 +94,7 @@ function spawnProcessTree(dir) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
   }
   if (!fs.existsSync(childInfoFile)) {
-    try { process.kill(parentPid, 'SIGKILL'); } catch {}
+    try { killProcessTree(parentPid); } catch {}
     throw new Error('子プロセスの起動・PID取得に失敗しました');
   }
   const childPid = parseInt(fs.readFileSync(childInfoFile, 'utf8'), 10);
@@ -102,6 +114,95 @@ test('stop-worker: -h もUsageを表示して終了コード0', () => {
   const r = run(['-h']);
   assert.equal(r.status, 0);
   assert.match(r.stdout, /Usage: node stop-worker\.js/);
+});
+
+test('killProcessTree: Windowsでtaskkillが自然終了を報告しても全PID停止後は成功する', () => {
+  const calls = [];
+  const spawnSyncFn = (command, args) => {
+    calls.push({ command, args });
+    if (command === 'powershell') return { status: 0, stdout: '[7101,7102]', stderr: '' };
+    if (command === 'taskkill') return { status: 1, stdout: '', stderr: 'process already exited' };
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  const result = killProcessTree(7101, {
+    platform: 'win32',
+    spawnSyncFn,
+    isProcessAliveFn: () => false,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+    sleepFn: () => {},
+  });
+
+  assert.deepEqual(result, { ok: true, pids: [7101, 7102] });
+  assert.deepEqual(calls.map(({ command }) => command), ['powershell', 'taskkill']);
+});
+
+test('killProcessTree: Windowsでtaskkill成功後も子PIDが残れば期限超過として例外になる', () => {
+  const spawnSyncFn = (command) => {
+    if (command === 'powershell') return { status: 0, stdout: '[7201,7202]', stderr: '' };
+    if (command === 'taskkill') return { status: 0, stdout: '', stderr: 'taskkill warning' };
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  assert.throws(() => killProcessTree(7201, {
+    platform: 'win32',
+    spawnSyncFn,
+    isProcessAliveFn: (pid) => pid === 7202,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+    sleepFn: () => {},
+  }), (error) => {
+    assert.match(error.message, /残存PID: 7202/);
+    assert.match(error.message, /taskkill: taskkill warning/);
+    return true;
+  });
+});
+
+test('killProcessTree: Unixでもプロセスグループと子孫PIDを停止確認し、子PID残存時は例外になる', () => {
+  const signals = [];
+  const spawnSyncFn = (command) => {
+    if (command === 'ps') {
+      return {
+        status: 0,
+        stdout: '7301 0 7301\n7302 7301 7301\n7303 7302 7301\n',
+        stderr: '',
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  assert.throws(() => killProcessTree(7301, {
+    platform: 'linux',
+    spawnSyncFn,
+    killFn: (pid, signal) => signals.push([pid, signal]),
+    isProcessAliveFn: (pid) => pid === 7302,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+    sleepFn: () => {},
+  }), /残存PID: 7302/);
+  assert.deepEqual(signals, [[-7301, 'SIGTERM'], [7301, 'SIGTERM']]);
+});
+
+test('killProcessTree: Unixのプロセス列挙不能時は成功へ縮退しない', () => {
+  assert.throws(() => killProcessTree(7401, {
+    platform: 'linux',
+    spawnSyncFn: () => ({ status: null, error: new Error('ps unavailable') }),
+    killFn: () => { throw new Error('kill must not be called'); },
+    timeoutMs: 5,
+    sleepFn: () => {},
+  }), /Unixプロセスツリーの列挙に失敗しました/);
+});
+
+test('stop-worker: killProcessTreeの停止確認失敗はCLI境界で非0 statusになる', () => {
+  const errors = [];
+  const status = stopWorkerCli.main(['test-worker', '--workspace', process.cwd()], {
+    stopWorkerProcessFn: () => { throw new Error('子プロセスの停止確認に失敗しました'); },
+    errorFn: (message) => errors.push(message),
+  });
+
+  assert.equal(status, 1);
+  assert.deepEqual(errors, ['stop-worker: 子プロセスの停止確認に失敗しました']);
 });
 
 test('stop-worker: 引数なしはUsageエラーで終了コード1', () => {
@@ -215,7 +316,7 @@ test('stop-worker: 正常系: 同一性が一致するプロセスツリー（�
       const workers = JSON.parse(fs.readFileSync(path.join(dir, '.gh-maestro', 'workers.json'), 'utf8'));
       assert.ok('test-worker' in workers, 'workers.jsonにエントリが残っていること');
     } finally {
-      try { process.kill(parentPid, 'SIGKILL'); } catch {}
+      try { killProcessTree(parentPid); } catch {}
       try { process.kill(childPid, 'SIGKILL'); } catch {}
     }
   });
@@ -263,7 +364,7 @@ test('stop-worker: 拒否側: PIDは生存しているが起動時刻が不一�
       const workers = JSON.parse(fs.readFileSync(path.join(dir, '.gh-maestro', 'workers.json'), 'utf8'));
       assert.ok('mismatch-worker' in workers, 'workers.jsonにエントリが残っていること');
     } finally {
-      try { process.kill(parentPid, 'SIGKILL'); } catch {}
+      try { killProcessTree(parentPid); } catch {}
       try { process.kill(childPid, 'SIGKILL'); } catch {}
     }
   });
@@ -295,7 +396,7 @@ test('stop-worker: 〈--issue + --skill〉指定で解決して停止できる',
       assert.equal(isProcessAlive(parentPid), false, '親プロセスが終了していること');
       assert.equal(isProcessAlive(childPid), false, '子プロセスが終了していること');
     } finally {
-      try { process.kill(parentPid, 'SIGKILL'); } catch {}
+      try { killProcessTree(parentPid); } catch {}
       try { process.kill(childPid, 'SIGKILL'); } catch {}
     }
   });

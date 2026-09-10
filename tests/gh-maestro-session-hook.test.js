@@ -241,6 +241,30 @@ test('runSessionHook: stage失敗時は後続を実行せず、捕捉したstdou
   assert.doesNotMatch(result.stderr, /SESSION_ID=old-session-id/);
 });
 
+test('runSessionHook: setupの判定不能失敗を成功へ縮退させず、reset以降を実行しない', () => {
+  const calls = [];
+  const workspace = path.join(__dirname, '..', 'session-hook-setup-failure-workspace');
+
+  const result = require('../scripts/gh-maestro-session-hook').runSessionHook(workspace, {
+    spawnSyncFn: (command, args) => {
+      calls.push(args[0]);
+      return {
+        status: 1,
+        stdout: 'setup output\n',
+        stderr: 'git フック置き場の問い合わせが判定不能\n',
+      };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(calls, [path.join(__dirname, '..', 'scripts', 'gh-maestro-setup.js')],
+    'setup失敗後にreset-session/get-contextを実行しないこと');
+  assert.equal(result.stdout, '', 'setup失敗時にstdoutを出力しないこと');
+  assert.equal(result.failedStage, 'gh-maestro-setup.js');
+  assert.match(result.stderr, /git フック置き場の問い合わせが判定不能/);
+});
+
 
 
 test('CLI通し: get-contextが失敗した場合は旧SESSION_IDをstdoutへ出力しない', () => {

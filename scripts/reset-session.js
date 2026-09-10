@@ -22,7 +22,7 @@ const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { killProcessTree } = require('./shared/kill-tree');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { worktreeRemove, worktreePrune } = require('./shared/git-worktree');
-const { sweepRegistry } = require('./process-lifecycle');
+const { sweepRegistry, isProcessAlive } = require('./process-lifecycle');
 const { getAlivePaneIds, killPane } = require('./shared/pane-launch');
 const { loadStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
 const { readWorkersRaw } = require('./shared/workers-registry');
@@ -387,8 +387,12 @@ if (require.main === module) {
       // 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill
       // 過去のセッションの workers.json には notifierPid が残っている可能性がある。
       if (normalized.notifierPid) {
-        killProcessTree(normalized.notifierPid);
-        log(`"${name}" のレガシー notifier (pid ${normalized.notifierPid}) を終了しました。`);
+        if (isProcessAlive(normalized.notifierPid)) {
+          killProcessTree(normalized.notifierPid);
+          log(`"${name}" のレガシー notifier (pid ${normalized.notifierPid}) を終了しました。`);
+        } else {
+          log(`"${name}" のレガシー notifier (pid ${normalized.notifierPid}) は既に終了しています。`);
+        }
       }
 
       let handled = false;

@@ -28,7 +28,7 @@ function fakeChild() {
  * kill-tree.js が spawnSync をロード時点で捕捉するため、キャッシュを必ず消す。
  * @returns {{ waitChildExit: Function, taskkillCalls: Array<Array<string>> }}
  */
-function loadChildWait() {
+function loadChildWait(rootPid = 9999) {
   const taskkillCalls = [];
   delete require.cache[childWaitPath];
   delete require.cache[killTreePath];
@@ -41,6 +41,7 @@ function loadChildWait() {
       spawn: () => { throw new Error('spawn should not be called in child-wait tests'); },
       spawnSync: (cmd, args) => {
         if (cmd === 'taskkill') taskkillCalls.push(args);
+        if (cmd === 'ps') return { status: 0, stdout: `${rootPid} 1 ${rootPid}\n`, stderr: '' };
         return { status: 0, stdout: '', stderr: '' };
       },
       execSync: () => '',

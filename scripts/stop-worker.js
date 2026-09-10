@@ -31,7 +31,7 @@ workerName（位置引数）か〈--issue + --skill〉のいずれかで停止�
 同一性が一致しない（PIDが別プロセスに再利用されている）場合はプロセスを kill せずエラー終了する。
 作業ツリー・ブランチ・workers.json エントリは削除せずそのまま維持するため、後から resume で再開できる。`;
 
-function main(argv = process.argv.slice(2)) {
+function main(argv = process.argv.slice(2), deps = {}) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(argv, {
@@ -55,7 +55,8 @@ function main(argv = process.argv.slice(2)) {
     return 0;
   }
 
-  const fail = (msg) => { console.error(`stop-worker: ${msg}`); return 1; };
+  const errorFn = deps.errorFn || console.error;
+  const fail = (msg) => { errorFn(`stop-worker: ${msg}`); return 1; };
 
   const workspace = resolveWorkspace(values['--workspace']);
   if (!workspace) return fail('ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
@@ -77,7 +78,8 @@ function main(argv = process.argv.slice(2)) {
   }
 
   try {
-    stopWorkerProcess(workspace, workerName, { isRemoveMode: false });
+    const stopWorkerProcessFn = deps.stopWorkerProcessFn || stopWorkerProcess;
+    stopWorkerProcessFn(workspace, workerName, { isRemoveMode: false });
     return 0;
   } catch (e) {
     return fail(e.message);
