@@ -92,15 +92,6 @@ test('CLI: --workspace省略時は環境変数のメインworkspaceへセンチ�
 
 // ── finalizeReview(complete) with --integrated（RMフェーズ2の重複統合ドラフト） ──
 
-// validatePayload は workspace/scripts/review-findings-schema.json からスキーマを読むため、
-// テストの一時workspaceへ実スキーマをコピーする。
-function copySchemaToWorkspace(workspace) {
-  const scriptsDir = path.join(workspace, 'scripts');
-  fs.mkdirSync(scriptsDir, { recursive: true });
-  const src = path.join(__dirname, '..', '..', 'scripts', 'review-findings-schema.json');
-  fs.copyFileSync(src, path.join(scriptsDir, 'review-findings-schema.json'));
-}
-
 function completeGateResults() {
   return {
     manifest_ref: { pr: 5, repo: 'o/r', headRefOid: 'abc' },
