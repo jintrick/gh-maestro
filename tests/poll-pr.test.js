@@ -1016,6 +1016,8 @@ test('runSlowTest records timeout/startup failures and does not retry a complete
       pr: '43', issue: 461, repo: 'fixture/repo', workspace, headSha: head,
     }, deps);
     assert.equal(result.status, 'unavailable');
+    assert.equal(result.command, 'npm run test:slow');
+    assert.equal(result.reason, 'child did not exit after timeout');
     assert.ok(fs.existsSync(result.executionLogPath));
     assert.match(fs.readFileSync(result.executionLogPath, 'utf8'), /child did not exit after timeout/);
     assert.ok(fs.existsSync(result.artifactPath));

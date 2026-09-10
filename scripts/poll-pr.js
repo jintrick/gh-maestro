@@ -392,6 +392,7 @@ function finishSlowFailure({ pr, repo, workspace, target, headSha, statePath, ru
   }
   if (closeLog) closeLog();
   const resolvedLogPath = logPath || slowLogPath(workspace, pr, headSha);
+  const fallbackLayer = unavailableSlowLayer(headSha, resolvedLogPath, reason);
   let logError;
   try { appendSlowFailureLog(resolvedLogPath, reason); } catch (error) { logError = error.message; }
   const artifactPath = writeUnavailableLayer(target, headSha, resolvedLogPath, reason, deps)
@@ -399,6 +400,8 @@ function finishSlowFailure({ pr, repo, workspace, target, headSha, statePath, ru
   const result = {
     status: 'unavailable',
     ...(headSha ? { testedHead: headSha } : {}),
+    command: fallbackLayer.command,
+    reason,
     executionLogPath: resolvedLogPath,
     artifactPath,
     statePath,
@@ -431,6 +434,8 @@ function finishSlowStale({ pr, workspace, target, headSha, statePath, runKey, lo
   const result = {
     status: 'unavailable',
     ...(headSha ? { testedHead: headSha } : {}),
+    command: 'npm run test:slow',
+    reason,
     executionLogPath: logPath,
     artifactPath,
     statePath,
