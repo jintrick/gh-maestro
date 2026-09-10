@@ -37,7 +37,7 @@ function tapSummary({ tests, pass, fail, cancelled = 0, skipped = 0, todo = 0 })
 }
 
 function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = [], child, writeArtifactFn,
-  cwd = tempWorktree(), workspace, actor, extraDeps = {} }) {
+  cwd = tempWorktree(), workspace, homedir = tempWorktree(), actor, extraDeps = {} }) {
   const stdout = [];
   const stderr = [];
   const calls = [];
@@ -52,6 +52,7 @@ function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = []
       changedFiles,
       cwd,
       workspace,
+      homedir,
       env: {
         TEST_RUNNER_FIXTURE: '1',
         ...((actor || suite === 'slow')
@@ -326,6 +327,22 @@ test('runTests: 未知のsuiteを拒否し、宣言されたargv/mapping/fallbac
   assert.deepEqual(customCall.args, ['--ci', 'value with spaces']);
   assert.equal(customCall.options.shell, false);
   assert.equal(custom.artifacts[0].outcome, 'pass');
+
+  const declaredNode = runWithChild({
+    child: { status: 0, stdout: 'node runner passed\n', stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: () => ({
+        source: 'declared',
+        layers: {
+          full: { scope: 'full', command: ['node', '--test', 'tests/declared.test.js'] },
+        },
+      }),
+    },
+  });
+  const declaredNodeCall = declaredNode.calls.find((call) => call.type === 'spawn');
+  assert.equal(declaredNodeCall.command, 'node');
+  assert.deepEqual(declaredNodeCall.args, ['--test', 'tests/declared.test.js']);
+  assert.equal(declaredNode.artifacts[0].outcome, 'pass');
 
   const partial = runWithChild({
     layer: 'changed',

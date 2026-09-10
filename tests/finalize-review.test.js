@@ -20,7 +20,10 @@ const {
 
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES } = require('../scripts/shared/review-aspects');
 const { _validateAgainstSchema } = require('../scripts/shared/json-schema');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
+const tempDirScope = createTempDirScope();
+test.after(() => tempDirScope.cleanup());
 
 
 test('checkCompleteness: all adopted leaves success passes', () => {
@@ -331,7 +334,7 @@ function completeGateResults() {
 }
 
 test('finalizeReview(complete): workspaceにスキーマが無くても同梱スキーマで検証して出力する', async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-no-schema-'));
+  const tmpDir = tempDirScope.mkdtemp('fr-no-schema-');
   try {
     const resultsPath = path.join(tmpDir, 'results.json');
     const outputPath = path.join(tmpDir, 'manager.json');
