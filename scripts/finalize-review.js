@@ -169,11 +169,10 @@ function aggregateFindings(results) {
  * 集約後のpayloadをreview-findings-schema.jsonで検証する。
  *
  * @param {object} payload
- * @param {string} workspace
  * @returns {{valid: boolean, errors: string[]}}
  */
-function validatePayload(payload, workspace) {
-  const schemaPath = path.join(workspace, 'scripts', 'review-findings-schema.json');
+function validatePayload(payload) {
+  const schemaPath = path.join(__dirname, 'review-findings-schema.json');
   let schema;
   try {
     schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
@@ -439,7 +438,7 @@ async function finalizeReview(resultsPath, mode, outputPath, workspace, integrat
     };
 
     // 4. スキーマ検証
-    const validation = validatePayload(payload, workspace);
+    const validation = validatePayload(payload);
     if (!validation.valid) {
       return { ok: false, summary: { error: 'schema validation failed', details: validation.errors } };
     }
