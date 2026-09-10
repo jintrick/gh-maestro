@@ -310,15 +310,6 @@ test('finalizeReview(incomplete): 投稿成功時は incomplete-review センチ
 
 // ── finalizeReview(complete) with --integrated（RMフェーズ2の重複統合ドラフト） ──
 
-// validatePayload は workspace/scripts/review-findings-schema.json からスキーマを読むため、
-// テストの一時workspaceへ実スキーマをコピーする。
-function copySchemaToWorkspace(workspace) {
-  const scriptsDir = path.join(workspace, 'scripts');
-  fs.mkdirSync(scriptsDir, { recursive: true });
-  const src = path.join(__dirname, '..', 'scripts', 'review-findings-schema.json');
-  fs.copyFileSync(src, path.join(scriptsDir, 'review-findings-schema.json'));
-}
-
 function completeGateResults() {
   return {
     manifest_ref: { pr: 5, repo: 'o/r', headRefOid: 'abc' },
@@ -339,9 +330,26 @@ function completeGateResults() {
   };
 }
 
+test('finalizeReview(complete): workspaceにスキーマが無くても同梱スキーマで検証して出力する', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-no-schema-'));
+  try {
+    const resultsPath = path.join(tmpDir, 'results.json');
+    const outputPath = path.join(tmpDir, 'manager.json');
+    fs.writeFileSync(resultsPath, JSON.stringify(completeGateResults()), 'utf8');
+
+    assert.equal(fs.existsSync(path.join(tmpDir, 'scripts', 'review-findings-schema.json')), false);
+    const res = await finalizeReview(resultsPath, 'complete', outputPath, tmpDir);
+
+    assert.equal(res.ok, true);
+    assert.equal(res.summary.totalFindings, 0);
+    assert.deepEqual(JSON.parse(fs.readFileSync(outputPath, 'utf8')).findings, []);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('finalizeReview(complete, --integrated): 統合ドラフトのfindingsを出力に書き出す', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-int-'));
-  copySchemaToWorkspace(tmpDir);
   try {
     const resultsPath = path.join(tmpDir, 'results.json');
     fs.writeFileSync(resultsPath, '\uFEFF' + JSON.stringify(completeGateResults()), 'utf8');
@@ -375,7 +383,6 @@ test('finalizeReview(complete, --integrated): 統合ドラフトのfindingsを�
 
 test('finalizeReview(complete, --integrated): ドラフトがfindings配列を持たなければエラーで書き出さない', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-int-bad-'));
-  copySchemaToWorkspace(tmpDir);
   try {
     const resultsPath = path.join(tmpDir, 'results.json');
     fs.writeFileSync(resultsPath, JSON.stringify(completeGateResults()), 'utf8');
@@ -395,7 +402,6 @@ test('finalizeReview(complete, --integrated): ドラフトがfindings配列を�
 
 test('finalizeReview(complete, --integrated): ドラフトがJSONパース不能ならエラーで書き出さない', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-int-parse-'));
-  copySchemaToWorkspace(tmpDir);
   try {
     const resultsPath = path.join(tmpDir, 'results.json');
     fs.writeFileSync(resultsPath, JSON.stringify(completeGateResults()), 'utf8');
