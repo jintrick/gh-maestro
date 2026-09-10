@@ -399,21 +399,47 @@ function registerProcess(workspace, meta = {}) {
  *
  * @param {string} workspace
  * @param {number} [pid] 省略時は process.pid
+ * @param {{startTime?: string, script?: string, workerName?: string|null}} [expected]
+ *   指定時は同じ起動主体の registry だけを削除する。停止後のPID再利用で
+ *   新しいプロセスの登録を消さないため、停止側から渡す。
  */
-function unregisterProcess(workspace, pid) {
+function unregisterProcess(workspace, pid, expected) {
   const targetPid = pid || process.pid;
 
+  const belongsToExpectedProcess = (filePath) => {
+    if (!expected) return true;
+    let entry;
+    try {
+      entry = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch {
+      // 読めないregistryは所有者を確認できないため、停止側からの削除を拒否する。
+      return false;
+    }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+    if (entry.pid !== targetPid) return false;
+    if (expected.startTime !== undefined && entry.startTime !== expected.startTime) return false;
+    if (expected.script !== undefined && entry.script !== expected.script) return false;
+    if (expected.workerName !== undefined
+      && (entry.workerName ?? null) !== (expected.workerName ?? null)) return false;
+    return true;
+  };
+
+  const removeIfOwned = (filePath, bestEffort = false) => {
+    if (!fs.existsSync(filePath) || !belongsToExpectedProcess(filePath)) return;
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {
+      if (!bestEffort && e.code !== 'ENOENT') throw e;
+    }
+  };
+
   const filePath = pidFilePath(workspace, targetPid);
-  try {
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  } catch (e) {
-    if (e.code !== 'ENOENT') throw e;
-  }
+  removeIfOwned(filePath);
 
   // bridge: 旧ロケーションの解除は best-effort（存在しない/読めない等は無視）。
   try {
     const legacyFilePath = legacyPidFilePath(workspace, targetPid);
-    if (fs.existsSync(legacyFilePath)) fs.unlinkSync(legacyFilePath);
+    removeIfOwned(legacyFilePath, true);
   } catch {}
 }
 

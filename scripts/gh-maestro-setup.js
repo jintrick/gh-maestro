@@ -48,18 +48,69 @@ function run(cmd, args, { capture } = {}) {
   return capture ? r.stdout.trim() : true;
 }
 
-// フック置き場の判定に使う git の問い合わせ。GIT_* 位置変数の除去は ./child-process の
-// 共有ラッパーが実施済み。失敗時は null（呼び出し側がフェイルクローズの判断に使う）。
-function gitOutput(args) {
-  const r = spawnSync('git', args, { cwd: workspaceRoot, encoding: 'utf8', stdio: 'pipe' });
-  if (r.status !== 0) return null;
-  return r.stdout.trim();
+// フック置き場の判定に使う git の問い合わせ。
+// GIT_* 位置変数の除去は ./child-process の共有ラッパーが実施済み。
+// `git config --get` の status=1（設定なし）と、spawn失敗・エラー出力を伴う
+// 問い合わせ不能を分ける。判定不能を未設定へ縮退させると、誤った hooksDir に
+// 書き込むか、必要な hook が無いまま setup 成功を返してしまうためである。
+function gitOutput(args, spawnSyncFn = spawnSync) {
+  let result;
+  try {
+    result = spawnSyncFn('git', args, { cwd: workspaceRoot, encoding: 'utf8', stdio: 'pipe' });
+  } catch (error) {
+    return { status: 'unavailable', detail: error.message };
+  }
+
+  if (!result || result.error || result.status === null || result.status === undefined) {
+    return {
+      status: 'unavailable',
+      detail: result?.error?.message || 'git process did not provide an exit status',
+    };
+  }
+  if (result.status === 0) {
+    return { status: 'ok', value: String(result.stdout || '').trim() };
+  }
+
+  // `git config --get <key>` はキーが未設定のときだけ、stderrなしの status=1 を返す。
+  // stderrがある場合は、リポジトリ不在・設定読取失敗などの問い合わせ不能として扱う。
+  const stderr = String(result.stderr || '').trim();
+  if (result.status === 1
+    && args[0] === 'config'
+    && args[1] === '--get'
+    && !stderr) {
+    return { status: 'unset', value: '' };
+  }
+  return {
+    status: 'unavailable',
+    detail: stderr || `git exited with status ${result.status}`,
+  };
 }
 
 // check-ignore のように exit コードを判定に使う git 呼び出し。`--` で operands を分離し、
 // 値が `-` 始まりでもオプションとして解釈されないようにする（git-arg-injection ルール）。
-function gitStatus(args) {
-  return spawnSync('git', args, { cwd: workspaceRoot, encoding: 'utf8', stdio: 'pipe' });
+function gitStatus(args, spawnSyncFn = spawnSync) {
+  let result;
+  try {
+    result = spawnSyncFn('git', args, { cwd: workspaceRoot, encoding: 'utf8', stdio: 'pipe' });
+  } catch (error) {
+    return { status: 'unavailable', detail: error.message };
+  }
+  if (!result || result.error || result.status === null || result.status === undefined) {
+    return {
+      status: 'unavailable',
+      detail: result?.error?.message || 'git process did not provide an exit status',
+    };
+  }
+  if (result.status === 0) return { status: 'matched' };
+  if (result.status === 1) return { status: 'unmatched' };
+  return {
+    status: 'unavailable',
+    detail: String(result.stderr || '').trim() || `git exited with status ${result.status}`,
+  };
+}
+
+function gitQueryFailure(label, result) {
+  return new Error(`${label} の問い合わせに失敗しました: ${result.detail || '原因不明'}`);
 }
 
 function isInsideDir(parent, child) {
@@ -366,41 +417,58 @@ const CHECKS_MARKER_RE = /^# gh-maestro:checks(:v\d+)?$/;
 // core.hooksPath があればその解決先（相対は git 同様、ワークツリーのトップレベル基準）、
 // 無ければ既定の git ディレクトリ配下の hooks。相対解決が cwd ではなくトップレベル
 // 基準であることは実地で確認済み。
-function resolveHooksDir() {
-  const hooksPath = gitOutput(['config', '--get', 'core.hooksPath']);
-  if (hooksPath) return resolve(workspaceRoot, hooksPath);
+function resolveHooksDir(spawnSyncFn = spawnSync) {
+  const hooksPathResult = gitOutput(['config', '--get', 'core.hooksPath'], spawnSyncFn);
+  if (hooksPathResult.status === 'unavailable') {
+    throw gitQueryFailure('core.hooksPath', hooksPathResult);
+  }
+  if (hooksPathResult.status === 'ok' && hooksPathResult.value) {
+    return resolve(workspaceRoot, hooksPathResult.value);
+  }
 
-  const gitDir = gitOutput(['rev-parse', '--git-dir']);
-  const base = gitDir ? (isAbsolute(gitDir) ? gitDir : resolve(workspaceRoot, gitDir))
-                      : resolve(workspaceRoot, '.git');
+  const gitDirResult = gitOutput(['rev-parse', '--git-dir'], spawnSyncFn);
+  if (gitDirResult.status !== 'ok' || !gitDirResult.value) {
+    throw gitQueryFailure('git-dir', gitDirResult);
+  }
+  const gitDir = gitDirResult.value;
+  const base = isAbsolute(gitDir) ? gitDir : resolve(workspaceRoot, gitDir);
   return resolve(base, 'hooks');
 }
 
 // 「そのフック置き場に書き込むと共有物（コミットされうるファイル）を汚すか」を判定する。
 // true なら書き込まず検証報告のみにする。判定は「今追跡ファイルがあるか」ではなく
 // 「ワークツリーの内側か（かつ無視対象でないか）」で行う（新規プロジェクトの空ディレクトリ
-// でも絶対パス入りファイルのコミット事故を防ぐ）。git 実行が失敗したら安全側（true）に倒す。
-function hooksDirNeedsVerification(dir) {
-  const toplevel = gitOutput(['rev-parse', '--show-toplevel']);
-  if (!toplevel) return true; // フェイルクローズ: 共有されないと確認できなければ書かない
+// でも絶対パス入りファイルのコミット事故を防ぐ）。git の判定が不能なら setup を中断する。
+function hooksDirNeedsVerification(dir, spawnSyncFn = spawnSync) {
+  const toplevelResult = gitOutput(['rev-parse', '--show-toplevel'], spawnSyncFn);
+  if (toplevelResult.status !== 'ok' || !toplevelResult.value) {
+    throw gitQueryFailure('git toplevel', toplevelResult);
+  }
+  const toplevel = toplevelResult.value;
 
   // ワークツリー外（`..` 始まり・別ドライブの絶対パス）→ コミットされない → 書き込み可。
   const rel = relative(toplevel, dir);
   if (rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) return false;
 
   // git ディレクトリ配下（既定 .git/hooks を含む）→ コミットされない → 書き込み可。
-  const gitDirs = [gitOutput(['rev-parse', '--absolute-git-dir']),
-                   gitOutput(['rev-parse', '--git-common-dir'])];
-  for (const g of gitDirs) {
-    if (!g) continue;
+  const gitDirResults = [
+    gitOutput(['rev-parse', '--absolute-git-dir'], spawnSyncFn),
+    gitOutput(['rev-parse', '--git-common-dir'], spawnSyncFn),
+  ];
+  for (const result of gitDirResults) {
+    if (result.status !== 'ok' || !result.value) {
+      throw gitQueryFailure('git directory', result);
+    }
+    const g = result.value;
     const abs = isAbsolute(g) ? g : resolve(toplevel, g);
     if (isInsideDir(abs, dir)) return false;
   }
 
   // ここまで残った dir はワークツリー内・git ディレクトリ外 → 共有リスク。
   // 無視対象（.gitignore）ならコミットされないので書き込み可、それ以外は書かない。
-  const r = gitStatus(['check-ignore', '-q', '--', dir]);
-  return !(r.status === 0);
+  const r = gitStatus(['check-ignore', '-q', '--', dir], spawnSyncFn);
+  if (r.status === 'unavailable') throw gitQueryFailure('git check-ignore', r);
+  return r.status !== 'matched';
 }
 
 // フック本文が「実行される内容」として規約同期を満たしているかを検証し、
@@ -426,7 +494,11 @@ function isEffectivelyEmptyHook(content) {
 // 追跡下（共有リスク）のフックに絶対パスを書き込まないために、人間が手動追記すべき
 // ブロックを repo-relative パスで提示する（絶対パスは共有物を汚すため使わない）。
 function reportManualSyncBlock(hookPath) {
-  const toplevel = gitOutput(['rev-parse', '--show-toplevel']) || workspaceRoot;
+  const toplevelResult = gitOutput(['rev-parse', '--show-toplevel']);
+  if (toplevelResult.status !== 'ok' || !toplevelResult.value) {
+    throw gitQueryFailure('git toplevel', toplevelResult);
+  }
+  const toplevel = toplevelResult.value;
   let rel = relative(toplevel, hookPath).split(sep).join('/');
   if (!rel.startsWith('.')) rel = `./${rel}`;
   console.warn(
@@ -557,8 +629,17 @@ function main() {
   // 実効フック置き場を一度だけ解決し、設置・撤去・後始末の各処理が同じ場所を扱う。
   // 管理対象（書き込まない契約）の置き場では retireChecksHooks も実行しない——
   // 追跡対象の pre-push を書き換え・削除してはいけない（レビュー指摘への対応）。
-  const hooksDir = resolveHooksDir();
-  const verifyOnly = hooksDirNeedsVerification(hooksDir);
+  let hooksDir;
+  let verifyOnly;
+  try {
+    hooksDir = resolveHooksDir();
+    verifyOnly = hooksDirNeedsVerification(hooksDir);
+  } catch (error) {
+    fail(
+      `git フック置き場の問い合わせが判定不能なため setup を中断しました: ${error.message}`,
+      '→ git が実行可能で、対象workspaceのリポジトリ情報を読み取れることを確認してください。',
+    );
+  }
   ensureSyncHook(hooksDir, verifyOnly);
   if (!verifyOnly) retireChecksHooks(hooksDir);
   removeStaleDefaultHooks(hooksDir);
@@ -571,7 +652,13 @@ function main() {
   }
 }
 
-module.exports = { main };
+module.exports = {
+  main,
+  gitOutput,
+  gitStatus,
+  resolveHooksDir,
+  hooksDirNeedsVerification,
+};
 
 if (require.main === module) {
   main();

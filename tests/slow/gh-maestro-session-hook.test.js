@@ -14,6 +14,10 @@ const lifecycle = require('../../scripts/process-lifecycle');
 const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
 lifecycle.getProcessStartTime = () => TEST_PROCESS_START_TIME;
 const readStateLib = require('../../scripts/shared/read-state');
+const {
+  createResidentRestartHooks,
+  stopResidentEntry,
+} = require('../../scripts/shared/restart-residents');
 
 // セッションhookの実プロセス・実Git・3段階の順序は維持し、reset-session内部の
 // platform process scanだけをテスト用固定値へ差し替える。PID再利用の実照合は
@@ -155,14 +159,26 @@ async function waitForRunningSupervisors(workspace, timeoutMs = 20000) {
 
 async function stopRunningSupervisors(workspace, processHandle) {
   const { killProcessTree } = require('../../scripts/shared/kill-tree');
+  const hooks = createResidentRestartHooks();
   const targetPids = new Set();
-  const killTarget = (pid) => {
-    if (!Number.isInteger(pid) || pid <= 0) return;
-    targetPids.add(pid);
-    killProcessTree(pid);
+  const stopEntry = (entry) => {
+    if (!Number.isInteger(entry?.pid) || entry.pid <= 0) return;
+    targetPids.add(entry.pid);
+    const result = stopResidentEntry(workspace, entry, hooks);
+    if (!result.ok) throw new Error(result.error);
   };
-  if (processHandle && processHandle.pid && processHandle.exitCode === null) {
-    killTarget(processHandle.pid);
+
+  const initialEntries = lifecycle.findRunningInstances(workspace, {
+    script: 'worker-supervisor.js',
+    workerName: null,
+    allowSelf: true,
+  });
+  for (const entry of initialEntries) stopEntry(entry);
+
+  if (processHandle && processHandle.pid && processHandle.exitCode === null
+    && lifecycle.isProcessAlive(processHandle.pid) && !targetPids.has(processHandle.pid)) {
+    targetPids.add(processHandle.pid);
+    killProcessTree(processHandle.pid);
   }
 
   const deadline = Date.now() + 20000;
@@ -172,7 +188,7 @@ async function stopRunningSupervisors(workspace, processHandle) {
       workerName: null,
       allowSelf: true,
     });
-    for (const entry of entries) killTarget(entry.pid);
+    for (const entry of entries) stopEntry(entry);
 
     const alivePids = [...targetPids].filter((pid) => lifecycle.isProcessAlive(pid));
     if (alivePids.length === 0) return;
@@ -182,6 +198,22 @@ async function stopRunningSupervisors(workspace, processHandle) {
   const remainingPids = [...targetPids].filter((pid) => lifecycle.isProcessAlive(pid));
   if (remainingPids.length === 0) return;
   throw new Error(`worker-supervisor の停止確認がタイムアウトしました。残存PID: ${JSON.stringify(remainingPids)}`);
+}
+
+function removeDirectory(directory) {
+  fs.rmSync(directory, {
+    recursive: true,
+    force: true,
+    maxRetries: 20,
+    retryDelay: 100,
+  });
+}
+
+function assertNoResidentLeases(workspace) {
+  const leaseDir = path.join(workspace, '.gh-maestro', 'leases');
+  if (!fs.existsSync(leaseDir)) return;
+  const residentLeases = fs.readdirSync(leaseDir).filter((name) => name.startsWith('resident-role-'));
+  assert.deepEqual(residentLeases, [], 'resident leaseがteardown後に残っていないこと');
 }
 
 
@@ -204,9 +236,9 @@ test('CLI通し: 旧sessionIdを置いた一時workspaceでreset後のSESSION_ID
     assert.equal(outputSessionId, stateResult.state.sessionId,
       'get-contextのSESSION_IDはreset後のorchestrator.jsonと一致すること');
   } finally {
-    fs.rmSync(workspace, { recursive: true, force: true });
-    fs.rmSync(binDir, { recursive: true, force: true });
-    fs.rmSync(runtimeDir, { recursive: true, force: true });
+    removeDirectory(workspace);
+    removeDirectory(binDir);
+    removeDirectory(runtimeDir);
   }
 });
 
@@ -268,13 +300,22 @@ test('CLI通し: 生存中のworker-supervisorを維持したままhookがreset�
     } catch (error) {
       stopError = error;
     }
+    if (!stopError) {
+      assertNoResidentLeases(workspace);
+      assert.deepEqual(lifecycle.findRunningInstances(workspace, {
+        script: 'worker-supervisor.js',
+        workerName: null,
+        allowSelf: true,
+      }), [], 'worker-supervisorのPID registryがteardown後に残っていないこと');
+    }
+
     if (previousRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
     else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntimeDir;
 
     let cleanupError = null;
     for (const directory of [workspace, binDir, runtimeDir]) {
       try {
-        fs.rmSync(directory, { recursive: true, force: true });
+        removeDirectory(directory);
       } catch (error) {
         cleanupError ||= error;
       }

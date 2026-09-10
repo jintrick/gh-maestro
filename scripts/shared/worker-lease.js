@@ -632,6 +632,57 @@ function releaseResidentLease({ workspace, role, pid }) {
   releaseLease(store, roleLeaseKey(role), { pid });
 }
 
+/**
+ * 停止確認済みの別プロセスが保持していた role lease を解放する。
+ *
+ * 強制終了では対象プロセスの exit handler が走らず、通常の
+ * releaseResidentLease() が呼ばれないことがある。停止処理側から回収する場合も、
+ * PIDだけでなく registry と同じ startTime を照合し、PID再利用後の別プロセスの
+ * leaseを削除しない。削除後に再読込して、leaseが残っていれば成功を返さない。
+ *
+ * @param {object} opt
+ * @param {string} opt.workspace
+ * @param {string} opt.role
+ * @param {number} opt.pid
+ * @param {string} opt.startTime
+ * @returns {{released:boolean, remaining:boolean, reason?:string}}
+ */
+function releaseResidentLeaseForProcess({ workspace, role, pid, startTime }) {
+  if (!Number.isInteger(pid) || pid <= 0 || typeof startTime !== 'string' || !startTime) {
+    return { released: false, remaining: true, reason: 'lease owner identity is incomplete' };
+  }
+
+  const store = createResidentLeaseStore(workspace);
+  const key = roleLeaseKey(role);
+  let lockAcquired = false;
+  try {
+    // acquireResidentLease() also serializes its stale read/remove/write window with
+    // this lock. Without taking the same lock here, a replacement could acquire the
+    // lease after the identity check and be removed by the old owner's teardown.
+    acquireLeaseLock(store, key);
+    lockAcquired = true;
+
+    const existing = store.read(key);
+    if (!existing) return { released: false, remaining: false };
+    if (existing.pid !== pid || existing.startTime !== startTime) {
+      return {
+        released: false,
+        remaining: true,
+        reason: 'lease owner identity does not match the stopped process',
+      };
+    }
+
+    store.remove(key);
+    const remaining = store.read(key);
+    if (remaining) {
+      return { released: false, remaining: true, reason: 'lease remains after removal' };
+    }
+    return { released: true, remaining: false };
+  } finally {
+    if (lockAcquired) releaseLeaseLock(store, key);
+  }
+}
+
 module.exports = {
   createNormalWorkerStore,
   acquireLease,
@@ -649,6 +700,7 @@ module.exports = {
   isResidentLeaseLive,
   acquireResidentLease,
   releaseResidentLease,
+  releaseResidentLeaseForProcess,
   // テスト用注入
   _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
   _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },

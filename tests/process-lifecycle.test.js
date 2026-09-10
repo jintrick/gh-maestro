@@ -349,6 +349,33 @@ test('unregisterProcess: ファイルが存在しなくてもエラーになら�
   assert.doesNotThrow(() => plc.unregisterProcess(workspace, 99999999));
 });
 
+test('unregisterProcess: expected identity不一致の新しいregistryを削除しない', () => {
+  const plc = loadModule();
+  const entry = plc.registerProcess(workspace, {
+    script: 'worker-supervisor.js',
+    workerName: null,
+    startTime: '2026-07-29T00:00:00.424Z',
+  });
+  const newPath = plc.pidFilePath(workspace, entry.pid);
+  const legacyPath = plc.legacyPidFilePath(workspace, entry.pid);
+
+  plc.unregisterProcess(workspace, entry.pid, {
+    script: entry.script,
+    workerName: entry.workerName,
+    startTime: '2026-07-29T00:00:00.101Z',
+  });
+  assert.equal(fs.existsSync(newPath), true);
+  assert.equal(fs.existsSync(legacyPath), true);
+
+  plc.unregisterProcess(workspace, entry.pid, {
+    script: entry.script,
+    workerName: entry.workerName,
+    startTime: entry.startTime,
+  });
+  assert.equal(fs.existsSync(newPath), false);
+  assert.equal(fs.existsSync(legacyPath), false);
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // bridge: dual-write / union-read / dual-delete（Issue #214 移行）
 // ═══════════════════════════════════════════════════════════════════════════

@@ -17,6 +17,7 @@ const {
   restartResidents,
   restartStatusPane,
   formatStatusPaneResult,
+  stopResidentEntry,
 } = require('../scripts/shared/restart-residents');
 const { main, USAGE, writeResult } = require('../scripts/restart-residents');
 
@@ -241,6 +242,50 @@ test('restartResidents: 停止確認に失敗した場合は再起動せず、�
     assert.equal(result.results[0].status, 'failed');
     assert.match(result.results[0].reason, /停止確認/);
     assert.equal(harness.live.has(old[0].pid), true);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('stopResidentEntry: 停止済み常駐のregistryとworker-supervisorのlegacy leaseを解放確認する', () => {
+  const workspace = makeWorkspace();
+  const registryPath = path.join(workspace, 'pid-registry.json');
+  const legacyRegistryPath = path.join(workspace, 'legacy-pid-registry.json');
+  try {
+    fs.writeFileSync(registryPath, '{}', 'utf8');
+    fs.writeFileSync(legacyRegistryPath, '{}', 'utf8');
+    const entry = {
+      pid: 4242,
+      script: 'worker-supervisor.js',
+      workerName: null,
+      workspace,
+      startTime: '2026-07-29T00:00:00.424Z',
+      args: [],
+    };
+    const releasedRoles = [];
+    const hooks = {
+      isProcessAlive: () => false,
+      unregisterProcess: () => {
+        fs.unlinkSync(registryPath);
+        fs.unlinkSync(legacyRegistryPath);
+      },
+      pidFilePath: () => registryPath,
+      legacyPidFilePath: () => legacyRegistryPath,
+      releaseResidentLeaseForProcess: ({ role, pid, startTime }) => {
+        releasedRoles.push({ role, pid, startTime });
+        return { released: true, remaining: false };
+      },
+    };
+
+    const result = stopResidentEntry(workspace, entry, hooks);
+
+    assert.deepEqual(result, { ok: true });
+    assert.equal(fs.existsSync(registryPath), false);
+    assert.equal(fs.existsSync(legacyRegistryPath), false);
+    assert.deepEqual(releasedRoles, [
+      { role: 'worker-supervisor', pid: 4242, startTime: entry.startTime },
+      { role: 'inbox-supervisor', pid: 4242, startTime: entry.startTime },
+    ]);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }

@@ -20,10 +20,18 @@ const { loadStatusPane } = require('./status-pane-registry');
 const {
   findRunningInstances,
   unregisterProcess,
+  pidFilePath,
+  legacyPidFilePath,
   verifyProcessIdentity,
   isProcessAlive,
   findSessionRootPid,
 } = require('../process-lifecycle');
+const {
+  LEGACY_INBOX_SUPERVISOR_ROLE,
+  WORKER_SUPERVISOR_ROLE,
+  msgPollRole,
+  releaseResidentLeaseForProcess,
+} = require('./worker-lease');
 
 const RESIDENT_SPECS = Object.freeze([
   Object.freeze({ script: 'worker-supervisor.js', workerName: null, monitorRequired: false }),
@@ -48,10 +56,13 @@ function createResidentRestartHooks() {
   return {
     findRunningInstances,
     unregisterProcess,
+    pidFilePath,
+    legacyPidFilePath,
     verifyProcessIdentity,
     isProcessAlive,
     findSessionRootPid,
     killProcessTree,
+    releaseResidentLeaseForProcess,
     spawn,
     sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
   };
@@ -242,6 +253,44 @@ function formatCommand(scriptPath, args) {
   return [process.execPath, scriptPath, ...args].map((part) => JSON.stringify(String(part))).join(' ');
 }
 
+function residentLeaseRoles(entry) {
+  const spec = specForScript(entry.script);
+  if (!spec) return [];
+  if (spec.script === 'worker-supervisor.js') {
+    // inbox-supervisor.js は移行前の互換leaseも残し得るため、canonical roleと
+    // legacy roleを同じ所有者同一性で回収する。
+    return [WORKER_SUPERVISOR_ROLE, LEGACY_INBOX_SUPERVISOR_ROLE];
+  }
+  if (spec.script === 'msg-poll.js') return [msgPollRole(entry.workerName ?? 'orchestrator')];
+  return [];
+}
+
+function ensureRegistryRemoved(workspace, pid, hooks) {
+  if (typeof hooks.pidFilePath !== 'function' || typeof hooks.legacyPidFilePath !== 'function') return;
+  const paths = [hooks.pidFilePath(workspace, pid), hooks.legacyPidFilePath(workspace, pid)];
+  const remaining = paths.filter((filePath) => fs.existsSync(filePath));
+  if (remaining.length > 0) {
+    throw new Error(`PID registryの解除を確認できませんでした: ${remaining.join(', ')}`);
+  }
+}
+
+function releaseResidentLeases(workspace, entry, hooks) {
+  if (typeof hooks.releaseResidentLeaseForProcess !== 'function') return;
+  for (const role of residentLeaseRoles(entry)) {
+    const result = hooks.releaseResidentLeaseForProcess({
+      workspace,
+      role,
+      pid: entry.pid,
+      startTime: entry.startTime,
+    });
+    if (result?.remaining) {
+      throw new Error(
+        `resident lease (${role}) の解放を確認できませんでした: ${result.reason || 'lease remains'}`,
+      );
+    }
+  }
+}
+
 function waitUntilStopped(pid, hooks, opts = {}) {
   const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
@@ -271,9 +320,25 @@ function stopEntry(workspace, entry, hooks, opts = {}) {
   }
 
   try {
-    hooks.unregisterProcess(workspace, entry.pid);
+    hooks.unregisterProcess(workspace, entry.pid, {
+      startTime: entry.startTime,
+      script: entry.script,
+      workerName: entry.workerName,
+    });
   } catch (e) {
     return { ok: false, error: `PID ${entry.pid} のregistry解除に失敗しました: ${e.message}` };
+  }
+
+  try {
+    ensureRegistryRemoved(workspace, entry.pid, hooks);
+  } catch (e) {
+    return { ok: false, error: `PID ${entry.pid} のregistry解除確認に失敗しました: ${e.message}` };
+  }
+
+  try {
+    releaseResidentLeases(workspace, entry, hooks);
+  } catch (e) {
+    return { ok: false, error: `PID ${entry.pid} のresident lease解放に失敗しました: ${e.message}` };
   }
   return { ok: true };
 }
@@ -712,6 +777,7 @@ module.exports = {
   DEFAULT_WAIT_MS,
   DEFAULT_STARTUP_CONFIRM_ATTEMPTS,
   createResidentRestartHooks,
+  stopResidentEntry: stopEntry,
   captureResidentEntries,
   parseSessionPid,
   replaceSessionPid,

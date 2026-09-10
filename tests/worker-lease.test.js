@@ -486,6 +486,86 @@ test('releaseLease: 存在しないキーでもエラーにならない', () => 
   }
 });
 
+test('releaseResidentLeaseForProcess: 停止済みプロセスとPID/startTimeが一致するleaseだけを解放する', () => {
+  const store = tempStore();
+  const tmp = store._tmpDir;
+  try {
+    const role = 'worker-supervisor';
+    const startTime = '2026-07-29T00:00:00.424Z';
+    store.write(lease.roleLeaseKey(role), {
+      pid: 4242,
+      startTime,
+      workerName: role,
+      phase: 'active',
+    });
+
+    const result = lease.releaseResidentLeaseForProcess({
+      workspace: tmp,
+      role,
+      pid: 4242,
+      startTime,
+    });
+
+    assert.deepEqual(result, { released: true, remaining: false });
+    assert.equal(store.read(lease.roleLeaseKey(role)), null);
+    assert.equal(fs.existsSync(store.lockPath(lease.roleLeaseKey(role))), false,
+      'owner lease解放後に一時lockを残さないこと');
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('releaseResidentLeaseForProcess: PIDまたはstartTime不一致の新しいleaseを削除しない', () => {
+  const store = tempStore();
+  const tmp = store._tmpDir;
+  try {
+    const role = 'worker-supervisor';
+    const replacement = {
+      pid: 5252,
+      startTime: '2026-07-29T00:00:00.525Z',
+      workerName: role,
+      phase: 'active',
+    };
+    store.write(lease.roleLeaseKey(role), replacement);
+
+    const result = lease.releaseResidentLeaseForProcess({
+      workspace: tmp,
+      role,
+      pid: 4242,
+      startTime: '2026-07-29T00:00:00.424Z',
+    });
+
+    assert.equal(result.released, false);
+    assert.equal(result.remaining, true);
+    assert.deepEqual(store.read(lease.roleLeaseKey(role)), replacement);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('releaseResidentLeaseForProcess: 所有者identityが不足する場合はleaseを残して失敗扱いにする', () => {
+  const store = tempStore();
+  const tmp = store._tmpDir;
+  try {
+    const role = 'worker-supervisor';
+    const existing = { pid: 4242, startTime: 'x', workerName: role, phase: 'active' };
+    store.write(lease.roleLeaseKey(role), existing);
+
+    const result = lease.releaseResidentLeaseForProcess({
+      workspace: tmp,
+      role,
+      pid: 4242,
+      startTime: '',
+    });
+
+    assert.equal(result.released, false);
+    assert.equal(result.remaining, true);
+    assert.deepEqual(store.read(lease.roleLeaseKey(role)), existing);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
 // ── activateLease ─────────────────────────────────────────────────────────────
 
 test('activateLease: リースのPIDとstartTimeを実際のワーカー情報で更新する', () => {
