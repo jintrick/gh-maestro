@@ -20,6 +20,11 @@ const {
   stopResidentEntry,
 } = require('../scripts/shared/restart-residents');
 const { main, USAGE, writeResult } = require('../scripts/restart-residents');
+const {
+  createNormalWorkerStore,
+  releaseResidentLeaseForProcess,
+  roleLeaseKey,
+} = require('../scripts/shared/worker-lease');
 
 function makeWorkspace() {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-resident-restart-'));
@@ -286,6 +291,42 @@ test('stopResidentEntry: 停止済み常駐のregistryとworker-supervisorのleg
       { role: 'worker-supervisor', pid: 4242, startTime: entry.startTime },
       { role: 'inbox-supervisor', pid: 4242, startTime: entry.startTime },
     ]);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('restartResidents: 無関係なstale resident leaseがあってもteardownを中断しない', () => {
+  const workspace = makeWorkspace();
+  const leaseStore = createNormalWorkerStore(workspace);
+  const role = 'worker-supervisor';
+  try {
+    leaseStore.write(roleLeaseKey(role), {
+      pid: 999999,
+      startTime: '2026-07-29T00:00:00.999Z',
+      workerName: role,
+      phase: 'active',
+    });
+    const old = residentEntries(workspace).slice(0, 1);
+    const harness = makeHarness(workspace, { entries: old });
+    harness.hooks.releaseResidentLeaseForProcess = releaseResidentLeaseForProcess;
+
+    const result = restartResidents(workspace, {
+      scriptsPath: path.join(workspace, 'scripts'),
+      hooks: harness.hooks,
+      maxAttempts: 1,
+      waitMs: 0,
+    });
+
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.results[0].status, 'replaced');
+    assert.deepEqual(result.results[0].newPids, [2000]);
+    assert.deepEqual(leaseStore.read(roleLeaseKey(role)), {
+      pid: 999999,
+      startTime: '2026-07-29T00:00:00.999Z',
+      workerName: role,
+      phase: 'active',
+    });
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
