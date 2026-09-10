@@ -518,6 +518,7 @@ test('releaseResidentLeaseForProcess: 停止済みプロセスとPID/startTime�
 test('releaseResidentLeaseForProcess: 別PIDの生存中leaseは削除せずno-op成功にする', () => {
   const store = tempStore();
   const tmp = store._tmpDir;
+  const calls = mockLiveness({ alive: true });
   try {
     const role = 'worker-supervisor';
     const replacement = {
@@ -535,8 +536,13 @@ test('releaseResidentLeaseForProcess: 別PIDの生存中leaseは削除せずno-o
       startTime: '2026-07-29T00:00:00.424Z',
     });
 
-    assert.equal(result.released, false);
-    assert.equal(result.remaining, false);
+    assert.deepEqual(result, {
+      released: false,
+      remaining: false,
+      reason: 'lease owner identity does not match the stopped process',
+    });
+    assert.deepEqual(calls.alive, [], 'identity不一致のleaseでは生存確認を行わない');
+    assert.deepEqual(calls.verify, [], 'identity不一致のleaseではPID同一性確認を行わない');
     assert.deepEqual(store.read(lease.roleLeaseKey(role)), replacement);
   } finally {
     cleanupStore(store);
@@ -546,6 +552,7 @@ test('releaseResidentLeaseForProcess: 別PIDの生存中leaseは削除せずno-o
 test('releaseResidentLeaseForProcess: 別PIDの死亡済みstale leaseもno-op成功にする', () => {
   const store = tempStore();
   const tmp = store._tmpDir;
+  const calls = mockLiveness({ alive: false });
   try {
     const role = 'worker-supervisor';
     const stale = {
@@ -563,8 +570,13 @@ test('releaseResidentLeaseForProcess: 別PIDの死亡済みstale leaseもno-op�
       startTime: '2026-07-29T00:00:00.424Z',
     });
 
-    assert.equal(result.released, false);
-    assert.equal(result.remaining, false);
+    assert.deepEqual(result, {
+      released: false,
+      remaining: false,
+      reason: 'lease owner identity does not match the stopped process',
+    });
+    assert.deepEqual(calls.alive, [], 'identity不一致のleaseでは生存確認を行わない');
+    assert.deepEqual(calls.verify, [], 'identity不一致のleaseではPID同一性確認を行わない');
     assert.deepEqual(store.read(lease.roleLeaseKey(role)), stale,
       '停止対象ではないstale leaseはacquire側の回収に委ねる');
   } finally {
