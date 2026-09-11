@@ -269,21 +269,40 @@ function prepareDirectories() {
 
 // ─── 3. .gitignore 確認・追記 ─────────────────────────────────────────────────
 
+// `.gh-maestro/` は一時的な実行状態（worktree・workers.json・ログ等）とプロジェクトの
+// 恒久的な設定（config.json）が同居する。丸ごと無視すると、config.json がworktreeへ
+// 複製されず、そこでのテスト層解決がホームディレクトリの共有設定へ意図せずフォール
+// バックする（Issue #528）。config.json だけは追跡対象として残す。
+const IGNORE_ENTRY = '.gh-maestro/*';
+const IGNORE_EXCEPTION = '!.gh-maestro/config.json';
+const LEGACY_ENTRY = '.gh-maestro/';
+
 function ensureGitIgnore() {
   const gitignore = resolve(workspaceRoot, '.gitignore');
-  const entry = '.gh-maestro/';
   if (!existsSync(gitignore)) {
-    appendFileSync(gitignore, `${entry}\n`, 'utf8');
-    ok(`.gitignore created with ${entry}`);
+    appendFileSync(gitignore, `${IGNORE_ENTRY}\n${IGNORE_EXCEPTION}\n`, 'utf8');
+    ok(`.gitignore created with ${IGNORE_ENTRY} / ${IGNORE_EXCEPTION}`);
     return;
   }
-  const already = readFileSync(gitignore, 'utf8').split('\n').some(l => l.trim() === entry);
-  if (!already) {
-    appendFileSync(gitignore, `\n${entry}\n`, 'utf8');
-    ok(`.gitignore updated: added ${entry}`);
-  } else {
-    ok(`.gitignore already contains ${entry}`);
+  const lines = readFileSync(gitignore, 'utf8').split('\n');
+  const hasEntry = lines.some(l => l.trim() === IGNORE_ENTRY);
+  const hasException = lines.some(l => l.trim() === IGNORE_EXCEPTION);
+  if (hasEntry && hasException) {
+    ok(`.gitignore already contains ${IGNORE_ENTRY} / ${IGNORE_EXCEPTION}`);
+    return;
   }
+  // 旧形式（`.gh-maestro/` 丸ごと無視）が残っていれば、新形式へ置き換える。
+  const withoutLegacy = lines.filter(l => l.trim() !== LEGACY_ENTRY);
+  const migrated = withoutLegacy.length !== lines.length;
+  const toAppend = [
+    ...(hasEntry ? [] : [IGNORE_ENTRY]),
+    ...(hasException ? [] : [IGNORE_EXCEPTION]),
+  ];
+  const nextContent = `${withoutLegacy.join('\n').replace(/\n*$/, '')}\n\n${toAppend.join('\n')}\n`;
+  writeFileSync(gitignore, nextContent, 'utf8');
+  ok(migrated
+    ? `.gitignore updated: replaced legacy ${LEGACY_ENTRY} with ${IGNORE_ENTRY} / ${IGNORE_EXCEPTION}`
+    : `.gitignore updated: added ${toAppend.join(' / ')}`);
 }
 
 // ─── 4. dev ブランチ確認・作成 ────────────────────────────────────────────────

@@ -4,9 +4,6 @@ node_modules/
 .agents/
 .gemini/
 
-# gh-maestro runtime (review-policy.md はプロジェクト設定なので除外)
-.gh-maestro/workers.json
-.gh-maestro/viewer-pane
-.gh-maestro/worktrees/
-
-.gh-maestro/
+# gh-maestro runtime (config.json はプロジェクト設定なので追跡対象。Issue #528)
+.gh-maestro/*
+!.gh-maestro/config.json
