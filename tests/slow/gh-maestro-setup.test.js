@@ -151,6 +151,35 @@ function gitIn(dir, ...args) {
   return r;
 }
 
+function setBareOriginHead(branch) {
+  const r = spawnSync('git', ['symbolic-ref', 'HEAD', `refs/heads/${branch}`], {
+    cwd: gitOrigin,
+    encoding: 'utf8',
+  });
+  assert.equal(r.status, 0, `git symbolic-ref HEAD ${branch} failed: ${r.stderr}`);
+}
+
+function prepareProjectWithoutDev(dir, defaultBranch) {
+  gitIn(dir, 'branch', '-D', 'dev');
+  const remoteDev = gitIn(dir, 'ls-remote', '--heads', 'origin', 'dev');
+  if (remoteDev.stdout.trim()) {
+    gitIn(dir, 'push', '-q', 'origin', '--delete', 'dev');
+  }
+  if (defaultBranch !== 'main') {
+    gitIn(dir, 'branch', '-m', 'main', defaultBranch);
+    gitIn(dir, 'push', '-q', 'origin', defaultBranch);
+  }
+  assert.equal(gitIn(dir, 'branch', '--show-current').stdout.trim(), defaultBranch);
+}
+
+function addMasterOnlyCommit(dir) {
+  gitIn(dir, 'branch', 'master');
+  fs.writeFileSync(path.join(dir, 'master-only.txt'), 'master', 'utf8');
+  gitIn(dir, 'add', 'master-only.txt');
+  gitIn(dir, 'commit', '-qm', 'master-only');
+  gitIn(dir, 'checkout', 'master');
+}
+
 // 追跡下・無視対象でない .githooks に手書きの同期フック（マーカー無し・相対パス）を置く。
 function setUpTrackedGithooks(dir) {
   fs.mkdirSync(path.join(dir, '.githooks'), { recursive: true });
@@ -185,6 +214,68 @@ test('新規プロジェクトにはsync-rulesフックのみを設置し、chec
 
     assert.equal(fs.existsSync(path.join(dir, '.git', 'hooks', 'pre-push')), false,
       'pre-push フックは作られないこと');
+  });
+});
+
+test('既定ブランチがmainでなくてもmasterからdevブランチを作成する', () => {
+  withGitProject((dir) => {
+    prepareProjectWithoutDev(dir, 'master');
+    setBareOriginHead('master');
+
+    const r = runSetupCli(dir);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Creating 'dev' branch from master/);
+    assert.match(r.stdout, /Branch 'dev' exists/);
+    assert.equal(
+      gitIn(dir, 'rev-parse', 'dev').stdout.trim(),
+      gitIn(dir, 'rev-parse', 'master').stdout.trim(),
+      'devは現在のmasterから作成されること',
+    );
+  });
+});
+
+test('既定ブランチがmainの場合はmainからdevブランチを作成する', () => {
+  withGitProject((dir) => {
+    prepareProjectWithoutDev(dir, 'main');
+    setBareOriginHead('main');
+
+    const r = runSetup(dir);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Creating 'dev' branch from main/);
+    assert.match(r.stdout, /Branch 'dev' exists/);
+    assert.equal(
+      gitIn(dir, 'rev-parse', 'dev').stdout.trim(),
+      gitIn(dir, 'rev-parse', 'main').stdout.trim(),
+      'devはmainから作成されること',
+    );
+  });
+});
+
+test('mainとmasterの両方がある場合はdevを作成せず停止する', () => {
+  withGitProject((dir) => {
+    prepareProjectWithoutDev(dir, 'main');
+    addMasterOnlyCommit(dir);
+    setBareOriginHead('main');
+
+    const r = runSetup(dir);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /'main' と 'master' の両方が存在するため、分岐元を決定できませんでした/);
+    assert.equal(gitIn(dir, 'branch', '--list', 'dev').stdout.trim(), '');
+    assert.equal(gitIn(dir, 'branch', '--show-current').stdout.trim(), 'master');
+    assert.doesNotMatch(r.stdout, /Branch 'dev' exists/);
+  });
+});
+
+test('mainとmasterのどちらも無い場合はdevを作成せず停止する', () => {
+  withGitProject((dir) => {
+    prepareProjectWithoutDev(dir, 'feature');
+
+    const r = runSetup(dir);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /'main' と 'master' のどちらも見つかりませんでした/);
+    assert.equal(gitIn(dir, 'branch', '--list', 'dev').stdout.trim(), '');
+    assert.equal(gitIn(dir, 'branch', '--show-current').stdout.trim(), 'feature');
+    assert.doesNotMatch(r.stdout, /Branch 'dev' exists/);
   });
 });
 

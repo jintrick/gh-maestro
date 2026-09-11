@@ -310,13 +310,29 @@ function ensureGitIgnore() {
 function ensureDevBranch() {
   const devBranch = run('git', ['branch', '--list', 'dev'], { capture: true });
   if (!devBranch) {
-    step("Creating 'dev' branch from main...");
-    if (!run('git', ['checkout', '-b', 'dev', 'main'])) {
+    const hasMain = Boolean(run('git', ['branch', '--list', 'main'], { capture: true }));
+    const hasMaster = Boolean(run('git', ['branch', '--list', 'master'], { capture: true }));
+    if (hasMain && hasMaster) {
+      fail(
+        "'dev' ブランチの作成に失敗しました。'main' と 'master' の両方が存在するため、分岐元を決定できませんでした。",
+        "→ 分岐元として使用する 'main' または 'master' のどちらか一方だけを残してください。",
+        '→ ブランチを整理してから setup を再実行してください。',
+      );
+    }
+    if (!hasMain && !hasMaster) {
+      fail(
+        "'dev' ブランチの作成に失敗しました。'main' と 'master' のどちらも見つかりませんでした。",
+        "→ 分岐元として使用できる 'main' または 'master' ブランチを用意してください。",
+        '→ 手動で作成する場合: git checkout -b dev <分岐元ブランチ名> && git push -u origin dev',
+      );
+    }
+    const baseBranch = hasMain ? 'main' : 'master';
+    step(`Creating 'dev' branch from ${baseBranch}...`);
+    if (!run('git', ['checkout', '-b', 'dev', baseBranch])) {
       fail(
         "'dev' ブランチの作成に失敗しました。",
-        "→ 'main' ブランチが存在するか確認してください: git branch --list main",
-        '→ main が無い場合、デフォルトブランチ名を確認して手動で作成してください:',
-        '   git checkout -b dev <デフォルトブランチ名> && git push -u origin dev',
+        `→ '${baseBranch}' ブランチが利用可能か確認してください: git branch --list ${baseBranch}`,
+        '→ 手動で作成する場合: git checkout -b dev <分岐元ブランチ名> && git push -u origin dev',
       );
     }
   }
