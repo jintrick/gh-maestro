@@ -231,10 +231,9 @@ test('既定ブランチがmainでなくてもmasterからdevブランチを作�
   });
 });
 
-test('mainとmasterの両方がある場合はmainからdevブランチを作成する', () => {
+test('既定ブランチがmainの場合はmainからdevブランチを作成する', () => {
   withGitProject((dir) => {
     prepareProjectWithoutDev(dir, 'main');
-    addMasterOnlyCommit(dir);
     setBareOriginHead('main');
 
     const r = runSetup(dir);
@@ -244,13 +243,23 @@ test('mainとmasterの両方がある場合はmainからdevブランチを作成
     assert.equal(
       gitIn(dir, 'rev-parse', 'dev').stdout.trim(),
       gitIn(dir, 'rev-parse', 'main').stdout.trim(),
-      'devはmasterではなくmainから作成されること',
+      'devはmainから作成されること',
     );
-    assert.notEqual(
-      gitIn(dir, 'rev-parse', 'dev').stdout.trim(),
-      gitIn(dir, 'rev-parse', 'master').stdout.trim(),
-      'devはmasterの作業内容を含まないこと',
-    );
+  });
+});
+
+test('mainとmasterの両方がある場合はdevを作成せず停止する', () => {
+  withGitProject((dir) => {
+    prepareProjectWithoutDev(dir, 'main');
+    addMasterOnlyCommit(dir);
+    setBareOriginHead('main');
+
+    const r = runSetup(dir);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /'main' と 'master' の両方が存在するため、分岐元を決定できませんでした/);
+    assert.equal(gitIn(dir, 'branch', '--list', 'dev').stdout.trim(), '');
+    assert.equal(gitIn(dir, 'branch', '--show-current').stdout.trim(), 'master');
+    assert.doesNotMatch(r.stdout, /Branch 'dev' exists/);
   });
 });
 
