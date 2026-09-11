@@ -1,0 +1,22 @@
+{
+  "test": {
+    "layers": {
+      "full": {
+        "scope": "full",
+        "command": ["node", "--require", "./tests/_env-setup.js", "--test"],
+        "defaultTestFiles": ["tests/*.test.js"],
+        "displayCommand": "npm test"
+      },
+      "slow": {
+        "scope": "partial",
+        "command": ["node", "--require", "./tests/_env-setup.js", "--test"],
+        "defaultTestFiles": ["tests/slow/*.test.js"],
+        "testFilePattern": "tests/slow/<name>.test.js",
+        "displayCommand": "npm run test:slow",
+        "mapping": [
+          { "changed": "scripts/<name>.js", "test": "tests/slow/<name>.test.js" }
+        ]
+      }
+    }
+  }
+}
