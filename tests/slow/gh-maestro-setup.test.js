@@ -151,6 +151,25 @@ function gitIn(dir, ...args) {
   return r;
 }
 
+function setBareOriginHead(branch) {
+  const r = spawnSync('git', ['symbolic-ref', 'HEAD', `refs/heads/${branch}`], {
+    cwd: gitOrigin,
+    encoding: 'utf8',
+  });
+  assert.equal(r.status, 0, `git symbolic-ref HEAD ${branch} failed: ${r.stderr}`);
+}
+
+function prepareProjectWithoutDev(dir, defaultBranch) {
+  gitIn(dir, 'branch', '-D', 'dev');
+  gitIn(dir, 'push', '-q', 'origin', '--delete', 'dev');
+  if (defaultBranch !== 'main') {
+    gitIn(dir, 'branch', '-m', 'main', defaultBranch);
+    gitIn(dir, 'push', '-q', 'origin', defaultBranch);
+  }
+  setBareOriginHead(defaultBranch);
+  assert.equal(gitIn(dir, 'branch', '--show-current').stdout.trim(), defaultBranch);
+}
+
 // 追跡下・無視対象でない .githooks に手書きの同期フック（マーカー無し・相対パス）を置く。
 function setUpTrackedGithooks(dir) {
   fs.mkdirSync(path.join(dir, '.githooks'), { recursive: true });
@@ -185,6 +204,37 @@ test('新規プロジェクトにはsync-rulesフックのみを設置し、chec
 
     assert.equal(fs.existsSync(path.join(dir, '.git', 'hooks', 'pre-push')), false,
       'pre-push フックは作られないこと');
+  });
+});
+
+test('既定ブランチがmainでなくても現在のHEADからdevブランチを作成する', () => {
+  withGitProject((dir) => {
+    prepareProjectWithoutDev(dir, 'master');
+
+    const r = runSetupCli(dir);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Creating 'dev' branch/);
+    assert.match(r.stdout, /Branch 'dev' exists/);
+    assert.equal(
+      gitIn(dir, 'rev-parse', 'dev').stdout.trim(),
+      gitIn(dir, 'rev-parse', 'master').stdout.trim(),
+      'devは現在のmasterから作成されること',
+    );
+  });
+});
+
+test('既定ブランチがmainの場合も現在のHEADからdevブランチを作成する', () => {
+  withGitProject((dir) => {
+    prepareProjectWithoutDev(dir, 'main');
+
+    const r = runSetup(dir);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Branch 'dev' exists/);
+    assert.equal(
+      gitIn(dir, 'rev-parse', 'dev').stdout.trim(),
+      gitIn(dir, 'rev-parse', 'main').stdout.trim(),
+      'devは現在のmainから作成されること',
+    );
   });
 });
 

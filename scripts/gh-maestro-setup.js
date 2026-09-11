@@ -310,13 +310,12 @@ function ensureGitIgnore() {
 function ensureDevBranch() {
   const devBranch = run('git', ['branch', '--list', 'dev'], { capture: true });
   if (!devBranch) {
-    step("Creating 'dev' branch from main...");
-    if (!run('git', ['checkout', '-b', 'dev', 'main'])) {
+    step("Creating 'dev' branch...");
+    if (!run('git', ['checkout', '-b', 'dev'])) {
       fail(
         "'dev' ブランチの作成に失敗しました。",
-        "→ 'main' ブランチが存在するか確認してください: git branch --list main",
-        '→ main が無い場合、デフォルトブランチ名を確認して手動で作成してください:',
-        '   git checkout -b dev <デフォルトブランチ名> && git push -u origin dev',
+        "→ 現在の HEAD が有効なコミットを指しているか確認してください: git rev-parse --verify HEAD",
+        '→ 手動で作成する場合: git checkout -b dev && git push -u origin dev',
       );
     }
   }
