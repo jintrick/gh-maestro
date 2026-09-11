@@ -310,12 +310,24 @@ function ensureGitIgnore() {
 function ensureDevBranch() {
   const devBranch = run('git', ['branch', '--list', 'dev'], { capture: true });
   if (!devBranch) {
-    step("Creating 'dev' branch...");
-    if (!run('git', ['checkout', '-b', 'dev'])) {
+    const baseBranch = run('git', ['branch', '--list', 'main'], { capture: true })
+      ? 'main'
+      : run('git', ['branch', '--list', 'master'], { capture: true })
+        ? 'master'
+        : null;
+    if (!baseBranch) {
+      fail(
+        "'dev' ブランチの作成に失敗しました。'main' と 'master' のどちらも見つかりませんでした。",
+        "→ 分岐元として使用できる 'main' または 'master' ブランチを確認してください。",
+        '→ 手動で作成する場合: git checkout -b dev <分岐元ブランチ名> && git push -u origin dev',
+      );
+    }
+    step(`Creating 'dev' branch from ${baseBranch}...`);
+    if (!run('git', ['checkout', '-b', 'dev', baseBranch])) {
       fail(
         "'dev' ブランチの作成に失敗しました。",
-        "→ 現在の HEAD が有効なコミットを指しているか確認してください: git rev-parse --verify HEAD",
-        '→ 手動で作成する場合: git checkout -b dev && git push -u origin dev',
+        `→ '${baseBranch}' ブランチが利用可能か確認してください: git branch --list ${baseBranch}`,
+        '→ 手動で作成する場合: git checkout -b dev <分岐元ブランチ名> && git push -u origin dev',
       );
     }
   }
