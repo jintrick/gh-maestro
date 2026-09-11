@@ -161,7 +161,10 @@ function setBareOriginHead(branch) {
 
 function prepareProjectWithoutDev(dir, defaultBranch) {
   gitIn(dir, 'branch', '-D', 'dev');
-  gitIn(dir, 'push', '-q', 'origin', '--delete', 'dev');
+  const remoteDev = gitIn(dir, 'ls-remote', '--heads', 'origin', 'dev');
+  if (remoteDev.stdout.trim()) {
+    gitIn(dir, 'push', '-q', 'origin', '--delete', 'dev');
+  }
   if (defaultBranch !== 'main') {
     gitIn(dir, 'branch', '-m', 'main', defaultBranch);
     gitIn(dir, 'push', '-q', 'origin', defaultBranch);
