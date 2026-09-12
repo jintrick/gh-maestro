@@ -1,0 +1,177 @@
+{
+  "schemaVersion": 1,
+  "expectedItemCount": 19,
+  "items": [
+    {
+      "id": "setup-ai-review-ci",
+      "generation": "ai-review-ci",
+      "scope": "repository",
+      "requiredCapabilities": ["workspace-read", "git-ref-read"],
+      "description": "旧AIレビューCIのワークフローと退役センチネル",
+      "cleanupId": "gh-maestro-setup.retireAiReviewCi",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "setup-pre-commit-checks-hook",
+      "generation": "checks-hook",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read"],
+      "description": "pre-commitに残る廃止済みchecksマーカーブロック",
+      "cleanupId": "gh-maestro-setup.ensureSyncHook",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "setup-pre-push-checks-hook",
+      "generation": "checks-hook",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read"],
+      "description": "pre-pushに残る廃止済みchecksブロックと抜け殻",
+      "cleanupId": "gh-maestro-setup.retireChecksHooks",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "setup-stale-default-hooks",
+      "generation": "hooks-path-migration",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read"],
+      "description": "core.hooksPath移行後の既定.git/hooksに残るマーカー",
+      "cleanupId": "gh-maestro-setup.removeStaleDefaultHooks",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "setup-legacy-gitignore",
+      "generation": "gitignore-v1",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read"],
+      "description": ".gitignoreの旧.gh-maestro/エントリ",
+      "cleanupId": "gh-maestro-setup.ensureGitIgnore",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "install-legacy-agents-config",
+      "generation": "agents-json",
+      "scope": "managed",
+      "requiredCapabilities": ["managed-read"],
+      "description": "管理領域に残る旧agents.json",
+      "cleanupId": "install.quarantineLegacyAgentsConfig",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "install-legacy-home-pids",
+      "generation": "home-pid-registry",
+      "scope": "managed",
+      "requiredCapabilities": ["managed-read"],
+      "description": "管理領域に残る旧ホームPIDレジストリ",
+      "cleanupId": "install.quarantineLegacyHomePids",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "install-legacy-managed-items",
+      "generation": "managed-root-prune",
+      "scope": "managed",
+      "requiredCapabilities": ["managed-read"],
+      "description": "管理領域直下に残る既知の旧バージョン項目",
+      "cleanupId": "install.pruneManagedRoot",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "migrate-legacy-records",
+      "generation": "records-before-254",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read"],
+      "description": "Issue #254以前の旧配置レコード",
+      "cleanupId": "migrate-records.planMigration",
+      "integrationStatus": "integrated"
+    },
+    {
+      "id": "process-legacy-pid-registry",
+      "generation": "workspace-pid-bridge",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read"],
+      "description": "旧workspace/.gh-maestro/pidsのレジストリとロック",
+      "cleanupId": "process-lifecycle.sweepRegistry",
+      "integrationStatus": "integrated"
+    },
+    {
+      "id": "msg-poll-v1-state",
+      "generation": "msg-state-v1",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read"],
+      "description": "msg-stateに残るv1形式の既読状態",
+      "cleanupId": "msg-poll.readState",
+      "integrationStatus": "integrated"
+    },
+    {
+      "id": "reset-detached-notifier",
+      "generation": "detached-notifier-before-151",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read", "process-observation"],
+      "description": "workers.jsonに残る旧detached notifier",
+      "cleanupId": "reset-session.notifierPid",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "reset-legacy-wezterm-pane",
+      "generation": "wezterm-pane-before-151",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read"],
+      "description": "reset-sessionが扱う旧WezTerm paneId",
+      "cleanupId": "reset-session.paneId",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "reset-legacy-messages",
+      "generation": "messages-before-phase-4",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read"],
+      "description": "Phase 4以前の.gh-maestro/messages",
+      "cleanupId": "reset-session.messages",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "reset-legacy-queue",
+      "generation": "queue-before-phase-2",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read", "process-observation"],
+      "description": "Phase 2以前のFSキューとqueue-poller",
+      "cleanupId": "reset-session.queue",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "stop-worker-legacy-pane",
+      "generation": "worker-pane-before-151",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read"],
+      "description": "stop-worker-processが扱うワーカー旧paneId",
+      "cleanupId": "stop-worker-process.paneId",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "worker-supervisor-legacy-name",
+      "generation": "inbox-supervisor-rename",
+      "scope": "mixed",
+      "requiredCapabilities": ["workspace-read", "process-observation"],
+      "description": "改名前のinbox-supervisor.jsと旧role lease",
+      "cleanupId": "worker-supervisor-control.legacyName",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "restart-residents-legacy-lease",
+      "generation": "legacy-resident-lease",
+      "scope": "workspace",
+      "requiredCapabilities": ["workspace-read", "process-observation"],
+      "description": "移行前の互換resident lease",
+      "cleanupId": "restart-residents.legacyLease",
+      "integrationStatus": "pending"
+    },
+    {
+      "id": "spawn-worker-roleless-worker",
+      "generation": "worker-name-without-role",
+      "scope": "mixed",
+      "requiredCapabilities": ["workspace-read", "process-observation"],
+      "description": "roleを含まない旧形式ワーカーの重複チェック対象",
+      "cleanupId": "spawn-worker.rolelessGuard",
+      "integrationStatus": "pending"
+    }
+  ]
+}

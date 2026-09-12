@@ -2,10 +2,10 @@
 'use strict';
 
 // /gh-maestro の UserPromptExpansion hook から呼ばれる単一エントリポイント。
-// Claude Code は同一イベントに一致する hook handler を並列実行するため、setup・
-// reset・context を別々の handler として登録すると reset 前の state を context が
-// 読み取る競合が起きる。ここでは兄弟CLIを同期実行し、全段階の成功後だけ stdout を
-// hook へ返す。
+// Claude Code は同一イベントに一致する hook handler を並列実行するため、legacy inspection・
+// setup・reset・context を別々の handler として登録すると、整理処理の
+// 前後で検査結果とcontextがずれる競合が起きる。ここでは兄弟CLIを同期実行し、
+// 全段階の成功後だけ stdout をhookへ返す。
 
 const path = require('path');
 const { spawnSync } = require('./shared/child-process');
@@ -21,9 +21,10 @@ Options:
   --help, -h          このusageを表示
 
 実行順:
-  1. gh-maestro-setup.js <workspace>
-  2. reset-session.js --workspace <workspace> --quiet
-  3. get-context.js
+  1. check-legacy.js --workspace <workspace>
+  2. gh-maestro-setup.js <workspace>
+  3. reset-session.js --workspace <workspace> --quiet
+  4. get-context.js
 
 全段階が終了コード0のときだけ、各段階のstdoutをこのhookのstdoutへ出力する。
 途中で失敗した場合は後続段階を実行せず、stdoutを出力しない。`;
@@ -40,6 +41,10 @@ function outputText(value) {
 
 function stageDefinitions(workspace, scriptsDir = __dirname) {
   return [
+    {
+      name: 'check-legacy.js',
+      args: [path.join(scriptsDir, 'check-legacy.js'), '--workspace', workspace],
+    },
     {
       name: 'gh-maestro-setup.js',
       args: [path.join(scriptsDir, 'gh-maestro-setup.js'), workspace],
@@ -68,7 +73,7 @@ function formatStageFailure(stage, result, error) {
 }
 
 /**
- * セッション開始に必要な3段階を、同じworkspaceの同期子プロセスとして実行する。
+ * セッション開始に必要な4段階を、同じworkspaceの同期子プロセスとして実行する。
  *
  * stdoutは成功が確定するまで保持する。get-context.jsが返すcontextを途中で流すと、
  * 後段の失敗時にも古いSESSION_IDがClaude Codeへ注入されるためである。

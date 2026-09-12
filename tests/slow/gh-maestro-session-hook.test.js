@@ -19,7 +19,7 @@ const {
   stopResidentEntry,
 } = require('../../scripts/shared/restart-residents');
 
-// セッションhookの実プロセス・実Git・3段階の順序は維持し、reset-session内部の
+// セッションhookの実プロセス・実Git・4段階の順序は維持し、reset-session内部の
 // platform process scanだけをテスト用固定値へ差し替える。PID再利用の実照合は
 // process-lifecycle.test.js の専用ケースで検証する。
 const FAST_SESSION_PRELOAD = (() => {
@@ -52,7 +52,7 @@ function runGit(cwd, ...args) {
   return result;
 }
 
-// The hook integration still runs the real hook and all three real stage
+// The hook integration still runs the real hook and all four real stage
 // processes.  Share only the immutable repository fixture so each case does
 // not spend several child-process launches recreating the same Git history.
 let workspaceTemplate;

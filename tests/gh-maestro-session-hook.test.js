@@ -184,7 +184,7 @@ async function stopRunningSupervisors(workspace, processHandle) {
   throw new Error(`worker-supervisor の停止確認がタイムアウトしました。残存PID: ${JSON.stringify(remainingPids)}`);
 }
 
-test('runSessionHook: setup → reset-session → get-contextを同期順に実行する', () => {
+test('runSessionHook: legacy inspection → setup → reset-session → get-contextを同期順に実行する', () => {
   const workspace = path.join(os.tmpdir(), 'ghm-session-hook-order-workspace');
   const scriptsDir = path.join(os.tmpdir(), 'ghm-session-hook-scripts');
   const calls = [];
@@ -204,18 +204,20 @@ test('runSessionHook: setup → reset-session → get-contextを同期順に実�
 
   assert.equal(result.ok, true);
   assert.deepEqual(calls.map(({ args }) => path.basename(args[0])), [
+    'check-legacy.js',
     'gh-maestro-setup.js',
     'reset-session.js',
     'get-context.js',
   ]);
-  assert.deepEqual(calls[0].args.slice(1), [workspace]);
-  assert.deepEqual(calls[1].args.slice(1), ['--workspace', workspace, '--quiet']);
-  assert.deepEqual(calls[2].args.slice(1), []);
+  assert.deepEqual(calls[0].args.slice(1), ['--workspace', workspace]);
+  assert.deepEqual(calls[1].args.slice(1), [workspace]);
+  assert.deepEqual(calls[2].args.slice(1), ['--workspace', workspace, '--quiet']);
+  assert.deepEqual(calls[3].args.slice(1), []);
   assert.equal(calls.every(({ command }) => command === process.execPath), true);
   assert.equal(calls.every(({ options }) => options.cwd === workspace), true);
   assert.equal(calls.every(({ options }) => options.env.GH_MAESTRO_WORKSPACE === workspace), true);
   assert.equal(calls.every(({ options }) => options.env.CLAUDE_PROJECT_DIR === workspace), true);
-  assert.equal(result.stdout, 'gh-maestro-setup.js\nreset-session.js\nget-context.js\n');
+  assert.equal(result.stdout, 'check-legacy.js\ngh-maestro-setup.js\nreset-session.js\nget-context.js\n');
 });
 
 test('runSessionHook: stage失敗時は後続を実行せず、捕捉したstdoutを破棄する', () => {
@@ -225,7 +227,7 @@ test('runSessionHook: stage失敗時は後続を実行せず、捕捉したstdou
   const result = require('../scripts/gh-maestro-session-hook').runSessionHook(workspace, {
     spawnSyncFn: (command, args) => {
       calls.push(args[0]);
-      if (calls.length === 2) {
+      if (calls.length === 3) {
         return { status: 1, stdout: 'SESSION_ID=old-session-id\n', stderr: 'reset failed\n' };
       }
       return { status: 0, stdout: 'setup output\n', stderr: '' };
@@ -234,14 +236,14 @@ test('runSessionHook: stage失敗時は後続を実行せず、捕捉したstdou
 
   assert.equal(result.ok, false);
   assert.equal(result.exitCode, 1);
-  assert.equal(calls.length, 2, 'stage失敗後にget-contextを実行しないこと');
+  assert.equal(calls.length, 3, 'stage失敗後にget-contextを実行しないこと');
   assert.equal(result.stdout, '', '失敗時に捕捉済みstdoutを出力しないこと');
   assert.match(result.stderr, /reset-session\.js failed/);
   assert.match(result.stderr, /reset failed/);
   assert.doesNotMatch(result.stderr, /SESSION_ID=old-session-id/);
 });
 
-test('runSessionHook: setupの判定不能失敗を成功へ縮退させず、reset以降を実行しない', () => {
+test('runSessionHook: 検査の判定不能失敗を成功へ縮退させず、後続を実行しない', () => {
   const calls = [];
   const workspace = path.join(__dirname, '..', 'session-hook-setup-failure-workspace');
 
@@ -258,10 +260,10 @@ test('runSessionHook: setupの判定不能失敗を成功へ縮退させず、re
 
   assert.equal(result.ok, false);
   assert.equal(result.exitCode, 1);
-  assert.deepEqual(calls, [path.join(__dirname, '..', 'scripts', 'gh-maestro-setup.js')],
-    'setup失敗後にreset-session/get-contextを実行しないこと');
-  assert.equal(result.stdout, '', 'setup失敗時にstdoutを出力しないこと');
-  assert.equal(result.failedStage, 'gh-maestro-setup.js');
+  assert.deepEqual(calls, [path.join(__dirname, '..', 'scripts', 'check-legacy.js')],
+    '検査失敗後にsetup/reset-session/get-contextを実行しないこと');
+  assert.equal(result.stdout, '', '検査失敗時にstdoutを出力しないこと');
+  assert.equal(result.failedStage, 'check-legacy.js');
   assert.match(result.stderr, /git フック置き場の問い合わせが判定不能/);
 });
 
@@ -274,7 +276,7 @@ test('CLI通し: get-contextが失敗した場合は旧SESSION_IDをstdoutへ出
   const result = require('../scripts/gh-maestro-session-hook').runSessionHook(workspace, {
       spawnSyncFn: (command, args) => {
         calls.push(path.basename(args[0]));
-        if (calls.length === 3) {
+        if (calls.length === 4) {
           return { status: 1, stdout: 'SESSION_ID=old-session-id\n', stderr: 'get-context failed\n' };
         }
         return { status: 0, stdout: `${path.basename(args[0])}\n`, stderr: '' };
@@ -282,7 +284,7 @@ test('CLI通し: get-contextが失敗した場合は旧SESSION_IDをstdoutへ出
     });
 
     assert.equal(result.ok, false);
-    assert.deepEqual(calls, ['gh-maestro-setup.js', 'reset-session.js', 'get-context.js']);
+    assert.deepEqual(calls, ['check-legacy.js', 'gh-maestro-setup.js', 'reset-session.js', 'get-context.js']);
     assert.doesNotMatch(result.stdout, /SESSION_ID=/,
       'get-context失敗時はreset前後のSESSION_IDを含むstdoutを破棄すること');
     assert.match(result.stderr, /get-context\.js failed/);
