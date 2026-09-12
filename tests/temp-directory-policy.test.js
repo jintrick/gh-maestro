@@ -23,7 +23,7 @@ const DIRECT_TEMP_USAGE = new Map([
   ['finalize-issue.test.js', 10],
   ['finalize-review.test.js', 14],
   ['find-matching-rules.test.js', 2],
-  ['gh-maestro-session-hook.test.js', 11],
+  ['gh-maestro-session-hook.test.js', 12],
   ['headless-launch.test.js', 2],
   ['installer.test.js', 67],
   ['json-file.test.js', 3],

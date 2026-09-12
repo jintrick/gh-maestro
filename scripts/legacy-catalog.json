@@ -7,6 +7,16 @@
       "generation": "ai-review-ci",
       "scope": "repository",
       "requiredCapabilities": ["workspace-read", "git-ref-read"],
+      "detector": "ai-review-ci",
+      "parameters": {
+        "sentinelPath": ".gh-maestro/ai-review-ok",
+        "refs": ["refs/remotes/origin/main", "refs/remotes/origin/dev"],
+        "paths": [
+          ".github/workflows/reviewer.lock.yml",
+          ".github/workflows/reviewer.md",
+          ".github/workflows/shared/reviewer-output-policy.md"
+        ]
+      },
       "description": "旧AIレビューCIのワークフローと退役センチネル",
       "cleanupId": "gh-maestro-setup.retireAiReviewCi",
       "integrationStatus": "pending"
@@ -16,6 +26,11 @@
       "generation": "checks-hook",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read"],
+      "detector": "effective-hook-marker",
+      "parameters": {
+        "hookName": "pre-commit",
+        "markerPattern": "^# gh-maestro:checks(?::v\\d+)?$"
+      },
       "description": "pre-commitに残る廃止済みchecksマーカーブロック",
       "cleanupId": "gh-maestro-setup.ensureSyncHook",
       "integrationStatus": "pending"
@@ -25,6 +40,11 @@
       "generation": "checks-hook",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read"],
+      "detector": "effective-hook-marker",
+      "parameters": {
+        "hookName": "pre-push",
+        "markerPattern": "^# gh-maestro:checks(?::v\\d+)?$"
+      },
       "description": "pre-pushに残る廃止済みchecksブロックと抜け殻",
       "cleanupId": "gh-maestro-setup.retireChecksHooks",
       "integrationStatus": "pending"
@@ -34,6 +54,14 @@
       "generation": "hooks-path-migration",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read"],
+      "detector": "stale-default-hooks",
+      "parameters": {
+        "hookNames": ["pre-commit", "pre-push"],
+        "markerPatterns": [
+          "^# gh-maestro:sync-rules(?::v\\d+)?$",
+          "^# gh-maestro:checks(?::v\\d+)?$"
+        ]
+      },
       "description": "core.hooksPath移行後の既定.git/hooksに残るマーカー",
       "cleanupId": "gh-maestro-setup.removeStaleDefaultHooks",
       "integrationStatus": "pending"
@@ -43,6 +71,8 @@
       "generation": "gitignore-v1",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read"],
+      "detector": "line-marker",
+      "parameters": { "path": ".gitignore", "line": ".gh-maestro/" },
       "description": ".gitignoreの旧.gh-maestro/エントリ",
       "cleanupId": "gh-maestro-setup.ensureGitIgnore",
       "integrationStatus": "pending"
@@ -52,6 +82,8 @@
       "generation": "agents-json",
       "scope": "managed",
       "requiredCapabilities": ["managed-read"],
+      "detector": "managed-json-file",
+      "parameters": { "path": "agents.json" },
       "description": "管理領域に残る旧agents.json",
       "cleanupId": "install.quarantineLegacyAgentsConfig",
       "integrationStatus": "pending"
@@ -61,6 +93,8 @@
       "generation": "home-pid-registry",
       "scope": "managed",
       "requiredCapabilities": ["managed-read"],
+      "detector": "managed-path",
+      "parameters": { "path": "pids" },
       "description": "管理領域に残る旧ホームPIDレジストリ",
       "cleanupId": "install.quarantineLegacyHomePids",
       "integrationStatus": "pending"
@@ -70,6 +104,10 @@
       "generation": "managed-root-prune",
       "scope": "managed",
       "requiredCapabilities": ["managed-read"],
+      "detector": "managed-entries",
+      "parameters": {
+        "entries": ["workflows", ".claude", "GH_MAESTRO_REF", "review-policy.md"]
+      },
       "description": "管理領域直下に残る既知の旧バージョン項目",
       "cleanupId": "install.pruneManagedRoot",
       "integrationStatus": "pending"
@@ -79,6 +117,15 @@
       "generation": "records-before-254",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read"],
+      "detector": "workspace-any-paths",
+      "parameters": {
+        "paths": [
+          ".gh-maestro/worker-logs",
+          ".gh-maestro/review-manager",
+          ".gh-maestro/assistant-watch",
+          ".gh-maestro/inbox-supervisor"
+        ]
+      },
       "description": "Issue #254以前の旧配置レコード",
       "cleanupId": "migrate-records.planMigration",
       "integrationStatus": "integrated"
@@ -88,6 +135,8 @@
       "generation": "workspace-pid-bridge",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read"],
+      "detector": "workspace-path",
+      "parameters": { "path": ".gh-maestro/pids" },
       "description": "旧workspace/.gh-maestro/pidsのレジストリとロック",
       "cleanupId": "process-lifecycle.sweepRegistry",
       "integrationStatus": "integrated"
@@ -97,6 +146,8 @@
       "generation": "msg-state-v1",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read"],
+      "detector": "v1-state",
+      "parameters": { "directory": ".gh-maestro/msg-state", "suffix": ".json" },
       "description": "msg-stateに残るv1形式の既読状態",
       "cleanupId": "msg-poll.readState",
       "integrationStatus": "integrated"
@@ -106,6 +157,8 @@
       "generation": "detached-notifier-before-151",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read", "process-observation"],
+      "detector": "worker-notifier",
+      "parameters": { "field": "notifierPid" },
       "description": "workers.jsonに残る旧detached notifier",
       "cleanupId": "reset-session.notifierPid",
       "integrationStatus": "pending"
@@ -115,6 +168,8 @@
       "generation": "wezterm-pane-before-151",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read"],
+      "detector": "worker-field",
+      "parameters": { "field": "paneId" },
       "description": "reset-sessionが扱う旧WezTerm paneId",
       "cleanupId": "reset-session.paneId",
       "integrationStatus": "pending"
@@ -124,6 +179,8 @@
       "generation": "messages-before-phase-4",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read"],
+      "detector": "workspace-path",
+      "parameters": { "path": ".gh-maestro/messages" },
       "description": "Phase 4以前の.gh-maestro/messages",
       "cleanupId": "reset-session.messages",
       "integrationStatus": "pending"
@@ -133,6 +190,8 @@
       "generation": "queue-before-phase-2",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read", "process-observation"],
+      "detector": "workspace-queue",
+      "parameters": { "directory": ".gh-maestro/queue", "pollerFile": "poller.json" },
       "description": "Phase 2以前のFSキューとqueue-poller",
       "cleanupId": "reset-session.queue",
       "integrationStatus": "pending"
@@ -142,6 +201,8 @@
       "generation": "worker-pane-before-151",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read"],
+      "detector": "worker-field",
+      "parameters": { "field": "paneId" },
       "description": "stop-worker-processが扱うワーカー旧paneId",
       "cleanupId": "stop-worker-process.paneId",
       "integrationStatus": "pending"
@@ -151,6 +212,14 @@
       "generation": "inbox-supervisor-rename",
       "scope": "mixed",
       "requiredCapabilities": ["workspace-read", "process-observation"],
+      "detector": "legacy-supervisor",
+      "parameters": {
+        "pidDirectories": [".gh-maestro/pids"],
+        "runtimePidDirectories": ["pids"],
+        "script": "inbox-supervisor.js",
+        "legacyRole": "inbox-supervisor",
+        "leaseDirectory": ".gh-maestro/leases"
+      },
       "description": "改名前のinbox-supervisor.jsと旧role lease",
       "cleanupId": "worker-supervisor-control.legacyName",
       "integrationStatus": "pending"
@@ -160,6 +229,8 @@
       "generation": "legacy-resident-lease",
       "scope": "workspace",
       "requiredCapabilities": ["workspace-read", "process-observation"],
+      "detector": "resident-lease",
+      "parameters": { "directory": ".gh-maestro/leases", "role": "inbose-supervisor" },
       "description": "移行前の互換resident lease",
       "cleanupId": "restart-residents.legacyLease",
       "integrationStatus": "pending"
@@ -169,6 +240,11 @@
       "generation": "worker-name-without-role",
       "scope": "mixed",
       "requiredCapabilities": ["workspace-read", "process-observation"],
+      "detector": "roleless-worker",
+      "parameters": {
+        "namePattern": "^issue-\\d+-(?!coder-|senior-coder-|explorer-|diagnostician-|architect-|review-manager-|base-|assistant-)[A-Za-z0-9_-]+$",
+        "leaseDirectory": ".gh-maestro/leases"
+      },
       "description": "roleを含まない旧形式ワーカーの重複チェック対象",
       "cleanupId": "spawn-worker.rolelessGuard",
       "integrationStatus": "pending"

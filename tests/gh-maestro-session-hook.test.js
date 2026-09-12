@@ -220,6 +220,41 @@ test('runSessionHook: legacy inspection → setup → reset-session → get-cont
   assert.equal(result.stdout, 'check-legacy.js\ngh-maestro-setup.js\nreset-session.js\nget-context.js\n');
 });
 
+test('runSessionHook: present/unknown/incompleteの検査結果をcontextとともにstdoutへ返す', () => {
+  const workspace = path.join(os.tmpdir(), 'ghm-session-hook-inspection-output-workspace');
+  const calls = [];
+  const inspection = {
+    schemaVersion: 1,
+    completeness: 'incomplete',
+    items: [
+      { id: 'legacy-present', status: 'present' },
+      { id: 'legacy-unknown', status: 'unknown' },
+    ],
+  };
+
+  const result = require('../scripts/gh-maestro-session-hook').runSessionHook(workspace, {
+    spawnSyncFn: (command, args) => {
+      const stage = path.basename(args[0]);
+      calls.push(stage);
+      if (stage === 'check-legacy.js') {
+        return { status: 0, stdout: `${JSON.stringify(inspection)}\n`, stderr: '' };
+      }
+      if (stage === 'get-context.js') {
+        return { status: 0, stdout: 'SESSION_ID=inspection-session\n', stderr: '' };
+      }
+      return { status: 0, stdout: `${stage} output\n`, stderr: '' };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, ['check-legacy.js', 'gh-maestro-setup.js', 'reset-session.js', 'get-context.js']);
+  assert.match(result.stdout, /"completeness":"incomplete"/);
+  assert.match(result.stdout, /"status":"present"/);
+  assert.match(result.stdout, /"status":"unknown"/);
+  assert.match(result.stdout, /SESSION_ID=inspection-session/);
+  assert.ok(result.stdout.indexOf('"completeness":"incomplete"') < result.stdout.indexOf('SESSION_ID='));
+});
+
 test('runSessionHook: stage失敗時は後続を実行せず、捕捉したstdoutを破棄する', () => {
   const calls = [];
   const workspace = path.join(os.tmpdir(), 'ghm-session-hook-failure-workspace');

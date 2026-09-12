@@ -16,6 +16,8 @@
           "generation",
           "scope",
           "requiredCapabilities",
+          "detector",
+          "parameters",
           "description",
           "cleanupId",
           "integrationStatus"
@@ -31,6 +33,62 @@
             "type": "array",
             "minItems": 1,
             "items": { "type": "string", "minLength": 1 }
+          },
+          "detector": { "type": "string", "minLength": 1 },
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "sentinelPath": { "type": "string", "minLength": 1 },
+              "refs": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "paths": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "hookName": { "type": "string", "minLength": 1 },
+              "markerPattern": { "type": "string", "minLength": 1 },
+              "hookNames": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "markerPatterns": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "path": { "type": "string", "minLength": 1 },
+              "line": { "type": "string", "minLength": 1 },
+              "entries": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "directory": { "type": "string", "minLength": 1 },
+              "suffix": { "type": "string", "minLength": 1 },
+              "field": { "type": "string", "minLength": 1 },
+              "pollerFile": { "type": "string", "minLength": 1 },
+              "script": { "type": "string", "minLength": 1 },
+              "legacyRole": { "type": "string", "minLength": 1 },
+              "pidDirectories": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "runtimePidDirectories": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "role": { "type": "string", "minLength": 1 },
+              "namePattern": { "type": "string", "minLength": 1 },
+              "leaseDirectory": { "type": "string", "minLength": 1 }
+            }
           },
           "description": { "type": "string", "minLength": 1 },
           "cleanupId": { "type": "string", "minLength": 1 },

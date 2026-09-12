@@ -23,30 +23,6 @@ const DECLARATION_SCHEMA = require('../legacy-catalog-schema.json');
 
 const ITEM_STATES = Object.freeze(['present', 'absent', 'unknown', 'not_applicable']);
 const COMPLETENESS_STATES = Object.freeze(['complete', 'incomplete']);
-const LEGACY_AI_REVIEW_PATHS = Object.freeze([
-  '.github/workflows/reviewer.lock.yml',
-  '.github/workflows/reviewer.md',
-  '.github/workflows/shared/reviewer-output-policy.md',
-]);
-const LEGACY_REPOSITORY_REFS = Object.freeze(['main', 'dev']);
-const LEGACY_RECORD_DIRS = Object.freeze([
-  'worker-logs',
-  'review-manager',
-  path.join('assistant-watch'),
-  path.join('inbox-supervisor'),
-]);
-const LEGACY_MANAGED_ENTRIES = Object.freeze([
-  'workflows',
-  '.claude',
-  'GH_MAESTRO_REF',
-  'review-policy.md',
-]);
-const LEGACY_ROLELESS_WORKER_RE = /^issue-\d+-(?!coder-|senior-coder-|explorer-|diagnostician-|architect-|review-manager-|base-|assistant-)[A-Za-z0-9_-]+$/;
-const LEGACY_SUPERVISOR_SCRIPT = 'inbox-supervisor.js';
-const LEGACY_SUPERVISOR_ROLE = 'inbox-supervisor';
-const LEGACY_TYPO_SUPERVISOR_ROLE = 'inbose-supervisor';
-const CHECKS_MARKER_RE = /^# gh-maestro:checks(?::v\d+)?$/;
-const SYNC_RULES_MARKER_RE = /^# gh-maestro:sync-rules(?::v\d+)?$/;
 
 function own(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
@@ -97,6 +73,31 @@ function notApplicable(reason) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function rootPath(context, root) {
+  if (root === 'managed') return context.managedRoot;
+  if (root === 'workspace') return context.workspace;
+  return null;
+}
+
+function scopedPath(context, root, relativePath) {
+  const base = rootPath(context, root);
+  return typeof base === 'string' && typeof relativePath === 'string'
+    ? path.join(base, relativePath)
+    : null;
+}
+
+function compilePattern(pattern, label) {
+  try {
+    return new RegExp(pattern);
+  } catch (error) {
+    throw new Error(`${label} の正規表現が不正です: ${errorMessage(error)}`);
+  }
+}
+
+function validReadResult(result) {
+  return result && ['present', 'absent', 'unknown'].includes(result.status);
 }
 
 function defaultReadGit(args, workspace) {
@@ -342,35 +343,48 @@ function markerInFile(context, filePath, markerRe) {
   return found ? present(filePath) : absent(filePath);
 }
 
-function detectAiReviewCi(context) {
-  const sentinel = path.join(context.workspace, '.gh-maestro', 'ai-review-ok');
+function detectAiReviewCi(context, parameters) {
+  const sentinel = scopedPath(context, 'workspace', parameters.sentinelPath);
   const sentinelState = pathState(context, sentinel);
   if (sentinelState.status === 'unknown') return sentinelState;
 
   const refResults = [];
-  for (const branch of LEGACY_REPOSITORY_REFS) {
-    const ref = `refs/remotes/origin/${branch}`;
-    for (const filePath of LEGACY_AI_REVIEW_PATHS) {
-      const result = context.capabilities.readRef(context.workspace, ref, filePath);
-      refResults.push({ branch, filePath, ...result });
+  for (const ref of parameters.refs) {
+    for (const filePath of parameters.paths) {
+      let result;
+      try {
+        result = context.capabilities.readRef(context.workspace, ref, filePath);
+      } catch (error) {
+        result = unknown(`${ref}:${filePath} の読み取りに失敗しました: ${errorMessage(error)}`);
+      }
+      refResults.push(validReadResult(result)
+        ? { ref, filePath, status: result.status, reason: result.reason }
+        : { ref, filePath, ...unknown('ref detectorが不正な状態を返しました') });
     }
   }
   const found = refResults.filter((result) => result.status === 'present');
   if (sentinelState.status === 'present' || found.length > 0) {
-    return present({ sentinel: sentinelState.status === 'present', files: found });
+    return present({
+      sentinel: sentinelState.status === 'present',
+      files: found.map(({ ref, filePath }) => ({ ref, filePath })),
+    });
   }
   const unavailable = refResults.find((result) => result.status === 'unknown');
   if (unavailable) return unknown(unavailable.reason || '旧AIレビューCIのrefを確認できません');
   return absent('旧AIレビューCIのセンチネルとワークフローはありません');
 }
 
-function detectEffectiveHookMarker(context, hookName, markerRe) {
+function detectEffectiveHookMarker(context, parameters) {
   const locations = resolveHookLocations(context);
   if (locations.status !== 'ok') return unknown(locations.reason);
-  return markerInFile(context, path.join(locations.effectiveHooksDir, hookName), markerRe);
+  return markerInFile(
+    context,
+    path.join(locations.effectiveHooksDir, parameters.hookName),
+    compilePattern(parameters.markerPattern, `${parameters.hookName} marker`),
+  );
 }
 
-function detectStaleDefaultHooks(context) {
+function detectStaleDefaultHooks(context, parameters) {
   const locations = resolveHookLocations(context);
   if (locations.status !== 'ok') return unknown(locations.reason);
   if (path.resolve(locations.defaultHooksDir).toLowerCase()
@@ -378,59 +392,71 @@ function detectStaleDefaultHooks(context) {
     return absent('既定のhooks置き場が現在のhooks置き場です');
   }
   return mergeResults(
-    ['pre-commit', 'pre-push'].map((hookName) => mergeResults([
-      markerInFile(context, path.join(locations.defaultHooksDir, hookName), SYNC_RULES_MARKER_RE),
-      markerInFile(context, path.join(locations.defaultHooksDir, hookName), CHECKS_MARKER_RE),
-    ], hookName)),
+    parameters.hookNames.map((hookName) => mergeResults(
+      parameters.markerPatterns.map((markerPattern) => markerInFile(
+        context,
+        path.join(locations.defaultHooksDir, hookName),
+        compilePattern(markerPattern, `${hookName} marker`),
+      )),
+      hookName,
+    )),
     '既定hooks置き場にマーカーはありません',
   );
 }
 
-function detectLegacyGitIgnore(context) {
-  const state = textState(context, path.join(context.workspace, '.gitignore'));
+function detectLineMarker(context, parameters) {
+  const target = scopedPath(context, 'workspace', parameters.path);
+  const state = textState(context, target);
   if (state.status !== 'present') return state;
-  return state.content.split(/\r?\n/).some((line) => line.trim() === '.gh-maestro/')
-    ? present('.gitignore contains .gh-maestro/')
-    : absent('.gitignore has no legacy .gh-maestro/ entry');
+  return state.content.split(/\r?\n/).some((line) => line.trim() === parameters.line)
+    ? present(`${target} contains ${parameters.line}`)
+    : absent(`${target} has no ${parameters.line} entry`);
 }
 
-function detectManagedAgentsJson(context) {
-  return jsonState(context, path.join(context.managedRoot, 'agents.json'));
+function detectManagedJsonFile(context, parameters) {
+  const target = scopedPath(context, 'managed', parameters.path);
+  const state = jsonState(context, target);
+  if (state.status !== 'present') return state;
+  // JSONの妥当性だけを確認し、管理領域の利用者データを検査結果へ載せない。
+  return present(target);
 }
 
-function detectManagedEntries(context) {
+function detectManagedEntries(context, parameters) {
   const state = directoryState(context, context.managedRoot);
   if (state.status !== 'present') return state;
   const names = new Set(entriesNames(state.entries));
-  const found = LEGACY_MANAGED_ENTRIES.filter((name) => names.has(name));
+  const found = parameters.entries.filter((name) => names.has(name));
   return found.length > 0 ? present(found) : absent('既知の旧管理項目はありません');
 }
 
-function detectLegacyHomePids(context) {
-  return pathState(context, path.join(context.managedRoot, 'pids'));
+function detectManagedPath(context, parameters) {
+  return pathState(context, scopedPath(context, 'managed', parameters.path));
 }
 
-function detectLegacyRecordDirectories(context) {
+function detectWorkspaceAnyPaths(context, parameters) {
   return mergeResults(
-    LEGACY_RECORD_DIRS.map((dir) => pathState(context, path.join(context.workspace, '.gh-maestro', dir))),
+    parameters.paths.map((relativePath) => pathState(
+      context,
+      scopedPath(context, 'workspace', relativePath),
+    )),
     '旧配置レコードのディレクトリはありません',
   );
 }
 
-function detectLegacyWorkspacePids(context) {
-  return pathState(context, path.join(context.workspace, '.gh-maestro', 'pids'));
+function detectWorkspacePath(context, parameters) {
+  return pathState(context, scopedPath(context, 'workspace', parameters.path));
 }
 
-function detectV1State(context) {
-  const directory = path.join(context.workspace, '.gh-maestro', 'msg-state');
+function detectV1State(context, parameters) {
+  const directory = scopedPath(context, 'workspace', parameters.directory);
   const state = directoryState(context, directory);
   if (state.status !== 'present') return state;
-  const candidates = entriesNames(state.entries).filter((name) => name.endsWith('.json'));
+  const candidates = entriesNames(state.entries).filter((name) => name.endsWith(parameters.suffix));
   if (candidates.length === 0) return absent('v1形式のstateファイルはありません');
 
   const results = [];
   for (const fileName of candidates) {
-    const self = fileName.slice(0, -'.json'.length);
+    const self = fileName.slice(0, -parameters.suffix.length);
     let result;
     try {
       const readResult = readState(context.workspace, self);
@@ -489,15 +515,18 @@ function workerEntriesWithField(context, field) {
   return { status: 'present', value: found };
 }
 
-function detectDetachedNotifier(context) {
-  const workers = workerEntriesWithField(context, 'notifierPid');
+function detectDetachedNotifier(context, parameters) {
+  const workers = workerEntriesWithField(context, parameters.field);
   if (workers.status !== 'present') return workers;
   if (workers.value.length === 0) return absent('旧detached notifierの記録はありません');
   const observations = [];
   for (const item of workers.value) {
-    const pid = Number(item.entry.notifierPid);
+    const rawPid = item.entry && typeof item.entry === 'object'
+      ? item.entry[parameters.field]
+      : item.entry;
+    const pid = Number(rawPid);
     if (!Number.isInteger(pid) || pid <= 0) {
-      observations.push({ workerName: item.workerName, pid: item.entry.notifierPid, live: 'unknown' });
+      observations.push({ workerName: item.workerName, pid: rawPid, live: 'unknown' });
       continue;
     }
     // notifierPidはworkers.jsonのワーカー本体とは別プロセスのPIDなので、ワーカーの
@@ -508,22 +537,26 @@ function detectDetachedNotifier(context) {
   return present(observations);
 }
 
-function detectLegacyPane(context) {
-  const workers = workerEntriesWithField(context, 'paneId');
+function detectWorkerField(context, parameters) {
+  const workers = workerEntriesWithField(context, parameters.field);
   if (workers.status !== 'present') return workers;
   return workers.value.length > 0
-    ? present(workers.value.map(({ workerName, entry }) => ({ workerName, paneId: entry.paneId ?? entry })))
+    ? present(workers.value.map(({ workerName, entry }) => ({
+      workerName,
+      [parameters.field]: entry && typeof entry === 'object'
+        ? entry[parameters.field]
+        : entry,
+    })))
     : absent('旧WezTerm paneIdの記録はありません');
 }
 
-function detectLegacyMessages(context) {
-  return pathState(context, path.join(context.workspace, '.gh-maestro', 'messages'));
-}
-
-function detectLegacyQueue(context) {
-  const queue = pathState(context, path.join(context.workspace, '.gh-maestro', 'queue'));
+function detectLegacyQueue(context, parameters) {
+  const queue = pathState(context, scopedPath(context, 'workspace', parameters.directory));
   if (queue.status !== 'present') return queue;
-  const poller = jsonState(context, path.join(context.workspace, '.gh-maestro', 'queue', 'poller.json'));
+  const poller = jsonState(
+    context,
+    path.join(scopedPath(context, 'workspace', parameters.directory), parameters.pollerFile),
+  );
   if (poller.status === 'unknown') return poller;
   if (poller.status === 'present' && poller.value && Number.isInteger(poller.value.pid)) {
     const observation = observeProcess(context, poller.value.pid, poller.value);
@@ -549,11 +582,11 @@ function readJsonEntriesFromDirectory(context, directory) {
   return { status: 'present', entries: results };
 }
 
-function detectLegacySupervisorName(context) {
+function detectLegacySupervisorName(context, parameters) {
   const directories = [
-    path.join(context.workspace, '.gh-maestro', 'pids'),
-    runtimeWorkspacePath(context, 'pids'),
-  ].filter(Boolean);
+    ...parameters.pidDirectories.map((relativePath) => scopedPath(context, 'workspace', relativePath)),
+    ...parameters.runtimePidDirectories.map((relativePath) => runtimeWorkspacePath(context, relativePath)),
+  ].filter((directory) => directory !== null);
   const observations = [];
   let unknownReason = null;
   for (const directory of directories) {
@@ -565,7 +598,7 @@ function detectLegacySupervisorName(context) {
         unknownReason = item.reason;
         continue;
       }
-      if (item.status !== 'present' || !item.value || item.value.script !== LEGACY_SUPERVISOR_SCRIPT) continue;
+      if (item.status !== 'present' || !item.value || item.value.script !== parameters.script) continue;
       const observation = observeProcess(context, item.value.pid, item.value);
       const live = observation.live;
       if (observation.reason) unknownReason = observation.reason;
@@ -574,37 +607,33 @@ function detectLegacySupervisorName(context) {
   }
 
   const leasePath = path.join(
-    context.workspace,
-    '.gh-maestro',
-    'leases',
-    `${workerLease.roleLeaseKey(LEGACY_SUPERVISOR_ROLE)}.json`,
+    scopedPath(context, 'workspace', parameters.leaseDirectory),
+    `${workerLease.roleLeaseKey(parameters.legacyRole)}.json`,
   );
   const lease = jsonState(context, leasePath);
   if (lease.status === 'unknown') unknownReason = lease.reason;
   if (lease.status === 'present') {
-    const observation = observeResidentLease(context, LEGACY_SUPERVISOR_ROLE);
+    const observation = observeResidentLease(context, parameters.legacyRole);
     if (observation.reason) unknownReason = observation.reason;
-    observations.push({ source: leasePath, role: LEGACY_SUPERVISOR_ROLE, live: observation.live });
+    observations.push({ source: leasePath, role: parameters.legacyRole, live: observation.live });
   }
   if (observations.length > 0) return present(observations);
   return unknownReason ? unknown(unknownReason) : absent('旧supervisor名のPID/leaseはありません');
 }
 
-function detectTypoSupervisorLease(context) {
+function detectResidentLease(context, parameters) {
   const leasePath = path.join(
-    context.workspace,
-    '.gh-maestro',
-    'leases',
-    `${workerLease.roleLeaseKey(LEGACY_TYPO_SUPERVISOR_ROLE)}.json`,
+    scopedPath(context, 'workspace', parameters.directory),
+    `${workerLease.roleLeaseKey(parameters.role)}.json`,
   );
   const lease = jsonState(context, leasePath);
   if (lease.status !== 'present') return lease;
-  const observation = observeResidentLease(context, LEGACY_TYPO_SUPERVISOR_ROLE);
-  return present({ path: leasePath, role: LEGACY_TYPO_SUPERVISOR_ROLE, live: observation.live,
+  const observation = observeResidentLease(context, parameters.role);
+  return present({ path: leasePath, role: parameters.role, live: observation.live,
     ...(observation.reason ? { observationError: observation.reason } : {}) });
 }
 
-function isRolelessWorkerName(name, entry = null) {
+function isRolelessWorkerName(name, entry, parameters) {
   if (entry && typeof entry === 'object' && Number.isFinite(Number(entry.issue))
     && typeof entry.skill === 'string') {
     try {
@@ -613,30 +642,30 @@ function isRolelessWorkerName(name, entry = null) {
       if (name.startsWith(issuePrefix)) return !name.startsWith(`${issuePrefix}${role}-`);
     } catch { /* fallback to the established name shape below */ }
   }
-  return LEGACY_ROLELESS_WORKER_RE.test(name);
+  return compilePattern(parameters.namePattern, 'roleless worker name').test(name);
 }
 
-function detectRolelessWorker(context) {
+function detectRolelessWorker(context, parameters) {
   const workers = getWorkers(context);
   if (workers.status === 'unknown') return workers;
   const observations = [];
   if (workers.status === 'present') {
     for (const [workerName, entry] of Object.entries(workers.value)) {
-      if (!isRolelessWorkerName(workerName, entry)) continue;
+      if (!isRolelessWorkerName(workerName, entry, parameters)) continue;
       let live = 'unknown';
       try { live = context.capabilities.isWorkerAlive(entry); } catch { /* field presence remains known */ }
       observations.push({ source: 'workers.json', workerName, live });
     }
   }
 
-  const leasesPath = path.join(context.workspace, '.gh-maestro', 'leases');
+  const leasesPath = scopedPath(context, 'workspace', parameters.leaseDirectory);
   const leases = readJsonEntriesFromDirectory(context, leasesPath);
   if (leases.status === 'unknown') return leases;
   if (leases.status === 'present') {
     for (const item of leases.entries) {
       if (item.status === 'unknown') return unknown(item.reason);
       const workerName = item.value?.workerName || item.name.replace(/\.json$/, '');
-      if (!isRolelessWorkerName(workerName, item.value)) continue;
+      if (!isRolelessWorkerName(workerName, item.value, parameters)) continue;
       let live = 'unknown';
       try { live = context.capabilities.isLeaseLive(item.value); } catch { /* state is still present */ }
       observations.push({ source: 'leases', workerName, live });
@@ -647,27 +676,54 @@ function detectRolelessWorker(context) {
     : absent('role無し旧形式ワーカーの記録はありません');
 }
 
-const DETECTORS = Object.freeze({
-  'setup-ai-review-ci': detectAiReviewCi,
-  'setup-pre-commit-checks-hook': (context) => detectEffectiveHookMarker(context, 'pre-commit', CHECKS_MARKER_RE),
-  'setup-pre-push-checks-hook': (context) => detectEffectiveHookMarker(context, 'pre-push', CHECKS_MARKER_RE),
-  'setup-stale-default-hooks': detectStaleDefaultHooks,
-  'setup-legacy-gitignore': detectLegacyGitIgnore,
-  'install-legacy-agents-config': detectManagedAgentsJson,
-  'install-legacy-home-pids': detectLegacyHomePids,
-  'install-legacy-managed-items': detectManagedEntries,
-  'migrate-legacy-records': detectLegacyRecordDirectories,
-  'process-legacy-pid-registry': detectLegacyWorkspacePids,
-  'msg-poll-v1-state': detectV1State,
-  'reset-detached-notifier': detectDetachedNotifier,
-  'reset-legacy-wezterm-pane': detectLegacyPane,
-  'reset-legacy-messages': detectLegacyMessages,
-  'reset-legacy-queue': detectLegacyQueue,
-  'stop-worker-legacy-pane': detectLegacyPane,
-  'worker-supervisor-legacy-name': detectLegacySupervisorName,
-  'restart-residents-legacy-lease': detectTypoSupervisorLease,
-  'spawn-worker-roleless-worker': detectRolelessWorker,
+const DETECTOR_TYPES = Object.freeze({
+  'ai-review-ci': detectAiReviewCi,
+  'effective-hook-marker': detectEffectiveHookMarker,
+  'stale-default-hooks': detectStaleDefaultHooks,
+  'line-marker': detectLineMarker,
+  'managed-json-file': detectManagedJsonFile,
+  'managed-path': detectManagedPath,
+  'managed-entries': detectManagedEntries,
+  'workspace-any-paths': detectWorkspaceAnyPaths,
+  'workspace-path': detectWorkspacePath,
+  'v1-state': detectV1State,
+  'worker-notifier': detectDetachedNotifier,
+  'worker-field': detectWorkerField,
+  'workspace-queue': detectLegacyQueue,
+  'legacy-supervisor': detectLegacySupervisorName,
+  'resident-lease': detectResidentLease,
+  'roleless-worker': detectRolelessWorker,
 });
+
+function buildDetectors(catalog) {
+  const detectors = {};
+  for (const entry of catalog) {
+    const detector = DETECTOR_TYPES[entry.detector];
+    if (typeof detector === 'function') {
+      detectors[entry.id] = (context) => detector(context, entry.parameters);
+    }
+  }
+  return Object.freeze(detectors);
+}
+
+function detectorWiringErrors(catalog, detectors) {
+  const catalogIds = new Set(catalog.map((entry) => entry.id));
+  const detectorIds = new Set(Object.keys(detectors));
+  const errors = [];
+  for (const id of catalogIds) {
+    if (!detectorIds.has(id)) errors.push(`catalog item has no detector: ${id}`);
+  }
+  for (const id of detectorIds) {
+    if (!catalogIds.has(id)) errors.push(`detector has no catalog item: ${id}`);
+  }
+  return errors;
+}
+
+const DETECTORS = buildDetectors(CATALOG);
+const detectorErrors = detectorWiringErrors(CATALOG, DETECTORS);
+if (detectorErrors.length > 0) {
+  throw new Error(`legacy catalog detector wiring is invalid:\n${detectorErrors.join('\n')}`);
+}
 
 function inspectLegacyArtifacts(options = {}) {
   const context = createContext(options);

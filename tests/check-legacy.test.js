@@ -1,6 +1,6 @@
 'use strict';
 
-const { test } = require('node:test');
+const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -9,12 +9,22 @@ const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'check-legacy.js');
 const checkLegacy = require('../scripts/check-legacy');
+let cliRuntimeRoot;
+
+before(() => {
+  cliRuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-check-cli-runtime-'));
+});
+
+after(() => {
+  if (cliRuntimeRoot) fs.rmSync(cliRuntimeRoot, { recursive: true, force: true });
+  cliRuntimeRoot = null;
+});
 
 function runCli(...args) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
     cwd: path.join(__dirname, '..'),
     encoding: 'utf8',
-    env: { ...process.env, GH_MAESTRO_RUNTIME_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-check-cli-runtime-')) },
+    env: { ...process.env, GH_MAESTRO_RUNTIME_DIR: cliRuntimeRoot },
   });
 }
 

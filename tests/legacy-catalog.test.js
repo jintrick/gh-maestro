@@ -64,6 +64,9 @@ test('catalog declares the independent 19-item inventory and all detectors are w
   assert.equal(CATALOG.length, EXPECTED_LEGACY_ITEM_COUNT);
   assert.equal(DECLARATION.expectedItemCount, EXPECTED_LEGACY_ITEM_COUNT);
   assert.equal(CATALOG.every((entry) => typeof DETECTORS[entry.id] === 'function'), true);
+  assert.equal(CATALOG.every((entry) => typeof entry.detector === 'string'
+    && entry.parameters && typeof entry.parameters === 'object'), true);
+  assert.deepEqual(Object.keys(DETECTORS).sort(), CATALOG.map((entry) => entry.id).sort());
 
   const fixture = createWorkspace();
   try {
@@ -103,7 +106,10 @@ test('detectors return present for local legacy files without executing cleanup'
     fs.mkdirSync(path.join(fixture.root, '.git', 'hooks'), { recursive: true });
     fs.writeFileSync(path.join(fixture.root, '.git', 'hooks', 'pre-commit'),
       '#!/bin/sh\n# gh-maestro:checks:v1\necho old\n', 'utf8');
-    fs.writeFileSync(path.join(fixture.managedRoot, 'agents.json'), '[]\n', 'utf8');
+    fs.writeFileSync(path.join(fixture.managedRoot, 'agents.json'), JSON.stringify([{
+      id: 'private-agent',
+      prompt: 'do-not-copy-this-secret-into-session-context',
+    }]) + '\n', 'utf8');
     fs.mkdirSync(path.join(fixture.managedRoot, 'workflows'));
     fs.mkdirSync(path.join(fixture.root, '.gh-maestro', 'messages'));
 
@@ -117,6 +123,11 @@ test('detectors return present for local legacy files without executing cleanup'
 
     assert.equal(item(result, 'setup-legacy-gitignore').status, 'present');
     assert.equal(item(result, 'install-legacy-agents-config').status, 'present');
+    assert.equal(Object.hasOwn(item(result, 'install-legacy-agents-config'), 'value'), false);
+    assert.doesNotMatch(
+      JSON.stringify(item(result, 'install-legacy-agents-config')),
+      /do-not-copy-this-secret-into-session-context/,
+    );
     assert.equal(item(result, 'install-legacy-managed-items').status, 'present');
     assert.equal(item(result, 'reset-legacy-messages').status, 'present');
     assert.equal(item(result, 'setup-pre-commit-checks-hook').status, 'present');
