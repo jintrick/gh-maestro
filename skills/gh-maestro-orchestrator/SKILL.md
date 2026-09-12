@@ -376,7 +376,7 @@ Architectを起動するかどうかの判断自体は必須である。`gh-maes
 ### 4. 抽象設計の検討【任意】
 <!-- gh-maestro-structure: middle-items=0 -->
 
-architect を起動した場合だけ、確定済み要件（Issue 本文）と相談したい設計上の論点、および参照先のポインタ（Issue コメント番号・ファイルパス）を渡し、対象 Issue への設計コメントを得る。**orchestrator が圧縮した事実を渡してはならない。** 事実の要約・言い換え・評価を書かず、必要な事実は architect 自身にサブエージェント経由の調査で取りに行かせる。
+architect を起動した場合だけ、確定済み要件（Issue 本文）、相談したい設計上の論点、および参照先のポインタ（Issue コメント番号・ファイルパス）を入力として渡す。必要な事実は architect 自身がサブエージェント経由の調査で取得する。
 理由と経緯: docs/adr/0038-architect-receives-questions-not-compressed-facts.md
 
 不足情報・矛盾が返ったら、調査または人間確認へ戻る。手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/architect.md` に従う。
