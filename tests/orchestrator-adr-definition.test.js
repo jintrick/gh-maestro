@@ -43,9 +43,9 @@ test('判断の場で照合する定義がオーケストレーターSKILL.mdの
 test('3条件と作文の禁止がSKILL.md本文にあり、別ファイルへの参照になっていない', () => {
   const section = readAdrSection();
 
-  assert.match(section, /覆すコストが大きい/, '条件1が本文にあること');
-  assert.match(section, /なぜこうなっているのか/, '条件2が本文にあること');
-  assert.match(section, /実際に選択肢があり/, '条件3が本文にあること');
+  assert.match(section, /覆したときの影響が大きい/, '条件1が本文にあること');
+  assert.match(section, /再び合理的に見えうる/, '条件2が本文にあること');
+  assert.match(section, /具体的な場面を示せる/, '条件3が本文にあること');
   assert.match(section, /作文してはならない/, '却下した案を作文しない旨が本文にあること');
   assert.match(section, /機械的に検出も強制もできない/, '遵守の限界が本文にあること');
 });
