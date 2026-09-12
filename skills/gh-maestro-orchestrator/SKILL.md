@@ -463,14 +463,25 @@ orchestrator評価: <承認推奨 or 要修正（理由）。懸念が無けれ�
   EOF
   ```
 
-- **差し戻し（修正依頼）**: `msg-send.js` でコーダーに修正指示を伝える。コーダーは計画を更新して再報告し、待機する。
+- **差し戻し（修正依頼）**: 差し戻しには2種類ある。実装のやり方だけを変えるものと、要件そのものを変えるものである。
+
+  要件を変える場合は、先に `update-issue.js` で Issue 本文の受け入れ条件を新しい要件へ揃え、続けて `msg-send.js` で修正指示を送る。この2つを同じ差し戻しの操作として扱う。受け入れ条件が古いまま残ると、実装は新しい指示に従う一方でレビューは古い受け入れ条件と突き合わせるため、両者の食い違いが欠陥として報告される。
+
+  実装のやり方だけを変える場合は、Issue 本文を触らない。
+
   ```sh
+  # 要件を変える差し戻しのときだけ、先に受け入れ条件を更新する
+  node "{{SCRIPTS_PATH}}/update-issue.js" --issue <N> --title "<タイトル>" \
+    --body-file /tmp/issue-<N>.md --repo $REPO --workspace $WORKSPACE
+
   node "{{SCRIPTS_PATH}}/msg-send.js" --issue <N> --skill <gh-maestro-coder または gh-maestro-senior-coder> --workspace $WORKSPACE --stdin <<'EOF'
   計画に以下の修正が必要です。修正後、計画を更新して報告してください:
   - <具体的な修正点1>
   - <具体的な修正点2>
   EOF
   ```
+
+  コーダーは計画を更新して再報告し、待機する。
 
 ### 8. PR検出【必須】
 <!-- gh-maestro-structure: middle-items=1 -->
