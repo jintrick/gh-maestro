@@ -78,6 +78,13 @@ test('extractMdRefs: Markdownリンクとインラインコードから.mdパス
   const refs = extractMdRefs(content);
   const targets = refs.map((r) => r.target).sort();
   assert.deepEqual(targets, ['docs/bar/baz.md', 'docs/foo.md']);
+  assert.deepEqual(
+    refs.map((ref) => ({ target: ref.target, kind: ref.kind })).sort((a, b) => a.target.localeCompare(b.target)),
+    [
+      { target: 'docs/bar/baz.md', kind: 'inline-code' },
+      { target: 'docs/foo.md', kind: 'link' },
+    ],
+  );
 });
 
 test('extractMdRefs: 先頭 ./ や ../ を含む相対パス表記も抽出する', () => {
@@ -118,6 +125,14 @@ test('extractMdRefs: 裸のファイル名も抽出する（祖先ディレク�
   const refs = extractMdRefs(content);
   const targets = refs.map((r) => r.target).sort();
   assert.deepEqual(targets, ['SKILL.md', 'logic-invariants.md']);
+});
+
+test('extractMdRefs: 裸ファイル名でもMarkdownリンクとインラインコードの種別を保持する', () => {
+  const refs = extractMdRefs('[参照](missing.md) と `SKILL.md`');
+  assert.deepEqual(refs.map((ref) => ({ target: ref.target, kind: ref.kind })), [
+    { target: 'missing.md', kind: 'link' },
+    { target: 'SKILL.md', kind: 'inline-code' },
+  ]);
 });
 
 test('extractMdRefs: 大きなファイルでも行番号を正しく計算する', () => {

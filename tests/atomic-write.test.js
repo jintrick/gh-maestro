@@ -15,7 +15,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { cleanSpawnEnv } = require('./_spawn-env');
 
-const { atomicWriteJson, atomicWriteText } = require('../scripts/shared/atomic-write');
+const { atomicWriteJson, atomicWriteText, atomicWriteTextPair } = require('../scripts/shared/atomic-write');
 const ATOMIC_WRITE_PATH = path.join(__dirname, '..', 'scripts', 'shared', 'atomic-write.js');
 
 /** 一時ディレクトリを作り、テスト後に掃除する。コールバックの返すPromiseをawaitする。 */
@@ -77,6 +77,86 @@ test('atomicWriteJson: rename 失敗（既存ディレクトリが出力先）�
     // staging は掃除されている
     const leftovers = fs.readdirSync(dir).filter((f) => f.includes('.staging-'));
     assert.deepEqual(leftovers, []);
+  });
+});
+
+test('atomicWriteTextPair: 2ファイルを更新し、退避ファイルとstagingを残さない', async () => {
+  await withTempDir((dir) => {
+    const first = path.join(dir, 'normative.md');
+    const second = path.join(dir, 'adr.md');
+    fs.writeFileSync(first, 'old normative', 'utf8');
+    const result = atomicWriteTextPair([
+      { filePath: first, content: 'new normative', expectedContent: 'old normative' },
+      { filePath: second, content: 'new adr', overwrite: false },
+    ]);
+    assert.deepEqual(result, [first, second]);
+    assert.equal(fs.readFileSync(first, 'utf8'), 'new normative');
+    assert.equal(fs.readFileSync(second, 'utf8'), 'new adr');
+    assert.deepEqual(
+      fs.readdirSync(dir).filter((name) => name.includes('.staging-') || name.includes('.backup-')),
+      [],
+    );
+  });
+});
+
+test('atomicWriteTextPair: 2つ目の配置失敗時に1つ目を元へ戻す', async () => {
+  await withTempDir((dir) => {
+    const first = path.join(dir, 'normative.md');
+    const second = path.join(dir, 'adr.md');
+    fs.writeFileSync(first, 'old normative', 'utf8');
+    const originalRename = fs.renameSync;
+    let renameCount = 0;
+    fs.renameSync = (source, target) => {
+      renameCount += 1;
+      if (renameCount === 3) {
+        const error = new Error('injected pair install failure');
+        error.code = 'EIO';
+        throw error;
+      }
+      return originalRename(source, target);
+    };
+    try {
+      assert.throws(() => atomicWriteTextPair([
+        { filePath: first, content: 'new normative', expectedContent: 'old normative' },
+        { filePath: second, content: 'new adr', overwrite: false },
+      ]), /injected pair install failure/);
+    } finally {
+      fs.renameSync = originalRename;
+    }
+    assert.equal(fs.readFileSync(first, 'utf8'), 'old normative');
+    assert.equal(fs.existsSync(second), false);
+    assert.deepEqual(
+      fs.readdirSync(dir).filter((name) => name.includes('.staging-') || name.includes('.backup-')),
+      [],
+    );
+  });
+});
+
+test('atomicWriteTextPair: 既存ファイルの退避失敗時も元ファイルを保持する', async () => {
+  await withTempDir((dir) => {
+    const first = path.join(dir, 'normative.md');
+    const second = path.join(dir, 'adr.md');
+    fs.writeFileSync(first, 'old normative', 'utf8');
+    const originalRename = fs.renameSync;
+    fs.renameSync = () => {
+      const error = new Error('injected backup failure');
+      error.code = 'EIO';
+      throw error;
+    };
+    try {
+      assert.throws(() => atomicWriteTextPair([
+        { filePath: first, content: 'new normative', expectedContent: 'old normative' },
+        { filePath: second, content: 'new adr', overwrite: false },
+      ]), /injected backup failure/);
+    } finally {
+      fs.renameSync = originalRename;
+    }
+    assert.equal(fs.readFileSync(first, 'utf8'), 'old normative');
+    assert.equal(fs.existsSync(second), false);
+    assert.deepEqual(
+      fs.readdirSync(dir).filter((name) => name.includes('.staging-') || name.includes('.backup-')),
+      [],
+    );
   });
 });
 

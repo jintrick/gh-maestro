@@ -19,7 +19,6 @@ const {
 } = require('../scripts/create-adr');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'create-adr.js');
-const REPO_ROOT = path.resolve(__dirname, '..');
 
 const VALID_BODY = [
   '# 判断を記録する',
@@ -59,8 +58,11 @@ function writeBody(workspace, body = VALID_BODY) {
   return file;
 }
 
-function runCli(workspace, args) {
-  return spawnSync(process.execPath, [SCRIPT, ...args, '--workspace', workspace], {
+function runCli(workspace, args, { referenceAfter = '0' } = {}) {
+  const positionArgs = referenceAfter === null
+    ? []
+    : ['--reference-after', String(referenceAfter)];
+  return spawnSync(process.execPath, [SCRIPT, ...args, ...positionArgs, '--workspace', workspace], {
     encoding: 'utf8',
   });
 }
@@ -86,7 +88,7 @@ test('create-adr.js: --nextが最大番号+1の相対パスを返し、ファイ
   const workspace = createWorkspace();
   writeAdr(workspace, '0001-first.md');
   writeAdr(workspace, '0003-third.md');
-  const result = runCli(workspace, ['--next', '--slug', 'new-decision']);
+  const result = runCli(workspace, ['--next', '--slug', 'new-decision'], { referenceAfter: null });
   assert.equal(result.status, 0);
   assert.equal(result.stdout.trim(), 'ADR_NEXT:docs/adr/0004-new-decision.md');
   assert.equal(fs.existsSync(path.join(workspace, 'docs', 'adr', '0004-new-decision.md')), false);
@@ -99,6 +101,25 @@ test('create-adr.js: 規範文書が無い場合は作成しない', () => {
     assert.notEqual(result.status, 0);
     assert.match(`${result.stderr}${result.stdout}`, /規範文書が指定されていません/);
     assert.equal(fs.existsSync(path.join(workspace, 'docs', 'adr', '0001-missing-scope.md')), false);
+  } finally {
+    cleanup(workspace);
+  }
+});
+
+test('create-adr.js: --reference-afterを省略した作成は何も変更せず拒否する', () => {
+  const workspace = createWorkspace();
+  try {
+    const normative = '# 規範\n';
+    fs.writeFileSync(path.join(workspace, 'AGENTS.md'), normative, 'utf8');
+    const result = runCli(workspace, [
+      '--slug', 'missing-position',
+      '--body-file', writeBody(workspace),
+      '--normative-file', 'AGENTS.md',
+    ], { referenceAfter: null });
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}${result.stdout}`, /--reference-afterが必要です/);
+    assert.equal(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8'), normative);
+    assert.equal(fs.existsSync(path.join(workspace, 'docs', 'adr', '0001-missing-position.md')), false);
   } finally {
     cleanup(workspace);
   }
@@ -124,7 +145,7 @@ test('createAdr: CLIを経由しなくても規範文書の指定を必須にす
   const workspace = createWorkspace();
   const bodyFile = writeBody(workspace);
   assert.throws(
-    () => createAdr({ workspace, slug: 'direct-call', bodyFile, selfContained: true }),
+    () => createAdr({ workspace, slug: 'direct-call', bodyFile, referenceAfter: 0, selfContained: true }),
     /規範文書が指定されていません/,
   );
   assert.equal(fs.existsSync(path.join(workspace, 'docs', 'adr', '0001-direct-call.md')), false);
@@ -157,7 +178,7 @@ test('create-adr.js: 参照行が割り当てられたADRを指さなければ�
       '--normative-file', 'AGENTS.md',
     ]);
     assert.notEqual(result.status, 0);
-    assert.match(`${result.stderr}${result.stdout}`, /新ADRへの参照行がありません/);
+    assert.match(`${result.stderr}${result.stdout}`, /参照先が存在しません/);
     assert.equal(fs.existsSync(path.join(workspace, 'docs', 'adr', '0001-new-decision.md')), false);
   } finally {
     cleanup(workspace);
@@ -190,6 +211,180 @@ test('create-adr.js: 規定の参照行と見出しで最大番号+1へ作成す
       normativeFile: 'AGENTS.md',
       endLine: 3,
     });
+    assert.equal(
+      (fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8').match(/理由と経緯: docs\/adr\/0004-new-decision\.md/g) || []).length,
+      1,
+    );
+  } finally {
+    cleanup(workspace);
+  }
+});
+
+test('create-adr.js: 既存の規範参照があれば位置指定を無視して重複を作らない', () => {
+  const workspace = createWorkspace();
+  try {
+    const normative = '## ADRの記録\n理由と経緯: docs/adr/0001-existing-reference.md\n';
+    fs.writeFileSync(path.join(workspace, 'AGENTS.md'), normative, 'utf8');
+    const result = runCli(workspace, [
+      '--slug', 'existing-reference',
+      '--body-file', writeBody(workspace),
+      '--normative-file', 'AGENTS.md',
+    ], { referenceAfter: 'not-a-position' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8'), normative);
+    assert.equal(fs.existsSync(path.join(workspace, 'docs', 'adr', '0001-existing-reference.md')), true);
+  } finally {
+    cleanup(workspace);
+  }
+});
+
+test('create-adr.js: 参照行が無い規範文書へ指定位置で挿入してADRも作成する', () => {
+  const workspace = createWorkspace();
+  try {
+    fs.writeFileSync(path.join(workspace, 'AGENTS.md'), '# 規範\n\n## 作成規則\n本文。\n', 'utf8');
+    const result = runCli(workspace, [
+      '--slug', 'inserted-reference',
+      '--body-file', writeBody(workspace),
+      '--normative-file', 'AGENTS.md',
+    ], { referenceAfter: 2 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8').split(/\r?\n/), [
+      '# 規範',
+      '',
+      '理由と経緯: docs/adr/0001-inserted-reference.md',
+      '## 作成規則',
+      '本文。',
+      '',
+    ]);
+    assert.equal(fs.existsSync(path.join(workspace, 'docs', 'adr', '0001-inserted-reference.md')), true);
+  } finally {
+    cleanup(workspace);
+  }
+});
+
+test('create-adr.js: 参照行の位置指定が不正なら作成しない', () => {
+  const cases = [
+    { label: '非整数', referenceAfter: 'one', pattern: /0以上の安全な整数/ },
+    { label: '範囲外', referenceAfter: '3', pattern: /0から2の範囲/ },
+    { label: 'コードフェンス内', referenceAfter: '2', pattern: /コードフェンスの外側/ },
+  ];
+  for (const item of cases) {
+    const workspace = createWorkspace();
+    try {
+      const normative = item.label === 'コードフェンス内'
+        ? '```markdown\n例\n```\n'
+        : '# 規範\n本文。\n';
+      fs.writeFileSync(path.join(workspace, 'AGENTS.md'), normative, 'utf8');
+      const result = runCli(workspace, [
+        '--slug', `invalid-position-${item.label === '非整数' ? 'text' : item.label === '範囲外' ? 'range' : 'fence'}`,
+        '--body-file', writeBody(workspace),
+        '--normative-file', 'AGENTS.md',
+      ], { referenceAfter: item.referenceAfter });
+      assert.notEqual(result.status, 0, item.label);
+      assert.match(`${result.stderr}${result.stdout}`, item.pattern, item.label);
+      assert.equal(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8'), normative, item.label);
+      assert.equal(fs.readdirSync(path.join(workspace, 'docs', 'adr')).length, 0, item.label);
+    } finally {
+      cleanup(workspace);
+    }
+  }
+});
+
+test('create-adr.js: 裸のファイル名言及は許容し、パスを含む壊れた参照は拒否する', () => {
+  const workspace = createWorkspace();
+  try {
+    const normative = [
+      '- `SKILL.md` は一般的なファイル名として使う。',
+      '- `skills/**/SKILL.md` は複数のスキルを表す。',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(workspace, 'AGENTS.md'), normative, 'utf8');
+    const result = runCli(workspace, [
+      '--slug', 'generic-reference',
+      '--body-file', writeBody(workspace),
+      '--normative-file', 'AGENTS.md',
+    ], { referenceAfter: 1 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(
+      fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8'),
+      /理由と経緯: docs\/adr\/0001-generic-reference\.md/,
+    );
+  } finally {
+    cleanup(workspace);
+  }
+
+  const brokenWorkspace = createWorkspace();
+  try {
+    const normative = '`SKILL.md` は一般名詞だが、`docs/missing.md` は壊れた参照。\n';
+    fs.writeFileSync(path.join(brokenWorkspace, 'AGENTS.md'), normative, 'utf8');
+    const result = runCli(brokenWorkspace, [
+      '--slug', 'broken-reference',
+      '--body-file', writeBody(brokenWorkspace),
+      '--normative-file', 'AGENTS.md',
+    ], { referenceAfter: 0 });
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}${result.stdout}`, /参照先が存在しません/);
+    assert.equal(fs.readFileSync(path.join(brokenWorkspace, 'AGENTS.md'), 'utf8'), normative);
+    assert.equal(fs.readdirSync(path.join(brokenWorkspace, 'docs', 'adr')).length, 0);
+  } finally {
+    cleanup(brokenWorkspace);
+  }
+
+  const brokenLinkWorkspace = createWorkspace();
+  try {
+    const normative = '[参照](missing.md) と `SKILL.md` は別の種類の言及。\n';
+    fs.writeFileSync(path.join(brokenLinkWorkspace, 'AGENTS.md'), normative, 'utf8');
+    const result = runCli(brokenLinkWorkspace, [
+      '--slug', 'broken-link-reference',
+      '--body-file', writeBody(brokenLinkWorkspace),
+      '--normative-file', 'AGENTS.md',
+    ], { referenceAfter: 0 });
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}${result.stdout}`, /missing\.md/);
+    assert.equal(fs.readFileSync(path.join(brokenLinkWorkspace, 'AGENTS.md'), 'utf8'), normative);
+    assert.equal(fs.readdirSync(path.join(brokenLinkWorkspace, 'docs', 'adr')).length, 0);
+  } finally {
+    cleanup(brokenLinkWorkspace);
+  }
+});
+
+test('create-adr.js: ADR配置失敗時に規範文書の参照行をロールバックする', () => {
+  const workspace = createWorkspace();
+  try {
+    const normativePath = path.join(workspace, 'AGENTS.md');
+    const originalNormative = '# 規範\n';
+    fs.writeFileSync(normativePath, originalNormative, 'utf8');
+    const originalRename = fs.renameSync;
+    let renameCount = 0;
+    fs.renameSync = (source, target) => {
+      renameCount += 1;
+      if (renameCount === 3) {
+        const error = new Error('injected ADR placement failure');
+        error.code = 'EIO';
+        throw error;
+      }
+      return originalRename(source, target);
+    };
+    try {
+      assert.throws(() => createAdr({
+        workspace,
+        slug: 'atomic-rollback',
+        bodyFile: writeBody(workspace),
+        normativeFile: 'AGENTS.md',
+        referenceAfter: 0,
+      }), /injected ADR placement failure/);
+    } finally {
+      fs.renameSync = originalRename;
+    }
+    assert.equal(fs.readFileSync(normativePath, 'utf8'), originalNormative);
+    assert.equal(fs.existsSync(path.join(workspace, 'docs', 'adr', '0001-atomic-rollback.md')), false);
+    assert.deepEqual(
+      [
+        ...fs.readdirSync(workspace),
+        ...fs.readdirSync(path.join(workspace, 'docs', 'adr')),
+      ].filter((name) => name.includes('.staging-') || name.includes('.backup-')),
+      [],
+    );
   } finally {
     cleanup(workspace);
   }
@@ -219,7 +414,7 @@ test('create-adr.js: コードフェンス内の見出しは規定見出しの�
   assert.doesNotThrow(() => validateAdrBody(body));
 });
 
-test('create-adr.js: コードフェンス内だけの新ADR参照は規範行として認めない', () => {
+test('create-adr.js: コードフェンス内だけの既存参照でも外側へ新規参照を挿入する', () => {
   const workspace = createWorkspace();
   try {
     writeNormative(workspace, 'docs/adr/0001-fenced.md', [
@@ -233,9 +428,15 @@ test('create-adr.js: コードフェンス内だけの新ADR参照は規範行�
       '--body-file', writeBody(workspace),
       '--normative-file', 'AGENTS.md',
     ]);
-    assert.notEqual(result.status, 0);
-    assert.match(`${result.stderr}${result.stdout}`, /新ADRへの参照行がありません/);
-    assert.equal(fs.existsSync(path.join(workspace, 'docs', 'adr', '0001-fenced.md')), false);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.existsSync(path.join(workspace, 'docs', 'adr', '0001-fenced.md')), true);
+    assert.deepEqual(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8').split(/\r?\n/), [
+      '理由と経緯: docs/adr/0001-fenced.md',
+      '```markdown',
+      '理由と経緯: docs/adr/0001-fenced.md',
+      '```',
+      '',
+    ]);
   } finally {
     cleanup(workspace);
   }
@@ -481,10 +682,26 @@ test('create-adr.js: 既存ADRの規範参照がコードフェンス内だけ�
   }
 });
 
-test('create-adr.js: リポジトリ内の既存ADR全件を検査し、front matter無しは明示的にスキップする', () => {
-  const results = validateExistingAdrFrontMatter(REPO_ROOT);
-  assert.ok(results.length > 0);
-  assert.ok(results.every((result) => result.skipped === true));
+test('create-adr.js: 一時workspace内の既存ADRを検査し、front matter無しは明示的にスキップする', () => {
+  const workspace = createWorkspace();
+  try {
+    writeNormative(workspace, 'docs/adr/0001-existing.md');
+    writeAdr(workspace, '0001-existing.md', [
+      '---',
+      'normative-file: AGENTS.md',
+      '---',
+      '',
+      VALID_BODY,
+    ].join('\n'));
+    writeAdr(workspace, '0002-legacy.md');
+    const results = validateExistingAdrFrontMatter(workspace);
+    assert.deepEqual(results.map((result) => ({ file: result.file, skipped: result.skipped })), [
+      { file: 'docs/adr/0001-existing.md', skipped: false },
+      { file: 'docs/adr/0002-legacy.md', skipped: true },
+    ]);
+  } finally {
+    cleanup(workspace);
+  }
 });
 
 test('create-adr.js: front matterの余分な項目は既存ADR検査で拒否する', () => {
@@ -516,6 +733,7 @@ test('create-adr.js: mainは一時workspaceで入力エラーを返す', () => {
       '--slug', 'x',
       '--body-file', 'missing.md',
       '--normative-file', 'AGENTS.md',
+      '--reference-after', '0',
       '--workspace', workspace,
     ]);
     assert.notEqual(result.code, 0);
@@ -538,4 +756,6 @@ test('create-adr.js: nextAdrPathは4桁を超える番号も切り詰めずに�
 test('create-adr.js: Usageに規範なしの作成経路が無いことを示す', () => {
   assert.doesNotMatch(USAGE, /self-contained|規範文書なし/);
   assert.match(USAGE, /--normative-file/);
+  assert.match(USAGE, /--reference-after/);
+  assert.match(USAGE, /作成時に必須/);
 });

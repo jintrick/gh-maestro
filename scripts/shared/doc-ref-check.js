@@ -79,7 +79,7 @@ function extractMdRefs(content) {
     if (/^file:\/\//i.test(target)) {
       const decoded = decodeFileUrl(target);
       if (decoded && (decoded.endsWith('.md') || /\.md#/.test(decoded))) {
-        refs.push({ raw: m[1], target: decoded, line, isAbsolute: true });
+        refs.push({ raw: m[1], target: decoded, line, isAbsolute: true, kind: 'link' });
       }
       continue;
     }
@@ -88,7 +88,7 @@ function extractMdRefs(content) {
     if (target.includes('{{') || target.includes('<')) continue;
     if (!target.endsWith('.md') && !/\.md#/.test(target)) continue;
     if (!isLikelyPathToken(target)) continue;
-    refs.push({ raw: m[1], target, line });
+    refs.push({ raw: m[1], target, line, kind: 'link' });
   }
 
   const codeRe = /`([^`\n]+)`/g;
@@ -101,7 +101,7 @@ function extractMdRefs(content) {
     // 裸のファイル名（例: `logic-invariants.md`）も、言及元ファイルの祖先ディレクトリ
     // 基準でresolveRefExistsが解決を試みるため、ここでは除外しない。
     const line = lineForIndex(offsets, m.index);
-    refs.push({ raw: m[1], target, line });
+    refs.push({ raw: m[1], target, line, kind: 'inline-code' });
   }
 
   return refs;
