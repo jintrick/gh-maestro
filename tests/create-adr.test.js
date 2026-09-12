@@ -3,9 +3,9 @@
 const { spawnSync } = require('node:child_process');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
 const {
   main,
@@ -34,15 +34,19 @@ const VALID_BODY = [
   '',
 ].join('\n');
 
+const tempDirScope = createTempDirScope();
+
+test.after(() => tempDirScope.cleanup());
+
 function createWorkspace() {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-create-adr-'));
+  const workspace = tempDirScope.mkdtemp('gh-maestro-create-adr-');
   fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
   fs.mkdirSync(path.join(workspace, 'docs', 'adr'), { recursive: true });
   return workspace;
 }
 
-function cleanup(workspace) {
-  fs.rmSync(workspace, { recursive: true, force: true });
+function cleanup() {
+  // The shared scope owns all test directories and removes them in test.after.
 }
 
 function writeBody(workspace, body = VALID_BODY) {
@@ -72,16 +76,12 @@ test('create-adr.js: --helpと-hはworkspace解決前に終了コード0でUsage
 
 test('create-adr.js: --nextが最大番号+1の相対パスを返し、ファイルを作らない', () => {
   const workspace = createWorkspace();
-  try {
-    writeAdr(workspace, '0001-first.md');
-    writeAdr(workspace, '0003-third.md');
-    const result = runCli(workspace, ['--next', '--slug', 'new-decision']);
-    assert.equal(result.status, 0);
-    assert.equal(result.stdout.trim(), 'ADR_NEXT:docs/adr/0004-new-decision.md');
-    assert.equal(fs.existsSync(path.join(workspace, 'docs', 'adr', '0004-new-decision.md')), false);
-  } finally {
-    cleanup(workspace);
-  }
+  writeAdr(workspace, '0001-first.md');
+  writeAdr(workspace, '0003-third.md');
+  const result = runCli(workspace, ['--next', '--slug', 'new-decision']);
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout.trim(), 'ADR_NEXT:docs/adr/0004-new-decision.md');
+  assert.equal(fs.existsSync(path.join(workspace, 'docs', 'adr', '0004-new-decision.md')), false);
 });
 
 test('create-adr.js: 規範文書もself-containedも無い場合は作成しない', () => {
@@ -307,7 +307,7 @@ test('create-adr.js: supersedesは追記と参照張り替えが済んでいれ�
 });
 
 test('create-adr.js: mainは一時workspaceで入力エラーを返す', () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-not-workspace-'));
+  const workspace = tempDirScope.mkdtemp('gh-maestro-not-workspace-');
   try {
     const result = main([
       '--slug', 'x',
