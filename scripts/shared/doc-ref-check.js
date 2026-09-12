@@ -104,17 +104,6 @@ function extractMdRefs(content) {
     refs.push({ raw: m[1], target, line });
   }
 
-  // ADRの参照行は既存の規範文書に、インラインコードではない裸のパスとしても
-  // 書かれている（例: `理由と経緯: docs/adr/0036-...md`）。一般の裸テキストを
-  // 参照として扱うと誤検出が増えるため、ADRの理由行だけを狭く対象にする。
-  const plainAdrRefRe = /^[ \t]*(?:[-*][ \t]+)?(?:理由と経緯|判断の背景と採用理由):[ \t]+(docs\/adr\/[A-Za-z0-9][A-Za-z0-9_.-]*\.md(?:#[^\s`)]*)?)[ \t]*$/gm;
-  while ((m = plainAdrRefRe.exec(content)) !== null) {
-    const target = m[1];
-    const line = lineForIndex(offsets, m.index);
-    if (refs.some(ref => ref.line === line && ref.target === target)) continue;
-    refs.push({ raw: m[0], target, line });
-  }
-
   return refs;
 }
 

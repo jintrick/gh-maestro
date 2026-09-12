@@ -16,14 +16,13 @@ const USAGE = `create-adr.js — ADRの採番・書式・参照を検証して�
 
 Usage:
   node create-adr.js --next --slug <slug> [--workspace <path>]
-  node create-adr.js --slug <slug> --body-file <path> (--normative-file <path> | --self-contained) [--supersedes <path>] [--workspace <path>]
+  node create-adr.js --slug <slug> --body-file <path> --normative-file <path> [--supersedes <path>] [--workspace <path>]
 
 Options:
   --next                   次に割り当てるADRの相対パスを表示する（ファイルは変更しない）
   --slug <slug>            ファイル名のスラッグ（英小文字・数字・ハイフン）
   --body-file <path>       ADR本文（UTF-8）
   --normative-file <path>  参照行を置いた規範文書。AGENTS.md、.claude/rules/**/*.md、skills/**/SKILL.mdに限る
-  --self-contained         ワーカーの実装や振る舞いを縛らない自己完結の判断であることを明示する
   --supersedes <path>      覆す旧ADR（docs/adr/<番号>-<slug>.md）
   --workspace <path>       ワークスペースのルート（省略時は環境変数またはCWDから解決）
   --help, -h               このヘルプを表示する
@@ -39,7 +38,7 @@ const SPEC = Object.freeze({
     '--supersedes': {},
     '--workspace': {},
   },
-  booleans: ['--next', '--self-contained', '--help', '-h'],
+  booleans: ['--next', '--help', '-h'],
   positionals: { min: 0, max: 0 },
 });
 
@@ -52,6 +51,9 @@ const ALLOWED_NORMATIVE_RE = [
   /^skills\/.+\/SKILL\.md$/,
 ];
 const REQUIRED_SECTIONS = Object.freeze(['決めたこと', 'なぜ', '却下した案']);
+const NORMATIVE_LABEL_RE = /^[ \t]*(?:[-*][ \t]+)?(?:理由と経緯|判断の背景と採用理由):(?:[ \t]+|$)/;
+const NORMATIVE_LINE_RE = /^[ \t]*(?:[-*][ \t]+)?(?:理由と経緯|判断の背景と採用理由):[ \t]+(docs\/adr\/[A-Za-z0-9][A-Za-z0-9_.-]*\.md(?:#[^\s`)]+)?)[ \t]*$/;
+const FRONT_MATTER_FIELD_RE = /^[ \t]*normative-file:[ \t]*(.+?)[ \t]*$/;
 
 function toPosix(value) {
   return value.split(path.sep).join('/');
@@ -138,9 +140,9 @@ function headingText(raw) {
   return raw.trim().replace(/[ \t]+#+[ \t]*$/, '').trim();
 }
 
-function parseMarkdownHeadings(content) {
-  const headings = [];
+function scanMarkdown(content) {
   const lines = content.split(/\r?\n/);
+  const fencedLines = new Set();
   let fenceChar = null;
   let fenceLength = 0;
 
@@ -148,6 +150,7 @@ function parseMarkdownHeadings(content) {
     const line = lines[index];
     const fence = line.match(/^ {0,3}(`{3,}|~{3,})/);
     if (fence) {
+      fencedLines.add(index + 1);
       const char = fence[1][0];
       const length = fence[1].length;
       if (fenceChar === null) {
@@ -159,8 +162,18 @@ function parseMarkdownHeadings(content) {
       }
       continue;
     }
-    if (fenceChar !== null) continue;
+    if (fenceChar !== null) fencedLines.add(index + 1);
+  }
 
+  return { lines, fencedLines };
+}
+
+function parseMarkdownHeadings(content) {
+  const headings = [];
+  const { lines, fencedLines } = scanMarkdown(content);
+  for (let index = 0; index < lines.length; index += 1) {
+    if (fencedLines.has(index + 1)) continue;
+    const line = lines[index];
     const heading = line.match(/^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$/);
     if (!heading) continue;
     headings.push({
@@ -230,9 +243,54 @@ function isTarget(ref, relativePath) {
   return target === relativePath || target === `./${relativePath}`;
 }
 
+function scanAdrReferences(content) {
+  const { lines, fencedLines } = scanMarkdown(content);
+  const refs = extractMdRefs(content).filter((ref) => !fencedLines.has(ref.line));
+  for (let index = 0; index < lines.length; index += 1) {
+    if (fencedLines.has(index + 1)) continue;
+    const match = lines[index].match(NORMATIVE_LINE_RE);
+    if (!match) continue;
+    const target = match[1];
+    if (!refs.some((ref) => ref.line === index + 1 && ref.target === target)) {
+      refs.push({ raw: match[0], target, line: index + 1 });
+    }
+  }
+  return { lines, fencedLines, refs };
+}
+
+function isNormativeCitation(ref, lines) {
+  return NORMATIVE_LABEL_RE.test(lines[ref.line - 1] || '');
+}
+
+function parseAdrFrontMatter(content) {
+  if (typeof content !== 'string') throw new Error('ADR本文が文字列ではありません');
+  const lines = content.split(/\r?\n/);
+  if (lines[0] !== '---') return null;
+
+  const end = lines.findIndex((line, index) => index > 0 && line === '---');
+  if (end < 0) throw new Error('ADRのfront matterの終端がありません');
+  const fields = lines.slice(1, end).filter((line) => line.trim().length > 0);
+  if (fields.some((line) => !FRONT_MATTER_FIELD_RE.test(line))) {
+    throw new Error('ADRのfront matterにはnormative-fileだけを指定してください');
+  }
+  const normativeFields = fields
+    .map((line) => line.match(FRONT_MATTER_FIELD_RE))
+    .filter(Boolean);
+  if (normativeFields.length !== 1) {
+    throw new Error('ADRのfront matterにnormative-fileが1つ必要です');
+  }
+  let normativeFile = normativeFields[0][1].trim();
+  if ((normativeFile.startsWith('"') && normativeFile.endsWith('"'))
+    || (normativeFile.startsWith("'") && normativeFile.endsWith("'"))) {
+    normativeFile = normativeFile.slice(1, -1).trim();
+  }
+  if (!normativeFile) throw new Error('ADRのfront matterのnormative-fileが空です');
+  return { normativeFile, endLine: end + 1 };
+}
+
 function readRefs(workspace, file, expectedNewPath = null) {
   const content = fs.readFileSync(file.absolute, 'utf8');
-  const refs = extractMdRefs(content);
+  const { refs } = scanAdrReferences(content);
   for (const ref of refs) {
     // 作成前の新ADRだけはまだ実在しないため、許可された作成先と一致することを
     // 検査する。既存の参照は共有解決器で実在とリポジトリ外脱出を確認する。
@@ -246,8 +304,8 @@ function readRefs(workspace, file, expectedNewPath = null) {
 
 function requireNewAdrReference(workspace, file, newRelativePath) {
   const content = fs.readFileSync(file.absolute, 'utf8');
-  const refs = extractMdRefs(content);
-  if (!refs.some((ref) => isTarget(ref, newRelativePath))) {
+  const { lines, refs } = scanAdrReferences(content);
+  if (!refs.some((ref) => isTarget(ref, newRelativePath) && isNormativeCitation(ref, lines))) {
     throw new Error(`${file.relative} に新ADRへの参照行がありません: ${newRelativePath}`);
   }
   for (const ref of refs) {
@@ -260,8 +318,9 @@ function requireNewAdrReference(workspace, file, newRelativePath) {
 
 function validateSupersession(workspace, oldFile, newRelativePath) {
   const oldContent = fs.readFileSync(oldFile.absolute, 'utf8');
+  const { fencedLines } = scanMarkdown(oldContent);
   const marker = `この判断は \`${newRelativePath}\` で覆された`;
-  if (!oldContent.split(/\r?\n/).some((line) => line.trim() === marker)) {
+  if (!oldContent.split(/\r?\n/).some((line, index) => !fencedLines.has(index + 1) && line.trim() === marker)) {
     throw new Error(`${oldFile.relative} に旧ADRの覆し追記がありません: ${marker}`);
   }
 
@@ -275,22 +334,52 @@ function validateSupersession(workspace, oldFile, newRelativePath) {
   }
 }
 
-function createAdr({ workspace, slug, bodyFile, normativeFile, selfContained = false, supersedes }) {
+function listAdrFiles(workspace) {
+  const adrRoot = path.join(workspace, 'docs', 'adr');
+  if (!fs.existsSync(adrRoot) || !fs.statSync(adrRoot).isDirectory()) return [];
+  return fs.readdirSync(adrRoot, { withFileTypes: true })
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+    .map((entry) => {
+      const absolute = assertWithinRoot(adrRoot, path.join(adrRoot, entry.name));
+      return { absolute, relative: toPosix(path.relative(workspace, absolute)) };
+    });
+}
+
+function validateAdrFrontMatter(workspace, file) {
+  const content = fs.readFileSync(file.absolute, 'utf8');
+  const frontMatter = parseAdrFrontMatter(content);
+  if (!frontMatter) return { skipped: true, file: file.relative };
+  const normative = resolveNormativeFile(workspace, frontMatter.normativeFile);
+  requireNewAdrReference(workspace, normative, file.relative);
+  return { skipped: false, file: file.relative, normativeFile: normative.relative };
+}
+
+function validateExistingAdrFrontMatter(workspace) {
+  return listAdrFiles(workspace).map((file) => validateAdrFrontMatter(workspace, file));
+}
+
+function renderAdrFrontMatter(normativeRelativePath) {
+  return `---\nnormative-file: ${normativeRelativePath}\n---\n\n`;
+}
+
+function createAdr({ workspace, slug, bodyFile, normativeFile, supersedes }) {
+  const normative = resolveNormativeFile(workspace, normativeFile);
   const next = nextAdrPath(workspace, slug);
   const bodyPath = path.resolve(toWinPath(bodyFile));
   const body = fs.readFileSync(bodyPath, 'utf8');
   validateAdrBody(body);
 
-  if (normativeFile) {
-    const normative = resolveNormativeFile(workspace, normativeFile);
-    requireNewAdrReference(workspace, normative, next.relative);
-  }
+  requireNewAdrReference(workspace, normative, next.relative);
   if (supersedes) {
     const oldFile = resolveAdrFile(workspace, supersedes);
     validateSupersession(workspace, oldFile, next.relative);
   }
 
-  fs.writeFileSync(next.absolute, body, { encoding: 'utf8', flag: 'wx' });
+  fs.writeFileSync(next.absolute, `${renderAdrFrontMatter(normative.relative)}${body}`, {
+    encoding: 'utf8',
+    flag: 'wx',
+  });
   return next;
 }
 
@@ -315,13 +404,10 @@ function main(argv = process.argv.slice(2)) {
   const nextOnly = values['--next'] === true;
   const slug = values['--slug'];
   if (!slug) return errorResult('--slugが必要です');
-  if (nextOnly && (values['--body-file'] || values['--normative-file'] || values['--self-contained'] || values['--supersedes'])) {
+  if (nextOnly && (values['--body-file'] || values['--normative-file'] || values['--supersedes'])) {
     return errorResult('--nextは作成用オプションと併用できません');
   }
   if (!nextOnly && !values['--body-file']) return errorResult('--body-fileが必要です');
-  if (!nextOnly && Boolean(values['--normative-file']) === Boolean(values['--self-contained'])) {
-    return errorResult('--normative-fileまたは--self-containedのどちらか一方が必要です');
-  }
 
   const workspace = resolveWorkspace(values['--workspace']);
   if (!workspace) {
@@ -337,7 +423,6 @@ function main(argv = process.argv.slice(2)) {
       slug,
       bodyFile: values['--body-file'],
       normativeFile: values['--normative-file'],
-      selfContained: values['--self-contained'] === true,
       supersedes: values['--supersedes'],
     });
     return { code: 0, stdout: `ADR_CREATED:${next.relative}` };
@@ -360,5 +445,8 @@ module.exports = {
   main,
   nextAdrPath,
   parseMarkdownHeadings,
+  parseAdrFrontMatter,
+  validateAdrFrontMatter,
+  validateExistingAdrFrontMatter,
   validateAdrBody,
 };

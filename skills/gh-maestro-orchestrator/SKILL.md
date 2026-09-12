@@ -83,7 +83,7 @@ ADRにしないことは、記録しないことではない。
 
 書式・見出し・採番・既存のADRを覆したときの扱いは `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/adr.md` にある。3条件をすべて満たすと判定したらそれを開き、そこに従って `{{SCRIPTS_PATH}}/create-adr.js` を使う。判定より前に開く必要はない。
 
-作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --workspace $WORKSPACE` を実行して、スクリプトが割り当てるADRの相対パスを取得する。そのパスを規範文書の参照行、または既存ADRを覆す場合の旧ADRへの追記と参照元の張り替えに使い、書き終えてから `adr.md` の作成経路を実行する。番号を `docs/adr/` の一覧から推測してはならない。
+ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --workspace $WORKSPACE` を実行して、スクリプトが割り当てるADRの相対パスを取得する。そのパスを規範文書の参照行、または既存ADRを覆す場合の旧ADRへの追記と参照元の張り替えに使い、書き終えてから `adr.md` の作成経路を実行する。番号を `docs/adr/` の一覧から推測してはならない。規範を直接縛らない判断でも、許可された規範ファイル（最低限 `AGENTS.md`）へ参照行を置き、作成されたADRのfront matterにそのファイルが記録される。
 
 ### セッション変数
 
@@ -184,7 +184,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<role>-<desc>/` に自動作成さ�
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口
 - **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「1. 要件確定」参照）
 - **create-issue.js** / **update-issue.js** / **comment-issue.js** — `gh issue create` / `gh issue edit` / `gh issue comment` の唯一の呼び出し口。`--body-file` は論理パスのまま渡し、タイトルだけのアンカーIssueには `--title-only` を使う（「1. 要件確定」「13. 反省会と後始末」参照）
-- **create-adr.js** — ADRの採番・書式・規範文書への参照行・既存ADRを覆すときの整合性を検査して作成する唯一の入口（「設計判断の記録（ADR）」参照）
+- **create-adr.js** — ADRの採番・書式・規範文書への参照行・front matter・既存ADRを覆すときの整合性を検査して作成する唯一の入口（「設計判断の記録（ADR）」参照）
 - **lightweight-pr.md** — Review Managerを起動せずにPR、slow層、テスト申告を通す軽量PR経路の手順（軽い変更時に参照）
 
 #### assistant（対話型ワーカー）について
