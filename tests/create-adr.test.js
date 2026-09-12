@@ -329,6 +329,23 @@ test('create-adr.js: 裸のファイル名言及は許容し、パスを含む�
   } finally {
     cleanup(brokenWorkspace);
   }
+
+  const brokenLinkWorkspace = createWorkspace();
+  try {
+    const normative = '[参照](missing.md) と `SKILL.md` は別の種類の言及。\n';
+    fs.writeFileSync(path.join(brokenLinkWorkspace, 'AGENTS.md'), normative, 'utf8');
+    const result = runCli(brokenLinkWorkspace, [
+      '--slug', 'broken-link-reference',
+      '--body-file', writeBody(brokenLinkWorkspace),
+      '--normative-file', 'AGENTS.md',
+    ], { referenceAfter: 0 });
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}${result.stdout}`, /missing\.md/);
+    assert.equal(fs.readFileSync(path.join(brokenLinkWorkspace, 'AGENTS.md'), 'utf8'), normative);
+    assert.equal(fs.readdirSync(path.join(brokenLinkWorkspace, 'docs', 'adr')).length, 0);
+  } finally {
+    cleanup(brokenLinkWorkspace);
+  }
 });
 
 test('create-adr.js: ADR配置失敗時に規範文書の参照行をロールバックする', () => {

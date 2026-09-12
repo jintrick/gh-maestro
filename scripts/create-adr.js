@@ -325,8 +325,9 @@ function isNormativeCitation(ref, lines) {
 
 function shouldValidateReference(ref, lines) {
   // 直下の規範文書では `SKILL.md` のような裸のファイル名が種類名として現れる。
-  // 抽出器の契約は変えず、パスを含む参照と規範ラベル付きの言及だけを実在検査する。
-  return ref.target.includes('/') || isNormativeCitation(ref, lines);
+  // Markdownリンクは壊れた裸ファイル名も検出対象に残し、インラインコードだけを
+  // 一般言及として許容する。規範行として手動追加した参照もラベルで検査対象にする。
+  return ref.kind !== 'inline-code' || ref.target.includes('/') || isNormativeCitation(ref, lines);
 }
 
 function parseAdrFrontMatter(content) {
