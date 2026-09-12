@@ -110,28 +110,234 @@ function atomicWriteJson(filePath, data) {
   return atomicWriteText(filePath, JSON.stringify(data, null, 2));
 }
 
+function temporaryPath(filePath, prefix) {
+  const dir = path.dirname(filePath);
+  const rand = Math.random().toString(36).slice(2, 8);
+  return path.join(dir, `.${prefix}-${path.basename(filePath)}.${process.pid}-${Date.now()}-${rand}`);
+}
+
+function stageText(filePath, content) {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+  const stagingPath = temporaryPath(filePath, 'staging');
+  try {
+    fs.writeFileSync(stagingPath, content, 'utf8');
+  } catch (error) {
+    try { fs.unlinkSync(stagingPath); } catch {}
+    throw error;
+  }
+  return stagingPath;
+}
+
+function statIfExists(filePath) {
+  try {
+    return fs.statSync(filePath);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function unlinkIfExists(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    if (!error || error.code !== 'ENOENT') throw error;
+  }
+}
+
+function normalizeTextWrite(entry) {
+  if (!entry || typeof entry.filePath !== 'string' || entry.filePath.length === 0) {
+    throw new TypeError('atomicWriteTextPairのfilePathは空でない文字列で指定してください');
+  }
+  if (typeof entry.content !== 'string') {
+    throw new TypeError('atomicWriteTextPairのcontentは文字列で指定してください');
+  }
+  if (entry.expectedContent !== undefined && typeof entry.expectedContent !== 'string') {
+    throw new TypeError('atomicWriteTextPairのexpectedContentは文字列で指定してください');
+  }
+  return {
+    filePath: path.resolve(entry.filePath),
+    content: entry.content,
+    overwrite: entry.overwrite !== false,
+    expectedContent: entry.expectedContent,
+    stagingPath: null,
+    backupPath: null,
+    installed: false,
+  };
+}
+
+function rollbackTextWrites(records) {
+  const rollbackErrors = [];
+
+  for (const record of records.slice().reverse()) {
+    if (!record.installed) continue;
+    try {
+      unlinkIfExists(record.filePath);
+    } catch (error) {
+      rollbackErrors.push(error);
+    }
+  }
+
+  for (const record of records.slice().reverse()) {
+    if (!record.backupPath) continue;
+    try {
+      if (statIfExists(record.filePath)) unlinkIfExists(record.filePath);
+      renameSyncWithRetry(record.backupPath, record.filePath);
+      record.backupPath = null;
+    } catch (error) {
+      rollbackErrors.push(error);
+    }
+  }
+
+  for (const record of records) {
+    try {
+      if (record.stagingPath) unlinkIfExists(record.stagingPath);
+      if (record.backupPath) unlinkIfExists(record.backupPath);
+    } catch (error) {
+      rollbackErrors.push(error);
+    }
+  }
+  return rollbackErrors;
+}
+
+/**
+ * 複数のテキストファイルを一つの更新として書き出す。
+ *
+ * 2ファイルのrename自体をOSが一度に原子化することはできないため、全ファイルを
+ * stagingしてから既存ファイルを退避し、配置途中の失敗では逆順にロールバックする。
+ * 単一ファイルのatomicWriteTextと同じstagingとrenameSyncWithRetryを使い、呼び出し側
+ * に片方だけを書き込む経路を作らない。
+ *
+ * @param {Array<{filePath: string, content: string, overwrite?: boolean, expectedContent?: string}>} entries 2件の書込み
+ * @returns {string[]} 書き込んだファイルパス
+ * @throws {Error} staging、配置、またはロールバックに失敗した場合
+ */
+function atomicWriteTextTransaction(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new TypeError('atomicWriteTextには1件以上の書込みを指定してください');
+  }
+  const records = entries.map(normalizeTextWrite);
+  const targets = new Set();
+  for (const record of records) {
+    if (targets.has(record.filePath)) {
+      throw new TypeError(`atomicWriteTextPairの出力先が重複しています: ${record.filePath}`);
+    }
+    targets.add(record.filePath);
+    const current = statIfExists(record.filePath);
+    if (current && !current.isFile()) {
+      const error = new Error(`atomicWriteTextPairの出力先が通常ファイルではありません: ${record.filePath}`);
+      error.code = 'EISDIR';
+      throw error;
+    }
+    if (!record.overwrite && current) {
+      const error = new Error(`atomicWriteTextPairの作成先が既に存在します: ${record.filePath}`);
+      error.code = 'EEXIST';
+      throw error;
+    }
+    if (record.expectedContent !== undefined) {
+      if (!current) {
+        const error = new Error(`atomicWriteTextPairの期待した既存ファイルがありません: ${record.filePath}`);
+        error.code = 'ENOENT';
+        throw error;
+      }
+      const actual = fs.readFileSync(record.filePath, 'utf8');
+      if (actual !== record.expectedContent) {
+        const error = new Error(`atomicWriteTextPairの入力が検証後に変更されています: ${record.filePath}`);
+        error.code = 'ESTALE';
+        throw error;
+      }
+    }
+  }
+
+  try {
+    for (const record of records) record.stagingPath = stageText(record.filePath, record.content);
+
+    for (const record of records) {
+      const current = statIfExists(record.filePath);
+      if (current && !current.isFile()) {
+        const error = new Error(`atomicWriteTextPairの出力先が通常ファイルではありません: ${record.filePath}`);
+        error.code = 'EISDIR';
+        throw error;
+      }
+      if (!record.overwrite && current) {
+        const error = new Error(`atomicWriteTextPairの作成先が既に存在します: ${record.filePath}`);
+        error.code = 'EEXIST';
+        throw error;
+      }
+      if (!current) {
+        if (record.expectedContent !== undefined) {
+          const error = new Error(`atomicWriteTextPairの期待した既存ファイルがありません: ${record.filePath}`);
+          error.code = 'ENOENT';
+          throw error;
+        }
+        continue;
+      }
+
+      const backupPath = temporaryPath(record.filePath, 'backup');
+      renameSyncWithRetry(record.filePath, backupPath);
+      record.backupPath = backupPath;
+      if (record.expectedContent !== undefined) {
+        const actual = fs.readFileSync(record.backupPath, 'utf8');
+        if (actual !== record.expectedContent) {
+          const error = new Error(`atomicWriteTextPairの入力が検証後に変更されています: ${record.filePath}`);
+          error.code = 'ESTALE';
+          throw error;
+        }
+      }
+    }
+
+    for (const record of records) {
+      if (!record.overwrite && statIfExists(record.filePath)) {
+        const error = new Error(`atomicWriteTextPairの作成先が既に存在します: ${record.filePath}`);
+        error.code = 'EEXIST';
+        throw error;
+      }
+      renameSyncWithRetry(record.stagingPath, record.filePath);
+      record.stagingPath = null;
+      record.installed = true;
+    }
+  } catch (error) {
+    const rollbackErrors = rollbackTextWrites(records);
+    if (rollbackErrors.length > 0) error.rollbackErrors = rollbackErrors;
+    throw error;
+  }
+
+  for (const record of records) {
+    if (record.backupPath) {
+      // 配置は完了しているため、退避ファイルの掃除失敗で更新結果を巻き戻さない。
+      // 単一ファイル版のstaging掃除と同じく、残骸は次の手動調査で確認できる。
+      try { fs.unlinkSync(record.backupPath); } catch (error) {
+        if (!error || error.code !== 'ENOENT') process.emitWarning(error);
+      }
+    }
+  }
+  return records.map((record) => record.filePath);
+}
+
 /**
  * UTF-8テキストを原子的に書き出す。失敗時は staging を必ず掃除する。
  * @param {string} filePath
  * @param {string} content
  * @returns {string}
  */
+function atomicWriteTextPair(entries) {
+  if (!Array.isArray(entries) || entries.length !== 2) {
+    throw new TypeError('atomicWriteTextPairには2件の書込みを指定してください');
+  }
+  return atomicWriteTextTransaction(entries);
+}
+
 function atomicWriteText(filePath, content) {
-  const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
-
-  const rand = Math.random().toString(36).slice(2, 8);
-  const stagingPath = path.join(dir, `.staging-${path.basename(filePath)}.${process.pid}-${Date.now()}-${rand}`);
-
+  const stagingPath = stageText(filePath, content);
   try {
-    fs.writeFileSync(stagingPath, content, 'utf8');
     renameSyncWithRetry(stagingPath, filePath);
-  } catch (e) {
+  } catch (error) {
     // 失敗時は staging を掃除（ベストエフォート）して失敗を伝える
     try { fs.unlinkSync(stagingPath); } catch {}
-    throw e;
+    throw error;
   }
   return filePath;
 }
 
-module.exports = { atomicWriteJson, atomicWriteText, renameSyncWithRetry };
+module.exports = { atomicWriteJson, atomicWriteText, atomicWriteTextPair, renameSyncWithRetry };

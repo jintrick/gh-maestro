@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // create-adr.js — ADR作成の決定的な入口
 //
-// --next は次に使われるパスを表示するだけで、ファイルを変更しない。呼び出し側は
-// その結果を使って規範文書や旧ADRへの参照を更新し、作成経路で完成状態を検査する。
+// --next は次に使われるパスを表示するだけで、ファイルを変更しない。作成経路では
+// 規範文書への新ADR参照の挿入とADRファイルの作成を同じ更新として扱う。
 'use strict';
 
 const fs = require('fs');
@@ -11,30 +11,34 @@ const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { toWinPath } = require('./shared/win-path');
 const { assertWithinRoot } = require('./shared/record-paths');
 const { extractMdRefs, resolveRefExists } = require('./shared/doc-ref-check');
+const { atomicWriteTextPair } = require('./shared/atomic-write');
 
 const USAGE = `create-adr.js — ADRの採番・書式・参照を検証して作成する
 
 Usage:
   node create-adr.js --next --slug <slug> [--workspace <path>]
-  node create-adr.js --slug <slug> --body-file <path> --normative-file <path> [--supersedes <path>] [--workspace <path>]
+  node create-adr.js --slug <slug> --body-file <path> --normative-file <path> --reference-after <line> [--supersedes <path>] [--workspace <path>]
 
 Options:
   --next                   次に割り当てるADRの相対パスを表示する（ファイルは変更しない）
   --slug <slug>            ファイル名のスラッグ（英小文字・数字・ハイフン）
   --body-file <path>       ADR本文（UTF-8）
   --normative-file <path>  参照行を置いた規範文書。AGENTS.md、.claude/rules/**/*.md、skills/**/SKILL.mdに限る
+  --reference-after <line> 新ADRの参照行を指定行の直後へ挿入する（0は先頭、作成時に必須）
   --supersedes <path>      覆す旧ADR（docs/adr/<番号>-<slug>.md）
   --workspace <path>       ワークスペースのルート（省略時は環境変数またはCWDから解決）
   --help, -h               このヘルプを表示する
 
-作成経路は、規範文書に新ADRへの「理由と経緯: docs/adr/<new-file>」行があること、
-および --supersedes 指定時の旧ADRへの追記と規範文書の参照張り替えを、ファイル作成前に確認する。`;
+作成経路は、指定位置への新ADRへの「理由と経緯: docs/adr/<new-file>」行の挿入、
+および --supersedes 指定時の旧ADRへの追記と規範文書の参照張り替えを検証してから、
+規範文書とADRを同じ更新として書き込む。`;
 
 const SPEC = Object.freeze({
   flags: {
     '--slug': {},
     '--body-file': {},
     '--normative-file': {},
+    '--reference-after': {},
     '--supersedes': {},
     '--workspace': {},
   },
@@ -168,6 +172,63 @@ function scanMarkdown(content) {
   return { lines, fencedLines };
 }
 
+function splitLogicalLines(content) {
+  const lineEnding = content.includes('\r\n') ? '\r\n' : '\n';
+  const hasTrailingLineEnding = /\r?\n$/.test(content);
+  const lines = content.split(/\r?\n/);
+  if (hasTrailingLineEnding) lines.pop();
+  if (content.length === 0) lines.length = 0;
+  return { lines, lineEnding, hasTrailingLineEnding };
+}
+
+function parseReferenceAfter(value) {
+  if (typeof value === 'number') {
+    if (Number.isSafeInteger(value) && value >= 0) return value;
+  } else if (typeof value === 'string' && /^(?:0|[1-9]\d*)$/.test(value)) {
+    const parsed = Number(value);
+    if (Number.isSafeInteger(parsed)) return parsed;
+  }
+  throw new Error('--reference-afterは0以上の安全な整数で指定してください');
+}
+
+function isFenceOpenAfterLine(content, lineNumber) {
+  const { lines } = splitLogicalLines(content);
+  let fenceChar = null;
+  let fenceLength = 0;
+  for (let index = 0; index < lineNumber; index += 1) {
+    const fence = lines[index].match(/^ {0,3}(`{3,}|~{3,})/);
+    if (!fence) continue;
+    const char = fence[1][0];
+    const length = fence[1].length;
+    if (fenceChar === null) {
+      fenceChar = char;
+      fenceLength = length;
+    } else if (char === fenceChar && length >= fenceLength) {
+      fenceChar = null;
+      fenceLength = 0;
+    }
+  }
+  return fenceChar !== null;
+}
+
+function insertNormativeReference(content, newRelativePath, referenceAfter) {
+  const { lines, lineEnding, hasTrailingLineEnding } = splitLogicalLines(content);
+  const line = validateReferenceAfter(content, referenceAfter, lines.length);
+  lines.splice(line, 0, `理由と経緯: ${newRelativePath}`);
+  return `${lines.join(lineEnding)}${hasTrailingLineEnding ? lineEnding : ''}`;
+}
+
+function validateReferenceAfter(content, referenceAfter, lineCount = splitLogicalLines(content).lines.length) {
+  const line = parseReferenceAfter(referenceAfter);
+  if (line > lineCount) {
+    throw new Error(`--reference-afterは0から${lineCount}の範囲で指定してください`);
+  }
+  if (isFenceOpenAfterLine(content, line)) {
+    throw new Error('--reference-afterはコードフェンスの外側を指定してください');
+  }
+  return line;
+}
+
 function parseMarkdownHeadings(content) {
   const headings = [];
   const { lines, fencedLines } = scanMarkdown(content);
@@ -262,6 +323,12 @@ function isNormativeCitation(ref, lines) {
   return NORMATIVE_LABEL_RE.test(lines[ref.line - 1] || '');
 }
 
+function shouldValidateReference(ref, lines) {
+  // 直下の規範文書では `SKILL.md` のような裸のファイル名が種類名として現れる。
+  // 抽出器の契約は変えず、パスを含む参照と規範ラベル付きの言及だけを実在検査する。
+  return ref.target.includes('/') || isNormativeCitation(ref, lines);
+}
+
 function parseAdrFrontMatter(content) {
   if (typeof content !== 'string') throw new Error('ADR本文が文字列ではありません');
   const lines = content.split(/\r?\n/);
@@ -288,13 +355,16 @@ function parseAdrFrontMatter(content) {
   return { normativeFile, endLine: end + 1 };
 }
 
-function readRefs(workspace, file, expectedNewPath = null) {
-  const content = fs.readFileSync(file.absolute, 'utf8');
-  const { refs } = scanAdrReferences(content);
+function readRefs(workspace, file, expectedNewPath = null, contentOverride = null) {
+  const content = contentOverride === null
+    ? fs.readFileSync(file.absolute, 'utf8')
+    : contentOverride;
+  const { lines, refs } = scanAdrReferences(content);
   for (const ref of refs) {
     // 作成前の新ADRだけはまだ実在しないため、許可された作成先と一致することを
     // 検査する。既存の参照は共有解決器で実在とリポジトリ外脱出を確認する。
     if (expectedNewPath && isTarget(ref, expectedNewPath)) continue;
+    if (!shouldValidateReference(ref, lines)) continue;
     if (!resolveRefExists(workspace, file.absolute, ref.target, { isAbsolute: ref.isAbsolute })) {
       throw new Error(`${file.relative}:${ref.line} の参照先が存在しません: ${ref.target}`);
     }
@@ -302,14 +372,17 @@ function readRefs(workspace, file, expectedNewPath = null) {
   return { content, refs };
 }
 
-function requireNewAdrReference(workspace, file, newRelativePath) {
-  const content = fs.readFileSync(file.absolute, 'utf8');
+function requireNewAdrReference(workspace, file, newRelativePath, contentOverride = null) {
+  const content = contentOverride === null
+    ? fs.readFileSync(file.absolute, 'utf8')
+    : contentOverride;
   const { lines, refs } = scanAdrReferences(content);
   if (!refs.some((ref) => isTarget(ref, newRelativePath) && isNormativeCitation(ref, lines))) {
     throw new Error(`${file.relative} に新ADRへの参照行がありません: ${newRelativePath}`);
   }
   for (const ref of refs) {
     if (isTarget(ref, newRelativePath)) continue;
+    if (!shouldValidateReference(ref, lines)) continue;
     if (!resolveRefExists(workspace, file.absolute, ref.target, { isAbsolute: ref.isAbsolute })) {
       throw new Error(`${file.relative}:${ref.line} の参照先が存在しません: ${ref.target}`);
     }
@@ -363,23 +436,53 @@ function renderAdrFrontMatter(normativeRelativePath) {
   return `---\nnormative-file: ${normativeRelativePath}\n---\n\n`;
 }
 
-function createAdr({ workspace, slug, bodyFile, normativeFile, supersedes }) {
+function prepareNormativeContent(workspace, normative, newRelativePath, referenceAfter) {
+  const originalContent = fs.readFileSync(normative.absolute, 'utf8');
+  const { lines, refs } = scanAdrReferences(originalContent);
+  const hasReference = refs.some(
+    (ref) => isTarget(ref, newRelativePath) && isNormativeCitation(ref, lines),
+  );
+  if (hasReference) {
+    requireNewAdrReference(workspace, normative, newRelativePath, originalContent);
+    return { originalContent, updatedContent: originalContent };
+  }
+
+  validateReferenceAfter(originalContent, referenceAfter, splitLogicalLines(originalContent).lines.length);
+  const updatedContent = insertNormativeReference(originalContent, newRelativePath, referenceAfter);
+
+  // 挿入後の本文を改めて全件検査し、作成する新ADRの参照行も規範ラベル付きであることを
+  // 確認してから、2ファイルの書込みトランザクションへ渡す。
+  requireNewAdrReference(workspace, normative, newRelativePath, updatedContent);
+  return { originalContent, updatedContent };
+}
+
+function createAdr({ workspace, slug, bodyFile, normativeFile, referenceAfter, supersedes }) {
+  if (referenceAfter === undefined) throw new Error('--reference-afterが必要です');
   const normative = resolveNormativeFile(workspace, normativeFile);
   const next = nextAdrPath(workspace, slug);
   const bodyPath = path.resolve(toWinPath(bodyFile));
   const body = fs.readFileSync(bodyPath, 'utf8');
   validateAdrBody(body);
 
-  requireNewAdrReference(workspace, normative, next.relative);
+  const normativeContents = prepareNormativeContent(workspace, normative, next.relative, referenceAfter);
   if (supersedes) {
     const oldFile = resolveAdrFile(workspace, supersedes);
     validateSupersession(workspace, oldFile, next.relative);
   }
 
-  fs.writeFileSync(next.absolute, `${renderAdrFrontMatter(normative.relative)}${body}`, {
-    encoding: 'utf8',
-    flag: 'wx',
-  });
+  atomicWriteTextPair([
+    {
+      filePath: normative.absolute,
+      content: normativeContents.updatedContent,
+      overwrite: true,
+      expectedContent: normativeContents.originalContent,
+    },
+    {
+      filePath: next.absolute,
+      content: `${renderAdrFrontMatter(normative.relative)}${body}`,
+      overwrite: false,
+    },
+  ]);
   return next;
 }
 
@@ -404,10 +507,14 @@ function main(argv = process.argv.slice(2)) {
   const nextOnly = values['--next'] === true;
   const slug = values['--slug'];
   if (!slug) return errorResult('--slugが必要です');
-  if (nextOnly && (values['--body-file'] || values['--normative-file'] || values['--supersedes'])) {
+  if (nextOnly && (values['--body-file'] || values['--normative-file']
+    || values['--reference-after'] || values['--supersedes'])) {
     return errorResult('--nextは作成用オプションと併用できません');
   }
   if (!nextOnly && !values['--body-file']) return errorResult('--body-fileが必要です');
+  if (!nextOnly && values['--reference-after'] === undefined) {
+    return errorResult('--reference-afterが必要です');
+  }
 
   const workspace = resolveWorkspace(values['--workspace']);
   if (!workspace) {
@@ -423,6 +530,7 @@ function main(argv = process.argv.slice(2)) {
       slug,
       bodyFile: values['--body-file'],
       normativeFile: values['--normative-file'],
+      referenceAfter: values['--reference-after'],
       supersedes: values['--supersedes'],
     });
     return { code: 0, stdout: `ADR_CREATED:${next.relative}` };

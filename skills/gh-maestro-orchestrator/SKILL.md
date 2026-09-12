@@ -83,7 +83,7 @@ ADRにしないことは、記録しないことではない。
 
 書式・見出し・採番・既存のADRを覆したときの扱いは `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/adr.md` にある。3条件をすべて満たすと判定したらそれを開き、そこに従って `{{SCRIPTS_PATH}}/create-adr.js` を使う。判定より前に開く必要はない。
 
-ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --workspace $WORKSPACE` を実行して、スクリプトが割り当てるADRの相対パスを取得する。そのパスを規範文書の参照行、または既存ADRを覆す場合の旧ADRへの追記と参照元の張り替えに使い、書き終えてから `adr.md` の作成経路を実行する。番号を `docs/adr/` の一覧から推測してはならない。規範を直接縛らない判断でも、許可された規範ファイル（最低限 `AGENTS.md`）へ参照行を置き、作成されたADRのfront matterにそのファイルが記録される。
+ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --workspace $WORKSPACE` を実行して、スクリプトが割り当てるADRの相対パスを取得する。規範文書内の適切な挿入位置を決め、`--reference-after <line>` でその位置を指定して `adr.md` の作成経路を実行する。参照行の書き込みとADRファイルの作成はスクリプトが同じ更新として行うため、呼び出し側が規範文書を手で編集してはならない。番号を `docs/adr/` の一覧から推測してはならない。規範を直接縛らない判断でも、許可された規範ファイル（最低限 `AGENTS.md`）へ参照行を置き、作成されたADRのfront matterにそのファイルが記録される。
 
 ### セッション変数
 
