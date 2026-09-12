@@ -120,6 +120,19 @@ test('extractMdRefs: 裸のファイル名も抽出する（祖先ディレク�
   assert.deepEqual(targets, ['SKILL.md', 'logic-invariants.md']);
 });
 
+test('extractMdRefs: ADRの理由行にある裸の参照を抽出する', () => {
+  const content = [
+    '理由と経緯: docs/adr/0036-corrupt-state-files-are-reported-not-repaired.md',
+    '- 判断の背景と採用理由: docs/adr/0037-dev-branches-from-main-or-master-only.md',
+    '一般文中の docs/adr/0036-corrupt-state-files-are-reported-not-repaired.md は対象外。',
+  ].join('\n');
+  const refs = extractMdRefs(content);
+  assert.deepEqual(refs.map((ref) => ref.target), [
+    'docs/adr/0036-corrupt-state-files-are-reported-not-repaired.md',
+    'docs/adr/0037-dev-branches-from-main-or-master-only.md',
+  ]);
+});
+
 test('extractMdRefs: 大きなファイルでも行番号を正しく計算する', () => {
   const filler = 'x'.repeat(5000) + '\n';
   const content = filler.repeat(2000) + '`docs/target.md`\n';
