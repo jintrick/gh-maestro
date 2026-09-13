@@ -1308,12 +1308,10 @@ function main(argv = process.argv.slice(2)) {
       );
       return { code: 1, lines: out, errLines: err };
     }
-    if (paneAlive) {
-      const killResult = _killPane(paneId, _statusPaneConnection(existingPane));
-      if (!killResult.ok) {
-        writeErr(`worker-status: 監視ペイン ${paneId} の終了に失敗しました: ${killResult.stderr}`);
-        return { code: 1, lines: out, errLines: err };
-      }
+    const killResult = _killPane(paneId, _statusPaneConnection(existingPane));
+    if (!killResult.ok) {
+      writeErr(`worker-status: 監視ペイン ${paneId} の終了に失敗しました: ${killResult.stderr}`);
+      return { code: 1, lines: out, errLines: err };
     }
 
     removeStatusPane(workspace);

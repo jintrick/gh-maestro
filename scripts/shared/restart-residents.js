@@ -32,9 +32,10 @@ const {
   msgPollRole,
   releaseResidentLeaseForProcess,
 } = require('./worker-lease');
-
-const WEZTERM_PANE_ENV = 'WEZTERM_PANE';
-const WEZTERM_UNIX_SOCKET_ENV = 'WEZTERM_UNIX_SOCKET';
+const {
+  WEZTERM_PANE_ENV,
+  WEZTERM_UNIX_SOCKET_ENV,
+} = require('./pane-launch');
 
 const RESIDENT_SPECS = Object.freeze([
   Object.freeze({ script: 'worker-supervisor.js', workerName: null, monitorRequired: false }),
