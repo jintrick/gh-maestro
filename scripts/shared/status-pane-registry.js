@@ -19,10 +19,10 @@ const storageLayout = require('./storage-layout');
 const STATUS_PANE_FILE = 'status-pane.json';
 const STATUS_PANE_RECOVERY_FILE = 'status-pane-recovery.json';
 
-function statusPanePath(workspace) {
+function statusPanePath(workspace, runtimeRoot) {
   storageLayout.assertValidWorkspace(workspace);
-  storageLayout.assertDisjointRoots();
-  return path.join(storageLayout.workspaceRuntimeDir(workspace), STATUS_PANE_FILE);
+  storageLayout.assertDisjointRoots(runtimeRoot);
+  return path.join(storageLayout.workspaceRuntimeDir(workspace, runtimeRoot), STATUS_PANE_FILE);
 }
 
 /**

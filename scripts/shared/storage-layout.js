@@ -74,10 +74,15 @@ function workspaceKey(p) {
 /**
  * workspace 固有の runtime ディレクトリを返す（純粋関数、副作用なし）。
  * @param {string} p
+ * @param {string} [runtimeRootOverride] 明示するruntime root（テスト・隔離実行用）
  * @returns {string}
  */
-function workspaceRuntimeDir(p) {
-  return path.join(runtimeRoot(), 'workspaces', workspaceKey(p));
+function workspaceRuntimeDir(p, runtimeRootOverride) {
+  const root = runtimeRootOverride === undefined ? runtimeRoot() : runtimeRootOverride;
+  if (typeof root !== 'string' || root === '') {
+    throw new Error('workspaceRuntimeDir: runtime rootがありません');
+  }
+  return path.join(path.resolve(root), 'workspaces', workspaceKey(p));
 }
 
 /**
@@ -316,11 +321,16 @@ function assertValidWorkspace(p) {
  * managed root と runtime root が物理的に分離されていることを検証する。
  * 起動時の自己検査として使う。
  *
+ * @param {string} [runtimeRootOverride] 明示するruntime root
  * @throws {Error} 両ルートが同一・祖先・子孫関係の場合
  */
-function assertDisjointRoots() {
+function assertDisjointRoots(runtimeRootOverride) {
   const managed = canonicalWorkspace(managedRoot());
-  const runtime = canonicalWorkspace(runtimeRoot());
+  const root = runtimeRootOverride === undefined ? runtimeRoot() : runtimeRootOverride;
+  if (typeof root !== 'string' || root === '') {
+    throw new Error('assertDisjointRoots: runtime rootがありません');
+  }
+  const runtime = canonicalWorkspace(root);
   if (isAncestorOrSame(managed, runtime) || isAncestorOrSame(runtime, managed)) {
     throw new Error(
       `assertDisjointRoots: managed root (${managed}) と runtime root (${runtime}) が`

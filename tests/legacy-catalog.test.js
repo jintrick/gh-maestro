@@ -14,7 +14,7 @@ const {
   hasLegacyFindings,
 } = require('../scripts/shared/legacy-catalog');
 const { readFileAtRef } = require('../scripts/shared/git-ref');
-const { statusPaneRecordPath } = require('../scripts/shared/status-pane-legacy');
+const { statusPanePath } = require('../scripts/shared/status-pane-registry');
 
 // 台帳の自己申告ではなく、Issue #532で確定した対象集合から独立に置く。
 const EXPECTED_LEGACY_ITEM_COUNT = 20;
@@ -248,7 +248,7 @@ test('readState statuses map legacy to present, missing/current to absent, and c
 
 test('status-pane旧形式だけをpresentとし、現行形式・破損・不在を区別する', () => {
   const fixture = createWorkspace();
-  const target = statusPaneRecordPath(fixture.root, fixture.runtimeRoot);
+  const target = statusPanePath(fixture.root, fixture.runtimeRoot);
   try {
     fs.mkdirSync(path.dirname(target), { recursive: true });
 

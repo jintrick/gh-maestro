@@ -9,7 +9,7 @@ const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'check-legacy.js');
 const checkLegacy = require('../scripts/check-legacy');
-const { statusPaneRecordPath } = require('../scripts/shared/status-pane-legacy');
+const { statusPanePath } = require('../scripts/shared/status-pane-registry');
 let cliRuntimeRoot;
 
 before(() => {
@@ -42,7 +42,7 @@ test('check-legacy CLI reports findings with exit code 0', () => {
   try {
     fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(path.join(workspace, '.gitignore'), '.gh-maestro/\n', 'utf8');
-    const statusPane = statusPaneRecordPath(workspace, cliRuntimeRoot);
+    const statusPane = statusPanePath(workspace, cliRuntimeRoot);
     fs.mkdirSync(path.dirname(statusPane), { recursive: true });
     fs.writeFileSync(statusPane, JSON.stringify({ paneId: 5 }), 'utf8');
     const result = runCli('--workspace', workspace);

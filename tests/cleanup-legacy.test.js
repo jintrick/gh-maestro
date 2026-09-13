@@ -12,7 +12,7 @@ const CLEANUP_ID = 'cleanup-legacy.statusPaneRecord';
 const {
   cleanupLegacyArtifact,
 } = require('../scripts/shared/legacy-cleanup');
-const { statusPaneRecordPath } = require('../scripts/shared/status-pane-legacy');
+const { statusPanePath } = require('../scripts/shared/status-pane-registry');
 
 function createFixture(root) {
   const workspace = path.join(root, 'workspace');
@@ -22,7 +22,7 @@ function createFixture(root) {
   return {
     workspace,
     runtimeRoot,
-    statusPane: statusPaneRecordPath(workspace, runtimeRoot),
+    statusPane: statusPanePath(workspace, runtimeRoot),
   };
 }
 

@@ -17,6 +17,7 @@ const { isWorkerAlive } = require('./worker-liveness');
 const workerLease = require('./worker-lease');
 const { deriveRoleFromSkill } = require('./worker-factory');
 const storageLayout = require('./storage-layout');
+const { statusPanePath } = require('./status-pane-registry');
 const statusPaneLegacy = require('./status-pane-legacy');
 
 const DECLARATION = require('../legacy-catalog.json');
@@ -568,7 +569,7 @@ function detectLegacyQueue(context, parameters) {
 }
 
 function detectStatusPaneLegacyRecord(context) {
-  const target = statusPaneLegacy.statusPaneRecordPath(context.workspace, context.runtimeRoot);
+  const target = statusPanePath(context.workspace, context.runtimeRoot);
   const state = jsonState(context, target);
   if (state.status !== 'present') return state;
 

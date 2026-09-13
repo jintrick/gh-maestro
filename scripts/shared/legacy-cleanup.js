@@ -10,9 +10,9 @@ const fs = require('fs');
 const { CATALOG } = require('./legacy-catalog');
 const processLifecycle = require('../process-lifecycle');
 const {
-  statusPaneRecordPath,
   classifyStatusPaneRecord,
 } = require('./status-pane-legacy');
+const { statusPanePath } = require('./status-pane-registry');
 
 const STATUS_PANE_CLEANUP_ID = 'cleanup-legacy.statusPaneRecord';
 const STATUS_PANE_LOCK_SCRIPT = 'status-pane';
@@ -86,7 +86,7 @@ function cleanupStatusPaneRecord(options = {}) {
     unlinkFn = fs.unlinkSync,
   } = options;
 
-  const filePath = statusPaneRecordPath(workspace, runtimeRoot);
+  const filePath = statusPanePath(workspace, runtimeRoot);
   let locked = false;
   try {
     let acquired;
