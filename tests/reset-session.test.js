@@ -229,7 +229,12 @@ test('reset-session: killPane に失敗した場合は status-pane.json を削�
     const { saveStatusPane, loadStatusPane } = require('../scripts/shared/status-pane-registry');
     const paneLaunch = require('../scripts/shared/pane-launch');
 
-    saveStatusPane(workspace, { paneId: '8888', launchedAt: '2026-08-26T09:00:00.000Z' });
+    saveStatusPane(workspace, {
+      paneId: '8888',
+      unixSocket: 'C:\\wezterm\\test-socket',
+      targetPaneId: 'base-pane',
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    });
     assert.ok(loadStatusPane(workspace) !== null);
 
     // list は生存中と判定し、killPane は失敗するモックを設定

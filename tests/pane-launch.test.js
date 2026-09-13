@@ -63,6 +63,7 @@ test('launchInSplitPane: split-pane成功でpaneIdを返す（既定: bottom 15%
   const result = paneLaunch.launchInSplitPane({
     argv: ['node', 'worker-status.js', 'watch'],
     cwd: '/tmp/ws',
+    targetPaneId: '0',
   });
 
   assert.equal(result.paneId, '55');
@@ -72,6 +73,9 @@ test('launchInSplitPane: split-pane成功でpaneIdを返す（既定: bottom 15%
   assert.ok(capturedArgs.includes('15'));
   assert.ok(capturedArgs.includes('--cwd'));
   assert.ok(capturedArgs.includes('/tmp/ws'));
+  assert.deepEqual(capturedArgs.slice(capturedArgs.indexOf('--pane-id'), capturedArgs.indexOf('--pane-id') + 2), [
+    '--pane-id', '0',
+  ]);
 });
 
 test('launchInSplitPane: direction と percent をカスタマイズできる', () => {
@@ -86,6 +90,7 @@ test('launchInSplitPane: direction と percent をカスタマイズできる', 
     cwd: '/tmp/ws',
     direction: 'right',
     percent: 25,
+    targetPaneId: 'base-1',
   });
 
   assert.ok(capturedArgs.includes('--right'));
@@ -96,7 +101,7 @@ test('launchInSplitPane: split-pane失敗でthrow', () => {
   paneLaunch._setWeztermSplitPane(() => ({ status: 1, stdout: '', stderr: 'split failed' }));
 
   assert.throws(
-    () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws' }),
+    () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws', targetPaneId: '0' }),
     /WezTermペインの分割起動に失敗しました: split failed/
   );
 });
@@ -105,7 +110,7 @@ test('launchInSplitPane: pane-idが空ならthrow', () => {
   paneLaunch._setWeztermSplitPane(() => ({ status: 0, stdout: '', stderr: '' }));
 
   assert.throws(
-    () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws' }),
+    () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws', targetPaneId: '0' }),
     /pane-id を取得できませんでした/
   );
 });
@@ -132,6 +137,46 @@ test('getAlivePaneIds: status!=0 の場合はwarnを呼び null を返す（0件
   const result = paneLaunch.getAlivePaneIds((msg) => { warned = msg; });
   assert.equal(result, null);
   assert.match(warned, /wezterm cli list 失敗: wezterm not running/);
+});
+
+test('pane操作: 記録済み接続先をWezTermコマンドの環境へ渡す', () => {
+  const connection = { unixSocket: 'C:\\wezterm\\socket-A', targetPaneId: 'base-A' };
+  const captured = [];
+  paneLaunch._setWeztermListPanes((args, options) => {
+    captured.push({ kind: 'list', args, options });
+    return { status: 0, stdout: JSON.stringify([{ pane_id: '77' }]), stderr: '' };
+  });
+  paneLaunch._setWeztermKillPane((args, options) => {
+    captured.push({ kind: 'kill', args, options });
+    return { status: 0, stdout: '', stderr: '' };
+  });
+  paneLaunch._setWeztermSplitPane((args, options) => {
+    captured.push({ kind: 'split', args, options });
+    return { status: 0, stdout: '88', stderr: '' };
+  });
+
+  try {
+    assert.equal(paneLaunch.isPaneAlive('77', undefined, connection), true);
+    assert.equal(paneLaunch.killPane('77', connection).ok, true);
+    assert.equal(paneLaunch.launchInSplitPane({
+      argv: ['node'],
+      cwd: '/tmp/ws',
+      targetPaneId: connection.targetPaneId,
+      connection,
+    }).paneId, '88');
+
+    for (const call of captured) {
+      assert.equal(call.options.env.WEZTERM_UNIX_SOCKET, connection.unixSocket);
+      assert.equal(call.options.env.WEZTERM_PANE, process.env.WEZTERM_PANE);
+    }
+    assert.deepEqual(captured.at(-1).args.slice(captured.at(-1).args.indexOf('--pane-id'), captured.at(-1).args.indexOf('--pane-id') + 2), [
+      '--pane-id', 'base-A',
+    ]);
+  } finally {
+    paneLaunch._setWeztermListPanes(null);
+    paneLaunch._setWeztermKillPane(null);
+    paneLaunch._setWeztermSplitPane(null);
+  }
 });
 
 test('getAlivePaneIds: JSONパース失敗時はwarnを呼び null を返す', () => {
@@ -217,7 +262,7 @@ test('launchInSplitPane: 未注入時に NODE_TEST_CONTEXT があると実起動
   paneLaunch._setWeztermSplitPane(null);
 
   assert.throws(
-    () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws' }),
+    () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws', targetPaneId: '0' }),
     /WezTermペインを起動しません.*NODE_TEST_CONTEXT/,
   );
 });
@@ -229,7 +274,7 @@ test('launchInSplitPane: 未注入時に NODE_TEST_CONTEXT があると claude /
   try {
     for (const command of ['claude', 'agy', 'codex']) {
       assert.throws(
-        () => paneLaunch.launchInSplitPane({ argv: [command], cwd: '/tmp/ws' }),
+        () => paneLaunch.launchInSplitPane({ argv: [command], cwd: '/tmp/ws', targetPaneId: '0' }),
         /WezTermペインを起動しません.*NODE_TEST_CONTEXT/,
       );
     }
@@ -251,7 +296,7 @@ test('launchAgentInWindow / launchInSplitPane: GH_MAESTRO_DISABLE_REAL_SPAWN で
       /GH_MAESTRO_DISABLE_REAL_SPAWN/,
     );
     assert.throws(
-      () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws' }),
+      () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws', targetPaneId: '0' }),
       /GH_MAESTRO_DISABLE_REAL_SPAWN/,
     );
   } finally {

@@ -12,6 +12,15 @@ const statusPaneRegistry = require('../scripts/shared/status-pane-registry');
 
 const { ensureStatusPane } = ensureStatusPaneLib;
 
+const PANE_CONTEXT = Object.freeze({
+  unixSocket: 'C:\\wezterm\\test-socket',
+  targetPaneId: 'base-pane',
+});
+
+function paneEntry(paneId, extra = {}) {
+  return { paneId, ...PANE_CONTEXT, ...extra };
+}
+
 function withTempWorkspace(fn) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ensure-status-pane-'));
   fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
@@ -58,6 +67,7 @@ function injectedDeps(overrides = {}) {
     },
     killPaneFn: () => ({ ok: true }),
     saveStatusPaneFn: () => { calls.save++; },
+    getCurrentPaneTargetFn: () => ({ ...PANE_CONTEXT }),
     nowFn: () => 1760000000000,
   };
   return { calls, deps: { ...deps, ...overrides } };
@@ -82,7 +92,7 @@ test('ensureStatusPane: 生存中の記録済みペインを再利用し起動�
   const { calls, deps } = injectedDeps({
     loadStatusPaneFn: () => {
       calls.load++;
-      return { paneId: '42', launchedAt: '2026-08-31T00:00:00.000Z' };
+      return paneEntry('42', { launchedAt: '2026-08-31T00:00:00.000Z' });
     },
     isPaneAliveFn: () => {
       calls.alive++;
@@ -101,11 +111,34 @@ test('ensureStatusPane: 生存中の記録済みペインを再利用し起動�
   assert.equal(calls.save, 0);
 });
 
+test('ensureStatusPane: 既存記録の接続先と基準ペインを使い、現在環境を参照しない', () => {
+  let observedConnection = null;
+  let launchParams = null;
+  const { deps } = injectedDeps({
+    loadStatusPaneFn: () => paneEntry('old'),
+    isPaneAliveFn: (paneId, connection) => {
+      observedConnection = connection;
+      return false;
+    },
+    launchInSplitPaneFn: (params) => {
+      launchParams = params;
+      return { paneId: 'new' };
+    },
+  });
+
+  const result = ensureStatusPane(baseParams(), deps);
+
+  assert.deepEqual(result, { ok: true, paneId: 'new', reused: false });
+  assert.deepEqual(observedConnection, PANE_CONTEXT);
+  assert.deepEqual(launchParams.connection, PANE_CONTEXT);
+  assert.equal(launchParams.targetPaneId, PANE_CONTEXT.targetPaneId);
+});
+
 test('ensureStatusPane: 要求Issueと異なる生存ペインは終了して対象Issueで張り直す', () => {
   const calls = [];
   let saved = null;
   const { deps } = injectedDeps({
-    loadStatusPaneFn: () => ({ paneId: 'old', issue: '470' }),
+    loadStatusPaneFn: () => paneEntry('old', { issue: '470' }),
     isPaneAliveFn: () => true,
     killPaneFn: (paneId) => {
       calls.push(['kill', paneId]);
@@ -130,6 +163,7 @@ test('ensureStatusPane: 要求Issueと異なる生存ペインは終了して対
   assert.equal(calls[2][1].at(-1), '471');
   assert.deepEqual(saved.entry, {
     paneId: 'new',
+    ...PANE_CONTEXT,
     issue: '471',
     launchedAt: '2025-10-09T08:53:20.000Z',
   });
@@ -138,7 +172,7 @@ test('ensureStatusPane: 要求Issueと異なる生存ペインは終了して対
 test('ensureStatusPane: Issue不一致ペインの終了に失敗した場合は再起動しない', () => {
   let launchCalled = false;
   const { deps } = injectedDeps({
-    loadStatusPaneFn: () => ({ paneId: 'old', issue: '470' }),
+    loadStatusPaneFn: () => paneEntry('old', { issue: '470' }),
     isPaneAliveFn: () => true,
     killPaneFn: () => ({ ok: false, status: 1, stderr: 'permission denied' }),
     launchInSplitPaneFn: () => {
@@ -184,6 +218,8 @@ test('ensureStatusPane: 未記録ペインを起動し status-pane.json の記�
   assert.equal(launchParams.cwd, 'C:\\workspace');
   assert.equal(launchParams.direction, 'right');
   assert.equal(launchParams.percent, 20);
+  assert.equal(launchParams.targetPaneId, PANE_CONTEXT.targetPaneId);
+  assert.deepEqual(launchParams.connection, PANE_CONTEXT);
   assert.deepEqual(launchParams.argv, [
     process.execPath,
     path.join('C:\\gh-maestro\\scripts', 'worker-status.js'),
@@ -197,17 +233,55 @@ test('ensureStatusPane: 未記録ペインを起動し status-pane.json の記�
   ]);
   assert.deepEqual(saved, {
     workspace: 'C:\\workspace',
-    entry: { paneId: '77', issue: '471', launchedAt: '2025-10-09T08:53:20.000Z' },
+    entry: {
+      paneId: '77',
+      ...PANE_CONTEXT,
+      issue: '471',
+      launchedAt: '2025-10-09T08:53:20.000Z',
+    },
   });
   assert.equal(calls.acquire, 1);
   assert.equal(calls.release, 1);
+});
+
+test('ensureStatusPane: 初回の接続先または基準ペインを取得できなければ起動しない', () => {
+  const { calls, deps } = injectedDeps({
+    getCurrentPaneTargetFn: () => null,
+  });
+
+  const result = ensureStatusPane(baseParams(), deps);
+
+  assert.deepEqual(result, {
+    ok: false,
+    stage: 'target',
+    error: '現在のWezTerm接続先または基準pane-idを取得できません',
+  });
+  assert.equal(calls.launch, 0);
+  assert.equal(calls.save, 0);
+  assert.equal(calls.release, 1);
+});
+
+test('ensureStatusPane: 既存記録に接続先または基準ペインが無ければ起動しない', () => {
+  const { calls, deps } = injectedDeps({
+    loadStatusPaneFn: () => ({ paneId: 'legacy-pane' }),
+  });
+
+  const result = ensureStatusPane(baseParams(), deps);
+
+  assert.deepEqual(result, {
+    ok: false,
+    stage: 'lookup',
+    error: '監視ペイン記録の接続先または基準pane-idを取得できません',
+  });
+  assert.equal(calls.launch, 0);
+  assert.equal(calls.save, 0);
 });
 
 test('ensureStatusPane: 死亡した記録済みペインは新規起動して記録を置き換える', () => {
   let launchCalls = 0;
   let savedPaneId = null;
   const { deps } = injectedDeps({
-    loadStatusPaneFn: () => ({ paneId: 'old' }),
+    loadStatusPaneFn: () => paneEntry('old'),
     isPaneAliveFn: () => false,
     launchInSplitPaneFn: () => {
       launchCalls++;
@@ -267,7 +341,7 @@ test('ensureStatusPane: pane一覧取得に失敗した場合は新規起動せ�
       }, {
         acquireLockFn: () => true,
         releaseLockFn: () => {},
-        loadStatusPaneFn: () => ({ paneId: 'existing' }),
+        loadStatusPaneFn: () => paneEntry('existing'),
         launchInSplitPaneFn: () => {
           launchCalled = true;
           return { paneId: 'duplicate' };
@@ -286,12 +360,51 @@ test('ensureStatusPane: pane一覧取得に失敗した場合は新規起動せ�
   });
 });
 
+test('ensureStatusPane: 記録された接続先の別window/tabにあるペインを再利用する', () => {
+  withTempWorkspace((workspace) => {
+    statusPaneRegistry.saveStatusPane(workspace, paneEntry('existing-pane'));
+    let listOptions = null;
+    paneLaunch._setWeztermListPanes((args, options) => {
+      listOptions = options;
+      return {
+        status: 0,
+        stdout: JSON.stringify([{
+          pane_id: 'existing-pane',
+          window_id: 17,
+          tab_id: 23,
+        }]),
+        stderr: '',
+      };
+    });
+    let launchCalled = false;
+    try {
+      const result = ensureStatusPane({
+        workspace,
+        scriptsPath: path.join(__dirname, '..', 'scripts'),
+      }, {
+        acquireLockFn: () => true,
+        releaseLockFn: () => {},
+        launchInSplitPaneFn: () => {
+          launchCalled = true;
+          return { paneId: 'duplicate' };
+        },
+      });
+
+      assert.deepEqual(result, { ok: true, paneId: 'existing-pane', reused: true });
+      assert.equal(launchCalled, false);
+      assert.equal(listOptions.env.WEZTERM_UNIX_SOCKET, PANE_CONTEXT.unixSocket);
+    } finally {
+      paneLaunch._setWeztermListPanes(null);
+    }
+  });
+});
+
 test('ensureStatusPane: primaryだけが壊れていればrecoveryを警告付きで再利用し二重起動しない', () => {
   withTempWorkspace((workspace) => {
     const primary = statusPaneRegistry.statusPanePath(workspace);
     fs.mkdirSync(path.dirname(primary), { recursive: true });
     fs.writeFileSync(primary, '{not json', 'utf8');
-    statusPaneRegistry.saveStatusPaneRecovery(workspace, { paneId: 'recovery-pane' });
+    statusPaneRegistry.saveStatusPaneRecovery(workspace, paneEntry('recovery-pane'));
     const warnings = [];
     let launchCalled = false;
 
@@ -323,6 +436,7 @@ test('ensureStatusPane: primaryの読み取り失敗でもrecoveryを警告付�
     fs.mkdirSync(primary, { recursive: true });
     statusPaneRegistry.saveStatusPaneRecovery(workspace, {
       paneId: 'recovery-readable',
+      ...PANE_CONTEXT,
       launchedAt: '2026-08-26T09:00:00.000Z',
     });
     const warnings = [];
@@ -470,6 +584,7 @@ test('ensureStatusPane: 補償終了失敗時は回復記録を残し、次回�
         throw new Error('status record unavailable');
       },
       killPaneFn: () => ({ ok: false, status: 1, stderr: 'kill failed' }),
+      getCurrentPaneTargetFn: () => ({ ...PANE_CONTEXT }),
       nowFn: () => 1760000000000,
     });
 
@@ -482,6 +597,7 @@ test('ensureStatusPane: 補償終了失敗時は回復記録を残し、次回�
     const { loadStatusPane } = require('../scripts/shared/status-pane-registry');
     assert.deepEqual(loadStatusPane(workspace), {
       paneId: 'recovery-pane',
+      ...PANE_CONTEXT,
       launchedAt: '2025-10-09T08:53:20.000Z',
     });
 
@@ -541,6 +657,7 @@ test('ensureStatusPane: 保持中ロックへの再入entrant呼び出しは二�
       return { paneId: 'only-one' };
     },
     saveStatusPaneFn: () => {},
+    getCurrentPaneTargetFn: () => ({ ...PANE_CONTEXT }),
   };
 
   const result = ensureStatusPane(baseParams(), deps);
@@ -586,6 +703,7 @@ test('ensureStatusPane: 既存startup lockのstale保持者を回収して一度
           return { paneId: 'stale-reclaimed' };
         },
         saveStatusPaneFn: () => {},
+        getCurrentPaneTargetFn: () => ({ ...PANE_CONTEXT }),
       });
 
       assert.deepEqual(result, { ok: true, paneId: 'stale-reclaimed', reused: false });
@@ -621,6 +739,7 @@ test('ensureStatusPane: 既存 process-lifecycle のstartup lockを専用キー�
         return { paneId: 'lock-test' };
       },
       saveStatusPaneFn: () => {},
+      getCurrentPaneTargetFn: () => ({ ...PANE_CONTEXT }),
     });
 
     assert.equal(result.ok, true);

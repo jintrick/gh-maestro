@@ -37,7 +37,12 @@ test('reset-session: status-pane.json が存在する場合にセッションリ
   withTempDir(workspace => {
     const { saveStatusPane, loadStatusPane } = require('../../scripts/shared/status-pane-registry');
 
-    saveStatusPane(workspace, { paneId: '9999', launchedAt: '2026-08-26T09:00:00.000Z' });
+    saveStatusPane(workspace, {
+      paneId: '9999',
+      unixSocket: 'C:\\wezterm\\test-socket',
+      targetPaneId: 'base-pane',
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    });
     assert.ok(loadStatusPane(workspace) !== null);
 
     const scriptPath = path.join(__dirname, '..', '..', 'scripts', 'reset-session.js');
@@ -47,7 +52,7 @@ test('reset-session: status-pane.json が存在する場合にセッションリ
 
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /WezTermのpane一覧取得をテスト中のため拒否しました/);
-    assert.equal(loadStatusPane(workspace), null, 'status-pane.json が削除されていること');
+    assert.equal(loadStatusPane(workspace).paneId, '9999', '一覧で確認できないpaneの状態記録を保持すること');
   });
 });
 

@@ -36,16 +36,20 @@ function defaultRemoveStatusPane(workspace) {
   return require('./status-pane-registry').removeStatusPane(workspace);
 }
 
-function defaultIsPaneAlive(paneId) {
-  return require('./pane-launch').isPaneAlive(paneId);
+function defaultIsPaneAlive(paneId, connection) {
+  return require('./pane-launch').isPaneAlive(paneId, undefined, connection);
 }
 
 function defaultLaunchInSplitPane(params) {
   return require('./pane-launch').launchInSplitPane(params);
 }
 
-function defaultKillPane(paneId) {
-  return require('./pane-launch').killPane(paneId);
+function defaultKillPane(paneId, connection) {
+  return require('./pane-launch').killPane(paneId, connection);
+}
+
+function defaultGetCurrentPaneTarget() {
+  return require('./pane-launch').getCurrentPaneTarget();
 }
 
 function defaultAcquireLock(workspace) {
@@ -97,6 +101,7 @@ function compensatePersistenceFailure({
   workspace,
   paneId,
   entry,
+  connection,
   saveError,
   killPaneFn,
   saveStatusPaneRecoveryFn,
@@ -104,7 +109,7 @@ function compensatePersistenceFailure({
   let killResult;
   let killError = null;
   try {
-    killResult = killPaneFn(paneId);
+    killResult = killPaneFn(paneId, connection);
   } catch (error) {
     killError = error;
   }
@@ -147,12 +152,13 @@ function compensatePersistenceFailure({
  * @param {Function} [deps.saveStatusPaneFn]
  * @param {Function} [deps.saveStatusPaneRecoveryFn]
  * @param {Function} [deps.removeStatusPaneFn]
- * @param {Function} [deps.isPaneAliveFn]
+ * @param {Function} [deps.isPaneAliveFn] `(paneId, connection) => boolean`
  * @param {Function} [deps.launchInSplitPaneFn]
- * @param {Function} [deps.killPaneFn]
+ * @param {Function} [deps.killPaneFn] `(paneId, connection) => result`
  * @param {Function} [deps.acquireLockFn] `(workspace) => boolean`
  * @param {Function} [deps.releaseLockFn] `(workspace) => void`
  * @param {Function} [deps.nowFn]
+ * @param {Function} [deps.getCurrentPaneTargetFn]
  * @returns {{ok:true,paneId:string,reused:boolean}|{ok:false,stage:string,error:string}}
  */
 function ensureStatusPane(params = {}, deps = {}) {
@@ -172,6 +178,7 @@ function ensureStatusPane(params = {}, deps = {}) {
   const isPaneAliveFn = deps.isPaneAliveFn || defaultIsPaneAlive;
   const launchInSplitPaneFn = deps.launchInSplitPaneFn || defaultLaunchInSplitPane;
   const killPaneFn = deps.killPaneFn || defaultKillPane;
+  const getCurrentPaneTargetFn = deps.getCurrentPaneTargetFn || defaultGetCurrentPaneTarget;
   const acquireLockFn = deps.acquireLockFn || defaultAcquireLock;
   const releaseLockFn = deps.releaseLockFn || defaultReleaseLock;
   const nowFn = deps.nowFn || Date.now;
@@ -194,10 +201,19 @@ function ensureStatusPane(params = {}, deps = {}) {
       return failure('load', error);
     }
 
+    let launchContext = existingPane;
     if (existingPane && validPaneId(existingPane.paneId)) {
+      if (!launchContext || !validPaneId(launchContext.targetPaneId) ||
+          typeof launchContext.unixSocket !== 'string' || launchContext.unixSocket === '') {
+        return failure('lookup', '監視ペイン記録の接続先または基準pane-idを取得できません');
+      }
+      launchContext = {
+        unixSocket: launchContext.unixSocket,
+        targetPaneId: launchContext.targetPaneId,
+      };
       let alive;
       try {
-        alive = Boolean(isPaneAliveFn(existingPane.paneId));
+        alive = Boolean(isPaneAliveFn(existingPane.paneId, launchContext));
       } catch (error) {
         return failure('lookup', error);
       }
@@ -219,7 +235,7 @@ function ensureStatusPane(params = {}, deps = {}) {
         // decide to replace the same pane.
         let killResult;
         try {
-          killResult = killPaneFn(existingPane.paneId);
+          killResult = killPaneFn(existingPane.paneId, launchContext);
         } catch (error) {
           return failure('close', error);
         }
@@ -231,6 +247,16 @@ function ensureStatusPane(params = {}, deps = {}) {
         } catch (error) {
           return failure('close', error);
         }
+      }
+    } else {
+      try {
+        launchContext = getCurrentPaneTargetFn();
+      } catch (error) {
+        return failure('target', error);
+      }
+      if (!launchContext || !validPaneId(launchContext.targetPaneId) ||
+          typeof launchContext.unixSocket !== 'string' || launchContext.unixSocket === '') {
+        return failure('target', '現在のWezTerm接続先または基準pane-idを取得できません');
       }
     }
 
@@ -252,6 +278,8 @@ function ensureStatusPane(params = {}, deps = {}) {
         cwd: workspace,
         direction,
         percent,
+        targetPaneId: launchContext.targetPaneId,
+        connection: launchContext,
       });
     } catch (error) {
       return failure('launch', error);
@@ -262,7 +290,11 @@ function ensureStatusPane(params = {}, deps = {}) {
     }
 
     const paneId = String(paneResult.paneId);
-    const entry = { paneId };
+    const entry = {
+      paneId,
+      unixSocket: launchContext.unixSocket,
+      targetPaneId: launchContext.targetPaneId,
+    };
     if (params.issue !== undefined && params.issue !== null && String(params.issue) !== '') {
       entry.issue = String(params.issue);
     }
@@ -274,6 +306,7 @@ function ensureStatusPane(params = {}, deps = {}) {
         workspace,
         paneId,
         entry,
+        connection: launchContext,
         saveError: error,
         killPaneFn,
         saveStatusPaneRecoveryFn,
@@ -288,6 +321,7 @@ function ensureStatusPane(params = {}, deps = {}) {
         workspace,
         paneId,
         entry,
+        connection: launchContext,
         saveError: error,
         killPaneFn,
         saveStatusPaneRecoveryFn,

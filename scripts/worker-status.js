@@ -79,6 +79,7 @@ let _injectedLaunchInSplitPane = null;
 let _injectedIsPaneAlive = null;
 let _injectedKillPane = null;
 let _injectedSaveStatusPane = null;
+let _injectedGetCurrentPaneTarget = null;
 let _injectedAcquireStatusPaneLock = null;
 let _injectedReleaseStatusPaneLock = null;
 let _injectedReadCycleEvents = null;
@@ -131,19 +132,32 @@ function _launchInSplitPane(params) {
   return fn(params);
 }
 
-function _isPaneAlive(paneId) {
-  const fn = _injectedIsPaneAlive ?? require('./shared/pane-launch').isPaneAlive;
-  return fn(paneId);
+function _isPaneAlive(paneId, connection) {
+  if (_injectedIsPaneAlive) return _injectedIsPaneAlive(paneId, connection);
+  return require('./shared/pane-launch').isPaneAlive(paneId, undefined, connection);
 }
 
-function _killPane(paneId) {
+function _killPane(paneId, connection) {
   const fn = _injectedKillPane ?? require('./shared/pane-launch').killPane;
-  return fn(paneId);
+  return fn(paneId, connection);
+}
+
+function _getCurrentPaneTarget() {
+  const fn = _injectedGetCurrentPaneTarget ?? require('./shared/pane-launch').getCurrentPaneTarget;
+  return fn();
 }
 
 function _saveStatusPane(workspace, entry) {
   const fn = _injectedSaveStatusPane ?? require('./shared/status-pane-registry').saveStatusPane;
   return fn(workspace, entry);
+}
+
+function _statusPaneConnection(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return {
+    unixSocket: entry.unixSocket,
+    targetPaneId: entry.targetPaneId,
+  };
 }
 
 function _acquireStatusPaneLock(workspace) {
@@ -169,6 +183,7 @@ function _ensureStatusPane(params) {
     saveStatusPaneFn: _saveStatusPane,
     launchInSplitPaneFn: _launchInSplitPane,
     killPaneFn: _killPane,
+    getCurrentPaneTargetFn: _getCurrentPaneTarget,
     acquireLockFn: _acquireStatusPaneLock,
     releaseLockFn: _releaseStatusPaneLock,
     nowFn: _now,
@@ -1281,17 +1296,22 @@ function main(argv = process.argv.slice(2)) {
     const paneId = existingPane.paneId;
     let paneAlive;
     try {
-      paneAlive = _isPaneAlive(paneId);
+      paneAlive = _isPaneAlive(paneId, _statusPaneConnection(existingPane));
     } catch (error) {
       writeErr(`worker-status: close-pane の外部コマンドの照会に失敗しました: ${error.message}`);
       return { code: 1, lines: out, errLines: err };
     }
-    if (paneAlive) {
-      const killResult = _killPane(paneId);
-      if (!killResult.ok) {
-        writeErr(`worker-status: 監視ペイン ${paneId} の終了に失敗しました: ${killResult.stderr}`);
-        return { code: 1, lines: out, errLines: err };
-      }
+    if (!paneAlive) {
+      writeErr(
+        `worker-status: 監視ペイン ${paneId} が記録された接続先の一覧にありません。` +
+        '状態記録を保持したまま終了を中止します',
+      );
+      return { code: 1, lines: out, errLines: err };
+    }
+    const killResult = _killPane(paneId, _statusPaneConnection(existingPane));
+    if (!killResult.ok) {
+      writeErr(`worker-status: 監視ペイン ${paneId} の終了に失敗しました: ${killResult.stderr}`);
+      return { code: 1, lines: out, errLines: err };
     }
 
     removeStatusPane(workspace);
@@ -1381,6 +1401,7 @@ module.exports = {
   _setIsPaneAlive: (fn) => { _injectedIsPaneAlive = fn; },
   _setKillPane: (fn) => { _injectedKillPane = fn; },
   _setSaveStatusPane: (fn) => { _injectedSaveStatusPane = fn; },
+  _setGetCurrentPaneTarget: (fn) => { _injectedGetCurrentPaneTarget = fn; },
   _setAcquireStatusPaneLock: (fn) => { _injectedAcquireStatusPaneLock = fn; },
   _setReleaseStatusPaneLock: (fn) => { _injectedReleaseStatusPaneLock = fn; },
   _setReadCycleEvents: (fn) => { _injectedReadCycleEvents = fn; },

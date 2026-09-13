@@ -449,11 +449,26 @@ if (require.main === module) {
     results.errors.push(`status-pane read: ${e.message}`);
   }
   if (statusPane && statusPane.paneId) {
-    if (alivePanes !== null && !alivePanes.has(statusPane.paneId)) {
-      log(`監視pane ${statusPane.paneId} は既に存在しません。スキップ。`);
-      removeStatusPane(workspace);
+    let statusAlivePanes = null;
+    try {
+      // status-pane は保存時の mux/server へ照会する。別接続の一覧を使うと
+      // 同じ数値paneIdを無関係なペインとしてkillし得るため、現在接続の
+      // alivePanes は流用しない。
+      statusAlivePanes = getAlivePaneIds(warn, statusPane);
+    } catch (error) {
+      if (error?.code === REAL_SPAWN_DISABLED_ERROR_CODE && process.env.NODE_TEST_CONTEXT) {
+        warn(`WezTermのpane一覧取得をテスト中のため拒否しました: ${error.message}`);
+        statusAlivePanes = new Set();
+      } else {
+        warn(`監視pane ${statusPane.paneId} の接続先照会に失敗しました: ${error.message}`);
+      }
+    }
+    if (statusAlivePanes === null) {
+      warn(`監視pane ${statusPane.paneId} の生存を確認できないため、状態記録を保持します。`);
+    } else if (!statusAlivePanes.has(statusPane.paneId)) {
+      log(`監視pane ${statusPane.paneId} は記録された接続先の一覧にありません。状態記録を保持します。`);
     } else {
-      const r = killPane(statusPane.paneId);
+      const r = killPane(statusPane.paneId, statusPane);
       if (r.ok) {
         log(`監視pane ${statusPane.paneId} を終了しました。`);
         results.killed.push(`status-pane-${statusPane.paneId}`);

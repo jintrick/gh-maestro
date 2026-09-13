@@ -32,6 +32,10 @@ const {
   msgPollRole,
   releaseResidentLeaseForProcess,
 } = require('./worker-lease');
+const {
+  WEZTERM_PANE_ENV,
+  WEZTERM_UNIX_SOCKET_ENV,
+} = require('./pane-launch');
 
 const RESIDENT_SPECS = Object.freeze([
   Object.freeze({ script: 'worker-supervisor.js', workerName: null, monitorRequired: false }),
@@ -455,12 +459,34 @@ function monitorCommandForEntry(scriptsPath, spec, entry, hooks = createResident
   return formatCommand(path.join(scriptsPath, spec.script), built.args);
 }
 
-function defaultRunStatusPaneCommand({ scriptsPath, subcommand, workspace, issue, spawnSyncFn = spawnSync }) {
+function defaultRunStatusPaneCommand({
+  scriptsPath,
+  subcommand,
+  workspace,
+  issue,
+  statusPaneContext = null,
+  spawnSyncFn = spawnSync,
+}) {
   const args = [path.join(scriptsPath, 'worker-status.js'), subcommand, '--workspace', workspace];
   if (subcommand === 'pane' && issue != null) args.push('--issue', String(issue));
-  const result = spawnSyncFn(process.execPath, args, {
+  const options = {
     cwd: workspace,
     encoding: 'utf8',
+  };
+  if (statusPaneContext !== null && statusPaneContext !== undefined) {
+    if (typeof statusPaneContext.unixSocket !== 'string' || statusPaneContext.unixSocket === ''
+      || statusPaneContext.targetPaneId === null || statusPaneContext.targetPaneId === undefined
+      || String(statusPaneContext.targetPaneId) === '') {
+      throw new Error('status-pane registryの接続先または基準pane-idを引き継げません');
+    }
+    options.env = {
+      ...process.env,
+      [WEZTERM_UNIX_SOCKET_ENV]: statusPaneContext.unixSocket,
+      [WEZTERM_PANE_ENV]: String(statusPaneContext.targetPaneId),
+    };
+  }
+  const result = spawnSyncFn(process.execPath, args, {
+    ...options,
   });
   return {
     ok: result.status === 0,
@@ -503,7 +529,12 @@ function restartStatusPane(workspace, scriptsPath, opts = {}) {
   const oldPaneId = statusPaneId(existing);
   let closed;
   try {
-    closed = runCommand({ scriptsPath, subcommand: 'close-pane', workspace });
+    closed = runCommand({
+      scriptsPath,
+      subcommand: 'close-pane',
+      workspace,
+      statusPaneContext: existing,
+    });
   } catch (error) {
     return {
       status: 'unavailable',
@@ -526,6 +557,7 @@ function restartStatusPane(workspace, scriptsPath, opts = {}) {
       subcommand: 'pane',
       workspace,
       issue: existing.issue,
+      statusPaneContext: existing,
     });
   } catch (error) {
     return {

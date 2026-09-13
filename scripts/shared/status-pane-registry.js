@@ -63,9 +63,17 @@ function readStatusPaneEntry(filePath) {
   if (parsed.paneId == null || parsed.paneId === '') {
     throw readError('型不正（paneId がありません）', filePath);
   }
+  if (typeof parsed.unixSocket !== 'string' || parsed.unixSocket === '') {
+    throw readError('型不正（unixSocket がありません）', filePath);
+  }
+  if (parsed.targetPaneId == null || parsed.targetPaneId === '') {
+    throw readError('型不正（targetPaneId がありません）', filePath);
+  }
 
   const entry = {
     paneId: String(parsed.paneId),
+    unixSocket: parsed.unixSocket,
+    targetPaneId: String(parsed.targetPaneId),
     launchedAt: typeof parsed.launchedAt === 'string' ? parsed.launchedAt : '',
   };
   if (/^[1-9]\d*$/.test(String(parsed.issue))) entry.issue = String(parsed.issue);
@@ -107,7 +115,7 @@ function removeFile(filePath) {
  *
  * @param {string} workspace
  * @param {(message: string) => void} [warn]
- * @returns {{paneId: string, launchedAt: string}|null}
+ * @returns {{paneId: string, unixSocket: string, targetPaneId: string, launchedAt: string}|null}
  * @throws {Error} 有効な記録を得られない、またはパス解決失敗
  */
 function loadStatusPane(workspace, warn = (message) => process.stderr.write(`Warning: ${message}\n`)) {
@@ -141,22 +149,39 @@ function loadStatusPane(workspace, warn = (message) => process.stderr.write(`War
   return null;
 }
 
+function buildStatusPaneRecord(entry) {
+  if (!entry || entry.paneId == null || entry.paneId === '') {
+    throw new Error('status-pane レジストリへ保存する paneId がありません');
+  }
+  if (typeof entry.unixSocket !== 'string' || entry.unixSocket === '') {
+    throw new Error('status-pane レジストリへ保存する unixSocket がありません');
+  }
+  if (entry.targetPaneId == null || entry.targetPaneId === '') {
+    throw new Error('status-pane レジストリへ保存する targetPaneId がありません');
+  }
+
+  const record = {
+    paneId: String(entry.paneId),
+    unixSocket: entry.unixSocket,
+    targetPaneId: String(entry.targetPaneId),
+    launchedAt: entry.launchedAt || new Date().toISOString(),
+  };
+  if (/^[1-9]\d*$/.test(String(entry.issue))) record.issue = String(entry.issue);
+  return record;
+}
+
 /**
  * status-pane.json に監視ペイン情報をアトミックに保存する。
  *
  * @param {string} workspace
- * @param {{paneId: string|number, launchedAt?: string}} entry
+ * @param {{paneId: string|number, unixSocket: string, targetPaneId: string|number, launchedAt?: string}} entry
  */
 function saveStatusPane(workspace, entry) {
   storageLayout.ensureWorkspaceRuntimeDir(workspace, {
     register: !storageLayout.isNodeTestContext(),
   });
   const p = statusPanePath(workspace);
-  const record = {
-    paneId: String(entry.paneId),
-    launchedAt: entry.launchedAt || new Date().toISOString(),
-  };
-  if (/^[1-9]\d*$/.test(String(entry.issue))) record.issue = String(entry.issue);
+  const record = buildStatusPaneRecord(entry);
   atomicWriteJson(p, record);
   // 通常記録に成功したら、不要になった回復記録を掃除する。掃除だけの失敗は
   // 次回 loadStatusPane の時刻比較で安全に扱えるため、主記録の成功を覆さない。
@@ -167,18 +192,14 @@ function saveStatusPane(workspace, entry) {
  * 通常の status-pane.json 保存と補償終了がともに失敗したペインを記録する。
  *
  * @param {string} workspace
- * @param {{paneId: string|number, launchedAt?: string}} entry
+ * @param {{paneId: string|number, unixSocket: string, targetPaneId: string|number, launchedAt?: string}} entry
  */
 function saveStatusPaneRecovery(workspace, entry) {
   storageLayout.ensureWorkspaceRuntimeDir(workspace, {
     register: !storageLayout.isNodeTestContext(),
   });
   const p = statusPaneRecoveryPath(workspace);
-  const record = {
-    paneId: String(entry.paneId),
-    launchedAt: entry.launchedAt || new Date().toISOString(),
-  };
-  if (/^[1-9]\d*$/.test(String(entry.issue))) record.issue = String(entry.issue);
+  const record = buildStatusPaneRecord(entry);
   atomicWriteJson(p, record);
 }
 
