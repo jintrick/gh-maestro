@@ -17,6 +17,7 @@ const { isWorkerAlive } = require('./worker-liveness');
 const workerLease = require('./worker-lease');
 const { deriveRoleFromSkill } = require('./worker-factory');
 const storageLayout = require('./storage-layout');
+const statusPaneLegacy = require('./status-pane-legacy');
 
 const DECLARATION = require('../legacy-catalog.json');
 const DECLARATION_SCHEMA = require('../legacy-catalog-schema.json');
@@ -566,6 +567,17 @@ function detectLegacyQueue(context, parameters) {
   return present({ queue: true, poller: poller.status });
 }
 
+function detectStatusPaneLegacyRecord(context) {
+  const target = statusPaneLegacy.statusPaneRecordPath(context.workspace, context.runtimeRoot);
+  const state = jsonState(context, target);
+  if (state.status !== 'present') return state;
+
+  const classification = statusPaneLegacy.classifyStatusPaneRecord(state.value);
+  if (classification.status === 'legacy') return present(target);
+  if (classification.status === 'current') return absent('現行形式のstatus-pane記録です');
+  return unknown(target + ' の形式を判定できません: ' + classification.reason);
+}
+
 function runtimeWorkspacePath(context, ...parts) {
   if (typeof context.runtimeRoot !== 'string' || !context.workspace) return null;
   return path.join(context.runtimeRoot, 'workspaces', storageLayout.workspaceKey(context.workspace), ...parts);
@@ -690,6 +702,7 @@ const DETECTOR_TYPES = Object.freeze({
   'worker-notifier': detectDetachedNotifier,
   'worker-field': detectWorkerField,
   'workspace-queue': detectLegacyQueue,
+  'status-pane-legacy-record': detectStatusPaneLegacyRecord,
   'legacy-supervisor': detectLegacySupervisorName,
   'resident-lease': detectResidentLease,
   'roleless-worker': detectRolelessWorker,

@@ -9,6 +9,7 @@ const { spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'check-legacy.js');
 const checkLegacy = require('../scripts/check-legacy');
+const { statusPaneRecordPath } = require('../scripts/shared/status-pane-legacy');
 let cliRuntimeRoot;
 
 before(() => {
@@ -41,11 +42,32 @@ test('check-legacy CLI reports findings with exit code 0', () => {
   try {
     fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(path.join(workspace, '.gitignore'), '.gh-maestro/\n', 'utf8');
+    const statusPane = statusPaneRecordPath(workspace, cliRuntimeRoot);
+    fs.mkdirSync(path.dirname(statusPane), { recursive: true });
+    fs.writeFileSync(statusPane, JSON.stringify({ paneId: 5 }), 'utf8');
     const result = runCli('--workspace', workspace);
     assert.equal(result.status, 0, result.stderr);
     const parsed = JSON.parse(result.stdout);
     const gitignore = parsed.items.find((entry) => entry.id === 'setup-legacy-gitignore');
     assert.equal(gitignore.status, 'present');
+    const legacyStatusPane = parsed.items.find((entry) => entry.id === 'status-pane-legacy-record');
+    assert.equal(legacyStatusPane.status, 'present');
+
+    fs.writeFileSync(statusPane, JSON.stringify({
+      paneId: '5',
+      unixSocket: 'C:\\\\wezterm\\\\test-socket',
+      targetPaneId: '1',
+    }), 'utf8');
+    const current = JSON.parse(runCli('--workspace', workspace).stdout);
+    assert.equal(current.items.find((entry) => entry.id === 'status-pane-legacy-record').status, 'absent');
+
+    fs.writeFileSync(statusPane, '{not-json', 'utf8');
+    const corrupt = JSON.parse(runCli('--workspace', workspace).stdout);
+    assert.notEqual(corrupt.items.find((entry) => entry.id === 'status-pane-legacy-record').status, 'present');
+
+    fs.rmSync(statusPane);
+    const missing = JSON.parse(runCli('--workspace', workspace).stdout);
+    assert.equal(missing.items.find((entry) => entry.id === 'status-pane-legacy-record').status, 'absent');
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }

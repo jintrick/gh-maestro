@@ -14,9 +14,10 @@ const {
   hasLegacyFindings,
 } = require('../scripts/shared/legacy-catalog');
 const { readFileAtRef } = require('../scripts/shared/git-ref');
+const { statusPaneRecordPath } = require('../scripts/shared/status-pane-legacy');
 
 // 台帳の自己申告ではなく、Issue #532で確定した対象集合から独立に置く。
-const EXPECTED_LEGACY_ITEM_COUNT = 19;
+const EXPECTED_LEGACY_ITEM_COUNT = 20;
 
 function createWorkspace() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-legacy-catalog-'));
@@ -60,7 +61,7 @@ function item(result, id) {
   return found;
 }
 
-test('catalog declares the independent 19-item inventory and all detectors are wired', () => {
+test('catalog declares the independent 20-item inventory and all detectors are wired', () => {
   assert.equal(CATALOG.length, EXPECTED_LEGACY_ITEM_COUNT);
   assert.equal(DECLARATION.expectedItemCount, EXPECTED_LEGACY_ITEM_COUNT);
   assert.equal(CATALOG.every((entry) => typeof DETECTORS[entry.id] === 'function'), true);
@@ -240,6 +241,53 @@ test('readState statuses map legacy to present, missing/current to absent, and c
     fs.rmSync(path.join(stateDir, 'corrupt.json'));
     const current = inspect(fixture);
     assert.equal(item(current, 'msg-poll-v1-state').status, 'absent');
+  } finally {
+    removeWorkspace(fixture);
+  }
+});
+
+test('status-pane旧形式だけをpresentとし、現行形式・破損・不在を区別する', () => {
+  const fixture = createWorkspace();
+  const target = statusPaneRecordPath(fixture.root, fixture.runtimeRoot);
+  try {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+
+    const legacy = JSON.stringify({
+      paneId: 5,
+      issue: '551',
+      launchedAt: '2026-08-26T09:00:00.000Z',
+    });
+    fs.writeFileSync(target, legacy, 'utf8');
+    const legacyResult = inspect(fixture);
+    assert.equal(item(legacyResult, 'status-pane-legacy-record').status, 'present');
+    assert.equal(fs.readFileSync(target, 'utf8'), legacy);
+
+    const current = JSON.stringify({
+      paneId: '5',
+      unixSocket: 'C:\\\\wezterm\\\\test-socket',
+      targetPaneId: '1',
+    });
+    fs.writeFileSync(target, current, 'utf8');
+    const currentResult = inspect(fixture);
+    assert.equal(item(currentResult, 'status-pane-legacy-record').status, 'absent');
+    assert.equal(fs.readFileSync(target, 'utf8'), current);
+
+    fs.writeFileSync(target, '{not-json', 'utf8');
+    const corruptResult = inspect(fixture);
+    assert.equal(item(corruptResult, 'status-pane-legacy-record').status, 'unknown');
+    assert.equal(fs.readFileSync(target, 'utf8'), '{not-json');
+
+    fs.writeFileSync(target, JSON.stringify({
+      paneId: 'invalid',
+      unixSocket: 123,
+      targetPaneId: '1',
+    }), 'utf8');
+    const invalidValueResult = inspect(fixture);
+    assert.equal(item(invalidValueResult, 'status-pane-legacy-record').status, 'unknown');
+
+    fs.rmSync(target);
+    const missingResult = inspect(fixture);
+    assert.equal(item(missingResult, 'status-pane-legacy-record').status, 'absent');
   } finally {
     removeWorkspace(fixture);
   }
