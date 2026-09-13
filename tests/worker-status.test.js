@@ -21,6 +21,11 @@ const { cleanSpawnEnv } = require('./_spawn-env');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-status.js');
 
+const STATUS_PANE_CONTEXT = Object.freeze({
+  unixSocket: 'C:\\wezterm\\test-socket',
+  targetPaneId: 'base-pane',
+});
+
 // status/list の実CLI境界は維持する。各子プロセスの初期化で発生する
 // process-lifecycle のWindows WMI照会だけを固定観測へ差し替え、PIDだけの
 // 表示ケースを不要なPowerShell待ちから分離する。PID再利用の同一性は
@@ -65,6 +70,7 @@ beforeEach(() => {
   // false を注入して確認する。
   workerStatus._setAcquireStatusPaneLock(() => true);
   workerStatus._setReleaseStatusPaneLock(() => {});
+  workerStatus._setGetCurrentPaneTarget(() => ({ ...STATUS_PANE_CONTEXT }));
 });
 
 function createWorkspace(prefix = 'gh-maestro-worker-status-') {
@@ -1226,7 +1232,11 @@ test('main: pane は初回起動時に status-pane.json を保存し、2回目�
   });
 
   const aliveSet = new Set(['201']);
-  workerStatus._setIsPaneAlive((id) => aliveSet.has(String(id)));
+  let aliveConnection = null;
+  workerStatus._setIsPaneAlive((id, connection) => {
+    aliveConnection = connection;
+    return aliveSet.has(String(id));
+  });
 
   try {
     // 1回目の実行: split-pane が呼ばれ、status-pane.json が保存される
@@ -1237,7 +1247,11 @@ test('main: pane は初回起動時に status-pane.json を保存し、2回目�
     assert.equal(launchCallCount, 1);
     assert.match(result1.lines[0], /STATUS_PANE_LAUNCHED: pane=201/);
     const registry = require('../scripts/shared/status-pane-registry').loadStatusPane(workspace);
-    assert.deepEqual(registry, { paneId: '201', launchedAt: registry.launchedAt });
+    assert.deepEqual(registry, {
+      paneId: '201',
+      ...STATUS_PANE_CONTEXT,
+      launchedAt: registry.launchedAt,
+    });
     assert.equal(Object.hasOwn(JSON.parse(
       fs.readFileSync(require('../scripts/shared/status-pane-registry').statusPanePath(workspace), 'utf8'),
     ), 'pid'), false);
@@ -1248,6 +1262,9 @@ test('main: pane は初回起動時に status-pane.json を保存し、2回目�
     assert.equal(result2.paneId, '201');
     assert.equal(result2.reused, true);
     assert.equal(launchCallCount, 1); // 呼ばれていないことを検証
+    assert.deepEqual(aliveConnection, {
+      ...STATUS_PANE_CONTEXT,
+    });
     assert.match(result2.lines[0], /STATUS_PANE_LAUNCHED: pane=201/);
   } finally {
     workerStatus._setLaunchInSplitPane(null);
@@ -1349,7 +1366,12 @@ test('main: close-pane は異なるIssueの監視ペインを終了せず記録�
     assert.match(result.lines[0], /STATUS_PANE_NOT_FOUND/);
     assert.equal(killed, false);
     const registry = require('../scripts/shared/status-pane-registry').loadStatusPane(workspace);
-    assert.deepEqual(registry, { paneId: '451', issue: '471', launchedAt: registry.launchedAt });
+    assert.deepEqual(registry, {
+      paneId: '451',
+      ...STATUS_PANE_CONTEXT,
+      issue: '471',
+      launchedAt: registry.launchedAt,
+    });
   } finally {
     workerStatus._setLaunchInSplitPane(null);
     workerStatus._setIsPaneAlive(null);
@@ -1380,7 +1402,7 @@ test('main: close-pane で kill に失敗した場合は code 1 を返す（フ�
 test('main: close-pane のWezTerm pane一覧照会失敗時はregistryを削除せず閉鎖成功を報告しない', () => {
   const workspace = createWorkspace();
   const statusRegistry = require('../scripts/shared/status-pane-registry');
-  statusRegistry.saveStatusPane(workspace, { paneId: '551', issue: 471 });
+  statusRegistry.saveStatusPane(workspace, { paneId: '551', ...STATUS_PANE_CONTEXT, issue: 471 });
   paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'wezterm unavailable' }));
   let killCalled = false;
   workerStatus._setIsPaneAlive(null);
@@ -1397,8 +1419,61 @@ test('main: close-pane のWezTerm pane一覧照会失敗時はregistryを削除�
     assert.match(result.errLines.join('\n'), /外部コマンドの照会失敗/);
     const remaining = statusRegistry.loadStatusPane(workspace);
     assert.equal(remaining.paneId, '551');
+    assert.equal(remaining.unixSocket, STATUS_PANE_CONTEXT.unixSocket);
+    assert.equal(remaining.targetPaneId, STATUS_PANE_CONTEXT.targetPaneId);
     assert.equal(remaining.issue, '471');
     assert.equal(typeof remaining.launchedAt, 'string');
+  } finally {
+    paneLaunch._setWeztermListPanes(null);
+    workerStatus._setKillPane(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('main: pane は初回のWezTerm接続先または基準ペインを取得できなければ起動しない', () => {
+  const workspace = createWorkspace();
+  let launchCalled = false;
+  workerStatus._setGetCurrentPaneTarget(() => null);
+  workerStatus._setLaunchInSplitPane(() => {
+    launchCalled = true;
+    return { paneId: 'never' };
+  });
+
+  try {
+    const result = runMain(['pane', '--workspace', workspace]);
+    assert.equal(result.code, 1);
+    assert.equal(launchCalled, false);
+    assert.match(result.errLines.join('\n'), /現在のWezTerm接続先または基準pane-idを取得できません/);
+  } finally {
+    workerStatus._setGetCurrentPaneTarget(null);
+    workerStatus._setLaunchInSplitPane(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('main: close-pane は記録接続先の一覧に無いpaneを削除・killせず停止する', () => {
+  const workspace = createWorkspace();
+  const statusRegistry = require('../scripts/shared/status-pane-registry');
+  statusRegistry.saveStatusPane(workspace, { paneId: '561', ...STATUS_PANE_CONTEXT, issue: 471 });
+  paneLaunch._setWeztermListPanes(() => ({
+    status: 0,
+    stdout: JSON.stringify([{ pane_id: 'other-pane' }]),
+    stderr: '',
+  }));
+  let killCalled = false;
+  workerStatus._setIsPaneAlive(null);
+  workerStatus._setKillPane(() => {
+    killCalled = true;
+    return { ok: true, status: 0, stderr: '' };
+  });
+
+  try {
+    const result = runMain(['close-pane', '--workspace', workspace, '--issue', '471']);
+    assert.equal(result.code, 1);
+    assert.equal(killCalled, false);
+    assert.equal(result.lines.some((line) => line.includes('STATUS_PANE_CLOSED')), false);
+    assert.match(result.errLines.join('\n'), /一覧にありません/);
+    assert.equal(statusRegistry.loadStatusPane(workspace).paneId, '561');
   } finally {
     paneLaunch._setWeztermListPanes(null);
     workerStatus._setKillPane(null);

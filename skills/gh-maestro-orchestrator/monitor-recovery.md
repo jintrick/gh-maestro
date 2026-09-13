@@ -12,7 +12,7 @@ workspaceごとに `workspace="<absolute-path>"` の見出しが出力され、�
 
 installまたはrestart CLIが非ゼロ終了した場合、registryの読み取り・停止・起動確認のいずれかが未確認である可能性がある。結果を人間に報告して判断を仰ぎ、セッション再起動依頼で置き換えない。
 
-なお、`node scripts/install.js` は監視ペイン（`status-pane`）の停止・再生成を行わない（別ウィンドウや他ワークスペースの監視ペインを奪う事故を防ぐため）。install 後に監視ペインを現行コードへ張り直す場合は、**対象のワークスペースを開いている端末ウィンドウから**人間が次のコマンドを実行する:
+なお、`node scripts/install.js` は監視ペイン（`status-pane`）の停止・再生成を行わない（別ワークスペースの監視ペインを奪う事故を防ぐため）。install 後に監視ペインを現行コードへ張り直す場合は、人間が次のコマンドを実行する。既存registryに保存されたWezTerm接続先と分割元ペインを使うため、現在アクティブなウィンドウに誤って作成されることはない。記録接続先を照会できない、または記録ペインが一覧に無い場合は、registryを保持したまま停止する:
 
 ```sh
 node "{{SCRIPTS_PATH}}/restart-residents.js" --workspace $WORKSPACE --restart-status-pane

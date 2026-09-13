@@ -184,7 +184,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<role>-<desc>/` に自動作成さ�
 - **msg-read.js** — コメントIDまたは計画から本文を読み出す: `msg-read.js <commentId> --workspace $WORKSPACE` または `msg-read.js --plan --issue <N> --workspace $WORKSPACE`
 - **stop-worker.js** — ワーカーのプロセスツリーのみを同一性確認の上で停止する（worktree・ブランチ・workers.json エントリは維持する）。対象は workerName の位置引数または〈`--issue` + `--skill`〉。報告投稿後にプロセスが終了せず残留（居座り）しているワーカーやハングしたワーカーを停止させる正規手段（再開可能な状態を保つ）。worktree ごと破棄する `remove-worker.js` と使い分ける
 - **remove-worker.js** — 個別ワーカーのプロセスを同一性確認の上でkillし、worktree とブランチを削除し、workers.json からエントリを除去する（完全破棄）。対象は workerName の位置引数または〈`--issue` + `--skill`〉。作業ツリーごと消えるため再開はできない。反省会後の一括後始末には代わりに finalize-issue.js を使う
-- **worker-status.js** — ワーカーの稼働状況・連続稼働時間を確認する。監視ペインは `spawn-worker.js` のワーカー登録後と `msg-send.js` のコメント投稿成功後に自動的に存在保証されるため、orchestratorがセッション開始・ワーカー起動・メッセージ送信のたびに手動で開く必要はない。手動で表示を開始・再作成するときだけ `worker-status.js pane --workspace $WORKSPACE` を使う。ワンショット確認は `worker-status.js list --workspace $WORKSPACE`（`--json` でJSON出力）、単一ワーカーの生死確認は `worker-status.js status --workspace $WORKSPACE --worker-name <name>`。`list` と `status` はペイン起動の代替経路・起動トリガーではない。監視ペインの終了は `worker-status.js close-pane --workspace $WORKSPACE`（reset-session.js でも自動終了される）
+- **worker-status.js** — ワーカーの稼働状況・連続稼働時間を確認する。監視ペインは `spawn-worker.js` のワーカー登録後と `msg-send.js` のコメント投稿成功後に自動的に存在保証されるため、orchestratorがセッション開始・ワーカー起動・メッセージ送信のたびに手動で開く必要はない。監視ペインは作成時のWezTerm接続先と分割元ペインを記録し、別ウィンドウからの再利用・再作成でもその対象を使う。記録された接続先を照会できない、または一覧に記録ペインが無い場合は、状態を消去せず処理を停止する。手動で表示を開始・再作成するときだけ `worker-status.js pane --workspace $WORKSPACE` を使う。ワンショット確認は `worker-status.js list --workspace $WORKSPACE`（`--json` でJSON出力）、単一ワーカーの生死確認は `worker-status.js status --workspace $WORKSPACE --worker-name <name>`。`list` と `status` はペイン起動の代替経路・起動トリガーではない。監視ペインの終了は `worker-status.js close-pane --workspace $WORKSPACE`（reset-session.js でも自動終了される）
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「13. 反省会と後始末」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する
 - **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「ワーカーからの報告の受信（msg-poll）」参照）
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「8. PR検出」参照）
@@ -270,6 +270,8 @@ msg-poll が `未初期化です。reset-session.js で初期化してくださ�
 #### ワーカーの連続稼働時間と暴走監視（worker-status）
 
 ヘッドレスで稼働するワーカーの暴走ループ・ハングを早期発見するため、WezTerm専用ペインで稼働状況を自動更新する。`spawn-worker.js` と `msg-send.js` が共有保証処理を呼び出すため、orchestratorが手動で監視ペインを開く必要はない。`list` と `status` は必要時に実行するワンショット照会であり、ペイン起動の代替経路・起動トリガーではない。
+
+監視ペインは作成時にWezTermの接続先と分割元ペインを状態記録へ保存し、後続の生存確認・終了・再作成はその接続先と明示的な分割元を使う。記録接続先を照会できない、または記録ペインがその一覧に無い場合は、別の現在ウィンドウへ作り直さず状態記録を保持して停止する。
 
 - **いつ実行するか**:
   - `spawn-worker.js` はワーカー登録後、`msg-send.js` はコメント投稿成功後に監視ペインの存在保証を自動的に試みる。WezTermが利用できない場合もワーカー起動・メッセージ送信の成否には影響しない。orchestratorはセッション開始・ワーカー起動・メッセージ送信のたびに `node "{{SCRIPTS_PATH}}/worker-status.js" pane --workspace $WORKSPACE` を手動実行しない。

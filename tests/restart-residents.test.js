@@ -32,6 +32,11 @@ function makeWorkspace() {
   return workspace;
 }
 
+const STATUS_PANE_CONTEXT = Object.freeze({
+  unixSocket: 'C:\\wezterm\\test-socket',
+  targetPaneId: 'base-pane',
+});
+
 function makeHarness(workspace, options = {}) {
   const oldEntries = options.entries || [];
   const entries = oldEntries.map((entry) => ({ ...entry, args: entry.args ? [...entry.args] : entry.args }));
@@ -607,7 +612,7 @@ test('formatResidentResult: statusと検証結果を機械可読な1行へ整形
 test('restartStatusPane: 既存ペインをclose-pane後に同じIssueでpane起動しpaneId変更を確認する', () => {
   const workspace = makeWorkspace();
   try {
-    let registry = { paneId: 'old-pane', issue: '471' };
+    let registry = { paneId: 'old-pane', ...STATUS_PANE_CONTEXT, issue: '471' };
     const calls = [];
     const result = restartStatusPane(workspace, path.join(workspace, 'scripts'), {
       loadStatusPaneFn: () => registry,
@@ -617,7 +622,7 @@ test('restartStatusPane: 既存ペインをclose-pane後に同じIssueでpane起
         if (subcommand === 'close-pane') registry = null;
         if (subcommand === 'pane') {
           const issue = args[args.indexOf('--issue') + 1];
-          registry = { paneId: 'new-pane', issue };
+          registry = { paneId: 'new-pane', ...STATUS_PANE_CONTEXT, issue };
         }
         return { ok: true, status: 0, stdout: '', stderr: '' };
       },
@@ -625,18 +630,22 @@ test('restartStatusPane: 既存ペインをclose-pane後に同じIssueでpane起
       statusPaneWaitMs: 0,
     });
 
-    assert.deepEqual(calls, [
+    assert.deepEqual(calls.map(({ command, args }) => ({ command, args })), [
       {
         command: process.execPath,
         args: [path.join(workspace, 'scripts', 'worker-status.js'), 'close-pane', '--workspace', workspace],
-        options: { cwd: workspace, encoding: 'utf8' },
       },
       {
         command: process.execPath,
         args: [path.join(workspace, 'scripts', 'worker-status.js'), 'pane', '--workspace', workspace, '--issue', '471'],
-        options: { cwd: workspace, encoding: 'utf8' },
       },
     ]);
+    for (const call of calls) {
+      assert.equal(call.options.cwd, workspace);
+      assert.equal(call.options.encoding, 'utf8');
+      assert.equal(call.options.env.WEZTERM_UNIX_SOCKET, STATUS_PANE_CONTEXT.unixSocket);
+      assert.equal(call.options.env.WEZTERM_PANE, STATUS_PANE_CONTEXT.targetPaneId);
+    }
     assert.deepEqual(result, {
       status: 'replaced',
       oldPaneIds: ['old-pane'],
@@ -653,7 +662,7 @@ test('restartStatusPane: 旧paneIdのままの場合はfailedになりrestartRes
   const workspace = makeWorkspace();
   try {
     const statusPane = restartStatusPane(workspace, workspace, {
-      loadStatusPaneFn: () => ({ paneId: 'old-pane', issue: '471' }),
+      loadStatusPaneFn: () => ({ paneId: 'old-pane', ...STATUS_PANE_CONTEXT, issue: '471' }),
       runStatusPaneCommandFn: ({ subcommand }) => {
         if (subcommand === 'pane') return { ok: true, status: 0, stdout: '', stderr: '' };
         return { ok: true, status: 0, stdout: '', stderr: '' };
@@ -673,7 +682,7 @@ test('restartStatusPane: 旧paneIdのままの場合はfailedになりrestartRes
       scriptsPath: workspace,
       preCapturedEntries: [],
       restartStatusPane: true,
-      loadStatusPaneFn: () => ({ paneId: 'old-pane', issue: '471' }),
+      loadStatusPaneFn: () => ({ paneId: 'old-pane', ...STATUS_PANE_CONTEXT, issue: '471' }),
       runStatusPaneCommandFn: () => ({ ok: true, status: 0, stdout: '', stderr: '' }),
       statusPaneConfirmAttempts: 1,
       statusPaneWaitMs: 0,
@@ -715,7 +724,7 @@ test('restartStatusPane: WezTermの終了失敗はunavailableとして返し、i
   const workspace = makeWorkspace();
   try {
     const result = restartStatusPane(workspace, workspace, {
-      loadStatusPaneFn: () => ({ paneId: 'old-pane', issue: '471' }),
+      loadStatusPaneFn: () => ({ paneId: 'old-pane', ...STATUS_PANE_CONTEXT, issue: '471' }),
       runStatusPaneCommandFn: () => ({ ok: false, status: 1, stderr: 'wezterm unavailable' }),
     });
     assert.equal(result.status, 'unavailable');

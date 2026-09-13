@@ -17,6 +17,15 @@ const {
 } = require('../scripts/shared/status-pane-registry');
 const storageLayout = require('../scripts/shared/storage-layout');
 
+const PANE_CONTEXT = Object.freeze({
+  unixSocket: 'C:\\wezterm\\test-socket',
+  targetPaneId: 'base-pane',
+});
+
+function paneEntry(paneId, extra = {}) {
+  return { paneId, ...PANE_CONTEXT, ...extra };
+}
+
 function withTempWorkspace(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-status-pane-'));
   try {
@@ -82,11 +91,12 @@ test('loadStatusPane: primaryだけが壊れていればrecoveryを警告付き�
     const p = statusPanePath(dir);
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, '{not json', 'utf8');
-    saveStatusPaneRecovery(dir, { paneId: 'recovery-42', launchedAt: '2026-08-26T09:00:00.000Z' });
+    saveStatusPaneRecovery(dir, paneEntry('recovery-42', { launchedAt: '2026-08-26T09:00:00.000Z' }));
 
     const warnings = [];
     assert.deepEqual(loadStatusPane(dir, (message) => warnings.push(message)), {
       paneId: 'recovery-42',
+      ...PANE_CONTEXT,
       launchedAt: '2026-08-26T09:00:00.000Z',
     });
     assert.match(warnings.join('\n'), /JSON構文エラー/);
@@ -96,13 +106,14 @@ test('loadStatusPane: primaryだけが壊れていればrecoveryを警告付き�
 
 test('loadStatusPane: recoveryだけが壊れていればprimaryを警告付きで使う', () => {
   withTempWorkspace((dir) => {
-    saveStatusPane(dir, { paneId: 'primary-42', launchedAt: '2026-08-26T09:00:00.000Z' });
+    saveStatusPane(dir, paneEntry('primary-42', { launchedAt: '2026-08-26T09:00:00.000Z' }));
     const p = statusPaneRecoveryPath(dir);
     fs.writeFileSync(p, '{not json', 'utf8');
 
     const warnings = [];
     assert.deepEqual(loadStatusPane(dir, (message) => warnings.push(message)), {
       paneId: 'primary-42',
+      ...PANE_CONTEXT,
       launchedAt: '2026-08-26T09:00:00.000Z',
     });
     assert.match(warnings.join('\n'), /JSON構文エラー/);
@@ -152,11 +163,12 @@ test('loadStatusPane: 読み取り失敗の相方が有効なら警告付きで�
     const p = statusPanePath(dir);
     fs.mkdirSync(p, { recursive: true });
     const recovery = statusPaneRecoveryPath(dir);
-    saveStatusPaneRecovery(dir, { paneId: 'recovery-readable', launchedAt: '2026-08-26T09:00:00.000Z' });
+    saveStatusPaneRecovery(dir, paneEntry('recovery-readable', { launchedAt: '2026-08-26T09:00:00.000Z' }));
 
     const warnings = [];
     assert.deepEqual(loadStatusPane(dir, (message) => warnings.push(message)), {
       paneId: 'recovery-readable',
+      ...PANE_CONTEXT,
       launchedAt: '2026-08-26T09:00:00.000Z',
     });
     assert.match(warnings.join('\n'), /読み取り失敗/);
@@ -169,12 +181,14 @@ test('saveStatusPane / loadStatusPane: 登録した内容を取得できる（�
   withTempWorkspace((dir) => {
     saveStatusPane(dir, {
       paneId: '42',
+      ...PANE_CONTEXT,
       issue: 471,
       pid: 12345,
       launchedAt: '2026-08-26T09:00:00.000Z',
     });
     assert.deepEqual(loadStatusPane(dir), {
       paneId: '42',
+      ...PANE_CONTEXT,
       issue: '471',
       launchedAt: '2026-08-26T09:00:00.000Z',
     });
@@ -183,7 +197,7 @@ test('saveStatusPane / loadStatusPane: 登録した内容を取得できる（�
   });
 });
 
-test('loadStatusPane: 旧形式のpidを読み込まずpane情報だけ返す', () => {
+test('loadStatusPane: paneIdだけの旧形式は接続先不明として拒否する', () => {
   withTempWorkspace((dir) => {
     const p = statusPanePath(dir);
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -194,11 +208,33 @@ test('loadStatusPane: 旧形式のpidを読み込まずpane情報だけ返す', 
       launchedAt: '2026-08-26T09:00:00.000Z',
     }), 'utf8');
 
-    assert.deepEqual(loadStatusPane(dir), {
-      paneId: 'legacy-pane',
-      issue: '471',
-      launchedAt: '2026-08-26T09:00:00.000Z',
-    });
+    assert.throws(() => loadStatusPane(dir), /型不正（unixSocket がありません）/);
+  });
+});
+
+test('loadStatusPane: 接続先と基準ペインはそれぞれ必須として検証する', () => {
+  withTempWorkspace((dir) => {
+    const p = statusPanePath(dir);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+
+    fs.writeFileSync(p, JSON.stringify({ paneId: 'missing-socket', targetPaneId: 'base' }), 'utf8');
+    assert.throws(() => loadStatusPane(dir), /型不正（unixSocket がありません）/);
+
+    fs.writeFileSync(p, JSON.stringify({ paneId: 'missing-target', unixSocket: 'socket-A' }), 'utf8');
+    assert.throws(() => loadStatusPane(dir), /型不正（targetPaneId がありません）/);
+  });
+});
+
+test('saveStatusPane: 接続先と基準ペインが無い記録は保存しない', () => {
+  withTempWorkspace((dir) => {
+    assert.throws(
+      () => saveStatusPane(dir, { paneId: 'missing-context' }),
+      /保存する unixSocket がありません/,
+    );
+    assert.throws(
+      () => saveStatusPane(dir, { paneId: 'missing-target', unixSocket: 'socket-A' }),
+      /保存する targetPaneId がありません/,
+    );
   });
 });
 
@@ -209,7 +245,7 @@ test('status-pane保存: テスト実行中はruntimeディレクトリを作成
     ['回復記録', saveStatusPaneRecovery],
   ]) {
     withTempWorkspace((dir) => {
-      save(dir, { paneId: label });
+      save(dir, paneEntry(label));
       const runtimeDir = storageLayout.workspaceRuntimeDir(dir);
       assert.ok(fs.existsSync(runtimeDir), `${label}: runtimeディレクトリは作成される`);
       assert.ok(!fs.existsSync(path.join(runtimeDir, 'workspace.json')), `${label}: registry manifestは作成されない`);
@@ -226,11 +262,13 @@ test('saveStatusPaneRecovery / loadStatusPane: 通常記録がなくても回復
   withTempWorkspace((dir) => {
     saveStatusPaneRecovery(dir, {
       paneId: 'recovery-42',
+      ...PANE_CONTEXT,
       pid: 12345,
       launchedAt: '2026-08-26T09:00:00.000Z',
     });
     assert.deepEqual(loadStatusPane(dir), {
       paneId: 'recovery-42',
+      ...PANE_CONTEXT,
       launchedAt: '2026-08-26T09:00:00.000Z',
     });
     const record = JSON.parse(fs.readFileSync(statusPaneRecoveryPath(dir), 'utf8'));
@@ -240,16 +278,18 @@ test('saveStatusPaneRecovery / loadStatusPane: 通常記録がなくても回復
 
 test('loadStatusPane: 通常記録と回復記録があれば新しい方を返す', () => {
   withTempWorkspace((dir) => {
-    saveStatusPane(dir, { paneId: 'primary-old', launchedAt: '2026-08-26T09:00:00.000Z' });
-    saveStatusPaneRecovery(dir, { paneId: 'recovery-new', launchedAt: '2026-08-26T09:01:00.000Z' });
+    saveStatusPane(dir, paneEntry('primary-old', { launchedAt: '2026-08-26T09:00:00.000Z' }));
+    saveStatusPaneRecovery(dir, paneEntry('recovery-new', { launchedAt: '2026-08-26T09:01:00.000Z' }));
     assert.deepEqual(loadStatusPane(dir), {
       paneId: 'recovery-new',
+      ...PANE_CONTEXT,
       launchedAt: '2026-08-26T09:01:00.000Z',
     });
 
-    saveStatusPane(dir, { paneId: 'primary-new', launchedAt: '2026-08-26T09:02:00.000Z' });
+    saveStatusPane(dir, paneEntry('primary-new', { launchedAt: '2026-08-26T09:02:00.000Z' }));
     assert.deepEqual(loadStatusPane(dir), {
       paneId: 'primary-new',
+      ...PANE_CONTEXT,
       launchedAt: '2026-08-26T09:02:00.000Z',
     });
     assert.equal(removeStatusPaneRecovery(dir), false);
@@ -258,7 +298,7 @@ test('loadStatusPane: 通常記録と回復記録があれば新しい方を返�
 
 test('saveStatusPane: launchedAt省略時は現在時刻で補完される', () => {
   withTempWorkspace((dir) => {
-    saveStatusPane(dir, { paneId: 100 });
+    saveStatusPane(dir, paneEntry(100));
     const loaded = loadStatusPane(dir);
     assert.equal(loaded.paneId, '100');
     assert.ok(loaded.launchedAt.length > 0);
@@ -267,7 +307,7 @@ test('saveStatusPane: launchedAt省略時は現在時刻で補完される', () 
 
 test('removeStatusPane: 存在するファイルを削除しtrueを返す', () => {
   withTempWorkspace((dir) => {
-    saveStatusPane(dir, { paneId: '99' });
+    saveStatusPane(dir, paneEntry('99'));
     const existed = removeStatusPane(dir);
     assert.equal(existed, true);
     assert.equal(loadStatusPane(dir), null);
@@ -276,8 +316,8 @@ test('removeStatusPane: 存在するファイルを削除しtrueを返す', () =
 
 test('removeStatusPane: 通常記録と回復記録をまとめて削除する', () => {
   withTempWorkspace((dir) => {
-    saveStatusPane(dir, { paneId: 'primary' });
-    saveStatusPaneRecovery(dir, { paneId: 'recovery' });
+    saveStatusPane(dir, paneEntry('primary'));
+    saveStatusPaneRecovery(dir, paneEntry('recovery'));
     assert.equal(removeStatusPane(dir), true);
     assert.equal(fs.existsSync(statusPanePath(dir)), false);
     assert.equal(fs.existsSync(statusPaneRecoveryPath(dir)), false);
