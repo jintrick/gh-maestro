@@ -686,6 +686,7 @@ function releaseResidentLeaseForProcess({ workspace, role, pid, startTime }) {
 
 module.exports = {
   createNormalWorkerStore,
+  createResidentLeaseStore,
   acquireLease,
   acquireLeaseLock,
   releaseLeaseLock,

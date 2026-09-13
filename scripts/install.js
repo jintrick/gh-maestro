@@ -172,12 +172,17 @@ function assertManagedTopLevelName(topLevelName) {
  * @param {string} quarantineDir
  * @returns {{ ok: boolean, migrated: number, errors: string[] }}
  */
-function quarantineLegacyHomePids(legacyHomePidsDir, quarantineDir) {
-  if (!fs.existsSync(legacyHomePidsDir)) return { ok: true, migrated: 0, errors: [] };
+function quarantineLegacyHomePids(legacyHomePidsDir, quarantineDir, options = {}) {
+  const existsFn = options.existsFn || fs.existsSync;
+  const readdirFn = options.readdirFn || fs.readdirSync;
+  const readFileFn = options.readFileFn || fs.readFileSync;
+  const mkdirFn = options.mkdirFn || fs.mkdirSync;
+  const writeFileFn = options.writeFileFn || fs.writeFileSync;
+  if (!existsFn(legacyHomePidsDir)) return { ok: true, migrated: 0, errors: [] };
 
   let entries;
   try {
-    entries = fs.readdirSync(legacyHomePidsDir, { withFileTypes: true });
+    entries = readdirFn(legacyHomePidsDir, { withFileTypes: true });
   } catch (e) {
     return { ok: false, migrated: 0, errors: [`readdir failed: ${e.message}`] };
   }
@@ -196,7 +201,7 @@ function quarantineLegacyHomePids(legacyHomePidsDir, quarantineDir) {
     const srcPath = path.join(legacyHomePidsDir, entry.name);
     let content;
     try {
-      content = fs.readFileSync(srcPath, 'utf8');
+      content = readFileFn(srcPath, 'utf8');
     } catch (e) {
       errors.push(`${entry.name}: read failed: ${e.message}`);
       continue;
@@ -214,8 +219,8 @@ function quarantineLegacyHomePids(legacyHomePidsDir, quarantineDir) {
     }
 
     try {
-      fs.mkdirSync(quarantineDir, { recursive: true });
-      fs.writeFileSync(path.join(quarantineDir, entry.name), content, 'utf8');
+      mkdirFn(quarantineDir, { recursive: true });
+      writeFileFn(path.join(quarantineDir, entry.name), content, 'utf8');
       migrated++;
     } catch (e) {
       errors.push(`${entry.name}: write failed: ${e.message}`);
@@ -223,6 +228,346 @@ function quarantineLegacyHomePids(legacyHomePidsDir, quarantineDir) {
   }
 
   return { ok: errors.length === 0, migrated, errors };
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseJsonFile(filePath, readFileFn = (p) => fs.readFileSync(p, 'utf8')) {
+  let content;
+  try {
+    content = readFileFn(filePath, 'utf8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { status: 'absent' };
+    return { status: 'unknown', reason: `${filePath} の読み取りに失敗しました: ${error.message}` };
+  }
+  try {
+    return { status: 'ok', value: JSON.parse(content) };
+  } catch (error) {
+    return { status: 'unknown', reason: `${filePath} のJSON構文エラー: ${error.message}` };
+  }
+}
+
+/**
+ * 旧 ~/.gh-maestro/agents.json を config.json の override へ移行する共通 primitive。
+ * 読み取り・デフォルト検証・config検証・書込みが完了したあとだけ source を削除する。
+ * @param {object} [options]
+ * @returns {{status:string, path:string, configPath:string, migratedCount:number, reason?:string}}
+ */
+function migrateLegacyAgentsConfig(options = {}) {
+  const managedRoot = options.managedRoot || ghMaestroDir;
+  const sourcePath = options.sourcePath || path.join(managedRoot, 'agents.json');
+  const configPath = options.configPath || path.join(managedRoot, 'config.json');
+  const defaultsFilePath = options.defaultsPath || path.join(ROOT, 'scripts', 'agent-defaults.json');
+  const existsFn = options.existsFn || fs.existsSync;
+  const lstatFn = options.lstatFn || fs.lstatSync;
+  const readFileFn = options.readFileFn || ((p, encoding) => fs.readFileSync(p, encoding));
+  const writeFileFn = options.writeFileFn || ((p, content, encoding) => fs.writeFileSync(p, content, encoding));
+  const mkdirFn = options.mkdirFn || ((p, opts) => fs.mkdirSync(p, opts));
+  const unlinkFn = options.unlinkFn || fs.unlinkSync;
+  const removeSource = options.removeSource === true;
+
+  if (!existsFn(sourcePath)) {
+    return { status: 'absent', path: sourcePath, configPath, migratedCount: 0 };
+  }
+
+  let sourceStat;
+  try {
+    sourceStat = lstatFn(sourcePath);
+  } catch (error) {
+    return {
+      status: 'unknown',
+      path: sourcePath,
+      configPath,
+      migratedCount: 0,
+      reason: `agents.json の確認に失敗しました: ${error.message}`,
+    };
+  }
+  if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
+    return {
+      status: 'unknown',
+      path: sourcePath,
+      configPath,
+      migratedCount: 0,
+      reason: 'agents.json が通常ファイルではありません',
+    };
+  }
+
+  const legacyResult = parseJsonFile(sourcePath, readFileFn);
+  if (legacyResult.status !== 'ok') {
+    return { status: 'unknown', path: sourcePath, configPath, migratedCount: 0, reason: legacyResult.reason };
+  }
+  if (!Array.isArray(legacyResult.value)) {
+    return {
+      status: 'unknown',
+      path: sourcePath,
+      configPath,
+      migratedCount: 0,
+      reason: 'agents.json のトップレベルは配列である必要があります',
+    };
+  }
+  for (const [index, agent] of legacyResult.value.entries()) {
+    if (!isPlainObject(agent) || typeof agent.id !== 'string' || agent.id.length === 0) {
+      return {
+        status: 'unknown',
+        path: sourcePath,
+        configPath,
+        migratedCount: 0,
+        reason: `agents.json の agents[${index}] は id を持つオブジェクトである必要があります`,
+      };
+    }
+  }
+  const agentIds = legacyResult.value.map((agent) => agent.id);
+  if (new Set(agentIds).size !== agentIds.length) {
+    return {
+      status: 'unknown',
+      path: sourcePath,
+      configPath,
+      migratedCount: 0,
+      reason: 'agents.json に重複した agent id があります',
+    };
+  }
+
+  let defaultsData = options.defaultsData;
+  if (defaultsData === undefined) {
+    const defaultsResult = parseJsonFile(defaultsFilePath, readFileFn);
+    if (defaultsResult.status !== 'ok') {
+      return { status: 'unknown', path: sourcePath, configPath, migratedCount: 0, reason: defaultsResult.reason };
+    }
+    defaultsData = defaultsResult.value;
+  }
+  let defaultsIssues;
+  try {
+    defaultsIssues = validateAgentDefaults(defaultsData);
+  } catch (error) {
+    return {
+      status: 'unknown',
+      path: sourcePath,
+      configPath,
+      migratedCount: 0,
+      reason: `agent-defaults.json の検証に失敗しました: ${error.message}`,
+    };
+  }
+  const defaultsErrors = defaultsIssues.filter((issue) => issue.startsWith('[ERROR]'));
+  if (defaultsErrors.length > 0) {
+    return {
+      status: 'unknown',
+      path: sourcePath,
+      configPath,
+      migratedCount: 0,
+      reason: `agent-defaults.json の検証に失敗しました: ${defaultsErrors.join('; ')}`,
+    };
+  }
+  const defaultMap = new Map(defaultsData.agents.map((agent) => [agent.id, agent]));
+  const agentOverrides = {};
+  for (const userAgent of legacyResult.value) {
+    const defaultAgent = defaultMap.get(userAgent.id);
+    if (!defaultAgent) {
+      const { id, ...rest } = userAgent;
+      agentOverrides[id] = rest;
+      continue;
+    }
+    const diff = {};
+    for (const [key, value] of Object.entries(userAgent)) {
+      if (key === 'id') continue;
+      if (!(key in defaultAgent) || JSON.stringify(value) !== JSON.stringify(defaultAgent[key])) {
+        diff[key] = value;
+      }
+    }
+    if (Object.keys(diff).length > 0) agentOverrides[userAgent.id] = diff;
+  }
+  const migratedCount = Object.keys(agentOverrides).length;
+
+  let existingConfig = {};
+  if (existsFn(configPath)) {
+    let configStat;
+    try {
+      configStat = lstatFn(configPath);
+    } catch (error) {
+      return {
+        status: 'unknown',
+        path: sourcePath,
+        configPath,
+        migratedCount: 0,
+        reason: `config.json の確認に失敗しました: ${error.message}`,
+      };
+    }
+    if (configStat.isSymbolicLink() || !configStat.isFile()) {
+      return {
+        status: 'unknown',
+        path: sourcePath,
+        configPath,
+        migratedCount: 0,
+        reason: 'config.json が通常ファイルではありません',
+      };
+    }
+    const configResult = parseJsonFile(configPath, readFileFn);
+    if (configResult.status !== 'ok' || !isPlainObject(configResult.value)) {
+      return {
+        status: 'unknown',
+        path: sourcePath,
+        configPath,
+        migratedCount: 0,
+        reason: configResult.reason || 'config.json はオブジェクトである必要があります',
+      };
+    }
+    existingConfig = configResult.value;
+    if (existingConfig.agents !== undefined && !isPlainObject(existingConfig.agents)) {
+      return {
+        status: 'unknown',
+        path: sourcePath,
+        configPath,
+        migratedCount: 0,
+        reason: 'config.json の agents はオブジェクトである必要があります',
+      };
+    }
+  }
+
+  if (migratedCount > 0) {
+    const nextConfig = {
+      ...existingConfig,
+      agents: { ...agentOverrides, ...(existingConfig.agents || {}) },
+    };
+    try {
+      mkdirFn(path.dirname(configPath), { recursive: true });
+      writeFileFn(configPath, JSON.stringify(nextConfig, null, 2) + '\n', 'utf8');
+    } catch (error) {
+      return {
+        status: 'unknown',
+        path: sourcePath,
+        configPath,
+        migratedCount: 0,
+        reason: `config.json の書込みに失敗しました: ${error.message}`,
+      };
+    }
+  }
+
+  if (!removeSource) {
+    return {
+      status: migratedCount > 0 ? 'removed' : 'absent',
+      path: sourcePath,
+      configPath,
+      migratedCount,
+    };
+  }
+  try {
+    unlinkFn(sourcePath);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return { status: 'absent', path: sourcePath, configPath, migratedCount };
+    }
+    return {
+      status: 'unknown',
+      path: sourcePath,
+      configPath,
+      migratedCount,
+      reason: `agents.json の削除に失敗しました: ${error.message}`,
+    };
+  }
+  return { status: 'removed', path: sourcePath, configPath, migratedCount };
+}
+
+/**
+ * managed root の台帳に列挙されたトップレベル項目だけを除去する。
+ * recursive delete は lstat で symlink/junction を通常ファイルとして扱ったあとに行う。
+ */
+function pruneManagedRootEntries(managedRoot, entries, options = {}) {
+  const removed = [];
+  const absent = [];
+  const errors = [];
+  const skip = new Set(options.skip || []);
+  const lstatFn = options.lstatFn || fs.lstatSync;
+  const unlinkFn = options.unlinkFn || fs.unlinkSync;
+  const rmFn = options.rmFn || ((target) => fs.rmSync(target, { recursive: true, force: true }));
+
+  if (!Array.isArray(entries)) throw new Error('managed root prune entries は配列である必要があります');
+  for (const name of entries) {
+    if (skip.has(name)) continue;
+    if (typeof name !== 'string' || name === '' || name === '.' || name === '..'
+      || path.basename(name) !== name) {
+      errors.push(`不正なmanaged root entry: ${String(name)}`);
+      continue;
+    }
+    const target = path.join(managedRoot, name);
+    let stat;
+    try {
+      stat = lstatFn(target);
+    } catch (error) {
+      if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+        absent.push(name);
+      } else {
+        errors.push(`${name}: lstat failed: ${error.message}`);
+      }
+      continue;
+    }
+    try {
+      if (stat.isSymbolicLink() || !stat.isDirectory()) unlinkFn(target);
+      else rmFn(target);
+      removed.push(name);
+    } catch (error) {
+      errors.push(`${name}: remove failed: ${error.message}`);
+    }
+  }
+  return { removed, absent, errors };
+}
+
+function cleanupLegacyAgentsConfig(options = {}) {
+  return migrateLegacyAgentsConfig({ ...options, removeSource: true });
+}
+
+function cleanupLegacyHomePids(options = {}) {
+  const managedRoot = options.managedRoot || ghMaestroDir;
+  const runtimeRoot = options.runtimeRoot || storageLayout.runtimeRoot();
+  storageLayout.assertDisjointRoots(runtimeRoot);
+  const managedAbsolute = path.resolve(managedRoot);
+  const runtimeAbsolute = path.resolve(runtimeRoot);
+  const relativeRuntime = path.relative(managedAbsolute, runtimeAbsolute);
+  const relativeManaged = path.relative(runtimeAbsolute, managedAbsolute);
+  if (relativeRuntime === '' || (!relativeRuntime.startsWith('..') && !path.isAbsolute(relativeRuntime))
+    || (relativeManaged !== '' && !relativeManaged.startsWith('..') && !path.isAbsolute(relativeManaged))) {
+    throw new Error(`legacy pidsのmanaged/runtime rootが分離されていません: ${managedRoot} / ${runtimeRoot}`);
+  }
+  const sourcePath = options.sourcePath || path.join(managedRoot, 'pids');
+  const quarantineDir = options.quarantineDir || path.join(runtimeRoot, 'legacy-home', 'pids');
+  const removeSource = options.removeSource !== false;
+  let sourceStat;
+  try {
+    sourceStat = (options.lstatFn || fs.lstatSync)(sourcePath);
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+      return { status: 'absent', path: sourcePath, quarantineDir, migrated: 0 };
+    }
+    return { status: 'unknown', path: sourcePath, quarantineDir, migrated: 0, reason: error.message };
+  }
+  if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) {
+    return { status: 'unknown', path: sourcePath, quarantineDir, migrated: 0, reason: 'legacy pids は通常ディレクトリではありません' };
+  }
+  const result = (options.quarantineFn || quarantineLegacyHomePids)(sourcePath, quarantineDir, options);
+  if (!result.ok) {
+    return { status: 'unknown', path: sourcePath, quarantineDir, migrated: result.migrated, reason: result.errors.join('; ') };
+  }
+  if (removeSource) {
+    try {
+      (options.rmFn || ((target) => fs.rmSync(target, { recursive: true, force: false })))(sourcePath);
+    } catch (error) {
+      return { status: 'unknown', path: sourcePath, quarantineDir, migrated: result.migrated, reason: `隔離元の削除に失敗しました: ${error.message}` };
+    }
+  }
+  return { status: 'removed', path: sourcePath, quarantineDir, migrated: result.migrated };
+}
+
+function cleanupLegacyManagedRoot(options = {}) {
+  const managedRoot = options.managedRoot || ghMaestroDir;
+  const entries = options.entries || [];
+  const result = pruneManagedRootEntries(managedRoot, entries, options);
+  return {
+    status: result.errors.length > 0 ? 'unknown' : (result.removed.length > 0 ? 'removed' : 'absent'),
+    path: managedRoot,
+    removed: result.removed,
+    absent: result.absent,
+    reason: result.errors.length > 0 ? result.errors.join('; ') : undefined,
+  };
 }
 
 // ~/.gh-maestro/ は gh-maestro 専用ディレクトリ。install が書いたものだけを残し、
@@ -720,7 +1065,9 @@ function registerUserPromptExpansionHook(options = {}) {
 
 module.exports = {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
-  buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
+  buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids,
+  migrateLegacyAgentsConfig, cleanupLegacyAgentsConfig, cleanupLegacyHomePids,
+  pruneManagedRootEntries, cleanupLegacyManagedRoot, installSkills,
   installScripts, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
   buildUserPromptExpansionHook, registerUserPromptExpansionHook,
 };
@@ -849,90 +1196,21 @@ installSharedSkills(agents, {
 step('Checking for legacy agents.json migration...');
 const agentsConfigPath = path.join(ghMaestroDir, 'agents.json');
 const configJsonPath = ghMaestroPath('config.json');
-
-if (fs.existsSync(agentsConfigPath)) {
-  let legacyAgents = [];
-  try {
-    legacyAgents = JSON.parse(fs.readFileSync(agentsConfigPath, 'utf8'));
-    if (!Array.isArray(legacyAgents)) { legacyAgents = []; ghMaestroPath("agents.json"); }
-  } catch {
-    ok('agents.json parse failed — skipping migration, preserving file');
-    ghMaestroPath('agents.json');
-    legacyAgents = [];
-  }
-
-  if (legacyAgents.length > 0) {
-    // agent-defaults.json からデフォルト値を読み込む
-    const defaultsPath = path.join(ROOT, 'scripts', 'agent-defaults.json');
-    let defaultsData = { agents: [] };
-    try {
-      defaultsData = JSON.parse(fs.readFileSync(defaultsPath, 'utf8'));
-    } catch {
-      ok('agent-defaults.json not found — skipping migration');
-    }
-
-    const defaultMap = new Map(defaultsData.agents.map(a => [a.id, a]));
-
-    // デフォルトと異なるフィールドのみを抽出
-    const agentOverrides = {};
-    let migratedCount = 0;
-
-    for (const userAgent of legacyAgents) {
-      const defaultAgent = defaultMap.get(userAgent.id);
-      if (!defaultAgent) {
-        // デフォルトに無いカスタムエージェント — 全体を保存
-        const { id, ...rest } = userAgent;
-        agentOverrides[id] = rest;
-        migratedCount++;
-        continue;
-      }
-
-      // デフォルトと異なるフィールドを抽出
-      const diff = {};
-      for (const [key, value] of Object.entries(userAgent)) {
-        if (key === 'id') continue;
-        // デフォルトに存在しないフィールドはカスタム追加として保存
-        if (!(key in defaultAgent)) {
-          diff[key] = value;
-          continue;
-        }
-        // 値が異なる場合のみ保存
-        if (JSON.stringify(value) !== JSON.stringify(defaultAgent[key])) {
-          diff[key] = value;
-        }
-      }
-
-      if (Object.keys(diff).length > 0) {
-        agentOverrides[userAgent.id] = diff;
-        migratedCount++;
-      }
-    }
-
-    if (migratedCount > 0) {
-      // 既存の config.json を読み込み、agents セクションをマージ
-      let existingConfig = {};
-      if (fs.existsSync(configJsonPath)) {
-        try {
-          existingConfig = JSON.parse(fs.readFileSync(configJsonPath, 'utf8'));
-          if (typeof existingConfig !== 'object' || existingConfig === null || Array.isArray(existingConfig)) {
-            existingConfig = {};
-          }
-        } catch {
-          existingConfig = {};
-        }
-      }
-
-      existingConfig.agents = { ...agentOverrides, ...(existingConfig.agents || {}) };
-      fs.writeFileSync(configJsonPath, JSON.stringify(existingConfig, null, 2) + '\n', 'utf8');
-      ok(`agents.json → config.json: ${migratedCount} agent override(s) migrated`);
-    } else {
-      ok('agents.json has no customizations — config.json not created (defaults are in agent-defaults.json)');
-    }
-  } else {
-    ok('agents.json is empty — nothing to migrate');
-  }
+const agentsMigration = migrateLegacyAgentsConfig({
+  sourcePath: agentsConfigPath,
+  configPath: configJsonPath,
+  defaultsPath: path.join(ROOT, 'scripts', 'agent-defaults.json'),
+});
+if (agentsMigration.status === 'unknown') {
+  // 形式不正・読み取り不能なユーザーファイルは prune から保護する。
+  ghMaestroPath('agents.json');
+  ok(`agents.json migration skipped — preserving file: ${agentsMigration.reason}`);
+} else if (agentsMigration.status === 'absent') {
+  ok(agentsMigration.path && fs.existsSync(agentsMigration.path)
+    ? 'agents.json has no customizations — config.json not created (defaults are in agent-defaults.json)'
+    : 'No legacy agents.json — nothing to migrate');
 } else {
-  ok('No legacy agents.json — nothing to migrate');
+  ok(`agents.json → config.json: ${agentsMigration.migratedCount} agent override(s) migrated`);
 }
 
 // ── Issue #214: legacy PID registry の隔離（prune より必ず先に実行） ────────────
@@ -952,13 +1230,19 @@ const legacyHomePidsDir = path.join(ghMaestroDir, 'pids');
 const prunePathSkip = new Set();
 if (fs.existsSync(legacyHomePidsDir)) {
   const quarantineDir = path.join(storageLayout.runtimeRoot(), 'legacy-home', 'pids');
-  const quarantineResult = quarantineLegacyHomePids(legacyHomePidsDir, quarantineDir);
-  if (quarantineResult.ok) {
+  const quarantineResult = cleanupLegacyHomePids({
+    managedRoot: ghMaestroDir,
+    runtimeRoot: storageLayout.runtimeRoot(),
+    sourcePath: legacyHomePidsDir,
+    quarantineDir,
+    removeSource: false,
+  });
+  if (quarantineResult.status !== 'unknown') {
     ok(`quarantined ${quarantineResult.migrated} legacy pids entrie(s) -> ${quarantineDir}`);
   } else {
     prunePathSkip.add('pids');
     console.warn(`  \x1b[33m! ~/.gh-maestro/pids の隔離に失敗したエントリがあるため、削除をスキップします（fail-closed）:\x1b[0m`);
-    for (const e of quarantineResult.errors) console.warn(`    ${e}`);
+    console.warn(`    ${quarantineResult.reason}`);
   }
 } else {
   ok('No legacy ~/.gh-maestro/pids found — nothing to quarantine');
@@ -971,13 +1255,20 @@ if (fs.existsSync(legacyHomePidsDir)) {
 // 管理対象リストは存在せず、登録し忘れによるサイレント削除が起きない
 // （ghMaestroPath() 自体も MANAGED_TOP_LEVEL 宣言と照合するため、二重にチェックされる）。
 step('Pruning ~/.gh-maestro/ of unmanaged legacy artifacts...');
-for (const entry of fs.readdirSync(ghMaestroDir)) {
+const unmanagedEntries = fs.readdirSync(ghMaestroDir);
+for (const entry of unmanagedEntries) {
   if (ghMaestroKeep.has(entry)) continue;
   if (prunePathSkip.has(entry)) {
     console.warn(`  \x1b[33m! skipping deletion of "${entry}" (quarantine failed above, fail-closed)\x1b[0m`);
-    continue;
   }
-  fs.rmSync(path.join(ghMaestroDir, entry), { recursive: true, force: true });
+}
+const pruneResult = pruneManagedRootEntries(ghMaestroDir, unmanagedEntries, {
+  skip: [...ghMaestroKeep, ...prunePathSkip],
+});
+if (pruneResult.errors.length > 0) {
+  throw new Error(`managed root legacy prune failed: ${pruneResult.errors.join('; ')}`);
+}
+for (const entry of pruneResult.removed) {
   ok(`removed legacy artifact: ${entry}`);
 }
 

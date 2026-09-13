@@ -13,6 +13,7 @@ const {
   REAL_SPAWN_DISABLED_ERROR_CODE,
 } = require('./shared/child-process');
 const crypto = require('crypto');
+const fs = require('fs');
 const path = require('path');
 const { resolve } = path;
 const { existsSync, readFileSync, rmSync,
@@ -50,6 +51,253 @@ function restartCapturedResidents(workspace, entries, scriptsPath, opts = {}) {
     preCapturedEntries: entries,
     skipStop: opts.skipStop ?? false,
   });
+}
+
+function validCleanupPid(value) {
+  return (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
+    && Number.isInteger(Number(value)) && Number(value) > 0;
+}
+
+function validCleanupPaneId(value) {
+  if (typeof value === 'number') return Number.isInteger(value) && value >= 0;
+  return typeof value === 'string' && /^\d+$/.test(value.trim());
+}
+
+function readCleanupWorkers(workspace, readWorkersFn = readWorkersRaw) {
+  if (readWorkersFn === readWorkersRaw) {
+    const workersPath = path.resolve(workspace, '.gh-maestro', 'workers.json');
+    try {
+      const stat = fs.lstatSync(workersPath);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new Error('workers.json が通常ファイルではありません');
+      }
+    } catch (error) {
+      if (!(error && (error.code === 'ENOENT' || error.code === 'ENOTDIR'))) throw error;
+    }
+  }
+  const workers = readWorkersFn(workspace);
+  if (workers === null) return null;
+  if (!workers || typeof workers !== 'object' || Array.isArray(workers)) {
+    throw new Error('workers.json はオブジェクトである必要があります');
+  }
+  return workers;
+}
+
+/**
+ * workers.json に残った notifierPid / paneId を安全に整理する共通 primitive。
+ * PID は生存確認後に必要なら停止し、全対象の観測が済んでから registry を原子的に更新する。
+ * @param {string} workspace
+ * @param {'notifierPid'|'paneId'} field
+ * @param {object} [options]
+ */
+function cleanupLegacyWorkerField(workspace, field, options = {}) {
+  if (!['notifierPid', 'paneId'].includes(field)) throw new Error(`未知のlegacy worker fieldです: ${field}`);
+  const readWorkersFn = options.readWorkersFn || readWorkersRaw;
+  const workers = readCleanupWorkers(workspace, readWorkersFn);
+  const workersPath = path.resolve(workspace, '.gh-maestro', 'workers.json');
+  if (workers === null) return { status: 'absent', path: workersPath, field };
+
+  const isProcessAliveFn = options.isProcessAliveFn || isProcessAlive;
+  const killProcessTreeFn = options.killProcessTreeFn || killProcessTree;
+  const atomicWriteFn = options.atomicWriteFn || atomicWriteJson;
+  const getAlivePaneIdsFn = options.getAlivePaneIdsFn || getAlivePaneIds;
+  const killPaneFn = options.killPaneFn || killPane;
+  const sleepFn = options.sleepFn || (() => {});
+  const persist = options.persist !== false;
+  const targetNames = options.targetNames ? new Set(options.targetNames) : null;
+  const nextWorkers = { ...workers };
+  const targets = [];
+  const killedPids = [];
+  const skippedPids = [];
+  const skippedPanes = [];
+  const paneResults = [];
+  const notifierResults = [];
+
+  for (const [name, rawEntry] of Object.entries(workers)) {
+    if (name === 'orchestrator' || (targetNames && !targetNames.has(name))) continue;
+    const isObject = rawEntry !== null && typeof rawEntry === 'object' && !Array.isArray(rawEntry);
+    const rawValue = isObject ? rawEntry[field] : field === 'paneId' ? rawEntry : undefined;
+    if (rawValue === undefined || rawValue === null || rawValue === '') continue;
+
+    if (field === 'notifierPid') {
+      if (!validCleanupPid(rawValue)) throw new Error(`workers.json の ${name}.${field} は正の整数PIDではありません`);
+      const pid = Number(rawValue);
+      const alive = isProcessAliveFn(pid);
+      if (typeof alive !== 'boolean') throw new Error(`PID ${pid} の生存確認がbooleanを返しませんでした`);
+      if (alive) {
+        killProcessTreeFn(pid);
+        const remaining = isProcessAliveFn(pid);
+        if (remaining !== false) throw new Error(`レガシー notifier (pid ${pid}) の停止を確認できませんでした`);
+        killedPids.push(pid);
+        notifierResults.push({ name, pid, status: 'killed' });
+      } else {
+        skippedPids.push(pid);
+        notifierResults.push({ name, pid, status: 'absent' });
+      }
+    } else {
+      if (!validCleanupPaneId(rawValue)) {
+        throw new Error(`workers.json の ${name}.${field} は正の整数paneIdではありません`);
+      }
+      const paneId = String(rawValue);
+      if (!paneId) throw new Error(`workers.json の ${name}.${field} が空です`);
+      let alivePanes = options.alivePanes;
+      if (alivePanes === undefined) alivePanes = getAlivePaneIdsFn(options.warnFn || (() => {}));
+      if (!(alivePanes instanceof Set)) throw new Error('legacy paneの生存一覧を確認できませんでした');
+      if (alivePanes.has(paneId) || alivePanes.has(rawValue)) {
+        let result;
+        try {
+          result = killPaneFn(paneId);
+        } catch (error) {
+          if (options.strictPane === false) {
+            paneResults.push({ name, paneId, status: 'unknown', reason: error.message });
+            targets.push({ name, rawEntry, isObject });
+            continue;
+          }
+          throw error;
+        }
+        if (!result || result.ok !== true) {
+          if (options.strictPane === false) {
+            paneResults.push({ name, paneId, status: 'unknown', reason: result?.stderr || '(empty)' });
+            targets.push({ name, rawEntry, isObject });
+            continue;
+          }
+          throw new Error(`レガシーpane ${paneId} のkillに失敗しました: ${result?.stderr || '(empty)'}`);
+        }
+        sleepFn(options.paneWaitMs ?? 0);
+        paneResults.push({ name, paneId, status: 'killed' });
+      } else {
+        skippedPanes.push(paneId);
+        paneResults.push({ name, paneId, status: 'absent' });
+      }
+    }
+    targets.push({ name, rawEntry, isObject });
+  }
+
+  if (targets.length === 0) return { status: 'absent', path: workersPath, field };
+  for (const { name, rawEntry, isObject } of targets) {
+    nextWorkers[name] = isObject ? { ...rawEntry, [field]: null } : { [field]: null };
+  }
+  if (persist) atomicWriteFn(workersPath, nextWorkers);
+  return {
+    status: 'removed',
+    path: workersPath,
+    field,
+    workers: targets.map(({ name }) => name),
+    killedPids,
+    skippedPids,
+    skippedPanes,
+    notifierResults,
+    paneResults,
+  };
+}
+
+function cleanupLegacyMessages(workspace, options = {}) {
+  const target = path.resolve(workspace, '.gh-maestro', 'messages');
+  const lstatFn = options.lstatFn || fs.lstatSync;
+  let stat;
+  try {
+    stat = lstatFn(target);
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return { status: 'absent', path: target };
+    return { status: 'unknown', path: target, reason: error.message };
+  }
+  try {
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      (options.unlinkFn || unlinkSync)(target);
+    } else {
+      (options.rmFn || ((p) => rmSync(p, { recursive: true, force: false })))(target);
+    }
+  } catch (error) {
+    return { status: 'unknown', path: target, reason: `messagesの削除に失敗しました: ${error.message}` };
+  }
+  return { status: 'removed', path: target };
+}
+
+function cleanupLegacyQueue(workspace, options = {}) {
+  const queueDir = path.resolve(workspace, '.gh-maestro', 'queue');
+  const pollerPath = path.join(queueDir, options.pollerFile || 'poller.json');
+  const lstatFn = options.lstatFn || fs.lstatSync;
+  let queueStat;
+  try {
+    queueStat = lstatFn(queueDir);
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return { status: 'absent', path: queueDir };
+    return { status: 'unknown', path: queueDir, reason: error.message };
+  }
+  if (queueStat.isSymbolicLink()) {
+    try { (options.unlinkFn || unlinkSync)(queueDir); } catch (error) {
+      return { status: 'unknown', path: queueDir, reason: `queueのjunction削除に失敗しました: ${error.message}` };
+    }
+    return { status: 'removed', path: queueDir };
+  }
+
+  const existsFn = options.existsFn || fs.existsSync;
+  const killedPids = [];
+  if (existsFn(pollerPath)) {
+    let poller;
+    try {
+      const stat = lstatFn(pollerPath);
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('poller.jsonが通常ファイルではありません');
+      poller = JSON.parse((options.readFileFn || fs.readFileSync)(pollerPath, 'utf8'));
+    } catch (error) {
+      return { status: 'unknown', path: queueDir, reason: `poller.jsonの読み取りに失敗しました: ${error.message}` };
+    }
+    if (!poller || typeof poller !== 'object' || Array.isArray(poller)) {
+      return { status: 'unknown', path: queueDir, reason: 'poller.jsonはオブジェクトである必要があります' };
+    }
+    if (poller.pid !== undefined && !validCleanupPid(poller.pid)) {
+      return { status: 'unknown', path: queueDir, reason: 'poller.jsonのpidが不正です' };
+    }
+    if (poller.heartbeat !== undefined
+      && (typeof poller.heartbeat !== 'number' || !Number.isFinite(poller.heartbeat))) {
+      return { status: 'unknown', path: queueDir, reason: 'poller.jsonのheartbeatが不正です' };
+    }
+    if (poller.pid !== undefined) {
+      const pid = Number(poller.pid);
+      const alive = (options.isProcessAliveFn || isProcessAlive)(pid);
+      if (typeof alive !== 'boolean') return { status: 'unknown', path: queueDir, reason: 'pollerの生存確認がbooleanを返しませんでした' };
+      if (alive) {
+        if (options.legacyResetMode === true) {
+          const heartbeat = poller.heartbeat;
+          const elapsed = typeof heartbeat === 'number' ? Date.now() - heartbeat : Infinity;
+          if (elapsed <= 15000) {
+            try {
+              (options.killProcessTreeFn || killProcessTree)(pid);
+              const remaining = (options.isProcessAliveFn || isProcessAlive)(pid);
+              if (remaining !== false) throw new Error('停止を確認できませんでした');
+              killedPids.push(pid);
+            } catch (error) {
+              return { status: 'unknown', path: queueDir, reason: `レガシー poller (pid ${pid}) の停止に失敗しました: ${error.message}` };
+            }
+          }
+        } else {
+          return { status: 'skipped', path: queueDir, reason: `レガシー poller (pid ${pid}) が稼働中です` };
+        }
+      }
+    }
+  }
+
+  try {
+      (options.unlinkJunctionsFn || unlinkJunctions)(queueDir, options.warnFn || (() => {}));
+  } catch (error) {
+    return { status: 'unknown', path: queueDir, reason: `queueのjunction除去に失敗しました: ${error.message}` };
+  }
+  const sleepFn = options.sleepFn || (() => {});
+  const rmFn = options.rmFn || ((p) => rmSync(p, { recursive: true, force: false }));
+  for (let attempt = 0; attempt <= 5; attempt++) {
+    try {
+      rmFn(queueDir);
+      return { status: 'removed', path: queueDir, killedPids };
+    } catch (error) {
+      if (error && error.code === 'ENOENT') return { status: 'absent', path: queueDir };
+      if (error && (error.code === 'EBUSY' || error.code === 'EPERM') && attempt < 5) {
+        sleepFn(20);
+        continue;
+      }
+      return { status: 'unknown', path: queueDir, reason: `queueの削除に失敗しました: ${error.message}` };
+    }
+  }
+  return { status: 'unknown', path: queueDir, reason: 'queueの削除リトライが上限に達しました' };
 }
 
 const USAGE = `reset-session.js — gh-maestro セッションを強制リセットする
@@ -136,7 +384,14 @@ function rebuildOrchestratorBaseline(workspace, { workers = {}, repo, listCommen
   return { ok: true, sessionId, issues, counts };
 }
 
-module.exports = { rebuildOrchestratorBaseline, restartCapturedResidents, USAGE };
+module.exports = {
+  rebuildOrchestratorBaseline,
+  restartCapturedResidents,
+  cleanupLegacyWorkerField,
+  cleanupLegacyMessages,
+  cleanupLegacyQueue,
+  USAGE,
+};
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -379,21 +634,55 @@ if (require.main === module) {
     alivePanes = new Set();
   }
 
+  let legacyNotifierCleanup = { notifierResults: [] };
+  let legacyPaneCleanup = { paneResults: [] };
   if (workers !== null) {
+    try {
+      legacyNotifierCleanup = cleanupLegacyWorkerField(workspace, 'notifierPid', {
+        readWorkersFn: () => workers,
+        persist: false,
+        isProcessAliveFn: isProcessAlive,
+        killProcessTreeFn: killProcessTree,
+      });
+      for (const result of legacyNotifierCleanup.notifierResults || []) {
+        if (result.status === 'killed') {
+          log(`"${result.name}" のレガシー notifier (pid ${result.pid}) を終了しました。`);
+        } else {
+          log(`"${result.name}" のレガシー notifier (pid ${result.pid}) は既に終了しています。`);
+        }
+      }
+    } catch (error) {
+      warn(`レガシー notifier の掃除に失敗しました: ${error.message}`);
+      results.errors.push(`legacy notifier: ${error.message}`);
+    }
+    try {
+      legacyPaneCleanup = cleanupLegacyWorkerField(workspace, 'paneId', {
+        readWorkersFn: () => workers,
+        persist: false,
+        alivePanes,
+        killPaneFn: killPane,
+        sleepFn: sleep,
+        paneWaitMs: 500,
+        strictPane: false,
+      });
+      for (const result of legacyPaneCleanup.paneResults || []) {
+        if (result.status === 'killed') {
+          log(`"${result.name}" のレガシーpane ${result.paneId} をkillしました。`);
+        } else if (result.status === 'absent') {
+          log(`"${result.name}" のレガシーpane ${result.paneId} は既に存在しません。スキップ。`);
+        } else {
+          warn(`"${result.name}" のレガシーpane ${result.paneId} のkillに失敗しました: ${result.reason}`);
+        }
+      }
+    } catch (error) {
+      warn(`レガシーpane の掃除に失敗しました: ${error.message}`);
+      results.errors.push(`legacy pane: ${error.message}`);
+    }
+
+    const paneByWorker = new Map((legacyPaneCleanup.paneResults || []).map((result) => [result.name, result]));
     for (const [name, entry] of Object.entries(workers)) {
       if (name === 'orchestrator') continue;
       const normalized = normalizeWorkerEntry(entry);
-
-      // 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill
-      // 過去のセッションの workers.json には notifierPid が残っている可能性がある。
-      if (normalized.notifierPid) {
-        if (isProcessAlive(normalized.notifierPid)) {
-          killProcessTree(normalized.notifierPid);
-          log(`"${name}" のレガシー notifier (pid ${normalized.notifierPid}) を終了しました。`);
-        } else {
-          log(`"${name}" のレガシー notifier (pid ${normalized.notifierPid}) は既に終了しています。`);
-        }
-      }
 
       let handled = false;
 
@@ -411,24 +700,12 @@ if (require.main === module) {
         handled = true;
       }
 
-      // 後方互換: 移行前セッション（Issue #151 以前）が残した WezTerm ペインを kill。
-      // 起動経路が headless に変わってもこの掃除経路は必要である
-      // （.claude/rules/legacy-process-cleanup-safety.md 参照）。
-      const id = normalized.paneId ?? '';
-      if (id) {
-        if (alivePanes !== null && !alivePanes.has(id)) {
-          log(`"${name}" のレガシーpane ${id} は既に存在しません。スキップ。`);
-          if (!handled) results.skipped.push(name);
-        } else {
-          const r = killPane(id);
-          if (r.ok) {
-            log(`"${name}" のレガシーpane ${id} をkillしました。`);
-            if (!handled) results.killed.push(name);
-          } else {
-            warn(`"${name}" のレガシーpane ${id} のkillに失敗しました: ${r.stderr}`);
-            if (!handled) results.skipped.push(name);
-          }
-        }
+      // 後方互換のpane処理は上の共通primitiveで済ませる。ここでは古い
+      // workers.jsonの対象だったかだけを参照し、ワーカー本体の判定と結果集計を続ける。
+      const paneResult = paneByWorker.get(name);
+      if (paneResult) {
+        if (!handled && paneResult.status === 'killed') results.killed.push(name);
+        if (!handled && paneResult.status !== 'killed') results.skipped.push(name);
         handled = true;
       }
 
@@ -561,14 +838,13 @@ if (require.main === module) {
   // Phase 4 で .gh-maestro/messages/ は廃止（queue/inbox/ に移行）。
   // 既存セッションの残骸を掃除するため、存在すれば削除する（レガシークリーンアップ）。
   log('.gh-maestro/messages/ のレガシー残骸を掃除します...');
-  const messagesDir = resolve(workspace, '.gh-maestro', 'messages');
-  if (existsSync(messagesDir)) {
-    try {
-      rmSync(messagesDir, { recursive: true, force: true });
+  const messagesResult = cleanupLegacyMessages(workspace, {
+    rmFn: (target) => rmSync(target, { recursive: true, force: true }),
+  });
+  if (messagesResult.status === 'removed') {
       log('messages/（レガシー）を削除しました。');
-    } catch (e) {
-      warn(`messages/（レガシー）削除失敗: ${e.message}`);
-    }
+  } else if (messagesResult.status === 'unknown') {
+    warn(`messages/（レガシー）削除失敗: ${messagesResult.reason}`);
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -640,76 +916,25 @@ if (require.main === module) {
   //    queue.js / queue-poller.js は削除済みのため fs 直叩きのみで行う。
   // ═══════════════════════════════════════════════════════════════════
 
-  // ── 後方互換: レガシー queue-poller（detached 常駐プロセス）を kill ──────
-  // Phase 2 以前に起動されたセッションの .gh-maestro/queue/poller.json には
-  // detached queue-poller の pid が残っている可能性がある。poller.json を読んで
-  // heartbeat が新鮮なら best-effort で kill する（PID 再利用レース対策）。
-  // poller.json 本体は後続の queue ディレクトリ削除で一緒に消える。
-  {
-    const pollerJsonPath = resolve(workspace, '.gh-maestro', 'queue', 'poller.json');
-    if (existsSync(pollerJsonPath)) {
-      try {
-        const pollerState = JSON.parse(readFileSync(pollerJsonPath, 'utf8'));
-        const elapsed = Date.now() - (pollerState.heartbeat || 0);
-        if (elapsed > 15000) {
-          log(`poller.json の heartbeat が ${Math.floor(elapsed / 1000)}s 前で stale のため kill をスキップします。`);
-        } else if (pollerState.pid && pollerState.pid > 0) {
-          try {
-            process.kill(pollerState.pid, 0); // 生存確認（死んでいれば ESRCH）
-            killProcessTree(pollerState.pid); // detached → 子プロセスごと kill
-            log(`レガシー poller (pid ${pollerState.pid}) を終了しました。`);
-            results.killed.push(`legacy-poller(${pollerState.pid})`);
-          } catch (e) {
-            if (e.code === 'ESRCH') {
-              log(`レガシー poller (pid ${pollerState.pid}) は既に終了しています。`);
-            } else {
-              warn(`レガシー poller (pid ${pollerState.pid}) の kill に失敗しました: ${e.message}`);
-            }
-          }
-        }
-      } catch (e) {
-        warn(`poller.json の読み取りに失敗しました（queue 削除は続行します）: ${e.message}`);
-      }
-    }
-  }
-
   log('キュー状態を掃除します...');
-  const queueDir = resolve(workspace, '.gh-maestro', 'queue');
-  if (existsSync(queueDir)) {
-    // 1. junction を先に除去（共有 junction を辿って中身を削除しないため）
-    try {
-      unlinkJunctions(queueDir, warn);
-    } catch (e) {
-      warn(`queue/ の junction 除去に失敗しました（後続処理は続行します）: ${e.message}`);
+  const queueResult = cleanupLegacyQueue(workspace, {
+    legacyResetMode: true,
+    killProcessTreeFn: killProcessTree,
+    isProcessAliveFn: isProcessAlive,
+    sleepFn: sleep,
+    rmFn: (target) => rmSync(target, { recursive: true, force: true }),
+    warnFn: warn,
+  });
+  if (queueResult.status === 'removed') {
+    for (const pid of queueResult.killedPids || []) {
+      log(`レガシー poller (pid ${pid}) を終了しました。`);
+      results.killed.push(`legacy-poller(${pid})`);
     }
-
-    // 2. EBUSY/EPERM リトライ付きで削除
-    let removed = false;
-    for (let attempt = 0; attempt <= 5 && !removed; attempt++) {
-      try {
-        rmSync(queueDir, { recursive: true, force: true });
-        removed = true;
-      } catch (e) {
-        if (e.code === 'ENOENT') {
-          // TOCTOU: 別プロセスが先に削除した → 成功扱い
-          removed = true;
-        } else if (e.code === 'EBUSY' || e.code === 'EPERM') {
-          if (attempt < 5) {
-            sleep(20);
-          } else {
-            warn(`queue/ 削除失敗（リトライ超過）: ${e.message}`);
-          }
-        } else {
-          warn(`queue/ 削除失敗: ${e.message}`);
-          break;
-        }
-      }
-    }
-    if (removed) {
-      log('queue/ を削除しました。');
-    }
-  } else {
+    log('queue/ を削除しました。');
+  } else if (queueResult.status === 'absent') {
     log('queue/ なし。スキップ。');
+  } else if (queueResult.status === 'unknown') {
+    warn(`queue/ の掃除に失敗しました: ${queueResult.reason}`);
   }
 
   // ═══════════════════════════════════════════════════════════════════

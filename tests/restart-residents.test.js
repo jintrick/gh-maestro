@@ -18,6 +18,7 @@ const {
   restartStatusPane,
   formatStatusPaneResult,
   stopResidentEntry,
+  cleanupLegacyResidentLease,
 } = require('../scripts/shared/restart-residents');
 const { main, USAGE, writeResult } = require('../scripts/restart-residents');
 const {
@@ -332,6 +333,56 @@ test('restartResidents: 無関係なstale resident leaseがあってもteardown�
       workerName: role,
       phase: 'active',
     });
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('cleanupLegacyResidentLease: typo roleのstale leaseだけを除去し、正しいrole leaseは保持する', () => {
+  const workspace = makeWorkspace();
+  const leaseDir = path.join(workspace, '.gh-maestro', 'leases');
+  fs.mkdirSync(leaseDir, { recursive: true });
+  const legacyPath = path.join(leaseDir, roleLeaseKey('inbose-supervisor') + '.json');
+  const currentPath = path.join(leaseDir, roleLeaseKey('inbox-supervisor') + '.json');
+  try {
+    fs.writeFileSync(legacyPath, JSON.stringify({
+      pid: 999999, startTime: '2026-01-01T00:00:00.000Z', role: 'inbose-supervisor',
+    }), 'utf8');
+    fs.writeFileSync(currentPath, JSON.stringify({
+      pid: 999998, startTime: '2026-01-01T00:00:00.000Z', role: 'inbox-supervisor',
+    }), 'utf8');
+    const result = cleanupLegacyResidentLease(workspace, {
+      isProcessAliveFn: () => false,
+      acquireLeaseLockFn: () => true,
+      releaseLeaseLockFn: () => {},
+    });
+    assert.equal(result.status, 'removed');
+    assert.equal(fs.existsSync(legacyPath), false);
+    assert.equal(fs.existsSync(currentPath), true);
+    assert.equal(cleanupLegacyResidentLease(workspace, {
+      isProcessAliveFn: () => false,
+      acquireLeaseLockFn: () => true,
+      releaseLeaseLockFn: () => {},
+    }).status, 'absent');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('cleanupLegacyResidentLease: 稼働中で同一性確認済みの所有者はskippedにして保持する', () => {
+  const workspace = makeWorkspace();
+  const leasePath = path.join(workspace, '.gh-maestro', 'leases', roleLeaseKey('inbose-supervisor') + '.json');
+  try {
+    fs.mkdirSync(path.dirname(leasePath), { recursive: true });
+    fs.writeFileSync(leasePath, JSON.stringify({
+      pid: 999997, startTime: '2026-01-01T00:00:00.000Z', role: 'inbose-supervisor',
+    }), 'utf8');
+    const result = cleanupLegacyResidentLease(workspace, {
+      isProcessAliveFn: () => true,
+      verifyProcessIdentityFn: () => ({ match: true }),
+    });
+    assert.equal(result.status, 'skipped');
+    assert.equal(fs.existsSync(leasePath), true);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }

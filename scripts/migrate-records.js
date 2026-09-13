@@ -212,6 +212,10 @@ function planMigration(workspace, scope, { dryRun = false } = {}) {
   const gh = path.join(workspace, '.gh-maestro');
   const processFiles = (dir, component) => {
     for (const file of regularFiles(dir)) {
+      // 実行中の移行を抑制する制御マーカーはレコードではない。all scopeでは
+      // review-managerの旧配置と同じディレクトリを通るため、マーカーを旧名不正の
+      // レコードとして報告すると、空の移行でもunparseableになってしまう。
+      if (file.name === '.migration-in-progress') continue;
       let item;
       try { item = classifyScoped(workspace, dir, component, file); } catch {
         out.unparseable.push({ source: file.path, reason: 'legacy name cannot be parsed' });

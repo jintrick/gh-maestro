@@ -26,6 +26,7 @@ const { spawnSync } = require('./shared/child-process');
 const { existsSync, mkdirSync, readFileSync, writeFileSync,
         lstatSync, rmdirSync, rmSync, readdirSync } = require('fs');
 const { resolve, relative } = require('path');
+const fs = require('fs');
 // link-node-modules は常に同一ディレクトリに同居する（リポジトリの scripts/ もインストール先 ~/.gh-maestro/scripts/ も）。
 const { linkNodeModules } = require('./shared/link-node-modules');
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
@@ -37,7 +38,7 @@ const { buildNormalWorkerLaunchSpec } = require('./shared/worker-factory');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { createNormalWorkerStore, acquireLease: acquireWorkerLease,
         activateLease: activateWorkerLease, releaseLease: releaseWorkerLease,
-        isLeaseLive } = require('./shared/worker-lease');
+        isLeaseLive, acquireLeaseLock, releaseLeaseLock } = require('./shared/worker-lease');
 const { killProcessTree } = require('./shared/kill-tree');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
@@ -54,6 +55,8 @@ const readStateLib = require('./shared/read-state');
 const { checkClosedPr } = require('./shared/closed-pr-guard');
 const { getCurrentBranch } = require('./shared/git-branch');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
+const { readWorkersRaw } = require('./shared/workers-registry');
+const processLifecycle = require('./process-lifecycle');
 
 const defaultEnsureStatusPane = ensureStatusPaneLib;
 let _ensureStatusPane = defaultEnsureStatusPane;
@@ -191,6 +194,193 @@ function shouldPruneStaleWorker(entry, resolveAgent, aliveFn = isWorkerAlive) {
   return true;
 }
 
+const DEFAULT_ROLELESS_WORKER_NAME_PATTERN = '^issue-\\d+-(?!coder-|senior-coder-|explorer-|diagnostician-|architect-|review-manager-|base-|assistant-)[A-Za-z0-9_-]+$';
+
+function isRolelessWorkerName(name, pattern = DEFAULT_ROLELESS_WORKER_NAME_PATTERN) {
+  return typeof name === 'string' && new RegExp(pattern).test(name);
+}
+
+/**
+ * roleを含まない旧worker名の workers.json / 通常leaseを整理する。
+ * 生存中のworker・leaseはスキップし、worktree・branch・プロセス停止は行わない。
+ * @param {string} workspace
+ * @param {object} [options]
+ */
+function cleanupRolelessWorkers(workspace, options = {}) {
+  const workersPath = resolve(workspace, '.gh-maestro', 'workers.json');
+  const readWorkersFn = options.readWorkersFn || ((target) => {
+    const targetPath = resolve(target, '.gh-maestro', 'workers.json');
+    let stat;
+    try {
+      stat = fs.lstatSync(targetPath);
+    } catch (error) {
+      if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return null;
+      throw error;
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error('workers.json が通常ファイルではありません');
+    }
+    return readWorkersRaw(target);
+  });
+  const workers = readWorkersFn(workspace);
+  if (workers !== null && (!workers || typeof workers !== 'object' || Array.isArray(workers))) {
+    throw new Error('workers.json はオブジェクトである必要があります');
+  }
+  const workerAliveFn = options.isWorkerAliveFn || isWorkerAlive;
+  const rolelessPattern = options.namePattern || DEFAULT_ROLELESS_WORKER_NAME_PATTERN;
+  const staleWorkerNames = [];
+  const liveWorkerNames = new Set();
+  const liveLeaseWorkerNames = new Set();
+  let skipped = false;
+  if (workers) {
+    for (const [name, entry] of Object.entries(workers)) {
+      if (name === 'orchestrator' || !isRolelessWorkerName(name, rolelessPattern)) continue;
+      let alive;
+      try { alive = workerAliveFn(entry); } catch (error) {
+        throw new Error(`roleless worker ${name} の生存確認に失敗しました: ${error.message}`);
+      }
+      if (typeof alive !== 'boolean') throw new Error(`roleless worker ${name} の生存確認がbooleanを返しませんでした`);
+      if (alive) {
+        skipped = true;
+        liveWorkerNames.add(name);
+      }
+      else staleWorkerNames.push(name);
+    }
+  }
+
+  const leaseDir = options.leaseDir || resolve(workspace, '.gh-maestro', 'leases');
+  const readDirFn = options.readDirFn || ((dir) => fs.readdirSync(dir));
+  const leaseLstatFn = options.lstatFn || fs.lstatSync;
+  const readFileFn = options.readFileFn || ((filePath) => fs.readFileSync(filePath, 'utf8'));
+  const unlinkFn = options.unlinkFn || fs.unlinkSync;
+  const staleLeases = [];
+  let leaseNames = [];
+  try {
+    leaseNames = readDirFn(leaseDir);
+  } catch (error) {
+    if (!(error && (error.code === 'ENOENT' || error.code === 'ENOTDIR'))) throw error;
+  }
+  const isLeaseLiveFn = options.isLeaseLiveFn || isLeaseLive;
+  const isProcessAliveFn = options.isProcessAliveFn || processLifecycle.isProcessAlive;
+  const verifyProcessIdentityFn = options.verifyProcessIdentityFn || processLifecycle.verifyProcessIdentity;
+  for (const nameEntry of leaseNames) {
+    const name = typeof nameEntry === 'string' ? nameEntry : nameEntry.name;
+    if (typeof name !== 'string' || !name.endsWith('.json')) continue;
+    const workerName = name.slice(0, -'.json'.length);
+    if (!isRolelessWorkerName(workerName, rolelessPattern)) continue;
+    const leasePath = resolve(leaseDir, name);
+    let stat;
+    try {
+      stat = leaseLstatFn(leasePath);
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('leaseが通常ファイルではありません');
+    } catch (error) {
+      throw new Error(`${leasePath} の確認に失敗しました: ${error.message}`);
+    }
+    let lease;
+    try { lease = JSON.parse(readFileFn(leasePath, 'utf8')); } catch (error) {
+      throw new Error(`${leasePath} のJSON読み取りに失敗しました: ${error.message}`);
+    }
+    if (!lease || typeof lease !== 'object' || Array.isArray(lease)
+      || typeof lease.pid !== 'number' || !Number.isInteger(lease.pid) || lease.pid <= 0
+      || typeof lease.startTime !== 'string' || lease.startTime === '') {
+      throw new Error(`${leasePath} のlease形式が不正です`);
+    }
+    if (liveWorkerNames.has(workerName)) {
+      skipped = true;
+      continue;
+    }
+    let live;
+    try { live = isLeaseLiveFn(lease); } catch (error) {
+      throw new Error(`${leasePath} のlease生存確認に失敗しました: ${error.message}`);
+    }
+    if (typeof live !== 'boolean') throw new Error(`${leasePath} のlease生存確認がbooleanを返しませんでした`);
+    if (live) {
+      skipped = true;
+      liveLeaseWorkerNames.add(workerName);
+      continue;
+    }
+    let processAlive;
+    try { processAlive = isProcessAliveFn(lease.pid); } catch (error) {
+      throw new Error(`${leasePath} のPID生存確認に失敗しました: ${error.message}`);
+    }
+    if (typeof processAlive !== 'boolean') throw new Error(`${leasePath} のPID生存確認がbooleanを返しませんでした`);
+    if (processAlive) {
+      const identity = verifyProcessIdentityFn(lease.pid, lease);
+      if (!identity || identity.match !== true) {
+        throw new Error(`${leasePath} のPID同一性を確認できません: ${identity?.reason || 'identity mismatch'}`);
+      }
+      skipped = true;
+      liveLeaseWorkerNames.add(workerName);
+    } else {
+      staleLeases.push({ leasePath, workerName, lease });
+    }
+  }
+
+  // lease の stale 判定から削除までを同じ per-worker lock の下で再確認する。
+  // 先に読んだ stale lease を、別プロセスが再取得した直後に無条件削除すると、
+  // 新しい worker の排他を壊すため、ロック後の再読込みと PID/startTime の一致を
+  // 必須にする。
+  const removedLeasePaths = [];
+  const createWorkerStoreFn = options.createNormalWorkerStoreFn || createNormalWorkerStore;
+  const acquireLeaseLockFn = options.acquireLeaseLockFn || acquireLeaseLock;
+  const releaseLeaseLockFn = options.releaseLeaseLockFn || releaseLeaseLock;
+  for (const { leasePath, workerName, lease } of staleLeases) {
+    let store;
+    let locked = false;
+    try {
+      store = createWorkerStoreFn(workspace);
+      locked = acquireLeaseLockFn(store, workerName);
+      if (!locked) throw new Error('roleless worker leaseのロックを取得できませんでした');
+      const current = JSON.parse(readFileFn(leasePath, 'utf8'));
+      if (!current || typeof current !== 'object' || Array.isArray(current)
+        || current.pid !== lease.pid || current.startTime !== lease.startTime) {
+        throw new Error('roleless worker leaseが確認後に変更されました');
+      }
+      const currentLive = isLeaseLiveFn(current);
+      if (typeof currentLive !== 'boolean') throw new Error('roleless worker leaseの生存確認がbooleanを返しませんでした');
+      if (currentLive) {
+        skipped = true;
+        liveLeaseWorkerNames.add(workerName);
+        continue;
+      }
+      const processAlive = isProcessAliveFn(current.pid);
+      if (typeof processAlive !== 'boolean') throw new Error(`${leasePath} のPID生存確認がbooleanを返しませんでした`);
+      if (processAlive) {
+        const identity = verifyProcessIdentityFn(current.pid, current);
+        if (!identity || identity.match !== true) {
+          throw new Error(`${leasePath} のPID同一性を確認できません: ${identity?.reason || 'identity mismatch'}`);
+        }
+        skipped = true;
+        liveLeaseWorkerNames.add(workerName);
+        continue;
+      }
+      try { unlinkFn(leasePath); } catch (error) {
+        if (!error || error.code !== 'ENOENT') throw error;
+      }
+      removedLeasePaths.push(leasePath);
+    } catch (error) {
+      throw new Error(`${leasePath} のstale lease整理に失敗しました: ${error.message}`);
+    } finally {
+      if (locked) releaseLeaseLockFn(store, workerName);
+    }
+  }
+
+  const removableWorkerNames = staleWorkerNames.filter((name) => !liveLeaseWorkerNames.has(name));
+  const hasChanges = removableWorkerNames.length > 0 || removedLeasePaths.length > 0;
+  if (removableWorkerNames.length > 0) {
+    const nextWorkers = { ...workers };
+    for (const name of removableWorkerNames) delete nextWorkers[name];
+    (options.atomicWriteFn || atomicWriteJson)(workersPath, nextWorkers);
+  }
+  return {
+    status: hasChanges ? 'removed' : skipped ? 'skipped' : 'absent',
+    path: workersPath,
+    removedWorkers: removableWorkerNames,
+    removedLeases: removedLeasePaths,
+    reason: skipped && !hasChanges ? '稼働中のroleless workerまたはleaseを保護しました' : undefined,
+  };
+}
+
 /**
  * orchestrator 用の「Issue ベースライン既読化」（Issue #207）。
  *
@@ -258,6 +448,8 @@ function establishOrchestratorBaseline(workspace, { repo, issue, listCommentsFn 
 
 module.exports = {
   shouldPruneStaleWorker,
+  cleanupRolelessWorkers,
+  isRolelessWorkerName,
   establishOrchestratorBaseline,
   parseWorkerArgs,
   ensureStatusPaneForWorkspace,

@@ -19,7 +19,7 @@
       },
       "description": "旧AIレビューCIのワークフローと退役センチネル",
       "cleanupId": "gh-maestro-setup.retireAiReviewCi",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "setup-pre-commit-checks-hook",
@@ -33,7 +33,7 @@
       },
       "description": "pre-commitに残る廃止済みchecksマーカーブロック",
       "cleanupId": "gh-maestro-setup.ensureSyncHook",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "setup-pre-push-checks-hook",
@@ -47,7 +47,7 @@
       },
       "description": "pre-pushに残る廃止済みchecksブロックと抜け殻",
       "cleanupId": "gh-maestro-setup.retireChecksHooks",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "setup-stale-default-hooks",
@@ -64,7 +64,7 @@
       },
       "description": "core.hooksPath移行後の既定.git/hooksに残るマーカー",
       "cleanupId": "gh-maestro-setup.removeStaleDefaultHooks",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "setup-legacy-gitignore",
@@ -75,7 +75,7 @@
       "parameters": { "path": ".gitignore", "line": ".gh-maestro/" },
       "description": ".gitignoreの旧.gh-maestro/エントリ",
       "cleanupId": "gh-maestro-setup.ensureGitIgnore",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "install-legacy-agents-config",
@@ -86,7 +86,7 @@
       "parameters": { "path": "agents.json" },
       "description": "管理領域に残る旧agents.json",
       "cleanupId": "install.quarantineLegacyAgentsConfig",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "install-legacy-home-pids",
@@ -97,7 +97,7 @@
       "parameters": { "path": "pids" },
       "description": "管理領域に残る旧ホームPIDレジストリ",
       "cleanupId": "install.quarantineLegacyHomePids",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "install-legacy-managed-items",
@@ -110,7 +110,7 @@
       },
       "description": "管理領域直下に残る既知の旧バージョン項目",
       "cleanupId": "install.pruneManagedRoot",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "migrate-legacy-records",
@@ -161,7 +161,7 @@
       "parameters": { "field": "notifierPid" },
       "description": "workers.jsonに残る旧detached notifier",
       "cleanupId": "reset-session.notifierPid",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "reset-legacy-wezterm-pane",
@@ -172,7 +172,7 @@
       "parameters": { "field": "paneId" },
       "description": "reset-sessionが扱う旧WezTerm paneId",
       "cleanupId": "reset-session.paneId",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "reset-legacy-messages",
@@ -183,7 +183,7 @@
       "parameters": { "path": ".gh-maestro/messages" },
       "description": "Phase 4以前の.gh-maestro/messages",
       "cleanupId": "reset-session.messages",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "reset-legacy-queue",
@@ -194,7 +194,7 @@
       "parameters": { "directory": ".gh-maestro/queue", "pollerFile": "poller.json" },
       "description": "Phase 2以前のFSキューとqueue-poller",
       "cleanupId": "reset-session.queue",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "stop-worker-legacy-pane",
@@ -205,7 +205,7 @@
       "parameters": { "field": "paneId" },
       "description": "stop-worker-processが扱うワーカー旧paneId",
       "cleanupId": "stop-worker-process.paneId",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "worker-supervisor-legacy-name",
@@ -222,7 +222,7 @@
       },
       "description": "改名前のinbox-supervisor.jsと旧role lease",
       "cleanupId": "worker-supervisor-control.legacyName",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "restart-residents-legacy-lease",
@@ -233,7 +233,7 @@
       "parameters": { "directory": ".gh-maestro/leases", "role": "inbose-supervisor" },
       "description": "移行前の互換resident lease",
       "cleanupId": "restart-residents.legacyLease",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "spawn-worker-roleless-worker",
@@ -247,7 +247,7 @@
       },
       "description": "roleを含まない旧形式ワーカーの重複チェック対象",
       "cleanupId": "spawn-worker.rolelessGuard",
-      "integrationStatus": "pending"
+      "integrationStatus": "integrated"
     },
     {
       "id": "status-pane-legacy-record",

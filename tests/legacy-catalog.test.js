@@ -15,6 +15,7 @@ const {
 } = require('../scripts/shared/legacy-catalog');
 const { readFileAtRef } = require('../scripts/shared/git-ref');
 const { statusPanePath } = require('../scripts/shared/status-pane-registry');
+const { CLEANERS, cleanupWiringErrors } = require('../scripts/shared/legacy-cleanup');
 
 // 台帳の自己申告ではなく、Issue #532で確定した対象集合から独立に置く。
 const EXPECTED_LEGACY_ITEM_COUNT = 20;
@@ -81,12 +82,13 @@ test('catalog declares the independent 20-item inventory and all detectors are w
   }
 });
 
-test('catalog completeness depends on detector wiring, not pending integration status', () => {
+test('catalog completeness and cleanup wiring are independent of detector results', () => {
   const fixture = createWorkspace();
   try {
     const result = inspect(fixture);
     assert.equal(result.completeness, 'complete');
-    assert.equal(result.items.some((entry) => entry.integrationStatus === 'pending'), true);
+    assert.equal(result.items.every((entry) => entry.integrationStatus === 'integrated'), true);
+    assert.deepEqual(cleanupWiringErrors(CATALOG, CLEANERS), []);
 
     const missingDetector = { ...DETECTORS };
     delete missingDetector['setup-ai-review-ci'];
