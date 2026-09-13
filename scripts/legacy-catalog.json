@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "expectedItemCount": 19,
+  "expectedItemCount": 20,
   "items": [
     {
       "id": "setup-ai-review-ci",
@@ -248,6 +248,19 @@
       "description": "roleを含まない旧形式ワーカーの重複チェック対象",
       "cleanupId": "spawn-worker.rolelessGuard",
       "integrationStatus": "pending"
+    },
+    {
+      "id": "status-pane-legacy-record",
+      "generation": "status-pane-before-connection-context",
+      "scope": "runtime",
+      "requiredCapabilities": ["runtime-read"],
+      "detector": "status-pane-legacy-record",
+      "parameters": {
+        "path": "status-pane.json"
+      },
+      "description": "接続先・基準ペイン追加前の監視ペイン記録",
+      "cleanupId": "cleanup-legacy.statusPaneRecord",
+      "integrationStatus": "integrated"
     }
   ]
 }
