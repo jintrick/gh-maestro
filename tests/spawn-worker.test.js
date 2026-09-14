@@ -19,8 +19,12 @@ const {
   _setEnsureStatusPane,
 } = require(SCRIPT);
 const readStateLib = require('../scripts/shared/read-state');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 const fs = require('fs');
 const os = require('os');
+
+const tempDirScope = createTempDirScope();
+test.after(() => tempDirScope.cleanup());
 
 const TEST_WORKSPACE = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-test-ws-'));
 const TEST_SESSION_ID = 'test-valid-session-uuid';
@@ -421,7 +425,7 @@ test('新規ワーカー登録エントリは notifierPid を持たない（null
 });
 
 test('cleanupRolelessWorkers: deadなroleless workerとleaseだけを除去し、canonical workerは保持する', () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-roleless-cleanup-'));
+  const workspace = tempDirScope.mkdtemp('ghm-roleless-cleanup-');
   const metaDir = path.join(workspace, '.gh-maestro');
   const leaseDir = path.join(metaDir, 'leases');
   const roleless = 'issue-1-old-worker';
@@ -457,7 +461,7 @@ test('cleanupRolelessWorkers: deadなroleless workerとleaseだけを除去し�
 });
 
 test('cleanupRolelessWorkers: live workerは停止もregistry削除もしない', () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-roleless-live-'));
+  const workspace = tempDirScope.mkdtemp('ghm-roleless-live-');
   const metaDir = path.join(workspace, '.gh-maestro');
   const leaseDir = path.join(metaDir, 'leases');
   const roleless = 'issue-2-legacy';

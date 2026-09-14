@@ -3,13 +3,15 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
 const { cleanupLegacyWorkerPanes } = require('../scripts/shared/stop-worker-process');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
+const tempDirScope = createTempDirScope();
+test.after(() => tempDirScope.cleanup());
 
 function withWorkspace(callback) {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-stop-cleanup-'));
+  const workspace = tempDirScope.mkdtemp('ghm-stop-cleanup-');
   try {
     fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
     return callback(workspace);
