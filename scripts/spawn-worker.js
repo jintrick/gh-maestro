@@ -57,6 +57,10 @@ const { getCurrentBranch } = require('./shared/git-branch');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const processLifecycle = require('./process-lifecycle');
+const {
+  DEFAULT_ROLELESS_WORKER_NAME_PATTERN,
+  isRolelessWorkerName,
+} = require('./shared/roleless-worker');
 
 const defaultEnsureStatusPane = ensureStatusPaneLib;
 let _ensureStatusPane = defaultEnsureStatusPane;
@@ -194,12 +198,6 @@ function shouldPruneStaleWorker(entry, resolveAgent, aliveFn = isWorkerAlive) {
   return true;
 }
 
-const DEFAULT_ROLELESS_WORKER_NAME_PATTERN = '^issue-\\d+-(?!coder-|senior-coder-|explorer-|diagnostician-|architect-|review-manager-|base-|assistant-)[A-Za-z0-9_-]+$';
-
-function isRolelessWorkerName(name, pattern = DEFAULT_ROLELESS_WORKER_NAME_PATTERN) {
-  return typeof name === 'string' && new RegExp(pattern).test(name);
-}
-
 /**
  * roleを含まない旧worker名の workers.json / 通常leaseを整理する。
  * 生存中のworker・leaseはスキップし、worktree・branch・プロセス停止は行わない。
@@ -234,7 +232,7 @@ function cleanupRolelessWorkers(workspace, options = {}) {
   let skipped = false;
   if (workers) {
     for (const [name, entry] of Object.entries(workers)) {
-      if (name === 'orchestrator' || !isRolelessWorkerName(name, rolelessPattern)) continue;
+      if (name === 'orchestrator' || !isRolelessWorkerName(name, entry, { namePattern: rolelessPattern })) continue;
       let alive;
       try { alive = workerAliveFn(entry); } catch (error) {
         throw new Error(`roleless worker ${name} の生存確認に失敗しました: ${error.message}`);
@@ -267,7 +265,7 @@ function cleanupRolelessWorkers(workspace, options = {}) {
     const name = typeof nameEntry === 'string' ? nameEntry : nameEntry.name;
     if (typeof name !== 'string' || !name.endsWith('.json')) continue;
     const workerName = name.slice(0, -'.json'.length);
-    if (!isRolelessWorkerName(workerName, rolelessPattern)) continue;
+    if (!isRolelessWorkerName(workerName, null, { namePattern: rolelessPattern })) continue;
     const leasePath = resolve(leaseDir, name);
     let stat;
     try {

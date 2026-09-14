@@ -15,7 +15,7 @@ const { readWorkersRaw } = require('./workers-registry');
 const processLifecycle = require('../process-lifecycle');
 const { isWorkerAlive } = require('./worker-liveness');
 const workerLease = require('./worker-lease');
-const { deriveRoleFromSkill } = require('./worker-factory');
+const { isRolelessWorkerName } = require('./roleless-worker');
 const storageLayout = require('./storage-layout');
 const { statusPanePath } = require('./status-pane-registry');
 const statusPaneLegacy = require('./status-pane-legacy');
@@ -644,18 +644,6 @@ function detectResidentLease(context, parameters) {
   const observation = observeResidentLease(context, parameters.role);
   return present({ path: leasePath, role: parameters.role, live: observation.live,
     ...(observation.reason ? { observationError: observation.reason } : {}) });
-}
-
-function isRolelessWorkerName(name, entry, parameters) {
-  if (entry && typeof entry === 'object' && Number.isFinite(Number(entry.issue))
-    && typeof entry.skill === 'string') {
-    try {
-      const role = deriveRoleFromSkill(entry.skill);
-      const issuePrefix = `issue-${Number(entry.issue)}-`;
-      if (name.startsWith(issuePrefix)) return !name.startsWith(`${issuePrefix}${role}-`);
-    } catch { /* fallback to the established name shape below */ }
-  }
-  return compilePattern(parameters.namePattern, 'roleless worker name').test(name);
 }
 
 function detectRolelessWorker(context, parameters) {

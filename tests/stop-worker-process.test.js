@@ -25,7 +25,7 @@ test('cleanupLegacyWorkerPanes: live paneだけをkillしてworkers.jsonのpaneI
     const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
     fs.writeFileSync(workersPath, JSON.stringify({
       orchestrator: { paneId: '1' },
-      'issue-1-old': { paneId: '7', pid: 101 },
+      'issue-1-old': { paneId: ' 7 ', pid: 101 },
       'issue-2-old': { paneId: '8', pid: 102 },
     }), 'utf8');
     const killed = [];

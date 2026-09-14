@@ -20,6 +20,7 @@ const {
 } = require(SCRIPT);
 const readStateLib = require('../scripts/shared/read-state');
 const { createTempDirScope } = require('../scripts/shared/temp-directory');
+const { isRolelessWorkerName: sharedIsRolelessWorkerName } = require('../scripts/shared/roleless-worker');
 const fs = require('fs');
 const os = require('os');
 
@@ -484,6 +485,18 @@ test('cleanupRolelessWorkers: live workerは停止もregistry削除もしない'
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
+});
+
+test('roleless判定はworkerのskillから導出したroleと共有utilityを使う', () => {
+  assert.equal(isRolelessWorkerName, sharedIsRolelessWorkerName);
+  assert.equal(isRolelessWorkerName('issue-3-coder-old', {
+    issue: 3,
+    skill: 'gh-maestro-coder',
+  }), false);
+  assert.equal(isRolelessWorkerName('issue-3-coder-old', {
+    issue: 3,
+    skill: 'gh-maestro-explorer',
+  }), true);
 });
 
 // ── agent 解決 ────────────────────────────────────────────────────────────────

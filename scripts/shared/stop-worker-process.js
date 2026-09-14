@@ -35,9 +35,15 @@ function stopLegacyPane(paneId, options = {}) {
   return result;
 }
 
+function normalizeLegacyPaneId(value) {
+  if (typeof value === 'number') return Number.isInteger(value) && value >= 0 ? String(value) : null;
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return /^\d+$/.test(normalized) ? normalized : null;
+}
+
 function validLegacyPaneId(value) {
-  if (typeof value === 'number') return Number.isInteger(value) && value >= 0;
-  return typeof value === 'string' && /^\d+$/.test(value.trim());
+  return normalizeLegacyPaneId(value) !== null;
 }
 
 /**
@@ -244,10 +250,11 @@ function cleanupLegacyWorkerPanes(workspace, options = {}) {
     const isObject = rawEntry !== null && typeof rawEntry === 'object' && !Array.isArray(rawEntry);
     const rawPaneId = isObject ? rawEntry.paneId : rawEntry;
     if (rawPaneId === undefined || rawPaneId === null || rawPaneId === '') continue;
-    if (!validLegacyPaneId(rawPaneId)) {
+    const paneId = normalizeLegacyPaneId(rawPaneId);
+    if (paneId === null) {
       throw new Error(`workers.json の ${name}.paneId は非負整数ではありません`);
     }
-    targets.push({ name, rawEntry, isObject, paneId: String(rawPaneId) });
+    targets.push({ name, rawEntry, isObject, paneId });
   }
   if (targets.length === 0) return { status: 'absent', path: workersPath, field: 'paneId' };
 
@@ -257,7 +264,7 @@ function cleanupLegacyWorkerPanes(workspace, options = {}) {
   const killed = [];
   const skipped = [];
   for (const target of targets) {
-    if (alivePanes.has(target.paneId) || alivePanes.has(target.rawEntry)) {
+    if (alivePanes.has(target.paneId)) {
       stopLegacyPane(target.paneId, {
         killPaneFn: options.killPaneFn,
         sleepFn: options.sleepFn,
@@ -284,4 +291,10 @@ function cleanupLegacyWorkerPanes(workspace, options = {}) {
   };
 }
 
-module.exports = { stopWorkerProcess, cleanupLegacyWorkerPanes, stopLegacyPane, validLegacyPaneId };
+module.exports = {
+  stopWorkerProcess,
+  cleanupLegacyWorkerPanes,
+  stopLegacyPane,
+  normalizeLegacyPaneId,
+  validLegacyPaneId,
+};

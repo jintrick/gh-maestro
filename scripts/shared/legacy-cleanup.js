@@ -193,14 +193,32 @@ function cleanupLegacyRecords(options = {}) {
     { dryRun: false },
     () => migrateRecords.planMigration(options.workspace, scope, { dryRun: false }),
   );
-  const problems = [out.conflicts, out.unparseable, out.unprocessed].flat();
-  if (problems.length > 0) {
-    return { status: 'unknown', reason: problems.map((item) => item.reason || JSON.stringify(item)).join('; ') };
+  const held = Array.isArray(out.held) ? out.held : [];
+  const problems = [out.conflicts, out.unparseable, out.unprocessed, held].flat();
+  const hardProblems = [out.conflicts, out.unparseable, out.unprocessed].flat();
+  if (hardProblems.length > 0) {
+    return {
+      status: 'unknown',
+      moved: out.moved,
+      alreadyMigrated: out.alreadyMigrated,
+      held,
+      problems,
+      reason: problems.map((item) => item.reason || JSON.stringify(item)).join('; '),
+    };
+  }
+  if (held.length > 0) {
+    return {
+      status: 'skipped',
+      moved: out.moved,
+      alreadyMigrated: out.alreadyMigrated,
+      held,
+      problems: held,
+      reason: '所有者が稼働中の旧レコードを保持しました',
+    };
   }
   if (out.moved.length > 0 || out.alreadyMigrated.length > 0) {
-    return { status: 'removed', moved: out.moved, alreadyMigrated: out.alreadyMigrated, held: out.held };
+    return { status: 'removed', moved: out.moved, alreadyMigrated: out.alreadyMigrated, held };
   }
-  if (out.held.length > 0) return { status: 'skipped', held: out.held, reason: '所有者が稼働中の旧レコードを保持しました' };
   return { status: 'absent' };
 }
 

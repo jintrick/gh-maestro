@@ -184,7 +184,90 @@ test('Issue #553の16 cleanupIdは独立した期待集合から全てdispatch�
     'spawn-worker.rolelessGuard',
   ];
   assert.equal(new Set(expected).size, 16);
-  for (const cleanupId of expected) assert.equal(typeof CLEANERS[cleanupId], 'function', cleanupId);
+  assert.deepEqual(expected.filter((cleanupId) => typeof CLEANERS[cleanupId] === 'function'), expected);
+});
+
+test('Issue #553の16 cleanupIdは共通入口からテーブル駆動で到達し、catalog parametersを受け取る', () => {
+  const expected = [
+    'gh-maestro-setup.retireAiReviewCi',
+    'gh-maestro-setup.ensureSyncHook',
+    'gh-maestro-setup.retireChecksHooks',
+    'gh-maestro-setup.removeStaleDefaultHooks',
+    'gh-maestro-setup.ensureGitIgnore',
+    'install.quarantineLegacyAgentsConfig',
+    'install.quarantineLegacyHomePids',
+    'install.pruneManagedRoot',
+    'reset-session.notifierPid',
+    'reset-session.paneId',
+    'reset-session.messages',
+    'reset-session.queue',
+    'stop-worker-process.paneId',
+    'worker-supervisor-control.legacyName',
+    'restart-residents.legacyLease',
+    'spawn-worker.rolelessGuard',
+  ];
+  const allowedStatuses = new Set(['removed', 'absent', 'skipped', 'unknown']);
+
+  withFixture((fixture) => {
+    const managedRoot = path.join(path.dirname(fixture.workspace), 'managed');
+    const hooksDir = path.join(path.dirname(fixture.workspace), 'hooks');
+    const defaultHooksDir = path.join(path.dirname(fixture.workspace), 'default-hooks');
+    fs.mkdirSync(path.join(managedRoot, 'workflows'), { recursive: true });
+    fs.mkdirSync(path.join(managedRoot, 'not-cataloged'), { recursive: true });
+    fs.mkdirSync(hooksDir, { recursive: true });
+    fs.mkdirSync(defaultHooksDir, { recursive: true });
+
+    for (const cleanupId of expected) {
+      const result = cleanupLegacyArtifact({
+        cleanupId,
+        workspace: fixture.workspace,
+        runtimeRoot: fixture.runtimeRoot,
+        managedRoot,
+        hooksDir,
+        defaultHooksDir,
+        verifyOnly: false,
+        sourcePath: path.join(managedRoot, 'agents.json'),
+        configPath: path.join(managedRoot, 'config.json'),
+        defaultsPath: path.join(managedRoot, 'agent-defaults.json'),
+        quarantineDir: path.join(fixture.runtimeRoot, 'legacy-home', 'pids'),
+      });
+      assert.equal(result.cleanupId, cleanupId);
+      assert.ok(allowedStatuses.has(result.status), `${cleanupId}: ${result.status}`);
+      assert.equal(result.ok, result.status !== 'unknown');
+    }
+
+    // install.pruneManagedRoot receives the exact entries from its catalog entry;
+    // the decoy top-level path must survive while workflows is removed.
+    assert.equal(fs.existsSync(path.join(managedRoot, 'workflows')), false);
+    assert.equal(fs.existsSync(path.join(managedRoot, 'not-cataloged')), true);
+  });
+});
+
+test('cleanupLegacyRecordsはmovedとheldが混在する場合もheldをskippedとして明示する', () => {
+  withFixture((fixture) => {
+    const watchDir = path.join(fixture.workspace, '.gh-maestro', 'assistant-watch');
+    fs.mkdirSync(watchDir, { recursive: true });
+    fs.writeFileSync(path.join(watchDir, '5.json'), '{"prs":{}}', 'utf8');
+    fs.writeFileSync(path.join(watchDir, '7.json'), '{"prs":{}}', 'utf8');
+    fs.writeFileSync(path.join(fixture.workspace, '.gh-maestro', 'assistants.json'), JSON.stringify({
+      '5': { paneId: 'pane-5', launchedAt: '2026-08-01T00:00:00.000Z' },
+    }), 'utf8');
+
+    const result = cleanupLegacyArtifact({
+      cleanupId: 'migrate-records.planMigration',
+      workspace: fixture.workspace,
+      runtimeRoot: fixture.runtimeRoot,
+      scope: 'assistant-watch',
+    });
+    assert.equal(result.status, 'skipped', JSON.stringify(result));
+    assert.equal(result.ok, true);
+    assert.equal(result.held.length, 1);
+    assert.deepEqual(result.problems, result.held);
+    assert.match(result.held[0].source, /5\.json$/);
+    assert.equal(result.moved.length, 1);
+    assert.equal(fs.existsSync(path.join(watchDir, '5.json')), true);
+    assert.equal(fs.existsSync(path.join(watchDir, '7.json')), false);
+  });
 });
 
 test('setup cleanerはhook/gitignoreの旧ブロックだけを除去し、再実行をabsentにする', () => {

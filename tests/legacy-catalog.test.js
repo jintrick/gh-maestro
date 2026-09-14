@@ -327,6 +327,30 @@ test('process and worker detectors use existing read-only liveness helpers', () 
   }
 });
 
+test('roleless worker detectorはskillから導出したroleを共有判定へ渡す', () => {
+  const fixture = createWorkspace();
+  const workersPath = path.join(fixture.root, '.gh-maestro', 'workers.json');
+  try {
+    fs.writeFileSync(workersPath, JSON.stringify({
+      'issue-3-coder-old': { issue: 3, skill: 'gh-maestro-coder' },
+    }), 'utf8');
+    const canonical = inspect(fixture, {
+      capabilities: { isWorkerAlive: () => false },
+    });
+    assert.equal(item(canonical, 'spawn-worker-roleless-worker').status, 'absent');
+
+    fs.writeFileSync(workersPath, JSON.stringify({
+      'issue-3-coder-old': { issue: 3, skill: 'gh-maestro-explorer' },
+    }), 'utf8');
+    const roleMismatch = inspect(fixture, {
+      capabilities: { isWorkerAlive: () => false },
+    });
+    assert.equal(item(roleMismatch, 'spawn-worker-roleless-worker').status, 'present');
+  } finally {
+    removeWorkspace(fixture);
+  }
+});
+
 test('workspace-scoped items are not_applicable when no workspace capability is supplied', () => {
   const fixture = createWorkspace();
   try {
