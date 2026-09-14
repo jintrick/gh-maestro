@@ -14,14 +14,37 @@
 const path = require('path');
 const fs = require('fs');
 const { spawnSync } = require('./child-process');
-const { killPane } = require('./pane-launch');
+const { killPane, getAlivePaneIds } = require('./pane-launch');
 const { normalizeWorkerEntry } = require('./worker-entry');
 const { killProcessTree, waitForPidsToExit } = require('./kill-tree');
 const { sweepRegistry, isProcessAlive, verifyProcessIdentity } = require('../process-lifecycle');
 const { deriveRoleFromSkill } = require('./worker-factory');
 const { recordCycleEvent } = require('./cycle-metrics');
+const { readWorkersRaw } = require('./workers-registry');
+const { atomicWriteJson } = require('./atomic-write');
 
 const defaultSleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+function stopLegacyPane(paneId, options = {}) {
+  const killPaneFn = options.killPaneFn || killPane;
+  const result = killPaneFn(String(paneId));
+  if (!result || result.ok !== true) {
+    throw new Error(`レガシーpane ${paneId} のkill-pane 失敗: ${(result && result.stderr) || '(empty)'}`);
+  }
+  (options.sleepFn || defaultSleep)(options.sleepMs ?? 500);
+  return result;
+}
+
+function normalizeLegacyPaneId(value) {
+  if (typeof value === 'number') return Number.isInteger(value) && value >= 0 ? String(value) : null;
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return /^\d+$/.test(normalized) ? normalized : null;
+}
+
+function validLegacyPaneId(value) {
+  return normalizeLegacyPaneId(value) !== null;
+}
 
 /**
  * ワーカーのプロセスを同一性確認の上で停止する。
@@ -134,14 +157,13 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
 
   // ── 後方互換: 移行前セッションが残した WezTerm ペインを kill ──────────────
   if (workerEntry.paneId) {
-    const killResult = killPane(workerEntry.paneId);
     const prefix = isRemoveMode ? 'remove-worker' : 'stop-worker';
-    if (!killResult.ok) {
-      logWarn(`${prefix}: レガシーpane ${workerEntry.paneId} のkill-pane 失敗: ${(killResult.stderr || '').trim()}`);
-    } else {
+    try {
+      stopLegacyPane(workerEntry.paneId, { sleepFn, sleepMs: paneWaitMs });
       logWarn(`${prefix}: レガシーpane ${workerEntry.paneId} を終了しました`);
+    } catch (error) {
+      logWarn(`${prefix}: レガシーpane ${workerEntry.paneId} のkill-pane 失敗: ${error.message}`);
     }
-    sleepFn(paneWaitMs);
   }
 
   if (!workerEntry.pid && !workerEntry.paneId) {
@@ -195,4 +217,84 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
   };
 }
 
-module.exports = { stopWorkerProcess };
+/**
+ * workers.jsonに残る旧paneIdだけを整理する。ワーカー本体のPIDやworktreeには触れない。
+ * paneの存在を確認できない場合は、IDを再利用した無関係なpaneをkillしないため中断する。
+ * @param {string} workspace
+ * @param {object} [options]
+ */
+function cleanupLegacyWorkerPanes(workspace, options = {}) {
+  const workersPath = path.resolve(workspace, '.gh-maestro', 'workers.json');
+  const readWorkersFn = options.readWorkersFn || ((target) => {
+    let stat;
+    try {
+      stat = fs.lstatSync(path.resolve(target, '.gh-maestro', 'workers.json'));
+    } catch (error) {
+      if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return null;
+      throw error;
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error('workers.json が通常ファイルではありません');
+    }
+    return readWorkersRaw(target);
+  });
+  const workers = readWorkersFn(workspace);
+  if (workers === null) return { status: 'absent', path: workersPath, field: 'paneId' };
+  if (!workers || typeof workers !== 'object' || Array.isArray(workers)) {
+    throw new Error('workers.json はオブジェクトである必要があります');
+  }
+
+  const targets = [];
+  for (const [name, rawEntry] of Object.entries(workers)) {
+    if (name === 'orchestrator') continue;
+    const isObject = rawEntry !== null && typeof rawEntry === 'object' && !Array.isArray(rawEntry);
+    const rawPaneId = isObject ? rawEntry.paneId : rawEntry;
+    if (rawPaneId === undefined || rawPaneId === null || rawPaneId === '') continue;
+    const paneId = normalizeLegacyPaneId(rawPaneId);
+    if (paneId === null) {
+      throw new Error(`workers.json の ${name}.paneId は非負整数ではありません`);
+    }
+    targets.push({ name, rawEntry, isObject, paneId });
+  }
+  if (targets.length === 0) return { status: 'absent', path: workersPath, field: 'paneId' };
+
+  let alivePanes = options.alivePanes;
+  if (alivePanes === undefined) alivePanes = (options.getAlivePaneIdsFn || getAlivePaneIds)(options.warnFn || (() => {}));
+  if (!(alivePanes instanceof Set)) throw new Error('legacy paneの生存一覧を確認できませんでした');
+  const killed = [];
+  const skipped = [];
+  for (const target of targets) {
+    if (alivePanes.has(target.paneId)) {
+      stopLegacyPane(target.paneId, {
+        killPaneFn: options.killPaneFn,
+        sleepFn: options.sleepFn,
+        sleepMs: options.sleepMs ?? 0,
+      });
+      killed.push(target.paneId);
+    } else {
+      skipped.push(target.paneId);
+    }
+  }
+
+  const nextWorkers = { ...workers };
+  for (const { name, rawEntry, isObject } of targets) {
+    nextWorkers[name] = isObject ? { ...rawEntry, paneId: null } : { paneId: null };
+  }
+  (options.atomicWriteFn || atomicWriteJson)(workersPath, nextWorkers);
+  return {
+    status: 'removed',
+    path: workersPath,
+    field: 'paneId',
+    workers: targets.map(({ name }) => name),
+    killedPanes: killed,
+    skippedPanes: skipped,
+  };
+}
+
+module.exports = {
+  stopWorkerProcess,
+  cleanupLegacyWorkerPanes,
+  stopLegacyPane,
+  normalizeLegacyPaneId,
+  validLegacyPaneId,
+};

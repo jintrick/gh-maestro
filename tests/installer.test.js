@@ -13,7 +13,9 @@ const os = require('os');
 const ROOT = path.join(__dirname, '..');
 const {
   parseAgentsYaml, applySubstitutions, expandHome, stripFrontmatter, copySkillAssets, pruneStaleRecursive,
-  buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids, installSkills,
+  buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids,
+  migrateLegacyAgentsConfig, cleanupLegacyAgentsConfig, cleanupLegacyHomePids,
+  pruneManagedRootEntries, cleanupLegacyManagedRoot, installSkills,
   installScripts, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
   buildUserPromptExpansionHook, registerUserPromptExpansionHook,
 } = require('../scripts/install.js');
@@ -942,6 +944,85 @@ test('quarantineLegacyHomePids: JSON以外のファイル（startup-lock等）�
     fs.rmSync(src, { recursive: true, force: true });
     fs.rmSync(dest, { recursive: true, force: true });
   }
+});
+
+test('migrateLegacyAgentsConfig: 検証済みの差分だけをconfigへ移し、cleanup時に旧ファイルを削除する', () => {
+  withTempDir('ghm-install-config-', (root) => {
+    const managedRoot = path.join(root, 'managed');
+    const sourcePath = path.join(managedRoot, 'agents.json');
+    const configPath = path.join(managedRoot, 'config.json');
+    const defaultsPath = path.join(root, 'agent-defaults.json');
+    const defaults = {
+      agents: [{
+        id: 'agent-a', label: 'Agent A', command: 'agent-a', runtime: 'agent-a',
+        extraArgs: [], promptDelivery: 'system-prompt-file', rulesSupported: true,
+        resumeCommand: [],
+      }],
+    };
+    fs.mkdirSync(managedRoot, { recursive: true });
+    fs.writeFileSync(defaultsPath, JSON.stringify(defaults), 'utf8');
+    fs.writeFileSync(sourcePath, JSON.stringify([
+      { id: 'agent-a', label: 'Private label' },
+    ]), 'utf8');
+    fs.writeFileSync(configPath, JSON.stringify({ unrelated: true }), 'utf8');
+
+    const result = cleanupLegacyAgentsConfig({ sourcePath, configPath, defaultsPath, managedRoot });
+    assert.equal(result.status, 'removed');
+    assert.equal(result.migratedCount, 1);
+    assert.equal(fs.existsSync(sourcePath), false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(configPath, 'utf8')), {
+      unrelated: true,
+      agents: { 'agent-a': { label: 'Private label' } },
+    });
+
+    const second = migrateLegacyAgentsConfig({ sourcePath, configPath, defaultsPath, managedRoot });
+    assert.equal(second.status, 'absent');
+  });
+});
+
+test('migrateLegacyAgentsConfig: 破損した旧設定はconfigを上書きせず旧ファイルを保持する', () => {
+  withTempDir('ghm-install-config-corrupt-', (root) => {
+    const sourcePath = path.join(root, 'agents.json');
+    const configPath = path.join(root, 'config.json');
+    const defaultsPath = path.join(root, 'agent-defaults.json');
+    fs.writeFileSync(sourcePath, '{broken', 'utf8');
+    fs.writeFileSync(configPath, JSON.stringify({ keep: true }), 'utf8');
+    fs.writeFileSync(defaultsPath, JSON.stringify({ agents: [] }), 'utf8');
+
+    const result = migrateLegacyAgentsConfig({ sourcePath, configPath, defaultsPath });
+    assert.equal(result.status, 'unknown');
+    assert.equal(fs.readFileSync(sourcePath, 'utf8'), '{broken');
+    assert.deepEqual(JSON.parse(fs.readFileSync(configPath, 'utf8')), { keep: true });
+  });
+});
+
+test('pruneManagedRootEntries: 台帳に明示したトップレベルだけを削除し、path traversalを拒否する', () => {
+  withTempDir('ghm-install-prune-', (root) => {
+    const managedRoot = path.join(root, 'managed');
+    fs.mkdirSync(path.join(managedRoot, 'workflows'), { recursive: true });
+    fs.writeFileSync(path.join(managedRoot, 'review-policy.md'), 'old', 'utf8');
+    fs.writeFileSync(path.join(managedRoot, 'keep.txt'), 'keep', 'utf8');
+    const result = pruneManagedRootEntries(managedRoot, ['workflows', 'review-policy.md', '../keep.txt']);
+    assert.deepEqual(result.removed.sort(), ['review-policy.md', 'workflows']);
+    assert.equal(fs.existsSync(path.join(managedRoot, 'keep.txt')), true);
+    assert.ok(result.errors.some((message) => message.includes('../keep.txt')));
+  });
+});
+
+test('cleanupLegacyHomePids: 隔離に失敗した場合は旧registryを削除しない', () => {
+  withTempDir('ghm-install-pids-', (root) => {
+    const managedRoot = path.join(root, 'managed');
+    const runtimeRoot = path.join(root, 'runtime');
+    const sourcePath = path.join(managedRoot, 'pids');
+    const quarantineDir = path.join(runtimeRoot, 'legacy-home', 'pids');
+    fs.mkdirSync(sourcePath, { recursive: true });
+    fs.writeFileSync(path.join(sourcePath, 'broken.json'), '{broken', 'utf8');
+
+    const result = cleanupLegacyHomePids({ managedRoot, runtimeRoot, sourcePath, quarantineDir });
+    assert.equal(result.status, 'unknown');
+    assert.equal(fs.existsSync(sourcePath), true);
+    assert.equal(fs.existsSync(path.join(quarantineDir, 'broken.json')), false);
+  });
 });
 
 // ── pruneStaleRecursive（G1） ─────────────────────────────────────────────────

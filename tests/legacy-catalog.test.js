@@ -15,6 +15,7 @@ const {
 } = require('../scripts/shared/legacy-catalog');
 const { readFileAtRef } = require('../scripts/shared/git-ref');
 const { statusPanePath } = require('../scripts/shared/status-pane-registry');
+const { CLEANERS, cleanupWiringErrors } = require('../scripts/shared/legacy-cleanup');
 
 // 台帳の自己申告ではなく、Issue #532で確定した対象集合から独立に置く。
 const EXPECTED_LEGACY_ITEM_COUNT = 20;
@@ -81,12 +82,13 @@ test('catalog declares the independent 20-item inventory and all detectors are w
   }
 });
 
-test('catalog completeness depends on detector wiring, not pending integration status', () => {
+test('catalog completeness and cleanup wiring are independent of detector results', () => {
   const fixture = createWorkspace();
   try {
     const result = inspect(fixture);
     assert.equal(result.completeness, 'complete');
-    assert.equal(result.items.some((entry) => entry.integrationStatus === 'pending'), true);
+    assert.equal(result.items.every((entry) => entry.integrationStatus === 'integrated'), true);
+    assert.deepEqual(cleanupWiringErrors(CATALOG, CLEANERS), []);
 
     const missingDetector = { ...DETECTORS };
     delete missingDetector['setup-ai-review-ci'];
@@ -320,6 +322,30 @@ test('process and worker detectors use existing read-only liveness helpers', () 
     assert.ok(processChecks > 0);
     assert.ok(workerChecks > 0);
     assert.ok(leaseChecks > 0);
+  } finally {
+    removeWorkspace(fixture);
+  }
+});
+
+test('roleless worker detectorはskillから導出したroleを共有判定へ渡す', () => {
+  const fixture = createWorkspace();
+  const workersPath = path.join(fixture.root, '.gh-maestro', 'workers.json');
+  try {
+    fs.writeFileSync(workersPath, JSON.stringify({
+      'issue-3-coder-old': { issue: 3, skill: 'gh-maestro-coder' },
+    }), 'utf8');
+    const canonical = inspect(fixture, {
+      capabilities: { isWorkerAlive: () => false },
+    });
+    assert.equal(item(canonical, 'spawn-worker-roleless-worker').status, 'absent');
+
+    fs.writeFileSync(workersPath, JSON.stringify({
+      'issue-3-coder-old': { issue: 3, skill: 'gh-maestro-explorer' },
+    }), 'utf8');
+    const roleMismatch = inspect(fixture, {
+      capabilities: { isWorkerAlive: () => false },
+    });
+    assert.equal(item(roleMismatch, 'spawn-worker-roleless-worker').status, 'present');
   } finally {
     removeWorkspace(fixture);
   }

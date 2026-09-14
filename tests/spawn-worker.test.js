@@ -11,14 +11,21 @@ lifecycle.getProcessStartTime = () => TEST_PROCESS_START_TIME;
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'spawn-worker.js');
 const {
   shouldPruneStaleWorker,
+  cleanupRolelessWorkers,
+  isRolelessWorkerName,
   establishOrchestratorBaseline,
   parseWorkerArgs,
   ensureStatusPaneForWorkspace,
   _setEnsureStatusPane,
 } = require(SCRIPT);
 const readStateLib = require('../scripts/shared/read-state');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
+const { isRolelessWorkerName: sharedIsRolelessWorkerName } = require('../scripts/shared/roleless-worker');
 const fs = require('fs');
 const os = require('os');
+
+const tempDirScope = createTempDirScope();
+test.after(() => tempDirScope.cleanup());
 
 const TEST_WORKSPACE = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-test-ws-'));
 const TEST_SESSION_ID = 'test-valid-session-uuid';
@@ -416,6 +423,80 @@ test('新規ワーカー登録エントリは notifierPid を持たない（null
   const { normalizeWorkerEntry } = require('../scripts/shared/worker-entry');
   const entry = normalizeWorkerEntry({ pid: 1, agentId: 'claude', issue: 7 });
   assert.equal(entry.notifierPid, null);
+});
+
+test('cleanupRolelessWorkers: deadなroleless workerとleaseだけを除去し、canonical workerは保持する', () => {
+  const workspace = tempDirScope.mkdtemp('ghm-roleless-cleanup-');
+  const metaDir = path.join(workspace, '.gh-maestro');
+  const leaseDir = path.join(metaDir, 'leases');
+  const roleless = 'issue-1-old-worker';
+  try {
+    fs.mkdirSync(leaseDir, { recursive: true });
+    fs.writeFileSync(path.join(metaDir, 'workers.json'), JSON.stringify({
+      [roleless]: { pid: 101, startTime: '2026-01-01T00:00:00.000Z' },
+      'issue-1-coder-worker': { pid: 102, startTime: '2026-01-01T00:00:00.000Z' },
+    }), 'utf8');
+    fs.writeFileSync(path.join(leaseDir, `${roleless}.json`), JSON.stringify({
+      pid: 101, startTime: '2026-01-01T00:00:00.000Z',
+    }), 'utf8');
+
+    assert.equal(isRolelessWorkerName(roleless), true);
+    const result = cleanupRolelessWorkers(workspace, {
+      isWorkerAliveFn: () => false,
+      isLeaseLiveFn: () => false,
+      isProcessAliveFn: () => false,
+    });
+    assert.equal(result.status, 'removed');
+    const workers = JSON.parse(fs.readFileSync(path.join(metaDir, 'workers.json'), 'utf8'));
+    assert.equal(workers[roleless], undefined);
+    assert.ok(workers['issue-1-coder-worker']);
+    assert.equal(fs.existsSync(path.join(leaseDir, `${roleless}.json`)), false);
+    assert.equal(cleanupRolelessWorkers(workspace, {
+      isWorkerAliveFn: () => false,
+      isLeaseLiveFn: () => false,
+      isProcessAliveFn: () => false,
+    }).status, 'absent');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('cleanupRolelessWorkers: live workerは停止もregistry削除もしない', () => {
+  const workspace = tempDirScope.mkdtemp('ghm-roleless-live-');
+  const metaDir = path.join(workspace, '.gh-maestro');
+  const leaseDir = path.join(metaDir, 'leases');
+  const roleless = 'issue-2-legacy';
+  try {
+    fs.mkdirSync(leaseDir, { recursive: true });
+    fs.writeFileSync(path.join(metaDir, 'workers.json'), JSON.stringify({
+      [roleless]: { pid: 201, startTime: '2026-01-01T00:00:00.000Z' },
+    }), 'utf8');
+    const leasePath = path.join(leaseDir, `${roleless}.json`);
+    fs.writeFileSync(leasePath, JSON.stringify({
+      pid: 202, startTime: '2026-01-01T00:00:00.000Z',
+    }), 'utf8');
+    const result = cleanupRolelessWorkers(workspace, {
+      isWorkerAliveFn: () => true,
+      isProcessAliveFn: () => false,
+    });
+    assert.equal(result.status, 'skipped');
+    assert.ok(JSON.parse(fs.readFileSync(path.join(metaDir, 'workers.json'), 'utf8'))[roleless]);
+    assert.equal(fs.existsSync(leasePath), true);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('roleless判定はworkerのskillから導出したroleと共有utilityを使う', () => {
+  assert.equal(isRolelessWorkerName, sharedIsRolelessWorkerName);
+  assert.equal(isRolelessWorkerName('issue-3-coder-old', {
+    issue: 3,
+    skill: 'gh-maestro-coder',
+  }), false);
+  assert.equal(isRolelessWorkerName('issue-3-coder-old', {
+    issue: 3,
+    skill: 'gh-maestro-explorer',
+  }), true);
 });
 
 // ── agent 解決 ────────────────────────────────────────────────────────────────

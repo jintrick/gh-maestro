@@ -21,9 +21,9 @@ const USAGE = [
   '                     GH_MAESTRO_WORKSPACE または CWD から解決）',
   '  --help, -h         このusageを表示',
   '',
-  'status-paneの旧形式を整理する場合、旧記録のファイルだけを削除し、',
-  '記録中のpaneIdを使ったWezTermの照会・終了は行わない。現行形式や破損した',
-  '記録は削除せず、判定不能な場合は終了コード1で返す。',
+  'cleanupIdごとの整理結果は removed / absent / skipped / unknown / unsupported のいずれかで返す。',
+  '現行状態・稼働中の所有者・verify-only対象は保持して skipped、読み取り・同一性・',
+  '外部操作を確認できない場合は保持して unknown（終了コード1）で返す。',
 ].join('\n');
 
 const SPEC = {

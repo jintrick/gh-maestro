@@ -30,6 +30,10 @@ const {
   LEGACY_INBOX_SUPERVISOR_ROLE,
   WORKER_SUPERVISOR_ROLE,
   msgPollRole,
+  roleLeaseKey,
+  createResidentLeaseStore,
+  acquireLeaseLock,
+  releaseLeaseLock,
   releaseResidentLeaseForProcess,
 } = require('./worker-lease');
 const {
@@ -267,6 +271,84 @@ function residentLeaseRoles(entry) {
   }
   if (spec.script === 'msg-poll.js') return [msgPollRole(entry.workerName ?? 'orchestrator')];
   return [];
+}
+
+/**
+ * 旧 typo role（inbose-supervisor）のleaseだけを、所有者の生存と同一性を確認して整理する。
+ * 現行の inbox-supervisor / worker-supervisor role lease には触れない。
+ * @param {string} workspace
+ * @param {object} [options]
+ */
+function cleanupLegacyResidentLease(workspace, options = {}) {
+  const role = options.role || 'inbose-supervisor';
+  const leasePath = path.join(workspace, '.gh-maestro', 'leases', `${roleLeaseKey(role)}.json`);
+  const lstatFn = options.lstatFn || fs.lstatSync;
+  const readFileFn = options.readFileFn || ((filePath) => fs.readFileSync(filePath, 'utf8'));
+  const unlinkFn = options.unlinkFn || fs.unlinkSync;
+  let stat;
+  try {
+    stat = lstatFn(leasePath);
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return { status: 'absent', path: leasePath };
+    return { status: 'unknown', path: leasePath, reason: error.message };
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    return { status: 'unknown', path: leasePath, reason: 'legacy resident leaseが通常ファイルではありません' };
+  }
+
+  let lease;
+  try {
+    lease = JSON.parse(readFileFn(leasePath, 'utf8'));
+  } catch (error) {
+    return { status: 'unknown', path: leasePath, reason: `legacy resident leaseのJSON読み取りに失敗しました: ${error.message}` };
+  }
+  if (!lease || typeof lease !== 'object' || Array.isArray(lease)
+    || !isValidPid(lease.pid) || !Number.isInteger(lease.pid)
+    || typeof lease.startTime !== 'string' || lease.startTime === '') {
+    return { status: 'unknown', path: leasePath, reason: 'legacy resident leaseの形式が不正です' };
+  }
+
+  const isProcessAliveFn = options.isProcessAliveFn || isProcessAlive;
+  const verifyProcessIdentityFn = options.verifyProcessIdentityFn || verifyProcessIdentity;
+  let alive;
+  try { alive = isProcessAliveFn(lease.pid); } catch (error) {
+    return { status: 'unknown', path: leasePath, reason: `lease所有者の生存確認に失敗しました: ${error.message}` };
+  }
+  if (typeof alive !== 'boolean') {
+    return { status: 'unknown', path: leasePath, reason: 'lease所有者の生存確認がbooleanを返しませんでした' };
+  }
+  if (alive) {
+    let identity;
+    try { identity = verifyProcessIdentityFn(lease.pid, lease); } catch (error) {
+      return { status: 'unknown', path: leasePath, reason: `lease所有者の同一性確認に失敗しました: ${error.message}` };
+    }
+    if (!identity || identity.match !== true) {
+      return { status: 'unknown', path: leasePath, reason: identity?.reason || 'lease所有者の同一性を確認できません' };
+    }
+    return { status: 'skipped', path: leasePath, reason: 'legacy resident leaseの所有者が稼働中です' };
+  }
+
+  const key = roleLeaseKey(role);
+  let store;
+  let locked = false;
+  try {
+    store = (options.createResidentLeaseStoreFn || createResidentLeaseStore)(workspace);
+    locked = (options.acquireLeaseLockFn || acquireLeaseLock)(store, key);
+    if (!locked) return { status: 'unknown', path: leasePath, reason: 'legacy resident leaseのロックを取得できませんでした' };
+    const current = JSON.parse(readFileFn(leasePath, 'utf8'));
+    if (!current || current.pid !== lease.pid || current.startTime !== lease.startTime) {
+      return { status: 'unknown', path: leasePath, reason: 'legacy resident leaseが確認後に変更されました' };
+    }
+    unlinkFn(leasePath);
+    return { status: 'removed', path: leasePath };
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { status: 'absent', path: leasePath };
+    return { status: 'unknown', path: leasePath, reason: `legacy resident leaseの削除に失敗しました: ${error.message}` };
+  } finally {
+    if (locked) {
+      try { (options.releaseLeaseLockFn || releaseLeaseLock)(store, key); } catch {}
+    }
+  }
 }
 
 function ensureRegistryRemoved(workspace, pid, hooks) {
@@ -815,6 +897,7 @@ module.exports = {
   replaceSessionPid,
   buildRestartArgs,
   isResidentEntry,
+  cleanupLegacyResidentLease,
   restartResidents,
   formatCommand,
   formatResidentResult,

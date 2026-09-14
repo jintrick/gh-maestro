@@ -6,7 +6,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { rebuildOrchestratorBaseline, restartCapturedResidents } = require('../scripts/reset-session');
+const {
+  rebuildOrchestratorBaseline,
+  restartCapturedResidents,
+  cleanupLegacyWorkerField,
+  cleanupLegacyMessages,
+  cleanupLegacyQueue,
+} = require('../scripts/reset-session');
 const readStateLib = require('../scripts/shared/read-state');
 
 function withTempDir(fn) {
@@ -263,5 +269,77 @@ test('reset-session: killPane に失敗した場合は status-pane.json を削�
       paneLaunch._setWeztermListPanes(null);
       paneLaunch._setWeztermKillPane(null);
     }
+  });
+});
+
+test('cleanupLegacyWorkerField: notifierPidとpaneIdを観測してからworkers.jsonを更新する', () => {
+  withTempDir((workspace) => {
+    const metaDir = path.join(workspace, '.gh-maestro');
+    fs.mkdirSync(metaDir, { recursive: true });
+    const workersPath = path.join(metaDir, 'workers.json');
+    fs.writeFileSync(workersPath, JSON.stringify({
+      orchestrator: { paneId: '1' },
+      'issue-10-old': { notifierPid: 123, paneId: '7', issue: 10 },
+    }), 'utf8');
+
+    let alive = true;
+    const killed = [];
+    const notifier = cleanupLegacyWorkerField(workspace, 'notifierPid', {
+      isProcessAliveFn: () => {
+        const result = alive;
+        alive = false;
+        return result;
+      },
+      killProcessTreeFn: (pid) => killed.push(pid),
+    });
+    assert.equal(notifier.status, 'removed');
+    assert.deepEqual(killed, [123]);
+    assert.equal(JSON.parse(fs.readFileSync(workersPath, 'utf8'))['issue-10-old'].notifierPid, null);
+
+    const pane = cleanupLegacyWorkerField(workspace, 'paneId', {
+      alivePanes: new Set(['7']),
+      killPaneFn: (paneId) => ({ ok: true, paneId }),
+      sleepFn: () => {},
+    });
+    assert.equal(pane.status, 'removed');
+    assert.equal(JSON.parse(fs.readFileSync(workersPath, 'utf8'))['issue-10-old'].paneId, null);
+  });
+});
+
+test('cleanupLegacyWorkerField: 不正なpaneIdはkillせずunknownとして保持する', () => {
+  withTempDir((workspace) => {
+    const metaDir = path.join(workspace, '.gh-maestro');
+    fs.mkdirSync(metaDir, { recursive: true });
+    const workersPath = path.join(metaDir, 'workers.json');
+    fs.writeFileSync(workersPath, JSON.stringify({ 'issue-10-old': { paneId: { id: 7 } } }), 'utf8');
+    assert.throws(
+      () => cleanupLegacyWorkerField(workspace, 'paneId', { alivePanes: new Set(['7']) }),
+      /paneId/,
+    );
+    assert.deepEqual(JSON.parse(fs.readFileSync(workersPath, 'utf8')), {
+      'issue-10-old': { paneId: { id: 7 } },
+    });
+  });
+});
+
+test('cleanupLegacyMessagesとcleanupLegacyQueue: 旧ディレクトリを冪等に除去しlive pollerは保持する', () => {
+  withTempDir((workspace) => {
+    const metaDir = path.join(workspace, '.gh-maestro');
+    const messagesDir = path.join(metaDir, 'messages');
+    const queueDir = path.join(metaDir, 'queue');
+    fs.mkdirSync(messagesDir, { recursive: true });
+    fs.writeFileSync(path.join(messagesDir, 'old.json'), '{}', 'utf8');
+    assert.equal(cleanupLegacyMessages(workspace).status, 'removed');
+    assert.equal(cleanupLegacyMessages(workspace).status, 'absent');
+
+    fs.mkdirSync(queueDir, { recursive: true });
+    fs.writeFileSync(path.join(queueDir, 'old.json'), '{}', 'utf8');
+    const livePollerPath = path.join(queueDir, 'poller.json');
+    fs.writeFileSync(livePollerPath, JSON.stringify({ pid: 456 }), 'utf8');
+    const held = cleanupLegacyQueue(workspace, { isProcessAliveFn: () => true });
+    assert.equal(held.status, 'skipped');
+    assert.equal(fs.existsSync(queueDir), true);
+    assert.equal(cleanupLegacyQueue(workspace, { isProcessAliveFn: () => false }).status, 'removed');
+    assert.equal(cleanupLegacyQueue(workspace, { isProcessAliveFn: () => false }).status, 'absent');
   });
 });

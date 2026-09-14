@@ -4,7 +4,7 @@
 // Sentinel (.gh-maestro/setup-ok) only gates expensive environment checks.
 
 const { spawnSync, REAL_SPAWN_DISABLED_ERROR_CODE } = require('./shared/child-process');
-const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, chmodSync } = require('fs');
+const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, chmodSync, lstatSync } = require('fs');
 const { resolve, relative, isAbsolute, sep } = require('path');
 
 const USAGE = `gh-maestro-setup.js — プロジェクトごとの前提条件チェックと初期セットアップ
@@ -33,10 +33,10 @@ function fail(msg, ...hints) {
   process.exit(1);
 }
 
-function run(cmd, args, { capture } = {}) {
+function run(cmd, args, { capture, workspace = workspaceRoot } = {}) {
   let r;
   try {
-    r = spawnSync(cmd, args, { cwd: workspaceRoot, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit' });
+    r = spawnSync(cmd, args, { cwd: workspace, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit' });
   } catch (error) {
     if (error?.code !== REAL_SPAWN_DISABLED_ERROR_CODE) throw error;
     // テスト時の WezTerm 拒否は、前提条件チェックの通常の失敗として扱う。ただし
@@ -53,10 +53,10 @@ function run(cmd, args, { capture } = {}) {
 // `git config --get` の status=1（設定なし）と、spawn失敗・エラー出力を伴う
 // 問い合わせ不能を分ける。判定不能を未設定へ縮退させると、誤った hooksDir に
 // 書き込むか、必要な hook が無いまま setup 成功を返してしまうためである。
-function gitOutput(args, spawnSyncFn = spawnSync) {
+function gitOutput(args, spawnSyncFn = spawnSync, workspace = workspaceRoot) {
   let result;
   try {
-    result = spawnSyncFn('git', args, { cwd: workspaceRoot, encoding: 'utf8', stdio: 'pipe' });
+    result = spawnSyncFn('git', args, { cwd: workspace, encoding: 'utf8', stdio: 'pipe' });
   } catch (error) {
     return { status: 'unavailable', detail: error.message };
   }
@@ -88,10 +88,10 @@ function gitOutput(args, spawnSyncFn = spawnSync) {
 
 // check-ignore のように exit コードを判定に使う git 呼び出し。`--` で operands を分離し、
 // 値が `-` 始まりでもオプションとして解釈されないようにする（git-arg-injection ルール）。
-function gitStatus(args, spawnSyncFn = spawnSync) {
+function gitStatus(args, spawnSyncFn = spawnSync, workspace = workspaceRoot) {
   let result;
   try {
-    result = spawnSyncFn('git', args, { cwd: workspaceRoot, encoding: 'utf8', stdio: 'pipe' });
+    result = spawnSyncFn('git', args, { cwd: workspace, encoding: 'utf8', stdio: 'pipe' });
   } catch (error) {
     return { status: 'unavailable', detail: error.message };
   }
@@ -118,11 +118,19 @@ function isInsideDir(parent, child) {
   return rel === '' || (rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel));
 }
 
-function getRemoteRepo() {
-  const remoteUrl = run('git', ['config', '--get', 'remote.origin.url'], { capture: true });
-  if (!remoteUrl) return null;
+function getRemoteRepo(workspace = workspaceRoot, spawnSyncFn = spawnSync) {
+  const result = gitOutput(['config', '--get', 'remote.origin.url'], spawnSyncFn, workspace);
+  if (result.status === 'unset') return null;
+  if (result.status !== 'ok') throw gitQueryFailure('remote.origin.url', result);
+  const remoteUrl = result.value;
   const match = remoteUrl.match(/github\.com[:/](.+?\/.+?)(\.git)?$/);
   return match ? match[1] : null;
+}
+
+function isMissingGitHubContent(result) {
+  if (!result || result.status === 0) return false;
+  const detail = `${String(result.stderr || '')} ${String(result.stdout || '')}`;
+  return /(?:\b404\b|not found|does not exist)/i.test(detail);
 }
 
 // ─── GitHub Actions AI Review CI 退役クリーンアップ ─────────────────────────
@@ -130,20 +138,34 @@ function getRemoteRepo() {
 // ローカル spawn 方式に移行したため、デプロイ済みファイルを削除する。
 // sentinel (.gh-maestro/ai-review-ok) が存在するプロジェクトが対象。
 
-function retireAiReviewCi() {
-  const aiReviewSentinel = resolve(workspaceRoot, '.gh-maestro', 'ai-review-ok');
-  if (!existsSync(aiReviewSentinel)) return;
+function retireAiReviewCi(options = {}) {
+  const workspace = options.workspace || workspaceRoot;
+  const existsFn = options.existsFn || existsSync;
+  const unlinkFn = options.unlinkFn || unlinkSync;
+  const spawnSyncFn = options.spawnSyncFn || spawnSync;
+  const testContext = options.testContext ?? Boolean(process.env.NODE_TEST_CONTEXT);
+  const cleanupOnly = options.cleanupOnly === true;
+  const aiReviewSentinel = resolve(workspace, '.gh-maestro', 'ai-review-ok');
+  const sentinelPresent = existsFn(aiReviewSentinel);
+  if (!sentinelPresent) return { status: 'absent', path: aiReviewSentinel };
 
-  const repoName = getRemoteRepo();
+  let repoName;
+  try {
+    repoName = getRemoteRepo(workspace, spawnSyncFn);
+  } catch (error) {
+    if (cleanupOnly) return { status: 'unknown', path: aiReviewSentinel, reason: error.message };
+    console.warn(`  [warn] remote.origin.url の確認に失敗したため AI Review CI retirement をスキップしました: ${error.message}`);
+    return { status: 'absent', path: aiReviewSentinel };
+  }
   if (repoName) {
-    if (process.env.NODE_TEST_CONTEXT) {
+    if (testContext) {
       // テスト実行中（node --test が自動設定し子プロセスへ継承する環境変数）は、
       // GitHub API の DELETE（外部システムへの副作用）を実行しない。
       // Issue #151 の launchAgentHeadless / #202 の msg-send.js と同じフェイルクローズ。
       // フック環境の GIT_* がテストへ漏れて実リポジトリのリモートを解決した場合も、
       // この経路で DELETE に到達しうるため、ここで確実に拒否する（Issue #283）。
       console.warn('  [warn] NODE_TEST_CONTEXT 検出のため GitHub Actions AI Review CI の退役（GitHub API DELETE）をスキップしました。テスト実行中は外部システムへの副作用を実行しません。');
-      return;
+      return { status: 'skipped', path: aiReviewSentinel, reason: 'NODE_TEST_CONTEXT' };
     }
     step('Retiring GitHub Actions AI Review CI...');
     const RETIRE_BRANCHES = ['main', 'dev'];
@@ -157,9 +179,13 @@ function retireAiReviewCi() {
       for (const filePath of RETIRE_PATHS) {
         let sha;
         try {
-          const get = spawnSync('gh', ['api', `repos/${repoName}/contents/${filePath}?ref=${branch}`, '--jq', '.sha'],
-            { encoding: 'utf8', stdio: 'pipe' });
-          sha = get.stdout.trim();
+          const get = spawnSyncFn('gh', ['api', `repos/${repoName}/contents/${filePath}?ref=${branch}`, '--jq', '.sha'],
+            { cwd: workspace, encoding: 'utf8', stdio: 'pipe' });
+          if (isMissingGitHubContent(get)) continue;
+          if (!get || get.error || get.status !== 0) {
+            throw new Error(get?.error?.message || String(get?.stderr || 'gh query failed'));
+          }
+          sha = String(get.stdout || '').trim();
         } catch (e) {
           console.warn(`  [warn] failed to query ${filePath} on ${branch}: ${e.message}`);
           allDeleted = false;
@@ -167,8 +193,8 @@ function retireAiReviewCi() {
         }
         if (!sha) continue;
         try {
-          const del = spawnSync('gh', ['api', `repos/${repoName}/contents/${filePath}`, '--method', 'DELETE', '--input', '-'],
-            { encoding: 'utf8', stdio: 'pipe',
+          const del = spawnSyncFn('gh', ['api', `repos/${repoName}/contents/${filePath}`, '--method', 'DELETE', '--input', '-'],
+            { cwd: workspace, encoding: 'utf8', stdio: 'pipe',
               input: JSON.stringify({ message: 'ci: retire AI Review CI (replaced by local reviewer)', sha, branch }) });
           if (del.status === 0) {
             ok(`removed ${filePath} from ${branch}`);
@@ -183,12 +209,26 @@ function retireAiReviewCi() {
       }
     }
     if (allDeleted) {
-      unlinkSync(aiReviewSentinel);
+      try {
+        if (sentinelPresent) unlinkFn(aiReviewSentinel);
+      } catch (error) {
+        return { status: 'unknown', path: aiReviewSentinel, reason: `AI Review CI sentinelの削除に失敗しました: ${error.message}` };
+      }
       ok('AI Review CI retired');
+      return { status: sentinelPresent ? 'removed' : 'absent', path: aiReviewSentinel };
     } else {
       console.warn('  [warn] AI Review CI retirement incomplete; sentinel kept for retry on next run');
+      return { status: 'unknown', path: aiReviewSentinel, reason: 'AI Review CI retirement incomplete' };
     }
   }
+  if (cleanupOnly) {
+    return {
+      status: 'unknown',
+      path: aiReviewSentinel,
+      reason: 'GitHub remote originを解決できないため旧AIレビューCIを確認できません',
+    };
+  }
+  return { status: 'absent', path: aiReviewSentinel };
 }
 
 // ─── 1. 環境チェック ──────────────────────────────────────────────────────────
@@ -277,32 +317,52 @@ const IGNORE_ENTRY = '.gh-maestro/*';
 const IGNORE_EXCEPTION = '!.gh-maestro/config.json';
 const LEGACY_ENTRY = '.gh-maestro/';
 
-function ensureGitIgnore() {
-  const gitignore = resolve(workspaceRoot, '.gitignore');
-  if (!existsSync(gitignore)) {
-    appendFileSync(gitignore, `${IGNORE_ENTRY}\n${IGNORE_EXCEPTION}\n`, 'utf8');
+function ensureGitIgnore(options = {}) {
+  const workspace = options.workspace || workspaceRoot;
+  const existsFn = options.existsFn || existsSync;
+  const readFileFn = options.readFileFn || readFileSync;
+  const appendFileFn = options.appendFileFn || appendFileSync;
+  const writeFileFn = options.writeFileFn || writeFileSync;
+  const lstatFn = options.lstatFn || lstatSync;
+  const cleanupOnly = options.cleanupOnly === true;
+  const gitignore = resolve(workspace, '.gitignore');
+  if (!existsFn(gitignore)) {
+    if (cleanupOnly) return { status: 'absent', path: gitignore };
+    appendFileFn(gitignore, `${IGNORE_ENTRY}\n${IGNORE_EXCEPTION}\n`, 'utf8');
     ok(`.gitignore created with ${IGNORE_ENTRY} / ${IGNORE_EXCEPTION}`);
-    return;
+    return { status: 'removed', path: gitignore };
   }
-  const lines = readFileSync(gitignore, 'utf8').split('\n');
+  try {
+    const stat = lstatFn(gitignore);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      return { status: 'unknown', path: gitignore, reason: '.gitignoreが通常ファイルではありません' };
+    }
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return { status: 'absent', path: gitignore };
+    return { status: 'unknown', path: gitignore, reason: `.gitignoreの確認に失敗しました: ${error.message}` };
+  }
+  const lines = String(readFileFn(gitignore, 'utf8')).split('\n');
   const hasEntry = lines.some(l => l.trim() === IGNORE_ENTRY);
   const hasException = lines.some(l => l.trim() === IGNORE_EXCEPTION);
   if (hasEntry && hasException) {
+    if (cleanupOnly) return { status: 'absent', path: gitignore };
     ok(`.gitignore already contains ${IGNORE_ENTRY} / ${IGNORE_EXCEPTION}`);
-    return;
+    return { status: 'absent', path: gitignore };
   }
   // 旧形式（`.gh-maestro/` 丸ごと無視）が残っていれば、新形式へ置き換える。
   const withoutLegacy = lines.filter(l => l.trim() !== LEGACY_ENTRY);
   const migrated = withoutLegacy.length !== lines.length;
+  if (cleanupOnly && !migrated) return { status: 'absent', path: gitignore };
   const toAppend = [
     ...(hasEntry ? [] : [IGNORE_ENTRY]),
     ...(hasException ? [] : [IGNORE_EXCEPTION]),
   ];
   const nextContent = `${withoutLegacy.join('\n').replace(/\n*$/, '')}\n\n${toAppend.join('\n')}\n`;
-  writeFileSync(gitignore, nextContent, 'utf8');
+  writeFileFn(gitignore, nextContent, 'utf8');
   ok(migrated
     ? `.gitignore updated: replaced legacy ${LEGACY_ENTRY} with ${IGNORE_ENTRY} / ${IGNORE_EXCEPTION}`
     : `.gitignore updated: added ${toAppend.join(' / ')}`);
+  return { status: migrated ? 'removed' : 'absent', path: gitignore };
 }
 
 // ─── 4. dev ブランチ確認・作成 ────────────────────────────────────────────────
@@ -412,10 +472,15 @@ function upsertMarkerBlock(hookPath, { marker, markerRe, entryLines }) {
  * ブロック境界の判定は upsertMarkerBlock と同じく「次の空行または EOF まで」。
  * @returns {'absent'|'removed'}
  */
-function removeMarkerBlock(hookPath, { markerRe }) {
-  if (!existsSync(hookPath)) return 'absent';
+function removeMarkerBlock(hookPath, {
+  markerRe,
+  existsFn = existsSync,
+  readFileFn = readFileSync,
+  writeFileFn = writeFileSync,
+} = {}) {
+  if (!existsFn(hookPath)) return 'absent';
 
-  const lines = readFileSync(hookPath, 'utf8').split('\n');
+  const lines = String(readFileFn(hookPath, 'utf8')).split('\n');
   const markerIdx = lines.findIndex(l => markerRe.test(l.trim()));
   if (markerIdx === -1) return 'absent';
 
@@ -425,7 +490,7 @@ function removeMarkerBlock(hookPath, { markerRe }) {
   if (blockEnd < lines.length && lines[blockEnd].trim() === '') blockEnd++;
   lines.splice(markerIdx, blockEnd - markerIdx);
 
-  writeFileSync(hookPath, lines.join('\n'), 'utf8');
+  writeFileFn(hookPath, lines.join('\n'), 'utf8');
   applyExecPermission(hookPath);
   return 'removed';
 }
@@ -452,21 +517,21 @@ const CHECKS_MARKER_RE = /^# gh-maestro:checks(:v\d+)?$/;
 // core.hooksPath があればその解決先（相対は git 同様、ワークツリーのトップレベル基準）、
 // 無ければ既定の git ディレクトリ配下の hooks。相対解決が cwd ではなくトップレベル
 // 基準であることは実地で確認済み。
-function resolveHooksDir(spawnSyncFn = spawnSync) {
-  const hooksPathResult = gitOutput(['config', '--get', 'core.hooksPath'], spawnSyncFn);
+function resolveHooksDir(spawnSyncFn = spawnSync, workspace = workspaceRoot) {
+  const hooksPathResult = gitOutput(['config', '--get', 'core.hooksPath'], spawnSyncFn, workspace);
   if (hooksPathResult.status === 'unavailable') {
     throw gitQueryFailure('core.hooksPath', hooksPathResult);
   }
   if (hooksPathResult.status === 'ok' && hooksPathResult.value) {
-    return resolve(workspaceRoot, hooksPathResult.value);
+    return resolve(workspace, hooksPathResult.value);
   }
 
-  const gitDirResult = gitOutput(['rev-parse', '--git-dir'], spawnSyncFn);
+  const gitDirResult = gitOutput(['rev-parse', '--git-dir'], spawnSyncFn, workspace);
   if (gitDirResult.status !== 'ok' || !gitDirResult.value) {
     throw gitQueryFailure('git-dir', gitDirResult);
   }
   const gitDir = gitDirResult.value;
-  const base = isAbsolute(gitDir) ? gitDir : resolve(workspaceRoot, gitDir);
+  const base = isAbsolute(gitDir) ? gitDir : resolve(workspace, gitDir);
   return resolve(base, 'hooks');
 }
 
@@ -474,8 +539,8 @@ function resolveHooksDir(spawnSyncFn = spawnSync) {
 // true なら書き込まず検証報告のみにする。判定は「今追跡ファイルがあるか」ではなく
 // 「ワークツリーの内側か（かつ無視対象でないか）」で行う（新規プロジェクトの空ディレクトリ
 // でも絶対パス入りファイルのコミット事故を防ぐ）。git の判定が不能なら setup を中断する。
-function hooksDirNeedsVerification(dir, spawnSyncFn = spawnSync) {
-  const toplevelResult = gitOutput(['rev-parse', '--show-toplevel'], spawnSyncFn);
+function hooksDirNeedsVerification(dir, spawnSyncFn = spawnSync, workspace = workspaceRoot) {
+  const toplevelResult = gitOutput(['rev-parse', '--show-toplevel'], spawnSyncFn, workspace);
   if (toplevelResult.status !== 'ok' || !toplevelResult.value) {
     throw gitQueryFailure('git toplevel', toplevelResult);
   }
@@ -487,8 +552,8 @@ function hooksDirNeedsVerification(dir, spawnSyncFn = spawnSync) {
 
   // git ディレクトリ配下（既定 .git/hooks を含む）→ コミットされない → 書き込み可。
   const gitDirResults = [
-    gitOutput(['rev-parse', '--absolute-git-dir'], spawnSyncFn),
-    gitOutput(['rev-parse', '--git-common-dir'], spawnSyncFn),
+    gitOutput(['rev-parse', '--absolute-git-dir'], spawnSyncFn, workspace),
+    gitOutput(['rev-parse', '--git-common-dir'], spawnSyncFn, workspace),
   ];
   for (const result of gitDirResults) {
     if (result.status !== 'ok' || !result.value) {
@@ -501,7 +566,7 @@ function hooksDirNeedsVerification(dir, spawnSyncFn = spawnSync) {
 
   // ここまで残った dir はワークツリー内・git ディレクトリ外 → 共有リスク。
   // 無視対象（.gitignore）ならコミットされないので書き込み可、それ以外は書かない。
-  const r = gitStatus(['check-ignore', '-q', '--', dir], spawnSyncFn);
+  const r = gitStatus(['check-ignore', '-q', '--', dir], spawnSyncFn, workspace);
   if (r.status === 'unavailable') throw gitQueryFailure('git check-ignore', r);
   return r.status !== 'matched';
 }
@@ -528,8 +593,8 @@ function isEffectivelyEmptyHook(content) {
 
 // 追跡下（共有リスク）のフックに絶対パスを書き込まないために、人間が手動追記すべき
 // ブロックを repo-relative パスで提示する（絶対パスは共有物を汚すため使わない）。
-function reportManualSyncBlock(hookPath) {
-  const toplevelResult = gitOutput(['rev-parse', '--show-toplevel']);
+function reportManualSyncBlock(hookPath, workspace = workspaceRoot, spawnSyncFn = spawnSync) {
+  const toplevelResult = gitOutput(['rev-parse', '--show-toplevel'], spawnSyncFn, workspace);
   if (toplevelResult.status !== 'ok' || !toplevelResult.value) {
     throw gitQueryFailure('git toplevel', toplevelResult);
   }
@@ -550,14 +615,14 @@ function reportManualSyncBlock(hookPath) {
   );
 }
 
-function ensureSyncHook(hooksDir, verifyOnly) {
+function ensureSyncHook(hooksDir, verifyOnly, options = {}) {
   const hookPath = resolve(hooksDir, 'pre-commit');
 
   if (verifyOnly) {
     // 共有リスク → 書き込まず、実行される内容として必要な呼び出しが揃っているかを検証報告。
     if (!existsSync(hookPath)) {
       console.warn('  [warn] pre-commit hook (sync): 未導入です（ファイルがありません）。');
-      reportManualSyncBlock(hookPath);
+      reportManualSyncBlock(hookPath, options.workspace || workspaceRoot, options.spawnSyncFn || spawnSync);
       return;
     }
     const missing = verifySyncInvocations(readFileSync(hookPath, 'utf8'));
@@ -565,7 +630,7 @@ function ensureSyncHook(hooksDir, verifyOnly) {
       ok('pre-commit hook (sync): 既に必要な同期の呼び出しが揃っています（tracked; untouched）');
     } else {
       console.warn(`  [warn] pre-commit hook (sync): 未導入: ${missing.join(', ')}`);
-      reportManualSyncBlock(hookPath);
+      reportManualSyncBlock(hookPath, options.workspace || workspaceRoot, options.spawnSyncFn || spawnSync);
     }
     return;
   }
@@ -592,34 +657,152 @@ function ensureSyncHook(hooksDir, verifyOnly) {
 
 // 実効フック置き場の pre-push から廃止済みの checks ブロックを撤去する（冪等）。
 // 撤去後に実コマンドが残らなければ抜け殻なのでファイルごと削除する。
-function retireChecksHooks(hooksDir) {
+function retireChecksHooks(hooksDir, options = {}) {
   const prePush = resolve(hooksDir, 'pre-push');
-  if (!existsSync(prePush)) return;
-  const removed = removeMarkerBlock(prePush, { markerRe: CHECKS_MARKER_RE });
+  const existsFn = options.existsFn || existsSync;
+  const readFileFn = options.readFileFn || readFileSync;
+  const unlinkFn = options.unlinkFn || unlinkSync;
+  if (!existsFn(prePush)) return { status: 'absent', path: prePush };
+  const removed = removeMarkerBlock(prePush, {
+    markerRe: CHECKS_MARKER_RE,
+    existsFn,
+    readFileFn,
+    writeFileFn: options.writeFileFn || writeFileSync,
+  });
   if (removed === 'removed') ok('pre-push hook (checks): 廃止したため撤去しました');
-  if (isEffectivelyEmptyHook(readFileSync(prePush, 'utf8'))) {
-    unlinkSync(prePush);
+  if (existsFn(prePush) && isEffectivelyEmptyHook(String(readFileFn(prePush, 'utf8')))) {
+    unlinkFn(prePush);
     ok('pre-push hook: 抜け殻（実コマンド無し）のため削除しました');
+    return { status: 'removed', path: prePush };
   }
+  return { status: removed === 'removed' ? 'removed' : 'absent', path: prePush };
 }
 
 // 実効フック置き場が既定と異なるとき、死んだ既定 .git/hooks/{pre-commit,pre-push} を後始末する。
 // gh-maestro マーカー付きブロックを撤去し、実コマンドが残らなければファイルごと削除する。
 // 無関係なユーザーフックの中身は残す。
-function removeStaleDefaultHooks(hooksDir) {
-  const defaultHooks = resolve(workspaceRoot, '.git', 'hooks');
-  if (resolve(hooksDir) === resolve(defaultHooks)) return;
+function removeStaleDefaultHooks(hooksDir, options = {}) {
+  const workspace = options.workspace || workspaceRoot;
+  const existsFn = options.existsFn || existsSync;
+  const readFileFn = options.readFileFn || readFileSync;
+  const lstatFn = options.lstatFn || lstatSync;
+  const unlinkFn = options.unlinkFn || unlinkSync;
+  const writeFileFn = options.writeFileFn || writeFileSync;
+  const defaultHooks = options.defaultHooksDir
+    ? resolve(options.defaultHooksDir)
+    : resolve(workspace, '.git', 'hooks');
+  if (resolve(hooksDir) === resolve(defaultHooks)) return { status: 'absent' };
+
+  let changed = false;
 
   for (const name of ['pre-commit', 'pre-push']) {
     const hookPath = resolve(defaultHooks, name);
-    if (!existsSync(hookPath)) continue;
-    removeMarkerBlock(hookPath, { markerRe: SYNC_RULES_MARKER_RE });
-    removeMarkerBlock(hookPath, { markerRe: CHECKS_MARKER_RE });
-    if (isEffectivelyEmptyHook(readFileSync(hookPath, 'utf8'))) {
-      unlinkSync(hookPath);
-      ok(`default ${name} hook: 実行されない置き場の残骸のため削除しました`);
+    if (!existsFn(hookPath)) continue;
+    let stat;
+    try {
+      stat = lstatFn(hookPath);
+    } catch (error) {
+      if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) continue;
+      return { status: 'unknown', path: hookPath, reason: `default hookの確認に失敗しました: ${error.message}` };
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      return { status: 'unknown', path: hookPath, reason: 'default hookが通常ファイルではありません' };
+    }
+    try {
+      const markerOptions = { existsFn, readFileFn, writeFileFn };
+      if (removeMarkerBlock(hookPath, { markerRe: SYNC_RULES_MARKER_RE, ...markerOptions }) === 'removed') changed = true;
+      if (removeMarkerBlock(hookPath, { markerRe: CHECKS_MARKER_RE, ...markerOptions }) === 'removed') changed = true;
+      if (existsFn(hookPath) && isEffectivelyEmptyHook(String(readFileFn(hookPath, 'utf8')))) {
+        unlinkFn(hookPath);
+        changed = true;
+        ok(`default ${name} hook: 実行されない置き場の残骸のため削除しました`);
+      }
+    } catch (error) {
+      return { status: 'unknown', path: hookPath, reason: `default hookの整理に失敗しました: ${error.message}` };
     }
   }
+  return { status: changed ? 'removed' : 'absent' };
+}
+
+function cleanupHookMarker(hookPath, markerRe, options = {}) {
+  const existsFn = options.existsFn || existsSync;
+  const readFileFn = options.readFileFn || readFileSync;
+  const unlinkFn = options.unlinkFn || unlinkSync;
+  const lstatFn = options.lstatFn || lstatSync;
+  let stat;
+  try {
+    stat = lstatFn(hookPath);
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+      return { status: 'absent', path: hookPath };
+    }
+    return { status: 'unknown', path: hookPath, reason: `hookの確認に失敗しました: ${error.message}` };
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    return { status: 'unknown', path: hookPath, reason: 'hookが通常ファイルではありません' };
+  }
+
+  // Read before deciding whether to write so unreadable hooks become unknown rather
+  // than an apparent absent artifact.
+  String(readFileFn(hookPath, 'utf8'));
+  const removed = removeMarkerBlock(hookPath, {
+    markerRe,
+    existsFn,
+    readFileFn,
+    writeFileFn: options.writeFileFn || writeFileSync,
+  });
+  if (removed !== 'removed') return { status: 'absent', path: hookPath };
+  if (existsFn(hookPath) && isEffectivelyEmptyHook(String(readFileFn(hookPath, 'utf8')))) {
+    unlinkFn(hookPath);
+  }
+  return { status: 'removed', path: hookPath };
+}
+
+function resolveCleanupHooks(options = {}) {
+  const workspace = options.workspace || workspaceRoot;
+  const spawnSyncFn = options.spawnSyncFn || spawnSync;
+  const hooksDir = options.hooksDir
+    ? resolve(options.hooksDir)
+    : resolveHooksDir(spawnSyncFn, workspace);
+  const verifyOnly = options.verifyOnly !== undefined
+    ? options.verifyOnly === true
+    : hooksDirNeedsVerification(hooksDir, spawnSyncFn, workspace);
+  return { workspace, hooksDir, verifyOnly };
+}
+
+function cleanupLegacySyncHook(options = {}) {
+  const { hooksDir, verifyOnly } = resolveCleanupHooks(options);
+  const hookPath = resolve(hooksDir, 'pre-commit');
+  if (verifyOnly) {
+    return {
+      status: 'skipped',
+      path: hookPath,
+      reason: '管理対象のpre-commit hookはsetupから変更しません',
+    };
+  }
+  return cleanupHookMarker(hookPath, CHECKS_MARKER_RE, options);
+}
+
+function cleanupLegacyChecksHook(options = {}) {
+  const { hooksDir, verifyOnly } = resolveCleanupHooks(options);
+  const hookPath = resolve(hooksDir, 'pre-push');
+  if (verifyOnly) {
+    return {
+      status: 'skipped',
+      path: hookPath,
+      reason: '管理対象のpre-push hookはsetupから変更しません',
+    };
+  }
+  return cleanupHookMarker(hookPath, CHECKS_MARKER_RE, options);
+}
+
+function cleanupLegacyStaleDefaultHooks(options = {}) {
+  const { hooksDir } = resolveCleanupHooks(options);
+  // 既定hooks置き場は共有ワークツリーの外側なので、effective hookが管理対象でも
+  // 既定側の残骸だけは削除対象になり得る。gitの解決結果が取得できない場合は
+  // resolveCleanupHooksが例外を投げ、共通入口がunknownへ変換する。
+  const defaultHooksDir = options.defaultHooksDir || resolve(options.workspace || workspaceRoot, '.git', 'hooks');
+  return removeStaleDefaultHooks(hooksDir, { ...options, defaultHooksDir });
 }
 
 function reportHookResult(label, result) {
@@ -691,8 +874,17 @@ module.exports = {
   main,
   gitOutput,
   gitStatus,
+  getRemoteRepo,
+  retireAiReviewCi,
+  ensureGitIgnore,
   resolveHooksDir,
   hooksDirNeedsVerification,
+  ensureSyncHook,
+  retireChecksHooks,
+  removeStaleDefaultHooks,
+  cleanupLegacySyncHook,
+  cleanupLegacyChecksHook,
+  cleanupLegacyStaleDefaultHooks,
 };
 
 if (require.main === module) {

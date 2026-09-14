@@ -10,6 +10,7 @@ const control = require('../scripts/shared/worker-supervisor-control');
 const { findRunningInstance } = require('../scripts/process-lifecycle');
 const { killProcessTree } = require('../scripts/shared/kill-tree');
 const workerLease = require('../scripts/shared/worker-lease');
+const { roleLeaseKey } = workerLease;
 
 let workspace;
 let tempDirScope;
@@ -114,4 +115,56 @@ test('stopRunningWorkerSupervisors: 個別のkill失敗は無視する（best-ef
   control._setKillProcessTree(() => { throw new Error('taskkill failed'); });
 
   assert.deepEqual(control.stopRunningWorkerSupervisors(workspace), []);
+});
+
+test('cleanupLegacyWorkerSupervisor: 旧scriptのstale registryとleaseだけを整理し、現行scriptは保持する', () => {
+  const legacyDir = path.join(workspace, '.gh-maestro', 'pids');
+  const runtimeDir = path.join(workspace, 'runtime', 'pids');
+  const leaseDir = path.join(workspace, '.gh-maestro', 'leases');
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.mkdirSync(leaseDir, { recursive: true });
+  const oldRegistry = path.join(legacyDir, '101.json');
+  const currentRegistry = path.join(runtimeDir, '102.json');
+  const oldLease = path.join(leaseDir, roleLeaseKey('inbox-supervisor') + '.json');
+  fs.writeFileSync(oldRegistry, JSON.stringify({
+    pid: 101, startTime: '2026-01-01T00:00:00.000Z', script: 'inbox-supervisor.js',
+  }), 'utf8');
+  fs.writeFileSync(currentRegistry, JSON.stringify({
+    pid: 102, startTime: '2026-01-01T00:00:00.000Z', script: 'worker-supervisor.js',
+  }), 'utf8');
+  fs.writeFileSync(oldLease, JSON.stringify({
+    pid: 103, startTime: '2026-01-01T00:00:00.000Z', role: 'inbox-supervisor',
+  }), 'utf8');
+
+  const result = control.cleanupLegacyWorkerSupervisor({
+    workspace,
+    legacyPidDir: legacyDir,
+    runtimePidDir: runtimeDir,
+    isProcessAliveFn: () => false,
+    acquireLeaseLockFn: () => true,
+    releaseLeaseLockFn: () => {},
+  });
+  assert.equal(result.status, 'removed');
+  assert.equal(fs.existsSync(oldRegistry), false);
+  assert.equal(fs.existsSync(oldLease), false);
+  assert.equal(fs.existsSync(currentRegistry), true);
+});
+
+test('cleanupLegacyWorkerSupervisor: startTime不明の旧registryはkill・削除せずunknownにする', () => {
+  const legacyDir = path.join(workspace, '.gh-maestro', 'pids');
+  fs.mkdirSync(legacyDir, { recursive: true });
+  const oldRegistry = path.join(legacyDir, '111.json');
+  fs.writeFileSync(oldRegistry, JSON.stringify({ pid: 111, script: 'inbox-supervisor.js' }), 'utf8');
+  let killed = false;
+  const result = control.cleanupLegacyWorkerSupervisor({
+    workspace,
+    legacyPidDir: legacyDir,
+    runtimePidDir: path.join(workspace, 'missing-runtime-pids'),
+    isProcessAliveFn: () => true,
+    killProcessTreeFn: () => { killed = true; },
+  });
+  assert.equal(result.status, 'unknown');
+  assert.equal(killed, false);
+  assert.equal(fs.existsSync(oldRegistry), true);
 });
