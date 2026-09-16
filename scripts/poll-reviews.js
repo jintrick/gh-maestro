@@ -366,7 +366,129 @@ async function runPollReviews(params, deps = {}) {
   }
 }
 
+/**
+ * poll-reviews の CLI メイン関数。
+ * process.exit() は直接呼ばず、結果オブジェクト（exitCode 等）を返す。
+ * require.main === module の薄いエントリポイントから呼び出される。
+ *
+ * @param {string[]} [argv]
+ * @param {object} [deps]
+ * @returns {Promise<{exitCode:number}>}
+ */
+async function main(argv = process.argv.slice(2), deps = {}) {
+  const parseFlagsFn = deps.parseFlagsFn || parseFlags;
+  const resolveWorkspaceFn = deps.resolveWorkspaceFn || resolveWorkspace;
+  const pollReviewsStateFilesFn = deps.pollReviewsStateFilesFn || pollReviewsStateFiles;
+  const resolveSessionPidFn = deps.resolveSessionPidFn || resolveSessionPid;
+  const getProcessStartTimeFn = deps.getProcessStartTimeFn || getProcessStartTime;
+  const createDeadManSwitchFn = deps.createDeadManSwitchFn || createDeadManSwitch;
+  const registerProcessFn = deps.registerProcessFn || registerProcess;
+  const lifecycleCleanupFn = deps.lifecycleCleanupFn || lifecycleCleanup;
+  const notifyWatchdogExitFn = deps.notifyWatchdogExitFn || notifyWatchdogExit;
+  const runPollReviewsFn = deps.runPollReviewsFn || runPollReviews;
+  const logFn = deps.logFn || console.log;
+  const errorFn = deps.errorFn || console.error;
+  const fsMod = deps.fs || fs;
+
+  let values, rest;
+  try {
+    ({ values, rest } = parseFlagsFn(argv, {
+      flags: { '--session-pid': {} },
+      booleans: ['--help', '-h', '--no-review-manager'],
+      // pr（必須）・workspace・interval の3つまで。未知フラグ・余剰位置引数はパーサ側で拒否。
+      positionals: { min: 1, max: 3 },
+    }));
+  } catch (err) {
+    if (err.name !== 'ArgsValidationError') throw err;
+    if (err.helpRequested) {
+      logFn(USAGE);
+      return { exitCode: 0 };
+    }
+    for (const e of err.errors) errorFn(`poll-reviews: ${e.message}`);
+    errorFn(USAGE);
+    return { exitCode: 1 };
+  }
+
+  if (values['--help'] || values['-h']) {
+    logFn(USAGE);
+    return { exitCode: 0 };
+  }
+
+  const noReviewManager = Boolean(values['--no-review-manager']);
+  const sessionPidArg = values['--session-pid'];
+  const [pr, workspaceArg, intervalArg] = rest;
+  const intervalSec = parseInt(intervalArg || '30');
+
+  if (!pr) {
+    errorFn(USAGE);
+    return { exitCode: 1 };
+  }
+
+  // 他スクリプト（poll-pr.js等）と同じ workspace 解決順（引数 >
+  // GH_MAESTRO_WORKSPACE env > CWD探索）に統一する。素の process.cwd() フォールバックだと、CWD が
+  // ホームディレクトリ配下のどこか等に誤解決される余地が残るため使わない
+  // （Issue #214: process-lifecycle.js の PID registry が managed root と衝突する事故の一因）。
+  const workspace = resolveWorkspaceFn(workspaceArg);
+  if (!workspace) {
+    errorFn('poll-reviews: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
+    return { exitCode: 1 };
+  }
+
+  const stateFiles = pollReviewsStateFilesFn(workspace, pr);
+
+  // ── ライフサイクル管理 ─────────────────────────────────────────────────
+
+  const sessionPid = resolveSessionPidFn(sessionPidArg);
+
+  // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
+  // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
+  const expectedStartTime = getProcessStartTimeFn(sessionPid);
+  const checkParent = createDeadManSwitchFn(sessionPid, { expectedStartTime });
+
+  // PID registry に自己登録
+  registerProcessFn(workspace, { script: 'poll-reviews.js' });
+
+  function cleanup() {
+    lifecycleCleanupFn(workspace, () => {
+      for (const file of stateFiles.files) {
+        try { fsMod.unlinkSync(file); } catch {}
+      }
+    });
+  }
+
+  if (deps.registerSignalHandlers !== false) {
+    process.on('SIGINT',  () => { cleanup(); process.exit(0); });
+    process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+
+    // 異常終了（非ゼロexit）を orchestrator へ通知する（Issue #289 受け入れ条件3）。
+    // 正常終了（exit 0: SIGINT/SIGTERM/親セッション消滅/MERGED/CLOSED）では何もしない。
+    // process.on('exit') は同期コードしか実行できないため、共有ヘルパーは spawnSync で
+    // 同期投稿する（best-effort・throwしない）。
+    process.on('exit', () => { notifyWatchdogExitFn({ workspace, scriptName: 'poll-reviews.js' }); });
+  }
+
+  try {
+    const result = await runPollReviewsFn({
+      pr,
+      workspace,
+      sessionPid,
+      intervalSec,
+      noReviewManager,
+    }, {
+      checkParentFn: checkParent,
+      cleanupFn: cleanup,
+      ...deps.runPollReviewsDeps,
+    });
+    return result;
+  } catch (err) {
+    errorFn('poll-reviews fatal:', err);
+    cleanup();
+    return { exitCode: 1 };
+  }
+}
+
 module.exports = {
+  main,
   isValidCommentId,
   isValidPrCommentId,
   buildPrCommentRelayEvents,
@@ -380,97 +502,10 @@ module.exports = {
 };
 
 if (require.main === module) {
-  const argv = process.argv.slice(2);
-  let values, rest;
-  try {
-    ({ values, rest } = parseFlags(argv, {
-      flags: { '--session-pid': {} },
-      booleans: ['--help', '-h', '--no-review-manager'],
-      // pr（必須）・workspace・interval の3つまで。未知フラグ・余剰位置引数はパーサ側で拒否。
-      positionals: { min: 1, max: 3 },
-    }));
-  } catch (err) {
-    if (err.name !== 'ArgsValidationError') throw err;
-    if (err.helpRequested) {
-      console.log(USAGE);
-      process.exit(0);
-    }
-    for (const e of err.errors) console.error(`poll-reviews: ${e.message}`);
-    console.error(USAGE);
-    process.exit(1);
-  }
-
-  if (values['--help'] || values['-h']) {
-    console.log(USAGE);
-    process.exit(0);
-  }
-
-  const noReviewManager = Boolean(values['--no-review-manager']);
-  const sessionPidArg = values['--session-pid'];
-  const [pr, workspaceArg, intervalArg] = rest;
-  const intervalSec = parseInt(intervalArg || '30');
-
-  if (!pr) {
-    console.error(USAGE);
-    process.exit(1);
-  }
-
-  // 他スクリプト（poll-pr.js等）と同じ workspace 解決順（引数 >
-  // GH_MAESTRO_WORKSPACE env > CWD探索）に統一する。素の process.cwd() フォールバックだと、CWD が
-  // ホームディレクトリ配下のどこか等に誤解決される余地が残るため使わない
-  // （Issue #214: process-lifecycle.js の PID registry が managed root と衝突する事故の一因）。
-  const workspace = resolveWorkspace(workspaceArg);
-  if (!workspace) {
-    console.error('poll-reviews: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
-    process.exit(1);
-  }
-
-  const stateFiles = pollReviewsStateFiles(workspace, pr);
-
-  // ── ライフサイクル管理 ─────────────────────────────────────────────────
-
-  const sessionPid = resolveSessionPid(sessionPidArg);
-
-  // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
-  // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
-  const expectedStartTime = getProcessStartTime(sessionPid);
-  const checkParent = createDeadManSwitch(sessionPid, { expectedStartTime });
-
-  // PID registry に自己登録
-  registerProcess(workspace, { script: 'poll-reviews.js' });
-
-  function cleanup() {
-    lifecycleCleanup(workspace, () => {
-      for (const file of stateFiles.files) {
-        try { fs.unlinkSync(file); } catch {}
-      }
-    });
-  }
-
-  process.on('SIGINT',  () => { cleanup(); process.exit(0); });
-  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
-
-  // 異常終了（非ゼロexit）を orchestrator へ通知する（Issue #289 受け入れ条件3）。
-  // 正常終了（exit 0: SIGINT/SIGTERM/親セッション消滅/MERGED/CLOSED）では何もしない。
-  // process.on('exit') は同期コードしか実行できないため、共有ヘルパーは spawnSync で
-  // 同期投稿する（best-effort・throwしない）。
-  process.on('exit', () => { notifyWatchdogExit({ workspace, scriptName: 'poll-reviews.js' }); });
-
-  (async () => {
-    const result = await runPollReviews({
-      pr,
-      workspace,
-      sessionPid,
-      intervalSec,
-      noReviewManager,
-    }, {
-      checkParentFn: checkParent,
-      cleanupFn: cleanup,
-    });
+  main().then((result) => {
     process.exit(result.exitCode);
-  })().catch((err) => {
+  }).catch((err) => {
     console.error('poll-reviews fatal:', err);
-    cleanup();
     process.exit(1);
   });
 }

@@ -4,6 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  main,
   isValidCommentId,
   isValidPrCommentId,
   buildPrCommentRelayEvents,
@@ -283,6 +284,77 @@ test('CLI: --no-review-manager は未知フラグにならずパースされる'
   const res = spawnSync(process.execPath, [pollReviewsScript, '--no-review-manager'], { encoding: 'utf8' });
   assert.equal(res.status, 1);
   assert.ok(res.stderr.includes('poll-reviews: 位置引数が必要です'));
+});
+
+test('CLI: --no-review-manager フラグを指定すると runPollReviews に noReviewManager=true が渡る', async () => {
+  let capturedParams = null;
+  const res = await main(['100', '/test/workspace', '--no-review-manager'], {
+    resolveWorkspaceFn: (ws) => ws,
+    resolveSessionPidFn: () => 12345,
+    getProcessStartTimeFn: () => null,
+    createDeadManSwitchFn: () => () => true,
+    registerProcessFn: () => {},
+    registerSignalHandlers: false,
+    pollReviewsStateFilesFn: () => ({ files: [] }),
+    runPollReviewsFn: async (params) => {
+      capturedParams = params;
+      return { exitCode: 0 };
+    },
+  });
+
+  assert.equal(res.exitCode, 0);
+  assert.ok(capturedParams, 'runPollReviews must be called');
+  assert.equal(capturedParams.pr, '100');
+  assert.equal(capturedParams.workspace, '/test/workspace');
+  assert.equal(capturedParams.noReviewManager, true);
+});
+
+test('CLI: --no-review-manager フラグを省略すると runPollReviews に noReviewManager=false が渡る', async () => {
+  let capturedParams = null;
+  const res = await main(['100', '/test/workspace'], {
+    resolveWorkspaceFn: (ws) => ws,
+    resolveSessionPidFn: () => 12345,
+    getProcessStartTimeFn: () => null,
+    createDeadManSwitchFn: () => () => true,
+    registerProcessFn: () => {},
+    registerSignalHandlers: false,
+    pollReviewsStateFilesFn: () => ({ files: [] }),
+    runPollReviewsFn: async (params) => {
+      capturedParams = params;
+      return { exitCode: 0 };
+    },
+  });
+
+  assert.equal(res.exitCode, 0);
+  assert.ok(capturedParams, 'runPollReviews must be called');
+  assert.equal(capturedParams.pr, '100');
+  assert.equal(capturedParams.workspace, '/test/workspace');
+  assert.equal(capturedParams.noReviewManager, false);
+});
+
+test('CLI: 子プロセス起動で --no-review-manager 引数が runPollReviews まで渡る', () => {
+  const probe = `
+    const { main } = require(${JSON.stringify(pollReviewsScript)});
+    main(['100', '/test/workspace', '--no-review-manager'], {
+      resolveWorkspaceFn: (w) => w,
+      resolveSessionPidFn: () => 12345,
+      getProcessStartTimeFn: () => null,
+      createDeadManSwitchFn: () => () => true,
+      registerProcessFn: () => {},
+      registerSignalHandlers: false,
+      pollReviewsStateFilesFn: () => ({ files: [] }),
+      runPollReviewsFn: async (params) => {
+        process.stdout.write(JSON.stringify(params));
+        return { exitCode: 0 };
+      },
+    });
+  `;
+  const res = spawnSync(process.execPath, ['-e', probe], { encoding: 'utf8' });
+  assert.equal(res.status, 0);
+  const parsed = JSON.parse(res.stdout);
+  assert.equal(parsed.noReviewManager, true);
+  assert.equal(parsed.pr, '100');
+  assert.equal(parsed.workspace, '/test/workspace');
 });
 
 // ── runPollReviews: --no-review-manager 振る舞い ───────────────────────────
