@@ -107,6 +107,16 @@ test('spawnPollReviews propagates a non-zero exit code', async () => {
   assert.equal(await mod.spawnPollReviews('12', '/workspace', 4321), 3);
 });
 
+test('spawnPollReviews passes --no-review-manager to the child only for lightweight monitoring', async () => {
+  const { mod, calls } = loadModule(() => ({ status: 0 }));
+  await mod.spawnPollReviews('12', '/workspace', 4321, 30, undefined, true);
+  assert.ok(calls[0].args.includes('--no-review-manager'));
+
+  const normal = loadModule(() => ({ status: 0 }));
+  await normal.mod.spawnPollReviews('12', '/workspace', 4321);
+  assert.equal(normal.calls[0].args.includes('--no-review-manager'), false);
+});
+
 
 // ── getPrBaseBranch ───────────────────────────────────────────────────────
 
@@ -166,6 +176,15 @@ test("getPrState returns empty string when gh pr view fails (fail-closed)", () =
   } finally {
     console.error = originalError;
   }
+});
+
+test('parsePrTerminalLine parses existing terminal stdout and rejects unrelated PRs', () => {
+  const { mod } = loadModule();
+  assert.deepEqual(mod.parsePrTerminalLine('PR_MERGED:42', '42'), { state: 'MERGED', pr: '42' });
+  assert.deepEqual(mod.parsePrTerminalLine('PR_CLOSED:42\r\n', 42), { state: 'CLOSED', pr: '42' });
+  assert.equal(mod.parsePrTerminalLine('PR_CLOSED:43', '42'), null);
+  assert.equal(mod.parsePrTerminalLine('PR_PUSH:abcdef1', '42'), null);
+  assert.equal(mod.parsePrTerminalLine('PR_CLOSED:not-a-pr', '42'), null);
 });
 
 // ── resolvePostReviewDecision（Issue #289: CLOSED → findPR 復帰） ────────────
@@ -526,6 +545,243 @@ test('runPollPr --no-review-manager does not claim, start, or emit Review Manage
   assert.equal(managerStarts, 0);
   assert.equal(output.some((line) => line.includes('REVIEW_MANAGER_')), false);
   assert.equal(fs.existsSync(mod.reviewManagerClaimPath(workspace, '42')), false);
+});
+
+test('runPollPr forwards lightweight mode and trusts a normal terminal event without refetching state', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-terminal-event-');
+  const head = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+  let stateCalls = 0;
+  let observed;
+  const result = await mod.runPollPr({
+    issue: 555,
+    repo: 'fixture/repo',
+    workspace,
+    sessionPid: 4321,
+    noReviewManager: true,
+    intervalMs: 0,
+    intervalArg: '0',
+  }, {
+    checkParentFn: () => true,
+    findPrFn: () => '42',
+    getPrHeadFn: () => head,
+    runSlowTestFn: async () => {},
+    spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine, noReviewManager) => {
+      assert.deepEqual({ pr, reviewWorkspace, sessionPid, interval, noReviewManager }, {
+        pr: '42',
+        reviewWorkspace: workspace,
+        sessionPid: 4321,
+        interval: '0',
+        noReviewManager: true,
+      });
+      onOutputLine('PR_MERGED:42');
+      return 0;
+    },
+    getPrStateFn: () => {
+      stateCalls += 1;
+      throw new Error('terminal event should avoid state refetch');
+    },
+    recordMergeAndSnapshotFn: (args) => { observed = args; },
+    cleanupFn: () => {},
+    writeStdoutFn: () => {},
+  });
+
+  assert.deepEqual(result, { exitCode: 0 });
+  assert.equal(stateCalls, 0);
+  assert.equal(observed.prState, 'MERGED');
+});
+
+test('runPollPr falls back to state refetch after an abnormal child exit even if a terminal line was relayed', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-terminal-fallback-');
+  const head = 'ffffffffffffffffffffffffffffffffffffffff';
+  let stateCalls = 0;
+  const result = await mod.runPollPr({
+    issue: 555,
+    repo: 'fixture/repo',
+    workspace,
+    sessionPid: 4321,
+    noReviewManager: true,
+    intervalMs: 0,
+    intervalArg: '0',
+  }, {
+    checkParentFn: () => true,
+    findPrFn: () => '42',
+    getPrHeadFn: () => head,
+    runSlowTestFn: async () => {},
+    spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine) => {
+      onOutputLine('PR_CLOSED:42');
+      return 3;
+    },
+    getPrStateFn: () => {
+      stateCalls += 1;
+      return 'OPEN';
+    },
+    recordMergeAndSnapshotFn: () => {},
+    cleanupFn: () => {},
+    writeStdoutFn: () => {},
+  });
+
+  assert.deepEqual(result, { exitCode: 3 });
+  assert.equal(stateCalls, 1);
+});
+
+test('runPollPr cancels CLOSED slow work without waiting and skips queued HEADs', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-closed-slow-cancel-');
+  const head = 'abababababababababababababababababababab';
+  const pushedHead = 'cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd';
+  const child = { pid: 27182 };
+  const killed = [];
+  const output = [];
+  let slowRuns = 0;
+  let findCalls = 0;
+  let parentChecks = 0;
+  let releaseSlow;
+  const slowNeverFinishes = new Promise((resolve) => { releaseSlow = resolve; });
+
+  const result = await mod.runPollPr({
+    issue: 555,
+    repo: 'fixture/repo',
+    workspace,
+    sessionPid: 4321,
+    noReviewManager: true,
+    intervalMs: 0,
+    intervalArg: '0',
+  }, {
+    checkParentFn: () => ++parentChecks < 3,
+    findPrFn: () => (findCalls++ === 0 ? '42' : ''),
+    getPrHeadFn: () => head,
+    spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine) => {
+      for (let i = 0; i < 20 && slowRuns === 0; i += 1) await Promise.resolve();
+      assert.equal(slowRuns, 1);
+      onOutputLine(`PR_PUSH:${pushedHead}`);
+      onOutputLine('PR_CLOSED:42');
+      return 0;
+    },
+    runSlowTestFn: async (args, slowDeps) => {
+      slowRuns += 1;
+      slowDeps.onChildSpawn(child);
+      await slowNeverFinishes;
+    },
+    killProcessTreeFn: (pid) => { killed.push(pid); },
+    getPrStateFn: () => { throw new Error('terminal event should avoid state refetch'); },
+    recordMergeAndSnapshotFn: () => {},
+    cleanupFn: () => {},
+    writeStdoutFn: (text) => output.push(text),
+    writeStderrFn: (text) => output.push(text),
+    sleepFn: async () => {},
+  });
+
+  assert.deepEqual(result, { exitCode: 0 });
+  assert.deepEqual(killed, [child.pid]);
+  assert.equal(slowRuns, 1, 'queued pushed HEAD must not start after CLOSED cancellation');
+  assert.equal(output.includes('PR_CLOSED_RESUMED:42\n'), true);
+  releaseSlow();
+});
+
+test('runPollPr fails closed when CLOSED slow child termination cannot be confirmed', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-closed-slow-kill-failure-');
+  const head = 'abababababababababababababababababababab';
+  const child = { pid: 31415 };
+  let slowStarted = false;
+  let releaseSlow;
+  const slowNeverFinishes = new Promise((resolve) => { releaseSlow = resolve; });
+  let stateCalls = 0;
+
+  try {
+    await assert.rejects(() => mod.runPollPr({
+      issue: 555,
+      repo: 'fixture/repo',
+      workspace,
+      sessionPid: 4321,
+      noReviewManager: true,
+      intervalMs: 0,
+      intervalArg: '0',
+    }, {
+      checkParentFn: () => true,
+      findPrFn: () => '42',
+      getPrHeadFn: () => head,
+      spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine) => {
+        for (let i = 0; i < 20 && !slowStarted; i += 1) {
+          await Promise.resolve();
+        }
+        assert.equal(slowStarted, true);
+        onOutputLine('PR_CLOSED:42');
+        return 0;
+      },
+      runSlowTestFn: async (args, slowDeps) => {
+        slowStarted = true;
+        slowDeps.onChildSpawn(child);
+        await slowNeverFinishes;
+      },
+      killProcessTreeFn: () => { throw new Error('kill confirmation failed'); },
+      getPrStateFn: () => {
+        stateCalls += 1;
+        throw new Error('terminal event should avoid state refetch');
+      },
+      recordMergeAndSnapshotFn: () => {},
+      cleanupFn: () => {},
+      writeStdoutFn: () => {},
+      writeStderrFn: () => {},
+    }), /kill confirmation failed/);
+    assert.equal(stateCalls, 0);
+  } finally {
+    releaseSlow();
+    await Promise.resolve();
+  }
+});
+
+test('runPollPr preserves MERGED slow completion wait while using the terminal event', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-merged-slow-wait-');
+  const head = '1212121212121212121212121212121212121212';
+  let slowStarted = false;
+  let releaseSlow;
+  const slowPending = new Promise((resolve) => { releaseSlow = resolve; });
+  let stateCalls = 0;
+
+  const runPromise = mod.runPollPr({
+    issue: 555,
+    repo: 'fixture/repo',
+    workspace,
+    sessionPid: 4321,
+    noReviewManager: true,
+    intervalMs: 0,
+    intervalArg: '0',
+  }, {
+    checkParentFn: () => true,
+    findPrFn: () => '42',
+    getPrHeadFn: () => head,
+    runSlowTestFn: async () => {
+      slowStarted = true;
+      await slowPending;
+    },
+    spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine) => {
+      for (let i = 0; i < 20 && !slowStarted; i += 1) await Promise.resolve();
+      onOutputLine('PR_MERGED:42');
+      return 0;
+    },
+    getPrStateFn: () => {
+      stateCalls += 1;
+      throw new Error('terminal event should avoid state refetch');
+    },
+    recordMergeAndSnapshotFn: () => {},
+    cleanupFn: () => {},
+    writeStdoutFn: () => {},
+  });
+
+  let settled = false;
+  runPromise.then(() => { settled = true; }, () => { settled = true; });
+  for (let i = 0; i < 20 && !slowStarted; i += 1) await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(slowStarted, true);
+  assert.equal(settled, false, 'MERGED must wait for pending slow completion');
+
+  releaseSlow();
+  assert.deepEqual(await runPromise, { exitCode: 0 });
+  assert.equal(stateCalls, 0);
 });
 
 test('runPollPr leaves the claim sentinel when automatic Review Manager startup fails', async () => {

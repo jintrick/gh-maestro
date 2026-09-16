@@ -39,6 +39,7 @@ test('lightweight-pr.md: PR監視はReview Managerを起動せず、slow層と�
   assert.doesNotMatch(pollFence, /start-review-manager\.js/);
   assert.match(content, /SLOW_TEST_RESULT/);
   assert.match(content, /テスト申告コメント/);
+  assert.match(content, /REVIEW_COMMENT.*PR_REVIEW.*出力されない/);
   assert.match(content, /REVIEW_MANAGER_STARTED[\s\S]*出力されない/);
 });
 

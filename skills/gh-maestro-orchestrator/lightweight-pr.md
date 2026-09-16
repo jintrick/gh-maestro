@@ -82,11 +82,12 @@ node "{{SCRIPTS_PATH}}/poll-pr.js" "$ISSUE" \
   --no-review-manager --workspace "$WORKSPACE" --base-branch "$BASE_BRANCH"
 ```
 
-このフラグによりReview Managerの起動だけを抑止する。PR検出後のslow層実行、slow完了時のテスト申告コメント更新、PRのマージ・クローズ監視は抑止しない。`run-slow-tests.js` を別途手動で回して代替してはならない。
+このフラグによりReview Managerの起動とinline/formalレビューイベントの取得・中継を抑止する。PR検出後のslow層実行、slow完了時のテスト申告コメント更新、PRのpush・マージ・クローズ監視、PR全体commentsからのテスト申告評価は抑止しない。`run-slow-tests.js` を別途手動で回して代替してはならない。
 
 確認する記録は次のとおりである。
 
 - `REVIEW_MANAGER_STARTED` / `REVIEW_MANAGER_ALREADY_RUNNING` が出力されない。
+- `REVIEW_COMMENT` / `PR_REVIEW` が出力されない。
 - `SLOW_TEST_RESULT:<json>` が対象PRのHEADについて届く。
 - slow層完了後、対象HEADに対するテスト申告コメントがIssueまたはPRへ投稿される。
 

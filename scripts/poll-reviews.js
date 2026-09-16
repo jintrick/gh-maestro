@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <pid>]
+// Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <pid>] [--no-review-manager]
 // Polls for review comments, commit pushes, and merge status. Emits:
 //   REVIEW_COMMENT:<path>:<line>|<user>:<body>
 //   PR_COMMENT:<user>:<body>
@@ -31,7 +31,7 @@ const {
 
 const USAGE = `poll-reviews.js — PR のレビューコメント・push・マージ状態をポーリングする
 
-Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <pid>]
+Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <pid>] [--no-review-manager]
 
 Arguments:
   <PR>                対象の PR 番号
@@ -41,11 +41,13 @@ Arguments:
 
 Options:
   --session-pid <pid>  監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
+  --no-review-manager   inline/formalレビューの取得・中継を行わず、PR状態・push・PR全体コメント
+                       （テスト申告評価）だけを監視する軽量モード
 
 Output (stdout):
-  REVIEW_COMMENT:<path>:<line>|<user>:<body>  インラインレビューコメント
+  REVIEW_COMMENT:<path>:<line>|<user>:<body>  インラインレビューコメント（通常モードのみ）
   PR_COMMENT:<user>:<body>                    PR 全体コメント
-  PR_REVIEW:<user>:<state>:<body>             正式レビュー提出（APPROVED/CHANGES_REQUESTED/COMMENTED）
+  PR_REVIEW:<user>:<state>:<body>             正式レビュー提出（通常モードのみ）
   PR_PUSH:<sha>                               新しいコミットが push された
   TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>
                                               テスト申告状態と実行記録
@@ -167,7 +169,7 @@ if (require.main === module) {
   try {
     ({ values, rest } = parseFlags(argv, {
       flags: { '--session-pid': {} },
-      booleans: ['--help', '-h'],
+      booleans: ['--no-review-manager', '--help', '-h'],
       // pr（必須）・workspace・interval の3つまで。未知フラグ・余剰位置引数はパーサ側で拒否。
       positionals: { min: 1, max: 3 },
     }));
@@ -188,6 +190,7 @@ if (require.main === module) {
   }
 
   const sessionPidArg = values['--session-pid'];
+  const noReviewManager = values['--no-review-manager'] === true;
   const [pr, workspaceArg, intervalArg] = rest;
   const intervalSec = parseInt(intervalArg || '30');
 
@@ -327,18 +330,20 @@ if (require.main === module) {
       const known = knownIds();
       let hadError = false;
 
-      const inlineOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/comments`,
-        '--paginate', '-q', inlineJq]);
-      if (inlineOut !== null) {
-        for (const line of inlineOut.split('\n').filter(Boolean)) {
-          const sep = line.indexOf('|');
-          const id = line.slice(0, sep);
-          if (!isValidCommentId(id) || known.has(id)) continue;
-          recordId(id);
-          process.stdout.write(`REVIEW_COMMENT:${line.slice(sep + 1)}\n`);
+      if (!noReviewManager) {
+        const inlineOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/comments`,
+          '--paginate', '-q', inlineJq]);
+        if (inlineOut !== null) {
+          for (const line of inlineOut.split('\n').filter(Boolean)) {
+            const sep = line.indexOf('|');
+            const id = line.slice(0, sep);
+            if (!isValidCommentId(id) || known.has(id)) continue;
+            recordId(id);
+            process.stdout.write(`REVIEW_COMMENT:${line.slice(sep + 1)}\n`);
+          }
+        } else {
+          hadError = true;
         }
-      } else {
-        hadError = true;
       }
 
       // PR コメント（テスト結果申告マーカーの抽出・判定もここで行う）
@@ -379,24 +384,26 @@ if (require.main === module) {
         hadError = true;
       }
 
-      const reviewsOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/reviews`,
-        '--paginate', '-q', reviewsJq]);
-      if (reviewsOut !== null) {
-        for (const line of reviewsOut.split('\n').filter(Boolean)) {
-          const sep = line.indexOf('|');
-          const id = line.slice(0, sep);
-          if (!isValidCommentId(id) || known.has(id)) continue;
-          recordId(id);
-          const rest = line.slice(sep + 1); // user|state|body
-          const [user, state, ...bodyParts] = rest.split('|');
-          const body = bodyParts.join('|');
-          // APPROVED/CHANGES_REQUESTED は body が空でも emit（マージ判断に必要）
-          if (body.trim() || state === 'APPROVED' || state === 'CHANGES_REQUESTED') {
-            process.stdout.write(`PR_REVIEW:${user}:${state}:${body}\n`);
+      if (!noReviewManager) {
+        const reviewsOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/reviews`,
+          '--paginate', '-q', reviewsJq]);
+        if (reviewsOut !== null) {
+          for (const line of reviewsOut.split('\n').filter(Boolean)) {
+            const sep = line.indexOf('|');
+            const id = line.slice(0, sep);
+            if (!isValidCommentId(id) || known.has(id)) continue;
+            recordId(id);
+            const rest = line.slice(sep + 1); // user|state|body
+            const [user, state, ...bodyParts] = rest.split('|');
+            const body = bodyParts.join('|');
+            // APPROVED/CHANGES_REQUESTED は body が空でも emit（マージ判断に必要）
+            if (body.trim() || state === 'APPROVED' || state === 'CHANGES_REQUESTED') {
+              process.stdout.write(`PR_REVIEW:${user}:${state}:${body}\n`);
+            }
           }
+        } else {
+          hadError = true;
         }
-      } else {
-        hadError = true;
       }
 
       noteCycleResult(hadError);

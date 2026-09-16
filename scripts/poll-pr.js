@@ -8,7 +8,8 @@
 //   PR_DETECTED:<number>
 //   REVIEW_MANAGER_STARTED:<number> | REVIEW_MANAGER_ALREADY_RUNNING:<number> |
 //   REVIEW_MANAGER_ALREADY_CLAIMED:<number>
-//   ...poll-reviews.js の出力がそのまま続く（REVIEW_COMMENT / PR_COMMENT / PR_REVIEW / PR_PUSH / PR_MERGED / PR_CLOSED / POLL_ERROR / POLL_RECOVERED）。
+//   ...poll-reviews.js の出力がそのまま続く（通常モードではREVIEW_COMMENT / PR_COMMENT / PR_REVIEW、
+//   軽量モードではPR_PUSH / PR_MERGED / PR_CLOSED / POLL_ERROR / POLL_RECOVERED等）。
 //   PR_PUSHを受け取るたび、そのSHAのslow層を非同期で予約する。
 //   Review Managerの起動後のクラッシュ（エージェントCLI起動失敗等）は、本スクリプトの
 //   出力ではなく、通常ワーカーと同じ終了フック経由でIssueコメントとして非同期に通知される
@@ -61,8 +62,9 @@ Arguments:
 
 Options:
   --no-review-manager        PR検出時に Review Manager を起動せず、レビュー監視だけを再開する。
-                             既にレビュー済み／再レビュー不要な状態で poll-pr.js を再起動するときに使う
-                             （再起動のたびにレビューを蒸し返すのを防ぐ）。
+                             inline/formalレビューイベントを取得・中継せず、PR状態・push・PR全体コメント
+                             （テスト申告）・slowの監視だけを再開する。既にレビュー済み／再レビュー不要な
+                             状態で poll-pr.js を再起動するときに使う（レビューの蒸し返しを防ぐ）。
   --workspace <path>         ワークスペースパス（省略時は環境変数またはCWDから解決）
   --session-pid <pid>        監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
   --base-branch <branch>     期待するベースブランチ名（省略時はベースブランチ検証をスキップ）
@@ -76,9 +78,10 @@ Output (stdout):
   PR_CLOSED_RESUMED:<PR>               監視していたPRがクローズされ、新PR検出に復帰した
   SLOW_TEST_STARTED:<json>             PR検出後のslow層を非同期で開始した
   SLOW_TEST_RESULT:<json>              slow層の完了または失敗を記録した
-  以降、poll-reviews.js を子プロセスとして起動し、その標準出力（REVIEW_COMMENT/PR_COMMENT/
-  PR_REVIEW/PR_PUSH/PR_MERGED/PR_CLOSED）をそのまま中継する。PR_PUSHを受け取ったHEADごとに
-  slow層を非同期で予約し、同じPR/HEAD/layerはstate予約で二重実行しない。poll-reviews.js が正常終了
+  以降、poll-reviews.js を子プロセスとして起動し、その標準出力（通常モードではREVIEW_COMMENT/
+  PR_COMMENT/PR_REVIEW/PR_PUSH/PR_MERGED/PR_CLOSED、軽量モードではPR_COMMENT/PR_PUSH/PR_MERGED/
+  PR_CLOSED等）をそのまま中継する。PR_PUSHを受け取ったHEADごとにslow層を非同期で予約し、
+  同じPR/HEAD/layerはstate予約で二重実行しない。poll-reviews.js が正常終了
   （exit 0）かつ PR_CLOSED で終了したときは、新 PR の検出（findPR ループ）へ復帰して監視を
   継続する。子が非ゼロ終了・シグナル終了（SIGKILL等）した場合は PR 状態に関わらず、
   その終了コードでこのプロセスも終了して監視停止を通知する（子自身の exit 通知が実行できなくても
@@ -108,10 +111,12 @@ Review Manager自身が実際のdiffを見た上で行う（本スクリプト�
  * @param {string|number} sessionPid
  * @param {string|number} [intervalSeconds]
  * @param {(line:string)=>void} [onOutputLine] poll-reviews.jsのstdoutを受け取るcallback
+ * @param {boolean} [noReviewManager=false] poll-reviews.jsをレビューイベントなしの軽量モードで起動するか
  * @returns {Promise<number>} poll-reviews.js の終了コード（不明な場合は1）
  */
-function spawnPollReviews(pr, workspace, sessionPid, intervalSeconds = 30, onOutputLine) {
+function spawnPollReviews(pr, workspace, sessionPid, intervalSeconds = 30, onOutputLine, noReviewManager = false) {
   const args = [path.join(__dirname, 'poll-reviews.js'), pr, workspace, String(intervalSeconds), '--session-pid', String(sessionPid)];
+  if (noReviewManager) args.push('--no-review-manager');
   let child;
   try {
     child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'inherit'] });
@@ -156,6 +161,22 @@ function parsePrPushLine(line) {
   if (typeof line !== 'string' || !line.startsWith('PR_PUSH:')) return null;
   const headSha = line.slice('PR_PUSH:'.length).trim();
   return /^[0-9a-fA-F]{7,40}$/.test(headSha) ? headSha : null;
+}
+
+/**
+ * poll-reviews.js が既存の stdout へ出す終端イベントを構造化する。
+ * 新しい通信経路を作らず、子の終了コードが正常な場合だけ親の状態判断へ使う。
+ *
+ * @param {unknown} line
+ * @param {string|number} [expectedPr]
+ * @returns {{state:'MERGED'|'CLOSED',pr:string}|null}
+ */
+function parsePrTerminalLine(line, expectedPr) {
+  if (typeof line !== 'string') return null;
+  const match = /^PR_(MERGED|CLOSED):([0-9]+)$/.exec(line.trim());
+  if (!match) return null;
+  if (expectedPr !== undefined && String(expectedPr) !== match[2]) return null;
+  return { state: match[1], pr: match[2] };
 }
 
 function getPrHead(pr, repo) {
@@ -609,8 +630,16 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
   let tempScope;
   let logPath;
   let child;
+  let childTrackingNotified = false;
   let closeLog;
   let result;
+  const notifyChildExit = () => {
+    if (!child || childTrackingNotified) return;
+    childTrackingNotified = true;
+    try {
+      if (deps.onChildExit) deps.onChildExit(child);
+    } catch {}
+  };
   try {
     statePath = slowStatePath(workspace, pr);
     const reservation = reserveSlowRun(workspace, pr, headSha);
@@ -678,28 +707,39 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
       childEnv,
       onSpawn: (spawned) => {
         child = spawned;
+        childTrackingNotified = false;
         updateSlowRun(statePath, runKey, { pid: spawned.pid || null, logPath });
+        try {
+          if (deps.onChildSpawn) deps.onChildSpawn(spawned);
+        } catch (error) {
+          throw new Error(`slow子プロセスの追跡登録に失敗しました: ${error.message}`);
+        }
       },
     }, deps);
+    notifyChildExit();
     child = childResult.child;
     closeLog = childResult.closeLog;
-    let finalLocalHead = '';
-    try { finalLocalHead = resolveHeadFn(target.worktree); } catch {}
-    if (!sameHead(finalLocalHead, headSha)) {
-      result = finishSlowStale({
+    if (deps.isCancelled && deps.isCancelled()) {
+      // CLOSED時のkill後は既存のfailure処理へ渡し、成果物・stateの更新と
+      // finallyのcleanupDetachedSlowWorktreeを共通化する。poll-pr側はこの
+      // pending taskを待たず、子の終了確認だけを既存のwaitChildExitへ任せる。
+      result = finishSlowFailure({
         pr,
+        repo,
         workspace,
         target,
         headSha,
         statePath,
         runKey,
         logPath,
-        reason: `slow対象worktreeのHEADが実行中に変更されました: ${finalLocalHead || '(empty)'} != ${headSha}`,
-      });
+        child: null,
+        closeLog,
+        reason: 'pr-closed',
+      }, deps);
     } else {
-      const getPrHeadFn = deps.getPrHeadFn || getPrHead;
-      const prHead = currentPrHead(pr, repo, getPrHeadFn);
-      if (prHead && !sameHead(prHead, headSha)) {
+      let finalLocalHead = '';
+      try { finalLocalHead = resolveHeadFn(target.worktree); } catch {}
+      if (!sameHead(finalLocalHead, headSha)) {
         result = finishSlowStale({
           pr,
           workspace,
@@ -708,15 +748,31 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
           statePath,
           runKey,
           logPath,
-          reason: `PRのHEADが実行中に変更されました: ${prHead} != ${headSha}`,
+          reason: `slow対象worktreeのHEADが実行中に変更されました: ${finalLocalHead || '(empty)'} != ${headSha}`,
         });
       } else {
-        result = finishSlowRun({
-          pr, repo, workspace, target, headSha, statePath, runKey, logPath, exitCode: childResult.exitCode,
-        }, deps);
+        const getPrHeadFn = deps.getPrHeadFn || getPrHead;
+        const prHead = currentPrHead(pr, repo, getPrHeadFn);
+        if (prHead && !sameHead(prHead, headSha)) {
+          result = finishSlowStale({
+            pr,
+            workspace,
+            target,
+            headSha,
+            statePath,
+            runKey,
+            logPath,
+            reason: `PRのHEADが実行中に変更されました: ${prHead} != ${headSha}`,
+          });
+        } else {
+          result = finishSlowRun({
+            pr, repo, workspace, target, headSha, statePath, runKey, logPath, exitCode: childResult.exitCode,
+          }, deps);
+        }
       }
     }
   } catch (error) {
+    notifyChildExit();
     result = finishSlowFailure({
       pr,
       repo,
@@ -885,22 +941,98 @@ async function runPollPr(params, deps = {}) {
   const writeStderrFn = deps.writeStderrFn || ((text) => process.stderr.write(text));
   const sleepFn = deps.sleepFn || ((ms) => new Promise(resolve => setTimeout(resolve, ms)));
   const slowTestDeps = deps.slowTestDeps || {};
+  const killProcessTreeFn = deps.killProcessTreeFn || killProcessTree;
 
   const pendingSlowTests = new Set();
+  const pendingSlowTestsByPr = new Map();
   const slowQueues = new Map();
+  const slowControls = new Map();
+
+  function slowControl(pr) {
+    const key = String(pr);
+    let control = slowControls.get(key);
+    if (!control) {
+      control = { cancelled: false, children: new Set() };
+      slowControls.set(key, control);
+    }
+    return control;
+  }
 
   function queueSlowTask(pr, operation) {
     const queueKey = String(pr);
+    const control = slowControl(pr);
     const previous = slowQueues.get(queueKey) || Promise.resolve();
-    const task = previous.catch(() => {}).then(operation);
+    const task = previous.catch(() => {}).then(() => {
+      if (control.cancelled) return { status: 'cancelled' };
+      return operation(control);
+    });
     slowQueues.set(queueKey, task);
     pendingSlowTests.add(task);
+    let tasksForPr = pendingSlowTestsByPr.get(queueKey);
+    if (!tasksForPr) {
+      tasksForPr = new Set();
+      pendingSlowTestsByPr.set(queueKey, tasksForPr);
+    }
+    tasksForPr.add(task);
     const remove = () => {
       pendingSlowTests.delete(task);
+      tasksForPr.delete(task);
+      if (tasksForPr.size === 0 && pendingSlowTestsByPr.get(queueKey) === tasksForPr) {
+        pendingSlowTestsByPr.delete(queueKey);
+      }
       if (slowQueues.get(queueKey) === task) slowQueues.delete(queueKey);
     };
     task.then(remove, remove);
     return task;
+  }
+
+  function cancelPendingSlowTests(pr) {
+    const queueKey = String(pr);
+    const control = slowControls.get(queueKey);
+    if (!control) return;
+    control.cancelled = true;
+
+    const tasksForPr = pendingSlowTestsByPr.get(queueKey);
+    if (tasksForPr) {
+      for (const task of tasksForPr) pendingSlowTests.delete(task);
+    }
+
+    for (const child of control.children) {
+      if (!child || !child.pid) continue;
+      try {
+        killProcessTreeFn(child.pid);
+      } catch (error) {
+        writeStderrFn(`poll-pr: CLOSED後のslow子プロセス(pid ${child.pid})終了に失敗しました: ${error.message}\n`);
+        throw error;
+      }
+    }
+  }
+
+  function slowTaskDeps(control) {
+    return {
+      ...slowTestDeps,
+      onChildSpawn: (child) => {
+        if (child) control.children.add(child);
+        if (slowTestDeps.onChildSpawn) slowTestDeps.onChildSpawn(child);
+        // executeSlowChild は onSpawn の直後に waitChildExit の購読を設定するため、
+        // この経路での終了は同一ターンの後に行い、closeイベントを取り逃がさない。
+        if (control.cancelled && child && child.pid) {
+          queueMicrotask(() => {
+            if (!control.children.has(child)) return;
+            try {
+              killProcessTreeFn(child.pid);
+            } catch (error) {
+              writeStderrFn(`poll-pr: CLOSED後のslow子プロセス(pid ${child.pid})終了に失敗しました: ${error.message}\n`);
+            }
+          });
+        }
+      },
+      onChildExit: (child) => {
+        control.children.delete(child);
+        if (slowTestDeps.onChildExit) slowTestDeps.onChildExit(child);
+      },
+      isCancelled: () => control.cancelled,
+    };
   }
 
   function launchSlowTest(pr, suppliedHeadSha) {
@@ -911,13 +1043,13 @@ async function runPollPr(params, deps = {}) {
         repo,
         workspace,
         reason: 'pr-head-unavailable',
-      }, slowTestDeps));
+      }, slowTaskDeps(slowControl(pr))));
       return;
     }
-    queueSlowTask(pr, () => runSlowTestFn(
+    queueSlowTask(pr, (control) => runSlowTestFn(
       { pr, issue, repo, workspace, headSha },
       {
-        ...slowTestDeps,
+        ...slowTaskDeps(control),
         onReserved: (event) => {
           writeStdoutFn(`SLOW_TEST_STARTED:${JSON.stringify({ pr: String(pr), layer: 'slow', testedHead: event.testedHead })}\n`);
           if (slowTestDeps.onReserved) slowTestDeps.onReserved(event);
@@ -958,19 +1090,36 @@ async function runPollPr(params, deps = {}) {
       }
     }
 
+    let terminalEvent = null;
     const exitCode = await spawnPollReviewsFn(
       pr,
       workspace,
       sessionPid,
       intervalArg || String(Math.round(intervalMs / 1000)),
       (line) => {
+        const parsedTerminal = parsePrTerminalLine(line, pr);
+        if (parsedTerminal) terminalEvent = parsedTerminal;
         const pushedHead = parsePrPushLine(line);
         if (pushedHead) launchSlowTest(pr, pushedHead);
       },
+      noReviewManager,
     );
-    if (pendingSlowTests.size > 0) await Promise.all([...pendingSlowTests]);
 
-    const prState = getPrStateFn(pr, repo);
+    // poll-reviews.js は終端イベントをstdoutへ出して exit 0 するため、その観測を
+    // そのまま使える場合は同じ state を gh へ二重問い合わせしない。異常終了または
+    // 終端イベント欠落時だけ、従来の状態再取得へフォールバックする。
+    const terminalState = exitCode === 0 && terminalEvent ? terminalEvent.state : '';
+    const prState = terminalState || getPrStateFn(pr, repo);
+    if (prState === 'CLOSED') {
+      // CLOSED後にslowを自然完了まで待つと、新PR検出が最大30分遅れる。既存の
+      // runSlowTest側のwaitChildExit/finishSlowFailure/cleanupDetachedSlowWorktreeへ
+      // 終了・cleanupを引き継ぐため、ここでは子をkillしてpending集合から外し、
+      // slow処理の自然完了待ちだけを省略する。
+      cancelPendingSlowTests(pr);
+    } else if (pendingSlowTests.size > 0) {
+      // MERGEDを含む通常終了は、slow結果とテスト申告が確定するまで従来どおり待つ。
+      await Promise.all([...pendingSlowTests]);
+    }
     recordMergeAndSnapshotFn({ prState, issue, pr, repo, workspace, exitCode });
     if (resolvePostReviewDecision(prState, exitCode) === 'resume') {
       writeStdoutFn(`PR_CLOSED_RESUMED:${pr}\n`);
@@ -990,6 +1139,7 @@ module.exports = {
   recordMergeAndSnapshot,
   spawnPollReviews,
   parsePrPushLine,
+  parsePrTerminalLine,
   slowStatePath,
   reserveSlowRun,
   resolveSlowWorktree,
