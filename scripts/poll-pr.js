@@ -108,10 +108,14 @@ Review Manager自身が実際のdiffを見た上で行う（本スクリプト�
  * @param {string|number} sessionPid
  * @param {string|number} [intervalSeconds]
  * @param {(line:string)=>void} [onOutputLine] poll-reviews.jsのstdoutを受け取るcallback
+ * @param {{noReviewManager?:boolean}} [options]
  * @returns {Promise<number>} poll-reviews.js の終了コード（不明な場合は1）
  */
-function spawnPollReviews(pr, workspace, sessionPid, intervalSeconds = 30, onOutputLine) {
-  const args = [path.join(__dirname, 'poll-reviews.js'), pr, workspace, String(intervalSeconds), '--session-pid', String(sessionPid)];
+function spawnPollReviews(pr, workspace, sessionPid, intervalSeconds = 30, onOutputLine, options = {}) {
+  const args = [path.join(__dirname, 'poll-reviews.js'), String(pr), workspace, String(intervalSeconds), '--session-pid', String(sessionPid)];
+  if (options && options.noReviewManager) {
+    args.push('--no-review-manager');
+  }
   let child;
   try {
     child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'inherit'] });
@@ -967,6 +971,7 @@ async function runPollPr(params, deps = {}) {
         const pushedHead = parsePrPushLine(line);
         if (pushedHead) launchSlowTest(pr, pushedHead);
       },
+      { noReviewManager },
     );
     if (pendingSlowTests.size > 0) await Promise.all([...pendingSlowTests]);
 

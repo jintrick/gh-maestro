@@ -80,7 +80,24 @@ test('spawnPollReviews launches poll-reviews.js asynchronously and relays stdout
   assert.ok(call.args.includes('/workspace'));
   assert.ok(call.args.includes('--session-pid'));
   assert.ok(call.args.includes('4321'));
+  assert.ok(!call.args.includes('--no-review-manager'));
   assert.deepEqual(call.opts.stdio, ['ignore', 'pipe', 'inherit']);
+});
+
+test('spawnPollReviews appends --no-review-manager when options.noReviewManager is true', async () => {
+  const { mod, calls } = loadModule(() => ({ status: 0 }));
+  const code = await mod.spawnPollReviews('12', '/workspace', 4321, 30, null, { noReviewManager: true });
+  assert.equal(code, 0);
+  assert.equal(calls.length, 1);
+  const [call] = calls;
+  assert.ok(call.args.includes('--no-review-manager'));
+});
+
+test('spawnPollReviews does not append --no-review-manager when options.noReviewManager is false', async () => {
+  const { mod, calls } = loadModule(() => ({ status: 0 }));
+  await mod.spawnPollReviews('12', '/workspace', 4321, 30, null, { noReviewManager: false });
+  assert.equal(calls.length, 1);
+  assert.ok(!calls[0].args.includes('--no-review-manager'));
 });
 
 test('spawnPollReviews sends relayed PR_PUSH lines to the callback', async () => {
@@ -498,6 +515,7 @@ test('runPollPr --no-review-manager does not claim, start, or emit Review Manage
   const workspace = temporaryWorkspace('gh-maestro-poll-pr-no-review-manager-');
   const output = [];
   let managerStarts = 0;
+  let capturedPollReviewsOptions = null;
   const result = await mod.runPollPr({
     issue: 507,
     repo: 'fixture/repo',
@@ -514,7 +532,10 @@ test('runPollPr --no-review-manager does not claim, start, or emit Review Manage
       managerStarts += 1;
       return 'REVIEW_MANAGER_STARTED';
     },
-    spawnPollReviewsFn: async () => 0,
+    spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine, options) => {
+      capturedPollReviewsOptions = options;
+      return 0;
+    },
     getPrStateFn: () => 'OPEN',
     recordMergeAndSnapshotFn: () => {},
     runSlowTestFn: async () => {},
@@ -526,6 +547,7 @@ test('runPollPr --no-review-manager does not claim, start, or emit Review Manage
   assert.equal(managerStarts, 0);
   assert.equal(output.some((line) => line.includes('REVIEW_MANAGER_')), false);
   assert.equal(fs.existsSync(mod.reviewManagerClaimPath(workspace, '42')), false);
+  assert.deepEqual(capturedPollReviewsOptions, { noReviewManager: true });
 });
 
 test('runPollPr leaves the claim sentinel when automatic Review Manager startup fails', async () => {
