@@ -152,6 +152,27 @@ function formatTestStatusEvent(evaluation = {}) {
 }
 
 /**
+ * poll-reviews で使用する状態ファイルのパス定義。
+ * ポーリングループと終了時クリーンアップとで定義が分散して残骸が残るのを防ぐため、ここに集約する。
+ * @param {string} workspace
+ * @param {string|number} pr
+ * @returns {{ stateDir: string, stateFile: string, shaFile: string, testStatusFile: string, files: string[] }}
+ */
+function pollReviewsStateFiles(workspace, pr) {
+  const stateDir = path.join(workspace, '.gh-maestro');
+  const stateFile = path.join(stateDir, `poll-state-${pr}`);
+  const shaFile = path.join(stateDir, `poll-sha-${pr}`);
+  const testStatusFile = path.join(stateDir, `poll-test-status-${pr}`);
+  return {
+    stateDir,
+    stateFile,
+    shaFile,
+    testStatusFile,
+    files: [stateFile, shaFile, testStatusFile],
+  };
+}
+
+/**
  * poll-reviews のポーリング実行ループ。
  *
  * @param {{pr:string|number,workspace:string,sessionPid?:string|number,intervalSec?:number,noReviewManager?:boolean,maxCycles?:number}} params
@@ -186,12 +207,14 @@ async function runPollReviews(params, deps = {}) {
 
   const repo = deps.repo || (ghCapture(['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner']) || '').trim();
 
-  const stateDir = path.join(workspace, '.gh-maestro');
+  const {
+    stateDir,
+    stateFile,
+    shaFile,
+    testStatusFile,
+  } = (deps.pollReviewsStateFilesFn || pollReviewsStateFiles)(workspace, pr);
   fsMod.mkdirSync(stateDir, { recursive: true });
-  const stateFile = path.join(stateDir, `poll-state-${pr}`);
   if (!fsMod.existsSync(stateFile)) fsMod.writeFileSync(stateFile, '');
-  const shaFile = path.join(stateDir, `poll-sha-${pr}`);
-  const testStatusFile = path.join(stateDir, `poll-test-status-${pr}`);
 
   function knownIds() {
     return new Set(fsMod.readFileSync(stateFile, 'utf8').split('\n').filter(Boolean));
@@ -352,6 +375,7 @@ module.exports = {
   pollDegradationTransition,
   reviewTerminalEvent,
   formatTestStatusEvent,
+  pollReviewsStateFiles,
   runPollReviews,
 };
 
@@ -401,10 +425,7 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  const stateDir = path.join(workspace, '.gh-maestro');
-  const stateFile = path.join(stateDir, `poll-state-${pr}`);
-  const shaFile = path.join(stateDir, `poll-sha-${pr}`);
-  const testStatusFile = path.join(stateDir, `poll-test-status-${pr}`);
+  const stateFiles = pollReviewsStateFiles(workspace, pr);
 
   // ── ライフサイクル管理 ─────────────────────────────────────────────────
 
@@ -420,9 +441,9 @@ if (require.main === module) {
 
   function cleanup() {
     lifecycleCleanup(workspace, () => {
-      try { fs.unlinkSync(stateFile); } catch {}
-      try { fs.unlinkSync(shaFile); } catch {}
-      try { fs.unlinkSync(testStatusFile); } catch {}
+      for (const file of stateFiles.files) {
+        try { fs.unlinkSync(file); } catch {}
+      }
     });
   }
 

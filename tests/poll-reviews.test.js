@@ -8,6 +8,7 @@ const {
   isValidPrCommentId,
   buildPrCommentRelayEvents,
   formatTestStatusEvent,
+  pollReviewsStateFiles,
   runPollReviews,
 } = require('../scripts/poll-reviews.js');
 
@@ -430,5 +431,16 @@ test('runPollReviews: noReviewManager=true でも MERGED / CLOSED 終端検出�
   assert.equal(res.exitCode, 0);
   assert.equal(res.terminalEvent, 'PR_MERGED:100');
   assert.ok(stdoutLines.some(line => line.includes('PR_MERGED:100')));
+});
+
+test('pollReviewsStateFiles: 状態ファイルのパス定義を一元的に払い出し、files配列に全ファイルを含む', () => {
+  const ws = path.join('fake', 'workspace');
+  const pr = 42;
+  const paths = pollReviewsStateFiles(ws, pr);
+  assert.equal(paths.stateDir, path.join(ws, '.gh-maestro'));
+  assert.equal(paths.stateFile, path.join(ws, '.gh-maestro', 'poll-state-42'));
+  assert.equal(paths.shaFile, path.join(ws, '.gh-maestro', 'poll-sha-42'));
+  assert.equal(paths.testStatusFile, path.join(ws, '.gh-maestro', 'poll-test-status-42'));
+  assert.deepEqual(paths.files, [paths.stateFile, paths.shaFile, paths.testStatusFile]);
 });
 
