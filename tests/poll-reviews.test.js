@@ -8,6 +8,7 @@ const {
   isValidPrCommentId,
   buildPrCommentRelayEvents,
   formatTestStatusEvent,
+  runPollReviews,
 } = require('../scripts/poll-reviews.js');
 
 test('isValidCommentId: 正の整数IDだけを受理する', () => {
@@ -252,3 +253,192 @@ test('extractTestDeclaration: 形式不正や欠落のあるコメントを安�
 
 // ── CLI: workspace 解決（サブプロセス経由） ─────────────────────────────────
 // workspace 解決は gh 呼び出しより前に行われるため、この検証だけなら実 gh 呼び出しは発生しない。
+
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { spawnSync } = require('child_process');
+
+const pollReviewsScript = path.join(__dirname, '../scripts/poll-reviews.js');
+
+// ── CLI 引数境界テスト ───────────────────────────────────────────────────
+
+test('CLI: --help 表示に --no-review-manager が含まれ exit 0', () => {
+  const res = spawnSync(process.execPath, [pollReviewsScript, '--help'], { encoding: 'utf8' });
+  assert.equal(res.status, 0);
+  assert.ok(res.stdout.includes('--no-review-manager'));
+});
+
+test('CLI: 未知のフラグを指定すると非ゼロで exit', () => {
+  const res = spawnSync(process.execPath, [pollReviewsScript, '12', '--unknown-flag'], { encoding: 'utf8' });
+  assert.notEqual(res.status, 0);
+  assert.ok(res.stderr.includes('未知の引数') || res.stderr.includes('--unknown-flag'));
+});
+
+test('CLI: --no-review-manager は未知フラグにならずパースされる', () => {
+  // PR番号なしで実行した場合は Usage で exit 1
+  const res = spawnSync(process.execPath, [pollReviewsScript, '--no-review-manager'], { encoding: 'utf8' });
+  assert.equal(res.status, 1);
+  assert.ok(res.stderr.includes('poll-reviews: 位置引数が必要です'));
+});
+
+// ── runPollReviews: --no-review-manager 振る舞い ───────────────────────────
+
+test('runPollReviews: noReviewManager=true のとき inline comments と formal reviews API を呼び出さない', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'poll-reviews-unit-'));
+  const calledGhArgs = [];
+  const stdoutLines = [];
+
+  const mockGhCapture = (args) => {
+    calledGhArgs.push(args);
+    const cmd = args.join(' ');
+    if (cmd.includes('pr view 100 --repo owner/repo --json state,headRefOid,author')) {
+      return 'OPEN|a1b2c3d4e5|alice\n';
+    }
+    if (cmd.includes('pr view 100 --repo owner/repo --json comments')) {
+      return JSON.stringify({
+        comments: [
+          {
+            id: 'IC_1',
+            author: { login: 'alice' },
+            body: fullDeclarationBody('a1b2c3d4e5', 0, 10, 'full'),
+          },
+        ],
+      });
+    }
+    if (cmd.includes('comments')) {
+      return '1|file.js|10|bob|inline comment\n';
+    }
+    if (cmd.includes('reviews')) {
+      return '2|bob|APPROVED|looks good\n';
+    }
+    return '';
+  };
+
+  try {
+    const res = await runPollReviews({
+      pr: 100,
+      workspace: tmpDir,
+      sessionPid: process.pid,
+      intervalSec: 1,
+      noReviewManager: true,
+      maxCycles: 1,
+    }, {
+      ghCaptureFn: mockGhCapture,
+      repo: 'owner/repo',
+      checkParentFn: () => true,
+      writeStdoutFn: (text) => stdoutLines.push(text),
+      sleepFn: () => Promise.resolve(),
+    });
+
+    assert.equal(res.exitCode, 0);
+
+    // inline comments API と formal reviews API の呼び出しが無いことを検証
+    const calledApis = calledGhArgs.map(a => a.join(' '));
+    assert.ok(!calledApis.some(cmd => cmd.includes('pulls/100/comments')), 'inline comments API must not be called');
+    assert.ok(!calledApis.some(cmd => cmd.includes('pulls/100/reviews')), 'formal reviews API must not be called');
+
+    // state, headRefOid, author の取得は呼ばれていること
+    assert.ok(calledApis.some(cmd => cmd.includes('pr view 100') && cmd.includes('headRefOid')));
+    // comments の取得（テスト申告評価用）は呼ばれていること
+    assert.ok(calledApis.some(cmd => cmd.includes('pr view 100') && cmd.includes('--json comments')));
+
+    // TEST_STATUS が出力されていること
+    assert.ok(stdoutLines.some(line => line.includes('TEST_STATUS:GREEN:a1b2c3d4e5:a1b2c3d4e5:test-runner:full')));
+    // REVIEW_COMMENT や PR_REVIEW が出力されていないこと
+    assert.ok(!stdoutLines.some(line => line.includes('REVIEW_COMMENT')));
+    assert.ok(!stdoutLines.some(line => line.includes('PR_REVIEW')));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('runPollReviews: noReviewManager=false のとき inline comments と formal reviews API を呼び出す', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'poll-reviews-full-'));
+  const calledGhArgs = [];
+  const stdoutLines = [];
+
+  const mockGhCapture = (args) => {
+    calledGhArgs.push(args);
+    const cmd = args.join(' ');
+    if (cmd.includes('pr view 100 --repo owner/repo --json state,headRefOid,author')) {
+      return 'OPEN|sha123|alice\n';
+    }
+    if (cmd.includes('pr view 100 --repo owner/repo --json comments')) {
+      return JSON.stringify({ comments: [] });
+    }
+    if (cmd.includes('pulls/100/comments')) {
+      return '1|file.js|10|bob|inline comment\n';
+    }
+    if (cmd.includes('pulls/100/reviews')) {
+      return '2|charlie|APPROVED|looks good\n';
+    }
+    return '';
+  };
+
+  try {
+    const res = await runPollReviews({
+      pr: 100,
+      workspace: tmpDir,
+      sessionPid: process.pid,
+      intervalSec: 1,
+      noReviewManager: false,
+      maxCycles: 1,
+    }, {
+      ghCaptureFn: mockGhCapture,
+      repo: 'owner/repo',
+      checkParentFn: () => true,
+      writeStdoutFn: (text) => stdoutLines.push(text),
+      sleepFn: () => Promise.resolve(),
+    });
+
+    assert.equal(res.exitCode, 0);
+
+    const calledApis = calledGhArgs.map(a => a.join(' '));
+    assert.ok(calledApis.some(cmd => cmd.includes('pulls/100/comments')), 'inline comments API must be called');
+    assert.ok(calledApis.some(cmd => cmd.includes('pulls/100/reviews')), 'formal reviews API must be called');
+
+    // REVIEW_COMMENT と PR_REVIEW が出力されていること
+    assert.ok(stdoutLines.some(line => line.includes('REVIEW_COMMENT:file.js|10|bob|inline comment')));
+    assert.ok(stdoutLines.some(line => line.includes('PR_REVIEW:charlie:APPROVED:looks good')));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('runPollReviews: noReviewManager=true でも MERGED / CLOSED 終端検出が動作する', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'poll-reviews-terminal-'));
+  const stdoutLines = [];
+
+  const mockGhCapture = (args) => {
+    const cmd = args.join(' ');
+    if (cmd.includes('pr view 100 --repo owner/repo --json state,headRefOid,author')) {
+      return 'MERGED|sha123|alice\n';
+    }
+    return '';
+  };
+
+  try {
+    const res = await runPollReviews({
+      pr: 100,
+      workspace: tmpDir,
+      sessionPid: process.pid,
+      intervalSec: 1,
+      noReviewManager: true,
+      maxCycles: 1,
+    }, {
+      ghCaptureFn: mockGhCapture,
+      repo: 'owner/repo',
+      checkParentFn: () => true,
+      writeStdoutFn: (text) => stdoutLines.push(text),
+      sleepFn: () => Promise.resolve(),
+    });
+
+    assert.equal(res.exitCode, 0);
+    assert.equal(res.terminalEvent, 'PR_MERGED:100');
+    assert.ok(stdoutLines.some(line => line.includes('PR_MERGED:100')));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+

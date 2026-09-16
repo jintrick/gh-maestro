@@ -31,7 +31,7 @@ const {
 
 const USAGE = `poll-reviews.js — PR のレビューコメント・push・マージ状態をポーリングする
 
-Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <pid>]
+Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <pid>] [--no-review-manager]
 
 Arguments:
   <PR>                対象の PR 番号
@@ -40,6 +40,7 @@ Arguments:
   [INTERVAL_SECONDS]  ポーリング間隔（秒、デフォルト 30）
 
 Options:
+  --no-review-manager  レビュー監視（inline/formalレビュー）を行わず、PR状態・テスト申告・push監視のみ行う
   --session-pid <pid>  監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
 
 Output (stdout):
@@ -150,6 +151,198 @@ function formatTestStatusEvent(evaluation = {}) {
   ].join(':');
 }
 
+/**
+ * poll-reviews のポーリング実行ループ。
+ *
+ * @param {{pr:string|number,workspace:string,sessionPid?:string|number,intervalSec?:number,noReviewManager?:boolean,maxCycles?:number}} params
+ * @param {object} [deps]
+ * @returns {Promise<{exitCode:number,reason?:string,terminalEvent?:string}>}
+ */
+async function runPollReviews(params, deps = {}) {
+  const {
+    pr,
+    workspace,
+    sessionPid,
+    intervalSec = 30,
+    noReviewManager = false,
+    maxCycles,
+  } = params;
+
+  const fsMod = deps.fs || fs;
+  const writeStdoutFn = deps.writeStdoutFn || ((text) => process.stdout.write(text));
+  const writeStderrFn = deps.writeStderrFn || ((text) => process.stderr.write(text));
+  const sleepFn = deps.sleepFn || ((ms) => new Promise(r => setTimeout(r, ms)));
+  const checkParentFn = deps.checkParentFn || (() => true);
+  const cleanupFn = deps.cleanupFn || (() => {});
+
+  const ghCapture = deps.ghCaptureFn || ((args) => {
+    const r = spawnSync('gh', args, { encoding: 'utf8' });
+    if (r.status !== 0) {
+      writeStderrFn(`poll-reviews: gh ${args.join(' ')} 失敗 (status ${r.status}): ${(r.stderr || '').toString().trim()}\n`);
+      return null;
+    }
+    return r.stdout;
+  });
+
+  const repo = deps.repo || (ghCapture(['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner']) || '').trim();
+
+  const stateDir = path.join(workspace, '.gh-maestro');
+  fsMod.mkdirSync(stateDir, { recursive: true });
+  const stateFile = path.join(stateDir, `poll-state-${pr}`);
+  if (!fsMod.existsSync(stateFile)) fsMod.writeFileSync(stateFile, '');
+  const shaFile = path.join(stateDir, `poll-sha-${pr}`);
+  const testStatusFile = path.join(stateDir, `poll-test-status-${pr}`);
+
+  function knownIds() {
+    return new Set(fsMod.readFileSync(stateFile, 'utf8').split('\n').filter(Boolean));
+  }
+
+  function recordId(id) {
+    fsMod.appendFileSync(stateFile, id + '\n');
+  }
+
+  const inlineJq = `.[] | [(.id | tostring), .path, ((.original_line // "?") | tostring), .user.login, (.body | gsub("\\n"; " "))] | join("|")`;
+  const reviewsJq = `.[] | [(.id | tostring), .user.login, .state, (.body | gsub("\\n"; " "))] | join("|")`;
+
+  let degraded = false;
+  function noteCycleResult(hadError) {
+    const t = pollDegradationTransition(degraded, hadError);
+    degraded = t.degraded;
+    if (t.emit === 'POLL_ERROR') {
+      writeStdoutFn('POLL_ERROR:review監視のGitHubアクセスが失敗しています（一時的な可能性。復旧まで再試行を継続します）\n');
+    } else if (t.emit === 'POLL_RECOVERED') {
+      writeStdoutFn('POLL_RECOVERED\n');
+    }
+  }
+
+  let cycle = 0;
+  while (true) {
+    if (typeof maxCycles === 'number' && cycle >= maxCycles) {
+      return { exitCode: 0, reason: 'max_cycles_reached' };
+    }
+    cycle++;
+
+    // dead-man's switch: 親セッション生存確認
+    if (!checkParentFn()) {
+      writeStderrFn(`poll-reviews: parent session (pid ${sessionPid}) is dead — exiting\n`);
+      cleanupFn();
+      return { exitCode: 0, reason: 'parent_dead' };
+    }
+
+    const prJson = ghCapture(['pr', 'view', String(pr), '--repo', repo,
+      '--json', 'state,headRefOid,author', '-q', '[.state, .headRefOid, (.author.login // "")] | join("|")']);
+    // PR状態が取れないサイクルは以降を丸ごとスキップ（誤った差分検知・中継を防ぐ）。
+    if (prJson === null) {
+      noteCycleResult(true);
+      await sleepFn(intervalSec * 1000);
+      continue;
+    }
+    const [state, headSha, prAuthor] = prJson.trim().split('|');
+
+    // 終端イベント（MERGED / CLOSED）を検出したら監視を終了する。
+    // CLOSED（却下・キャンセル）も終端として扱う（Issue #289: 従来は MERGED のみ終端だった
+    // ため、CLOSED された PR を監視し続けて poll-pr.js が新 PR を検出できず機能死を起こした）。
+    const terminalEvent = reviewTerminalEvent(state, String(pr));
+    if (terminalEvent) {
+      writeStdoutFn(`${terminalEvent}\n`);
+      cleanupFn();
+      return { exitCode: 0, terminalEvent };
+    }
+
+    let isPushEvent = false;
+    const prevSha = fsMod.existsSync(shaFile) ? fsMod.readFileSync(shaFile, 'utf8').trim() : '';
+    if (headSha && headSha !== prevSha) {
+      fsMod.writeFileSync(shaFile, headSha);
+      if (prevSha) {
+        writeStdoutFn(`PR_PUSH:${headSha}\n`);
+        isPushEvent = true;
+      }
+    }
+
+    const known = knownIds();
+    let hadError = false;
+
+    if (!noReviewManager) {
+      const inlineOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/comments`,
+        '--paginate', '-q', inlineJq]);
+      if (inlineOut !== null) {
+        for (const line of inlineOut.split('\n').filter(Boolean)) {
+          const sep = line.indexOf('|');
+          const id = line.slice(0, sep);
+          if (!isValidCommentId(id) || known.has(id)) continue;
+          recordId(id);
+          writeStdoutFn(`REVIEW_COMMENT:${line.slice(sep + 1)}\n`);
+        }
+      } else {
+        hadError = true;
+      }
+    }
+
+    // PR コメント（テスト結果申告マーカーの抽出・判定もここで行う）
+    const commentsJson = ghCapture(['pr', 'view', String(pr), '--repo', repo,
+      '--json', 'comments']);
+    if (commentsJson !== null) {
+      let commentsList = [];
+      try {
+        const parsed = JSON.parse(commentsJson);
+        commentsList = parsed.comments || [];
+      } catch {}
+
+      // 第三者による偽の申告捏造（Issue #209）を防ぐため、PR作成者または権限保持者の
+      // 最新の有効なコメントだけを共有ヘルパー経由で採用する。
+      const latestDecl = findLatestTrustedTestDeclaration(commentsList, prAuthor);
+      const testEvaluation = evaluateTestDeclaration(latestDecl, headSha);
+      const evalKey = [
+        testEvaluation.status,
+        testEvaluation.declaredSha || '',
+        testEvaluation.headSha || '',
+        testEvaluation.provenance || 'unknown',
+        testEvaluation.scope || 'unknown',
+        testEvaluation.fail === undefined ? '' : testEvaluation.fail,
+        testEvaluation.pass === undefined ? '' : testEvaluation.pass,
+      ].join(':');
+      const prevEvalKey = fsMod.existsSync(testStatusFile) ? fsMod.readFileSync(testStatusFile, 'utf8').trim() : '';
+
+      if (evalKey !== prevEvalKey || isPushEvent) {
+        fsMod.writeFileSync(testStatusFile, evalKey);
+        writeStdoutFn(formatTestStatusEvent(testEvaluation) + '\n');
+      }
+
+      for (const event of buildPrCommentRelayEvents(commentsList, known)) {
+        recordId(event.id);
+        writeStdoutFn(`${event.line}\n`);
+      }
+    } else {
+      hadError = true;
+    }
+
+    if (!noReviewManager) {
+      const reviewsOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/reviews`,
+        '--paginate', '-q', reviewsJq]);
+      if (reviewsOut !== null) {
+        for (const line of reviewsOut.split('\n').filter(Boolean)) {
+          const sep = line.indexOf('|');
+          const id = line.slice(0, sep);
+          if (!isValidCommentId(id) || known.has(id)) continue;
+          recordId(id);
+          const rest = line.slice(sep + 1); // user|state|body
+          const [user, reviewState, ...bodyParts] = rest.split('|');
+          const body = bodyParts.join('|');
+          // APPROVED/CHANGES_REQUESTED は body が空でも emit（マージ判断に必要）
+          if (body.trim() || reviewState === 'APPROVED' || reviewState === 'CHANGES_REQUESTED') {
+            writeStdoutFn(`PR_REVIEW:${user}:${reviewState}:${body}\n`);
+          }
+        }
+      } else {
+        hadError = true;
+      }
+    }
+
+    noteCycleResult(hadError);
+    await sleepFn(intervalSec * 1000);
+  }
+}
+
 module.exports = {
   isValidCommentId,
   isValidPrCommentId,
@@ -159,6 +352,7 @@ module.exports = {
   pollDegradationTransition,
   reviewTerminalEvent,
   formatTestStatusEvent,
+  runPollReviews,
 };
 
 if (require.main === module) {
@@ -167,7 +361,7 @@ if (require.main === module) {
   try {
     ({ values, rest } = parseFlags(argv, {
       flags: { '--session-pid': {} },
-      booleans: ['--help', '-h'],
+      booleans: ['--help', '-h', '--no-review-manager'],
       // pr（必須）・workspace・interval の3つまで。未知フラグ・余剰位置引数はパーサ側で拒否。
       positionals: { min: 1, max: 3 },
     }));
@@ -187,6 +381,7 @@ if (require.main === module) {
     process.exit(0);
   }
 
+  const noReviewManager = Boolean(values['--no-review-manager']);
   const sessionPidArg = values['--session-pid'];
   const [pr, workspaceArg, intervalArg] = rest;
   const intervalSec = parseInt(intervalArg || '30');
@@ -206,13 +401,8 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  const repo = spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-    { encoding: 'utf8' }).stdout.trim();
-
   const stateDir = path.join(workspace, '.gh-maestro');
-  fs.mkdirSync(stateDir, { recursive: true });
   const stateFile = path.join(stateDir, `poll-state-${pr}`);
-  if (!fs.existsSync(stateFile)) fs.writeFileSync(stateFile, '');
   const shaFile = path.join(stateDir, `poll-sha-${pr}`);
   const testStatusFile = path.join(stateDir, `poll-test-status-${pr}`);
 
@@ -245,162 +435,21 @@ if (require.main === module) {
   // 同期投稿する（best-effort・throwしない）。
   process.on('exit', () => { notifyWatchdogExit({ workspace, scriptName: 'poll-reviews.js' }); });
 
-  function knownIds() {
-    return new Set(fs.readFileSync(stateFile, 'utf8').split('\n').filter(Boolean));
-  }
-
-  function recordId(id) {
-    fs.appendFileSync(stateFile, id + '\n');
-  }
-
-  // gh 呼び出しは終了コードを必ず確認する。GitHub障害中は gh がエラーレスポンス
-  // （404 JSON・切れた出力等）を stdout に出して非ゼロ終了しうる。status を見ずに
-  // stdout を消費すると、そのゴミが state に記録され REVIEW_COMMENT 断片として中継され続ける。
-  // 失敗時は null を返し（呼び出し側はそのサイクル/セクションをスキップ）、エラーは stderr へ出す
-  // （stdout はイベントストリームなので混ぜない）。
-  function ghCapture(args) {
-    const r = spawnSync('gh', args, { encoding: 'utf8' });
-    if (r.status !== 0) {
-      process.stderr.write(`poll-reviews: gh ${args.join(' ')} 失敗 (status ${r.status}): ${(r.stderr || '').toString().trim()}\n`);
-      return null;
-    }
-    return r.stdout;
-  }
-
-  const inlineJq = `.[] | [(.id | tostring), .path, ((.original_line // "?") | tostring), .user.login, (.body | gsub("\\n"; " "))] | join("|")`;
-  const reviewsJq = `.[] | [(.id | tostring), .user.login, .state, (.body | gsub("\\n"; " "))] | join("|")`;
-
-  // GitHubアクセスの失敗をサイレントに握り潰さない。stderr は Monitor に拾われるとは限らないため、
-  // orchestrator に確実に届く stdout へ、状態遷移（正常→劣化／劣化→復旧）のときだけイベントを出す
-  // （毎周回出すとスパムになるので遷移時のみ）。これにより持続的な障害が可視化され、
-  // orchestrator が「まだレビューが来ないだけ」と誤解して無限に待つのを防ぐ。
-  let degraded = false;
-  function noteCycleResult(hadError) {
-    const t = pollDegradationTransition(degraded, hadError);
-    degraded = t.degraded;
-    if (t.emit === 'POLL_ERROR') {
-      process.stdout.write('POLL_ERROR:review監視のGitHubアクセスが失敗しています（一時的な可能性。復旧まで再試行を継続します）\n');
-    } else if (t.emit === 'POLL_RECOVERED') {
-      process.stdout.write('POLL_RECOVERED\n');
-    }
-  }
-
   (async () => {
-    while (true) {
-      // dead-man's switch: 親セッション生存確認
-      if (!checkParent()) {
-        console.error(`poll-reviews: parent session (pid ${sessionPid}) is dead — exiting`);
-        cleanup();
-        process.exit(0);
-      }
-
-      const prJson = ghCapture(['pr', 'view', pr, '--repo', repo,
-        '--json', 'state,headRefOid,author', '-q', '[.state, .headRefOid, (.author.login // "")] | join("|")']);
-      // PR状態が取れないサイクルは以降を丸ごとスキップ（誤った差分検知・中継を防ぐ）。
-      if (prJson === null) {
-        noteCycleResult(true);
-        await new Promise(r => setTimeout(r, intervalSec * 1000));
-        continue;
-      }
-      const [state, headSha, prAuthor] = prJson.trim().split('|');
-
-      // 終端イベント（MERGED / CLOSED）を検出したら監視を終了する。
-      // CLOSED（却下・キャンセル）も終端として扱う（Issue #289: 従来は MERGED のみ終端だった
-      // ため、CLOSED された PR を監視し続けて poll-pr.js が新 PR を検出できず機能死を起こした）。
-      const terminalEvent = reviewTerminalEvent(state, pr);
-      if (terminalEvent) {
-        process.stdout.write(`${terminalEvent}\n`);
-        cleanup();
-        process.exit(0);
-      }
-
-      let isPushEvent = false;
-      const prevSha = fs.existsSync(shaFile) ? fs.readFileSync(shaFile, 'utf8').trim() : '';
-      if (headSha && headSha !== prevSha) {
-        fs.writeFileSync(shaFile, headSha);
-        if (prevSha) {
-          process.stdout.write(`PR_PUSH:${headSha}\n`);
-          isPushEvent = true;
-        }
-      }
-
-      const known = knownIds();
-      let hadError = false;
-
-      const inlineOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/comments`,
-        '--paginate', '-q', inlineJq]);
-      if (inlineOut !== null) {
-        for (const line of inlineOut.split('\n').filter(Boolean)) {
-          const sep = line.indexOf('|');
-          const id = line.slice(0, sep);
-          if (!isValidCommentId(id) || known.has(id)) continue;
-          recordId(id);
-          process.stdout.write(`REVIEW_COMMENT:${line.slice(sep + 1)}\n`);
-        }
-      } else {
-        hadError = true;
-      }
-
-      // PR コメント（テスト結果申告マーカーの抽出・判定もここで行う）
-      const commentsJson = ghCapture(['pr', 'view', pr, '--repo', repo,
-        '--json', 'comments']);
-      if (commentsJson !== null) {
-        let commentsList = [];
-        try {
-          const parsed = JSON.parse(commentsJson);
-          commentsList = parsed.comments || [];
-        } catch {}
-
-        // 第三者による偽の申告捏造（Issue #209）を防ぐため、PR作成者または権限保持者の
-        // 最新の有効なコメントだけを共有ヘルパー経由で採用する。
-        const latestDecl = findLatestTrustedTestDeclaration(commentsList, prAuthor);
-        const testEvaluation = evaluateTestDeclaration(latestDecl, headSha);
-        const evalKey = [
-          testEvaluation.status,
-          testEvaluation.declaredSha || '',
-          testEvaluation.headSha || '',
-          testEvaluation.provenance || 'unknown',
-          testEvaluation.scope || 'unknown',
-          testEvaluation.fail === undefined ? '' : testEvaluation.fail,
-          testEvaluation.pass === undefined ? '' : testEvaluation.pass,
-        ].join(':');
-        const prevEvalKey = fs.existsSync(testStatusFile) ? fs.readFileSync(testStatusFile, 'utf8').trim() : '';
-
-        if (evalKey !== prevEvalKey || isPushEvent) {
-          fs.writeFileSync(testStatusFile, evalKey);
-          process.stdout.write(formatTestStatusEvent(testEvaluation) + '\n');
-        }
-
-        for (const event of buildPrCommentRelayEvents(commentsList, known)) {
-          recordId(event.id);
-          process.stdout.write(`${event.line}\n`);
-        }
-      } else {
-        hadError = true;
-      }
-
-      const reviewsOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/reviews`,
-        '--paginate', '-q', reviewsJq]);
-      if (reviewsOut !== null) {
-        for (const line of reviewsOut.split('\n').filter(Boolean)) {
-          const sep = line.indexOf('|');
-          const id = line.slice(0, sep);
-          if (!isValidCommentId(id) || known.has(id)) continue;
-          recordId(id);
-          const rest = line.slice(sep + 1); // user|state|body
-          const [user, state, ...bodyParts] = rest.split('|');
-          const body = bodyParts.join('|');
-          // APPROVED/CHANGES_REQUESTED は body が空でも emit（マージ判断に必要）
-          if (body.trim() || state === 'APPROVED' || state === 'CHANGES_REQUESTED') {
-            process.stdout.write(`PR_REVIEW:${user}:${state}:${body}\n`);
-          }
-        }
-      } else {
-        hadError = true;
-      }
-
-      noteCycleResult(hadError);
-      await new Promise(r => setTimeout(r, intervalSec * 1000));
-    }
-  })();
+    const result = await runPollReviews({
+      pr,
+      workspace,
+      sessionPid,
+      intervalSec,
+      noReviewManager,
+    }, {
+      checkParentFn: checkParent,
+      cleanupFn: cleanup,
+    });
+    process.exit(result.exitCode);
+  })().catch((err) => {
+    console.error('poll-reviews fatal:', err);
+    cleanup();
+    process.exit(1);
+  });
 }
