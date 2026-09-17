@@ -669,6 +669,29 @@ test('renderSnapshotLines: Review ManagerのworkerNameとstartTime基準が異�
   assert.ok(workerLines[1].includes('job-415-1') && workerLines[1].includes('(pid: 4151)'));
 });
 
+test('mergeCycleWorkers: Review Managerのcycle eventにPIDが無ければ同一runと断定しない', () => {
+  const merged = workerStatus.mergeCycleWorkers([{
+    workerName: 'issue-563-review-manager-pr-415',
+    role: 'review-manager',
+    pr: 415,
+    startTime: '2026-09-17T00:00:00.000Z',
+    running: true,
+  }], [{
+    workerName: 'review-manager-pr-415',
+    role: 'review-manager',
+    pr: 415,
+    pid: 4150,
+    startTime: '2026-09-17T00:00:30.000Z',
+    running: true,
+    elapsedSeconds: 30,
+    durationKnown: true,
+  }]);
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].runNumber, 2);
+  assert.equal(merged[0].pid, 4150);
+});
+
 test('renderWorkerRows: Review Managerのジョブを監視用の子行として描画する', () => {
   const lines = workerStatus.renderWorkerRows([{
     role: 'review-manager',

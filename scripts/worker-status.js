@@ -783,7 +783,11 @@ function workerRunMatches(left, right) {
   // records retain the timestamp check to avoid folding a PID-reused run into
   // an older history entry.
   if (leftReviewManagerPr != null && rightReviewManagerPr != null
-    && left.workerName !== right.workerName) return true;
+    && left.workerName !== right.workerName) {
+    if (left.pid == null || right.pid == null
+      || Number(left.pid) !== Number(right.pid)) return false;
+    return true;
+  }
   if (left.startTime && right.startTime && left.startTime !== right.startTime) return false;
   return true;
 }
