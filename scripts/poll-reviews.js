@@ -31,7 +31,7 @@ const {
 
 const USAGE = `poll-reviews.js — PR のレビューコメント・push・マージ状態をポーリングする
 
-Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <pid>] [--no-review-manager]
+Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <pid>] [--no-review-manager] [--no-review-events]
 
 Arguments:
   <PR>                対象の PR 番号
@@ -40,7 +40,8 @@ Arguments:
   [INTERVAL_SECONDS]  ポーリング間隔（秒、デフォルト 30）
 
 Options:
-  --no-review-manager  レビュー監視（inline/formalレビュー）を行わず、PR状態・テスト申告・push監視のみ行う
+  --no-review-manager  Review Managerの自動起動を抑止する（レビューAPI監視は継続する）
+  --no-review-events   レビュー監視（inline/formalレビュー）を行わず、PR状態・テスト申告・push監視のみ行う
   --session-pid <pid>  監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
 
 Output (stdout):
@@ -175,7 +176,7 @@ function pollReviewsStateFiles(workspace, pr) {
 /**
  * poll-reviews のポーリング実行ループ。
  *
- * @param {{pr:string|number,workspace:string,sessionPid?:string|number,intervalSec?:number,noReviewManager?:boolean,maxCycles?:number}} params
+ * @param {{pr:string|number,workspace:string,sessionPid?:string|number,intervalSec?:number,noReviewManager?:boolean,noReviewEvents?:boolean,maxCycles?:number}} params
  * @param {object} [deps]
  * @returns {Promise<{exitCode:number,reason?:string,terminalEvent?:string}>}
  */
@@ -186,6 +187,7 @@ async function runPollReviews(params, deps = {}) {
     sessionPid,
     intervalSec = 30,
     noReviewManager = false,
+    noReviewEvents = false,
     maxCycles,
   } = params;
 
@@ -285,7 +287,7 @@ async function runPollReviews(params, deps = {}) {
     const known = knownIds();
     let hadError = false;
 
-    if (!noReviewManager) {
+    if (!noReviewEvents) {
       const inlineOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/comments`,
         '--paginate', '-q', inlineJq]);
       if (inlineOut !== null) {
@@ -339,7 +341,7 @@ async function runPollReviews(params, deps = {}) {
       hadError = true;
     }
 
-    if (!noReviewManager) {
+    if (!noReviewEvents) {
       const reviewsOut = ghCapture(['api', `repos/${repo}/pulls/${pr}/reviews`,
         '--paginate', '-q', reviewsJq]);
       if (reviewsOut !== null) {
@@ -394,7 +396,7 @@ async function main(argv = process.argv.slice(2), deps = {}) {
   try {
     ({ values, rest } = parseFlagsFn(argv, {
       flags: { '--session-pid': {} },
-      booleans: ['--help', '-h', '--no-review-manager'],
+      booleans: ['--help', '-h', '--no-review-manager', '--no-review-events'],
       // pr（必須）・workspace・interval の3つまで。未知フラグ・余剰位置引数はパーサ側で拒否。
       positionals: { min: 1, max: 3 },
     }));
@@ -415,6 +417,7 @@ async function main(argv = process.argv.slice(2), deps = {}) {
   }
 
   const noReviewManager = Boolean(values['--no-review-manager']);
+  const noReviewEvents = Boolean(values['--no-review-events']);
   const sessionPidArg = values['--session-pid'];
   const [pr, workspaceArg, intervalArg] = rest;
   const intervalSec = parseInt(intervalArg || '30');
@@ -474,6 +477,7 @@ async function main(argv = process.argv.slice(2), deps = {}) {
       sessionPid,
       intervalSec,
       noReviewManager,
+      noReviewEvents,
     }, {
       checkParentFn: checkParent,
       cleanupFn: cleanup,

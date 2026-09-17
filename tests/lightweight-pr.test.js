@@ -36,6 +36,7 @@ test('lightweight-pr.md: PR監視はReview Managerを起動せず、slow層と�
 
   assert.ok(pollFence, 'poll-pr.jsの実行例がない');
   assert.match(pollFence, /--no-review-manager/);
+  assert.match(pollFence, /--no-review-events/);
   assert.doesNotMatch(pollFence, /start-review-manager\.js/);
   assert.match(content, /SLOW_TEST_RESULT/);
   assert.match(content, /テスト申告コメント/);
