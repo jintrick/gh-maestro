@@ -84,20 +84,11 @@ test('spawnPollReviews launches poll-reviews.js asynchronously and relays stdout
   assert.deepEqual(call.opts.stdio, ['ignore', 'pipe', 'inherit']);
 });
 
-test('spawnPollReviews appends --no-review-manager when options.noReviewManager is true', async () => {
+test('spawnPollReviews appends --no-review-events when requested', async () => {
   const { mod, calls } = loadModule(() => ({ status: 0 }));
-  const code = await mod.spawnPollReviews('12', '/workspace', 4321, 30, null, { noReviewManager: true });
-  assert.equal(code, 0);
+  await mod.spawnPollReviews('12', '/workspace', 4321, 30, null, { noReviewEvents: true });
   assert.equal(calls.length, 1);
-  const [call] = calls;
-  assert.ok(call.args.includes('--no-review-manager'));
-});
-
-test('spawnPollReviews does not append --no-review-manager when options.noReviewManager is false', async () => {
-  const { mod, calls } = loadModule(() => ({ status: 0 }));
-  await mod.spawnPollReviews('12', '/workspace', 4321, 30, null, { noReviewManager: false });
-  assert.equal(calls.length, 1);
-  assert.ok(!calls[0].args.includes('--no-review-manager'));
+  assert.ok(calls[0].args.includes('--no-review-events'));
 });
 
 test('spawnPollReviews sends relayed PR_PUSH lines to the callback', async () => {
@@ -547,7 +538,38 @@ test('runPollPr --no-review-manager does not claim, start, or emit Review Manage
   assert.equal(managerStarts, 0);
   assert.equal(output.some((line) => line.includes('REVIEW_MANAGER_')), false);
   assert.equal(fs.existsSync(mod.reviewManagerClaimPath(workspace, '42')), false);
-  assert.deepEqual(capturedPollReviewsOptions, { noReviewManager: true });
+  assert.deepEqual(capturedPollReviewsOptions, { noReviewEvents: false });
+});
+
+test('runPollPr passes both independent suppression flags to poll-reviews', async () => {
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-both-flags-');
+  let capturedOptions = null;
+  const result = await mod.runPollPr({
+    issue: 559,
+    repo: 'fixture/repo',
+    workspace,
+    sessionPid: 4321,
+    noReviewManager: true,
+    noReviewEvents: true,
+    intervalMs: 0,
+    intervalArg: '0',
+  }, {
+    checkParentFn: () => true,
+    findPrFn: () => '42',
+    getPrHeadFn: () => 'cccccccccccccccccccccccccccccccccccccccc',
+    spawnPollReviewsFn: async (...args) => {
+      capturedOptions = args[5];
+      return 0;
+    },
+    getPrStateFn: () => 'OPEN',
+    recordMergeAndSnapshotFn: () => {},
+    runSlowTestFn: async () => {},
+    cleanupFn: () => {},
+  });
+
+  assert.deepEqual(result, { exitCode: 0 });
+  assert.deepEqual(capturedOptions, { noReviewEvents: true });
 });
 
 test('runPollPr leaves the claim sentinel when automatic Review Manager startup fails', async () => {

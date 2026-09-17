@@ -63,6 +63,7 @@ Options:
   --no-review-manager        PR検出時に Review Manager を起動せず、レビュー監視だけを再開する。
                              既にレビュー済み／再レビュー不要な状態で poll-pr.js を再起動するときに使う
                              （再起動のたびにレビューを蒸し返すのを防ぐ）。
+  --no-review-events         inline review comments・formal reviews のAPI監視を行わない。
   --workspace <path>         ワークスペースパス（省略時は環境変数またはCWDから解決）
   --session-pid <pid>        監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
   --base-branch <branch>     期待するベースブランチ名（省略時はベースブランチ検証をスキップ）
@@ -108,13 +109,13 @@ Review Manager自身が実際のdiffを見た上で行う（本スクリプト�
  * @param {string|number} sessionPid
  * @param {string|number} [intervalSeconds]
  * @param {(line:string)=>void} [onOutputLine] poll-reviews.jsのstdoutを受け取るcallback
- * @param {{noReviewManager?:boolean}} [options]
+ * @param {{noReviewEvents?:boolean}} [options]
  * @returns {Promise<number>} poll-reviews.js の終了コード（不明な場合は1）
  */
 function spawnPollReviews(pr, workspace, sessionPid, intervalSeconds = 30, onOutputLine, options = {}) {
   const args = [path.join(__dirname, 'poll-reviews.js'), String(pr), workspace, String(intervalSeconds), '--session-pid', String(sessionPid)];
-  if (options && options.noReviewManager) {
-    args.push('--no-review-manager');
+  if (options && options.noReviewEvents) {
+    args.push('--no-review-events');
   }
   let child;
   try {
@@ -847,7 +848,7 @@ function formatBaseBranchMismatch(expectedBaseBranch, actualBaseBranch, pr) {
  *
  * CLIのライフサイクル／外部境界を依存性として受け取れるようにし、PR検出・
  * PR_PUSH・slowの重複抑止・完了待ちを、実際の制御接続のままテストできるようにする。
- * @param {{issue:string|number,repo:string,workspace:string,sessionPid:string|number,baseBranch?:string,noReviewManager?:boolean,intervalMs?:number,intervalArg?:string}} params
+ * @param {{issue:string|number,repo:string,workspace:string,sessionPid:string|number,baseBranch?:string,noReviewManager?:boolean,noReviewEvents?:boolean,intervalMs?:number,intervalArg?:string}} params
  * @param {object} [deps]
  * @returns {Promise<{exitCode:number}>}
  */
@@ -859,6 +860,7 @@ async function runPollPr(params, deps = {}) {
     sessionPid,
     baseBranch,
     noReviewManager = false,
+    noReviewEvents = false,
     intervalMs = 30 * 1000,
     intervalArg,
   } = params;
@@ -971,7 +973,7 @@ async function runPollPr(params, deps = {}) {
         const pushedHead = parsePrPushLine(line);
         if (pushedHead) launchSlowTest(pr, pushedHead);
       },
-      { noReviewManager },
+      { noReviewEvents },
     );
     if (pendingSlowTests.size > 0) await Promise.all([...pendingSlowTests]);
 
@@ -1011,7 +1013,7 @@ if (require.main === module) {
   try {
     ({ values, rest } = parseFlags(argv, {
       flags: { '--workspace': {}, '--session-pid': {}, '--base-branch': {} },
-      booleans: ['--no-review-manager', '--help', '-h'],
+      booleans: ['--no-review-manager', '--no-review-events', '--help', '-h'],
       // issue（必須）と interval（任意）の2つまで。未知フラグ・余剰位置引数はパーサ側で拒否される
       // （Issue #14 / argv-parsing-pitfalls）。
       positionals: { min: 1, max: 2 },
@@ -1036,6 +1038,7 @@ if (require.main === module) {
   const sessionPidArg = values['--session-pid'];
   const baseBranch = values['--base-branch'];
   const noReviewManager = values['--no-review-manager'] === true;
+  const noReviewEvents = values['--no-review-events'] === true;
 
   const [issue, intervalArg] = rest;
 
@@ -1086,6 +1089,7 @@ if (require.main === module) {
     sessionPid,
     baseBranch,
     noReviewManager,
+    noReviewEvents,
     intervalMs: interval,
     intervalArg: intervalArg || '30',
   }, {
