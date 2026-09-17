@@ -623,6 +623,52 @@ test('renderSnapshotLines: 同一ワーカーのrunを1行へ畳み、最新PID�
   }
 });
 
+test('renderSnapshotLines: Review ManagerのworkerNameとstartTime基準が異なっても同一PID・PRを1行へ統合する', () => {
+  const base = Date.parse('2026-09-17T00:00:00.000Z');
+  const lines = workerStatus.renderSnapshotLines('C:/temporary-workspace', 563, {
+    cycleEvents: [{
+      schemaVersion: 1,
+      issue: 563,
+      event: 'worker-started',
+      at: new Date(base).toISOString(),
+      workerName: 'issue-563-review-manager-pr-415',
+      role: 'review-manager',
+      agentId: 'codex',
+      pid: 4150,
+      startTime: new Date(base).toISOString(),
+      pr: 415,
+    }],
+    currentWorkers: [{
+      workerName: 'review-manager-pr-415',
+      role: 'review-manager',
+      agentId: 'codex',
+      pid: 4150,
+      running: true,
+      startTime: new Date(base + 30000).toISOString(),
+      elapsedSeconds: 30,
+      durationKnown: true,
+      pr: 415,
+      jobs: [{
+        jobId: 'job-415-1',
+        aspect: 'Correctness',
+        agentId: 'codex',
+        pid: 4151,
+        running: true,
+        startTime: new Date(base + 10000).toISOString(),
+        elapsedSeconds: 20,
+        durationKnown: true,
+      }],
+    }],
+    now: base + 60000,
+  });
+
+  const workerLines = lines.slice(2);
+  assert.equal(workerLines.length, 2);
+  assert.equal((workerLines[0].match(/review-manager/g) || []).length, 1);
+  assert.ok(workerLines[0].includes('(pid: 4150)'));
+  assert.ok(workerLines[1].includes('job-415-1') && workerLines[1].includes('(pid: 4151)'));
+});
+
 test('renderWorkerRows: Review Managerのジョブを監視用の子行として描画する', () => {
   const lines = workerStatus.renderWorkerRows([{
     role: 'review-manager',
