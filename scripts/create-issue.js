@@ -9,6 +9,7 @@
 
 const { spawnSync } = require('./shared/child-process');
 const fs = require('fs');
+const path = require('path');
 const { toWinPath } = require('./shared/win-path');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { deleteInputFileBestEffort } = require('./shared/file-cleanup');

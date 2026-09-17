@@ -3,11 +3,35 @@
 const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const { buildGhCreateArgs, createIssue, validateBodyMode, USAGE } = require('../scripts/create-issue');
 
 const CREATE_ISSUE_SCRIPT = path.join(__dirname, '..', 'scripts', 'create-issue.js');
+
+function withTempCliFixture(fn) {
+  const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'ghm-create-issue-cli-'));
+  const workspace = path.join(root, 'workspace');
+  const bodyFile = path.join(root, 'body.md');
+  fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(bodyFile, '# body\n', 'utf8');
+  const ghMockPath = path.join(root, 'mock-gh.js');
+  fs.writeFileSync(ghMockPath, [
+    "const childProcess = require('node:child_process');",
+    "const realSpawnSync = childProcess.spawnSync;",
+    "childProcess.spawnSync = (command, args, options) => command === 'gh'",
+    "  ? { status: 0, stdout: 'https://github.com/test/repo/issues/123\\n', stderr: '' }",
+    "  : realSpawnSync(command, args, options);",
+    '',
+  ].join('\n'), 'utf8');
+
+  try {
+    return fn({ bodyFile, ghMockPath, workspace });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
 
 test('createIssue: title-onlyは空本文で作成し、body-fileを扱わない', () => {
   let ghCreateArgs = null;
@@ -59,6 +83,29 @@ test('create-issue.js: 本文入力モードの拒否をCLI境界で検証する
   ], { encoding: 'utf8' });
   assert.notEqual(conflictingModes.status, 0);
   assert.match(`${conflictingModes.stderr}${conflictingModes.stdout}`, /--body-file と --title-only/);
+});
+
+test('create-issue.js: --body-fileのCLI経路が子プロセスでIssueを作成する', () => {
+  withTempCliFixture(({ bodyFile, ghMockPath, workspace }) => {
+    const result = spawnSync(process.execPath, [
+      CREATE_ISSUE_SCRIPT,
+      '--title', 'CLI regression',
+      '--body-file', bodyFile,
+      '--repo', 'test/repo',
+      '--workspace', workspace,
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${ghMockPath}`].filter(Boolean).join(' '),
+      },
+    });
+
+    assert.equal(result.status, 0, `${result.stderr}${result.stdout}`);
+    assert.match(result.stdout, /^ISSUE_CREATED:123 /m);
+    assert.doesNotMatch(`${result.stderr}${result.stdout}`, /ReferenceError: path is not defined/);
+    assert.equal(fs.existsSync(bodyFile), false);
+  });
 });
 
 test('create-issue.js: title-onlyはgh issue createへ空本文を渡す', () => {
