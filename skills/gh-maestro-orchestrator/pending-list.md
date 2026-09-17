@@ -29,7 +29,7 @@ PENDING_ISSUE=$(gh issue list --repo $REPO \
 
 上記でゼロ件だったときに限り作成する。
 
-**ここだけは意図的に `gh issue create` を直接使う例外。** `--label` の付与が必須だが `create-issue.js` は `--label` を持たない。ラベルで管理する使い捨てでないストックIssue（実装アンカーではない）なので、assistant自動起動も不要。「切り出し」（下記）は通常のアンカーIssueを作るため、この例外に倣わず必ず `create-issue.js` を使うこと。
+**ここだけは意図的に `gh issue create` を直接使う例外。** `--label` の付与が必須だが `create-issue.js` は `--label` を持たない。ラベルで管理する使い捨てでないストックIssue（実装アンカーではない）なので、assistant起動も不要。「切り出し」（下記）は通常のアンカーIssueを作るため、この例外に倣わず必ず `create-issue.js` を使うこと。
 
 ```sh
 if [ -z "$PENDING_ISSUE" ]; then
@@ -56,7 +56,7 @@ node "{{SCRIPTS_PATH}}/comment-issue.js" \
 
 ## 切り出し
 
-切り出し先も通常のアンカーIssueなので、`gh issue create` を直接叩かない。唯一の呼び出し口は `create-issue.js`（「アセット」参照）——これを経由しないと切り出し先Issueにassistantが自動起動されない。
+切り出し先も通常のアンカーIssueなので、`gh issue create` を直接叩かない。唯一の呼び出し口は `create-issue.js`（「アセット」参照）。
 
 ```sh
 # 対応する項目をグループ化して新規Issueとして切り出す
@@ -65,7 +65,7 @@ Issue #$PENDING_ISSUE の保留項目から切り出し。
 - <path>:<line> — <内容>
 EOF
 
-# --workspace は必ず明示する（省略するとassistant起動先がずれる。「1. 要件確定」参照）
+# --workspace は必ず明示する（省略するとIssue作成先のworkspaceがずれる。「1. 要件確定」参照）
 CREATE_OUTPUT=$(node "{{SCRIPTS_PATH}}/create-issue.js" \
   --title "<切り出した対応内容の要約>" \
   --body-file /tmp/issue-extract.md \

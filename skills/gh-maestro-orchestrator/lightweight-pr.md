@@ -14,7 +14,7 @@
 
 ### 1. タイトルだけのアンカーIssueを作成する
 
-本文ファイルは作らない。`--title-only` は明示的にタイトルだけのIssueを作り、assistantを自動起動しないモードである。
+本文ファイルは作らない。`--title-only` は明示的にタイトルだけのIssueを作るモードである。assistantはIssue作成時に自動起動されない。
 
 ```sh
 CREATE_OUTPUT=$(node "{{SCRIPTS_PATH}}/create-issue.js" \

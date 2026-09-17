@@ -14,8 +14,6 @@ const path = require('path');
 const { readFileSync, existsSync, rmSync } = require('fs');
 const { spawnSync } = require('./shared/child-process');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
-const { getAssistant, removeAssistant } = require('./shared/assistants-registry');
-const { killPane } = require('./shared/pane-launch');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { ARTIFACTS, recordPath } = require('./shared/record-paths');
 const { pruneExecutionsForIssue } = require('./shared/execution-registry');
@@ -33,10 +31,6 @@ Options:
 反省会が完了した後にだけ呼ぶこと。Issueに紐づく全ワーカーを remove-worker.js 経由で削除し、
 そのあと Issue をクローズする。ワーカー削除は best-effort（一部失敗しても続行し、Issueは閉じる）。
 
-このIssueに紐づく対話型ワーカー「assistant」（.gh-maestro/assistants.json に登録。
-workers.json とは別管理）が存在すれば、あわせて強制終了（kill-pane）する。assistantが
-存在しなくてもエラー扱いにしない。
-
 さらに、このIssueの --issue で起動された監視ペインを best-effort で close-pane 経由で終了する。
 別Issueのペインや起動Issueを確認できない旧形式の記録は終了しない。
 
@@ -47,7 +41,7 @@ workers.json とは別管理）が存在すれば、あわせて強制終了（k
 - .gh-maestro/executions.json の当該Issueレコードを間引き（ファイル自体は残す）
 
 Output (stdout):
-  FINALIZED:<N> removed=<削除成功数>/<対象数> closed=<true|false> assistant=<ok|skipped|failed>`;
+  FINALIZED:<N> removed=<削除成功数>/<対象数> closed=<true|false>`;
 
 /**
  * workers.json から、指定 Issue に紐づくワーカー名を列挙する（orchestrator 自身は除く）。
@@ -84,16 +78,6 @@ function defaultCloseIssue(issue, repo, workspace) {
   if (repo) args.push('--repo', repo);
   const r = spawnSync('gh', args, { cwd: workspace, encoding: 'utf8' });
   return { ok: r.status === 0, status: r.status, stderr: (r.stderr || '').trim() };
-}
-
-// 既定のassistant終了処理: assistants.json からpane-idを引いてkill-paneし、エントリを除く。
-// workers.json には一切触れない（assistantは元々そこに登録されていない）。
-function defaultKillAssistant(workspace, issue) {
-  const entry = getAssistant(workspace, issue);
-  if (!entry || !entry.paneId) return { ok: true, skipped: true };
-  const r = killPane(entry.paneId);
-  removeAssistant(workspace, issue);
-  return { ok: r.ok, status: r.status, stderr: (r.stderr || '').trim() };
 }
 
 // 既定の監視ペイン終了処理。worker-status.js側で起動時Issueを検証するため、
@@ -225,19 +209,17 @@ function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn 
 }
 
 /**
- * Issue に紐づく全ワーカーを削除し、Issue をクローズし、対話型ワーカー「assistant」を終了する。
+ * Issue に紐づく全ワーカーを削除し、Issue をクローズする。
  * あわせて、情報価値のない内部状態（assistant-watch/<issue>.json・対象PRの .incomplete・
  * executions.json の当該issueレコード）を後始末する（Issue #248 項目2/4/7）。
  * @param {{workspace: string, issue: string|number, repo?: string|null}} params
- * @param {{removeWorkerFn?: Function, closeIssueFn?: Function, killAssistantFn?: Function, closeStatusPaneFn?: Function, findReviewPrsFn?: Function}} [deps] テスト用に処理を注入する
- * @returns {{workers: {name: string, ok: boolean}[], removedCount: number, closed: boolean, assistantKilled: boolean|null, statusPaneClosed: boolean, artifacts: object}}
- *   assistantKilled: true=正常終了, false=終了処理に失敗, null=対象となるassistantが無かった（skipped）
+ * @param {{removeWorkerFn?: Function, closeIssueFn?: Function, closeStatusPaneFn?: Function, findReviewPrsFn?: Function}} [deps] テスト用に処理を注入する
+ * @returns {{workers: {name: string, ok: boolean}[], removedCount: number, closed: boolean, statusPaneClosed: boolean, artifacts: object}}
  *   artifacts: cleanupIssueArtifacts() の結果（watchRemoved / incompleteRemoved / executionsPruned）
  */
 function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
   const removeWorkerFn = deps.removeWorkerFn || defaultRemoveWorker;
   const closeIssueFn = deps.closeIssueFn || defaultCloseIssue;
-  const killAssistantFn = deps.killAssistantFn || defaultKillAssistant;
   const closeStatusPaneFn = deps.closeStatusPaneFn || defaultCloseStatusPane;
 
   const names = collectWorkersForIssue(workspace, issue);
@@ -255,12 +237,6 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
   if (!close.ok) {
     process.stderr.write(`finalize-issue: Issue #${issue} のクローズに失敗しました: ${close.stderr || 'unknown'}\n`);
   }
-
-  const assistantResult = killAssistantFn(workspace, issue);
-  if (!assistantResult.ok) {
-    process.stderr.write(`finalize-issue: assistantペインの終了に失敗しました: ${assistantResult.stderr || 'unknown'}\n`);
-  }
-  const assistantKilled = assistantResult.skipped ? null : assistantResult.ok;
 
   let statusPaneResult;
   try {
@@ -283,7 +259,6 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
     workers,
     removedCount: workers.filter(w => w.ok).length,
     closed: close.ok,
-    assistantKilled,
     statusPaneClosed: Boolean(statusPaneResult && statusPaneResult.ok),
     artifacts,
   };
@@ -334,7 +309,6 @@ if (require.main === module) {
   }
 
   const result = finalizeIssue({ workspace, issue, repo });
-  const assistantLabel = result.assistantKilled === null ? 'skipped' : (result.assistantKilled ? 'ok' : 'failed');
-  console.log(`FINALIZED:${issue} removed=${result.removedCount}/${result.workers.length} closed=${result.closed} assistant=${assistantLabel}`);
+  console.log(`FINALIZED:${issue} removed=${result.removedCount}/${result.workers.length} closed=${result.closed}`);
   process.exit(result.closed ? 0 : 1);
 }

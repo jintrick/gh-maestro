@@ -185,7 +185,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<role>-<desc>/` に自動作成さ�
 - **stop-worker.js** — ワーカーのプロセスツリーのみを同一性確認の上で停止する（worktree・ブランチ・workers.json エントリは維持する）。対象は workerName の位置引数または〈`--issue` + `--skill`〉。報告投稿後にプロセスが終了せず残留（居座り）しているワーカーやハングしたワーカーを停止させる正規手段（再開可能な状態を保つ）。worktree ごと破棄する `remove-worker.js` と使い分ける
 - **remove-worker.js** — 個別ワーカーのプロセスを同一性確認の上でkillし、worktree とブランチを削除し、workers.json からエントリを除去する（完全破棄）。対象は workerName の位置引数または〈`--issue` + `--skill`〉。作業ツリーごと消えるため再開はできない。反省会後の一括後始末には代わりに finalize-issue.js を使う
 - **worker-status.js** — ワーカーの稼働状況・連続稼働時間を確認する。監視ペインは `spawn-worker.js` のワーカー登録後と `msg-send.js` のコメント投稿成功後に自動的に存在保証されるため、orchestratorがセッション開始・ワーカー起動・メッセージ送信のたびに手動で開く必要はない。監視ペインは作成時のWezTerm接続先と分割元ペインを記録し、別ウィンドウからの再利用・再作成でもその対象を使う。記録された接続先を照会できない、または一覧に記録ペインが無い場合は、状態を消去せず処理を停止する。手動で表示を開始・再作成するときだけ `worker-status.js pane --workspace $WORKSPACE` を使う。ワンショット確認は `worker-status.js list --workspace $WORKSPACE`（`--json` でJSON出力）、単一ワーカーの生死確認は `worker-status.js status --workspace $WORKSPACE --worker-name <name>`。`list` と `status` はペイン起動の代替経路・起動トリガーではない。監視ペインの終了は `worker-status.js close-pane --workspace $WORKSPACE`（reset-session.js でも自動終了される）
-- **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「13. 反省会と後始末」参照）。あわせて後述の**assistant**（対話型ワーカー）も自動終了する
+- **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「13. 反省会と後始末」参照）。assistantの終了は行わない
 - **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「ワーカーからの報告の受信（msg-poll）」参照）
 - **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「8. PR検出」参照）
 - **run-slow-tests.js** — orchestrator／人間が宣言済みslow層を対象指定なしで全件実行する入口（「11. マージ」参照）
@@ -197,7 +197,13 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<role>-<desc>/` に自動作成さ�
 
 #### assistant（対話型ワーカー）について
 
-`create-issue.js` は通常の起票と同時に、`spawn-assistant.js` 経由でagy専用の対話型ワーカー「assistant」を自動起動する。タイトルだけのアンカーIssueは `--title-only` を使い、assistantを起動しない。**このワーカーはあなた（orchestrator）の管理対象外である。** `workers.json` に登録されず、あなたからは見えず、`msg-send.js`/`remove-worker.js`の対象にもならない。人間が直接そのウィンドウに向かって質問・雑務を依頼する専用の存在であり、あなたが起動・終了・監督を意識する必要は一切ない。終了も`finalize-issue.js`実行時に自動で行われる（`.gh-maestro/assistants.json`で管理。`workers.json`とは無関係）。
+`create-issue.js` はassistantを起動しない。assistantの起動・終了は人間の手動操作とする。人間から「assistantを起動して」等の指示を受けた場合に限り、orchestratorはワーカー起動（`spawn-worker.js`）を介さず、次の既存CLIを単発コマンドとして直接実行してよい：
+
+```sh
+node "{{SCRIPTS_PATH}}/spawn-assistant.js" --issue <N> --workspace $WORKSPACE --repo $REPO
+```
+
+`--repo` は省略してworkspaceのgit remoteから解決してもよい。**このワーカーはあなた（orchestrator）の管理対象外である。** `workers.json` に登録されず、`msg-send.js`/`remove-worker.js`の対象にもならない。人間が直接そのウィンドウに向かって質問・雑務を依頼する専用の存在であり、通常のIssue作成や`finalize-issue.js`による後始末で自動起動・自動終了しない。終了は人間が既存の手動操作で行う（`.gh-maestro/assistants.json`による起動済みassistantの追跡は維持する）。
 
 ### 不変条件
 
@@ -359,7 +365,7 @@ node "{{SCRIPTS_PATH}}/update-issue.js" --issue <N> --title "<正式タイトル
   --body-file /tmp/issue-<N>.md --repo $REPO --workspace $WORKSPACE
 ```
 
-`--workspace` は必ず明示する（省略するとassistant起動先がずれる）。
+`--workspace` は必ず明示する（省略するとIssue作成先のworkspaceがずれる）。assistantを起動する場合も同じworkspaceを指定する。
 
 ### 2. 必要な調査【任意】
 <!-- gh-maestro-structure: middle-items=0 -->

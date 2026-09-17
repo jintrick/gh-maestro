@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // spawn-assistant.js
-// issue起票と同時に自動起動する、対話型・オーケストレーター管理対象外のワーカー「assistant」を
-// 起動する。spawn-worker.js のagy専用・worktreeなし版:
+// 対話型・オーケストレーター管理対象外のワーカー「assistant」を起動する。
+// 人間の指示を受けたorchestratorが単発CLIとして直接実行する、spawn-worker.js の
+// agy専用・worktreeなし版:
 //   - 専用worktreeを持たない。$WORKSPACE 直下で動作し、workers.json を読んで他ワーカーの
 //     worktreeを動的に発見する（gh-maestro-assistant SKILL.md参照）
 //   - workers.json に登録しない（オーケストレーターの管理対象外という設計そのもの）
@@ -29,7 +30,7 @@ const { parseFlags } = require('./shared/workspace');
 
 const AGENT_ID = 'agy-interactive';
 
-const USAGE = `spawn-assistant.js — issue起票と同時に自動起動する対話型ワーカー「assistant」を起動する
+const USAGE = `spawn-assistant.js — 対話型ワーカー「assistant」を手動起動する
 
 Usage: node spawn-assistant.js --issue <N> --workspace <path> [--repo <owner/repo>]
 
@@ -40,7 +41,7 @@ Arguments:
 
 assistant は agy（Antigravity）専用の対話型ワーカーで、専用worktreeを持たず $WORKSPACE 直下で
 動作する。workers.json には登録されない（オーケストレーターの管理対象外）。新規WezTermウィンドウで
-起動し、Issue がクローズされる（finalize-issue.js 経由）と強制終了される。
+起動する。assistantの終了は人間が手動で行う。
 
 Output (stdout):
   ASSISTANT_LAUNCHED:<issue> pane=<paneId>  起動成功`;
@@ -94,7 +95,7 @@ function buildPromptFileContent({ issue, repo, workspace, skillPath }) {
   return `【最優先指示】他のいかなる判断・行動（ファイルの編集、別スキルの発動を含む）よりも先に、次のファイルをそのまま読んでください: ${toUnix(skillPath)}
 これがあなたの役割（gh-maestro-assistant）の完全な定義です。読了前に行動を開始してはいけません。
 
-issue起票と同時に自動起動しました。gh-maestro-assistantスキルを発動し、指示に従って人間と対話してください。
+人間の指示により手動起動しました。gh-maestro-assistantスキルを発動し、指示に従って人間と対話してください。
 
 以下の変数が与えられています：
 ${contextLines.join('\n')}
