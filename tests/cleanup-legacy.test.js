@@ -243,29 +243,23 @@ test('Issue #553の16 cleanupIdは共通入口からテーブル駆動で到達�
   });
 });
 
-test('cleanupLegacyRecordsはmovedとheldが混在する場合もheldをskippedとして明示する', () => {
+test('cleanupLegacyRecordsはassistant-watchをregistryなしで移行する', () => {
   withFixture((fixture) => {
     const watchDir = path.join(fixture.workspace, '.gh-maestro', 'assistant-watch');
     fs.mkdirSync(watchDir, { recursive: true });
     fs.writeFileSync(path.join(watchDir, '5.json'), '{"prs":{}}', 'utf8');
     fs.writeFileSync(path.join(watchDir, '7.json'), '{"prs":{}}', 'utf8');
-    fs.writeFileSync(path.join(fixture.workspace, '.gh-maestro', 'assistants.json'), JSON.stringify({
-      '5': { paneId: 'pane-5', launchedAt: '2026-08-01T00:00:00.000Z' },
-    }), 'utf8');
-
     const result = cleanupLegacyArtifact({
       cleanupId: 'migrate-records.planMigration',
       workspace: fixture.workspace,
       runtimeRoot: fixture.runtimeRoot,
       scope: 'assistant-watch',
     });
-    assert.equal(result.status, 'skipped', JSON.stringify(result));
+    assert.equal(result.status, 'removed', JSON.stringify(result));
     assert.equal(result.ok, true);
-    assert.equal(result.held.length, 1);
-    assert.deepEqual(result.problems, result.held);
-    assert.match(result.held[0].source, /5\.json$/);
-    assert.equal(result.moved.length, 1);
-    assert.equal(fs.existsSync(path.join(watchDir, '5.json')), true);
+    assert.equal(result.held.length, 0);
+    assert.equal(result.moved.length, 2);
+    assert.equal(fs.existsSync(path.join(watchDir, '5.json')), false);
     assert.equal(fs.existsSync(path.join(watchDir, '7.json')), false);
   });
 });

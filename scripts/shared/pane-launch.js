@@ -7,7 +7,7 @@
 //
 // assistant（`spawn-assistant.js`）は headless 化しない。人間が直接そのウィンドウに
 // 話しかける対話型ワーカーであり、画面があること自体が機能だからである。
-// orchestrator の管理対象外で、Issue とともに生まれ Issue とともに消える。
+// orchestrator の管理対象外で、起動・終了は人間の手動操作とする。
 //
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
@@ -76,7 +76,7 @@ function commandOptionsForConnection(connection) {
  *
  * 独立したOSウィンドウとして起動するため、他の何のレイアウトにも依存・干渉しない
  * （`wezterm cli spawn --new-window`、docs/rag/wezterm/reference/spawn.md 参照）。
- * 返る pane-id は kill-pane で終了できる（`finalize-issue.js` が Issue クローズ時に使う）。
+ * 返る pane-id は kill-pane で終了できる（assistantの手動終了操作で使う）。
  *
  * @param {object} params
  * @param {string[]} params.argv    - エージェントコマンド + 全引数

@@ -146,7 +146,6 @@ test('finalizeIssue: 実物のremove-workerへworkerNameを位置引数で渡し
           // removeWorkerFn を注入しないことで、実物の defaultRemoveWorker と
           // finalize-issue.js → remove-worker.js の引数境界を通す。
           closeIssueFn: () => ({ ok: true }),
-          killAssistantFn: () => ({ ok: true }),
           findReviewPrsFn: () => [],
         }
       );
@@ -208,49 +207,22 @@ test('finalizeIssue: Issueクローズ失敗は closed:false で返る', () => {
   });
 });
 
-test('finalizeIssue: 既定のkillAssistantFnはassistants.jsonにエントリが無ければskipped扱い（assistantKilled:null）', () => {
-  withTempWorkspace({ 'issue-5-coder': { paneId: '1', issue: 5 } }, (dir) => {
-    const result = finalizeIssue(
-      { workspace: dir, issue: 5 },
-      {
-        removeWorkerFn: () => ({ ok: true }),
-        closeIssueFn: () => ({ ok: true }),
-        findReviewPrsFn: () => [],
-      }
-    );
-    assert.equal(result.assistantKilled, null);
-    assert.equal(result.closed, true);
-  });
-});
-
-test('finalizeIssue: killAssistantFnが注入されればそれが呼ばれ、結果がassistantKilledに反映される', () => {
+test('finalizeIssue: assistantを終了しない', () => {
   withTempWorkspace({}, (dir) => {
-    let calledWith = null;
+    let closeCalled = false;
+    let killAssistantCalled = false;
     const result = finalizeIssue(
       { workspace: dir, issue: 9 },
       {
-        closeIssueFn: () => ({ ok: true }),
-        killAssistantFn: (ws, issue) => { calledWith = { ws, issue }; return { ok: true }; },
+        closeIssueFn: () => { closeCalled = true; return { ok: true }; },
+        killAssistantFn: () => { killAssistantCalled = true; return { ok: false }; },
         findReviewPrsFn: () => [],
       }
     );
-    assert.deepEqual(calledWith, { ws: dir, issue: 9 });
-    assert.equal(result.assistantKilled, true);
-  });
-});
-
-test('finalizeIssue: assistant終了失敗はassistantKilled:falseだが、closedはissueクローズ結果に従う（best-effort）', () => {
-  withTempWorkspace({}, (dir) => {
-    const result = finalizeIssue(
-      { workspace: dir, issue: 9 },
-      {
-        closeIssueFn: () => ({ ok: true }),
-        killAssistantFn: () => ({ ok: false, stderr: 'kill-pane failed' }),
-        findReviewPrsFn: () => [],
-      }
-    );
-    assert.equal(result.assistantKilled, false);
+    assert.equal(closeCalled, true);
+    assert.equal(killAssistantCalled, false);
     assert.equal(result.closed, true);
+    assert.equal(Object.hasOwn(result, 'assistantKilled'), false);
   });
 });
 

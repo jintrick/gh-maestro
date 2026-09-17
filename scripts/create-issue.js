@@ -5,15 +5,10 @@
 // 無駄なReadが発生する。削除をスクリプト側の必須処理にすることで、
 // orchestrator（LLM）の記憶に依存せず毎回クリーンな状態を保証する。
 //
-// issue作成成功時、通常はbest-effortで対話型ワーカー「assistant」を自動起動する
-// （spawn-assistant.js）。タイトルだけのアンカーIssue（--title-only）ではassistantを起動しない。
-// assistant起動の成否はissue作成自体の成否と独立している — 失敗してもこのスクリプトは
-// 成功として終了する（assistantはあくまで補助的な存在で、issue作成のcritical pathではない）。
 'use strict';
 
 const { spawnSync } = require('./shared/child-process');
 const fs = require('fs');
-const path = require('path');
 const { toWinPath } = require('./shared/win-path');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { deleteInputFileBestEffort } = require('./shared/file-cleanup');
@@ -29,22 +24,17 @@ Usage:
 Arguments:
   --title <タイトル>     Issue タイトル
   --body-file <path>    Issue本文ファイル（/tmp 形式可）。--title-only と排他。作成成功後に削除を試み、失敗時は警告する
-  --title-only          本文なしのタイトルだけのIssueを作成する。--body-file と排他。assistantを起動しない
+  --title-only          本文なしのタイトルだけのIssueを作成する。--body-file と排他
                         --body-file または --title-only のいずれか一方が必要（両方指定も不可）
   --repo <owner/repo>   対象リポジトリ（省略時はカレントディレクトリのリポジトリ）
-  --workspace <path>    ワークスペースのルートパス（省略時は環境変数またはCWDから上方探索で解決）。
-                        通常のIssue作成では、このワークスペースを起点に対話型ワーカー「assistant」を自動起動する
+  --workspace <path>    ワークスペースのルートパス（省略時は環境変数またはCWDから上方探索で解決）
 
 Output (stdout):
   ISSUE_CREATED:<番号>  作成成功。<URL> も併記される
 
 body-file は成功時にこのスクリプトが削除を試みる。削除に失敗した場合はIssue作成成功として扱い、
 原案が残った旨を警告する。gh issue create が失敗した場合もbody-fileを残す（原案を失わないため）。
---title-only は本文ファイルを作成・読み込み・削除せず、assistantも自動起動しない。
-
-副作用: 作成成功時、spawn-assistant.js を呼び出し対話型ワーカー「assistant」をbest-effortで
-自動起動する（新規WezTermウィンドウ）。assistant起動が失敗してもissue作成自体は成功として扱う
-（stderrに警告が出る）。`;
+--title-only は本文ファイルを作成・読み込み・削除しない。assistantの起動・終了はこのスクリプトの責務ではない。`;
 
 function buildGhCreateArgs({ title, bodyFile, titleOnly, repo }) {
   const args = ['issue', 'create', '--title', title];
@@ -67,23 +57,14 @@ function defaultResolveRepoForFallback() {
   return repoView.status === 0 ? repoView.stdout.trim() : null;
 }
 
-function defaultSpawnAssistant({ issue, repo, workspace }) {
-  return spawnSync(process.execPath, [
-    path.join(__dirname, 'spawn-assistant.js'),
-    '--issue', String(issue),
-    '--repo', repo,
-    '--workspace', workspace,
-  ], { encoding: 'utf8' });
-}
-
 /**
- * gh issue create を実行し（必要ならGraphQLへフォールバック）、成功時は assistant を起動する。
+ * gh issue create を実行し（必要ならGraphQLへフォールバック）、成功時は本文原案を整理する。
  * CLIエントリポイントから分離してあり、deps 注入でテスト可能。
  *
  * @param {{title: string, bodyFile?: string|null, titleOnly?: boolean, repo?: string|null, workspace: string}} params
  *   bodyFile は解決済みの実体パス（呼び出し元が toWinPath 済みであること）
  * @param {object} [deps]
- * @returns {{ok: boolean, number?: string, url?: string, status?: number, stderr?: string, assistantWarning?: string|null, cleanupWarning?: string|null}}
+ * @returns {{ok: boolean, number?: string, url?: string, status?: number, stderr?: string, cleanupWarning?: string|null}}
  */
 function createIssue({ title, bodyFile, titleOnly = false, repo, workspace }, deps = {}) {
   const {
@@ -93,7 +74,6 @@ function createIssue({ title, bodyFile, titleOnly = false, repo, workspace }, de
     graphqlCreateIssueFn = graphqlCreateIssue,
     readBodyFileFn = (p) => fs.readFileSync(p, 'utf8'),
     unlinkBodyFileFn = (p) => fs.unlinkSync(p),
-    spawnAssistantFn = defaultSpawnAssistant,
     recordCycleEventFn = recordCycleEvent,
   } = deps;
 
@@ -126,22 +106,7 @@ function createIssue({ title, bodyFile, titleOnly = false, repo, workspace }, de
     ? deleteInputFileBestEffort(bodyFile, unlinkBodyFileFn)
     : null;
 
-  const repoMatch = url.match(/github\.com\/([^/]+\/[^/]+)\/issues\/\d+/);
-  const resolvedRepoForAssistant = repo || (repoMatch ? repoMatch[1] : null);
-
-  let assistantWarning = null;
-  if (!titleOnly) {
-    if (resolvedRepoForAssistant && workspace) {
-      const spawnResult = spawnAssistantFn({ issue: number, repo: resolvedRepoForAssistant, workspace });
-      if (spawnResult.status !== 0) {
-        assistantWarning = ((spawnResult.stderr || '').toString().trim()) || 'unknown error';
-      }
-    } else {
-      assistantWarning = 'repo/workspace を解決できずassistantを起動できませんでした';
-    }
-  }
-
-  return { ok: true, number, url, assistantWarning, cleanupWarning };
+  return { ok: true, number, url, cleanupWarning };
 }
 
 function validateBodyMode({ bodyFile, titleOnly }) {
@@ -202,12 +167,9 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  // 生のprocess.cwd()を直接信用しない。--workspace省略時、orchestratorの実際のシェルCWDが
-  // ワークスペースルートからズレていると（サブディレクトリでの操作後など）、assistantの
-  // 登録（.gh-maestro/assistants.json）が誤った場所に書き込まれ、finalize-issue.js
-  // （常に--workspace $WORKSPACEを明示）側からは見つからず、assistantが終了されない
-  // 実障害になる。resolveWorkspace()の「.gh-maestro/を持つ祖先ディレクトリへの上方探索」で
-  // このズレを吸収する。
+  // 生のprocess.cwd()を直接信用しない。--workspace省略時も、orchestratorの実際のシェルCWDが
+  // ワークスペースルートからズレていれば、Issue作成記録を誤った場所へ書き込むため、
+  // resolveWorkspace()の上方探索でこのズレを吸収する。
   const workspace = resolveWorkspace(values['--workspace']);
 
   if (!workspace) {
@@ -236,10 +198,6 @@ if (require.main === module) {
       console.error('gh issue create に失敗した。');
     }
     process.exit(result.status || 1);
-  }
-
-  if (result.assistantWarning) {
-    console.error(`create-issue: assistant起動に失敗しました（issue作成自体は成功）: ${result.assistantWarning}`);
   }
 
   if (result.cleanupWarning) {

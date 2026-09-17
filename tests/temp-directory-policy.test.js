@@ -7,7 +7,6 @@ const path = require('path');
 
 const DIRECT_TEMP_USAGE = new Map([
   ['assistant-watch.test.js', 2],
-  ['assistants-registry.test.js', 2],
   ['atomic-write.test.js', 2],
   ['check-legacy.test.js', 4],
   ['cleanup-workspace-registry.test.js', 4],

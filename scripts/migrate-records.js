@@ -10,7 +10,6 @@ const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { isProcessAlive } = require('./process-lifecycle');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
-const { getAssistant } = require('./shared/assistants-registry');
 const { markMigrationInProgress, clearMigrationInProgress } = require('./shared/migration-marker');
 const {
   runningInboxSupervisorPids,
@@ -41,8 +40,6 @@ Options:
     （--dry-run では停止せず、notices に「実実行時に停止する」旨を出す）
   - 実行中は .gh-maestro/.migration-in-progress マーカーを作成して inbox-supervisor の
     自動起動を抑制し、完了時に削除する（再開は既存の自動起動機構に任せる）
-assistant-watch は、対象issueのassistantが assistants.json に登録されている間は
-held（assistant agent is running）となり移行しない（対話型assistantは強制終了しない）。
 出力JSONには notices 配列が含まれ、プロセスの停止・検知情報が記録される。`;
 
 const SCOPES = new Set(['all', 'worker-log', 'review-manager', ...SUPERVISOR_MIGRATION_SCOPES, 'assistant-watch']);
@@ -164,16 +161,9 @@ function ownerIsLive(workspace, item) {
 /**
  * 対象レコードを移行せず held にすべき理由を返す（なければ null）。
  *
- * assistant-watch は対象issueの対話型assistantが assistants.json に登録されている間は
- * 無条件で held とする。assistant は人間が会話中の可能性がある窓口であり、ツールが
- * 強制終了・状態移行を行ってはならない（Issue #256）。assistants.json の読み取りは
- * loadAssistants の「存在しない・壊れている場合は空として扱う」規約に従い、読めない
- * 場合は assistant が登録されていないものとして移行を許可する。
+ * レコードの所有プロセスが稼働中の場合だけ held とする。
  */
 function holdReason(workspace, item) {
-  if (item.kind === 'assistant-watch' && getAssistant(workspace, item.ownerId) !== null) {
-    return 'assistant agent is running';
-  }
   if (ownerIsLive(workspace, item)) return 'owner process is live';
   return null;
 }
