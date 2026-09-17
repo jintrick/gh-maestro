@@ -267,10 +267,9 @@ test.after(() => tempDirScope.cleanup());
 
 // ── CLI 引数境界テスト ───────────────────────────────────────────────────
 
-test('CLI: --help 表示に独立した抑止フラグが含まれ exit 0', () => {
+test('CLI: --help 表示にレビューイベント抑止フラグが含まれ exit 0', () => {
   const res = spawnSync(process.execPath, [pollReviewsScript, '--help'], { encoding: 'utf8' });
   assert.equal(res.status, 0);
-  assert.ok(res.stdout.includes('--no-review-manager'));
   assert.ok(res.stdout.includes('--no-review-events'));
 });
 
@@ -280,11 +279,10 @@ test('CLI: 未知のフラグを指定すると非ゼロで exit', () => {
   assert.ok(res.stderr.includes('未知の引数') || res.stderr.includes('--unknown-flag'));
 });
 
-test('CLI: --no-review-manager は未知フラグにならずパースされる', () => {
-  // PR番号なしで実行した場合は Usage で exit 1
+test('CLI: --no-review-manager は未知フラグとして拒否される', () => {
   const res = spawnSync(process.execPath, [pollReviewsScript, '--no-review-manager'], { encoding: 'utf8' });
   assert.equal(res.status, 1);
-  assert.ok(res.stderr.includes('poll-reviews: 位置引数が必要です'));
+  assert.ok(res.stderr.includes('--no-review-manager') || res.stderr.includes('未知の引数'));
 });
 
 test('CLI: --no-review-events は未知フラグにならずパースされる', () => {
@@ -293,31 +291,7 @@ test('CLI: --no-review-events は未知フラグにならずパースされる',
   assert.ok(res.stderr.includes('poll-reviews: 位置引数が必要です'));
 });
 
-test('CLI: --no-review-manager フラグを指定すると runPollReviews に noReviewManager=true が渡る', async () => {
-  let capturedParams = null;
-  const res = await main(['100', '/test/workspace', '--no-review-manager'], {
-    resolveWorkspaceFn: (ws) => ws,
-    resolveSessionPidFn: () => 12345,
-    getProcessStartTimeFn: () => null,
-    createDeadManSwitchFn: () => () => true,
-    registerProcessFn: () => {},
-    registerSignalHandlers: false,
-    pollReviewsStateFilesFn: () => ({ files: [] }),
-    runPollReviewsFn: async (params) => {
-      capturedParams = params;
-      return { exitCode: 0 };
-    },
-  });
-
-  assert.equal(res.exitCode, 0);
-  assert.ok(capturedParams, 'runPollReviews must be called');
-  assert.equal(capturedParams.pr, '100');
-  assert.equal(capturedParams.workspace, '/test/workspace');
-  assert.equal(capturedParams.noReviewManager, true);
-  assert.equal(capturedParams.noReviewEvents, false);
-});
-
-test('CLI: --no-review-manager フラグを省略すると runPollReviews に noReviewManager=false が渡る', async () => {
+test('CLI: --no-review-events フラグを省略すると runPollReviews に noReviewEvents=false が渡る', async () => {
   let capturedParams = null;
   const res = await main(['100', '/test/workspace'], {
     resolveWorkspaceFn: (ws) => ws,
@@ -337,7 +311,6 @@ test('CLI: --no-review-manager フラグを省略すると runPollReviews に no
   assert.ok(capturedParams, 'runPollReviews must be called');
   assert.equal(capturedParams.pr, '100');
   assert.equal(capturedParams.workspace, '/test/workspace');
-  assert.equal(capturedParams.noReviewManager, false);
   assert.equal(capturedParams.noReviewEvents, false);
 });
 
@@ -358,14 +331,13 @@ test('CLI: --no-review-events フラグを指定すると runPollReviews に noR
   });
 
   assert.equal(res.exitCode, 0);
-  assert.equal(capturedParams.noReviewManager, false);
   assert.equal(capturedParams.noReviewEvents, true);
 });
 
-test('CLI: 子プロセス起動で --no-review-manager 引数が runPollReviews まで渡る', () => {
+test('CLI: 子プロセス起動で --no-review-events 引数が runPollReviews まで渡る', () => {
   const probe = `
     const { main } = require(${JSON.stringify(pollReviewsScript)});
-    main(['100', '/test/workspace', '--no-review-manager'], {
+    main(['100', '/test/workspace', '--no-review-events'], {
       resolveWorkspaceFn: (w) => w,
       resolveSessionPidFn: () => 12345,
       getProcessStartTimeFn: () => null,
@@ -382,12 +354,12 @@ test('CLI: 子プロセス起動で --no-review-manager 引数が runPollReviews
   const res = spawnSync(process.execPath, ['-e', probe], { encoding: 'utf8' });
   assert.equal(res.status, 0);
   const parsed = JSON.parse(res.stdout);
-  assert.equal(parsed.noReviewManager, true);
+  assert.equal(parsed.noReviewEvents, true);
   assert.equal(parsed.pr, '100');
   assert.equal(parsed.workspace, '/test/workspace');
 });
 
-// ── runPollReviews: --no-review-manager 振る舞い ───────────────────────────
+// ── runPollReviews: --no-review-events 振る舞い ────────────────────────────
 
 test('runPollReviews: noReviewEvents=true のとき inline comments と formal reviews API を呼び出さない', async () => {
   const tmpDir = tempDirScope.mkdtemp('poll-reviews-unit-');
@@ -454,7 +426,7 @@ test('runPollReviews: noReviewEvents=true のとき inline comments と formal r
   assert.ok(!stdoutLines.some(line => line.includes('PR_REVIEW')));
 });
 
-test('runPollReviews: noReviewManager=true のみでは inline comments と formal reviews API を継続する', async () => {
+test('runPollReviews: noReviewEvents=false のとき inline comments と formal reviews API を継続する', async () => {
   const tmpDir = tempDirScope.mkdtemp('poll-reviews-manager-only-');
   const calledGhArgs = [];
   const stdoutLines = [];
@@ -473,7 +445,6 @@ test('runPollReviews: noReviewManager=true のみでは inline comments と form
     workspace: tmpDir,
     sessionPid: process.pid,
     intervalSec: 1,
-    noReviewManager: true,
     maxCycles: 1,
   }, {
     ghCaptureFn: mockGhCapture,
@@ -490,7 +461,7 @@ test('runPollReviews: noReviewManager=true のみでは inline comments と form
   assert.ok(stdoutLines.some(line => line.includes('PR_REVIEW')));
 });
 
-test('runPollReviews: noReviewManager=false のとき inline comments と formal reviews API を呼び出す', async () => {
+test('runPollReviews: noReviewEvents=false のとき inline comments と formal reviews API を呼び出す', async () => {
   const tmpDir = tempDirScope.mkdtemp('poll-reviews-full-');
   const calledGhArgs = [];
   const stdoutLines = [];
@@ -518,7 +489,6 @@ test('runPollReviews: noReviewManager=false のとき inline comments と formal
     workspace: tmpDir,
     sessionPid: process.pid,
     intervalSec: 1,
-    noReviewManager: false,
     maxCycles: 1,
   }, {
     ghCaptureFn: mockGhCapture,
@@ -539,7 +509,7 @@ test('runPollReviews: noReviewManager=false のとき inline comments と formal
   assert.ok(stdoutLines.some(line => line.includes('PR_REVIEW:charlie:APPROVED:looks good')));
 });
 
-test('runPollReviews: noReviewManager=true でも MERGED / CLOSED 終端検出が動作する', async () => {
+test('runPollReviews: noReviewEvents=true でも MERGED / CLOSED 終端検出が動作する', async () => {
   const tmpDir = tempDirScope.mkdtemp('poll-reviews-terminal-');
   const stdoutLines = [];
 
@@ -556,7 +526,7 @@ test('runPollReviews: noReviewManager=true でも MERGED / CLOSED 終端検出�
     workspace: tmpDir,
     sessionPid: process.pid,
     intervalSec: 1,
-    noReviewManager: true,
+    noReviewEvents: true,
     maxCycles: 1,
   }, {
     ghCaptureFn: mockGhCapture,
