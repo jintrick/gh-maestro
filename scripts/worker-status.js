@@ -742,6 +742,8 @@ function workerDurationKnown(worker) {
 }
 
 function workerDisplayKey(worker) {
+  const reviewManagerPr = reviewManagerPrFromWorker(worker);
+  if (reviewManagerPr != null) return `review-manager-pr:${reviewManagerPr}`;
   if (worker && worker.workerName) return `worker:${worker.workerName}`;
   const role = worker && worker.role || '';
   const pr = worker && worker.pr != null ? String(worker.pr) : '';
@@ -754,10 +756,38 @@ function workerDisplayKey(worker) {
   ].join('|');
 }
 
+function reviewManagerPrFromWorker(worker) {
+  if (!worker) return null;
+  const role = worker.role ? String(worker.role) : '';
+  const workerName = worker.workerName ? String(worker.workerName) : '';
+  const isReviewManager = role === 'review-manager'
+    || workerName.includes('review-manager-pr-');
+  if (!isReviewManager) return null;
+
+  if (worker.pr != null && String(worker.pr) !== '') return String(worker.pr);
+  const match = /(?:^|-)review-manager-pr-(\d+)$/.exec(workerName);
+  return match ? match[1] : null;
+}
+
 function workerRunMatches(left, right) {
   if (!left || !right) return false;
-  if (left.workerName !== right.workerName) return false;
+  const leftReviewManagerPr = reviewManagerPrFromWorker(left);
+  const rightReviewManagerPr = reviewManagerPrFromWorker(right);
+  if (leftReviewManagerPr != null || rightReviewManagerPr != null) {
+    if (leftReviewManagerPr == null || leftReviewManagerPr !== rightReviewManagerPr) return false;
+  } else if (left.workerName !== right.workerName) return false;
   if (left.pid != null && right.pid != null && Number(left.pid) !== Number(right.pid)) return false;
+  // Cycle events use the event-recording time while manager.running uses the
+  // OS process start time.  Ignore that difference only when the two Review
+  // Manager records came through those different naming paths.  Same-name
+  // records retain the timestamp check to avoid folding a PID-reused run into
+  // an older history entry.
+  if (leftReviewManagerPr != null && rightReviewManagerPr != null
+    && left.workerName !== right.workerName) {
+    if (left.pid == null || right.pid == null
+      || Number(left.pid) !== Number(right.pid)) return false;
+    return true;
+  }
   if (left.startTime && right.startTime && left.startTime !== right.startTime) return false;
   return true;
 }
