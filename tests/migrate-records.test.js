@@ -162,35 +162,11 @@ test('migration classifies inbox-supervisor cursors vs contracts by their direct
   assert.deepEqual(workerSupervisor.readCursor(dir, 'issue-5-coder-fix'), cursorState);
 });
 
-test('migration holds an assistant-watch record whose issue has a registered assistant（対話型assistantは強制終了しない）', () => {
-  const dir = workspace();
-  const oldWatch = path.join(dir, '.gh-maestro', 'assistant-watch', '5.json');
-  fs.mkdirSync(path.dirname(oldWatch), { recursive: true });
-  fs.writeFileSync(oldWatch, '{"prs":{}}');
-  fs.writeFileSync(path.join(dir, '.gh-maestro', 'assistants.json'), JSON.stringify({
-    '5': { paneId: 'pane-5', launchedAt: '2026-08-01T00:00:00.000Z' },
-  }));
-
-  const preview = planMigration(dir, 'assistant-watch', { dryRun: true });
-  assert.equal(preview.held.length, 1);
-  assert.equal(preview.held[0].reason, 'assistant agent is running');
-  assert.equal(preview.moved.length, 0);
-  assert.equal(fs.existsSync(oldWatch), true);
-
-  // 実実行でも held のまま移動しない
-  const applied = planMigration(dir, 'assistant-watch');
-  assert.equal(applied.held.length, 1);
-  assert.equal(applied.moved.length, 0);
-  assert.equal(fs.existsSync(oldWatch), true);
-});
-
-test('migration moves an assistant-watch record when the assistant is not registered', () => {
+test('migration moves an assistant-watch record without an assistant registry', () => {
   const dir = workspace();
   const oldWatch = path.join(dir, '.gh-maestro', 'assistant-watch', '7.json');
   fs.mkdirSync(path.dirname(oldWatch), { recursive: true });
   fs.writeFileSync(oldWatch, '{"prs":{}}');
-  // assistants.json は存在しない → getAssistant は null → held にならない
-
   const result = planMigration(dir, 'assistant-watch');
   assert.equal(result.moved.length, 1);
   assert.equal(result.held.length, 0);

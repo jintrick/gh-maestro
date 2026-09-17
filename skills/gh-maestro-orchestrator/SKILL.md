@@ -203,7 +203,7 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<role>-<desc>/` に自動作成さ�
 node "{{SCRIPTS_PATH}}/spawn-assistant.js" --issue <N> --workspace $WORKSPACE --repo $REPO
 ```
 
-`--repo` は省略してworkspaceのgit remoteから解決してもよい。**このワーカーはあなた（orchestrator）の管理対象外である。** `workers.json` に登録されず、`msg-send.js`/`remove-worker.js`の対象にもならない。人間が直接そのウィンドウに向かって質問・雑務を依頼する専用の存在であり、通常のIssue作成や`finalize-issue.js`による後始末で自動起動・自動終了しない。終了は人間が既存の手動操作で行う（`.gh-maestro/assistants.json`による起動済みassistantの追跡は維持する）。
+`--repo` は省略してworkspaceのgit remoteから解決してもよい。**このワーカーはあなた（orchestrator）の管理対象外である。** `workers.json` に登録されず、`msg-send.js`/`remove-worker.js`の対象にもならない。人間が直接そのウィンドウに向かって質問・雑務を依頼する専用の存在であり、通常のIssue作成や`finalize-issue.js`による後始末で自動起動・自動終了しない。起動済みassistantのレジストリは持たず、終了は人間が既存の手動操作で行う。
 
 ### 不変条件
 

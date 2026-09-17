@@ -207,10 +207,8 @@ test('finalizeIssue: Issueクローズ失敗は closed:false で返る', () => {
   });
 });
 
-test('finalizeIssue: assistant registryを変更せずassistantを終了しない', () => {
+test('finalizeIssue: assistantを終了しない', () => {
   withTempWorkspace({}, (dir) => {
-    const registry = path.join(dir, '.gh-maestro', 'assistants.json');
-    fs.writeFileSync(registry, JSON.stringify({ '9': { paneId: '123' } }));
     let closeCalled = false;
     let killAssistantCalled = false;
     const result = finalizeIssue(
@@ -224,7 +222,6 @@ test('finalizeIssue: assistant registryを変更せずassistantを終了しな�
     assert.equal(closeCalled, true);
     assert.equal(killAssistantCalled, false);
     assert.equal(result.closed, true);
-    assert.deepEqual(JSON.parse(fs.readFileSync(registry, 'utf8')), { '9': { paneId: '123' } });
     assert.equal(Object.hasOwn(result, 'assistantKilled'), false);
   });
 });

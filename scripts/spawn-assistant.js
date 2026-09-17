@@ -25,7 +25,6 @@ const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { checkAgentExists } = require('./shared/agent-exec');
 const { buildAgentCommandArgs } = require('./shared/agent-launch');
 const { launchAgentInWindow } = require('./shared/pane-launch');
-const { setAssistant } = require('./shared/assistants-registry');
 const { parseFlags } = require('./shared/workspace');
 
 const AGENT_ID = 'agy-interactive';
@@ -221,8 +220,6 @@ if (require.main === module) {
   } catch (e) {
     fail(e.message);
   }
-
-  setAssistant(workspace, issue, { paneId, launchedAt: new Date().toISOString() });
 
   console.log(`ASSISTANT_LAUNCHED:${issue} pane=${paneId}`);
 }

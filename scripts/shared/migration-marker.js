@@ -9,7 +9,7 @@
 //
 // 設置場所は <workspace>/.gh-maestro/ 配下（install.js 管理対象外）。workspace は
 // resolveWorkspace() の解決結果を使う前提で、既存の `.gh-maestro/` ディレクトリ
-// （workers.json / assistants.json / worker-supervisor-autostart.log 等）と同じ扱い。
+// （workers.json / worker-supervisor-autostart.log 等）と同じ扱い。
 //
 // 自己回復（BLOCKER 修正、PR #257 レビュー指摘）:
 //   マーカーは移行プロセス自身の `{ pid, startTime }` を記録する（worker-lease.js の

@@ -2,7 +2,7 @@
 // status-pane-registry.js — .gh-maestro/status-pane.json（監視ペイン情報）の読み書き。
 //
 // 監視ペインはワークスペース単位の設備であり、セッション単位で1つだけ存在する。
-// Issue 単位の管理対象（workers.json / assistants.json）とは意図的に分離する。
+// Issue 単位の管理対象（workers.json）とは意図的に分離する。
 // split-pane 作成後に通常の保存と補償終了がともに失敗した場合は、回復用の
 // status-pane-recovery.json に記録する。通常記録より新しい回復記録を優先して読むことで、
 // 次回の存在保証が作成済みペインを再利用できるようにし、reset-session の既存の
