@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { testResultPath, writeTestResultArtifact } = require('../scripts/shared/test-result');
+const { testResultPath, writeTestResultLayer } = require('../scripts/shared/test-result');
 const { listTestLayers } = require('../scripts/run-tests');
 const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
@@ -118,6 +118,33 @@ function writeTestLayerConfig(workspace, layers = {
   const configDir = path.join(workspace, '.gh-maestro');
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ test: { layers } }), 'utf8');
+}
+
+function writeAggregateResult(workspace, { fail = 0, contentHash = CONTENT_HASH } = {}) {
+  writeTestResultLayer(workspace, {
+        layer: 'full',
+        scope: 'full',
+        status: 'complete',
+        outcome: fail === 0 ? 'pass' : 'fail',
+        command: 'npm test',
+        recordedAt: '2026-08-29T00:00:00.000Z',
+        testedHead: SHA,
+        tests: 12,
+        pass: 12 - fail,
+        fail,
+        cancelled: 0,
+        skipped: 0,
+        todo: 0,
+        testedContentHash: contentHash,
+      }, {
+      status: 'complete',
+      outcome: 'pass',
+      findingCount: 0,
+      command: 'npm run lint',
+      recordedAt: '2026-08-29T00:00:00.000Z',
+      testedHead: SHA,
+      testedContentHash: contentHash,
+  });
 }
 
 const SHA = '0123456789abcdef0123456789abcdef01234567'; // 40桁の16進数
@@ -345,7 +372,7 @@ test('収束: 宣言済みfull層の成果物が無い場合はpush後にexit 3�
   );
 });
 
-test('収束: 文書だけの変更は宣言済みfull層の成果物なしでも従来どおり進む', () => {
+test('収束: 文書だけの変更でもlint成果物なしの申告は再実行を促して拒否する', () => {
   const { mod, calls } = loadModule(dispatcher(fullPathHandlers({
     nameOnly: { status: 0, stdout: 'README.md\n' },
   })));
@@ -356,10 +383,13 @@ test('収束: 文書だけの変更は宣言済みfull層の成果物なしで�
     issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
   }, { listTestLayersFn: listTestLayers }));
 
-  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
-  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
-  assert.ok(createCall, '文書だけの変更は従来どおりunknown申告へ進む');
-  assert.match(createCall.args[3], /結果.*unknown/);
+  assert.equal(result.exitCode, 3, `stderr: ${result.stderr}`);
+  assert.match(result.stderr, /lint結果がない古い/);
+  assert.equal(
+    calls.some(({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f'),
+    false,
+    '古いlint成果物では申告コメントを投稿しない',
+  );
 });
 
 test('収束: 文書だけの変更でも存在する不一致成果物の検査は省略しない', () => {
@@ -368,23 +398,7 @@ test('収束: 文書だけの変更でも存在する不一致成果物の検査
   })));
   const ws = tempWorkspace();
   writeTestLayerConfig(ws);
-  writeTestResultArtifact(ws, {
-    schemaVersion: 1,
-    producer: 'gh-maestro-test-runner',
-    provenance: 'test-runner',
-    scope: 'full',
-    status: 'complete',
-    command: 'npm test',
-    recordedAt: '2026-08-29T00:00:00.000Z',
-    testedHead: SHA,
-    tests: 12,
-    pass: 12,
-    fail: 0,
-    cancelled: 0,
-    skipped: 0,
-    todo: 0,
-    testedContentHash: CONTENT_HASH,
-  });
+  writeAggregateResult(ws, { contentHash: CONTENT_HASH });
 
   const result = withGuardBypassed(() => mod.pushAndDeclare({
     issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
@@ -407,23 +421,7 @@ test('収束: 宣言済みfull層のcompleteなfail結果は既存照合を通�
   const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
   const ws = tempWorkspace();
   writeTestLayerConfig(ws);
-  writeTestResultArtifact(ws, {
-    schemaVersion: 1,
-    producer: 'gh-maestro-test-runner',
-    provenance: 'test-runner',
-    scope: 'full',
-    status: 'complete',
-    command: 'npm test',
-    recordedAt: '2026-08-29T00:00:00.000Z',
-    testedHead: SHA,
-    tests: 12,
-    pass: 9,
-    fail: 3,
-    cancelled: 0,
-    skipped: 0,
-    todo: 0,
-    testedContentHash: CONTENT_HASH,
-  });
+  writeAggregateResult(ws, { fail: 3, contentHash: CONTENT_HASH });
 
   const result = withGuardBypassed(() => mod.pushAndDeclare({
     issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
@@ -432,7 +430,7 @@ test('収束: 宣言済みfull層のcompleteなfail結果は既存照合を通�
   assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
   const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
   assert.ok(createCall, '既存の内容照合を通過した結果を申告する');
-  assert.match(createCall.args[3], /結果.*fail.*fail: 3, pass: 9/);
+  assert.match(createCall.args[3], /結果[\s\S]*full\*\*: fail \(fail: 3, pass: 9\)/);
 });
 
 test('収束: ステージ済み変更が無ければ空コミットを作らず、コミット段をスキップして push→申告で exit 0', () => {
@@ -633,23 +631,7 @@ test('終了コード: 引数不正（--issue が整数でない）は exit 1 �
 test('終了コード: テストが赤（fail>0）でも exit 0 で完走し、赤として申告される', () => {
   const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
   const ws = tempWorkspace();
-  writeTestResultArtifact(ws, {
-    schemaVersion: 1,
-    producer: 'gh-maestro-test-runner',
-    provenance: 'test-runner',
-    scope: 'full',
-    status: 'complete',
-    command: 'npm test',
-    recordedAt: '2026-08-29T00:00:00.000Z',
-    testedHead: SHA,
-    tests: 12,
-    pass: 9,
-    fail: 3,
-    cancelled: 0,
-    skipped: 0,
-    todo: 0,
-    testedContentHash: CONTENT_HASH,
-  });
+  writeAggregateResult(ws, { fail: 3, contentHash: CONTENT_HASH });
   const result = withGuardBypassed(() => mod.pushAndDeclare({
     issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
   }, { commitContentHashFn: () => CONTENT_HASH }));
@@ -658,9 +640,9 @@ test('終了コード: テストが赤（fail>0）でも exit 0 で完走し、�
   // 申告本体（declareTestResult のコメント投稿）が失敗件数を載せている
   const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
   assert.ok(createCall, '申告コメント投稿が呼ばれる');
-  assert.match(createCall.args[3], /結果.*fail.*fail: 3, pass: 9/);
+  assert.match(createCall.args[3], /結果[\s\S]*full\*\*: fail \(fail: 3, pass: 9\)/);
   assert.match(createCall.args[3], /実行元.*test-runner/);
-  assert.match(createCall.args[3], /実行範囲.*full/);
+  assert.match(createCall.args[3], /実行範囲.*aggregate/);
 });
 
 // ── NODE_TEST_CONTEXT ガード（Issue #202 の構造的対策） ────────────────────────

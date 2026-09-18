@@ -309,6 +309,48 @@ test('declareTestResult: 必須層指定時は成果物の欠落を申告前に�
   assert.equal(listed, false, '不足した成果物ではGitHubコメントを取得しない');
 });
 
+test('declareTestResult: lint記録のない旧形式成果物は古いものとして再実行を促す', () => {
+  const result = declareTestResult(
+    { pr: '42', repo: 'owner/repo', headSha: SHA, requireLintResult: true },
+    baseDeps({
+      readTestResultFn: () => ({ ok: true, result: {
+        provenance: 'test-runner',
+        scope: 'aggregate',
+        layers: {
+          full: {
+            layer: 'full', scope: 'full', status: 'complete', outcome: 'pass',
+            testedContentHash: CONTENT_HASH,
+          },
+        },
+      } }),
+    }),
+  );
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /古い/);
+  assert.match(result.error, /run-tests\.js を再実行/);
+  assert.match(result.error, /lint-result-missing/);
+});
+
+test('declareTestResult: JSON破損と型不正は旧形式とは別の失敗種別で拒否する', () => {
+  const invalidJson = declareTestResult(
+    { pr: '42', repo: 'owner/repo', headSha: SHA, requireLintResult: true },
+    baseDeps({ readTestResultFn: () => ({ ok: false, kind: 'invalid', reason: 'invalid-json' }) }),
+  );
+  const invalidShape = declareTestResult(
+    { pr: '42', repo: 'owner/repo', headSha: SHA, requireLintResult: true },
+    baseDeps({ readTestResultFn: () => ({ ok: false, kind: 'invalid', reason: 'invalid-artifact' }) }),
+  );
+
+  assert.equal(invalidJson.ok, false);
+  assert.match(invalidJson.error, /JSONが壊れています/);
+  assert.match(invalidJson.error, /invalid-json/);
+  assert.equal(invalidShape.ok, false);
+  assert.match(invalidShape.error, /型または構造が不正/);
+  assert.match(invalidShape.error, /invalid-artifact/);
+  assert.notEqual(invalidJson.error, invalidShape.error);
+});
+
 test('declareTestResult: 未実行許容時も欠落だけを許容し、内容不一致は拒否する', () => {
   const missing = declareTestResult(
     {

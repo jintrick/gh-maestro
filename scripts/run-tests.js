@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-// run-tests.js — 宣言されたテスト層の実行と結果成果物の生成を一体化する。
+// run-tests.js — 宣言されたテスト層とlintの実行、結果成果物の生成を一体化する。
 //
 // このスクリプト自身が runtime root へ成果物を書き出すため、コーダーが fail/pass を
 // 数えて申告コマンドへ入力する経路はない。子プロセスの終了コードを基本の結果とし、
@@ -19,6 +19,7 @@ const {
   calculateWorktreeContentHash,
   parseTapSummary,
   publicTestCommand,
+  validateLintResult,
   invalidateTestResultArtifact,
   writeTestResultLayer,
 } = require('./shared/test-result');
@@ -45,7 +46,8 @@ Output:
   --list は status と層ごとの name / scope だけをJSONで出力します。
   --list の exit 0 = 宣言あり、exit 2 = 宣言なし、exit 1 = 解決失敗です。
   宣言されたコマンドの出力をそのまま標準出力/標準エラーへ中継します。
-  結果は storage-layout.js の runtime root に worktree 単位で保存します。
+  テスト結果と毎回側の lint 結果は、storage-layout.js の runtime root に
+  worktree 単位の同じ成果物として保存します。lint の指摘はテストの終了コードを変えません。
   テストが失敗しても、終了コードと成果物の生成に成功した場合はその結果を保存します。
   exit 0 = 宣言コマンド成功、exit 1以上 = 宣言コマンド失敗または起動失敗`;
 
@@ -229,6 +231,77 @@ function outputText(value) {
   return value === undefined || value === null ? '' : String(value);
 }
 
+function lintCommand() {
+  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+}
+
+function runLint({ cwd, env, spawnSyncFn = spawnSync }) {
+  const command = 'npm run lint';
+  let child;
+  try {
+    child = spawnSyncFn(lintCommand(), ['run', '--silent', 'lint'], {
+      cwd,
+      env: { ...env, GH_MAESTRO_LINT_FORMAT: 'json' },
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+      // Windowsのnpm.cmdはcmdラッパーのため、spawnSyncのshell:falseでは
+      // EINVALになる環境がある。lint入力は固定argvから組み立てるため、ここだけ
+      // OS標準シェル経由でnpm scriptを起動する。
+      shell: process.platform === 'win32',
+    }) || {};
+  } catch (error) {
+    return {
+      status: 'unavailable',
+      command,
+      recordedAt: new Date().toISOString(),
+      reason: `lint-runner-start-failed: ${error.message}`,
+    };
+  }
+
+  const stdout = outputText(child.stdout);
+  const childExitCode = child && Number.isInteger(child.status) && child.status >= 0
+    ? child.status : null;
+  let report;
+  try {
+    report = JSON.parse(stdout);
+  } catch (error) {
+    return {
+      status: 'unavailable',
+      command,
+      recordedAt: new Date().toISOString(),
+      reason: child.error
+        ? `lint-runner-start-failed: ${child.error.message}`
+        : `lint-output-invalid: ${error.message}`,
+    };
+  }
+  if (!Array.isArray(report)) {
+    return {
+      status: 'unavailable',
+      command,
+      recordedAt: new Date().toISOString(),
+      reason: 'lint-output-invalid: result must be an array',
+    };
+  }
+  const findingCount = report.reduce((total, file) => (
+    total + (Array.isArray(file && file.messages) ? file.messages.length : 0)
+  ), 0);
+  if (childExitCode === null) {
+    return {
+      status: 'unavailable',
+      command,
+      recordedAt: new Date().toISOString(),
+      reason: 'lint-runner-start-failed',
+    };
+  }
+  return {
+    status: 'complete',
+    command,
+    recordedAt: new Date().toISOString(),
+    outcome: findingCount === 0 ? 'pass' : 'findings',
+    findingCount,
+  };
+}
+
 function configuredTestArgs(layer, testFiles) {
   if (testFiles.length > 0 && layer.scope !== 'partial') {
     throw new Error('個別のテストファイル指定は partial 層でのみ使用できます');
@@ -303,6 +376,7 @@ function listTestLayers({ cwd = process.cwd(), workspace, homedir, env = process
  * @param {Function} [deps.writeArtifactFn] (worktree, artifact) => void
  * @param {Function} [deps.writeStdoutFn]
  * @param {Function} [deps.writeStderrFn]
+ * @param {Function} [deps.lintSpawnSyncFn]
  * @returns {{exitCode:number, artifact:object|null, artifactWritten:boolean, stdout:string, stderr:string}}
  */
 function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = process.cwd(), workspace, env = process.env, homedir } = {}, deps = {}) {
@@ -401,6 +475,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   const writeArtifactFn = deps.writeArtifactFn || writeTestResultLayer;
   const writeStdoutFn = deps.writeStdoutFn || ((text) => process.stdout.write(text));
   const writeStderrFn = deps.writeStderrFn || ((text) => process.stderr.write(text));
+  const lintSpawnSyncFn = deps.lintSpawnSyncFn || spawnSync;
 
   try {
     clearArtifactFn(executionWorkspace);
@@ -453,6 +528,17 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   const stderr = outputText(child.stderr);
   if (stdout) writeStdoutFn(stdout);
   if (stderr) writeStderrFn(stderr);
+
+  const lintResult = runLint({
+    cwd: executionWorkspace,
+    env,
+    spawnSyncFn: lintSpawnSyncFn,
+  });
+  if (lintResult.status === 'complete') {
+    writeStderrFn(`lint: ${lintResult.findingCount} finding(s)\n`);
+  } else {
+    writeStderrFn(`lint: unavailable (${lintResult.reason})\n`);
+  }
 
   const summary = parseTapSummary(`${stdout}${stderr ? `\n${stderr}` : ''}`);
   // TAPの必須欄が揃っていても、framework固有の集計が成果物契約に収まらない場合は
@@ -513,7 +599,12 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
 
   let artifactWritten = false;
   try {
-    writeArtifactFn(executionWorkspace, artifact);
+    const validatedLint = lintResult.status === 'complete'
+      ? { ...lintResult, testedHead, testedContentHash }
+      : lintResult;
+    const lintValidation = validateLintResult(validatedLint);
+    if (!lintValidation.ok) throw new Error(lintValidation.error);
+    writeArtifactFn(executionWorkspace, artifact, validatedLint);
     artifactWritten = true;
   } catch (error) {
     try {
@@ -589,6 +680,7 @@ module.exports = {
   normalizeRelativeTestFile,
   normalizeTestFiles,
   mapChangedFilesToTests,
+  runLint,
   runTests,
   main,
 };

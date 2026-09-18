@@ -52,8 +52,10 @@ Arguments:
      本文=関連Issue: #<N>）
   7. 宣言された毎回側（scope=full）の層名を解決し、runtime root のテスト成果物を
      読んで解決したHEADに対するテスト結果を申告。必須層の結果が欠落・unavailable
-     の場合は申告を失敗として返す。文書だけの変更は未実行の層だけを許容し、
-     存在する成果物の照合は行う。テスト層未宣言の場合は必須層を要求しない
+     の場合は申告を失敗として返す。同じ成果物に lint 実行記録が無い場合も、
+     古い記録として再実行を促し申告を失敗させる。lint の指摘自体は停止条件にしない。
+     文書だけの変更は未実行の層だけを許容し、存在する成果物の照合は行う。
+     テスト層未宣言の場合は必須層を要求しない
 
 コミットメッセージは \`impl(issue-<N>): <Issueタイトル>\` で固定（モデル推論を挟まない）。
 素の git commit / git push / gh pr create を直接実行しないこと（このスクリプトが一括で行う）。
@@ -357,6 +359,7 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
     worktree,
     requiredLayers: requiredLayersResult.requiredLayers,
     allowMissingRequiredLayers: requiredLayersResult.allowMissingRequiredLayers,
+    requireLintResult: requiredLayersResult.requiredLayers.length > 0,
   }, declareDeps);
   if (!declResult.ok) {
     return { exitCode: 3, stdout: '', stderr: `テスト結果の申告に失敗しました: ${declResult.error}` };

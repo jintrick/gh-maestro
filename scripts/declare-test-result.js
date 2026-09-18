@@ -119,6 +119,12 @@ function aggregateLayerStatus(layer) {
   return 'unknown';
 }
 
+function aggregateLintStatus(lint) {
+  if (!lint || lint.status !== 'complete') return 'unknown';
+  if (lint.outcome === 'pass' || lint.outcome === 'findings') return lint.outcome;
+  return 'unknown';
+}
+
 function aggregateResultForCommit(result, commitSha, commitContentHash) {
   if (!result || result.scope !== 'aggregate' || !result.layers) return null;
   const layers = Object.fromEntries(Object.entries(result.layers).map(([name, layer]) => {
@@ -132,14 +138,48 @@ function aggregateResultForCommit(result, commitSha, commitContentHash) {
       reason: contentMatches ? (layer.reason || 'unavailable') : 'content-mismatch',
     }];
   }));
+  const lint = result.lint;
+  const lintContentMatches = lint && typeof lint.testedContentHash === 'string'
+    && lint.testedContentHash === commitContentHash;
+  const checkedLint = lint
+    ? (lintContentMatches ? lint : { ...lint, status: 'unavailable', reason: 'content-mismatch' })
+    : { status: 'unavailable', reason: 'lint-result-missing' };
   const statuses = Object.values(layers).map(aggregateLayerStatus);
   const outcome = statuses.includes('fail') ? 'fail'
     : (statuses.length > 0 && statuses.every(status => status === 'pass') ? 'pass' : undefined);
   return {
     ...result,
     layers,
+    lint: checkedLint,
     ...(outcome ? { outcome } : {}),
   };
+}
+
+function requiredLintError(testResult, artifactRead, requireLintResult) {
+  if (!requireLintResult) return null;
+  if (!artifactRead || !artifactRead.ok) {
+    if (artifactRead && artifactRead.reason === 'missing') {
+      return 'lint結果がない古いテスト成果物です。run-tests.js を再実行してから申告してください (lint-result-missing)';
+    }
+    if (artifactRead && artifactRead.reason === 'invalid-json') {
+      return 'テスト成果物のJSONが壊れています。成果物を修正してから再実行してください (invalid-json)';
+    }
+    if (artifactRead && artifactRead.reason === 'invalid-artifact') {
+      return 'テスト成果物の型または構造が不正です。成果物を修正してから再実行してください (invalid-artifact)';
+    }
+    return `テスト成果物を読み取れません。run-tests.js を再実行してください (${artifactRead && artifactRead.reason ? artifactRead.reason : 'unreadable'})`;
+  }
+  if (!testResult || testResult.scope !== 'aggregate' || !testResult.lint) {
+    return 'lint結果がない古いテスト成果物です。run-tests.js を再実行してから申告してください (lint-result-missing)';
+  }
+  if (testResult.lint.reason === 'lint-result-missing') {
+    return 'lint結果がない古いテスト成果物です。run-tests.js を再実行してから申告してください (lint-result-missing)';
+  }
+  if (testResult.lint.status !== 'complete') {
+    const reason = testResult.lint.reason || 'lint-result-unavailable';
+    return `lint結果を利用できません。run-tests.js を再実行してから申告してください (${reason})`;
+  }
+  return null;
 }
 
 /**
@@ -203,6 +243,7 @@ function buildCommentBody({ commit, testResult }) {
       `- **結果**: ${outcome}`,
       '- **実行元**: `test-runner`',
       '- **実行範囲**: `aggregate`',
+      ...(testResult.lint ? [`- **lint**: ${aggregateLintStatus(testResult.lint)}${Number.isSafeInteger(testResult.lint.findingCount) ? ` (findings: ${testResult.lint.findingCount})` : ''}${testResult.lint.reason ? `, reason: ${testResult.lint.reason}` : ''}`] : []),
       '- **層別結果**:',
     ];
     for (const [name, layer] of layers) {
@@ -277,6 +318,7 @@ function declareTestResult(params = {}, deps = {}) {
     headSha,
     requiredLayers = [],
     allowMissingRequiredLayers = false,
+    requireLintResult = false,
   } = params;
   const {
     ghRepoViewFn = _ghRepoView,
@@ -351,6 +393,12 @@ function declareTestResult(params = {}, deps = {}) {
     testResult = unknownTestResult('invalid-artifact');
   }
 
+  const lintError = requiredLintError(testResult, artifactRead, requireLintResult);
+  if (lintError && artifactRead && !artifactRead.ok
+      && ['invalid-json', 'invalid-artifact'].includes(artifactRead.reason)) {
+    return { ok: false, error: lintError };
+  }
+
   const missingLayers = missingRequiredLayers(testResult, requiredLayers, { allowMissingRequiredLayers });
   if (missingLayers.length > 0) {
     return {
@@ -358,6 +406,8 @@ function declareTestResult(params = {}, deps = {}) {
       error: `必須テスト層の結果が揃っていません: ${missingLayers.join(', ')}`,
     };
   }
+
+  if (lintError) return { ok: false, error: lintError };
 
   // 2. リポジトリ特定
   let targetRepo = typeof repo === 'string' ? repo.trim() : '';
@@ -452,6 +502,10 @@ module.exports = {
   USAGE,
   SPEC,
   buildCommentBody,
+  aggregateLintStatus,
+  aggregateResultForCommit,
+  requiredLintError,
+  missingRequiredLayers,
   declareTestResult,
   main,
 };
