@@ -13,6 +13,7 @@ const {
   testResultInvalidationPath,
   invalidateTestResultArtifact,
   validateTestResultArtifact,
+  validateLintResult,
   writeTestResultArtifact,
   writeTestResultLayer,
   testResultLockPath,
@@ -35,6 +36,20 @@ test.after(() => {
 function tempWorktree() {
   return tempDirScope.mkdtemp('gh-maestro-test-result-worktree-');
 }
+
+test('validateLintResult: findingsはcompleteなlint実行結果として受理し、記録欠落は成果物検証と区別する', () => {
+  const lint = {
+    status: 'complete',
+    outcome: 'findings',
+    findingCount: 2,
+    command: 'npm run lint',
+    recordedAt: '2026-09-18T00:00:00.000Z',
+    testedContentHash: 'a'.repeat(64),
+  };
+  assert.equal(validateLintResult(lint).ok, true);
+  assert.equal(validateLintResult({ ...lint, findingCount: -1 }).ok, false);
+  assert.equal(validateTestResultArtifact(completeArtifact()).ok, true, 'lintなしの旧形式は妥当な成果物として読み続ける');
+});
 
 function completeArtifact(overrides = {}) {
   return {

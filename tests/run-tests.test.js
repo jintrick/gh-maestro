@@ -9,6 +9,7 @@ const {
   USAGE,
   listTestLayers,
   runTests,
+  runLint,
   main,
 } = require('../scripts/run-tests');
 const { createBuiltinTestConfig } = require('../scripts/shared/resolve-config');
@@ -44,6 +45,7 @@ function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = []
   const artifacts = [];
   const invalidations = [];
   const writes = [];
+  const lintResults = [];
   const result = runTests(
     {
       suite,
@@ -75,9 +77,10 @@ function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = []
         return child;
       },
       invalidateArtifactFn: (worktree, reason) => invalidations.push({ worktree, reason }),
-      writeArtifactFn: writeArtifactFn || ((worktree, artifact) => {
+      writeArtifactFn: writeArtifactFn || ((worktree, artifact, lintResult) => {
         writes.push({ worktree, artifact });
         artifacts.push(artifact);
+        lintResults.push(lintResult);
       }),
       writeStdoutFn: (value) => stdout.push(value),
       writeStderrFn: (value) => stderr.push(value),
@@ -90,10 +93,53 @@ function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = []
     artifacts,
     invalidations,
     writes,
+    lintResults,
     stdout: stdout.join(''),
     stderr: stderr.join(''),
   };
 }
+
+test('runLint: lintの指摘はcomplete/findingsとして記録し、起動結果を終了コードへ変換しない', () => {
+  const calls = [];
+  const result = runLint({
+    cwd: 'C:/worktree',
+    env: {},
+    spawnSyncFn: (command, args, options) => {
+      calls.push({ command, args, options });
+      return {
+        status: 1,
+        stdout: JSON.stringify([{ filePath: 'scripts/example.js', messages: [{ line: 4, message: 'x' }] }]),
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.status, 'complete');
+  assert.equal(result.outcome, 'findings');
+  assert.equal(result.findingCount, 1);
+  assert.equal(result.command, 'npm run lint');
+  assert.deepEqual(calls[0].args, ['run', '--silent', 'lint']);
+  assert.equal(calls[0].options.env.GH_MAESTRO_LINT_FORMAT, 'json');
+});
+
+test('runTests: lint結果をテスト層と同じ成果物へ保存し、指摘があってもrunner終了コードを変えない', () => {
+  const fixture = runWithChild({
+    child: { status: 0, stdout: `TAP version 13\n${tapSummary({ tests: 1, pass: 1, fail: 0 })}`, stderr: '' },
+    extraDeps: {
+      lintSpawnSyncFn: () => ({
+        status: 1,
+        stdout: JSON.stringify([{ filePath: 'scripts/example.js', messages: [{ line: 4, message: 'unused' }] }]),
+        stderr: '',
+      }),
+    },
+  });
+
+  assert.equal(fixture.result.exitCode, 0);
+  assert.equal(fixture.lintResults[0].status, 'complete');
+  assert.equal(fixture.lintResults[0].outcome, 'findings');
+  assert.equal(fixture.lintResults[0].findingCount, 1);
+  assert.equal(fixture.lintResults[0].testedContentHash, CONTENT_HASH);
+});
 
 test('runTests: full suiteを一度だけ起動し、成功結果をfullとして保存する', () => {
   const fixture = runWithChild({
