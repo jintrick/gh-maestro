@@ -2,8 +2,14 @@
 'use strict';
 
 const { ESLint } = require('eslint');
+const { parseFlags } = require('./shared/workspace');
 
 const TARGETS = Object.freeze(['scripts/**/*.js', 'tests/**/*.js']);
+const SPEC = {
+  flags: { '--format': {} },
+  booleans: ['--help', '-h'],
+  positionals: { min: 0, max: 0 },
+};
 const USAGE = `run-lint.js — scripts/**/*.js と tests/**/*.js を静的検査する
 
 Usage:
@@ -18,20 +24,11 @@ Options:
   lint実行自体に失敗した場合だけ終了コード1になる。対象ファイルのコードは実行しない。`;
 
 function parseArgs(argv) {
-  let format = process.env.GH_MAESTRO_LINT_FORMAT || 'stylish';
-  for (let index = 0; index < argv.length; index += 1) {
-    const value = argv[index];
-    if (value === '--help' || value === '-h') return { help: true, format };
-    if (value === '--format') {
-      const next = argv[index + 1];
-      if (!next || next.startsWith('-')) throw new Error('--format には値が必要です');
-      format = next;
-      index += 1;
-      continue;
-    }
-    throw new Error(`未知の引数です: ${value}`);
-  }
-  return { help: false, format };
+  const { values } = parseFlags(argv, SPEC);
+  return {
+    help: Boolean(values['--help'] || values['-h']),
+    format: values['--format'] || process.env.GH_MAESTRO_LINT_FORMAT || 'stylish',
+  };
 }
 
 async function main(argv = process.argv.slice(2)) {
@@ -39,7 +36,13 @@ async function main(argv = process.argv.slice(2)) {
   try {
     options = parseArgs(argv);
   } catch (error) {
-    return { exitCode: 1, stdout: '', stderr: `${error.message}\n${USAGE}` };
+    if (error.name === 'ArgsValidationError' && error.helpRequested) {
+      return { exitCode: 0, stdout: USAGE, stderr: '' };
+    }
+    const details = error.name === 'ArgsValidationError'
+      ? error.errors.map(item => item.message).join('\n')
+      : error.message;
+    return { exitCode: 1, stdout: '', stderr: `run-lint: ${details}\n${USAGE}` };
   }
   if (options.help) return { exitCode: 0, stdout: USAGE, stderr: '' };
 
@@ -53,7 +56,7 @@ async function main(argv = process.argv.slice(2)) {
   }
 }
 
-module.exports = { TARGETS, USAGE, parseArgs, main };
+module.exports = { TARGETS, SPEC, USAGE, parseArgs, main };
 
 if (require.main === module) {
   main().then((result) => {
