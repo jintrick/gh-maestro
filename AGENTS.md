@@ -167,6 +167,7 @@ node scripts/install.js
 - 状態ファイルの読み取りで、有効な値が1つも得られないときに、正常な不在・0件・対象なしと同じ値を返してはならない。例外を catch して番兵値へ戻す形も同じである。
 - 管理用の状態ファイルが破損していた場合、削除・初期化・再構築による自動修復を実装してはならない。どのファイルがどう壊れているかを示して処理を止める。回復は有事に人間の指示のもとエージェントが行う。
   理由と経緯: docs/adr/0036-corrupt-state-files-are-reported-not-repaired.md
+理由と経緯: docs/adr/0040-stale-pane-socket-is-recreated.md
 
 ### エージェントCLIの変更は実機で確認する
 
