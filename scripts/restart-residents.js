@@ -16,12 +16,14 @@ Options:
                       CWDからの .gh-maestro/ 上方探索で解決）
   --session-pid <pid> worker-supervisorのregistry引数と対象プロセス親チェーンから
                       PIDを解決できない旧形式に限るフォールバック。
-  --restart-status-pane 対象の窓から監視ペインを現行worker-status.jsで張り直す。
+  --restart-status-pane 対象の窓から監視ペインを現行worker-status.jsで張り直す。記録socketの
+                      消滅を確実に判定できる場合は旧接続先を閉じず、現在環境へrebindする。
   --help, -h          このヘルプを表示する
 
 対象:
   worker-supervisor.js / msg-poll.js（orchestrator）/ poll-pr.js / poll-reviews.js
   --restart-status-pane指定時は、status-pane registryに記録された監視ペインも対象。
+  旧socketの消滅を確実に判定できない、または現在環境を取得できない場合は、registryを保持して停止する。
 
 Output (stdout):
   RESIDENT script=<name> status=replaced|monitor-required|delegated|not-running|failed ...

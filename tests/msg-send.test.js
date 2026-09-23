@@ -146,33 +146,44 @@ test('--issue で指定した Issue が使われる', () => {
 
 test('コメント投稿成功時は送信先を問わず監視ペイン保証を呼び、保証失敗を送信失敗に変換しない', () => {
   withTempDir(workspace => {
-    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    msgSend._setGhIssueComment(() => ({
-      status: 0,
-      stdout: 'https://github.com/test/repo/issues/1#issuecomment-pane-1\n',
-    }));
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+      msgSend._setGhIssueComment(() => ({
+        status: 0,
+        stdout: 'https://github.com/test/repo/issues/1#issuecomment-pane-1\n',
+      }));
 
-    const orchestratorSend = msgSend.main(
-      ['worker-1', '--stdin', '--issue', '1', '--workspace', workspace],
-      null,
-      stdinIO('hello'),
-    );
-    assert.equal(orchestratorSend.code, 0);
-    assert.equal(ensureStatusPaneCalls.length, 1);
-    assert.equal(ensureStatusPaneCalls[0].workspace, workspace);
-    assert.equal(ensureStatusPaneCalls[0].issue, '1');
-    assert.ok(ensureStatusPaneCalls[0].scriptsPath.endsWith(`${path.sep}scripts`));
+      const orchestratorSend = msgSend.main(
+        ['worker-1', '--stdin', '--issue', '1', '--workspace', workspace],
+        null,
+        stdinIO('hello'),
+      );
+      assert.equal(orchestratorSend.code, 0);
+      assert.equal(ensureStatusPaneCalls.length, 1);
+      assert.equal(ensureStatusPaneCalls[0].workspace, workspace);
+      assert.equal(ensureStatusPaneCalls[0].issue, '1');
+      assert.ok(ensureStatusPaneCalls[0].scriptsPath.endsWith(`${path.sep}scripts`));
 
-    ensureStatusPaneCalls.length = 0;
-    const workerSend = msgSend.main(
-      ['--stdin', '--workspace', workspace],
-      { GH_MAESTRO_WORKER: 'issue-1-worker' },
-      stdinIO('報告'),
-    );
-    assert.equal(workerSend.code, 0);
-    assert.equal(ensureStatusPaneCalls.length, 1);
-    assert.equal(ensureStatusPaneCalls[0].workspace, workspace);
-    assert.equal(ensureStatusPaneCalls[0].issue, '1');
+      ensureStatusPaneCalls.length = 0;
+      const workerSend = msgSend.main(
+        ['--stdin', '--workspace', workspace],
+        { GH_MAESTRO_WORKER: 'issue-1-worker' },
+        stdinIO('報告'),
+      );
+      assert.equal(workerSend.code, 0);
+      assert.equal(ensureStatusPaneCalls.length, 1);
+      assert.equal(ensureStatusPaneCalls[0].workspace, workspace);
+      assert.equal(ensureStatusPaneCalls[0].issue, '1');
+      assert.match(warnings.join('\n'), /msg-send: 監視ペイン保証に失敗しました/);
+      assert.match(warnings.join('\n'), /stage=launch/);
+      assert.match(warnings.join('\n'), /unixSocket=/);
+      assert.match(warnings.join('\n'), /targetPaneId=/);
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 });
 

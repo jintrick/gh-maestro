@@ -120,6 +120,8 @@ test('CLI_USAGE: status・workspace・worker-name・出力形式が定義され�
   assert.match(workerStatus.CLI_USAGE, /worker-status\.js/);
   assert.match(workerStatus.CLI_USAGE, /status --workspace <path> --worker-name <name>/);
   assert.match(workerStatus.CLI_USAGE, /running/);
+  assert.match(workerStatus.CLI_USAGE, /socketの消滅/);
+  assert.match(workerStatus.CLI_USAGE, /rebind/);
 });
 
 test('main: --help は code 0 で usage を返す', () => {
@@ -1376,6 +1378,48 @@ test('main: pane は記録されたペインが既に死亡している場合、
   } finally {
     workerStatus._setLaunchInSplitPane(null);
     workerStatus._setIsPaneAlive(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('main: pane は消滅した記録接続先を現在のWezTermへrebindする', () => {
+  const workspace = createWorkspace();
+  const statusRegistry = require('../scripts/shared/status-pane-registry');
+  statusRegistry.saveStatusPane(workspace, {
+    paneId: 'stale-pane',
+    unixSocket: path.join(workspace, 'deleted-socket'),
+    targetPaneId: 'old-target',
+    issue: '568',
+  });
+  paneLaunch._setWeztermListPanes(() => ({
+    status: 1,
+    stdout: '',
+    stderr: 'failed to connect',
+  }));
+  let launchParams = null;
+  workerStatus._setIsPaneAlive(null);
+  workerStatus._setLaunchInSplitPane((params) => {
+    launchParams = params;
+    return { paneId: 'rebound-pane' };
+  });
+
+  try {
+    const result = runMain(['pane', '--workspace', workspace, '--issue', '569']);
+    assert.equal(result.code, 0);
+    assert.equal(result.paneId, 'rebound-pane');
+    assert.equal(result.reused, false);
+    assert.deepEqual(launchParams.connection, STATUS_PANE_CONTEXT);
+    assert.equal(launchParams.targetPaneId, STATUS_PANE_CONTEXT.targetPaneId);
+    assert.deepEqual(statusRegistry.loadStatusPane(workspace), {
+      paneId: 'rebound-pane',
+      ...STATUS_PANE_CONTEXT,
+      issue: '569',
+      launchedAt: statusRegistry.loadStatusPane(workspace).launchedAt,
+    });
+  } finally {
+    paneLaunch._setWeztermListPanes(null);
+    workerStatus._setIsPaneAlive(null);
+    workerStatus._setLaunchInSplitPane(null);
     removeWorkspace(workspace);
   }
 });

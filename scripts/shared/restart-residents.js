@@ -39,6 +39,7 @@ const {
 const {
   WEZTERM_PANE_ENV,
   WEZTERM_UNIX_SOCKET_ENV,
+  isWeztermConnectionGone,
 } = require('./pane-launch');
 
 const RESIDENT_SPECS = Object.freeze([
@@ -609,27 +610,30 @@ function restartStatusPane(workspace, scriptsPath, opts = {}) {
   if (!existing || !existing.paneId) return { status: 'not-running' };
 
   const oldPaneId = statusPaneId(existing);
-  let closed;
-  try {
-    closed = runCommand({
-      scriptsPath,
-      subcommand: 'close-pane',
-      workspace,
-      statusPaneContext: existing,
-    });
-  } catch (error) {
-    return {
-      status: 'unavailable',
-      oldPaneIds: oldPaneId ? [oldPaneId] : [],
-      reason: `監視ペインの終了に失敗しました: ${error.message}`,
-    };
-  }
-  if (!closed || !closed.ok) {
-    return {
-      status: 'unavailable',
-      oldPaneIds: oldPaneId ? [oldPaneId] : [],
-      reason: `監視ペインの終了に失敗しました: ${(closed && closed.stderr) || 'unknown'}`,
-    };
+  const staleConnection = isWeztermConnectionGone(existing);
+  if (!staleConnection) {
+    let closed;
+    try {
+      closed = runCommand({
+        scriptsPath,
+        subcommand: 'close-pane',
+        workspace,
+        statusPaneContext: existing,
+      });
+    } catch (error) {
+      return {
+        status: 'unavailable',
+        oldPaneIds: oldPaneId ? [oldPaneId] : [],
+        reason: `監視ペインの終了に失敗しました: ${error.message}`,
+      };
+    }
+    if (!closed || !closed.ok) {
+      return {
+        status: 'unavailable',
+        oldPaneIds: oldPaneId ? [oldPaneId] : [],
+        reason: `監視ペインの終了に失敗しました: ${(closed && closed.stderr) || 'unknown'}`,
+      };
+    }
   }
 
   let launched;
@@ -639,7 +643,9 @@ function restartStatusPane(workspace, scriptsPath, opts = {}) {
       subcommand: 'pane',
       workspace,
       issue: existing.issue,
-      statusPaneContext: existing,
+      // stale socket の場合は旧接続先を子プロセスへ渡さず、呼び出し元の現在環境を
+      // 継承する。worker-status の共有存在保証が stale と判定して現在値へ rebind する。
+      statusPaneContext: staleConnection ? null : existing,
     });
   } catch (error) {
     return {

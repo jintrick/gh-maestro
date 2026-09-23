@@ -210,6 +210,50 @@ test('isPaneAlive: paneIdの生存を正しく判定する', () => {
   );
 });
 
+test('isPaneAlive: 消滅した接続先へのlist失敗は stale 接続として分類する', () => {
+  const connection = { unixSocket: `${__filename}.missing-stale-socket`, targetPaneId: '0' };
+  paneLaunch._setWeztermListPanes(() => ({
+    status: 1,
+    stdout: '',
+    stderr: 'failed to connect',
+  }));
+
+  try {
+    assert.throws(
+      () => paneLaunch.isPaneAlive('10', undefined, connection),
+      (error) => {
+        assert.equal(error.code, paneLaunch.WEZTERM_CONNECTION_GONE_CODE);
+        assert.match(error.message, /connection=/);
+        return true;
+      },
+    );
+  } finally {
+    paneLaunch._setWeztermListPanes(null);
+  }
+});
+
+test('isPaneAlive: 接続先が存在するlist失敗は stale と判定せず判定不能のまま止める', () => {
+  const connection = { unixSocket: __filename, targetPaneId: '0' };
+  paneLaunch._setWeztermListPanes(() => ({
+    status: 1,
+    stdout: '',
+    stderr: 'temporary failure',
+  }));
+
+  try {
+    assert.throws(
+      () => paneLaunch.isPaneAlive('10', undefined, connection),
+      (error) => {
+        assert.notEqual(error.code, paneLaunch.WEZTERM_CONNECTION_GONE_CODE);
+        assert.match(error.message, /外部コマンドの照会失敗/);
+        return true;
+      },
+    );
+  } finally {
+    paneLaunch._setWeztermListPanes(null);
+  }
+});
+
 test('killPane: paneIdを指定して正常にkillできる', () => {
   let capturedArgs = null;
   paneLaunch._setWeztermKillPane((args) => {

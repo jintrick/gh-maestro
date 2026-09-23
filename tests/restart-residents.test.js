@@ -34,7 +34,7 @@ function makeWorkspace() {
 }
 
 const STATUS_PANE_CONTEXT = Object.freeze({
-  unixSocket: 'C:\\wezterm\\test-socket',
+  unixSocket: __filename,
   targetPaneId: 'base-pane',
 });
 
@@ -704,6 +704,37 @@ test('restartStatusPane: 既存ペインをclose-pane後に同じIssueでpane起
       verified: true,
     });
     assert.equal(formatStatusPaneResult(result), 'STATUS_PANE status=replaced oldPaneId=old-pane newPaneId=new-pane verified=true');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('restartStatusPane: 消滅した接続先ではcloseせず現在環境を継承してrebindする', () => {
+  const workspace = makeWorkspace();
+  try {
+    const staleSocket = path.join(workspace, 'deleted-socket');
+    let registry = { paneId: 'old-pane', unixSocket: staleSocket, targetPaneId: 'old-target', issue: '471' };
+    const calls = [];
+    const result = restartStatusPane(workspace, path.join(workspace, 'scripts'), {
+      loadStatusPaneFn: () => registry,
+      runStatusPaneCommandFn: (params) => {
+        calls.push(params);
+        assert.equal(params.subcommand, 'pane');
+        assert.equal(params.statusPaneContext, null);
+        registry = { paneId: 'new-pane', ...STATUS_PANE_CONTEXT, issue: params.issue };
+        return { ok: true, status: 0, stdout: '', stderr: '' };
+      },
+      statusPaneConfirmAttempts: 1,
+      statusPaneWaitMs: 0,
+    });
+
+    assert.deepEqual(result, {
+      status: 'replaced',
+      oldPaneIds: ['old-pane'],
+      newPaneIds: ['new-pane'],
+      verified: true,
+    });
+    assert.equal(calls.length, 1);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
