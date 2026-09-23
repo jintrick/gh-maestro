@@ -26,7 +26,10 @@ const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
 const { markCommentResult, readRegistry } = require('./shared/execution-registry');
 const { isRetryableGhFailure, graphqlAddComment } = require('./shared/gh-fallback');
 const { ensureWorkerSupervisorRunning } = require('./shared/ensure-worker-supervisor');
-const { ensureStatusPane: ensureStatusPaneLib } = require('./shared/ensure-status-pane');
+const {
+  ensureStatusPane: ensureStatusPaneLib,
+  formatEnsureStatusPaneFailure,
+} = require('./shared/ensure-status-pane');
 const { resolveWorkerName, readWorkersRaw } = require('./shared/workers-registry');
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
@@ -49,13 +52,19 @@ let _ensureStatusPane = defaultEnsureStatusPane;
  * @returns {object} ensure-status-pane.js の結果
  */
 function ensureStatusPaneForWorkspace(workspace, issue = undefined) {
+  let result;
   try {
     const params = { workspace, scriptsPath: __dirname };
     if (issue !== undefined && issue !== null && String(issue) !== '') params.issue = issue;
-    return _ensureStatusPane(params);
+    result = _ensureStatusPane(params);
   } catch (error) {
-    return { ok: false, stage: 'unknown', error: error.message };
+    result = { ok: false, stage: 'unknown', error: error.message };
   }
+  const diagnostic = formatEnsureStatusPaneFailure(result);
+  if (diagnostic) {
+    console.warn(`msg-send: 監視ペイン保証に失敗しました ${diagnostic}`);
+  }
+  return result;
 }
 
 const USAGE = `msg-send.js — GitHub Issue コメント経由でメッセージを送信する
@@ -99,6 +108,8 @@ Output (stdout):
 コンテキスト判定: GH_MAESTRO_WORKER 環境変数の値（ワーカー名か orchestrator/human か）で判別する
   （spawn-worker.js / worker-supervisor.js が起動時にワーカーへ注入し、orchestrator は orchestrator を名乗る）。
 workspace 解決順: --workspace 引数 > GH_MAESTRO_WORKSPACE env > CWD から上方探索
+コメント投稿成功後の監視ペイン保証はbest-effortで、失敗時はstageと接続先をログへ残すが、
+コメント送信の結果は変更しない。
 
 拒否ガード（orchestrator からワーカー宛ての送信のみ）: 宛先ワーカーが稼働中（作業中）で、
   直近の起動以降まだ orchestrator へ報告していないと確定的に判定できた場合、GitHub には

@@ -146,6 +146,9 @@ const DEAD = () => false;
 
 test('ensureStatusPaneForWorkspace: 起動時に保証ヘルパーを呼び、失敗結果を起動失敗へ変換しない', () => {
   let captured = null;
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(' '));
   _setEnsureStatusPane((params) => {
     captured = params;
     return { ok: false, stage: 'launch', error: 'WezTerm unavailable' };
@@ -157,8 +160,13 @@ test('ensureStatusPaneForWorkspace: 起動時に保証ヘルパーを呼び、�
       workspace: 'C:\\workspace',
       scriptsPath: path.dirname(SCRIPT),
     });
+    assert.match(warnings.join('\n'), /spawn-worker: 監視ペイン保証に失敗しました/);
+    assert.match(warnings.join('\n'), /stage=launch/);
+    assert.match(warnings.join('\n'), /unixSocket=/);
+    assert.match(warnings.join('\n'), /targetPaneId=/);
   } finally {
     _setEnsureStatusPane(null);
+    console.warn = originalWarn;
   }
 });
 

@@ -330,8 +330,10 @@ test('ensureStatusPane: split-pane失敗は launch の失敗結果になりロ�
   assert.equal(calls.save, 0);
 });
 
-test('ensureStatusPane: pane一覧取得に失敗した場合は新規起動せず lookup の失敗結果を返す', () => {
+test('ensureStatusPane: 接続先が存在するpane一覧取得失敗は新規起動せず lookup の失敗結果を返す', () => {
   withTempWorkspace((workspace) => {
+    const transientSocket = path.join(workspace, 'existing-socket');
+    fs.writeFileSync(transientSocket, 'placeholder', 'utf8');
     paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'wezterm unavailable' }));
     let launchCalled = false;
     try {
@@ -341,7 +343,7 @@ test('ensureStatusPane: pane一覧取得に失敗した場合は新規起動せ�
       }, {
         acquireLockFn: () => true,
         releaseLockFn: () => {},
-        loadStatusPaneFn: () => paneEntry('existing'),
+        loadStatusPaneFn: () => paneEntry('existing', { unixSocket: transientSocket }),
         launchInSplitPaneFn: () => {
           launchCalled = true;
           return { paneId: 'duplicate' };
@@ -354,6 +356,155 @@ test('ensureStatusPane: pane一覧取得に失敗した場合は新規起動せ�
       assert.match(result.error, /外部コマンドの照会失敗/);
       assert.match(result.error, /wezterm cli list --format json/);
       assert.equal(launchCalled, false);
+    } finally {
+      paneLaunch._setWeztermListPanes(null);
+    }
+  });
+});
+
+test('ensureStatusPane: 消滅した記録接続先は現在の接続先へrebindし新しい記録を保存する', () => {
+  withTempWorkspace((workspace) => {
+    const oldSocket = path.join(workspace, 'deleted-socket');
+    const currentContext = {
+      unixSocket: path.join(workspace, 'current-socket'),
+      targetPaneId: 'current-pane',
+    };
+    let launchParams = null;
+    let savedEntry = null;
+    paneLaunch._setWeztermListPanes(() => ({
+      status: 1,
+      stdout: '',
+      stderr: 'failed to connect',
+    }));
+    try {
+      const result = ensureStatusPane({
+        workspace,
+        scriptsPath: path.join(__dirname, '..', 'scripts'),
+        issue: 569,
+      }, {
+        acquireLockFn: () => true,
+        releaseLockFn: () => {},
+        loadStatusPaneFn: () => paneEntry('old-pane', {
+          unixSocket: oldSocket,
+          targetPaneId: 'old-target',
+        }),
+        getCurrentPaneTargetFn: () => currentContext,
+        launchInSplitPaneFn: (params) => {
+          launchParams = params;
+          return { paneId: 'new-pane' };
+        },
+        saveStatusPaneFn: (savedWorkspace, entry) => {
+          savedEntry = { savedWorkspace, entry };
+        },
+        nowFn: () => 1760000000000,
+      });
+
+      assert.deepEqual(result, { ok: true, paneId: 'new-pane', reused: false });
+      assert.deepEqual(launchParams.connection, currentContext);
+      assert.equal(launchParams.targetPaneId, currentContext.targetPaneId);
+      assert.deepEqual(savedEntry, {
+        savedWorkspace: workspace,
+        entry: {
+          paneId: 'new-pane',
+          ...currentContext,
+          issue: '569',
+          launchedAt: '2025-10-09T08:53:20.000Z',
+        },
+      });
+    } finally {
+      paneLaunch._setWeztermListPanes(null);
+    }
+  });
+});
+
+test('ensureStatusPane: stale接続先でも現在環境を取得できなければ起動せず旧記録を保持する', () => {
+  withTempWorkspace((workspace) => {
+    const oldSocket = path.join(workspace, 'deleted-socket');
+    paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'failed to connect' }));
+    let launchCalled = false;
+    try {
+      const result = ensureStatusPane({
+        workspace,
+        scriptsPath: path.join(__dirname, '..', 'scripts'),
+      }, {
+        acquireLockFn: () => true,
+        releaseLockFn: () => {},
+        loadStatusPaneFn: () => paneEntry('old-pane', { unixSocket: oldSocket }),
+        getCurrentPaneTargetFn: () => null,
+        launchInSplitPaneFn: () => {
+          launchCalled = true;
+          return { paneId: 'must-not-launch' };
+        },
+        saveStatusPaneFn: () => { throw new Error('must-not-save'); },
+      });
+
+      assert.deepEqual(result, {
+        ok: false,
+        stage: 'target',
+        error: '現在のWezTerm接続先または基準pane-idを取得できません',
+      });
+      assert.equal(launchCalled, false);
+    } finally {
+      paneLaunch._setWeztermListPanes(null);
+    }
+  });
+});
+
+test('ensureStatusPane: stale接続先でlaunchに失敗した場合は旧記録を置き換えない', () => {
+  withTempWorkspace((workspace) => {
+    const oldSocket = path.join(workspace, 'deleted-socket');
+    const oldEntry = paneEntry('old-pane', { unixSocket: oldSocket, targetPaneId: 'old-target' });
+    statusPaneRegistry.saveStatusPane(workspace, oldEntry);
+    const storedOldEntry = statusPaneRegistry.loadStatusPane(workspace);
+    paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'failed to connect' }));
+    try {
+      const result = ensureStatusPane({
+        workspace,
+        scriptsPath: path.join(__dirname, '..', 'scripts'),
+        issue: 569,
+      }, {
+        getCurrentPaneTargetFn: () => ({ ...PANE_CONTEXT, unixSocket: path.join(workspace, 'current-socket') }),
+        launchInSplitPaneFn: () => { throw new Error('split failed'); },
+      });
+
+      assert.deepEqual(result, { ok: false, stage: 'launch', error: 'split failed' });
+      assert.deepEqual(statusPaneRegistry.loadStatusPane(workspace), storedOldEntry);
+    } finally {
+      paneLaunch._setWeztermListPanes(null);
+    }
+  });
+});
+
+test('ensureStatusPane: stale接続先でsaveに失敗した場合は旧記録を保持する', () => {
+  withTempWorkspace((workspace) => {
+    const oldSocket = path.join(workspace, 'deleted-socket');
+    const oldEntry = paneEntry('old-pane', { unixSocket: oldSocket, targetPaneId: 'old-target' });
+    statusPaneRegistry.saveStatusPane(workspace, oldEntry);
+    const storedOldEntry = statusPaneRegistry.loadStatusPane(workspace);
+    paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'failed to connect' }));
+    let killed = null;
+    try {
+      const result = ensureStatusPane({
+        workspace,
+        scriptsPath: path.join(__dirname, '..', 'scripts'),
+        issue: 569,
+      }, {
+        getCurrentPaneTargetFn: () => ({ ...PANE_CONTEXT, unixSocket: path.join(workspace, 'current-socket') }),
+        launchInSplitPaneFn: () => ({ paneId: 'new-pane' }),
+        saveStatusPaneFn: () => { throw new Error('disk full'); },
+        killPaneFn: (paneId, connection) => {
+          killed = { paneId, connection };
+          return { ok: true, status: 0, stderr: '' };
+        },
+        nowFn: () => 1760000000000,
+      });
+
+      assert.deepEqual(result, { ok: false, stage: 'save', error: 'disk full' });
+      assert.deepEqual(killed, {
+        paneId: 'new-pane',
+        connection: { ...PANE_CONTEXT, unixSocket: path.join(workspace, 'current-socket') },
+      });
+      assert.deepEqual(statusPaneRegistry.loadStatusPane(workspace), storedOldEntry);
     } finally {
       paneLaunch._setWeztermListPanes(null);
     }

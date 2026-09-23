@@ -52,6 +52,10 @@ function defaultGetCurrentPaneTarget() {
   return require('./pane-launch').getCurrentPaneTarget();
 }
 
+function isStaleConnectionError(error) {
+  return error && error.code === require('./pane-launch').WEZTERM_CONNECTION_GONE_CODE;
+}
+
 function defaultAcquireLock(workspace) {
   return require('../process-lifecycle').acquireStartupLock(
     workspace,
@@ -71,6 +75,22 @@ function defaultReleaseLock(workspace) {
 function failure(stage, error) {
   const message = error instanceof Error ? error.message : String(error || 'unknown error');
   return { ok: false, stage, error: message };
+}
+
+/**
+ * best-effort 呼び出し元が stderr へ残すための機械可読な失敗情報を整形する。
+ *
+ * @param {{ok?: boolean, stage?: string, error?: string}} result
+ * @param {NodeJS.ProcessEnv} [env=process.env]
+ * @returns {string|null}
+ */
+function formatEnsureStatusPaneFailure(result, env = process.env) {
+  if (!result || result.ok !== false) return null;
+  const socket = env && env.WEZTERM_UNIX_SOCKET ? String(env.WEZTERM_UNIX_SOCKET) : '(unset)';
+  const targetPaneId = env && env.WEZTERM_PANE ? String(env.WEZTERM_PANE) : '(unset)';
+  return `stage=${String(result.stage || 'unknown')} `
+    + `unixSocket=${JSON.stringify(socket)} targetPaneId=${JSON.stringify(targetPaneId)} `
+    + `error=${JSON.stringify(String(result.error || 'unknown error'))}`;
 }
 
 function validPaneId(paneId) {
@@ -215,7 +235,19 @@ function ensureStatusPane(params = {}, deps = {}) {
       try {
         alive = Boolean(isPaneAliveFn(existingPane.paneId, launchContext));
       } catch (error) {
-        return failure('lookup', error);
+        if (isStaleConnectionError(error)) {
+          try {
+            launchContext = getCurrentPaneTargetFn();
+          } catch (targetError) {
+            return failure('target', targetError);
+          }
+          if (!launchContext || !validPaneId(launchContext.targetPaneId) ||
+              typeof launchContext.unixSocket !== 'string' || launchContext.unixSocket === '') {
+            return failure('target', '現在のWezTerm接続先または基準pane-idを取得できません');
+          }
+        } else {
+          return failure('lookup', error);
+        }
       }
       if (alive) {
         const requestedIssue = params.issue === undefined || params.issue === null || String(params.issue) === ''
@@ -343,6 +375,7 @@ function ensureStatusPane(params = {}, deps = {}) {
 
 module.exports = {
   ensureStatusPane,
+  formatEnsureStatusPaneFailure,
   STATUS_PANE_LOCK_SCRIPT,
   STATUS_PANE_LOCK_WORKER,
 };

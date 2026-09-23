@@ -12,11 +12,13 @@
 // require されるだけのモジュール（CLIエントリポイントなし）のため --help 対象外
 // （skill-asset-help ルール準拠）。
 
+const fs = require('fs');
 const { spawnSync, realSpawnDisabledReason } = require('./child-process');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 
 const WEZTERM_PANE_ENV = 'WEZTERM_PANE';
 const WEZTERM_UNIX_SOCKET_ENV = 'WEZTERM_UNIX_SOCKET';
+const WEZTERM_CONNECTION_GONE_CODE = 'WEZTERM_CONNECTION_GONE';
 
 // テスト中に実WezTermペイン・ウィンドウを起動してしまう事故を構造的に防ぐガード。
 // 抑止判定の正本は child-process.js::realSpawnDisabledReason を利用する。
@@ -34,6 +36,35 @@ let _weztermKillPane = defaultWeztermKillPane;
 
 function hasValue(value) {
   return value !== null && value !== undefined && String(value) !== '';
+}
+
+function connectionUnixSocket(connection) {
+  return connection && typeof connection === 'object' ? connection.unixSocket : connection;
+}
+
+/**
+ * 保存済み接続先のソケットがファイルシステムから消滅しているかを判定する。
+ *
+ * `existsSync` 自体の失敗は消滅とは扱わない。判定処理の失敗を stale と誤認して
+ * 別の WezTerm へ作成することを避けるため、判定不能は false のまま呼び出し側の
+ * fail-closed 経路へ渡す。
+ *
+ * @param {{unixSocket?: string}|string|null} connection
+ * @returns {boolean}
+ */
+function isWeztermConnectionGone(connection) {
+  const unixSocket = connectionUnixSocket(connection);
+  if (!hasValue(unixSocket)) return false;
+  try {
+    return !fs.existsSync(String(unixSocket));
+  } catch {
+    return false;
+  }
+}
+
+function connectionDescription(connection) {
+  const unixSocket = connectionUnixSocket(connection);
+  return hasValue(unixSocket) ? ` connection=${JSON.stringify(String(unixSocket))}` : '';
 }
 
 /**
@@ -190,26 +221,33 @@ function launchInSplitPane({
  * @param {{unixSocket: string}} [connection]
  * @returns {Set<string>|null}
  */
-function getAlivePaneIds(warn = () => {}, connection = null) {
+function queryAlivePaneIds(warn = () => {}, connection = null) {
   const r = _weztermListPanes(
     ['cli', '--no-auto-start', 'list', '--format', 'json'],
     commandOptionsForConnection(connection),
   );
   if (r.status !== 0) {
     warn(`wezterm cli list 失敗: ${(r.stderr || '').toString().trim()} — pane生存確認をスキップします`);
-    return null;
+    return { panes: null, failure: 'command', status: r.status };
   }
   try {
     const list = JSON.parse((r.stdout || '').toString());
     if (!Array.isArray(list)) {
       warn(`wezterm cli list の出力が配列ではありません — pane生存確認をスキップします`);
-      return null;
+      return { panes: null, failure: 'output' };
     }
-    return new Set(list.filter((pane) => pane && hasValue(pane.pane_id)).map((pane) => String(pane.pane_id)));
+    return {
+      panes: new Set(list.filter((pane) => pane && hasValue(pane.pane_id)).map((pane) => String(pane.pane_id))),
+      failure: null,
+    };
   } catch (e) {
     warn(`wezterm cli list の出力パース失敗: ${e.message} — pane生存確認をスキップします`);
-    return null;
+    return { panes: null, failure: 'output' };
   }
+}
+
+function getAlivePaneIds(warn = () => {}, connection = null) {
+  return queryAlivePaneIds(warn, connection).panes;
 }
 
 /**
@@ -224,17 +262,27 @@ function getAlivePaneIds(warn = () => {}, connection = null) {
 function isPaneAlive(paneId, warn = () => {}, connection = null) {
   if (paneId === null || paneId === undefined || paneId === '') return false;
   let warning = '';
-  const alivePanes = getAlivePaneIds((message) => {
+  const query = queryAlivePaneIds((message) => {
     warning = message;
     warn(message);
   }, connection);
-  if (alivePanes === null) {
-    throw new Error(
+  if (query.panes === null) {
+    const error = new Error(
       `WezTerm pane一覧の外部コマンドの照会失敗（wezterm cli list --format json）: `
-      + (warning || 'pane生存確認を判定できません'),
+      + (warning || 'pane生存確認を判定できません')
+      + connectionDescription(connection),
     );
+    // コマンドが実行され、接続先のパスが存在しない場合だけ stale と確定する。
+    // コマンド未検出・JSON破損・判定不能な失敗は従来の lookup failure のまま扱う。
+    if (query.failure === 'command'
+      && Number.isInteger(query.status)
+      && query.status !== 0
+      && isWeztermConnectionGone(connection)) {
+      error.code = WEZTERM_CONNECTION_GONE_CODE;
+    }
+    throw error;
   }
-  return alivePanes.has(String(paneId));
+  return query.panes.has(String(paneId));
 }
 
 /**
@@ -267,6 +315,8 @@ module.exports = {
   isPaneAlive,
   killPane,
   getCurrentPaneTarget,
+  isWeztermConnectionGone,
+  WEZTERM_CONNECTION_GONE_CODE,
   WEZTERM_PANE_ENV,
   WEZTERM_UNIX_SOCKET_ENV,
   _setWeztermSpawnWindow: (fn) => { _weztermSpawnWindow = fn ?? defaultWeztermSpawnWindow; },

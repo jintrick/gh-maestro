@@ -44,7 +44,10 @@ const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-wor
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { ensureWorkerSupervisorRunning } = require('./shared/ensure-worker-supervisor');
-const { ensureStatusPane: ensureStatusPaneLib } = require('./shared/ensure-status-pane');
+const {
+  ensureStatusPane: ensureStatusPaneLib,
+  formatEnsureStatusPaneFailure,
+} = require('./shared/ensure-status-pane');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { resolveTextInput } = require('./shared/text-input');
@@ -77,15 +80,21 @@ let _recordCycleEvent = recordCycleEvent;
  * @returns {object} ensure-status-pane.js の結果
  */
 function ensureStatusPaneForWorkspace(workspace, issue = undefined) {
+  let result;
   try {
     const params = { workspace, scriptsPath: __dirname };
     if (issue !== undefined && issue !== null && String(issue) !== '') params.issue = issue;
-    return _ensureStatusPane(params);
+    result = _ensureStatusPane(params);
   } catch (error) {
     // 共有ヘルパーは通常すべての運用エラーを結果へ変換する。ここは予期しない
     // 注入・実装エラーがワーカー起動へ波及しないための最終境界である。
-    return { ok: false, stage: 'unknown', error: error.message };
+    result = { ok: false, stage: 'unknown', error: error.message };
   }
+  const diagnostic = formatEnsureStatusPaneFailure(result);
+  if (diagnostic) {
+    console.warn(`spawn-worker: 監視ペイン保証に失敗しました ${diagnostic}`);
+  }
+  return result;
 }
 
 const SPEC = {
@@ -130,7 +139,9 @@ Output (stdout):
   ワーカー名（例: issue-5-coder-implement）
 
 ワーカーは画面を持たないバックグラウンドプロセスとして起動し、標準出力/標準エラーは
-<workspace>/.gh-maestro/records/issue/<N>/workers/<worker>/worker.log へ実行中から逐次書き込まれる。`;
+<workspace>/.gh-maestro/records/issue/<N>/workers/<worker>/worker.log へ実行中から逐次書き込まれる。
+ワーカー登録後の監視ペイン保証はbest-effortで、失敗時はstageと接続先をログへ残すが、
+ワーカーの起動結果は変更しない。`;
 
 /**
  * CLI引数の構文・値だけを検証する。worktree、git、agent、外部プロセスには触れない。
