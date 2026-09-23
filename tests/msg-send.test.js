@@ -167,6 +167,8 @@ test('コメント投稿成功時は送信先を問わず監視ペイン保証�
       assert.equal(ensureStatusPaneCalls[0].issue, '1');
       assert.ok(ensureStatusPaneCalls[0].scriptsPath.endsWith(`${path.sep}scripts`));
 
+      // 先行する orchestrator 経路の診断を混ぜず、worker 経路だけのログを検証する。
+      warnings.length = 0;
       ensureStatusPaneCalls.length = 0;
       const workerSend = msgSend.main(
         ['--stdin', '--workspace', workspace],

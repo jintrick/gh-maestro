@@ -212,11 +212,15 @@ test('isPaneAlive: paneIdの生存を正しく判定する', () => {
 
 test('isPaneAlive: 消滅した接続先へのlist失敗は stale 接続として分類する', () => {
   const connection = { unixSocket: `${__filename}.missing-stale-socket`, targetPaneId: '0' };
-  paneLaunch._setWeztermListPanes(() => ({
-    status: 1,
-    stdout: '',
-    stderr: 'failed to connect',
-  }));
+  const calls = [];
+  paneLaunch._setWeztermListPanes((args, options) => {
+    calls.push({ args, options });
+    return {
+      status: 1,
+      stdout: '',
+      stderr: 'failed to connect',
+    };
+  });
 
   try {
     assert.throws(
@@ -227,6 +231,9 @@ test('isPaneAlive: 消滅した接続先へのlist失敗は stale 接続とし�
         return true;
       },
     );
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].args, ['cli', '--no-auto-start', 'list', '--format', 'json']);
+    assert.equal(calls[0].options.env.WEZTERM_UNIX_SOCKET, connection.unixSocket);
   } finally {
     paneLaunch._setWeztermListPanes(null);
   }
