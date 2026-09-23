@@ -9,6 +9,7 @@ const path = require('path');
 const ensureStatusPaneLib = require('../scripts/shared/ensure-status-pane');
 const paneLaunch = require('../scripts/shared/pane-launch');
 const statusPaneRegistry = require('../scripts/shared/status-pane-registry');
+const { installWeztermCommandPorts, weztermCall } = require('./_wezterm-command-recorder');
 
 const { ensureStatusPane } = ensureStatusPaneLib;
 
@@ -36,6 +37,17 @@ function baseParams(workspace = 'C:\\workspace') {
     workspace,
     scriptsPath: 'C:\\gh-maestro\\scripts',
   };
+}
+
+function listCall(result, connection) {
+  const options = connection
+    ? { env: { ...process.env, WEZTERM_UNIX_SOCKET: connection.unixSocket } }
+    : {};
+  return weztermCall(
+    ['cli', '--no-auto-start', 'list', '--format', 'json'],
+    result,
+    options,
+  );
 }
 
 function injectedDeps(overrides = {}) {
@@ -334,7 +346,12 @@ test('ensureStatusPane: 接続先が存在するpane一覧取得失敗は新規�
   withTempWorkspace((workspace) => {
     const transientSocket = path.join(workspace, 'existing-socket');
     fs.writeFileSync(transientSocket, 'placeholder', 'utf8');
-    paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'wezterm unavailable' }));
+    installWeztermCommandPorts({
+      listPanes: [listCall(
+        { status: 1, stdout: '', stderr: 'wezterm unavailable' },
+        { unixSocket: transientSocket },
+      )],
+    });
     let launchCalled = false;
     try {
       const result = ensureStatusPane({
@@ -371,11 +388,12 @@ test('ensureStatusPane: 消滅した記録接続先は現在の接続先へrebin
     };
     let launchParams = null;
     let savedEntry = null;
-    paneLaunch._setWeztermListPanes(() => ({
-      status: 1,
-      stdout: '',
-      stderr: 'failed to connect',
-    }));
+    installWeztermCommandPorts({
+      listPanes: [listCall(
+        { status: 1, stdout: '', stderr: 'failed to connect' },
+        { unixSocket: oldSocket },
+      )],
+    });
     try {
       const result = ensureStatusPane({
         workspace,
@@ -420,7 +438,12 @@ test('ensureStatusPane: 消滅した記録接続先は現在の接続先へrebin
 test('ensureStatusPane: stale接続先でも現在環境を取得できなければ起動せず旧記録を保持する', () => {
   withTempWorkspace((workspace) => {
     const oldSocket = path.join(workspace, 'deleted-socket');
-    paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'failed to connect' }));
+    installWeztermCommandPorts({
+      listPanes: [listCall(
+        { status: 1, stdout: '', stderr: 'failed to connect' },
+        { unixSocket: oldSocket },
+      )],
+    });
     let launchCalled = false;
     try {
       const result = ensureStatusPane({
@@ -456,7 +479,12 @@ test('ensureStatusPane: stale接続先でlaunchに失敗した場合は旧記録
     const oldEntry = paneEntry('old-pane', { unixSocket: oldSocket, targetPaneId: 'old-target' });
     statusPaneRegistry.saveStatusPane(workspace, oldEntry);
     const storedOldEntry = statusPaneRegistry.loadStatusPane(workspace);
-    paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'failed to connect' }));
+    installWeztermCommandPorts({
+      listPanes: [listCall(
+        { status: 1, stdout: '', stderr: 'failed to connect' },
+        { unixSocket: oldSocket },
+      )],
+    });
     try {
       const result = ensureStatusPane({
         workspace,
@@ -481,7 +509,12 @@ test('ensureStatusPane: stale接続先でsaveに失敗した場合は旧記録�
     const oldEntry = paneEntry('old-pane', { unixSocket: oldSocket, targetPaneId: 'old-target' });
     statusPaneRegistry.saveStatusPane(workspace, oldEntry);
     const storedOldEntry = statusPaneRegistry.loadStatusPane(workspace);
-    paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'failed to connect' }));
+    installWeztermCommandPorts({
+      listPanes: [listCall(
+        { status: 1, stdout: '', stderr: 'failed to connect' },
+        { unixSocket: oldSocket },
+      )],
+    });
     let killed = null;
     try {
       const result = ensureStatusPane({
@@ -514,18 +547,19 @@ test('ensureStatusPane: stale接続先でsaveに失敗した場合は旧記録�
 test('ensureStatusPane: 記録された接続先の別window/tabにあるペインを再利用する', () => {
   withTempWorkspace((workspace) => {
     statusPaneRegistry.saveStatusPane(workspace, paneEntry('existing-pane'));
-    let listOptions = null;
-    paneLaunch._setWeztermListPanes((args, options) => {
-      listOptions = options;
-      return {
-        status: 0,
-        stdout: JSON.stringify([{
-          pane_id: 'existing-pane',
-          window_id: 17,
-          tab_id: 23,
-        }]),
-        stderr: '',
-      };
+    installWeztermCommandPorts({
+      listPanes: [listCall(
+        {
+          status: 0,
+          stdout: JSON.stringify([{
+            pane_id: 'existing-pane',
+            window_id: 17,
+            tab_id: 23,
+          }]),
+          stderr: '',
+        },
+        PANE_CONTEXT,
+      )],
     });
     let launchCalled = false;
     try {
@@ -543,7 +577,6 @@ test('ensureStatusPane: 記録された接続先の別window/tabにあるペイ�
 
       assert.deepEqual(result, { ok: true, paneId: 'existing-pane', reused: true });
       assert.equal(launchCalled, false);
-      assert.equal(listOptions.env.WEZTERM_UNIX_SOCKET, PANE_CONTEXT.unixSocket);
     } finally {
       paneLaunch._setWeztermListPanes(null);
     }
