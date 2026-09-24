@@ -13,12 +13,14 @@
 // （skill-asset-help ルール準拠）。
 
 const fs = require('fs');
+const { isDeepStrictEqual } = require('node:util');
 const { spawnSync, realSpawnDisabledReason } = require('./child-process');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 
 const WEZTERM_PANE_ENV = 'WEZTERM_PANE';
 const WEZTERM_UNIX_SOCKET_ENV = 'WEZTERM_UNIX_SOCKET';
 const WEZTERM_CONNECTION_GONE_CODE = 'WEZTERM_CONNECTION_GONE';
+const WEZTERM_COMMAND_PORT_BRAND = Symbol('gh-maestro.wezterm-command-port');
 
 // テスト中に実WezTermペイン・ウィンドウを起動してしまう事故を構造的に防ぐガード。
 // 抑止判定の正本は child-process.js::realSpawnDisabledReason を利用する。
@@ -33,6 +35,102 @@ let _weztermSpawnWindow = defaultWeztermSpawnWindow;
 let _weztermSplitPane = defaultWeztermSplitPane;
 let _weztermListPanes = defaultWeztermListPanes;
 let _weztermKillPane = defaultWeztermKillPane;
+
+function createWeztermCommandPort(operation, expectedCalls) {
+  if (typeof operation !== 'string' || operation.length === 0) {
+    throw new TypeError('WezTerm command port の operation は必須です');
+  }
+  if (!Array.isArray(expectedCalls)) {
+    throw new TypeError(`WezTerm ${operation} command port の期待呼び出しは配列で指定してください`);
+  }
+
+  const calls = expectedCalls.map((expected, index) => {
+    if (!expected || !Array.isArray(expected.args)) {
+      throw new TypeError(`WezTerm ${operation} の期待呼び出し ${index + 1} に argv がありません`);
+    }
+    const options = expected.options === undefined ? {} : expected.options;
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+      throw new TypeError(`WezTerm ${operation} の期待呼び出し ${index + 1} の options が不正です`);
+    }
+    if (!Object.prototype.hasOwnProperty.call(expected, 'result')) {
+      throw new TypeError(`WezTerm ${operation} の期待呼び出し ${index + 1} に result がありません`);
+    }
+    return {
+      args: expected.args,
+      options,
+      result: expected.result,
+    };
+  });
+
+  let consumed = 0;
+  const environmentDifference = (expectedOptions, actualOptions) => {
+    const expectedEnv = expectedOptions.env && typeof expectedOptions.env === 'object'
+      ? expectedOptions.env
+      : {};
+    const actualEnv = actualOptions.env && typeof actualOptions.env === 'object'
+      ? actualOptions.env
+      : {};
+    const keys = new Set([...Object.keys(expectedEnv), ...Object.keys(actualEnv)]);
+    return [...keys].filter(key => !isDeepStrictEqual(expectedEnv[key], actualEnv[key])).sort();
+  };
+  const commandSummary = (args, options) => ({
+    args,
+    envKeys: options.env && typeof options.env === 'object' ? Object.keys(options.env).sort() : [],
+  });
+  return Object.freeze({
+    [WEZTERM_COMMAND_PORT_BRAND]: true,
+    invoke(args, options = {}) {
+      const expected = calls[consumed];
+      if (!expected) {
+        throw new Error(
+          `WezTerm ${operation} に宣言されていない呼び出しがあります: `
+          + JSON.stringify(commandSummary(args, options)),
+        );
+      }
+      if (!isDeepStrictEqual(args, expected.args) || !isDeepStrictEqual(options, expected.options)) {
+        const differences = [];
+        if (!isDeepStrictEqual(args, expected.args)) differences.push('argv');
+        if (!isDeepStrictEqual(options, expected.options)) {
+          const envKeys = environmentDifference(expected.options, options);
+          differences.push(envKeys.length > 0 ? `environment(${envKeys.join(',')})` : 'options');
+        }
+        throw new Error(
+          `WezTerm ${operation} の呼び出し引数が期待と異なります: ${differences.join(',')}`
+          + ` expected=${JSON.stringify(commandSummary(expected.args, expected.options))}`
+          + ` actual=${JSON.stringify(commandSummary(args, options))}`,
+        );
+      }
+      consumed++;
+      return expected.result;
+    },
+    assertComplete() {
+      if (consumed !== calls.length) {
+        throw new Error(
+          `WezTerm ${operation} の期待呼び出しが未消費です: `
+          + `${calls.length - consumed}件`,
+        );
+      }
+    },
+  });
+}
+
+function isWeztermCommandPort(port) {
+  return Boolean(
+    port
+    && typeof port === 'object'
+    && port[WEZTERM_COMMAND_PORT_BRAND] === true
+    && typeof port.invoke === 'function'
+    && typeof port.assertComplete === 'function',
+  );
+}
+
+function setWeztermCommandPort(setterName, port, defaultCommand) {
+  if (port === null) return defaultCommand;
+  if (!isWeztermCommandPort(port)) {
+    throw new TypeError(`${setterName} は期待呼び出しを照合する command port または null を受け付けます`);
+  }
+  return (args, options = {}) => port.invoke(args, options);
+}
 
 function hasValue(value) {
   return value !== null && value !== undefined && String(value) !== '';
@@ -129,7 +227,7 @@ function launchAgentInWindow({ argv, cwd, env = {}, onExit = null }) {
   const loginShellArgs = buildLoginShellExecArgs(argv, process.platform, onExit, env);
   const spawnArgs = ['cli', '--no-auto-start', 'spawn', '--new-window', '--cwd', cwd, '--', ...loginShellArgs];
 
-  const result = _weztermSpawnWindow(spawnArgs);
+  const result = _weztermSpawnWindow(spawnArgs, {});
   if (result.status !== 0) {
     throw new Error(`WezTermウィンドウの起動に失敗しました: ${(result.stderr || '').toString().trim()}`);
   }
@@ -319,8 +417,17 @@ module.exports = {
   WEZTERM_CONNECTION_GONE_CODE,
   WEZTERM_PANE_ENV,
   WEZTERM_UNIX_SOCKET_ENV,
-  _setWeztermSpawnWindow: (fn) => { _weztermSpawnWindow = fn ?? defaultWeztermSpawnWindow; },
-  _setWeztermSplitPane: (fn) => { _weztermSplitPane = fn ?? defaultWeztermSplitPane; },
-  _setWeztermListPanes: (fn) => { _weztermListPanes = fn ?? defaultWeztermListPanes; },
-  _setWeztermKillPane: (fn) => { _weztermKillPane = fn ?? defaultWeztermKillPane; },
+  _createWeztermCommandPort: createWeztermCommandPort,
+  _setWeztermSpawnWindow: (port) => {
+    _weztermSpawnWindow = setWeztermCommandPort('_setWeztermSpawnWindow', port, defaultWeztermSpawnWindow);
+  },
+  _setWeztermSplitPane: (port) => {
+    _weztermSplitPane = setWeztermCommandPort('_setWeztermSplitPane', port, defaultWeztermSplitPane);
+  },
+  _setWeztermListPanes: (port) => {
+    _weztermListPanes = setWeztermCommandPort('_setWeztermListPanes', port, defaultWeztermListPanes);
+  },
+  _setWeztermKillPane: (port) => {
+    _weztermKillPane = setWeztermCommandPort('_setWeztermKillPane', port, defaultWeztermKillPane);
+  },
 };

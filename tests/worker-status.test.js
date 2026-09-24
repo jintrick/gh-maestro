@@ -18,6 +18,7 @@ const workerStatus = require('../scripts/worker-status');
 const workerLiveness = require('../scripts/shared/worker-liveness');
 const paneLaunch = require('../scripts/shared/pane-launch');
 const { cleanSpawnEnv } = require('./_spawn-env');
+const { installWeztermCommandPorts, weztermCall } = require('./_wezterm-command-recorder');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-status.js');
 
@@ -25,6 +26,17 @@ const STATUS_PANE_CONTEXT = Object.freeze({
   unixSocket: 'C:\\wezterm\\test-socket',
   targetPaneId: 'base-pane',
 });
+
+function listCall(result, connection) {
+  const env = { ...process.env };
+  delete env.GH_MAESTRO_WORKSPACE;
+  env.WEZTERM_UNIX_SOCKET = connection.unixSocket;
+  return weztermCall(
+    ['cli', '--no-auto-start', 'list', '--format', 'json'],
+    result,
+    { env },
+  );
+}
 
 // status/list の実CLI境界は維持する。各子プロセスの初期化で発生する
 // process-lifecycle のWindows WMI照会だけを固定観測へ差し替え、PIDだけの
@@ -1391,11 +1403,12 @@ test('main: pane は消滅した記録接続先を現在のWezTermへrebindす�
     targetPaneId: 'old-target',
     issue: '568',
   });
-  paneLaunch._setWeztermListPanes(() => ({
-    status: 1,
-    stdout: '',
-    stderr: 'failed to connect',
-  }));
+  installWeztermCommandPorts({
+    listPanes: [listCall(
+      { status: 1, stdout: '', stderr: 'failed to connect' },
+      { unixSocket: path.join(workspace, 'deleted-socket') },
+    )],
+  });
   let launchParams = null;
   workerStatus._setIsPaneAlive(null);
   workerStatus._setLaunchInSplitPane((params) => {
@@ -1516,7 +1529,12 @@ test('main: close-pane のWezTerm pane一覧照会失敗時はregistryを削除�
   const workspace = createWorkspace();
   const statusRegistry = require('../scripts/shared/status-pane-registry');
   statusRegistry.saveStatusPane(workspace, { paneId: '551', ...STATUS_PANE_CONTEXT, issue: 471 });
-  paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'wezterm unavailable' }));
+  installWeztermCommandPorts({
+    listPanes: [listCall(
+      { status: 1, stdout: '', stderr: 'wezterm unavailable' },
+      STATUS_PANE_CONTEXT,
+    )],
+  });
   let killCalled = false;
   workerStatus._setIsPaneAlive(null);
   workerStatus._setKillPane(() => {
@@ -1568,11 +1586,12 @@ test('main: close-pane は記録接続先の一覧に無いpaneを削除・kill�
   const workspace = createWorkspace();
   const statusRegistry = require('../scripts/shared/status-pane-registry');
   statusRegistry.saveStatusPane(workspace, { paneId: '561', ...STATUS_PANE_CONTEXT, issue: 471 });
-  paneLaunch._setWeztermListPanes(() => ({
-    status: 0,
-    stdout: JSON.stringify([{ pane_id: 'other-pane' }]),
-    stderr: '',
-  }));
+  installWeztermCommandPorts({
+    listPanes: [listCall(
+      { status: 0, stdout: JSON.stringify([{ pane_id: 'other-pane' }]), stderr: '' },
+      STATUS_PANE_CONTEXT,
+    )],
+  });
   let killCalled = false;
   workerStatus._setIsPaneAlive(null);
   workerStatus._setKillPane(() => {

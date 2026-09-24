@@ -48,8 +48,8 @@ Output (stdout):
   PR_COMMENT:<user>:<body>                    PR 全体コメント
   PR_REVIEW:<user>:<state>:<body>             正式レビュー提出（APPROVED/CHANGES_REQUESTED/COMMENTED）
   PR_PUSH:<sha>                               新しいコミットが push された
-  TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>
-                                              テスト申告状態と実行記録
+  TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>:lint=<state>
+                                              テスト申告状態・実行記録・lint状態
   PR_MERGED:<PR>                              マージ完了（このとき終了する）
   PR_CLOSED:<PR>                              却下・キャンセルでクローズ（このとき終了する）
   POLL_ERROR:<detail>                         GitHubアクセスが失敗し始めた（遷移時のみ。再試行は継続）
@@ -135,12 +135,29 @@ function reviewTerminalEvent(state, pr) {
 /**
  * テスト申告の評価を、orchestrator が解釈できる固定形式の通知へ変換する。
  * provenance/scope を status と同じイベントに含め、v1/unknown と v2 full/partial/aggregate を
- * 通知だけでも区別できるようにする。aggregate の層別事実は query-test-status.js で照会する。
+ * 通知だけでも区別できるようにする。lint状態も同じイベントへ含め、aggregate の層別事実は
+ * query-test-status.js で照会する。lintの指摘・利用不能・欠落はテスト状態の停止条件ではないが、
+ * 通知から状態を欠落させない。
  *
- * @param {{status?:string, declaredSha?:string, headSha?:string, provenance?:string, scope?:string, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}} evaluation
+ * @param {{status?:string, declaredSha?:string, headSha?:string, provenance?:string, scope?:string, lint?:object, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}} evaluation
  * @returns {string}
  */
 function formatTestStatusEvent(evaluation = {}) {
+  const lint = evaluation.lint;
+  let lintToken = 'missing';
+  if (lint && lint.status === 'complete') {
+    if (lint.outcome === 'findings') {
+      const count = Number.isSafeInteger(lint.findingCount) ? lint.findingCount : 'unknown';
+      lintToken = `complete/findings(${count})`;
+    } else {
+      lintToken = 'complete/pass';
+    }
+  } else if (lint && lint.status === 'unavailable') {
+    const reason = typeof lint.reason === 'string' && lint.reason.trim()
+      ? lint.reason.trim().replace(/[^A-Za-z0-9_-]/g, '_')
+      : 'lint-result-unavailable';
+    lintToken = `unavailable/${reason}`;
+  }
   return [
     'TEST_STATUS',
     evaluation.status || 'NONE',
@@ -148,6 +165,7 @@ function formatTestStatusEvent(evaluation = {}) {
     evaluation.headSha || 'none',
     evaluation.provenance || 'unknown',
     evaluation.scope || 'unknown',
+    `lint=${lintToken}`,
   ].join(':');
 }
 
@@ -323,6 +341,7 @@ async function runPollReviews(params, deps = {}) {
         testEvaluation.scope || 'unknown',
         testEvaluation.fail === undefined ? '' : testEvaluation.fail,
         testEvaluation.pass === undefined ? '' : testEvaluation.pass,
+        formatTestStatusEvent(testEvaluation).split(':').at(-1),
       ].join(':');
       const prevEvalKey = fsMod.existsSync(testStatusFile) ? fsMod.readFileSync(testStatusFile, 'utf8').trim() : '';
 

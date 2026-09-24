@@ -1,18 +1,58 @@
 'use strict';
 
-const { test, beforeEach } = require('node:test');
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 const paneLaunch = require('../scripts/shared/pane-launch');
+const { buildLoginShellExecArgs } = require('../scripts/shared/agent-exec');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
+const { installWeztermCommandPorts, weztermCall } = require('./_wezterm-command-recorder');
 const { launchAgentInWindow } = paneLaunch;
+
+const tempDirScope = createTempDirScope();
+test.after(() => tempDirScope.cleanup());
 
 // このモジュールに残るのは assistant（対話型ワーカー）専用の起動経路だけ。
 // orchestrator管理下のワーカーの起動は shared/headless-launch.js へ移行した（Issue #151）。
-beforeEach(() => {
-  paneLaunch._setWeztermSpawnWindow(() => ({ status: 0, stdout: '42', stderr: '' }));
-});
+function shellArgs(argv, onExit = null, env = {}) {
+  return buildLoginShellExecArgs(argv, process.platform, onExit, env);
+}
+
+function spawnArgs(argv, cwd, onExit = null, env = {}) {
+  return ['cli', '--no-auto-start', 'spawn', '--new-window', '--cwd', cwd, '--', ...shellArgs(argv, onExit, env)];
+}
+
+function splitArgs(argv, cwd, targetPaneId, direction = 'bottom', percent = 15, onExit = null, env = {}) {
+  return [
+    'cli', '--no-auto-start', 'split-pane',
+    '--pane-id', String(targetPaneId),
+    `--${direction}`,
+    '--percent', String(percent),
+    '--cwd', cwd,
+    '--',
+    ...shellArgs(argv, onExit, env),
+  ];
+}
+
+function connectionOptions(connection) {
+  return {
+    env: {
+      ...process.env,
+      WEZTERM_UNIX_SOCKET: connection.unixSocket,
+    },
+  };
+}
 
 test('launchAgentInWindow: spawn成功でpaneIdを返す', () => {
+  installWeztermCommandPorts({
+    spawnWindow: [weztermCall(
+      spawnArgs(['agy', '--prompt-interactive', 'hello'], '/tmp/ws'),
+      { status: 0, stdout: '42', stderr: '' },
+    )],
+  });
   const result = launchAgentInWindow({
     argv: ['agy', '--prompt-interactive', 'hello'],
     cwd: '/tmp/ws',
@@ -21,22 +61,26 @@ test('launchAgentInWindow: spawn成功でpaneIdを返す', () => {
 });
 
 test('launchAgentInWindow: --new-window --cwd を伴う spawn 引数を組み立てる（splitFromPaneId等は不要）', () => {
-  let capturedArgs = null;
-  paneLaunch._setWeztermSpawnWindow((args) => {
-    capturedArgs = args;
-    return { status: 0, stdout: '99', stderr: '' };
+  installWeztermCommandPorts({
+    spawnWindow: [weztermCall(
+      spawnArgs(['agy', '--prompt-interactive', 'hi'], '/tmp/ws-2'),
+      { status: 0, stdout: '99', stderr: '' },
+    )],
   });
 
-  launchAgentInWindow({ argv: ['agy', '--prompt-interactive', 'hi'], cwd: '/tmp/ws-2' });
-
-  assert.ok(capturedArgs.includes('spawn'));
-  assert.ok(capturedArgs.includes('--new-window'));
-  assert.ok(capturedArgs.includes('--cwd'));
-  assert.ok(capturedArgs.includes('/tmp/ws-2'));
+  assert.equal(
+    launchAgentInWindow({ argv: ['agy', '--prompt-interactive', 'hi'], cwd: '/tmp/ws-2' }).paneId,
+    '99',
+  );
 });
 
 test('launchAgentInWindow: spawn失敗でthrow', () => {
-  paneLaunch._setWeztermSpawnWindow(() => ({ status: 1, stdout: '', stderr: 'nope' }));
+  installWeztermCommandPorts({
+    spawnWindow: [weztermCall(
+      spawnArgs(['agy'], '/tmp/ws'),
+      { status: 1, stdout: '', stderr: 'nope' },
+    )],
+  });
 
   assert.throws(
     () => launchAgentInWindow({ argv: ['agy'], cwd: '/tmp/ws' }),
@@ -45,7 +89,12 @@ test('launchAgentInWindow: spawn失敗でthrow', () => {
 });
 
 test('launchAgentInWindow: pane-idが空ならthrow', () => {
-  paneLaunch._setWeztermSpawnWindow(() => ({ status: 0, stdout: '', stderr: '' }));
+  installWeztermCommandPorts({
+    spawnWindow: [weztermCall(
+      spawnArgs(['agy'], '/tmp/ws'),
+      { status: 0, stdout: '', stderr: '' },
+    )],
+  });
 
   assert.throws(
     () => launchAgentInWindow({ argv: ['agy'], cwd: '/tmp/ws' }),
@@ -54,10 +103,11 @@ test('launchAgentInWindow: pane-idが空ならthrow', () => {
 });
 
 test('launchInSplitPane: split-pane成功でpaneIdを返す（既定: bottom 15%）', () => {
-  let capturedArgs = null;
-  paneLaunch._setWeztermSplitPane((args) => {
-    capturedArgs = args;
-    return { status: 0, stdout: '55', stderr: '' };
+  installWeztermCommandPorts({
+    splitPane: [weztermCall(
+      splitArgs(['node', 'worker-status.js', 'watch'], '/tmp/ws', '0'),
+      { status: 0, stdout: '55', stderr: '' },
+    )],
   });
 
   const result = paneLaunch.launchInSplitPane({
@@ -67,22 +117,14 @@ test('launchInSplitPane: split-pane成功でpaneIdを返す（既定: bottom 15%
   });
 
   assert.equal(result.paneId, '55');
-  assert.ok(capturedArgs.includes('split-pane'));
-  assert.ok(capturedArgs.includes('--bottom'));
-  assert.ok(capturedArgs.includes('--percent'));
-  assert.ok(capturedArgs.includes('15'));
-  assert.ok(capturedArgs.includes('--cwd'));
-  assert.ok(capturedArgs.includes('/tmp/ws'));
-  assert.deepEqual(capturedArgs.slice(capturedArgs.indexOf('--pane-id'), capturedArgs.indexOf('--pane-id') + 2), [
-    '--pane-id', '0',
-  ]);
 });
 
 test('launchInSplitPane: direction と percent をカスタマイズできる', () => {
-  let capturedArgs = null;
-  paneLaunch._setWeztermSplitPane((args) => {
-    capturedArgs = args;
-    return { status: 0, stdout: '56', stderr: '' };
+  installWeztermCommandPorts({
+    splitPane: [weztermCall(
+      splitArgs(['node', 'worker-status.js', 'watch'], '/tmp/ws', 'base-1', 'right', 25),
+      { status: 0, stdout: '56', stderr: '' },
+    )],
   });
 
   paneLaunch.launchInSplitPane({
@@ -93,12 +135,15 @@ test('launchInSplitPane: direction と percent をカスタマイズできる', 
     targetPaneId: 'base-1',
   });
 
-  assert.ok(capturedArgs.includes('--right'));
-  assert.ok(capturedArgs.includes('25'));
 });
 
 test('launchInSplitPane: split-pane失敗でthrow', () => {
-  paneLaunch._setWeztermSplitPane(() => ({ status: 1, stdout: '', stderr: 'split failed' }));
+  installWeztermCommandPorts({
+    splitPane: [weztermCall(
+      splitArgs(['node'], '/tmp/ws', '0'),
+      { status: 1, stdout: '', stderr: 'split failed' },
+    )],
+  });
 
   assert.throws(
     () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws', targetPaneId: '0' }),
@@ -107,7 +152,12 @@ test('launchInSplitPane: split-pane失敗でthrow', () => {
 });
 
 test('launchInSplitPane: pane-idが空ならthrow', () => {
-  paneLaunch._setWeztermSplitPane(() => ({ status: 0, stdout: '', stderr: '' }));
+  installWeztermCommandPorts({
+    splitPane: [weztermCall(
+      splitArgs(['node'], '/tmp/ws', '0'),
+      { status: 0, stdout: '', stderr: '' },
+    )],
+  });
 
   assert.throws(
     () => paneLaunch.launchInSplitPane({ argv: ['node'], cwd: '/tmp/ws', targetPaneId: '0' }),
@@ -116,11 +166,16 @@ test('launchInSplitPane: pane-idが空ならthrow', () => {
 });
 
 test('getAlivePaneIds: listのJSON出力からSet<string>を構築する', () => {
-  paneLaunch._setWeztermListPanes(() => ({
-    status: 0,
-    stdout: JSON.stringify([{ pane_id: 1 }, { pane_id: '42' }, { pane_id: 99 }]),
-    stderr: '',
-  }));
+  installWeztermCommandPorts({
+    listPanes: [weztermCall(
+      ['cli', '--no-auto-start', 'list', '--format', 'json'],
+      {
+        status: 0,
+        stdout: JSON.stringify([{ pane_id: 1 }, { pane_id: '42' }, { pane_id: 99 }]),
+        stderr: '',
+      },
+    )],
+  });
 
   const result = paneLaunch.getAlivePaneIds();
   assert.equal(result.size, 3);
@@ -132,7 +187,12 @@ test('getAlivePaneIds: listのJSON出力からSet<string>を構築する', () =>
 
 test('getAlivePaneIds: status!=0 の場合はwarnを呼び null を返す（0件生存と区別）', () => {
   let warned = null;
-  paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'wezterm not running' }));
+  installWeztermCommandPorts({
+    listPanes: [weztermCall(
+      ['cli', '--no-auto-start', 'list', '--format', 'json'],
+      { status: 1, stdout: '', stderr: 'wezterm not running' },
+    )],
+  });
 
   const result = paneLaunch.getAlivePaneIds((msg) => { warned = msg; });
   assert.equal(result, null);
@@ -141,47 +201,43 @@ test('getAlivePaneIds: status!=0 の場合はwarnを呼び null を返す（0件
 
 test('pane操作: 記録済み接続先をWezTermコマンドの環境へ渡す', () => {
   const connection = { unixSocket: 'C:\\wezterm\\socket-A', targetPaneId: 'base-A' };
-  const captured = [];
-  paneLaunch._setWeztermListPanes((args, options) => {
-    captured.push({ kind: 'list', args, options });
-    return { status: 0, stdout: JSON.stringify([{ pane_id: '77' }]), stderr: '' };
-  });
-  paneLaunch._setWeztermKillPane((args, options) => {
-    captured.push({ kind: 'kill', args, options });
-    return { status: 0, stdout: '', stderr: '' };
-  });
-  paneLaunch._setWeztermSplitPane((args, options) => {
-    captured.push({ kind: 'split', args, options });
-    return { status: 0, stdout: '88', stderr: '' };
+  const options = connectionOptions(connection);
+  installWeztermCommandPorts({
+    listPanes: [weztermCall(
+      ['cli', '--no-auto-start', 'list', '--format', 'json'],
+      { status: 0, stdout: JSON.stringify([{ pane_id: '77' }]), stderr: '' },
+      options,
+    )],
+    killPane: [weztermCall(
+      ['cli', '--no-auto-start', 'kill-pane', '--pane-id', '77'],
+      { status: 0, stdout: '', stderr: '' },
+      options,
+    )],
+    splitPane: [weztermCall(
+      splitArgs(['node'], '/tmp/ws', connection.targetPaneId),
+      { status: 0, stdout: '88', stderr: '' },
+      options,
+    )],
   });
 
-  try {
-    assert.equal(paneLaunch.isPaneAlive('77', undefined, connection), true);
-    assert.equal(paneLaunch.killPane('77', connection).ok, true);
-    assert.equal(paneLaunch.launchInSplitPane({
-      argv: ['node'],
-      cwd: '/tmp/ws',
-      targetPaneId: connection.targetPaneId,
-      connection,
-    }).paneId, '88');
-
-    for (const call of captured) {
-      assert.equal(call.options.env.WEZTERM_UNIX_SOCKET, connection.unixSocket);
-      assert.equal(call.options.env.WEZTERM_PANE, process.env.WEZTERM_PANE);
-    }
-    assert.deepEqual(captured.at(-1).args.slice(captured.at(-1).args.indexOf('--pane-id'), captured.at(-1).args.indexOf('--pane-id') + 2), [
-      '--pane-id', 'base-A',
-    ]);
-  } finally {
-    paneLaunch._setWeztermListPanes(null);
-    paneLaunch._setWeztermKillPane(null);
-    paneLaunch._setWeztermSplitPane(null);
-  }
+  assert.equal(paneLaunch.isPaneAlive('77', undefined, connection), true);
+  assert.equal(paneLaunch.killPane('77', connection).ok, true);
+  assert.equal(paneLaunch.launchInSplitPane({
+    argv: ['node'],
+    cwd: '/tmp/ws',
+    targetPaneId: connection.targetPaneId,
+    connection,
+  }).paneId, '88');
 });
 
 test('getAlivePaneIds: JSONパース失敗時はwarnを呼び null を返す', () => {
   let warned = null;
-  paneLaunch._setWeztermListPanes(() => ({ status: 0, stdout: 'not json', stderr: '' }));
+  installWeztermCommandPorts({
+    listPanes: [weztermCall(
+      ['cli', '--no-auto-start', 'list', '--format', 'json'],
+      { status: 0, stdout: 'not json', stderr: '' },
+    )],
+  });
 
   const result = paneLaunch.getAlivePaneIds((msg) => { warned = msg; });
   assert.equal(result, null);
@@ -189,11 +245,16 @@ test('getAlivePaneIds: JSONパース失敗時はwarnを呼び null を返す', (
 });
 
 test('isPaneAlive: paneIdの生存を正しく判定する', () => {
-  paneLaunch._setWeztermListPanes(() => ({
-    status: 0,
-    stdout: JSON.stringify([{ pane_id: 10 }]),
-    stderr: '',
-  }));
+  const listArgs = ['cli', '--no-auto-start', 'list', '--format', 'json'];
+  const aliveResult = { status: 0, stdout: JSON.stringify([{ pane_id: 10 }]), stderr: '' };
+  installWeztermCommandPorts({
+    listPanes: [
+      weztermCall(listArgs, aliveResult),
+      weztermCall(listArgs, aliveResult),
+      weztermCall(listArgs, aliveResult),
+      weztermCall(listArgs, { status: 1, stdout: '', stderr: 'error' }),
+    ],
+  });
 
   assert.equal(paneLaunch.isPaneAlive('10'), true);
   assert.equal(paneLaunch.isPaneAlive(10), true);
@@ -203,7 +264,6 @@ test('isPaneAlive: paneIdの生存を正しく判定する', () => {
   assert.equal(paneLaunch.isPaneAlive(undefined), false);
 
   // 一覧取得失敗時は死亡へ縮退せず判定不能としてthrow
-  paneLaunch._setWeztermListPanes(() => ({ status: 1, stdout: '', stderr: 'error' }));
   assert.throws(
     () => paneLaunch.isPaneAlive('10'),
     /外部コマンドの照会失敗.*wezterm cli list --format json/,
@@ -212,66 +272,55 @@ test('isPaneAlive: paneIdの生存を正しく判定する', () => {
 
 test('isPaneAlive: 消滅した接続先へのlist失敗は stale 接続として分類する', () => {
   const connection = { unixSocket: `${__filename}.missing-stale-socket`, targetPaneId: '0' };
-  const calls = [];
-  paneLaunch._setWeztermListPanes((args, options) => {
-    calls.push({ args, options });
-    return {
-      status: 1,
-      stdout: '',
-      stderr: 'failed to connect',
-    };
+  installWeztermCommandPorts({
+    listPanes: [weztermCall(
+      ['cli', '--no-auto-start', 'list', '--format', 'json'],
+      { status: 1, stdout: '', stderr: 'failed to connect' },
+      connectionOptions(connection),
+    )],
   });
 
-  try {
-    assert.throws(
-      () => paneLaunch.isPaneAlive('10', undefined, connection),
-      (error) => {
-        assert.equal(error.code, paneLaunch.WEZTERM_CONNECTION_GONE_CODE);
-        assert.match(error.message, /connection=/);
-        return true;
-      },
-    );
-    assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0].args, ['cli', '--no-auto-start', 'list', '--format', 'json']);
-    assert.equal(calls[0].options.env.WEZTERM_UNIX_SOCKET, connection.unixSocket);
-  } finally {
-    paneLaunch._setWeztermListPanes(null);
-  }
+  assert.throws(
+    () => paneLaunch.isPaneAlive('10', undefined, connection),
+    (error) => {
+      assert.equal(error.code, paneLaunch.WEZTERM_CONNECTION_GONE_CODE);
+      assert.match(error.message, /connection=/);
+      return true;
+    },
+  );
 });
 
 test('isPaneAlive: 接続先が存在するlist失敗は stale と判定せず判定不能のまま止める', () => {
   const connection = { unixSocket: __filename, targetPaneId: '0' };
-  paneLaunch._setWeztermListPanes(() => ({
-    status: 1,
-    stdout: '',
-    stderr: 'temporary failure',
-  }));
+  installWeztermCommandPorts({
+    listPanes: [weztermCall(
+      ['cli', '--no-auto-start', 'list', '--format', 'json'],
+      { status: 1, stdout: '', stderr: 'temporary failure' },
+      connectionOptions(connection),
+    )],
+  });
 
-  try {
-    assert.throws(
-      () => paneLaunch.isPaneAlive('10', undefined, connection),
-      (error) => {
-        assert.notEqual(error.code, paneLaunch.WEZTERM_CONNECTION_GONE_CODE);
-        assert.match(error.message, /外部コマンドの照会失敗/);
-        return true;
-      },
-    );
-  } finally {
-    paneLaunch._setWeztermListPanes(null);
-  }
+  assert.throws(
+    () => paneLaunch.isPaneAlive('10', undefined, connection),
+    (error) => {
+      assert.notEqual(error.code, paneLaunch.WEZTERM_CONNECTION_GONE_CODE);
+      assert.match(error.message, /外部コマンドの照会失敗/);
+      return true;
+    },
+  );
 });
 
 test('killPane: paneIdを指定して正常にkillできる', () => {
-  let capturedArgs = null;
-  paneLaunch._setWeztermKillPane((args) => {
-    capturedArgs = args;
-    return { status: 0, stdout: '', stderr: '' };
+  installWeztermCommandPorts({
+    killPane: [weztermCall(
+      ['cli', '--no-auto-start', 'kill-pane', '--pane-id', '42'],
+      { status: 0, stdout: '', stderr: '' },
+    )],
   });
 
   const result = paneLaunch.killPane('42');
   assert.equal(result.ok, true);
   assert.equal(result.status, 0);
-  assert.deepEqual(capturedArgs, ['cli', '--no-auto-start', 'kill-pane', '--pane-id', '42']);
 });
 
 test('killPane: 空のpaneIdはエラー結果を返す', () => {
@@ -282,11 +331,12 @@ test('killPane: 空のpaneIdはエラー結果を返す', () => {
 });
 
 test('killPane: kill失敗時はステータスとstderrを返す', () => {
-  paneLaunch._setWeztermKillPane(() => ({
-    status: 1,
-    stdout: '',
-    stderr: 'pane not found',
-  }));
+  installWeztermCommandPorts({
+    killPane: [weztermCall(
+      ['cli', '--no-auto-start', 'kill-pane', '--pane-id', '99'],
+      { status: 1, stdout: '', stderr: 'pane not found' },
+    )],
+  });
 
   const result = paneLaunch.killPane('99');
   assert.equal(result.ok, false);
@@ -355,6 +405,106 @@ test('launchAgentInWindow / launchInSplitPane: GH_MAESTRO_DISABLE_REAL_SPAWN で
     else delete process.env.NODE_TEST_CONTEXT;
     if (savedDisabled !== undefined) process.env.GH_MAESTRO_DISABLE_REAL_SPAWN = savedDisabled;
     else delete process.env.GH_MAESTRO_DISABLE_REAL_SPAWN;
+  }
+});
+
+test('WezTerm差し替え口: plain Function は拒否し null は本番実装へ戻す', () => {
+  const setters = [
+    '_setWeztermSpawnWindow',
+    '_setWeztermSplitPane',
+    '_setWeztermListPanes',
+    '_setWeztermKillPane',
+  ];
+  for (const setter of setters) {
+    assert.throws(
+      () => paneLaunch[setter](() => ({ status: 0, stdout: '', stderr: '' })),
+      /command port または null/,
+    );
+    paneLaunch[setter](null);
+  }
+});
+
+test('WezTerm command port: argv または環境が期待と異なる呼び出しを拒否する', () => {
+  const expectedArgs = ['cli', '--no-auto-start', 'list', '--format', 'json'];
+  const argvPort = paneLaunch._createWeztermCommandPort('list-panes', [weztermCall(
+    expectedArgs,
+    { status: 0, stdout: '[]', stderr: '' },
+  )]);
+  assert.throws(
+    () => argvPort.invoke(['cli', '--no-auto-start', 'list'], {}),
+    /呼び出し引数が期待と異なります: argv/,
+  );
+
+  const port = paneLaunch._createWeztermCommandPort('list-panes', [weztermCall(
+    expectedArgs,
+    { status: 0, stdout: '[]', stderr: '' },
+    { env: { WEZTERM_UNIX_SOCKET: 'expected' } },
+  )]);
+
+  paneLaunch._setWeztermListPanes(port);
+  assert.throws(() => paneLaunch.getAlivePaneIds(), /呼び出し引数が期待と異なります: environment/);
+  paneLaunch._setWeztermListPanes(null);
+});
+
+test('WezTerm command port: 空の期待呼び出しは外部コマンドなしを許可する', () => {
+  installWeztermCommandPorts({ listPanes: [] });
+  assert.equal(paneLaunch.isPaneAlive('', undefined), false);
+});
+
+test('WezTerm command port: 期待より多い呼び出しを拒否する', () => {
+  const port = paneLaunch._createWeztermCommandPort('list-panes', []);
+  paneLaunch._setWeztermListPanes(port);
+  assert.throws(() => paneLaunch.getAlivePaneIds(), /宣言されていない呼び出し/);
+  paneLaunch._setWeztermListPanes(null);
+});
+
+test('WezTerm command port: 未消費の期待呼び出しを完了確認で拒否する', () => {
+  const port = paneLaunch._createWeztermCommandPort('list-panes', [weztermCall(
+    ['cli', '--no-auto-start', 'list', '--format', 'json'],
+    { status: 0, stdout: '[]', stderr: '' },
+  )]);
+  assert.throws(() => port.assertComplete(), /期待呼び出しが未消費/);
+});
+
+test('WezTerm command recorder: 未知の期待キーを登録前に拒否する', () => {
+  assert.throws(
+    () => installWeztermCommandPorts({ listPane: [] }),
+    /未知の WezTerm command port 期待キー: listPane/,
+  );
+});
+
+test('WezTerm command recorder: 完了確認を明示的に呼ばなくても afterEach が未消費期待を拒否する', () => {
+  const fixtureDir = tempDirScope.mkdtemp('ghm-wezterm-recorder-');
+  const fixturePath = path.join(fixtureDir, 'after-each.test.js');
+  const helperPath = path.join(__dirname, '_wezterm-command-recorder.js');
+  const fixture = [
+    "'use strict';",
+    "const { test } = require('node:test');",
+    `const { installWeztermCommandPorts, weztermCall } = require(${JSON.stringify(helperPath)});`,
+    "test('未消費の期待呼び出しを残したテスト', () => {",
+    '  installWeztermCommandPorts({',
+    '    listPanes: [weztermCall(',
+    "      ['cli', '--no-auto-start', 'list', '--format', 'json'],",
+    "      { status: 0, stdout: '[]', stderr: '' },",
+    '    )],',
+    '  });',
+    '});',
+  ].join('\n');
+  fs.writeFileSync(fixturePath, fixture, 'utf8');
+
+  try {
+    const childEnv = { ...process.env };
+    delete childEnv.NODE_TEST_CONTEXT;
+    const result = spawnSync(process.execPath, ['--test', fixturePath], {
+      cwd: path.join(__dirname, '..'),
+      env: childEnv,
+      encoding: 'utf8',
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.notEqual(result.status, 0, output);
+    assert.match(output, /期待呼び出しが未消費/);
+  } finally {
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
   }
 });
 

@@ -30,6 +30,7 @@ Output (stdout):
   status: GREEN / RED / STALE / NONE
   provenance: test-runner / unknown / none
   scope: full / partial / aggregate / unknown / none
+  lint: complete/pass, complete/findings (with findingCount), unavailable, or missing
   aggregate scope includes layers, allLayersPresent, and allLayersComplete
   exit 0 = 成功、exit 1 = 引数・GitHubアクセス・応答解釈のエラー`;
 
@@ -132,7 +133,7 @@ function parsePrViewResponse(stdout) {
  * @param {object} [deps] テスト用の依存注入
  * @param {function} [deps.ghRepoViewFn]
  * @param {function} [deps.ghPrViewFn]
- * @returns {{ ok: true, status: string, declaredSha?: string, headSha?: string, fail?: number, pass?: number, provenance:string, scope:string, layers?: object, allLayersPresent?: boolean, allLayersComplete?: boolean } | { ok: false, error: string }}
+ * @returns {{ ok: true, status: string, declaredSha?: string, headSha?: string, fail?: number, pass?: number, provenance:string, scope:string, lint: object, layers?: object, allLayersPresent?: boolean, allLayersComplete?: boolean } | { ok: false, error: string }}
  */
 function queryTestStatus({ pr, repo, workspace }, deps = {}) {
   const {
@@ -214,6 +215,7 @@ function main(argv, deps = {}) {
     status: result.status,
     provenance: result.provenance,
     scope: result.scope,
+    lint: result.lint,
     ...(result.declaredSha !== undefined ? { declaredSha: result.declaredSha } : {}),
     ...(result.headSha !== undefined ? { headSha: result.headSha } : {}),
     ...(result.fail !== undefined ? { fail: result.fail } : {}),

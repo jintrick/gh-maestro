@@ -14,6 +14,7 @@ const {
   cleanupLegacyQueue,
 } = require('../scripts/reset-session');
 const readStateLib = require('../scripts/shared/read-state');
+const { installWeztermCommandPorts, weztermCall } = require('./_wezterm-command-recorder');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-reset-'));
@@ -244,16 +245,16 @@ test('reset-session: killPane に失敗した場合は status-pane.json を削�
     assert.ok(loadStatusPane(workspace) !== null);
 
     // list は生存中と判定し、killPane は失敗するモックを設定
-    paneLaunch._setWeztermListPanes(() => ({
-      status: 0,
-      stdout: JSON.stringify([{ pane_id: '8888' }]),
-      stderr: '',
-    }));
-    paneLaunch._setWeztermKillPane(() => ({
-      status: 1,
-      stdout: '',
-      stderr: 'kill failed',
-    }));
+    installWeztermCommandPorts({
+      listPanes: [weztermCall(
+        ['cli', '--no-auto-start', 'list', '--format', 'json'],
+        { status: 0, stdout: JSON.stringify([{ pane_id: '8888' }]), stderr: '' },
+      )],
+      killPane: [weztermCall(
+        ['cli', '--no-auto-start', 'kill-pane', '--pane-id', '8888'],
+        { status: 1, stdout: '', stderr: 'kill failed' },
+      )],
+    });
 
     try {
       const alivePanes = paneLaunch.getAlivePaneIds();

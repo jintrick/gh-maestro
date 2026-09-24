@@ -120,7 +120,12 @@ function writeTestLayerConfig(workspace, layers = {
   fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ test: { layers } }), 'utf8');
 }
 
-function writeAggregateResult(workspace, { fail = 0, contentHash = CONTENT_HASH } = {}) {
+function writeAggregateResult(workspace, {
+  fail = 0,
+  contentHash = CONTENT_HASH,
+  lintOutcome = 'pass',
+  lintFindingCount = 0,
+} = {}) {
   writeTestResultLayer(workspace, {
         layer: 'full',
         scope: 'full',
@@ -138,8 +143,8 @@ function writeAggregateResult(workspace, { fail = 0, contentHash = CONTENT_HASH 
         testedContentHash: contentHash,
       }, {
       status: 'complete',
-      outcome: 'pass',
-      findingCount: 0,
+       outcome: lintOutcome,
+       findingCount: lintFindingCount,
       command: 'npm run lint',
       recordedAt: '2026-08-29T00:00:00.000Z',
       testedHead: SHA,
@@ -643,6 +648,20 @@ test('終了コード: テストが赤（fail>0）でも exit 0 で完走し、�
   assert.match(createCall.args[3], /結果[\s\S]*full\*\*: fail \(fail: 3, pass: 9\)/);
   assert.match(createCall.args[3], /実行元.*test-runner/);
   assert.match(createCall.args[3], /実行範囲.*aggregate/);
+});
+
+test('終了コード: lint findings があっても push と申告を完了する', () => {
+  const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
+  const ws = tempWorkspace();
+  writeAggregateResult(ws, { lintOutcome: 'findings', lintFindingCount: 2 });
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: ws, env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+  }, { commitContentHashFn: () => CONTENT_HASH }));
+
+  assert.equal(result.exitCode, 0, 'lint findings は push/申告の停止条件ではない');
+  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
+  assert.ok(createCall, '申告コメント投稿が呼ばれる');
+  assert.match(createCall.args[3], /\*\*lint\*\*: findings \(findings: 2\)/);
 });
 
 // ── NODE_TEST_CONTEXT ガード（Issue #202 の構造的対策） ────────────────────────

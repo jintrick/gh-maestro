@@ -98,7 +98,8 @@ function fullDeclarationBody(commit = 'a1b2c3d4e5', fail = 0, pass = 1826, scope
 - **結果**: ${fail === 0 ? 'pass' : 'fail'} (fail: ${fail}, pass: ${pass})
 - **実行件数**: \`${fail + pass}\`
 - **実行元**: \`test-runner\`
-- **実行範囲**: \`${scope}\``;
+- **実行範囲**: \`${scope}\`
+- **lint**: pass (findings: 0)`;
 }
 
 function aggregateDeclarationBody(commit = 'a1b2c3d4e5f6') {
@@ -108,6 +109,7 @@ function aggregateDeclarationBody(commit = 'a1b2c3d4e5f6') {
 - **結果**: pass
 - **実行元**: \`test-runner\`
 - **実行範囲**: \`aggregate\`
+- **lint**: pass (findings: 0)
 - **層別結果**:
   - **full**: pass (fail: 0, pass: 1826), tests: 1826, executor: \`test-runner\`, scope: \`full\`
   - **slow**: pass (fail: 0, pass: 10), tests: 10, executor: \`poll-pr\`, scope: \`partial\`, 実行記録: \`C:/runtime/slow.log\``;
@@ -128,11 +130,11 @@ test('formatTestStatusEvent: provenance/scope をTEST_STATUS通知へ含める',
       provenance: 'test-runner',
       scope: 'full',
     }),
-    'TEST_STATUS:GREEN:a1b2c3d:a1b2c3d4e5f6:test-runner:full',
+    'TEST_STATUS:GREEN:a1b2c3d:a1b2c3d4e5f6:test-runner:full:lint=missing',
   );
   assert.equal(
     formatTestStatusEvent({ status: 'NONE', provenance: 'unknown', scope: 'unknown' }),
-    'TEST_STATUS:NONE:none:none:unknown:unknown',
+    'TEST_STATUS:NONE:none:none:unknown:unknown:lint=missing',
   );
   const aggregateEvaluation = evaluateTestDeclaration(
     extractTestDeclaration(aggregateDeclarationBody()),
@@ -140,8 +142,60 @@ test('formatTestStatusEvent: provenance/scope をTEST_STATUS通知へ含める',
   );
   assert.equal(
     formatTestStatusEvent(aggregateEvaluation),
-    'TEST_STATUS:GREEN:a1b2c3d4e5f6:a1b2c3d4e5f6:test-runner:aggregate',
+    'TEST_STATUS:GREEN:a1b2c3d4e5f6:a1b2c3d4e5f6:test-runner:aggregate:lint=complete/pass',
   );
+});
+
+test('formatTestStatusEvent: lintの4状態を既存TEST_STATUSへ含める', () => {
+  const cases = [
+    [{ status: 'complete', outcome: 'pass', findingCount: 0 }, 'lint=complete/pass'],
+    [{ status: 'complete', outcome: 'findings', findingCount: 3 }, 'lint=complete/findings(3)'],
+    [{ status: 'unavailable', reason: 'lint-output-invalid' }, 'lint=unavailable/lint-output-invalid'],
+    [{ status: 'missing', reason: 'lint-result-missing' }, 'lint=missing'],
+  ];
+  for (const [lint, token] of cases) {
+    assert.match(formatTestStatusEvent({
+      status: 'GREEN',
+      declaredSha: 'a1b2c3d',
+      headSha: 'a1b2c3d4e5f6',
+      provenance: 'test-runner',
+      scope: 'aggregate',
+      lint,
+    }), new RegExp(`${token.replace(/[()]/g, '\\$&')}$`));
+  }
+});
+
+test('extractTestDeclaration: lintの4状態を共有申告解析へ保持する', () => {
+  const lines = [
+    ['pass (findings: 0)', { status: 'complete', outcome: 'pass', findingCount: 0 }],
+    ['findings (findings: 4)', { status: 'complete', outcome: 'findings', findingCount: 4 }],
+    ['unavailable, reason: eslint-not-found', { status: 'unavailable', reason: 'eslint-not-found' }],
+    ['missing, reason: lint-result-missing', { status: 'missing', reason: 'lint-result-missing' }],
+  ];
+  for (const [line, expected] of lines) {
+    const declaration = extractTestDeclaration(`${fullDeclarationBody().replace(/- \*\*lint\*\*:.*$/, `- **lint**: ${line}`)}`);
+    assert.deepEqual(declaration.lint, expected);
+  }
+});
+
+test('extractTestDeclaration: findings件数の欠落・不正・安全整数超過を0へ丸めない', () => {
+  for (const lintLine of [
+    'findings',
+    'findings (findings: invalid)',
+    'findings (findings: 9007199254740992)',
+  ]) {
+    const declaration = extractTestDeclaration(
+      fullDeclarationBody().replace(/- \*\*lint\*\*:.*$/, `- **lint**: ${lintLine}`),
+    );
+    assert.deepEqual(declaration.lint, {
+      status: 'complete',
+      outcome: 'findings',
+    });
+    assert.equal(
+      formatTestStatusEvent(evaluateTestDeclaration(declaration, 'a1b2c3d4e5')),
+      'TEST_STATUS:GREEN:a1b2c3d4e5:a1b2c3d4e5:test-runner:full:lint=complete/findings(unknown)',
+    );
+  }
 });
 
 test('poll-reviews: aggregate通知と共有評価は層別結果を保持する', () => {
@@ -167,6 +221,7 @@ test('extractTestDeclaration: v2 から commit, fail, pass, provenance, scope �
     tests: 1826,
     provenance: 'test-runner',
     scope: 'full',
+    lint: { status: 'complete', outcome: 'pass', findingCount: 0 },
   });
 });
 
@@ -182,6 +237,7 @@ test('extractTestDeclaration: v1 の値は読めても実行範囲は unknown', 
     pass: undefined,
     provenance: 'unknown',
     scope: 'unknown',
+    lint: { status: 'missing', reason: 'lint-result-missing' },
   });
 });
 
@@ -196,6 +252,7 @@ test('extractTestDeclaration: provenance/scope が欠落した v2 は unknown �
     scope: 'unknown',
     fail: undefined,
     pass: undefined,
+    lint: { status: 'missing', reason: 'lint-result-missing' },
   });
 });
 
@@ -206,6 +263,7 @@ test('evaluateTestDeclaration: 申告なし → NONE と none metadata', () => {
     headSha: 'a1b2c3d4e5',
     provenance: 'none',
     scope: 'none',
+    lint: { status: 'missing', reason: 'lint-result-missing' },
   });
 });
 
@@ -219,6 +277,7 @@ test('evaluateTestDeclaration: headSha が空の場合は STALE ではなく NON
     pass: 100,
     provenance: 'test-runner',
     scope: 'full',
+    lint: { status: 'missing', reason: 'lint-result-missing' },
   });
 });
 
@@ -420,7 +479,7 @@ test('runPollReviews: noReviewEvents=true のとき inline comments と formal r
   assert.ok(calledApis.some(cmd => cmd.includes('pr view 100') && cmd.includes('--json comments')));
 
   // TEST_STATUS が出力されていること
-  assert.ok(stdoutLines.some(line => line.includes('TEST_STATUS:GREEN:a1b2c3d4e5:a1b2c3d4e5:test-runner:full')));
+  assert.ok(stdoutLines.some(line => line.includes('TEST_STATUS:GREEN:a1b2c3d4e5:a1b2c3d4e5:test-runner:full:lint=complete/pass')));
   // REVIEW_COMMENT や PR_REVIEW が出力されていないこと
   assert.ok(!stdoutLines.some(line => line.includes('REVIEW_COMMENT')));
   assert.ok(!stdoutLines.some(line => line.includes('PR_REVIEW')));
