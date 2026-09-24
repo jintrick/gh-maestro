@@ -105,10 +105,15 @@ function isKnownTestResult(testResult) {
 }
 
 function unknownTestResult(reason) {
+  const normalizedReason = typeof reason === 'string' && reason ? reason : 'unavailable';
+  const lint = normalizedReason === 'missing' || normalizedReason === 'lint-result-missing'
+    ? { status: 'missing', reason: 'lint-result-missing' }
+    : { status: 'unavailable', reason: normalizedReason };
   return {
     provenance: 'unknown',
     scope: 'unknown',
-    reason: typeof reason === 'string' && reason ? reason : 'unavailable',
+    reason: normalizedReason,
+    lint,
   };
 }
 
@@ -120,9 +125,10 @@ function aggregateLayerStatus(layer) {
 }
 
 function aggregateLintStatus(lint) {
-  if (!lint || lint.status !== 'complete') return 'unknown';
+  if (!lint || lint.status === 'missing') return 'missing';
+  if (lint.status !== 'complete') return 'unavailable';
   if (lint.outcome === 'pass' || lint.outcome === 'findings') return lint.outcome;
-  return 'unknown';
+  return 'unavailable';
 }
 
 function aggregateResultForCommit(result, commitSha, commitContentHash) {
@@ -143,7 +149,7 @@ function aggregateResultForCommit(result, commitSha, commitContentHash) {
     && lint.testedContentHash === commitContentHash;
   const checkedLint = lint
     ? (lintContentMatches ? lint : { ...lint, status: 'unavailable', reason: 'content-mismatch' })
-    : { status: 'unavailable', reason: 'lint-result-missing' };
+    : { status: 'missing', reason: 'lint-result-missing' };
   const statuses = Object.values(layers).map(aggregateLayerStatus);
   const outcome = statuses.includes('fail') ? 'fail'
     : (statuses.length > 0 && statuses.every(status => status === 'pass') ? 'pass' : undefined);
@@ -243,7 +249,7 @@ function buildCommentBody({ commit, testResult }) {
       `- **結果**: ${outcome}`,
       '- **実行元**: `test-runner`',
       '- **実行範囲**: `aggregate`',
-      ...(testResult.lint ? [`- **lint**: ${aggregateLintStatus(testResult.lint)}${Number.isSafeInteger(testResult.lint.findingCount) ? ` (findings: ${testResult.lint.findingCount})` : ''}${testResult.lint.reason ? `, reason: ${testResult.lint.reason}` : ''}`] : []),
+      `- **lint**: ${aggregateLintStatus(testResult.lint)}${Number.isSafeInteger(testResult.lint && testResult.lint.findingCount) ? ` (findings: ${testResult.lint.findingCount})` : ''}${testResult.lint && testResult.lint.reason ? `, reason: ${testResult.lint.reason}` : ''}`,
       '- **層別結果**:',
     ];
     for (const [name, layer] of layers) {
@@ -282,10 +288,12 @@ function buildCommentBody({ commit, testResult }) {
     }
     lines.push(`- **実行元**: \`${testResult.provenance}\``);
     lines.push(`- **実行範囲**: \`${testResult.scope}\``);
+    lines.push(`- **lint**: ${aggregateLintStatus(testResult.lint)}${Number.isSafeInteger(testResult.lint && testResult.lint.findingCount) ? ` (findings: ${testResult.lint.findingCount})` : ''}${testResult.lint && testResult.lint.reason ? `, reason: ${testResult.lint.reason}` : ''}`);
   } else {
     lines.push('- **結果**: unknown');
     lines.push('- **実行元**: `unknown`');
     lines.push('- **実行範囲**: `unknown`');
+    lines.push(`- **lint**: ${aggregateLintStatus(testResult && testResult.lint)}${testResult && testResult.lint && testResult.lint.reason ? `, reason: ${testResult.lint.reason}` : ''}`);
     lines.push(`- **実行記録**: unavailable (${publicTestReason(testResult && testResult.reason)})`);
   }
 

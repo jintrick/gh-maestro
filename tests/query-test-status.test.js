@@ -28,7 +28,8 @@ function fullDeclarationBody(commit = 'a1b2c3d', fail = 0, pass = 1826, scope = 
 - **結果**: ${fail === 0 ? 'pass' : 'fail'} (fail: ${fail}, pass: ${pass})
 - **実行件数**: \`${fail + pass}\`
 - **実行元**: \`test-runner\`
-- **実行範囲**: \`${scope}\``;
+- **実行範囲**: \`${scope}\`
+- **lint**: pass (findings: 0)`;
 }
 
 function aggregateDeclarationBody(commit = SHA, includeSlow = true) {
@@ -40,6 +41,7 @@ function aggregateDeclarationBody(commit = SHA, includeSlow = true) {
 - **結果**: pass
 - **実行元**: \`test-runner\`
 - **実行範囲**: \`aggregate\`
+- **lint**: pass (findings: 0)
 - **層別結果**:
   - **full**: pass (fail: 0, pass: 1826), tests: 1826, executor: \`test-runner\`, scope: \`full\`${slow}`;
 }
@@ -103,6 +105,7 @@ test('共有ルール: v2 full の provenance/scope と件数を抽出する', (
     tests: 1826,
     provenance: 'test-runner',
     scope: 'full',
+    lint: { status: 'complete', outcome: 'pass', findingCount: 0 },
   });
   assert.deepEqual(evaluateTestDeclaration(declaration, SHA), {
     status: 'GREEN',
@@ -112,6 +115,7 @@ test('共有ルール: v2 full の provenance/scope と件数を抽出する', (
     pass: 1826,
     provenance: 'test-runner',
     scope: 'full',
+    lint: { status: 'complete', outcome: 'pass', findingCount: 0 },
   });
 
   const outcomeOnly = extractTestDeclaration(outcomeOnlyDeclarationBody());
@@ -121,6 +125,7 @@ test('共有ルール: v2 full の provenance/scope と件数を抽出する', (
     outcome: 'pass',
     provenance: 'test-runner',
     scope: 'full',
+    lint: { status: 'missing', reason: 'lint-result-missing' },
   });
   assert.deepEqual(evaluateTestDeclaration(outcomeOnly, SHA), {
     status: 'GREEN',
@@ -128,6 +133,7 @@ test('共有ルール: v2 full の provenance/scope と件数を抽出する', (
     headSha: SHA,
     provenance: 'test-runner',
     scope: 'full',
+    lint: { status: 'missing', reason: 'lint-result-missing' },
   });
 });
 
@@ -151,6 +157,7 @@ test('共有ルール: aggregate は層別結果と全層充足性を抽出す�
     },
     allLayersPresent: true,
     allLayersComplete: true,
+    lint: { status: 'complete', outcome: 'pass', findingCount: 0 },
   });
   assert.deepEqual(evaluateTestDeclaration(declaration, SHA), {
     status: 'GREEN',
@@ -161,6 +168,7 @@ test('共有ルール: aggregate は層別結果と全層充足性を抽出す�
     layers: declaration.layers,
     allLayersPresent: true,
     allLayersComplete: true,
+    lint: { status: 'complete', outcome: 'pass', findingCount: 0 },
   });
 });
 
@@ -191,6 +199,31 @@ test('queryTestStatus: aggregate はfull/slowの層別結果と不足層を返�
   assert.equal(partial.allLayersComplete, false);
 });
 
+test('queryTestStatus: lintの4状態を既存の照会JSONへ含める', () => {
+  const cases = [
+    ['pass (findings: 0)', { status: 'complete', outcome: 'pass', findingCount: 0 }],
+    ['findings (findings: 2)', { status: 'complete', outcome: 'findings', findingCount: 2 }],
+    ['unavailable, reason: lint-output-invalid', { status: 'unavailable', reason: 'lint-output-invalid' }],
+    ['missing, reason: lint-result-missing', { status: 'missing', reason: 'lint-result-missing' }],
+  ];
+  for (const [line, expected] of cases) {
+    const body = fullDeclarationBody().replace(/- \*\*lint\*\*:.*$/, `- **lint**: ${line}`);
+    const result = queryTestStatus(
+      { pr: '42', repo: 'owner/repo' },
+      { ghPrViewFn: () => prView([prComment(body)]) },
+    );
+    assert.deepEqual(result.lint, expected);
+    assert.equal(result.status, 'GREEN');
+
+    const cliResult = main(
+      ['--pr', '42', '--repo', 'owner/repo'],
+      { ghPrViewFn: () => prView([prComment(body)]) },
+    );
+    assert.equal(cliResult.exitCode, 0);
+    assert.deepEqual(JSON.parse(cliResult.stdout).lint, expected);
+  }
+});
+
 test('共有ルール: v1 は値を読めても provenance/scope が unknown になる', () => {
   const declaration = extractTestDeclaration(legacyDeclarationBody('a1b2c3d', 0, 1826));
   assert.deepEqual(declaration, {
@@ -200,6 +233,7 @@ test('共有ルール: v1 は値を読めても provenance/scope が unknown に
     pass: 1826,
     provenance: 'unknown',
     scope: 'unknown',
+    lint: { status: 'missing', reason: 'lint-result-missing' },
   });
   const evaluation = evaluateTestDeclaration(declaration, SHA);
   assert.equal(evaluation.status, 'GREEN');
@@ -235,6 +269,7 @@ test('queryTestStatus: v2 full のSHA一致・fail 0 → GREEN と full を返�
     pass: 1826,
     provenance: 'test-runner',
     scope: 'full',
+    lint: { status: 'complete', outcome: 'pass', findingCount: 0 },
   });
 });
 
@@ -253,6 +288,7 @@ test('queryTestStatus: v2 partial のfail > 0 → RED と partial を返す', ()
     pass: 10,
     provenance: 'test-runner',
     scope: 'partial',
+    lint: { status: 'complete', outcome: 'pass', findingCount: 0 },
   });
 
   const outcomeOnly = queryTestStatus(
@@ -266,6 +302,7 @@ test('queryTestStatus: v2 partial のfail > 0 → RED と partial を返す', ()
     headSha: SHA,
     provenance: 'test-runner',
     scope: 'partial',
+    lint: { status: 'missing', reason: 'lint-result-missing' },
   });
 
   const exitCodeAuthoritative = queryTestStatus(
@@ -299,6 +336,7 @@ test('queryTestStatus: v1 と不完全なv2を full と取り違えず unknown �
     headSha: SHA,
     provenance: 'unknown',
     scope: 'unknown',
+    lint: { status: 'missing', reason: 'lint-result-missing' },
   });
 });
 
@@ -313,6 +351,7 @@ test('queryTestStatus: 申告なし → NONE と none metadata', () => {
     headSha: SHA,
     provenance: 'none',
     scope: 'none',
+    lint: { status: 'missing', reason: 'lint-result-missing' },
   });
 });
 
@@ -384,6 +423,7 @@ test('main: 成功時JSONに provenance/scope を含め、1行で返す', () => 
     status: 'GREEN',
     provenance: 'test-runner',
     scope: 'full',
+    lint: { status: 'complete', outcome: 'pass', findingCount: 0 },
     declaredSha: 'a1b2c3d',
     headSha: SHA,
     fail: 0,

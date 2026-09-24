@@ -47,7 +47,10 @@ async function main(argv = process.argv.slice(2)) {
   if (options.help) return { exitCode: 0, stdout: USAGE, stderr: '' };
 
   try {
-    const eslint = new ESLint({ cwd: process.cwd() });
+    // worktree は共有workspaceの配下にあり、親workspaceの ignorePatterns が
+    // junction の node_modules を含む形で適用されることがある。対象は固定した
+    // scripts/tests のglobだけなので、ここでは対象列挙を無視設定から切り離す。
+    const eslint = new ESLint({ cwd: process.cwd(), ignore: false });
     const results = await eslint.lintFiles([...TARGETS]);
     const formatter = await eslint.loadFormatter(options.format);
     return { exitCode: 0, stdout: formatter.format(results), stderr: '' };

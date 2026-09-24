@@ -17,6 +17,13 @@ const PARTIAL_SCOPE = 'partial';
 const AGGREGATE_SCOPE = 'aggregate';
 const EXPECTED_AGGREGATE_LAYERS = Object.freeze(['full', 'slow']);
 
+function missingLintResult(reason = 'lint-result-missing') {
+  return {
+    status: 'missing',
+    reason: typeof reason === 'string' && reason.trim() ? reason.trim() : 'lint-result-missing',
+  };
+}
+
 function matchCommit(body) {
   const match = body.match(/-\s+\*\*対象コミット\*\*:\s*`([0-9a-fA-F]{7,40})`/);
   return match ? match[1] : null;
@@ -41,6 +48,40 @@ function matchBacktickField(body, label) {
 function matchInlineBacktickField(body, label) {
   const match = body.match(new RegExp(`${label}\\s*:\\s*` + '`([^`]*)`'));
   return match ? match[1].trim() : undefined;
+}
+
+function parseLintDeclaration(body) {
+  const line = body.split(/\r?\n/).find(line => /^\s*-\s+\*\*lint\*\*:/i.test(line));
+  if (!line) return missingLintResult();
+
+  const value = line.replace(/^\s*-\s+\*\*lint\*\*:\s*/i, '').trim();
+  const statusMatch = value.match(/^(pass|findings|unavailable|missing|unknown)\b/i);
+  const status = statusMatch ? statusMatch[1].toLowerCase() : 'unavailable';
+  const reasonMatch = value.match(/,\s*reason\s*:\s*(.+)$/i);
+  const reason = reasonMatch ? reasonMatch[1].trim() : undefined;
+
+  if (status === 'pass') {
+    const findingCount = matchCount(value, 'findings');
+    return {
+      status: 'complete',
+      outcome: 'pass',
+      findingCount: findingCount === undefined ? 0 : findingCount,
+    };
+  }
+  if (status === 'findings') {
+    return {
+      status: 'complete',
+      outcome: 'findings',
+      findingCount: matchCount(value, 'findings') || 0,
+    };
+  }
+  if (status === 'missing' || (status === 'unknown' && reason === 'lint-result-missing')) {
+    return missingLintResult(reason || 'lint-result-missing');
+  }
+  return {
+    status: 'unavailable',
+    ...(reason ? { reason } : { reason: 'lint-result-unavailable' }),
+  };
 }
 
 function parseAggregateLayerLine(line, provenance) {
@@ -113,6 +154,7 @@ function extractV2Declaration(body) {
   const tests = matchCount(body, '実行件数');
   const resultLabel = resultMatch[1].toLowerCase();
   const aggregate = scope === AGGREGATE_SCOPE ? parseAggregateLayers(body, provenance) : null;
+  const lint = parseLintDeclaration(body);
 
   const hasCounts = fail !== undefined && pass !== undefined;
   const hasPartialCounts = (fail === undefined) !== (pass === undefined);
@@ -132,6 +174,7 @@ function extractV2Declaration(body) {
       commit,
       provenance: 'unknown',
       scope: 'unknown',
+      lint,
       ...(aggregate ? aggregate : {}),
       fail: undefined,
       pass: undefined,
@@ -143,6 +186,7 @@ function extractV2Declaration(body) {
     commit,
     provenance,
     scope,
+    lint,
     outcome: resultLabel,
     ...(hasCounts ? { fail, pass } : {}),
     ...(tests !== undefined ? { tests } : {}),
@@ -162,6 +206,7 @@ function extractV1Declaration(body) {
     pass: matchCount(body, 'pass'),
     provenance: 'unknown',
     scope: 'unknown',
+    lint: parseLintDeclaration(body),
   };
 }
 
@@ -170,7 +215,7 @@ function extractV1Declaration(body) {
  * v1 は値を読めても実行記録を持たないため provenance/scope を unknown とする。
  *
  * @param {string} body コメント本文
- * @returns {{version:number, commit:string, outcome?:'pass'|'fail', fail?:number, pass?:number, tests?:number, provenance:string, scope:string, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}|null}
+ * @returns {{version:number, commit:string, outcome?:'pass'|'fail', fail?:number, pass?:number, tests?:number, provenance:string, scope:string, lint?:object, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}|null}
  */
 function extractTestDeclaration(body) {
   if (!hasTestDeclarationMarker(body)) return null;
@@ -207,14 +252,21 @@ function declarationLayers(declaration) {
   };
 }
 
+function declarationLint(declaration) {
+  if (!declaration || !declaration.lint || typeof declaration.lint !== 'object') {
+    return { lint: missingLintResult() };
+  }
+  return { lint: declaration.lint };
+}
+
 /**
  * テスト申告の事実とPRのheadShaを突き合わせてステータスを判定する純粋関数。
  * provenance/scope はステータスとは独立した事実として常に返す。したがって、旧 v1 の
  * fail=0 は GREEN でも scope=unknown となり、v2 full の GREEN と区別できる。
  *
- * @param {{commit:string, outcome?:'pass'|'fail', fail?:number, pass?:number, provenance?:string, scope?:string, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}|null} declaration
+ * @param {{commit:string, outcome?:'pass'|'fail', fail?:number, pass?:number, provenance?:string, scope?:string, lint?:object, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}|null} declaration
  * @param {string} headSha PRの現在のHEADコミットSHA
- * @returns {{status:'GREEN'|'RED'|'STALE'|'NONE', declaredSha?:string, headSha?:string, fail?:number, pass?:number, provenance:string, scope:string, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}}
+ * @returns {{status:'GREEN'|'RED'|'STALE'|'NONE', declaredSha?:string, headSha?:string, fail?:number, pass?:number, provenance:string, scope:string, lint:object, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}}
  */
 function evaluateTestDeclaration(declaration, headSha) {
   const cleanHead = cleanHeadSha(headSha);
@@ -224,6 +276,7 @@ function evaluateTestDeclaration(declaration, headSha) {
       headSha: cleanHead || undefined,
       provenance: 'none',
       scope: 'none',
+      lint: missingLintResult(),
     };
   }
 
@@ -234,6 +287,7 @@ function evaluateTestDeclaration(declaration, headSha) {
     headSha: cleanHead || undefined,
     ...counts,
     ...metadata,
+    ...declarationLint(declaration),
     ...declarationLayers(declaration),
   };
 
