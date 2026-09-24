@@ -36,6 +36,12 @@ function weztermCall(args, result, options = {}) {
  * @returns {void}
  */
 function installWeztermCommandPorts(expectations = {}) {
+  const unknownNames = Object.keys(expectations)
+    .filter(name => !Object.prototype.hasOwnProperty.call(SETTERS, name));
+  if (unknownNames.length > 0) {
+    throw new Error(`未知の WezTerm command port 期待キー: ${unknownNames.join(', ')}`);
+  }
+
   const registrations = [];
   for (const [name, [setterName, operation]] of Object.entries(SETTERS)) {
     if (!Object.prototype.hasOwnProperty.call(expectations, name)) continue;

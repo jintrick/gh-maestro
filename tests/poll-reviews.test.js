@@ -178,6 +178,26 @@ test('extractTestDeclaration: lintの4状態を共有申告解析へ保持する
   }
 });
 
+test('extractTestDeclaration: findings件数の欠落・不正・安全整数超過を0へ丸めない', () => {
+  for (const lintLine of [
+    'findings',
+    'findings (findings: invalid)',
+    'findings (findings: 9007199254740992)',
+  ]) {
+    const declaration = extractTestDeclaration(
+      fullDeclarationBody().replace(/- \*\*lint\*\*:.*$/, `- **lint**: ${lintLine}`),
+    );
+    assert.deepEqual(declaration.lint, {
+      status: 'complete',
+      outcome: 'findings',
+    });
+    assert.equal(
+      formatTestStatusEvent(evaluateTestDeclaration(declaration, 'a1b2c3d4e5')),
+      'TEST_STATUS:GREEN:a1b2c3d4e5:a1b2c3d4e5:test-runner:full:lint=complete/findings(unknown)',
+    );
+  }
+});
+
 test('poll-reviews: aggregate通知と共有評価は層別結果を保持する', () => {
   const evaluation = evaluateTestDeclaration(
     extractTestDeclaration(aggregateDeclarationBody()),

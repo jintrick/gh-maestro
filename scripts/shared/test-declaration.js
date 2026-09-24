@@ -69,10 +69,11 @@ function parseLintDeclaration(body) {
     };
   }
   if (status === 'findings') {
+    const findingCount = matchCount(value, 'findings');
     return {
       status: 'complete',
       outcome: 'findings',
-      findingCount: matchCount(value, 'findings') || 0,
+      ...(findingCount === undefined ? {} : { findingCount }),
     };
   }
   if (status === 'missing' || (status === 'unknown' && reason === 'lint-result-missing')) {

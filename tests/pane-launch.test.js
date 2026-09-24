@@ -466,6 +466,13 @@ test('WezTerm command port: 未消費の期待呼び出しを完了確認で拒�
   assert.throws(() => port.assertComplete(), /期待呼び出しが未消費/);
 });
 
+test('WezTerm command recorder: 未知の期待キーを登録前に拒否する', () => {
+  assert.throws(
+    () => installWeztermCommandPorts({ listPane: [] }),
+    /未知の WezTerm command port 期待キー: listPane/,
+  );
+});
+
 test('WezTerm command recorder: 完了確認を明示的に呼ばなくても afterEach が未消費期待を拒否する', () => {
   const fixtureDir = tempDirScope.mkdtemp('ghm-wezterm-recorder-');
   const fixturePath = path.join(fixtureDir, 'after-each.test.js');

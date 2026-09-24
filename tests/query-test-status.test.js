@@ -273,6 +273,35 @@ test('queryTestStatus: v2 full のSHA一致・fail 0 → GREEN と full を返�
   });
 });
 
+test('queryTestStatus: 不明なfindings件数を0としてJSONへ出力しない', () => {
+  const declarationBody = fullDeclarationBody()
+    .replace('- **lint**: pass (findings: 0)', '- **lint**: findings');
+  const result = queryTestStatus(
+    { pr: '42', repo: 'owner/repo' },
+    { ghPrViewFn: () => prView([prComment(declarationBody)]) },
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    status: 'GREEN',
+    declaredSha: 'a1b2c3d',
+    headSha: SHA,
+    fail: 0,
+    pass: 1826,
+    provenance: 'test-runner',
+    scope: 'full',
+    lint: { status: 'complete', outcome: 'findings' },
+  });
+
+  const output = main(
+    ['--pr', '42', '--repo', 'owner/repo'],
+    { ghPrViewFn: () => prView([prComment(declarationBody)]) },
+  );
+  assert.equal(output.exitCode, 0);
+  assert.doesNotMatch(output.stdout, /"findingCount":0/);
+  assert.match(output.stdout, /"outcome":"findings"/);
+});
+
 test('queryTestStatus: v2 partial のfail > 0 → RED と partial を返す', () => {
   const result = queryTestStatus(
     { pr: '42', repo: 'owner/repo' },
