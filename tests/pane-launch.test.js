@@ -1,12 +1,19 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 const paneLaunch = require('../scripts/shared/pane-launch');
 const { buildLoginShellExecArgs } = require('../scripts/shared/agent-exec');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 const { installWeztermCommandPorts, weztermCall } = require('./_wezterm-command-recorder');
 const { launchAgentInWindow } = paneLaunch;
+
+const tempDirScope = createTempDirScope();
+test.after(() => tempDirScope.cleanup());
 
 // このモジュールに残るのは assistant（対話型ワーカー）専用の起動経路だけ。
 // orchestrator管理下のワーカーの起動は shared/headless-launch.js へ移行した（Issue #151）。
@@ -457,6 +464,41 @@ test('WezTerm command port: 未消費の期待呼び出しを完了確認で拒�
     { status: 0, stdout: '[]', stderr: '' },
   )]);
   assert.throws(() => port.assertComplete(), /期待呼び出しが未消費/);
+});
+
+test('WezTerm command recorder: 完了確認を明示的に呼ばなくても afterEach が未消費期待を拒否する', () => {
+  const fixtureDir = tempDirScope.mkdtemp('ghm-wezterm-recorder-');
+  const fixturePath = path.join(fixtureDir, 'after-each.test.js');
+  const helperPath = path.join(__dirname, '_wezterm-command-recorder.js');
+  const fixture = [
+    "'use strict';",
+    "const { test } = require('node:test');",
+    `const { installWeztermCommandPorts, weztermCall } = require(${JSON.stringify(helperPath)});`,
+    "test('未消費の期待呼び出しを残したテスト', () => {",
+    '  installWeztermCommandPorts({',
+    '    listPanes: [weztermCall(',
+    "      ['cli', '--no-auto-start', 'list', '--format', 'json'],",
+    "      { status: 0, stdout: '[]', stderr: '' },",
+    '    )],',
+    '  });',
+    '});',
+  ].join('\n');
+  fs.writeFileSync(fixturePath, fixture, 'utf8');
+
+  try {
+    const childEnv = { ...process.env };
+    delete childEnv.NODE_TEST_CONTEXT;
+    const result = spawnSync(process.execPath, ['--test', fixturePath], {
+      cwd: path.join(__dirname, '..'),
+      env: childEnv,
+      encoding: 'utf8',
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.notEqual(result.status, 0, output);
+    assert.match(output, /期待呼び出しが未消費/);
+  } finally {
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  }
 });
 
 
