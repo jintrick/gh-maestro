@@ -210,6 +210,32 @@ test('poll-reviews: aggregate通知と共有評価は層別結果を保持する
   assert.equal(evaluation.allLayersComplete, true);
 });
 
+test('poll-reviews: テスト名に fail: 0 等の文字列が含まれていても、RED判定と層別件数を狂わせない', () => {
+  const body = `<!-- gh-maestro-test-result:v2 -->
+### 🧪 テスト結果申告
+- **対象コミット**: \`a1b2c3d4e5f6\`
+- **結果**: fail
+- **実行元**: \`test-runner\`
+- **実行範囲**: \`aggregate\`
+- **lint**: pass (findings: 0)
+- **層別結果**:
+  - **full**: fail (fail: 1, pass: 9), tests: 10, executor: \`local\`, scope: \`full\`, 失敗: \`check fail: 0 and pass: 99\`
+  - **slow**: pass (fail: 0, pass: 5), tests: 5, executor: \`poll-pr\`, scope: \`partial\`, 実行記録: \`C:/runtime/slow.log\`
+`;
+  const evaluation = evaluateTestDeclaration(
+    extractTestDeclaration(body),
+    'a1b2c3d4e5f6',
+  );
+  assert.equal(evaluation.status, 'RED');
+  assert.equal(evaluation.layers.full.fail, 1);
+  assert.equal(evaluation.layers.full.pass, 9);
+  assert.deepEqual(evaluation.layers.full.failedTests, ['check fail: 0 and pass: 99']);
+  assert.equal(
+    formatTestStatusEvent(evaluation),
+    'TEST_STATUS:RED:a1b2c3d4e5f6:a1b2c3d4e5f6:test-runner:aggregate:lint=complete/pass',
+  );
+});
+
 test('extractTestDeclaration: v2 から commit, fail, pass, provenance, scope を抽出する', () => {
   const decl = extractTestDeclaration(fullDeclarationBody());
   assert.deepEqual(decl, {

@@ -9,6 +9,7 @@ const {
   TEST_RESULT_PRODUCER,
   TEST_RESULT_PROVENANCE,
   parseTapSummary,
+  parseTapFailures,
   testResultPath,
   testResultInvalidationPath,
   invalidateTestResultArtifact,
@@ -97,6 +98,48 @@ test('parseTapSummary: 必須項目欠落・重複・空出力を拒否する', 
   assert.equal(parseTapSummary('').ok, false);
   assert.equal(parseTapSummary('# tests 2\n# pass 2\n').ok, false);
   assert.equal(parseTapSummary('# tests 2\n# pass 2\n# fail 0\n# fail 0\n').ok, false);
+});
+
+test('parseTapFailures: not ok から失敗テスト名を抽出し、suiteやSKIP/TODOを除外し重複を排除する', () => {
+  const tapOutput = `
+TAP version 13
+# Subtest: test alpha
+not ok 1 - test alpha
+  ---
+  duration_ms: 1.2
+  type: 'test'
+  ...
+# Subtest: test beta
+ok 2 - test beta
+  ---
+  duration_ms: 0.5
+  type: 'test'
+  ...
+# Subtest: suite gamma
+    # Subtest: subtest delta
+    not ok 1 - subtest delta
+      ---
+      duration_ms: 0.8
+      type: 'test'
+      ...
+    1..1
+not ok 3 - suite gamma
+  ---
+  duration_ms: 2.1
+  type: 'suite'
+  failureType: 'subtestsFailed'
+  ...
+not ok 4 - skipped test # SKIP
+not ok 5 - todo test # TODO
+not ok 6 - test alpha
+`;
+  const failures = parseTapFailures(tapOutput);
+  assert.deepEqual(failures, ['test alpha', 'subtest delta']);
+});
+
+test('parseTapFailures: 空出力や失敗なしは空配列を返す', () => {
+  assert.deepEqual(parseTapFailures(''), []);
+  assert.deepEqual(parseTapFailures('ok 1 - test a\nok 2 - test b\n'), []);
 });
 
 test('validateTestResultArtifact: runnerが作成した complete 成果物を受理する', () => {
