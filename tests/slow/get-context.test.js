@@ -64,6 +64,22 @@ function createContextWorkspace(configText) {
   return workspace;
 }
 
+function writeDependencyFixture(workspace, installedVersion = null) {
+  fs.writeFileSync(path.join(workspace, 'package-lock.json'), JSON.stringify({
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'fixture', version: '1.0.0' },
+      'node_modules/example': { version: '1.0.0' },
+    },
+  }), 'utf8');
+  if (installedVersion !== null) {
+    fs.mkdirSync(path.join(workspace, 'node_modules', 'example'), { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'node_modules', 'example', 'package.json'), JSON.stringify({
+      name: 'example', version: installedVersion,
+    }), 'utf8');
+  }
+}
+
 test('REPO と WORKSPACE を正しいフォーマットで出力する', () => {
   const r = runContext({
     cwd: REPO_ROOT,
@@ -132,6 +148,50 @@ test('壊れたtest.layersでもcontextを出力し、終了コード0で完了�
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('package-lock.jsonがありnode_modulesが無い場合は欠落をcontextへ出力し、開始を止めない', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace();
+  try {
+    writeDependencyFixture(workspace);
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^NODE_MODULES_STATUS=missing$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('package-lock.jsonとnode_modulesのversionが不一致なら不一致をcontextへ出力する', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace();
+  try {
+    writeDependencyFixture(workspace, '2.0.0');
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^NODE_MODULES_STATUS=mismatch$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('lockfileとnode_modulesが一致する場合、およびlockfileが無い場合は状態行を増やさない', () => {
+  for (const installedVersion of ['1.0.0', null]) {
+    const { home, env } = isolatedHome();
+    const workspace = createContextWorkspace();
+    try {
+      if (installedVersion !== null) writeDependencyFixture(workspace, installedVersion);
+      const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+      assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+      assert.equal(r.stdout.includes('NODE_MODULES_STATUS='), false, r.stdout);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
   }
 });
 
