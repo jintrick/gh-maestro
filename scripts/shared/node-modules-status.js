@@ -15,6 +15,31 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function matchesEnvironment(value, conditions) {
+  if (!Array.isArray(conditions) || conditions.length === 0) return true;
+  const normalized = String(value).toLowerCase();
+  const rules = conditions.map((condition) => String(condition).toLowerCase());
+  if (rules.some((condition) => condition === `!${normalized}`)) return false;
+  const positive = rules.filter((condition) => !condition.startsWith('!'));
+  return positive.length === 0 || positive.includes(normalized);
+}
+
+function isInstallableHere(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  return matchesEnvironment(process.platform, entry.os)
+    && matchesEnvironment(process.arch, entry.cpu);
+}
+
+function formatStatusLine(result) {
+  if (!result || typeof result.status !== 'string') {
+    return 'NODE_MODULES_STATUS=unknown REASON=検査結果が不正です';
+  }
+  const reason = typeof result.reason === 'string' && result.reason.trim()
+    ? result.reason.replace(/[\r\n]+/g, ' ').trim()
+    : '理由は記録されていません';
+  return `NODE_MODULES_STATUS=${result.status} REASON=${reason}`;
+}
+
 function readJson(filePath, readFile = fs.readFileSync) {
   let raw;
   try {
@@ -69,6 +94,7 @@ function inspectNodeModulesStatus(workspace, options = {}) {
   for (const [relativePath, expected] of Object.entries(lock.value.packages)) {
     const normalized = relativePath.replaceAll('\\', '/');
     if (!normalized.startsWith('node_modules/') || !expected || typeof expected !== 'object') continue;
+    if (expected.optional === true || !isInstallableHere(expected)) continue;
     if (typeof expected.version !== 'string' || expected.version.length === 0) {
       return { status: STATUS.UNKNOWN, reason: `lockfileの${relativePath}にversionがありません` };
     }
@@ -94,4 +120,4 @@ function inspectNodeModulesStatus(workspace, options = {}) {
     : { status: STATUS.OK };
 }
 
-module.exports = { STATUS, inspectNodeModulesStatus };
+module.exports = { STATUS, formatStatusLine, inspectNodeModulesStatus };

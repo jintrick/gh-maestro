@@ -7,7 +7,11 @@ const { getCurrentBranch } = require('./shared/git-branch');
 const { resolveWorkspace } = require('./shared/workspace');
 const { readState } = require('./shared/read-state');
 const { getTestLayerDeclarationStatus } = require('./shared/resolve-config');
-const { STATUS: NODE_MODULES_STATUS, inspectNodeModulesStatus } = require('./shared/node-modules-status');
+const {
+  STATUS: NODE_MODULES_STATUS,
+  formatStatusLine,
+  inspectNodeModulesStatus,
+} = require('./shared/node-modules-status');
 
 const USAGE = `get-context.js — orchestrator の起動コンテキストをプロンプト注入用ブロックとして出力する
 
@@ -81,5 +85,5 @@ try {
 }
 if (nodeModulesStatus.status !== NODE_MODULES_STATUS.NOT_APPLICABLE
     && nodeModulesStatus.status !== NODE_MODULES_STATUS.OK) {
-  console.log(`NODE_MODULES_STATUS=${nodeModulesStatus.status}`);
+  console.log(formatStatusLine(nodeModulesStatus));
 }

@@ -158,7 +158,7 @@ test('package-lock.jsonがありnode_modulesが無い場合は欠落をcontext�
     writeDependencyFixture(workspace);
     const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
     assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
-    assert.match(r.stdout, /^NODE_MODULES_STATUS=missing$/m);
+    assert.match(r.stdout, /^NODE_MODULES_STATUS=missing REASON=.*node_modules.*ありません$/m);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(workspace, { recursive: true, force: true });
@@ -172,7 +172,21 @@ test('package-lock.jsonとnode_modulesのversionが不一致なら不一致をco
     writeDependencyFixture(workspace, '2.0.0');
     const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
     assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
-    assert.match(r.stdout, /^NODE_MODULES_STATUS=mismatch$/m);
+    assert.match(r.stdout, /^NODE_MODULES_STATUS=mismatch REASON=.*node_modules\/example.*lock=1\.0\.0.*installed=2\.0\.0$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('依存検査が判定不能ならunknownと理由をcontextへ出力し、開始を止めない', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace();
+  try {
+    fs.writeFileSync(path.join(workspace, 'package-lock.json'), '{ broken', 'utf8');
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^NODE_MODULES_STATUS=unknown REASON=.*package-lock\.json.*JSON構文エラー/m);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(workspace, { recursive: true, force: true });
