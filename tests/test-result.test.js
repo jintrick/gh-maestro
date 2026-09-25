@@ -100,7 +100,7 @@ test('parseTapSummary: 必須項目欠落・重複・空出力を拒否する', 
   assert.equal(parseTapSummary('# tests 2\n# pass 2\n# fail 0\n# fail 0\n').ok, false);
 });
 
-test('parseTapFailures: not ok から失敗テスト名を抽出し、suiteやSKIP/TODOを除外し重複を排除する', () => {
+test('parseTapFailures: not ok から失敗テスト名を抽出し、suiteやSKIP/TODOを除外するが同名失敗は重複排除せず全て保持する', () => {
   const tapOutput = `
 TAP version 13
 # Subtest: test alpha
@@ -134,7 +134,31 @@ not ok 5 - todo test # TODO
 not ok 6 - test alpha
 `;
   const failures = parseTapFailures(tapOutput);
-  assert.deepEqual(failures, ['test alpha', 'subtest delta']);
+  assert.equal(failures.length, 3);
+  assert.deepEqual(failures, ['test alpha', 'subtest delta', 'test alpha']);
+});
+
+test('parseTapFailures: 同名失敗を複数含む7件の失敗で、失敗件数と名前の一覧が一致する', () => {
+  const tapOutput = `TAP version 13
+not ok 1 - duplicate failure
+not ok 2 - unique 1
+not ok 3 - duplicate failure
+not ok 4 - unique 2
+not ok 5 - duplicate failure
+not ok 6 - duplicate failure
+not ok 7 - unique 3
+`;
+  const failures = parseTapFailures(tapOutput);
+  assert.equal(failures.length, 7);
+  assert.deepEqual(failures, [
+    'duplicate failure',
+    'unique 1',
+    'duplicate failure',
+    'unique 2',
+    'duplicate failure',
+    'duplicate failure',
+    'unique 3',
+  ]);
 });
 
 test('parseTapFailures: 空出力や失敗なしは空配列を返す', () => {

@@ -116,7 +116,9 @@ function parseAggregateLayerLine(line, provenance) {
       names.push(m[1]);
     }
     failedTests = names;
-    const overflowMatch = failurePart.match(/[（(]他(\d+)件[）)]/);
+    const lastBacktickIndex = failurePart.lastIndexOf('`');
+    const tail = lastBacktickIndex >= 0 ? failurePart.slice(lastBacktickIndex + 1) : failurePart;
+    const overflowMatch = tail.match(/[（(]他(\d+)件[）)]/);
     otherFailedCount = overflowMatch ? parseInt(overflowMatch[1], 10) : 0;
   }
 

@@ -534,8 +534,35 @@ test('queryTestStatus: テスト名に fail: 0 や pass: 99 や scope: full 等�
   assert.equal(result.layers.full.otherFailedCount, 0);
 });
 
+test('queryTestStatus: テスト名に「（他N件）」が含まれていても超過件数として誤認しない', () => {
+  const commentBody = `<!-- gh-maestro-test-result:v2 -->
+### 🧪 テスト結果申告
+- **対象コミット**: \`${SHA}\`
+- **結果**: fail
+- **実行元**: \`test-runner\`
+- **実行範囲**: \`aggregate\`
+- **lint**: pass (findings: 0)
+- **層別結果**:
+  - **full**: fail (fail: 1, pass: 9), tests: 10, executor: \`local\`, scope: \`full\`, 失敗: \`test with (他99件) and （他50件） in name\`
+  - **slow**: fail (fail: 7, pass: 0), tests: 7, executor: \`poll-pr\`, scope: \`partial\`, 実行記録: \`slow.log\`, 失敗: \`t1\`, \`t2\`, \`t3\`, \`t4\`, \`t5（他100件）\`（他2件）
+`;
+  const result = queryTestStatus(
+    { pr: '42', repo: 'owner/repo' },
+    { ghPrViewFn: () => prView([prComment(commentBody)]) },
+  );
+  assert.equal(result.status, 'RED');
+  // full層: テスト名に（他99件）等があっても超過なしなので otherFailedCount は 0
+  assert.deepEqual(result.layers.full.failedTests, ['test with (他99件) and （他50件） in name']);
+  assert.equal(result.layers.full.otherFailedCount, 0);
+
+  // slow層: 5つ目のテスト名に（他100件）があっても、末尾の「（他2件）」が正しく otherFailedCount = 2 として解釈される
+  assert.deepEqual(result.layers.slow.failedTests, ['t1', 't2', 't3', 't4', 't5（他100件）']);
+  assert.equal(result.layers.slow.otherFailedCount, 2);
+});
+
 test('main: --help は終了コード0で usage を返し、failedTests の説明を含む', () => {
   const result = main(['--help']);
   assert.equal(result.exitCode, 0);
   assert.match(result.stdout, /failedTests and otherFailedCount/);
 });
+

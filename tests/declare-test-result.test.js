@@ -142,6 +142,25 @@ test('buildCommentBody: 失敗テスト名が5件以内なら全件表示し、5
   assert.doesNotMatch(body, /slow failure alpha.*他/);
 });
 
+test('buildCommentBody: 同名テストの失敗が複数ある場合も重複排除せず、実失敗数に基づいて5件表示および「他N件」を計算する', () => {
+  const body = buildCommentBody({
+    commit: SHA,
+    testResult: {
+      provenance: 'test-runner',
+      scope: 'aggregate',
+      layers: {
+        full: {
+          status: 'complete', outcome: 'fail', tests: 7, pass: 0, fail: 7,
+          executor: 'local', scope: 'full',
+          failedTests: ['same error', 'same error', 'unique error', 'same error', 'same error', 'same error', 'same error'],
+        },
+      },
+    },
+  });
+  // 7件の失敗中5件表示（同名が4件＋uniqueが1件）＋他2件
+  assert.ok(body.includes('**full**: fail (fail: 7, pass: 0), tests: 7, executor: `local`, scope: `full`, 失敗: `same error`, `same error`, `unique error`, `same error`, `same error`（他2件）'));
+});
+
 test('buildCommentBody: 失敗が0件の層では失敗テスト名を表示しない', () => {
   const body = buildCommentBody({
     commit: SHA,

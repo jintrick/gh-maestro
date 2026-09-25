@@ -172,7 +172,6 @@ function parseTapFailures(output) {
   if (typeof output !== 'string' || !output) return [];
   const lines = output.split(/\r?\n/);
   const failures = [];
-  const seen = new Set();
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -200,10 +199,7 @@ function parseTapFailures(output) {
     }
 
     if (!isSuite && testName) {
-      if (!seen.has(testName)) {
-        seen.add(testName);
-        failures.push(testName);
-      }
+      failures.push(testName);
     }
   }
 
