@@ -7,6 +7,11 @@ const { getCurrentBranch } = require('./shared/git-branch');
 const { resolveWorkspace } = require('./shared/workspace');
 const { readState } = require('./shared/read-state');
 const { getTestLayerDeclarationStatus } = require('./shared/resolve-config');
+const {
+  STATUS: NODE_MODULES_STATUS,
+  formatStatusLine,
+  inspectNodeModulesStatus,
+} = require('./shared/node-modules-status');
 
 const USAGE = `get-context.js — orchestrator の起動コンテキストをプロンプト注入用ブロックとして出力する
 
@@ -71,3 +76,14 @@ if (baseBranch) console.log(`BASE_BRANCH=${baseBranch}`);
 console.log('GH_MAESTRO_WORKER=orchestrator');
 if (sessionId) console.log(`SESSION_ID=${sessionId}`);
 console.log(`TEST_LAYERS_STATUS=${testLayersStatus}`);
+
+let nodeModulesStatus;
+try {
+  nodeModulesStatus = inspectNodeModulesStatus(workspace);
+} catch (error) {
+  nodeModulesStatus = { status: NODE_MODULES_STATUS.UNKNOWN, reason: error.message };
+}
+if (nodeModulesStatus.status !== NODE_MODULES_STATUS.NOT_APPLICABLE
+    && nodeModulesStatus.status !== NODE_MODULES_STATUS.OK) {
+  console.log(formatStatusLine(nodeModulesStatus));
+}
