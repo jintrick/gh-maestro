@@ -313,11 +313,6 @@ function configuredTestArgs(layer, testFiles) {
   return [...(layer.command || []).slice(1), ...(layer.fileArgs || []), ...files];
 }
 
-function resolveExecutionWorkspace(cwd, workspace) {
-  if (workspace !== undefined) return resolveWorkspace(workspace);
-  return resolveWorkspace(cwd);
-}
-
 function resolveConfigWorkspace(cwd, workspace, env = process.env) {
   if (workspace !== undefined) return resolveWorkspace(workspace);
   if (env && env.GH_MAESTRO_WORKSPACE) return resolveWorkspace(env.GH_MAESTRO_WORKSPACE);
@@ -401,18 +396,17 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   let executionWorkspace;
   let testConfig;
   try {
-    executionWorkspace = resolveExecutionWorkspace(cwd, workspace);
+    executionWorkspace = resolveConfigWorkspace(cwd, workspace, env);
     if (!executionWorkspace) {
       return {
         exitCode: 1,
         artifact: null,
         artifactWritten: false,
         stdout: '',
-        stderr: 'テストを実行するworkspaceを解決できません',
+        stderr: 'テスト設定を読むworkspaceを解決できません',
       };
     }
-    const configWorkspace = resolveConfigWorkspace(cwd, workspace, env);
-    testConfig = resolveTestConfigFn({ workspace: configWorkspace, homedir });
+    testConfig = resolveTestConfigFn({ workspace: executionWorkspace, homedir });
   } catch {
     testConfig = null;
   }
@@ -692,8 +686,6 @@ module.exports = {
   normalizeRelativeTestFile,
   normalizeTestFiles,
   mapChangedFilesToTests,
-  resolveExecutionWorkspace,
-  resolveConfigWorkspace,
   runLint,
   runTests,
   main,
