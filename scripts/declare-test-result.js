@@ -267,7 +267,15 @@ function buildCommentBody({ commit, testResult }) {
       const record = recordName ? `, 実行記録: \`${recordName}\`` : '';
       const command = status === 'unknown' ? `, command: \`${publicTestCommand(name, layer && layer.scope)}\`` : '';
       const reason = status === 'unknown' && layer.reason ? `, reason: ${publicTestReason(layer.reason)}` : '';
-      lines.push(`  - **${name}**: ${status}${countSuffix}${count}${executor}${scope}${record}${command}${reason}`);
+      let failuresSuffix = '';
+      if (status === 'fail' && Array.isArray(layer.failedTests) && layer.failedTests.length > 0) {
+        const MAX_FAILED_TESTS = 5;
+        const shown = layer.failedTests.slice(0, MAX_FAILED_TESTS);
+        const overflow = layer.failedTests.length - MAX_FAILED_TESTS;
+        const overflowText = overflow > 0 ? `（他${overflow}件）` : '';
+        failuresSuffix = `, 失敗: ${shown.map(t => `\`${String(t).replaceAll('`', "'")}\``).join(', ')}${overflowText}`;
+      }
+      lines.push(`  - **${name}**: ${status}${countSuffix}${count}${executor}${scope}${record}${command}${reason}${failuresSuffix}`);
     }
     return lines.join('\n');
   }

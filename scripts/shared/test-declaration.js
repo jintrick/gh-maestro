@@ -92,14 +92,35 @@ function parseAggregateLayerLine(line, provenance) {
   const layer = header[1].trim();
   if (!layer) return null;
   const outcome = header[2].toLowerCase();
-  const fail = matchCount(line, 'fail');
-  const pass = matchCount(line, 'pass');
-  const tests = matchCount(line, 'tests');
-  const executor = matchInlineBacktickField(line, 'executor') || provenance || 'unknown';
-  const explicitScope = matchInlineBacktickField(line, 'scope');
+
+  const failureSeparatorIndex = line.indexOf(', 失敗: ');
+  const metaLine = failureSeparatorIndex >= 0 ? line.slice(0, failureSeparatorIndex) : line;
+  const failurePart = failureSeparatorIndex >= 0 ? line.slice(failureSeparatorIndex + ', 失敗: '.length) : null;
+
+  const fail = matchCount(metaLine, 'fail');
+  const pass = matchCount(metaLine, 'pass');
+  const tests = matchCount(metaLine, 'tests');
+  const executor = matchInlineBacktickField(metaLine, 'executor') || provenance || 'unknown';
+  const explicitScope = matchInlineBacktickField(metaLine, 'scope');
   const scope = explicitScope || (layer === 'full' ? FULL_SCOPE : layer === 'slow' ? PARTIAL_SCOPE : 'unknown');
-  const recordMatch = line.match(/実行記録\s*:\s*`([^`]*)`/);
-  const reasonMatch = line.match(/reason\s*:\s*(.+)$/);
+  const recordMatch = metaLine.match(/実行記録\s*:\s*`([^`]*)`/);
+  const reasonMatch = metaLine.match(/reason\s*:\s*(.+)$/);
+
+  let failedTests;
+  let otherFailedCount = 0;
+  if (failurePart) {
+    const names = [];
+    const re = /`([^`]+)`/g;
+    let m;
+    while ((m = re.exec(failurePart)) !== null) {
+      names.push(m[1]);
+    }
+    failedTests = names;
+    const lastBacktickIndex = failurePart.lastIndexOf('`');
+    const tail = lastBacktickIndex >= 0 ? failurePart.slice(lastBacktickIndex + 1) : failurePart;
+    const overflowMatch = tail.match(/[（(]他(\d+)件[）)]/);
+    otherFailedCount = overflowMatch ? parseInt(overflowMatch[1], 10) : 0;
+  }
 
   return {
     layer,
@@ -111,6 +132,7 @@ function parseAggregateLayerLine(line, provenance) {
     scope,
     ...(recordMatch ? { executionLogPath: recordMatch[1] } : {}),
     ...(reasonMatch ? { reason: reasonMatch[1].trim() } : {}),
+    ...(failedTests !== undefined ? { failedTests, otherFailedCount } : {}),
   };
 }
 

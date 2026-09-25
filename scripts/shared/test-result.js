@@ -168,6 +168,44 @@ function parseTapSummary(output) {
   return { ok: true, summary };
 }
 
+function parseTapFailures(output) {
+  if (typeof output !== 'string' || !output) return [];
+  const lines = output.split(/\r?\n/);
+  const failures = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const match = line.match(/^\s*not ok(?:\s+[0-9]+)?\s+-\s+(.+?)\s*$/);
+    if (!match) continue;
+
+    const testName = match[1].trim();
+    if (/#\s*(?:TODO|SKIP)\b/i.test(testName)) {
+      continue;
+    }
+
+    let isSuite = false;
+    for (let j = i + 1; j < lines.length; j++) {
+      const nextLine = lines[j];
+      if (/^\s*(?:ok|not ok|[0-9]+\.\.[0-9]+|# Subtest:)/.test(nextLine)) {
+        break;
+      }
+      if (/^\s*type:\s*['"]?suite['"]?/.test(nextLine) || /^\s*failureType:\s*['"]?subtestsFailed['"]?/.test(nextLine)) {
+        isSuite = true;
+        break;
+      }
+      if (/^\s*\.\.\.\s*$/.test(nextLine)) {
+        break;
+      }
+    }
+
+    if (!isSuite && testName) {
+      failures.push(testName);
+    }
+  }
+
+  return failures;
+}
+
 function validateCountFields(value, required) {
   for (const field of required) {
     if (!Object.prototype.hasOwnProperty.call(value, field)) {
@@ -189,6 +227,11 @@ function validateResultFields(value, fieldPrefix, { requireLayer = false } = {})
   if (typeof value.status !== 'string' || !TEST_RESULT_STATUSES.has(value.status)) return { ok: false, error: `${fieldPrefix} status is invalid` };
   if (typeof value.command !== 'string' || !value.command.trim()) return { ok: false, error: `${fieldPrefix} command is required` };
   if (typeof value.recordedAt !== 'string' || !value.recordedAt.trim()) return { ok: false, error: `${fieldPrefix} recordedAt is required` };
+  if (value.failedTests !== undefined) {
+    if (!Array.isArray(value.failedTests) || value.failedTests.some(t => typeof t !== 'string')) {
+      return { ok: false, error: `${fieldPrefix} failedTests must be an array of strings` };
+    }
+  }
   if (value.status === 'complete') {
     if (value.outcome !== undefined && (typeof value.outcome !== 'string' || !TEST_RESULT_OUTCOMES.has(value.outcome))) return { ok: false, error: `${fieldPrefix} complete outcome is invalid` };
     const counts = validateCountFields(value, []);
@@ -361,6 +404,7 @@ function layerForRead(layer) {
     status: layer.status,
     ...(layer.outcome !== undefined ? { outcome: layer.outcome } : {}),
     ...Object.fromEntries(TAP_COUNT_FIELDS.filter(field => Object.prototype.hasOwnProperty.call(layer, field)).map(field => [field, layer[field]])),
+    ...(Array.isArray(layer.failedTests) ? { failedTests: layer.failedTests } : {}),
     command: layer.command,
     recordedAt: layer.recordedAt,
     testedHead: layer.testedHead || undefined,
@@ -409,6 +453,7 @@ function readTestResultArtifact(worktree = process.cwd()) {
       scope: parsed.scope,
       ...(parsed.outcome !== undefined ? { outcome: parsed.outcome } : {}),
       ...Object.fromEntries(TAP_COUNT_FIELDS.filter(field => Object.prototype.hasOwnProperty.call(parsed, field)).map(field => [field, parsed[field]])),
+      ...(Array.isArray(parsed.failedTests) ? { failedTests: parsed.failedTests } : {}),
       command: parsed.command,
       recordedAt: parsed.recordedAt,
       testedHead: parsed.testedHead || undefined,
@@ -444,6 +489,7 @@ module.exports = {
   clearTestResultInvalidation,
   invalidateTestResultArtifact,
   parseTapSummary,
+  parseTapFailures,
   validateLayerResult,
   validateLintResult,
   validateTestResultArtifact,

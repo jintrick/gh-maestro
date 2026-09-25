@@ -167,6 +167,40 @@ test('runTests: full suiteを一度だけ起動し、成功結果をfullとし�
   assert.match(fixture.stdout, /# tests 5/);
 });
 
+test('runTests: fail時はTAP出力からfailedTestsを成果物へ記録する', () => {
+  const tapOutput = `TAP version 13
+# Subtest: failing test 1
+not ok 1 - failing test 1
+  ---
+  duration_ms: 1.0
+  type: 'test'
+  ...
+# Subtest: passing test 2
+ok 2 - passing test 2
+  ---
+  duration_ms: 0.5
+  type: 'test'
+  ...
+# Subtest: failing test 3
+not ok 3 - failing test 3
+  ---
+  duration_ms: 1.2
+  type: 'test'
+  ...
+${tapSummary({ tests: 3, pass: 1, fail: 2 })}`;
+
+  const fixture = runWithChild({
+    child: { status: 1, stdout: tapOutput, stderr: '' },
+  });
+
+  assert.equal(fixture.result.exitCode, 1);
+  assert.equal(fixture.result.artifactWritten, true);
+  assert.equal(fixture.artifacts.length, 1);
+  assert.equal(fixture.artifacts[0].outcome, 'fail');
+  assert.equal(fixture.artifacts[0].fail, 2);
+  assert.deepEqual(fixture.artifacts[0].failedTests, ['failing test 1', 'failing test 3']);
+});
+
 test('runTests: runnerが赤でもsummaryを保存し、runnerの終了コードを返す', () => {
   const fixture = runWithChild({
     child: { status: 1, stdout: tapSummary({ tests: 4, pass: 3, fail: 1 }), stderr: 'not ok 4 - failure\n' },

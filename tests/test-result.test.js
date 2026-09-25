@@ -9,6 +9,7 @@ const {
   TEST_RESULT_PRODUCER,
   TEST_RESULT_PROVENANCE,
   parseTapSummary,
+  parseTapFailures,
   testResultPath,
   testResultInvalidationPath,
   invalidateTestResultArtifact,
@@ -97,6 +98,72 @@ test('parseTapSummary: 必須項目欠落・重複・空出力を拒否する', 
   assert.equal(parseTapSummary('').ok, false);
   assert.equal(parseTapSummary('# tests 2\n# pass 2\n').ok, false);
   assert.equal(parseTapSummary('# tests 2\n# pass 2\n# fail 0\n# fail 0\n').ok, false);
+});
+
+test('parseTapFailures: not ok から失敗テスト名を抽出し、suiteやSKIP/TODOを除外するが同名失敗は重複排除せず全て保持する', () => {
+  const tapOutput = `
+TAP version 13
+# Subtest: test alpha
+not ok 1 - test alpha
+  ---
+  duration_ms: 1.2
+  type: 'test'
+  ...
+# Subtest: test beta
+ok 2 - test beta
+  ---
+  duration_ms: 0.5
+  type: 'test'
+  ...
+# Subtest: suite gamma
+    # Subtest: subtest delta
+    not ok 1 - subtest delta
+      ---
+      duration_ms: 0.8
+      type: 'test'
+      ...
+    1..1
+not ok 3 - suite gamma
+  ---
+  duration_ms: 2.1
+  type: 'suite'
+  failureType: 'subtestsFailed'
+  ...
+not ok 4 - skipped test # SKIP
+not ok 5 - todo test # TODO
+not ok 6 - test alpha
+`;
+  const failures = parseTapFailures(tapOutput);
+  assert.equal(failures.length, 3);
+  assert.deepEqual(failures, ['test alpha', 'subtest delta', 'test alpha']);
+});
+
+test('parseTapFailures: 同名失敗を複数含む7件の失敗で、失敗件数と名前の一覧が一致する', () => {
+  const tapOutput = `TAP version 13
+not ok 1 - duplicate failure
+not ok 2 - unique 1
+not ok 3 - duplicate failure
+not ok 4 - unique 2
+not ok 5 - duplicate failure
+not ok 6 - duplicate failure
+not ok 7 - unique 3
+`;
+  const failures = parseTapFailures(tapOutput);
+  assert.equal(failures.length, 7);
+  assert.deepEqual(failures, [
+    'duplicate failure',
+    'unique 1',
+    'duplicate failure',
+    'unique 2',
+    'duplicate failure',
+    'duplicate failure',
+    'unique 3',
+  ]);
+});
+
+test('parseTapFailures: 空出力や失敗なしは空配列を返す', () => {
+  assert.deepEqual(parseTapFailures(''), []);
+  assert.deepEqual(parseTapFailures('ok 1 - test a\nok 2 - test b\n'), []);
 });
 
 test('validateTestResultArtifact: runnerが作成した complete 成果物を受理する', () => {

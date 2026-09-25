@@ -18,6 +18,7 @@ const {
   TEST_RESULT_PROVENANCE,
   calculateWorktreeContentHash,
   parseTapSummary,
+  parseTapFailures,
   publicTestCommand,
   validateLintResult,
   invalidateTestResultArtifact,
@@ -475,6 +476,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   const writeArtifactFn = deps.writeArtifactFn || writeTestResultLayer;
   const writeStdoutFn = deps.writeStdoutFn || ((text) => process.stdout.write(text));
   const writeStderrFn = deps.writeStderrFn || ((text) => process.stderr.write(text));
+  const parseTapFailuresFn = deps.parseTapFailuresFn || parseTapFailures;
   const lintSpawnSyncFn = deps.lintSpawnSyncFn || spawnSync;
 
   try {
@@ -540,7 +542,9 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
     writeStderrFn(`lint: unavailable (${lintResult.reason})\n`);
   }
 
-  const summary = parseTapSummary(`${stdout}${stderr ? `\n${stderr}` : ''}`);
+  const combinedOutput = `${stdout}${stderr ? `\n${stderr}` : ''}`;
+  const summary = parseTapSummary(combinedOutput);
+  const failedTests = parseTapFailuresFn(combinedOutput);
   // TAPの必須欄が揃っていても、framework固有の集計が成果物契約に収まらない場合は
   // 件数だけを捨てる。テスト実行後の非0終了は、summaryが不正でも終了コード由来の
   // failとして保持する。
@@ -563,13 +567,14 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   });
   let artifact;
   if (childExitCode !== null && testedContentHash && !runnerUnavailableReason) {
+    const outcome = childExitCode === 0 ? 'pass' : 'fail';
     artifact = {
       schemaVersion: TEST_RESULT_SCHEMA_VERSION,
       producer: TEST_RESULT_PRODUCER,
       provenance: TEST_RESULT_PROVENANCE,
       scope: selected.scope,
       status: 'complete',
-      outcome: childExitCode === 0 ? 'pass' : 'fail',
+      outcome,
       layer: layerName,
       command: displayCommand,
       recordedAt,
@@ -577,6 +582,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
       testedHead,
       testedContentHash,
       ...summaryFields,
+      ...(outcome === 'fail' && failedTests.length > 0 ? { failedTests } : {}),
     };
   } else {
     artifact = {

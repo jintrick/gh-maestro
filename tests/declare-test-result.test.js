@@ -115,6 +115,71 @@ test('buildCommentBody: 層別aggregateはfull/slowの結果とslowの実行記�
   assert.ok(body.includes('- **結果**: fail'));
 });
 
+test('buildCommentBody: 失敗テスト名が5件以内なら全件表示し、5件を超える分は「他N件」と表示する（pass層には表示しない）', () => {
+  const body = buildCommentBody({
+    commit: SHA,
+    testResult: {
+      provenance: 'test-runner',
+      scope: 'aggregate',
+      layers: {
+        full: {
+          status: 'complete', outcome: 'fail', tests: 17, pass: 10, fail: 7,
+          executor: 'local', scope: 'full',
+          failedTests: ['test 1', 'test 2', 'test 3', 'test 4', 'test 5', 'test 6', 'test 7'],
+        },
+        slow: {
+          status: 'complete', outcome: 'fail', tests: 2, pass: 1, fail: 1,
+          executor: 'poll-pr', scope: 'partial',
+          failedTests: ['slow failure alpha'],
+        },
+      },
+    },
+  });
+  // full層: 7件中5件表示 + 他2件
+  assert.ok(body.includes('**full**: fail (fail: 7, pass: 10), tests: 17, executor: `local`, scope: `full`, 失敗: `test 1`, `test 2`, `test 3`, `test 4`, `test 5`（他2件）'));
+  // slow層: 1件のみ表示
+  assert.ok(body.includes('**slow**: fail (fail: 1, pass: 1), tests: 2, executor: `poll-pr`, scope: `partial`, 失敗: `slow failure alpha`'));
+  assert.doesNotMatch(body, /slow failure alpha.*他/);
+});
+
+test('buildCommentBody: 同名テストの失敗が複数ある場合も重複排除せず、実失敗数に基づいて5件表示および「他N件」を計算する', () => {
+  const body = buildCommentBody({
+    commit: SHA,
+    testResult: {
+      provenance: 'test-runner',
+      scope: 'aggregate',
+      layers: {
+        full: {
+          status: 'complete', outcome: 'fail', tests: 7, pass: 0, fail: 7,
+          executor: 'local', scope: 'full',
+          failedTests: ['same error', 'same error', 'unique error', 'same error', 'same error', 'same error', 'same error'],
+        },
+      },
+    },
+  });
+  // 7件の失敗中5件表示（同名が4件＋uniqueが1件）＋他2件
+  assert.ok(body.includes('**full**: fail (fail: 7, pass: 0), tests: 7, executor: `local`, scope: `full`, 失敗: `same error`, `same error`, `unique error`, `same error`, `same error`（他2件）'));
+});
+
+test('buildCommentBody: 失敗が0件の層では失敗テスト名を表示しない', () => {
+  const body = buildCommentBody({
+    commit: SHA,
+    testResult: {
+      provenance: 'test-runner',
+      scope: 'aggregate',
+      layers: {
+        full: {
+          status: 'complete', outcome: 'pass', tests: 10, pass: 10, fail: 0,
+          executor: 'local', scope: 'full',
+          failedTests: [],
+        },
+      },
+    },
+  });
+  assert.ok(body.includes('**full**: pass (fail: 0, pass: 10)'));
+  assert.doesNotMatch(body, /失敗:/);
+});
+
 test('buildCommentBody: unavailable層はcommandと具体的なreasonをunknownとして申告する', () => {
   const body = buildCommentBody({
     commit: SHA,
