@@ -202,6 +202,10 @@ function resetAllMocks() {
   resetHeadlessLaunchMocks();
   setWorkersIdle();
   workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+  supervisor._setGetProcessStartTime((pid) => {
+    assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
+    return TEST_SESSION_START_TIME;
+  });
   supervisor._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
   // resume直後の生存確認スリープは実待機させない
   supervisor._setSleep(() => {});
@@ -297,6 +301,42 @@ describe('CLI argument validation', () => {
     assert.ok(r.errLines.some(l => l.includes('リポジトリ')));
 
     resetGhRepoView();
+  });
+
+  test('main: 常駐leaseへ渡したself identityを結果へ保持する', () => {
+    resetAllMocks();
+    try {
+      withTempDir((dir) => {
+        setupWorkspace(dir);
+        supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+        let calls = 0;
+        supervisor._setGetProcessStartTime((pid) => {
+          assert.equal(pid, process.pid);
+          calls += 1;
+          return calls === 1
+            ? '2026-07-29T00:00:00.424Z'
+            : '2026-07-29T00:00:00.525Z';
+        });
+
+        const result = runMain(['--workspace', dir, '--once']);
+        assert.equal(result.code, 0);
+        assert.deepEqual(result.residentIdentity, {
+          pid: process.pid,
+          startTime: '2026-07-29T00:00:00.424Z',
+        });
+        const leasePath = path.join(
+          dir,
+          '.gh-maestro',
+          'leases',
+          `${workerLease.roleLeaseKey('worker-supervisor')}.json`,
+        );
+        assert.equal(JSON.parse(fs.readFileSync(leasePath, 'utf8')).startTime, result.residentIdentity.startTime);
+        assert.equal(calls, 2, 'self identityとsession identity以外の起動時刻を取得しない');
+        result.residentLease.release();
+      });
+    } finally {
+      resetAllMocks();
+    }
   });
 });
 

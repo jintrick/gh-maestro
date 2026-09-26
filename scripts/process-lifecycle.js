@@ -200,6 +200,38 @@ function getProcessStartTime(pid) {
 }
 
 /**
+ * プロセスのPIDと起動時刻を一つのidentityとして捕捉する。
+ *
+ * leaseとPID registryのように同じプロセスidentityを複数の状態へ保存する呼び出し元は、
+ * 起動時刻の取得をこの関数で一度だけ行い、戻り値を各保存先へ渡す。WindowsのCIM取得が
+ * 失敗した場合は起動時刻を未知値（null）のまま返し、現在時刻などをプロセスidentityの
+ * 代替値として保存しない。
+ *
+ * @param {number|string} [pid] 対象プロセスのPID
+ * @param {(pid: number) => (string|null)} [getProcessStartTimeFn] テスト用の取得関数
+ * @returns {{pid: number, startTime: string|null}}
+ * @throws {Error} PIDが正の整数でない場合
+ */
+function captureProcessIdentity(pid = process.pid, getProcessStartTimeFn = getProcessStartTime) {
+  const targetPid = parseInt(pid, 10);
+  if (!Number.isFinite(targetPid) || targetPid <= 0) {
+    throw new Error(`captureProcessIdentity: 不正な PID です: ${pid}`);
+  }
+
+  let startTime = null;
+  try {
+    startTime = getProcessStartTimeFn(targetPid);
+  } catch {
+    // getProcessStartTime() 自体は失敗をnullへ縮退する。注入関数でも同じbest-effort契約に揃える。
+    startTime = null;
+  }
+  return {
+    pid: targetPid,
+    startTime: typeof startTime === 'string' && startTime !== '' ? startTime : null,
+  };
+}
+
+/**
  * 2つのプロセス起動時刻（ISO 文字列）が同一プロセスのものであるかを判定する。
  *
  * 1秒の許容範囲（WMI と JS Date の精度差を吸収）。不正な日付文字列は getTime() が
@@ -342,6 +374,7 @@ function legacyPidFilePath(workspace, pid) {
  *
  * @param {string} workspace
  * @param {object} meta
+ * @param {number} [meta.pid] 対象プロセスのPID（省略時は現在のプロセス）
  * @param {string} [meta.script]     スクリプト名（例: "msg-poll.js"）
  * @param {string[]} [meta.args]     CLI引数（process.argv.slice(2)）
  * @param {string} [meta.workerName] ワーカー名（該当時）
@@ -976,6 +1009,7 @@ module.exports = {
   resolveSessionPid,
   isProcessAlive,
   getProcessStartTime,
+  captureProcessIdentity,
   startTimesMatch,
   createDeadManSwitch,
   // PID registry

@@ -32,6 +32,7 @@ const {
   resolveSessionPid,
   createDeadManSwitch,
   getProcessStartTime,
+  captureProcessIdentity,
   registerProcess,
   findRunningInstance,
   cleanup: lifecycleCleanup,
@@ -281,6 +282,8 @@ function parseArgs(args) {
  *   scanOnce: (() => void) | null,   // code !== 0 のときは null
  *   onceMode: boolean,
  *   intervalMs: number,
+ *   residentLease: object|null,
+ *   residentIdentity: {pid: number, startTime: string|null}|null,
  * }}
  */
 function main(argsOverride, opts = {}) {
@@ -417,14 +420,25 @@ function main(argsOverride, opts = {}) {
   // --once でも算出する（lease 未取得なら解放は no-op）。
   const role = msgPollRole(self);
   let residentLease = null;
+  let residentIdentity = null;
   if (!onceMode) {
+    // leaseとPID registryへ同じプロセスidentityを保存するため、起動時刻は常駐起動時に
+    // 一度だけ捕捉する。取得できない場合はunknownのまま常駐leaseを作成せず、現在時刻を
+    // identityの代替値にしない。
+    residentIdentity = captureProcessIdentity(process.pid, _getProcessStartTime);
     const handoffTargets = () => {
       const workerNameForRegistry = self !== 'orchestrator' ? self : null;
       const dup = findRunningInstance(workspace, { script: 'msg-poll.js', workerName: workerNameForRegistry });
       return dup ? [dup.pid] : [];
     };
     try {
-      const res = acquireResidentLease({ workspace, role, handoff: force, handoffStopTargets: handoffTargets });
+      const res = acquireResidentLease({
+        workspace,
+        role,
+        handoff: force,
+        handoffStopTargets: handoffTargets,
+        identity: residentIdentity,
+      });
       if (!res.acquired) {
         // 引き継ぎ期限超過（--force で既存所有者が終了しなかった）
         writeErr(
@@ -812,6 +826,7 @@ function main(argsOverride, opts = {}) {
     waitMode,
     waitMs,
     residentLease,
+    residentIdentity,
     issueArg,
   };
 }
@@ -977,6 +992,8 @@ if (require.main === module) {
   // （registry は表示・診断用途。排他の正本は role lease であり、これは二重化しない）
 
   registerProcess(result.workspace, {
+    pid: result.residentIdentity.pid,
+    startTime: result.residentIdentity.startTime,
     script: 'msg-poll.js',
     workerName: result.self !== 'orchestrator' ? result.self : null,
   });
