@@ -46,10 +46,10 @@ const FAST_SESSION_PRELOAD = (() => {
   return file;
 })();
 
-// 常駐lease取得とPID registry登録が同じ起動時刻を共有しない旧経路を再現する。
-// 自プロセスのCIM取得は最初だけ成功し、2回目以降は失敗させる。修正前はleaseが
-// 1回目の値、registryが現在時刻fallbackになり、強制停止後のlease解放identityが
-// 不一致になる。修正後はself identityを一度だけ捕捉するため、2回目の取得へ到達しない。
+// 常駐プロセス自身のidentity取得が不明値へ縮退する経路を再現する。
+// read-state.jsのモジュールロードで最初のCIM取得を消費した後、常駐lease用の
+// self identity取得を失敗させる。現在時刻fallbackでleaseを作ると、後の実測値との
+// 照合で生存中のプロセスをstale扱いできるため、修正後はlease作成自体を拒否する。
 function createResidentIdentityFailurePreload() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-resident-identity-preload-'));
   const file = path.join(dir, 'preload.js');
@@ -362,7 +362,7 @@ test('CLI通し: 生存中のworker-supervisorを維持したままhookがreset�
   }
 });
 
-test('CLI通し: 起動時刻取得が一時失敗してもleaseとPID registryのidentityを共有する', async () => {
+test('CLI通し: 常駐プロセスの起動時刻取得に失敗したらleaseとPID registryを作成しない', async () => {
   const workspace = createWorkspace();
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-identity-bin-'));
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-identity-runtime-'));
@@ -381,26 +381,25 @@ test('CLI通し: 起動時刻取得が一時失敗してもleaseとPID registry�
     ], {
       cwd: workspace,
       env: { ...env, GH_MAESTRO_WORKER: 'orchestrator' },
-      stdio: 'ignore',
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
 
     const registryPath = lifecycle.pidFilePath(workspace, supervisor.pid);
     const leasePath = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-worker-supervisor.json');
-    const deadline = Date.now() + 20000;
-    let registryEntry = null;
-    let leaseEntry = null;
-    while (Date.now() < deadline && (!registryEntry || !leaseEntry)) {
-      try { registryEntry = JSON.parse(fs.readFileSync(registryPath, 'utf8')); } catch { registryEntry = null; }
-      try { leaseEntry = JSON.parse(fs.readFileSync(leasePath, 'utf8')); } catch { leaseEntry = null; }
-      if (!registryEntry || !leaseEntry) await waitFor(100);
+    const stderr = [];
+    supervisor.stdout.on('data', () => {});
+    supervisor.stderr.on('data', (chunk) => stderr.push(String(chunk)));
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && supervisor.exitCode === null) {
+      await waitFor(100);
     }
 
-    assert.ok(registryEntry, `PID registryが作成されること: ${registryPath}`);
-    assert.ok(leaseEntry, `resident leaseが作成されること: ${leasePath}`);
-    assert.equal(registryEntry.pid, supervisor.pid);
-    assert.equal(leaseEntry.pid, supervisor.pid);
-    assert.equal(leaseEntry.startTime, registryEntry.startTime,
-      '起動時刻取得の一時失敗があってもleaseとregistryのidentityを分断しない');
+    assert.equal(supervisor.exitCode, 1,
+      `起動時刻不明時は常駐起動を拒否すること: ${stderr.join('')}`);
+    assert.equal(fs.existsSync(registryPath), false,
+      `PID registryを作成しないこと: ${registryPath}`);
+    assert.equal(fs.existsSync(leasePath), false,
+      `resident leaseを作成しないこと: ${leasePath}`);
   } finally {
     let stopError = null;
     try {
