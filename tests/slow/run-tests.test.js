@@ -82,10 +82,16 @@ function createWorkspaceAndWorktreePair() {
   const configWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-config-workspace-'));
   const executionWorktree = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-execution-worktree-'));
   const marker = path.join(os.tmpdir(), `gh-maestro-worktree-target-${process.pid}-${Date.now()}.log`);
+  const lintMarker = path.join(os.tmpdir(), `gh-maestro-worktree-lint-${process.pid}-${Date.now()}.log`);
   const runnerSource = (label) => `
 const fs = require('fs');
 fs.appendFileSync(process.env.RUNNER_MARKER, ${JSON.stringify(label)} + '\\n', 'utf8');
 process.stdout.write('custom runner output\\n');
+`.trimStart();
+  const lintSource = (label) => `
+const fs = require('fs');
+fs.appendFileSync(process.env.LINT_MARKER, ${JSON.stringify(label)} + '\\n', 'utf8');
+process.stdout.write('[]');
 `.trimStart();
 
   fs.mkdirSync(path.join(configWorkspace, '.gh-maestro'), { recursive: true });
@@ -101,6 +107,12 @@ process.stdout.write('custom runner output\\n');
   }, null, 2), 'utf8');
   fs.writeFileSync(path.join(configWorkspace, 'runner.js'), runnerSource('config-workspace'), 'utf8');
   fs.writeFileSync(path.join(executionWorktree, 'runner.js'), runnerSource('execution-worktree'), 'utf8');
+  for (const [project, label] of [[configWorkspace, 'config-workspace'], [executionWorktree, 'execution-worktree']]) {
+    fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({
+      scripts: { lint: 'node lint-runner.js' },
+    }, null, 2), 'utf8');
+    fs.writeFileSync(path.join(project, 'lint-runner.js'), lintSource(label), 'utf8');
+  }
 
   for (const project of [configWorkspace, executionWorktree]) {
     runGit(project, ['init', '-q']);
@@ -110,7 +122,7 @@ process.stdout.write('custom runner output\\n');
     runGit(project, ['commit', '-qm', 'fixture']);
   }
 
-  return { configWorkspace, executionWorktree, marker };
+  return { configWorkspace, executionWorktree, marker, lintMarker };
 }
 
 function clearTestResult(project) {
@@ -207,7 +219,7 @@ test('run-tests.js: 実在しないNodeテストファイルはtest-file-not-fou
 });
 
 test('run-tests.js: 設定workspaceと実行worktreeを分離し、両方の指定形式でworktreeのHEADと成果物を使う', () => {
-  const { configWorkspace, executionWorktree, marker } = createWorkspaceAndWorktreePair();
+  const { configWorkspace, executionWorktree, marker, lintMarker } = createWorkspaceAndWorktreePair();
   const worktreeHead = resolveGitHead(executionWorktree);
   const configHead = resolveGitHead(configWorkspace);
   assert.notEqual(worktreeHead, configHead, '設定用と実行用のHEADを別物にするfixtureであること');
@@ -220,22 +232,29 @@ test('run-tests.js: 設定workspaceと実行worktreeを分離し、両方の指�
       clearTestResult(configWorkspace);
       clearTestResult(executionWorktree);
       fs.rmSync(marker, { force: true });
+      fs.rmSync(lintMarker, { force: true });
       const result = spawnSync(process.execPath, args, {
         cwd: executionWorktree,
         env: cleanChildEnv({
           GH_MAESTRO_WORKSPACE: configWorkspace,
           RUNNER_MARKER: marker,
+          LINT_MARKER: lintMarker,
         }),
         encoding: 'utf8',
       });
 
       assert.equal(result.status, 0, `${label}でrun-tests.jsが失敗しました: ${result.stderr}`);
       assert.deepEqual(fs.readFileSync(marker, 'utf8').trim().split(/\r?\n/), ['execution-worktree']);
+      assert.deepEqual(fs.readFileSync(lintMarker, 'utf8').trim().split(/\r?\n/), ['execution-worktree']);
 
       const executionArtifact = readTestResultArtifact(executionWorktree);
       assert.equal(executionArtifact.ok, true);
       assert.equal(executionArtifact.result.testedHead, worktreeHead);
       assert.equal(executionArtifact.result.layers.every.testedHead, worktreeHead);
+      assert.equal(executionArtifact.result.lint.status, 'complete');
+      assert.equal(executionArtifact.result.lint.outcome, 'pass');
+      assert.equal(executionArtifact.result.lint.findingCount, 0);
+      assert.equal(executionArtifact.result.lint.testedHead, worktreeHead);
       assert.equal(readTestResultArtifact(configWorkspace).reason, 'missing');
     }
   } finally {
@@ -244,5 +263,6 @@ test('run-tests.js: 設定workspaceと実行worktreeを分離し、両方の指�
     fs.rmSync(configWorkspace, { recursive: true, force: true });
     fs.rmSync(executionWorktree, { recursive: true, force: true });
     fs.rmSync(marker, { force: true });
+    fs.rmSync(lintMarker, { force: true });
   }
 });
