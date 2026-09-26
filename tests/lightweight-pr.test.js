@@ -29,15 +29,17 @@ test('lightweight-pr.md: タイトルだけのIssueからPR作成までの具体
   assert.ok(powershellFences.some((fence) => /\$env:GH_MAESTRO_BASE_BRANCH/.test(fence) && /gh-create-pr\.js/.test(fence)));
 });
 
-test('lightweight-pr.md: PR監視はReview Managerを起動せず、slow層と申告確認を残す', () => {
+test('lightweight-pr.md: target経由のPR監視はReview Managerを起動せず、slow層と申告確認を残す', () => {
   const content = readDocument();
   const fences = shellFences(content);
-  const pollFence = fences.find((fence) => /poll-pr\.js/.test(fence));
+  const monitorFence = fences.find((fence) => /activate-pr-monitor\.js/.test(fence));
 
-  assert.ok(pollFence, 'poll-pr.jsの実行例がない');
-  assert.match(pollFence, /--no-review-manager/);
-  assert.match(pollFence, /--no-review-events/);
-  assert.doesNotMatch(pollFence, /start-review-manager\.js/);
+  assert.ok(monitorFence, 'activate-pr-monitor.jsの実行例がない');
+  assert.match(monitorFence, /--no-review-manager/);
+  assert.match(monitorFence, /--no-review-events/);
+  assert.doesNotMatch(monitorFence, /start-review-manager\.js/);
+  assert.match(content, /poll-pr-monitor\.js/);
+  assert.doesNotMatch(content, /node "\{\{SCRIPTS_PATH\}\}\/poll-pr\.js"/);
   assert.match(content, /SLOW_TEST_RESULT/);
   assert.match(content, /テスト申告コメント/);
   assert.match(content, /REVIEW_MANAGER_STARTED[\s\S]*出力されない/);

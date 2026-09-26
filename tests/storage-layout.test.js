@@ -353,6 +353,6 @@ test('assertDisjointRoots: runtime root が managed root の子孫の場合 thro
 test('MANAGED_TOP_LEVEL: install.js が管理する既知のトップレベル名のみを含む', () => {
   assert.deepEqual(
     [...sl.MANAGED_TOP_LEVEL].sort(),
-    ['agents.json', 'config.json', 'scripts', 'skills']
+    ['.claude-plugin', 'agents.json', 'config.json', 'monitors', 'scripts', 'skills']
   );
 });

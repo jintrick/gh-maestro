@@ -344,7 +344,14 @@ function assertDisjointRoots(runtimeRootOverride) {
  * ここに無い名前を ghMaestroPath() で組み立てようとした場合は install.js 側で
  * throw する（登録漏れの実行時検知）。
  */
-const MANAGED_TOP_LEVEL = new Set(['scripts', 'skills', 'config.json', 'agents.json']);
+const MANAGED_TOP_LEVEL = new Set([
+  'scripts',
+  'skills',
+  'config.json',
+  'agents.json',
+  '.claude-plugin',
+  'monitors',
+]);
 
 module.exports = {
   managedRoot,

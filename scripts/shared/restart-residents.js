@@ -8,9 +8,10 @@
 //
 // poll-pr.js は poll-reviews.js を子プロセスとして起動するため、両方が登録されて
 // いた場合は poll-reviews.js を単独で二重起動しない。msg-poll.js と poll-pr.js は
-// stdout が呼び出し元の Monitor へ届く契約を持つため、Monitor常駐3種はdetached
-// 起動せず、停止後にMonitorから同じ引数で張り直すコマンドを返す。Monitorを持たない
-// worker-supervisorだけはdetachedで直接入れ替える。
+// stdout が呼び出し元の Monitor へ届く契約を持つため、旧形式のMonitor常駐はdetached
+// 起動せず、停止後にMonitorから同じ引数で張り直すコマンドを返す。plugin monitor から
+// 起動された常駐は plugin のセッションライフサイクルが正本なので、install/resetで
+// killや張り直しを行わず、稼働中のプロセスを保持する。
 
 const fs = require('fs');
 const path = require('path');
@@ -87,6 +88,11 @@ function isResidentEntry(entry) {
   const spec = specForScript(entry.script);
   if (!spec) return false;
   return (entry.workerName ?? null) === spec.workerName;
+}
+
+function isPluginManagedEntry(entry) {
+  return Boolean(entry && Array.isArray(entry.args)
+    && entry.args.includes('--plugin-monitor'));
 }
 
 /**
@@ -732,18 +738,41 @@ function restartResidents(workspace, opts = {}) {
     fallbackSessionPid: opts.fallbackSessionPid,
   }));
 
+  const capturedEntries = entries;
+  const pluginManagedEntries = capturedEntries.filter(isPluginManagedEntry);
+  const pluginManagedScripts = new Set(pluginManagedEntries.map((entry) => entry.script));
+  const hasPluginManagedPollPr = pluginManagedScripts.has('poll-pr.js');
+  // plugin poll-pr の子 poll-reviews は同じ process tree に属するため、
+  // poll-pr が plugin 管理なら poll-reviews も停止対象から外す。
+  const entriesToRestart = capturedEntries.filter((entry) => {
+    if (isPluginManagedEntry(entry)) return false;
+    if (hasPluginManagedPollPr && entry.script === 'poll-reviews.js') return false;
+    return true;
+  });
+
   const entriesByScript = new Map();
-  for (const entry of entries) {
+  for (const entry of entriesToRestart) {
     if (!entriesByScript.has(entry.script)) entriesByScript.set(entry.script, []);
     entriesByScript.get(entry.script).push(entry);
   }
+  const allEntriesByScript = new Map();
+  for (const entry of capturedEntries) {
+    if (!allEntriesByScript.has(entry.script)) allEntriesByScript.set(entry.script, []);
+    allEntriesByScript.get(entry.script).push(entry);
+  }
   const results = RESIDENT_SPECS.map((spec) => {
-    const oldEntries = entriesByScript.get(spec.script) || [];
+    const oldEntries = allEntriesByScript.get(spec.script) || [];
+    const pluginManaged = pluginManagedScripts.has(spec.script)
+      || (hasPluginManagedPollPr && spec.script === 'poll-reviews.js' && oldEntries.length > 0);
     return {
       script: spec.script,
-      status: oldEntries.length === 0 ? 'not-running' : 'pending',
+      status: oldEntries.length === 0 ? 'not-running' : pluginManaged ? 'plugin-managed' : 'pending',
       oldPids: oldEntries.map((entry) => entry.pid),
       monitorRequired: false,
+      ...(pluginManaged ? {
+        pluginManaged: true,
+        reason: 'plugin monitorがセッションライフサイクルを管理するため停止・再起動しません',
+      } : {}),
     };
   });
   const resultByScript = new Map(results.map((result) => [result.script, result]));
@@ -752,7 +781,7 @@ function restartResidents(workspace, opts = {}) {
   // stop前に全対象の再起動引数を構築する。session-pidを解決できない対象を
   // 先に停止すると、再起動もMonitor再接続要求もできず常駐を失うためである。
   const plans = new Map();
-  for (const entry of entries) {
+  for (const entry of entriesToRestart) {
     const spec = specForScript(entry.script);
     try {
       const built = buildRestartArgs(spec, entry, workspace, hooks, opts);
@@ -771,7 +800,7 @@ function restartResidents(workspace, opts = {}) {
   }
 
   if (opts.skipStop) {
-    const stopError = ensureCapturedEntriesStopped(entries, hooks, opts);
+    const stopError = ensureCapturedEntriesStopped(entriesToRestart, hooks, opts);
     if (stopError) {
       for (const result of results) {
         if (result.status === 'pending') {
@@ -783,7 +812,7 @@ function restartResidents(workspace, opts = {}) {
       return { entries, results, errors };
     }
   } else {
-    for (const entry of entries) {
+    for (const entry of entriesToRestart) {
       const plan = plans.get(entry);
       if (!plan || !plan.ok) continue;
       const stopResult = stopEntry(workspace, entry, hooks, opts);
@@ -796,7 +825,8 @@ function restartResidents(workspace, opts = {}) {
     }
   }
 
-  const pollPrWasScheduled = () => ['replaced', 'monitor-required'].includes(resultByScript.get('poll-pr.js').status);
+  const pollPrWasScheduled = () => ['replaced', 'monitor-required', 'plugin-managed']
+    .includes(resultByScript.get('poll-pr.js').status);
   for (const spec of RESIDENT_SPECS) {
     const result = resultByScript.get(spec.script);
     const oldEntries = entriesByScript.get(spec.script) || [];
@@ -804,7 +834,7 @@ function restartResidents(workspace, opts = {}) {
 
     // poll-pr が新しい poll-reviews を子として起動するため、旧構成に両方が
     // 登録されていた場合は、poll-reviewsを単独spawnして二重監視を作らない。
-    const pollPrEntries = entriesByScript.get('poll-pr.js') || [];
+    const pollPrEntries = allEntriesByScript.get('poll-pr.js') || [];
     if (spec.script === 'poll-reviews.js'
       && pollPrEntries.length === oldEntries.length
       && pollPrEntries.length > 0
@@ -815,7 +845,7 @@ function restartResidents(workspace, opts = {}) {
       continue;
     }
 
-    const oldPids = new Set(entries.flatMap((entry) => entry.script === spec.script ? [entry.pid] : []));
+    const oldPids = new Set(capturedEntries.flatMap((entry) => entry.script === spec.script ? [entry.pid] : []));
     const readyEntries = oldEntries.filter((entry) => plans.get(entry)?.ok);
 
     if (spec.monitorRequired) {
@@ -903,6 +933,7 @@ module.exports = {
   replaceSessionPid,
   buildRestartArgs,
   isResidentEntry,
+  isPluginManagedEntry,
   cleanupLegacyResidentLease,
   restartResidents,
   formatCommand,

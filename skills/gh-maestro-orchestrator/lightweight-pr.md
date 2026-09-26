@@ -73,16 +73,16 @@ Remove-Item Env:GH_MAESTRO_BASE_BRANCH
 
 PR本文にはIssueを自動クローズするキーワードを入れない。Issueのクローズは通常の後始末で行う。
 
-### 4. `--no-review-manager` と `--no-review-events` でPR監視を起動する
+### 4. `--no-review-manager` と `--no-review-events` をtargetへ設定する
 
-orchestratorのMonitorで、次のコマンドを `persistent: true` として起動する。
+plugin monitorは `/gh-maestro` 起動時に固定コマンドで起動済みなので、通常のMonitorを追加で張らない。次のコマンドでPR監視targetだけを設定する。
 
 ```sh
-node "{{SCRIPTS_PATH}}/poll-pr.js" "$ISSUE" \
+node "{{SCRIPTS_PATH}}/activate-pr-monitor.js" --issue "$ISSUE" \
   --no-review-manager --no-review-events --workspace "$WORKSPACE" --base-branch "$BASE_BRANCH"
 ```
 
-`--no-review-manager`でReview Managerの起動を、`--no-review-events`でinline/formalレビューAPI監視を抑止する。PR検出後のslow層実行、slow完了時のテスト申告コメント更新、PRのマージ・クローズ監視は抑止しない。`run-slow-tests.js` を別途手動で回して代替してはならない。
+固定の `poll-pr-monitor.js` がtargetを読み、`poll-pr.js`を1回だけ起動する。`--no-review-manager`でReview Managerの起動を、`--no-review-events`でinline/formalレビューAPI監視を抑止する。PR検出後のslow層実行、slow完了時のテスト申告コメント更新、PRのマージ・クローズ監視は抑止しない。`run-slow-tests.js` を別途手動で回して代替してはならない。
 
 確認する記録は次のとおりである。
 

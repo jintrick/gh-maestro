@@ -8,6 +8,7 @@ const { execFileSync } = require('child_process');
 const ROOT = path.join(__dirname, '..');
 const SKILLS_DIR = path.join(ROOT, 'skills');
 const AGENTS_YAML = path.join(SKILLS_DIR, 'agents.yaml');
+const PLUGIN_DIR = path.join(ROOT, 'plugin');
 // 部分テンプレート（複数スキルの SKILL.md へ {{...}} で差し込む共通本文）の置き場所。
 // `_` 始まりのため skillDirs の走査対象からは除外され、スキルとしてはインストールされない。
 const PARTIALS_DIR = path.join(SKILLS_DIR, '_partials');
@@ -743,6 +744,48 @@ function installScripts(options = {}) {
 }
 
 /**
+ * Claude Code plugin の manifest と plugin monitors を managed root へ配置する。
+ * plugin root は ~/.gh-maestro そのものなので、固定コマンドから同じ root の
+ * scripts/ を ${CLAUDE_PLUGIN_ROOT} 経由で参照できる。
+ *
+ * @param {object} [options]
+ * @param {string} [options.pluginDir] plugin/ 原本ディレクトリ
+ * @param {string} [options.pluginRoot] .claude-plugin の配置先
+ * @param {string} [options.monitorsDir] monitors の配置先
+ */
+function installPluginAssets(options = {}) {
+  const sourceRoot = options.pluginDir || PLUGIN_DIR;
+  const sourceManifestDir = path.join(sourceRoot, '.claude-plugin');
+  const sourceMonitorsDir = path.join(sourceRoot, 'monitors');
+  const destManifestDir = options.pluginRoot || ghMaestroPath('.claude-plugin');
+  const destMonitorsDir = options.monitorsDir || ghMaestroPath('monitors');
+
+  const sourceManifest = path.join(sourceManifestDir, 'plugin.json');
+  const sourceMonitors = path.join(sourceMonitorsDir, 'monitors.json');
+  if (!fs.existsSync(sourceManifest) || !fs.existsSync(sourceMonitors)) {
+    throw new Error(`plugin 配布物が不足しています: ${sourceRoot}`);
+  }
+
+  fs.mkdirSync(destManifestDir, { recursive: true });
+  fs.mkdirSync(destMonitorsDir, { recursive: true });
+  pruneStaleRecursive(sourceManifestDir, destManifestDir, '.claude-plugin');
+  pruneStaleRecursive(sourceMonitorsDir, destMonitorsDir, 'monitors');
+
+  const destManifest = path.join(destManifestDir, 'plugin.json');
+  const destMonitors = path.join(destMonitorsDir, 'monitors.json');
+  for (const [source, dest] of [[sourceManifest, destManifest], [sourceMonitors, destMonitors]]) {
+    if (fs.existsSync(dest)) {
+      const stat = fs.lstatSync(dest);
+      if (!stat.isFile() || stat.isSymbolicLink()) fs.rmSync(dest, { recursive: true, force: true });
+    }
+    fs.copyFileSync(source, dest);
+  }
+  ok(`plugin manifest -> ${destManifest}`);
+  ok(`plugin monitors -> ${destMonitors}`);
+  return { pluginRoot: destManifestDir, monitorsDir: destMonitorsDir };
+}
+
+/**
  * 共有スキルを共有ディレクトリ（~/.gh-maestro/skills/）にデプロイする。
  * @param {object} agents parseAgentsYaml() の戻り値
  * @param {object} [options]
@@ -1068,7 +1111,7 @@ module.exports = {
   buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids,
   migrateLegacyAgentsConfig, cleanupLegacyAgentsConfig, cleanupLegacyHomePids,
   pruneManagedRootEntries, cleanupLegacyManagedRoot, installSkills,
-  installScripts, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
+  installScripts, installPluginAssets, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
   buildUserPromptExpansionHook, registerUserPromptExpansionHook,
 };
 
@@ -1170,6 +1213,13 @@ installScripts({
   agentsYaml: AGENTS_YAML,
   step,
   ok,
+});
+
+// ── Claude Code plugin (manifest + fixed plugin monitors) ───────────────────
+installPluginAssets({
+  pluginDir: PLUGIN_DIR,
+  pluginRoot: ghMaestroPath('.claude-plugin'),
+  monitorsDir: ghMaestroPath('monitors'),
 });
 
 // ── 共有スキルを ~/.gh-maestro/skills/ にデプロイ ─────────────────────────────
