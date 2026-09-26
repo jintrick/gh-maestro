@@ -4,9 +4,17 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { testResultPath, writeTestResultLayer } = require('../scripts/shared/test-result');
+const { spawnSync } = require('child_process');
+const {
+  readTestResultArtifact,
+  testResultPath,
+  writeTestResultLayer,
+} = require('../scripts/shared/test-result');
+const { workspaceRuntimeDir } = require('../scripts/shared/storage-layout');
 const { listTestLayers } = require('../scripts/run-tests');
 const { createTempDirScope } = require('../scripts/shared/temp-directory');
+
+const RUN_TESTS = path.join(__dirname, '..', 'scripts', 'run-tests.js');
 
 // push-and-declare.js は「ステージング・コミット・push・PR取得/作成・テスト結果申告」を
 // 一つの操作にまとめた収束型の単一入口（Issue #374）。テストは child-process.js の
@@ -17,7 +25,9 @@ const { createTempDirScope } = require('../scripts/shared/temp-directory');
 // declareTestResult（declare-test-result.js）は依存注入せず実物を通し、argvと実際の受理を
 // 一緒に固定する（.claude/rules/test-child-process-argv-boundary.md: 子プロセス境界のargvを
 // 注入モックで飛ばしたままにしない）。テスト結果は push 側へ数値を渡さず、
-// runner成果物が無い場合の unknown 縮退も実経路で確認する。
+// runner成果物が無い場合の unknown 縮退も実経路で確認する。Issue #577 の回帰テストだけは、
+// 隔離した一時fixtureで実際の run-tests.js CLIも起動する（push/ghの外部副作用は引き続き
+// child-process.jsのモックで遮断する）。
 //
 // pushAndDeclare の NODE_TEST_CONTEXT ガードは「テスト実行中の外部副作用（git操作・gh操作・
 // 投稿）を機械的に拒否する」構造的対策（Issue #202）。ガード自体の動作は「NODE_TEST_CONTEXT
@@ -112,6 +122,78 @@ function tempWorkspace() {
   return tempDirScope.mkdtemp('ghm-pad-test-');
 }
 
+function runGit(cwd, args) {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 0, `git ${args.join(' ')} failed: ${result.stderr}`);
+  return result;
+}
+
+function cleanChildEnv(overrides = {}) {
+  const env = { ...process.env, ...overrides };
+  delete env.NODE_TEST_CONTEXT;
+  return env;
+}
+
+function clearTestArtifact(workspace) {
+  try { fs.rmSync(testResultPath(workspace), { force: true }); } catch {}
+  try { fs.rmSync(workspaceRuntimeDir(workspace), { recursive: true, force: true }); } catch {}
+}
+
+function createRunTestsDeclarationFixture() {
+  const mainWorkspace = tempWorkspace();
+  const worktree = tempWorkspace();
+  const markerWorkspace = tempWorkspace();
+  const runnerMarker = path.join(markerWorkspace, 'runner.log');
+  const lintMarker = path.join(markerWorkspace, 'lint.log');
+  const runnerSource = (label) => `
+const fs = require('fs');
+fs.appendFileSync(process.env.RUNNER_MARKER, ${JSON.stringify(label)} + '\\n', 'utf8');
+process.stdout.write('# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0\\n');
+`.trimStart();
+  const lintSource = (label) => `
+const fs = require('fs');
+fs.appendFileSync(process.env.LINT_MARKER, ${JSON.stringify(label)} + '\\n', 'utf8');
+process.stdout.write('[]');
+`.trimStart();
+
+  writeTestLayerConfig(mainWorkspace, {
+    full: {
+      scope: 'full',
+      command: [process.execPath, 'runner.js'],
+    },
+  });
+  fs.writeFileSync(path.join(mainWorkspace, 'runner.js'), runnerSource('main-workspace'), 'utf8');
+  fs.writeFileSync(path.join(worktree, 'runner.js'), runnerSource('execution-worktree'), 'utf8');
+  for (const [workspace, label] of [[mainWorkspace, 'main-workspace'], [worktree, 'execution-worktree']]) {
+    fs.writeFileSync(path.join(workspace, 'package.json'), JSON.stringify({
+      scripts: { lint: 'node lint-runner.js' },
+    }, null, 2), 'utf8');
+    fs.writeFileSync(path.join(workspace, 'lint-runner.js'), lintSource(label), 'utf8');
+    runGit(workspace, ['init', '-q']);
+    runGit(workspace, ['config', 'user.email', 'test@example.invalid']);
+    runGit(workspace, ['config', 'user.name', 'gh-maestro test']);
+    runGit(workspace, ['add', '-A']);
+    runGit(workspace, ['commit', '-qm', 'fixture']);
+  }
+
+  return { mainWorkspace, worktree, runnerMarker, lintMarker };
+}
+
+function runCoderFull({ mainWorkspace, worktree, runnerMarker, lintMarker }, explicitWorkspace) {
+  const args = [RUN_TESTS];
+  if (explicitWorkspace) args.push('--workspace', mainWorkspace);
+  args.push('full');
+  return spawnSync(process.execPath, args, {
+    cwd: worktree,
+    env: cleanChildEnv({
+      GH_MAESTRO_WORKSPACE: mainWorkspace,
+      RUNNER_MARKER: runnerMarker,
+      LINT_MARKER: lintMarker,
+    }),
+    encoding: 'utf8',
+  });
+}
+
 function writeTestLayerConfig(workspace, layers = {
   full: { scope: 'full', command: ['test-runner'] },
 }) {
@@ -202,13 +284,87 @@ function fullPathHandlers(overrides = {}) {
     { matches: m.quietDiff(), result: overrides.quietDiff || { status: 1, stdout: '' } },
     { matches: m.commit(), result: { status: 0, stdout: '' } },
     { matches: m.push(), result: overrides.push || { status: 0, stdout: '' } },
-    { matches: m.head(), result: { status: 0, stdout: SHA + '\n' } },
+    { matches: m.head(), result: overrides.head || { status: 0, stdout: SHA + '\n' } },
     { matches: m.prList(), result: overrides.prList || { status: 0, stdout: '[]' } }, // 既存PRなし
     { matches: m.prCreate(), result: overrides.prCreate || { status: 0, stdout: PR_URL + '\n' } },
     { matches: m.commentList(), result: overrides.commentList || { status: 0, stdout: '[]' } },
     { matches: m.commentCreate(), result: overrides.commentCreate || { status: 0, stdout: `{"html_url":"${DECL_URL}"}` } },
   ];
 }
+
+test('Issue #577: coder手順のrun-tests後にpush-and-declareがfullとlintを受理する', () => {
+  const fixture = createRunTestsDeclarationFixture();
+  const executionHead = String(runGit(fixture.worktree, ['rev-parse', 'HEAD']).stdout).trim();
+  const savedWorkspace = process.env.GH_MAESTRO_WORKSPACE;
+  process.env.GH_MAESTRO_WORKSPACE = fixture.mainWorkspace;
+
+  try {
+    for (const explicitWorkspace of [true, false]) {
+      fs.rmSync(fixture.runnerMarker, { force: true });
+      fs.rmSync(fixture.lintMarker, { force: true });
+      clearTestArtifact(fixture.worktree);
+
+      const runResult = runCoderFull(fixture, explicitWorkspace);
+      assert.equal(
+        runResult.status,
+        0,
+        `${explicitWorkspace ? '--workspace指定' : '省略'}のrun-tests.jsが失敗しました: ${runResult.stderr}`,
+      );
+      assert.deepEqual(
+        fs.readFileSync(fixture.runnerMarker, 'utf8').trim().split(/\r?\n/),
+        ['execution-worktree'],
+      );
+      assert.deepEqual(
+        fs.readFileSync(fixture.lintMarker, 'utf8').trim().split(/\r?\n/),
+        ['execution-worktree'],
+      );
+
+      const artifact = readTestResultArtifact(fixture.worktree);
+      assert.equal(artifact.ok, true);
+      assert.equal(artifact.result.layers.full.status, 'complete');
+      assert.equal(artifact.result.layers.full.outcome, 'pass');
+      assert.equal(artifact.result.layers.full.testedHead, executionHead);
+      assert.equal(artifact.result.lint.status, 'complete');
+      assert.equal(artifact.result.lint.outcome, 'pass');
+      assert.equal(artifact.result.lint.findingCount, 0);
+      assert.equal(artifact.result.lint.testedHead, executionHead);
+
+      const { mod, calls } = loadModule(dispatcher(fullPathHandlers({
+        head: { status: 0, stdout: `${executionHead}\n` },
+      })));
+      const declaration = withGuardBypassed(() => mod.pushAndDeclare({
+        issue: 374,
+        workspace: explicitWorkspace ? fixture.mainWorkspace : undefined,
+        worktree: fixture.worktree,
+        env: {
+          GH_MAESTRO_WORKSPACE: fixture.mainWorkspace,
+          GH_MAESTRO_BASE_BRANCH: 'dev',
+        },
+      }, {
+        listTestLayersFn: listTestLayers,
+        commitContentHashFn: () => artifact.result.layers.full.testedContentHash,
+      }));
+
+      assert.equal(
+        declaration.exitCode,
+        0,
+        `${explicitWorkspace ? '--workspace指定' : '省略'}のpush-and-declareが失敗しました: ${declaration.stderr}`,
+      );
+      const comment = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
+      assert.ok(comment, 'full/lintの申告コメントが投稿される');
+      assert.match(comment.args[3], /\*\*結果\*\*: pass/);
+      assert.match(comment.args[3], /\*\*lint\*\*: pass \(findings: 0\)/);
+      assert.match(comment.args[3], /\*\*full\*\*: pass/);
+    }
+  } finally {
+    if (savedWorkspace === undefined) delete process.env.GH_MAESTRO_WORKSPACE;
+    else process.env.GH_MAESTRO_WORKSPACE = savedWorkspace;
+    clearTestArtifact(fixture.mainWorkspace);
+    clearTestArtifact(fixture.worktree);
+    fs.rmSync(fixture.runnerMarker, { force: true });
+    fs.rmSync(fixture.lintMarker, { force: true });
+  }
+});
 
 /** 再実行（同じ状態での2回目）を検証するためのステートフルなハンドラ群。
  *  1回目の実行の副作用（コミット済み・PR作成済み・申告コメント投稿済み）を state に残し、
