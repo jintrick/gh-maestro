@@ -27,7 +27,7 @@ gh-maestro は **GitHub Issue のコメント** をメッセージバスとし�
 
 ### orchestrator は Claude Code 専用
 
-orchestrator の手順は Claude Code の **plugin monitors**（対話型セッションのバックグラウンドスクリプトの出力を通知として受け取る）を前提に組み立てられている。インストール時に `plugin/.claude-plugin/plugin.json` と `plugin/monitors/monitors.json` が `~/.gh-maestro/` へ配置され、`/gh-maestro` 起動時に inbox監視（`msg-poll.js`）と固定PR監視役（`poll-pr-monitor.js`）が起動する。通常のMonitorツールは既定5分・最大30分で終了するため、これらへ `persistent` を設定したり手動で張り直したりしない。Monitor を持たないエージェントでは orchestrator を務められない。
+orchestrator の手順は Claude Code の **plugin monitors**（対話型セッションのバックグラウンドスクリプトの出力を通知として受け取る）を前提に組み立てられている。インストール時に `plugin/.claude-plugin/plugin.json`、`plugin/monitors/monitors.json`、監視用スクリプトが `~/.claude/skills/gh-maestro/` にskills-dir pluginとして配置され、通常起動した次のClaude Codeセッションから自動発見される。`/gh-maestro` 起動時に inbox監視（`msg-poll.js`）と固定PR監視役（`poll-pr-monitor.js`）が起動する。通常のMonitorツールは既定5分・最大30分で終了するため、これらへ `persistent` を設定したり手動で張り直したりしない。Monitor を持たないエージェントでは orchestrator を務められない。
 
 worker は Monitor を必要としない。orchestrator からの追加指示は `worker-supervisor.js` がプロセスの再開（resume）として配送するため、worker 側はポーリングを一切行わない。したがって worker には agy / codex / reasonix を自由に割り当てられる（`skillAgentMap` 参照）。
 
@@ -46,8 +46,8 @@ cd gh-maestro
 node scripts/install.js
 ```
 
-インストール後は、対象プロジェクトの対話型 `claude` セッションで `/gh-maestro` を実行する。plugin monitors は対話型セッション専用で、`-p` の非対話実行では起動しない。
-ローカルのplugin rootを明示する場合は `claude --plugin-dir "$HOME/.gh-maestro"` で起動するか、Claude Codeの `/plugin` 管理経路で `gh-maestro` を有効化する。
+インストール後は、対象プロジェクトの対話型 `claude` セッションを通常起動し、`/gh-maestro` を実行する。インストーラーが `~/.claude/skills/gh-maestro/` をskills-dir pluginとして配置するため、通常起動に `--plugin-dir` は不要である。plugin monitors は対話型セッション専用で、`-p` の非対話実行では起動しない。
+互換性のため、ローカルのplugin rootを明示する場合は `claude --plugin-dir "$HOME/.gh-maestro"` でも起動できる。
 
 ## 使い方
 

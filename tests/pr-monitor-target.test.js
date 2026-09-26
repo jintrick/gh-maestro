@@ -12,6 +12,7 @@ process.env.GH_MAESTRO_RUNTIME_DIR = runtimeRoot;
 
 const {
   targetPath,
+  targetLockPath,
   createPrMonitorTarget,
   readPrMonitorTarget,
   writePrMonitorTarget,
@@ -88,4 +89,25 @@ test('target の型不正は書き込み時に拒否する', () => {
     sessionStartTime: null,
     updatedAt: new Date().toISOString(),
   }), /フィールドが不正/);
+});
+
+test('targetのwriteとclearは同じ排他ロックを使い、新世代を旧世代の後始末から守る', () => {
+  const workspace = makeWorkspace();
+  const first = createPrMonitorTarget({ issue: 581, generation: 'first' });
+  const second = createPrMonitorTarget({ issue: 581, generation: 'second' });
+  writePrMonitorTarget(workspace, first);
+
+  const lockPath = targetLockPath(workspace);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  fs.writeFileSync(lockPath, 'writer holds target lock', 'utf8');
+  try {
+    assert.throws(() => writePrMonitorTarget(workspace, second), /排他ロックを取得できません/);
+    assert.throws(() => clearPrMonitorTarget(workspace, first), /排他ロックを取得できません/);
+  } finally {
+    fs.unlinkSync(lockPath);
+  }
+
+  writePrMonitorTarget(workspace, second);
+  assert.equal(clearPrMonitorTarget(workspace, { issue: 581, generation: 'first' }), false);
+  assert.equal(readPrMonitorTarget(workspace).generation, 'second');
 });

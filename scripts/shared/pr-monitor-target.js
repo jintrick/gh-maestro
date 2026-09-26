@@ -35,6 +35,37 @@ function targetPath(workspace) {
   return path.join(workspaceRuntimeDir(workspace), TARGET_FILE);
 }
 
+function targetLockPath(workspace) {
+  return `${targetPath(workspace)}.lock`;
+}
+
+/**
+ * targetの読み取り判定と削除、ならびにatomic writeを同じ排他区間へ置く。
+ * clearが旧値を読んだ直後に新しいtargetがatomicWriteされると、旧世代の後始末が
+ * 新世代をunlinkしてしまうため、read/check/unlinkをwriterと共有するロックで囲む。
+ */
+function withTargetLock(workspace, action) {
+  const filePath = targetPath(workspace);
+  ensureWorkspaceRuntimeDir(workspace, { register: !isNodeTestContext() });
+  const lockPath = `${filePath}.lock`;
+  let fd;
+  try {
+    fd = fs.openSync(lockPath, 'wx');
+  } catch (error) {
+    throw new Error(`PR monitor target の排他ロックを取得できません: ${lockPath}: ${error.message}`, { cause: error });
+  }
+  try {
+    return action(filePath);
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+    try {
+      fs.unlinkSync(lockPath);
+    } catch (error) {
+      if (!error || error.code !== 'ENOENT') throw error;
+    }
+  }
+}
+
 function isPositiveInteger(value) {
   return Number.isInteger(value) && value > 0;
 }
@@ -91,8 +122,9 @@ function readPrMonitorTarget(workspace) {
 function writePrMonitorTarget(workspace, target) {
   const filePath = targetPath(workspace);
   const normalized = validateTarget(target, filePath);
-  ensureWorkspaceRuntimeDir(workspace, { register: !isNodeTestContext() });
-  atomicWriteJson(filePath, normalized);
+  withTargetLock(workspace, () => {
+    atomicWriteJson(filePath, normalized);
+  });
   return normalized;
 }
 
@@ -125,24 +157,26 @@ function createPrMonitorTarget({
  * generation も照合できる。
  */
 function clearPrMonitorTarget(workspace, expected = {}) {
-  const filePath = targetPath(workspace);
-  const current = readPrMonitorTarget(workspace);
-  if (!current) return false;
-  if (expected.issue !== undefined && String(expected.issue) !== current.issue) return false;
-  if (expected.generation !== undefined && expected.generation !== current.generation) return false;
+  return withTargetLock(workspace, (filePath) => {
+    const current = readPrMonitorTarget(workspace);
+    if (!current) return false;
+    if (expected.issue !== undefined && String(expected.issue) !== current.issue) return false;
+    if (expected.generation !== undefined && expected.generation !== current.generation) return false;
 
-  try {
-    fs.unlinkSync(filePath);
-  } catch (error) {
-    if (error && error.code === 'ENOENT') return false;
-    throw new Error(`PR monitor target を削除できません: ${filePath}: ${error.message}`, { cause: error });
-  }
-  return true;
+    try {
+      fs.unlinkSync(filePath);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') return false;
+      throw new Error(`PR monitor target を削除できません: ${filePath}: ${error.message}`, { cause: error });
+    }
+    return true;
+  });
 }
 
 module.exports = {
   TARGET_FILE,
   targetPath,
+  targetLockPath,
   validateTarget,
   createPrMonitorTarget,
   readPrMonitorTarget,

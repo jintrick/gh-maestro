@@ -160,6 +160,39 @@ test('restartResidents: plugin monitor管理の常駐は停止・再起動しな
   }
 });
 
+test('restartResidents: 同じscriptにplugin管理と旧形式が混在しても旧形式だけ張り直しを要求する', () => {
+  const workspace = makeWorkspace();
+  try {
+    const pluginEntry = residentEntries(workspace)[1];
+    pluginEntry.args.push('--plugin-monitor');
+    const legacyEntry = {
+      ...residentEntries(workspace)[1],
+      pid: 202,
+      startTime: 'old-202',
+    };
+    const entries = [pluginEntry, legacyEntry];
+    const harness = makeHarness(workspace, { entries });
+    const result = restartResidents(workspace, {
+      scriptsPath: path.join(workspace, 'scripts'),
+      preCapturedEntries: entries,
+      hooks: harness.hooks,
+      maxAttempts: 1,
+      waitMs: 0,
+    });
+    const msgPoll = result.results.find((item) => item.script === 'msg-poll.js');
+    assert.equal(msgPoll.status, 'monitor-required');
+    assert.equal(msgPoll.monitorRequired, true);
+    assert.equal(msgPoll.pluginManaged, true);
+    assert.deepEqual(msgPoll.pluginManagedPids, [102]);
+    assert.deepEqual(msgPoll.oldPids.sort((a, b) => a - b), [102, 202]);
+    assert.equal(msgPoll.commands.length, 1, '旧形式の常駐1件だけを張り直す');
+    assert.deepEqual(harness.unregistered, [202]);
+    assert.equal(harness.live.has(102), true, 'plugin管理の常駐は停止しない');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test('buildRestartArgs: msg-pollはrestart CLIの親PIDを使わずregistryのsession-pidを引き継ぐ', () => {
   const workspace = makeWorkspace();
   try {

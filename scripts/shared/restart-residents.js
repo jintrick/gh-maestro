@@ -762,16 +762,24 @@ function restartResidents(workspace, opts = {}) {
   }
   const results = RESIDENT_SPECS.map((spec) => {
     const oldEntries = allEntriesByScript.get(spec.script) || [];
+    const legacyEntries = entriesByScript.get(spec.script) || [];
+    const pluginEntries = oldEntries.filter(isPluginManagedEntry);
     const pluginManaged = pluginManagedScripts.has(spec.script)
       || (hasPluginManagedPollPr && spec.script === 'poll-reviews.js' && oldEntries.length > 0);
+    const pluginOnly = pluginManaged && legacyEntries.length === 0;
     return {
       script: spec.script,
-      status: oldEntries.length === 0 ? 'not-running' : pluginManaged ? 'plugin-managed' : 'pending',
+      status: oldEntries.length === 0 ? 'not-running' : pluginOnly ? 'plugin-managed' : 'pending',
       oldPids: oldEntries.map((entry) => entry.pid),
       monitorRequired: false,
       ...(pluginManaged ? {
         pluginManaged: true,
-        reason: 'plugin monitorがセッションライフサイクルを管理するため停止・再起動しません',
+        pluginManagedPids: pluginEntries.map((entry) => entry.pid),
+        ...(pluginOnly ? {
+          reason: 'plugin monitorがセッションライフサイクルを管理するため停止・再起動しません',
+        } : {
+          reason: 'plugin monitor管理の常駐を保持し、旧形式の常駐だけMonitorから張り直します',
+        }),
       } : {}),
     };
   });

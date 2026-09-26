@@ -744,14 +744,46 @@ function installScripts(options = {}) {
 }
 
 /**
- * Claude Code plugin の manifest と plugin monitors を managed root へ配置する。
- * plugin root は ~/.gh-maestro そのものなので、固定コマンドから同じ root の
- * scripts/ を ${CLAUDE_PLUGIN_ROOT} 経由で参照できる。
+ * ディレクトリの中身を、リンクを追従せずに別のディレクトリへミラーする。
+ * installPluginAssets のskills-dir plugin配布では、manifest/monitorだけでなく
+ * ${CLAUDE_PLUGIN_ROOT} から参照する共有CLIも同じplugin rootへ置く必要がある。
+ */
+function copyDirectoryContents(srcDir, destDir, label) {
+  fs.mkdirSync(destDir, { recursive: true });
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    const source = path.join(srcDir, entry.name);
+    const destination = path.join(destDir, entry.name);
+    if (entry.isDirectory() && !entry.isSymbolicLink()) {
+      const existing = fs.existsSync(destination) ? fs.lstatSync(destination) : null;
+      if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) {
+        fs.rmSync(destination, { recursive: true, force: true });
+      }
+      copyDirectoryContents(source, destination, label ? path.join(label, entry.name) : entry.name);
+      continue;
+    }
+    if (!entry.isFile()) {
+      throw new Error(`plugin配布元に未対応のファイル種別があります: ${source}`);
+    }
+    const existing = fs.existsSync(destination) ? fs.lstatSync(destination) : null;
+    if (existing && (!existing.isFile() || existing.isSymbolicLink())) {
+      fs.rmSync(destination, { recursive: true, force: true });
+    }
+    fs.copyFileSync(source, destination);
+  }
+}
+
+/**
+ * Claude Code plugin の manifest、plugin monitors、plugin rootのCLIを配置する。
+ * 既存のmanaged rootへ置く呼び出しでは plugin root は ~/.gh-maestro そのもの、
+ * skills-dir pluginへ置く呼び出しでは ~/.claude/skills/gh-maestro になる。
+ * どちらも固定コマンドから同じrootの scripts/ を ${CLAUDE_PLUGIN_ROOT} 経由で参照できる。
  *
  * @param {object} [options]
  * @param {string} [options.pluginDir] plugin/ 原本ディレクトリ
  * @param {string} [options.pluginRoot] .claude-plugin の配置先
  * @param {string} [options.monitorsDir] monitors の配置先
+ * @param {string} [options.pluginInstallRoot] 実際のplugin root（scriptsの配置先）
+ * @param {string} [options.scriptsDir] plugin rootへミラーする共有スクリプトの原本
  */
 function installPluginAssets(options = {}) {
   const sourceRoot = options.pluginDir || PLUGIN_DIR;
@@ -759,17 +791,28 @@ function installPluginAssets(options = {}) {
   const sourceMonitorsDir = path.join(sourceRoot, 'monitors');
   const destManifestDir = options.pluginRoot || ghMaestroPath('.claude-plugin');
   const destMonitorsDir = options.monitorsDir || ghMaestroPath('monitors');
+  const destPluginRoot = options.pluginInstallRoot || null;
+  const sourceScriptsDir = options.scriptsDir || null;
+  const destScriptsDir = options.pluginScriptsDir
+    || (destPluginRoot ? path.join(destPluginRoot, 'scripts') : null);
 
   const sourceManifest = path.join(sourceManifestDir, 'plugin.json');
   const sourceMonitors = path.join(sourceMonitorsDir, 'monitors.json');
   if (!fs.existsSync(sourceManifest) || !fs.existsSync(sourceMonitors)) {
     throw new Error(`plugin 配布物が不足しています: ${sourceRoot}`);
   }
+  if (sourceScriptsDir && !fs.existsSync(sourceScriptsDir)) {
+    throw new Error(`plugin共有スクリプトの原本が不足しています: ${sourceScriptsDir}`);
+  }
 
   fs.mkdirSync(destManifestDir, { recursive: true });
   fs.mkdirSync(destMonitorsDir, { recursive: true });
+  if (destScriptsDir) fs.mkdirSync(destScriptsDir, { recursive: true });
   pruneStaleRecursive(sourceManifestDir, destManifestDir, '.claude-plugin');
   pruneStaleRecursive(sourceMonitorsDir, destMonitorsDir, 'monitors');
+  if (sourceScriptsDir && destScriptsDir) {
+    pruneStaleRecursive(sourceScriptsDir, destScriptsDir, 'scripts');
+  }
 
   const destManifest = path.join(destManifestDir, 'plugin.json');
   const destMonitors = path.join(destMonitorsDir, 'monitors.json');
@@ -780,9 +823,18 @@ function installPluginAssets(options = {}) {
     }
     fs.copyFileSync(source, dest);
   }
+  if (sourceScriptsDir && destScriptsDir) {
+    copyDirectoryContents(sourceScriptsDir, destScriptsDir, 'scripts');
+  }
   ok(`plugin manifest -> ${destManifest}`);
   ok(`plugin monitors -> ${destMonitors}`);
-  return { pluginRoot: destManifestDir, monitorsDir: destMonitorsDir };
+  if (sourceScriptsDir && destScriptsDir) ok(`plugin scripts -> ${destScriptsDir}`);
+  return {
+    pluginRoot: destPluginRoot || path.dirname(destManifestDir),
+    manifestDir: destManifestDir,
+    monitorsDir: destMonitorsDir,
+    scriptsDir: destScriptsDir,
+  };
 }
 
 /**
@@ -1220,6 +1272,21 @@ installPluginAssets({
   pluginDir: PLUGIN_DIR,
   pluginRoot: ghMaestroPath('.claude-plugin'),
   monitorsDir: ghMaestroPath('monitors'),
+  pluginInstallRoot: ghMaestroDir,
+});
+
+// Claude Codeはskills directory配下の .claude-plugin/plugin.json を次回の
+// 対話型セッションで自動発見する。managed rootへファイルを置くだけでは
+// --plugin-dirなしの通常起動からは発見されないため、/gh-maestro のSKILL.mdが
+// 既に配置されたClaude専用skills directoryをplugin rootとして使う。固定monitor
+// が参照するスクリプトも、${CLAUDE_PLUGIN_ROOT}配下へ同じ内容をミラーする。
+const claudePluginRoot = path.join(expandHome('~/.claude/skills'), 'gh-maestro');
+installPluginAssets({
+  pluginDir: PLUGIN_DIR,
+  pluginRoot: path.join(claudePluginRoot, '.claude-plugin'),
+  monitorsDir: path.join(claudePluginRoot, 'monitors'),
+  pluginInstallRoot: claudePluginRoot,
+  scriptsDir: SHARED_SCRIPTS,
 });
 
 // ── 共有スキルを ~/.gh-maestro/skills/ にデプロイ ─────────────────────────────

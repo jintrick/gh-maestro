@@ -69,7 +69,11 @@ function spawnTarget(target, workspace, sessionPid, deps = {}) {
   const spawnFn = deps.spawnFn || spawn;
   const writeStdoutFn = deps.writeStdoutFn || ((chunk) => process.stdout.write(chunk));
   const writeStderrFn = deps.writeStderrFn || ((chunk) => process.stderr.write(chunk));
-  const child = spawnFn(process.execPath, childArguments(target, workspace, target.sessionPid || sessionPid), {
+  // target.sessionPid はactivate時点のセッションを記録したヒントに過ぎない。
+  // セッションを開き直した場合に旧PIDをdead-man's switchへ渡すと、新しい
+  // monitorが直ちに「親セッション終了」と判定されるため、現在のmonitorのPIDを
+  // 常に子へ渡す。
+  const child = spawnFn(process.execPath, childArguments(target, workspace, sessionPid), {
     cwd: workspace,
     env: { ...process.env, GH_MAESTRO_WORKSPACE: workspace },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -138,9 +142,15 @@ async function runPrMonitor({ workspace, intervalMs = DEFAULT_INTERVAL_MS } = {}
   let active = null;
   let finishedGeneration = null;
   let stopping = false;
+  let recoveryPending = false;
+  let recoveredThisIteration = false;
   let iterations = 0;
 
-  const recover = () => recoverFn(workspace, { writeStdoutFn });
+  const recover = () => {
+    recoveredThisIteration = true;
+    recoveryPending = true;
+    return recoverFn(workspace, { writeStdoutFn });
+  };
   const stopActive = async () => {
     if (!active) return;
     const old = active;
@@ -156,6 +166,7 @@ async function runPrMonitor({ workspace, intervalMs = DEFAULT_INTERVAL_MS } = {}
   try {
     while (!stopping && iterations < maxIterations) {
       iterations += 1;
+      recoveredThisIteration = false;
       if (!checkSessionFn()) {
         await stopActive();
         return { exitCode: 0, reason: 'session-ended' };
@@ -164,6 +175,7 @@ async function runPrMonitor({ workspace, intervalMs = DEFAULT_INTERVAL_MS } = {}
       const target = readTargetFn(workspace);
       if (!target) {
         await stopActive();
+        if (recoveryPending && !recoveredThisIteration) recover();
         await sleepFn(intervalMs);
         continue;
       }
@@ -190,6 +202,11 @@ async function runPrMonitor({ workspace, intervalMs = DEFAULT_INTERVAL_MS } = {}
           finishedGeneration = target.generation;
         }
       }
+      // poll-pr.js が終了した時点では、子のslow workerがまだ生きていることが
+      // ある。その最初の回収でPIDが生存中なら、同じgenerationを再試行せず、
+      // monitorが生きている間は次の周回でも回収を続ける。slow workerが後から
+      // 結果なしで終了した周回で unavailable を確定できる。
+      if (!active && recoveryPending && !recoveredThisIteration) recover();
       await sleepFn(intervalMs);
     }
   } finally {
