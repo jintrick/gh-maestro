@@ -227,6 +227,7 @@ node "{{SCRIPTS_PATH}}/spawn-assistant.js" --issue <N> --workspace $WORKSPACE --
 #### 起動
 
 **セッション開始時、他のどのタスクにも着手する前に `/gh-maestro` を実行する。** インストール済みの `gh-maestro` plugin が `when: "on-skill-invoke:gh-maestro"` の固定 monitor を起動し、受信監視をセッション終了まで保持する。通常のMonitorツールを手動で張り直したり、`msg-poll.js`へIssueごとの引数を追加したりしてはならない。
+理由と経緯: docs/adr/0041-monitors-run-as-plugin-for-session-lifetime.md
 
 plugin monitor は対話型セッションだけで起動し、セッション終了時に停止する。pluginを無効化しても既に起動したmonitorはそのセッション中は止まらない。monitorの異常終了を確認した場合は `monitor-recovery.md` に従い、状態を確認してから人間へ報告する。
 
