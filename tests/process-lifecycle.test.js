@@ -305,7 +305,7 @@ test('captureProcessIdentity: 起動時刻取得を一度だけ行いPIDと組�
   assert.deepEqual(calls, [4242]);
 });
 
-test('captureProcessIdentity: 起動時刻取得の失敗は一つのfallbackへ縮退する', () => {
+test('captureProcessIdentity: 起動時刻取得の失敗は未知値のまま返す', () => {
   const plc = loadModule();
   let calls = 0;
   const identity = plc.captureProcessIdentity(process.pid, () => {
@@ -314,8 +314,7 @@ test('captureProcessIdentity: 起動時刻取得の失敗は一つのfallbackへ
   });
 
   assert.equal(calls, 1);
-  assert.equal(identity.pid, process.pid);
-  assert.match(identity.startTime, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(identity, { pid: process.pid, startTime: null });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

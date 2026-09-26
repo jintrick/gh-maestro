@@ -283,7 +283,7 @@ function parseArgs(args) {
  *   onceMode: boolean,
  *   intervalMs: number,
  *   residentLease: object|null,
- *   residentIdentity: {pid: number, startTime: string}|null,
+ *   residentIdentity: {pid: number, startTime: string|null}|null,
  * }}
  */
 function main(argsOverride, opts = {}) {
@@ -423,7 +423,8 @@ function main(argsOverride, opts = {}) {
   let residentIdentity = null;
   if (!onceMode) {
     // leaseとPID registryへ同じプロセスidentityを保存するため、起動時刻は常駐起動時に
-    // 一度だけ捕捉する。WindowsのCIM取得失敗時のfallbackも保存先ごとに分断しない。
+    // 一度だけ捕捉する。取得できない場合はunknownのまま常駐leaseを作成せず、現在時刻を
+    // identityの代替値にしない。
     residentIdentity = captureProcessIdentity(process.pid, _getProcessStartTime);
     const handoffTargets = () => {
       const workerNameForRegistry = self !== 'orchestrator' ? self : null;

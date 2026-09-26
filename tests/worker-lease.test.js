@@ -199,6 +199,27 @@ test('acquireLeaseLock: 既存ロックがなければ取得に成功する', ()
   }
 });
 
+test('acquireLeaseLock: 自プロセスの起動時刻を取得できない場合はロックを作成せずstale回収もしない', () => {
+  const store = tempStore();
+  try {
+    fs.mkdirSync(path.dirname(store.lockPath('test-key')), { recursive: true });
+    fs.writeFileSync(
+      store.lockPath('test-key'),
+      JSON.stringify({ pid: 99999, startTime: '2026-07-29T00:00:00.000Z' }),
+      'utf8'
+    );
+    lease._setGetProcessStartTime(() => null);
+
+    assert.throws(
+      () => lease.acquireLeaseLock(store, 'test-key'),
+      /起動時刻/
+    );
+    assert.equal(fs.existsSync(store.lockPath('test-key')), true);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
 test('acquireLeaseLock: liveな保持者がいればエラーを投げる', () => {
   const store = tempStore();
   try {
@@ -330,6 +351,26 @@ test('acquireLease: startTime未指定時の取得結果をロックとleaseで�
 
     assert.equal(calls, 1, '同じ起動処理で起動時刻を再取得しない');
     assert.equal(store.read('issue-1-coder-test').startTime, '2026-07-29T00:00:00.424Z');
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireLease: 起動時刻を取得できない場合はlock/leaseを作成しない', () => {
+  const store = tempStore();
+  try {
+    lease._setGetProcessStartTime(() => null);
+
+    assert.throws(
+      () => lease.acquireLease(store, 'issue-1-coder-test', {
+        pid: process.pid,
+        startTime: null,
+        workerName: 'issue-1-coder-test',
+      }),
+      /起動時刻/
+    );
+    assert.equal(store.read('issue-1-coder-test'), null);
+    assert.equal(fs.existsSync(store.lockPath('issue-1-coder-test')), false);
   } finally {
     cleanupStore(store);
   }
@@ -663,6 +704,47 @@ test('acquireResidentLease: 呼び出し元のidentityを再取得せずleaseへ
   }
 });
 
+test('acquireResidentLease: 自プロセス以外のPIDをidentityとして受け付けない', () => {
+  const store = tempStore();
+  const tmp = store._tmpDir;
+  try {
+    assert.throws(
+      () => lease.acquireResidentLease({
+        workspace: tmp,
+        role: 'worker-supervisor',
+        identity: {
+          pid: process.pid + 1,
+          startTime: '2026-07-29T00:00:00.424Z',
+        },
+      }),
+      /自プロセスのPID/
+    );
+    assert.equal(store.read(lease.roleLeaseKey('worker-supervisor')), null);
+    assert.equal(fs.existsSync(store.lockPath(lease.roleLeaseKey('worker-supervisor'))), false);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireResidentLease: 未確定のidentityでは新規leaseを作成しない', () => {
+  const store = tempStore();
+  const tmp = store._tmpDir;
+  try {
+    assert.throws(
+      () => lease.acquireResidentLease({
+        workspace: tmp,
+        role: 'worker-supervisor',
+        identity: { pid: process.pid, startTime: null },
+      }),
+      /起動時刻/
+    );
+    assert.equal(store.read(lease.roleLeaseKey('worker-supervisor')), null);
+    assert.equal(fs.existsSync(store.lockPath(lease.roleLeaseKey('worker-supervisor'))), false);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
 test('releaseResidentLeaseForProcess: 自分のleaseが削除後も残れば失敗扱いにする', () => {
   const store = tempStore();
   const tmp = store._tmpDir;
@@ -776,6 +858,29 @@ test('activateLease: startTime省略時はgetProcessStartTimeで取得する', (
     assert.equal(entry.pid, 4242);
     // pid=4242 は4桁なので padStart(3, '0') を通過し、'.4242Z' になる
     assert.equal(entry.startTime, '2026-07-29T00:00:00.4242Z');
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('activateLease: 起動時刻を取得できない場合はleaseを更新しない', () => {
+  const store = tempStore();
+  try {
+    const existing = {
+      pid: 100,
+      startTime: 'old',
+      workerName: 'w',
+      createdAt: 'x',
+      phase: 'initializing',
+    };
+    store.write('test-key', existing);
+    lease._setGetProcessStartTime(() => null);
+
+    assert.throws(
+      () => lease.activateLease(store, 'test-key', { pid: 4242, startTime: null }),
+      /起動時刻/
+    );
+    assert.deepEqual(store.read('test-key'), existing);
   } finally {
     cleanupStore(store);
   }

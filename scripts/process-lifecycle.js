@@ -204,12 +204,12 @@ function getProcessStartTime(pid) {
  *
  * leaseとPID registryのように同じプロセスidentityを複数の状態へ保存する呼び出し元は、
  * 起動時刻の取得をこの関数で一度だけ行い、戻り値を各保存先へ渡す。WindowsのCIM取得が
- * 一時的に失敗した場合の現在時刻fallbackもここで一度だけ確定するため、保存先ごとに
- * 独立したfallback値を作ってidentityを分断しない。
+ * 失敗した場合は起動時刻を未知値（null）のまま返し、現在時刻などをプロセスidentityの
+ * 代替値として保存しない。
  *
  * @param {number|string} [pid] 対象プロセスのPID
  * @param {(pid: number) => (string|null)} [getProcessStartTimeFn] テスト用の取得関数
- * @returns {{pid: number, startTime: string}}
+ * @returns {{pid: number, startTime: string|null}}
  * @throws {Error} PIDが正の整数でない場合
  */
 function captureProcessIdentity(pid = process.pid, getProcessStartTimeFn = getProcessStartTime) {
@@ -225,10 +225,10 @@ function captureProcessIdentity(pid = process.pid, getProcessStartTimeFn = getPr
     // getProcessStartTime() 自体は失敗をnullへ縮退する。注入関数でも同じbest-effort契約に揃える。
     startTime = null;
   }
-  if (typeof startTime !== 'string' || startTime === '') {
-    startTime = new Date().toISOString();
-  }
-  return { pid: targetPid, startTime };
+  return {
+    pid: targetPid,
+    startTime: typeof startTime === 'string' && startTime !== '' ? startTime : null,
+  };
 }
 
 /**

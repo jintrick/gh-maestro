@@ -621,7 +621,7 @@ function shouldRetry(pendingEntry, nowMs) {
  *   onceMode: boolean,
  *   intervalMs: number,
  *   workspace: string,
- *   residentIdentity: {pid: number, startTime: string},
+ *   residentIdentity: {pid: number, startTime: string|null},
  * }}
  */
 function main(argsOverride, opts = {}) {
@@ -705,7 +705,8 @@ function main(argsOverride, opts = {}) {
   // workspace 表記の差異（大文字小文字・末尾スラッシュ等）でもすり抜けないよう、
   // role lease は workspace を canonicalWorkspace で正規化して排他する（Issue #240）。
   // leaseとPID registryへ同じプロセスidentityを保存するため、起動時刻はここで一度だけ
-  // 捕捉し、両方の書き込みへ渡す。WindowsのCIM取得失敗時のfallbackも分断しない。
+  // 捕捉する。取得できない場合はunknownのまま常駐leaseを作成せず、現在時刻をidentityの
+  // 代替値にしない。
   const residentIdentity = captureProcessIdentity(process.pid, _getProcessStartTime);
   let residentLease = null;
   {
