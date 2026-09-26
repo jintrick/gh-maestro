@@ -186,8 +186,10 @@ worktreeは `.gh-maestro/worktrees/issue-<N>-<role>-<desc>/` に自動作成さ�
 - **remove-worker.js** — 個別ワーカーのプロセスを同一性確認の上でkillし、worktree とブランチを削除し、workers.json からエントリを除去する（完全破棄）。対象は workerName の位置引数または〈`--issue` + `--skill`〉。作業ツリーごと消えるため再開はできない。反省会後の一括後始末には代わりに finalize-issue.js を使う
 - **worker-status.js** — ワーカーの稼働状況・連続稼働時間を確認する。監視ペインは `spawn-worker.js` のワーカー登録後と `msg-send.js` のコメント投稿成功後に自動的に存在保証されるため、orchestratorがセッション開始・ワーカー起動・メッセージ送信のたびに手動で開く必要はない。監視ペインは作成時のWezTerm接続先と分割元ペインを記録し、別ウィンドウからの再利用・再作成でもその対象を使う。記録された接続先のsocket消滅を確実に判定でき、現在のWezTerm接続先と基準ペインが有効な場合は現在環境へrebindして記録を更新する。消滅と判定できない照会失敗や現在環境の欠落では、状態を消去せず処理を停止する。手動で表示を開始・再作成するときだけ `worker-status.js pane --workspace $WORKSPACE` を使う。ワンショット確認は `worker-status.js list --workspace $WORKSPACE`（`--json` でJSON出力）、単一ワーカーの生死確認は `worker-status.js status --workspace $WORKSPACE --worker-name <name>`。`list` と `status` はペイン起動の代替経路・起動トリガーではない。監視ペインの終了は `worker-status.js close-pane --workspace $WORKSPACE`（reset-session.js でも自動終了される）
 - **finalize-issue.js** — 反省会完了後の決定的な後始末。`--issue <N>` で、そのIssueに紐づく全ワーカーを削除し、Issueをクローズする（「13. 反省会と後始末」参照）。assistantの終了は行わない
-- **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視（「ワーカーからの報告の受信（msg-poll）」参照）
-- **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する単一プロセス（「8. PR検出」参照）
+- **msg-poll.js** — Issueコメントを定期スキャンし新着を通知するorchestratorのinbox監視。`gh-maestro` plugin monitorから固定引数で起動する（「ワーカーからの報告の受信（msg-poll）」参照）
+- **activate-pr-monitor.js** — IssueごとのPR監視target（Issue番号・ベースブランチ・抑止フラグ）をruntimeへ原子的に設定する
+- **poll-pr-monitor.js** — plugin monitorの固定コマンド。targetを読み、可変引数を持つ `poll-pr.js` を子プロセスとして起動・停止する
+- **poll-pr.js** — PR検出→Review Manager起動→レビュー監視を中継する実体プロセス（「8. PR検出」参照）
 - **run-slow-tests.js** — orchestrator／人間が宣言済みslow層を対象指定なしで全件実行する入口（「11. マージ」参照）
 - **reset-session.js** — 壊れた状態からセッションを強制リセットする。msg-poll が未初期化を報告したとき・セッション初期化の際の復旧入口
 - **write-draft.js** — 論理パス（`/tmp/...`）を実体パスへ解決して草案を書き出す唯一の入口。`C:\tmp`等を推論せず常にこれを経由する（「1. 要件確定」参照）
@@ -215,28 +217,28 @@ node "{{SCRIPTS_PATH}}/spawn-assistant.js" --issue <N> --workspace $WORKSPACE --
 - `main` / `master`への直接pushは禁止
 - `BASE_BRANCH`への直接commit / pushは禁止。orchestrator自身の変更も、Issueアンカー付きの軽量PR経路で提出する（`adr.md`が定義するADRの追加・改訂を除く）。
   理由と経緯: docs/adr/0035-orchestrator-changes-go-through-a-lightweight-pr.md
-- **`scripts/` 配下または `skills/agents.yaml` に触れた変更を install した後の常駐入れ替えは、install.js がruntime rootに登録された全workspaceについて配布済みの `restart-residents.js` を自動で呼び出す。更新後・障害時の結果確認とMonitor再接続の手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` を参照する。**
+- **`scripts/` 配下または `skills/agents.yaml` に触れた変更を install した後の常駐入れ替えは、install.js がruntime rootに登録された全workspaceについて配布済みの `restart-residents.js` を自動で呼び出す。plugin monitor管理の `msg-poll.js` / `poll-pr-monitor.js` / `poll-pr.js` は停止・張り直しを行わず、更新後は次の対話型セッションでpluginを再読込する。その他の旧形式常駐と障害時の確認手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` を参照する。**
 - `skills/**` 配下のドキュメントだけを変更した場合は手動の常駐入れ替えは不要。常駐プロセスは SKILL.md を読まない
 
 ### ワーカーからの報告の受信（msg-poll）
 
-ワーカーからの報告はすべて Issue コメントとして投稿され、`msg-poll.js` を張った Monitor 経由で届く。
+ワーカーからの報告はすべて Issue コメントとして投稿され、plugin monitor が起動する `msg-poll.js` 経由で届く。
 
 #### 起動
 
-**セッション開始時、他のどのタスクにも着手する前に張る。** Monitorツールを呼び出し、`command` に `node "{{SCRIPTS_PATH}}/msg-poll.js" orchestrator --workspace $WORKSPACE` を直接指定する。`persistent: true` を設定すること。
+**セッション開始時、他のどのタスクにも着手する前に `/gh-maestro` を実行する。** インストール済みの `gh-maestro` plugin が `when: "on-skill-invoke:gh-maestro"` の固定 monitor を起動し、受信監視をセッション終了まで保持する。通常のMonitorツールを手動で張り直したり、`msg-poll.js`へIssueごとの引数を追加したりしてはならない。
 
-**自動起動も自動復活も存在しない。** 張り忘れても、張った1本が死んでも、代わりに張る者はいない。その間ワーカーの報告は一切届かず、「まだ届いていない」と読んで待ち続けることになる。アラームを受けたら自分で起動し直す。
+plugin monitor は対話型セッションだけで起動し、セッション終了時に停止する。pluginを無効化しても既に起動したmonitorはそのセッション中は止まらない。monitorの異常終了を確認した場合は `monitor-recovery.md` に従い、状態を確認してから人間へ報告する。
 
-**プロセスが動いていることは、この Monitor を張らなくてよい理由にはならない。** 前のセッション等のプロセスが残っていても、その出力（`NEW_MESSAGE`）はログファイルに書かれるだけで、**自分が Monitor を張っていなければ自分のセッションには届かない**。既に稼働中のプロセスがあって起動が拒否された場合（`重複起動を検出しました` で exit 1）は、拒否メッセージが案内する `--watch-pid <pid>` の Monitor を張る——判断を挟まず、案内されたコマンドをそのまま使う。
+**プロセスが動いていることは、現在の対話型セッションへ通知が届く根拠にはならない。** `/gh-maestro` を実行したセッションのplugin monitorが、現在のworkspaceの `NEW_MESSAGE` を stdout へ届けていることを確認する。前セッションのプロセスを再利用せず、pluginのロード失敗はその事実を人間へ報告する。
 
-**セッション中に1本だけ稼働させる。** PR検出・レビュー監視・本番公開（CI/CD）確認・反省会での応答待ちなど、待つ相手や場面が変わっても新しいMonitorを起動し直さず、既存の1本を使い回す。他の節はこの1本を通じて通知を受け取る前提で書かれている。
+**セッション中に受信monitorを1本だけ稼働させる。** PR検出・レビュー監視・本番公開（CI/CD）確認・反省会での応答待ちなど、待つ相手や場面が変わっても新しい受信monitorを起動し直さず、plugin monitorを使い回す。他の節はこの1本を通じて通知を受け取る前提で書かれている。
 
 重複起動に気づいた場合、片方を反射的に止めてはならない。復旧手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md`の「inbox監視の重複復旧」を参照する。
 
 #### 届いた通知の処理
 
-- `NEW_MESSAGE:<issue>:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を読む。内容に応じて処理する（PR_DETECTED → PR番号を記録 等）。**完了後は直ちにMonitorに戻る**
+- `NEW_MESSAGE:<issue>:<commentId>` → `node "{{SCRIPTS_PATH}}/msg-read.js" <commentId> --workspace $WORKSPACE` で本文を読む。内容に応じて処理する（PR_DETECTED → PR番号を記録 等）。**完了後は直ちにplugin monitorの通知待ちへ戻る**
 
 msg-poll が `未初期化です。reset-session.js で初期化してください` や `旧形式(v1)です` を報告したら、`node "{{SCRIPTS_PATH}}/reset-session.js" --workspace $WORKSPACE` を実行してから再開する。
 
@@ -502,16 +504,24 @@ orchestrator評価: <承認推奨 or 要修正（理由）。懸念が無けれ�
 ### 8. PR検出【必須】
 <!-- gh-maestro-structure: middle-items=1 -->
 
-コーダーを起動したら、orchestrator 自身が Monitor で `poll-pr.js <アンカーIssue番号>` を起動する。**`persistent: true` を設定すること**（付け忘れると既定の5分でMonitorがタイムアウトし、レビュー中に通知が届かなくなる）。**このMonitor 1本がPR検出からマージ検知まで完結する**ため、以後別途起動し直すことはない。
-`--base-branch` にはセッション変数 `$BASE_BRANCH` を渡すことで、PR作成時のベースブランチ不一致を検出できる。
+コーダーを起動したら、orchestratorはtargetを設定する。plugin monitorが既に `/gh-maestro` 起動時に固定コマンドとして起動しているため、Issue番号をMonitorのコマンド引数へ埋め込んだり、30分上限の通常Monitorを張ったりしない。**このplugin monitorがPR検出からマージ検知までセッション中のtargetを監視する**ため、通常のMonitorを張り直さない。
+
+```sh
+node "{{SCRIPTS_PATH}}/activate-pr-monitor.js" \
+  --issue <ISSUE> --workspace "$WORKSPACE" --base-branch "$BASE_BRANCH"
+```
+
+`activate-pr-monitor.js` は `pr-monitor-target.json` を原子的に更新し、固定の `poll-pr-monitor.js` がそのtargetを検出して `poll-pr.js` を起動する。targetを切り替えると、前のpoll-prとそのslow子プロセスを停止してから新しい世代を1回だけ起動する。Issueを終了すると `finalize-issue.js` が一致するtargetを消す。
 
 `poll-pr.js`はレビュー観点を一切選ばない。PR検出時に常にReview Managerを全観点で起動する。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。
 
 PR検出後、`poll-pr.js` は対象PRのHEADと対応するcoder/senior-coder worktreeを照合して `slow` 層を非同期起動する。`poll-reviews.js` から `PR_PUSH:<sha>` を受け取るたび、その新しいHEADに対してもslowを非同期予約する。レビュー監視の起動・通知をslow完了まで同期的に待たせてはならない。同じPR/HEAD/layerはstate予約で二重実行しない。slow結果は同じworktreeの単一層別成果物へ保存され、完了時にテスト申告コメントを更新する。対象HEADの照合不能、worktree不在、子プロセス異常終了は `unavailable` として実行ログ識別子を残し、自動再試行・自動診断を行わない。
 
 ```sh
-node "{{SCRIPTS_PATH}}/poll-pr.js" <ISSUE> --workspace $WORKSPACE --base-branch $BASE_BRANCH
+node "{{SCRIPTS_PATH}}/poll-pr-monitor.js" --plugin-monitor --workspace "$WORKSPACE"
 ```
+
+上のコマンドはpluginが固定で起動する実体であり、通常の対話型セッションで手動実行しない。
 
 PR検出時の出力:
 - `PR_BASE_MISMATCH:<PR>:<expected>:<actual>` — ベースブランチ不一致（想定と実際が異なる場合は出力される。処理は継続）
@@ -533,14 +543,14 @@ PR検出時の出力:
 
 #### 8-[1/1] PR監視・Review Managerの再起動が必要なとき【任意】
 
-Monitorが落ちた場合の`poll-pr.js`再起動、Review Managerが起動しなかった／失敗した場合の再起動は、いずれも `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` の「PR監視・Review Managerの再起動」を参照する。**再レビューが不要な場合は`poll-pr.js`に`--no-review-manager`を付けること**（付け忘れると検出のたびにレビューが蒸し返されquotaを浪費する）。
+plugin monitorまたはその子 `poll-pr.js` が落ちた場合の確認・targetの再設定、Review Managerが起動しなかった／失敗した場合の再起動は、いずれも `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` の「PR監視・Review Managerの再起動」を参照する。**再レビューが不要な場合は `activate-pr-monitor.js` に `--no-review-manager` を渡すこと**（付け忘れると検出のたびにレビューが蒸し返されquotaを浪費する）。
 
 ### 9. レビュー監視【必須】
 <!-- gh-maestro-structure: middle-items=0 -->
 
 PR番号が確定したら、レビューコメントとマージ状態の通知を処理する。
 
-**新しいMonitorやポーリングプロセスをここで起動してはならない。** 以下はすべて「8. PR検出」で起動した `poll-pr.js` のMonitorから届く通知として処理する（別プロセスを起動すると二重ポーリング・二重通知になる）。
+**新しいMonitorやポーリングプロセスをここで起動してはならない。** 以下はすべて「8. PR検出」で起動したplugin monitor配下の `poll-pr.js` から届く通知として処理する（別プロセスを起動すると二重ポーリング・二重通知になる）。
 
 - `REVIEW_COMMENT:<path>:<line>:<user>:<body>` → インラインのレビュー指摘。コメントトリアージを実行する
 - `PR_COMMENT:<user>:<body>` → PR全体へのコメント。同様にトリアージする
@@ -582,7 +592,7 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
 人間から「マージを取り消したい」（レビュー未完了のまま早くマージされた等）と言われた場合：
 
 - まず**revertが本当に必要か**を切り分ける。実装自体に問題があるのではなく、レビュー指摘への対応が終わる前に早くマージされただけなら、revertせずに残りの指摘対応を軽量PR経路の追いPRとして提出する方が安全（コンフリクトが原理的に発生しない）。
-- 実装自体を一旦取り下げたい等、revertが本当に必要な場合は、タイトルだけのアンカーIssueを作成し、BASE_BRANCHからrevert用ブランチを切る。`git revert -m 1 <mergeCommit> --no-edit` はそのブランチ上で実行し、commit・push・PR作成後に `poll-pr.js --no-review-manager` で監視する。具体的なコマンドは `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/lightweight-pr.md` に従う。BASE_BRANCHへrevertコミットを直接追加してはならない。**このとき、元になった作業ブランチをそのまま延長させて指摘対応や再提出をさせてはならない。** そのブランチはrevertされたコミットの子孫であり続けるため、BASE_BRANCH側の「削除」とブランチ側の「追記」が同じファイルで必ず衝突する。revert後に作業を続けさせる場合は、revert後のBASE_BRANCHから新しくブランチを切って必要な差分を再適用させること。
+- 実装自体を一旦取り下げたい等、revertが本当に必要な場合は、タイトルだけのアンカーIssueを作成し、BASE_BRANCHからrevert用ブランチを切る。`git revert -m 1 <mergeCommit> --no-edit` はそのブランチ上で実行し、commit・push・PR作成後に `activate-pr-monitor.js --no-review-manager --no-review-events` でtargetを設定して監視する。具体的なコマンドは `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/lightweight-pr.md` に従う。BASE_BRANCHへrevertコミットを直接追加してはならない。**このとき、元になった作業ブランチをそのまま延長させて指摘対応や再提出をさせてはならない。** そのブランチはrevertされたコミットの子孫であり続けるため、BASE_BRANCH側の「削除」とブランチ側の「追記」が同じファイルで必ず衝突する。revert後に作業を続けさせる場合は、revert後のBASE_BRANCHから新しくブランチを切って必要な差分を再適用させること。
 - どうしても元のブランチをmerge/rebaseで復元させる場合、**revert後に一切触っていない新規追加ファイルは、コンフリクト一覧に出ないまま3-way mergeが無言で「削除」を採用することがある**（共通祖先＝revert前のマージ元コミット、BASE_BRANCH側＝削除、ブランチ側＝無変更、という組み合わせで自動的に削除が選ばれるため）。復元後はコーダーに`git diff <revert前の直前コミット> -- <変更ファイル一覧>`で無差分を確認させてからcommitさせること。
 
 ### 12. 本番公開（CI/CD）確認【必須】

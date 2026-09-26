@@ -96,19 +96,21 @@ test('parseArgs: 値欠落は validationErrors を返す', () => {
   assert.ok(r.validationErrors.some(e => e.message === 'フラグ --workspace には値が必要です'));
 });
 
-test('parseArgs: self/onceMode/force/workspaceArg を正しく分離する', () => {
-  const r = msgPoll.parseArgs(['my-worker', '--issue', '5', '--workspace', '/ws', '--once', '--force']);
+test('parseArgs: self/onceMode/force/pluginMonitor/workspaceArg を正しく分離する', () => {
+  const r = msgPoll.parseArgs(['my-worker', '--issue', '5', '--workspace', '/ws', '--once', '--force', '--plugin-monitor']);
   assert.equal(r.self, 'my-worker');
   assert.equal(r.issueArg, '5');
   assert.equal(r.workspaceArg, '/ws');
   assert.equal(r.onceMode, true);
   assert.equal(r.force, true);
+  assert.equal(r.pluginMonitor, true);
 });
 
 test('parseArgs: --once/--force が無ければ false', () => {
   const r = msgPoll.parseArgs(['orchestrator', '--workspace', '/ws']);
   assert.equal(r.onceMode, false);
   assert.equal(r.force, false);
+  assert.equal(r.pluginMonitor, false);
 });
 
 test('parseArgs: --wait <sec> を waitArg として返す', () => {

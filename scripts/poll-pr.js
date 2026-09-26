@@ -46,6 +46,8 @@ const {
   resolveSessionPid,
   createDeadManSwitch,
   getProcessStartTime,
+  isProcessAlive,
+  startTimesMatch,
   registerProcess,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
@@ -67,6 +69,7 @@ Options:
   --workspace <path>         ワークスペースパス（省略時は環境変数またはCWDから解決）
   --session-pid <pid>        監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
   --base-branch <branch>     期待するベースブランチ名（省略時はベースブランチ検証をスキップ）
+  --plugin-monitor            Claude Code plugin monitor から起動されたことをregistryへ記録する
 
 Output (stdout):
   PR_BASE_MISMATCH:<PR>:<expected>:<actual>  ベースブランチ不一致を検出（--base-branch指定時のみ）
@@ -248,7 +251,7 @@ function withSlowStateLock(statePath, action) {
   }
 }
 
-function reserveSlowRun(workspace, pr, headSha, now = new Date().toISOString()) {
+function reserveSlowRun(workspace, pr, headSha, now = new Date().toISOString(), metadata = {}) {
   const statePath = slowStatePath(workspace, pr);
   const runKey = headSha || SLOW_UNKNOWN_HEAD_KEY;
   return withSlowStateLock(statePath, () => {
@@ -258,6 +261,8 @@ function reserveSlowRun(workspace, pr, headSha, now = new Date().toISOString()) 
     state.schemaVersion = 1;
     state.pr = String(pr);
     state.layer = 'slow';
+    if (metadata && metadata.issue !== undefined) state.issue = String(metadata.issue);
+    if (metadata && metadata.repo !== undefined) state.repo = String(metadata.repo);
     state.runs[runKey] = {
       status: 'running',
       startedAt: now,
@@ -276,6 +281,124 @@ function updateSlowRun(statePath, runKey, update) {
     atomicWriteJson(statePath, state);
     return state.runs[runKey];
   });
+}
+
+function orphanedSlowRunReason(entry, deps = {}) {
+  const isAliveFn = deps.isProcessAliveFn || isProcessAlive;
+  const getStartTimeFn = deps.getProcessStartTimeFn || getProcessStartTime;
+  const startTimesMatchFn = deps.startTimesMatchFn || startTimesMatch;
+  const pid = Number(entry && entry.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return 'slow-worker-missing';
+
+  let alive;
+  try { alive = isAliveFn(pid); } catch { return 'slow-worker-identity-unavailable'; }
+  if (alive !== true) return 'slow-worker-exited-without-result';
+  if (typeof entry.startTime !== 'string' || entry.startTime === '') {
+    return 'slow-worker-identity-unavailable';
+  }
+
+  let actualStartTime;
+  try { actualStartTime = getStartTimeFn(pid); } catch { actualStartTime = null; }
+  if (!actualStartTime) return 'slow-worker-identity-unavailable';
+  if (!startTimesMatchFn(entry.startTime, actualStartTime)) return 'slow-worker-identity-mismatch';
+  return null;
+}
+
+/**
+ * 親 poll-pr が停止した後に残った slow state の running レコードを回収する。
+ * slow worker は poll-pr の子プロセスとして生存期間を共有するため、PID＋起動時刻を
+ *確認できない running は再実行せず unavailable へ確定する。PIDが別プロセスへ
+ *再利用された場合も kill は行わず、元の結果だけを unavailable として残す。
+ */
+function recoverOrphanedSlowRuns(workspace, deps = {}) {
+  const slowDir = path.join(workspace, '.gh-maestro');
+  const readdirFn = deps.readdirFn || fs.readdirSync;
+  const readStateFn = deps.readSlowStateFn || readSlowState;
+  const updateRunFn = deps.updateSlowRunFn || updateSlowRun;
+  const writeStdoutFn = deps.writeStdoutFn || ((text) => process.stdout.write(text));
+  const nowFn = deps.nowFn || (() => new Date().toISOString());
+  let files;
+  try {
+    files = readdirFn(slowDir);
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return [];
+    throw new Error(`slow state ディレクトリを読み取れません: ${slowDir}: ${error.message}`, { cause: error });
+  }
+
+  const recovered = [];
+  for (const file of files.filter((name) => /^poll-slow-test-[1-9][0-9]*\.json$/.test(name))) {
+    const match = file.match(/^poll-slow-test-([1-9][0-9]*)\.json$/);
+    const pr = match[1];
+    const statePath = path.join(slowDir, file);
+    let state;
+    try {
+      state = readStateFn(statePath);
+    } catch (error) {
+      throw new Error(`slow state を読み取れません: ${statePath}: ${error.message}`, { cause: error });
+    }
+    for (const [runKey, entry] of Object.entries(state.runs)) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error(`slow state run の形式が不正です: ${statePath}#${runKey}`);
+      }
+      if (entry.status !== 'running') continue;
+      const reason = orphanedSlowRunReason(entry, deps);
+      if (!reason) continue;
+
+      const headSha = entry.testedHead || (runKey === SLOW_UNKNOWN_HEAD_KEY ? null : runKey);
+      const logPath = entry.logPath || slowLogPath(workspace, pr, headSha);
+      let target = null;
+      if (typeof entry.worktree === 'string' && entry.worktree !== '') {
+        try {
+          if (fs.statSync(entry.worktree).isDirectory()) target = { worktree: entry.worktree };
+        } catch {}
+      }
+      let logError;
+      try { appendSlowFailureLog(logPath, reason); } catch (error) { logError = error.message; }
+      const result = {
+        status: 'unavailable',
+        ...(headSha ? { testedHead: headSha } : {}),
+        command: publicTestCommand('slow', 'partial'),
+        reason: publicTestReason(reason),
+        executionLogPath: logPath,
+        artifactPath: writeUnavailableLayer(target, headSha, logPath, reason, deps) || statePath,
+        statePath,
+        error: reason,
+        ...(logError ? { logError } : {}),
+      };
+      const completedAt = nowFn();
+      updateRunFn(statePath, runKey, {
+        status: 'unavailable',
+        completedAt,
+        logPath,
+        result,
+        ...(logError ? { logError } : {}),
+      });
+      let declaration = { status: 'not-attempted' };
+      if (target && headSha && typeof state.repo === 'string' && state.repo !== ''
+        && (typeof state.issue === 'string' || typeof state.issue === 'number')) {
+        declaration = declareSlowResult({
+          pr,
+          repo: state.repo,
+          workspace,
+          target,
+          headSha,
+          statePath,
+          runKey,
+        }, deps);
+        const declaredResult = {
+          ...result,
+          declaration: declaration.status,
+          ...(declaration.error ? { declarationError: declaration.error } : {}),
+        };
+        updateRunFn(statePath, runKey, { result: declaredResult });
+        Object.assign(result, declaredResult);
+      }
+      const event = { pr: String(pr), layer: 'slow', ...result };
+      writeStdoutFn(`SLOW_TEST_RESULT:${JSON.stringify(event)}\n`);
+      recovered.push(event);
+    }
+  }
+  return recovered;
 }
 
 function resolveSlowWorktree(workspace, issue) {
@@ -618,7 +741,7 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
   let result;
   try {
     statePath = slowStatePath(workspace, pr);
-    const reservation = reserveSlowRun(workspace, pr, headSha);
+    const reservation = reserveSlowRun(workspace, pr, headSha, undefined, { issue, repo });
     if (!reservation.reserved) {
       const result = reservation.existing.result || {
         status: reservation.existing.status,
@@ -671,6 +794,7 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
     }
 
     logPath = slowLogPath(target.worktree, pr, headSha);
+    updateSlowRun(statePath, runKey, { worktree: target.worktree, logPath });
     const childEnv = {
       ...process.env,
       GH_MAESTRO_WORKSPACE: target.worktree,
@@ -683,7 +807,17 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
       childEnv,
       onSpawn: (spawned) => {
         child = spawned;
-        updateSlowRun(statePath, runKey, { pid: spawned.pid || null, logPath });
+        let startTime = null;
+        if (spawned && spawned.pid) {
+          try {
+            startTime = (deps.getProcessStartTimeFn || getProcessStartTime)(spawned.pid);
+          } catch {}
+        }
+        updateSlowRun(statePath, runKey, {
+          pid: spawned.pid || null,
+          startTime: startTime || null,
+          logPath,
+        });
       },
     }, deps);
     child = childResult.child;
@@ -861,6 +995,7 @@ async function runPollPr(params, deps = {}) {
     baseBranch,
     noReviewManager = false,
     noReviewEvents = false,
+    pluginMonitor = false,
     intervalMs = 30 * 1000,
     intervalArg,
   } = params;
@@ -891,6 +1026,13 @@ async function runPollPr(params, deps = {}) {
   const writeStderrFn = deps.writeStderrFn || ((text) => process.stderr.write(text));
   const sleepFn = deps.sleepFn || ((ms) => new Promise(resolve => setTimeout(resolve, ms)));
   const slowTestDeps = deps.slowTestDeps || {};
+
+  // 前回の poll-pr が監視の途中で失われた場合、slow worker の PIDが既に無い
+  // running レコードを開始直後に確定する。ここで再実行はしない。
+  recoverOrphanedSlowRuns(workspace, {
+    ...slowTestDeps,
+    writeStdoutFn,
+  });
 
   const pendingSlowTests = new Set();
   const slowQueues = new Map();
@@ -1000,6 +1142,7 @@ module.exports = {
   slowStatePath,
   reserveSlowRun,
   resolveSlowWorktree,
+  recoverOrphanedSlowRuns,
   runSlowTest,
   recordHeadUnavailable,
   reviewManagerClaimPath,
@@ -1013,7 +1156,7 @@ if (require.main === module) {
   try {
     ({ values, rest } = parseFlags(argv, {
       flags: { '--workspace': {}, '--session-pid': {}, '--base-branch': {} },
-      booleans: ['--no-review-manager', '--no-review-events', '--help', '-h'],
+      booleans: ['--no-review-manager', '--no-review-events', '--plugin-monitor', '--help', '-h'],
       // issue（必須）と interval（任意）の2つまで。未知フラグ・余剰位置引数はパーサ側で拒否される
       // （Issue #14 / argv-parsing-pitfalls）。
       positionals: { min: 1, max: 2 },
@@ -1039,6 +1182,7 @@ if (require.main === module) {
   const baseBranch = values['--base-branch'];
   const noReviewManager = values['--no-review-manager'] === true;
   const noReviewEvents = values['--no-review-events'] === true;
+  const pluginMonitor = values['--plugin-monitor'] === true;
 
   const [issue, intervalArg] = rest;
 
@@ -1090,6 +1234,7 @@ if (require.main === module) {
     baseBranch,
     noReviewManager,
     noReviewEvents,
+    pluginMonitor,
     intervalMs: interval,
     intervalArg: intervalArg || '30',
   }, {

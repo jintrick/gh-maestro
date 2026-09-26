@@ -1,0 +1,14 @@
+[
+  {
+    "name": "gh-maestro-inbox",
+    "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/msg-poll.js\" orchestrator --plugin-monitor --workspace \"${CLAUDE_PROJECT_DIR}\"",
+    "description": "Continuously deliver gh-maestro inbox messages for the interactive session.",
+    "when": "on-skill-invoke:gh-maestro"
+  },
+  {
+    "name": "gh-maestro-pr",
+    "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/poll-pr-monitor.js\" --plugin-monitor --workspace \"${CLAUDE_PROJECT_DIR}\"",
+    "description": "Keep the fixed PR monitor alive while the gh-maestro interactive session is active.",
+    "when": "on-skill-invoke:gh-maestro"
+  }
+]

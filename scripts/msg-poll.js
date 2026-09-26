@@ -86,6 +86,7 @@ Options:
                           停止要求を送ってから起動する（継続モード・--wait モードのみ有効。
                           lease判定を無効化せず、引き継げなければ exit 1 する。既定では
                           多重起動を検知して exit 1 する）。
+  --plugin-monitor       Claude Code plugin monitor から起動されたことをregistryへ記録する。
   --watch-pid <pid>      他の <self> 引数を無視し、指定PIDの生存監視のみを行う特殊モード。
                           「重複起動を検出しました」エラー時に代替コマンドとして案内される
                           （このモードは msg-poll.js 自身を起動するかどうかの判断を必要としない）。
@@ -228,7 +229,7 @@ function parseMarker(body) {
  *   validationErrors?: Array<{ message: string }>|null,  // 検証エラー時のみ設定（help・成功時は null）
  *   self?: string, issueArg?: string|null, workspaceArg?: string|null,
  *   intervalArg?: string|null, sessionPidArg?: string|null,
- *   onceMode?: boolean, force?: boolean, waitArg?: string|null,
+ *   onceMode?: boolean, force?: boolean, pluginMonitor?: boolean, waitArg?: string|null,
  * }}
  */
 function parseArgs(args) {
@@ -236,7 +237,7 @@ function parseArgs(args) {
   try {
     ({ values, rest } = parseFlags(args, {
       flags: { '--workspace': {}, '--issue': {}, '--interval': {}, '--session-pid': {}, '--wait': {} },
-      booleans: ['--once', '--force', '--help', '-h'],
+      booleans: ['--once', '--force', '--plugin-monitor', '--help', '-h'],
       // self（ワーカー名/recipient）は最大1つの位置引数。未知フラグ（-- 始まり）は
       // パーサ側で拒否される（Issue #14 / argv-parsing-pitfalls。先頭に来て self として
       // 採用されるとポーリング・状態更新・PID registry操作まで進んでしまうため）。
@@ -264,6 +265,7 @@ function parseArgs(args) {
     sessionPidArg: values['--session-pid'],
     onceMode: values['--once'] === true,
     force: values['--force'] === true,
+    pluginMonitor: values['--plugin-monitor'] === true,
     waitArg: values['--wait'],
   };
 }
@@ -314,7 +316,7 @@ function main(argsOverride, opts = {}) {
     return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode: false, intervalMs: 0 };
   }
 
-  const { self, issueArg, onceMode, force, waitArg } = parsed;
+  const { self, issueArg, onceMode, force, pluginMonitor, waitArg } = parsed;
 
   if (onceMode && waitArg != null) {
     writeErr('msg-poll: --once と --wait は同時指定できません。');
@@ -444,7 +446,9 @@ function main(argsOverride, opts = {}) {
         writeErr(
           `msg-poll: role "${role}" を引き継げませんでした（${res.reason}）` +
           (res.ownerPid ? `。既存プロセス pid=${res.ownerPid} が終了しません` : '') +
-          `。既存のMonitorを使い回すか、--force を再指定してください。`
+          (pluginMonitor
+            ? '。plugin monitor管理下の既存プロセスを停止・手動再接続せず、そのセッションの監視状態を確認してください。'
+            : '。既存のMonitorを使い回すか、--force を再指定してください。')
         );
         return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode, intervalMs, residentLease: null };
       }
@@ -455,12 +459,19 @@ function main(argsOverride, opts = {}) {
       const pidMatch = /pid (\d+)/.exec(e.message);
       if (pidMatch) {
         const ownerPid = parseInt(pidMatch[1], 10);
-        writeErr('代わりに以下をMonitorでpersistent:trueとして起動してください（このコマンドをそのまま使うこと。判断は不要）:');
-        writeErr(`  ${buildWatchPidCommand(ownerPid)}`);
-        writeErr(
-          `このコマンドは pid=${ownerPid} の生存を監視し続け、死亡時に \`PID_DIED:${ownerPid}\` を通知します。` +
-          'その通知を受け取ったら、そのときはじめて改めてこのコマンドを --force なしで起動し直してください。'
-        );
+        if (pluginMonitor) {
+          writeErr(
+            `plugin monitor管理下の既存msg-poll（pid=${ownerPid}）を検出しました。` +
+            '通常のMonitorで代替起動せず、現在の対話型セッションのplugin monitor状態を確認してください。'
+          );
+        } else {
+          writeErr('代わりに以下をMonitorでpersistent:trueとして起動してください（このコマンドをそのまま使うこと。判断は不要）:');
+          writeErr(`  ${buildWatchPidCommand(ownerPid)}`);
+          writeErr(
+            `このコマンドは pid=${ownerPid} の生存を監視し続け、死亡時に \`PID_DIED:${ownerPid}\` を通知します。` +
+            'その通知を受け取ったら、そのときはじめて改めてこのコマンドを --force なしで起動し直してください。'
+          );
+        }
       }
       return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode, intervalMs, residentLease: null };
     }

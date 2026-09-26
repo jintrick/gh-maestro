@@ -18,6 +18,7 @@ const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { ARTIFACTS, recordPath } = require('./shared/record-paths');
 const { pruneExecutionsForIssue } = require('./shared/execution-registry');
 const { readWorkersRaw } = require('./shared/workers-registry');
+const { clearPrMonitorTarget } = require('./shared/pr-monitor-target');
 
 const USAGE = `finalize-issue.js — Issue をクローズし、そのIssueの全ワーカーを削除する
 
@@ -221,6 +222,17 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
   const removeWorkerFn = deps.removeWorkerFn || defaultRemoveWorker;
   const closeIssueFn = deps.closeIssueFn || defaultCloseIssue;
   const closeStatusPaneFn = deps.closeStatusPaneFn || defaultCloseStatusPane;
+  const clearTargetFn = deps.clearPrMonitorTargetFn || clearPrMonitorTarget;
+
+  let monitorTarget;
+  try {
+    monitorTarget = {
+      cleared: Boolean(clearTargetFn(workspace, { issue })),
+    };
+  } catch (error) {
+    monitorTarget = { cleared: false, error: error.message };
+    process.stderr.write(`finalize-issue: PR monitor target の終了に失敗しました（続行します）: ${error.message}\n`);
+  }
 
   const names = collectWorkersForIssue(workspace, issue);
   const workers = [];
@@ -260,6 +272,7 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
     removedCount: workers.filter(w => w.ok).length,
     closed: close.ok,
     statusPaneClosed: Boolean(statusPaneResult && statusPaneResult.ok),
+    monitorTarget,
     artifacts,
   };
 }
