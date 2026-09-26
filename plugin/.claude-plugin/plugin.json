@@ -1,0 +1,5 @@
+{
+  "name": "gh-maestro",
+  "version": "0.1.0",
+  "description": "gh-maestro session monitors for inbox and pull-request events"
+}

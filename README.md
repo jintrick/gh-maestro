@@ -27,7 +27,7 @@ gh-maestro は **GitHub Issue のコメント** をメッセージバスとし�
 
 ### orchestrator は Claude Code 専用
 
-orchestrator の手順は Claude Code の **Monitor ツール**（バックグラウンドスクリプトの出力を通知として受け取る）と `TaskStop` を前提に組み立てられている。inbox 監視（`msg-poll.js`）・PR 監視（`poll-pr.js`）・ワーカーログの追尾がいずれもこれに依存するため、Monitor を持たないエージェントでは orchestrator を務められない。
+orchestrator の手順は Claude Code の **plugin monitors**（対話型セッションのバックグラウンドスクリプトの出力を通知として受け取る）を前提に組み立てられている。インストール時に `plugin/.claude-plugin/plugin.json` と `plugin/monitors/monitors.json` が `~/.gh-maestro/` へ配置され、`/gh-maestro` 起動時に inbox監視（`msg-poll.js`）と固定PR監視役（`poll-pr-monitor.js`）が起動する。通常のMonitorツールは既定5分・最大30分で終了するため、これらへ `persistent` を設定したり手動で張り直したりしない。Monitor を持たないエージェントでは orchestrator を務められない。
 
 worker は Monitor を必要としない。orchestrator からの追加指示は `worker-supervisor.js` がプロセスの再開（resume）として配送するため、worker 側はポーリングを一切行わない。したがって worker には agy / codex / reasonix を自由に割り当てられる（`skillAgentMap` 参照）。
 
@@ -46,6 +46,9 @@ cd gh-maestro
 node scripts/install.js
 ```
 
+インストール後は、対象プロジェクトの対話型 `claude` セッションで `/gh-maestro` を実行する。plugin monitors は対話型セッション専用で、`-p` の非対話実行では起動しない。
+ローカルのplugin rootを明示する場合は `claude --plugin-dir "$HOME/.gh-maestro"` で起動するか、Claude Codeの `/plugin` 管理経路で `gh-maestro` を有効化する。
+
 ## 使い方
 
 1. WezTerm 内で対象プロジェクトのルートに移動する
@@ -60,7 +63,7 @@ node scripts/install.js
 orchestrator: Issue を起草・作成
 orchestrator: coder をアンカー Issue と共に起動（coder は Issue 本文を読んで着手）
 coder: 実装・PR 作成（進捗・結果を Issue コメントで報告）
-orchestrator: PR を検出して Review Manager をローカル起動（正確性・保守性・堅牢性）
+orchestrator: plugin monitor がPRを検出して Review Manager をローカル起動（正確性・保守性・堅牢性）
 orchestrator: レビュー結果をトリアージ → あなたにマージを依頼
 
 # バグ調査の場合
@@ -87,7 +90,7 @@ PRが作成されると、ローカルでAIレビュワー `reviewer`（Review M
 
 ### 動作の仕組み
 
-orchestrator が起動した `poll-pr.js` がPRを検出すると、`start-review-manager.js` がバックグラウンドで起動し、以下の処理を実行する。
+plugin monitor が固定コマンドの `poll-pr-monitor.js` を起動し、runtimeの `pr-monitor-target.json` に設定されたIssueを `poll-pr.js` へ渡す。`poll-pr.js` がPRを検出すると、`start-review-manager.js` がバックグラウンドで起動し、以下の処理を実行する。
 
 1. `run-review-manager.js` が各観点のサブエージェント（Reviewer）を並列で実行
 2. 各Reviewerが観点別ディレクトリ（`correctness/`・`maintainability/`・`resilience-security/`・`test-quality/`）の基準ファイルに沿ってレビューを実行
@@ -99,12 +102,17 @@ PR・レビューの監視プロセスは、放置しても溜まらないよう
 
 | プロセス | 役割 | 終了条件 |
 |---|---|---|
-| `poll-pr.js` | Issue に対する PR の出現を待つ。検出したら Review Manager を起動し、`poll-reviews.js` を子プロセスとして起動して出力を中継する | 子の `poll-reviews.js` が終了したとき |
+| `poll-pr-monitor.js` | 固定plugin monitorとしてtargetを読み、Issueごとの `poll-pr.js` を起動・停止する | セッション終了、target削除、同一世代のpoll-pr終了 |
+| `poll-pr.js` | targetのIssueに対する PR の出現を待つ。検出したら Review Manager を起動し、`poll-reviews.js` を子プロセスとして起動して出力を中継する | 子の `poll-reviews.js` が終了したとき |
 | `poll-reviews.js` | PR のコメント・レビュー・push・マージを監視して出力する | `PR_MERGED` を検出したとき（`cleanup()` 後に exit 0） |
 
 加えて両者とも **dead-man's switch** を持つ。ポーリングの毎周回で親セッション（オーケストレーター）の生存を確認し、消えていれば PID レジストリを解除して自動終了する。セッションを閉じても孤児プロセスが残らない。
 
-稼働中のプロセスは `.gh-maestro/pids/` に登録され、`reset-session.js` がまとめて掃除できる。
+稼働中のプロセスはruntime rootのPID registryに登録され、`reset-session.js` がまとめて掃除できる。PR監視対象を変更するときは、Issue番号を固定monitorの引数へ追加せず、次でtargetを更新する:
+
+```sh
+node "$HOME/.gh-maestro/scripts/activate-pr-monitor.js" --issue <N> --workspace "$WORKSPACE" --base-branch "$BASE_BRANCH"
+```
 
 ## スキルの構造
 

@@ -28,6 +28,7 @@ const { getAlivePaneIds, killPane } = require('./shared/pane-launch');
 const { loadStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { atomicWriteJson } = require('./shared/atomic-write');
+const { clearPrMonitorTarget } = require('./shared/pr-monitor-target');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const {
@@ -435,6 +436,14 @@ if (require.main === module) {
 
   const log  = (msg) => { if (!quiet) console.log(`[reset] ${msg}`); };
   const warn = (msg) => console.warn(`[reset] ⚠ ${msg}`);
+
+  try {
+    const cleared = clearPrMonitorTarget(workspace);
+    log(cleared ? 'PR monitor target を終了しました。' : 'PR monitor target はありません。');
+  } catch (error) {
+    warn(`PR monitor target の読み取り・終了に失敗しました: ${error.message}`);
+    results.errors.push(`pr-monitor-target: ${error.message}`);
+  }
 
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 

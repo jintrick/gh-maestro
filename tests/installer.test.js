@@ -16,11 +16,37 @@ const {
   buildRulesSupportedMap, assertManagedTopLevelName, quarantineLegacyHomePids,
   migrateLegacyAgentsConfig, cleanupLegacyAgentsConfig, cleanupLegacyHomePids,
   pruneManagedRootEntries, cleanupLegacyManagedRoot, installSkills,
-  installScripts, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
+  installScripts, installPluginAssets, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
   buildUserPromptExpansionHook, registerUserPromptExpansionHook,
 } = require('../scripts/install.js');
 const { MANAGED_TOP_LEVEL } = require('../scripts/shared/storage-layout');
 const { withTempDir } = require('../scripts/shared/temp-directory');
+
+test('installPluginAssets: plugin manifestと固定monitorsをmanaged rootへ配置する', () => {
+  const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-plugin-source-'));
+  const destinationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-plugin-dest-'));
+  try {
+    fs.mkdirSync(path.join(sourceRoot, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(sourceRoot, 'monitors'), { recursive: true });
+    fs.writeFileSync(path.join(sourceRoot, '.claude-plugin', 'plugin.json'), '{"name":"fixture"}', 'utf8');
+    fs.writeFileSync(path.join(sourceRoot, 'monitors', 'monitors.json'), '[]', 'utf8');
+    fs.mkdirSync(path.join(destinationRoot, 'monitors', 'stale'), { recursive: true });
+    fs.writeFileSync(path.join(destinationRoot, 'monitors', 'stale', 'old.txt'), 'old', 'utf8');
+
+    installPluginAssets({
+      pluginDir: sourceRoot,
+      pluginRoot: path.join(destinationRoot, '.claude-plugin'),
+      monitorsDir: path.join(destinationRoot, 'monitors'),
+    });
+
+    assert.equal(fs.readFileSync(path.join(destinationRoot, '.claude-plugin', 'plugin.json'), 'utf8'), '{"name":"fixture"}');
+    assert.equal(fs.readFileSync(path.join(destinationRoot, 'monitors', 'monitors.json'), 'utf8'), '[]');
+    assert.equal(fs.existsSync(path.join(destinationRoot, 'monitors', 'stale')), false);
+  } finally {
+    fs.rmSync(sourceRoot, { recursive: true, force: true });
+    fs.rmSync(destinationRoot, { recursive: true, force: true });
+  }
+});
 
 test('restartResidentsAfterInstall: 登録済みの全workspaceに配布済みCLIを明示引数付きで呼び出す', () => {
   const workspaces = [

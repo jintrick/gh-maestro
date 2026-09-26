@@ -135,6 +135,31 @@ test('parseSessionPid/replaceSessionPid: 既存PIDを安全に抽出・置換す
   assert.equal(parseSessionPid(['--session-pid', 'bad']), null);
 });
 
+test('restartResidents: plugin monitor管理の常駐は停止・再起動しない', () => {
+  const workspace = makeWorkspace();
+  try {
+    const entries = residentEntries(workspace);
+    entries[1].args.push('--plugin-monitor');
+    entries[2].args.push('--plugin-monitor');
+    const harness = makeHarness(workspace, { entries });
+    const result = restartResidents(workspace, {
+      scriptsPath: path.join(workspace, 'scripts'),
+      preCapturedEntries: entries,
+      hooks: harness.hooks,
+      maxAttempts: 1,
+      waitMs: 0,
+    });
+    const byScript = new Map(result.results.map((item) => [item.script, item]));
+    assert.equal(byScript.get('msg-poll.js').status, 'plugin-managed');
+    assert.equal(byScript.get('poll-pr.js').status, 'plugin-managed');
+    assert.equal(byScript.get('poll-reviews.js').status, 'plugin-managed');
+    assert.ok(!harness.unregistered.some((pid) => [102, 103, 104].includes(pid)));
+    assert.ok(!harness.spawned.some((entry) => [102, 103, 104].includes(entry.pid)));
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test('buildRestartArgs: msg-pollはrestart CLIの親PIDを使わずregistryのsession-pidを引き継ぐ', () => {
   const workspace = makeWorkspace();
   try {

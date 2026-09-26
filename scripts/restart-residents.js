@@ -26,15 +26,16 @@ Options:
   旧socketの消滅を確実に判定できない、または現在環境を取得できない場合は、registryを保持して停止する。
 
 Output (stdout):
-  RESIDENT script=<name> status=replaced|monitor-required|delegated|not-running|failed ...
+  RESIDENT script=<name> status=replaced|plugin-managed|monitor-required|delegated|not-running|failed ...
   STATUS_PANE status=replaced|not-running|unavailable|failed oldPaneId=<id> newPaneId=<id> verified=<bool>
   MONITOR_REATTACH_REQUIRED script=<name> command=<command>
-  Monitorで出力を受ける常駐は停止後にdetached起動せず、上記の再接続指示を必ず実行する。
+  旧形式のMonitor常駐は停止後にdetached起動せず、上記の再接続指示を必ず実行する。
+  --plugin-monitorを含む常駐はplugin monitorが管理するため停止・再起動しない。
   poll-pr.js が poll-reviews.js を子として起動する構成では、後者は delegated と出力する。
 
 副作用:
   PIDと起動時刻の同一性を確認できた対象だけを停止する。worker-supervisorは現行
-  scripts/ 配下からdetached起動し、Monitor常駐3種はMonitorからの再接続を要求する。
+  scripts/ 配下からdetached起動し、旧形式のMonitor常駐3種はMonitorからの再接続を要求する。
   worker-supervisorの起動ログは <workspace>/.gh-maestro/resident-restart-logs/ に追記する。
   registryの読み取り・停止・起動確認に失敗した場合は、未確認のプロセスを削除せず終了コード1を返す。`;
 
