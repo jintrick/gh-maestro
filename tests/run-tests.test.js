@@ -38,7 +38,7 @@ function tapSummary({ tests, pass, fail, cancelled = 0, skipped = 0, todo = 0 })
 }
 
 function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = [], child, writeArtifactFn,
-  cwd = tempWorktree(), workspace, homedir = tempWorktree(), actor, extraDeps = {} }) {
+  cwd = tempWorktree(), workspace, homedir = tempWorktree(), actor, env = {}, extraDeps = {} }) {
   const stdout = [];
   const stderr = [];
   const calls = [];
@@ -57,6 +57,7 @@ function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = []
       homedir,
       env: {
         TEST_RUNNER_FIXTURE: '1',
+        ...env,
         ...((actor || suite === 'slow')
           ? { GH_MAESTRO_TEST_ACTOR: actor || 'poll-pr' }
           : {}),
@@ -528,18 +529,98 @@ test('runTests: 未知のsuiteを拒否し、宣言されたargv/mapping/fallbac
 
   const caller = tempWorktree();
   const project = tempWorktree();
+  const configWorkspaces = [];
   const workspace = runWithChild({
     cwd: caller,
     workspace: project,
     child: { status: 0, stdout: '', stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: ({ workspace: resolvedWorkspace }) => {
+        configWorkspaces.push(resolvedWorkspace);
+        return {
+          source: 'declared',
+          layers: { full: { scope: 'full', command: ['custom-runner'] } },
+        };
+      },
+      lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+    },
   });
+  assert.deepEqual(configWorkspaces, [project]);
   assert.deepEqual(
     workspace.calls.filter((call) => ['clear', 'head', 'hash'].includes(call.type))
       .map((call) => call.worktree),
-    [project, project, project],
+    [caller, caller, caller],
   );
-  assert.equal(workspace.calls.find((call) => call.type === 'spawn').options.cwd, project);
-  assert.equal(workspace.writes[0].worktree, project);
+  assert.equal(workspace.calls.find((call) => call.type === 'spawn').options.cwd, caller);
+  assert.equal(workspace.writes[0].worktree, caller);
+});
+
+test('runTests: GH_MAESTRO_WORKSPACE が本体を指していても、明示指定と省略の両方でworktreeを実行対象にする', () => {
+  for (const [mode, workspaceArg] of [
+    ['明示した設定workspace', 'explicit'],
+    ['継承した設定workspace', undefined],
+  ]) {
+    const executionWorktree = tempWorktree();
+    const configWorkspace = tempWorktree();
+    const resolvedConfigWorkspaces = [];
+    const fixture = runWithChild({
+      cwd: executionWorktree,
+      workspace: workspaceArg === 'explicit' ? configWorkspace : undefined,
+      env: { GH_MAESTRO_WORKSPACE: configWorkspace },
+      child: { status: 0, stdout: `TAP version 13\n${tapSummary({ tests: 1, pass: 1, fail: 0 })}`, stderr: '' },
+      extraDeps: {
+        resolveTestConfigFn: ({ workspace }) => {
+          resolvedConfigWorkspaces.push(workspace);
+          return {
+            source: 'declared',
+            layers: { full: { scope: 'full', command: ['custom-runner'] } },
+          };
+        },
+        lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+      },
+    });
+
+    assert.equal(fixture.result.exitCode, 0, `${mode}で実行に失敗しました: ${fixture.result.stderr}`);
+    assert.deepEqual(resolvedConfigWorkspaces, [configWorkspace]);
+    assert.deepEqual(
+      fixture.calls.filter((call) => ['clear', 'head', 'hash'].includes(call.type))
+        .map((call) => call.worktree),
+      [executionWorktree, executionWorktree, executionWorktree],
+    );
+    assert.equal(fixture.calls.find((call) => call.type === 'spawn').options.cwd, executionWorktree);
+    assert.equal(fixture.writes[0].worktree, executionWorktree);
+    assert.equal(fixture.artifacts[0].testedHead, SHA);
+  }
+});
+
+test('runTests: slow層も設定workspaceではなく実行worktreeへ成果物を書く', () => {
+  const executionWorktree = tempWorktree();
+  const configWorkspace = tempWorktree();
+  const resolvedConfigWorkspaces = [];
+  const fixture = runWithChild({
+    suite: 'slow',
+    cwd: executionWorktree,
+    workspace: configWorkspace,
+    env: { GH_MAESTRO_WORKSPACE: configWorkspace },
+    actor: 'poll-pr',
+    child: { status: 0, stdout: `TAP version 13\n${tapSummary({ tests: 1, pass: 1, fail: 0 })}`, stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: ({ workspace }) => {
+        resolvedConfigWorkspaces.push(workspace);
+        return {
+          source: 'declared',
+          layers: { slow: { scope: 'partial', command: ['slow-runner'] } },
+        };
+      },
+      lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+    },
+  });
+
+  assert.equal(fixture.result.exitCode, 0);
+  assert.deepEqual(resolvedConfigWorkspaces, [configWorkspace]);
+  assert.equal(fixture.calls.find((call) => call.type === 'spawn').options.cwd, executionWorktree);
+  assert.equal(fixture.writes[0].worktree, executionWorktree);
+  assert.equal(fixture.artifacts[0].scope, 'partial');
 });
 
 test('main: --helpは実runnerを起動せずusageを返す', () => {

@@ -39,7 +39,8 @@ Arguments:
                         指定時は変更した相対ファイルとして mapping へ渡す
 
 Options:
-  --workspace <path>   テスト層を解決するworkspace（省略時は環境/CWDから解決）
+  --workspace <path>   テスト層を読むworkspace（省略時は環境/CWDから解決）。
+                       実行対象と成果物の保存先は起動元CWDのworktree
   --list               宣言された層の名前とscopeをJSONで一覧表示する。層は実行しない
   --changed             後続の path を変更ファイルとして mapping でテストへ変換する
 
@@ -319,6 +320,21 @@ function resolveConfigWorkspace(cwd, workspace, env = process.env) {
   return cwd;
 }
 
+/**
+ * テスト・lint・HEAD・内容指紋・成果物が対象にする作業ツリーを解決する。
+ *
+ * `--workspace` と GH_MAESTRO_WORKSPACE はテスト層の宣言を読む設定workspaceの
+ * 解決に使うが、ワーカーから継承した本体workspaceを実行対象へ流用してはならない。
+ * 実行対象は常にこのプロセスを起動したCWD（通常はcoderのworktree）であり、明示的な
+ * 引数として渡すことで resolveWorkspace() のmanaged root/homeガードも適用する。
+ *
+ * @param {string} cwd
+ * @returns {string|null}
+ */
+function resolveExecutionWorkspace(cwd) {
+  return resolveWorkspace(cwd);
+}
+
 function layerListResult(status, layers, exitCode, stderr = '') {
   return {
     exitCode,
@@ -340,19 +356,19 @@ function layerListResult(status, layers, exitCode, stderr = '') {
  */
 function listTestLayers({ cwd = process.cwd(), workspace, homedir, env = process.env } = {}, deps = {}) {
   const resolveTestConfigFn = deps.resolveTestConfigFn || resolveTestConfig;
-  let executionWorkspace;
+  let configWorkspace;
   try {
-    executionWorkspace = resolveConfigWorkspace(cwd, workspace, env);
+    configWorkspace = resolveConfigWorkspace(cwd, workspace, env);
   } catch {
     return layerListResult('invalid', [], 1, 'テスト層を解決できません');
   }
-  if (!executionWorkspace) {
+  if (!configWorkspace) {
     return layerListResult('invalid', [], 1, 'テスト層を解決するworkspaceを特定できません');
   }
 
   let testConfig;
   try {
-    testConfig = resolveTestConfigFn({ workspace: executionWorkspace, homedir });
+    testConfig = resolveTestConfigFn({ workspace: configWorkspace, homedir });
   } catch {
     testConfig = null;
   }
@@ -368,6 +384,8 @@ function listTestLayers({ cwd = process.cwd(), workspace, homedir, env = process
  * 宣言されたテスト層を1回実行し、終了コードを結果の正本として成果物を作る。
  *
  * @param {{suite?:string, layer?:string, testFiles?:string[], changedFiles?:string[], cwd?:string, workspace?:string, env?:object, homedir?:string}} params
+ * @param {string} params.cwd 実際にテストrunner・lintを起動し、成果物を保存するworktree
+ * @param {string} params.workspace テスト層宣言を読むworkspace（省略可）
  * @param {object} [deps]
  * @param {Function} [deps.spawnSyncFn]
  * @param {Function} [deps.resolveTestConfigFn]
@@ -394,10 +412,26 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   }
   const resolveTestConfigFn = deps.resolveTestConfigFn || resolveTestConfig;
   let executionWorkspace;
+  let configWorkspace;
+  try {
+    executionWorkspace = resolveExecutionWorkspace(cwd);
+  } catch {
+    executionWorkspace = null;
+  }
+  if (!executionWorkspace) {
+    return {
+      exitCode: 1,
+      artifact: null,
+      artifactWritten: false,
+      stdout: '',
+      stderr: 'テストを実行するworkspaceを解決できません',
+    };
+  }
+
   let testConfig;
   try {
-    executionWorkspace = resolveConfigWorkspace(cwd, workspace, env);
-    if (!executionWorkspace) {
+    configWorkspace = resolveConfigWorkspace(cwd, workspace, env);
+    if (!configWorkspace) {
       return {
         exitCode: 1,
         artifact: null,
@@ -406,7 +440,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
         stderr: 'テスト設定を読むworkspaceを解決できません',
       };
     }
-    testConfig = resolveTestConfigFn({ workspace: executionWorkspace, homedir });
+    testConfig = resolveTestConfigFn({ workspace: configWorkspace, homedir });
   } catch {
     testConfig = null;
   }
@@ -686,6 +720,8 @@ module.exports = {
   normalizeRelativeTestFile,
   normalizeTestFiles,
   mapChangedFilesToTests,
+  resolveExecutionWorkspace,
+  resolveConfigWorkspace,
   runLint,
   runTests,
   main,
