@@ -302,6 +302,39 @@ test('stopResidentEntry: 停止済み常駐のregistryとworker-supervisorのleg
   }
 });
 
+test('stopResidentEntry: 同じPIDのresident lease identity不一致を成功扱いにしない', () => {
+  const workspace = makeWorkspace();
+  const leaseStore = createNormalWorkerStore(workspace);
+  const role = 'worker-supervisor';
+  try {
+    leaseStore.write(roleLeaseKey(role), {
+      pid: 4242,
+      startTime: '2026-07-29T00:00:00.525Z',
+      workerName: role,
+      phase: 'active',
+    });
+    const entry = {
+      pid: 4242,
+      script: 'worker-supervisor.js',
+      workerName: null,
+      workspace,
+      startTime: '2026-07-29T00:00:00.424Z',
+    };
+
+    const result = stopResidentEntry(workspace, entry, {
+      isProcessAlive: () => false,
+      unregisterProcess: () => {},
+      releaseResidentLeaseForProcess,
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.error, /resident lease \(worker-supervisor\) の解放を確認できませんでした/);
+    assert.equal(leaseStore.read(roleLeaseKey(role)).pid, entry.pid);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test('restartResidents: 無関係なstale resident leaseがあってもteardownを中断しない', () => {
   const workspace = makeWorkspace();
   const leaseStore = createNormalWorkerStore(workspace);

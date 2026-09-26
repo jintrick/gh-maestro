@@ -54,6 +54,20 @@ function _getProcessStartTime(pid) {
   return fn(pid);
 }
 
+function resolveProcessIdentity({ pid = process.pid, startTime } = {}) {
+  const targetPid = Number.parseInt(pid, 10);
+  if (!Number.isFinite(targetPid) || targetPid <= 0) {
+    throw new Error(`worker lease: 不正な PID です: ${pid}`);
+  }
+  if (typeof startTime === 'string' && startTime !== '') {
+    return { pid: targetPid, startTime };
+  }
+  return {
+    pid: targetPid,
+    startTime: _getProcessStartTime(targetPid) || new Date().toISOString(),
+  };
+}
+
 // テストで注入可能にする（実プロセスに触れない）。
 let _killProcessTree = killProcessTree;
 let _sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -186,17 +200,15 @@ function isLeaseLive(entry) {
  * @param {object} store lease store
  * @param {string} key リースキー
  * @param {number} maxRetries 最大リトライ回数
+ * @param {{pid: number, startTime: string}} [identity] ロック保持者として共有するidentity
  * @returns {boolean} 取得できれば true
  * @throws {Error} live な保持者がいる、またはリトライ上限超過
  */
-function acquireLeaseLock(store, key, maxRetries = 5) {
+function acquireLeaseLock(store, key, maxRetries = 5, identity = null) {
   const lockPath = store.lockPath(key);
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
 
-  const selfEntry = {
-    pid: process.pid,
-    startTime: _getProcessStartTime(process.pid) || new Date().toISOString(),
-  };
+  const selfEntry = resolveProcessIdentity(identity || undefined);
 
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -290,11 +302,19 @@ function acquireLease(store, key, { pid, startTime, workerName }) {
     );
   }
 
+  // 起動時刻の取得はロック保持者とlease本体で共有する。WindowsでWMI/CIM取得が
+  // 片方だけ失敗して別々のfallbackを作ると、停止時のlease解放identityが分断される。
+  const identity = resolveProcessIdentity({ pid, startTime });
+
   // ── per-key ロックを取得 ──
   // 他プロセスが同じキーの stale 回収を実行中ならここで待つか拒否される。
   let lockAcquired = false;
   try {
-    acquireLeaseLock(store, key);
+    // 起動ロックの所有者はこのNodeプロセス自身であり、通常leaseの対象PIDが
+    // 別プロセスとして渡された場合にそのPIDをロック記録へ書いてはならない。
+    // 常駐leaseのように対象PIDが自PIDの場合だけ、捕捉済みidentityを共有する。
+    const lockIdentity = identity.pid === process.pid ? identity : null;
+    acquireLeaseLock(store, key, 5, lockIdentity);
     lockAcquired = true;
   } catch (e) {
     throw new Error(`起動を拒否しました: ${e.message}`);
@@ -321,8 +341,8 @@ function acquireLease(store, key, { pid, startTime, workerName }) {
     // 新規リースを原子的に作成
     const now = new Date().toISOString();
     const entry = {
-      pid,
-      startTime: startTime || _getProcessStartTime(pid) || now,
+      pid: identity.pid,
+      startTime: identity.startTime,
       workerName,
       createdAt: now,
       // phase: 'initializing' = ワーカー起動準備中（orchestrator 用 Issue ベースライン既読化の
@@ -529,6 +549,7 @@ function recordAudit(workspace, type, role, detail) {
  * @param {() => Array<number>} [opt.handoffStopTargets]
  *   引き継ぎ時に停止要求を送る追加PID（registry 由来の旧所有者等）を返す関数
  * @param {number} [opt.deadlineMs] 引き継ぎ待機の上限時間（既定: HANDOFF_WAIT_MS）
+ * @param {{pid: number, startTime: string}} [opt.identity] 呼び出し元が捕捉済みのプロセスidentity
  * @returns {{ acquired: true, key: string, release: () => void, staleReclaimed: boolean }
  *          | { acquired: false, reason: 'handoff-timeout', key: string, ownerPid: number|null }}
  * @throws {Error} live lease が存在する（handoff なし）場合、または監査記録に失敗した場合
@@ -540,11 +561,12 @@ function acquireResidentLease({
   handoffStopTargets = () => [],
   deadlineMs = HANDOFF_WAIT_MS,
   env = process.env,
+  identity = null,
 }) {
   const store = createResidentLeaseStore(workspace);
   const key = roleLeaseKey(role);
-  const pid = process.pid;
-  const startTime = _getProcessStartTime(pid) || new Date().toISOString();
+  const selfIdentity = resolveProcessIdentity(identity || undefined);
+  const { pid, startTime } = selfIdentity;
 
   const existing = store.read(key);
   const liveExisting = existing && isLeaseLive(existing);
@@ -638,8 +660,9 @@ function releaseResidentLease({ workspace, role, pid }) {
  * 強制終了では対象プロセスの exit handler が走らず、通常の
  * releaseResidentLease() が呼ばれないことがある。停止処理側から回収する場合も、
  * PIDだけでなく registry と同じ startTime を照合し、PID再利用後の別プロセスの
- * leaseを削除しない。別プロセスの lease は停止対象の解放失敗とはみなさず、
- * 削除後に再読込して残存を確認するのは自分の leaseだけに限定する。
+ * leaseを削除しない。別PIDの lease は停止対象の解放失敗とはみなさないが、同じPIDで
+ * startTimeだけが不一致の場合はidentity取得結果が分断された可能性を成功扱いにせず、
+ * 残留失敗として返す。削除後に再読込して残存を確認するのは自分の leaseだけに限定する。
  *
  * @param {object} opt
  * @param {string} opt.workspace
@@ -665,11 +688,18 @@ function releaseResidentLeaseForProcess({ workspace, role, pid, startTime }) {
 
     const existing = store.read(key);
     if (!existing) return { released: false, remaining: false };
-    if (existing.pid !== pid || existing.startTime !== startTime) {
+    if (existing.pid !== pid) {
       return {
         released: false,
         remaining: false,
         reason: 'lease owner identity does not match the stopped process',
+      };
+    }
+    if (existing.startTime !== startTime) {
+      return {
+        released: false,
+        remaining: true,
+        reason: 'lease owner startTime does not match the stopped process',
       };
     }
 

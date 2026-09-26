@@ -312,6 +312,29 @@ test('acquireLease: 既存リースがなければ新規作成に成功する', 
   }
 });
 
+test('acquireLease: startTime未指定時の取得結果をロックとleaseで共有する', () => {
+  const store = tempStore();
+  let calls = 0;
+  try {
+    mockLiveness({ alive: true, identityMatch: true });
+    lease._setGetProcessStartTime(() => {
+      calls += 1;
+      return '2026-07-29T00:00:00.424Z';
+    });
+
+    lease.acquireLease(store, 'issue-1-coder-test', {
+      pid: process.pid,
+      startTime: null,
+      workerName: 'issue-1-coder-test',
+    });
+
+    assert.equal(calls, 1, '同じ起動処理で起動時刻を再取得しない');
+    assert.equal(store.read('issue-1-coder-test').startTime, '2026-07-29T00:00:00.424Z');
+  } finally {
+    cleanupStore(store);
+  }
+});
+
 test('acquireLease: live lease があればエラーを投げる（重複起動拒否）', () => {
   const store = tempStore();
   try {
@@ -579,6 +602,62 @@ test('releaseResidentLeaseForProcess: 別PIDの死亡済みstale leaseもno-op�
     assert.deepEqual(calls.verify, [], 'identity不一致のleaseではPID同一性確認を行わない');
     assert.deepEqual(store.read(lease.roleLeaseKey(role)), stale,
       '停止対象ではないstale leaseはacquire側の回収に委ねる');
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('releaseResidentLeaseForProcess: 同じPIDでstartTimeが不一致なら残留失敗にする', () => {
+  const store = tempStore();
+  const tmp = store._tmpDir;
+  try {
+    const role = 'worker-supervisor';
+    const leaseIdentity = '2026-07-29T00:00:00.525Z';
+    store.write(lease.roleLeaseKey(role), {
+      pid: 4242,
+      startTime: leaseIdentity,
+      workerName: role,
+      phase: 'active',
+    });
+
+    const result = lease.releaseResidentLeaseForProcess({
+      workspace: tmp,
+      role,
+      pid: 4242,
+      startTime: '2026-07-29T00:00:00.424Z',
+    });
+
+    assert.deepEqual(result, {
+      released: false,
+      remaining: true,
+      reason: 'lease owner startTime does not match the stopped process',
+    });
+    assert.equal(store.read(lease.roleLeaseKey(role)).startTime, leaseIdentity);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireResidentLease: 呼び出し元のidentityを再取得せずleaseへ保存する', () => {
+  const store = tempStore();
+  const tmp = store._tmpDir;
+  const startTime = '2026-07-29T00:00:00.424Z';
+  try {
+    let calls = 0;
+    lease._setGetProcessStartTime(() => {
+      calls += 1;
+      throw new Error('起動時刻の再取得は禁止');
+    });
+
+    const result = lease.acquireResidentLease({
+      workspace: tmp,
+      role: 'worker-supervisor',
+      identity: { pid: process.pid, startTime },
+    });
+
+    assert.equal(calls, 0);
+    assert.equal(store.read(lease.roleLeaseKey('worker-supervisor')).startTime, startTime);
+    result.release();
   } finally {
     cleanupStore(store);
   }

@@ -729,6 +729,40 @@ test('死のスイッチ発火時: role lease を解放し exit 3 で終了す�
   });
 });
 
+test('main: 常駐leaseへ渡したself identityをregistry用の結果へ保持する', () => {
+  withTempDir(workspace => {
+    initOrchestratorState(workspace);
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
+    let calls = 0;
+    msgPoll._setGetProcessStartTime((pid) => {
+      assert.equal(pid, process.pid);
+      calls += 1;
+      return calls === 1
+        ? '2026-07-29T00:00:00.525Z'
+        : '2026-07-29T00:00:00.626Z';
+    });
+
+    const result = runMain(['orchestrator', '--workspace', workspace]);
+    try {
+      assert.equal(result.code, 0);
+      assert.deepEqual(result.residentIdentity, {
+        pid: process.pid,
+        startTime: '2026-07-29T00:00:00.626Z',
+      });
+      const leasePath = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json');
+      assert.equal(JSON.parse(fs.readFileSync(leasePath, 'utf8')).startTime, result.residentIdentity.startTime);
+      assert.equal(calls, 2, 'session identityとself identity以外の起動時刻を取得しない');
+    } finally {
+      result.residentLease.release();
+      msgPoll._setGetProcessStartTime((pid) => {
+        assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
+        return TEST_SESSION_START_TIME;
+      });
+    }
+  });
+});
+
 test('orchestrator モード: workers.json が無い場合もエラーにならず継続', () => {
   withTempDir(workspace => {
     initOrchestratorState(workspace);

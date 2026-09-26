@@ -51,6 +51,7 @@ const {
   resolveSessionPid,
   createDeadManSwitch,
   getProcessStartTime,
+  captureProcessIdentity,
   registerProcess,
   findRunningInstance,
   cleanup: lifecycleCleanup,
@@ -620,6 +621,7 @@ function shouldRetry(pendingEntry, nowMs) {
  *   onceMode: boolean,
  *   intervalMs: number,
  *   workspace: string,
+ *   residentIdentity: {pid: number, startTime: string},
  * }}
  */
 function main(argsOverride, opts = {}) {
@@ -702,6 +704,9 @@ function main(argsOverride, opts = {}) {
   // gh 呼び出しより前に行い、多重起動時は無駄な外部呼び出しを避けて即拒否する。
   // workspace 表記の差異（大文字小文字・末尾スラッシュ等）でもすり抜けないよう、
   // role lease は workspace を canonicalWorkspace で正規化して排他する（Issue #240）。
+  // leaseとPID registryへ同じプロセスidentityを保存するため、起動時刻はここで一度だけ
+  // 捕捉し、両方の書き込みへ渡す。WindowsのCIM取得失敗時のfallbackも分断しない。
+  const residentIdentity = captureProcessIdentity(process.pid, _getProcessStartTime);
   let residentLease = null;
   {
     const role = WORKER_SUPERVISOR_ROLE;
@@ -710,7 +715,14 @@ function main(argsOverride, opts = {}) {
       return [...new Set([...(dup ? [dup.pid] : []), ...legacyPids])];
     };
     try {
-      const res = acquireResidentLease({ workspace, role, handoff: force, handoffStopTargets: handoffTargets, env });
+      const res = acquireResidentLease({
+        workspace,
+        role,
+        handoff: force,
+        handoffStopTargets: handoffTargets,
+        env,
+        identity: residentIdentity,
+      });
       if (!res.acquired) {
         // 引き継ぎ期限超過（--force で既存所有者が終了しなかった）
         writeErr(
@@ -1309,6 +1321,7 @@ function main(argsOverride, opts = {}) {
     workspace,
     sessionPid,
     residentLease,
+    residentIdentity,
   };
 }
 
@@ -1352,7 +1365,11 @@ if (require.main === module) {
   }
 
   // PID registry に自己登録（表示・診断用途。排他の正本は role lease であり、二重化しない）
-  registerProcess(result.workspace, { script: 'worker-supervisor.js' });
+  registerProcess(result.workspace, {
+    pid: result.residentIdentity.pid,
+    startTime: result.residentIdentity.startTime,
+    script: 'worker-supervisor.js',
+  });
 
   const ru = result.runOnce;
 

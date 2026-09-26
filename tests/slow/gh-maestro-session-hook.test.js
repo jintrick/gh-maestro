@@ -46,6 +46,43 @@ const FAST_SESSION_PRELOAD = (() => {
   return file;
 })();
 
+// 常駐lease取得とPID registry登録が同じ起動時刻を共有しない旧経路を再現する。
+// 自プロセスのCIM取得は最初だけ成功し、2回目以降は失敗させる。修正前はleaseが
+// 1回目の値、registryが現在時刻fallbackになり、強制停止後のlease解放identityが
+// 不一致になる。修正後はself identityを一度だけ捕捉するため、2回目の取得へ到達しない。
+function createResidentIdentityFailurePreload() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-resident-identity-preload-'));
+  const file = path.join(dir, 'preload.js');
+  const childProcessPath = require.resolve('../../scripts/shared/child-process');
+  const fixedStartTime = TEST_PROCESS_START_TIME;
+  const source = [
+    "'use strict';",
+    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
+    `const fixedStartTime = ${JSON.stringify(fixedStartTime)};`,
+    'const callsByPid = new Map();',
+    'const realExecSync = childProcess.execSync;',
+    'childProcess.execSync = (command, opts) => {',
+    "  const commandText = String(command);",
+    "  if (commandText.includes('Get-CimInstance Win32_Process')) {",
+    "    const match = /ProcessId=(\\d+)/.exec(commandText);",
+    '    const pid = match ? Number(match[1]) : null;',
+    '    const count = (callsByPid.get(pid) || 0) + 1;',
+    '    callsByPid.set(pid, count);',
+    '    if (pid === process.pid && count > 1) return "\\n";',
+    '    return `${fixedStartTime}\\n`;',
+    '  }',
+    '  return realExecSync(command, opts);',
+    '};',
+  ].join('\n');
+  fs.writeFileSync(file, source, 'utf8');
+  process.once('exit', () => {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  });
+  return file;
+}
+
+const RESIDENT_IDENTITY_FAILURE_PRELOAD = createResidentIdentityFailurePreload();
+
 function runGit(cwd, ...args) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
   assert.equal(result.status, 0, `git ${args.join(' ')} failed: ${result.stderr}`);
@@ -322,5 +359,61 @@ test('CLI通し: 生存中のworker-supervisorを維持したままhookがreset�
     }
     if (stopError) throw stopError;
     if (cleanupError) throw cleanupError;
+  }
+});
+
+test('CLI通し: 起動時刻取得が一時失敗してもleaseとPID registryのidentityを共有する', async () => {
+  const workspace = createWorkspace();
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-identity-bin-'));
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-identity-runtime-'));
+  const previousRuntimeDir = process.env.GH_MAESTRO_RUNTIME_DIR;
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtimeDir;
+  let supervisor = null;
+  try {
+    const bootstrapPath = createFakeGh(binDir);
+    const env = hookEnv(binDir, runtimeDir, bootstrapPath);
+    supervisor = spawn(process.execPath, [
+      '-r', RESIDENT_IDENTITY_FAILURE_PRELOAD,
+      SUPERVISOR_SCRIPT,
+      '--workspace', workspace,
+      '--interval', '1',
+      '--session-pid', String(process.pid),
+    ], {
+      cwd: workspace,
+      env: { ...env, GH_MAESTRO_WORKER: 'orchestrator' },
+      stdio: 'ignore',
+    });
+
+    const registryPath = lifecycle.pidFilePath(workspace, supervisor.pid);
+    const leasePath = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-worker-supervisor.json');
+    const deadline = Date.now() + 20000;
+    let registryEntry = null;
+    let leaseEntry = null;
+    while (Date.now() < deadline && (!registryEntry || !leaseEntry)) {
+      try { registryEntry = JSON.parse(fs.readFileSync(registryPath, 'utf8')); } catch { registryEntry = null; }
+      try { leaseEntry = JSON.parse(fs.readFileSync(leasePath, 'utf8')); } catch { leaseEntry = null; }
+      if (!registryEntry || !leaseEntry) await waitFor(100);
+    }
+
+    assert.ok(registryEntry, `PID registryが作成されること: ${registryPath}`);
+    assert.ok(leaseEntry, `resident leaseが作成されること: ${leasePath}`);
+    assert.equal(registryEntry.pid, supervisor.pid);
+    assert.equal(leaseEntry.pid, supervisor.pid);
+    assert.equal(leaseEntry.startTime, registryEntry.startTime,
+      '起動時刻取得の一時失敗があってもleaseとregistryのidentityを分断しない');
+  } finally {
+    let stopError = null;
+    try {
+      if (supervisor) await stopRunningSupervisors(workspace, supervisor);
+    } catch (error) {
+      stopError = error;
+    }
+    if (!stopError) assertNoResidentLeases(workspace);
+    for (const directory of [workspace, binDir, runtimeDir]) {
+      try { removeDirectory(directory); } catch {}
+    }
+    if (previousRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntimeDir;
+    if (stopError) throw stopError;
   }
 });

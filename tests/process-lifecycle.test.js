@@ -293,6 +293,31 @@ test('startTimesMatch: 不正な日付（NaN）・欠落は不一致として扱
   assert.equal(plc.startTimesMatch(undefined, MOCK_START_TIME), false);
 });
 
+test('captureProcessIdentity: 起動時刻取得を一度だけ行いPIDと組にして返す', () => {
+  const plc = loadModule();
+  const calls = [];
+  const identity = plc.captureProcessIdentity('4242', (pid) => {
+    calls.push(pid);
+    return MOCK_START_TIME;
+  });
+
+  assert.deepEqual(identity, { pid: 4242, startTime: MOCK_START_TIME });
+  assert.deepEqual(calls, [4242]);
+});
+
+test('captureProcessIdentity: 起動時刻取得の失敗は一つのfallbackへ縮退する', () => {
+  const plc = loadModule();
+  let calls = 0;
+  const identity = plc.captureProcessIdentity(process.pid, () => {
+    calls += 1;
+    throw new Error('CIM unavailable');
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(identity.pid, process.pid);
+  assert.match(identity.startTime, /^\d{4}-\d{2}-\d{2}T/);
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // registerProcess / unregisterProcess
 // ═══════════════════════════════════════════════════════════════════════════
