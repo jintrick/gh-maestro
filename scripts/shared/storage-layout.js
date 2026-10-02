@@ -351,6 +351,7 @@ const MANAGED_TOP_LEVEL = new Set([
   'agents.json',
   '.claude-plugin',
   'monitors',
+  'install-source.json',
 ]);
 
 module.exports = {

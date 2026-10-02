@@ -28,11 +28,19 @@ gh issue list --repo $REPO --state open --limit 20
 gh pr list --repo $REPO --state merged --limit 15
 ```
 
-4. **テスト層宣言の確認**: セッションコンテキストの `TEST_LAYERS_STATUS` を確認する。
+4. **鮮度の事実を確認して人間へ伝える**: セッションコンテキストに出力された次の2行を確認する:
+
+   - `BASE_BRANCH_STATUS=behind` は、現在の `BASE_BRANCH` がGitHub上の同名ブランチより遅れていることを示す。`BEHIND_COMMITS` の件数とともに人間へ伝える。
+   - `GH_MAESTRO_INSTALL_STATUS=stale` は、インストール済みコピーが、記録されたインストール元リポジトリの同名ブランチより古いことを示す。`INSTALLED_COMMIT` とともに人間へ伝える。
+   - どちらかが `unknown` の場合は、`REASON` を含めて確認不能だった事実を人間へ伝える。`unknown` を `up-to-date` とみなしてはならない。
+
+   `behind`、`stale`、`unknown` のいずれも、orchestratorの起動を止める条件ではない。状態を理由に自動 `pull`、自動インストール、プロセス停止を行わず、commit・push・mergeもこの検査だけを理由にブロックしてはならない。必要な対応は人間の判断を仰ぐ。
+
+5. **テスト層宣言の確認**: セッションコンテキストの `TEST_LAYERS_STATUS` を確認する。
 
    - `declared` の場合は、既存の宣言されたテスト層を使う。
    - `missing` または `invalid` の場合は、`gh-maestro-test-setup` スキルを読み、その手順に従う。提案を人間へ提示して承認を得るまで、対象プロジェクトのテストや設定を変更してはならない。承認後の設定・テスト配置・実行結果の確認まで終わってから次へ進む。
 
    セッション初期化が `invalid` を報告していても、それだけを理由に初期化やコンテキストの出力をやり直してはならない。出力された状態を使って人間へ状況を提示する。
 
-5. `gh-maestro-orchestrator` スキルのゴール定義に従ってorchestratorとして動作を開始する。
+6. `gh-maestro-orchestrator` スキルのゴール定義に従ってorchestratorとして動作を開始する。
