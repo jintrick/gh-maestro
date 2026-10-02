@@ -9,6 +9,7 @@ const os = require('os');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'get-context.js');
 const REPO_ROOT = path.join(__dirname, '..', '..');
+const { createFakeGh } = require('../_fake-gh');
 
 // get-context の実CLI境界とGit照会は維持する。一方、読み込まれる read-state の
 // 自プロセス起動時刻取得だけは、各ケースでPowerShell/WMIを起動しない固定値へ差し替える。
@@ -37,7 +38,23 @@ const FAST_CONTEXT_PRELOAD = (() => {
 })();
 
 function runContext(options = {}) {
-  return spawnSync(process.execPath, ['-r', FAST_CONTEXT_PRELOAD, SCRIPT], options);
+  const { fakeGhOptions, ...spawnOptions } = options;
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-get-context-gh-'));
+  const bootstrapPath = createFakeGh(binDir, fakeGhOptions);
+  const baseEnv = { ...process.env, ...(spawnOptions.env || {}) };
+  const env = {
+    ...baseEnv,
+    PATH: `${binDir}${path.delimiter}${baseEnv.PATH || ''}`,
+    NODE_OPTIONS: [baseEnv.NODE_OPTIONS, `--require=${bootstrapPath}`].filter(Boolean).join(' '),
+  };
+  try {
+    return spawnSync(process.execPath, ['-r', FAST_CONTEXT_PRELOAD, SCRIPT], {
+      ...spawnOptions,
+      env,
+    });
+  } finally {
+    fs.rmSync(binDir, { recursive: true, force: true });
+  }
 }
 
 function isolatedHome() {
@@ -80,6 +97,28 @@ function writeDependencyFixture(workspace, installedVersion = null) {
   }
 }
 
+function createCommittedContextWorkspace() {
+  const workspace = createContextWorkspace();
+  const config = spawnSync('git', ['config', 'user.email', 'get-context@example.com'], {
+    cwd: workspace,
+    encoding: 'utf8',
+  });
+  assert.equal(config.status, 0, `git config user.email failed: ${config.stderr}`);
+  const name = spawnSync('git', ['config', 'user.name', 'get-context test'], {
+    cwd: workspace,
+    encoding: 'utf8',
+  });
+  assert.equal(name.status, 0, `git config user.name failed: ${name.stderr}`);
+  const branch = spawnSync('git', ['branch', '-M', 'dev'], { cwd: workspace, encoding: 'utf8' });
+  assert.equal(branch.status, 0, `git branch failed: ${branch.stderr}`);
+  fs.writeFileSync(path.join(workspace, 'README.md'), 'context fixture\n', 'utf8');
+  const add = spawnSync('git', ['add', 'README.md'], { cwd: workspace, encoding: 'utf8' });
+  assert.equal(add.status, 0, `git add failed: ${add.stderr}`);
+  const commit = spawnSync('git', ['commit', '-qm', 'context fixture'], { cwd: workspace, encoding: 'utf8' });
+  assert.equal(commit.status, 0, `git commit failed: ${commit.stderr}`);
+  return workspace;
+}
+
 test('REPO と WORKSPACE を正しいフォーマットで出力する', () => {
   const r = runContext({
     cwd: REPO_ROOT,
@@ -103,6 +142,57 @@ test('GH_MAESTRO_WORKER=orchestrator がセッション変数として出力さ�
     lines.includes('GH_MAESTRO_WORKER=orchestrator'),
     `出力に GH_MAESTRO_WORKER=orchestrator が含まれること: ${r.stdout}`
   );
+});
+
+test('実CLI: behind/staleを出力してもセッション開始を終了コード0で継続する', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createCommittedContextWorkspace();
+  const installedCommit = 'b'.repeat(40);
+  fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.gh-maestro', 'install-source.json'), JSON.stringify({
+    schemaVersion: 1,
+    sourceRepository: 'test/repo',
+    sourceBranch: 'dev',
+    sourceCommit: installedCommit,
+  }), 'utf8');
+  try {
+    const r = runContext({
+      cwd: workspace,
+      env,
+      fakeGhOptions: { apiResponses: { branchSha: 'c'.repeat(40), behindBy: 2 } },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^BASE_BRANCH_STATUS=behind BEHIND_COMMITS=2$/m);
+    assert.match(
+      r.stdout,
+      new RegExp(`^GH_MAESTRO_INSTALL_STATUS=stale .*INSTALLED_COMMIT=${installedCommit} BEHIND_COMMITS=2$`, 'm'),
+    );
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('実CLI: GitHub照会不能時はunknownを出力して終了コード0で継続する', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createCommittedContextWorkspace();
+  fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.gh-maestro', 'install-source.json'), JSON.stringify({
+    schemaVersion: 1,
+    sourceRepository: 'test/repo',
+    sourceBranch: 'dev',
+    sourceCommit: 'd'.repeat(40),
+  }), 'utf8');
+  try {
+    const r = runContext({ cwd: workspace, env, fakeGhOptions: { fail: true }, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^BASE_BRANCH_STATUS=unknown REASON=.*gh api.*$/m);
+    assert.match(r.stdout, /^GH_MAESTRO_INSTALL_STATUS=unknown REASON=.*gh api.*$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test('test.layers宣言が無い場合はmissingをsession contextへ出力する', () => {

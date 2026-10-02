@@ -11,6 +11,7 @@ const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'gh-maestro-session-h
 const SUPERVISOR_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'worker-supervisor.js');
 const PROCESS_LIFECYCLE_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'process-lifecycle.js');
 const lifecycle = require('../../scripts/process-lifecycle');
+const { createFakeGh, hookEnv } = require('../_fake-gh');
 const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
 lifecycle.getProcessStartTime = () => TEST_PROCESS_START_TIME;
 const readStateLib = require('../../scripts/shared/read-state');
@@ -127,44 +128,6 @@ function createWorkspace(oldSessionId = 'old-session-id') {
   });
   assert.equal(initialized.ok, true);
   return workspace;
-}
-
-function createFakeGh(binDir, { fail = false } = {}) {
-  fs.mkdirSync(binDir, { recursive: true });
-  const source = [
-    "'use strict';",
-    `const fail = ${fail ? 'true' : 'false'};`,
-    "const path = require('path');",
-    "const args = process.argv.slice(1);",
-    "if (path.basename(args[0] || '') === 'repo' && args[1] === 'view') {",
-    "  if (!fail) {",
-    "    process.stdout.write('example/gh-maestro-test\\n');",
-    '    process.exit(0);',
-    '  }',
-    "  process.stderr.write('fake gh failure\\n');",
-    '  process.exit(1);',
-    '}',
-    '',
-  ].join('\n');
-
-  const bootstrapPath = path.join(binDir, 'fake-gh-bootstrap.js');
-  const ghPath = path.join(binDir, process.platform === 'win32' ? 'gh.exe' : 'gh');
-  fs.writeFileSync(bootstrapPath, source, 'utf8');
-  // reset-session.js invokes the real executable name `gh` without a shell. A copied
-  // Node executable plus NODE_OPTIONS gives the test a cross-platform executable
-  // replacement without relying on .cmd/.bat resolution on Windows.
-  fs.copyFileSync(process.execPath, ghPath);
-  if (process.platform !== 'win32') fs.chmodSync(ghPath, 0o755);
-  return bootstrapPath;
-}
-
-function hookEnv(binDir, runtimeDir, bootstrapPath) {
-  return {
-    ...process.env,
-    PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
-    GH_MAESTRO_RUNTIME_DIR: runtimeDir,
-    ...(bootstrapPath ? { NODE_OPTIONS: `--require=${bootstrapPath}` } : {}),
-  };
 }
 
 function runHook(workspace, env) {

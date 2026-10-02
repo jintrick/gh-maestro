@@ -9,6 +9,7 @@ const ROOT = path.join(__dirname, '..');
 const SKILLS_DIR = path.join(ROOT, 'skills');
 const AGENTS_YAML = path.join(SKILLS_DIR, 'agents.yaml');
 const PLUGIN_DIR = path.join(ROOT, 'plugin');
+const INSTALL_SOURCE_FILENAME = 'install-source.json';
 // 部分テンプレート（複数スキルの SKILL.md へ {{...}} で差し込む共通本文）の置き場所。
 // `_` 始まりのため skillDirs の走査対象からは除外され、スキルとしてはインストールされない。
 const PARTIALS_DIR = path.join(SKILLS_DIR, '_partials');
@@ -17,7 +18,10 @@ const { resolveExtends } = require(path.join(__dirname, 'shared', 'resolve-confi
 const storageLayout = require(path.join(__dirname, 'shared', 'storage-layout'));
 const { parseAgentsYaml, expandHome } = require(path.join(__dirname, 'shared', 'agents-yaml'));
 const { getCurrentBranch } = require(path.join(__dirname, 'shared', 'git-branch'));
+const { resolveGitHead } = require(path.join(__dirname, 'shared', 'git-head'));
+const { validateInstallSourceRecord } = require('./shared/freshness-status');
 const { resolveWorkspace } = require(path.join(__dirname, 'shared', 'workspace'));
+const { getRemoteRepo } = require('./gh-maestro-setup');
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -582,6 +586,30 @@ function ghMaestroPath(...segs) {
   assertManagedTopLevelName(segs[0]);
   ghMaestroKeep.add(segs[0]);
   return path.join(ghMaestroDir, ...segs);
+}
+
+function resolveInstallSourceRecord(options = {}) {
+  const root = options.root || ROOT;
+  return validateInstallSourceRecord({
+    schemaVersion: 1,
+    sourceRepository: options.sourceRepository === undefined
+      ? getRemoteRepo(root)
+      : options.sourceRepository,
+    sourceBranch: options.sourceBranch === undefined
+      ? getCurrentBranch(root)
+      : options.sourceBranch,
+    sourceCommit: options.sourceCommit === undefined
+      ? resolveGitHead(root)
+      : options.sourceCommit,
+  });
+}
+
+function writeInstallSourceRecord(options = {}) {
+  const record = validateInstallSourceRecord(options.record || resolveInstallSourceRecord(options));
+  const recordPath = options.recordPath || ghMaestroPath(INSTALL_SOURCE_FILENAME);
+  fs.mkdirSync(path.dirname(recordPath), { recursive: true });
+  fs.writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+  return { path: recordPath, record };
 }
 
 // 全スクリプト（CLI・モジュール）を集約する単一ディレクトリ。
@@ -1165,6 +1193,7 @@ module.exports = {
   pruneManagedRootEntries, cleanupLegacyManagedRoot, installSkills,
   installScripts, installPluginAssets, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
   buildUserPromptExpansionHook, registerUserPromptExpansionHook,
+  resolveInstallSourceRecord, writeInstallSourceRecord,
 };
 
 if (require.main !== module) return;
@@ -1176,8 +1205,10 @@ if (require.main !== module) return;
 // 未レビュー・未マージのWIPブランチからの実行は機械的に拒否する。
 // --force で明示的に許可可能。
 const forceFlag = process.argv.includes('--force');
+let installBranch = '';
 try {
   const currentBranch = getCurrentBranch(ROOT);
+  installBranch = currentBranch;
   const PROTECTED_BRANCHES = new Set(['dev', 'main']);
   if (!PROTECTED_BRANCHES.has(currentBranch) && !forceFlag) {
     console.error(`\x1b[31m[gh-maestro-install] エラー: 現在のブランチ "${currentBranch}" は保護ブランチではありません。`);
@@ -1200,6 +1231,16 @@ try {
     process.exit(1);
   }
   console.warn(`  \x1b[33m! --force によりブランチ確認失敗を無視して続行します（${e.message.split('\n')[0]}）\x1b[0m`);
+}
+
+let installSourceRecord;
+let installSourcePath;
+try {
+  installSourceRecord = resolveInstallSourceRecord({ root: ROOT, sourceBranch: installBranch });
+  // prune前にkeepへ登録しておき、書き込みは全インストール処理が完了してから行う。
+  installSourcePath = ghMaestroPath(INSTALL_SOURCE_FILENAME);
+} catch (error) {
+  fail(`インストール元の記録を準備できません: ${error.message}`);
 }
 
 if (!fs.existsSync(AGENTS_YAML)) fail('skills/agents.yaml not found');
@@ -1424,6 +1465,13 @@ if (!residentRestart.attempted) {
   fail(`常駐プロセスの入れ替えに失敗しました（${status}）。一部workspaceに未確認の常駐が残っている可能性があります。`);
 } else {
   ok(`Resident process restart completed for ${residentRestart.workspaces.length} workspace(s)`);
+}
+
+try {
+  const written = writeInstallSourceRecord({ record: installSourceRecord, recordPath: installSourcePath });
+  ok(`install source recorded: ${written.path}`);
+} catch (error) {
+  fail(`インストール元の記録に失敗しました: ${error.message}`);
 }
 
 printInstallCompletion(residentRestart);

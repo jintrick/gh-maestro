@@ -18,6 +18,7 @@ const {
   pruneManagedRootEntries, cleanupLegacyManagedRoot, installSkills,
   installScripts, installPluginAssets, installSharedSkills, restartResidentsAfterInstall, printInstallCompletion,
   buildUserPromptExpansionHook, registerUserPromptExpansionHook,
+  resolveInstallSourceRecord, writeInstallSourceRecord,
 } = require('../scripts/install.js');
 const { MANAGED_TOP_LEVEL } = require('../scripts/shared/storage-layout');
 const { withTempDir } = require('../scripts/shared/temp-directory');
@@ -868,6 +869,7 @@ test('インストーラー成果物検証: 全エージェント宛先・共有
       'shared/agent-launch.js',
       'shared/child-process.js',
       'shared/finalize-council.js',
+      'shared/freshness-status.js',
       'shared/git-worktree.js',
       'shared/kill-tree.js',
       'shared/link-node-modules.js',
@@ -907,6 +909,30 @@ test('assertManagedTopLevelName: MANAGED_TOP_LEVEL に宣言済みの名前は t
 test('assertManagedTopLevelName: 未宣言の名前（登録漏れ）は throw する', () => {
   assert.throws(() => assertManagedTopLevelName('pids'), /MANAGED_TOP_LEVEL/);
   assert.throws(() => assertManagedTopLevelName('workflows'));
+});
+
+test('install source record: 形式を検証してinstall-source.jsonへ書き込む', () => {
+  return withTempDir('gh-maestro-install-source-', (dir) => {
+    const recordPath = path.join(dir, 'install-source.json');
+    const record = resolveInstallSourceRecord({
+      sourceRepository: 'owner/repo',
+      sourceBranch: 'dev',
+      sourceCommit: 'a'.repeat(40),
+    });
+    assert.deepEqual(record, {
+      schemaVersion: 1,
+      sourceRepository: 'owner/repo',
+      sourceBranch: 'dev',
+      sourceCommit: 'a'.repeat(40),
+    });
+    const written = writeInstallSourceRecord({ record, recordPath });
+    assert.equal(written.path, recordPath);
+    assert.deepEqual(JSON.parse(fs.readFileSync(recordPath, 'utf8')), record);
+    assert.throws(() => writeInstallSourceRecord({
+      record: { ...record, sourceCommit: 'broken' },
+      recordPath,
+    }), /40桁のSHA/);
+  });
 });
 
 test('quarantineLegacyHomePids: 隔離元ディレクトリが存在しない場合は ok:true, migrated:0', () => {

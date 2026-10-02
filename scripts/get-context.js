@@ -4,6 +4,12 @@
 
 const { execSync } = require('child_process');
 const { getCurrentBranch } = require('./shared/git-branch');
+const { resolveGitHead } = require('./shared/git-head');
+const {
+  inspectFreshness,
+  formatBaseBranchStatus,
+  formatInstallStatus,
+} = require('./shared/freshness-status');
 const { resolveWorkspace } = require('./shared/workspace');
 const { readState } = require('./shared/read-state');
 const { getTestLayerDeclarationStatus } = require('./shared/resolve-config');
@@ -39,7 +45,7 @@ if (!workspace) {
 
 let repo = '';
 try {
-  const raw = execSync('git config --get remote.origin.url', { encoding: 'utf8' }).trim();
+  const raw = execSync('git config --get remote.origin.url', { cwd: workspace, encoding: 'utf8' }).trim();
   const match = raw.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/);
   repo = match ? match[1] : raw;
 } catch {
@@ -67,6 +73,31 @@ try {
   // 設定状態の通知は補助情報であり、セッション初期化を止めない。
 }
 
+let localHead = '';
+try {
+  localHead = resolveGitHead(workspace);
+} catch {
+  // ローカルHEADが取れない場合も、インストール済みコピーの判定は継続する。
+}
+
+let freshness = null;
+try {
+  // repo はこのファイルで一度だけ origin から解決し、freshness helper へ渡す。
+  // helper 側でoriginを再解決すると、作業中のworkspaceと別のrepoを比較する余地が生じる。
+  freshness = inspectFreshness({
+    workspace,
+    repository: repo,
+    baseBranch,
+    localHead,
+  });
+} catch (error) {
+  const reason = error instanceof Error ? error.message : String(error);
+  freshness = {
+    baseBranch: { status: 'unknown', reason },
+    install: { status: 'unknown', reason },
+  };
+}
+
 const unixWorkspace = workspace.replace(/\\/g, '/');
 
 console.log('[gh-maestro session context]');
@@ -76,6 +107,8 @@ if (baseBranch) console.log(`BASE_BRANCH=${baseBranch}`);
 console.log('GH_MAESTRO_WORKER=orchestrator');
 if (sessionId) console.log(`SESSION_ID=${sessionId}`);
 console.log(`TEST_LAYERS_STATUS=${testLayersStatus}`);
+console.log(formatBaseBranchStatus(freshness.baseBranch));
+console.log(formatInstallStatus(freshness.install));
 
 let nodeModulesStatus;
 try {
