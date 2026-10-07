@@ -128,7 +128,9 @@ For a more structured approach to organizing instructions, see [`.claude/rules/`
 
 ### AGENTS.md
 
-Claude Code reads `CLAUDE.md`, not `AGENTS.md`. If your repository already uses `AGENTS.md` for other coding agents, create a `CLAUDE.md` that imports it so both tools read the same instructions without duplicating them. You can also add Claude-specific instructions below the import. Claude loads the imported file at session start, then appends the rest:
+Claude Code reads `AGENTS.md` by default, so no `CLAUDE.md` is needed to load it. To add Claude-specific instructions, create a `CLAUDE.md` that imports it and write them below the import. Claude loads the imported file at session start, then appends the rest:
+
+> ローカル修正（2026-10-08）: 取得元の文書は「Claude Code は `AGENTS.md` を読まない」としていたが、Claude Code 2.1.293 で `CLAUDE.md` の無いディレクトリの `AGENTS.md` が読み込まれることを実測した。
 
 ```markdown CLAUDE.md theme={null}
 @AGENTS.md
