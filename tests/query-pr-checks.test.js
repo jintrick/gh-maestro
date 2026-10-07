@@ -4,6 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
+const childProcess = require('../scripts/shared/child-process');
 const {
   parseCheckRuns,
   parseCommitStatuses,
@@ -118,6 +119,57 @@ test('queryPrChecks はHEADに紐づく両種のチェックを返す', () => {
   assert.deepEqual(deps.calls, [
     `repos/owner/project/commits/${HEAD_A}/check-runs?per_page=100`,
     `repos/owner/project/commits/${HEAD_A}/statuses?per_page=100`,
+  ]);
+});
+
+test('queryPrChecks は実際の gh api コマンドに対象HEADとページング引数を渡す', () => {
+  const calls = [];
+  const responses = [
+    checkRunsResponse([]),
+    statusesResponse([]),
+  ];
+  const originalSpawnSync = childProcess.spawnSync;
+  const prChecksPath = require.resolve('../scripts/shared/pr-checks');
+  const previousPrChecksModule = require.cache[prChecksPath];
+
+  childProcess.spawnSync = (command, args, options) => {
+    calls.push({ command, args: [...args], options });
+    const response = responses[calls.length - 1];
+    if (!response) assert.fail(`unexpected subprocess call: ${command} ${args.join(' ')}`);
+    return response;
+  };
+  delete require.cache[prChecksPath];
+
+  let result;
+  try {
+    const { queryPrChecks: queryWithGhApi } = require(prChecksPath);
+    result = queryWithGhApi({ pr: 17, repo: 'owner/project' }, {
+      readPrHeadFn: () => ({ ok: true, headSha: HEAD_A }),
+    });
+  } finally {
+    childProcess.spawnSync = originalSpawnSync;
+    delete require.cache[prChecksPath];
+    if (previousPrChecksModule) require.cache[prChecksPath] = previousPrChecksModule;
+  }
+
+  assert.equal(result.ok, true);
+  assert.equal(result.headSha, HEAD_A);
+  assert.equal(result.hasChecks, false);
+  assert.deepEqual(calls.map(({ command, args }) => ({ command, args })), [
+    {
+      command: 'gh',
+      args: [
+        'api', '--paginate', '--slurp',
+        'repos/owner/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?per_page=100',
+      ],
+    },
+    {
+      command: 'gh',
+      args: [
+        'api', '--paginate', '--slurp',
+        'repos/owner/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/statuses?per_page=100',
+      ],
+    },
   ]);
 });
 
