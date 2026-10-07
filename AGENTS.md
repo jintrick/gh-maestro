@@ -110,6 +110,7 @@ node scripts/install.js
 ## コミット操作の規則
 
 - ファイル変更が承認されたら、追加の指示を待たず同じターンでcommitとpushまで行う。
+- 人間がこのセッションで直接依頼した変更は、`dev`へ直接commit・pushする。Issue・PR・ブランチは作らない。スキル、スクリプト配布、`skills/agents.yaml`に触れた場合は、push後に続けて`node scripts/install.js`まで実行する。
 - `git reset --hard`を実行する前には、必ず人間へ確認する。予告なしに実行してはならない（無断実行で承認済みのコミットを消失させた事故がある）。
 - pushがnon-fast-forwardで失敗した場合、`git reset --hard`を使わず、状況を報告してから進め方を確認する。
 - `git checkout`等で変更を元に戻す前に、使う方法と失われるものを説明し、確認を得てから実行する。事後報告では足りない。
