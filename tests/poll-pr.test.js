@@ -147,8 +147,11 @@ test("getPrBaseBranch returns empty string for empty gh output", () => {
 });
 
 test('getPrHead rejects an empty or malformed gh response', () => {
-  const { mod } = loadModule(() => ({ status: 0, stdout: 'not-a-sha\n' }));
-  assert.equal(mod.getPrHead('42', 'o/r'), '');
+  const { mod } = loadModule();
+  const result = mod.getPrHead('42', 'o/r', {
+    ghPrViewFn: () => ({ status: 0, stdout: JSON.stringify({ headRefOid: 'not-a-sha' }) }),
+  });
+  assert.deepEqual(result, { ok: false, error: 'PR情報に有効なheadRefOidがありません' });
 });
 
 // ── getPrState（Issue #289: poll-reviews 終了後の続行判断用） ─────────────
@@ -180,6 +183,7 @@ test("getPrState returns empty string when gh pr view fails (fail-closed)", () =
 const {
   resolvePostReviewDecision,
   parsePrPushLine: modParsePrPushLine,
+  createPrChecksMonitor,
 } = require('../scripts/poll-pr');
 
 test("resolvePostReviewDecision: 子が正常終了かつ CLOSED は findPR へ復帰（resume）", () => {
@@ -199,6 +203,141 @@ test("resolvePostReviewDecision: 子が非ゼロ終了なら CLOSED でも resum
   // 親の exit 通知（notifyWatchdogExit）で監視停止を待機側へ届ける（受け入れ条件3）。
   assert.equal(resolvePostReviewDecision("CLOSED", 1), "exit");
   assert.equal(resolvePostReviewDecision("CLOSED", 7), "exit");
+});
+
+test('createPrChecksMonitor は失敗を即時通知し、全件完了時に名前と状態を通知する', async () => {
+  const headSha = 'a'.repeat(40);
+  const output = [];
+  let responseIndex = 0;
+  const responses = [
+    {
+      ok: true, headSha,
+      checks: [{ kind: 'check_run', name: 'build', state: 'failure', detailsUrl: 'https://ci.invalid/build' }],
+      hasChecks: true, hasRunning: true, allCompleted: false,
+    },
+    {
+      ok: true, headSha,
+      checks: [
+        { kind: 'check_run', name: 'build', state: 'failure', detailsUrl: 'https://ci.invalid/build' },
+        { kind: 'commit_status', name: 'deploy', state: 'success', detailsUrl: 'https://ci.invalid/deploy' },
+      ],
+      hasChecks: true, hasRunning: false, allCompleted: true,
+    },
+    {
+      ok: true, headSha,
+      checks: [
+        { kind: 'check_run', name: 'build', state: 'failure', detailsUrl: 'https://ci.invalid/build' },
+        { kind: 'commit_status', name: 'deploy', state: 'success', detailsUrl: 'https://ci.invalid/deploy' },
+      ],
+      hasChecks: true, hasRunning: false, allCompleted: true,
+    },
+  ];
+  const monitor = createPrChecksMonitor({ pr: '42', repo: 'owner/project', intervalMs: 1000 }, {
+    queryPrChecksFn: () => responses[responseIndex++],
+    writeStdoutFn: text => output.push(text),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+  });
+
+  monitor.start();
+  await monitor.request();
+  await monitor.request();
+  await monitor.request();
+  await monitor.stop();
+
+  const failed = output.filter(line => line.startsWith('CI_CHECK_FAILED:'));
+  const completed = output.filter(line => line.startsWith('CI_CHECKS_COMPLETE:'));
+  assert.equal(failed.length, 1);
+  assert.deepEqual(JSON.parse(failed[0].slice('CI_CHECK_FAILED:'.length)), {
+    pr: '42',
+    headSha,
+    checks: [{ kind: 'check_run', name: 'build', state: 'failure', detailsUrl: 'https://ci.invalid/build' }],
+  });
+  assert.equal(completed.length, 1);
+  assert.deepEqual(JSON.parse(completed[0].slice('CI_CHECKS_COMPLETE:'.length)).checks.map(({ name, state }) => ({ name, state })), [
+    { name: 'build', state: 'failure' },
+    { name: 'deploy', state: 'success' },
+  ]);
+});
+
+test('createPrChecksMonitor distinguishes no checks, running checks, and retrieval failure', async () => {
+  const headSha = 'b'.repeat(40);
+  const output = [];
+  const responses = [
+    { ok: true, headSha, checks: [], hasChecks: false, hasRunning: false, allCompleted: false },
+    { ok: true, headSha, checks: [{ kind: 'check_run', name: 'queued', state: 'running', detailsUrl: 'https://ci.invalid/queued' }], hasChecks: true, hasRunning: true, allCompleted: false },
+    { ok: false, error: 'GitHub API unavailable' },
+    { ok: false, error: 'GitHub API unavailable' },
+  ];
+  let responseIndex = 0;
+  const monitor = createPrChecksMonitor({ pr: '43', repo: 'owner/project', intervalMs: 1000 }, {
+    queryPrChecksFn: () => responses[responseIndex++],
+    writeStdoutFn: text => output.push(text),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+  });
+
+  monitor.start();
+  await monitor.request();
+  await monitor.request();
+  await monitor.request();
+  await monitor.request();
+  await monitor.stop();
+
+  assert.equal(output.filter(line => line.startsWith('CI_CHECKS_EMPTY:')).length, 1);
+  assert.equal(output.some(line => line.startsWith('CI_CHECKS_COMPLETE:')), false);
+  assert.equal(output.filter(line => line.startsWith('CI_CHECKS_UNAVAILABLE:')).length, 1);
+  const unavailable = output.find(line => line.startsWith('CI_CHECKS_UNAVAILABLE:'));
+  assert.match(unavailable, /GitHub API unavailable/);
+});
+
+test('runPollPr ignores an in-flight old HEAD result after PR_PUSH and checks the new HEAD', async () => {
+  const { mod } = loadModule();
+  const headA = 'c'.repeat(40);
+  const headB = 'd'.repeat(40);
+  const output = [];
+  let queryIndex = 0;
+  let intervalCallback;
+  const responses = [
+    { ok: true, headSha: headA, checks: [{ kind: 'check_run', name: 'build', state: 'failure', detailsUrl: 'https://ci.invalid/a' }], hasChecks: true, hasRunning: false, allCompleted: true },
+    { ok: true, headSha: headB, checks: [{ kind: 'check_run', name: 'build', state: 'success', detailsUrl: 'https://ci.invalid/b' }], hasChecks: true, hasRunning: false, allCompleted: true },
+    { ok: true, headSha: headB, checks: [{ kind: 'check_run', name: 'build', state: 'success', detailsUrl: 'https://ci.invalid/b' }], hasChecks: true, hasRunning: false, allCompleted: true },
+  ];
+  const result = await mod.runPollPr({
+    issue: 590,
+    repo: 'owner/project',
+    workspace: temporaryWorkspace('gh-maestro-poll-pr-ci-push-'),
+    sessionPid: 4321,
+    noReviewManager: true,
+    intervalMs: 1000,
+  }, {
+    checkParentFn: () => true,
+    findPrFn: () => '42',
+    getPrHeadFn: () => headA,
+    queryPrChecksFn: () => responses[queryIndex++],
+    setIntervalFn: callback => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    spawnPollReviewsFn: async (pr, workspace, sessionPid, interval, onOutputLine) => {
+      onOutputLine(`PR_PUSH:${headB}`);
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+      intervalCallback();
+      await new Promise(resolve => setImmediate(resolve));
+      return 0;
+    },
+    getPrStateFn: () => 'MERGED',
+    recordMergeAndSnapshotFn: () => {},
+    runSlowTestFn: async () => {},
+    cleanupFn: () => {},
+    writeStdoutFn: text => output.push(text),
+  });
+
+  assert.deepEqual(result, { exitCode: 0 });
+  assert.equal(typeof intervalCallback, 'function');
+  const completion = output.find(line => line.startsWith('CI_CHECKS_COMPLETE:'));
+  assert.equal(output.some(line => line.startsWith('CI_CHECK_FAILED:')), false);
+  assert.equal(JSON.parse(completion.slice('CI_CHECKS_COMPLETE:'.length)).headSha, headB);
+  assert.equal(queryIndex, 3);
 });
 
 test("resolvePostReviewDecision: 状態取得失敗（空文字列）は fail-closed で exit に倒れる", () => {
@@ -348,6 +487,7 @@ test('runPollPr connects PR detection, PR_PUSH slow launches, deduplication, and
       noReviewManager: false,
       intervalMs: 0,
       intervalArg: '0',
+      enablePrChecksMonitoring: false,
     }, {
       checkParentFn: () => true,
       findPrFn: () => '42',
@@ -436,6 +576,7 @@ test('runPollPr skips automatic Review Manager restart after the same PR is dete
     sessionPid: 4321,
     intervalMs: 0,
     intervalArg: '0',
+    enablePrChecksMonitoring: false,
   }, {
     checkParentFn: () => true,
     findPrFn: () => '42',
@@ -477,6 +618,7 @@ test('runPollPr claims and starts a different PR after the previous PR closes', 
     sessionPid: 4321,
     intervalMs: 0,
     intervalArg: '0',
+    enablePrChecksMonitoring: false,
   }, {
     checkParentFn: () => true,
     findPrFn: () => prs.shift() || '43',
@@ -515,6 +657,7 @@ test('runPollPr --no-review-manager does not claim, start, or emit Review Manage
     noReviewManager: true,
     intervalMs: 0,
     intervalArg: '0',
+    enablePrChecksMonitoring: false,
   }, {
     checkParentFn: () => true,
     findPrFn: () => '42',
@@ -554,6 +697,7 @@ test('runPollPr passes both independent suppression flags to poll-reviews', asyn
     noReviewEvents: true,
     intervalMs: 0,
     intervalArg: '0',
+    enablePrChecksMonitoring: false,
   }, {
     checkParentFn: () => true,
     findPrFn: () => '42',
@@ -582,6 +726,7 @@ test('runPollPr leaves the claim sentinel when automatic Review Manager startup 
     sessionPid: 4321,
     intervalMs: 0,
     intervalArg: '0',
+    enablePrChecksMonitoring: false,
   }, {
     checkParentFn: () => true,
     findPrFn: () => '42',
@@ -985,7 +1130,7 @@ test('runSlowTest propagates unavailable command and reason to SLOW_TEST_RESULT'
   }
 });
 
-test('runSlowTest treats PR HEAD lookup failures as unknown, not stale', async (t) => {
+test('runSlowTest treats PR HEAD lookup failures as unavailable and does not declare', async (t) => {
   for (const { name, pr, getPrHeadFn } of [
     { name: 'empty response', pr: '50', getPrHeadFn: () => '' },
     { name: 'thrown exception', pr: '51', getPrHeadFn: () => { throw new Error('gh unavailable'); } },
@@ -1021,9 +1166,9 @@ test('runSlowTest treats PR HEAD lookup failures as unknown, not stale', async (
             return { ok: true };
           },
         });
-        assert.equal(result.status, 'pass');
-        assert.equal(result.testedHead, head);
-        assert.equal(declareCalls, 1);
+        assert.equal(result.status, 'unavailable');
+        assert.match(result.error, /PR HEADを再確認できません/);
+        assert.equal(declareCalls, 0);
       } finally {
         if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
         else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
