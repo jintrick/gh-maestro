@@ -13,7 +13,8 @@
 'use strict';
 
 const { spawnSync } = require('./shared/child-process');
-const { resolveWorkspace, parseFlags } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
+const { resolveRepo } = require('./shared/repo');
 const { resolveGitHead } = require('./shared/git-head');
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const {
@@ -59,11 +60,6 @@ const SPEC = {
 };
 
 // ── gh / git 呼び出し（テストで注入可能） ────────────────────────────────────
-
-let _ghRepoView = (opts = {}) => {
-  return spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-    { encoding: 'utf8', ...opts });
-};
 
 let _ghListComments = (pr, repo, opts = {}) => {
   return listComments(repo, pr, opts);
@@ -337,7 +333,7 @@ function declareTestResult(params = {}, deps = {}) {
     requireLintResult = false,
   } = params;
   const {
-    ghRepoViewFn = _ghRepoView,
+    ghRepoViewFn,
     ghListCommentsFn = _ghListComments,
     ghCreateCommentFn = _ghCreateComment,
     ghUpdateCommentFn = _ghUpdateComment,
@@ -426,19 +422,9 @@ function declareTestResult(params = {}, deps = {}) {
   if (lintError) return { ok: false, error: lintError };
 
   // 2. リポジトリ特定
-  let targetRepo = typeof repo === 'string' ? repo.trim() : '';
-  if (!targetRepo) {
-    const ws = resolveWorkspace(workspace);
-    if (!ws) {
-      return { ok: false, error: 'ワークスペースを解決できません。--repoを指定するか、.gh-maestro/のあるディレクトリで実行してください。' };
-    }
-    const repoRes = ghRepoViewFn({ cwd: ws });
-    if (!repoRes || repoRes.status !== 0) {
-      return { ok: false, error: `リポジトリの特定に失敗しました: ${(repoRes && repoRes.stderr) || '(no stderr)'}` };
-    }
-    targetRepo = String(repoRes.stdout || '').trim();
-  }
-  if (!targetRepo) return { ok: false, error: 'リポジトリ名が空です' };
+  const repoResult = resolveRepo({ repo, workspace }, { ghRepoViewFn });
+  if (!repoResult.ok) return repoResult;
+  const targetRepo = repoResult.repo;
 
   // 3. コメント一覧取得
   const listRes = ghListCommentsFn(String(prNum), targetRepo);

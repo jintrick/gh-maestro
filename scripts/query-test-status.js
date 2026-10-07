@@ -7,7 +7,9 @@
 'use strict';
 
 const { spawnSync } = require('./shared/child-process');
-const { parseFlags, resolveWorkspace } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
+const { resolveRepo } = require('./shared/repo');
+const { parsePrViewResponse } = require('./shared/pr-view');
 const {
   evaluateTestDeclaration,
   findLatestTrustedTestDeclaration,
@@ -46,14 +48,6 @@ const SPEC = {
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
-let _ghRepoView = (opts = {}) => {
-  return spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], {
-    encoding: 'utf8',
-    timeout: GH_TIMEOUT_MS,
-    ...opts,
-  });
-};
-
 function buildPrViewArgs(pr, repo) {
   return [
     'pr', 'view', pr,
@@ -80,53 +74,6 @@ function normalizePrNumber(pr) {
 }
 
 /**
- * gh pr view の応答を、照会に必要な型だけ検証して取り出す。
- * 応答が壊れている場合は NONE に丸めず、呼び出し側がエラーとして扱える形にする。
- *
- * @param {string} stdout gh pr view のJSON出力
- * @returns {{ ok: true, comments: Array<object>, headSha: string, prAuthor?: string } | { ok: false, error: string }}
- */
-function parsePrViewResponse(stdout) {
-  let parsed;
-  try {
-    parsed = JSON.parse(stdout || '');
-  } catch (err) {
-    return { ok: false, error: `PR情報のJSONパースに失敗しました: ${err.message}` };
-  }
-
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { ok: false, error: 'PR情報のJSON形式が不正です' };
-  }
-
-  if (parsed.comments !== undefined && !Array.isArray(parsed.comments)) {
-    return { ok: false, error: 'PR情報のcommentsフィールドが配列ではありません' };
-  }
-
-  if (parsed.headRefOid !== undefined && parsed.headRefOid !== null
-      && typeof parsed.headRefOid !== 'string') {
-    return { ok: false, error: 'PR情報のheadRefOidフィールドが文字列ではありません' };
-  }
-
-  let prAuthor;
-  if (parsed.author !== undefined && parsed.author !== null) {
-    if (typeof parsed.author !== 'object' || Array.isArray(parsed.author)) {
-      return { ok: false, error: 'PR情報のauthorフィールドが不正です' };
-    }
-    if (parsed.author.login !== undefined && typeof parsed.author.login !== 'string') {
-      return { ok: false, error: 'PR情報のauthor.loginフィールドが文字列ではありません' };
-    }
-    prAuthor = parsed.author.login;
-  }
-
-  return {
-    ok: true,
-    comments: parsed.comments || [],
-    headSha: parsed.headRefOid || '',
-    prAuthor,
-  };
-}
-
-/**
  * GitHubからPRコメントとHEADを読み、共有された申告ルールで評価する。
  *
  * @param {{ pr: string|number, repo?: string, workspace?: string }} params
@@ -137,7 +84,7 @@ function parsePrViewResponse(stdout) {
  */
 function queryTestStatus({ pr, repo, workspace }, deps = {}) {
   const {
-    ghRepoViewFn = _ghRepoView,
+    ghRepoViewFn,
     ghPrViewFn = _ghPrView,
   } = deps;
 
@@ -146,27 +93,9 @@ function queryTestStatus({ pr, repo, workspace }, deps = {}) {
     return { ok: false, error: `--pr は正の整数で指定してください: ${pr}` };
   }
 
-  let targetRepo = typeof repo === 'string' ? repo.trim() : '';
-  let workspacePath;
-
-  if (!targetRepo) {
-    workspacePath = resolveWorkspace(workspace);
-    if (!workspacePath) {
-      return { ok: false, error: 'ワークスペースを解決できません。--repoを指定するか、.gh-maestro/のあるディレクトリで実行してください。' };
-    }
-
-    const repoRes = ghRepoViewFn({ cwd: workspacePath });
-    if (!repoRes || repoRes.status !== 0) {
-      return {
-        ok: false,
-        error: `リポジトリの特定に失敗しました: ${(repoRes && repoRes.stderr) || '(no stderr)'}`,
-      };
-    }
-    targetRepo = (repoRes.stdout || '').trim();
-    if (!targetRepo) {
-      return { ok: false, error: 'リポジトリ名が空です' };
-    }
-  }
+  const repoResult = resolveRepo({ repo, workspace }, { ghRepoViewFn });
+  if (!repoResult.ok) return repoResult;
+  const { repo: targetRepo, workspacePath } = repoResult;
 
   const prRes = ghPrViewFn(prNumber, targetRepo, workspacePath ? { cwd: workspacePath } : {});
   if (!prRes || prRes.status !== 0) {

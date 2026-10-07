@@ -10,6 +10,7 @@
 //   REVIEW_MANAGER_ALREADY_CLAIMED:<number>
 //   ...poll-reviews.js の出力がそのまま続く（REVIEW_COMMENT / PR_COMMENT / PR_REVIEW / PR_PUSH / PR_MERGED / PR_CLOSED / POLL_ERROR / POLL_RECOVERED）。
 //   PR_PUSHを受け取るたび、そのSHAのslow層を非同期で予約する。
+//   GitHub checksはこのプロセスが現在HEADを定期確認し、CI_CHECK_*通知を出す。
 //   Review Managerの起動後のクラッシュ（エージェントCLI起動失敗等）は、本スクリプトの
 //   出力ではなく、通常ワーカーと同じ終了フック経由でIssueコメントとして非同期に通知される
 //   （start-review-manager.js参照）。本スクリプトはそれを待たずPR/レビュー監視を継続する。
@@ -21,7 +22,10 @@ const { spawn, spawnSync } = require('./shared/child-process');
 const { startReviewManager } = require('./start-review-manager');
 const { waitChildExit } = require('./shared/child-wait');
 const { killProcessTree } = require('./shared/kill-tree');
-const { resolveWorkspace, parseFlags } = require('./shared/workspace');
+const { parseFlags } = require('./shared/workspace');
+const { resolveRepo } = require('./shared/repo');
+const { SHA_RE, readPrHead } = require('./shared/pr-view');
+const { queryPrChecks } = require('./shared/pr-checks');
 const { resolveGitHead } = require('./shared/git-head');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { workspaceRuntimeDir } = require('./shared/storage-layout');
@@ -53,7 +57,7 @@ const {
 } = require('./process-lifecycle');
 
 const USAGE = `poll-pr.js — Issue に対応する PR を検出し、検出時にレビュアーを起動し、
-その後 poll-reviews.js に処理を橋渡ししてレビュー監視を続行する
+その後 poll-reviews.js に処理を橋渡ししてレビュー監視を続行し、GitHub checksも監視する
 
 Usage: node poll-pr.js <ISSUE> [--workspace <path>] [--session-pid <pid>] [--base-branch <branch>] [INTERVAL_SECONDS]
 
@@ -80,6 +84,10 @@ Output (stdout):
   PR_CLOSED_RESUMED:<PR>               監視していたPRがクローズされ、新PR検出に復帰した
   SLOW_TEST_STARTED:<json>             PR検出後のslow層を非同期で開始した
   SLOW_TEST_RESULT:<json>              slow層の完了または失敗を記録した
+  CI_CHECK_FAILED:<json>               現在HEADで失敗したGitHub checkを検出した
+  CI_CHECKS_COMPLETE:<json>             現在HEADの全GitHub checkが完了した
+  CI_CHECKS_EMPTY:<json>                現在HEADにGitHub checkが無い
+  CI_CHECKS_UNAVAILABLE:<json>          GitHub checkの取得に失敗した
   以降、poll-reviews.js を子プロセスとして起動し、その標準出力（REVIEW_COMMENT/PR_COMMENT/
   PR_REVIEW/PR_PUSH/PR_MERGED/PR_CLOSED）をそのまま中継する。PR_PUSHを受け取ったHEADごとに
   slow層を非同期で予約し、同じPR/HEAD/layerはstate予約で二重実行しない。poll-reviews.js が正常終了
@@ -93,7 +101,8 @@ Output (stdout):
 
 PR が見つかるまでブロックし、見つけたら Review Manager(start-review-manager.js)を
 全観点で起動し（skills/gh-maestro-reviewer/SKILL.md参照）、続けて poll-reviews.js を
-子プロセスとして起動してレビュー監視を引き継いでから終了する。観点を絞り込む判断は
+子プロセスとして起動してレビュー監視を引き継ぐ。GitHub checksは本プロセスが同時に
+定期取得し、PR_PUSH後は新しいHEADをすぐ照会する。観点を絞り込む判断は
 Review Manager自身が実際のdiffを見た上で行う（本スクリプトはファイルパターン等による
 機械的な観点選定を一切行わない。ファイル名に基づく自動判定が一部の観点だけに絞り込んでしまい
 他の観点のレビューが丸ごと欠落する実障害があったため、この責務はオーケストレーター側からは
@@ -166,15 +175,8 @@ function parsePrPushLine(line) {
   return /^[0-9a-fA-F]{7,40}$/.test(headSha) ? headSha : null;
 }
 
-function getPrHead(pr, repo) {
-  const r = spawnSync('gh', ['pr', 'view', pr, '--repo', repo,
-    '--json', 'headRefOid', '-q', '.headRefOid'], { encoding: 'utf8' });
-  if (!r || r.status !== 0) {
-    console.error('poll-pr: PR #' + pr + ' のHEAD取得に失敗しました（gh pr view）: ' + ((r && r.stderr) || '').toString().trim());
-    return '';
-  }
-  const head = (r.stdout || '').toString().trim();
-  return /^[0-9a-fA-F]{7,40}$/.test(head) ? head : '';
+function getPrHead(pr, repo, deps = {}) {
+  return readPrHead(pr, repo, deps);
 }
 
 const SLOW_TEST_TIMEOUT_MS = 30 * 60 * 1000;
@@ -429,9 +431,17 @@ function sameHead(actual, expected) {
 function currentPrHead(pr, repo, getPrHeadFn) {
   try {
     const value = getPrHeadFn(pr, repo);
-    return typeof value === 'string' ? value.trim() : '';
-  } catch {
-    return '';
+    if (value && value.ok === true && typeof value.headSha === 'string' && SHA_RE.test(value.headSha)) {
+      return { ok: true, headSha: value.headSha };
+    }
+    // 文字列は既存の依存注入境界との互換用。実際のgetPrHeadは常に識別可能な結果を返す。
+    if (typeof value === 'string' && SHA_RE.test(value.trim())) {
+      return { ok: true, headSha: value.trim() };
+    }
+    if (value && value.ok === false && typeof value.error === 'string') return value;
+    return { ok: false, error: 'PR HEAD取得の応答形式が不正です' };
+  } catch (error) {
+    return { ok: false, error: error && error.message ? error.message : 'PR HEAD取得に失敗しました' };
   }
 }
 
@@ -486,8 +496,18 @@ function declareSlowResult({ pr, repo, workspace, target, headSha, statePath, ru
   const declareFn = deps.declareTestResultFn || declareTestResult;
   const getPrHeadFn = deps.getPrHeadFn || getPrHead;
   const prHead = currentPrHead(pr, repo, getPrHeadFn);
-  if (prHead && !sameHead(prHead, headSha)) {
-    const reason = `PR HEADが実行対象SHAと一致しないため申告をスキップしました: ${prHead} != ${headSha}`;
+  if (!prHead.ok) {
+    const reason = `PR HEADを確認できないため申告をスキップしました: ${prHead.error}`;
+    try {
+      updateSlowRun(statePath, runKey, {
+        declaration: 'failed',
+        declarationError: reason,
+      });
+    } catch {}
+    return { status: 'unavailable', reason };
+  }
+  if (!sameHead(prHead.headSha, headSha)) {
+    const reason = `PR HEADが実行対象SHAと一致しないため申告をスキップしました: ${prHead.headSha} != ${headSha}`;
     try {
       updateSlowRun(statePath, runKey, {
         declaration: 'skipped',
@@ -619,7 +639,7 @@ function finishSlowRun({ pr, repo, workspace, target, headSha, statePath, runKey
     result.stateError = error.message;
   }
   const declaration = declareSlowResult({ pr, repo, workspace, target, headSha, statePath, runKey }, deps);
-  if (declaration.status === 'stale') {
+  if (declaration.status === 'stale' || declaration.status === 'unavailable') {
     return finishSlowStale({
       pr,
       workspace,
@@ -838,7 +858,7 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
     } else {
       const getPrHeadFn = deps.getPrHeadFn || getPrHead;
       const prHead = currentPrHead(pr, repo, getPrHeadFn);
-      if (prHead && !sameHead(prHead, headSha)) {
+      if (!prHead.ok) {
         result = finishSlowStale({
           pr,
           workspace,
@@ -847,7 +867,18 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
           statePath,
           runKey,
           logPath,
-          reason: `PRのHEADが実行中に変更されました: ${prHead} != ${headSha}`,
+          reason: `PR HEADを再確認できません: ${prHead.error}`,
+        });
+      } else if (!sameHead(prHead.headSha, headSha)) {
+        result = finishSlowStale({
+          pr,
+          workspace,
+          target,
+          headSha,
+          statePath,
+          runKey,
+          logPath,
+          reason: `PRのHEADが実行中に変更されました: ${prHead.headSha} != ${headSha}`,
         });
       } else {
         result = finishSlowRun({
@@ -977,12 +1008,142 @@ function formatBaseBranchMismatch(expectedBaseBranch, actualBaseBranch, pr) {
   return 'PR_BASE_MISMATCH:' + pr + ':' + expectedBaseBranch + ':' + actualBaseBranch;
 }
 
+function checkSummarySignature(checks) {
+  return JSON.stringify(checks.map(({ kind, name, state, detailsUrl }) => ({
+    kind, name, state, detailsUrl,
+  })).sort((a, b) => `${a.kind}\0${a.name}\0${a.state}\0${a.detailsUrl}`
+    .localeCompare(`${b.kind}\0${b.name}\0${b.state}\0${b.detailsUrl}`)));
+}
+
+function createPrChecksMonitor({ pr, repo, intervalMs }, deps = {}) {
+  const queryPrChecksFn = deps.queryPrChecksFn || queryPrChecks;
+  const writeStdoutFn = deps.writeStdoutFn || ((text) => process.stdout.write(text));
+  const setIntervalFn = deps.setIntervalFn || setInterval;
+  const clearIntervalFn = deps.clearIntervalFn || clearInterval;
+  const failedNotifications = new Map();
+  const completedNotifications = new Map();
+  const emptyNotifications = new Set();
+  let lastUnavailable = '';
+  let inFlight = null;
+  let queuedHeadSha = '';
+  let latestExpectedHeadSha = '';
+  let timer = null;
+  let stopped = false;
+
+  function emitUnavailable(error, expectedHeadSha) {
+    const detail = typeof error === 'string' && error ? error : 'チェック結果の取得に失敗しました';
+    const signature = `${expectedHeadSha || ''}\0${detail}`;
+    if (signature === lastUnavailable) return;
+    lastUnavailable = signature;
+    writeStdoutFn(`CI_CHECKS_UNAVAILABLE:${JSON.stringify({
+      pr: String(pr),
+      headSha: expectedHeadSha || null,
+      error: detail,
+    })}\n`);
+  }
+
+  function reportResult(result, expectedHeadSha) {
+    if (!result || result.ok !== true) {
+      emitUnavailable(result && result.error, expectedHeadSha);
+      return;
+    }
+    if (typeof result.headSha !== 'string' || !SHA_RE.test(result.headSha)
+        || !Array.isArray(result.checks)) {
+      emitUnavailable('チェック結果の形式が不正です', expectedHeadSha);
+      return;
+    }
+    if (expectedHeadSha && !sameHead(result.headSha, expectedHeadSha)) return;
+    lastUnavailable = '';
+
+    const headKey = result.headSha.toLowerCase();
+    if (result.checks.length === 0) {
+      if (!emptyNotifications.has(headKey)) {
+        emptyNotifications.add(headKey);
+        writeStdoutFn(`CI_CHECKS_EMPTY:${JSON.stringify({ pr: String(pr), headSha: result.headSha })}\n`);
+      }
+      return;
+    }
+
+    const failures = result.checks.filter(check => check && check.state === 'failure');
+    const knownFailures = failedNotifications.get(headKey) || new Set();
+    const newFailures = failures.filter((check) => {
+      const key = `${check.kind || ''}\0${check.name}\0${check.detailsUrl}`;
+      if (knownFailures.has(key)) return false;
+      knownFailures.add(key);
+      return true;
+    });
+    failedNotifications.set(headKey, knownFailures);
+    if (newFailures.length > 0) {
+      writeStdoutFn(`CI_CHECK_FAILED:${JSON.stringify({
+        pr: String(pr),
+        headSha: result.headSha,
+        checks: newFailures.map(({ kind, name, state, detailsUrl }) => ({ kind, name, state, detailsUrl })),
+      })}\n`);
+    }
+
+    const allCompleted = result.allCompleted === true
+      && result.hasRunning !== true
+      && !result.checks.some(check => check && check.state === 'running');
+    if (!allCompleted) return;
+    const signature = checkSummarySignature(result.checks);
+    if (completedNotifications.get(headKey) === signature) return;
+    completedNotifications.set(headKey, signature);
+    writeStdoutFn(`CI_CHECKS_COMPLETE:${JSON.stringify({
+      pr: String(pr),
+      headSha: result.headSha,
+      checks: result.checks.map(({ kind, name, state, detailsUrl }) => ({ kind, name, state, detailsUrl })),
+    })}\n`);
+  }
+
+  function request(expectedHeadSha = '') {
+    if (stopped) return Promise.resolve();
+    if (expectedHeadSha) latestExpectedHeadSha = expectedHeadSha;
+    if (inFlight) {
+      if (expectedHeadSha) queuedHeadSha = expectedHeadSha;
+      return inFlight;
+    }
+
+    const requestHeadSha = expectedHeadSha || latestExpectedHeadSha;
+    const task = Promise.resolve()
+      .then(() => queryPrChecksFn({ pr, repo }))
+      .then(result => reportResult(result, latestExpectedHeadSha || requestHeadSha))
+      .catch((error) => {
+        // PR_PUSH後に前のHEAD向け照会が失敗しても、新HEADの取得失敗とは報告しない。
+        if (latestExpectedHeadSha && latestExpectedHeadSha !== requestHeadSha) return;
+        emitUnavailable(error && error.message, latestExpectedHeadSha || requestHeadSha);
+      });
+    const tracked = task.finally(() => {
+      if (inFlight === tracked) inFlight = null;
+      const nextHeadSha = queuedHeadSha;
+      queuedHeadSha = '';
+      if (!stopped && nextHeadSha) void request(nextHeadSha);
+    });
+    inFlight = tracked;
+    return tracked;
+  }
+
+  function start() {
+    void request();
+    timer = setIntervalFn(() => { void request(); }, intervalMs);
+  }
+
+  async function stop() {
+    stopped = true;
+    queuedHeadSha = '';
+    if (timer !== null) clearIntervalFn(timer);
+    timer = null;
+    if (inFlight) await inFlight;
+  }
+
+  return { start, request, stop };
+}
+
 /**
  * PR検出からレビュー監視終了までの制御ループ。
  *
  * CLIのライフサイクル／外部境界を依存性として受け取れるようにし、PR検出・
  * PR_PUSH・slowの重複抑止・完了待ちを、実際の制御接続のままテストできるようにする。
- * @param {{issue:string|number,repo:string,workspace:string,sessionPid:string|number,baseBranch?:string,noReviewManager?:boolean,noReviewEvents?:boolean,intervalMs?:number,intervalArg?:string}} params
+ * @param {{issue:string|number,repo:string,workspace:string,sessionPid:string|number,baseBranch?:string,noReviewManager?:boolean,noReviewEvents?:boolean,intervalMs?:number,intervalArg?:string,enablePrChecksMonitoring?:boolean}} params
  * @param {object} [deps]
  * @returns {Promise<{exitCode:number}>}
  */
@@ -998,6 +1159,7 @@ async function runPollPr(params, deps = {}) {
     pluginMonitor = false,
     intervalMs = 30 * 1000,
     intervalArg,
+    enablePrChecksMonitoring = true,
   } = params;
   const checkParentFn = deps.checkParentFn || (() => true);
   const findPrFn = deps.findPrFn || (() => {
@@ -1014,6 +1176,7 @@ async function runPollPr(params, deps = {}) {
     return r.stdout.trim().split('\n').find(s => s.trim()) || '';
   });
   const getPrHeadFn = deps.getPrHeadFn || getPrHead;
+  const queryPrChecksFn = deps.queryPrChecksFn || queryPrChecks;
   const getPrBaseBranchFn = deps.getPrBaseBranchFn || getPrBaseBranch;
   const startReviewManagerFn = deps.startReviewManagerFn || startReviewManager;
   const spawnPollReviewsFn = deps.spawnPollReviewsFn || spawnPollReviews;
@@ -1052,18 +1215,20 @@ async function runPollPr(params, deps = {}) {
   }
 
   function launchSlowTest(pr, suppliedHeadSha) {
-    const headSha = suppliedHeadSha || getPrHeadFn(pr, repo);
-    if (!headSha) {
+    const headResult = suppliedHeadSha
+      ? { ok: true, headSha: suppliedHeadSha }
+      : currentPrHead(pr, repo, getPrHeadFn);
+    if (!headResult.ok) {
       queueSlowTask(pr, () => recordHeadUnavailableFn({
         pr,
         repo,
         workspace,
-        reason: 'pr-head-unavailable',
+        reason: `pr-head-unavailable: ${headResult.error}`,
       }, slowTestDeps));
       return;
     }
     queueSlowTask(pr, () => runSlowTestFn(
-      { pr, issue, repo, workspace, headSha },
+      { pr, issue, repo, workspace, headSha: headResult.headSha },
       {
         ...slowTestDeps,
         onReserved: (event) => {
@@ -1095,6 +1260,14 @@ async function runPollPr(params, deps = {}) {
 
     writeStdoutFn(`PR_DETECTED:${pr}\n`);
     launchSlowTest(pr);
+    const checksMonitor = enablePrChecksMonitoring
+      ? createPrChecksMonitor({ pr, repo, intervalMs }, {
+        queryPrChecksFn,
+        writeStdoutFn,
+        setIntervalFn: deps.setIntervalFn,
+        clearIntervalFn: deps.clearIntervalFn,
+      })
+      : { start() {}, request() { return Promise.resolve(); }, async stop() {} };
 
     if (!noReviewManager) {
       const claim = claimReviewManagerLaunch(workspace, pr);
@@ -1106,17 +1279,27 @@ async function runPollPr(params, deps = {}) {
       }
     }
 
-    const exitCode = await spawnPollReviewsFn(
-      pr,
-      workspace,
-      sessionPid,
-      intervalArg || String(Math.round(intervalMs / 1000)),
-      (line) => {
-        const pushedHead = parsePrPushLine(line);
-        if (pushedHead) launchSlowTest(pr, pushedHead);
-      },
-      { noReviewEvents },
-    );
+    checksMonitor.start();
+
+    let exitCode;
+    try {
+      exitCode = await spawnPollReviewsFn(
+        pr,
+        workspace,
+        sessionPid,
+        intervalArg || String(Math.round(intervalMs / 1000)),
+        (line) => {
+          const pushedHead = parsePrPushLine(line);
+          if (pushedHead) {
+            launchSlowTest(pr, pushedHead);
+            void checksMonitor.request(pushedHead);
+          }
+        },
+        { noReviewEvents },
+      );
+    } finally {
+      await checksMonitor.stop();
+    }
     if (pendingSlowTests.size > 0) await Promise.all([...pendingSlowTests]);
 
     const prState = getPrStateFn(pr, repo);
@@ -1134,6 +1317,8 @@ module.exports = {
   getPrHead,
   getPrBaseBranch,
   formatBaseBranchMismatch,
+  checkSummarySignature,
+  createPrChecksMonitor,
   getPrState,
   resolvePostReviewDecision,
   recordMergeAndSnapshot,
@@ -1188,14 +1373,12 @@ if (require.main === module) {
 
   const interval = parseInt(intervalArg || '30') * 1000;
 
-  const workspace = resolveWorkspace(workspaceArg);
-  if (!workspace) {
-    console.error('poll-pr: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
+  const repoResult = resolveRepo({ workspace: workspaceArg });
+  if (!repoResult.ok) {
+    console.error(`poll-pr: ${repoResult.error}`);
     process.exit(1);
   }
-
-  const repo = spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-    { encoding: 'utf8', cwd: workspace }).stdout.trim();
+  const { workspacePath: workspace, repo } = repoResult;
 
   // ── ライフサイクル管理 ─────────────────────────────────────────────────
 

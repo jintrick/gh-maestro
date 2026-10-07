@@ -74,20 +74,21 @@ test('PIDが生きていても起動時刻が違えばrunningを残さない', (
 });
 
 test('回収対象のworktreeとIssue情報が残っていればunavailable層を申告する', () => {
+  const headSha = 'a'.repeat(40);
   const workspace = workspaceWithState({
-    abc: { status: 'running', testedHead: 'abc', pid: 999, startTime: '2026-09-27T00:00:00.000Z' },
+    [headSha]: { status: 'running', testedHead: headSha, pid: 999, startTime: '2026-09-27T00:00:00.000Z' },
   });
   const statePath = path.join(workspace, '.gh-maestro', 'poll-slow-test-42.json');
   const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
   state.issue = '581';
   state.repo = 'fixture/repo';
-  state.runs.abc.worktree = workspace;
+  state.runs[headSha].worktree = workspace;
   fs.writeFileSync(statePath, JSON.stringify(state), 'utf8');
 
   const declarations = [];
   recoverOrphanedSlowRuns(workspace, {
     isProcessAliveFn: () => false,
-    getPrHeadFn: () => 'abc',
+    getPrHeadFn: () => headSha,
     declareTestResultFn: (args) => {
       declarations.push(args);
       return { ok: true };
@@ -96,11 +97,11 @@ test('回収対象のworktreeとIssue情報が残っていればunavailable層�
   });
 
   const recovered = JSON.parse(fs.readFileSync(statePath, 'utf8'));
-  assert.equal(recovered.runs.abc.status, 'unavailable');
-  assert.equal(recovered.runs.abc.declaration, 'updated');
-  assert.equal(recovered.runs.abc.result.declaration, 'updated');
+  assert.equal(recovered.runs[headSha].status, 'unavailable');
+  assert.equal(recovered.runs[headSha].declaration, 'updated');
+  assert.equal(recovered.runs[headSha].result.declaration, 'updated');
   assert.equal(declarations.length, 1);
-  assert.equal(declarations[0].headSha, 'abc');
+  assert.equal(declarations[0].headSha, headSha);
 });
 
 test('PIDと起動時刻が一致するslow workerはrunningのまま待つ', () => {
