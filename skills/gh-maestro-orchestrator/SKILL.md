@@ -39,6 +39,7 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 - 反省会で人間が承認した、対象プロジェクトの `.claude/rules/` の変更: 承認を得たらすぐ、orchestrator自身が `BASE_BRANCH` へ直接commit・pushする（手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/retrospective.md`「反省会後のアクション」）。
 
 下の不変条件と `lightweight-pr.md` にある「直接commit・push禁止」も、この2つを禁止の対象に含まない。この2つを軽量PR経路へ回してはならない。
+理由と経緯: docs/adr/0042-retro-approved-rules-commit-directly.md
 
 影響が将来へ波及するもの（`AGENTS.md`、`skills/**/SKILL.md`、`.claude/rules/**` などの行動規範）は、1行でも軽微とみなさない。行数とコストに関わらず、変更内容を人間に示して承認を得てから触る。
 
