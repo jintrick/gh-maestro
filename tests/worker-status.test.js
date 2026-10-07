@@ -350,7 +350,7 @@ test('renderUptimeBars: 空ワーカー・単一ワーカー・複数ワーカ�
   assert.ok(defaultWidthLines.every(line => Array.from(line).length <= 120));
 });
 
-test('cycle snapshot: 区間だけを1行バーで表示し、ワーカーは最大4行の役職・モデル・時間・PIDにする', () => {
+test('cycle snapshot: 区間を1行で表示し、ワーカーは最大4行の役職・モデル・時間・PIDにする', () => {
   const start = Date.parse('2026-08-26T00:00:00.000Z');
   const events = [
     { schemaVersion: 1, issue: 450, event: 'issue-created', at: new Date(start).toISOString() },
@@ -400,41 +400,6 @@ test('cycle snapshot: 区間だけを1行バーで表示し、ワーカーは最
   })[0];
   assert.ok(Array.from(fullLine).length <= 120);
 
-  const ratioIntervals = [
-    { label: '準備', seconds: 10, recorded: true },
-    { label: '計画', seconds: 20, recorded: true },
-    { label: '承認', seconds: 30, recorded: true },
-    { label: '実装', seconds: null, recorded: false },
-    { label: '査読', seconds: null, recorded: false },
-    { label: '統合', seconds: null, recorded: false },
-  ];
-  const ratioLine = workerStatus.renderUptimeBars(ratioIntervals, {
-    mode: 'interval', issue: 450, totalSeconds: 60, maxLineWidth: 100,
-  })[0];
-  const ratioBarCells = ratioLine.split(' | ').map(token => (
-    (token.match(/█/g) || []).length
-  ));
-  // 長い区間ほどバーが長いこと。何セルになるかは幅と書式で変わる見た目なので
-  // 固定しない（固定すると見た目を変えるたびにテストを直すことになる）。
-  assert.ok(ratioBarCells[0] < ratioBarCells[1]);
-  assert.ok(ratioBarCells[1] < ratioBarCells[2]);
-
-  const minimumCellLine = workerStatus.renderUptimeBars([
-    { label: '準備', seconds: 1, recorded: true },
-    { label: '計画', seconds: 1, recorded: true },
-    { label: '承認', seconds: 100000, recorded: true },
-    { label: '実装', seconds: null, recorded: false },
-    { label: '査読', seconds: null, recorded: false },
-    { label: '統合', seconds: null, recorded: false },
-  ], {
-    mode: 'interval', issue: 450, totalSeconds: 100002, maxLineWidth: 100,
-  })[0];
-  const minimumBarCells = minimumCellLine.split(' | ').map(token => (
-    (token.match(/█/g) || []).length
-  ));
-  assert.ok(minimumBarCells[0] >= 1);
-  assert.ok(minimumBarCells[1] >= 1);
-  assert.ok(minimumBarCells[2] > minimumBarCells[0]);
 });
 
 test('renderWorkerRows: 稼働優先・resume回数・状態ドット色・残数を表示する', () => {

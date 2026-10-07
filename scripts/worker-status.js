@@ -621,41 +621,8 @@ function formatIntervalSeconds(seconds) {
   return formatDuration(Math.max(0, Number(seconds)));
 }
 
-function intervalBarLengths(intervals, budget) {
-  const recorded = intervals
-    .map((item, index) => ({ item, index }))
-    .filter(({ item }) => item && item.recorded && Number(item.seconds) >= 0);
-  if (recorded.length === 0 || budget < recorded.length) return null;
-
-  const lengths = new Map(recorded.map(({ index }) => [index, 1]));
-  let remaining = budget - recorded.length;
-  const weights = recorded.map(({ item }) => Math.max(0, Number(item.seconds)));
-  const weightTotal = weights.reduce((sum, value) => sum + value, 0);
-
-  if (remaining > 0 && weightTotal > 0) {
-    const fractions = recorded.map(({ index }, position) => {
-      const exact = remaining * (weights[position] / weightTotal);
-      return { index, whole: Math.floor(exact), fraction: exact - Math.floor(exact) };
-    });
-    for (const part of fractions) lengths.set(part.index, lengths.get(part.index) + part.whole);
-    let assigned = fractions.reduce((sum, part) => sum + part.whole, 0);
-    fractions.sort((a, b) => b.fraction - a.fraction || a.index - b.index);
-    for (let i = assigned; i < remaining; i++) {
-      const part = fractions[(i - assigned) % fractions.length];
-      lengths.set(part.index, lengths.get(part.index) + 1);
-    }
-  } else if (remaining > 0) {
-    for (let i = 0; i < remaining; i++) {
-      const part = recorded[i % recorded.length];
-      lengths.set(part.index, lengths.get(part.index) + 1);
-    }
-  }
-  return lengths;
-}
-
 /**
- * 6区間を1行へ畳む。既存の renderUptimeBars 入口から呼び出すことで、
- * 区間の棒だけをここで描画し、ワーカー行へ棒を持ち込まない。
+ * 6区間を1行へ畳む。各区間は名前と経過時間だけを示し、棒グラフは描かない。
  */
 function renderCycleLine(projection, opts = {}) {
   const intervals = Array.isArray(projection) ? projection : [];
@@ -682,35 +649,9 @@ function renderCycleLine(projection, opts = {}) {
     ? `${item.label} ${formatIntervalSeconds(item.seconds)}`
     : item.label);
   const separators = ' | ';
-  const baseTokens = specs.map(plainToken);
-  const baseLine = baseTokens.join(separators);
-
-  let line = baseLine;
-  if (visibleLength(baseLine) <= maxLineWidth) {
-    const recordedCount = specs.filter(item => item.recorded).length;
-    const free = maxLineWidth - visibleLength(baseLine);
-    // The plain token already contains one separator between its label and
-    // duration. Adding a bar introduces one additional separator per recorded
-    // interval; reserve those cells before allocating the normalized bar
-    // lengths so the complete line, rather than just the bar cells, fits the
-    // terminal width.
-    const barPadding = recordedCount;
-    const lengths = intervalBarLengths(specs, free - barPadding);
-    if (lengths) {
-      const tokens = specs.map((item, index) => {
-        const length = lengths.get(index);
-        const token = length
-          ? `${item.label} ${'█'.repeat(length)} ${formatIntervalSeconds(item.seconds)}`
-          : plainToken(item);
-        return colorizeText(token, palette[index], colorize);
-      });
-      line = tokens.join(separators);
-    } else {
-      line = specs.map((item, index) => (
-        colorizeText(plainToken(item), palette[index], colorize)
-      )).join(separators);
-    }
-  }
+  let line = specs.map((item, index) => (
+    colorizeText(plainToken(item), palette[index], colorize)
+  )).join(separators);
 
   if (visibleLength(line) > maxLineWidth) {
     const plain = stripAnsi(line);

@@ -294,7 +294,7 @@ msg-poll が `未初期化です。reset-session.js で初期化してくださ�
   - `spawn-worker.js` はワーカー登録後、`msg-send.js` はコメント投稿成功後に監視ペインの存在保証を自動的に試みる。WezTermが利用できない場合もワーカー起動・メッセージ送信の成否には影響しない。orchestratorはセッション開始・ワーカー起動・メッセージ送信のたびに `node "{{SCRIPTS_PATH}}/worker-status.js" pane --workspace $WORKSPACE` を手動実行しない。
   - 状態をその場で確認するときは `node "{{SCRIPTS_PATH}}/worker-status.js" list --workspace $WORKSPACE`（全ワーカー、`--json`で機械可読）または `node "{{SCRIPTS_PATH}}/worker-status.js" status --workspace $WORKSPACE --worker-name <name>`（単一ワーカー）を使う。監視ペインを手動で開始・再作成する必要がある場合だけ `node "{{SCRIPTS_PATH}}/worker-status.js" pane --workspace $WORKSPACE` を使い、終了は `close-pane` を使う。
 - **何を不審と見なすか**:
-  - 他のワーカーと比較して突出して長い横棒グラフを持つワーカー、またはタスクの規模（軽微な調査や局所修正など）に対して不自然に長時間の連続稼働を続けているワーカー。
+  - 他のワーカーと比較して経過時間が突出して長いワーカー、またはタスクの規模（軽微な調査や局所修正など）に対して不自然に長時間の連続稼働を続けているワーカー。
 - **不審な場合に何をするか**:
   - 該当ワーカーの実行ログ（`$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log`）を `Read` で確認し、実際に進捗があるか（処理中か、暴走ループ／無応答か）を切り分ける。
   - 暴走やハングと判断した場合は `node "{{SCRIPTS_PATH}}/stop-worker.js" <workerName> --workspace $WORKSPACE` でプロセスを停止し、人間に状況を報告するか、必要に応じて追加指示で再開（resume）を促す。
