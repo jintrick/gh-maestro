@@ -33,6 +33,13 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 
 理由と経緯: docs/adr/0035-orchestrator-changes-go-through-a-lightweight-pr.md
 
+この禁止の例外は次の2つだけである。どちらも軽量PR経路に乗せず、アンカーIssue・PR・slow層・マージ依頼のいずれも作らない。
+
+- `adr.md` が定義するADRの追加・改訂: `BASE_BRANCH` へ直接commit・pushしてよい。
+- 反省会で人間が承認した、対象プロジェクトの `.claude/rules/` の変更: 承認を得たらすぐ、orchestrator自身が `BASE_BRANCH` へ直接commit・pushする（手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/retrospective.md`「反省会後のアクション」）。
+
+下の不変条件と `lightweight-pr.md` にある「直接commit・push禁止」も、この2つを禁止の対象に含まない。この2つを軽量PR経路へ回してはならない。
+
 影響が将来へ波及するもの（`AGENTS.md`、`skills/**/SKILL.md`、`.claude/rules/**` などの行動規範）は、1行でも軽微とみなさない。行数とコストに関わらず、変更内容を人間に示して承認を得てから触る。
 
 #### 判断・伝え方の心得
@@ -215,7 +222,7 @@ node "{{SCRIPTS_PATH}}/spawn-assistant.js" --issue <N> --workspace $WORKSPACE --
 - **Issueをクローズする唯一の手段は `finalize-issue.js` である。人間から「Issueを閉じて」「クローズして」等と指示された場合も、その言葉をそのまま `gh issue close` の実行指示と解釈しない。反省会が未完了ならまず反省会を完了させてから `finalize-issue.js` を呼ぶ**
 - `BASE_BRANCH`は保護ブランチ（`main`/`master`）でもworktreeブランチ（`issue-N-description`形式）でもない。セッション中に変更しない。起動時に保護ブランチ上にいた場合のみ、最初のIssue確定時に開発ブランチを切って設定する
 - `main` / `master`への直接pushは禁止
-- `BASE_BRANCH`への直接commit / pushは禁止。orchestrator自身の変更も、Issueアンカー付きの軽量PR経路で提出する（`adr.md`が定義するADRの追加・改訂を除く）。
+- `BASE_BRANCH`への直接commit / pushは禁止。orchestrator自身の変更も、Issueアンカー付きの軽量PR経路で提出する。例外は `adr.md` が定義するADRの追加・改訂と、反省会で人間が承認した対象プロジェクトの `.claude/rules/` の変更の2つだけで、この2つは軽量PR経路に乗せず `BASE_BRANCH` へ直接commit・pushする（「自分でやるか、ワーカーを起動するか、の判断基準」参照）。
   理由と経緯: docs/adr/0035-orchestrator-changes-go-through-a-lightweight-pr.md
 - **`scripts/` 配下または `skills/agents.yaml` に触れた変更を install した後の常駐入れ替えは、install.js がruntime rootに登録された全workspaceについて配布済みの `restart-residents.js` を自動で呼び出す。plugin monitor管理の `msg-poll.js` / `poll-pr-monitor.js` / `poll-pr.js` は停止・張り直しを行わず、更新後は次の対話型セッションでpluginを再読込する。その他の旧形式常駐と障害時の確認手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` を参照する。**
 - `skills/**` 配下のドキュメントだけを変更した場合は手動の常駐入れ替えは不要。常駐プロセスは SKILL.md を読まない

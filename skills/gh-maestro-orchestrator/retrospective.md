@@ -112,7 +112,7 @@ issueコメント化することで、そのIssueに紐づくassistant（対話�
 - **型・制御フローでの防止**: diagnostician を起動して該当コードと他の呼び出し経路を含む影響範囲を特定し、新しい Issue として起票する
 - **Lint化**: diagnostician を起動して設定ファイルを特定し、新しい Issue として起票する
 - **テスト追加**: diagnostician を起動して該当テストファイルを特定し、新しい Issue として起票する
-- **`.claude/rules/`追加**: ルールファイルの内容を人間に提示して承認後、ターゲットプロジェクトの `.claude/rules/` に追記する（`paths:` スコープが適切なら指定する）
+- **`.claude/rules/`追加**: ルールファイルの内容を人間に提示して承認後、ターゲットプロジェクトの `.claude/rules/` に追記する（`paths:` スコープが適切なら指定する）。承認を得たらすぐ、orchestrator自身が `BASE_BRANCH` へ直接commit・pushする。アンカーIssue・PR・slow層テスト・マージ依頼は作らない。これは `SKILL.md` の不変条件「`BASE_BRANCH`への直接commit / push禁止」と `lightweight-pr.md` の例外として明記されたもので、軽量PR経路に乗せてはならない。pushの後は `git show --stat` で対象ファイルだけが入ったことを確認する
 - **SKILL.md更新**: `skills/gh-maestro-coder/SKILL.md` の修正を人間に提示して承認後に反映する
 
 提案が0件（すべて個別判断）の場合は「今回は汎用化できる改善点がありませんでした」と報告して終了する。
