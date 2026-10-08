@@ -25,6 +25,14 @@ const FAST_WORKER_CLI_PRELOAD = (() => {
   const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
   const source = [
     "'use strict';",
+    "const fs = require('fs');",
+    'const realReadFileSync = fs.readFileSync;',
+    'fs.readFileSync = (file, ...args) => {',
+    "  if (/^\\/proc\\/\\d+\\/stat$/.test(String(file)) && !process.env.GHM_TEST_WORKER_START_TIME) {",
+    "    throw new Error('test fixture: process start time unavailable');",
+    '  }',
+    '  return realReadFileSync(file, ...args);',
+    '};',
     `const childProcess = require(${JSON.stringify(childProcessPath)});`,
     'const realExecSync = childProcess.execSync;',
     'const isAlive = (pid) => {',
@@ -397,6 +405,7 @@ test('stop-worker: 拒否側: 起動時刻を取得できない場合、実プ�
       const r = run(['unknown-start-time-worker', '--workspace', dir]);
       assert.notEqual(r.status, 0, '起動時刻が不明なら終了コード1でエラーになること');
       assert.match(r.stderr, /同一性確認に失敗しました/);
+      assert.match(r.stderr, /cannot get process start time/);
 
       assert.equal(isProcessAlive(parentPid), true, '起動時刻不明の親プロセスはkillされず生存し続けること');
       assert.equal(isProcessAlive(childPid), true, '起動時刻不明の子プロセスはkillされず生存し続けること');
