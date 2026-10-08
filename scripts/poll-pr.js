@@ -9,8 +9,8 @@
 //   REVIEW_MANAGER_STARTED:<number> | REVIEW_MANAGER_ALREADY_RUNNING:<number> |
 //   REVIEW_MANAGER_ALREADY_CLAIMED:<number>
 //   ...poll-reviews.js の出力がそのまま続く（REVIEW_COMMENT / PR_COMMENT / PR_REVIEW / PR_PUSH / PR_MERGED / PR_CLOSED / POLL_ERROR / POLL_RECOVERED）。
-//   PR_PUSHを受け取るたび、そのSHAのslow層を非同期で予約する。
-//   GitHub checksはこのプロセスが現在HEADを定期確認し、CI_CHECK_*通知を出す。
+//   軽量PR以外では、PR_PUSHを受け取るたびそのSHAのslow層を非同期で予約する。
+//   GitHub checksは軽量PR以外で現在HEADを定期確認し、CI_CHECK_*通知を出す。
 //   Review Managerの起動後のクラッシュ（エージェントCLI起動失敗等）は、本スクリプトの
 //   出力ではなく、通常ワーカーと同じ終了フック経由でIssueコメントとして非同期に通知される
 //   （start-review-manager.js参照）。本スクリプトはそれを待たずPR/レビュー監視を継続する。
@@ -69,7 +69,7 @@ Options:
   --no-review-manager        PR検出時に Review Manager を起動せず、レビュー監視だけを再開する。
                              既にレビュー済み／再レビュー不要な状態で poll-pr.js を再起動するときに使う
                              （再起動のたびにレビューを蒸し返すのを防ぐ）。
-  --no-review-events         inline review comments・formal reviews のAPI監視を行わない。
+  --no-review-events         inline review comments・formal reviews のAPI監視を行わない。軽量PRでは --no-review-manager と併用し、slow層とGitHub checks監視も行わない。
   --workspace <path>         ワークスペースパス（省略時は環境変数またはCWDから解決）
   --session-pid <pid>        監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
   --base-branch <branch>     期待するベースブランチ名（省略時はベースブランチ検証をスキップ）
@@ -82,8 +82,8 @@ Output (stdout):
   REVIEW_MANAGER_ALREADY_RUNNING:<PR>  Review Manager は既に稼働中
   REVIEW_MANAGER_ALREADY_CLAIMED:<PR>  このPRの自動Review Manager起動は既にclaim済みのためスキップした
   PR_CLOSED_RESUMED:<PR>               監視していたPRがクローズされ、新PR検出に復帰した
-  SLOW_TEST_STARTED:<json>             PR検出後のslow層を非同期で開始した
-  SLOW_TEST_RESULT:<json>              slow層の完了または失敗を記録した
+  SLOW_TEST_STARTED:<json>             通常PRのslow層を非同期で開始した
+  SLOW_TEST_RESULT:<json>              通常PRのslow層の完了または失敗を記録した
   CI_CHECK_FAILED:<json>               現在HEADで失敗したGitHub checkを検出した
   CI_CHECKS_COMPLETE:<json>             現在HEADの全GitHub checkが完了した
   CI_CHECKS_EMPTY:<json>                現在HEADにGitHub checkが無い
@@ -99,15 +99,15 @@ Output (stdout):
   Review Manager起動後のクラッシュはこの標準出力では通知されない（start-review-manager.js
   参照。Issueコメントとして別経路で届く）。PR/レビュー監視はそれとは独立して継続する。
 
-PR が見つかるまでブロックし、見つけたら Review Manager(start-review-manager.js)を
+PR が見つかるまでブロックし、見つけたら必要に応じて Review Manager(start-review-manager.js)を
 全観点で起動し（skills/gh-maestro-reviewer/SKILL.md参照）、続けて poll-reviews.js を
-子プロセスとして起動してレビュー監視を引き継ぐ。GitHub checksは本プロセスが同時に
-定期取得し、PR_PUSH後は新しいHEADをすぐ照会する。観点を絞り込む判断は
-Review Manager自身が実際のdiffを見た上で行う（本スクリプトはファイルパターン等による
-機械的な観点選定を一切行わない。ファイル名に基づく自動判定が一部の観点だけに絞り込んでしまい
-他の観点のレビューが丸ごと欠落する実障害があったため、この責務はオーケストレーター側からは
-完全に排除した）。slow層はPR検出後と修正pushごとに対象worktreeで非同期実行し、レビュー監視を
-ブロックせず、完了時に層別成果物と申告コメントを更新する。
+子プロセスとして起動してPR状態監視を引き継ぐ。通常PRではGitHub checksを定期取得し、
+PR_PUSH後は新しいHEADをすぐ照会する。Review Managerを起動しない軽量経路
+（--no-review-manager と --no-review-events の併用）では、slow層とGitHub checks監視を行わない。
+その他のReview Managerを起動しない経路（復旧・revert等）では、slow層とGitHub checks監視を維持する。
+観点を絞り込む判断はReview Manager自身が実際のdiffを見た上で行う（本スクリプトは
+ファイルパターン等による機械的な観点選定を一切行わない）。slow層は対象worktreeで非同期実行し、
+通常PRではPR検出後と修正pushごとに予約し、完了時に層別成果物と申告コメントを更新する。
 ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
 消滅時はPID registryを解除して自動exitする。`;
 
@@ -1189,13 +1189,16 @@ async function runPollPr(params, deps = {}) {
   const writeStderrFn = deps.writeStderrFn || ((text) => process.stderr.write(text));
   const sleepFn = deps.sleepFn || ((ms) => new Promise(resolve => setTimeout(resolve, ms)));
   const slowTestDeps = deps.slowTestDeps || {};
+  const lightweightPr = noReviewManager && noReviewEvents;
 
   // 前回の poll-pr が監視の途中で失われた場合、slow worker の PIDが既に無い
-  // running レコードを開始直後に確定する。ここで再実行はしない。
-  recoverOrphanedSlowRuns(workspace, {
-    ...slowTestDeps,
-    writeStdoutFn,
-  });
+  // running レコードを開始直後に確定する。軽量経路ではslow結果を生成・通知しない。
+  if (!lightweightPr) {
+    recoverOrphanedSlowRuns(workspace, {
+      ...slowTestDeps,
+      writeStdoutFn,
+    });
+  }
 
   const pendingSlowTests = new Set();
   const slowQueues = new Map();
@@ -1259,8 +1262,8 @@ async function runPollPr(params, deps = {}) {
     }
 
     writeStdoutFn(`PR_DETECTED:${pr}\n`);
-    launchSlowTest(pr);
-    const checksMonitor = enablePrChecksMonitoring
+    if (!lightweightPr) launchSlowTest(pr);
+    const checksMonitor = enablePrChecksMonitoring && !lightweightPr
       ? createPrChecksMonitor({ pr, repo, intervalMs }, {
         queryPrChecksFn,
         writeStdoutFn,
@@ -1290,7 +1293,7 @@ async function runPollPr(params, deps = {}) {
         intervalArg || String(Math.round(intervalMs / 1000)),
         (line) => {
           const pushedHead = parsePrPushLine(line);
-          if (pushedHead) {
+          if (pushedHead && !lightweightPr) {
             launchSlowTest(pr, pushedHead);
             void checksMonitor.request(pushedHead);
           }
