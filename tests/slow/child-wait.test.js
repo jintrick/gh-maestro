@@ -53,6 +53,15 @@ function loadChildWait(rootPid = 9999) {
   return { waitChildExit: mod.waitChildExit, taskkillCalls };
 }
 
+test('waitChildExit: kill後にcloseが届かなくてもkill猶予後にrejectして完了する', async () => {
+  const { waitChildExit } = loadChildWait();
+  const child = fakeChild();
+  let cleanupCount = 0;
+  const pending = waitChildExit({ child, timeoutMs: 1, killGraceMs: 5, onCleanup: () => { cleanupCount++; } });
+  await assert.rejects(pending, /did not exit after timeout/);
+  assert.equal(cleanupCount, 1);
+});
+
 
 
 test('waitChildExit: タイムアウトで killProcessTree でプロセスツリーを終了し、close で解決する', async () => {
