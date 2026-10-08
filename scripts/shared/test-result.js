@@ -25,6 +25,8 @@ const TEST_RESULT_STATUSES = Object.freeze(new Set(['complete', 'unavailable']))
 const TEST_RESULT_OUTCOMES = Object.freeze(new Set(['pass', 'fail']));
 const LINT_RESULT_STATUSES = Object.freeze(new Set(['complete', 'unavailable']));
 const LINT_RESULT_OUTCOMES = Object.freeze(new Set(['pass', 'findings']));
+const STATIC_CHECK_STATUSES = Object.freeze(new Set(['complete', 'unavailable', 'undefined']));
+const STATIC_CHECK_OUTCOMES = Object.freeze(new Set(['pass', 'fail', 'findings']));
 const TAP_COUNT_FIELDS = Object.freeze(['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo']);
 const TEST_CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
 const PUBLIC_TEST_COMMANDS = Object.freeze({
@@ -273,6 +275,27 @@ function validateLintResult(value, fieldPrefix = 'lint result') {
   return { ok: true, value };
 }
 
+function validateStaticCheckResult(value, fieldPrefix = 'static check result') {
+  if (!isPlainObject(value)) return { ok: false, error: `${fieldPrefix} must be a JSON object` };
+  if (!STATIC_CHECK_STATUSES.has(value.status)) return { ok: false, error: `${fieldPrefix} status is invalid` };
+  if (typeof value.command !== 'string' || !value.command.trim()) return { ok: false, error: `${fieldPrefix} command is required` };
+  if (typeof value.recordedAt !== 'string' || !value.recordedAt.trim()) return { ok: false, error: `${fieldPrefix} recordedAt is required` };
+  if (value.status === 'complete') {
+    if (!STATIC_CHECK_OUTCOMES.has(value.outcome)) return { ok: false, error: `${fieldPrefix} outcome is invalid` };
+    if (!Number.isSafeInteger(value.exitCode) || value.exitCode < 0) return { ok: false, error: `${fieldPrefix} exitCode is invalid` };
+    if (typeof value.testedContentHash !== 'string' || !TEST_CONTENT_HASH_RE.test(value.testedContentHash)) return { ok: false, error: `${fieldPrefix} complete must include a testedContentHash` };
+    if (value.outcome === 'findings' && (!Number.isSafeInteger(value.findingCount) || value.findingCount < 0)) return { ok: false, error: `${fieldPrefix} findingCount is invalid` };
+    if (value.outcome === 'pass' && value.exitCode !== 0) return { ok: false, error: `${fieldPrefix} pass requires exitCode 0` };
+    if (value.outcome === 'fail' && value.exitCode === 0) return { ok: false, error: `${fieldPrefix} fail requires a nonzero exitCode` };
+  } else if (value.status === 'unavailable') {
+    if (typeof value.reason !== 'string' || !value.reason.trim()) return { ok: false, error: `${fieldPrefix} unavailable must include a reason` };
+    if (value.exitCode !== null && value.exitCode !== undefined && (!Number.isSafeInteger(value.exitCode) || value.exitCode < 0)) return { ok: false, error: `${fieldPrefix} exitCode is invalid` };
+  }
+  if (value.status === 'undefined' && value.outcome !== undefined) return { ok: false, error: `${fieldPrefix} undefined cannot have an outcome` };
+  if (value.testedHead !== undefined && value.testedHead !== null && (typeof value.testedHead !== 'string' || !/^[0-9a-fA-F]{7,40}$/.test(value.testedHead))) return { ok: false, error: `${fieldPrefix} testedHead is invalid` };
+  return { ok: true, value };
+}
+
 function validateLegacyTestResultArtifact(value) {
   if (!isPlainObject(value)) return { ok: false, error: 'test result artifact must be a JSON object' };
   if (value.schemaVersion !== TEST_RESULT_SCHEMA_VERSION) return { ok: false, error: `unsupported test result schemaVersion: ${JSON.stringify(value.schemaVersion)}` };
@@ -297,6 +320,16 @@ function validateAggregateTestResultArtifact(value) {
   if (value.lint !== undefined) {
     const lint = validateLintResult(value.lint);
     if (!lint.ok) return lint;
+  }
+  if (value.checks !== undefined) {
+    if (!isPlainObject(value.checks)) return { ok: false, error: 'test result aggregate checks must be an object' };
+    for (const [name, check] of Object.entries(value.checks)) {
+      const validated = name === 'lint'
+        ? validateLintResult(check, `${name} result`)
+        : validateStaticCheckResult(check, `${name} result`);
+      if (!validated.ok) return validated;
+    }
+    if (value.checks.lint && value.lint && JSON.stringify(value.checks.lint) !== JSON.stringify(value.lint)) return { ok: false, error: 'lint compatibility field does not match checks.lint' };
   }
   if (value.testedHead !== undefined && value.testedHead !== null && (typeof value.testedHead !== 'string' || !/^[0-9a-fA-F]{7,40}$/.test(value.testedHead))) return { ok: false, error: 'test result aggregate testedHead is invalid' };
   return { ok: true, value };
@@ -341,7 +374,7 @@ function readAggregateFromDisk(resultPath) {
 }
 
 /** 内容指紋が一致する（または判定不能な）他層を保持したまま、1層だけを原子的に更新する。 */
-function writeTestResultLayer(worktree, layerArtifact, lintResult) {
+function writeTestResultLayer(worktree, layerArtifact, checksOrLint) {
   const layer = { ...layerArtifact };
   if (typeof layer.layer !== 'string' || !layer.layer.trim()) throw new Error('test result layer is required');
   layer.layer = layer.layer.trim();
@@ -384,8 +417,22 @@ function writeTestResultLayer(worktree, layerArtifact, lintResult) {
       testedHead: incomingHead,
       layers,
     };
-    if (lintResult !== undefined) aggregate.lint = lintResult;
-    else if (current && current.lint !== undefined) aggregate.lint = current.lint;
+    const incomingChecks = checksOrLint && (checksOrLint.lint || checksOrLint.typecheck)
+      ? checksOrLint
+      : (checksOrLint !== undefined ? { lint: checksOrLint } : {});
+    const checks = {};
+    if (current && current.checks) {
+      for (const [name, check] of Object.entries(current.checks)) {
+        if (!incomingHash || !check || check.testedContentHash !== incomingHash) continue;
+        checks[name] = check;
+      }
+    }
+    Object.assign(checks, incomingChecks);
+    if (!Object.keys(checks).length && current && current.lint && current.lint.testedContentHash === incomingHash) checks.lint = current.lint;
+    if (checks) {
+      aggregate.checks = checks;
+      if (checks.lint !== undefined) aggregate.lint = checks.lint;
+    } else if (current && current.lint !== undefined) aggregate.lint = current.lint;
     const validated = validateAggregateTestResultArtifact(aggregate);
     if (!validated.ok) throw new Error(validated.error);
     fs.mkdirSync(path.dirname(resultPath), { recursive: true });
@@ -441,6 +488,8 @@ function readTestResultArtifact(worktree = process.cwd()) {
         testedHead: parsed.testedHead || undefined,
         layers: Object.fromEntries(Object.entries(parsed.layers).map(([name, layer]) => [name, layerForRead(layer)])),
         ...(parsed.lint !== undefined ? { lint: parsed.lint } : {}),
+        ...(parsed.checks !== undefined ? { checks: parsed.checks } : {}),
+        ...(parsed.checks && parsed.checks.typecheck !== undefined ? { typecheck: parsed.checks.typecheck } : {}),
       },
     };
   }
@@ -492,6 +541,7 @@ module.exports = {
   parseTapFailures,
   validateLayerResult,
   validateLintResult,
+  validateStaticCheckResult,
   validateTestResultArtifact,
   writeTestResultArtifact,
   writeTestResultLayer,

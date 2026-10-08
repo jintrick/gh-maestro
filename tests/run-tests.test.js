@@ -10,6 +10,7 @@ const {
   listTestLayers,
   runTests,
   runLint,
+  runTypecheck,
   main,
 } = require('../scripts/run-tests');
 const { createBuiltinTestConfig } = require('../scripts/shared/resolve-config');
@@ -46,6 +47,7 @@ function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = []
   const invalidations = [];
   const writes = [];
   const lintResults = [];
+  const staticCheckRecords = [];
   const result = runTests(
     {
       suite,
@@ -78,10 +80,11 @@ function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = []
         return child;
       },
       invalidateArtifactFn: (worktree, reason) => invalidations.push({ worktree, reason }),
-      writeArtifactFn: writeArtifactFn || ((worktree, artifact, lintResult) => {
+      writeArtifactFn: writeArtifactFn || ((worktree, artifact, checks) => {
         writes.push({ worktree, artifact });
         artifacts.push(artifact);
-        lintResults.push(lintResult);
+        lintResults.push(checks.lint);
+        staticCheckRecords.push(checks);
       }),
       writeStdoutFn: (value) => stdout.push(value),
       writeStderrFn: (value) => stderr.push(value),
@@ -95,6 +98,7 @@ function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = []
     invalidations,
     writes,
     lintResults,
+    staticCheckRecords,
     stdout: stdout.join(''),
     stderr: stderr.join(''),
   };
@@ -123,6 +127,24 @@ test('runLint: lintの指摘はcomplete/findingsとして記録し、起動結�
   assert.equal(calls[0].options.env.GH_MAESTRO_LINT_FORMAT, 'json');
 });
 
+test('runTypecheck: 成功・失敗・起動不能・未定義を共通npm起動結果として区別する', () => {
+  const cwd = tempWorktree();
+  fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { typecheck: 'tsc --noEmit' } }));
+  const run = (status, error) => runTypecheck({
+    cwd, env: {}, testedHead: SHA, testedContentHash: CONTENT_HASH,
+    spawnSyncFn: (command, args, options) => {
+      assert.equal(args.join(' '), 'run --silent typecheck');
+      assert.equal(options.cwd, cwd);
+      return { status, error, stdout: '', stderr: '' };
+    },
+  });
+  assert.deepEqual([run(0).status, run(0).outcome, run(0).exitCode], ['complete', 'pass', 0]);
+  assert.deepEqual([run(2).status, run(2).outcome, run(2).exitCode], ['complete', 'fail', 2]);
+  assert.equal(run(null, new Error('spawn denied')).status, 'unavailable');
+  const absent = runTypecheck({ cwd: tempWorktree(), env: {}, spawnSyncFn: () => assert.fail('未定義scriptは起動しない') });
+  assert.equal(absent.status, 'undefined');
+});
+
 test('runTests: lint結果をテスト層と同じ成果物へ保存し、指摘があってもrunner終了コードを変えない', () => {
   const fixture = runWithChild({
     child: { status: 0, stdout: `TAP version 13\n${tapSummary({ tests: 1, pass: 1, fail: 0 })}`, stderr: '' },
@@ -140,6 +162,20 @@ test('runTests: lint結果をテスト層と同じ成果物へ保存し、指摘
   assert.equal(fixture.lintResults[0].outcome, 'findings');
   assert.equal(fixture.lintResults[0].findingCount, 1);
   assert.equal(fixture.lintResults[0].testedContentHash, CONTENT_HASH);
+});
+
+test('runTests: fullはtypecheckの失敗を成果物に記録してもテスト終了コードを変えない', () => {
+  const cwd = tempWorktree();
+  fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { typecheck: 'tsc --noEmit' } }));
+  const fixture = runWithChild({
+    cwd,
+    child: { status: 0, stdout: `TAP version 13\n${tapSummary({ tests: 1, pass: 1, fail: 0 })}`, stderr: '' },
+    extraDeps: { typecheckSpawnSyncFn: () => ({ status: 2, stdout: '', stderr: 'type error' }) },
+  });
+  assert.equal(fixture.result.exitCode, 0);
+  assert.deepEqual({ status: fixture.staticCheckRecords[0].typecheck.status, outcome: fixture.staticCheckRecords[0].typecheck.outcome, exitCode: fixture.staticCheckRecords[0].typecheck.exitCode, command: fixture.staticCheckRecords[0].typecheck.command }, {
+    status: 'complete', outcome: 'fail', exitCode: 2, command: 'npm run typecheck',
+  });
 });
 
 test('runTests: full suiteを一度だけ起動し、成功結果をfullとして保存する', () => {
