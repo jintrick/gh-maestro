@@ -6,13 +6,13 @@ normative-file: skills/gh-maestro-orchestrator/SKILL.md
 
 ## 決めたこと
 
-反省会で人間が承認した、対象プロジェクトの `.claude/rules/` の変更は、軽量PR経路（アンカーIssue・PR・slow層・マージ依頼）に乗せない。承認を得たらすぐ、orchestrator自身がベースブランチへ直接commit・pushする。これは `docs/adr/0035-orchestrator-changes-go-through-a-lightweight-pr.md` の「ベースブランチへ直接commit・pushしない」に対する、ADRの追加・改訂と並ぶ2つ目の例外である。例外は判断基準・不変条件・`skills/gh-maestro-orchestrator/lightweight-pr.md`・`skills/gh-maestro-orchestrator/retrospective.md` のすべてに同じ形で書き、どこから読んでも直接commit・pushと読めるようにする。
+反省会で人間が承認した、対象プロジェクトの `.claude/rules/` の変更は、軽量PR経路（アンカーIssue・PR・slow層・マージ依頼）に乗せない。承認を得たらすぐ、orchestrator自身がベースブランチへ直接commit・pushする。これは「ベースブランチへ直接commit・pushしない」規範に対する、ADRの追加・改訂と並ぶ2つ目の例外である。例外は判断基準・不変条件・`skills/gh-maestro-orchestrator/lightweight-pr.md`・`skills/gh-maestro-orchestrator/retrospective.md` のすべてに同じ形で書き、どこから読んでも直接commit・pushと読めるようにする。
 
 ## なぜ
 
 反省会では、ルールファイルの内容そのものを人間に示して承認を得ている。そのあと軽量PR経路に乗せると、同じ内容に対してマージ依頼という2回目の承認を求めることになる。承認済みの内容に再承認を求めないという規範（`docs/adr/0007-one-question-per-human-message.md`）に反する。
 
-ADR 0035 がPRを必須にした理由は、直接コミットした変更がslow層の検証を受けないまま入り、重い側の期待値を壊すことだった。`.claude/rules/` の文書はこの検証の対象にならず、`push-and-declare.js` もドキュメントだけの変更にはテスト成果物を求めない。PRに乗せても、検証の面で得るものが無い。
+`.claude/rules/` の文書はslow層の検証の対象にならず、`push-and-declare.js` もドキュメントだけの変更にはテスト成果物を求めない。PRに乗せても、検証の面で得るものが無い。
 
 実際に、直接commit禁止の規範が例外にADRだけを挙げていたため、orchestratorは `skills/gh-maestro-orchestrator/retrospective.md` の「承認後に追記する」よりそちらを優先して読んだ。その結果、承認済みの `.claude/rules/` の変更を軽量PR経路に乗せてしまった。
 
