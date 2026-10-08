@@ -1,0 +1,6 @@
+{
+  "humanNotification": {
+    "url": "https://ntfy.sh/gh-maestro",
+    "method": "POST"
+  }
+}

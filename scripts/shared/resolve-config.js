@@ -20,6 +20,7 @@ const { existsSync, readFileSync } = require('fs');
 const { resolve, join } = require('path');
 
 const { isPlainObject } = require('./object');
+const { readJsonFile } = require('./json-file');
 
 // workspace/.gh-maestro/config.json からの上書きを許さない実行系フィールド。
 // command/extraArgs に加え、execArgs も同じ扱いとする（PR #103 Review Manager指摘:
@@ -769,6 +770,48 @@ function resolveCouncilConfig(opts = {}) {
   return { groups, investigationAgent };
 }
 
+/**
+ * 人間向け通知の配送先とHTTP methodを、既定値 → global → workspaceの順に解決する。
+ * 既定値も通知設定ファイルとしてスクリプト本体の外に置く。
+ * @param {{workspace?:string,homedir?:string,defaultsPath?:string}} [opts]
+ * @returns {{url:string,method:string}|null}
+ */
+function resolveHumanNotificationConfig(opts = {}) {
+  const defaultsPath = opts.defaultsPath || resolve(__dirname, '..', 'notification-defaults.json');
+  const defaults = readJsonFile(defaultsPath);
+  if (!isPlainObject(defaults) || !isPlainObject(defaults.humanNotification)) {
+    throw new Error(`通知設定の既定ファイルのトップレベル形式が不正です: ${defaultsPath}`);
+  }
+  const homedir = opts.homedir || process.env.HOME || process.env.USERPROFILE || '';
+  const globalConfig = loadHumanNotificationConfigFile(resolve(homedir, '.gh-maestro', 'config.json'));
+  const workspaceConfig = opts.workspace
+    ? loadHumanNotificationConfigFile(resolve(opts.workspace, '.gh-maestro', 'config.json')) : {};
+  const globalNotification = globalConfig.humanNotification ?? {};
+  const workspaceNotification = workspaceConfig.humanNotification ?? {};
+  const merged = { ...defaults.humanNotification, ...globalNotification, ...workspaceNotification };
+  if (typeof merged.url !== 'string' || !/^https:\/\//i.test(merged.url)
+      || typeof merged.method !== 'string' || !/^[A-Z]+$/.test(merged.method)) return null;
+  return { url: merged.url, method: merged.method };
+}
+
+function loadHumanNotificationConfigFile(configPath) {
+  if (!existsSync(configPath)) return {};
+  let config;
+  try {
+    config = readJsonFile(configPath);
+  } catch (error) {
+    const failure = error.kind === 'parse' ? 'JSON構文' : '読み取り';
+    throw new Error(`通知設定ファイルの${failure}に失敗しました: ${configPath}: ${error.message}`, { cause: error });
+  }
+  if (!isPlainObject(config)) {
+    throw new Error(`通知設定ファイルのトップレベルはJSONオブジェクトである必要があります: ${configPath}`);
+  }
+  if (config.humanNotification !== undefined && !isPlainObject(config.humanNotification)) {
+    throw new Error(`通知設定 humanNotification がJSONオブジェクトではありません: ${configPath}`);
+  }
+  return config;
+}
+
 module.exports = {
   resolveAgentConfig,
   resolveTestConfig,
@@ -778,6 +821,7 @@ module.exports = {
   validateTestMapping,
   resolveSkillAgentMap,
   resolveCouncilConfig,
+  resolveHumanNotificationConfig,
   resolveExtends,
   loadDefaults,
   isValidAgentConfig,
