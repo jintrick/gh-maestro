@@ -2,7 +2,7 @@
 'use strict';
 
 const { spawnSync } = require('./shared/child-process');
-const { parseFlags } = require('./shared/workspace');
+const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { resolveRepo } = require('./shared/repo');
 const { resolveHumanNotificationConfig } = require('./shared/resolve-config');
 
@@ -27,15 +27,25 @@ const SPEC = {
 };
 
 function notifyHuman({ repo, workspace }, deps = {}) {
+  const resolveWorkspaceFn = deps.resolveWorkspaceFn || resolveWorkspace;
+  let resolvedWorkspace;
+  try {
+    resolvedWorkspace = resolveWorkspaceFn(workspace);
+  } catch (error) {
+    return { exitCode: 1, stderr: `notify-human: workspace を解決できません: ${error.message}\n` };
+  }
+  if (workspace && !resolvedWorkspace) {
+    return { exitCode: 1, stderr: 'notify-human: 指定された workspace を解決できません\n' };
+  }
   const resolveRepoFn = deps.resolveRepoFn || resolveRepo;
-  const repoResult = resolveRepoFn({ repo, workspace }, deps.repoDeps);
+  const repoResult = resolveRepoFn({ repo, workspace: resolvedWorkspace || workspace }, deps.repoDeps);
   if (!repoResult || !repoResult.ok) {
     return { exitCode: 1, stderr: `notify-human: ${repoResult?.error || 'リポジトリを解決できません'}\n` };
   }
   const resolveConfigFn = deps.resolveConfigFn || resolveHumanNotificationConfig;
   let config;
   try {
-    config = resolveConfigFn({ workspace, homedir: deps.homedir });
+    config = resolveConfigFn({ workspace: repoResult.workspacePath || resolvedWorkspace, homedir: deps.homedir });
   } catch (error) {
     return { exitCode: 1, stderr: `notify-human: 通知設定を読み込めません: ${error.message}\n` };
   }

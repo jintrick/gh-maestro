@@ -23,6 +23,18 @@ function writeConfig(dir, value) {
   fs.writeFileSync(path.join(dir, '.gh-maestro', 'config.json'), JSON.stringify(value), 'utf8');
 }
 
+function expectNotificationConfigFailure(home, workspace, configPath) {
+  const result = main(['--repo', 'owner/project'], {
+    resolveWorkspaceFn: () => workspace,
+    resolveRepoFn: ({ repo }) => ({ ok: true, repo, workspacePath: null }),
+    homedir: home,
+    spawnSyncFn: () => assert.fail('invalid config must not send a notification'),
+  });
+  assert.equal(result.exitCode, 1);
+  assert.ok(result.stderr.includes(configPath), result.stderr);
+  return result.stderr;
+}
+
 test('human notification config uses defaults and global then workspace overrides', () => {
   withConfigDirs(({ home, workspace }) => {
     writeConfig(home, { humanNotification: { url: 'https://ntfy.sh/global', method: 'PUT' } });
@@ -37,6 +49,30 @@ test('human notification config rejects an invalid method', () => {
   withConfigDirs(({ home, workspace }) => {
     writeConfig(workspace, { humanNotification: { method: 'POST;bad' } });
     assert.equal(resolveHumanNotificationConfig({ homedir: home, workspace }), null);
+  });
+});
+
+test('notification config JSON syntax errors fail with the offending file path', () => {
+  withConfigDirs(({ home, workspace }) => {
+    const configPath = path.join(workspace, '.gh-maestro', 'config.json');
+    fs.writeFileSync(configPath, '{invalid json', 'utf8');
+    assert.match(expectNotificationConfigFailure(home, workspace, configPath), /JSON構文/);
+  });
+});
+
+test('notification config top-level type errors fail with the offending file path', () => {
+  withConfigDirs(({ home, workspace }) => {
+    const configPath = path.join(workspace, '.gh-maestro', 'config.json');
+    fs.writeFileSync(configPath, '[]', 'utf8');
+    assert.match(expectNotificationConfigFailure(home, workspace, configPath), /トップレベル/);
+  });
+});
+
+test('notification config read errors fail with the offending file path', () => {
+  withConfigDirs(({ home, workspace }) => {
+    const configPath = path.join(workspace, '.gh-maestro', 'config.json');
+    fs.mkdirSync(configPath);
+    assert.match(expectNotificationConfigFailure(home, workspace, configPath), /読み取り/);
   });
 });
 
@@ -63,6 +99,26 @@ test('notification sends repository name as one curl data argument', () => {
     '--fail', '--silent', '--show-error', '--request', 'POST',
     '--data-binary', 'owner/project', 'https://ntfy.sh/topic',
   ]);
+});
+
+test('explicit --repo still resolves workspace and reads its notification config', () => {
+  const workspace = path.join('C:', 'isolated', 'workspace');
+  let configWorkspace;
+  const result = main(['--repo', 'owner/project'], {
+    resolveWorkspaceFn: () => workspace,
+    resolveRepoFn: ({ repo, workspace: resolvedWorkspace }) => {
+      assert.equal(repo, 'owner/project');
+      assert.equal(resolvedWorkspace, workspace);
+      return { ok: true, repo, workspacePath: null };
+    },
+    resolveConfigFn: ({ workspace: resolvedWorkspace }) => {
+      configWorkspace = resolvedWorkspace;
+      return { url: 'https://ntfy.sh/topic', method: 'POST' };
+    },
+    spawnSyncFn: () => ({ status: 0, stderr: '' }),
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(configWorkspace, workspace);
 });
 
 test('notification reports curl missing and HTTP/network failures without retrying', () => {

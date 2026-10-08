@@ -779,17 +779,37 @@ function resolveCouncilConfig(opts = {}) {
 function resolveHumanNotificationConfig(opts = {}) {
   const defaultsPath = opts.defaultsPath || resolve(__dirname, '..', 'notification-defaults.json');
   const defaults = readJsonFile(defaultsPath);
-  if (!isPlainObject(defaults) || !isPlainObject(defaults.humanNotification)) return null;
+  if (!isPlainObject(defaults) || !isPlainObject(defaults.humanNotification)) {
+    throw new Error(`通知設定の既定ファイルのトップレベル形式が不正です: ${defaultsPath}`);
+  }
   const homedir = opts.homedir || process.env.HOME || process.env.USERPROFILE || '';
-  const globalConfig = loadConfigFile(resolve(homedir, '.gh-maestro', 'config.json'));
+  const globalConfig = loadHumanNotificationConfigFile(resolve(homedir, '.gh-maestro', 'config.json'));
   const workspaceConfig = opts.workspace
-    ? loadConfigFile(resolve(opts.workspace, '.gh-maestro', 'config.json')) : {};
-  const globalNotification = isPlainObject(globalConfig.humanNotification) ? globalConfig.humanNotification : {};
-  const workspaceNotification = isPlainObject(workspaceConfig.humanNotification) ? workspaceConfig.humanNotification : {};
+    ? loadHumanNotificationConfigFile(resolve(opts.workspace, '.gh-maestro', 'config.json')) : {};
+  const globalNotification = globalConfig.humanNotification ?? {};
+  const workspaceNotification = workspaceConfig.humanNotification ?? {};
   const merged = { ...defaults.humanNotification, ...globalNotification, ...workspaceNotification };
   if (typeof merged.url !== 'string' || !/^https:\/\//i.test(merged.url)
       || typeof merged.method !== 'string' || !/^[A-Z]+$/.test(merged.method)) return null;
   return { url: merged.url, method: merged.method };
+}
+
+function loadHumanNotificationConfigFile(configPath) {
+  if (!existsSync(configPath)) return {};
+  let config;
+  try {
+    config = readJsonFile(configPath);
+  } catch (error) {
+    const failure = error.kind === 'parse' ? 'JSON構文' : '読み取り';
+    throw new Error(`通知設定ファイルの${failure}に失敗しました: ${configPath}: ${error.message}`, { cause: error });
+  }
+  if (!isPlainObject(config)) {
+    throw new Error(`通知設定ファイルのトップレベルはJSONオブジェクトである必要があります: ${configPath}`);
+  }
+  if (config.humanNotification !== undefined && !isPlainObject(config.humanNotification)) {
+    throw new Error(`通知設定 humanNotification がJSONオブジェクトではありません: ${configPath}`);
+  }
+  return config;
 }
 
 module.exports = {
