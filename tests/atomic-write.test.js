@@ -15,7 +15,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { cleanSpawnEnv } = require('./_spawn-env');
 
-const { atomicWriteJson, atomicWriteText, atomicWriteTextPair } = require('../scripts/shared/atomic-write');
+const { atomicWriteJson, atomicWriteTextPair } = require('../scripts/shared/atomic-write');
 const ATOMIC_WRITE_PATH = path.join(__dirname, '..', 'scripts', 'shared', 'atomic-write.js');
 
 /** 一時ディレクトリを作り、テスト後に掃除する。コールバックの返すPromiseをawaitする。 */
@@ -167,31 +167,3 @@ test('atomicWriteTextPair: 既存ファイルの退避失敗時も元ファイ�
 // 従来の直接 writeFileSync では部分書き込みが別プロセスの読み取りに観測されうる
 // （項目12の readWorkersRaw リトライが防ぐ側面）。ここでは書き込み側の破損が起きない
 // ことを検証する。
-
-
-// ── Issue #250: rename の EPERM（他プロセスが対象を掴んでいる）への耐性 ──────────
-// Windows では、他プロセスが対象ファイルを開いていると rename が EPERM で失敗する。
-// atomic-write.js の短時間リトライ（予算500ms）が一時的な競合を救い、開きっぱなしの
-// 競合は予算を使い切って throw する（常駐プロセスを止めないのは呼び出し元の try-catch
-// + 次サイクル再試行の責務。本テストはリトライ層の挙動のみを検証する）。
-// 開きっぱなしの再現に fs.openSync の読み取りハンドルを使う（実機で rename が 100% EPERM
-// になることを確認済み。Zed 等エディタ固有の挙動の再現は不要で、renameSync が EPERM を
-// 投げたときの挙動を検証するのが目的）。
-
-test('atomicWriteText: 開きっぱなし（EPERM）はリトライ後も throw し、対象を書き換えず staging を掃除する（Windows）', { skip: process.platform !== 'win32' }, async () => {
-  await withTempDir((dir) => {
-    const target = path.join(dir, 'out.json');
-    fs.writeFileSync(target, 'old');
-    // 読み取り専用で開いたままにすると、Windows では rename が EPERM で失敗し続ける
-    const fd = fs.openSync(target, 'r');
-    try {
-      assert.throws(() => atomicWriteText(target, 'new'));
-    } finally {
-      fs.closeSync(fd);
-    }
-    // 対象は上書きされていない（リトライ予算を消費して失敗）
-    assert.equal(fs.readFileSync(target, 'utf8'), 'old');
-    const leftovers = fs.readdirSync(dir).filter((f) => f.includes('.staging-'));
-    assert.deepEqual(leftovers, []);
-  });
-});

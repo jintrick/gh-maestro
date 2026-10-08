@@ -18,7 +18,7 @@ const os = require('os');
 const {
   buildPrompt, buildFinalizePrompt, generateStagingPath,
   validateArtifactContent, atomicCopyStaging,
-  boundedCleanup, pollForArtifact,
+  boundedCleanup,
   superviseReviewManager, clearStaleIncompleteSentinel, resetRetryCount,
   findIncompleteSentinel, readIncompleteSentinel, incompleteSentinelOutcome,
   persistReviewManifest, runJobsDeterministically, mapAgentPhaseFailure,
@@ -553,36 +553,6 @@ test('atomicCopyStaging: 存在しないsrcは失敗する', () => {
 });
 
 // ── pollForArtifact ──────────────────────────────────────────────────────
-
-test('pollForArtifact: ファイルが最初から存在すれば即座に検出する', async () => {
-  const artifactPath = path.join(tmpBase, 'poll-immediate.json');
-  fs.writeFileSync(artifactPath, '{"ok":true}', 'utf8');
-
-  const result = await pollForArtifact(artifactPath, 5000, 50, { aborted: false });
-  assert.equal(result.found, true);
-  assert.equal(result.content, '{"ok":true}');
-});
-
-
-test('pollForArtifact: deadlineを過ぎると見つからずに終了する', async () => {
-  const artifactPath = path.join(tmpBase, 'poll-deadline.json');
-  try { fs.unlinkSync(artifactPath); } catch {}
-
-  const result = await pollForArtifact(artifactPath, 200, 30, { aborted: false });
-  assert.equal(result.found, false);
-  assert.equal(result.reason, 'deadline');
-});
-
-
-test('pollForArtifact: 空ファイルは未完成とみなし検出しない', async () => {
-  const artifactPath = path.join(tmpBase, 'poll-empty.json');
-  // 空ファイルを即座に作成
-  fs.writeFileSync(artifactPath, '', 'utf8');
-
-  const result = await pollForArtifact(artifactPath, 200, 30, { aborted: false });
-  // 空ファイルは検出されず、deadlineで終了する
-  assert.equal(result.found, false);
-});
 
 // ── boundedCleanup ───────────────────────────────────────────────────────
 

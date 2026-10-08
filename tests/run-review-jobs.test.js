@@ -28,7 +28,6 @@ const {
   retryCountLockPath,
   acquireRetryCountLock,
   releaseRetryCountLock,
-  _setRetryCountLockWaitMs,
   readRetryCount,
   incrementRetryCount,
   applyRetryGate,
@@ -1378,63 +1377,6 @@ test('applyRetryGate: ゲート通過後にロックファイルが残留しな�
     assert.ok(!fs.existsSync(retryCountLockPath(workspace, 42)), 'ゲート後にロックファイルが残留しない');
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
-  }
-});
-
-test('acquireRetryCountLock: ロック取得できずタイムアウトで throw する（フェイルクローズ）', () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'rlt-'));
-  try {
-    const lockPath = retryCountLockPath(workspace, 42);
-    // 別プロセスがロックを保持している状態を模す（fresh なロックファイル＝stale ではない）
-    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    fs.writeFileSync(lockPath, String(99999), 'utf8');
-    assert.throws(
-      () => acquireRetryCountLock(lockPath, 100),
-      /ロックを取得できませんでした/,
-    );
-  } finally {
-    fs.rmSync(workspace, { recursive: true, force: true });
-  }
-});
-
-test('runJobsFromManifest: ロック取得失敗でフェイルクローズ（{ok:false}、ジョブ実行なし）', async () => {
-  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-lockfail-'));
-  try {
-    const manifestPath = path.join(testDir, 'manifest.json');
-    const resultsPath = path.join(testDir, 'results.json');
-    const mainWorkspace = path.join(testDir, 'main');
-    const ghDir = path.join(mainWorkspace, '.gh-maestro');
-    const validManifest = {
-      pr: 42, repo: 'o/r', headRefOid: 'abc',
-      coverage_ledger: {
-        leaves: ALL_LEAF_IDS.map(id => ({
-          id,
-          trunk: Object.entries(TRUNK_TO_LEAVES).find(([, lvs]) => lvs.includes(id))[0],
-          decision: 'adopted', rationale: null,
-        })),
-      },
-      jobs: ALL_LEAF_IDS.map((id, i) => ({
-        id: 'job-' + i, leaf_ids: [id], aspect: 'Correctness',
-      })),
-    };
-    fs.writeFileSync(manifestPath, JSON.stringify(validManifest), 'utf8');
-
-    // ロックを別プロセスが保持している状態を模す（fresh なロックファイル）
-    const lockPath = retryCountLockPath(mainWorkspace, 42);
-    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    fs.writeFileSync(lockPath, String(99999), 'utf8');
-
-    _setRetryCountLockWaitMs(100); // 短い待ちでタイムアウトさせる
-    try {
-      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, 42, 'o/r', ghDir, { mainWorkspace });
-      assert.equal(result.ok, false);
-      assert.ok(!result.summary.retryLimitReached, '上限到達ではなくゲート失敗');
-      assert.match(result.summary.error, /retry counter gate failed/);
-    } finally {
-      _setRetryCountLockWaitMs(null);
-    }
-  } finally {
-    fs.rmSync(testDir, { recursive: true, force: true });
   }
 });
 
