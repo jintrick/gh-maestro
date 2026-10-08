@@ -656,12 +656,9 @@ test('boundedCleanup: manager.running は所有者と起動時刻が一致する
   assert.ok(fs.existsSync(foreignFile), '別所有者のmanager.runningを残す');
 });
 
-// ── superviseReviewManager: spawn error 即時検出 ─────────────────────────
-// Issue: 非同期spawn失敗（ENOENT等）でerrorイベントが発火しても、監督ループが
-// processExitedを知らず30分deadlineを待ち続けていた。errorハンドラが
-// markProcessDoneでsignal.abortedを設定することで即座に戻ることを検証する。
+// ── superviseReviewManager: setupReviewWorktree 失敗時の記録 ──────────────
 
-test('superviseReviewManager: spawn error時は即座にprocess-exit-no-artifactで戻る（deadlineを待たない）', async () => {
+test('superviseReviewManager: setupReviewWorktree失敗時にsetup-failedで戻りロックを記録して起動予約を解放する', async () => {
   const testDir = path.join(tmpBase, 'sv-error-imm');
   fs.mkdirSync(testDir, { recursive: true });
 
@@ -675,9 +672,6 @@ test('superviseReviewManager: spawn error時は即座にprocess-exit-no-artifact
   const logs = [];
   const log = (msg) => logs.push(msg);
 
-  // 存在しない実行ファイルで spawn する → error イベントが発火
-  // (superviseReviewManager は setupReviewWorktree の前に落ちるが、
-  // その前に ghDir 作成・ロック書き込みまで到達する)
   // 起動側が先に作った予約を、本体がmanager.runningを書いた直後に解放する
   // 順序を模擬する（PR #410の二重writer回帰）。
   const startupToken = 'startup-token-for-test';
@@ -690,7 +684,6 @@ test('superviseReviewManager: spawn error時は即座にprocess-exit-no-artifact
   const previousStartupToken = process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN;
   process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN = startupToken;
 
-  const start = Date.now();
   let result;
   try {
     result = await superviseReviewManager({
@@ -707,10 +700,6 @@ test('superviseReviewManager: spawn error時は即座にprocess-exit-no-artifact
       process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN = previousStartupToken;
     }
   }
-  const elapsed = Date.now() - start;
-
-  // 30分ではなく数秒以内に戻る
-  assert.ok(elapsed < 5000, `should return quickly, not after deadline: ${elapsed}ms`);
   // エラー結果であること
   assert.equal(result.outcome, 'setup-failed');
   assert.notEqual(result.exitCode, 0);
