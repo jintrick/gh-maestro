@@ -54,6 +54,8 @@ Arguments:
      読んで解決したHEADに対するテスト結果を申告。必須層の結果が欠落・unavailable
      の場合は申告を失敗として返す。同じ成果物に lint 実行記録が無い場合も、
      古い記録として再実行を促し申告を失敗させる。lint の指摘自体は停止条件にしない。
+     型チェック記録も必須とし、欠落時は再実行を促す。型チェックの失敗・起動不能・未定義は
+     記録して申告し、停止条件にしない。
      文書だけの変更は未実行の層だけを許容し、存在する成果物の照合は行う。
      テスト層未宣言の場合は必須層を要求しない
 
@@ -360,6 +362,7 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
     requiredLayers: requiredLayersResult.requiredLayers,
     allowMissingRequiredLayers: requiredLayersResult.allowMissingRequiredLayers,
     requireLintResult: requiredLayersResult.requiredLayers.length > 0,
+    requireTypecheckResult: requiredLayersResult.requiredLayers.length > 0,
   }, declareDeps);
   if (!declResult.ok) {
     return { exitCode: 3, stdout: '', stderr: `テスト結果の申告に失敗しました: ${declResult.error}` };

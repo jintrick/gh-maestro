@@ -33,6 +33,7 @@ Output (stdout):
   provenance: test-runner / unknown / none
   scope: full / partial / aggregate / unknown / none
   lint: complete/pass, complete/findings (with findingCount), unavailable, or missing
+  typecheck: complete/pass, complete/fail (with exitCode), unavailable, undefined, or missing
   aggregate scope includes layers (with failedTests and otherFailedCount on failures), allLayersPresent, and allLayersComplete
   exit 0 = 成功、exit 1 = 引数・GitHubアクセス・応答解釈のエラー`;
 
@@ -145,6 +146,7 @@ function main(argv, deps = {}) {
     provenance: result.provenance,
     scope: result.scope,
     lint: result.lint,
+    typecheck: result.typecheck || { status: 'missing', reason: 'typecheck-result-missing' },
     ...(result.declaredSha !== undefined ? { declaredSha: result.declaredSha } : {}),
     ...(result.headSha !== undefined ? { headSha: result.headSha } : {}),
     ...(result.fail !== undefined ? { fail: result.fail } : {}),

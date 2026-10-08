@@ -49,6 +49,34 @@ test('buildCommentBody: ランナー由来の full 結果だけを値付きで�
   assert.ok(body.includes('- **実行範囲**: `full`'));
 });
 
+test('buildCommentBody: typecheck失敗をlint行を保って申告する', () => {
+  const body = buildCommentBody({
+    commit: SHA,
+    testResult: {
+      provenance: 'test-runner', scope: 'aggregate', outcome: 'pass',
+      layers: { full: { status: 'complete', outcome: 'pass', scope: 'full', command: 'npm test' } },
+      lint: { status: 'complete', outcome: 'pass', findingCount: 0 },
+      typecheck: { status: 'complete', outcome: 'fail', exitCode: 2 },
+    },
+  });
+  assert.match(body, /- \*\*lint\*\*: pass \(findings: 0\)/);
+  assert.match(body, /- \*\*typecheck\*\*: fail \(exit code: 2\)/);
+});
+
+test('declareTestResult: typecheck失敗は記録して申告し、必須記録の存在だけを検証する', () => {
+  const testResult = {
+    provenance: 'test-runner', scope: 'aggregate',
+    layers: { full: { layer: 'full', scope: 'full', status: 'complete', outcome: 'pass', testedContentHash: CONTENT_HASH } },
+    lint: { status: 'complete', outcome: 'pass', findingCount: 0, command: 'npm run lint', recordedAt: 'now', testedContentHash: CONTENT_HASH },
+    typecheck: { status: 'complete', outcome: 'fail', exitCode: 2, command: 'npm run typecheck', recordedAt: 'now', testedContentHash: CONTENT_HASH },
+  };
+  const result = declareTestResult(
+    { pr: '42', repo: 'owner/repo', headSha: SHA, requiredLayers: ['full'], requireTypecheckResult: true },
+    baseDeps({ readTestResultFn: () => ({ ok: true, result: testResult }) }),
+  );
+  assert.equal(result.ok, true);
+});
+
 test('buildCommentBody: fail > 0 は runner の値から fail として出力する', () => {
   const body = buildCommentBody({
     commit: SHA,
@@ -395,6 +423,20 @@ test('declareTestResult: lint記録のない旧形式成果物は古いものと
   assert.match(result.error, /古い/);
   assert.match(result.error, /run-tests\.js を再実行/);
   assert.match(result.error, /lint-result-missing/);
+});
+
+test('declareTestResult: typecheck記録のない旧形式成果物は再実行を促す', () => {
+  const result = declareTestResult(
+    { pr: '42', repo: 'owner/repo', headSha: SHA, requiredLayers: ['full'], requireTypecheckResult: true },
+    baseDeps({ readTestResultFn: () => ({ ok: true, result: {
+      provenance: 'test-runner', scope: 'aggregate',
+      layers: { full: { layer: 'full', scope: 'full', status: 'complete', outcome: 'pass', testedContentHash: CONTENT_HASH } },
+      lint: { status: 'complete', outcome: 'pass', findingCount: 0, testedContentHash: CONTENT_HASH },
+    } }) }),
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /typecheck-result-missing/);
+  assert.match(result.error, /run-tests\.js を再実行/);
 });
 
 test('declareTestResult: JSON破損と型不正は旧形式とは別の失敗種別で拒否する', () => {

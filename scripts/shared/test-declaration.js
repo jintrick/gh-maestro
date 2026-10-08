@@ -24,6 +24,10 @@ function missingLintResult(reason = 'lint-result-missing') {
   };
 }
 
+function missingTypecheckResult(reason = 'typecheck-result-missing') {
+  return { status: 'missing', reason };
+}
+
 function matchCommit(body) {
   const match = body.match(/-\s+\*\*対象コミット\*\*:\s*`([0-9a-fA-F]{7,40})`/);
   return match ? match[1] : null;
@@ -50,15 +54,24 @@ function matchInlineBacktickField(body, label) {
   return match ? match[1].trim() : undefined;
 }
 
-function parseLintDeclaration(body) {
-  const line = body.split(/\r?\n/).find(line => /^\s*-\s+\*\*lint\*\*:/i.test(line));
-  if (!line) return missingLintResult();
-
-  const value = line.replace(/^\s*-\s+\*\*lint\*\*:\s*/i, '').trim();
-  const statusMatch = value.match(/^(pass|findings|unavailable|missing|unknown)\b/i);
-  const status = statusMatch ? statusMatch[1].toLowerCase() : 'unavailable';
+function parseStaticCheckDeclaration(body, name) {
+  const marker = new RegExp(`^\\s*-\\s+\\*\\*${name}\\*\\*:`, 'i');
+  const line = body.split(/\r?\n/).find(candidate => marker.test(candidate));
+  if (!line) return null;
+  const value = line.replace(marker, '').trim();
+  const statusMatch = value.match(/^(pass|fail|findings|unavailable|undefined|missing|unknown)\b/i);
   const reasonMatch = value.match(/,\s*reason\s*:\s*(.+)$/i);
-  const reason = reasonMatch ? reasonMatch[1].trim() : undefined;
+  return {
+    value,
+    status: statusMatch ? statusMatch[1].toLowerCase() : 'unavailable',
+    ...(reasonMatch ? { reason: reasonMatch[1].trim() } : {}),
+  };
+}
+
+function parseLintDeclaration(body) {
+  const parsed = parseStaticCheckDeclaration(body, 'lint');
+  if (!parsed) return missingLintResult();
+  const { value, status, reason } = parsed;
 
   if (status === 'pass') {
     const findingCount = matchCount(value, 'findings');
@@ -83,6 +96,21 @@ function parseLintDeclaration(body) {
     status: 'unavailable',
     ...(reason ? { reason } : { reason: 'lint-result-unavailable' }),
   };
+}
+
+function parseTypecheckDeclaration(body) {
+  const parsed = parseStaticCheckDeclaration(body, 'typecheck');
+  if (!parsed) return missingTypecheckResult();
+  const { value, reason } = parsed;
+  const normalized = parsed.status;
+  if (!/^(?:pass|fail|unavailable|undefined|missing)$/.test(normalized)) return { status: 'unavailable', reason: 'typecheck-result-invalid' };
+  if (normalized === 'undefined') return { status: 'undefined' };
+  if (normalized === 'missing') return missingTypecheckResult(reason || 'typecheck-result-missing');
+  if (normalized === 'pass' || normalized === 'fail') {
+    const exitCode = (value.match(/\(exit code:\s*(\d+)\)/i) || [])[1];
+    return { status: 'complete', outcome: normalized, ...(exitCode !== undefined ? { exitCode: Number(exitCode) } : {}) };
+  }
+  return { status: 'unavailable', ...(reason ? { reason: reason.trim() } : { reason: 'typecheck-result-unavailable' }) };
 }
 
 function parseAggregateLayerLine(line, provenance) {
@@ -178,6 +206,8 @@ function extractV2Declaration(body) {
   const resultLabel = resultMatch[1].toLowerCase();
   const aggregate = scope === AGGREGATE_SCOPE ? parseAggregateLayers(body, provenance) : null;
   const lint = parseLintDeclaration(body);
+  const typecheckLine = body.split(/\r?\n/).some(line => /^\s*-\s+\*\*typecheck\*\*:/i.test(line));
+  const typecheck = typecheckLine ? parseTypecheckDeclaration(body) : undefined;
 
   const hasCounts = fail !== undefined && pass !== undefined;
   const hasPartialCounts = (fail === undefined) !== (pass === undefined);
@@ -198,6 +228,7 @@ function extractV2Declaration(body) {
       provenance: 'unknown',
       scope: 'unknown',
       lint,
+      ...(typecheck ? { typecheck } : {}),
       ...(aggregate ? aggregate : {}),
       fail: undefined,
       pass: undefined,
@@ -210,6 +241,7 @@ function extractV2Declaration(body) {
     provenance,
     scope,
     lint,
+    ...(typecheck ? { typecheck } : {}),
     outcome: resultLabel,
     ...(hasCounts ? { fail, pass } : {}),
     ...(tests !== undefined ? { tests } : {}),
@@ -282,6 +314,10 @@ function declarationLint(declaration) {
   return { lint: declaration.lint };
 }
 
+function declarationTypecheck(declaration) {
+  return declaration && declaration.typecheck ? { typecheck: declaration.typecheck } : {};
+}
+
 /**
  * テスト申告の事実とPRのheadShaを突き合わせてステータスを判定する純粋関数。
  * provenance/scope はステータスとは独立した事実として常に返す。したがって、旧 v1 の
@@ -299,7 +335,7 @@ function evaluateTestDeclaration(declaration, headSha) {
       headSha: cleanHead || undefined,
       provenance: 'none',
       scope: 'none',
-      lint: missingLintResult(),
+        lint: missingLintResult(),
     };
   }
 
@@ -311,6 +347,7 @@ function evaluateTestDeclaration(declaration, headSha) {
     ...counts,
     ...metadata,
     ...declarationLint(declaration),
+    ...declarationTypecheck(declaration),
     ...declarationLayers(declaration),
   };
 

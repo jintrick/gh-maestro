@@ -137,6 +137,22 @@ test('共有ルール: v2 full の provenance/scope と件数を抽出する', (
   });
 });
 
+test('main: 旧申告コメントのlintを保ち、typecheckはmissingとしてJSONへ返す', () => {
+  const result = main(['--pr', '42', '--repo', 'owner/repo'], {
+    ghPrViewFn: () => prView([prComment(fullDeclarationBody())]),
+  });
+  const parsed = JSON.parse(result.stdout);
+  assert.deepEqual(parsed.lint, { status: 'complete', outcome: 'pass', findingCount: 0 });
+  assert.deepEqual(parsed.typecheck, { status: 'missing', reason: 'typecheck-result-missing' });
+});
+
+test('共有ルール: typecheck失敗は明示されてもGREEN/REDをテスト結果だけで判定する', () => {
+  const declaration = extractTestDeclaration(`${fullDeclarationBody()}\n- **typecheck**: fail (exit code: 2)`);
+  const evaluation = evaluateTestDeclaration(declaration, SHA);
+  assert.equal(evaluation.status, 'GREEN');
+  assert.deepEqual(evaluation.typecheck, { status: 'complete', outcome: 'fail', exitCode: 2 });
+});
+
 test('共有ルール: aggregate は層別結果と全層充足性を抽出する', () => {
   const declaration = extractTestDeclaration(aggregateDeclarationBody());
   assert.deepEqual(declaration, {
@@ -453,6 +469,7 @@ test('main: 成功時JSONに provenance/scope を含め、1行で返す', () => 
     provenance: 'test-runner',
     scope: 'full',
     lint: { status: 'complete', outcome: 'pass', findingCount: 0 },
+    typecheck: { status: 'missing', reason: 'typecheck-result-missing' },
     declaredSha: 'a1b2c3d',
     headSha: SHA,
     fail: 0,

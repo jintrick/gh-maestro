@@ -15,6 +15,7 @@ const {
   invalidateTestResultArtifact,
   validateTestResultArtifact,
   validateLintResult,
+  validateStaticCheckResult,
   writeTestResultArtifact,
   writeTestResultLayer,
   testResultLockPath,
@@ -50,6 +51,16 @@ test('validateLintResult: findingsはcompleteなlint実行結果として受理�
   assert.equal(validateLintResult(lint).ok, true);
   assert.equal(validateLintResult({ ...lint, findingCount: -1 }).ok, false);
   assert.equal(validateTestResultArtifact(completeArtifact()).ok, true, 'lintなしの旧形式は妥当な成果物として読み続ける');
+});
+
+test('validateStaticCheckResult: 成功・失敗・起動不能・未定義を区別する', () => {
+  const base = { command: 'npm run typecheck', recordedAt: '2026-10-08T00:00:00.000Z' };
+  assert.equal(validateStaticCheckResult({ ...base, status: 'complete', outcome: 'pass', exitCode: 0, testedContentHash: 'a'.repeat(64) }).ok, true);
+  assert.equal(validateStaticCheckResult({ ...base, status: 'complete', outcome: 'fail', exitCode: 2, testedContentHash: 'a'.repeat(64) }).ok, true);
+  assert.equal(validateStaticCheckResult({ ...base, status: 'unavailable', reason: 'spawn-failed', exitCode: null }).ok, true);
+  assert.equal(validateStaticCheckResult({ ...base, status: 'undefined' }).ok, true);
+  assert.equal(validateStaticCheckResult({ ...base, status: 'complete', outcome: 'fail', exitCode: null }).ok, false);
+  assert.equal(validateStaticCheckResult({ ...base, status: 'complete', outcome: 'findings', findingCount: 1, exitCode: 1, testedContentHash: 'a'.repeat(64) }).ok, false, 'typecheck は lint 専用の findings outcome を受理しない');
 });
 
 function completeArtifact(overrides = {}) {
@@ -427,4 +438,57 @@ test('writeTestResultLayer: 集約ロック取得失敗は既存成果物を変�
     testedHead: '0123456789abcdef0123456789abcdef01234567',
     testedContentHash: 'a'.repeat(64),
   }), /lock is unavailable/);
+});
+
+test('writeTestResultLayer: typecheck記録をlint互換フィールドと共通checksへ同時保存する', () => {
+  const worktree = tempWorktree();
+  const hash = 'a'.repeat(64);
+  const lint = {
+    status: 'complete', outcome: 'pass', findingCount: 0,
+    command: 'npm run lint', recordedAt: '2026-10-08T00:00:00.000Z', testedContentHash: hash,
+  };
+  const typecheck = {
+    status: 'complete', outcome: 'fail', exitCode: 2,
+    command: 'npm run typecheck', recordedAt: '2026-10-08T00:00:00.000Z', testedContentHash: hash,
+  };
+  writeTestResultLayer(worktree, {
+    layer: 'full', scope: 'full', status: 'complete', outcome: 'pass',
+    command: 'npm test', recordedAt: '2026-10-08T00:00:00.000Z',
+    testedHead: '0123456789abcdef0123456789abcdef01234567', testedContentHash: hash,
+  }, { lint, typecheck });
+  const result = readTestResultArtifact(worktree);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.result.lint, lint);
+  assert.deepEqual(result.result.checks.typecheck, typecheck);
+  assert.deepEqual(result.result.typecheck, typecheck);
+});
+
+test('writeTestResultLayer: 指紋なし unavailable 層の追加後も lint と typecheck の記録を保持する', () => {
+  const worktree = tempWorktree();
+  const hash = 'a'.repeat(64);
+  const lint = {
+    status: 'complete', outcome: 'pass', findingCount: 0,
+    command: 'npm run lint', recordedAt: '2026-10-08T00:00:00.000Z', testedContentHash: hash,
+  };
+  const typecheck = {
+    status: 'complete', outcome: 'pass', exitCode: 0,
+    command: 'npm run typecheck', recordedAt: '2026-10-08T00:00:00.000Z', testedContentHash: hash,
+  };
+  writeTestResultLayer(worktree, {
+    layer: 'full', scope: 'full', status: 'complete', outcome: 'pass',
+    command: 'npm test', recordedAt: '2026-10-08T00:00:00.000Z',
+    testedHead: '0123456789abcdef0123456789abcdef01234567', testedContentHash: hash,
+  }, { lint, typecheck });
+  writeTestResultLayer(worktree, {
+    layer: 'slow', scope: 'partial', status: 'unavailable',
+    command: 'npm run test:slow', recordedAt: '2026-10-08T00:01:00.000Z',
+    testedHead: 'abcdefabcdefabcdefabcdefabcdefabcdefabcd',
+    executor: 'poll-pr', reason: 'slow-result-missing',
+  });
+
+  const result = readTestResultArtifact(worktree);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.result.lint, lint);
+  assert.deepEqual(result.result.checks.typecheck, typecheck);
+  assert.deepEqual(result.result.typecheck, typecheck);
 });

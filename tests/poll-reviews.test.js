@@ -130,11 +130,11 @@ test('formatTestStatusEvent: provenance/scope をTEST_STATUS通知へ含める',
       provenance: 'test-runner',
       scope: 'full',
     }),
-    'TEST_STATUS:GREEN:a1b2c3d:a1b2c3d4e5f6:test-runner:full:lint=missing',
+    'TEST_STATUS:GREEN:a1b2c3d:a1b2c3d4e5f6:test-runner:full:lint=missing:typecheck=missing',
   );
   assert.equal(
     formatTestStatusEvent({ status: 'NONE', provenance: 'unknown', scope: 'unknown' }),
-    'TEST_STATUS:NONE:none:none:unknown:unknown:lint=missing',
+    'TEST_STATUS:NONE:none:none:unknown:unknown:lint=missing:typecheck=missing',
   );
   const aggregateEvaluation = evaluateTestDeclaration(
     extractTestDeclaration(aggregateDeclarationBody()),
@@ -142,7 +142,7 @@ test('formatTestStatusEvent: provenance/scope をTEST_STATUS通知へ含める',
   );
   assert.equal(
     formatTestStatusEvent(aggregateEvaluation),
-    'TEST_STATUS:GREEN:a1b2c3d4e5f6:a1b2c3d4e5f6:test-runner:aggregate:lint=complete/pass',
+    'TEST_STATUS:GREEN:a1b2c3d4e5f6:a1b2c3d4e5f6:test-runner:aggregate:lint=complete/pass:typecheck=missing',
   );
 });
 
@@ -161,7 +161,21 @@ test('formatTestStatusEvent: lintの4状態を既存TEST_STATUSへ含める', ()
       provenance: 'test-runner',
       scope: 'aggregate',
       lint,
-    }), new RegExp(`${token.replace(/[()]/g, '\\$&')}$`));
+    }), new RegExp(`${token.replace(/[()]/g, '\\$&')}:typecheck=missing$`));
+  }
+});
+
+test('formatTestStatusEvent: typecheck状態を末尾へ足し、テスト状態とは独立させる', () => {
+  const base = { status: 'GREEN', declaredSha: 'abc1234', headSha: 'abc1234', provenance: 'test-runner', scope: 'full' };
+  for (const [typecheck, token] of [
+    [{ status: 'complete', outcome: 'pass', exitCode: 0 }, 'complete/pass(0)'],
+    [{ status: 'complete', outcome: 'fail', exitCode: 2 }, 'complete/fail(2)'],
+    [{ status: 'unavailable', reason: 'spawn-failed' }, 'unavailable/spawn-failed'],
+    [{ status: 'undefined' }, 'undefined'],
+    [undefined, 'missing'],
+  ]) {
+    assert.ok(formatTestStatusEvent({ ...base, typecheck }).endsWith(`:typecheck=${token}`));
+    assert.equal(formatTestStatusEvent({ ...base, typecheck }).split(':')[1], 'GREEN');
   }
 });
 
@@ -193,7 +207,7 @@ test('extractTestDeclaration: findings件数の欠落・不正・安全整数超
     });
     assert.equal(
       formatTestStatusEvent(evaluateTestDeclaration(declaration, 'a1b2c3d4e5')),
-      'TEST_STATUS:GREEN:a1b2c3d4e5:a1b2c3d4e5:test-runner:full:lint=complete/findings(unknown)',
+      'TEST_STATUS:GREEN:a1b2c3d4e5:a1b2c3d4e5:test-runner:full:lint=complete/findings(unknown):typecheck=missing',
     );
   }
 });
@@ -232,7 +246,7 @@ test('poll-reviews: テスト名に fail: 0 等の文字列が含まれていて
   assert.deepEqual(evaluation.layers.full.failedTests, ['check fail: 0 and pass: 99']);
   assert.equal(
     formatTestStatusEvent(evaluation),
-    'TEST_STATUS:RED:a1b2c3d4e5f6:a1b2c3d4e5f6:test-runner:aggregate:lint=complete/pass',
+    'TEST_STATUS:RED:a1b2c3d4e5f6:a1b2c3d4e5f6:test-runner:aggregate:lint=complete/pass:typecheck=missing',
   );
 });
 
@@ -505,7 +519,7 @@ test('runPollReviews: noReviewEvents=true のとき inline comments と formal r
   assert.ok(calledApis.some(cmd => cmd.includes('pr view 100') && cmd.includes('--json comments')));
 
   // TEST_STATUS が出力されていること
-  assert.ok(stdoutLines.some(line => line.includes('TEST_STATUS:GREEN:a1b2c3d4e5:a1b2c3d4e5:test-runner:full:lint=complete/pass')));
+  assert.ok(stdoutLines.some(line => line.includes('TEST_STATUS:GREEN:a1b2c3d4e5:a1b2c3d4e5:test-runner:full:lint=complete/pass:typecheck=missing')));
   // REVIEW_COMMENT や PR_REVIEW が出力されていないこと
   assert.ok(!stdoutLines.some(line => line.includes('REVIEW_COMMENT')));
   assert.ok(!stdoutLines.some(line => line.includes('PR_REVIEW')));

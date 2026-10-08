@@ -223,14 +223,12 @@ function writeAggregateResult(workspace, {
         skipped: 0,
         todo: 0,
         testedContentHash: contentHash,
-      }, {
-      status: 'complete',
-       outcome: lintOutcome,
-       findingCount: lintFindingCount,
-      command: 'npm run lint',
-      recordedAt: '2026-08-29T00:00:00.000Z',
-      testedHead: SHA,
-      testedContentHash: contentHash,
+  }, {
+      lint: {
+        status: 'complete', outcome: lintOutcome, findingCount: lintFindingCount,
+        command: 'npm run lint', recordedAt: '2026-08-29T00:00:00.000Z', testedHead: SHA, testedContentHash: contentHash,
+      },
+      typecheck: { status: 'undefined', command: 'npm run typecheck', recordedAt: '2026-08-29T00:00:00.000Z', testedHead: SHA, testedContentHash: contentHash },
   });
 }
 

@@ -110,6 +110,7 @@ function unknownTestResult(reason) {
     scope: 'unknown',
     reason: normalizedReason,
     lint,
+    typecheck: { status: 'missing', reason: 'typecheck-result-missing' },
   };
 }
 
@@ -118,13 +119,6 @@ function aggregateLayerStatus(layer) {
   if (layer.outcome === 'pass' || layer.outcome === 'fail') return layer.outcome;
   if (Number.isSafeInteger(layer.fail)) return layer.fail === 0 ? 'pass' : 'fail';
   return 'unknown';
-}
-
-function aggregateLintStatus(lint) {
-  if (!lint || lint.status === 'missing') return 'missing';
-  if (lint.status !== 'complete') return 'unavailable';
-  if (lint.outcome === 'pass' || lint.outcome === 'findings') return lint.outcome;
-  return 'unavailable';
 }
 
 function aggregateResultForCommit(result, commitSha, commitContentHash) {
@@ -146,6 +140,14 @@ function aggregateResultForCommit(result, commitSha, commitContentHash) {
   const checkedLint = lint
     ? (lintContentMatches ? lint : { ...lint, status: 'unavailable', reason: 'content-mismatch' })
     : { status: 'missing', reason: 'lint-result-missing' };
+  const typecheck = result.typecheck;
+  const typecheckContentMatches = typecheck
+    && typeof typecheck.testedContentHash === 'string' && typecheck.testedContentHash === commitContentHash;
+  const checkedTypecheck = !typecheck
+    ? { status: 'missing', reason: 'typecheck-result-missing' }
+    : (typecheckContentMatches
+      ? typecheck
+      : { ...typecheck, status: 'unavailable', reason: 'content-mismatch' });
   const statuses = Object.values(layers).map(aggregateLayerStatus);
   const outcome = statuses.includes('fail') ? 'fail'
     : (statuses.length > 0 && statuses.every(status => status === 'pass') ? 'pass' : undefined);
@@ -153,6 +155,7 @@ function aggregateResultForCommit(result, commitSha, commitContentHash) {
     ...result,
     layers,
     lint: checkedLint,
+    typecheck: checkedTypecheck,
     ...(outcome ? { outcome } : {}),
   };
 }
@@ -182,6 +185,31 @@ function requiredLintError(testResult, artifactRead, requireLintResult) {
     return `lint結果を利用できません。run-tests.js を再実行してから申告してください (${reason})`;
   }
   return null;
+}
+
+function requiredTypecheckError(testResult, artifactRead, requireTypecheckResult) {
+  if (!requireTypecheckResult) return null;
+  if (!artifactRead || !artifactRead.ok || !testResult || testResult.scope !== 'aggregate' || !testResult.typecheck) {
+    return '型チェック結果がない古いテスト成果物です。run-tests.js を再実行してから申告してください (typecheck-result-missing)';
+  }
+  if (testResult.typecheck.status === 'missing') {
+    return '型チェック結果がない古いテスト成果物です。run-tests.js を再実行してから申告してください (typecheck-result-missing)';
+  }
+  if (testResult.typecheck.status === 'unavailable' && testResult.typecheck.reason === 'content-mismatch') {
+    return '型チェック結果が対象HEADと一致しません。run-tests.js を再実行してから申告してください (content-mismatch)';
+  }
+  return null;
+}
+
+function staticCheckLabel(result, kind) {
+  if (!result || result.status === 'missing') return 'missing';
+  if (result.status === 'undefined') return 'undefined';
+  if (result.status === 'unavailable') return `unavailable${result.reason ? `, reason: ${result.reason}` : ''}`;
+  if (kind === 'lint') {
+    const status = result.outcome === 'findings' ? 'findings' : result.outcome === 'pass' ? 'pass' : 'unavailable';
+    return `${status}${Number.isSafeInteger(result.findingCount) ? ` (findings: ${result.findingCount})` : ''}`;
+  }
+  return `${result.outcome === 'pass' ? 'pass' : 'fail'}${Number.isSafeInteger(result.exitCode) ? ` (exit code: ${result.exitCode})` : ''}`;
 }
 
 /**
@@ -245,7 +273,8 @@ function buildCommentBody({ commit, testResult }) {
       `- **結果**: ${outcome}`,
       '- **実行元**: `test-runner`',
       '- **実行範囲**: `aggregate`',
-      `- **lint**: ${aggregateLintStatus(testResult.lint)}${Number.isSafeInteger(testResult.lint && testResult.lint.findingCount) ? ` (findings: ${testResult.lint.findingCount})` : ''}${testResult.lint && testResult.lint.reason ? `, reason: ${testResult.lint.reason}` : ''}`,
+      `- **lint**: ${staticCheckLabel(testResult.lint, 'lint')}`,
+      `- **typecheck**: ${staticCheckLabel(testResult.typecheck, 'typecheck')}`,
       '- **層別結果**:',
     ];
     for (const [name, layer] of layers) {
@@ -292,12 +321,14 @@ function buildCommentBody({ commit, testResult }) {
     }
     lines.push(`- **実行元**: \`${testResult.provenance}\``);
     lines.push(`- **実行範囲**: \`${testResult.scope}\``);
-    lines.push(`- **lint**: ${aggregateLintStatus(testResult.lint)}${Number.isSafeInteger(testResult.lint && testResult.lint.findingCount) ? ` (findings: ${testResult.lint.findingCount})` : ''}${testResult.lint && testResult.lint.reason ? `, reason: ${testResult.lint.reason}` : ''}`);
+    lines.push(`- **lint**: ${staticCheckLabel(testResult.lint, 'lint')}`);
+    lines.push(`- **typecheck**: ${staticCheckLabel(testResult.typecheck, 'typecheck')}`);
   } else {
     lines.push('- **結果**: unknown');
     lines.push('- **実行元**: `unknown`');
     lines.push('- **実行範囲**: `unknown`');
-    lines.push(`- **lint**: ${aggregateLintStatus(testResult && testResult.lint)}${testResult && testResult.lint && testResult.lint.reason ? `, reason: ${testResult.lint.reason}` : ''}`);
+    lines.push(`- **lint**: ${staticCheckLabel(testResult && testResult.lint, 'lint')}`);
+    lines.push(`- **typecheck**: ${staticCheckLabel(testResult && testResult.typecheck, 'typecheck')}`);
     lines.push(`- **実行記録**: unavailable (${publicTestReason(testResult && testResult.reason)})`);
   }
 
@@ -331,6 +362,7 @@ function declareTestResult(params = {}, deps = {}) {
     requiredLayers = [],
     allowMissingRequiredLayers = false,
     requireLintResult = false,
+    requireTypecheckResult = false,
   } = params;
   const {
     ghRepoViewFn,
@@ -406,6 +438,7 @@ function declareTestResult(params = {}, deps = {}) {
   }
 
   const lintError = requiredLintError(testResult, artifactRead, requireLintResult);
+  const typecheckError = requiredTypecheckError(testResult, artifactRead, requireTypecheckResult);
   if (lintError && artifactRead && !artifactRead.ok
       && ['invalid-json', 'invalid-artifact'].includes(artifactRead.reason)) {
     return { ok: false, error: lintError };
@@ -420,6 +453,7 @@ function declareTestResult(params = {}, deps = {}) {
   }
 
   if (lintError) return { ok: false, error: lintError };
+  if (typecheckError) return { ok: false, error: typecheckError };
 
   // 2. リポジトリ特定
   const repoResult = resolveRepo({ repo, workspace }, { ghRepoViewFn });
@@ -504,9 +538,10 @@ module.exports = {
   USAGE,
   SPEC,
   buildCommentBody,
-  aggregateLintStatus,
+  staticCheckLabel,
   aggregateResultForCommit,
   requiredLintError,
+  requiredTypecheckError,
   missingRequiredLayers,
   declareTestResult,
   main,

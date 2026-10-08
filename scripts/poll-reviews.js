@@ -48,8 +48,8 @@ Output (stdout):
   PR_COMMENT:<user>:<body>                    PR 全体コメント
   PR_REVIEW:<user>:<state>:<body>             正式レビュー提出（APPROVED/CHANGES_REQUESTED/COMMENTED）
   PR_PUSH:<sha>                               新しいコミットが push された
-  TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>:lint=<state>
-                                              テスト申告状態・実行記録・lint状態
+  TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>:lint=<state>:typecheck=<state>
+                                              テスト申告状態・実行記録・lint/型チェック状態
   PR_MERGED:<PR>                              マージ完了（このとき終了する）
   PR_CLOSED:<PR>                              却下・キャンセルでクローズ（このとき終了する）
   POLL_ERROR:<detail>                         GitHubアクセスが失敗し始めた（遷移時のみ。再試行は継続）
@@ -135,11 +135,11 @@ function reviewTerminalEvent(state, pr) {
 /**
  * テスト申告の評価を、orchestrator が解釈できる固定形式の通知へ変換する。
  * provenance/scope を status と同じイベントに含め、v1/unknown と v2 full/partial/aggregate を
- * 通知だけでも区別できるようにする。lint状態も同じイベントへ含め、aggregate の層別事実は
+ * 通知だけでも区別できるようにする。lint/型チェック状態も同じイベントへ含め、aggregate の層別事実は
  * query-test-status.js で照会する。lintの指摘・利用不能・欠落はテスト状態の停止条件ではないが、
  * 通知から状態を欠落させない。
  *
- * @param {{status?:string, declaredSha?:string, headSha?:string, provenance?:string, scope?:string, lint?:object, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}} evaluation
+ * @param {{status?:string, declaredSha?:string, headSha?:string, provenance?:string, scope?:string, lint?:object, typecheck?:object, layers?:object, allLayersPresent?:boolean, allLayersComplete?:boolean}} evaluation
  * @returns {string}
  */
 function formatTestStatusEvent(evaluation = {}) {
@@ -158,6 +158,16 @@ function formatTestStatusEvent(evaluation = {}) {
       : 'lint-result-unavailable';
     lintToken = `unavailable/${reason}`;
   }
+  const typecheck = evaluation.typecheck;
+  let typecheckToken = 'missing';
+  if (typecheck && typecheck.status === 'undefined') typecheckToken = 'undefined';
+  else if (typecheck && typecheck.status === 'complete') {
+    typecheckToken = `${typecheck.outcome === 'pass' ? 'complete/pass' : 'complete/fail'}${Number.isSafeInteger(typecheck.exitCode) ? `(${typecheck.exitCode})` : ''}`;
+  } else if (typecheck && typecheck.status === 'unavailable') {
+    const reason = typeof typecheck.reason === 'string' && typecheck.reason.trim()
+      ? typecheck.reason.trim().replace(/[^A-Za-z0-9_-]/g, '_') : 'typecheck-result-unavailable';
+    typecheckToken = `unavailable/${reason}`;
+  }
   return [
     'TEST_STATUS',
     evaluation.status || 'NONE',
@@ -166,6 +176,7 @@ function formatTestStatusEvent(evaluation = {}) {
     evaluation.provenance || 'unknown',
     evaluation.scope || 'unknown',
     `lint=${lintToken}`,
+    `typecheck=${typecheckToken}`,
   ].join(':');
 }
 

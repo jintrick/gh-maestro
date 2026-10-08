@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-// run-tests.js — 宣言されたテスト層とlintの実行、結果成果物の生成を一体化する。
+// run-tests.js — 宣言されたテスト層と静的検査の実行、結果成果物の生成を一体化する。
 //
 // このスクリプト自身が runtime root へ成果物を書き出すため、コーダーが fail/pass を
 // 数えて申告コマンドへ入力する経路はない。子プロセスの終了コードを基本の結果とし、
@@ -9,6 +9,8 @@
 // 読めるテスト件数は付加情報として保存する。
 
 const { spawnSync } = require('./shared/child-process');
+const fs = require('fs');
+const path = require('path');
 const { resolveGitHead } = require('./shared/git-head');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { resolveTestConfig } = require('./shared/resolve-config');
@@ -21,13 +23,15 @@ const {
   parseTapFailures,
   publicTestCommand,
   validateLintResult,
+  validateStaticCheckResult,
   invalidateTestResultArtifact,
   writeTestResultLayer,
 } = require('./shared/test-result');
+const { runNpmScript, npmScriptCommand } = require('./shared/npm-script-check');
 
 const SLOW_TEST_ACTORS = Object.freeze(new Set(['poll-pr', 'run-slow-tests']));
 
-const USAGE = `run-tests.js — 宣言されたテスト層を実行し、結果成果物を生成する
+const USAGE = `run-tests.js — 宣言されたテスト層と対象worktreeの静的検査を実行し、結果成果物を生成する
 
 Usage:
   node run-tests.js [--workspace <path>] --list
@@ -48,8 +52,10 @@ Output:
   --list は status と層ごとの name / scope だけをJSONで出力します。
   --list の exit 0 = 宣言あり、exit 2 = 宣言なし、exit 1 = 解決失敗です。
   宣言されたコマンドの出力をそのまま標準出力/標準エラーへ中継します。
-  テスト結果と毎回側の lint 結果は、storage-layout.js の runtime root に
-  worktree 単位の同じ成果物として保存します。lint の指摘はテストの終了コードを変えません。
+  テスト結果と毎回側の lint 結果を、scope=full では package.json の typecheck 結果も、
+  storage-layout.js の runtime root に worktree 単位の同じ成果物として保存します。
+  typecheck は未定義・成功・失敗・起動不能を区別します。lint の指摘と型チェックの成否は
+  テストの終了コードを変えません。
   テストが失敗しても、終了コードと成果物の生成に成功した場合はその結果を保存します。
   exit 0 = 宣言コマンド成功、exit 1以上 = 宣言コマンド失敗または起動失敗`;
 
@@ -233,36 +239,20 @@ function outputText(value) {
   return value === undefined || value === null ? '' : String(value);
 }
 
-function lintCommand() {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
-}
-
 function runLint({ cwd, env, spawnSyncFn = spawnSync }) {
-  const command = 'npm run lint';
-  let child;
-  try {
-    child = spawnSyncFn(lintCommand(), ['run', '--silent', 'lint'], {
-      cwd,
-      env: { ...env, GH_MAESTRO_LINT_FORMAT: 'json' },
-      encoding: 'utf8',
-      maxBuffer: 16 * 1024 * 1024,
-      // Windowsのnpm.cmdはcmdラッパーのため、spawnSyncのshell:falseでは
-      // EINVALになる環境がある。lint入力は固定argvから組み立てるため、ここだけ
-      // OS標準シェル経由でnpm scriptを起動する。
-      shell: process.platform === 'win32',
-    }) || {};
-  } catch (error) {
+  const execution = runNpmScript({ script: 'lint', cwd, env, spawnSyncFn, envOverrides: { GH_MAESTRO_LINT_FORMAT: 'json' } });
+  const command = execution.command;
+  if (execution.error && execution.status === null) {
     return {
       status: 'unavailable',
       command,
       recordedAt: new Date().toISOString(),
-      reason: `lint-runner-start-failed: ${error.message}`,
+      reason: `lint-runner-start-failed: ${execution.error.message}`,
     };
   }
 
-  const stdout = outputText(child.stdout);
-  const childExitCode = child && Number.isInteger(child.status) && child.status >= 0
-    ? child.status : null;
+  const stdout = execution.stdout;
+  const childExitCode = execution.status;
   let report;
   try {
     report = JSON.parse(stdout);
@@ -271,8 +261,8 @@ function runLint({ cwd, env, spawnSyncFn = spawnSync }) {
       status: 'unavailable',
       command,
       recordedAt: new Date().toISOString(),
-      reason: child.error
-        ? `lint-runner-start-failed: ${child.error.message}`
+      reason: execution.error
+        ? `lint-runner-start-failed: ${execution.error.message}`
         : `lint-output-invalid: ${error.message}`,
     };
   }
@@ -301,6 +291,55 @@ function runLint({ cwd, env, spawnSyncFn = spawnSync }) {
     recordedAt: new Date().toISOString(),
     outcome: findingCount === 0 ? 'pass' : 'findings',
     findingCount,
+  };
+}
+
+function readTypecheckScript(cwd) {
+  let packageJson;
+  try {
+    packageJson = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf8'));
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { status: 'undefined' };
+    return { status: 'unavailable', reason: `typecheck-package-json-unreadable: ${error.message}` };
+  }
+  if (!packageJson || typeof packageJson !== 'object' || Array.isArray(packageJson)) {
+    return { status: 'unavailable', reason: 'typecheck-package-json-invalid' };
+  }
+  if (!packageJson.scripts || typeof packageJson.scripts !== 'object' || Array.isArray(packageJson.scripts)
+      || !Object.prototype.hasOwnProperty.call(packageJson.scripts, 'typecheck')) {
+    return { status: 'undefined' };
+  }
+  if (typeof packageJson.scripts.typecheck !== 'string' || !packageJson.scripts.typecheck.trim()) {
+    return { status: 'unavailable', reason: 'typecheck-script-invalid' };
+  }
+  return { status: 'defined' };
+}
+
+function runTypecheck({ cwd, env, spawnSyncFn = spawnSync, testedHead, testedContentHash }) {
+  const command = npmScriptCommand('typecheck');
+  const recordedAt = new Date().toISOString();
+  const target = {
+    ...(testedHead ? { testedHead } : {}),
+    ...(testedContentHash ? { testedContentHash } : {}),
+  };
+  const definition = readTypecheckScript(cwd);
+  if (definition.status === 'undefined') return { status: 'undefined', command, recordedAt, ...target };
+  if (definition.status === 'unavailable') return { status: 'unavailable', command, recordedAt, reason: definition.reason, exitCode: null, ...target };
+  const execution = runNpmScript({ script: 'typecheck', cwd, env, spawnSyncFn });
+  if (execution.status === null) {
+    return { status: 'unavailable', command, recordedAt, reason: `typecheck-runner-start-failed${execution.error ? `: ${execution.error.message}` : ''}`, exitCode: null, ...target };
+  }
+  if (!testedContentHash) {
+    return { status: 'unavailable', command, recordedAt, reason: 'content-snapshot-failed', exitCode: execution.status, ...target };
+  }
+  return {
+    status: 'complete',
+    command,
+    recordedAt,
+    outcome: execution.status === 0 ? 'pass' : 'fail',
+    exitCode: execution.status,
+    testedHead,
+    testedContentHash,
   };
 }
 
@@ -570,6 +609,18 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
     env,
     spawnSyncFn: lintSpawnSyncFn,
   });
+  const checks = { lint: lintResult };
+  if (selected.scope === 'full') {
+    checks.typecheck = runTypecheck({
+      cwd: executionWorkspace,
+      env,
+      spawnSyncFn: deps.typecheckSpawnSyncFn || spawnSync,
+      testedHead,
+      testedContentHash,
+    });
+    const typecheck = checks.typecheck;
+    writeStderrFn(`typecheck: ${typecheck.status === 'complete' ? typecheck.outcome : typecheck.status}${typecheck.reason ? ` (${typecheck.reason})` : ''}\n`);
+  }
   if (lintResult.status === 'complete') {
     writeStderrFn(`lint: ${lintResult.findingCount} finding(s)\n`);
   } else {
@@ -644,7 +695,12 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
       : lintResult;
     const lintValidation = validateLintResult(validatedLint);
     if (!lintValidation.ok) throw new Error(lintValidation.error);
-    writeArtifactFn(executionWorkspace, artifact, validatedLint);
+    checks.lint = validatedLint;
+    if (checks.typecheck) {
+      const typecheckValidation = validateStaticCheckResult(checks.typecheck, 'typecheck result');
+      if (!typecheckValidation.ok) throw new Error(typecheckValidation.error);
+    }
+    writeArtifactFn(executionWorkspace, artifact, checks);
     artifactWritten = true;
   } catch (error) {
     try {
@@ -723,6 +779,7 @@ module.exports = {
   resolveExecutionWorkspace,
   resolveConfigWorkspace,
   runLint,
+  runTypecheck,
   runTests,
   main,
 };
