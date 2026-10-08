@@ -25,6 +25,14 @@ const FAST_WORKER_CLI_PRELOAD = (() => {
   const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
   const source = [
     "'use strict';",
+    "const fs = require('fs');",
+    'const realReadFileSync = fs.readFileSync;',
+    'fs.readFileSync = (file, ...args) => {',
+    "  if (/^\\/proc\\/\\d+\\/stat$/.test(String(file)) && !process.env.GHM_TEST_WORKER_START_TIME) {",
+    "    throw new Error('test fixture: process start time unavailable');",
+    '  }',
+    '  return realReadFileSync(file, ...args);',
+    '};',
     `const childProcess = require(${JSON.stringify(childProcessPath)});`,
     'const realExecSync = childProcess.execSync;',
     'const isAlive = (pid) => {',
@@ -349,9 +357,9 @@ test('stop-worker: 拒否側: PIDは生存しているが起動時刻が不一�
         'utf8'
       );
 
-      const actualStartTime = getProcessStartTime(parentPid);
-      assert.ok(actualStartTime, '実プロセスの起動時刻を取得できること');
-      const r = run(['mismatch-worker', '--workspace', dir], { [TEST_START_TIME_ENV]: actualStartTime });
+      // 子CLIがOS境界から観測する起動時刻は固定し、テスト準備時のOS応答に依存させない。
+      const observedStartTime = '2026-01-01T00:00:00.000Z';
+      const r = run(['mismatch-worker', '--workspace', dir], { [TEST_START_TIME_ENV]: observedStartTime });
       assert.notEqual(r.status, 0, '同一性不一致時は終了コード1でエラーになること');
       assert.match(r.stderr, /同一性確認に失敗しました/);
 
@@ -363,6 +371,47 @@ test('stop-worker: 拒否側: PIDは生存しているが起動時刻が不一�
       assert.ok(fs.existsSync(worktreeDir), 'worktreeディレクトリが残っていること');
       const workers = JSON.parse(fs.readFileSync(path.join(dir, '.gh-maestro', 'workers.json'), 'utf8'));
       assert.ok('mismatch-worker' in workers, 'workers.jsonにエントリが残っていること');
+    } finally {
+      try { killProcessTree(parentPid); } catch {}
+      try { process.kill(childPid, 'SIGKILL'); } catch {}
+    }
+  });
+});
+
+test('stop-worker: 拒否側: 起動時刻を取得できない場合、実プロセスツリーをkillせずエラー終了する', () => {
+  withTempDir((dir) => {
+    const worktreeDir = path.join(dir, '.gh-maestro', 'worktrees', 'unknown-start-time-worker');
+    fs.mkdirSync(worktreeDir, { recursive: true });
+
+    const { parentPid, childPid } = spawnProcessTree(dir);
+    assert.ok(parentPid > 0);
+    assert.ok(childPid > 0);
+
+    try {
+      fs.writeFileSync(
+        path.join(dir, '.gh-maestro', 'workers.json'),
+        JSON.stringify({
+          'unknown-start-time-worker': {
+            pid: parentPid,
+            startTime: '2025-01-01T00:00:00.000Z',
+            issue: 21,
+            skill: 'gh-maestro-coder',
+          },
+        }),
+        'utf8'
+      );
+
+      // envを渡さないと既存preloaderの起動時刻取得境界がnullを返す。
+      const r = run(['unknown-start-time-worker', '--workspace', dir]);
+      assert.notEqual(r.status, 0, '起動時刻が不明なら終了コード1でエラーになること');
+      assert.match(r.stderr, /同一性確認に失敗しました/);
+      assert.match(r.stderr, /cannot get process start time/);
+
+      assert.equal(isProcessAlive(parentPid), true, '起動時刻不明の親プロセスはkillされず生存し続けること');
+      assert.equal(isProcessAlive(childPid), true, '起動時刻不明の子プロセスはkillされず生存し続けること');
+      assert.ok(fs.existsSync(worktreeDir), 'worktreeディレクトリが残っていること');
+      const workers = JSON.parse(fs.readFileSync(path.join(dir, '.gh-maestro', 'workers.json'), 'utf8'));
+      assert.ok('unknown-start-time-worker' in workers, 'workers.jsonにエントリが残っていること');
     } finally {
       try { killProcessTree(parentPid); } catch {}
       try { process.kill(childPid, 'SIGKILL'); } catch {}
