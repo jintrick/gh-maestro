@@ -20,7 +20,6 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 - 自分が書いた `/tmp/issue-*.md` 等の草稿ファイルを読む
 - 機械的なgitリポジトリの保守作業を直接git/ghコマンドで行う
 - ユーザーがその場で明示指示した文書修正を軽量PR経路で提出する（重さは下記の判断基準で測る）
-  理由と経緯: docs/adr/0035-orchestrator-changes-go-through-a-lightweight-pr.md
 
 #### 自分でやるか、ワーカーを起動するか、の判断基準
 
@@ -30,8 +29,6 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 2. **コスト** — コーダー起動・レビュー起動のフルサイクルに見合うか
 
 影響が今回だけに閉じ、フルサイクルに見合わない軽い変更でも、Issueをアンカーにした軽量PR経路で提出する。軽量経路はReview Managerを起動しないが、PR検出・slow層の実行・テスト結果の申告・マージ状態の監視は行う。IssueもPRも通さずに自分でcommit・pushしてはならない。具体的な手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/lightweight-pr.md` を参照する。
-
-理由と経緯: docs/adr/0035-orchestrator-changes-go-through-a-lightweight-pr.md
 
 この禁止の例外は次の2つだけである。どちらも軽量PR経路に乗せず、アンカーIssue・PR・slow層・マージ依頼のいずれも作らない。
 
@@ -224,7 +221,6 @@ node "{{SCRIPTS_PATH}}/spawn-assistant.js" --issue <N> --workspace $WORKSPACE --
 - `BASE_BRANCH`は保護ブランチ（`main`/`master`）でもworktreeブランチ（`issue-N-description`形式）でもない。セッション中に変更しない。起動時に保護ブランチ上にいた場合のみ、最初のIssue確定時に開発ブランチを切って設定する
 - `main` / `master`への直接pushは禁止
 - `BASE_BRANCH`への直接commit / pushは禁止。orchestrator自身の変更も、Issueアンカー付きの軽量PR経路で提出する。例外は `adr.md` が定義するADRの追加・改訂と、反省会で人間が承認した対象プロジェクトの `.claude/rules/` の変更の2つだけで、この2つは軽量PR経路に乗せず `BASE_BRANCH` へ直接commit・pushする（「自分でやるか、ワーカーを起動するか、の判断基準」参照）。
-  理由と経緯: docs/adr/0035-orchestrator-changes-go-through-a-lightweight-pr.md
 - **`scripts/` 配下または `skills/agents.yaml` に触れた変更を install した後の常駐入れ替えは、install.js がruntime rootに登録された全workspaceについて配布済みの `restart-residents.js` を自動で呼び出す。plugin monitor管理の `msg-poll.js` / `poll-pr-monitor.js` / `poll-pr.js` は停止・張り直しを行わず、更新後は次の対話型セッションでpluginを再読込する。その他の旧形式常駐と障害時の確認手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` を参照する。**
 - `skills/**` 配下のドキュメントだけを変更した場合は手動の常駐入れ替えは不要。常駐プロセスは SKILL.md を読まない
 
