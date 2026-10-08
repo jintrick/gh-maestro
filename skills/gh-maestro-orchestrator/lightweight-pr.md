@@ -1,6 +1,6 @@
 # 軽量PR経路
 
-影響範囲が限定的でReview Managerのレビューを起動するコストに見合わない変更でも、ベースブランチへ直接commit・pushしてはならない。タイトルだけのアンカーIssueを作成し、通常のPR監視からReview Managerだけを外す。この経路でもPR検出、slow層、テスト結果の申告、マージ状態の監視は残る。
+影響範囲が限定的でReview Managerのレビューを起動するコストに見合わない変更でも、ベースブランチへ直接commit・pushしてはならない。タイトルだけのアンカーIssueを作成し、通常のPR監視からReview Managerを外す。この軽量経路ではslow層とGitHub CI checksの照会を行わず、PR検出、テスト結果の申告、マージ状態の監視を行う。Review Managerを起動しないだけの通常PR（監視復旧やrevert用PRなど）は軽量経路ではなく、slow層とGitHub CI checksの照会を維持する。
 
 例外は次の2つだけである。どちらもこの経路を使わず、アンカーIssue・PR・slow層・マージ依頼を作らずにベースブランチへ直接commit・pushする。
 
@@ -78,7 +78,7 @@ Remove-Item Env:GH_MAESTRO_BASE_BRANCH
 
 PR本文にはIssueを自動クローズするキーワードを入れない。Issueのクローズは通常の後始末で行う。
 
-### 4. `--no-review-manager` と `--no-review-events` をtargetへ設定する
+### 4. 軽量PRのtargetを設定し、slow層とCI checksを省く
 
 plugin monitorは `/gh-maestro` 起動時に固定コマンドで起動済みなので、通常のMonitorを追加で張らない。次のコマンドでPR監視targetだけを設定する。
 
@@ -87,15 +87,17 @@ node "{{SCRIPTS_PATH}}/activate-pr-monitor.js" --issue "$ISSUE" \
   --no-review-manager --no-review-events --workspace "$WORKSPACE" --base-branch "$BASE_BRANCH"
 ```
 
-固定の `poll-pr-monitor.js` がtargetを読み、`poll-pr.js`を1回だけ起動する。`--no-review-manager`でReview Managerの起動を、`--no-review-events`でinline/formalレビューAPI監視を抑止する。PR検出後のslow層実行、slow完了時のテスト申告コメント更新、PRのマージ・クローズ監視は抑止しない。`run-slow-tests.js` を別途手動で回して代替してはならない。
+固定の `poll-pr-monitor.js` がtargetを読み、`poll-pr.js`を1回だけ起動する。`--no-review-manager`でReview Managerの起動を、`--no-review-events`でinline/formalレビューAPI監視を抑止する。この2つを併用した軽量経路では、初回検出時・`PR_PUSH`時ともslow層とGitHub CI checksの照会を行わない。PR検出とマージ・クローズ監視は継続する。`run-slow-tests.js` を別途手動で回して代替してはならない。
 
 確認する記録は次のとおりである。
 
 - `REVIEW_MANAGER_STARTED` / `REVIEW_MANAGER_ALREADY_RUNNING` が出力されない。
-- `SLOW_TEST_RESULT:<json>` が対象PRのHEADについて届く。
-- slow層完了後、対象HEADに対するテスト申告コメントがIssueまたはPRへ投稿される。
+- 対象PRについて `SLOW_TEST_STARTED` / `SLOW_TEST_RESULT` が出力されない。
+- 対象PRについて `CI_CHECK_FAILED` / `CI_CHECKS_COMPLETE` / `CI_CHECKS_EMPTY` / `CI_CHECKS_UNAVAILABLE` が出力されない。
+- PR検出とマージ・クローズ監視の記録は通常どおり確認できる。
+- この軽量PR経路を実際に1回運用確認し、slow層とCI checksの通知がないことを確認した記録をIssueコメントに残す。
 
-結果に `SLOW_TEST_RESULT` またはテスト申告がない場合、推測で再実行せず、監視ログと申告の正本を確認して人間へ報告する。
+slow層またはGitHub CI checksの通知が出た場合は、監視経路の設定を確認して人間へ報告する。通知がないこと自体は軽量PR経路の期待動作である。
 
 ### 5. マージ後の後始末
 

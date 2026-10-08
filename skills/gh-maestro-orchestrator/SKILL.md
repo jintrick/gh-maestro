@@ -28,7 +28,7 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 1. **影響範囲** — 効果が今回の作業で終わるか、以後の全セッション・全ワーカーに及ぶか
 2. **コスト** — コーダー起動・レビュー起動のフルサイクルに見合うか
 
-影響が今回だけに閉じ、フルサイクルに見合わない軽い変更でも、Issueをアンカーにした軽量PR経路で提出する。軽量経路はReview Managerを起動しないが、PR検出・slow層の実行・テスト結果の申告・マージ状態の監視は行う。IssueもPRも通さずに自分でcommit・pushしてはならない。具体的な手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/lightweight-pr.md` を参照する。
+影響が今回だけに閉じ、フルサイクルに見合わない軽い変更でも、Issueをアンカーにした軽量PR経路で提出する。軽量経路はReview Managerを起動せず、slow層とGitHub CI checksの照会を行わない。PR検出・テスト結果の申告・マージ状態の監視は行う。IssueもPRも通さずに自分でcommit・pushしてはならない。具体的な手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/lightweight-pr.md` を参照する。
 
 この禁止の例外は次の2つだけである。どちらも軽量PR経路に乗せず、アンカーIssue・PR・slow層・マージ依頼のいずれも作らない。
 
@@ -518,9 +518,9 @@ node "{{SCRIPTS_PATH}}/activate-pr-monitor.js" \
 
 `activate-pr-monitor.js` は `pr-monitor-target.json` を原子的に更新し、固定の `poll-pr-monitor.js` がそのtargetを検出して `poll-pr.js` を起動する。targetを切り替えると、前のpoll-prとそのslow子プロセスを停止してから新しい世代を1回だけ起動する。Issueを終了すると `finalize-issue.js` が一致するtargetを消す。
 
-`poll-pr.js`はレビュー観点を一切選ばない。PR検出時に常にReview Managerを全観点で起動する。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。
+`poll-pr.js`はレビュー観点を一切選ばない。通常経路ではPR検出時にReview Managerを全観点で起動する。軽量PR（`--no-review-manager` と `--no-review-events` の併用）では起動しない。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。
 
-PR検出後、`poll-pr.js` は対象PRのHEADと対応するcoder/senior-coder worktreeを照合して `slow` 層を非同期起動する。`poll-reviews.js` から `PR_PUSH:<sha>` を受け取るたび、その新しいHEADに対してもslowを非同期予約する。レビュー監視の起動・通知をslow完了まで同期的に待たせてはならない。同じPR/HEAD/layerはstate予約で二重実行しない。slow結果は同じworktreeの単一層別成果物へ保存され、完了時にテスト申告コメントを更新する。対象HEADの照合不能、worktree不在、子プロセス異常終了は `unavailable` として実行ログ識別子を残し、自動再試行・自動診断を行わない。
+通常経路のPR検出後、`poll-pr.js` は対象PRのHEADと対応するcoder/senior-coder worktreeを照合して `slow` 層を非同期起動する。`poll-reviews.js` から `PR_PUSH:<sha>` を受け取るたび、その新しいHEADに対してもslowを非同期予約する。Review Managerを起動しない通常監視の復旧経路やrevert用PRでもこの動作を維持する。軽量PR（`--no-review-manager` と `--no-review-events` の併用）では初回検出・push後ともslow層を起動しない。レビュー監視の起動・通知をslow完了まで同期的に待たせてはならない。同じPR/HEAD/layerはstate予約で二重実行しない。slow結果は同じworktreeの単一層別成果物へ保存され、完了時にテスト申告コメントを更新する。対象HEADの照合不能、worktree不在、子プロセス異常終了は `unavailable` として実行ログ識別子を残し、自動再試行・自動診断を行わない。
 
 ```sh
 node "{{SCRIPTS_PATH}}/poll-pr-monitor.js" --plugin-monitor --workspace "$WORKSPACE"
@@ -534,9 +534,9 @@ PR検出時の出力:
 - `REVIEW_MANAGER_STARTED:<PR>` — Review Managerを起動した
 - `REVIEW_MANAGER_ALREADY_RUNNING:<PR>` — Review Managerは既に稼働中のため起動要求を受け付けなかった
 - `REVIEW_MANAGER_ALREADY_CLAIMED:<PR>` — このPRの自動Review Manager起動は既にclaim済みのためスキップした
-- `SLOW_TEST_STARTED:<json>` — PRの対象HEADに対するslow層を、レビュー監視をブロックせずに開始した。初回検出と各修正pushのHEADごとに予約され、同じPR/HEAD/layerを再実行しない
-- `SLOW_TEST_RESULT:<json>` — slow層の pass/fail/unavailable、対象HEAD、テスト件数、実行コマンド、unavailable時の分類済みreason、実行ログ識別子を含む完了通知。テストを1件も実行する前のモジュール解決・テストファイル不在・spawn失敗・空出力の非0終了は `unavailable` として記録し、実行後の失敗は `fail` のまま保持する。子プロセスのstdout/stderrやログ本文は申告コメントへ転記せず、公開するcommand/reasonは固定の許可リストから生成する。完了時は層別成果物を正本としてテスト申告コメントを更新する
-- `CI_CHECK_FAILED:<json>` — 現在のPR HEADで失敗したGitHub check。JSONのPR番号・HEAD・チェック名・詳細URLを事実として記録する
+- `SLOW_TEST_STARTED:<json>` — 通常経路PRの対象HEADに対するslow層を、レビュー監視をブロックせずに開始した。初回検出と各修正pushのHEADごとに予約され、同じPR/HEAD/layerを再実行しない。軽量PRでは出力されない
+- `SLOW_TEST_RESULT:<json>` — 通常経路PRのslow層の pass/fail/unavailable、対象HEAD、テスト件数、実行コマンド、unavailable時の分類済みreason、実行ログ識別子を含む完了通知。軽量PRでは出力されない。テストを1件も実行する前のモジュール解決・テストファイル不在・spawn失敗・空出力の非0終了は `unavailable` として記録し、実行後の失敗は `fail` のまま保持する。子プロセスのstdout/stderrやログ本文は申告コメントへ転記せず、公開するcommand/reasonは固定の許可リストから生成する。完了時は層別成果物を正本としてテスト申告コメントを更新する
+- `CI_CHECK_FAILED:<json>` — 通常経路PRの現在HEADで失敗したGitHub check。JSONのPR番号・HEAD・チェック名・詳細URLを事実として記録する。軽量PRではchecks照会・この通知を行わない
 - `CI_CHECKS_COMPLETE:<json>` — 現在のPR HEADで完了した全checkの名前と状態。失敗を含む状態をそのまま記録する
 - `CI_CHECKS_EMPTY:<json>` — 現在のPR HEADにcheckが存在しない
 - `CI_CHECKS_UNAVAILABLE:<json>` — GitHub checkを取得できなかった。チェックなし・成功と読み替えない
@@ -572,7 +572,7 @@ PR番号が確定したら、レビューコメントとマージ状態の通知
 - `PR_CLOSED:<PR番号>` → 該当PRが却下・キャンセルでクローズされた（`CLOSED`）。マージはされない。この後 `poll-pr.js` が新 PR の検出に復帰する（`PR_CLOSED_RESUMED`）。クローズ理由を確認し、必要に応じてコーダーに再指示する。`PR_CLOSED_RESUMED:<PR番号>` は「監視プロセスが生きていて新 PR を待っている」という生存のシグナルでもあるため、**この通知以降は新 PR の `PR_DETECTED` を待つ**（無言のまま監視が止まったと誤解しない）
 - `POLL_ERROR:<detail>` → レビュー監視のGitHubアクセスが失敗し始めた（GitHub障害・一時的なネットワーク断など）。ポーラーは再試行を継続するため起動し直す必要はない。レビュー監視が劣化していることを人間に伝える。復旧すれば `POLL_RECOVERED` が届く
 - `POLL_RECOVERED` → 上記の劣化から復旧した。通常のレビュー監視に戻ってよい
-- `SLOW_TEST_RESULT` とレビュー完了通知の両方が揃うまで、テスト申告の層別結果（`full`/`slow`）と実行記録を突き合わせる。片方だけ届いた場合は利用できる事実を保持し、欠落側の自動再実行や診断は行わない。結果の確認が済むまでコーダーのrollback・worktree削除へ進まない
+- 通常経路では `SLOW_TEST_RESULT` とレビュー完了通知の両方が揃うまで、テスト申告の層別結果（`full`/`slow`）と実行記録を突き合わせる。片方だけ届いた場合は利用できる事実を保持し、欠落側の自動再実行や診断は行わない。結果の確認が済むまでコーダーのrollback・worktree削除へ進まない。軽量PRではslow結果を待たず、この確認項目は適用しない
 - 人間からの報告も同様に受け付ける
 - ポーリング間隔は30秒（`poll-reviews.js`の既定値）。アクティビティがなければ自動で間隔が延びる
 
@@ -595,7 +595,7 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
   - JSONの `status`（`GREEN`/`RED`/`STALE`/`NONE`）と、存在する `declaredSha`・`headSha`・`fail`・`pass`・`provenance`・`scope`・`lint`、`typecheck`、層別結果の `failedTests`・`otherFailedCount` を**解釈を加えずそのまま事実として記載**する。`GREEN` は申告あり・SHA一致・fail 0、`RED` は申告あり・SHA一致・fail > 0、`STALE` はSHA不一致、`NONE` は申告なしまたは照合不能を表す。`lint.status` は従来どおり `complete`（`outcome=pass` または `findings` と `findingCount`）、`unavailable`、`missing` のいずれか。`typecheck.status` は `complete`（`outcome=pass/fail` と `exitCode`）、`unavailable`、`undefined`、`missing` のいずれか。いずれも `unavailable`/`missing` を状態のない GREEN と読み替えてはならない。lint の指摘と型チェック結果は commit・push・PR作成・merge の機械停止条件ではなく、止めるかどうかは orchestrator と人間が判断する。`provenance` が `unknown`、または `scope` が `unknown` の場合も、その値を変更せず記載する。
   - コマンドが非0終了した場合は、状態を `NONE` と取り違えず、テスト申告状態を照会できなかった事実を提示する。
 - **GitHub CI checksの確認と事実提示**:
-  - `node "{{SCRIPTS_PATH}}/query-pr-checks.js" --pr <PR> --repo $REPO` を実行し、現在のHEADに紐づくcheck runsとcommit statusesを照会する。成功時はJSONの `headSha` と各checkの名前・状態・詳細URLをテスト申告と並べて提示する。
+  - 通常経路PRでは `node "{{SCRIPTS_PATH}}/query-pr-checks.js" --pr <PR> --repo $REPO` を実行し、現在のHEADに紐づくcheck runsとcommit statusesを照会する。成功時はJSONの `headSha` と各checkの名前・状態・詳細URLをテスト申告と並べて提示する。軽量PRではGitHub CI checksを照会・通知しない。
   - `hasChecks=false` はチェックなし、`hasRunning=true` は実行中、`allCompleted=true` は全件完了を表す。実行中でも待たず、その状態を提示する。
   - コマンドが非0終了した場合は、CI状態を取得できなかった事実を提示する。チェックなし・成功として扱わない。
   - CI失敗と今回の変更との関連性を推測したり、「無関係」等の独自解釈を加えたりしない。CIの状態は機械的なマージ条件ではなく、止めるかどうかの最終判断は人間に委ねる。
@@ -607,7 +607,7 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
 人間から「マージを取り消したい」（レビュー未完了のまま早くマージされた等）と言われた場合：
 
 - まず**revertが本当に必要か**を切り分ける。実装自体に問題があるのではなく、レビュー指摘への対応が終わる前に早くマージされただけなら、revertせずに残りの指摘対応を軽量PR経路の追いPRとして提出する方が安全（コンフリクトが原理的に発生しない）。
-- 実装自体を一旦取り下げたい等、revertが本当に必要な場合は、タイトルだけのアンカーIssueを作成し、BASE_BRANCHからrevert用ブランチを切る。`git revert -m 1 <mergeCommit> --no-edit` はそのブランチ上で実行し、commit・push・PR作成後に `activate-pr-monitor.js --no-review-manager --no-review-events` でtargetを設定して監視する。具体的なコマンドは `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/lightweight-pr.md` に従う。BASE_BRANCHへrevertコミットを直接追加してはならない。**このとき、元になった作業ブランチをそのまま延長させて指摘対応や再提出をさせてはならない。** そのブランチはrevertされたコミットの子孫であり続けるため、BASE_BRANCH側の「削除」とブランチ側の「追記」が同じファイルで必ず衝突する。revert後に作業を続けさせる場合は、revert後のBASE_BRANCHから新しくブランチを切って必要な差分を再適用させること。
+- 実装自体を一旦取り下げたい等、revertが本当に必要な場合は、タイトルだけのアンカーIssueを作成し、BASE_BRANCHからrevert用ブランチを切る。`git revert -m 1 <mergeCommit> --no-edit` はそのブランチ上で実行し、commit・push・PR作成後に `activate-pr-monitor.js --no-review-manager` だけを指定して監視する。revert用PRは軽量PRではなく、Review Managerを起動しない場合もslow層とGitHub CI checksの照会を行う。軽量PR用の `--no-review-events` は付けず、監視targetの設定は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` の手順に従う。BASE_BRANCHへrevertコミットを直接追加してはならない。**このとき、元になった作業ブランチをそのまま延長させて指摘対応や再提出をさせてはならない。** そのブランチはrevertされたコミットの子孫であり続けるため、BASE_BRANCH側の「削除」とブランチ側の「追記」が同じファイルで必ず衝突する。revert後に作業を続けさせる場合は、revert後のBASE_BRANCHから新しくブランチを切って必要な差分を再適用させること。
 - どうしても元のブランチをmerge/rebaseで復元させる場合、**revert後に一切触っていない新規追加ファイルは、コンフリクト一覧に出ないまま3-way mergeが無言で「削除」を採用することがある**（共通祖先＝revert前のマージ元コミット、BASE_BRANCH側＝削除、ブランチ側＝無変更、という組み合わせで自動的に削除が選ばれるため）。復元後はコーダーに`git diff <revert前の直前コミット> -- <変更ファイル一覧>`で無差分を確認させてからcommitさせること。
 
 ### 12. 本番公開（CI/CD）確認【必須】
@@ -671,4 +671,3 @@ node "{{SCRIPTS_PATH}}/finalize-issue.js" --issue <N> --repo $REPO --workspace $
 ```
 
 これがそのIssueに紐づく全ワーカーの削除とIssueのクローズを一括・決定的に行う。Issueクローズとワーカー削除を個別に手作業でやらない（取りこぼしを防ぐため）。人間の削除許可を都度取る必要はない——マージが唯一の人間チェックポイントであり、反省会が済めば後始末は自動でよい。
-

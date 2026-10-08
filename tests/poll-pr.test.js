@@ -684,6 +684,68 @@ test('runPollPr --no-review-manager does not claim, start, or emit Review Manage
   assert.deepEqual(capturedPollReviewsOptions, { noReviewEvents: false });
 });
 
+test('runPollPr suppresses slow and CI only for lightweight PRs, while recovery and revert keep both', async () => {
+  const headA = 'a'.repeat(40);
+  const headB = 'b'.repeat(40);
+
+  for (const scenario of [
+    { name: 'lightweight', noReviewEvents: true, expectSlow: false, expectChecks: false },
+    { name: 'Review Manager recovery', noReviewEvents: false, expectSlow: true, expectChecks: true },
+    { name: 'revert PR', noReviewEvents: false, expectSlow: true, expectChecks: true },
+  ]) {
+    const { mod } = loadModule();
+    const workspace = temporaryWorkspace(`gh-maestro-poll-pr-${scenario.name.replaceAll(' ', '-')}-`);
+    const output = [];
+    const slowHeads = [];
+    const queriedHeads = [];
+    let getHeadCalls = 0;
+
+    const result = await mod.runPollPr({
+      issue: 600,
+      repo: 'fixture/repo',
+      workspace,
+      sessionPid: 4321,
+      noReviewManager: true,
+      noReviewEvents: scenario.noReviewEvents,
+      intervalMs: 0,
+      intervalArg: '0',
+    }, {
+      checkParentFn: () => true,
+      findPrFn: () => '42',
+      getPrHeadFn: () => (++getHeadCalls === 1 ? headA : headB),
+      queryPrChecksFn: () => {
+        const headSha = queriedHeads.length === 0 ? headA : headB;
+        queriedHeads.push(headSha);
+        return {
+          ok: true, headSha,
+          checks: [{ kind: 'check_run', name: 'build', state: 'success', detailsUrl: 'https://ci.invalid/build' }],
+          hasChecks: true, hasRunning: false, allCompleted: true,
+        };
+      },
+      setIntervalFn: () => 1,
+      clearIntervalFn: () => {},
+      spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine) => {
+        await new Promise(resolve => setImmediate(resolve));
+        onOutputLine(`PR_PUSH:${headB}`);
+        return 0;
+      },
+      getPrStateFn: () => 'OPEN',
+      recordMergeAndSnapshotFn: () => {},
+      runSlowTestFn: async ({ headSha }) => { slowHeads.push(headSha); },
+      cleanupFn: () => {},
+      writeStdoutFn: text => output.push(text),
+    });
+
+    assert.deepEqual(result, { exitCode: 0 }, scenario.name);
+    assert.deepEqual(slowHeads, scenario.expectSlow ? [headA, headB] : [], `${scenario.name}: slow heads`);
+    assert.equal(queriedHeads.length, scenario.expectChecks ? 2 : 0, `${scenario.name}: check queries`);
+    if (!scenario.expectSlow) {
+      assert.equal(output.some(line => line.startsWith('SLOW_TEST_STARTED:') || line.startsWith('SLOW_TEST_RESULT:')), false, `${scenario.name}: slow output`);
+    }
+    assert.equal(output.some(line => /^CI_CHECK(?:_FAILED|S_(?:COMPLETE|EMPTY|UNAVAILABLE)):/.test(line)), scenario.expectChecks, `${scenario.name}: CI output`);
+  }
+});
+
 test('runPollPr passes both independent suppression flags to poll-reviews', async () => {
   const { mod } = loadModule();
   const workspace = temporaryWorkspace('gh-maestro-poll-pr-both-flags-');

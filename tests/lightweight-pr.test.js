@@ -29,7 +29,7 @@ test('lightweight-pr.md: タイトルだけのIssueからPR作成までの具体
   assert.ok(powershellFences.some((fence) => /\$env:GH_MAESTRO_BASE_BRANCH/.test(fence) && /gh-create-pr\.js/.test(fence)));
 });
 
-test('lightweight-pr.md: target経由のPR監視はReview Managerを起動せず、slow層と申告確認を残す', () => {
+test('lightweight-pr.md: target経由のPR監視はReview Manager・slow層・CI checksを行わない', () => {
   const content = readDocument();
   const fences = shellFences(content);
   const monitorFence = fences.find((fence) => /activate-pr-monitor\.js/.test(fence));
@@ -40,8 +40,8 @@ test('lightweight-pr.md: target経由のPR監視はReview Managerを起動せず
   assert.doesNotMatch(monitorFence, /start-review-manager\.js/);
   assert.match(content, /poll-pr-monitor\.js/);
   assert.doesNotMatch(content, /node "\{\{SCRIPTS_PATH\}\}\/poll-pr\.js"/);
-  assert.match(content, /SLOW_TEST_RESULT/);
-  assert.match(content, /テスト申告コメント/);
+  assert.match(content, /SLOW_TEST_STARTED[\s\S]*SLOW_TEST_RESULT[\s\S]*出力されない/);
+  assert.match(content, /CI_CHECK_FAILED[\s\S]*CI_CHECKS_COMPLETE[\s\S]*出力されない/);
   assert.match(content, /REVIEW_MANAGER_STARTED[\s\S]*出力されない/);
 });
 
