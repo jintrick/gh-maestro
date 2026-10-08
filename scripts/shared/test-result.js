@@ -26,7 +26,7 @@ const TEST_RESULT_OUTCOMES = Object.freeze(new Set(['pass', 'fail']));
 const LINT_RESULT_STATUSES = Object.freeze(new Set(['complete', 'unavailable']));
 const LINT_RESULT_OUTCOMES = Object.freeze(new Set(['pass', 'findings']));
 const STATIC_CHECK_STATUSES = Object.freeze(new Set(['complete', 'unavailable', 'undefined']));
-const STATIC_CHECK_OUTCOMES = Object.freeze(new Set(['pass', 'fail', 'findings']));
+const STATIC_CHECK_OUTCOMES = Object.freeze(new Set(['pass', 'fail']));
 const TAP_COUNT_FIELDS = Object.freeze(['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo']);
 const TEST_CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
 const PUBLIC_TEST_COMMANDS = Object.freeze({
@@ -284,7 +284,6 @@ function validateStaticCheckResult(value, fieldPrefix = 'static check result') {
     if (!STATIC_CHECK_OUTCOMES.has(value.outcome)) return { ok: false, error: `${fieldPrefix} outcome is invalid` };
     if (!Number.isSafeInteger(value.exitCode) || value.exitCode < 0) return { ok: false, error: `${fieldPrefix} exitCode is invalid` };
     if (typeof value.testedContentHash !== 'string' || !TEST_CONTENT_HASH_RE.test(value.testedContentHash)) return { ok: false, error: `${fieldPrefix} complete must include a testedContentHash` };
-    if (value.outcome === 'findings' && (!Number.isSafeInteger(value.findingCount) || value.findingCount < 0)) return { ok: false, error: `${fieldPrefix} findingCount is invalid` };
     if (value.outcome === 'pass' && value.exitCode !== 0) return { ok: false, error: `${fieldPrefix} pass requires exitCode 0` };
     if (value.outcome === 'fail' && value.exitCode === 0) return { ok: false, error: `${fieldPrefix} fail requires a nonzero exitCode` };
   } else if (value.status === 'unavailable') {
@@ -423,12 +422,12 @@ function writeTestResultLayer(worktree, layerArtifact, checksOrLint) {
     const checks = {};
     if (current && current.checks) {
       for (const [name, check] of Object.entries(current.checks)) {
-        if (!incomingHash || !check || check.testedContentHash !== incomingHash) continue;
+        if (incomingHash && (!check || check.testedContentHash !== incomingHash)) continue;
         checks[name] = check;
       }
     }
     Object.assign(checks, incomingChecks);
-    if (!Object.keys(checks).length && current && current.lint && current.lint.testedContentHash === incomingHash) checks.lint = current.lint;
+    if (!Object.keys(checks).length && current && current.lint && (!incomingHash || current.lint.testedContentHash === incomingHash)) checks.lint = current.lint;
     if (checks) {
       aggregate.checks = checks;
       if (checks.lint !== undefined) aggregate.lint = checks.lint;
