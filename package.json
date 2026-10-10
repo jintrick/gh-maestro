@@ -1,6 +1,6 @@
 {
   "name": "gh-maestro",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "description": "GitHub-based AI agent orchestration daemon",
   "main": "src/daemon.js",
   "scripts": {
