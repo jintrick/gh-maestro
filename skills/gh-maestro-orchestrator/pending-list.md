@@ -56,7 +56,7 @@ node "{{SCRIPTS_PATH}}/comment-issue.js" \
 
 ## 切り出し
 
-切り出し先も通常のアンカーIssueなので、`gh issue create` を直接叩かない。唯一の呼び出し口は `create-issue.js`（「アセット」参照）。
+切り出し先も通常のアンカーIssueなので、`gh issue create` を直接叩かない。唯一の呼び出し口は create-issue.js（SKILL.md「横断的な手続き」の「CLI参照とIssueアンカー」参照）。
 
 ```sh
 # 対応する項目をグループ化して新規Issueとして切り出す

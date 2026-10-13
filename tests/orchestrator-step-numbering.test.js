@@ -11,10 +11,11 @@ const STAGE_COUNT_RE = /<!--\s*gh-maestro-structure:\s*stages=(\d+)\s*-->/g;
 const STAGE_STRUCTURE_RE = /<!--\s*gh-maestro-structure:\s*middle-items=(\d+)\s*-->/g;
 
 function readDevelopmentCycle() {
-  const content = fs.readFileSync(SKILL_PATH, 'utf8');
-  const start = content.indexOf('## 開発サイクル');
-  assert.notEqual(start, -1, '開発サイクルの見出しが存在すること');
-  return content.slice(start);
+  const lines = fs.readFileSync(SKILL_PATH, 'utf8').split(/\r?\n/);
+  const start = lines.findIndex(line => line === '## 開発サイクル');
+  assert.notEqual(start, -1, '開発サイクルの見出しが行全体で存在すること');
+  const end = lines.findIndex((line, index) => index > start && /^## /.test(line));
+  return lines.slice(start, end === -1 ? lines.length : end).join('\n');
 }
 
 function readStage(cycle, stageNumber) {

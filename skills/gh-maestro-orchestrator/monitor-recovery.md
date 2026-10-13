@@ -49,6 +49,29 @@ Review Managerを起動しない軽量経路では、上のコマンドへ `--no
 
 反省会後に `finalize-issue.js --issue <N> --workspace $WORKSPACE` を1回実行する。`finalize-issue.js` は一致するtargetだけを削除し、plugin monitorが次の周回でpoll-prを停止できる状態にする。`reset-session.js` はセッション全体を初期化するためtargetを無条件に削除する。
 
+## ワーカー状態監視と異常対応
+
+worker-status.jsはヘッドレスワーカーの稼働状況と連続稼働時間を確認する。通常はspawn-worker.jsの登録後とmsg-send.jsのコメント投稿成功後に監視paneの存在保証が自動で試みられるため、手動で開かない。listとstatusはワンショット照会であり、paneの起動トリガーではない。
+
+監視paneは作成時のWezTerm接続先と分割元paneを状態記録に保存する。後続の生存確認・終了・再作成はその接続先と明示的な分割元を使う。記録接続先のsocket消滅を確実に判定でき、現在のWezTerm接続先と基準paneが有効な場合だけ現在環境へrebindして記録を更新する。消滅と確定できない照会失敗や現在環境の欠落では、状態記録を保持して停止する。spawn-worker.jsとmsg-send.jsの存在保証失敗はstageと接続先をログに残すが、ワーカー起動・コメント送信の成否は変えない。
+
+状態を確認するときは次を使う。
+
+~~~sh
+node "{{SCRIPTS_PATH}}/worker-status.js" list --workspace $WORKSPACE
+node "{{SCRIPTS_PATH}}/worker-status.js" status --workspace $WORKSPACE --worker-name <name>
+~~~
+
+listは全ワーカーを表示し、必要なら--jsonでJSON出力する。statusは単一ワーカーの生死を確認する。監視paneの手動開始・再作成が必要な場合だけ次を使い、終了にはclose-paneを使う。
+
+~~~sh
+node "{{SCRIPTS_PATH}}/worker-status.js" pane --workspace $WORKSPACE
+node "{{SCRIPTS_PATH}}/worker-status.js" close-pane --workspace $WORKSPACE
+~~~
+
+他のワーカーと比べて連続稼働時間が突出している場合や、タスク規模に対して不自然に長い場合は、worker log（$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log）を読み、処理中か、暴走ループか、無応答かを切り分ける。ログは異常終了・配送断念・長時間無反応の生死確認が必要な場合にだけ読む。新規起動workerが報告せず終了してもログから代理投稿せず、短いresumeメッセージで本人に報告させる。
+
+暴走やハングと判断した場合はstop-worker.jsでプロセスを停止し、人間に状況を報告するか、必要に応じて追加指示でresumeを促す。閾値による機械的な自動停止は行わず、停止・再開はorchestratorが判断する。報告後にプロセスだけが残った居座りもstop-worker.jsを使う。remove-worker.jsはworktree・branch・登録も消すため、再開可能な停止に使わない。
 ## 監視ペイン
 
 `status-pane` はplugin monitorとは別のWezTerm設備である。install後の常駐更新が監視ペインを別workspaceから奪わない契約は維持する。必要時だけ次を実行し、失敗した場合はregistryを確認して人間へ報告する。
