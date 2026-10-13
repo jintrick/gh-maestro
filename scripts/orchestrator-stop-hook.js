@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 'use strict';
 
-// orchestrator の対話型セッションで、人間に問いを投げて応答を終えたときだけ通知する
+// orchestrator の対話型セッションで、応答が終わるたびに人間へ通知する
 // Claude Code plugin の Stop hook。
 // 通知を orchestrator 自身の操作に任せると、SKILL.md に書いてあっても発言の瞬間に
 // 想起されず送られない（Issue #611）。応答の終わりに必ず発火する Stop hook で送る。
 //
 // plugin hook はヘッドレスのワーカーや gh-maestro を使わないセッションでも発火するため、
 // /gh-maestro のセッション初期化（gh-maestro-session-hook.js）が記録したセッションIDと
-// 一致するときだけ通知する。判断・承認を求める発言は末尾に問いを1つ置く規範なので、
-// 応答の最後が問いで終わるときだけ通知し、人間に用の無いターンでは鳴らさない。
+// 一致するときだけ通知する。人間に用があるかは応答の形から判定できないため、応答の
+// 内容では絞らない（docs/adr/0045-notify-human-on-every-orchestrator-stop.md）。
 // 失敗してもClaude Codeの応答・対話を止めないよう、終了コード2（ブロック）は使わない。
 
 const fs = require('fs');
@@ -26,12 +26,11 @@ Usage:
   node orchestrator-stop-hook.js
   node orchestrator-stop-hook.js --help | -h
 
-Stop hook の入力JSON（session_id, last_assistant_message）を標準入力から読む（TTYならエラー）。
+Stop hook の入力JSON（session_id, cwd）を標準入力から読む（TTYならエラー）。
 workspace は CLAUDE_PROJECT_DIR、なければhook入力の cwd から解決する。
-次の両方を満たすときだけ notify-human.js を実行する:
-  - session_id が /gh-maestro のセッション初期化で記録されたIDと一致する
-  - last_assistant_message の末尾が問い（？ または ?）で終わる
-満たさないときは何もせず終了コード0。失敗時は終了コード1（Claude Codeの処理は止めない）。`;
+session_id が /gh-maestro のセッション初期化で記録されたIDと一致するとき、
+応答の内容（last_assistant_message）にかかわらず notify-human.js を実行する。
+一致しないとき・記録が無いときは何もせず終了コード0。失敗時は終了コード1（Claude Codeの処理は止めない）。`;
 
 const SPEC = {
   flags: {},
@@ -87,19 +86,6 @@ function readMarkedSessionId(filePath) {
   return data.sessionId;
 }
 
-/**
- * 応答の末尾が問いかを判定する。末尾の空白と、問いを囲むMarkdownの強調・コード・
- * 括弧・引用符は取り除いてから見る（例: `**〜ですか？**`）。
- *
- * @param {unknown} text
- * @returns {boolean}
- */
-function endsWithQuestion(text) {
-  if (typeof text !== 'string') return false;
-  const trimmed = text.replace(/[\s*_`」』）)"'”’]+$/u, '');
-  return /[？?]$/u.test(trimmed);
-}
-
 function parseHookInput(text) {
   const input = parseJsonText(text);
   if (!input || typeof input !== 'object' || typeof input.session_id !== 'string' || input.session_id === '') {
@@ -111,7 +97,7 @@ function parseHookInput(text) {
 /**
  * Stop hook の1回分の処理。副作用はdepsで差し替えられる。
  *
- * @param {object} input hook入力（session_id, last_assistant_message, cwd）
+ * @param {object} input hook入力（session_id, cwd）
  * @param {object} [deps]
  * @returns {{exitCode:number, stderr?:string}}
  */
@@ -122,7 +108,6 @@ function runStopHook(input, deps = {}) {
   const workspace = resolveWorkspaceFn(env.CLAUDE_PROJECT_DIR || input.cwd);
   if (!workspace) return { exitCode: 0 };
   if (readMarkedSessionId(markerPath(workspace, deps.runtimeRoot)) !== input.session_id) return { exitCode: 0 };
-  if (!endsWithQuestion(input.last_assistant_message)) return { exitCode: 0 };
 
   const spawnSyncFn = deps.spawnSyncFn || spawnSync;
   const result = spawnSyncFn(process.execPath, [
@@ -177,7 +162,7 @@ function main(argv = process.argv.slice(2), options = {}) {
 
 module.exports = {
   USAGE, SPEC, MARKER_FILE, markerPath, markOrchestratorSession, readMarkedSessionId,
-  endsWithQuestion, parseHookInput, runStopHook, main,
+  parseHookInput, runStopHook, main,
 };
 
 if (require.main === module) {

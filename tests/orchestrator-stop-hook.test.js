@@ -57,16 +57,7 @@ test('markOrchestratorSession: session_id を workspace runtime に記録し、�
   });
 });
 
-test('endsWithQuestion: 末尾の問いを、強調・空白・括弧を除いて判定する', () => {
-  for (const text of ['マージしますか？', 'Merge?', '**直してよいですか？**\n', '「よいですか？」', '`ok?`  ']) {
-    assert.equal(hook.endsWithQuestion(text), true, text);
-  }
-  for (const text of ['お返事を待っています。', 'よいですか？\n\nお返事を待っています。', '', undefined, 42]) {
-    assert.equal(hook.endsWithQuestion(text), false, String(text));
-  }
-});
-
-test('stop: 記録済みセッションで問いで終わる応答なら notify-human.js を workspace 付きで実行する', () => {
+test('stop: 記録済みセッションの応答なら notify-human.js を workspace 付きで実行する', () => {
   withEnv((env) => {
     env.mark('session-A');
     const spawn = recordingSpawn();
@@ -81,17 +72,19 @@ test('stop: 記録済みセッションで問いで終わる応答なら notify-
   });
 });
 
-test('stop: 問いで終わらない応答では通知しない', () => {
-  withEnv((env) => {
-    env.mark('session-A');
-    const spawn = recordingSpawn();
-    const result = hook.runStopHook(
-      { session_id: 'session-A', last_assistant_message: '報告を待っています。' },
-      env.deps({ spawnSyncFn: spawn.fn }),
-    );
-    assert.deepEqual(result, { exitCode: 0 });
-    assert.equal(spawn.calls.length, 0);
-  });
+test('stop: 記録済みセッションなら、問いで終わらない応答・空の応答・応答なしでも通知する', () => {
+  for (const message of ['PR #614 をマージしました。', 'よいですか？\n\n報告を待っています。', '', undefined]) {
+    withEnv((env) => {
+      env.mark('session-A');
+      const spawn = recordingSpawn();
+      const input = { session_id: 'session-A' };
+      if (message !== undefined) input.last_assistant_message = message;
+      const result = hook.runStopHook(input, env.deps({ spawnSyncFn: spawn.fn }));
+      assert.deepEqual(result, { exitCode: 0 }, String(message));
+      assert.equal(spawn.calls.length, 1, String(message));
+      assert.deepEqual(spawn.calls[0].args, [path.join(SCRIPTS_DIR, 'notify-human.js'), '--workspace', env.workspace]);
+    });
+  }
 });
 
 test('stop: 記録と異なるセッション（ワーカー・前のセッション）・記録なしでは通知しない', () => {
@@ -199,7 +192,7 @@ test('CLI: --help は終了コード0、余分な位置引数は非0', () => {
   assert.match(extra.stderr, /orchestrator-stop-hook: /);
 });
 
-test('CLI: 実プロセスで、記録と異なるセッションの問いには通知せず終了コード0', () => {
+test('CLI: 実プロセスで、記録と異なるセッションの応答には通知せず終了コード0', () => {
   withEnv((env) => {
     env.mark('session-A');
     const result = spawnSync(process.execPath, [SCRIPT], {

@@ -109,7 +109,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 
 ### 発言の形
 
-- 人間への通知はgh-maestro pluginのStop hook（scripts/orchestrator-stop-hook.js）が送る。/gh-maestroを実行したセッションで、応答の最後が問いで終わったときだけ通知する。orchestratorはnotify-human.jsを自分で実行せず、通知を送った旨も書かない。判断や承認を求める発言は必ず問いで終える。問いの後に文を足すと通知されない。
+- 人間への通知はgh-maestro pluginのStop hook（scripts/orchestrator-stop-hook.js）が送る。/gh-maestroを実行したセッションで、応答が終わるたびに、応答の内容にかかわらず通知する。orchestratorはnotify-human.jsを自分で実行せず、通知を送った旨も書かない。
 - 1つの発言に質問を2つ含めない。質問は末尾に1つだけ置き、複数の実行や承認を一度に求めない。
 - 選択肢や長い提案と、取り消せない操作の承認を同じ発言で求めない。先に選択肢への回答を得て、必要なら対象と操作を明示して別に尋ねる。
 - 長い提案や全文を読まなければ答えられない内容について、短い「はい／いいえ」を求めない。文書案はファイルまたはGitHubへ置き、承認対象を短い一つの命題にする。
