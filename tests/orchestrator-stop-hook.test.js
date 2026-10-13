@@ -31,6 +31,8 @@ function withEnv(fn) {
           env: { CLAUDE_PROJECT_DIR: workspace },
           resolveWorkspaceFn: (value) => (value ? path.resolve(value) : null),
           runtimeRoot,
+          // 既定では待たない。待つあいだの出来事は各テストが sleepFn で起こす。
+          sleepFn: () => {},
           ...extra,
         };
       },
@@ -57,16 +59,7 @@ test('markOrchestratorSession: session_id を workspace runtime に記録し、�
   });
 });
 
-test('endsWithQuestion: 末尾の問いを、強調・空白・括弧を除いて判定する', () => {
-  for (const text of ['マージしますか？', 'Merge?', '**直してよいですか？**\n', '「よいですか？」', '`ok?`  ']) {
-    assert.equal(hook.endsWithQuestion(text), true, text);
-  }
-  for (const text of ['お返事を待っています。', 'よいですか？\n\nお返事を待っています。', '', undefined, 42]) {
-    assert.equal(hook.endsWithQuestion(text), false, String(text));
-  }
-});
-
-test('stop: 記録済みセッションで問いで終わる応答なら notify-human.js を workspace 付きで実行する', () => {
+test('stop: 記録済みセッションの応答なら notify-human.js を workspace 付きで実行する', () => {
   withEnv((env) => {
     env.mark('session-A');
     const spawn = recordingSpawn();
@@ -81,17 +74,106 @@ test('stop: 記録済みセッションで問いで終わる応答なら notify-
   });
 });
 
-test('stop: 問いで終わらない応答では通知しない', () => {
+test('stop: 記録済みセッションなら、問いで終わらない応答・空の応答・応答なしでも通知する', () => {
+  for (const message of ['PR #614 をマージしました。', 'よいですか？\n\n報告を待っています。', '', undefined]) {
+    withEnv((env) => {
+      env.mark('session-A');
+      const spawn = recordingSpawn();
+      const input = { session_id: 'session-A' };
+      if (message !== undefined) input.last_assistant_message = message;
+      const result = hook.runStopHook(input, env.deps({ spawnSyncFn: spawn.fn }));
+      assert.deepEqual(result, { exitCode: 0 }, String(message));
+      assert.equal(spawn.calls.length, 1, String(message));
+      assert.deepEqual(spawn.calls[0].args, [path.join(SCRIPTS_DIR, 'notify-human.js'), '--workspace', env.workspace]);
+    });
+  }
+});
+
+test('stop: 通知を予約して既定の60秒を待ち、予約が残っていれば1回通知して予約を消す', () => {
   withEnv((env) => {
     env.mark('session-A');
     const spawn = recordingSpawn();
-    const result = hook.runStopHook(
-      { session_id: 'session-A', last_assistant_message: '報告を待っています。' },
-      env.deps({ spawnSyncFn: spawn.fn }),
-    );
+    const waits = [];
+    const file = hook.pendingPath(env.workspace, env.runtimeRoot);
+    const result = hook.runStopHook({ session_id: 'session-A' }, env.deps({
+      spawnSyncFn: spawn.fn,
+      randomUUIDFn: () => 'token-1',
+      sleepFn: (ms) => {
+        waits.push(ms);
+        assert.equal(hook.readPendingToken(file), 'token-1');
+        assert.equal(spawn.calls.length, 0, '待つ前に通知しない');
+      },
+      delayMs: undefined,
+    }));
+    assert.deepEqual(result, { exitCode: 0 });
+    assert.deepEqual(waits, [60000]);
+    assert.equal(spawn.calls.length, 1);
+    assert.equal(fs.existsSync(file), false);
+  });
+});
+
+test('stop: 待つあいだに次の Stop が発火したら、前の予約は通知せず、後の予約だけが1回通知する', () => {
+  withEnv((env) => {
+    env.mark('session-A');
+    const spawn = recordingSpawn();
+    let n = 0;
+    const deps = env.deps({
+      spawnSyncFn: spawn.fn,
+      randomUUIDFn: () => `token-${++n}`,
+      sleepFn: () => {
+        if (n === 1) hook.runStopHook({ session_id: 'session-A' }, deps);
+      },
+    });
+    const first = hook.runStopHook({ session_id: 'session-A', last_assistant_message: QUESTION }, deps);
+    assert.deepEqual(first, { exitCode: 0 });
+    assert.equal(spawn.calls.length, 1);
+    assert.equal(fs.existsSync(hook.pendingPath(env.workspace, env.runtimeRoot)), false);
+  });
+});
+
+test('cancel: 待つあいだに人間が入力したら（--cancel）、通知しない', () => {
+  withEnv((env) => {
+    env.mark('session-A');
+    const spawn = recordingSpawn();
+    const result = hook.runStopHook({ session_id: 'session-A' }, env.deps({
+      spawnSyncFn: spawn.fn,
+      sleepFn: () => assert.deepEqual(hook.runCancelHook({ session_id: 'session-A' }, env.deps()), { exitCode: 0 }),
+    }));
     assert.deepEqual(result, { exitCode: 0 });
     assert.equal(spawn.calls.length, 0);
   });
+});
+
+test('cancel: 記録と異なるセッション・記録なしの入力では予約を取り消さない', () => {
+  withEnv((env) => {
+    const spawn = recordingSpawn();
+    const other = () => {
+      assert.deepEqual(hook.runCancelHook({ session_id: 'worker-session' }, env.deps()), { exitCode: 0 });
+    };
+    env.mark('session-A');
+    hook.runStopHook({ session_id: 'session-A' }, env.deps({ spawnSyncFn: spawn.fn, sleepFn: other }));
+    assert.equal(spawn.calls.length, 1);
+  });
+  withEnv((env) => {
+    assert.deepEqual(hook.runCancelHook({ session_id: 'session-A' }, env.deps()), { exitCode: 0 });
+    assert.equal(fs.existsSync(hook.pendingPath(env.workspace, env.runtimeRoot)), false);
+  });
+});
+
+test('壊れた予約: 待ち終えたときの予約が壊れていれば、修復も通知もせずエラーにする', () => {
+  for (const content of ['{not json', '{"schemaVersion":1,"token":42}']) {
+    withEnv((env) => {
+      env.mark('session-A');
+      const spawn = recordingSpawn();
+      const file = hook.pendingPath(env.workspace, env.runtimeRoot);
+      assert.throws(() => hook.runStopHook({ session_id: 'session-A' }, env.deps({
+        spawnSyncFn: spawn.fn,
+        sleepFn: () => fs.writeFileSync(file, content, 'utf8'),
+      })), content.startsWith('{"') ? /通知の予約が不正です/ : undefined);
+      assert.equal(spawn.calls.length, 0);
+      assert.equal(fs.readFileSync(file, 'utf8'), content);
+    });
+  }
 });
 
 test('stop: 記録と異なるセッション（ワーカー・前のセッション）・記録なしでは通知しない', () => {
@@ -199,7 +281,28 @@ test('CLI: --help は終了コード0、余分な位置引数は非0', () => {
   assert.match(extra.stderr, /orchestrator-stop-hook: /);
 });
 
-test('CLI: 実プロセスで、記録と異なるセッションの問いには通知せず終了コード0', () => {
+test('CLI: 実プロセスの --cancel は予約を消し、標準出力に何も書かず終了コード0', () => {
+  withEnv((env) => {
+    env.mark('session-A');
+    const file = hook.pendingPath(env.workspace, env.runtimeRoot);
+    fs.writeFileSync(file, '{"schemaVersion":1,"token":"t"}', 'utf8');
+    const run = (sessionId) => spawnSync(process.execPath, [SCRIPT, '--cancel'], {
+      encoding: 'utf8',
+      env: { ...process.env, GH_MAESTRO_RUNTIME_DIR: env.runtimeRoot, CLAUDE_PROJECT_DIR: env.workspace },
+      input: JSON.stringify({ session_id: sessionId, prompt: 'はい' }),
+    });
+    const other = run('worker-session');
+    assert.equal(other.status, 0, other.stderr);
+    assert.equal(fs.existsSync(file), true);
+    const own = run('session-A');
+    assert.equal(own.status, 0, own.stderr);
+    assert.equal(own.stdout, '');
+    assert.equal(own.stderr, '');
+    assert.equal(fs.existsSync(file), false);
+  });
+});
+
+test('CLI: 実プロセスで、記録と異なるセッションの応答には通知せず終了コード0', () => {
   withEnv((env) => {
     env.mark('session-A');
     const result = spawnSync(process.execPath, [SCRIPT], {

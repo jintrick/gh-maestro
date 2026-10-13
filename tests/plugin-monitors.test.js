@@ -34,17 +34,25 @@ test('plugin manifest and monitors: fixed interactive session monitors have no d
   }
 });
 
-test('plugin manifest hooks: orchestratorの通知用 Stop hook だけを固定引数で登録する', () => {
+test('plugin manifest hooks: orchestratorの通知の予約（Stop）と取り消し（UserPromptSubmit）だけを固定引数で登録する', () => {
   const manifest = readJson('.claude-plugin/plugin.json');
-  assert.deepEqual(Object.keys(manifest.hooks), ['Stop']);
-  const groups = manifest.hooks.Stop;
-  assert.equal(groups.length, 1);
-  assert.equal(groups[0].matcher, undefined);
-  assert.equal(groups[0].hooks.length, 1);
-  const entry = groups[0].hooks[0];
-  assert.equal(entry.type, 'command');
-  assert.equal(entry.command, 'node');
-  assert.deepEqual(entry.args, ['${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js']);
-  assert.equal(entry.async, true);
+  assert.deepEqual(Object.keys(manifest.hooks).sort(), ['Stop', 'UserPromptSubmit']);
+  const entryOf = (event) => {
+    const groups = manifest.hooks[event];
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].matcher, undefined);
+    assert.equal(groups[0].hooks.length, 1);
+    const entry = groups[0].hooks[0];
+    assert.equal(entry.type, 'command');
+    assert.equal(entry.command, 'node');
+    return entry;
+  };
+  const stop = entryOf('Stop');
+  assert.deepEqual(stop.args, ['${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js']);
+  // hook の中で通知の遅延を待つため、応答を止めない async で、待ち時間より長い timeout を持つ。
+  assert.equal(stop.async, true);
+  assert.ok(stop.timeout * 1000 > require('../scripts/orchestrator-stop-hook').NOTIFY_DELAY_MS);
+  const cancel = entryOf('UserPromptSubmit');
+  assert.deepEqual(cancel.args, ['${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js', '--cancel']);
   assert.ok(fs.existsSync(path.join(__dirname, '..', 'scripts', 'orchestrator-stop-hook.js')));
 });
