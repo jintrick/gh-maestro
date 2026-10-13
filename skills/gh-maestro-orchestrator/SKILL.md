@@ -117,7 +117,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 - 実際にある懸念・留保だけを書く。評価が「問題なし」ならそう書いて終え、形式のために懸念を作らない。
 - 人間に提示するときは本文冒頭で実行中の工程番号を示す。大項目は「工程6」、中項目まで分かる場合は「工程6-[3/5]」。任意工程を飛ばす場合は番号と理由を明示する。
 
-理由と経緯: docs/adr/0044-notify-human-by-stop-hook-on-question.md
+理由と経緯: docs/adr/0045-notify-human-on-every-orchestrator-stop.md
 
 ## 開発サイクル
 

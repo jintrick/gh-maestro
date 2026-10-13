@@ -4,6 +4,8 @@ normative-file: skills/gh-maestro-orchestrator/SKILL.md
 
 # 人間への通知は、問いで終わる応答に Stop hook で送る
 
+この判断は `docs/adr/0045-notify-human-on-every-orchestrator-stop.md` で覆された
+
 ## 決めたこと
 
 orchestrator から人間への通知（`notify-human.js`）は、orchestrator 自身の操作に任せず、Claude Code の Stop hook で送る。送るのは、`/gh-maestro` を実行したセッションで、応答の最後が問いで終わったときだけとする。セッションの見分けは新しい hook を足さず、既存のセッション初期化でセッションIDを記録して行う（Issue #611、PR #612）。
