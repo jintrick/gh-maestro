@@ -63,7 +63,7 @@ test('stop: 記録済みセッションの応答なら notify-human.js を works
   withEnv((env) => {
     env.mark('session-A');
     const spawn = recordingSpawn();
-    const result = hook.runStopHook(
+    const result = hook.runNotificationHook(
       { session_id: 'session-A', last_assistant_message: QUESTION },
       env.deps({ spawnSyncFn: spawn.fn }),
     );
@@ -81,7 +81,7 @@ test('stop: 記録済みセッションなら、問いで終わらない応答�
       const spawn = recordingSpawn();
       const input = { session_id: 'session-A' };
       if (message !== undefined) input.last_assistant_message = message;
-      const result = hook.runStopHook(input, env.deps({ spawnSyncFn: spawn.fn }));
+      const result = hook.runNotificationHook(input, env.deps({ spawnSyncFn: spawn.fn }));
       assert.deepEqual(result, { exitCode: 0 }, String(message));
       assert.equal(spawn.calls.length, 1, String(message));
       assert.deepEqual(spawn.calls[0].args, [path.join(SCRIPTS_DIR, 'notify-human.js'), '--workspace', env.workspace]);
@@ -95,7 +95,7 @@ test('stop: 通知を予約して既定の60秒を待ち、予約が残ってい
     const spawn = recordingSpawn();
     const waits = [];
     const file = hook.pendingPath(env.workspace, env.runtimeRoot);
-    const result = hook.runStopHook({ session_id: 'session-A' }, env.deps({
+    const result = hook.runNotificationHook({ session_id: 'session-A' }, env.deps({
       spawnSyncFn: spawn.fn,
       randomUUIDFn: () => 'token-1',
       sleepFn: (ms) => {
@@ -121,10 +121,10 @@ test('stop: 待つあいだに次の Stop が発火したら、前の予約は�
       spawnSyncFn: spawn.fn,
       randomUUIDFn: () => `token-${++n}`,
       sleepFn: () => {
-        if (n === 1) hook.runStopHook({ session_id: 'session-A' }, deps);
+        if (n === 1) hook.runNotificationHook({ session_id: 'session-A' }, deps);
       },
     });
-    const first = hook.runStopHook({ session_id: 'session-A', last_assistant_message: QUESTION }, deps);
+    const first = hook.runNotificationHook({ session_id: 'session-A', last_assistant_message: QUESTION }, deps);
     assert.deepEqual(first, { exitCode: 0 });
     assert.equal(spawn.calls.length, 1);
     assert.equal(fs.existsSync(hook.pendingPath(env.workspace, env.runtimeRoot)), false);
@@ -135,12 +135,43 @@ test('cancel: 待つあいだに人間が入力したら（--cancel）、通知�
   withEnv((env) => {
     env.mark('session-A');
     const spawn = recordingSpawn();
-    const result = hook.runStopHook({ session_id: 'session-A' }, env.deps({
+    const result = hook.runNotificationHook({ session_id: 'session-A' }, env.deps({
       spawnSyncFn: spawn.fn,
       sleepFn: () => assert.deepEqual(hook.runCancelHook({ session_id: 'session-A' }, env.deps()), { exitCode: 0 }),
     }));
     assert.deepEqual(result, { exitCode: 0 });
     assert.equal(spawn.calls.length, 0);
+  });
+});
+
+test('permission request: AskUserQuestion の回答後の PostToolUse 取消で、継続中に通知しない', () => {
+  withEnv((env) => {
+    env.mark('session-A');
+    const spawn = recordingSpawn();
+    const input = { session_id: 'session-A', tool_name: 'AskUserQuestion' };
+    const result = hook.runNotificationHook(input, env.deps({
+      spawnSyncFn: spawn.fn,
+      sleepFn: () => {
+        assert.deepEqual(hook.runCancelHook(input, env.deps()), { exitCode: 0 });
+      },
+    }));
+    assert.deepEqual(result, { exitCode: 0 });
+    assert.equal(spawn.calls.length, 0);
+    assert.equal(fs.existsSync(hook.pendingPath(env.workspace, env.runtimeRoot)), false);
+  });
+});
+
+test('拒否・中断: 後続入力がなければ予約を維持し、通知を1回送る', () => {
+  withEnv((env) => {
+    env.mark('session-A');
+    const spawn = recordingSpawn();
+    const result = hook.runNotificationHook(
+      { session_id: 'session-A', tool_name: 'AskUserQuestion' },
+      env.deps({ spawnSyncFn: spawn.fn, randomUUIDFn: () => 'permission-pending' }),
+    );
+    assert.deepEqual(result, { exitCode: 0 });
+    assert.equal(spawn.calls.length, 1);
+    assert.equal(fs.existsSync(hook.pendingPath(env.workspace, env.runtimeRoot)), false);
   });
 });
 
@@ -151,7 +182,7 @@ test('cancel: 記録と異なるセッション・記録なしの入力では予
       assert.deepEqual(hook.runCancelHook({ session_id: 'worker-session' }, env.deps()), { exitCode: 0 });
     };
     env.mark('session-A');
-    hook.runStopHook({ session_id: 'session-A' }, env.deps({ spawnSyncFn: spawn.fn, sleepFn: other }));
+    hook.runNotificationHook({ session_id: 'session-A' }, env.deps({ spawnSyncFn: spawn.fn, sleepFn: other }));
     assert.equal(spawn.calls.length, 1);
   });
   withEnv((env) => {
@@ -166,7 +197,7 @@ test('壊れた予約: 待ち終えたときの予約が壊れていれば、修
       env.mark('session-A');
       const spawn = recordingSpawn();
       const file = hook.pendingPath(env.workspace, env.runtimeRoot);
-      assert.throws(() => hook.runStopHook({ session_id: 'session-A' }, env.deps({
+      assert.throws(() => hook.runNotificationHook({ session_id: 'session-A' }, env.deps({
         spawnSyncFn: spawn.fn,
         sleepFn: () => fs.writeFileSync(file, content, 'utf8'),
       })), content.startsWith('{"') ? /通知の予約が不正です/ : undefined);
@@ -180,11 +211,11 @@ test('stop: 記録と異なるセッション（ワーカー・前のセッシ�
   withEnv((env) => {
     const spawn = recordingSpawn();
     const input = (id) => ({ session_id: id, last_assistant_message: QUESTION });
-    assert.deepEqual(hook.runStopHook(input('session-A'), env.deps({ spawnSyncFn: spawn.fn })), { exitCode: 0 });
+    assert.deepEqual(hook.runNotificationHook(input('session-A'), env.deps({ spawnSyncFn: spawn.fn })), { exitCode: 0 });
     env.mark('session-A');
     env.mark('session-B');
-    assert.deepEqual(hook.runStopHook(input('session-A'), env.deps({ spawnSyncFn: spawn.fn })), { exitCode: 0 });
-    assert.deepEqual(hook.runStopHook(input('worker-session'), env.deps({ spawnSyncFn: spawn.fn })), { exitCode: 0 });
+    assert.deepEqual(hook.runNotificationHook(input('session-A'), env.deps({ spawnSyncFn: spawn.fn })), { exitCode: 0 });
+    assert.deepEqual(hook.runNotificationHook(input('worker-session'), env.deps({ spawnSyncFn: spawn.fn })), { exitCode: 0 });
     assert.equal(spawn.calls.length, 0);
   });
 });
@@ -192,7 +223,7 @@ test('stop: 記録と異なるセッション（ワーカー・前のセッシ�
 test('stop: workspace を解決できないプロジェクトでは何もしない', () => {
   withEnv((env) => {
     const spawn = recordingSpawn();
-    const result = hook.runStopHook(
+    const result = hook.runNotificationHook(
       { session_id: 'x', last_assistant_message: QUESTION },
       env.deps({ resolveWorkspaceFn: () => null, spawnSyncFn: spawn.fn }),
     );
@@ -205,12 +236,12 @@ test('stop: 通知の失敗は終了コード1で返し、ブロックの終了�
   withEnv((env) => {
     env.mark('session-A');
     const input = { session_id: 'session-A', last_assistant_message: QUESTION };
-    const failed = hook.runStopHook(input, env.deps({
+    const failed = hook.runNotificationHook(input, env.deps({
       spawnSyncFn: recordingSpawn({ status: 7, stdout: '', stderr: 'curl failed' }).fn,
     }));
     assert.equal(failed.exitCode, 1);
     assert.match(failed.stderr, /通知に失敗しました: curl failed/);
-    const errored = hook.runStopHook(input, env.deps({
+    const errored = hook.runNotificationHook(input, env.deps({
       spawnSyncFn: recordingSpawn({ status: null, error: new Error('ENOENT node') }).fn,
     }));
     assert.equal(errored.exitCode, 1);
@@ -224,7 +255,7 @@ test('壊れた記録: JSON構文エラーは修復せずエラーにする', ()
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, '{not json', 'utf8');
     const spawn = recordingSpawn();
-    assert.throws(() => hook.runStopHook(
+    assert.throws(() => hook.runNotificationHook(
       { session_id: 's', last_assistant_message: QUESTION },
       env.deps({ spawnSyncFn: spawn.fn }),
     ));
@@ -239,7 +270,7 @@ test('壊れた記録: sessionId の型不正は修復せずエラーにする',
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, '{"schemaVersion":1,"sessionId":42}', 'utf8');
     assert.throws(
-      () => hook.runStopHook({ session_id: 's', last_assistant_message: QUESTION }, env.deps()),
+      () => hook.runNotificationHook({ session_id: 's', last_assistant_message: QUESTION }, env.deps()),
       /orchestratorセッション記録が不正です/,
     );
     assert.equal(fs.readFileSync(file, 'utf8'), '{"schemaVersion":1,"sessionId":42}');
@@ -276,6 +307,8 @@ test('CLI: --help は終了コード0、余分な位置引数は非0', () => {
   const help = spawnSync(process.execPath, [SCRIPT, '--help'], { encoding: 'utf8' });
   assert.equal(help.status, 0);
   assert.match(help.stdout, /Usage:/);
+  assert.match(help.stdout, /Stop \/ StopFailure \/ PermissionRequest/);
+  assert.match(help.stdout, /PostToolUse \/ UserPromptSubmit/);
   const extra = spawnSync(process.execPath, [SCRIPT, 'stop'], { encoding: 'utf8', input: '{"session_id":"s"}' });
   assert.equal(extra.status, 1);
   assert.match(extra.stderr, /orchestrator-stop-hook: /);

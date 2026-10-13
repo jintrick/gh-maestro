@@ -34,9 +34,11 @@ test('plugin manifest and monitors: fixed interactive session monitors have no d
   }
 });
 
-test('plugin manifest hooks: orchestratorの通知の予約（Stop）と取り消し（UserPromptSubmit）だけを固定引数で登録する', () => {
+test('plugin manifest hooks: 操作待ちの予約・完了後の取消を固定引数で登録する', () => {
   const manifest = readJson('.claude-plugin/plugin.json');
-  assert.deepEqual(Object.keys(manifest.hooks).sort(), ['Stop', 'UserPromptSubmit']);
+  assert.deepEqual(Object.keys(manifest.hooks).sort(), [
+    'PermissionRequest', 'PostToolUse', 'Stop', 'StopFailure', 'UserPromptSubmit',
+  ]);
   const entryOf = (event) => {
     const groups = manifest.hooks[event];
     assert.equal(groups.length, 1);
@@ -47,12 +49,19 @@ test('plugin manifest hooks: orchestratorの通知の予約（Stop）と取り�
     assert.equal(entry.command, 'node');
     return entry;
   };
-  const stop = entryOf('Stop');
-  assert.deepEqual(stop.args, ['${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js']);
-  // hook の中で通知の遅延を待つため、応答を止めない async で、待ち時間より長い timeout を持つ。
-  assert.equal(stop.async, true);
-  assert.ok(stop.timeout * 1000 > require('../scripts/orchestrator-stop-hook').NOTIFY_DELAY_MS);
-  const cancel = entryOf('UserPromptSubmit');
-  assert.deepEqual(cancel.args, ['${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js', '--cancel']);
+  const reserveArgs = ['${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js'];
+  const delayMs = require('../scripts/orchestrator-stop-hook').NOTIFY_DELAY_MS;
+  for (const event of ['PermissionRequest', 'Stop', 'StopFailure']) {
+    const reserve = entryOf(event);
+    assert.deepEqual(reserve.args, reserveArgs, `${event} は共通の予約処理を使う`);
+    // 通知まで待っても Claude Code の対話や許可画面を止めない。
+    assert.equal(reserve.async, true, `${event} hook は async`);
+    assert.ok(reserve.timeout * 1000 > delayMs, `${event} timeout は通知待ちより長い`);
+  }
+  for (const event of ['PostToolUse', 'UserPromptSubmit']) {
+    const cancel = entryOf(event);
+    assert.deepEqual(cancel.args, [...reserveArgs, '--cancel'], `${event} は共通の取消処理を使う`);
+    assert.notEqual(cancel.async, true, `${event} は予約取消を同期して完了する`);
+  }
   assert.ok(fs.existsSync(path.join(__dirname, '..', 'scripts', 'orchestrator-stop-hook.js')));
 });

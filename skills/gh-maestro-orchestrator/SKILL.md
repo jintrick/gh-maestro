@@ -109,7 +109,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 
 ### 発言の形
 
-- 人間への通知はgh-maestro pluginのhook（scripts/orchestrator-stop-hook.js）が送る。/gh-maestroを実行したセッションで応答が終わると、応答の内容にかかわらず60秒後の通知を予約し、その間に次の応答が終わるか人間が入力すれば取り消す。orchestratorはnotify-human.jsを自分で実行せず、通知を送った旨も書かない。
+- 人間への通知はgh-maestro pluginのhook（scripts/orchestrator-stop-hook.js）が送る。/gh-maestroを実行したセッションでは、応答の終了（Stop）、APIエラー（StopFailure）、AskUserQuestionまたはツールの許可画面（PermissionRequest）で通知を60秒後に予約する。回答・許可後のPostToolUseまたは人間の次の入力（UserPromptSubmit）で予約を取り消す。拒否・中断後に人間の入力がなければ通知が届くことがある。orchestratorはnotify-human.jsを自分で実行せず、通知を送った旨も書かない。
 - 通知やワーカーの報告を受けて、人間が判断・対応することが無いときは、応答は最小限の一言にとどめる。受け取った旨の説明、待っている旨の説明、既に伝えた内容の繰り返しを書かない（Claude Code は文章の無い応答を許さず、応答を求め直す）。
 - 1つの発言に質問を2つ含めない。質問は末尾に1つだけ置き、複数の実行や承認を一度に求めない。
 - 選択肢や長い提案と、取り消せない操作の承認を同じ発言で求めない。先に選択肢への回答を得て、必要なら対象と操作を明示して別に尋ねる。
