@@ -48,13 +48,11 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 
 ### 人間への通知
 
-人間の応答を待っている間に進捗を報告するとき、および判断や承認を求めるときは、本文の送信を完了してから次のコマンドを実行する。
+人間への通知は、gh-maestro plugin の Stop hook が orchestrator の応答が終わるたびに自動で送る（`scripts/orchestrator-turn-hook.js`）。orchestrator は `notify-human.js` を自分で実行せず、通知を送った旨もチャットに書かない。
 
-```sh
-node "{{SCRIPTS_PATH}}/notify-human.js" --repo $REPO --workspace $WORKSPACE
-```
+人間の発言が届くたびに、UserPromptSubmit hook が発言ごとに守る規範の要約（`scripts/orchestrator-turn-reminder.md`）を文脈へ追加する。要約は各規範の正本の節を指すだけである。規範を変えるときは正本を変え、要約が食い違わないように合わせる。
 
-通知本文にはリポジトリ名が使われる。通知に失敗しても主作業を止めず、stderrに出た失敗理由を確認して人間に通知失敗を伝える。
+hook は `/gh-maestro` を実行したセッションだけで動き、ヘッドレスのワーカーや gh-maestro を使わないセッションでは何もしない。規範を書き足しても発言の瞬間に想起されなかったため、この2つは記憶に頼らない仕組みにしてある（Issue #611）。
 ### 設計判断の記録（ADR）
 
 `docs/adr/` に判断記録（ADR）を書くのはあなただけである。ワーカーには書かせない。判断の経緯を持っているのは人間と協働したあなたであり、その経緯はセッションが終われば失われる。
