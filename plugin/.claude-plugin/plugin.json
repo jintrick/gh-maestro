@@ -1,7 +1,7 @@
 {
   "name": "gh-maestro",
   "version": "0.1.0",
-  "description": "gh-maestro session monitors and orchestrator notification hook",
+  "description": "gh-maestro session monitors and orchestrator notification hooks",
   "hooks": {
     "Stop": [
       {
@@ -13,7 +13,22 @@
               "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js"
             ],
             "async": true,
-            "timeout": 60
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js",
+              "--cancel"
+            ],
+            "timeout": 10
           }
         ]
       }

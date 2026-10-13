@@ -1,44 +1,82 @@
 #!/usr/bin/env node
 'use strict';
 
-// orchestrator の対話型セッションで、応答が終わるたびに人間へ通知する
-// Claude Code plugin の Stop hook。
+// orchestrator の対話型セッションで人間へ通知する Claude Code plugin の hook。
 // 通知を orchestrator 自身の操作に任せると、SKILL.md に書いてあっても発言の瞬間に
 // 想起されず送られない（Issue #611）。応答の終わりに必ず発火する Stop hook で送る。
 //
+// 人間に用があるかは応答の形から判定できないため、応答の内容では絞らない。代わりに、
+// Stop で60秒後の通知を予約し、その間に次の Stop か人間の入力（UserPromptSubmit、
+// --cancel）があれば取り消す。監視の通知に反応しただけのターンが続いても、通知は
+// 静かになった後の1回にまとまる（docs/adr/0045-notify-human-on-every-orchestrator-stop.md）。
+// Stop hook は async で登録されているため、hook の中で待っても応答を止めない。
+//
 // plugin hook はヘッドレスのワーカーや gh-maestro を使わないセッションでも発火するため、
 // /gh-maestro のセッション初期化（gh-maestro-session-hook.js）が記録したセッションIDと
-// 一致するときだけ通知する。人間に用があるかは応答の形から判定できないため、応答の
-// 内容では絞らない（docs/adr/0045-notify-human-on-every-orchestrator-stop.md）。
+// 一致するときだけ予約・取り消しを行う。
 // 失敗してもClaude Codeの応答・対話を止めないよう、終了コード2（ブロック）は使わない。
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('./shared/child-process');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { ensureWorkspaceRuntimeDir, workspaceRuntimeDir } = require('./shared/storage-layout');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { readJsonFile, parseJsonText } = require('./shared/json-file');
 
-const USAGE = `orchestrator-stop-hook.js — orchestratorセッション専用のClaude Code Stop hook
+const USAGE = `orchestrator-stop-hook.js — orchestratorセッション専用のClaude Code Stop / UserPromptSubmit hook
 
 Usage:
-  node orchestrator-stop-hook.js
+  node orchestrator-stop-hook.js            Stop hook として通知を予約する
+  node orchestrator-stop-hook.js --cancel   UserPromptSubmit hook として予約を取り消す
   node orchestrator-stop-hook.js --help | -h
 
-Stop hook の入力JSON（session_id, cwd）を標準入力から読む（TTYならエラー）。
+hook の入力JSON（session_id, cwd）を標準入力から読む（TTYならエラー）。
 workspace は CLAUDE_PROJECT_DIR、なければhook入力の cwd から解決する。
-session_id が /gh-maestro のセッション初期化で記録されたIDと一致するとき、
-応答の内容（last_assistant_message）にかかわらず notify-human.js を実行する。
-一致しないとき・記録が無いときは何もせず終了コード0。失敗時は終了コード1（Claude Codeの処理は止めない）。`;
+session_id が /gh-maestro のセッション初期化で記録されたIDと一致するときだけ動く。
+一致しないとき・記録が無いときは何もせず終了コード0。
+
+予約（引数なし）: 応答の内容（last_assistant_message）にかかわらず、60秒後の通知を
+  予約して待つ。待つあいだに次の予約か --cancel があれば、通知せず終了する。
+  何も起きなければ notify-human.js を1回実行する。
+取り消し（--cancel）: 予約があれば取り消す。標準出力には何も書かない。
+
+失敗時は終了コード1（Claude Codeの処理は止めない）。`;
 
 const SPEC = {
   flags: {},
-  booleans: ['--help', '-h'],
+  booleans: ['--help', '-h', '--cancel'],
   positionals: { min: 0, max: 0 },
 };
 
 const MARKER_FILE = 'orchestrator-claude-session.json';
+const PENDING_FILE = 'orchestrator-pending-notification.json';
+const NOTIFY_DELAY_MS = 60000;
+
+function pendingPath(workspace, runtimeRootOverride) {
+  return path.join(workspaceRuntimeDir(workspace, runtimeRootOverride), PENDING_FILE);
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * 予約中の通知のトークンを読む。予約が無いことは正常な不在として null を返し、
+ * 壊れた予約は修復せず例外にする。
+ *
+ * @param {string} filePath
+ * @returns {string|null}
+ */
+function readPendingToken(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  const data = readJsonFile(filePath);
+  if (!data || typeof data !== 'object' || typeof data.token !== 'string' || data.token === '') {
+    throw new Error(`通知の予約が不正です: ${filePath}`);
+  }
+  return data.token;
+}
 
 function markerPath(workspace, runtimeRootOverride) {
   return path.join(workspaceRuntimeDir(workspace, runtimeRootOverride), MARKER_FILE);
@@ -95,19 +133,45 @@ function parseHookInput(text) {
 }
 
 /**
- * Stop hook の1回分の処理。副作用はdepsで差し替えられる。
+ * hook入力が記録済みの orchestrator セッションのものなら、その workspace を返す。
+ *
+ * @param {object} input hook入力（session_id, cwd）
+ * @param {object} deps
+ * @returns {string|null}
+ */
+function resolveOrchestratorWorkspace(input, deps) {
+  const env = deps.env || process.env;
+  const resolveWorkspaceFn = deps.resolveWorkspaceFn || resolveWorkspace;
+  // gh-maestro を使っていないプロジェクトでも plugin hook は発火する。
+  const workspace = resolveWorkspaceFn(env.CLAUDE_PROJECT_DIR || input.cwd);
+  if (!workspace) return null;
+  if (readMarkedSessionId(markerPath(workspace, deps.runtimeRoot)) !== input.session_id) return null;
+  return workspace;
+}
+
+/**
+ * Stop hook の1回分の処理。通知を予約して待ち、予約が残っていれば通知する。
+ * 副作用はdepsで差し替えられる。
  *
  * @param {object} input hook入力（session_id, cwd）
  * @param {object} [deps]
  * @returns {{exitCode:number, stderr?:string}}
  */
 function runStopHook(input, deps = {}) {
-  const env = deps.env || process.env;
-  const resolveWorkspaceFn = deps.resolveWorkspaceFn || resolveWorkspace;
-  // gh-maestro を使っていないプロジェクトでも plugin hook は発火する。
-  const workspace = resolveWorkspaceFn(env.CLAUDE_PROJECT_DIR || input.cwd);
+  const workspace = resolveOrchestratorWorkspace(input, deps);
   if (!workspace) return { exitCode: 0 };
-  if (readMarkedSessionId(markerPath(workspace, deps.runtimeRoot)) !== input.session_id) return { exitCode: 0 };
+
+  const file = pendingPath(workspace, deps.runtimeRoot);
+  const token = (deps.randomUUIDFn || crypto.randomUUID)();
+  atomicWriteJson(file, {
+    schemaVersion: 1,
+    token,
+    scheduledAt: (deps.now || (() => new Date()))().toISOString(),
+  });
+  (deps.sleepFn || sleepSync)(deps.delayMs === undefined ? NOTIFY_DELAY_MS : deps.delayMs);
+  // 待つあいだに次の Stop が予約し直したか、人間の入力で取り消された。
+  if (readPendingToken(file) !== token) return { exitCode: 0 };
+  fs.rmSync(file, { force: true });
 
   const spawnSyncFn = deps.spawnSyncFn || spawnSync;
   const result = spawnSyncFn(process.execPath, [
@@ -117,6 +181,20 @@ function runStopHook(input, deps = {}) {
     const detail = result?.error?.message || String(result?.stderr || '').trim() || `exit ${result?.status}`;
     return { exitCode: 1, stderr: `orchestrator-stop-hook: 通知に失敗しました: ${detail}\n` };
   }
+  return { exitCode: 0 };
+}
+
+/**
+ * UserPromptSubmit hook の1回分の処理。予約中の通知を取り消す。
+ *
+ * @param {object} input hook入力（session_id, cwd）
+ * @param {object} [deps]
+ * @returns {{exitCode:number}}
+ */
+function runCancelHook(input, deps = {}) {
+  const workspace = resolveOrchestratorWorkspace(input, deps);
+  if (!workspace) return { exitCode: 0 };
+  fs.rmSync(pendingPath(workspace, deps.runtimeRoot), { force: true });
   return { exitCode: 0 };
 }
 
@@ -151,7 +229,8 @@ function main(argv = process.argv.slice(2), options = {}) {
   }
 
   try {
-    const result = runStopHook(parseHookInput(readStdin()), options);
+    const input = parseHookInput(readStdin());
+    const result = values['--cancel'] ? runCancelHook(input, options) : runStopHook(input, options);
     if (result.stderr) writeStderr(result.stderr);
     return result.exitCode;
   } catch (error) {
@@ -161,7 +240,8 @@ function main(argv = process.argv.slice(2), options = {}) {
 }
 
 module.exports = {
-  USAGE, SPEC, MARKER_FILE, markerPath, markOrchestratorSession, readMarkedSessionId,
+  USAGE, SPEC, MARKER_FILE, PENDING_FILE, NOTIFY_DELAY_MS, markerPath, pendingPath, readPendingToken,
+  runCancelHook, markOrchestratorSession, readMarkedSessionId,
   parseHookInput, runStopHook, main,
 };
 
