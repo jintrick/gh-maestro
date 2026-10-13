@@ -2,17 +2,12 @@
 
 影響範囲が限定的でReview Managerのレビューを起動するコストに見合わない変更でも、ベースブランチへ直接commit・pushしてはならない。タイトルだけのアンカーIssueを作成し、通常のPR監視からReview Managerを外す。この軽量経路ではslow層とGitHub CI checksの照会を行わず、PR検出、テスト結果の申告、マージ状態の監視を行う。Review Managerを起動しないだけの通常PR（監視復旧やrevert用PRなど）は軽量経路ではなく、slow層とGitHub CI checksの照会を維持する。
 
-例外は次の2つだけである。どちらもこの経路を使わず、アンカーIssue・PR・slow層・マージ依頼を作らずにベースブランチへ直接commit・pushする。
-
-- `adr.md`が定義するADRの追加・改訂（直接commit・pushしてよい）。
-- 反省会で人間が承認した、対象プロジェクトの `.claude/rules/` の変更（承認後すぐにorchestrator自身が直接commit・pushする。手順は `retrospective.md`「反省会後のアクション」）。
-
-このファイルの「直接commit・pushしない」「ドキュメントだけでも省略しない」は、この2つには適用しない。
+直接commit・pushが許される例外の定義はSKILL.md「役割と不変条件」に集約する。ここではその例外に該当しない軽量PR手順を扱う。
 
 ## 実行前の前提
 
 - セッション変数 `$REPO`、`$WORKSPACE`、`$BASE_BRANCH` が設定されていること。
-- `$WORKSPACE` に未コミットの無関係な変更がないこと。必要なら先に状態を人間へ確認する。
+- $WORKSPACE に未コミットの無関係な変更がないこと。必要ならSKILL.md「人間への発言の規範」に従って状態を確認する。
 - 変更対象の要件と、PRのタイトル・本文に使う説明が確定していること。
 
 ## 手順
@@ -48,7 +43,7 @@ git commit -m "<変更内容の短いタイトル>"
 git push -u origin "$BRANCH"
 ```
 
-BASE_BRANCHへ直接commit・pushしない（冒頭の例外2つを除く）。変更がドキュメントだけでも、この経路を省略しない。反省会で承認された `.claude/rules/` の変更は「ドキュメントだけの変更」ではなく冒頭の例外であり、この経路に乗せない。
+BASE_BRANCHへの直接commit・pushと例外はSKILL.md「役割と不変条件」を参照する。変更がドキュメントだけでも軽量PR経路を省略しない。
 
 ### 3. Review ManagerなしでPRを作成する
 
@@ -97,10 +92,10 @@ node "{{SCRIPTS_PATH}}/activate-pr-monitor.js" --issue "$ISSUE" \
 - PR検出とマージ・クローズ監視の記録は通常どおり確認できる。
 - この軽量PR経路を実際に1回運用確認し、slow層とCI checksの通知がないことを確認した記録をIssueコメントに残す。
 
-slow層またはGitHub CI checksの通知が出た場合は、監視経路の設定を確認して人間へ報告する。通知がないこと自体は軽量PR経路の期待動作である。
+slow層またはGitHub CI checksの通知が出た場合は、監視経路の設定を確認してSKILL.md「人間への発言の規範」に従って報告する。通知がないこと自体は軽量PR経路の期待動作である。
 
 ### 5. マージ後の後始末
 
-**軽量PR経路に反省会は無い。** Review Managerを起動しないためレビュー指摘が構造的に発生せず、反省会の分析対象は常にゼロである。`SKILL.md`「13. 反省会と後始末」の13-[2/3]にある「分析対象がゼロなら人間に確認する」は、この経路には適用しない。飛ばしてよいかを人間に尋ねない。
+**軽量PR経路に反省会は無い。** Review Managerを起動しないためレビュー指摘が構造的に発生せず、反省会の分析対象は常にゼロである。SKILL.md工程13-[2/3]の「分析対象がゼロなら人間に確認する」はこの経路には適用せず、スキップ可否を尋ねない。
 
 マージを検出したらベースブランチを最新化し、`scripts/` または `skills/agents.yaml` に触れた変更なら `node scripts/install.js` を実行してから、`finalize-issue.js` でアンカーIssueをクローズする。
