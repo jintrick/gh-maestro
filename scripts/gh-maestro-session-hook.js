@@ -7,9 +7,12 @@
 // 前後で検査結果とcontextがずれる競合が起きる。ここでは兄弟CLIを同期実行し、
 // 全段階の成功後だけ stdout をhookへ返す。
 
+const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./shared/child-process');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
+const { parseJsonText } = require('./shared/json-file');
+const { markOrchestratorSession } = require('./orchestrator-stop-hook');
 
 const USAGE = `gh-maestro-session-hook.js — /gh-maestro のセッション開始hook
 
@@ -25,9 +28,12 @@ Options:
   2. gh-maestro-setup.js <workspace>
   3. reset-session.js --workspace <workspace> --quiet
   4. get-context.js
+  5. 標準入力のhook入力JSONにある session_id を、orchestratorセッションとして記録する
+     （orchestrator-stop-hook.js が通知の対象を見分けるため。標準入力がTTYなら省略）
 
 全段階が終了コード0のときだけ、各段階のstdoutをこのhookのstdoutへ出力する。
-途中で失敗した場合は後続段階を実行せず、stdoutを出力しない。`;
+途中で失敗した場合は後続段階を実行せず、stdoutを出力しない。
+5の記録に失敗しても警告を出すだけで、セッション開始は失敗させない。`;
 
 const SPEC = {
   flags: { '--workspace': {} },
@@ -133,6 +139,32 @@ function runSessionHook(workspace, options = {}) {
   };
 }
 
+/**
+ * hook入力の session_id を orchestrator セッションとして記録する。
+ * 通知の対象を見分けるための記録であり、セッション開始の成否には影響させない。
+ *
+ * @param {string} workspace
+ * @param {object} [options]
+ * @returns {string} 警告（無ければ空文字）
+ */
+function recordOrchestratorSession(workspace, options = {}) {
+  const isStdinTTY = options.isStdinTTY || (() => process.stdin.isTTY);
+  if (isStdinTTY()) return '';
+  const readStdin = options.readStdinFn || (() => fs.readFileSync(0, 'utf8'));
+  const mark = options.markSessionFn || markOrchestratorSession;
+  try {
+    const input = parseJsonText(readStdin());
+    const sessionId = input && typeof input === 'object' ? input.session_id : undefined;
+    if (typeof sessionId !== 'string' || sessionId === '') {
+      return 'gh-maestro-session-hook: hook入力に session_id が無いため、orchestratorセッションを記録しませんでした（通知は送られません）\n';
+    }
+    mark(workspace, sessionId);
+    return '';
+  } catch (error) {
+    return `gh-maestro-session-hook: orchestratorセッションを記録できませんでした（通知は送られません）: ${error.message}\n`;
+  }
+}
+
 function printArgsError(error, writeStderr) {
   if (error && error.name === 'ArgsValidationError') {
     if (error.helpRequested) {
@@ -191,6 +223,7 @@ function main(argv = process.argv.slice(2), options = {}) {
 
   // contextを含むstdoutは、全段階成功後にだけ出力する。
   writeStderr(outputText(result.stderr));
+  writeStderr(recordOrchestratorSession(workspace, options));
   writeStdout(outputText(result.stdout));
   return 0;
 }
@@ -200,6 +233,7 @@ module.exports = {
   SPEC,
   stageDefinitions,
   runSessionHook,
+  recordOrchestratorSession,
   main,
 };
 

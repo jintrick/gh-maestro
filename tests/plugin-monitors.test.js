@@ -33,3 +33,18 @@ test('plugin manifest and monitors: fixed interactive session monitors have no d
     assert.doesNotMatch(entry.command, /persistent|timeout|user_config/i);
   }
 });
+
+test('plugin manifest hooks: orchestratorの通知用 Stop hook だけを固定引数で登録する', () => {
+  const manifest = readJson('.claude-plugin/plugin.json');
+  assert.deepEqual(Object.keys(manifest.hooks), ['Stop']);
+  const groups = manifest.hooks.Stop;
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].matcher, undefined);
+  assert.equal(groups[0].hooks.length, 1);
+  const entry = groups[0].hooks[0];
+  assert.equal(entry.type, 'command');
+  assert.equal(entry.command, 'node');
+  assert.deepEqual(entry.args, ['${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js']);
+  assert.equal(entry.async, true);
+  assert.ok(fs.existsSync(path.join(__dirname, '..', 'scripts', 'orchestrator-stop-hook.js')));
+});

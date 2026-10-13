@@ -1,5 +1,22 @@
 {
   "name": "gh-maestro",
   "version": "0.1.0",
-  "description": "gh-maestro session monitors for inbox and pull-request events"
+  "description": "gh-maestro session monitors and orchestrator notification hook",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js"
+            ],
+            "async": true,
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
 }
