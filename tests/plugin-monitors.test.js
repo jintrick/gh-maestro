@@ -34,26 +34,17 @@ test('plugin manifest and monitors: fixed interactive session monitors have no d
   }
 });
 
-test('plugin manifest hooks: orchestratorの発言ごとの hook を固定引数で登録する', () => {
+test('plugin manifest hooks: orchestratorの通知用 Stop hook だけを固定引数で登録する', () => {
   const manifest = readJson('.claude-plugin/plugin.json');
-  const scriptArg = '${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-turn-hook.js';
-  const expected = {
-    UserPromptExpansion: { mode: 'mark', matcher: '^gh-maestro$' },
-    UserPromptSubmit: { mode: 'prompt' },
-    Stop: { mode: 'stop', async: true },
-  };
-  assert.deepEqual(Object.keys(manifest.hooks).sort(), Object.keys(expected).sort());
-  for (const [event, spec] of Object.entries(expected)) {
-    const groups = manifest.hooks[event];
-    assert.equal(groups.length, 1, event);
-    assert.equal(groups[0].matcher, spec.matcher, event);
-    assert.equal(groups[0].hooks.length, 1, event);
-    const entry = groups[0].hooks[0];
-    assert.equal(entry.type, 'command');
-    assert.equal(entry.command, 'node');
-    assert.deepEqual(entry.args, [scriptArg, spec.mode]);
-    assert.equal(entry.async, spec.async, event);
-  }
-  assert.ok(fs.existsSync(path.join(__dirname, '..', 'scripts', 'orchestrator-turn-hook.js')));
-  assert.ok(fs.existsSync(path.join(__dirname, '..', 'scripts', 'orchestrator-turn-reminder.md')));
+  assert.deepEqual(Object.keys(manifest.hooks), ['Stop']);
+  const groups = manifest.hooks.Stop;
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].matcher, undefined);
+  assert.equal(groups[0].hooks.length, 1);
+  const entry = groups[0].hooks[0];
+  assert.equal(entry.type, 'command');
+  assert.equal(entry.command, 'node');
+  assert.deepEqual(entry.args, ['${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js']);
+  assert.equal(entry.async, true);
+  assert.ok(fs.existsSync(path.join(__dirname, '..', 'scripts', 'orchestrator-stop-hook.js')));
 });

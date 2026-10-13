@@ -328,3 +328,93 @@ test('CLI通し: get-contextが失敗した場合は旧SESSION_IDをstdoutへ出
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test('recordOrchestratorSession: hook入力の session_id を workspace と共に記録する', () => {
+  const { recordOrchestratorSession } = require('../scripts/gh-maestro-session-hook');
+  const calls = [];
+  const warning = recordOrchestratorSession('C:/ws', {
+    isStdinTTY: () => false,
+    readStdinFn: () => JSON.stringify({ session_id: 'claude-session-1', hook_event_name: 'UserPromptExpansion' }),
+    markSessionFn: (workspace, sessionId) => calls.push([workspace, sessionId]),
+  });
+  assert.equal(warning, '');
+  assert.deepEqual(calls, [['C:/ws', 'claude-session-1']]);
+});
+
+test('recordOrchestratorSession: TTYなら標準入力を読まずに記録を省く', () => {
+  const { recordOrchestratorSession } = require('../scripts/gh-maestro-session-hook');
+  let read = false;
+  const warning = recordOrchestratorSession('C:/ws', {
+    isStdinTTY: () => true,
+    readStdinFn: () => { read = true; return ''; },
+    markSessionFn: () => { throw new Error('呼ばれてはならない'); },
+  });
+  assert.equal(warning, '');
+  assert.equal(read, false);
+});
+
+test('recordOrchestratorSession: 記録できない場合は警告だけを返し、例外にしない', () => {
+  const { recordOrchestratorSession } = require('../scripts/gh-maestro-session-hook');
+  const cases = [
+    { name: '空の入力', read: () => '' },
+    { name: 'JSON構文エラー', read: () => '{bad' },
+    { name: 'session_id 欠落', read: () => '{"cwd":"x"}' },
+    { name: 'session_id 型不正', read: () => '{"session_id":1}' },
+  ];
+  for (const c of cases) {
+    let marked = false;
+    const warning = recordOrchestratorSession('C:/ws', {
+      isStdinTTY: () => false, readStdinFn: c.read, markSessionFn: () => { marked = true; },
+    });
+    assert.match(warning, /orchestratorセッションを記録/, c.name);
+    assert.equal(marked, false, c.name);
+  }
+  const failed = recordOrchestratorSession('C:/ws', {
+    isStdinTTY: () => false,
+    readStdinFn: () => '{"session_id":"s"}',
+    markSessionFn: () => { throw new Error('disk full'); },
+  });
+  assert.match(failed, /記録できませんでした.*disk full/);
+});
+
+test('main: 全段階成功後に orchestrator セッションを記録し、記録の失敗では終了コードを変えない', () => {
+  const { main } = require('../scripts/gh-maestro-session-hook');
+  const out = [];
+  const err = [];
+  const marks = [];
+  const base = {
+    runSessionHookFn: () => ({ ok: true, exitCode: 0, stdout: 'SESSION_ID=x\n', stderr: '' }),
+    writeStdoutFn: (v) => out.push(v),
+    writeStderrFn: (v) => err.push(v),
+    isStdinTTY: () => false,
+  };
+  const workspace = path.join(__dirname, 'fixture-session-hook-workspace');
+  assert.equal(main(['--workspace', workspace], {
+    ...base,
+    readStdinFn: () => '{"session_id":"claude-1"}',
+    markSessionFn: (ws, id) => marks.push([ws, id]),
+  }), 0);
+  assert.deepEqual(marks, [[workspace, 'claude-1']]);
+  assert.equal(main(['--workspace', workspace], {
+    ...base,
+    readStdinFn: () => '{"session_id":"claude-2"}',
+    markSessionFn: () => { throw new Error('disk full'); },
+  }), 0);
+  assert.match(err.join(''), /disk full/);
+  assert.deepEqual(out, ['SESSION_ID=x\n', 'SESSION_ID=x\n']);
+});
+
+test('main: 段階が失敗したときは orchestrator セッションを記録しない', () => {
+  const { main } = require('../scripts/gh-maestro-session-hook');
+  let marked = false;
+  const code = main(['--workspace', path.join(__dirname, 'fixture-session-hook-workspace')], {
+    runSessionHookFn: () => ({ ok: false, exitCode: 1, stdout: '', stderr: 'failed\n' }),
+    writeStdoutFn: () => {},
+    writeStderrFn: () => {},
+    isStdinTTY: () => false,
+    readStdinFn: () => '{"session_id":"claude-1"}',
+    markSessionFn: () => { marked = true; },
+  });
+  assert.equal(code, 1);
+  assert.equal(marked, false);
+});

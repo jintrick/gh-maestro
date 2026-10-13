@@ -1,39 +1,8 @@
 {
   "name": "gh-maestro",
   "version": "0.1.0",
-  "description": "gh-maestro session monitors and orchestrator turn hooks",
+  "description": "gh-maestro session monitors and orchestrator notification hook",
   "hooks": {
-    "UserPromptExpansion": [
-      {
-        "matcher": "^gh-maestro$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-turn-hook.js",
-              "mark"
-            ],
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-turn-hook.js",
-              "prompt"
-            ],
-            "timeout": 10
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "hooks": [
@@ -41,8 +10,7 @@
             "type": "command",
             "command": "node",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-turn-hook.js",
-              "stop"
+              "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js"
             ],
             "async": true,
             "timeout": 60
