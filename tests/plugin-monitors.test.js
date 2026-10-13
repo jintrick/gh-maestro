@@ -37,7 +37,7 @@ test('plugin manifest and monitors: fixed interactive session monitors have no d
 test('plugin manifest hooks: 操作待ちの予約・完了後の取消を固定引数で登録する', () => {
   const manifest = readJson('.claude-plugin/plugin.json');
   assert.deepEqual(Object.keys(manifest.hooks).sort(), [
-    'PermissionRequest', 'PostToolUse', 'Stop', 'StopFailure', 'UserPromptSubmit',
+    'PermissionRequest', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure', 'UserPromptSubmit',
   ]);
   const entryOf = (event) => {
     const groups = manifest.hooks[event];
@@ -58,7 +58,7 @@ test('plugin manifest hooks: 操作待ちの予約・完了後の取消を固定
     assert.equal(reserve.async, true, `${event} hook は async`);
     assert.ok(reserve.timeout * 1000 > delayMs, `${event} timeout は通知待ちより長い`);
   }
-  for (const event of ['PostToolUse', 'UserPromptSubmit']) {
+  for (const event of ['PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit']) {
     const cancel = entryOf(event);
     assert.deepEqual(cancel.args, [...reserveArgs, '--cancel'], `${event} は共通の取消処理を使う`);
     assert.notEqual(cancel.async, true, `${event} は予約取消を同期して完了する`);

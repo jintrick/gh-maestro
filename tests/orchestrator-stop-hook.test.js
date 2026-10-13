@@ -175,6 +175,54 @@ test('拒否・中断: 後続入力がなければ予約を維持し、通知を
   });
 });
 
+test('Stop: 前後の空白を除いて — だけなら予約せず、既存予約も変更しない', () => {
+  for (const message of ['—', '  — \n']) {
+    withEnv((env) => {
+      env.mark('session-A');
+      const spawn = recordingSpawn();
+      const file = hook.pendingPath(env.workspace, env.runtimeRoot);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const existing = JSON.stringify({ schemaVersion: 1, token: 'question-reservation', hookEventName: 'Stop' });
+      fs.writeFileSync(file, existing, 'utf8');
+      const result = hook.runNotificationHook({
+        session_id: 'session-A', hook_event_name: 'Stop', last_assistant_message: message,
+      }, env.deps({ spawnSyncFn: spawn.fn, randomUUIDFn: () => 'must-not-replace' }));
+      assert.deepEqual(result, { exitCode: 0 });
+      assert.equal(fs.readFileSync(file, 'utf8'), existing);
+      assert.equal(spawn.calls.length, 0);
+    });
+  }
+});
+
+test('Stop: — 以外の応答は予約し、PermissionRequest の — も予約する', () => {
+  for (const [event, message] of [['Stop', '— —'], ['Stop', '—です'], ['PermissionRequest', '—']]) {
+    withEnv((env) => {
+      env.mark('session-A');
+      const spawn = recordingSpawn();
+      hook.runNotificationHook({ session_id: 'session-A', hook_event_name: event, last_assistant_message: message },
+        env.deps({ spawnSyncFn: spawn.fn }));
+      assert.equal(spawn.calls.length, 1, `${event}: ${message}`);
+    });
+  }
+});
+
+test('PostToolUse と PostToolUseFailure は PermissionRequest 由来だけを取り消し、UserPromptSubmit はすべて取り消す', () => {
+  for (const [source, cancelEvent, shouldCancel] of [
+    ['Stop', 'PostToolUse', false], ['StopFailure', 'PostToolUseFailure', false],
+    ['PermissionRequest', 'PostToolUse', true], ['PermissionRequest', 'PostToolUseFailure', true],
+    ['Stop', 'UserPromptSubmit', true], ['PermissionRequest', 'UserPromptSubmit', true],
+  ]) {
+    withEnv((env) => {
+      env.mark('session-A');
+      const file = hook.pendingPath(env.workspace, env.runtimeRoot);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, token: 'pending', hookEventName: source }), 'utf8');
+      hook.runCancelHook({ session_id: 'session-A', hook_event_name: cancelEvent }, env.deps());
+      assert.equal(fs.existsSync(file), !shouldCancel, `${cancelEvent} / ${source}`);
+    });
+  }
+});
+
 test('cancel: 記録と異なるセッション・記録なしの入力では予約を取り消さない', () => {
   withEnv((env) => {
     const spawn = recordingSpawn();
@@ -308,7 +356,7 @@ test('CLI: --help は終了コード0、余分な位置引数は非0', () => {
   assert.equal(help.status, 0);
   assert.match(help.stdout, /Usage:/);
   assert.match(help.stdout, /Stop \/ StopFailure \/ PermissionRequest/);
-  assert.match(help.stdout, /PostToolUse \/ UserPromptSubmit/);
+  assert.match(help.stdout, /PostToolUse \/ PostToolUseFailure \/ UserPromptSubmit/);
   const extra = spawnSync(process.execPath, [SCRIPT, 'stop'], { encoding: 'utf8', input: '{"session_id":"s"}' });
   assert.equal(extra.status, 1);
   assert.match(extra.stderr, /orchestrator-stop-hook: /);

@@ -5,9 +5,9 @@
 // 通知を orchestrator 自身の操作に任せると、SKILL.md に書いてあっても発言の瞬間に
 // 想起されず送られない（Issue #611）。Stop、StopFailure、PermissionRequest で予約する。
 //
-// 人間に用があるかは応答の形から判定できないため、応答の内容では絞らない。代わりに、
-// 人間への操作渡しで60秒後の通知を予約し、回答・許可後の PostToolUse または次の人間の
-// 入力（UserPromptSubmit）で取り消す。拒否・中断のあと何も入力されなければ通知する。
+// Stop / StopFailure / PermissionRequest で60秒後の通知を予約し、次の人間の入力
+// （UserPromptSubmit）で取り消す。PostToolUse / PostToolUseFailure は PermissionRequest
+// 由来の予約だけ取り消す。拒否・中断のあと何も入力されなければ通知する。
 // 次の Stop が予約し直す場合も含め、予約は1つにまとまる
 // （docs/adr/0045-notify-human-on-every-orchestrator-stop.md）。予約hookは async で
 // 登録されているため、hook の中で待っても応答や許可画面を止めない。
@@ -30,7 +30,7 @@ const USAGE = `orchestrator-stop-hook.js — orchestratorセッション専用�
 
 Usage:
   node orchestrator-stop-hook.js            Stop / StopFailure / PermissionRequest hook として通知を予約する
-  node orchestrator-stop-hook.js --cancel   PostToolUse / UserPromptSubmit hook として予約を取り消す
+  node orchestrator-stop-hook.js --cancel   PostToolUse / PostToolUseFailure / UserPromptSubmit hook として予約を取り消す
   node orchestrator-stop-hook.js --help | -h
 
 hook の入力JSON（session_id, cwd）を標準入力から読む（TTYならエラー）。
@@ -41,7 +41,8 @@ session_id が /gh-maestro のセッション初期化で記録されたIDと一
 予約（引数なし）: Stop、StopFailure、PermissionRequest で60秒後の通知を予約して待つ。
   待つあいだに次の予約か --cancel があれば、通知せず終了する。何も起きなければ
   notify-human.js を1回実行する。
-取り消し（--cancel）: PostToolUse または UserPromptSubmit で予約を取り消す。
+取り消し（--cancel）: UserPromptSubmit はすべての予約を、PostToolUse / PostToolUseFailure は
+  PermissionRequest 由来の予約だけを取り消す。
   拒否・中断だけで人間の入力が続かない場合は予約を維持し、通知する。標準出力には何も書かない。
 
 失敗時は終了コード1（Claude Codeの処理は止めない）。`;
@@ -163,12 +164,15 @@ function resolveOrchestratorWorkspace(input, deps) {
 function runNotificationHook(input, deps = {}) {
   const workspace = resolveOrchestratorWorkspace(input, deps);
   if (!workspace) return { exitCode: 0 };
+  if (input.hook_event_name === 'Stop' && typeof input.last_assistant_message === 'string'
+    && input.last_assistant_message.trim() === '—') return { exitCode: 0 };
 
   const file = pendingPath(workspace, deps.runtimeRoot);
   const token = (deps.randomUUIDFn || crypto.randomUUID)();
   atomicWriteJson(file, {
     schemaVersion: 1,
     token,
+    hookEventName: input.hook_event_name || 'Stop',
     scheduledAt: (deps.now || (() => new Date()))().toISOString(),
   });
   (deps.sleepFn || sleepSync)(deps.delayMs === undefined ? NOTIFY_DELAY_MS : deps.delayMs);
@@ -197,8 +201,22 @@ function runNotificationHook(input, deps = {}) {
 function runCancelHook(input, deps = {}) {
   const workspace = resolveOrchestratorWorkspace(input, deps);
   if (!workspace) return { exitCode: 0 };
-  fs.rmSync(pendingPath(workspace, deps.runtimeRoot), { force: true });
+  const file = pendingPath(workspace, deps.runtimeRoot);
+  if (input.hook_event_name === 'PostToolUse' || input.hook_event_name === 'PostToolUseFailure') {
+    const pending = readPending(file);
+    if (!pending || pending.hookEventName !== 'PermissionRequest') return { exitCode: 0 };
+  }
+  fs.rmSync(file, { force: true });
   return { exitCode: 0 };
+}
+
+function readPending(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  const data = readJsonFile(filePath);
+  if (!data || typeof data !== 'object' || typeof data.token !== 'string' || data.token === '') {
+    throw new Error(`通知の予約が不正です: ${filePath}`);
+  }
+  return data;
 }
 
 function main(argv = process.argv.slice(2), options = {}) {

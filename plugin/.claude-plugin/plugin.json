@@ -77,6 +77,21 @@
           }
         ]
       }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop-hook.js",
+              "--cancel"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
