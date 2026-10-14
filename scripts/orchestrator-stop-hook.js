@@ -165,7 +165,7 @@ function runNotificationHook(input, deps = {}) {
   const workspace = resolveOrchestratorWorkspace(input, deps);
   if (!workspace) return { exitCode: 0 };
   if (input.hook_event_name === 'Stop' && typeof input.last_assistant_message === 'string'
-    && input.last_assistant_message.trim() === '—') return { exitCode: 0 };
+    && input.last_assistant_message.trimEnd().endsWith('—')) return { exitCode: 0 };
 
   const file = pendingPath(workspace, deps.runtimeRoot);
   const token = (deps.randomUUIDFn || crypto.randomUUID)();
