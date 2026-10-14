@@ -175,8 +175,8 @@ test('拒否・中断: 後続入力がなければ予約を維持し、通知を
   });
 });
 
-test('Stop: 前後の空白を除いて — だけなら予約せず、既存予約も変更しない', () => {
-  for (const message of ['—', '  — \n']) {
+test('Stop: 末尾が — なら予約せず、既存予約も変更しない', () => {
+  for (const message of ['—', '  — \n', '処理が完了しました—', '処理が完了しました—  \n']) {
     withEnv((env) => {
       env.mark('session-A');
       const spawn = recordingSpawn();
@@ -194,8 +194,11 @@ test('Stop: 前後の空白を除いて — だけなら予約せず、既存予
   }
 });
 
-test('Stop: — 以外の応答は予約し、PermissionRequest の — も予約する', () => {
-  for (const [event, message] of [['Stop', '— —'], ['Stop', '—です'], ['PermissionRequest', '—']]) {
+test('Stop: 末尾が — でない応答は予約し、PermissionRequest の — も予約する', () => {
+  for (const [event, message] of [
+    ['Stop', '文中に—がある'], ['Stop', '最後は-'], ['Stop', '最後は–'], ['Stop', '最後は―'],
+    ['PermissionRequest', '—'],
+  ]) {
     withEnv((env) => {
       env.mark('session-A');
       const spawn = recordingSpawn();
