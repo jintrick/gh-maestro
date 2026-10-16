@@ -20,6 +20,19 @@ description: 対象プロジェクトのテストを実行方法に応じた層�
 
 5. 対象プロジェクトの `.gh-maestro/config.json` に `test.layers` を書く。毎回側と分離側の両方（分離対象が無い場合は単一層）の `scope`、argv配列の `command`、既定の対象ファイル、必要な `fileArgs`、表示用コマンド、変更ファイルから対象テストを選ぶ `mapping` を宣言する。パスはworkspaceからの相対パスにし、シェル文字列ではなくargv配列を使う。分離側の `scope` は `partial`、全件を実行する毎回側の `scope` は `full` とする。実在しない層を将来のために追加してはならない。
 
+   slow層の起動時に並列数を調整する必要がある場合は、その層だけに任意の `dynamicConcurrency` を宣言する。`args` はコマンドへ足すargv配列であり、配列全体に `{value}` を1つだけ含める。`cpuReserve` はCPU数から差し引く数、`reviewJobCost` は稼働中のReview Manager review-jobごとに差し引く数、`minimum` は並列数の下限で、いずれも設定ファイルで変更する。計算値は `max(minimum, CPU数 - cpuReserve - reviewJob数 * reviewJobCost)`。CPU数またはreview-job数を読めないときは `minimum` で実行し、取得できなかった入力を結果に記録する。例:
+
+   ```json
+   "dynamicConcurrency": {
+     "args": ["--test-concurrency={value}"],
+     "cpuReserve": 1,
+     "reviewJobCost": 1,
+     "minimum": 1
+   }
+   ```
+
+   設定項目と実行時の記録形式は `run-tests.js --help` と `run-slow-tests.js --help` を確認する。
+
 6. 宣言した毎回側と分離側の両方を、共有ランナー経由で実行する。各層で実行範囲と結果を確認し、宣言と実際の配置が一致していることを確認する。実行結果を人間へ報告する。結果が失敗した場合は、失敗した層・実行範囲・原因を報告し、テスト関数の削除や層の水増しで隠してはならない。
 
    ```sh
@@ -27,4 +40,3 @@ description: 対象プロジェクトのテストを実行方法に応じた層�
    ```
 
 7. 設定とテスト配置の承認済み変更、両層の実行結果を人間へ報告してから、`/gh-maestro` の起動手順へ戻る。`TEST_LAYERS_STATUS=declared` を確認したうえで、`gh-maestro-orchestrator` スキルを読み、orchestratorとして動作を開始する。
-

@@ -202,6 +202,60 @@ test('validateTestResultArtifact: producer/provenance/scope/count の不正を�
   }
 });
 
+test('validateTestResultArtifact: dynamicConcurrencyは完全な入力と下限フォールバックを区別する', () => {
+  const complete = {
+    value: 5,
+    cpuCount: 12,
+    reviewJobCount: 3,
+    status: 'complete',
+    unavailableInputs: [],
+  };
+  const fallback = {
+    value: 1,
+    cpuCount: 12,
+    reviewJobCount: null,
+    status: 'unavailable',
+    unavailableInputs: ['reviewJobCount'],
+  };
+  assert.equal(validateTestResultArtifact(completeArtifact({ dynamicConcurrency: complete })).ok, true);
+  assert.equal(validateTestResultArtifact(completeArtifact({ dynamicConcurrency: fallback })).ok, true);
+  for (const invalid of [
+    { ...complete, value: 0 },
+    { ...complete, cpuCount: null },
+    { ...complete, unavailableInputs: ['reviewJobCount'] },
+    { ...fallback, unavailableInputs: [] },
+    { ...fallback, unavailableInputs: ['cpuCount'] },
+    { ...fallback, unavailableInputs: ['reviewJobCount', 'reviewJobCount'] },
+  ]) {
+    assert.equal(validateTestResultArtifact(completeArtifact({ dynamicConcurrency: invalid })).ok, false);
+  }
+});
+
+test('writeTestResultLayer/readTestResultArtifact: slow層のdynamicConcurrencyを保存・返却する', () => {
+  const worktree = tempWorktree();
+  const dynamicConcurrency = {
+    value: 1,
+    cpuCount: 12,
+    reviewJobCount: null,
+    status: 'unavailable',
+    unavailableInputs: ['reviewJobCount'],
+  };
+  writeTestResultLayer(worktree, {
+    layer: 'slow',
+    scope: 'partial',
+    status: 'complete',
+    outcome: 'pass',
+    command: 'npm run test:slow',
+    recordedAt: '2026-10-16T00:00:00.000Z',
+    testedContentHash: 'a'.repeat(64),
+    dynamicConcurrency,
+  });
+
+  const read = readTestResultArtifact(worktree);
+  assert.equal(read.ok, true);
+  assert.deepEqual(read.result.layers.slow.dynamicConcurrency, dynamicConcurrency);
+});
+
 test('write/readTestResultArtifact: runtime rootへ原子的に保存し、worktree外から読み戻す', () => {
   const worktree = tempWorktree();
   const artifact = completeArtifact({ scope: 'partial', pass: 3, fail: 0, tests: 3 });

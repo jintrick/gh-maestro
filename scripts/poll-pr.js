@@ -627,6 +627,7 @@ function finishSlowRun({ pr, repo, workspace, target, headSha, statePath, runKey
     ...(finalLayer.tests !== undefined ? { tests: finalLayer.tests } : {}),
     ...(finalLayer.pass !== undefined ? { pass: finalLayer.pass } : {}),
     ...(finalLayer.fail !== undefined ? { fail: finalLayer.fail } : {}),
+    ...(finalLayer.dynamicConcurrency ? { dynamicConcurrency: finalLayer.dynamicConcurrency } : {}),
     command: publicTestCommand(finalLayer),
     ...(finalLayer.reason ? { reason: publicTestReason(finalLayer.reason) } : {}),
     executionLogPath: finalLayer.executionLogPath || logPath,
@@ -818,6 +819,7 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
     const childEnv = {
       ...process.env,
       GH_MAESTRO_WORKSPACE: target.worktree,
+      GH_MAESTRO_RUNTIME_WORKSPACE: workspace,
       GH_MAESTRO_TEST_ACTOR: 'poll-pr',
       GH_MAESTRO_TEST_LOG_PATH: logPath,
     };

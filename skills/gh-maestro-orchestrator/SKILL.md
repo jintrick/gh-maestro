@@ -345,7 +345,7 @@ orchestrator評価: <承認推奨 or 要修正（理由）。懸念が無けれ�
 
 `poll-pr.js`はレビュー観点を一切選ばない。通常経路ではPR検出時にReview Managerを全観点で起動する。軽量PR（`--no-review-manager` と `--no-review-events` の併用）では起動しない。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。
 
-通常経路のPR検出後、`poll-pr.js` は対象PRのHEADと対応するcoder/senior-coder worktreeを照合して `slow` 層を非同期起動する。`poll-reviews.js` から `PR_PUSH:<sha>` を受け取るたび、その新しいHEADに対してもslowを非同期予約する。Review Managerを起動しない通常監視の復旧経路やrevert用PRでもこの動作を維持する。軽量PR（`--no-review-manager` と `--no-review-events` の併用）では初回検出・push後ともslow層を起動しない。レビュー監視の起動・通知をslow完了まで同期的に待たせてはならない。同じPR/HEAD/layerはstate予約で二重実行しない。slow結果は同じworktreeの単一層別成果物へ保存され、完了時にテスト申告コメントを更新する。対象HEADの照合不能、worktree不在、子プロセス異常終了は `unavailable` として実行ログ識別子を残し、自動再試行・自動診断を行わない。
+通常経路のPR検出後、`poll-pr.js` は対象PRのHEADと対応するcoder/senior-coder worktreeを照合して `slow` 層を非同期起動する。`poll-reviews.js` から `PR_PUSH:<sha>` を受け取るたび、その新しいHEADに対してもslowを非同期予約する。Review Managerを起動しない通常監視の復旧経路やrevert用PRでもこの動作を維持する。軽量PR（`--no-review-manager` と `--no-review-events` の併用）では初回検出・push後ともslow層を起動しない。レビュー監視の起動・通知をslow完了まで同期的に待たせてはならない。同じPR/HEAD/layerはstate予約で二重実行しない。slow層の `test.layers.slow.dynamicConcurrency` が宣言されている場合、起動時にCPU数とメインworkspaceのPID registryから同一性を確認できた `review-job` 数を取得し、`max(minimum, CPU数 - cpuReserve - review-job数 * reviewJobCost)` でテスト並列数を決める。どちらかの入力を読めない場合は宣言された下限で実行し、並列数・CPU数・review-job数・取得できなかった入力を層別成果物へ残す。PR worktree上の実行もメインworkspaceのreview-job数を参照する。slow結果は同じworktreeの単一層別成果物へ保存され、完了時にテスト申告コメントを更新する。`SLOW_TEST_RESULT` とテスト申告の層別結果にも計算値と入力状態を含める。対象HEADの照合不能、worktree不在、子プロセス異常終了は `unavailable` として実行ログ識別子を残し、自動再試行・自動診断を行わない。
 
 ```sh
 node "{{SCRIPTS_PATH}}/poll-pr-monitor.js" --plugin-monitor --workspace "$WORKSPACE"
@@ -390,7 +390,7 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
 - 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER/MAJOR は、修正 push に対する explorer の事実確認が完了するまで未解消として扱う）
 - **テスト申告状態の確認と事実提示（Issue #209）**:
   - `node "{{SCRIPTS_PATH}}/query-test-status.js" --pr <PR>` を実行し、成功時に返るJSON 1行をテスト申告状態の正本として確認する。このコマンドは現在のPRコメントとHEADをGitHubから取得するため、`poll-reviews.js` の内部状態ファイルや「新しいコメントがあるか」の推測を使わない。
-  - JSONの `status`（`GREEN`/`RED`/`STALE`/`NONE`）と、存在する `declaredSha`・`headSha`・`fail`・`pass`・`provenance`・`scope`・`lint`、`typecheck`、層別結果の `failedTests`・`otherFailedCount` を**解釈を加えずそのまま事実として記載**する。`GREEN` は申告あり・SHA一致・fail 0、`RED` は申告あり・SHA一致・fail > 0、`STALE` はSHA不一致、`NONE` は申告なしまたは照合不能を表す。`lint.status` は従来どおり `complete`（`outcome=pass` または `findings` と `findingCount`）、`unavailable`、`missing` のいずれか。`typecheck.status` は `complete`（`outcome=pass/fail` と `exitCode`）、`unavailable`、`undefined`、`missing` のいずれか。いずれも `unavailable`/`missing` を状態のない GREEN と読み替えてはならない。lint の指摘と型チェック結果は commit・push・PR作成・merge の機械停止条件ではなく、止めるかどうかは orchestrator と人間が判断する。`provenance` が `unknown`、または `scope` が `unknown` の場合も、その値を変更せず記載する。
+  - JSONの `status`（`GREEN`/`RED`/`STALE`/`NONE`）と、存在する `declaredSha`・`headSha`・`fail`・`pass`・`provenance`・`scope`・`lint`、`typecheck`、層別結果の `failedTests`・`otherFailedCount` を**解釈を加えずそのまま事実として記載**する。slow層に `dynamicConcurrency` がある場合は、その `value`・`cpuCount`・`reviewJobCount`・`status`・`unavailableInputs` も確認して伝える。`GREEN` は申告あり・SHA一致・fail 0、`RED` は申告あり・SHA一致・fail > 0、`STALE` はSHA不一致、`NONE` は申告なしまたは照合不能を表す。`lint.status` は従来どおり `complete`（`outcome=pass` または `findings` と `findingCount`）、`unavailable`、`missing` のいずれか。`typecheck.status` は `complete`（`outcome=pass/fail` と `exitCode`）、`unavailable`、`undefined`、`missing` のいずれか。いずれも `unavailable`/`missing` を状態のない GREEN と読み替えてはならない。lint の指摘と型チェック結果は commit・push・PR作成・merge の機械停止条件ではなく、止めるかどうかは orchestrator と人間が判断する。`provenance` が `unknown`、または `scope` が `unknown` の場合も、その値を変更せず記載する。
   - コマンドが非0終了した場合は、状態を `NONE` と取り違えず、テスト申告状態を照会できなかった事実を提示する。
 - **GitHub CI checksの確認と事実提示**:
   - 通常経路PRでは `node "{{SCRIPTS_PATH}}/query-pr-checks.js" --pr <PR> --repo $REPO` を実行し、現在のHEADに紐づくcheck runsとcommit statusesを照会する。成功時はJSONの `headSha` と各checkの名前・状態・詳細URLをテスト申告と並べて提示する。軽量PRではGitHub CI checksを照会・通知しない。
@@ -398,7 +398,7 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
   - コマンドが非0終了した場合は、CI状態を取得できなかった事実を提示する。チェックなし・成功として扱わない。
   - CI失敗と今回の変更との関連性を推測したり、「無関係」等の独自解釈を加えたりしない。CIの状態は機械的なマージ条件ではなく、止めるかどうかの最終判断は人間に委ねる。
   - **「無関係なテスト失敗だから」「今回は影響ないから」といった関係有無の判断や独自解釈を orchestrator が挟むことは禁止**。申告された事実（対象コミットSHA、fail件数、pass件数、失敗したテスト名と超過件数）をそのまま伝える。マージするかどうかの最終判断は人間に委ねる。
-  - devの健全性確認やテスト障害の調査でslow層を全件実行する場合は、`node "{{SCRIPTS_PATH}}/run-slow-tests.js" --workspace $WORKSPACE` を使う。対象指定なしで宣言済みslow層を実行し、結果は通常のテスト成果物と同じruntime rootへ保存する。`npm run test:slow` はコーダー経路のため、この用途には使わない。
+  - devの健全性確認やテスト障害の調査でslow層を全件実行する場合は、`node "{{SCRIPTS_PATH}}/run-slow-tests.js" --workspace $WORKSPACE` を使う。対象指定なしで宣言済みslow層を実行し、結果は通常のテスト成果物と同じruntime rootへ保存する。slow層に `dynamicConcurrency` が宣言されていれば、起動時の並列数と計算入力も記録される。`npm run test:slow` はコーダー経路のため、この用途には使わない。
 
 #### 11-[1/1] 誤ってマージしてしまった場合の対処【任意】
 
@@ -498,7 +498,7 @@ node "{{SCRIPTS_PATH}}/finalize-issue.js" --issue <N> --repo $REPO --workspace $
 | Review Manager異常終了のNEW_MESSAGE（fromがissue-<N>-review-manager-pr-<PR>） | worker logで原因を確認して人間へ報告する。poll-pr.jsは監視を継続するため再起動せず、原因解消後にReview Managerだけ復旧する。 | monitor-recovery.md「PR監視・Review Managerの再起動」 |
 | SLOW_TEST_STARTED:<json> | PR HEADごとのslow開始を記録する。同じPR/HEAD/layerを二重実行しない。軽量PRでは発生しない。 | 工程8から工程9へ |
 | SLOW_TEST_ALREADY_RECORDED:<json> | PR、testedHead、layer、statusを照合し、対象のslow stateと成果物の既存記録を確認する。同じ予約を再実行しない。既存stateがrunningなら工程9で結果を待ち、完了済みなら既存結果を使う。軽量PRでは発生しない。 | 工程8。確認後は工程9へ進む |
-| SLOW_TEST_RESULT:<json> | PR、HEAD、層、pass/fail/unavailable、件数、コマンド、分類済みreason、実行ログ識別子を記録してテスト申告を更新する。テスト開始前の依存解決・テストファイル不在・spawn失敗・空出力の非0終了はunavailable、実行後の失敗はfailのまま保持する。申告へ子プロセスのstdout/stderrやログ本文を転記せず、公開するcommand/reasonは固定許可リストから生成する。unavailableや申告更新失敗を自動再試行・診断しない。`SLOW_TEST_STARTED`より前に届くunavailable結果は工程8で予約結果として受け付け、工程9へ進む。軽量PRでは発生しない。 | 工程8（開始前unavailable）または工程9（実行結果） |
+| SLOW_TEST_RESULT:<json> | PR、HEAD、層、pass/fail/unavailable、件数、コマンド、分類済みreason、実行ログ識別子を記録してテスト申告を更新する。イベントに `dynamicConcurrency` がある場合は並列数、CPU数、review-job数、入力取得状態も記録する。テスト開始前の依存解決・テストファイル不在・spawn失敗・空出力の非0終了はunavailable、実行後の失敗はfailのまま保持する。申告へ子プロセスのstdout/stderrやログ本文を転記せず、公開するcommand/reasonは固定許可リストから生成する。unavailableや申告更新失敗を自動再試行・診断しない。`SLOW_TEST_STARTED`より前に届くunavailable結果は工程8で予約結果として受け付け、工程9へ進む。軽量PRでは発生しない。 | 工程8（開始前unavailable）または工程9（実行結果） |
 | REVIEW_COMMENT:<path>:<line>:<user>:<body> / PR_COMMENT:<user>:<body> / PR_REVIEW:<user>:<state>:<body> | 受信元と本文を保持する。PR_REVIEWのAPPROVEDはマージ許可シグナル、CHANGES_REQUESTEDは指摘、COMMENTEDはPR_COMMENTと同様に扱う。 | 工程9。findingsがあれば工程10 |
 | PR_PUSH:<sha> | 新HEADにslow層を非同期予約し、GitHub checksを照会する。転送済みBLOCKER/MAJORへの修正ではReview Managerを再起動せずexplorerに再現条件解消の事実確認を依頼する。新規起動時は調査前に対象PRのbranch/commitをgit fetchとcheckoutで明示する。 | 工程9。再現条件の確認は工程10の判断材料 |
 | TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>:lint=<lintState>:typecheck=<typecheckState> | GREENは申告あり・SHA一致・fail 0、REDは申告あり・SHA一致・fail > 0、STALEはSHA不一致、NONEは申告なしまたは照合不能。provenanceとscopeを記録し、lintはcomplete/findings/unavailable/missing、typecheckはcomplete pass/fail/unavailable/undefined/missingとして記録する。これらはGREEN/REDや停止条件を変えない。aggregateならコメント内の層別full/slowを個別確認する。STALE/NONEはquery-test-status.jsで正本を確認し、申告を催促せず事実を示す。 | 工程11 |

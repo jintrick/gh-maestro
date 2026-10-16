@@ -22,6 +22,11 @@ Options:
 Output:
   宣言されたslow層のrunner出力を標準出力／標準エラーへ中継します。
   結果はrun-tests.jsと同じruntime rootへworktree単位で保存します。
+  .gh-maestro/config.json の test.layers.slow.dynamicConcurrency があれば、起動時に
+  CPU数とReview Managerのreview-job数から並列数を決めます。args内の{value}がその値に
+  置換されます。並列数 = max(minimum, CPU数 - cpuReserve - review-job数 * reviewJobCost) で、
+  3つの調整値は設定ファイルで変更できます。入力を読めない場合は
+  minimumで実行し、使った値と取得できなかった入力を層別結果へ記録します。
   exit 0 = 宣言コマンド成功、exit 1以上 = 宣言コマンド失敗または起動失敗`;
 
 const SPEC = {

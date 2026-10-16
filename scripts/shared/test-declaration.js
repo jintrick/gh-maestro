@@ -42,6 +42,14 @@ function matchCount(body, name) {
   return Number.isSafeInteger(value) ? value : undefined;
 }
 
+function matchNullableCount(body, name) {
+  const match = body.match(new RegExp(`${name}\\s*:\\s*(unknown|[0-9]+)`, 'i'));
+  if (!match) return undefined;
+  if (match[1].toLowerCase() === 'unknown') return null;
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
 function matchBacktickField(body, label) {
   const match = body.match(new RegExp(
     '-\\s+\\*\\*' + label + '\\*\\*:\\s*`([^`]+)`'
@@ -133,6 +141,20 @@ function parseAggregateLayerLine(line, provenance) {
   const scope = explicitScope || (layer === 'full' ? FULL_SCOPE : layer === 'slow' ? PARTIAL_SCOPE : 'unknown');
   const recordMatch = metaLine.match(/実行記録\s*:\s*`([^`]*)`/);
   const reasonMatch = metaLine.match(/reason\s*:\s*(.+)$/);
+  const concurrencyValue = matchCount(metaLine, '並列数');
+  const concurrencyStatusMatch = metaLine.match(/並列数状態\s*:\s*(complete|unavailable)\b/i);
+  const dynamicConcurrency = concurrencyValue !== undefined && concurrencyStatusMatch
+    ? {
+      value: concurrencyValue,
+      cpuCount: matchNullableCount(metaLine, 'CPU数'),
+      reviewJobCount: matchNullableCount(metaLine, 'Review Managerジョブ数'),
+      status: concurrencyStatusMatch[1].toLowerCase(),
+      unavailableInputs: (() => {
+        const unavailableMatch = metaLine.match(/並列数取得失敗\s*:\s*([A-Za-z|]+)/);
+        return unavailableMatch ? unavailableMatch[1].split('|') : [];
+      })(),
+    }
+    : undefined;
 
   let failedTests;
   let otherFailedCount = 0;
@@ -160,6 +182,7 @@ function parseAggregateLayerLine(line, provenance) {
     scope,
     ...(recordMatch ? { executionLogPath: recordMatch[1] } : {}),
     ...(reasonMatch ? { reason: reasonMatch[1].trim() } : {}),
+    ...(dynamicConcurrency ? { dynamicConcurrency } : {}),
     ...(failedTests !== undefined ? { failedTests, otherFailedCount } : {}),
   };
 }

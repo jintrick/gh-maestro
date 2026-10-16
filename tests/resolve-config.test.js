@@ -125,6 +125,37 @@ test('getTestLayerDeclarationStatus: 組み込み値だけならmissingを返す
   });
 });
 
+test('resolveTestConfig: dynamicConcurrencyのargvと調整値を検証して保持する', () => {
+  withTempHome(home => {
+    const workspace = path.join(home, 'workspace');
+    const dynamicConcurrency = {
+      args: ['--test-concurrency={value}'],
+      cpuReserve: 1,
+      reviewJobCost: 2,
+      minimum: 1,
+    };
+    writeWorkspaceConfig(workspace, {
+      test: { layers: { slow: { dynamicConcurrency } } },
+    });
+
+    const resolved = resolveTestConfig({ homedir: home, workspace });
+    assert.deepEqual(resolved.layers.slow.dynamicConcurrency, dynamicConcurrency);
+
+    for (const invalid of [
+      { ...dynamicConcurrency, args: ['--jobs'] },
+      { ...dynamicConcurrency, args: ['--jobs={value}', '--parallel={value}'] },
+      { ...dynamicConcurrency, cpuReserve: -1 },
+      { ...dynamicConcurrency, reviewJobCost: 0 },
+      { ...dynamicConcurrency, minimum: 0 },
+    ]) {
+      writeWorkspaceConfig(workspace, {
+        test: { layers: { slow: { dynamicConcurrency: invalid } } },
+      });
+      assert.equal(resolveTestConfig({ homedir: home, workspace }), null);
+    }
+  });
+});
+
 test('getTestLayerDeclarationStatus: global/workspaceの有効な宣言をdeclaredとして返す', () => {
   withTempHome(home => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-status-ws-'));

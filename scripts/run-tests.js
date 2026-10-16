@@ -14,6 +14,7 @@ const path = require('path');
 const { resolveGitHead } = require('./shared/git-head');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { resolveTestConfig } = require('./shared/resolve-config');
+const { resolveDynamicConcurrency, dynamicConcurrencyArgs } = require('./shared/test-concurrency');
 const {
   TEST_RESULT_SCHEMA_VERSION,
   TEST_RESULT_PRODUCER,
@@ -56,6 +57,13 @@ Output:
   storage-layout.js の runtime root に worktree 単位の同じ成果物として保存します。
   typecheck は未定義・成功・失敗・起動不能を区別します。lint の指摘と型チェックの成否は
   テストの終了コードを変えません。
+  任意の test.layers.<name>.dynamicConcurrency で起動時並列数を宣言できます。例:
+  {"args":["--test-concurrency={value}"],"cpuReserve":1,"reviewJobCost":1,"minimum":1}
+  並列数 = max(minimum, CPU数 - cpuReserve - review-job数 * reviewJobCost)。各値は調整可能です。
+  CPU数または workspace の review-job 数を取得できないときは minimum で実行し、その事実を
+  層別成果物へ記録します。
+  GH_MAESTRO_RUNTIME_WORKSPACE が指定された場合、Review Manager のジョブ数はそのworkspace
+  のPID registryから取得します（設定を読む --workspace とは別に指定できます）。
   テストが失敗しても、終了コードと成果物の生成に成功した場合はその結果を保存します。
   exit 0 = 宣言コマンド成功、exit 1以上 = 宣言コマンド失敗または起動失敗`;
 
@@ -343,20 +351,32 @@ function runTypecheck({ cwd, env, spawnSyncFn = spawnSync, testedHead, testedCon
   };
 }
 
-function configuredTestArgs(layer, testFiles) {
+function configuredTestArgs(layer, testFiles, dynamicConcurrency) {
   if (testFiles.length > 0 && layer.scope !== 'partial') {
     throw new Error('個別のテストファイル指定は partial 層でのみ使用できます');
   }
   const files = testFiles.length > 0
     ? testFiles
     : (Array.isArray(layer.defaultTestFiles) ? layer.defaultTestFiles : []);
-  return [...(layer.command || []).slice(1), ...(layer.fileArgs || []), ...files];
+  const concurrencyArgs = layer.dynamicConcurrency && dynamicConcurrency
+    ? dynamicConcurrencyArgs(layer.dynamicConcurrency, dynamicConcurrency)
+    : [];
+  return [...(layer.command || []).slice(1), ...concurrencyArgs, ...(layer.fileArgs || []), ...files];
 }
 
 function resolveConfigWorkspace(cwd, workspace, env = process.env) {
   if (workspace !== undefined) return resolveWorkspace(workspace);
   if (env && env.GH_MAESTRO_WORKSPACE) return resolveWorkspace(env.GH_MAESTRO_WORKSPACE);
   return cwd;
+}
+
+function resolveRuntimeWorkspace(configWorkspace, env = process.env) {
+  if (!env || !Object.prototype.hasOwnProperty.call(env, 'GH_MAESTRO_RUNTIME_WORKSPACE')) {
+    return configWorkspace;
+  }
+  const runtimeWorkspace = env.GH_MAESTRO_RUNTIME_WORKSPACE;
+  if (typeof runtimeWorkspace !== 'string' || runtimeWorkspace.trim() === '') return null;
+  return resolveWorkspace(runtimeWorkspace);
 }
 
 /**
@@ -528,9 +548,26 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
 
   let command;
   let commandArgs;
+  let dynamicConcurrency;
   try {
     command = selected.command[0];
-    commandArgs = configuredTestArgs(selected, normalizedFiles);
+    if (selected.dynamicConcurrency) {
+      let runtimeWorkspace = null;
+      try {
+        runtimeWorkspace = resolveRuntimeWorkspace(configWorkspace, env);
+      } catch {
+        runtimeWorkspace = null;
+      }
+      const resolveDynamicConcurrencyFn = deps.resolveDynamicConcurrencyFn || resolveDynamicConcurrency;
+      dynamicConcurrency = resolveDynamicConcurrencyFn({
+        declaration: selected.dynamicConcurrency,
+        workspace: runtimeWorkspace,
+      }, {
+        availableParallelismFn: deps.availableParallelismFn,
+        findRunningInstancesFn: deps.findRunningInstancesFn,
+      });
+    }
+    commandArgs = configuredTestArgs(selected, normalizedFiles, dynamicConcurrency);
   } catch (error) {
     return {
       exitCode: 1,
@@ -666,6 +703,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
       executor: env.GH_MAESTRO_TEST_ACTOR || env.GH_MAESTRO_WORKER || 'local',
       testedHead,
       testedContentHash,
+      ...(dynamicConcurrency ? { dynamicConcurrency } : {}),
       ...summaryFields,
       ...(outcome === 'fail' && failedTests.length > 0 ? { failedTests } : {}),
     };
@@ -681,6 +719,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
       recordedAt,
       executor: env.GH_MAESTRO_TEST_ACTOR || env.GH_MAESTRO_WORKER || 'local',
       testedHead,
+      ...(dynamicConcurrency ? { dynamicConcurrency } : {}),
       reason: contentSnapshotError
         ? 'content-snapshot-failed'
         : (runnerUnavailableReason || 'tap-summary-invalid'),
@@ -778,6 +817,7 @@ module.exports = {
   mapChangedFilesToTests,
   resolveExecutionWorkspace,
   resolveConfigWorkspace,
+  resolveRuntimeWorkspace,
   runLint,
   runTypecheck,
   runTests,

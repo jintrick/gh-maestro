@@ -165,6 +165,42 @@ function validateTestMapping(value) {
   return { ok: true, value: mapping };
 }
 
+function validateDynamicConcurrency(value) {
+  if (!isPlainObject(value)) {
+    return { ok: false, error: 'test layer dynamicConcurrency must be a JSON object' };
+  }
+  if (!Array.isArray(value.args) || value.args.length === 0
+      || value.args.some(arg => typeof arg !== 'string' || arg.includes('\0'))) {
+    return { ok: false, error: 'test layer dynamicConcurrency.args must be a non-empty array of strings' };
+  }
+  const placeholderCount = value.args.reduce((count, arg) => (
+    count + arg.split('{value}').length - 1
+  ), 0);
+  if (placeholderCount !== 1) {
+    return { ok: false, error: 'test layer dynamicConcurrency.args must contain {value} exactly once' };
+  }
+  for (const field of ['cpuReserve', 'reviewJobCost', 'minimum']) {
+    if (!Number.isSafeInteger(value[field]) || value[field] < (field === 'minimum' ? 1 : 0)) {
+      return {
+        ok: false,
+        error: `test layer dynamicConcurrency.${field} must be a ${field === 'minimum' ? 'positive' : 'non-negative'} safe integer`,
+      };
+    }
+  }
+  if (value.reviewJobCost < 1) {
+    return { ok: false, error: 'test layer dynamicConcurrency.reviewJobCost must be a positive safe integer' };
+  }
+  return {
+    ok: true,
+    value: {
+      args: [...value.args],
+      cpuReserve: value.cpuReserve,
+      reviewJobCost: value.reviewJobCost,
+      minimum: value.minimum,
+    },
+  };
+}
+
 /**
  * テスト層の設定片を検証する。ここではカスケード途中の層も扱うため command は
  * 必須にしないが、指定された command/fileArgs は常に argv 配列として検証する。
@@ -216,6 +252,11 @@ function validateTestLayerOverride(raw) {
     const mapping = validateTestMapping(raw.mapping);
     if (!mapping.ok) return mapping;
     value.mapping = mapping.value;
+  }
+  if (raw.dynamicConcurrency !== undefined) {
+    const dynamicConcurrency = validateDynamicConcurrency(raw.dynamicConcurrency);
+    if (!dynamicConcurrency.ok) return dynamicConcurrency;
+    value.dynamicConcurrency = dynamicConcurrency.value;
   }
 
   return { ok: true, value };
@@ -822,6 +863,7 @@ module.exports = {
   createBuiltinTestConfig,
   validateTestLayerOverride,
   validateTestMapping,
+  validateDynamicConcurrency,
   resolveSkillAgentMap,
   resolveCouncilConfig,
   resolveHumanNotificationConfig,

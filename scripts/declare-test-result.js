@@ -284,6 +284,19 @@ function buildCommentBody({ commit, testResult }) {
       const count = Number.isSafeInteger(layer.tests) ? `, tests: ${layer.tests}` : '';
       const executor = layer.executor ? `, executor: \`${layer.executor}\`` : '';
       const scope = layer.scope ? `, scope: \`${layer.scope}\`` : '';
+      const concurrency = layer.dynamicConcurrency;
+      const concurrencyFields = concurrency ? [
+        `並列数: ${concurrency.value}`,
+        `CPU数: ${concurrency.cpuCount === null ? 'unknown' : concurrency.cpuCount}`,
+        `Review Managerジョブ数: ${concurrency.reviewJobCount === null ? 'unknown' : concurrency.reviewJobCount}`,
+        `並列数状態: ${concurrency.status}`,
+        ...(concurrency.unavailableInputs.length > 0
+          ? [`並列数取得失敗: ${concurrency.unavailableInputs.join('|')}`]
+          : []),
+      ] : [];
+      const concurrencySuffix = concurrencyFields.length > 0
+        ? `, ${concurrencyFields.join(', ')}`
+        : '';
       // 公開先はGitHubであり、ローカルの絶対パスは他の環境から辿れずユーザー名を含む。
       // 実行記録を特定できるファイル名だけを載せる（正本はローカルのファイル側にある）。
       const recordName = layer.executionLogPath
@@ -300,7 +313,7 @@ function buildCommentBody({ commit, testResult }) {
         const overflowText = overflow > 0 ? `（他${overflow}件）` : '';
         failuresSuffix = `, 失敗: ${shown.map(t => `\`${String(t).replaceAll('`', "'")}\``).join(', ')}${overflowText}`;
       }
-      lines.push(`  - **${name}**: ${status}${countSuffix}${count}${executor}${scope}${record}${command}${reason}${failuresSuffix}`);
+      lines.push(`  - **${name}**: ${status}${countSuffix}${count}${executor}${scope}${record}${concurrencySuffix}${command}${reason}${failuresSuffix}`);
     }
     return lines.join('\n');
   }

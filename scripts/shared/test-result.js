@@ -222,6 +222,49 @@ function validateCountFields(value, required) {
   return { ok: true };
 }
 
+function validateDynamicConcurrencyResult(value, fieldPrefix) {
+  if (!isPlainObject(value)) return { ok: false, error: `${fieldPrefix} must be a JSON object` };
+  if (!Number.isSafeInteger(value.value) || value.value < 1) {
+    return { ok: false, error: `${fieldPrefix}.value must be a positive safe integer` };
+  }
+  if (value.cpuCount !== null
+      && (!Number.isSafeInteger(value.cpuCount) || value.cpuCount < 1)) {
+    return { ok: false, error: `${fieldPrefix}.cpuCount must be null or a positive safe integer` };
+  }
+  if (value.reviewJobCount !== null
+      && (!Number.isSafeInteger(value.reviewJobCount) || value.reviewJobCount < 0)) {
+    return { ok: false, error: `${fieldPrefix}.reviewJobCount must be null or a non-negative safe integer` };
+  }
+  if (value.status !== 'complete' && value.status !== 'unavailable') {
+    return { ok: false, error: `${fieldPrefix}.status is invalid` };
+  }
+  if (!Array.isArray(value.unavailableInputs)
+      || value.unavailableInputs.some(input => !['cpuCount', 'reviewJobCount'].includes(input))) {
+    return { ok: false, error: `${fieldPrefix}.unavailableInputs is invalid` };
+  }
+  const unavailableInputs = [...new Set(value.unavailableInputs)].sort();
+  if (unavailableInputs.length !== value.unavailableInputs.length) {
+    return { ok: false, error: `${fieldPrefix}.unavailableInputs contains duplicates` };
+  }
+  const expectedUnavailableInputs = [
+    ...(value.cpuCount === null ? ['cpuCount'] : []),
+    ...(value.reviewJobCount === null ? ['reviewJobCount'] : []),
+  ].sort();
+  if (unavailableInputs.join('|') !== expectedUnavailableInputs.join('|')) {
+    return { ok: false, error: `${fieldPrefix}.unavailableInputs does not match missing inputs` };
+  }
+  const hasUnavailableInput = expectedUnavailableInputs.length > 0;
+  if (value.status === 'complete'
+      && (hasUnavailableInput || value.unavailableInputs.length > 0)) {
+    return { ok: false, error: `${fieldPrefix} complete status requires all inputs` };
+  }
+  if (value.status === 'unavailable'
+      && (!hasUnavailableInput || value.unavailableInputs.length === 0)) {
+    return { ok: false, error: `${fieldPrefix} unavailable status requires a missing input` };
+  }
+  return { ok: true };
+}
+
 function validateResultFields(value, fieldPrefix, { requireLayer = false } = {}) {
   if (!isPlainObject(value)) return { ok: false, error: `${fieldPrefix} must be a JSON object` };
   if (requireLayer && (typeof value.layer !== 'string' || !value.layer.trim())) return { ok: false, error: `${fieldPrefix} layer is required` };
@@ -252,6 +295,10 @@ function validateResultFields(value, fieldPrefix, { requireLayer = false } = {})
   if (value.testedHead !== undefined && value.testedHead !== null && (typeof value.testedHead !== 'string' || !/^[0-9a-fA-F]{7,40}$/.test(value.testedHead))) return { ok: false, error: `${fieldPrefix} testedHead is invalid` };
   if (value.executionLogPath !== undefined && (typeof value.executionLogPath !== 'string' || !value.executionLogPath.trim())) return { ok: false, error: `${fieldPrefix} executionLogPath is invalid` };
   if (value.executor !== undefined && (typeof value.executor !== 'string' || !value.executor.trim())) return { ok: false, error: `${fieldPrefix} executor is invalid` };
+  if (value.dynamicConcurrency !== undefined) {
+    const concurrency = validateDynamicConcurrencyResult(value.dynamicConcurrency, `${fieldPrefix} dynamicConcurrency`);
+    if (!concurrency.ok) return concurrency;
+  }
   return { ok: true, value };
 }
 
@@ -458,6 +505,7 @@ function layerForRead(layer) {
     ...(layer.reason ? { reason: layer.reason } : {}),
     ...(layer.executor ? { executor: layer.executor } : {}),
     ...(layer.executionLogPath ? { executionLogPath: layer.executionLogPath } : {}),
+    ...(layer.dynamicConcurrency ? { dynamicConcurrency: layer.dynamicConcurrency } : {}),
   };
 }
 
