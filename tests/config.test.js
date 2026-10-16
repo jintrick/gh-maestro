@@ -21,6 +21,11 @@ const { loadDefaults } = require('../scripts/shared/resolve-config');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'config.js');
 
+test('config --help describes extraArgs as shared and execArgs as reserved', () => {
+  assert.match(USAGE, /Set agents\.<id>\.extraArgs for arguments shared by normal and headless launches/);
+  assert.match(USAGE, /Do not set agents\.<id>\.execArgs in config\.json/);
+});
+
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 /**

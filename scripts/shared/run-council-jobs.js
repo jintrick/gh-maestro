@@ -19,7 +19,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('./child-process');
-const { runAgentWithPrompt } = require('./agent-launch');
+const { buildAgentExecArgs, runAgentWithPrompt } = require('./agent-launch');
 const { resolveAgentConfig, validateNonInteractiveTokens } = require('./resolve-config');
 const { workerLogPath } = require('./headless-launch');
 const { _validateAgainstSchema } = require('./json-schema');
@@ -388,14 +388,14 @@ async function launchParticipantJob({ participant, manifest, agentConfig, worktr
   const participantId = participant.participant_id;
 
   // 非対話化トークン検証（フェイルクローズ、Issue #163 Review Manager指摘）。
-  // 実際に起動引数に使う execArgs ?? extraArgs を検証してから spawn する。
-  const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
+  // 実際に起動引数へ使う共通引数と経路固有引数の合成列を検証してから spawn する。
+  const tokenCheck = validateNonInteractiveTokens(agentConfig, buildAgentExecArgs(agentConfig));
   if (!tokenCheck.valid) {
     return {
       participant_id: participantId,
       status: 'failed',
       attempt,
-      error: `agent "${agentConfig.id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (check ~/.gh-maestro/config.json agents["${agentConfig.id}"].execArgs / extraArgs)`,
+      error: `agent "${agentConfig.id}" council argv is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (add shared arguments to ~/.gh-maestro/config.json agents["${agentConfig.id}"].extraArgs)`,
     };
   }
 

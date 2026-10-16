@@ -73,7 +73,7 @@ function codexReviewAgentConfig() {
   return {
     id: 'codex',
     command: 'codex',
-    execArgs: ['exec', '--skip-git-repo-check', '--cd', '{workspace}', '--dangerously-bypass-approvals-and-sandbox'],
+    execArgs: ['--cd', '{workspace}'],
     extraArgs: ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'],
     nonInteractiveTokens: ['exec'],
     promptDelivery: 'positional',

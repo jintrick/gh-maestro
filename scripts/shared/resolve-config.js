@@ -407,7 +407,6 @@ function resolveDynamicCommand(agent) {
       ...agent,
       command: resolved.command,
       extraArgs: [...resolved.prependArgs, ...(agent.extraArgs || [])],
-      execArgs: agent.execArgs ? [...resolved.prependArgs, ...agent.execArgs] : agent.execArgs,
     };
   }
   // 動的解決が失敗しても、元の command でフォールバックする
@@ -525,7 +524,7 @@ function isValidAgentConfig(agent) {
  *
  * agent-defaults.json の `nonInteractiveTokens`（宣言フィールド）に列挙されたトークン
  * （claude系: --print、reasonix: run、codex系: exec 等）は、headless 起動時に画面・標準入力が
- * 無い環境で対話モードに入らず1回実行で終了させるために必須。config.json の extraArgs/execArgs
+ * 無い環境で対話モードに入らず1回実行で終了させるために必須。config.json の extraArgs
  * 上書きは配列ごと置換されるため、うっかりトークンを欠落させた設定がそのまま有効化されてしまい、
  * 起動がハングしても誰にも気づけない（Issue #163）。
  *
@@ -535,10 +534,8 @@ function isValidAgentConfig(agent) {
  *
  * @param {object} agent     解決済みエージェント設定（nonInteractiveTokens を読む）
  * @param {string[]} [argsArray]  検証対象の引数配列。省略時は agent.extraArgs。
- *   Review Manager系（run-review-manager.js / run-review-jobs.js）は
- *   agentConfig.execArgs ?? agentConfig.extraArgs を渡す。execArgs だけを対話モードになる形に
- *   上書きすると extraArgs は既定のまま残り、extraArgs だけ見る検証をすり抜けてしまうため、
- *   実際に起動に使われる配列を検証対象にしなければならない（Issue #163 Review Manager指摘）。
+ *   Review Manager 系は buildAgentExecArgs() が作る extraArgs + execArgs を明示して渡す。
+ *   起動に使う引数配列そのものを検証し、別経路の設定による欠落を見逃さない。
  * @returns {{ valid: boolean, missing: string[] }}
  *   valid: 非対話化トークンをすべて保持していれば true
  *   missing: 欠落しているトークンの配列（valid なら空）
@@ -588,15 +585,21 @@ function resolveAgentConfig(agentId, opts = {}) {
   const defaultAgent = rawDefaultAgent ? resolveExtends(rawDefaultAgent, defaults.agents) : null;
 
   // 2. ~/.gh-maestro/config.json の agents セクション
-  const globalConfig = loadConfigFile(resolve(homedir, '.gh-maestro', 'config.json'));
+  const globalConfigPath = resolve(homedir, '.gh-maestro', 'config.json');
+  const globalConfig = loadConfigFile(globalConfigPath);
   const globalOverride = (globalConfig.agents && globalConfig.agents[agentId]) || {};
+  if (isPlainObject(globalOverride) && Object.prototype.hasOwnProperty.call(globalOverride, 'execArgs')) {
+    throw new Error(
+      `Agent "${agentId}" in ${globalConfigPath} defines unsupported "execArgs". ` +
+      'Put shared launch arguments in "extraArgs"; "execArgs" is reserved for built-in route-specific arguments.',
+    );
+  }
 
   // 3. workspace/.gh-maestro/config.json の agents セクション
   // セキュリティ: workspace config は実行コマンド（EXEC_SENSITIVE_FIELDS）を上書きできない。
   // 悪意あるリポジトリを clone しただけで任意コマンド実行されるのを防ぐ。
-  // execArgs は run-review-manager.js のような exec 系起動（--sandbox / --skip-git-repo-check 等の
-  // 安全設定を含む）で command/extraArgs の代わりに使われるため、同じ扱いが必要
-  // （execArgsだけ上書き可能だとサンドボックス設定を欠いた危険なコマンドラインに差し替えられる。PR #103 Review Manager指摘）。
+  // execArgs は Review Manager 系だけに必要な経路固有引数だが、実 argv に追加されるため、
+  // workspace config から差し替え・追記できないようにする（PR #103 Review Manager指摘）。
   // 実行系フィールドの上書きは ~/.gh-maestro/config.json（ユーザーが明示的に編集したもの）のみ許可。
   let workspaceOverride = {};
   if (opts.workspace) {

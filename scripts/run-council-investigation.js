@@ -19,7 +19,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('./shared/child-process');
-const { runAgentWithPrompt } = require('./shared/agent-launch');
+const { buildAgentExecArgs, runAgentWithPrompt } = require('./shared/agent-launch');
 const { resolveAgentConfig, resolveCouncilConfig, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { _validateAgainstSchema } = require('./shared/json-schema');
@@ -116,12 +116,12 @@ function buildInvestigationPrompt({ title, agenda, question }) {
  * @returns {Promise<{ ok: boolean, findings?: string, sources?: string[], error?: string }>}
  */
 async function launchInvestigationJob({ title, agenda, question, agentConfig, worktreeDir, workspace, timeoutMs = DEFAULT_JOB_TIMEOUT_MS, jobId = 'council-investigation' }) {
-  // 非対話化トークン検証（フェイルクローズ）。実際に起動引数に使う execArgs ?? extraArgs を検証する。
-  const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
+  // 非対話化トークン検証（フェイルクローズ）。実際の合成 argv を検証する。
+  const tokenCheck = validateNonInteractiveTokens(agentConfig, buildAgentExecArgs(agentConfig));
   if (!tokenCheck.valid) {
     return {
       ok: false,
-      error: `agent "${agentConfig.id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (check ~/.gh-maestro/config.json agents["${agentConfig.id}"].execArgs / extraArgs)`,
+      error: `agent "${agentConfig.id}" council argv is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (add shared arguments to ~/.gh-maestro/config.json agents["${agentConfig.id}"].extraArgs)`,
     };
   }
 

@@ -80,6 +80,25 @@ function buildAgentCommandArgs(agentConfig, opts = {}) {
 }
 
 /**
+ * 共通の extraArgs と Review Manager 系にだけ必要な追加分を結合する。
+ * normal 起動は extraArgs のみを使うため、headless 起動とその事前検証だけが利用する。
+ *
+ * @param {object} agentConfig
+ * @returns {string[]}
+ */
+function buildAgentExecArgs(agentConfig) {
+  if (!agentConfig || typeof agentConfig !== 'object') {
+    throw agentLaunchConfigError('agentConfig is required');
+  }
+  const extraArgs = agentConfig.extraArgs ?? [];
+  const execArgs = agentConfig.execArgs ?? [];
+  if (![extraArgs, execArgs].every(args => Array.isArray(args) && args.every(arg => typeof arg === 'string'))) {
+    throw agentLaunchConfigError('agentConfig extraArgs/execArgs must be arrays of strings');
+  }
+  return [...extraArgs, ...execArgs];
+}
+
+/**
  * 起動入口で使うエージェント設定を正規化する。
  * exec用の設定を優先し、ジョブのcwdを `{workspace}` へ埋め込む。
  * 呼び出し側が配送方式や引数を組み立てると、エージェントごとの差分が
@@ -97,10 +116,7 @@ function normalizeAgentLaunchConfig(agentConfig, cwd) {
     throw new TypeError('cwd must be a non-empty string');
   }
 
-  const configuredArgs = agentConfig.execArgs ?? agentConfig.extraArgs ?? [];
-  if (!Array.isArray(configuredArgs) || configuredArgs.some(arg => typeof arg !== 'string')) {
-    throw agentLaunchConfigError('agentConfig execArgs/extraArgs must be an array of strings');
-  }
+  const configuredArgs = buildAgentExecArgs(agentConfig);
 
   const promptDelivery = agentConfig.execPromptDelivery ?? agentConfig.promptDelivery;
   const promptFlag = agentConfig.execPromptFlag ?? agentConfig.promptFlag;
@@ -305,6 +321,8 @@ function buildAgentResumeCommandArgs(agentConfig, resumeArgs, opts = {}) {
 
 module.exports = {
   buildAgentCommandArgs,
+  buildAgentExecArgs,
+  normalizeAgentLaunchConfig,
   buildAgentResumeCommandArgs,
   runAgentWithPrompt,
   RESULT_FILE_TOKEN,
