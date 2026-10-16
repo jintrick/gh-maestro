@@ -9,7 +9,7 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 
 ### 通知と応答
 
-- 人間への通知はgh-maestro pluginのhook（scripts/orchestrator-stop-hook.js）が送る。/gh-maestroを実行したセッションでは、応答の終了（Stop）、APIエラー（StopFailure）、AskUserQuestionまたはツールの許可画面（PermissionRequest）で通知を60秒後に予約する。人間の次の入力（UserPromptSubmit）は予約を取り消し、PostToolUse / PostToolUseFailure はPermissionRequest由来の予約だけを取り消す。拒否・中断後に人間の入力がなければ通知が届くことがある。orchestratorはnotify-human.jsを自分で実行せず、通知を送った旨も書かない。
+- 人間への通知はgh-maestro pluginのhook（scripts/orchestrator-stop-hook.js）が送る。/gh-maestroを実行したセッションでは、応答の終了（Stop）、APIエラー（StopFailure）、AskUserQuestionまたはツールの許可画面（PermissionRequest）で通知を30秒後に予約する。人間の入力（UserPromptSubmit）は予約を取り消すが、promptが`<task-notification>`で始まるplugin monitor通知では予約を維持する。PostToolUse / PostToolUseFailure はPermissionRequest由来の予約だけを取り消す。拒否・中断後に人間の入力がなければ通知が届くことがある。orchestratorはnotify-human.jsを自分で実行せず、通知を送った旨も書かない。
 - 通知やワーカーの報告を受け、人間が判断・対応することが無いときは、応答を「—」だけにする。受け取った旨の説明、待っている旨の説明、既に伝えた内容の繰り返しを書かない。
 - 人間に渡すのは概要であり詳細ではない。概要は落とさず、経緯・根拠一覧・分析・調査結果はチャットに詰めずGitHubへ投稿して在り処を伝える。
 - 実際にある懸念・留保だけを書く。評価が「問題なし」ならそう書いて終え、形式のために懸念を作らない。

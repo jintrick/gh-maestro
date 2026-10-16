@@ -291,6 +291,8 @@ Add a `monitors/monitors.json` file at the plugin root with an array of monitor 
 
 Each stdout line from `command` is delivered to Claude as a notification during the session. For the full schema, including the `when` trigger and variable substitution, see [Monitors](/en/plugins-reference#monitors).
 
+**Observed in Claude Code 2.1.301:** a plugin monitor stdout notification enters the conversation as a synthetic `<task-notification>...</task-notification>` prompt and fires `UserPromptSubmit`. The hook stdin includes `hook_event_name: "UserPromptSubmit"` and a `prompt` beginning with `<task-notification>`. The monitor completion notification can fire another `UserPromptSubmit` with a task-notification prompt. This was measured with a temporary plugin and project/local settings; it is runtime behavior beyond the general monitor description above.
+
 ### Ship default settings with your plugin
 
 Plugins can include a `settings.json` file at the plugin root to apply default configuration when the plugin is enabled. Currently, only the `agent` and `subagentStatusLine` keys are supported.
