@@ -22,6 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./shared/child-process');
+const { buildAgentExecArgs } = require('./shared/agent-launch');
 const { resolveAgentConfig, resolveCouncilConfig, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const {
@@ -678,10 +679,10 @@ async function runCouncilLocked({ opts, workspace, homedir, session, statePath }
       process.stderr.write(`Error: participant agent "${p.agent_id}" could not be resolved (fail-closed).\n`);
       return 2;
     }
-    const tokenCheck = validateNonInteractiveTokens(agent, agent.execArgs ?? agent.extraArgs);
+    const tokenCheck = validateNonInteractiveTokens(agent, buildAgentExecArgs(agent));
     if (!tokenCheck.valid) {
       process.stderr.write(
-        `Error: participant "${p.agent_id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (fail-closed).\n`,
+        `Error: participant "${p.agent_id}" council argv is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (fail-closed).\n`,
       );
       return 2;
     }

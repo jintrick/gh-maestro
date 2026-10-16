@@ -23,6 +23,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, resolveExtends, isValidAgentConfig, validateNonInteractiveTokens, resolveCouncilConfig, EXEC_SENSITIVE_FIELDS } = require('./shared/resolve-config');
+const { buildAgentExecArgs } = require('./shared/agent-launch');
 const { isPlainObject } = require('./shared/object');
 const { checkAgentExists } = require('./shared/agent-exec');
 
@@ -322,8 +323,7 @@ function cmdStatus(workspacePath) {
 
   // Warn about workspace overrides of execution-sensitive fields (silently ignored by resolver).
   // Uses the same EXEC_SENSITIVE_FIELDS list as resolveAgentConfig's sanitization so this
-  // warning can't drift out of sync with what the resolver actually strips (PR #103 Review
-  // Manager指摘: execArgsだけ片方に足し忘れる、といった複製ズレを避ける).
+  // warning stays aligned with the execution fields the resolver actually strips.
   if (wsConfig && wsConfig.agents && !wsConfig._parseError) {
     for (const [agentId, override] of Object.entries(wsConfig.agents)) {
       const suppressed = isPlainObject(override)
@@ -363,13 +363,12 @@ function cmdStatus(workspacePath) {
   const resolvedCache = new Map();
   const existsCache = new Map();
 
-  // config.json の extraArgs / execArgs 上書きで非対話化トークン（--print / run / exec 等）が
+  // config.json の extraArgs 上書きで非対話化トークン（--print / run / exec 等）が
   // 欠落しているエージェントの警告。spawn-worker.js / run-review-manager.js / run-review-jobs.js
   // の起動ブロックとは別に、人間が status で日常的に乖離を確認できるようにする（Issue #163）。
-  // 通常ワーカー起動は extraArgs、Review Manager 系起動は execArgs ?? extraArgs を使うため、
-  // 両方を個別に検証する（execArgs だけ上書きで対話モード化された設定を extraArgs 側の
-  // 検証がすり抜けないように）。同一 agentId（複数スキルが同じエージェントにマップされる
-  // 場合）は警告を重複させない。
+  // 通常ワーカーは extraArgs、Review Manager 系は extraArgs + 経路固有引数を使うため、
+  // それぞれの実際の引数列を検証する。同一 agentId（複数スキルが同じエージェントに
+  // マップされる場合）は警告を重複させない。
   const nonInteractiveWarnings = [];
   const warnedAgentFields = new Set();
 
@@ -395,14 +394,13 @@ function cmdStatus(workspacePath) {
           `[WARN] Agent "${agentId}" is missing non-interactive token(s): ${extraCheck.missing.join(', ')} in extraArgs — headless launch will hang.`,
         );
       }
-      // execArgs が無ければ Review Manager 起動は extraArgs にフォールバックするため、
-      // execArgs が存在する場合のみ個別に検証する（extraArgs 側で検証済み）。
+      // 経路固有の追加引数がある場合は、共通分も含む実際の argv を検証する。
       if (resolved.execArgs !== undefined) {
-        const execCheck = validateNonInteractiveTokens(resolved, resolved.execArgs);
-        if (!execCheck.valid && !warnedAgentFields.has(`${agentId}:execArgs`)) {
-          warnedAgentFields.add(`${agentId}:execArgs`);
+        const execCheck = validateNonInteractiveTokens(resolved, buildAgentExecArgs(resolved));
+        if (!execCheck.valid && !warnedAgentFields.has(`${agentId}:review-argv`)) {
+          warnedAgentFields.add(`${agentId}:review-argv`);
           nonInteractiveWarnings.push(
-            `[WARN] Agent "${agentId}" is missing non-interactive token(s): ${execCheck.missing.join(', ')} in execArgs — Review Manager launch will hang.`,
+            `[WARN] Agent "${agentId}" is missing non-interactive token(s): ${execCheck.missing.join(', ')} in Review Manager argv — headless launch will hang.`,
           );
         }
       }
@@ -768,13 +766,18 @@ Profile semantics:
   relative to agent-defaults.json defaults. The resolver merges:
     defaults → global skillAgentMap → workspace skillAgentMap
 
+Agent launch arguments:
+  Set agents.<id>.extraArgs for arguments shared by normal and headless launches.
+  Do not set agents.<id>.execArgs in config.json; it is reserved for built-in
+  route-specific arguments such as --cd {workspace}.
+
 Usage:
   node scripts/config.js <subcommand> [options]
 
 Subcommands:
   use <profile>     Apply a named profile's skillAgentMap to config.json
   status            Show resolved skillAgentMap with connectivity checks and
-                    warn when an agent's extraArgs/execArgs is missing its
+                    warn when an agent's extraArgs is missing its
                     non-interactive token (--print / run / exec etc.)
   doctor            Validate config structure and report issues
 

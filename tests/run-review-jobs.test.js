@@ -84,7 +84,7 @@ function codexReviewAgentConfig() {
   return {
     id: 'codex',
     command: 'codex',
-    execArgs: ['exec', '--skip-git-repo-check', '--cd', '{workspace}', '--dangerously-bypass-approvals-and-sandbox'],
+    execArgs: ['--cd', '{workspace}'],
     extraArgs: ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'],
     nonInteractiveTokens: ['exec'],
     promptDelivery: 'positional',
@@ -406,7 +406,7 @@ test('launchJobWorker: 正本の観点定義が存在しない場合はエージ
     };
     const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
     const agentConfig = {
-      id: 'codex', command: 'codex', extraArgs: ['exec'], execArgs: ['exec'],
+      id: 'codex', command: 'codex', extraArgs: ['exec'], execArgs: ['--cd', '{workspace}'],
       nonInteractiveTokens: ['exec'], promptDelivery: 'positional',
     };
 
@@ -433,7 +433,7 @@ test('launchJobWorker: 未知の葉IDが指定された場合はエージェン�
     };
     const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
     const agentConfig = {
-      id: 'codex', command: 'codex', extraArgs: ['exec'], execArgs: ['exec'],
+      id: 'codex', command: 'codex', extraArgs: ['exec'], execArgs: ['--cd', '{workspace}'],
       nonInteractiveTokens: ['exec'], promptDelivery: 'positional',
     };
 
@@ -555,7 +555,7 @@ test('launchJobWorker: 単一プロセスを同一cwdから起動し、pre/post�
       {
         id: 'codex',
         command: 'codex',
-        execArgs: ['exec', '--skip-git-repo-check', '--cd', '{workspace}', '--dangerously-bypass-approvals-and-sandbox'],
+        execArgs: ['--cd', '{workspace}'],
         extraArgs: ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'],
         nonInteractiveTokens: ['exec'],
         promptDelivery: 'positional',
@@ -635,7 +635,6 @@ test('launchJobWorker: claudeのstream-json stdoutを無視して結果ファイ
   const agentConfig = {
     id: 'claude',
     command: 'claude',
-    execArgs: ['--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose'],
     extraArgs: ['--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose'],
     nonInteractiveTokens: ['--print'],
     promptDelivery: 'system-prompt-file',
@@ -653,7 +652,6 @@ test('launchJobWorker: agyのprintジョブも結果ファイル経由で成立�
   const agentConfig = {
     id: 'agy',
     command: 'agy',
-    execArgs: ['--dangerously-skip-permissions', '--print-timeout', '30m0s'],
     extraArgs: ['--dangerously-skip-permissions', '--print-timeout', '30m0s'],
     promptDelivery: 'flag',
     promptFlag: '--print',
@@ -686,7 +684,7 @@ test('launchJobWorker: エージェントが非0終了ならfailedで終了す�
       { pr: 1, repo: 'o/r', headRefOid: 'abc' },
       {
         id: 'codex', command: 'codex',
-        execArgs: ['exec'], extraArgs: ['exec'], nonInteractiveTokens: ['exec'],
+        execArgs: ['--cd', '{workspace}'], extraArgs: ['exec'], nonInteractiveTokens: ['exec'],
         promptDelivery: 'positional',
       }, worktreeDir, worktreeDir, 5000, null, { reviewSkillsDir: skillsDir },
     );
@@ -758,18 +756,16 @@ test('buildJobPrompt keeps the input contract when manifest has no acceptance cr
   }
 });
 
-test('launchJobWorker: execArgsが非対話化トークンを欠くとspawnせずfailedになる（Issue #163 BLOCKER）', async () => {
-  // 修正前の検証漏れを再現: extraArgs はトークンを保持しているが、ジョブワーカーが
-  // 実際に使う execArgs ?? extraArgs のうち execArgs が対話モード化されているケース。
-  // ガードは spawn より前で解決するため、実プロセスは起動しない。
+test('launchJobWorker: 合成後の Review Manager argv が非対話化トークンを欠くと spawn せず failed になる', async () => {
+  // 共通引数にも経路固有引数にも必須トークンが無い場合、ガードは spawn 前に起動を拒否する。
   const result = await launchJobWorker(
     { id: 'job-1', leaf_ids: ['leaf-1'], aspect: 'Correctness' },
     { pr: 1 },
     {
       id: 'codex',
       nonInteractiveTokens: ['exec'],
-      extraArgs: ['exec', '--skip-git-repo-check'],
-      execArgs: ['--skip-git-repo-check'], // exec を欠落
+      extraArgs: ['--skip-git-repo-check'],
+      execArgs: ['--cd', '{workspace}'],
     },
     '/tmp/review-wt',
     '/tmp/ws',

@@ -16,7 +16,7 @@ const {
   loadDefaults,
   validateNonInteractiveTokens,
 } = require('../scripts/shared/resolve-config');
-const { buildAgentCommandArgs } = require('../scripts/shared/agent-launch');
+const { buildAgentCommandArgs, buildAgentExecArgs } = require('../scripts/shared/agent-launch');
 const { createSessionResumeAdapter } = require('../scripts/shared/inbox-adapters/session-resume-adapter');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -253,19 +253,35 @@ test('resolveAgentConfig: ~/.gh-maestro/config.json の override がデフォル
   });
 });
 
-test('resolveAgentConfig: グローバルpwshラッパーのReview ManagerはClaudeをストリーム出力で起動する', () => {
+test('resolveAgentConfig: global execArgs を設定するとagent ID・config path・extraArgs案内付きで拒否する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'codex-sol': { extends: 'codex', execArgs: ['--config', 'model=gpt-6.1-sol'] },
+      },
+    });
+    const configPath = path.resolve(home, '.gh-maestro', 'config.json');
+    assert.throws(() => resolveAgentConfig('codex-sol', { homedir: home }), error => {
+      assert.match(error.message, /codex-sol/);
+      assert.ok(error.message.includes(configPath), error.message);
+      assert.match(error.message, /extraArgs/);
+      return true;
+    });
+  });
+});
+
+test('resolveAgentConfig: global extraArgs は通常・Review Managerの両方に使われる', () => {
   withTempHome(home => {
     writeConfig(home, {
       agents: {
         'claude-ds-pro': {
           command: 'pwsh',
-          extraArgs: ['-Command', 'claude-ds-pro --dangerously-skip-permissions'],
-          execArgs: ['-Command', 'claude-ds-pro --dangerously-skip-permissions --print --output-format stream-json --verbose'],
+          extraArgs: ['-Command', 'claude-ds-pro --dangerously-skip-permissions --print --output-format stream-json --verbose'],
         },
       },
     });
     const agent = resolveAgentConfig('claude-ds-pro', { homedir: home });
-    const args = buildAgentCommandArgs({ ...agent, extraArgs: agent.execArgs }, {
+    const args = buildAgentCommandArgs({ ...agent, extraArgs: buildAgentExecArgs(agent) }, {
       promptFile: 'C:/tmp/review-manager-prompt.md',
       systemPromptText: 'review',
     });
@@ -326,11 +342,8 @@ test('resolveAgentConfig: workspace config は execArgs も上書きできない
 
       const agent = resolveAgentConfig('codex', { homedir: home, workspace: ws });
       assert.ok(agent);
-      assert.ok(
-        !agent.execArgs.includes('danger-full-access'),
-        'workspace should not be able to swap execArgs for a config missing the sandbox/trust safety flags',
-      );
-      assert.ok(agent.execArgs.includes('--skip-git-repo-check'), 'default execArgs should be preserved');
+      assert.deepEqual(agent.execArgs, ['--cd', '{workspace}'], 'workspace should not replace route-specific arguments');
+      assert.ok(agent.extraArgs.includes('--skip-git-repo-check'), 'shared safety arguments should remain in extraArgs');
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }
@@ -509,6 +522,7 @@ test('resolveExtends: 配列フィールドは継承元配列の末尾に追記�
 
 test('resolveExtends: 追記対象（extraArgs/execArgs/nonInteractiveTokens）はそれぞれ追記され、resumeCommand は完全置換される', () => {
   const defaults = loadDefaults();
+  const claude = { ...defaults.agents.find(a => a.id === 'claude'), execArgs: ['--base-route'] };
   const entry = {
     id: 'derived',
     extends: 'claude',
@@ -518,8 +532,7 @@ test('resolveExtends: 追記対象（extraArgs/execArgs/nonInteractiveTokens）�
     resumeCommand: ['--custom-resume'],
     nonInteractiveTokens: ['--new-token'],
   };
-  const resolved = resolveExtends(entry, defaults.agents);
-  const claude = defaults.agents.find(a => a.id === 'claude');
+  const resolved = resolveExtends(entry, [claude]);
   assert.deepEqual(resolved.extraArgs, [...claude.extraArgs, '--model', 'opus']);
   assert.deepEqual(resolved.execArgs, [...claude.execArgs, '--extra-exec']);
   // resumeCommand は追記されず完全置換（末尾要素をセッション参照で置換する resume() の契約と整合）
@@ -814,17 +827,19 @@ test('resolveAgentConfig: reasonix の command が動的に解決される', () 
   });
 });
 
-test('resolveAgentConfig: reasonix のReview Manager用execArgsにも動的スクリプトパスを付与する', () => {
+test('resolveAgentConfig: reasonix の動的 prependArgs は共通引数に一度だけ入る', () => {
   withTempHome(home => {
     const agent = resolveAgentConfig('reasonix', { homedir: home });
     assert.ok(agent);
-    assert.ok(agent.execArgs.includes('run'));
-    // Review Manager用のexecArgsは作業ディレクトリを明示する（--dir {workspace}）
-    assert.ok(agent.execArgs.includes('--dir'));
+    assert.deepEqual(agent.execArgs, ['--dir', '{workspace}']);
+    assert.ok(agent.extraArgs.includes('run'));
+    const execArgs = buildAgentExecArgs(agent);
+    assert.deepEqual(execArgs.slice(-2), ['--dir', '{workspace}']);
 
     if (agent.command === 'node') {
-      assert.ok(agent.execArgs[0].endsWith('reasonix.js'));
-      assert.equal(agent.execArgs[1], 'run');
+      const prependArg = agent.extraArgs[0];
+      assert.ok(prependArg.endsWith('reasonix.js'));
+      assert.equal(execArgs.filter(arg => arg === prependArg).length, 1);
     }
   });
 });
@@ -1004,28 +1019,24 @@ test('resolveAgentConfig: config.json で extraArgs から --print を欠落さ�
   });
 });
 
-test('validateNonInteractiveTokens: argsArray 指定で execArgs を検証できる（execArgs 経由の起動漏れ, Issue #163 BLOCKER）', () => {
+test('validateNonInteractiveTokens: buildAgentExecArgs で合成したReview Manager argvを検証する', () => {
   const agent = {
-    extraArgs: ['exec', '--skip-git-repo-check'],
-    execArgs: ['--skip-git-repo-check'], // exec を欠落
+    extraArgs: ['--model', 'gpt-6.1-sol'],
+    execArgs: ['--cd', '{workspace}'],
     nonInteractiveTokens: ['exec'],
   };
-  // extraArgs は保持している → 省略時（extraArgs 検証）では valid
-  assert.equal(validateNonInteractiveTokens(agent).valid, true);
-  // Review Manager 系起動は execArgs ?? extraArgs を使うため、execArgs を渡すと
-  // 欠落を検出できる（修正前はこのケースが素通りしていた）
-  const result = validateNonInteractiveTokens(agent, agent.execArgs);
+  const result = validateNonInteractiveTokens(agent, buildAgentExecArgs(agent));
   assert.equal(result.valid, false);
   assert.deepEqual(result.missing, ['exec']);
 });
 
-test('validateNonInteractiveTokens: argsArray が execArgs ?? extraArgs なら RM 起動経路の実態を検証できる', () => {
+test('validateNonInteractiveTokens: headless 経路固有引数にあるトークンも合成列なら検出できる', () => {
   const agent = {
-    extraArgs: ['exec', '--skip-git-repo-check'],
+    extraArgs: ['--model', 'gpt-6.1-sol'],
+    execArgs: ['exec', '--cd', '{workspace}'],
     nonInteractiveTokens: ['exec'],
   };
-  // execArgs 未定義 → RM は extraArgs にフォールバック → extraArgs が保持していれば valid
-  assert.equal(validateNonInteractiveTokens(agent, agent.execArgs ?? agent.extraArgs).valid, true);
+  assert.equal(validateNonInteractiveTokens(agent, buildAgentExecArgs(agent)).valid, true);
 });
 
 test('validateNonInteractiveTokens: argsArray が null の場合は欠落として扱う（フェイルクローズ）', () => {

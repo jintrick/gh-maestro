@@ -17,7 +17,7 @@ const { spawn, spawnSync } = require('./shared/child-process');
 const { writeSentinel, finalizeReview } = require('./finalize-review');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { atomicWriteJson } = require('./shared/atomic-write');
-const { runAgentWithPrompt, RESULT_FILE_TOKEN } = require('./shared/agent-launch');
+const { buildAgentExecArgs, runAgentWithPrompt, RESULT_FILE_TOKEN } = require('./shared/agent-launch');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
 const { readJsonFile } = require('./shared/json-file');
@@ -581,9 +581,9 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
     error,
   });
 
-  const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
+  const tokenCheck = validateNonInteractiveTokens(agentConfig, buildAgentExecArgs(agentConfig));
   if (!tokenCheck.valid) {
-    return failed(`agent "${agentConfig.id}" execArgs/extraArgs is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (check ~/.gh-maestro/config.json agents["${agentConfig.id}"].execArgs / extraArgs)`);
+    return failed(`agent "${agentConfig.id}" Review Manager argv is missing non-interactive token(s): ${tokenCheck.missing.join(', ')} (add shared arguments to ~/.gh-maestro/config.json agents["${agentConfig.id}"].extraArgs)`);
   }
 
   const skillsDir = resolveReviewSkillsDir(options);

@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('./shared/child-process');
-const { runAgentWithPrompt } = require('./shared/agent-launch');
+const { buildAgentExecArgs, runAgentWithPrompt } = require('./shared/agent-launch');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { linkNodeModules } = require('./shared/link-node-modules');
 const { unlinkJunctions } = require('./shared/unlink-junctions');
@@ -895,9 +895,9 @@ async function superviseAgentPhase({
   }
 
   // 非対話化トークン検証（フェイルクローズ、Issue #163 Review Manager指摘）。詳細は旧実装コメント参照。
-  const execTokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.execArgs ?? agentConfig.extraArgs);
+  const execTokenCheck = validateNonInteractiveTokens(agentConfig, buildAgentExecArgs(agentConfig));
   if (!execTokenCheck.valid) {
-    log(`エージェント "${agentId}" の execArgs/extraArgs が非対話化トークン（${execTokenCheck.missing.join(', ')}）を保持していません。`);
+    log(`エージェント "${agentId}" の Review Manager 用 argv が非対話化トークン（${execTokenCheck.missing.join(', ')}）を保持していません。`);
     return { outcome: 'agent-config-failed', exitCode: 1, agentPid: null, reason: `non-interactive token missing: ${execTokenCheck.missing.join(', ')}` };
   }
 

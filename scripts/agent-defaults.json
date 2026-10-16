@@ -12,13 +12,6 @@
         "stream-json",
         "--verbose"
       ],
-      "execArgs": [
-        "--dangerously-skip-permissions",
-        "--print",
-        "--output-format",
-        "stream-json",
-        "--verbose"
-      ],
       "nonInteractiveTokens": [
         "--print"
       ],
@@ -49,7 +42,6 @@
         "run"
       ],
       "execArgs": [
-        "run",
         "--dir",
         "{workspace}"
       ],
@@ -74,11 +66,6 @@
         "--print-timeout",
         "30m0s"
       ],
-      "execArgs": [
-        "--dangerously-skip-permissions",
-        "--print-timeout",
-        "30m0s"
-      ],
       "execPromptDelivery": "flag",
       "execPromptFlag": "--print",
       "promptDelivery": "flag",
@@ -99,11 +86,8 @@
         "--dangerously-bypass-approvals-and-sandbox"
       ],
       "execArgs": [
-        "exec",
-        "--skip-git-repo-check",
         "--cd",
-        "{workspace}",
-        "--dangerously-bypass-approvals-and-sandbox"
+        "{workspace}"
       ],
       "nonInteractiveTokens": [
         "exec"

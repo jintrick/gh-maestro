@@ -9,11 +9,14 @@ const { withTempDir } = require('../scripts/shared/temp-directory');
 
 const {
   buildAgentCommandArgs,
+  buildAgentExecArgs,
   buildAgentResumeCommandArgs,
+  normalizeAgentLaunchConfig,
   runAgentWithPrompt,
   RESULT_FILE_TOKEN,
   RESUME_REPORTING_REMINDER,
 } = require('../scripts/shared/agent-launch');
+const { loadDefaults, resolveAgentConfig, resolveExtends } = require('../scripts/shared/resolve-config');
 
 function fakeChild() {
   const child = new EventEmitter();
@@ -223,6 +226,78 @@ test('buildAgentCommandArgs: unknown delivery fails clearly', () => {
     command: 'x',
     promptDelivery: 'unknown',
   }), /unknown promptDelivery/);
+});
+
+test('default agents keep literal argv for normal and Review Manager launches', () => {
+  const cwd = 'C:/agent-workspace';
+  const promptOptions = {
+    promptFile: 'C:/tmp/prompt.md',
+    shortPrompt: 'prompt',
+    systemPromptText: 'system',
+  };
+  const defaults = loadDefaults();
+  const agents = new Map(defaults.agents.map(agent => [agent.id, resolveExtends(agent, defaults.agents)]));
+  const expected = {
+    claude: {
+      normal: ['claude', '--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose', '--append-system-prompt-file', 'C:/tmp/prompt.md', 'system'],
+      review: ['claude', '--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose', '--append-system-prompt-file', 'C:/tmp/prompt.md', 'system'],
+    },
+    codex: {
+      normal: ['codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', 'prompt'],
+      review: ['codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--cd', cwd, 'prompt'],
+    },
+    reasonix: {
+      normal: ['reasonix', 'run', 'prompt'],
+      review: ['reasonix', 'run', '--dir', cwd, 'prompt'],
+    },
+    agy: {
+      normal: ['agy', '--dangerously-skip-permissions', '--print-timeout', '30m0s', '--print', 'prompt'],
+      review: ['agy', '--dangerously-skip-permissions', '--print-timeout', '30m0s', '--print', 'prompt'],
+    },
+    'agy-interactive': {
+      normal: ['agy', '--dangerously-skip-permissions', '--prompt-interactive', 'prompt'],
+      review: ['agy', '--dangerously-skip-permissions', '--prompt-interactive', 'prompt'],
+    },
+  };
+
+  for (const [agentId, launches] of Object.entries(expected)) {
+    const agent = agents.get(agentId);
+    assert.ok(agent, `missing default agent ${agentId}`);
+    assert.deepEqual(buildAgentCommandArgs(agent, promptOptions), launches.normal, `${agentId} normal argv`);
+    const normalized = normalizeAgentLaunchConfig(agent, cwd);
+    assert.deepEqual(buildAgentCommandArgs(normalized, promptOptions), launches.review, `${agentId} Review Manager argv`);
+  }
+});
+
+test('inherited codex and agy extraArgs are shared by normal and Review Manager argv', async () => {
+  await withTempDir('agent-launch-inherited-args-', async (root) => {
+    const home = path.join(root, 'home');
+    const configDir = path.join(home, '.gh-maestro');
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({
+      agents: {
+        'codex-sol': { extends: 'codex', extraArgs: ['--config', 'model=gpt-6.1-sol'] },
+        'agy-model': { extends: 'agy', extraArgs: ['--model', 'gemini-3.8-flash-medium'] },
+      },
+    }), 'utf8');
+
+    const cwd = 'C:/agent-workspace';
+    const codex = resolveAgentConfig('codex-sol', { homedir: home });
+    const agy = resolveAgentConfig('agy-model', { homedir: home });
+    assert.ok(codex);
+    assert.ok(agy);
+
+    const codexNormal = buildAgentCommandArgs(codex, { shortPrompt: 'prompt' });
+    const codexReview = buildAgentCommandArgs(normalizeAgentLaunchConfig(codex, cwd), { shortPrompt: 'prompt' });
+    assert.deepEqual(codexNormal, ['codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--config', 'model=gpt-6.1-sol', 'prompt']);
+    assert.deepEqual(codexReview, ['codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--config', 'model=gpt-6.1-sol', '--cd', cwd, 'prompt']);
+
+    const agyNormal = buildAgentCommandArgs(agy, { shortPrompt: 'prompt' });
+    const agyReview = buildAgentCommandArgs(normalizeAgentLaunchConfig(agy, cwd), { shortPrompt: 'prompt' });
+    assert.deepEqual(agyNormal, ['agy', '--dangerously-skip-permissions', '--print-timeout', '30m0s', '--model', 'gemini-3.8-flash-medium', '--print', 'prompt']);
+    assert.deepEqual(agyReview, ['agy', '--dangerously-skip-permissions', '--print-timeout', '30m0s', '--model', 'gemini-3.8-flash-medium', '--print', 'prompt']);
+    assert.deepEqual(buildAgentExecArgs(codex), [...codex.extraArgs, '--cd', '{workspace}']);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
