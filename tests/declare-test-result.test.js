@@ -129,6 +129,13 @@ test('buildCommentBody: 層別aggregateはfull/slowの結果とslowの実行記�
           status: 'complete', outcome: 'fail', tests: 2, pass: 1, fail: 1,
           executor: 'poll-pr', scope: 'partial',
           executionLogPath: 'C:/runtime/slow.log',
+          dynamicConcurrency: {
+            value: 1,
+            cpuCount: null,
+            reviewJobCount: 2,
+            status: 'unavailable',
+            unavailableInputs: ['cpuCount'],
+          },
         },
       },
     },
@@ -139,6 +146,7 @@ test('buildCommentBody: 層別aggregateはfull/slowの結果とslowの実行記�
   assert.ok(body.includes('executor: `test-runner`, scope: `full`'));
   assert.ok(body.includes('executor: `poll-pr`, scope: `partial`'));
   assert.ok(body.includes('実行記録: `slow.log`'));
+  assert.ok(body.includes('並列数: 1, CPU数: unknown, Review Managerジョブ数: 2, 並列数状態: unavailable, 並列数取得失敗: cpuCount'));
   assert.ok(!body.includes('C:/runtime/'), '公開先のコメントにローカルの絶対パスを載せない');
   assert.ok(body.includes('- **結果**: fail'));
 });

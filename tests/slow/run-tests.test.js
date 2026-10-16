@@ -266,3 +266,73 @@ test('run-tests.js: 設定workspaceと実行worktreeを分離し、両方の指�
     fs.rmSync(lintMarker, { force: true });
   }
 });
+
+test('run-tests.js: slow層のdynamicConcurrencyを実際のNode test processへ渡して成果物に記録する', () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-dynamic-concurrency-'));
+  const resultPath = testResultPath(project);
+  const runtimeDir = workspaceRuntimeDir(project);
+  const configDir = path.join(project, '.gh-maestro');
+  const testDir = path.join(project, 'tests');
+
+  try {
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.mkdirSync(testDir, { recursive: true });
+    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({
+      test: {
+        layers: {
+          slow: {
+            scope: 'partial',
+            command: [process.execPath, '--test'],
+            defaultTestFiles: ['tests/concurrency.test.js'],
+            dynamicConcurrency: {
+              args: ['--test-concurrency={value}'],
+              // safe integerの最大値をreserveし、CPU数に関係なくminimumへ固定する。
+              cpuReserve: Number.MAX_SAFE_INTEGER,
+              reviewJobCost: 1,
+              minimum: 11,
+            },
+          },
+        },
+      },
+    }, null, 2), 'utf8');
+    fs.writeFileSync(path.join(testDir, 'concurrency.test.js'), `
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+test('dynamic concurrency reaches the Node test process', () => {
+  assert.ok(process.execArgv.includes('--test-concurrency=11'), process.execArgv.join(' '));
+});
+`.trimStart(), 'utf8');
+
+    runGit(project, ['init', '-q']);
+    runGit(project, ['config', 'user.email', 'test@example.invalid']);
+    runGit(project, ['config', 'user.name', 'gh-maestro test']);
+    runGit(project, ['add', '-A']);
+    runGit(project, ['commit', '-qm', 'fixture']);
+
+    const execution = spawnSync(process.execPath, [RUN_TESTS, '--workspace', project, 'slow'], {
+      cwd: project,
+      env: cleanChildEnv({
+        GH_MAESTRO_TEST_ACTOR: 'run-slow-tests',
+        GH_MAESTRO_RUNTIME_WORKSPACE: project,
+      }),
+      encoding: 'utf8',
+    });
+
+    assert.equal(execution.status, 0, `run-tests.js slow failed: ${execution.stderr}\n${execution.stdout}`);
+
+    const artifact = readTestResultArtifact(project);
+    assert.equal(artifact.ok, true);
+    assert.equal(artifact.result.layers.slow.outcome, 'pass');
+    const dynamicConcurrency = artifact.result.layers.slow.dynamicConcurrency;
+    assert.equal(dynamicConcurrency.value, 11);
+    assert.ok(Number.isSafeInteger(dynamicConcurrency.cpuCount) && dynamicConcurrency.cpuCount >= 1);
+    assert.equal(dynamicConcurrency.reviewJobCount, 0);
+    assert.equal(dynamicConcurrency.status, 'complete');
+    assert.deepEqual(dynamicConcurrency.unavailableInputs, []);
+  } finally {
+    try { fs.rmSync(resultPath, { force: true }); } catch {}
+    try { fs.rmSync(runtimeDir, { recursive: true, force: true }); } catch {}
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});

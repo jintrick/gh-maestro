@@ -46,6 +46,9 @@ test('main: --help and -h return Usage without running the layer', () => {
     });
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout, USAGE);
+    assert.match(result.stdout, /dynamicConcurrency/);
+    assert.match(result.stdout, /reviewJobCost/);
+    assert.match(result.stdout, /review-job数 \* reviewJobCost/);
   }
 });
 

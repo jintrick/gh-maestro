@@ -188,6 +188,25 @@ test('共有ルール: aggregate は層別結果と全層充足性を抽出す�
   });
 });
 
+test('queryTestStatus: aggregateのslow層から動的並列数・入力・取得失敗を返す', () => {
+  const body = aggregateDeclarationBody().replace(
+    '実行記録: `C:/runtime/slow.log`',
+    '実行記録: `slow.log`, 並列数: 1, CPU数: unknown, Review Managerジョブ数: 2, 並列数状態: unavailable, 並列数取得失敗: cpuCount',
+  );
+  const result = queryTestStatus(
+    { pr: '42', repo: 'owner/repo' },
+    { ghPrViewFn: () => prView([prComment(body)]) },
+  );
+
+  assert.deepEqual(result.layers.slow.dynamicConcurrency, {
+    value: 1,
+    cpuCount: null,
+    reviewJobCount: 2,
+    status: 'unavailable',
+    unavailableInputs: ['cpuCount'],
+  });
+});
+
 test('queryTestStatus: aggregate はfull/slowの層別結果と不足層を返す', () => {
   const complete = queryTestStatus(
     { pr: '42', repo: 'owner/repo' },

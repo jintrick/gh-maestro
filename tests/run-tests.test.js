@@ -15,6 +15,7 @@ const {
 } = require('../scripts/run-tests');
 const { createBuiltinTestConfig } = require('../scripts/shared/resolve-config');
 const { createTempDirScope } = require('../scripts/shared/temp-directory');
+const { findRunningInstances, pidsDir } = require('../scripts/process-lifecycle');
 
 const BUILTIN_TEST_LAYERS = createBuiltinTestConfig().layers;
 
@@ -265,6 +266,168 @@ test('runTests: slow suiteはpartialとして記録する', () => {
     ...BUILTIN_TEST_LAYERS.slow.command.slice(1),
     ...BUILTIN_TEST_LAYERS.slow.defaultTestFiles,
   ]);
+  assert.equal(fixture.artifacts[0].dynamicConcurrency, undefined);
+});
+
+test('runTests: 宣言した動的並列数を実 argv と層別成果物へ渡し、main workspace のreview-jobを数える', () => {
+  const configWorkspace = tempWorktree();
+  const mainWorkspace = tempWorktree();
+  let registryQuery;
+  const fixture = runWithChild({
+    suite: 'slow',
+    actor: 'poll-pr',
+    workspace: configWorkspace,
+    env: { GH_MAESTRO_RUNTIME_WORKSPACE: mainWorkspace },
+    child: { status: 0, stdout: tapSummary({ tests: 1, pass: 1, fail: 0 }), stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: () => ({
+        source: 'declared',
+        layers: {
+          slow: {
+            scope: 'partial',
+            command: [process.execPath, '--test'],
+            dynamicConcurrency: {
+              args: ['--test-concurrency={value}'],
+              cpuReserve: 1,
+              reviewJobCost: 2,
+              minimum: 1,
+            },
+          },
+        },
+      }),
+      availableParallelismFn: () => 12,
+      findRunningInstancesFn: (workspace, options) => {
+        registryQuery = { workspace, options };
+        return [{}, {}, {}];
+      },
+      lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+    },
+  });
+
+  assert.deepEqual(registryQuery, {
+    workspace: mainWorkspace,
+    options: { script: 'review-job', failOnReadError: true },
+  });
+  assert.deepEqual(fixture.calls.find(call => call.type === 'spawn').args, [
+    '--test', '--test-concurrency=5',
+  ]);
+  assert.deepEqual(fixture.artifacts[0].dynamicConcurrency, {
+    value: 5,
+    cpuCount: 12,
+    reviewJobCount: 3,
+    status: 'complete',
+    unavailableInputs: [],
+  });
+});
+
+test('runTests: PR worktreeから本体workspaceのPID registryにあるreview-jobを実際に数える', () => {
+  const configWorkspace = tempWorktree();
+  const mainWorkspace = tempWorktree();
+  const runtimeDir = tempWorktree();
+  const previousRuntimeDir = process.env.GH_MAESTRO_RUNTIME_DIR;
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtimeDir;
+
+  try {
+    const registryDir = pidsDir(mainWorkspace);
+    fs.mkdirSync(registryDir, { recursive: true });
+    for (const pid of [910001, 910002, 910003, 910004]) {
+      fs.writeFileSync(path.join(registryDir, `${pid}.json`), JSON.stringify({
+        pid,
+        workspace: mainWorkspace,
+        script: 'review-job',
+        workerName: `review-job-pr-625-${pid}`,
+      }), 'utf8');
+    }
+
+    const fixture = runWithChild({
+      suite: 'slow',
+      actor: 'poll-pr',
+      workspace: configWorkspace,
+      env: { GH_MAESTRO_RUNTIME_WORKSPACE: mainWorkspace },
+      child: { status: 0, stdout: tapSummary({ tests: 1, pass: 1, fail: 0 }), stderr: '' },
+      extraDeps: {
+        resolveTestConfigFn: () => ({
+          source: 'declared',
+          layers: {
+            slow: {
+              scope: 'partial',
+              command: [process.execPath, '--test'],
+              dynamicConcurrency: {
+                args: ['--test-concurrency={value}'],
+                cpuReserve: 1,
+                reviewJobCost: 2,
+                minimum: 1,
+              },
+            },
+          },
+        }),
+        availableParallelismFn: () => 12,
+        findRunningInstancesFn: (workspace, options) => {
+          assert.equal(workspace, mainWorkspace);
+          assert.deepEqual(options, { script: 'review-job', failOnReadError: true });
+          return findRunningInstances(workspace, {
+            ...options,
+            isProcessAliveFn: () => true,
+            verifyProcessIdentityFn: () => ({ match: true }),
+          });
+        },
+        lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+      },
+    });
+
+    assert.deepEqual(fixture.calls.find(call => call.type === 'spawn').args, [
+      '--test', '--test-concurrency=3',
+    ]);
+    assert.deepEqual(fixture.artifacts[0].dynamicConcurrency, {
+      value: 3,
+      cpuCount: 12,
+      reviewJobCount: 4,
+      status: 'complete',
+      unavailableInputs: [],
+    });
+  } finally {
+    if (previousRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntimeDir;
+  }
+});
+
+test('runTests: 動的並列数の入力が読めないときは設定下限をargvと成果物へ残す', () => {
+  const fixture = runWithChild({
+    suite: 'slow',
+    actor: 'poll-pr',
+    child: { status: 0, stdout: tapSummary({ tests: 1, pass: 1, fail: 0 }), stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: () => ({
+        source: 'declared',
+        layers: {
+          slow: {
+            scope: 'partial',
+            command: [process.execPath, '--test'],
+            dynamicConcurrency: {
+              args: ['--test-concurrency={value}'],
+              cpuReserve: 1,
+              reviewJobCost: 1,
+              minimum: 2,
+            },
+          },
+        },
+      }),
+      availableParallelismFn: () => 12,
+      findRunningInstancesFn: () => { throw new Error('registry unavailable'); },
+      lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+    },
+  });
+
+  assert.deepEqual(fixture.calls.find(call => call.type === 'spawn').args, [
+    '--test', '--test-concurrency=2',
+  ]);
+  assert.deepEqual(fixture.artifacts[0].dynamicConcurrency, {
+    value: 2,
+    cpuCount: 12,
+    reviewJobCount: null,
+    status: 'unavailable',
+    unavailableInputs: ['reviewJobCount'],
+  });
 });
 
 test('runTests: slow suiteは指定された分離側テストだけを起動する', () => {
@@ -664,7 +827,9 @@ test('main: --helpは実runnerを起動せずusageを返す', () => {
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout, USAGE);
   assert.match(result.stdout, /--list/);
-  assert.doesNotMatch(result.stdout, /config\.json/);
+  assert.match(result.stdout, /dynamicConcurrency/);
+  assert.match(result.stdout, /review-job数 \* reviewJobCost/);
+  assert.match(result.stdout, /GH_MAESTRO_RUNTIME_WORKSPACE/);
 
   const calls = [];
   const changed = main(['--changed', 'changed', 'src/widget.js'], {

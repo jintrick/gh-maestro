@@ -867,6 +867,7 @@ test('runSlowTest uses a matching existing worktree and preserves the full layer
     assert.equal(declareCalls.length, 1);
     assert.equal(declareCalls[0].headSha, head);
     assert.equal(spawnOptions.env.GH_MAESTRO_TEST_ACTOR, 'poll-pr');
+    assert.equal(spawnOptions.env.GH_MAESTRO_RUNTIME_WORKSPACE, workspace);
     assert.equal(spawnOptions.env.GH_MAESTRO_TEST_LOG_PATH, result.executionLogPath);
     assert.ok(fs.existsSync(result.artifactPath));
     assert.equal(readTestResultArtifact(worktree).result.layers.full.outcome, 'pass');
@@ -1112,6 +1113,7 @@ test('runSlowTest keeps a non-zero slow test outcome as fail', async () => {
   const head = '9999999999999999999999999999999999999999';
   const child = new EventEmitter();
   child.pid = 1236;
+  const output = captureStdout();
   try {
     const result = await mod.runSlowTest({
       pr: '48', issue: 461, repo: 'fixture/repo', workspace, headSha: head,
@@ -1126,6 +1128,13 @@ test('runSlowTest keeps a non-zero slow test outcome as fail', async () => {
           outcome: 'fail',
           pass: 0,
           fail: 1,
+          dynamicConcurrency: {
+            value: 2,
+            cpuCount: 12,
+            reviewJobCount: 4,
+            status: 'complete',
+            unavailableInputs: [],
+          },
         });
         onCleanup();
         return 1;
@@ -1135,7 +1144,17 @@ test('runSlowTest keeps a non-zero slow test outcome as fail', async () => {
     assert.equal(result.status, 'fail');
     assert.equal(result.outcome, 'fail');
     assert.equal(result.exitCode, 1);
+    assert.deepEqual(result.dynamicConcurrency, {
+      value: 2,
+      cpuCount: 12,
+      reviewJobCount: 4,
+      status: 'complete',
+      unavailableInputs: [],
+    });
+    const event = JSON.parse(output.output().trim().slice('SLOW_TEST_RESULT:'.length));
+    assert.deepEqual(event.dynamicConcurrency, result.dynamicConcurrency);
   } finally {
+    output.restore();
     if (previousRuntime === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
     else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
   }
