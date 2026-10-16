@@ -5,9 +5,10 @@
 // 通知を orchestrator 自身の操作に任せると、SKILL.md に書いてあっても発言の瞬間に
 // 想起されず送られない（Issue #611）。Stop、StopFailure、PermissionRequest で予約する。
 //
-// Stop / StopFailure / PermissionRequest で60秒後の通知を予約し、次の人間の入力
-// （UserPromptSubmit）で取り消す。PostToolUse / PostToolUseFailure は PermissionRequest
-// 由来の予約だけ取り消す。拒否・中断のあと何も入力されなければ通知する。
+// Stop / StopFailure / PermissionRequest で30秒後の通知を予約し、次の人間の入力
+// （UserPromptSubmit）で取り消す。plugin monitor の task-notification は人間の入力では
+// ないため予約を維持する。PostToolUse / PostToolUseFailure は PermissionRequest 由来の
+// 予約だけ取り消す。拒否・中断のあと何も入力されなければ通知する。
 // 次の Stop が予約し直す場合も含め、予約は1つにまとまる
 // （docs/adr/0045-notify-human-on-every-orchestrator-stop.md）。予約hookは async で
 // 登録されているため、hook の中で待っても応答や許可画面を止めない。
@@ -38,11 +39,12 @@ workspace は CLAUDE_PROJECT_DIR、なければhook入力の cwd から解決す
 session_id が /gh-maestro のセッション初期化で記録されたIDと一致するときだけ動く。
 一致しないとき・記録が無いときは何もせず終了コード0。
 
-予約（引数なし）: Stop、StopFailure、PermissionRequest で60秒後の通知を予約して待つ。
+予約（引数なし）: Stop、StopFailure、PermissionRequest で30秒後の通知を予約して待つ。
   待つあいだに次の予約か --cancel があれば、通知せず終了する。何も起きなければ
   notify-human.js を1回実行する。
-取り消し（--cancel）: UserPromptSubmit はすべての予約を、PostToolUse / PostToolUseFailure は
-  PermissionRequest 由来の予約だけを取り消す。
+取り消し（--cancel）: 人間の UserPromptSubmit はすべての予約を、PostToolUse /
+  PostToolUseFailure は PermissionRequest 由来の予約だけを取り消す。plugin monitor の
+  task-notification による UserPromptSubmit は予約を維持する。
   拒否・中断だけで人間の入力が続かない場合は予約を維持し、通知する。標準出力には何も書かない。
 
 失敗時は終了コード1（Claude Codeの処理は止めない）。`;
@@ -55,7 +57,7 @@ const SPEC = {
 
 const MARKER_FILE = 'orchestrator-claude-session.json';
 const PENDING_FILE = 'orchestrator-pending-notification.json';
-const NOTIFY_DELAY_MS = 60000;
+const NOTIFY_DELAY_MS = 30000;
 
 function pendingPath(workspace, runtimeRootOverride) {
   return path.join(workspaceRuntimeDir(workspace, runtimeRootOverride), PENDING_FILE);
@@ -201,6 +203,9 @@ function runNotificationHook(input, deps = {}) {
 function runCancelHook(input, deps = {}) {
   const workspace = resolveOrchestratorWorkspace(input, deps);
   if (!workspace) return { exitCode: 0 };
+  if (input.hook_event_name === 'UserPromptSubmit'
+    && typeof input.prompt === 'string'
+    && input.prompt.startsWith('<task-notification>')) return { exitCode: 0 };
   const file = pendingPath(workspace, deps.runtimeRoot);
   if (input.hook_event_name === 'PostToolUse' || input.hook_event_name === 'PostToolUseFailure') {
     const pending = readPending(file);

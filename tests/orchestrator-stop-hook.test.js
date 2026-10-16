@@ -89,7 +89,7 @@ test('stop: 記録済みセッションなら、問いで終わらない応答�
   }
 });
 
-test('stop: 通知を予約して既定の60秒を待ち、予約が残っていれば1回通知して予約を消す', () => {
+test('stop: 通知を予約して既定の30秒を待ち、予約が残っていれば1回通知して予約を消す', () => {
   withEnv((env) => {
     env.mark('session-A');
     const spawn = recordingSpawn();
@@ -106,7 +106,7 @@ test('stop: 通知を予約して既定の60秒を待ち、予約が残ってい
       delayMs: undefined,
     }));
     assert.deepEqual(result, { exitCode: 0 });
-    assert.deepEqual(waits, [60000]);
+    assert.deepEqual(waits, [30000]);
     assert.equal(spawn.calls.length, 1);
     assert.equal(fs.existsSync(file), false);
   });
@@ -141,6 +141,42 @@ test('cancel: 待つあいだに人間が入力したら（--cancel）、通知�
     }));
     assert.deepEqual(result, { exitCode: 0 });
     assert.equal(spawn.calls.length, 0);
+  });
+});
+
+test('monitor task-notification の UserPromptSubmit 後に — で Stop しても先の予約を通知する', () => {
+  withEnv((env) => {
+    env.mark('session-A');
+    const spawn = recordingSpawn();
+    const file = hook.pendingPath(env.workspace, env.runtimeRoot);
+    const events = [];
+    const monitorPrompt = '<task-notification>\n<event>MONITOR_PROBE</event>\n</task-notification>';
+    const firstStop = hook.runNotificationHook({
+      session_id: 'session-A', hook_event_name: 'Stop', last_assistant_message: QUESTION,
+    }, env.deps({
+      spawnSyncFn: spawn.fn,
+      randomUUIDFn: () => 'original-reservation',
+      delayMs: 0,
+      sleepFn: () => {
+        events.push('Stop');
+        assert.equal(hook.readPendingToken(file), 'original-reservation');
+        assert.deepEqual(hook.runCancelHook({
+          session_id: 'session-A', hook_event_name: 'UserPromptSubmit', prompt: monitorPrompt,
+        }, env.deps()), { exitCode: 0 });
+        events.push('UserPromptSubmit:monitor');
+        assert.equal(hook.readPendingToken(file), 'original-reservation');
+        assert.deepEqual(hook.runNotificationHook({
+          session_id: 'session-A', hook_event_name: 'Stop', last_assistant_message: '—',
+        }, env.deps({ spawnSyncFn: spawn.fn })), { exitCode: 0 });
+        events.push('Stop:dash');
+        assert.equal(hook.readPendingToken(file), 'original-reservation');
+      },
+    }));
+
+    assert.deepEqual(events, ['Stop', 'UserPromptSubmit:monitor', 'Stop:dash']);
+    assert.deepEqual(firstStop, { exitCode: 0 });
+    assert.equal(spawn.calls.length, 1);
+    assert.equal(fs.existsSync(file), false);
   });
 });
 
