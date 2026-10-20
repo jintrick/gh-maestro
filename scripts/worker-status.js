@@ -12,7 +12,7 @@ const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
-const { resolveRepo } = require('./shared/repo');
+const { resolveRepo, ghRepoView } = require('./shared/repo');
 const { loadStatusPane, saveStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
 const { ensureStatusPane: ensureStatusPaneLib } = require('./shared/ensure-status-pane');
 const { resolveSkillAgentMap } = require('./shared/resolve-config');
@@ -86,27 +86,43 @@ let _injectedGetCurrentPaneTarget = null;
 let _injectedAcquireStatusPaneLock = null;
 let _injectedReleaseStatusPaneLock = null;
 let _injectedReadCycleEvents = null;
+const REPO_RESOLVE_TIMEOUT_MS = 3000;
+const REPO_RETRY_INTERVAL_MS = 30_000;
+
 let _injectedResolveRepo = null;
 const _repoCache = new Map();
 
 function _getRepo(workspace, opts = {}) {
   if (opts.repo !== undefined) return opts.repo;
   if (!workspace) return null;
-  if (_repoCache.has(workspace)) return _repoCache.get(workspace);
+
+  const cached = _repoCache.get(workspace);
+  if (cached && cached.repo) return cached.repo;
+
+  const now = (opts.nowFn || _now)();
+  const retryInterval = opts.retryIntervalMs ?? REPO_RETRY_INTERVAL_MS;
+  if (cached && cached.failedAt && (now - cached.failedAt) < retryInterval) {
+    return null;
+  }
 
   const resolveRepoFn = opts.resolveRepoFn || _injectedResolveRepo || resolveRepo;
   try {
-    const res = resolveRepoFn({ workspace });
+    const res = resolveRepoFn(
+      { workspace },
+      { ghRepoViewFn: (ghOpts) => (opts.ghRepoViewFn || ghRepoView)({ timeout: opts.timeoutMs ?? REPO_RESOLVE_TIMEOUT_MS, ...ghOpts }) }
+    );
     if (res && res.ok && res.repo) {
       const repo = String(res.repo).trim();
       if (repo) {
-        _repoCache.set(workspace, repo);
+        _repoCache.set(workspace, { repo, failedAt: null });
         return repo;
       }
     }
   } catch {
-    // 解決失敗時はキャッシュせず、次回再試行する
+    // 解決失敗時は再試行間隔まで外部コマンドを再実行しない
   }
+
+  _repoCache.set(workspace, { repo: null, failedAt: now });
   return null;
 }
 
@@ -1169,11 +1185,13 @@ function main(argv = process.argv.slice(2)) {
       });
       writeOut(JSON.stringify(jsonEntries, null, 2));
     } else {
+      const repo = _getRepo(workspace);
       const lines = renderSnapshotLines(workspace, issueArg, {
         currentWorkers: workers,
         now: _now(),
         maxLineWidth: process.stdout.columns,
         colorize: Boolean(process.stdout.isTTY && process.env.NO_COLOR !== '1'),
+        repo: repo || undefined,
       });
       for (const line of lines) writeOut(line);
     }
@@ -1199,15 +1217,17 @@ function main(argv = process.argv.slice(2)) {
       return { code: 1, lines: out, errLines: err };
     }
 
+    const repo = _getRepo(workspace);
     const lines = renderSnapshotLines(workspace, issueArg, {
       currentWorkers: workers,
       now: _now(),
       maxLineWidth: process.stdout.columns,
       colorize: Boolean(process.stdout.isTTY && process.env.NO_COLOR !== '1'),
+      repo: repo || undefined,
     });
     for (const line of lines) writeOut(line);
 
-    return { code: 0, lines: out, errLines: err, isWatch: true, workspace, interval, issue: issueArg, startTimeCache };
+    return { code: 0, lines: out, errLines: err, isWatch: true, workspace, interval, issue: issueArg, startTimeCache, repo: repo || undefined };
   }
 
   if (sub === 'pane') {
@@ -1400,6 +1420,9 @@ module.exports = {
   _setReadCycleEvents: (fn) => { _injectedReadCycleEvents = fn; },
   _setResolveRepo: (fn) => { _injectedResolveRepo = fn; },
   _clearRepoCache: () => { _repoCache.clear(); },
+  _getRepo,
+  REPO_RESOLVE_TIMEOUT_MS,
+  REPO_RETRY_INTERVAL_MS,
 };
 
 if (require.main === module) {

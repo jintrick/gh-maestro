@@ -134,12 +134,21 @@ test('CLI_USAGE: status・workspace・worker-name・出力形式が定義され�
   assert.match(workerStatus.CLI_USAGE, /running/);
   assert.match(workerStatus.CLI_USAGE, /socketの消滅/);
   assert.match(workerStatus.CLI_USAGE, /rebind/);
+  assert.match(workerStatus.CLI_USAGE, /見出しとワーカー行/);
+  assert.doesNotMatch(workerStatus.CLI_USAGE, /6区間/);
+  assert.doesNotMatch(workerStatus.CLI_USAGE, /cycle metrics/);
 });
 
-test('main: --help は code 0 で usage を返す', () => {
+test('main: --help は code 0 で usage を返し、新しい説明を含み旧来の文言を含まない', () => {
   const result = runMain(['--help']);
   assert.equal(result.code, 0);
-  assert.match(result.lines.join('\n'), /worker-status\.js/);
+  const helpText = result.lines.join('\n');
+  assert.match(helpText, /worker-status\.js/);
+  assert.match(helpText, /list\s+見出しとワーカーの稼働状況を表示する/);
+  assert.match(helpText, /watch\s+見出しとワーカー行を画面クリアしながら定期更新する/);
+  assert.match(helpText, /見出しとワーカー行/);
+  assert.doesNotMatch(helpText, /6区間/);
+  assert.doesNotMatch(helpText, /cycle metrics/);
   assert.deepEqual(result.errLines, []);
 });
 
@@ -2151,9 +2160,10 @@ test('renderSnapshotLines: 区間時間行を表示せず、見出しにリポ�
   assert.ok(!lines.some(l => l.includes('準備') && l.includes('計画') && l.includes('承認')));
 });
 
-test('_getRepo: 解決失敗時はキャッシュせず、成功時にキャッシュする', () => {
+test('_getRepo: 解決失敗後のクールダウン期間内は外部コマンドを呼ばず即座にnull(unknown)を返し、成功時にキャッシュする', () => {
   workerStatus._clearRepoCache();
   let calls = 0;
+  let now = 100000;
   workerStatus._setResolveRepo(() => {
     calls++;
     if (calls === 1) return { ok: false, error: 'fail' };
@@ -2161,18 +2171,46 @@ test('_getRepo: 解決失敗時はキャッシュせず、成功時にキャッ�
   });
 
   const ws = 'C:/test-ws-retry';
-  const lines1 = workerStatus.renderSnapshotLines(ws, 1, { currentWorkers: [] });
-  assert.equal(lines1[0], 'unknown issue#1');
+  // 1回目: 失敗
+  const res1 = workerStatus._getRepo(ws, { nowFn: () => now });
+  assert.equal(res1, null);
   assert.equal(calls, 1);
 
-  const lines2 = workerStatus.renderSnapshotLines(ws, 1, { currentWorkers: [] });
-  assert.equal(lines2[0], 'jintrick/gh-maestro issue#1');
+  // 10秒後 (クールダウン30秒以内): 外部関数を呼ばずに即座にnullを返す
+  now += 10000;
+  const res2 = workerStatus._getRepo(ws, { nowFn: () => now });
+  assert.equal(res2, null);
+  assert.equal(calls, 1);
+
+  // 31秒後 (クールダウン経過): 再試行する
+  now += 21000;
+  const res3 = workerStatus._getRepo(ws, { nowFn: () => now });
+  assert.equal(res3, 'jintrick/gh-maestro');
   assert.equal(calls, 2);
 
-  // 3回目はキャッシュされているため resolveRepo は呼ばれない
-  const lines3 = workerStatus.renderSnapshotLines(ws, 1, { currentWorkers: [] });
-  assert.equal(lines3[0], 'jintrick/gh-maestro issue#1');
+  // 3回目 (成功後キャッシュ): 外部関数を呼ばない
+  now += 5000;
+  const res4 = workerStatus._getRepo(ws, { nowFn: () => now });
+  assert.equal(res4, 'jintrick/gh-maestro');
   assert.equal(calls, 2);
+
+  workerStatus._setResolveRepo(null);
+  workerStatus._clearRepoCache();
+});
+
+test('_getRepo: 既定の timeoutMs に REPO_RESOLVE_TIMEOUT_MS (3000ms) を渡す', () => {
+  workerStatus._clearRepoCache();
+  let capturedDeps = null;
+  const ws = 'C:/test-ws-timeout';
+  workerStatus._setResolveRepo((params, deps) => {
+    capturedDeps = deps;
+    return { ok: true, repo: 'jintrick/gh-maestro' };
+  });
+
+  workerStatus._getRepo(ws);
+  assert.ok(capturedDeps && typeof capturedDeps.ghRepoViewFn === 'function');
+  assert.equal(workerStatus.REPO_RESOLVE_TIMEOUT_MS, 3000);
+  assert.equal(workerStatus.REPO_RETRY_INTERVAL_MS, 30000);
 
   workerStatus._setResolveRepo(null);
   workerStatus._clearRepoCache();
