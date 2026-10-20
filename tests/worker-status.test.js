@@ -350,7 +350,7 @@ test('renderUptimeBars: 空ワーカー・単一ワーカー・複数ワーカ�
   assert.ok(defaultWidthLines.every(line => Array.from(line).length <= 120));
 });
 
-test('cycle snapshot: 区間を1行で表示し、ワーカーは最大4行の役職・モデル・時間・PIDにする', () => {
+test('snapshot: 見出しと最大4行のワーカー行（役職・モデル・時間・PID）を表示する', () => {
   const start = Date.parse('2026-08-26T00:00:00.000Z');
   const events = [
     { schemaVersion: 1, issue: 450, event: 'issue-created', at: new Date(start).toISOString() },
@@ -379,7 +379,7 @@ test('cycle snapshot: 区間を1行で表示し、ワーカーは最大4行の�
   // 見た目（見出しの文言・区切り・バー・時間の書式）は検証しない。
   // 変えるたびにテストを直すことになるため、ワーカー行が1行だけ出ることと、
   // そこに識別に要る情報が載っていることだけを見る。
-  const workerLines = lines.slice(2);
+  const workerLines = lines.slice(1);
   assert.equal(workerLines.length, 1);
   assert.ok(workerLines[0].includes('senior-coder'));
   assert.ok(workerLines[0].includes('16924'));
@@ -557,7 +557,7 @@ test('renderSnapshotLines: 同一ワーカーのrunを1行へ畳み、最新PID�
   });
 
   // run が2つあっても行は1つ。見た目ではなく行数と載っている値だけを見る。
-  const collapsed = lines.slice(2);
+  const collapsed = lines.slice(1);
   assert.equal(collapsed.length, 1);
   assert.equal((collapsed[0].match(/senior-coder/g) || []).length, 1);
   assert.ok(collapsed[0].includes('202'));
@@ -590,7 +590,7 @@ test('renderSnapshotLines: 同一ワーカーのrunを1行へ畳み、最新PID�
     ]);
     assert.equal(stoppedWithoutEvent.code, 0);
     // 実在しないPIDなので停止として扱われること。行の見た目は検証しない。
-    const stoppedLine = stoppedWithoutEvent.lines[2];
+    const stoppedLine = stoppedWithoutEvent.lines[1];
     assert.ok(stoppedLine.includes('senior-coder'));
     assert.ok(stoppedLine.includes('999999999'));
     assert.ok(stoppedLine.includes('senior-coder'));
@@ -641,7 +641,7 @@ test('renderSnapshotLines: Review ManagerのworkerNameとstartTime基準が異�
     now: base + 60000,
   });
 
-  const workerLines = lines.slice(2);
+  const workerLines = lines.slice(1);
   assert.equal(workerLines.length, 2);
   assert.equal((workerLines[0].match(/review-manager/g) || []).length, 1);
   assert.ok(workerLines[0].includes('(pid: 4150)'));
@@ -697,7 +697,7 @@ test('renderWorkerRows: Review Managerのジョブを監視用の子行として
   assert.ok(lines[1].includes('job-1 (Correctness)') && lines[1].includes('[codex]') && lines[1].includes('(pid: 333)'));
 });
 
-test('main: list はサイクル行と最大4件のワーカー行を出力する', () => {
+test('main: list は見出しと最大4件のワーカー行を出力する', () => {
   const workspace = createWorkspace();
   const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
   workerStatus._setNow(() => fixedNow);
@@ -718,12 +718,11 @@ test('main: list はサイクル行と最大4件のワーカー行を出力す�
     const result = runMain(['list', '--workspace', workspace]);
     assert.equal(result.code, 0);
     assert.equal(result.errLines.length, 0);
-    assert.equal(result.lines.length, 5);
+    assert.equal(result.lines.length, 4);
     assert.ok(result.lines[0].includes('#100'));
-    assert.match(result.lines[1], /^準備 \| 計画 \| 承認 \| 実装 \| 査読 \| 統合$/);
-    assert.ok(result.lines[2].includes('worker-a') && result.lines[2].includes('(pid: 111)'));
-    assert.ok(result.lines[3].includes('worker-b') && result.lines[3].includes('(pid: 222)'));
-    assert.match(result.lines[4], /worker-c\s+\[-\s*\]\s+- \(pid: 999999999\)$/);
+    assert.ok(result.lines[1].includes('worker-a') && result.lines[1].includes('(pid: 111)'));
+    assert.ok(result.lines[2].includes('worker-b') && result.lines[2].includes('(pid: 222)'));
+    assert.match(result.lines[3], /worker-c\s+\[-\s*\]\s+- \(pid: 999999999\)$/);
   } finally {
     workerStatus._setNow(null);
     workerStatus._setIsWorkerAlive(null);
@@ -855,9 +854,9 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
     assert.equal(handle.timer, 12345);
     const initialOutput = stdoutChunks.join('');
     assert.match(initialOutput, /\x1b\[2J\x1b\[H/); // ANSI画面クリア
-    assert.match(initialOutput, /=== gh-maestro #\?/);
+    assert.match(initialOutput, /issue#\?/);
     assert.doesNotMatch(initialOutput, /interval:|21:00:00/);
-    assert.match(initialOutput, /準備 \| 計画 \| 承認 \| 実装 \| 査読 \| 統合/);
+    assert.doesNotMatch(initialOutput, /準備 \| 計画 \| 承認 \| 実装 \| 査読 \| 統合/);
     assert.match(initialOutput, /worker-a\s+\[-\]\s+.*\(pid: 111\)/);
     assert.equal(startTimeCalls, 1, '同一描画内の起動時刻取得は1回');
 
@@ -869,9 +868,9 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
 
     const secondOutput = stdoutChunks.join('');
     assert.match(secondOutput, /\x1b\[2J\x1b\[H/);
-    assert.match(secondOutput, /=== gh-maestro #\?/);
+    assert.match(secondOutput, /issue#\?/);
     assert.doesNotMatch(secondOutput, /interval:|21:00:02/);
-    assert.match(secondOutput, /準備 \| 計画 \| 承認 \| 実装 \| 査読 \| 統合/);
+    assert.doesNotMatch(secondOutput, /準備 \| 計画 \| 承認 \| 実装 \| 査読 \| 統合/);
     assert.match(secondOutput, /worker-a\s+\[-\]\s+.*\(pid: 111\)/);
     assert.equal(startTimeCalls, 1, '上限間隔未満の再描画では再取得しない');
 
@@ -1135,7 +1134,7 @@ test('main: list --json と watch は同じ収集結果のワーカー集合・�
 
     const watchResult = runMain(['watch', '--workspace', workspace, '--interval', '5']);
     assert.equal(watchResult.code, 0);
-    const workerLines = watchResult.lines.slice(2);
+    const workerLines = watchResult.lines.slice(1);
     assert.equal(workerLines.length, 1);
     assert.ok(workerLines[0].includes('stopped-worker'));
     assert.ok(workerLines[0].includes('999'));
@@ -1889,11 +1888,10 @@ test('main: list および list --json で Review Manager を表示する', () =
     // 1. list (テキスト行)
     const listResult = runMain(['list', '--workspace', workspace]);
     assert.equal(listResult.code, 0);
-    assert.equal(listResult.lines.length, 4);
-    assert.match(listResult.lines[0], /^=== gh-maestro #\S*/);
-    assert.match(listResult.lines[1], /^準備 \| 計画 \| 承認 \| 実装 \| 査読 \| 統合$/);
-    assert.ok(listResult.lines[2].includes('worker-a') && listResult.lines[2].includes('(pid: 111)'));
-    assert.ok(listResult.lines[3].includes('review-manager') && listResult.lines[3].includes('(pid: 222)'));
+    assert.equal(listResult.lines.length, 3);
+    assert.ok(listResult.lines[0].includes('#100'));
+    assert.ok(listResult.lines[1].includes('worker-a') && listResult.lines[1].includes('(pid: 111)'));
+    assert.ok(listResult.lines[2].includes('review-manager') && listResult.lines[2].includes('(pid: 222)'));
 
     // 2. list --json (機械可読JSON)
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
@@ -2028,12 +2026,11 @@ test('collectWorkersStatus & main: list / --json でレビュージョブを収�
     // 2. list (テキスト行)
     const listResult = runMain(['list', '--workspace', workspace]);
     assert.equal(listResult.code, 0);
-    assert.equal(listResult.lines.length, 5);
-    assert.match(listResult.lines[0], /^=== gh-maestro #\S*/);
-    assert.match(listResult.lines[1], /^準備 \| 計画 \| 承認 \| 実装 \| 査読 \| 統合$/);
-    assert.ok(listResult.lines[2].includes('review-manager') && listResult.lines[2].includes('(pid: 222)'));
-    assert.ok(listResult.lines[3].includes('job-1 (Design)') && listResult.lines[3].includes('(pid: 333)'));
-    assert.ok(listResult.lines[4].includes('job-2 (Correctness)') && listResult.lines[4].includes('(pid: 444)'));
+    assert.equal(listResult.lines.length, 4);
+    assert.ok(listResult.lines[0].includes('#?'));
+    assert.ok(listResult.lines[1].includes('review-manager') && listResult.lines[1].includes('(pid: 222)'));
+    assert.ok(listResult.lines[2].includes('job-1 (Design)') && listResult.lines[2].includes('(pid: 333)'));
+    assert.ok(listResult.lines[3].includes('job-2 (Correctness)') && listResult.lines[3].includes('(pid: 444)'));
 
     // 3. list --json
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
@@ -2082,8 +2079,9 @@ test('collectWorkersStatus: レビュージョブ取得失敗をReview Manager�
 
     const listResult = runMain(['list', '--workspace', workspace]);
     assert.equal(listResult.code, 0);
-    assert.ok(listResult.lines[2].includes('review-manager') && listResult.lines[2].includes('(pid: 222)'));
-    assert.match(listResult.lines[3], /^  └─ review jobs unavailable \(取得失敗\)$/);
+    assert.equal(listResult.lines.length, 3);
+    assert.ok(listResult.lines[1].includes('review-manager') && listResult.lines[1].includes('(pid: 222)'));
+    assert.match(listResult.lines[2], /^  └─ review jobs unavailable \(取得失敗\)$/);
 
     const jsonResult = runMain(['list', '--workspace', workspace, '--json']);
     assert.equal(jsonResult.code, 0);
@@ -2097,4 +2095,85 @@ test('collectWorkersStatus: レビュージョブ取得失敗をReview Manager�
     workerStatus._setFindRunningInstances(null);
     removeWorkspace(workspace);
   }
+});
+
+test('buildStatusHeader: PRありの場合は <owner>/<repo> issue#<N>, PR#<M> 形式で表示する', () => {
+  assert.equal(
+    workerStatus.buildStatusHeader('jintrick/gh-maestro', 629, 630),
+    'jintrick/gh-maestro issue#629, PR#630',
+  );
+  assert.equal(
+    workerStatus.buildStatusHeader('jintrick/gh-maestro', '629', '630'),
+    'jintrick/gh-maestro issue#629, PR#630',
+  );
+});
+
+test('buildStatusHeader: PR未作成の場合は <owner>/<repo> issue#<N> 形式で表示し、計時間を含まない', () => {
+  assert.equal(
+    workerStatus.buildStatusHeader('jintrick/gh-maestro', 629, null),
+    'jintrick/gh-maestro issue#629',
+  );
+  assert.equal(
+    workerStatus.buildStatusHeader('jintrick/gh-maestro', 629),
+    'jintrick/gh-maestro issue#629',
+  );
+  assert.equal(
+    workerStatus.buildStatusHeader('jintrick/gh-maestro', 629, ''),
+    'jintrick/gh-maestro issue#629',
+  );
+  const header = workerStatus.buildStatusHeader('jintrick/gh-maestro', 629, 630);
+  assert.ok(!header.includes('計'));
+  assert.ok(!header.includes('==='));
+});
+
+test('buildStatusHeader: repoまたはissueが未解決の場合はフォールバックする', () => {
+  assert.equal(
+    workerStatus.buildStatusHeader(null, 629),
+    'unknown issue#629',
+  );
+  assert.equal(
+    workerStatus.buildStatusHeader('', 629),
+    'unknown issue#629',
+  );
+  assert.equal(
+    workerStatus.buildStatusHeader('jintrick/gh-maestro', null),
+    'jintrick/gh-maestro issue#?',
+  );
+});
+
+test('renderSnapshotLines: 区間時間行を表示せず、見出しにリポジトリ名を表示する', () => {
+  const lines = workerStatus.renderSnapshotLines('C:/temporary-workspace', 629, {
+    repo: 'jintrick/gh-maestro',
+    currentWorkers: [],
+    cycleEvents: [{ schemaVersion: 1, issue: 629, event: 'pr-created', at: '2026-10-20T00:00:00Z', pr: 630 }],
+  });
+  assert.equal(lines[0], 'jintrick/gh-maestro issue#629, PR#630');
+  assert.ok(!lines.some(l => l.includes('準備') && l.includes('計画') && l.includes('承認')));
+});
+
+test('_getRepo: 解決失敗時はキャッシュせず、成功時にキャッシュする', () => {
+  workerStatus._clearRepoCache();
+  let calls = 0;
+  workerStatus._setResolveRepo(() => {
+    calls++;
+    if (calls === 1) return { ok: false, error: 'fail' };
+    return { ok: true, repo: 'jintrick/gh-maestro' };
+  });
+
+  const ws = 'C:/test-ws-retry';
+  const lines1 = workerStatus.renderSnapshotLines(ws, 1, { currentWorkers: [] });
+  assert.equal(lines1[0], 'unknown issue#1');
+  assert.equal(calls, 1);
+
+  const lines2 = workerStatus.renderSnapshotLines(ws, 1, { currentWorkers: [] });
+  assert.equal(lines2[0], 'jintrick/gh-maestro issue#1');
+  assert.equal(calls, 2);
+
+  // 3回目はキャッシュされているため resolveRepo は呼ばれない
+  const lines3 = workerStatus.renderSnapshotLines(ws, 1, { currentWorkers: [] });
+  assert.equal(lines3[0], 'jintrick/gh-maestro issue#1');
+  assert.equal(calls, 2);
+
+  workerStatus._setResolveRepo(null);
+  workerStatus._clearRepoCache();
 });

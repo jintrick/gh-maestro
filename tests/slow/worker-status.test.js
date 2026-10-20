@@ -179,7 +179,7 @@ test('サブプロセス: workers.json の読み取り失敗は running:false �
 
 
 
-test('サブプロセス: list はサイクル行と状態ドットを表示する', () => {
+test('サブプロセス: list は見出しと状態ドットを表示する', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-list-cli-');
   try {
     writeWorkers(workspace, { alive: { pid: process.pid } });
