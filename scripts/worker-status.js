@@ -3,7 +3,7 @@
 //
 // workers.json の指定エントリまたは全エントリを照会し、
 // ワーカーの生死および実起動時刻に基づく連続稼働時間を返す。
-// 一覧（list）ではサイクル行とワーカー行（または --json）を出力し、
+// 一覧（list）では見出しとワーカー行（または --json）を出力し、
 // 常駐表示（watch / pane）では画面クリア・WezTermスプリットペインで自動更新する。
 
 'use strict';
@@ -12,6 +12,7 @@ const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
+const { resolveRepo, ghRepoView } = require('./shared/repo');
 const { loadStatusPane, saveStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
 const { ensureStatusPane: ensureStatusPaneLib } = require('./shared/ensure-status-pane');
 const { resolveSkillAgentMap } = require('./shared/resolve-config');
@@ -35,8 +36,8 @@ Usage:
 
 Commands:
   status                 指定ワーカーの生死状態をJSONで照会する
-  list                   6区間のサイクル行とワーカーの稼働状況を表示する
-  watch                  サイクル行とワーカー行を画面クリアしながら定期更新する
+  list                   見出しとワーカーの稼働状況を表示する
+  watch                  見出しとワーカー行を画面クリアしながら定期更新する
   pane                   WezTermスプリットペインを下部に開き、watchモードを常駐表示する（既存ペインがあれば再利用）
   close-pane             開いているWezTerm監視ペインを終了する（--issue指定時は対象を検証）
 
@@ -54,14 +55,14 @@ Output (stdout):
   status:
     {"workerName":...,"running":true|false,"pid":...}
   list:
-    6区間のサイクル行とワーカー行、または --json 指定時は [{"workerName":...,"pid":...,"running":...,"startTime":...,"elapsedSeconds":...}]
+    見出しとワーカー行、または --json 指定時は [{"workerName":...,"pid":...,"running":...,"startTime":...,"elapsedSeconds":...}]
   pane:
     STATUS_PANE_LAUNCHED: pane=<paneId>
   close-pane:
     STATUS_PANE_CLOSED: pane=<paneId>
 
 Description:
-  workers.json とIssue単位のcycle metricsを読み取り、6区間を1行へ畳んで表示する。
+  workers.json を読み取り、見出しとワーカーの稼働状況を表示する。
   --json は既存のworkers.json由来の配列契約を維持する。
   pane サブコマンドは WezTerm の専用ペイン（既定: bottom 15%）を分割作成し、独立して自動更新し続ける。
   既存ペインが生存している場合は新しく作らず既存ペインを再利用する。記録socketの消滅を
@@ -85,6 +86,45 @@ let _injectedGetCurrentPaneTarget = null;
 let _injectedAcquireStatusPaneLock = null;
 let _injectedReleaseStatusPaneLock = null;
 let _injectedReadCycleEvents = null;
+const REPO_RESOLVE_TIMEOUT_MS = 3000;
+const REPO_RETRY_INTERVAL_MS = 30_000;
+
+let _injectedResolveRepo = null;
+const _repoCache = new Map();
+
+function _getRepo(workspace, opts = {}) {
+  if (opts.repo !== undefined) return opts.repo;
+  if (!workspace) return null;
+
+  const cached = _repoCache.get(workspace);
+  if (cached && cached.repo) return cached.repo;
+
+  const now = (opts.nowFn || _now)();
+  const retryInterval = opts.retryIntervalMs ?? REPO_RETRY_INTERVAL_MS;
+  if (cached && cached.failedAt && (now - cached.failedAt) < retryInterval) {
+    return null;
+  }
+
+  const resolveRepoFn = opts.resolveRepoFn || _injectedResolveRepo || resolveRepo;
+  try {
+    const res = resolveRepoFn(
+      { workspace },
+      { ghRepoViewFn: (ghOpts) => (opts.ghRepoViewFn || ghRepoView)({ timeout: opts.timeoutMs ?? REPO_RESOLVE_TIMEOUT_MS, ...ghOpts }) }
+    );
+    if (res && res.ok && res.repo) {
+      const repo = String(res.repo).trim();
+      if (repo) {
+        _repoCache.set(workspace, { repo, failedAt: null });
+        return repo;
+      }
+    }
+  } catch {
+    // 解決失敗時は再試行間隔まで外部コマンドを再実行しない
+  }
+
+  _repoCache.set(workspace, { repo: null, failedAt: now });
+  return null;
+}
 
 // Windows の起動時刻取得は PowerShell 子プロセスを起動するため、既定の3秒再描画より
 // 長いが、PID再利用を長時間見逃さない間隔にする。watch ループ内だけで使い、他の
@@ -950,17 +990,18 @@ function inferIssue(workers) {
 }
 
 /**
- * 監視ペインの見出し行。対象Issue・PR・記録済み区間の合計時間を示す。
+ * 監視ペインの見出し行。対象リポジトリ・Issue・PRを示す。
  *
- * @param {string|null} issue
- * @param {number|null} pr
- * @param {number} totalSeconds
+ * @param {string|null} repo   owner/repo 形式のリポジトリ名
+ * @param {string|number|null} issue
+ * @param {number|string|null} [pr]
  * @returns {string}
  */
-function buildStatusHeader(issue, pr, totalSeconds) {
-  const issueText = issue == null || issue === '' ? '#?' : `#${issue}`;
-  const prText = pr == null || pr === '' ? '' : ` PR#${pr}`;
-  return `=== gh-maestro ${issueText}${prText} 計${formatDuration(totalSeconds)} ===`;
+function buildStatusHeader(repo, issue, pr) {
+  const repoText = repo ? String(repo).trim() : 'unknown';
+  const issueText = issue == null || issue === '' ? '?' : String(issue);
+  const prText = pr == null || pr === '' ? '' : `, PR#${pr}`;
+  return `${repoText} issue#${issueText}${prText}`;
 }
 
 function renderSnapshotLines(workspace, issue, opts = {}) {
@@ -978,15 +1019,10 @@ function renderSnapshotLines(workspace, issue, opts = {}) {
   const workers = mergeCycleWorkers(projected.workers, currentWorkers.filter(worker => (
     selectedIssue == null || worker.issue == null || String(worker.issue) === selectedIssue
   )));
-  const cycleLine = renderUptimeBars(projected.intervals, {
-    mode: 'interval',
-    issue: selectedIssue || '?',
-    totalSeconds: projected.totalSeconds,
-    maxLineWidth: opts.maxLineWidth,
-    colorize: opts.colorize,
-  })[0];
-  const header = buildStatusHeader(selectedIssue, projected.pr, projected.totalSeconds);
-  return [header, cycleLine, ...renderWorkerRows(workers, opts)];
+  const repo = opts.repo !== undefined ? opts.repo : _getRepo(workspace, opts);
+  const pr = projected.pr ?? currentWorkers.find(w => w.pr != null)?.pr ?? null;
+  const header = buildStatusHeader(repo, selectedIssue, pr);
+  return [header, ...renderWorkerRows(workers, opts)];
 }
 
 const MIN_INTERVAL_SEC = 1;
@@ -1149,11 +1185,13 @@ function main(argv = process.argv.slice(2)) {
       });
       writeOut(JSON.stringify(jsonEntries, null, 2));
     } else {
+      const repo = _getRepo(workspace);
       const lines = renderSnapshotLines(workspace, issueArg, {
         currentWorkers: workers,
         now: _now(),
         maxLineWidth: process.stdout.columns,
         colorize: Boolean(process.stdout.isTTY && process.env.NO_COLOR !== '1'),
+        repo: repo || undefined,
       });
       for (const line of lines) writeOut(line);
     }
@@ -1179,15 +1217,17 @@ function main(argv = process.argv.slice(2)) {
       return { code: 1, lines: out, errLines: err };
     }
 
+    const repo = _getRepo(workspace);
     const lines = renderSnapshotLines(workspace, issueArg, {
       currentWorkers: workers,
       now: _now(),
       maxLineWidth: process.stdout.columns,
       colorize: Boolean(process.stdout.isTTY && process.env.NO_COLOR !== '1'),
+      repo: repo || undefined,
     });
     for (const line of lines) writeOut(line);
 
-    return { code: 0, lines: out, errLines: err, isWatch: true, workspace, interval, issue: issueArg, startTimeCache };
+    return { code: 0, lines: out, errLines: err, isWatch: true, workspace, interval, issue: issueArg, startTimeCache, repo: repo || undefined };
   }
 
   if (sub === 'pane') {
@@ -1378,6 +1418,11 @@ module.exports = {
   _setAcquireStatusPaneLock: (fn) => { _injectedAcquireStatusPaneLock = fn; },
   _setReleaseStatusPaneLock: (fn) => { _injectedReleaseStatusPaneLock = fn; },
   _setReadCycleEvents: (fn) => { _injectedReadCycleEvents = fn; },
+  _setResolveRepo: (fn) => { _injectedResolveRepo = fn; },
+  _clearRepoCache: () => { _repoCache.clear(); },
+  _getRepo,
+  REPO_RESOLVE_TIMEOUT_MS,
+  REPO_RETRY_INTERVAL_MS,
 };
 
 if (require.main === module) {
