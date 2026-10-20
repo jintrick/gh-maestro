@@ -397,7 +397,7 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
   - コマンドが非0終了した場合は、状態を `NONE` と取り違えず、テスト申告状態を照会できなかった事実を提示する。
 - **GitHub CI checksの確認と事実提示**:
   - 通常経路PRでは `node "{{SCRIPTS_PATH}}/query-pr-checks.js" --pr <PR> --repo $REPO` を実行し、現在のHEADに紐づくcheck runsとcommit statusesを照会する。成功時はJSONの `headSha` と各checkの名前・状態・詳細URLをテスト申告と並べて提示する。軽量PRではGitHub CI checksを照会・通知しない。
-  - `hasChecks=false` はチェックなし、`hasRunning=true` は実行中、`allCompleted=true` は全件完了を表す。実行中でも待たず、その状態を提示する。
+  - `hasChecks=false` はチェックなし、`hasRunning=true` は実行中、`allCompleted=true` は全件完了を表す。`hasRunning=true` の間は merge 候補として提示せず、`CI_CHECKS_COMPLETE` または `CI_CHECK_FAILED` を受けてから結果を提示する。`hasChecks=false`（`CI_CHECKS_EMPTY`）は待たずに提示する。
   - コマンドが非0終了した場合は、CI状態を取得できなかった事実を提示する。チェックなし・成功として扱わない。
   - CI失敗と今回の変更との関連性を推測したり、「無関係」等の独自解釈を加えたりしない。CIの状態は機械的なマージ条件ではなく、止めるかどうかの最終判断は人間に委ねる。
   - **「無関係なテスト失敗だから」「今回は影響ないから」といった関係有無の判断や独自解釈を orchestrator が挟むことは禁止**。申告された事実（対象コミットSHA、fail件数、pass件数、失敗したテスト名と超過件数）をそのまま伝える。マージするかどうかの最終判断は人間に委ねる。
@@ -505,7 +505,7 @@ node "{{SCRIPTS_PATH}}/finalize-issue.js" --issue <N> --repo $REPO --workspace $
 | REVIEW_COMMENT:<path>:<line>:<user>:<body> / PR_COMMENT:<user>:<body> / PR_REVIEW:<user>:<state>:<body> | 受信元と本文を保持する。PR_REVIEWのAPPROVEDはマージ許可シグナル、CHANGES_REQUESTEDは指摘、COMMENTEDはPR_COMMENTと同様に扱う。 | 工程9。findingsがあれば工程10 |
 | PR_PUSH:<sha> | 新HEADにslow層を非同期予約し、GitHub checksを照会する。転送済みBLOCKER/MAJORへの修正ではReview Managerを再起動せずexplorerに再現条件解消の事実確認を依頼する。新規起動時は調査前に対象PRのbranch/commitをgit fetchとcheckoutで明示する。 | 工程9。再現条件の確認は工程10の判断材料 |
 | TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>:lint=<lintState>:typecheck=<typecheckState> | GREENは申告あり・SHA一致・fail 0、REDは申告あり・SHA一致・fail > 0、STALEはSHA不一致、NONEは申告なしまたは照合不能。provenanceとscopeを記録し、lintはcomplete/findings/unavailable/missing、typecheckはcomplete pass/fail/unavailable/undefined/missingとして記録する。これらはGREEN/REDや停止条件を変えない。aggregateならコメント内の層別full/slowを個別確認する。STALE/NONEはquery-test-status.jsで正本を確認し、申告を催促せず事実を示す。 | 工程11 |
-| CI_CHECK_FAILED:<json> / CI_CHECKS_COMPLETE:<json> / CI_CHECKS_EMPTY:<json> / CI_CHECKS_UNAVAILABLE:<json> | 現在HEADのcheck名・状態・詳細URLを記録する。hasChecks=falseはチェックなし、hasRunning=trueは実行中、allCompleted=trueは全件完了を示す。取得失敗をチェックなし・成功と読み替えず、PR_PUSH前の古いHEADを新HEADに流用しない。実行中でも待たず状態を提示する。軽量PRではchecks通知は発生しない。 | 工程11 |
+| CI_CHECK_FAILED:<json> / CI_CHECKS_COMPLETE:<json> / CI_CHECKS_EMPTY:<json> / CI_CHECKS_UNAVAILABLE:<json> | 現在HEADのcheck名・状態・詳細URLを記録する。hasChecks=falseはチェックなし、hasRunning=trueは実行中、allCompleted=trueは全件完了を示す。取得失敗をチェックなし・成功と読み替えず、PR_PUSH前の古いHEADを新HEADに流用しない。実行中（hasRunning=true）の間は merge 候補として提示せず、CI_CHECKS_COMPLETE または CI_CHECK_FAILED を受けてから結果を提示する。CI_CHECKS_EMPTY と CI_CHECKS_UNAVAILABLE は待たずに事実を提示する。軽量PRではchecks通知は発生しない。 | 工程11 |
 | PR_MERGED:<PR番号> | マージを確認し、工程12の入口でgit -C $WORKSPACE pull --ff-onlyでBASE_BRANCHを最新化する。ワーカーやworktreeは削除しない。 | 工程12 |
 | PR_CLOSED:<PR番号> | 却下・キャンセルによるクローズとして理由を確認し、必要ならコーダーへ再指示する。マージ扱いしない。 | 工程9。新PR検出への復帰通知を待つ。 |
 | PR_CLOSED_RESUMED:<PR番号> | 監視プロセスが新しいPR検出へ戻った生存シグナルとして記録する。 | 工程8でPR_DETECTED待ち |
