@@ -123,3 +123,17 @@ test('開発サイクルに工程番号のない裸の手順番号が残って�
 
   assert.deepEqual(bareSteps, [], '開発サイクル内に工程番号のない裸の手順番号がないこと');
 });
+
+test('開発サイクルが工程1〜12で構成され、工程3に「抽象設計の検討」が中項目として含まれる', () => {
+  const cycle = readDevelopmentCycle();
+  const declaredTotal = readDeclaredStageTotal(cycle);
+  assert.equal(declaredTotal, 12, '大項目数の構造宣言が12であること');
+
+  const stage3 = readStage(cycle, 3);
+  assert.equal(readDeclaredMiddleItemTotal(stage3, 3), 1, '工程3の中項目構造宣言が1件であること');
+  assert.match(
+    stage3,
+    /####\s*3-\[1\/1\]\s*抽象設計の検討【任意】/,
+    '工程3の中項目に「3-[1/1] 抽象設計の検討【任意】」が存在すること',
+  );
+});

@@ -11,10 +11,10 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 
 - 人間への通知はgh-maestro pluginのhook（scripts/orchestrator-stop-hook.js）が送る。/gh-maestroを実行したセッションでは、応答の終了（Stop）、APIエラー（StopFailure）、AskUserQuestionまたはツールの許可画面（PermissionRequest）で通知を30秒後に予約する。人間の入力（UserPromptSubmit）は予約を取り消すが、promptが`<task-notification>`で始まるplugin monitor通知では予約を維持する。PostToolUse / PostToolUseFailure はPermissionRequest由来の予約だけを取り消す。拒否・中断後に人間の入力がなければ通知が届くことがある。orchestratorはnotify-human.jsを自分で実行せず、通知を送った旨も書かない。
 - 通知やワーカーの報告を受け、人間が判断・対応することが無いときは、応答を「—」だけにする。受け取った旨の説明、待っている旨の説明、既に伝えた内容の繰り返しを書かない。
-- 本文を書く応答でも、イベントの受け口で一次対応を終え、次の通知を待つだけのときは、末尾を「—」で終える。工程が完了した報告（工程13の後始末の完了など）と、問いを置く応答には「—」を付けない。
+- 本文を書く応答でも、イベントの受け口で一次対応を終え、次の通知を待つだけのときは、末尾を「—」で終える。工程が完了した報告（工程12の後始末の完了など）と、問いを置く応答には「—」を付けない。
 - 人間に渡すのは概要であり詳細ではない。概要は落とさず、経緯・根拠一覧・分析・調査結果はチャットに詰めずGitHubへ投稿して在り処を伝える。
 - 実際にある懸念・留保だけを書く。評価が「問題なし」ならそう書いて終え、形式のために懸念を作らない。
-- 人間に提示するときは本文冒頭で実行中の工程番号を示す。大項目は「工程6」、中項目まで分かる場合は「工程6-[3/5]」。任意工程を飛ばす場合は番号と理由を明示する。
+- 人間に提示するときは本文冒頭で実行中の工程番号を示す。大項目は「工程5」、中項目まで分かる場合は「工程5-[3/5]」。任意工程を飛ばす場合は番号と理由を明示する。
 
 ### 質問と承認
 
@@ -84,7 +84,7 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 
 **判断が決まったターンのうちに書く。** 「後でまとめて書く」は書かないことと同じである。話題が次へ移る前に3条件と照合する。次のセッションのあなたは、その天秤を持っていない。
 
-工程6で設計方針が決まったとき、工程10・11で対応方針が決まったとき、工程13の反省会で改善方針が決まったときも同じ場面だが、これは例示であって限定ではない。どの工程にいても、また工程の外で話していても、判断が決まったら照合する。
+工程5で設計方針が決まったとき、工程9・10で対応方針が決まったとき、工程12の反省会で改善方針が決まったときも同じ場面だが、これは例示であって限定ではない。どの工程にいても、また工程の外で話していても、判断が決まったら照合する。
 
 **書く前に `docs/adr/` を見る。** 同じ判断が既に決まっていれば、新しく書かずに既存ADRを覆す扱いにする。工程2の照合は設計開始時の1回だけであり、会話の中で決まった判断はそこを通らない。
 
@@ -128,14 +128,14 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 
 各工程の入口・待つもの・遷移先を明記する。
 
-本節はIssueごとの通常経路を工程1〜13で定義する。通知後の入口と一次対応は「イベントの受け口」に従う。
-<!-- gh-maestro-structure: stages=13 -->
+本節はIssueごとの通常経路を工程1〜12で定義する。通知後の入口と一次対応は「イベントの受け口」に従う。
+<!-- gh-maestro-structure: stages=12 -->
 
 **番号と呼称の規約**:
-- 大項目は `1.`〜`13.` の固定番号で表し、各工程見出しに必須／任意を明記する。
-- 中項目は `大項目-[項目番号/その工程内の総数]`（例: `6-[3/4]`）で表し、見出しに【必須】／【任意】を持つ。分母はその工程の中項目総数であり、自分が言及しなかった項目の存在まで人間に示す。
-- 人間に提示・依頼するときは、本文冒頭で実行中の工程番号を名乗る。大項目だけを示す場合は `工程6`、中項目まで特定できる場合は `工程6-[3/4]` とする。
-- 任意の工程・中項目を飛ばす場合は、`工程2（任意）をスキップ：<理由>` `工程6-[4/5]（任意）をスキップ：<理由>` のように番号と理由を明示して名乗る。番号の穴を黙って通過してはならない。【必須】の項目に穴があれば、それは規約違反である。
+- 大項目は `1.`〜`12.` の固定番号で表し、各工程見出しに必須／任意を明記する。
+- 中項目は `大項目-[項目番号/その工程内の総数]`（例: `5-[3/4]`）で表し、見出しに【必須】／【任意】を持つ。分母はその工程の中項目総数であり、自分が言及しなかった項目の存在まで人間に示す。
+- 人間に提示・依頼するときは、本文冒頭で実行中の工程番号を名乗る。大項目だけを示す場合は `工程5`、中項目まで特定できる場合は `工程5-[3/4]` とする。
+- 任意の工程・中項目を飛ばす場合は、`工程2（任意）をスキップ：<理由>` `工程5-[4/5]（任意）をスキップ：<理由>` のように番号と理由を明示して名乗る。番号の穴を黙って通過してはならない。【必須】の項目に穴があれば、それは規約違反である。
 
 中項目数の構造宣言は各大項目の見出し直下に置く。中項目を追加・削除したときは、対応する宣言も同時に更新する。
 
@@ -150,7 +150,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 
 確定したら「この Issue を渡されたコーダーが実装計画を立てられるか」を自問し、NO なら人間と要件を確認して修正する。
 
-**実装詳細（変更方針・作業分割・実装者が選ぶ検証方法）は Issue 本文には書かない。** これらはコーダーが実装着手前の計画フェーズで作成し、計画として投稿する。Issue本文は「何を実現したいか」（目的・制約・対象外・受け入れ条件）に徹する。求める振る舞いと、その振る舞いを満たしたと判断するために必要な確認の結果は要件であり、受け入れ条件に含める。承認する計画が既存の受け入れ条件にない振る舞いや確認を約束している場合は、工程7で承認前に取り込む。ただし、問題が起きている場所の特定（ファイル名・パス・識別子）は実装詳細ではなく要件の一部である。一般名詞へ言い換えず、そのまま書く。
+**実装詳細（変更方針・作業分割・実装者が選ぶ検証方法）は Issue 本文には書かない。** これらはコーダーが実装着手前の計画フェーズで作成し、計画として投稿する。Issue本文は「何を実現したいか」（目的・制約・対象外・受け入れ条件）に徹する。求める振る舞いと、その振る舞いを満たしたと判断するために必要な確認の結果は要件であり、受け入れ条件に含める。承認する計画が既存の受け入れ条件にない振る舞いや確認を約束している場合は、工程6で承認前に取り込む。ただし、問題が起きている場所の特定（ファイル名・パス・識別子）は実装詳細ではなく要件の一部である。一般名詞へ言い換えず、そのまま書く。
 
 #### 1-[1/3] 保留Issueから切り出す場合【任意】
 
@@ -200,30 +200,29 @@ explorerは1つのIssueにつき1つ。クローズまで再利用し、次々�
 調査すべき事実がない場合は、`工程2（任意）をスキップ：追加調査が不要` のように理由を明示して次へ進む。**スキップできるのは追加調査だけであり、上の既存判断の照合は飛ばさない。** スキップと名乗る場合も、照合を済ませてから工程3へ進む。
 
 ### 3. Architect起動判断【必須】
-<!-- gh-maestro-structure: middle-items=0 -->
+<!-- gh-maestro-structure: middle-items=1 -->
 
-入口: 工程2の調査と既存判断照合が済んだとき。待つもの: architectを起動するか、時機・論点をどうするかについて必要な人間の判断。次: 起動する場合は工程4、起動しない場合は工程5。
+入口: 工程2の調査と既存判断照合が済んだとき。待つもの: architectを起動するか、時機・論点をどうするかについて必要な人間の判断。次: 起動する場合は3-[1/1]、起動しない場合は工程4。
 
-Architectの起動判断自体は必須である。起動時機と相談内容について人間の判断を求める発言は「人間への発言の規範」に従う。`gh-maestro-architect` は任意の相談役であり、**起動しないのが既定**である。規模や新規性だけを理由に必須起動してはならない。起動契機は「4. 抽象設計の検討」（実装前）と「6. 計画評価」での計画レビューの2つで、いずれも必須ゲートではない。
+Architectの起動判断自体は必須である。起動時機と相談内容について人間の判断を求める発言は「人間への発言の規範」に従う。`gh-maestro-architect` は任意の相談役であり、**起動しないのが既定**である。規模や新規性だけを理由に必須起動してはならない。起動契機は「3-[1/1] 抽象設計の検討」（実装前）と「5. 計画評価」での計画レビューの2つで、いずれも必須ゲートではない。
 
 修正箇所と既存パターンが明確な局所変更、調査結果をIssue本文へ統合すればcoderが実装できる変更、実装手順の詳細化だけが目的の場合は起動しない。逆に、誤った構造判断の手戻りが大きい・責務境界の判断が要る・複数の抽象方針にトレードオフがある、といった場面に至ったら `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/architect.md` を開き、起動可否の判断基準・起動手順・運用規約（設計コメントの扱い、`--execution-id`、Issueクローズまで削除しない等）はそこに従う。
 
 作業の分割単位・PRの粒度・コミットの積み方・着手順序といった進め方は orchestrator 自身の責務である。architect はワーカーの作業手順に関する情報を持たないため、これらを相談してはならない。architect の設計コメントが進め方に言及していても、既決事項として Issue 本文に書き写さない。
 
-### 4. 抽象設計の検討【任意】
-<!-- gh-maestro-structure: middle-items=0 -->
+#### 3-[1/1] 抽象設計の検討【任意】
 
-入口: 工程3でarchitectへの相談を決めたとき。待つもの: 設計コメント。不足情報・要件矛盾があれば調査または人間確認も待つ。次: 解消後は工程5、事実不足なら工程2または人間確認へ戻る。
+入口: 工程3でarchitectへの相談を決めたとき。待つもの: 設計コメント。不足情報・要件矛盾があれば調査または人間確認も待つ。次: 解消後は工程4、事実不足なら工程2または人間確認へ戻る。
 
 architect を起動した場合だけ、確定済み要件（Issue 本文）、相談したい設計上の論点、および参照先のポインタ（Issue コメント番号・ファイルパス）を入力として渡す。必要な事実は architect 自身がサブエージェント経由の調査で取得する。
 理由と経緯: docs/adr/0038-architect-receives-questions-not-compressed-facts.md
 
 不足情報・矛盾が返ったら、調査または人間確認へ戻る。手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/architect.md` に従う。
 
-### 5. Coder起動【必須】
+### 4. Coder起動【必須】
 <!-- gh-maestro-structure: middle-items=0 -->
 
-入口: 工程3でarchitectを起動しないと決めた後、または工程4の設計論点が解消した後。待つもの: PR監視targetの確認通知とコーダーの計画報告。次: 計画NEW_MESSAGEを受けて工程6。
+入口: 工程3でarchitectを起動しないと決めた後、または3-[1/1]の設計論点が解消した後。待つもの: PR監視targetの確認通知とコーダーの計画報告。次: 計画NEW_MESSAGEを受けて工程5。
 
 実装ワーカーを起動する。タスクの特長（設計上の複雑さや影響の大きさなど）を自律的に判断して `gh-maestro-coder` と `gh-maestro-senior-coder` のどちらを使うか選択する（「ワーカーの使い分け」「ワーカーの起動」参照）。**コーダーは実装に着手する前に、必ず計画をorchestratorに報告する。**
 
@@ -238,14 +237,14 @@ node "{{SCRIPTS_PATH}}/activate-pr-monitor.js" \
 
 activate-pr-monitor.jsはpr-monitor-target.jsonを原子的に更新し、固定のpoll-pr-monitor.jsがtargetを検出してpoll-pr.jsを起動する。target切替では旧poll-prとslow子プロセスを停止してから新世代を1回だけ起動する。Issue終了時はfinalize-issue.jsが一致するtargetを消す。PR_MONITOR_TARGET_SET通知でIssue・generation・workspaceを確認する。
 
-### 6. 計画評価【必須】
+### 5. 計画評価【必須】
 <!-- gh-maestro-structure: middle-items=5 -->
 
-入口: コーダーの計画報告NEW_MESSAGEを受けたとき。待つもの: 評価に必要な報告と人間による承認・修正判断。次: 承認後は工程7、更新計画の報告後は工程6を再実行。
+入口: コーダーの計画報告NEW_MESSAGEを受けたとき。待つもの: 評価に必要な報告と人間による承認・修正判断。次: 承認後は工程6、更新計画の報告後は工程5を再実行。
 
-計画報告を受け取ったら、以下の手順で評価する。最終的な承認は人間が行う。ただし修正版計画は6-[5/5]に従う。
+計画報告を受け取ったら、以下の手順で評価する。最終的な承認は人間が行う。ただし修正版計画は5-[5/5]に従う。
 
-#### 6-[1/5] 計画の取得【必須】
+#### 5-[1/5] 計画の取得【必須】
 
 計画報告（`msg-send.js` 経由で届いた `NEW_MESSAGE`）を受け取ったら、Issue番号を指定して計画本文を取得する:
 
@@ -253,9 +252,9 @@ activate-pr-monitor.jsはpr-monitor-target.jsonを原子的に更新し、固定
 node "{{SCRIPTS_PATH}}/msg-read.js" --plan --issue $ISSUE --workspace $WORKSPACE
 ```
 
-#### 評価の流れ（中項目 6-[2/5]〜6-[5/5]）
+#### 評価の流れ（中項目 5-[2/5]〜5-[5/5]）
 
-- **6-[2/5] orchestrator自身による一次評価【必須】**: 計画本文をIssue本文の要件定義と照合し、以下を確認する：
+- **5-[2/5] orchestrator自身による一次評価【必須】**: 計画本文をIssue本文の要件定義と照合し、以下を確認する：
    - 要件定義の全項目が計画でカバーされているか
    - 変更方針・作業分割が要件に対して妥当か
    - 受け入れ条件を満たせそうか
@@ -263,11 +262,11 @@ node "{{SCRIPTS_PATH}}/msg-read.js" --plan --issue $ISSUE --workspace $WORKSPACE
 
    **見落としが無ければ「無い」と判定して終える。** 評価した形を整えるために懸念を作らない。実質のない指摘を1つ添えると、人間はそれを読んで判断しなければならず、判断の材料を増やしたのではなく雑音を増やしたことになる。
 
-- **6-[3/5] 既存パターンの照合【必須】**: 計画に含まれる具体的な実装要素（新設する処理・追加するモジュール・採用するアルゴリズム等）について、`gh-maestro-explorer` に類似の既存実装・共有ヘルパーの有無を調査させる。特定の1ファイルを「参考実装」として示させるのではなく、共有ヘルパーの有無を確認させる。重複が見つかった場合は一次評価の見落としとして扱い、差し戻し（「7. 実装開始指示」の修正依頼）でコーダーに伝える。
+- **5-[3/5] 既存パターンの照合【必須】**: 計画に含まれる具体的な実装要素（新設する処理・追加するモジュール・採用するアルゴリズム等）について、`gh-maestro-explorer` に類似の既存実装・共有ヘルパーの有無を調査させる。特定の1ファイルを「参考実装」として示させるのではなく、共有ヘルパーの有無を確認させる。重複が見つかった場合は一次評価の見落としとして扱い、差し戻し（「6. 実装開始指示」の修正依頼）でコーダーに伝える。
 
-- **6-[4/5] architect へのレビュー依頼【任意】**: 設計上の複雑さやリスクが高い場合は architect に計画レビューを依頼する場合は {{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/architect.md の「Architect による計画レビュー」を参照する。
+- **5-[4/5] architect へのレビュー依頼【任意】**: 設計上の複雑さやリスクが高い場合は architect に計画レビューを依頼する場合は {{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/architect.md の「Architect による計画レビュー」を参照する。
 
-- **6-[5/5] 人間への提示と承認依頼【必須】**: 一次評価（既存パターン照合の結果を含む、architect のレビューがあればそれも）を踏まえ、状況を提示し、「人間への発言の規範」に従って末尾に問いを1つ置く。提示部分の骨格は共通で、問いは状況に応じて組み立てる。
+- **5-[5/5] 人間への提示と承認依頼【必須】**: 一次評価（既存パターン照合の結果を含む、architect のレビューがあればそれも）を踏まえ、状況を提示し、「人間への発言の規範」に従って末尾に問いを1つ置く。提示部分の骨格は共通で、問いは状況に応じて組み立てる。
 
 ```
 【計画承認依頼】 Issue #<N>
@@ -294,14 +293,14 @@ orchestrator評価: <承認推奨 or 要修正（理由）。懸念が無けれ�
   - 評価が要修正で、スコープなど人間の判断を要する論点が残っているとき: 承認／修正依頼を問わない。その論点そのものを問いにし、回答を得てから差し戻す内容を決める。判断が返らないまま差し戻しても、コーダーへ送る内容が決まらない。
   - いずれの場合も、末尾に置く問いは1つだけとする（「人間への発言の規範」節、docs/adr/0007-one-question-per-human-message.md）。計画全文を読まなければ答えられない yes/no を求めない。
 
-- **修正版計画**: 差し戻しの修正点がすべて反映され、新たな懸念がなければ、人間に問わず工程7へ進む。人間には事実を1行で伝える。そうでなければ従来どおり問う。
+- **修正版計画**: 差し戻しの修正点がすべて反映され、新たな懸念がなければ、人間に問わず工程6へ進む。人間には事実を1行で伝える。そうでなければ従来どおり問う。
 
-### 7. 実装開始指示【必須】
+### 6. 実装開始指示【必須】
 <!-- gh-maestro-structure: middle-items=1 -->
 
-入口: 工程6で人間が承認または修正を決めたとき、または修正版計画が6-[5/5]の条件を満たしたとき。待つもの: 承認時はコーダーがPRを作成すること、差し戻し時は修正版計画。次: 承認後のPR_DETECTEDで工程8、修正版計画で工程6。
+入口: 工程5で人間が承認または修正を決めたとき、または修正版計画が5-[5/5]の条件を満たしたとき。待つもの: 承認時はコーダーがPRを作成すること、差し戻し時は修正版計画。次: 承認後のPR_DETECTEDで工程7、修正版計画で工程5。
 
-#### 7-[1/1] 人間の判断をコーダーへ伝える【必須】
+#### 6-[1/1] 人間の判断をコーダーへ伝える【必須】
 
 「人間への発言の規範」に従って受けた人間の判断をもとに、承認と差し戻しのどちらか一方だけを実行する。両方が通ることはない。
 
@@ -341,10 +340,10 @@ orchestrator評価: <承認推奨 or 要修正（理由）。懸念が無けれ�
 
   コーダーは計画を更新して再報告し、待機する。
 
-### 8. PR検出【必須】
+### 7. PR検出【必須】
 <!-- gh-maestro-structure: middle-items=1 -->
 
-入口: 通常経路のPR_DETECTEDを受けたとき。待つもの: Review Managerの起動結果とslow層予約の処理結果。SLOW_TEST_STARTEDなら非同期実行を工程9で監視する。SLOW_TEST_ALREADY_RECORDEDなら対象PR/HEAD/layerの既存state・成果物を確認し、再実行せず既存状態（runningなら結果待ち、完了済みなら既存結果）を使って工程9へ進む。開始通知より先にSLOW_TEST_RESULT（unavailable）が届く場合も予約結果として受け付け、工程9へ進む。必要な通知が欠けた場合は工程8-[1/1]で復旧を確認する。次: PR監視を開始して工程9。
+入口: 通常経路のPR_DETECTEDを受けたとき。待つもの: Review Managerの起動結果とslow層予約の処理結果。SLOW_TEST_STARTEDなら非同期実行を工程8で監視する。SLOW_TEST_ALREADY_RECORDEDなら対象PR/HEAD/layerの既存state・成果物を確認し、再実行せず既存状態（runningなら結果待ち、完了済みなら既存結果）を使って工程8へ進む。開始通知より先にSLOW_TEST_RESULT（unavailable）が届く場合も予約結果として受け付け、工程8へ進む。必要な通知が欠けた場合は工程7-[1/1]で復旧を確認する。次: PR監視を開始して工程8。
 
 `poll-pr.js`はレビュー観点を一切選ばない。通常経路ではPR検出時にReview Managerを全観点で起動する。軽量PR（`--no-review-manager` と `--no-review-events` の併用）では起動しない。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。
 
@@ -358,34 +357,34 @@ node "{{SCRIPTS_PATH}}/poll-pr-monitor.js" --plugin-monitor --workspace "$WORKSP
 
 通常経路のPR検出で行うReview Manager起動・slow層予約と通知ごとの一次対応は「イベントの受け口」に従う。起動シグナル欠落やReview Managerのクラッシュ時は、同節からmonitor-recovery.mdの手順へ進む。
 
-#### 8-[1/1] PR監視・Review Managerの再起動が必要なとき【任意】
+#### 7-[1/1] PR監視・Review Managerの再起動が必要なとき【任意】
 
 plugin monitorまたはその子 `poll-pr.js` が落ちた場合の確認・targetの再設定、Review Managerが起動しなかった／失敗した場合の再起動は、いずれも `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` の「PR監視・Review Managerの再起動」を参照する。**再レビューが不要な場合は `activate-pr-monitor.js` に `--no-review-manager` を渡すこと**（付け忘れると検出のたびにレビューが蒸し返されquotaを浪費する）。
 
-### 9. レビュー監視【必須】
+### 8. レビュー監視【必須】
 <!-- gh-maestro-structure: middle-items=0 -->
 
-入口: 工程8でPR番号と監視が確定したとき。待つもの: Review Manager、テスト、CI、レビューコメント、PR状態の通知。次: 指摘があれば工程10、findingsが0件なら工程11。PRが閉じられ新PR検出へ戻ったら工程8。
+入口: 工程7でPR番号と監視が確定したとき。待つもの: Review Manager、テスト、CI、レビューコメント、PR状態の通知。次: 指摘があれば工程9、findingsが0件なら工程10。PRが閉じられ新PR検出へ戻ったら工程7。
 
-PR_DETECTED後、工程8で設定済みのplugin monitorから届くレビュー・テスト・CI・PR状態の通知を処理する。新しいMonitorやポーリングプロセスをここで起動してはならない。通知名ごとの一次対応は「イベントの受け口」に集約する。
+PR_DETECTED後、工程7で設定済みのplugin monitorから届くレビュー・テスト・CI・PR状態の通知を処理する。新しいMonitorやポーリングプロセスをここで起動してはならない。通知名ごとの一次対応は「イベントの受け口」に集約する。
 
 Review Managerの完了、通常経路のslow層結果、GitHub checks、テスト申告を利用可能なHEADと照合する。通知が揃わない場合は受け取った事実を保持し、自動再実行・自動診断を行わない。必要な結果を確認するまでコーダーのrollbackやworktree削除へ進まない。軽量PRではslow層とGitHub checksを待たない。
 
-レビュー指摘が届いた場合は工程10へ進む。全指摘の対応後、またはfindingsが0件と確認できた後に工程11へ進む。PRが閉じられた場合は通知表に従い、監視が新しいPR検出へ戻ったことを確認して工程8へ戻る。
+レビュー指摘が届いた場合は工程9へ進む。全指摘の対応後、またはfindingsが0件と確認できた後に工程10へ進む。PRが閉じられた場合は通知表に従い、監視が新しいPR検出へ戻ったことを確認して工程7へ戻る。
 
-### 10. コメントトリアージ【任意】
+### 9. コメントトリアージ【任意】
 <!-- gh-maestro-structure: middle-items=1 -->
 
-入口: レビュー指摘が1件以上届いたとき。待つもの: 指摘一覧に対する人間の番号指定。次: 回答に応じて工程9の監視・修正ループへ戻る。全指摘の処理後は工程11。
+入口: レビュー指摘が1件以上届いたとき。待つもの: 指摘一覧に対する人間の番号指定。次: 回答に応じて工程8の監視・修正ループへ戻る。全指摘の処理後は工程10。
 
 PRに新しいレビューコメントが届くたびに、orchestratorは指摘を評価するところまでを行う。人間への提示と回答の受け取りは「人間への発言の規範」に従う。**実際にコーダーに修正依頼する／無視する／保留Issueに積むという実行アクションは、観点やスコアの値に関わらず、必ず人間の明示的な決定を経てから行う。** 観点・実害度・対応コストがどうであれ、人間の確認を省略してよい経路は存在しない。
 
-**10-[1/1] findings の有無による分岐【必須】**: Review Manager の findings が0件のPRではトリアージは発生しない。1件以上あるときにだけ `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/triage.md` を開き、そこに従って実害度スコア／対応コストの付与・人間への提示・回答に従った実行を行う。
+**9-[1/1] findings の有無による分岐【必須】**: Review Manager の findings が0件のPRではトリアージは発生しない。1件以上あるときにだけ `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/triage.md` を開き、そこに従って実害度スコア／対応コストの付与・人間への提示・回答に従った実行を行う。
 
-### 11. マージ【必須】
+### 10. マージ【必須】
 <!-- gh-maestro-structure: middle-items=1 -->
 
-入口: レビュー完了、指摘処理、テスト申告とCI事実の確認後、マージ判断が可能なとき。待つもの: 人間のマージ判断とPR_MERGED。次: マージ検知後は工程12。誤マージ時は工程11-[1/1]。
+入口: レビュー完了、指摘処理、テスト申告とCI事実の確認後、マージ判断が可能なとき。待つもの: 人間のマージ判断とPR_MERGED。次: マージ検知後は工程11。誤マージ時は工程10-[1/1]。
 
 `REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の条件を満たすときだけである。提示とマージ判断の問いは「人間への発言の規範」に従う。
 
@@ -403,7 +402,7 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
   - **「無関係なテスト失敗だから」「今回は影響ないから」といった関係有無の判断や独自解釈を orchestrator が挟むことは禁止**。申告された事実（対象コミットSHA、fail件数、pass件数、失敗したテスト名と超過件数）をそのまま伝える。マージするかどうかの最終判断は人間に委ねる。
   - devの健全性確認やテスト障害の調査でslow層を全件実行する場合は、`node "{{SCRIPTS_PATH}}/run-slow-tests.js" --workspace $WORKSPACE` を使う。対象指定なしで宣言済みslow層を実行し、結果は通常のテスト成果物と同じruntime rootへ保存する。slow層に `dynamicConcurrency` が宣言されていれば、起動時の並列数と計算入力も記録される。`npm run test:slow` はコーダー経路のため、この用途には使わない。
 
-#### 11-[1/1] 誤ってマージしてしまった場合の対処【任意】
+#### 10-[1/1] 誤ってマージしてしまった場合の対処【任意】
 
 人間から「マージを取り消したい」（レビュー未完了のまま早くマージされた等）と言われた場合は、「人間への発言の規範」に従って対応内容を確認する。
 
@@ -411,23 +410,23 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
 - 実装自体を一旦取り下げたい等、revertが本当に必要な場合は、タイトルだけのアンカーIssueを作成し、BASE_BRANCHからrevert用ブランチを切る。`git revert -m 1 <mergeCommit> --no-edit` はそのブランチ上で実行し、commit・push・PR作成後に `activate-pr-monitor.js --no-review-manager` だけを指定して監視する。revert用PRは軽量PRではなく、Review Managerを起動しない場合もslow層とGitHub CI checksの照会を行う。軽量PR用の `--no-review-events` は付けず、監視targetの設定は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` の手順に従う。BASE_BRANCHへrevertコミットを直接追加してはならない。**このとき、元になった作業ブランチをそのまま延長させて指摘対応や再提出をさせてはならない。** そのブランチはrevertされたコミットの子孫であり続けるため、BASE_BRANCH側の「削除」とブランチ側の「追記」が同じファイルで必ず衝突する。revert後に作業を続けさせる場合は、revert後のBASE_BRANCHから新しくブランチを切って必要な差分を再適用させること。
 - どうしても元のブランチをmerge/rebaseで復元させる場合、**revert後に一切触っていない新規追加ファイルは、コンフリクト一覧に出ないまま3-way mergeが無言で「削除」を採用することがある**（共通祖先＝revert前のマージ元コミット、BASE_BRANCH側＝削除、ブランチ側＝無変更、という組み合わせで自動的に削除が選ばれるため）。復元後はコーダーに`git diff <revert前の直前コミット> -- <変更ファイル一覧>`で無差分を確認させてからcommitさせること。
 
-### 12. 本番公開（CI/CD）確認【必須】
+### 11. 本番公開（CI/CD）確認【必須】
 <!-- gh-maestro-structure: middle-items=2 -->
 
-入口: PR_MERGEDを受けたとき。最初にBASE_BRANCHを最新化する。待つもの: 本番公開（CI/CD）workflow。実行中なら完了し、失敗時は人間との対応判断を待つ。次: 確認後に工程13。
+入口: PR_MERGEDを受けたとき。最初にBASE_BRANCHを最新化する。待つもの: 本番公開（CI/CD）workflow。実行中なら完了し、失敗時は人間との対応判断を待つ。次: 確認後に工程12。
 
-PR_MERGEDを受けた工程12の入口でBASE_BRANCHを最新化し、反省会前に本番公開（CI/CD）workflowの実行結果を必ず確認する。
+PR_MERGEDを受けた工程11の入口でBASE_BRANCHを最新化し、反省会前に本番公開（CI/CD）workflowの実行結果を必ず確認する。
 
-#### 確認手順（中項目 12-[1/2]〜12-[2/2]）
+#### 確認手順（中項目 11-[1/2]〜11-[2/2]）
 
-- **12-[1/2] ワークフロー実行の確認と待機【必須】**:
+- **11-[1/2] ワークフロー実行の確認と待機【必須】**:
   `gh run list` を用いて、マージ直後の `BASE_BRANCH` 上で起動されたワークフローを確認する：
   ```sh
   gh run list --repo $REPO --branch $BASE_BRANCH --limit 1
   ```
   - ステータスが実行中（`in_progress` / `queued`）の場合は `gh run watch <run-id> --repo $REPO` を実行し、ワークフロー完了を待機する。
 
-- **12-[2/2] 結果の判定と対応【必須】**: 失敗時の協議は「人間への発言の規範」に従う。
+- **11-[2/2] 結果の判定と対応【必須】**: 失敗時の協議は「人間への発言の規範」に従う。
   - **成功 (`success`)**: 本番公開（CI/CD）が正常終了した旨を人間に報告し、反省会へ進む。
   - **失敗 (`failure` / `cancelled` / `timed_out` 等)**:
     - 失敗ログの概要 (`gh run view <run-id> --repo $REPO --log-failed`) を取得する。
@@ -436,23 +435,23 @@ PR_MERGEDを受けた工程12の入口でBASE_BRANCHを最新化し、反省会�
   - **ワークフローが存在しない場合 (`no runs found` / 未構築)**:
     - 本番公開（CI/CD）ワークフローが未設定・存在しない旨を確認し、そのまま反省会へ進む。
 
-### 13. 反省会と後始末【必須】
+### 12. 反省会と後始末【必須】
 <!-- gh-maestro-structure: middle-items=3 -->
 
-入口: 工程12のCI/CD確認が完了したとき。待つもの: 分析対象が0件なら人間のスキップ判断、実施時は反省会の承認事項を反映する。次: 反省会完了または承認済みスキップ後に工程13-[3/3]で後始末して終了。
+入口: 工程11のCI/CD確認が完了したとき。待つもの: 分析対象が0件なら人間のスキップ判断、実施時は反省会の承認事項を反映する。次: 反省会完了または承認済みスキップ後に工程12-[3/3]で後始末して終了。
 
-PR_MERGEDの到着後、工程12の本番公開（CI/CD）確認が完了したら、Issueクローズ・worktree削除の前に反省会を実施する。目的は「同じ指摘を次回のコーダーが最初から回避できるようにすること」であり、個人の批判ではない。
+PR_MERGEDの到着後、工程11の本番公開（CI/CD）確認が完了したら、Issueクローズ・worktree削除の前に反省会を実施する。目的は「同じ指摘を次回のコーダーが最初から回避できるようにすること」であり、個人の批判ではない。
 
 **反省会が完了するまでワーカーを削除してはならない（「不変条件」参照）。** 反省会には実装を担当したコーダー本人を参加させる。
 
-#### 13-[1/3] 分析対象【必須】
+#### 12-[1/3] 分析対象【必須】
 
 セッション中に蓄積した以下の記録を材料とする：
 - コーダーへ転送した BLOCKER・命名修正の一覧
 - 保留Issueに積んだ SUGGESTION の一覧
 - スパイラル検知が発動した場合その内容
 
-#### 13-[2/3] 実施判断（分析対象がゼロなら人間に確認して飛ばす）【必須】
+#### 12-[2/3] 実施判断（分析対象がゼロなら人間に確認して飛ばす）【必須】
 
 上記の分析対象が**1件もない**場合、反省会は材料を持たない。この場合だけ「人間への発言の規範」に従って人間に確認する：
 
@@ -467,7 +466,7 @@ Issue #<N> / PR #<PR> のレビュー指摘は0件でした。反省会を飛ば
 
 実施すると決まったら `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/retrospective.md` を開き、そこに従って除外フィルタ・分類・コーダーへの意見聴取・素案の投稿・承認事項の反映・決定事項の記録まで行う。
 
-#### 13-[3/3] 後始末（Issueクローズとワーカー削除）【必須】
+#### 12-[3/3] 後始末（Issueクローズとワーカー削除）【必須】
 
 反省会が完了したら（スキップと決まった場合を含む）、最後に `finalize-issue.js` を1回呼ぶ。
 
@@ -485,7 +484,7 @@ node "{{SCRIPTS_PATH}}/finalize-issue.js" --issue <N> --repo $REPO --workspace $
 |---|---|---|
 | セッション開始、/gh-maestro起動 | 現在の対話型セッションでplugin monitor gh-maestro-inboxがロードされたことを確認する。受信monitorを手動で張り直さない。 | 横断的な手続き「セッションの受信monitorとInbox Supervisor」 |
 | セッション開始時の$WORKSPACE/.gh-maestro/sync-failures/確認 | 失敗記録があれば時刻・理由・HEAD SHA等を読み、規約同期失敗の事実を人間へ伝え、.claude/rules/の確認・再同期を促す。 | 横断的な手続き「セッションの受信monitorとInbox Supervisor」 |
-| NEW_MESSAGE:<issue>:<commentId> | msg-read.js <commentId> --workspace $WORKSPACEで通知本文を読む。計画・報告・障害等を本文から判定する。 | 計画報告は工程6。PR/Review Manager通知と障害は該当行。処理後は通知待ちへ戻る。 |
+| NEW_MESSAGE:<issue>:<commentId> | msg-read.js <commentId> --workspace $WORKSPACEで通知本文を読む。計画・報告・障害等を本文から判定する。 | 計画報告は工程5。PR/Review Manager通知と障害は該当行。処理後は通知待ちへ戻る。 |
 | msg-pollの未初期化または旧形式(v1)通知 | reset-session.js --workspace $WORKSPACEで初期化して受信を再開する。 | 横断的な手続き「セッションの受信monitorとInbox Supervisor」 |
 | ワーカー起動失敗・異常終了（⚠️ 起動失敗または異常終了: exit code <N>）、または配送断念（⚠️ ワーカーへのメッセージ配送に5回失敗し断念） | ワーカーが完了できていない事実として扱う。必要なときだけworker logを読み、原因と未完了を人間に伝える。 | monitor-recovery.mdまたは横断的な手続き「ワーカーの稼働監視」 |
 | 自動代理送信マーカー | msg-send.jsの呼び忘れだけなので、本文を通常どおり評価する。 | 該当工程 |
@@ -494,23 +493,23 @@ node "{{SCRIPTS_PATH}}/finalize-issue.js" --issue <N> --repo $REPO --workspace $
 | ワーカーのプロセス停止検知 | 成果を待っていなければ何もしない。待っている場合はsleep 30をバックグラウンド実行し、完了通知後に報告が届いたか再確認する。届かなければ成果なしを人間に伝える。報告状況の文言だけで判断しない。 | 該当工程 |
 | 新規起動workerが報告なしで終了 | ログを読んで代理投稿しない。短いresumeメッセージで本人に報告させる。 | 該当工程 |
 | Inbox/PR監視プロセスの停止、親セッション消滅による自動終了 | 現在のセッション状態とregistryを確認し、plugin monitorの異常・通知欠落を人間へ報告する。plugin管理monitorを手動で重複起動・再接続しない。 | monitor-recovery.md |
-| PR_MONITOR_TARGET_SET:<json> | Issue・generation・workspaceが意図したtargetか確認する。 | 工程5。確認後はPR_DETECTEDを待つ。 |
-| PR_BASE_MISMATCH:<PR>:<expected>:<actual> | PRは存在するため処理を止めず、ベースブランチ違いを人間に伝える。 | 工程8 |
-| PR_DETECTED:<PR> | PR番号を記録する。通常経路ではReview Managerが全観点で起動し、slow層を対象HEADに対して非同期予約する。軽量PRはlightweight-pr.mdに従う。 | 工程8から工程9へ |
-| REVIEW_MANAGER_STARTED:<PR> / REVIEW_MANAGER_ALREADY_RUNNING:<PR> / REVIEW_MANAGER_ALREADY_CLAIMED:<PR> | 起動・既存起動・claim済みを記録する。いずれも届かない場合はmonitor-recovery.mdで確認する。 | 工程8 |
+| PR_MONITOR_TARGET_SET:<json> | Issue・generation・workspaceが意図したtargetか確認する。 | 工程4。確認後はPR_DETECTEDを待つ。 |
+| PR_BASE_MISMATCH:<PR>:<expected>:<actual> | PRは存在するため処理を止めず、ベースブランチ違いを人間に伝える。 | 工程7 |
+| PR_DETECTED:<PR> | PR番号を記録する。通常経路ではReview Managerが全観点で起動し、slow層を対象HEADに対して非同期予約する。軽量PRはlightweight-pr.mdに従う。 | 工程7から工程8へ |
+| REVIEW_MANAGER_STARTED:<PR> / REVIEW_MANAGER_ALREADY_RUNNING:<PR> / REVIEW_MANAGER_ALREADY_CLAIMED:<PR> | 起動・既存起動・claim済みを記録する。いずれも届かない場合はmonitor-recovery.mdで確認する。 | 工程7 |
 | Review Manager異常終了のNEW_MESSAGE（fromがissue-<N>-review-manager-pr-<PR>） | worker logで原因を確認して人間へ報告する。poll-pr.jsは監視を継続するため再起動せず、原因解消後にReview Managerだけ復旧する。 | monitor-recovery.md「PR監視・Review Managerの再起動」 |
-| SLOW_TEST_STARTED:<json> | PR HEADごとのslow開始を記録する。同じPR/HEAD/layerを二重実行しない。軽量PRでは発生しない。 | 工程8から工程9へ |
-| SLOW_TEST_ALREADY_RECORDED:<json> | PR、testedHead、layer、statusを照合し、対象のslow stateと成果物の既存記録を確認する。同じ予約を再実行しない。既存stateがrunningなら工程9で結果を待ち、完了済みなら既存結果を使う。軽量PRでは発生しない。 | 工程8。確認後は工程9へ進む |
-| SLOW_TEST_RESULT:<json> | PR、HEAD、層、pass/fail/unavailable、件数、コマンド、分類済みreason、実行ログ識別子を記録してテスト申告を更新する。イベントに `dynamicConcurrency` がある場合は並列数、CPU数、review-job数、入力取得状態も記録する。テスト開始前の依存解決・テストファイル不在・spawn失敗・空出力の非0終了はunavailable、実行後の失敗はfailのまま保持する。申告へ子プロセスのstdout/stderrやログ本文を転記せず、公開するcommand/reasonは固定許可リストから生成する。unavailableや申告更新失敗を自動再試行・診断しない。`SLOW_TEST_STARTED`より前に届くunavailable結果は工程8で予約結果として受け付け、工程9へ進む。軽量PRでは発生しない。 | 工程8（開始前unavailable）または工程9（実行結果） |
-| REVIEW_COMMENT:<path>:<line>:<user>:<body> / PR_COMMENT:<user>:<body> / PR_REVIEW:<user>:<state>:<body> | 受信元と本文を保持する。PR_REVIEWのAPPROVEDはマージ許可シグナル、CHANGES_REQUESTEDは指摘、COMMENTEDはPR_COMMENTと同様に扱う。 | 工程9。findingsがあれば工程10 |
-| PR_PUSH:<sha> | 新HEADにslow層を非同期予約し、GitHub checksを照会する。転送済みBLOCKER/MAJORへの修正ではReview Managerを再起動せずexplorerに再現条件解消の事実確認を依頼する。新規起動時は調査前に対象PRのbranch/commitをgit fetchとcheckoutで明示する。 | 工程9。再現条件の確認は工程10の判断材料 |
-| TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>:lint=<lintState>:typecheck=<typecheckState> | GREENは申告あり・SHA一致・fail 0、REDは申告あり・SHA一致・fail > 0、STALEはSHA不一致、NONEは申告なしまたは照合不能。provenanceとscopeを記録し、lintはcomplete/findings/unavailable/missing、typecheckはcomplete pass/fail/unavailable/undefined/missingとして記録する。これらはGREEN/REDや停止条件を変えない。aggregateならコメント内の層別full/slowを個別確認する。STALE/NONEはquery-test-status.jsで正本を確認し、申告を催促せず事実を示す。 | 工程11 |
-| CI_CHECK_FAILED:<json> / CI_CHECKS_COMPLETE:<json> / CI_CHECKS_EMPTY:<json> / CI_CHECKS_UNAVAILABLE:<json> | 現在HEADのcheck名・状態・詳細URLを記録する。hasChecks=falseはチェックなし、hasRunning=trueは実行中、allCompleted=trueは全件完了を示す。取得失敗をチェックなし・成功と読み替えず、PR_PUSH前の古いHEADを新HEADに流用しない。実行中（hasRunning=true）の間は merge 候補として提示せず、CI_CHECKS_COMPLETE または CI_CHECK_FAILED を受けてから結果を提示する。CI_CHECKS_EMPTY と CI_CHECKS_UNAVAILABLE は待たずに事実を提示する。軽量PRではchecks通知は発生しない。 | 工程11 |
-| PR_MERGED:<PR番号> | マージを確認し、工程12の入口でgit -C $WORKSPACE pull --ff-onlyでBASE_BRANCHを最新化する。ワーカーやworktreeは削除しない。 | 工程12 |
-| PR_CLOSED:<PR番号> | 却下・キャンセルによるクローズとして理由を確認し、必要ならコーダーへ再指示する。マージ扱いしない。 | 工程9。新PR検出への復帰通知を待つ。 |
-| PR_CLOSED_RESUMED:<PR番号> | 監視プロセスが新しいPR検出へ戻った生存シグナルとして記録する。 | 工程8でPR_DETECTED待ち |
-| POLL_ERROR:<detail> / POLL_RECOVERED | GitHub accessの劣化・復旧を人間へ事実として伝える。ポーラーが再試行中なので再起動しない。 | 工程9 |
-| 同じBLOCKERが2回連続して届くスパイラル | コーダーへの転送を停止し、対象と継続回数を人間に提示する。原因判断と次の対応は人間に委ねる。 | 工程9で検知し、指摘表と回答待ちは工程10 |
+| SLOW_TEST_STARTED:<json> | PR HEADごとのslow開始を記録する。同じPR/HEAD/layerを二重実行しない。軽量PRでは発生しない。 | 工程7から工程8へ |
+| SLOW_TEST_ALREADY_RECORDED:<json> | PR、testedHead、layer、statusを照合し、対象のslow stateと成果物の既存記録を確認する。同じ予約を再実行しない。既存stateがrunningなら工程8で結果を待ち、完了済みなら既存結果を使う。軽量PRでは発生しない。 | 工程7。確認後は工程8へ進む |
+| SLOW_TEST_RESULT:<json> | PR、HEAD、層、pass/fail/unavailable、件数、コマンド、分類済みreason、実行ログ識別子を記録してテスト申告を更新する。イベントに `dynamicConcurrency` がある場合は並列数、CPU数、review-job数、入力取得状態も記録する。テスト開始前の依存解決・テストファイル不在・spawn失敗・空出力の非0終了はunavailable、実行後の失敗はfailのまま保持する。申告へ子プロセスのstdout/stderrやログ本文を転記せず、公開するcommand/reasonは固定許可リストから生成する。unavailableや申告更新失敗を自動再試行・診断しない。`SLOW_TEST_STARTED`より前に届くunavailable結果は工程7で予約結果として受け付け、工程8へ進む。軽量PRでは発生しない。 | 工程7（開始前unavailable）または工程8（実行結果） |
+| REVIEW_COMMENT:<path>:<line>:<user>:<body> / PR_COMMENT:<user>:<body> / PR_REVIEW:<user>:<state>:<body> | 受信元と本文を保持する。PR_REVIEWのAPPROVEDはマージ許可シグナル、CHANGES_REQUESTEDは指摘、COMMENTEDはPR_COMMENTと同様に扱う。 | 工程8。findingsがあれば工程9 |
+| PR_PUSH:<sha> | 新HEADにslow層を非同期予約し、GitHub checksを照会する。転送済みBLOCKER/MAJORへの修正ではReview Managerを再起動せずexplorerに再現条件解消の事実確認を依頼する。新規起動時は調査前に対象PRのbranch/commitをgit fetchとcheckoutで明示する。 | 工程8。再現条件の確認は工程9の判断材料 |
+| TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>:lint=<lintState>:typecheck=<typecheckState> | GREENは申告あり・SHA一致・fail 0、REDは申告あり・SHA一致・fail > 0、STALEはSHA不一致、NONEは申告なしまたは照合不能。provenanceとscopeを記録し、lintはcomplete/findings/unavailable/missing、typecheckはcomplete pass/fail/unavailable/undefined/missingとして記録する。これらはGREEN/REDや停止条件を変えない。aggregateならコメント内の層別full/slowを個別確認する。STALE/NONEはquery-test-status.jsで正本を確認し、申告を催促せず事実を示す。 | 工程10 |
+| CI_CHECK_FAILED:<json> / CI_CHECKS_COMPLETE:<json> / CI_CHECKS_EMPTY:<json> / CI_CHECKS_UNAVAILABLE:<json> | 現在HEADのcheck名・状態・詳細URLを記録する。hasChecks=falseはチェックなし、hasRunning=trueは実行中、allCompleted=trueは全件完了を示す。取得失敗をチェックなし・成功と読み替えず、PR_PUSH前の古いHEADを新HEADに流用しない。実行中（hasRunning=true）の間は merge 候補として提示せず、CI_CHECKS_COMPLETE または CI_CHECK_FAILED を受けてから結果を提示する。CI_CHECKS_EMPTY と CI_CHECKS_UNAVAILABLE は待たずに事実を提示する。軽量PRではchecks通知は発生しない。 | 工程10 |
+| PR_MERGED:<PR番号> | マージを確認し、工程11の入口でgit -C $WORKSPACE pull --ff-onlyでBASE_BRANCHを最新化する。ワーカーやworktreeは削除しない。 | 工程11 |
+| PR_CLOSED:<PR番号> | 却下・キャンセルによるクローズとして理由を確認し、必要ならコーダーへ再指示する。マージ扱いしない。 | 工程8。新PR検出への復帰通知を待つ。 |
+| PR_CLOSED_RESUMED:<PR番号> | 監視プロセスが新しいPR検出へ戻った生存シグナルとして記録する。 | 工程7でPR_DETECTED待ち |
+| POLL_ERROR:<detail> / POLL_RECOVERED | GitHub accessの劣化・復旧を人間へ事実として伝える。ポーラーが再試行中なので再起動しない。 | 工程8 |
+| 同じBLOCKERが2回連続して届くスパイラル | コーダーへの転送を停止し、対象と継続回数を人間に提示する。原因判断と次の対応は人間に委ねる。 | 工程8で検知し、指摘表と回答待ちは工程9 |
 
 PR監視・受信monitorの停止や重複、slow state、worker-statusの復旧詳細はmonitor-recovery.mdに従う。
 
