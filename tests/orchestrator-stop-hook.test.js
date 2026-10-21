@@ -11,7 +11,7 @@ const { withTempDir } = require('../scripts/shared/temp-directory');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'orchestrator-stop-hook.js');
 const SCRIPTS_DIR = path.join(__dirname, '..', 'scripts');
-const QUESTION = '工程11\n\n変更点は次のとおりです。\n\n**PR #612 をマージしますか？**';
+const QUESTION = '工程10\n\n変更点は次のとおりです。\n\n**PR #612 をマージしますか？**';
 
 function withEnv(fn) {
   return withTempDir('ghm-stop-hook-', (root) => {
