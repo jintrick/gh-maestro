@@ -6,7 +6,7 @@ paths:
 
 # 工程の構造宣言を更新する
 
-`skills/gh-maestro-orchestrator/SKILL.md` には構造宣言のコメントがある。文書冒頭に `<!-- gh-maestro-structure: stages=12 -->`、各工程見出しの直下に `<!-- gh-maestro-structure: middle-items=N -->`。
+`skills/gh-maestro-orchestrator/SKILL.md` には構造宣言のコメントがある。文書冒頭に `<!-- gh-maestro-structure: stages=9 -->`、各工程見出しの直下に `<!-- gh-maestro-structure: middle-items=N -->`。
 
 工程や中項目を増減したら、同じ変更の中で数字も更新する。
 
