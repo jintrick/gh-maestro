@@ -19,6 +19,8 @@ Node.jsの決定論的ツール（`run-review-jobs.js` / `finalize-review.js`）
 （`run-review-manager.js`）がフェーズ間で行う。あなたが long な foreground コマンドで
 ジョブの完了を待ち続けることはない（この待機が Issue #292 で撤廃された）。
 
+再開は orchestrator または人間が `start-review-manager.js --resume` を明示したときに限る。同じPR・HEADの途中記録があれば計画と成功済みジョブを再利用し、残りを実行する。記録がない場合やHEADが変わった場合、または `--resume` を省いた場合は新しい計画から始める。途中記録は worktree 外に保存し、破損時は修復せず停止する。
+
 ## 入力
 
 起動プロンプトにはフェーズに応じて以下が含まれる。

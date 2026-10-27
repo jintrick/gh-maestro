@@ -17,6 +17,7 @@ const { spawn, spawnSync } = require('./shared/child-process');
 const { writeSentinel, finalizeReview } = require('./finalize-review');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { atomicWriteJson } = require('./shared/atomic-write');
+const checkpoint = require('./shared/review-checkpoint');
 const { buildAgentExecArgs, runAgentWithPrompt, RESULT_FILE_TOKEN } = require('./shared/agent-launch');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
@@ -55,9 +56,10 @@ let _spawn = spawn;
 
 const USAGE = `run-review-jobs.js — RMの実行manifestに従いレビュージョブをheadless起動する
 
-Usage: node run-review-jobs.js --manifest <path> --results <path> --pr <N> --repo <owner/repo> --gh-dir <path> [--workspace <path>]
+Usage: node run-review-jobs.js --manifest <path> --results <path> --pr <N> --repo <owner/repo> --gh-dir <path> [--workspace <path>] [--checkpoint-id <id>]
 
 Options:
+  --checkpoint-id <id> 周回記録を使用して完了済みジョブを再利用する
   --manifest <path>    RMが書き出した実行manifestのJSONファイルパス
   --results <path>     ジョブ実行結果を書き出すJSONファイルパス
   --pr <N>             必須。通知先PR番号（検証前の起動コンテキスト。正整数のみ受理）
@@ -1253,6 +1255,20 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
     };
   }
 
+  let saved = null;
+  let pendingJobs = manifest.jobs;
+  if (options.checkpointId) {
+    try {
+      saved = checkpoint.read(options.mainWorkspace, pr, options.checkpointId, validateManifest);
+      if (JSON.stringify(saved.state.manifest) !== JSON.stringify(manifest)) {
+        throw new Error(`manifest と checkpoint が一致しません: ${saved.file}`);
+      }
+      pendingJobs = manifest.jobs.filter(job => saved.state.results[job.id]?.status !== 'success');
+    } catch (e) {
+      return { ok: false, summary: { error: e.message } };
+    }
+  }
+
   // 2.5 再試行上限ゲート（Issue #273）。
   // manifest検証（上）は「再試行しない」経路のため attempt を消費せず、ここから先の
   // ジョブ実行ループにだけ上限を掛ける。上限到達時はジョブを起動せず、既存の不完全
@@ -1264,7 +1280,15 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
       if (path.resolve(ghDir) !== path.resolve(path.join(mainWorkspace, '.gh-maestro'))) {
         return { ok: false, summary: { error: 'メインworkspaceと--gh-dirの対応が不正です' } };
       }
-      gate = applyRetryGate({ workspace: mainWorkspace, pr });
+      if (saved) {
+        if (pendingJobs.length === 0) gate = { gated: false };
+        else if (saved.state.attempts >= MAX_REVIEW_ATTEMPTS) gate = { gated: true, attempts: saved.state.attempts };
+        else {
+          saved.state.attempts++;
+          checkpoint.save(saved.file, saved.state, validateManifest);
+          gate = { gated: false, attempts: saved.state.attempts };
+        }
+      } else gate = applyRetryGate({ workspace: mainWorkspace, pr });
     } else {
       // プログラム呼び出しで --gh-dir が省略された場合は、従来どおり再試行ゲートを適用しない。
       gate = { gated: false };
@@ -1319,12 +1343,18 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   // 4. 全ジョブを並列起動
   // 子プロセスへの参照を保持し、total-timeout時に実際にkillできるようにする
   const activeChildren = [];
-  const jobPromises = manifest.jobs.map(job => {
+  const jobPromises = pendingJobs.map(job => {
     const childRef = { child: null };
     activeChildren.push(childRef);
     return launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, jobTimeoutMs, childRef, {
       ...options,
       mainWorkspace: targetWorkspace,
+    }).then(result => {
+      if (saved) {
+        saved.state.results[job.id] = result;
+        checkpoint.save(saved.file, saved.state, validateManifest);
+      }
+      return result;
     });
   });
 
@@ -1349,7 +1379,7 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   if (raceResult === 'total-timeout') {
     // タイムアウト: 残存ジョブの結果を収集（killされたものは自然に解決される）
     const settled = await Promise.allSettled(jobPromises);
-    jobResults = manifest.jobs.map((job, i) => {
+    jobResults = pendingJobs.map((job, i) => {
       if (settled[i].status === 'fulfilled') return settled[i].value;
       return {
         jobId: job.id,
@@ -1361,6 +1391,10 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
     });
   } else {
     jobResults = raceResult;
+  }
+
+  if (saved) {
+    jobResults = manifest.jobs.map(job => saved.state.results[job.id] || jobResults[pendingJobs.indexOf(job)]);
   }
 
   // 5. resultsを構築
@@ -1468,6 +1502,7 @@ if (require.main === module) {
           '--workspace': {},
           '--job-timeout': {},
           '--total-timeout': {},
+          '--checkpoint-id': {},
         },
         booleans: ['--help', '-h'],
         // 未知フラグ・位置引数はパーサ側で拒否される（argv-parsing-pitfalls参照）。
@@ -1543,7 +1578,7 @@ if (require.main === module) {
 
     const result = await runJobsFromManifest(
       manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo, ghDir,
-      { mainWorkspace },
+      { mainWorkspace, checkpointId: values['--checkpoint-id'] },
     );
 
     if (!result.ok) {
