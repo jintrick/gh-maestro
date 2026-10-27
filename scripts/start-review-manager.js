@@ -26,6 +26,7 @@ const { launchAgentHeadless } = require('./shared/headless-launch');
 const { assertValidPr } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags } = require('./shared/workspace');
+const { inspectRunners } = require('./shared/review-checkpoint');
 const {
   inspectRunningReviewManager,
   acquireReviewManagerStartup,
@@ -108,6 +109,12 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
   // workerName・ログパス・leaseパスの一貫性が保証され、
   // 「識別子がファイルごとに別々に手書きされる」不具合パターンを防ぐ。
   // assertValidIssue は factory 内部で検証される。
+  if (resume) {
+    const runner = inspectRunners(workspace, pr)[0];
+    if (runner) {
+      throw new Error(`前回の run-review-jobs.js が生存中です: PID ${runner.pid}`);
+    }
+  }
   const spec = buildReviewManagerLaunchSpec({ issue, pr, repo, workspace });
   const workerName = spec.workerName;
   const lockFile = spec.leaseStore;

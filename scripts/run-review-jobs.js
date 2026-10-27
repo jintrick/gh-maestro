@@ -18,6 +18,7 @@ const { writeSentinel, finalizeReview } = require('./finalize-review');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const checkpoint = require('./shared/review-checkpoint');
+const { writeRunningReviewManager, removeRunningReviewManagerIfOwned, inspectRunningReviewManager } = require('./shared/running-review-managers');
 const { buildAgentExecArgs, runAgentWithPrompt, RESULT_FILE_TOKEN } = require('./shared/agent-launch');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
@@ -1453,6 +1454,7 @@ function resolveRunJobsExitCode(result) {
 // ── テスト用エクスポート ──────────────────────────────────────────────────────
 module.exports = {
   validateManifest,
+  parseFindingsText,
   validateJobs,
   resolveReviewSkillsDir,
   resolveCanonicalReviewPath,
@@ -1576,6 +1578,23 @@ if (require.main === module) {
       process.exit(1);
     }
 
+    let runnerOwner = null;
+    let runnerPath = null;
+    try {
+    if (values['--checkpoint-id']) {
+      runnerPath = checkpoint.runnerLeasePath(mainWorkspace, pr, process.pid);
+      fs.mkdirSync(path.dirname(runnerPath), { recursive: true });
+      const startTime = getProcessStartTime(process.pid);
+      if (!startTime) throw new Error('run-review-jobs の開始時刻を確認できません');
+      runnerOwner = { pid: process.pid, startTime };
+      writeRunningReviewManager(runnerPath, runnerOwner);
+      const manager = inspectRunningReviewManager(reviewArtifactPath(mainWorkspace, pr, '.running'), { onError: 'throw' });
+      if (manager.status !== 'live' || String(manager.pid) !== process.env.GH_MAESTRO_REVIEW_PARENT_PID ||
+          manager.startTime !== process.env.GH_MAESTRO_REVIEW_PARENT_START) {
+        removeRunningReviewManagerIfOwned(runnerPath, runnerOwner);
+        throw new Error('起動元 Review Manager の同一性を確認できません');
+      }
+    }
     const result = await runJobsFromManifest(
       manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo, ghDir,
       { mainWorkspace, checkpointId: values['--checkpoint-id'] },
@@ -1583,10 +1602,14 @@ if (require.main === module) {
 
     if (!result.ok) {
       console.error(JSON.stringify(result.summary));
-      process.exit(resolveRunJobsExitCode(result));
+      process.exitCode = resolveRunJobsExitCode(result);
+      return;
     }
 
     console.log(JSON.stringify(result.summary));
-    process.exit(resolveRunJobsExitCode(result));
+    process.exitCode = resolveRunJobsExitCode(result);
+    } finally {
+      if (runnerOwner) removeRunningReviewManagerIfOwned(runnerPath, runnerOwner);
+    }
   })();
 }

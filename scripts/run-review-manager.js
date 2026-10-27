@@ -791,7 +791,7 @@ function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewW
   ], {
     cwd: reviewWtDir,
     encoding: 'utf8',
-    env: process.env,
+    env: { ...process.env, GH_MAESTRO_REVIEW_PARENT_PID: String(process.pid), GH_MAESTRO_REVIEW_PARENT_START: _getProcessStartTime(process.pid) || '' },
     maxBuffer: 20 * 1024 * 1024,
   });
   if (r.stdout) log(r.stdout);
@@ -1082,6 +1082,14 @@ async function superviseReviewManager({
   } catch (e) {
     return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir: null, reason: `初期化失敗: ${e.message}` };
   }
+  if (resume) {
+    try {
+      const runner = checkpoint.inspectRunners(workspace, pr)[0];
+      if (runner) return { outcome: 'setup-failed', exitCode: 1, reviewWtDir: null, agentPid: null, reason: `前回の run-review-jobs.js が生存中です: PID ${runner.pid}` };
+    } catch (error) {
+      return { outcome: 'setup-failed', exitCode: 1, reviewWtDir: null, agentPid: null, reason: error.message };
+    }
+  }
   // 新レビュー周回の開始＝.running ロック作成。前周回が不完全終了した場合の
   // 古い .incomplete センチネルが残っていると、今回の途中結果を誤って
   // 「不完全完了」と判定してしまうため、ここで必ず消す（Issue #248 項目4）。
@@ -1111,11 +1119,7 @@ async function superviseReviewManager({
   let prior = null;
   try {
   if (resume) {
-    prior = checkpoint.load(workspace, pr, validateManifest);
-    if (prior && (String(prior.state.manifest.pr) !== String(pr) || prior.state.manifest.repo !== repo)) {
-      throw new Error(`review checkpoint PR/repo 不一致: ${prior.file}`);
-    }
-    if (prior && prior.state.manifest.headRefOid !== head) prior = null;
+    prior = checkpoint.select(workspace, pr, repo, head, validateManifest);
   }
   } catch (error) {
     return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: error.message };
@@ -1142,6 +1146,9 @@ async function superviseReviewManager({
     fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
     fs.writeFileSync(manifestPath, JSON.stringify(prior.state.manifest, null, 2));
   } else {
+    try { checkpoint.begin(workspace, pr); } catch (error) {
+      return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: error.message };
+    }
     const { prompt: phase1Prompt } = buildPrompt({ pr, repo, issue, workspace: reviewWtDir, mainGhDir: ghDir, skillPath });
     const phase1 = await superviseAgentPhase({
       pr, repo, issue, workspace, reviewWtDir, logFile, log, signal,
@@ -1153,7 +1160,7 @@ async function superviseReviewManager({
       return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: `${manifestPath}: ${error.message}` };
     }
     const validation = validateManifest(manifest);
-    if (!validation.valid || String(manifest.pr) !== String(pr) || manifest.repo !== repo || manifest.headRefOid !== head) {
+    if (!validation.valid || !Array.isArray(manifest.jobs) || String(manifest.pr) !== String(pr) || manifest.repo !== repo || manifest.headRefOid !== head) {
       return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: `manifest 不正またはPR/HEAD不一致: ${manifestPath}: ${validation.errors.join('; ')}` }; 
     }
     try { prior = checkpoint.create(workspace, pr, manifest, validateManifest); } catch (error) {
@@ -1221,7 +1228,7 @@ async function superviseReviewManager({
   ], {
     cwd: workspace,
     encoding: 'utf8',
-    env: process.env,
+    env: { ...process.env, GH_MAESTRO_REVIEW_PARENT_PID: String(process.pid), GH_MAESTRO_REVIEW_PARENT_START: _getProcessStartTime(process.pid) || '' },
     maxBuffer: 20 * 1024 * 1024,
   });
   if (publish.stdout) log(publish.stdout);
