@@ -422,3 +422,45 @@ test('旧 PID registry 整理はリンク・読み取り失敗・削除失敗を
     assert.ok(fs.existsSync(file));
   });
 });
+
+
+test('旧 PID registry の個別ファイルが読めない場合は unknown として保持する', () => {
+  withFixture((fixture) => {
+    const dir = path.join(fixture.workspace, '.gh-maestro', 'pids');
+    fs.mkdirSync(dir);
+    const file = path.join(dir, '123.json');
+    fs.writeFileSync(file, JSON.stringify({ pid: 123, startTime: '2026-01-01T00:00:00Z' }));
+    const result = cleanupLegacyArtifact({
+      cleanupId: 'process-lifecycle.sweepRegistry', workspace: fixture.workspace,
+      readFileFn: (target, encoding) => {
+        if (target === file) throw Object.assign(new Error('access denied'), { code: 'EACCES' });
+        return fs.readFileSync(target, encoding);
+      },
+    });
+    assert.equal(result.status, 'unknown');
+    assert.match(result.reason, /access denied/);
+    assert.ok(fs.existsSync(file));
+  });
+});
+
+test('旧 startup lock の所有者が稼働中または確認不能なら保持する', () => {
+  withFixture((fixture) => {
+    const dir = path.join(fixture.workspace, '.gh-maestro', 'pids');
+    fs.mkdirSync(dir);
+    const file = path.join(dir, '.startup-lock-test.js__orchestrator');
+    const startTime = '2026-01-01T00:00:00.000Z';
+    const run = () => cleanupLegacyArtifact({
+      cleanupId: 'process-lifecycle.sweepRegistry', workspace: fixture.workspace,
+      getProcessStartTimeFn: () => startTime,
+    });
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, startTime }));
+    assert.equal(run().status, 'unknown');
+    assert.ok(fs.existsSync(file));
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, startTime: 'invalid' }));
+    assert.equal(run().status, 'unknown');
+    assert.ok(fs.existsSync(file));
+    fs.writeFileSync(file, JSON.stringify({ pid: 2147483647, startTime }));
+    assert.equal(run().status, 'removed');
+    assert.equal(fs.existsSync(file), false);
+  });
+});

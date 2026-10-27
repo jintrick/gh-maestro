@@ -226,6 +226,7 @@ function cleanupLegacyPidRegistry(options = {}) {
   const directory = processLifecycle.legacyPidsDir(options.workspace);
   const lstatFn = options.lstatFn || fs.lstatSync;
   const readDirFn = options.readDirFn || ((target) => fs.readdirSync(target, { withFileTypes: true }));
+  const readFileFn = options.readFileFn || fs.readFileSync;
   let stat;
   try { stat = lstatFn(directory); } catch (error) {
     if (error.code === 'ENOENT') return { status: 'absent', path: directory };
@@ -251,7 +252,7 @@ function cleanupLegacyPidRegistry(options = {}) {
       return { status: 'unknown', path: filePath, reason: 'PID registry項目が通常ファイルではありません' };
     }
     let record;
-    try { record = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (error) {
+    try { record = JSON.parse(readFileFn(filePath, 'utf8')); } catch (error) {
       return { status: 'unknown', path: filePath, reason: `PID registry項目を読めません: ${error.message}` };
     }
     if (!record || typeof record !== 'object' || Array.isArray(record)
@@ -259,6 +260,26 @@ function cleanupLegacyPidRegistry(options = {}) {
       || typeof record.startTime !== 'string' || !record.startTime
       || (entry.name.endsWith('.json') && `${record.pid}.json` !== entry.name)) {
       return { status: 'unknown', path: filePath, reason: 'PID registry項目が不正です' };
+    }
+    if (entry.name.startsWith('.startup-lock-')) {
+      // 所有者が存命か確認できないロックは残す。PID が再利用されていれば
+      // 起動時刻の不一致により旧所有者は既にいないと判定できる。
+      let identity;
+      try {
+        const identityOptions = options.getProcessStartTimeFn
+          ? { actualStartTime: options.getProcessStartTimeFn(record.pid) }
+          : undefined;
+        identity = processLifecycle.verifyProcessIdentity(record.pid, record, identityOptions);
+      } catch (error) {
+        return { status: 'unknown', path: filePath, reason: `ロック所有者を確認できません: ${error.message}` };
+      }
+      if (!identity || (identity.match !== false && identity.match !== true)) {
+        return { status: 'unknown', path: filePath, reason: 'ロック所有者の判定結果が不正です' };
+      }
+      if (identity.match || (identity.reason !== 'process not alive'
+        && !identity.reason?.startsWith('start time mismatch:'))) {
+        return { status: 'unknown', path: filePath, reason: `ロック所有者が稼働中または確認不能です: ${identity.reason || 'alive'}` };
+      }
     }
   }
   try {
