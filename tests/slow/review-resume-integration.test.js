@@ -6,6 +6,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { createTempDirScope } = require('../../scripts/shared/temp-directory');
 const checkpoint = require('../../scripts/shared/review-checkpoint');
+const { getParentPid, getProcessStartTime, verifyProcessIdentity, isProcessAlive } = require('../../scripts/process-lifecycle');
 const { validateManifest, ALL_LEAF_IDS, TRUNK_TO_LEAVES } = require('../../scripts/run-review-jobs');
 
 const root = path.resolve(__dirname, '../..');
@@ -66,6 +67,15 @@ async function scenario(mode) {
     const args = [path.join(root, 'scripts/start-review-manager.js'), ...(mode === 'fresh' ? [] : ['--resume']), '11', 'o/r', ws, '1'];
     command(process.execPath, args, { env });
     safeToCleanup = false;
+    const runningPath = path.join(ws, '.gh-maestro/records/pr/11/review/manager.running');
+    await waitUntil(() => fs.existsSync(runningPath), 'manager registration');
+    const managerPid = JSON.parse(fs.readFileSync(runningPath, 'utf8')).pid;
+    const launcherParent = getParentPid(managerPid);
+    assert.ok(launcherParent, 'manager parent PID is required');
+    const shimPid = process.platform === 'win32' ? getParentPid(launcherParent) : launcherParent;
+    assert.ok(shimPid, 'headless shim PID is required');
+    const shimStartTime = getProcessStartTime(shimPid);
+    assert.ok(shimStartTime, 'headless shim start time is required');
     const resultPath = path.join(fixture, 'observed-results.json');
     await waitUntil(() => fs.existsSync(resultPath), 'phase2 results');
     const results = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
@@ -76,10 +86,17 @@ async function scenario(mode) {
     assert.equal(events.filter(e => e.kind === 'phase1').length, mode === 'resume' ? 0 : 1);
     const jobs = events.filter(e => e.kind === 'job').map(e => e.id);
     assert.deepEqual(jobs.sort(), mode === 'resume' ? ['second'] : ['first', 'second']);
-    await waitUntil(() => !fs.existsSync(path.join(ws, '.gh-maestro/records/pr/11/review/manager.running')), 'manager exit');
+    await waitUntil(() => !fs.existsSync(runningPath), 'manager exit');
+    await waitUntil(() => {
+      const identity = verifyProcessIdentity(shimPid, { startTime: shimStartTime });
+      if (identity.match) return false;
+      if (identity.reason === 'process not alive' || /^start time mismatch:/.test(identity.reason || '')) return true;
+      if (identity.reason === 'cannot get process start time' && !isProcessAlive(shimPid)) return true;
+      throw new Error(`cannot verify headless shim PID ${shimPid}: ${identity.reason}`);
+    }, 'headless shim and exit hook');
     safeToCleanup = true;
   } finally { if (safeToCleanup) scope.cleanup(); }
 }
 for (const mode of ['resume', 'fresh', 'head-change']) {
-  test(`start-review-manager ${mode} carries review state through worktree recreation`, { timeout: 60000 }, async () => scenario(mode));
+  test(`start-review-manager ${mode} carries review state through worktree recreation`, { timeout: 120000 }, async () => scenario(mode));
 }
