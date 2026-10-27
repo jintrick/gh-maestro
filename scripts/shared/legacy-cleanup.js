@@ -223,21 +223,53 @@ function cleanupLegacyRecords(options = {}) {
 }
 
 function cleanupLegacyPidRegistry(options = {}) {
-  const sweepRegistryFn = options.sweepRegistryFn || processLifecycle.sweepRegistry;
-  // The existing sweep is the authoritative PID-registry cleanup primitive. Do not pass a
-  // catch-all match here: sweepRegistry's no-match path is what builds the live-worker and
-  // resident exclusions before deciding whether a PID may be stopped. A truthy match would
-  // deliberately bypass those exclusions and could stop a current process.
-  const result = sweepRegistryFn(options.workspace);
-  if (!result || !Array.isArray(result.errors) || !Array.isArray(result.killed)
-    || !Array.isArray(result.cleaned)) {
-    return { status: 'unknown', reason: 'PID registry sweepが不正な結果を返しました', result };
+  const directory = processLifecycle.legacyPidsDir(options.workspace);
+  const lstatFn = options.lstatFn || fs.lstatSync;
+  const readDirFn = options.readDirFn || ((target) => fs.readdirSync(target, { withFileTypes: true }));
+  let stat;
+  try { stat = lstatFn(directory); } catch (error) {
+    if (error.code === 'ENOENT') return { status: 'absent', path: directory };
+    return { status: 'unknown', path: directory, reason: error.message };
   }
-  if (result.errors.length > 0) return { status: 'unknown', reason: result.errors.join('; '), result };
-  return {
-    status: result.killed.length > 0 || result.cleaned.length > 0 ? 'removed' : 'absent',
-    result,
-  };
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    return { status: 'unknown', path: directory, reason: 'PID registryが通常ディレクトリではありません' };
+  }
+  let entries;
+  try { entries = readDirFn(directory); } catch (error) {
+    return { status: 'unknown', path: directory, reason: error.message };
+  }
+  // 既知のファイルだけを削除する。未知の内容があれば何も削除しない。
+  for (const entry of entries) {
+    const filePath = path.join(directory, entry.name);
+    if (!/^(?:[1-9][0-9]*\.json|\.startup-lock-[A-Za-z0-9_.-]+)$/.test(entry.name)) {
+      return { status: 'unknown', path: filePath, reason: '未知のPID registry項目です' };
+    }
+    try { stat = lstatFn(filePath); } catch (error) {
+      return { status: 'unknown', path: filePath, reason: error.message };
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      return { status: 'unknown', path: filePath, reason: 'PID registry項目が通常ファイルではありません' };
+    }
+    let record;
+    try { record = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (error) {
+      return { status: 'unknown', path: filePath, reason: `PID registry項目を読めません: ${error.message}` };
+    }
+    if (!record || typeof record !== 'object' || Array.isArray(record)
+      || !Number.isSafeInteger(record.pid) || record.pid <= 0
+      || typeof record.startTime !== 'string' || !record.startTime
+      || (entry.name.endsWith('.json') && `${record.pid}.json` !== entry.name)) {
+      return { status: 'unknown', path: filePath, reason: 'PID registry項目が不正です' };
+    }
+  }
+  try {
+    const unlinkFn = options.unlinkFn || fs.unlinkSync;
+    const rmdirFn = options.rmdirFn || fs.rmdirSync;
+    for (const entry of entries) unlinkFn(path.join(directory, entry.name));
+    rmdirFn(directory);
+  } catch (error) {
+    return { status: 'unknown', path: directory, reason: error.message };
+  }
+  return { status: 'removed', path: directory };
 }
 
 function cleanupLegacyMsgPollState(options = {}) {

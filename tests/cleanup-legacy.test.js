@@ -380,3 +380,45 @@ test('cleanup-legacy CLIは境界で引数を検証し、明示した旧形式�
     assert.equal(fs.existsSync(fixture.statusPane), false);
   });
 });
+
+
+test('旧 PID registry 整理は稼働 PID を停止せず、未知・破損項目は保持する', () => {
+  withFixture((fixture) => {
+    const dir = path.join(fixture.workspace, '.gh-maestro', 'pids');
+    const run = () => cleanupLegacyArtifact({ cleanupId: 'process-lifecycle.sweepRegistry', workspace: fixture.workspace });
+    assert.equal(run().status, 'absent');
+    fs.mkdirSync(dir);
+    const file = path.join(dir, `${process.pid}.json`);
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, startTime: '2026-01-01T00:00:00Z' }));
+    const unknown = path.join(dir, 'unknown');
+    fs.writeFileSync(unknown, 'data');
+    assert.equal(run().status, 'unknown');
+    assert.ok(fs.existsSync(file));
+    fs.unlinkSync(unknown);
+    fs.writeFileSync(file, '{');
+    assert.equal(run().status, 'unknown');
+    assert.ok(fs.existsSync(file));
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, startTime: '2026-01-01T00:00:00Z' }));
+    assert.equal(run().status, 'removed');
+    assert.equal(fs.existsSync(dir), false);
+    assert.doesNotThrow(() => process.kill(process.pid, 0));
+  });
+});
+
+
+test('旧 PID registry 整理はリンク・読み取り失敗・削除失敗を unknown として残す', () => {
+  withFixture((fixture) => {
+    const dir = path.join(fixture.workspace, '.gh-maestro', 'pids');
+    fs.mkdirSync(dir);
+    const file = path.join(dir, '123.json');
+    fs.writeFileSync(file, JSON.stringify({ pid: 123, startTime: '2026-01-01T00:00:00Z' }));
+    const run = (extra) => cleanupLegacyArtifact({ cleanupId: 'process-lifecycle.sweepRegistry', workspace: fixture.workspace, ...extra });
+    const lstatFn = (target) => target === file
+      ? { isSymbolicLink: () => true, isFile: () => false }
+      : fs.lstatSync(target);
+    assert.equal(run({ lstatFn }).status, 'unknown');
+    assert.equal(run({ readDirFn: () => { throw new Error('denied'); } }).status, 'unknown');
+    assert.equal(run({ unlinkFn: () => { throw new Error('denied'); } }).status, 'unknown');
+    assert.ok(fs.existsSync(file));
+  });
+});
