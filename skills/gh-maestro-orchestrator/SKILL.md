@@ -377,6 +377,7 @@ Review Managerの完了、通常経路のslow層結果、GitHub checks、テス�
 #### 7-[2/5] PR監視・Review Managerの再起動【任意】
 
 plugin monitorまたはその子 `poll-pr.js` が落ちた場合の確認・targetの再設定、Review Managerが起動しなかった／失敗した場合の再起動は、いずれも `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` の「PR監視・Review Managerの再起動」を参照する。異常を人間へ報告するときは `工程7-[2/5]` と名乗る。**再レビューが不要な場合は `activate-pr-monitor.js` に `--no-review-manager` を渡すこと**（付け忘れると検出のたびにレビューが蒸し返されquotaを浪費する）。
+理由と経緯: docs/adr/0046-review-manager-resume-requires-explicit-flag.md
 
 #### 7-[3/5] コメントトリアージ【任意】
 
