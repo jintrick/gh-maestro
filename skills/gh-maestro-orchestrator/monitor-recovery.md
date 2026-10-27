@@ -27,6 +27,8 @@ node "{{SCRIPTS_PATH}}/activate-pr-monitor.js" \
 
 Review Managerを起動しない軽量経路では、上のコマンドへ `--no-review-manager --no-review-events` を追加する。`poll-pr-monitor.js` がruntimeの `pr-monitor-target.json` を読み、世代ごとに `poll-pr.js` を1回だけ子プロセスとして起動する。targetの切替・削除では旧poll-prとslow子プロセスをまとめて停止し、同じ世代を自動再試行しない。
 
+途中停止した Review Manager を続行する場合は `node "{{SCRIPTS_PATH}}/start-review-manager.js" --resume <PR> <REPO> "$WORKSPACE" <ISSUE>` を明示する。同じHEADの計画と成功済みジョブを再利用し、記録なし・HEAD変更時は新規開始する。`--resume` なしでは常に新規開始し、古い記録は保持する。前回のジョブ実行器が生存中または同一性を確認できない場合は再開を拒否し、停止しない。記録の破損や読み取り失敗は削除・修復せず報告する。
+
 確認する記録は次のとおりである。
 
 - `PR_MONITOR_TARGET_SET:<json>` が出力され、Issue・generation・workspaceが意図した値である。

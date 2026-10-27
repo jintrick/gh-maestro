@@ -26,6 +26,7 @@ const { launchAgentHeadless } = require('./shared/headless-launch');
 const { assertValidPr } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags } = require('./shared/workspace');
+const { inspectRunners } = require('./shared/review-checkpoint');
 const {
   inspectRunningReviewManager,
   acquireReviewManagerStartup,
@@ -35,7 +36,10 @@ const {
 
 const USAGE = `start-review-manager.js — PRに対してReview Managerを起動する
 
-Usage: node start-review-manager.js <PR> <REPO> <WORKSPACE> <ISSUE>
+Usage: node start-review-manager.js [--resume] <PR> <REPO> <WORKSPACE> <ISSUE>
+
+  --resume  同じHEADの途中計画と完了済みジョブを再利用する。記録なし・HEAD変更時は新規開始。
+            省略時は既存記録を残し、計画と全ジョブを新しく実行する。
 
 Arguments:
   <PR>         レビュー対象の PR 番号
@@ -95,7 +99,7 @@ function isLockValid(lockFile) {
  * @param {string} workspace
  * @param {string|number} issue アンカーIssue番号。異常終了通知の投稿先として終了フックへ渡す。
  */
-function startReviewManager(pr, repo, workspace, issue) {
+function startReviewManager(pr, repo, workspace, issue, resume = false) {
   // 副作用（lock書き込み）の前に入力を検証する（fail-closed）。
   // pr はファイルパス構成要素として使われるため、厳密な正整数であることを
   // ここで確定させる（PR #84 Review指摘: pathトラバーサル対策）。
@@ -105,6 +109,12 @@ function startReviewManager(pr, repo, workspace, issue) {
   // workerName・ログパス・leaseパスの一貫性が保証され、
   // 「識別子がファイルごとに別々に手書きされる」不具合パターンを防ぐ。
   // assertValidIssue は factory 内部で検証される。
+  if (resume) {
+    const runner = inspectRunners(workspace, pr)[0];
+    if (runner) {
+      throw new Error(`前回の run-review-jobs.js が生存中です: PID ${runner.pid}`);
+    }
+  }
   const spec = buildReviewManagerLaunchSpec({ issue, pr, repo, workspace });
   const workerName = spec.workerName;
   const lockFile = spec.leaseStore;
@@ -152,7 +162,7 @@ function startReviewManager(pr, repo, workspace, issue) {
   const launched = launchAgentHeadless({
     // Phase 5: ISSUE を run-review-manager.js へ構造化引数として渡す。
     // shell文字列の再構築を避け、argv配列で直接渡す（argv-parsing-pitfalls ルール準拠）。
-    argv: [process.execPath, path.join(__dirname, 'run-review-manager.js'), pr, repo, workspace, String(issue)],
+    argv: [process.execPath, path.join(__dirname, 'run-review-manager.js'), ...(resume ? ['--resume'] : []), pr, repo, workspace, String(issue)],
     cwd: workspace,
     logPath,
     env: {
@@ -198,7 +208,7 @@ if (require.main === module) {
   try {
     ({ values, rest } = parseFlags(args, {
       flags: {},
-      booleans: ['--help', '-h'],
+      booleans: ['--resume', '--help', '-h'],
       // pr / repo / workspace / issue のちょうど4つの位置引数。未知フラグ・余剰位置引数は
       // パーサ側で拒否される（argv-parsing-pitfalls参照）。
       positionals: { min: 4, max: 4 },
@@ -226,7 +236,7 @@ if (require.main === module) {
   }
 
   try {
-    process.stdout.write(`${startReviewManager(pr, repo, workspace, issue)}:${pr}\n`);
+    process.stdout.write(`${startReviewManager(pr, repo, workspace, issue, Boolean(values['--resume']))}:${pr}\n`);
   } catch (e) {
     console.error(`start-review-manager: ${e.message}`);
     process.exit(1);

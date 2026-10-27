@@ -17,6 +17,8 @@ const { spawn, spawnSync } = require('./shared/child-process');
 const { writeSentinel, finalizeReview } = require('./finalize-review');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { atomicWriteJson } = require('./shared/atomic-write');
+const checkpoint = require('./shared/review-checkpoint');
+const { writeRunningReviewManager, removeRunningReviewManagerIfOwned, inspectRunningReviewManager } = require('./shared/running-review-managers');
 const { buildAgentExecArgs, runAgentWithPrompt, RESULT_FILE_TOKEN } = require('./shared/agent-launch');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { workerLogPath } = require('./shared/headless-launch');
@@ -55,9 +57,10 @@ let _spawn = spawn;
 
 const USAGE = `run-review-jobs.js — RMの実行manifestに従いレビュージョブをheadless起動する
 
-Usage: node run-review-jobs.js --manifest <path> --results <path> --pr <N> --repo <owner/repo> --gh-dir <path> [--workspace <path>]
+Usage: node run-review-jobs.js --manifest <path> --results <path> --pr <N> --repo <owner/repo> --gh-dir <path> [--workspace <path>] [--checkpoint-id <id>]
 
 Options:
+  --checkpoint-id <id> 周回記録を使用して完了済みジョブを再利用する
   --manifest <path>    RMが書き出した実行manifestのJSONファイルパス
   --results <path>     ジョブ実行結果を書き出すJSONファイルパス
   --pr <N>             必須。通知先PR番号（検証前の起動コンテキスト。正整数のみ受理）
@@ -673,7 +676,13 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
         stdio: ['ignore', 'ignore', stderrFd],
       },
       onSpawn: (child) => {
-        if (childRef) childRef.child = child;
+        if (childRef) {
+          childRef.child = child;
+          childRef.closed = new Promise(resolve => {
+            child.once('close', resolve);
+            child.once('error', () => { if (!child.pid) resolve(); });
+          });
+        }
         onSpawn(child);
       },
       observe: (child) => new Promise((resolve) => {
@@ -1253,6 +1262,20 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
     };
   }
 
+  let saved = null;
+  let pendingJobs = manifest.jobs;
+  if (options.checkpointId) {
+    try {
+      saved = checkpoint.read(options.mainWorkspace, pr, options.checkpointId, validateManifest);
+      if (JSON.stringify(saved.state.manifest) !== JSON.stringify(manifest)) {
+        throw new Error(`manifest と checkpoint が一致しません: ${saved.file}`);
+      }
+      pendingJobs = manifest.jobs.filter(job => saved.state.results[job.id]?.status !== 'success');
+    } catch (e) {
+      return { ok: false, summary: { error: e.message } };
+    }
+  }
+
   // 2.5 再試行上限ゲート（Issue #273）。
   // manifest検証（上）は「再試行しない」経路のため attempt を消費せず、ここから先の
   // ジョブ実行ループにだけ上限を掛ける。上限到達時はジョブを起動せず、既存の不完全
@@ -1264,7 +1287,15 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
       if (path.resolve(ghDir) !== path.resolve(path.join(mainWorkspace, '.gh-maestro'))) {
         return { ok: false, summary: { error: 'メインworkspaceと--gh-dirの対応が不正です' } };
       }
-      gate = applyRetryGate({ workspace: mainWorkspace, pr });
+      if (saved) {
+        if (pendingJobs.length === 0) gate = { gated: false };
+        else if (saved.state.attempts >= MAX_REVIEW_ATTEMPTS) gate = { gated: true, attempts: saved.state.attempts };
+        else {
+          saved.state.attempts++;
+          checkpoint.save(saved.file, saved.state, validateManifest);
+          gate = { gated: false, attempts: saved.state.attempts };
+        }
+      } else gate = applyRetryGate({ workspace: mainWorkspace, pr });
     } else {
       // プログラム呼び出しで --gh-dir が省略された場合は、従来どおり再試行ゲートを適用しない。
       gate = { gated: false };
@@ -1275,9 +1306,23 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
     return { ok: false, summary: { error: `retry counter gate failed: ${e.message}` } };
   }
   if (gate.gated) {
-    // 既存の不完全レビュー経路を再利用（新しい通知経路は作らない）。results は前回実行の
-    // スナップショットが残っており、そこから成功ジョブの指摘内容を不完全コメントに載せる。
-    // finalizeReview が失敗しても（results 欠落等）、上限はそのまま維持して拒否する。
+    if (saved) {
+      const recovered = {
+        manifest_ref: { pr: manifest.pr, repo: manifest.repo, headRefOid: manifest.headRefOid },
+        coverage_ledger: manifest.coverage_ledger,
+        jobs: manifest.jobs.map(job => saved.state.results[job.id] || ({
+          jobId: job.id, status: 'failed', leaf_ids: job.leaf_ids,
+          attempt: saved.state.attempts, error: 'job result unavailable after interruption',
+        })),
+        completed_at: new Date().toISOString(),
+      };
+      try {
+        fs.mkdirSync(path.dirname(resultsPath), { recursive: true });
+        atomicWriteJson(resultsPath, recovered);
+      } catch (error) {
+        return { ok: false, summary: { error: `checkpoint results restore failed: ${resultsPath}: ${error.message}` } };
+      }
+    }
     const incomplete = await (_finalizeReviewForTest || finalizeReview)(resultsPath, 'incomplete', null, workspace);
     return {
       ok: false,
@@ -1319,12 +1364,28 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   // 4. 全ジョブを並列起動
   // 子プロセスへの参照を保持し、total-timeout時に実際にkillできるようにする
   const activeChildren = [];
-  const jobPromises = manifest.jobs.map(job => {
+  let jobFailure = null;
+  function stopChildren() {
+    for (const ref of activeChildren) {
+      try { if (ref.child) ref.child.kill(); } catch {}
+    }
+  }
+  const jobPromises = pendingJobs.map(job => {
     const childRef = { child: null };
     activeChildren.push(childRef);
     return launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspace, jobTimeoutMs, childRef, {
       ...options,
       mainWorkspace: targetWorkspace,
+    }).then(result => {
+      if (saved) {
+        saved.state.results[job.id] = result;
+        checkpoint.save(saved.file, saved.state, validateManifest);
+      }
+      return result;
+    }).catch(error => {
+      if (!jobFailure) jobFailure = error;
+      stopChildren();
+      throw error;
     });
   });
 
@@ -1334,33 +1395,24 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   const totalTimer = new Promise((resolve) => {
     totalTimerHandle = setTimeout(() => {
       totalTimedOut = true;
-      for (const ref of activeChildren) {
-        try { if (ref.child) ref.child.kill(); } catch {}
-      }
+      stopChildren();
       resolve('total-timeout');
     }, totalTimeoutMs);
   });
 
-  const allJobsPromise = Promise.all(jobPromises);
-  const raceResult = await Promise.race([allJobsPromise, totalTimer]);
-  if (!totalTimedOut && totalTimerHandle) clearTimeout(totalTimerHandle);
+  // A rejection must not release the runner lease while any child is still alive.
+  const allJobsPromise = Promise.allSettled(jobPromises);
+  await Promise.race([allJobsPromise, totalTimer]);
+  const settled = await allJobsPromise;
+  // An error event may resolve a worker before its process closes. Keep the lease
+  // until every spawned child has emitted close (or failed to spawn without a PID).
+  await Promise.all(activeChildren.map(ref => ref.closed || Promise.resolve()));
+  if (totalTimerHandle) clearTimeout(totalTimerHandle);
+  if (jobFailure) return { ok: false, summary: { error: `job execution or checkpoint save failed: ${jobFailure.message}` } };
+  let jobResults = settled.map(item => item.value);
 
-  let jobResults;
-  if (raceResult === 'total-timeout') {
-    // タイムアウト: 残存ジョブの結果を収集（killされたものは自然に解決される）
-    const settled = await Promise.allSettled(jobPromises);
-    jobResults = manifest.jobs.map((job, i) => {
-      if (settled[i].status === 'fulfilled') return settled[i].value;
-      return {
-        jobId: job.id,
-        status: 'failed',
-        leaf_ids: job.leaf_ids,
-        attempt: 1,
-        error: 'job timeout (total deadline reached)',
-      };
-    });
-  } else {
-    jobResults = raceResult;
+  if (saved) {
+    jobResults = manifest.jobs.map(job => saved.state.results[job.id] || jobResults[pendingJobs.indexOf(job)]);
   }
 
   // 5. resultsを構築
@@ -1419,6 +1471,7 @@ function resolveRunJobsExitCode(result) {
 // ── テスト用エクスポート ──────────────────────────────────────────────────────
 module.exports = {
   validateManifest,
+  parseFindingsText,
   validateJobs,
   resolveReviewSkillsDir,
   resolveCanonicalReviewPath,
@@ -1468,6 +1521,7 @@ if (require.main === module) {
           '--workspace': {},
           '--job-timeout': {},
           '--total-timeout': {},
+          '--checkpoint-id': {},
         },
         booleans: ['--help', '-h'],
         // 未知フラグ・位置引数はパーサ側で拒否される（argv-parsing-pitfalls参照）。
@@ -1541,17 +1595,38 @@ if (require.main === module) {
       process.exit(1);
     }
 
+    let runnerOwner = null;
+    let runnerPath = null;
+    try {
+    if (values['--checkpoint-id']) {
+      runnerPath = checkpoint.runnerLeasePath(mainWorkspace, pr, process.pid);
+      fs.mkdirSync(path.dirname(runnerPath), { recursive: true });
+      const startTime = getProcessStartTime(process.pid);
+      if (!startTime) throw new Error('run-review-jobs の開始時刻を確認できません');
+      runnerOwner = { pid: process.pid, startTime };
+      writeRunningReviewManager(runnerPath, runnerOwner);
+      const manager = inspectRunningReviewManager(reviewArtifactPath(mainWorkspace, pr, '.running'), { onError: 'throw' });
+      if (manager.status !== 'live' || String(manager.pid) !== process.env.GH_MAESTRO_REVIEW_PARENT_PID ||
+          manager.startTime !== process.env.GH_MAESTRO_REVIEW_PARENT_START) {
+        removeRunningReviewManagerIfOwned(runnerPath, runnerOwner);
+        throw new Error('起動元 Review Manager の同一性を確認できません');
+      }
+    }
     const result = await runJobsFromManifest(
       manifestPath, resultsPath, workspace, jobTimeoutMs, totalTimeoutMs, pr, repo, ghDir,
-      { mainWorkspace },
+      { mainWorkspace, checkpointId: values['--checkpoint-id'] },
     );
 
     if (!result.ok) {
       console.error(JSON.stringify(result.summary));
-      process.exit(resolveRunJobsExitCode(result));
+      process.exitCode = resolveRunJobsExitCode(result);
+      return;
     }
 
     console.log(JSON.stringify(result.summary));
-    process.exit(resolveRunJobsExitCode(result));
+    process.exitCode = resolveRunJobsExitCode(result);
+    } finally {
+      if (runnerOwner) removeRunningReviewManagerIfOwned(runnerPath, runnerOwner);
+    }
   })();
 }

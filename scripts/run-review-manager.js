@@ -23,7 +23,9 @@ const {
 } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags } = require('./shared/workspace');
-const { parseJsonText } = require('./shared/json-file');
+const { parseJsonText, readJsonFile } = require('./shared/json-file');
+const checkpoint = require('./shared/review-checkpoint');
+const { validateManifest } = require('./run-review-jobs');
 const { _validateAgainstSchema } = require('./shared/json-schema');
 const { VALID_ASPECTS, VALID_SEVERITIES, FINDING_REQUIRED_FIELDS } = require('./shared/review-aspects');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
@@ -42,7 +44,9 @@ function _getProcessStartTime(pid) {
 
 const USAGE = `run-review-manager.js — Review Managerをheadless起動してPRレビューを実行する
 
-Usage: node run-review-manager.js <PR> <REPO> <WORKSPACE> <ISSUE>
+Usage: node run-review-manager.js [--resume] <PR> <REPO> <WORKSPACE> <ISSUE>
+
+  --resume  同じHEADの途中計画と完了済みジョブを再利用する。
 
 Arguments:
   <PR>         レビュー対象の PR 番号
@@ -774,7 +778,7 @@ function persistReviewManifest({ reviewWtDir, workspace, pr, log }) {
  *   status — 終了コード。起動失敗・シグナル終了では null。
  *   error  — spawnSync が例外を返した場合の文字列（status が null になる主因）。正常時は null。
  */
-function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log }) {
+function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log, checkpointId }) {
   const r = spawnSync(process.execPath, [
     path.join(__dirname, 'run-review-jobs.js'),
     '--manifest', manifestPath,
@@ -783,10 +787,11 @@ function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewW
     '--repo', repo,
     '--gh-dir', ghDir,
     '--workspace', reviewWtDir,
+    ...(checkpointId ? ['--checkpoint-id', checkpointId] : []),
   ], {
     cwd: reviewWtDir,
     encoding: 'utf8',
-    env: process.env,
+    env: { ...process.env, GH_MAESTRO_REVIEW_PARENT_PID: String(process.pid), GH_MAESTRO_REVIEW_PARENT_START: _getProcessStartTime(process.pid) || '' },
     maxBuffer: 20 * 1024 * 1024,
   });
   if (r.stdout) log(r.stdout);
@@ -842,10 +847,10 @@ function judgeJobRun({ status, error }, { workspace, reviewWtDir, pr, resultsPat
  *
  * @returns {{outcome:'results-ready'|'incomplete'|'exec-failed', reason:string}}
  */
-function runJobsDeterministically({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log }) {
+function runJobsDeterministically({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log, checkpointId }) {
   const exec = _injectedRunReviewJobsOnce || runReviewJobsOnce;
   const runOnce = () => {
-    const run = exec({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log });
+    const run = exec({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log, checkpointId });
     log(`run-review-jobs exited with status ${run.status}`);
     return { run, judged: judgeJobRun(run, { workspace, reviewWtDir, pr, resultsPath }) };
   };
@@ -1052,7 +1057,7 @@ function mapAgentPhaseFailure(phase, reviewWtDir) {
  */
 async function superviseReviewManager({
   pr, repo, workspace, ghDir, lockFile, logFile,
-  outputFile, deadlineMs, log, signal, issue, lockOwner,
+  outputFile, deadlineMs, log, signal, issue, lockOwner, resume = false,
 }) {
   // 1. ディレクトリ作成・ロック
   try {
@@ -1077,19 +1082,18 @@ async function superviseReviewManager({
   } catch (e) {
     return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir: null, reason: `初期化失敗: ${e.message}` };
   }
+  if (resume) {
+    try {
+      const runner = checkpoint.inspectRunners(workspace, pr)[0];
+      if (runner) return { outcome: 'setup-failed', exitCode: 1, reviewWtDir: null, agentPid: null, reason: `前回の run-review-jobs.js が生存中です: PID ${runner.pid}` };
+    } catch (error) {
+      return { outcome: 'setup-failed', exitCode: 1, reviewWtDir: null, agentPid: null, reason: error.message };
+    }
+  }
   // 新レビュー周回の開始＝.running ロック作成。前周回が不完全終了した場合の
   // 古い .incomplete センチネルが残っていると、今回の途中結果を誤って
   // 「不完全完了」と判定してしまうため、ここで必ず消す（Issue #248 項目4）。
   clearStaleIncompleteSentinel(workspace, pr);
-  // 再試行カウンタも同じ周回開始タイミングでリセットする（Issue #273）。
-  // リセット失敗はフェイルクローズ（resetRetryCount が throw）。黙って続行すると
-  // 新周回がジョブを1件も実行しないため、setup-failed として異常終了する。
-  try {
-    resetRetryCount(workspace, pr);
-  } catch (e) {
-    return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir: null, reason: e.message };
-  }
-
   log(`run-review-manager started pr=${pr} repo=${repo}`);
 
   // 2. review worktree セットアップ
@@ -1107,6 +1111,20 @@ async function superviseReviewManager({
   const manifestPath = reviewArtifactPath(reviewWtDir, pr, '.manifest.json');
   const resultsPath = path.join(worktreeGhDir, `review-results-${pr}.json`);
   const schemaPath = path.join(__dirname, 'review-findings-schema.json');
+  const headResult = spawnSync('git', ['-C', reviewWtDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  if (headResult.status !== 0 || !headResult.stdout.trim()) {
+    return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: 'PR HEAD の取得に失敗しました' };
+  }
+  const head = headResult.stdout.trim();
+  let prior = null;
+  try {
+  if (resume) {
+    prior = checkpoint.select(workspace, pr, repo, head, validateManifest);
+  }
+  } catch (error) {
+    return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: error.message };
+  }
+
 
   // RMに読ませるSKILL.mdは配布済み正本の絶対パスで指定する。スキル名だけを伝えると、
   // 作業ディレクトリ（審査対象PRのworktree）にある同名ファイルが読まれうる（PR #350 で実障害）。
@@ -1124,18 +1142,34 @@ async function superviseReviewManager({
   }
 
   // ── フェーズA: RM が計画（manifest書き出し） ──────────────────────────────────
-  const { prompt: phase1Prompt } = buildPrompt({ pr, repo, issue, workspace: reviewWtDir, mainGhDir: ghDir, skillPath });
-  const phase1 = await superviseAgentPhase({
-    pr, repo, issue, workspace, reviewWtDir, logFile, log, signal,
-    promptText: phase1Prompt, targetPath: manifestPath, watchSentinel: false, deadlineMs,
-  });
-  if (phase1.outcome !== 'target') {
-    return mapAgentPhaseFailure(phase1, reviewWtDir);
+  if (prior) {
+    fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+    fs.writeFileSync(manifestPath, JSON.stringify(prior.state.manifest, null, 2));
+  } else {
+    try { checkpoint.begin(workspace, pr); } catch (error) {
+      return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: error.message };
+    }
+    const { prompt: phase1Prompt } = buildPrompt({ pr, repo, issue, workspace: reviewWtDir, mainGhDir: ghDir, skillPath });
+    const phase1 = await superviseAgentPhase({
+      pr, repo, issue, workspace, reviewWtDir, logFile, log, signal,
+      promptText: phase1Prompt, targetPath: manifestPath, watchSentinel: false, deadlineMs,
+    });
+    if (phase1.outcome !== 'target') return mapAgentPhaseFailure(phase1, reviewWtDir);
+    let manifest;
+    try { manifest = readJsonFile(manifestPath); } catch (error) {
+      return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: `${manifestPath}: ${error.message}` };
+    }
+    const validation = validateManifest(manifest);
+    if (!validation.valid || !Array.isArray(manifest.jobs) || String(manifest.pr) !== String(pr) || manifest.repo !== repo || manifest.headRefOid !== head) {
+      return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: `manifest 不正またはPR/HEAD不一致: ${manifestPath}: ${validation.errors.join('; ')}` }; 
+    }
+    try { prior = checkpoint.create(workspace, pr, manifest, validateManifest); } catch (error) {
+      return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: error.message };
+    }
   }
-  log(`phase1 complete: manifest at ${manifestPath}`);
-
+  log(`review checkpoint: ${prior.file}`);
   // ── フェーズB: 決定論的ジョブ実行（モデル介入なし） ────────────────────────────
-  const phaseB = runJobsDeterministically({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log });
+  const phaseB = runJobsDeterministically({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log, checkpointId: prior.id });
   if (phaseB.outcome === 'incomplete') {
     // run-review-jobs が不完全終了を確定（manifest検証失敗・再試行上限）。judgeJobRun が
     // センチネルを確認済み。念のため再取得して不完全レビュー通知経路へ繋ぐ。
@@ -1194,7 +1228,7 @@ async function superviseReviewManager({
   ], {
     cwd: workspace,
     encoding: 'utf8',
-    env: process.env,
+    env: { ...process.env, GH_MAESTRO_REVIEW_PARENT_PID: String(process.pid), GH_MAESTRO_REVIEW_PARENT_START: _getProcessStartTime(process.pid) || '' },
     maxBuffer: 20 * 1024 * 1024,
   });
   if (publish.stdout) log(publish.stdout);
@@ -1229,7 +1263,7 @@ if (require.main === module) {
     try {
       ({ values, rest } = parseFlags(argv, {
         flags: {},
-        booleans: ['--help', '-h'],
+        booleans: ['--resume', '--help', '-h'],
         // pr / repo / workspace / issue のちょうど4つの位置引数。未知フラグ・余剰位置引数は
         // パーサ側で拒否される（argv-parsing-pitfalls参照）。
         positionals: { min: 4, max: 4 },
@@ -1313,6 +1347,7 @@ if (require.main === module) {
         outputFile,
         issue,
         lockOwner,
+        resume: Boolean(values['--resume']),
         deadlineMs: DEFAULT_DEADLINE_MS,
         log, signal,
       });
