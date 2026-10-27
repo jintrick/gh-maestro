@@ -22,7 +22,6 @@ const {
   findRunningInstances,
   unregisterProcess,
   pidFilePath,
-  legacyPidFilePath,
   verifyProcessIdentity,
   isProcessAlive,
   findSessionRootPid,
@@ -67,8 +66,7 @@ function createResidentRestartHooks() {
     findRunningInstances,
     unregisterProcess,
     pidFilePath,
-    legacyPidFilePath,
-    verifyProcessIdentity,
+      verifyProcessIdentity,
     isProcessAlive,
     findSessionRootPid,
     killProcessTree,
@@ -359,8 +357,8 @@ function cleanupLegacyResidentLease(workspace, options = {}) {
 }
 
 function ensureRegistryRemoved(workspace, pid, hooks) {
-  if (typeof hooks.pidFilePath !== 'function' || typeof hooks.legacyPidFilePath !== 'function') return;
-  const paths = [hooks.pidFilePath(workspace, pid), hooks.legacyPidFilePath(workspace, pid)];
+  if (typeof hooks.pidFilePath !== 'function') return;
+  const paths = [hooks.pidFilePath(workspace, pid)];
   const remaining = paths.filter((filePath) => fs.existsSync(filePath));
   if (remaining.length > 0) {
     throw new Error(`PID registryの解除を確認できませんでした: ${remaining.join(', ')}`);

@@ -316,11 +316,6 @@ function createDeadManSwitch(monitorPid, opts = {}) {
 // 場合は pidsDir()/legacyPidsDir() の入口で assertValidWorkspace が throw し、
 // 以後のあらゆる pids 操作（作成・sweep・lock）を一括で遮断する（fail-closed）。
 //
-// 移行期間中は旧ロケーション（<workspace>/.gh-maestro/pids/）も bridge として
-// dual-write / union-read / dual-delete する。これにより、まだ再起動していない
-// 旧プロセス（旧コードのまま legacy のみ読み書きする）との生存判定・二重起動
-// 防止が移行の前後で分断されない。
-
 /**
  * PID registry のディレクトリパスを返す（新ロケーション: OS runtime root 配下）。
  * workspace がホームディレクトリ等 managed root と衝突する場合は throw する。
@@ -339,7 +334,7 @@ function pidsDir(workspace) {
 
 /**
  * PID registry の旧ロケーション（<workspace>/.gh-maestro/pids）を返す。
- * bridge 期間中の dual-write/union-read/dual-delete 専用。
+ * 旧遺物の検査・整理専用。
  * @param {string} workspace
  * @returns {string}
  */
@@ -369,8 +364,7 @@ function legacyPidFilePath(workspace, pid) {
 }
 
 /**
- * 自プロセスを PID registry に登録する。新ロケーションへ書き込み、
- * bridge として旧ロケーションへも best-effort で dual-write する。
+ * 自プロセスを runtime の PID registry に登録する。
  *
  * @param {string} workspace
  * @param {object} meta
@@ -415,20 +409,12 @@ function registerProcess(workspace, meta = {}) {
   const filePath = pidFilePath(workspace, targetPid);
   fs.writeFileSync(filePath, JSON.stringify(entry, null, 2), 'utf8');
 
-  // bridge: 旧ロケーションへの dual-write（best-effort）。
-  // まだ再起動していない旧コードの読み手がこのプロセスを認識できるようにする。
-  try {
-    const legacyDir = legacyPidsDir(workspace);
-    fs.mkdirSync(legacyDir, { recursive: true });
-    fs.writeFileSync(legacyPidFilePath(workspace, targetPid), JSON.stringify(entry, null, 2), 'utf8');
-  } catch {}
-
   return entry;
 }
 
 /**
  * 自プロセス（または指定PID）を PID registry から解除する。
- * 新旧両ロケーションから削除する（旧ロケーションは best-effort）。
+ * runtime のレジストリから削除する。
  *
  * @param {string} workspace
  * @param {number} [pid] 省略時は process.pid
@@ -469,11 +455,7 @@ function unregisterProcess(workspace, pid, expected) {
   const filePath = pidFilePath(workspace, targetPid);
   removeIfOwned(filePath);
 
-  // bridge: 旧ロケーションの解除は best-effort（存在しない/読めない等は無視）。
-  try {
-    const legacyFilePath = legacyPidFilePath(workspace, targetPid);
-    removeIfOwned(legacyFilePath, true);
-  } catch {}
+
 }
 
 // ── プロセス同一性確認（PID再利用対策） ──────────────────────────────
@@ -538,9 +520,7 @@ function verifyProcessIdentity(pid, registeredMeta, opts = {}) {
  * @returns {object[]} 一致する生存エントリ（PID重複は除外済み）
  */
 function findRunningInstances(workspace, opts = {}) {
-  // bridge: 新旧両ロケーションを union して読む（旧コードのプロセスは
-  // legacy にしか登録されていない可能性があるため）。
-  const dirs = [pidsDir(workspace), legacyPidsDir(workspace)];
+  const dirs = [pidsDir(workspace)];
   const seenPids = new Set();
   const matches = [];
 
@@ -584,7 +564,7 @@ function findRunningInstances(workspace, opts = {}) {
       const entryPid = entry.pid;
       if (!entryPid || !Number.isFinite(entryPid)) continue;
       if (opts.allowSelf !== true && entryPid === process.pid) continue;
-      // dual-write により同一pidが新旧両方に存在しうる。既に判定済みならスキップ。
+      // 同一 PID の重複レコードは一度だけ判定する。
       if (seenPids.has(entryPid)) continue;
       seenPids.add(entryPid);
       const isAliveFn = opts.isProcessAliveFn || isProcessAlive;
@@ -642,7 +622,7 @@ function startupLockPath(workspace, script, workerName) {
 }
 
 /**
- * 単一起動ロックファイルのパスを返す（旧ロケーション）。bridge専用。
+ * 旧形式の単一起動ロックファイルのパスを返す。
  * @param {string} workspace
  * @param {string} script
  * @param {string|null} workerName
@@ -655,15 +635,13 @@ function legacyStartupLockPath(workspace, script, workerName) {
 
 /**
  * 単一のロックファイルに対する取得処理（stale奪取込み）。
- * acquireStartupLock の新旧両ロケーションで共通利用する内部ヘルパー。
+ * acquireStartupLock の内部ヘルパー。
  *
  * @param {string} dir mkdir 対象ディレクトリ（lockPath の親）
  * @param {string} lockPath
  * @param {number} maxRetries
  * @param {{pid: number, startTime: string}} selfEntry 呼び出し元で1回だけ計算した自分自身のエントリ。
  *   getProcessStartTime は Windows では PowerShell/WMI 呼び出しを伴い高コストなため、
- *   新旧2ロケーションの取得で毎回計算し直さない（bridge化で2倍の呼び出しコストが
- *   掛かるのを避ける）。
  * @returns {boolean}
  */
 function acquireLockAt(dir, lockPath, maxRetries, selfEntry) {
@@ -725,11 +703,6 @@ function releaseLockAt(lockPath) {
  * 保持者が非生存、または同一性不一致（PID再利用）の場合は stale とみなし
  * 自動的に奪取する。
  *
- * bridge期間中は旧ロケーションを第一ゲート、新ロケーションを第二ゲートとし、
- * 両方取得できた場合のみ成功とする（取得順は常に legacy → new に固定）。
- * 新ロケーションの取得に失敗した場合は、既に取得した旧ロケーションのロックを
- * 解放してから失敗を返す。
- *
  * @param {string} workspace
  * @param {string} script
  * @param {string|null} workerName
@@ -740,31 +713,17 @@ function releaseLockAt(lockPath) {
 function acquireStartupLock(workspace, script, workerName, opts = {}) {
   const maxRetries = opts.maxRetries ?? 5;
 
-  // 新旧2ロケーション分の getProcessStartTime（Windowsでは WMI 呼び出し）を
-  // 1回にまとめる。
   const selfEntry = {
     pid: process.pid,
     startTime: getProcessStartTime(process.pid) || new Date().toISOString(),
   };
 
-  const legacyDir = legacyPidsDir(workspace);
-  const legacyLock = legacyStartupLockPath(workspace, script, workerName);
-  const gotLegacy = acquireLockAt(legacyDir, legacyLock, maxRetries, selfEntry);
-  if (!gotLegacy) return false;
-
-  const newDir = pidsDir(workspace);
-  const newLock = startupLockPath(workspace, script, workerName);
-  const gotNew = acquireLockAt(newDir, newLock, maxRetries, selfEntry);
-  if (!gotNew) {
-    releaseLockAt(legacyLock);
-    return false;
-  }
-
-  return true;
+  const dir = pidsDir(workspace);
+  return acquireLockAt(dir, startupLockPath(workspace, script, workerName), maxRetries, selfEntry);
 }
 
 /**
- * 自プロセスが保持している起動ロックを解放する（新旧両ロケーション）。
+ * 自プロセスが保持している起動ロックを解放する。
  * 自分が保持者でない場合は何もしない（他プロセスのロックを誤って消さない）。
  *
  * @param {string} workspace
@@ -772,7 +731,6 @@ function acquireStartupLock(workspace, script, workerName, opts = {}) {
  * @param {string|null} workerName
  */
 function releaseStartupLock(workspace, script, workerName) {
-  releaseLockAt(legacyStartupLockPath(workspace, script, workerName));
   releaseLockAt(startupLockPath(workspace, script, workerName));
 }
 
@@ -786,9 +744,7 @@ function releaseStartupLock(workspace, script, workerName) {
  *   2. PID生存・同一性不一致 → ファイル削除のみ（PID再利用、無関係なプロセス）
  *   3. PID生存・同一性一致 → kill + ファイル削除（stale だが生き残っている）
  *
- * bridge期間中は新旧両ロケーションを union して走査する。同一PIDのエントリが
- * 両方に存在する場合（dual-write の結果）は1つのエントリとして判定し、
- * kill/削除の対象ファイルは両ロケーション分をまとめて扱う。
+ * runtime のレジストリのみを走査する。旧配置は遺物整理で扱う。
  *
  * @param {string} workspace
  * @param {object} [opts]
@@ -797,12 +753,12 @@ function releaseStartupLock(workspace, script, workerName) {
  * @returns {{ killed: object[], cleaned: object[], errors: string[] }}
  */
 function sweepRegistry(workspace, opts = {}) {
-  const dirs = [pidsDir(workspace), legacyPidsDir(workspace)];
+  const dirs = [pidsDir(workspace)];
   const results = { killed: [], cleaned: [], errors: [] };
 
   const hasRegistry = dirs.some(d => fs.existsSync(d));
 
-  // entryPid -> { entry, filePaths: string[] }（新旧に跨るエントリを集約する）
+  // entryPid -> { entry, filePaths: string[] }（同じ PID のエントリを集約する）
   const byPid = new Map();
 
   for (const dir of dirs) {

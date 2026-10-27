@@ -336,7 +336,6 @@ test('stopResidentEntry: 停止済み常駐のregistryとworker-supervisorのleg
       isProcessAlive: () => false,
       unregisterProcess: () => {
         fs.unlinkSync(registryPath);
-        fs.unlinkSync(legacyRegistryPath);
       },
       pidFilePath: () => registryPath,
       legacyPidFilePath: () => legacyRegistryPath,
@@ -350,7 +349,7 @@ test('stopResidentEntry: 停止済み常駐のregistryとworker-supervisorのleg
 
     assert.deepEqual(result, { ok: true });
     assert.equal(fs.existsSync(registryPath), false);
-    assert.equal(fs.existsSync(legacyRegistryPath), false);
+    assert.equal(fs.existsSync(legacyRegistryPath), true);
     assert.deepEqual(releasedRoles, [
       { role: 'worker-supervisor', pid: 4242, startTime: entry.startTime },
       { role: 'inbox-supervisor', pid: 4242, startTime: entry.startTime },

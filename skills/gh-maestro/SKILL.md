@@ -5,7 +5,7 @@ description: gh-maestroセッションをこのワークスペースで起動す
 
 ## 起動
 
-1. **PID registry sweep**: セッション起動時、前回セッションのクラッシュ残骸を回収するため、必ずPID registryのstale sweepを実行する:
+1. **PID registry sweep**: セッション起動時、前回セッションのクラッシュ残骸を回収するため、runtime側PID registryのstale sweepを実行する。旧 `.gh-maestro/pids` は遺物検査と明示的な整理で扱う:
 
 ```sh
 node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE

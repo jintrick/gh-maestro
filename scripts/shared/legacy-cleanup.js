@@ -223,21 +223,74 @@ function cleanupLegacyRecords(options = {}) {
 }
 
 function cleanupLegacyPidRegistry(options = {}) {
-  const sweepRegistryFn = options.sweepRegistryFn || processLifecycle.sweepRegistry;
-  // The existing sweep is the authoritative PID-registry cleanup primitive. Do not pass a
-  // catch-all match here: sweepRegistry's no-match path is what builds the live-worker and
-  // resident exclusions before deciding whether a PID may be stopped. A truthy match would
-  // deliberately bypass those exclusions and could stop a current process.
-  const result = sweepRegistryFn(options.workspace);
-  if (!result || !Array.isArray(result.errors) || !Array.isArray(result.killed)
-    || !Array.isArray(result.cleaned)) {
-    return { status: 'unknown', reason: 'PID registry sweepが不正な結果を返しました', result };
+  const directory = processLifecycle.legacyPidsDir(options.workspace);
+  const lstatFn = options.lstatFn || fs.lstatSync;
+  const readDirFn = options.readDirFn || ((target) => fs.readdirSync(target, { withFileTypes: true }));
+  const readFileFn = options.readFileFn || fs.readFileSync;
+  let stat;
+  try { stat = lstatFn(directory); } catch (error) {
+    if (error.code === 'ENOENT') return { status: 'absent', path: directory };
+    return { status: 'unknown', path: directory, reason: error.message };
   }
-  if (result.errors.length > 0) return { status: 'unknown', reason: result.errors.join('; '), result };
-  return {
-    status: result.killed.length > 0 || result.cleaned.length > 0 ? 'removed' : 'absent',
-    result,
-  };
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    return { status: 'unknown', path: directory, reason: 'PID registryが通常ディレクトリではありません' };
+  }
+  let entries;
+  try { entries = readDirFn(directory); } catch (error) {
+    return { status: 'unknown', path: directory, reason: error.message };
+  }
+  // 既知のファイルだけを削除する。未知の内容があれば何も削除しない。
+  for (const entry of entries) {
+    const filePath = path.join(directory, entry.name);
+    if (!/^(?:[1-9][0-9]*\.json|\.startup-lock-[A-Za-z0-9_.-]+)$/.test(entry.name)) {
+      return { status: 'unknown', path: filePath, reason: '未知のPID registry項目です' };
+    }
+    try { stat = lstatFn(filePath); } catch (error) {
+      return { status: 'unknown', path: filePath, reason: error.message };
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      return { status: 'unknown', path: filePath, reason: 'PID registry項目が通常ファイルではありません' };
+    }
+    let record;
+    try { record = JSON.parse(readFileFn(filePath, 'utf8')); } catch (error) {
+      return { status: 'unknown', path: filePath, reason: `PID registry項目を読めません: ${error.message}` };
+    }
+    if (!record || typeof record !== 'object' || Array.isArray(record)
+      || !Number.isSafeInteger(record.pid) || record.pid <= 0
+      || typeof record.startTime !== 'string' || !record.startTime
+      || (entry.name.endsWith('.json') && `${record.pid}.json` !== entry.name)) {
+      return { status: 'unknown', path: filePath, reason: 'PID registry項目が不正です' };
+    }
+    if (entry.name.startsWith('.startup-lock-')) {
+      // 所有者が存命か確認できないロックは残す。PID が再利用されていれば
+      // 起動時刻の不一致により旧所有者は既にいないと判定できる。
+      let identity;
+      try {
+        const identityOptions = options.getProcessStartTimeFn
+          ? { actualStartTime: options.getProcessStartTimeFn(record.pid) }
+          : undefined;
+        identity = processLifecycle.verifyProcessIdentity(record.pid, record, identityOptions);
+      } catch (error) {
+        return { status: 'unknown', path: filePath, reason: `ロック所有者を確認できません: ${error.message}` };
+      }
+      if (!identity || (identity.match !== false && identity.match !== true)) {
+        return { status: 'unknown', path: filePath, reason: 'ロック所有者の判定結果が不正です' };
+      }
+      if (identity.match || (identity.reason !== 'process not alive'
+        && !identity.reason?.startsWith('start time mismatch:'))) {
+        return { status: 'unknown', path: filePath, reason: `ロック所有者が稼働中または確認不能です: ${identity.reason || 'alive'}` };
+      }
+    }
+  }
+  try {
+    const unlinkFn = options.unlinkFn || fs.unlinkSync;
+    const rmdirFn = options.rmdirFn || fs.rmdirSync;
+    for (const entry of entries) unlinkFn(path.join(directory, entry.name));
+    rmdirFn(directory);
+  } catch (error) {
+    return { status: 'unknown', path: directory, reason: error.message };
+  }
+  return { status: 'removed', path: directory };
 }
 
 function cleanupLegacyMsgPollState(options = {}) {

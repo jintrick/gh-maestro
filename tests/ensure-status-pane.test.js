@@ -893,7 +893,7 @@ test('ensureStatusPane: 既存startup lockのstale保持者を回収して一度
       assert.deepEqual(result, { ok: true, paneId: 'stale-reclaimed', reused: false });
       assert.equal(launchCalls, 1);
       assert.equal(fs.existsSync(lockPath), false);
-      assert.equal(fs.existsSync(legacyLockPath), false);
+      assert.equal(fs.existsSync(legacyLockPath), true);
     } finally {
       try { fs.unlinkSync(lockPath); } catch {}
       try { fs.unlinkSync(legacyLockPath); } catch {}

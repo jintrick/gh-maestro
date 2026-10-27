@@ -389,7 +389,7 @@ test('unregisterProcess: expected identity不一致の新しいregistryを削除
     startTime: '2026-07-29T00:00:00.101Z',
   });
   assert.equal(fs.existsSync(newPath), true);
-  assert.equal(fs.existsSync(legacyPath), true);
+  assert.equal(fs.existsSync(legacyPath), false);
 
   plc.unregisterProcess(workspace, entry.pid, {
     script: entry.script,
@@ -400,223 +400,34 @@ test('unregisterProcess: expected identity不一致の新しいregistryを削除
   assert.equal(fs.existsSync(legacyPath), false);
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// bridge: dual-write / union-read / dual-delete（Issue #214 移行）
-// ═══════════════════════════════════════════════════════════════════════════
+test('registry と起動ロックは runtime のみに作成し旧レコードを参照しない', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const ws = path.join(tmpBase, 'runtime-only');
+  fs.mkdirSync(ws, { recursive: true });
+  const oldDir = plc.legacyPidsDir(ws);
+  const entry = plc.registerProcess(ws, { script: 'msg-poll.js', startTime: MOCK_START_TIME });
+  assert.equal(fs.existsSync(oldDir), false);
+  assert.equal(plc.acquireStartupLock(ws, 'example.js', null), true);
+  assert.equal(fs.existsSync(oldDir), false);
+  assert.ok(fs.existsSync(plc.startupLockPath(ws, 'example.js', null)));
+  plc.releaseStartupLock(ws, 'example.js', null);
+  fs.mkdirSync(oldDir, { recursive: true });
+  const oldFile = path.join(oldDir, `${process.ppid}.json`);
+  fs.writeFileSync(oldFile, JSON.stringify({ pid: process.ppid, script: 'old.js', workspace: ws, startTime: MOCK_START_TIME }));
+  assert.equal(plc.findRunningInstance(ws, { script: 'old.js' }), null);
+  plc.sweepRegistry(ws, { match: () => true, dryRun: true });
+  assert.ok(fs.existsSync(oldFile));
+  plc.unregisterProcess(ws, entry.pid);
+});
 
-test('registerProcess: 新ロケーションに加え、旧ロケーション（legacy）にも dual-write する', () => {
+test('findRunningInstances: runtime registry 読み取り失敗を伝播する', () => {
   const plc = loadModule();
-  plc.registerProcess(workspace, { script: 'msg-poll.js', startTime: MOCK_START_TIME });
-
-  try {
-    const legacyPath = plc.legacyPidFilePath(workspace, process.pid);
-    assert.ok(fs.existsSync(legacyPath), 'legacy ロケーションにも書かれるはず');
-    const raw = JSON.parse(fs.readFileSync(legacyPath, 'utf8'));
-    assert.equal(raw.pid, process.pid);
-    assert.equal(raw.script, 'msg-poll.js');
-  } finally {
-    plc.unregisterProcess(workspace, process.pid);
-  }
-});
-
-test('unregisterProcess: 新旧両ロケーションから削除する（dual-delete）', () => {
-  const plc = loadModule();
-  plc.registerProcess(workspace, { script: 'test.js', startTime: MOCK_START_TIME });
-  const newPath = plc.pidFilePath(workspace, process.pid);
-  const legacyPath = plc.legacyPidFilePath(workspace, process.pid);
-  assert.ok(fs.existsSync(newPath));
-  assert.ok(fs.existsSync(legacyPath));
-
-  plc.unregisterProcess(workspace, process.pid);
-  assert.ok(!fs.existsSync(newPath));
-  assert.ok(!fs.existsSync(legacyPath));
-});
-
-test('findRunningInstance: legacyロケーションのみに存在するエントリ（旧コードのプロセス）も見つかる（union-read）', () => {
-  const plc = loadModule({ execSync: mockWmiSuccess() });
-  const legacyDir = plc.legacyPidsDir(workspace);
-  fs.mkdirSync(legacyDir, { recursive: true });
-  const otherPid = process.ppid;
-
-  fs.writeFileSync(path.join(legacyDir, `${otherPid}.json`), JSON.stringify({
-    pid: otherPid, script: 'msg-poll.js', workerName: null, workspace, startTime: MOCK_START_TIME,
-  }));
-
-  try {
-    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
-    assert.ok(result, 'legacyのみのエントリでも見つかるはず');
-    assert.equal(result.pid, otherPid);
-  } finally {
-    fs.unlinkSync(path.join(legacyDir, `${otherPid}.json`));
-  }
-});
-
-test('findRunningInstance: 新旧両方に同一pidのエントリがあっても1回だけ判定する（dual-write後の重複排除）', () => {
-  const plc = loadModule({ execSync: mockWmiSuccess() });
-  const newDir = plc.pidsDir(workspace);
-  const legacyDir = plc.legacyPidsDir(workspace);
-  fs.mkdirSync(newDir, { recursive: true });
-  fs.mkdirSync(legacyDir, { recursive: true });
-  const otherPid = process.ppid;
-  const entry = { pid: otherPid, script: 'msg-poll.js', workerName: null, workspace, startTime: MOCK_START_TIME };
-
-  fs.writeFileSync(path.join(newDir, `${otherPid}.json`), JSON.stringify(entry));
-  fs.writeFileSync(path.join(legacyDir, `${otherPid}.json`), JSON.stringify(entry));
-
-  try {
-    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
-    assert.ok(result);
-    assert.equal(result.pid, otherPid);
-  } finally {
-    fs.unlinkSync(path.join(newDir, `${otherPid}.json`));
-    fs.unlinkSync(path.join(legacyDir, `${otherPid}.json`));
-  }
-});
-
-test('findRunningInstances: 新旧registryを統合し、同一PIDを1件に重複排除する', () => {
-  const plc = loadModule({ execSync: mockWmiSuccess() });
-  const newDir = plc.pidsDir(workspace);
-  const legacyDir = plc.legacyPidsDir(workspace);
-  fs.mkdirSync(newDir, { recursive: true });
-  fs.mkdirSync(legacyDir, { recursive: true });
-  const otherPid = process.ppid;
-  const entry = {
-    pid: otherPid,
-    script: 'poll-pr.js',
-    workerName: null,
-    workspace,
-    startTime: MOCK_START_TIME,
-    args: ['42', '--workspace', workspace, '--session-pid', String(otherPid)],
-  };
-  fs.writeFileSync(path.join(newDir, `${otherPid}.json`), JSON.stringify(entry));
-  fs.writeFileSync(path.join(legacyDir, `${otherPid}.json`), JSON.stringify(entry));
-
-  try {
-    const result = plc.findRunningInstances(workspace, { script: 'poll-pr.js', workerName: null });
-    assert.equal(result.length, 1);
-    assert.equal(result[0].pid, otherPid);
-    assert.deepEqual(result[0].args, entry.args);
-  } finally {
-    fs.unlinkSync(path.join(newDir, `${otherPid}.json`));
-    fs.unlinkSync(path.join(legacyDir, `${otherPid}.json`));
-  }
-});
-
-test('findRunningInstances: registry読み取り失敗をfailOnReadErrorで伝播する', () => {
-  const plc = loadModule();
-  const brokenWorkspace = path.join(tmpBase, 'broken-registry-workspace');
-  const legacyDir = plc.legacyPidsDir(brokenWorkspace);
-  fs.mkdirSync(path.dirname(legacyDir), { recursive: true });
-  fs.writeFileSync(legacyDir, 'not a directory', 'utf8');
-  try {
-    assert.throws(
-      () => plc.findRunningInstances(brokenWorkspace, { failOnReadError: true }),
-      /PID registry ディレクトリを読み取れません/,
-    );
-  } finally {
-    fs.unlinkSync(legacyDir);
-  }
-});
-
-test('sweepRegistry: legacyロケーションのみに存在する stale エントリも掃除される（union-read）', () => {
-  const plc = loadModule();
-  const legacyDir = plc.legacyPidsDir(workspace);
-  fs.mkdirSync(legacyDir, { recursive: true });
-  fs.writeFileSync(path.join(legacyDir, '99996.json'), JSON.stringify({
-    pid: -1, script: 'test.js', startTime: '2025-01-01T00:00:00.000Z',
-  }));
-
-  const results = plc.sweepRegistry(workspace, { dryRun: false });
-
-  const cleaned = results.cleaned.filter(c => c.reason && c.reason.includes('not alive'));
-  assert.ok(cleaned.length >= 1);
-  assert.ok(!fs.existsSync(path.join(legacyDir, '99996.json')));
-});
-
-test('sweepRegistry: 新旧両方にある同一pidのstaleエントリは、両方のファイルが削除される', () => {
-  const plc = loadModule();
-  const newDir = plc.pidsDir(workspace);
-  const legacyDir = plc.legacyPidsDir(workspace);
-  fs.mkdirSync(newDir, { recursive: true });
-  fs.mkdirSync(legacyDir, { recursive: true });
-  const entry = JSON.stringify({ pid: -1, script: 'test.js', startTime: '2025-01-01T00:00:00.000Z' });
-  fs.writeFileSync(path.join(newDir, '99995.json'), entry);
-  fs.writeFileSync(path.join(legacyDir, '99995.json'), entry);
-
-  const results = plc.sweepRegistry(workspace, { dryRun: false });
-
-  assert.ok(!fs.existsSync(path.join(newDir, '99995.json')));
-  assert.ok(!fs.existsSync(path.join(legacyDir, '99995.json')));
-  const cleaned = results.cleaned.filter(c => c.pid === -1);
-  assert.equal(cleaned.length, 1, '新旧2ファイルにまたがっていても1エントリとして報告されるはず');
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// bridge: acquireStartupLock の取得順序（legacy → new）
-// ═══════════════════════════════════════════════════════════════════════════
-
-test('acquireStartupLock: 成功時は新旧両方のロックファイルを作成する', () => {
-  const plc = loadModule({ execSync: mockWmiSuccess() });
-  const legacyLock = plc.legacyStartupLockPath(workspace, 'test-lock-both.js', null);
-  const newLock = plc.startupLockPath(workspace, 'test-lock-both.js', null);
-  try {
-    assert.equal(plc.acquireStartupLock(workspace, 'test-lock-both.js', null), true);
-    assert.ok(fs.existsSync(legacyLock), '旧ロケーションのロックも作られるはず');
-    assert.ok(fs.existsSync(newLock));
-  } finally {
-    try { fs.unlinkSync(legacyLock); } catch {}
-    try { fs.unlinkSync(newLock); } catch {}
-  }
-});
-
-test('acquireStartupLock: 旧ロケーションを他プロセスが保持中なら新ロケーションを触らず失敗する', () => {
-  const plc = loadModule({ execSync: mockWmiSuccess() });
-  const legacyDir = plc.legacyPidsDir(workspace);
-  fs.mkdirSync(legacyDir, { recursive: true });
-  const legacyLock = plc.legacyStartupLockPath(workspace, 'test-lock-legacy-held.js', null);
-  const newLock = plc.startupLockPath(workspace, 'test-lock-legacy-held.js', null);
-  // 生存かつ同一性一致する他プロセス（process.ppid）が legacy ロックを保持中と偽装
-  fs.writeFileSync(legacyLock, JSON.stringify({ pid: process.ppid, startTime: MOCK_START_TIME }));
-
-  try {
-    const ok = plc.acquireStartupLock(workspace, 'test-lock-legacy-held.js', null, { maxRetries: 1 });
-    assert.equal(ok, false);
-    assert.ok(!fs.existsSync(newLock), '旧ロケーションで失敗した場合、新ロケーションは触らないはず');
-  } finally {
-    try { fs.unlinkSync(legacyLock); } catch {}
-  }
-});
-
-test('acquireStartupLock: 新ロケーションの取得に失敗したら旧ロケーションのロックを解放する（rollback）', () => {
-  const plc = loadModule({ execSync: mockWmiSuccess() });
-  const newDir = plc.pidsDir(workspace);
-  fs.mkdirSync(newDir, { recursive: true });
-  const legacyLock = plc.legacyStartupLockPath(workspace, 'test-lock-rollback.js', null);
-  const newLock = plc.startupLockPath(workspace, 'test-lock-rollback.js', null);
-  // 生存かつ同一性一致する他プロセスが新ロケーションのロックを保持中と偽装
-  fs.writeFileSync(newLock, JSON.stringify({ pid: process.ppid, startTime: MOCK_START_TIME }));
-
-  try {
-    const ok = plc.acquireStartupLock(workspace, 'test-lock-rollback.js', null, { maxRetries: 1 });
-    assert.equal(ok, false);
-    assert.ok(!fs.existsSync(legacyLock), '新ロケーションで失敗した場合、取得済みの旧ロケーションロックは解放されるはず');
-  } finally {
-    try { fs.unlinkSync(newLock); } catch {}
-    try { fs.unlinkSync(legacyLock); } catch {}
-  }
-});
-
-test('releaseStartupLock: 新旧両方のロックを解放する', () => {
-  const plc = loadModule({ execSync: mockWmiSuccess() });
-  const legacyLock = plc.legacyStartupLockPath(workspace, 'test-lock-release-both.js', null);
-  const newLock = plc.startupLockPath(workspace, 'test-lock-release-both.js', null);
-  plc.acquireStartupLock(workspace, 'test-lock-release-both.js', null);
-  assert.ok(fs.existsSync(legacyLock));
-  assert.ok(fs.existsSync(newLock));
-
-  plc.releaseStartupLock(workspace, 'test-lock-release-both.js', null);
-  assert.ok(!fs.existsSync(legacyLock));
-  assert.ok(!fs.existsSync(newLock));
+  const ws = path.join(tmpBase, 'broken-runtime');
+  fs.mkdirSync(ws, { recursive: true });
+  const dir = plc.pidsDir(ws);
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  fs.writeFileSync(dir, 'not a directory');
+  assert.throws(() => plc.findRunningInstances(ws, { failOnReadError: true }), /読み取れません/);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
