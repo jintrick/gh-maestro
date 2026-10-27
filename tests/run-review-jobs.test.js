@@ -1749,3 +1749,52 @@ test('checkpoint saves each completed job before other jobs finish and skips it 
     scope.cleanup();
   }
 });
+
+test('checkpoint write failure kills remaining workers and waits for close before returning', async () => {
+  const scope = require('../scripts/shared/temp-directory').createTempDirScope();
+  const ws = scope.mkdtemp('rm-save-fail-');
+  const skills = scope.mkdtemp('rm-save-fail-skills-');
+  const checkpoint = require('../scripts/shared/review-checkpoint');
+  const firstLeaf = 'correctness/logic-invariants';
+  const secondLeaf = 'correctness/api-contract';
+  const plan = { pr: 11, repo: 'o/r', headRefOid: 'abc', changedFiles: ['a.js'],
+    coverage_ledger: { leaves: ALL_LEAF_IDS.map(id => ({ id,
+      trunk: Object.entries(TRUNK_TO_LEAVES).find(([, ids]) => ids.includes(id))[0],
+      decision: [firstLeaf, secondLeaf].includes(id) ? 'adopted' : 'excluded',
+      rationale: [firstLeaf, secondLeaf].includes(id) ? null : 'excluded',
+    })) },
+    jobs: [{ id: 'first', leaf_ids: [firstLeaf], aspect: 'Correctness' },
+      { id: 'second', leaf_ids: [secondLeaf], aspect: 'Correctness' }], parallelism: 'parallel' };
+  writeReviewFixtures(skills, [firstLeaf, secondLeaf]);
+  const entry = checkpoint.create(ws, 11, plan, validateManifest);
+  const file = path.join(ws, 'manifest.json');
+  fs.writeFileSync(file, JSON.stringify(plan));
+  const children = [];
+  const realSave = checkpoint.save;
+  let saves = 0;
+  checkpoint.save = (...args) => { if (++saves === 2) throw new Error('disk full'); return realSave(...args); };
+  _setSpawn(() => {
+    const child = new EventEmitter();
+    child.pid = 12345678;
+    child.kill = () => { child.killed = true; };
+    children.push(child);
+    return child;
+  });
+  try {
+    let returned = false;
+    const pending = runJobsFromManifest(file, path.join(ws, 'result.json'), ws, 5000, 5000, '11', 'o/r', path.join(ws, '.gh-maestro'), {
+      mainWorkspace: ws, checkpointId: entry.id, reviewSkillsDir: skills,
+      registerProcessFn: () => {}, unregisterProcessFn: () => {}, getProcessStartTimeFn: () => '2026-01-01T00:00:00Z',
+    }).then(result => { returned = true; return result; });
+    assert.equal(children.length, 2);
+    const prompt = promptFileInOwnedDir('review-job-first-review-');
+    fs.writeFileSync(resultFileFromPrompt(fs.readFileSync(prompt, 'utf8')), '[]');
+    children[0].emit('close', 0);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(children[1].killed, true);
+    assert.equal(returned, false);
+    children[1].emit('close', 1);
+    const result = await pending;
+    assert.match(result.summary.error, /disk full/);
+  } finally { checkpoint.save = realSave; _setSpawn(null); scope.cleanup(); }
+});

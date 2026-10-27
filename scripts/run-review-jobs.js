@@ -676,7 +676,13 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
         stdio: ['ignore', 'ignore', stderrFd],
       },
       onSpawn: (child) => {
-        if (childRef) childRef.child = child;
+        if (childRef) {
+          childRef.child = child;
+          childRef.closed = new Promise(resolve => {
+            child.once('close', resolve);
+            child.once('error', () => { if (!child.pid) resolve(); });
+          });
+        }
         onSpawn(child);
       },
       observe: (child) => new Promise((resolve) => {
@@ -1300,9 +1306,23 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
     return { ok: false, summary: { error: `retry counter gate failed: ${e.message}` } };
   }
   if (gate.gated) {
-    // 既存の不完全レビュー経路を再利用（新しい通知経路は作らない）。results は前回実行の
-    // スナップショットが残っており、そこから成功ジョブの指摘内容を不完全コメントに載せる。
-    // finalizeReview が失敗しても（results 欠落等）、上限はそのまま維持して拒否する。
+    if (saved) {
+      const recovered = {
+        manifest_ref: { pr: manifest.pr, repo: manifest.repo, headRefOid: manifest.headRefOid },
+        coverage_ledger: manifest.coverage_ledger,
+        jobs: manifest.jobs.map(job => saved.state.results[job.id] || ({
+          jobId: job.id, status: 'failed', leaf_ids: job.leaf_ids,
+          attempt: saved.state.attempts, error: 'job result unavailable after interruption',
+        })),
+        completed_at: new Date().toISOString(),
+      };
+      try {
+        fs.mkdirSync(path.dirname(resultsPath), { recursive: true });
+        atomicWriteJson(resultsPath, recovered);
+      } catch (error) {
+        return { ok: false, summary: { error: `checkpoint results restore failed: ${resultsPath}: ${error.message}` } };
+      }
+    }
     const incomplete = await (_finalizeReviewForTest || finalizeReview)(resultsPath, 'incomplete', null, workspace);
     return {
       ok: false,
@@ -1344,6 +1364,12 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   // 4. 全ジョブを並列起動
   // 子プロセスへの参照を保持し、total-timeout時に実際にkillできるようにする
   const activeChildren = [];
+  let jobFailure = null;
+  function stopChildren() {
+    for (const ref of activeChildren) {
+      try { if (ref.child) ref.child.kill(); } catch {}
+    }
+  }
   const jobPromises = pendingJobs.map(job => {
     const childRef = { child: null };
     activeChildren.push(childRef);
@@ -1356,6 +1382,10 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
         checkpoint.save(saved.file, saved.state, validateManifest);
       }
       return result;
+    }).catch(error => {
+      if (!jobFailure) jobFailure = error;
+      stopChildren();
+      throw error;
     });
   });
 
@@ -1365,34 +1395,21 @@ async function runJobsFromManifest(manifestPath, resultsPath, workspace, jobTime
   const totalTimer = new Promise((resolve) => {
     totalTimerHandle = setTimeout(() => {
       totalTimedOut = true;
-      for (const ref of activeChildren) {
-        try { if (ref.child) ref.child.kill(); } catch {}
-      }
+      stopChildren();
       resolve('total-timeout');
     }, totalTimeoutMs);
   });
 
-  const allJobsPromise = Promise.all(jobPromises);
-  const raceResult = await Promise.race([allJobsPromise, totalTimer]);
-  if (!totalTimedOut && totalTimerHandle) clearTimeout(totalTimerHandle);
-
-  let jobResults;
-  if (raceResult === 'total-timeout') {
-    // タイムアウト: 残存ジョブの結果を収集（killされたものは自然に解決される）
-    const settled = await Promise.allSettled(jobPromises);
-    jobResults = pendingJobs.map((job, i) => {
-      if (settled[i].status === 'fulfilled') return settled[i].value;
-      return {
-        jobId: job.id,
-        status: 'failed',
-        leaf_ids: job.leaf_ids,
-        attempt: 1,
-        error: 'job timeout (total deadline reached)',
-      };
-    });
-  } else {
-    jobResults = raceResult;
-  }
+  // A rejection must not release the runner lease while any child is still alive.
+  const allJobsPromise = Promise.allSettled(jobPromises);
+  await Promise.race([allJobsPromise, totalTimer]);
+  const settled = await allJobsPromise;
+  // An error event may resolve a worker before its process closes. Keep the lease
+  // until every spawned child has emitted close (or failed to spawn without a PID).
+  await Promise.all(activeChildren.map(ref => ref.closed || Promise.resolve()));
+  if (totalTimerHandle) clearTimeout(totalTimerHandle);
+  if (jobFailure) return { ok: false, summary: { error: `job execution or checkpoint save failed: ${jobFailure.message}` } };
+  let jobResults = settled.map(item => item.value);
 
   if (saved) {
     jobResults = manifest.jobs.map(job => saved.state.results[job.id] || jobResults[pendingJobs.indexOf(job)]);

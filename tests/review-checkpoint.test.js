@@ -76,14 +76,25 @@ test('resume refuses pending jobs after the attempt limit', async () => {
   const ws = scope.mkdtemp('rm-limit-');
   try {
     const plan = validManifest();
+    plan.jobs = [
+      { id: 'a', leaf_ids: [ALL_LEAF_IDS[0]], aspect: 'Correctness' },
+      { id: 'b', leaf_ids: ALL_LEAF_IDS.slice(1), aspect: 'Correctness' },
+    ];
     const entry = checkpoint.create(ws, 11, plan, validateManifest);
     entry.state.attempts = 2;
+    entry.state.results.a = { jobId: 'a', status: 'success', leaf_ids: plan.jobs[0].leaf_ids, attempt: 1, findings: [] };
     checkpoint.save(entry.file, entry.state, validateManifest);
     const manifestFile = path.join(ws, 'manifest.json');
     fs.writeFileSync(manifestFile, JSON.stringify(plan));
-    _setFinalizeReviewForTest(async () => ({ ok: true }));
+    let restored;
+    _setFinalizeReviewForTest(async resultsPath => { restored = JSON.parse(fs.readFileSync(resultsPath, 'utf8')); return { ok: true }; });
     const result = await runJobsFromManifest(manifestFile, path.join(ws, 'results.json'), ws, 1000, 1000, '11', 'o/r', path.join(ws, '.gh-maestro'), { mainWorkspace: ws, checkpointId: entry.id });
     assert.equal(result.summary.retryLimitReached, true);
+    assert.equal(restored.jobs[0].status, 'success');
+    assert.equal(restored.jobs[0].jobId, 'a');
+    assert.equal(restored.jobs[1].status, 'failed');
+    assert.equal(restored.jobs[1].jobId, 'b');
+    assert.equal(restored.manifest_ref.headRefOid, 'abc');
     assert.equal(checkpoint.read(ws, 11, entry.id, validateManifest).state.attempts, 2);
   } finally { _setFinalizeReviewForTest(null); fs.rmSync(ws, { recursive: true, force: true }); }
 });
