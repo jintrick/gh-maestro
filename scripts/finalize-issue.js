@@ -12,7 +12,8 @@
 
 const path = require('path');
 const { readFileSync, existsSync, rmSync } = require('fs');
-const { spawnSync } = require('./shared/child-process');
+const childProcess = require('./shared/child-process');
+const { spawnSync } = childProcess;
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { ARTIFACTS, recordPath } = require('./shared/record-paths');
@@ -32,9 +33,9 @@ Options:
 反省会が完了した後にだけ呼ぶこと。Issueに紐づく全ワーカーを remove-worker.js 経由で削除し、
 そのあと Issue をクローズする。ワーカー削除は best-effort（一部失敗しても続行し、Issueは閉じる）。
 
-さらに、このIssueの --issue で起動された監視ペインを best-effort で close-pane 経由で終了する。
-worker worktree ごとの監視ペインはワーカー削除前に終了し、メイン workspace のペインも終了する。
-別Issueのペインや起動Issueを確認できない旧形式の記録は終了しない。
+さらに、このIssueの --issue で起動された監視ペインを close-pane 経由で終了する。
+worker worktree ごとの終了に失敗した場合は、そのworkerを削除せずIssueのクローズを中止する（非0終了）。
+メイン workspace のペインはbest-effortで終了する。別Issueのペインや起動Issueを確認できない旧形式の記録は終了しない。
 
 さらに、ライフサイクル終了後の情報価値のない内部状態を後始末する（Issue #248・すべて best-effort）:
 - .gh-maestro/assistant-watch/<N>.json を削除
@@ -85,7 +86,7 @@ function defaultCloseIssue(issue, repo, workspace) {
 // 既定の監視ペイン終了処理。worker-status.js側で起動時Issueを検証するため、
 // finalize-issueがstatus-pane.jsonを直接kill・削除する経路は持たない。
 function defaultCloseStatusPane(workspace, issue) {
-  const r = spawnSync(process.execPath, [
+  const r = childProcess.spawnSync(process.execPath, [
     path.join(__dirname, 'worker-status.js'),
     'close-pane',
     '--workspace', workspace,
@@ -216,8 +217,8 @@ function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn 
  * executions.json の当該issueレコード）を後始末する（Issue #248 項目2/4/7）。
  * @param {{workspace: string, issue: string|number, repo?: string|null}} params
  * @param {{removeWorkerFn?: Function, closeIssueFn?: Function, closeStatusPaneFn?: Function, findReviewPrsFn?: Function}} [deps] テスト用に処理を注入する
- * @returns {{workers: {name: string, ok: boolean}[], removedCount: number, closed: boolean, statusPaneClosed: boolean, artifacts: object}}
- *   artifacts: cleanupIssueArtifacts() の結果（watchRemoved / incompleteRemoved / executionsPruned）
+ * @returns {{workers: {name: string, ok: boolean}[], removedCount: number, closed: boolean, statusPaneClosed: boolean, workerStatusPaneFailures: {name:string, reason:string}[], artifacts: object|null}}
+ *   artifacts: cleanupIssueArtifacts() の結果（worker pane終了失敗時は後続cleanupを行わないため null）
  */
 function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
   const removeWorkerFn = deps.removeWorkerFn || defaultRemoveWorker;
@@ -237,6 +238,7 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
 
   const names = collectWorkersForIssue(workspace, issue);
   const workers = [];
+  const workerStatusPaneFailures = [];
   for (const name of names) {
     const workerWorkspace = path.resolve(workspace, '.gh-maestro', 'worktrees', name);
     let workerStatusPaneResult;
@@ -246,10 +248,14 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
       workerStatusPaneResult = { ok: false, stderr: error.message };
     }
     if (!workerStatusPaneResult || !workerStatusPaneResult.ok) {
+      const reason = String(workerStatusPaneResult && workerStatusPaneResult.stderr || 'unknown');
+      workerStatusPaneFailures.push({ name, reason });
       process.stderr.write(
         `finalize-issue: ワーカー "${name}" の監視ペイン終了に失敗しました: `
-        + `${workerStatusPaneResult && workerStatusPaneResult.stderr || 'unknown'}\n`,
+        + `${reason}\n`,
       );
+      workers.push({ name, ok: false });
+      continue;
     }
 
     const result = removeWorkerFn(workspace, name);
@@ -258,6 +264,20 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
       process.stderr.write(`finalize-issue: ワーカー "${name}" の削除に失敗しました: ${result && result.stderr || 'unknown'}\n`);
     }
     workers.push({ name, ok });
+  }
+
+  if (workerStatusPaneFailures.length > 0) {
+    // worktree 側 watch を閉じられないと remove-worker 後に再試行で見つけられない。
+    // worker state と Issue を残し、監視 pane の終了を回復してから再実行できるようにする。
+    return {
+      workers,
+      removedCount: workers.filter(w => w.ok).length,
+      closed: false,
+      statusPaneClosed: false,
+      monitorTarget,
+      workerStatusPaneFailures,
+      artifacts: null,
+    };
   }
 
   const close = closeIssueFn(issue, repo, workspace);
@@ -288,6 +308,7 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
     closed: close.ok,
     statusPaneClosed: Boolean(statusPaneResult && statusPaneResult.ok),
     monitorTarget,
+    workerStatusPaneFailures,
     artifacts,
   };
 }
