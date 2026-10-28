@@ -159,20 +159,36 @@ function mockWmiReuseToEmpty() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// isProcessAlive（実プロセスspawnなしでテスト可能）
+// process-liveness public API
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('isProcessAlive: 生存しているPIDは true', () => {
-  const plc = loadModule();
-  assert.equal(plc.isProcessAlive(process.pid), true);
+test('observe: 生存・死亡・判定不能を3状態で返す', () => {
+  loadModule();
+  const liveness = require('../scripts/shared/process-liveness').createLiveness({
+    probePid: (pid) => pid === 4242 ? 'alive' : pid === 4343 ? 'dead' : 'unknown',
+    readStartTime: () => MOCK_START_TIME,
+  });
+  const liveRef = liveness.readRef({ pid: 4242, startTime: MOCK_START_TIME });
+  const deadRef = liveness.readRef({ pid: 4343, startTime: MOCK_START_TIME });
+  const unknownRef = liveness.readRef({ pid: 4444, startTime: MOCK_START_TIME });
+
+  assert.equal(liveness.observe(liveRef), 'alive');
+  assert.equal(liveness.observe(deadRef), 'dead');
+  assert.equal(liveness.observe(unknownRef), 'unknown');
 });
 
-test('isProcessAlive: 無効なPIDは false', () => {
-  const plc = loadModule();
-  assert.equal(plc.isProcessAlive(0), false);
-  assert.equal(plc.isProcessAlive(-1), false);
-  assert.equal(plc.isProcessAlive(null), false);
-  assert.equal(plc.isProcessAlive(undefined), false);
+test('ProcessRef: 識別子を不透明な文字列として捕捉して往復できる', () => {
+  loadModule();
+  const liveness = require('../scripts/shared/process-liveness').createLiveness({
+    probePid: () => 'alive',
+    readStartTime: () => MOCK_START_TIME,
+  });
+  const ref = liveness.captureProcess(4242);
+
+  assert.equal(typeof ref, 'string');
+  assert.equal(liveness.observe(ref), 'alive');
+  assert.equal(liveness.sameRef(ref, liveness.readRef({ pid: 4242, startTime: MOCK_START_TIME })), true);
+  assert.equal(liveness.readRef({ pid: 0, startTime: MOCK_START_TIME }), null);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -199,123 +215,54 @@ test('resolveSessionPid: 無効な文字列は自動検出にフォールバッ�
   assert.ok(result > 0);
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// createDeadManSwitch（実プロセスspawn不要）
-// ═══════════════════════════════════════════════════════════════════════════
-
-test('createDeadManSwitch: 自身のPIDに対しては true を返す', () => {
-  const plc = loadModule();
-  const check = plc.createDeadManSwitch(process.pid);
-  assert.equal(check(), true);
-});
-
-test('createDeadManSwitch: 無効なPIDは3回連続で false を返す', () => {
-  const plc = loadModule();
-  const check = plc.createDeadManSwitch(0);
-  assert.equal(check(), true, 'first dead check — grace period');
-  assert.equal(check(), true, 'second dead check — grace period');
-  assert.equal(check(), false, 'third dead check — confirmed');
-});
-
-test('createDeadManSwitch: 生存→死亡の遷移で3回連続確認', () => {
-  const plc = loadModule();
-  const check = plc.createDeadManSwitch(process.pid);
-  assert.equal(check(), true, 'alive');
-
-  const checkDead = plc.createDeadManSwitch(99999999);
-  assert.equal(checkDead(), true, 'first dead — grace');
-  assert.equal(checkDead(), true, 'second dead — grace');
-  assert.equal(checkDead(), false, 'third dead — confirmed');
-});
-
-test('createDeadManSwitch: 死亡カウンタは生存確認でリセットされる', () => {
-  const plc = loadModule();
-  const check = plc.createDeadManSwitch(process.pid);
-  assert.equal(check(), true);
-  assert.equal(check(), true);
-  assert.equal(check(), true);
-});
-
-// ── 受け入れ条件: PID 再利用でも生存と誤判定しない ──────────────────────
-
-test('createDeadManSwitch: PID が別プロセスに再利用された状況で生存と誤判定しない（受け入れ条件）', () => {
-  const plc = loadModule({ execSync: mockWmiReuse() });
-  // 捕捉時（1回目のWMI呼び出し）は MOCK_START_TIME が返る → これが期待値になる
-  const expectedStartTime = plc.getProcessStartTime(process.pid);
-  assert.equal(expectedStartTime, MOCK_START_TIME);
-  const check = plc.createDeadManSwitch(process.pid, { expectedStartTime });
-  // isProcessAlive(process.pid) は true（PID は存在する）が、起動時刻が OTHER_START_TIME に
-  // 切り替わっている = 同じPIDに別プロセスが居る。startTime 不一致は確定事実なので即 false。
-  assert.equal(check(), false, 'PID が再利用されていれば生存と誤判定しない');
-});
-
-test('createDeadManSwitch: expectedStartTime を渡さないと PID 再利用で居座る（対照・従来挙動）', () => {
-  // 修正は「expectedStartTime を渡すことで初めて効く」性質のものである。渡し忘れが
-  // 将来起きた場合、この対照テストが失敗として現れる（orchestrator 確認事項）。
-  const plc = loadModule({ execSync: mockWmiReuse() });
-  const check = plc.createDeadManSwitch(process.pid); // expectedStartTime なし
-  assert.equal(check(), true, 'PID 再利用があっても従来どおり生存扱い（居座り）');
-  assert.equal(check(), true);
-  assert.equal(check(), true);
-});
-
-test('createDeadManSwitch: 起動時刻が一致する場合は生存を維持する（誤自滅しない）', () => {
-  const plc = loadModule({ execSync: mockWmiSuccess() });
-  const expectedStartTime = plc.getProcessStartTime(process.pid);
-  assert.equal(expectedStartTime, MOCK_START_TIME);
-  const check = plc.createDeadManSwitch(process.pid, { expectedStartTime });
-  assert.equal(check(), true, '起動時刻が一致すれば生存を維持');
-  assert.equal(check(), true);
-});
-
-test('createDeadManSwitch: 起動時刻の取得失敗（WMI 空）は生存扱い（fail-open・誤自滅しない）', () => {
-  // expectedStartTime は捕捉できたが、以後の WMI 読取が空文字（null 相当）を返す一過性の
-  // 失敗。fail-open を誤自滅防止側に倒し、生存扱いにする。
-  const plc = loadModule({ execSync: mockWmiReuseToEmpty() });
-  const expectedStartTime = plc.getProcessStartTime(process.pid);
-  assert.equal(expectedStartTime, MOCK_START_TIME);
-  const check = plc.createDeadManSwitch(process.pid, { expectedStartTime });
-  assert.equal(check(), true, '読取失敗は生存扱い');
-  assert.equal(check(), true);
-});
-
-// ── startTimesMatch ─────────────────────────────────────────────────────
-
-test('startTimesMatch: 1秒以内の差は同一プロセスとみなす', () => {
-  const plc = loadModule();
-  assert.equal(plc.startTimesMatch('2025-06-01T12:00:00.000Z', '2025-06-01T12:00:00.500Z'), true);
-  assert.equal(plc.startTimesMatch('2025-06-01T12:00:00.000Z', '2025-06-01T12:00:02.000Z'), false);
-});
-
-test('startTimesMatch: 不正な日付（NaN）・欠落は不一致として扱う', () => {
-  const plc = loadModule();
-  assert.equal(plc.startTimesMatch('not-a-date', MOCK_START_TIME), false);
-  assert.equal(plc.startTimesMatch(null, MOCK_START_TIME), false);
-  assert.equal(plc.startTimesMatch(undefined, MOCK_START_TIME), false);
-});
-
-test('captureProcessIdentity: 起動時刻取得を一度だけ行いPIDと組にして返す', () => {
-  const plc = loadModule();
-  const calls = [];
-  const identity = plc.captureProcessIdentity('4242', (pid) => {
-    calls.push(pid);
-    return MOCK_START_TIME;
+test('watchParent: PID消失は3回連続で確認し、生存でカウンターを戻す', () => {
+  loadModule();
+  let states = ['dead', 'dead', 'alive', 'dead', 'dead', 'dead'];
+  const liveness = require('../scripts/shared/process-liveness').createLiveness({
+    probePid: () => states.shift() || 'dead',
+    readStartTime: () => MOCK_START_TIME,
   });
+  const check = liveness.watchParent(liveness.readRef({ pid: 4242, startTime: MOCK_START_TIME }));
 
-  assert.deepEqual(identity, { pid: 4242, startTime: MOCK_START_TIME });
-  assert.deepEqual(calls, [4242]);
+  assert.equal(check(), true);
+  assert.equal(check(), true);
+  assert.equal(check(), true, 'alive resets the consecutive-dead count');
+  assert.equal(check(), true);
+  assert.equal(check(), true);
+  assert.equal(check(), false);
 });
 
-test('captureProcessIdentity: 起動時刻取得の失敗は未知値のまま返す', () => {
-  const plc = loadModule();
-  let calls = 0;
-  const identity = plc.captureProcessIdentity(process.pid, () => {
-    calls += 1;
-    throw new Error('CIM unavailable');
+test('watchParent: PID再利用は即時に親死亡として返し、観測失敗は猶予する', () => {
+  loadModule();
+  const liveness = require('../scripts/shared/process-liveness').createLiveness({
+    probePid: () => 'alive',
+    readStartTime: () => OTHER_START_TIME,
   });
+  const check = liveness.watchParent(liveness.readRef({ pid: 4242, startTime: MOCK_START_TIME }));
+  assert.equal(check(), false);
 
-  assert.equal(calls, 1);
-  assert.deepEqual(identity, { pid: process.pid, startTime: null });
+  const unavailable = require('../scripts/shared/process-liveness').createLiveness({
+    probePid: () => 'alive',
+    readStartTime: () => null,
+  });
+  const keepAlive = unavailable.watchParent(unavailable.readRef({ pid: 4242, startTime: MOCK_START_TIME }));
+  assert.equal(keepAlive(), true);
+});
+
+test('observe: 欠落した参照は判定不能で、失敗を生存・死亡へ丸めない', () => {
+  loadModule();
+  let probes = 0;
+  const liveness = require('../scripts/shared/process-liveness').createLiveness({
+    probePid: () => { probes++; throw new Error('probe failed'); },
+    readStartTime: () => { throw new Error('start time unavailable'); },
+  });
+  const missing = liveness.readRef({ pid: 4242 });
+  assert.equal(liveness.observe(missing), 'unknown');
+  assert.equal(probes, 0, 'missing identity is unknown without probing the PID');
+
+  const failedProbe = liveness.readRef({ pid: 4242, startTime: MOCK_START_TIME });
+  assert.equal(liveness.observe(failedProbe), 'unknown');
+  assert.equal(probes, 1);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -324,6 +271,9 @@ test('captureProcessIdentity: 起動時刻取得の失敗は未知値のまま�
 
 test('registerProcess: .gh-maestro/pids/<pid>.json を作成する', () => {
   const plc = loadModule();
+  plc._setLiveness(require('../scripts/shared/process-liveness').createLiveness({
+    readStartTime: () => null,
+  }));
   const entry = plc.registerProcess(workspace, {
     script: 'msg-poll.js',
     workerName: 'test-worker',
@@ -432,128 +382,28 @@ test('findRunningInstances: runtime registry 読み取り失敗を伝播する',
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// verifyProcessIdentity（WMI をモック化して決定的にテスト）
-// ═══════════════════════════════════════════════════════════════════════════
+// ProcessRef の判定は公開された3状態 API から確認する。WMI は共通モジュール内だけで使う。
 
-test('verifyProcessIdentity: プロセス非生存の場合は match:false', () => {
-  const plc = loadModule();
-  const result = plc.verifyProcessIdentity(0, { startTime: '2025-01-01T00:00:00.000Z' });
-  assert.equal(result.match, false);
-  assert.ok(result.reason.includes('not alive'));
+test('observe: WMIで取得した起動時刻の一致をaliveとして返す', () => {
+  loadModule({ execSync: mockWmiSuccess() });
+  const liveness = require('../scripts/shared/process-liveness');
+  const ref = liveness.captureProcess(process.pid);
+  assert.equal(liveness.observe(ref), 'alive');
 });
 
-test('verifyProcessIdentity: 起動時刻が取得できない場合は match:false', () => {
-  const plc = loadModule();
-  // -1 は getProcessStartTime が parseInt + isFinite ではじく
-  const result = plc.verifyProcessIdentity(-1, { startTime: '2025-01-01T00:00:00.000Z' });
-  assert.equal(result.match, false);
+test('observe: WMIでPID再利用を検出したらdeadとして返す', () => {
+  loadModule({ execSync: mockWmiReuse() });
+  const liveness = require('../scripts/shared/process-liveness');
+  const ref = liveness.captureProcess(process.pid);
+  assert.equal(liveness.observe(ref), 'dead');
 });
 
-test('verifyProcessIdentity: startTime比較 - 不正な日付文字列で match:false (NaNガード)', () => {
-  // WMI成功をモック → getProcessStartTime(process.pid) が MOCK_START_TIME を返す
-  // → startTime比較に入り 'invalid-date-format' → new Date().getTime() = NaN
-  // → Number.isNaN チェックで match:false / reason='invalid date'
-  const plc = loadModule({ execSync: mockWmiSuccess() });
-  const result = plc.verifyProcessIdentity(process.pid, {
-    startTime: 'invalid-date-format',
-  });
-  assert.equal(result.match, false);
-  assert.ok(result.reason.includes('invalid date'),
-    `expected 'invalid date' reason, got: ${result.reason}`);
+test('observe: 起動時刻を取得できない場合はunknownを返す', () => {
+  loadModule({ execSync: mockWmiEmpty() });
+  const liveness = require('../scripts/shared/process-liveness');
+  const ref = liveness.captureProcess(process.pid);
+  assert.equal(liveness.observe(ref), 'unknown');
 });
-
-test('verifyProcessIdentity: 起動時刻が一致 - 許容範囲内なら match:true', () => {
-  // WMI が MOCK_START_TIME を返す → registeredMeta.startTime も MOCK_START_TIME
-  // → 差は0 < 1000ms → match:true
-  const plc = loadModule({ execSync: mockWmiSuccess() });
-  const result = plc.verifyProcessIdentity(process.pid, {
-    startTime: MOCK_START_TIME,
-  });
-  assert.equal(result.match, true);
-});
-
-test('verifyProcessIdentity: 起動時刻が大きくずれている場合は match:false', () => {
-  const plc = loadModule({ execSync: mockWmiSuccess() });
-  // WMI が MOCK_START_TIME (2025-06-01) を返すが、登録時刻は1年前
-  const result = plc.verifyProcessIdentity(process.pid, {
-    startTime: '2024-06-01T12:00:00.000Z',
-  });
-  assert.equal(result.match, false);
-  assert.ok(result.reason.includes('start time mismatch'));
-});
-
-test('verifyProcessIdentity: startTime未設定で alive なPIDは true（同一性確認スキップ）', () => {
-  // WMI が成功を返す → getProcessStartTime は値を返すが
-  // registeredMeta.startTime が未設定 → 比較をスキップ → match:true
-  const plc = loadModule({ execSync: mockWmiSuccess() });
-  const result = plc.verifyProcessIdentity(process.pid, {});
-  assert.equal(result.match, true);
-});
-
-test('verifyProcessIdentity: getProcessStartTime が空文字を返した場合は match:false', () => {
-  // WMI が空を返す → actualStartTime が空 → match:false
-  const plc = loadModule({ execSync: mockWmiEmpty() });
-  const result = plc.verifyProcessIdentity(process.pid, {
-    startTime: '2025-01-01T00:00:00.000Z',
-  });
-  assert.equal(result.match, false);
-  assert.ok(result.reason.includes('cannot get'),
-    `expected 'cannot get' reason, got: ${result.reason}`);
-});
-
-test('verifyProcessIdentity: actualStartTime 指定時はその値で比較し、再観測しない', () => {
-  let execCalls = 0;
-  const plc = loadModule({
-    execSync: () => {
-      execCalls++;
-      throw new Error('actual start time should already be supplied');
-    },
-  });
-
-  const matched = plc.verifyProcessIdentity(process.pid, {
-    startTime: MOCK_START_TIME,
-  }, {
-    actualStartTime: MOCK_START_TIME,
-  });
-  assert.equal(matched.match, true);
-  assert.equal(execCalls, 0);
-
-  const mismatched = plc.verifyProcessIdentity(process.pid, {
-    startTime: MOCK_START_TIME,
-  }, {
-    actualStartTime: OTHER_START_TIME,
-  });
-  assert.equal(mismatched.match, false);
-  assert.match(mismatched.reason, /start time mismatch/);
-  assert.equal(execCalls, 0);
-});
-
-test('verifyProcessIdentity: actualStartTime:null は未指定時の空観測と同じく不一致にする', () => {
-  let execCalls = 0;
-  const plc = loadModule({
-    execSync: () => {
-      execCalls++;
-      return '\n';
-    },
-  });
-
-  const suppliedNull = plc.verifyProcessIdentity(process.pid, {
-    startTime: MOCK_START_TIME,
-  }, {
-    actualStartTime: null,
-  });
-  assert.equal(suppliedNull.match, false);
-  assert.equal(suppliedNull.reason, 'cannot get process start time');
-  assert.equal(execCalls, 0, 'actualStartTime:null の指定時は OS 観測しない');
-
-  const observedNull = plc.verifyProcessIdentity(process.pid, {
-    startTime: MOCK_START_TIME,
-  });
-  assert.deepEqual(observedNull, suppliedNull);
-  assert.equal(execCalls, 1, '未指定時だけ実観測して同じ不一致結果になる');
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
 // findRunningInstance
 // ═══════════════════════════════════════════════════════════════════════════
 // verifyProcessIdentity 経由でWMIを呼ぶため、生存PIDを扱うテストは
@@ -725,15 +575,16 @@ test('findRunningInstance: 識別情報のないエントリは判定不能と�
   const plc = loadModule();
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
+  const ownerPid = process.ppid;
 
-  fs.writeFileSync(path.join(pidsDir, '99997.json'), JSON.stringify({
-    pid: 2147483647, script: 'msg-poll.js', workerName: null, workspace,
+  fs.writeFileSync(path.join(pidsDir, `${ownerPid}.json`), JSON.stringify({
+    pid: ownerPid, script: 'msg-poll.js', workerName: null, workspace,
   }));
 
   try {
     assert.throws(() => plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null }), /生死を判定できません/);
   } finally {
-    fs.unlinkSync(path.join(pidsDir, '99997.json'));
+    fs.unlinkSync(path.join(pidsDir, `${ownerPid}.json`));
   }
 });
 
@@ -1235,8 +1086,8 @@ test('sweepRegistry: manager.running の PID は stale registry エントリを�
   fs.mkdirSync(pidsDir, { recursive: true });
   fs.mkdirSync(reviewDir, { recursive: true });
 
-  // 死んだ正の PID (999999999) を持つ Review Manager の running ファイルと、同 PID の stale registry
-  const stalePid = 999999999;
+  // 起動時刻のない manager.running と同 PID の stale registry。旧 marker は PID が生きているため unknown。
+  const stalePid = process.ppid;
   const stalePidFile = path.join(pidsDir, `${stalePid}.json`);
   const runningFile = path.join(reviewDir, 'manager.running');
 

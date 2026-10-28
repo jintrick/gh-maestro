@@ -49,8 +49,6 @@ const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const {
   resolveSessionPid,
-  getProcessStartTime,
-  captureProcessIdentity,
   registerProcess,
   findRunningInstance,
   cleanup: lifecycleCleanup,
@@ -66,13 +64,7 @@ const { runningLegacyWorkerSupervisorPids } = require('./shared/worker-superviso
 // テスト注入。既定は実装。
 let _parentLiveness = processLiveness;
 let _parentDeathExit = (code) => process.exit(code);
-let _injectedGetProcessStartTime;
 let _recordCycleEvent = recordCycleEvent;
-
-function _getProcessStartTime(pid) {
-  const fn = _injectedGetProcessStartTime ?? getProcessStartTime;
-  return fn(pid);
-}
 
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // msg-poll.js のスキャンロジックを再利用（マーカーパースのみ）
@@ -473,7 +465,7 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
   // （実障害: resumeが成功と誤認識され、起動直後に消滅したワーカーが誰にも気づかれず
   // 放置された）。短い猶予を置いてから生存確認する。
   _sleep(RESUME_LIVENESS_GRACE_MS);
-  if (!_isWorkerAlive({ pid: launched.pid, startTime: launched.startTime })) {
+  if (_parentLiveness.observe(launched.processRef) !== 'alive') {
     return {
       success: false,
       method: 'resume-failed',
@@ -509,7 +501,7 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
         skill,
         agentId,
         pid: launched.pid,
-        startTime: launched.startTime,
+        startTime: _parentLiveness.writeRef({}, launched.processRef).startTime,
       });
     } catch { /* best-effort */ }
   }
@@ -707,7 +699,7 @@ function main(argsOverride, opts = {}) {
   // leaseとPID registryへ同じプロセスidentityを保存するため、起動時刻はここで一度だけ
   // 捕捉する。取得できない場合はunknownのまま常駐leaseを作成せず、現在時刻をidentityの
   // 代替値にしない。
-  const residentIdentity = captureProcessIdentity(process.pid, _getProcessStartTime);
+  const residentIdentity = _parentLiveness.captureSelf();
   let residentLease = null;
   {
     const role = WORKER_SUPERVISOR_ROLE;
@@ -722,7 +714,7 @@ function main(argsOverride, opts = {}) {
         handoff: force,
         handoffStopTargets: handoffTargets,
         env,
-        identity: residentIdentity,
+        processRef: residentIdentity,
       });
       if (!res.acquired) {
         // 引き継ぎ期限超過（--force で既存所有者が終了しなかった）
@@ -817,7 +809,7 @@ function main(argsOverride, opts = {}) {
     // アラーム経路と watchdog 通知が両方無効化される（Issue #301）。
     if (!checkParent()) {
       lifecycleCleanup(workspace);
-      handleParentSessionDeath({ workspace, scriptName: 'worker-supervisor.js', role: WORKER_SUPERVISOR_ROLE, sessionPid });
+      handleParentSessionDeath({ workspace, scriptName: 'worker-supervisor.js', role: WORKER_SUPERVISOR_ROLE, sessionPid, processRef: residentIdentity });
       _parentDeathExit(PARENT_DEATH_EXIT_CODE);
     }
 
@@ -1051,7 +1043,7 @@ function main(argsOverride, opts = {}) {
       // 猶予として、報告コメントの投稿から10秒経過するまでは判定しない。
       //
       // 重複通知防止キーは pid 単独ではなく pid + startTime（起動時刻）の組で同一プロセスを
-      // 識別する。同一ファイル内の生存判定（_isWorkerAlive → verifyProcessIdentity）と同じ
+      // 識別する。同一ファイル内の生存判定と同じ
       // 理由: PIDだけをキーにすると、通知後にワーカーが終了し、OSがそのPIDを無関係な別
       // プロセスへ再利用した場合、再利用先が同じPIDで別の（未報告の）ワーカーとして
       // resume されても「既に通知済みのPID」と誤認して再通知を抑止してしまう。
@@ -1366,8 +1358,7 @@ if (require.main === module) {
 
   // PID registry に自己登録（表示・診断用途。排他の正本は role lease であり、二重化しない）
   registerProcess(result.workspace, {
-    pid: result.residentIdentity.pid,
-    startTime: result.residentIdentity.startTime,
+    processRef: result.residentIdentity,
     script: 'worker-supervisor.js',
   });
 
@@ -1401,7 +1392,6 @@ if (require.main === module) {
 // ── テスト用 export ──────────────────────────────────────────────────────
 
 module.exports = {
-  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setIsWorkerAlive: (fn) => { _isWorkerAlive = fn; },

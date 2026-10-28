@@ -20,8 +20,11 @@ const path = require('path');
 // セッション排他ロックのテストで worker-lease の生存確認・同一性確認を注入する
 // （実プロセスに触れない）。
 const workerLease = require('../scripts/shared/worker-lease');
-const processLifecycle = require('../scripts/process-lifecycle');
-workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+const processLiveness = require('../scripts/shared/process-liveness');
+workerLease._setLiveness(processLiveness.createLiveness({
+  probePid: () => 'alive',
+  readStartTime: () => '2026-07-25T00:00:00.000Z',
+}));
 
 const SHA = 'a'.repeat(40);
 const AGENDA = '# 議題\n\nRAG構成の採用可否について';
@@ -901,7 +904,10 @@ test('セッションロック: stale ロック（保持者非生存）は自動
     // 死亡済みプロセスの残骸ロック
     fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999, startTime: '2000-01-01T00:00:00.000Z' }), 'utf8');
 
-    workerLease._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'dead' }));
+    workerLease._setLiveness(require('../scripts/shared/process-liveness').createLiveness({
+      probePid: (pid) => pid === process.pid ? 'alive' : 'dead',
+      readStartTime: () => '2026-08-28T00:00:00.000Z',
+    }));
     try {
       const { mod } = moduleFor();
       mod.acquireCouncilSessionLock(ws, 's1'); // throw しない

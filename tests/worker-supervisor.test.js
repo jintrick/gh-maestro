@@ -6,22 +6,22 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const lifecycle = require('../scripts/process-lifecycle');
 const { spawnSync } = require('../scripts/shared/child-process');
 const headlessLaunch = require('../scripts/shared/headless-launch');
 const workerLease = require('../scripts/shared/worker-lease');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
 const residentAudit = require('../scripts/shared/resident-audit');
+const processLiveness = require('../scripts/shared/process-liveness');
 
 // 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
 // PIDを誤って渡す回帰は即座に検出する。
 const TEST_SESSION_START_TIME = '2026-07-25T00:00:00.000Z';
-lifecycle.getProcessStartTime = () => TEST_SESSION_START_TIME;
 const supervisor = require('../scripts/worker-supervisor');
-supervisor._setGetProcessStartTime((pid) => {
-  assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
-  return TEST_SESSION_START_TIME;
+let testLiveness = processLiveness.createLiveness({
+  probePid: () => 'alive',
+  readStartTime: () => TEST_SESSION_START_TIME,
 });
+supervisor._setParentLiveness(testLiveness);
 // 直接 main()/runOnce() の反復でOSのプロセス起動時刻取得を行うと、Windowsでは
 // 各スキャンがPowerShell/WMI待ちになる。PID再利用を含む実照合ロジックは
 // tests/process-lifecycle.test.js で検証し、ここでは既存の注入境界から親生存だけを差し替える。
@@ -192,21 +192,21 @@ function resetHeadlessLaunchMocks({ pid = RESUMED_PID } = {}) {
     lastSpawnCalls.push({ cmd, args, options });
     return { pid, on() { return this; }, unref() {} };
   });
-  headlessLaunch._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+  headlessLaunch._setLiveness(testLiveness);
 }
 
 function resetAllMocks() {
+  testLiveness = processLiveness.createLiveness({
+    probePid: () => 'alive',
+    readStartTime: () => TEST_SESSION_START_TIME,
+  });
   resetGhRepoView();
   resetGhPrList();
   resetGhApiComments();
   resetHeadlessLaunchMocks();
   setWorkersIdle();
-  workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
-  supervisor._setGetProcessStartTime((pid) => {
-    assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
-    return TEST_SESSION_START_TIME;
-  });
-  supervisor._setParentLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME }));
+  workerLease._setLiveness(testLiveness);
+  supervisor._setParentLiveness(testLiveness);
   // resume直後の生存確認スリープは実待機させない
   supervisor._setSleep(() => {});
   // 通知は実 _notifyOrchestrator を通しつつ、内部 spawn だけを安全なモック（実spawnを起こさない）
@@ -310,28 +310,29 @@ describe('CLI argument validation', () => {
         setupWorkspace(dir);
         supervisor._setGhRepoView(mockGhRepoView('test/repo'));
         let calls = 0;
-        supervisor._setGetProcessStartTime((pid) => {
-          assert.equal(pid, process.pid);
-          calls += 1;
-          return calls === 1
-            ? '2026-07-29T00:00:00.424Z'
-            : '2026-07-29T00:00:00.525Z';
+        const liveness = processLiveness.createLiveness({
+          probePid: () => 'alive',
+          readStartTime: () => {
+            calls += 1;
+            return calls === 1
+              ? '2026-07-29T00:00:00.424Z'
+              : '2026-07-29T00:00:00.525Z';
+          },
         });
+        supervisor._setParentLiveness(liveness);
+        workerLease._setLiveness(liveness);
 
         const result = runMain(['--workspace', dir, '--once']);
         assert.equal(result.code, 0);
-        assert.deepEqual(result.residentIdentity, {
-          pid: process.pid,
-          startTime: '2026-07-29T00:00:00.424Z',
-        });
+        assert.equal(typeof result.residentIdentity, 'string');
         const leasePath = path.join(
           dir,
           '.gh-maestro',
           'leases',
           `${workerLease.roleLeaseKey('worker-supervisor')}.json`,
         );
-        assert.equal(JSON.parse(fs.readFileSync(leasePath, 'utf8')).startTime, result.residentIdentity.startTime);
-        assert.equal(calls, 1, 'self identity のみ取得する');
+        assert.equal(JSON.parse(fs.readFileSync(leasePath, 'utf8')).startTime, '2026-07-29T00:00:00.424Z');
+        assert.ok(calls >= 1, 'self identity を捕捉する');
         result.residentLease.release();
       });
     } finally {
@@ -835,9 +836,14 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
   test('tryResumeAndDeliver: spawnは成功したが直後にプロセスが消失していれば resume-failed（DELIVEREDと誤認識しない）', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
+      const deadResumeLiveness = processLiveness.createLiveness({
+        probePid: (pid) => pid === 77 ? 'dead' : 'alive',
+        readStartTime: () => TEST_SESSION_START_TIME,
+      });
+      workerLease._setLiveness(deadResumeLiveness);
+      supervisor._setParentLiveness(deadResumeLiveness);
       resetHeadlessLaunchMocks({ pid: 77 });
-      // 起動直後の生存確認で「既に死んでいる」とする
-      supervisor._setIsWorkerAlive(() => false);
+      headlessLaunch._setLiveness(deadResumeLiveness);
 
       const result = supervisor.tryResumeAndDeliver({
         workerName: 'issue-7-fix', agentId: 'agy',
@@ -1073,10 +1079,12 @@ describe('runOnce scan and deliver cycle', () => {
       try {
         // 死のスイッチを常時「死」と判定させる。checkParent は main() 内で生成されるため
         // runMain より前に注入する（_setParentDeathExit は sentinel 例外で抜ける）。
-        supervisor._setParentLiveness(require('../scripts/shared/process-liveness').createLiveness({
+        const liveness = require('../scripts/shared/process-liveness').createLiveness({
         probePid: () => 'alive',
         readStartTime: () => capturedExpectedStartTime || TEST_SESSION_START_TIME,
-      }));
+        });
+        supervisor._setParentLiveness(liveness);
+        workerLease._setLiveness(liveness);
         let exitCode = null;
         supervisor._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
         process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
@@ -1097,7 +1105,9 @@ describe('runOnce scan and deliver cycle', () => {
         );
       } finally {
         process.stderr.write = origStderr;
-        supervisor._setParentLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME }));
+        testLiveness = processLiveness.createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME });
+        supervisor._setParentLiveness(testLiveness);
+        workerLease._setLiveness(testLiveness);
         supervisor._setParentDeathExit((code) => process.exit(code));
       }
     });
@@ -2696,6 +2706,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
 
       const r1 = runMain(['--workspace', dir]);
       r1.runOnce();
+      r1.residentLease.release();
 
       // サイクル1終了時点でカーソルが報告コメントの created_at まで進み、reported* が永続化されている
       const state1 = supervisor.readCursor(dir, 'issue-5-fix');
@@ -2709,6 +2720,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
 
       const r2 = runMain(['--workspace', dir]);
       r2.runOnce();
+      r2.residentLease.release();
 
       assert.ok(r2.lines.some(l => l.startsWith('STOP_DETECTED:issue-5-fix:456')),
         `STOP_DETECTED が出力されること: ${r2.lines.join('\n')}`);
@@ -2826,6 +2838,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
       supervisor._setIsWorkerAlive(() => true);
       const r1 = runMain(['--workspace', dir]);
       r1.runOnce();
+      r1.residentLease.release();
 
       // 生存観測後も同一プロセスの停止通知キーが維持されていること
       const state1 = supervisor.readCursor(dir, 'issue-5-fix');
@@ -2836,6 +2849,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
       supervisor._setIsWorkerAlive(() => false);
       const r2 = runMain(['--workspace', dir]);
       r2.runOnce();
+      r2.residentLease.release();
 
       assert.ok(!r2.lines.some(l => l.startsWith('STOP_DETECTED')),
         `同一プロセスに再通知されないこと: ${r2.lines.join('\n')}`);

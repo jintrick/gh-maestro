@@ -15,12 +15,44 @@ const { spawnSync } = require('node:child_process');
 const { beforeEach, test } = require('node:test');
 
 const workerStatus = require('../scripts/worker-status');
+const processLiveness = require('../scripts/shared/process-liveness');
 const workerLiveness = require('../scripts/shared/worker-liveness');
 const paneLaunch = require('../scripts/shared/pane-launch');
 const { cleanSpawnEnv } = require('./_spawn-env');
 const { installWeztermCommandPorts, weztermCall } = require('./_wezterm-command-recorder');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-status.js');
+const DEFAULT_TEST_START_TIME = '2026-08-26T11:55:00.000Z';
+let testProbePid = () => 'alive';
+let testReadStartTime = (_pid, expectedStartTime) => expectedStartTime || DEFAULT_TEST_START_TIME;
+let testWorkerPredicate = null;
+
+function installTestLiveness() {
+  workerStatus._setLiveness(processLiveness.createLiveness({
+    probePid: (pid) => testWorkerPredicate
+      ? (testWorkerPredicate({ pid }) ? 'alive' : 'dead')
+      : testProbePid(pid),
+    readStartTime: testReadStartTime,
+    startTimeCacheMs: workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
+  }));
+}
+
+// Transitional test fixtures map their former independent injections onto the
+// single public liveness checker used by production code.
+workerStatus._setGetProcessStartTime = (fn) => {
+  testReadStartTime = fn || ((_pid, expectedStartTime) => expectedStartTime || DEFAULT_TEST_START_TIME);
+  installTestLiveness();
+};
+workerStatus._setIsProcessAlive = (fn) => {
+  testProbePid = fn ? (pid) => (fn(pid) ? 'alive' : 'dead') : () => 'alive';
+  testWorkerPredicate = null;
+  installTestLiveness();
+};
+workerStatus._setVerifyProcessIdentity = () => {};
+workerStatus._setIsWorkerAlive = (fn) => {
+  testWorkerPredicate = fn;
+  installTestLiveness();
+};
 
 const STATUS_PANE_CONTEXT = Object.freeze({
   unixSocket: 'C:\\wezterm\\test-socket',
@@ -71,12 +103,13 @@ const FAST_STATUS_PRELOAD = (() => {
 // discovery.  Avoid launching the platform process scanner for those cases;
 // the final review-job integration case injects its own representative data.
 beforeEach(() => {
+  testProbePid = () => 'alive';
+  testReadStartTime = (_pid, expectedStartTime) => expectedStartTime || DEFAULT_TEST_START_TIME;
+  testWorkerPredicate = null;
+  installTestLiveness();
   workerStatus._setFindRunningInstances(() => []);
-  // Review-manager fixtures below inject identity verification themselves; a
-  // null observation here keeps the non-identity-focused cases from invoking
-  // the platform WMI probe.  PID-reuse behavior remains covered by the
-  // dedicated process-lifecycle tests and the explicit cache tests above.
-  workerStatus._setGetProcessStartTime(() => null);
+// Review-manager fixtures below inject their liveness observations; the
+// non-identity-focused cases use a deterministic checker instead of WMI.
   // pane の各入力・出力ケースは、明示的な lock 拒否ケース以外では
   // ロック取得のOS照会を検証対象にしない。実際の lock 拒否は専用ケースで
   // false を注入して確認する。
@@ -194,6 +227,7 @@ test('main: 無効なworkspaceは状態を出さず code 1', () => {
 
 test('main: 生存中・停止済み・未登録ワーカーの状態を既存述語経由で返す', () => {
   const workspace = createWorkspace();
+  workerStatus._setIsProcessAlive((pid) => pid === process.pid);
   try {
     writeWorkers(workspace, {
       alive: require('../scripts/shared/process-liveness').writeRef({}, require('../scripts/shared/process-liveness').captureSelf()),
@@ -912,17 +946,20 @@ test('collectWorkersStatus: 上限間隔内は同じ観測値を使い、期限�
   let processAlive = true;
   let startTimeCalls = 0;
   let verifyCalls = 0;
-  const cache = workerStatus.createProcessStartTimeCache((pid) => {
-    assert.equal(pid, 111);
-    startTimeCalls++;
-    return currentStartTime;
-  });
-
-  workerStatus._setIsWorkerAlive(null);
-  workerLiveness._setProbePid((pid) => {
-    verifyCalls++;
-    assert.equal(pid, 111);
-    return processAlive ? 'alive' : 'dead';
+  let currentNow = 0;
+  const liveness = processLiveness.createLiveness({
+    probePid: (pid) => {
+      verifyCalls++;
+      assert.equal(pid, 111);
+      return processAlive ? 'alive' : 'dead';
+    },
+    readStartTime: (pid) => {
+      assert.equal(pid, 111);
+      startTimeCalls++;
+      return currentStartTime;
+    },
+    startTimeCacheMs: workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
+    now: () => currentNow,
   });
 
   try {
@@ -930,10 +967,10 @@ test('collectWorkersStatus: 上限間隔内は同じ観測値を使い、期限�
       'worker-a': { pid: 111, startTime: originalStartTime },
     });
 
-    const collectAt = (now) => workerStatus.collectWorkersStatus(workspace, {
-      nowFn: () => now,
-      startTimeCache: cache,
-    });
+    const collectAt = (now) => {
+      currentNow = now;
+      return workerStatus.collectWorkersStatus(workspace, { nowFn: () => now, liveness });
+    };
 
     const first = collectAt(0);
     assert.equal(first[0].running, true);
@@ -941,39 +978,41 @@ test('collectWorkersStatus: 上限間隔内は同じ観測値を使い、期限�
     assert.equal(startTimeCalls, 1, '生存判定と経過時間算出で観測を共有する');
 
     currentStartTime = reusedStartTime;
-    const beforeExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS - 1);
+    const beforeExpiry = collectAt(workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS - 1);
     assert.equal(beforeExpiry[0].running, true);
     assert.equal(beforeExpiry[0].startTime, originalStartTime);
     assert.equal(startTimeCalls, 1, '上限未到達では再観測しない');
 
-    const afterExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS);
+    const afterExpiry = collectAt(workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS);
     assert.equal(afterExpiry[0].running, false);
     assert.equal(afterExpiry[0].startTime, null);
     assert.equal(startTimeCalls, 2, '上限到達時は新しい起動時刻を観測する');
     assert.equal(verifyCalls, 3);
     assert.match(workerStatus.renderUptimeBars(afterExpiry)[0], /\[stopped\]/);
   } finally {
-    workerStatus._setIsWorkerAlive(null);
     workerLiveness._setProbePid(null);
     removeWorkspace(workspace);
   }
 });
 
-test('collectWorkersStatus: 起動時刻取得がnullでもTTL内は再取得せず、期限到達時に再観測する', () => {
+test('collectWorkersStatus: 起動時刻取得が不明ならunknownを維持し、期限到達時に再観測する', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-start-cache-null-');
   const registeredStartTime = '2026-08-26T11:55:00.000Z';
   let startTimeCalls = 0;
   let verifyCalls = 0;
-  const cache = workerStatus.createProcessStartTimeCache(() => {
-    startTimeCalls++;
-    return null;
-  });
-
-  workerStatus._setIsWorkerAlive(null);
-  workerLiveness._setProbePid((pid) => {
-    verifyCalls++;
-    assert.equal(pid, 114);
-    return 'alive';
+  let currentNow = 0;
+  const liveness = processLiveness.createLiveness({
+    probePid: (pid) => {
+      verifyCalls++;
+      assert.equal(pid, 114);
+      return 'alive';
+    },
+    readStartTime: () => {
+      startTimeCalls++;
+      return null;
+    },
+    startTimeCacheMs: workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
+    now: () => currentNow,
   });
 
   try {
@@ -981,31 +1020,23 @@ test('collectWorkersStatus: 起動時刻取得がnullでもTTL内は再取得せ
       'worker-a': { pid: 114, startTime: registeredStartTime },
     });
 
-    const collectAt = (now) => workerStatus.collectWorkersStatus(workspace, {
-      nowFn: () => now,
-      startTimeCache: cache,
-    });
+    const collectAt = (now) => {
+      currentNow = now;
+      return workerStatus.collectWorkersStatus(workspace, { nowFn: () => now, liveness });
+    };
 
-    const first = collectAt(0);
-    assert.equal(first[0].running, false);
-    assert.equal(first[0].startTime, null);
+    assert.throws(() => collectAt(0), /unknown/);
     assert.equal(startTimeCalls, 1);
     assert.equal(verifyCalls, 1);
 
-    const beforeExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS - 1);
-    assert.equal(beforeExpiry[0].running, false);
-    assert.equal(beforeExpiry[0].startTime, null);
-    assert.equal(startTimeCalls, 1, 'null の観測値も上限未到達では再利用する');
-    assert.equal(verifyCalls, 2, 'キャッシュした null を生存照会に使う');
+    assert.throws(() => collectAt(workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS - 1), /unknown/);
+    assert.equal(startTimeCalls, 1, 'nullの観測値も上限未到達では再利用する');
+    assert.equal(verifyCalls, 2);
 
-    const atExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS);
-    assert.equal(atExpiry[0].running, false);
-    assert.equal(atExpiry[0].startTime, null);
-    assert.equal(startTimeCalls, 2, '上限到達時は null でも再観測する');
+    assert.throws(() => collectAt(workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS), /unknown/);
+    assert.equal(startTimeCalls, 2, '上限到達時はnullでも再観測する');
     assert.equal(verifyCalls, 3);
   } finally {
-    workerStatus._setIsWorkerAlive(null);
-    workerLiveness._setProbePid(null);
     removeWorkspace(workspace);
   }
 });
@@ -1015,23 +1046,26 @@ test('collectWorkersStatus: プロセス終了時はキャッシュを破棄し�
   const startTime = '2026-08-26T11:55:00.000Z';
   let processAlive = true;
   let startTimeCalls = 0;
-  const cache = workerStatus.createProcessStartTimeCache(() => {
-    startTimeCalls++;
-    return startTime;
+  let currentNow = 0;
+  const liveness = processLiveness.createLiveness({
+    probePid: () => processAlive ? 'alive' : 'dead',
+    readStartTime: () => {
+      startTimeCalls++;
+      return startTime;
+    },
+    startTimeCacheMs: workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
+    now: () => currentNow,
   });
-
-  workerStatus._setIsWorkerAlive(null);
-  workerLiveness._setProbePid(() => processAlive ? 'alive' : 'dead');
 
   try {
     writeWorkers(workspace, {
       'worker-a': { pid: 112, startTime },
     });
 
-    const collectAt = (now) => workerStatus.collectWorkersStatus(workspace, {
-      nowFn: () => now,
-      startTimeCache: cache,
-    });
+    const collectAt = (now) => {
+      currentNow = now;
+      return workerStatus.collectWorkersStatus(workspace, { nowFn: () => now, liveness });
+    };
 
     assert.equal(collectAt(0)[0].running, true);
     assert.equal(startTimeCalls, 1);
@@ -1043,8 +1077,6 @@ test('collectWorkersStatus: プロセス終了時はキャッシュを破棄し�
     assert.equal(startTimeCalls, 1, '終了判定で不要な起動時刻取得を行わない');
     assert.match(workerStatus.renderUptimeBars(stopped)[0], /\[stopped\]/);
   } finally {
-    workerStatus._setIsWorkerAlive(null);
-    workerLiveness._setProbePid(null);
     removeWorkspace(workspace);
   }
 });
@@ -1055,39 +1087,38 @@ test('collectWorkersStatus: Review Manager もワーカーと同じTTLキャッ�
   const secondStartTime = '2026-08-26T12:00:00.000Z';
   let currentStartTime = firstStartTime;
   let startTimeCalls = 0;
-  const cache = workerStatus.createProcessStartTimeCache(() => {
-    startTimeCalls++;
-    return currentStartTime;
+  let currentNow = 0;
+  const liveness = processLiveness.createLiveness({
+    probePid: () => 'alive',
+    readStartTime: () => {
+      startTimeCalls++;
+      return currentStartTime;
+    },
+    startTimeCacheMs: workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
+    now: () => currentNow,
   });
-
-  workerStatus._setIsProcessAlive(() => true);
-  workerStatus._setVerifyProcessIdentity((pid, meta, opts) => ({
-    match: opts && opts.actualStartTime === meta.startTime,
-  }));
 
   try {
     writeReviewManager(workspace, 407, 113, firstStartTime);
 
-    const collectAt = (now) => workerStatus.collectWorkersStatus(workspace, {
-      nowFn: () => now,
-      startTimeCache: cache,
-    });
+    const collectAt = (now) => {
+      currentNow = now;
+      return workerStatus.collectWorkersStatus(workspace, { nowFn: () => now, liveness });
+    };
 
     const first = collectAt(0);
     assert.equal(first[0].startTime, firstStartTime);
     assert.equal(startTimeCalls, 1);
 
     currentStartTime = secondStartTime;
-    const beforeExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS - 1);
+    const beforeExpiry = collectAt(workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS - 1);
     assert.equal(beforeExpiry[0].startTime, firstStartTime);
     assert.equal(startTimeCalls, 1);
 
-    const afterExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS);
+    const afterExpiry = collectAt(workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS);
     assert.equal(afterExpiry.length, 0, '期限到達後にPID再利用を検出してRMを非表示にする');
     assert.equal(startTimeCalls, 2);
   } finally {
-    workerStatus._setIsProcessAlive(null);
-    workerStatus._setVerifyProcessIdentity(null);
     removeWorkspace(workspace);
   }
 });
@@ -1870,7 +1901,7 @@ test('main: list および list --json で Review Manager を表示する', () =
   const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
   workerStatus._setNow(() => fixedNow);
   workerStatus._setIsWorkerAlive((rawEntry) => rawEntry && rawEntry.pid === 111);
-  workerStatus._setIsProcessAlive((pid) => pid === 222);
+  workerStatus._setIsProcessAlive((pid) => pid === 111 || pid === 222);
   workerStatus._setVerifyProcessIdentity(() => ({ match: true }));
   workerStatus._setGetProcessStartTime((pid) => {
     if (pid === 111) return '2026-08-26T11:50:00.000Z'; // 600s

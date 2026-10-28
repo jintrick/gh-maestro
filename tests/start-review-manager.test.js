@@ -54,12 +54,12 @@ function fakeSpawn({ pid = 55501 } = {}) {
 beforeEach(() => {
   spawnCalls = [];
   headlessLaunch._setSpawn(fakeSpawn());
-  headlessLaunch._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+  headlessLaunch._setLiveness(makeLiveness());
 });
 
 afterEach(() => {
   headlessLaunch._setSpawn(require('../scripts/shared/child-process').spawn);
-  headlessLaunch._setGetProcessStartTime(require('../scripts/process-lifecycle').getProcessStartTime);
+  headlessLaunch._setLiveness(null);
 });
 
 function loadModule() {

@@ -302,11 +302,20 @@ test('process and worker detectors use existing read-only liveness helpers', () 
   let leaseChecks = 0;
   try {
     fs.writeFileSync(path.join(fixture.root, '.gh-maestro', 'workers.json'), JSON.stringify({
-      'issue-1-old-worker': { notifierPid: 123, paneId: '7' },
+      'issue-1-old-worker': { notifierPid: 123, notifierStartTime: '2026-07-25T00:00:00.000Z', paneId: '7' },
     }), 'utf8');
     const leaseDir = path.join(fixture.root, '.gh-maestro', 'leases');
     fs.mkdirSync(leaseDir, { recursive: true });
-    fs.writeFileSync(path.join(leaseDir, 'issue-1-old-worker.json'), JSON.stringify({ pid: 123 }), 'utf8');
+    fs.writeFileSync(path.join(leaseDir, 'issue-1-old-worker.json'), JSON.stringify({
+      pid: 123,
+      startTime: '2026-07-25T00:00:00.000Z',
+    }), 'utf8');
+    const queueDir = path.join(fixture.root, '.gh-maestro', 'queue');
+    fs.mkdirSync(queueDir, { recursive: true });
+    fs.writeFileSync(path.join(queueDir, 'poller.json'), JSON.stringify({
+      pid: 123,
+      startTime: '2026-07-25T00:00:00.000Z',
+    }), 'utf8');
 
     const result = inspect(fixture, {
       capabilities: {

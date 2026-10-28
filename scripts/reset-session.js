@@ -23,7 +23,8 @@ const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { killProcessTree } = require('./shared/kill-tree');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const { worktreeRemove, worktreePrune } = require('./shared/git-worktree');
-const { sweepRegistry, isProcessAlive } = require('./process-lifecycle');
+const { sweepRegistry } = require('./process-lifecycle');
+const processLiveness = require('./shared/process-liveness');
 const { getAlivePaneIds, killPane } = require('./shared/pane-launch');
 const { loadStatusPane, removeStatusPane } = require('./shared/status-pane-registry');
 const { readWorkersRaw } = require('./shared/workers-registry');
@@ -98,7 +99,7 @@ function cleanupLegacyWorkerField(workspace, field, options = {}) {
   const workersPath = path.resolve(workspace, '.gh-maestro', 'workers.json');
   if (workers === null) return { status: 'absent', path: workersPath, field };
 
-  const isProcessAliveFn = options.isProcessAliveFn || isProcessAlive;
+  const liveness = options.liveness || processLiveness;
   const killProcessTreeFn = options.killProcessTreeFn || killProcessTree;
   const atomicWriteFn = options.atomicWriteFn || atomicWriteJson;
   const getAlivePaneIdsFn = options.getAlivePaneIdsFn || getAlivePaneIds;
@@ -123,12 +124,14 @@ function cleanupLegacyWorkerField(workspace, field, options = {}) {
     if (field === 'notifierPid') {
       if (!validCleanupPid(rawValue)) throw new Error(`workers.json の ${name}.${field} は正の整数PIDではありません`);
       const pid = Number(rawValue);
-      const alive = isProcessAliveFn(pid);
-      if (typeof alive !== 'boolean') throw new Error(`PID ${pid} の生存確認がbooleanを返しませんでした`);
-      if (alive) {
+      const startTime = isObject ? rawEntry.notifierStartTime : null;
+      const state = liveness.observe(liveness.readRef({ pid, startTime }));
+      if (state === 'unknown') throw new Error(`レガシー notifier (pid ${pid}) の生死を判定できません`);
+      if (state === 'alive') {
         killProcessTreeFn(pid);
-        const remaining = isProcessAliveFn(pid);
-        if (remaining !== false) throw new Error(`レガシー notifier (pid ${pid}) の停止を確認できませんでした`);
+        if (liveness.observe(liveness.readRef({ pid, startTime })) !== 'dead') {
+          throw new Error(`レガシー notifier (pid ${pid}) の停止を確認できませんでした`);
+        }
         killedPids.push(pid);
         notifierResults.push({ name, pid, status: 'killed' });
       } else {
@@ -255,17 +258,17 @@ function cleanupLegacyQueue(workspace, options = {}) {
     }
     if (poller.pid !== undefined) {
       const pid = Number(poller.pid);
-      const alive = (options.isProcessAliveFn || isProcessAlive)(pid);
-      if (typeof alive !== 'boolean') return { status: 'unknown', path: queueDir, reason: 'pollerの生存確認がbooleanを返しませんでした' };
-      if (alive) {
+      const pollerRef = processLiveness.readRef({ pid, startTime: poller.startTime });
+      const state = (options.liveness || processLiveness).observe(pollerRef);
+      if (state === 'unknown') return { status: 'unknown', path: queueDir, reason: `poller (pid ${pid}) の生死を判定できません` };
+      if (state === 'alive') {
         if (options.legacyResetMode === true) {
           const heartbeat = poller.heartbeat;
           const elapsed = typeof heartbeat === 'number' ? Date.now() - heartbeat : Infinity;
           if (elapsed <= 15000) {
             try {
               (options.killProcessTreeFn || killProcessTree)(pid);
-              const remaining = (options.isProcessAliveFn || isProcessAlive)(pid);
-              if (remaining !== false) throw new Error('停止を確認できませんでした');
+              if ((options.liveness || processLiveness).observe(pollerRef) !== 'dead') throw new Error('停止を確認できませんでした');
               killedPids.push(pid);
             } catch (error) {
               return { status: 'unknown', path: queueDir, reason: `レガシー poller (pid ${pid}) の停止に失敗しました: ${error.message}` };
@@ -650,7 +653,7 @@ if (require.main === module) {
       legacyNotifierCleanup = cleanupLegacyWorkerField(workspace, 'notifierPid', {
         readWorkersFn: () => workers,
         persist: false,
-        isProcessAliveFn: isProcessAlive,
+        liveness: processLiveness,
         killProcessTreeFn: killProcessTree,
       });
       for (const result of legacyNotifierCleanup.notifierResults || []) {
@@ -929,7 +932,7 @@ if (require.main === module) {
   const queueResult = cleanupLegacyQueue(workspace, {
     legacyResetMode: true,
     killProcessTreeFn: killProcessTree,
-    isProcessAliveFn: isProcessAlive,
+    liveness: processLiveness,
     sleepFn: sleep,
     rmFn: (target) => rmSync(target, { recursive: true, force: true }),
     warnFn: warn,

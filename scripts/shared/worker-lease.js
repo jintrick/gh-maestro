@@ -31,38 +31,8 @@ const { atomicWriteJson } = require('./atomic-write');
 const { checkResidentForceGuard } = require('./resident-force-guard');
 
 // テストでは生存確認の入力を注入した同じ API を使う。
-let _injectedGetProcessStartTime = null;
 let _injectedLiveness = null;
 function liveness() { return _injectedLiveness || require('./process-liveness'); }
-
-function _getProcessStartTime(pid) {
-  const fn = _injectedGetProcessStartTime ?? require('../process-lifecycle').getProcessStartTime;
-  return fn(pid);
-}
-
-function resolveProcessIdentity({ pid = process.pid, startTime } = {}, { allowLookup = true } = {}) {
-  const targetPid = Number.parseInt(pid, 10);
-  if (!Number.isFinite(targetPid) || targetPid <= 0) {
-    throw new Error(`worker lease: 不正な PID です: ${pid}`);
-  }
-  if (typeof startTime === 'string' && startTime !== '') {
-    return { pid: targetPid, startTime };
-  }
-  if (!allowLookup) {
-    throw new Error('worker lease: identity の起動時刻が未確定のため、lease/lockを作成できません');
-  }
-
-  let resolvedStartTime = null;
-  try {
-    resolvedStartTime = _getProcessStartTime(targetPid);
-  } catch (e) {
-    throw new Error(`worker lease: プロセス起動時刻を取得できないため、lease/lockを作成できません: ${e.message}`);
-  }
-  if (typeof resolvedStartTime !== 'string' || resolvedStartTime === '') {
-    throw new Error('worker lease: プロセス起動時刻を取得できないため、lease/lockを作成できません');
-  }
-  return { pid: targetPid, startTime: resolvedStartTime };
-}
 
 // テストで注入可能にする（実プロセスに触れない）。
 let _killProcessTree = killProcessTree;
@@ -195,13 +165,16 @@ function isLeaseLive(entry) {
  * @returns {boolean} 取得できれば true
  * @throws {Error} live な保持者がいる、またはリトライ上限超過
  */
-function acquireLeaseLock(store, key, maxRetries = 5, identity = null) {
+function acquireLeaseLock(store, key, maxRetries = 5, ownerRef = null) {
   // identity を明示された場合は、捕捉済みの起動時刻をそのまま検証する。
   // 取得に失敗したidentityをここで再取得すると、lease本体・PID registryとの照合値が
   // 分断されるため、未知値のままロックを作成しない。
-  const selfEntry = identity == null
-    ? resolveProcessIdentity()
-    : resolveProcessIdentity(identity, { allowLookup: false });
+  const checker = liveness();
+  const lockOwnerRef = ownerRef || checker.captureSelf();
+  if (checker.observe(lockOwnerRef) !== 'alive') {
+    throw new Error('worker lease: ロック所有者の生存を確認できません');
+  }
+  const selfEntry = checker.writeRef({}, lockOwnerRef);
   const lockPath = store.lockPath(key);
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
 
@@ -223,7 +196,6 @@ function acquireLeaseLock(store, key, maxRetries = 5, identity = null) {
     } catch (error) {
       throw new Error(`ロック ${lockPath} の保持者を読めません: ${error.message}`, { cause: error });
     }
-    const checker = liveness();
     const state = checker.observe(checker.readRef(holder));
     if (state === 'unknown') {
       throw new Error(`ロック ${lockPath} の保持者 ${JSON.stringify(holder)} の生死を判定できません`);
@@ -256,7 +228,8 @@ function releaseLeaseLock(store, key) {
   const lockPath = store.lockPath(key);
   try {
     const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-    if (holder && holder.pid === process.pid) {
+    const checker = liveness();
+    if (checker.sameRef(checker.readRef(holder), checker.captureSelf())) {
       fs.unlinkSync(lockPath);
     }
   } catch {
@@ -281,13 +254,12 @@ function releaseLeaseLock(store, key) {
  * @param {object} store lease store
  * @param {string} key リースキー（workerName）
  * @param {object} opt
- * @param {number} opt.pid 起動元（launcher）のPID
- * @param {string|null} opt.startTime 起動元のプロセス起動時刻
+ * @param {string} opt.processRef 不透明な起動元参照
  * @param {string} opt.workerName ワーカー名（エラーメッセージ用）
  * @returns {{ acquired: true, staleReclaimed: boolean }}
  * @throws {Error} live lease が存在する場合、または別launcherが進行中の場合
  */
-function acquireLease(store, key, { pid, startTime, workerName }) {
+function acquireLease(store, key, { processRef, workerName }) {
   // ── 高速パス: ロック取得前に live lease をチェック ──
   const checker = liveness();
   const requireDead = (entry) => {
@@ -303,9 +275,9 @@ function acquireLease(store, key, { pid, startTime, workerName }) {
   const quickCheck = store.read(key);
   requireDead(quickCheck);
 
-  // 起動時刻の取得はロック保持者とlease本体で共有する。取得できない場合は
-  // 現在時刻などを代替値にせず、ロックもleaseも作成しない。
-  const identity = resolveProcessIdentity({ pid, startTime });
+  if (checker.observe(processRef) !== 'alive') {
+    throw new Error('worker lease: lease所有者の生存を確認できません');
+  }
 
   // ── per-key ロックを取得 ──
   // 他プロセスが同じキーの stale 回収を実行中ならここで待つか拒否される。
@@ -314,8 +286,9 @@ function acquireLease(store, key, { pid, startTime, workerName }) {
     // 起動ロックの所有者はこのNodeプロセス自身であり、通常leaseの対象PIDが
     // 別プロセスとして渡された場合にそのPIDをロック記録へ書いてはならない。
     // 常駐leaseのように対象PIDが自PIDの場合だけ、捕捉済みidentityを共有する。
-    const lockIdentity = identity.pid === process.pid ? identity : null;
-    acquireLeaseLock(store, key, 5, lockIdentity);
+    const selfRef = checker.captureSelf();
+    const lockOwnerRef = checker.sameRef(processRef, selfRef) ? processRef : null;
+    acquireLeaseLock(store, key, 5, lockOwnerRef);
     lockAcquired = true;
   } catch (e) {
     throw new Error(`起動を拒否しました: ${e.message}`);
@@ -336,9 +309,7 @@ function acquireLease(store, key, { pid, startTime, workerName }) {
 
     // 新規リースを原子的に作成
     const now = new Date().toISOString();
-    const entry = {
-      pid: identity.pid,
-      startTime: identity.startTime,
+    const entry = checker.writeRef({
       workerName,
       createdAt: now,
       // phase: 'initializing' = ワーカー起動準備中（orchestrator 用 Issue ベースライン既読化の
@@ -346,7 +317,7 @@ function acquireLease(store, key, { pid, startTime, workerName }) {
       // クラッシュ復旧時は stale lease として回収され、ベースラインが冪等に再実行される
       // （集合和のため「再実行＝完了確認」となる）。
       phase: 'initializing',
-    };
+    }, processRef);
 
     try {
       store.write(key, entry);
@@ -379,12 +350,12 @@ function acquireLease(store, key, { pid, startTime, workerName }) {
  * @param {object} opt
  * @param {number} opt.pid 解放を試みるプロセスのPID
  */
-function releaseLease(store, key, { pid }) {
+function releaseLease(store, key, processRef) {
   const existing = store.read(key);
   if (!existing) return;
 
   // 自プロセスのリースだけを解放（他プロセスのリースを誤って消さない）
-  if (existing.pid === pid) {
+  if (liveness().sameRef(liveness().readRef(existing), processRef)) {
     store.remove(key);
   }
 }
@@ -401,21 +372,20 @@ function releaseLease(store, key, { pid }) {
  * @param {object} store lease store
  * @param {string} key リースキー
  * @param {object} opt
- * @param {number} opt.pid ワーカープロセスのPID
- * @param {string|null} opt.startTime ワーカープロセスの起動時刻
+ * @param {string} opt.processRef ワーカープロセスの不透明な参照
  */
-function activateLease(store, key, { pid, startTime }) {
+function activateLease(store, key, processRef) {
   const existing = store.read(key);
   if (!existing) return; // 何らかの理由でリースが消えている → 何もしない
 
-  const identity = resolveProcessIdentity({ pid, startTime });
-  store.update(key, {
+  if (liveness().observe(processRef) !== 'alive') {
+    throw new Error('worker lease: アクティベート対象の生存を確認できません');
+  }
+  store.update(key, liveness().writeRef({
     ...existing,
-    pid: identity.pid,
-    startTime: identity.startTime,
     // ワーカープロセス起動まで完了したら active（initializing → active。Issue #207）
     phase: 'active',
-  });
+  }, processRef));
 }
 
 // ── 常駐プロセス用 role lease（Issue #240） ────────────────────────────────
@@ -538,7 +508,7 @@ function recordAudit(workspace, type, role, detail) {
  * @param {() => Array<number>} [opt.handoffStopTargets]
  *   引き継ぎ時に停止要求を送る追加PID（registry 由来の旧所有者等）を返す関数
  * @param {number} [opt.deadlineMs] 引き継ぎ待機の上限時間（既定: HANDOFF_WAIT_MS）
- * @param {{pid: number, startTime: string|null}} [opt.identity] 呼び出し元が捕捉済みのプロセスidentity
+ * @param {string} [opt.processRef] 呼び出し元が捕捉済みの不透明なプロセス参照
  * @returns {{ acquired: true, key: string, release: () => void, staleReclaimed: boolean }
  *          | { acquired: false, reason: 'handoff-timeout', key: string, ownerPid: number|null }}
  * @throws {Error} live lease が存在する（handoff なし）場合、または監査記録に失敗した場合
@@ -550,27 +520,16 @@ function acquireResidentLease({
   handoffStopTargets = () => [],
   deadlineMs = HANDOFF_WAIT_MS,
   env = process.env,
-  identity = null,
+  processRef = null,
 }) {
+  const checker = liveness();
   const key = roleLeaseKey(role);
-  // 常駐leaseはこのプロセス自身のidentityだけを受け付ける。別PIDのidentityを
-  // 受け付けると、呼び出し元が任意のプロセスを常駐leaseの所有者として登録できる。
-  const requestedPid = identity == null || identity.pid === undefined ? process.pid : identity.pid;
-  const targetPid = Number.parseInt(requestedPid, 10);
-  if (!Number.isFinite(targetPid) || targetPid <= 0) {
-    throw new Error(`resident lease: 不正なPIDです: ${requestedPid}`);
+  const currentRef = checker.captureSelf();
+  const selfRef = processRef || currentRef;
+  if (!checker.sameRef(selfRef, currentRef) || checker.observe(selfRef) !== 'alive') {
+    throw new Error('resident lease: 不透明な参照が自プロセスを示していません');
   }
-  if (targetPid !== process.pid) {
-    throw new Error(
-      `resident lease: identity.pid=${targetPid} は自プロセスのPID ${process.pid} と一致しません`
-    );
-  }
-
-  // 呼び出し元が捕捉済みidentityを渡した場合は、起動時刻を再取得して別値に差し替えない。
-  const selfIdentity = identity == null
-    ? resolveProcessIdentity()
-    : resolveProcessIdentity(identity, { allowLookup: false });
-  const { pid, startTime } = selfIdentity;
+  const selfRecord = checker.writeRef({}, selfRef);
   const store = createResidentLeaseStore(workspace);
 
   const existing = store.read(key);
@@ -608,15 +567,15 @@ function acquireResidentLease({
       let extra = [];
       try { extra = handoffStopTargets() || []; } catch {}
       for (const t of extra) {
-        if (Number.isFinite(t) && t > 0 && t !== pid) targets.add(t);
+        if (Number.isFinite(t) && t > 0 && t !== selfRecord.pid) targets.add(t);
       }
       for (const t of targets) {
         try { _killProcessTree(t); } catch {}
       }
       try {
-        const res = acquireLease(store, key, { pid, startTime, workerName: role });
-        activateLease(store, key, { pid, startTime });
-        return { acquired: true, key, release: () => releaseLease(store, key, { pid }), staleReclaimed: res.staleReclaimed };
+        const res = acquireLease(store, key, { processRef: selfRef, workerName: role });
+        activateLease(store, key, selfRef);
+        return { acquired: true, key, release: () => releaseLease(store, key, selfRef), staleReclaimed: res.staleReclaimed };
       } catch (error) {
         if (error.code === 'LIVENESS_UNKNOWN') throw error;
       }
@@ -633,9 +592,9 @@ function acquireResidentLease({
   }
 
   // ── 通常起動（live lease なし）または stale lease 回収 ──
-  const res = acquireLease(store, key, { pid, startTime, workerName: role });
+  const res = acquireLease(store, key, { processRef: selfRef, workerName: role });
   try {
-    activateLease(store, key, { pid, startTime });
+    activateLease(store, key, selfRef);
   } catch (e) {
     // アクティベート（update）失敗は保存処理の一時的な競合（Windows の rename EPERM 等）が
     // 原因で、「別プロセスが稼働中」を意味しない（Issue #252）。リース本体は acquireLease で
@@ -644,7 +603,7 @@ function acquireResidentLease({
     // （spawn-worker.js の activateWorkerLease 失敗処理と同型）。
     console.warn(`role "${role}" のリースアクティベートに失敗しました: ${e.message}`);
   }
-  return { acquired: true, key, release: () => releaseLease(store, key, { pid }), staleReclaimed: res.staleReclaimed };
+  return { acquired: true, key, release: () => releaseLease(store, key, selfRef), staleReclaimed: res.staleReclaimed };
 }
 
 /**
@@ -656,9 +615,9 @@ function acquireResidentLease({
  * @param {string} opt.role
  * @param {number} opt.pid
  */
-function releaseResidentLease({ workspace, role, pid }) {
+function releaseResidentLease({ workspace, role, processRef = null }) {
   const store = createResidentLeaseStore(workspace);
-  releaseLease(store, roleLeaseKey(role), { pid });
+  releaseLease(store, roleLeaseKey(role), processRef || liveness().captureSelf());
 }
 
 /**
@@ -678,8 +637,8 @@ function releaseResidentLease({ workspace, role, pid }) {
  * @param {string} opt.startTime
  * @returns {{released:boolean, remaining:boolean, reason?:string}}
  */
-function releaseResidentLeaseForProcess({ workspace, role, pid, startTime }) {
-  if (!Number.isInteger(pid) || pid <= 0 || typeof startTime !== 'string' || !startTime) {
+function releaseResidentLeaseForProcess({ workspace, role, processRef }) {
+  if (typeof processRef !== 'string' || !processRef) {
     return { released: false, remaining: true, reason: 'lease owner identity is incomplete' };
   }
 
@@ -695,18 +654,18 @@ function releaseResidentLeaseForProcess({ workspace, role, pid, startTime }) {
 
     const existing = store.read(key);
     if (!existing) return { released: false, remaining: false };
-    if (existing.pid !== pid) {
+    const checker = liveness();
+    const existingRef = checker.readRef(existing);
+    if (!checker.sameRef(existingRef, processRef)) {
+      const existingOwner = checker.writeRef({}, existingRef);
+      const stoppedOwner = checker.writeRef({}, processRef);
       return {
         released: false,
-        remaining: false,
+        // A different PID means this lease belongs to another process and is
+        // outside this stop operation. The same PID with a different start
+        // time is ambiguous PID reuse and must remain a reported failure.
+        remaining: existingOwner.pid === stoppedOwner.pid,
         reason: 'lease owner identity does not match the stopped process',
-      };
-    }
-    if (existing.startTime !== startTime) {
-      return {
-        released: false,
-        remaining: true,
-        reason: 'lease owner startTime does not match the stopped process',
       };
     }
 
@@ -742,7 +701,6 @@ module.exports = {
   releaseResidentLeaseForProcess,
   // テスト用注入
   _setLiveness: (value) => { _injectedLiveness = value; },
-  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setKillProcessTree: (fn) => { _killProcessTree = fn; },
   _setSleep: (fn) => { _sleep = fn; },
 };

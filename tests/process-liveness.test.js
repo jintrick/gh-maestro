@@ -39,6 +39,9 @@ test('reference serialization and comparison are owned by liveness', () => {
   const record = liveness.writeRef({ purpose: 'worker' }, ref);
   assert.deepEqual(record, { purpose: 'worker', pid: 123, startTime: time });
   assert.equal(liveness.sameRef(ref, liveness.readRef(record)), true);
+  assert.equal(liveness.sameRef(ref, liveness.readRef({ pid: 123, startTime: '2025-01-01T00:00:00.999Z' })), true,
+    '同じPIDと1秒以内の起動時刻は同一参照として扱う');
+  assert.equal(liveness.sameRef(ref, liveness.readRef({ pid: 123, startTime: '2025-01-01T00:00:01.001Z' })), false);
   assert.equal(liveness.sameRef(ref, liveness.readRef({ pid: 124, startTime: time })), false);
   assert.throws(() => liveness.writeRef({}, 'invalid'));
 });

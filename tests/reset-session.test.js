@@ -14,7 +14,10 @@ const {
   cleanupLegacyQueue,
 } = require('../scripts/reset-session');
 const readStateLib = require('../scripts/shared/read-state');
+const processLiveness = require('../scripts/shared/process-liveness');
 const { installWeztermCommandPorts, weztermCall } = require('./_wezterm-command-recorder');
+
+const TEST_START_TIME = '2026-07-25T00:00:00.000Z';
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-reset-'));
@@ -161,7 +164,7 @@ test('restartCapturedResidents: 全体掃除後も生存する捕捉済み常駐
       script: 'worker-supervisor.js',
       workerName: null,
       workspace,
-      startTime: 'old',
+      startTime: TEST_START_TIME,
       args: ['--workspace', workspace, '--session-pid', '9000'],
     };
     let replacement = null;
@@ -169,14 +172,17 @@ test('restartCapturedResidents: 全体掃除後も生存する捕捉済み常駐
     let killed = false;
     const hooks = {
       findRunningInstances: () => replacement ? [replacement] : [],
-      isProcessAlive: (pid) => (pid === 101 && oldAlive) || pid === 9000 || pid === replacement?.pid,
-      verifyProcessIdentity: () => ({ match: true }),
+      liveness: processLiveness.createLiveness({
+        probePid: (pid) => ((pid === 101 && oldAlive) || pid === 9000 || pid === replacement?.pid) ? 'alive' : 'dead',
+        readStartTime: (pid) => pid === 101 ? TEST_START_TIME : '2026-07-25T00:00:00.101Z',
+      }),
       spawn: (cmd, args) => {
         replacement = {
           pid: 200,
           script: 'worker-supervisor.js',
           workerName: null,
           workspace,
+          startTime: '2026-07-25T00:00:00.200Z',
           args: args.slice(1),
         };
         return { pid: 200, unref() {} };
@@ -208,14 +214,16 @@ test('restartCapturedResidents: skipStopを明示すると旧常駐の生存時�
       script: 'worker-supervisor.js',
       workerName: null,
       workspace,
-      startTime: 'old',
+      startTime: TEST_START_TIME,
       args: ['--workspace', workspace, '--session-pid', '9000'],
     };
     let spawnCalled = false;
     const hooks = {
       findRunningInstances: () => [],
-      isProcessAlive: (pid) => pid === 101 || pid === 9000,
-      verifyProcessIdentity: () => ({ match: true }),
+      liveness: processLiveness.createLiveness({
+        probePid: (pid) => pid === 101 || pid === 9000 ? 'alive' : 'dead',
+        readStartTime: (pid) => pid === 101 ? TEST_START_TIME : '2026-07-25T00:00:00.900Z',
+      }),
       spawn: () => { spawnCalled = true; throw new Error('must not spawn'); },
       killProcessTree: () => {},
       unregisterProcess: () => {},
@@ -280,18 +288,17 @@ test('cleanupLegacyWorkerField: notifierPidとpaneIdを観測してからworkers
     const workersPath = path.join(metaDir, 'workers.json');
     fs.writeFileSync(workersPath, JSON.stringify({
       orchestrator: { paneId: '1' },
-      'issue-10-old': { notifierPid: 123, paneId: '7', issue: 10 },
+      'issue-10-old': { notifierPid: 123, notifierStartTime: TEST_START_TIME, paneId: '7', issue: 10 },
     }), 'utf8');
 
     let alive = true;
     const killed = [];
     const notifier = cleanupLegacyWorkerField(workspace, 'notifierPid', {
-      isProcessAliveFn: () => {
-        const result = alive;
-        alive = false;
-        return result;
-      },
-      killProcessTreeFn: (pid) => killed.push(pid),
+      liveness: processLiveness.createLiveness({
+        probePid: () => alive ? 'alive' : 'dead',
+        readStartTime: () => TEST_START_TIME,
+      }),
+      killProcessTreeFn: (pid) => { killed.push(pid); alive = false; },
     });
     assert.equal(notifier.status, 'removed');
     assert.deepEqual(killed, [123]);
@@ -336,11 +343,14 @@ test('cleanupLegacyMessagesとcleanupLegacyQueue: 旧ディレクトリを冪等
     fs.mkdirSync(queueDir, { recursive: true });
     fs.writeFileSync(path.join(queueDir, 'old.json'), '{}', 'utf8');
     const livePollerPath = path.join(queueDir, 'poller.json');
-    fs.writeFileSync(livePollerPath, JSON.stringify({ pid: 456 }), 'utf8');
-    const held = cleanupLegacyQueue(workspace, { isProcessAliveFn: () => true });
+    fs.writeFileSync(livePollerPath, JSON.stringify({ pid: 456, startTime: TEST_START_TIME }), 'utf8');
+    const held = cleanupLegacyQueue(workspace, {
+      liveness: processLiveness.createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_START_TIME }),
+    });
     assert.equal(held.status, 'skipped');
     assert.equal(fs.existsSync(queueDir), true);
-    assert.equal(cleanupLegacyQueue(workspace, { isProcessAliveFn: () => false }).status, 'removed');
-    assert.equal(cleanupLegacyQueue(workspace, { isProcessAliveFn: () => false }).status, 'absent');
+    const deadLiveness = processLiveness.createLiveness({ probePid: () => 'dead', readStartTime: () => TEST_START_TIME });
+    assert.equal(cleanupLegacyQueue(workspace, { liveness: deadLiveness }).status, 'removed');
+    assert.equal(cleanupLegacyQueue(workspace, { liveness: deadLiveness }).status, 'absent');
   });
 });

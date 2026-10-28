@@ -2,16 +2,16 @@
 // process-lifecycle.js — ポーリングプロセスのライフサイクル管理（共通モジュール）
 //
 // 提供する機能:
-//   - 親セッション監視（dead-man's switch）: ポーリングループの毎周回で親の生存を確認
+//   - 親プロセスの解決
 //   - PID registry（1プロセス1ファイル）: 登録・解除・sweep
-//   - プロセス同一性確認（PID再利用対策）
 //
 // Usage (module):
 //   const plc = require('./process-lifecycle');
 //
-//   // Dead-man's switch
+//   // Parent monitoring
 //   const sessionPid = plc.resolveSessionPid(cliFlagValue);
-//   const checkParent = plc.createDeadManSwitch(sessionPid);
+//   const liveness = require('./shared/process-liveness');
+//   const checkParent = liveness.watchParent(liveness.captureProcess(sessionPid));
 //
 //   // PID registry
 //   plc.registerProcess(workspace, { workerName, script: 'msg-poll.js' });
@@ -29,9 +29,10 @@ const path = require('path');
 const { execSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const storageLayout = require('./shared/storage-layout');
-const { isProcessAlive, getProcessStartTime, captureProcessIdentity, startTimesMatch, createDeadManSwitch, verifyProcessIdentity } = require('./shared/process-liveness');
 
 const IS_WIN = process.platform === 'win32';
+let injectedLiveness = null;
+function getLiveness() { return injectedLiveness || require('./shared/process-liveness'); }
 
 // ── 親セッション監視（dead-man's switch） ──────────────────────────────
 
@@ -206,11 +207,14 @@ function registerProcess(workspace, meta = {}) {
     throw new Error(`registerProcess: 不正な PID です: ${meta && meta.pid}`);
   }
 
-  const checker = require('./shared/process-liveness');
-  const ref = meta.startTime ? checker.readRef({ pid: targetPid, startTime: meta.startTime })
-    : checker.captureProcess(targetPid);
+  const checker = meta.liveness || getLiveness();
+  const { processRef, ...recordMeta } = meta;
+  delete recordMeta.liveness;
+  const ref = processRef || (meta.startTime
+    ? checker.readRef({ pid: targetPid, startTime: meta.startTime })
+    : checker.captureProcess(targetPid));
   const entry = checker.writeRef({
-    ...meta,
+    ...recordMeta,
     script: meta.script || path.basename(process.argv[1] || 'unknown'),
     args: meta.args || process.argv.slice(2),
     workerName: meta.workerName || null,
@@ -218,7 +222,7 @@ function registerProcess(workspace, meta = {}) {
     registeredAt: new Date().toISOString(),
   }, ref);
 
-  const filePath = pidFilePath(workspace, targetPid);
+  const filePath = pidFilePath(workspace, entry.pid);
   fs.writeFileSync(filePath, JSON.stringify(entry, null, 2), 'utf8');
 
   return entry;
@@ -336,7 +340,7 @@ function findRunningInstances(workspace, opts = {}) {
       // 同一 PID の重複レコードは一度だけ判定する。
       if (seenPids.has(entryPid)) continue;
       seenPids.add(entryPid);
-      const checker = opts.liveness || require('./shared/process-liveness');
+      const checker = opts.liveness || getLiveness();
       const state = checker.observe(checker.readRef(entry));
       if (state === 'unknown') {
         throw new Error(`PID registry の生死を判定できません: ${entryPid}`);
@@ -423,7 +427,7 @@ function acquireLockAt(dir, lockPath, maxRetries, selfEntry) {
     } catch (error) {
       throw new Error(`ロック ${lockPath} の保持者を読めません: ${error.message}`, { cause: error });
     }
-    const liveness = require('./shared/process-liveness');
+    const liveness = getLiveness();
     const state = liveness.observe(liveness.readRef(holder));
     if (state === 'unknown') {
       throw new Error(`ロック ${lockPath} の保持者 ${JSON.stringify(holder)} の生死を判定できません`);
@@ -477,7 +481,7 @@ function releaseLockAt(lockPath) {
 function acquireStartupLock(workspace, script, workerName, opts = {}) {
   const maxRetries = opts.maxRetries ?? 5;
 
-  const checker = require('./shared/process-liveness');
+  const checker = opts.liveness || getLiveness();
   const selfRef = checker.captureSelf();
   if (checker.observe(selfRef) !== 'alive') throw new Error('起動ロック保持者の生死を判定できません');
   const selfEntry = checker.writeRef({}, selfRef);
@@ -604,7 +608,7 @@ function sweepRegistry(workspace, opts = {}) {
     }
   }
 
-  const checker = opts.liveness || require('./shared/process-liveness');
+  const checker = opts.liveness || getLiveness();
   const states = new Map();
   for (const { entry } of byPid.values()) {
     const state = checker.observe(checker.readRef(entry));
@@ -658,7 +662,7 @@ function sweepRegistry(workspace, opts = {}) {
     // workers.json / lease / .running 由来の除外対象に加えて housekeeping へ渡す。
     for (const { entry } of byPid.values()) {
       if (!entry.workerName || results.killed.some(k => k.workerName === entry.workerName)) continue;
-      const checker = opts.liveness || require('./shared/process-liveness');
+      const checker = opts.liveness || getLiveness();
       if (checker.observe(checker.readRef(entry)) !== 'dead') {
         excludedWorkerNames.add(entry.workerName);
       }
@@ -727,15 +731,11 @@ Description:
 // undefined を掴む（Issue #267）。各 shared モジュール側も呼び出し時点で解決する防衛を入れる。
 
 module.exports = {
+  _setLiveness: (value) => { injectedLiveness = value || null; },
   // 親セッション監視
   getParentPid,
   findSessionRootPid,
   resolveSessionPid,
-  isProcessAlive,
-  getProcessStartTime,
-  captureProcessIdentity,
-  startTimesMatch,
-  createDeadManSwitch,
   // PID registry
   pidsDir,
   pidFilePath,
@@ -750,8 +750,6 @@ module.exports = {
   legacyStartupLockPath,
   acquireStartupLock,
   releaseStartupLock,
-  // 同一性確認
-  verifyProcessIdentity,
   // sweep
   sweepRegistry,
   // 統合

@@ -30,8 +30,6 @@ const { isTrustedCommentAuthor } = require('./shared/comment-author-trust');
 const readStateLib = require('./shared/read-state');
 const {
   resolveSessionPid,
-  getProcessStartTime,
-  captureProcessIdentity,
   registerProcess,
   findRunningInstance,
   cleanup: lifecycleCleanup,
@@ -51,12 +49,6 @@ const { handleParentSessionDeath } = require('./shared/resident-parent-death');
 // テスト注入。既定は実装。
 let _parentLiveness = processLiveness;
 let _parentDeathExit = (code) => process.exit(code);
-let _injectedGetProcessStartTime;
-
-function _getProcessStartTime(pid) {
-  const fn = _injectedGetProcessStartTime ?? getProcessStartTime;
-  return fn(pid);
-}
 
 const DEFAULT_INTERVAL_SEC = 20;
 const MARKER_RE = /^<!--\s*gh-maestro\s+(\{.*\})\s*-->/;
@@ -426,7 +418,7 @@ function main(argsOverride, opts = {}) {
     // leaseとPID registryへ同じプロセスidentityを保存するため、起動時刻は常駐起動時に
     // 一度だけ捕捉する。取得できない場合はunknownのまま常駐leaseを作成せず、現在時刻を
     // identityの代替値にしない。
-    residentIdentity = captureProcessIdentity(process.pid, _getProcessStartTime);
+    residentIdentity = _parentLiveness.captureSelf();
     const handoffTargets = () => {
       const workerNameForRegistry = self !== 'orchestrator' ? self : null;
       const dup = findRunningInstance(workspace, { script: 'msg-poll.js', workerName: workerNameForRegistry });
@@ -438,7 +430,7 @@ function main(argsOverride, opts = {}) {
         role,
         handoff: force,
         handoffStopTargets: handoffTargets,
-        identity: residentIdentity,
+        processRef: residentIdentity,
       });
       if (!res.acquired) {
         // 引き継ぎ期限超過（--force で既存所有者が終了しなかった）
@@ -528,7 +520,7 @@ function main(argsOverride, opts = {}) {
     // handleParentSessionDeath が stderr へ出す。
     if (!checkParent()) {
       lifecycleCleanup(workspace);
-      handleParentSessionDeath({ workspace, scriptName: 'msg-poll.js', role, sessionPid });
+      handleParentSessionDeath({ workspace, scriptName: 'msg-poll.js', role, sessionPid, processRef: residentIdentity });
       _parentDeathExit(PARENT_DEATH_EXIT_CODE);
     }
 
@@ -1001,8 +993,7 @@ if (require.main === module) {
   // （registry は表示・診断用途。排他の正本は role lease であり、これは二重化しない）
 
   registerProcess(result.workspace, {
-    pid: result.residentIdentity.pid,
-    startTime: result.residentIdentity.startTime,
+    processRef: result.residentIdentity,
     script: 'msg-poll.js',
     workerName: result.self !== 'orchestrator' ? result.self : null,
   });
@@ -1047,7 +1038,6 @@ if (require.main === module) {
 // ── テスト用 export ──────────────────────────────────────────────────────
 
 module.exports = {
-  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setSleep: (fn) => { _sleep = fn; },

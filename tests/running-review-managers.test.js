@@ -101,7 +101,7 @@ test('listRunningReviewManagers: 旧 PID-only は判定不能として保持す�
     const file = runningPath(ws, 42);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, '12345\n');
-    rrm._setLiveness(dead());
+    rrm._setLiveness(live());
     assert.throws(() => rrm.listRunningReviewManagers(ws, { cleanupStale: true }), /判定できません/);
     assert.equal(fs.readFileSync(file, 'utf8'), '12345\n');
   } finally { fs.rmSync(ws, { recursive: true, force: true }); }
@@ -168,7 +168,9 @@ test('writeRunningReviewManager: PID＋起動時刻JSONを原子的に書く', (
   const ws = tmpWorkspace();
   try {
     const file = runningPath(ws, 42);
-    rrm.writeRunningReviewManager(file, { pid: '12345', startTime: '2026-08-28T00:00:00.000Z' });
+    const checker = live();
+    rrm._setLiveness(checker);
+    rrm.writeRunningReviewManager(file, checker.captureProcess(12345));
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), {
       pid: 12345,
       startTime: '2026-08-28T00:00:00.000Z',
@@ -183,10 +185,9 @@ test('removeRunningReviewManagerIfOwned: 別所有者のファイルは削除し
   const ws = tmpWorkspace();
   try {
     const file = writeRecord(ws, 42, 12345, '2026-08-28T00:00:00.000Z');
-    const result = rrm.removeRunningReviewManagerIfOwned(file, {
-      pid: 67890,
-      startTime: '2026-08-28T00:01:00.000Z',
-    });
+    const checker = live();
+    rrm._setLiveness(checker);
+    const result = rrm.removeRunningReviewManagerIfOwned(file, checker.captureProcess(67890));
     assert.equal(result.released, false);
     assert.ok(fs.existsSync(file));
   } finally {

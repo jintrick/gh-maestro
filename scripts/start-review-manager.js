@@ -112,7 +112,7 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
   // manager.runningが本体書き込み前の窓でも、予約を持つ起動だけが先へ進める。
   const self = checker();
   const startup = acquireReviewManagerStartup(lockFile, {
-    ...self.writeRef({}, self.captureSelf()),
+    processRef: self.captureSelf(),
     liveness: self,
   });
   if (!startup.acquired) {
@@ -161,8 +161,7 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
   // manager.runningはここでは書かない。本体が書き込んだ後に起動予約を
   // 解放できるよう、shimのPIDだけをmanager.startingへ引き渡す。
   const transferred = transferReviewManagerStartup(lockFile, startup.token, {
-    pid: launched.pid,
-    startTime: launched.startTime,
+    processRef: launched.processRef,
   });
   // 本体が先にmanager.runningを書いて予約を解放した場合はmissingになる。
   // それは正常な並行実行なので、二重起動扱いにはしない。

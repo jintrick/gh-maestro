@@ -237,9 +237,33 @@ function verifyProcessIdentity(pid, registeredMeta, opts = {}) {
 function createLiveness(deps = {}) {
   const probe = deps.probePid || ((pid) => {
     try { process.kill(pid, 0); return 'alive'; }
-    catch (error) { return error && error.code === 'ESRCH' ? 'dead' : 'unknown'; }
+    catch (error) {
+      if (error && error.code === 'ESRCH') return 'dead';
+      if (error && error.code === 'EPERM') return 'alive';
+      return 'unknown';
+    }
   });
   const readStartTime = deps.readStartTime || getProcessStartTime;
+  const startTimeCacheMs = deps.startTimeCacheMs ?? 0;
+  const now = deps.now || Date.now;
+  const startTimeCache = new Map();
+  function observeStartTime(pid, expectedStartTime) {
+    if (!(startTimeCacheMs > 0)) return readStartTime(pid, expectedStartTime);
+    const observedAt = now();
+    const cached = startTimeCache.get(pid);
+    const age = cached ? observedAt - cached.observedAt : Infinity;
+    const fresh = cached && Number.isFinite(observedAt) && Number.isFinite(cached.observedAt)
+      && age >= 0 && age < startTimeCacheMs;
+    const expectedMatches = !expectedStartTime || (cached && (
+      cached.startTime
+        ? startTimesMatch(expectedStartTime, cached.startTime)
+        : cached.expectedStartTime && startTimesMatch(expectedStartTime, cached.expectedStartTime)
+    ));
+    if (fresh && expectedMatches) return cached.startTime;
+    const startTime = readStartTime(pid, expectedStartTime) || null;
+    startTimeCache.set(pid, { startTime, expectedStartTime: expectedStartTime || null, observedAt });
+    return startTime;
+  }
   const encode = (pid, startTime) => Buffer.from(JSON.stringify({ v: 1, pid, startTime })).toString('base64url');
   const decode = (ref) => {
     try {
@@ -257,6 +281,14 @@ function createLiveness(deps = {}) {
     if (!Number.isInteger(n) || n <= 0) throw new Error('invalid process identifier');
     let startTime = null;
     try { startTime = readStartTime(n) || null; } catch { /* unknown */ }
+    if (startTimeCacheMs > 0) {
+      const observedAt = now();
+      startTimeCache.set(n, {
+        startTime,
+        expectedStartTime: startTime,
+        observedAt,
+      });
+    }
     return encode(n, startTime);
   }
   function readRef(record, format = 'default') {
@@ -279,15 +311,20 @@ function createLiveness(deps = {}) {
   function observe(ref) {
     const value = decode(ref);
     if (!value) return 'unknown';
+    if (!value.startTime || Number.isNaN(new Date(value.startTime).getTime())) return 'unknown';
     let state;
     try { state = probe(value.pid); } catch { return 'unknown'; }
-    if (!value.startTime) return 'unknown';
-    if (state === 'dead') return 'dead';
+    if (state === 'dead') {
+      startTimeCache.delete(value.pid);
+      return 'dead';
+    }
     if (state !== 'alive') return 'unknown';
     let actual;
-    try { actual = readStartTime(value.pid, value.startTime); } catch { return 'unknown'; }
+    try { actual = observeStartTime(value.pid, value.startTime); } catch { return 'unknown'; }
     if (!actual || Number.isNaN(new Date(actual).getTime()) || Number.isNaN(new Date(value.startTime).getTime())) return 'unknown';
-    return startTimesMatch(value.startTime, actual) ? 'alive' : 'dead';
+    if (startTimesMatch(value.startTime, actual)) return 'alive';
+    startTimeCache.delete(value.pid);
+    return 'dead';
   }
   function sameRef(a, b) {
     const left = decode(a); const right = decode(b);
@@ -304,7 +341,7 @@ function createLiveness(deps = {}) {
       if (status !== 'alive') { consecutiveDead = 0; return true; }
       if (value.startTime) {
         let actual;
-        try { actual = readStartTime(value.pid, value.startTime); } catch { actual = null; }
+        try { actual = observeStartTime(value.pid, value.startTime); } catch { actual = null; }
         if (actual && !Number.isNaN(new Date(actual).getTime())
             && !Number.isNaN(new Date(value.startTime).getTime())
             && !startTimesMatch(value.startTime, actual)) return false;
@@ -317,5 +354,5 @@ function createLiveness(deps = {}) {
 }
 const liveness = createLiveness();
 
-module.exports = { createLiveness, ...liveness, isProcessAlive, getProcessStartTime, captureProcessIdentity, startTimesMatch, createDeadManSwitch, verifyProcessIdentity };
+module.exports = { createLiveness, ...liveness };
 

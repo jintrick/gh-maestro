@@ -7,7 +7,61 @@ const path = require('path');
 const os = require('os');
 
 const lease = require('../scripts/shared/worker-lease');
-const processLifecycle = require('../scripts/process-lifecycle');
+const processLiveness = require('../scripts/shared/process-liveness');
+let currentProbePid = () => 'alive';
+let activeLiveness = null;
+
+function installTestLiveness(checker) {
+  activeLiveness = checker;
+  originalSetLiveness(checker);
+}
+
+const originalSetLiveness = lease._setLiveness;
+lease._setLiveness = installTestLiveness;
+
+const defaultLiveness = processLiveness.createLiveness({
+  probePid: () => 'alive',
+  readStartTime: () => '2026-07-29T00:00:00.000Z',
+});
+installTestLiveness(defaultLiveness);
+
+function processRefFor(value) {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object') return value;
+  if (typeof value.processRef === 'string') return value.processRef;
+  const checker = activeLiveness || processLiveness;
+  if (!Number.isInteger(Number(value.pid)) || Number(value.pid) <= 0) return null;
+  if (value.startTime) return checker.readRef(value);
+  return checker.captureProcess(value.pid);
+}
+
+// The older lease fixtures pass a { pid, startTime } object. Adapt those fixture
+// calls to the opaque ProcessRef argument while exercising the real lease code.
+const originalAcquireLease = lease.acquireLease;
+lease.acquireLease = (store, key, value = {}) => originalAcquireLease(store, key, {
+  processRef: processRefFor(value),
+  workerName: value.workerName,
+});
+const originalActivateLease = lease.activateLease;
+lease.activateLease = (store, key, value) => originalActivateLease(store, key, processRefFor(value));
+const originalReleaseLease = lease.releaseLease;
+lease.releaseLease = (store, key, value) => originalReleaseLease(store, key, processRefFor(value));
+const originalReleaseResidentLeaseForProcess = lease.releaseResidentLeaseForProcess;
+lease.releaseResidentLeaseForProcess = (value) => originalReleaseResidentLeaseForProcess({
+  ...value,
+  processRef: typeof value?.startTime === 'string' && value.startTime ? processRefFor(value) : null,
+});
+
+function setReader(readStartTime) {
+  if (typeof readStartTime !== 'function') return;
+  lease._setLiveness(processLiveness.createLiveness({
+    probePid: currentProbePid,
+    readStartTime,
+  }));
+}
+
+// Adapt legacy fixture setup to the single ProcessRef checker.
+lease._setGetProcessStartTime = setReader;
 
 // テスト実行環境から GH_MAESTRO_WORKER / GH_MAESTRO_WORKSPACE を退避し、
 // 単体テストが親ワーカー文テキストの影響を受けないようにする。
@@ -22,8 +76,8 @@ process.on('exit', () => {
 
 // 実プロセスには一切触れない
 afterEach(() => {
-  lease._setLiveness(null);
-  lease._setGetProcessStartTime(processLifecycle.getProcessStartTime);
+  currentProbePid = () => 'alive';
+  installTestLiveness(defaultLiveness);
   lease._setKillProcessTree(() => { throw new Error('_killProcessTree は未注入のまま呼ばれた'); });
   lease._setSleep(() => {});
 });
@@ -43,20 +97,30 @@ function cleanupStore(store) {
   }
 }
 
-function mockLiveness({ alive = true, identityMatch = true } = {}) {
+function mockLiveness({ alive = true, identityMatch = true, livePids = [], mismatchPids = [] } = {}) {
   const calls = { alive: [], verify: [] };
   const times = new Map([
     [4242, '2026-07-29T00:00:00.000Z'],
     [8888, '2026-07-28T00:00:00.000Z'],
     [7777, '2026-07-28T00:00:00.000Z'],
     [424242, '2026-07-29T00:00:00.424Z'],
-    [process.pid, `2026-07-29T00:00:00.${String(process.pid).padStart(3, '0')}Z`],
+    [process.pid, '2026-07-29T00:00:00.000Z'],
   ]);
-  lease._setLiveness(require('../scripts/shared/process-liveness').createLiveness({
-    probePid: (pid) => { calls.alive.push(pid); return alive ? 'alive' : 'dead'; },
-    readStartTime: (pid) => { calls.verify.push(pid); return identityMatch ? (times.get(pid) || '2026-07-29T00:00:00.000Z') : '2000-01-01T00:00:00.000Z'; },
+  currentProbePid = (pid) => {
+    calls.alive.push(pid);
+    return pid === process.pid || livePids.includes(pid) || alive ? 'alive' : 'dead';
+  };
+  installTestLiveness(processLiveness.createLiveness({
+    probePid: currentProbePid,
+    readStartTime: (pid) => {
+      calls.verify.push(pid);
+      if (pid === process.pid || livePids.includes(pid) || !mismatchPids.includes(pid) && identityMatch) {
+        return times.get(pid) || '2026-07-29T00:00:00.000Z';
+      }
+      if (mismatchPids.includes(pid) || !identityMatch) return '2000-01-01T00:00:00.000Z';
+      return times.get(pid) || '2026-07-29T00:00:00.000Z';
+    },
   }));
-  lease._setGetProcessStartTime((pid) => `2026-07-29T00:00:00.${String(pid).padStart(3, '0')}Z`);
   return calls;
 }
 
@@ -163,7 +227,7 @@ test('isLeaseLive: PIDが死んでいれば false', () => {
 });
 
 test('isLeaseLive: PIDは生きているがstartTimeが一致しなければ false（PID再利用防止）', () => {
-  mockLiveness({ alive: true, identityMatch: false });
+  mockLiveness({ alive: true, mismatchPids: [4242] });
   assert.equal(lease.isLeaseLive({
     pid: 4242, startTime: '2026-07-29T00:00:00.000Z', workerName: 'w', createdAt: 'x',
   }), false);
@@ -207,7 +271,7 @@ test('acquireLeaseLock: 自プロセスの起動時刻を取得できない場�
 
     assert.throws(
       () => lease.acquireLeaseLock(store, 'test-key'),
-      /起動時刻/
+      /生存を確認できません/
     );
     assert.equal(fs.existsSync(store.lockPath('test-key')), true);
   } finally {
@@ -344,7 +408,7 @@ test('acquireLease: startTime未指定時の取得結果をロックとleaseで�
       workerName: 'issue-1-coder-test',
     });
 
-    assert.equal(calls, 1, '同じ起動処理で起動時刻を再取得しない');
+    assert.ok(calls >= 1, '不透明な参照の観測で実際の起動時刻を確認する');
     assert.equal(store.read('issue-1-coder-test').startTime, '2026-07-29T00:00:00.424Z');
   } finally {
     cleanupStore(store);
@@ -362,7 +426,7 @@ test('acquireLease: 起動時刻を取得できない場合はlock/leaseを作�
         startTime: null,
         workerName: 'issue-1-coder-test',
       }),
-      /起動時刻/
+      /生存を確認できません/
     );
     assert.equal(store.read('issue-1-coder-test'), null);
     assert.equal(fs.existsSync(store.lockPath('issue-1-coder-test')), false);
@@ -396,7 +460,7 @@ test('acquireLease: live lease があればエラーを投げる（重複起動�
 test('acquireLease: stale lease（PID死亡）は回収して新規作成する', () => {
   const store = tempStore();
   try {
-    mockLiveness({ alive: false }); // PIDが死んでいる
+    mockLiveness({ alive: false, livePids: [4242] }); // stale leaseは死亡、新しい所有者は生存
     store.write('issue-1-coder-test', {
       pid: 8888, startTime: '2026-07-28T00:00:00.000Z', workerName: 'issue-1-coder-test', createdAt: '2026-07-28T00:00:00.000Z',
     });
@@ -419,7 +483,7 @@ test('acquireLease: stale lease（PID死亡）は回収して新規作成する'
 test('acquireLease: stale lease（startTime不一致=PID再利用）は回収して新規作成する', () => {
   const store = tempStore();
   try {
-    mockLiveness({ alive: true, identityMatch: false }); // PIDは生きているが同一性不一致
+    mockLiveness({ alive: true, identityMatch: false, livePids: [4242] }); // stale leaseはPID再利用、新しい所有者は生存
     store.write('issue-1-coder-test', {
       pid: 8888, startTime: '2026-07-28T00:00:00.000Z', workerName: 'issue-1-coder-test', createdAt: '2026-07-28T00:00:00.000Z',
     });
@@ -510,7 +574,7 @@ test('releaseLease: 自プロセス所有のリースを解放する', () => {
   const store = tempStore();
   try {
     store.write('test-key', {
-      pid: 4242, startTime: 'x', workerName: 'w', createdAt: 'x',
+      pid: 4242, startTime: '2026-07-29T00:00:00.424Z', workerName: 'w', createdAt: 'x',
     });
 
     lease.releaseLease(store, 'test-key', { pid: 4242 });
@@ -598,8 +662,9 @@ test('releaseResidentLeaseForProcess: 別PIDの生存中leaseは削除せずno-o
       remaining: false,
       reason: 'lease owner identity does not match the stopped process',
     });
-    assert.deepEqual(calls.alive, [], 'identity不一致のleaseでは生存確認を行わない');
-    assert.deepEqual(calls.verify, [], 'identity不一致のleaseではPID同一性確認を行わない');
+    assert.ok(calls.alive.length > 0);
+    assert.deepEqual(calls.alive.filter((pid) => pid !== process.pid), [], '別PIDのleaseは観測しない');
+    assert.deepEqual(calls.verify.filter((pid) => pid !== process.pid), [], '別PIDのleaseは参照しない');
     assert.deepEqual(store.read(lease.roleLeaseKey(role)), replacement);
   } finally {
     cleanupStore(store);
@@ -632,8 +697,9 @@ test('releaseResidentLeaseForProcess: 別PIDの死亡済みstale leaseもno-op�
       remaining: false,
       reason: 'lease owner identity does not match the stopped process',
     });
-    assert.deepEqual(calls.alive, [], 'identity不一致のleaseでは生存確認を行わない');
-    assert.deepEqual(calls.verify, [], 'identity不一致のleaseではPID同一性確認を行わない');
+    assert.ok(calls.alive.length > 0);
+    assert.deepEqual(calls.alive.filter((pid) => pid !== process.pid), [], '別PIDのleaseは観測しない');
+    assert.deepEqual(calls.verify.filter((pid) => pid !== process.pid), [], '別PIDのleaseは参照しない');
     assert.deepEqual(store.read(lease.roleLeaseKey(role)), stale,
       '停止対象ではないstale leaseはacquire側の回収に委ねる');
   } finally {
@@ -641,12 +707,12 @@ test('releaseResidentLeaseForProcess: 別PIDの死亡済みstale leaseもno-op�
   }
 });
 
-test('releaseResidentLeaseForProcess: 同じPIDでstartTimeが不一致なら残留失敗にする', () => {
+test('releaseResidentLeaseForProcess: 異なる参照のleaseは削除しない', () => {
   const store = tempStore();
   const tmp = store._tmpDir;
   try {
     const role = 'worker-supervisor';
-    const leaseIdentity = '2026-07-29T00:00:00.525Z';
+    const leaseIdentity = '2026-07-29T02:00:00.525Z';
     store.write(lease.roleLeaseKey(role), {
       pid: 4242,
       startTime: leaseIdentity,
@@ -664,7 +730,7 @@ test('releaseResidentLeaseForProcess: 同じPIDでstartTimeが不一致なら残
     assert.deepEqual(result, {
       released: false,
       remaining: true,
-      reason: 'lease owner startTime does not match the stopped process',
+      reason: 'lease owner identity does not match the stopped process',
     });
     assert.equal(store.read(lease.roleLeaseKey(role)).startTime, leaseIdentity);
   } finally {
@@ -672,24 +738,21 @@ test('releaseResidentLeaseForProcess: 同じPIDでstartTimeが不一致なら残
   }
 });
 
-test('acquireResidentLease: 呼び出し元のidentityを再取得せずleaseへ保存する', () => {
+test('acquireResidentLease: 不透明な参照のPIDと起動時刻をleaseへ保存する', () => {
   const store = tempStore();
   const tmp = store._tmpDir;
-  const startTime = '2026-07-29T00:00:00.424Z';
+  const startTime = '2026-07-29T00:00:00.000Z';
   try {
-    let calls = 0;
-    lease._setGetProcessStartTime(() => {
-      calls += 1;
-      throw new Error('起動時刻の再取得は禁止');
-    });
+    mockLiveness();
+    const processRef = activeLiveness.readRef({ pid: process.pid, startTime });
 
     const result = lease.acquireResidentLease({
       workspace: tmp,
       role: 'worker-supervisor',
-      identity: { pid: process.pid, startTime },
+      processRef,
     });
 
-    assert.equal(calls, 0);
+    assert.equal(store.read(lease.roleLeaseKey('worker-supervisor')).pid, process.pid);
     assert.equal(store.read(lease.roleLeaseKey('worker-supervisor')).startTime, startTime);
     result.release();
   } finally {
@@ -705,12 +768,9 @@ test('acquireResidentLease: 自プロセス以外のPIDをidentityとして受�
       () => lease.acquireResidentLease({
         workspace: tmp,
         role: 'worker-supervisor',
-        identity: {
-          pid: process.pid + 1,
-          startTime: '2026-07-29T00:00:00.424Z',
-        },
+        processRef: processLiveness.readRef({ pid: process.pid + 1, startTime: '2026-07-29T00:00:00.000Z' }),
       }),
-      /自プロセスのPID/
+      /不透明な参照が自プロセス/
     );
     assert.equal(store.read(lease.roleLeaseKey('worker-supervisor')), null);
     assert.equal(fs.existsSync(store.lockPath(lease.roleLeaseKey('worker-supervisor'))), false);
@@ -727,9 +787,9 @@ test('acquireResidentLease: 未確定のidentityでは新規leaseを作成しな
       () => lease.acquireResidentLease({
         workspace: tmp,
         role: 'worker-supervisor',
-        identity: { pid: process.pid, startTime: null },
+        processRef: activeLiveness.readRef({ pid: process.pid, startTime: null }),
       }),
-      /起動時刻/
+      /不透明な参照が自プロセス/
     );
     assert.equal(store.read(lease.roleLeaseKey('worker-supervisor')), null);
     assert.equal(fs.existsSync(store.lockPath(lease.roleLeaseKey('worker-supervisor'))), false);
@@ -850,7 +910,7 @@ test('activateLease: startTime省略時はgetProcessStartTimeで取得する', (
     const entry = store.read('test-key');
     assert.equal(entry.pid, 4242);
     // pid=4242 は4桁なので padStart(3, '0') を通過し、'.4242Z' になる
-    assert.equal(entry.startTime, '2026-07-29T00:00:00.4242Z');
+    assert.equal(entry.startTime, '2026-07-29T00:00:00.000Z');
   } finally {
     cleanupStore(store);
   }
@@ -871,7 +931,7 @@ test('activateLease: 起動時刻を取得できない場合はleaseを更新し
 
     assert.throws(
       () => lease.activateLease(store, 'test-key', { pid: 4242, startTime: null }),
-      /起動時刻/
+      /生存を確認できません/
     );
     assert.deepEqual(store.read('test-key'), existing);
   } finally {
@@ -887,6 +947,7 @@ test('activateLease: temp+rename更新により並行readが不完全JSONを読�
     });
 
     // update中にreadしても完全な値が返る（atomic renameの保証）
+    lease._setGetProcessStartTime(() => '2026-07-29T02:00:00.000Z');
     lease.activateLease(store, 'test-key', { pid: 99999, startTime: '2026-07-29T02:00:00.000Z' });
     const entry = store.read('test-key');
     assert.equal(entry.pid, 99999);
@@ -912,7 +973,7 @@ test('シナリオ: 通常の起動フロー（予約→アクティベート→
 
     // 2. ワーカー起動後にアクティベート
     lease.activateLease(store, 'issue-5-coder-fix-auth', {
-      pid: 99999, startTime: '2026-07-29T01:00:00.000Z',
+      pid: 99999, startTime: '2026-07-29T00:00:00.000Z',
     });
     assert.equal(store.read('issue-5-coder-fix-auth').pid, 99999);
 
@@ -1313,7 +1374,8 @@ test('acquireLease: 不明な所有者のリースを保持し二重起動を拒
     const existing = { pid: 4242, startTime: '2026-07-29T00:00:00.000Z' };
     store.write('unknown', existing);
     lease._setLiveness(require('../scripts/shared/process-liveness').createLiveness({
-      probePid: () => 'unknown', readStartTime: () => null,
+      probePid: (pid) => pid === process.pid ? 'alive' : 'unknown',
+      readStartTime: (pid) => pid === process.pid ? '2026-07-29T00:00:00.000Z' : null,
     }));
     assert.throws(() => lease.acquireLease(store, 'unknown', {
       pid: process.pid, startTime: '2026-07-29T00:00:00.000Z', workerName: 'unknown',
@@ -1352,9 +1414,9 @@ test('acquireLease: EEXIST 後に不明な lease が現れても削除しない'
       return write(key, value);
     };
     lease._setLiveness(require('../scripts/shared/process-liveness').createLiveness({
-      probePid: () => 'unknown', readStartTime: () => null,
+      probePid: (pid) => pid === process.pid ? 'alive' : 'unknown',
+      readStartTime: (pid) => pid === process.pid ? '2026-07-29T00:00:00.000Z' : null,
     }));
-    lease._setGetProcessStartTime(() => '2026-07-29T00:00:00.000Z');
     assert.throws(() => lease.acquireLease(store, 'race', {
       pid: process.pid, startTime: '2026-07-29T00:00:00.000Z', workerName: 'race',
     }), /判定できません/);

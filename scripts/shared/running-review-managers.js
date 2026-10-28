@@ -42,16 +42,14 @@ function createStartupToken() {
   return crypto.randomBytes(16).toString('hex');
 }
 
-function normalizeStartupMarker({ pid, startTime, token }) {
-  const normalizedPid = normalizePid(pid);
-  if (normalizedPid === null) throw new Error('Review Manager起動予約のPIDが不正です');
-  if (startTime != null && (typeof startTime !== 'string' || startTime.trim() === '')) {
-    throw new Error('Review Manager起動予約の起動時刻が不正です');
-  }
+function normalizeStartupMarker({ processRef, token }, checker = checkerFor()) {
+  if (typeof processRef !== 'string' || !processRef) throw new Error('Review Manager起動予約の参照が不正です');
+  const owner = checker.writeRef({}, processRef);
+  if (!owner || normalizePid(owner.pid) === null) throw new Error('Review Manager起動予約のPIDが不正です');
   if (typeof token !== 'string' || token === '') {
     throw new Error('Review Manager起動予約のトークンが不正です');
   }
-  return { pid: normalizedPid, startTime: startTime || null, token };
+  return { ...owner, token };
 }
 
 function writeStartupMarkerExclusive(startingPath, marker) {
@@ -69,18 +67,19 @@ function writeStartupMarkerExclusive(startingPath, marker) {
  *
  * @param {string} runningPath manager.runningのパス
  * @param {object} [opts]
- * @param {number|string} [opts.pid] 予約を作るプロセスのPID
- * @param {string|null} [opts.startTime] 予約を作るプロセスの起動時刻
+ * @param {string} [opts.processRef] 予約を作るプロセスの不透明な参照
  * @param {string} [opts.token] 本体へ引き渡すトークン
  * @returns {{acquired:boolean,active?:boolean,error?:Error,path:string,token?:string}}
  */
 function acquireReviewManagerStartup(runningPath, opts = {}) {
   const startingPath = reviewManagerStartingPath(runningPath);
+  const checker = checkerFor(opts);
+  const processRef = opts.processRef || checker.captureSelf();
+  if (checker.observe(processRef) !== 'alive') throw new Error('Review Manager起動予約の所有者を確認できません');
   const marker = normalizeStartupMarker({
-    pid: opts.pid == null ? process.pid : opts.pid,
-    startTime: opts.startTime,
+    processRef,
     token: opts.token || createStartupToken(),
-  });
+  }, checker);
 
   try {
     writeStartupMarkerExclusive(startingPath, marker);
@@ -117,7 +116,7 @@ function acquireReviewManagerStartup(runningPath, opts = {}) {
  *
  * @param {string} runningPath manager.runningのパス
  * @param {string} token 起動側が作成した予約トークン
- * @param {{pid:number|string,startTime?:string|null}} owner shimのPID・起動時刻
+ * @param {{processRef:string}} owner shimの不透明な参照
  * @returns {{transferred:boolean,missing?:boolean,reason?:string}}
  */
 function transferReviewManagerStartup(runningPath, token, owner) {
@@ -305,7 +304,7 @@ function finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reas
  * @param {'throw'|'skip'} [opts.onError='throw'] エラー時の動作
  * @param {boolean} [opts.cleanupStale=false] staleファイルを内容比較後に削除するか
  * @param {(info:{pr:string|null,pid:number,path:string,legacy:true})=>void} [opts.onLegacyLive]
- * @returns {{status:'missing'|'live'|'legacy-live'|'stale'|'error', pr:string|null, pid?:number, startTime?:string|null, legacy?:boolean, reason?:string, error?:Error}}
+ * @returns {{status:'missing'|'live'|'legacy-live'|'stale'|'error', pr:string|null, pid?:number, startTime?:string|null, processRef?:string, legacy?:boolean, reason?:string, error?:Error}}
  */
 function inspectRunningReviewManager(runningPath, opts = {}) {
   const onError = opts.onError || 'throw';
@@ -335,7 +334,10 @@ function inspectRunningReviewManager(runningPath, opts = {}) {
   if (state === 'dead') {
     return finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reason: 'process not alive or identity mismatch' });
   }
-  return { status: 'live', pr, pid: record.pid, startTime: record.startTime, legacy: false };
+  return {
+    status: 'live', pr, pid: record.pid, startTime: record.startTime,
+    processRef: checker.readRef(record), legacy: false,
+  };
 
 }
 
@@ -345,17 +347,15 @@ function inspectRunningReviewManager(runningPath, opts = {}) {
  * 呼び出し側で現在時刻を捏造しない。
  *
  * @param {string} runningPath
- * @param {{pid:number|string,startTime?:string|null}} record
+ * @param {string|{processRef:string}} record
  * @returns {string}
  */
 function writeRunningReviewManager(runningPath, record) {
-  const pid = normalizePid(record && record.pid);
-  if (pid === null) throw new Error(`manager.running のPIDが不正です: ${runningPath}`);
-  const startTime = record && record.startTime != null ? record.startTime : null;
-  if (startTime !== null && (typeof startTime !== 'string' || startTime.trim() === '')) {
-    throw new Error(`manager.running の起動時刻が不正です: ${runningPath}`);
-  }
-  atomicWriteJson(runningPath, { pid, startTime });
+  const processRef = typeof record === 'string' ? record : record && record.processRef;
+  if (typeof processRef !== 'string' || !processRef) throw new Error(`manager.running の参照が不正です: ${runningPath}`);
+  const checker = checkerFor();
+  if (checker.observe(processRef) !== 'alive') throw new Error(`manager.running の所有者を確認できません: ${runningPath}`);
+  atomicWriteJson(runningPath, checker.writeRef({}, processRef));
   return runningPath;
 }
 
@@ -363,12 +363,12 @@ function writeRunningReviewManager(runningPath, record) {
  * 指定した所有者の manager.running だけを、内容比較後に削除する。
  *
  * @param {string} runningPath
- * @param {{pid:number|string,startTime?:string|null}} owner
+ * @param {{processRef:string}} owner
  * @returns {{released:boolean,missing?:boolean,changed?:boolean,reason?:string}}
  */
 function removeRunningReviewManagerIfOwned(runningPath, owner) {
-  const ownerPid = normalizePid(owner && owner.pid);
-  if (ownerPid === null) return { released: false, reason: 'owner pid unavailable' };
+  const processRef = typeof owner === 'string' ? owner : owner && owner.processRef;
+  if (typeof processRef !== 'string' || !processRef) return { released: false, reason: 'owner reference unavailable' };
 
   let raw;
   try {
@@ -384,12 +384,8 @@ function removeRunningReviewManagerIfOwned(runningPath, owner) {
   } catch (e) {
     return { released: false, reason: e.message };
   }
-  if (record.pid !== ownerPid) {
-    return { released: false, reason: 'different owner' };
-  }
-
   const checker = checkerFor();
-  if (!checker.sameRef(checker.readRef(owner), checker.readRef(record))) {
+  if (!checker.sameRef(processRef, checker.readRef(record))) {
     return { released: false, reason: 'different process identity' };
   }
 

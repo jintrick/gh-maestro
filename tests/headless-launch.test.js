@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const headlessLaunch = require('../scripts/shared/headless-launch');
+const processLiveness = require('../scripts/shared/process-liveness');
 const { launchAgentHeadless, workerLogPath, SHIM_PATH } = headlessLaunch;
 const { runShim } = require('../scripts/shared/headless-shim');
 const { buildWorkerEnv } = require('../scripts/shared/worker-env');
@@ -56,12 +57,15 @@ function fakeSpawn({ pid = 4242, noPid = false, throwError = null } = {}) {
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-headless-test-'));
   spawnCalls = [];
-  headlessLaunch._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+  headlessLaunch._setLiveness(processLiveness.createLiveness({
+    probePid: () => 'alive',
+    readStartTime: () => '2026-07-25T00:00:00.000Z',
+  }));
 });
 
 afterEach(() => {
   headlessLaunch._setSpawn(require('../scripts/shared/child-process').spawn);
-  headlessLaunch._setGetProcessStartTime(require('../scripts/process-lifecycle').getProcessStartTime);
+  headlessLaunch._setLiveness(null);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -242,23 +246,31 @@ test('launchAgentHeadless: 既存ログを truncate せず追記モードで開�
 
 // ── launchAgentHeadless: 戻り値 ──────────────────────────────────────────────
 
-test('launchAgentHeadless: pid・startTime・logPath を返す（PID再利用の誤判定を防ぐため startTime も返す）', () => {
+test('launchAgentHeadless: pid・不透明なprocessRef・logPathを返す', () => {
   headlessLaunch._setSpawn(fakeSpawn({ pid: 31337 }));
   const logPath = path.join(tmpDir, 'w.log');
 
   const result = launchAgentHeadless({ argv: ['codex', 'exec'], cwd: tmpDir, logPath });
 
-  assert.deepEqual(result, { pid: 31337, startTime: '2026-07-25T00:00:00.000Z', logPath });
+  assert.deepEqual(result, {
+    pid: 31337,
+    processRef: processLiveness.readRef({ pid: 31337, startTime: '2026-07-25T00:00:00.000Z' }),
+    logPath,
+  });
 });
 
-test('launchAgentHeadless: startTime が取得できなくても null を返して起動自体は成功扱いにする', () => {
+test('launchAgentHeadless: 参照の取得に失敗しても未知状態を返し、起動自体は成功扱いにする', () => {
   headlessLaunch._setSpawn(fakeSpawn({ pid: 99 }));
-  headlessLaunch._setGetProcessStartTime(() => null);
+  const checker = processLiveness.createLiveness({
+    probePid: () => 'alive',
+    readStartTime: () => null,
+  });
+  headlessLaunch._setLiveness(checker);
 
   const result = launchAgentHeadless({ argv: ['codex', 'exec'], cwd: tmpDir, logPath: path.join(tmpDir, 'w.log') });
 
   assert.equal(result.pid, 99);
-  assert.equal(result.startTime, null);
+  assert.equal(checker.observe(result.processRef), 'unknown');
 });
 
 test("launchAgentHeadless: 子の 'error' イベントにリスナーを登録する（未登録だと呼び出し元ごと落ちる）", () => {

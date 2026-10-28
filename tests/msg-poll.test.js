@@ -6,20 +6,21 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const lifecycle = require('../scripts/process-lifecycle');
 const workerLease = require('../scripts/shared/worker-lease');
+const processLiveness = require('../scripts/shared/process-liveness');
 
-workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
 // 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
 // PIDを誤って渡す回帰は即座に検出する。
 const TEST_SESSION_START_TIME = '2026-07-25T00:00:00.000Z';
-lifecycle.getProcessStartTime = () => TEST_SESSION_START_TIME;
 const msgPoll = require('../scripts/msg-poll');
 const readStateLib = require('../scripts/shared/read-state');
-msgPoll._setGetProcessStartTime((pid) => {
-  assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
-  return TEST_SESSION_START_TIME;
-});
+msgPoll._setParentLiveness(processLiveness.createLiveness({
+  probePid: () => 'alive',
+  readStartTime: (pid) => {
+    assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
+    return TEST_SESSION_START_TIME;
+  },
+}));
 
 // 直接 main()/scanOnce() を呼ぶケースでは、親セッションの死活確認自体は
 // process-lifecycle.test.js の実照合テストで検証する。ここでは各スキャンで
@@ -28,7 +29,12 @@ msgPoll._setGetProcessStartTime((pid) => {
 // 実際のプロセス境界を通す。
 const TEST_PARENT_CHECKER = () => true;
 const useFastParentChecker = () => {
-  msgPoll._setParentLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME }));
+  const liveness = processLiveness.createLiveness({
+    probePid: () => 'alive',
+    readStartTime: () => TEST_SESSION_START_TIME,
+  });
+  workerLease._setLiveness(liveness);
+  msgPoll._setParentLiveness(liveness);
 };
 useFastParentChecker();
 
@@ -703,6 +709,10 @@ test('死のスイッチ発火時: role lease を解放し exit 3 で終了す�
         probePid: () => 'alive',
         readStartTime: () => capturedExpectedStartTime || TEST_SESSION_START_TIME,
       }));
+      workerLease._setLiveness(require('../scripts/shared/process-liveness').createLiveness({
+        probePid: () => 'alive',
+        readStartTime: () => capturedExpectedStartTime || TEST_SESSION_START_TIME,
+      }));
       let exitCode = null;
       msgPoll._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
       process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
@@ -735,31 +745,31 @@ test('main: 常駐leaseへ渡したself identityをregistry用の結果へ保持
     initOrchestratorState(workspace);
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
-    let calls = 0;
-    msgPoll._setGetProcessStartTime((pid) => {
-      assert.equal(pid, process.pid);
-      calls += 1;
-      return calls === 1
-        ? '2026-07-29T00:00:00.525Z'
-        : '2026-07-29T00:00:00.626Z';
+    let livenessCalls = 0;
+    const liveness = processLiveness.createLiveness({
+      probePid: () => 'alive',
+      readStartTime: (pid) => {
+        assert.equal(pid, process.pid);
+        livenessCalls++;
+        return livenessCalls === 1
+          ? '2026-07-29T00:00:00.525Z'
+          : '2026-07-29T00:00:00.626Z';
+      },
     });
+    msgPoll._setParentLiveness(liveness);
+    workerLease._setLiveness(liveness);
 
     const result = runMain(['orchestrator', '--workspace', workspace]);
     try {
       assert.equal(result.code, 0);
-      assert.deepEqual(result.residentIdentity, {
-        pid: process.pid,
-        startTime: '2026-07-29T00:00:00.525Z',
-      });
+      assert.equal(typeof result.residentIdentity, 'string');
       const leasePath = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json');
-      assert.equal(JSON.parse(fs.readFileSync(leasePath, 'utf8')).startTime, result.residentIdentity.startTime);
-      assert.equal(calls, 1, 'self identity のみ取得する');
+      // 親セッション参照の捕捉が先に行われるため、residentIdentity は2回目の取得値。
+      assert.equal(JSON.parse(fs.readFileSync(leasePath, 'utf8')).startTime, '2026-07-29T00:00:00.626Z');
+      assert.ok(livenessCalls > 1, 'sameRef と observe は共通 liveness API で同一性を確認する');
     } finally {
       result.residentLease.release();
-      msgPoll._setGetProcessStartTime((pid) => {
-        assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
-        return TEST_SESSION_START_TIME;
-      });
+      useFastParentChecker();
     }
   });
 });

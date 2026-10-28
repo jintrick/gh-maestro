@@ -8,7 +8,11 @@ function isWorkerAlive(entry, opts = {}) {
   const liveness = injectedLiveness || (opts.readStartTime || injectedProbe
     ? processLiveness.createLiveness({ readStartTime: opts.readStartTime, probePid: injectedProbe })
     : processLiveness);
-  return liveness.observe(liveness.readRef(entry)) === 'alive';
+  const state = liveness.observe(liveness.readRef(entry));
+  // Worker delivery preserves the existing stopped-worker behavior when legacy
+  // records cannot establish process identity. A PID alone is not proof that
+  // the recorded worker is still running.
+  return state === 'alive';
 }
 
 module.exports = {
