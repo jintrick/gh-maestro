@@ -872,7 +872,9 @@ test('セッションロック: 他プロセスが保持中は exit 2 で拒否�
     // 別プロセス（pid 424242）がロックを保持している状況を作る
     const lockPath = path.join(workspace, '.gh-maestro', `council-${AUTO_SESSION}.lock`);
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    fs.writeFileSync(lockPath, JSON.stringify({ pid: 424242, startTime: new Date().toISOString() }), 'utf8');
+    const liveness = require('../scripts/shared/process-liveness');
+    const holderRecord = liveness.writeRef({}, liveness.captureSelf());
+    fs.writeFileSync(lockPath, JSON.stringify(holderRecord), 'utf8');
 
     // テスト中は実プロセス生存確認をしない。保持者を「生存・同一プロセス」とみなして
     // ビジー拒否を検証する
@@ -885,7 +887,7 @@ test('セッションロック: 他プロセスが保持中は exit 2 で拒否�
       assert.ok(r.err.includes('another process is running council session'));
       // 保持者が別プロセスなのでロックファイルは残す（誤って消さない）
       const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-      assert.equal(holder.pid, 424242);
+      assert.equal(holder.pid, process.pid);
     } finally {
       workerLease._setIsProcessAlive(processLifecycle.isProcessAlive);
       workerLease._setVerifyProcessIdentity(processLifecycle.verifyProcessIdentity);

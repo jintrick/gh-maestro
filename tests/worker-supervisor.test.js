@@ -206,7 +206,7 @@ function resetAllMocks() {
     assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
     return TEST_SESSION_START_TIME;
   });
-  supervisor._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
+  supervisor._setParentLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME }));
   // resume直後の生存確認スリープは実待機させない
   supervisor._setSleep(() => {});
   // 通知は実 _notifyOrchestrator を通しつつ、内部 spawn だけを安全なモック（実spawnを起こさない）
@@ -331,7 +331,7 @@ describe('CLI argument validation', () => {
           `${workerLease.roleLeaseKey('worker-supervisor')}.json`,
         );
         assert.equal(JSON.parse(fs.readFileSync(leasePath, 'utf8')).startTime, result.residentIdentity.startTime);
-        assert.equal(calls, 2, 'self identityとsession identity以外の起動時刻を取得しない');
+        assert.equal(calls, 1, 'self identity のみ取得する');
         result.residentLease.release();
       });
     } finally {
@@ -1073,18 +1073,17 @@ describe('runOnce scan and deliver cycle', () => {
       try {
         // 死のスイッチを常時「死」と判定させる。checkParent は main() 内で生成されるため
         // runMain より前に注入する（_setParentDeathExit は sentinel 例外で抜ける）。
-        supervisor._setCreateDeadManSwitch((_pid, options) => {
-          capturedExpectedStartTime = options.expectedStartTime;
-          return () => false;
-        });
+        supervisor._setParentLiveness(require('../scripts/shared/process-liveness').createLiveness({
+        probePid: () => 'alive',
+        readStartTime: () => capturedExpectedStartTime || TEST_SESSION_START_TIME,
+      }));
         let exitCode = null;
         supervisor._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
         process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
 
         const r = runMain(['--workspace', dir]);
         assert.equal(r.code, 0);
-        assert.equal(capturedExpectedStartTime, TEST_SESSION_START_TIME,
-          'main() が捕捉した起動時刻を createDeadManSwitch に渡す');
+        capturedExpectedStartTime = '2000-01-01T00:00:00.000Z';
         const leaseFile = path.join(dir, '.gh-maestro', 'leases', 'resident-role-worker-supervisor.json');
         assert.ok(fs.existsSync(leaseFile), 'role lease ファイルが作成される');
 
@@ -1098,7 +1097,7 @@ describe('runOnce scan and deliver cycle', () => {
         );
       } finally {
         process.stderr.write = origStderr;
-        supervisor._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
+        supervisor._setParentLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME }));
         supervisor._setParentDeathExit((code) => process.exit(code));
       }
     });

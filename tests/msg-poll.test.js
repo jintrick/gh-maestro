@@ -28,7 +28,7 @@ msgPoll._setGetProcessStartTime((pid) => {
 // 実際のプロセス境界を通す。
 const TEST_PARENT_CHECKER = () => true;
 const useFastParentChecker = () => {
-  msgPoll._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
+  msgPoll._setParentLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME }));
 };
 useFastParentChecker();
 
@@ -699,10 +699,10 @@ test('死のスイッチ発火時: role lease を解放し exit 3 で終了す�
     try {
       // 死のスイッチを常時「死」と判定させる。checkParent は main() 内で生成されるため
       // runMain より前に注入する（_setParentDeathExit は sentinel 例外で抜ける）。
-      msgPoll._setCreateDeadManSwitch((_pid, options) => {
-        capturedExpectedStartTime = options.expectedStartTime;
-        return () => false;
-      });
+      msgPoll._setParentLiveness(require('../scripts/shared/process-liveness').createLiveness({
+        probePid: () => 'alive',
+        readStartTime: () => capturedExpectedStartTime || TEST_SESSION_START_TIME,
+      }));
       let exitCode = null;
       msgPoll._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
       process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
@@ -710,8 +710,7 @@ test('死のスイッチ発火時: role lease を解放し exit 3 で終了す�
       // 継続モード（--once なし）で起動 → orchestrator の role lease を取得する
       const r = runMain(['orchestrator', '--workspace', workspace]);
       assert.equal(r.code, 0);
-      assert.equal(capturedExpectedStartTime, TEST_SESSION_START_TIME,
-        'main() が捕捉した起動時刻を createDeadManSwitch に渡す');
+      capturedExpectedStartTime = '2000-01-01T00:00:00.000Z';
       const leaseFile = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json');
       assert.ok(fs.existsSync(leaseFile), '継続モードで role lease ファイルが作成される');
 
@@ -750,11 +749,11 @@ test('main: 常駐leaseへ渡したself identityをregistry用の結果へ保持
       assert.equal(result.code, 0);
       assert.deepEqual(result.residentIdentity, {
         pid: process.pid,
-        startTime: '2026-07-29T00:00:00.626Z',
+        startTime: '2026-07-29T00:00:00.525Z',
       });
       const leasePath = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json');
       assert.equal(JSON.parse(fs.readFileSync(leasePath, 'utf8')).startTime, result.residentIdentity.startTime);
-      assert.equal(calls, 2, 'session identityとself identity以外の起動時刻を取得しない');
+      assert.equal(calls, 1, 'self identity のみ取得する');
     } finally {
       result.residentLease.release();
       msgPoll._setGetProcessStartTime((pid) => {

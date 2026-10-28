@@ -367,8 +367,9 @@ describe('main: review_done検知', () => {
       }));
       const scanOpts = {
         workspace, ghDir, repo: 'owner/repo', issue: '5', state, isBaseline: false, ghOpts: {},
-        isProcessAliveFn: () => true,
-        verifyProcessIdentityFn: () => ({ match: true }),
+        liveness: require('../scripts/shared/process-liveness').createLiveness({
+          probePid: () => 'alive', readStartTime: () => '2026-07-28T00:00:00.000Z',
+        }),
       };
       let r = watch.scanOnce(scanOpts);
       assert.equal(r.events.length, 0);

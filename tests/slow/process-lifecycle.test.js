@@ -56,6 +56,7 @@ afterEach(() => {
 function loadModule(overrides = {}) {
   // キャッシュクリア
   delete require.cache[require.resolve('../../scripts/process-lifecycle')];
+  delete require.cache[require.resolve('../../scripts/shared/process-liveness')];
 
   // execSync のモック注入（実プロセス spawn 回避）
   if (overrides.execSync) {

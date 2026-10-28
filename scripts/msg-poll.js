@@ -30,13 +30,13 @@ const { isTrustedCommentAuthor } = require('./shared/comment-author-trust');
 const readStateLib = require('./shared/read-state');
 const {
   resolveSessionPid,
-  createDeadManSwitch,
   getProcessStartTime,
   captureProcessIdentity,
   registerProcess,
   findRunningInstance,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
+const processLiveness = require('./shared/process-liveness');
 const { acquireResidentLease, msgPollRole } = require('./shared/worker-lease');
 const {
   listUnprocessedResidentAuditEvents,
@@ -49,7 +49,7 @@ const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdo
 const { handleParentSessionDeath } = require('./shared/resident-parent-death');
 
 // テスト注入。既定は実装。
-let _createDeadManSwitch = createDeadManSwitch;
+let _parentLiveness = processLiveness;
 let _parentDeathExit = (code) => process.exit(code);
 let _injectedGetProcessStartTime;
 
@@ -409,9 +409,8 @@ function main(argsOverride, opts = {}) {
 
   const sessionPid = resolveSessionPid(parsed.sessionPidArg);
 
-  // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
-  // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
-  const expectedStartTime = _getProcessStartTime(sessionPid);
+  // 親セッションの参照を起動時に捕捉する。
+  const parentRef = _parentLiveness.captureProcess(sessionPid);
 
   // ── 常駐プロセス用 role lease（Issue #240） ───────────────────────────
   // 継続モード・--wait モードのみ排他する（--once は読み取り専用の一回実行のため）。
@@ -492,10 +491,9 @@ function main(argsOverride, opts = {}) {
   const state = readState(workspace, self);
 
   // ── dead-man's switch: 毎周回で親セッションの生存を確認 ──────────
-  // expectedStartTime（起動時に捕捉）を渡し、同じ PID に別プロセスが再利用された場合も
-  // 死と判定できるようにする（isProcessAlive のみの判定にしない）。
+  // 親の観測と PID 再利用の判定は共通モジュールに委ねる。
 
-  const checkParent = _createDeadManSwitch(sessionPid, { expectedStartTime });
+  const checkParent = _parentLiveness.watchParent(parentRef);
 
   /**
    * 1回のスキャン。
@@ -917,8 +915,8 @@ if (require.main === module) {
     // 追いかけ続けることを防ぐ。実体が消えた場合は3周回連続で確認してから通知する
     // （一過性の誤検出で PID_DIED を出さない。false positive は orchestrator の再起動を
     // 誘導するため、通知は遅くても正しく倒す）。
-    const watchStartTime = _getProcessStartTime(watchPid);
-    const checkWatchedPid = _createDeadManSwitch(watchPid, { expectedStartTime: watchStartTime });
+    const watchRef = _parentLiveness.captureProcess(watchPid);
+    const checkWatchedPid = _parentLiveness.watchParent(watchRef);
     const emitWatchResult = () => {
       if (!checkWatchedPid()) {
         process.stdout.write(`PID_DIED:${watchPid}\n`);
@@ -1056,7 +1054,7 @@ module.exports = {
   _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
   // 実装を直接参照（テストが注入を戻す際の復元用。PR #251 の引数検証テストから使う）
   _notifyOrchestrator,
-  _setCreateDeadManSwitch: (fn) => { _createDeadManSwitch = fn; },
+  _setParentLiveness: (value) => { _parentLiveness = value || processLiveness; },
   _setParentDeathExit: (fn) => { _parentDeathExit = fn; },
   main,
   runWaitMode,

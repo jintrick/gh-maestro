@@ -196,7 +196,7 @@ test('main: 生存中・停止済み・未登録ワーカーの状態を既存�
   const workspace = createWorkspace();
   try {
     writeWorkers(workspace, {
-      alive: { pid: process.pid },
+      alive: require('../scripts/shared/process-liveness').writeRef({}, require('../scripts/shared/process-liveness').captureSelf()),
       stopped: { pid: 999999999 },
     });
 
@@ -919,11 +919,10 @@ test('collectWorkersStatus: 上限間隔内は同じ観測値を使い、期限�
   });
 
   workerStatus._setIsWorkerAlive(null);
-  workerLiveness._setIsProcessAlive(() => processAlive);
-  workerLiveness._setVerifyProcessIdentity((pid, meta, opts) => {
+  workerLiveness._setProbePid((pid) => {
     verifyCalls++;
     assert.equal(pid, 111);
-    return { match: opts.actualStartTime === meta.startTime };
+    return processAlive ? 'alive' : 'dead';
   });
 
   try {
@@ -955,8 +954,7 @@ test('collectWorkersStatus: 上限間隔内は同じ観測値を使い、期限�
     assert.match(workerStatus.renderUptimeBars(afterExpiry)[0], /\[stopped\]/);
   } finally {
     workerStatus._setIsWorkerAlive(null);
-    workerLiveness._setIsProcessAlive(null);
-    workerLiveness._setVerifyProcessIdentity(null);
+    workerLiveness._setProbePid(null);
     removeWorkspace(workspace);
   }
 });
@@ -972,13 +970,10 @@ test('collectWorkersStatus: 起動時刻取得がnullでもTTL内は再取得せ
   });
 
   workerStatus._setIsWorkerAlive(null);
-  workerLiveness._setIsProcessAlive(() => true);
-  workerLiveness._setVerifyProcessIdentity((pid, meta, opts) => {
+  workerLiveness._setProbePid((pid) => {
     verifyCalls++;
     assert.equal(pid, 114);
-    assert.equal(meta.startTime, registeredStartTime);
-    assert.equal(opts.actualStartTime, null);
-    return { match: false, reason: 'cannot get process start time' };
+    return 'alive';
   });
 
   try {
@@ -1001,7 +996,7 @@ test('collectWorkersStatus: 起動時刻取得がnullでもTTL内は再取得せ
     assert.equal(beforeExpiry[0].running, false);
     assert.equal(beforeExpiry[0].startTime, null);
     assert.equal(startTimeCalls, 1, 'null の観測値も上限未到達では再利用する');
-    assert.equal(verifyCalls, 2, 'キャッシュした null は verifyProcessIdentity に渡す');
+    assert.equal(verifyCalls, 2, 'キャッシュした null を生存照会に使う');
 
     const atExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS);
     assert.equal(atExpiry[0].running, false);
@@ -1010,8 +1005,7 @@ test('collectWorkersStatus: 起動時刻取得がnullでもTTL内は再取得せ
     assert.equal(verifyCalls, 3);
   } finally {
     workerStatus._setIsWorkerAlive(null);
-    workerLiveness._setIsProcessAlive(null);
-    workerLiveness._setVerifyProcessIdentity(null);
+    workerLiveness._setProbePid(null);
     removeWorkspace(workspace);
   }
 });
@@ -1027,8 +1021,7 @@ test('collectWorkersStatus: プロセス終了時はキャッシュを破棄し�
   });
 
   workerStatus._setIsWorkerAlive(null);
-  workerLiveness._setIsProcessAlive(() => processAlive);
-  workerLiveness._setVerifyProcessIdentity(() => ({ match: true }));
+  workerLiveness._setProbePid(() => processAlive ? 'alive' : 'dead');
 
   try {
     writeWorkers(workspace, {
@@ -1051,8 +1044,7 @@ test('collectWorkersStatus: プロセス終了時はキャッシュを破棄し�
     assert.match(workerStatus.renderUptimeBars(stopped)[0], /\[stopped\]/);
   } finally {
     workerStatus._setIsWorkerAlive(null);
-    workerLiveness._setIsProcessAlive(null);
-    workerLiveness._setVerifyProcessIdentity(null);
+    workerLiveness._setProbePid(null);
     removeWorkspace(workspace);
   }
 });
@@ -1711,6 +1703,7 @@ test('collectWorkersStatus: 稼働中 Review Manager を収集し、PR番号・�
 
 test('collectWorkersStatus / renderUptimeBars: resolveSkillAgentMap が例外を投げた場合に agentId が null / - となる縮退動作を検証する', () => {
   const workspace = createWorkspace('gh-maestro-ws-rm-throw-');
+  workerStatus._setGetProcessStartTime(() => '2026-08-26T11:55:00.000Z');
   workerStatus._setIsProcessAlive((pid) => pid === 6001);
   workerStatus._setVerifyProcessIdentity(() => ({ match: true }));
   workerStatus._setResolveSkillAgentMap(() => {
@@ -1728,6 +1721,7 @@ test('collectWorkersStatus / renderUptimeBars: resolveSkillAgentMap が例外を
     assert.equal(lines.length, 1);
     assert.match(lines[0], /^PR#501\s+review-manager-pr-501\s+-\s+\[running\]/);
   } finally {
+    workerStatus._setGetProcessStartTime(null);
     workerStatus._setIsProcessAlive(null);
     workerStatus._setResolveSkillAgentMap(null);
     workerStatus._setVerifyProcessIdentity(null);
@@ -1737,6 +1731,7 @@ test('collectWorkersStatus / renderUptimeBars: resolveSkillAgentMap が例外を
 
 test('collectWorkersStatus / renderUptimeBars: skillAgentMap[\'gh-maestro-reviewer\'] が未設定・null・非文字列の場合に agentId が null / - となる縮退動作を検証する', () => {
   const workspace = createWorkspace('gh-maestro-ws-rm-unset-');
+  workerStatus._setGetProcessStartTime(() => '2026-08-26T11:55:00.000Z');
   workerStatus._setIsProcessAlive(() => true);
   workerStatus._setVerifyProcessIdentity(() => ({ match: true }));
 
@@ -1769,6 +1764,7 @@ test('collectWorkersStatus / renderUptimeBars: skillAgentMap[\'gh-maestro-review
     assert.equal(rm3.agentId, null);
     assert.match(workerStatus.renderUptimeBars([rm3])[0], /^PR#603\s+review-manager-pr-603\s+-\s+\[running\]/);
   } finally {
+    workerStatus._setGetProcessStartTime(null);
     workerStatus._setIsProcessAlive(null);
     workerStatus._setResolveSkillAgentMap(null);
     workerStatus._setVerifyProcessIdentity(null);
@@ -1783,7 +1779,7 @@ test('collectWorkersStatus: 死亡した Review Manager の PID は収集しな�
   try {
     const reviewDir = path.join(workspace, '.gh-maestro', 'records', 'pr', '404', 'review');
     fs.mkdirSync(reviewDir, { recursive: true });
-    fs.writeFileSync(path.join(reviewDir, 'manager.running'), '999999999\n', 'utf8');
+    fs.writeFileSync(path.join(reviewDir, 'manager.running'), JSON.stringify({ pid: 999999999, startTime: '2025-01-01T00:00:00.000Z' }), 'utf8');
 
     const results = workerStatus.collectWorkersStatus(workspace);
     assert.equal(results.length, 0);
@@ -1793,7 +1789,7 @@ test('collectWorkersStatus: 死亡した Review Manager の PID は収集しな�
   }
 });
 
-test('collectWorkersStatus: manager.running が破損・空・非数値でも全体が失敗せず既存ワーカーを返す (tolerant)', () => {
+test('collectWorkersStatus: manager.running が破損・空・非数値ならエラーを報告する', () => {
   const workspace = createWorkspace('gh-maestro-ws-rm-corrupt-');
   workerStatus._setIsWorkerAlive((rawEntry) => rawEntry && rawEntry.pid === 111);
 
@@ -1809,9 +1805,8 @@ test('collectWorkersStatus: manager.running が破損・空・非数値でも全
     fs.writeFileSync(path.join(badReviewDir1, 'manager.running'), 'not-a-number\n', 'utf8');
     fs.writeFileSync(path.join(badReviewDir2, 'manager.running'), '', 'utf8');
 
-    const results = workerStatus.collectWorkersStatus(workspace);
-    assert.equal(results.length, 1);
-    assert.equal(results[0].workerName, 'issue-100-worker-a');
+    assert.throws(() => workerStatus.collectWorkersStatus(workspace), /manager\.running/);
+    assert.ok(fs.existsSync(path.join(badReviewDir1, 'manager.running')));
   } finally {
     workerStatus._setIsWorkerAlive(null);
     removeWorkspace(workspace);

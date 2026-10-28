@@ -203,7 +203,7 @@ function resetAllMocks() {
   resetHeadlessLaunchMocks();
   setWorkersIdle();
   workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
-  supervisor._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
+  supervisor._setParentLiveness(require('../../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME }));
   // resume直後の生存確認スリープは実待機させない
   supervisor._setSleep(() => {});
   // 通知は実 _notifyOrchestrator を通しつつ、内部 spawn だけを安全なモック（実spawnを起こさない）

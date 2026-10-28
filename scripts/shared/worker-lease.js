@@ -38,6 +38,9 @@ const { checkResidentForceGuard } = require('./resident-force-guard');
 let _injectedIsProcessAlive = null;
 let _injectedVerifyProcessIdentity = null;
 let _injectedGetProcessStartTime = null;
+let _injectedLiveness = null;
+function liveness() { return _injectedLiveness || require('./process-liveness'); }
+
 
 function _isProcessAlive(pid) {
   const fn = _injectedIsProcessAlive ?? require('../process-lifecycle').isProcessAlive;
@@ -114,17 +117,22 @@ function createNormalWorkerStore(workspace) {
   }
 
   return {
-    /** リースエントリを読み取る。存在しない・破損時は null。 */
+    /** 不在だけ null。破損・読み取り失敗はファイルを保持して報告する。 */
     read(key) {
       const fp = filePath(key);
-      try {
-        const raw = fs.readFileSync(fp, 'utf8');
-        const entry = JSON.parse(raw);
-        if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return null;
-        return entry;
-      } catch {
-        return null;
+      let raw;
+      try { raw = fs.readFileSync(fp, 'utf8'); }
+      catch (error) {
+        if (error.code === 'ENOENT') return null;
+        throw new Error(`lease ${fp} の読み取りに失敗しました: ${error.message}`, { cause: error });
       }
+      let entry;
+      try { entry = JSON.parse(raw); }
+      catch (error) { throw new Error(`lease ${fp} が破損しています: ${error.message}`, { cause: error }); }
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error(`lease ${fp} の形式が不正です`);
+      }
+      return entry;
     },
 
     /** 原子的に新規作成する。既存の場合は EEXIST を投げる。 */
@@ -178,22 +186,15 @@ function createNormalWorkerStore(workspace) {
  * @returns {boolean}
  */
 function isLeaseLive(entry) {
-  if (!entry || typeof entry !== 'object') return false;
-
-  const pid = typeof entry.pid === 'number' && Number.isFinite(entry.pid) && entry.pid > 0
-    ? entry.pid
-    : null;
-  if (!pid) return false;
-
-  // startTime が欠落・不正なリースは live とみなさない（--force の停止対象にもしない）
-  if (typeof entry.startTime !== 'string' || !entry.startTime) return false;
-
-  if (!_isProcessAlive(pid)) return false;
-
-  const result = _verifyProcessIdentity(pid, { startTime: entry.startTime });
-  if (!result.match) return false;
-
-  return true;
+  if (!entry) return false;
+  const checker = liveness();
+  const state = checker.observe(checker.readRef(entry));
+  if (state === 'unknown') {
+    const error = new Error(`lease 保持者 ${JSON.stringify(entry)} の生死を判定できません`);
+    error.code = 'LIVENESS_UNKNOWN';
+    throw error;
+  }
+  return state === 'alive';
 }
 
 // ── Per-Key 起動ロック ────────────────────────────────────────────────────────
@@ -236,18 +237,18 @@ function acquireLeaseLock(store, key, maxRetries = 5, identity = null) {
     // stale 判定する。無条件 unlink だと、他プロセスが直前に書いた新しいロックを
     // 消して同一ワーカーの二重起動を許す TOCTOU 競合になるため（Review指摘 #4）、
     // process-lifecycle.js の acquireStartupLock と同型のパターンに揃える。
-    let holder = null;
+    let holder;
     try {
       holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-    } catch {
-      holder = null;
+    } catch (error) {
+      throw new Error(`ロック ${lockPath} の保持者を読めません: ${error.message}`, { cause: error });
     }
-
-    const holderAlive = holder
-      && Number.isFinite(holder.pid)
-      && holder.pid > 0
-      && _isProcessAlive(holder.pid);
-    const holderMatches = holderAlive && _verifyProcessIdentity(holder.pid, holder).match;
+    const checker = liveness();
+    const state = checker.observe(checker.readRef(holder));
+    if (state === 'unknown') {
+      throw new Error(`ロック ${lockPath} の保持者 ${JSON.stringify(holder)} の生死を判定できません`);
+    }
+    const holderMatches = state === 'alive';
     if (holderMatches) {
       throw new Error(
         `worker "${key}" の起動処理が別プロセス（pid ${holder.pid}）で進行中です。` +
@@ -255,7 +256,7 @@ function acquireLeaseLock(store, key, maxRetries = 5, identity = null) {
       );
     }
 
-    // stale ロック（保持者非生存・PID再利用・破損）→ 奪取して再試行
+    // stale ロック（保持者非生存・PID再利用）→ 奪取して再試行
     try { fs.unlinkSync(lockPath); } catch {}
   }
 
@@ -308,13 +309,19 @@ function releaseLeaseLock(store, key) {
  */
 function acquireLease(store, key, { pid, startTime, workerName }) {
   // ── 高速パス: ロック取得前に live lease をチェック ──
+  const checker = liveness();
+  const requireDead = (entry) => {
+    if (!entry) return;
+    const state = checker.observe(checker.readRef(entry));
+    if (state === 'alive') throw new Error(`worker "${workerName}" は既に稼働中です（pid ${entry.pid}）。重複起動できません。`);
+    if (state !== 'dead') {
+      const error = new Error(`worker "${workerName}" の lease 保持者 ${JSON.stringify(entry)} の生死を判定できません`);
+      error.code = 'LIVENESS_UNKNOWN';
+      throw error;
+    }
+  };
   const quickCheck = store.read(key);
-  if (quickCheck && isLeaseLive(quickCheck)) {
-    throw new Error(
-      `worker "${workerName}" は既に稼働中です（pid ${quickCheck.pid}）。` +
-      `重複起動できません。前のワーカーが終了するまでお待ちください。`
-    );
-  }
+  requireDead(quickCheck);
 
   // 起動時刻の取得はロック保持者とlease本体で共有する。取得できない場合は
   // 現在時刻などを代替値にせず、ロックもleaseも作成しない。
@@ -339,12 +346,7 @@ function acquireLease(store, key, { pid, startTime, workerName }) {
     // ロック取得待ちの間に別プロセスが live lease を作成している可能性がある。
     const existing = store.read(key);
 
-    if (existing && isLeaseLive(existing)) {
-      throw new Error(
-        `worker "${workerName}" は既に稼働中です（pid ${existing.pid}）。` +
-        `重複起動できません。`
-      );
-    }
+    requireDead(existing);
 
     // stale lease があれば回収
     let staleReclaimed = !!existing;
@@ -370,20 +372,13 @@ function acquireLease(store, key, { pid, startTime, workerName }) {
       store.write(key, entry);
     } catch (e) {
       if (e.code === 'EEXIST') {
-        // read が null を返してもファイルがディスク上に存在するケース:
-        // 破損JSON・空ファイル等で store.read() が null を返したが、
-        // ファイル実体が残っているため 'wx' が EEXIST で失敗する。
-        // ロック下なので安全に削除→再作成できる。
+        // Re-read under the lock. A missing or unreadable record is not proof
+        // of death, and must never be removed or recreated automatically.
         const retryRead = store.read(key);
-        if (retryRead && isLeaseLive(retryRead)) {
-          throw new Error(
-            `worker "${workerName}" は既に稼働中です（pid ${retryRead.pid}）。` +
-            `重複起動できません。`
-          );
-        }
-        // 破損またはstale → 削除して再試行
+        if (!retryRead) throw new Error(`worker "${workerName}" の lease が競合後に読めません`);
+        requireDead(retryRead);
         store.remove(key);
-        staleReclaimed = true; // 破損ファイルも回収扱い
+        staleReclaimed = true;
         store.write(key, entry);
       } else {
         throw e;
@@ -642,7 +637,9 @@ function acquireResidentLease({
         const res = acquireLease(store, key, { pid, startTime, workerName: role });
         activateLease(store, key, { pid, startTime });
         return { acquired: true, key, release: () => releaseLease(store, key, { pid }), staleReclaimed: res.staleReclaimed };
-      } catch {}
+      } catch (error) {
+        if (error.code === 'LIVENESS_UNKNOWN') throw error;
+      }
       _sleep(HANDOFF_POLL_MS);
     }
     // 期限超過: まだ live な所有者が残っていれば拒否
@@ -764,6 +761,7 @@ module.exports = {
   releaseResidentLease,
   releaseResidentLeaseForProcess,
   // テスト用注入
+  _setLiveness: (value) => { _injectedLiveness = value; },
   _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
   _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
   _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },

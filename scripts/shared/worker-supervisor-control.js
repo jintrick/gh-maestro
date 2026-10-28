@@ -153,8 +153,7 @@ function cleanupLegacyWorkerSupervisor(options = {}) {
   const lstatFn = options.lstatFn || fs.lstatSync;
   const readFileFn = options.readFileFn || ((filePath) => fs.readFileSync(filePath, 'utf8'));
   const unlinkFn = options.unlinkFn || fs.unlinkSync;
-  const isProcessAliveFn = options.isProcessAliveFn || lifecycle.isProcessAlive;
-  const verifyProcessIdentityFn = options.verifyProcessIdentityFn || lifecycle.verifyProcessIdentity;
+  const checker = options.liveness || require('./process-liveness');
   const killProcessTreeFn = options.killProcessTreeFn || _killProcessTree;
   const script = options.script || 'inbox-supervisor.js';
   const role = options.legacyRole || LEGACY_INBOX_SUPERVISOR_ROLE;
@@ -218,31 +217,15 @@ function cleanupLegacyWorkerSupervisor(options = {}) {
     byPid.get(item.entry.pid).push(item.filePath);
   }
   for (const [pid, filePaths] of byPid) {
-    let alive;
-    try { alive = isProcessAliveFn(pid); } catch (error) {
-      errors.push(`PID ${pid} の生存確認に失敗しました: ${error.message}`);
-      continue;
-    }
-    if (typeof alive !== 'boolean') {
-      errors.push(`PID ${pid} の生存確認がbooleanを返しませんでした`);
-      continue;
-    }
     const metadata = entries.find((item) => item.entry.pid === pid).entry;
-    if (alive) {
-      let identity;
-      try { identity = verifyProcessIdentityFn(pid, metadata); } catch (error) {
-        errors.push(`PID ${pid} の同一性確認に失敗しました: ${error.message}`);
-        continue;
-      }
-      if (!identity || identity.match !== true) {
-        errors.push(`PID ${pid} は旧inbox-supervisorと同一だと確認できません: ${identity?.reason || 'identity mismatch'}`);
-        continue;
-      }
-      try {
-        killProcessTreeFn(pid);
-        const remaining = isProcessAliveFn(pid);
-        if (remaining !== false) throw new Error('停止を確認できませんでした');
-      } catch (error) {
+    const state = checker.observe(checker.readRef(metadata));
+    if (state === 'unknown') {
+      errors.push(`旧inbox-supervisor PID ${pid} の生死を判定できません`);
+      continue;
+    }
+    if (state === 'alive') {
+      try { killProcessTreeFn(pid); }
+      catch (error) {
         errors.push(`旧inbox-supervisor (pid ${pid}) の停止に失敗しました: ${error.message}`);
         continue;
       }
@@ -272,29 +255,10 @@ function cleanupLegacyWorkerSupervisor(options = {}) {
       || typeof lease.startTime !== 'string' || lease.startTime === '') {
       errors.push(`${leasePath} のlease形式が不正です`);
     } else {
-      let alive;
-      try { alive = isProcessAliveFn(lease.pid); } catch (error) {
-        errors.push(`lease PID ${lease.pid} の生存確認に失敗しました: ${error.message}`);
-        alive = null;
-      }
-      if (typeof alive !== 'boolean') {
-        if (alive !== null) errors.push(`lease PID ${lease.pid} の生存確認がbooleanを返しませんでした`);
-      }
-      let removable = alive === false;
-      if (alive === true) {
-        let identity;
-        let identityError = false;
-        try { identity = verifyProcessIdentityFn(lease.pid, lease); } catch (error) {
-          errors.push(`lease PID ${lease.pid} の同一性確認に失敗しました: ${error.message}`);
-          identityError = true;
-          identity = null;
-        }
-        if (identity && identity.match === true) {
-          skipped = true;
-        } else if (!identityError) {
-          errors.push(`lease PID ${lease.pid} の同一性を確認できません: ${identity?.reason || 'identity mismatch'}`);
-        }
-      }
+      const state = checker.observe(checker.readRef(lease));
+      if (state === 'unknown') errors.push(`lease PID ${lease.pid} の生死を判定できません`);
+      if (state === 'alive') skipped = true;
+      const removable = state === 'dead';
       if (removable) {
         let store;
         let locked = false;
@@ -303,7 +267,7 @@ function cleanupLegacyWorkerSupervisor(options = {}) {
           locked = (options.acquireLeaseLockFn || acquireLeaseLock)(store, roleLeaseKey(role));
           if (!locked) throw new Error('lease lockを取得できませんでした');
           const current = JSON.parse(readFileFn(leasePath, 'utf8'));
-          if (current.pid !== lease.pid || current.startTime !== lease.startTime) {
+          if (JSON.stringify(current) !== JSON.stringify(lease)) {
             throw new Error('leaseが確認後に変更されました');
           }
           if (!removeFile(leasePath)) throw new Error('leaseの削除に失敗しました');

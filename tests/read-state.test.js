@@ -267,15 +267,14 @@ test('stale ロック（保持者死亡）は奪取して更新できる', () =>
   });
 });
 
-test('破損ロック（JSONでない）は stale とみなし奪取して更新できる', () => {
+test('破損ロックは保持したままエラーを返す', () => {
   withTempDir(workspace => {
     rs.initializeState(workspace, 'orchestrator', { generation: 'g' });
     const lp = rs.stateLockPath(workspace, 'orchestrator');
     fs.mkdirSync(path.dirname(lp), { recursive: true });
     fs.writeFileSync(lp, 'not-json', 'utf8');
-    const r = rs.markRead(workspace, 'orchestrator', { issue: 10, ids: [1] });
-    assert.equal(r.ok, true);
-    assert.deepEqual(r.state.readByIssue['10'], [1]);
+    assert.throws(() => rs.markRead(workspace, 'orchestrator', { issue: 10, ids: [1] }), /保持者を読めません/);
+    assert.equal(fs.readFileSync(lp, 'utf8'), 'not-json');
   });
 });
 
@@ -335,5 +334,16 @@ test('requireInitialized: missing / corrupt / legacy は失敗', () => {
     assert.equal(rs.requireInitialized(workspace, 'orchestrator').ok, false);
     writeRaw(workspace, 'orchestrator', 'broken{{{');
     assert.equal(rs.requireInitialized(workspace, 'orchestrator').ok, false);
+  });
+});
+
+test('acquireStateLock: 同一性不明の保持者のロックを残して中断する', () => {
+  withTempDir(workspace => {
+    const lp = rs.stateLockPath(workspace, 'orchestrator');
+    fs.mkdirSync(path.dirname(lp), { recursive: true });
+    const raw = JSON.stringify({ pid: process.pid });
+    fs.writeFileSync(lp, raw);
+    assert.throws(() => rs.acquireStateLock(workspace, 'orchestrator'), /判定できません/);
+    assert.equal(fs.readFileSync(lp, 'utf8'), raw);
   });
 });

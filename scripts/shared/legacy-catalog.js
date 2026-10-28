@@ -12,7 +12,7 @@ const { _validateAgainstSchema } = require('./json-schema');
 const { readFileAtRef } = require('./git-ref');
 const { readState } = require('./read-state');
 const { readWorkersRaw } = require('./workers-registry');
-const processLifecycle = require('../process-lifecycle');
+const processLiveness = require('./process-liveness');
 const { isWorkerAlive } = require('./worker-liveness');
 const workerLease = require('./worker-lease');
 const { isRolelessWorkerName } = require('./roleless-worker');
@@ -150,8 +150,7 @@ function makeCapabilities(options) {
     readGitConfig,
     readGitDir,
     readWorkers: (workspace) => readWorkersRaw(workspace),
-    isProcessAlive: processLifecycle.isProcessAlive,
-    verifyProcessIdentity: processLifecycle.verifyProcessIdentity,
+    liveness: processLiveness,
     isWorkerAlive,
     isLeaseLive: workerLease.isLeaseLive,
     isResidentLeaseLive: workerLease.isResidentLeaseLive,
@@ -262,7 +261,7 @@ function checkRequiredCapabilities(entry, context) {
     } else if (capability === 'git-ref-read') {
       available = Boolean(context.workspace) && typeof context.capabilities.readRef === 'function';
     } else if (capability === 'process-observation') {
-      available = typeof context.capabilities.isProcessAlive === 'function';
+      available = typeof context.capabilities.liveness?.observe === 'function' && typeof context.capabilities.liveness?.readRef === 'function';
     }
     if (!available) missing.push(capability);
   }
@@ -279,18 +278,11 @@ function unavailableResult(entry, context, missing) {
 }
 
 function observeProcess(context, pid, meta = null) {
-  if (!Number.isInteger(pid) || pid <= 0) return { live: 'unknown', reason: 'PID is invalid' };
+  const checker = context.capabilities.liveness;
   try {
-    const alive = context.capabilities.isProcessAlive(pid);
-    if (typeof alive !== 'boolean') return { live: 'unknown', reason: '生存確認がbooleanを返しませんでした' };
-    if (!alive) return { live: false };
-    if (meta && typeof meta.startTime === 'string' && meta.startTime) {
-      const identity = context.capabilities.verifyProcessIdentity(pid, meta);
-      if (!identity || identity.match !== true) {
-        return { live: 'unknown', reason: identity?.reason || 'プロセス同一性を確認できません' };
-      }
-    }
-    return { live: true };
+    const state = checker.observe(checker.readRef({ ...meta, pid }));
+    if (state === 'unknown') return { live: 'unknown', reason: 'プロセスの生死を判定できません' };
+    return { live: state === 'alive' };
   } catch (error) {
     return { live: 'unknown', reason: errorMessage(error) };
   }

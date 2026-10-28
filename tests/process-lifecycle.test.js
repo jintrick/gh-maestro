@@ -56,6 +56,7 @@ afterEach(() => {
 function loadModule(overrides = {}) {
   // キャッシュクリア
   delete require.cache[require.resolve('../scripts/process-lifecycle')];
+  delete require.cache[require.resolve('../scripts/shared/process-liveness')];
 
   // execSync のモック注入（実プロセス spawn 回避）
   if (overrides.execSync) {
@@ -332,7 +333,7 @@ test('registerProcess: .gh-maestro/pids/<pid>.json を作成する', () => {
   assert.equal(entry.script, 'msg-poll.js');
   assert.equal(entry.workerName, 'test-worker');
   assert.equal(entry.workspace, workspace);
-  assert.ok(typeof entry.startTime === 'string');
+  assert.equal(entry.startTime, null, '取得不能時は架空の起動時刻を作らない');
   assert.ok(typeof entry.registeredAt === 'string');
 
   const filePath = plc.pidFilePath(workspace, process.pid);
@@ -726,7 +727,7 @@ test('findRunningInstance: 生存していないPIDのエントリは無視す�
   fs.mkdirSync(pidsDir, { recursive: true });
 
   fs.writeFileSync(path.join(pidsDir, '99997.json'), JSON.stringify({
-    pid: -1, script: 'msg-poll.js', workerName: null, workspace,
+    pid: 2147483647, script: 'msg-poll.js', workerName: null, workspace,
   }));
 
   try {
@@ -782,7 +783,7 @@ test('acquireStartupLock: staleなロック（保持者が非生存）は奪取�
   fs.mkdirSync(pidsDir, { recursive: true });
   const lockPath = plc.startupLockPath(workspace, 'test-lock.js', null);
   const legacyLockPath = plc.legacyStartupLockPath(workspace, 'test-lock.js', null);
-  fs.writeFileSync(lockPath, JSON.stringify({ pid: -1, startTime: MOCK_START_TIME }));
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: 2147483647, startTime: MOCK_START_TIME }));
 
   try {
     const ok = plc.acquireStartupLock(workspace, 'test-lock.js', null);
@@ -833,77 +834,35 @@ test('sweepRegistry: ディレクトリが存在しない場合は空結果', ()
   assert.deepEqual(results, { killed: [], cleaned: [], errors: [] });
 });
 
-test('sweepRegistry: 破損JSONファイルは cleaned に分類される', () => {
-  const plc = loadModule();
-  const pidsDir = plc.pidsDir(workspace);
-  fs.mkdirSync(pidsDir, { recursive: true });
-  fs.writeFileSync(path.join(pidsDir, '12345.json'), 'not valid json {{{');
-
-  const results = plc.sweepRegistry(workspace, { dryRun: false });
-
-  const corrupt = results.cleaned.filter(c => c.reason.includes('corrupt JSON'));
-  assert.ok(corrupt.length >= 1, 'corrupt JSON should be cleaned');
-  assert.ok(!fs.existsSync(path.join(pidsDir, '12345.json')));
-});
-
-test('sweepRegistry: nullエントリは cleaned に分類される', () => {
-  const plc = loadModule();
-  const pidsDir = plc.pidsDir(workspace);
-  fs.mkdirSync(pidsDir, { recursive: true });
-  fs.writeFileSync(path.join(pidsDir, '99999.json'), 'null');
-
-  const results = plc.sweepRegistry(workspace, { dryRun: false });
-
-  const nullEntry = results.cleaned.filter(c => c.reason && c.reason.includes('invalid entry type'));
-  assert.ok(nullEntry.length >= 1, 'null entry should be cleaned');
-  assert.ok(!fs.existsSync(path.join(pidsDir, '99999.json')));
-});
-
-test('sweepRegistry: 配列エントリは cleaned に分類される', () => {
-  const plc = loadModule();
-  const pidsDir = plc.pidsDir(workspace);
-  fs.mkdirSync(pidsDir, { recursive: true });
-  fs.writeFileSync(path.join(pidsDir, '88888.json'), '[1, 2, 3]');
-
-  const results = plc.sweepRegistry(workspace, { dryRun: false });
-
-  const arrEntry = results.cleaned.filter(c => c.reason && c.reason.includes('invalid entry type'));
-  assert.ok(arrEntry.length >= 1, 'array entry should be cleaned');
-  assert.ok(!fs.existsSync(path.join(pidsDir, '88888.json')));
-});
-
-test('sweepRegistry: 文字列エントリは cleaned に分類される', () => {
-  const plc = loadModule();
-  const pidsDir = plc.pidsDir(workspace);
-  fs.mkdirSync(pidsDir, { recursive: true });
-  fs.writeFileSync(path.join(pidsDir, '77777.json'), '"just a string"');
-
-  const results = plc.sweepRegistry(workspace, { dryRun: false });
-
-  const strEntry = results.cleaned.filter(c => c.reason && c.reason.includes('invalid entry type'));
-  assert.ok(strEntry.length >= 1, 'string entry should be cleaned');
-  assert.ok(!fs.existsSync(path.join(pidsDir, '77777.json')));
-});
-
-test('sweepRegistry: pidフィールドがないエントリは cleaned', () => {
-  const plc = loadModule();
-  const pidsDir = plc.pidsDir(workspace);
-  fs.mkdirSync(pidsDir, { recursive: true });
-  fs.writeFileSync(path.join(pidsDir, '66666.json'), JSON.stringify({ script: 'test.js' }));
-
-  const results = plc.sweepRegistry(workspace, { dryRun: false });
-
-  const noPid = results.cleaned.filter(c => c.reason && c.reason.includes('missing/invalid pid'));
-  assert.ok(noPid.length >= 1, 'missing pid should be cleaned');
-  assert.ok(!fs.existsSync(path.join(pidsDir, '66666.json')));
-});
+for (const [label, raw] of [
+  ['JSON構文', 'not valid json {{{'],
+  ['null', 'null'],
+  ['配列', '[1, 2, 3]'],
+  ['文字列', '"just a string"'],
+  ['PID欠落', '{"script":"test.js"}'],
+]) {
+  test(`sweepRegistry: ${label} の不正な記録を保持し処理を中断する`, () => {
+    const plc = loadModule();
+    const dir = plc.pidsDir(workspace);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'corrupt.json');
+    fs.writeFileSync(file, raw);
+    try {
+      const result = plc.sweepRegistry(workspace);
+      assert.ok(result.errors.some(error => error.includes(file)));
+      assert.equal(fs.readFileSync(file, 'utf8'), raw);
+      assert.deepEqual(result.killed, []);
+      assert.deepEqual(result.cleaned, []);
+    } finally { fs.unlinkSync(file); }
+  });
+}
 
 test('sweepRegistry: 生存していないPIDのエントリは cleaned', () => {
   const plc = loadModule();
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
   fs.writeFileSync(path.join(pidsDir, '99998.json'), JSON.stringify({
-    pid: -1,
+    pid: 2147483647,
     script: 'test.js',
     startTime: '2025-01-01T00:00:00.000Z',
   }));
@@ -916,7 +875,7 @@ test('sweepRegistry: 生存していないPIDのエントリは cleaned', () => 
 });
 
 test('sweepRegistry: stale registry掃除とhousekeepingを一連で実行する', () => {
-  const plc = loadModule();
+  const plc = loadModule({ execSync: mockWmiSuccess() });
   const pidsDir = plc.pidsDir(workspace);
   const logDir = path.join(workspace, '.gh-maestro', 'records', 'issue', '237', 'workers');
   fs.mkdirSync(pidsDir, { recursive: true });
@@ -929,7 +888,7 @@ test('sweepRegistry: stale registry掃除とhousekeepingを一連で実行する
   const leasePath = path.join(workspace, '.gh-maestro', 'leases', `${activeName}.json`);
   const previousWorkers = fs.existsSync(workersPath) ? fs.readFileSync(workersPath) : null;
   fs.writeFileSync(path.join(pidsDir, 'stale.json'), JSON.stringify({
-    pid: -1, script: 'worker.js', workerName: staleName,
+    pid: 2147483647, startTime: '2000-01-01T00:00:00.000Z', script: 'worker.js', workerName: staleName,
   }));
   const noise = '{"type":"system","subtype":"thinking_tokens"}\n';
   fs.writeFileSync(path.join(logDir, `${staleName}.log`), noise);
@@ -938,15 +897,15 @@ test('sweepRegistry: stale registry掃除とhousekeepingを一連で実行する
   fs.mkdirSync(path.dirname(reviewLogPath), { recursive: true });
   fs.writeFileSync(reviewLogPath, noise);
   fs.mkdirSync(path.dirname(leasePath), { recursive: true });
-  fs.writeFileSync(workersPath, JSON.stringify({ [activeName]: { pid: process.pid, startTime: null } }));
-  fs.writeFileSync(leasePath, JSON.stringify({ pid: process.pid, workerName: activeName }));
-  fs.writeFileSync(reviewLockPath, String(process.pid));
+  fs.writeFileSync(workersPath, JSON.stringify({ [activeName]: { pid: process.pid, startTime: MOCK_START_TIME } }));
+  fs.writeFileSync(leasePath, JSON.stringify({ pid: process.pid, startTime: MOCK_START_TIME, workerName: activeName }));
+  fs.writeFileSync(reviewLockPath, JSON.stringify({ pid: process.pid, startTime: MOCK_START_TIME }));
   const old = new Date(Date.now() - 120000);
   fs.utimesSync(path.join(logDir, `${staleName}.log`), old, old);
 
   try {
     const results = plc.sweepRegistry(workspace, { dryRun: false });
-    assert.ok(results.housekeeping, 'housekeeping must be owned by the lifecycle sweep');
+    assert.ok(results.housekeeping, `housekeeping must be owned by the lifecycle sweep: ${JSON.stringify(results.errors)}`);
     // 項目8: sweepはログ圧縮を行わない（圧縮は worker-exit-hook.js と手動CLIのみ）。
     // したがって stale ログも圧縮されず、中身がそのまま残る。
     assert.equal(results.housekeeping.compacted.length, 0);
@@ -975,8 +934,7 @@ test('sweepRegistry: dryRun では実際の削除を行わない', () => {
 
   const results = plc.sweepRegistry(workspace, { dryRun: true });
 
-  const corrupt = results.cleaned.filter(c => c.reason.includes('corrupt JSON'));
-  assert.ok(corrupt.length >= 1);
+  assert.ok(results.errors.some(error => error.includes('dryrun.json')));
   assert.ok(fs.existsSync(path.join(pidsDir, 'dryrun.json')), 'file should still exist in dryRun');
   assert.ok(fs.existsSync(runningFile), 'manager.running のstale回収もdryRunでは行わない');
 
@@ -990,10 +948,10 @@ test('sweepRegistry: matchフィルタで特定エントリのみ対象', () => 
   fs.mkdirSync(pidsDir, { recursive: true });
 
   fs.writeFileSync(path.join(pidsDir, '11111.json'), JSON.stringify({
-    pid: -1, script: 'poll.js', workerName: 'worker-a', startTime: '2025-01-01T00:00:00.000Z',
+    pid: 2147483647, script: 'poll.js', workerName: 'worker-a', startTime: '2025-01-01T00:00:00.000Z',
   }));
   fs.writeFileSync(path.join(pidsDir, '22222.json'), JSON.stringify({
-    pid: -1, script: 'poll.js', workerName: 'worker-b', startTime: '2025-01-01T00:00:00.000Z',
+    pid: 2147483647, script: 'poll.js', workerName: 'worker-b', startTime: '2025-01-01T00:00:00.000Z',
   }));
 
   const results = plc.sweepRegistry(workspace, {
@@ -1001,7 +959,7 @@ test('sweepRegistry: matchフィルタで特定エントリのみ対象', () => 
     dryRun: false,
   });
 
-  const cleanedA = results.cleaned.filter(c => c.pid === -1 && c.reason && c.reason.includes('not alive'));
+  const cleanedA = results.cleaned.filter(c => c.pid === 2147483647 && c.reason && c.reason.includes('not alive'));
   assert.ok(cleanedA.length >= 1, `worker-a entry should be cleaned, got cleaned: ${JSON.stringify(results.cleaned)}`);
   assert.ok(!fs.existsSync(path.join(pidsDir, '11111.json')));
 
@@ -1216,14 +1174,14 @@ test('sweepRegistry: role lease 保持者および稼働中ワーカーは PID r
 
   // stale プロセス
   fs.writeFileSync(stalePidFile, JSON.stringify({
-    pid: -1,
+    pid: 2147483647, startTime: '2000-01-01T00:00:00.000Z',
     script: 'stale-worker.js',
   }));
 
   try {
     const results = plc.sweepRegistry(workspace, { dryRun: false });
     // stale は cleaned
-    assert.ok(results.cleaned.some(c => c.pid === -1));
+    assert.ok(results.cleaned.some(c => c.pid === 2147483647));
     assert.ok(!fs.existsSync(stalePidFile), 'stale ファイルは削除される');
 
     // resident process は kill されず、ファイルも残る
@@ -1285,15 +1243,14 @@ test('sweepRegistry: manager.running の PID は stale registry エントリを�
 
   fs.writeFileSync(runningFile, String(stalePid) + '\n');
   fs.writeFileSync(stalePidFile, JSON.stringify({
-    pid: stalePid,
+    pid: stalePid, startTime: '2000-01-01T00:00:00.000Z',
     script: 'legacy-stale.js',
   }));
 
   try {
     const results = plc.sweepRegistry(workspace, { dryRun: false });
-    // manager.running に PID が書かれていても、stale エントリは保護されず cleaned される
-    assert.ok(results.cleaned.some(c => c.pid === stalePid), 'manager.running の PID は stale エントリを shield しない');
-    assert.ok(!fs.existsSync(stalePidFile), 'stale ファイルは回収・削除される');
+    assert.ok(results.errors.some(error => error.includes('判定できません')));
+    assert.ok(fs.existsSync(stalePidFile), '旧形式が判定不能なら関連記録を保持する');
   } finally {
     for (const p of [stalePidFile, runningFile]) {
       try { fs.unlinkSync(p); } catch {}
@@ -1358,8 +1315,10 @@ test('registerProcess: meta.pid と追加メタデータを指定して登録・
   // findRunningInstances で子PID・メタデータが照合できること（allowSelfなしで取得可能）
   const instances = plc.findRunningInstances(workspace, {
     script: 'review-job',
-    isProcessAliveFn: (pid) => pid === customPid,
-    verifyProcessIdentityFn: () => ({ match: true }),
+    liveness: require('../scripts/shared/process-liveness').createLiveness({
+      probePid: (pid) => pid === customPid ? 'alive' : 'dead',
+      readStartTime: () => MOCK_START_TIME,
+    }),
   });
   assert.equal(instances.length, 1);
   assert.equal(instances[0].pid, customPid);
@@ -1371,8 +1330,10 @@ test('registerProcess: meta.pid と追加メタデータを指定して登録・
   assert.ok(!fs.existsSync(customPidFile), 'unregisterProcess で customPid のファイルが削除される');
   const instancesAfter = plc.findRunningInstances(workspace, {
     script: 'review-job',
-    isProcessAliveFn: (pid) => pid === customPid,
-    verifyProcessIdentityFn: () => ({ match: true }),
+    liveness: require('../scripts/shared/process-liveness').createLiveness({
+      probePid: (pid) => pid === customPid ? 'alive' : 'dead',
+      readStartTime: () => MOCK_START_TIME,
+    }),
   });
   assert.equal(instancesAfter.length, 0);
 });
@@ -1441,4 +1402,16 @@ test('sweepRegistry: 稼働中 Review Manager PR に属する review-job は保�
       try { fs.unlinkSync(p); } catch {}
     }
   }
+});
+
+test('acquireStartupLock: 同一性不明の保持者のロックを残して中断する', () => {
+  const plc = loadModule({ execSync: mockWmiSuccess() });
+  const lp = plc.startupLockPath(workspace, 'unknown-holder.js', null);
+  fs.mkdirSync(path.dirname(lp), { recursive: true });
+  const raw = JSON.stringify({ pid: process.pid });
+  fs.writeFileSync(lp, raw);
+  try {
+    assert.throws(() => plc.acquireStartupLock(workspace, 'unknown-holder.js', null), /判定できません/);
+    assert.equal(fs.readFileSync(lp, 'utf8'), raw);
+  } finally { fs.unlinkSync(lp); }
 });

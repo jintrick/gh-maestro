@@ -378,7 +378,7 @@ function collectWorkersStatus(workspace, opts = {}) {
     const entry = normalizeWorkerEntry(rawEntry);
     if (!entry.startTime) return _isWorkerAlive(rawEntry);
     return _isWorkerAlive(rawEntry, {
-      getProcessStartTimeFn: (pid) => {
+      readStartTime: (pid) => {
         const actualStartTime = startTimeCache.get(pid, entry.startTime, now);
         observedStartTimes.set(_cachePid(pid), actualStartTime);
         return actualStartTime;
@@ -446,16 +446,13 @@ function collectWorkersStatus(workspace, opts = {}) {
     if (!alive) startTimeCache.invalidate(pid);
     return alive;
   };
+  const checker = require('./shared/process-liveness').createLiveness({
+    probePid: (pid) => isManagerProcessAlive(pid) ? 'alive' : 'dead',
+    readStartTime: (pid, expected) => startTimeCache.get(pid, expected || null, now),
+  });
   const runningManagers = listRunningReviewManagers(workspace, {
-    isProcessAliveFn: isManagerProcessAlive,
-    verifyProcessIdentityFn: verifyProcessIdentity,
-    // 通常ワーカーと同じ startTime キャッシュを共有する。キャッシュされた値は
-    // helper の verifyProcessIdentity に actualStartTime として渡されるため、
-    // Review Manager もPID再利用を検出しつつ、#407の再描画間隔を維持できる。
-    getProcessStartTimeFn: (pid, expectedStartTime) => (
-      startTimeCache.get(pid, expectedStartTime || null, now) || null
-    ),
-    onError: 'skip',
+    liveness: checker,
+    onError: 'throw',
     cleanupStale: false,
   });
 
@@ -465,11 +462,7 @@ function collectWorkersStatus(workspace, opts = {}) {
   try {
     runningReviewJobs = findInstancesFn(workspace, {
       script: 'review-job',
-      isProcessAliveFn: isManagerProcessAlive,
-      verifyProcessIdentityFn: verifyProcessIdentity,
-      getProcessStartTimeFn: (pid, expectedStartTime) => (
-        startTimeCache.get(pid, expectedStartTime || null, now) || null
-      ),
+      liveness: checker,
       allowSelf: true,
     });
   } catch {

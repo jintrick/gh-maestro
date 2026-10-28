@@ -310,7 +310,7 @@ test('process and worker detectors use existing read-only liveness helpers', () 
 
     const result = inspect(fixture, {
       capabilities: {
-        isProcessAlive: () => { processChecks++; return false; },
+        liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => { processChecks++; return 'dead'; } }),
         isWorkerAlive: () => { workerChecks++; return false; },
         isLeaseLive: () => { leaseChecks++; return false; },
       },

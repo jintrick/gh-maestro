@@ -30,7 +30,7 @@ msgPoll._setGetProcessStartTime((pid) => {
 // 実CLI統合テスト（重複lease/--force/--watch-pid）は実際のプロセス境界を通す。
 const TEST_PARENT_CHECKER = () => true;
 const useFastParentChecker = () => {
-  msgPoll._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
+  msgPoll._setParentLiveness(require('../../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME }));
 };
 useFastParentChecker();
 

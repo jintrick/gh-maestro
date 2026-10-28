@@ -20,7 +20,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { isProcessAlive, verifyProcessIdentity, getProcessStartTime } = require('../process-lifecycle');
+const processLiveness = require('./process-liveness');
 const { atomicWriteJson } = require('./atomic-write');
 
 const SCHEMA_VERSION = 2;
@@ -29,7 +29,7 @@ const SCHEMA_VERSION = 2;
 // acquireStateLock はポーリング毎（20秒間隔）に呼ばれるため、毎回 WMI（~0.5秒）を
 // 呼ぶのは許容できない（process-lifecycle.js の acquireStartupLock が毎回呼ぶのを
 // 踏襲せず、ロックの自己エントリはキャッシュ値で書く）。
-const SELF_START_TIME = getProcessStartTime(process.pid) || new Date().toISOString();
+const SELF_REF = processLiveness.captureSelf();
 
 /**
  * 状態ファイルのパスを返す。
@@ -181,9 +181,7 @@ function stateLockPath(workspace, self) {
  * いる場合は取得に失敗する。
  *
  * 自己エントリの startTime はモジュールロード時に1回だけ取得してキャッシュする
- * （SELF_START_TIME）。WMI は ~0.5秒かかるため、ポーリング毎（20秒間隔）に呼ばれる
- * markRead では毎回呼ばず、保持者検証の verifyProcessIdentity も「保持者が生存している」
- * とき（＝ロック競合時、稀）だけ実行される。
+ * 起動時に捕捉した参照を使用し、照会不能な所有者のロックは奪取しない。
  *
  * @param {string} workspace
  * @param {string} self
@@ -192,7 +190,8 @@ function stateLockPath(workspace, self) {
 function acquireStateLock(workspace, self) {
   const lp = stateLockPath(workspace, self);
   fs.mkdirSync(path.dirname(lp), { recursive: true });
-  const selfEntry = { pid: process.pid, startTime: SELF_START_TIME };
+  if (processLiveness.observe(SELF_REF) !== 'alive') throw new Error(`ロック ${lp} の自プロセスの生死を判定できません`);
+  const selfEntry = processLiveness.writeRef({}, SELF_REF);
   for (let i = 0; i < 5; i++) {
     try {
       fs.writeFileSync(lp, JSON.stringify(selfEntry), { encoding: 'utf8', flag: 'wx' });
@@ -203,22 +202,23 @@ function acquireStateLock(workspace, self) {
     // EEXIST 後は現在のロックを読み直し、同一性まで確認してから stale を奪取する。
     // この「読み直し→同一性確認」により、他プロセスが直前に書いた新しいロックを
     // 無条件 unlink で消す競合（TOCTOU）を避ける。
-    let holder = null;
+    let holder;
     try {
       holder = JSON.parse(fs.readFileSync(lp, 'utf8'));
-    } catch {
-      holder = null;
+    } catch (error) {
+      throw new Error(`ロック ${lp} の保持者を読めません: ${error.message}`, { cause: error });
     }
-    const holderAlive = holder
-      && Number.isFinite(holder.pid)
-      && holder.pid > 0
-      && isProcessAlive(holder.pid);
-    const holderMatches = holderAlive && verifyProcessIdentity(holder.pid, holder).match;
+    const liveness = require('./process-liveness');
+    const state = liveness.observe(liveness.readRef(holder));
+    if (state === 'unknown') {
+      throw new Error(`ロック ${lp} の保持者 ${JSON.stringify(holder)} の生死を判定できません`);
+    }
+    const holderMatches = state === 'alive';
     if (holderMatches) {
       // 正当な保持者（生存かつ同一プロセス）がいる → 取得失敗
       return false;
     }
-    // stale ロック（保持者非生存・PID再利用・破損）→ 奪取して再試行
+    // stale ロック（保持者非生存・PID再利用）→ 奪取して再試行
     try { fs.unlinkSync(lp); } catch {}
   }
   return false;

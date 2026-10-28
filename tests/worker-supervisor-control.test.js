@@ -141,7 +141,7 @@ test('cleanupLegacyWorkerSupervisor: 旧scriptのstale registryとleaseだけを
     workspace,
     legacyPidDir: legacyDir,
     runtimePidDir: runtimeDir,
-    isProcessAliveFn: () => false,
+    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'dead' }),
     acquireLeaseLockFn: () => true,
     releaseLeaseLockFn: () => {},
   });
@@ -161,7 +161,7 @@ test('cleanupLegacyWorkerSupervisor: startTime不明の旧registryはkill・削�
     workspace,
     legacyPidDir: legacyDir,
     runtimePidDir: path.join(workspace, 'missing-runtime-pids'),
-    isProcessAliveFn: () => true,
+    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }),
     killProcessTreeFn: () => { killed = true; },
   });
   assert.equal(result.status, 'unknown');

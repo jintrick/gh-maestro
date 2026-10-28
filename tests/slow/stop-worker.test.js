@@ -136,7 +136,7 @@ test('killProcessTree: Windowsでtaskkillが自然終了を報告しても全PID
   const result = killProcessTree(7101, {
     platform: 'win32',
     spawnSyncFn,
-    isProcessAliveFn: () => false,
+    hasNotExitedFn: () => false,
     timeoutMs: 5,
     pollIntervalMs: 1,
     sleepFn: () => {},
@@ -156,7 +156,7 @@ test('killProcessTree: Windowsでtaskkill成功後も子PIDが残れば期限超
   assert.throws(() => killProcessTree(7201, {
     platform: 'win32',
     spawnSyncFn,
-    isProcessAliveFn: (pid) => pid === 7202,
+    hasNotExitedFn: (pid) => pid === 7202,
     timeoutMs: 5,
     pollIntervalMs: 1,
     sleepFn: () => {},
@@ -184,7 +184,7 @@ test('killProcessTree: Unixでもプロセスグループと子孫PIDを停止�
     platform: 'linux',
     spawnSyncFn,
     killFn: (pid, signal) => signals.push([pid, signal]),
-    isProcessAliveFn: (pid) => pid === 7302,
+    hasNotExitedFn: (pid) => pid === 7302,
     timeoutMs: 5,
     pollIntervalMs: 1,
     sleepFn: () => {},

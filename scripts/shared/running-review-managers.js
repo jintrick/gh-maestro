@@ -20,28 +20,9 @@ const { reviewArtifactPath } = require('./review-manager-paths');
 
 const STARTING_FILE_NAME = 'manager.starting';
 
-let _injectedIsProcessAlive = null;
-let _injectedVerifyProcessIdentity = null;
-let _injectedGetProcessStartTime = null;
-
-function _isProcessAlive(pid) {
-  const fn = _injectedIsProcessAlive ?? require('../process-lifecycle').isProcessAlive;
-  return fn(pid);
-}
-
-function _verifyProcessIdentity(pid, identity, opts) {
-  const fn = _injectedVerifyProcessIdentity ?? require('../process-lifecycle').verifyProcessIdentity;
-  return fn(pid, identity, opts);
-}
-
-function _getProcessStartTime(pid) {
-  const fn = _injectedGetProcessStartTime ?? require('../process-lifecycle').getProcessStartTime;
-  return fn(pid);
-}
-
-function _startTimesMatch(a, b) {
-  return require('../process-lifecycle').startTimesMatch(a, b);
-}
+const processLiveness = require('./process-liveness');
+let injectedLiveness = null;
+function checkerFor(opts = {}) { return opts.liveness || injectedLiveness || processLiveness; }
 
 /**
  * Review Managerの起動中だけ使う予約ファイルのパスを返す。
@@ -91,8 +72,6 @@ function writeStartupMarkerExclusive(startingPath, marker) {
  * @param {number|string} [opts.pid] 予約を作るプロセスのPID
  * @param {string|null} [opts.startTime] 予約を作るプロセスの起動時刻
  * @param {string} [opts.token] 本体へ引き渡すトークン
- * @param {(pid:number)=>boolean} [opts.isProcessAliveFn]
- * @param {(pid:number,meta:object,opts?:object)=>object} [opts.verifyProcessIdentityFn]
  * @returns {{acquired:boolean,active?:boolean,error?:Error,path:string,token?:string}}
  */
 function acquireReviewManagerStartup(runningPath, opts = {}) {
@@ -113,8 +92,7 @@ function acquireReviewManagerStartup(runningPath, opts = {}) {
   const existing = inspectRunningReviewManager(startingPath, {
     onError: 'skip',
     cleanupStale: true,
-    isProcessAliveFn: opts.isProcessAliveFn,
-    verifyProcessIdentityFn: opts.verifyProcessIdentityFn,
+    liveness: opts.liveness,
   });
   if (existing.status === 'live' || existing.status === 'legacy-live') {
     return { acquired: false, active: true, path: startingPath };
@@ -326,18 +304,12 @@ function finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reas
  * @param {string|number} [opts.pr] PR番号。旧形式コールバックへ渡す値
  * @param {'throw'|'skip'} [opts.onError='throw'] エラー時の動作
  * @param {boolean} [opts.cleanupStale=false] staleファイルを内容比較後に削除するか
- * @param {(pid:number)=>boolean} [opts.isProcessAliveFn]
- * @param {(pid:number,meta:object,opts?:object)=>{match:boolean,reason?:string}} [opts.verifyProcessIdentityFn]
- * @param {(pid:number,expectedStartTime:string)=>string|null} [opts.getProcessStartTimeFn]
  * @param {(info:{pr:string|null,pid:number,path:string,legacy:true})=>void} [opts.onLegacyLive]
  * @returns {{status:'missing'|'live'|'legacy-live'|'stale'|'error', pr:string|null, pid?:number, startTime?:string|null, legacy?:boolean, reason?:string, error?:Error}}
  */
 function inspectRunningReviewManager(runningPath, opts = {}) {
   const onError = opts.onError || 'throw';
   const pr = opts.pr == null ? null : String(opts.pr);
-  const isAlive = opts.isProcessAliveFn || _isProcessAlive;
-  const verifyIdentity = opts.verifyProcessIdentityFn || _verifyProcessIdentity;
-  const getStartTime = opts.getProcessStartTimeFn || _injectedGetProcessStartTime;
   const cleanupStale = opts.cleanupStale === true;
 
   let raw;
@@ -355,87 +327,16 @@ function inspectRunningReviewManager(runningPath, opts = {}) {
     return errorResult(e, onError);
   }
 
-  let alive;
-  try {
-    alive = Boolean(isAlive(record.pid));
-  } catch (e) {
-    return errorResult(`manager.running のPID生存確認に失敗しました: ${runningPath}: ${e.message}`, onError);
+  const checker = checkerFor(opts);
+  const state = checker.observe(checker.readRef(record));
+  if (state === 'unknown') {
+    return errorResult(`manager.running の生死を判定できません: ${runningPath}`, onError);
   }
-
-  if (record.legacy) {
-    if (!alive) {
-      return finishStale({
-        runningPath, raw, record, pr, cleanupStale, onError,
-        reason: 'legacy PID process not alive',
-      });
-    }
-
-    // 旧PID-onlyは同一性を検証できないため live とは返さない。ただしアップグレード
-    // 直後にまだ旧RMが動いている間は、そのPRのログを掃除から守る必要がある。
-    // ここは「稼働中と断定」する経路ではなく、当該PRだけを保守的に保護する経路である。
-    if (typeof opts.onLegacyLive === 'function') {
-      try {
-        opts.onLegacyLive({ pr, pid: record.pid, path: runningPath, legacy: true });
-      } catch (e) {
-        return errorResult(`旧形式manager.runningの保護通知に失敗しました: ${runningPath}: ${e.message}`, onError);
-      }
-    }
-    return {
-      status: 'legacy-live',
-      pr,
-      pid: record.pid,
-      startTime: null,
-      legacy: true,
-      reason: 'legacy PID-only record cannot verify process identity',
-    };
+  if (state === 'dead') {
+    return finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reason: 'process not alive or identity mismatch' });
   }
+  return { status: 'live', pr, pid: record.pid, startTime: record.startTime, legacy: false };
 
-  if (!alive) {
-    return finishStale({
-      runningPath, raw, record, pr, cleanupStale, onError,
-      reason: 'process not alive',
-    });
-  }
-
-  if (!record.startTime) {
-    return errorResult(
-      `manager.running の起動時刻が不正です（同一性確認不能）: ${runningPath}`,
-      onError
-    );
-  }
-
-  let identity;
-  try {
-    const verifyOpts = getStartTime
-      ? { actualStartTime: getStartTime(record.pid, record.startTime) }
-      : undefined;
-    identity = verifyIdentity(record.pid, { startTime: record.startTime }, verifyOpts);
-  } catch (e) {
-    return errorResult(`manager.running の同一性確認に失敗しました: ${runningPath}: ${e.message}`, onError);
-  }
-
-  if (identity === true || (identity && identity.match === true)) {
-    return {
-      status: 'live',
-      pr,
-      pid: record.pid,
-      startTime: record.startTime,
-      legacy: false,
-    };
-  }
-
-  const reason = identity && identity.reason ? String(identity.reason) : 'identity could not be verified';
-  // canonical verifyProcessIdentity が返す「process not alive」と「start time mismatch」は
-  // stale と確定できる。それ以外（起動時刻の取得不能・不正日付等）は、稼働中プロセスを
-  // 消す根拠にならないためファイルを保持してエラー/skipにする。
-  if (reason === 'process not alive' || /^start time mismatch:/.test(reason)) {
-    return finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reason });
-  }
-
-  return errorResult(
-    `manager.running の同一性を確認できません: ${runningPath}: ${reason}`,
-    onError
-  );
 }
 
 /**
@@ -487,14 +388,9 @@ function removeRunningReviewManagerIfOwned(runningPath, owner) {
     return { released: false, reason: 'different owner' };
   }
 
-  const ownerStartTime = owner && owner.startTime != null ? owner.startTime : null;
-  // 旧形式は同一性を検証できないが、現在プロセスが自分で書いた起動マーカーを
-  // 解放する既存の終了経路との互換性のため、PID一致時だけ解放を許可する。
-  // 新形式同士は起動時刻も一致しなければ別周回のレコードとみなす。
-  if (!record.legacy) {
-    if (!ownerStartTime || !record.startTime || !_startTimesMatch(ownerStartTime, record.startTime)) {
-      return { released: false, reason: 'different process identity' };
-    }
+  const checker = checkerFor();
+  if (!checker.sameRef(checker.readRef(owner), checker.readRef(record))) {
+    return { released: false, reason: 'different process identity' };
   }
 
   try {
@@ -513,9 +409,6 @@ function removeRunningReviewManagerIfOwned(runningPath, owner) {
  * @param {object} [opts]
  * @param {'throw'|'skip'} [opts.onError='throw'] 不正値・読み取り不能時の挙動
  * @param {boolean} [opts.cleanupStale=false] staleファイルを回収するか
- * @param {(pid:number)=>boolean} [opts.isProcessAliveFn]
- * @param {(pid:number,meta:object,opts?:object)=>{match:boolean,reason?:string}} [opts.verifyProcessIdentityFn]
- * @param {(pid:number,expectedStartTime:string)=>string|null} [opts.getProcessStartTimeFn]
  * @param {(info:object)=>void} [opts.onLegacyLive] 旧形式の生存PIDを当該PRの保護対象として通知
  * @returns {Array<{pr:string,pid:number,startTime:string}>}
  */
@@ -562,7 +455,5 @@ module.exports = {
   acquireReviewManagerStartup,
   transferReviewManagerStartup,
   releaseReviewManagerStartup,
-  _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
-  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
-  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
+  _setLiveness: (value) => { injectedLiveness = value; },
 };

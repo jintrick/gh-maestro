@@ -3,7 +3,7 @@
 //
 // 提供する機能:
 //   - workers.json から workerName のエントリを取得
-//   - プロセスの同一性確認（verifyProcessIdentity）
+//   - プロセスの生存確認
 //   - プロセスツリーの終了（killProcessTree）
 //   - レガシー WezTerm pane / notifier の終了
 //   - 関連する PID registry の sweep
@@ -16,8 +16,9 @@ const fs = require('fs');
 const { spawnSync } = require('./child-process');
 const { killPane, getAlivePaneIds } = require('./pane-launch');
 const { normalizeWorkerEntry } = require('./worker-entry');
-const { killProcessTree, waitForPidsToExit } = require('./kill-tree');
-const { sweepRegistry, isProcessAlive, verifyProcessIdentity } = require('../process-lifecycle');
+const { killProcessTree } = require('./kill-tree');
+const { sweepRegistry } = require('../process-lifecycle');
+const processLiveness = require('./process-liveness');
 const { deriveRoleFromSkill } = require('./worker-factory');
 const { recordCycleEvent } = require('./cycle-metrics');
 const { readWorkersRaw } = require('./workers-registry');
@@ -59,8 +60,7 @@ function validLegacyPaneId(value) {
  * @param {number} [opts.pollIntervalMs=50] プロセス停止確認の間隔ミリ秒
  * @param {number} [opts.sleepMs=500] レガシーpaneの解放待ちミリ秒
  * @param {Function} [opts.killProcessTreeFn] プロセス停止関数（テスト用）
- * @param {Function} [opts.waitForPidsToExitFn] 停止確認関数（テスト用）
- * @param {Function} [opts.isProcessAliveFn] 生存確認関数（テスト用）
+ * @param {object} [opts.liveness] 生存確認モジュール（テスト用）
  * @param {object} [opts._injectedWorkers] テスト用 workers オブジェクト注入
  * @returns {{ success: boolean, stoppedPid: number|null, skippedReason?: string, workerEntry: object }}
  */
@@ -73,30 +73,14 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
   const paneWaitMs = opts.sleepMs ?? 500;
   const recordCycleEventFn = opts.recordCycleEventFn || recordCycleEvent;
   const killProcessTreeFn = opts.killProcessTreeFn || killProcessTree;
-  const waitForPidsToExitFn = opts.waitForPidsToExitFn || waitForPidsToExit;
-  const isProcessAliveFn = opts.isProcessAliveFn || isProcessAlive;
+  const liveness = opts.liveness || processLiveness;
 
   const killAndConfirm = (pid) => {
     const killResult = killProcessTreeFn(pid, {
       timeoutMs: stopTimeoutMs,
       pollIntervalMs,
       sleepFn,
-      isProcessAliveFn,
     });
-    // WindowsではkillProcessTreeが親子孫全体を確認する。Unixでは同じAPIを
-    // 親PIDにも適用して、少なくとも呼び出し元が停止完了を観測するまで返さない。
-    const stopped = waitForPidsToExitFn(killResult?.pids || [pid], {
-      timeoutMs: stopTimeoutMs,
-      pollIntervalMs,
-      sleepFn,
-      isProcessAliveFn,
-    });
-    if (!stopped.ok) {
-      throw new Error(
-        `プロセスツリーの停止確認が期限内に完了しませんでした `
-        + `(pid ${pid}, 残存PID: ${stopped.alivePids.join(',')})`,
-      );
-    }
     return killResult;
   };
 
@@ -121,34 +105,26 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
   let stoppedPid = null;
   let skippedReason = null;
 
-  // ── 後方互換: レガシーな detached notifier（poll-and-notify.js）を kill ──────
+  // Legacy notifier records contain no identity, so they cannot authorize a kill.
   if (workerEntry.notifierPid) {
-    if (isProcessAliveFn(workerEntry.notifierPid)) {
-      killAndConfirm(workerEntry.notifierPid);
-      logWarn(`stop-worker: レガシー notifier (pid ${workerEntry.notifierPid}) を終了しました`);
-    } else {
-      logWarn(`stop-worker: レガシー notifier (pid ${workerEntry.notifierPid}) は既に停止しています`);
+    const state = liveness.observe(liveness.readRef({ pid: workerEntry.notifierPid }));
+    if (state === 'unknown') {
+      throw new Error(`レガシー notifier (pid ${workerEntry.notifierPid}) の生死を判定できません`);
     }
+    if (state === 'alive') killAndConfirm(workerEntry.notifierPid);
   }
 
-  // ── headless ワーカーのプロセスツリーを終了（同一性確認付き） ──────────────────
   if (workerEntry.pid) {
-    const pidAlive = isProcessAliveFn(workerEntry.pid);
-    if (pidAlive) {
-      const identity = verifyProcessIdentity(workerEntry.pid, workerEntry);
-      if (!identity.match) {
-        skippedReason = identity.reason || 'identity mismatch';
-        if (isRemoveMode) {
-          logWarn(`remove-worker: PID ${workerEntry.pid} の同一性確認に失敗しました (${identity.reason}) — プロセスは別プロセスに再利用されているため kill をスキップします`);
-        } else {
-          throw new Error(`ワーカー "${workerName}" のプロセス同一性確認に失敗しました（PID ${workerEntry.pid} は別プロセスに再利用されています: ${identity.reason}）。安全のためプロセス終了を中断します。`);
-        }
-      } else {
-        killAndConfirm(workerEntry.pid);
-        stoppedPid = workerEntry.pid;
-        const prefix = isRemoveMode ? 'remove-worker' : 'stop-worker';
-        logWarn(`${prefix}: ワーカープロセス (pid ${workerEntry.pid}) を終了しました`);
-      }
+    const state = liveness.observe(liveness.readRef(workerEntry));
+    if (state === 'unknown') {
+      skippedReason = 'process identity unavailable';
+      if (!isRemoveMode) throw new Error(`ワーカー "${workerName}" の生死を判定できません (PID ${workerEntry.pid})`);
+      logWarn(`remove-worker: PID ${workerEntry.pid} の生死を判定できないため停止をスキップします`);
+    } else if (state === 'alive') {
+      killAndConfirm(workerEntry.pid);
+      stoppedPid = workerEntry.pid;
+      const prefix = isRemoveMode ? 'remove-worker' : 'stop-worker';
+      logWarn(`${prefix}: ワーカープロセス (pid ${workerEntry.pid}) を終了しました`);
     } else {
       const prefix = isRemoveMode ? 'remove-worker' : 'stop-worker';
       logWarn(`${prefix}: ワーカープロセス (pid ${workerEntry.pid}) は既に停止しています`);

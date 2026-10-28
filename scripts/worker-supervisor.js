@@ -49,13 +49,13 @@ const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const {
   resolveSessionPid,
-  createDeadManSwitch,
   getProcessStartTime,
   captureProcessIdentity,
   registerProcess,
   findRunningInstance,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
+const processLiveness = require('./shared/process-liveness');
 const { acquireResidentLease, WORKER_SUPERVISOR_ROLE } = require('./shared/worker-lease');
 const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdog-exit-notify');
 const { recordResidentNotification } = require('./shared/resident-audit');
@@ -64,7 +64,7 @@ const { checkResidentForceGuard } = require('./shared/resident-force-guard');
 const { runningLegacyWorkerSupervisorPids } = require('./shared/worker-supervisor-control');
 
 // テスト注入。既定は実装。
-let _createDeadManSwitch = createDeadManSwitch;
+let _parentLiveness = processLiveness;
 let _parentDeathExit = (code) => process.exit(code);
 let _injectedGetProcessStartTime;
 let _recordCycleEvent = recordCycleEvent;
@@ -743,10 +743,9 @@ function main(argsOverride, opts = {}) {
 
   const sessionPid = resolveSessionPid(values['--session-pid']);
 
-  // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
-  // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
-  const expectedStartTime = _getProcessStartTime(sessionPid);
-  const checkParent = _createDeadManSwitch(sessionPid, { expectedStartTime });
+  // 親セッションの参照を起動時に捕捉する。
+  const parentRef = _parentLiveness.captureProcess(sessionPid);
+  const checkParent = _parentLiveness.watchParent(parentRef);
 
   // リポジトリ解決
   const ghOpts = { cwd: workspace };
@@ -1412,7 +1411,7 @@ module.exports = {
   _notifyOrchestrator,
   _setReadContract: (fn) => { _readContract = fn; },
   _setClearContract: (fn) => { _clearContract = fn; },
-  _setCreateDeadManSwitch: (fn) => { _createDeadManSwitch = fn; },
+  _setParentLiveness: (value) => { _parentLiveness = value || processLiveness; },
   _setParentDeathExit: (fn) => { _parentDeathExit = fn; },
   _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
   main,
