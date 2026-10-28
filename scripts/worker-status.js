@@ -1229,7 +1229,11 @@ function runWatchLoop(workspace, interval, opts = {}) {
   const clearIntervalFn = opts.clearIntervalFn || clearInterval;
   const onSignalFn = opts.onSignalFn || ((sig, handler) => process.on(sig, handler));
   const exitFn = opts.exitFn || process.exit;
-  const liveness = opts.liveness || _injectedLiveness || createWorkerStatusLiveness({ nowFn: opts.nowFn || _now });
+  const liveness = opts.liveness || _injectedLiveness || createWorkerStatusLiveness({
+    nowFn: opts.nowFn || _now,
+    probePid: opts.probePid,
+    readStartTime: opts.readStartTime,
+  });
   const collectOpts = { ...opts, liveness };
 
   const render = () => {

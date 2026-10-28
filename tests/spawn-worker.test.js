@@ -5,9 +5,7 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const lifecycle = require('../scripts/process-lifecycle');
 const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
-lifecycle.getProcessStartTime = () => TEST_PROCESS_START_TIME;
 const workerLiveness = require('../scripts/shared/worker-liveness');
 const { createLiveness } = require('../scripts/shared/process-liveness');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'spawn-worker.js');
@@ -42,6 +40,8 @@ const FAST_CLI_PRELOAD = (() => {
   const childProcessPath = require.resolve('../scripts/shared/child-process');
   const lifecyclePath = require.resolve('../scripts/process-lifecycle');
   const leasePath = require.resolve('../scripts/shared/worker-lease');
+  const processLivenessPath = require.resolve('../scripts/shared/process-liveness');
+  const workerLivenessPath = require.resolve('../scripts/shared/worker-liveness');
   const statusPanePath = require.resolve('../scripts/shared/ensure-status-pane');
   const supervisorPath = require.resolve('../scripts/shared/ensure-worker-supervisor');
   const source = [
@@ -61,9 +61,14 @@ const FAST_CLI_PRELOAD = (() => {
     '  return realExecSync(command, opts);',
     '};',
     `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
-    'lifecycle.getProcessStartTime = () => fixedStartTime;',
+    `const processLiveness = require(${JSON.stringify(processLivenessPath)});`,
+    'const checker = processLiveness.createLiveness({ probePid: (pid) => isAlive(pid) ? "alive" : "dead", readStartTime: (_pid, expected) => expected || fixedStartTime });',
+    'Object.assign(processLiveness, checker);',
+    `const workerLiveness = require(${JSON.stringify(workerLivenessPath)});`,
+    'workerLiveness._setLiveness(checker);',
+    'lifecycle._setLiveness(checker);',
     `const lease = require(${JSON.stringify(leasePath)});`,
-    'lease._setGetProcessStartTime(() => fixedStartTime);',
+    'lease._setLiveness(checker);',
     `const statusPane = require(${JSON.stringify(statusPanePath)});`,
     "statusPane.ensureStatusPane = () => ({ ok: false, stage: 'test', error: 'injected' });",
     `const supervisor = require(${JSON.stringify(supervisorPath)});`,

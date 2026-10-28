@@ -67,9 +67,10 @@ test('isMigrationInProgress: 所有プロセスが死んでいれば stale と�
 
 test('isMigrationInProgress: PIDが再利用され同一性が確認できなければ false', () => {
   const dir = freshWorkspace();
-  inject();
-
-  marker.markMigrationInProgress(dir);
+  marker._setLiveness(createLiveness({ probePid: () => 'alive', readStartTime: () => start }));
+  fs.writeFileSync(marker.migrationInProgressPath(dir), JSON.stringify({
+    pid: 12345, startTime: '2026-08-01T00:00:00.000Z',
+  }));
   start = '2026-08-02T00:00:00.000Z';
 
   assert.equal(marker.isMigrationInProgress(dir), false);
@@ -83,7 +84,7 @@ test('isMigrationInProgress: startTime 未記録でも所有プロセス生存�
   const raw = JSON.parse(fs.readFileSync(marker.migrationInProgressPath(dir), 'utf8'));
   assert.equal(raw.startTime, null);
 
-  // startTime が null なので verifyProcessIdentity は呼ばれず、生存確認のみで抑止を維持する
+  // startTime が null でも PID は生存中なので、判定不能として抑止を維持する。
   assert.equal(marker.isMigrationInProgress(dir), true);
 });
 

@@ -332,8 +332,10 @@ describe('CLI argument validation', () => {
           'leases',
           `${workerLease.roleLeaseKey('worker-supervisor')}.json`,
         );
-        assert.equal(JSON.parse(fs.readFileSync(leasePath, 'utf8')).startTime, '2026-07-29T00:00:00.424Z');
-        assert.ok(calls >= 1, 'self identity を捕捉する');
+        const leaseRecord = JSON.parse(fs.readFileSync(leasePath, 'utf8'));
+        assert.equal(leaseRecord.startTime, '2026-07-29T00:00:00.424Z');
+        assert.equal(testLiveness.sameRef(result.residentIdentity, testLiveness.readRef(leaseRecord)), true);
+        assert.equal(calls, 2, 'resident identity と parent session の起動時刻だけを取得する');
         result.residentLease.release();
       });
     } finally {
@@ -538,11 +540,15 @@ describe('loadWorkers', () => {
       }));
       supervisor._setIsWorkerAlive(workerLiveness.isWorkerAlive);
       try {
-        assert.throws(() => supervisor.deliverMessage({
+        const spawnCallsBefore = lastSpawnCalls.length;
+        const result = supervisor.deliverMessage({
           workerName: 'issue-5-fix', entry,
           message: { from: 'orch', body: 'hello' }, workspace: dir,
           homedir: os.homedir(), issue: '5',
-        }), /liveness is unknown/);
+        });
+        assert.equal(result.method, 'pending');
+        assert.match(result.error, /liveness is unknown/);
+        assert.equal(lastSpawnCalls.length, spawnCallsBefore, 'unknownなworkerをresumeしてはならない');
       } finally {
         workerLiveness._setLiveness(null);
         supervisor._setIsWorkerAlive(() => false);
@@ -565,6 +571,34 @@ describe('loadWorkers', () => {
 
 describe('Delivery', () => {
   beforeEach(() => resetAllMocks());
+
+  test('deliverMessage: PIDが生存していてもstartTime欠落時はresumeせずpendingにする', () => {
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: { 'issue-5-fix': { pid: 4242, agentId: 'agy', issue: 5 } },
+      });
+      const liveness = processLiveness.createLiveness({
+        probePid: () => 'alive',
+        readStartTime: () => null,
+      });
+      workerLiveness._setLiveness(liveness);
+      supervisor._setIsWorkerAlive(workerLiveness.isWorkerAlive);
+      try {
+        const entry = supervisor.loadWorkers(dir).get('issue-5-fix');
+        const result = supervisor.deliverMessage({
+          workerName: 'issue-5-fix', entry,
+          message: { from: 'orch', body: 'hello' }, workspace: dir,
+          homedir: os.homedir(), issue: '5',
+        });
+        assert.equal(result.method, 'pending');
+        assert.match(result.error, /liveness is unknown; refusing resume/);
+        assert.equal(lastSpawnCalls.length, 0, '起動時刻不明の生存PIDでは二重起動しない');
+      } finally {
+        workerLiveness._setLiveness(null);
+        supervisor._setIsWorkerAlive(() => false);
+      }
+    });
+  });
 
   test('deliverMessage: プロセス生存時は稼働中とみなしpending（二重起動しない）', () => {
     setWorkersBusy();

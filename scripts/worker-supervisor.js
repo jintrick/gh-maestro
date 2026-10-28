@@ -519,7 +519,19 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
  * @returns {{ success: boolean, method: string, error?: string }}
  */
 function deliverMessage({ workerName, entry, message, workspace, homedir, issue, repo }) {
-  if (_isWorkerAlive(entry.rawProcessEntry ?? entry)) {
+  let workerAlive;
+  try {
+    workerAlive = _isWorkerAlive(entry.rawProcessEntry ?? entry);
+  } catch (error) {
+    // A live PID with an incomplete or unreadable identity may still be busy.
+    // Keep the delivery pending so this uncertainty can never start a duplicate worker.
+    return {
+      success: false,
+      method: 'pending',
+      error: `worker pid ${entry.pid || 'unknown'} liveness is unknown; refusing resume: ${error.message}`,
+    };
+  }
+  if (workerAlive) {
     return {
       success: false,
       method: 'pending',

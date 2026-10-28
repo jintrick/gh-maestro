@@ -19,10 +19,17 @@ test('opaque reference observes live, reused and missing processes', () => {
 test('missing identity and failed probes remain unknown', () => {
   let probe = 'alive';
   let start = time;
-  const liveness = createLiveness({ probePid: () => probe, readStartTime: () => start });
-  assert.equal(liveness.observe(liveness.readRef({ pid: 123 })), 'unknown');
+  let readCalls = 0;
+  const liveness = createLiveness({
+    probePid: () => probe,
+    readStartTime: () => { readCalls++; return start; },
+  });
+  const missingStartTimeRef = liveness.readRef({ pid: 123 });
+  assert.equal(liveness.observe(missingStartTimeRef), 'unknown', '生存PIDのstartTime欠落はunknown');
+  assert.equal(readCalls, 0, 'startTimeのない参照は比較用時刻を読み取らない');
   probe = 'dead';
-  assert.equal(liveness.observe(liveness.readRef({ pid: 123 })), 'unknown');
+  assert.equal(liveness.observe(missingStartTimeRef), 'dead', 'PID消失が確認できればstartTime欠落でもdead');
+  assert.equal(readCalls, 0, '死亡確認だけで十分な場合はstartTimeを照会しない');
   probe = 'alive';
   const ref = liveness.captureProcess(123);
   probe = 'unknown';

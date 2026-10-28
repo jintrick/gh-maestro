@@ -5,25 +5,6 @@ const { execSync } = require('./child-process');
 const IS_WIN = process.platform === 'win32';
 
 /**
- * プロセスが生存しているかを確認する。
- *
- * @param {number} pid
- * @returns {boolean}
- */
-function isProcessAlive(pid) {
-  if (!pid || pid <= 0) return false;
-  try {
-    // process.kill(pid, 0) はシグナルを送らず生存確認だけ行う
-    // ESRCH: プロセス不在, EPERM: 存在するが権限なし（生存とみなす）
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    if (e.code === 'ESRCH') return false;
-    return true; // EPERM 等 → 存在する
-  }
-}
-
-/**
  * プロセスの起動時刻をISO文字列で取得する。
  *
  * @param {number} pid
@@ -81,44 +62,11 @@ function getProcessStartTime(pid) {
 }
 
 /**
- * プロセスのPIDと起動時刻を一つのidentityとして捕捉する。
- *
- * leaseとPID registryのように同じプロセスidentityを複数の状態へ保存する呼び出し元は、
- * 起動時刻の取得をこの関数で一度だけ行い、戻り値を各保存先へ渡す。WindowsのCIM取得が
- * 失敗した場合は起動時刻を未知値（null）のまま返し、現在時刻などをプロセスidentityの
- * 代替値として保存しない。
- *
- * @param {number|string} [pid] 対象プロセスのPID
- * @param {(pid: number) => (string|null)} [getProcessStartTimeFn] テスト用の取得関数
- * @returns {{pid: number, startTime: string|null}}
- * @throws {Error} PIDが正の整数でない場合
- */
-function captureProcessIdentity(pid = process.pid, getProcessStartTimeFn = getProcessStartTime) {
-  const targetPid = parseInt(pid, 10);
-  if (!Number.isFinite(targetPid) || targetPid <= 0) {
-    throw new Error(`captureProcessIdentity: 不正な PID です: ${pid}`);
-  }
-
-  let startTime = null;
-  try {
-    startTime = getProcessStartTimeFn(targetPid);
-  } catch {
-    // getProcessStartTime() 自体は失敗をnullへ縮退する。注入関数でも同じbest-effort契約に揃える。
-    startTime = null;
-  }
-  return {
-    pid: targetPid,
-    startTime: typeof startTime === 'string' && startTime !== '' ? startTime : null,
-  };
-}
-
-/**
  * 2つのプロセス起動時刻（ISO 文字列）が同一プロセスのものであるかを判定する。
  *
  * 1秒の許容範囲（WMI と JS Date の精度差を吸収）。不正な日付文字列は getTime() が
  * NaN を返すため、明示的に不一致扱いとする（NaN を無視すると常に一致に倒れて
- * PID再利用の誤判定が静かに復活する）。verifyProcessIdentity と createDeadManSwitch の
- * 両方がこの比較意味論を共有する。
+ * PID再利用の誤判定が静かに復活する）。
  *
  * @param {string} a 起動時刻（ISO 文字列）
  * @param {string} b 起動時刻（ISO 文字列）
@@ -131,106 +79,6 @@ function startTimesMatch(a, b) {
   if (Number.isNaN(ta) || Number.isNaN(tb)) return false;
   return Math.abs(ta - tb) <= 1000;
 }
-
-/**
- * dead-man's switch のチェック関数を作成する。
- *
- * 返された関数をポーリングループの毎周回で呼び出す。
- * 親が死んだことを検出したら false を返す（呼び出し側は cleanup して exit）。
- *
- * 判定は2段:
- * - PID が存在しない: isProcessAlive の一過性の誤検出を緩和するため、3回連続で
- *   確認するまで false を返さない。
- * - PID は存在するが起動時刻が期待値と不一致（同じ PID に別プロセスが再利用された）:
- *   起動時刻の不一致は確定事実（同一プロセスは起動時刻を変えない）のため、初回検出で
- *   即 false を返す。居座りを最大1ポーリング間隔で検出できる。
- *   起動時刻の取得失敗（null / throw）は一過性の読取失敗が疑われるため生存扱いとし、
- *   誤自滅しない（fail-open は誤自滅防止側に倒す。基本の isProcessAlive チェックは残る）。
- *
- * @param {number} monitorPid 監視対象PID
- * @param {object} [opts]
- * @param {string} [opts.expectedStartTime] 監視対象の起動時刻（PID再利用検知用。
- *   呼び出し元が起動時に getProcessStartTime で捕捉して渡す。未指定なら従来の
- *   isProcessAlive のみの判定にフォールバックする）
- * @returns {() => boolean} 親が生きていれば true、死んでいれば false
- */
-function createDeadManSwitch(monitorPid, opts = {}) {
-  const expectedStartTime = opts.expectedStartTime || null;
-  let consecutiveDead = 0;
-  const REQUIRED_CONSECUTIVE_DEAD = 3;
-
-  return function checkParent() {
-    const alive = isProcessAlive(monitorPid);
-
-    if (!alive) {
-      consecutiveDead++;
-      if (consecutiveDead >= REQUIRED_CONSECUTIVE_DEAD) return false;
-      return true; // 猶予期間中
-    }
-
-    // PID再利用チェック: 期待起動時刻と実起動時刻を比較
-    if (expectedStartTime) {
-      let actualStart = null;
-      try {
-        actualStart = getProcessStartTime(monitorPid);
-      } catch {
-        actualStart = null;
-      }
-      if (actualStart && !startTimesMatch(expectedStartTime, actualStart)) {
-        // 同じPIDに別プロセスが居る → 元の親は死んだとみなす
-        return false;
-      }
-      // 取得失敗（null）→ 読取失敗の可能性があるため生存扱い（誤自滅しない）
-    }
-
-    consecutiveDead = 0;
-    return true;
-  };
-}
-
-/**
- * 実行中のプロセスが registry エントリと同一か検証する。
- *
- * PID再利用事故を防ぐため、起動時刻を比較する。
- * Windows: Get-CimInstance Win32_Process の CreationDate
- * Linux:   /proc/<pid>/stat の starttime
- *
- * @param {number} pid
- * @param {object} registeredMeta  registry エントリ（registerProcess の戻り値）
- * @param {object} [opts]
- * @param {string|null} [opts.actualStartTime] 今回の判定用に呼び出し側が観測した実起動時刻。
- *   指定時は `getProcessStartTime(pid)` を呼ばず、この値を登録値と比較する。
- * @returns {{ match: boolean, reason?: string }}
- */
-function verifyProcessIdentity(pid, registeredMeta, opts = {}) {
-  if (!isProcessAlive(pid)) {
-    return { match: false, reason: 'process not alive' };
-  }
-
-  const actualStartTime = Object.prototype.hasOwnProperty.call(opts, 'actualStartTime')
-    ? opts.actualStartTime
-    : getProcessStartTime(pid);
-  if (!actualStartTime) {
-    // 起動時刻が取得できない → 同一性確認不能
-    // 安全のため「一致しない」と判定（無関係なプロセスを kill しない）
-    return { match: false, reason: 'cannot get process start time' };
-  }
-
-  if (registeredMeta.startTime && !startTimesMatch(registeredMeta.startTime, actualStartTime)) {
-    const regTime = new Date(registeredMeta.startTime).getTime();
-    const actualTime = new Date(actualStartTime).getTime();
-    // 不正な日付文字列の場合 getTime() が NaN を返す。
-    // NaN > 1000 は false のため誤って一致判定（match:true）に倒れてしまう。
-    // startTimesMatch が NaN を不一致扱いにするため、ここでは reason を区別して返す。
-    const reason = (Number.isNaN(regTime) || Number.isNaN(actualTime))
-      ? `invalid date: registered=${registeredMeta.startTime}, actual=${actualStartTime}`
-      : `start time mismatch: registered=${registeredMeta.startTime}, actual=${actualStartTime}`;
-    return { match: false, reason };
-  }
-
-  return { match: true };
-}
-
 
 // The reference is an opaque, versioned serialized value. Only this module
 // interprets it; callers may persist it or pass it back to this API.
@@ -247,6 +95,7 @@ function createLiveness(deps = {}) {
   const startTimeCacheMs = deps.startTimeCacheMs ?? 0;
   const now = deps.now || Date.now;
   const startTimeCache = new Map();
+  let capturedSelfRef = null;
   function observeStartTime(pid, expectedStartTime) {
     if (!(startTimeCacheMs > 0)) return readStartTime(pid, expectedStartTime);
     const observedAt = now();
@@ -291,6 +140,15 @@ function createLiveness(deps = {}) {
     }
     return encode(n, startTime);
   }
+  function captureSelf() {
+    if (capturedSelfRef) return capturedSelfRef;
+    const ref = captureProcess(process.pid);
+    const value = decode(ref);
+    if (value && value.startTime && !Number.isNaN(new Date(value.startTime).getTime())) {
+      capturedSelfRef = ref;
+    }
+    return ref;
+  }
   function readRef(record, format = 'default') {
     if (!record || typeof record !== 'object') return null;
     if (format !== 'default' && format !== 'session') throw new Error('invalid process reference format');
@@ -311,7 +169,6 @@ function createLiveness(deps = {}) {
   function observe(ref) {
     const value = decode(ref);
     if (!value) return 'unknown';
-    if (!value.startTime || Number.isNaN(new Date(value.startTime).getTime())) return 'unknown';
     let state;
     try { state = probe(value.pid); } catch { return 'unknown'; }
     if (state === 'dead') {
@@ -319,6 +176,10 @@ function createLiveness(deps = {}) {
       return 'dead';
     }
     if (state !== 'alive') return 'unknown';
+    if (!value.startTime || Number.isNaN(new Date(value.startTime).getTime())) return 'unknown';
+    // A process cannot outlive itself. Reusing a valid captured self reference avoids
+    // querying the OS for our own start time on every lock/lease check.
+    if (value.pid === process.pid && capturedSelfRef && sameRef(ref, capturedSelfRef)) return 'alive';
     let actual;
     try { actual = observeStartTime(value.pid, value.startTime); } catch { return 'unknown'; }
     if (!actual || Number.isNaN(new Date(actual).getTime()) || Number.isNaN(new Date(value.startTime).getTime())) return 'unknown';
@@ -350,7 +211,7 @@ function createLiveness(deps = {}) {
       return true;
     };
   }
-  return { captureSelf: () => captureProcess(process.pid), captureProcess, readRef, writeRef, observe, sameRef, watchParent };
+  return { captureSelf, captureProcess, readRef, writeRef, observe, sameRef, watchParent };
 }
 const liveness = createLiveness();
 

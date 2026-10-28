@@ -10,7 +10,7 @@ const os = require('os');
 //
 // 実プロセス確認は行わない。生存判定は
 // 各モジュールの _set* 注入で制御する。注入しない場合は死んだ PID（999999999 等）を使い、
-// isProcessAlive が WMI/PowerShell を起動せず false を返す経路だけを踏ませる。
+// process-liveness のテスト用 checker で PID の生死を制御する。
 
 // ── ヘルパー: 注入状態を分離するため対象モジュールをフレッシュに再読込 ──────
 const CHE = require.resolve('../scripts/shared/collect-housekeeping-exclusions');
@@ -149,11 +149,12 @@ test('collectHousekeepingExclusions: 同一性確認済みの Review Manager が
   }
 });
 
-test('collectHousekeepingExclusions: 旧 PID-only は判定不能として保持し中断する', () => {
+test('collectHousekeepingExclusions: 生存中の旧 PID-only は判定不能として保持し中断する', () => {
   const { che } = fresh(); const ws = tmpWorkspace();
   try {
     const file = path.join(ws, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.running');
     fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, '12345');
+    che._setLiveness(createLiveness({ probePid: () => 'alive' }));
     assert.throws(() => che.collectHousekeepingExclusions(ws), /判定できません/);
     assert.equal(fs.readFileSync(file, 'utf8'), '12345');
   } finally { fs.rmSync(ws, { recursive: true, force: true }); }

@@ -765,8 +765,10 @@ test('main: 常駐leaseへ渡したself identityをregistry用の結果へ保持
       assert.equal(typeof result.residentIdentity, 'string');
       const leasePath = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json');
       // 親セッション参照の捕捉が先に行われるため、residentIdentity は2回目の取得値。
-      assert.equal(JSON.parse(fs.readFileSync(leasePath, 'utf8')).startTime, '2026-07-29T00:00:00.626Z');
-      assert.ok(livenessCalls > 1, 'sameRef と observe は共通 liveness API で同一性を確認する');
+      const leaseRecord = JSON.parse(fs.readFileSync(leasePath, 'utf8'));
+      assert.equal(leaseRecord.startTime, '2026-07-29T00:00:00.626Z');
+      assert.equal(liveness.sameRef(result.residentIdentity, liveness.readRef(leaseRecord)), true);
+      assert.equal(livenessCalls, 2, 'parent session と resident identity の起動時刻だけを取得する');
     } finally {
       result.residentLease.release();
       useFastParentChecker();
@@ -1349,6 +1351,30 @@ test('runWaitMode: 新着を即座に検出すればリトライせず true を�
 
     msgPoll._setSleep(async (ms) => {});
   });
+});
+
+
+test('runWaitMode: 新着が無ければ waitMs 経過後に false を返す（リトライを重ねる）', async () => {
+  let now = 0;
+  let sleepCalls = 0;
+  let scanCalls = 0;
+  msgPoll._setSleep(async (ms) => { sleepCalls++; now += ms; });
+  try {
+    const lines = [];
+    const found = await msgPoll.runWaitMode({
+      scanOnce: () => { scanCalls++; },
+      lines,
+      intervalMs: 10,
+      waitMs: 25,
+      nowFn: () => now,
+    });
+    assert.equal(found, false);
+    assert.equal(lines.length, 0);
+    assert.ok(scanCalls > 1, `scanCalls should be > 1, got ${scanCalls}`);
+    assert.ok(sleepCalls > 0, `sleepCalls should be > 0, got ${sleepCalls}`);
+  } finally {
+    msgPoll._setSleep(async () => {});
+  }
 });
 
 

@@ -25,11 +25,20 @@ const { atomicWriteJson } = require('./atomic-write');
 
 const SCHEMA_VERSION = 2;
 
-// 自プロセスの起動時刻。モジュールロード時に1回だけ取得してキャッシュする。
-// acquireStateLock はポーリング毎（20秒間隔）に呼ばれるため、毎回 WMI（~0.5秒）を
-// 呼ぶのは許容できない（process-lifecycle.js の acquireStartupLock が毎回呼ぶのを
-// 踏襲せず、ロックの自己エントリはキャッシュ値で書く）。
-const SELF_REF = processLiveness.captureSelf();
+// 成功した self reference はキャッシュする。取得できなかった参照は保持せず、
+// 次のロック操作で再取得できるようにする。
+let selfRef = null;
+
+function getSelfRef() {
+  if (selfRef && processLiveness.sameRef(selfRef, selfRef)) return selfRef;
+  selfRef = null;
+  const candidate = processLiveness.captureSelf();
+  if (!processLiveness.sameRef(candidate, candidate)) {
+    throw new Error('ロック所有者の起動時刻を取得できません');
+  }
+  selfRef = candidate;
+  return selfRef;
+}
 
 /**
  * 状態ファイルのパスを返す。
@@ -180,8 +189,8 @@ function stateLockPath(workspace, self) {
  * PID再利用（startTime不一致）OR 破損」のときのみ行い、正当な保持者（生存かつ同一性一致）が
  * いる場合は取得に失敗する。
  *
- * 自己エントリの startTime はモジュールロード時に1回だけ取得してキャッシュする
- * 起動時に捕捉した参照を使用し、照会不能な所有者のロックは奪取しない。
+ * 自己エントリは取得に成功した不透明な参照をキャッシュして使用し、
+ * 照会不能な所有者のロックは奪取しない。
  *
  * @param {string} workspace
  * @param {string} self
@@ -190,8 +199,8 @@ function stateLockPath(workspace, self) {
 function acquireStateLock(workspace, self) {
   const lp = stateLockPath(workspace, self);
   fs.mkdirSync(path.dirname(lp), { recursive: true });
-  if (processLiveness.observe(SELF_REF) !== 'alive') throw new Error(`ロック ${lp} の自プロセスの生死を判定できません`);
-  const selfEntry = processLiveness.writeRef({}, SELF_REF);
+  const ownerRef = getSelfRef();
+  const selfEntry = processLiveness.writeRef({}, ownerRef);
   for (let i = 0; i < 5; i++) {
     try {
       fs.writeFileSync(lp, JSON.stringify(selfEntry), { encoding: 'utf8', flag: 'wx' });
@@ -234,7 +243,7 @@ function releaseStateLock(workspace, self) {
   const lp = stateLockPath(workspace, self);
   try {
     const holder = JSON.parse(fs.readFileSync(lp, 'utf8'));
-    if (holder && processLiveness.sameRef(processLiveness.readRef(holder), SELF_REF)) fs.unlinkSync(lp);
+    if (holder && processLiveness.sameRef(processLiveness.readRef(holder), getSelfRef())) fs.unlinkSync(lp);
   } catch {
     // 読めない・存在しない → 何もしない
   }

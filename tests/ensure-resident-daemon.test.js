@@ -19,11 +19,6 @@ const {
   tryReserveAutostartAttempt,
 } = require('../scripts/shared/ensure-resident-daemon');
 const migrationMarker = require('../scripts/shared/migration-marker');
-const {
-  isProcessAlive,
-  getProcessStartTime,
-  verifyProcessIdentity,
-} = require('../scripts/process-lifecycle');
 
 function fakeChild() {
   const emitter = new EventEmitter();

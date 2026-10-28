@@ -638,7 +638,7 @@ if (closedPr.blocked) {
     } catch (error) {
       fail(`workers.json の読み取り・検証に失敗しました: ${error.message}`);
     }
-    const oldEntry = previousWorkers && previousWorkers[oldKey];
+    const oldEntry = previousWorkers ? previousWorkers[oldKey] : undefined;
     if (oldEntry !== undefined) {
       const state = observeWorker(oldEntry);
       if (state === 'unknown') {

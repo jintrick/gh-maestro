@@ -859,15 +859,16 @@ let _sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 async function runWaitMode(result) {
   const { scanOnce, lines, intervalMs, waitMs } = result;
-  const start = Date.now();
+  const nowFn = result.nowFn || Date.now;
+  const start = nowFn();
   while (true) {
     const before = lines.length;
     // gh 呼び出しの上限を残り時間に絞り、--wait の締切超過を最小化する
-    const remainingForGh = Math.max(0, waitMs - (Date.now() - start));
+    const remainingForGh = Math.max(0, waitMs - (nowFn() - start));
     // --wait は1回の呼び出しで常に高々1件しか返さない契約（Issue #99）
     scanOnce({ maxGhTimeoutMs: remainingForGh, singleMessage: true });
     if (lines.length > before) return true;
-    const elapsed = Date.now() - start;
+    const elapsed = nowFn() - start;
     if (elapsed >= waitMs) return false;
     const remaining = waitMs - elapsed;
     await _sleep(Math.min(intervalMs, remaining));

@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const rs = require('../scripts/shared/read-state');
+const processLiveness = require('../scripts/shared/process-liveness');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-read-state-'));
@@ -22,6 +23,40 @@ function writeRaw(workspace, self, obj) {
   fs.mkdirSync(path.dirname(sp), { recursive: true });
   fs.writeFileSync(sp, JSON.stringify(obj, null, 2), 'utf8');
 }
+
+test('read-state: self reference の取得失敗を固定せず次回の既読書き込みで再取得する', () => {
+  const originalCaptureSelf = processLiveness.captureSelf;
+  let captureCalls = 0;
+  processLiveness.captureSelf = () => {
+    captureCalls++;
+    return captureCalls === 1
+      ? processLiveness.readRef({ pid: process.pid })
+      : originalCaptureSelf();
+  };
+
+  try {
+    withTempDir((workspace) => {
+      assert.throws(
+        () => rs.initializeState(workspace, 'orchestrator', { sessionId: 'self-ref-retry' }),
+        /起動時刻を取得できません/
+      );
+      assert.equal(
+        fs.existsSync(rs.stateLockPath(workspace, 'orchestrator')),
+        false,
+        '参照取得に失敗した場合は lock を作らない'
+      );
+
+      const initialized = rs.initializeState(workspace, 'orchestrator', { sessionId: 'self-ref-retry' });
+      assert.equal(initialized.ok, true);
+      const marked = rs.markRead(workspace, 'orchestrator', { issue: 654, ids: [123] });
+      assert.equal(marked.ok, true);
+      assert.deepEqual(marked.state.readByIssue['654'], [123]);
+      assert.equal(captureCalls, 2, '有効な参照だけを1回捕捉して以後再利用する');
+    });
+  } finally {
+    processLiveness.captureSelf = originalCaptureSelf;
+  }
+});
 
 // ── readState の status 判定 ────────────────────────────────────────────────
 

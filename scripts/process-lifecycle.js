@@ -32,7 +32,9 @@ const storageLayout = require('./shared/storage-layout');
 
 const IS_WIN = process.platform === 'win32';
 let injectedLiveness = null;
-function getLiveness() { return injectedLiveness || require('./shared/process-liveness'); }
+function getLiveness(candidate) {
+  return candidate || injectedLiveness || require('./shared/process-liveness');
+}
 
 // ── 親セッション監視（dead-man's switch） ──────────────────────────────
 
@@ -207,12 +209,17 @@ function registerProcess(workspace, meta = {}) {
     throw new Error(`registerProcess: 不正な PID です: ${meta && meta.pid}`);
   }
 
-  const checker = meta.liveness || getLiveness();
+  const checker = getLiveness(meta.liveness);
   const { processRef, ...recordMeta } = meta;
   delete recordMeta.liveness;
   const ref = processRef || (meta.startTime
     ? checker.readRef({ pid: targetPid, startTime: meta.startTime })
-    : checker.captureProcess(targetPid));
+    : targetPid === process.pid
+      ? checker.captureSelf()
+      : checker.captureProcess(targetPid));
+  if (checker.observe(ref) !== 'alive') {
+    throw new Error(`registerProcess: PID ${targetPid} の生存と同一性を確認できません`);
+  }
   const entry = checker.writeRef({
     ...recordMeta,
     script: meta.script || path.basename(process.argv[1] || 'unknown'),
@@ -296,6 +303,7 @@ function findRunningInstances(workspace, opts = {}) {
   const dirs = [pidsDir(workspace)];
   const seenPids = new Set();
   const matches = [];
+  const checker = getLiveness(opts.liveness);
 
   for (const dir of dirs) {
     let files;
@@ -369,7 +377,6 @@ function findRunningInstances(workspace, opts = {}) {
       // 同一 PID の重複レコードは一度だけ判定する。
       if (seenPids.has(entryPid)) continue;
       seenPids.add(entryPid);
-      const checker = opts.liveness || getLiveness();
       const state = checker.observe(checker.readRef(entry));
       if (state === 'unknown') {
         throw new Error(`PID registry の生死を判定できません: ${entryPid}`);
@@ -439,7 +446,7 @@ function legacyStartupLockPath(workspace, script, workerName) {
  *   getProcessStartTime は Windows では PowerShell/WMI 呼び出しを伴い高コストなため、
  * @returns {boolean}
  */
-function acquireLockAt(dir, lockPath, maxRetries, selfEntry) {
+function acquireLockAt(dir, lockPath, maxRetries, selfEntry, checker) {
   fs.mkdirSync(dir, { recursive: true });
 
   for (let i = 0; i < maxRetries; i++) {
@@ -456,8 +463,7 @@ function acquireLockAt(dir, lockPath, maxRetries, selfEntry) {
     } catch (error) {
       throw new Error(`ロック ${lockPath} の保持者を読めません: ${error.message}`, { cause: error });
     }
-    const liveness = getLiveness();
-    const state = liveness.observe(liveness.readRef(holder));
+    const state = checker.observe(checker.readRef(holder));
     if (state === 'unknown') {
       throw new Error(`ロック ${lockPath} の保持者 ${JSON.stringify(holder)} の生死を判定できません`);
     }
@@ -510,13 +516,13 @@ function releaseLockAt(lockPath) {
 function acquireStartupLock(workspace, script, workerName, opts = {}) {
   const maxRetries = opts.maxRetries ?? 5;
 
-  const checker = opts.liveness || getLiveness();
+  const checker = getLiveness(opts.liveness);
   const selfRef = checker.captureSelf();
   if (checker.observe(selfRef) !== 'alive') throw new Error('起動ロック保持者の生死を判定できません');
   const selfEntry = checker.writeRef({}, selfRef);
 
   const dir = pidsDir(workspace);
-  return acquireLockAt(dir, startupLockPath(workspace, script, workerName), maxRetries, selfEntry);
+  return acquireLockAt(dir, startupLockPath(workspace, script, workerName), maxRetries, selfEntry, checker);
 }
 
 /**
@@ -637,7 +643,7 @@ function sweepRegistry(workspace, opts = {}) {
     }
   }
 
-  const checker = opts.liveness || getLiveness();
+  const checker = getLiveness(opts.liveness);
   const states = new Map();
   for (const { entry } of byPid.values()) {
     const state = checker.observe(checker.readRef(entry));
@@ -691,8 +697,7 @@ function sweepRegistry(workspace, opts = {}) {
     // workers.json / lease / .running 由来の除外対象に加えて housekeeping へ渡す。
     for (const { entry } of byPid.values()) {
       if (!entry.workerName || results.killed.some(k => k.workerName === entry.workerName)) continue;
-      const checker = opts.liveness || getLiveness();
-      if (checker.observe(checker.readRef(entry)) !== 'dead') {
+      if (states.get(entry.pid) !== 'dead') {
         excludedWorkerNames.add(entry.workerName);
       }
     }
