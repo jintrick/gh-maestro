@@ -30,27 +30,10 @@ const { recordResidentAuditEvent } = require('./resident-audit');
 const { atomicWriteJson } = require('./atomic-write');
 const { checkResidentForceGuard } = require('./resident-force-guard');
 
-// process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。
-// process-lifecycle.js は CLI 主経路（require.main === module）から sweepRegistry 経由で
-// このモジュールを require する。評価時に require して捕捉すると、module.exports の代入
-// 前に循環参照した process-lifecycle の undefined を掴むため、最初の呼び出し時まで
-// 解決を遅らせる。テスト注入（_set*）は注入値が優先される。
-let _injectedIsProcessAlive = null;
-let _injectedVerifyProcessIdentity = null;
+// テストでは生存確認の入力を注入した同じ API を使う。
 let _injectedGetProcessStartTime = null;
 let _injectedLiveness = null;
 function liveness() { return _injectedLiveness || require('./process-liveness'); }
-
-
-function _isProcessAlive(pid) {
-  const fn = _injectedIsProcessAlive ?? require('../process-lifecycle').isProcessAlive;
-  return fn(pid);
-}
-
-function _verifyProcessIdentity(pid, identity) {
-  const fn = _injectedVerifyProcessIdentity ?? require('../process-lifecycle').verifyProcessIdentity;
-  return fn(pid, identity);
-}
 
 function _getProcessStartTime(pid) {
   const fn = _injectedGetProcessStartTime ?? require('../process-lifecycle').getProcessStartTime;
@@ -175,12 +158,9 @@ function createNormalWorkerStore(workspace) {
 /**
  * リースエントリが指すプロセスが稼働中か判定する。
  *
- * startTime は必須で、PID の生存に加えて必ず verifyProcessIdentity による同一性を
- * 確認する（PID再利用による誤判定・改ざんされたリースによる誤kill防止。
- * process-lifecycle-scripts.md ルール準拠）。startTime が欠落・不正なリースは
- * live とみなさない。この判定は --force の停止対象選定にもそのまま使われるため、
- * startTime なしで live と判定すると書き込み可能な workspace に細工したリースを
- * 置くだけで任意の生存 PID を強制終了できてしまう。
+ * 参照を共通モジュールで観測し、判定不能な記録はエラーにする。
+ * この判定は --force の停止対象選定にも使われるため、不明な所有者を
+ * 生存または死亡と決めつけない。
  *
  * @param {object|null} entry リースエントリ
  * @returns {boolean}
@@ -762,8 +742,6 @@ module.exports = {
   releaseResidentLeaseForProcess,
   // テスト用注入
   _setLiveness: (value) => { _injectedLiveness = value; },
-  _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
-  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
   _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setKillProcessTree: (fn) => { _killProcessTree = fn; },
   _setSleep: (fn) => { _sleep = fn; },

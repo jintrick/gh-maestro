@@ -21,6 +21,9 @@ test('missing identity and failed probes remain unknown', () => {
   let start = time;
   const liveness = createLiveness({ probePid: () => probe, readStartTime: () => start });
   assert.equal(liveness.observe(liveness.readRef({ pid: 123 })), 'unknown');
+  probe = 'dead';
+  assert.equal(liveness.observe(liveness.readRef({ pid: 123 })), 'unknown');
+  probe = 'alive';
   const ref = liveness.captureProcess(123);
   probe = 'unknown';
   assert.equal(liveness.observe(ref), 'unknown');
@@ -54,6 +57,8 @@ test('watchParent: PID 再利用は即時に死亡とし照会失敗では終了
   const api = createLiveness({ probePid: () => 'alive', readStartTime: () => actual });
   const watch = api.watchParent(api.captureProcess(123));
   actual = null;
+  assert.equal(watch(), true);
+  actual = 'invalid';
   assert.equal(watch(), true);
   actual = '2025-01-01T00:00:05.000Z';
   assert.equal(watch(), false);

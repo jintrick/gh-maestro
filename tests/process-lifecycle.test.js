@@ -721,7 +721,7 @@ test('findRunningInstance: workspace が一致しないエントリは無視す�
   }
 });
 
-test('findRunningInstance: 生存していないPIDのエントリは無視する', () => {
+test('findRunningInstance: 識別情報のないエントリは判定不能として拒否する', () => {
   const plc = loadModule();
   const pidsDir = plc.pidsDir(workspace);
   fs.mkdirSync(pidsDir, { recursive: true });
@@ -731,8 +731,7 @@ test('findRunningInstance: 生存していないPIDのエントリは無視す�
   }));
 
   try {
-    const result = plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null });
-    assert.equal(result, null);
+    assert.throws(() => plc.findRunningInstance(workspace, { script: 'msg-poll.js', workerName: null }), /生死を判定できません/);
   } finally {
     fs.unlinkSync(path.join(pidsDir, '99997.json'));
   }

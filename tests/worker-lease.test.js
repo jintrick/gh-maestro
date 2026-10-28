@@ -23,8 +23,6 @@ process.on('exit', () => {
 // 実プロセスには一切触れない
 afterEach(() => {
   lease._setLiveness(null);
-  lease._setIsProcessAlive(processLifecycle.isProcessAlive);
-  lease._setVerifyProcessIdentity(processLifecycle.verifyProcessIdentity);
   lease._setGetProcessStartTime(processLifecycle.getProcessStartTime);
   lease._setKillProcessTree(() => { throw new Error('_killProcessTree は未注入のまま呼ばれた'); });
   lease._setSleep(() => {});
@@ -55,14 +53,9 @@ function mockLiveness({ alive = true, identityMatch = true } = {}) {
     [process.pid, `2026-07-29T00:00:00.${String(process.pid).padStart(3, '0')}Z`],
   ]);
   lease._setLiveness(require('../scripts/shared/process-liveness').createLiveness({
-    probePid: (pid) => alive ? 'alive' : 'dead',
-    readStartTime: (pid) => identityMatch ? (times.get(pid) || '2026-07-29T00:00:00.000Z') : '2000-01-01T00:00:00.000Z',
+    probePid: (pid) => { calls.alive.push(pid); return alive ? 'alive' : 'dead'; },
+    readStartTime: (pid) => { calls.verify.push(pid); return identityMatch ? (times.get(pid) || '2026-07-29T00:00:00.000Z') : '2000-01-01T00:00:00.000Z'; },
   }));
-  lease._setIsProcessAlive((pid) => { calls.alive.push(pid); return alive; });
-  lease._setVerifyProcessIdentity((pid, meta) => {
-    calls.verify.push({ pid, meta });
-    return identityMatch ? { match: true } : { match: false, reason: 'start time mismatch' };
-  });
   lease._setGetProcessStartTime((pid) => `2026-07-29T00:00:00.${String(pid).padStart(3, '0')}Z`);
   return calls;
 }

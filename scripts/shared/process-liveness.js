@@ -305,7 +305,9 @@ function createLiveness(deps = {}) {
       if (value.startTime) {
         let actual;
         try { actual = readStartTime(value.pid, value.startTime); } catch { actual = null; }
-        if (actual && !startTimesMatch(value.startTime, actual)) return false;
+        if (actual && !Number.isNaN(new Date(actual).getTime())
+            && !Number.isNaN(new Date(value.startTime).getTime())
+            && !startTimesMatch(value.startTime, actual)) return false;
       }
       consecutiveDead = 0;
       return true;

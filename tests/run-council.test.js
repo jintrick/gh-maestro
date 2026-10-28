@@ -878,8 +878,7 @@ test('セッションロック: 他プロセスが保持中は exit 2 で拒否�
 
     // テスト中は実プロセス生存確認をしない。保持者を「生存・同一プロセス」とみなして
     // ビジー拒否を検証する
-    workerLease._setIsProcessAlive(() => true);
-    workerLease._setVerifyProcessIdentity(() => ({ match: true }));
+    workerLease._setLiveness(liveness.createLiveness({ probePid: () => 'alive', readStartTime: () => holderRecord.startTime }));
     try {
       const { mod } = moduleFor();
       const r = await runAndCapture(() => mod.runCouncil(args(workspace)));
@@ -889,8 +888,7 @@ test('セッションロック: 他プロセスが保持中は exit 2 で拒否�
       const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
       assert.equal(holder.pid, process.pid);
     } finally {
-      workerLease._setIsProcessAlive(processLifecycle.isProcessAlive);
-      workerLease._setVerifyProcessIdentity(processLifecycle.verifyProcessIdentity);
+      workerLease._setLiveness(null);
     }
   });
 });
@@ -903,7 +901,7 @@ test('セッションロック: stale ロック（保持者非生存）は自動
     // 死亡済みプロセスの残骸ロック
     fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999, startTime: '2000-01-01T00:00:00.000Z' }), 'utf8');
 
-    workerLease._setIsProcessAlive(() => false);
+    workerLease._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'dead' }));
     try {
       const { mod } = moduleFor();
       mod.acquireCouncilSessionLock(ws, 's1'); // throw しない
@@ -912,7 +910,7 @@ test('セッションロック: stale ロック（保持者非生存）は自動
       mod.releaseCouncilSessionLock(ws, 's1');
       assert.equal(fs.existsSync(lockPath), false, '解放後はロックが消える');
     } finally {
-      workerLease._setIsProcessAlive(processLifecycle.isProcessAlive);
+      workerLease._setLiveness(null);
     }
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });

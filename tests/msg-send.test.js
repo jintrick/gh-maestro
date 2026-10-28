@@ -23,8 +23,7 @@ msgSend._setEnsureStatusPane(mockEnsureStatusPane);
 // モジュール）を直接呼ぶため、実体側のセッターで差し替える（tests/worker-liveness.test.js と
 // 同じパターン）。実プロセスには一切触れない。
 afterEach(() => {
-  workerLiveness._setIsProcessAlive(processLifecycle.isProcessAlive);
-  workerLiveness._setVerifyProcessIdentity(processLifecycle.verifyProcessIdentity);
+  workerLiveness._setLiveness(null);
   closedPrGuard._setListFn(() => ({ status: 0, stdout: '[]', stderr: '' }));
   ensureStatusPaneCalls.length = 0;
   msgSend._setEnsureStatusPane(mockEnsureStatusPane);
@@ -528,8 +527,7 @@ function mockCommentsResponse(comments) {
 test('稼働中で未報告のワーカー宛て送信は投稿前に拒否され、GitHubに何も投稿されない（本文は退避され迂回路も明示される）', () => {
   withTempDir(workspace => {
     writeBusyWorker(workspace);
-    workerLiveness._setIsProcessAlive(() => true);
-    workerLiveness._setVerifyProcessIdentity(() => ({ match: true }));
+    workerLiveness._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }));
 
     let postCalls = 0;
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
@@ -572,8 +570,7 @@ test('判定不能（起動時刻を特定できない）なら拒否せず通�
       JSON.stringify({ 'issue-9-fix': { pid: 42424, startTime: null, agentId: 'agy', issue: 9 } }, null, 2),
       'utf8'
     );
-    workerLiveness._setIsProcessAlive(() => true);
-    workerLiveness._setVerifyProcessIdentity(() => ({ match: true }));
+    workerLiveness._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }));
 
     let listCommentsCalled = false;
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
@@ -594,8 +591,7 @@ test('判定不能（起動時刻を特定できない）なら拒否せず通�
 test('判定不能（GitHub APIの取得に失敗）なら拒否せず通常どおり配送される', () => {
   withTempDir(workspace => {
     writeBusyWorker(workspace);
-    workerLiveness._setIsProcessAlive(() => true);
-    workerLiveness._setVerifyProcessIdentity(() => ({ match: true }));
+    workerLiveness._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }));
 
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgSend._setGhListComments(() => ({ status: 1, stdout: '', stderr: 'gh: rate limit' }));
@@ -636,8 +632,7 @@ test('判定不能（workers.json が解析不能）でも拒否せず通常ど�
 test('稼働中でも既に報告済みのワーカー宛て送信は拒否されない', () => {
   withTempDir(workspace => {
     writeBusyWorker(workspace);
-    workerLiveness._setIsProcessAlive(() => true);
-    workerLiveness._setVerifyProcessIdentity(() => ({ match: true }));
+    workerLiveness._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }));
 
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     // 起動時刻(2026-01-01T00:00:00.000Z)より後にワーカー自身が報告済み
@@ -662,7 +657,7 @@ test('稼働中でも既に報告済みのワーカー宛て送信は拒否さ�
 test('休止中（非生存）のワーカー宛て送信は影響を受けず通常どおり配送される', () => {
   withTempDir(workspace => {
     writeBusyWorker(workspace);
-    workerLiveness._setIsProcessAlive(() => false); // 休止中
+    workerLiveness._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'dead' })); // 休止中
 
     let listCommentsCalled = false;
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
@@ -679,8 +674,7 @@ test('ワーカーからorchestrator宛の報告はこのガードの対象外�
   withTempDir(workspace => {
     writeBusyWorker(workspace, { workerName: 'issue-9-fix' });
     // ワーカー自身が稼働中（自プロセス）でも、報告送信そのものは拒否されない
-    workerLiveness._setIsProcessAlive(() => true);
-    workerLiveness._setVerifyProcessIdentity(() => ({ match: true }));
+    workerLiveness._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }));
 
     let postCalls = 0;
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));

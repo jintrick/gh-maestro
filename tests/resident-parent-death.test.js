@@ -34,8 +34,9 @@ function captureStderr(fn) {
 // process-lifecycle 系の生存判定を注入でモックする（worker-lease.test.js の
 // mockLiveness と同型）。
 function mockLiveness() {
-  lease._setIsProcessAlive(() => true);
-  lease._setVerifyProcessIdentity(() => ({ match: true }));
+  lease._setLiveness(require('../scripts/shared/process-liveness').createLiveness({
+    probePid: () => 'alive', readStartTime: () => '2026-07-29T00:00:00.000Z',
+  }));
   lease._setGetProcessStartTime((pid) => '2026-07-29T00:00:00.000Z');
 }
 
