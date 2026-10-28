@@ -12,6 +12,11 @@ const {
   updateWorkerProcess,
   resolveWorkerName,
 } = require('../scripts/shared/workers-registry');
+const processLiveness = require('../scripts/shared/process-liveness');
+
+function processUpdate(pid, startTime = '2026-07-25T00:00:00.000Z', logPath = null) {
+  return { processRef: processLiveness.readRef({ pid, startTime }), logPath };
+}
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-'));
@@ -127,7 +132,7 @@ test('updateWorkerProcess: 破損workers.jsonはthrow（falseはエントリ不�
     fs.writeFileSync(workersJsonPath(dir), '{not json', 'utf8');
     // 破損を false に潰すと呼び出し側（worker-supervisor）が「エントリ不在」と誤報告するため、
     // 破損は例外として伝播させる（Issue #275 項目1）。false はエントリ不在の専用に残す。
-    assert.throws(() => updateWorkerProcess(dir, 'issue-5-fix', { pid: 999 }), /workers\.json のJSON構文エラー/);
+    assert.throws(() => updateWorkerProcess(dir, 'issue-5-fix', processUpdate(999)), /workers\.json のJSON構文エラー/);
   });
 });
 
@@ -138,9 +143,7 @@ test('updateWorkerProcess: 既存エントリのpid/startTime/logPathを更新�
       'issue-5-fix': { pid: 100, startTime: 'old', agentId: 'agy', issue: 5, skill: 'gh-maestro-coder' },
     });
 
-    const ok = updateWorkerProcess(dir, 'issue-5-fix', {
-      pid: 999, startTime: '2026-07-25T00:00:00.000Z', logPath: 'C:/ws/w.log',
-    });
+    const ok = updateWorkerProcess(dir, 'issue-5-fix', processUpdate(999, '2026-07-25T00:00:00.000Z', 'C:/ws/w.log'));
     assert.equal(ok, true);
 
     const raw = readWorkersRaw(dir);
@@ -159,7 +162,7 @@ test('updateWorkerProcess: 既存エントリのpid/startTime/logPathを更新�
 test('updateWorkerProcess: 文字列pidも数値化して保存する', () => {
   withTempDir((dir) => {
     writeWorkers(dir, { 'issue-5-fix': { pid: 100, agentId: 'agy', issue: 5 } });
-    updateWorkerProcess(dir, 'issue-5-fix', { pid: '999', startTime: null, logPath: null });
+    updateWorkerProcess(dir, 'issue-5-fix', processUpdate('999', null, null));
     const raw = readWorkersRaw(dir);
     assert.equal(raw['issue-5-fix'].pid, 999);
     assert.equal(typeof raw['issue-5-fix'].pid, 'number');
@@ -169,7 +172,7 @@ test('updateWorkerProcess: 文字列pidも数値化して保存する', () => {
 test('updateWorkerProcess: logPath 省略時は既存の値を維持する', () => {
   withTempDir((dir) => {
     writeWorkers(dir, { 'issue-5-fix': { pid: 100, logPath: 'C:/ws/keep.log', agentId: 'agy' } });
-    updateWorkerProcess(dir, 'issue-5-fix', { pid: 999, startTime: 'x' });
+    updateWorkerProcess(dir, 'issue-5-fix', processUpdate(999, 'x'));
     assert.equal(readWorkersRaw(dir)['issue-5-fix'].logPath, 'C:/ws/keep.log');
   });
 });
@@ -177,7 +180,7 @@ test('updateWorkerProcess: logPath 省略時は既存の値を維持する', () 
 test('updateWorkerProcess: レガシーpaneIdは消す（新プロセスが起きた以上、古いペインIDは誤ったkill対象になる）', () => {
   withTempDir((dir) => {
     writeWorkers(dir, { 'issue-5-fix': { paneId: '10', agentId: 'agy', issue: 5 } });
-    updateWorkerProcess(dir, 'issue-5-fix', { pid: 999, startTime: 'x', logPath: 'C:/ws/w.log' });
+    updateWorkerProcess(dir, 'issue-5-fix', processUpdate(999, 'x', 'C:/ws/w.log'));
     assert.equal(readWorkersRaw(dir)['issue-5-fix'].paneId, null);
   });
 });
@@ -196,9 +199,7 @@ test('updateWorkerProcess: ホワイトリスト外の未知フィールドは�
       },
     });
 
-    const ok = updateWorkerProcess(dir, 'issue-5-fix', {
-      pid: 999, startTime: '2026-07-25T00:00:00.000Z', logPath: 'C:/ws/w.log',
-    });
+    const ok = updateWorkerProcess(dir, 'issue-5-fix', processUpdate(999, '2026-07-25T00:00:00.000Z', 'C:/ws/w.log'));
     assert.equal(ok, true);
 
     const raw = readWorkersRaw(dir);
@@ -218,7 +219,7 @@ test('updateWorkerProcess: ホワイトリスト外の未知フィールドは�
 test('updateWorkerProcess: 存在しないworkerNameはfalseを返し何も書き換えない', () => {
   withTempDir((dir) => {
     writeWorkers(dir, { 'issue-5-fix': { pid: 100 } });
-    const ok = updateWorkerProcess(dir, 'issue-999-nope', { pid: 999 });
+    const ok = updateWorkerProcess(dir, 'issue-999-nope', processUpdate(999));
     assert.equal(ok, false);
     // 書き込みが行われていないため、raw のファイル内容がそのまま残っている
     assert.deepEqual(readWorkersRaw(dir)['issue-5-fix'], { pid: 100 });
@@ -227,7 +228,7 @@ test('updateWorkerProcess: 存在しないworkerNameはfalseを返し何も書�
 
 test('updateWorkerProcess: workers.jsonが無い場合はfalse', () => {
   withTempDir((dir) => {
-    assert.equal(updateWorkerProcess(dir, 'issue-5-fix', { pid: 999 }), false);
+    assert.equal(updateWorkerProcess(dir, 'issue-5-fix', processUpdate(999)), false);
   });
 });
 

@@ -6,13 +6,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+const processLiveness = require('../../scripts/shared/process-liveness');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'gh-maestro-session-hook.js');
 const SUPERVISOR_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'worker-supervisor.js');
 const PROCESS_LIFECYCLE_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'process-lifecycle.js');
 const lifecycle = require('../../scripts/process-lifecycle');
 const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
-lifecycle.getProcessStartTime = () => TEST_PROCESS_START_TIME;
 const readStateLib = require('../../scripts/shared/read-state');
 const {
   createResidentRestartHooks,
@@ -26,18 +26,15 @@ const FAST_SESSION_PRELOAD = (() => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-preload-'));
   const file = path.join(dir, 'preload.js');
   const childProcessPath = require.resolve('../../scripts/shared/child-process');
-  const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
   const source = [
     "'use strict';",
     `const childProcess = require(${JSON.stringify(childProcessPath)});`,
     `const fixedStartTime = ${JSON.stringify(TEST_PROCESS_START_TIME)};`,
     'const realExecSync = childProcess.execSync;',
     'childProcess.execSync = (command, opts) => {',
-    "  if (String(command).includes('Get-CimInstance Win32_Process') || String(command).includes('Get-WmiObject Win32_Process')) return '';",
+    "  if (String(command).includes('Get-CimInstance Win32_Process') || String(command).includes('Get-WmiObject Win32_Process')) return `${fixedStartTime}\\n`;",
     '  return realExecSync(command, opts);',
     '};',
-    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
-    'lifecycle.getProcessStartTime = () => fixedStartTime;',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
   process.once('exit', () => {
@@ -47,9 +44,8 @@ const FAST_SESSION_PRELOAD = (() => {
 })();
 
 // 常駐プロセス自身のidentity取得が不明値へ縮退する経路を再現する。
-// read-state.jsのモジュールロードで最初のCIM取得を消費した後、常駐lease用の
-// self identity取得を失敗させる。現在時刻fallbackでleaseを作ると、後の実測値との
-// 照合で生存中のプロセスをstale扱いできるため、修正後はlease作成自体を拒否する。
+// 現在時刻fallbackでleaseを作ると、後の実測値との照合で生存中のプロセスをstale扱いできるため、
+// 修正後はlease作成自体を拒否する。
 function createResidentIdentityFailurePreload() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-resident-identity-preload-'));
   const file = path.join(dir, 'preload.js');
@@ -68,7 +64,7 @@ function createResidentIdentityFailurePreload() {
     '    const pid = match ? Number(match[1]) : null;',
     '    const count = (callsByPid.get(pid) || 0) + 1;',
     '    callsByPid.set(pid, count);',
-    '    if (pid === process.pid && count > 1) return "\\n";',
+    '    if (pid === process.pid) return "\\n";',
     '    return `${fixedStartTime}\\n`;',
     '  }',
     '  return realExecSync(command, opts);',
@@ -198,6 +194,12 @@ async function stopRunningSupervisors(workspace, processHandle) {
   const { killProcessTree } = require('../../scripts/shared/kill-tree');
   const hooks = createResidentRestartHooks();
   const targetPids = new Set();
+  const refs = new Map();
+  const checker = processLiveness.createLiveness({ startTimeCacheMs: 500 });
+  const observePid = (pid) => {
+    if (!refs.has(pid)) refs.set(pid, checker.captureProcess(pid));
+    return checker.observe(refs.get(pid));
+  };
   const stopEntry = (entry) => {
     if (!Number.isInteger(entry?.pid) || entry.pid <= 0) return;
     targetPids.add(entry.pid);
@@ -213,7 +215,7 @@ async function stopRunningSupervisors(workspace, processHandle) {
   for (const entry of initialEntries) stopEntry(entry);
 
   if (processHandle && processHandle.pid && processHandle.exitCode === null
-    && lifecycle.isProcessAlive(processHandle.pid) && !targetPids.has(processHandle.pid)) {
+    && observePid(processHandle.pid) === 'alive' && !targetPids.has(processHandle.pid)) {
     targetPids.add(processHandle.pid);
     killProcessTree(processHandle.pid);
   }
@@ -227,12 +229,12 @@ async function stopRunningSupervisors(workspace, processHandle) {
     });
     for (const entry of entries) stopEntry(entry);
 
-    const alivePids = [...targetPids].filter((pid) => lifecycle.isProcessAlive(pid));
+    const alivePids = [...targetPids].filter((pid) => observePid(pid) === 'alive');
     if (alivePids.length === 0) return;
     await waitFor(Math.min(100, Math.max(0, deadline - Date.now())));
   }
 
-  const remainingPids = [...targetPids].filter((pid) => lifecycle.isProcessAlive(pid));
+  const remainingPids = [...targetPids].filter((pid) => observePid(pid) === 'alive');
   if (remainingPids.length === 0) return;
   throw new Error(`worker-supervisor の停止確認がタイムアウトしました。残存PID: ${JSON.stringify(remainingPids)}`);
 }
@@ -329,7 +331,7 @@ test('CLI通し: 生存中のworker-supervisorを維持したままhookがreset�
 
     const replacementEntries = await waitForRunningSupervisors(workspace);
     assert.equal(replacementEntries.length, 1, 'hook後のworker-supervisorは1つだけ生存する');
-    assert.equal(lifecycle.isProcessAlive(replacementEntries[0].pid), true);
+    assert.equal(processLiveness.observe(processLiveness.readRef(replacementEntries[0])), 'alive');
   } finally {
     let stopError = null;
     try {

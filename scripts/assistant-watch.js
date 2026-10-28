@@ -40,16 +40,8 @@ const DEFAULT_WAIT_SEC = 1200;
 const GH_TIMEOUT_MS = 30000;
 const ISSUE_RE = /^[1-9]\d*$/;
 
-let _injectedIsProcessAlive = null;
-let _injectedVerifyProcessIdentity = null;
-function _isProcessAlive(pid) {
-  const fn = _injectedIsProcessAlive ?? require('./process-lifecycle').isProcessAlive;
-  return fn(pid);
-}
-function _verifyProcessIdentity(pid, identity, opts) {
-  const fn = _injectedVerifyProcessIdentity ?? require('./process-lifecycle').verifyProcessIdentity;
-  return fn(pid, identity, opts);
-}
+const processLiveness = require('./shared/process-liveness');
+let injectedLiveness = null;
 
 const USAGE = `assistant-watch.js — assistant向け、issueの進行状況を検知する読み取り専用ポーリング
 
@@ -201,12 +193,10 @@ function firstLine(body) {
 
 /**
  * @param {{ workspace: string, ghDir: string, repo: string, issue: string, state: object,
- *   isBaseline: boolean, ghOpts: object, isProcessAliveFn?: Function,
- *   verifyProcessIdentityFn?: Function, getProcessStartTimeFn?: Function }} params
+ *   isBaseline: boolean, ghOpts: object, liveness?: object }} params
  * @returns {{ events: object[], errors: string[] }}
  */
-function scanOnce({ workspace, ghDir, repo, issue, state, isBaseline, ghOpts,
-                    isProcessAliveFn, verifyProcessIdentityFn, getProcessStartTimeFn }) {
+function scanOnce({ workspace, ghDir, repo, issue, state, isBaseline, ghOpts, liveness }) {
   const events = [];
   const errors = [];
 
@@ -215,10 +205,8 @@ function scanOnce({ workspace, ghDir, repo, issue, state, isBaseline, ghOpts,
   // 同一性確認不能のファイルは稼働中と断定せず、次のPR状態更新へ進む。
   const reviewRunningPrs = new Set(
     listRunningReviewManagers(workspace, {
-      isProcessAliveFn: isProcessAliveFn || _isProcessAlive,
-      verifyProcessIdentityFn: verifyProcessIdentityFn || _verifyProcessIdentity,
-      getProcessStartTimeFn,
-      onError: 'skip',
+      liveness: liveness || injectedLiveness || processLiveness,
+      onError: 'throw',
       cleanupStale: false,
     }).map((manager) => String(manager.pr))
   );
@@ -530,6 +518,5 @@ module.exports = {
   statePath,
   extractPreview,
   USAGE,
-  _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
-  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
+  _setLiveness: (value) => { injectedLiveness = value; },
 };

@@ -7,6 +7,9 @@ const path = require('path');
 const os = require('os');
 
 const RRM = require.resolve('../scripts/shared/running-review-managers');
+const { createLiveness } = require('../scripts/shared/process-liveness');
+const live = (readStartTime = () => '2026-08-28T00:00:00.000Z') => createLiveness({ probePid: () => 'alive', readStartTime });
+const dead = () => createLiveness({ probePid: () => 'dead', readStartTime: () => '2026-08-28T00:00:00.000Z' });
 
 function fresh() {
   delete require.cache[RRM];
@@ -56,11 +59,7 @@ test('listRunningReviewManagers: PID＋起動時刻が一致する Review Manage
     writeRecord(ws, 42, 12345, '2026-08-28T00:00:00.000Z');
     writeRecord(ws, 100, 67890, '2026-08-28T00:01:00.000Z');
 
-    rrm._setIsProcessAlive(() => true);
-    rrm._setVerifyProcessIdentity((pid, meta) => ({
-      match: (pid === 12345 && meta.startTime === '2026-08-28T00:00:00.000Z')
-        || (pid === 67890 && meta.startTime === '2026-08-28T00:01:00.000Z'),
-    }));
+    rrm._setLiveness(live(pid => pid === 12345 ? '2026-08-28T00:00:00.000Z' : '2026-08-28T00:01:00.000Z'));
     const res = rrm.listRunningReviewManagers(ws);
     assert.equal(res.length, 2);
     assert.ok(res.some((r) => r.pr === '42' && r.pid === 12345 && r.startTime === '2026-08-28T00:00:00.000Z'));
@@ -75,11 +74,7 @@ test('listRunningReviewManagers: PIDが生存していても起動時刻不一�
   const ws = tmpWorkspace();
   try {
     const file = writeRecord(ws, 42, 12345);
-    rrm._setIsProcessAlive(() => true);
-    rrm._setVerifyProcessIdentity(() => ({
-      match: false,
-      reason: 'start time mismatch: registered=old, actual=new',
-    }));
+    rrm._setLiveness(live(() => '2026-08-29T00:00:00.000Z'));
     assert.deepEqual(rrm.listRunningReviewManagers(ws), []);
     assert.ok(fs.existsSync(file), 'cleanupStale=false の照会ではファイルを残す');
   } finally {
@@ -92,7 +87,7 @@ test('listRunningReviewManagers: staleな新形式は内容確認後に回収で
   const ws = tmpWorkspace();
   try {
     const file = writeRecord(ws, 42, 12345);
-    rrm._setIsProcessAlive(() => false);
+    rrm._setLiveness(dead());
     assert.deepEqual(rrm.listRunningReviewManagers(ws, { cleanupStale: true }), []);
     assert.ok(!fs.existsSync(file));
   } finally {
@@ -100,42 +95,16 @@ test('listRunningReviewManagers: staleな新形式は内容確認後に回収で
   }
 });
 
-test('listRunningReviewManagers: 旧PID-onlyの死亡ファイルは回収できる', () => {
-  const rrm = fresh();
-  const ws = tmpWorkspace();
+test('listRunningReviewManagers: 旧 PID-only は判定不能として保持する', () => {
+  const rrm = fresh(); const ws = tmpWorkspace();
   try {
     const file = runningPath(ws, 42);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, '12345\n', 'utf8');
-    rrm._setIsProcessAlive(() => false);
-    assert.deepEqual(rrm.listRunningReviewManagers(ws, { cleanupStale: true }), []);
-    assert.ok(!fs.existsSync(file));
-  } finally {
-    fs.rmSync(ws, { recursive: true, force: true });
-  }
-});
-
-test('listRunningReviewManagers: 生存中の旧PID-onlyはlive一覧に含めず、保護通知だけ行う', () => {
-  const rrm = fresh();
-  const ws = tmpWorkspace();
-  try {
-    const legacyFile = runningPath(ws, 42);
-    fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
-    fs.writeFileSync(legacyFile, '12345\n', 'utf8');
-    writeRecord(ws, 43, 67890, '2026-08-28T00:01:00.000Z');
-
-    rrm._setIsProcessAlive((pid) => pid === 12345 || pid === 67890);
-    rrm._setVerifyProcessIdentity(() => ({ match: true }));
-    const protectedPrs = [];
-    const res = rrm.listRunningReviewManagers(ws, {
-      onLegacyLive: ({ pr }) => protectedPrs.push(pr),
-    });
-    assert.deepEqual(res, [{ pr: '43', pid: 67890, startTime: '2026-08-28T00:01:00.000Z' }]);
-    assert.deepEqual(protectedPrs, ['42']);
-    assert.equal(fs.readFileSync(legacyFile, 'utf8'), '12345\n', '生存中の旧形式は削除しない');
-  } finally {
-    fs.rmSync(ws, { recursive: true, force: true });
-  }
+    fs.writeFileSync(file, '12345\n');
+    rrm._setLiveness(live());
+    assert.throws(() => rrm.listRunningReviewManagers(ws, { cleanupStale: true }), /判定できません/);
+    assert.equal(fs.readFileSync(file, 'utf8'), '12345\n');
+  } finally { fs.rmSync(ws, { recursive: true, force: true }); }
 });
 
 test('listRunningReviewManagers: 起動時刻を取得できない新形式は保持してskipできる', () => {
@@ -143,13 +112,12 @@ test('listRunningReviewManagers: 起動時刻を取得できない新形式は�
   const ws = tmpWorkspace();
   try {
     const file = writeRecord(ws, 42, 12345);
-    rrm._setIsProcessAlive(() => true);
-    rrm._setVerifyProcessIdentity(() => ({ match: false, reason: 'cannot get process start time' }));
+    rrm._setLiveness(live(() => null));
     assert.deepEqual(rrm.listRunningReviewManagers(ws, { onError: 'skip' }), []);
     assert.ok(fs.existsSync(file));
     assert.throws(
       () => rrm.listRunningReviewManagers(ws),
-      /manager\.running の同一性を確認できません/
+      /manager\.running の生死を判定できません/
     );
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
@@ -161,11 +129,10 @@ test('listRunningReviewManagers: stale判定中に内容が置き換わった場
   const ws = tmpWorkspace();
   try {
     const file = writeRecord(ws, 42, 12345, '2026-08-28T00:00:00.000Z');
-    rrm._setIsProcessAlive(() => true);
-    rrm._setVerifyProcessIdentity(() => {
+    rrm._setLiveness(live(() => {
       fs.writeFileSync(file, JSON.stringify({ pid: 67890, startTime: '2026-08-28T00:01:00.000Z' }), 'utf8');
-      return { match: false, reason: 'start time mismatch: replaced' };
-    });
+      return '2026-08-29T00:00:00.000Z';
+    }));
     assert.deepEqual(rrm.listRunningReviewManagers(ws, { cleanupStale: true, onError: 'skip' }), []);
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), {
       pid: 67890,
@@ -186,8 +153,7 @@ test('listRunningReviewManagers: manager.running の形式不正はthrow/skipを
     fs.mkdirSync(path.dirname(goodFile), { recursive: true });
     fs.writeFileSync(badFile, 'not-a-number', 'utf8');
     fs.writeFileSync(goodFile, JSON.stringify({ pid: 12345, startTime: '2026-08-28T00:00:00.000Z' }), 'utf8');
-    rrm._setIsProcessAlive((pid) => pid === 12345);
-    rrm._setVerifyProcessIdentity(() => ({ match: true }));
+    rrm._setLiveness(live());
 
     assert.throws(() => rrm.listRunningReviewManagers(ws), /manager\.running の PID が不正/);
     const res = rrm.listRunningReviewManagers(ws, { onError: 'skip' });
@@ -202,7 +168,9 @@ test('writeRunningReviewManager: PID＋起動時刻JSONを原子的に書く', (
   const ws = tmpWorkspace();
   try {
     const file = runningPath(ws, 42);
-    rrm.writeRunningReviewManager(file, { pid: '12345', startTime: '2026-08-28T00:00:00.000Z' });
+    const checker = live();
+    rrm._setLiveness(checker);
+    rrm.writeRunningReviewManager(file, checker.captureProcess(12345));
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), {
       pid: 12345,
       startTime: '2026-08-28T00:00:00.000Z',
@@ -217,10 +185,9 @@ test('removeRunningReviewManagerIfOwned: 別所有者のファイルは削除し
   const ws = tmpWorkspace();
   try {
     const file = writeRecord(ws, 42, 12345, '2026-08-28T00:00:00.000Z');
-    const result = rrm.removeRunningReviewManagerIfOwned(file, {
-      pid: 67890,
-      startTime: '2026-08-28T00:01:00.000Z',
-    });
+    const checker = live();
+    rrm._setLiveness(checker);
+    const result = rrm.removeRunningReviewManagerIfOwned(file, checker.captureProcess(67890));
     assert.equal(result.released, false);
     assert.ok(fs.existsSync(file));
   } finally {

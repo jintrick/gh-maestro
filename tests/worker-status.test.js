@@ -21,6 +21,35 @@ const { cleanSpawnEnv } = require('./_spawn-env');
 const { installWeztermCommandPorts, weztermCall } = require('./_wezterm-command-recorder');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-status.js');
+const DEFAULT_TEST_START_TIME = '2026-08-26T11:55:00.000Z';
+let testProbePid = () => 'alive';
+let testReadStartTime = (_pid, expectedStartTime) => expectedStartTime || DEFAULT_TEST_START_TIME;
+let testWorkerPredicate = null;
+
+function installTestLiveness() {
+  workerStatus._setLiveness(workerStatus.createWorkerStatusLiveness({
+    probePid: (pid) => testWorkerPredicate
+      ? (testWorkerPredicate({ pid }) ? 'alive' : 'dead')
+      : testProbePid(pid),
+    readStartTime: testReadStartTime,
+  }));
+}
+
+function setTestReadStartTime(fn) {
+  testReadStartTime = fn || ((_pid, expectedStartTime) => expectedStartTime || DEFAULT_TEST_START_TIME);
+  installTestLiveness();
+}
+
+function setTestProbePid(fn) {
+  testProbePid = fn ? (pid) => (fn(pid) ? 'alive' : 'dead') : () => 'alive';
+  testWorkerPredicate = null;
+  installTestLiveness();
+}
+
+function setTestWorkerPredicate(fn) {
+  testWorkerPredicate = fn;
+  installTestLiveness();
+}
 
 const STATUS_PANE_CONTEXT = Object.freeze({
   unixSocket: 'C:\\wezterm\\test-socket',
@@ -57,7 +86,6 @@ const FAST_STATUS_PRELOAD = (() => {
     '  return realExecSync(command, opts);',
     '};',
     `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
-    'lifecycle.getProcessStartTime = () => fixedStartTime;',
     'lifecycle.findRunningInstances = () => [];',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
@@ -71,12 +99,13 @@ const FAST_STATUS_PRELOAD = (() => {
 // discovery.  Avoid launching the platform process scanner for those cases;
 // the final review-job integration case injects its own representative data.
 beforeEach(() => {
+  testProbePid = () => 'alive';
+  testReadStartTime = (_pid, expectedStartTime) => expectedStartTime || DEFAULT_TEST_START_TIME;
+  testWorkerPredicate = null;
+  installTestLiveness();
   workerStatus._setFindRunningInstances(() => []);
-  // Review-manager fixtures below inject identity verification themselves; a
-  // null observation here keeps the non-identity-focused cases from invoking
-  // the platform WMI probe.  PID-reuse behavior remains covered by the
-  // dedicated process-lifecycle tests and the explicit cache tests above.
-  workerStatus._setGetProcessStartTime(() => null);
+// Review-manager fixtures below inject their liveness observations; the
+// non-identity-focused cases use a deterministic checker instead of WMI.
   // pane の各入力・出力ケースは、明示的な lock 拒否ケース以外では
   // ロック取得のOS照会を検証対象にしない。実際の lock 拒否は専用ケースで
   // false を注入して確認する。
@@ -194,9 +223,10 @@ test('main: 無効なworkspaceは状態を出さず code 1', () => {
 
 test('main: 生存中・停止済み・未登録ワーカーの状態を既存述語経由で返す', () => {
   const workspace = createWorkspace();
+  setTestProbePid((pid) => pid === process.pid);
   try {
     writeWorkers(workspace, {
-      alive: { pid: process.pid },
+      alive: require('../scripts/shared/process-liveness').writeRef({}, require('../scripts/shared/process-liveness').captureSelf()),
       stopped: { pid: 999999999 },
     });
 
@@ -584,7 +614,7 @@ test('renderSnapshotLines: 同一ワーカーのrunを1行へ畳み、最新PID�
     pid: 999999999,
     startTime: new Date(base).toISOString(),
   }]);
-  workerStatus._setIsWorkerAlive(null);
+  setTestWorkerPredicate(null);
   try {
     writeWorkers(workspace, {
       'issue-467-senior-coder-status-rows': {
@@ -606,7 +636,7 @@ test('renderSnapshotLines: 同一ワーカーのrunを1行へ畳み、最新PID�
   } finally {
     workerStatus._setNow(null);
     workerStatus._setReadCycleEvents(null);
-    workerStatus._setIsWorkerAlive(null);
+    setTestWorkerPredicate(null);
     removeWorkspace(workspace);
   }
 });
@@ -710,8 +740,8 @@ test('main: list は見出しと最大4件のワーカー行を出力する', ()
   const workspace = createWorkspace();
   const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
   workerStatus._setNow(() => fixedNow);
-  workerStatus._setIsWorkerAlive((rawEntry) => rawEntry && rawEntry.pid !== 999999999);
-  workerStatus._setGetProcessStartTime((pid) => {
+  setTestWorkerPredicate((rawEntry) => rawEntry && rawEntry.pid !== 999999999);
+  setTestReadStartTime((pid) => {
     if (pid === 111) return '2026-08-26T11:50:00.000Z'; // 600s ago
     if (pid === 222) return '2026-08-26T11:55:00.000Z'; // 300s ago
     return null;
@@ -719,8 +749,8 @@ test('main: list は見出しと最大4件のワーカー行を出力する', ()
 
   try {
     writeWorkers(workspace, {
-      'issue-100-worker-a': { pid: 111, issue: 100, agentId: 'agent-1' },
-      'issue-100-worker-b': { pid: 222, issue: 100, agentId: 'agent-2' },
+      'issue-100-worker-a': { pid: 111, startTime: '2026-08-26T11:50:00.000Z', issue: 100, agentId: 'agent-1' },
+      'issue-100-worker-b': { pid: 222, startTime: '2026-08-26T11:55:00.000Z', issue: 100, agentId: 'agent-2' },
       'worker-c': { pid: 999999999 }, // stopped, no issue/agentId
     });
 
@@ -734,8 +764,8 @@ test('main: list は見出しと最大4件のワーカー行を出力する', ()
     assert.match(result.lines[3], /worker-c\s+\[-\s*\]\s+- \(pid: 999999999\)$/);
   } finally {
     workerStatus._setNow(null);
-    workerStatus._setIsWorkerAlive(null);
-    workerStatus._setGetProcessStartTime(null);
+    setTestWorkerPredicate(null);
+    setTestReadStartTime(null);
     removeWorkspace(workspace);
   }
 });
@@ -744,15 +774,15 @@ test('main: list --json は機械可読な JSON 配列を出力する', () => {
   const workspace = createWorkspace();
   const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
   workerStatus._setNow(() => fixedNow);
-  workerStatus._setIsWorkerAlive((rawEntry) => rawEntry && rawEntry.pid === 111);
-  workerStatus._setGetProcessStartTime((pid) => {
+  setTestWorkerPredicate((rawEntry) => rawEntry && rawEntry.pid === 111);
+  setTestReadStartTime((pid) => {
     if (pid === 111) return '2026-08-26T11:50:00.000Z';
     return null;
   });
 
   try {
     writeWorkers(workspace, {
-      'worker-a': { pid: 111 },
+      'worker-a': { pid: 111, startTime: '2026-08-26T11:50:00.000Z' },
     });
 
     const result = runMain(['list', '--workspace', workspace, '--json']);
@@ -770,8 +800,30 @@ test('main: list --json は機械可読な JSON 配列を出力する', () => {
     });
   } finally {
     workerStatus._setNow(null);
-    workerStatus._setIsWorkerAlive(null);
-    workerStatus._setGetProcessStartTime(null);
+    setTestWorkerPredicate(null);
+    setTestReadStartTime(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('collectWorkersStatus: PID-only worker record is unknown and does not capture a replacement identity', () => {
+  const workspace = createWorkspace('gh-maestro-worker-status-pid-only-');
+  let probeCalls = 0;
+  let startTimeCalls = 0;
+  workerStatus._setLiveness(workerStatus.createWorkerStatusLiveness({
+    probePid: () => { probeCalls++; return 'alive'; },
+    readStartTime: () => { startTimeCalls++; return DEFAULT_TEST_START_TIME; },
+  }));
+
+  try {
+    writeWorkers(workspace, { 'worker-legacy': { pid: 4242 } });
+    const workers = workerStatus.collectWorkersStatus(workspace);
+    assert.equal(workers[0].running, false);
+    assert.equal(workers[0].startTime, null);
+    assert.equal(probeCalls, 1, 'the stored PID is checked first so an absent PID can be classified dead');
+    assert.equal(startTimeCalls, 0, 'PID-only records do not capture a new start time');
+  } finally {
+    workerStatus._setLiveness(null);
     removeWorkspace(workspace);
   }
 });
@@ -838,15 +890,11 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
 
   let currentTime = new Date('2026-08-26T12:00:00.000Z').getTime();
   workerStatus._setNow(() => currentTime);
-  workerStatus._setIsWorkerAlive((rawEntry) => rawEntry && rawEntry.pid === 111);
   let startTimeCalls = 0;
-  workerStatus._setGetProcessStartTime((pid) => {
-    startTimeCalls++;
-    return pid === 111 ? '2026-08-26T11:55:00.000Z' : null;
-  });
+  workerStatus._setLiveness(null);
 
   try {
-    writeWorkers(workspace, { 'worker-a': { pid: 111 } });
+    writeWorkers(workspace, { 'worker-a': { pid: 111, startTime: '2026-08-26T11:55:00.000Z' } });
 
     // ループ開始
     const handle = workerStatus.runWatchLoop(workspace, 2, {
@@ -856,6 +904,12 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
       clearIntervalFn: fakeClearInterval,
       onSignalFn: fakeOnSignal,
       exitFn: fakeExit,
+      probePid: (pid) => pid === 111 ? 'alive' : 'dead',
+      readStartTime: (pid) => {
+        assert.equal(pid, 111);
+        startTimeCalls++;
+        return '2026-08-26T11:55:00.000Z';
+      },
     });
 
     // 1. 初回描画の検証（intervalMs, 画面クリア, ヘッダー, サイクル行）
@@ -898,8 +952,7 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
     assert.equal(exitCode, 0);
   } finally {
     workerStatus._setNow(null);
-    workerStatus._setIsWorkerAlive(null);
-    workerStatus._setGetProcessStartTime(null);
+    workerStatus._setLiveness(null);
     removeWorkspace(workspace);
   }
 });
@@ -912,18 +965,20 @@ test('collectWorkersStatus: 上限間隔内は同じ観測値を使い、期限�
   let processAlive = true;
   let startTimeCalls = 0;
   let verifyCalls = 0;
-  const cache = workerStatus.createProcessStartTimeCache((pid) => {
-    assert.equal(pid, 111);
-    startTimeCalls++;
-    return currentStartTime;
-  });
-
-  workerStatus._setIsWorkerAlive(null);
-  workerLiveness._setIsProcessAlive(() => processAlive);
-  workerLiveness._setVerifyProcessIdentity((pid, meta, opts) => {
-    verifyCalls++;
-    assert.equal(pid, 111);
-    return { match: opts.actualStartTime === meta.startTime };
+  let currentNow = 0;
+  const liveness = workerStatus.createWorkerStatusLiveness({
+    probePid: (pid) => {
+      verifyCalls++;
+      assert.equal(pid, 111);
+      return processAlive ? 'alive' : 'dead';
+    },
+    readStartTime: (pid) => {
+      assert.equal(pid, 111);
+      startTimeCalls++;
+      return currentStartTime;
+    },
+    startTimeCacheMs: workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
+    nowFn: () => currentNow,
   });
 
   try {
@@ -931,10 +986,10 @@ test('collectWorkersStatus: 上限間隔内は同じ観測値を使い、期限�
       'worker-a': { pid: 111, startTime: originalStartTime },
     });
 
-    const collectAt = (now) => workerStatus.collectWorkersStatus(workspace, {
-      nowFn: () => now,
-      startTimeCache: cache,
-    });
+    const collectAt = (now) => {
+      currentNow = now;
+      return workerStatus.collectWorkersStatus(workspace, { nowFn: () => now, liveness });
+    };
 
     const first = collectAt(0);
     assert.equal(first[0].running, true);
@@ -942,43 +997,41 @@ test('collectWorkersStatus: 上限間隔内は同じ観測値を使い、期限�
     assert.equal(startTimeCalls, 1, '生存判定と経過時間算出で観測を共有する');
 
     currentStartTime = reusedStartTime;
-    const beforeExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS - 1);
+    const beforeExpiry = collectAt(workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS - 1);
     assert.equal(beforeExpiry[0].running, true);
     assert.equal(beforeExpiry[0].startTime, originalStartTime);
     assert.equal(startTimeCalls, 1, '上限未到達では再観測しない');
 
-    const afterExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS);
+    const afterExpiry = collectAt(workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS);
     assert.equal(afterExpiry[0].running, false);
     assert.equal(afterExpiry[0].startTime, null);
     assert.equal(startTimeCalls, 2, '上限到達時は新しい起動時刻を観測する');
     assert.equal(verifyCalls, 3);
     assert.match(workerStatus.renderUptimeBars(afterExpiry)[0], /\[stopped\]/);
   } finally {
-    workerStatus._setIsWorkerAlive(null);
-    workerLiveness._setIsProcessAlive(null);
-    workerLiveness._setVerifyProcessIdentity(null);
+    workerLiveness._setProbePid(null);
     removeWorkspace(workspace);
   }
 });
 
-test('collectWorkersStatus: 起動時刻取得がnullでもTTL内は再取得せず、期限到達時に再観測する', () => {
+test('collectWorkersStatus: 起動時刻取得が不明ならunknownを維持し、期限到達時に再観測する', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-start-cache-null-');
   const registeredStartTime = '2026-08-26T11:55:00.000Z';
   let startTimeCalls = 0;
   let verifyCalls = 0;
-  const cache = workerStatus.createProcessStartTimeCache(() => {
-    startTimeCalls++;
-    return null;
-  });
-
-  workerStatus._setIsWorkerAlive(null);
-  workerLiveness._setIsProcessAlive(() => true);
-  workerLiveness._setVerifyProcessIdentity((pid, meta, opts) => {
-    verifyCalls++;
-    assert.equal(pid, 114);
-    assert.equal(meta.startTime, registeredStartTime);
-    assert.equal(opts.actualStartTime, null);
-    return { match: false, reason: 'cannot get process start time' };
+  let currentNow = 0;
+  const liveness = workerStatus.createWorkerStatusLiveness({
+    probePid: (pid) => {
+      verifyCalls++;
+      assert.equal(pid, 114);
+      return 'alive';
+    },
+    readStartTime: () => {
+      startTimeCalls++;
+      return null;
+    },
+    startTimeCacheMs: workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
+    nowFn: () => currentNow,
   });
 
   try {
@@ -986,32 +1039,23 @@ test('collectWorkersStatus: 起動時刻取得がnullでもTTL内は再取得せ
       'worker-a': { pid: 114, startTime: registeredStartTime },
     });
 
-    const collectAt = (now) => workerStatus.collectWorkersStatus(workspace, {
-      nowFn: () => now,
-      startTimeCache: cache,
-    });
+    const collectAt = (now) => {
+      currentNow = now;
+      return workerStatus.collectWorkersStatus(workspace, { nowFn: () => now, liveness });
+    };
 
-    const first = collectAt(0);
-    assert.equal(first[0].running, false);
-    assert.equal(first[0].startTime, null);
+    assert.throws(() => collectAt(0), /unknown/);
     assert.equal(startTimeCalls, 1);
     assert.equal(verifyCalls, 1);
 
-    const beforeExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS - 1);
-    assert.equal(beforeExpiry[0].running, false);
-    assert.equal(beforeExpiry[0].startTime, null);
-    assert.equal(startTimeCalls, 1, 'null の観測値も上限未到達では再利用する');
-    assert.equal(verifyCalls, 2, 'キャッシュした null は verifyProcessIdentity に渡す');
+    assert.throws(() => collectAt(workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS - 1), /unknown/);
+    assert.equal(startTimeCalls, 1, 'nullの観測値も上限未到達では再利用する');
+    assert.equal(verifyCalls, 2);
 
-    const atExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS);
-    assert.equal(atExpiry[0].running, false);
-    assert.equal(atExpiry[0].startTime, null);
-    assert.equal(startTimeCalls, 2, '上限到達時は null でも再観測する');
+    assert.throws(() => collectAt(workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS), /unknown/);
+    assert.equal(startTimeCalls, 2, '上限到達時はnullでも再観測する');
     assert.equal(verifyCalls, 3);
   } finally {
-    workerStatus._setIsWorkerAlive(null);
-    workerLiveness._setIsProcessAlive(null);
-    workerLiveness._setVerifyProcessIdentity(null);
     removeWorkspace(workspace);
   }
 });
@@ -1021,24 +1065,26 @@ test('collectWorkersStatus: プロセス終了時はキャッシュを破棄し�
   const startTime = '2026-08-26T11:55:00.000Z';
   let processAlive = true;
   let startTimeCalls = 0;
-  const cache = workerStatus.createProcessStartTimeCache(() => {
-    startTimeCalls++;
-    return startTime;
+  let currentNow = 0;
+  const liveness = workerStatus.createWorkerStatusLiveness({
+    probePid: () => processAlive ? 'alive' : 'dead',
+    readStartTime: () => {
+      startTimeCalls++;
+      return startTime;
+    },
+    startTimeCacheMs: workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
+    nowFn: () => currentNow,
   });
-
-  workerStatus._setIsWorkerAlive(null);
-  workerLiveness._setIsProcessAlive(() => processAlive);
-  workerLiveness._setVerifyProcessIdentity(() => ({ match: true }));
 
   try {
     writeWorkers(workspace, {
       'worker-a': { pid: 112, startTime },
     });
 
-    const collectAt = (now) => workerStatus.collectWorkersStatus(workspace, {
-      nowFn: () => now,
-      startTimeCache: cache,
-    });
+    const collectAt = (now) => {
+      currentNow = now;
+      return workerStatus.collectWorkersStatus(workspace, { nowFn: () => now, liveness });
+    };
 
     assert.equal(collectAt(0)[0].running, true);
     assert.equal(startTimeCalls, 1);
@@ -1050,9 +1096,6 @@ test('collectWorkersStatus: プロセス終了時はキャッシュを破棄し�
     assert.equal(startTimeCalls, 1, '終了判定で不要な起動時刻取得を行わない');
     assert.match(workerStatus.renderUptimeBars(stopped)[0], /\[stopped\]/);
   } finally {
-    workerStatus._setIsWorkerAlive(null);
-    workerLiveness._setIsProcessAlive(null);
-    workerLiveness._setVerifyProcessIdentity(null);
     removeWorkspace(workspace);
   }
 });
@@ -1063,39 +1106,38 @@ test('collectWorkersStatus: Review Manager もワーカーと同じTTLキャッ�
   const secondStartTime = '2026-08-26T12:00:00.000Z';
   let currentStartTime = firstStartTime;
   let startTimeCalls = 0;
-  const cache = workerStatus.createProcessStartTimeCache(() => {
-    startTimeCalls++;
-    return currentStartTime;
+  let currentNow = 0;
+  const liveness = workerStatus.createWorkerStatusLiveness({
+    probePid: () => 'alive',
+    readStartTime: () => {
+      startTimeCalls++;
+      return currentStartTime;
+    },
+    startTimeCacheMs: workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
+    nowFn: () => currentNow,
   });
-
-  workerStatus._setIsProcessAlive(() => true);
-  workerStatus._setVerifyProcessIdentity((pid, meta, opts) => ({
-    match: opts && opts.actualStartTime === meta.startTime,
-  }));
 
   try {
     writeReviewManager(workspace, 407, 113, firstStartTime);
 
-    const collectAt = (now) => workerStatus.collectWorkersStatus(workspace, {
-      nowFn: () => now,
-      startTimeCache: cache,
-    });
+    const collectAt = (now) => {
+      currentNow = now;
+      return workerStatus.collectWorkersStatus(workspace, { nowFn: () => now, liveness });
+    };
 
     const first = collectAt(0);
     assert.equal(first[0].startTime, firstStartTime);
     assert.equal(startTimeCalls, 1);
 
     currentStartTime = secondStartTime;
-    const beforeExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS - 1);
+    const beforeExpiry = collectAt(workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS - 1);
     assert.equal(beforeExpiry[0].startTime, firstStartTime);
     assert.equal(startTimeCalls, 1);
 
-    const afterExpiry = collectAt(workerStatus.PROCESS_START_TIME_CACHE_MAX_AGE_MS);
+    const afterExpiry = collectAt(workerStatus.PROCESS_LIVENESS_CACHE_MAX_AGE_MS);
     assert.equal(afterExpiry.length, 0, '期限到達後にPID再利用を検出してRMを非表示にする');
     assert.equal(startTimeCalls, 2);
   } finally {
-    workerStatus._setIsProcessAlive(null);
-    workerStatus._setVerifyProcessIdentity(null);
     removeWorkspace(workspace);
   }
 });
@@ -1127,7 +1169,7 @@ test('main: list --json と watch は同じ収集結果のワーカー集合・�
   const workspace = createWorkspace('gh-maestro-worker-status-list-watch-');
   const fixedNow = new Date('2026-08-26T03:15:30.000Z').getTime();
   workerStatus._setNow(() => fixedNow);
-  workerStatus._setIsWorkerAlive(() => false);
+  setTestWorkerPredicate(() => false);
 
   try {
     writeWorkers(workspace, {
@@ -1149,7 +1191,7 @@ test('main: list --json と watch は同じ収集結果のワーカー集合・�
     assert.ok(workerLines[0].includes('999'));
   } finally {
     workerStatus._setNow(null);
-    workerStatus._setIsWorkerAlive(null);
+    setTestWorkerPredicate(null);
     removeWorkspace(workspace);
   }
 });
@@ -1676,9 +1718,8 @@ test('collectWorkersStatus: 稼働中 Review Manager を収集し、PR番号・�
   const workspace = createWorkspace('gh-maestro-ws-rm-');
   const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
   workerStatus._setNow(() => fixedNow);
-  workerStatus._setIsProcessAlive((pid) => pid === 5001);
-  workerStatus._setGetProcessStartTime((pid) => (pid === 5001 ? '2026-08-26T11:50:00.000Z' : null));
-  workerStatus._setVerifyProcessIdentity(() => ({ match: true }));
+  setTestProbePid((pid) => pid === 5001);
+  setTestReadStartTime((pid) => (pid === 5001 ? '2026-08-26T11:50:00.000Z' : null));
 
   try {
     writeReviewManager(workspace, 404, 5001, '2026-08-26T11:50:00.000Z');
@@ -1702,17 +1743,16 @@ test('collectWorkersStatus: 稼働中 Review Manager を収集し、PR番号・�
     });
   } finally {
     workerStatus._setNow(null);
-    workerStatus._setIsProcessAlive(null);
-    workerStatus._setGetProcessStartTime(null);
-    workerStatus._setVerifyProcessIdentity(null);
+    setTestProbePid(null);
+    setTestReadStartTime(null);
     removeWorkspace(workspace);
   }
 });
 
 test('collectWorkersStatus / renderUptimeBars: resolveSkillAgentMap が例外を投げた場合に agentId が null / - となる縮退動作を検証する', () => {
   const workspace = createWorkspace('gh-maestro-ws-rm-throw-');
-  workerStatus._setIsProcessAlive((pid) => pid === 6001);
-  workerStatus._setVerifyProcessIdentity(() => ({ match: true }));
+  setTestReadStartTime(() => '2026-08-26T11:55:00.000Z');
+  setTestProbePid((pid) => pid === 6001);
   workerStatus._setResolveSkillAgentMap(() => {
     throw new Error('config parse error');
   });
@@ -1728,17 +1768,17 @@ test('collectWorkersStatus / renderUptimeBars: resolveSkillAgentMap が例外を
     assert.equal(lines.length, 1);
     assert.match(lines[0], /^PR#501\s+review-manager-pr-501\s+-\s+\[running\]/);
   } finally {
-    workerStatus._setIsProcessAlive(null);
+    setTestReadStartTime(null);
+    setTestProbePid(null);
     workerStatus._setResolveSkillAgentMap(null);
-    workerStatus._setVerifyProcessIdentity(null);
     removeWorkspace(workspace);
   }
 });
 
 test('collectWorkersStatus / renderUptimeBars: skillAgentMap[\'gh-maestro-reviewer\'] が未設定・null・非文字列の場合に agentId が null / - となる縮退動作を検証する', () => {
   const workspace = createWorkspace('gh-maestro-ws-rm-unset-');
-  workerStatus._setIsProcessAlive(() => true);
-  workerStatus._setVerifyProcessIdentity(() => ({ match: true }));
+  setTestReadStartTime(() => '2026-08-26T11:55:00.000Z');
+  setTestProbePid(() => true);
 
   try {
     writeReviewManager(workspace, 601, 7001);
@@ -1769,37 +1809,39 @@ test('collectWorkersStatus / renderUptimeBars: skillAgentMap[\'gh-maestro-review
     assert.equal(rm3.agentId, null);
     assert.match(workerStatus.renderUptimeBars([rm3])[0], /^PR#603\s+review-manager-pr-603\s+-\s+\[running\]/);
   } finally {
-    workerStatus._setIsProcessAlive(null);
+    setTestReadStartTime(null);
+    setTestProbePid(null);
     workerStatus._setResolveSkillAgentMap(null);
-    workerStatus._setVerifyProcessIdentity(null);
     removeWorkspace(workspace);
   }
 });
 
 test('collectWorkersStatus: 死亡した Review Manager の PID は収集しない', () => {
   const workspace = createWorkspace('gh-maestro-ws-rm-dead-');
-  workerStatus._setIsProcessAlive(() => false);
+  setTestProbePid(() => false);
 
   try {
     const reviewDir = path.join(workspace, '.gh-maestro', 'records', 'pr', '404', 'review');
     fs.mkdirSync(reviewDir, { recursive: true });
-    fs.writeFileSync(path.join(reviewDir, 'manager.running'), '999999999\n', 'utf8');
+    fs.writeFileSync(path.join(reviewDir, 'manager.running'), JSON.stringify({ pid: 999999999, startTime: '2025-01-01T00:00:00.000Z' }), 'utf8');
 
     const results = workerStatus.collectWorkersStatus(workspace);
     assert.equal(results.length, 0);
   } finally {
-    workerStatus._setIsProcessAlive(null);
+    setTestProbePid(null);
     removeWorkspace(workspace);
   }
 });
 
-test('collectWorkersStatus: manager.running が破損・空・非数値でも全体が失敗せず既存ワーカーを返す (tolerant)', () => {
+test('collectWorkersStatus: manager.running が破損・空・非数値ならエラーを報告する', () => {
   const workspace = createWorkspace('gh-maestro-ws-rm-corrupt-');
-  workerStatus._setIsWorkerAlive((rawEntry) => rawEntry && rawEntry.pid === 111);
+  setTestWorkerPredicate((rawEntry) => rawEntry && rawEntry.pid === 111);
 
   try {
     writeWorkers(workspace, {
-      'issue-100-worker-a': { pid: 111, issue: 100, agentId: 'agent-1' },
+      'issue-100-worker-a': {
+        pid: 111, startTime: '2026-08-26T11:50:00.000Z', issue: 100, agentId: 'agent-1',
+      },
     });
 
     const badReviewDir1 = path.join(workspace, '.gh-maestro', 'records', 'pr', '401', 'review');
@@ -1809,20 +1851,18 @@ test('collectWorkersStatus: manager.running が破損・空・非数値でも全
     fs.writeFileSync(path.join(badReviewDir1, 'manager.running'), 'not-a-number\n', 'utf8');
     fs.writeFileSync(path.join(badReviewDir2, 'manager.running'), '', 'utf8');
 
-    const results = workerStatus.collectWorkersStatus(workspace);
-    assert.equal(results.length, 1);
-    assert.equal(results[0].workerName, 'issue-100-worker-a');
+    assert.throws(() => workerStatus.collectWorkersStatus(workspace), /manager\.running/);
+    assert.ok(fs.existsSync(path.join(badReviewDir1, 'manager.running')));
   } finally {
-    workerStatus._setIsWorkerAlive(null);
+    setTestWorkerPredicate(null);
     removeWorkspace(workspace);
   }
 });
 
 test('collectWorkersStatus: 複数 PR の Review Manager が同時に存在する場合それぞれ収集する', () => {
   const workspace = createWorkspace('gh-maestro-ws-rm-multi-');
-  workerStatus._setIsProcessAlive((pid) => pid === 101 || pid === 102);
-  workerStatus._setGetProcessStartTime(() => '2026-08-26T11:55:00.000Z');
-  workerStatus._setVerifyProcessIdentity(() => ({ match: true }));
+  setTestProbePid((pid) => pid === 101 || pid === 102);
+  setTestReadStartTime(() => '2026-08-26T11:55:00.000Z');
 
   try {
     writeReviewManager(workspace, 10, 101);
@@ -1833,9 +1873,8 @@ test('collectWorkersStatus: 複数 PR の Review Manager が同時に存在す�
     assert.ok(results.some((r) => r.workerName === 'review-manager-pr-10' && r.pr === 10 && r.pid === 101));
     assert.ok(results.some((r) => r.workerName === 'review-manager-pr-20' && r.pr === 20 && r.pid === 102));
   } finally {
-    workerStatus._setIsProcessAlive(null);
-    workerStatus._setGetProcessStartTime(null);
-    workerStatus._setVerifyProcessIdentity(null);
+    setTestProbePid(null);
+    setTestReadStartTime(null);
     removeWorkspace(workspace);
   }
 });
@@ -1874,10 +1913,9 @@ test('main: list および list --json で Review Manager を表示する', () =
   const workspace = createWorkspace('gh-maestro-ws-rm-main-');
   const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
   workerStatus._setNow(() => fixedNow);
-  workerStatus._setIsWorkerAlive((rawEntry) => rawEntry && rawEntry.pid === 111);
-  workerStatus._setIsProcessAlive((pid) => pid === 222);
-  workerStatus._setVerifyProcessIdentity(() => ({ match: true }));
-  workerStatus._setGetProcessStartTime((pid) => {
+  setTestWorkerPredicate((rawEntry) => rawEntry && rawEntry.pid === 111);
+  setTestProbePid((pid) => pid === 111 || pid === 222);
+  setTestReadStartTime((pid) => {
     if (pid === 111) return '2026-08-26T11:50:00.000Z'; // 600s
     if (pid === 222) return '2026-08-26T11:55:00.000Z'; // 300s
     return null;
@@ -1885,7 +1923,9 @@ test('main: list および list --json で Review Manager を表示する', () =
 
   try {
     writeWorkers(workspace, {
-      'issue-100-worker-a': { pid: 111, issue: 100, agentId: 'agent-1' },
+      'issue-100-worker-a': {
+        pid: 111, startTime: '2026-08-26T11:50:00.000Z', issue: 100, agentId: 'agent-1',
+      },
     });
 
     fs.writeFileSync(path.join(workspace, '.gh-maestro', 'config.json'), JSON.stringify({
@@ -1923,10 +1963,9 @@ test('main: list および list --json で Review Manager を表示する', () =
     });
   } finally {
     workerStatus._setNow(null);
-    workerStatus._setIsWorkerAlive(null);
-    workerStatus._setIsProcessAlive(null);
-    workerStatus._setGetProcessStartTime(null);
-    workerStatus._setVerifyProcessIdentity(null);
+    setTestWorkerPredicate(null);
+    setTestProbePid(null);
+    setTestReadStartTime(null);
     removeWorkspace(workspace);
   }
 });
@@ -1975,9 +2014,8 @@ test('collectWorkersStatus & main: list / --json でレビュージョブを収�
   const workspace = createWorkspace('gh-maestro-ws-rm-jobs-');
   const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
   workerStatus._setNow(() => fixedNow);
-  workerStatus._setIsProcessAlive((pid) => pid === 222 || pid === 333 || pid === 444);
-  workerStatus._setVerifyProcessIdentity(() => ({ match: true }));
-  workerStatus._setGetProcessStartTime((pid) => {
+  setTestProbePid((pid) => pid === 222 || pid === 333 || pid === 444);
+  setTestReadStartTime((pid) => {
     if (pid === 222) return '2026-08-26T11:55:00.000Z'; // 300s
     if (pid === 333) return '2026-08-26T11:57:00.000Z'; // 180s
     if (pid === 444) return '2026-08-26T11:58:00.000Z'; // 120s
@@ -2059,9 +2097,8 @@ test('collectWorkersStatus & main: list / --json でレビュージョブを収�
     });
   } finally {
     workerStatus._setNow(null);
-    workerStatus._setIsProcessAlive(null);
-    workerStatus._setGetProcessStartTime(null);
-    workerStatus._setVerifyProcessIdentity(null);
+    setTestProbePid(null);
+    setTestReadStartTime(null);
     workerStatus._setFindRunningInstances(null);
     removeWorkspace(workspace);
   }
@@ -2071,9 +2108,8 @@ test('collectWorkersStatus: レビュージョブ取得失敗をReview Manager�
   const workspace = createWorkspace('gh-maestro-ws-rm-jobs-error-');
   const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
   workerStatus._setNow(() => fixedNow);
-  workerStatus._setIsProcessAlive((pid) => pid === 222);
-  workerStatus._setVerifyProcessIdentity(() => ({ match: true }));
-  workerStatus._setGetProcessStartTime(() => '2026-08-26T11:55:00.000Z');
+  setTestProbePid((pid) => pid === 222);
+  setTestReadStartTime(() => '2026-08-26T11:55:00.000Z');
   workerStatus._setFindRunningInstances(() => {
     throw new Error('review-job scanner failed');
   });
@@ -2098,9 +2134,8 @@ test('collectWorkersStatus: レビュージョブ取得失敗をReview Manager�
     assert.equal(parsed[0].jobsError, true);
   } finally {
     workerStatus._setNow(null);
-    workerStatus._setIsProcessAlive(null);
-    workerStatus._setGetProcessStartTime(null);
-    workerStatus._setVerifyProcessIdentity(null);
+    setTestProbePid(null);
+    setTestReadStartTime(null);
     workerStatus._setFindRunningInstances(null);
     removeWorkspace(workspace);
   }

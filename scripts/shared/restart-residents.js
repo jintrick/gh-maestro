@@ -18,12 +18,11 @@ const path = require('path');
 const { spawn, spawnSync } = require('./child-process');
 const { killProcessTree } = require('./kill-tree');
 const { loadStatusPane } = require('./status-pane-registry');
+const processLiveness = require('./process-liveness');
 const {
   findRunningInstances,
   unregisterProcess,
   pidFilePath,
-  verifyProcessIdentity,
-  isProcessAlive,
   findSessionRootPid,
 } = require('../process-lifecycle');
 const {
@@ -63,11 +62,10 @@ function isValidPid(pid) {
 
 function createResidentRestartHooks() {
   return {
+    liveness: processLiveness,
     findRunningInstances,
     unregisterProcess,
     pidFilePath,
-      verifyProcessIdentity,
-    isProcessAlive,
     findSessionRootPid,
     killProcessTree,
     releaseResidentLeaseForProcess,
@@ -245,8 +243,15 @@ function buildRestartArgs(spec, entry, workspace, hooks, opts = {}) {
   if (!sessionPid) {
     throw new Error(`${spec.script} の --session-pid をregistryから引き継げないため、Monitorから起動してください`);
   }
-  if (!hooks.isProcessAlive(sessionPid)) {
-    throw new Error(`${spec.script} の記録済みセッションPID ${sessionPid} が生存していません。Monitorから起動してください`);
+  const checker = hooks.liveness || processLiveness;
+  const recordedSessionRef = entry.sessionPid === sessionPid
+    ? checker.readRef(entry, 'session')
+    : null;
+  const sessionRef = recordedSessionRef || checker.captureProcess(sessionPid);
+  const sessionState = checker.observe(sessionRef);
+  if (sessionState !== 'alive') {
+    const state = sessionState === 'unknown' ? '生死を判定できません' : '生存していません';
+    throw new Error(`${spec.script} の記録済みセッションPID ${sessionPid} は${state}。Monitorから起動してください`);
   }
 
   return {
@@ -313,23 +318,15 @@ function cleanupLegacyResidentLease(workspace, options = {}) {
     return { status: 'unknown', path: leasePath, reason: 'legacy resident leaseの形式が不正です' };
   }
 
-  const isProcessAliveFn = options.isProcessAliveFn || isProcessAlive;
-  const verifyProcessIdentityFn = options.verifyProcessIdentityFn || verifyProcessIdentity;
-  let alive;
-  try { alive = isProcessAliveFn(lease.pid); } catch (error) {
+  const checker = options.liveness || processLiveness;
+  let state;
+  try { state = checker.observe(checker.readRef(lease)); } catch (error) {
     return { status: 'unknown', path: leasePath, reason: `lease所有者の生存確認に失敗しました: ${error.message}` };
   }
-  if (typeof alive !== 'boolean') {
-    return { status: 'unknown', path: leasePath, reason: 'lease所有者の生存確認がbooleanを返しませんでした' };
+  if (state === 'unknown') {
+    return { status: 'unknown', path: leasePath, reason: 'lease所有者の生死を判定できません' };
   }
-  if (alive) {
-    let identity;
-    try { identity = verifyProcessIdentityFn(lease.pid, lease); } catch (error) {
-      return { status: 'unknown', path: leasePath, reason: `lease所有者の同一性確認に失敗しました: ${error.message}` };
-    }
-    if (!identity || identity.match !== true) {
-      return { status: 'unknown', path: leasePath, reason: identity?.reason || 'lease所有者の同一性を確認できません' };
-    }
+  if (state === 'alive') {
     return { status: 'skipped', path: leasePath, reason: 'legacy resident leaseの所有者が稼働中です' };
   }
 
@@ -367,12 +364,12 @@ function ensureRegistryRemoved(workspace, pid, hooks) {
 
 function releaseResidentLeases(workspace, entry, hooks) {
   if (typeof hooks.releaseResidentLeaseForProcess !== 'function') return;
+  const processRef = (hooks.liveness || processLiveness).readRef(entry);
   for (const role of residentLeaseRoles(entry)) {
     const result = hooks.releaseResidentLeaseForProcess({
       workspace,
       role,
-      pid: entry.pid,
-      startTime: entry.startTime,
+      processRef,
     });
     if (result?.remaining) {
       throw new Error(
@@ -382,30 +379,35 @@ function releaseResidentLeases(workspace, entry, hooks) {
   }
 }
 
-function waitUntilStopped(pid, hooks, opts = {}) {
+function waitUntilStopped(processRef, hooks, opts = {}) {
+  const checker = hooks.liveness || processLiveness;
   const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if (!hooks.isProcessAlive(pid)) return true;
+    const state = checker.observe(processRef);
+    if (state === 'dead') return true;
+    if (state === 'unknown') return false;
     hooks.sleep(waitMs);
   }
-  return !hooks.isProcessAlive(pid);
+  return checker.observe(processRef) === 'dead';
 }
 
 function stopEntry(workspace, entry, hooks, opts = {}) {
   if (!isValidPid(entry.pid)) return { ok: false, error: 'registryのPIDが正の整数ではありません' };
+  const checker = hooks.liveness || processLiveness;
+  const processRef = checker.readRef(entry);
+  const state = checker.observe(processRef);
+  if (state === 'unknown') {
+    return { ok: false, error: `PID ${entry.pid} の生死を判定できません` };
+  }
 
-  if (hooks.isProcessAlive(entry.pid)) {
-    const identity = hooks.verifyProcessIdentity(entry.pid, entry);
-    if (!identity.match) {
-      return { ok: false, error: `PID ${entry.pid} の同一性を確認できません: ${identity.reason || 'mismatch'}` };
-    }
+  if (state === 'alive') {
     try {
       hooks.killProcessTree(entry.pid);
     } catch (e) {
       return { ok: false, error: `PID ${entry.pid} の停止に失敗しました: ${e.message}` };
     }
-    if (!waitUntilStopped(entry.pid, hooks, opts)) {
+    if (!waitUntilStopped(processRef, hooks, opts)) {
       return { ok: false, error: `PID ${entry.pid} が停止確認の期限内に終了しませんでした` };
     }
   }
@@ -435,13 +437,14 @@ function stopEntry(workspace, entry, hooks, opts = {}) {
 }
 
 function ensureCapturedEntriesStopped(entries, hooks, opts = {}) {
+  const checker = hooks.liveness || processLiveness;
   for (const entry of entries) {
-    if (!hooks.isProcessAlive(entry.pid)) continue;
-    const identity = hooks.verifyProcessIdentity(entry.pid, entry);
-    if (identity.match) {
+    const state = checker.observe(checker.readRef(entry));
+    if (state === 'dead') continue;
+    if (state === 'alive') {
       return `旧PID ${entry.pid} がまだ生存しているため、重複起動を防止して中断しました`;
     }
-    return `旧PID ${entry.pid} の停止後確認に失敗しました: ${identity.reason || 'mismatch'}`;
+    return `旧PID ${entry.pid} の生死を判定できないため、重複起動を防止して中断しました`;
   }
   return null;
 }
@@ -455,15 +458,12 @@ function findReplacementEntry(workspace, spec, oldPids, hooks) {
   return entries.find((entry) => !oldPids.has(entry.pid)) || null;
 }
 
-function missingReplacementError(spec, childPid, logPath, hooks) {
-  let alive;
-  try {
-    alive = hooks.isProcessAlive(childPid);
-  } catch (e) {
-    return `${spec.script} の新しいregistry登録を確認できませんでした（起動PID ${childPid} の生存確認にも失敗したため、登録前終了か登録遅延か判定できません。${e.message}。起動ログ: ${logPath}）`;
+function missingReplacementError(spec, processRef, childPid, logPath, hooks) {
+  const state = (hooks.liveness || processLiveness).observe(processRef);
+  if (state === 'unknown') {
+    return `${spec.script} の新しいregistry登録を確認できず、起動PID ${childPid} の生死も判定できません（起動ログ: ${logPath}）`;
   }
-
-  if (alive) {
+  if (state === 'alive') {
     return `${spec.script} の起動PID ${childPid} は生存していますが、新しいregistry登録を確認できませんでした（登録遅延またはregistry可視化遅延。起動ログ: ${logPath}）`;
   }
   return `${spec.script} の起動PID ${childPid} はregistry登録を確認する前に終了しました（起動ログ: ${logPath}）`;
@@ -483,6 +483,7 @@ function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = 
   let logPath;
   let logFd;
   let child;
+  let processRef;
   try {
     logPath = residentLogPath(workspace, spec.script);
     logFd = fs.openSync(logPath, 'a');
@@ -498,6 +499,7 @@ function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = 
     if (!child || !isValidPid(child.pid)) {
       return { ok: false, error: `${spec.script} のspawn結果から有効なPIDを取得できません` };
     }
+    processRef = (hooks.liveness || processLiveness).captureProcess(child.pid);
     if (typeof child.unref === 'function') child.unref();
   } catch (e) {
     return { ok: false, error: `${spec.script} の起動に失敗しました: ${e.message}` };
@@ -528,7 +530,7 @@ function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = 
   if (!replacement) {
     return {
       ok: false,
-      error: missingReplacementError(spec, child.pid, logPath, hooks),
+      error: missingReplacementError(spec, processRef, child.pid, logPath, hooks),
     };
   }
   return {
