@@ -421,7 +421,9 @@ function main(argsOverride, opts = {}) {
     residentIdentity = _parentLiveness.captureSelf();
     const handoffTargets = () => {
       const workerNameForRegistry = self !== 'orchestrator' ? self : null;
-      const dup = findRunningInstance(workspace, { script: 'msg-poll.js', workerName: workerNameForRegistry });
+      const dup = findRunningInstance(workspace, {
+        script: 'msg-poll.js', workerName: workerNameForRegistry, failOnReadError: true,
+      });
       return dup ? [dup.pid] : [];
     };
     try {

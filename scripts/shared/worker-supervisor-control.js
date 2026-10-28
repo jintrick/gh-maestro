@@ -74,7 +74,7 @@ function isValidPid(pid) {
 
 /**
  * 稼働中の worker-supervisor の PID を検知する（registry と role lease の両方を参照、
- * 重複排除済み）。検知不能・検知失敗時は空配列を返す（fail-open）。
+ * 重複排除済み）。検知不能・検知失敗時は例外にして、停止や重複起動へ進ませない。
  *
  * @param {string} workspace
  * @returns {number[]}
@@ -84,24 +84,23 @@ function runningPidsForScriptsAndRoles(workspace, scriptNames, roles) {
 
   // PID registry。旧script名も移行期間だけ union して読む。
   for (const script of scriptNames) {
-    try {
-      const entry = _findRunningInstance(workspace, { script, workerName: null });
-      if (entry && isValidPid(entry.pid)) pids.add(entry.pid);
-    } catch {
-      // registry 読取失敗時は role lease 側で拾えれば拾う
+    const entry = _findRunningInstance(workspace, {
+      script, workerName: null, failOnReadError: true,
+    });
+    if (entry) {
+      if (!isValidPid(entry.pid)) throw new Error(`${script} のPID registryエントリが不正です`);
+      pids.add(entry.pid);
     }
   }
 
   // role lease（排他の正本）。isLeaseLive が startTime 照合まで行うため、PID 再利用や
   // 改ざんされた lease を停止対象にすることはない。
-  try {
-    const store = _createResidentLeaseStore(workspace);
-    for (const role of roles) {
-      const entry = store.read(roleLeaseKey(role));
-      if (_isLeaseLive(entry) && isValidPid(entry.pid)) pids.add(entry.pid);
-    }
-  } catch {
-    // role lease 読取失敗時も停止対象なしとして続行
+  const store = _createResidentLeaseStore(workspace);
+  for (const role of roles) {
+    const entry = store.read(roleLeaseKey(role));
+    if (!_isLeaseLive(entry)) continue;
+    if (!isValidPid(entry.pid)) throw new Error(`${role} のresident lease PIDが不正です`);
+    pids.add(entry.pid);
   }
 
   return [...pids];
@@ -216,13 +215,49 @@ function cleanupLegacyWorkerSupervisor(options = {}) {
     if (!byPid.has(item.entry.pid)) byPid.set(item.entry.pid, []);
     byPid.get(item.entry.pid).push(item.filePath);
   }
+  if (errors.length > 0) {
+    return { status: 'unknown', reason: errors.join('; '), removed: 0 };
+  }
+  const observed = [];
   for (const [pid, filePaths] of byPid) {
     const metadata = entries.find((item) => item.entry.pid === pid).entry;
     const state = checker.observe(checker.readRef(metadata));
     if (state === 'unknown') {
       errors.push(`旧inbox-supervisor PID ${pid} の生死を判定できません`);
-      continue;
+    } else observed.push({ pid, filePaths, state });
+  }
+  if (errors.length > 0) {
+    return { status: 'unknown', reason: errors.join('; '), removed: 0 };
+  }
+
+  const leasePath = path.join(workspace, '.gh-maestro', 'leases', `${roleLeaseKey(role)}.json`);
+  let lease = null;
+  let leaseState = 'missing';
+  try {
+    const stat = lstatFn(leasePath);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('leaseが通常ファイルではありません');
+    try { lease = JSON.parse(readFileFn(leasePath, 'utf8')); } catch (error) {
+      throw new Error(`JSON読み取りに失敗しました: ${error.message}`);
     }
+    if (!lease || typeof lease !== 'object' || Array.isArray(lease)
+      || !isValidPid(lease.pid) || !Number.isInteger(lease.pid)
+      || typeof lease.startTime !== 'string' || lease.startTime === '') {
+      throw new Error('lease形式が不正です');
+    }
+    leaseState = checker.observe(checker.readRef(lease));
+    if (leaseState === 'unknown') throw new Error(`PID ${lease.pid} の生死を判定できません`);
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+      leaseState = 'missing';
+    } else {
+      errors.push(`${leasePath} の確認に失敗しました: ${error.message}`);
+    }
+  }
+  if (errors.length > 0) {
+    return { status: 'unknown', reason: errors.join('; '), removed: 0 };
+  }
+
+  for (const { pid, filePaths, state } of observed) {
     if (state === 'alive') {
       try { killProcessTreeFn(pid); }
       catch (error) {
@@ -233,60 +268,39 @@ function cleanupLegacyWorkerSupervisor(options = {}) {
     for (const filePath of filePaths) if (removeFile(filePath)) removedCount++;
   }
 
-  const leasePath = path.join(workspace, '.gh-maestro', 'leases', `${roleLeaseKey(role)}.json`);
-  let leaseExists = false;
-  try {
-    const stat = lstatFn(leasePath);
-    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('leaseが通常ファイルではありません');
-    leaseExists = true;
-  } catch (error) {
-    if (!(error && (error.code === 'ENOENT' || error.code === 'ENOTDIR'))) {
-      errors.push(`${leasePath} の確認に失敗しました: ${error.message}`);
-    }
+  if (errors.length > 0) {
+    return { status: 'unknown', reason: errors.join('; '), removed: removedCount };
   }
-  if (leaseExists) {
-    let lease;
-    try { lease = JSON.parse(readFileFn(leasePath, 'utf8')); } catch (error) {
-      errors.push(`${leasePath} のJSON読み取りに失敗しました: ${error.message}`);
-      lease = null;
-    }
-    if (!lease || typeof lease !== 'object' || Array.isArray(lease)
-      || !isValidPid(lease.pid) || !Number.isInteger(lease.pid)
-      || typeof lease.startTime !== 'string' || lease.startTime === '') {
-      errors.push(`${leasePath} のlease形式が不正です`);
-    } else {
-      const state = checker.observe(checker.readRef(lease));
-      if (state === 'unknown') errors.push(`lease PID ${lease.pid} の生死を判定できません`);
-      if (state === 'alive') skipped = true;
-      const removable = state === 'dead';
-      if (removable) {
-        let store;
-        let locked = false;
-        try {
-          store = (options.createResidentLeaseStoreFn || _createResidentLeaseStore)(workspace);
-          locked = (options.acquireLeaseLockFn || acquireLeaseLock)(store, roleLeaseKey(role));
-          if (!locked) throw new Error('lease lockを取得できませんでした');
-          const current = JSON.parse(readFileFn(leasePath, 'utf8'));
-          if (JSON.stringify(current) !== JSON.stringify(lease)) {
-            throw new Error('leaseが確認後に変更されました');
-          }
-          if (!removeFile(leasePath)) throw new Error('leaseの削除に失敗しました');
-          removedCount++;
-        } catch (error) {
-          errors.push(`${leasePath} の削除に失敗しました: ${error.message}`);
-        } finally {
-          if (locked) {
-            try { (options.releaseLeaseLockFn || releaseLeaseLock)(store, roleLeaseKey(role)); } catch (error) {
-              errors.push(`${leasePath} のロック解放に失敗しました: ${error.message}`);
-            }
-          }
+
+  if (leaseState === 'alive') skipped = true;
+  if (leaseState === 'dead') {
+    let store;
+    let locked = false;
+    try {
+      store = (options.createResidentLeaseStoreFn || _createResidentLeaseStore)(workspace);
+      locked = (options.acquireLeaseLockFn || acquireLeaseLock)(store, roleLeaseKey(role));
+      if (!locked) throw new Error('lease lockを取得できませんでした');
+      const current = JSON.parse(readFileFn(leasePath, 'utf8'));
+      if (JSON.stringify(current) !== JSON.stringify(lease)) {
+        throw new Error('leaseが確認後に変更されました');
+      }
+      const currentState = checker.observe(checker.readRef(current));
+      if (currentState === 'unknown') throw new Error('lease保持者の生死を判定できません');
+      if (currentState === 'alive') {
+        skipped = true;
+      } else {
+        if (!removeFile(leasePath)) throw new Error('leaseの削除に失敗しました');
+        removedCount++;
+      }
+    } catch (error) {
+      errors.push(`${leasePath} の削除に失敗しました: ${error.message}`);
+    } finally {
+      if (locked) {
+        try { (options.releaseLeaseLockFn || releaseLeaseLock)(store, roleLeaseKey(role)); } catch (error) {
+          errors.push(`${leasePath} のロック解放に失敗しました: ${error.message}`);
         }
       }
     }
-  }
-
-  if (errors.length > 0) {
-    return { status: 'unknown', reason: errors.join('; '), removed: removedCount };
   }
   if (skipped) return { status: 'skipped', reason: '旧inbox-supervisorのlease所有者が稼働中です' };
   return { status: removedCount > 0 ? 'removed' : 'absent' };

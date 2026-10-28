@@ -381,6 +381,34 @@ test('findRunningInstances: runtime registry 読み取り失敗を伝播する',
   assert.throws(() => plc.findRunningInstances(ws, { failOnReadError: true }), /読み取れません/);
 });
 
+test('findRunningInstances: 起動判定中に対象registryのPID欠落・不正値を見つけたら中止する', () => {
+  const plc = loadModule();
+  const ws = path.join(tmpBase, 'invalid-runtime-entry');
+  const dir = plc.pidsDir(ws);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, '12345.json');
+  fs.writeFileSync(filePath, JSON.stringify({
+    pid: 'not-a-pid', script: 'msg-poll.js', workerName: null, workspace: ws,
+  }));
+
+  assert.throws(() => plc.findRunningInstance(ws, {
+    script: 'msg-poll.js', workerName: null, failOnReadError: true,
+  }), /PIDが不正/);
+});
+
+test('findRunningInstances: 起動判定中に対象registryのJSON破損を空扱いしない', () => {
+  const plc = loadModule();
+  const ws = path.join(tmpBase, 'corrupt-runtime-entry');
+  const dir = plc.pidsDir(ws);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, '12345.json');
+  fs.writeFileSync(filePath, '{broken');
+
+  assert.throws(() => plc.findRunningInstance(ws, {
+    script: 'msg-poll.js', workerName: null, failOnReadError: true,
+  }), /エントリを読み取れません/);
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ProcessRef の判定は公開された3状態 API から確認する。WMI は共通モジュール内だけで使う。
 

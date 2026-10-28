@@ -12,6 +12,7 @@ const workerLease = require('../scripts/shared/worker-lease');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
 const residentAudit = require('../scripts/shared/resident-audit');
 const processLiveness = require('../scripts/shared/process-liveness');
+const workerLiveness = require('../scripts/shared/worker-liveness');
 
 // 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
 // PIDを誤って渡す回帰は即座に検出する。
@@ -492,6 +493,7 @@ describe('loadWorkers', () => {
       assert.equal(workers.get('issue-5-fix').agentId, 'claude');
       assert.equal(workers.get('issue-5-fix').issue, 5);
       assert.equal(workers.get('issue-8-add').pid, 103);
+      assert.equal(workers.get('issue-5-fix').rawProcessEntry.pid, 102);
     });
   });
 
@@ -509,19 +511,42 @@ describe('loadWorkers', () => {
     });
   });
 
-  test('壊れた workers.json / 配列は空 Map を返す', () => {
+  test('壊れた workers.json / 配列は空 Map と扱わずエラーにする', () => {
     withTempDir((dir) => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
       fs.writeFileSync(path.join(maestroDir, 'workers.json'), '{broken');
-      assert.equal(supervisor.loadWorkers(dir).size, 0);
+      assert.throws(() => supervisor.loadWorkers(dir), /JSON構文エラー/);
     });
 
     withTempDir((dir) => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
       fs.writeFileSync(path.join(maestroDir, 'workers.json'), '[]');
-      assert.equal(supervisor.loadWorkers(dir).size, 0);
+      assert.throws(() => supervisor.loadWorkers(dir), /オブジェクトでない/);
+    });
+  });
+
+  test('不正なPIDのworker recordも元の値を保持し、稼働判定で停止する', () => {
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: { 'issue-5-fix': { pid: 'not-a-pid', agentId: 'missing-agent', issue: 5 } },
+      });
+      const entry = supervisor.loadWorkers(dir).get('issue-5-fix');
+      workerLiveness._setLiveness(processLiveness.createLiveness({
+        probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME,
+      }));
+      supervisor._setIsWorkerAlive(workerLiveness.isWorkerAlive);
+      try {
+        assert.throws(() => supervisor.deliverMessage({
+          workerName: 'issue-5-fix', entry,
+          message: { from: 'orch', body: 'hello' }, workspace: dir,
+          homedir: os.homedir(), issue: '5',
+        }), /liveness is unknown/);
+      } finally {
+        workerLiveness._setLiveness(null);
+        supervisor._setIsWorkerAlive(() => false);
+      }
     });
   });
 });

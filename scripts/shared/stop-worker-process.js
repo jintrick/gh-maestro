@@ -8,8 +8,7 @@
 //   - レガシー WezTerm pane / notifier の終了
 //   - 関連する PID registry の sweep
 //
-// stop-worker.js（停止モード: isRemoveMode=false）および
-// remove-worker.js（削除モード: isRemoveMode=true）のプロセス停止段で共通利用する。
+// stop-worker.js / remove-worker.js のプロセス停止段で共通利用する。
 
 const path = require('path');
 const fs = require('fs');
@@ -53,7 +52,7 @@ function validLegacyPaneId(value) {
  * @param {string} workspace ワークスペースのルートパス
  * @param {string} workerName 停止対象のワーカー名
  * @param {object} [opts]
- * @param {boolean} [opts.isRemoveMode=false] true の場合、同一性不一致時に throw せず警告を出して kill をスキップ
+ * @param {boolean} [opts.isRemoveMode=false] ログのコマンド名をremove-workerとして表示する
  * @param {(msg: string) => void} [opts.logWarn=console.warn] 警告・情報ログ出力関数
  * @param {(ms: number) => void} [opts.sleepFn=defaultSleep] pane解放待ちにも使うスリープ関数
  * @param {number} [opts.stopTimeoutMs=5000] プロセス停止確認の上限ミリ秒
@@ -62,7 +61,7 @@ function validLegacyPaneId(value) {
  * @param {Function} [opts.killProcessTreeFn] プロセス停止関数（テスト用）
  * @param {object} [opts.liveness] 生存確認モジュール（テスト用）
  * @param {object} [opts._injectedWorkers] テスト用 workers オブジェクト注入
- * @returns {{ success: boolean, stoppedPid: number|null, skippedReason?: string, workerEntry: object }}
+ * @returns {{ success: boolean, stoppedPid: number|null, workerEntry: object }}
  */
 function stopWorkerProcess(workspace, workerName, opts = {}) {
   const isRemoveMode = opts.isRemoveMode ?? false;
@@ -101,25 +100,41 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
     throw new Error(`ワーカー "${workerName}" のエントリが workers.json に見つかりません`);
   }
 
-  const workerEntry = normalizeWorkerEntry(workers[workerName]);
+  const rawWorkerEntry = workers[workerName];
+  const workerEntry = normalizeWorkerEntry(rawWorkerEntry);
+  const hasRawPid = rawWorkerEntry && typeof rawWorkerEntry === 'object' && !Array.isArray(rawWorkerEntry)
+    && rawWorkerEntry.pid !== undefined && rawWorkerEntry.pid !== null;
+  if (hasRawPid && !workerEntry.pid) {
+    throw new Error(`ワーカー "${workerName}" のPID記録が不正です`);
+  }
+  if (!workerEntry.pid && rawWorkerEntry && typeof rawWorkerEntry === 'object'
+      && !Array.isArray(rawWorkerEntry) && rawWorkerEntry.startTime != null && rawWorkerEntry.startTime !== '') {
+    throw new Error(`ワーカー "${workerName}" の起動時刻記録に対応するPIDがありません`);
+  }
   let stoppedPid = null;
-  let skippedReason = null;
 
   // Legacy notifier records contain no identity, so they cannot authorize a kill.
-  if (workerEntry.notifierPid) {
-    const state = liveness.observe(liveness.readRef({ pid: workerEntry.notifierPid }));
-    if (state === 'unknown') {
-      throw new Error(`レガシー notifier (pid ${workerEntry.notifierPid}) の生死を判定できません`);
+  const rawNotifierPid = rawWorkerEntry && typeof rawWorkerEntry === 'object' && !Array.isArray(rawWorkerEntry)
+    ? rawWorkerEntry.notifierPid
+    : undefined;
+  if (rawNotifierPid !== undefined && rawNotifierPid !== null && rawNotifierPid !== '') {
+    if ((typeof rawNotifierPid !== 'number' && typeof rawNotifierPid !== 'string')
+        || !Number.isInteger(Number(rawNotifierPid)) || Number(rawNotifierPid) <= 0) {
+      throw new Error(`レガシー notifier (pid ${rawNotifierPid}) のPID記録が不正です`);
     }
-    if (state === 'alive') killAndConfirm(workerEntry.notifierPid);
+    const notifierPid = Number(rawNotifierPid);
+    const notifierStartTime = rawWorkerEntry.notifierStartTime ?? null;
+    const state = liveness.observe(liveness.readRef({ pid: notifierPid, startTime: notifierStartTime }));
+    if (state === 'unknown') {
+      throw new Error(`レガシー notifier (pid ${notifierPid}) の生死を判定できません`);
+    }
+    if (state === 'alive') killAndConfirm(notifierPid);
   }
 
   if (workerEntry.pid) {
-    const state = liveness.observe(liveness.readRef(workerEntry));
+    const state = liveness.observe(liveness.readRef(rawWorkerEntry));
     if (state === 'unknown') {
-      skippedReason = 'process identity unavailable';
-      if (!isRemoveMode) throw new Error(`ワーカー "${workerName}" の生死を判定できません (PID ${workerEntry.pid})`);
-      logWarn(`remove-worker: PID ${workerEntry.pid} の生死を判定できないため停止をスキップします`);
+      throw new Error(`ワーカー "${workerName}" の生死を判定できません (PID ${workerEntry.pid})`);
     } else if (state === 'alive') {
       killAndConfirm(workerEntry.pid);
       stoppedPid = workerEntry.pid;
@@ -188,7 +203,6 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
   return {
     success: true,
     stoppedPid,
-    skippedReason,
     workerEntry,
   };
 }

@@ -320,22 +320,51 @@ function findRunningInstances(workspace, opts = {}) {
         }
         continue;
       }
-      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        if (opts.failOnReadError) {
+          throw new Error(`PID registry エントリの形式が不正です: ${path.join(dir, file)}`);
+        }
+        continue;
+      }
+      if (opts.script && typeof entry.script !== 'string') {
+        if (opts.failOnReadError) {
+          throw new Error(`PID registry エントリにscriptがありません: ${path.join(dir, file)}`);
+        }
+        continue;
+      }
       if (opts.script && entry.script !== opts.script) continue;
       // findRunningInstances で workerName が省略された場合は全workerを返す。
       // 従来の findRunningInstance は省略時を orchestrator(null) と解釈するため、
       // ラッパー側で明示的に null を補う。
-      if (opts.workerName !== undefined && (entry.workerName ?? null) !== opts.workerName) continue;
+      if (opts.workerName !== undefined) {
+        if (entry.workerName != null && typeof entry.workerName !== 'string') {
+          if (opts.failOnReadError) {
+            throw new Error(`PID registry エントリのworkerNameが不正です: ${path.join(dir, file)}`);
+          }
+          continue;
+        }
+        if ((entry.workerName ?? null) !== opts.workerName) continue;
+      }
       // registryには登録時の表記が保存される一方、検索側はruntime registryの列挙結果など
       // から正規化済みのworkspaceを受け取ることがある。registryの配置キーと同じ正規化を
       // フィールド比較にも適用し、表記差だけで稼働中プロセスを除外しない。
-      if (typeof entry.workspace !== 'string'
-        || storageLayout.canonicalWorkspace(entry.workspace) !== storageLayout.canonicalWorkspace(workspace)) {
+      if (typeof entry.workspace !== 'string') {
+        if (opts.failOnReadError) {
+          throw new Error(`PID registry エントリにworkspaceがありません: ${path.join(dir, file)}`);
+        }
+        continue;
+      }
+      if (storageLayout.canonicalWorkspace(entry.workspace) !== storageLayout.canonicalWorkspace(workspace)) {
         continue;
       }
 
       const entryPid = entry.pid;
-      if (!entryPid || !Number.isFinite(entryPid)) continue;
+      if (!Number.isInteger(entryPid) || entryPid <= 0) {
+        if (opts.failOnReadError) {
+          throw new Error(`PID registry エントリのPIDが不正です: ${path.join(dir, file)}`);
+        }
+        continue;
+      }
       if (opts.allowSelf !== true && entryPid === process.pid) continue;
       // 同一 PID の重複レコードは一度だけ判定する。
       if (seenPids.has(entryPid)) continue;

@@ -125,7 +125,6 @@ function _getRepo(workspace, opts = {}) {
 
 // PowerShell によるプロセス観測を毎回起こさないよう、watch 再描画間だけ短時間キャッシュする。
 const PROCESS_LIVENESS_CACHE_MAX_AGE_MS = 6_000;
-const _legacyProcessRefCache = new WeakMap();
 // ワーカー行の先頭に並べる状態ドットの個数
 const DOT_COUNT = 3;
 
@@ -264,29 +263,12 @@ function createWorkerStatusLiveness(opts = {}) {
   });
 }
 
-function cachedLegacyProcessRef(pid, checker, now) {
-  let refs = _legacyProcessRefCache.get(checker);
-  if (!refs) {
-    refs = new Map();
-    _legacyProcessRefCache.set(checker, refs);
-  }
-  const cached = refs.get(pid);
-  if (cached && Number.isFinite(now) && Number.isFinite(cached.observedAt)
-      && now >= cached.observedAt && now - cached.observedAt < PROCESS_LIVENESS_CACHE_MAX_AGE_MS) {
-    return cached.processRef;
-  }
-  const processRef = checker.captureProcess(pid);
-  refs.set(pid, { processRef, observedAt: now });
-  return processRef;
-}
-
-function observeWorkerEntry(rawEntry, checker, now = _now()) {
-  const entry = normalizeWorkerEntry(rawEntry);
-  if (!entry.pid) return { state: 'dead', processRef: null };
-  let processRef = checker.readRef(rawEntry);
-  if (!entry.startTime) processRef = cachedLegacyProcessRef(entry.pid, checker, now);
+function observeWorkerEntry(rawEntry, checker) {
+  const processRef = checker.readRef(rawEntry);
   const state = checker.observe(processRef);
-  if (state === 'unknown' && entry.startTime) throw new Error('worker process liveness is unknown');
+  if (state === 'unknown' && normalizeWorkerEntry(rawEntry).startTime) {
+    throw new Error('worker process liveness is unknown');
+  }
   return { state, processRef };
 }
 
@@ -319,9 +301,9 @@ function collectWorkersStatus(workspace, opts = {}) {
     for (const [workerName, rawEntry] of Object.entries(rawWorkers)) {
       if (workerName === 'orchestrator') continue;
       const entry = normalizeWorkerEntry(rawEntry);
-      // 古い workers.json には PID だけの記録がある。従来の表示も現在のプロセスを
-      // 直接照会していたため、observeWorkerEntry が現在の不透明な参照を捕捉する。
-      const observed = observeWorkerEntry(rawEntry, checker, now);
+      // 古い workers.json に PID だけの記録がある場合、参照の同一性を確認できないため
+      // unknown として表示上は稼働中にしない。停止や起動の判断はここでは行わない。
+      const observed = observeWorkerEntry(rawEntry, checker);
       const processRef = observed.processRef;
       const state = observed.state;
       const running = state === 'alive';
@@ -1034,7 +1016,7 @@ function main(argv = process.argv.slice(2)) {
 
     let running = false;
     try {
-      running = observeWorkerEntry(rawEntry, _injectedLiveness || createWorkerStatusLiveness(), _now()).state === 'alive';
+      running = observeWorkerEntry(rawEntry, _injectedLiveness || createWorkerStatusLiveness()).state === 'alive';
     } catch (e) {
       writeErr(`worker-status: status の生存確認に失敗しました: ${e.message}`);
       return { code: 1, lines: out, errLines: err };

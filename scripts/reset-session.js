@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // reset-session.js
 // gh-maestroセッションを強制リセットする。
-// workers.jsonの破損・pane消滅・worktree残骸など、どんな状態からでも
-// できる限りクリーンアップしてから終了する（途中エラーで止まらない）。
+// 管理対象プロセスの同一性を確認できない状態では、停止やworktree削除をせずに終了する。
 //
 // Usage:
 //   node reset-session.js [--workspace <path>]
@@ -21,7 +20,7 @@ const { existsSync, readFileSync, rmSync,
 const { unlinkJunctions } = require('./shared/unlink-junctions');
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { killProcessTree } = require('./shared/kill-tree');
-const { isWorkerAlive } = require('./shared/worker-liveness');
+const { observeWorker } = require('./shared/worker-liveness');
 const { worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { sweepRegistry } = require('./process-lifecycle');
 const processLiveness = require('./shared/process-liveness');
@@ -440,6 +439,22 @@ if (require.main === module) {
   const log  = (msg) => { if (!quiet) console.log(`[reset] ${msg}`); };
   const warn = (msg) => console.warn(`[reset] ⚠ ${msg}`);
 
+  const loadWorkers = () => readWorkersRaw(workspace);
+  let workers;
+  try {
+    workers = loadWorkers() || {};
+  } catch (error) {
+    warn(`workers.json の読み取りを中止しました: ${error.message}`);
+    process.exit(1);
+  }
+  for (const [name, entry] of Object.entries(workers)) {
+    if (name === 'orchestrator') continue;
+    if (observeWorker(entry) === 'unknown') {
+      warn(`worker "${name}" の生死を確認できないためリセットを中止します。状態とworktreeは保持します。`);
+      process.exit(1);
+    }
+  }
+
   try {
     const cleared = clearPrMonitorTarget(workspace);
     log(cleared ? 'PR monitor target を終了しました。' : 'PR monitor target はありません。');
@@ -465,11 +480,6 @@ if (require.main === module) {
   }
 
   // ── workers.json を安全に読む ─────────────────────────────────────
-
-  const loadWorkers = () => {
-    const workers = readWorkersRaw(workspace);
-    return workers || {};
-  };
 
   // ── junction/symlinkを除去する（unlink-junctions.js 参照） ──────
 
@@ -618,21 +628,12 @@ if (require.main === module) {
   // ═══════════════════════════════════════════════════════════════════
 
   log('前回の quarantine 残骸を確認します...');
-  cleanupOrphans();
 
   // ═══════════════════════════════════════════════════════════════════
   // 2. ワーカープロセスをkill
   // ═══════════════════════════════════════════════════════════════════
 
   log('ワーカープロセスをkillします...');
-  let workers = null;
-  try {
-    workers = loadWorkers();
-  } catch (e) {
-    stateReadFailed = true;
-    warn(`workers.json の読み取りを中止しました: ${e.message}`);
-    results.errors.push(`workers.json read: ${e.message}`);
-  }
   let alivePanes;
   try {
     alivePanes = getAlivePaneIds(warn);
@@ -648,7 +649,7 @@ if (require.main === module) {
 
   let legacyNotifierCleanup = { notifierResults: [] };
   let legacyPaneCleanup = { paneResults: [] };
-  if (workers !== null) {
+  {
     try {
       legacyNotifierCleanup = cleanupLegacyWorkerField(workspace, 'notifierPid', {
         readWorkersFn: () => workers,
@@ -664,6 +665,7 @@ if (require.main === module) {
         }
       }
     } catch (error) {
+      stateReadFailed = true;
       warn(`レガシー notifier の掃除に失敗しました: ${error.message}`);
       results.errors.push(`legacy notifier: ${error.message}`);
     }
@@ -687,6 +689,7 @@ if (require.main === module) {
         }
       }
     } catch (error) {
+      stateReadFailed = true;
       warn(`レガシーpane の掃除に失敗しました: ${error.message}`);
       results.errors.push(`legacy pane: ${error.message}`);
     }
@@ -701,7 +704,11 @@ if (require.main === module) {
       // headless ワーカー: 登録PIDは中継シムのもの。配下にログインシェルとエージェント本体が
       // ぶら下がるためツリー全体を落とす。
       if (normalized.pid) {
-        if (isWorkerAlive(normalized)) {
+        const state = observeWorker(entry);
+        if (state === 'unknown') {
+          throw new Error(`worker "${name}" の生死を確認できません`);
+        }
+        if (state === 'alive') {
           killProcessTree(normalized.pid);
           log(`"${name}" (pid ${normalized.pid}) をkillしました。`);
           results.killed.push(name);
@@ -768,12 +775,65 @@ if (require.main === module) {
     }
   }
 
+  // Queue and registry state must be checked before the broad worktree kill.
+  // Their own cleanup paths refuse unknown owners; an unknown result also
+  // disables the broader process and worktree cleanup below.
+  if (!stateReadFailed) {
+    log('キュー状態を掃除します...');
+    const queueResult = cleanupLegacyQueue(workspace, {
+      legacyResetMode: true,
+      killProcessTreeFn: killProcessTree,
+      liveness: processLiveness,
+      sleepFn: sleep,
+      rmFn: (target) => rmSync(target, { recursive: true, force: true }),
+      warnFn: warn,
+    });
+    if (queueResult.status === 'removed') {
+      for (const pid of queueResult.killedPids || []) {
+        log(`レガシー poller (pid ${pid}) を終了しました。`);
+        results.killed.push(`legacy-poller(${pid})`);
+      }
+      log('queue/ を削除しました。');
+    } else if (queueResult.status === 'absent') {
+      log('queue/ なし。スキップ。');
+    } else if (queueResult.status === 'unknown') {
+      stateReadFailed = true;
+      warn(`queue/ の掃除に失敗しました: ${queueResult.reason}`);
+    }
+  }
+
+  if (!stateReadFailed) {
+    log('PID registry を sweep します...');
+    const sweepResults = sweepRegistry(workspace);
+    if (sweepResults.killed.length > 0) {
+      log(`PID registry: ${sweepResults.killed.length} 件のプロセスを終了しました`);
+      for (const k of sweepResults.killed) {
+        log(`  pid=${k.pid} worker=${k.workerName || '-'} script=${k.script || '-'}`);
+      }
+      results.killed.push(...sweepResults.killed.map(k => `pid-registry-${k.pid}`));
+    }
+    if (sweepResults.cleaned.length > 0) {
+      log(`PID registry: ${sweepResults.cleaned.length} 件のstaleエントリを掃除しました`);
+    }
+    for (const error of sweepResults.errors) {
+      stateReadFailed = true;
+      warn(`PID registry error: ${error}`);
+      results.errors.push(`pid-registry: ${error}`);
+    }
+  }
+
+  if (!stateReadFailed) {
+    cleanupOrphans();
+  } else {
+    warn('管理状態に判定不能があるため quarantine/worktree cleanup を行いません。');
+  }
+
   // ═══════════════════════════════════════════════════════════════════
   // 3. worktrees配下のプロセスをWMIで直接終了（Windows）
   //    プロセスツリーのkillを取りこぼした場合への最終手段
   // ═══════════════════════════════════════════════════════════════════
 
-  if (existsSync(worktreesDir)) {
+  if (!stateReadFailed && existsSync(worktreesDir)) {
     log('worktrees配下で動作中のプロセスを確認・終了します...');
     const killed = killProcessesInWorktrees(worktreesDir);
     if (killed > 0) {
@@ -781,6 +841,8 @@ if (require.main === module) {
       log('プロセス終了を待ちます (1秒)...');
       sleep(1000);
     }
+  } else if (stateReadFailed) {
+    warn('管理状態に判定不能があるため、worktrees配下のプロセスを停止しません。');
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -788,7 +850,7 @@ if (require.main === module) {
   // ═══════════════════════════════════════════════════════════════════
 
   log('worktreeを削除します...');
-  if (existsSync(worktreesDir)) {
+  if (!stateReadFailed && existsSync(worktreesDir)) {
     let entries = [];
     try {
       entries = readdirSync(worktreesDir).filter(e => {
@@ -816,15 +878,19 @@ if (require.main === module) {
         results.errors.push(`${entry}: ${result.reason}`);
       }
     }
-  } else {
+  } else if (!stateReadFailed) {
     log('worktreesディレクトリが存在しません。スキップ。');
+  } else {
+    warn('管理状態に判定不能があるため、worktreeとGit worktree情報を保持します。');
   }
 
-  try {
-    worktreePrune(workspace);
-    log('git worktree prune 完了。');
-  } catch (e) {
-    warn(`git worktree prune 失敗: ${e.message.split('\n')[0]}`);
+  if (!stateReadFailed) {
+    try {
+      worktreePrune(workspace);
+      log('git worktree prune 完了。');
+    } catch (e) {
+      warn(`git worktree prune 失敗: ${e.message.split('\n')[0]}`);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -871,8 +937,8 @@ if (require.main === module) {
     { cwd: workspace, encoding: 'utf8' });
   const resetRepo = repoResult.status === 0 ? repoResult.stdout.trim() : '';
 
-  if (workers === null) {
-    warn('workers.json が判定不能なため msg-state のベースライン再構築をスキップします（破損からの自動回復は行いません）。');
+  if (stateReadFailed) {
+    warn('管理状態が判定不能なため msg-state のベースライン再構築をスキップします（破損からの自動回復は行いません）。');
     results.errors.push('msg-state baseline: workers.json が判定不能のため再構築しませんでした');
   } else if (!resetRepo) {
     warn('リポジトリを解決できないため msg-state のベースライン再構築をスキップします（既存状態は変更しません）。');
@@ -924,56 +990,6 @@ if (require.main === module) {
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  // 7. queue 状態の掃除（後方互換: 旧FSキューセッションの残骸を掃除）
-  //    queue.js / queue-poller.js は削除済みのため fs 直叩きのみで行う。
-  // ═══════════════════════════════════════════════════════════════════
-
-  log('キュー状態を掃除します...');
-  const queueResult = cleanupLegacyQueue(workspace, {
-    legacyResetMode: true,
-    killProcessTreeFn: killProcessTree,
-    liveness: processLiveness,
-    sleepFn: sleep,
-    rmFn: (target) => rmSync(target, { recursive: true, force: true }),
-    warnFn: warn,
-  });
-  if (queueResult.status === 'removed') {
-    for (const pid of queueResult.killedPids || []) {
-      log(`レガシー poller (pid ${pid}) を終了しました。`);
-      results.killed.push(`legacy-poller(${pid})`);
-    }
-    log('queue/ を削除しました。');
-  } else if (queueResult.status === 'absent') {
-    log('queue/ なし。スキップ。');
-  } else if (queueResult.status === 'unknown') {
-    warn(`queue/ の掃除に失敗しました: ${queueResult.reason}`);
-  }
-
-  // ═══════════════════════════════════════════════════════════════════
-  // 8. PID registry sweep（全エントリを同一性確認の上で掃除）
-  //    req.10: registry 全体を読み取り、全エントリを同一性確認の上でkill
-  // ═══════════════════════════════════════════════════════════════════
-
-  log('PID registry を sweep します...');
-  {
-    const sweepResults = sweepRegistry(workspace);
-    if (sweepResults.killed.length > 0) {
-      log(`PID registry: ${sweepResults.killed.length} 件のプロセスを終了しました`);
-      for (const k of sweepResults.killed) {
-        log(`  pid=${k.pid} worker=${k.workerName || '-'} script=${k.script || '-'}`);
-      }
-      results.killed.push(...sweepResults.killed.map(k => `pid-registry-${k.pid}`));
-    }
-    if (sweepResults.cleaned.length > 0) {
-      log(`PID registry: ${sweepResults.cleaned.length} 件のstaleエントリを掃除しました`);
-    }
-    for (const e of sweepResults.errors) {
-      warn(`PID registry error: ${e}`);
-      results.errors.push(`pid-registry: ${e}`);
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════════
   // 9. workers.json をリセット
   // ═══════════════════════════════════════════════════════════════════
 
@@ -981,8 +997,8 @@ if (require.main === module) {
   // orchestrator エントリはワーカー走査時に一律スキップされる予約キー。
   // WezTerm脱却によりペインIDを持たなくなったため、存在だけを保持する。
   const fresh = { orchestrator: { agentId: null } };
-  if (workers === null) {
-    warn('workers.json が判定不能なためリセットせず、ファイルを保持します。破損からの自動回復は行いません。');
+  if (stateReadFailed) {
+    warn('管理状態が判定不能なため workers.json をリセットせず、ファイルを保持します。破損からの自動回復は行いません。');
   } else {
     try {
       // 並行書き込み競合でも破損JSONを作らないようアトミック書き込みに統一する
@@ -1003,7 +1019,10 @@ if (require.main === module) {
   // ═══════════════════════════════════════════════════════════════════
 
   let residentRestartFailed = false;
-  if (residentCaptureError) {
+  if (stateReadFailed) {
+    warn('管理状態が判定不能なため、常駐プロセスを停止・再起動しません。');
+    residentRestartFailed = true;
+  } else if (residentCaptureError) {
     warn('常駐プロセスは再起動情報を確認できなかったため、立て直しを実行しませんでした。');
     residentRestartFailed = true;
   } else if (residentEntries.length > 0) {

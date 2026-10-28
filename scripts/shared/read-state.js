@@ -234,7 +234,7 @@ function releaseStateLock(workspace, self) {
   const lp = stateLockPath(workspace, self);
   try {
     const holder = JSON.parse(fs.readFileSync(lp, 'utf8'));
-    if (holder && holder.pid === process.pid) fs.unlinkSync(lp);
+    if (holder && processLiveness.sameRef(processLiveness.readRef(holder), SELF_REF)) fs.unlinkSync(lp);
   } catch {
     // 読めない・存在しない → 何もしない
   }

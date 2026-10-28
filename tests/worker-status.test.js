@@ -753,8 +753,8 @@ test('main: list は見出しと最大4件のワーカー行を出力する', ()
 
   try {
     writeWorkers(workspace, {
-      'issue-100-worker-a': { pid: 111, issue: 100, agentId: 'agent-1' },
-      'issue-100-worker-b': { pid: 222, issue: 100, agentId: 'agent-2' },
+      'issue-100-worker-a': { pid: 111, startTime: '2026-08-26T11:50:00.000Z', issue: 100, agentId: 'agent-1' },
+      'issue-100-worker-b': { pid: 222, startTime: '2026-08-26T11:55:00.000Z', issue: 100, agentId: 'agent-2' },
       'worker-c': { pid: 999999999 }, // stopped, no issue/agentId
     });
 
@@ -786,7 +786,7 @@ test('main: list --json は機械可読な JSON 配列を出力する', () => {
 
   try {
     writeWorkers(workspace, {
-      'worker-a': { pid: 111 },
+      'worker-a': { pid: 111, startTime: '2026-08-26T11:50:00.000Z' },
     });
 
     const result = runMain(['list', '--workspace', workspace, '--json']);
@@ -806,6 +806,28 @@ test('main: list --json は機械可読な JSON 配列を出力する', () => {
     workerStatus._setNow(null);
     workerStatus._setIsWorkerAlive(null);
     workerStatus._setGetProcessStartTime(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('collectWorkersStatus: PID-only worker record is unknown and is not observed through a new capture', () => {
+  const workspace = createWorkspace('gh-maestro-worker-status-pid-only-');
+  let probeCalls = 0;
+  let startTimeCalls = 0;
+  workerStatus._setLiveness(processLiveness.createLiveness({
+    probePid: () => { probeCalls++; return 'alive'; },
+    readStartTime: () => { startTimeCalls++; return DEFAULT_TEST_START_TIME; },
+  }));
+
+  try {
+    writeWorkers(workspace, { 'worker-legacy': { pid: 4242 } });
+    const workers = workerStatus.collectWorkersStatus(workspace);
+    assert.equal(workers[0].running, false);
+    assert.equal(workers[0].startTime, null);
+    assert.equal(probeCalls, 0, 'PID-only records do not establish identity by probing the current PID');
+    assert.equal(startTimeCalls, 0, 'PID-only records do not capture a new start time');
+  } finally {
+    workerStatus._setLiveness(null);
     removeWorkspace(workspace);
   }
 });
@@ -880,7 +902,7 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
   });
 
   try {
-    writeWorkers(workspace, { 'worker-a': { pid: 111 } });
+    writeWorkers(workspace, { 'worker-a': { pid: 111, startTime: '2026-08-26T11:55:00.000Z' } });
 
     // ループ開始
     const handle = workerStatus.runWatchLoop(workspace, 2, {
@@ -1826,7 +1848,9 @@ test('collectWorkersStatus: manager.running が破損・空・非数値ならエ
 
   try {
     writeWorkers(workspace, {
-      'issue-100-worker-a': { pid: 111, issue: 100, agentId: 'agent-1' },
+      'issue-100-worker-a': {
+        pid: 111, startTime: '2026-08-26T11:50:00.000Z', issue: 100, agentId: 'agent-1',
+      },
     });
 
     const badReviewDir1 = path.join(workspace, '.gh-maestro', 'records', 'pr', '401', 'review');
@@ -1911,7 +1935,9 @@ test('main: list および list --json で Review Manager を表示する', () =
 
   try {
     writeWorkers(workspace, {
-      'issue-100-worker-a': { pid: 111, issue: 100, agentId: 'agent-1' },
+      'issue-100-worker-a': {
+        pid: 111, startTime: '2026-08-26T11:50:00.000Z', issue: 100, agentId: 'agent-1',
+      },
     });
 
     fs.writeFileSync(path.join(workspace, '.gh-maestro', 'config.json'), JSON.stringify({

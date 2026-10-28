@@ -561,7 +561,7 @@ test('稼働中で未報告のワーカー宛て送信は投稿前に拒否さ�
   });
 });
 
-test('判定不能（起動時刻を特定できない）なら拒否せず通常どおり配送される', () => {
+test('起動時刻不明で生死unknownなら配送を拒否しGitHubへ投稿しない', () => {
   withTempDir(workspace => {
     const ghDir = path.join(workspace, '.gh-maestro');
     fs.mkdirSync(ghDir, { recursive: true });
@@ -573,18 +573,45 @@ test('判定不能（起動時刻を特定できない）なら拒否せず通�
     workerLiveness._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }));
 
     let listCommentsCalled = false;
+    let postCalled = false;
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgSend._setGhListComments(() => { listCommentsCalled = true; return { status: 0, stdout: '[]' }; });
-    let capturedBody = null;
-    msgSend._setGhIssueComment((issue, body) => {
-      capturedBody = body;
+    msgSend._setGhIssueComment(() => {
+      postCalled = true;
       return { status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-5\n' };
     });
 
     const r = msgSend.main(['issue-9-fix', '--stdin', '--issue', '9', '--workspace', workspace], null, stdinIO('hello'));
-    assert.equal(r.code, 0, `判定不能は拒否しないこと: ${r.errLines.join('\n')}`);
-    assert.equal(listCommentsCalled, false, '起動時刻が無ければ報告確認自体を行わない');
-    assert.ok(capturedBody && capturedBody.includes('hello'));
+    assert.equal(r.code, 1, `判定不能は送信を止めること: ${r.errLines.join('\n')}`);
+    assert.match(r.errLines.join('\n'), /生死を確認できない/);
+    assert.equal(listCommentsCalled, false, '生死不明なら報告確認へ進まない');
+    assert.equal(postCalled, false, '生死不明ならコメントを投稿しない');
+  });
+});
+
+test('不正なPIDを含むworker記録は休止扱いにせず配送を拒否する', () => {
+  withTempDir(workspace => {
+    const ghDir = path.join(workspace, '.gh-maestro');
+    fs.mkdirSync(ghDir, { recursive: true });
+    fs.writeFileSync(path.join(ghDir, 'workers.json'), JSON.stringify({
+      'issue-9-fix': { pid: 'not-a-pid', agentId: 'agy', issue: 9 },
+    }), 'utf8');
+    workerLiveness._setLiveness(require('../scripts/shared/process-liveness').createLiveness({
+      probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z',
+    }));
+
+    let postCalled = false;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment(() => {
+      postCalled = true;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-9\n' };
+    });
+
+    const r = msgSend.main(['issue-9-fix', '--stdin', '--issue', '9', '--workspace', workspace], null, stdinIO('hello'));
+    assert.equal(r.code, 1);
+    assert.match(r.errLines.join('\n'), /生死を確認できない/);
+    assert.equal(postCalled, false, '不正なPIDの記録ではコメントを投稿しない');
+    workerLiveness._setLiveness(null);
   });
 });
 
@@ -607,25 +634,24 @@ test('判定不能（GitHub APIの取得に失敗）なら拒否せず通常ど�
   });
 });
 
-test('判定不能（workers.json が解析不能）でも拒否せず通常どおり配送される（フェイルオープン維持）', () => {
+test('workers.json が解析不能なら配送を拒否し状態を空扱いしない', () => {
   withTempDir(workspace => {
     const ghDir = path.join(workspace, '.gh-maestro');
     fs.mkdirSync(ghDir, { recursive: true });
-    // workers.json を解析不能にする。readWorkersRaw は throw し、checkWorkerBusyRejection の
-    // catch が null に落として通す（Issue #275 項目1）。判定不能時のフェイルオープンは
-    // 上記 docstring のとおり、拒否した場合の方が損害が大きい（指示が一切届かなくなる）。
+    // workers.json を解析不能にする。破損状態を「宛先の記録なし」と解釈してはならない。
     fs.writeFileSync(path.join(ghDir, 'workers.json'), '{ broken json');
 
     msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    let capturedBody = null;
-    msgSend._setGhIssueComment((issue, body) => {
-      capturedBody = body;
+    let postCalled = false;
+    msgSend._setGhIssueComment(() => {
+      postCalled = true;
       return { status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-8\n' };
     });
 
     const r = msgSend.main(['issue-9-fix', '--stdin', '--issue', '9', '--workspace', workspace], null, stdinIO('hello'));
-    assert.equal(r.code, 0, `解析不能は拒否しないこと: ${r.errLines.join('\n')}`);
-    assert.ok(capturedBody && capturedBody.includes('hello'));
+    assert.equal(r.code, 1, `解析不能は送信を止めること: ${r.errLines.join('\n')}`);
+    assert.match(r.errLines.join('\n'), /状態を読めない/);
+    assert.equal(postCalled, false, '破損状態ならコメントを投稿しない');
   });
 });
 

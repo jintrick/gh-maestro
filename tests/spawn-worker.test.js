@@ -8,6 +8,8 @@ const { spawnSync } = require('child_process');
 const lifecycle = require('../scripts/process-lifecycle');
 const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
 lifecycle.getProcessStartTime = () => TEST_PROCESS_START_TIME;
+const workerLiveness = require('../scripts/shared/worker-liveness');
+const { createLiveness } = require('../scripts/shared/process-liveness');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'spawn-worker.js');
 const {
   shouldPruneStaleWorker,
@@ -201,6 +203,25 @@ test('shouldPruneStaleWorker: プロセス不在でもagentConfigが解決でき
 test('shouldPruneStaleWorker: agentConfigが解決できない場合はfail-safeで除去する', () => {
   const result = shouldPruneStaleWorker({ pid: 5, agentId: 'unknown-agent' }, () => null, DEAD);
   assert.equal(result, true);
+});
+
+test('shouldPruneStaleWorker: 生死unknownのプロセスは除去せず起動を止める', () => {
+  workerLiveness._setLiveness(createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_PROCESS_START_TIME }));
+  try {
+    let resolved = false;
+    assert.throws(() => shouldPruneStaleWorker({ pid: 5, agentId: 'unknown-agent' }, () => {
+      resolved = true;
+      return null;
+    }), /liveness is unknown/);
+    assert.equal(resolved, false);
+    assert.throws(() => shouldPruneStaleWorker({ pid: 'not-a-pid', agentId: 'unknown-agent' }, () => {
+      resolved = true;
+      return null;
+    }), /liveness is unknown/);
+    assert.equal(resolved, false, 'malformed PID does not get pruned as an absent worker');
+  } finally {
+    workerLiveness._setLiveness(null);
+  }
 });
 
 test('shouldPruneStaleWorker: resolveAgentが例外を投げてもfail-safeで除去する', () => {

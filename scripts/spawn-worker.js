@@ -35,7 +35,7 @@ const { buildAgentCommandArgs } = require('./shared/agent-launch');
 const { checkAgentExists } = require('./shared/agent-exec');
 const { launchAgentHeadless } = require('./shared/headless-launch');
 const { buildNormalWorkerLaunchSpec } = require('./shared/worker-factory');
-const { isWorkerAlive } = require('./shared/worker-liveness');
+const { isWorkerAlive, observeWorker } = require('./shared/worker-liveness');
 const { createNormalWorkerStore, acquireLease: acquireWorkerLease, isLeaseLive,
         activateLease: activateWorkerLease, releaseLease: releaseWorkerLease,
         acquireLeaseLock, releaseLeaseLock } = require('./shared/worker-lease');
@@ -197,8 +197,16 @@ function parseWorkerArgs(argv) {
  * @param {(entry: object) => boolean} [aliveFn=isWorkerAlive] テスト用の注入口
  * @returns {boolean}
  */
-function shouldPruneStaleWorker(entry, resolveAgent, aliveFn = isWorkerAlive) {
-  if (aliveFn(entry)) return false;
+function shouldPruneStaleWorker(entry, resolveAgent, aliveFn) {
+  let state;
+  try {
+    state = aliveFn ? (aliveFn(entry) ? 'alive' : 'dead') : observeWorker(entry);
+  } catch (error) {
+    throw new Error(`worker process liveness is unknown: ${error.message}`, { cause: error });
+  }
+  if (state === 'unknown') throw new Error('worker process liveness is unknown');
+  if (state === 'alive') return false;
+  if (state !== 'dead') throw new Error('worker process liveness returned an invalid state');
   let agentConfig;
   try {
     agentConfig = entry.agentId ? resolveAgent(entry.agentId) : null;
@@ -624,19 +632,25 @@ if (closedPr.blocked) {
       );
     }
     // 旧形式 workers.json チェック（Phase 2 以前の lease 非保持ワーカー向け）
-    if (existsSync(workersJson)) {
-      try {
-        const parsed = JSON.parse(readFileSync(workersJson, 'utf8'));
-        if (typeof parsed === 'object' && parsed !== null && parsed[oldKey]) {
-          const oldEntry = normalizeWorkerEntry(parsed[oldKey]);
-          if (isWorkerAlive(oldEntry)) {
-            fail(
-              `旧形式（role無し）のワーカー "${oldKey}" が workers.json に登録され生存中です（pid ${oldEntry.pid}）。` +
-              `このワーカーを停止してから再試行してください。`
-            );
-          }
-        }
-      } catch { /* workers.json が読めなければスキップ（後続の本処理で改めて読む） */ }
+    let previousWorkers;
+    try {
+      previousWorkers = readWorkersRaw(workspace);
+    } catch (error) {
+      fail(`workers.json の読み取り・検証に失敗しました: ${error.message}`);
+    }
+    const oldEntry = previousWorkers && previousWorkers[oldKey];
+    if (oldEntry !== undefined) {
+      const state = observeWorker(oldEntry);
+      if (state === 'unknown') {
+        fail(`旧形式（role無し）のワーカー "${oldKey}" の生死を確認できないため起動を拒否しました。`);
+      }
+      if (state === 'alive') {
+        const normalizedOldEntry = normalizeWorkerEntry(oldEntry);
+        fail(
+          `旧形式（role無し）のワーカー "${oldKey}" が workers.json に登録され生存中です（pid ${normalizedOldEntry.pid}）。` +
+          `このワーカーを停止してから再試行してください。`
+        );
+      }
     }
   }
 }
@@ -686,19 +700,12 @@ if (!baselineResult.ok) {
 }
 console.warn(`spawn-worker: Issue ${issue} の既存コメント ${baselineResult.count} 件を orchestrator 既読として記録しました`);
 
-// --- workers.json を読み込み（なければ初期化、破損時は空として扱う） ---
-let workers = {};
-if (existsSync(workersJson)) {
-  try {
-    const parsed = JSON.parse(readFileSync(workersJson, 'utf8'));
-    if (typeof parsed === 'object' && parsed !== null) {
-      workers = parsed;
-    } else {
-      console.warn(`spawn-worker: workers.json の内容が不正です（型: ${typeof parsed}）。空として扱います。`);
-    }
-  } catch (e) {
-    console.warn(`spawn-worker: workers.json のパースに失敗しました: ${e.message}。空として扱います。`);
-  }
+// --- workers.json を読み込み（不在のみ空として扱い、破損時は起動を止める） ---
+let workers;
+try {
+  workers = readWorkersRaw(workspace) || {};
+} catch (e) {
+  fail(`workers.json の読み取り・検証に失敗しました: ${e.message}`);
 }
 if (!workers.orchestrator) {
   // orchestrator エントリ自体はワーカー走査時に一律スキップされる予約キー。
@@ -712,7 +719,7 @@ if (!workers.orchestrator) {
   for (const [k, v] of Object.entries(workers)) {
     if (k === 'orchestrator') continue;
     const entry = normalizeWorkerEntry(v);
-    if (!shouldPruneStaleWorker(entry, (id) => resolveAgentConfig(id, { workspace, homedir }))) continue;
+    if (!shouldPruneStaleWorker(v, (id) => resolveAgentConfig(id, { workspace, homedir }))) continue;
 
     console.warn(`spawn-worker: stale worker "${k}" (pid ${entry.pid ?? '-'}) を workers.json から除去します`);
     delete workers[k];
