@@ -33,6 +33,7 @@ Options:
 そのあと Issue をクローズする。ワーカー削除は best-effort（一部失敗しても続行し、Issueは閉じる）。
 
 さらに、このIssueの --issue で起動された監視ペインを best-effort で close-pane 経由で終了する。
+worker worktree ごとの監視ペインはワーカー削除前に終了し、メイン workspace のペインも終了する。
 別Issueのペインや起動Issueを確認できない旧形式の記録は終了しない。
 
 さらに、ライフサイクル終了後の情報価値のない内部状態を後始末する（Issue #248・すべて best-effort）:
@@ -210,7 +211,7 @@ function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn 
 }
 
 /**
- * Issue に紐づく全ワーカーを削除し、Issue をクローズする。
+ * Issue に紐づく全ワーカーの worktree 監視ペインを終了してからワーカーを削除し、Issue をクローズする。
  * あわせて、情報価値のない内部状態（assistant-watch/<issue>.json・対象PRの .incomplete・
  * executions.json の当該issueレコード）を後始末する（Issue #248 項目2/4/7）。
  * @param {{workspace: string, issue: string|number, repo?: string|null}} params
@@ -237,6 +238,20 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
   const names = collectWorkersForIssue(workspace, issue);
   const workers = [];
   for (const name of names) {
+    const workerWorkspace = path.resolve(workspace, '.gh-maestro', 'worktrees', name);
+    let workerStatusPaneResult;
+    try {
+      workerStatusPaneResult = closeStatusPaneFn(workerWorkspace, issue);
+    } catch (error) {
+      workerStatusPaneResult = { ok: false, stderr: error.message };
+    }
+    if (!workerStatusPaneResult || !workerStatusPaneResult.ok) {
+      process.stderr.write(
+        `finalize-issue: ワーカー "${name}" の監視ペイン終了に失敗しました: `
+        + `${workerStatusPaneResult && workerStatusPaneResult.stderr || 'unknown'}\n`,
+      );
+    }
+
     const result = removeWorkerFn(workspace, name);
     const ok = result && result.ok !== false;
     if (!ok) {

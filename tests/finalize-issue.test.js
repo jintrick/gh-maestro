@@ -116,6 +116,82 @@ test('finalizeIssue: 全ワーカーを削除してからIssueをクローズす
   });
 });
 
+test('finalizeIssue: worker worktree の監視ペインを削除前に閉じ、メインworkspaceの監視ペインも閉じる', () => {
+  withTempWorkspace({
+    'issue-5-coder': { paneId: '1', issue: 5 },
+    'issue-5-explore': { paneId: '2', issue: 5 },
+  }, (dir) => {
+    const events = [];
+    finalizeIssue(
+      { workspace: dir, issue: 5 },
+      {
+        closeStatusPaneFn: (ws, issue) => {
+          events.push(['close-pane', ws, issue]);
+          return { ok: true };
+        },
+        removeWorkerFn: (ws, name) => {
+          events.push(['remove-worker', ws, name]);
+          return { ok: true };
+        },
+        closeIssueFn: (issue) => {
+          events.push(['close-issue', issue]);
+          return { ok: true };
+        },
+        findReviewPrsFn: () => [],
+      },
+    );
+
+    assert.deepEqual(events, [
+      ['close-pane', path.resolve(dir, '.gh-maestro', 'worktrees', 'issue-5-coder'), 5],
+      ['remove-worker', dir, 'issue-5-coder'],
+      ['close-pane', path.resolve(dir, '.gh-maestro', 'worktrees', 'issue-5-explore'), 5],
+      ['remove-worker', dir, 'issue-5-explore'],
+      ['close-issue', 5],
+      ['close-pane', dir, 5],
+    ]);
+  });
+});
+
+test('finalizeIssue: worker worktree の監視ペイン終了が失敗してもログして削除を続ける', () => {
+  withTempWorkspace({
+    'issue-5-coder': { paneId: '1', issue: 5 },
+  }, (dir) => {
+    const events = [];
+    let stderr = '';
+    const originalWrite = process.stderr.write;
+    process.stderr.write = (chunk) => {
+      stderr += chunk;
+      return true;
+    };
+    try {
+      finalizeIssue(
+        { workspace: dir, issue: 5 },
+        {
+          closeStatusPaneFn: (ws) => {
+            events.push(['close-pane', ws]);
+            return { ok: ws === dir, stderr: 'pane unavailable' };
+          },
+          removeWorkerFn: (ws, name) => {
+            events.push(['remove-worker', ws, name]);
+            return { ok: true };
+          },
+          closeIssueFn: () => ({ ok: true }),
+          findReviewPrsFn: () => [],
+        },
+      );
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+
+    assert.deepEqual(events, [
+      ['close-pane', path.resolve(dir, '.gh-maestro', 'worktrees', 'issue-5-coder')],
+      ['remove-worker', dir, 'issue-5-coder'],
+      ['close-pane', dir],
+    ]);
+    assert.match(stderr, /ワーカー "issue-5-coder" の監視ペイン終了に失敗しました: pane unavailable/);
+  });
+});
+
 test('finalizeIssue: 監視ペイン終了の失敗はIssueクローズを失敗扱いにしない', () => {
   withTempWorkspace({}, (dir) => {
     const result = finalizeIssue(
