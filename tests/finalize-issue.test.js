@@ -2,11 +2,13 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync: spawnNodeSync } = require('node:child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
 const { collectWorkersForIssue, finalizeIssue, cleanupIssueArtifacts, bodyReferencesIssue } = require('../scripts/finalize-issue.js');
+const childProcess = require('../scripts/shared/child-process');
 
 function withTempWorkspace(workers, fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-finalize-'));
@@ -116,6 +118,150 @@ test('finalizeIssue: 全ワーカーを削除してからIssueをクローズす
   });
 });
 
+test('finalizeIssue: default close-pane のargvでworktreeを削除前に閉じ、メインworkspaceも閉じる', () => {
+  withTempWorkspace({
+    'issue-5-coder': { paneId: '1', issue: 5 },
+    'issue-5-explore': { paneId: '2', issue: 5 },
+  }, (dir) => {
+    const events = [];
+    const originalSpawnSync = childProcess.spawnSync;
+    childProcess.spawnSync = (command, args, options) => {
+      events.push(['close-pane-command', command, [...args], options.cwd]);
+      return { status: 0, stdout: 'STATUS_PANE_NOT_FOUND', stderr: '' };
+    };
+    try {
+      finalizeIssue(
+        { workspace: dir, issue: 5 },
+        {
+          removeWorkerFn: (ws, name) => {
+            events.push(['remove-worker', ws, name]);
+            return { ok: true };
+          },
+          closeIssueFn: (issue) => {
+            events.push(['close-issue', issue]);
+            return { ok: true };
+          },
+          findReviewPrsFn: () => [],
+        },
+      );
+    } finally {
+      childProcess.spawnSync = originalSpawnSync;
+    }
+
+    const workerStatusScript = path.join(__dirname, '..', 'scripts', 'worker-status.js');
+    const coderWorktree = path.resolve(dir, '.gh-maestro', 'worktrees', 'issue-5-coder');
+    const explorerWorktree = path.resolve(dir, '.gh-maestro', 'worktrees', 'issue-5-explore');
+    assert.deepEqual(events, [
+      ['close-pane-command', process.execPath, [workerStatusScript, 'close-pane', '--workspace', coderWorktree, '--issue', '5'], coderWorktree],
+      ['remove-worker', dir, 'issue-5-coder'],
+      ['close-pane-command', process.execPath, [workerStatusScript, 'close-pane', '--workspace', explorerWorktree, '--issue', '5'], explorerWorktree],
+      ['remove-worker', dir, 'issue-5-explore'],
+      ['close-issue', 5],
+      ['close-pane-command', process.execPath, [workerStatusScript, 'close-pane', '--workspace', dir, '--issue', '5'], dir],
+    ]);
+  });
+});
+
+test('finalizeIssue: worker worktree の監視ペイン終了失敗時はworkerとIssueを残す', () => {
+  withTempWorkspace({
+    'issue-5-coder': { paneId: '1', issue: 5 },
+  }, (dir) => {
+    const worktree = path.resolve(dir, '.gh-maestro', 'worktrees', 'issue-5-coder');
+    fs.mkdirSync(worktree, { recursive: true });
+    let removeCalls = 0;
+    let issueCloseCalls = 0;
+
+    const result = finalizeIssue(
+      { workspace: dir, issue: 5 },
+      {
+        closeStatusPaneFn: () => ({ ok: false, stderr: 'pane unavailable' }),
+        removeWorkerFn: () => { removeCalls += 1; return { ok: true }; },
+        closeIssueFn: () => { issueCloseCalls += 1; return { ok: true }; },
+        findReviewPrsFn: () => [],
+      },
+    );
+
+    assert.equal(result.closed, false);
+    assert.deepEqual(result.workerStatusPaneFailures, [{ name: 'issue-5-coder', reason: 'pane unavailable' }]);
+    assert.equal(result.artifacts, null);
+    assert.equal(removeCalls, 0);
+    assert.equal(issueCloseCalls, 0);
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(dir, '.gh-maestro', 'workers.json'), 'utf8')),
+      { 'issue-5-coder': { paneId: '1', issue: 5 } },
+    );
+    assert.ok(fs.existsSync(worktree));
+  });
+});
+
+test('finalize-issue CLI: worktree runtimeのclose-pane失敗を非0で報告し、記録を保って再実行できる', () => {
+  withTempWorkspace({
+    'issue-5-coder': { paneId: '1', issue: 5 },
+  }, (dir) => {
+    const worktree = path.resolve(dir, '.gh-maestro', 'worktrees', 'issue-5-coder');
+    const runtimeDir = path.join(dir, 'isolated-runtime');
+    const statusPaneRegistry = require('../scripts/shared/status-pane-registry');
+    fs.mkdirSync(worktree, { recursive: true });
+    const statusFile = statusPaneRegistry.statusPanePath(worktree, runtimeDir);
+    fs.mkdirSync(path.dirname(statusFile), { recursive: true });
+    fs.writeFileSync(statusFile, '{invalid json', 'utf8');
+
+    const savedRuntimeDir = process.env.GH_MAESTRO_RUNTIME_DIR;
+    process.env.GH_MAESTRO_RUNTIME_DIR = runtimeDir;
+    try {
+      const cliResult = spawnNodeSync(
+        process.execPath,
+        [
+          path.join(__dirname, '..', 'scripts', 'finalize-issue.js'),
+          '--issue', '5',
+          '--workspace', dir,
+        ],
+        { encoding: 'utf8', env: { ...process.env, GH_MAESTRO_RUNTIME_DIR: runtimeDir } },
+      );
+      assert.equal(cliResult.status, 1);
+      assert.match(cliResult.stdout, /FINALIZED:5 removed=0\/1 closed=false/);
+      assert.match(cliResult.stderr, /ワーカー "issue-5-coder" の監視ペイン終了に失敗しました/);
+      assert.ok(cliResult.stderr.includes(statusFile), '失敗理由にworktree runtimeの記録パスを含める');
+      assert.deepEqual(
+        JSON.parse(fs.readFileSync(path.join(dir, '.gh-maestro', 'workers.json'), 'utf8')),
+        { 'issue-5-coder': { paneId: '1', issue: 5 } },
+      );
+      assert.ok(fs.existsSync(worktree), 'close-pane失敗時はworktreeを残す');
+
+      // 壊れた一時 runtime 記録を隔離テスト内で解消し、同じ finalize を再実行する。
+      fs.rmSync(statusFile);
+      let issueCloseCalls = 0;
+      const retryResult = finalizeIssue(
+        { workspace: dir, issue: 5 },
+        {
+          removeWorkerFn: (workspace, name) => {
+            const workersFile = path.join(workspace, '.gh-maestro', 'workers.json');
+            const workers = JSON.parse(fs.readFileSync(workersFile, 'utf8'));
+            delete workers[name];
+            fs.writeFileSync(workersFile, JSON.stringify(workers, null, 2));
+            fs.rmSync(worktree, { recursive: true, force: true });
+            return { ok: true };
+          },
+          closeIssueFn: () => {
+            issueCloseCalls += 1;
+            return { ok: true };
+          },
+          findReviewPrsFn: () => [],
+        },
+      );
+
+      assert.equal(retryResult.closed, true);
+      assert.deepEqual(retryResult.workerStatusPaneFailures, []);
+      assert.equal(issueCloseCalls, 1);
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, '.gh-maestro', 'workers.json'), 'utf8')), {});
+      assert.equal(fs.existsSync(worktree), false);
+    } finally {
+      if (savedRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+      else process.env.GH_MAESTRO_RUNTIME_DIR = savedRuntimeDir;
+    }
+  });
+});
+
 test('finalizeIssue: 監視ペイン終了の失敗はIssueクローズを失敗扱いにしない', () => {
   withTempWorkspace({}, (dir) => {
     const result = finalizeIssue(
@@ -145,6 +291,7 @@ test('finalizeIssue: 実物のremove-workerへworkerNameを位置引数で渡し
         {
           // removeWorkerFn を注入しないことで、実物の defaultRemoveWorker と
           // finalize-issue.js → remove-worker.js の引数境界を通す。
+          closeStatusPaneFn: () => ({ ok: true }),
           closeIssueFn: () => ({ ok: true }),
           findReviewPrsFn: () => [],
         }
@@ -171,6 +318,7 @@ test('finalizeIssue: ワーカー削除が一部失敗してもIssueは閉じる
       {
         removeWorkerFn: (ws, name) => ({ ok: name !== 'issue-5-explore', stderr: 'boom' }),
         closeIssueFn: () => { closed = true; return { ok: true }; },
+        closeStatusPaneFn: () => ({ ok: true }),
         findReviewPrsFn: () => [],
       }
     );
@@ -200,6 +348,7 @@ test('finalizeIssue: Issueクローズ失敗は closed:false で返る', () => {
       {
         removeWorkerFn: () => ({ ok: true }),
         closeIssueFn: () => ({ ok: false, stderr: 'gh error' }),
+        closeStatusPaneFn: () => ({ ok: true }),
         findReviewPrsFn: () => [],
       }
     );
