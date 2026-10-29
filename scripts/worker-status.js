@@ -9,7 +9,7 @@
 'use strict';
 
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
-const processLiveness = require('./shared/process-liveness');
+const { isWorkerAlive } = require('./shared/worker-liveness');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { resolveRepo, ghRepoView } = require('./shared/repo');
@@ -71,7 +71,10 @@ Description:
   close-pane サブコマンドは記録された監視ペインを終了して記録を削除する。
   --issue を指定した場合は、監視ペイン起動時の --issue と一致するときだけ実行する。`;
 
-let _injectedLiveness = null;
+let _injectedGetProcessStartTime = null;
+let _injectedIsWorkerAlive = null;
+let _injectedIsProcessAlive = null;
+let _injectedVerifyProcessIdentity = null;
 let _injectedResolveSkillAgentMap = null;
 let _injectedFindRunningInstances = null;
 let _injectedNow = null;
@@ -123,14 +126,37 @@ function _getRepo(workspace, opts = {}) {
   return null;
 }
 
-// PowerShell によるプロセス観測を毎回起こさないよう、watch 再描画間だけ短時間キャッシュする。
-const PROCESS_LIVENESS_CACHE_MAX_AGE_MS = 6_000;
+// Windows の起動時刻取得は PowerShell 子プロセスを起動するため、既定の3秒再描画より
+// 長いが、PID再利用を長時間見逃さない間隔にする。watch ループ内だけで使い、他の
+// process-lifecycle 呼び出しには影響させない。
+const PROCESS_START_TIME_CACHE_MAX_AGE_MS = 6_000;
 // ワーカー行の先頭に並べる状態ドットの個数
 const DOT_COUNT = 3;
+
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime ?? require('./process-lifecycle').getProcessStartTime;
+  return fn(pid);
+}
 
 function _findRunningInstances(workspace, opts) {
   const fn = _injectedFindRunningInstances ?? require('./process-lifecycle').findRunningInstances;
   return fn(workspace, opts);
+}
+
+function _isWorkerAlive(entry, opts) {
+  const fn = _injectedIsWorkerAlive ?? require('./shared/worker-liveness').isWorkerAlive;
+  if (opts === undefined) return fn(entry);
+  return fn(entry, opts);
+}
+
+function _isProcessAlive(pid) {
+  const fn = _injectedIsProcessAlive ?? require('./process-lifecycle').isProcessAlive;
+  return fn(pid);
+}
+
+function _verifyProcessIdentity(pid, identity, opts) {
+  const fn = _injectedVerifyProcessIdentity ?? require('./process-lifecycle').verifyProcessIdentity;
+  return fn(pid, identity, opts);
 }
 
 function _resolveSkillAgentMap(opts) {
@@ -254,22 +280,82 @@ function formatDuration(seconds) {
   return `${hours}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
-function createWorkerStatusLiveness(opts = {}) {
-  return processLiveness.createLiveness({
-    probePid: opts.probePid,
-    readStartTime: opts.readStartTime,
-    startTimeCacheMs: PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
-    now: opts.nowFn || _now,
-  });
+function _startTimesMatch(a, b) {
+  return require('./process-lifecycle').startTimesMatch(a, b);
 }
 
-function observeWorkerEntry(rawEntry, checker) {
-  const processRef = checker.readRef(rawEntry);
-  const state = checker.observe(processRef);
-  if (state === 'unknown' && normalizeWorkerEntry(rawEntry).startTime) {
-    throw new Error('worker process liveness is unknown');
+function _cachePid(pid) {
+  const n = parseInt(pid, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * worker-status の再描画間で共有するプロセス起動時刻キャッシュを作成する。
+ *
+ * キャッシュは無期限ではない。観測から上限間隔に達したら必ず再観測し、
+ * `verifyProcessIdentity` が新しい実起動時刻を登録値と比較できるようにする。
+ * `begin()` から次の `begin()` までの1集計内では、同じ PID に対する再取得も抑止する。
+ *
+ * @param {(pid: number) => (string|null)} getStartTimeFn
+ * @param {object} [opts]
+ * @param {number} [opts.maxAgeMs=PROCESS_START_TIME_CACHE_MAX_AGE_MS] テスト用の上限値
+ * @returns {{begin: (now: number) => void, get: (pid: number, expectedStartTime: string|null, now: number) => (string|null), invalidate: (pid: number) => void}}
+ */
+function createProcessStartTimeCache(getStartTimeFn = _getProcessStartTime, opts = {}) {
+  const maxAgeMs = opts.maxAgeMs ?? PROCESS_START_TIME_CACHE_MAX_AGE_MS;
+  const entries = new Map();
+  const currentObservation = new Map();
+  let currentNow = null;
+
+  function begin(now) {
+    currentNow = now;
+    currentObservation.clear();
   }
-  return { state, processRef };
+
+  function get(pid, expectedStartTime, now) {
+    const key = _cachePid(pid);
+    if (key === null) return null;
+
+    if (currentObservation.has(key)) {
+      return currentObservation.get(key).startTime;
+    }
+
+    const cached = entries.get(key);
+    const age = cached ? now - cached.observedAt : Infinity;
+    const fresh = cached
+      && Number.isFinite(now)
+      && Number.isFinite(cached.observedAt)
+      && age >= 0
+      && age < maxAgeMs;
+    const expectedMatches = !expectedStartTime
+      || (cached && (
+        cached.startTime
+          ? _startTimesMatch(expectedStartTime, cached.startTime)
+          : cached.expectedStartTime && _startTimesMatch(expectedStartTime, cached.expectedStartTime)
+      ));
+
+    if (fresh && expectedMatches) {
+      currentObservation.set(key, cached);
+      return cached.startTime;
+    }
+
+    const startTime = getStartTimeFn(key) || null;
+    const next = { startTime, expectedStartTime: expectedStartTime || null, observedAt: now };
+    entries.set(key, next);
+    currentObservation.set(key, next);
+    return startTime;
+  }
+
+  function invalidate(pid) {
+    const key = _cachePid(pid);
+    if (key === null) return;
+    entries.delete(key);
+    // 1集計内の別行が同じ PID を持っていても、invalidate 後に2回目の OS 観測を
+    // 発生させない。次の begin() でこの番兵を捨て、必要なら再観測する。
+    currentObservation.set(key, { startTime: null, observedAt: currentNow });
+  }
+
+  return { begin, get, invalidate };
 }
 
 /**
@@ -281,7 +367,24 @@ function observeWorkerEntry(rawEntry, checker) {
  */
 function collectWorkersStatus(workspace, opts = {}) {
   const now = (opts.nowFn || _now)();
-  const checker = opts.liveness || _injectedLiveness || createWorkerStatusLiveness({ nowFn: opts.nowFn || _now });
+  const getStartTime = opts.getProcessStartTimeFn || _getProcessStartTime;
+  const isProcAlive = opts.isProcessAliveFn || _isProcessAlive;
+  const verifyProcessIdentity = opts.verifyProcessIdentityFn || _verifyProcessIdentity;
+  const startTimeCache = opts.startTimeCache || createProcessStartTimeCache(getStartTime);
+  const observedStartTimes = new Map();
+  startTimeCache.begin(now);
+
+  const isAlive = opts.isWorkerAliveFn || ((rawEntry) => {
+    const entry = normalizeWorkerEntry(rawEntry);
+    if (!entry.startTime) return _isWorkerAlive(rawEntry);
+    return _isWorkerAlive(rawEntry, {
+      getProcessStartTimeFn: (pid) => {
+        const actualStartTime = startTimeCache.get(pid, entry.startTime, now);
+        observedStartTimes.set(_cachePid(pid), actualStartTime);
+        return actualStartTime;
+      },
+    });
+  });
 
   // Review Manager 用の agentId を 1 回だけ解決（PRごとのループ内でファイル読み込みを繰り返さない）
   let reviewerAgentId = null;
@@ -301,17 +404,19 @@ function collectWorkersStatus(workspace, opts = {}) {
     for (const [workerName, rawEntry] of Object.entries(rawWorkers)) {
       if (workerName === 'orchestrator') continue;
       const entry = normalizeWorkerEntry(rawEntry);
-      // 古い workers.json に PID だけの記録がある場合、参照の同一性を確認できないため
-      // unknown として表示上は稼働中にしない。停止や起動の判断はここでは行わない。
-      const observed = observeWorkerEntry(rawEntry, checker);
-      const processRef = observed.processRef;
-      const state = observed.state;
-      const running = state === 'alive';
+      const running = isAlive(rawEntry);
+      if (!running && entry.pid) {
+        // 起動時刻の観測失敗（null）は同一性確認を安全側で停止扱いにするが、
+        // TTL 内は null 自体を観測済み値として保持し、毎描画の再取得を避ける。
+        // 非null の不一致や PID 消滅はキャッシュを破棄して次回に再観測する。
+        const observedStartTime = observedStartTimes.get(_cachePid(entry.pid));
+        if (observedStartTime !== null) startTimeCache.invalidate(entry.pid);
+      }
       let startTime = null;
       let elapsedSeconds = 0;
 
       if (running && entry.pid) {
-        startTime = checker.writeRef({}, processRef).startTime || null;
+        startTime = startTimeCache.get(entry.pid, entry.startTime, now) || entry.startTime || null;
         if (startTime) {
           const startMs = new Date(startTime).getTime();
           if (!Number.isNaN(startMs)) {
@@ -336,9 +441,21 @@ function collectWorkersStatus(workspace, opts = {}) {
   }
 
   // 稼働中の Review Manager を収集（破損ファイル等は tolerant にスキップ）
+  const isManagerProcessAlive = (pid) => {
+    const alive = isProcAlive(pid);
+    if (!alive) startTimeCache.invalidate(pid);
+    return alive;
+  };
   const runningManagers = listRunningReviewManagers(workspace, {
-    liveness: checker,
-    onError: 'throw',
+    isProcessAliveFn: isManagerProcessAlive,
+    verifyProcessIdentityFn: verifyProcessIdentity,
+    // 通常ワーカーと同じ startTime キャッシュを共有する。キャッシュされた値は
+    // helper の verifyProcessIdentity に actualStartTime として渡されるため、
+    // Review Manager もPID再利用を検出しつつ、#407の再描画間隔を維持できる。
+    getProcessStartTimeFn: (pid, expectedStartTime) => (
+      startTimeCache.get(pid, expectedStartTime || null, now) || null
+    ),
+    onError: 'skip',
     cleanupStale: false,
   });
 
@@ -348,7 +465,11 @@ function collectWorkersStatus(workspace, opts = {}) {
   try {
     runningReviewJobs = findInstancesFn(workspace, {
       script: 'review-job',
-      liveness: checker,
+      isProcessAliveFn: isManagerProcessAlive,
+      verifyProcessIdentityFn: verifyProcessIdentity,
+      getProcessStartTimeFn: (pid, expectedStartTime) => (
+        startTimeCache.get(pid, expectedStartTime || null, now) || null
+      ),
       allowSelf: true,
     });
   } catch {
@@ -1014,16 +1135,9 @@ function main(argv = process.argv.slice(2)) {
       : undefined;
     const entry = normalizeWorkerEntry(rawEntry);
 
-    let running = false;
-    try {
-      running = observeWorkerEntry(rawEntry, _injectedLiveness || createWorkerStatusLiveness()).state === 'alive';
-    } catch (e) {
-      writeErr(`worker-status: status の生存確認に失敗しました: ${e.message}`);
-      return { code: 1, lines: out, errLines: err };
-    }
     writeOut(JSON.stringify({
       workerName,
-      running,
+      running: _isWorkerAlive(rawEntry),
       pid: entry.pid,
     }));
     return { code: 0, lines: out, errLines: err };
@@ -1094,10 +1208,10 @@ function main(argv = process.argv.slice(2)) {
       return { code: 1, lines: out, errLines: err };
     }
 
-    const liveness = _injectedLiveness || createWorkerStatusLiveness();
+    const startTimeCache = createProcessStartTimeCache(_getProcessStartTime);
     let workers;
     try {
-      workers = collectWorkersStatus(workspace, { liveness });
+      workers = collectWorkersStatus(workspace, { startTimeCache });
     } catch (e) {
       writeErr(`worker-status: watch の照会に失敗しました: ${e.message}`);
       return { code: 1, lines: out, errLines: err };
@@ -1113,7 +1227,7 @@ function main(argv = process.argv.slice(2)) {
     });
     for (const line of lines) writeOut(line);
 
-    return { code: 0, lines: out, errLines: err, isWatch: true, workspace, interval, issue: issueArg, liveness, repo: repo || undefined };
+    return { code: 0, lines: out, errLines: err, isWatch: true, workspace, interval, issue: issueArg, startTimeCache, repo: repo || undefined };
   }
 
   if (sub === 'pane') {
@@ -1229,12 +1343,9 @@ function runWatchLoop(workspace, interval, opts = {}) {
   const clearIntervalFn = opts.clearIntervalFn || clearInterval;
   const onSignalFn = opts.onSignalFn || ((sig, handler) => process.on(sig, handler));
   const exitFn = opts.exitFn || process.exit;
-  const liveness = opts.liveness || _injectedLiveness || createWorkerStatusLiveness({
-    nowFn: opts.nowFn || _now,
-    probePid: opts.probePid,
-    readStartTime: opts.readStartTime,
-  });
-  const collectOpts = { ...opts, liveness };
+  const startTimeCache = opts.startTimeCache
+    || createProcessStartTimeCache(opts.getProcessStartTimeFn || _getProcessStartTime);
+  const collectOpts = { ...opts, startTimeCache };
 
   const render = () => {
     try {
@@ -1267,7 +1378,7 @@ function runWatchLoop(workspace, interval, opts = {}) {
   onSignalFn('SIGINT', handleSignal);
   onSignalFn('SIGTERM', handleSignal);
 
-  return { timer, render, handleSignal, liveness };
+  return { timer, render, handleSignal, startTimeCache };
 }
 
 module.exports = {
@@ -1287,12 +1398,15 @@ module.exports = {
   mergeCycleWorkers,
   parseInterval,
   runWatchLoop,
-  createWorkerStatusLiveness,
-  PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
+  createProcessStartTimeCache,
+  PROCESS_START_TIME_CACHE_MAX_AGE_MS,
   MIN_INTERVAL_SEC,
   MAX_INTERVAL_SEC,
   DEFAULT_INTERVAL_SEC,
-  _setLiveness: (value) => { _injectedLiveness = value; },
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
+  _setIsWorkerAlive: (fn) => { _injectedIsWorkerAlive = fn; },
+  _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
+  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
   _setResolveSkillAgentMap: (fn) => { _injectedResolveSkillAgentMap = fn; },
   _setFindRunningInstances: (fn) => { _injectedFindRunningInstances = fn; },
   _setNow: (fn) => { _injectedNow = fn; },
@@ -1320,7 +1434,7 @@ if (require.main === module) {
   if (result.isWatch) {
     runWatchLoop(result.workspace, result.interval, {
       issue: result.issue,
-      liveness: result.liveness,
+      startTimeCache: result.startTimeCache,
     });
   } else {
     for (const line of result.lines) process.stdout.write(line + '\n');

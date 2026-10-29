@@ -2,16 +2,16 @@
 // process-lifecycle.js — ポーリングプロセスのライフサイクル管理（共通モジュール）
 //
 // 提供する機能:
-//   - 親プロセスの解決
+//   - 親セッション監視（dead-man's switch）: ポーリングループの毎周回で親の生存を確認
 //   - PID registry（1プロセス1ファイル）: 登録・解除・sweep
+//   - プロセス同一性確認（PID再利用対策）
 //
 // Usage (module):
 //   const plc = require('./process-lifecycle');
 //
-//   // Parent monitoring
+//   // Dead-man's switch
 //   const sessionPid = plc.resolveSessionPid(cliFlagValue);
-//   const liveness = require('./shared/process-liveness');
-//   const checkParent = liveness.watchParent(liveness.captureProcess(sessionPid));
+//   const checkParent = plc.createDeadManSwitch(sessionPid);
 //
 //   // PID registry
 //   plc.registerProcess(workspace, { workerName, script: 'msg-poll.js' });
@@ -31,10 +31,6 @@ const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const storageLayout = require('./shared/storage-layout');
 
 const IS_WIN = process.platform === 'win32';
-let injectedLiveness = null;
-function getLiveness(candidate) {
-  return candidate || injectedLiveness || require('./shared/process-liveness');
-}
 
 // ── 親セッション監視（dead-man's switch） ──────────────────────────────
 
@@ -127,6 +123,190 @@ function resolveSessionPid(cliSessionPid) {
   }
 }
 
+/**
+ * プロセスが生存しているかを確認する。
+ *
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function isProcessAlive(pid) {
+  if (!pid || pid <= 0) return false;
+  try {
+    // process.kill(pid, 0) はシグナルを送らず生存確認だけ行う
+    // ESRCH: プロセス不在, EPERM: 存在するが権限なし（生存とみなす）
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    if (e.code === 'ESRCH') return false;
+    return true; // EPERM 等 → 存在する
+  }
+}
+
+/**
+ * プロセスの起動時刻をISO文字列で取得する。
+ *
+ * @param {number} pid
+ * @returns {string|null} ISO 8601 形式の起動時刻、または null（取得失敗時）
+ */
+function getProcessStartTime(pid) {
+  // pid引数の検証（コマンド実行・パストラバーサル対策）
+  const n = parseInt(pid, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+
+  if (IS_WIN) {
+    try {
+      // Get-CimInstance の CreationDate は既に [DateTime] オブジェクトなので、
+      // [System.DateTime]::Parse で文字列パースし直してはならない。DateTime→文字列の
+      // 暗黙変換は現在カルチャ依存で、日本語ロケール等では Parse が失敗し null を返して
+      // しまう（プロセス同一性確認＝重複検出・sweepが全て機能しなくなる実バグだった）。
+      // DateTime オブジェクトに直接 ToUniversalTime().ToString('o') を適用する。
+      const out = execSync(
+        `powershell -NoProfile -Command "$d=(Get-CimInstance Win32_Process -Filter 'ProcessId=${n}').CreationDate; if($d){$d.ToUniversalTime().ToString('o')}else{''}"`,
+        { encoding: 'utf8', timeout: 5000, stdio: 'pipe' }
+      );
+      const val = out.trim();
+      return val || null;
+    } catch {
+      return null;
+    }
+  } else {
+    try {
+      // /proc/<pid>/stat の starttime (フィールド22) を boot_time からのオフセットとして計算
+      const statOut = fs.readFileSync(`/proc/${n}/stat`, 'utf8');
+      const commEnd = statOut.lastIndexOf(')');
+      const afterComm = statOut.slice(commEnd + 2);
+      const parts = afterComm.split(' ');
+      // フィールド22（0-indexed: 19 after comm）: starttime
+      const startTimeTicks = parseInt(parts[19], 10);
+      if (Number.isFinite(startTimeTicks)) {
+        // 起動時刻 ≈ boot_time + starttime / sysconf(_SC_CLK_TCK)
+        const procStat = fs.readFileSync('/proc/stat', 'utf8');
+        const btimeMatch = procStat.match(/btime\s+(\d+)/);
+        if (btimeMatch) {
+          const bootTime = parseInt(btimeMatch[1], 10);
+          // sysconf(_SC_CLK_TCK) は通常 100
+          const clkTick = 100;
+          const startSec = bootTime + startTimeTicks / clkTick;
+          return new Date(startSec * 1000).toISOString();
+        }
+      }
+      // フォールバック: /proc/<pid> の mtime（birthtime は procfs でサポートされず 1970-01-01 を返す）
+      const stat = fs.statSync(`/proc/${n}`);
+      return stat.mtime.toISOString();
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * プロセスのPIDと起動時刻を一つのidentityとして捕捉する。
+ *
+ * leaseとPID registryのように同じプロセスidentityを複数の状態へ保存する呼び出し元は、
+ * 起動時刻の取得をこの関数で一度だけ行い、戻り値を各保存先へ渡す。WindowsのCIM取得が
+ * 失敗した場合は起動時刻を未知値（null）のまま返し、現在時刻などをプロセスidentityの
+ * 代替値として保存しない。
+ *
+ * @param {number|string} [pid] 対象プロセスのPID
+ * @param {(pid: number) => (string|null)} [getProcessStartTimeFn] テスト用の取得関数
+ * @returns {{pid: number, startTime: string|null}}
+ * @throws {Error} PIDが正の整数でない場合
+ */
+function captureProcessIdentity(pid = process.pid, getProcessStartTimeFn = getProcessStartTime) {
+  const targetPid = parseInt(pid, 10);
+  if (!Number.isFinite(targetPid) || targetPid <= 0) {
+    throw new Error(`captureProcessIdentity: 不正な PID です: ${pid}`);
+  }
+
+  let startTime = null;
+  try {
+    startTime = getProcessStartTimeFn(targetPid);
+  } catch {
+    // getProcessStartTime() 自体は失敗をnullへ縮退する。注入関数でも同じbest-effort契約に揃える。
+    startTime = null;
+  }
+  return {
+    pid: targetPid,
+    startTime: typeof startTime === 'string' && startTime !== '' ? startTime : null,
+  };
+}
+
+/**
+ * 2つのプロセス起動時刻（ISO 文字列）が同一プロセスのものであるかを判定する。
+ *
+ * 1秒の許容範囲（WMI と JS Date の精度差を吸収）。不正な日付文字列は getTime() が
+ * NaN を返すため、明示的に不一致扱いとする（NaN を無視すると常に一致に倒れて
+ * PID再利用の誤判定が静かに復活する）。verifyProcessIdentity と createDeadManSwitch の
+ * 両方がこの比較意味論を共有する。
+ *
+ * @param {string} a 起動時刻（ISO 文字列）
+ * @param {string} b 起動時刻（ISO 文字列）
+ * @returns {boolean} 同一プロセスの起動時刻なら true
+ */
+function startTimesMatch(a, b) {
+  if (!a || !b) return false;
+  const ta = new Date(a).getTime();
+  const tb = new Date(b).getTime();
+  if (Number.isNaN(ta) || Number.isNaN(tb)) return false;
+  return Math.abs(ta - tb) <= 1000;
+}
+
+/**
+ * dead-man's switch のチェック関数を作成する。
+ *
+ * 返された関数をポーリングループの毎周回で呼び出す。
+ * 親が死んだことを検出したら false を返す（呼び出し側は cleanup して exit）。
+ *
+ * 判定は2段:
+ * - PID が存在しない: isProcessAlive の一過性の誤検出を緩和するため、3回連続で
+ *   確認するまで false を返さない。
+ * - PID は存在するが起動時刻が期待値と不一致（同じ PID に別プロセスが再利用された）:
+ *   起動時刻の不一致は確定事実（同一プロセスは起動時刻を変えない）のため、初回検出で
+ *   即 false を返す。居座りを最大1ポーリング間隔で検出できる。
+ *   起動時刻の取得失敗（null / throw）は一過性の読取失敗が疑われるため生存扱いとし、
+ *   誤自滅しない（fail-open は誤自滅防止側に倒す。基本の isProcessAlive チェックは残る）。
+ *
+ * @param {number} monitorPid 監視対象PID
+ * @param {object} [opts]
+ * @param {string} [opts.expectedStartTime] 監視対象の起動時刻（PID再利用検知用。
+ *   呼び出し元が起動時に getProcessStartTime で捕捉して渡す。未指定なら従来の
+ *   isProcessAlive のみの判定にフォールバックする）
+ * @returns {() => boolean} 親が生きていれば true、死んでいれば false
+ */
+function createDeadManSwitch(monitorPid, opts = {}) {
+  const expectedStartTime = opts.expectedStartTime || null;
+  let consecutiveDead = 0;
+  const REQUIRED_CONSECUTIVE_DEAD = 3;
+
+  return function checkParent() {
+    const alive = isProcessAlive(monitorPid);
+
+    if (!alive) {
+      consecutiveDead++;
+      if (consecutiveDead >= REQUIRED_CONSECUTIVE_DEAD) return false;
+      return true; // 猶予期間中
+    }
+
+    // PID再利用チェック: 期待起動時刻と実起動時刻を比較
+    if (expectedStartTime) {
+      let actualStart = null;
+      try {
+        actualStart = getProcessStartTime(monitorPid);
+      } catch {
+        actualStart = null;
+      }
+      if (actualStart && !startTimesMatch(expectedStartTime, actualStart)) {
+        // 同じPIDに別プロセスが居る → 元の親は死んだとみなす
+        return false;
+      }
+      // 取得失敗（null）→ 読取失敗の可能性があるため生存扱い（誤自滅しない）
+    }
+
+    consecutiveDead = 0;
+    return true;
+  };
+}
+
 // ── PID Registry（1プロセス1ファイル） ─────────────────────────────────
 //
 // Issue #214: PID registry は本来 workspace 固有の runtime 状態であり、
@@ -209,27 +389,24 @@ function registerProcess(workspace, meta = {}) {
     throw new Error(`registerProcess: 不正な PID です: ${meta && meta.pid}`);
   }
 
-  const checker = getLiveness(meta.liveness);
-  const { processRef, ...recordMeta } = meta;
-  delete recordMeta.liveness;
-  const ref = processRef || (meta.startTime
-    ? checker.readRef({ pid: targetPid, startTime: meta.startTime })
-    : targetPid === process.pid
-      ? checker.captureSelf()
-      : checker.captureProcess(targetPid));
-  if (checker.observe(ref) !== 'alive') {
-    throw new Error(`registerProcess: PID ${targetPid} の生存と同一性を確認できません`);
-  }
-  const entry = checker.writeRef({
-    ...recordMeta,
+  // 起動時刻は実際のプロセス開始時刻を使用する。
+  // Node起動レイテンシが1秒を超えるとverifyProcessIdentityの閾値(1秒)で
+  // 誤動作するため、new Date()（登録時の現在時刻）では不十分。
+  // 取得失敗時のみ現在時刻をフォールバックとする。
+  const actualStartTime = meta.startTime || getProcessStartTime(targetPid) || new Date().toISOString();
+
+  const entry = {
+    ...meta,
+    pid: targetPid,
     script: meta.script || path.basename(process.argv[1] || 'unknown'),
     args: meta.args || process.argv.slice(2),
     workerName: meta.workerName || null,
-    workspace,
+    workspace: workspace,
+    startTime: actualStartTime,
     registeredAt: new Date().toISOString(),
-  }, ref);
+  };
 
-  const filePath = pidFilePath(workspace, entry.pid);
+  const filePath = pidFilePath(workspace, targetPid);
   fs.writeFileSync(filePath, JSON.stringify(entry, null, 2), 'utf8');
 
   return entry;
@@ -284,6 +461,49 @@ function unregisterProcess(workspace, pid, expected) {
 // ── プロセス同一性確認（PID再利用対策） ──────────────────────────────
 
 /**
+ * 実行中のプロセスが registry エントリと同一か検証する。
+ *
+ * PID再利用事故を防ぐため、起動時刻を比較する。
+ * Windows: Get-CimInstance Win32_Process の CreationDate
+ * Linux:   /proc/<pid>/stat の starttime
+ *
+ * @param {number} pid
+ * @param {object} registeredMeta  registry エントリ（registerProcess の戻り値）
+ * @param {object} [opts]
+ * @param {string|null} [opts.actualStartTime] 今回の判定用に呼び出し側が観測した実起動時刻。
+ *   指定時は `getProcessStartTime(pid)` を呼ばず、この値を登録値と比較する。
+ * @returns {{ match: boolean, reason?: string }}
+ */
+function verifyProcessIdentity(pid, registeredMeta, opts = {}) {
+  if (!isProcessAlive(pid)) {
+    return { match: false, reason: 'process not alive' };
+  }
+
+  const actualStartTime = Object.prototype.hasOwnProperty.call(opts, 'actualStartTime')
+    ? opts.actualStartTime
+    : getProcessStartTime(pid);
+  if (!actualStartTime) {
+    // 起動時刻が取得できない → 同一性確認不能
+    // 安全のため「一致しない」と判定（無関係なプロセスを kill しない）
+    return { match: false, reason: 'cannot get process start time' };
+  }
+
+  if (registeredMeta.startTime && !startTimesMatch(registeredMeta.startTime, actualStartTime)) {
+    const regTime = new Date(registeredMeta.startTime).getTime();
+    const actualTime = new Date(actualStartTime).getTime();
+    // 不正な日付文字列の場合 getTime() が NaN を返す。
+    // NaN > 1000 は false のため誤って一致判定（match:true）に倒れてしまう。
+    // startTimesMatch が NaN を不一致扱いにするため、ここでは reason を区別して返す。
+    const reason = (Number.isNaN(regTime) || Number.isNaN(actualTime))
+      ? `invalid date: registered=${registeredMeta.startTime}, actual=${actualStartTime}`
+      : `start time mismatch: registered=${registeredMeta.startTime}, actual=${actualStartTime}`;
+    return { match: false, reason };
+  }
+
+  return { match: true };
+}
+
+/**
  * 同一の inbox（script + workerName + workspace）を既に監視している
  * 生存プロセスを registry から全件探す（非破壊・読み取り専用）。
  *
@@ -303,7 +523,6 @@ function findRunningInstances(workspace, opts = {}) {
   const dirs = [pidsDir(workspace)];
   const seenPids = new Set();
   const matches = [];
-  const checker = getLiveness(opts.liveness);
 
   for (const dir of dirs) {
     let files;
@@ -328,60 +547,39 @@ function findRunningInstances(workspace, opts = {}) {
         }
         continue;
       }
-      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
-        if (opts.failOnReadError) {
-          throw new Error(`PID registry エントリの形式が不正です: ${path.join(dir, file)}`);
-        }
-        continue;
-      }
-      if (opts.script && typeof entry.script !== 'string') {
-        if (opts.failOnReadError) {
-          throw new Error(`PID registry エントリにscriptがありません: ${path.join(dir, file)}`);
-        }
-        continue;
-      }
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
       if (opts.script && entry.script !== opts.script) continue;
       // findRunningInstances で workerName が省略された場合は全workerを返す。
       // 従来の findRunningInstance は省略時を orchestrator(null) と解釈するため、
       // ラッパー側で明示的に null を補う。
-      if (opts.workerName !== undefined) {
-        if (entry.workerName != null && typeof entry.workerName !== 'string') {
-          if (opts.failOnReadError) {
-            throw new Error(`PID registry エントリのworkerNameが不正です: ${path.join(dir, file)}`);
-          }
-          continue;
-        }
-        if ((entry.workerName ?? null) !== opts.workerName) continue;
-      }
+      if (opts.workerName !== undefined && (entry.workerName ?? null) !== opts.workerName) continue;
       // registryには登録時の表記が保存される一方、検索側はruntime registryの列挙結果など
       // から正規化済みのworkspaceを受け取ることがある。registryの配置キーと同じ正規化を
       // フィールド比較にも適用し、表記差だけで稼働中プロセスを除外しない。
-      if (typeof entry.workspace !== 'string') {
-        if (opts.failOnReadError) {
-          throw new Error(`PID registry エントリにworkspaceがありません: ${path.join(dir, file)}`);
-        }
-        continue;
-      }
-      if (storageLayout.canonicalWorkspace(entry.workspace) !== storageLayout.canonicalWorkspace(workspace)) {
+      if (typeof entry.workspace !== 'string'
+        || storageLayout.canonicalWorkspace(entry.workspace) !== storageLayout.canonicalWorkspace(workspace)) {
         continue;
       }
 
       const entryPid = entry.pid;
-      if (!Number.isInteger(entryPid) || entryPid <= 0) {
-        if (opts.failOnReadError) {
-          throw new Error(`PID registry エントリのPIDが不正です: ${path.join(dir, file)}`);
-        }
-        continue;
-      }
+      if (!entryPid || !Number.isFinite(entryPid)) continue;
       if (opts.allowSelf !== true && entryPid === process.pid) continue;
       // 同一 PID の重複レコードは一度だけ判定する。
       if (seenPids.has(entryPid)) continue;
       seenPids.add(entryPid);
-      const state = checker.observe(checker.readRef(entry));
-      if (state === 'unknown') {
-        throw new Error(`PID registry の生死を判定できません: ${entryPid}`);
-      }
-      if (state !== 'alive') continue;
+      const isAliveFn = opts.isProcessAliveFn || isProcessAlive;
+      if (!isAliveFn(entryPid)) continue;
+
+      // PID再利用対策: 生存はしているが、起動時刻が registry の記録と一致しない場合は
+      // OSが同じPIDを無関係な別プロセスに再割り当てしただけであり、重複起動ではない。
+      // ここで「重複」と誤判定すると、以後の起動が永久にブロックされてしまう
+      // （sweepRegistry と同じ verifyProcessIdentity を用いる）。
+      const verifyIdentityFn = opts.verifyProcessIdentityFn || verifyProcessIdentity;
+      const verifyOpts = opts.getProcessStartTimeFn
+        ? { actualStartTime: opts.getProcessStartTimeFn(entryPid, entry.startTime) }
+        : undefined;
+      const identity = verifyIdentityFn(entryPid, entry, verifyOpts);
+      if (!identity.match) continue;
 
       matches.push(entry);
     }
@@ -446,7 +644,7 @@ function legacyStartupLockPath(workspace, script, workerName) {
  *   getProcessStartTime は Windows では PowerShell/WMI 呼び出しを伴い高コストなため、
  * @returns {boolean}
  */
-function acquireLockAt(dir, lockPath, maxRetries, selfEntry, checker) {
+function acquireLockAt(dir, lockPath, maxRetries, selfEntry) {
   fs.mkdirSync(dir, { recursive: true });
 
   for (let i = 0; i < maxRetries; i++) {
@@ -457,23 +655,22 @@ function acquireLockAt(dir, lockPath, maxRetries, selfEntry, checker) {
       if (e.code !== 'EEXIST') throw e;
     }
 
-    let holder;
+    let holder = null;
     try {
       holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-    } catch (error) {
-      throw new Error(`ロック ${lockPath} の保持者を読めません: ${error.message}`, { cause: error });
+    } catch {
+      holder = null;
     }
-    const state = checker.observe(checker.readRef(holder));
-    if (state === 'unknown') {
-      throw new Error(`ロック ${lockPath} の保持者 ${JSON.stringify(holder)} の生死を判定できません`);
-    }
-    const holderMatches = state === 'alive';
+
+    const holderAlive = holder && Number.isFinite(holder.pid) && isProcessAlive(holder.pid);
+    const holderMatches = holderAlive && verifyProcessIdentity(holder.pid, holder).match;
+
     if (holderMatches) {
       // 正当な保持者がいる → 取得失敗
       return false;
     }
 
-    // stale ロック（保持者が非生存、またはPID再利用）→ 奪取して再試行
+    // stale ロック（保持者が非生存、または壊れている、またはPID再利用）→ 奪取して再試行
     try { fs.unlinkSync(lockPath); } catch {}
   }
 
@@ -516,13 +713,13 @@ function releaseLockAt(lockPath) {
 function acquireStartupLock(workspace, script, workerName, opts = {}) {
   const maxRetries = opts.maxRetries ?? 5;
 
-  const checker = getLiveness(opts.liveness);
-  const selfRef = checker.captureSelf();
-  if (checker.observe(selfRef) !== 'alive') throw new Error('起動ロック保持者の生死を判定できません');
-  const selfEntry = checker.writeRef({}, selfRef);
+  const selfEntry = {
+    pid: process.pid,
+    startTime: getProcessStartTime(process.pid) || new Date().toISOString(),
+  };
 
   const dir = pidsDir(workspace);
-  return acquireLockAt(dir, startupLockPath(workspace, script, workerName), maxRetries, selfEntry, checker);
+  return acquireLockAt(dir, startupLockPath(workspace, script, workerName), maxRetries, selfEntry);
 }
 
 /**
@@ -582,20 +779,23 @@ function sweepRegistry(workspace, opts = {}) {
 
       try {
         entry = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      } catch (error) {
-        results.errors.push(`PID registry ${filePath} を読めません: ${error.message}`);
+      } catch {
+        try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
+        results.cleaned.push({ file, reason: 'corrupt JSON' });
         continue;
       }
 
       // JSON.parse が null や非オブジェクト（文字列・数値等）を返した場合は不正データとして扱う
       if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
-        results.errors.push(`PID registry ${filePath}: invalid entry type: ${entry === null ? 'null' : typeof entry}`);
+        try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
+        results.cleaned.push({ file, reason: `invalid entry type: ${entry === null ? 'null' : typeof entry}` });
         continue;
       }
 
       const entryPid = entry.pid;
       if (!entryPid || !Number.isFinite(entryPid)) {
-        results.errors.push(`PID registry ${filePath}: missing/invalid pid`);
+        try { if (!opts.dryRun) fs.unlinkSync(filePath); } catch {}
+        results.cleaned.push({ file, reason: 'missing/invalid pid' });
         continue;
       }
 
@@ -606,8 +806,6 @@ function sweepRegistry(workspace, opts = {}) {
       byPid.get(entryPid).filePaths.push(filePath);
     }
   }
-
-  if (results.errors.length > 0) return results;
 
   const removeFiles = (filePaths) => {
     if (opts.dryRun) return;
@@ -643,22 +841,21 @@ function sweepRegistry(workspace, opts = {}) {
     }
   }
 
-  const checker = getLiveness(opts.liveness);
-  const states = new Map();
-  for (const { entry } of byPid.values()) {
-    const state = checker.observe(checker.readRef(entry));
-    states.set(entry.pid, state);
-    if (state === 'unknown') results.errors.push(`PID registry の生死を判定できません: ${entry.pid}`);
-  }
-  if (results.errors.length > 0) return results;
-
   for (const { entry, filePaths } of byPid.values()) {
     const entryPid = entry.pid;
 
-    const state = states.get(entryPid);
-    if (state === 'dead') {
+    if (!isProcessAlive(entryPid)) {
       removeFiles(filePaths);
-      results.cleaned.push({ pid: entryPid, reason: 'process not alive or identity mismatch' });
+      results.cleaned.push({ pid: entryPid, reason: 'process not alive' });
+      continue;
+    }
+
+    // プロセス生存 → 同一性確認
+    const identity = verifyProcessIdentity(entryPid, entry);
+    if (!identity.match) {
+      // PID再利用 → ファイル削除のみ（無関係なプロセスを kill しない）
+      removeFiles(filePaths);
+      results.cleaned.push({ pid: entryPid, reason: `identity mismatch: ${identity.reason}` });
       continue;
     }
 
@@ -687,9 +884,6 @@ function sweepRegistry(workspace, opts = {}) {
     });
   }
 
-  // A failed observation cannot safely establish housekeeping exclusions.
-  if (results.errors.length > 0) return results;
-
   // 既存の stale sweep を workspace housekeeping の単一の権威にする。
   if (!opts.match) {
     // この sweep 自身が確認した生存ワーカー（PID registry 由来）を除外対象に加える。
@@ -697,7 +891,7 @@ function sweepRegistry(workspace, opts = {}) {
     // workers.json / lease / .running 由来の除外対象に加えて housekeeping へ渡す。
     for (const { entry } of byPid.values()) {
       if (!entry.workerName || results.killed.some(k => k.workerName === entry.workerName)) continue;
-      if (states.get(entry.pid) !== 'dead') {
+      if (isProcessAlive(entry.pid) && verifyProcessIdentity(entry.pid, entry).match) {
         excludedWorkerNames.add(entry.workerName);
       }
     }
@@ -765,11 +959,15 @@ Description:
 // undefined を掴む（Issue #267）。各 shared モジュール側も呼び出し時点で解決する防衛を入れる。
 
 module.exports = {
-  _setLiveness: (value) => { injectedLiveness = value || null; },
   // 親セッション監視
   getParentPid,
   findSessionRootPid,
   resolveSessionPid,
+  isProcessAlive,
+  getProcessStartTime,
+  captureProcessIdentity,
+  startTimesMatch,
+  createDeadManSwitch,
   // PID registry
   pidsDir,
   pidFilePath,
@@ -784,6 +982,8 @@ module.exports = {
   legacyStartupLockPath,
   acquireStartupLock,
   releaseStartupLock,
+  // 同一性確認
+  verifyProcessIdentity,
   // sweep
   sweepRegistry,
   // 統合

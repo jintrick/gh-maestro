@@ -14,6 +14,9 @@ const { killProcessTree } = require('./shared/kill-tree');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const {
   resolveSessionPid,
+  getProcessStartTime,
+  isProcessAlive,
+  startTimesMatch,
 } = require('./process-lifecycle');
 const { readPrMonitorTarget } = require('./shared/pr-monitor-target');
 const { recoverOrphanedSlowRuns } = require('./poll-pr');
@@ -114,7 +117,14 @@ async function stopTarget(active, deps = {}) {
   await (deps.waitForChildCloseFn || waitForChildClose)(active.child, deps.childStopTimeoutMs);
 }
 
-const processLiveness = require('./shared/process-liveness');
+function sessionIsAlive(sessionPid, expectedStartTime, deps = {}) {
+  if (!Number.isInteger(sessionPid) || sessionPid <= 0) return true;
+  const aliveFn = deps.isProcessAliveFn || isProcessAlive;
+  if (aliveFn(sessionPid) !== true) return false;
+  if (!expectedStartTime) return true;
+  const actual = (deps.getProcessStartTimeFn || getProcessStartTime)(sessionPid);
+  return !actual || (deps.startTimesMatchFn || startTimesMatch)(expectedStartTime, actual);
+}
 
 async function runPrMonitor({ workspace, intervalMs = DEFAULT_INTERVAL_MS } = {}, deps = {}) {
   if (typeof workspace !== 'string' || workspace === '') throw new Error('poll-pr-monitor: workspace が必要です');
@@ -125,11 +135,10 @@ async function runPrMonitor({ workspace, intervalMs = DEFAULT_INTERVAL_MS } = {}
   const writeStderrFn = deps.writeStderrFn || ((chunk) => process.stderr.write(chunk));
   const maxIterations = deps.maxIterations === undefined ? Infinity : deps.maxIterations;
   const sessionPid = deps.sessionPid || (deps.resolveSessionPidFn || resolveSessionPid)();
-  const checker = deps.liveness || processLiveness;
-  const ref = deps.expectedStartTime === undefined
-    ? checker.captureProcess(sessionPid)
-    : checker.readRef({ pid: sessionPid, startTime: deps.expectedStartTime });
-  const checkSessionFn = deps.checkSessionFn || (() => checker.observe(ref) !== 'dead');
+  const expectedStartTime = deps.expectedStartTime === undefined
+    ? ((deps.getProcessStartTimeFn || getProcessStartTime)(sessionPid))
+    : deps.expectedStartTime;
+  const checkSessionFn = deps.checkSessionFn || (() => sessionIsAlive(sessionPid, expectedStartTime, deps));
   let active = null;
   let finishedGeneration = null;
   let stopping = false;

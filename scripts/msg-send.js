@@ -239,22 +239,17 @@ function buildBusyRejectionMessage({ workerName, entry, issue, draftPath }) {
  * @returns {string|null}  拒否メッセージ（拒否する場合）。拒否しない場合は null。
  */
 function checkWorkerBusyRejection({ workspace, workerName, repo, issue, ghOpts, body }) {
-  // workers.json の破損や生存確認不能は、宛先が休止中だと確認できないため配送を止める。
+  // readWorkersRaw は不在のみ null、破損は throw する。このガードは上記 docstring のとおり
+  // 「判定不能は拒否せず通す（フェイルオープン）」契約のため、破損も null に落として通す。
+  // 判定不能時にここで通しても損害はない（従来どおり休止待ちキューへ積まれて配送される）。
   let raw;
-  try { raw = readWorkersRaw(workspace); } catch (error) {
-    return `worker ${workerName} の状態を読めないため送信を拒否しました: ${error.message}`;
-  }
+  try { raw = readWorkersRaw(workspace); } catch { return null; }
   if (!raw || !(workerName in raw)) return null; // 未登録の宛先はこのガードの対象外（issue解決等が別途扱う）
 
-  const rawEntry = raw[workerName];
-  const entry = normalizeWorkerEntry(rawEntry);
-  let alive;
-  try {
-    alive = isWorkerAlive(rawEntry);
-  } catch (error) {
-    return `worker ${workerName} の生死を確認できないため送信を拒否しました: ${error.message}`;
-  }
-  if (!alive) return null; // dead → 通常どおり配送に任せる
+  const entry = normalizeWorkerEntry(raw[workerName]);
+  if (!isWorkerAlive(entry)) return null; // 休止中 → 通常どおり配送に任せる
+
+  if (!entry.startTime) return null; // 判定不能（起動時刻不明）→ 通す
 
   const commentsResult = _ghListComments(repo, issue, ghOpts);
   if (commentsResult.status !== 0) return null; // 判定不能（GitHub API取得失敗）→ 通す

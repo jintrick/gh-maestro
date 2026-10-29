@@ -10,3 +10,4 @@ paths:
 
 生存確認は共通のモジュールを通す。各スクリプトが個別に生死を判定する処理を書かない。
 理由と経緯: docs/adr/0047-liveness-via-os-released-resources.md
+理由と経緯: docs/adr/0048-plugin-monitor-exit-by-takeover.md

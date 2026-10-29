@@ -9,7 +9,6 @@
 const fs = require('fs');
 const path = require('path');
 const { normalizeWorkerEntry, normalizePid } = require('./worker-entry');
-const processLiveness = require('./process-liveness');
 
 /**
  * workspace の workers.json パスを返す。
@@ -103,14 +102,14 @@ function readWorkersRaw(workspace, {
  *
  * @param {string} workspace
  * @param {string} workerName
- * @param {{processRef: string, logPath: string|null}} process
+ * @param {{pid: number, startTime: string|null, logPath: string|null}} process
  * @returns {boolean} エントリが存在し更新に成功した場合は true、エントリ不在の場合は false。
  *   readWorkersRaw の契約どおり、レジストリ破損・読み取り不能は throw する（Issue #275 項目1）。
  *   呼び出し側は false を「エントリ不在」として扱い、破損は例外として区別して報告すること。
  *   破損を false に潰すと、呼び出し側（worker-supervisor の resume）が「ワーカーが見つから
  *   ない」と誤報告し、診断を誤誘導する。
  */
-function updateWorkerProcess(workspace, workerName, { processRef, logPath = null }) {
+function updateWorkerProcess(workspace, workerName, { pid, startTime = null, logPath = null }) {
   const p = workersJsonPath(workspace);
   // readWorkersRaw は不在のみ null、破損は throw する。エントリ不在のみ false にし、
   // 破損は例外のまま呼び出し側へ伝播させる（不在と破損を取り違えようのない形にする）。
@@ -128,9 +127,8 @@ function updateWorkerProcess(workspace, workerName, { processRef, logPath = null
   const entry = (prev !== null && typeof prev === 'object' && !Array.isArray(prev))
     ? { ...prev, ...normalizeWorkerEntry(prev) }
     : normalizeWorkerEntry(prev);
-  const processFields = processLiveness.writeRef({}, processRef);
-  entry.pid = normalizePid(processFields.pid);
-  entry.startTime = processFields.startTime;
+  entry.pid = normalizePid(pid);
+  entry.startTime = startTime;
   entry.logPath = logPath ?? entry.logPath;
   entry.paneId = null;
   raw[workerName] = entry;

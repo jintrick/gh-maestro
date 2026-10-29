@@ -12,7 +12,6 @@ const fs = require('fs');
 
 const { handleParentSessionDeath } = require('../scripts/shared/resident-parent-death');
 const lease = require('../scripts/shared/worker-lease');
-const processLiveness = require('../scripts/shared/process-liveness');
 const { MSGPOLL_ORCHESTRATOR_ROLE } = lease;
 
 function tmpWorkspace() {
@@ -35,9 +34,9 @@ function captureStderr(fn) {
 // process-lifecycle 系の生存判定を注入でモックする（worker-lease.test.js の
 // mockLiveness と同型）。
 function mockLiveness() {
-  lease._setLiveness(processLiveness.createLiveness({
-    probePid: () => 'alive', readStartTime: () => '2026-07-29T00:00:00.000Z',
-  }));
+  lease._setIsProcessAlive(() => true);
+  lease._setVerifyProcessIdentity(() => ({ match: true }));
+  lease._setGetProcessStartTime((pid) => '2026-07-29T00:00:00.000Z');
 }
 
 test('handleParentSessionDeath: 自PIDのrole leaseを解放し、stderrに理由を出力する', () => {

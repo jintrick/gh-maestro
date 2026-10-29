@@ -11,9 +11,6 @@ const headlessLaunch = require('../scripts/shared/headless-launch');
 const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('../scripts/shared/worker-factory');
 
-const { createLiveness } = require('../scripts/shared/process-liveness');
-const makeLiveness = (probePid = () => 'alive') => createLiveness({ probePid, readStartTime: () => '2026-07-25T00:00:00.000Z' });
-
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'start-review-manager.js');
 function runCli(args) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
@@ -54,18 +51,18 @@ function fakeSpawn({ pid = 55501 } = {}) {
 beforeEach(() => {
   spawnCalls = [];
   headlessLaunch._setSpawn(fakeSpawn());
-  headlessLaunch._setLiveness(makeLiveness());
+  headlessLaunch._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
 });
 
 afterEach(() => {
   headlessLaunch._setSpawn(require('../scripts/shared/child-process').spawn);
-  headlessLaunch._setLiveness(null);
+  headlessLaunch._setGetProcessStartTime(require('../scripts/process-lifecycle').getProcessStartTime);
 });
 
 function loadModule() {
   delete require.cache[require.resolve('../scripts/start-review-manager')];
   const mod = require('../scripts/start-review-manager');
-  mod._setLiveness(makeLiveness());
+  mod._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
   return mod;
 }
 
@@ -104,7 +101,8 @@ test('isLockValid returns true and keeps the file for a live pid', () => {
     pid: process.pid,
     startTime: '2026-07-25T00:00:00.000Z',
   }));
-
+  mod._setIsProcessAlive(() => true);
+  mod._setVerifyProcessIdentity(() => ({ match: true }));
   assert.equal(mod.isLockValid(lockFile), true);
   assert.equal(fs.existsSync(lockFile), true);
 });
@@ -113,8 +111,7 @@ test('isLockValid returns false and removes the file for a stale pid', () => {
   const mod = loadModule();
   const lockFile = path.join(freshWorkspace('lock-stale'), 'lock.running');
   // PID 999999999 は確実に stale として扱われる。
-  fs.writeFileSync(lockFile, JSON.stringify({ pid: 999999999, startTime: '2026-07-25T00:00:00.000Z' }));
-  mod._setLiveness(makeLiveness(() => 'dead'));
+  fs.writeFileSync(lockFile, '999999999');
   assert.equal(mod.isLockValid(lockFile), false);
   assert.equal(fs.existsSync(lockFile), false);
 });
@@ -123,19 +120,32 @@ test('isLockValid は生存中の旧PID-onlyを削除せず起動をfail-closed�
   const mod = loadModule();
   const lockFile = path.join(freshWorkspace('lock-legacy-live'), 'lock.running');
   fs.writeFileSync(lockFile, '12345\n', 'utf8');
-  assert.throws(() => mod.isLockValid(lockFile), /判定できません/);
+  mod._setIsProcessAlive(() => true);
+  assert.throws(() => mod.isLockValid(lockFile), /旧形式.*同一性を確認できません/);
   assert.equal(fs.readFileSync(lockFile, 'utf8'), '12345\n');
 });
 
-test('入力照会の死亡と生存を区別する', () => {
+test('_setIsProcessAlive で注入した判定関数が isLockValid に使われる', () => {
   const mod = loadModule();
   const lockFile = path.join(freshWorkspace('lock-injected'), 'lock.running');
-  fs.writeFileSync(lockFile, JSON.stringify({ pid: 12345, startTime: '2026-07-25T00:00:00.000Z' }));
-  mod._setLiveness(makeLiveness(() => 'alive'));
-  assert.equal(mod.isLockValid(lockFile), true);
-  mod._setLiveness(makeLiveness(() => 'dead'));
-  assert.equal(mod.isLockValid(lockFile), false);
-  assert.equal(fs.existsSync(lockFile), false);
+  // 実PIDの生死に頼らず、注入した関数の戻り値だけで isLockValid の判定が決まることを確認する。
+  fs.writeFileSync(lockFile, JSON.stringify({
+    pid: 12345,
+    startTime: '2026-07-25T00:00:00.000Z',
+  }));
+  try {
+    mod._setIsProcessAlive(() => true);
+    mod._setVerifyProcessIdentity(() => ({ match: true }));
+    assert.equal(mod.isLockValid(lockFile), true);
+    assert.equal(fs.existsSync(lockFile), true);
+
+    mod._setIsProcessAlive(() => false);
+    assert.equal(mod.isLockValid(lockFile), false);
+    assert.equal(fs.existsSync(lockFile), false);
+  } finally {
+    mod._setIsProcessAlive(require('../scripts/process-lifecycle').isProcessAlive);
+    mod._setVerifyProcessIdentity(require('../scripts/process-lifecycle').verifyProcessIdentity);
+  }
 });
 
 // ── startReviewManager ───────────────────────────────────────────────────
@@ -151,7 +161,8 @@ test('startReviewManager returns ALREADY_RUNNING and does not launch when locked
     pid: process.pid,
     startTime: '2026-07-25T00:00:00.000Z',
   }));
-
+  mod._setIsProcessAlive(() => true);
+  mod._setVerifyProcessIdentity(() => ({ match: true }));
 
   const result = mod.startReviewManager('42', 'o/r', workspace, '5');
   assert.equal(result, 'REVIEW_MANAGER_ALREADY_RUNNING');
@@ -232,7 +243,8 @@ test('startReviewManager: 起動側はmanager.runningを書かず、起動予約
 test('startReviewManager: manager.runningが本体書き込み前でも起動予約で二重起動を拒否する', () => {
   const mod = loadModule();
   const workspace = freshWorkspace('startup-window');
-
+  mod._setIsProcessAlive(() => true);
+  mod._setVerifyProcessIdentity(() => ({ match: true }));
 
   assert.equal(mod.startReviewManager('11', 'o/r', workspace, '55'), 'REVIEW_MANAGER_STARTED');
   const runningFile = path.join(workspace, '.gh-maestro', 'records', 'pr', '11', 'review', 'manager.running');

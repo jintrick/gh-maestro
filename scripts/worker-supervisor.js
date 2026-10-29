@@ -43,17 +43,19 @@ const { resolveAdapter } = require('./shared/inbox-adapters');
 const { buildAgentResumeCommandArgs } = require('./shared/agent-launch');
 const { launchAgentHeadless, workerLogPath } = require('./shared/headless-launch');
 const { buildWorkerEnv } = require('./shared/worker-env');
-const { readWorkersRaw, updateWorkerProcess } = require('./shared/workers-registry');
+const { updateWorkerProcess } = require('./shared/workers-registry');
 const { deriveRoleFromSkill } = require('./shared/worker-factory');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { isWorkerAlive } = require('./shared/worker-liveness');
 const {
   resolveSessionPid,
+  createDeadManSwitch,
+  getProcessStartTime,
+  captureProcessIdentity,
   registerProcess,
   findRunningInstance,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
-const processLiveness = require('./shared/process-liveness');
 const { acquireResidentLease, WORKER_SUPERVISOR_ROLE } = require('./shared/worker-lease');
 const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdog-exit-notify');
 const { recordResidentNotification } = require('./shared/resident-audit');
@@ -62,9 +64,15 @@ const { checkResidentForceGuard } = require('./shared/resident-force-guard');
 const { runningLegacyWorkerSupervisorPids } = require('./shared/worker-supervisor-control');
 
 // テスト注入。既定は実装。
-let _parentLiveness = processLiveness;
+let _createDeadManSwitch = createDeadManSwitch;
 let _parentDeathExit = (code) => process.exit(code);
+let _injectedGetProcessStartTime;
 let _recordCycleEvent = recordCycleEvent;
+
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime ?? getProcessStartTime;
+  return fn(pid);
+}
 
 const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 // msg-poll.js のスキャンロジックを再利用（マーカーパースのみ）
@@ -286,21 +294,30 @@ function writeCursor(workspace, workerName, state) {
 // ── workers.json 読み込み ─────────────────────────────────────────────────
 
 /**
- * workers.json を読み込み、正規化情報と元の process identity record を Map に返す。
+ * workers.json を読み込み、正規化されたワーカーエントリの Map を返す。
  * orchestrator エントリは除外する。
  *
  * @param {string} workspace
  * @returns {Map<string, { pid: number|null, startTime: string|null, agentId: string|null, issue: number|null }>}
  */
 function loadWorkers(workspace) {
+  const workersPath = path.join(workspace, '.gh-maestro', 'workers.json');
   const map = new Map();
-  const raw = readWorkersRaw(workspace);
-  if (!raw) return map;
+
+  let raw;
+  try {
+    if (!fs.existsSync(workersPath)) return map;
+    raw = JSON.parse(fs.readFileSync(workersPath, 'utf8'));
+  } catch {
+    return map;
+  }
+
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return map;
 
   for (const [name, entry] of Object.entries(raw)) {
     if (name === 'orchestrator') continue;
     const normalized = normalizeWorkerEntry(entry);
-    map.set(name, { ...normalized, rawProcessEntry: entry });
+    map.set(name, normalized);
   }
 
   return map;
@@ -456,7 +473,7 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
   // （実障害: resumeが成功と誤認識され、起動直後に消滅したワーカーが誰にも気づかれず
   // 放置された）。短い猶予を置いてから生存確認する。
   _sleep(RESUME_LIVENESS_GRACE_MS);
-  if (_parentLiveness.observe(launched.processRef) !== 'alive') {
+  if (!_isWorkerAlive({ pid: launched.pid, startTime: launched.startTime })) {
     return {
       success: false,
       method: 'resume-failed',
@@ -492,7 +509,7 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
         skill,
         agentId,
         pid: launched.pid,
-        startTime: _parentLiveness.writeRef({}, launched.processRef).startTime,
+        startTime: launched.startTime,
       });
     } catch { /* best-effort */ }
   }
@@ -519,20 +536,7 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
  * @returns {{ success: boolean, method: string, error?: string }}
  */
 function deliverMessage({ workerName, entry, message, workspace, homedir, issue, repo }) {
-  let workerAlive;
-  try {
-    workerAlive = _isWorkerAlive(entry.rawProcessEntry ?? entry);
-  } catch (error) {
-    // A live PID with an incomplete or unreadable identity may still be busy.
-    // Keep the delivery pending so this uncertainty can never start a duplicate worker.
-    return {
-      success: false,
-      method: 'pending',
-      livenessUnknown: true,
-      error: `worker pid ${entry.pid || 'unknown'} liveness is unknown; refusing resume: ${error.message}`,
-    };
-  }
-  if (workerAlive) {
+  if (_isWorkerAlive(entry)) {
     return {
       success: false,
       method: 'pending',
@@ -689,12 +693,7 @@ function main(argsOverride, opts = {}) {
   // Upgrade bridge: the old process uses a different script/role identity,
   // so acquiring the new lease alone cannot prevent overlap.
   let legacyPids = [];
-  try {
-    legacyPids = runningLegacyWorkerSupervisorPids(workspace);
-  } catch (error) {
-    writeErr(`worker-supervisor: 改名前の常駐プロセス状態を確認できないため起動を中止しました: ${error.message}`);
-    return { code: 1, lines: out, errLines: err, runOnce: null, onceMode, intervalMs, workspace, residentLease: null };
-  }
+  try { legacyPids = runningLegacyWorkerSupervisorPids(workspace); } catch {}
   if (legacyPids.length > 0 && !force) {
     writeErr(`worker-supervisor: 改名前の常駐プロセスを検出したため起動を拒否しました（pid: ${legacyPids.join(', ')}）。`);
     return { code: 1, lines: out, errLines: err, runOnce: null, onceMode, intervalMs, workspace, residentLease: null };
@@ -708,14 +707,12 @@ function main(argsOverride, opts = {}) {
   // leaseとPID registryへ同じプロセスidentityを保存するため、起動時刻はここで一度だけ
   // 捕捉する。取得できない場合はunknownのまま常駐leaseを作成せず、現在時刻をidentityの
   // 代替値にしない。
-  const residentIdentity = _parentLiveness.captureSelf();
+  const residentIdentity = captureProcessIdentity(process.pid, _getProcessStartTime);
   let residentLease = null;
   {
     const role = WORKER_SUPERVISOR_ROLE;
     const handoffTargets = () => {
-      const dup = findRunningInstance(workspace, {
-        script: 'worker-supervisor.js', workerName: null, failOnReadError: true,
-      });
+      const dup = findRunningInstance(workspace, { script: 'worker-supervisor.js', workerName: null });
       return [...new Set([...(dup ? [dup.pid] : []), ...legacyPids])];
     };
     try {
@@ -725,7 +722,7 @@ function main(argsOverride, opts = {}) {
         handoff: force,
         handoffStopTargets: handoffTargets,
         env,
-        processRef: residentIdentity,
+        identity: residentIdentity,
       });
       if (!res.acquired) {
         // 引き継ぎ期限超過（--force で既存所有者が終了しなかった）
@@ -746,9 +743,10 @@ function main(argsOverride, opts = {}) {
 
   const sessionPid = resolveSessionPid(values['--session-pid']);
 
-  // 親セッションの参照を起動時に捕捉する。
-  const parentRef = _parentLiveness.captureProcess(sessionPid);
-  const checkParent = _parentLiveness.watchParent(parentRef);
+  // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
+  // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
+  const expectedStartTime = _getProcessStartTime(sessionPid);
+  const checkParent = _createDeadManSwitch(sessionPid, { expectedStartTime });
 
   // リポジトリ解決
   const ghOpts = { cwd: workspace };
@@ -795,19 +793,6 @@ function main(argsOverride, opts = {}) {
     }
     return monitor;
   };
-  const persistCursor = (workerName, issue, cursor) => {
-    cursor.seenIds = cursor.seenIds.slice(-MAX_SEEN_IDS);
-    cursor.deliveredIds = cursor.deliveredIds.slice(-MAX_SEEN_IDS);
-    try {
-      writeCursor(workspace, workerName, cursor);
-      getWriteFailureMonitor(workerName, issue).onSuccess();
-      return true;
-    } catch (error) {
-      writeErr(`worker-supervisor: ${workerName} のカーソル保存に失敗しました: ${error.message}`);
-      getWriteFailureMonitor(workerName, issue).onFailure(error.message);
-      return false;
-    }
-  };
 
   // writeCursor の失敗でディスクのカーソルが巻き戻っても、同一プロセス内では重複配送
   // しないためのメモリ内配送済みキャッシュ（Issue #250）。サイズはディスク側と同じ
@@ -823,44 +808,6 @@ function main(argsOverride, opts = {}) {
     return arr.includes(cid);
   };
 
-  // Keep unknown workers out of every resume path, but report the condition once per
-  // worker identity so a persistent uncertainty does not flood the orchestrator inbox.
-  const unknownWorkerNotifications = new Map();
-  const reportUnknownWorker = (workerName, entry, issue, error) => {
-    const identity = `${entry.pid ?? 'unknown'}:${entry.startTime ?? 'unknown'}`;
-    let notification = unknownWorkerNotifications.get(workerName);
-    if (!notification || notification.identity !== identity) {
-      notification = { identity, notified: false };
-      unknownWorkerNotifications.set(workerName, notification);
-      writeErr(
-        `worker-supervisor: worker "${workerName}" (pid ${entry.pid ?? 'unknown'}) の生死が不明なため、この周回では処理をスキップします: ${error.message}`
-      );
-    }
-    if (notification.notified) return;
-
-    const body = `⚠️ ワーカー "${workerName}" (PID ${entry.pid ?? 'unknown'}) の生死を判定できないため、worker-supervisor はこの周回で再開せずスキップしました。停止・削除も行いません。理由: ${error.message}`;
-    try {
-      const result = _notifyOrchestrator({ workspace, issue, body });
-      if (result && result.status === 0) {
-        notification.notified = true;
-      } else {
-        writeErr(`worker-supervisor: worker "${workerName}" の生死不明通知に失敗: ${(result?.stderr || '').trim() || '通知コマンドが成功を返しませんでした'}`);
-      }
-    } catch (notifyError) {
-      writeErr(`worker-supervisor: worker "${workerName}" の生死不明通知に失敗: ${notifyError.message}`);
-    }
-  };
-  const checkWorkerLiveness = (workerName, entry, issue) => {
-    try {
-      const alive = _isWorkerAlive(entry.rawProcessEntry ?? entry);
-      unknownWorkerNotifications.delete(workerName);
-      return alive ? 'alive' : 'dead';
-    } catch (error) {
-      reportUnknownWorker(workerName, entry, issue, error);
-      return 'unknown';
-    }
-  };
-
   /**
    * 1回のポーリングサイクル。
    * 全ワーカーをスキャンし、新着メッセージの検出・配送を行う。
@@ -871,7 +818,7 @@ function main(argsOverride, opts = {}) {
     // アラーム経路と watchdog 通知が両方無効化される（Issue #301）。
     if (!checkParent()) {
       lifecycleCleanup(workspace);
-      handleParentSessionDeath({ workspace, scriptName: 'worker-supervisor.js', role: WORKER_SUPERVISOR_ROLE, sessionPid, processRef: residentIdentity });
+      handleParentSessionDeath({ workspace, scriptName: 'worker-supervisor.js', role: WORKER_SUPERVISOR_ROLE, sessionPid });
       _parentDeathExit(PARENT_DEATH_EXIT_CODE);
     }
 
@@ -900,9 +847,7 @@ function main(argsOverride, opts = {}) {
       // HANG_RESUMED として報告するのは誤り（ログが実際に動いたわけではない）。
       // pid+startTime が現在のエントリと一致する場合のみ「復帰」として報告し、一致しない
       // （＝別プロセスの通知済み状態が残留しているだけの）場合は無言でクリアする。
-      const initialLiveness = checkWorkerLiveness(workerName, entry, issue);
-      if (initialLiveness === 'unknown') continue;
-      if (initialLiveness === 'alive') {
+      if (_isWorkerAlive(entry)) {
         const logPath = workerLogPath(workspace, workerName);
         let mtimeMs = null;
         try {
@@ -1037,9 +982,6 @@ function main(argsOverride, opts = {}) {
           issue,
           repo,
         });
-        if (deliveryResult.livenessUnknown) {
-          reportUnknownWorker(workerName, entry, issue, new Error(deliveryResult.error || 'worker process liveness is unknown'));
-        }
 
         if (deliveryResult.success) {
           cursor.deliveredIds.push(commentId);
@@ -1110,7 +1052,7 @@ function main(argsOverride, opts = {}) {
       // 猶予として、報告コメントの投稿から10秒経過するまでは判定しない。
       //
       // 重複通知防止キーは pid 単独ではなく pid + startTime（起動時刻）の組で同一プロセスを
-      // 識別する。同一ファイル内の生存判定と同じ
+      // 識別する。同一ファイル内の生存判定（_isWorkerAlive → verifyProcessIdentity）と同じ
       // 理由: PIDだけをキーにすると、通知後にワーカーが終了し、OSがそのPIDを無関係な別
       // プロセスへ再利用した場合、再利用先が同じPIDで別の（未報告の）ワーカーとして
       // resume されても「既に通知済みのPID」と誤認して再通知を抑止してしまう。
@@ -1123,14 +1065,7 @@ function main(argsOverride, opts = {}) {
       // （cursor.since はこのサイクルの終わりに comments の最大 created_at まで進むため、
       // 同一サイクル内であれば取りこぼさない。一度検知した後は pid+startTime ベースの重複
       // 排除で再通知しないため、翌サイクル以降 since がその報告コメントを過ぎても問題ない）。
-      const staleCheckLiveness = checkWorkerLiveness(workerName, entry, issue);
-      if (staleCheckLiveness === 'unknown') {
-        // Pending配送の再試行が先にカーソルを更新している場合がある。since は進めず、
-        // その更新だけを残してからこのworkerの残りを飛ばす。
-        persistCursor(workerName, issue, cursor);
-        continue;
-      }
-      const isAlive = staleCheckLiveness === 'alive';
+      const isAlive = _isWorkerAlive(entry);
       if (isAlive && entry.startTime) {
         // 新プロセスが起動した場合は旧プロセスの停止通知キーをクリアする（同一プロセスなら保持し再通知を防ぐ）
         if (cursor.stoppedNotifiedPid !== null) {
@@ -1329,9 +1264,6 @@ function main(argsOverride, opts = {}) {
           issue,
           repo,
         });
-        if (deliveryResult.livenessUnknown) {
-          reportUnknownWorker(workerName, entry, issue, new Error(deliveryResult.error || 'worker process liveness is unknown'));
-        }
 
         cursor.seenIds.push(candidate.cid);
 
@@ -1360,10 +1292,21 @@ function main(argsOverride, opts = {}) {
         cursor.since = maxCreated;
       }
 
+      // trimmed
+      cursor.seenIds = cursor.seenIds.slice(-MAX_SEEN_IDS);
+      cursor.deliveredIds = cursor.deliveredIds.slice(-MAX_SEEN_IDS);
+
       // カーソル永続化は他プロセスがカーソルファイルを掴んでいる等で EPERM 失敗しうる
       // （Issue #250）。例外はここで捕捉してこのワーカーの処理を終え、次サイクルで再試行
       // する。ディスクが巻き戻っても deliveredIds はメモリキャッシュで重複配送を防ぐ。
-      persistCursor(workerName, issue, cursor);
+      try {
+        writeCursor(workspace, workerName, cursor);
+        getWriteFailureMonitor(workerName, issue).onSuccess();
+      } catch (e) {
+        writeErr(`worker-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
+        getWriteFailureMonitor(workerName, issue).onFailure(e.message);
+        continue;
+      }
     }
 
     writeOut(`SCAN_END:${workers.size}:${totalDetected} source=worker-supervisor.js scope=worker-delivery-scan workers=${workers.size} detected=${totalDetected} orchestrator-inbox=separate-msg-poll.js`);
@@ -1424,7 +1367,8 @@ if (require.main === module) {
 
   // PID registry に自己登録（表示・診断用途。排他の正本は role lease であり、二重化しない）
   registerProcess(result.workspace, {
-    processRef: result.residentIdentity,
+    pid: result.residentIdentity.pid,
+    startTime: result.residentIdentity.startTime,
     script: 'worker-supervisor.js',
   });
 
@@ -1458,6 +1402,7 @@ if (require.main === module) {
 // ── テスト用 export ──────────────────────────────────────────────────────
 
 module.exports = {
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setIsWorkerAlive: (fn) => { _isWorkerAlive = fn; },
@@ -1467,7 +1412,7 @@ module.exports = {
   _notifyOrchestrator,
   _setReadContract: (fn) => { _readContract = fn; },
   _setClearContract: (fn) => { _clearContract = fn; },
-  _setParentLiveness: (value) => { _parentLiveness = value || processLiveness; },
+  _setCreateDeadManSwitch: (fn) => { _createDeadManSwitch = fn; },
   _setParentDeathExit: (fn) => { _parentDeathExit = fn; },
   _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
   main,

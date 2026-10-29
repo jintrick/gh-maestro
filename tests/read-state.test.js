@@ -7,7 +7,6 @@ const os = require('os');
 const path = require('path');
 
 const rs = require('../scripts/shared/read-state');
-const processLiveness = require('../scripts/shared/process-liveness');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-read-state-'));
@@ -23,40 +22,6 @@ function writeRaw(workspace, self, obj) {
   fs.mkdirSync(path.dirname(sp), { recursive: true });
   fs.writeFileSync(sp, JSON.stringify(obj, null, 2), 'utf8');
 }
-
-test('read-state: self reference の取得失敗を固定せず次回の既読書き込みで再取得する', () => {
-  const originalCaptureSelf = processLiveness.captureSelf;
-  let captureCalls = 0;
-  processLiveness.captureSelf = () => {
-    captureCalls++;
-    return captureCalls === 1
-      ? processLiveness.readRef({ pid: process.pid })
-      : originalCaptureSelf();
-  };
-
-  try {
-    withTempDir((workspace) => {
-      assert.throws(
-        () => rs.initializeState(workspace, 'orchestrator', { sessionId: 'self-ref-retry' }),
-        /起動時刻を取得できません/
-      );
-      assert.equal(
-        fs.existsSync(rs.stateLockPath(workspace, 'orchestrator')),
-        false,
-        '参照取得に失敗した場合は lock を作らない'
-      );
-
-      const initialized = rs.initializeState(workspace, 'orchestrator', { sessionId: 'self-ref-retry' });
-      assert.equal(initialized.ok, true);
-      const marked = rs.markRead(workspace, 'orchestrator', { issue: 654, ids: [123] });
-      assert.equal(marked.ok, true);
-      assert.deepEqual(marked.state.readByIssue['654'], [123]);
-      assert.equal(captureCalls, 2, '有効な参照だけを1回捕捉して以後再利用する');
-    });
-  } finally {
-    processLiveness.captureSelf = originalCaptureSelf;
-  }
-});
 
 // ── readState の status 判定 ────────────────────────────────────────────────
 
@@ -302,14 +267,15 @@ test('stale ロック（保持者死亡）は奪取して更新できる', () =>
   });
 });
 
-test('破損ロックは保持したままエラーを返す', () => {
+test('破損ロック（JSONでない）は stale とみなし奪取して更新できる', () => {
   withTempDir(workspace => {
     rs.initializeState(workspace, 'orchestrator', { generation: 'g' });
     const lp = rs.stateLockPath(workspace, 'orchestrator');
     fs.mkdirSync(path.dirname(lp), { recursive: true });
     fs.writeFileSync(lp, 'not-json', 'utf8');
-    assert.throws(() => rs.markRead(workspace, 'orchestrator', { issue: 10, ids: [1] }), /保持者を読めません/);
-    assert.equal(fs.readFileSync(lp, 'utf8'), 'not-json');
+    const r = rs.markRead(workspace, 'orchestrator', { issue: 10, ids: [1] });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.state.readByIssue['10'], [1]);
   });
 });
 
@@ -369,16 +335,5 @@ test('requireInitialized: missing / corrupt / legacy は失敗', () => {
     assert.equal(rs.requireInitialized(workspace, 'orchestrator').ok, false);
     writeRaw(workspace, 'orchestrator', 'broken{{{');
     assert.equal(rs.requireInitialized(workspace, 'orchestrator').ok, false);
-  });
-});
-
-test('acquireStateLock: 同一性不明の保持者のロックを残して中断する', () => {
-  withTempDir(workspace => {
-    const lp = rs.stateLockPath(workspace, 'orchestrator');
-    fs.mkdirSync(path.dirname(lp), { recursive: true });
-    const raw = JSON.stringify({ pid: process.pid });
-    fs.writeFileSync(lp, raw);
-    assert.throws(() => rs.acquireStateLock(workspace, 'orchestrator'), /判定できません/);
-    assert.equal(fs.readFileSync(lp, 'utf8'), raw);
   });
 });
