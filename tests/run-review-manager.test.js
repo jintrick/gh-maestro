@@ -2,7 +2,6 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const processLiveness = require('../scripts/shared/process-liveness');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -561,23 +560,15 @@ test('boundedCleanup: 存在しないPIDでもエラーなく完了する（プ�
   const testDir = path.join(tmpBase, 'cleanup-no-pid');
   fs.mkdirSync(testDir, { recursive: true });
   const lockFile = path.join(testDir, 'test.running');
+  fs.writeFileSync(lockFile, String(process.pid));
 
   const logs = [];
-  const liveness = processLiveness.createLiveness({
-    probePid: (pid) => pid === 999999 ? 'dead' : 'alive',
-    readStartTime: () => '2026-08-28T00:00:00.000Z',
-  });
-  const lockOwner = liveness.captureSelf();
-  fs.writeFileSync(lockFile, JSON.stringify(liveness.writeRef({}, lockOwner)));
   const result = await boundedCleanup({
     pid: 999999, // 存在しないPID
-    processRef: liveness.captureProcess(999999),
     worktreeDir: null,
     workspace: null,
     pr: null,
     lockFile,
-    lockOwner,
-    liveness,
     log: (msg) => logs.push(msg),
     gracefulShutdownMs: 100,
   });
@@ -614,11 +605,6 @@ test('boundedCleanup: manager.running は所有者と起動時刻が一致する
   const ownedFile = path.join(testDir, 'owned.running');
   const foreignFile = path.join(testDir, 'foreign.running');
   const owner = { pid: process.pid, startTime: '2026-08-28T00:00:00.000Z' };
-  const liveness = processLiveness.createLiveness({
-    probePid: () => 'alive',
-    readStartTime: () => owner.startTime,
-  });
-  const ownerRef = liveness.captureSelf();
   fs.writeFileSync(ownedFile, JSON.stringify(owner), 'utf8');
   fs.writeFileSync(foreignFile, JSON.stringify({
     pid: 67890,
@@ -627,14 +613,14 @@ test('boundedCleanup: manager.running は所有者と起動時刻が一致する
 
   const owned = await boundedCleanup({
     pid: null, worktreeDir: null, workspace: null, pr: null,
-    lockFile: ownedFile, lockOwner: ownerRef, liveness, log: () => {}, gracefulShutdownMs: 0,
+    lockFile: ownedFile, lockOwner: owner, log: () => {}, gracefulShutdownMs: 0,
   });
   assert.equal(owned.leaseReleased, true);
   assert.ok(!fs.existsSync(ownedFile));
 
   const foreign = await boundedCleanup({
     pid: null, worktreeDir: null, workspace: null, pr: null,
-    lockFile: foreignFile, lockOwner: ownerRef, liveness, log: () => {}, gracefulShutdownMs: 0,
+    lockFile: foreignFile, lockOwner: owner, log: () => {}, gracefulShutdownMs: 0,
   });
   assert.equal(foreign.leaseReleased, false);
   assert.ok(fs.existsSync(foreignFile), '別所有者のmanager.runningを残す');

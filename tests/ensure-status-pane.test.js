@@ -856,7 +856,7 @@ test('ensureStatusPane: 保持中ロックへの再入entrant呼び出しは二�
   assert.equal(held, false);
 });
 
-test('ensureStatusPane: 不正なstartup lockの保持者を回収せず起動を拒否する', () => {
+test('ensureStatusPane: 既存startup lockのstale保持者を回収して一度だけ起動する', () => {
   withTempWorkspace((workspace) => {
     const processLifecycle = require('../scripts/process-lifecycle');
     const lockPath = processLifecycle.startupLockPath(
@@ -890,10 +890,9 @@ test('ensureStatusPane: 不正なstartup lockの保持者を回収せず起動�
         getCurrentPaneTargetFn: () => ({ ...PANE_CONTEXT }),
       });
 
-      assert.equal(result.ok, false);
-      assert.equal(result.stage, 'lock');
-      assert.equal(launchCalls, 0);
-      assert.equal(fs.existsSync(lockPath), true);
+      assert.deepEqual(result, { ok: true, paneId: 'stale-reclaimed', reused: false });
+      assert.equal(launchCalls, 1);
+      assert.equal(fs.existsSync(lockPath), false);
       assert.equal(fs.existsSync(legacyLockPath), true);
     } finally {
       try { fs.unlinkSync(lockPath); } catch {}

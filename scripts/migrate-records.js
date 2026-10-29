@@ -7,8 +7,9 @@
 const fs = require('fs');
 const path = require('path');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
-const processLiveness = require('./shared/process-liveness');
+const { isProcessAlive } = require('./process-lifecycle');
 const { readWorkersRaw } = require('./shared/workers-registry');
+const { isWorkerAlive } = require('./shared/worker-liveness');
 const { markMigrationInProgress, clearMigrationInProgress } = require('./shared/migration-marker');
 const {
   runningInboxSupervisorPids,
@@ -137,33 +138,24 @@ function classifyScoped(workspace, source, component, file) {
     })();
 }
 
-function observedLive(record, description) {
-  const state = processLiveness.observe(processLiveness.readRef(record));
-  if (state === 'unknown') throw new Error(`${description} の生死を判定できません`);
-  return state === 'alive';
-}
-
 function reviewManagerIsLive(workspace, pr) {
   const running = path.join(workspace, '.gh-maestro', `review-manager-${pr}.running`);
-  let raw;
-  try { raw = fs.readFileSync(running, 'utf8').trim(); }
-  catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw new Error(`${running} の読み取りに失敗しました: ${error.message}`, { cause: error });
-  }
-  let record;
-  try { record = raw.startsWith('{') ? JSON.parse(raw) : { pid: Number(raw) }; }
-  catch (error) { throw new Error(`${running} が破損しています: ${error.message}`, { cause: error }); }
-  return observedLive(record, running);
+  try {
+    const raw = fs.readFileSync(running, 'utf8').trim();
+    let pid = Number(raw);
+    if (!Number.isInteger(pid) && raw.startsWith('{')) pid = Number(JSON.parse(raw).pid);
+    return Number.isInteger(pid) && pid > 0 && isProcessAlive(pid);
+  } catch { return false; }
 }
 
 function ownerIsLive(workspace, item) {
   if (item.kind === 'review-manager') return reviewManagerIsLive(workspace, item.ownerId);
   if (!item.owner || item.owner.ownerKind !== 'issue') return false;
-  const workers = readWorkersRaw(workspace);
+  let workers;
+  try { workers = readWorkersRaw(workspace); } catch { return true; }
   const entry = workers && workers[item.owner.workerName];
   if (!entry) return false;
-  return observedLive(entry, `worker ${item.owner.workerName}`);
+  try { return isWorkerAlive(entry); } catch { return true; }
 }
 
 /**

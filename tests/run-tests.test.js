@@ -333,7 +333,6 @@ test('runTests: PR worktreeから本体workspaceのPID registryにあるreview-j
     for (const pid of [910001, 910002, 910003, 910004]) {
       fs.writeFileSync(path.join(registryDir, `${pid}.json`), JSON.stringify({
         pid,
-        startTime: '2026-01-01T00:00:00.000Z',
         workspace: mainWorkspace,
         script: 'review-job',
         workerName: `review-job-pr-625-${pid}`,
@@ -368,9 +367,8 @@ test('runTests: PR worktreeから本体workspaceのPID registryにあるreview-j
           assert.deepEqual(options, { script: 'review-job', failOnReadError: true });
           return findRunningInstances(workspace, {
             ...options,
-            liveness: require('../scripts/shared/process-liveness').createLiveness({
-              probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z',
-            }),
+            isProcessAliveFn: () => true,
+            verifyProcessIdentityFn: () => ({ match: true }),
           });
         },
         lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),

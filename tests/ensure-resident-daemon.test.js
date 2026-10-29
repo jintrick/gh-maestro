@@ -19,6 +19,11 @@ const {
   tryReserveAutostartAttempt,
 } = require('../scripts/shared/ensure-resident-daemon');
 const migrationMarker = require('../scripts/shared/migration-marker');
+const {
+  isProcessAlive,
+  getProcessStartTime,
+  verifyProcessIdentity,
+} = require('../scripts/process-lifecycle');
 
 function fakeChild() {
   const emitter = new EventEmitter();
@@ -42,7 +47,9 @@ beforeEach(() => {
 
 afterEach(() => {
   try {
-    migrationMarker._setLiveness(null);
+    migrationMarker._setIsProcessAlive(isProcessAlive);
+    migrationMarker._setGetProcessStartTime(getProcessStartTime);
+    migrationMarker._setVerifyProcessIdentity(verifyProcessIdentity);
   } finally {
     tempDirScope.cleanup();
   }
@@ -114,7 +121,9 @@ test('ensureResidentDaemon: 引数欠落バリデーション（必須パラメ�
 });
 
 test('ensureResidentDaemon: 有効な .migration-in-progress マーカー存在時は起動を見送る', () => {
-  migrationMarker._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-08-01T00:00:00.000Z' }));
+  migrationMarker._setGetProcessStartTime(() => '2026-08-01T00:00:00.000Z');
+  migrationMarker._setIsProcessAlive(() => true);
+  migrationMarker._setVerifyProcessIdentity(() => ({ match: true }));
   migrationMarker.markMigrationInProgress(workspace);
 
   let spawnCalled = false;

@@ -6,21 +6,20 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+const lifecycle = require('../scripts/process-lifecycle');
 const workerLease = require('../scripts/shared/worker-lease');
-const processLiveness = require('../scripts/shared/process-liveness');
 
+workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
 // 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
 // PIDを誤って渡す回帰は即座に検出する。
 const TEST_SESSION_START_TIME = '2026-07-25T00:00:00.000Z';
+lifecycle.getProcessStartTime = () => TEST_SESSION_START_TIME;
 const msgPoll = require('../scripts/msg-poll');
 const readStateLib = require('../scripts/shared/read-state');
-msgPoll._setParentLiveness(processLiveness.createLiveness({
-  probePid: () => 'alive',
-  readStartTime: (pid) => {
-    assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
-    return TEST_SESSION_START_TIME;
-  },
-}));
+msgPoll._setGetProcessStartTime((pid) => {
+  assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
+  return TEST_SESSION_START_TIME;
+});
 
 // 直接 main()/scanOnce() を呼ぶケースでは、親セッションの死活確認自体は
 // process-lifecycle.test.js の実照合テストで検証する。ここでは各スキャンで
@@ -29,12 +28,7 @@ msgPoll._setParentLiveness(processLiveness.createLiveness({
 // 実際のプロセス境界を通す。
 const TEST_PARENT_CHECKER = () => true;
 const useFastParentChecker = () => {
-  const liveness = processLiveness.createLiveness({
-    probePid: () => 'alive',
-    readStartTime: () => TEST_SESSION_START_TIME,
-  });
-  workerLease._setLiveness(liveness);
-  msgPoll._setParentLiveness(liveness);
+  msgPoll._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
 };
 useFastParentChecker();
 
@@ -705,14 +699,10 @@ test('死のスイッチ発火時: role lease を解放し exit 3 で終了す�
     try {
       // 死のスイッチを常時「死」と判定させる。checkParent は main() 内で生成されるため
       // runMain より前に注入する（_setParentDeathExit は sentinel 例外で抜ける）。
-      msgPoll._setParentLiveness(require('../scripts/shared/process-liveness').createLiveness({
-        probePid: () => 'alive',
-        readStartTime: () => capturedExpectedStartTime || TEST_SESSION_START_TIME,
-      }));
-      workerLease._setLiveness(require('../scripts/shared/process-liveness').createLiveness({
-        probePid: () => 'alive',
-        readStartTime: () => capturedExpectedStartTime || TEST_SESSION_START_TIME,
-      }));
+      msgPoll._setCreateDeadManSwitch((_pid, options) => {
+        capturedExpectedStartTime = options.expectedStartTime;
+        return () => false;
+      });
       let exitCode = null;
       msgPoll._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
       process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
@@ -720,7 +710,8 @@ test('死のスイッチ発火時: role lease を解放し exit 3 で終了す�
       // 継続モード（--once なし）で起動 → orchestrator の role lease を取得する
       const r = runMain(['orchestrator', '--workspace', workspace]);
       assert.equal(r.code, 0);
-      capturedExpectedStartTime = '2000-01-01T00:00:00.000Z';
+      assert.equal(capturedExpectedStartTime, TEST_SESSION_START_TIME,
+        'main() が捕捉した起動時刻を createDeadManSwitch に渡す');
       const leaseFile = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json');
       assert.ok(fs.existsSync(leaseFile), '継続モードで role lease ファイルが作成される');
 
@@ -745,33 +736,31 @@ test('main: 常駐leaseへ渡したself identityをregistry用の結果へ保持
     initOrchestratorState(workspace);
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
-    let livenessCalls = 0;
-    const liveness = processLiveness.createLiveness({
-      probePid: () => 'alive',
-      readStartTime: (pid) => {
-        assert.equal(pid, process.pid);
-        livenessCalls++;
-        return livenessCalls === 1
-          ? '2026-07-29T00:00:00.525Z'
-          : '2026-07-29T00:00:00.626Z';
-      },
+    let calls = 0;
+    msgPoll._setGetProcessStartTime((pid) => {
+      assert.equal(pid, process.pid);
+      calls += 1;
+      return calls === 1
+        ? '2026-07-29T00:00:00.525Z'
+        : '2026-07-29T00:00:00.626Z';
     });
-    msgPoll._setParentLiveness(liveness);
-    workerLease._setLiveness(liveness);
 
     const result = runMain(['orchestrator', '--workspace', workspace]);
     try {
       assert.equal(result.code, 0);
-      assert.equal(typeof result.residentIdentity, 'string');
+      assert.deepEqual(result.residentIdentity, {
+        pid: process.pid,
+        startTime: '2026-07-29T00:00:00.626Z',
+      });
       const leasePath = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json');
-      // 親セッション参照の捕捉が先に行われるため、residentIdentity は2回目の取得値。
-      const leaseRecord = JSON.parse(fs.readFileSync(leasePath, 'utf8'));
-      assert.equal(leaseRecord.startTime, '2026-07-29T00:00:00.626Z');
-      assert.equal(liveness.sameRef(result.residentIdentity, liveness.readRef(leaseRecord)), true);
-      assert.equal(livenessCalls, 2, 'parent session と resident identity の起動時刻だけを取得する');
+      assert.equal(JSON.parse(fs.readFileSync(leasePath, 'utf8')).startTime, result.residentIdentity.startTime);
+      assert.equal(calls, 2, 'session identityとself identity以外の起動時刻を取得しない');
     } finally {
       result.residentLease.release();
-      useFastParentChecker();
+      msgPoll._setGetProcessStartTime((pid) => {
+        assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
+        return TEST_SESSION_START_TIME;
+      });
     }
   });
 });
@@ -1351,30 +1340,6 @@ test('runWaitMode: 新着を即座に検出すればリトライせず true を�
 
     msgPoll._setSleep(async (ms) => {});
   });
-});
-
-
-test('runWaitMode: 新着が無ければ waitMs 経過後に false を返す（リトライを重ねる）', async () => {
-  let now = 0;
-  let sleepCalls = 0;
-  let scanCalls = 0;
-  msgPoll._setSleep(async (ms) => { sleepCalls++; now += ms; });
-  try {
-    const lines = [];
-    const found = await msgPoll.runWaitMode({
-      scanOnce: () => { scanCalls++; },
-      lines,
-      intervalMs: 10,
-      waitMs: 25,
-      nowFn: () => now,
-    });
-    assert.equal(found, false);
-    assert.equal(lines.length, 0);
-    assert.ok(scanCalls > 1, `scanCalls should be > 1, got ${scanCalls}`);
-    assert.ok(sleepCalls > 0, `sleepCalls should be > 0, got ${sleepCalls}`);
-  } finally {
-    msgPoll._setSleep(async () => {});
-  }
 });
 
 

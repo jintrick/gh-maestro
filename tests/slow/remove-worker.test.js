@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawnSync, spawn } = require('child_process');
-const processLiveness = require('../../scripts/shared/process-liveness');
+const { getProcessStartTime, isProcessAlive } = require('../../scripts/process-lifecycle');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'remove-worker.js');
 // workspace引数を省略する経路が実ワークスペースを読まないよう env を外す。
@@ -18,6 +18,7 @@ const FAST_WORKER_CLI_PRELOAD = (() => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-remove-worker-preload-'));
   const file = path.join(dir, 'preload.js');
   const childProcessPath = require.resolve('../../scripts/shared/child-process');
+  const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
   const source = [
     "'use strict';",
     `const childProcess = require(${JSON.stringify(childProcessPath)});`,
@@ -34,6 +35,11 @@ const FAST_WORKER_CLI_PRELOAD = (() => {
     '  }',
     '  return realExecSync(command, opts);',
     '};',
+    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
+    'lifecycle.getProcessStartTime = (pid) => {',
+    '  const value = process.env.GHM_TEST_WORKER_START_TIME;',
+    '  return value && isAlive(pid) ? value : null;',
+    '};',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
   process.once('exit', () => {
@@ -46,12 +52,6 @@ function run(args, env = {}) {
   return spawnSync(process.execPath, ['-r', FAST_WORKER_CLI_PRELOAD, SCRIPT, ...args], {
     encoding: 'utf8', env: { ...cleanSpawnEnv(), ...env },
   });
-}
-function captureRecord(pid) {
-  return processLiveness.writeRef({ pid }, processLiveness.captureProcess(pid));
-}
-function isProcessAlive(pid) {
-  return processLiveness.observe(processLiveness.captureProcess(pid)) === 'alive';
 }
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-rmw-'));
@@ -170,13 +170,13 @@ test('remove-worker: 同一性一致のプロセスツリー（親＋子）を�
     fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
     const { parentPid, childPid } = spawnProcessTree(dir);
     try {
-      const processRecord = captureRecord(parentPid);
-      const startTime = processRecord.startTime;
+      const startTime = getProcessStartTime(parentPid);
       fs.writeFileSync(
         path.join(dir, '.gh-maestro', 'workers.json'),
         JSON.stringify({
           'issue-50-coder': {
-            ...processRecord,
+            pid: parentPid,
+            startTime,
             issue: 50,
             skill: 'gh-maestro-coder',
           },
@@ -214,11 +214,12 @@ test('remove-worker: 拒否側: 起動時刻不一致（PID再利用）のプロ
         }),
         'utf8'
       );
-      const actualStartTime = captureRecord(parentPid).startTime;
+      const actualStartTime = getProcessStartTime(parentPid);
       assert.ok(actualStartTime, '実プロセスの起動時刻を取得できること');
       const r = run(['issue-51-coder', '--workspace', dir], { [TEST_START_TIME_ENV]: actualStartTime });
       assert.equal(r.status, 0);
-      assert.match(r.stderr, /既に停止しています/);
+      assert.match(r.stderr, /同一性確認に失敗しました/);
+      assert.match(r.stderr, /kill をスキップします/);
 
       // 親・子プロセスが kill されずに生存していることを検証（巻き添え防止の検証）
       assert.equal(isProcessAlive(parentPid), true, '再利用された親プロセスはkillされず生存し続けること');

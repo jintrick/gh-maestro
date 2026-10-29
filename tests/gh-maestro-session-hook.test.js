@@ -12,7 +12,7 @@ const SUPERVISOR_SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-supervis
 const PROCESS_LIFECYCLE_SCRIPT = path.join(__dirname, '..', 'scripts', 'process-lifecycle.js');
 const lifecycle = require('../scripts/process-lifecycle');
 const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
-const processLiveness = require('../scripts/shared/process-liveness');
+lifecycle.getProcessStartTime = () => TEST_PROCESS_START_TIME;
 const readStateLib = require('../scripts/shared/read-state');
 
 // セッションhookの実プロセス・実Git・3段階の順序は維持し、reset-session内部の
@@ -23,7 +23,6 @@ const FAST_SESSION_PRELOAD = (() => {
   const file = path.join(dir, 'preload.js');
   const childProcessPath = require.resolve('../scripts/shared/child-process');
   const lifecyclePath = require.resolve('../scripts/process-lifecycle');
-  const processLivenessPath = require.resolve('../scripts/shared/process-liveness');
   const source = [
     "'use strict';",
     `const childProcess = require(${JSON.stringify(childProcessPath)});`,
@@ -34,13 +33,7 @@ const FAST_SESSION_PRELOAD = (() => {
     '  return realExecSync(command, opts);',
     '};',
     `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
-    `const processLiveness = require(${JSON.stringify(processLivenessPath)});`,
-    'const checker = processLiveness.createLiveness({',
-    '  probePid: (pid) => { try { process.kill(Number(pid), 0); return "alive"; } catch (e) { if (e && e.code === "ESRCH") return "dead"; if (e && e.code === "EPERM") return "alive"; return "unknown"; } },',
-    '  readStartTime: (_pid, expected) => expected || fixedStartTime,',
-    '});',
-    'Object.assign(processLiveness, checker);',
-    'lifecycle._setLiveness(checker);',
+    'lifecycle.getProcessStartTime = () => fixedStartTime;',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
   process.once('exit', () => {
@@ -148,23 +141,11 @@ function waitFor(ms) {
 async function waitForRunningSupervisors(workspace, timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
   let entries = [];
-  const checker = processLiveness.createLiveness({
-    probePid: (pid) => {
-      try { process.kill(pid, 0); return 'alive'; }
-      catch (error) {
-        if (error && error.code === 'ESRCH') return 'dead';
-        if (error && error.code === 'EPERM') return 'alive';
-        return 'unknown';
-      }
-    },
-    readStartTime: (_pid, expected) => expected || TEST_PROCESS_START_TIME,
-  });
   while (Date.now() < deadline) {
     entries = lifecycle.findRunningInstances(workspace, {
       script: 'worker-supervisor.js',
       workerName: null,
       allowSelf: true,
-      liveness: checker,
     });
     if (entries.length > 0) return entries;
     await waitFor(100);
@@ -175,22 +156,9 @@ async function waitForRunningSupervisors(workspace, timeoutMs = 20000) {
 async function stopRunningSupervisors(workspace, processHandle) {
   const { killProcessTree } = require('../scripts/shared/kill-tree');
   const targetPids = new Set();
-  const checker = processLiveness.createLiveness({
-    probePid: (pid) => {
-      try { process.kill(pid, 0); return 'alive'; }
-      catch (error) {
-        if (error && error.code === 'ESRCH') return 'dead';
-        if (error && error.code === 'EPERM') return 'alive';
-        return 'unknown';
-      }
-    },
-    readStartTime: (_pid, expected) => expected || TEST_PROCESS_START_TIME,
-  });
-  const targetRefs = new Map();
-  const killTarget = (pid, processRef = null) => {
+  const killTarget = (pid) => {
     if (!Number.isInteger(pid) || pid <= 0) return;
     targetPids.add(pid);
-    if (!targetRefs.has(pid)) targetRefs.set(pid, processRef || checker.captureProcess(pid));
     killProcessTree(pid);
   };
   if (processHandle && processHandle.pid && processHandle.exitCode === null) {
@@ -203,16 +171,15 @@ async function stopRunningSupervisors(workspace, processHandle) {
       script: 'worker-supervisor.js',
       workerName: null,
       allowSelf: true,
-      liveness: checker,
     });
-    for (const entry of entries) killTarget(entry.pid, checker.readRef(entry));
+    for (const entry of entries) killTarget(entry.pid);
 
-    const alivePids = [...targetPids].filter((pid) => checker.observe(targetRefs.get(pid)) !== 'dead');
+    const alivePids = [...targetPids].filter((pid) => lifecycle.isProcessAlive(pid));
     if (alivePids.length === 0) return;
     await waitFor(Math.min(100, Math.max(0, deadline - Date.now())));
   }
 
-  const remainingPids = [...targetPids].filter((pid) => checker.observe(targetRefs.get(pid)) !== 'dead');
+  const remainingPids = [...targetPids].filter((pid) => lifecycle.isProcessAlive(pid));
   if (remainingPids.length === 0) return;
   throw new Error(`worker-supervisor の停止確認がタイムアウトしました。残存PID: ${JSON.stringify(remainingPids)}`);
 }

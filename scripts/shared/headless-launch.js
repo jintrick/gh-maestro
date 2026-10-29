@@ -21,8 +21,6 @@ const path = require('path');
 const { spawn, realSpawnDisabledReason } = require('./child-process');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 const { ARTIFACTS, legacyWorkerLogPath, recordPath } = require('./record-paths');
-const processLiveness = require('./process-liveness');
-let liveness = processLiveness;
 
 const SHIM_PATH = path.join(__dirname, 'headless-shim.js');
 
@@ -47,6 +45,16 @@ const HEADLESS_ENV = Object.freeze({ NO_COLOR: '1' });
 
 // テストで注入可能にする（実プロセスを spawn しない）。
 let _spawn = spawn;
+
+// process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。CLI 主経路
+// （require.main === module）から sweepRegistry 経由でこのモジュールが require される
+// 可能性を踏まえ、評価時に捕捉すると module.exports 未確定の undefined を掴むため、
+// 最初の呼び出し時まで解決を遅らせる。テスト注入（_set*）は注入値が優先される。
+let _injectedGetProcessStartTime = null;
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime ?? require('../process-lifecycle').getProcessStartTime;
+  return fn(pid);
+}
 
 /**
  * ワーカーのログファイルパスを返す。
@@ -74,7 +82,7 @@ function workerLogPath(workspace, workerName, owner = null) {
  * argv を headless（画面なし）で起動し、標準出力/標準エラーを logPath へ直接リダイレクトする。
  *
  * 起動したプロセスは detach され、呼び出し元（使い捨てのCLIプロセス）が終了しても生き続ける。
- * 呼び出し元は返り値の不透明な参照を workers.json に記録し、以降の生存確認に使う。
+ * 呼び出し元は返り値の pid/startTime を workers.json に記録し、以降の生存確認に使う。
  *
  * 返る pid は中継プロセス（headless-shim.js）のもの。シムは子（ログインシェル→エージェント）の
  * 終了コードでそのまま終了するため、**シムの生死 = ワーカーの生死** であり、生存確認にそのまま
@@ -86,7 +94,7 @@ function workerLogPath(workspace, workerName, owner = null) {
  * @param {string} params.logPath      - 標準出力/標準エラーの書き込み先（追記。親ディレクトリは自動作成）
  * @param {object} [params.env={}]     - 起動プロセスに注入する環境変数
  * @param {object|null} [params.onExit=null] - 子終了後にshimがログfd閉鎖後に実行する終了フック
- * @returns {{ pid: number, processRef: string, logPath: string }}
+ * @returns {{ pid: number, startTime: string|null, logPath: string }}
  * @throws {Error} ログを準備できない場合、または spawn に失敗した場合
  */
 function launchAgentHeadless({ argv, cwd, logPath, env = {}, onExit = null }) {
@@ -156,7 +164,9 @@ function launchAgentHeadless({ argv, cwd, logPath, env = {}, onExit = null }) {
   // 呼び出し元（使い捨てCLI）の終了を子がブロックしないよう切り離す。
   child.unref();
 
-  return { pid: child.pid, processRef: liveness.captureProcess(child.pid), logPath };
+  // PID再利用による生存判定の誤りを防ぐため、起動時刻も併せて返す
+  // （process-lifecycle.js の verifyProcessIdentity で照合する）。
+  return { pid: child.pid, startTime: _getProcessStartTime(child.pid), logPath };
 }
 
 module.exports = {
@@ -164,5 +174,5 @@ module.exports = {
   workerLogPath,
   SHIM_PATH,
   _setSpawn: (fn) => { _spawn = fn; },
-  _setLiveness: (value) => { liveness = value || processLiveness; },
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
 };

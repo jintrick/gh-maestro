@@ -7,7 +7,6 @@ const path = require('path');
 const os = require('os');
 
 const storageLayout = require('../../scripts/shared/storage-layout');
-const processLiveness = require('../../scripts/shared/process-liveness');
 
 // process-lifecycle.js は child-process.js の execSync に依存する（Windows WMI）。
 // テストは実プロセスを0個spawnする。
@@ -45,8 +44,121 @@ afterEach(() => {
   } catch {}
 });
 
+// ── ヘルパー: モジュールをリロードして依存を注入 ──────────────────────
+
+/**
+ * process-lifecycle.js を再ロードする。
+ *
+ * @param {object} [overrides]
+ * @param {Function} [overrides.execSync]  child-process.js の execSync を置き換える。
+ *   WMI/PowerShell呼び出しをモック化し、実プロセスspawnを回避する。
+ */
+function loadModule(overrides = {}) {
+  // キャッシュクリア
+  delete require.cache[require.resolve('../../scripts/process-lifecycle')];
+
+  // execSync のモック注入（実プロセス spawn 回避）
+  if (overrides.execSync) {
+    const childProcessPath = require.resolve('../../scripts/shared/child-process');
+    delete require.cache[childProcessPath];
+    require.cache[childProcessPath] = {
+      id: childProcessPath,
+      filename: childProcessPath,
+      loaded: true,
+      exports: {
+        spawn: () => { throw new Error('spawn not allowed in tests'); },
+        spawnSync: () => { throw new Error('spawnSync not allowed in tests'); },
+        execSync: overrides.execSync,
+      },
+    };
+  }
+
+  return require('../../scripts/process-lifecycle');
+}
+
+// ── モック用ヘルパー ──────────────────────────────────────────────────
+
+// getProcessStartTime が WMI から受け取る ISO 8601 形式の固定タイムスタンプ
+const MOCK_START_TIME = '2025-06-01T12:00:00.000Z';
+
+/**
+ * getProcessStartTime(WMI) の成功を模倣する execSync モックを作成する。
+ * コマンド文字列に 'Win32_Process' が含まれていれば固定タイムスタンプを返す。
+ * それ以外の呼び出しはエラーにする（想定外の spawn を検出）。
+ */
+function mockWmiSuccess() {
+  return (cmd, opts) => {
+    const cmdStr = typeof cmd === 'string' ? cmd : '';
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('CreationDate')) {
+      return MOCK_START_TIME + '\n';
+    }
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('ParentProcessId')) {
+      return '42\n';  // 適当な親PID
+    }
+    throw new Error(`unexpected execSync call in test: ${cmdStr.slice(0, 80)}`);
+  };
+}
+
+/** WMI が空文字列を返す（プロセス不在）execSync モック */
+function mockWmiEmpty() {
+  return (cmd, opts) => {
+    const cmdStr = typeof cmd === 'string' ? cmd : '';
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('CreationDate')) {
+      return '\n';
+    }
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('ParentProcessId')) {
+      return '\n';
+    }
+    throw new Error(`unexpected execSync call in test: ${cmdStr.slice(0, 80)}`);
+  };
+}
+
+// PID再利用を模擬するときの「別プロセス」の起動時刻（MOCK_START_TIME と1秒以上離す）
+const OTHER_START_TIME = '2025-06-02T00:00:00.000Z';
+
+/**
+ * PID再利用を模擬する execSync モック。
+ * 同じPIDに対して WMI（CreationDate）の呼び出しが1回目は MOCK_START_TIME（=捕捉時の
+ * 期待値）、以後は OTHER_START_TIME（=再利用された別プロセス）を返す。
+ * 「捕捉後に同じPIDに別プロセスが居着いた」状況を呼び出し回数の切替で表現する。
+ */
+function mockWmiReuse() {
+  let calls = 0;
+  return (cmd, opts) => {
+    const cmdStr = typeof cmd === 'string' ? cmd : '';
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('CreationDate')) {
+      calls++;
+      return (calls === 1 ? MOCK_START_TIME : OTHER_START_TIME) + '\n';
+    }
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('ParentProcessId')) {
+      return '42\n';
+    }
+    throw new Error(`unexpected execSync call in test: ${cmdStr.slice(0, 80)}`);
+  };
+}
+
+/**
+ * 起動時刻の取得失敗を模擬する execSync モック。
+ * 捕捉時（1回目）は MOCK_START_TIME を返し、以後は空文字（=null 相当）を返す。
+ * expectedStartTime は捕捉できたが、ポーリング中の WMI 読取が一過性で失敗する状況。
+ */
+function mockWmiReuseToEmpty() {
+  let calls = 0;
+  return (cmd, opts) => {
+    const cmdStr = typeof cmd === 'string' ? cmd : '';
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('CreationDate')) {
+      calls++;
+      return (calls === 1 ? MOCK_START_TIME : '') + '\n';
+    }
+    if (cmdStr.includes('Win32_Process') && cmdStr.includes('ParentProcessId')) {
+      return '42\n';
+    }
+    throw new Error(`unexpected execSync call in test: ${cmdStr.slice(0, 80)}`);
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
-// ProcessRef による生存観測
+// isProcessAlive（実プロセスspawnなしでテスト可能）
 // ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -59,7 +171,7 @@ afterEach(() => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 親プロセス監視
+// createDeadManSwitch（実プロセスspawn不要）
 // ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -105,7 +217,7 @@ afterEach(() => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ProcessRef の同一性観測
+// verifyProcessIdentity（WMI をモック化して決定的にテスト）
 // ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -120,7 +232,8 @@ afterEach(() => {
 // ═══════════════════════════════════════════════════════════════════════════
 // findRunningInstance
 // ═══════════════════════════════════════════════════════════════════════════
-// 生存PIDの同一性は process-liveness の観測依存を使って検証する。
+// verifyProcessIdentity 経由でWMIを呼ぶため、生存PIDを扱うテストは
+// mockWmiSuccess() で決定的にする（実WMI呼び出しを回避）。
 
 
 
@@ -314,11 +427,12 @@ test('status: 停止したPID registryエントリは running:false として一
 test('status: script と workerName の組み合わせに一致する常駐プロセスだけを running と判定する', () => {
   const { ws, pidsDir } = createStatusWorkspace();
   try {
-    fs.writeFileSync(path.join(pidsDir, `${process.pid}.json`), JSON.stringify(processLiveness.writeRef({
+    fs.writeFileSync(path.join(pidsDir, `${process.pid}.json`), JSON.stringify({
+      pid: process.pid,
       script: 'msg-poll.js',
       workerName: 'resident-worker',
       workspace: ws,
-    }, processLiveness.captureSelf())));
+    }));
 
     const matching = runCli([
       'status', '--workspace', ws, '--script', 'msg-poll.js', '--worker-name', 'resident-worker',
@@ -369,7 +483,7 @@ test('サブプロセス経由: sweep は CLI 主経路でも除外リストを�
     fs.mkdirSync(path.join(ghDir, 'leases'), { recursive: true });
     fs.mkdirSync(path.join(ghDir, 'records', 'pr', '42', 'review'), { recursive: true });
     // 全情報源（workers.json / lease / Review Manager .running）に「有効だが死んだ」PIDを置き、
-    // 除外リスト組み立てで process-liveness の観測が実際に呼ばれる
+    // 除外リスト組み立てで process-lifecycle の生存述語（isProcessAlive 等）が実際に呼ばれる
     // 状態を作る。修復前は CLI 主経路でのみ循環 require により undefined 捕捉が TypeError を
     // 起こし、sweep 全体が落ちた（Issue #267）。死んだPIDなら WMI/PowerShell を起動しない
     //

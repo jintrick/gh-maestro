@@ -30,11 +30,13 @@ const { isTrustedCommentAuthor } = require('./shared/comment-author-trust');
 const readStateLib = require('./shared/read-state');
 const {
   resolveSessionPid,
+  createDeadManSwitch,
+  getProcessStartTime,
+  captureProcessIdentity,
   registerProcess,
   findRunningInstance,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
-const processLiveness = require('./shared/process-liveness');
 const { acquireResidentLease, msgPollRole } = require('./shared/worker-lease');
 const {
   listUnprocessedResidentAuditEvents,
@@ -47,8 +49,14 @@ const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdo
 const { handleParentSessionDeath } = require('./shared/resident-parent-death');
 
 // テスト注入。既定は実装。
-let _parentLiveness = processLiveness;
+let _createDeadManSwitch = createDeadManSwitch;
 let _parentDeathExit = (code) => process.exit(code);
+let _injectedGetProcessStartTime;
+
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime ?? getProcessStartTime;
+  return fn(pid);
+}
 
 const DEFAULT_INTERVAL_SEC = 20;
 const MARKER_RE = /^<!--\s*gh-maestro\s+(\{.*\})\s*-->/;
@@ -401,8 +409,9 @@ function main(argsOverride, opts = {}) {
 
   const sessionPid = resolveSessionPid(parsed.sessionPidArg);
 
-  // 親セッションの参照を起動時に捕捉する。
-  const parentRef = _parentLiveness.captureProcess(sessionPid);
+  // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
+  // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
+  const expectedStartTime = _getProcessStartTime(sessionPid);
 
   // ── 常駐プロセス用 role lease（Issue #240） ───────────────────────────
   // 継続モード・--wait モードのみ排他する（--once は読み取り専用の一回実行のため）。
@@ -418,12 +427,10 @@ function main(argsOverride, opts = {}) {
     // leaseとPID registryへ同じプロセスidentityを保存するため、起動時刻は常駐起動時に
     // 一度だけ捕捉する。取得できない場合はunknownのまま常駐leaseを作成せず、現在時刻を
     // identityの代替値にしない。
-    residentIdentity = _parentLiveness.captureSelf();
+    residentIdentity = captureProcessIdentity(process.pid, _getProcessStartTime);
     const handoffTargets = () => {
       const workerNameForRegistry = self !== 'orchestrator' ? self : null;
-      const dup = findRunningInstance(workspace, {
-        script: 'msg-poll.js', workerName: workerNameForRegistry, failOnReadError: true,
-      });
+      const dup = findRunningInstance(workspace, { script: 'msg-poll.js', workerName: workerNameForRegistry });
       return dup ? [dup.pid] : [];
     };
     try {
@@ -432,7 +439,7 @@ function main(argsOverride, opts = {}) {
         role,
         handoff: force,
         handoffStopTargets: handoffTargets,
-        processRef: residentIdentity,
+        identity: residentIdentity,
       });
       if (!res.acquired) {
         // 引き継ぎ期限超過（--force で既存所有者が終了しなかった）
@@ -485,9 +492,10 @@ function main(argsOverride, opts = {}) {
   const state = readState(workspace, self);
 
   // ── dead-man's switch: 毎周回で親セッションの生存を確認 ──────────
-  // 親の観測と PID 再利用の判定は共通モジュールに委ねる。
+  // expectedStartTime（起動時に捕捉）を渡し、同じ PID に別プロセスが再利用された場合も
+  // 死と判定できるようにする（isProcessAlive のみの判定にしない）。
 
-  const checkParent = _parentLiveness.watchParent(parentRef);
+  const checkParent = _createDeadManSwitch(sessionPid, { expectedStartTime });
 
   /**
    * 1回のスキャン。
@@ -522,7 +530,7 @@ function main(argsOverride, opts = {}) {
     // handleParentSessionDeath が stderr へ出す。
     if (!checkParent()) {
       lifecycleCleanup(workspace);
-      handleParentSessionDeath({ workspace, scriptName: 'msg-poll.js', role, sessionPid, processRef: residentIdentity });
+      handleParentSessionDeath({ workspace, scriptName: 'msg-poll.js', role, sessionPid });
       _parentDeathExit(PARENT_DEATH_EXIT_CODE);
     }
 
@@ -859,16 +867,15 @@ let _sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 async function runWaitMode(result) {
   const { scanOnce, lines, intervalMs, waitMs } = result;
-  const nowFn = result.nowFn || Date.now;
-  const start = nowFn();
+  const start = Date.now();
   while (true) {
     const before = lines.length;
     // gh 呼び出しの上限を残り時間に絞り、--wait の締切超過を最小化する
-    const remainingForGh = Math.max(0, waitMs - (nowFn() - start));
+    const remainingForGh = Math.max(0, waitMs - (Date.now() - start));
     // --wait は1回の呼び出しで常に高々1件しか返さない契約（Issue #99）
     scanOnce({ maxGhTimeoutMs: remainingForGh, singleMessage: true });
     if (lines.length > before) return true;
-    const elapsed = nowFn() - start;
+    const elapsed = Date.now() - start;
     if (elapsed >= waitMs) return false;
     const remaining = waitMs - elapsed;
     await _sleep(Math.min(intervalMs, remaining));
@@ -910,8 +917,8 @@ if (require.main === module) {
     // 追いかけ続けることを防ぐ。実体が消えた場合は3周回連続で確認してから通知する
     // （一過性の誤検出で PID_DIED を出さない。false positive は orchestrator の再起動を
     // 誘導するため、通知は遅くても正しく倒す）。
-    const watchRef = _parentLiveness.captureProcess(watchPid);
-    const checkWatchedPid = _parentLiveness.watchParent(watchRef);
+    const watchStartTime = _getProcessStartTime(watchPid);
+    const checkWatchedPid = _createDeadManSwitch(watchPid, { expectedStartTime: watchStartTime });
     const emitWatchResult = () => {
       if (!checkWatchedPid()) {
         process.stdout.write(`PID_DIED:${watchPid}\n`);
@@ -996,7 +1003,8 @@ if (require.main === module) {
   // （registry は表示・診断用途。排他の正本は role lease であり、これは二重化しない）
 
   registerProcess(result.workspace, {
-    processRef: result.residentIdentity,
+    pid: result.residentIdentity.pid,
+    startTime: result.residentIdentity.startTime,
     script: 'msg-poll.js',
     workerName: result.self !== 'orchestrator' ? result.self : null,
   });
@@ -1041,13 +1049,14 @@ if (require.main === module) {
 // ── テスト用 export ──────────────────────────────────────────────────────
 
 module.exports = {
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
   _setSleep: (fn) => { _sleep = fn; },
   _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
   // 実装を直接参照（テストが注入を戻す際の復元用。PR #251 の引数検証テストから使う）
   _notifyOrchestrator,
-  _setParentLiveness: (value) => { _parentLiveness = value || processLiveness; },
+  _setCreateDeadManSwitch: (fn) => { _createDeadManSwitch = fn; },
   _setParentDeathExit: (fn) => { _parentDeathExit = fn; },
   main,
   runWaitMode,
