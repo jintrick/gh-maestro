@@ -48,6 +48,10 @@ const { postCycleSnapshot } = require('./shared/cycle-snapshot');
 const { ARTIFACTS, recordPath } = require('./shared/record-paths');
 const {
   resolveSessionPid,
+  createDeadManSwitch,
+  getProcessStartTime,
+  isProcessAlive,
+  startTimesMatch,
   registerProcess,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
@@ -281,13 +285,25 @@ function updateSlowRun(statePath, runKey, update) {
   });
 }
 
-const processLiveness = require('./shared/process-liveness');
 function orphanedSlowRunReason(entry, deps = {}) {
-  const checker = deps.liveness || processLiveness;
-  const state = checker.observe(checker.readRef(entry));
-  if (state === 'alive') return null;
-  if (state === 'unknown') throw new Error('slow worker の生死を判定できません');
-  return 'slow-worker-exited-without-result';
+  const isAliveFn = deps.isProcessAliveFn || isProcessAlive;
+  const getStartTimeFn = deps.getProcessStartTimeFn || getProcessStartTime;
+  const startTimesMatchFn = deps.startTimesMatchFn || startTimesMatch;
+  const pid = Number(entry && entry.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return 'slow-worker-missing';
+
+  let alive;
+  try { alive = isAliveFn(pid); } catch { return 'slow-worker-identity-unavailable'; }
+  if (alive !== true) return 'slow-worker-exited-without-result';
+  if (typeof entry.startTime !== 'string' || entry.startTime === '') {
+    return 'slow-worker-identity-unavailable';
+  }
+
+  let actualStartTime;
+  try { actualStartTime = getStartTimeFn(pid); } catch { actualStartTime = null; }
+  if (!actualStartTime) return 'slow-worker-identity-unavailable';
+  if (!startTimesMatchFn(entry.startTime, actualStartTime)) return 'slow-worker-identity-mismatch';
+  return null;
 }
 
 /**
@@ -813,12 +829,17 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
       childEnv,
       onSpawn: (spawned) => {
         child = spawned;
-        let identity = { pid: null, startTime: null };
+        let startTime = null;
         if (spawned && spawned.pid) {
-          const checker = deps.liveness || processLiveness;
-          identity = checker.writeRef({}, checker.captureProcess(spawned.pid));
+          try {
+            startTime = (deps.getProcessStartTimeFn || getProcessStartTime)(spawned.pid);
+          } catch {}
         }
-        updateSlowRun(statePath, runKey, { ...identity, logPath });
+        updateSlowRun(statePath, runKey, {
+          pid: spawned.pid || null,
+          startTime: startTime || null,
+          logPath,
+        });
       },
     }, deps);
     child = childResult.child;
@@ -1368,7 +1389,10 @@ if (require.main === module) {
 
   const sessionPid = resolveSessionPid(sessionPidArg);
 
-  const checkParent = processLiveness.watchParent(processLiveness.captureProcess(sessionPid));
+  // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
+  // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
+  const expectedStartTime = getProcessStartTime(sessionPid);
+  const checkParent = createDeadManSwitch(sessionPid, { expectedStartTime });
 
   // PID registry に自己登録
   registerProcess(workspace, { script: 'poll-pr.js' });

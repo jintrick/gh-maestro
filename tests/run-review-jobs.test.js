@@ -7,7 +7,6 @@ const fs = require('fs');
 const os = require('os');
 const { spawnSync } = require('child_process');
 const { EventEmitter } = require('events');
-const processLiveness = require('../scripts/shared/process-liveness');
 
 const { cleanSpawnEnv } = require('./_spawn-env');
 
@@ -1519,10 +1518,7 @@ test('launchJobWorker: ジョブ起動時に registerProcess を呼び、正常�
       null,
       {
         reviewSkillsDir: skillsDir,
-        liveness: processLiveness.createLiveness({
-          probePid: () => 'alive',
-          readStartTime: () => '2026-08-28T04:00:00.000Z',
-        }),
+        getProcessStartTimeFn: () => '2026-08-28T04:00:00.000Z',
         registerProcessFn: (ws, meta) => registered.push({ ws, meta }),
         unregisterProcessFn: (ws, pid) => unregistered.push({ ws, pid }),
       }
@@ -1530,10 +1526,7 @@ test('launchJobWorker: ジョブ起動時に registerProcess を呼び、正常�
 
     assert.equal(result.status, 'success');
     assert.equal(registered.length, 1, 'registerProcess が1回呼ばれる');
-    assert.deepEqual(
-      processLiveness.writeRef({}, registered[0].meta.processRef),
-      { pid: 8888, startTime: '2026-08-28T04:00:00.000Z' },
-    );
+    assert.equal(registered[0].meta.pid, 8888);
     assert.equal(registered[0].meta.script, 'review-job');
     assert.equal(registered[0].meta.pr, 415);
     assert.equal(registered[0].meta.jobId, 'job-test');
@@ -1582,10 +1575,7 @@ test('launchJobWorker: ジョブ異常終了時（非0終了・エラー）で�
       null,
       {
         reviewSkillsDir: skillsDir,
-        liveness: processLiveness.createLiveness({
-          probePid: () => 'alive',
-          readStartTime: () => '2026-08-28T04:00:00.000Z',
-        }),
+        getProcessStartTimeFn: () => '2026-08-28T04:00:00.000Z',
         registerProcessFn: (ws, meta) => registered.push({ ws, meta }),
         unregisterProcessFn: (ws, pid) => unregistered.push({ ws, pid }),
       }
@@ -1593,10 +1583,7 @@ test('launchJobWorker: ジョブ異常終了時（非0終了・エラー）で�
 
     assert.equal(result.status, 'failed');
     assert.equal(registered.length, 1);
-    assert.deepEqual(
-      processLiveness.writeRef({}, registered[0].meta.processRef),
-      { pid: 9999, startTime: '2026-08-28T04:00:00.000Z' },
-    );
+    assert.equal(registered[0].meta.pid, 9999);
     assert.equal(unregistered.length, 1, '異常終了時でも unregisterProcess が呼ばれる');
     assert.equal(unregistered[0].pid, 9999);
   } finally {

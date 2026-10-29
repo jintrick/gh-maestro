@@ -6,8 +6,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { createTempDirScope } = require('../../scripts/shared/temp-directory');
 const checkpoint = require('../../scripts/shared/review-checkpoint');
-const { getParentPid } = require('../../scripts/process-lifecycle');
-const processLiveness = require('../../scripts/shared/process-liveness');
+const { getParentPid, getProcessStartTime, verifyProcessIdentity, isProcessAlive } = require('../../scripts/process-lifecycle');
 const { validateManifest, ALL_LEAF_IDS, TRUNK_TO_LEAVES } = require('../../scripts/run-review-jobs');
 
 const root = path.resolve(__dirname, '../..');
@@ -35,24 +34,9 @@ async function scenario(mode) {
   const remote = path.join(base, 'remote.git');
   const home = path.join(base, 'home');
   const fixture = path.join(base, 'fixture');
-  const livenessPreload = path.join(base, 'liveness-preload.js');
   fs.mkdirSync(ws, { recursive: true }); fs.mkdirSync(fixture, { recursive: true });
-  fs.writeFileSync(livenessPreload, [
-    "'use strict';",
-    `const processLiveness = require(${JSON.stringify(require.resolve('../../scripts/shared/process-liveness'))});`,
-    "const fixedStartTime = '2026-07-25T00:00:00.000Z';",
-    "const checker = processLiveness.createLiveness({",
-    "  probePid: (pid) => {",
-    "    try { process.kill(Number(pid), 0); return 'alive'; }",
-    "    catch (error) { if (error && error.code === 'ESRCH') return 'dead'; if (error && error.code === 'EPERM') return 'alive'; return 'unknown'; }",
-    '  },',
-    '  readStartTime: (_pid, expectedStartTime) => expectedStartTime || fixedStartTime,',
-    '});',
-    'Object.assign(processLiveness, checker);',
-  ].join('\n'), 'utf8');
   const env = { ...process.env, HOME: home, USERPROFILE: home, GH_MAESTRO_WORKSPACE: ws,
-    GH_MAESTRO_RUNTIME_DIR: path.join(base, 'runtime'), REVIEW_RESUME_FIXTURE: fixture, GH_HOST: '127.0.0.1',
-    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require="${livenessPreload.replace(/\\/g, '/')}"`].filter(Boolean).join(' ') };
+    GH_MAESTRO_RUNTIME_DIR: path.join(base, 'runtime'), REVIEW_RESUME_FIXTURE: fixture, GH_HOST: '127.0.0.1' };
   delete env.NODE_TEST_CONTEXT;
   let safeToCleanup = true;
   try {
@@ -90,7 +74,8 @@ async function scenario(mode) {
     assert.ok(launcherParent, 'manager parent PID is required');
     const shimPid = process.platform === 'win32' ? getParentPid(launcherParent) : launcherParent;
     assert.ok(shimPid, 'headless shim PID is required');
-    const shimRef = processLiveness.captureProcess(shimPid);
+    const shimStartTime = getProcessStartTime(shimPid);
+    assert.ok(shimStartTime, 'headless shim start time is required');
     const resultPath = path.join(fixture, 'observed-results.json');
     await waitUntil(() => fs.existsSync(resultPath), 'phase2 results');
     const results = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
@@ -102,7 +87,13 @@ async function scenario(mode) {
     const jobs = events.filter(e => e.kind === 'job').map(e => e.id);
     assert.deepEqual(jobs.sort(), mode === 'resume' ? ['second'] : ['first', 'second']);
     await waitUntil(() => !fs.existsSync(runningPath), 'manager exit');
-    await waitUntil(() => processLiveness.observe(shimRef) === 'dead', 'headless shim and exit hook');
+    await waitUntil(() => {
+      const identity = verifyProcessIdentity(shimPid, { startTime: shimStartTime });
+      if (identity.match) return false;
+      if (identity.reason === 'process not alive' || /^start time mismatch:/.test(identity.reason || '')) return true;
+      if (identity.reason === 'cannot get process start time' && !isProcessAlive(shimPid)) return true;
+      throw new Error(`cannot verify headless shim PID ${shimPid}: ${identity.reason}`);
+    }, 'headless shim and exit hook');
     safeToCleanup = true;
   } finally { if (safeToCleanup) scope.cleanup(); }
 }

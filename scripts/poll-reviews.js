@@ -23,10 +23,11 @@ const {
 } = require('./shared/test-declaration');
 const {
   resolveSessionPid,
+  createDeadManSwitch,
+  getProcessStartTime,
   registerProcess,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
-const processLiveness = require('./shared/process-liveness');
 
 const USAGE = `poll-reviews.js — PR のレビューコメント・push・マージ状態をポーリングする
 
@@ -409,6 +410,8 @@ async function main(argv = process.argv.slice(2), deps = {}) {
   const resolveWorkspaceFn = deps.resolveWorkspaceFn || resolveWorkspace;
   const pollReviewsStateFilesFn = deps.pollReviewsStateFilesFn || pollReviewsStateFiles;
   const resolveSessionPidFn = deps.resolveSessionPidFn || resolveSessionPid;
+  const getProcessStartTimeFn = deps.getProcessStartTimeFn || getProcessStartTime;
+  const createDeadManSwitchFn = deps.createDeadManSwitchFn || createDeadManSwitch;
   const registerProcessFn = deps.registerProcessFn || registerProcess;
   const lifecycleCleanupFn = deps.lifecycleCleanupFn || lifecycleCleanup;
   const notifyWatchdogExitFn = deps.notifyWatchdogExitFn || notifyWatchdogExit;
@@ -467,9 +470,10 @@ async function main(argv = process.argv.slice(2), deps = {}) {
 
   const sessionPid = resolveSessionPidFn(sessionPidArg);
 
-  const checker = deps.liveness || processLiveness;
-  const parentRef = checker.captureProcess(sessionPid);
-  const checkParent = checker.watchParent(parentRef);
+  // PID再利用検知のため、起動時に親セッションの起動時刻を捕捉する（best-effort。
+  // 取得失敗時は expectedStartTime=null となり isProcessAlive のみの従来判定にフォールバック）。
+  const expectedStartTime = getProcessStartTimeFn(sessionPid);
+  const checkParent = createDeadManSwitchFn(sessionPid, { expectedStartTime });
 
   // PID registry に自己登録
   registerProcessFn(workspace, { script: 'poll-reviews.js' });

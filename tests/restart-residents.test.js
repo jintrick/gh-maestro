@@ -6,7 +6,6 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
-const processLiveness = require('../scripts/shared/process-liveness');
 
 const {
   RESIDENT_SPECS,
@@ -34,10 +33,6 @@ function makeWorkspace() {
   return workspace;
 }
 
-function fakeStartTime(pid) {
-  return new Date(Date.UTC(2026, 0, 1) + pid * 1000).toISOString();
-}
-
 const STATUS_PANE_CONTEXT = Object.freeze({
   unixSocket: __filename,
   targetPaneId: 'base-pane',
@@ -45,20 +40,12 @@ const STATUS_PANE_CONTEXT = Object.freeze({
 
 function makeHarness(workspace, options = {}) {
   const oldEntries = options.entries || [];
-  const entries = oldEntries.map((entry) => ({
-    ...entry,
-    startTime: fakeStartTime(entry.pid),
-    args: entry.args ? [...entry.args] : entry.args,
-  }));
+  const entries = oldEntries.map((entry) => ({ ...entry, args: entry.args ? [...entry.args] : entry.args }));
   const live = new Set([...oldEntries.map((entry) => entry.pid), 9000]);
   let nextPid = 2000;
   const spawned = [];
   const unregistered = [];
   const hooks = {
-    liveness: processLiveness.createLiveness({
-      probePid: (pid) => live.has(pid) ? 'alive' : 'dead',
-      readStartTime: (pid) => fakeStartTime(pid),
-    }),
     findRunningInstances: (ws, opts = {}) => entries.filter((entry) => (
       live.has(entry.pid)
       && entry.workspace === ws
@@ -90,7 +77,7 @@ function makeHarness(workspace, options = {}) {
         script,
         workerName: null,
         workspace,
-        startTime: fakeStartTime(pid),
+        startTime: `new-${pid}`,
         args: args.slice(1),
       });
       live.add(pid);
@@ -109,7 +96,7 @@ function residentEntries(workspace) {
       script: 'worker-supervisor.js',
       workerName: null,
       workspace,
-      startTime: fakeStartTime(101),
+      startTime: 'old-101',
       args: ['--workspace', workspace, '--session-pid', '9000'],
     },
     {
@@ -117,7 +104,7 @@ function residentEntries(workspace) {
       script: 'msg-poll.js',
       workerName: null,
       workspace,
-      startTime: fakeStartTime(102),
+      startTime: 'old-102',
       args: ['orchestrator', '--workspace', workspace, '--session-pid', '9000'],
     },
     {
@@ -125,7 +112,7 @@ function residentEntries(workspace) {
       script: 'poll-pr.js',
       workerName: null,
       workspace,
-      startTime: fakeStartTime(103),
+      startTime: 'old-103',
       args: ['334', '--workspace', workspace, '--base-branch', 'dev', '--session-pid', '9000'],
     },
     {
@@ -133,7 +120,7 @@ function residentEntries(workspace) {
       script: 'poll-reviews.js',
       workerName: null,
       workspace,
-      startTime: fakeStartTime(104),
+      startTime: 'old-104',
       args: ['77', workspace, '30', '--session-pid', '9000'],
     },
   ];
@@ -352,8 +339,8 @@ test('stopResidentEntry: 停止済み常駐のregistryとworker-supervisorのleg
       },
       pidFilePath: () => registryPath,
       legacyPidFilePath: () => legacyRegistryPath,
-      releaseResidentLeaseForProcess: ({ role, processRef }) => {
-        releasedRoles.push({ role, ...processLiveness.writeRef({}, processRef) });
+      releaseResidentLeaseForProcess: ({ role, pid, startTime }) => {
+        releasedRoles.push({ role, pid, startTime });
         return { released: true, remaining: false };
       },
     };
@@ -379,7 +366,7 @@ test('stopResidentEntry: 同じPIDのresident lease identity不一致を成功�
   try {
     leaseStore.write(roleLeaseKey(role), {
       pid: 4242,
-      startTime: '2026-07-29T00:00:02.525Z',
+      startTime: '2026-07-29T00:00:00.525Z',
       workerName: role,
       phase: 'active',
     });
@@ -454,12 +441,8 @@ test('cleanupLegacyResidentLease: typo roleのstale leaseだけを除去し、�
     fs.writeFileSync(currentPath, JSON.stringify({
       pid: 999998, startTime: '2026-01-01T00:00:00.000Z', role: 'inbox-supervisor',
     }), 'utf8');
-    const staleLiveness = processLiveness.createLiveness({
-      probePid: () => 'dead',
-      readStartTime: () => '2026-01-01T00:00:00.000Z',
-    });
     const result = cleanupLegacyResidentLease(workspace, {
-      liveness: staleLiveness,
+      isProcessAliveFn: () => false,
       acquireLeaseLockFn: () => true,
       releaseLeaseLockFn: () => {},
     });
@@ -467,7 +450,7 @@ test('cleanupLegacyResidentLease: typo roleのstale leaseだけを除去し、�
     assert.equal(fs.existsSync(legacyPath), false);
     assert.equal(fs.existsSync(currentPath), true);
     assert.equal(cleanupLegacyResidentLease(workspace, {
-      liveness: staleLiveness,
+      isProcessAliveFn: () => false,
       acquireLeaseLockFn: () => true,
       releaseLeaseLockFn: () => {},
     }).status, 'absent');
@@ -485,10 +468,8 @@ test('cleanupLegacyResidentLease: 稼働中で同一性確認済みの所有者�
       pid: 999997, startTime: '2026-01-01T00:00:00.000Z', role: 'inbose-supervisor',
     }), 'utf8');
     const result = cleanupLegacyResidentLease(workspace, {
-      liveness: processLiveness.createLiveness({
-        probePid: () => 'alive',
-        readStartTime: () => '2026-01-01T00:00:00.000Z',
-      }),
+      isProcessAliveFn: () => true,
+      verifyProcessIdentityFn: () => ({ match: true }),
     });
     assert.equal(result.status, 'skipped');
     assert.equal(fs.existsSync(leasePath), true);
@@ -594,7 +575,7 @@ test('restartResidents: detached起動直後にregistry登録が遅れても成�
         harness.entries.push({
           ...old[0],
           pid: 2000,
-          startTime: fakeStartTime(2000),
+          startTime: 'new-2000',
         });
         harness.live.add(2000);
       }
@@ -695,13 +676,11 @@ test('restartResidents: 起動PIDの生存確認に失敗した場合は判定�
         return child;
       },
     });
-    harness.hooks.liveness = processLiveness.createLiveness({
-      probePid: (pid) => {
-        if (pid === 2000) throw new Error('liveness unavailable');
-        return harness.live.has(pid) ? 'alive' : 'dead';
-      },
-      readStartTime: (pid) => fakeStartTime(pid),
-    });
+    const originalIsProcessAlive = harness.hooks.isProcessAlive;
+    harness.hooks.isProcessAlive = (pid) => {
+      if (pid === 2000) throw new Error('liveness unavailable');
+      return originalIsProcessAlive(pid);
+    };
     const result = restartResidents(workspace, {
       scriptsPath: path.join(workspace, 'scripts'),
       hooks: harness.hooks,
@@ -711,7 +690,8 @@ test('restartResidents: 起動PIDの生存確認に失敗した場合は判定�
 
     assert.equal(result.errors.length, 1);
     assert.equal(result.results[0].status, 'failed');
-    assert.match(result.results[0].reason, /生死も判定できません/);
+    assert.match(result.results[0].reason, /生存確認にも失敗したため/);
+    assert.match(result.results[0].reason, /登録前終了か登録遅延か判定できません/);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }

@@ -3,9 +3,25 @@
 
 const fs = require('fs');
 const path = require('path');
-const processLiveness = require('./shared/process-liveness');
-let injectedLiveness = null;
-function checker() { return injectedLiveness || processLiveness; }
+// process-lifecycle への依存は呼び出し時点で解決する（Issue #267）。CLI 主経路
+// （require.main === module）から sweepRegistry 経由でこのモジュールが require される
+// 可能性を踏まえ、評価時に捕捉すると module.exports 未確定の undefined を掴むため、
+// 最初の呼び出し時まで解決を遅らせる。テスト注入（_set*）は注入値が優先される。
+let _injectedIsProcessAlive = null;
+function _isProcessAlive(pid) {
+  const fn = _injectedIsProcessAlive ?? require('./process-lifecycle').isProcessAlive;
+  return fn(pid);
+}
+let _injectedVerifyProcessIdentity = null;
+function _verifyProcessIdentity(pid, identity, opts) {
+  const fn = _injectedVerifyProcessIdentity ?? require('./process-lifecycle').verifyProcessIdentity;
+  return fn(pid, identity, opts);
+}
+let _injectedGetProcessStartTime = null;
+function _getProcessStartTime(pid) {
+  const fn = _injectedGetProcessStartTime ?? require('./process-lifecycle').getProcessStartTime;
+  return fn(pid);
+}
 const { launchAgentHeadless } = require('./shared/headless-launch');
 const { assertValidPr } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
@@ -65,7 +81,8 @@ function isLockValid(lockFile) {
   const result = inspectRunningReviewManager(lockFile, {
     onError: 'throw',
     cleanupStale: true,
-    liveness: checker(),
+    isProcessAliveFn: _isProcessAlive,
+    verifyProcessIdentityFn: _verifyProcessIdentity,
   });
   if (result.status === 'legacy-live') {
     throw new Error(
@@ -110,10 +127,11 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
   // manager.runningへ書くと、本体終了時の所有者判定と競合して残留するため、
   // 起動側は隣接するmanager.startingだけを原子的に予約する。
   // manager.runningが本体書き込み前の窓でも、予約を持つ起動だけが先へ進める。
-  const self = checker();
   const startup = acquireReviewManagerStartup(lockFile, {
-    processRef: self.captureSelf(),
-    liveness: self,
+    pid: process.pid,
+    startTime: _getProcessStartTime(process.pid) || null,
+    isProcessAliveFn: _isProcessAlive,
+    verifyProcessIdentityFn: _verifyProcessIdentity,
   });
   if (!startup.acquired) {
     if (startup.error) throw startup.error;
@@ -161,7 +179,8 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
   // manager.runningはここでは書かない。本体が書き込んだ後に起動予約を
   // 解放できるよう、shimのPIDだけをmanager.startingへ引き渡す。
   const transferred = transferReviewManagerStartup(lockFile, startup.token, {
-    processRef: launched.processRef,
+    pid: launched.pid,
+    startTime: launched.startTime,
   });
   // 本体が先にmanager.runningを書いて予約を解放した場合はmissingになる。
   // それは正常な並行実行なので、二重起動扱いにはしない。
@@ -178,7 +197,9 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
 module.exports = {
   startReviewManager,
   isLockValid,
-  _setLiveness: (value) => { injectedLiveness = value; },
+  _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
+  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
 };
 
 if (require.main === module) {

@@ -16,6 +16,7 @@ const FAST_CONTEXT_PRELOAD = (() => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-get-context-preload-'));
   const file = path.join(dir, 'preload.js');
   const childProcessPath = require.resolve('../../scripts/shared/child-process');
+  const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
   const source = [
     "'use strict';",
     `const childProcess = require(${JSON.stringify(childProcessPath)});`,
@@ -25,6 +26,8 @@ const FAST_CONTEXT_PRELOAD = (() => {
     "  if (String(command).includes('Get-CimInstance Win32_Process')) return `${fixedStartTime}\\n`;",
     '  return realExecSync(command, opts);',
     '};',
+    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
+    'lifecycle.getProcessStartTime = () => fixedStartTime;',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
   process.once('exit', () => {

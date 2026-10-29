@@ -35,10 +35,10 @@ const { buildAgentCommandArgs } = require('./shared/agent-launch');
 const { checkAgentExists } = require('./shared/agent-exec');
 const { launchAgentHeadless } = require('./shared/headless-launch');
 const { buildNormalWorkerLaunchSpec } = require('./shared/worker-factory');
-const { isWorkerAlive, observeWorker } = require('./shared/worker-liveness');
-const { createNormalWorkerStore, acquireLease: acquireWorkerLease, isLeaseLive,
+const { isWorkerAlive } = require('./shared/worker-liveness');
+const { createNormalWorkerStore, acquireLease: acquireWorkerLease,
         activateLease: activateWorkerLease, releaseLease: releaseWorkerLease,
-        acquireLeaseLock, releaseLeaseLock } = require('./shared/worker-lease');
+        isLeaseLive, acquireLeaseLock, releaseLeaseLock } = require('./shared/worker-lease');
 const { killProcessTree } = require('./shared/kill-tree');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
@@ -59,7 +59,7 @@ const { checkClosedPr } = require('./shared/closed-pr-guard');
 const { getCurrentBranch } = require('./shared/git-branch');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { readWorkersRaw } = require('./shared/workers-registry');
-const processLiveness = require('./shared/process-liveness');
+const processLifecycle = require('./process-lifecycle');
 const {
   DEFAULT_ROLELESS_WORKER_NAME_PATTERN,
   isRolelessWorkerName,
@@ -197,16 +197,8 @@ function parseWorkerArgs(argv) {
  * @param {(entry: object) => boolean} [aliveFn=isWorkerAlive] テスト用の注入口
  * @returns {boolean}
  */
-function shouldPruneStaleWorker(entry, resolveAgent, aliveFn) {
-  let state;
-  try {
-    state = aliveFn ? (aliveFn(entry) ? 'alive' : 'dead') : observeWorker(entry);
-  } catch (error) {
-    throw new Error(`worker process liveness is unknown: ${error.message}`, { cause: error });
-  }
-  if (state === 'unknown') throw new Error('worker process liveness is unknown');
-  if (state === 'alive') return false;
-  if (state !== 'dead') throw new Error('worker process liveness returned an invalid state');
+function shouldPruneStaleWorker(entry, resolveAgent, aliveFn = isWorkerAlive) {
+  if (aliveFn(entry)) return false;
   let agentConfig;
   try {
     agentConfig = entry.agentId ? resolveAgent(entry.agentId) : null;
@@ -277,7 +269,9 @@ function cleanupRolelessWorkers(workspace, options = {}) {
   } catch (error) {
     if (!(error && (error.code === 'ENOENT' || error.code === 'ENOTDIR'))) throw error;
   }
-  const liveness = options.liveness || processLiveness;
+  const isLeaseLiveFn = options.isLeaseLiveFn || isLeaseLive;
+  const isProcessAliveFn = options.isProcessAliveFn || processLifecycle.isProcessAlive;
+  const verifyProcessIdentityFn = options.verifyProcessIdentityFn || processLifecycle.verifyProcessIdentity;
   for (const nameEntry of leaseNames) {
     const name = typeof nameEntry === 'string' ? nameEntry : nameEntry.name;
     if (typeof name !== 'string' || !name.endsWith('.json')) continue;
@@ -304,17 +298,31 @@ function cleanupRolelessWorkers(workspace, options = {}) {
       skipped = true;
       continue;
     }
-    let state;
-    try { state = liveness.observe(liveness.readRef(lease)); } catch (error) {
+    let live;
+    try { live = isLeaseLiveFn(lease); } catch (error) {
       throw new Error(`${leasePath} のlease生存確認に失敗しました: ${error.message}`);
     }
-    if (state === 'unknown') throw new Error(`${leasePath} のlease保持者の生死を判定できません`);
-    if (state === 'alive') {
+    if (typeof live !== 'boolean') throw new Error(`${leasePath} のlease生存確認がbooleanを返しませんでした`);
+    if (live) {
       skipped = true;
       liveLeaseWorkerNames.add(workerName);
       continue;
     }
-    staleLeases.push({ leasePath, workerName, lease });
+    let processAlive;
+    try { processAlive = isProcessAliveFn(lease.pid); } catch (error) {
+      throw new Error(`${leasePath} のPID生存確認に失敗しました: ${error.message}`);
+    }
+    if (typeof processAlive !== 'boolean') throw new Error(`${leasePath} のPID生存確認がbooleanを返しませんでした`);
+    if (processAlive) {
+      const identity = verifyProcessIdentityFn(lease.pid, lease);
+      if (!identity || identity.match !== true) {
+        throw new Error(`${leasePath} のPID同一性を確認できません: ${identity?.reason || 'identity mismatch'}`);
+      }
+      skipped = true;
+      liveLeaseWorkerNames.add(workerName);
+    } else {
+      staleLeases.push({ leasePath, workerName, lease });
+    }
   }
 
   // lease の stale 判定から削除までを同じ per-worker lock の下で再確認する。
@@ -334,13 +342,23 @@ function cleanupRolelessWorkers(workspace, options = {}) {
       if (!locked) throw new Error('roleless worker leaseのロックを取得できませんでした');
       const current = JSON.parse(readFileFn(leasePath, 'utf8'));
       if (!current || typeof current !== 'object' || Array.isArray(current)
-        || JSON.stringify(current) !== JSON.stringify(lease)
-        || !liveness.sameRef(liveness.readRef(current), liveness.readRef(lease))) {
+        || current.pid !== lease.pid || current.startTime !== lease.startTime) {
         throw new Error('roleless worker leaseが確認後に変更されました');
       }
-      const currentState = liveness.observe(liveness.readRef(current));
-      if (currentState === 'unknown') throw new Error('roleless worker lease保持者の生死を判定できません');
-      if (currentState === 'alive') {
+      const currentLive = isLeaseLiveFn(current);
+      if (typeof currentLive !== 'boolean') throw new Error('roleless worker leaseの生存確認がbooleanを返しませんでした');
+      if (currentLive) {
+        skipped = true;
+        liveLeaseWorkerNames.add(workerName);
+        continue;
+      }
+      const processAlive = isProcessAliveFn(current.pid);
+      if (typeof processAlive !== 'boolean') throw new Error(`${leasePath} のPID生存確認がbooleanを返しませんでした`);
+      if (processAlive) {
+        const identity = verifyProcessIdentityFn(current.pid, current);
+        if (!identity || identity.match !== true) {
+          throw new Error(`${leasePath} のPID同一性を確認できません: ${identity?.reason || 'identity mismatch'}`);
+        }
         skipped = true;
         liveLeaseWorkerNames.add(workerName);
         continue;
@@ -632,25 +650,19 @@ if (closedPr.blocked) {
       );
     }
     // 旧形式 workers.json チェック（Phase 2 以前の lease 非保持ワーカー向け）
-    let previousWorkers;
-    try {
-      previousWorkers = readWorkersRaw(workspace);
-    } catch (error) {
-      fail(`workers.json の読み取り・検証に失敗しました: ${error.message}`);
-    }
-    const oldEntry = previousWorkers ? previousWorkers[oldKey] : undefined;
-    if (oldEntry !== undefined) {
-      const state = observeWorker(oldEntry);
-      if (state === 'unknown') {
-        fail(`旧形式（role無し）のワーカー "${oldKey}" の生死を確認できないため起動を拒否しました。`);
-      }
-      if (state === 'alive') {
-        const normalizedOldEntry = normalizeWorkerEntry(oldEntry);
-        fail(
-          `旧形式（role無し）のワーカー "${oldKey}" が workers.json に登録され生存中です（pid ${normalizedOldEntry.pid}）。` +
-          `このワーカーを停止してから再試行してください。`
-        );
-      }
+    if (existsSync(workersJson)) {
+      try {
+        const parsed = JSON.parse(readFileSync(workersJson, 'utf8'));
+        if (typeof parsed === 'object' && parsed !== null && parsed[oldKey]) {
+          const oldEntry = normalizeWorkerEntry(parsed[oldKey]);
+          if (isWorkerAlive(oldEntry)) {
+            fail(
+              `旧形式（role無し）のワーカー "${oldKey}" が workers.json に登録され生存中です（pid ${oldEntry.pid}）。` +
+              `このワーカーを停止してから再試行してください。`
+            );
+          }
+        }
+      } catch { /* workers.json が読めなければスキップ（後続の本処理で改めて読む） */ }
     }
   }
 }
@@ -662,10 +674,10 @@ if (closedPr.blocked) {
 // workers.json（resume台帳）とは責務を分離。
 const leaseStore = createNormalWorkerStore(workspace);
 let leaseAcquired = false;
-const launcherRef = processLiveness.captureSelf();
 try {
   const leaseResult = acquireWorkerLease(leaseStore, workerName, {
-    processRef: launcherRef,
+    pid: process.pid,
+    startTime: null,
     workerName,
   });
   leaseAcquired = true;
@@ -680,7 +692,7 @@ try {
 const _originalFail = fail;
 fail = (msg) => {
   if (leaseAcquired) {
-    try { releaseWorkerLease(leaseStore, workerName, launcherRef); } catch {}
+    try { releaseWorkerLease(leaseStore, workerName, { pid: process.pid }); } catch {}
   }
   _originalFail(msg);
 };
@@ -700,12 +712,19 @@ if (!baselineResult.ok) {
 }
 console.warn(`spawn-worker: Issue ${issue} の既存コメント ${baselineResult.count} 件を orchestrator 既読として記録しました`);
 
-// --- workers.json を読み込み（不在のみ空として扱い、破損時は起動を止める） ---
-let workers;
-try {
-  workers = readWorkersRaw(workspace) || {};
-} catch (e) {
-  fail(`workers.json の読み取り・検証に失敗しました: ${e.message}`);
+// --- workers.json を読み込み（なければ初期化、破損時は空として扱う） ---
+let workers = {};
+if (existsSync(workersJson)) {
+  try {
+    const parsed = JSON.parse(readFileSync(workersJson, 'utf8'));
+    if (typeof parsed === 'object' && parsed !== null) {
+      workers = parsed;
+    } else {
+      console.warn(`spawn-worker: workers.json の内容が不正です（型: ${typeof parsed}）。空として扱います。`);
+    }
+  } catch (e) {
+    console.warn(`spawn-worker: workers.json のパースに失敗しました: ${e.message}。空として扱います。`);
+  }
 }
 if (!workers.orchestrator) {
   // orchestrator エントリ自体はワーカー走査時に一律スキップされる予約キー。
@@ -719,7 +738,7 @@ if (!workers.orchestrator) {
   for (const [k, v] of Object.entries(workers)) {
     if (k === 'orchestrator') continue;
     const entry = normalizeWorkerEntry(v);
-    if (!shouldPruneStaleWorker(v, (id) => resolveAgentConfig(id, { workspace, homedir }))) continue;
+    if (!shouldPruneStaleWorker(entry, (id) => resolveAgentConfig(id, { workspace, homedir }))) continue;
 
     console.warn(`spawn-worker: stale worker "${k}" (pid ${entry.pid ?? '-'}) を workers.json から除去します`);
     delete workers[k];
@@ -936,7 +955,7 @@ try {
 // --- リースを実際のワーカーPIDでアクティベート ---
 // 予約リース（launcher PID）を実際のワーカープロセス情報に更新する。
 try {
-  activateWorkerLease(leaseStore, workerName, launched.processRef);
+  activateWorkerLease(leaseStore, workerName, { pid: launched.pid, startTime: launched.startTime });
 } catch (e) {
   console.warn(`spawn-worker: リースアクティベートに失敗しました: ${e.message}`);
   // ワーカー本体は起動済みのためロールバックしない（リースは予約状態のまま残るが、
@@ -945,7 +964,9 @@ try {
 
 // --- workers.json にワーカーを登録（失敗時はプロセスもロールバック） ---
 try {
-  const workerEntry = processLiveness.writeRef({
+  workers[workerName] = normalizeWorkerEntry({
+    pid: launched.pid,
+    startTime: launched.startTime,
     logPath: launched.logPath,
     agentId: agentConfig.id,
     issue,
@@ -953,8 +974,7 @@ try {
     // resume配送（worker-supervisor.js）が GH_MAESTRO_BASE_BRANCH として再注入できるよう、
     // ベースブランチをワーカーレコードに永続化する（Issue #269）。
     baseBranch,
-  }, launched.processRef);
-  workers[workerName] = normalizeWorkerEntry(workerEntry);
+  });
   atomicWriteJson(workersJson, workers);
   try {
     _recordCycleEvent(workspace, issue, 'worker-started', {
@@ -963,7 +983,7 @@ try {
       skill,
       agentId: agentConfig.id,
       pid: launched.pid,
-      startTime: workerEntry.startTime,
+      startTime: launched.startTime,
     });
   } catch { /* best-effort; the launched worker remains authoritative */ }
   console.warn(`spawn-worker: worker "${workerName}" を pid ${launched.pid} として workers.json に登録しました`);

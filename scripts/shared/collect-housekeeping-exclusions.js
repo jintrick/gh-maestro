@@ -24,12 +24,24 @@
 const path = require('path');
 const fs = require('fs');
 const { readWorkersRaw } = require('./workers-registry');
-const { createNormalWorkerStore } = require('./worker-lease');
+const { isWorkerAlive } = require('./worker-liveness');
+const { createNormalWorkerStore, isLeaseLive } = require('./worker-lease');
 const { listRunningReviewManagers } = require('./running-review-managers');
 const { normalizePid } = require('./worker-entry');
 
-const processLiveness = require('./process-liveness');
-let injectedLiveness = null;
+// process-lifecycle 由来の関数のみ呼び出し時点で解決する（循環 require 対策、上記参照）。
+// テスト注入（_setIsProcessAlive）は注入値が優先される。
+let _injectedIsProcessAlive = null;
+function _isProcessAlive(pid) {
+  const fn = _injectedIsProcessAlive ?? require('../process-lifecycle').isProcessAlive;
+  return fn(pid);
+}
+
+let _injectedVerifyProcessIdentity = null;
+function _verifyProcessIdentity(pid, identity, opts) {
+  const fn = _injectedVerifyProcessIdentity ?? require('../process-lifecycle').verifyProcessIdentity;
+  return fn(pid, identity, opts);
+}
 
 /**
  * housekeeping から除外する稼働中ワーカーを収集する。
@@ -60,12 +72,6 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
   const reviewPrs = new Set();
   const pids = new Set();
   const ghDir = path.join(workspace, '.gh-maestro');
-  const checker = opts.liveness || injectedLiveness || processLiveness;
-  const live = (entry, description) => {
-    const state = checker.observe(checker.readRef(entry));
-    if (state === 'unknown') throw new Error(`${description} の生死を判定できません`);
-    return state === 'alive';
-  };
 
   // PID registry にない通常 headless ワーカーも、既存の workers.json の生存述語を
   // 再利用して除外対象へ加える。
@@ -76,7 +82,7 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
   const rawWorkers = readWorkersRaw(workspace);
   if (rawWorkers) {
     for (const [workerName, entry] of Object.entries(rawWorkers)) {
-      if (workerName !== 'orchestrator' && live(entry, `worker ${workerName}`)) {
+      if (workerName !== 'orchestrator' && isWorkerAlive(entry)) {
         workerNames.add(workerName);
         const normPid = normalizePid(entry && typeof entry === 'object' ? entry.pid : null);
         if (normPid) pids.add(normPid);
@@ -99,7 +105,7 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
       if (entry === null && fs.existsSync(path.join(leasesDir, name))) {
         throw new Error(`lease の読み取り・解析に失敗しました: ${path.join(leasesDir, name)}`);
       }
-      if (entry && live(entry, `lease ${path.join(leasesDir, name)}`)) {
+      if (isLeaseLive(entry)) {
         workerNames.add(entry.workerName || workerName);
         const normPid = normalizePid(entry.pid);
         if (normPid) pids.add(normPid);
@@ -116,9 +122,15 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
   // 守る必要がある。onLegacyLive はその保護集合だけを更新し、例外を投げずに次のPRへ
   // 進めるための経路である。旧PIDを pids 集合へ入れることはしない。
   const runningManagers = listRunningReviewManagers(workspace, {
-    liveness: checker,
+    isProcessAliveFn: _isProcessAlive,
+    // 注入が明示されたテスト時だけこのモジュールの関数を渡す。通常は
+    // running-review-managers.js 自身の遅延解決（およびその注入点）を使う。
+    verifyProcessIdentityFn: _injectedVerifyProcessIdentity || undefined,
     onError: 'throw',
     cleanupStale: opts.cleanupStale !== false,
+    onLegacyLive: ({ pr }) => {
+      if (pr != null) reviewPrs.add(pr);
+    },
   });
   for (const manager of runningManagers) {
     reviewPrs.add(manager.pr);
@@ -130,5 +142,6 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
 module.exports = {
   collectHousekeepingExclusions,
   // テスト用注入（実プロセス確認を回避する）
-  _setLiveness: (value) => { injectedLiveness = value; },
+  _setIsProcessAlive: (fn) => { _injectedIsProcessAlive = fn; },
+  _setVerifyProcessIdentity: (fn) => { _injectedVerifyProcessIdentity = fn; },
 };

@@ -9,11 +9,9 @@ const { beforeEach, test } = require('node:test');
 
 const workerStatus = require('../../scripts/worker-status');
 const workerLiveness = require('../../scripts/shared/worker-liveness');
-const processLiveness = require('../../scripts/shared/process-liveness');
 const { cleanSpawnEnv } = require('../_spawn-env');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'worker-status.js');
-const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
 
 // status/list の実CLI境界は維持する。各子プロセスの初期化で発生する
 // process-lifecycle のWindows WMI照会だけを固定観測へ差し替え、PIDだけの
@@ -23,16 +21,18 @@ const FAST_STATUS_PRELOAD = (() => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-worker-status-preload-'));
   const file = path.join(dir, 'preload.js');
   const childProcessPath = require.resolve('../../scripts/shared/child-process');
+  const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
   const source = [
     "'use strict';",
     `const childProcess = require(${JSON.stringify(childProcessPath)});`,
-    `const fixedStartTime = ${JSON.stringify(TEST_PROCESS_START_TIME)};`,
+    "const fixedStartTime = '2026-07-25T00:00:00.000Z';",
     'const realExecSync = childProcess.execSync;',
     'childProcess.execSync = (command, opts) => {',
     "  if (String(command).includes('Get-CimInstance Win32_Process')) return `${fixedStartTime}\\n`;",
     '  return realExecSync(command, opts);',
     '};',
-    `const lifecycle = require(${JSON.stringify(require.resolve('../../scripts/process-lifecycle'))});`,
+    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
+    'lifecycle.getProcessStartTime = () => fixedStartTime;',
     'lifecycle.findRunningInstances = () => [];',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
@@ -51,10 +51,7 @@ beforeEach(() => {
   // null observation here keeps the non-identity-focused cases from invoking
   // the platform WMI probe.  PID-reuse behavior remains covered by the
   // dedicated process-lifecycle tests and the explicit cache tests above.
-  workerStatus._setLiveness(workerStatus.createWorkerStatusLiveness({
-    probePid: () => 'alive',
-    readStartTime: (_pid, expectedStartTime) => expectedStartTime || TEST_PROCESS_START_TIME,
-  }));
+  workerStatus._setGetProcessStartTime(() => null);
   // pane の各入力・出力ケースは、明示的な lock 拒否ケース以外では
   // ロック取得のOS照会を検証対象にしない。実際の lock 拒否は専用ケースで
   // false を注入して確認する。
@@ -125,9 +122,7 @@ test('サブプロセス: --help は code 0 で usage を表示し、新しい�
 test('サブプロセス: status は workers.json の生存状態をJSONで返す', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-cli-');
   try {
-    writeWorkers(workspace, { alive: processLiveness.writeRef(
-      { workerName: 'alive' }, processLiveness.readRef({ pid: process.pid, startTime: TEST_PROCESS_START_TIME })
-    ) });
+    writeWorkers(workspace, { alive: { pid: process.pid } });
     const result = runCli([
       'status', '--workspace', workspace, '--worker-name', 'alive',
     ]);
@@ -190,9 +185,7 @@ test('サブプロセス: workers.json の読み取り失敗は running:false �
 test('サブプロセス: list は見出しと状態ドットを表示する', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-list-cli-');
   try {
-    writeWorkers(workspace, { alive: processLiveness.writeRef(
-      { workerName: 'alive' }, processLiveness.readRef({ pid: process.pid, startTime: TEST_PROCESS_START_TIME })
-    ) });
+    writeWorkers(workspace, { alive: { pid: process.pid } });
     const result = runCli(['list', '--workspace', workspace]);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stderr, '');
@@ -208,9 +201,7 @@ test('サブプロセス: list は見出しと状態ドットを表示する', (
 test('サブプロセス: list --json は機械可読な JSON 配列を返す', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-list-json-');
   try {
-    writeWorkers(workspace, { alive: processLiveness.writeRef(
-      { workerName: 'alive' }, processLiveness.readRef({ pid: process.pid, startTime: TEST_PROCESS_START_TIME })
-    ) });
+    writeWorkers(workspace, { alive: { pid: process.pid } });
     const result = runCli(['list', '--workspace', workspace, '--json']);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stderr, '');

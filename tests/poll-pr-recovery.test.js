@@ -38,7 +38,7 @@ test('slow workerが消えたrunningレコードはunavailableへ回収する', 
   });
   const output = [];
   const events = recoverOrphanedSlowRuns(workspace, {
-    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'dead' }),
+    isProcessAliveFn: () => false,
     nowFn: () => '2026-09-27T01:00:00.000Z',
     writeStdoutFn: (line) => output.push(line),
   });
@@ -64,12 +64,13 @@ test('PIDが生きていても起動時刻が違えばrunningを残さない', (
     abc: { status: 'running', testedHead: 'abc', pid: 999, startTime: '2026-09-27T00:00:00.000Z' },
   });
   recoverOrphanedSlowRuns(workspace, {
-    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-09-27T02:00:00.000Z' }),
+    isProcessAliveFn: () => true,
+    getProcessStartTimeFn: () => '2026-09-27T02:00:00.000Z',
     writeStdoutFn: () => {},
   });
   const state = JSON.parse(fs.readFileSync(path.join(workspace, '.gh-maestro', 'poll-slow-test-42.json'), 'utf8'));
   assert.equal(state.runs.abc.status, 'unavailable');
-  assert.equal(state.runs.abc.result.error, 'slow-worker-exited-without-result');
+  assert.equal(state.runs.abc.result.error, 'slow-worker-identity-mismatch');
 });
 
 test('回収対象のworktreeとIssue情報が残っていればunavailable層を申告する', () => {
@@ -86,7 +87,7 @@ test('回収対象のworktreeとIssue情報が残っていればunavailable層�
 
   const declarations = [];
   recoverOrphanedSlowRuns(workspace, {
-    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'dead' }),
+    isProcessAliveFn: () => false,
     getPrHeadFn: () => headSha,
     declareTestResultFn: (args) => {
       declarations.push(args);
@@ -108,23 +109,11 @@ test('PIDと起動時刻が一致するslow workerはrunningのまま待つ', ()
     abc: { status: 'running', testedHead: 'abc', pid: 999, startTime: '2026-09-27T00:00:00.000Z' },
   });
   const events = recoverOrphanedSlowRuns(workspace, {
-    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-09-27T00:00:00.500Z' }),
+    isProcessAliveFn: () => true,
+    getProcessStartTimeFn: () => '2026-09-27T00:00:00.500Z',
     writeStdoutFn: () => {},
   });
   const state = JSON.parse(fs.readFileSync(path.join(workspace, '.gh-maestro', 'poll-slow-test-42.json'), 'utf8'));
   assert.deepEqual(events, []);
   assert.equal(state.runs.abc.status, 'running');
-});
-
-test('slow worker の判定不能時は running を保持し回収を中断する', () => {
-  const workspace = workspaceWithState({
-    abc: { status: 'running', testedHead: 'abc', pid: 999, startTime: '2026-09-27T00:00:00.000Z' },
-  });
-  const statePath = path.join(workspace, '.gh-maestro', 'poll-slow-test-42.json');
-  const original = fs.readFileSync(statePath, 'utf8');
-  const liveness = require('../scripts/shared/process-liveness').createLiveness({
-    probePid: () => 'unknown', readStartTime: () => null,
-  });
-  assert.throws(() => recoverOrphanedSlowRuns(workspace, { liveness }), /判定できません/);
-  assert.equal(fs.readFileSync(statePath, 'utf8'), original);
 });

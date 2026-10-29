@@ -12,19 +12,22 @@ const headlessLaunch = require('../../scripts/shared/headless-launch');
 const workerLease = require('../../scripts/shared/worker-lease');
 const closedPrGuard = require('../../scripts/shared/closed-pr-guard');
 const residentAudit = require('../../scripts/shared/resident-audit');
-const processLiveness = require('../../scripts/shared/process-liveness');
 
+// 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
+// PIDを誤って渡す回帰は即座に検出する。
 const TEST_SESSION_START_TIME = '2026-07-25T00:00:00.000Z';
+lifecycle.getProcessStartTime = () => TEST_SESSION_START_TIME;
 const supervisor = require('../../scripts/worker-supervisor');
-const TEST_LIVENESS = processLiveness.createLiveness({
-  probePid: () => 'alive',
-  readStartTime: (_pid, expectedStartTime) => expectedStartTime || TEST_SESSION_START_TIME,
+supervisor._setGetProcessStartTime((pid) => {
+  assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
+  return TEST_SESSION_START_TIME;
 });
 
 // 直接 main()/runOnce() の反復でOSのプロセス起動時刻取得を行うと、Windowsでは
 // 各スキャンがPowerShell/WMI待ちになる。PID再利用を含む実照合ロジックは
 // tests/process-lifecycle.test.js で検証し、ここでは既存の注入境界から親生存だけを差し替える。
 // 下部のCLI integrationは実argv・実プロセス境界を通す。
+const TEST_PARENT_CHECKER = () => true;
 
 // テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
 // 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
@@ -190,7 +193,7 @@ function resetHeadlessLaunchMocks({ pid = RESUMED_PID } = {}) {
     lastSpawnCalls.push({ cmd, args, options });
     return { pid, on() { return this; }, unref() {} };
   });
-  headlessLaunch._setLiveness(TEST_LIVENESS);
+  headlessLaunch._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
 }
 
 function resetAllMocks() {
@@ -199,9 +202,8 @@ function resetAllMocks() {
   resetGhApiComments();
   resetHeadlessLaunchMocks();
   setWorkersIdle();
-  workerLease._setLiveness(TEST_LIVENESS);
-  lifecycle._setLiveness(TEST_LIVENESS);
-  supervisor._setParentLiveness(TEST_LIVENESS);
+  workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+  supervisor._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
   // resume直後の生存確認スリープは実待機させない
   supervisor._setSleep(() => {});
   // 通知は実 _notifyOrchestrator を通しつつ、内部 spawn だけを安全なモック（実spawnを起こさない）
@@ -523,7 +525,6 @@ function createFastCliPreload() {
   const childProcessPath = require.resolve('../../scripts/shared/child-process');
   const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
   const leasePath = require.resolve('../../scripts/shared/worker-lease');
-  const processLivenessPath = require.resolve('../../scripts/shared/process-liveness');
   const source = [
     "'use strict';",
     `const childProcess = require(${JSON.stringify(childProcessPath)});`,
@@ -542,12 +543,12 @@ function createFastCliPreload() {
     '};',
     `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
     'lifecycle.findRunningInstance = () => null;',
+    'lifecycle.getProcessStartTime = () => fixedStartTime;',
+    'lifecycle.createDeadManSwitch = () => () => true;',
     `const lease = require(${JSON.stringify(leasePath)});`,
-    `const processLiveness = require(${JSON.stringify(processLivenessPath)});`,
-    'const checker = processLiveness.createLiveness({ probePid: (pid) => isAlive(pid) ? "alive" : "dead", readStartTime: (_pid, expected) => expected || fixedStartTime });',
-    'lease._setLiveness(checker);',
-    'Object.assign(processLiveness, checker);',
-    'lifecycle._setLiveness(checker);',
+    'lease._setGetProcessStartTime(() => fixedStartTime);',
+    'lease._setIsProcessAlive(isAlive);',
+    'lease._setVerifyProcessIdentity(() => ({ match: true }));',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
   process.once('exit', () => {

@@ -24,7 +24,6 @@ const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens }
 const { workerLogPath } = require('./shared/headless-launch');
 const { readJsonFile } = require('./shared/json-file');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
-const processLiveness = require('./shared/process-liveness');
 const {
   ALL_LEAF_IDS,
   TRUNK_TO_LEAVES,
@@ -38,6 +37,7 @@ const {
   pidsDir,
   registerProcess,
   unregisterProcess,
+  getProcessStartTime,
 } = require('./process-lifecycle');
 
 // ── 定数 ────────────────────────────────────────────────────────────────────────
@@ -48,6 +48,7 @@ const DEFAULT_TOTAL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes total
 // セマンティクス: attempt 1,2 は許容し、attempt 3 を拒否する。
 const MAX_REVIEW_ATTEMPTS = 2;
 
+let _injectedGetProcessStartTime = null;
 let _injectedRegisterProcess = null;
 let _injectedUnregisterProcess = null;
 
@@ -632,11 +633,11 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
   const onSpawn = (child) => {
     if (child && child.pid) {
       try {
-        const liveness = (options && options.liveness) || processLiveness;
-        const processRef = liveness.captureProcess(child.pid);
+        const startTimeFn = (options && options.getProcessStartTimeFn) || _injectedGetProcessStartTime || getProcessStartTime;
+        const startTime = startTimeFn(child.pid) || new Date().toISOString();
         const registerFn = (options && options.registerProcessFn) || _injectedRegisterProcess || registerProcess;
         registerFn(targetWorkspace, {
-          processRef,
+          pid: child.pid,
           script: 'review-job',
           workerName: `review-job-pr-${manifest.pr}-${job.id}`,
           pr: Number(manifest.pr),
@@ -644,6 +645,7 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
           aspect: job.aspect,
           leafIds: job.leaf_ids,
           agentId: agentConfig.id,
+          startTime,
         });
         registeredPid = child.pid;
       } catch (err) {
@@ -1500,6 +1502,7 @@ module.exports = {
   _setSpawn: (fn) => { _spawn = fn || spawn; },
   _setRegisterProcess: (fn) => { _injectedRegisterProcess = fn; },
   _setUnregisterProcess: (fn) => { _injectedUnregisterProcess = fn; },
+  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
 };
 
 // ── CLIエントリポイント ────────────────────────────────────────────────────────
@@ -1598,11 +1601,13 @@ if (require.main === module) {
     if (values['--checkpoint-id']) {
       runnerPath = checkpoint.runnerLeasePath(mainWorkspace, pr, process.pid);
       fs.mkdirSync(path.dirname(runnerPath), { recursive: true });
-      runnerOwner = processLiveness.captureSelf();
+      const startTime = getProcessStartTime(process.pid);
+      if (!startTime) throw new Error('run-review-jobs の開始時刻を確認できません');
+      runnerOwner = { pid: process.pid, startTime };
       writeRunningReviewManager(runnerPath, runnerOwner);
       const manager = inspectRunningReviewManager(reviewArtifactPath(mainWorkspace, pr, '.running'), { onError: 'throw' });
-      if (manager.status !== 'live'
-          || !processLiveness.sameRef(manager.processRef, process.env.GH_MAESTRO_REVIEW_PARENT_REF)) {
+      if (manager.status !== 'live' || String(manager.pid) !== process.env.GH_MAESTRO_REVIEW_PARENT_PID ||
+          manager.startTime !== process.env.GH_MAESTRO_REVIEW_PARENT_START) {
         removeRunningReviewManagerIfOwned(runnerPath, runnerOwner);
         throw new Error('起動元 Review Manager の同一性を確認できません');
       }
