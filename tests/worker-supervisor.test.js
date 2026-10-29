@@ -3517,3 +3517,122 @@ describe('Cursor type safety', () => {
     });
   });
 });
+
+// ── orchestrator msg-poll の観測は endpoint を正本にする（PR #658 BLOCKER） ─────
+// role lease は補助メタデータで、保存に失敗しても msg-poll の所有は失われない。
+// lease の有無・内容で生きている msg-poll を dead と誤認して終了してはならない。
+
+describe('observeOrchestratorMsgPoll', () => {
+  const role = workerLease.msgPollRole('orchestrator');
+
+  function seedMsgPoll(checker, workspace, pid, instanceId) {
+    return checker.captureProcess(pid, { workspace, kind: 'resident', name: role, instanceId });
+  }
+
+  test('role lease ファイルが無くても endpoint が alive なら alive と世代を返す', () => {
+    withTempDir((ws) => {
+      const checker = createTestLiveness({ probePid: () => 'alive' });
+      const ref = seedMsgPoll(checker, ws, 5151, 'msgpoll-gen-1');
+      const observed = supervisor.observeOrchestratorMsgPoll(ws, checker);
+      assert.equal(observed.state, 'alive');
+      assert.equal(observed.pid, 5151);
+      assert.equal(checker.sameRef(observed.processRef, ref), true);
+      assert.equal(fs.existsSync(path.join(canonicalWorkspace(ws), '.gh-maestro', 'leases',
+        `${workerLease.roleLeaseKey(role)}.json`)), false);
+    });
+  });
+
+  test('role lease の保存に失敗した msg-poll も alive として観測する', () => {
+    withTempDir((ws) => {
+      const checker = createTestLiveness({ probePid: (pid) => (pid === process.pid ? 'alive' : 'dead') });
+      workerLease._setLiveness(checker);
+      const origRenameSync = fs.renameSync;
+      const origWriteFileSync = fs.writeFileSync;
+      const origWarn = console.warn;
+      const leaseDir = path.join(canonicalWorkspace(ws), '.gh-maestro', 'leases');
+      let res;
+      try {
+        // lease の新規作成（wx）も更新（rename）も失敗させる。
+        fs.writeFileSync = (file, ...rest) => {
+          if (String(file).startsWith(leaseDir) && String(file).endsWith('.json')) {
+            const error = new Error('EPERM: simulated lease write failure');
+            error.code = 'EPERM';
+            throw error;
+          }
+          return origWriteFileSync(file, ...rest);
+        };
+        fs.renameSync = () => {
+          const error = new Error('EPERM: simulated rename contention');
+          error.code = 'EPERM';
+          throw error;
+        };
+        console.warn = () => {};
+        res = workerLease.acquireResidentLease({ workspace: ws, role });
+      } finally {
+        fs.renameSync = origRenameSync;
+        fs.writeFileSync = origWriteFileSync;
+        console.warn = origWarn;
+      }
+      try {
+        assert.equal(res.acquired, true);
+        assert.equal(fs.existsSync(path.join(leaseDir, `${workerLease.roleLeaseKey(role)}.json`)), false,
+          'lease は保存されていない前提');
+        const observed = supervisor.observeOrchestratorMsgPoll(ws, checker);
+        assert.equal(observed.state, 'alive');
+        assert.equal(observed.pid, process.pid);
+      } finally {
+        res.release();
+        workerLease._setLiveness(null);
+      }
+    });
+  });
+
+  test('endpoint が dead なら role lease が残っていても dead を返す', () => {
+    withTempDir((ws) => {
+      const checker = createTestLiveness({ probePid: (pid) => (pid === 5151 ? 'dead' : 'alive') });
+      const ref = seedMsgPoll(checker, ws, 5151, 'msgpoll-gen-1');
+      workerLease.createResidentLeaseStore(ws).write(workerLease.roleLeaseKey(role),
+        checker.writeRef({ workerName: role, phase: 'active', createdAt: 'x' }, ref));
+      const observed = supervisor.observeOrchestratorMsgPoll(ws, checker);
+      assert.equal(observed.state, 'dead');
+      assert.equal(observed.processRef, null);
+    });
+  });
+
+  test('endpoint の世代が替われば processRef が別世代になる', () => {
+    withTempDir((ws) => {
+      const checker = createTestLiveness({ probePid: () => 'alive' });
+      const first = seedMsgPoll(checker, ws, 5151, 'msgpoll-gen-1');
+      const before = supervisor.observeOrchestratorMsgPoll(ws, checker);
+      seedMsgPoll(checker, ws, 6262, 'msgpoll-gen-2');
+      const after = supervisor.observeOrchestratorMsgPoll(ws, checker);
+      assert.equal(checker.sameRef(before.processRef, first), true);
+      assert.equal(after.state, 'alive');
+      assert.equal(after.pid, 6262);
+      assert.equal(checker.sameRef(before.processRef, after.processRef), false);
+    });
+  });
+
+  test('endpoint の判定不能は unknown として返す', () => {
+    withTempDir((ws) => {
+      const checker = createTestLiveness({ probeEndpoint: () => 'unknown' });
+      const observed = supervisor.observeOrchestratorMsgPoll(ws, checker);
+      assert.equal(observed.state, 'unknown');
+    });
+  });
+
+  test('manifest 破損（LIVENESS_CORRUPT）は例外にせず unknown として報告する', () => {
+    withTempDir((ws) => {
+      const checker = {
+        observeResource: () => {
+          const error = new Error('process liveness manifest が壊れています');
+          error.code = 'LIVENESS_CORRUPT';
+          throw error;
+        },
+      };
+      const observed = supervisor.observeOrchestratorMsgPoll(ws, checker);
+      assert.equal(observed.state, 'unknown');
+      assert.equal(observed.error.code, 'LIVENESS_CORRUPT');
+    });
+  });
+});

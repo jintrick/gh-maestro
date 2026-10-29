@@ -55,9 +55,7 @@ const {
 const processLiveness = require('./shared/process-liveness');
 const {
   acquireResidentLease,
-  createResidentLeaseStore,
   msgPollRole,
-  roleLeaseKey,
   WORKER_SUPERVISOR_ROLE,
 } = require('./shared/worker-lease');
 const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
@@ -133,26 +131,32 @@ Description:
     起動時刻）が復帰した場合のみHANG_RESUMEDを出力する。通知抑止にはworkers.jsonのPIDとworker起動時刻をカーソルキーとして使う。これは通知世代の補助情報であり、生死の判定は決定論的OS endpointを使う。
   居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みで、報告から10秒以上経過してもendpointがaliveの場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（ハング検知とは独立）。通知抑止はPIDとworker起動時刻をカーソルキーとして使う。
   停止検知: workers.json に登録されたワーカーのendpointがdeadと判定された場合、STOP_DETECTEDを出力しorchestratorへ通知する。通知本文には hasReportedSinceStart による報告状況（報告済み/未投稿）が明記される。プロセスの停止・再起動・削除等の自動介入は行わない。
-  orchestrator msg-poll のlease世代を確認し、monitor takeover中は新しいmsg-pollへの接続を待つ。
+  orchestrator msg-poll の決定論的endpointと世代を確認し、monitor takeover中は新しいmsg-pollへの接続を待つ。
   一定時間以内に再接続できなければ、通常終了して自分のleaseを解放する。`;
 
+/**
+ * orchestrator msg-poll の生死と世代を、その role の決定論的 endpoint から観測する。
+ *
+ * role lease ファイルは停止用の補助メタデータであり、保存に失敗しても msg-poll の
+ * 所有は失われない（worker-lease.js の acquireResidentEndpointLease）。lease を読んで
+ * 判定すると、生きている msg-poll を「戻らない」と誤認して終了してしまうため、
+ * endpoint と、claim と同時に書かれる manifest だけを正本にする。
+ *
+ * @returns {{ state: 'alive'|'dead'|'unknown', processRef: string|null, pid: number|null, error: Error|null }}
+ */
 function observeOrchestratorMsgPoll(workspace, checker = processLiveness) {
-  let lease;
+  let observed;
   try {
-    lease = createResidentLeaseStore(workspace).read(roleLeaseKey(msgPollRole('orchestrator')));
+    observed = checker.observeResource({ workspace, kind: 'resident', name: msgPollRole('orchestrator') });
   } catch (error) {
+    // manifest 破損（LIVENESS_CORRUPT）を含む。破損は修復せず unknown として報告する。
     return { state: 'unknown', processRef: null, pid: null, error };
   }
-  if (!lease) return { state: 'dead', processRef: null, pid: null, error: null };
-  let processRef;
-  try { processRef = checker.readRef(lease); } catch (error) {
-    return { state: 'unknown', processRef: null, pid: lease.pid ?? null, error };
+  if (observed.state === 'alive') {
+    return { state: 'alive', processRef: observed.ref, pid: observed.manifest?.pid ?? null, error: null };
   }
-  let state;
-  try { state = checker.observe(processRef); } catch (error) {
-    return { state: 'unknown', processRef, pid: lease.pid ?? null, error };
-  }
-  return { state, processRef, pid: lease.pid ?? null, error: null };
+  if (observed.state === 'dead') return { state: 'dead', processRef: null, pid: null, error: null };
+  return { state: 'unknown', processRef: null, pid: null, error: observed.error || null };
 }
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
@@ -1520,6 +1524,7 @@ module.exports = {
   _setParentDeathExit: (fn) => { _parentDeathExit = fn; },
   _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
   main,
+  observeOrchestratorMsgPoll,
   readCursor,
   writeCursor,
   cursorPath,

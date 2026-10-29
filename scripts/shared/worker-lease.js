@@ -40,6 +40,9 @@ let _killProcessTree = killProcessTree;
 let _killProcess = (pid) => process.kill(pid, 'SIGKILL');
 let _sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
+/** activateLease が endpoint 確立を待つときの観測間隔（ms）。 */
+const ACTIVATE_POLL_MS = 100;
+
 // ── Lease Store 抽象 ───────────────────────────────────────────────────────────
 //
 // Lease store は以下のインターフェースを持つプレーンオブジェクト:
@@ -255,7 +258,7 @@ function releaseLeaseLock(store, key) {
  *   4. ロック下で再読み取り→再判定→stale回収→原子的新規作成
  *
  * 作成されたリースエントリの pid は起動元（launcher）のPID。
- * ワーカー起動後に activateLease() で実際のワーカーPIDに更新する。
+ * ワーカー起動後に activateLease() で、ワーカーの endpoint 確立を確認してから実際のワーカー参照に更新する。
  *
  * @param {object} store lease store
  * @param {string} key リースキー（workerName）
@@ -302,6 +305,27 @@ function acquireLease(store, key, { processRef, workerName }) {
         const error = new Error(`worker "${workerName}" の lease resource metadata が破損しています`);
         error.code = 'LIVENESS_CORRUPT';
         throw error;
+      }
+      if (!hasResourceKey) {
+        // PR1 形式の lease の保持者は決定論的 endpoint を持たないため、ワーカー endpoint の
+        // dead は保持者の死亡を意味しない。PID の不在（ESRCH）だけを死亡の証拠とし、
+        // PID が存在する場合は旧ワーカーの稼働と PID 再利用を区別できないので拒否する。
+        const legacyRef = checker.readRef(entry);
+        if (!legacyRef) {
+          const error = new Error(`worker "${workerName}" の PR1 形式 lease の pid が不正です: ${JSON.stringify(entry)}`);
+          error.code = 'LIVENESS_CORRUPT';
+          throw error;
+        }
+        const legacyState = checker.observe(legacyRef);
+        if (legacyState !== 'dead') {
+          const error = new Error(
+            `worker "${workerName}" の PR1 形式 lease（pid ${entry.pid}）の保持者の生死を判定できません。`
+            + '旧版のワーカーが稼働中の可能性があるため起動しません。'
+          );
+          error.code = 'LIVENESS_UNKNOWN';
+          throw error;
+        }
+        return;
       }
       // During initialization the lease describes the launcher, not the worker.
       // Its endpoint remains relevant until activation replaces it with the worker ref.
@@ -412,22 +436,44 @@ function releaseLease(store, key, processRef) {
  * 起動元（launcher）のPIDで予約したリースを、実際に起動したワーカープロセスの
  * PID・resourceKey で更新する。
  *
+ * ワーカーは別プロセスとして起動した後に自分の決定論的 endpoint を確立するため、
+ * 呼び出し元は waitMs を指定して endpoint の確立を待つ。待機中も launcher は自分の
+ * endpoint と initializing lease を持ち続けるので、予約に空白ができない。
+ * 期限内に endpoint の確立を確認できなければ例外を投げ、lease は launcher 参照の
+ * まま変更しない（起動中の子をどう扱うかは呼び出し元が決める）。
+ * この待機は単一の OS 資源の確立待ちであり、期限は決定論的に強制する。
+ *
  * store.update() は temp+rename による原子更新のため、並行 read が
  * 空ファイルや不完全 JSON を読むことは構造的に起きない。
  *
  * @param {object} store lease store
  * @param {string} key リースキー
- * @param {object} opt
- * @param {string} opt.processRef ワーカープロセスの不透明な参照
+ * @param {string} processRef ワーカープロセスの不透明な参照
+ * @param {object} [opt]
+ * @param {number} [opt.waitMs=0] endpoint 確立を待つ上限時間（ms）
+ * @throws {Error} lease が消えている、期限内に生存を確認できない、または保存に失敗した場合
  */
-function activateLease(store, key, processRef) {
+function activateLease(store, key, processRef, { waitMs = 0 } = {}) {
   const existing = store.read(key);
-  if (!existing) return; // 何らかの理由でリースが消えている → 何もしない
-
-  if (liveness().observe(processRef) !== 'alive') {
-    throw new Error('worker lease: アクティベート対象の生存を確認できません');
+  if (!existing) {
+    throw new Error(`worker lease "${key}" がアクティベート前に消えています`);
   }
-  store.update(key, liveness().writeRef({
+
+  const checker = liveness();
+  const deadline = Date.now() + Math.max(0, waitMs);
+  let state = checker.observe(processRef);
+  while (state !== 'alive' && Date.now() < deadline) {
+    _sleep(Math.min(ACTIVATE_POLL_MS, Math.max(1, deadline - Date.now())));
+    state = checker.observe(processRef);
+  }
+  if (state !== 'alive') {
+    const error = new Error(
+      `worker lease: アクティベート対象の生存を確認できません（${state}、待機 ${Math.max(0, waitMs)}ms）`
+    );
+    if (state === 'unknown') error.code = 'LIVENESS_UNKNOWN';
+    throw error;
+  }
+  store.update(key, checker.writeRef({
     ...existing,
     // ワーカープロセス起動まで完了したら active（initializing → active。Issue #207）
     phase: 'active',
@@ -681,8 +727,10 @@ function acquireResidentEndpointLease(options) {
       if (existing) store.update(key, record);
       else store.write(key, record);
     } catch (error) {
-      // The endpoint is the ownership record. Disk metadata is a stop/reporting aid and
-      // must not make an already-held endpoint look unowned or start a duplicate process.
+      // The endpoint is the ownership record. Disk metadata is a stop/reporting aid:
+      // liveness readers (isResidentLeaseLive, worker-supervisor's msg-poll observer)
+      // consult the endpoint and its manifest, so a failed metadata write does not make
+      // this live owner look dead. Failing the start here would stop delivery instead.
       console.warn(`role "${role}" のリースメタデータを保存できません: ${error.message}`);
     }
 
@@ -860,7 +908,7 @@ function acquireResidentLease({
               staleReclaimed: result.staleReclaimed,
             };
           } catch (error) {
-            if (error.code === 'LIVENESS_UNKNOWN') throw error;
+            if (error.code === 'LIVENESS_UNKNOWN' || error.code === 'LIVENESS_CORRUPT') throw error;
             // A non-plugin launcher may have claimed the role during this pass.
           }
         } else {
@@ -920,7 +968,7 @@ function acquireResidentLease({
         activateLease(store, key, selfRef);
         return { acquired: true, key, release: () => releaseLease(store, key, selfRef), staleReclaimed: res.staleReclaimed };
       } catch (error) {
-        if (error.code === 'LIVENESS_UNKNOWN') throw error;
+        if (error.code === 'LIVENESS_UNKNOWN' || error.code === 'LIVENESS_CORRUPT') throw error;
       }
       _sleep(HANDOFF_POLL_MS);
     }
@@ -943,7 +991,7 @@ function acquireResidentLease({
     // 原因で、「別プロセスが稼働中」を意味しない（Issue #252）。リース本体は acquireLease で
     // 作成済み（phase='initializing'）のため、起動を拒否せず警告して継続する。このリースは
     // クリーン終了時（release）に削除され、異常終了時は stale として次回起動時に回収される
-    // （spawn-worker.js の activateWorkerLease 失敗処理と同型）。
+    // （lease の保持者はこのプロセス自身で既に alive のため、予約が回収される空白は生じない）。
     console.warn(`role "${role}" のリースアクティベートに失敗しました: ${e.message}`);
   }
   return { acquired: true, key, release: () => releaseLease(store, key, selfRef), staleReclaimed: res.staleReclaimed };

@@ -473,34 +473,108 @@ test('acquireLease: live lease があればエラーを投げる（重複起動�
   }
 });
 
-test('acquireLease: worker endpointがdeadならPIDが存在するPR1 leaseを遺物として回収する', () => {
+// PR1 形式（resourceKey/instanceId なし）の lease は、保持者が決定論的 endpoint を持たない。
+// ワーカー endpoint の dead は保持者の死亡を示さないため、PID の不在（ESRCH）だけで回収する。
+function writePr1WorkerLease(store, workerName, pid) {
+  const entry = {
+    pid,
+    workerName,
+    createdAt: '2026-07-28T00:00:00.000Z',
+    phase: 'active',
+    // テスト double が startTime 付き記録を test endpoint へ読み替えないよう、
+    // 本物の PR1 記録と同じ endpointless 経路を明示する。
+    legacyEndpointless: true,
+  };
+  store.write(workerName, entry);
+  return entry;
+}
+
+function launcherFor(checker, store, workerName) {
+  return checker.captureSelf({ workspace: store.workspace, kind: 'launcher', name: workerName });
+}
+
+test('acquireLease: worker endpointがdeadでもPIDが存在するPR1 leaseは回収せず起動を拒否する', () => {
   const store = tempStore();
   const workerName = 'issue-1-coder-test';
   try {
-    const checker = createTestLiveness({ probePid: () => 'alive' });
+    const checker = createTestLiveness({
+      probePid: (pid) => (pid === 8888 || pid === process.pid ? 'alive' : 'dead'),
+    });
     installTestLiveness(checker);
-    store.write(workerName, {
-      pid: 8888,
-      startTime: '2026-07-28T00:00:00.000Z',
-      workerName,
-      createdAt: '2026-07-28T00:00:00.000Z',
-      phase: 'active',
-    });
-    const launcher = checker.captureSelf({
-      workspace: store.workspace,
-      kind: 'launcher',
-      name: workerName,
-    });
+    const entry = writePr1WorkerLease(store, workerName, 8888);
+    const launcher = launcherFor(checker, store, workerName);
 
-    const result = lease.acquireLease(store, workerName, {
-      processRef: launcher,
-      workerName,
+    assert.throws(
+      () => lease.acquireLease(store, workerName, { processRef: launcher, workerName }),
+      (error) => error.code === 'LIVENESS_UNKNOWN' && /PR1 形式 lease（pid 8888）/.test(error.message),
+    );
+    assert.deepEqual(store.read(workerName), entry, '判定不能な旧 lease は削除も上書きもしない');
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireLease: PR1 lease の PID 照会が ESRCH 以外で失敗したら unknown として拒否する', () => {
+  const store = tempStore();
+  const workerName = 'issue-1-coder-test';
+  try {
+    // test double の kill は probePid の unknown を EPERM として投げる（ESRCH ではない）。
+    const checker = createTestLiveness({
+      probePid: (pid) => (pid === process.pid ? 'alive' : 'unknown'),
     });
+    installTestLiveness(checker);
+    const entry = writePr1WorkerLease(store, workerName, 8888);
+    const launcher = launcherFor(checker, store, workerName);
+
+    assert.throws(
+      () => lease.acquireLease(store, workerName, { processRef: launcher, workerName }),
+      (error) => error.code === 'LIVENESS_UNKNOWN' && /生死を判定できません/.test(error.message),
+    );
+    assert.deepEqual(store.read(workerName), entry);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireLease: PR1 lease の PID が ESRCH なら遺物として回収する', () => {
+  const store = tempStore();
+  const workerName = 'issue-1-coder-test';
+  try {
+    const checker = createTestLiveness({
+      probePid: (pid) => (pid === process.pid ? 'alive' : 'dead'),
+    });
+    installTestLiveness(checker);
+    writePr1WorkerLease(store, workerName, 8888);
+    const launcher = launcherFor(checker, store, workerName);
+
+    const result = lease.acquireLease(store, workerName, { processRef: launcher, workerName });
 
     assert.equal(result.acquired, true);
     assert.equal(result.staleReclaimed, true);
     assert.equal(store.read(workerName).pid, process.pid);
     lease.releaseLease(store, workerName, launcher);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireLease: pid が不正な PR1 lease は corrupt として拒否しファイルを保持する', () => {
+  const store = tempStore();
+  const workerName = 'issue-1-coder-test';
+  try {
+    const checker = createTestLiveness({
+      probePid: (pid) => (pid === process.pid ? 'alive' : 'dead'),
+    });
+    installTestLiveness(checker);
+    const entry = { pid: 'not-a-pid', workerName, createdAt: 'x', legacyEndpointless: true };
+    store.write(workerName, entry);
+    const launcher = launcherFor(checker, store, workerName);
+
+    assert.throws(
+      () => lease.acquireLease(store, workerName, { processRef: launcher, workerName }),
+      (error) => error.code === 'LIVENESS_CORRUPT' && /pid が不正です/.test(error.message),
+    );
+    assert.deepEqual(store.read(workerName), entry);
   } finally {
     cleanupStore(store);
   }
@@ -1117,10 +1191,91 @@ test('activateLease: リースのPIDとOS資源IDを実際のワーカー情報�
   }
 });
 
-test('activateLease: リースが存在しなければ何もしない（エラーにしない）', () => {
+test('activateLease: リースが消えていれば例外を投げ、無 lease のワーカーを成功扱いにしない', () => {
   const store = tempStore();
   try {
-    assert.doesNotThrow(() => lease.activateLease(store, 'nonexistent', null));
+    assert.throws(
+      () => lease.activateLease(store, 'nonexistent', testProcessRef(4242)),
+      /アクティベート前に消えています/,
+    );
+    assert.equal(store.read('nonexistent'), null);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+function writeInitializingLease(store) {
+  const existing = {
+    pid: 100, workerName: 'w', createdAt: 'x', phase: 'initializing', legacyEndpointless: true,
+  };
+  store.write('test-key', existing);
+  return existing;
+}
+
+test('activateLease: ワーカーの endpoint が確立するまで待ってから lease を移す', () => {
+  const store = tempStore();
+  try {
+    let workerUp = false;
+    const checker = createTestLiveness({
+      probePid: (pid) => (pid === 4242 ? (workerUp ? 'alive' : 'dead') : 'alive'),
+    });
+    installTestLiveness(checker);
+    const existing = writeInitializingLease(store);
+    const workerRef = checker.captureProcess(4242, 'worker:w', 'worker-instance');
+    let sleeps = 0;
+    lease._setSleep(() => {
+      sleeps += 1;
+      assert.deepEqual(store.read('test-key'), existing, '確立前は launcher の予約を書き換えない');
+      // 3回目の待機中にワーカーが endpoint を開く
+      if (sleeps === 3) workerUp = true;
+    });
+
+    lease.activateLease(store, 'test-key', workerRef, { waitMs: 60000 });
+
+    assert.equal(sleeps, 3);
+    const entry = store.read('test-key');
+    assert.equal(entry.pid, 4242);
+    assert.equal(entry.instanceId, 'worker-instance');
+    assert.equal(entry.phase, 'active');
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('activateLease: 期限内に endpoint が確立しなければ投げて launcher の予約を保持する', () => {
+  const store = tempStore();
+  try {
+    const checker = createTestLiveness({ probePid: (pid) => (pid === 4242 ? 'dead' : 'alive') });
+    installTestLiveness(checker);
+    const existing = writeInitializingLease(store);
+    const workerRef = checker.captureProcess(4242, 'worker:w', 'worker-instance');
+    lease._setSleep((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+
+    const started = Date.now();
+    assert.throws(
+      () => lease.activateLease(store, 'test-key', workerRef, { waitMs: 50 }),
+      (error) => /生存を確認できません（dead/.test(error.message) && error.code === undefined,
+    );
+    assert.ok(Date.now() - started >= 50, '期限まで待ってから失敗する');
+    assert.deepEqual(store.read('test-key'), existing);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('activateLease: 期限まで unknown なら LIVENESS_UNKNOWN で投げて予約を保持する', () => {
+  const store = tempStore();
+  try {
+    const checker = createTestLiveness({ probePid: (pid) => (pid === 4242 ? 'unknown' : 'alive') });
+    installTestLiveness(checker);
+    const existing = writeInitializingLease(store);
+    const workerRef = checker.captureProcess(4242, 'worker:w', 'worker-instance');
+
+    assert.throws(
+      () => lease.activateLease(store, 'test-key', workerRef, { waitMs: 0 }),
+      (error) => error.code === 'LIVENESS_UNKNOWN',
+    );
+    assert.deepEqual(store.read('test-key'), existing);
   } finally {
     cleanupStore(store);
   }

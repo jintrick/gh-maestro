@@ -437,6 +437,42 @@ function establishOrchestratorBaseline(workspace, { repo, issue, listCommentsFn 
   return { ok: true, count: ids.length };
 }
 
+/** 起動したワーカーが自分の決定論的 endpoint を確立するまで待つ上限時間（ms）。 */
+const WORKER_ENDPOINT_WAIT_MS = 10000;
+
+/**
+ * 起動直後のワーカーの endpoint 確立を待ってから lease をワーカー参照へ移す。
+ *
+ * 子は spawn 後に別プロセスとして endpoint を開くため、確立前に launcher が終了すると
+ * launcher とワーカーの両 endpoint が dead になり、起動中の予約が回収されうる。
+ * activateLease が endpoint を確認するまで launcher は initializing lease を保持し続ける。
+ * 確認できなければ、追跡されないワーカーを残さないよう子のツリーを停止して失敗を返す。
+ *
+ * @param {object} opt
+ * @param {object} opt.store lease store
+ * @param {string} opt.workerName
+ * @param {{ pid: number, processRef: string }} opt.launched launchAgentHeadless の戻り値
+ * @param {number} [opt.waitMs]
+ * @param {Function} [opt.activate] テスト用の注入口
+ * @param {Function} [opt.kill] テスト用の注入口
+ * @returns {{ ok: true } | { ok: false, error: Error, stopError: Error|null }}
+ */
+function activateLaunchedWorkerLease({
+  store, workerName, launched,
+  waitMs = WORKER_ENDPOINT_WAIT_MS,
+  activate = activateWorkerLease,
+  kill = killProcessTree,
+}) {
+  try {
+    activate(store, workerName, launched.processRef, { waitMs });
+    return { ok: true };
+  } catch (error) {
+    let stopError = null;
+    try { kill(launched.pid); } catch (e) { stopError = e; }
+    return { ok: false, error, stopError };
+  }
+}
+
 module.exports = {
   shouldPruneStaleWorker,
   cleanupRolelessWorkers,
@@ -444,6 +480,8 @@ module.exports = {
   establishOrchestratorBaseline,
   parseWorkerArgs,
   ensureStatusPaneForWorkspace,
+  activateLaunchedWorkerLease,
+  WORKER_ENDPOINT_WAIT_MS,
   _setEnsureStatusPane: (fn) => { _ensureStatusPane = fn || defaultEnsureStatusPane; },
   _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
 };
@@ -937,14 +975,23 @@ try {
   fail(e.message);
 }
 
-// --- リースを実際のワーカーPIDでアクティベート ---
-// 予約リース（launcher PID）を実際のワーカープロセス情報に更新する。
-try {
-  activateWorkerLease(leaseStore, workerName, launched.processRef);
-} catch (e) {
-  console.warn(`spawn-worker: リースアクティベートに失敗しました: ${e.message}`);
-  // ワーカー本体は起動済みのためロールバックしない（リースは予約状態のまま残るが、
-  // launcher終了後にstale判定されるため次回起動時に回収される）。
+// --- ワーカーの endpoint 確立を待ってリースをアクティベート ---
+// 予約リース（launcher 参照）は、ワーカーが自分の endpoint を確立したことを確認してから
+// ワーカー参照へ移す。確認前に launcher が終了すると予約が回収されうるため。
+// 確認できなければ子を停止し、worktree をロールバックして起動失敗とする。
+{
+  const activation = activateLaunchedWorkerLease({ store: leaseStore, workerName, launched });
+  if (!activation.ok) {
+    const reason = `ワーカー（pid ${launched.pid}）の起動を確認できません: ${activation.error.message}`
+      + (activation.stopError
+        ? `。子プロセスの停止にも失敗しました（${activation.stopError.message}）。pid ${launched.pid} が残っている可能性があります`
+        : '。子プロセスを停止しました');
+    if (executionId) {
+      try { markLaunchFailure(workspace, executionId, reason); } catch (_) {}
+    }
+    rollbackWorktree();
+    fail(reason);
+  }
 }
 
 // --- workers.json にワーカーを登録（失敗時はプロセスもロールバック） ---

@@ -712,3 +712,69 @@ test('establishOrchestratorBaseline: markRead が失敗すれば失敗として�
 // ── セッション同一性検証（Issue #444） ─────────────────────────────────────────
 // スキル未ロードのセッションからの直接実行や古いセッションIDの使い回しを防ぐため、
 // 副作用の前に msg-state/orchestrator.json の sessionId と厳密照合する。
+
+// ── ワーカー endpoint 確立前の lease 有効化（PR #658 BLOCKER） ──────────────────
+// launcher は子が自分の決定論的 endpoint を開いたことを確認してから lease を移す。
+// 確認できなければ、追跡されないワーカーを残さないよう子を停止して失敗を返す。
+
+const { activateLaunchedWorkerLease } = require(SCRIPT);
+const workerLeaseLib = require('../scripts/shared/worker-lease');
+const { createTestLiveness } = require('./helpers/process-liveness-test-double');
+const { resourceKeyFor } = require('../scripts/shared/process-liveness');
+
+function withLaunchFixture(probePid, fn) {
+  const ws = tempDirScope.mkdtemp('ghm-spawn-activate-');
+  const checker = createTestLiveness({ probePid });
+  workerLeaseLib._setLiveness(checker);
+  try {
+    const store = workerLeaseLib.createNormalWorkerStore(ws);
+    const workerName = 'issue-1-coder-activate';
+    const launcherRef = checker.captureSelf({ workspace: store.workspace, kind: 'worker-launcher', name: workerName });
+    workerLeaseLib.acquireLease(store, workerName, { processRef: launcherRef, workerName });
+    const reserved = store.read(workerName);
+    const shimRef = checker.captureProcess(4242, { workspace: store.workspace, kind: 'worker', name: workerName });
+    return fn({ store, workerName, reserved, launched: { pid: 4242, processRef: shimRef } });
+  } finally {
+    workerLeaseLib._setLiveness(null);
+  }
+}
+
+test('activateLaunchedWorkerLease: 子の endpoint が確立しなければ子を停止し予約を launcher のまま残す', () => {
+  withLaunchFixture((pid) => (pid === 4242 ? 'dead' : 'alive'), ({ store, workerName, reserved, launched }) => {
+    const killed = [];
+    const result = activateLaunchedWorkerLease({
+      store, workerName, launched, waitMs: 20, kill: (pid) => { killed.push(pid); },
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.error.message, /生存を確認できません/);
+    assert.equal(result.stopError, null);
+    assert.deepEqual(killed, [4242]);
+    assert.deepEqual(store.read(workerName), reserved);
+    assert.equal(store.read(workerName).phase, 'initializing');
+  });
+});
+
+test('activateLaunchedWorkerLease: 子の停止に失敗したら stopError として報告する', () => {
+  withLaunchFixture((pid) => (pid === 4242 ? 'dead' : 'alive'), ({ store, workerName, launched }) => {
+    const result = activateLaunchedWorkerLease({
+      store, workerName, launched, waitMs: 0, kill: () => { throw new Error('injected kill failure'); },
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.stopError.message, /injected kill failure/);
+  });
+});
+
+test('activateLaunchedWorkerLease: 子の endpoint が確立していれば lease をワーカー参照の active へ移し、子を止めない', () => {
+  withLaunchFixture(() => 'alive', ({ store, workerName, launched }) => {
+    const killed = [];
+    const result = activateLaunchedWorkerLease({
+      store, workerName, launched, waitMs: 0, kill: (pid) => { killed.push(pid); },
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(killed, []);
+    const entry = store.read(workerName);
+    assert.equal(entry.pid, 4242);
+    assert.equal(entry.phase, 'active');
+    assert.equal(entry.resourceKey, resourceKeyFor({ workspace: store.workspace, kind: 'worker', name: workerName }));
+  });
+});
