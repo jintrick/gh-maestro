@@ -786,6 +786,9 @@ function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewW
     kind: 'review-job',
     name: String(pr),
   });
+  // The runner needs the main workspace for --gh-dir validation and retry state,
+  // while its deterministic process identity remains bound to the review worktree.
+  jobsLiveness.env.GH_MAESTRO_WORKSPACE = path.dirname(ghDir);
   const r = spawnSync(process.execPath, [
     path.join(__dirname, 'run-review-jobs.js'),
     '--manifest', manifestPath,

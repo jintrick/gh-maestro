@@ -74,7 +74,6 @@ const FAST_CLI_PRELOAD = (() => {
     `const supervisor = require(${JSON.stringify(supervisorPath)});`,
     'supervisor._setSpawn(() => ({ pid: 99990, on: () => {}, unref: () => {} }));',
     'supervisor._setFindRunningInstance(() => null);',
-    'supervisor._setFindSessionRootPid(() => null);',
     'supervisor._setIsResidentLeaseLive(() => false);',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');

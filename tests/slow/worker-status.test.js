@@ -12,8 +12,8 @@ const { beforeEach, test } = require('node:test');
 
 const workerStatus = require('../../scripts/worker-status');
 const workerLiveness = require('../../scripts/shared/worker-liveness');
-const processLiveness = require('../../scripts/shared/process-liveness');
 const { cleanSpawnEnv } = require('../_spawn-env');
+const { startLivenessOwner, stopLivenessOwner } = require('../helpers/liveness-owner');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'worker-status.js');
 const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
@@ -91,10 +91,26 @@ function removeWorkspace(workspace) {
 }
 
 function runCli(args) {
+  const workspaceIndex = args.indexOf('--workspace');
+  const workspace = workspaceIndex >= 0 ? args[workspaceIndex + 1] : undefined;
   return spawnSync(process.execPath, ['-r', FAST_STATUS_PRELOAD, SCRIPT, ...args], {
     encoding: 'utf8',
-    env: cleanSpawnEnv(),
+    env: {
+      ...cleanSpawnEnv(),
+      ...(workspace ? { GH_MAESTRO_RUNTIME_DIR: path.join(workspace, '.test-runtime') } : {}),
+    },
   });
+}
+
+function startAliveWorker(workspace, workerName = 'alive') {
+  const owner = startLivenessOwner({
+    workspace,
+    runtimeRoot: path.join(workspace, '.test-runtime'),
+    kind: 'worker',
+    name: workerName,
+  });
+  const { childPid, ...record } = owner.record;
+  return { owner, record: { ...record, workerName } };
 }
 
 function runMain(args) {
@@ -127,19 +143,19 @@ test('サブプロセス: --help は code 0 で usage を表示し、新しい�
 
 test('サブプロセス: status は workers.json の生存状態をJSONで返す', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-cli-');
+  const { owner, record } = startAliveWorker(workspace);
   try {
-    writeWorkers(workspace, { alive: processLiveness.writeRef(
-      { workerName: 'alive' }, processLiveness.readRef({ pid: process.pid, startTime: TEST_PROCESS_START_TIME })
-    ) });
+    writeWorkers(workspace, { alive: record });
     const result = runCli([
       'status', '--workspace', workspace, '--worker-name', 'alive',
     ]);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stderr, '');
     assert.deepEqual(JSON.parse(result.stdout), {
-      workerName: 'alive', running: true, pid: process.pid,
+      workerName: 'alive', running: true, pid: record.pid,
     });
   } finally {
+    stopLivenessOwner(owner);
     removeWorkspace(workspace);
   }
 });
@@ -192,16 +208,16 @@ test('サブプロセス: workers.json の読み取り失敗は running:false �
 
 test('サブプロセス: list は見出しと状態ドットを表示する', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-list-cli-');
+  const { owner, record } = startAliveWorker(workspace);
   try {
-    writeWorkers(workspace, { alive: processLiveness.writeRef(
-      { workerName: 'alive' }, processLiveness.readRef({ pid: process.pid, startTime: TEST_PROCESS_START_TIME })
-    ) });
+    writeWorkers(workspace, { alive: record });
     const result = runCli(['list', '--workspace', workspace]);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stderr, '');
     assert.match(result.stdout, /alive/);
     assert.doesNotMatch(result.stdout, /\[running\]/);
   } finally {
+    stopLivenessOwner(owner);
     removeWorkspace(workspace);
   }
 });
@@ -210,10 +226,9 @@ test('サブプロセス: list は見出しと状態ドットを表示する', (
 
 test('サブプロセス: list --json は機械可読な JSON 配列を返す', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-list-json-');
+  const { owner, record } = startAliveWorker(workspace);
   try {
-    writeWorkers(workspace, { alive: processLiveness.writeRef(
-      { workerName: 'alive' }, processLiveness.readRef({ pid: process.pid, startTime: TEST_PROCESS_START_TIME })
-    ) });
+    writeWorkers(workspace, { alive: record });
     const result = runCli(['list', '--workspace', workspace, '--json']);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stderr, '');
@@ -222,9 +237,10 @@ test('サブプロセス: list --json は機械可読な JSON 配列を返す', 
     assert.equal(parsed.length, 1);
     assert.equal(parsed[0].workerName, 'alive');
     assert.equal(parsed[0].running, true);
-    assert.equal(parsed[0].pid, process.pid);
+    assert.equal(parsed[0].pid, record.pid);
     assert.ok(typeof parsed[0].elapsedSeconds === 'number');
   } finally {
+    stopLivenessOwner(owner);
     removeWorkspace(workspace);
   }
 });

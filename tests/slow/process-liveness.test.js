@@ -12,6 +12,7 @@ const { killProcessTree } = require('../../scripts/shared/kill-tree');
 function readFirstLine(child, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     let buffer = '';
+    let stderr = '';
     const timeout = setTimeout(() => finish(new Error('child did not publish its liveness reference')), timeoutMs);
     const onData = (chunk) => {
       buffer += String(chunk);
@@ -19,16 +20,19 @@ function readFirstLine(child, timeoutMs = 5000) {
       if (newline >= 0) finish(null, buffer.slice(0, newline));
     };
     const onError = (error) => finish(error);
-    const onExit = (code) => finish(new Error(`child exited before publishing its liveness reference (code=${code})`));
+    const onStderr = (chunk) => { stderr += String(chunk); };
+    const onExit = (code) => finish(new Error(`child exited before publishing its liveness reference (code=${code}): ${stderr}`));
     const finish = (error, line) => {
       clearTimeout(timeout);
       child.stdout.removeListener('data', onData);
+      child.stderr.removeListener('data', onStderr);
       child.removeListener('error', onError);
       child.removeListener('exit', onExit);
       if (error) reject(error);
       else resolve(line);
     };
     child.stdout.on('data', onData);
+    child.stderr.on('data', onStderr);
     child.once('error', onError);
     child.once('exit', onExit);
   });
