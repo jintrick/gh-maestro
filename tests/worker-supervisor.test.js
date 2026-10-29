@@ -574,10 +574,34 @@ describe('loadWorkers', () => {
 describe('Delivery', () => {
   beforeEach(() => resetAllMocks());
 
-  test('deliverMessage: PIDが生存していてもstartTime欠落時はresumeせずpendingにする', () => {
+  test('deliverMessage: PIDが生存していても旧形式のワーカー記録は持ち主なしとして止まらずresumeへ進む', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
-        workers: { 'issue-5-fix': { pid: 4242, resourceKey: null, agentId: 'agy', issue: 5 } },
+        workers: { 'issue-5-fix': { pid: process.pid, resourceKey: null, agentId: 'agy', issue: 5 } },
+      });
+      const liveness = processLiveness.createLiveness({ probePid: () => 'alive', readStartTime: () => null });
+      workerLiveness._setLiveness(liveness);
+      supervisor._setObserveWorker(workerLiveness.observeWorker);
+      try {
+        const entry = supervisor.loadWorkers(dir).get('issue-5-fix');
+        const result = supervisor.deliverMessage({
+          workerName: 'issue-5-fix', entry,
+          message: { from: 'orch', body: 'hello' }, workspace: dir,
+          homedir: os.homedir(), issue: '5',
+        });
+        assert.equal(result.workerState, 'dead');
+        assert.notEqual(result.method, 'pending');
+      } finally {
+        workerLiveness._setLiveness(null);
+        setWorkerAlive(() => false);
+      }
+    });
+  });
+
+  test('deliverMessage: 識別情報が壊れたワーカー記録では生死unknownとしてresumeせずpendingにする', () => {
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: { 'issue-5-fix': { pid: 4242, instanceId: 'identity-without-resource', agentId: 'agy', issue: 5 } },
       });
       const liveness = processLiveness.createLiveness({
         probePid: () => 'alive',
@@ -594,7 +618,7 @@ describe('Delivery', () => {
         });
         assert.equal(result.method, 'pending');
         assert.match(result.error, /liveness is unknown; refusing resume/);
-        assert.equal(lastSpawnCalls.length, 0, '起動時刻不明の生存PIDでは二重起動しない');
+        assert.equal(lastSpawnCalls.length, 0, '生死不明では二重起動しない');
       } finally {
         workerLiveness._setLiveness(null);
         setWorkerAlive(() => false);
@@ -3356,7 +3380,8 @@ describe('Reliability: restart continuity', () => {
       r2.runOnce();
 
       // 700 は再検出されない
-      const linesWith700 = r2.lines.filter(l => l.includes('700'));
+      // 行末のコメントIDで照合する（MSG_POLL_CONNECTED:<pid> の pid に 700 が含まれても誤検出しない）
+      const linesWith700 = r2.lines.filter(l => /:700$/.test(l));
       assert.equal(linesWith700.length, 0, `Should not re-detect 700: ${r2.lines.join('\n')}`);
       // 701 は新規検出
       assert.ok(r2.lines.some(l => l === 'DETECTED:issue-5-fix:701'));

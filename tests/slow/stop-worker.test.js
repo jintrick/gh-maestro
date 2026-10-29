@@ -388,7 +388,7 @@ test('stop-worker: endpointは生存中でもinstanceId不一致なら停止せ�
   });
 });
 
-test('stop-worker: PR1形式でPIDが存在する場合はunknownとして停止を拒否する', () => {
+test('stop-worker: PR1形式でPIDが存在しても持ち主なしとして扱い、そのPIDをkillしない', () => {
   withTempDir((dir) => {
     const worktreeDir = path.join(dir, '.gh-maestro', 'worktrees', 'unknown-start-time-worker');
     fs.mkdirSync(worktreeDir, { recursive: true });
@@ -412,14 +412,12 @@ test('stop-worker: PR1形式でPIDが存在する場合はunknownとして停止
       );
 
       const r = run(['unknown-start-time-worker', '--workspace', dir]);
-      assert.notEqual(r.status, 0, 'PR1形式の生存PIDは同一性不明として終了コード1になること');
-      assert.match(r.stderr, /生死を判定できません/);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /旧形式の記録を持ち主なしとして扱いました/);
 
-      assert.equal(isProcessAlive(parentPid), true, '起動時刻不明の親プロセスはkillされず生存し続けること');
-      assert.equal(isProcessAlive(childPid), true, '起動時刻不明の子プロセスはkillされず生存し続けること');
-      assert.ok(fs.existsSync(worktreeDir), 'worktreeディレクトリが残っていること');
-      const workers = JSON.parse(fs.readFileSync(path.join(dir, '.gh-maestro', 'workers.json'), 'utf8'));
-      assert.ok('unknown-start-time-worker' in workers, 'workers.jsonにエントリが残っていること');
+      // 旧形式のPIDは再利用されうるので、持ち主なしとして扱い kill しない。
+      assert.equal(isProcessAlive(parentPid), true, '旧形式記録のPIDの親プロセスはkillされず生存し続けること');
+      assert.equal(isProcessAlive(childPid), true, '旧形式記録のPIDの子プロセスはkillされず生存し続けること');
     } finally {
       try { killProcessTree(parentPid); } catch {}
       try { process.kill(childPid, 'SIGKILL'); } catch {}

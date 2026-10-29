@@ -21,8 +21,10 @@ test('resourceが死亡していれば稼働中と判定しない', () => {
 });
 test('識別情報欠落、取得失敗、照会失敗はunknownになり、稼働確認を伴う処理を止める', () => {
   useInputs(() => 'unknown', () => null);
-  assert.equal(worker.observeWorker({ pid: 4242, resourceKey: null }), 'unknown');
-  assert.throws(() => worker.isWorkerAlive({ pid: 4242, resourceKey: null }), /liveness is unknown/);
+  // endpoint 識別情報を持たない旧形式は持ち主なし（dead）。識別情報が片方だけなら corrupt。
+  assert.equal(worker.observeWorker({ pid: 4242, resourceKey: null }), 'dead');
+  assert.equal(worker.isWorkerAlive({ pid: 4242, resourceKey: null }), false);
+  assert.equal(worker.observeWorker({ pid: 4242, instanceId: 'only-instance' }), 'unknown');
   assert.equal(worker.observeWorker({ pid: 4242, resourceKey: 'unknown-resource' }), 'unknown');
   assert.throws(() => worker.isWorkerAlive({ pid: 4242, resourceKey: 'unknown-resource' }), /liveness is unknown/);
   useInputs(() => 'unknown', () => START);

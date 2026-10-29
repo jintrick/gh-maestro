@@ -14,8 +14,14 @@ const headlessLaunch = require('../scripts/shared/headless-launch');
 const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('../scripts/shared/worker-factory');
 
-const { createLiveness } = require('../scripts/shared/process-liveness');
-const makeLiveness = (probePid = () => 'alive') => createLiveness({ probePid, readStartTime: () => '2026-07-25T00:00:00.000Z' });
+const { createLiveness, RESOURCE_KEY_ENV, INSTANCE_ID_ENV } = require('../scripts/shared/process-liveness');
+// 起動側と偽の shim が同じ OS 資源の表を共有するよう、1つの liveness を使い回す。
+let sharedLiveness = null;
+const makeLiveness = (probePid = () => 'alive') => {
+  sharedLiveness = createLiveness({ probePid, readStartTime: () => '2026-07-25T00:00:00.000Z' });
+  return sharedLiveness;
+};
+let killedPids = [];
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'start-review-manager.js');
 function runCli(args) {
@@ -42,9 +48,16 @@ after(() => {
 
 let spawnCalls;
 
-function fakeSpawn({ pid = 55501 } = {}) {
+function fakeSpawn({ pid = 55501, claimEndpoint = true } = {}) {
   return (cmd, args, options) => {
     spawnCalls.push({ cmd, args, options });
+    // 実際の shim は起動後に自分の endpoint を claim する。偽の shim ではそれを模擬する。
+    if (claimEndpoint && sharedLiveness && options && options.env) {
+      sharedLiveness.captureProcess(pid, {
+        resourceKey: options.env[RESOURCE_KEY_ENV],
+        instanceId: options.env[INSTANCE_ID_ENV],
+      });
+    }
     return {
       pid,
       handlers: {},
@@ -56,6 +69,7 @@ function fakeSpawn({ pid = 55501 } = {}) {
 
 beforeEach(() => {
   spawnCalls = [];
+  killedPids = [];
   headlessLaunch._setSpawn(fakeSpawn());
   headlessLaunch._setLiveness(makeLiveness());
 });
@@ -68,7 +82,8 @@ afterEach(() => {
 function loadModule() {
   delete require.cache[require.resolve('../scripts/start-review-manager')];
   const mod = require('../scripts/start-review-manager');
-  mod._setLiveness(makeLiveness());
+  mod._setLiveness(sharedLiveness || makeLiveness());
+  mod._setKillProcessTree((pid) => { killedPids.push(pid); });
   return mod;
 }
 
@@ -124,12 +139,12 @@ test('isLockValid returns false and removes the file for a stale pid', () => {
   assert.equal(fs.existsSync(lockFile), false);
 });
 
-test('isLockValid は生存中の旧PID-onlyを削除せず起動をfail-closedにする', () => {
+test('isLockValid は旧PID-onlyを持ち主のいない stale として回収し、起動を止めない', () => {
   const mod = loadModule();
   const lockFile = path.join(freshWorkspace('lock-legacy-live'), 'lock.running');
-  fs.writeFileSync(lockFile, '12345\n', 'utf8');
-  assert.throws(() => mod.isLockValid(lockFile), /判定できません/);
-  assert.equal(fs.readFileSync(lockFile, 'utf8'), '12345\n');
+  fs.writeFileSync(lockFile, `${process.pid}\n`, 'utf8');
+  assert.equal(mod.isLockValid(lockFile), false);
+  assert.equal(fs.existsSync(lockFile), false);
 });
 
 test('入力照会の死亡と生存を区別する', () => {
@@ -246,6 +261,60 @@ test('startReviewManager: manager.runningが本体書き込み前でも起動予
 
   assert.equal(mod.startReviewManager('11', 'o/r', workspace, '55'), 'REVIEW_MANAGER_ALREADY_RUNNING');
   assert.equal(spawnCalls.length, 1, '起動予約がある間は2本目を起動しない');
+});
+
+test('startReviewManager: 起動処理を終えたら起動予約 endpoint を手放し、本体の終了後は同じプロセスからでも再開できる', () => {
+  let shimDead = false;
+  headlessLaunch._setLiveness(makeLiveness((pid) => (pid === 55501 && shimDead ? 'dead' : 'alive')));
+  const mod = loadModule();
+  const workspace = freshWorkspace('startup-endpoint-released');
+  const startupEndpoint = { workspace, kind: 'review-manager-startup', name: '12' };
+
+  assert.equal(mod.startReviewManager('12', 'o/r', workspace, '55'), 'REVIEW_MANAGER_STARTED');
+  assert.equal(sharedLiveness.observeResource(startupEndpoint).state, 'dead',
+    '常駐する呼び出し元（poll-pr）が起動予約 endpoint を保持し続けない');
+
+  // 起動した本体がいる間は、起動予約（manager.starting）の所有者で二重起動を拒否する。
+  assert.equal(mod.startReviewManager('12', 'o/r', workspace, '55', true), 'REVIEW_MANAGER_ALREADY_RUNNING');
+  assert.equal(sharedLiveness.observeResource(startupEndpoint).state, 'dead');
+
+  // 本体が終了したら、再開（--resume 相当）は拒否されない。
+  shimDead = true;
+  headlessLaunch._setSpawn(fakeSpawn({ pid: 55502 }));
+  assert.equal(mod.startReviewManager('12', 'o/r', workspace, '55', true), 'REVIEW_MANAGER_STARTED');
+  assert.equal(spawnCalls.length, 2);
+  assert.equal(sharedLiveness.observeResource(startupEndpoint).state, 'dead');
+});
+
+test('startReviewManager: 別の起動処理が起動予約 endpoint を保持中なら起動しない', () => {
+  const mod = loadModule();
+  const workspace = freshWorkspace('startup-endpoint-busy');
+  const busy = new Error('busy');
+  busy.code = 'LIVENESS_ENDPOINT_BUSY';
+  const original = sharedLiveness.captureSelf;
+  sharedLiveness.captureSelf = () => { throw busy; };
+  try {
+    assert.equal(mod.startReviewManager('13', 'o/r', workspace, '55'), 'REVIEW_MANAGER_ALREADY_RUNNING');
+  } finally {
+    sharedLiveness.captureSelf = original;
+  }
+  assert.equal(spawnCalls.length, 0);
+});
+
+test('startReviewManager: shim が endpoint を確立しなければ子を停止し、起動予約と endpoint を解放して失敗する', () => {
+  headlessLaunch._setSpawn(fakeSpawn({ pid: 66601, claimEndpoint: false }));
+  // 偽の shim の endpoint は確立しない（観測は dead のまま）。
+  headlessLaunch._setLiveness(makeLiveness((pid) => (pid === 66601 ? 'dead' : 'alive')));
+  const mod = loadModule();
+  // 期限（既定10秒）まで待たずに、1回の観測で判定させる。
+  sharedLiveness.waitUntilAlive = (ref) => sharedLiveness.observe(ref);
+  const workspace = freshWorkspace('shim-never-claims');
+  const startingFile = path.join(workspace, '.gh-maestro', 'records', 'pr', '14', 'review', 'manager.starting');
+
+  assert.throws(() => mod.startReviewManager('14', 'o/r', workspace, '55'), /起動を確認できません/);
+  assert.deepEqual(killedPids, [66601]);
+  assert.equal(fs.existsSync(startingFile), false);
+  assert.equal(sharedLiveness.observeResource({ workspace, kind: 'review-manager-startup', name: '14' }).state, 'dead');
 });
 
 test('startReviewManager: onExitフックへexecutionIdを渡さない（execution registryのcompleted遷移手段が無く、常にprocess_failedへ誤記録されるのを避けるため）', () => {

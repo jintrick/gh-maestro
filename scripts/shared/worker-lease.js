@@ -127,6 +127,11 @@ function createNormalWorkerStore(workspace) {
     lockPath(key) {
       return lockPath(key);
     },
+
+    /** キーに対応する lease ファイルのパスを返す（記録の出所の報告用）。 */
+    filePath(key) {
+      return filePath(key);
+    },
   };
 }
 
@@ -284,6 +289,7 @@ function acquireLease(store, key, { processRef, workerName }) {
     }
     return observed;
   };
+  const leaseSource = typeof store.filePath === 'function' ? store.filePath(key) : `lease ${key}`;
   const requireAvailable = (entry) => {
     const observed = observeWorkerEndpoint();
     if (observed?.state === 'unknown') {
@@ -306,31 +312,17 @@ function acquireLease(store, key, { processRef, workerName }) {
         error.code = 'LIVENESS_CORRUPT';
         throw error;
       }
-      if (!hasResourceKey) {
-        // PR1 形式の lease の保持者は決定論的 endpoint を持たないため、ワーカー endpoint の
-        // dead は保持者の死亡を意味しない。PID の不在（ESRCH）だけを死亡の証拠とし、
-        // PID が存在する場合は旧ワーカーの稼働と PID 再利用を区別できないので拒否する。
-        const legacyRef = checker.readRef(entry);
-        if (!legacyRef) {
-          const error = new Error(`worker "${workerName}" の PR1 形式 lease の pid が不正です: ${JSON.stringify(entry)}`);
+      // During initialization the lease describes the launcher, not the worker.
+      // Its endpoint remains relevant until activation replaces it with the worker ref.
+      // An endpointless (old-format) lease has no holder; observe() reports it as dead.
+      if (entry.resourceKey !== workerResourceKey) {
+        const ref = checker.readRef(entry, 'default', { source: leaseSource });
+        if (!ref) {
+          const error = new Error(`worker "${workerName}" の lease の形式が不正です: ${JSON.stringify(entry)}`);
           error.code = 'LIVENESS_CORRUPT';
           throw error;
         }
-        const legacyState = checker.observe(legacyRef);
-        if (legacyState !== 'dead') {
-          const error = new Error(
-            `worker "${workerName}" の PR1 形式 lease（pid ${entry.pid}）の保持者の生死を判定できません。`
-            + '旧版のワーカーが稼働中の可能性があるため起動しません。'
-          );
-          error.code = 'LIVENESS_UNKNOWN';
-          throw error;
-        }
-        return;
-      }
-      // During initialization the lease describes the launcher, not the worker.
-      // Its endpoint remains relevant until activation replaces it with the worker ref.
-      if (hasResourceKey && entry.resourceKey !== workerResourceKey) {
-        const state = checker.observe(checker.readRef(entry));
+        const state = checker.observe(ref);
         if (state === 'alive') {
           throw new Error(`worker "${workerName}" の起動処理は既に進行中です（pid ${entry.pid}）。重複起動できません。`);
         }

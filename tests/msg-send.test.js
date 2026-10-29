@@ -563,13 +563,13 @@ test('稼働中で未報告のワーカー宛て送信は投稿前に拒否さ�
   });
 });
 
-test('起動時刻不明で生死unknownなら配送を拒否しGitHubへ投稿しない', () => {
+test('識別情報が壊れていて生死unknownなら配送を拒否しGitHubへ投稿しない', () => {
   withTempDir(workspace => {
     const ghDir = path.join(workspace, '.gh-maestro');
     fs.mkdirSync(ghDir, { recursive: true });
     fs.writeFileSync(
       path.join(ghDir, 'workers.json'),
-      JSON.stringify({ 'issue-9-fix': { pid: 42424, resourceKey: null, agentId: 'agy', issue: 9 } }, null, 2),
+      JSON.stringify({ 'issue-9-fix': { pid: 42424, instanceId: 'identity-without-resource', agentId: 'agy', issue: 9 } }, null, 2),
       'utf8'
     );
     workerLiveness._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }));

@@ -9,14 +9,13 @@ const { restartResidents, formatResidentResult, formatStatusPaneResult } = requi
 const USAGE = `restart-residents.js — 常駐プロセス4種を現行コードへ入れ替える
 
 Usage:
-  node restart-residents.js [--workspace <path>] [--restart-status-pane] [--upgrade-legacy]
+  node restart-residents.js [--workspace <path>] [--restart-status-pane]
 
 Options:
   --workspace <path>  ワークスペース（省略時は GH_MAESTRO_WORKSPACE env または
                       CWDからの .gh-maestro/ 上方探索で解決）
   --restart-status-pane 対象の窓から監視ペインを現行worker-status.jsで張り直す。記録socketの
                       消滅を確実に判定できる場合は旧接続先を閉じず、現在環境へrebindする。
-  --upgrade-legacy    install.js内部用。PID-only PR1常駐を停止して新方式へ移行する。
   --help, -h          このヘルプを表示する
 
 対象:
@@ -30,7 +29,6 @@ Output (stdout):
   MONITOR_REATTACH_REQUIRED script=<name> command=<command>
   旧形式のMonitor常駐は停止後にdetached起動せず、上記の再接続指示を必ず実行する。
   --plugin-monitorを含む現行endpoint常駐はplugin monitorが管理するため停止・再起動しない。
-  --upgrade-legacy時はendpointを持たないPR1常駐を停止し、plugin monitorの再接続を要求する。
   poll-pr.js が poll-reviews.js を子として起動する構成では、後者は delegated と出力する。
 
 副作用:
@@ -53,7 +51,7 @@ function main(argv = process.argv.slice(2), opts = {}) {
   try {
     ({ values } = parseFlags(argv, {
       flags: { '--workspace': {} },
-      booleans: ['--help', '-h', '--restart-status-pane', '--upgrade-legacy'],
+      booleans: ['--help', '-h', '--restart-status-pane'],
       positionals: { min: 0, max: 0 },
     }));
   } catch (err) {
@@ -80,7 +78,6 @@ function main(argv = process.argv.slice(2), opts = {}) {
       maxAttempts: opts.maxAttempts,
       waitMs: opts.waitMs,
       restartStatusPane: values['--restart-status-pane'] === true,
-      upgradeLegacy: values['--upgrade-legacy'] === true,
       runStatusPaneCommandFn: opts.runStatusPaneCommandFn,
       loadStatusPaneFn: opts.loadStatusPaneFn,
       statusPaneConfirmAttempts: opts.statusPaneConfirmAttempts,

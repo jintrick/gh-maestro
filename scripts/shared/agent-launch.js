@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('./child-process');
@@ -154,7 +155,7 @@ function normalizeAgentLaunchConfig(agentConfig, cwd) {
  * @param {object} [opts.tempDirOptions] 既存temp-directory.jsへ渡すテスト/実行オプション
  * @param {object} [opts.spawnOptions] child-process spawn options（cwd/env/stdio等）
  * @param {Function} [opts.spawnFn=spawn] テスト用spawn注入口
- * @param {Function} [opts.onSpawn] spawn直後に子プロセスを受け取るobserver
+ * @param {Function} [opts.onSpawn] spawn後に子プロセスを受け取るobserver。livenessLogPath 指定時は shim の endpoint 確立を待ってから呼ぶ（livenessInfo.state に最後の観測結果）
  * @param {Function} [opts.observe] 子プロセスの完了・監督を待つcallback
  * @param {Function} [opts.cleanup] プロセス側リソースの後始末callback
  * @param {string} [opts.livenessLogPath] 指定時は headless shim 経由で起動し、そのOS資源を追跡する
@@ -230,13 +231,17 @@ function runAgentWithPrompt({
           };
           const childWorkspace = childEnvBase.GH_MAESTRO_WORKSPACE || cwd;
           const workerName = childEnvBase.GH_MAESTRO_WORKER;
+          // 同じプロセスから同じ GH_MAESTRO_WORKER で並列に起動される子（Review Manager の
+          // 並列ジョブ等）が同じ endpoint を取り合わないよう、起動ごとに一意な名前にする。
+          // agent shim の endpoint は名前で探されず、返す processRef だけで観測される。
+          const launchId = crypto.randomUUID();
           childLiveness = processLiveness.createChildLivenessEnv({
             env: childEnvBase,
             workspace: childWorkspace,
             kind: 'agent-shim',
             name: workerName
-              ? `${workerName}:agent:${process.pid}`
-              : `${path.basename(agentArgs[0] || 'agent')}:${process.pid}`,
+              ? `${workerName}:agent:${process.pid}:${launchId}`
+              : `${path.basename(agentArgs[0] || 'agent')}:${process.pid}:${launchId}`,
           });
           child = spawnFn(process.execPath, [
             path.join(__dirname, 'headless-shim.js'),
@@ -265,13 +270,22 @@ function runAgentWithPrompt({
       if (!child || typeof child.on !== 'function') {
         throw new Error('spawn returned an invalid child process handle');
       }
-      const livenessInfo = childLiveness && child && child.pid
-        ? {
+      let livenessInfo = null;
+      if (childLiveness && child && child.pid) {
+        const processRef = liveness.captureProcess(child.pid, childLiveness);
+        // shim は spawn 後に endpoint を claim する。onSpawn の観測者（PID registry 登録等）が
+        // 確立前の endpoint を dead と見ないよう、確立を期限付きで待ってから渡す。
+        // 同期待機のため、待機中に子の close/exit イベントが失われることはない。
+        const state = typeof liveness.waitUntilAlive === 'function'
+          ? liveness.waitUntilAlive(processRef)
+          : null;
+        livenessInfo = {
           resourceKey: childLiveness.resourceKey,
           instanceId: childLiveness.instanceId,
-          processRef: liveness.captureProcess(child.pid, childLiveness),
-        }
-        : null;
+          processRef,
+          state,
+        };
+      }
       if (typeof onSpawn === 'function') onSpawn(child, livenessInfo);
       const observed = typeof observe === 'function' ? await observe(child) : undefined;
 

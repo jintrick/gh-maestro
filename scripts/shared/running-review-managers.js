@@ -195,7 +195,7 @@ function releaseReviewManagerStartup(runningPath, token) {
  *
  * 旧形式は、ファイル全体が正の整数PIDだけのテキストである。新形式は
  * {pid, resourceKey, instanceId} のJSONオブジェクトである。PR1の起動時刻だけの
- * 旧JSONはOS資源参照がなく、process-livenessのESRCH判定以外はunknownとして扱う。
+ * 旧JSONはOS資源参照がなく、process-liveness が持ち主のいない記録（dead）として扱う。
  *
  * @param {string} raw
  * @param {string} [runningPath]
@@ -336,7 +336,7 @@ function inspectRunningReviewManager(runningPath, opts = {}) {
   }
 
   const checker = checkerFor(opts);
-  const state = checker.observe(checker.readRef(record));
+  const state = checker.observe(checker.readRef(record, 'default', { source: runningPath }));
   if (state === 'unknown') {
     return errorResult(`manager.running の生死を判定できません: ${runningPath}`, onError);
   }

@@ -299,7 +299,7 @@ function orphanedSlowRunReason(entry, deps = {}) {
 /**
  * 親 poll-pr が停止した後に残った slow state の running レコードを回収する。
  * slow worker は poll-pr の子プロセスとして生存期間を共有するため、endpointがdead、
- * またはendpointを持たない旧形式のPIDがESRCHとなった running は再実行せず unavailable
+ * またはendpointを持たない旧形式（持ち主のいない記録）の running は再実行せず unavailable
  * へ確定する。endpointがunknownの場合は停止せず報告し、別プロセスをkillしない。
  */
 function recoverOrphanedSlowRuns(workspace, deps = {}) {

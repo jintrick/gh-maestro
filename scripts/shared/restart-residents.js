@@ -105,7 +105,6 @@ function isPluginManagedEntry(entry) {
 function captureResidentEntries(workspace, hooks = createResidentRestartHooks(), opts = {}) {
   return hooks.findRunningInstances(workspace, {
     failOnReadError: true,
-    includeUnknownLegacy: opts.upgradeLegacy === true,
   })
     .filter(isResidentEntry);
 }
@@ -272,14 +271,7 @@ function stopEntry(workspace, entry, hooks, opts = {}) {
   if (!isValidPid(entry.pid)) return { ok: false, error: 'registryのPIDが正の整数ではありません' };
   const checker = hooks.liveness || processLiveness;
   const processRef = checker.readRef(entry);
-  let state = checker.observe(processRef);
-  const upgradingLegacy = opts.upgradeLegacy === true
-    && entry.resourceKey == null && entry.instanceId == null;
-  if (state === 'unknown' && upgradingLegacy) {
-    const legacyState = checker.legacyPidStatus(entry.pid);
-    if (legacyState === 'present') state = 'alive';
-    else if (legacyState === 'dead') state = 'dead';
-  }
+  const state = checker.observe(processRef);
   if (state === 'unknown') {
     return { ok: false, error: `PID ${entry.pid} の生死を判定できません` };
   }
@@ -290,9 +282,7 @@ function stopEntry(workspace, entry, hooks, opts = {}) {
     } catch (e) {
       return { ok: false, error: `PID ${entry.pid} の停止に失敗しました: ${e.message}` };
     }
-    const stopped = upgradingLegacy
-      ? checker.legacyPidStatus(entry.pid) === 'dead'
-      : waitUntilStopped(processRef, hooks, opts);
+    const stopped = waitUntilStopped(processRef, hooks, opts);
     if (!stopped) {
       return { ok: false, error: `PID ${entry.pid} が停止確認の期限内に終了しませんでした` };
     }
@@ -615,7 +605,7 @@ function restartStatusPane(workspace, scriptsPath, opts = {}) {
  * @param {object} [opts.hooks] テスト用依存注入
  * @returns {{results: object[], errors: string[], entries: object[]}}
  *   通常Monitor常駐のstatusは `monitor-required` となり、commandsにMonitorで実行する
- *   コマンドを保持する。`upgradeLegacy` で停止したPR1 plugin常駐もMonitor再起動待ちとなる。
+ *   コマンドを保持する。
  */
 function restartResidents(workspace, opts = {}) {
   if (!opts.scriptsPath) throw new Error('restartResidents: scriptsPath が必要です');
@@ -641,7 +631,7 @@ function restartResidents(workspace, opts = {}) {
   // plugin poll-pr の子 poll-reviews は同じ process tree に属するため、
   // poll-pr が plugin 管理なら poll-reviews も停止対象から外す。
   const entriesToRestart = capturedEntries.filter((entry) => {
-    if (isPluginManagedEntry(entry) && !(opts.upgradeLegacy && entry.legacyEndpointless)) return false;
+    if (isPluginManagedEntry(entry)) return false;
     if (hasPluginManagedPollPr && entry.script === 'poll-reviews.js') return false;
     return true;
   });

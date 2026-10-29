@@ -299,7 +299,10 @@ test('status: 停止したPID registryエントリは running:false として一
 
     const r = runCli(['status', '--workspace', ws, '--script', 'msg-poll.js']);
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(r.stderr, '');
+    // endpoint 識別情報を持たない記録は持ち主なしとして扱い、出所を一度だけ報告する。
+    const reported = r.stderr.split(/\r?\n/).filter(Boolean);
+    assert.equal(reported.length, 1, r.stderr);
+    assert.match(reported[0], /旧形式の記録を持ち主なしとして扱いました: .*999999999\.json$/);
     assert.deepEqual(JSON.parse(r.stdout), {
       script: 'msg-poll.js',
       workerName: null,

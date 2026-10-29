@@ -379,9 +379,19 @@ test('acquireStateLock: 同一性不明の保持者のロックを残して中�
   withTempDir(workspace => {
     const lp = rs.stateLockPath(workspace, 'orchestrator');
     fs.mkdirSync(path.dirname(lp), { recursive: true });
-    const raw = JSON.stringify({ pid: process.pid, resourceKey: null });
+    const raw = JSON.stringify({ pid: process.pid, instanceId: 'identity-without-resource' });
     fs.writeFileSync(lp, raw);
     assert.throws(() => rs.acquireStateLock(workspace, 'orchestrator'), /判定できません/);
     assert.equal(fs.readFileSync(lp, 'utf8'), raw);
+  });
+});
+
+test('acquireStateLock: 旧形式（PIDだけ）の保持者のロックは持ち主なしとして奪取する', () => {
+  withTempDir(workspace => {
+    const lp = rs.stateLockPath(workspace, 'orchestrator');
+    fs.mkdirSync(path.dirname(lp), { recursive: true });
+    fs.writeFileSync(lp, JSON.stringify({ pid: process.pid, resourceKey: null }));
+    assert.equal(rs.acquireStateLock(workspace, 'orchestrator'), true);
+    rs.releaseStateLock(workspace, 'orchestrator');
   });
 });

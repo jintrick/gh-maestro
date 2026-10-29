@@ -6,9 +6,9 @@
 
 ## install後の確認
 
-`node "{{SCRIPTS_PATH}}/install.js"` はplugin manifest・monitors・共有スクリプトを配置し、runtime rootに登録されたworkspaceの旧常駐を `restart-residents.js --upgrade-legacy` で確認する。決定論的endpointを持つplugin monitorはClaude Codeのセッション管理下に残す。PR1形式でendpointを持たない常駐は移行のため停止する。installは対話型session用monitorを自分で起動しないため、次のClaude Codeセッションで `/gh-maestro` を実行して新しいplugin monitorを起動する。endpointを持たないPR1記録はPIDが `ESRCH` のときだけdeadと判定し、PIDが存在する記録はunknownとして扱う。
+`node "{{SCRIPTS_PATH}}/install.js"` はplugin manifest・monitors・共有スクリプトを配置し、runtime rootに登録されたworkspaceの旧常駐を `restart-residents.js` で確認する。決定論的endpointを持つplugin monitorはClaude Codeのセッション管理下に残す。installは対話型session用monitorを自分で起動しないため、次のClaude Codeセッションで `/gh-maestro` を実行して新しいplugin monitorを起動する。endpointの識別情報を持たない旧形式（PR1）の記録は、PIDを照会せず持ち主のいない記録（dead）として扱い、既存の後片付けで回収する。扱ったことは記録の出所ごとに一度stderrへ出る。
 
-旧形式の通常Monitorに `MONITOR_REATTACH_REQUIRED` が出た場合は、出力されたコマンドを人間が確認して通常のMonitorで実行する。PR1形式のplugin monitor停止に同じ行が出た移行後は、コマンドを手動実行せず、新しい対話型セッションから `/gh-maestro` を呼び出してpluginを起動する。決定論的endpointを持つplugin monitorに手動で重複起動を行わない。
+旧形式の通常Monitorに `MONITOR_REATTACH_REQUIRED` が出た場合は、出力されたコマンドを人間が確認して通常のMonitorで実行する。決定論的endpointを持つplugin monitorに手動で重複起動を行わない。
 
 ## inbox監視の確認
 
@@ -37,7 +37,7 @@ Review Managerを起動しない軽量経路では、上のコマンドへ `--no
 
 ### slow stateがrunningのまま残った場合
 
-`poll-pr.js` は起動時に `.gh-maestro/poll-slow-test-<PR>.json` を走査する。`running` レコードのslow workerについて、endpointがdead、または記録がendpointを持たない旧形式でPIDの `ESRCH` を確認した場合は、workerをkillせず `unavailable` と `SLOW_TEST_RESULT` を記録する。endpointへのI/Oがunknown、または旧形式のPIDが存在する場合は状態を確定せず停止して報告する。再実行は行わない。生きたendpointと同じ `instanceId` を確認できる場合だけ、そのworkerを待つ。
+`poll-pr.js` は起動時に `.gh-maestro/poll-slow-test-<PR>.json` を走査する。`running` レコードのslow workerについて、endpointがdead、または記録がendpointを持たない旧形式（持ち主のいない記録として dead）の場合は、workerをkillせず `unavailable` と `SLOW_TEST_RESULT` を記録する。endpointへのI/Oがunknownの場合は状態を確定せず停止して報告する。再実行は行わない。生きたendpointと同じ `instanceId` を確認できる場合だけ、そのworkerを待つ。
 
 再現調査で `poll-pr.js` を停止するとslow実行も停止し、stateが `running` のまま残った事実は、親子プロセス寿命の契約を確認する回帰材料である。slowをdetached化して監視から切り離すことで隠すのではなく、回収処理で結果を確定する。
 

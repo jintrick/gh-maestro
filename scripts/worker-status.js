@@ -8,6 +8,7 @@
 
 'use strict';
 
+const path = require('path');
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const processLiveness = require('./shared/process-liveness');
 const { readWorkersRaw } = require('./shared/workers-registry');
@@ -260,8 +261,8 @@ function createWorkerStatusLiveness(opts = {}) {
   });
 }
 
-function observeWorkerEntry(rawEntry, checker) {
-  const processRef = checker.readRef(rawEntry);
+function observeWorkerEntry(rawEntry, checker, source = null) {
+  const processRef = checker.readRef(rawEntry, 'default', { source });
   const state = checker.observe(processRef);
   if (state === 'unknown' && normalizeWorkerEntry(rawEntry).startTime) {
     throw new Error('worker process liveness is unknown');
@@ -298,9 +299,9 @@ function collectWorkersStatus(workspace, opts = {}) {
     for (const [workerName, rawEntry] of Object.entries(rawWorkers)) {
       if (workerName === 'orchestrator') continue;
       const entry = normalizeWorkerEntry(rawEntry);
-      // 古い workers.json に PID だけの記録がある場合、参照の同一性を確認できないため
-      // unknown として表示上は稼働中にしない。停止や起動の判断はここでは行わない。
-      const observed = observeWorkerEntry(rawEntry, checker);
+      // 旧形式（endpoint 識別情報なし）の記録は持ち主のいない記録として dead になり、
+      // 表示上も稼働中にしない。停止や起動の判断はここでは行わない。
+      const observed = observeWorkerEntry(rawEntry, checker, `${path.join(workspace, '.gh-maestro', 'workers.json')}#${workerName}`);
       const processRef = observed.processRef;
       const state = observed.state;
       const running = state === 'alive';
@@ -1013,7 +1014,8 @@ function main(argv = process.argv.slice(2)) {
 
     let running = false;
     try {
-      running = observeWorkerEntry(rawEntry, _injectedLiveness || createWorkerStatusLiveness()).state === 'alive';
+      running = observeWorkerEntry(rawEntry, _injectedLiveness || createWorkerStatusLiveness(),
+        `${path.join(workspace, '.gh-maestro', 'workers.json')}#${workerName}`).state === 'alive';
     } catch (e) {
       writeErr(`worker-status: status の生存確認に失敗しました: ${e.message}`);
       return { code: 1, lines: out, errLines: err };

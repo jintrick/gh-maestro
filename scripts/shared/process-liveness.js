@@ -15,6 +15,12 @@ const INSTANCE_ID_ENV = 'GH_MAESTRO_INSTANCE_ID';
 const PROBE_TIMEOUT_MS = 1000;
 // probe worker thread の起動（準備完了通知）を待つ上限。
 const PROBE_WORKER_START_TIMEOUT_MS = 10000;
+// 起動した子が自分の endpoint を確立するまで待つ上限（waitUntilAlive の既定値）。
+const CHILD_ENDPOINT_WAIT_MS = 10000;
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 const CLAIM_TIMEOUT_MS = 5000;
 const PROBE_WORKER_PATH = path.join(__dirname, 'process-liveness-probe-worker.js');
 const PROCESS_REGISTRY_DIR = 'process-liveness';
@@ -267,19 +273,17 @@ function removeDeadSocket(endpoint, expected) {
   fs.unlinkSync(endpoint);
 }
 
-function legacyPidStatus(pid, kill = process.kill.bind(process)) {
-  try {
-    kill(pid, 0);
-    return 'present';
-  } catch (error) {
-    if (error && error.code === 'ESRCH') return 'dead';
-    return 'unknown';
-  }
-}
+// 旧形式（決定論的 endpoint の識別情報を持たない）記録を持ち主なしとして扱ったことを、
+// 同じプロセス内では出所ごとに一度だけ報告する。常駐プロセスが周回するたびに繰り返さない。
+const reportedHolderlessSources = new Set();
 
-function legacyPidState(pid, kill = process.kill.bind(process)) {
-  // An existing PID could have been reused; legacy records lack endpoint identity.
-  return legacyPidStatus(pid, kill) === 'dead' ? 'dead' : 'unknown';
+function reportHolderlessRecord(value) {
+  const source = value.source || `pid ${value.pid}（出所不明）`;
+  if (reportedHolderlessSources.has(source)) return;
+  reportedHolderlessSources.add(source);
+  try {
+    process.stderr.write(`gh-maestro: 旧形式の記録を持ち主なしとして扱いました: ${source}\n`);
+  } catch { /* 報告できなくても判定は変えない */ }
 }
 
 function createLiveness(deps = {}) {
@@ -290,16 +294,15 @@ function createLiveness(deps = {}) {
   const useRealResources = deps.useRealResources === undefined
     ? deps.probeEndpoint === undefined
     : deps.useRealResources;
-  const killFn = deps.kill || process.kill.bind(process);
   const refsByKey = new Map();
   const serversByKey = new Map();
   let activeSelfRef = null;
   let exitCleanupRegistered = false;
 
-  const encode = (pid, resourceKey, instanceId) => Buffer.from(JSON.stringify(
+  const encode = (pid, resourceKey, instanceId, source = null) => Buffer.from(JSON.stringify(
     validateResourceKey(resourceKey) && validateInstanceId(instanceId)
       ? { v: 3, pid, resourceKey, instanceId }
-      : { v: 1, pid },
+      : (typeof source === 'string' && source ? { v: 1, pid, source } : { v: 1, pid }),
   )).toString('base64url');
 
   function decodeRef(ref) {
@@ -308,9 +311,14 @@ function createLiveness(deps = {}) {
       const value = JSON.parse(Buffer.from(ref, 'base64url').toString('utf8'));
       if (!value || !Number.isInteger(value.pid) || value.pid <= 0) return null;
       if (value.v === 1 || value.v === 2) {
-        // PR1 records have no deterministic resource key. ESRCH proves they are dead;
-        // an existing PID is unknown because it may have been reused.
-        return { v: 1, pid: value.pid, resourceKey: null, instanceId: null };
+        // 旧形式（PR1）の記録は決定論的 endpoint を持たないため、持ち主のいない参照になる。
+        return {
+          v: 1,
+          pid: value.pid,
+          resourceKey: null,
+          instanceId: null,
+          source: typeof value.source === 'string' ? value.source : null,
+        };
       }
       if (value.v !== 3 || !validateResourceKey(value.resourceKey)
           || !validateInstanceId(value.instanceId)) return null;
@@ -406,18 +414,17 @@ function createLiveness(deps = {}) {
   function observe(ref) {
     const value = decodeRef(ref);
     if (!value) return 'unknown';
-    if (!value.resourceKey) return legacyPidState(value.pid, killFn);
+    if (!value.resourceKey) {
+      // 持ち主のいない参照（旧形式の記録）は、保持者の判定・起動の拒否・掃除の中断に使わない。
+      // PID は再利用されうるので照会せず、dead として既存の後片付けに回収させる。
+      reportHolderlessRecord(value);
+      return 'dead';
+    }
     const observed = observeResource({ resourceKey: value.resourceKey });
     if (observed.state !== 'alive') return observed.state;
     return observed.manifest.pid === value.pid && observed.manifest.instanceId === value.instanceId
       ? 'alive'
       : 'dead';
-  }
-
-  function observeLegacyPid(pid) {
-    let normalizedPid;
-    try { normalizedPid = validatePid(pid); } catch { return 'unknown'; }
-    return legacyPidStatus(normalizedPid, killFn);
   }
 
   function createProcessRef(pid, identity) {
@@ -594,7 +601,15 @@ function createLiveness(deps = {}) {
     return true;
   }
 
-  function readRef(record, format = 'default') {
+  /**
+   * 記録から不透明なプロセス参照を作る。
+   * resourceKey・instanceId を両方持たない旧形式の記録は、持ち主のいない参照になり
+   * observe() は dead を返す。pid 不正や片方だけの識別情報は null（corrupt）。
+   * @param {object} record
+   * @param {'default'|'session'} [format]
+   * @param {{ source?: string }} [opt] source: 旧形式を報告するときの出所（ファイルパス等）
+   */
+  function readRef(record, format = 'default', { source = null } = {}) {
     if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
     if (format !== 'default' && format !== 'session') throw new Error('invalid process reference format');
     const pid = format === 'session' ? record.sessionPid : record.pid;
@@ -604,7 +619,7 @@ function createLiveness(deps = {}) {
     try { normalizedPid = validatePid(pid); } catch { return null; }
     const hasResourceKey = resourceKey !== undefined && resourceKey !== null;
     const hasInstanceId = instanceId !== undefined && instanceId !== null;
-    if (!hasResourceKey && !hasInstanceId) return encode(normalizedPid, null, null);
+    if (!hasResourceKey && !hasInstanceId) return encode(normalizedPid, null, null, source);
     if (!validateResourceKey(resourceKey) || !validateInstanceId(instanceId)) return null;
     return encode(normalizedPid, resourceKey, instanceId);
   }
@@ -647,6 +662,25 @@ function createLiveness(deps = {}) {
       && left.instanceId === right.instanceId);
   }
 
+  /**
+   * 起動直後の子が自分の endpoint を確立するまで、決定論的な期限内で同期的に待つ。
+   * 子は spawn 後に別プロセスとして endpoint を claim するため、spawn 直後の observe は
+   * dead になる。起動予約の引き渡しや registry 登録の前に、この関数で確立を確かめる。
+   * 同期待機なので、待機中に子の exit/close イベントが失われることはない。
+   * @param {string} ref
+   * @param {{ timeoutMs?: number, pollMs?: number, sleep?: (ms:number)=>void }} [opt]
+   * @returns {'alive'|'dead'|'unknown'} 期限時点の最後の観測結果
+   */
+  function waitUntilAlive(ref, { timeoutMs = CHILD_ENDPOINT_WAIT_MS, pollMs = 50, sleep = sleepSync } = {}) {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    let state = observe(ref);
+    while (state !== 'alive' && Date.now() < deadline) {
+      sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+      state = observe(ref);
+    }
+    return state;
+  }
+
   function watchParent(ref, options = {}) {
     if (ref) {
       let consecutiveDead = 0;
@@ -684,10 +718,10 @@ function createLiveness(deps = {}) {
     readRef,
     writeRef,
     observe,
-    legacyPidStatus: observeLegacyPid,
     observeResource,
     sameRef,
     watchParent,
+    waitUntilAlive,
   };
 }
 
@@ -702,8 +736,6 @@ module.exports = {
   endpointPath,
   manifestPath,
   readManifest,
-  legacyPidState,
-  legacyPidStatus,
   createLiveness,
   createProbeWorkerClient,
   PROBE_TIMEOUT_MS,

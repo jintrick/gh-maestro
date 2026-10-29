@@ -212,7 +212,7 @@ test('remove-worker: 同一性一致のプロセスツリー（親＋子）を�
   });
 });
 
-test('remove-worker: PR1形式でPIDが存在する場合はunknownとしてkillせず記録を削除する', () => {
+test('remove-worker: PR1形式でPIDが存在しても持ち主なしとしてkillせず記録を削除する', () => {
   withTempDir((dir) => {
     fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
     const { parentPid, childPid } = spawnProcessTree(dir, 'issue-51-coder', false);
@@ -231,7 +231,7 @@ test('remove-worker: PR1形式でPIDが存在する場合はunknownとしてkill
       );
       const r = run(['issue-51-coder', '--workspace', dir]);
       assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stderr, /生死を判定できません/);
+      assert.match(r.stderr, /旧形式の記録を持ち主なしとして扱いました/);
 
       // 親・子プロセスが kill されずに生存していることを検証（巻き添え防止の検証）
       assert.equal(isProcessAlive(parentPid), true, 'PIDが存在するPR1記録では親プロセスをkillしないこと');

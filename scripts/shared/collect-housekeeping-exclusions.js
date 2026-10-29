@@ -61,8 +61,8 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
   const pids = new Set();
   const ghDir = path.join(workspace, '.gh-maestro');
   const checker = opts.liveness || injectedLiveness || processLiveness;
-  const live = (entry, description) => {
-    const state = checker.observe(checker.readRef(entry));
+  const live = (entry, description, source) => {
+    const state = checker.observe(checker.readRef(entry, 'default', { source }));
     if (state === 'unknown') throw new Error(`${description} の生死を判定できません`);
     return state === 'alive';
   };
@@ -76,7 +76,7 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
   const rawWorkers = readWorkersRaw(workspace);
   if (rawWorkers) {
     for (const [workerName, entry] of Object.entries(rawWorkers)) {
-      if (workerName !== 'orchestrator' && live(entry, `worker ${workerName}`)) {
+      if (workerName !== 'orchestrator' && live(entry, `worker ${workerName}`, `${path.join(ghDir, 'workers.json')}#${workerName}`)) {
         workerNames.add(workerName);
         const normPid = normalizePid(entry && typeof entry === 'object' ? entry.pid : null);
         if (normPid) pids.add(normPid);
@@ -99,7 +99,7 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
       if (entry === null && fs.existsSync(path.join(leasesDir, name))) {
         throw new Error(`lease の読み取り・解析に失敗しました: ${path.join(leasesDir, name)}`);
       }
-      if (entry && live(entry, `lease ${path.join(leasesDir, name)}`)) {
+      if (entry && live(entry, `lease ${path.join(leasesDir, name)}`, path.join(leasesDir, name))) {
         workerNames.add(entry.workerName || workerName);
         const normPid = normalizePid(entry.pid);
         if (normPid) pids.add(normPid);
