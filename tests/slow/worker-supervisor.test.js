@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const lifecycle = require('../../scripts/process-lifecycle');
-const { spawnSync } = require('../../scripts/shared/child-process');
+const { spawnSync, execSync } = require('../../scripts/shared/child-process');
 const headlessLaunch = require('../../scripts/shared/headless-launch');
 const workerLease = require('../../scripts/shared/worker-lease');
 const closedPrGuard = require('../../scripts/shared/closed-pr-guard');
@@ -172,12 +172,16 @@ const RESUMED_PID = 999;
  * この2つを区別しないと、resume直後の生存確認が必ず失敗してしまう。
  */
 function setWorkersIdle() {
-  supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
+  setWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
 }
 
 /** ワーカー生存判定を「稼働中」に固定する（配送を見送る状態） */
 function setWorkersBusy() {
-  supervisor._setIsWorkerAlive(() => true);
+  setWorkerAlive(() => true);
+}
+
+function setWorkerAlive(isAlive) {
+  supervisor._setObserveWorker((entry) => (isAlive(entry) ? 'alive' : 'dead'));
 }
 
 /**
@@ -297,7 +301,7 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
   beforeEach(() => {
     resetAllMocks();
     // resume直後の生存確認は既定で「生きている」とする（個別テストで上書きする）
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
   });
 
   function setupResumeWorkspace(dir, { workerName = 'issue-7-fix', agentId = 'agy' } = {}) {
@@ -440,7 +444,7 @@ describe('Stale report detection（居座り検知）', () => {
 
   // PID単独をキーにすると、通知後にワーカーが終了し、OSが同じPIDを無関係な別プロセスへ
   // 再利用した場合、そのPIDで起動された別の（未報告の）ワーカーまで「通知済み」と誤認して
-  // 再通知を抑止してしまう（同一ファイル内の _isWorkerAlive → verifyProcessIdentity と同じ
+  // 再通知を抑止してしまう（同一ファイル内の observeWorker → verifyProcessIdentity と同じ
   // 落とし穴）。startTimeも一致することを要求して区別する。
 
 
@@ -511,57 +515,22 @@ describe('Cursor type safety', () => {
 const { spawnSync: realSpawnSync, spawn } = require('child_process');
 
 const SUPERVISOR_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'worker-supervisor.js');
-const CLI_TEST_START_TIME = '2026-07-25T00:00:00.000Z';
 
-// Keep the CLI integration tests on a real child-process/argv path, but avoid
-// paying for a PowerShell/WMI startup-time query on every short-lived child.
-// The preload only replaces that observation and the unrelated registry scan;
-// process liveness still uses process.kill, and PID-reuse identity behavior is
-// covered by the dedicated process-lifecycle integration case.
-function createFastCliPreload() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-supervisor-preload-'));
-  const file = path.join(dir, 'preload.js');
-  const childProcessPath = require.resolve('../../scripts/shared/child-process');
-  const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
-  const leasePath = require.resolve('../../scripts/shared/worker-lease');
-  const processLivenessPath = require.resolve('../../scripts/shared/process-liveness');
-  const source = [
-    "'use strict';",
-    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
-    `const fixedStartTime = ${JSON.stringify(CLI_TEST_START_TIME)};`,
-    'const isAlive = (pid) => {',
-    '  try { process.kill(Number(pid), 0); return true; }',
-    "  catch (e) { return e && e.code !== 'ESRCH'; }",
-    '};',
-    'const realExecSync = childProcess.execSync;',
-    'childProcess.execSync = (command, opts) => {',
-    "  if (String(command).includes('Get-CimInstance Win32_Process')) {",
-    '    const match = /ProcessId=(\\d+)/.exec(String(command));',
-    '    return match && isAlive(Number(match[1])) ? `${fixedStartTime}\\n` : \"\";',
-    '  }',
-    '  return realExecSync(command, opts);',
-    '};',
-    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
-    'lifecycle.findRunningInstance = () => null;',
-    `const lease = require(${JSON.stringify(leasePath)});`,
-    `const processLiveness = require(${JSON.stringify(processLivenessPath)});`,
-    'const checker = processLiveness.createLiveness({ probePid: (pid) => isAlive(pid) ? "alive" : "dead", readStartTime: (_pid, expected) => expected || fixedStartTime });',
-    'lease._setLiveness(checker);',
-    'Object.assign(processLiveness, checker);',
-    'lifecycle._setLiveness(checker);',
-  ].join('\n');
-  fs.writeFileSync(file, source, 'utf8');
-  process.once('exit', () => {
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-  });
-  return file;
+function readProcessStartTime(pid) {
+  const numericPid = Number(pid);
+  assert.ok(Number.isInteger(numericPid) && numericPid > 0, `有効な PID: ${pid}`);
+  const output = execSync(
+    `powershell -NoProfile -Command "$d=(Get-CimInstance Win32_Process -Filter 'ProcessId=${numericPid}').CreationDate; if($d){$d.ToUniversalTime().ToString('o')}else{''}"`,
+    { encoding: 'utf8', timeout: 5000, stdio: 'pipe' }
+  );
+  return output.trim() || null;
 }
-
-const FAST_CLI_PRELOAD = createFastCliPreload();
 
 // 排他の正本は role lease（Issue #240）。既存所有者を再現する live lease を
 // <workspace>/.gh-maestro/leases/resident-role-worker-supervisor.json に書く。
-function writeLiveSupervisorLease(dir, pid, startTime) {
+function writeLiveSupervisorLease(dir, pid) {
+  const startTime = readProcessStartTime(pid);
+  assert.ok(startTime, `PowerShell で PID ${pid} の起動時刻を実取得できる`);
   const leasesDir = path.join(dir, '.gh-maestro', 'leases');
   fs.mkdirSync(leasesDir, { recursive: true });
   fs.writeFileSync(path.join(leasesDir, 'resident-role-worker-supervisor.json'), JSON.stringify({
@@ -582,14 +551,13 @@ function runSupervisor(args, cwd, envOverride = {}) {
     ...envOverride,
   };
   return realSpawnSync(process.execPath, [
-    '-r', FAST_CLI_PRELOAD,
     SUPERVISOR_SCRIPT,
     ...args,
     '--session-pid', String(process.pid),
   ], {
     cwd,
     encoding: 'utf8',
-    timeout: 15000,
+    timeout: 30000,
     env: spawnEnv,
   });
 }
@@ -597,19 +565,11 @@ function runSupervisor(args, cwd, envOverride = {}) {
 function createResidentUnknownLivenessPreload(ghLogPath) {
   const file = path.join(path.dirname(ghLogPath), 'resident-unknown-preload.js');
   const childProcessPath = require.resolve('../../scripts/shared/child-process');
-  const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
-  const leasePath = require.resolve('../../scripts/shared/worker-lease');
-  const processLivenessPath = require.resolve('../../scripts/shared/process-liveness');
   const source = [
     "'use strict';",
     "const fs = require('fs');",
     `const childProcess = require(${JSON.stringify(childProcessPath)});`,
     `const ghLogPath = ${JSON.stringify(ghLogPath)};`,
-    `const fixedStartTime = ${JSON.stringify(CLI_TEST_START_TIME)};`,
-    'const isAlive = (pid) => {',
-    '  try { process.kill(pid, 0); return true; }',
-    "  catch (error) { return error && error.code !== 'ESRCH'; }",
-    '};',
     'const realSpawnSync = childProcess.spawnSync;',
     'childProcess.spawnSync = (command, args, options) => {',
     "  if (String(command).toLowerCase() !== 'gh') return realSpawnSync(command, args, options);",
@@ -618,22 +578,6 @@ function createResidentUnknownLivenessPreload(ghLogPath) {
     "  if (args[0] === 'api') return { status: 0, stdout: '[]\\n', stderr: '' };",
     "  return { status: 1, stdout: '', stderr: 'unexpected gh command' };",
     '};',
-    'const realExecSync = childProcess.execSync;',
-    'childProcess.execSync = (command, options) => {',
-    "  if (String(command).includes('Get-CimInstance Win32_Process')) {",
-    '    const match = /ProcessId=(\\d+)/.exec(String(command));',
-    "    return match && isAlive(Number(match[1])) ? `${fixedStartTime}\\n` : '';",
-    '  }',
-    '  return realExecSync(command, options);',
-    '};',
-    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
-    'lifecycle.findRunningInstance = () => null;',
-    `const lease = require(${JSON.stringify(leasePath)});`,
-    `const processLiveness = require(${JSON.stringify(processLivenessPath)});`,
-    "const checker = processLiveness.createLiveness({ probePid: (pid) => isAlive(pid) ? 'alive' : 'dead', readStartTime: (_pid, expected) => expected || fixedStartTime });",
-    'lease._setLiveness(checker);',
-    'Object.assign(processLiveness, checker);',
-    'lifecycle._setLiveness(checker);',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
   return file;
@@ -713,7 +657,7 @@ describe('CLI integration (subprocess)', () => {
 
       // 既存所有者の live lease を書く。pid は process.ppid を指定する（--force 無しなので
       // kill は走らないが、念のためテスト実行環境のプロセスを対象にしない）。
-      writeLiveSupervisorLease(dir, process.ppid, CLI_TEST_START_TIME);
+      writeLiveSupervisorLease(dir, process.ppid);
 
       const r = runSupervisor(['--once', '--workspace', dir], dir);
       assert.equal(r.status, 1, `exit 1, got ${r.status}, stderr: ${r.stderr}`);
@@ -735,7 +679,7 @@ describe('CLI integration (subprocess)', () => {
       });
       let leakedOwner = true;
       try {
-        writeLiveSupervisorLease(dir, owner.pid, CLI_TEST_START_TIME);
+        writeLiveSupervisorLease(dir, owner.pid);
 
         const r = runSupervisor(
           ['--once', '--force', '--workspace', dir],
@@ -768,7 +712,7 @@ describe('CLI integration (subprocess)', () => {
       });
       let ownerRemainedAlive = false;
       try {
-        writeLiveSupervisorLease(dir, owner.pid, CLI_TEST_START_TIME);
+        writeLiveSupervisorLease(dir, owner.pid);
 
         const r = runSupervisor(
           ['--once', '--force', '--workspace', dir],
@@ -804,7 +748,7 @@ describe('CLI integration (subprocess)', () => {
       });
       let ownerRemainedAlive = false;
       try {
-        writeLiveSupervisorLease(dir, owner.pid, CLI_TEST_START_TIME);
+        writeLiveSupervisorLease(dir, owner.pid);
 
         const r = runSupervisor(
           ['--once', '--force', '--workspace', dir],
@@ -861,6 +805,8 @@ describe('resident unknown-liveness integration', () => {
           worker.once('error', reject);
         })));
 
+        const knownWorkerStartTime = readProcessStartTime(knownWorker.pid);
+        assert.ok(knownWorkerStartTime, `PowerShell で known worker PID ${knownWorker.pid} の起動時刻を実取得できる`);
         const workers = {
           orchestrator: { agentId: null },
           'issue-654-unknown-worker': {
@@ -870,7 +816,7 @@ describe('resident unknown-liveness integration', () => {
           },
           'issue-655-live-worker': {
             pid: knownWorker.pid,
-            startTime: CLI_TEST_START_TIME,
+            startTime: knownWorkerStartTime,
             agentId: 'test-agent',
             issue: 655,
           },

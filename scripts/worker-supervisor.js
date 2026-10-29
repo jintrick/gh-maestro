@@ -46,7 +46,7 @@ const { buildWorkerEnv } = require('./shared/worker-env');
 const { readWorkersRaw, updateWorkerProcess } = require('./shared/workers-registry');
 const { deriveRoleFromSkill } = require('./shared/worker-factory');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
-const { isWorkerAlive } = require('./shared/worker-liveness');
+const { observeWorker } = require('./shared/worker-liveness');
 const {
   resolveSessionPid,
   registerProcess,
@@ -149,13 +149,21 @@ let _ghApiComments = (repo, issue, since, opts = {}) => {
 
 // ── ワーカー生存確認（テストで注入可能） ──────────────────────────────────
 
-let _isWorkerAlive = isWorkerAlive;
+let _observeWorker = observeWorker;
 
 // resume直後の生存確認までの待機（テストで注入可能）。
 let _sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
 // resume 直後にプロセスが即死していないかを確認するまでの猶予。
 const RESUME_LIVENESS_GRACE_MS = 2000;
+
+function observeWorkerState(entry) {
+  const state = _observeWorker(entry.rawProcessEntry ?? entry);
+  if (state !== 'alive' && state !== 'dead' && state !== 'unknown') {
+    throw new Error(`worker-liveness returned an invalid state: ${String(state)}`);
+  }
+  return state;
+}
 
 // 配送を断念した際に orchestrator へ通知する（テストで注入可能）。worker-supervisor.js は
 // ワーカーではないため GH_MAESTRO_WORKER は設定せず、--from/--issue を明示して投稿する。
@@ -516,28 +524,28 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
  * @param {string} params.homedir
  * @param {string} params.issue      - Issue 番号（文字列）
  * @param {string} [params.repo]     - main() が解決済みのリポジトリ名
- * @returns {{ success: boolean, method: string, error?: string }}
+ * @returns {{ success: boolean, method: string, workerState: 'alive'|'dead'|'unknown', error?: string }}
  */
 function deliverMessage({ workerName, entry, message, workspace, homedir, issue, repo }) {
-  let workerAlive;
-  try {
-    workerAlive = _isWorkerAlive(entry.rawProcessEntry ?? entry);
-  } catch (error) {
-    // A live PID with an incomplete or unreadable identity may still be busy.
-    // Keep the delivery pending so this uncertainty can never start a duplicate worker.
+  const workerState = observeWorkerState(entry);
+  if (workerState === 'unknown') {
     return {
       success: false,
       method: 'pending',
-      livenessUnknown: true,
-      error: `worker pid ${entry.pid || 'unknown'} liveness is unknown; refusing resume: ${error.message}`,
+      workerState,
+      error: `worker pid ${entry.pid || 'unknown'} liveness is unknown; refusing resume`,
     };
   }
-  if (workerAlive) {
+  if (workerState === 'alive') {
     return {
       success: false,
       method: 'pending',
+      workerState,
       error: `worker pid ${entry.pid} is alive (worker busy) — waiting for it to become idle for resume delivery`,
     };
+  }
+  if (workerState !== 'dead') {
+    throw new Error(`worker-liveness returned an invalid state: ${String(workerState)}`);
   }
 
   const resumeResult = tryResumeAndDeliver({
@@ -553,12 +561,13 @@ function deliverMessage({ workerName, entry, message, workspace, homedir, issue,
   });
   if (resumeResult.method !== 'pending') {
     // resumeを試みた結果（成功 or 明確な失敗）。既存のpendingDeliveries/バックオフ機構にそのまま乗る。
-    return resumeResult;
+    return { ...resumeResult, workerState };
   }
 
   return {
     success: false,
     method: 'pending',
+    workerState,
     error: `worker process (pid ${entry.pid || 'none'}) is not alive — queued for resume`,
   };
 }
@@ -826,19 +835,19 @@ function main(argsOverride, opts = {}) {
   // Keep unknown workers out of every resume path, but report the condition once per
   // worker identity so a persistent uncertainty does not flood the orchestrator inbox.
   const unknownWorkerNotifications = new Map();
-  const reportUnknownWorker = (workerName, entry, issue, error) => {
+  const reportUnknownWorker = (workerName, entry, issue) => {
     const identity = `${entry.pid ?? 'unknown'}:${entry.startTime ?? 'unknown'}`;
     let notification = unknownWorkerNotifications.get(workerName);
     if (!notification || notification.identity !== identity) {
       notification = { identity, notified: false };
       unknownWorkerNotifications.set(workerName, notification);
       writeErr(
-        `worker-supervisor: worker "${workerName}" (pid ${entry.pid ?? 'unknown'}) の生死が不明なため、この周回では処理をスキップします: ${error.message}`
+        `worker-supervisor: worker "${workerName}" (pid ${entry.pid ?? 'unknown'}) の生死が不明なため、この周回では処理をスキップします`
       );
     }
     if (notification.notified) return;
 
-    const body = `⚠️ ワーカー "${workerName}" (PID ${entry.pid ?? 'unknown'}) の生死を判定できないため、worker-supervisor はこの周回で再開せずスキップしました。停止・削除も行いません。理由: ${error.message}`;
+    const body = `⚠️ ワーカー "${workerName}" (PID ${entry.pid ?? 'unknown'}) の生死を判定できないため、worker-supervisor はこの周回で再開せずスキップしました。停止・削除も行いません。`;
     try {
       const result = _notifyOrchestrator({ workspace, issue, body });
       if (result && result.status === 0) {
@@ -850,15 +859,18 @@ function main(argsOverride, opts = {}) {
       writeErr(`worker-supervisor: worker "${workerName}" の生死不明通知に失敗: ${notifyError.message}`);
     }
   };
-  const checkWorkerLiveness = (workerName, entry, issue) => {
-    try {
-      const alive = _isWorkerAlive(entry.rawProcessEntry ?? entry);
+  const recordWorkerLiveness = (workerName, entry, issue, state) => {
+    if (state === 'unknown') {
+      reportUnknownWorker(workerName, entry, issue);
+    } else if (state === 'dead') {
       unknownWorkerNotifications.delete(workerName);
-      return alive ? 'alive' : 'dead';
-    } catch (error) {
-      reportUnknownWorker(workerName, entry, issue, error);
-      return 'unknown';
     }
+    // A single alive observation does not clear a prior notification: a later probe in
+    // the same or next cycle can still be unknown for this same process identity.
+    return state;
+  };
+  const checkWorkerLiveness = (workerName, entry, issue) => {
+    return recordWorkerLiveness(workerName, entry, issue, observeWorkerState(entry));
   };
 
   /**
@@ -1037,9 +1049,7 @@ function main(argsOverride, opts = {}) {
           issue,
           repo,
         });
-        if (deliveryResult.livenessUnknown) {
-          reportUnknownWorker(workerName, entry, issue, new Error(deliveryResult.error || 'worker process liveness is unknown'));
-        }
+        recordWorkerLiveness(workerName, entry, issue, deliveryResult.workerState);
 
         if (deliveryResult.success) {
           cursor.deliveredIds.push(commentId);
@@ -1329,9 +1339,7 @@ function main(argsOverride, opts = {}) {
           issue,
           repo,
         });
-        if (deliveryResult.livenessUnknown) {
-          reportUnknownWorker(workerName, entry, issue, new Error(deliveryResult.error || 'worker process liveness is unknown'));
-        }
+        recordWorkerLiveness(workerName, entry, issue, deliveryResult.workerState);
 
         cursor.seenIds.push(candidate.cid);
 
@@ -1460,7 +1468,7 @@ if (require.main === module) {
 module.exports = {
   _setGhRepoView: (fn) => { _ghRepoView = fn; },
   _setGhApiComments: (fn) => { _ghApiComments = fn; },
-  _setIsWorkerAlive: (fn) => { _isWorkerAlive = fn; },
+  _setObserveWorker: (fn) => { _observeWorker = fn; },
   _setSleep: (fn) => { _sleep = fn; },
   _setNotifyOrchestrator: (fn) => { _notifyOrchestrator = fn; },
   // 実装を直接参照（テストが注入を戻す際の復元用。PR #251 の引数検証テストから使う）
