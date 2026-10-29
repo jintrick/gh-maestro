@@ -154,7 +154,7 @@ test('cleanupLegacyWorkerSupervisor: 旧scriptのstale registryとleaseだけを
   assert.equal(fs.existsSync(currentRegistry), true);
 });
 
-test('cleanupLegacyWorkerSupervisor: startTime不明の旧registryはkill・削除せずunknownにする', () => {
+test('cleanupLegacyWorkerSupervisor: endpoint識別情報のない旧registryは生存PIDでもkillせず持ち主なしとして回収する', () => {
   const legacyDir = path.join(workspace, '.gh-maestro', 'pids');
   fs.mkdirSync(legacyDir, { recursive: true });
   const oldRegistry = path.join(legacyDir, '111.json');
@@ -167,9 +167,9 @@ test('cleanupLegacyWorkerSupervisor: startTime不明の旧registryはkill・削�
     liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }),
     killProcessTreeFn: () => { killed = true; },
   });
-  assert.equal(result.status, 'unknown');
-  assert.equal(killed, false);
-  assert.equal(fs.existsSync(oldRegistry), true);
+  assert.notEqual(result.status, 'unknown');
+  assert.equal(killed, false, '旧形式のPIDは再利用されうるのでkillしない');
+  assert.equal(fs.existsSync(oldRegistry), false);
 });
 
 test('cleanupLegacyWorkerSupervisor: 1件でも生死unknownなら他registryもkill・削除しない', () => {
@@ -181,7 +181,7 @@ test('cleanupLegacyWorkerSupervisor: 1件でも生死unknownなら他registryも
     pid: 111, startTime: '2026-01-01T00:00:00.000Z', script: 'inbox-supervisor.js',
   }), 'utf8');
   fs.writeFileSync(unknownRegistry, JSON.stringify({
-    pid: 112, script: 'inbox-supervisor.js',
+    pid: 112, script: 'inbox-supervisor.js', instanceId: 'identity-without-resource',
   }), 'utf8');
   let killed = false;
   const result = control.cleanupLegacyWorkerSupervisor({
@@ -209,14 +209,16 @@ test('cleanupLegacyWorkerSupervisor: leaseがunknownなら既知のregistryもki
   fs.writeFileSync(registry, JSON.stringify({
     pid: 111, startTime: '2026-01-01T00:00:00.000Z', script: 'inbox-supervisor.js',
   }), 'utf8');
-  fs.writeFileSync(leasePath, JSON.stringify({ pid: 112, role: 'inbox-supervisor' }), 'utf8');
+  fs.writeFileSync(leasePath, JSON.stringify({
+    pid: 112, role: 'inbox-supervisor', resourceKey: 'c'.repeat(64), instanceId: 'unknown-lease-instance',
+  }), 'utf8');
   let killed = false;
   const result = control.cleanupLegacyWorkerSupervisor({
     workspace,
     legacyPidDir: legacyDir,
     runtimePidDir: path.join(workspace, 'missing-runtime-pids'),
     liveness: require('../scripts/shared/process-liveness').createLiveness({
-      probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z',
+      probePid: (pid) => (pid === 112 ? 'unknown' : 'alive'), readStartTime: () => '2026-01-01T00:00:00.000Z',
     }),
     killProcessTreeFn: () => { killed = true; },
   });

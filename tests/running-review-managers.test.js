@@ -103,15 +103,15 @@ test('listRunningReviewManagers: staleな新形式は内容確認後に回収で
   }
 });
 
-test('listRunningReviewManagers: 旧 PID-only は判定不能として保持する', () => {
+test('listRunningReviewManagers: 旧 PID-only は持ち主のいない stale として回収する', () => {
   const rrm = fresh(); const ws = tmpWorkspace();
   try {
     const file = runningPath(ws, 42);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, '12345\n');
+    fs.writeFileSync(file, `${process.pid}\n`);
     rrm._setLiveness(live());
-    assert.throws(() => rrm.listRunningReviewManagers(ws, { cleanupStale: true }), /判定できません/);
-    assert.equal(fs.readFileSync(file, 'utf8'), '12345\n');
+    assert.deepEqual(rrm.listRunningReviewManagers(ws, { cleanupStale: true }), []);
+    assert.equal(fs.existsSync(file), false);
   } finally { fs.rmSync(ws, { recursive: true, force: true }); }
 });
 

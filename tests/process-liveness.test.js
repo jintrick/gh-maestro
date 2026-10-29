@@ -67,16 +67,67 @@ test('a different endpoint generation makes an old reference dead', () => {
   assert.equal(api.observe(api.captureProcess(123, { resourceKey, instanceId })), 'dead');
 });
 
-test('endpointless PR1 records are dead only on ESRCH and remain unknown when PID exists', () => {
-  const { api, endpoints, state } = makeLiveness({ endpointState: 'dead', killState: 'present' });
-  const legacy = api.readRef({ pid: 123, startTime: '2025-01-01T00:00:00Z' });
-  assert.equal(api.observe(legacy), 'unknown');
+function captureStderr(fn) {
+  const original = process.stderr.write;
+  const lines = [];
+  process.stderr.write = (chunk, ...rest) => {
+    lines.push(String(chunk));
+    return true;
+  };
+  try { fn(); } finally { process.stderr.write = original; }
+  return lines;
+}
+
+test('endpointless PR1 records are holderless: dead without querying the PID, whatever the PID state', () => {
+  const { api, endpoints, state } = makeLiveness({ endpointState: 'alive', killState: 'present' });
+  let kills = 0;
+  const counting = processLiveness.createLiveness({
+    useRealResources: false,
+    probeEndpoint: (endpoint) => { endpoints.push(endpoint); return state.endpointState; },
+    readManifest: () => state.manifest,
+    kill: () => { kills += 1; },
+  });
+  for (const checker of [api, counting]) {
+    const legacy = checker.readRef({ pid: process.pid, startTime: '2025-01-01T00:00:00Z' }, 'default',
+      { source: `test-holderless-${Math.random()}` });
+    captureStderr(() => assert.equal(checker.observe(legacy), 'dead'));
+    assert.equal(checker.sameRef(legacy, legacy), false);
+  }
   assert.equal(endpoints.length, 0, 'legacy records do not invent a deterministic endpoint');
-  state.killState = 'dead';
-  assert.equal(api.observe(legacy), 'dead');
-  state.killState = 'unknown';
-  assert.equal(api.observe(legacy), 'unknown');
-  assert.equal(api.sameRef(legacy, legacy), false);
+  assert.equal(kills, 0, 'legacy records never query the PID');
+});
+
+test('holderless records are reported once per source with the source path', () => {
+  const { api } = makeLiveness();
+  const source = `C:/tmp/leases/test-${process.pid}-${Date.now()}.json`;
+  const other = `${source}.other`;
+  const lines = captureStderr(() => {
+    for (let i = 0; i < 3; i++) api.observe(api.readRef({ pid: 4242 }, 'default', { source }));
+    api.observe(api.readRef({ pid: 4243 }, 'default', { source: other }));
+  });
+  assert.equal(lines.filter((line) => line.includes(source) && !line.includes('.other')).length, 1);
+  assert.equal(lines.filter((line) => line.includes(other)).length, 1);
+  assert.ok(lines.every((line) => /旧形式の記録を持ち主なしとして扱いました/.test(line)));
+});
+
+test('corrupt process records stay unknown and are not treated as holderless', () => {
+  const { api } = makeLiveness();
+  const lines = captureStderr(() => {
+    for (const record of [
+      { pid: 'x' },
+      { pid: 0 },
+      { pid: 4242, resourceKey },
+      { pid: 4242, instanceId },
+      { pid: 4242, resourceKey: 'not-hex', instanceId },
+    ]) {
+      const ref = api.readRef(record, 'default', { source: 'corrupt-record' });
+      assert.equal(ref, null, JSON.stringify(record));
+      assert.equal(api.observe(ref), 'unknown', JSON.stringify(record));
+    }
+    assert.equal(api.readRef(null), null);
+    assert.equal(api.readRef([1]), null);
+  });
+  assert.deepEqual(lines, []);
 });
 
 test('reference serialization carries resource key and instance ID while preserving domain timestamps', () => {

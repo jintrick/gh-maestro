@@ -811,7 +811,10 @@ describe('resident unknown-liveness integration', () => {
         const workers = {
           orchestrator: { agentId: null },
           'issue-654-unknown-worker': {
+            // endpoint 識別情報が片方だけの記録は判定不能（unknown）になる。
+            // 識別情報を両方持たない旧形式は持ち主なし（dead）として扱われるため使わない。
             pid: unknownWorker.pid,
+            instanceId: 'identity-without-resource',
             agentId: 'test-agent',
             issue: 654,
           },

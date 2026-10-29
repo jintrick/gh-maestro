@@ -124,12 +124,12 @@ test('isLockValid returns false and removes the file for a stale pid', () => {
   assert.equal(fs.existsSync(lockFile), false);
 });
 
-test('isLockValid は生存中の旧PID-onlyを削除せず起動をfail-closedにする', () => {
+test('isLockValid は旧PID-onlyを持ち主のいない stale として回収し、起動を止めない', () => {
   const mod = loadModule();
   const lockFile = path.join(freshWorkspace('lock-legacy-live'), 'lock.running');
-  fs.writeFileSync(lockFile, '12345\n', 'utf8');
-  assert.throws(() => mod.isLockValid(lockFile), /判定できません/);
-  assert.equal(fs.readFileSync(lockFile, 'utf8'), '12345\n');
+  fs.writeFileSync(lockFile, `${process.pid}\n`, 'utf8');
+  assert.equal(mod.isLockValid(lockFile), false);
+  assert.equal(fs.existsSync(lockFile), false);
 });
 
 test('入力照会の死亡と生存を区別する', () => {

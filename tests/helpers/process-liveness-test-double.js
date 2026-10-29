@@ -65,7 +65,7 @@ function createTestLiveness({
     return { resourceKey, instanceId: actualInstanceId };
   }
 
-  function readRef(record, format = 'default') {
+  function readRef(record, format = 'default', opts = {}) {
     if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
     const pid = format === 'session' ? record.sessionPid : record.pid;
     if (!Number.isInteger(Number(pid)) || Number(pid) <= 0) return null;
@@ -84,11 +84,11 @@ function createTestLiveness({
       const normalized = remember(pid, label, instanceId || (hasGenerationlessTestFixture ? record.startTime : null));
       return api.readRef(format === 'session'
         ? { ...record, sessionResourceKey: normalized.resourceKey, sessionInstanceId: normalized.instanceId }
-        : { ...record, resourceKey: normalized.resourceKey, instanceId: normalized.instanceId }, format);
+        : { ...record, resourceKey: normalized.resourceKey, instanceId: normalized.instanceId }, format, opts);
     }
     // PR1 records remain endpointless. The production PID probe returns dead only for ESRCH;
     // a present PID remains unknown because its identity cannot be established.
-    return api.readRef(record, format);
+    return api.readRef(record, format, opts);
   }
 
   function captureProcess(pid, resourceKeyOrLabel, instanceId) {
@@ -201,7 +201,7 @@ function installLivenessTestAdapter() {
   processLiveness.createLiveness = createTestLiveness;
   for (const method of [
     'prepareSelf', 'captureSelf', 'captureProcess', 'createProcessRef', 'claim', 'release',
-    'readRef', 'writeRef', 'observe', 'legacyPidStatus', 'observeResource', 'sameRef', 'watchParent',
+    'readRef', 'writeRef', 'observe', 'observeResource', 'sameRef', 'watchParent',
   ]) {
     processLiveness[method] = sharedApi[method].bind(sharedApi);
   }

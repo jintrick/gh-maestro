@@ -212,8 +212,6 @@ function unregisterProcess(workspace, pid, expected) {
  * @param {boolean} [opts.failOnReadError=false] true の場合、registry ディレクトリ・個別
  *   エントリの読み取りまたはJSON解析に失敗したら throw する。ディレクトリ自体が無い場合は
  *   「エントリなし」として空配列を返す。
- * @param {boolean} [opts.includeUnknownLegacy=false] 一時移行経路専用。OS endpointを持たない
- *   旧recordのPIDが存在すると確認できた場合、そのrecordを結果へ含める。
  * @returns {object[]} 一致する生存エントリ（PID重複は除外済み）
  */
 function findRunningInstances(workspace, opts = {}) {
@@ -294,19 +292,8 @@ function findRunningInstances(workspace, opts = {}) {
       // 同一 PID の重複レコードは一度だけ判定する。
       if (seenPids.has(entryPid)) continue;
       seenPids.add(entryPid);
-      const state = checker.observe(checker.readRef(entry));
+      const state = checker.observe(checker.readRef(entry, 'default', { source: path.join(dir, file) }));
       if (state === 'unknown') {
-        const hasNoEndpointMetadata = entry.resourceKey == null && entry.instanceId == null;
-        if (opts.includeUnknownLegacy && hasNoEndpointMetadata) {
-          const legacyPidState = typeof checker.legacyPidStatus === 'function'
-            ? checker.legacyPidStatus(entryPid)
-            : 'unknown';
-          if (legacyPidState === 'present') {
-            matches.push({ ...entry, legacyEndpointless: true });
-            continue;
-          }
-          if (legacyPidState === 'dead') continue;
-        }
         throw new Error(`PID registry の生死を判定できません: ${entryPid}`);
       }
       if (state !== 'alive') continue;
@@ -583,8 +570,8 @@ function sweepRegistry(workspace, opts = {}) {
 
   const checker = getLiveness(opts.liveness);
   const states = new Map();
-  for (const { entry } of byPid.values()) {
-    const state = checker.observe(checker.readRef(entry));
+  for (const { entry, filePaths } of byPid.values()) {
+    const state = checker.observe(checker.readRef(entry, 'default', { source: filePaths[0] }));
     states.set(entry.pid, state);
     if (state === 'unknown') results.errors.push(`PID registry の生死を判定できません: ${entry.pid}`);
   }

@@ -87,7 +87,7 @@ test('restartResidentsAfterInstall: 登録済みの全workspaceに配布済みCL
   assert.deepEqual(notices, workspaces);
   assert.deepEqual(calls, workspaces.map((workspace) => [
     process.execPath,
-    [path.join(sharedScripts, 'restart-residents.js'), '--workspace', workspace, '--upgrade-legacy'],
+    [path.join(sharedScripts, 'restart-residents.js'), '--workspace', workspace],
     { encoding: 'utf8', stdio: ['inherit', 'pipe', 'inherit'] },
   ]));
 });

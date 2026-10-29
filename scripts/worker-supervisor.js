@@ -182,8 +182,9 @@ let _sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0,
 // resume 直後にプロセスが即死していないかを確認するまでの猶予。
 const RESUME_LIVENESS_GRACE_MS = 2000;
 
-function observeWorkerState(entry) {
-  const state = _observeWorker(entry.rawProcessEntry ?? entry);
+function observeWorkerState(entry, workerName = null) {
+  const source = workerName ? `workers.json#${workerName}` : null;
+  const state = _observeWorker(entry.rawProcessEntry ?? entry, { source });
   if (state !== 'alive' && state !== 'dead' && state !== 'unknown') {
     throw new Error(`worker-liveness returned an invalid state: ${String(state)}`);
   }
@@ -552,7 +553,7 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
  * @returns {{ success: boolean, method: string, workerState: 'alive'|'dead'|'unknown', error?: string }}
  */
 function deliverMessage({ workerName, entry, message, workspace, homedir, issue, repo }) {
-  const workerState = observeWorkerState(entry);
+  const workerState = observeWorkerState(entry, workerName);
   if (workerState === 'unknown') {
     return {
       success: false,
@@ -892,7 +893,7 @@ function main(argsOverride, opts = {}) {
     return state;
   };
   const checkWorkerLiveness = (workerName, entry, issue) => {
-    return recordWorkerLiveness(workerName, entry, issue, observeWorkerState(entry));
+    return recordWorkerLiveness(workerName, entry, issue, observeWorkerState(entry, workerName));
   };
 
   const observeMsgPollFn = opts.observeMsgPollFn || observeOrchestratorMsgPoll;

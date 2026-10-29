@@ -154,14 +154,43 @@ test('collectHousekeepingExclusions: 同一性確認済みの Review Manager が
   }
 });
 
-test('collectHousekeepingExclusions: 生存中の旧 PID-only は判定不能として保持し中断する', () => {
+test('collectHousekeepingExclusions: PIDが生存中でも旧 PID-only は持ち主なしとして中断せず除外対象にしない', () => {
   const { che } = fresh(); const ws = tmpWorkspace();
   try {
     const file = path.join(ws, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.running');
     fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, '12345');
     che._setLiveness(createLiveness({ probePid: () => 'alive' }));
+    const result = che.collectHousekeepingExclusions(ws);
+    assert.equal(result.reviewPrs.has('42'), false);
+    assert.equal(result.pids.has(12345), false);
+  } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('collectHousekeepingExclusions: PIDが生存中の旧形式 lease・workers.json の項目があっても中断しない', () => {
+  const { che } = fresh(); const ws = tmpWorkspace();
+  try {
+    const ghDir = path.join(ws, '.gh-maestro');
+    fs.mkdirSync(path.join(ghDir, 'leases'), { recursive: true });
+    fs.writeFileSync(path.join(ghDir, 'leases', 'issue-1-coder-old.json'),
+      JSON.stringify({ pid: process.pid, workerName: 'issue-1-coder-old', legacyEndpointless: true }));
+    fs.writeFileSync(path.join(ghDir, 'workers.json'),
+      JSON.stringify({ 'issue-2-coder-old': { pid: process.pid, issue: 2, legacyEndpointless: true } }));
+    che._setLiveness(createLiveness({ probePid: () => 'alive' }));
+    const result = che.collectHousekeepingExclusions(ws);
+    assert.equal(result.workerNames.has('issue-1-coder-old'), false);
+    assert.equal(result.workerNames.has('issue-2-coder-old'), false);
+    assert.ok(fs.existsSync(path.join(ghDir, 'leases', 'issue-1-coder-old.json')), '除外リスト構築では削除しない');
+  } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('collectHousekeepingExclusions: pid が不正な lease は従来どおり判定不能として中断する', () => {
+  const { che } = fresh(); const ws = tmpWorkspace();
+  try {
+    const ghDir = path.join(ws, '.gh-maestro');
+    fs.mkdirSync(path.join(ghDir, 'leases'), { recursive: true });
+    fs.writeFileSync(path.join(ghDir, 'leases', 'issue-1-coder-bad.json'), JSON.stringify({ pid: 'x' }));
+    che._setLiveness(createLiveness({ probePid: () => 'alive' }));
     assert.throws(() => che.collectHousekeepingExclusions(ws), /判定できません/);
-    assert.equal(fs.readFileSync(file, 'utf8'), '12345');
   } finally { fs.rmSync(ws, { recursive: true, force: true }); }
 });
 

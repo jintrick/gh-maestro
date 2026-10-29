@@ -12,7 +12,7 @@ function observeWorker(entry, opts = {}) {
   const liveness = injectedLiveness || (opts.probeEndpoint || injectedProbe
     ? processLiveness.createLiveness({ probeEndpoint: opts.probeEndpoint || injectedProbe, useRealResources: false })
     : processLiveness);
-  return liveness.observe(liveness.readRef(entry));
+  return liveness.observe(liveness.readRef(entry, 'default', { source: opts.source ?? null }));
 }
 
 function isWorkerAlive(entry, opts = {}) {
