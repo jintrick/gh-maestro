@@ -1,7 +1,7 @@
 'use strict';
 
 const net = require('net');
-const { parentPort } = require('worker_threads');
+const { parentPort, workerData } = require('worker_threads');
 
 const listeners = new Map();
 const activeRequests = new Map();
@@ -132,3 +132,12 @@ parentPort.on('message', (message) => {
     Atomics.notify(shared, 0);
   }
 });
+
+// Startup is complete once the message handler is attached. The parent waits for this
+// signal separately so that thread startup latency under load is not charged to the
+// per-request probe deadline (which would misreport live or dead endpoints as unknown).
+if (workerData && workerData.ready) {
+  const ready = new Int32Array(workerData.ready);
+  Atomics.store(ready, 0, 1);
+  Atomics.notify(ready, 0);
+}

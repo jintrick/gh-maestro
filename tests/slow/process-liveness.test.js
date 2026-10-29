@@ -91,3 +91,71 @@ test('OS liveness resource is alive while its owner runs and dead after forced p
     fs.rmSync(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
+
+// ── probe worker thread の起動遅延を probe の期限に含めない（PR #658 slow 層の失敗） ──
+// 負荷が高いと worker thread の起動だけで数百 ms かかり、最初の probe が unknown になって
+// spawn-worker や常駐プロセスの起動が LIVENESS_UNKNOWN で止まっていた。
+// 起動を遅らせた worker で、期限 250ms の probe が不在 endpoint を dead と答えることを確かめる。
+
+const { createProbeWorkerClient } = require('../../scripts/shared/process-liveness');
+const { createTempDirScope } = require('../../scripts/shared/temp-directory');
+
+const REAL_PROBE_WORKER = path.join(__dirname, '..', '..', 'scripts', 'shared', 'process-liveness-probe-worker.js');
+const MISSING_ENDPOINT = process.platform === 'win32'
+  ? `\\.\pipe\gh-maestro-test-missing-${process.pid}-${Date.now()}`
+  : path.join(os.tmpdir(), `gh-maestro-test-missing-${process.pid}-${Date.now()}.sock`);
+
+function slowStartingWorker(scope, delayMs, { signalReady = true } = {}) {
+  const dir = scope.mkdtemp('ghm-slow-probe-worker-');
+  const file = path.join(dir, 'worker.js');
+  const body = signalReady
+    ? `require(${JSON.stringify(REAL_PROBE_WORKER)});`
+    : "require('worker_threads').parentPort.on('message', () => {});";
+  fs.writeFileSync(file, [
+    "'use strict';",
+    `const until = Date.now() + ${delayMs};`,
+    'while (Date.now() < until) {}',
+    body,
+  ].join('\n'), 'utf8');
+  return file;
+}
+
+test('probe: worker thread の起動が probe 期限より遅くても、不在 endpoint を dead と判定する', { timeout: 15000 }, () => {
+  const scope = createTempDirScope();
+  try {
+    const request = createProbeWorkerClient({ workerPath: slowStartingWorker(scope, 800) });
+    assert.equal(request({ type: 'probe', endpoint: MISSING_ENDPOINT }, 250), 2);
+  } finally {
+    scope.cleanup();
+  }
+});
+
+test('probe: worker thread の起動が上限内に終わらなければ unknown を返し、準備完了後の probe は判定できる', { timeout: 15000 }, () => {
+  const scope = createTempDirScope();
+  try {
+    const request = createProbeWorkerClient({ workerPath: slowStartingWorker(scope, 800), startTimeoutMs: 100 });
+    assert.equal(request({ type: 'probe', endpoint: MISSING_ENDPOINT }, 250), 3, '起動未確認のまま判定しない');
+    const later = createProbeWorkerClient({ workerPath: slowStartingWorker(scope, 0), startTimeoutMs: 5000 });
+    assert.equal(later({ type: 'probe', endpoint: MISSING_ENDPOINT }, 250), 2);
+    // 同じ client でも、準備が整えば次のリクエストで判定できる。
+    const until = Date.now() + 1500;
+    let state = 3;
+    while (state === 3 && Date.now() < until) state = request({ type: 'probe', endpoint: MISSING_ENDPOINT }, 250);
+    assert.equal(state, 2);
+  } finally {
+    scope.cleanup();
+  }
+});
+
+test('probe: 準備完了を通知しない worker では unknown を返す（判定不能を dead にしない）', { timeout: 15000 }, () => {
+  const scope = createTempDirScope();
+  try {
+    const request = createProbeWorkerClient({
+      workerPath: slowStartingWorker(scope, 0, { signalReady: false }),
+      startTimeoutMs: 300,
+    });
+    assert.equal(request({ type: 'probe', endpoint: MISSING_ENDPOINT }, 250), 3);
+  } finally {
+    scope.cleanup();
+  }
+});

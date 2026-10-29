@@ -36,12 +36,25 @@ function startLivenessOwner({ workspace, runtimeRoot, kind, name, withChild = fa
     GHM_TEST_LIVENESS_NAME: name,
     GHM_TEST_LIVENESS_RECORD: recordPath,
   };
-  const child = spawn(process.execPath, ['-e', source], {
-    cwd: workspace,
-    env,
-    stdio: 'ignore',
-    windowsHide: true,
-  });
+  // 公開に失敗したとき原因を報告できるよう、子の stderr をファイルへ残す。
+  // 下の同期待機中は 'exit' イベントが処理されず exitCode が null のままになるため、
+  // stderr が子の終了理由を知る唯一の手がかりになる。
+  const stderrPath = `${recordPath}.stderr`;
+  const stderrFd = fs.openSync(stderrPath, 'w');
+  let child;
+  try {
+    child = spawn(process.execPath, ['-e', source], {
+      cwd: workspace,
+      env,
+      stdio: ['ignore', 'ignore', stderrFd],
+      windowsHide: true,
+    });
+  } finally {
+    fs.closeSync(stderrFd);
+  }
+  const readStderr = () => {
+    try { return fs.readFileSync(stderrPath, 'utf8').trim(); } catch { return ''; }
+  };
 
   const deadline = Date.now() + 10000;
   while (!fs.existsSync(recordPath) && Date.now() < deadline && child.exitCode === null) {
@@ -49,8 +62,12 @@ function startLivenessOwner({ workspace, runtimeRoot, kind, name, withChild = fa
   }
   if (!fs.existsSync(recordPath)) {
     try { child.kill(); } catch {}
-    throw new Error(`liveness owner failed to publish its record (pid=${child.pid}, exit=${child.exitCode})`);
+    const stderr = readStderr();
+    try { fs.unlinkSync(stderrPath); } catch {}
+    throw new Error(`liveness owner failed to publish its record (pid=${child.pid}, exit=${child.exitCode})`
+      + (stderr ? `: ${stderr}` : ''));
   }
+  try { fs.unlinkSync(stderrPath); } catch {}
   const record = JSON.parse(fs.readFileSync(recordPath, 'utf8'));
   fs.unlinkSync(recordPath);
   return { child, record, childPid: record.childPid };

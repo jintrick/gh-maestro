@@ -11,14 +11,14 @@ const { resolveWorkspace } = require('./workspace');
 const IS_WIN = process.platform === 'win32';
 const RESOURCE_KEY_ENV = 'GH_MAESTRO_RESOURCE_KEY';
 const INSTANCE_ID_ENV = 'GH_MAESTRO_INSTANCE_ID';
-const PROBE_TIMEOUT_MS = 250;
+// 接続そのものの期限。負荷の高いマシンでも worker thread の応答が収まる幅を取る。
+const PROBE_TIMEOUT_MS = 1000;
+// probe worker thread の起動（準備完了通知）を待つ上限。
+const PROBE_WORKER_START_TIMEOUT_MS = 10000;
 const CLAIM_TIMEOUT_MS = 5000;
 const PROBE_WORKER_PATH = path.join(__dirname, 'process-liveness-probe-worker.js');
 const PROCESS_REGISTRY_DIR = 'process-liveness';
 const RESOURCE_KEY_RE = /^[a-f0-9]{64}$/;
-
-let probeWorker = null;
-let probeWorkerFailure = null;
 
 function newInstanceId() {
   return crypto.randomUUID();
@@ -81,47 +81,80 @@ function createChildLivenessEnv({ env = process.env, workspace, kind, name, inst
   };
 }
 
-function startProbeWorker() {
-  if (probeWorker || probeWorkerFailure) return probeWorker;
-  try {
-    probeWorker = new Worker(PROBE_WORKER_PATH);
-    probeWorker.unref();
-    probeWorker.on('error', (error) => {
-      probeWorkerFailure = error || new Error('process liveness probe worker failed');
-    });
-    probeWorker.on('exit', (code) => {
-      if (code !== 0) probeWorkerFailure = new Error(`process liveness probe worker exited with code ${code}`);
-    });
-  } catch (error) {
-    probeWorkerFailure = error;
-  }
-  return probeWorker;
-}
+/**
+ * probe worker thread への同期リクエスト口を作る。
+ *
+ * 各リクエストの期限は「接続・listen そのもの」に掛ける。worker thread の起動
+ * （モジュール読み込み）は負荷が高いと数百 ms かかるため、同じ期限に含めると
+ * 生きている／死んでいる相手を unknown と誤判定する。起動は worker が workerData の
+ * 共有バッファで通知する準備完了を、別の決定論的な上限（startTimeoutMs）まで待つ。
+ *
+ * @param {object} [opt]
+ * @param {string} [opt.workerPath]
+ * @param {number} [opt.startTimeoutMs]
+ * @returns {(message: object, timeoutMs: number) => number} 1/2 は worker の応答、3 は判定不能
+ */
+function createProbeWorkerClient({
+  workerPath = PROBE_WORKER_PATH,
+  startTimeoutMs = PROBE_WORKER_START_TIMEOUT_MS,
+} = {}) {
+  let worker = null;
+  let failure = null;
+  let ready = null;
 
-function probeWorkerRequest(message, timeoutMs) {
-  const worker = startProbeWorker();
-  if (!worker || probeWorkerFailure) return 3;
-
-  const shared = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
-  try {
-    worker.postMessage({ ...message, shared: shared.buffer, timeoutMs });
-  } catch {
-    return 3;
-  }
-  const waitResult = Atomics.wait(shared, 0, 0, timeoutMs + 50);
-  if (waitResult !== 'timed-out') return Atomics.load(shared, 0);
-
-  if (message.type === 'claim') {
-    // A late bind must not leave an untracked listener behind after the synchronous
-    // caller gives up. The worker checks this cancellation before retaining the server.
-    const cancelled = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  function start() {
+    if (worker || failure) return worker;
     try {
-      worker.postMessage({ type: 'cancel-claim', requestId: message.requestId, shared: cancelled.buffer });
-      Atomics.wait(cancelled, 0, 0, 1000);
-    } catch {}
+      ready = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+      worker = new Worker(workerPath, { workerData: { ready: ready.buffer } });
+      worker.unref();
+      worker.on('error', (error) => {
+        failure = error || new Error('process liveness probe worker failed');
+      });
+      worker.on('exit', (code) => {
+        if (code !== 0) failure = new Error(`process liveness probe worker exited with code ${code}`);
+      });
+    } catch (error) {
+      failure = error;
+    }
+    return worker;
   }
-  return 3;
+
+  function awaitReady() {
+    if (Atomics.load(ready, 0) !== 0) return true;
+    // 未準備のまま期限を過ぎた場合も worker は残し、次のリクエストで再び準備を待つ。
+    Atomics.wait(ready, 0, 0, startTimeoutMs);
+    return Atomics.load(ready, 0) !== 0;
+  }
+
+  return function request(message, timeoutMs) {
+    const current = start();
+    if (!current || failure) return 3;
+    if (!awaitReady() || failure) return 3;
+
+    const shared = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+    try {
+      current.postMessage({ ...message, shared: shared.buffer, timeoutMs });
+    } catch {
+      return 3;
+    }
+    const waitResult = Atomics.wait(shared, 0, 0, timeoutMs + 50);
+    if (waitResult !== 'timed-out') return Atomics.load(shared, 0);
+
+    if (message.type === 'claim') {
+      // A late bind must not leave an untracked listener behind after the synchronous
+      // caller gives up. The worker checks this cancellation before retaining the server.
+      const cancelled = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+      try {
+        current.postMessage({ type: 'cancel-claim', requestId: message.requestId, shared: cancelled.buffer });
+        Atomics.wait(cancelled, 0, 0, 1000);
+      } catch {}
+    }
+    return 3;
+  };
 }
+
+const probeWorkerRequest = createProbeWorkerClient();
 
 /**
  * Synchronize a local net connection probe through one unrefed Node worker thread.
@@ -672,5 +705,7 @@ module.exports = {
   legacyPidState,
   legacyPidStatus,
   createLiveness,
+  createProbeWorkerClient,
+  PROBE_TIMEOUT_MS,
   ...liveness,
 };
