@@ -7,7 +7,7 @@ const { spawnSync } = require('child_process');
 
 const lifecycle = require('../../scripts/process-lifecycle');
 const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
-lifecycle.getProcessStartTime = () => TEST_PROCESS_START_TIME;
+const processLiveness = require('../../scripts/shared/process-liveness');
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'spawn-worker.js');
 const {
   shouldPruneStaleWorker,
@@ -33,6 +33,9 @@ const FAST_CLI_PRELOAD = (() => {
   const childProcessPath = require.resolve('../../scripts/shared/child-process');
   const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
   const leasePath = require.resolve('../../scripts/shared/worker-lease');
+  const processLivenessPath = require.resolve('../../scripts/shared/process-liveness');
+  const workerLivenessPath = require.resolve('../../scripts/shared/worker-liveness');
+  const headlessLaunchPath = require.resolve('../../scripts/shared/headless-launch');
   const statusPanePath = require.resolve('../../scripts/shared/ensure-status-pane');
   const supervisorPath = require.resolve('../../scripts/shared/ensure-worker-supervisor');
   const source = [
@@ -41,6 +44,7 @@ const FAST_CLI_PRELOAD = (() => {
     `const fixedStartTime = ${JSON.stringify(TEST_PROCESS_START_TIME)};`,
     'const realExecSync = childProcess.execSync;',
     'const isAlive = (pid) => {',
+    '  if (Number(pid) >= 99990 && Number(pid) <= 99999) return true;',
     '  try { process.kill(Number(pid), 0); return true; }',
     "  catch (e) { return e && e.code !== 'ESRCH'; }",
     '};',
@@ -52,9 +56,16 @@ const FAST_CLI_PRELOAD = (() => {
     '  return realExecSync(command, opts);',
     '};',
     `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
-    'lifecycle.getProcessStartTime = () => fixedStartTime;',
     `const lease = require(${JSON.stringify(leasePath)});`,
-    'lease._setGetProcessStartTime(() => fixedStartTime);',
+    `const processLiveness = require(${JSON.stringify(processLivenessPath)});`,
+    'const checker = processLiveness.createLiveness({ probePid: (pid) => isAlive(pid) ? "alive" : "dead", readStartTime: (_pid, expected) => expected || fixedStartTime });',
+    'Object.assign(processLiveness, checker);',
+    `const workerLiveness = require(${JSON.stringify(workerLivenessPath)});`,
+    'workerLiveness._setLiveness(checker);',
+    'lifecycle._setLiveness(checker);',
+    'lease._setLiveness(checker);',
+    `const headless = require(${JSON.stringify(headlessLaunchPath)});`,
+    'headless._setLiveness(checker);',
     `const statusPane = require(${JSON.stringify(statusPanePath)});`,
     "statusPane.ensureStatusPane = () => ({ ok: false, stage: 'test', error: 'injected' });",
     `const supervisor = require(${JSON.stringify(supervisorPath)});`,
@@ -603,7 +614,6 @@ test('junction 作成失敗時 (missing 非空) はワーカーを起動せず�
       `
       const path = require('path');
       const workerLease = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'worker-lease.js'))});
-      workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
       const closedGuard = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'closed-pr-guard.js'))});
       closedGuard.checkClosedPr = () => ({ ok: true, closed: false, prNumber: null });
       const ghComments = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'gh-comments.js'))});
@@ -689,7 +699,6 @@ test('linkNodeModules の予期しない例外発生時もワーカーを起動�
       preload,
       `
       const workerLease = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'worker-lease.js'))});
-      workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
       const closedGuard = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'closed-pr-guard.js'))});
       closedGuard.checkClosedPr = () => ({ ok: true, closed: false, prNumber: null });
       const ghComments = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'gh-comments.js'))});
@@ -767,7 +776,6 @@ test('junction 作成で missing が空かつ skipped が非空の場合、ワ�
       `
       const path = require('path');
       const workerLease = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'worker-lease.js'))});
-      workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
       const closedGuard = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'closed-pr-guard.js'))});
       closedGuard.checkClosedPr = () => ({ ok: true, closed: false, prNumber: null });
       const ghComments = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'gh-comments.js'))});
@@ -778,7 +786,6 @@ test('junction 作成で missing が空かつ skipped が非空の場合、ワ�
         unref: () => {},
         on: () => {},
       }));
-      headless._setGetProcessStartTime(() => new Date().toISOString());
       const supervisor = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'ensure-worker-supervisor.js'))});
       supervisor._setSpawn(() => ({
         pid: 99992,
@@ -864,7 +871,6 @@ test('junction 作成で linked / skipped / missing がいずれも空の場合�
       `
       const path = require('path');
       const workerLease = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'worker-lease.js'))});
-      workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
       const closedGuard = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'closed-pr-guard.js'))});
       closedGuard.checkClosedPr = () => ({ ok: true, closed: false, prNumber: null });
       const ghComments = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'gh-comments.js'))});
@@ -875,7 +881,6 @@ test('junction 作成で linked / skipped / missing がいずれも空の場合�
         unref: () => {},
         on: () => {},
       }));
-      headless._setGetProcessStartTime(() => new Date().toISOString());
       const supervisor = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'ensure-worker-supervisor.js'))});
       supervisor._setSpawn(() => ({
         pid: 99994,

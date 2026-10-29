@@ -80,7 +80,7 @@ test('migration holds a worker log owned by a live workers.json process', () => 
   fs.mkdirSync(path.dirname(oldLog), { recursive: true });
   fs.writeFileSync(oldLog, 'live\n');
   fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), JSON.stringify({
-    [workerName]: { pid: process.pid },
+    [workerName]: require('../scripts/shared/process-liveness').writeRef({}, require('../scripts/shared/process-liveness').captureSelf()),
   }));
 
   const result = planMigration(dir, 'worker-log', { dryRun: true });
@@ -100,9 +100,7 @@ test('migration holds a worker log when workers.json is unreadable（破損時�
   // 誤判定すると移行対象が動いてしまい、稼働中ワーカーのログを引き剥がす。
   fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), '{ broken json');
 
-  const result = planMigration(dir, 'worker-log', { dryRun: true });
-  assert.equal(result.held.length, 1);
-  assert.equal(result.moved.length, 0);
+  assert.throws(() => planMigration(dir, 'worker-log', { dryRun: true }), /workers.json/);
   assert.equal(fs.existsSync(oldLog), true);
 });
 

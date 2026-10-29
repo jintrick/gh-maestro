@@ -11,11 +11,6 @@ const mod = require('../scripts/shared/ensure-worker-supervisor');
 const { ensureWorkerSupervisorRunning, AUTOSTART_COOLDOWN_MS } = mod;
 const workerLease = require('../scripts/shared/worker-lease');
 const migrationMarker = require('../scripts/shared/migration-marker');
-const {
-  isProcessAlive,
-  getProcessStartTime,
-  verifyProcessIdentity,
-} = require('../scripts/process-lifecycle');
 const { readAutostartAttempt } = require('../scripts/shared/ensure-resident-daemon');
 
 function fakeChild() {
@@ -53,9 +48,7 @@ beforeEach(() => {
 afterEach(() => {
   try {
     // マーカーの生存確認注入を実装へ戻す（テスト間で持ち越さない）
-    migrationMarker._setIsProcessAlive(isProcessAlive);
-    migrationMarker._setGetProcessStartTime(getProcessStartTime);
-    migrationMarker._setVerifyProcessIdentity(verifyProcessIdentity);
+    migrationMarker._setLiveness(null);
   } finally {
     tempDirScope.cleanup();
   }
@@ -139,9 +132,7 @@ test('ensureWorkerSupervisorRunning: 改名前のregistry/roleを検出した場
 
 test('ensureWorkerSupervisorRunning: 所有プロセス生存中の.migration-in-progressマーカー存在時はspawnもセッションPID解決も行わない（Issue #256）', () => {
   // 有効なマーカー（所有プロセス生存）を作成する
-  migrationMarker._setGetProcessStartTime(() => '2026-08-01T00:00:00.000Z');
-  migrationMarker._setIsProcessAlive(() => true);
-  migrationMarker._setVerifyProcessIdentity(() => ({ match: true }));
+  migrationMarker._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-08-01T00:00:00.000Z' }));
   migrationMarker.markMigrationInProgress(workspace);
   mod._setFindRunningInstance(() => null);
   let spawnCalled = false;
@@ -157,8 +148,7 @@ test('ensureWorkerSupervisorRunning: 所有プロセス生存中の.migration-in
 
 test('ensureWorkerSupervisorRunning: 所有プロセスが死んだstaleマーカーは無視して自動起動する（自己回復）', () => {
   // 移行プロセスが強制終了して削除されずに残ったマーカー（所有プロセスは死んでいる）
-  migrationMarker._setGetProcessStartTime(() => '2026-08-01T00:00:00.000Z');
-  migrationMarker._setIsProcessAlive(() => false);
+  migrationMarker._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'dead', readStartTime: () => '2026-08-01T00:00:00.000Z' }));
   migrationMarker.markMigrationInProgress(workspace);
   assert.equal(migrationMarker.isMigrationInProgress(workspace), false);
   mod._setFindRunningInstance(() => null);

@@ -15,8 +15,8 @@ const {
 } = require('./shared/pr-monitor-target');
 const {
   resolveSessionPid,
-  getProcessStartTime,
 } = require('./process-lifecycle');
+const processLiveness = require('./shared/process-liveness');
 
 const USAGE = `activate-pr-monitor.js — plugin monitor のPR監視対象を設定する
 
@@ -93,15 +93,14 @@ function run(argv = process.argv.slice(2), deps = {}) {
 
   let sessionPid = resolveSessionPid(values['--session-pid']);
   if (!Number.isInteger(sessionPid) || sessionPid <= 0) sessionPid = null;
-  const getStartTime = deps.getProcessStartTimeFn || getProcessStartTime;
-  const sessionStartTime = sessionPid ? getStartTime(sessionPid) : null;
+  const checker = deps.liveness || processLiveness;
+  const session = sessionPid ? checker.writeRef({}, checker.captureProcess(sessionPid), 'session') : {};
   const target = createPrMonitorTarget({
     issue,
     baseBranch: values['--base-branch'] || null,
     noReviewManager: values['--no-review-manager'] === true,
     noReviewEvents: values['--no-review-events'] === true,
-    sessionPid,
-    sessionStartTime,
+    ...session,
   });
   const writeTarget = deps.writeTargetFn || writePrMonitorTarget;
   writeTarget(workspace, target);

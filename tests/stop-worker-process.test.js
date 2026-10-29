@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
-const { cleanupLegacyWorkerPanes } = require('../scripts/shared/stop-worker-process');
+const { stopWorkerProcess, cleanupLegacyWorkerPanes } = require('../scripts/shared/stop-worker-process');
 const { createTempDirScope } = require('../scripts/shared/temp-directory');
 const tempDirScope = createTempDirScope();
 test.after(() => tempDirScope.cleanup());
@@ -19,6 +19,34 @@ function withWorkspace(callback) {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 }
+
+test('stopWorkerProcess: 生死unknownではremove modeでも停止に進まない', () => {
+  withWorkspace((workspace) => {
+    let killed = false;
+    const liveness = require('../scripts/shared/process-liveness').createLiveness({
+      probePid: () => 'alive', readStartTime: () => null,
+    });
+    assert.throws(() => stopWorkerProcess(workspace, 'worker', {
+      isRemoveMode: true,
+      _injectedWorkers: { worker: { pid: 101, agentId: 'agent' } },
+      liveness,
+      killProcessTreeFn: () => { killed = true; },
+    }), /生死を判定できません/);
+    assert.equal(killed, false);
+  });
+});
+
+test('stopWorkerProcess: 不正なPIDは欠落扱いせず停止を拒否する', () => {
+  withWorkspace((workspace) => {
+    let killed = false;
+    assert.throws(() => stopWorkerProcess(workspace, 'worker', {
+      isRemoveMode: true,
+      _injectedWorkers: { worker: { pid: 'not-a-pid' } },
+      killProcessTreeFn: () => { killed = true; },
+    }), /PID記録が不正/);
+    assert.equal(killed, false);
+  });
+});
 
 test('cleanupLegacyWorkerPanes: live paneだけをkillしてworkers.jsonのpaneIdを消す', () => {
   withWorkspace((workspace) => {

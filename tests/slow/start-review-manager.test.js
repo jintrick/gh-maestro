@@ -8,10 +8,15 @@ const os = require('os');
 const { spawnSync } = require('child_process');
 
 const headlessLaunch = require('../../scripts/shared/headless-launch');
+const processLiveness = require('../../scripts/shared/process-liveness');
 const { reviewArtifactPath } = require('../../scripts/shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('../../scripts/shared/worker-factory');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'start-review-manager.js');
+const TEST_LIVENESS = processLiveness.createLiveness({
+  probePid: () => 'alive',
+  readStartTime: (_pid, expectedStartTime) => expectedStartTime || '2026-07-25T00:00:00.000Z',
+});
 function runCli(args) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
 }
@@ -51,18 +56,18 @@ function fakeSpawn({ pid = 55501 } = {}) {
 beforeEach(() => {
   spawnCalls = [];
   headlessLaunch._setSpawn(fakeSpawn());
-  headlessLaunch._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+  headlessLaunch._setLiveness(TEST_LIVENESS);
 });
 
 afterEach(() => {
   headlessLaunch._setSpawn(require('../../scripts/shared/child-process').spawn);
-  headlessLaunch._setGetProcessStartTime(require('../../scripts/process-lifecycle').getProcessStartTime);
+  headlessLaunch._setLiveness(null);
 });
 
 function loadModule() {
   delete require.cache[require.resolve('../../scripts/start-review-manager')];
   const mod = require('../../scripts/start-review-manager');
-  mod._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+  mod._setLiveness(TEST_LIVENESS);
   return mod;
 }
 
