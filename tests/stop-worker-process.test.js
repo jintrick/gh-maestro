@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -24,11 +27,11 @@ test('stopWorkerProcess: 生死unknownではremove modeでも停止に進まな�
   withWorkspace((workspace) => {
     let killed = false;
     const liveness = require('../scripts/shared/process-liveness').createLiveness({
-      probePid: () => 'alive', readStartTime: () => null,
+      probeEndpoint: () => 'unknown',
     });
     assert.throws(() => stopWorkerProcess(workspace, 'worker', {
       isRemoveMode: true,
-      _injectedWorkers: { worker: { pid: 101, agentId: 'agent' } },
+      _injectedWorkers: { worker: { pid: 101, resourceKey: 'unknown-resource', agentId: 'agent' } },
       liveness,
       killProcessTreeFn: () => { killed = true; },
     }), /生死を判定できません/);

@@ -180,7 +180,7 @@ function councilSessionLockStore(workspace) {
 
 /**
  * セッション排他ロックを取得する。保持者が非生存なら stale として自動回収する
- * （worker-lease.acquireLeaseLock の原子的ロック。EEXIST + PID/startTime 同一性検証）。
+ * （worker-lease.acquireLeaseLock の原子的ロック。EEXIST + OS endpoint参照の同一性検証）。
  * live な保持者がいる場合（同一 session の別プロセスが進行中）は throw。
  *
  * @param {string} workspace

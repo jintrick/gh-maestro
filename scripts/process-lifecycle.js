@@ -2,20 +2,13 @@
 // process-lifecycle.js — ポーリングプロセスのライフサイクル管理（共通モジュール）
 //
 // 提供する機能:
-//   - 親プロセスの解決
 //   - PID registry（1プロセス1ファイル）: 登録・解除・sweep
 //
 // Usage (module):
 //   const plc = require('./process-lifecycle');
 //
-//   // Parent monitoring
-//   const sessionPid = plc.resolveSessionPid(cliFlagValue);
-//   const liveness = require('./shared/process-liveness');
-//   const checkParent = liveness.watchParent(liveness.captureProcess(sessionPid));
-//
 //   // PID registry
 //   plc.registerProcess(workspace, { workerName, script: 'msg-poll.js' });
-//   // ... polling loop with checkParent() ...
 //   plc.cleanup(workspace);
 //
 // Usage (CLI):
@@ -26,105 +19,23 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const storageLayout = require('./shared/storage-layout');
 
-const IS_WIN = process.platform === 'win32';
 let injectedLiveness = null;
 function getLiveness(candidate) {
   return candidate || injectedLiveness || require('./shared/process-liveness');
 }
 
-// ── 親セッション監視（dead-man's switch） ──────────────────────────────
-
-/**
- * 親プロセスの PID を取得する。
- * Windows: Get-CimInstance Win32_Process の ParentProcessId
- * Linux:   /proc/<pid>/stat の第4フィールド
- *
- * @param {number} pid
- * @returns {number|null}
- */
-function getParentPid(pid) {
-  // pid引数の検証（コマンド実行・パストラバーサル対策）
-  const n = parseInt(pid, 10);
-  if (!Number.isFinite(n) || n <= 0) return null;
-
-  if (IS_WIN) {
-    try {
-      const out = execSync(
-        `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=${n}').ParentProcessId"`,
-        { encoding: 'utf8', timeout: 5000, stdio: 'pipe' }
-      );
-      const val = parseInt(out.trim(), 10);
-      return Number.isFinite(val) && val > 0 ? val : null;
-    } catch {
-      return null;
-    }
-  } else {
-    try {
-      const stat = fs.readFileSync(`/proc/${n}/stat`, 'utf8');
-      // フィールド4（0-indexed: 3）が ppid
-      // 注意: comm フィールド（2番目）は括弧で囲まれ、スペースを含む可能性がある
-      const commEnd = stat.lastIndexOf(')');
-      const afterComm = stat.slice(commEnd + 2); // ") " の後
-      const parts = afterComm.split(' ');
-      const ppid = parseInt(parts[1], 10); // state(0), ppid(1)
-      return Number.isFinite(ppid) && ppid > 0 ? ppid : null;
-    } catch {
-      return null;
-    }
+function captureSelfForRole(checker, workspace, kind, name) {
+  // A parent may have supplied this process's identity explicitly (for example,
+  // poll-pr-monitor -> poll-pr). Preserve that resource. Standalone entrypoints
+  // derive a stable endpoint from their workspace and logical role.
+  if (process.env.GH_MAESTRO_RESOURCE_KEY !== undefined
+      || process.env.GH_MAESTRO_INSTANCE_ID !== undefined) {
+    return checker.captureSelf();
   }
-}
-
-/**
- * セッションルートPIDを親チェーンを遡って特定する。
- *
- * process.ppid が中間シェル（bash/cmd/powershell）を指している場合、
- * さらに1〜2階層遡ってエージェントセッション本体のPIDを探す。
- * 最大5階層まで遡り、init/systemプロセス（pid<=4）の直前で停止する。
- *
- * @param {number} [startPid] 起点PID（省略時は process.pid）
- * @returns {number|null} セッションルートPID（特定不能時は、起点省略なら process.ppid、
- *   明示起点なら null）
- */
-function findSessionRootPid(startPid) {
-  let pid = startPid || process.pid;
-  let found = startPid ? null : process.ppid; // 明示起点では別プロセスのppidを流用しない
-  const maxDepth = 5;
-
-  for (let i = 0; i < maxDepth; i++) {
-    const ppid = getParentPid(pid);
-    if (!ppid || ppid <= 4) break; // init/system に到達
-    found = ppid;
-    pid = ppid;
-  }
-  return found;
-}
-
-/**
- * 監視対象PIDを解決する。
- *
- * 優先順位:
- *   1. --session-pid CLIフラグの値
- *   2. 親チェーンを遡ったセッションルート（findSessionRootPid）
- *   3. process.ppid（フォールバック）
- *
- * @param {string|number|null} cliSessionPid  --session-pid フラグの値
- * @returns {number}
- */
-function resolveSessionPid(cliSessionPid) {
-  if (cliSessionPid != null && cliSessionPid !== '') {
-    const n = parseInt(cliSessionPid, 10);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  // 親チェーンを遡ってセッションルートを特定（中間シェルをスキップ）
-  try {
-    return findSessionRootPid();
-  } catch {
-    return process.ppid;
-  }
+  return checker.captureSelf({ workspace, kind, name });
 }
 
 // ── PID Registry（1プロセス1ファイル） ─────────────────────────────────
@@ -192,7 +103,8 @@ function legacyPidFilePath(workspace, pid) {
  * @param {string} [meta.script]     スクリプト名（例: "msg-poll.js"）
  * @param {string[]} [meta.args]     CLI引数（process.argv.slice(2)）
  * @param {string} [meta.workerName] ワーカー名（該当時）
- * @param {string} [meta.startTime]  プロセス起動時刻（省略時は現在時刻）
+ * @param {string} [meta.resourceKey] 対象プロセスの決定論的OS資源キー
+ * @param {string} [meta.instanceId] 対象プロセスの起動世代
  * @returns {object} 登録されたエントリ
  */
 function registerProcess(workspace, meta = {}) {
@@ -212,17 +124,19 @@ function registerProcess(workspace, meta = {}) {
   const checker = getLiveness(meta.liveness);
   const { processRef, ...recordMeta } = meta;
   delete recordMeta.liveness;
-  const ref = processRef || (meta.startTime
-    ? checker.readRef({ pid: targetPid, startTime: meta.startTime })
-    : targetPid === process.pid
-      ? checker.captureSelf()
-      : checker.captureProcess(targetPid));
+  const script = meta.script || path.basename(process.argv[1] || 'unknown');
+  const ref = processRef || (targetPid === process.pid
+    ? captureSelfForRole(checker, workspace, 'process', `${script}:${meta.workerName || 'workspace'}`)
+    : checker.captureProcess(targetPid, {
+      resourceKey: meta.resourceKey,
+      instanceId: meta.instanceId,
+    }));
   if (checker.observe(ref) !== 'alive') {
-    throw new Error(`registerProcess: PID ${targetPid} の生存と同一性を確認できません`);
+    throw new Error(`registerProcess: PID ${targetPid} の生存資源を確認できません`);
   }
   const entry = checker.writeRef({
     ...recordMeta,
-    script: meta.script || path.basename(process.argv[1] || 'unknown'),
+    script,
     args: meta.args || process.argv.slice(2),
     workerName: meta.workerName || null,
     workspace,
@@ -241,7 +155,7 @@ function registerProcess(workspace, meta = {}) {
  *
  * @param {string} workspace
  * @param {number} [pid] 省略時は process.pid
- * @param {{startTime?: string, script?: string, workerName?: string|null}} [expected]
+ * @param {{resourceKey?: string, instanceId?: string, script?: string, workerName?: string|null}} [expected]
  *   指定時は同じ起動主体の registry だけを削除する。停止後のPID再利用で
  *   新しいプロセスの登録を消さないため、停止側から渡す。
  */
@@ -259,7 +173,8 @@ function unregisterProcess(workspace, pid, expected) {
     }
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
     if (entry.pid !== targetPid) return false;
-    if (expected.startTime !== undefined && entry.startTime !== expected.startTime) return false;
+    if (expected.resourceKey !== undefined && entry.resourceKey !== expected.resourceKey) return false;
+    if (expected.instanceId !== undefined && entry.instanceId !== expected.instanceId) return false;
     if (expected.script !== undefined && entry.script !== expected.script) return false;
     if (expected.workerName !== undefined
       && (entry.workerName ?? null) !== (expected.workerName ?? null)) return false;
@@ -297,6 +212,8 @@ function unregisterProcess(workspace, pid, expected) {
  * @param {boolean} [opts.failOnReadError=false] true の場合、registry ディレクトリ・個別
  *   エントリの読み取りまたはJSON解析に失敗したら throw する。ディレクトリ自体が無い場合は
  *   「エントリなし」として空配列を返す。
+ * @param {boolean} [opts.includeUnknownLegacy=false] 一時移行経路専用。OS endpointを持たない
+ *   旧recordのPIDが存在すると確認できた場合、そのrecordを結果へ含める。
  * @returns {object[]} 一致する生存エントリ（PID重複は除外済み）
  */
 function findRunningInstances(workspace, opts = {}) {
@@ -379,6 +296,17 @@ function findRunningInstances(workspace, opts = {}) {
       seenPids.add(entryPid);
       const state = checker.observe(checker.readRef(entry));
       if (state === 'unknown') {
+        const hasNoEndpointMetadata = entry.resourceKey == null && entry.instanceId == null;
+        if (opts.includeUnknownLegacy && hasNoEndpointMetadata) {
+          const legacyPidState = typeof checker.legacyPidStatus === 'function'
+            ? checker.legacyPidStatus(entryPid)
+            : 'unknown';
+          if (legacyPidState === 'present') {
+            matches.push({ ...entry, legacyEndpointless: true });
+            continue;
+          }
+          if (legacyPidState === 'dead') continue;
+        }
         throw new Error(`PID registry の生死を判定できません: ${entryPid}`);
       }
       if (state !== 'alive') continue;
@@ -442,8 +370,7 @@ function legacyStartupLockPath(workspace, script, workerName) {
  * @param {string} dir mkdir 対象ディレクトリ（lockPath の親）
  * @param {string} lockPath
  * @param {number} maxRetries
- * @param {{pid: number, startTime: string}} selfEntry 呼び出し元で1回だけ計算した自分自身のエントリ。
- *   getProcessStartTime は Windows では PowerShell/WMI 呼び出しを伴い高コストなため、
+ * @param {{pid: number, resourceKey: string, instanceId: string}} selfEntry 呼び出し元で1回だけ捕捉した自分自身のエントリ。
  * @returns {boolean}
  */
 function acquireLockAt(dir, lockPath, maxRetries, selfEntry, checker) {
@@ -473,7 +400,7 @@ function acquireLockAt(dir, lockPath, maxRetries, selfEntry, checker) {
       return false;
     }
 
-    // stale ロック（保持者が非生存、またはPID再利用）→ 奪取して再試行
+    // dead なOS資源を持つ stale ロックだけを奪取して再試行する。
     try { fs.unlinkSync(lockPath); } catch {}
   }
 
@@ -485,10 +412,10 @@ function acquireLockAt(dir, lockPath, maxRetries, selfEntry, checker) {
  * 保持しているロックを解放する（自分が保持者の場合のみ）。
  * @param {string} lockPath
  */
-function releaseLockAt(lockPath) {
+function releaseLockAt(lockPath, checker = getLiveness(), expectedRef = null) {
   try {
     const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-    if (holder && holder.pid === process.pid) {
+    if (checker.sameRef(checker.readRef(holder), expectedRef || checker.captureSelf())) {
       fs.unlinkSync(lockPath);
     }
   } catch {
@@ -503,8 +430,7 @@ function releaseLockAt(lockPath) {
  * ほぼ同時に2プロセスが起動した場合に両方がチェックを通過してしまう（TOCTOU）。
  * このロックで「チェック開始〜登録完了」の区間を排他化する。
  *
- * 保持者が非生存、または同一性不一致（PID再利用）の場合は stale とみなし
- * 自動的に奪取する。
+ * 保持者のOS資源が dead の場合だけ stale とみなし自動的に奪取する。
  *
  * @param {string} workspace
  * @param {string} script
@@ -517,7 +443,12 @@ function acquireStartupLock(workspace, script, workerName, opts = {}) {
   const maxRetries = opts.maxRetries ?? 5;
 
   const checker = getLiveness(opts.liveness);
-  const selfRef = checker.captureSelf();
+  const selfRef = captureSelfForRole(
+    checker,
+    workspace,
+    'startup-lock',
+    `${script}:${workerName || 'workspace'}`,
+  );
   if (checker.observe(selfRef) !== 'alive') throw new Error('起動ロック保持者の生死を判定できません');
   const selfEntry = checker.writeRef({}, selfRef);
 
@@ -533,8 +464,15 @@ function acquireStartupLock(workspace, script, workerName, opts = {}) {
  * @param {string} script
  * @param {string|null} workerName
  */
-function releaseStartupLock(workspace, script, workerName) {
-  releaseLockAt(startupLockPath(workspace, script, workerName));
+function releaseStartupLock(workspace, script, workerName, opts = {}) {
+  const checker = getLiveness(opts.liveness);
+  const expectedRef = captureSelfForRole(
+    checker,
+    workspace,
+    'startup-lock',
+    `${script}:${workerName || 'workspace'}`,
+  );
+  releaseLockAt(startupLockPath(workspace, script, workerName), checker, expectedRef);
 }
 
 // ── Registry sweep ────────────────────────────────────────────────────
@@ -543,9 +481,9 @@ function releaseStartupLock(workspace, script, workerName) {
  * PID registry を sweep する。
  *
  * 各エントリに対して:
- *   1. PID非生存 → ファイル削除のみ（プロセスは既に死んでいる）
- *   2. PID生存・同一性不一致 → ファイル削除のみ（PID再利用、無関係なプロセス）
- *   3. PID生存・同一性一致 → kill + ファイル削除（stale だが生き残っている）
+ *   1. OS資源が dead → ファイル削除のみ（プロセスは既に死んでいる）
+ *   2. OS資源が unknown → エラーを返し、停止・削除を行わない
+ *   3. OS資源が alive → 除外対象でなければkill + ファイル削除
  *
  * runtime のレジストリのみを走査する。旧配置は遺物整理で扱う。
  *
@@ -658,7 +596,7 @@ function sweepRegistry(workspace, opts = {}) {
     const state = states.get(entryPid);
     if (state === 'dead') {
       removeFiles(filePaths);
-      results.cleaned.push({ pid: entryPid, reason: 'process not alive or identity mismatch' });
+      results.cleaned.push({ pid: entryPid, reason: 'process resource is dead' });
       continue;
     }
 
@@ -669,7 +607,7 @@ function sweepRegistry(workspace, opts = {}) {
       continue;
     }
 
-    // 同一性一致 → kill（stale プロセス）
+    // alive な登録済みプロセスを sweep 対象として kill する。
     // この sweep が処理を決めた時点では対象ログが開いている可能性があるため、
     // housekeeping のログ整理から除外する対象として workerName を渡す。
     if (entry.workerName && !opts.dryRun) {
@@ -745,8 +683,8 @@ Options:
 
 Description:
   PID registry を走査し、stale エントリを掃除する。
-  各エントリは同一性確認（起動時刻比較）を経て、一致する場合のみ kill される。
-  PID再利用が検出されたエントリはファイル削除のみ行う（無関係なプロセスを保護）。
+  各エントリはOS資源参照で生死を確認し、停止対象のPIDを特定する。
+  判定不能なエントリは保持する（無関係なプロセスを保護）。
 
   status は指定した workspace・script・workerName の生存プロセスを読み取り専用で照会する。
   stdout には {"script":...,"workerName":...,"running":true|false,"pid":...} を出力する。
@@ -766,10 +704,6 @@ Description:
 
 module.exports = {
   _setLiveness: (value) => { injectedLiveness = value || null; },
-  // 親セッション監視
-  getParentPid,
-  findSessionRootPid,
-  resolveSessionPid,
   // PID registry
   pidsDir,
   pidFilePath,

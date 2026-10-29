@@ -1,4 +1,7 @@
 'use strict';
+
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
 // run-council.test.js — run-council.js（council の決定論的フェーズ機械）のテスト
 //
 // 方針: テストは実プロセスを 0 個 spawn する。

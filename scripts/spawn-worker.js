@@ -319,7 +319,7 @@ function cleanupRolelessWorkers(workspace, options = {}) {
 
   // lease の stale 判定から削除までを同じ per-worker lock の下で再確認する。
   // 先に読んだ stale lease を、別プロセスが再取得した直後に無条件削除すると、
-  // 新しい worker の排他を壊すため、ロック後の再読込みと PID/startTime の一致を
+  // 新しい worker の排他を壊すため、ロック後の再読込みと resourceKey/instanceId の一致を
   // 必須にする。
   const removedLeasePaths = [];
   const createWorkerStoreFn = options.createNormalWorkerStoreFn || createNormalWorkerStore;
@@ -662,7 +662,11 @@ if (closedPr.blocked) {
 // workers.json（resume台帳）とは責務を分離。
 const leaseStore = createNormalWorkerStore(workspace);
 let leaseAcquired = false;
-const launcherRef = processLiveness.captureSelf();
+const launcherRef = processLiveness.captureSelf({
+  workspace,
+  kind: 'worker-launcher',
+  name: workerName,
+});
 try {
   const leaseResult = acquireWorkerLease(leaseStore, workerName, {
     processRef: launcherRef,
@@ -946,6 +950,7 @@ try {
 // --- workers.json にワーカーを登録（失敗時はプロセスもロールバック） ---
 try {
   const workerEntry = processLiveness.writeRef({
+    startTime: new Date().toISOString(),
     logPath: launched.logPath,
     agentId: agentConfig.id,
     issue,

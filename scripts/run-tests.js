@@ -29,6 +29,7 @@ const {
   writeTestResultLayer,
 } = require('./shared/test-result');
 const { runNpmScript, npmScriptCommand } = require('./shared/npm-script-check');
+const processLiveness = require('./shared/process-liveness');
 
 const SLOW_TEST_ACTORS = Object.freeze(new Set(['poll-pr', 'run-slow-tests']));
 
@@ -770,6 +771,16 @@ function main(argv, deps = {}) {
   }
 
   if (values['--help'] || values['-h']) return { exitCode: 0, stdout: USAGE };
+
+  if (process.env.GH_MAESTRO_TEST_ACTOR === 'poll-pr') {
+    try {
+      processLiveness.captureSelf();
+    } catch (error) {
+      const stderr = `run-tests: slow worker の生存資源を確立できません: ${error.message}`;
+      (deps.writeStderrFn || ((text) => process.stderr.write(text)))(`${stderr}\n`);
+      return { exitCode: 1, artifact: null, artifactWritten: false, stdout: '', stderr };
+    }
+  }
 
   if (values['--list']) {
     if (values['--changed'] || rest.length > 0) {

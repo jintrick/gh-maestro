@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
@@ -50,11 +53,11 @@ test('childArguments はtargetの可変値をpoll-pr.jsのargvへ変換する', 
     issue: '42',
     noReviewManager: true,
     noReviewEvents: true,
-  }), 'C:/workspace', 99);
+  }), 'C:/workspace');
   assert.equal(args[0], path.join(__dirname, '..', 'scripts', 'poll-pr.js'));
   assert.deepEqual(args.slice(1), [
     '42', '--workspace', 'C:/workspace', '--plugin-monitor',
-    '--session-pid', '99', '--base-branch', 'dev',
+    '--base-branch', 'dev',
     '--no-review-manager', '--no-review-events',
   ]);
 });
@@ -63,7 +66,7 @@ test('spawnTarget はpoll-pr.jsのstdout/stderrをmonitorへ中継する', async
   const child = fakeChild(504);
   const stdout = [];
   const stderr = [];
-  const active = monitor.spawnTarget(target('relay'), 'C:/workspace', 99, {
+  const active = monitor.spawnTarget(target('relay'), 'C:/workspace', {
     spawnFn: () => child,
     writeStdoutFn: (chunk) => stdout.push(String(chunk)),
     writeStderrFn: (chunk) => stderr.push(String(chunk)),
@@ -78,26 +81,23 @@ test('spawnTarget はpoll-pr.jsのstdout/stderrをmonitorへ中継する', async
   assert.deepEqual(stderr, ['poll-pr warning\n']);
 });
 
-test('spawnTarget はtargetに残った旧sessionPidではなく現在のmonitor PIDを渡す', async () => {
+test('spawnTarget は親セッションPIDを子へ渡さず、stdinをpipe接続する', async () => {
   const child = fakeChild(505);
   let spawnedArgs;
   await monitor.runPrMonitor({ workspace: 'C:/workspace' }, {
     readTargetFn: () => target('reopened', { sessionPid: 123 }),
-    resolveSessionPidFn: () => 999,
-    expectedStartTime: null,
-    checkSessionFn: () => true,
     maxIterations: 1,
     sleepFn: async () => {},
-    spawnFn: (command, args) => {
+    spawnFn: (command, args, options) => {
       spawnedArgs = args;
+      assert.equal(options.stdio[0], 'pipe');
       return child;
     },
     killProcessTreeFn: () => {},
     waitForChildCloseFn: async () => {},
     recoverOrphanedSlowRunsFn: () => [],
   });
-  const sessionPidIndex = spawnedArgs.indexOf('--session-pid');
-  assert.deepEqual(spawnedArgs.slice(sessionPidIndex, sessionPidIndex + 2), ['--session-pid', '999']);
+  assert.equal(spawnedArgs.includes('--session-pid'), false);
 });
 
 test('同じgenerationのpoll-prは終了しても再試行しない', async () => {
@@ -105,9 +105,6 @@ test('同じgenerationのpoll-prは終了しても再試行しない', async () 
   const targetValue = target('same');
   const result = await monitor.runPrMonitor({ workspace: 'C:/workspace' }, {
     readTargetFn: () => targetValue,
-    resolveSessionPidFn: () => 99,
-    expectedStartTime: null,
-    checkSessionFn: () => true,
     sleepFn: async () => {
       const child = children[0];
       if (child && !child.exitCode) {
@@ -134,9 +131,6 @@ test('poll-pr異常終了は通知して同じgenerationを再試行しない', 
   const targetValue = target('failed-generation');
   const result = await monitor.runPrMonitor({ workspace: 'C:/workspace' }, {
     readTargetFn: () => targetValue,
-    resolveSessionPidFn: () => 99,
-    expectedStartTime: null,
-    checkSessionFn: () => true,
     sleepFn: async () => {
       const child = children[0];
       if (child && child.exitCode === null) {
@@ -168,9 +162,6 @@ test('targetを消すとpoll-prのprocess treeを停止しslow回収を一度行
   let killedPid = null;
   await monitor.runPrMonitor({ workspace: 'C:/workspace' }, {
     readTargetFn: () => targets[Math.min(reads++, targets.length - 1)],
-    resolveSessionPidFn: () => 99,
-    expectedStartTime: null,
-    checkSessionFn: () => true,
     sleepFn: async () => {},
     maxIterations: 2,
     spawnFn: () => child,
@@ -213,9 +204,6 @@ test('停止に失敗してslowが後から終了しても、monitorがrunning s
   try {
     await monitor.runPrMonitor({ workspace }, {
       readTargetFn: () => targets[Math.min(reads++, targets.length - 1)],
-      resolveSessionPidFn: () => 9999,
-      expectedStartTime: null,
-      checkSessionFn: () => true,
       maxIterations: 5,
       sleepFn: async () => {
         sleeps += 1;

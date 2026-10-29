@@ -1,4 +1,7 @@
 'use strict';
+
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
 const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const worker = require('../scripts/shared/worker-liveness');
@@ -12,21 +15,19 @@ test('同じプロセスなら稼働中と判定する', () => {
   useInputs(() => 'alive', () => START);
   assert.equal(worker.isWorkerAlive({ pid: 4242, startTime: START }), true);
 });
-test('死亡またはPID再利用の場合は稼働中と判定しない', () => {
+test('resourceが死亡していれば稼働中と判定しない', () => {
   useInputs(() => 'dead', () => START);
-  assert.equal(worker.isWorkerAlive({ pid: 4242, startTime: START }), false);
-  useInputs(() => 'alive', () => '2026-07-26T00:00:00.000Z');
-  assert.equal(worker.isWorkerAlive({ pid: 4242, startTime: START }), false);
+  assert.equal(worker.isWorkerAlive({ pid: 4242, resourceKey: 'dead-resource' }), false);
 });
 test('識別情報欠落、取得失敗、照会失敗はunknownになり、稼働確認を伴う処理を止める', () => {
-  useInputs(() => 'alive', () => null);
-  assert.equal(worker.observeWorker({ pid: 4242 }), 'unknown');
-  assert.throws(() => worker.isWorkerAlive({ pid: 4242 }), /liveness is unknown/);
-  assert.equal(worker.observeWorker({ pid: 4242, startTime: START }), 'unknown');
-  assert.throws(() => worker.isWorkerAlive({ pid: 4242, startTime: START }), /liveness is unknown/);
+  useInputs(() => 'unknown', () => null);
+  assert.equal(worker.observeWorker({ pid: 4242, resourceKey: null }), 'unknown');
+  assert.throws(() => worker.isWorkerAlive({ pid: 4242, resourceKey: null }), /liveness is unknown/);
+  assert.equal(worker.observeWorker({ pid: 4242, resourceKey: 'unknown-resource' }), 'unknown');
+  assert.throws(() => worker.isWorkerAlive({ pid: 4242, resourceKey: 'unknown-resource' }), /liveness is unknown/);
   useInputs(() => 'unknown', () => START);
-  assert.equal(worker.observeWorker({ pid: 4242, startTime: START }), 'unknown');
-  assert.throws(() => worker.isWorkerAlive({ pid: 4242, startTime: START }), /liveness is unknown/);
+  assert.equal(worker.observeWorker({ pid: 4242, resourceKey: 'unknown-resource' }), 'unknown');
+  assert.throws(() => worker.isWorkerAlive({ pid: 4242, resourceKey: 'unknown-resource' }), /liveness is unknown/);
   assert.equal(worker.observeWorker({ agentId: 'sleeping' }), 'dead');
   assert.equal(worker.isWorkerAlive({ agentId: 'sleeping' }), false);
   assert.equal(worker.observeWorker(null), 'unknown');

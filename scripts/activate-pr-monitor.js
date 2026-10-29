@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-// Usage: node activate-pr-monitor.js --issue <N> [--workspace <path>]
-//        [--session-pid <pid>] [--base-branch <branch>]
+// Usage: node activate-pr-monitor.js --issue <N> [--workspace <path>] [--base-branch <branch>]
 //        [--no-review-manager] [--no-review-events]
 
 const {
@@ -13,21 +12,15 @@ const {
   createPrMonitorTarget,
   writePrMonitorTarget,
 } = require('./shared/pr-monitor-target');
-const {
-  resolveSessionPid,
-} = require('./process-lifecycle');
-const processLiveness = require('./shared/process-liveness');
 
 const USAGE = `activate-pr-monitor.js — plugin monitor のPR監視対象を設定する
 
-Usage: node activate-pr-monitor.js --issue <N> [--workspace <path>]
-       [--session-pid <pid>] [--base-branch <branch>]
+Usage: node activate-pr-monitor.js --issue <N> [--workspace <path>] [--base-branch <branch>]
        [--no-review-manager] [--no-review-events]
 
 Options:
   --issue <N>              監視対象の Issue 番号（必須）
   --workspace <path>       ワークスペースパス
-  --session-pid <pid>      対話型セッションのPID（省略時は自動検出）
   --base-branch <branch>   PRの期待ベースブランチ
   --no-review-manager      PR検出時にReview Managerを起動しない
   --no-review-events       inline review comments・formal reviewsを監視しない
@@ -45,7 +38,6 @@ function parseCli(argv) {
       flags: {
         '--issue': {},
         '--workspace': {},
-        '--session-pid': {},
         '--base-branch': {},
       },
       booleans: ['--no-review-manager', '--no-review-events', '--help', '-h'],
@@ -91,16 +83,11 @@ function run(argv = process.argv.slice(2), deps = {}) {
     return 1;
   }
 
-  let sessionPid = resolveSessionPid(values['--session-pid']);
-  if (!Number.isInteger(sessionPid) || sessionPid <= 0) sessionPid = null;
-  const checker = deps.liveness || processLiveness;
-  const session = sessionPid ? checker.writeRef({}, checker.captureProcess(sessionPid), 'session') : {};
   const target = createPrMonitorTarget({
     issue,
     baseBranch: values['--base-branch'] || null,
     noReviewManager: values['--no-review-manager'] === true,
     noReviewEvents: values['--no-review-events'] === true,
-    ...session,
   });
   const writeTarget = deps.writeTargetFn || writePrMonitorTarget;
   writeTarget(workspace, target);

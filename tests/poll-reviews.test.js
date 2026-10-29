@@ -394,8 +394,7 @@ test('CLI: --no-review-events フラグを省略すると runPollReviews に noR
   let capturedParams = null;
   const res = await main(['100', '/test/workspace'], {
     resolveWorkspaceFn: (ws) => ws,
-    resolveSessionPidFn: () => 12345,
-    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }),
+    liveness: { watchParent: () => () => true },
     registerProcessFn: () => {},
     registerSignalHandlers: false,
     pollReviewsStateFilesFn: () => ({ files: [] }),
@@ -416,8 +415,7 @@ test('CLI: --no-review-events フラグを指定すると runPollReviews に noR
   let capturedParams = null;
   const res = await main(['100', '/test/workspace', '--no-review-events'], {
     resolveWorkspaceFn: (ws) => ws,
-    resolveSessionPidFn: () => 12345,
-    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }),
+    liveness: { watchParent: () => () => true },
     registerProcessFn: () => {},
     registerSignalHandlers: false,
     pollReviewsStateFilesFn: () => ({ files: [] }),
@@ -436,8 +434,7 @@ test('CLI: 子プロセス起動で --no-review-events 引数が runPollReviews 
     const { main } = require(${JSON.stringify(pollReviewsScript)});
     main(['100', '/test/workspace', '--no-review-events'], {
       resolveWorkspaceFn: (w) => w,
-      resolveSessionPidFn: () => 12345,
-      liveness: require(${JSON.stringify(require.resolve('../scripts/shared/process-liveness'))}).createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }),
+      liveness: { watchParent: () => () => true },
       registerProcessFn: () => {},
       registerSignalHandlers: false,
       pollReviewsStateFilesFn: () => ({ files: [] }),

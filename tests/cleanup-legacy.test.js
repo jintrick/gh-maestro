@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -388,7 +391,7 @@ test('旧 PID registry 整理は稼働 PID を停止せず、未知・破損項�
     const run = () => cleanupLegacyArtifact({ cleanupId: 'process-lifecycle.sweepRegistry', workspace: fixture.workspace });
     assert.equal(run().status, 'absent');
     fs.mkdirSync(dir);
-    const file = path.join(dir, `${process.pid}.json`);
+    let file = path.join(dir, `${process.pid}.json`);
     fs.writeFileSync(file, JSON.stringify({ pid: process.pid, startTime: '2026-01-01T00:00:00Z' }));
     const unknown = path.join(dir, 'unknown');
     fs.writeFileSync(unknown, 'data');
@@ -398,7 +401,9 @@ test('旧 PID registry 整理は稼働 PID を停止せず、未知・破損項�
     fs.writeFileSync(file, '{');
     assert.equal(run().status, 'unknown');
     assert.ok(fs.existsSync(file));
-    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, startTime: '2026-01-01T00:00:00Z' }));
+    fs.unlinkSync(file);
+    file = path.join(dir, '2147483647.json');
+    fs.writeFileSync(file, JSON.stringify({ pid: 2147483647 }));
     assert.equal(run().status, 'removed');
     assert.equal(fs.existsSync(dir), false);
     assert.doesNotThrow(() => process.kill(process.pid, 0));
@@ -461,7 +466,7 @@ test('旧 startup lock の所有者が稼働中または確認不能なら保持
     fs.writeFileSync(file, JSON.stringify({ pid: process.pid, startTime: 'invalid' }));
     assert.equal(run().status, 'unknown');
     assert.ok(fs.existsSync(file));
-    fs.writeFileSync(file, JSON.stringify({ pid: 2147483647, startTime }));
+    fs.writeFileSync(file, JSON.stringify({ pid: 2147483647 }));
     assert.equal(run().status, 'removed');
     assert.equal(fs.existsSync(file), false);
   });

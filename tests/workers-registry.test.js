@@ -15,7 +15,14 @@ const {
 const processLiveness = require('../scripts/shared/process-liveness');
 
 function processUpdate(pid, startTime = '2026-07-25T00:00:00.000Z', logPath = null) {
-  return { processRef: processLiveness.readRef({ pid, startTime }), logPath };
+  return {
+    processRef: processLiveness.captureProcess(pid, {
+      resourceKey: 'a'.repeat(64),
+      instanceId: `worker-${pid}`,
+    }),
+    logPath,
+    startedAt: startTime,
+  };
 }
 
 function withTempDir(fn) {

@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -165,7 +168,7 @@ test('restartCapturedResidents: 全体掃除後も生存する捕捉済み常駐
       workerName: null,
       workspace,
       startTime: TEST_START_TIME,
-      args: ['--workspace', workspace, '--session-pid', '9000'],
+      args: ['--workspace', workspace],
     };
     let replacement = null;
     let oldAlive = true;
@@ -189,7 +192,6 @@ test('restartCapturedResidents: 全体掃除後も生存する捕捉済み常駐
       },
       killProcessTree: () => { killed = true; oldAlive = false; },
       unregisterProcess: () => {},
-      findSessionRootPid: () => 9000,
       sleep: () => {},
     };
 
@@ -215,7 +217,7 @@ test('restartCapturedResidents: skipStopを明示すると旧常駐の生存時�
       workerName: null,
       workspace,
       startTime: TEST_START_TIME,
-      args: ['--workspace', workspace, '--session-pid', '9000'],
+      args: ['--workspace', workspace],
     };
     let spawnCalled = false;
     const hooks = {
@@ -227,7 +229,6 @@ test('restartCapturedResidents: skipStopを明示すると旧常駐の生存時�
       spawn: () => { spawnCalled = true; throw new Error('must not spawn'); },
       killProcessTree: () => {},
       unregisterProcess: () => {},
-      findSessionRootPid: () => 9000,
       sleep: () => {},
     };
 
@@ -288,7 +289,7 @@ test('cleanupLegacyWorkerField: notifierPidとpaneIdを観測してからworkers
     const workersPath = path.join(metaDir, 'workers.json');
     fs.writeFileSync(workersPath, JSON.stringify({
       orchestrator: { paneId: '1' },
-      'issue-10-old': { notifierPid: 123, notifierStartTime: TEST_START_TIME, paneId: '7', issue: 10 },
+      'issue-10-old': { notifierPid: 123, notifierResourceKey: 'legacy-notifier', notifierStartTime: TEST_START_TIME, paneId: '7', issue: 10 },
     }), 'utf8');
 
     let alive = true;
@@ -343,7 +344,7 @@ test('cleanupLegacyMessagesとcleanupLegacyQueue: 旧ディレクトリを冪等
     fs.mkdirSync(queueDir, { recursive: true });
     fs.writeFileSync(path.join(queueDir, 'old.json'), '{}', 'utf8');
     const livePollerPath = path.join(queueDir, 'poller.json');
-    fs.writeFileSync(livePollerPath, JSON.stringify({ pid: 456, startTime: TEST_START_TIME }), 'utf8');
+    fs.writeFileSync(livePollerPath, JSON.stringify({ pid: 456, resourceKey: 'legacy-poller', startTime: TEST_START_TIME }), 'utf8');
     const held = cleanupLegacyQueue(workspace, {
       liveness: processLiveness.createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_START_TIME }),
     });

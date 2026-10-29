@@ -93,8 +93,8 @@ function runningPidsForScriptsAndRoles(workspace, scriptNames, roles) {
     }
   }
 
-  // role lease（排他の正本）。isLeaseLive が startTime 照合まで行うため、PID 再利用や
-  // 改ざんされた lease を停止対象にすることはない。
+  // role endpoint が排他の正本。lease のresourceKey/instanceIdは保持者の付帯情報なので、
+  // endpointの状態と参照世代を照合してからPIDを停止対象として使う。
   const store = _createResidentLeaseStore(workspace);
   for (const role of roles) {
     const entry = store.read(roleLeaseKey(role));
@@ -193,8 +193,10 @@ function cleanupLegacyWorkerSupervisor(options = {}) {
       }
       if (entry.script !== script) continue;
       if (!isValidPid(entry.pid) || !Number.isInteger(entry.pid)
-        || typeof entry.startTime !== 'string' || entry.startTime === '') {
-        errors.push(`${filePath} のPID/startTimeが不正です`);
+        || ((entry.resourceKey !== undefined || entry.instanceId !== undefined)
+          && (typeof entry.resourceKey !== 'string' || !/^[a-f0-9]{64}$/.test(entry.resourceKey)
+            || typeof entry.instanceId !== 'string' || entry.instanceId === ''))) {
+        errors.push(`${filePath} のPID/resource metadataが不正です`);
         continue;
       }
       entries.push({ filePath, entry });
@@ -241,7 +243,9 @@ function cleanupLegacyWorkerSupervisor(options = {}) {
     }
     if (!lease || typeof lease !== 'object' || Array.isArray(lease)
       || !isValidPid(lease.pid) || !Number.isInteger(lease.pid)
-      || typeof lease.startTime !== 'string' || lease.startTime === '') {
+      || ((lease.resourceKey !== undefined || lease.instanceId !== undefined)
+        && (typeof lease.resourceKey !== 'string' || !/^[a-f0-9]{64}$/.test(lease.resourceKey)
+          || typeof lease.instanceId !== 'string' || lease.instanceId === ''))) {
       throw new Error('lease形式が不正です');
     }
     leaseState = checker.observe(checker.readRef(lease));

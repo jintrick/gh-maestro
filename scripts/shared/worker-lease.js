@@ -29,6 +29,7 @@ const { killProcessTree } = require('./kill-tree');
 const { recordResidentAuditEvent } = require('./resident-audit');
 const { atomicWriteJson } = require('./atomic-write');
 const { checkResidentForceGuard } = require('./resident-force-guard');
+const { resourceKeyFor } = require('./process-liveness');
 
 // テストでは生存確認の入力を注入した同じ API を使う。
 let _injectedLiveness = null;
@@ -36,6 +37,7 @@ function liveness() { return _injectedLiveness || require('./process-liveness');
 
 // テストで注入可能にする（実プロセスに触れない）。
 let _killProcessTree = killProcessTree;
+let _killProcess = (pid) => process.kill(pid, 'SIGKILL');
 let _sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 // ── Lease Store 抽象 ───────────────────────────────────────────────────────────
@@ -47,7 +49,7 @@ let _sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0
 //   remove(key)  → void        リースを削除
 //   lockPath(key)→ string      キーに対応するロックファイルのパス
 //
-// entry 形式: { pid, startTime, workerName, createdAt }
+// entry 形式: { pid, resourceKey, workerName, createdAt }
 
 /**
  * 通常ワーカー用の lease store を作成する。
@@ -59,6 +61,7 @@ let _sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0
  * @returns {object} lease store
  */
 function createNormalWorkerStore(workspace) {
+  const canonical = canonicalWorkspace(workspace);
   const dir = path.join(workspace, '.gh-maestro', 'leases');
 
   function filePath(key) {
@@ -70,6 +73,7 @@ function createNormalWorkerStore(workspace) {
   }
 
   return {
+    workspace: canonical,
     /** 不在だけ null。破損・読み取り失敗はファイルを保持して報告する。 */
     read(key) {
       const fp = filePath(key);
@@ -161,12 +165,12 @@ function isLeaseLive(entry) {
  * @param {object} store lease store
  * @param {string} key リースキー
  * @param {number} maxRetries 最大リトライ回数
- * @param {{pid: number, startTime: string}} [identity] ロック保持者として共有するidentity
+ * @param {string} [identity] ロック保持者として共有する不透明なプロセス参照
  * @returns {boolean} 取得できれば true
  * @throws {Error} live な保持者がいる、またはリトライ上限超過
  */
 function acquireLeaseLock(store, key, maxRetries = 5, ownerRef = null) {
-  // identity を明示された場合は、捕捉済みの起動時刻をそのまま検証する。
+  // identity を明示された場合は、捕捉済みの resourceKey と instanceId をそのまま検証する。
   // 取得に失敗したidentityをここで再取得すると、lease本体・PID registryとの照合値が
   // 分断されるため、未知値のままロックを作成しない。
   const checker = liveness();
@@ -186,7 +190,7 @@ function acquireLeaseLock(store, key, maxRetries = 5, ownerRef = null) {
       if (e.code !== 'EEXIST') throw e;
     }
 
-    // ロックが存在 → 現在の保持者を読み直し、PID+startTime の同一性まで確認してから
+    // ロックが存在 → 現在の保持者を読み直し、OS資源参照の同一性まで確認してから
     // stale 判定する。無条件 unlink だと、他プロセスが直前に書いた新しいロックを
     // 消して同一ワーカーの二重起動を許す TOCTOU 競合になるため（Review指摘 #4）、
     // process-lifecycle.js の acquireStartupLock と同型のパターンに揃える。
@@ -202,10 +206,12 @@ function acquireLeaseLock(store, key, maxRetries = 5, ownerRef = null) {
     }
     const holderMatches = state === 'alive';
     if (holderMatches) {
-      throw new Error(
+      const error = new Error(
         `worker "${key}" の起動処理が別プロセス（pid ${holder.pid}）で進行中です。` +
         `しばらくお待ちください。`
       );
+      error.code = 'LEASE_LOCK_HELD';
+      throw error;
     }
 
     // stale ロック（保持者非生存・PID再利用）→ 奪取して再試行
@@ -262,18 +268,58 @@ function releaseLeaseLock(store, key) {
 function acquireLease(store, key, { processRef, workerName }) {
   // ── 高速パス: ロック取得前に live lease をチェック ──
   const checker = liveness();
-  const requireDead = (entry) => {
-    if (!entry) return;
-    const state = checker.observe(checker.readRef(entry));
-    if (state === 'alive') throw new Error(`worker "${workerName}" は既に稼働中です（pid ${entry.pid}）。重複起動できません。`);
-    if (state !== 'dead') {
-      const error = new Error(`worker "${workerName}" の lease 保持者 ${JSON.stringify(entry)} の生死を判定できません`);
+  const workerResourceKey = typeof store.workspace === 'string'
+    ? resourceKeyFor({ workspace: store.workspace, kind: 'worker', name: key })
+    : null;
+  const observeWorkerEndpoint = () => {
+    if (typeof checker.observeResource !== 'function' || typeof store.workspace !== 'string') return null;
+    const observed = checker.observeResource({ workspace: store.workspace, kind: 'worker', name: key });
+    if (observed.state === 'unknown') {
+      const error = new Error(`worker "${workerName}" の決定論的endpointを確認できません`);
       error.code = 'LIVENESS_UNKNOWN';
       throw error;
     }
+    return observed;
+  };
+  const requireAvailable = (entry) => {
+    const observed = observeWorkerEndpoint();
+    if (observed?.state === 'unknown') {
+      const error = new Error(`worker "${workerName}" の決定論的endpointを確認できません`);
+      error.code = 'LIVENESS_UNKNOWN';
+      throw error;
+    }
+    if (observed?.state === 'alive') {
+      throw new Error(`worker "${workerName}" は既に稼働中です（pid ${observed.manifest?.pid ?? 'unknown'}）。重複起動できません。`);
+    }
+
+    if (entry) {
+      const hasResourceKey = entry.resourceKey !== undefined && entry.resourceKey !== null;
+      const hasInstanceId = entry.instanceId !== undefined && entry.instanceId !== null;
+      if (hasResourceKey !== hasInstanceId
+          || (hasResourceKey && (typeof entry.resourceKey !== 'string'
+            || !/^[a-f0-9]{64}$/.test(entry.resourceKey)
+            || typeof entry.instanceId !== 'string' || entry.instanceId.length === 0))) {
+        const error = new Error(`worker "${workerName}" の lease resource metadata が破損しています`);
+        error.code = 'LIVENESS_CORRUPT';
+        throw error;
+      }
+      // During initialization the lease describes the launcher, not the worker.
+      // Its endpoint remains relevant until activation replaces it with the worker ref.
+      if (hasResourceKey && entry.resourceKey !== workerResourceKey) {
+        const state = checker.observe(checker.readRef(entry));
+        if (state === 'alive') {
+          throw new Error(`worker "${workerName}" の起動処理は既に進行中です（pid ${entry.pid}）。重複起動できません。`);
+        }
+        if (state !== 'dead') {
+          const error = new Error(`worker "${workerName}" の lease 保持者 ${JSON.stringify(entry)} の生死を判定できません`);
+          error.code = 'LIVENESS_UNKNOWN';
+          throw error;
+        }
+      }
+    }
   };
   const quickCheck = store.read(key);
-  requireDead(quickCheck);
+  requireAvailable(quickCheck);
 
   if (checker.observe(processRef) !== 'alive') {
     throw new Error('worker lease: lease所有者の生存を確認できません');
@@ -299,7 +345,7 @@ function acquireLease(store, key, { processRef, workerName }) {
     // ロック取得待ちの間に別プロセスが live lease を作成している可能性がある。
     const existing = store.read(key);
 
-    requireDead(existing);
+    requireAvailable(existing);
 
     // stale lease があれば回収
     let staleReclaimed = !!existing;
@@ -327,7 +373,7 @@ function acquireLease(store, key, { processRef, workerName }) {
         // of death, and must never be removed or recreated automatically.
         const retryRead = store.read(key);
         if (!retryRead) throw new Error(`worker "${workerName}" の lease が競合後に読めません`);
-        requireDead(retryRead);
+        requireAvailable(retryRead);
         store.remove(key);
         staleReclaimed = true;
         store.write(key, entry);
@@ -364,7 +410,7 @@ function releaseLease(store, key, processRef) {
  * リースを実際のワーカーPIDでアクティベートする。
  *
  * 起動元（launcher）のPIDで予約したリースを、実際に起動したワーカープロセスの
- * PID・startTime で更新する。
+ * PID・resourceKey で更新する。
  *
  * store.update() は temp+rename による原子更新のため、並行 read が
  * 空ファイルや不完全 JSON を読むことは構造的に起きない。
@@ -392,7 +438,7 @@ function activateLease(store, key, processRef) {
 //
 // msg-poll.js / worker-supervisor.js などの常駐プロセスは、固定の role 名を
 // リースキーとして workspace ごとに排他する。通常ワーカー lease と異なり
-// 起動元（launcher）がいないため、lease の PID/startTime は実際に稼働する
+// 起動元（launcher）がいないため、lease の PID/resourceKey は実際に稼働する
 // プロセス自身（= このコードを実行するプロセス）が記録する。
 //
 // Issue #240 の根本症状「workspace 表記の差異（大文字小文字・末尾スラッシュ等）で
@@ -407,6 +453,7 @@ const WORKER_SUPERVISOR_ROLE = 'worker-supervisor';
 // only by the compatibility checks; new processes always acquire the
 // WORKER_SUPERVISOR_ROLE lease.
 const LEGACY_INBOX_SUPERVISOR_ROLE = 'inbox-supervisor';
+const POLL_PR_MONITOR_ROLE = 'poll-pr-monitor';
 
 /**
  * msg-poll の role lease 名（msgpoll-<self>）を組み立てる。
@@ -472,7 +519,193 @@ function createResidentLeaseStore(workspace) {
  */
 function isResidentLeaseLive({ workspace, role }) {
   const store = createResidentLeaseStore(workspace);
+  const existing = store.read(roleLeaseKey(role));
+  if (existing) validateResidentMetadata(existing, role);
+  if (typeof liveness().observeResource === 'function') {
+    const observed = liveness().observeResource({ workspace, kind: 'resident', name: role });
+    if (observed.state === 'unknown') {
+      const error = new Error(`role "${role}" の決定論的endpointを確認できません`);
+      error.code = 'LIVENESS_UNKNOWN';
+      throw error;
+    }
+    return observed.state === 'alive';
+  }
   return isLeaseLive(store.read(roleLeaseKey(role)));
+}
+
+function validateResidentMetadata(entry, role) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+      || !Number.isInteger(entry.pid) || entry.pid <= 0) {
+    throw new Error(`resident lease "${role}" の形式が不正です`);
+  }
+  const hasResourceKey = entry.resourceKey !== undefined && entry.resourceKey !== null;
+  const hasInstanceId = entry.instanceId !== undefined && entry.instanceId !== null;
+  if (hasResourceKey !== hasInstanceId
+      || (hasResourceKey && (typeof entry.resourceKey !== 'string'
+        || !/^[a-f0-9]{64}$/.test(entry.resourceKey)
+        || typeof entry.instanceId !== 'string' || entry.instanceId.length === 0))) {
+    throw new Error(`resident lease "${role}" のresource metadataが不正です`);
+  }
+}
+
+function acquireResidentEndpointLease(options) {
+  const {
+    workspace, role, handoff = false, takeover = false,
+    deadlineMs = HANDOFF_WAIT_MS, processRef = null,
+  } = options;
+  const checker = liveness();
+  if (takeover && !handoff) throw new Error('resident lease: plugin takeover requires handoff mode');
+  const identity = { workspace, kind: 'resident', name: role };
+  const selfRef = checker.prepareSelf(identity);
+  if (processRef && !checker.sameRef(processRef, selfRef)) {
+    throw new Error('resident lease: 不透明な参照が自プロセスの決定論的endpointを示していません');
+  }
+  const store = createResidentLeaseStore(workspace);
+  const key = roleLeaseKey(role);
+  let existing = store.read(key);
+  if (existing) validateResidentMetadata(existing, role);
+
+  let takeoverRef = null;
+  if (takeover) {
+    takeoverRef = checker.createProcessRef(process.pid, {
+      workspace,
+      kind: 'resident-takeover',
+      name: role,
+      instanceId: require('crypto').randomUUID(),
+    });
+  }
+
+  let claimed = false;
+  try {
+    const deadline = Date.now() + (handoff ? deadlineMs : 0);
+    if (takeoverRef) {
+      let takeoverClaimed = false;
+      while (Date.now() < deadline && !takeoverClaimed) {
+        const gate = checker.observeResource({ workspace, kind: 'resident-takeover', name: role });
+        if (gate.state === 'unknown') {
+          const error = new Error(`role "${role}" のtakeover endpointを確認できません`);
+          error.code = 'LIVENESS_UNKNOWN';
+          throw error;
+        }
+        if (gate.state === 'alive') {
+          const ownerPid = gate.manifest?.pid;
+          if (!Number.isInteger(ownerPid) || ownerPid <= 0 || ownerPid === process.pid) {
+            throw new Error(`role "${role}" のtakeover endpoint所有PIDが停止対象として不正です`);
+          }
+          try { _killProcessTree(ownerPid); } catch { /* endpoint probe below verifies release */ }
+          _sleep(Math.min(HANDOFF_POLL_MS, Math.max(1, deadline - Date.now())));
+          continue;
+        }
+        try {
+          checker.claim(takeoverRef);
+          takeoverClaimed = true;
+        } catch (error) {
+          if (error.code !== 'LIVENESS_ENDPOINT_BUSY') throw error;
+          _sleep(Math.min(HANDOFF_POLL_MS, Math.max(1, deadline - Date.now())));
+        }
+      }
+      if (!takeoverClaimed) {
+        recordAudit(workspace, 'lock-denied', role, { ownerPid: null, reason: 'takeover-lock-timeout' });
+        return { acquired: false, reason: 'handoff-timeout', key, ownerPid: null };
+      }
+    }
+
+    let waitRecorded = false;
+    while (true) {
+      const observed = checker.observeResource(identity);
+      if (observed.state === 'unknown') {
+        const error = new Error(`role "${role}" の生存endpointを確認できません`);
+        error.code = 'LIVENESS_UNKNOWN';
+        throw error;
+      }
+      if (observed.state === 'dead') break;
+      if (!handoff) {
+        recordAudit(workspace, 'lock-denied', role, {
+          ownerPid: observed.manifest?.pid ?? existing?.pid ?? null,
+          reason: 'live-endpoint',
+        });
+        throw new Error(
+          `role "${role}" は既に別プロセス（pid ${observed.manifest?.pid ?? existing?.pid ?? 'unknown'}）で稼働中です。`
+          + '重複起動できません。'
+        );
+      }
+      if (Date.now() >= deadline) {
+        recordAudit(workspace, 'lock-denied', role, {
+          ownerPid: observed.manifest?.pid ?? null,
+          reason: 'handoff-timeout',
+        });
+        return {
+          acquired: false,
+          reason: 'handoff-timeout',
+          key,
+          ownerPid: observed.manifest?.pid ?? null,
+        };
+      }
+      if (!waitRecorded) {
+        recordAudit(workspace, 'handoff-wait', role, { ownerPid: observed.manifest?.pid ?? null });
+        waitRecorded = true;
+      }
+      if (!takeover) {
+        const guardRes = checkResidentForceGuard(options.env || process.env);
+        if (!guardRes.allowed) {
+          recordAudit(workspace, 'lock-denied', role, {
+            ownerPid: observed.manifest?.pid ?? null,
+            reason: 'force-disallowed-context',
+          });
+          throw new Error(guardRes.message);
+        }
+      }
+      const ownerPid = observed.manifest?.pid;
+      if (!Number.isInteger(ownerPid) || ownerPid <= 0 || ownerPid === process.pid) {
+        throw new Error(`role "${role}" のendpoint所有PIDが停止対象として不正です`);
+      }
+      try {
+        if (role.startsWith('msgpoll-')) _killProcess(ownerPid);
+        else _killProcessTree(ownerPid);
+      } catch { /* the endpoint probe below decides whether ownership ended */ }
+      _sleep(Math.min(HANDOFF_POLL_MS, Math.max(1, deadline - Date.now())));
+    }
+
+    // The endpoint claim is the exclusive ownership operation. Disk records only supply
+    // stop metadata and are overwritten after a successful claim, including valid PR1 records.
+    checker.claim(selfRef);
+    claimed = true;
+    existing = store.read(key);
+    if (existing) validateResidentMetadata(existing, role);
+    const record = checker.writeRef({
+      workerName: role,
+      createdAt: new Date().toISOString(),
+      phase: 'active',
+    }, selfRef);
+    try {
+      if (existing) store.update(key, record);
+      else store.write(key, record);
+    } catch (error) {
+      // The endpoint is the ownership record. Disk metadata is a stop/reporting aid and
+      // must not make an already-held endpoint look unowned or start a duplicate process.
+      console.warn(`role "${role}" のリースメタデータを保存できません: ${error.message}`);
+    }
+
+    return {
+      acquired: true,
+      key,
+      staleReclaimed: Boolean(existing),
+      release: () => {
+        const current = store.read(key);
+        if (current && checker.sameRef(checker.readRef(current), selfRef)) store.remove(key);
+        checker.release(selfRef);
+      },
+    };
+  } catch (error) {
+    if (claimed) {
+      try { checker.release(selfRef); } catch {}
+    }
+    throw error;
+  } finally {
+    if (takeoverRef) {
+      try { checker.release(takeoverRef); } catch {}
+    }
+  }
 }
 
 /**
@@ -497,7 +730,7 @@ function recordAudit(workspace, type, role, detail) {
  *   待機開始時に handoff-wait を監査記録し、期限超過時は lock-denied を記録して
  *   { acquired: false } を返す（本稼働へは進まない）。
  *
- * どの経路でも lease の PID/startTime はこのプロセス自身のものを記録する。
+ * どの経路でも lease の PID/resourceKey はこのプロセス自身のものを記録する。
  * 取得に成功した場合は即座に phase 'active' にする（常駐プロセスは起動直後に
  * 本稼働するため、launcher の initializing ウィンドウを持たない）。
  *
@@ -517,12 +750,27 @@ function acquireResidentLease({
   workspace,
   role,
   handoff = false,
+  takeover = false,
   handoffStopTargets = () => [],
   deadlineMs = HANDOFF_WAIT_MS,
   env = process.env,
   processRef = null,
 }) {
   const checker = liveness();
+  if (typeof checker.observeResource === 'function'
+      && typeof checker.prepareSelf === 'function'
+      && typeof checker.claim === 'function') {
+    return acquireResidentEndpointLease({
+      workspace,
+      role,
+      handoff,
+      takeover,
+      handoffStopTargets,
+      deadlineMs,
+      env,
+      processRef,
+    });
+  }
   const key = roleLeaseKey(role);
   const currentRef = checker.captureSelf();
   const selfRef = processRef || currentRef;
@@ -542,6 +790,101 @@ function acquireResidentLease({
       `role "${role}" は既に別プロセス（pid ${existing.pid}）で稼働中です。重複起動できません。` +
       `既存プロセスが終了するまでお待ちください。`
     );
+  }
+
+  // ── plugin monitor: 同役割の旧世代を停止して後発プロセスが引き継ぐ ──
+  if (takeover) {
+    if (!handoff) throw new Error('resident lease: plugin takeover requires handoff mode');
+    const takeoverKey = `${key}-plugin-takeover`;
+    const deadline = Date.now() + deadlineMs;
+    let takeoverLockAcquired = false;
+    while (!takeoverLockAcquired && Date.now() < deadline) {
+      try {
+        acquireLeaseLock(store, takeoverKey, 1, selfRef);
+        takeoverLockAcquired = true;
+      } catch (error) {
+        if (error.code !== 'LEASE_LOCK_HELD') throw error;
+        _sleep(Math.min(HANDOFF_POLL_MS, Math.max(1, deadline - Date.now())));
+      }
+    }
+    if (!takeoverLockAcquired) {
+      recordAudit(workspace, 'lock-denied', role, { ownerPid: null, reason: 'takeover-lock-timeout' });
+      return { acquired: false, reason: 'handoff-timeout', key, ownerPid: null };
+    }
+
+    let waitRecorded = false;
+    let lastOwnerPid = null;
+    try {
+      while (Date.now() < deadline) {
+        const targets = new Map();
+        const currentLease = store.read(key);
+        if (currentLease) {
+          const leaseRef = checker.readRef(currentLease);
+          const leaseState = checker.observe(leaseRef);
+          if (leaseState === 'unknown') {
+            throw new Error(`resident lease "${role}" の保持者の生死を判定できません`);
+          }
+          if (leaseState === 'alive') {
+            targets.set(currentLease.pid, { pid: currentLease.pid, ref: leaseRef });
+            lastOwnerPid = currentLease.pid;
+          }
+        }
+
+        const extraTargets = handoffStopTargets();
+        if (!Array.isArray(extraTargets)) throw new Error('plugin takeover targets must be an array');
+        for (const target of extraTargets) {
+          const pid = typeof target === 'number' ? target : target && target.pid;
+          if (!Number.isInteger(pid) || pid <= 0 || pid === selfRecord.pid) continue;
+          const ref = typeof target === 'number' ? checker.captureProcess(pid) : checker.readRef(target);
+          const state = checker.observe(ref);
+          if (state === 'unknown') {
+            throw new Error(`plugin takeover target pid ${pid} の生死を判定できません`);
+          }
+          if (state !== 'alive') continue;
+          const prior = targets.get(pid);
+          if (prior && !checker.sameRef(prior.ref, ref)) {
+            throw new Error(`plugin takeover target pid ${pid} のプロセス参照が競合しています`);
+          }
+          targets.set(pid, { pid, ref });
+          lastOwnerPid = pid;
+        }
+
+        if (targets.size === 0) {
+          try {
+            const result = acquireLease(store, key, { processRef: selfRef, workerName: role });
+            activateLease(store, key, selfRef);
+            return {
+              acquired: true,
+              key,
+              release: () => releaseLease(store, key, selfRef),
+              staleReclaimed: result.staleReclaimed,
+            };
+          } catch (error) {
+            if (error.code === 'LIVENESS_UNKNOWN') throw error;
+            // A non-plugin launcher may have claimed the role during this pass.
+          }
+        } else {
+          if (!waitRecorded) {
+            recordAudit(workspace, 'handoff-wait', role, { ownerPid: lastOwnerPid });
+            waitRecorded = true;
+          }
+          const stopProcess = role.startsWith('msgpoll-') ? _killProcess : _killProcessTree;
+          for (const { pid, ref } of targets.values()) {
+            if (checker.observe(ref) !== 'alive') continue;
+            try { stopProcess(pid); } catch {}
+          }
+        }
+        _sleep(Math.min(HANDOFF_POLL_MS, Math.max(1, deadline - Date.now())));
+      }
+    } finally {
+      releaseLeaseLock(store, takeoverKey);
+    }
+
+    recordAudit(workspace, 'lock-denied', role, {
+      ownerPid: lastOwnerPid,
+      reason: 'handoff-timeout',
+    });
+    return { acquired: false, reason: 'handoff-timeout', key, ownerPid: lastOwnerPid };
   }
 
   // ── --force: 既存所有者へ停止要求 → 同じ lease を期限付きで再取得 ──
@@ -617,7 +960,10 @@ function acquireResidentLease({
  */
 function releaseResidentLease({ workspace, role, processRef = null }) {
   const store = createResidentLeaseStore(workspace);
-  releaseLease(store, roleLeaseKey(role), processRef || liveness().captureSelf());
+  const checker = liveness();
+  const ownerRef = processRef || checker.captureSelf({ workspace, kind: 'resident', name: role });
+  releaseLease(store, roleLeaseKey(role), ownerRef);
+  if (typeof checker.release === 'function') checker.release(ownerRef);
 }
 
 /**
@@ -625,16 +971,16 @@ function releaseResidentLease({ workspace, role, processRef = null }) {
  *
  * 強制終了では対象プロセスの exit handler が走らず、通常の
  * releaseResidentLease() が呼ばれないことがある。停止処理側から回収する場合も、
- * PIDだけでなく registry と同じ startTime を照合し、PID再利用後の別プロセスの
+ * PIDだけでなく registry と同じ resourceKey を照合し、PID再利用後の別プロセスの
  * leaseを削除しない。別PIDの lease は停止対象の解放失敗とはみなさないが、同じPIDで
- * startTimeだけが不一致の場合はidentity取得結果が分断された可能性を成功扱いにせず、
+ * resourceKeyだけが不一致の場合はidentity取得結果が分断された可能性を成功扱いにせず、
  * 残留失敗として返す。削除後に再読込して残存を確認するのは自分の leaseだけに限定する。
  *
  * @param {object} opt
  * @param {string} opt.workspace
  * @param {string} opt.role
  * @param {number} opt.pid
- * @param {string} opt.startTime
+ * @param {string} opt.resourceKey
  * @returns {{released:boolean, remaining:boolean, reason?:string}}
  */
 function releaseResidentLeaseForProcess({ workspace, role, processRef }) {
@@ -659,6 +1005,18 @@ function releaseResidentLeaseForProcess({ workspace, role, processRef }) {
     if (!checker.sameRef(existingRef, processRef)) {
       const existingOwner = checker.writeRef({}, existingRef);
       const stoppedOwner = checker.writeRef({}, processRef);
+      const bothEndpointless = existingOwner.resourceKey == null
+        && existingOwner.instanceId == null
+        && stoppedOwner.resourceKey == null
+        && stoppedOwner.instanceId == null;
+      if (bothEndpointless && existingOwner.pid === stoppedOwner.pid
+          && checker.observe(existingRef) === 'dead') {
+        store.remove(key);
+        const remaining = store.read(key);
+        return remaining
+          ? { released: false, remaining: true, reason: 'lease remains after removal' }
+          : { released: true, remaining: false };
+      }
       return {
         released: false,
         // A different PID means this lease belongs to another process and is
@@ -692,6 +1050,7 @@ module.exports = {
   // 常駐プロセス用 role lease（Issue #240）
   WORKER_SUPERVISOR_ROLE,
   LEGACY_INBOX_SUPERVISOR_ROLE,
+  POLL_PR_MONITOR_ROLE,
   MSGPOLL_ORCHESTRATOR_ROLE,
   msgPollRole,
   roleLeaseKey,
@@ -702,5 +1061,6 @@ module.exports = {
   // テスト用注入
   _setLiveness: (value) => { _injectedLiveness = value; },
   _setKillProcessTree: (fn) => { _killProcessTree = fn; },
+  _setKillProcess: (fn) => { _killProcess = fn; },
   _setSleep: (fn) => { _sleep = fn; },
 };

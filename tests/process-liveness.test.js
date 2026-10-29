@@ -1,103 +1,227 @@
 'use strict';
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createLiveness } = require('../scripts/shared/process-liveness');
+const { EventEmitter } = require('node:events');
+const fs = require('node:fs');
+const path = require('node:path');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
+const processLiveness = require('../scripts/shared/process-liveness');
 
-const time = '2025-01-01T00:00:00.000Z';
-test('opaque reference observes live, reused and missing processes', () => {
-  let probe = 'alive';
-  let start = time;
-  const liveness = createLiveness({ probePid: () => probe, readStartTime: () => start });
-  const ref = liveness.captureProcess(123);
-  assert.equal(typeof ref, 'string');
-  assert.equal(liveness.observe(ref), 'alive');
-  start = '2025-01-01T00:00:05.000Z';
-  assert.equal(liveness.observe(ref), 'dead');
-  probe = 'dead';
-  assert.equal(liveness.observe(ref), 'dead');
-});
-test('missing identity and failed probes remain unknown', () => {
-  let probe = 'alive';
-  let start = time;
-  let readCalls = 0;
-  const liveness = createLiveness({
-    probePid: () => probe,
-    readStartTime: () => { readCalls++; return start; },
+const resource = { workspace: 'C:/isolated/workspace', kind: 'worker', name: 'worker-a' };
+const resourceKey = processLiveness.resourceKeyFor(resource);
+const instanceId = 'instance-generation-1';
+
+function makeLiveness({ endpointState = 'alive', manifest = null, killState = 'present' } = {}) {
+  const endpoints = [];
+  const state = { endpointState, manifest: manifest || {
+    schemaVersion: 2, resourceKey, instanceId, pid: 123,
+  }, killState };
+  const api = processLiveness.createLiveness({
+    useRealResources: false,
+    probeEndpoint: (endpoint) => { endpoints.push(endpoint); return state.endpointState; },
+    readManifest: () => state.manifest,
+    kill: (_pid, _signal) => {
+      if (state.killState === 'dead') {
+        const error = new Error('not found');
+        error.code = 'ESRCH';
+        throw error;
+      }
+      if (state.killState === 'unknown') {
+        const error = new Error('not permitted');
+        error.code = 'EPERM';
+        throw error;
+      }
+    },
   });
-  const missingStartTimeRef = liveness.readRef({ pid: 123 });
-  assert.equal(liveness.observe(missingStartTimeRef), 'unknown', '生存PIDのstartTime欠落はunknown');
-  assert.equal(readCalls, 0, 'startTimeのない参照は比較用時刻を読み取らない');
-  probe = 'dead';
-  assert.equal(liveness.observe(missingStartTimeRef), 'dead', 'PID消失が確認できればstartTime欠落でもdead');
-  assert.equal(readCalls, 0, '死亡確認だけで十分な場合はstartTimeを照会しない');
-  probe = 'alive';
-  const ref = liveness.captureProcess(123);
-  probe = 'unknown';
-  assert.equal(liveness.observe(ref), 'unknown');
-  probe = 'alive'; start = null;
-  assert.equal(liveness.observe(ref), 'unknown');
-  start = 'invalid';
-  assert.equal(liveness.observe(ref), 'unknown');
-  assert.equal(liveness.observe('invalid'), 'unknown');
-});
-test('reference serialization and comparison are owned by liveness', () => {
-  const liveness = createLiveness({ readStartTime: () => time });
-  const ref = liveness.captureProcess(123);
-  const record = liveness.writeRef({ purpose: 'worker' }, ref);
-  assert.deepEqual(record, { purpose: 'worker', pid: 123, startTime: time });
-  assert.equal(liveness.sameRef(ref, liveness.readRef(record)), true);
-  assert.equal(liveness.sameRef(ref, liveness.readRef({ pid: 123, startTime: '2025-01-01T00:00:00.999Z' })), true,
-    '同じPIDと1秒以内の起動時刻は同一参照として扱う');
-  assert.equal(liveness.sameRef(ref, liveness.readRef({ pid: 123, startTime: '2025-01-01T00:00:01.001Z' })), false);
-  assert.equal(liveness.sameRef(ref, liveness.readRef({ pid: 124, startTime: time })), false);
-  assert.throws(() => liveness.writeRef({}, 'invalid'));
+  return { api, endpoints, state };
+}
+
+test('resource keys deterministically include workspace, kind, and name', () => {
+  const original = processLiveness.resourceKeyFor(resource);
+  assert.match(original, /^[a-f0-9]{64}$/);
+  assert.equal(processLiveness.resourceKeyFor(resource), original);
+  assert.notEqual(processLiveness.resourceKeyFor({ ...resource, workspace: 'C:/isolated/other' }), original);
+  assert.notEqual(processLiveness.resourceKeyFor({ ...resource, kind: 'resident' }), original);
+  assert.notEqual(processLiveness.resourceKeyFor({ ...resource, name: 'worker-b' }), original);
+  assert.match(processLiveness.endpointPath(original, 'C:/isolated/runtime'), /gh-maestro-/);
 });
 
-test('watchParent: 一時的な消滅は猶予し3回連続で死亡とする', () => {
-  let current = 'alive';
-  const api = createLiveness({ probePid: () => current, readStartTime: () => time });
-  const watch = api.watchParent(api.captureProcess(123));
-  current = 'dead';
-  assert.equal(watch(), true);
-  assert.equal(watch(), true);
-  assert.equal(watch(), false);
-});
-test('watchParent: PID 再利用は即時に死亡とし照会失敗では終了しない', () => {
-  let actual = time;
-  const api = createLiveness({ probePid: () => 'alive', readStartTime: () => actual });
-  const watch = api.watchParent(api.captureProcess(123));
-  actual = null;
-  assert.equal(watch(), true);
-  actual = 'invalid';
-  assert.equal(watch(), true);
-  actual = '2025-01-01T00:00:05.000Z';
-  assert.equal(watch(), false);
+test('observe uses deterministic endpoint and instance metadata for alive, dead, and unknown', () => {
+  const { api, endpoints, state } = makeLiveness();
+  const ref = api.captureProcess(123, { resourceKey, instanceId });
+  assert.equal(api.observe(ref), 'alive');
+  assert.equal(endpoints.length, 1);
+  assert.match(endpoints[0], /gh-maestro-/);
+
+  state.endpointState = 'dead';
+  assert.equal(api.observe(ref), 'dead');
+  state.endpointState = 'unknown';
+  assert.equal(api.observe(ref), 'unknown');
 });
 
-test('watchParent: 生存・不明の観測で死亡カウンタをリセットする', () => {
-  let state = 'alive';
-  const api = createLiveness({ probePid: () => state, readStartTime: () => time });
-  const watch = api.watchParent(api.captureProcess(123));
-  state = 'dead'; assert.equal(watch(), true); assert.equal(watch(), true);
-  state = 'unknown'; assert.equal(watch(), true);
-  state = 'dead'; assert.equal(watch(), true); assert.equal(watch(), true);
-  state = 'alive'; assert.equal(watch(), true);
-  state = 'dead'; assert.equal(watch(), true); assert.equal(watch(), true); assert.equal(watch(), false);
+test('a different endpoint generation makes an old reference dead', () => {
+  const { api, state } = makeLiveness({ manifest: {
+    schemaVersion: 2, resourceKey, instanceId: 'instance-generation-2', pid: 456,
+  } });
+  assert.equal(api.observe(api.captureProcess(123, { resourceKey, instanceId })), 'dead');
 });
 
-test('セッション記録の参照は形式変換後も同一', () => {
-  const api = createLiveness({ readStartTime: () => time, probePid: () => 'alive' });
-  const ref = api.captureProcess(123);
-  const record = api.writeRef({ issue: 7 }, ref, 'session');
-  assert.deepEqual(record, { issue: 7, sessionPid: 123, sessionStartTime: time });
-  assert.equal(api.sameRef(ref, api.readRef(record, 'session')), true);
+test('endpointless PR1 records are dead only on ESRCH and remain unknown when PID exists', () => {
+  const { api, endpoints, state } = makeLiveness({ endpointState: 'dead', killState: 'present' });
+  const legacy = api.readRef({ pid: 123, startTime: '2025-01-01T00:00:00Z' });
+  assert.equal(api.observe(legacy), 'unknown');
+  assert.equal(endpoints.length, 0, 'legacy records do not invent a deterministic endpoint');
+  state.killState = 'dead';
+  assert.equal(api.observe(legacy), 'dead');
+  state.killState = 'unknown';
+  assert.equal(api.observe(legacy), 'unknown');
+  assert.equal(api.sameRef(legacy, legacy), false);
+});
+
+test('reference serialization carries resource key and instance ID while preserving domain timestamps', () => {
+  const { api } = makeLiveness();
+  const ref = api.captureProcess(123, { resourceKey, instanceId });
+  const record = api.writeRef({ purpose: 'worker', startTime: 'domain timestamp' }, ref);
+  assert.deepEqual(record, {
+    purpose: 'worker', startTime: 'domain timestamp', pid: 123, resourceKey, instanceId,
+  });
+  assert.equal(api.sameRef(ref, api.readRef(record)), true);
+  assert.equal(api.sameRef(ref, api.readRef({ pid: 123, resourceKey, instanceId: 'other' })), false);
+  assert.equal(api.sameRef(ref, api.readRef({ pid: 124, resourceKey, instanceId })), false);
+
+  const sessionRecord = api.writeRef({ issue: 7 }, ref, 'session');
+  assert.deepEqual(sessionRecord, { issue: 7, sessionPid: 123, sessionResourceKey: resourceKey, sessionInstanceId: instanceId });
+  assert.equal(api.sameRef(ref, api.readRef(sessionRecord, 'session')), true);
+  assert.equal(api.readRef({ pid: 123, resourceKey }), null, 'partial endpoint metadata is invalid');
+  assert.throws(() => api.writeRef({}, 'invalid'));
   assert.throws(() => api.writeRef({}, ref, 'unsupported'));
 });
 
-test('真偽値や空文字を PID に変換しない', () => {
-  const api = createLiveness({ readStartTime: () => time, probePid: () => 'alive' });
-  for (const pid of [true, false, '', ' ', null, {}]) {
-    assert.throws(() => api.captureProcess(pid), /invalid process identifier/);
-    assert.equal(api.observe(api.readRef({ pid, startTime: time })), 'unknown');
+test('watchParent retains the three-dead observation barrier and unknown grace', () => {
+  const { api, state } = makeLiveness();
+  const check = api.watchParent(api.captureProcess(123, { resourceKey, instanceId }));
+  state.endpointState = 'dead';
+  assert.equal(check(), true);
+  assert.equal(check(), true);
+  assert.equal(check(), false);
+  state.endpointState = 'unknown';
+  assert.equal(check(), true);
+});
+
+test('watchParent without a reference observes stdin EOF or close', () => {
+  const stream = new EventEmitter();
+  stream.readableEnded = false;
+  stream.destroyed = false;
+  let resumed = false;
+  stream.resume = () => { resumed = true; };
+  const api = processLiveness.createLiveness({ useRealResources: false });
+  const watch = api.watchParent(undefined, { stream });
+  assert.equal(resumed, true);
+  assert.equal(watch(), true);
+  stream.emit('end');
+  assert.equal(watch(), false);
+
+  const closedStream = new EventEmitter();
+  closedStream.resume = () => {};
+  const watchClosed = api.watchParent(null, { stream: closedStream });
+  closedStream.emit('close');
+  assert.equal(watchClosed(), false);
+});
+
+test('PID validation and legacy parsing reject malformed identifiers without probing endpoints', () => {
+  const { api, endpoints } = makeLiveness();
+  for (const pid of [true, false, '', ' ', null, {}, 1.5, 0, -1]) {
+    assert.throws(() => api.captureProcess(pid, { resourceKey, instanceId }), /invalid process identifier/);
+    assert.equal(api.readRef({ pid, resourceKey, instanceId }), null);
+  }
+  assert.equal(api.observe('invalid'), 'unknown');
+  assert.equal(endpoints.length, 0);
+});
+
+test('a live endpoint with missing instance metadata is unknown', () => {
+  const { api, state } = makeLiveness();
+  state.manifest = null;
+  assert.equal(api.observe(api.captureProcess(123, { resourceKey, instanceId })), 'unknown');
+});
+
+test('a corrupt manifest is reported while its endpoint is live', () => {
+  const corrupt = new Error('corrupt process liveness manifest');
+  corrupt.code = 'LIVENESS_CORRUPT';
+  const api = processLiveness.createLiveness({
+    useRealResources: false,
+    probeEndpoint: () => 'alive',
+    readManifest: () => { throw corrupt; },
+  });
+
+  assert.throws(() => api.observe(api.captureProcess(123, { resourceKey, instanceId })), (error) => error === corrupt);
+});
+
+test('a manifest of any format is overwritten when its deterministic endpoint is dead', () => {
+  const tempDirScope = createTempDirScope();
+  const runtimeRoot = tempDirScope.mkdtemp('gh-maestro-liveness-manifest-');
+  const manifest = processLiveness.manifestPath(resourceKey, runtimeRoot);
+  fs.mkdirSync(path.dirname(manifest), { recursive: true });
+  fs.writeFileSync(manifest, '{corrupt legacy residue');
+  let server;
+  const api = processLiveness.createLiveness({
+    useRealResources: true,
+    runtimeRoot: () => runtimeRoot,
+    probeEndpoint: () => 'dead',
+    createServer: () => {
+      server = new EventEmitter();
+      server.listen = () => { server.listening = true; };
+      server.unref = () => {};
+      server.close = () => { server.listening = false; };
+      return server;
+    },
+  });
+  const ref = api.captureProcess(process.pid, { resourceKey, instanceId });
+
+  try {
+    assert.equal(api.claim(ref), ref);
+    assert.equal(server.listening, true);
+    assert.deepEqual(processLiveness.readManifest(resourceKey, runtimeRoot), {
+      schemaVersion: 2,
+      resourceKey,
+      instanceId,
+      pid: process.pid,
+    });
+    assert.equal(api.release(ref), true);
+  } finally {
+    if (server?.listening) server.close();
+    tempDirScope.cleanup();
+  }
+});
+
+test('the synchronous resource claim owns and releases a real OS endpoint', () => {
+  const tempDirScope = createTempDirScope();
+  const workspace = tempDirScope.mkdtemp('gh-maestro-liveness-owner-');
+  const runtimeRoot = tempDirScope.mkdtemp('gh-maestro-liveness-runtime-');
+  const identity = { workspace, kind: 'test-resident', name: 'listener-worker' };
+  const owner = processLiveness.createLiveness({ runtimeRoot: () => runtimeRoot });
+  const observer = processLiveness.createLiveness({ runtimeRoot: () => runtimeRoot });
+  const ownerRef = owner.prepareSelf(identity);
+  const competingRef = observer.createProcessRef(process.pid, {
+    ...identity,
+    instanceId: 'competing-instance',
+  });
+  let claimed = false;
+
+  try {
+    assert.equal(owner.claim(ownerRef), ownerRef);
+    claimed = true;
+    assert.equal(owner.observeResource(identity).state, 'alive');
+    assert.throws(() => observer.claim(competingRef), (error) => error.code === 'LIVENESS_ENDPOINT_BUSY');
+    assert.equal(owner.release(ownerRef), true);
+    claimed = false;
+    assert.equal(observer.observeResource(identity).state, 'dead');
+    assert.equal(observer.claim(competingRef), competingRef);
+    claimed = true;
+    assert.equal(observer.release(competingRef), true);
+    claimed = false;
+  } finally {
+    if (claimed) owner.release(ownerRef);
+    tempDirScope.cleanup();
   }
 });

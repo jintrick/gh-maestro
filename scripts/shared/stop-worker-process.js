@@ -123,8 +123,13 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
       throw new Error(`レガシー notifier (pid ${rawNotifierPid}) のPID記録が不正です`);
     }
     const notifierPid = Number(rawNotifierPid);
-    const notifierStartTime = rawWorkerEntry.notifierStartTime ?? null;
-    const state = liveness.observe(liveness.readRef({ pid: notifierPid, startTime: notifierStartTime }));
+    const notifierResourceKey = rawWorkerEntry.notifierResourceKey ?? null;
+    const notifierInstanceId = rawWorkerEntry.notifierInstanceId ?? null;
+    const state = liveness.observe(liveness.readRef({
+      pid: notifierPid,
+      resourceKey: notifierResourceKey,
+      instanceId: notifierInstanceId,
+    }));
     if (state === 'unknown') {
       throw new Error(`レガシー notifier (pid ${notifierPid}) の生死を判定できません`);
     }

@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
@@ -36,13 +39,10 @@ beforeEach(() => {
   tempDirScope = createTempDirScope();
   workspace = tempDirScope.mkdtemp('ensure-supervisor-');
   mod._setSpawn(() => fakeChild());
-  // findSessionRootPid は実装がWMI/execSyncを呼ぶため、テストでは常にモックする
-  // （実プロセスを起動しない）。
-  mod._setFindSessionRootPid(() => 12345);
   mod._setFindRunningInstance(() => null);
   // 既定は実装（worker-lease.isResidentLeaseLive）。テスト用 temp workspace には
-  // lease が無いため false を返し、既存テストの挙動を変えない。
-  mod._setIsResidentLeaseLive(workerLease.isResidentLeaseLive);
+  // orchestrator msg-poll lease が存在する状態を表し、supervisor lease は未作成にする。
+  mod._setIsResidentLeaseLive(({ role }) => role === workerLease.MSGPOLL_ORCHESTRATOR_ROLE);
 });
 
 afterEach(() => {
@@ -67,18 +67,13 @@ test('ensureWorkerSupervisorRunning: detached・windowsHide付きでworker-super
   assert.deepEqual(captured.args, [
     path.join('/abs/scripts', 'worker-supervisor.js'),
     '--workspace', workspace,
-    '--session-pid', '12345',
   ]);
+  assert.ok(captured.opts.env.GH_MAESTRO_RESOURCE_KEY, 'child receives a fresh OS-resource identity');
   assert.equal(captured.opts.detached, true);
   assert.equal(captured.opts.windowsHide, true);
 });
 
-test('ensureWorkerSupervisorRunning: 呼び出し元プロセスがまだ生存しているうちにセッションPIDを解決し、子へ明示的に渡す', () => {
-  // 実障害の再発防止テスト: 子プロセス自身に解決を委ねると、直近の親（この
-  // 呼び出し元）が既に終了した後では親チェーンを辿れず、使い捨てCLIを
-  // セッション本体と誤認して数十秒で自滅していた。呼び出し元の生存中に
-  // 解決した値がそのまま --session-pid として子に渡ることを確認する。
-  mod._setFindSessionRootPid(() => 99999);
+test('ensureWorkerSupervisorRunning: Claude親セッションPIDを子へ渡さない', () => {
   let captured = null;
   mod._setSpawn((cmd, args, opts) => {
     captured = { cmd, args, opts };
@@ -87,35 +82,17 @@ test('ensureWorkerSupervisorRunning: 呼び出し元プロセスがまだ生存�
 
   ensureWorkerSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
 
-  assert.ok(captured.args.includes('--session-pid'));
-  assert.equal(captured.args[captured.args.indexOf('--session-pid') + 1], '99999');
-});
-
-test('ensureWorkerSupervisorRunning: セッションPID解決が失敗しても--session-pidなしでspawnする（フォールバック）', () => {
-  mod._setFindSessionRootPid(() => { throw new Error('WMI failure'); });
-  let captured = null;
-  mod._setSpawn((cmd, args, opts) => {
-    captured = { cmd, args, opts };
-    return fakeChild();
-  });
-
-  ensureWorkerSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
-
-  assert.ok(captured, 'spawnは実行される');
   assert.equal(captured.args.includes('--session-pid'), false);
 });
 
 test('ensureWorkerSupervisorRunning: 既にSupervisorが稼働中ならspawnもセッションPID解決も行わない', () => {
   mod._setFindRunningInstance(() => ({ pid: 777, script: 'worker-supervisor.js' }));
   let spawnCalled = false;
-  let resolveCalled = false;
   mod._setSpawn(() => { spawnCalled = true; return fakeChild(); });
-  mod._setFindSessionRootPid(() => { resolveCalled = true; return 12345; });
 
   ensureWorkerSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
 
   assert.equal(spawnCalled, false);
-  assert.equal(resolveCalled, false);
 });
 
 test('ensureWorkerSupervisorRunning: 改名前のregistry/roleを検出した場合もspawnしない', () => {
@@ -136,14 +113,11 @@ test('ensureWorkerSupervisorRunning: 所有プロセス生存中の.migration-in
   migrationMarker.markMigrationInProgress(workspace);
   mod._setFindRunningInstance(() => null);
   let spawnCalled = false;
-  let resolveCalled = false;
   mod._setSpawn(() => { spawnCalled = true; return fakeChild(); });
-  mod._setFindSessionRootPid(() => { resolveCalled = true; return 12345; });
 
   ensureWorkerSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
 
   assert.equal(spawnCalled, false);
-  assert.equal(resolveCalled, false);
 });
 
 test('ensureWorkerSupervisorRunning: 所有プロセスが死んだstaleマーカーは無視して自動起動する（自己回復）', () => {
@@ -153,14 +127,11 @@ test('ensureWorkerSupervisorRunning: 所有プロセスが死んだstaleマー�
   assert.equal(migrationMarker.isMigrationInProgress(workspace), false);
   mod._setFindRunningInstance(() => null);
   let spawnCalled = false;
-  let resolveCalled = false;
   mod._setSpawn(() => { spawnCalled = true; return fakeChild(); });
-  mod._setFindSessionRootPid(() => { resolveCalled = true; return 12345; });
 
   ensureWorkerSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
 
   assert.equal(spawnCalled, true);
-  assert.equal(resolveCalled, true);
 });
 
 test('ensureWorkerSupervisorRunning: 稼働中判定が例外を投げてもfail-openでspawnを試みる', () => {
@@ -175,19 +146,16 @@ test('ensureWorkerSupervisorRunning: 稼働中判定が例外を投げてもfail
 
 test('ensureWorkerSupervisorRunning: registryに無くても role lease が live なら spawn しない（Issue #240）', () => {
   mod._setFindRunningInstance(() => null); // registry にはエントリが無い
-  mod._setIsResidentLeaseLive(() => true); // しかし role lease は live（排他の正本）
+  mod._setIsResidentLeaseLive(() => true); // 依存leaseとsupervisor leaseがlive
   let spawnCalled = false;
-  let resolveCalled = false;
   mod._setSpawn(() => { spawnCalled = true; return fakeChild(); });
-  mod._setFindSessionRootPid(() => { resolveCalled = true; return 12345; });
 
   ensureWorkerSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
 
   assert.equal(spawnCalled, false);
-  assert.equal(resolveCalled, false);
 });
 
-test('ensureWorkerSupervisorRunning: role lease 判定が例外を投げても fail-open で spawn を試みる', () => {
+test('ensureWorkerSupervisorRunning: 依存 role lease 判定が不明なら孤立起動しない', () => {
   mod._setFindRunningInstance(() => null);
   mod._setIsResidentLeaseLive(() => { throw new Error('lease read failed'); });
   let spawnCalled = false;
@@ -195,7 +163,7 @@ test('ensureWorkerSupervisorRunning: role lease 判定が例外を投げても f
 
   ensureWorkerSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
 
-  assert.equal(spawnCalled, true);
+  assert.equal(spawnCalled, false);
 });
 
 test('ensureWorkerSupervisorRunning: unrefを呼ぶ（呼び出し元プロセスをブロックしない）', () => {
@@ -343,14 +311,9 @@ test('ensureWorkerSupervisorRunning: 呼び出しシーケンス（順序）の�
     return null;
   });
 
-  mod._setIsResidentLeaseLive(() => {
+  mod._setIsResidentLeaseLive(({ role }) => {
     events.push('leaseCheck');
-    return false;
-  });
-
-  mod._setFindSessionRootPid(() => {
-    events.push('resolvePid');
-    return 7777;
+    return role === workerLease.MSGPOLL_ORCHESTRATOR_ROLE;
   });
 
   mod._setSpawn((cmd, args, opts) => {
@@ -362,11 +325,11 @@ test('ensureWorkerSupervisorRunning: 呼び出しシーケンス（順序）の�
   ensureWorkerSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
 
   assert.deepEqual(events, [
+    'leaseCheck',
     'runningCheck',
     'runningCheck',
     'leaseCheck',
     'leaseCheck',
-    'resolvePid',
     'spawn(recorded:true)',
   ]);
 });

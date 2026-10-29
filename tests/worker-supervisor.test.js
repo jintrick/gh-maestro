@@ -1,5 +1,9 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+const { createTestLiveness } = require('./helpers/process-liveness-test-double');
+
 const { test, describe, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -12,6 +16,7 @@ const workerLease = require('../scripts/shared/worker-lease');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
 const residentAudit = require('../scripts/shared/resident-audit');
 const processLiveness = require('../scripts/shared/process-liveness');
+const { canonicalWorkspace } = require('../scripts/shared/storage-layout');
 const workerLiveness = require('../scripts/shared/worker-liveness');
 
 // 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
@@ -29,11 +34,8 @@ supervisor._setParentLiveness(testLiveness);
 // 下部のCLI integrationは実argv・実プロセス境界を通す。
 const TEST_PARENT_CHECKER = () => true;
 
-// テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
-// 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
-// --session-pid を渡すため、テストでも常に自プロセスPIDを渡してこの探索を省く。
+// main() is exercised directly with temp workspaces and injected liveness probes.
 const _realMain = supervisor.main;
-const TEST_SESSION_PID = String(process.pid);
 // 明示した --workspace は環境変数より優先されるが、workspace引数を省略する
 // 経路も実workspaceへ向かわないよう、テスト中は環境変数を一時的に除去する。
 const _savedWorkspaceEnv = process.env.GH_MAESTRO_WORKSPACE;
@@ -45,7 +47,12 @@ delete process.env.GH_MAESTRO_WORKER;
 // テスト中は一時的に除去する。
 const _savedBaseBranchEnv = process.env.GH_MAESTRO_BASE_BRANCH;
 delete process.env.GH_MAESTRO_BASE_BRANCH;
-const runMain = (args, opts) => _realMain([...args, '--session-pid', TEST_SESSION_PID], opts);
+const runMain = (args, opts = {}) => _realMain(args, {
+  observeMsgPollFn: (_workspace, checker) => ({
+    state: 'alive', processRef: checker.captureSelf(), pid: process.pid, error: null,
+  }),
+  ...opts,
+});
 
 // ── テストヘルパー ────────────────────────────────────────────────────────
 
@@ -314,16 +321,7 @@ describe('CLI argument validation', () => {
       withTempDir((dir) => {
         setupWorkspace(dir);
         supervisor._setGhRepoView(mockGhRepoView('test/repo'));
-        let calls = 0;
-        const liveness = processLiveness.createLiveness({
-          probePid: () => 'alive',
-          readStartTime: () => {
-            calls += 1;
-            return calls === 1
-              ? '2026-07-29T00:00:00.424Z'
-              : '2026-07-29T00:00:00.525Z';
-          },
-        });
+        const liveness = createTestLiveness({ probePid: () => 'alive' });
         supervisor._setParentLiveness(liveness);
         workerLease._setLiveness(liveness);
 
@@ -337,9 +335,9 @@ describe('CLI argument validation', () => {
           `${workerLease.roleLeaseKey('worker-supervisor')}.json`,
         );
         const leaseRecord = JSON.parse(fs.readFileSync(leasePath, 'utf8'));
-        assert.equal(leaseRecord.startTime, '2026-07-29T00:00:00.424Z');
+        assert.equal(leaseRecord.pid, process.pid);
+        assert.equal(typeof leaseRecord.resourceKey, 'string');
         assert.equal(testLiveness.sameRef(result.residentIdentity, testLiveness.readRef(leaseRecord)), true);
-        assert.equal(calls, 2, 'resident identity と parent session の起動時刻だけを取得する');
         result.residentLease.release();
       });
     } finally {
@@ -579,7 +577,7 @@ describe('Delivery', () => {
   test('deliverMessage: PIDが生存していてもstartTime欠落時はresumeせずpendingにする', () => {
     withTempDir((dir) => {
       setupWorkspace(dir, {
-        workers: { 'issue-5-fix': { pid: 4242, agentId: 'agy', issue: 5 } },
+        workers: { 'issue-5-fix': { pid: 4242, resourceKey: null, agentId: 'agy', issue: 5 } },
       });
       const liveness = processLiveness.createLiveness({
         probePid: () => 'alive',
@@ -789,7 +787,7 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
 
       const raw = readWorkersRaw(dir);
       assert.equal(raw['issue-7-fix'].pid, 77);
-      assert.equal(raw['issue-7-fix'].startTime, '2026-07-25T00:00:00.000Z');
+      assert.equal(typeof raw['issue-7-fix'].resourceKey, 'string');
     });
   });
 
@@ -976,7 +974,7 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
         const spawnEnv = lastSpawnCalls[0].options.env;
         assert.equal(spawnEnv.GH_MAESTRO_BASE_BRANCH, 'dev', '継承値(main)を上書きして dev が入る');
         assert.equal(spawnEnv.GH_MAESTRO_WORKER, 'issue-7-fix');
-        assert.equal(spawnEnv.GH_MAESTRO_WORKSPACE, dir);
+        assert.equal(spawnEnv.GH_MAESTRO_WORKSPACE, canonicalWorkspace(dir));
       });
     });
   });
@@ -1110,6 +1108,66 @@ describe('shouldRetry', () => {
 describe('runOnce scan and deliver cycle', () => {
   beforeEach(() => resetAllMocks());
 
+  test('orchestrator msg-poll の一時停止中はworker-supervisorを保ち、新しいliveness世代へ再接続する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    const oldRef = testLiveness.captureProcess(9101, 'old-msg-poll-resource');
+    const newRef = testLiveness.captureProcess(9102, 'new-msg-poll-resource');
+    const observations = [
+      { state: 'alive', processRef: oldRef, pid: 9101, error: null },
+      { state: 'dead', processRef: null, pid: null, error: null },
+      { state: 'alive', processRef: newRef, pid: 9102, error: null },
+    ];
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      const result = runMain(['--workspace', dir], {
+        observeMsgPollFn: () => observations.shift(),
+      });
+      assert.equal(result.code, 0);
+
+      result.runOnce();
+      assert.equal(result.residentLease != null, true, 'msg-pollへの接続待ちでもworker-supervisor leaseを保持する');
+      assert.equal(result.runOnce().status, 'waiting-for-msg-poll');
+      result.runOnce();
+
+      assert.ok(result.lines.includes('MSG_POLL_CONNECTED:9101'));
+      assert.ok(result.lines.includes('MSG_POLL_RECONNECTED:9102'));
+      assert.equal(result.lines.filter((line) => line.startsWith('SCAN_START:') || line.startsWith('SCAN_START ')).length, 2,
+        'msg-pollが不在の周回だけ配送スキャンを見送る');
+      result.residentLease.release();
+    });
+  });
+
+  test('msg-poll再接続期限を過ぎたらworker-supervisor leaseを解放して正常終了する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    const originalNow = Date.now;
+    const originalExit = (code) => process.exit(code);
+    let now = 10_000;
+    Date.now = () => now;
+    supervisor._setParentDeathExit((code) => { throw new Error(`supervisor-exit:${code}`); });
+
+    try {
+      withTempDir((dir) => {
+        setupWorkspace(dir);
+        const result = runMain(['--workspace', dir], {
+          observeMsgPollFn: () => ({ state: 'dead', processRef: null, pid: null, error: null }),
+        });
+        assert.equal(result.code, 0);
+        const leasePath = path.join(dir, '.gh-maestro', 'leases', `${workerLease.roleLeaseKey('worker-supervisor')}.json`);
+        assert.ok(fs.existsSync(leasePath));
+
+        result.runOnce();
+        assert.ok(fs.existsSync(leasePath), '再接続猶予中はleaseを維持する');
+        now += 15_001;
+        assert.throws(() => result.runOnce(), /supervisor-exit:0/);
+        assert.equal(fs.existsSync(leasePath), false, '期限後はcleanupしてleaseを解放する');
+      });
+    } finally {
+      Date.now = originalNow;
+      supervisor._setParentDeathExit(originalExit);
+    }
+  });
+
   test('ワーカーが0件のときは SCAN_END:0:0', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
 
@@ -1121,7 +1179,7 @@ describe('runOnce scan and deliver cycle', () => {
 
       const lastLine = r.lines[r.lines.length - 1];
       assert.equal(lastLine, 'SCAN_END:0:0 source=worker-supervisor.js scope=worker-delivery-scan workers=0 detected=0 orchestrator-inbox=separate-msg-poll.js');
-      assert.equal(r.lines[0], 'SCAN_START source=worker-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js');
+      assert.ok(r.lines.includes('SCAN_START source=worker-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js'));
     });
   });
 
@@ -1324,57 +1382,6 @@ describe('runOnce scan and deliver cycle', () => {
     } finally {
       resetAllMocks();
     }
-  });
-
-  // ── 死のスイッチ配線（Issue #301） ─────────────────────────────────────
-  // runOnce が親セッションの死を検出したとき、role lease を解放して exit 3 で終了する
-  // （受け入れ条件1: 死のスイッチ経路で lease が解放される）。scriptName と sessionPid が
-  // stderr に出力される（沈黙しない）。このテスト自身の finally で通常の高速checkerへ戻す。
-
-  test('死のスイッチ発火時: role lease を解放し exit 3 で終了する（配線）', () => {
-    const { PARENT_DEATH_EXIT_CODE } = require('../scripts/shared/watchdog-exit-notify');
-    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
-
-    withTempDir((dir) => {
-      setupWorkspace(dir);
-      const stderrLines = [];
-      let capturedExpectedStartTime;
-      const origStderr = process.stderr.write;
-      try {
-        // 死のスイッチを常時「死」と判定させる。checkParent は main() 内で生成されるため
-        // runMain より前に注入する（_setParentDeathExit は sentinel 例外で抜ける）。
-        const liveness = require('../scripts/shared/process-liveness').createLiveness({
-        probePid: () => 'alive',
-        readStartTime: () => capturedExpectedStartTime || TEST_SESSION_START_TIME,
-        });
-        supervisor._setParentLiveness(liveness);
-        workerLease._setLiveness(liveness);
-        let exitCode = null;
-        supervisor._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
-        process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
-
-        const r = runMain(['--workspace', dir]);
-        assert.equal(r.code, 0);
-        capturedExpectedStartTime = '2000-01-01T00:00:00.000Z';
-        const leaseFile = path.join(dir, '.gh-maestro', 'leases', 'resident-role-worker-supervisor.json');
-        assert.ok(fs.existsSync(leaseFile), 'role lease ファイルが作成される');
-
-        // runOnce 1回で死のスイッチ発火 → lease 解放 + exit 3
-        assert.throws(() => r.runOnce(), /parent-death-exit sentinel/);
-        assert.equal(exitCode, PARENT_DEATH_EXIT_CODE, '死のスイッチは exit 3 で終了する');
-        assert.equal(fs.existsSync(leaseFile), false, '死のスイッチ経路で role lease が解放される（受け入れ条件1）');
-        assert.ok(
-          stderrLines.some(l => l.includes('worker-supervisor.js') && l.includes(`pid ${TEST_SESSION_PID}`)),
-          `stderr に worker-supervisor.js と sessionPid が出力される: ${stderrLines.join('|')}`
-        );
-      } finally {
-        process.stderr.write = origStderr;
-        testLiveness = processLiveness.createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME });
-        supervisor._setParentLiveness(testLiveness);
-        workerLease._setLiveness(testLiveness);
-        supervisor._setParentDeathExit((code) => process.exit(code));
-      }
-    });
   });
 
   test('新着メッセージを検出して配送する', () => {

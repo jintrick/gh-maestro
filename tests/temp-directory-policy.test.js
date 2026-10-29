@@ -59,7 +59,6 @@ const DIRECT_TEMP_USAGE = new Map([
   ['update-issue.test.js', 2],
   ['watchdog-exit-notify.test.js', 2],
   ['worker-exit-hook.test.js', 2],
-  ['worker-lease.test.js', 20],
   ['worker-status.test.js', 4],
   ['worker-supervisor.test.js', 2],
   ['workers-registry.test.js', 2],

@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('../helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');

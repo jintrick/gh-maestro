@@ -3,7 +3,7 @@
 // 新着メッセージを検出して各エージェントに配送する常駐プロセス
 //
 // Usage:
-//   node worker-supervisor.js --workspace <path> [--interval <sec>] [--session-pid <pid>]
+//   node worker-supervisor.js --workspace <path> [--interval <sec>]
 //
 // アーキテクチャ:
 //   - 各ワーカーのIssueをポーリングし、自分宛ての新着コメントを検出する
@@ -17,7 +17,7 @@
 //   - カーソル永続化（since + seenIds）による再起動後の継続
 //   - 配送済みID管理による重複配送防止
 //   - 配送失敗時の指数バックオフリトライ（最大5回）
-//   - PID registry + dead-man's switch によるライフサイクル管理
+//   - PID registry と orchestrator msg-poll lease の世代監視によるライフサイクル管理
 //   - resume直後の生存確認（spawnの成功=プロセス生存し続けることではないため、短い猶予後に
 //     PIDで再確認する。消えていればDELIVEREDにせずresume-failedとして扱う）
 //   - リトライ断念時のorchestrator通知（stderrへのログだけでは誰も気づけないため、
@@ -48,16 +48,20 @@ const { deriveRoleFromSkill } = require('./shared/worker-factory');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { observeWorker } = require('./shared/worker-liveness');
 const {
-  resolveSessionPid,
   registerProcess,
   findRunningInstance,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
 const processLiveness = require('./shared/process-liveness');
-const { acquireResidentLease, WORKER_SUPERVISOR_ROLE } = require('./shared/worker-lease');
-const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdog-exit-notify');
+const {
+  acquireResidentLease,
+  createResidentLeaseStore,
+  msgPollRole,
+  roleLeaseKey,
+  WORKER_SUPERVISOR_ROLE,
+} = require('./shared/worker-lease');
+const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
 const { recordResidentNotification } = require('./shared/resident-audit');
-const { handleParentSessionDeath } = require('./shared/resident-parent-death');
 const { checkResidentForceGuard } = require('./shared/resident-force-guard');
 const { runningLegacyWorkerSupervisorPids } = require('./shared/worker-supervisor-control');
 
@@ -88,17 +92,17 @@ const MAX_RETRIES = 5;
 const RETRY_BASE_DELAY_MS = 10000;
 const DEFAULT_HANG_THRESHOLD_MS = 20 * 60 * 1000; // 20分
 const STALE_REPORT_GRACE_MS = 10 * 1000;
+const MSG_POLL_RECONNECT_GRACE_MS = 15 * 1000;
 
 const USAGE = `worker-supervisor.js — 全ワーカーのGitHub Issueインボックスを監視し新着メッセージを配送する
 
-Usage: node worker-supervisor.js --workspace <path> [--interval <sec>] [--session-pid <pid>] [--force] [--once]
+Usage: node worker-supervisor.js --workspace <path> [--interval <sec>] [--force] [--once]
 
 Options:
   --workspace <path>     ワークスペースパス（必須）
   --interval <sec>       ポーリング間隔（秒、既定: ${DEFAULT_INTERVAL_SEC}）
   --hang-threshold-sec <sec>
                          ハング判定の閾値（秒、ログ更新がこの時間以上止まったら通知。既定: 1200=20分）
-  --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
   --force                既に同じworkspaceで稼働中のSupervisorがいても、既存プロセスへ停止要求を
                           送ってから起動する（role lease の判定を無効化せず、引き継げなければ
                           exit 1 する。既定では多重起動を検知して exit 1 する）
@@ -126,13 +130,30 @@ Description:
   ハング検知: ワーカーのログファイル更新（ただし現在のプロセスの起動時刻より前の
     更新は基準にしない）が一定時間（--hang-threshold-sec）以上止まっている場合、
     HANG_DETECTEDを出力しorchestratorへ通知する。その後、通知した本人（同一PID+
-    起動時刻）が復帰した場合のみHANG_RESUMEDを出力する。同一プロセス（PID+起動時刻）
-    への重複通知は防止される（PID再利用や新プロセスへの切り替わりによる誤抑止・
-    誤った復帰報告を避けるため起動時刻も照合する）。
-  居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みで、報告から10秒以上経過してもプロセスが生存し続けている場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（ハング検知とは独立）。同一プロセス（PID+起動時刻）への重複通知は防止される（PID再利用による誤抑止を避けるため起動時刻も照合する）。
-  停止検知: workers.json に登録されたワーカーのプロセスが生存していないことを検知した場合、STOP_DETECTEDを出力しorchestratorへ通知する。通知本文には hasReportedSinceStart による報告状況（報告済み/未投稿）が明記される。同一プロセス（PID+起動時刻）への重複通知は防止される。プロセスの停止・再起動・削除等の自動介入は行わない。
-  ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
-  消滅時はPID registryを解除して自動exitする。`;
+    起動時刻）が復帰した場合のみHANG_RESUMEDを出力する。通知抑止にはworkers.jsonのPIDとworker起動時刻をカーソルキーとして使う。これは通知世代の補助情報であり、生死の判定は決定論的OS endpointを使う。
+  居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みで、報告から10秒以上経過してもendpointがaliveの場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（ハング検知とは独立）。通知抑止はPIDとworker起動時刻をカーソルキーとして使う。
+  停止検知: workers.json に登録されたワーカーのendpointがdeadと判定された場合、STOP_DETECTEDを出力しorchestratorへ通知する。通知本文には hasReportedSinceStart による報告状況（報告済み/未投稿）が明記される。プロセスの停止・再起動・削除等の自動介入は行わない。
+  orchestrator msg-poll のlease世代を確認し、monitor takeover中は新しいmsg-pollへの接続を待つ。
+  一定時間以内に再接続できなければ、通常終了して自分のleaseを解放する。`;
+
+function observeOrchestratorMsgPoll(workspace, checker = processLiveness) {
+  let lease;
+  try {
+    lease = createResidentLeaseStore(workspace).read(roleLeaseKey(msgPollRole('orchestrator')));
+  } catch (error) {
+    return { state: 'unknown', processRef: null, pid: null, error };
+  }
+  if (!lease) return { state: 'dead', processRef: null, pid: null, error: null };
+  let processRef;
+  try { processRef = checker.readRef(lease); } catch (error) {
+    return { state: 'unknown', processRef: null, pid: lease.pid ?? null, error };
+  }
+  let state;
+  try { state = checker.observe(processRef); } catch (error) {
+    return { state: 'unknown', processRef, pid: lease.pid ?? null, error };
+  }
+  return { state, processRef, pid: lease.pid ?? null, error: null };
+}
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -500,7 +521,7 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
         skill,
         agentId,
         pid: launched.pid,
-        startTime: _parentLiveness.writeRef({}, launched.processRef).startTime,
+        startTime: new Date().toISOString(),
       });
     } catch { /* best-effort */ }
   }
@@ -518,7 +539,7 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
  *
  * @param {object} params
  * @param {string} params.workerName
- * @param {object} params.entry      - workers.json のエントリ（生存確認に pid/startTime を使う）
+ * @param {object} params.entry      - workers.json のエントリ（生存確認に pid/resourceKey を使う）
  * @param {object} params.message    - { from, body }
  * @param {string} params.workspace
  * @param {string} params.homedir
@@ -626,7 +647,7 @@ function shouldRetry(pendingEntry, nowMs) {
  *   onceMode: boolean,
  *   intervalMs: number,
  *   workspace: string,
- *   residentIdentity: {pid: number, startTime: string|null},
+ *   residentIdentity: string, 不透明なProcessRef
  * }}
  */
 function main(argsOverride, opts = {}) {
@@ -648,7 +669,7 @@ function main(argsOverride, opts = {}) {
   let values;
   try {
     ({ values } = parseFlags(args, {
-      flags: { '--workspace': {}, '--interval': {}, '--hang-threshold-sec': {}, '--session-pid': {} },
+    flags: { '--workspace': {}, '--interval': {}, '--hang-threshold-sec': {} },
       booleans: ['--once', '--force', '--help', '-h'],
       // 未知フラグ・位置引数はパーサ側で拒否される（argv-parsing-pitfalls参照）。
       positionals: { min: 0, max: 0 },
@@ -714,10 +735,13 @@ function main(argsOverride, opts = {}) {
   // gh 呼び出しより前に行い、多重起動時は無駄な外部呼び出しを避けて即拒否する。
   // workspace 表記の差異（大文字小文字・末尾スラッシュ等）でもすり抜けないよう、
   // role lease は workspace を canonicalWorkspace で正規化して排他する（Issue #240）。
-  // leaseとPID registryへ同じプロセスidentityを保存するため、起動時刻はここで一度だけ
-  // 捕捉する。取得できない場合はunknownのまま常駐leaseを作成せず、現在時刻をidentityの
-  // 代替値にしない。
-  const residentIdentity = _parentLiveness.captureSelf();
+  // leaseとPID registryへ同じプロセスidentityを保存するため、OS endpoint参照はここで
+  // 一度だけ捕捉する。workerのstartTimeは経過時間と報告境界用の記録であり、生死判定には使わない。
+  const residentIdentity = _parentLiveness.prepareSelf({
+    workspace,
+    kind: 'resident',
+    name: WORKER_SUPERVISOR_ROLE,
+  });
   let residentLease = null;
   {
     const role = WORKER_SUPERVISOR_ROLE;
@@ -752,12 +776,6 @@ function main(argsOverride, opts = {}) {
       return { code: 1, lines: out, errLines: err, runOnce: null, onceMode, intervalMs, workspace, residentLease: null };
     }
   }
-
-  const sessionPid = resolveSessionPid(values['--session-pid']);
-
-  // 親セッションの参照を起動時に捕捉する。
-  const parentRef = _parentLiveness.captureProcess(sessionPid);
-  const checkParent = _parentLiveness.watchParent(parentRef);
 
   // リポジトリ解決
   const ghOpts = { cwd: workspace };
@@ -873,18 +891,42 @@ function main(argsOverride, opts = {}) {
     return recordWorkerLiveness(workerName, entry, issue, observeWorkerState(entry));
   };
 
+  const observeMsgPollFn = opts.observeMsgPollFn || observeOrchestratorMsgPoll;
+  let connectedMsgPollRef = null;
+  let msgPollMissingSince = null;
+  let msgPollUnknownReported = false;
+
   /**
    * 1回のポーリングサイクル。
    * 全ワーカーをスキャンし、新着メッセージの検出・配送を行う。
    */
   function runOnce() {
-    // dead-man's switch: 親が死んでいたら cleanup して非ゼロ終了（exit 3）
-    // exit 3 = 親セッション消滅。exit 0 にすると正常終了扱いとなり、Monitor の異常終了
-    // アラーム経路と watchdog 通知が両方無効化される（Issue #301）。
-    if (!checkParent()) {
-      lifecycleCleanup(workspace);
-      handleParentSessionDeath({ workspace, scriptName: 'worker-supervisor.js', role: WORKER_SUPERVISOR_ROLE, sessionPid, processRef: residentIdentity });
-      _parentDeathExit(PARENT_DEATH_EXIT_CODE);
+    if (!onceMode) {
+      const observedMsgPoll = observeMsgPollFn(workspace, _parentLiveness);
+      if (observedMsgPoll.state === 'alive') {
+        const changed = !connectedMsgPollRef
+          || !_parentLiveness.sameRef(connectedMsgPollRef, observedMsgPoll.processRef);
+        if (changed) {
+          writeOut(`${connectedMsgPollRef ? 'MSG_POLL_RECONNECTED' : 'MSG_POLL_CONNECTED'}:${observedMsgPoll.pid}`);
+          connectedMsgPollRef = observedMsgPoll.processRef;
+        }
+        msgPollMissingSince = null;
+        msgPollUnknownReported = false;
+      } else {
+        if (msgPollMissingSince === null) msgPollMissingSince = Date.now();
+        if (observedMsgPoll.state === 'unknown' && !msgPollUnknownReported) {
+          writeErr(`worker-supervisor: orchestrator msg-poll の生死を判定できません${observedMsgPoll.error ? `: ${observedMsgPoll.error.message}` : ''}`);
+          msgPollUnknownReported = true;
+        }
+        if (Date.now() - msgPollMissingSince >= MSG_POLL_RECONNECT_GRACE_MS) {
+          writeErr('worker-supervisor: orchestrator msg-poll が再接続猶予内に戻らなかったため終了します');
+          lifecycleCleanup(workspace);
+          if (residentLease && typeof residentLease.release === 'function') residentLease.release();
+          _parentDeathExit(0);
+          return { status: 'msg-poll-reconnect-timeout' };
+        }
+        return { status: 'waiting-for-msg-poll' };
+      }
     }
 
     writeOut('SCAN_START source=worker-supervisor.js scope=worker-delivery-scan orchestrator-inbox=separate-msg-poll.js');
@@ -900,17 +942,17 @@ function main(argsOverride, opts = {}) {
 
       // ── ハング検知 ──────────────────────────────────────────────────
       // ワーカーが生存しているがログファイルの更新が一定時間止まっていれば「ハングの疑い」
-      // として orchestrator へ通知する。同一プロセス（PID+startTime）には1回のみ通知し、
+      // として orchestrator へ通知する。同じ通知世代（PID+startTimeカーソルキー）には1回のみ通知し、
       // ログが再び動いたらリセットする。
       //
-      // 重複通知防止キーは pid 単独ではなく pid + startTime（起動時刻）の組で同一プロセスを
-      // 識別する（居座り検知の staleReportNotifiedPid/StartTime と同じ理由、Issue #265）。
+      // 重複通知防止キーは pid 単独ではなく pid + startTime（workerの起動記録）で通知世代を
+      // 区別する（居座り検知の staleReportNotifiedPid/StartTime と同じ理由、Issue #265）。
       // resumeで新プロセスが起動すると entry.startTime が更新され、baselineMs もそれに
       // 追随して新しくなる（下記）ため、resume直後は非ハング判定に落ちる。この非ハング分岐
       // は「ログが再び動いた」ことを表す HANG_RESUMED を出すが、旧PIDに対する通知済み状態が
       // 残っているだけで新プロセス自体は一度もハング通知されていない場合、これを
       // HANG_RESUMED として報告するのは誤り（ログが実際に動いたわけではない）。
-      // pid+startTime が現在のエントリと一致する場合のみ「復帰」として報告し、一致しない
+      // pid+startTime の通知キーが現在のエントリと一致する場合のみ「復帰」として報告し、一致しない
       // （＝別プロセスの通知済み状態が残留しているだけの）場合は無言でクリアする。
       const initialLiveness = checkWorkerLiveness(workerName, entry, issue);
       if (initialLiveness === 'unknown') continue;
@@ -1119,8 +1161,8 @@ function main(argsOverride, opts = {}) {
       // 終了せず生存し続けている状態を「居座り」として異常通知する。正常な終了処理の
       // 猶予として、報告コメントの投稿から10秒経過するまでは判定しない。
       //
-      // 重複通知防止キーは pid 単独ではなく pid + startTime（起動時刻）の組で同一プロセスを
-      // 識別する。同一ファイル内の生存判定と同じ
+      // 重複通知防止キーは pid 単独ではなく pid + startTime（workerの起動記録）で通知世代を
+      // 区別する。生存判定は別に決定論的OS endpointで行う。
       // 理由: PIDだけをキーにすると、通知後にワーカーが終了し、OSがそのPIDを無関係な別
       // プロセスへ再利用した場合、再利用先が同じPIDで別の（未報告の）ワーカーとして
       // resume されても「既に通知済みのPID」と誤認して再通知を抑止してしまう。
@@ -1231,8 +1273,8 @@ function main(argsOverride, opts = {}) {
         // 追い越した後に停止した場合でも正しく「報告済み」と判定する。
         //
         // entry.startTime が null/未記録の場合でも、entry.pid があれば通知する（判定不能として報告）。
-        // 重複通知防止キーは pid と startTime の組で照合する（同一PIDでも起動時刻が異なれば
-        // 別プロセスとして再通知する）。
+        // 重複通知防止キーは pid と worker startTime の組で照合する（同じPIDでも起動記録が異なれば
+        // 新しい通知世代として扱う）。
         // プロセスの停止・再起動・削除等の自動介入は一切行わない。
         if (entry.pid) {
           const alreadyNotified = cursor.stoppedNotifiedPid === entry.pid
@@ -1385,7 +1427,6 @@ function main(argsOverride, opts = {}) {
     onceMode,
     intervalMs,
     workspace,
-    sessionPid,
     residentLease,
     residentIdentity,
   };

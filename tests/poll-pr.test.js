@@ -70,7 +70,7 @@ function loadModule(spawnSyncImpl) {
 
 test('spawnPollReviews launches poll-reviews.js asynchronously and relays stdout', async () => {
   const { mod, calls } = loadModule(() => ({ status: 0 }));
-  const code = await mod.spawnPollReviews('12', '/workspace', 4321);
+  const code = await mod.spawnPollReviews('12', '/workspace', 30);
   assert.equal(code, 0);
   assert.equal(calls.length, 1);
   const [call] = calls;
@@ -78,15 +78,14 @@ test('spawnPollReviews launches poll-reviews.js asynchronously and relays stdout
   assert.ok(call.args.some(a => a.endsWith('poll-reviews.js')));
   assert.ok(call.args.includes('12'));
   assert.ok(call.args.includes('/workspace'));
-  assert.ok(call.args.includes('--session-pid'));
-  assert.ok(call.args.includes('4321'));
+  assert.equal(call.args.includes('--session-pid'), false);
   assert.ok(!call.args.includes('--no-review-manager'));
-  assert.deepEqual(call.opts.stdio, ['ignore', 'pipe', 'inherit']);
+  assert.deepEqual(call.opts.stdio, ['pipe', 'pipe', 'inherit']);
 });
 
 test('spawnPollReviews appends --no-review-events when requested', async () => {
   const { mod, calls } = loadModule(() => ({ status: 0 }));
-  await mod.spawnPollReviews('12', '/workspace', 4321, 30, null, { noReviewEvents: true });
+  await mod.spawnPollReviews('12', '/workspace', 30, null, { noReviewEvents: true });
   assert.equal(calls.length, 1);
   assert.ok(calls[0].args.includes('--no-review-events'));
 });
@@ -94,7 +93,7 @@ test('spawnPollReviews appends --no-review-events when requested', async () => {
 test('spawnPollReviews sends relayed PR_PUSH lines to the callback', async () => {
   const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'PR_PUSH:0123456789abcdef0123456789abcdef01234567\n' }));
   const lines = [];
-  await mod.spawnPollReviews('12', '/workspace', 4321, 30, (line) => lines.push(line));
+  await mod.spawnPollReviews('12', '/workspace', 30, (line) => lines.push(line));
   assert.deepEqual(lines, ['PR_PUSH:0123456789abcdef0123456789abcdef01234567']);
   assert.equal(calls.length, 1);
 });
@@ -307,7 +306,6 @@ test('runPollPr ignores an in-flight old HEAD result after PR_PUSH and checks th
     issue: 590,
     repo: 'owner/project',
     workspace: temporaryWorkspace('gh-maestro-poll-pr-ci-push-'),
-    sessionPid: 4321,
     noReviewManager: true,
     intervalMs: 1000,
   }, {
@@ -317,7 +315,7 @@ test('runPollPr ignores an in-flight old HEAD result after PR_PUSH and checks th
     queryPrChecksFn: () => responses[queryIndex++],
     setIntervalFn: callback => { intervalCallback = callback; return 1; },
     clearIntervalFn: () => {},
-    spawnPollReviewsFn: async (pr, workspace, sessionPid, interval, onOutputLine) => {
+    spawnPollReviewsFn: async (pr, workspace, interval, onOutputLine) => {
       onOutputLine(`PR_PUSH:${headB}`);
       await new Promise(resolve => setImmediate(resolve));
       await new Promise(resolve => setImmediate(resolve));
@@ -483,7 +481,6 @@ test('runPollPr connects PR detection, PR_PUSH slow launches, deduplication, and
       issue: 465,
       repo: 'fixture/repo',
       workspace,
-      sessionPid: 4321,
       noReviewManager: false,
       intervalMs: 0,
       intervalArg: '0',
@@ -496,8 +493,8 @@ test('runPollPr connects PR detection, PR_PUSH slow launches, deduplication, and
         managerStarts += 1;
         return 'REVIEW_MANAGER_STARTED';
       },
-      spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine) => {
-        pollCall = { pr, reviewWorkspace, sessionPid, interval };
+      spawnPollReviewsFn: async (pr, reviewWorkspace, interval, onOutputLine) => {
+        pollCall = { pr, reviewWorkspace, interval };
         onOutputLine(`PR_PUSH:${pushedHead}`);
         onOutputLine(`PR_PUSH:${pushedHead}`);
         return 0;
@@ -543,7 +540,6 @@ test('runPollPr connects PR detection, PR_PUSH slow launches, deduplication, and
     assert.deepEqual(pollCall, {
       pr: '42',
       reviewWorkspace: workspace,
-      sessionPid: 4321,
       interval: '0',
     });
     assert.equal(childStarts, 2, 'initial HEAD and one pushed HEAD should execute once each');
@@ -573,7 +569,6 @@ test('runPollPr skips automatic Review Manager restart after the same PR is dete
     issue: 507,
     repo: 'fixture/repo',
     workspace,
-    sessionPid: 4321,
     intervalMs: 0,
     intervalArg: '0',
     enablePrChecksMonitoring: false,
@@ -615,7 +610,6 @@ test('runPollPr claims and starts a different PR after the previous PR closes', 
     issue: 507,
     repo: 'fixture/repo',
     workspace,
-    sessionPid: 4321,
     intervalMs: 0,
     intervalArg: '0',
     enablePrChecksMonitoring: false,
@@ -653,7 +647,6 @@ test('runPollPr --no-review-manager does not claim, start, or emit Review Manage
     issue: 507,
     repo: 'fixture/repo',
     workspace,
-    sessionPid: 4321,
     noReviewManager: true,
     intervalMs: 0,
     intervalArg: '0',
@@ -666,7 +659,7 @@ test('runPollPr --no-review-manager does not claim, start, or emit Review Manage
       managerStarts += 1;
       return 'REVIEW_MANAGER_STARTED';
     },
-    spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine, options) => {
+    spawnPollReviewsFn: async (pr, reviewWorkspace, interval, onOutputLine, options) => {
       capturedPollReviewsOptions = options;
       return 0;
     },
@@ -704,7 +697,6 @@ test('runPollPr suppresses slow and CI only for lightweight PRs, while recovery 
       issue: 600,
       repo: 'fixture/repo',
       workspace,
-      sessionPid: 4321,
       noReviewManager: true,
       noReviewEvents: scenario.noReviewEvents,
       intervalMs: 0,
@@ -724,7 +716,7 @@ test('runPollPr suppresses slow and CI only for lightweight PRs, while recovery 
       },
       setIntervalFn: () => 1,
       clearIntervalFn: () => {},
-      spawnPollReviewsFn: async (pr, reviewWorkspace, sessionPid, interval, onOutputLine) => {
+      spawnPollReviewsFn: async (pr, reviewWorkspace, interval, onOutputLine) => {
         await new Promise(resolve => setImmediate(resolve));
         onOutputLine(`PR_PUSH:${headB}`);
         return 0;
@@ -754,7 +746,6 @@ test('runPollPr passes both independent suppression flags to poll-reviews', asyn
     issue: 559,
     repo: 'fixture/repo',
     workspace,
-    sessionPid: 4321,
     noReviewManager: true,
     noReviewEvents: true,
     intervalMs: 0,
@@ -765,7 +756,7 @@ test('runPollPr passes both independent suppression flags to poll-reviews', asyn
     findPrFn: () => '42',
     getPrHeadFn: () => 'cccccccccccccccccccccccccccccccccccccccc',
     spawnPollReviewsFn: async (...args) => {
-      capturedOptions = args[5];
+      capturedOptions = args[4];
       return 0;
     },
     getPrStateFn: () => 'OPEN',
@@ -785,7 +776,6 @@ test('runPollPr leaves the claim sentinel when automatic Review Manager startup 
     issue: 507,
     repo: 'fixture/repo',
     workspace,
-    sessionPid: 4321,
     intervalMs: 0,
     intervalArg: '0',
     enablePrChecksMonitoring: false,

@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -139,6 +142,8 @@ test('collectHousekeepingExclusions: 同一性確認済みの Review Manager が
     fs.mkdirSync(reviewDir, { recursive: true });
     fs.writeFileSync(path.join(reviewDir, 'manager.running'), JSON.stringify({
       pid: 12345,
+      resourceKey: 'review-manager-42',
+      instanceId: 'review-manager-42-instance',
       startTime: '2026-08-28T00:00:00.000Z',
     }));
     che._setLiveness(simulated('2026-08-28T00:00:00.000Z'));
@@ -276,7 +281,9 @@ test('collectHousekeepingExclusions: 生存プロセスの PID を pids 集合�
 
 
     // 3. manager.running 由来（Review Manager は reviewPrs にのみ入り、pids には入れない）
-    fs.writeFileSync(path.join(reviewDir, 'manager.running'), JSON.stringify({ pid: 3003, startTime: '2025-01-01T00:00:00.000Z' }));
+    fs.writeFileSync(path.join(reviewDir, 'manager.running'), JSON.stringify({
+      pid: 3003, resourceKey: 'review-manager-42', instanceId: 'review-manager-42-instance', startTime: '2025-01-01T00:00:00.000Z',
+    }));
 
     const { workerNames, reviewPrs, pids } = che.collectHousekeepingExclusions(ws);
     assert.ok(workerNames.has('worker-1'));

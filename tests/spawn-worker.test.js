@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
@@ -211,10 +214,10 @@ test('shouldPruneStaleWorker: agentConfigが解決できない場合はfail-safe
 });
 
 test('shouldPruneStaleWorker: 生死unknownのプロセスは除去せず起動を止める', () => {
-  workerLiveness._setLiveness(createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_PROCESS_START_TIME }));
+  workerLiveness._setLiveness(createLiveness({ probeEndpoint: () => 'unknown' }));
   try {
     let resolved = false;
-    assert.throws(() => shouldPruneStaleWorker({ pid: 5, agentId: 'unknown-agent' }, () => {
+    assert.throws(() => shouldPruneStaleWorker({ pid: 5, resourceKey: 'unknown-worker-resource', agentId: 'unknown-agent' }, () => {
       resolved = true;
       return null;
     }), /liveness is unknown/);

@@ -1,10 +1,10 @@
 'use strict';
 // workers.json のエントリを正規化・構築する。
 //
-// 新形式: { pid, startTime, logPath, agentId, issue, skill, baseBranch }。
-//   pid/startTime — headless起動したワーカープロセスの識別。生存確認は pid だけでなく
-//     startTime との組で行う（OSがPIDを再利用したとき、無関係なプロセスを「稼働中」と
-//     誤判定し続けるのを防ぐ。scripts/shared/worker-liveness.js 参照）。
+// 新形式: { pid, resourceKey, instanceId, startTime, logPath, agentId, issue, skill, baseBranch }。
+//   pid/resourceKey/instanceId — headless起動したプロセスの識別。生存確認は決定論的OS資源への接続で行い、
+//     PIDは停止先の指定にだけ使う（scripts/shared/worker-liveness.js 参照）。
+//   startTime — workerの起動日時。応答コメントの起動後判定と経過時間表示に使う。
 //   logPath — ワーカーの標準出力/標準エラーの記録先。1ワーカー1ファイルで追記される。
 //   agentId — エージェントごとに異なる挙動を後段で切り替えるための情報。
 //   issue/skill — orchestrator が workerName を覚えずに〈issue + skill〉でワーカーを
@@ -41,6 +41,8 @@ function normalizeWorkerEntry(v) {
   if (v && typeof v === 'object') {
     return {
       pid: normalizePid(v.pid),
+      resourceKey: typeof v.resourceKey === 'string' && v.resourceKey !== '' ? v.resourceKey : null,
+      instanceId: typeof v.instanceId === 'string' && v.instanceId !== '' ? v.instanceId : null,
       startTime: typeof v.startTime === 'string' ? v.startTime : null,
       logPath: typeof v.logPath === 'string' ? v.logPath : null,
       agentId: v.agentId ?? null,
@@ -54,7 +56,7 @@ function normalizeWorkerEntry(v) {
   }
   // 最旧形式: pane_id 文字列そのものがエントリだった時代
   return {
-    pid: null, startTime: null, logPath: null,
+    pid: null, resourceKey: null, instanceId: null, startTime: null, logPath: null,
     agentId: null, issue: null, skill: null, baseBranch: null,
     paneId: v != null ? String(v) : null, notifierPid: null,
   };

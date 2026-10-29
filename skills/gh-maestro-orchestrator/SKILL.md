@@ -495,7 +495,7 @@ node "{{SCRIPTS_PATH}}/finalize-issue.js" --issue <N> --repo $REPO --workspace $
 | ハング通知または不審な長時間稼働 | worker logと状態を確認し、ハングと判断した場合はstop-worker.jsで停止して人間へ報告する。自動停止しない。 | 横断的な手続き「ワーカーの稼働監視」とmonitor-recovery.md |
 | ワーカーのプロセス停止検知 | 成果を待っていなければ何もしない。待っている場合はsleep 30をバックグラウンド実行し、完了通知後に報告が届いたか再確認する。届かなければ成果なしを人間に伝える。報告状況の文言だけで判断しない。 | 該当工程 |
 | 新規起動workerが報告なしで終了 | ログを読んで代理投稿しない。短いresumeメッセージで本人に報告させる。 | 該当工程 |
-| Inbox/PR監視プロセスの停止、親セッション消滅による自動終了 | 現在のセッション状態とregistryを確認し、plugin monitorの異常・通知欠落を人間へ報告する。plugin管理monitorを手動で重複起動・再接続しない。 | monitor-recovery.md |
+| Inbox/PR監視プロセスの停止・通知欠落 | 現在のセッション状態とregistryを確認し、plugin monitorの異常・通知欠落を人間へ報告する。Claude Codeの強制終了後に残った同役割monitorは、次の対話型セッションでplugin monitorが起動すると自動で停止・引き継がれる。plugin管理monitorを手動で重複起動・再接続しない。 | monitor-recovery.md |
 | PR_MONITOR_TARGET_SET:<json> | Issue・generation・workspaceが意図したtargetか確認する。 | 工程4。確認後はPR_DETECTEDを待つ。 |
 | PR_BASE_MISMATCH:<PR>:<expected>:<actual> | PRは存在するため処理を止めず、ベースブランチ違いを人間に伝える。 | 工程7-[1/5] |
 | PR_DETECTED:<PR> | PR番号を記録する。通常経路ではReview Managerが全観点で起動し、slow層を対象HEADに対して非同期予約する。軽量PRはlightweight-pr.mdに従う。 | 工程7-[1/5] |
@@ -591,10 +591,10 @@ repoはworkspaceのgit remoteから解決してもよい。assistantはorchestra
 
 ### セッションの受信monitorとInbox Supervisor
 
-セッション開始時、他のタスクより前に/gh-maestroを実行する。インストール済みpluginの固定monitorがinbox監視をセッション終了まで保持する。通常のMonitorを手動で張り直したり、msg-poll.jsにIssue別引数を追加したりしない。
+セッション開始時、他のタスクより前に/gh-maestroを実行する。インストール済みpluginの固定monitorがinbox監視を保持する。通常のMonitorを手動で張り直したり、msg-poll.jsにIssue別引数を追加したりしない。
 理由と経緯: docs/adr/0041-monitors-run-as-plugin-for-session-lifetime.md
 
-plugin monitorは対話型セッションでだけ起動し終了時に停止する。現在のセッションでNEW_MESSAGEがstdoutへ届くことを確認し、前セッションのプロセスは再利用しない。受信monitorはセッション中1本だけ使う。重複時は片方を反射的に止めずmonitor-recovery.md「inbox監視の重複復旧」を参照する。
+plugin monitorは対話型セッションでだけ起動する。通常のセッション終了はClaude Codeがmonitorとその子を停止する。Claude Codeを強制終了した場合はmonitorが残ることがあり、次のセッションで同じ役割のmonitorが起動すると、残ったmonitorと子を止めて引き継ぐ。後から起動したmonitorが有効な世代となる。現在のセッションでNEW_MESSAGEがstdoutへ届くことを確認し、前セッションのstdoutには依存しない。重複・停止時の確認はmonitor-recovery.mdを参照し、plugin管理monitorを手動で重複起動しない。
 
 msg-send.jsの追加指示はworker-supervisor.jsが配送する。作業中で未報告のworkerには追加指示を送れず、拒否本文はファイルへ退避される。報告を待ち、報告と退避本文を統合して一度に送る。worker終了後に送る、gh issue commentで直接投稿する等の迂回はしない。
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <pid>]
+// Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--no-review-events]
 // Polls for review comments, commit pushes, and merge status. Emits:
 //   REVIEW_COMMENT:<path>:<line>|<user>:<body>
 //   PR_COMMENT:<user>:<body>
@@ -22,7 +22,6 @@ const {
   findLatestTrustedTestDeclaration,
 } = require('./shared/test-declaration');
 const {
-  resolveSessionPid,
   registerProcess,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
@@ -30,7 +29,7 @@ const processLiveness = require('./shared/process-liveness');
 
 const USAGE = `poll-reviews.js — PR のレビューコメント・push・マージ状態をポーリングする
 
-Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--session-pid <pid>] [--no-review-events]
+Usage: node poll-reviews.js <PR> [WORKSPACE] [INTERVAL_SECONDS] [--no-review-events]
 
 Arguments:
   <PR>                対象の PR 番号
@@ -40,7 +39,6 @@ Arguments:
 
 Options:
   --no-review-events   レビュー監視（inline/formalレビュー）を行わず、PR状態・テスト申告・push監視のみ行う
-  --session-pid <pid>  監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
 
 Output (stdout):
   REVIEW_COMMENT:<path>:<line>|<user>:<body>  インラインレビューコメント
@@ -55,8 +53,8 @@ Output (stdout):
   POLL_RECOVERED                              失敗から復旧した（遷移時のみ）
 
 PR_MERGED または PR_CLOSED を検出するまで永続的にポーリングする。
-ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
-消滅時はPID registryを解除して自動exitする。`;
+poll-pr.jsの子プロセスとして起動され、stdinのEOFで親の終了を検知してregistryを解除し
+自動exitする。`;
 
 /**
  * REST API が返す inline comment / formal review のIDは正の整数。gh のエラーレスポンス
@@ -203,7 +201,7 @@ function pollReviewsStateFiles(workspace, pr) {
 /**
  * poll-reviews のポーリング実行ループ。
  *
- * @param {{pr:string|number,workspace:string,sessionPid?:string|number,intervalSec?:number,noReviewEvents?:boolean,maxCycles?:number}} params
+ * @param {{pr:string|number,workspace:string,intervalSec?:number,noReviewEvents?:boolean,maxCycles?:number}} params
  * @param {object} [deps]
  * @returns {Promise<{exitCode:number,reason?:string,terminalEvent?:string}>}
  */
@@ -211,7 +209,6 @@ async function runPollReviews(params, deps = {}) {
   const {
     pr,
     workspace,
-    sessionPid,
     intervalSec = 30,
     noReviewEvents = false,
     maxCycles,
@@ -275,7 +272,7 @@ async function runPollReviews(params, deps = {}) {
 
     // dead-man's switch: 親セッション生存確認
     if (!checkParentFn()) {
-      writeStderrFn(`poll-reviews: parent session (pid ${sessionPid}) is dead — exiting\n`);
+      writeStderrFn('poll-reviews: parent stdin reached EOF — exiting\n');
       cleanupFn();
       return { exitCode: 0, reason: 'parent_dead' };
     }
@@ -408,7 +405,6 @@ async function main(argv = process.argv.slice(2), deps = {}) {
   const parseFlagsFn = deps.parseFlagsFn || parseFlags;
   const resolveWorkspaceFn = deps.resolveWorkspaceFn || resolveWorkspace;
   const pollReviewsStateFilesFn = deps.pollReviewsStateFilesFn || pollReviewsStateFiles;
-  const resolveSessionPidFn = deps.resolveSessionPidFn || resolveSessionPid;
   const registerProcessFn = deps.registerProcessFn || registerProcess;
   const lifecycleCleanupFn = deps.lifecycleCleanupFn || lifecycleCleanup;
   const notifyWatchdogExitFn = deps.notifyWatchdogExitFn || notifyWatchdogExit;
@@ -420,7 +416,7 @@ async function main(argv = process.argv.slice(2), deps = {}) {
   let values, rest;
   try {
     ({ values, rest } = parseFlagsFn(argv, {
-      flags: { '--session-pid': {} },
+      flags: {},
       booleans: ['--help', '-h', '--no-review-events'],
       // pr（必須）・workspace・interval の3つまで。未知フラグ・余剰位置引数はパーサ側で拒否。
       positionals: { min: 1, max: 3 },
@@ -442,7 +438,6 @@ async function main(argv = process.argv.slice(2), deps = {}) {
   }
 
   const noReviewEvents = Boolean(values['--no-review-events']);
-  const sessionPidArg = values['--session-pid'];
   const [pr, workspaceArg, intervalArg] = rest;
   const intervalSec = parseInt(intervalArg || '30');
 
@@ -465,11 +460,8 @@ async function main(argv = process.argv.slice(2), deps = {}) {
 
   // ── ライフサイクル管理 ─────────────────────────────────────────────────
 
-  const sessionPid = resolveSessionPidFn(sessionPidArg);
-
   const checker = deps.liveness || processLiveness;
-  const parentRef = checker.captureProcess(sessionPid);
-  const checkParent = checker.watchParent(parentRef);
+  const checkParent = checker.watchParent();
 
   // PID registry に自己登録
   registerProcessFn(workspace, { script: 'poll-reviews.js' });
@@ -497,7 +489,6 @@ async function main(argv = process.argv.slice(2), deps = {}) {
     const result = await runPollReviewsFn({
       pr,
       workspace,
-      sessionPid,
       intervalSec,
       noReviewEvents,
     }, {

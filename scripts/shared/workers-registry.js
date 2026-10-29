@@ -89,7 +89,7 @@ function readWorkersRaw(workspace, {
 }
 
 /**
- * 既存workerエントリのプロセス識別フィールド（pid/startTime/logPath）を更新する。
+ * 既存workerエントリのプロセス識別フィールド（pid/resourceKey/startTime/logPath）を更新する。
  * アトミック書き込み（tmp → rename）。
  * workerNameのエントリが存在しない場合は何もせずfalseを返す。
  *
@@ -97,20 +97,21 @@ function readWorkersRaw(workspace, {
  * 載っていないフィールドも保持する（Issue #278）。新フィールドを追加した際に、書き戻しの
  * たびに黙って消える事故を構造的に排除する。
  *
- * resume でワーカーを再起動したときに呼ぶ。移行前セッションが残した paneId は
+ * resume でワーカーを再起動したときに呼ぶ。startTime はworkerの起動日時として更新し、
+ * OS資源参照用のresourceKeyはprocessRefから取得する。移行前セッションが残した paneId は
  * ここで消す——新しいプロセスが起きた以上、古いペインIDは掃除経路にとっても
  * 誤った対象であり、残すと無関係なペインをkillしうる。
  *
  * @param {string} workspace
  * @param {string} workerName
- * @param {{processRef: string, logPath: string|null}} process
+ * @param {{processRef: string, logPath: string|null, startedAt?: string}} process
  * @returns {boolean} エントリが存在し更新に成功した場合は true、エントリ不在の場合は false。
  *   readWorkersRaw の契約どおり、レジストリ破損・読み取り不能は throw する（Issue #275 項目1）。
  *   呼び出し側は false を「エントリ不在」として扱い、破損は例外として区別して報告すること。
  *   破損を false に潰すと、呼び出し側（worker-supervisor の resume）が「ワーカーが見つから
  *   ない」と誤報告し、診断を誤誘導する。
  */
-function updateWorkerProcess(workspace, workerName, { processRef, logPath = null }) {
+function updateWorkerProcess(workspace, workerName, { processRef, logPath = null, startedAt = null }) {
   const p = workersJsonPath(workspace);
   // readWorkersRaw は不在のみ null、破損は throw する。エントリ不在のみ false にし、
   // 破損は例外のまま呼び出し側へ伝播させる（不在と破損を取り違えようのない形にする）。
@@ -130,7 +131,11 @@ function updateWorkerProcess(workspace, workerName, { processRef, logPath = null
     : normalizeWorkerEntry(prev);
   const processFields = processLiveness.writeRef({}, processRef);
   entry.pid = normalizePid(processFields.pid);
-  entry.startTime = processFields.startTime;
+  entry.resourceKey = processFields.resourceKey;
+  entry.instanceId = processFields.instanceId;
+  entry.startTime = typeof startedAt === 'string'
+    ? startedAt
+    : new Date().toISOString();
   entry.logPath = logPath ?? entry.logPath;
   entry.paneId = null;
   raw[workerName] = entry;

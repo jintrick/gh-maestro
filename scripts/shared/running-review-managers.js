@@ -1,6 +1,6 @@
 'use strict';
 // running-review-managers.js
-// Review Manager の manager.running を読み取り、PID とプロセス起動時刻の
+// Review Manager の manager.running を読み取り、OS endpointとinstanceIdの
 // 同一性まで確認する共有ヘルパー。
 //
 // collect-housekeeping-exclusions.js（安全側）と worker-status.js（tolerant）だけで
@@ -194,12 +194,12 @@ function releaseReviewManagerStartup(runningPath, token) {
  * manager.running の内容を解析する。
  *
  * 旧形式は、ファイル全体が正の整数PIDだけのテキストである。新形式は
- * {pid, startTime} のJSONオブジェクトで、startTime=null は「記録はできたが
- * 同一性確認に必要な時刻を取得できなかった」未確認レコードとして扱う。
+ * {pid, resourceKey, instanceId} のJSONオブジェクトである。PR1の起動時刻だけの
+ * 旧JSONはOS資源参照がなく、process-livenessのESRCH判定以外はunknownとして扱う。
  *
  * @param {string} raw
  * @param {string} [runningPath]
- * @returns {{pid: number, startTime: string|null, legacy: boolean, raw: string}}
+ * @returns {{pid: number, resourceKey: string|null, instanceId: string|null, legacy: boolean, raw: string}}
  * @throws {Error} 形式またはPIDが不正な場合
  */
 function parseRunningReviewManagerRecord(raw, runningPath = 'manager.running') {
@@ -212,7 +212,7 @@ function parseRunningReviewManagerRecord(raw, runningPath = 'manager.running') {
   // 誤認すると、想定外の内容をプロセス識別子として扱うことになる。
   if (/^[1-9]\d*$/.test(trimmed)) {
     const pid = normalizePid(trimmed);
-    if (pid !== null) return { pid, startTime: null, legacy: true, raw };
+    if (pid !== null) return { pid, resourceKey: null, instanceId: null, legacy: true, raw };
   }
 
   let parsed;
@@ -231,10 +231,19 @@ function parseRunningReviewManagerRecord(raw, runningPath = 'manager.running') {
     throw new Error(`manager.running の PID が不正です（解析不能）: ${runningPath}`);
   }
 
-  const startTime = typeof parsed.startTime === 'string' && parsed.startTime.trim() !== ''
+  const resourceKey = typeof parsed.resourceKey === 'string' && parsed.resourceKey.trim() !== ''
+    ? parsed.resourceKey
+    : null;
+  const instanceId = typeof parsed.instanceId === 'string' && parsed.instanceId.trim() !== ''
+    ? parsed.instanceId
+    : null;
+  if ((resourceKey === null) !== (instanceId === null)) {
+    throw new Error(`manager.running のresource metadataが不正です: ${runningPath}`);
+  }
+  const startTime = typeof parsed.startTime === 'string' && Number.isFinite(Date.parse(parsed.startTime))
     ? parsed.startTime
     : null;
-  return { pid, startTime, legacy: false, raw };
+  return { pid, resourceKey, instanceId, startTime, legacy: resourceKey === null, raw };
 }
 
 /**
@@ -289,7 +298,7 @@ function finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reas
     status: 'stale',
     pr,
     pid: record.pid,
-    startTime: record.startTime,
+    resourceKey: record.resourceKey,
     legacy: record.legacy,
     reason,
   };
@@ -335,7 +344,7 @@ function inspectRunningReviewManager(runningPath, opts = {}) {
     return finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reason: 'process not alive or identity mismatch' });
   }
   return {
-    status: 'live', pr, pid: record.pid, startTime: record.startTime,
+    status: 'live', pr, pid: record.pid, resourceKey: record.resourceKey, instanceId: record.instanceId, startTime: record.startTime,
     processRef: checker.readRef(record), legacy: false,
   };
 
@@ -343,8 +352,7 @@ function inspectRunningReviewManager(runningPath, opts = {}) {
 
 /**
  * manager.running を新形式で原子的に書き出す。
- * startTime=null はOSから起動時刻を取得できなかった場合の未確認値であり、
- * 呼び出し側で現在時刻を捏造しない。
+ * resourceKey は決定論的OS endpointを指し、instanceIdは起動世代を識別する。
  *
  * @param {string} runningPath
  * @param {string|{processRef:string}} record
@@ -355,7 +363,10 @@ function writeRunningReviewManager(runningPath, record) {
   if (typeof processRef !== 'string' || !processRef) throw new Error(`manager.running の参照が不正です: ${runningPath}`);
   const checker = checkerFor();
   if (checker.observe(processRef) !== 'alive') throw new Error(`manager.running の所有者を確認できません: ${runningPath}`);
-  atomicWriteJson(runningPath, checker.writeRef({}, processRef));
+  const metadata = record && typeof record === 'object' && typeof record.startTime === 'string'
+    ? { startTime: record.startTime }
+    : {};
+  atomicWriteJson(runningPath, checker.writeRef(metadata, processRef));
   return runningPath;
 }
 

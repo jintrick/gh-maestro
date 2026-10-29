@@ -11,21 +11,12 @@
 // spawn-worker.js（ワーカー作成時）とmsg-send.js（ワーカー宛て送信時）の両方から
 // 呼ぶことで、エージェントの記憶に頼らず決定的に起動を保証する。
 //
-// セッションPIDはこの関数の呼び出し元（まだ生存が保証されている今の時点）で解決し、
-// 子（worker-supervisor.js）へ --session-pid として明示的に渡す。
-// 実障害: 子に解決を委ねると、子自身のfindSessionRootPidは「自分の直近の親」から
-// 親チェーンを遡るが、その直近の親は本関数の呼び出し元（msg-send.js/spawn-worker.js。
-// fire-and-forgetで即終了する使い捨てCLI）であり、子の起動から間もなく消える。
-// 消えた後にさらに1階層上（本当のセッション本体）へ遡ろうとするとWMI照会が
-// 対象なしで失敗し、遡行はその場で静かに止まって「直近の使い捨てCLI」を
-// セッション本体と誤認する。結果、そのCLIが（設計通り）即座に消えたことを
-// 「オーケストレーターセッションが死んだ」と誤判定し、子が数十秒で自滅していた。
-// 呼び出し元がまだ生きている時点で解決すれば、この取りこぼしは起きない。
-//
-// 既に稼働中のSupervisorがいれば、spawnもセッションPID解決もスキップする
-// （二重起動はworker-supervisor.js自身のロックでも防がれるが、事前チェックで
-// 無駄なspawnと毎回のセッションPID解決コストを避ける）。この関数はbest-effortの
-// fire-and-forgetであり、起動の成否を待たず・呼び出し元をブロックしない。
+// worker-supervisor は Claude 親セッションではなく orchestrator msg-poll のrole leaseを
+// 監視し、msg-poll が世代交代したときも同じプロセスから新しい世代へ再接続する。
+// msg-poll leaseが無い/判定不能なときにSupervisorだけ先行起動すると孤立常駐するため、
+// requiresRoleでliveなmsg-pollの存在を確認してからspawnする。
+// 既にSupervisorがいればspawnを省略する。この関数はbest-effortのfire-and-forgetであり、
+// 起動の成否を待たず・呼び出し元をブロックしない。
 //
 // migrate-records.js の移行実行中（.gh-maestro/.migration-in-progress マーカー存在中）も
 // 自動起動をスキップする。移行中に復活すると、移行先の空状態で記録を上書きしかける
@@ -43,6 +34,7 @@
 const {
   WORKER_SUPERVISOR_ROLE,
   LEGACY_INBOX_SUPERVISOR_ROLE,
+  MSGPOLL_ORCHESTRATOR_ROLE,
 } = require('./worker-lease');
 const {
   ensureResidentDaemon,
@@ -70,11 +62,8 @@ function ensureWorkerSupervisorRunning({ workspace, scriptsPath }) {
     attemptName: 'worker-supervisor',
     legacyScriptNames: ['inbox-supervisor.js'],
     legacyRoles: [LEGACY_INBOX_SUPERVISOR_ROLE],
-    buildArgs: ({ workspace: ws, sessionPid }) => {
-      const args = ['--workspace', ws];
-      if (sessionPid) args.push('--session-pid', String(sessionPid));
-      return args;
-    },
+    requiresRole: MSGPOLL_ORCHESTRATOR_ROLE,
+    buildArgs: ({ workspace: ws }) => ['--workspace', ws],
     hooks,
   });
 }
@@ -83,7 +72,6 @@ module.exports = {
   ensureWorkerSupervisorRunning,
   AUTOSTART_COOLDOWN_MS,
   _setSpawn: hooks.setSpawn,
-  _setFindSessionRootPid: hooks.setFindSessionRootPid,
   _setFindRunningInstance: hooks.setFindRunningInstance,
   _setIsResidentLeaseLive: hooks.setIsResidentLeaseLive,
 };

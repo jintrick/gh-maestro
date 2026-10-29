@@ -1,5 +1,9 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+const { createTestLiveness } = require('./helpers/process-liveness-test-double');
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -9,8 +13,6 @@ const path = require('path');
 const workerLease = require('../scripts/shared/worker-lease');
 const processLiveness = require('../scripts/shared/process-liveness');
 
-// 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
-// PIDを誤って渡す回帰は即座に検出する。
 const TEST_SESSION_START_TIME = '2026-07-25T00:00:00.000Z';
 const msgPoll = require('../scripts/msg-poll');
 const readStateLib = require('../scripts/shared/read-state');
@@ -22,12 +24,7 @@ msgPoll._setParentLiveness(processLiveness.createLiveness({
   },
 }));
 
-// 直接 main()/scanOnce() を呼ぶケースでは、親セッションの死活確認自体は
-// process-lifecycle.test.js の実照合テストで検証する。ここでは各スキャンで
-// WindowsのPowerShell/WMIを起動しないよう、既存の注入境界から生存checkerだけを差し替える。
-// 実CLI統合テスト（重複lease/--force/--watch-pid）は tests/slow/msg-poll.test.js で
-// 実際のプロセス境界を通す。
-const TEST_PARENT_CHECKER = () => true;
+// 直接 main()/scanOnce() を呼ぶテストでは、OS resource probeをテスト用checkerへ差し替える。
 const useFastParentChecker = () => {
   const liveness = processLiveness.createLiveness({
     probePid: () => 'alive',
@@ -38,11 +35,7 @@ const useFastParentChecker = () => {
 };
 useFastParentChecker();
 
-// テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
-// 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
-// --session-pid を渡すため、テストでも常に自プロセスPIDを渡してこの探索を省く。
 const _realMain = msgPoll.main;
-const TEST_SESSION_PID = String(process.pid);
 
 // 明示した --workspace は環境変数より優先されるが、workspace引数を省略する
 // 経路も実workspaceへ向かわないよう、main() の間だけ env を外す。
@@ -50,7 +43,7 @@ const runMain = (args, opts) => {
   const saved = process.env.GH_MAESTRO_WORKSPACE;
   delete process.env.GH_MAESTRO_WORKSPACE;
   try {
-    return _realMain([...args, '--session-pid', TEST_SESSION_PID], opts);
+    return _realMain(args, opts);
   } finally {
     if (saved !== undefined) process.env.GH_MAESTRO_WORKSPACE = saved;
   }
@@ -686,76 +679,34 @@ test('orchestrator モード: 複数 issue をスキャンする', () => {
   });
 });
 
-// ── 死のスイッチ配線（Issue #301） ────────────────────────────────────────
-// scanOnce が親セッションの死を検出したとき、role lease を解放して exit 3 で終了する
-// （受け入れ条件1: 死のスイッチ経路で lease が解放される）。scriptName と sessionPid が
-// stderr に出力される（沈黙しない）。
-
-test('死のスイッチ発火時: role lease を解放し exit 3 で終了する（配線）', () => {
-  const { PARENT_DEATH_EXIT_CODE } = require('../scripts/shared/watchdog-exit-notify');
-  withTempDir(workspace => {
+// Plugin monitors deliberately do not watch their Claude parent. Session exit is
+// owned by Claude Code; the next plugin monitor takes over a stale role lease.
+test('plugin monitor path does not watch Claude parent', () => {
+  withTempDir((workspace) => {
     initOrchestratorState(workspace);
-    writeWorkers(workspace, { 'worker-1': { issue: 10 } });
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
+    let watchCalls = 0;
+    const liveness = processLiveness.createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME });
+    const watchParent = liveness.watchParent;
+    liveness.watchParent = (...args) => { watchCalls++; return watchParent(...args); };
+    msgPoll._setParentLiveness(liveness);
+    workerLease._setLiveness(liveness);
 
-    const stderrLines = [];
-    let capturedExpectedStartTime;
-    const origStderr = process.stderr.write;
-    try {
-      // 死のスイッチを常時「死」と判定させる。checkParent は main() 内で生成されるため
-      // runMain より前に注入する（_setParentDeathExit は sentinel 例外で抜ける）。
-      msgPoll._setParentLiveness(require('../scripts/shared/process-liveness').createLiveness({
-        probePid: () => 'alive',
-        readStartTime: () => capturedExpectedStartTime || TEST_SESSION_START_TIME,
-      }));
-      workerLease._setLiveness(require('../scripts/shared/process-liveness').createLiveness({
-        probePid: () => 'alive',
-        readStartTime: () => capturedExpectedStartTime || TEST_SESSION_START_TIME,
-      }));
-      let exitCode = null;
-      msgPoll._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
-      process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
-
-      // 継続モード（--once なし）で起動 → orchestrator の role lease を取得する
-      const r = runMain(['orchestrator', '--workspace', workspace]);
-      assert.equal(r.code, 0);
-      capturedExpectedStartTime = '2000-01-01T00:00:00.000Z';
-      const leaseFile = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json');
-      assert.ok(fs.existsSync(leaseFile), '継続モードで role lease ファイルが作成される');
-
-      // scanOnce 1回で死のスイッチ発火 → lease 解放 + exit 3
-      assert.throws(() => r.scanOnce(), /parent-death-exit sentinel/);
-      assert.equal(exitCode, PARENT_DEATH_EXIT_CODE, '死のスイッチは exit 3 で終了する');
-      assert.equal(fs.existsSync(leaseFile), false, '死のスイッチ経路で role lease が解放される（受け入れ条件1）');
-      assert.ok(
-        stderrLines.some(l => l.includes('msg-poll.js') && l.includes(`pid ${TEST_SESSION_PID}`)),
-        `stderr に msg-poll.js と sessionPid が出力される: ${stderrLines.join('|')}`
-      );
-    } finally {
-      process.stderr.write = origStderr;
-      useFastParentChecker();
-      msgPoll._setParentDeathExit((code) => process.exit(code));
-    }
+    const result = runMain(['orchestrator', '--workspace', workspace, '--plugin-monitor']);
+    assert.equal(result.code, 0);
+    result.scanOnce();
+    assert.equal(watchCalls, 0);
+    assert.ok(fs.existsSync(path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json')));
   });
+  useFastParentChecker();
 });
-
 test('main: 常駐leaseへ渡したself identityをregistry用の結果へ保持する', () => {
   withTempDir(workspace => {
     initOrchestratorState(workspace);
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
-    let livenessCalls = 0;
-    const liveness = processLiveness.createLiveness({
-      probePid: () => 'alive',
-      readStartTime: (pid) => {
-        assert.equal(pid, process.pid);
-        livenessCalls++;
-        return livenessCalls === 1
-          ? '2026-07-29T00:00:00.525Z'
-          : '2026-07-29T00:00:00.626Z';
-      },
-    });
+    const liveness = createTestLiveness({ probePid: () => 'alive' });
     msgPoll._setParentLiveness(liveness);
     workerLease._setLiveness(liveness);
 
@@ -764,11 +715,10 @@ test('main: 常駐leaseへ渡したself identityをregistry用の結果へ保持
       assert.equal(result.code, 0);
       assert.equal(typeof result.residentIdentity, 'string');
       const leasePath = path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json');
-      // 親セッション参照の捕捉が先に行われるため、residentIdentity は2回目の取得値。
       const leaseRecord = JSON.parse(fs.readFileSync(leasePath, 'utf8'));
-      assert.equal(leaseRecord.startTime, '2026-07-29T00:00:00.626Z');
+      assert.equal(leaseRecord.pid, process.pid);
+      assert.equal(typeof leaseRecord.resourceKey, 'string');
       assert.equal(liveness.sameRef(result.residentIdentity, liveness.readRef(leaseRecord)), true);
-      assert.equal(livenessCalls, 2, 'parent session と resident identity の起動時刻だけを取得する');
     } finally {
       result.residentLease.release();
       useFastParentChecker();
@@ -1274,19 +1224,6 @@ test('gh api が null を返した場合にクラッシュしない', () => {
 // interval ループには入らず、実ポーリングプロセスは生成されない
 //
 // GH_MAESTRO_WORKSPACE を外した env で起動し、必ず --workspace の一時dirを使う。
-
-// ── buildWatchPidCommand ─────────────────────────────────────────────────────
-
-test('buildWatchPidCommand: pidを含むコマンド文字列を組み立てる', () => {
-  const cmd = msgPoll.buildWatchPidCommand(12345);
-  assert.match(cmd, /--watch-pid 12345/);
-  assert.doesNotMatch(cmd, /--interval/);
-});
-
-test('buildWatchPidCommand: intervalSec指定時は--intervalを含む', () => {
-  const cmd = msgPoll.buildWatchPidCommand(12345, '5');
-  assert.match(cmd, /--interval 5/);
-});
 
 // ── --wait モード ───────────────────────────────────────────────────────────
 

@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
@@ -35,7 +38,6 @@ beforeEach(() => {
   workspace = tempDirScope.mkdtemp('ensure-daemon-');
   hooks = createDaemonHooks();
   hooks.setSpawn(() => fakeChild());
-  hooks.setFindSessionRootPid(() => 12345);
   hooks.setFindRunningInstance(() => null);
   hooks.setIsResidentLeaseLive(() => false);
 });
@@ -68,8 +70,8 @@ test('ensureResidentDaemon: 基本動作 - detached・windowsHide付きでスク
   assert.deepEqual(captured.args, [
     path.join('/abs/scripts', 'test-daemon.js'),
     '--workspace', workspace,
-    '--session-pid', '12345',
   ]);
+  assert.ok(captured.opts.env.GH_MAESTRO_RESOURCE_KEY);
   assert.equal(captured.opts.detached, true);
   assert.equal(captured.opts.windowsHide, true);
   assert.ok(fs.existsSync(path.join(workspace, '.gh-maestro', 'test-daemon-autostart.log')));
@@ -88,7 +90,7 @@ test('ensureResidentDaemon: buildArgs カスタマイズで引数を構築でき
     scriptName: 'custom-daemon.js',
     logFileName: 'custom.log',
     attemptName: 'custom',
-    buildArgs: ({ workspace: ws, sessionPid }) => ['orchestrator', '--ws', ws, '--pid', String(sessionPid)],
+    buildArgs: ({ workspace: ws }) => ['orchestrator', '--ws', ws, '--mode', 'daemon'],
     hooks,
   });
 
@@ -96,7 +98,7 @@ test('ensureResidentDaemon: buildArgs カスタマイズで引数を構築でき
     path.join('/abs/scripts', 'custom-daemon.js'),
     'orchestrator',
     '--ws', workspace,
-    '--pid', '12345',
+    '--mode', 'daemon',
   ]);
 });
 
@@ -372,11 +374,6 @@ test('ensureResidentDaemon: 呼び出しシーケンス（順序）の厳密検�
     return false;
   });
 
-  hooks.setFindSessionRootPid(() => {
-    events.push('resolvePid');
-    return 9999;
-  });
-
   hooks.setSpawn((cmd, args, opts) => {
     const attempt = readAutostartAttempt(workspace, 'daemon-seq');
     events.push(`spawn(recorded:${attempt !== null})`);
@@ -397,7 +394,6 @@ test('ensureResidentDaemon: 呼び出しシーケンス（順序）の厳密検�
     'migrationCheck',
     'runningCheck',
     'leaseCheck',
-    'resolvePid',
     'spawn(recorded:true)',
   ]);
 });

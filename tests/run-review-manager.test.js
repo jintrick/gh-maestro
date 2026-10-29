@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const processLiveness = require('../scripts/shared/process-liveness');
@@ -608,22 +611,18 @@ test('boundedCleanup: cleanup結果が独立して診断可能', async () => {
   assert.ok(Array.isArray(result.errors));
 });
 
-test('boundedCleanup: manager.running は所有者と起動時刻が一致する場合だけ解放する', async () => {
+test('boundedCleanup: manager.running は所有者とOS resourceが一致する場合だけ解放する', async () => {
   const testDir = path.join(tmpBase, 'cleanup-owner');
   fs.mkdirSync(testDir, { recursive: true });
   const ownedFile = path.join(testDir, 'owned.running');
   const foreignFile = path.join(testDir, 'foreign.running');
-  const owner = { pid: process.pid, startTime: '2026-08-28T00:00:00.000Z' };
   const liveness = processLiveness.createLiveness({
     probePid: () => 'alive',
-    readStartTime: () => owner.startTime,
   });
   const ownerRef = liveness.captureSelf();
-  fs.writeFileSync(ownedFile, JSON.stringify(owner), 'utf8');
-  fs.writeFileSync(foreignFile, JSON.stringify({
-    pid: 67890,
-    startTime: '2026-08-28T00:01:00.000Z',
-  }), 'utf8');
+  fs.writeFileSync(ownedFile, JSON.stringify(liveness.writeRef({ startTime: '2026-08-28T00:00:00.000Z' }, ownerRef)), 'utf8');
+  const foreignRef = liveness.captureProcess(67890, 'foreign-resource');
+  fs.writeFileSync(foreignFile, JSON.stringify(liveness.writeRef({ startTime: '2026-08-28T00:01:00.000Z' }, foreignRef)), 'utf8');
 
   const owned = await boundedCleanup({
     pid: null, worktreeDir: null, workspace: null, pr: null,

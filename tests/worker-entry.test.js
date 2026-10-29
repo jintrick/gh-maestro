@@ -5,20 +5,20 @@ const assert = require('node:assert/strict');
 const { normalizeWorkerEntry, normalizePid } = require('../scripts/shared/worker-entry');
 
 const EMPTY = {
-  pid: null, startTime: null, logPath: null,
+  pid: null, resourceKey: null, instanceId: null, startTime: null, logPath: null,
   agentId: null, issue: null, skill: null, baseBranch: null,
   paneId: null, notifierPid: null,
 };
 
 // ── 新形式（headless: pid/startTime/logPath） ────────────────────────────────
 
-test('normalizeWorkerEntry: 新形式 { pid, startTime, logPath, agentId } をそのまま読む', () => {
+test('normalizeWorkerEntry: 新形式 { pid, resourceKey, startTime, logPath, agentId } をそのまま読む', () => {
   const r = normalizeWorkerEntry({
-    pid: 4242, startTime: '2026-07-25T00:00:00.000Z', logPath: 'C:/ws/.gh-maestro/worker-logs/w.log', agentId: 'agy',
+    pid: 4242, resourceKey: 'a'.repeat(64), instanceId: 'worker-instance-4242', startTime: '2026-07-25T00:00:00.000Z', logPath: 'C:/ws/.gh-maestro/worker-logs/w.log', agentId: 'agy',
   });
   assert.deepEqual(r, {
     ...EMPTY,
-    pid: 4242, startTime: '2026-07-25T00:00:00.000Z', logPath: 'C:/ws/.gh-maestro/worker-logs/w.log', agentId: 'agy',
+    pid: 4242, resourceKey: 'a'.repeat(64), instanceId: 'worker-instance-4242', startTime: '2026-07-25T00:00:00.000Z', logPath: 'C:/ws/.gh-maestro/worker-logs/w.log', agentId: 'agy',
   });
 });
 

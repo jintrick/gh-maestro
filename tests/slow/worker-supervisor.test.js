@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('../helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, describe, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -27,11 +30,8 @@ const TEST_LIVENESS = processLiveness.createLiveness({
 // tests/process-lifecycle.test.js で検証し、ここでは既存の注入境界から親生存だけを差し替える。
 // 下部のCLI integrationは実argv・実プロセス境界を通す。
 
-// テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
-// 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
-// --session-pid を渡すため、テストでも常に自プロセスPIDを渡してこの探索を省く。
+// テスト時の接続先 msg-poll lease は runMain から alive として注入する。
 const _realMain = supervisor.main;
-const TEST_SESSION_PID = String(process.pid);
 // 明示した --workspace は環境変数より優先されるが、workspace引数を省略する
 // 経路も実workspaceへ向かわないよう、テスト中は環境変数を一時的に除去する。
 const _savedWorkspaceEnv = process.env.GH_MAESTRO_WORKSPACE;
@@ -43,7 +43,12 @@ delete process.env.GH_MAESTRO_WORKER;
 // テスト中は一時的に除去する。
 const _savedBaseBranchEnv = process.env.GH_MAESTRO_BASE_BRANCH;
 delete process.env.GH_MAESTRO_BASE_BRANCH;
-const runMain = (args, opts) => _realMain([...args, '--session-pid', TEST_SESSION_PID], opts);
+const runMain = (args, opts = {}) => _realMain(args, {
+  observeMsgPollFn: (_workspace, checker) => ({
+    state: 'alive', processRef: checker.captureSelf(), pid: process.pid, error: null,
+  }),
+  ...opts,
+});
 
 // ── テストヘルパー ────────────────────────────────────────────────────────
 

@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -8,6 +11,8 @@ const path = require('path');
 
 const headlessLaunch = require('../scripts/shared/headless-launch');
 const processLiveness = require('../scripts/shared/process-liveness');
+const { canonicalWorkspace } = require('../scripts/shared/storage-layout');
+const { createResourceLiveness } = require('./helpers/process-liveness-test-double');
 const { launchAgentHeadless, workerLogPath, SHIM_PATH } = headlessLaunch;
 const { runShim } = require('../scripts/shared/headless-shim');
 const { buildWorkerEnv } = require('../scripts/shared/worker-env');
@@ -114,6 +119,22 @@ test('launchAgentHeadless: シムにはログインシェルでラップ済み�
   assert.equal(args[2], logPath);
 });
 
+test('launchAgentHeadless: resourceKey は shim だけに渡し、起動したCLIへは注入しない', () => {
+  headlessLaunch._setSpawn(fakeSpawn());
+
+  launchAgentHeadless({ argv: ['node', 'worker-supervisor.js'], cwd: tmpDir, logPath: path.join(tmpDir, 'w.log') });
+
+  const call = spawnCalls[0];
+  const resourceKey = call.options.env.GH_MAESTRO_RESOURCE_KEY;
+  assert.equal(typeof resourceKey, 'string');
+  assert.notEqual(resourceKey, '');
+  const shellArgs = JSON.parse(call.args[1]);
+  const serialized = process.platform === 'win32'
+    ? Buffer.from(shellArgs[3], 'base64').toString('utf16le')
+    : shellArgs[2];
+  assert.doesNotMatch(serialized, /GH_MAESTRO_RESOURCE_KEY/);
+});
+
 test('launchAgentHeadless: シム自身の標準入出力は使わない（ログ書き込みはシムが開くfdが担う）', () => {
   headlessLaunch._setSpawn(fakeSpawn());
 
@@ -160,7 +181,7 @@ test('launchAgentHeadless: env をプロセス環境にマージして渡す', (
 
   const { env } = spawnCalls[0].options;
   assert.equal(env.GH_MAESTRO_WORKER, 'issue-151-x');
-  assert.equal(env.GH_MAESTRO_WORKSPACE, tmpDir);
+  assert.equal(env.GH_MAESTRO_WORKSPACE, canonicalWorkspace(tmpDir));
   assert.equal(env.PATH ?? env.Path, process.env.PATH ?? process.env.Path);
 });
 
@@ -183,7 +204,7 @@ test('launchAgentHeadless: 初回起動で base 未指定なら継承した GH_M
   const { env } = spawnCalls[0].options;
   assert.equal(env.GH_MAESTRO_BASE_BRANCH, '', '継承値(main)は除去され空文字になる');
   assert.equal(env.GH_MAESTRO_WORKER, 'issue-1-impl');
-  assert.equal(env.GH_MAESTRO_WORKSPACE, tmpDir);
+  assert.equal(env.GH_MAESTRO_WORKSPACE, canonicalWorkspace(tmpDir));
 });
 
 test('launchAgentHeadless: 初回起動で base 指定なら継承値を上書きして GH_MAESTRO_BASE_BRANCH に渡る', () => {
@@ -254,16 +275,19 @@ test('launchAgentHeadless: pid・不透明なprocessRef・logPathを返す', () 
 
   assert.deepEqual(result, {
     pid: 31337,
-    processRef: processLiveness.readRef({ pid: 31337, startTime: '2026-07-25T00:00:00.000Z' }),
+    processRef: processLiveness.captureProcess(31337, {
+      resourceKey: spawnCalls[0].options.env.GH_MAESTRO_RESOURCE_KEY,
+      instanceId: spawnCalls[0].options.env.GH_MAESTRO_INSTANCE_ID,
+    }),
     logPath,
   });
 });
 
 test('launchAgentHeadless: 参照の取得に失敗しても未知状態を返し、起動自体は成功扱いにする', () => {
   headlessLaunch._setSpawn(fakeSpawn({ pid: 99 }));
-  const checker = processLiveness.createLiveness({
-    probePid: () => 'alive',
-    readStartTime: () => null,
+  const checker = createResourceLiveness({
+    useRealResources: false,
+    probeEndpoint: () => 'unknown',
   });
   headlessLaunch._setLiveness(checker);
 

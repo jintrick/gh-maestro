@@ -108,7 +108,7 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
   }
 
   // 通常ワーカー以外の Review Manager は PID registry に登録されず、専用の
-  // manager.running だけを持つ。新形式は PID＋起動時刻の同一性まで確認して、
+  // manager.running だけを持つ。新形式は OS endpoint と instanceId の同一性まで確認して、
   // 対応する records/pr/<PR>/review/manager.log を保護する。
   //
   // 旧形式の生存PIDは同一性を確認できないので live 一覧には入れない。ただし

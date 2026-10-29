@@ -1,15 +1,34 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+const { createResourceLiveness, createTestLiveness, testEndpointPath } = require('./helpers/process-liveness-test-double');
+
 const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
 const lease = require('../scripts/shared/worker-lease');
 const processLiveness = require('../scripts/shared/process-liveness');
 let currentProbePid = () => 'alive';
 let activeLiveness = null;
+const tempDirScopes = new Map();
+
+function createTestTempDir() {
+  const scope = createTempDirScope();
+  const directory = scope.mkdtemp('gh-maestro-lease-test-');
+  tempDirScopes.set(directory, scope);
+  return directory;
+}
+
+function cleanupTestTempDir(directory) {
+  const scope = tempDirScopes.get(directory);
+  if (!scope) return;
+  scope.cleanup();
+  tempDirScopes.delete(directory);
+}
 
 function installTestLiveness(checker) {
   activeLiveness = checker;
@@ -22,10 +41,9 @@ const defaultLiveness = processLiveness.createLiveness({
 });
 installTestLiveness(defaultLiveness);
 
-function testProcessRef(pid, startTime = null) {
+function testProcessRef(pid, instanceId = 'test-instance') {
   const checker = activeLiveness || processLiveness;
-  if (typeof startTime === 'string' && startTime) return checker.readRef({ pid, startTime });
-  return checker.captureProcess(pid);
+  return checker.captureProcess(pid, `legacy-process:${pid}`, instanceId || 'test-instance');
 }
 
 function setReader(readStartTime) {
@@ -58,7 +76,7 @@ afterEach(() => {
 // ── テスト用ヘルパー ───────────────────────────────────────────────────────────
 
 function tempStore() {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  const tmp = createTestTempDir();
   const store = lease.createNormalWorkerStore(tmp);
   store._tmpDir = tmp;
   return store;
@@ -66,7 +84,7 @@ function tempStore() {
 
 function cleanupStore(store) {
   if (store._tmpDir) {
-    fs.rmSync(store._tmpDir, { recursive: true, force: true });
+    cleanupTestTempDir(store._tmpDir);
   }
 }
 
@@ -95,6 +113,27 @@ function mockLiveness({ alive = true, identityMatch = true, livePids = [], misma
     },
   }));
   return calls;
+}
+
+function seedResidentEndpoint(checker, workspace, role, pid, instanceId = `resident-${pid}`) {
+  return checker.captureProcess(pid, {
+    workspace,
+    kind: 'resident',
+    name: role,
+    instanceId,
+  });
+}
+
+function writeResidentLease(workspace, checker, role, pid, instanceId = `resident-${pid}`, fields = {}) {
+  const ref = seedResidentEndpoint(checker, workspace, role, pid, instanceId);
+  const record = checker.writeRef({
+    workerName: role,
+    phase: 'active',
+    createdAt: '2026-10-29T00:00:00.000Z',
+    ...fields,
+  }, ref);
+  lease.createResidentLeaseStore(workspace).write(lease.roleLeaseKey(role), record);
+  return { ref, record };
 }
 
 // ── createNormalWorkerStore ────────────────────────────────────────────────────
@@ -199,15 +238,15 @@ test('isLeaseLive: PIDが死んでいれば false', () => {
   }), false);
 });
 
-test('isLeaseLive: PIDは生きているがstartTimeが一致しなければ false（PID再利用防止）', () => {
+test('isLeaseLive: endpointがaliveなら古いstartTime値に関係なくtrue', () => {
   mockLiveness({ alive: true, mismatchPids: [4242] });
   assert.equal(lease.isLeaseLive({
     pid: 4242, startTime: '2026-07-29T00:00:00.000Z', workerName: 'w', createdAt: 'x',
-  }), false);
+  }), true);
 });
 
 test('isLeaseLive: 識別情報が欠けた lease は判定不能としてエラー', () => {
-  mockLiveness();
+  installTestLiveness(createResourceLiveness({ useRealResources: false, probeEndpoint: () => 'unknown' }));
   for (const entry of [{ pid: 4242 }, {}, { pid: 0 }]) {
     assert.throws(() => lease.isLeaseLive(entry), /判定できません/);
   }
@@ -240,11 +279,13 @@ test('acquireLeaseLock: 自プロセスの起動時刻を取得できない場�
       JSON.stringify({ pid: 99999, startTime: '2026-07-29T00:00:00.000Z' }),
       'utf8'
     );
-    setReader(() => null);
+    installTestLiveness(createTestLiveness({
+      probePid: (pid) => pid === process.pid ? 'alive' : 'unknown',
+    }));
 
     assert.throws(
       () => lease.acquireLeaseLock(store, 'test-key'),
-      /生存を確認できません/
+      /生死を判定できません/
     );
     assert.equal(fs.existsSync(store.lockPath('test-key')), true);
   } finally {
@@ -258,7 +299,7 @@ test('acquireLeaseLock: liveな保持者がいればエラーを投げる', () =
     mockLiveness({ alive: true, identityMatch: true });
     // 事前に別プロセスのロック（JSON: pid+startTime）を作成
     fs.mkdirSync(path.dirname(store.lockPath('test-key')), { recursive: true });
-    fs.writeFileSync(store.lockPath('test-key'), JSON.stringify({ pid: process.pid, startTime: `2026-07-29T00:00:00.${String(process.pid).padStart(3, '0')}Z` }), 'utf8');
+    fs.writeFileSync(store.lockPath('test-key'), JSON.stringify({ pid: process.pid, startTime: '2026-07-29T00:00:00.000Z' }), 'utf8');
 
     assert.throws(
       () => lease.acquireLeaseLock(store, 'test-key'),
@@ -285,7 +326,7 @@ test('acquireLeaseLock: staleロック（保持者死亡）は奪取して成功
   }
 });
 
-test('acquireLeaseLock: PID再利用（生存だがstartTime不一致）はstaleとみなし奪取する', () => {
+test('acquireLeaseLock: live resourceはstartTime不一致でもstale扱いせず拒否する', () => {
   const store = tempStore();
   try {
     // 生存しているが、ロックに記録されたstartTimeとは別プロセス（PID再利用）のケース
@@ -293,9 +334,8 @@ test('acquireLeaseLock: PID再利用（生存だがstartTime不一致）はstale
     fs.mkdirSync(path.dirname(store.lockPath('test-key')), { recursive: true });
     fs.writeFileSync(store.lockPath('test-key'), JSON.stringify({ pid: 99999, startTime: '2026-07-29T00:00:00.000Z' }), 'utf8');
 
-    const result = lease.acquireLeaseLock(store, 'test-key');
-    assert.equal(result, true);
-    lease.releaseLeaseLock(store, 'test-key');
+    assert.throws(() => lease.acquireLeaseLock(store, 'test-key'), /進行中/);
+    assert.equal(fs.existsSync(store.lockPath('test-key')), true);
   } finally {
     cleanupStore(store);
   }
@@ -378,24 +418,25 @@ test('acquireLease: callerが捕捉したProcessRefをロックとleaseで共有
     const processRef = activeLiveness.captureSelf();
     lease.acquireLease(store, 'issue-1-coder-test', { processRef, workerName: 'issue-1-coder-test' });
 
-    assert.equal(calls, 1, '呼び出し元が1回捕捉した参照を内部処理で再取得しない');
-    assert.equal(store.read('issue-1-coder-test').startTime, '2026-07-29T00:00:00.424Z');
+    assert.equal(calls, 0, 'liveness resource の確認はプロセス起動時刻の照会をしない');
+    assert.equal(typeof store.read('issue-1-coder-test').resourceKey, 'string');
   } finally {
     cleanupStore(store);
   }
 });
 
-test('acquireLease: 起動時刻を取得できない場合はlock/leaseを作成しない', () => {
+test('acquireLease: endpoint probeがunknownならlock/leaseを作成しない', () => {
   const store = tempStore();
   try {
-    setReader(() => null);
+    const unknownLiveness = createResourceLiveness({ useRealResources: false, probeEndpoint: () => 'unknown' });
+    installTestLiveness(unknownLiveness);
 
     assert.throws(
       () => lease.acquireLease(store, 'issue-1-coder-test', {
-        processRef: activeLiveness.captureSelf(),
+        processRef: unknownLiveness.captureSelf(),
         workerName: 'issue-1-coder-test',
       }),
-      /生存を確認できません/
+      /endpoint/
     );
     assert.equal(store.read('issue-1-coder-test'), null);
     assert.equal(fs.existsSync(store.lockPath('issue-1-coder-test')), false);
@@ -407,11 +448,17 @@ test('acquireLease: 起動時刻を取得できない場合はlock/leaseを作�
 test('acquireLease: live lease があればエラーを投げる（重複起動拒否）', () => {
   const store = tempStore();
   try {
-    mockLiveness({ alive: true, identityMatch: true });
-    // 事前に live なリースを作成
-    store.write('issue-1-coder-test', {
-      pid: 8888, startTime: '2026-07-28T00:00:00.000Z', workerName: 'issue-1-coder-test', createdAt: '2026-07-28T00:00:00.000Z',
+    const checker = createTestLiveness({ probePid: () => 'alive' });
+    installTestLiveness(checker);
+    const workerRef = checker.captureProcess(8888, {
+      workspace: store.workspace,
+      kind: 'worker',
+      name: 'issue-1-coder-test',
+      instanceId: 'worker-generation-1',
     });
+    store.write('issue-1-coder-test', checker.writeRef({
+      workerName: 'issue-1-coder-test', createdAt: '2026-07-28T00:00:00.000Z',
+    }, workerRef));
 
     assert.throws(
       () => lease.acquireLease(store, 'issue-1-coder-test', {
@@ -421,6 +468,95 @@ test('acquireLease: live lease があればエラーを投げる（重複起動�
     );
     // 元のリースはそのまま残っている
     assert.equal(store.read('issue-1-coder-test').pid, 8888);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireLease: worker endpointがdeadならPIDが存在するPR1 leaseを遺物として回収する', () => {
+  const store = tempStore();
+  const workerName = 'issue-1-coder-test';
+  try {
+    const checker = createTestLiveness({ probePid: () => 'alive' });
+    installTestLiveness(checker);
+    store.write(workerName, {
+      pid: 8888,
+      startTime: '2026-07-28T00:00:00.000Z',
+      workerName,
+      createdAt: '2026-07-28T00:00:00.000Z',
+      phase: 'active',
+    });
+    const launcher = checker.captureSelf({
+      workspace: store.workspace,
+      kind: 'launcher',
+      name: workerName,
+    });
+
+    const result = lease.acquireLease(store, workerName, {
+      processRef: launcher,
+      workerName,
+    });
+
+    assert.equal(result.acquired, true);
+    assert.equal(result.staleReclaimed, true);
+    assert.equal(store.read(workerName).pid, process.pid);
+    lease.releaseLease(store, workerName, launcher);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireLease: lease file が無くても既存worker endpointを正本として二重起動を拒否する', () => {
+  const store = tempStore();
+  const workerName = 'endpoint-only-worker';
+  try {
+    const checker = createTestLiveness({ probePid: () => 'alive' });
+    installTestLiveness(checker);
+    checker.captureProcess(5151, {
+      workspace: store.workspace,
+      kind: 'worker',
+      name: workerName,
+      instanceId: 'existing-worker-instance',
+    });
+    const launcher = checker.captureSelf({
+      workspace: store.workspace,
+      kind: 'launcher',
+      name: 'spawn-worker',
+    });
+
+    assert.throws(() => lease.acquireLease(store, workerName, {
+      processRef: launcher,
+      workerName,
+    }), /既に稼働中です（pid 5151）/);
+    assert.equal(store.read(workerName), null);
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireLease: lease file とworker endpointが無くてもendpoint照会unknownなら作成を拒否する', () => {
+  const store = tempStore();
+  const workerName = 'unknown-endpoint-worker';
+  try {
+    const checker = createTestLiveness({ probePid: () => 'unknown' });
+    installTestLiveness(checker);
+    checker.captureProcess(5152, {
+      workspace: store.workspace,
+      kind: 'worker',
+      name: workerName,
+      instanceId: 'unknown-worker-instance',
+    });
+    const launcher = checker.captureSelf({
+      workspace: store.workspace,
+      kind: 'launcher',
+      name: 'spawn-worker',
+    });
+
+    assert.throws(() => lease.acquireLease(store, workerName, {
+      processRef: launcher,
+      workerName,
+    }), { code: 'LIVENESS_UNKNOWN' });
+    assert.equal(store.read(workerName), null);
   } finally {
     cleanupStore(store);
   }
@@ -443,7 +579,7 @@ test('acquireLease: stale lease（PID死亡）は回収して新規作成する'
     // 新しいリースに置き換わっている
     const entry = store.read('issue-1-coder-test');
     assert.equal(entry.pid, 4242);
-    assert.equal(entry.startTime, '2026-07-29T00:00:00.000Z');
+    assert.equal(typeof entry.resourceKey, 'string');
   } finally {
     cleanupStore(store);
   }
@@ -476,20 +612,25 @@ test('acquireLease: startTime が無くても死亡PIDのleaseだけは回収で
   }
 });
 
-test('acquireLease: stale lease（startTime不一致=PID再利用）は回収して新規作成する', () => {
+test('acquireLease: lease記録と無関係にworker endpointがliveなら二重起動を拒否する', () => {
   const store = tempStore();
   try {
-    mockLiveness({ alive: true, identityMatch: false, livePids: [4242] }); // stale leaseはPID再利用、新しい所有者は生存
+    const checker = createTestLiveness({ probePid: () => 'alive' });
+    installTestLiveness(checker);
+    checker.captureProcess(4242, {
+      workspace: store.workspace,
+      kind: 'worker',
+      name: 'issue-1-coder-test',
+      instanceId: 'current-worker-instance',
+    });
     store.write('issue-1-coder-test', {
       pid: 8888, startTime: '2026-07-28T00:00:00.000Z', workerName: 'issue-1-coder-test', createdAt: '2026-07-28T00:00:00.000Z',
     });
 
-    const result = lease.acquireLease(store, 'issue-1-coder-test', {
-      processRef: testProcessRef(4242, '2026-07-29T00:00:00.000Z'), workerName: 'issue-1-coder-test',
-    });
-    assert.equal(result.acquired, true);
-    assert.equal(result.staleReclaimed, true);
-    assert.equal(store.read('issue-1-coder-test').pid, 4242);
+    assert.throws(() => lease.acquireLease(store, 'issue-1-coder-test', {
+      processRef: testProcessRef(process.pid), workerName: 'issue-1-coder-test',
+    }), /既に稼働中/);
+    assert.equal(store.read('issue-1-coder-test').pid, 8888);
   } finally {
     cleanupStore(store);
   }
@@ -518,7 +659,7 @@ test('acquireLease: per-keyロックにより並行起動を拒否する', () =>
     mockLiveness({ alive: true, identityMatch: true });
     // 事前に別プロセスのロックを作成（他launcherが起動処理中）
     fs.mkdirSync(path.dirname(store.lockPath('issue-1-coder-test')), { recursive: true });
-    fs.writeFileSync(store.lockPath('issue-1-coder-test'), JSON.stringify({ pid: process.pid, startTime: `2026-07-29T00:00:00.${String(process.pid).padStart(3, '0')}Z` }), 'utf8');
+    fs.writeFileSync(store.lockPath('issue-1-coder-test'), JSON.stringify({ pid: process.pid, startTime: '2026-07-29T00:00:00.000Z' }), 'utf8');
 
     assert.throws(
       () => lease.acquireLease(store, 'issue-1-coder-test', {
@@ -536,7 +677,8 @@ test('acquireLease: ロック取得後にlive leaseが現れた場合は拒否�
   try {
     // 高速チェック: leaseなし → ロック取得へ進む
     // ロック取得後の再チェック: leaseが出現
-    mockLiveness({ alive: true, identityMatch: true });
+    const checker = createTestLiveness({ probePid: () => 'alive' });
+    installTestLiveness(checker);
 
     // store.read を差し替え: 1回目はnull（高速チェック通過）、2回目はlive lease（再チェックで検出）
     let readCount = 0;
@@ -546,14 +688,20 @@ test('acquireLease: ロック取得後にlive leaseが現れた場合は拒否�
       if (readCount === 1) return null; // 高速チェック
       if (readCount >= 2) {
         // ロック下の再チェック: live leaseが出現
-        return { pid: 7777, startTime: '2026-07-28T00:00:00.000Z', workerName: 'issue-1-coder-test', createdAt: 'x' };
+        const ref = checker.captureProcess(7777, {
+          workspace: store.workspace,
+          kind: 'worker',
+          name: 'issue-1-coder-test',
+          instanceId: 'racing-worker-instance',
+        });
+        return checker.writeRef({ workerName: 'issue-1-coder-test', createdAt: 'x' }, ref);
       }
       return origRead(key);
     };
 
     assert.throws(
       () => lease.acquireLease(store, 'issue-1-coder-test', {
-        processRef: testProcessRef(4242), workerName: 'issue-1-coder-test',
+        processRef: testProcessRef(process.pid), workerName: 'issue-1-coder-test',
       }),
       /既に稼働中/
     );
@@ -730,13 +878,16 @@ test('releaseResidentLeaseForProcess: 異なる参照のleaseは削除しない'
   }
 });
 
-test('acquireResidentLease: 不透明な参照のPIDと起動時刻をleaseへ保存する', () => {
+test('acquireResidentLease: 不透明な参照のPIDとOS資源IDをleaseへ保存する', () => {
   const store = tempStore();
   const tmp = store._tmpDir;
-  const startTime = '2026-07-29T00:00:00.000Z';
   try {
     mockLiveness();
-    const processRef = activeLiveness.readRef({ pid: process.pid, startTime });
+    const processRef = activeLiveness.prepareSelf({
+      workspace: tmp,
+      kind: 'resident',
+      name: 'worker-supervisor',
+    });
 
     const result = lease.acquireResidentLease({
       workspace: tmp,
@@ -745,8 +896,98 @@ test('acquireResidentLease: 不透明な参照のPIDと起動時刻をleaseへ�
     });
 
     assert.equal(store.read(lease.roleLeaseKey('worker-supervisor')).pid, process.pid);
-    assert.equal(store.read(lease.roleLeaseKey('worker-supervisor')).startTime, startTime);
+    assert.equal(typeof store.read(lease.roleLeaseKey('worker-supervisor')).resourceKey, 'string');
     result.release();
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireResidentLease: plugin takeover は生存中の同役割monitorを止めて後発をlease ownerにする', () => {
+  const store = tempStore();
+  const workspace = store._tmpDir;
+  let oldMonitorAlive = true;
+  const checker = createTestLiveness({
+    probePid: (pid) => pid === process.pid ? 'alive' : pid === 4242 && oldMonitorAlive ? 'alive' : 'dead',
+  });
+  try {
+    installTestLiveness(checker);
+    const role = lease.POLL_PR_MONITOR_ROLE;
+    const oldRef = checker.captureProcess(4242, {
+      workspace, kind: 'resident', name: role, instanceId: 'old-plugin-monitor-instance',
+    });
+    checker.captureProcess(4242, {
+      workspace, kind: 'resident-takeover', name: role, instanceId: 'old-plugin-takeover-instance',
+    });
+    const residentStore = lease.createResidentLeaseStore(workspace);
+    residentStore.write(lease.roleLeaseKey(role), checker.writeRef({
+      workerName: role,
+      phase: 'active',
+      createdAt: '2026-10-29T00:00:00.000Z',
+    }, oldRef));
+
+    const killedPids = [];
+    lease._setKillProcessTree((pid) => {
+      killedPids.push(pid);
+      oldMonitorAlive = false;
+    });
+    lease._setSleep(() => {});
+
+    const newRef = checker.prepareSelf({ workspace, kind: 'resident', name: role });
+    const result = lease.acquireResidentLease({
+      workspace,
+      role,
+      handoff: true,
+      takeover: true,
+      processRef: newRef,
+    });
+
+    assert.equal(result.acquired, true);
+    assert.deepEqual(killedPids, [4242]);
+    const newLease = residentStore.read(lease.roleLeaseKey(role));
+    assert.equal(newLease.pid, process.pid);
+    assert.equal(typeof newLease.resourceKey, 'string');
+    assert.notEqual(newLease.resourceKey, 'old-plugin-monitor-resource');
+    result.release();
+  } finally {
+    cleanupStore(store);
+  }
+});
+
+test('acquireResidentLease: plugin takeover は旧monitorがunknownなら停止もlease置換もしない', () => {
+  const store = tempStore();
+  const workspace = store._tmpDir;
+  const checker = createTestLiveness({
+    probePid: (pid) => pid === process.pid ? 'alive' : 'unknown',
+  });
+  try {
+    installTestLiveness(checker);
+    const role = lease.POLL_PR_MONITOR_ROLE;
+    const oldRef = checker.captureProcess(4242, {
+      workspace, kind: 'resident', name: role, instanceId: 'unknown-plugin-monitor-instance',
+    });
+    const residentStore = lease.createResidentLeaseStore(workspace);
+    const oldLease = checker.writeRef({
+      workerName: role,
+      phase: 'active',
+      createdAt: '2026-10-29T00:00:00.000Z',
+    }, oldRef);
+    residentStore.write(lease.roleLeaseKey(role), oldLease);
+
+    const killedPids = [];
+    lease._setKillProcessTree((pid) => killedPids.push(pid));
+    lease._setSleep(() => {});
+
+    assert.throws(() => lease.acquireResidentLease({
+      workspace,
+      role,
+      handoff: true,
+      takeover: true,
+      processRef: checker.prepareSelf({ workspace, kind: 'resident', name: role }),
+    }), /確認できません/);
+
+    assert.deepEqual(killedPids, []);
+    assert.deepEqual(residentStore.read(lease.roleLeaseKey(role)), oldLease);
   } finally {
     cleanupStore(store);
   }
@@ -760,7 +1001,9 @@ test('acquireResidentLease: 自プロセス以外のPIDをidentityとして受�
       () => lease.acquireResidentLease({
         workspace: tmp,
         role: 'worker-supervisor',
-        processRef: processLiveness.readRef({ pid: process.pid + 1, startTime: '2026-07-29T00:00:00.000Z' }),
+        processRef: activeLiveness.captureProcess(process.pid + 1, {
+          workspace: tmp, kind: 'resident', name: 'worker-supervisor', instanceId: 'other-process-instance',
+        }),
       }),
       /不透明な参照が自プロセス/
     );
@@ -779,7 +1022,7 @@ test('acquireResidentLease: 未確定のidentityでは新規leaseを作成しな
       () => lease.acquireResidentLease({
         workspace: tmp,
         role: 'worker-supervisor',
-        processRef: activeLiveness.readRef({ pid: process.pid, startTime: null }),
+        processRef: activeLiveness.readRef({ pid: process.pid, legacyEndpointless: true }),
       }),
       /不透明な参照が自プロセス/
     );
@@ -855,18 +1098,18 @@ test('releaseResidentLeaseForProcess: 所有者identityが不足する場合はl
 
 // ── activateLease ─────────────────────────────────────────────────────────────
 
-test('activateLease: リースのPIDとstartTimeを実際のワーカー情報で更新する', () => {
+test('activateLease: リースのPIDとOS資源IDを実際のワーカー情報で更新する', () => {
   const store = tempStore();
   try {
     store.write('test-key', {
       pid: 100, startTime: 'old', workerName: 'w', createdAt: '2026-07-29T00:00:00.000Z',
     });
 
-    lease.activateLease(store, 'test-key', testProcessRef(4242, '2026-07-29T00:00:01.000Z'));
+    lease.activateLease(store, 'test-key', testProcessRef(4242, '2026-07-29T00:00:00.000Z'));
 
     const entry = store.read('test-key');
     assert.equal(entry.pid, 4242);
-    assert.equal(entry.startTime, '2026-07-29T00:00:01.000Z');
+    assert.equal(typeof entry.resourceKey, 'string');
     assert.equal(entry.workerName, 'w');
     assert.equal(entry.createdAt, '2026-07-29T00:00:00.000Z');
   } finally {
@@ -901,8 +1144,8 @@ test('activateLease: callerが捕捉したProcessRefをそのまま保存する'
 
     const entry = store.read('test-key');
     assert.equal(entry.pid, process.pid);
-    assert.equal(entry.startTime, '2026-07-29T00:00:00.000Z');
-    assert.equal(calls, 1, 'activateLeaseは参照を捕捉し直さない');
+    assert.equal(typeof entry.resourceKey, 'string');
+    assert.equal(calls, 0, 'activateLease はプロセス起動時刻を照会しない');
   } finally {
     cleanupStore(store);
   }
@@ -919,8 +1162,9 @@ test('activateLease: 起動時刻を取得できない場合はleaseを更新し
       phase: 'initializing',
     };
     store.write('test-key', existing);
-    setReader(() => null);
-    const processRef = activeLiveness.captureSelf();
+    const unknownLiveness = createResourceLiveness({ useRealResources: false, probeEndpoint: () => 'unknown' });
+    installTestLiveness(unknownLiveness);
+    const processRef = unknownLiveness.captureSelf();
 
     assert.throws(
       () => lease.activateLease(store, 'test-key', processRef),
@@ -1066,7 +1310,7 @@ test('msgPollRole: MSGPOLL_ORCHESTRATOR_ROLE と msg-poll.js の role 構築が�
 });
 
 test('acquireResidentLease: live lease が無ければ取得して自PIDでアクティブ化する', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  const tmp = createTestTempDir();
   try {
     mockLiveness({ alive: true });
     const res = lease.acquireResidentLease({ workspace: tmp, role: 'worker-supervisor' });
@@ -1084,14 +1328,18 @@ test('acquireResidentLease: live lease が無ければ取得して自PIDでア�
     }
     assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'worker-supervisor' }), false);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    cleanupTestTempDir(tmp);
   }
 });
 
-test('acquireResidentLease: アクティベート（update）失敗時も警告して継続し、起動を拒否しない（Issue #252）', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+test('acquireResidentLease: endpoint取得後のlease metadata更新失敗は警告して継続する', () => {
+  const tmp = createTestTempDir();
   try {
-    mockLiveness({ alive: true });
+    const checker = createTestLiveness({
+      probePid: (pid) => pid === process.pid ? 'alive' : 'dead',
+    });
+    installTestLiveness(checker);
+    writeResidentLease(tmp, checker, 'worker-supervisor', 999999, 'stale-worker-supervisor');
 
     // Windows で他プロセスが対象ファイルを掴む rename EPERM を再現する。atomic-write.js の
     // リトライ予算（500ms）を使い切って throw するまで fs.renameSync を失敗させ、update が
@@ -1110,15 +1358,11 @@ test('acquireResidentLease: アクティベート（update）失敗時も警告�
       try {
         assert.equal(res.acquired, true);
         // 黙って素通りせず、アクティベート失敗が警告されている
-        assert.ok(warnings.some(w => w.includes('アクティベートに失敗')),
+        assert.ok(warnings.some(w => w.includes('リースメタデータを保存できません')),
           `warnings: ${JSON.stringify(warnings)}`);
-        // リース本体は acquireLease で作成済みのまま残る（phase は initializing のまま）
+        // endpointが排他の正本なので、補助メタデータ更新が失敗しても新所有者はlive。
         const canonical = storageLayout.canonicalWorkspace(tmp);
-        const entry = JSON.parse(fs.readFileSync(
-          path.join(canonical, '.gh-maestro', 'leases', lease.roleLeaseKey('worker-supervisor') + '.json'), 'utf8'));
-        assert.equal(entry.pid, process.pid);
-        assert.equal(entry.phase, 'initializing');
-        // 稼働中は正しく live とみなされ、重複起動防止は維持される
+        assert.equal(fs.existsSync(path.join(canonical, '.gh-maestro', 'leases', lease.roleLeaseKey('worker-supervisor') + '.json')), true);
         assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'worker-supervisor' }), true);
       } finally {
         res.release();
@@ -1130,20 +1374,16 @@ test('acquireResidentLease: アクティベート（update）失敗時も警告�
       console.warn = origWarn;
     }
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    cleanupTestTempDir(tmp);
   }
 });
 
 test('acquireResidentLease: live lease があれば lock-denied を監査記録して throw する', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  const tmp = createTestTempDir();
   try {
     mockLiveness({ alive: true });
     const canonical = storageLayout.canonicalWorkspace(tmp);
-    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
-    fs.mkdirSync(leasesDir, { recursive: true });
-    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
-      pid: 424242, startTime: '2026-07-29T00:00:00.424Z', workerName: 'worker-supervisor', phase: 'active',
-    }), 'utf8');
+    writeResidentLease(tmp, activeLiveness, 'worker-supervisor', 424242, 'existing-worker-supervisor');
 
     assert.throws(
       () => lease.acquireResidentLease({ workspace: tmp, role: 'worker-supervisor' }),
@@ -1158,20 +1398,15 @@ test('acquireResidentLease: live lease があれば lock-denied を監査記録�
     assert.equal(denied[0].event.role, 'worker-supervisor');
     assert.equal(denied[0].event.detail.ownerPid, 424242);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    cleanupTestTempDir(tmp);
   }
 });
 
 test('acquireResidentLease: workspace 表記の差異（末尾スラッシュ）でも同一の排他領域で拒否する（Issue #240）', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  const tmp = createTestTempDir();
   try {
     mockLiveness({ alive: true });
-    const canonical = storageLayout.canonicalWorkspace(tmp);
-    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
-    fs.mkdirSync(leasesDir, { recursive: true });
-    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
-      pid: 424242, startTime: '2026-07-29T00:00:00.424Z', workerName: 'worker-supervisor', phase: 'active',
-    }), 'utf8');
+    writeResidentLease(tmp, activeLiveness, 'worker-supervisor', 424242, 'existing-worker-supervisor');
 
     // 生パスと「末尾スラッシュ付き」の表記が異なっても、同じ canonical へ正規化され同一排他領域になる
     assert.throws(
@@ -1179,31 +1414,26 @@ test('acquireResidentLease: workspace 表記の差異（末尾スラッシュ）
       /重複起動できません/
     );
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    cleanupTestTempDir(tmp);
   }
 });
 
 test('acquireResidentLease: --force は既存所有者を停止させて同じ lease を再取得する', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  const tmp = createTestTempDir();
   try {
-    mockLiveness({ alive: true });
     // 既存所有者が kill されるまで alive、kill されたら false を返す
     let ownerAlive = true;
     const ownerPid = 424242;
-    installTestLiveness(require('../scripts/shared/process-liveness').createLiveness({
+    const checker = createTestLiveness({
       probePid: (pid) => ownerAlive || pid !== ownerPid ? 'alive' : 'dead',
-      readStartTime: () => '2026-07-29T00:00:00.424Z',
-    }));
+    });
+    installTestLiveness(checker);
     const kills = [];
     lease._setKillProcessTree((pid) => { kills.push(pid); ownerAlive = false; });
     lease._setSleep(() => {});
 
     const canonical = storageLayout.canonicalWorkspace(tmp);
-    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
-    fs.mkdirSync(leasesDir, { recursive: true });
-    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
-      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'worker-supervisor', phase: 'active',
-    }), 'utf8');
+    writeResidentLease(tmp, checker, 'worker-supervisor', ownerPid, 'handoff-owner-instance');
 
     const res = lease.acquireResidentLease({
       workspace: tmp,
@@ -1223,15 +1453,15 @@ test('acquireResidentLease: --force は既存所有者を停止させて同じ l
       res.release();
     }
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    cleanupTestTempDir(tmp);
   }
 });
 
-test('acquireResidentLease: startTime 欠落の細工リースは --force の停止対象にしない（任意PID誤kill防止）', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+test('acquireResidentLease: endpoint probeのunknownではPR1形式リースを保持して引き継がない', () => {
+  const tmp = createTestTempDir();
   try {
     const ownerPid = 424242;
-    mockLiveness({ alive: true });
+    installTestLiveness(createTestLiveness({ probeEndpoint: () => 'unknown' }));
     const kills = [];
     lease._setKillProcessTree((pid) => { kills.push(pid); });
     lease._setSleep(() => {});
@@ -1247,28 +1477,101 @@ test('acquireResidentLease: startTime 欠落の細工リースは --force の停
     assert.throws(() => lease.acquireResidentLease({
       workspace: tmp, role: 'worker-supervisor', handoff: true,
       deadlineMs: 50, env: { GH_MAESTRO_WORKER: 'orchestrator' },
-    }), /判定できません/);
+    }), { code: 'LIVENESS_UNKNOWN' });
     assert.deepEqual(kills, []);
-    assert.ok(fs.existsSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json')));
+    assert.equal(lease.createResidentLeaseStore(tmp).read(lease.roleLeaseKey('worker-supervisor')).pid, ownerPid);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    cleanupTestTempDir(tmp);
   }
 });
 
-test('acquireResidentLease: --force でも所有者が終了しなければ期限超過で acquired:false（本稼働へ進まない）', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+test('acquireResidentLease: deterministic endpointがdeadならPIDが存在するPR1形式リースも上書きする', () => {
+  const tmp = createTestTempDir();
   try {
-    mockLiveness({ alive: true });
     const ownerPid = 424242;
-    lease._setKillProcessTree(() => {}); // 止めても ownerAlive は変わらない
+    installTestLiveness(createTestLiveness({
+      probePid: () => 'alive',
+    }));
+    const kills = [];
+    lease._setKillProcessTree((pid) => { kills.push(pid); });
     lease._setSleep(() => {});
 
     const canonical = storageLayout.canonicalWorkspace(tmp);
     const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
     fs.mkdirSync(leasesDir, { recursive: true });
     fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
-      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'worker-supervisor', phase: 'active',
+      pid: ownerPid, workerName: 'worker-supervisor', phase: 'active',
+      startTime: '2026-01-01T00:00:00.000Z',
+      legacyEndpointless: true,
     }), 'utf8');
+
+    const result = lease.acquireResidentLease({
+      workspace: tmp, role: 'worker-supervisor', handoff: true,
+      deadlineMs: 50, env: { GH_MAESTRO_WORKER: 'orchestrator' },
+    });
+    assert.equal(result.acquired, true);
+    assert.deepEqual(kills, []);
+    assert.equal(lease.createResidentLeaseStore(tmp).read(lease.roleLeaseKey('worker-supervisor')).pid, process.pid);
+    result.release();
+  } finally {
+    cleanupTestTempDir(tmp);
+  }
+});
+
+test('isResidentLeaseLive: deterministic endpointがdeadならendpointless PR1記録は遺物として扱う', () => {
+  const tmp = createTestTempDir();
+  try {
+    const ownerPid = 424242;
+    const store = lease.createResidentLeaseStore(tmp);
+    store.write(lease.roleLeaseKey('worker-supervisor'), {
+      pid: ownerPid,
+      workerName: 'worker-supervisor',
+      phase: 'active',
+      startTime: '2026-01-01T00:00:00.000Z',
+      legacyEndpointless: true,
+    });
+    installTestLiveness(createTestLiveness({
+      probePid: (pid) => pid === ownerPid ? 'unknown' : 'alive',
+    }));
+
+    assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'worker-supervisor' }), false);
+  } finally {
+    cleanupTestTempDir(tmp);
+  }
+});
+
+test('isResidentLeaseLive: endpoint probeのunknownはPR1記録が残っていてもunknownとして報告する', () => {
+  const tmp = createTestTempDir();
+  try {
+    const store = lease.createResidentLeaseStore(tmp);
+    store.write(lease.roleLeaseKey('worker-supervisor'), {
+      pid: 424242,
+      workerName: 'worker-supervisor',
+      phase: 'active',
+      startTime: '2026-01-01T00:00:00.000Z',
+      legacyEndpointless: true,
+    });
+    installTestLiveness(createTestLiveness({ probeEndpoint: () => 'unknown' }));
+
+    assert.throws(() => lease.isResidentLeaseLive({ workspace: tmp, role: 'worker-supervisor' }), {
+      code: 'LIVENESS_UNKNOWN',
+    });
+  } finally {
+    cleanupTestTempDir(tmp);
+  }
+});
+
+test('acquireResidentLease: --force でも所有者が終了しなければ期限超過で acquired:false（本稼働へ進まない）', () => {
+  const tmp = createTestTempDir();
+  try {
+    const ownerPid = 424242;
+    const checker = createTestLiveness({ probePid: () => 'alive' });
+    installTestLiveness(checker);
+    lease._setKillProcessTree(() => {}); // 止めても ownerAlive は変わらない
+    lease._setSleep(() => {});
+
+    const canonical = storageLayout.canonicalWorkspace(tmp);
+    writeResidentLease(tmp, checker, 'worker-supervisor', ownerPid, 'timeout-owner-instance');
 
     const res = lease.acquireResidentLease({ workspace: tmp, role: 'worker-supervisor', handoff: true, deadlineMs: 50, env: { GH_MAESTRO_WORKER: 'orchestrator' } });
     assert.equal(res.acquired, false);
@@ -1280,12 +1583,12 @@ test('acquireResidentLease: --force でも所有者が終了しなければ期�
     const denied = events.filter(e => e.event.type === 'lock-denied' && e.event.detail.reason === 'handoff-timeout');
     assert.equal(denied.length, 1);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    cleanupTestTempDir(tmp);
   }
 });
 
 test('acquireResidentLease: GH_MAESTRO_WORKER がワーカー名のときは handoff を拒否し kill しない（Issue #384）', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  const tmp = createTestTempDir();
   try {
     mockLiveness({ alive: true });
     const ownerPid = 424242;
@@ -1293,11 +1596,7 @@ test('acquireResidentLease: GH_MAESTRO_WORKER がワーカー名のときは han
     lease._setKillProcessTree((pid) => { kills.push(pid); });
 
     const canonical = storageLayout.canonicalWorkspace(tmp);
-    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
-    fs.mkdirSync(leasesDir, { recursive: true });
-    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
-      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'worker-supervisor', phase: 'active',
-    }), 'utf8');
+    writeResidentLease(tmp, activeLiveness, 'worker-supervisor', ownerPid, 'worker-guard-owner');
 
     assert.throws(
       () => lease.acquireResidentLease({
@@ -1311,12 +1610,12 @@ test('acquireResidentLease: GH_MAESTRO_WORKER がワーカー名のときは han
 
     assert.deepEqual(kills, [], 'ワーカーからの要求で既存プロセスを kill してはならない');
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    cleanupTestTempDir(tmp);
   }
 });
 
 test('acquireResidentLease: GH_MAESTRO_WORKER が未設定のときは handoff を拒否し kill しない（Issue #384）', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-lease-test-'));
+  const tmp = createTestTempDir();
   try {
     mockLiveness({ alive: true });
     const ownerPid = 424242;
@@ -1324,11 +1623,7 @@ test('acquireResidentLease: GH_MAESTRO_WORKER が未設定のときは handoff �
     lease._setKillProcessTree((pid) => { kills.push(pid); });
 
     const canonical = storageLayout.canonicalWorkspace(tmp);
-    const leasesDir = path.join(canonical, '.gh-maestro', 'leases');
-    fs.mkdirSync(leasesDir, { recursive: true });
-    fs.writeFileSync(path.join(leasesDir, lease.roleLeaseKey('worker-supervisor') + '.json'), JSON.stringify({
-      pid: ownerPid, startTime: '2026-07-29T00:00:00.424Z', workerName: 'worker-supervisor', phase: 'active',
-    }), 'utf8');
+    writeResidentLease(tmp, activeLiveness, 'worker-supervisor', ownerPid, 'unset-worker-guard-owner');
 
     assert.throws(
       () => lease.acquireResidentLease({
@@ -1342,7 +1637,7 @@ test('acquireResidentLease: GH_MAESTRO_WORKER が未設定のときは handoff �
 
     assert.deepEqual(kills, [], '名乗り無しでの要求で既存プロセスを kill してはならない');
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    cleanupTestTempDir(tmp);
   }
 });
 
@@ -1350,10 +1645,12 @@ test('acquireResidentLease: GH_MAESTRO_WORKER が未設定のときは handoff �
 test('acquireLeaseLock: 同一性不明の保持者のロックを残して中断する', () => {
   const store = tempStore();
   try {
-    setReader(() => '2026-01-01T00:00:00.000Z');
+    installTestLiveness(createTestLiveness({
+      probePid: (pid) => pid === process.pid ? 'alive' : 'unknown',
+    }));
     const lp = store.lockPath('unknown-holder');
     fs.mkdirSync(path.dirname(lp), { recursive: true });
-    const raw = JSON.stringify({ pid: process.pid });
+    const raw = JSON.stringify({ pid: process.pid + 1 });
     fs.writeFileSync(lp, raw);
     assert.throws(() => lease.acquireLeaseLock(store, 'unknown-holder'), /判定できません/);
     assert.equal(fs.readFileSync(lp, 'utf8'), raw);
@@ -1365,13 +1662,19 @@ test('acquireLease: 不明な所有者のリースを保持し二重起動を拒
   try {
     const existing = { pid: 4242, startTime: '2026-07-29T00:00:00.000Z' };
     store.write('unknown', existing);
-    installTestLiveness(require('../scripts/shared/process-liveness').createLiveness({
-      probePid: (pid) => pid === process.pid ? 'alive' : 'unknown',
-      readStartTime: (pid) => pid === process.pid ? '2026-07-29T00:00:00.000Z' : null,
-    }));
+    const unknownWorkerEndpoint = testEndpointPath({
+      workspace: store.workspace,
+      kind: 'worker',
+      name: 'unknown',
+    });
+    const checker = createTestLiveness({
+      probePid: () => 'alive',
+      probeEndpoint: (endpoint) => endpoint === unknownWorkerEndpoint ? 'unknown' : 'alive',
+    });
+    installTestLiveness(checker);
     assert.throws(() => lease.acquireLease(store, 'unknown', {
-      processRef: testProcessRef(process.pid, '2026-07-29T00:00:00.000Z'), workerName: 'unknown',
-    }), /判定できません/);
+      processRef: checker.captureProcess(process.pid, 'launcher', 'test-instance'), workerName: 'unknown',
+    }), { code: 'LIVENESS_UNKNOWN' });
     assert.deepEqual(store.read('unknown'), existing);
   } finally { installTestLiveness(null); cleanupStore(store); }
 });
@@ -1393,25 +1696,34 @@ test('acquireLease: EEXIST 後に不明な lease が現れても削除しない'
   const store = tempStore();
   try {
     const existing = { pid: 4242, startTime: '2026-07-29T00:00:00.000Z' };
+    let workerEndpointState = 'dead';
+    const unknownWorkerEndpoint = testEndpointPath({
+      workspace: store.workspace,
+      kind: 'worker',
+      name: 'race',
+    });
+    const checker = createTestLiveness({
+      probePid: () => 'alive',
+      probeEndpoint: (endpoint) => endpoint === unknownWorkerEndpoint ? workerEndpointState : 'alive',
+    });
+    installTestLiveness(checker);
+    const processRef = checker.captureProcess(process.pid, 'launcher', 'test-instance');
     const write = store.write.bind(store);
     let first = true;
     store.write = (key, value) => {
       if (first) {
         first = false;
         write(key, existing);
+        workerEndpointState = 'unknown';
         const error = new Error('already exists');
         error.code = 'EEXIST';
         throw error;
       }
       return write(key, value);
     };
-    installTestLiveness(require('../scripts/shared/process-liveness').createLiveness({
-      probePid: (pid) => pid === process.pid ? 'alive' : 'unknown',
-      readStartTime: (pid) => pid === process.pid ? '2026-07-29T00:00:00.000Z' : null,
-    }));
     assert.throws(() => lease.acquireLease(store, 'race', {
-      processRef: testProcessRef(process.pid, '2026-07-29T00:00:00.000Z'), workerName: 'race',
-    }), /判定できません/);
+      processRef, workerName: 'race',
+    }), { code: 'LIVENESS_UNKNOWN' });
     assert.deepEqual(store.read('race'), existing);
   } finally { installTestLiveness(null); cleanupStore(store); }
 });
