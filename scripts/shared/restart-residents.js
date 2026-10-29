@@ -4,14 +4,15 @@
 //
 // restart-residents.js (CLI) と reset-session.js の両方が、常駐を停止したあとに
 // 同じ検証済み registry 情報から現行スクリプトを立ち上げるために使う。PID registry
-// の生存確認だけでkill対象を決めず、停止直前にも起動時刻の同一性を確認する。
+// の生存確認だけでkill対象を決めず、停止直前にもOS資源参照の同一性を確認する。
 //
 // poll-pr.js は poll-reviews.js を子プロセスとして起動するため、両方が登録されて
 // いた場合は poll-reviews.js を単独で二重起動しない。msg-poll.js と poll-pr.js は
-// stdout が呼び出し元の Monitor へ届く契約を持つため、旧形式のMonitor常駐はdetached
-// 起動せず、停止後にMonitorから同じ引数で張り直すコマンドを返す。plugin monitor から
-// 起動された常駐は plugin のセッションライフサイクルが正本なので、install/resetで
-// killや張り直しを行わず、稼働中のプロセスを保持する。
+// stdout が呼び出し元の Monitor へ届く契約を持つため、旧形式の通常Monitor常駐はdetached
+// 起動せず、停止後にMonitorから同じ引数で張り直すコマンドを返す。現行plugin monitorは
+// pluginのセッションライフサイクルが正本なので通常のinstall/resetでは保持する。
+// installのPR1移行だけはendpointを持たない旧plugin常駐を停止し、次の対話型plugin sessionが
+// 現行コードを起動する。
 
 const fs = require('fs');
 const path = require('path');
@@ -19,11 +20,11 @@ const { spawn, spawnSync } = require('./child-process');
 const { killProcessTree } = require('./kill-tree');
 const { loadStatusPane } = require('./status-pane-registry');
 const processLiveness = require('./process-liveness');
+const { createChildLivenessEnv } = processLiveness;
 const {
   findRunningInstances,
   unregisterProcess,
   pidFilePath,
-  findSessionRootPid,
 } = require('../process-lifecycle');
 const {
   LEGACY_INBOX_SUPERVISOR_ROLE,
@@ -66,7 +67,6 @@ function createResidentRestartHooks() {
     findRunningInstances,
     unregisterProcess,
     pidFilePath,
-    findSessionRootPid,
     killProcessTree,
     releaseResidentLeaseForProcess,
     spawn,
@@ -102,92 +102,12 @@ function isPluginManagedEntry(entry) {
  * @param {object} [opts]
  * @returns {object[]}
  */
-function resolveResidentSessionPid(entry, spec, hooks, opts = {}) {
-  const argsPid = parseSessionPid(entry.args);
-  if (isValidPid(argsPid)) return { pid: argsPid, source: 'registry-args' };
-
-  if (isValidPid(entry.sessionPid)) {
-    return { pid: entry.sessionPid, source: 'registry-session-pid' };
-  }
-
-  // restart-residents自身の親ではなく、入れ替え対象だった常駐プロセスの
-  // 親チェーンを起点に解決する。これなら通常のMonitor起動でargvへ
-  // --session-pidが渡されていなくても、元プロセスと同じdead-man's switchの
-  // 対象を引き継げる。停止後は親チェーンを辿れないため、capture時に解決する。
-  if (isValidPid(entry.pid) && typeof hooks.findSessionRootPid === 'function') {
-    try {
-      const residentParentPid = hooks.findSessionRootPid(entry.pid);
-      if (isValidPid(residentParentPid)) {
-        return { pid: residentParentPid, source: 'resident-parent-chain' };
-      }
-    } catch {}
-  }
-
-  // worker-supervisorの旧registryだけは、対象プロセスの親チェーンも解決できない
-  // 場合に限り従来のCLI親チェーンへフォールバックする。Monitor出力を持つ3種は
-  // 使い捨てCLIに紐づけると寿命契約を壊すため、ここでは推測起動しない。
-  if (spec.script === 'worker-supervisor.js') {
-    const fallback = opts.fallbackSessionPid
-      ?? (typeof hooks.findSessionRootPid === 'function' ? hooks.findSessionRootPid() : null);
-    if (isValidPid(fallback)) return { pid: fallback, source: 'restart-cli-parent-chain' };
-  }
-  return null;
-}
-
-function prepareResidentEntry(entry, hooks, opts = {}) {
-  const spec = specForScript(entry.script);
-  if (!spec) return entry;
-  if (parseSessionPid(entry.args) || isValidPid(entry.sessionPid) || isValidPid(entry.restartSessionPid)) {
-    return entry;
-  }
-  const resolved = resolveResidentSessionPid(entry, spec, hooks, opts);
-  if (!resolved) return entry;
-  return {
-    ...entry,
-    restartSessionPid: resolved.pid,
-    restartSessionPidSource: resolved.source,
-  };
-}
-
 function captureResidentEntries(workspace, hooks = createResidentRestartHooks(), opts = {}) {
-  return hooks.findRunningInstances(workspace, { failOnReadError: true })
-    .filter(isResidentEntry)
-    .map((entry) => prepareResidentEntry(entry, hooks, opts));
-}
-
-function parseSessionPid(args) {
-  if (!Array.isArray(args)) return null;
-  for (let i = 0; i < args.length - 1; i++) {
-    if (args[i] !== '--session-pid') continue;
-    const pid = Number.parseInt(args[i + 1], 10);
-    if (Number.isFinite(pid) && pid > 0) return pid;
-  }
-  return null;
-}
-
-/**
- * registryの引数から --session-pid だけを差し替える。引数はshellへ渡さず、
- * child_process.spawnへ配列のまま渡すため、値にシェル構文が含まれていても解釈されない。
- */
-function replaceSessionPid(args, sessionPid) {
-  const source = Array.isArray(args) ? args : [];
-  const result = [];
-  let hadSessionPid = false;
-  for (let i = 0; i < source.length; i++) {
-    if (source[i] === '--session-pid') {
-      hadSessionPid = true;
-      i += 1;
-      continue;
-    }
-    result.push(source[i]);
-  }
-  if (isValidPid(sessionPid)) {
-    result.push('--session-pid', String(sessionPid));
-  } else if (hadSessionPid) {
-    // 呼び出し元が無効なPIDを渡した場合に、古い値を黙って残さない。
-    throw new Error('--session-pid が正の整数ではありません');
-  }
-  return result;
+  return hooks.findRunningInstances(workspace, {
+    failOnReadError: true,
+    includeUnknownLegacy: opts.upgradeLegacy === true,
+  })
+    .filter(isResidentEntry);
 }
 
 function fallbackArgs(spec, workspace) {
@@ -197,13 +117,8 @@ function fallbackArgs(spec, workspace) {
 }
 
 /**
- * 起動対象の引数を構築する。
- *
- * 既存プロセスの --session-pid は、restart CLIの親チェーンではなく、対象プロセスが
- * 実際に使っていた値を引き継ぐ。引数に無い場合も、停止前に対象プロセス自身の
- * 親チェーンから解決した値を使う。使い捨てrestart CLIの親チェーンをmsg-poll等へ
- * 渡すことはしない。worker-supervisorだけは対象の親チェーンも解決できない旧形式に
- * 限り、既存のCLI自動起動と同じ親チェーンをフォールバックに使う。
+ * 起動対象の引数を構築する。古い registry argv に残った --session-pid は、
+ * 親セッション監視を使わない現行residentへ渡さない。
  */
 function buildRestartArgs(spec, entry, workspace, hooks, opts = {}) {
   const recordedArgs = Array.isArray(entry.args) && entry.args.every((arg) => typeof arg === 'string')
@@ -217,47 +132,8 @@ function buildRestartArgs(spec, entry, workspace, hooks, opts = {}) {
     throw new Error(`${spec.script} のregistry引数が無いため、Monitorから起動してください`);
   }
 
-  const recordedSessionPid = parseSessionPid(sourceArgs);
-  let sessionPid = recordedSessionPid;
-  let sessionPidSource = recordedSessionPid ? 'registry-args' : null;
-
-  if (!sessionPid && isValidPid(entry.sessionPid)) {
-    sessionPid = entry.sessionPid;
-    sessionPidSource = 'registry-session-pid';
-  }
-  if (!sessionPid && isValidPid(entry.restartSessionPid)) {
-    sessionPid = entry.restartSessionPid;
-    sessionPidSource = entry.restartSessionPidSource || 'resident-parent-chain';
-  }
-
-  if (!sessionPid && spec.script === 'worker-supervisor.js') {
-    const fallback = opts.fallbackSessionPid
-      ?? (typeof hooks.findSessionRootPid === 'function' ? hooks.findSessionRootPid() : null);
-    if (!isValidPid(fallback)) {
-      throw new Error('worker-supervisor.js の --session-pid を親セッションから解決できません');
-    }
-    sessionPid = fallback;
-    sessionPidSource = 'restart-cli-parent-chain';
-  }
-
-  if (!sessionPid) {
-    throw new Error(`${spec.script} の --session-pid をregistryから引き継げないため、Monitorから起動してください`);
-  }
-  const checker = hooks.liveness || processLiveness;
-  const recordedSessionRef = entry.sessionPid === sessionPid
-    ? checker.readRef(entry, 'session')
-    : null;
-  const sessionRef = recordedSessionRef || checker.captureProcess(sessionPid);
-  const sessionState = checker.observe(sessionRef);
-  if (sessionState !== 'alive') {
-    const state = sessionState === 'unknown' ? '生死を判定できません' : '生存していません';
-    throw new Error(`${spec.script} の記録済みセッションPID ${sessionPid} は${state}。Monitorから起動してください`);
-  }
-
   return {
-    args: replaceSessionPid(sourceArgs, sessionPid),
-    sessionPid,
-    sessionPidSource,
+    args: sourceArgs.filter((arg, index) => arg !== '--session-pid' && sourceArgs[index - 1] !== '--session-pid'),
   };
 }
 
@@ -314,7 +190,7 @@ function cleanupLegacyResidentLease(workspace, options = {}) {
   }
   if (!lease || typeof lease !== 'object' || Array.isArray(lease)
     || !isValidPid(lease.pid) || !Number.isInteger(lease.pid)
-    || typeof lease.startTime !== 'string' || lease.startTime === '') {
+    || typeof lease.resourceKey !== 'string' || lease.resourceKey === '') {
     return { status: 'unknown', path: leasePath, reason: 'legacy resident leaseの形式が不正です' };
   }
 
@@ -338,7 +214,7 @@ function cleanupLegacyResidentLease(workspace, options = {}) {
     locked = (options.acquireLeaseLockFn || acquireLeaseLock)(store, key);
     if (!locked) return { status: 'unknown', path: leasePath, reason: 'legacy resident leaseのロックを取得できませんでした' };
     const current = JSON.parse(readFileFn(leasePath, 'utf8'));
-    if (!current || current.pid !== lease.pid || current.startTime !== lease.startTime) {
+    if (!current || current.pid !== lease.pid || current.resourceKey !== lease.resourceKey) {
       return { status: 'unknown', path: leasePath, reason: 'legacy resident leaseが確認後に変更されました' };
     }
     unlinkFn(leasePath);
@@ -396,7 +272,14 @@ function stopEntry(workspace, entry, hooks, opts = {}) {
   if (!isValidPid(entry.pid)) return { ok: false, error: 'registryのPIDが正の整数ではありません' };
   const checker = hooks.liveness || processLiveness;
   const processRef = checker.readRef(entry);
-  const state = checker.observe(processRef);
+  let state = checker.observe(processRef);
+  const upgradingLegacy = opts.upgradeLegacy === true
+    && entry.resourceKey == null && entry.instanceId == null;
+  if (state === 'unknown' && upgradingLegacy) {
+    const legacyState = checker.legacyPidStatus(entry.pid);
+    if (legacyState === 'present') state = 'alive';
+    else if (legacyState === 'dead') state = 'dead';
+  }
   if (state === 'unknown') {
     return { ok: false, error: `PID ${entry.pid} の生死を判定できません` };
   }
@@ -407,14 +290,17 @@ function stopEntry(workspace, entry, hooks, opts = {}) {
     } catch (e) {
       return { ok: false, error: `PID ${entry.pid} の停止に失敗しました: ${e.message}` };
     }
-    if (!waitUntilStopped(processRef, hooks, opts)) {
+    const stopped = upgradingLegacy
+      ? checker.legacyPidStatus(entry.pid) === 'dead'
+      : waitUntilStopped(processRef, hooks, opts);
+    if (!stopped) {
       return { ok: false, error: `PID ${entry.pid} が停止確認の期限内に終了しませんでした` };
     }
   }
 
   try {
     hooks.unregisterProcess(workspace, entry.pid, {
-      startTime: entry.startTime,
+      resourceKey: entry.resourceKey,
       script: entry.script,
       workerName: entry.workerName,
     });
@@ -487,6 +373,21 @@ function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = 
   try {
     logPath = residentLogPath(workspace, spec.script);
     logFd = fs.openSync(logPath, 'a');
+    const residentName = spec.script === 'msg-poll.js'
+      ? msgPollRole(entry.workerName ?? 'orchestrator')
+      : spec.script === 'worker-supervisor.js'
+        ? WORKER_SUPERVISOR_ROLE
+        : spec.script === 'poll-pr.js'
+          ? `poll-pr:${built.args[0]}`
+          : spec.script === 'poll-reviews.js'
+            ? `poll-reviews:${built.args[0]}`
+            : `${spec.script}:${entry.workerName ?? 'orchestrator'}`;
+    const childLiveness = createChildLivenessEnv({
+      env: process.env,
+      workspace,
+      kind: 'resident',
+      name: residentName,
+    });
     child = hooks.spawn(process.execPath, [scriptPath, ...built.args], {
       detached: true,
       windowsHide: true,
@@ -494,12 +395,13 @@ function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = 
       env: {
         ...process.env,
         GH_MAESTRO_WORKER: process.env.GH_MAESTRO_WORKER || 'orchestrator',
+        ...childLiveness.env,
       },
     });
     if (!child || !isValidPid(child.pid)) {
       return { ok: false, error: `${spec.script} のspawn結果から有効なPIDを取得できません` };
     }
-    processRef = (hooks.liveness || processLiveness).captureProcess(child.pid);
+    processRef = (hooks.liveness || processLiveness).captureProcess(child.pid, childLiveness);
     if (typeof child.unref === 'function') child.unref();
   } catch (e) {
     return { ok: false, error: `${spec.script} の起動に失敗しました: ${e.message}` };
@@ -537,8 +439,6 @@ function startEntry(workspace, scriptsPath, spec, entry, oldPids, hooks, opts = 
     ok: true,
     pid: replacement.pid,
     args: built.args,
-    sessionPid: built.sessionPid,
-    sessionPidSource: built.sessionPidSource,
     command: formatCommand(scriptPath, built.args),
   };
 }
@@ -714,8 +614,8 @@ function restartStatusPane(workspace, scriptsPath, opts = {}) {
  * @param {number} [opts.startupConfirmAttempts] detached起動後のregistry確認回数
  * @param {object} [opts.hooks] テスト用依存注入
  * @returns {{results: object[], errors: string[], entries: object[]}}
- *   Monitor常駐のstatusは `monitor-required` となり、commandsにMonitorで実行する
- *   コマンドを保持する。
+ *   通常Monitor常駐のstatusは `monitor-required` となり、commandsにMonitorで実行する
+ *   コマンドを保持する。`upgradeLegacy` で停止したPR1 plugin常駐もMonitor再起動待ちとなる。
  */
 function restartResidents(workspace, opts = {}) {
   if (!opts.scriptsPath) throw new Error('restartResidents: scriptsPath が必要です');
@@ -724,7 +624,7 @@ function restartResidents(workspace, opts = {}) {
   try {
     entries = opts.preCapturedEntries
       ? opts.preCapturedEntries.filter(isResidentEntry)
-      : captureResidentEntries(workspace, hooks, { fallbackSessionPid: opts.fallbackSessionPid });
+      : captureResidentEntries(workspace, hooks, opts);
   } catch (e) {
     const reason = `常駐registryの読み取りに失敗したため入れ替えを中断しました: ${e.message}`;
     return {
@@ -734,10 +634,6 @@ function restartResidents(workspace, opts = {}) {
     };
   }
 
-  entries = entries.map((entry) => prepareResidentEntry(entry, hooks, {
-    fallbackSessionPid: opts.fallbackSessionPid,
-  }));
-
   const capturedEntries = entries;
   const pluginManagedEntries = capturedEntries.filter(isPluginManagedEntry);
   const pluginManagedScripts = new Set(pluginManagedEntries.map((entry) => entry.script));
@@ -745,7 +641,7 @@ function restartResidents(workspace, opts = {}) {
   // plugin poll-pr の子 poll-reviews は同じ process tree に属するため、
   // poll-pr が plugin 管理なら poll-reviews も停止対象から外す。
   const entriesToRestart = capturedEntries.filter((entry) => {
-    if (isPluginManagedEntry(entry)) return false;
+    if (isPluginManagedEntry(entry) && !(opts.upgradeLegacy && entry.legacyEndpointless)) return false;
     if (hasPluginManagedPollPr && entry.script === 'poll-reviews.js') return false;
     return true;
   });
@@ -786,8 +682,8 @@ function restartResidents(workspace, opts = {}) {
   const resultByScript = new Map(results.map((result) => [result.script, result]));
   const errors = [];
 
-  // stop前に全対象の再起動引数を構築する。session-pidを解決できない対象を
-  // 先に停止すると、再起動もMonitor再接続要求もできず常駐を失うためである。
+  // stop前に全対象の再起動引数を構築する。必要なMonitor再接続コマンドを
+  // 先に確定し、停止後に接続先を失う状態を防ぐ。
   const plans = new Map();
   for (const entry of entriesToRestart) {
     const spec = specForScript(entry.script);
@@ -867,7 +763,6 @@ function restartResidents(workspace, opts = {}) {
       result.monitorRequired = true;
       result.monitorScript = spec.script;
       result.commands = commands;
-      result.sessionPids = readyEntries.map((entry) => plans.get(entry).sessionPid);
       continue;
     }
 
@@ -890,8 +785,6 @@ function restartResidents(workspace, opts = {}) {
     result.verified = true;
     result.newPids = startedEntries.map((started) => started.pid);
     result.commands = startedEntries.map((started) => started.command);
-    result.sessionPids = startedEntries.map((started) => started.sessionPid);
-    result.sessionPidSources = startedEntries.map((started) => started.sessionPidSource);
   }
 
   const result = { entries, results, errors };
@@ -937,8 +830,6 @@ module.exports = {
   createResidentRestartHooks,
   stopResidentEntry: stopEntry,
   captureResidentEntries,
-  parseSessionPid,
-  replaceSessionPid,
   buildRestartArgs,
   isResidentEntry,
   isPluginManagedEntry,
@@ -947,7 +838,6 @@ module.exports = {
   formatCommand,
   formatResidentResult,
   monitorCommandForEntry,
-  resolveResidentSessionPid,
   restartStatusPane,
   formatStatusPaneResult,
 };

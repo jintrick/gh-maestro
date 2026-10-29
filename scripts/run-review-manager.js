@@ -780,6 +780,15 @@ function persistReviewManifest({ reviewWtDir, workspace, pr, log }) {
  */
 function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log, checkpointId, parentRef }) {
   const reviewManagerRef = parentRef || processLiveness.captureSelf();
+  const jobsLiveness = processLiveness.createChildLivenessEnv({
+    env: { ...process.env, GH_MAESTRO_REVIEW_PARENT_REF: reviewManagerRef },
+    workspace: reviewWtDir,
+    kind: 'review-job',
+    name: String(pr),
+  });
+  // The runner needs the main workspace for --gh-dir validation and retry state,
+  // while its deterministic process identity remains bound to the review worktree.
+  jobsLiveness.env.GH_MAESTRO_WORKSPACE = path.dirname(ghDir);
   const r = spawnSync(process.execPath, [
     path.join(__dirname, 'run-review-jobs.js'),
     '--manifest', manifestPath,
@@ -792,7 +801,7 @@ function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewW
   ], {
     cwd: reviewWtDir,
     encoding: 'utf8',
-    env: { ...process.env, GH_MAESTRO_REVIEW_PARENT_REF: reviewManagerRef },
+    env: jobsLiveness.env,
     maxBuffer: 20 * 1024 * 1024,
   });
   if (r.stdout) log(r.stdout);
@@ -949,16 +958,19 @@ async function superviseAgentPhase({
       systemPromptText: `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
       spawnFn: spawn,
       spawnOptions: { stdio: ['pipe', agentFd, agentFd] },
-      onSpawn: (child) => {
+      livenessLogPath: logFile,
+      onSpawn: (child, livenessInfo) => {
         // 成果物を先に検出して observe が戻っても、子プロセスが終了するまでは
         // stdout/stderr の出力先を閉じない。終了後の診断ログを失わないためである。
         watchChildEnd(child);
-        if (child && child.pid) agentRef = processLiveness.captureProcess(child.pid);
+        if (child && child.pid && livenessInfo) agentRef = livenessInfo.processRef;
         if (child.stdin) child.stdin.end();
       },
       observe: async (agentChild) => {
         const agentPid = agentChild.pid;
-        agentRef = agentRef || (agentPid ? processLiveness.captureProcess(agentPid) : null);
+        agentRef = agentRef || (agentChild._ghMaestroLiveness
+          ? agentChild._ghMaestroLiveness.processRef
+          : null);
 
         // プロセス終了を phaseSignal で表現し、pollForArtifact を即座に中断させる。
         // 呼び出し元の共有 signal は外部中止用であり、ここでは変更しない。
@@ -1061,7 +1073,7 @@ function mapAgentPhaseFailure(phase, reviewWtDir) {
  */
 async function superviseReviewManager({
   pr, repo, workspace, ghDir, lockFile, logFile,
-  outputFile, deadlineMs, log, signal, issue, lockOwner, resume = false,
+  outputFile, deadlineMs, log, signal, issue, lockOwner, startedAt = new Date().toISOString(), resume = false,
 }) {
   // 1. ディレクトリ作成・ロック
   try {
@@ -1069,7 +1081,7 @@ async function superviseReviewManager({
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
     fs.mkdirSync(path.dirname(lockFile), { recursive: true });
     const owner = lockOwner || processLiveness.captureSelf();
-    writeRunningReviewManager(lockFile, owner);
+    writeRunningReviewManager(lockFile, { processRef: owner, startTime: startedAt });
     const startupToken = process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN;
     if (startupToken) {
       const released = releaseReviewManagerStartup(lockFile, startupToken);
@@ -1233,7 +1245,12 @@ async function superviseReviewManager({
   ], {
     cwd: workspace,
     encoding: 'utf8',
-    env: { ...process.env, GH_MAESTRO_REVIEW_PARENT_REF: lockOwner || processLiveness.captureSelf() },
+    env: (() => {
+      const env = { ...process.env, GH_MAESTRO_REVIEW_PARENT_REF: lockOwner || processLiveness.captureSelf() };
+      delete env.GH_MAESTRO_RESOURCE_KEY;
+      delete env.GH_MAESTRO_INSTANCE_ID;
+      return env;
+    })(),
     maxBuffer: 20 * 1024 * 1024,
   });
   if (publish.stdout) log(publish.stdout);
@@ -1312,7 +1329,11 @@ if (require.main === module) {
     const lockFile = spec.leaseStore;
     const logFile = spec.logPath;
     const outputFile = reviewArtifactPath(workspace, pr, '.json');
-    const lockOwner = processLiveness.captureSelf();
+    const lockOwner = processLiveness.captureSelf({
+      workspace,
+      kind: 'review-manager',
+      name: String(pr),
+    });
 
     const reviewManagerWorkerName = spec.workerName;
     const reviewManagerAgentId = (() => {
@@ -1350,6 +1371,7 @@ if (require.main === module) {
         outputFile,
         issue,
         lockOwner,
+        startedAt: reviewManagerStartTime,
         resume: Boolean(values['--resume']),
         deadlineMs: DEFAULT_DEADLINE_MS,
         log, signal,

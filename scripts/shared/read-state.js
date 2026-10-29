@@ -34,7 +34,7 @@ function getSelfRef() {
   selfRef = null;
   const candidate = processLiveness.captureSelf();
   if (!processLiveness.sameRef(candidate, candidate)) {
-    throw new Error('ロック所有者の起動時刻を取得できません');
+    throw new Error('ロック所有者のprocess liveness identityを取得できません');
   }
   selfRef = candidate;
   return selfRef;
@@ -183,10 +183,10 @@ function stateLockPath(workspace, self) {
 /**
  * msg-state の更新ロックを取得する。
  *
- * process-lifecycle.js の acquireStartupLock と同型の「PID+startTime 同一性確認つき
+ * process-lifecycle.js の acquireStartupLock と同型の「OS endpointとinstanceIdの同一性確認つき
  * 原子的奪取」を行う（Review指摘 #3: 無条件 unlink による TOCTOU で、他プロセスの新しい
  * ロックを誤って消し、既読更新を失う競合を防ぐ）。stale 判定は「保持者が非生存 OR
- * PID再利用（startTime不一致）OR 破損」のときのみ行い、正当な保持者（生存かつ同一性一致）が
+ * endpoint dead OR 破損」のときのみ行い、正当な保持者（生存かつ同一性一致）が
  * いる場合は取得に失敗する。
  *
  * 自己エントリは取得に成功した不透明な参照をキャッシュして使用し、

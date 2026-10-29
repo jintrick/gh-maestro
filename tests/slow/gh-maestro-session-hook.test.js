@@ -13,11 +13,36 @@ const SUPERVISOR_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'worker-su
 const PROCESS_LIFECYCLE_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'process-lifecycle.js');
 const lifecycle = require('../../scripts/process-lifecycle');
 const TEST_PROCESS_START_TIME = '2026-07-25T00:00:00.000Z';
+const SESSION_HOOK_TEST_RUNTIME = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-test-runtime-'));
+let sessionHookRuntimeCleanupRegistered = false;
+const workerLease = require('../../scripts/shared/worker-lease');
 const readStateLib = require('../../scripts/shared/read-state');
 const {
   createResidentRestartHooks,
   stopResidentEntry,
 } = require('../../scripts/shared/restart-residents');
+
+function isolateLivenessEnvironment(workspace, runtimeDir) {
+  const keys = [
+    'GH_MAESTRO_WORKSPACE',
+    'GH_MAESTRO_WORKER',
+    'GH_MAESTRO_RUNTIME_DIR',
+    processLiveness.RESOURCE_KEY_ENV,
+    processLiveness.INSTANCE_ID_ENV,
+  ];
+  const saved = new Map(keys.map((key) => [key, process.env[key]]));
+  process.env.GH_MAESTRO_WORKSPACE = workspace;
+  process.env.GH_MAESTRO_WORKER = 'orchestrator';
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtimeDir;
+  delete process.env[processLiveness.RESOURCE_KEY_ENV];
+  delete process.env[processLiveness.INSTANCE_ID_ENV];
+  return () => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+}
 
 // セッションhookの実プロセス・実Git・4段階の順序は維持し、reset-session内部の
 // platform process scanだけをテスト用固定値へ差し替える。PID再利用の実照合は
@@ -43,31 +68,26 @@ const FAST_SESSION_PRELOAD = (() => {
   return file;
 })();
 
-// 常駐プロセス自身のidentity取得が不明値へ縮退する経路を再現する。
-// 現在時刻fallbackでleaseを作ると、後の実測値との照合で生存中のプロセスをstale扱いできるため、
-// 修正後はlease作成自体を拒否する。
+// 常駐プロセス自身のOS endpoint identity取得失敗を再現する。
 function createResidentIdentityFailurePreload() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-resident-identity-preload-'));
   const file = path.join(dir, 'preload.js');
   const childProcessPath = require.resolve('../../scripts/shared/child-process');
-  const fixedStartTime = TEST_PROCESS_START_TIME;
+  const processLivenessPath = require.resolve('../../scripts/shared/process-liveness');
   const source = [
     "'use strict';",
     `const childProcess = require(${JSON.stringify(childProcessPath)});`,
-    `const fixedStartTime = ${JSON.stringify(fixedStartTime)};`,
-    'const callsByPid = new Map();',
     'const realExecSync = childProcess.execSync;',
     'childProcess.execSync = (command, opts) => {',
     "  const commandText = String(command);",
-    "  if (commandText.includes('Get-CimInstance Win32_Process')) {",
-    "    const match = /ProcessId=(\\d+)/.exec(commandText);",
-    '    const pid = match ? Number(match[1]) : null;',
-    '    const count = (callsByPid.get(pid) || 0) + 1;',
-    '    callsByPid.set(pid, count);',
-    '    if (pid === process.pid) return "\\n";',
-    '    return `${fixedStartTime}\\n`;',
-    '  }',
+    "  if (commandText.includes('Get-CimInstance Win32_Process')) return '';",
     '  return realExecSync(command, opts);',
+    '};',
+    `const processLiveness = require(${JSON.stringify(processLivenessPath)});`,
+    'processLiveness.prepareSelf = () => {',
+    "  const error = new Error('test fixture: OS resource identity unavailable');",
+    "  error.code = 'LIVENESS_UNKNOWN';",
+    '  throw error;',
     '};',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
@@ -118,9 +138,22 @@ function createWorkspace(oldSessionId = 'old-session-id') {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-workspace-'));
   ensureWorkspaceTemplate();
   fs.cpSync(workspaceTemplate, workspace, { recursive: true });
-  const initialized = readStateLib.initializeState(workspace, 'orchestrator', {
-    sessionId: oldSessionId,
-  });
+  const restoreEnvironment = isolateLivenessEnvironment(workspace, SESSION_HOOK_TEST_RUNTIME);
+  let initialized;
+  try {
+    initialized = readStateLib.initializeState(workspace, 'orchestrator', {
+      sessionId: oldSessionId,
+    });
+  } finally {
+    restoreEnvironment();
+    if (!sessionHookRuntimeCleanupRegistered) {
+      // register after process-liveness so its exit hook closes the endpoint first.
+      process.once('exit', () => {
+        try { fs.rmSync(SESSION_HOOK_TEST_RUNTIME, { recursive: true, force: true }); } catch {}
+      });
+      sessionHookRuntimeCleanupRegistered = true;
+    }
+  }
   assert.equal(initialized.ok, true);
   return workspace;
 }
@@ -155,12 +188,16 @@ function createFakeGh(binDir, { fail = false } = {}) {
 }
 
 function hookEnv(binDir, runtimeDir, bootstrapPath) {
-  return {
+  const env = {
     ...process.env,
     PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
     GH_MAESTRO_RUNTIME_DIR: runtimeDir,
+    GH_MAESTRO_WORKER: 'orchestrator',
     ...(bootstrapPath ? { NODE_OPTIONS: `--require=${bootstrapPath}` } : {}),
   };
+  delete env[processLiveness.RESOURCE_KEY_ENV];
+  delete env[processLiveness.INSTANCE_ID_ENV];
+  return env;
 }
 
 function runHook(workspace, env) {
@@ -194,11 +231,11 @@ async function stopRunningSupervisors(workspace, processHandle) {
   const { killProcessTree } = require('../../scripts/shared/kill-tree');
   const hooks = createResidentRestartHooks();
   const targetPids = new Set();
-  const refs = new Map();
   const checker = processLiveness.createLiveness({ startTimeCacheMs: 500 });
   const observePid = (pid) => {
-    if (!refs.has(pid)) refs.set(pid, checker.captureProcess(pid));
-    return checker.observe(refs.get(pid));
+    const observed = checker.observeResource({ workspace, kind: 'resident', name: 'worker-supervisor' });
+    if (observed.state !== 'alive') return observed.state;
+    return observed.manifest.pid === pid ? 'alive' : 'dead';
   };
   const stopEntry = (entry) => {
     if (!Number.isInteger(entry?.pid) || entry.pid <= 0) return;
@@ -285,16 +322,22 @@ test('CLI通し: 生存中のworker-supervisorを維持したままhookがreset�
   const workspace = createWorkspace();
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-resident-bin-'));
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-resident-runtime-'));
-  const previousRuntimeDir = process.env.GH_MAESTRO_RUNTIME_DIR;
+  const restoreEnvironment = isolateLivenessEnvironment(workspace, runtimeDir);
+  // readState.initializeState has already claimed this test process's normal
+  // orchestrator identity. Use a separate identity for teardown locks while
+  // keeping spawned Claude/session-hook children explicitly in orchestrator role.
+  process.env.GH_MAESTRO_WORKER = 'session-hook-test-cleanup';
+  workerLease._setLiveness(processLiveness.createLiveness({ runtimeRoot: () => runtimeDir }));
   let supervisor = null;
-  process.env.GH_MAESTRO_RUNTIME_DIR = runtimeDir;
   try {
     const bootstrapPath = createFakeGh(binDir);
     const env = hookEnv(binDir, runtimeDir, bootstrapPath);
-    supervisor = spawn(process.execPath, [SUPERVISOR_SCRIPT, '--workspace', workspace, '--interval', '1', '--session-pid', String(process.pid)], {
+    supervisor = spawn(process.execPath, [SUPERVISOR_SCRIPT, '--workspace', workspace, '--interval', '1'], {
       cwd: workspace,
       env: { ...env, GH_MAESTRO_WORKER: 'orchestrator' },
-      stdio: 'ignore',
+      // The downstream resident is a real child of this test process. Keep stdin
+      // open until teardown so its parent watcher sees EOF only when the parent exits.
+      stdio: ['pipe', 'ignore', 'ignore'],
     });
 
     const initialEntries = await waitForRunningSupervisors(workspace);
@@ -339,37 +382,34 @@ test('CLI通し: 生存中のworker-supervisorを維持したままhookがreset�
     } catch (error) {
       stopError = error;
     }
-    if (!stopError) {
-      assertNoResidentLeases(workspace);
-      assert.deepEqual(lifecycle.findRunningInstances(workspace, {
-        script: 'worker-supervisor.js',
-        workerName: null,
-        allowSelf: true,
-      }), [], 'worker-supervisorのPID registryがteardown後に残っていないこと');
-    }
-
-    if (previousRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
-    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntimeDir;
-
     let cleanupError = null;
-    for (const directory of [workspace, binDir, runtimeDir]) {
-      try {
-        removeDirectory(directory);
-      } catch (error) {
-        cleanupError ||= error;
+    try {
+      if (!stopError) {
+        assertNoResidentLeases(workspace);
+        assert.deepEqual(lifecycle.findRunningInstances(workspace, {
+          script: 'worker-supervisor.js',
+          workerName: null,
+          allowSelf: true,
+        }), [], 'worker-supervisorのPID registryがteardown後に残っていないこと');
       }
+    } catch (error) {
+      cleanupError ||= error;
     }
+    for (const directory of [workspace, binDir, runtimeDir]) {
+      try { removeDirectory(directory); } catch (error) { cleanupError ||= error; }
+    }
+    workerLease._setLiveness(null);
+    restoreEnvironment();
     if (stopError) throw stopError;
     if (cleanupError) throw cleanupError;
   }
 });
 
-test('CLI通し: 常駐プロセスの起動時刻取得に失敗したらleaseとPID registryを作成しない', async () => {
+test('CLI通し: 常駐プロセスのOS endpoint identity取得に失敗したらleaseとPID registryを作成しない', async () => {
   const workspace = createWorkspace();
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-identity-bin-'));
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-identity-runtime-'));
-  const previousRuntimeDir = process.env.GH_MAESTRO_RUNTIME_DIR;
-  process.env.GH_MAESTRO_RUNTIME_DIR = runtimeDir;
+  const restoreEnvironment = isolateLivenessEnvironment(workspace, runtimeDir);
   let supervisor = null;
   try {
     const bootstrapPath = createFakeGh(binDir);
@@ -379,7 +419,6 @@ test('CLI通し: 常駐プロセスの起動時刻取得に失敗したらlease�
       SUPERVISOR_SCRIPT,
       '--workspace', workspace,
       '--interval', '1',
-      '--session-pid', String(process.pid),
     ], {
       cwd: workspace,
       env: { ...env, GH_MAESTRO_WORKER: 'orchestrator' },
@@ -397,7 +436,8 @@ test('CLI通し: 常駐プロセスの起動時刻取得に失敗したらlease�
     }
 
     assert.equal(supervisor.exitCode, 1,
-      `起動時刻不明時は常駐起動を拒否すること: ${stderr.join('')}`);
+      `OS endpoint identity不明時は常駐起動を拒否すること: ${stderr.join('')}`);
+    assert.match(stderr.join(''), /OS resource identity unavailable/);
     assert.equal(fs.existsSync(registryPath), false,
       `PID registryを作成しないこと: ${registryPath}`);
     assert.equal(fs.existsSync(leasePath), false,
@@ -409,12 +449,17 @@ test('CLI通し: 常駐プロセスの起動時刻取得に失敗したらlease�
     } catch (error) {
       stopError = error;
     }
-    if (!stopError) assertNoResidentLeases(workspace);
-    for (const directory of [workspace, binDir, runtimeDir]) {
-      try { removeDirectory(directory); } catch {}
+    let cleanupError = null;
+    try {
+      if (!stopError) assertNoResidentLeases(workspace);
+    } catch (error) {
+      cleanupError ||= error;
     }
-    if (previousRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
-    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntimeDir;
+    for (const directory of [workspace, binDir, runtimeDir]) {
+      try { removeDirectory(directory); } catch (error) { cleanupError ||= error; }
+    }
+    restoreEnvironment();
     if (stopError) throw stopError;
+    if (cleanupError) throw cleanupError;
   }
 });

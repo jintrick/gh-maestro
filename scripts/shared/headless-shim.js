@@ -20,6 +20,7 @@
 
 const fs = require('fs');
 const { spawn, spawnSync } = require('./child-process');
+const { RESOURCE_KEY_ENV, INSTANCE_ID_ENV, captureSelf } = require('./process-liveness');
 
 const USAGE = `headless-shim.js — headlessワーカーの中継プロセス（gh-maestro内部用）
 
@@ -44,7 +45,7 @@ Arguments:
  * @param {(code: number) => void} params.onExit - 子の終了コードを受け取る
  * @returns {object} 起動した子プロセスハンドル
  */
-function runShim({ shellArgs, logPath, exitHook = null, spawnFn = spawn,
+function runShim({ shellArgs, logPath, exitHook = null, env, spawnFn = spawn,
   spawnSyncFn = spawnSync, onExit }) {
   // 追記で開く。resume も同じファイルへ書き足し、時系列が1本に繋がる。
   const fd = fs.openSync(logPath, 'a');
@@ -57,6 +58,7 @@ function runShim({ shellArgs, logPath, exitHook = null, spawnFn = spawn,
       // stdout/stderr はログfdへ直接リダイレクト（パイプ経由の複製はしない）。
       stdio: ['pipe', fd, fd],
       windowsHide: true,
+      env,
     });
   } catch (e) {
     // シム自身の標準出力は捨てられているため、起動失敗をログへ残さないと
@@ -152,7 +154,12 @@ if (require.main === module) {
   }
 
   try {
-    runShim({ shellArgs, logPath, exitHook, onExit: (code) => process.exit(code) });
+    captureSelf();
+    const childEnv = { ...process.env };
+    // The agent CLI is not the process represented by this shim's OS resource.
+    delete childEnv[RESOURCE_KEY_ENV];
+    delete childEnv[INSTANCE_ID_ENV];
+    runShim({ shellArgs, logPath, exitHook, env: childEnv, onExit: (code) => process.exit(code) });
   } catch {
     // 起動失敗の詳細は runShim がログへ書いている
     process.exit(1);

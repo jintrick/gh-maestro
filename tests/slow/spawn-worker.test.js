@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('../helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
@@ -71,7 +74,6 @@ const FAST_CLI_PRELOAD = (() => {
     `const supervisor = require(${JSON.stringify(supervisorPath)});`,
     'supervisor._setSpawn(() => ({ pid: 99990, on: () => {}, unref: () => {} }));',
     'supervisor._setFindRunningInstance(() => null);',
-    'supervisor._setFindSessionRootPid(() => null);',
     'supervisor._setIsResidentLeaseLive(() => false);',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
@@ -786,6 +788,17 @@ test('junction 作成で missing が空かつ skipped が非空の場合、ワ�
         unref: () => {},
         on: () => {},
       }));
+      // 偽の shim（PID 99991）は実プロセスではなく endpoint を開けない。spawn-worker は
+      // 子の endpoint 確立を待ってから lease を移すため、偽の子だけ endpoint 確立済みとして観測させる。
+      const fakeShimLiveness = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'process-liveness.js'))});
+      workerLease._setLiveness({
+        ...fakeShimLiveness,
+        observe: (ref) => {
+          let pid = null;
+          try { pid = fakeShimLiveness.writeRef({}, ref).pid; } catch {}
+          return pid === 99991 ? 'alive' : fakeShimLiveness.observe(ref);
+        },
+      });
       const supervisor = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'ensure-worker-supervisor.js'))});
       supervisor._setSpawn(() => ({
         pid: 99992,
@@ -881,6 +894,17 @@ test('junction 作成で linked / skipped / missing がいずれも空の場合�
         unref: () => {},
         on: () => {},
       }));
+      // 偽の shim（PID 99993）は実プロセスではなく endpoint を開けない。spawn-worker は
+      // 子の endpoint 確立を待ってから lease を移すため、偽の子だけ endpoint 確立済みとして観測させる。
+      const fakeShimLiveness = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'process-liveness.js'))});
+      workerLease._setLiveness({
+        ...fakeShimLiveness,
+        observe: (ref) => {
+          let pid = null;
+          try { pid = fakeShimLiveness.writeRef({}, ref).pid; } catch {}
+          return pid === 99993 ? 'alive' : fakeShimLiveness.observe(ref);
+        },
+      });
       const supervisor = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'ensure-worker-supervisor.js'))});
       supervisor._setSpawn(() => ({
         pid: 99994,
@@ -923,6 +947,92 @@ test('junction 作成で linked / skipped / missing がいずれも空の場合�
     assert.equal(fs.existsSync(workersPath), true, 'workers.jsonが存在すること');
     const workers = JSON.parse(fs.readFileSync(workersPath, 'utf8'));
     assert.equal(workers[workerName].pid, 99993, 'workers.jsonにワーカーが登録されていること');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('子の endpoint が期限内に確立しなければ、子を停止し worktree をロールバックして workers.json に登録せず非ゼロ終了する (PR #658)', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-activate-fail-ws-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-activate-fail-home-'));
+  const preload = path.join(home, 'preload-activate-fail.js');
+  const killLog = path.join(home, 'killed.json');
+  try {
+    copyGitTemplate(ws);
+    readStateLib.initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
+
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.gh-maestro', 'config.json'),
+      JSON.stringify({
+        agents: {
+          'test-agent': {
+            id: 'test-agent',
+            command: process.execPath,
+            extraArgs: [],
+            promptDelivery: 'positional',
+          },
+        },
+      }),
+      'utf8',
+    );
+
+    // 偽の shim（PID 99995）は endpoint を開かない。停止要求は実プロセスへ送らず記録だけする。
+    fs.writeFileSync(
+      preload,
+      `
+      const fs = require('fs');
+      const path = require('path');
+      const closedGuard = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'closed-pr-guard.js'))});
+      closedGuard.checkClosedPr = () => ({ ok: true, closed: false, prNumber: null });
+      const ghComments = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'gh-comments.js'))});
+      ghComments.listComments = () => ({ status: 0, stdout: '[]' });
+      const headless = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'headless-launch.js'))});
+      headless._setSpawn(() => ({ pid: 99995, unref: () => {}, on: () => {} }));
+      const killTree = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'kill-tree.js'))});
+      killTree.killProcessTree = (pid) => {
+        fs.writeFileSync(${JSON.stringify(killLog)}, JSON.stringify([pid]));
+        return { ok: true, pids: [pid] };
+      };
+      const supervisor = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'ensure-worker-supervisor.js'))});
+      supervisor._setSpawn(() => ({ pid: 99996, unref: () => {}, on: () => {} }));
+      const mod = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', 'link-node-modules.js'))});
+      mod.linkNodeModules = () => ({ linked: [], skipped: [], missing: [] });
+      `,
+      'utf8',
+    );
+
+    const workerName = 'issue-425-coder-activatefail';
+    const worktreeDir = path.join(ws, '.gh-maestro', 'worktrees', workerName);
+    const workersPath = path.join(ws, '.gh-maestro', 'workers.json');
+    const leasePath = path.join(ws, '.gh-maestro', 'leases', `${workerName}.json`);
+
+    const r = spawnSync(
+      process.execPath,
+      ['-r', FAST_CLI_PRELOAD, '-r', preload, SCRIPT,
+        '--skill', 'gh-maestro-coder',
+        '--issue', '425',
+        '--description', 'activatefail',
+        '--repo', 'o/r',
+        '--workspace', ws,
+        '--agent', 'test-agent',
+        '--session-id', 'valid-test-session',
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+      },
+    );
+
+    assert.notEqual(r.status, 0, `非ゼロ終了すること: ${r.stderr}`);
+    assert.match(r.stderr, /ワーカー（pid 99995）の起動を確認できません/);
+    assert.match(r.stderr, /子プロセスを停止しました/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(killLog, 'utf8')), [99995], '起動中の子を停止すること');
+    assert.equal(fs.existsSync(worktreeDir), false, 'worktreeがロールバックされること');
+    assert.equal(fs.existsSync(leasePath), false, 'launcher の予約 lease が解放されること');
+    const workers = fs.existsSync(workersPath) ? JSON.parse(fs.readFileSync(workersPath, 'utf8')) : {};
+    assert.equal(workers[workerName], undefined, 'workers.jsonに登録しないこと');
   } finally {
     fs.rmSync(ws, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

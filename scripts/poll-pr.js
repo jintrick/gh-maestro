@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Usage: node poll-pr.js <ISSUE> [--workspace <path>] [--session-pid <pid>] [--base-branch <branch>] [INTERVAL_SECONDS]
+// Usage: node poll-pr.js <ISSUE> [--workspace <path>] [--base-branch <branch>] [INTERVAL_SECONDS]
 // Polls until a PR for the given issue is found, then launches the reviewer
 // (全観点。観点を絞り込むかどうかの判断はReview Manager自身が実際のdiffを見て行う —
 // オーケストレーターや機械的ロジックが観点を絞り込むことはしない）
@@ -47,15 +47,15 @@ const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { postCycleSnapshot } = require('./shared/cycle-snapshot');
 const { ARTIFACTS, recordPath } = require('./shared/record-paths');
 const {
-  resolveSessionPid,
   registerProcess,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
+const processLiveness = require('./shared/process-liveness');
 
 const USAGE = `poll-pr.js — Issue に対応する PR を検出し、検出時にレビュアーを起動し、
 その後 poll-reviews.js に処理を橋渡ししてレビュー監視を続行し、GitHub checksも監視する
 
-Usage: node poll-pr.js <ISSUE> [--workspace <path>] [--session-pid <pid>] [--base-branch <branch>] [INTERVAL_SECONDS]
+Usage: node poll-pr.js <ISSUE> [--workspace <path>] [--base-branch <branch>] [INTERVAL_SECONDS]
 
 Arguments:
   <ISSUE>             対象の Issue 番号（必須）
@@ -67,7 +67,6 @@ Options:
                              （再起動のたびにレビューを蒸し返すのを防ぐ）。
   --no-review-events         inline review comments・formal reviews のAPI監視を行わない。軽量PRでは --no-review-manager と併用し、slow層とGitHub checks監視も行わない。
   --workspace <path>         ワークスペースパス（省略時は環境変数またはCWDから解決）
-  --session-pid <pid>        監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
   --base-branch <branch>     期待するベースブランチ名（省略時はベースブランチ検証をスキップ）
   --plugin-monitor            Claude Code plugin monitor から起動されたことをregistryへ記録する
 
@@ -104,8 +103,8 @@ PR_PUSH後は新しいHEADをすぐ照会する。Review Managerを起動しな�
 観点を絞り込む判断はReview Manager自身が実際のdiffを見た上で行う（本スクリプトは
 ファイルパターン等による機械的な観点選定を一切行わない）。slow層は対象worktreeで非同期実行し、
 通常PRではPR検出後と修正pushごとに予約し、完了時に層別成果物と申告コメントを更新する。
-ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
-消滅時はPID registryを解除して自動exitする。`;
+poll-pr-monitor.jsの子プロセスとして起動され、stdinのEOFで親の終了を検知してregistryを
+解除し自動exitする。`;
 
 /**
  * poll-reviews.js を子プロセスとして起動し、その標準出力/標準エラーを自プロセスへ
@@ -114,20 +113,28 @@ PR_PUSH後は新しいHEADをすぐ照会する。Review Managerを起動しな�
  *
  * @param {string} pr
  * @param {string} workspace
- * @param {string|number} sessionPid
  * @param {string|number} [intervalSeconds]
  * @param {(line:string)=>void} [onOutputLine] poll-reviews.jsのstdoutを受け取るcallback
  * @param {{noReviewEvents?:boolean}} [options]
  * @returns {Promise<number>} poll-reviews.js の終了コード（不明な場合は1）
  */
-function spawnPollReviews(pr, workspace, sessionPid, intervalSeconds = 30, onOutputLine, options = {}) {
-  const args = [path.join(__dirname, 'poll-reviews.js'), String(pr), workspace, String(intervalSeconds), '--session-pid', String(sessionPid)];
+function spawnPollReviews(pr, workspace, intervalSeconds = 30, onOutputLine, options = {}) {
+  const args = [path.join(__dirname, 'poll-reviews.js'), String(pr), workspace, String(intervalSeconds)];
   if (options && options.noReviewEvents) {
     args.push('--no-review-events');
   }
   let child;
   try {
-    child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'inherit'] });
+    const childLiveness = processLiveness.createChildLivenessEnv({
+      env: process.env,
+      workspace,
+      kind: 'pr-job-child',
+      name: `poll-reviews:${pr}`,
+    });
+    child = spawn(process.execPath, args, {
+      env: childLiveness.env,
+      stdio: ['pipe', 'pipe', 'inherit'],
+    });
   } catch {
     return Promise.resolve(1);
   }
@@ -281,7 +288,6 @@ function updateSlowRun(statePath, runKey, update) {
   });
 }
 
-const processLiveness = require('./shared/process-liveness');
 function orphanedSlowRunReason(entry, deps = {}) {
   const checker = deps.liveness || processLiveness;
   const state = checker.observe(checker.readRef(entry));
@@ -292,9 +298,9 @@ function orphanedSlowRunReason(entry, deps = {}) {
 
 /**
  * 親 poll-pr が停止した後に残った slow state の running レコードを回収する。
- * slow worker は poll-pr の子プロセスとして生存期間を共有するため、PID＋起動時刻を
- *確認できない running は再実行せず unavailable へ確定する。PIDが別プロセスへ
- *再利用された場合も kill は行わず、元の結果だけを unavailable として残す。
+ * slow worker は poll-pr の子プロセスとして生存期間を共有するため、endpointがdead、
+ * またはendpointを持たない旧形式のPIDがESRCHとなった running は再実行せず unavailable
+ * へ確定する。endpointがunknownの場合は停止せず報告し、別プロセスをkillしない。
  */
 function recoverOrphanedSlowRuns(workspace, deps = {}) {
   const slowDir = path.join(workspace, '.gh-maestro');
@@ -686,7 +692,7 @@ async function executeSlowChild({ target, logPath, childEnv, onSpawn }, deps = {
     child = spawnFn(process.execPath, [path.join(__dirname, 'run-tests.js'), '--workspace', target.worktree, 'slow'], {
       cwd: target.worktree,
       env: childEnv,
-      stdio: ['ignore', logFd, logFd],
+      stdio: ['pipe', logFd, logFd],
     });
     if (onSpawn) onSpawn(child);
     const exitCode = await waitChildExitFn({
@@ -800,23 +806,29 @@ async function runSlowTest({ pr, issue, repo, workspace, headSha }, deps = {}) {
 
     logPath = slowLogPath(target.worktree, pr, headSha);
     updateSlowRun(statePath, runKey, { worktree: target.worktree, logPath });
-    const childEnv = {
-      ...process.env,
-      GH_MAESTRO_WORKSPACE: target.worktree,
+    const childLiveness = processLiveness.createChildLivenessEnv({
+      env: {
+        ...process.env,
+        GH_MAESTRO_WORKSPACE: target.worktree,
       GH_MAESTRO_RUNTIME_WORKSPACE: workspace,
       GH_MAESTRO_TEST_ACTOR: 'poll-pr',
       GH_MAESTRO_TEST_LOG_PATH: logPath,
-    };
+      },
+      workspace,
+      kind: 'slow-test',
+      name: `${pr}:${headSha}`,
+    });
+    const childEnv = childLiveness.env;
     const childResult = await executeSlowChild({
       target,
       logPath,
       childEnv,
       onSpawn: (spawned) => {
         child = spawned;
-        let identity = { pid: null, startTime: null };
+        let identity = { pid: null, resourceKey: null, instanceId: null };
         if (spawned && spawned.pid) {
           const checker = deps.liveness || processLiveness;
-          identity = checker.writeRef({}, checker.captureProcess(spawned.pid));
+          identity = checker.writeRef({}, checker.captureProcess(spawned.pid, childLiveness));
         }
         updateSlowRun(statePath, runKey, { ...identity, logPath });
       },
@@ -1124,7 +1136,7 @@ function createPrChecksMonitor({ pr, repo, intervalMs }, deps = {}) {
  *
  * CLIのライフサイクル／外部境界を依存性として受け取れるようにし、PR検出・
  * PR_PUSH・slowの重複抑止・完了待ちを、実際の制御接続のままテストできるようにする。
- * @param {{issue:string|number,repo:string,workspace:string,sessionPid:string|number,baseBranch?:string,noReviewManager?:boolean,noReviewEvents?:boolean,intervalMs?:number,intervalArg?:string,enablePrChecksMonitoring?:boolean}} params
+ * @param {{issue:string|number,repo:string,workspace:string,baseBranch?:string,noReviewManager?:boolean,noReviewEvents?:boolean,intervalMs?:number,intervalArg?:string,enablePrChecksMonitoring?:boolean}} params
  * @param {object} [deps]
  * @returns {Promise<{exitCode:number}>}
  */
@@ -1133,7 +1145,6 @@ async function runPollPr(params, deps = {}) {
     issue,
     repo,
     workspace,
-    sessionPid,
     baseBranch,
     noReviewManager = false,
     noReviewEvents = false,
@@ -1225,7 +1236,7 @@ async function runPollPr(params, deps = {}) {
 
   while (true) {
     if (!checkParentFn()) {
-      writeStderrFn(`poll-pr: parent session (pid ${sessionPid}) is dead — exiting\n`);
+      writeStderrFn('poll-pr: parent stdin reached EOF — exiting\n');
       cleanupFn();
       return { exitCode: 0 };
     }
@@ -1270,7 +1281,6 @@ async function runPollPr(params, deps = {}) {
       exitCode = await spawnPollReviewsFn(
         pr,
         workspace,
-        sessionPid,
         intervalArg || String(Math.round(intervalMs / 1000)),
         (line) => {
           const pushedHead = parsePrPushLine(line);
@@ -1324,7 +1334,7 @@ if (require.main === module) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(argv, {
-      flags: { '--workspace': {}, '--session-pid': {}, '--base-branch': {} },
+      flags: { '--workspace': {}, '--base-branch': {} },
       booleans: ['--no-review-manager', '--no-review-events', '--plugin-monitor', '--help', '-h'],
       // issue（必須）と interval（任意）の2つまで。未知フラグ・余剰位置引数はパーサ側で拒否される
       // （Issue #14 / argv-parsing-pitfalls）。
@@ -1347,7 +1357,6 @@ if (require.main === module) {
   }
 
   const workspaceArg = values['--workspace'];
-  const sessionPidArg = values['--session-pid'];
   const baseBranch = values['--base-branch'];
   const noReviewManager = values['--no-review-manager'] === true;
   const noReviewEvents = values['--no-review-events'] === true;
@@ -1366,9 +1375,7 @@ if (require.main === module) {
 
   // ── ライフサイクル管理 ─────────────────────────────────────────────────
 
-  const sessionPid = resolveSessionPid(sessionPidArg);
-
-  const checkParent = processLiveness.watchParent(processLiveness.captureProcess(sessionPid));
+  const checkParent = processLiveness.watchParent();
 
   // PID registry に自己登録
   registerProcess(workspace, { script: 'poll-pr.js' });
@@ -1394,7 +1401,6 @@ if (require.main === module) {
     issue,
     repo,
     workspace,
-    sessionPid,
     baseBranch,
     noReviewManager,
     noReviewEvents,

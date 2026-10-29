@@ -1003,6 +1003,7 @@ function restartResidentsAfterInstall(options = {}) {
       const runResult = run(process.execPath, [
         scriptPath,
         '--workspace', workspace,
+        '--upgrade-legacy',
       ], {
         encoding: 'utf8',
         stdio: ['inherit', 'pipe', 'inherit'],

@@ -61,7 +61,11 @@ function markMigrationInProgress(workspace) {
   const p = migrationInProgressPath(workspace);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   const checker = liveness();
-  const entry = checker.writeRef({}, checker.captureSelf());
+  const entry = checker.writeRef({}, checker.captureSelf({
+    workspace,
+    kind: 'migration',
+    name: 'migrate-records',
+  }));
   fs.writeFileSync(p, JSON.stringify(entry, null, 2), 'utf8');
 }
 

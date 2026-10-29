@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -59,12 +62,12 @@ test('壊れたslow stateは対象なしへ縮退せずファイルを示して�
   );
 });
 
-test('PIDが生きていても起動時刻が違えばrunningを残さない', () => {
+test('slow workerのresourceが死亡していればrunningを回収する', () => {
   const workspace = workspaceWithState({
-    abc: { status: 'running', testedHead: 'abc', pid: 999, startTime: '2026-09-27T00:00:00.000Z' },
+    abc: { status: 'running', testedHead: 'abc', pid: 999, resourceKey: 'dead-slow-worker' },
   });
   recoverOrphanedSlowRuns(workspace, {
-    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-09-27T02:00:00.000Z' }),
+    liveness: require('../scripts/shared/process-liveness').createLiveness({ probeEndpoint: () => 'dead' }),
     writeStdoutFn: () => {},
   });
   const state = JSON.parse(fs.readFileSync(path.join(workspace, '.gh-maestro', 'poll-slow-test-42.json'), 'utf8'));
@@ -103,12 +106,12 @@ test('回収対象のworktreeとIssue情報が残っていればunavailable層�
   assert.equal(declarations[0].headSha, headSha);
 });
 
-test('PIDと起動時刻が一致するslow workerはrunningのまま待つ', () => {
+test('slow workerのresourceが生存していればrunningのまま待つ', () => {
   const workspace = workspaceWithState({
-    abc: { status: 'running', testedHead: 'abc', pid: 999, startTime: '2026-09-27T00:00:00.000Z' },
+    abc: { status: 'running', testedHead: 'abc', pid: 999, resourceKey: 'live-slow-worker' },
   });
   const events = recoverOrphanedSlowRuns(workspace, {
-    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-09-27T00:00:00.500Z' }),
+    liveness: require('../scripts/shared/process-liveness').createLiveness({ probeEndpoint: () => 'alive' }),
     writeStdoutFn: () => {},
   });
   const state = JSON.parse(fs.readFileSync(path.join(workspace, '.gh-maestro', 'poll-slow-test-42.json'), 'utf8'));

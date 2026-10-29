@@ -18,6 +18,8 @@ const WORKER_CONTEXT_ENV_VARS = Object.freeze([
   'GH_MAESTRO_ISSUE',     // 将来のIssue番号注入用（予約）
   'ISSUE',                // msg-send.js が --issue 未指定時のフォールバックに使う
   'NO_COLOR',             // headless起動由来の表示設定をテストへ持ち込まない
+  'GH_MAESTRO_RESOURCE_KEY', // 子プロセス自身のOS endpoint identityを親から誤継承させない
+  'GH_MAESTRO_INSTANCE_ID',  // 同上。resource keyとinstance idは必ず組で生成する
 ]);
 
 /**

@@ -22,6 +22,7 @@ const { spawn, realSpawnDisabledReason } = require('./child-process');
 const { buildLoginShellExecArgs } = require('./agent-exec');
 const { ARTIFACTS, legacyWorkerLogPath, recordPath } = require('./record-paths');
 const processLiveness = require('./process-liveness');
+const { RESOURCE_KEY_ENV, INSTANCE_ID_ENV } = processLiveness;
 let liveness = processLiveness;
 
 const SHIM_PATH = path.join(__dirname, 'headless-shim.js');
@@ -102,11 +103,25 @@ function launchAgentHeadless({ argv, cwd, logPath, env = {}, onExit = null }) {
   // headless共通の環境変数を土台に、呼び出し元指定を上書きとして重ねる
   // （呼び出し元が明示的に指定した値が勝つ）。
   const launchEnv = { ...HEADLESS_ENV, ...env };
+  const workspace = launchEnv.GH_MAESTRO_WORKSPACE || cwd;
+  const workerName = launchEnv.GH_MAESTRO_WORKER;
+  const childLiveness = processLiveness.createChildLivenessEnv({
+    env: launchEnv,
+    workspace,
+    kind: 'worker',
+    name: workerName || `headless-shim:${path.basename(argv[0] || 'agent')}:${process.pid}`,
+  });
+  const shimEnv = childLiveness.env;
+  const agentEnv = { ...launchEnv };
+  // The resource identity belongs to the shim process. The launched agent CLI may itself
+  // run gh-maestro code and must create its own process resource.
+  delete agentEnv[RESOURCE_KEY_ENV];
+  delete agentEnv[INSTANCE_ID_ENV];
 
   // ログインシェル経由のラップは維持する。$PROFILE の pwsh 関数として定義された
   // エージェント（claude-ds 等）は、これを通さないと解決できない（agent-exec.js 参照）。
   // 終了フックはログfdを保持するシェル内で実行せず、shimが子終了後に起動する。
-  const shellArgs = buildLoginShellExecArgs(argv, process.platform, null, launchEnv);
+  const shellArgs = buildLoginShellExecArgs(argv, process.platform, null, agentEnv);
 
   // ログの準備に失敗したらプロセスを起動しない。記録の残らないワーカーを走らせると、
   // 本Issueが解消しようとしている「後から追跡できない実行」がそのまま再発する。
@@ -125,7 +140,7 @@ function launchAgentHeadless({ argv, cwd, logPath, env = {}, onExit = null }) {
     if (onExit) shimArgs.push(JSON.stringify(onExit));
     child = _spawn(process.execPath, shimArgs, {
       cwd,
-      env: { ...process.env, ...launchEnv },
+      env: { ...process.env, ...shimEnv },
       // 起動元の使い捨てCLIが終了してもワーカーを生かすために detached が要る。
       // node は detached でも正常に動く（pwsh は動かない。だからシムを挟んでいる）。
       detached: true,
@@ -156,7 +171,7 @@ function launchAgentHeadless({ argv, cwd, logPath, env = {}, onExit = null }) {
   // 呼び出し元（使い捨てCLI）の終了を子がブロックしないよう切り離す。
   child.unref();
 
-  return { pid: child.pid, processRef: liveness.captureProcess(child.pid), logPath };
+  return { pid: child.pid, processRef: liveness.captureProcess(child.pid, childLiveness), logPath };
 }
 
 module.exports = {

@@ -123,12 +123,14 @@ function cleanupLegacyWorkerField(workspace, field, options = {}) {
     if (field === 'notifierPid') {
       if (!validCleanupPid(rawValue)) throw new Error(`workers.json の ${name}.${field} は正の整数PIDではありません`);
       const pid = Number(rawValue);
-      const startTime = isObject ? rawEntry.notifierStartTime : null;
-      const state = liveness.observe(liveness.readRef({ pid, startTime }));
+      const resourceKey = isObject ? rawEntry.notifierResourceKey : null;
+      const instanceId = isObject ? rawEntry.notifierInstanceId : null;
+      const notifierRef = liveness.readRef({ pid, resourceKey, instanceId });
+      const state = liveness.observe(notifierRef);
       if (state === 'unknown') throw new Error(`レガシー notifier (pid ${pid}) の生死を判定できません`);
       if (state === 'alive') {
         killProcessTreeFn(pid);
-        if (liveness.observe(liveness.readRef({ pid, startTime })) !== 'dead') {
+        if (liveness.observe(notifierRef) !== 'dead') {
           throw new Error(`レガシー notifier (pid ${pid}) の停止を確認できませんでした`);
         }
         killedPids.push(pid);
@@ -257,8 +259,13 @@ function cleanupLegacyQueue(workspace, options = {}) {
     }
     if (poller.pid !== undefined) {
       const pid = Number(poller.pid);
-      const pollerRef = processLiveness.readRef({ pid, startTime: poller.startTime });
-      const state = (options.liveness || processLiveness).observe(pollerRef);
+      const liveness = options.liveness || processLiveness;
+      const pollerRef = liveness.readRef({
+        pid,
+        resourceKey: poller.resourceKey,
+        instanceId: poller.instanceId,
+      });
+      const state = liveness.observe(pollerRef);
       if (state === 'unknown') return { status: 'unknown', path: queueDir, reason: `poller (pid ${pid}) の生死を判定できません` };
       if (state === 'alive') {
         if (options.legacyResetMode === true) {
@@ -267,7 +274,7 @@ function cleanupLegacyQueue(workspace, options = {}) {
           if (elapsed <= 15000) {
             try {
               (options.killProcessTreeFn || killProcessTree)(pid);
-              if ((options.liveness || processLiveness).observe(pollerRef) !== 'dead') throw new Error('停止を確認できませんでした');
+              if (liveness.observe(pollerRef) !== 'dead') throw new Error('停止を確認できませんでした');
               killedPids.push(pid);
             } catch (error) {
               return { status: 'unknown', path: queueDir, reason: `レガシー poller (pid ${pid}) の停止に失敗しました: ${error.message}` };

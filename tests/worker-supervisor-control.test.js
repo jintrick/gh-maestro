@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -128,13 +131,13 @@ test('cleanupLegacyWorkerSupervisor: 旧scriptのstale registryとleaseだけを
   const currentRegistry = path.join(runtimeDir, '102.json');
   const oldLease = path.join(leaseDir, roleLeaseKey('inbox-supervisor') + '.json');
   fs.writeFileSync(oldRegistry, JSON.stringify({
-    pid: 101, startTime: '2026-01-01T00:00:00.000Z', script: 'inbox-supervisor.js',
+    pid: 101, resourceKey: 'a'.repeat(64), instanceId: 'old-supervisor-registry-instance', script: 'inbox-supervisor.js',
   }), 'utf8');
   fs.writeFileSync(currentRegistry, JSON.stringify({
     pid: 102, startTime: '2026-01-01T00:00:00.000Z', script: 'worker-supervisor.js',
   }), 'utf8');
   fs.writeFileSync(oldLease, JSON.stringify({
-    pid: 103, startTime: '2026-01-01T00:00:00.000Z', role: 'inbox-supervisor',
+    pid: 103, resourceKey: 'b'.repeat(64), instanceId: 'old-supervisor-lease-instance', role: 'inbox-supervisor',
   }), 'utf8');
 
   const result = control.cleanupLegacyWorkerSupervisor({

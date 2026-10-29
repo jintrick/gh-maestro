@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -29,8 +32,8 @@ test('read-state: self reference の取得失敗を固定せず次回の既読�
   let captureCalls = 0;
   processLiveness.captureSelf = () => {
     captureCalls++;
-    return captureCalls === 1
-      ? processLiveness.readRef({ pid: process.pid })
+      return captureCalls === 1
+      ? processLiveness.readRef({ pid: process.pid, resourceKey: null })
       : originalCaptureSelf();
   };
 
@@ -38,7 +41,7 @@ test('read-state: self reference の取得失敗を固定せず次回の既読�
     withTempDir((workspace) => {
       assert.throws(
         () => rs.initializeState(workspace, 'orchestrator', { sessionId: 'self-ref-retry' }),
-        /起動時刻を取得できません/
+        /process liveness identityを取得できません/
       );
       assert.equal(
         fs.existsSync(rs.stateLockPath(workspace, 'orchestrator')),
@@ -295,7 +298,7 @@ test('stale ロック（保持者死亡）は奪取して更新できる', () =>
     const lp = rs.stateLockPath(workspace, 'orchestrator');
     fs.mkdirSync(path.dirname(lp), { recursive: true });
     // 確実に死亡しているPID（999999）でロックを残す
-    fs.writeFileSync(lp, JSON.stringify({ pid: 999999, startTime: '2020-01-01T00:00:00Z' }), 'utf8');
+    fs.writeFileSync(lp, JSON.stringify({ pid: 999999, resourceKey: 'dead-state-lock' }), 'utf8');
     const r = rs.markRead(workspace, 'orchestrator', { issue: 10, ids: [1] });
     assert.equal(r.ok, true);
     assert.deepEqual(r.state.readByIssue['10'], [1]);
@@ -376,7 +379,7 @@ test('acquireStateLock: 同一性不明の保持者のロックを残して中�
   withTempDir(workspace => {
     const lp = rs.stateLockPath(workspace, 'orchestrator');
     fs.mkdirSync(path.dirname(lp), { recursive: true });
-    const raw = JSON.stringify({ pid: process.pid });
+    const raw = JSON.stringify({ pid: process.pid, resourceKey: null });
     fs.writeFileSync(lp, raw);
     assert.throws(() => rs.acquireStateLock(workspace, 'orchestrator'), /判定できません/);
     assert.equal(fs.readFileSync(lp, 'utf8'), raw);

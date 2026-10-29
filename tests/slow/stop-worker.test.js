@@ -55,16 +55,20 @@ const FAST_WORKER_CLI_PRELOAD = (() => {
 })();
 
 function run(args, env = {}) {
+  const workspaceIndex = args.indexOf('--workspace');
+  const workspace = workspaceIndex >= 0 ? args[workspaceIndex + 1] : undefined;
   return spawnSync(process.execPath, ['-r', FAST_WORKER_CLI_PRELOAD, SCRIPT, ...args], {
     encoding: 'utf8',
-    env: { ...cleanSpawnEnv(), ...env },
+    env: {
+      ...cleanSpawnEnv(),
+      ...(workspace ? { GH_MAESTRO_RUNTIME_DIR: path.join(workspace, '.test-runtime') } : {}),
+      ...env,
+    },
   });
 }
-function captureRecord(pid) {
-  return processLiveness.writeRef({ pid }, processLiveness.captureProcess(pid));
-}
 function isProcessAlive(pid) {
-  return processLiveness.observe(processLiveness.captureProcess(pid)) === 'alive';
+  try { process.kill(Number(pid), 0); return true; }
+  catch (error) { return error && error.code !== 'ESRCH'; }
 }
 
 function withTempDir(fn) {
@@ -81,17 +85,29 @@ function withTempDir(fn) {
  * 実際のワーカー構造（親プロセス＋子プロセス）を模したプロセスツリーを起動する。
  * 親プロセス（シム役）の下に子プロセス（エージェント役）がぶら下がる木構造を作る。
  */
-function spawnProcessTree(dir) {
+function spawnProcessTree(dir, workerName, claimLiveness = true) {
   const childInfoFile = path.join(dir, `child-pid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.txt`);
+  const livenessPath = require.resolve('../../scripts/shared/process-liveness');
+  const ownerSetup = claimLiveness
+    ? `const liveness = require(${JSON.stringify(livenessPath)}); const ref = liveness.captureSelf({ workspace: process.env.GH_MAESTRO_WORKSPACE, kind: 'worker', name: process.env.GHM_TEST_WORKER_NAME });`
+    : '';
   const parent = spawn(process.execPath, ['-e', `
     const { spawn } = require('child_process');
     const fs = require('fs');
+    ${ownerSetup}
     const child = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], { stdio: 'ignore', windowsHide: true });
-    fs.writeFileSync(process.argv[1], String(child.pid), 'utf8');
+    const info = ${claimLiveness ? "JSON.stringify({ ...liveness.writeRef({}, ref), childPid: child.pid })" : "JSON.stringify({ childPid: child.pid })"};
+    fs.writeFileSync(process.argv[1], info, 'utf8');
     setInterval(() => {}, 1000);
   `, childInfoFile], {
     cwd: dir,
     detached: true,
+    env: {
+      ...cleanSpawnEnv(),
+      GH_MAESTRO_WORKSPACE: dir,
+      GH_MAESTRO_RUNTIME_DIR: path.join(dir, '.test-runtime'),
+      GHM_TEST_WORKER_NAME: workerName,
+    },
     stdio: 'ignore',
     windowsHide: true,
   });
@@ -105,8 +121,8 @@ function spawnProcessTree(dir) {
     try { killProcessTree(parentPid); } catch {}
     throw new Error('子プロセスの起動・PID取得に失敗しました');
   }
-  const childPid = parseInt(fs.readFileSync(childInfoFile, 'utf8'), 10);
-  return { parentPid, childPid };
+  const processRecord = JSON.parse(fs.readFileSync(childInfoFile, 'utf8'));
+  return { parentPid, childPid: processRecord.childPid, processRecord };
 }
 
 test('stop-worker: --help はUsageを表示して終了コード0', () => {
@@ -287,15 +303,11 @@ test('stop-worker: 正常系: 同一性が一致するプロセスツリー（�
     fs.writeFileSync(path.join(worktreeDir, 'sample.txt'), 'hello', 'utf8');
 
     // 親子関係を持つプロセスツリーを起動
-    const { parentPid, childPid } = spawnProcessTree(dir);
+    const { parentPid, childPid, processRecord } = spawnProcessTree(dir, 'test-worker');
     assert.ok(parentPid > 0);
     assert.ok(childPid > 0);
 
     try {
-      const processRecord = captureRecord(parentPid);
-      const startTime = processRecord.startTime;
-      assert.ok(startTime, '親プロセスの起動時刻を取得できること');
-
       fs.writeFileSync(
         path.join(dir, '.gh-maestro', 'workers.json'),
         JSON.stringify({
@@ -308,8 +320,8 @@ test('stop-worker: 正常系: 同一性が一致するプロセスツリー（�
         'utf8'
       );
 
-      const r = run(['test-worker', '--workspace', dir], { [TEST_START_TIME_ENV]: startTime });
-      assert.equal(r.status, 0);
+      const r = run(['test-worker', '--workspace', dir]);
+      assert.equal(r.status, 0, r.stderr);
       assert.match(r.stderr, /終了しました/);
 
       // 親プロセスだけでなく配下の子プロセスまで終了していることを検証（プロセスツリー全体の停止）
@@ -330,26 +342,26 @@ test('stop-worker: 正常系: 同一性が一致するプロセスツリー（�
   });
 });
 
-test('stop-worker: 拒否側: PIDは生存しているが起動時刻が不一致（PID再利用）の場合、プロセスツリーをkillせずエラー終了する', () => {
+test('stop-worker: endpointは生存中でもinstanceId不一致なら停止せずdeadとして扱う', () => {
   withTempDir((dir) => {
     const worktreeDir = path.join(dir, '.gh-maestro', 'worktrees', 'mismatch-worker');
     fs.mkdirSync(worktreeDir, { recursive: true });
 
     // 親子関係を持つプロセスツリーを起動
-    const { parentPid, childPid } = spawnProcessTree(dir);
+    const { parentPid, childPid, processRecord } = spawnProcessTree(dir, 'mismatch-worker');
     assert.ok(parentPid > 0);
     assert.ok(childPid > 0);
 
     try {
-      // 意図的に全く異なる過去の起動時刻を登録
-      const fakeStartTime = '2000-01-01T00:00:00.000Z';
+      // 同じresource endpointを指す別世代のinstanceIdを登録する。
+      const mismatchedInstanceId = processLiveness.newInstanceId();
 
       fs.writeFileSync(
         path.join(dir, '.gh-maestro', 'workers.json'),
         JSON.stringify({
           'mismatch-worker': {
-            pid: parentPid,
-            startTime: fakeStartTime,
+            ...processRecord,
+            instanceId: mismatchedInstanceId,
             issue: 20,
             skill: 'gh-maestro-coder',
           },
@@ -357,9 +369,7 @@ test('stop-worker: 拒否側: PIDは生存しているが起動時刻が不一�
         'utf8'
       );
 
-      // 子CLIがOS境界から観測する起動時刻は固定し、テスト準備時のOS応答に依存させない。
-      const observedStartTime = '2026-01-01T00:00:00.000Z';
-      const r = run(['mismatch-worker', '--workspace', dir], { [TEST_START_TIME_ENV]: observedStartTime });
+      const r = run(['mismatch-worker', '--workspace', dir]);
       assert.equal(r.status, 0, '同一性不一致はdeadとして扱い、停止せず正常終了する');
       assert.match(r.stderr, /既に停止しています/);
 
@@ -378,12 +388,12 @@ test('stop-worker: 拒否側: PIDは生存しているが起動時刻が不一�
   });
 });
 
-test('stop-worker: 拒否側: 起動時刻を取得できない場合、実プロセスツリーをkillせずエラー終了する', () => {
+test('stop-worker: PR1形式でPIDが存在する場合はunknownとして停止を拒否する', () => {
   withTempDir((dir) => {
     const worktreeDir = path.join(dir, '.gh-maestro', 'worktrees', 'unknown-start-time-worker');
     fs.mkdirSync(worktreeDir, { recursive: true });
 
-    const { parentPid, childPid } = spawnProcessTree(dir);
+    const { parentPid, childPid } = spawnProcessTree(dir, 'unknown-start-time-worker', false);
     assert.ok(parentPid > 0);
     assert.ok(childPid > 0);
 
@@ -401,9 +411,8 @@ test('stop-worker: 拒否側: 起動時刻を取得できない場合、実プ�
         'utf8'
       );
 
-      // envを渡さないと既存preloaderの起動時刻取得境界がnullを返す。
       const r = run(['unknown-start-time-worker', '--workspace', dir]);
-      assert.notEqual(r.status, 0, '起動時刻が不明なら終了コード1でエラーになること');
+      assert.notEqual(r.status, 0, 'PR1形式の生存PIDは同一性不明として終了コード1になること');
       assert.match(r.stderr, /生死を判定できません/);
 
       assert.equal(isProcessAlive(parentPid), true, '起動時刻不明の親プロセスはkillされず生存し続けること');
@@ -420,10 +429,8 @@ test('stop-worker: 拒否側: 起動時刻を取得できない場合、実プ�
 
 test('stop-worker: 〈--issue + --skill〉指定で解決して停止できる', () => {
   withTempDir((dir) => {
-    const { parentPid, childPid } = spawnProcessTree(dir);
+    const { parentPid, childPid, processRecord } = spawnProcessTree(dir, 'issue-30-coder');
     try {
-      const processRecord = captureRecord(parentPid);
-      const startTime = processRecord.startTime;
       fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
       fs.writeFileSync(
         path.join(dir, '.gh-maestro', 'workers.json'),
@@ -437,9 +444,7 @@ test('stop-worker: 〈--issue + --skill〉指定で解決して停止できる',
         'utf8'
       );
 
-      const r = run(['--issue', '30', '--skill', 'gh-maestro-coder', '--workspace', dir], {
-        [TEST_START_TIME_ENV]: startTime,
-      });
+      const r = run(['--issue', '30', '--skill', 'gh-maestro-coder', '--workspace', dir]);
       assert.equal(r.status, 0);
       assert.equal(isProcessAlive(parentPid), false, '親プロセスが終了していること');
       assert.equal(isProcessAlive(childPid), false, '子プロセスが終了していること');

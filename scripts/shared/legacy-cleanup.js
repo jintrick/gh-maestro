@@ -257,7 +257,9 @@ function cleanupLegacyPidRegistry(options = {}) {
     }
     if (!record || typeof record !== 'object' || Array.isArray(record)
       || !Number.isSafeInteger(record.pid) || record.pid <= 0
-      || typeof record.startTime !== 'string' || !record.startTime
+      || ((record.resourceKey !== undefined || record.instanceId !== undefined)
+        && (typeof record.resourceKey !== 'string' || !/^[a-f0-9]{64}$/.test(record.resourceKey)
+          || typeof record.instanceId !== 'string' || !record.instanceId))
       || (entry.name.endsWith('.json') && `${record.pid}.json` !== entry.name)) {
       return { status: 'unknown', path: filePath, reason: 'PID registry項目が不正です' };
     }

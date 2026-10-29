@@ -2,19 +2,19 @@
 
 通常の `msg-poll.js` とPR監視は、Claude Code plugin の monitors が対話型セッション開始時に固定コマンドで起動する。通常のMonitorツールは既定5分、最大30分で終了するため、`persistent` を付けたり、30分ごとに同じMonitorを張り直したりしてはならない。
 
-plugin monitor はセッション終了まで動き、セッション終了時に停止する。pluginを無効化しても、既に起動したmonitorはそのセッション中は停止しない。plugin monitors は対話型セッション専用で、`-p` の非対話実行では起動しない。
+通常のセッション終了ではClaude Codeがplugin monitorとその子を停止する。Claude Codeを強制終了するとmonitorが残ることがある。次に対話型セッションで同じ役割のplugin monitorが起動したとき、後発monitorが残った同役割プロセスとその子を停止して引き継ぐ。通常のMonitorツールへ手動再接続せず、後発monitorから通知が届くことを確認する。plugin monitors は対話型セッション専用で、`-p` の非対話実行では起動しない。
 
 ## install後の確認
 
-`node "{{SCRIPTS_PATH}}/install.js"` はplugin manifest・monitors・共有スクリプトを配置し、runtime rootに登録されたworkspaceの旧常駐を確認する。`--plugin-monitor` を含む `msg-poll.js` / `poll-pr.js` は `restart-residents.js` が停止しない。更新済みコードを使うには、現在の対話型セッションを通常終了し、次のセッションで `/gh-maestro` を実行する。
+`node "{{SCRIPTS_PATH}}/install.js"` はplugin manifest・monitors・共有スクリプトを配置し、runtime rootに登録されたworkspaceの旧常駐を `restart-residents.js --upgrade-legacy` で確認する。決定論的endpointを持つplugin monitorはClaude Codeのセッション管理下に残す。PR1形式でendpointを持たない常駐は移行のため停止する。installは対話型session用monitorを自分で起動しないため、次のClaude Codeセッションで `/gh-maestro` を実行して新しいplugin monitorを起動する。endpointを持たないPR1記録はPIDが `ESRCH` のときだけdeadと判定し、PIDが存在する記録はunknownとして扱う。
 
-旧形式の常駐に `MONITOR_REATTACH_REQUIRED` が出た場合だけ、出力されたコマンドを人間が確認して通常のMonitorで実行する。plugin管理対象に対して手動再接続を行わない。
+旧形式の通常Monitorに `MONITOR_REATTACH_REQUIRED` が出た場合は、出力されたコマンドを人間が確認して通常のMonitorで実行する。PR1形式のplugin monitor停止に同じ行が出た移行後は、コマンドを手動実行せず、新しい対話型セッションから `/gh-maestro` を呼び出してpluginを起動する。決定論的endpointを持つplugin monitorに手動で重複起動を行わない。
 
 ## inbox監視の確認
 
 1. `/gh-maestro` を実行した現在の対話型セッションに、plugin monitor `gh-maestro-inbox` がロードされていることを確認する。
 2. `node "{{SCRIPTS_PATH}}/process-lifecycle.js" status --workspace $WORKSPACE --script msg-poll.js` でregistryの事実を確認する。生存していても、別セッションのstdoutを現在の画面へ届ける根拠にはしない。
-3. pluginのロード失敗・monitor終了・`NEW_MESSAGE` の欠落を確認したら、人間へ事実を報告する。プロセスを手動でdetachしたり、同じ受信monitorを重複起動したりしない。
+3. Claude Codeの強制終了後に残った同役割monitorは、次の対話型セッションで自動引き継ぎされる。monitorの起動後に現在のセッションへ通知が届くことを確認する。pluginのロード失敗・引き継ぎ後のmonitor終了・`NEW_MESSAGE` の欠落が続く場合は人間へ事実を報告する。手動でmonitorを重複起動しない。
 
 ## PR監視・Review Managerの再起動
 
@@ -37,7 +37,7 @@ Review Managerを起動しない軽量経路では、上のコマンドへ `--no
 
 ### slow stateがrunningのまま残った場合
 
-`poll-pr.js` は起動時に `.gh-maestro/poll-slow-test-<PR>.json` を走査する。`running` レコードのslow workerについて、PID・起動時刻を確認できない、プロセスが終了済み、またはPID再利用と判定した場合は、workerをkillせず `unavailable` と `SLOW_TEST_RESULT` を記録する。再実行は行わない。PIDと起動時刻が一致して生存している場合だけ、そのworkerを待つ。
+`poll-pr.js` は起動時に `.gh-maestro/poll-slow-test-<PR>.json` を走査する。`running` レコードのslow workerについて、endpointがdead、または記録がendpointを持たない旧形式でPIDの `ESRCH` を確認した場合は、workerをkillせず `unavailable` と `SLOW_TEST_RESULT` を記録する。endpointへのI/Oがunknown、または旧形式のPIDが存在する場合は状態を確定せず停止して報告する。再実行は行わない。生きたendpointと同じ `instanceId` を確認できる場合だけ、そのworkerを待つ。
 
 再現調査で `poll-pr.js` を停止するとslow実行も停止し、stateが `running` のまま残った事実は、親子プロセス寿命の契約を確認する回帰材料である。slowをdetached化して監視から切り離すことで隠すのではなく、回収処理で結果を確定する。
 
@@ -84,10 +84,10 @@ node "{{SCRIPTS_PATH}}/restart-residents.js" --workspace "$WORKSPACE" --restart-
 
 ## inbox監視の重複復旧
 
-旧形式の `msg-poll.js` が複数ある場合だけ、まず次を `--dry-run` で実行して事実を確認する。
+endpointを持たない旧形式の `msg-poll.js` が複数ある場合だけ、まず次を `--dry-run` で実行して事実を確認する。
 
 ```sh
 node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace "$WORKSPACE" --dry-run
 ```
 
-対象PIDと起動時刻を人間へ報告し、無関係な常駐を含む無条件のsweepや手動killを行わない。plugin管理対象を通常Monitorの再接続で置き換えない。
+対象PIDと `instanceId`（旧記録で無い場合はその事実）を人間へ報告し、無関係な常駐を含む無条件のsweepや手動killを行わない。plugin管理対象を通常Monitorの再接続で置き換えない。

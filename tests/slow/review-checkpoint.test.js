@@ -15,7 +15,9 @@ test('resume CLI refuses a live previous job runner and preserves it', () => {
     const file = runnerLeasePath(ws, 123, process.pid);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const processRef = processLiveness.captureSelf();
-    assert.ok(processLiveness.writeRef({}, processRef).startTime);
+    const processRecord = processLiveness.writeRef({}, processRef);
+    assert.ok(processRecord.resourceKey);
+    assert.ok(processRecord.instanceId);
     writeRunningReviewManager(file, { processRef });
     const cli = path.resolve(__dirname, '../../scripts/start-review-manager.js');
     const result = spawnSync(process.execPath, [cli, '--resume', '123', 'o/r', ws, '1'], { encoding: 'utf8' });

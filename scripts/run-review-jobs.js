@@ -14,6 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('./shared/child-process');
+const { killProcessTree } = require('./shared/kill-tree');
 const { writeSentinel, finalizeReview } = require('./finalize-review');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { atomicWriteJson } = require('./shared/atomic-write');
@@ -623,17 +624,26 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
   let timedOut = false;
   timeoutHandle = setTimeout(() => {
     timedOut = true;
-    try { if (childRef && childRef.child) childRef.child.kill(); } catch {}
+    try {
+      if (childRef && childRef.child && Number.isInteger(childRef.child.pid)) {
+        killProcessTree(childRef.child.pid);
+      } else if (childRef && childRef.child) {
+        childRef.child.kill();
+      }
+    } catch {}
   }, timeoutMs);
 
   let registeredPid = null;
   const targetWorkspace = (options && options.mainWorkspace) || workspace;
 
-  const onSpawn = (child) => {
+  const onSpawn = (child, livenessInfo) => {
     if (child && child.pid) {
       try {
         const liveness = (options && options.liveness) || processLiveness;
-        const processRef = liveness.captureProcess(child.pid);
+        if (!livenessInfo || typeof livenessInfo.processRef !== 'string') {
+          throw new Error('review job launcher did not provide a process liveness reference');
+        }
+        const processRef = livenessInfo.processRef;
         const registerFn = (options && options.registerProcessFn) || _injectedRegisterProcess || registerProcess;
         registerFn(targetWorkspace, {
           processRef,
@@ -668,12 +678,14 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
       resultFileName: 'findings.json',
       systemPromptText: `orchestratorです。レビューワーカーとして、担当観点「${job.aspect}」のレビューを実行してください。`,
       spawnFn: _spawn,
+      livenessLogPath: logFile,
+      liveness: (options && options.liveness) || processLiveness,
       spawnOptions: {
         // stdout is deliberately ignored. Review results are read from the file
         // requested in the job prompt; parsing a mixed agent stream is unsafe.
         stdio: ['ignore', 'ignore', stderrFd],
       },
-      onSpawn: (child) => {
+      onSpawn: (child, livenessInfo) => {
         if (childRef) {
           childRef.child = child;
           childRef.closed = new Promise(resolve => {
@@ -681,7 +693,7 @@ async function launchJobWorker(job, manifest, agentConfig, reviewWtDir, workspac
             child.once('error', () => { if (!child.pid) resolve(); });
           });
         }
-        onSpawn(child);
+        onSpawn(child, livenessInfo);
       },
       observe: (child) => new Promise((resolve) => {
         child.on('error', err => resolve({ error: `agent process error: ${err.message}` }));
@@ -1095,9 +1107,8 @@ function incrementRetryCount(workspace, pr) {
 // read-modify-write 区間を直列化する。
 //
 // ロック保持ウィンドウは数ms。mtime が閾値（30秒）を超えたロックは、保持プロセスが
-// クラッシュした stale ロックとみなして回収する。PID/startTime 照合（worker-lease.js）は
-// 使わない——このロックは短命で、Windows の WMI 呼び出しを伴う高コストな
-// getProcessStartTime を避けるため。
+// クラッシュした stale ロックとみなして回収する。worker endpoint の照会は使わない——
+// このロックは短命で、時刻ベースのstale判定で回収する。
 
 const RETRY_COUNT_LOCK_STALE_MS = 30 * 1000; // これを超えて残っていれば stale とみなす
 const RETRY_COUNT_LOCK_WAIT_MS = 5 * 1000;   // ロック取得の最大待ち時間

@@ -200,7 +200,7 @@ function scanOnce({ workspace, ghDir, repo, issue, state, isBaseline, ghOpts, li
   const events = [];
   const errors = [];
 
-  // manager.running は存在だけでなく、PID＋起動時刻の同一性まで確認する。ここは
+  // manager.running は存在だけでなく、OS endpointとinstanceIdの同一性まで確認する。ここは
   // assistant-watch の読み取り専用契約を守るため stale 回収を行わない。旧PID-onlyや
   // 同一性確認不能のファイルは稼働中と断定せず、次のPR状態更新へ進む。
   const reviewRunningPrs = new Set(

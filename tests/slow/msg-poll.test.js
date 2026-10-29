@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('../helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -11,6 +14,11 @@ const { cleanSpawnEnv } = require('../_spawn-env');
 const workerLease = require('../../scripts/shared/worker-lease');
 const { spawnSync: nativeSpawnSync } = require('node:child_process');
 const processLiveness = require('../../scripts/shared/process-liveness');
+const {
+  startLivenessOwner,
+  stopLivenessOwner,
+  waitForLivenessOwnerExit,
+} = require('../helpers/liveness-owner');
 
 const TEST_SESSION_START_TIME = '2026-07-25T00:00:00.000Z';
 const msgPoll = require('../../scripts/msg-poll');
@@ -33,11 +41,8 @@ const useFastParentChecker = () => {
 };
 useFastParentChecker();
 
-// テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
-// 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
-// --session-pid を渡すため、テストでも常に自プロセスPIDを渡してこの探索を省く。
+// PR2の親子常駐はPID探索ではなくstdin EOFで終了する。
 const _realMain = msgPoll.main;
-const TEST_SESSION_PID = String(process.pid);
 const TEST_CLI_START_TIME = '2026-07-25T00:00:00.000Z';
 
 // 明示した --workspace は環境変数より優先されるが、workspace引数を省略する
@@ -46,7 +51,7 @@ const runMain = (args, opts) => {
   const saved = process.env.GH_MAESTRO_WORKSPACE;
   delete process.env.GH_MAESTRO_WORKSPACE;
   try {
-    return _realMain([...args, '--session-pid', TEST_SESSION_PID], opts);
+    return _realMain(args, opts);
   } finally {
     if (saved !== undefined) process.env.GH_MAESTRO_WORKSPACE = saved;
   }
@@ -121,13 +126,20 @@ const FAST_DEAD_WATCH_PRELOAD = createFastCliPreload({ parentAlive: false });
 function runMsgPollCli(args, { parentAlive = true, ...opts } = {}) {
   const preload = parentAlive ? FAST_CLI_PRELOAD : FAST_DEAD_WATCH_PRELOAD;
   const childArgs = ['-r', preload, path.join(__dirname, '..', '..', 'scripts', 'msg-poll.js'), ...args];
-  if (!args.includes('--watch-pid') && !args.includes('--session-pid')) {
-    childArgs.push('--session-pid', TEST_SESSION_PID);
-  }
+  const workspaceIndex = args.indexOf('--workspace');
+  const runtimeRoot = workspaceIndex >= 0
+    ? path.join(args[workspaceIndex + 1], '.test-runtime')
+    : undefined;
+  const env = {
+    ...cleanSpawnEnv(),
+    ...(runtimeRoot ? { GH_MAESTRO_RUNTIME_DIR: runtimeRoot } : {}),
+    ...(opts.env || {}),
+  };
+  delete opts.env;
   return nativeSpawnSync(process.execPath, childArgs, {
     encoding: 'utf8',
     timeout: 10000,
-    env: cleanSpawnEnv(),
+    env,
     ...opts,
   });
 }
@@ -277,21 +289,24 @@ function writeWorkers(workspace, workers) {
 
 test('継続モード: 同じ self を監視中の生存プロセスがいれば exit 1 して起動しない', () => {
   withTempDir(workspace => {
-    // 排他の正本は role lease（Issue #240）。registry エントリでなく
-    // <workspace>/.gh-maestro/leases/resident-role-msgpoll-orchestrator.json を用意する。
-    // pid はテストランナー自身ではなく ppid を指定する（--force 無しなので kill は走らないが、
-    // 念のためテスト環境のプロセスを対象にしない）。
-    const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
-    fs.mkdirSync(leasesDir, { recursive: true });
-    const otherPid = process.ppid;
-    fs.writeFileSync(path.join(leasesDir, 'resident-role-msgpoll-orchestrator.json'), JSON.stringify({
-      pid: otherPid, startTime: TEST_CLI_START_TIME, workerName: 'msgpoll-orchestrator', phase: 'active',
-    }));
+    const runtimeRoot = path.join(workspace, '.test-runtime');
+    const owner = startLivenessOwner({
+      workspace, runtimeRoot, kind: 'resident', name: 'msgpoll-orchestrator',
+    });
+    try {
+      const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
+      fs.mkdirSync(leasesDir, { recursive: true });
+      fs.writeFileSync(path.join(leasesDir, 'resident-role-msgpoll-orchestrator.json'), JSON.stringify({
+        ...owner.record, workerName: 'msgpoll-orchestrator', phase: 'active',
+      }));
 
-    const r = runMsgPollCli(['orchestrator', '--workspace', workspace]);
+      const r = runMsgPollCli(['orchestrator', '--workspace', workspace]);
 
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /重複起動/);
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /重複起動/);
+    } finally {
+      stopLivenessOwner(owner);
+    }
   });
 });
 
@@ -319,100 +334,72 @@ test('継続モード: --workspace がホームディレクトリと衝突する
   }
 });
 
-test('継続モード: 重複起動検出時のエラーに、判断不要でそのまま使えるwatch-pidコマンドが含まれる', () => {
+test('継続モード: 重複起動検出は削除済みのwatch-pidを案内しない', () => {
   withTempDir(workspace => {
-    const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
-    fs.mkdirSync(leasesDir, { recursive: true });
-    const otherPid = process.ppid;
-    fs.writeFileSync(path.join(leasesDir, 'resident-role-msgpoll-orchestrator.json'), JSON.stringify({
-      pid: otherPid, startTime: TEST_CLI_START_TIME, workerName: 'msgpoll-orchestrator', phase: 'active',
-    }));
-
-    const r = runMsgPollCli(['orchestrator', '--workspace', workspace]);
-
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, new RegExp(`--watch-pid ${otherPid}\\b`));
-    assert.match(r.stderr, /PID_DIED/);
-  });
-});
-
-test('継続モード: --force は重複レース判定を無効化せず、既存所有者を停止させて引き継ぐ', () => {
-  const { spawn } = require('child_process');
-  withTempDir(workspace => {
-    // 既存所有者として使い捨ての実子プロセスを立てる。--force の引き継ぎは
-    // killProcessTree で所有者を終了させるため、process.ppid 等のテスト実行環境の
-    // プロセスを owner に指定してはならない（テストランナーの親を kill してしまう）。
-    const owner = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
-      stdio: 'ignore',
-      windowsHide: true,
-      env: cleanSpawnEnv(),
+    const runtimeRoot = path.join(workspace, '.test-runtime');
+    const owner = startLivenessOwner({
+      workspace, runtimeRoot, kind: 'resident', name: 'msgpoll-orchestrator',
     });
-    let leakedOwner = true;
     try {
-      const otherPid = owner.pid;
       const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
       fs.mkdirSync(leasesDir, { recursive: true });
       fs.writeFileSync(path.join(leasesDir, 'resident-role-msgpoll-orchestrator.json'), JSON.stringify({
-        pid: otherPid, startTime: TEST_CLI_START_TIME, workerName: 'msgpoll-orchestrator', phase: 'active',
+        ...owner.record, workerName: 'msgpoll-orchestrator', phase: 'active',
       }));
 
-      const r = runMsgPollCli(['orchestrator', '--workspace', workspace, '--force'], {
+      const r = runMsgPollCli(['orchestrator', '--workspace', workspace]);
+
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /重複起動/);
+      assert.doesNotMatch(r.stderr, /--watch-pid|PID_DIED/);
+    } finally {
+      stopLivenessOwner(owner);
+    }
+  });
+});
+
+test('継続モード: --force は重複レース判定を無効化せず、既存所有者を停止させて引き継ぐ', async () => {
+  await withTempDir(async (workspace) => {
+    const runtimeRoot = path.join(workspace, '.test-runtime');
+    const owner = startLivenessOwner({
+      workspace, runtimeRoot, kind: 'resident', name: 'msgpoll-orchestrator',
+    });
+    let leakedOwner = true;
+    let runResult;
+    try {
+      const leasesDir = path.join(workspace, '.gh-maestro', 'leases');
+      fs.mkdirSync(leasesDir, { recursive: true });
+      fs.writeFileSync(path.join(leasesDir, 'resident-role-msgpoll-orchestrator.json'), JSON.stringify({
+        ...owner.record, workerName: 'msgpoll-orchestrator', phase: 'active',
+      }));
+
+      runResult = runMsgPollCli(['orchestrator', '--workspace', workspace, '--force'], {
         timeout: 15000,
-        env: { ...cleanSpawnEnv(), GH_MAESTRO_WORKER: 'orchestrator' },
+        env: { GH_MAESTRO_WORKER: 'orchestrator' },
       });
 
-      assert.doesNotMatch(r.stderr, /重複起動/);
+      assert.doesNotMatch(runResult.stderr, /重複起動/);
       // 引き継ぎは lease を再取得して本稼働へ進む（本テストでは gh 解決に失敗して
       // exit 1 になるが、重複起動の拒否ではない）。owner は停止されている。
-      if (owner.exitCode === null && owner.signalCode === null) {
-        leakedOwner = false;
-      }
+      await waitForLivenessOwnerExit(owner);
+      leakedOwner = owner.child.exitCode === null && owner.child.signalCode === null;
     } finally {
-      if (owner.exitCode === null && owner.signalCode === null) {
-        try { owner.kill(); } catch {}
+      if (owner.child.exitCode === null && owner.child.signalCode === null) {
+        stopLivenessOwner(owner);
       }
-      assert.equal(leakedOwner, false, '--force の引き継ぎで既存所有者プロセスが停止されること');
+      assert.equal(leakedOwner, false,
+        `--force の引き継ぎで既存所有者プロセスが停止されること (exit=${runResult?.status}, owner=${owner.child.exitCode}/${owner.child.signalCode})\n${runResult?.stderr}`);
     }
   });
 });
 
 
 
-// ── buildWatchPidCommand ─────────────────────────────────────────────────────
-
-
-
-// ── --watch-pid モード（実プロセス起動） ─────────────────────────────────────
-
-test('--watch-pid: 監視対象PIDが生きている間は何も出力しない', () => {
-  const r = runMsgPollCli(['--watch-pid', String(process.pid), '--interval', '1'], { timeout: 2500 });
-  assert.equal(r.stdout.trim(), '');
-});
-
-test('--watch-pid: 監視対象PIDが死んでいれば即座にPID_DIEDを出力してexit 0', () => {
-  const { spawnSync } = require('child_process');
-  const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)'], { encoding: 'utf8' });
-  const deadPid = dead.pid;
-
-  const r = runMsgPollCli(['--watch-pid', String(deadPid), '--interval', '1'], {
-    timeout: 5000,
-    parentAlive: false,
-  });
-
-  assert.equal(r.status, 0);
-  assert.equal(r.stdout.trim(), `PID_DIED:${deadPid}`);
-});
-
-test('--watch-pid: 不正なpid指定はexit 1', () => {
-  const r = runMsgPollCli(['--watch-pid', 'not-a-number'], { timeout: 5000 });
+// --watch-pid was removed when downstream residents switched to stdin EOF.
+test('旧 --watch-pid は未知のフラグとして拒否する', () => {
+  const r = runMsgPollCli(['--watch-pid', String(process.pid)], { timeout: 5000 });
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /正の整数のPID/);
-});
-
-test('--watch-pid: 余剰な位置引数・未知フラグはエラー終了する（黙って無視しない）', () => {
-  const r = runMsgPollCli(['--watch-pid', String(process.pid), 'extra'], { timeout: 5000 });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /予期しない位置引数/);
+  assert.match(r.stderr, /未知のフラグ.*--watch-pid/);
 });
 
 

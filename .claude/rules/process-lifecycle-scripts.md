@@ -24,8 +24,9 @@ paths:
 - detachした子プロセスを起動する場合、lock/registryのPIDは子プロセス自身が起動直後に自PIDで上書きする（launcherのPIDのまま生死判定しない）
 - `process-lifecycle.js`の`registerProcess`をワーカー起因のプロセスから呼ぶ場合は必ず`workerName`を渡す（`remove-worker.js`のターゲット削除に必要）
 - lock/temp等のリソースを作成する処理は、生成箇所すべてを`try/finally`または対応するエラーハンドラ（`child.on('error')`/`('exit')`等）でカバーする。一部だけ（例: lockFileのみ）をカバーし他（briefFile等）を見落とすと、異常系でファイルが残留する（PR #84 Review Manager指摘）
-- 重複プロセスの判定は共通の生存確認モジュールを通す。判定不能な記録を死亡とみなして回収しない。PID は再利用されるため、PID だけで生死や同一性を判定しない（PR #90 Review Manager指摘）。
+- 重複プロセスの判定は共通の生存確認モジュールを通す。判定不能な記録を死亡とみなして回収しない。PID は停止先の特定にだけ使い、生死は `(workspace, 種別, 役割名またはworker名)` から決定論的に導出したOS endpointで確認し、起動世代は別の `instanceId` で区別する。endpointを持たないPR1形式の参照は `process-liveness.js` 内でのみ `process.kill(pid, 0)` を使い、`ESRCH` ならdead、PIDが存在するか不在を確定できなければunknownとする。起動時刻の照会で同一性を確認しない（PR #90 Review Manager指摘）。
   理由と経緯: docs/adr/0047-liveness-via-os-released-resources.md
+  理由と経緯: docs/adr/0048-plugin-monitor-exit-by-takeover.md
 - 「重複起動チェック→レジストリ登録」のような check-then-register 処理は、2段階が非アトミックだとTOCTOU競合（ほぼ同時に2プロセスが起動し両方がチェックを通過してしまう）を起こす。チェックと登録は単一のアトミックな主張操作（排他ロックファイルの取得等）にまとめる（PR #90 Review Manager指摘）
 - 内部でリトライしながら指定時間内の終了を保証する有界待機（`--wait`等）で、サブ処理（`gh`呼び出し等）が独自の固定タイムアウトを持つ場合、締切直前に始まったサブ処理がその分だけ全体の締切を超過しうる。サブ処理のタイムアウトは残り予算に合わせて動的に絞り込む（PR #98 Review Manager指摘）
 - GitHub APIの`since`パラメータ等、タイムスタンプ境界によるカーソル方式を使うポーリングは、境界がinclusive/exclusiveのどちらかをAPI仕様で確認せず前提にしない。同一タイムスタンプの複数レコードが存在すると境界の解釈次第で取りこぼしうる。タイムスタンプ単独でなく、処理済みIDの記録と併用して重複排除する（PR #100 Review Manager指摘）

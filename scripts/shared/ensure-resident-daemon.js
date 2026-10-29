@@ -17,7 +17,7 @@
 //    排他ロック下で最後に spawn を試みた時点（.gh-maestro/<attemptName>-autostart-attempt.json）を
 //    原子的に予約更新し、クールダウン中（既定5分）の再試行をスキップする。
 //    破損記録・未来時刻は fail-open で再試行を妨げない。
-// 6. 親セッションPIDの同期解決（呼び出し元生存中の解決。Issue #256 実障害防止）
+// 6. 依存roleのlive lease確認（worker-supervisorをorchestrator msg-pollより先に起動しない）
 // 7. detached + windowsHide + unref + ログファイル管理
 // 8. best-effort エラーハンドリング（例外を呼び出し元に伝播させない）
 //
@@ -27,6 +27,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('./child-process');
+const { createChildLivenessEnv } = require('./process-liveness');
 const { isResidentLeaseLive } = require('./worker-lease');
 const { isMigrationInProgress } = require('./migration-marker');
 
@@ -147,17 +148,12 @@ function tryReserveAutostartAttempt(workspace, attemptName) {
  * process-lifecycle への依存は評価時ではなく呼び出し時まで遅延する（Issue #267）。
  */
 function createDaemonHooks() {
-  let _injectedFindSessionRootPid = null;
   let _injectedFindRunningInstance = null;
   let _spawn = (cmd, args, opts) => spawn(cmd, args, opts);
   let _isResidentLeaseLive = isResidentLeaseLive;
   let _isMigrationInProgress = isMigrationInProgress;
 
   return {
-    getFindSessionRootPid: () => {
-      const fn = _injectedFindSessionRootPid ?? require('../process-lifecycle').findSessionRootPid;
-      return fn;
-    },
     getFindRunningInstance: () => {
       const fn = _injectedFindRunningInstance ?? require('../process-lifecycle').findRunningInstance;
       return fn;
@@ -166,7 +162,6 @@ function createDaemonHooks() {
     getIsResidentLeaseLive: () => _isResidentLeaseLive,
     getIsMigrationInProgress: () => _isMigrationInProgress,
     setSpawn: (fn) => { _spawn = fn; },
-    setFindSessionRootPid: (fn) => { _injectedFindSessionRootPid = fn; },
     setFindRunningInstance: (fn) => { _injectedFindRunningInstance = fn; },
     setIsResidentLeaseLive: (fn) => { _isResidentLeaseLive = fn; },
     setIsMigrationInProgress: (fn) => { _isMigrationInProgress = fn; },
@@ -185,7 +180,8 @@ function createDaemonHooks() {
  * @param {string} params.attemptName - 試行記録識別名（例: 'worker-supervisor'）
  * @param {string[]} [params.legacyScriptNames] - 改名前の常駐script名（移行期間のみ検知）
  * @param {string[]} [params.legacyRoles] - 改名前のrole名（移行期間のみ検知）
- * @param {function} [params.buildArgs] - 引数構築関数 `({ workspace, sessionPid }) => string[]`
+ * @param {string} [params.requiresRole] - このrole leaseがliveの場合だけ起動する
+ * @param {function} [params.buildArgs] - 引数構築関数 `({ workspace }) => string[]`
  * @param {object} [params.hooks]     - テスト用フックオブジェクト（createDaemonHooks 由来）
  */
 function ensureResidentDaemon({
@@ -197,6 +193,7 @@ function ensureResidentDaemon({
   attemptName,
   legacyScriptNames = [],
   legacyRoles = [],
+  requiresRole = null,
   buildArgs,
   hooks = null,
 }) {
@@ -207,6 +204,14 @@ function ensureResidentDaemon({
 
   const findRunning = hooks ? hooks.getFindRunningInstance() : require('../process-lifecycle').findRunningInstance;
   const checkLease = hooks ? hooks.getIsResidentLeaseLive() : isResidentLeaseLive;
+
+  if (requiresRole) {
+    try {
+      if (!checkLease({ workspace, role: requiresRole })) return;
+    } catch {
+      return;
+    }
+  }
 
   try {
     const scriptNames = [scriptName, ...legacyScriptNames];
@@ -234,28 +239,24 @@ function ensureResidentDaemon({
     fs.mkdirSync(ghDir, { recursive: true });
     logFd = fs.openSync(path.join(ghDir, logFileName), 'a');
 
-    let sessionPid = null;
-    try {
-      const resolvePid = hooks ? hooks.getFindSessionRootPid() : require('../process-lifecycle').findSessionRootPid;
-      const pid = resolvePid();
-      if (Number.isFinite(pid) && pid > 0) {
-        sessionPid = pid;
-      }
-    } catch {
-      // 解決失敗時はフォールバック
-    }
-
     const scriptFullPath = path.join(scriptsPath, scriptName);
     const customArgs = typeof buildArgs === 'function'
-      ? buildArgs({ workspace, sessionPid })
-      : ['--workspace', workspace, ...(sessionPid ? ['--session-pid', String(sessionPid)] : [])];
+      ? buildArgs({ workspace })
+      : ['--workspace', workspace];
     const args = [scriptFullPath, ...customArgs];
 
     const doSpawn = hooks ? hooks.getSpawn() : spawn;
+    const childLiveness = createChildLivenessEnv({
+      env: process.env,
+      workspace,
+      kind: 'resident',
+      name: role || scriptName,
+    });
     const child = doSpawn(process.execPath, args, {
       detached: true,
       windowsHide: true,
       stdio: ['ignore', logFd, logFd],
+      env: childLiveness.env,
     });
     child.on('error', () => {});
     child.unref();

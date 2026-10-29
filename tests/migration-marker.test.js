@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -9,8 +12,7 @@ const path = require('path');
 const marker = require('../scripts/shared/migration-marker');
 const { createLiveness } = require('../scripts/shared/process-liveness');
 let probe = 'alive';
-let start = '2026-08-01T00:00:00.000Z';
-function inject() { marker._setLiveness(createLiveness({ probePid: () => probe, readStartTime: () => start })); }
+function inject() { marker._setLiveness(createLiveness({ probeEndpoint: () => probe })); }
 
 let workspace;
 
@@ -20,7 +22,6 @@ let workspace;
 afterEach(() => {
   marker._setLiveness(null);
   probe = 'alive';
-  start = '2026-08-01T00:00:00.000Z';
   try { fs.rmSync(workspace, { recursive: true, force: true }); } catch {}
 });
 
@@ -30,7 +31,7 @@ function freshWorkspace() {
   return workspace;
 }
 
-test('markMigrationInProgress: 所有PIDとstartTimeをJSONで記録する', () => {
+test('markMigrationInProgress: 所有PIDとresource identityをJSONで記録する', () => {
   const dir = freshWorkspace();
   inject();
 
@@ -38,7 +39,8 @@ test('markMigrationInProgress: 所有PIDとstartTimeをJSONで記録する', () 
 
   const raw = JSON.parse(fs.readFileSync(marker.migrationInProgressPath(dir), 'utf8'));
   assert.equal(raw.pid, process.pid);
-  assert.equal(raw.startTime, '2026-08-01T00:00:00.000Z');
+  assert.equal(typeof raw.resourceKey, 'string');
+  assert.equal(raw.startTime, undefined);
 });
 
 test('isMigrationInProgress: マーカーが無ければ false', () => {
@@ -65,35 +67,35 @@ test('isMigrationInProgress: 所有プロセスが死んでいれば stale と�
   assert.equal(marker.isMigrationInProgress(dir), false);
 });
 
-test('isMigrationInProgress: PIDが再利用され同一性が確認できなければ false', () => {
+test('isMigrationInProgress: 所有resourceが死亡していれば false', () => {
   const dir = freshWorkspace();
-  marker._setLiveness(createLiveness({ probePid: () => 'alive', readStartTime: () => start }));
+  marker._setLiveness(createLiveness({ probeEndpoint: () => 'dead' }));
   fs.writeFileSync(marker.migrationInProgressPath(dir), JSON.stringify({
-    pid: 12345, startTime: '2026-08-01T00:00:00.000Z',
+    pid: 12345, resourceKey: 'old-resource',
   }));
-  start = '2026-08-02T00:00:00.000Z';
 
   assert.equal(marker.isMigrationInProgress(dir), false);
 });
 
-test('isMigrationInProgress: startTime 未記録でも所有プロセス生存なら true（劣化縮退）', () => {
+test('isMigrationInProgress: startTimeなしでも所有resourceが生存なら true', () => {
   const dir = freshWorkspace();
-  start = null; inject();
+  inject();
 
   marker.markMigrationInProgress(dir);
   const raw = JSON.parse(fs.readFileSync(marker.migrationInProgressPath(dir), 'utf8'));
-  assert.equal(raw.startTime, null);
+  assert.equal(typeof raw.resourceKey, 'string');
+  assert.equal(raw.startTime, undefined);
 
-  // startTime が null でも PID は生存中なので、判定不能として抑止を維持する。
+  // resource が生存中なら、自動起動の抑止を維持する。
   assert.equal(marker.isMigrationInProgress(dir), true);
 });
 
 test('isMigrationInProgress: 不正なPIDは判定不能として抑止する', () => {
   const dir = freshWorkspace();
-  fs.writeFileSync(marker.migrationInProgressPath(dir), JSON.stringify({ pid: 0, startTime: '2026-08-01T00:00:00.000Z' }));
+  fs.writeFileSync(marker.migrationInProgressPath(dir), JSON.stringify({ pid: 0, resourceKey: 'invalid-pid' }));
   assert.equal(marker.isMigrationInProgress(dir), true);
 
-  fs.writeFileSync(marker.migrationInProgressPath(dir), JSON.stringify({ startTime: '2026-08-01T00:00:00.000Z' }));
+  fs.writeFileSync(marker.migrationInProgressPath(dir), JSON.stringify({ resourceKey: 'missing-pid' }));
   assert.equal(marker.isMigrationInProgress(dir), true);
 });
 

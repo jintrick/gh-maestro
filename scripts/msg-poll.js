@@ -29,9 +29,8 @@ const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const { isTrustedCommentAuthor } = require('./shared/comment-author-trust');
 const readStateLib = require('./shared/read-state');
 const {
-  resolveSessionPid,
   registerProcess,
-  findRunningInstance,
+  findRunningInstances,
   cleanup: lifecycleCleanup,
 } = require('./process-lifecycle');
 const processLiveness = require('./shared/process-liveness');
@@ -43,20 +42,17 @@ const {
   formatResidentNotification,
 } = require('./shared/resident-audit');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
-const { notifyWatchdogExit, PARENT_DEATH_EXIT_CODE } = require('./shared/watchdog-exit-notify');
-const { handleParentSessionDeath } = require('./shared/resident-parent-death');
+const { notifyWatchdogExit } = require('./shared/watchdog-exit-notify');
 
 // テスト注入。既定は実装。
 let _parentLiveness = processLiveness;
-let _parentDeathExit = (code) => process.exit(code);
 
 const DEFAULT_INTERVAL_SEC = 20;
 const MARKER_RE = /^<!--\s*gh-maestro\s+(\{.*\})\s*-->/;
 
 const USAGE = `msg-poll.js — GitHub Issue コメントを定期スキャンし新着メッセージを stdout に通知する
 
-Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once | --wait <sec>] [--session-pid <pid>] [--force]
-       node msg-poll.js --watch-pid <pid> [--interval <sec>]
+Usage: node msg-poll.js <self> [--issue <N>] [--workspace <path>] [--interval <sec>] [--once | --wait <sec>] [--force] [--plugin-monitor]
 
 Arguments:
   <self>                 自分の名前（worker 名、または "orchestrator"）
@@ -73,19 +69,11 @@ Options:
                           最も古い1件のみ。残りは次回の --wait 呼び出しで改めて返される。
                           --once と同時指定はできない（エラー終了する）。
                           継続モードと同様にPID registryへ自己登録し、終了時に解除する。
-  --session-pid <pid>    監視対象のセッションPID（dead-man's switch用。省略時は自動検出）
   --force                同じ role を既に保持している生存プロセスがいても、既存所有者へ
                           停止要求を送ってから起動する（継続モード・--wait モードのみ有効。
                           lease判定を無効化せず、引き継げなければ exit 1 する。既定では
                           多重起動を検知して exit 1 する）。
   --plugin-monitor       Claude Code plugin monitor から起動されたことをregistryへ記録する。
-  --watch-pid <pid>      他の <self> 引数を無視し、指定PIDの生存監視のみを行う特殊モード。
-                          「重複起動を検出しました」エラー時に代替コマンドとして案内される
-                          （このモードは msg-poll.js 自身を起動するかどうかの判断を必要としない）。
-                          PIDが生存している間は何も出力しない。死亡を検知した時点で
-                          \`PID_DIED:<pid>\` を1行出力して exit 0 する。Monitorのcommandに
-                          そのまま渡すことを想定している。PID registryへの自己登録は行わない
-                          （監視対象そのものではなくその健全性を見ているだけのため）。
 
 Output (stdout):
   新着メッセージを1行ずつ出力:
@@ -99,7 +87,6 @@ Output (stdout):
     orchestrator モード: RESIDENT_NOTIFICATION:<JSON>
                           （常駐プロセスの内部通知。各巡回で未処理分を処理済み化して出力し、
                           GitHub への投稿は行わない）
-  --watch-pid モード:    PID_DIED:<pid>（監視対象PIDの死亡を検知した1回のみ）
 
 このスクリプトはエージェントのターン内で blocking 実行される。detached 起動しない。
 既読状態は .gh-maestro/msg-state/<self>.json（v2スキーマ）に永続化され、--once/--wait の
@@ -111,24 +98,11 @@ orchestrator モードでは state が欠落・破損・旧形式（未初期化
 gh 呼び出し失敗（ネットワーク断・rate limit 等）はそのサイクルをスキップし次サイクルへ継続する。
 
 ライフサイクル管理:
-  ポーリングループの毎周回で親セッションの生存を確認し（dead-man's switch）、
-  消滅時はPID registryを解除して自動exitする。継続モード・--wait モードは起動時にPID registryへ
+  plugin monitorの通常終了はClaude Codeが管理する。--plugin-monitor起動では次回の同役割monitorが
+  残存instanceを停止して引き継ぐ。その他の親子起動ではstdinのEOFで親終了を検知する。
+  継続モード・--wait モードは起動時にPID registryへ
   自己登録し、role lease（role = msgpoll-<self>、<workspace>/.gh-maestro/leases/）を
   プロセス寿命中保持する。正常終了・シグナル・初期化失敗の全経路で解放する。`;
-
-/**
- * 「重複起動を検出しました」エラー時に案内する、既存PIDを監視するための
- * 代替コマンド文字列を組み立てる。
- *
- * @param {number} pid
- * @param {string|null} [intervalSec]
- * @returns {string}
- */
-function buildWatchPidCommand(pid, intervalSec) {
-  const parts = ['node', JSON.stringify(__filename), '--watch-pid', String(pid)];
-  if (intervalSec) parts.push('--interval', String(intervalSec));
-  return parts.join(' ');
-}
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -220,7 +194,7 @@ function parseMarker(body) {
  *   help: boolean,
  *   validationErrors?: Array<{ message: string }>|null,  // 検証エラー時のみ設定（help・成功時は null）
  *   self?: string, issueArg?: string|null, workspaceArg?: string|null,
- *   intervalArg?: string|null, sessionPidArg?: string|null,
+ *   intervalArg?: string|null,
  *   onceMode?: boolean, force?: boolean, pluginMonitor?: boolean, waitArg?: string|null,
  * }}
  */
@@ -228,7 +202,7 @@ function parseArgs(args) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(args, {
-      flags: { '--workspace': {}, '--issue': {}, '--interval': {}, '--session-pid': {}, '--wait': {} },
+      flags: { '--workspace': {}, '--issue': {}, '--interval': {}, '--wait': {} },
       booleans: ['--once', '--force', '--plugin-monitor', '--help', '-h'],
       // self（ワーカー名/recipient）は最大1つの位置引数。未知フラグ（-- 始まり）は
       // パーサ側で拒否される（Issue #14 / argv-parsing-pitfalls。先頭に来て self として
@@ -254,7 +228,6 @@ function parseArgs(args) {
     issueArg: values['--issue'],
     workspaceArg: values['--workspace'],
     intervalArg: values['--interval'],
-    sessionPidArg: values['--session-pid'],
     onceMode: values['--once'] === true,
     force: values['--force'] === true,
     pluginMonitor: values['--plugin-monitor'] === true,
@@ -277,7 +250,7 @@ function parseArgs(args) {
  *   onceMode: boolean,
  *   intervalMs: number,
  *   residentLease: object|null,
- *   residentIdentity: {pid: number, startTime: string|null}|null,
+ *   residentIdentity: string|null,
  * }}
  */
 function main(argsOverride, opts = {}) {
@@ -397,40 +370,30 @@ function main(argsOverride, opts = {}) {
     return null;
   }
 
-  // ── セッションPID解決（dead-man's switch） ────────────────────────────
-
-  const sessionPid = resolveSessionPid(parsed.sessionPidArg);
-
-  // 親セッションの参照を起動時に捕捉する。
-  const parentRef = _parentLiveness.captureProcess(sessionPid);
-
   // ── 常駐プロセス用 role lease（Issue #240） ───────────────────────────
   // 継続モード・--wait モードのみ排他する（--once は読み取り専用の一回実行のため）。
   // 取得は resolveWorkspace 直後・gh 呼び出しより前に行い、多重起動時は無駄な外部呼び出しを
   // 避けて即拒否する。workspace 表記の差異（大文字小文字・末尾スラッシュ等）でもすり抜けない
   // よう、role lease は workspace を canonicalWorkspace で正規化して排他する（Issue #240）。
-  // role は親セッション死亡時の lease 解放（handleParentSessionDeath）でも参照するため
-  // --once でも算出する（lease 未取得なら解放は no-op）。
+  // role は --once でも算出する（lease 未取得なら解放は no-op）。
   const role = msgPollRole(self);
   let residentLease = null;
   let residentIdentity = null;
   if (!onceMode) {
-    // leaseとPID registryへ同じプロセスidentityを保存するため、起動時刻は常駐起動時に
-    // 一度だけ捕捉する。取得できない場合はunknownのまま常駐leaseを作成せず、現在時刻を
-    // identityの代替値にしない。
-    residentIdentity = _parentLiveness.captureSelf();
+    // leaseとPID registryへ同じOS資源参照を保存する。
+    residentIdentity = _parentLiveness.prepareSelf({ workspace, kind: 'resident', name: role });
     const handoffTargets = () => {
       const workerNameForRegistry = self !== 'orchestrator' ? self : null;
-      const dup = findRunningInstance(workspace, {
+      return findRunningInstances(workspace, {
         script: 'msg-poll.js', workerName: workerNameForRegistry, failOnReadError: true,
       });
-      return dup ? [dup.pid] : [];
     };
     try {
       const res = acquireResidentLease({
         workspace,
         role,
-        handoff: force,
+        handoff: force || pluginMonitor,
+        takeover: pluginMonitor,
         handoffStopTargets: handoffTargets,
         processRef: residentIdentity,
       });
@@ -447,25 +410,7 @@ function main(argsOverride, opts = {}) {
       }
       residentLease = res;
     } catch (e) {
-      // live lease による拒否。--watch-pid による監視コマンドを案内する。
       writeErr(`msg-poll: 重複起動を検出しました。${e.message}`);
-      const pidMatch = /pid (\d+)/.exec(e.message);
-      if (pidMatch) {
-        const ownerPid = parseInt(pidMatch[1], 10);
-        if (pluginMonitor) {
-          writeErr(
-            `plugin monitor管理下の既存msg-poll（pid=${ownerPid}）を検出しました。` +
-            '通常のMonitorで代替起動せず、現在の対話型セッションのplugin monitor状態を確認してください。'
-          );
-        } else {
-          writeErr('代わりに以下をMonitorでpersistent:trueとして起動してください（このコマンドをそのまま使うこと。判断は不要）:');
-          writeErr(`  ${buildWatchPidCommand(ownerPid)}`);
-          writeErr(
-            `このコマンドは pid=${ownerPid} の生存を監視し続け、死亡時に \`PID_DIED:${ownerPid}\` を通知します。` +
-            'その通知を受け取ったら、そのときはじめて改めてこのコマンドを --force なしで起動し直してください。'
-          );
-        }
-      }
       return { code: 1, lines: out, errLines: err, scanOnce: null, onceMode, intervalMs, residentLease: null };
     }
   }
@@ -484,10 +429,8 @@ function main(argsOverride, opts = {}) {
 
   const state = readState(workspace, self);
 
-  // ── dead-man's switch: 毎周回で親セッションの生存を確認 ──────────
-  // 親の観測と PID 再利用の判定は共通モジュールに委ねる。
-
-  const checkParent = _parentLiveness.watchParent(parentRef);
+  // plugin monitor の寿命は Claude Code が管理する。親子起動の場合だけstdin EOFを見る。
+  const checkParent = pluginMonitor ? () => true : _parentLiveness.watchParent();
 
   /**
    * 1回のスキャン。
@@ -515,15 +458,10 @@ function main(argsOverride, opts = {}) {
       ? { cwd: workspace, timeout: Math.min(GH_TIMEOUT_MS, Math.max(1000, maxGhTimeoutMs)) }
       : ghOpts;
 
-    // dead-man's switch: 親が死んでいたら cleanup して非ゼロ終了（exit 3）
-    // exit 3 = 親セッション消滅。exit 0 にすると正常終了扱いとなり、Monitor の異常終了
-    // アラーム経路と watchdog 通知が両方無効化される（Issue #301）。
-    // stdout は Monitor 通知チャンネルなので使わず、理由は lease 解放とともに
-    // handleParentSessionDeath が stderr へ出す。
     if (!checkParent()) {
       lifecycleCleanup(workspace);
-      handleParentSessionDeath({ workspace, scriptName: 'msg-poll.js', role, sessionPid, processRef: residentIdentity });
-      _parentDeathExit(PARENT_DEATH_EXIT_CODE);
+      if (residentLease && typeof residentLease.release === 'function') residentLease.release();
+      process.exit(0);
     }
 
     // ── 監査イベントの処理（orchestrator のみ） ────────────────────────
@@ -823,7 +761,6 @@ function main(argsOverride, opts = {}) {
     onceMode,
     intervalMs,
     workspace,
-    sessionPid,
     self,
     force,
     waitMode,
@@ -879,51 +816,6 @@ async function runWaitMode(result) {
 
 if (require.main === module) {
   const rawArgs = process.argv.slice(2);
-
-  // ── --watch-pid: 既存の生存プロセスを監視するだけの軽量モード ──────────
-  // <self> 等の他の引数を必要としない、完全に独立したモード。
-  // 「重複起動を検出しました」時の代替コマンドとして案内される。
-  if (rawArgs.includes('--watch-pid')) {
-    let watchValues, watchRest;
-    try {
-      ({ values: watchValues, rest: watchRest } = parseFlags(rawArgs, {
-        flags: { '--watch-pid': {}, '--interval': {} },
-        booleans: [],
-        // watch-pid モードは位置引数を取らない。余剰な位置引数・未知フラグは黙って無視しない
-        // （パーサ側で拒否。argv-parsing-pitfalls参照）。
-        positionals: { min: 0, max: 0 },
-      }));
-    } catch (err) {
-      if (err.name !== 'ArgsValidationError') throw err;
-      for (const e of err.errors) process.stderr.write(`msg-poll: ${e.message}\n`);
-      process.exit(1);
-    }
-    const watchPid = parseInt(watchValues['--watch-pid'], 10);
-    if (!Number.isFinite(watchPid) || watchPid <= 0) {
-      process.stderr.write(`msg-poll: --watch-pid には正の整数のPIDを指定してください: ${watchValues['--watch-pid']}\n`);
-      process.exit(1);
-    }
-    const watchIntervalMs = (parseInt(watchValues['--interval'] || String(DEFAULT_INTERVAL_SEC)) || DEFAULT_INTERVAL_SEC) * 1000;
-
-    // PID再利用検知のため、監視開始時に捕捉した起動時刻を dead-man's switch に渡す。
-    // 監視対象の PID が別プロセスに再利用された場合も即 PID_DIED を発火し、古いプロセスを
-    // 追いかけ続けることを防ぐ。実体が消えた場合は3周回連続で確認してから通知する
-    // （一過性の誤検出で PID_DIED を出さない。false positive は orchestrator の再起動を
-    // 誘導するため、通知は遅くても正しく倒す）。
-    const watchRef = _parentLiveness.captureProcess(watchPid);
-    const checkWatchedPid = _parentLiveness.watchParent(watchRef);
-    const emitWatchResult = () => {
-      if (!checkWatchedPid()) {
-        process.stdout.write(`PID_DIED:${watchPid}\n`);
-        process.exit(0);
-      }
-    };
-    emitWatchResult();
-    const watchIntervalHandle = setInterval(emitWatchResult, watchIntervalMs);
-    process.on('SIGINT', () => { clearInterval(watchIntervalHandle); process.exit(0); });
-    process.on('SIGTERM', () => { clearInterval(watchIntervalHandle); process.exit(0); });
-    return;
-  }
 
   // main() と同じ parseArgs() を再利用する（解析ロジックを2箇所に分けない）。
   const parsedForCli = parseArgs(rawArgs);
@@ -1048,7 +940,6 @@ module.exports = {
   // 実装を直接参照（テストが注入を戻す際の復元用。PR #251 の引数検証テストから使う）
   _notifyOrchestrator,
   _setParentLiveness: (value) => { _parentLiveness = value || processLiveness; },
-  _setParentDeathExit: (fn) => { _parentDeathExit = fn; },
   main,
   runWaitMode,
   // 内部ロジックの単体テスト用
@@ -1058,7 +949,6 @@ module.exports = {
   readState,
   writeState,
   statePath,
-  buildWatchPidCommand,
   MARKER_RE,
   USAGE,
 };

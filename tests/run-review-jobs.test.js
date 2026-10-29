@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
@@ -57,10 +60,11 @@ function writeReviewFixtures(root, leafIds, contents = {}) {
 }
 
 function shellCommandText(call) {
+  const shellArgs = JSON.parse(call.args[1]);
   if (process.platform === 'win32') {
-    return Buffer.from(call.args[2], 'base64').toString('utf16le');
+    return Buffer.from(shellArgs[3], 'base64').toString('utf16le');
   }
-  return call.args.slice(3).join(' ');
+  return shellArgs[2];
 }
 
 function resultFileFromPrompt(prompt) {
@@ -1530,10 +1534,11 @@ test('launchJobWorker: ジョブ起動時に registerProcess を呼び、正常�
 
     assert.equal(result.status, 'success');
     assert.equal(registered.length, 1, 'registerProcess が1回呼ばれる');
-    assert.deepEqual(
-      processLiveness.writeRef({}, registered[0].meta.processRef),
-      { pid: 8888, startTime: '2026-08-28T04:00:00.000Z' },
-    );
+    const processRef = processLiveness.writeRef({}, registered[0].meta.processRef);
+    assert.equal(processRef.pid, 8888);
+    assert.match(processRef.resourceKey, /^[a-f0-9]{64}$/);
+    assert.equal(typeof processRef.instanceId, 'string');
+    assert.ok(processRef.instanceId);
     assert.equal(registered[0].meta.script, 'review-job');
     assert.equal(registered[0].meta.pr, 415);
     assert.equal(registered[0].meta.jobId, 'job-test');
@@ -1593,10 +1598,11 @@ test('launchJobWorker: ジョブ異常終了時（非0終了・エラー）で�
 
     assert.equal(result.status, 'failed');
     assert.equal(registered.length, 1);
-    assert.deepEqual(
-      processLiveness.writeRef({}, registered[0].meta.processRef),
-      { pid: 9999, startTime: '2026-08-28T04:00:00.000Z' },
-    );
+    const processRef = processLiveness.writeRef({}, registered[0].meta.processRef);
+    assert.equal(processRef.pid, 9999);
+    assert.match(processRef.resourceKey, /^[a-f0-9]{64}$/);
+    assert.equal(typeof processRef.instanceId, 'string');
+    assert.ok(processRef.instanceId);
     assert.equal(unregistered.length, 1, '異常終了時でも unregisterProcess が呼ばれる');
     assert.equal(unregistered[0].pid, 9999);
   } finally {

@@ -123,8 +123,6 @@ function _getRepo(workspace, opts = {}) {
   return null;
 }
 
-// PowerShell によるプロセス観測を毎回起こさないよう、watch 再描画間だけ短時間キャッシュする。
-const PROCESS_LIVENESS_CACHE_MAX_AGE_MS = 6_000;
 // ワーカー行の先頭に並べる状態ドットの個数
 const DOT_COUNT = 3;
 
@@ -257,8 +255,7 @@ function formatDuration(seconds) {
 function createWorkerStatusLiveness(opts = {}) {
   return processLiveness.createLiveness({
     probePid: opts.probePid,
-    readStartTime: opts.readStartTime,
-    startTimeCacheMs: PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
+    probeEndpoint: opts.probeEndpoint,
     now: opts.nowFn || _now,
   });
 }
@@ -311,7 +308,7 @@ function collectWorkersStatus(workspace, opts = {}) {
       let elapsedSeconds = 0;
 
       if (running && entry.pid) {
-        startTime = checker.writeRef({}, processRef).startTime || null;
+        startTime = entry.startTime || null;
         if (startTime) {
           const startMs = new Date(startTime).getTime();
           if (!Number.isNaN(startMs)) {
@@ -1232,7 +1229,6 @@ function runWatchLoop(workspace, interval, opts = {}) {
   const liveness = opts.liveness || _injectedLiveness || createWorkerStatusLiveness({
     nowFn: opts.nowFn || _now,
     probePid: opts.probePid,
-    readStartTime: opts.readStartTime,
   });
   const collectOpts = { ...opts, liveness };
 
@@ -1288,7 +1284,6 @@ module.exports = {
   parseInterval,
   runWatchLoop,
   createWorkerStatusLiveness,
-  PROCESS_LIVENESS_CACHE_MAX_AGE_MS,
   MIN_INTERVAL_SEC,
   MAX_INTERVAL_SEC,
   DEFAULT_INTERVAL_SEC,

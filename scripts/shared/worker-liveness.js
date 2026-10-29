@@ -9,8 +9,8 @@ function observeWorker(entry, opts = {}) {
   if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) return 'unknown';
   const hasPid = entry.pid !== undefined && entry.pid !== null;
   if (!hasPid) return entry.startTime === undefined || entry.startTime === null ? 'dead' : 'unknown';
-  const liveness = injectedLiveness || (opts.readStartTime || injectedProbe
-    ? processLiveness.createLiveness({ readStartTime: opts.readStartTime, probePid: injectedProbe })
+  const liveness = injectedLiveness || (opts.probeEndpoint || injectedProbe
+    ? processLiveness.createLiveness({ probeEndpoint: opts.probeEndpoint || injectedProbe, useRealResources: false })
     : processLiveness);
   return liveness.observe(liveness.readRef(entry));
 }
@@ -27,5 +27,5 @@ module.exports = {
   observeWorker,
   isWorkerAlive,
   _setLiveness: (value) => { injectedLiveness = value; },
-  _setProbePid: (value) => { injectedProbe = value; },
+  _setProbeEndpoint: (value) => { injectedProbe = value; },
 };

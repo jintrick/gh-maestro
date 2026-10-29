@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -39,7 +42,6 @@ ensureWorkerSupervisor._setSpawn(() => {
 });
 ensureWorkerSupervisor._setFindRunningInstance(() => null);
 ensureWorkerSupervisor._setIsResidentLeaseLive(() => false);
-ensureWorkerSupervisor._setFindSessionRootPid(() => 12345);
 closedPrGuard._setListFn(() => ({ status: 0, stdout: '[]', stderr: '' }));
 
 
@@ -567,7 +569,7 @@ test('起動時刻不明で生死unknownなら配送を拒否しGitHubへ投稿�
     fs.mkdirSync(ghDir, { recursive: true });
     fs.writeFileSync(
       path.join(ghDir, 'workers.json'),
-      JSON.stringify({ 'issue-9-fix': { pid: 42424, startTime: null, agentId: 'agy', issue: 9 } }, null, 2),
+      JSON.stringify({ 'issue-9-fix': { pid: 42424, resourceKey: null, agentId: 'agy', issue: 9 } }, null, 2),
       'utf8'
     );
     workerLiveness._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }));

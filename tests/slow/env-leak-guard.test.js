@@ -194,6 +194,8 @@ test('_env-setup.js プリロードがワーカー文脈変数を除去し、テ
       GH_MAESTRO_ISSUE: '342',
       ISSUE: '342',
       NO_COLOR: '1',
+      GH_MAESTRO_RESOURCE_KEY: 'a'.repeat(64),
+      GH_MAESTRO_INSTANCE_ID: 'parent-instance',
       GH_MAESTRO_RUNTIME_DIR: runtimeRoot,
     };
     const probe = 'console.log(JSON.stringify(process.env))';
@@ -210,6 +212,8 @@ test('_env-setup.js プリロードがワーカー文脈変数を除去し、テ
       'GH_MAESTRO_ISSUE',
       'ISSUE',
       'NO_COLOR',
+      'GH_MAESTRO_RESOURCE_KEY',
+      'GH_MAESTRO_INSTANCE_ID',
     ]) {
       assert.equal(out[key], undefined, `_env-setup.js は ${key} を除去すること`);
     }

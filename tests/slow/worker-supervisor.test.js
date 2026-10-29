@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('../helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, describe, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -7,13 +10,18 @@ const os = require('os');
 const path = require('path');
 
 const lifecycle = require('../../scripts/process-lifecycle');
-const { spawnSync, execSync } = require('../../scripts/shared/child-process');
+const { spawnSync } = require('../../scripts/shared/child-process');
 const headlessLaunch = require('../../scripts/shared/headless-launch');
 const workerLease = require('../../scripts/shared/worker-lease');
 const closedPrGuard = require('../../scripts/shared/closed-pr-guard');
 const residentAudit = require('../../scripts/shared/resident-audit');
 const processLiveness = require('../../scripts/shared/process-liveness');
 const storageLayout = require('../../scripts/shared/storage-layout');
+const {
+  startLivenessOwner,
+  stopLivenessOwner,
+  waitForLivenessOwnerExit,
+} = require('../helpers/liveness-owner');
 
 const TEST_SESSION_START_TIME = '2026-07-25T00:00:00.000Z';
 const supervisor = require('../../scripts/worker-supervisor');
@@ -27,11 +35,8 @@ const TEST_LIVENESS = processLiveness.createLiveness({
 // tests/process-lifecycle.test.js で検証し、ここでは既存の注入境界から親生存だけを差し替える。
 // 下部のCLI integrationは実argv・実プロセス境界を通す。
 
-// テスト高速化: main() は --session-pid 未指定だと resolveSessionPid が親プロセスツリーを
-// 辿る（Windowsでは1回あたり ~2.3秒のPowerShell起動を伴う）。実運用では起動元が必ず
-// --session-pid を渡すため、テストでも常に自プロセスPIDを渡してこの探索を省く。
+// テスト時の接続先 msg-poll lease は runMain から alive として注入する。
 const _realMain = supervisor.main;
-const TEST_SESSION_PID = String(process.pid);
 // 明示した --workspace は環境変数より優先されるが、workspace引数を省略する
 // 経路も実workspaceへ向かわないよう、テスト中は環境変数を一時的に除去する。
 const _savedWorkspaceEnv = process.env.GH_MAESTRO_WORKSPACE;
@@ -43,7 +48,12 @@ delete process.env.GH_MAESTRO_WORKER;
 // テスト中は一時的に除去する。
 const _savedBaseBranchEnv = process.env.GH_MAESTRO_BASE_BRANCH;
 delete process.env.GH_MAESTRO_BASE_BRANCH;
-const runMain = (args, opts) => _realMain([...args, '--session-pid', TEST_SESSION_PID], opts);
+const runMain = (args, opts = {}) => _realMain(args, {
+  observeMsgPollFn: (_workspace, checker) => ({
+    state: 'alive', processRef: checker.captureSelf(), pid: process.pid, error: null,
+  }),
+  ...opts,
+});
 
 // ── テストヘルパー ────────────────────────────────────────────────────────
 
@@ -513,47 +523,37 @@ describe('Cursor type safety', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const { spawnSync: realSpawnSync, spawn } = require('child_process');
+const { cleanSpawnEnv } = require('../_spawn-env');
 
 const SUPERVISOR_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'worker-supervisor.js');
 
-function readProcessStartTime(pid) {
-  const numericPid = Number(pid);
-  assert.ok(Number.isInteger(numericPid) && numericPid > 0, `有効な PID: ${pid}`);
-  const output = execSync(
-    `powershell -NoProfile -Command "$d=(Get-CimInstance Win32_Process -Filter 'ProcessId=${numericPid}').CreationDate; if($d){$d.ToUniversalTime().ToString('o')}else{''}"`,
-    { encoding: 'utf8', timeout: 5000, stdio: 'pipe' }
-  );
-  return output.trim() || null;
-}
-
-// 排他の正本は role lease（Issue #240）。既存所有者を再現する live lease を
-// <workspace>/.gh-maestro/leases/resident-role-worker-supervisor.json に書く。
-function writeLiveSupervisorLease(dir, pid) {
-  const startTime = readProcessStartTime(pid);
-  assert.ok(startTime, `PowerShell で PID ${pid} の起動時刻を実取得できる`);
+// The deterministic resident endpoint, rather than the disk lease, is the
+// source of truth for this live-owner fixture.
+function startLiveSupervisorOwner(dir) {
+  const owner = startLivenessOwner({
+    workspace: dir,
+    runtimeRoot: path.join(dir, '.test-runtime'),
+    kind: 'resident',
+    name: 'worker-supervisor',
+  });
   const leasesDir = path.join(dir, '.gh-maestro', 'leases');
   fs.mkdirSync(leasesDir, { recursive: true });
   fs.writeFileSync(path.join(leasesDir, 'resident-role-worker-supervisor.json'), JSON.stringify({
-    pid, startTime, workerName: 'worker-supervisor', phase: 'active',
+    ...owner.record, workerName: 'worker-supervisor', phase: 'active',
   }), 'utf8');
+  return owner;
 }
 
 /** ヘルパー: worker-supervisor.js を子プロセスとして起動 */
 function runSupervisor(args, cwd, envOverride = {}) {
-  // --session-pid を渡し、子プロセス側の親プロセスツリー探索（Windowsでは高コスト）を省く。
-  // timeout はこのプロセス自体の処理時間ではなく、フルスイート実行時のシステム負荷下での
-  // OSスケジューリング遅延に対する余裕を持たせる（実障害: 5000msだと、他のテストファイルが
-  // 実プロセス（pwsh等）を並行して起動している状況で、ワークスペース未解決による即時
-  // exit(1)しかしないこのプロセスすら5秒以内にスケジュールされずtimeout killされ、
-  // status: null になることがあった）。
   const spawnEnv = {
-    ...process.env,
+    ...cleanSpawnEnv(),
+    GH_MAESTRO_RUNTIME_DIR: path.join(cwd, '.test-runtime'),
     ...envOverride,
   };
   return realSpawnSync(process.execPath, [
     SUPERVISOR_SCRIPT,
     ...args,
-    '--session-pid', String(process.pid),
   ], {
     cwd,
     encoding: 'utf8',
@@ -596,6 +596,11 @@ function waitForProcessExit(child, timeoutMs = 5000) {
     }, timeoutMs);
     child.once('exit', onExit);
   });
+}
+
+function isPidAlive(pid) {
+  try { process.kill(Number(pid), 0); return true; }
+  catch (error) { return error && error.code !== 'ESRCH'; }
 }
 
 async function stopTestProcess(child) {
@@ -654,49 +659,39 @@ describe('CLI integration (subprocess)', () => {
     withTempDir((dir) => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
-
-      // 既存所有者の live lease を書く。pid は process.ppid を指定する（--force 無しなので
-      // kill は走らないが、念のためテスト実行環境のプロセスを対象にしない）。
-      writeLiveSupervisorLease(dir, process.ppid);
-
-      const r = runSupervisor(['--once', '--workspace', dir], dir);
-      assert.equal(r.status, 1, `exit 1, got ${r.status}, stderr: ${r.stderr}`);
-      assert.ok(r.stderr.includes('重複起動'), `stderr should mention 重複起動: ${r.stderr}`);
+      const owner = startLiveSupervisorOwner(dir);
+      try {
+        const r = runSupervisor(['--once', '--workspace', dir], dir);
+        assert.equal(r.status, 1, `exit 1, got ${r.status}, stderr: ${r.stderr}`);
+        assert.ok(r.stderr.includes('重複起動'), `stderr should mention 重複起動: ${r.stderr}`);
+      } finally {
+        stopLivenessOwner(owner);
+      }
     });
   });
 
-  test('--force は GH_MAESTRO_WORKER=orchestrator なら既存所有者を停止させて引き継ぐ（Issue #384）', () => {
-    withTempDir((dir) => {
+  test('--force は GH_MAESTRO_WORKER=orchestrator なら既存所有者を停止させて引き継ぐ（Issue #384）', async () => {
+    await withTempDir(async (dir) => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
-
-      // 既存所有者として使い捨ての実子プロセスを立てる。--force の引き継ぎは
-      // killProcessTree で所有者を終了させるため、process.ppid 等のテスト実行環境の
-      // プロセスを owner に指定してはならない（テストランナーの親を kill してしまう）。
-      const owner = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
-        stdio: 'ignore',
-        windowsHide: true,
-      });
+      const owner = startLiveSupervisorOwner(dir);
       let leakedOwner = true;
+      let runResult;
       try {
-        writeLiveSupervisorLease(dir, owner.pid);
-
-        const r = runSupervisor(
+        runResult = runSupervisor(
           ['--once', '--force', '--workspace', dir],
           dir,
           { GH_MAESTRO_WORKER: 'orchestrator' }
         );
-        assert.notEqual(r.status, 0, `should exit non-zero (gh failure), got ${r.status}`);
-        assert.ok(!r.stderr.includes('重複起動'),
-          `stderr should NOT mention 重複起動: ${r.stderr}`);
-        if (owner.exitCode === null && owner.signalCode === null) {
-          leakedOwner = false;
-        }
+        assert.notEqual(runResult.status, 0, `should exit non-zero (gh failure), got ${runResult.status}`);
+        assert.ok(!runResult.stderr.includes('重複起動'),
+          `stderr should NOT mention 重複起動: ${runResult.stderr}`);
+        await waitForLivenessOwnerExit(owner);
+        leakedOwner = owner.child.exitCode === null && owner.child.signalCode === null;
       } finally {
-        if (owner.exitCode === null && owner.signalCode === null) {
-          try { owner.kill(); } catch {}
-        }
-        assert.equal(leakedOwner, false, '--force の引き継ぎで既存所有者プロセスが停止されること');
+        if (isPidAlive(owner.child.pid)) stopLivenessOwner(owner);
+        assert.equal(leakedOwner, false,
+          `--force の引き継ぎで既存所有者プロセスが停止されること (exit=${runResult?.status})\nstdout:\n${runResult?.stdout}\nstderr:\n${runResult?.stderr}`);
       }
     });
   });
@@ -706,14 +701,9 @@ describe('CLI integration (subprocess)', () => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
 
-      const owner = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
-        stdio: 'ignore',
-        windowsHide: true,
-      });
+      const owner = startLiveSupervisorOwner(dir);
       let ownerRemainedAlive = false;
       try {
-        writeLiveSupervisorLease(dir, owner.pid);
-
         const r = runSupervisor(
           ['--once', '--force', '--workspace', dir],
           dir,
@@ -727,11 +717,11 @@ describe('CLI integration (subprocess)', () => {
         assert.ok(r.stderr.includes('【禁止事項】'), `stderr should contain prohibition: ${r.stderr}`);
 
         // 所有者は生存し続けていること
-        if (owner.exitCode === null && owner.signalCode === null) {
+        if (isPidAlive(owner.child.pid)) {
           ownerRemainedAlive = true;
         }
       } finally {
-        try { owner.kill(); } catch {}
+        if (isPidAlive(owner.child.pid)) stopLivenessOwner(owner);
         assert.equal(ownerRemainedAlive, true, 'ワーカーからの --force で既存プロセスが停止されてはならない');
       }
     });
@@ -742,14 +732,9 @@ describe('CLI integration (subprocess)', () => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
 
-      const owner = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
-        stdio: 'ignore',
-        windowsHide: true,
-      });
+      const owner = startLiveSupervisorOwner(dir);
       let ownerRemainedAlive = false;
       try {
-        writeLiveSupervisorLease(dir, owner.pid);
-
         const r = runSupervisor(
           ['--once', '--force', '--workspace', dir],
           dir,
@@ -759,11 +744,11 @@ describe('CLI integration (subprocess)', () => {
         assert.ok(r.stderr.includes('実行主体の名乗り（GH_MAESTRO_WORKER）が設定されていません'),
           `stderr should contain missing identity message: ${r.stderr}`);
 
-        if (owner.exitCode === null && owner.signalCode === null) {
+        if (isPidAlive(owner.child.pid)) {
           ownerRemainedAlive = true;
         }
       } finally {
-        try { owner.kill(); } catch {}
+        if (isPidAlive(owner.child.pid)) stopLivenessOwner(owner);
         assert.equal(ownerRemainedAlive, true, '名乗り無しでの --force で既存プロセスが停止されてはならない');
       }
     });
@@ -794,19 +779,35 @@ describe('resident unknown-liveness integration', () => {
         stdio: 'ignore',
         windowsHide: true,
       });
-      const knownWorker = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
-        stdio: 'ignore',
-        windowsHide: true,
+      const runtimeRoot = path.join(dir, 'isolated-runtime');
+      const knownWorkerOwner = startLivenessOwner({
+        workspace: dir,
+        runtimeRoot,
+        kind: 'worker',
+        name: 'issue-655-live-worker',
       });
+      const knownWorker = knownWorkerOwner.child;
+      const msgPollOwner = startLivenessOwner({
+        workspace: dir,
+        runtimeRoot,
+        kind: 'resident',
+        name: 'msgpoll-orchestrator',
+      });
+      const { childPid: _msgPollChildPid, ...msgPollRecord } = msgPollOwner.record;
+      const leaseDir = path.join(maestroDir, 'leases');
+      fs.mkdirSync(leaseDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(leaseDir, 'resident-role-msgpoll-orchestrator.json'),
+        JSON.stringify({ ...msgPollRecord, role: 'msgpoll-orchestrator', phase: 'active' }),
+        'utf8',
+      );
       let supervisorProcess;
       try {
-        await Promise.all([unknownWorker, knownWorker].map((worker) => new Promise((resolve, reject) => {
-          worker.once('spawn', resolve);
-          worker.once('error', reject);
-        })));
-
-        const knownWorkerStartTime = readProcessStartTime(knownWorker.pid);
-        assert.ok(knownWorkerStartTime, `PowerShell で known worker PID ${knownWorker.pid} の起動時刻を実取得できる`);
+        await new Promise((resolve, reject) => {
+          unknownWorker.once('spawn', resolve);
+          unknownWorker.once('error', reject);
+        });
+        const { childPid: _childPid, ...knownWorkerRecord } = knownWorkerOwner.record;
         const workers = {
           orchestrator: { agentId: null },
           'issue-654-unknown-worker': {
@@ -815,8 +816,7 @@ describe('resident unknown-liveness integration', () => {
             issue: 654,
           },
           'issue-655-live-worker': {
-            pid: knownWorker.pid,
-            startTime: knownWorkerStartTime,
+            ...knownWorkerRecord,
             agentId: 'test-agent',
             issue: 655,
           },
@@ -825,7 +825,6 @@ describe('resident unknown-liveness integration', () => {
         const workersJson = JSON.stringify(workers, null, 2);
         fs.writeFileSync(workersPath, workersJson, 'utf8');
 
-        const runtimeRoot = path.join(dir, 'isolated-runtime');
         const ghLogPath = path.join(dir, 'gh-calls.jsonl');
         const preloadPath = createResidentUnknownLivenessPreload(ghLogPath);
         const runtimeDir = storageLayout.workspaceRuntimeDir(dir, runtimeRoot);
@@ -838,14 +837,13 @@ describe('resident unknown-liveness integration', () => {
           SUPERVISOR_SCRIPT,
           '--workspace', dir,
           '--interval', '1',
-          '--session-pid', String(process.pid),
         ], {
           cwd: dir,
           env: {
-            ...process.env,
+            ...cleanSpawnEnv(),
             GH_MAESTRO_RUNTIME_DIR: runtimeRoot,
           },
-          stdio: ['ignore', 'pipe', 'pipe'],
+          stdio: ['pipe', 'pipe', 'pipe'],
           windowsHide: true,
         });
         supervisorProcess.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
@@ -881,7 +879,9 @@ describe('resident unknown-liveness integration', () => {
         assert.equal(knownWorker.exitCode, null, 'other worker child remains alive');
       } finally {
         await stopTestProcess(supervisorProcess);
-        await Promise.all([unknownWorker, knownWorker].map(stopTestProcess));
+        await stopTestProcess(unknownWorker);
+        stopLivenessOwner(knownWorkerOwner);
+        stopLivenessOwner(msgPollOwner);
       }
     });
   });

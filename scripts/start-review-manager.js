@@ -51,12 +51,12 @@ Review Managerは通常ワーカーと同じ起動基盤（shared/headless-launc
 
 /**
  * lock ファイルが有効かチェックする。
- * lock ファイルに記録された新形式のPID＋起動時刻が同一プロセスなら true。
- * PIDが死んでいる、またはPID再利用で同一性が不一致な場合は lock ファイルを
- * 内容比較後に削除して false を返す。旧PID-onlyや同一性確認不能なレコードは
+ * lock ファイルに記録された新形式のOS endpointとinstanceIdが同一プロセスなら true。
+ * endpointがdeadの場合は lock ファイルを内容比較後に削除して false を返す。
+ * endpointを持たない旧PID形式や同一性確認不能なレコードは
  * 削除せず例外（fail-closed）とする。
  *
- * req.13: lock に PID を記録し、生存＋同一性確認で stale 判定
+ * req.13: lock に停止用PIDとOS endpoint参照を記録し、生存＋同一性確認で stale 判定
  *
  * @param {string} lockFile
  * @returns {boolean} true = 有効なlock（既に起動済み）, false = stale または lock なし
@@ -112,7 +112,7 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
   // manager.runningが本体書き込み前の窓でも、予約を持つ起動だけが先へ進める。
   const self = checker();
   const startup = acquireReviewManagerStartup(lockFile, {
-    processRef: self.captureSelf(),
+    processRef: self.captureSelf({ workspace, kind: 'review-manager-startup', name: String(pr) }),
     liveness: self,
   });
   if (!startup.acquired) {

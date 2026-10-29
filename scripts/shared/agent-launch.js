@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('./child-process');
 const { buildLoginShellExecArgs } = require('./agent-exec');
+const processLiveness = require('./process-liveness');
 const { withTempDir } = require('./temp-directory');
 
 const RESULT_FILE_TOKEN = '{{GH_MAESTRO_RESULT_FILE}}';
@@ -156,6 +157,8 @@ function normalizeAgentLaunchConfig(agentConfig, cwd) {
  * @param {Function} [opts.onSpawn] spawn直後に子プロセスを受け取るobserver
  * @param {Function} [opts.observe] 子プロセスの完了・監督を待つcallback
  * @param {Function} [opts.cleanup] プロセス側リソースの後始末callback
+ * @param {string} [opts.livenessLogPath] 指定時は headless shim 経由で起動し、そのOS資源を追跡する
+ * @param {object} [opts.liveness] プロセス参照捕捉の注入点
  * @param {Function} [opts.log] 内部で構築した起動内容を記録するcallback
  * @returns {Promise<{observed: *, resultFileText?: string|null}>}
  */
@@ -172,6 +175,8 @@ function runAgentWithPrompt({
   onSpawn,
   observe,
   cleanup,
+  livenessLogPath,
+  liveness = processLiveness,
   log,
 }) {
   if (typeof promptText !== 'string') throw new TypeError('promptText must be a string');
@@ -213,12 +218,45 @@ function runAgentWithPrompt({
       const shellArgs = buildLoginShellExecArgs(agentArgs, process.platform);
       if (typeof log === 'function') log(agentArgs);
 
+      let childLiveness = null;
       try {
-        child = spawnFn(shellArgs[0], shellArgs.slice(1), {
-          cwd,
-          env: process.env,
-          ...spawnOptions,
-        });
+        if (livenessLogPath !== undefined) {
+          if (typeof livenessLogPath !== 'string' || livenessLogPath.length === 0) {
+            throw new TypeError('livenessLogPath must be a non-empty file path');
+          }
+          const childEnvBase = {
+            ...process.env,
+            ...(spawnOptions.env || {}),
+          };
+          const childWorkspace = childEnvBase.GH_MAESTRO_WORKSPACE || cwd;
+          const workerName = childEnvBase.GH_MAESTRO_WORKER;
+          childLiveness = processLiveness.createChildLivenessEnv({
+            env: childEnvBase,
+            workspace: childWorkspace,
+            kind: 'agent-shim',
+            name: workerName
+              ? `${workerName}:agent:${process.pid}`
+              : `${path.basename(agentArgs[0] || 'agent')}:${process.pid}`,
+          });
+          child = spawnFn(process.execPath, [
+            path.join(__dirname, 'headless-shim.js'),
+            JSON.stringify(shellArgs),
+            livenessLogPath,
+          ], {
+            cwd,
+            ...spawnOptions,
+            env: childLiveness.env,
+            detached: false,
+            windowsHide: true,
+            stdio: 'ignore',
+          });
+        } else {
+          child = spawnFn(shellArgs[0], shellArgs.slice(1), {
+            cwd,
+            env: process.env,
+            ...spawnOptions,
+          });
+        }
       } catch (error) {
         const spawnError = new Error(`spawn failed: ${error.message}`);
         spawnError.cause = error;
@@ -227,7 +265,14 @@ function runAgentWithPrompt({
       if (!child || typeof child.on !== 'function') {
         throw new Error('spawn returned an invalid child process handle');
       }
-      if (typeof onSpawn === 'function') onSpawn(child);
+      const livenessInfo = childLiveness && child && child.pid
+        ? {
+          resourceKey: childLiveness.resourceKey,
+          instanceId: childLiveness.instanceId,
+          processRef: liveness.captureProcess(child.pid, childLiveness),
+        }
+        : null;
+      if (typeof onSpawn === 'function') onSpawn(child, livenessInfo);
       const observed = typeof observe === 'function' ? await observe(child) : undefined;
 
       let resultFileText;

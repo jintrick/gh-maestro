@@ -12,11 +12,18 @@ const path = require('path');
 const { spawn } = require('./shared/child-process');
 const { killProcessTree } = require('./shared/kill-tree');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
-const {
-  resolveSessionPid,
-} = require('./process-lifecycle');
 const { readPrMonitorTarget } = require('./shared/pr-monitor-target');
 const { recoverOrphanedSlowRuns } = require('./poll-pr');
+const processLiveness = require('./shared/process-liveness');
+const {
+  findRunningInstances,
+  registerProcess,
+  unregisterProcess,
+} = require('./process-lifecycle');
+const {
+  acquireResidentLease,
+  POLL_PR_MONITOR_ROLE,
+} = require('./shared/worker-lease');
 
 const DEFAULT_INTERVAL_MS = 1000;
 const CHILD_STOP_TIMEOUT_MS = 5000;
@@ -48,32 +55,33 @@ function waitForChildClose(child, timeoutMs = CHILD_STOP_TIMEOUT_MS) {
   });
 }
 
-function childArguments(target, workspace, sessionPid) {
+function childArguments(target, workspace) {
   const args = [
     path.join(__dirname, 'poll-pr.js'),
     String(target.issue),
     '--workspace', workspace,
     '--plugin-monitor',
   ];
-  if (sessionPid) args.push('--session-pid', String(sessionPid));
   if (target.baseBranch) args.push('--base-branch', target.baseBranch);
   if (target.noReviewManager) args.push('--no-review-manager');
   if (target.noReviewEvents) args.push('--no-review-events');
   return args;
 }
 
-function spawnTarget(target, workspace, sessionPid, deps = {}) {
+function spawnTarget(target, workspace, deps = {}) {
   const spawnFn = deps.spawnFn || spawn;
   const writeStdoutFn = deps.writeStdoutFn || ((chunk) => process.stdout.write(chunk));
   const writeStderrFn = deps.writeStderrFn || ((chunk) => process.stderr.write(chunk));
-  // target.sessionPid はactivate時点のセッションを記録したヒントに過ぎない。
-  // セッションを開き直した場合に旧PIDをdead-man's switchへ渡すと、新しい
-  // monitorが直ちに「親セッション終了」と判定されるため、現在のmonitorのPIDを
-  // 常に子へ渡す。
-  const child = spawnFn(process.execPath, childArguments(target, workspace, sessionPid), {
+  const childLiveness = processLiveness.createChildLivenessEnv({
+    env: process.env,
+    workspace,
+    kind: 'pr-monitor-child',
+    name: `poll-pr:${target.issue}`,
+  });
+  const child = spawnFn(process.execPath, childArguments(target, workspace), {
     cwd: workspace,
-    env: { ...process.env, GH_MAESTRO_WORKSPACE: workspace },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    env: childLiveness.env,
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   if (!child || !Number.isInteger(child.pid) || child.pid <= 0) {
     throw new Error('poll-pr.js のspawn結果から有効なPIDを取得できません');
@@ -114,9 +122,7 @@ async function stopTarget(active, deps = {}) {
   await (deps.waitForChildCloseFn || waitForChildClose)(active.child, deps.childStopTimeoutMs);
 }
 
-const processLiveness = require('./shared/process-liveness');
-
-async function runPrMonitor({ workspace, intervalMs = DEFAULT_INTERVAL_MS } = {}, deps = {}) {
+async function runPrMonitor({ workspace, intervalMs = DEFAULT_INTERVAL_MS, pluginMonitor = false } = {}, deps = {}) {
   if (typeof workspace !== 'string' || workspace === '') throw new Error('poll-pr-monitor: workspace が必要です');
   const readTargetFn = deps.readTargetFn || readPrMonitorTarget;
   const sleepFn = deps.sleepFn || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -124,12 +130,39 @@ async function runPrMonitor({ workspace, intervalMs = DEFAULT_INTERVAL_MS } = {}
   const writeStdoutFn = deps.writeStdoutFn || ((chunk) => process.stdout.write(chunk));
   const writeStderrFn = deps.writeStderrFn || ((chunk) => process.stderr.write(chunk));
   const maxIterations = deps.maxIterations === undefined ? Infinity : deps.maxIterations;
-  const sessionPid = deps.sessionPid || (deps.resolveSessionPidFn || resolveSessionPid)();
   const checker = deps.liveness || processLiveness;
-  const ref = deps.expectedStartTime === undefined
-    ? checker.captureProcess(sessionPid)
-    : checker.readRef({ pid: sessionPid, startTime: deps.expectedStartTime });
-  const checkSessionFn = deps.checkSessionFn || (() => checker.observe(ref) !== 'dead');
+  let residentLease = null;
+  let residentIdentity = null;
+  let registered = false;
+  if (pluginMonitor) {
+    residentIdentity = checker.prepareSelf({ workspace, kind: 'resident', name: POLL_PR_MONITOR_ROLE });
+    try {
+      const targets = () => findRunningInstances(workspace, {
+        script: 'poll-pr-monitor.js', workerName: null, failOnReadError: true,
+      });
+      residentLease = acquireResidentLease({
+        workspace,
+        role: POLL_PR_MONITOR_ROLE,
+        handoff: true,
+        takeover: true,
+        handoffStopTargets: targets,
+        processRef: residentIdentity,
+      });
+      if (!residentLease.acquired) {
+        throw new Error(`role "${POLL_PR_MONITOR_ROLE}" を引き継げませんでした (${residentLease.reason})`);
+      }
+      registerProcess(workspace, {
+        processRef: residentIdentity,
+        script: 'poll-pr-monitor.js',
+        args: process.argv.slice(2),
+        pluginMonitor: true,
+      });
+      registered = true;
+    } catch (error) {
+      if (residentLease && typeof residentLease.release === 'function') residentLease.release();
+      throw error;
+    }
+  }
   let active = null;
   let finishedGeneration = null;
   let stopping = false;
@@ -158,10 +191,6 @@ async function runPrMonitor({ workspace, intervalMs = DEFAULT_INTERVAL_MS } = {}
     while (!stopping && iterations < maxIterations) {
       iterations += 1;
       recoveredThisIteration = false;
-      if (!checkSessionFn()) {
-        await stopActive();
-        return { exitCode: 0, reason: 'session-ended' };
-      }
 
       const target = readTargetFn(workspace);
       if (!target) {
@@ -187,7 +216,7 @@ async function runPrMonitor({ workspace, intervalMs = DEFAULT_INTERVAL_MS } = {}
       }
       if (!active && finishedGeneration !== target.generation) {
         try {
-          active = spawnTarget(target, workspace, sessionPid, { ...deps, writeStdoutFn, writeStderrFn });
+          active = spawnTarget(target, workspace, { ...deps, writeStdoutFn, writeStderrFn });
         } catch (error) {
           writeStderrFn(`poll-pr-monitor: poll-pr.js の起動に失敗しました: ${error.message}\n`);
           finishedGeneration = target.generation;
@@ -204,6 +233,16 @@ async function runPrMonitor({ workspace, intervalMs = DEFAULT_INTERVAL_MS } = {}
     process.removeListener('SIGINT', onSignal);
     process.removeListener('SIGTERM', onSignal);
     if (active) await stopActive();
+    if (registered && residentIdentity) {
+      try {
+        unregisterProcess(workspace, process.pid, {
+          resourceKey: checker.writeRef({}, residentIdentity).resourceKey,
+          instanceId: checker.writeRef({}, residentIdentity).instanceId,
+          script: 'poll-pr-monitor.js',
+        });
+      } catch {}
+    }
+    if (residentLease && typeof residentLease.release === 'function') residentLease.release();
   }
   return { exitCode: 0, reason: stopping ? 'stopped' : 'test-limit' };
 }
@@ -238,7 +277,7 @@ function run(argv = process.argv.slice(2), deps = {}) {
     (deps.writeErr || console.error)('poll-pr-monitor: ワークスペースを解決できません。--workspace を指定してください');
     return Promise.resolve(1);
   }
-  return runPrMonitor({ workspace }, deps).then(() => 0).catch((error) => {
+  return runPrMonitor({ workspace, pluginMonitor: parsed.values['--plugin-monitor'] === true }, deps).then(() => 0).catch((error) => {
     (deps.writeErr || console.error)(`poll-pr-monitor: ${error.message}`);
     return 1;
   });

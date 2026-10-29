@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, before, after, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -102,6 +105,8 @@ test('isLockValid returns true and keeps the file for a live pid', () => {
   const lockFile = path.join(freshWorkspace('lock-live'), 'lock.running');
   fs.writeFileSync(lockFile, JSON.stringify({
     pid: process.pid,
+    resourceKey: 'live-review-manager',
+    instanceId: 'live-review-manager-instance',
     startTime: '2026-07-25T00:00:00.000Z',
   }));
 
@@ -113,7 +118,7 @@ test('isLockValid returns false and removes the file for a stale pid', () => {
   const mod = loadModule();
   const lockFile = path.join(freshWorkspace('lock-stale'), 'lock.running');
   // PID 999999999 は確実に stale として扱われる。
-  fs.writeFileSync(lockFile, JSON.stringify({ pid: 999999999, startTime: '2026-07-25T00:00:00.000Z' }));
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: 999999999, resourceKey: 'dead-review-manager', instanceId: 'dead-review-manager-instance' }));
   mod._setLiveness(makeLiveness(() => 'dead'));
   assert.equal(mod.isLockValid(lockFile), false);
   assert.equal(fs.existsSync(lockFile), false);
@@ -130,7 +135,7 @@ test('isLockValid は生存中の旧PID-onlyを削除せず起動をfail-closed�
 test('入力照会の死亡と生存を区別する', () => {
   const mod = loadModule();
   const lockFile = path.join(freshWorkspace('lock-injected'), 'lock.running');
-  fs.writeFileSync(lockFile, JSON.stringify({ pid: 12345, startTime: '2026-07-25T00:00:00.000Z' }));
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: 12345, resourceKey: 'injected-review-manager', instanceId: 'injected-review-manager-instance' }));
   mod._setLiveness(makeLiveness(() => 'alive'));
   assert.equal(mod.isLockValid(lockFile), true);
   mod._setLiveness(makeLiveness(() => 'dead'));
@@ -149,6 +154,8 @@ test('startReviewManager returns ALREADY_RUNNING and does not launch when locked
   fs.mkdirSync(path.dirname(lockFile), { recursive: true });
   fs.writeFileSync(lockFile, JSON.stringify({
     pid: process.pid,
+    resourceKey: 'already-running-manager',
+    instanceId: 'already-running-manager-instance',
     startTime: '2026-07-25T00:00:00.000Z',
   }));
 
@@ -222,10 +229,9 @@ test('startReviewManager: 起動側はmanager.runningを書かず、起動予約
   const startingFile = path.join(workspace, '.gh-maestro', 'records', 'pr', '8', 'review', 'manager.starting');
   assert.equal(fs.existsSync(lockFile), false, '起動側は本体所有のmanager.runningを書かない');
   const marker = JSON.parse(fs.readFileSync(startingFile, 'utf8'));
-  assert.deepEqual({ pid: marker.pid, startTime: marker.startTime }, {
-    pid: 77701,
-    startTime: '2026-07-25T00:00:00.000Z',
-  });
+  assert.equal(marker.pid, 77701);
+  assert.equal(typeof marker.resourceKey, 'string');
+  assert.equal(marker.startTime, undefined);
   assert.match(marker.token, /^[0-9a-f]{32}$/);
 });
 

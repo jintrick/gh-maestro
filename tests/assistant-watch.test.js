@@ -1,5 +1,8 @@
 'use strict';
 
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -363,6 +366,8 @@ describe('main: review_done検知', () => {
       // リセットされることを確認する（リセットが無いと2回目の review_done が永久に発火しない）。
       fs.writeFileSync(lockPath, JSON.stringify({
         pid: process.pid,
+        resourceKey: 'assistant-watch-review-manager',
+        instanceId: 'assistant-watch-review-manager-instance-2',
         startTime: '2026-07-28T00:00:00.000Z',
       }));
       const scanOpts = {
