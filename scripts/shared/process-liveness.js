@@ -15,6 +15,12 @@ const INSTANCE_ID_ENV = 'GH_MAESTRO_INSTANCE_ID';
 const PROBE_TIMEOUT_MS = 1000;
 // probe worker thread の起動（準備完了通知）を待つ上限。
 const PROBE_WORKER_START_TIMEOUT_MS = 10000;
+// 起動した子が自分の endpoint を確立するまで待つ上限（waitUntilAlive の既定値）。
+const CHILD_ENDPOINT_WAIT_MS = 10000;
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 const CLAIM_TIMEOUT_MS = 5000;
 const PROBE_WORKER_PATH = path.join(__dirname, 'process-liveness-probe-worker.js');
 const PROCESS_REGISTRY_DIR = 'process-liveness';
@@ -656,6 +662,25 @@ function createLiveness(deps = {}) {
       && left.instanceId === right.instanceId);
   }
 
+  /**
+   * 起動直後の子が自分の endpoint を確立するまで、決定論的な期限内で同期的に待つ。
+   * 子は spawn 後に別プロセスとして endpoint を claim するため、spawn 直後の observe は
+   * dead になる。起動予約の引き渡しや registry 登録の前に、この関数で確立を確かめる。
+   * 同期待機なので、待機中に子の exit/close イベントが失われることはない。
+   * @param {string} ref
+   * @param {{ timeoutMs?: number, pollMs?: number, sleep?: (ms:number)=>void }} [opt]
+   * @returns {'alive'|'dead'|'unknown'} 期限時点の最後の観測結果
+   */
+  function waitUntilAlive(ref, { timeoutMs = CHILD_ENDPOINT_WAIT_MS, pollMs = 50, sleep = sleepSync } = {}) {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    let state = observe(ref);
+    while (state !== 'alive' && Date.now() < deadline) {
+      sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+      state = observe(ref);
+    }
+    return state;
+  }
+
   function watchParent(ref, options = {}) {
     if (ref) {
       let consecutiveDead = 0;
@@ -696,6 +721,7 @@ function createLiveness(deps = {}) {
     observeResource,
     sameRef,
     watchParent,
+    waitUntilAlive,
   };
 }
 

@@ -6,6 +6,8 @@ const path = require('path');
 const processLiveness = require('./shared/process-liveness');
 let injectedLiveness = null;
 function checker() { return injectedLiveness || processLiveness; }
+const { killProcessTree } = require('./shared/kill-tree');
+let _killProcessTree = killProcessTree;
 const { launchAgentHeadless } = require('./shared/headless-launch');
 const { assertValidPr } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
@@ -110,9 +112,37 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
   // manager.runningへ書くと、本体終了時の所有者判定と競合して残留するため、
   // 起動側は隣接するmanager.startingだけを原子的に予約する。
   // manager.runningが本体書き込み前の窓でも、予約を持つ起動だけが先へ進める。
+  //
+  // 起動予約の endpoint は、この起動処理が予約を進めている間だけ保持する。呼び出し元が
+  // poll-pr.js のような常駐プロセスでも、起動処理を終えたら（成功・既存 manager・失敗の
+  // いずれでも）解放する。保持し続けると、Review Manager 本体が終了した後も外部からの
+  // 再開起動が claim に失敗し続ける。起動状態の正本は manager.running と、生存する
+  // 所有者を持つ manager.starting である。
   const self = checker();
+  let startupRef;
+  try {
+    startupRef = self.captureSelf({ workspace, kind: 'review-manager-startup', name: String(pr) });
+  } catch (e) {
+    // 同じ PR の起動予約を別の起動処理が今まさに進めている。
+    if (e && e.code === 'LIVENESS_ENDPOINT_BUSY') return 'REVIEW_MANAGER_ALREADY_RUNNING';
+    throw e;
+  }
+  try {
+    return startReviewManagerWithStartupRef({
+      pr, repo, workspace, issue, resume, lockFile, logPath, workerName, self, startupRef,
+    });
+  } finally {
+    try { if (typeof self.release === 'function') self.release(startupRef); } catch (e) {
+      console.warn(`start-review-manager: 起動予約 endpoint の解放に失敗しました: ${e.message}`);
+    }
+  }
+}
+
+function startReviewManagerWithStartupRef({
+  pr, repo, workspace, issue, resume, lockFile, logPath, workerName, self, startupRef,
+}) {
   const startup = acquireReviewManagerStartup(lockFile, {
-    processRef: self.captureSelf({ workspace, kind: 'review-manager-startup', name: String(pr) }),
+    processRef: startupRef,
     liveness: self,
   });
   if (!startup.acquired) {
@@ -158,6 +188,17 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
     },
   });
 
+  // shim は spawn 後に自分の endpoint を claim する。確立前に予約を引き渡すと、
+  // 起動予約 endpoint を解放した後に予約が dead と見なされて回収されうるため、
+  // 確立を確かめてから引き渡す。確立しなければ子を止めて起動失敗にする。
+  const shimState = self.waitUntilAlive(launched.processRef);
+  if (shimState !== 'alive') {
+    let stopError = null;
+    try { _killProcessTree(launched.pid); } catch (e) { stopError = e; }
+    throw new Error(`Review Manager の起動を確認できません（${shimState}、pid ${launched.pid}）`
+      + (stopError ? `。子プロセスの停止にも失敗しました: ${stopError.message}` : '。子プロセスを停止しました'));
+  }
+
   // manager.runningはここでは書かない。本体が書き込んだ後に起動予約を
   // 解放できるよう、shimのPIDだけをmanager.startingへ引き渡す。
   const transferred = transferReviewManagerStartup(lockFile, startup.token, {
@@ -179,6 +220,7 @@ module.exports = {
   startReviewManager,
   isLockValid,
   _setLiveness: (value) => { injectedLiveness = value; },
+  _setKillProcessTree: (fn) => { _killProcessTree = fn || killProcessTree; },
 };
 
 if (require.main === module) {

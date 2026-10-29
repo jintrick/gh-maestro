@@ -201,7 +201,7 @@ function installLivenessTestAdapter() {
   processLiveness.createLiveness = createTestLiveness;
   for (const method of [
     'prepareSelf', 'captureSelf', 'captureProcess', 'createProcessRef', 'claim', 'release',
-    'readRef', 'writeRef', 'observe', 'observeResource', 'sameRef', 'watchParent',
+    'readRef', 'writeRef', 'observe', 'observeResource', 'sameRef', 'watchParent', 'waitUntilAlive',
   ]) {
     processLiveness[method] = sharedApi[method].bind(sharedApi);
   }

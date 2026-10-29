@@ -1651,6 +1651,7 @@ test('launchJobWorker: registerProcess 失敗時もジョブ実行を継続し�
       {
         reviewSkillsDir: skillsDir,
         getProcessStartTimeFn: () => '2026-08-28T04:00:00.000Z',
+        liveness: processLiveness.createLiveness({ probePid: () => 'alive' }),
         registerProcessFn: () => { throw new Error('disk full in registry'); },
         unregisterProcessFn: (ws, pid) => unregistered.push({ ws, pid }),
       }
@@ -1804,6 +1805,8 @@ test('checkpoint write failure kills remaining workers and waits for close befor
     const pending = runJobsFromManifest(file, path.join(ws, 'result.json'), ws, 5000, 5000, '11', 'o/r', path.join(ws, '.gh-maestro'), {
       mainWorkspace: ws, checkpointId: entry.id, reviewSkillsDir: skills,
       registerProcessFn: () => {}, unregisterProcessFn: () => {}, getProcessStartTimeFn: () => '2026-01-01T00:00:00Z',
+      // 偽の子は endpoint を claim しないため、確立済みとして観測する liveness を使う。
+      liveness: processLiveness.createLiveness({ probePid: () => 'alive' }),
     }).then(result => { returned = true; return result; });
     assert.equal(children.length, 2);
     const prompt = promptFileInOwnedDir('review-job-first-review-');

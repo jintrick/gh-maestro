@@ -379,3 +379,54 @@ test('buildAgentResumeCommandArgs: shortPrompt必須', () => {
     command: 'agy', promptDelivery: 'flag', promptFlag: '-i',
   }, ['--continue'], {}), /shortPrompt is required/);
 });
+
+// ── 並列起動された shim の identity（PR #658 の退行） ─────────────────────────
+// 同じプロセスから同じ GH_MAESTRO_WORKER で並列に起動した shim が同じ endpoint を
+// 取り合うと、最初の1つ以外が claim に失敗して exit 1 になる。
+
+test('runAgentWithPrompt: 同じ workerName の並列起動でも shim ごとに別の endpoint を割り当て、確立後に onSpawn へ渡す', async () => {
+  const processLiveness = require('../scripts/shared/process-liveness');
+  const claimed = new Map();
+  const liveness = processLiveness.createLiveness({
+    useRealResources: false,
+    probeEndpoint: (endpoint) => ([...claimed.values()].some((item) => item.endpoint === endpoint) ? 'alive' : 'dead'),
+    readManifest: (resourceKey) => {
+      const item = claimed.get(resourceKey);
+      return item ? { schemaVersion: 2, resourceKey, instanceId: item.instanceId, pid: item.pid } : null;
+    },
+  });
+  await withTempDir('agent-launch-test-', async (root) => {
+    const seen = [];
+    let nextPid = 5000;
+    const launch = () => runAgentWithPrompt({
+      agentConfig: fileDeliveryConfig('positional'),
+      promptText: 'job',
+      cwd: root,
+      tempPrefix: 'agent-launch-scope-',
+      tempDirOptions: { tempRoot: root },
+      livenessLogPath: path.join(root, 'job.log'),
+      liveness,
+      spawnOptions: { env: { GH_MAESTRO_WORKER: 'issue-654-review-manager-pr-659', GH_MAESTRO_WORKSPACE: root } },
+      spawnFn: (_cmd, _args, options) => {
+        const child = fakeChild();
+        child.pid = nextPid++;
+        const resourceKey = options.env[processLiveness.RESOURCE_KEY_ENV];
+        const instanceId = options.env[processLiveness.INSTANCE_ID_ENV];
+        // 実際の shim と同じく、自分の endpoint を claim した状態を模擬する。
+        claimed.set(resourceKey, {
+          endpoint: processLiveness.endpointPath(resourceKey, require('../scripts/shared/storage-layout').runtimeRoot()),
+          instanceId,
+          pid: child.pid,
+        });
+        process.nextTick(() => child.emit('close', 0));
+        return child;
+      },
+      onSpawn: (_child, info) => seen.push(info),
+      observe: observeClose,
+    });
+    await Promise.all([launch(), launch(), launch()]);
+    assert.equal(seen.length, 3);
+    assert.equal(new Set(seen.map((info) => info.resourceKey)).size, 3, 'shim ごとに別の endpoint');
+    assert.deepEqual(seen.map((info) => info.state), ['alive', 'alive', 'alive']);
+  });
+});
