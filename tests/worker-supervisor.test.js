@@ -6,22 +6,23 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const lifecycle = require('../scripts/process-lifecycle');
 const { spawnSync } = require('../scripts/shared/child-process');
 const headlessLaunch = require('../scripts/shared/headless-launch');
 const workerLease = require('../scripts/shared/worker-lease');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
 const residentAudit = require('../scripts/shared/resident-audit');
+const processLiveness = require('../scripts/shared/process-liveness');
+const workerLiveness = require('../scripts/shared/worker-liveness');
 
 // 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
 // PIDを誤って渡す回帰は即座に検出する。
 const TEST_SESSION_START_TIME = '2026-07-25T00:00:00.000Z';
-lifecycle.getProcessStartTime = () => TEST_SESSION_START_TIME;
 const supervisor = require('../scripts/worker-supervisor');
-supervisor._setGetProcessStartTime((pid) => {
-  assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
-  return TEST_SESSION_START_TIME;
+let testLiveness = processLiveness.createLiveness({
+  probePid: () => 'alive',
+  readStartTime: () => TEST_SESSION_START_TIME,
 });
+supervisor._setParentLiveness(testLiveness);
 // 直接 main()/runOnce() の反復でOSのプロセス起動時刻取得を行うと、Windowsでは
 // 各スキャンがPowerShell/WMI待ちになる。PID再利用を含む実照合ロジックは
 // tests/process-lifecycle.test.js で検証し、ここでは既存の注入境界から親生存だけを差し替える。
@@ -173,12 +174,16 @@ const RESUMED_PID = 999;
  * この2つを区別しないと、resume直後の生存確認が必ず失敗してしまう。
  */
 function setWorkersIdle() {
-  supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
+  setWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
 }
 
 /** ワーカー生存判定を「稼働中」に固定する（配送を見送る状態） */
 function setWorkersBusy() {
-  supervisor._setIsWorkerAlive(() => true);
+  setWorkerAlive(() => true);
+}
+
+function setWorkerAlive(isAlive) {
+  supervisor._setObserveWorker((entry) => (isAlive(entry) ? 'alive' : 'dead'));
 }
 
 /**
@@ -192,21 +197,21 @@ function resetHeadlessLaunchMocks({ pid = RESUMED_PID } = {}) {
     lastSpawnCalls.push({ cmd, args, options });
     return { pid, on() { return this; }, unref() {} };
   });
-  headlessLaunch._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
+  headlessLaunch._setLiveness(testLiveness);
 }
 
 function resetAllMocks() {
+  testLiveness = processLiveness.createLiveness({
+    probePid: () => 'alive',
+    readStartTime: () => TEST_SESSION_START_TIME,
+  });
   resetGhRepoView();
   resetGhPrList();
   resetGhApiComments();
   resetHeadlessLaunchMocks();
   setWorkersIdle();
-  workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
-  supervisor._setGetProcessStartTime((pid) => {
-    assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
-    return TEST_SESSION_START_TIME;
-  });
-  supervisor._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
+  workerLease._setLiveness(testLiveness);
+  supervisor._setParentLiveness(testLiveness);
   // resume直後の生存確認スリープは実待機させない
   supervisor._setSleep(() => {});
   // 通知は実 _notifyOrchestrator を通しつつ、内部 spawn だけを安全なモック（実spawnを起こさない）
@@ -310,28 +315,31 @@ describe('CLI argument validation', () => {
         setupWorkspace(dir);
         supervisor._setGhRepoView(mockGhRepoView('test/repo'));
         let calls = 0;
-        supervisor._setGetProcessStartTime((pid) => {
-          assert.equal(pid, process.pid);
-          calls += 1;
-          return calls === 1
-            ? '2026-07-29T00:00:00.424Z'
-            : '2026-07-29T00:00:00.525Z';
+        const liveness = processLiveness.createLiveness({
+          probePid: () => 'alive',
+          readStartTime: () => {
+            calls += 1;
+            return calls === 1
+              ? '2026-07-29T00:00:00.424Z'
+              : '2026-07-29T00:00:00.525Z';
+          },
         });
+        supervisor._setParentLiveness(liveness);
+        workerLease._setLiveness(liveness);
 
         const result = runMain(['--workspace', dir, '--once']);
         assert.equal(result.code, 0);
-        assert.deepEqual(result.residentIdentity, {
-          pid: process.pid,
-          startTime: '2026-07-29T00:00:00.424Z',
-        });
+        assert.equal(typeof result.residentIdentity, 'string');
         const leasePath = path.join(
           dir,
           '.gh-maestro',
           'leases',
           `${workerLease.roleLeaseKey('worker-supervisor')}.json`,
         );
-        assert.equal(JSON.parse(fs.readFileSync(leasePath, 'utf8')).startTime, result.residentIdentity.startTime);
-        assert.equal(calls, 2, 'self identityとsession identity以外の起動時刻を取得しない');
+        const leaseRecord = JSON.parse(fs.readFileSync(leasePath, 'utf8'));
+        assert.equal(leaseRecord.startTime, '2026-07-29T00:00:00.424Z');
+        assert.equal(testLiveness.sameRef(result.residentIdentity, testLiveness.readRef(leaseRecord)), true);
+        assert.equal(calls, 2, 'resident identity と parent session の起動時刻だけを取得する');
         result.residentLease.release();
       });
     } finally {
@@ -491,6 +499,7 @@ describe('loadWorkers', () => {
       assert.equal(workers.get('issue-5-fix').agentId, 'claude');
       assert.equal(workers.get('issue-5-fix').issue, 5);
       assert.equal(workers.get('issue-8-add').pid, 103);
+      assert.equal(workers.get('issue-5-fix').rawProcessEntry.pid, 102);
     });
   });
 
@@ -508,19 +517,46 @@ describe('loadWorkers', () => {
     });
   });
 
-  test('壊れた workers.json / 配列は空 Map を返す', () => {
+  test('壊れた workers.json / 配列は空 Map と扱わずエラーにする', () => {
     withTempDir((dir) => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
       fs.writeFileSync(path.join(maestroDir, 'workers.json'), '{broken');
-      assert.equal(supervisor.loadWorkers(dir).size, 0);
+      assert.throws(() => supervisor.loadWorkers(dir), /JSON構文エラー/);
     });
 
     withTempDir((dir) => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
       fs.writeFileSync(path.join(maestroDir, 'workers.json'), '[]');
-      assert.equal(supervisor.loadWorkers(dir).size, 0);
+      assert.throws(() => supervisor.loadWorkers(dir), /オブジェクトでない/);
+    });
+  });
+
+  test('不正なPIDのworker recordも元の値を保持し、稼働判定で停止する', () => {
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: { 'issue-5-fix': { pid: 'not-a-pid', agentId: 'missing-agent', issue: 5 } },
+      });
+      const entry = supervisor.loadWorkers(dir).get('issue-5-fix');
+      workerLiveness._setLiveness(processLiveness.createLiveness({
+        probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME,
+      }));
+      supervisor._setObserveWorker(workerLiveness.observeWorker);
+      try {
+        const spawnCallsBefore = lastSpawnCalls.length;
+        const result = supervisor.deliverMessage({
+          workerName: 'issue-5-fix', entry,
+          message: { from: 'orch', body: 'hello' }, workspace: dir,
+          homedir: os.homedir(), issue: '5',
+        });
+        assert.equal(result.method, 'pending');
+        assert.match(result.error, /liveness is unknown/);
+        assert.equal(lastSpawnCalls.length, spawnCallsBefore, 'unknownなworkerをresumeしてはならない');
+      } finally {
+        workerLiveness._setLiveness(null);
+        setWorkerAlive(() => false);
+      }
     });
   });
 });
@@ -539,6 +575,34 @@ describe('loadWorkers', () => {
 
 describe('Delivery', () => {
   beforeEach(() => resetAllMocks());
+
+  test('deliverMessage: PIDが生存していてもstartTime欠落時はresumeせずpendingにする', () => {
+    withTempDir((dir) => {
+      setupWorkspace(dir, {
+        workers: { 'issue-5-fix': { pid: 4242, agentId: 'agy', issue: 5 } },
+      });
+      const liveness = processLiveness.createLiveness({
+        probePid: () => 'alive',
+        readStartTime: () => null,
+      });
+      workerLiveness._setLiveness(liveness);
+      supervisor._setObserveWorker(workerLiveness.observeWorker);
+      try {
+        const entry = supervisor.loadWorkers(dir).get('issue-5-fix');
+        const result = supervisor.deliverMessage({
+          workerName: 'issue-5-fix', entry,
+          message: { from: 'orch', body: 'hello' }, workspace: dir,
+          homedir: os.homedir(), issue: '5',
+        });
+        assert.equal(result.method, 'pending');
+        assert.match(result.error, /liveness is unknown; refusing resume/);
+        assert.equal(lastSpawnCalls.length, 0, '起動時刻不明の生存PIDでは二重起動しない');
+      } finally {
+        workerLiveness._setLiveness(null);
+        setWorkerAlive(() => false);
+      }
+    });
+  });
 
   test('deliverMessage: プロセス生存時は稼働中とみなしpending（二重起動しない）', () => {
     setWorkersBusy();
@@ -605,7 +669,7 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
   beforeEach(() => {
     resetAllMocks();
     // resume直後の生存確認は既定で「生きている」とする（個別テストで上書きする）
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
   });
 
   function setupResumeWorkspace(dir, { workerName = 'issue-7-fix', agentId = 'agy' } = {}) {
@@ -689,7 +753,7 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
       fs.mkdirSync(path.join(dir, '.gh-maestro', 'worktrees', 'issue-7-fix'), { recursive: true });
       fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), '{ broken json');
       resetHeadlessLaunchMocks({ pid: 77 });
-      supervisor._setIsWorkerAlive(() => true);
+      setWorkerAlive(() => true);
 
       const result = supervisor.tryResumeAndDeliver({
         workerName: 'issue-7-fix', agentId: 'agy',
@@ -707,7 +771,7 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
       resetHeadlessLaunchMocks({ pid: 77 });
-      supervisor._setIsWorkerAlive(() => true);
+      setWorkerAlive(() => true);
 
       const result = supervisor.tryResumeAndDeliver({
         workerName: 'issue-7-fix', agentId: 'agy',
@@ -835,9 +899,14 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
   test('tryResumeAndDeliver: spawnは成功したが直後にプロセスが消失していれば resume-failed（DELIVEREDと誤認識しない）', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
+      const deadResumeLiveness = processLiveness.createLiveness({
+        probePid: (pid) => pid === 77 ? 'dead' : 'alive',
+        readStartTime: () => TEST_SESSION_START_TIME,
+      });
+      workerLease._setLiveness(deadResumeLiveness);
+      supervisor._setParentLiveness(deadResumeLiveness);
       resetHeadlessLaunchMocks({ pid: 77 });
-      // 起動直後の生存確認で「既に死んでいる」とする
-      supervisor._setIsWorkerAlive(() => false);
+      headlessLaunch._setLiveness(deadResumeLiveness);
 
       const result = supervisor.tryResumeAndDeliver({
         workerName: 'issue-7-fix', agentId: 'agy',
@@ -858,7 +927,7 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
       // 休止中とみなす（resumeが走る）
-      supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
+      setWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
 
       const result = supervisor.deliverMessage({
         workerName: 'issue-7-fix', entry: { pid: 456, startTime: 'old', agentId: 'agy' },
@@ -873,7 +942,7 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
   test('deliverMessage: プロセス非生存 + claude も resume を試みる', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'claude' });
-      supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
+      setWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
 
       const result = supervisor.deliverMessage({
         workerName: 'issue-7-fix', entry: { pid: 456, startTime: 'old', agentId: 'claude' },
@@ -892,7 +961,7 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     // （`{ ...process.env, ...env }` マージ後）に dev が入ることを検証する。
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
-      supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
+      setWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
 
       withInheritedBaseBranch('main', () => {
         const result = supervisor.deliverMessage({
@@ -920,7 +989,7 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     // 最終的なspawn env（マージ後）で検証する。
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
-      supervisor._setIsWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
+      setWorkerAlive((e) => !!e && e.pid === RESUMED_PID);
 
       withInheritedBaseBranch('main', () => {
         const result = supervisor.deliverMessage({
@@ -1056,6 +1125,207 @@ describe('runOnce scan and deliver cycle', () => {
     });
   });
 
+  test('unknown worker はalive観測が間に入っても通知を重複させず、他workerの見回りを続ける', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    const apiIssues = [];
+    supervisor._setGhApiComments((_repo, issue) => {
+      apiIssues.push(String(issue));
+      return { status: 0, stdout: '[]', stderr: '' };
+    });
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+    let unknownWorkerState = 'unknown';
+    supervisor._setObserveWorker((entry) => {
+      if (entry.pid === 101) return unknownWorkerState;
+      return 'alive';
+    });
+
+    try {
+      withTempDir((dir) => {
+        setupWorkspace(dir, {
+          workers: {
+            'issue-654-unknown-worker': { pid: 101, agentId: 'agy', issue: 654 },
+            'issue-655-live-worker': { pid: 102, startTime: TEST_SESSION_START_TIME, agentId: 'agy', issue: 655 },
+          },
+        });
+        const workersPath = path.join(dir, '.gh-maestro', 'workers.json');
+        const workersBefore = fs.readFileSync(workersPath, 'utf8');
+        const r = runMain(['--workspace', dir]);
+        assert.equal(r.code, 0);
+
+        assert.doesNotThrow(() => r.runOnce(), 'unknown worker がいても周回を完了する');
+        unknownWorkerState = 'alive';
+        assert.doesNotThrow(() => r.runOnce(), 'alive に戻った周回も完了する');
+        unknownWorkerState = 'unknown';
+        assert.doesNotThrow(() => r.runOnce(), 'unknown に戻った周回も完了する');
+
+        assert.deepEqual(apiIssues, ['655', '654', '655', '655'], 'unknown worker は飛ばし、alive の周回は両workerを見回る');
+        assert.equal(notifications.length, 1, 'alive の観測後に同じidentityが unknown に戻っても通知を重複させない');
+        assert.match(notifications[0].body, /issue-654-unknown-worker/);
+        assert.ok(r.errLines.some((line) => line.includes('issue-654-unknown-worker') && line.includes('生死が不明')));
+        assert.equal(lastSpawnCalls.length, 0, 'unknown worker をresumeしない');
+        assert.equal(fs.readFileSync(workersPath, 'utf8'), workersBefore, 'workers.json のunknown workerを変更・削除しない');
+        assert.equal(r.lines.filter((line) => line.startsWith('SCAN_END:')).length, 3);
+      });
+    } finally {
+      resetAllMocks();
+    }
+  });
+
+  test('pending再試行を更新した後のunknownはpendingとsinceを保全してそのworkerを飛ばす', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    const apiIssues = [];
+    supervisor._setGhApiComments((_repo, issue) => {
+      apiIssues.push(String(issue));
+      const comments = String(issue) === '654'
+        ? [{ id: 302, created_at: '2024-06-02T12:00:00Z', body: 'unrelated comment' }]
+        : [];
+      return { status: 0, stdout: JSON.stringify(comments), stderr: '' };
+    });
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+    const observationsByPid = new Map([
+      [201, ['alive', 'alive', 'unknown']],
+      [202, ['alive', 'alive']],
+    ]);
+    supervisor._setObserveWorker((entry) => {
+      const observations = observationsByPid.get(entry.pid);
+      return observations?.shift() || 'alive';
+    });
+
+    try {
+      const since = '2024-06-01T12:00:00Z';
+      const lastAttempt = new Date(Date.now() - 300000).toISOString();
+      withTempDir((dir) => {
+        setupWorkspace(dir, {
+          workers: {
+            'issue-654-late-unknown-worker': { pid: 201, startTime: TEST_SESSION_START_TIME, agentId: 'agy', issue: 654 },
+            'issue-655-live-worker': { pid: 202, startTime: TEST_SESSION_START_TIME, agentId: 'agy', issue: 655 },
+          },
+          cursors: {
+            'issue-654-late-unknown-worker': {
+              since,
+              seenIds: [],
+              deliveredIds: [],
+              pendingDeliveries: {
+                '301': {
+                  retries: 2,
+                  lastAttempt,
+                  lastError: 'worker busy',
+                  lastMethod: 'pending',
+                  lastFrom: 'orchestrator',
+                  lastBody: 'retry this pending delivery',
+                },
+              },
+            },
+          },
+        });
+        const r = runMain(['--workspace', dir]);
+        assert.equal(r.code, 0);
+        assert.doesNotThrow(() => r.runOnce());
+
+        assert.deepEqual(apiIssues, ['654', '655'], 'liveness再確認がunknownでも次workerのIssueを読む');
+        assert.equal(notifications.length, 1);
+        assert.match(notifications[0].body, /issue-654-late-unknown-worker/);
+        const savedCursor = supervisor.readCursor(dir, 'issue-654-late-unknown-worker');
+        assert.equal(savedCursor.since, since, '新しいコメントがあっても unknown で since を進めない');
+        assert.equal(savedCursor.pendingDeliveries['301'].retries, 3, 'pending 再試行の retries 更新を保存する');
+        assert.notEqual(savedCursor.pendingDeliveries['301'].lastAttempt, lastAttempt, 'pending 再試行時刻を保存する');
+        assert.equal(savedCursor.pendingDeliveries['301'].lastMethod, 'pending');
+        assert.equal(savedCursor.pendingDeliveries['301'].lastBody, 'retry this pending delivery');
+        assert.equal(lastSpawnCalls.length, 0, 'unknown worker をresumeしない');
+        assert.ok(!r.lines.some((line) => line.startsWith('STOP_DETECTED:issue-654-late-unknown-worker')),
+          'unknownを停止済みとして扱わない');
+        assert.ok(r.lines.some((line) => line.startsWith('SCAN_END:2:0')));
+      });
+    } finally {
+      resetAllMocks();
+    }
+  });
+
+  test('unknown通知の失敗は次周回に再試行し、成功後は重複させない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    const notificationResults = [
+      { status: 1, stdout: '', stderr: 'temporary failure' },
+      { status: 0, stdout: '', stderr: '' },
+    ];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return notificationResults.shift();
+    });
+    supervisor._setObserveWorker((entry) => (entry.pid === 301 ? 'unknown' : 'alive'));
+
+    try {
+      withTempDir((dir) => {
+        setupWorkspace(dir, {
+          workers: { 'issue-654-notification-retry': { pid: 301, agentId: 'agy', issue: 654 } },
+        });
+        const r = runMain(['--workspace', dir]);
+        assert.equal(r.code, 0);
+
+        r.runOnce();
+        r.runOnce();
+        r.runOnce();
+
+        assert.equal(notifications.length, 2, '失敗後は再送し、成功後の同一identityでは抑止する');
+        assert.ok(r.errLines.some((line) => line.includes('生死不明通知に失敗') && line.includes('temporary failure')));
+        assert.equal(r.lines.filter((line) => line.startsWith('SCAN_END:')).length, 3);
+      });
+    } finally {
+      resetAllMocks();
+    }
+  });
+
+  test('配送直前のlivenessがunknownへ変わっても通知してresumeしない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([
+      {
+        id: 103,
+        created_at: '2024-06-01T12:00:00Z',
+        body: '<!-- gh-maestro {"v":1,"to":"issue-654-racing-worker","from":"orchestrator"} -->\n> test',
+      },
+    ]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+    const observationsByPid = new Map([[203, ['alive', 'alive', 'unknown']]]);
+    supervisor._setObserveWorker((entry) => {
+      const observations = observationsByPid.get(entry.pid);
+      return observations?.shift() || 'alive';
+    });
+
+    try {
+      withTempDir((dir) => {
+        setupWorkspace(dir, {
+          workers: {
+            'issue-654-racing-worker': { pid: 203, startTime: TEST_SESSION_START_TIME, agentId: 'agy', issue: 654 },
+          },
+        });
+        const r = runMain(['--workspace', dir]);
+        assert.equal(r.code, 0);
+        assert.doesNotThrow(() => r.runOnce());
+
+        assert.equal(lastSpawnCalls.length, 0, 'unknownになったworkerをresumeしない');
+        assert.equal(notifications.length, 1);
+        assert.match(notifications[0].body, /issue-654-racing-worker/);
+        assert.ok(r.lines.some((line) => line.startsWith('DELIVERY_FAILED:issue-654-racing-worker:103')));
+        assert.ok(r.lines.some((line) => line.startsWith('SCAN_END:1:1')));
+      });
+    } finally {
+      resetAllMocks();
+    }
+  });
+
   // ── 死のスイッチ配線（Issue #301） ─────────────────────────────────────
   // runOnce が親セッションの死を検出したとき、role lease を解放して exit 3 で終了する
   // （受け入れ条件1: 死のスイッチ経路で lease が解放される）。scriptName と sessionPid が
@@ -1073,18 +1343,19 @@ describe('runOnce scan and deliver cycle', () => {
       try {
         // 死のスイッチを常時「死」と判定させる。checkParent は main() 内で生成されるため
         // runMain より前に注入する（_setParentDeathExit は sentinel 例外で抜ける）。
-        supervisor._setCreateDeadManSwitch((_pid, options) => {
-          capturedExpectedStartTime = options.expectedStartTime;
-          return () => false;
+        const liveness = require('../scripts/shared/process-liveness').createLiveness({
+        probePid: () => 'alive',
+        readStartTime: () => capturedExpectedStartTime || TEST_SESSION_START_TIME,
         });
+        supervisor._setParentLiveness(liveness);
+        workerLease._setLiveness(liveness);
         let exitCode = null;
         supervisor._setParentDeathExit((code) => { exitCode = code; throw new Error('parent-death-exit sentinel'); });
         process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
 
         const r = runMain(['--workspace', dir]);
         assert.equal(r.code, 0);
-        assert.equal(capturedExpectedStartTime, TEST_SESSION_START_TIME,
-          'main() が捕捉した起動時刻を createDeadManSwitch に渡す');
+        capturedExpectedStartTime = '2000-01-01T00:00:00.000Z';
         const leaseFile = path.join(dir, '.gh-maestro', 'leases', 'resident-role-worker-supervisor.json');
         assert.ok(fs.existsSync(leaseFile), 'role lease ファイルが作成される');
 
@@ -1098,7 +1369,9 @@ describe('runOnce scan and deliver cycle', () => {
         );
       } finally {
         process.stderr.write = origStderr;
-        supervisor._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
+        testLiveness = processLiveness.createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME });
+        supervisor._setParentLiveness(testLiveness);
+        workerLease._setLiveness(testLiveness);
         supervisor._setParentDeathExit((code) => process.exit(code));
       }
     });
@@ -1685,7 +1958,7 @@ describe('Hang detection', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
     // ワーカーは稼働中（生存）とする
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -1741,7 +2014,7 @@ describe('Hang detection', () => {
   test('重複通知防止: 同一PIDでログ未更新のまま2回目のrunOnceでは通知しない', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -1788,7 +2061,7 @@ describe('Hang detection', () => {
   test('復帰検知: ハング通知後にログが更新されると HANG_RESUMED が出力されて状態がリセットされる', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -1836,7 +2109,7 @@ describe('Hang detection', () => {
   test('ワーカー非生存時はハング判定をスキップする', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    // 非生存（_isWorkerAliveがfalseを返す）＝ resetAllMocks の既定
+    // 非生存（observeWorker が 'dead' を返す）＝ resetAllMocks の既定
     // setWorkersIdle() が設定する既定で休止中扱い
 
     const r = withTempDir((dir) => {
@@ -1867,7 +2140,7 @@ describe('Hang detection', () => {
   test('ログファイルが存在しなければ例外を投げずにスキップする', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     // ログファイルを作成しない（存在しない状態）
 
@@ -1889,7 +2162,7 @@ describe('Hang detection', () => {
   test('--hang-threshold-sec より短い経過時間なら通知しない', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -1924,7 +2197,7 @@ describe('Hang detection', () => {
   test('--hang-threshold-sec より長い経過時間なら通知する', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -1964,7 +2237,7 @@ describe('Hang detection', () => {
   test('HANG_DETECTED後のカーソル保存が失敗しても runOnce はクラッシュしない', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
     supervisor._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
 
     withTempDir((dir) => {
@@ -1998,7 +2271,7 @@ describe('Hang detection', () => {
   test('_notifyOrchestrator はIssueコメントではなく監査イベントへ通知する', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     withTempDir((dir) => {
       setupWorkspace(dir, {
@@ -2034,7 +2307,7 @@ describe('Hang detection', () => {
   test('resume直後（startTimeが新しくログmtimeが古い）は通知しない', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2070,7 +2343,7 @@ describe('Hang detection', () => {
   test('resumeで新PIDになった場合、旧プロセスの通知済み状態が残っていてもHANG_RESUMEDは誤報されない（レビュー指摘）', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2130,7 +2403,7 @@ describe('Hang detection', () => {
   test('startTimeも十分前（実際にハングしている）なら従来どおり通知する', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2164,7 +2437,7 @@ describe('Hang detection', () => {
   test('startTimeが無いエントリでは従来どおりログmtimeのみで判定する', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2218,7 +2491,7 @@ describe('Stale report detection（居座り検知）', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     const reportCreatedAt = new Date(Date.now() - (7 * 60 + 5) * 1000).toISOString();
     supervisor._setGhApiComments(mockGhApiComments([reportComment({ createdAt: reportCreatedAt })]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2268,7 +2541,7 @@ describe('Stale report detection（居座り検知）', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     // 起動時刻の5分後に投稿された報告コメント
     supervisor._setGhApiComments(mockGhApiComments([reportComment({ createdAt: '2026-07-25T00:05:00Z' })]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2321,7 +2594,7 @@ describe('Stale report detection（居座り検知）', () => {
     ];
 
     supervisor._setGhApiComments(mockGhApiComments(comments));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2355,7 +2628,7 @@ describe('Stale report detection（居座り検知）', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     const reportCreatedAt = new Date(Date.now() - 1000).toISOString();
     supervisor._setGhApiComments(mockGhApiComments([reportComment({ createdAt: reportCreatedAt })]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2384,7 +2657,7 @@ describe('Stale report detection（居座り検知）', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     const reportCreatedAt = new Date(Date.now() - 1000).toISOString();
     supervisor._setGhApiComments(mockGhApiComments([reportComment({ createdAt: reportCreatedAt })]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2422,7 +2695,7 @@ describe('Stale report detection（居座り検知）', () => {
   // 通じて配送そのものを止めうる。本Issueの目的と矛盾するため必ず1回に抑える）。
   test('居座り判定は新着コメントスキャンと同じ取得結果を再利用し、追加のgh api呼び出しを行わない', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
     supervisor._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
 
     let apiCallCount = 0;
@@ -2450,7 +2723,7 @@ describe('Stale report detection（居座り検知）', () => {
   test('未報告のまま生存中は通知しない（休止待ちの正常状態）', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([])); // まだ何も報告していない
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2478,7 +2751,7 @@ describe('Stale report detection（居座り検知）', () => {
   test('重複通知防止: 同一プロセス（同一PID+同一起動時刻）で2回目のrunOnceでは通知しない', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2516,12 +2789,12 @@ describe('Stale report detection（居座り検知）', () => {
 
   // PID単独をキーにすると、通知後にワーカーが終了し、OSが同じPIDを無関係な別プロセスへ
   // 再利用した場合、そのPIDで起動された別の（未報告の）ワーカーまで「通知済み」と誤認して
-  // 再通知を抑止してしまう（同一ファイル内の _isWorkerAlive → verifyProcessIdentity と同じ
+  // 再通知を抑止してしまう（同一ファイル内の observeWorker → verifyProcessIdentity と同じ
   // 落とし穴）。startTimeも一致することを要求して区別する。
   test('PID再利用: 同一PIDでも起動時刻が異なれば別プロセスとして再通知する', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([reportComment({ createdAt: '2026-07-26T00:05:00Z' })]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2567,7 +2840,7 @@ describe('Stale report detection（居座り検知）', () => {
   test('起動時刻を特定できない（startTimeが無い）場合は判定せず通知しない', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2640,7 +2913,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
   test('停止ワーカー検知→通知: 報告済みの停止ワーカーを検知して通知する（報告状況: 報告済み）', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
-    supervisor._setIsWorkerAlive(() => false);
+    setWorkerAlive(() => false);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2692,11 +2965,12 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
       });
 
       // サイクル1: ワーカーは生存中、報告コメントを投稿
-      supervisor._setIsWorkerAlive(() => true);
+      setWorkerAlive(() => true);
       supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
 
       const r1 = runMain(['--workspace', dir]);
       r1.runOnce();
+      r1.residentLease.release();
 
       // サイクル1終了時点でカーソルが報告コメントの created_at まで進み、reported* が永続化されている
       const state1 = supervisor.readCursor(dir, 'issue-5-fix');
@@ -2705,11 +2979,12 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
       assert.equal(state1.since, '2026-07-25T00:00:15.000Z');
 
       // サイクル2: ワーカー停止。新着コメントは空（cursor.since 以降の新規なし）
-      supervisor._setIsWorkerAlive(() => false);
+      setWorkerAlive(() => false);
       supervisor._setGhApiComments(mockGhApiComments([]));
 
       const r2 = runMain(['--workspace', dir]);
       r2.runOnce();
+      r2.residentLease.release();
 
       assert.ok(r2.lines.some(l => l.startsWith('STOP_DETECTED:issue-5-fix:456')),
         `STOP_DETECTED が出力されること: ${r2.lines.join('\n')}`);
@@ -2723,7 +2998,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
   test('停止ワーカー検知→通知: 未報告の停止ワーカーを検知して通知する（報告状況: 未投稿）', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => false);
+    setWorkerAlive(() => false);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2759,7 +3034,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
   test('重複通知防止: 同一プロセス（同一PID+同一起動時刻）で2回目のrunOnceでは通知しない', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([reportComment()]));
-    supervisor._setIsWorkerAlive(() => false);
+    setWorkerAlive(() => false);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2824,9 +3099,10 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
       });
 
       // 1回目の run: 同一プロセスが生存中と観測される
-      supervisor._setIsWorkerAlive(() => true);
+      setWorkerAlive(() => true);
       const r1 = runMain(['--workspace', dir]);
       r1.runOnce();
+      r1.residentLease.release();
 
       // 生存観測後も同一プロセスの停止通知キーが維持されていること
       const state1 = supervisor.readCursor(dir, 'issue-5-fix');
@@ -2834,9 +3110,10 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
       assert.equal(state1.stoppedNotifiedStartTime, START_TIME);
 
       // 2回目の run: 再度停止
-      supervisor._setIsWorkerAlive(() => false);
+      setWorkerAlive(() => false);
       const r2 = runMain(['--workspace', dir]);
       r2.runOnce();
+      r2.residentLease.release();
 
       assert.ok(!r2.lines.some(l => l.startsWith('STOP_DETECTED')),
         `同一プロセスに再通知されないこと: ${r2.lines.join('\n')}`);
@@ -2847,7 +3124,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
   test('PID再利用: 同一PIDでも起動時刻が異なれば別プロセスとして再通知する', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => false);
+    setWorkerAlive(() => false);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2888,10 +3165,10 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
     });
   });
 
-  test('ワーカー生存中（_isWorkerAlive=true）は停止通知しない', () => {
+  test("ワーカー生存中（observeWorker='alive'）は停止通知しない", () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => true);
+    setWorkerAlive(() => true);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2918,7 +3195,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
   test('起動時刻が無いエントリは判定不能として停止通知する（報告状況: 判定不能（起動時刻なし・不正））（指摘2）', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => false);
+    setWorkerAlive(() => false);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2952,7 +3229,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
   test('起動時刻が不正な文字列のエントリは判定不能として停止通知する（報告状況: 判定不能（起動時刻なし・不正））（Issue #413）', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => false);
+    setWorkerAlive(() => false);
 
     const notifyCalls = [];
     supervisor._setNotifyOrchestrator((opts) => {
@@ -2986,7 +3263,7 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
   test('停止検知時に worktree や workers.json が変更・削除されないこと', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));
-    supervisor._setIsWorkerAlive(() => false);
+    setWorkerAlive(() => false);
 
     supervisor._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
 

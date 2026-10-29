@@ -27,9 +27,9 @@ const { releaseResidentLease } = require('./worker-lease');
  * @param {string} params.role       このプロセスが保持する role lease 名
  * @param {number} params.sessionPid 監視していた親セッションのPID
  */
-function handleParentSessionDeath({ workspace, scriptName, role, sessionPid }) {
+function handleParentSessionDeath({ workspace, scriptName, role, sessionPid, processRef }) {
   try {
-    releaseResidentLease({ workspace, role, pid: process.pid });
+    releaseResidentLease({ workspace, role, processRef });
   } catch (e) {
     // lease 解放は best-effort。失敗しても終了を妨げない（残った stale lease は
     // 次の起動の stale 回収で処理される）。

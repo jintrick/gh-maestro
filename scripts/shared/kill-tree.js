@@ -13,14 +13,10 @@ const DEFAULT_POLL_INTERVAL_MS = 50;
 
 const defaultSleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-function isProcessAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error && error.code === 'ESRCH') return false;
-    return true;
-  }
+// This probe is used only by the teardown barrier immediately after tree kill.
+function hasNotExited(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return !(error && error.code === 'ESRCH'); }
 }
 
 function validPid(pid) {
@@ -138,14 +134,14 @@ function processTreePidsUnix(rootPid, spawnSyncFn = spawnSync) {
  * @param {object} [options]
  * @param {number} [options.timeoutMs=5000]
  * @param {number} [options.pollIntervalMs=50]
- * @param {(pid:number) => boolean} [options.isProcessAliveFn]
+ * @param {(pid:number) => boolean} [options.hasNotExitedFn]
  * @param {(ms:number) => void} [options.sleepFn]
  * @returns {{ok:boolean, alivePids:number[]}}
  */
 function waitForPidsToExit(pids, options = {}) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-  const isAlive = options.isProcessAliveFn || isProcessAlive;
+  const isAlive = options.hasNotExitedFn || hasNotExited;
   const sleep = options.sleepFn || defaultSleep;
   const targets = [...new Set(pids.filter(validPid))];
   const deadline = Date.now() + timeoutMs;
@@ -170,7 +166,7 @@ function waitForPidsToExit(pids, options = {}) {
  * @param {number} [options.timeoutMs=5000]
  * @param {number} [options.pollIntervalMs=50]
  * @param {(ms:number) => void} [options.sleepFn]
- * @param {(pid:number) => boolean} [options.isProcessAliveFn]
+ * @param {(pid:number) => boolean} [options.hasNotExitedFn]
  * @param {(cmd:string,args:string[],options:object) => object} [options.spawnSyncFn]
  * @param {(pid:number, signal:string) => void} [options.killFn]
  * @param {string} [options.platform=process.platform] テスト用の対象プラットフォーム
@@ -236,5 +232,4 @@ module.exports = {
   DEFAULT_STOP_TIMEOUT_MS,
   DEFAULT_POLL_INTERVAL_MS,
   killProcessTree,
-  waitForPidsToExit,
 };

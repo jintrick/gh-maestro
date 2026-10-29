@@ -451,7 +451,9 @@ test('旧 startup lock の所有者が稼働中または確認不能なら保持
     const startTime = '2026-01-01T00:00:00.000Z';
     const run = () => cleanupLegacyArtifact({
       cleanupId: 'process-lifecycle.sweepRegistry', workspace: fixture.workspace,
-      getProcessStartTimeFn: () => startTime,
+      liveness: require('../scripts/shared/process-liveness').createLiveness({
+        probePid: (pid) => pid === process.pid ? 'alive' : 'dead', readStartTime: () => startTime,
+      }),
     });
     fs.writeFileSync(file, JSON.stringify({ pid: process.pid, startTime }));
     assert.equal(run().status, 'unknown');

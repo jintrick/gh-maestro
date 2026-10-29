@@ -7,11 +7,10 @@ const os = require('os');
 const path = require('path');
 
 const marker = require('../scripts/shared/migration-marker');
-const {
-  isProcessAlive,
-  getProcessStartTime,
-  verifyProcessIdentity,
-} = require('../scripts/process-lifecycle');
+const { createLiveness } = require('../scripts/shared/process-liveness');
+let probe = 'alive';
+let start = '2026-08-01T00:00:00.000Z';
+function inject() { marker._setLiveness(createLiveness({ probePid: () => probe, readStartTime: () => start })); }
 
 let workspace;
 
@@ -19,9 +18,9 @@ let workspace;
 // 実装を跨いで持ち越さないよう、afterEach で必ず実装へ戻す
 // （実プロセス確認は行わない）。
 afterEach(() => {
-  marker._setIsProcessAlive(isProcessAlive);
-  marker._setGetProcessStartTime(getProcessStartTime);
-  marker._setVerifyProcessIdentity(verifyProcessIdentity);
+  marker._setLiveness(null);
+  probe = 'alive';
+  start = '2026-08-01T00:00:00.000Z';
   try { fs.rmSync(workspace, { recursive: true, force: true }); } catch {}
 });
 
@@ -33,7 +32,7 @@ function freshWorkspace() {
 
 test('markMigrationInProgress: 所有PIDとstartTimeをJSONで記録する', () => {
   const dir = freshWorkspace();
-  marker._setGetProcessStartTime(() => '2026-08-01T00:00:00.000Z');
+  inject();
 
   marker.markMigrationInProgress(dir);
 
@@ -49,9 +48,9 @@ test('isMigrationInProgress: マーカーが無ければ false', () => {
 
 test('isMigrationInProgress: 所有プロセスが生存していれば true', () => {
   const dir = freshWorkspace();
-  marker._setGetProcessStartTime(() => '2026-08-01T00:00:00.000Z');
-  marker._setIsProcessAlive(() => true);
-  marker._setVerifyProcessIdentity(() => ({ match: true }));
+  inject();
+
+
   marker.markMigrationInProgress(dir);
 
   assert.equal(marker.isMigrationInProgress(dir), true);
@@ -59,8 +58,8 @@ test('isMigrationInProgress: 所有プロセスが生存していれば true', (
 
 test('isMigrationInProgress: 所有プロセスが死んでいれば stale として false（自己回復）', () => {
   const dir = freshWorkspace();
-  marker._setGetProcessStartTime(() => '2026-08-01T00:00:00.000Z');
-  marker._setIsProcessAlive(() => false);
+  inject();
+  probe = 'dead';
   marker.markMigrationInProgress(dir);
 
   assert.equal(marker.isMigrationInProgress(dir), false);
@@ -68,50 +67,51 @@ test('isMigrationInProgress: 所有プロセスが死んでいれば stale と�
 
 test('isMigrationInProgress: PIDが再利用され同一性が確認できなければ false', () => {
   const dir = freshWorkspace();
-  marker._setGetProcessStartTime(() => '2026-08-01T00:00:00.000Z');
-  marker._setIsProcessAlive(() => true);
-  marker._setVerifyProcessIdentity(() => ({ match: false, reason: 'startTime mismatch' }));
-  marker.markMigrationInProgress(dir);
+  marker._setLiveness(createLiveness({ probePid: () => 'alive', readStartTime: () => start }));
+  fs.writeFileSync(marker.migrationInProgressPath(dir), JSON.stringify({
+    pid: 12345, startTime: '2026-08-01T00:00:00.000Z',
+  }));
+  start = '2026-08-02T00:00:00.000Z';
 
   assert.equal(marker.isMigrationInProgress(dir), false);
 });
 
 test('isMigrationInProgress: startTime 未記録でも所有プロセス生存なら true（劣化縮退）', () => {
   const dir = freshWorkspace();
-  marker._setGetProcessStartTime(() => null); // 起動時刻が取得できなかった
-  marker._setIsProcessAlive(() => true);
+  start = null; inject();
+
   marker.markMigrationInProgress(dir);
   const raw = JSON.parse(fs.readFileSync(marker.migrationInProgressPath(dir), 'utf8'));
   assert.equal(raw.startTime, null);
 
-  // startTime が null なので verifyProcessIdentity は呼ばれず、生存確認のみで抑止を維持する
+  // startTime が null でも PID は生存中なので、判定不能として抑止を維持する。
   assert.equal(marker.isMigrationInProgress(dir), true);
 });
 
-test('isMigrationInProgress: 不正なPID（0以下・非数値）は false', () => {
+test('isMigrationInProgress: 不正なPIDは判定不能として抑止する', () => {
   const dir = freshWorkspace();
   fs.writeFileSync(marker.migrationInProgressPath(dir), JSON.stringify({ pid: 0, startTime: '2026-08-01T00:00:00.000Z' }));
-  assert.equal(marker.isMigrationInProgress(dir), false);
+  assert.equal(marker.isMigrationInProgress(dir), true);
 
   fs.writeFileSync(marker.migrationInProgressPath(dir), JSON.stringify({ startTime: '2026-08-01T00:00:00.000Z' }));
-  assert.equal(marker.isMigrationInProgress(dir), false);
+  assert.equal(marker.isMigrationInProgress(dir), true);
 });
 
-test('isMigrationInProgress: 読めない・パースできないマーカーは false（fail-open）', () => {
+test('isMigrationInProgress: 破損マーカーはエラーを報告し保持する', () => {
   const dir = freshWorkspace();
   const p = marker.migrationInProgressPath(dir);
-  fs.writeFileSync(p, ''); // 空ファイル（旧形式）
-  assert.equal(marker.isMigrationInProgress(dir), false);
-
-  fs.writeFileSync(p, 'not-json');
-  assert.equal(marker.isMigrationInProgress(dir), false);
+  for (const raw of ['', 'not-json', 'null']) {
+    fs.writeFileSync(p, raw);
+    assert.throws(() => marker.isMigrationInProgress(dir), /移行マーカー/);
+    assert.equal(fs.readFileSync(p, 'utf8'), raw);
+  }
 });
 
 test('clearMigrationInProgress: マーカーを削除する', () => {
   const dir = freshWorkspace();
-  marker._setGetProcessStartTime(() => '2026-08-01T00:00:00.000Z');
-  marker._setIsProcessAlive(() => true);
-  marker._setVerifyProcessIdentity(() => ({ match: true }));
+  inject();
+
+
   marker.markMigrationInProgress(dir);
   assert.equal(fs.existsSync(marker.migrationInProgressPath(dir)), true);
 

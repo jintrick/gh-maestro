@@ -7,16 +7,16 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { runnerLeasePath } = require('../../scripts/shared/review-checkpoint');
 const { writeRunningReviewManager } = require('../../scripts/shared/running-review-managers');
-const { getProcessStartTime } = require('../../scripts/process-lifecycle');
+const processLiveness = require('../../scripts/shared/process-liveness');
 
 test('resume CLI refuses a live previous job runner and preserves it', () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'rm-live-runner-'));
   try {
     const file = runnerLeasePath(ws, 123, process.pid);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const startTime = getProcessStartTime(process.pid);
-    assert.ok(startTime);
-    writeRunningReviewManager(file, { pid: process.pid, startTime });
+    const processRef = processLiveness.captureSelf();
+    assert.ok(processLiveness.writeRef({}, processRef).startTime);
+    writeRunningReviewManager(file, { processRef });
     const cli = path.resolve(__dirname, '../../scripts/start-review-manager.js');
     const result = spawnSync(process.execPath, [cli, '--resume', '123', 'o/r', ws, '1'], { encoding: 'utf8' });
     assert.notEqual(result.status, 0);

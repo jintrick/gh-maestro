@@ -231,9 +231,10 @@ test('停止に失敗してslowが後から終了しても、monitorがrunning s
       waitForChildCloseFn: async () => {},
       recoverOrphanedSlowRunsFn: (recoveryWorkspace, deps) => recoverOrphanedSlowRuns(recoveryWorkspace, {
         ...deps,
-        isProcessAliveFn: () => slowAlive,
-        getProcessStartTimeFn: () => '2026-09-27T00:00:00.000Z',
-        startTimesMatchFn: () => true,
+        liveness: require('../scripts/shared/process-liveness').createLiveness({
+          probePid: () => slowAlive ? 'alive' : 'dead',
+          readStartTime: () => '2026-09-27T00:00:00.000Z',
+        }),
       }),
       writeStdoutFn: (chunk) => stdout.push(String(chunk)),
       writeStderrFn: (chunk) => stderr.push(String(chunk)),

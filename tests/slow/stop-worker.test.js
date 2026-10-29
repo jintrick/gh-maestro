@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawnSync, spawn } = require('child_process');
-const { getProcessStartTime, isProcessAlive } = require('../../scripts/process-lifecycle');
+const processLiveness = require('../../scripts/shared/process-liveness');
 const { killProcessTree } = require('../../scripts/shared/kill-tree');
 const stopWorkerCli = require('../../scripts/stop-worker');
 const { cleanSpawnEnv } = require('../_spawn-env');
@@ -22,7 +22,6 @@ const FAST_WORKER_CLI_PRELOAD = (() => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-stop-worker-preload-'));
   const file = path.join(dir, 'preload.js');
   const childProcessPath = require.resolve('../../scripts/shared/child-process');
-  const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
   const source = [
     "'use strict';",
     "const fs = require('fs');",
@@ -47,11 +46,6 @@ const FAST_WORKER_CLI_PRELOAD = (() => {
     '  }',
     '  return realExecSync(command, opts);',
     '};',
-    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
-    'lifecycle.getProcessStartTime = (pid) => {',
-    '  const value = process.env.GHM_TEST_WORKER_START_TIME;',
-    '  return value && isAlive(pid) ? value : null;',
-    '};',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
   process.once('exit', () => {
@@ -65,6 +59,12 @@ function run(args, env = {}) {
     encoding: 'utf8',
     env: { ...cleanSpawnEnv(), ...env },
   });
+}
+function captureRecord(pid) {
+  return processLiveness.writeRef({ pid }, processLiveness.captureProcess(pid));
+}
+function isProcessAlive(pid) {
+  return processLiveness.observe(processLiveness.captureProcess(pid)) === 'alive';
 }
 
 function withTempDir(fn) {
@@ -136,7 +136,7 @@ test('killProcessTree: Windowsでtaskkillが自然終了を報告しても全PID
   const result = killProcessTree(7101, {
     platform: 'win32',
     spawnSyncFn,
-    isProcessAliveFn: () => false,
+    hasNotExitedFn: () => false,
     timeoutMs: 5,
     pollIntervalMs: 1,
     sleepFn: () => {},
@@ -156,7 +156,7 @@ test('killProcessTree: Windowsでtaskkill成功後も子PIDが残れば期限超
   assert.throws(() => killProcessTree(7201, {
     platform: 'win32',
     spawnSyncFn,
-    isProcessAliveFn: (pid) => pid === 7202,
+    hasNotExitedFn: (pid) => pid === 7202,
     timeoutMs: 5,
     pollIntervalMs: 1,
     sleepFn: () => {},
@@ -184,7 +184,7 @@ test('killProcessTree: Unixでもプロセスグループと子孫PIDを停止�
     platform: 'linux',
     spawnSyncFn,
     killFn: (pid, signal) => signals.push([pid, signal]),
-    isProcessAliveFn: (pid) => pid === 7302,
+    hasNotExitedFn: (pid) => pid === 7302,
     timeoutMs: 5,
     pollIntervalMs: 1,
     sleepFn: () => {},
@@ -292,15 +292,15 @@ test('stop-worker: 正常系: 同一性が一致するプロセスツリー（�
     assert.ok(childPid > 0);
 
     try {
-      const startTime = getProcessStartTime(parentPid);
+      const processRecord = captureRecord(parentPid);
+      const startTime = processRecord.startTime;
       assert.ok(startTime, '親プロセスの起動時刻を取得できること');
 
       fs.writeFileSync(
         path.join(dir, '.gh-maestro', 'workers.json'),
         JSON.stringify({
           'test-worker': {
-            pid: parentPid,
-            startTime,
+            ...processRecord,
             issue: 10,
             skill: 'gh-maestro-coder',
           },
@@ -360,8 +360,8 @@ test('stop-worker: 拒否側: PIDは生存しているが起動時刻が不一�
       // 子CLIがOS境界から観測する起動時刻は固定し、テスト準備時のOS応答に依存させない。
       const observedStartTime = '2026-01-01T00:00:00.000Z';
       const r = run(['mismatch-worker', '--workspace', dir], { [TEST_START_TIME_ENV]: observedStartTime });
-      assert.notEqual(r.status, 0, '同一性不一致時は終了コード1でエラーになること');
-      assert.match(r.stderr, /同一性確認に失敗しました/);
+      assert.equal(r.status, 0, '同一性不一致はdeadとして扱い、停止せず正常終了する');
+      assert.match(r.stderr, /既に停止しています/);
 
       // 親・子ともに kill されず生存し続けていることを検証（巻き添え防止の検証）
       assert.equal(isProcessAlive(parentPid), true, '同一性不一致の親プロセスはkillされず生存し続けること');
@@ -404,8 +404,7 @@ test('stop-worker: 拒否側: 起動時刻を取得できない場合、実プ�
       // envを渡さないと既存preloaderの起動時刻取得境界がnullを返す。
       const r = run(['unknown-start-time-worker', '--workspace', dir]);
       assert.notEqual(r.status, 0, '起動時刻が不明なら終了コード1でエラーになること');
-      assert.match(r.stderr, /同一性確認に失敗しました/);
-      assert.match(r.stderr, /cannot get process start time/);
+      assert.match(r.stderr, /生死を判定できません/);
 
       assert.equal(isProcessAlive(parentPid), true, '起動時刻不明の親プロセスはkillされず生存し続けること');
       assert.equal(isProcessAlive(childPid), true, '起動時刻不明の子プロセスはkillされず生存し続けること');
@@ -423,14 +422,14 @@ test('stop-worker: 〈--issue + --skill〉指定で解決して停止できる',
   withTempDir((dir) => {
     const { parentPid, childPid } = spawnProcessTree(dir);
     try {
-      const startTime = getProcessStartTime(parentPid);
+      const processRecord = captureRecord(parentPid);
+      const startTime = processRecord.startTime;
       fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
       fs.writeFileSync(
         path.join(dir, '.gh-maestro', 'workers.json'),
         JSON.stringify({
           'issue-30-coder': {
-            pid: parentPid,
-            startTime,
+            ...processRecord,
             issue: 30,
             skill: 'gh-maestro-coder',
           },

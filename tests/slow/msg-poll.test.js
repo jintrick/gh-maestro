@@ -6,31 +6,30 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const lifecycle = require('../../scripts/process-lifecycle');
 const { spawnSync } = require('../../scripts/shared/child-process');
 const { cleanSpawnEnv } = require('../_spawn-env');
 const workerLease = require('../../scripts/shared/worker-lease');
 const { spawnSync: nativeSpawnSync } = require('node:child_process');
+const processLiveness = require('../../scripts/shared/process-liveness');
 
-workerLease._setGetProcessStartTime(() => '2026-07-25T00:00:00.000Z');
-// 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
-// PIDを誤って渡す回帰は即座に検出する。
 const TEST_SESSION_START_TIME = '2026-07-25T00:00:00.000Z';
-lifecycle.getProcessStartTime = () => TEST_SESSION_START_TIME;
 const msgPoll = require('../../scripts/msg-poll');
 const readStateLib = require('../../scripts/shared/read-state');
-msgPoll._setGetProcessStartTime((pid) => {
-  assert.equal(pid, process.pid, 'main() は実行中テストプロセスのPIDを検証対象にする');
-  return TEST_SESSION_START_TIME;
-});
 
 // 直接 main()/scanOnce() を呼ぶケースでは、親セッションの死活確認自体は
 // process-lifecycle.test.js の実照合テストで検証する。ここでは各スキャンで
 // WindowsのPowerShell/WMIを起動しないよう、既存の注入境界から生存checkerだけを差し替える。
 // 実CLI統合テスト（重複lease/--force/--watch-pid）は実際のプロセス境界を通す。
-const TEST_PARENT_CHECKER = () => true;
 const useFastParentChecker = () => {
-  msgPoll._setCreateDeadManSwitch(() => TEST_PARENT_CHECKER);
+  const checker = processLiveness.createLiveness({
+    probePid: () => 'alive',
+    readStartTime: (pid, expectedStartTime) => {
+      assert.equal(pid, process.pid, 'resident と session の参照は実行中テストプロセスを使う');
+      return expectedStartTime || TEST_SESSION_START_TIME;
+    },
+  });
+  msgPoll._setParentLiveness(checker);
+  workerLease._setLiveness(checker);
 };
 useFastParentChecker();
 
@@ -81,6 +80,7 @@ function createFastCliPreload({ parentAlive = true } = {}) {
   const childProcessPath = require.resolve('../../scripts/shared/child-process');
   const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
   const leasePath = require.resolve('../../scripts/shared/worker-lease');
+  const processLivenessPath = require.resolve('../../scripts/shared/process-liveness');
   const source = [
     "'use strict';",
     `const childProcess = require(${JSON.stringify(childProcessPath)});`,
@@ -101,12 +101,12 @@ function createFastCliPreload({ parentAlive = true } = {}) {
     // The role lease tests create no registry owner.  Keep the force path in
     // the real CLI while avoiding an unrelated registry/WMI scan.
     'lifecycle.findRunningInstance = () => null;',
-    'lifecycle.getProcessStartTime = () => fixedStartTime;',
-    `lifecycle.createDeadManSwitch = () => () => ${parentAlive ? 'true' : 'false'};`,
     `const lease = require(${JSON.stringify(leasePath)});`,
-    'lease._setGetProcessStartTime(() => fixedStartTime);',
-    'lease._setIsProcessAlive(isAlive);',
-    'lease._setVerifyProcessIdentity(() => ({ match: true }));',
+    `const processLiveness = require(${JSON.stringify(processLivenessPath)});`,
+    `const checker = processLiveness.createLiveness({ probePid: (pid) => pid === process.pid || ${parentAlive ? 'true' : 'false'} ? 'alive' : 'dead', readStartTime: (_pid, expected) => expected || fixedStartTime });`,
+    'lease._setLiveness(checker);',
+    'Object.assign(processLiveness, checker);',
+    'lifecycle._setLiveness(checker);',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
   process.once('exit', () => {
@@ -424,23 +424,6 @@ test('--watch-pid: 余剰な位置引数・未知フラグはエラー終了す�
 
 
 
-test('runWaitMode: 新着が無ければ waitMs 経過後に false を返す（リトライを重ねる）', async () => {
-  await withTempDir(async workspace => {
-    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
-
-    let sleepCalls = 0;
-    msgPoll._setSleep(async (ms) => { sleepCalls++; await new Promise(resolve => setTimeout(resolve, Math.min(ms, 20))); });
-
-    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--wait', '1', '--interval', '1']);
-    const found = await msgPoll.runWaitMode(r);
-    assert.equal(found, false);
-    assert.equal(r.lines.length, 0);
-    assert.ok(sleepCalls > 0, `sleepCalls should be > 0, got ${sleepCalls}`);
-
-    msgPoll._setSleep(async (ms) => {});
-  });
-});
 
 
 

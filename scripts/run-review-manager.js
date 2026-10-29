@@ -11,7 +11,7 @@ const { unlinkJunctions } = require('./shared/unlink-junctions');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { killProcessTree } = require('./shared/kill-tree');
-const { isProcessAlive, getProcessStartTime } = require('./process-lifecycle');
+const processLiveness = require('./shared/process-liveness');
 const {
   writeRunningReviewManager,
   removeRunningReviewManagerIfOwned,
@@ -35,12 +35,7 @@ const DEFAULT_ARTIFACT_POLL_INTERVAL_MS = 200;
 const DEFAULT_DEADLINE_MS = 30 * 60 * 1000; // 30 minutes
 const GRACEFUL_SHUTDOWN_GRACE_MS = 5000; // 5 seconds for child process to exit normally
 
-let _injectedGetProcessStartTime = null;
 let _recordCycleEvent = recordCycleEvent;
-function _getProcessStartTime(pid) {
-  const fn = _injectedGetProcessStartTime || getProcessStartTime;
-  return fn(pid);
-}
 
 const USAGE = `run-review-manager.js — Review Managerをheadless起動してPRレビューを実行する
 
@@ -424,17 +419,18 @@ function atomicCopyStaging(srcPath, dstPath) {
  *
  * @param {object} opts
  * @param {number|null} opts.pid 停止対象のプロセスPID（エージェントの子プロセス）
+ * @param {string|null} opts.processRef 停止対象の不透明なプロセス参照
  * @param {string} opts.worktreeDir worktreeの絶対パス
  * @param {string} opts.workspace メインワークスペース
  * @param {string} opts.pr PR番号
  * @param {string} opts.lockFile .running ロックファイルのパス
- * @param {{pid:number,startTime:string|null}} [opts.lockOwner] この監督プロセスが書いた所有者情報
+ * @param {string} [opts.lockOwner] この監督プロセスが書いた不透明な所有者参照
  * @param {(msg: string) => void} opts.log ログ関数
  * @param {number} [opts.gracefulShutdownMs] 正常終了猶予（ms）。デフォルト5000
  * @returns {Promise<{processStopped: boolean, worktreeCleaned: boolean, leaseReleased: boolean, errors: string[]}>}
  */
-async function boundedCleanup({ pid, worktreeDir, workspace, pr, lockFile, log,
-                                 gracefulShutdownMs, lockOwner }) {
+async function boundedCleanup({ pid, processRef, worktreeDir, workspace, pr, lockFile, log,
+                                 gracefulShutdownMs, lockOwner, liveness = processLiveness }) {
   const graceMs = gracefulShutdownMs ?? GRACEFUL_SHUTDOWN_GRACE_MS;
   const results = {
     processStopped: false,
@@ -445,39 +441,41 @@ async function boundedCleanup({ pid, worktreeDir, workspace, pr, lockFile, log,
 
   // 1. 子プロセスに短い正常終了猶予を与える
   if (pid != null && Number.isFinite(pid) && pid > 0) {
-    let processExited = false;
-    const graceEnd = Date.now() + graceMs;
-    while (Date.now() < graceEnd) {
-      if (!isProcessAlive(pid)) {
-        processExited = true;
-        break;
-      }
-      await sleep(200);
-    }
-
-    // 2. 残存していればプロセスツリーを停止
-    if (!processExited) {
-      try {
-        killProcessTree(pid);
-        // kill直後はOSのプロセス破棄が完了していないことがあるため、少し待つ
-        await sleep(1000);
-        results.processStopped = !isProcessAlive(pid);
-        if (!results.processStopped) {
-          results.errors.push(
-            `プロセスツリー停止未完了 (pid ${pid}): ` +
-            `kill後もプロセスが生存しています。同一PRの再起動は拒否されます`
-          );
-        }
-      } catch (e) {
-        results.errors.push(`プロセスツリー停止例外 (pid ${pid}): ${e.message}`);
-      }
+    if (typeof processRef !== 'string' || !processRef) {
+      results.errors.push(`停止対象 (pid ${pid}) のプロセス参照がありません。worktreeとleaseを保持します`);
     } else {
-      results.processStopped = true;
+      const graceEnd = Date.now() + graceMs;
+      let state = liveness.observe(processRef);
+      while (state === 'alive' && Date.now() < graceEnd) {
+        await sleep(200);
+        state = liveness.observe(processRef);
+      }
+
+      if (state === 'dead') {
+        results.processStopped = true;
+      } else if (state === 'unknown') {
+        results.errors.push(`停止対象 (pid ${pid}) の生死を判定できません。worktreeとleaseを保持します`);
+      } else {
+        // kill-tree が停止直後の待機と子孫を含む終了確認を担当する。
+        try {
+          killProcessTree(pid);
+          state = liveness.observe(processRef);
+          results.processStopped = state === 'dead';
+          if (!results.processStopped) {
+            results.errors.push(
+              `プロセスツリー停止未完了 (pid ${pid}): ` +
+              `kill-tree後に停止を確認できません。同一PRの再起動は拒否されます`
+            );
+          }
+        } catch (e) {
+          results.errors.push(`プロセスツリー停止例外 (pid ${pid}): ${e.message}`);
+        }
+      }
     }
   }
 
   // 3. worktree破棄
-  if (worktreeDir && workspace && pr != null) {
+  if (worktreeDir && workspace && pr != null && (results.processStopped || pid == null)) {
     try {
       teardownReviewWorktree(workspace, pr, (msg) => {
         try { log(msg); } catch {}
@@ -494,7 +492,7 @@ async function boundedCleanup({ pid, worktreeDir, workspace, pr, lockFile, log,
   if (lockFile) {
     if (results.processStopped || pid == null) {
       try {
-        const owner = lockOwner || { pid: process.pid, startTime: null };
+        const owner = lockOwner || processLiveness.captureSelf();
         const release = removeRunningReviewManagerIfOwned(lockFile, owner);
         if (release.released) {
           results.leaseReleased = true;
@@ -544,7 +542,6 @@ module.exports = {
   _validateFindingShape, _validateAgainstSchema,
   _setPollForArtifact: (fn) => { _injectedPollForArtifact = fn; },
   _setRunReviewJobsOnce: (fn) => { _injectedRunReviewJobsOnce = fn; },
-  _setGetProcessStartTime: (fn) => { _injectedGetProcessStartTime = fn; },
   _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
 };
 
@@ -665,7 +662,7 @@ function readIncompleteSentinel(sentinelPath) {
  * @param {{sentinelPath: string, agentPid: number|null, reviewWtDir: string|null}} params
  * @returns {SupervisionResult}
  */
-function incompleteSentinelOutcome({ sentinelPath, agentPid, reviewWtDir }) {
+function incompleteSentinelOutcome({ sentinelPath, agentPid, agentRef = null, reviewWtDir }) {
   const sentinel = readIncompleteSentinel(sentinelPath);
   if (sentinel && sentinel.reason === 'notify-failed') {
     // run-review-jobs.js は検証失敗・読み込み失敗・パース失敗を failureLabel / failureDetail で
@@ -681,6 +678,7 @@ function incompleteSentinelOutcome({ sentinelPath, agentPid, reviewWtDir }) {
       exitCode: 1,
       artifact: null,
       agentPid,
+      agentRef,
       reviewWtDir,
       reason: `検証失敗・解析失敗の通知（PR投稿）に失敗したため、不完全レビューとして完了扱いにしません。投稿エラー: ${sentinel.postError || '(記録なし)'}。${label}: ${detail}`,
     };
@@ -690,6 +688,7 @@ function incompleteSentinelOutcome({ sentinelPath, agentPid, reviewWtDir }) {
     exitCode: 0,
     artifact: null,
     agentPid,
+    agentRef,
     reviewWtDir,
     reason: 'review completed as incomplete (plane comment posted; no retry per Issue #271)',
   };
@@ -747,6 +746,7 @@ function persistReviewManifest({ reviewWtDir, workspace, pr, log }) {
  * @property {object|null} artifact 検証済みの成果物（outcome === 'artifact-published' の場合のみ）
  * @property {string} [reason] outcome の補足説明
  * @property {number|null} agentPid エージェントプロセスのPID（cleanup用）
+ * @property {string|null} agentRef エージェントプロセスの不透明な参照（cleanup用）
  * @property {string|null} reviewWtDir worktreeの絶対パス（cleanup用）
  */
 
@@ -778,7 +778,8 @@ function persistReviewManifest({ reviewWtDir, workspace, pr, log }) {
  *   status — 終了コード。起動失敗・シグナル終了では null。
  *   error  — spawnSync が例外を返した場合の文字列（status が null になる主因）。正常時は null。
  */
-function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log, checkpointId }) {
+function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewWtDir, log, checkpointId, parentRef }) {
+  const reviewManagerRef = parentRef || processLiveness.captureSelf();
   const r = spawnSync(process.execPath, [
     path.join(__dirname, 'run-review-jobs.js'),
     '--manifest', manifestPath,
@@ -791,7 +792,7 @@ function runReviewJobsOnce({ manifestPath, resultsPath, pr, repo, ghDir, reviewW
   ], {
     cwd: reviewWtDir,
     encoding: 'utf8',
-    env: { ...process.env, GH_MAESTRO_REVIEW_PARENT_PID: String(process.pid), GH_MAESTRO_REVIEW_PARENT_START: _getProcessStartTime(process.pid) || '' },
+    env: { ...process.env, GH_MAESTRO_REVIEW_PARENT_REF: reviewManagerRef },
     maxBuffer: 20 * 1024 * 1024,
   });
   if (r.stdout) log(r.stdout);
@@ -847,10 +848,10 @@ function judgeJobRun({ status, error }, { workspace, reviewWtDir, pr, resultsPat
  *
  * @returns {{outcome:'results-ready'|'incomplete'|'exec-failed', reason:string}}
  */
-function runJobsDeterministically({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log, checkpointId }) {
+function runJobsDeterministically({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log, checkpointId, parentRef }) {
   const exec = _injectedRunReviewJobsOnce || runReviewJobsOnce;
   const runOnce = () => {
-    const run = exec({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log, checkpointId });
+    const run = exec({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log, checkpointId, parentRef });
     log(`run-review-jobs exited with status ${run.status}`);
     return { run, judged: judgeJobRun(run, { workspace, reviewWtDir, pr, resultsPath }) };
   };
@@ -878,11 +879,11 @@ function runJobsDeterministically({ manifestPath, resultsPath, pr, repo, workspa
  * 共有しても、フェーズ1の終了がフェーズ2のポーリングを誤って中断させない）。
  *
  * @returns {object} 判別可能な結果
- *   { outcome:'target', content, targetPath, agentPid }            — targetPath 出現
- *   { outcome:'incomplete', sentinelPath, agentPid }                — センチネル検出（watchSentinel時）
- *   { outcome:'exit', exitCode, agentPid, reason }                  — プロセス終了（target未出現）
- *   { outcome:'timeout', exitCode, agentPid, reason }               — deadline到達
- *   { outcome:'setup-failed'|'agent-config-failed', exitCode, agentPid, reason }
+ *   { outcome:'target', content, targetPath, agentPid, agentRef }   — targetPath 出現
+ *   { outcome:'incomplete', sentinelPath, agentPid, agentRef }       — センチネル検出（watchSentinel時）
+ *   { outcome:'exit', exitCode, agentPid, agentRef, reason }         — プロセス終了（target未出現）
+ *   { outcome:'timeout', exitCode, agentPid, agentRef, reason }      — deadline到達
+ *   { outcome:'setup-failed'|'agent-config-failed', exitCode, agentPid, agentRef, reason }
  */
 async function superviseAgentPhase({
   pr, repo, issue, workspace, reviewWtDir, logFile, log, signal,
@@ -915,6 +916,7 @@ async function superviseAgentPhase({
 
   let agentFdClosed = false;
   let childEndWatcherInstalled = false;
+  let agentRef = null;
   const closeAgentFd = () => {
     if (agentFdClosed) return;
     agentFdClosed = true;
@@ -951,10 +953,12 @@ async function superviseAgentPhase({
         // 成果物を先に検出して observe が戻っても、子プロセスが終了するまでは
         // stdout/stderr の出力先を閉じない。終了後の診断ログを失わないためである。
         watchChildEnd(child);
+        if (child && child.pid) agentRef = processLiveness.captureProcess(child.pid);
         if (child.stdin) child.stdin.end();
       },
       observe: async (agentChild) => {
         const agentPid = agentChild.pid;
+        agentRef = agentRef || (agentPid ? processLiveness.captureProcess(agentPid) : null);
 
         // プロセス終了を phaseSignal で表現し、pollForArtifact を即座に中断させる。
         // 呼び出し元の共有 signal は外部中止用であり、ここでは変更しない。
@@ -991,7 +995,7 @@ async function superviseAgentPhase({
             const sentinelPath = findIncompleteSentinel(workspace, reviewWtDir, pr);
             if (sentinelPath) {
               log(`incomplete sentinel detected (${path.basename(sentinelPath)})`);
-              return { outcome: 'incomplete', sentinelPath, agentPid };
+              return { outcome: 'incomplete', sentinelPath, agentPid, agentRef };
             }
           }
 
@@ -999,7 +1003,7 @@ async function superviseAgentPhase({
           const pollResult = await pollFn(targetPath, remaining, DEFAULT_ARTIFACT_POLL_INTERVAL_MS, phaseSignal);
           if (pollResult.found && pollResult.content) {
             log(`target detected at ${targetPath} (${pollResult.content.length} bytes)`);
-            return { outcome: 'target', content: pollResult.content, targetPath, agentPid };
+            return { outcome: 'target', content: pollResult.content, targetPath, agentPid, agentRef };
           }
 
           if (processExited) {
@@ -1007,12 +1011,12 @@ async function superviseAgentPhase({
               ? `プロセス起動/実行エラー（status ${processExitCode}）: ${processExitReason}`
               : `プロセス終了（status ${processExitCode}）、成果物未検出`;
             log(reason);
-            return { outcome: 'exit', exitCode: processExitCode || 1, agentPid, reason };
+            return { outcome: 'exit', exitCode: processExitCode || 1, agentPid, agentRef, reason };
           }
         }
 
         log('timeout: neither target nor process exit detected');
-        return { outcome: 'timeout', exitCode: 1, agentPid, reason: `deadline (${deadlineMs}ms) reached without target or process exit` };
+        return { outcome: 'timeout', exitCode: 1, agentPid, agentRef, reason: `deadline (${deadlineMs}ms) reached without target or process exit` };
       },
       cleanup: (child) => {
         // cleanup は observe の終了直後に呼ばれることがある。fdの寿命は
@@ -1022,7 +1026,7 @@ async function superviseAgentPhase({
     });
   } catch (e) {
     log(`spawn error: ${e.message}`);
-    return { outcome: 'setup-failed', exitCode: 1, agentPid: null, reason: `spawn失敗: ${e.message}` };
+    return { outcome: 'setup-failed', exitCode: 1, agentPid: null, agentRef, reason: `spawn失敗: ${e.message}` };
   }
   return run.observed;
 }
@@ -1033,12 +1037,12 @@ async function superviseAgentPhase({
  */
 function mapAgentPhaseFailure(phase, reviewWtDir) {
   if (phase.outcome === 'exit') {
-    return { outcome: 'process-exit-no-artifact', exitCode: phase.exitCode, artifact: null, agentPid: phase.agentPid, reviewWtDir, reason: phase.reason };
+    return { outcome: 'process-exit-no-artifact', exitCode: phase.exitCode, artifact: null, agentPid: phase.agentPid, agentRef: phase.agentRef, reviewWtDir, reason: phase.reason };
   }
   if (phase.outcome === 'timeout') {
-    return { outcome: 'timeout', exitCode: 1, artifact: null, agentPid: phase.agentPid, reviewWtDir, reason: phase.reason };
+    return { outcome: 'timeout', exitCode: 1, artifact: null, agentPid: phase.agentPid, agentRef: phase.agentRef, reviewWtDir, reason: phase.reason };
   }
-  return { outcome: 'setup-failed', exitCode: phase.exitCode || 1, artifact: null, agentPid: phase.agentPid, reviewWtDir, reason: phase.reason || phase.outcome };
+  return { outcome: 'setup-failed', exitCode: phase.exitCode || 1, artifact: null, agentPid: phase.agentPid, agentRef: phase.agentRef, reviewWtDir, reason: phase.reason || phase.outcome };
 }
 
 /**
@@ -1064,10 +1068,7 @@ async function superviseReviewManager({
     fs.mkdirSync(ghDir, { recursive: true });
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
     fs.mkdirSync(path.dirname(lockFile), { recursive: true });
-    const owner = lockOwner || {
-      pid: process.pid,
-      startTime: _getProcessStartTime(process.pid) || null,
-    };
+    const owner = lockOwner || processLiveness.captureSelf();
     writeRunningReviewManager(lockFile, owner);
     const startupToken = process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN;
     if (startupToken) {
@@ -1169,7 +1170,11 @@ async function superviseReviewManager({
   }
   log(`review checkpoint: ${prior.file}`);
   // ── フェーズB: 決定論的ジョブ実行（モデル介入なし） ────────────────────────────
-  const phaseB = runJobsDeterministically({ manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log, checkpointId: prior.id });
+  const phaseB = runJobsDeterministically({
+    manifestPath, resultsPath, pr, repo, workspace, ghDir, reviewWtDir, log,
+    checkpointId: prior.id,
+    parentRef: lockOwner,
+  });
   if (phaseB.outcome === 'incomplete') {
     // run-review-jobs が不完全終了を確定（manifest検証失敗・再試行上限）。judgeJobRun が
     // センチネルを確認済み。念のため再取得して不完全レビュー通知経路へ繋ぐ。
@@ -1199,7 +1204,7 @@ async function superviseReviewManager({
   });
   if (phase2.outcome === 'incomplete') {
     // RM が incomplete 判断 → finalize-review --mode incomplete がセンチネルを書いた
-    const outcome = incompleteSentinelOutcome({ sentinelPath: phase2.sentinelPath, agentPid: phase2.agentPid, reviewWtDir });
+    const outcome = incompleteSentinelOutcome({ sentinelPath: phase2.sentinelPath, agentPid: phase2.agentPid, agentRef: phase2.agentRef, reviewWtDir });
     log(`incomplete review sentinel detected (${path.basename(phase2.sentinelPath)}) — ${outcome.reason}`);
     return outcome;
   }
@@ -1212,13 +1217,13 @@ async function superviseReviewManager({
   const artifactValidation = validateArtifactContent(phase2.content, schemaPath);
   if (!artifactValidation.valid) {
     log(`artifact validation failed: ${artifactValidation.error}`);
-    return { outcome: 'process-exit-no-artifact', exitCode: 1, artifact: null, agentPid: phase2.agentPid, reviewWtDir, reason: `成果物検証不合格: ${artifactValidation.error}` };
+    return { outcome: 'process-exit-no-artifact', exitCode: 1, artifact: null, agentPid: phase2.agentPid, agentRef: phase2.agentRef, reviewWtDir, reason: `成果物検証不合格: ${artifactValidation.error}` };
   }
   log('artifact validation passed');
 
   const copyResult = atomicCopyStaging(worktreeOutputFile, outputFile);
   if (!copyResult.success) {
-    return { outcome: 'process-exit-no-artifact', exitCode: 1, artifact: null, agentPid: phase2.agentPid, reviewWtDir, reason: `成果物コピー失敗: ${copyResult.error}` };
+    return { outcome: 'process-exit-no-artifact', exitCode: 1, artifact: null, agentPid: phase2.agentPid, agentRef: phase2.agentRef, reviewWtDir, reason: `成果物コピー失敗: ${copyResult.error}` };
   }
   log(`artifact atomically copied to ${outputFile}`);
 
@@ -1228,7 +1233,7 @@ async function superviseReviewManager({
   ], {
     cwd: workspace,
     encoding: 'utf8',
-    env: { ...process.env, GH_MAESTRO_REVIEW_PARENT_PID: String(process.pid), GH_MAESTRO_REVIEW_PARENT_START: _getProcessStartTime(process.pid) || '' },
+    env: { ...process.env, GH_MAESTRO_REVIEW_PARENT_REF: lockOwner || processLiveness.captureSelf() },
     maxBuffer: 20 * 1024 * 1024,
   });
   if (publish.stdout) log(publish.stdout);
@@ -1251,6 +1256,7 @@ async function superviseReviewManager({
     exitCode: publish.status ?? 0,
     artifact: artifactValidation.payload,
     agentPid: phase2.agentPid,
+    agentRef: phase2.agentRef,
     reviewWtDir,
     reason: `publish completed (status ${publish.status})`,
   };
@@ -1306,10 +1312,7 @@ if (require.main === module) {
     const lockFile = spec.leaseStore;
     const logFile = spec.logPath;
     const outputFile = reviewArtifactPath(workspace, pr, '.json');
-    const lockOwner = {
-      pid: process.pid,
-      startTime: _getProcessStartTime(process.pid) || null,
-    };
+    const lockOwner = processLiveness.captureSelf();
 
     const reviewManagerWorkerName = spec.workerName;
     const reviewManagerAgentId = (() => {
@@ -1366,6 +1369,7 @@ if (require.main === module) {
 
       cleanupResult = await boundedCleanup({
         pid: supervisionResult.agentPid,
+        processRef: supervisionResult.agentRef,
         worktreeDir: supervisionResult.reviewWtDir,
         workspace, pr, lockFile,
         log,

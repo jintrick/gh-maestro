@@ -81,19 +81,19 @@ test('runningWorkerSupervisorPids: 稼働中なしは空配列を返す', () => 
   assert.deepEqual(control.runningWorkerSupervisorPids(workspace), []);
 });
 
-test('runningWorkerSupervisorPids: 不正なPID（非正数）は停止対象から除外する', () => {
+test('runningWorkerSupervisorPids: 不正なPIDは未知状態として停止を中止する', () => {
   control._setFindRunningInstance(() => ({ pid: 0, script: 'worker-supervisor.js' }));
   control._setCreateResidentLeaseStore(() => ({ read: () => ({ pid: -5, startTime: '2026-08-01T00:00:00.000Z' }) }));
   control._setIsLeaseLive(() => true);
 
-  assert.deepEqual(control.runningWorkerSupervisorPids(workspace), []);
+  assert.throws(() => control.runningWorkerSupervisorPids(workspace), /PID registryエントリが不正/);
 });
 
-test('runningWorkerSupervisorPids: 検知失敗（例外）は fail-open で空配列', () => {
+test('runningWorkerSupervisorPids: 検知失敗（例外）は停止・起動判断を中止する', () => {
   control._setFindRunningInstance(() => { throw new Error('registry boom'); });
   control._setCreateResidentLeaseStore(() => { throw new Error('lease boom'); });
 
-  assert.deepEqual(control.runningWorkerSupervisorPids(workspace), []);
+  assert.throws(() => control.runningWorkerSupervisorPids(workspace), /registry boom/);
 });
 
 test('stopRunningWorkerSupervisors: 検知したPIDをkillProcessTreeで停止する', () => {
@@ -141,7 +141,7 @@ test('cleanupLegacyWorkerSupervisor: 旧scriptのstale registryとleaseだけを
     workspace,
     legacyPidDir: legacyDir,
     runtimePidDir: runtimeDir,
-    isProcessAliveFn: () => false,
+    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'dead' }),
     acquireLeaseLockFn: () => true,
     releaseLeaseLockFn: () => {},
   });
@@ -161,10 +161,64 @@ test('cleanupLegacyWorkerSupervisor: startTime不明の旧registryはkill・削�
     workspace,
     legacyPidDir: legacyDir,
     runtimePidDir: path.join(workspace, 'missing-runtime-pids'),
-    isProcessAliveFn: () => true,
+    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }),
     killProcessTreeFn: () => { killed = true; },
   });
   assert.equal(result.status, 'unknown');
   assert.equal(killed, false);
   assert.equal(fs.existsSync(oldRegistry), true);
+});
+
+test('cleanupLegacyWorkerSupervisor: 1件でも生死unknownなら他registryもkill・削除しない', () => {
+  const legacyDir = path.join(workspace, '.gh-maestro', 'pids');
+  fs.mkdirSync(legacyDir, { recursive: true });
+  const liveRegistry = path.join(legacyDir, '111.json');
+  const unknownRegistry = path.join(legacyDir, '112.json');
+  fs.writeFileSync(liveRegistry, JSON.stringify({
+    pid: 111, startTime: '2026-01-01T00:00:00.000Z', script: 'inbox-supervisor.js',
+  }), 'utf8');
+  fs.writeFileSync(unknownRegistry, JSON.stringify({
+    pid: 112, script: 'inbox-supervisor.js',
+  }), 'utf8');
+  let killed = false;
+  const result = control.cleanupLegacyWorkerSupervisor({
+    workspace,
+    legacyPidDir: legacyDir,
+    runtimePidDir: path.join(workspace, 'missing-runtime-pids'),
+    liveness: require('../scripts/shared/process-liveness').createLiveness({
+      probePid: () => 'alive', readStartTime: (pid) => pid === 111 ? '2026-01-01T00:00:00.000Z' : null,
+    }),
+    killProcessTreeFn: () => { killed = true; },
+  });
+  assert.equal(result.status, 'unknown');
+  assert.equal(killed, false);
+  assert.equal(fs.existsSync(liveRegistry), true);
+  assert.equal(fs.existsSync(unknownRegistry), true);
+});
+
+test('cleanupLegacyWorkerSupervisor: leaseがunknownなら既知のregistryもkill・削除しない', () => {
+  const legacyDir = path.join(workspace, '.gh-maestro', 'pids');
+  const leaseDir = path.join(workspace, '.gh-maestro', 'leases');
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.mkdirSync(leaseDir, { recursive: true });
+  const registry = path.join(legacyDir, '111.json');
+  const leasePath = path.join(leaseDir, `${roleLeaseKey('inbox-supervisor')}.json`);
+  fs.writeFileSync(registry, JSON.stringify({
+    pid: 111, startTime: '2026-01-01T00:00:00.000Z', script: 'inbox-supervisor.js',
+  }), 'utf8');
+  fs.writeFileSync(leasePath, JSON.stringify({ pid: 112, role: 'inbox-supervisor' }), 'utf8');
+  let killed = false;
+  const result = control.cleanupLegacyWorkerSupervisor({
+    workspace,
+    legacyPidDir: legacyDir,
+    runtimePidDir: path.join(workspace, 'missing-runtime-pids'),
+    liveness: require('../scripts/shared/process-liveness').createLiveness({
+      probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z',
+    }),
+    killProcessTreeFn: () => { killed = true; },
+  });
+  assert.equal(result.status, 'unknown');
+  assert.equal(killed, false);
+  assert.equal(fs.existsSync(registry), true);
+  assert.equal(fs.existsSync(leasePath), true);
 });
