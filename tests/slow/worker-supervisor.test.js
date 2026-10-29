@@ -13,6 +13,7 @@ const workerLease = require('../../scripts/shared/worker-lease');
 const closedPrGuard = require('../../scripts/shared/closed-pr-guard');
 const residentAudit = require('../../scripts/shared/resident-audit');
 const processLiveness = require('../../scripts/shared/process-liveness');
+const storageLayout = require('../../scripts/shared/storage-layout');
 
 const TEST_SESSION_START_TIME = '2026-07-25T00:00:00.000Z';
 const supervisor = require('../../scripts/worker-supervisor');
@@ -593,6 +594,79 @@ function runSupervisor(args, cwd, envOverride = {}) {
   });
 }
 
+function createResidentUnknownLivenessPreload(ghLogPath) {
+  const file = path.join(path.dirname(ghLogPath), 'resident-unknown-preload.js');
+  const childProcessPath = require.resolve('../../scripts/shared/child-process');
+  const lifecyclePath = require.resolve('../../scripts/process-lifecycle');
+  const leasePath = require.resolve('../../scripts/shared/worker-lease');
+  const processLivenessPath = require.resolve('../../scripts/shared/process-liveness');
+  const source = [
+    "'use strict';",
+    "const fs = require('fs');",
+    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
+    `const ghLogPath = ${JSON.stringify(ghLogPath)};`,
+    `const fixedStartTime = ${JSON.stringify(CLI_TEST_START_TIME)};`,
+    'const isAlive = (pid) => {',
+    '  try { process.kill(pid, 0); return true; }',
+    "  catch (error) { return error && error.code !== 'ESRCH'; }",
+    '};',
+    'const realSpawnSync = childProcess.spawnSync;',
+    'childProcess.spawnSync = (command, args, options) => {',
+    "  if (String(command).toLowerCase() !== 'gh') return realSpawnSync(command, args, options);",
+    "  fs.appendFileSync(ghLogPath, JSON.stringify(args) + '\\n', 'utf8');",
+    "  if (args[0] === 'repo') return { status: 0, stdout: 'jintrick/gh-maestro\\n', stderr: '' };",
+    "  if (args[0] === 'api') return { status: 0, stdout: '[]\\n', stderr: '' };",
+    "  return { status: 1, stdout: '', stderr: 'unexpected gh command' };",
+    '};',
+    'const realExecSync = childProcess.execSync;',
+    'childProcess.execSync = (command, options) => {',
+    "  if (String(command).includes('Get-CimInstance Win32_Process')) {",
+    '    const match = /ProcessId=(\\d+)/.exec(String(command));',
+    "    return match && isAlive(Number(match[1])) ? `${fixedStartTime}\\n` : '';",
+    '  }',
+    '  return realExecSync(command, options);',
+    '};',
+    `const lifecycle = require(${JSON.stringify(lifecyclePath)});`,
+    'lifecycle.findRunningInstance = () => null;',
+    `const lease = require(${JSON.stringify(leasePath)});`,
+    `const processLiveness = require(${JSON.stringify(processLivenessPath)});`,
+    "const checker = processLiveness.createLiveness({ probePid: (pid) => isAlive(pid) ? 'alive' : 'dead', readStartTime: (_pid, expected) => expected || fixedStartTime });",
+    'lease._setLiveness(checker);',
+    'Object.assign(processLiveness, checker);',
+    'lifecycle._setLiveness(checker);',
+  ].join('\n');
+  fs.writeFileSync(file, source, 'utf8');
+  return file;
+}
+
+function waitForProcessExit(child, timeoutMs = 5000) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      child.removeListener('exit', onExit);
+      reject(new Error(`process ${child.pid} did not exit within ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.once('exit', onExit);
+  });
+}
+
+async function stopTestProcess(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const exited = waitForProcessExit(child);
+  try { child.kill('SIGTERM'); } catch {}
+  try {
+    await exited;
+  } catch {
+    const forcedExit = waitForProcessExit(child);
+    try { child.kill('SIGKILL'); } catch {}
+    await forcedExit;
+  }
+}
+
 describe('CLI integration (subprocess)', () => {
   test('--help は Usage を表示して exit 0', () => {
     withTempDir((dir) => {
@@ -762,6 +836,107 @@ describe('CLI integration (subprocess)', () => {
         `stderr should NOT mention 重複起動: ${r.stderr}`);
       assert.ok(r.stderr.includes('リポジトリを解決'),
         `stderr should mention repo resolution failure: ${r.stderr}`);
+    });
+  });
+});
+
+describe('resident unknown-liveness integration', () => {
+  test('実際の常駐CLIはunknown workerを残したまま複数周回し、他workerのIssueを読む', async () => {
+    await withTempDir(async (dir) => {
+      const maestroDir = path.join(dir, '.gh-maestro');
+      fs.mkdirSync(maestroDir, { recursive: true });
+
+      const unknownWorker = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      const knownWorker = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      let supervisorProcess;
+      try {
+        await Promise.all([unknownWorker, knownWorker].map((worker) => new Promise((resolve, reject) => {
+          worker.once('spawn', resolve);
+          worker.once('error', reject);
+        })));
+
+        const workers = {
+          orchestrator: { agentId: null },
+          'issue-654-unknown-worker': {
+            pid: unknownWorker.pid,
+            agentId: 'test-agent',
+            issue: 654,
+          },
+          'issue-655-live-worker': {
+            pid: knownWorker.pid,
+            startTime: CLI_TEST_START_TIME,
+            agentId: 'test-agent',
+            issue: 655,
+          },
+        };
+        const workersPath = path.join(maestroDir, 'workers.json');
+        const workersJson = JSON.stringify(workers, null, 2);
+        fs.writeFileSync(workersPath, workersJson, 'utf8');
+
+        const runtimeRoot = path.join(dir, 'isolated-runtime');
+        const ghLogPath = path.join(dir, 'gh-calls.jsonl');
+        const preloadPath = createResidentUnknownLivenessPreload(ghLogPath);
+        const runtimeDir = storageLayout.workspaceRuntimeDir(dir, runtimeRoot);
+        const auditDir = path.join(runtimeDir, 'resident-audit');
+        let stdout = '';
+        let stderr = '';
+
+        supervisorProcess = spawn(process.execPath, [
+          '-r', preloadPath,
+          SUPERVISOR_SCRIPT,
+          '--workspace', dir,
+          '--interval', '1',
+          '--session-pid', String(process.pid),
+        ], {
+          cwd: dir,
+          env: {
+            ...process.env,
+            GH_MAESTRO_RUNTIME_DIR: runtimeRoot,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        });
+        supervisorProcess.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+        supervisorProcess.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+
+        const deadline = Date.now() + 20000;
+        while (Date.now() < deadline) {
+          if (supervisorProcess.exitCode !== null || supervisorProcess.signalCode !== null) {
+            assert.fail(`resident exited early (code=${supervisorProcess.exitCode}, signal=${supervisorProcess.signalCode})\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+          }
+          const scanCount = (stdout.match(/SCAN_END:/g) || []).length;
+          const ghLogReady = fs.existsSync(ghLogPath)
+            && fs.readFileSync(ghLogPath, 'utf8').includes('/issues/655/comments');
+          if (scanCount >= 2 && ghLogReady) break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+
+        assert.ok((stdout.match(/SCAN_END:/g) || []).length >= 2, `two resident scans completed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+        assert.equal(supervisorProcess.exitCode, null, `resident remains alive\nstderr:\n${stderr}`);
+        assert.ok(stderr.includes('issue-654-unknown-worker'), `unknown worker name is logged\nstderr:\n${stderr}`);
+        assert.ok(fs.existsSync(ghLogPath), 'the other worker reached the read-only GitHub API adapter');
+        const ghCalls = fs.readFileSync(ghLogPath, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+        assert.ok(ghCalls.some((args) => args.some((arg) => arg.includes('/issues/655/comments'))), 'the known worker issue was inspected');
+        assert.ok(!ghCalls.some((args) => args.some((arg) => arg.includes('/issues/654/comments'))), 'the unknown worker was skipped before issue polling');
+
+        const auditEvents = fs.readdirSync(auditDir)
+          .filter((name) => name.endsWith('.json'))
+          .map((name) => JSON.parse(fs.readFileSync(path.join(auditDir, name), 'utf8')));
+        assert.ok(auditEvents.some((event) => event.type === 'notification'
+          && event.detail?.body?.includes('issue-654-unknown-worker')), 'an orchestrator notification records the unknown worker');
+        assert.equal(fs.readFileSync(workersPath, 'utf8'), workersJson, 'workers.json remains unchanged');
+        assert.equal(unknownWorker.exitCode, null, 'unknown worker child remains alive');
+        assert.equal(knownWorker.exitCode, null, 'other worker child remains alive');
+      } finally {
+        await stopTestProcess(supervisorProcess);
+        await Promise.all([unknownWorker, knownWorker].map(stopTestProcess));
+      }
     });
   });
 });
