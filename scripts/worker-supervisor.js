@@ -528,6 +528,7 @@ function deliverMessage({ workerName, entry, message, workspace, homedir, issue,
     return {
       success: false,
       method: 'pending',
+      livenessUnknown: true,
       error: `worker pid ${entry.pid || 'unknown'} liveness is unknown; refusing resume: ${error.message}`,
     };
   }
@@ -794,6 +795,19 @@ function main(argsOverride, opts = {}) {
     }
     return monitor;
   };
+  const persistCursor = (workerName, issue, cursor) => {
+    cursor.seenIds = cursor.seenIds.slice(-MAX_SEEN_IDS);
+    cursor.deliveredIds = cursor.deliveredIds.slice(-MAX_SEEN_IDS);
+    try {
+      writeCursor(workspace, workerName, cursor);
+      getWriteFailureMonitor(workerName, issue).onSuccess();
+      return true;
+    } catch (error) {
+      writeErr(`worker-supervisor: ${workerName} のカーソル保存に失敗しました: ${error.message}`);
+      getWriteFailureMonitor(workerName, issue).onFailure(error.message);
+      return false;
+    }
+  };
 
   // writeCursor の失敗でディスクのカーソルが巻き戻っても、同一プロセス内では重複配送
   // しないためのメモリ内配送済みキャッシュ（Issue #250）。サイズはディスク側と同じ
@@ -807,6 +821,44 @@ function main(argsOverride, opts = {}) {
   const wasDeliveredInMemory = (workerName, cid) => {
     const arr = deliveredIdsCache.get(workerName) || [];
     return arr.includes(cid);
+  };
+
+  // Keep unknown workers out of every resume path, but report the condition once per
+  // worker identity so a persistent uncertainty does not flood the orchestrator inbox.
+  const unknownWorkerNotifications = new Map();
+  const reportUnknownWorker = (workerName, entry, issue, error) => {
+    const identity = `${entry.pid ?? 'unknown'}:${entry.startTime ?? 'unknown'}`;
+    let notification = unknownWorkerNotifications.get(workerName);
+    if (!notification || notification.identity !== identity) {
+      notification = { identity, notified: false };
+      unknownWorkerNotifications.set(workerName, notification);
+      writeErr(
+        `worker-supervisor: worker "${workerName}" (pid ${entry.pid ?? 'unknown'}) の生死が不明なため、この周回では処理をスキップします: ${error.message}`
+      );
+    }
+    if (notification.notified) return;
+
+    const body = `⚠️ ワーカー "${workerName}" (PID ${entry.pid ?? 'unknown'}) の生死を判定できないため、worker-supervisor はこの周回で再開せずスキップしました。停止・削除も行いません。理由: ${error.message}`;
+    try {
+      const result = _notifyOrchestrator({ workspace, issue, body });
+      if (result && result.status === 0) {
+        notification.notified = true;
+      } else {
+        writeErr(`worker-supervisor: worker "${workerName}" の生死不明通知に失敗: ${(result?.stderr || '').trim() || '通知コマンドが成功を返しませんでした'}`);
+      }
+    } catch (notifyError) {
+      writeErr(`worker-supervisor: worker "${workerName}" の生死不明通知に失敗: ${notifyError.message}`);
+    }
+  };
+  const checkWorkerLiveness = (workerName, entry, issue) => {
+    try {
+      const alive = _isWorkerAlive(entry.rawProcessEntry ?? entry);
+      unknownWorkerNotifications.delete(workerName);
+      return alive ? 'alive' : 'dead';
+    } catch (error) {
+      reportUnknownWorker(workerName, entry, issue, error);
+      return 'unknown';
+    }
   };
 
   /**
@@ -848,7 +900,9 @@ function main(argsOverride, opts = {}) {
       // HANG_RESUMED として報告するのは誤り（ログが実際に動いたわけではない）。
       // pid+startTime が現在のエントリと一致する場合のみ「復帰」として報告し、一致しない
       // （＝別プロセスの通知済み状態が残留しているだけの）場合は無言でクリアする。
-      if (_isWorkerAlive(entry.rawProcessEntry ?? entry)) {
+      const initialLiveness = checkWorkerLiveness(workerName, entry, issue);
+      if (initialLiveness === 'unknown') continue;
+      if (initialLiveness === 'alive') {
         const logPath = workerLogPath(workspace, workerName);
         let mtimeMs = null;
         try {
@@ -983,6 +1037,9 @@ function main(argsOverride, opts = {}) {
           issue,
           repo,
         });
+        if (deliveryResult.livenessUnknown) {
+          reportUnknownWorker(workerName, entry, issue, new Error(deliveryResult.error || 'worker process liveness is unknown'));
+        }
 
         if (deliveryResult.success) {
           cursor.deliveredIds.push(commentId);
@@ -1066,7 +1123,14 @@ function main(argsOverride, opts = {}) {
       // （cursor.since はこのサイクルの終わりに comments の最大 created_at まで進むため、
       // 同一サイクル内であれば取りこぼさない。一度検知した後は pid+startTime ベースの重複
       // 排除で再通知しないため、翌サイクル以降 since がその報告コメントを過ぎても問題ない）。
-      const isAlive = _isWorkerAlive(entry.rawProcessEntry ?? entry);
+      const staleCheckLiveness = checkWorkerLiveness(workerName, entry, issue);
+      if (staleCheckLiveness === 'unknown') {
+        // Pending配送の再試行が先にカーソルを更新している場合がある。since は進めず、
+        // その更新だけを残してからこのworkerの残りを飛ばす。
+        persistCursor(workerName, issue, cursor);
+        continue;
+      }
+      const isAlive = staleCheckLiveness === 'alive';
       if (isAlive && entry.startTime) {
         // 新プロセスが起動した場合は旧プロセスの停止通知キーをクリアする（同一プロセスなら保持し再通知を防ぐ）
         if (cursor.stoppedNotifiedPid !== null) {
@@ -1265,6 +1329,9 @@ function main(argsOverride, opts = {}) {
           issue,
           repo,
         });
+        if (deliveryResult.livenessUnknown) {
+          reportUnknownWorker(workerName, entry, issue, new Error(deliveryResult.error || 'worker process liveness is unknown'));
+        }
 
         cursor.seenIds.push(candidate.cid);
 
@@ -1293,21 +1360,10 @@ function main(argsOverride, opts = {}) {
         cursor.since = maxCreated;
       }
 
-      // trimmed
-      cursor.seenIds = cursor.seenIds.slice(-MAX_SEEN_IDS);
-      cursor.deliveredIds = cursor.deliveredIds.slice(-MAX_SEEN_IDS);
-
       // カーソル永続化は他プロセスがカーソルファイルを掴んでいる等で EPERM 失敗しうる
       // （Issue #250）。例外はここで捕捉してこのワーカーの処理を終え、次サイクルで再試行
       // する。ディスクが巻き戻っても deliveredIds はメモリキャッシュで重複配送を防ぐ。
-      try {
-        writeCursor(workspace, workerName, cursor);
-        getWriteFailureMonitor(workerName, issue).onSuccess();
-      } catch (e) {
-        writeErr(`worker-supervisor: ${workerName} のカーソル保存に失敗しました: ${e.message}`);
-        getWriteFailureMonitor(workerName, issue).onFailure(e.message);
-        continue;
-      }
+      persistCursor(workerName, issue, cursor);
     }
 
     writeOut(`SCAN_END:${workers.size}:${totalDetected} source=worker-supervisor.js scope=worker-delivery-scan workers=${workers.size} detected=${totalDetected} orchestrator-inbox=separate-msg-poll.js`);

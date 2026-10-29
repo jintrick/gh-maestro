@@ -1121,6 +1121,145 @@ describe('runOnce scan and deliver cycle', () => {
     });
   });
 
+  test('unknown worker は通知してスキップし、他workerの見回りを続ける', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    const apiIssues = [];
+    supervisor._setGhApiComments((_repo, issue) => {
+      apiIssues.push(String(issue));
+      return { status: 0, stdout: '[]', stderr: '' };
+    });
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+    supervisor._setIsWorkerAlive((entry) => {
+      if (entry.pid === 101) throw new Error('worker process liveness is unknown');
+      return true;
+    });
+
+    try {
+      withTempDir((dir) => {
+        setupWorkspace(dir, {
+          workers: {
+            'issue-654-unknown-worker': { pid: 101, agentId: 'agy', issue: 654 },
+            'issue-655-live-worker': { pid: 102, startTime: TEST_SESSION_START_TIME, agentId: 'agy', issue: 655 },
+          },
+        });
+        const workersPath = path.join(dir, '.gh-maestro', 'workers.json');
+        const workersBefore = fs.readFileSync(workersPath, 'utf8');
+        const r = runMain(['--workspace', dir]);
+        assert.equal(r.code, 0);
+
+        assert.doesNotThrow(() => {
+          r.runOnce();
+          r.runOnce();
+        }, 'unknown worker がいても複数周回を完了する');
+
+        assert.deepEqual(apiIssues, ['655', '655'], 'unknown worker は飛ばし、次のworkerのIssueを両周回で確認する');
+        assert.equal(notifications.length, 1, '同一identityのunknown通知を周回ごとに重複させない');
+        assert.match(notifications[0].body, /issue-654-unknown-worker/);
+        assert.ok(r.errLines.some((line) => line.includes('issue-654-unknown-worker') && line.includes('生死が不明')));
+        assert.equal(lastSpawnCalls.length, 0, 'unknown worker をresumeしない');
+        assert.equal(fs.readFileSync(workersPath, 'utf8'), workersBefore, 'workers.json のunknown workerを変更・削除しない');
+        assert.equal(r.lines.filter((line) => line.startsWith('SCAN_END:')).length, 2);
+      });
+    } finally {
+      resetAllMocks();
+    }
+  });
+
+  test('2回目のlivenessがunknownならカーソルを保全してそのworkerを飛ばす', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    const apiIssues = [];
+    supervisor._setGhApiComments((_repo, issue) => {
+      apiIssues.push(String(issue));
+      return { status: 0, stdout: '[]', stderr: '' };
+    });
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+    const probeCounts = new Map();
+    supervisor._setIsWorkerAlive((entry) => {
+      if (entry.pid !== 201) return true;
+      const count = (probeCounts.get(entry.pid) || 0) + 1;
+      probeCounts.set(entry.pid, count);
+      if (count === 2) throw new Error('worker process liveness is unknown');
+      return true;
+    });
+
+    try {
+      withTempDir((dir) => {
+        setupWorkspace(dir, {
+          workers: {
+            'issue-654-late-unknown-worker': { pid: 201, startTime: TEST_SESSION_START_TIME, agentId: 'agy', issue: 654 },
+            'issue-655-live-worker': { pid: 202, startTime: TEST_SESSION_START_TIME, agentId: 'agy', issue: 655 },
+          },
+        });
+        const r = runMain(['--workspace', dir]);
+        assert.equal(r.code, 0);
+        assert.doesNotThrow(() => r.runOnce());
+
+        assert.deepEqual(apiIssues, ['654', '655'], 'liveness再確認がunknownでも次workerのIssueを読む');
+        assert.equal(notifications.length, 1);
+        assert.match(notifications[0].body, /issue-654-late-unknown-worker/);
+        assert.ok(fs.existsSync(supervisor.cursorPath(dir, 'issue-654-late-unknown-worker')),
+          'pending再試行状態を失わないようカーソルを保存する');
+        assert.ok(!r.lines.some((line) => line.startsWith('STOP_DETECTED:issue-654-late-unknown-worker')),
+          'unknownを停止済みとして扱わない');
+        assert.ok(r.lines.some((line) => line.startsWith('SCAN_END:2:0')));
+      });
+    } finally {
+      resetAllMocks();
+    }
+  });
+
+  test('配送直前のlivenessがunknownへ変わっても通知してresumeしない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([
+      {
+        id: 103,
+        created_at: '2024-06-01T12:00:00Z',
+        body: '<!-- gh-maestro {"v":1,"to":"issue-654-racing-worker","from":"orchestrator"} -->\n> test',
+      },
+    ]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+    let livenessCalls = 0;
+    supervisor._setIsWorkerAlive(() => {
+      livenessCalls++;
+      if (livenessCalls === 3) throw new Error('worker process liveness is unknown');
+      return true;
+    });
+
+    try {
+      withTempDir((dir) => {
+        setupWorkspace(dir, {
+          workers: {
+            'issue-654-racing-worker': { pid: 203, startTime: TEST_SESSION_START_TIME, agentId: 'agy', issue: 654 },
+          },
+        });
+        const r = runMain(['--workspace', dir]);
+        assert.equal(r.code, 0);
+        assert.doesNotThrow(() => r.runOnce());
+
+        assert.equal(livenessCalls, 3, '初回・居座り検知・配送直前で生存を再確認する');
+        assert.equal(lastSpawnCalls.length, 0, 'unknownになったworkerをresumeしない');
+        assert.equal(notifications.length, 1);
+        assert.match(notifications[0].body, /issue-654-racing-worker/);
+        assert.ok(r.lines.some((line) => line.startsWith('DELIVERY_FAILED:issue-654-racing-worker:103')));
+        assert.ok(r.lines.some((line) => line.startsWith('SCAN_END:1:1')));
+      });
+    } finally {
+      resetAllMocks();
+    }
+  });
+
   // ── 死のスイッチ配線（Issue #301） ─────────────────────────────────────
   // runOnce が親セッションの死を検出したとき、role lease を解放して exit 3 で終了する
   // （受け入れ条件1: 死のスイッチ経路で lease が解放される）。scriptName と sessionPid が
