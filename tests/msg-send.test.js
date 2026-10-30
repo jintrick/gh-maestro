@@ -97,6 +97,12 @@ test('recipient なしは usage を stderr にして code 1', () => {
   assert.ok(r.errLines.join('\n').includes('msg-send.js'));
 });
 
+test('msg-send は工程手順書のscript合図を受け付けない', () => {
+  const r = msgSend.main(['worker-1', '--guidance-signal', 'approval']);
+  assert.equal(r.code, 1);
+  assert.match(r.errLines.join('\n'), /未知のフラグ.*--guidance-signal/);
+});
+
 test('--body-file も --stdin も無いとエラーになる（本文は位置引数で渡せない）', () => {
   const r = msgSend.main(['worker-1']);
   assert.equal(r.code, 1);

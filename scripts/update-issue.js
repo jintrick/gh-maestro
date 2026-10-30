@@ -116,7 +116,11 @@ function main(argv = process.argv.slice(2), deps = {}) {
   try {
     fs.accessSync(bodyFile, fs.constants.F_OK);
   } catch {
-    return { code: 1, stderr: `update-issue: body-fileが見つかりません: ${logicalBodyFile}` };
+    return {
+      code: 1,
+      stdout: guidance,
+      stderr: `update-issue: body-fileが見つかりません: ${logicalBodyFile}`,
+    };
   }
 
   const result = updateIssue({
@@ -130,6 +134,7 @@ function main(argv = process.argv.slice(2), deps = {}) {
   if (!result.ok) {
     return {
       code: result.status || 1,
+      stdout: guidance,
       stderr: `update-issue: gh issue editに失敗しました。body-fileは保持します: ${logicalBodyFile}\n${result.stderr}`,
     };
   }

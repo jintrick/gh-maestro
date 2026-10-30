@@ -65,6 +65,21 @@ test('PR_MERGEDで届く3手順書の実際の追加文脈が9000文字以下', 
   }
 });
 
+test('triage.mdは正式レビュー通知で届き、テスト結果コメントPR_COMMENTでは届かない', () => {
+  const skillDirectory = path.resolve(__dirname, '..', 'skills', 'gh-maestro-orchestrator');
+  const notify = (event) => renderNotificationGuidance({
+    workspace: path.dirname(path.dirname(skillDirectory)),
+    skillDirectory,
+    prompt: `<task-notification><event>${event}:42</event></task-notification>`,
+  });
+  const expectedHeading = '# レビューコメントのトリアージ手順（参照専用）';
+
+  for (const event of ['REVIEW_COMMENT', 'PR_REVIEW']) {
+    assert.ok(notify(event).includes(expectedHeading), `${event} delivers triage.md`);
+  }
+  assert.equal(notify('PR_COMMENT'), '', 'test-result and other ordinary PR comments do not repeat triage guidance');
+});
+
 test('script合図は一致する宣言だけを読みorchestrator identityを要求する', () => {
   withTempDir((root) => {
     writeGuide(root, 'stage2.md', ['script:create-issue.js:implementation-issue'], '# stage 2');

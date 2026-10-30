@@ -1,6 +1,7 @@
 ---
 signals:
-  - notify:PR_COMMENT
+  - notify:REVIEW_COMMENT
+  - notify:PR_REVIEW
 ---
 # レビューコメントのトリアージ手順（参照専用）
 

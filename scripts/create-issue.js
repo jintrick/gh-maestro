@@ -192,6 +192,7 @@ if (require.main === module) {
     console.error(`create-issue: ${error.message}`);
     process.exit(1);
   }
+  if (guidance) console.log(guidance);
 
   let absBodyFile = null;
   if (bodyFile) {
@@ -221,5 +222,4 @@ if (require.main === module) {
   }
 
   console.log(`ISSUE_CREATED:${result.number} ${result.url}`);
-  if (guidance) console.log(guidance);
 }

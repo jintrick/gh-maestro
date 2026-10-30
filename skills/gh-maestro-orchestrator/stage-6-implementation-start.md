@@ -1,6 +1,6 @@
 ---
 signals:
-  - script:msg-send.js:approval
+  - script:set-response-contract.js:implementation-approved
 ---
 # 工程 6. 実装開始指示【必須】
 
@@ -22,10 +22,11 @@ signals:
   # 1. 応答契約を設定（コーダー／シニアコーダーの計画承認時のみ必須）
   node "{{SCRIPTS_PATH}}/set-response-contract.js" \
     --issue <N> --skill <gh-maestro-coder または gh-maestro-senior-coder> \
+    --guidance-signal implementation-approved \
     --type artifact-or-message --artifact pr --workspace $WORKSPACE
 
   # 2. 承認指示を送信
-  node "{{SCRIPTS_PATH}}/msg-send.js" --issue <N> --skill <gh-maestro-coder または gh-maestro-senior-coder> --workspace $WORKSPACE --guidance-signal approval --stdin <<'EOF'
+  node "{{SCRIPTS_PATH}}/msg-send.js" --issue <N> --skill <gh-maestro-coder または gh-maestro-senior-coder> --workspace $WORKSPACE --stdin <<'EOF'
   計画が承認されました。計画に従って実装を開始してください。
   EOF
   ```

@@ -539,6 +539,7 @@ try {
   console.error(`spawn-worker: ${error.message}`);
   process.exit(1);
 }
+if (orchestratorGuidance) console.log(orchestratorGuidance);
 
 // --- セッション同一性検証（Issue #444） ---
 // スキル未ロードのセッションからの直接実行や古いセッションIDの使い回しを防ぐため、
@@ -1049,6 +1050,5 @@ ensureWorkerSupervisorRunning({ workspace, scriptsPath: __dirname });
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---
 console.log(workerName);
-if (orchestratorGuidance) console.log(orchestratorGuidance);
 
 } // require.main === module

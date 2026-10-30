@@ -38,7 +38,6 @@ const { getReportStatusSinceStart } = require('./shared/worker-report-check');
 const { main: writeDraftMain } = require('./write-draft');
 const closedPrGuard = require('./shared/closed-pr-guard');
 const { isWorkerIdentity } = require('./shared/resident-force-guard');
-const { prepareScriptGuidance } = require('./shared/orchestrator-guidance');
 
 const defaultEnsureStatusPane = ensureStatusPaneLib;
 let _ensureStatusPane = defaultEnsureStatusPane;
@@ -78,7 +77,7 @@ Usage (orchestrator からワーカーへ送信):
   node msg-send.js --issue <N> --skill <role> [--workspace <path>] --stdin <<'EOF'
   <本文>
   EOF
-  node msg-send.js <recipient> --body-file <path> [--from <name>] [--issue <N>] [--workspace <path>] [--raw] [--execution-id <id>] [--guidance-signal <name>]
+  node msg-send.js <recipient> --body-file <path> [--from <name>] [--issue <N>] [--workspace <path>] [--raw] [--execution-id <id>]
 
 Arguments:
   <recipient>           送信先（worker 名、または "orchestrator"）。--skill 使用時は指定しない。
@@ -100,7 +99,6 @@ Options:
   --raw                 メッセージ用のマーカー・引用ヘッダーを付けず、本文をそのまま Issue コメントに投稿する。
   --execution-id <id>  実行記録と紐付けるID。投稿成功時だけ completed として記録する。
   --plan-comment-id <id> 計画URL報告用（ワーカー専用）。msg-pollは通常のNEW_MESSAGEではなくPLAN_REPORTEDとして通知する。
-  --guidance-signal <name> orchestrator専用。宣言済みの場面に限り対応する手順書を標準出力へ追加する。
 
 本文は --body-file と --stdin のどちらか一方を必ず指定する（同時指定・両方省略はエラー）。
 本文を位置引数で渡すことはできない（渡すとエラーになる）。
@@ -303,7 +301,7 @@ function main(argsOverride, envOverride, ioOverride) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(parsedArgs, {
-      flags: { '--workspace': {}, '--issue': {}, '--from': {}, '--body-file': {}, '--execution-id': {}, '--skill': {}, '--plan-comment-id': {}, '--guidance-signal': {} },
+      flags: { '--workspace': {}, '--issue': {}, '--from': {}, '--body-file': {}, '--execution-id': {}, '--skill': {}, '--plan-comment-id': {} },
       booleans: ['--stdin', '--help', '-h'],
       // 宛先（recipient）は位置引数で受け取る。個数の妥当性は下の extraPositionals 判定で
       // 専用メッセージ（--stdin / --body-file 案内）と共に検証するため、パーサ側では上限を設けない。
@@ -341,23 +339,13 @@ function main(argsOverride, envOverride, ioOverride) {
   const workerIdentity = env.GH_MAESTRO_WORKER || null;
   const isWorker = isWorkerIdentity(workerIdentity);
   const planCommentId = values['--plan-comment-id'];
-  const guidanceSignal = values['--guidance-signal'];
   const hasPlanCommentId = planCommentId !== undefined;
-  const hasGuidanceSignal = guidanceSignal !== undefined;
   if (hasPlanCommentId && !/^[1-9][0-9]*$/.test(planCommentId)) {
     writeErr('msg-send: --plan-comment-id は正の整数で指定してください。');
     return { code: 1, lines: out, errLines: err };
   }
   if (hasPlanCommentId && !isWorker) {
     writeErr('msg-send: --plan-comment-id はワーカーからorchestratorへの計画報告専用です。');
-    return { code: 1, lines: out, errLines: err };
-  }
-  if (hasGuidanceSignal && isWorker) {
-    writeErr('msg-send: --guidance-signal はorchestrator専用です。');
-    return { code: 1, lines: out, errLines: err };
-  }
-  if (hasPlanCommentId && hasGuidanceSignal) {
-    writeErr('msg-send: --plan-comment-id と --guidance-signal は同時に指定できません。');
     return { code: 1, lines: out, errLines: err };
   }
   if (hasPlanCommentId && raw) {
@@ -412,24 +400,6 @@ function main(argsOverride, envOverride, ioOverride) {
   } else {
     recipient = rest[0];
     extraPositionals = rest.slice(1);
-  }
-
-  if (hasGuidanceSignal && recipient === 'orchestrator') {
-    writeErr('msg-send: --guidance-signal はorchestratorからワーカーへ送る場面でのみ使えます。');
-    return { code: 1, lines: out, errLines: err };
-  }
-
-  let guidance = '';
-  try {
-    guidance = prepareScriptGuidance({
-      workspace,
-      scriptName: 'msg-send.js',
-      signal: guidanceSignal,
-      env,
-    });
-  } catch (error) {
-    writeErr(`msg-send: ${error.message}`);
-    return { code: 1, lines: out, errLines: err };
   }
 
   if (extraPositionals.length > 0) {
@@ -582,7 +552,6 @@ function main(argsOverride, envOverride, ioOverride) {
       const execution = readRegistry(workspace)[executionId];
       if (execution?.status === 'completed') {
         writeOut(execution.commentUrl);
-        if (guidance) writeOut(guidance);
         return { code: 0, lines: out, errLines: err };
       }
     } catch (e) {
@@ -634,7 +603,6 @@ function main(argsOverride, envOverride, ioOverride) {
   }
 
   writeOut(commentUrl);
-  if (guidance) writeOut(guidance);
   return { code: 0, lines: out, errLines: err };
 }
 
