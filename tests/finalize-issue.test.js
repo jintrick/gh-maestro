@@ -260,12 +260,14 @@ test('defaultReadIssueComments: 認証ユーザーを取得できなければコ
   assert.equal(calls, 1, 'comments are not read under an unknown identity');
 });
 
-test('defaultReadIssueComments: 投稿者と改行を含む本文をページ結果から復元する', () => {
+test('defaultReadIssueComments: bot・投稿者不明を含むページ結果と改行を復元する', () => {
   const expected = {
     authenticatedLogin: 'orchestrator',
     comments: [
       { login: 'orchestrator', body: '1ページ目の本文\n2行目' },
       { login: 'reviewer', body: '2ページ目の本文' },
+      { login: 'dependabot[bot]', body: 'botのコメント' },
+      { login: null, body: '削除済みユーザーのコメント' },
     ],
   };
   const calls = [];
@@ -287,7 +289,7 @@ test('defaultReadIssueComments: 投稿者と改行を含む本文をページ結
   ]);
 });
 
-test('defaultFindDecisionPosted: 認証ユーザーが完全一致本文を投稿した場合だけ投稿済みとする', () => {
+test('defaultFindDecisionPosted: bot・投稿者不明が混在しても自分の完全一致本文だけを投稿済みとする', () => {
   const params = { issue: 5, repo: 'owner/repo', workspace: 'C:/temp/workspace', decisionBody: '採用した決定事項' };
   const expectedBody = decisionCommentBody(params.issue, params.decisionBody);
   const marker = decisionCommentMarker(params.issue, params.decisionBody);
@@ -300,16 +302,17 @@ test('defaultFindDecisionPosted: 認証ユーザーが完全一致本文を投�
   assert.equal(find([{ login: 'reviewer', body: expectedBody }]).posted, false, 'a third-party copy of the full body is not proof');
   assert.equal(find([{ login: 'orchestrator', body: `決定事項 ${marker}` }]).posted, false, 'marker-only content is not the full decision');
   assert.equal(find([{ login: 'orchestrator', body: params.decisionBody }]).posted, false, 'unmarked legacy content is not an exact match');
-});
-
-test('defaultFindDecisionPosted: 投稿者を取得できないコメントがあれば照合不能として止める', () => {
-  const params = { issue: 5, repo: 'owner/repo', workspace: 'C:/temp/workspace', decisionBody: '決定事項' };
-  assert.throws(() => defaultFindDecisionPosted(params, {
-    readIssueCommentsFn: () => ({
-      authenticatedLogin: 'orchestrator',
-      comments: [{ login: null, body: decisionCommentBody(5, params.decisionBody) }],
-    }),
-  }), /投稿者または本文を取得できない/);
+  assert.equal(find([
+    { login: 'dependabot[bot]', body: marker },
+    { login: null, body: expectedBody },
+    { body: marker },
+    { login: 'orchestrator', body: expectedBody },
+  ]).posted, true, 'unreadable and bot authors are not fatal; the authenticated author exact match is recognized');
+  assert.equal(find([
+    { login: 'dependabot[bot]', body: expectedBody },
+    { login: null, body: expectedBody },
+    { body: marker },
+  ]).posted, false, 'bot and unreadable authors are never mistaken for the authenticated user');
 });
 
 test('finalizeIssue: workers.jsonの読み取り失敗時はIssueをクローズしない', () => {

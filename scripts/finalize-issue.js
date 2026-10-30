@@ -186,8 +186,8 @@ function defaultReadIssueComments({ issue, repo, workspace }, deps = {}) {
       throw new Error(`Issueコメントの照合結果 ${index + 1} 件目をJSONとして読めません: ${error.message}`);
     }
     if (!comment || typeof comment !== 'object' || Array.isArray(comment)
-      || !isGitHubLogin(comment.login) || typeof comment.body !== 'string') {
-      throw new Error(`Issueコメントの照合結果 ${index + 1} 件目から投稿者または本文を取得できません`);
+      || typeof comment.body !== 'string') {
+      throw new Error(`Issueコメントの照合結果 ${index + 1} 件目から本文を取得できません`);
     }
     return { login: comment.login, body: comment.body };
   });
@@ -202,15 +202,17 @@ function defaultFindDecisionPosted({ issue, repo, workspace, decisionBody }, dep
     throw new Error('GitHub認証ユーザーまたはIssueコメントの照合結果を取得できません');
   }
   if (result.comments.some((comment) => !comment || typeof comment !== 'object'
-    || !isGitHubLogin(comment.login) || typeof comment.body !== 'string')) {
-    throw new Error('Issueコメントの投稿者または本文を取得できないため、決定事項を安全に照合できません');
+    || typeof comment.body !== 'string')) {
+    throw new Error('Issueコメントの本文を取得できないため、決定事項を安全に照合できません');
   }
 
   const expectedBody = decisionCommentBody(issue, decisionBody);
   const authenticatedLogin = result.authenticatedLogin.toLowerCase();
   return {
     posted: result.comments.some((comment) => (
-      comment.login.toLowerCase() === authenticatedLogin && comment.body === expectedBody
+      typeof comment.login === 'string'
+      && comment.login.toLowerCase() === authenticatedLogin
+      && comment.body === expectedBody
     )),
   };
 }
