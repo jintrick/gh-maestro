@@ -33,7 +33,7 @@ const { readJsonFile } = require('./json-file');
 // が agents.<id>.nonInteractiveTokens: [] を指定するだけで、グローバル設定側の
 // extraArgs/execArgs 欠落検出を無効化できてしまう。カスタムエージェントで宣言したい場合は
 // ~/.gh-maestro/config.json（グローバル・信頼された設定）でのみ可能。
-// resolveAgentConfig と config.js（cmdStatusの警告表示）の両方から参照する単一のSSOT。
+// ワークスペース側から上書きできない実行系フィールドの単一の一覧。resolveAgentConfig が除外に使う。
 const EXEC_SENSITIVE_FIELDS = ['command', 'extraArgs', 'execArgs', 'execPromptDelivery', 'execPromptFlag', 'resumeCommand', 'extends', 'nonInteractiveTokens'];
 
 // テスト宣言は agent 設定とは別のセクションで解決する。agent 設定の command 等を
@@ -570,8 +570,7 @@ function isValidAgentConfig(agent) {
  * 起動がハングしても誰にも気づけない（Issue #163）。
  *
  * この関数は「指定された引数配列がトークンを保持しているか」を直接見る。欠落検出は呼び出し元
- * （spawn-worker.js の起動ブロック・run-review-manager.js / run-review-jobs.js の起動ブロック・
- * config.js status の警告）が行う。
+ * （spawn-worker.js、run-review-manager.js、run-review-jobs.js、run-council-jobs.js の起動ブロック）が行う。
  *
  * @param {object} agent     解決済みエージェント設定（nonInteractiveTokens を読む）
  * @param {string[]} [argsArray]  検証対象の引数配列。省略時は agent.extraArgs。

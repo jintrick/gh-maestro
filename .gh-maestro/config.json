@@ -10,12 +10,7 @@
       "slow": {
         "scope": "partial",
         "command": ["node", "--require", "./tests/_env-setup.js", "--test"],
-        "dynamicConcurrency": {
-          "args": ["--test-concurrency={value}"],
-          "cpuReserve": 1,
-          "reviewJobCost": 1,
-          "minimum": 1
-        },
+        "fileArgs": ["--test-concurrency=2"],
         "defaultTestFiles": ["tests/slow/*.test.js"],
         "testFilePattern": "tests/slow/<name>.test.js",
         "displayCommand": "npm run test:slow",

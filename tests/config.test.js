@@ -11,7 +11,6 @@ const {
   loadJSON,
   collectValidAgentIds,
   closestKnownSkillKey,
-  resolveSkillAgentMapWithSources,
   validateConfig,
   validateCouncilConfig,
   USAGE,
@@ -205,54 +204,6 @@ test('closestKnownSkillKey: totally different key returns null', () => {
 test('closestKnownSkillKey: 共通接頭辞のみ一致し個別名が異なる場合は null を返す', () => {
   const keys = ['gh-maestro-coder', 'gh-maestro-reviewer', 'gh-maestro-base'];
   assert.equal(closestKnownSkillKey('gh-maestro-foo', keys), null);
-});
-
-// ── resolveSkillAgentMapWithSources ─────────────────────────────────────────────
-
-test('resolveSkillAgentMapWithSources: デフォルトのみですべて default ソース', () => {
-  const defaults = loadDefaults();
-  const { map, sources } = resolveSkillAgentMapWithSources(defaults, null, null);
-  assert.equal(map['gh-maestro-coder'], 'claude-ds');
-  assert.equal(sources['gh-maestro-coder'], 'default');
-  assert.equal(sources['gh-maestro-explorer'], 'default');
-});
-
-test('resolveSkillAgentMapWithSources: global config が上書きする', () => {
-  const defaults = loadDefaults();
-  const globalConfig = {
-    skillAgentMap: { 'gh-maestro-coder': 'agy' },
-  };
-  const { map, sources } = resolveSkillAgentMapWithSources(defaults, globalConfig, null);
-  assert.equal(map['gh-maestro-coder'], 'agy');
-  assert.equal(sources['gh-maestro-coder'], 'global');
-  // unrelated entry unchanged
-  assert.equal(map['gh-maestro-base'], 'claude-ds');
-  assert.equal(sources['gh-maestro-base'], 'default');
-});
-
-test('resolveSkillAgentMapWithSources: workspace config がさらに上書きする', () => {
-  const defaults = loadDefaults();
-  const globalConfig = {
-    skillAgentMap: { 'gh-maestro-coder': 'agy' },
-  };
-  const wsConfig = {
-    skillAgentMap: { 'gh-maestro-coder': 'codex' },
-  };
-  const { map, sources } = resolveSkillAgentMapWithSources(defaults, globalConfig, wsConfig);
-  assert.equal(map['gh-maestro-coder'], 'codex');
-  assert.equal(sources['gh-maestro-coder'], 'workspace');
-});
-
-test('resolveSkillAgentMapWithSources: 新しいスキルを追加できる', () => {
-  const defaults = loadDefaults();
-  const globalConfig = {
-    skillAgentMap: { 'gh-maestro-custom-reviewer': 'claude' },
-  };
-  const { map, sources } = resolveSkillAgentMapWithSources(defaults, globalConfig, null);
-  assert.equal(map['gh-maestro-custom-reviewer'], 'claude');
-  assert.equal(sources['gh-maestro-custom-reviewer'], 'global');
-  // defaults still present for existing skills
-  assert.ok(map['gh-maestro-coder']);
 });
 
 // ── validateConfig ─────────────────────────────────────────────────────────────
@@ -555,11 +506,6 @@ test('validateConfig: プロファイルの未知スキルキーに "did you mea
 
 
 
-// CLI status の実サブプロセス統合テストは tests/slow/config-status.test.js
-// （`npm run test:slow`）に分離した。checkAgentExists() が未知コマンド1件につき
-// pwshを最大2回起動するため、デフォルトの `npm test` に含めると1テストあたり
-// 数十秒かかっていた。
-
 // ── CLI integration: doctor ────────────────────────────────────────────────────
 
 
@@ -578,28 +524,10 @@ test('validateConfig: プロファイルの未知スキルキーに "did you mea
 
 // ── Profile differential semantics ─────────────────────────────────────────────
 
-// 'Profile semantics: プロファイルはデフォルトに対する差分として機能する' は
-// config.js status を呼ぶため tests/slow/config-status.test.js に移動した。
-
-
-
-
 // ── Config parse error handling ────────────────────────────────────────────────
 
 
 // ── --workspace flag parsing ───────────────────────────────────────────────────
-
-// 'CLI: --workspace flag が正しく解析される' と
-// 'CLI: --workspace の後に値がない場合はデフォルト解決' は config.js status を
-// 呼ぶため tests/slow/config-status.test.js に移動した。
-
-// ── CLI integration: status の非対話化トークン警告（Issue #163） ───────────────
-// 通常の status 実サブプロセステストは checkAgentExists がログインシェルを起動するため
-// tests/slow/config-status.test.js に分離している。ここでは skillAgentMap の全対象
-// エージェントを command=process.execPath に上書きし、checkAgentExists が同一コマンドに
-// 対して1回（pwsh/bash）だけ起動するよう高速化した上で、警告出力をデフォルトの npm test
-// で検証する。
-
 
 // ── validateCouncilConfig（Issue #230） ───────────────────────────────────────
 

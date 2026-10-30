@@ -549,10 +549,8 @@ test('非対話化トークンを欠落させたエージェントは起動を�
     fs.rmSync(ws, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
-// 注: 正のケース（トークン保持ならガードを通る）は tests/resolve-config.test.js の
-// validateNonInteractiveTokens 単体テスト + 実機の `node scripts/config.js status`
-// （正常時は警告なし）で担保する。ここで subprocess で検証すると checkAgentExists が
-// ログインシェル（pwsh）を起動するため、テスト内実プロセス spawn 禁止ルールに反する。
+// 注: 正のケース（トークン保持なら判定が valid）は tests/resolve-config.test.js の
+// validateNonInteractiveTokens 単体テストで確認する。この節は起動時の拒否経路を扱う。
 
 // ── linkNodeModules のフェイルクローズ（Issue #425） ─────────────────────────
 // worktree への node_modules junction 作成に失敗（missing が空でない）した場合、

@@ -6,7 +6,6 @@
 //
 // Subcommands:
 //   use <profile>   Apply a named profile's skillAgentMap to ~/.gh-maestro/config.json
-//   status          Show resolved skillAgentMap with sources and agent connectivity
 //   doctor          Validate config structure
 //
 // Profile semantics: a profile's skillAgentMap is a DIFFERENTIAL — only the skills
@@ -22,10 +21,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, resolveExtends, isValidAgentConfig, validateNonInteractiveTokens, resolveCouncilConfig, EXEC_SENSITIVE_FIELDS } = require('./shared/resolve-config');
-const { buildAgentExecArgs } = require('./shared/agent-launch');
+const { loadDefaults, resolveAgentConfig, resolveSkillAgentMap, resolveExtends, isValidAgentConfig, resolveCouncilConfig } = require('./shared/resolve-config');
 const { isPlainObject } = require('./shared/object');
-const { checkAgentExists } = require('./shared/agent-exec');
 
 const HOMEDIR = process.env.HOME || process.env.USERPROFILE || '';
 const CONFIG_PATH = path.resolve(HOMEDIR, '.gh-maestro', 'config.json');
@@ -133,7 +130,7 @@ function closestKnownSkillKey(key, knownKeys) {
 
 /**
  * Get known skill keys from agent defaults.
- * Shared helper for cmdUse, cmdStatus, and validateConfig.
+ * Shared helper for cmdUse and validateConfig.
  *
  * @param {object} defaults
  * @returns {string[]}
@@ -145,7 +142,7 @@ function getKnownSkillKeys(defaults) {
 /**
  * Detect skill keys not present in knownSkillKeys, each paired with a
  * "did you mean" hint string (empty string if no reasonable suggestion).
- * Shared detection+formatting helper for cmdUse, cmdStatus, and validateConfig
+ * Shared detection+formatting helper for cmdUse and validateConfig
  * — unifies the four previously-duplicated unknown-skill-key warning loops.
  *
  * @param {string[]} skillKeys
@@ -161,39 +158,6 @@ function findUnknownSkillKeys(skillKeys, knownSkillKeys) {
     }
   }
   return unknown;
-}
-
-/**
- * Build a resolved skillAgentMap with source annotations.
- * Returns { map, sources } where sources maps skill → 'default'|'global'|'workspace'.
- *
- * @param {object} defaults
- * @param {object|null} globalConfig
- * @param {object|null} wsConfig
- * @returns {{ map: Record<string,string>, sources: Record<string,string> }}
- */
-function resolveSkillAgentMapWithSources(defaults, globalConfig, wsConfig) {
-  const map = { ...defaults.skillAgentMap };
-  const sources = {};
-  for (const skill of Object.keys(map)) {
-    sources[skill] = 'default';
-  }
-
-  if (globalConfig && globalConfig.skillAgentMap && !globalConfig._parseError) {
-    for (const [skill, agentId] of Object.entries(globalConfig.skillAgentMap)) {
-      map[skill] = agentId;
-      sources[skill] = 'global';
-    }
-  }
-
-  if (wsConfig && wsConfig.skillAgentMap && !wsConfig._parseError) {
-    for (const [skill, agentId] of Object.entries(wsConfig.skillAgentMap)) {
-      map[skill] = agentId;
-      sources[skill] = 'workspace';
-    }
-  }
-
-  return { map, sources };
 }
 
 // ── subcommand: use ────────────────────────────────────────────────────────────
@@ -300,172 +264,6 @@ function cmdUse(profileName) {
   }
 }
 
-// ── subcommand: status ─────────────────────────────────────────────────────────
-
-/**
- * Show the resolved skillAgentMap with source annotations and agent connectivity.
- *
- * @param {string|null} workspacePath
- */
-function cmdStatus(workspacePath) {
-  const defaults = loadDefaults();
-  const config = loadJSON(CONFIG_PATH);
-
-  // Load workspace config
-  let wsConfig = null;
-  if (workspacePath) {
-    const wsConfigPath = path.resolve(workspacePath, '.gh-maestro', 'config.json');
-    wsConfig = loadJSON(wsConfigPath);
-  }
-
-  // Resolve skillAgentMap with sources
-  const { map, sources } = resolveSkillAgentMapWithSources(defaults, config, wsConfig);
-
-  // Warn about workspace overrides of execution-sensitive fields (silently ignored by resolver).
-  // Uses the same EXEC_SENSITIVE_FIELDS list as resolveAgentConfig's sanitization so this
-  // warning stays aligned with the execution fields the resolver actually strips.
-  if (wsConfig && wsConfig.agents && !wsConfig._parseError) {
-    for (const [agentId, override] of Object.entries(wsConfig.agents)) {
-      const suppressed = isPlainObject(override)
-        ? EXEC_SENSITIVE_FIELDS.filter(field => override[field] !== undefined)
-        : [];
-      if (suppressed.length > 0) {
-        console.log(
-          `[WARN] Workspace overrides ${suppressed.join('/')} for agent "${agentId}" — ` +
-          'IGNORED (security: workspace cannot override execution fields).',
-        );
-      }
-    }
-  }
-
-
-
-  // Display table with agent connectivity
-  const entries = Object.entries(map).sort((a, b) => a[0].localeCompare(b[0]));
-  if (entries.length === 0) {
-    console.log('(no skill-agent mappings)');
-    return;
-  }
-
-  const maxSkillLen = Math.max(...entries.map(([s]) => s.length), 5);
-  const maxAgentLen = Math.max(...entries.map(([, a]) => a.length), 5);
-
-  // Header
-  const header = `${'Skill'.padEnd(maxSkillLen)}  ${'Agent'.padEnd(maxAgentLen)}  Source      OK`;
-  console.log(header);
-  console.log('-'.repeat(header.length));
-
-  // Cache both resolveAgentConfig and checkAgentExists results.
-  // resolveAgentConfig can be expensive (npm root -g for reasonix etc.),
-  // and checkAgentExists spawns a login shell per unique command.
-  // Caching by agentId prevents DoS via malicious workspace configs
-  // with thousands of fake skill keys mapping to the same agent.
-  const resolvedCache = new Map();
-  const existsCache = new Map();
-
-  // config.json の extraArgs 上書きで非対話化トークン（--print / run / exec 等）が
-  // 欠落しているエージェントの警告。spawn-worker.js / run-review-manager.js / run-review-jobs.js
-  // の起動ブロックとは別に、人間が status で日常的に乖離を確認できるようにする（Issue #163）。
-  // 通常ワーカーは extraArgs、Review Manager 系は extraArgs + 経路固有引数を使うため、
-  // それぞれの実際の引数列を検証する。同一 agentId（複数スキルが同じエージェントに
-  // マップされる場合）は警告を重複させない。
-  const nonInteractiveWarnings = [];
-  const warnedAgentFields = new Set();
-
-  for (const [skill, agentId] of entries) {
-    // Resolve the agent config (cached)
-    let resolved;
-    if (resolvedCache.has(agentId)) {
-      resolved = resolvedCache.get(agentId);
-    } else {
-      resolved = resolveAgentConfig(agentId, {
-        homedir: HOMEDIR,
-        workspace: workspacePath || undefined,
-      });
-      resolvedCache.set(agentId, resolved);
-    }
-
-    let ok = '✗';
-    if (resolved) {
-      const extraCheck = validateNonInteractiveTokens(resolved, resolved.extraArgs);
-      if (!extraCheck.valid && !warnedAgentFields.has(`${agentId}:extraArgs`)) {
-        warnedAgentFields.add(`${agentId}:extraArgs`);
-        nonInteractiveWarnings.push(
-          `[WARN] Agent "${agentId}" is missing non-interactive token(s): ${extraCheck.missing.join(', ')} in extraArgs — headless launch will hang.`,
-        );
-      }
-      // 経路固有の追加引数がある場合は、共通分も含む実際の argv を検証する。
-      if (resolved.execArgs !== undefined) {
-        const execCheck = validateNonInteractiveTokens(resolved, buildAgentExecArgs(resolved));
-        if (!execCheck.valid && !warnedAgentFields.has(`${agentId}:review-argv`)) {
-          warnedAgentFields.add(`${agentId}:review-argv`);
-          nonInteractiveWarnings.push(
-            `[WARN] Agent "${agentId}" is missing non-interactive token(s): ${execCheck.missing.join(', ')} in Review Manager argv — headless launch will hang.`,
-          );
-        }
-      }
-      if (!existsCache.has(resolved.command)) {
-        existsCache.set(resolved.command, checkAgentExists(resolved.command));
-      }
-      ok = existsCache.get(resolved.command) ? '✓' : '✗';
-    }
-
-    const srcLabel = sources[skill] || '?';
-    console.log(
-      `${skill.padEnd(maxSkillLen)}  ${agentId.padEnd(maxAgentLen)}  ${srcLabel.padEnd(11)} ${ok}`,
-    );
-  }
-
-  if (nonInteractiveWarnings.length > 0) {
-    console.log('\n' + nonInteractiveWarnings.join('\n'));
-  }
-
-  // Warn about unknown skill keys in global config sources
-  const unknownWarnings = [];
-  if (config && !config._parseError) {
-    const knownSkillKeys = getKnownSkillKeys(defaults);
-    if (isPlainObject(config.skillAgentMap)) {
-      for (const { skill, hint } of findUnknownSkillKeys(Object.keys(config.skillAgentMap), knownSkillKeys)) {
-        unknownWarnings.push(`[WARN] Unknown skill key "${skill}" in global config${hint}.`);
-      }
-    }
-    if (isPlainObject(config.profiles)) {
-      for (const [profileName, profile] of Object.entries(config.profiles)) {
-        if (profile && isPlainObject(profile.skillAgentMap)) {
-          for (const { skill, hint } of findUnknownSkillKeys(Object.keys(profile.skillAgentMap), knownSkillKeys)) {
-            unknownWarnings.push(`[WARN] Unknown skill key "${skill}" in profile "${profileName}"${hint}.`);
-          }
-        }
-      }
-    }
-  }
-  if (unknownWarnings.length > 0) {
-    console.log('\n' + unknownWarnings.join('\n'));
-  }
-
-  // Warn about council config issues (Issue #230)
-  // マージ前の各ファイルの形式チェックに加え、マージ後（global + workspace）の検証を行う。
-  const councilCtx = { workspace: workspacePath || undefined, homedir: HOMEDIR };
-  const councilWarnings = [];
-  let councilConfigured = false;
-  if (config && !config._parseError && config.council !== undefined) {
-    councilConfigured = true;
-    councilWarnings.push(...validateCouncilConfig('global', config.council, councilCtx));
-  }
-  if (wsConfig && !wsConfig._parseError && wsConfig.council !== undefined) {
-    councilConfigured = true;
-    councilWarnings.push(...validateCouncilConfig('workspace', wsConfig.council, councilCtx));
-  }
-  // default グループ必須等はマージ結果でしか判定できないため、ここで検証する
-  // （分割設定の false positive を避け、マージ結果として破綻している場合のみ報告）。
-  if (councilConfigured) {
-    councilWarnings.push(...validateCouncilMerged(councilCtx));
-  }
-  if (councilWarnings.length > 0) {
-    console.log('\n' + councilWarnings.join('\n'));
-  }
-}
-
 // ── council 設定検証（Issue #230） ─────────────────────────────────────────────
 
 /**
@@ -541,7 +339,7 @@ function validateCouncilConfig(label, council, ctx = {}) {
 }
 
 /**
- * global + workspace をマージした council 設定の検証（doctor / status 用）。
+ * global + workspace をマージした council 設定の検証（doctor 用）。
  *
  * resolveCouncilConfig は「default グループ必須・各グループの agents が非空/重複なし/
  * 解決可能・investigationAgent が指定されていれば解決可能」を満たせないと null を返す
@@ -758,8 +556,7 @@ function cmdDoctor(workspacePath) {
 
 const USAGE = `config.js — gh-maestro agent configuration CLI
 
-Manage skill→agent mappings via named profiles, inspect resolved configuration,
-and validate config file integrity.
+Manage skill→agent mappings via named profiles and validate config file integrity.
 
 Profile semantics:
   A profile's skillAgentMap is a DIFFERENTIAL — only the skills to change
@@ -776,14 +573,10 @@ Usage:
 
 Subcommands:
   use <profile>     Apply a named profile's skillAgentMap to config.json
-  status            Show resolved skillAgentMap with connectivity checks and
-                    warn when an agent's extraArgs is missing its
-                    non-interactive token (--print / run / exec etc.)
   doctor            Validate config structure and report issues
 
 Options:
-  --workspace <path>  Workspace path (for status: include workspace config;
-                      for doctor: also validate workspace config)
+  --workspace <path>  Workspace path for doctor validation
   --help, -h          Show this help message`;
 
 function parseArgs(argv) {
@@ -835,9 +628,6 @@ if (require.main === module) {
       cmdUse(profileName);
       break;
     }
-    case 'status':
-      cmdStatus(workspacePath);
-      break;
     case 'doctor':
       cmdDoctor(workspacePath);
       break;
@@ -858,7 +648,6 @@ module.exports = {
   closestKnownSkillKey,
   getKnownSkillKeys,
   findUnknownSkillKeys,
-  resolveSkillAgentMapWithSources,
   validateConfig,
   validateCouncilConfig,
   validateCouncilMerged,
