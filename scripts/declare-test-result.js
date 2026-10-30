@@ -27,6 +27,8 @@ const {
 const {
   TEST_RESULT_MARKER,
   hasTestDeclarationMarker,
+  extractTestDeclaration,
+  mergeAggregateDeclarationBodies,
 } = require('./shared/test-declaration');
 
 const USAGE = `declare-test-result.js — PR に対するテスト実行結果（事実）を申告・更新する
@@ -42,7 +44,10 @@ Options:
 動作:
   1. 同じ worktree の runtime root にあるテスト結果成果物を読み取る（値の手入力は不可）
   2. worktree の現在のHEADを対象コミットとして解決する
-  3. 対象 PR の既存申告コメントを更新、または新規投稿する
+  3. 対象 PR の既存申告コメントを更新、または新規投稿する。既存コメントが同一コミットの
+     aggregate 申告なら、自分の成果物に無い層と lint/typecheck の記録（missing/unavailable
+     のときだけ）を既存コメントから引き継いで合成し、結果行は全層から再計算する。
+     更新後に1回読み直し、引き継いだ層が欠落していたらエラーにする（再試行はしない）
   4. 成果物が欠落・破損している場合は通常経路では unknown として申告する
 
 Output (stdout):
@@ -351,6 +356,32 @@ function buildCommentBody({ commit, testResult }) {
 // ── コアロジック ──────────────────────────────────────────────────────────
 
 /**
+ * 合成して書き込んだコメントを1回読み直し、書き込んだ本文にあった層が残っているかを返す。
+ * 合成で既存の層を引き継いだ場合（writtenBody が自分の本文と異なる場合）にだけ呼ぶ。
+ * 読み直せない・コメントが見つからない場合は検証できないため、全層を欠落として返す
+ * （フェイルクローズ。申告の再実行は冪等なので、誤検出の代償は再実行だけで済む）。
+ *
+ * @returns {string[]} 読み直したコメントに無かった層名
+ */
+function verifyMergedLayers(listFn, repo, prNum, commentId, writtenBody) {
+  const written = extractTestDeclaration(writtenBody);
+  const expected = written && written.layers ? Object.keys(written.layers) : [];
+  let reread;
+  try {
+    const res = listFn(String(prNum), repo);
+    if (!res || res.status !== 0) return expected;
+    const list = parseCommentsResponse(res.stdout || '[]');
+    reread = list && list.find(comment => comment && comment.id === commentId);
+  } catch {
+    return expected;
+  }
+  if (!reread) return expected;
+  const after = extractTestDeclaration(String(reread.body || ''));
+  const present = after && after.layers ? Object.keys(after.layers) : [];
+  return expected.filter(name => !present.includes(name));
+}
+
+/**
  * PR にテスト結果コメントがあれば更新、なければ新規投稿する。
  *
  * @param {{pr:string, repo?:string, workspace?:string, worktree?:string, headSha?:string, requiredLayers?:string[]}} params
@@ -487,16 +518,29 @@ function declareTestResult(params = {}, deps = {}) {
   }
   if (!comments) return { ok: false, error: 'コメント一覧のJSON形式が不正です' };
 
-  const fullBody = buildCommentBody({ commit: trimmedHead, testResult });
+  const ownBody = buildCommentBody({ commit: trimmedHead, testResult });
 
   // 4. 既存の申告コメント検索（最新のコメントを対象にするため末尾から検索）
   const existingComment = [...comments].reverse()
     .find(comment => comment && hasTestDeclarationMarker(comment.body));
 
   if (existingComment) {
+    // coder（full+lint）と poll-pr 配下の slow は別 worktree の成果物しか持たないため、
+    // 同一コミットの aggregate 申告は既存コメントの他の層・lint を残して合成する。
+    // 合成できない既存コメント（別コミット・v1・壊れた本文）は従来どおり置換する。
+    const fullBody = mergeAggregateDeclarationBodies(String(existingComment.body || ''), ownBody);
     const updateRes = ghUpdateCommentFn(existingComment.id, targetRepo, fullBody);
     if (!updateRes || updateRes.status !== 0) {
       return { ok: false, error: `申告コメントの更新に失敗しました: ${(updateRes && updateRes.stderr) || '(no stderr)'}` };
+    }
+    // GET→PATCH の間に別の書き手が更新していた場合、その層を上書きして消している。
+    // 再試行はせず（ADR 0006）、書き込み後に1回だけ読み直して欠落を失敗として報告する。
+    const lostLayers = fullBody === ownBody ? [] : verifyMergedLayers(ghListCommentsFn, targetRepo, prNum, existingComment.id, fullBody);
+    if (lostLayers.length > 0) {
+      return {
+        ok: false,
+        error: `申告コメントの更新後、層が欠落していました（並行書き込みの可能性）: ${lostLayers.join(', ')}`,
+      };
     }
     let url = existingComment.html_url;
     try {
@@ -508,7 +552,7 @@ function declareTestResult(params = {}, deps = {}) {
     return { ok: true, url, action: 'updated', provenance: testResult.provenance, scope: testResult.scope };
   }
 
-  const createRes = ghCreateCommentFn(String(prNum), targetRepo, fullBody);
+  const createRes = ghCreateCommentFn(String(prNum), targetRepo, ownBody);
   if (!createRes || createRes.status !== 0) {
     return { ok: false, error: `申告コメントの投稿に失敗しました: ${(createRes && createRes.stderr) || '(no stderr)'}` };
   }

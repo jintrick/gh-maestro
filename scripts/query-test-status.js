@@ -35,6 +35,7 @@ Output (stdout):
   lint: complete/pass, complete/findings (with findingCount), unavailable, or missing
   typecheck: complete/pass, complete/fail (with exitCode), unavailable, undefined, or missing
   aggregate scope includes layers (with failedTests and otherFailedCount on failures), allLayersPresent, and allLayersComplete
+  aggregate scope: status は全層から決まる（層に fail が1つでもあれば、申告の結果行が pass でも RED）。申告コメントは同一コミットで層別に合成される
   exit 0 = 成功、exit 1 = 引数・GitHubアクセス・応答解釈のエラー`;
 
 const SPEC = {
