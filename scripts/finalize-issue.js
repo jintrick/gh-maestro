@@ -2,13 +2,14 @@
 'use strict';
 // finalize-issue.js
 // 反省会が完了した後に呼ぶ、決定的な最終後始末。
-//   1. 指定 Issue に紐づく全ワーカーを remove-worker.js 経由で削除する（取りこぼし防止）
-//   2. Issue をクローズする
+//   1. 決定事項をIssueへ投稿する
+//   2. 指定 Issue に紐づく全ワーカーを remove-worker.js 経由で削除する（取りこぼし防止）
+//   3. Issue をクローズする
 // 判断（反省会・コーダー意見聴取・ルール提案・承認反映）は orchestrator 側の責務であり、
-// このスクリプトは機械的な後始末だけを担う。反省会が済む前に呼んではならない。
+// このスクリプトは機械的な投稿と後始末だけを担う。反省会が済む前に呼んではならない。
 //
 // Usage:
-//   node finalize-issue.js --issue <N> [--repo <owner/repo>] [--workspace <path>]
+//   node finalize-issue.js --issue <N> --decision-file <path> [--repo <owner/repo>] [--workspace <path>]
 
 const path = require('path');
 const { readFileSync, existsSync, rmSync } = require('fs');
@@ -20,18 +21,22 @@ const { ARTIFACTS, recordPath } = require('./shared/record-paths');
 const { pruneExecutionsForIssue } = require('./shared/execution-registry');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { clearPrMonitorTarget } = require('./shared/pr-monitor-target');
+const { toWinPath } = require('./shared/win-path');
+const { commentIssueBody } = require('./comment-issue');
 
 const USAGE = `finalize-issue.js — Issue をクローズし、そのIssueの全ワーカーを削除する
 
-Usage: node finalize-issue.js --issue <N> [--repo <owner/repo>] [--workspace <path>]
+Usage: node finalize-issue.js --issue <N> --decision-file <path> [--repo <owner/repo>] [--workspace <path>]
 
 Options:
   --issue <N>          クローズ対象の Issue 番号（正の整数）
+  --decision-file <path> Issueへ先に投稿する決定事項本文ファイル（UTF-8、必須、空は禁止）
   --repo <owner/repo>  対象リポジトリ（省略時は workspace の git remote から解決）
   --workspace <path>   ワークスペース（省略時は GH_MAESTRO_WORKSPACE env または CWD から上方探索で解決）
 
-反省会が完了した後にだけ呼ぶこと。Issueに紐づく全ワーカーを remove-worker.js 経由で削除し、
-そのあと Issue をクローズする。ワーカー削除は best-effort（一部失敗しても続行し、Issueは閉じる）。
+反省会が完了した後にだけ呼ぶこと。決定事項をIssueへ投稿した後、Issueに紐づく全ワーカーを
+remove-worker.js 経由で削除し、そのあと Issue をクローズする。コメント投稿失敗時は後始末しない。
+ワーカー削除は best-effort（一部失敗しても続行し、Issueは閉じる）。
 
 さらに、このIssueの --issue で起動された監視ペインを close-pane 経由で終了する。
 worker worktree ごとの終了に失敗した場合は、そのworkerを削除せずIssueのクローズを中止する（非0終了）。
@@ -220,7 +225,32 @@ function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn 
  * @returns {{workers: {name: string, ok: boolean}[], removedCount: number, closed: boolean, statusPaneClosed: boolean, workerStatusPaneFailures: {name:string, reason:string}[], artifacts: object|null}}
  *   artifacts: cleanupIssueArtifacts() の結果（worker pane終了失敗時は後続cleanupを行わないため null）
  */
-function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
+function finalizeIssue({ workspace, issue, repo = null, decisionBody }, deps = {}) {
+  if (typeof decisionBody !== 'string' || decisionBody.trim() === '') {
+    throw new Error('決定事項本文は空でない文字列が必要です');
+  }
+  const postDecisionFn = deps.postDecisionFn || ((body) => commentIssueBody({
+    issue,
+    body,
+    repo,
+    workspace,
+  }));
+  let decision;
+  try {
+    decision = postDecisionFn(decisionBody, issue, repo, workspace);
+  } catch (error) {
+    decision = { ok: false, stderr: error.message };
+  }
+  if (!decision || !decision.ok) {
+    const reason = String(decision && decision.stderr || 'unknown');
+    process.stderr.write(`finalize-issue: 決定事項コメントを投稿できないため後始末を中止しました: ${reason}\n`);
+    return {
+      workers: [], removedCount: 0, closed: false, statusPaneClosed: false,
+      monitorTarget: null, workerStatusPaneFailures: [], artifacts: null,
+      decisionPosted: false, decisionUrl: null,
+    };
+  }
+
   const removeWorkerFn = deps.removeWorkerFn || defaultRemoveWorker;
   const closeIssueFn = deps.closeIssueFn || defaultCloseIssue;
   const closeStatusPaneFn = deps.closeStatusPaneFn || defaultCloseStatusPane;
@@ -277,6 +307,8 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
       monitorTarget,
       workerStatusPaneFailures,
       artifacts: null,
+      decisionPosted: true,
+      decisionUrl: decision.url || null,
     };
   }
 
@@ -310,6 +342,8 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
     monitorTarget,
     workerStatusPaneFailures,
     artifacts,
+    decisionPosted: true,
+    decisionUrl: decision.url || null,
   };
 }
 
@@ -320,7 +354,7 @@ if (require.main === module) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(argv, {
-      flags: { '--issue': {}, '--repo': {}, '--workspace': {} },
+      flags: { '--issue': { required: true }, '--decision-file': { required: true }, '--repo': {}, '--workspace': {} },
       booleans: ['--help', '-h'],
       positionals: { min: 0, max: 0 },
     }));
@@ -340,6 +374,7 @@ if (require.main === module) {
   }
 
   const issue = values['--issue'];
+  const decisionFileArg = values['--decision-file'];
   const repo = values['--repo'] || null;
   const workspace = resolveWorkspace(values['--workspace']);
 
@@ -357,7 +392,20 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  const result = finalizeIssue({ workspace, issue, repo });
+  const decisionFile = path.resolve(toWinPath(decisionFileArg));
+  let decisionBody;
+  try {
+    decisionBody = readFileSync(decisionFile, 'utf8');
+  } catch (error) {
+    console.error(`finalize-issue: 決定事項ファイルを読めません: ${decisionFile}: ${error.message}`);
+    process.exit(1);
+  }
+  if (decisionBody.trim() === '') {
+    console.error(`finalize-issue: 決定事項ファイルが空です: ${decisionFile}`);
+    process.exit(1);
+  }
+
+  const result = finalizeIssue({ workspace, issue, repo, decisionBody });
   console.log(`FINALIZED:${issue} removed=${result.removedCount}/${result.workers.length} closed=${result.closed}`);
   process.exit(result.closed ? 0 : 1);
 }

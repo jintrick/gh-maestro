@@ -12,11 +12,12 @@ const {
   createPrMonitorTarget,
   writePrMonitorTarget,
 } = require('./shared/pr-monitor-target');
+const { prepareScriptGuidance } = require('./shared/orchestrator-guidance');
 
 const USAGE = `activate-pr-monitor.js — plugin monitor のPR監視対象を設定する
 
 Usage: node activate-pr-monitor.js --issue <N> [--workspace <path>] [--base-branch <branch>]
-       [--no-review-manager] [--no-review-events]
+       [--no-review-manager] [--no-review-events] [--guidance-signal <name>]
 
 Options:
   --issue <N>              監視対象の Issue 番号（必須）
@@ -24,6 +25,7 @@ Options:
   --base-branch <branch>   PRの期待ベースブランチ
   --no-review-manager      PR検出時にReview Managerを起動しない
   --no-review-events       inline review comments・formal reviewsを監視しない
+  --guidance-signal <name> 宣言済みの場面に限り、対応するorchestrator手順書を標準出力へ追加する
   --help, -h               このヘルプを表示する`;
 
 function positiveIssue(value) {
@@ -39,6 +41,7 @@ function parseCli(argv) {
         '--issue': {},
         '--workspace': {},
         '--base-branch': {},
+        '--guidance-signal': {},
       },
       booleans: ['--no-review-manager', '--no-review-events', '--help', '-h'],
       positionals: { min: 0, max: 0 },
@@ -83,6 +86,20 @@ function run(argv = process.argv.slice(2), deps = {}) {
     return 1;
   }
 
+  let guidance = '';
+  try {
+    guidance = (deps.prepareScriptGuidanceFn || prepareScriptGuidance)({
+      workspace,
+      scriptName: 'activate-pr-monitor.js',
+      signal: values['--guidance-signal'],
+      env: deps.env || process.env,
+      skillDirectory: deps.skillDirectory,
+    });
+  } catch (error) {
+    writeErr(`activate-pr-monitor: ${error.message}`);
+    return 1;
+  }
+
   const target = createPrMonitorTarget({
     issue,
     baseBranch: values['--base-branch'] || null,
@@ -92,6 +109,7 @@ function run(argv = process.argv.slice(2), deps = {}) {
   const writeTarget = deps.writeTargetFn || writePrMonitorTarget;
   writeTarget(workspace, target);
   writeOut(`PR_MONITOR_TARGET_SET:${JSON.stringify({ workspace, ...target })}`);
+  if (guidance) writeOut(guidance);
   return 0;
 }
 

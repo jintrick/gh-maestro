@@ -786,15 +786,18 @@ test('インストーラー成果物検証: 全エージェント宛先・共有
 
         // orchestrator SKILL.md の issue template 参照が shared skills の絶対パスであること
         if (skill === 'gh-maestro-orchestrator') {
-          const tmplMatch = content.match(/`([^`]+issue-template\.md)`/);
-          assert.ok(tmplMatch, `${label}/gh-maestro-orchestrator/SKILL.md に issue-template.md 参照が見つからない`);
+          const stage1Path = path.join(destDir, skill, 'stage-1-requirements.md');
+          assert.ok(fs.existsSync(stage1Path), `${label}/gh-maestro-orchestrator/stage-1-requirements.md が生成されていない`);
+          const stage1Content = fs.readFileSync(stage1Path, 'utf8');
+          const tmplMatch = stage1Content.match(/`([^`]+issue-template\.md)`/);
+          assert.ok(tmplMatch, `${label}/gh-maestro-orchestrator/stage-1-requirements.md に issue-template.md 参照が見つからない`);
           assert.ok(
             path.isAbsolute(tmplMatch[1]),
-            `${label}/gh-maestro-orchestrator/SKILL.md の issue-template 参照が相対パス: "${tmplMatch[1]}"`
+            `${label}/gh-maestro-orchestrator/stage-1-requirements.md の issue-template 参照が相対パス: "${tmplMatch[1]}"`
           );
           assert.ok(
             tmplMatch[1].startsWith(tmpSharedSkills),
-            `${label}/gh-maestro-orchestrator/SKILL.md の issue-template 参照が共有スキル先を指していない: "${tmplMatch[1]}"`
+            `${label}/gh-maestro-orchestrator/stage-1-requirements.md の issue-template 参照が共有スキル先を指していない: "${tmplMatch[1]}"`
           );
         }
 

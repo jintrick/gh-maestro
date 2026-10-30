@@ -28,7 +28,7 @@ test('gh-maestro-test-setup: 人間向けの7手順として層分類からorche
 });
 
 test('gh-maestro-orchestrator: slow層の動的並列数を結果・申告の事実として扱う', () => {
-  const content = fs.readFileSync(path.join(ROOT, 'skills', 'gh-maestro-orchestrator', 'SKILL.md'), 'utf8');
+  const content = fs.readFileSync(path.join(ROOT, 'skills', 'gh-maestro-orchestrator', 'stage-7-review-merge.md'), 'utf8');
   assert.match(content, /dynamicConcurrency/);
   assert.match(content, /review-job/);
   assert.match(content, /並列数・CPU数・review-job数・取得できなかった入力/);

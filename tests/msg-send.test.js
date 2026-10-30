@@ -145,6 +145,47 @@ test('--issue で指定した Issue が使われる', () => {
   });
 });
 
+test('--plan-comment-id はfrom/toを保った計画報告マーカーを投稿する', () => {
+  withTempDir(workspace => {
+    let capturedBody = null;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-51\n' };
+    });
+
+    const r = msgSend.main(
+      ['--plan-comment-id', '42', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-9-coder' },
+      stdinIO('計画: https://github.com/test/repo/issues/9#issuecomment-42'),
+    );
+    assert.equal(r.code, 0, r.errLines.join('\n'));
+    const marker = /^<!-- gh-maestro (\{.*\}) -->$/m.exec(capturedBody);
+    assert.ok(marker, '計画報告にmarkerが付く');
+    assert.deepEqual(JSON.parse(marker[1]), {
+      v: 1, to: 'orchestrator', from: 'issue-9-coder', kind: 'plan-report', planCommentId: 42,
+    });
+  });
+});
+
+test('--plan-comment-idはorchestrator・raw投稿では拒否される', () => {
+  withTempDir(workspace => {
+    const orchestrator = msgSend.main(
+      ['orchestrator', '--plan-comment-id', '42', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'orchestrator' }, stdinIO('body'),
+    );
+    assert.equal(orchestrator.code, 1);
+    assert.match(orchestrator.errLines.join('\n'), /ワーカーからorchestratorへの計画報告専用/);
+
+    const raw = msgSend.main(
+      ['--plan-comment-id', '42', '--raw', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-9-coder' }, stdinIO('body'),
+    );
+    assert.equal(raw.code, 1);
+    assert.match(raw.errLines.join('\n'), /--raw と同時に指定できません/);
+  });
+});
+
 test('コメント投稿成功時は送信先を問わず監視ペイン保証を呼び、保証失敗を送信失敗に変換しない', () => {
   withTempDir(workspace => {
     const warnings = [];
@@ -657,7 +698,7 @@ test('workers.json が解析不能なら配送を拒否し状態を空扱いし�
   });
 });
 
-test('稼働中でも既に報告済みのワーカー宛て送信は拒否されない', () => {
+test('稼働中でも計画報告済みワーカー宛て送信は拒否されない', () => {
   withTempDir(workspace => {
     writeBusyWorker(workspace);
     workerLiveness._setLiveness(require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }));
@@ -667,7 +708,7 @@ test('稼働中でも既に報告済みのワーカー宛て送信は拒否さ�
     msgSend._setGhListComments(mockCommentsResponse([
       {
         id: 1, author_association: 'MEMBER', created_at: '2026-01-01T00:05:00Z',
-        body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-9-fix"} -->\n> 完了しました',
+        body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-9-fix","kind":"plan-report","planCommentId":44} -->\n> https://github.com/test/repo/issues/9#issuecomment-44',
       },
     ]));
     let capturedBody = null;

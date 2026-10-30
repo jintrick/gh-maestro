@@ -7,8 +7,22 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { collectWorkersForIssue, finalizeIssue, cleanupIssueArtifacts, bodyReferencesIssue } = require('../scripts/finalize-issue.js');
+const {
+  collectWorkersForIssue,
+  finalizeIssue: finalizeIssueCore,
+  cleanupIssueArtifacts,
+  bodyReferencesIssue,
+} = require('../scripts/finalize-issue.js');
 const childProcess = require('../scripts/shared/child-process');
+
+// 既存のcleanupテストでは決定コメント投稿を成功として注入する。必須入力と投稿失敗の
+// 挙動はfinalizeIssueCoreを直接使う専用テストで検証する。
+function finalizeIssue(params, deps = {}) {
+  return finalizeIssueCore(
+    { decisionBody: 'テスト決定事項', ...params },
+    { postDecisionFn: () => ({ ok: true, url: 'https://example.test/comment/1' }), ...deps },
+  );
+}
 
 function withTempWorkspace(workers, fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-finalize-'));
@@ -21,6 +35,28 @@ function withTempWorkspace(workers, fn) {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+function fakeGhEnvironment(directory) {
+  const binDir = path.join(directory, 'fake-bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  const bootstrap = path.join(binDir, 'fake-gh-bootstrap.js');
+  fs.writeFileSync(bootstrap, [
+    "'use strict';",
+    "const path = require('node:path');",
+    "if (path.basename(process.execPath).toLowerCase() === (process.platform === 'win32' ? 'gh.exe' : 'gh')) {",
+    "  process.stdout.write('https://github.com/test/repo/issues/5#issuecomment-555\\n');",
+    '  process.exit(0);',
+    '}',
+    '',
+  ].join('\n'), 'utf8');
+  fs.copyFileSync(process.execPath, path.join(binDir, process.platform === 'win32' ? 'gh.exe' : 'gh'));
+  if (process.platform !== 'win32') fs.chmodSync(path.join(binDir, 'gh'), 0o755);
+  return {
+    ...process.env,
+    PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
+    NODE_OPTIONS: `--require="${bootstrap.replace(/\\/g, '/')}"`,
+  };
 }
 
 test('collectWorkersForIssue: 指定Issueのワーカーだけ列挙しorchestratorは除く', () => {
@@ -65,6 +101,40 @@ test('collectWorkersForIssue: malformed JSONは対象パス付きのJSON構文�
 test('collectWorkersForIssue: JSONとして妥当でも配列はオブジェクトでないエラーでthrow', () => {
   withTempWorkspace([], (dir) => {
     assert.throws(() => collectWorkersForIssue(dir, 5), /JSONとしては妥当だがオブジェクトでない/);
+  });
+});
+
+test('finalizeIssue: 決定事項本文が欠落または空なら後始末を開始しない', () => {
+  withTempWorkspace({ 'issue-5-coder': { issue: 5 } }, (dir) => {
+    let postCalls = 0;
+    let closeCalls = 0;
+    const deps = {
+      postDecisionFn: () => { postCalls += 1; return { ok: true }; },
+      closeIssueFn: () => { closeCalls += 1; return { ok: true }; },
+    };
+    assert.throws(() => finalizeIssueCore({ workspace: dir, issue: 5 }, deps), /決定事項本文/);
+    assert.throws(() => finalizeIssueCore({ workspace: dir, issue: 5, decisionBody: '  ' }, deps), /決定事項本文/);
+    assert.equal(postCalls, 0);
+    assert.equal(closeCalls, 0);
+  });
+});
+
+test('finalizeIssue: 決定事項コメント投稿失敗時はworker削除とIssueクローズをしない', () => {
+  withTempWorkspace({ 'issue-5-coder': { issue: 5 } }, (dir) => {
+    let removeCalls = 0;
+    let closeCalls = 0;
+    const result = finalizeIssueCore(
+      { workspace: dir, issue: 5, decisionBody: '反省会なし（軽量PR）' },
+      {
+        postDecisionFn: () => ({ ok: false, stderr: 'GitHub unavailable' }),
+        removeWorkerFn: () => { removeCalls += 1; return { ok: true }; },
+        closeIssueFn: () => { closeCalls += 1; return { ok: true }; },
+      },
+    );
+    assert.equal(result.closed, false);
+    assert.equal(result.decisionPosted, false);
+    assert.equal(removeCalls, 0);
+    assert.equal(closeCalls, 0);
   });
 });
 
@@ -200,6 +270,8 @@ test('finalize-issue CLI: worktree runtimeのclose-pane失敗を非0で報告し
   }, (dir) => {
     const worktree = path.resolve(dir, '.gh-maestro', 'worktrees', 'issue-5-coder');
     const runtimeDir = path.join(dir, 'isolated-runtime');
+    const decisionFile = path.join(dir, 'decision.md');
+    fs.writeFileSync(decisionFile, '実機確認テストの決定事項\n', 'utf8');
     const statusPaneRegistry = require('../scripts/shared/status-pane-registry');
     fs.mkdirSync(worktree, { recursive: true });
     const statusFile = statusPaneRegistry.statusPanePath(worktree, runtimeDir);
@@ -214,12 +286,13 @@ test('finalize-issue CLI: worktree runtimeのclose-pane失敗を非0で報告し
         [
           path.join(__dirname, '..', 'scripts', 'finalize-issue.js'),
           '--issue', '5',
+          '--decision-file', decisionFile,
           '--workspace', dir,
         ],
-        { encoding: 'utf8', env: { ...process.env, GH_MAESTRO_RUNTIME_DIR: runtimeDir } },
+        { encoding: 'utf8', env: { ...fakeGhEnvironment(path.join(dir, 'fake')), GH_MAESTRO_RUNTIME_DIR: runtimeDir } },
       );
       assert.equal(cliResult.status, 1);
-      assert.match(cliResult.stdout, /FINALIZED:5 removed=0\/1 closed=false/);
+      assert.match(cliResult.stdout, /FINALIZED:5 removed=0\/1 closed=false/, cliResult.stderr);
       assert.match(cliResult.stderr, /ワーカー "issue-5-coder" の監視ペイン終了に失敗しました/);
       assert.ok(cliResult.stderr.includes(statusFile), '失敗理由にworktree runtimeの記録パスを含める');
       assert.deepEqual(
@@ -259,6 +332,21 @@ test('finalize-issue CLI: worktree runtimeのclose-pane失敗を非0で報告し
       if (savedRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
       else process.env.GH_MAESTRO_RUNTIME_DIR = savedRuntimeDir;
     }
+  });
+});
+
+test('finalize-issue CLI: --decision-fileは必須で空ファイルも拒否する', () => {
+  withTempWorkspace({}, (dir) => {
+    const script = path.join(__dirname, '..', 'scripts', 'finalize-issue.js');
+    const missing = spawnNodeSync(process.execPath, [script, '--issue', '5', '--workspace', dir], { encoding: 'utf8' });
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /--decision-file/);
+
+    const emptyFile = path.join(dir, 'empty-decision.md');
+    fs.writeFileSync(emptyFile, '  \n', 'utf8');
+    const empty = spawnNodeSync(process.execPath, [script, '--issue', '5', '--decision-file', emptyFile, '--workspace', dir], { encoding: 'utf8' });
+    assert.equal(empty.status, 1);
+    assert.match(empty.stderr, /決定事項ファイルが空/);
   });
 });
 

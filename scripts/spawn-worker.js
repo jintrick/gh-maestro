@@ -64,6 +64,7 @@ const {
   DEFAULT_ROLELESS_WORKER_NAME_PATTERN,
   isRolelessWorkerName,
 } = require('./shared/roleless-worker');
+const { prepareScriptGuidance } = require('./shared/orchestrator-guidance');
 
 const defaultEnsureStatusPane = ensureStatusPaneLib;
 let _ensureStatusPane = defaultEnsureStatusPane;
@@ -101,7 +102,7 @@ const SPEC = {
   flags: {
     '--skill': {}, '--short-prompt': {}, '--prompt-file': {}, '--issue': {}, '--description': {},
     '--repo': {}, '--workspace': {}, '--base-branch': {}, '--agent': {}, '--execution-id': {},
-    '--session-id': {},
+    '--session-id': {}, '--guidance-signal': {},
   },
   booleans: ['--help', '-h'],
   positionals: { min: 0, max: 0 },
@@ -113,6 +114,7 @@ Usage: node spawn-worker.js --skill <skill-name> --issue <N> --description <desc
                             --session-id <id>
                             [--short-prompt <text> | --prompt-file <path>] [--workspace <path>]
                             [--base-branch <branch>] [--agent <id>] [--execution-id <id>]
+                            [--guidance-signal <name>]
 
 Arguments:
   --skill <name>          起動するワーカースキル名
@@ -134,6 +136,7 @@ Arguments:
   --base-branch <branch>  worktree のベースブランチ
   --agent <id>            エージェントID（省略時はスキルに応じたデフォルト）
   --execution-id <id>     外部成果物と紐付ける実行ID。指定時だけ実行状態を追跡する。
+  --guidance-signal <name> 宣言済みの場面に限り、対応するorchestrator手順書を標準出力へ追加する
 
 Output (stdout):
   ワーカー名（例: issue-5-coder-implement）
@@ -523,6 +526,19 @@ let fail = (msg) => {
   process.exit(1);
 };
 if (!workspace) fail('ワークスペースを解決できません。--workspace を指定するか、GH_MAESTRO_WORKSPACE または .gh-maestro/ のあるディレクトリで実行してください');
+
+let orchestratorGuidance = '';
+try {
+  orchestratorGuidance = prepareScriptGuidance({
+    workspace,
+    scriptName: 'spawn-worker.js',
+    signal: values['--guidance-signal'],
+    env: process.env,
+  });
+} catch (error) {
+  console.error(`spawn-worker: ${error.message}`);
+  process.exit(1);
+}
 
 // --- セッション同一性検証（Issue #444） ---
 // スキル未ロードのセッションからの直接実行や古いセッションIDの使い回しを防ぐため、
@@ -1033,5 +1049,6 @@ ensureWorkerSupervisorRunning({ workspace, scriptsPath: __dirname });
 
 // --- ワーカー名を出力（orchestratorが受け取る） ---
 console.log(workerName);
+if (orchestratorGuidance) console.log(orchestratorGuidance);
 
 } // require.main === module

@@ -26,6 +26,7 @@ const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { ensureWorkspaceRuntimeDir, workspaceRuntimeDir } = require('./shared/storage-layout');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { readJsonFile, parseJsonText } = require('./shared/json-file');
+const { renderNotificationGuidance } = require('./shared/orchestrator-guidance');
 
 const USAGE = `orchestrator-stop-hook.js — orchestratorセッション専用のClaude Code notification hooks
 
@@ -44,8 +45,9 @@ session_id が /gh-maestro のセッション初期化で記録されたIDと一
   notify-human.js を1回実行する。
 取り消し（--cancel）: 人間の UserPromptSubmit はすべての予約を、PostToolUse /
   PostToolUseFailure は PermissionRequest 由来の予約だけを取り消す。plugin monitor の
-  task-notification による UserPromptSubmit は予約を維持する。
-  拒否・中断だけで人間の入力が続かない場合は予約を維持し、通知する。標準出力には何も書かない。
+  task-notification による UserPromptSubmit は予約を維持し、宣言済み手順書があれば
+  hookSpecificOutput.additionalContext として返す。人間の入力には文脈を追加しない。
+  拒否・中断だけで人間の入力が続かない場合は予約を維持し、通知する。
 
 失敗時は終了コード1（Claude Codeの処理は止めない）。`;
 
@@ -198,14 +200,31 @@ function runNotificationHook(input, deps = {}) {
  *
  * @param {object} input hook入力（session_id, cwd）
  * @param {object} [deps]
- * @returns {{exitCode:number}}
+ * @returns {{exitCode:number, stdout?:string}}
  */
 function runCancelHook(input, deps = {}) {
   const workspace = resolveOrchestratorWorkspace(input, deps);
   if (!workspace) return { exitCode: 0 };
   if (input.hook_event_name === 'UserPromptSubmit'
     && typeof input.prompt === 'string'
-    && input.prompt.startsWith('<task-notification>')) return { exitCode: 0 };
+    && input.prompt.startsWith('<task-notification>')) {
+    const additionalContext = (deps.renderNotificationGuidanceFn || renderNotificationGuidance)({
+      workspace,
+      prompt: input.prompt,
+      skillDirectory: deps.skillDirectory,
+      resolveSkillMdPathFn: deps.resolveSkillMdPathFn,
+    });
+    if (!additionalContext) return { exitCode: 0 };
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'UserPromptSubmit',
+          additionalContext,
+        },
+      }),
+    };
+  }
   const file = pendingPath(workspace, deps.runtimeRoot);
   if (input.hook_event_name === 'PostToolUse' || input.hook_event_name === 'PostToolUseFailure') {
     const pending = readPending(file);
@@ -257,6 +276,7 @@ function main(argv = process.argv.slice(2), options = {}) {
   try {
     const input = parseHookInput(readStdin());
     const result = values['--cancel'] ? runCancelHook(input, options) : runNotificationHook(input, options);
+    if (result.stdout) writeStdout(`${result.stdout}\n`);
     if (result.stderr) writeStderr(result.stderr);
     return result.exitCode;
   } catch (error) {

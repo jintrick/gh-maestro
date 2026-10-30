@@ -49,7 +49,7 @@ Review Managerを起動しない軽量経路では、上のコマンドへ `--no
 
 ## Issue終了時
 
-反省会後に `finalize-issue.js --issue <N> --workspace $WORKSPACE` を1回実行する。`finalize-issue.js` は一致するtargetだけを削除し、plugin monitorが次の周回でpoll-prを停止できる状態にする。`reset-session.js` はセッション全体を初期化するためtargetを無条件に削除する。
+反省会後、決定事項本文を `/tmp/decision-<N>.md` に作り、`finalize-issue.js --issue <N> --workspace $WORKSPACE --decision-file /tmp/decision-<N>.md` を1回実行する。finalize-issue.jsは決定事項コメントをIssueへ投稿してからtarget等を後始末するため、投稿失敗時はクローズしない。`finalize-issue.js` は一致するtargetだけを削除し、plugin monitorが次の周回でpoll-prを停止できる状態にする。`reset-session.js` はセッション全体を初期化するためtargetを無条件に削除する。
 
 ## ワーカー状態監視と異常対応
 

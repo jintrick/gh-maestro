@@ -1,3 +1,8 @@
+---
+signals:
+  - script:create-issue.js:lightweight-anchor
+  - script:activate-pr-monitor.js:lightweight-pr
+---
 # 軽量PR経路
 
 影響範囲が限定的でReview Managerのレビューを起動するコストに見合わない変更でも、ベースブランチへ直接commit・pushしてはならない。タイトルだけのアンカーIssueを作成し、通常のPR監視からReview Managerを外す。この軽量経路ではslow層とGitHub CI checksの照会を行わず、PR検出、テスト結果の申告、マージ状態の監視を行う。Review Managerを起動しないだけの通常PR（監視復旧やrevert用PRなど）は軽量経路ではなく、slow層とGitHub CI checksの照会を維持する。
@@ -20,7 +25,7 @@
 CREATE_OUTPUT=$(node "{{SCRIPTS_PATH}}/create-issue.js" \
   --title "<変更内容の短いタイトル>" \
   --title-only \
-  --repo "$REPO" --workspace "$WORKSPACE")
+  --repo "$REPO" --workspace "$WORKSPACE" --guidance-signal lightweight-anchor)
 ISSUE=$(printf '%s\n' "$CREATE_OUTPUT" | sed -n 's/^ISSUE_CREATED:\([0-9][0-9]*\).*/\1/p')
 test -n "$ISSUE"
 ```
@@ -79,7 +84,7 @@ plugin monitorは `/gh-maestro` 起動時に固定コマンドで起動済みな
 
 ```sh
 node "{{SCRIPTS_PATH}}/activate-pr-monitor.js" --issue "$ISSUE" \
-  --no-review-manager --no-review-events --workspace "$WORKSPACE" --base-branch "$BASE_BRANCH"
+  --no-review-manager --no-review-events --workspace "$WORKSPACE" --base-branch "$BASE_BRANCH" --guidance-signal lightweight-pr
 ```
 
 固定の `poll-pr-monitor.js` がtargetを読み、`poll-pr.js`を1回だけ起動する。`--no-review-manager`でReview Managerの起動を、`--no-review-events`でinline/formalレビューAPI監視を抑止する。この2つを併用した軽量経路では、初回検出時・`PR_PUSH`時ともslow層とGitHub CI checksの照会を行わない。PR検出とマージ・クローズ監視は継続する。`run-slow-tests.js` を別途手動で回して代替してはならない。
@@ -98,4 +103,14 @@ slow層またはGitHub CI checksの通知が出た場合は、監視経路の設
 
 **軽量PR経路に反省会は無い。** Review Managerを起動しないためレビュー指摘が構造的に発生せず、反省会の分析対象は常にゼロである。SKILL.md工程9-[2/3]の「分析対象がゼロなら人間に確認する」はこの経路には適用せず、スキップ可否を尋ねない。
 
-マージを検出したらベースブランチを最新化し、`scripts/` または `skills/agents.yaml` に触れた変更なら `node scripts/install.js` を実行してから、`finalize-issue.js` でアンカーIssueをクローズする。
+マージを検出したらベースブランチを最新化する。`scripts/` または `skills/agents.yaml` に触れた変更のinstallはdevへマージ後に行う。
+
+軽量PRには反省会が無いため、次の決定事項本文を作ってからfinalizeする。これにより必須のIssueコメントを残してアンカーIssueを閉じる。
+
+```sh
+node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/decision-<N>.md --stdin <<'EOF'
+反省会なし（軽量PR）
+PR #<PR> をマージ。反省会は軽量PR経路のため実施しない。
+EOF
+node "{{SCRIPTS_PATH}}/finalize-issue.js" --issue <N> --repo $REPO --workspace $WORKSPACE --decision-file /tmp/decision-<N>.md
+```

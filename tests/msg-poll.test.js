@@ -879,6 +879,37 @@ test('orchestrator モード: 出力形式が NEW_MESSAGE:<issue>:<commentId>', 
   });
 });
 
+test('orchestrator モード: 計画URL報告はPLAN_REPORTEDだけを出力しcarrierを既読化する', () => {
+  withTempDir(workspace => {
+    initOrchestratorState(workspace);
+    writeWorkers(workspace, { 'issue-10-coder': { issue: 10 } });
+    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgPoll._setGhApiComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        {
+          id: 778,
+          author_association: 'MEMBER',
+          body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-10-coder","kind":"plan-report","planCommentId":777} -->\n> https://github.com/test/repo/issues/10#issuecomment-777',
+          created_at: '2026-07-07T12:00:00Z',
+        },
+      ]),
+    }));
+
+    const first = runMain(['orchestrator', '--workspace', workspace, '--once']);
+    assert.equal(first.code, 0);
+    first.scanOnce();
+    assert.deepEqual(first.lines, ['PLAN_REPORTED:10:777']);
+    const state = msgPoll.readState(workspace, 'orchestrator');
+    assert.equal(state.status, 'ok');
+    assert.ok(state.state.readByIssue['10'].includes(778), 'carrierコメントIDを既読記録する');
+
+    const second = runMain(['orchestrator', '--workspace', workspace, '--once']);
+    second.scanOnce();
+    assert.deepEqual(second.lines, [], '同じ計画報告を再通知しない');
+  });
+});
+
 test('orchestrator モード: 通知後は readByIssue に既読記録される', () => {
   withTempDir(workspace => {
     initOrchestratorState(workspace);
