@@ -6,6 +6,7 @@
 const { spawnSync, REAL_SPAWN_DISABLED_ERROR_CODE } = require('./shared/child-process');
 const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, chmodSync, lstatSync } = require('fs');
 const { resolve, relative, isAbsolute, sep } = require('path');
+const { parseFlags } = require('./shared/workspace');
 
 const USAGE = `gh-maestro-setup.js — プロジェクトごとの前提条件チェックと初期セットアップ
 
@@ -19,13 +20,21 @@ WezTerm稼働（assistant用）/ git リポジトリ / gh 認証を検証し、.
 使う置き場（core.hooksPath 解決先、未設定なら既定の git ディレクトリ配下）に導入する。
 その置き場がプロジェクトの管理対象（共有される）なら書き込まず、必要な呼び出しが既に
 存在するかを検証して正直に報告する。初回実行後は sentinel (.gh-maestro/setup-ok) で
-環境チェックのみスキップし、冪等なセットアップステップは毎回実行する。通常は
-/gh-maestro の起動フックが呼ぶ。`;
+環境チェックをスキップし、成功した確認行も省略します。冪等なセットアップステップと失敗報告は
+毎回実行・表示します。通常は /gh-maestro の起動フックが呼ぶ。`;
 
-const workspaceRoot = process.argv[2] ?? process.cwd();
+const SPEC = {
+  flags: {},
+  booleans: ['--help', '-h'],
+  positionals: { min: 0, max: 1 },
+};
+
+let workspaceRoot = process.argv[2] ?? process.cwd();
+let sentinelPath = resolve(workspaceRoot, '.gh-maestro', 'setup-ok');
+let reportSuccessfulChecks = true;
 
 function step(msg)  { console.log(`\x1b[36m[gh-maestro] ${msg}\x1b[0m`); }
-function ok(msg)    { console.log(`  \x1b[32mv ${msg}\x1b[0m`); }
+function ok(msg)    { if (reportSuccessfulChecks) console.log(`  \x1b[32mv ${msg}\x1b[0m`); }
 function fail(msg, ...hints) {
   console.error(`\n  \x1b[31mx ${msg}\x1b[0m`);
   for (const h of hints) console.error(`    ${h}`);
@@ -233,7 +242,6 @@ function retireAiReviewCi(options = {}) {
 
 // ─── 1. 環境チェック ──────────────────────────────────────────────────────────
 
-const sentinelPath = resolve(workspaceRoot, '.gh-maestro', 'setup-ok');
 const isFirstRun = () => !existsSync(sentinelPath);
 
 function checkEnvironment() {
@@ -825,18 +833,37 @@ function reportHookResult(label, result) {
  * これらが実行された——実際に動作確認のつもりで require され、git hooks が
  * 書き換わる事故が起きた（gh api DELETE まで走りうる状態だった）。
  */
-function main() {
-  if (process.argv.slice(2).some(a => a === '--help' || a === '-h')) {
-    console.log(USAGE);
-    process.exit(0);
+function main(argv = process.argv.slice(2)) {
+  let values;
+  let rest;
+  try {
+    ({ values, rest } = parseFlags(argv, SPEC));
+  } catch (error) {
+    if (error.name !== 'ArgsValidationError') throw error;
+    if (error.helpRequested) {
+      console.log(USAGE);
+      return 0;
+    }
+    console.error(`gh-maestro-setup: ${error.errors.map((item) => item.message).join('\n')}`);
+    console.error(USAGE);
+    return 1;
   }
+
+  if (values['--help'] || values['-h']) {
+    console.log(USAGE);
+    return 0;
+  }
+
+  workspaceRoot = rest[0] ?? process.cwd();
+  sentinelPath = resolve(workspaceRoot, '.gh-maestro', 'setup-ok');
+  const firstRun = isFirstRun();
+  reportSuccessfulChecks = firstRun;
 
   retireAiReviewCi();
 
   // Sentinel gates only expensive environment checks.
   // Idempotent setup steps (ensure*) run every invocation so new steps
   // apply automatically to existing projects.
-  const firstRun = isFirstRun();
   if (firstRun) {
     checkEnvironment();
   }
@@ -868,9 +895,12 @@ function main() {
     ok('Setup complete (subsequent /gh-maestro invocations will skip environment checks)');
     console.log('\ngh-maestro ready.\n');
   }
+  return 0;
 }
 
 module.exports = {
+  USAGE,
+  SPEC,
   main,
   gitOutput,
   gitStatus,
@@ -888,5 +918,5 @@ module.exports = {
 };
 
 if (require.main === module) {
-  main();
+  process.exitCode = main();
 }

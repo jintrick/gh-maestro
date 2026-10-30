@@ -18,6 +18,7 @@ const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { resolveWorkerName } = require('./shared/workers-registry');
 const { ARTIFACTS, legacyWorkerOwner, recordPath } = require('./shared/record-paths');
 const { stopWorkerProcess } = require('./shared/stop-worker-process');
+const { createNormalWorkerStore } = require('./shared/worker-lease');
 
 const USAGE = `remove-worker.js — ワーカープロセスを kill し worktree を削除する
 
@@ -36,7 +37,8 @@ Options:
 
 workerName（位置引数）か〈--issue + --skill〉のいずれかで削除対象を指定する。
 対象プロセスの同一性を確認したうえでプロセスツリーを kill し（PID再利用時は kill をスキップ）、
-worktree と同名ブランチを削除し、workers.json からエントリを除く。
+worktree と同名ブランチを削除し、lease と workers.json からエントリを除く。
+プロセス停止に失敗した場合や lease が破損している場合、lease は保持してパスを警告する。
 移行前セッションが残した WezTerm ペイン（レガシー paneId）があればそれも kill する。
 ディレクトリがロックで残っても次回 reset-session.js が junction 非追跡で安全に掃除する
 （残骸を手動 rm しないこと。node_modules junction を辿って共有ファイルを壊す）。`;
@@ -111,14 +113,39 @@ function main(argv = process.argv.slice(2)) {
 
   // ── ワーカープロセスを終了（同一性確認付き） ─────────────────────────────
 
+  let processStopSucceeded = false;
   try {
-    stopWorkerProcess(workspace, workerName, {
+    const stopResult = stopWorkerProcess(workspace, workerName, {
       isRemoveMode: true,
       logWarn: (msg) => console.warn(msg),
       _injectedWorkers: workers,
     });
+    processStopSucceeded = stopResult?.success === true;
+    if (!processStopSucceeded) {
+      console.warn('remove-worker: プロセス終了処理が成功を返さなかったため lease を保持します');
+    }
   } catch (e) {
     console.warn(`remove-worker: プロセス終了処理で警告が発生しました: ${e.message}`);
+  }
+
+  // stopWorkerProcess が失敗した場合、プロセスが残っている可能性があるため lease を維持する。
+  // 削除前にも store.read で lease の破損を確認する。旧形式の有効な記録は
+  // process reference を持たないため、JSONとlease構造を読めれば削除してよい。
+  {
+    const store = createNormalWorkerStore(workspace);
+    const leasePath = store.filePath(workerName);
+    if (!processStopSucceeded) {
+      if (existsSync(leasePath)) {
+        console.warn(`remove-worker: プロセス停止処理が失敗したため lease を保持します: ${leasePath}`);
+      }
+    } else {
+      try {
+        const lease = store.read(workerName);
+        if (lease) store.remove(workerName);
+      } catch (error) {
+        console.warn(`remove-worker: lease を削除できないため保持します: ${leasePath}: ${error.message}`);
+      }
+    }
   }
 
   // ── worktreeを即座に削除 ──────────────────────────────────────────────

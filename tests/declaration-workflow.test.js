@@ -74,8 +74,9 @@ test('coder-workflow.md: 計画ファイルの置き場所（worktree外 per-wor
   assert.match(content, /\$WORKSPACE\/\.gh-maestro\/plans\/<issue>\.md/);
 });
 
-test('coder-workflow.md: 素の git commit/push/gh pr create の直接実行を禁止する制約が明記されている', () => {
+test('coder-workflow.md: 素の git commit/push/gh pr create は push-and-declare 手順で禁止する', () => {
   const content = fs.readFileSync(CODER_WORKFLOW, 'utf8');
   const constraintsSection = content.slice(content.indexOf('## 制約'));
-  assert.match(constraintsSection, /git commit.*git push.*gh pr create/);
+  assert.match(content, /素の `git commit` \/ `git push` \/ `gh pr create` を直接実行しない/);
+  assert.doesNotMatch(constraintsSection, /git commit.*git push.*gh pr create/);
 });

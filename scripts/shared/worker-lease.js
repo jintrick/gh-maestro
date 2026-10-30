@@ -506,6 +506,9 @@ function msgPollRole(self) {
 /** orchestrator モードの msg-poll.js が自身に使う role lease 名。msgPollRole() から導出。 */
 const MSGPOLL_ORCHESTRATOR_ROLE = msgPollRole('orchestrator');
 
+/** Prefix shared by every resident role lease filename. */
+const RESIDENT_ROLE_LEASE_PREFIX = 'resident-role-';
+
 /** 引き継ぎ（--force）で所有者の終了を待つ上限時間（ms）。 */
 const HANDOFF_WAIT_MS = 10000;
 
@@ -525,7 +528,7 @@ const INVALID_PATH_CHAR_RE = /[/\\:*?"<>|\x00-\x1f]/g;
  * @returns {string}
  */
 function roleLeaseKey(role) {
-  return `resident-role-${String(role).replace(INVALID_PATH_CHAR_RE, '_')}`;
+  return `${RESIDENT_ROLE_LEASE_PREFIX}${String(role).replace(INVALID_PATH_CHAR_RE, '_')}`;
 }
 
 /**
@@ -1092,6 +1095,7 @@ module.exports = {
   LEGACY_INBOX_SUPERVISOR_ROLE,
   POLL_PR_MONITOR_ROLE,
   MSGPOLL_ORCHESTRATOR_ROLE,
+  RESIDENT_ROLE_LEASE_PREFIX,
   msgPollRole,
   roleLeaseKey,
   isResidentLeaseLive,

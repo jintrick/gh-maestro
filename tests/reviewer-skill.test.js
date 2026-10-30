@@ -16,9 +16,9 @@ test('gh-maestro-reviewer: 共通SKILL.mdは起動フェーズに応じた手順
 
   assert.match(skill, /phase1-planning\.md/);
   assert.match(skill, /phase2-integration\.md/);
-  assert.match(skill, /## レビュー基準（7葉）/);
   assert.match(skill, /## RMの禁止事項/);
-  assert.match(skill, /## 出力形式（参考: 最終findings\.jsonのスキーマ）/);
+  assert.doesNotMatch(skill, /レビュー基準（7葉）/);
+  assert.doesNotMatch(skill, /最終findings\.jsonのスキーマ/);
 
   assert.doesNotMatch(skill, /### 1\. 証拠の取得/);
   assert.doesNotMatch(skill, /### 4\. 結果の受領/);
@@ -31,6 +31,9 @@ test('gh-maestro-reviewer: フェーズ1手順にフェーズ2手順を混在さ
   assert.match(phase1, /## RMの責務（フェーズ1: 計画）/);
   assert.match(phase1, /### 1\. 証拠の取得/);
   assert.match(phase1, /node "\{\{SCRIPTS_PATH\}\}\/print-review-leaves\.js"/);
+  assert.match(phase1, /correctness\/logic-invariants/);
+  assert.match(phase1, /resilience-security\/failure-recovery/);
+  assert.match(phase1, /test-quality\/test-quality/);
   assert.doesNotMatch(phase1, /SHARED_SKILLS_PATH/);
   assert.match(phase1, /coverage ledger/);
   assert.match(phase1, /manifestのJSON構造/);
@@ -45,6 +48,8 @@ test('gh-maestro-reviewer: フェーズ2手順にフェーズ1手順を混在さ
   assert.match(phase2, /## RMの責務（フェーズ2: 統合・完否判断）/);
   assert.match(phase2, /### 4\. 結果の受領/);
   assert.match(phase2, /### 5\. 重複指摘の統合/);
+  assert.match(phase2, /統合済みfindingsの形式/);
+  assert.match(phase2, /verified_references/);
   assert.match(phase2, /finalize-review\.js/);
   assert.doesNotMatch(phase2, /## RMの責務（フェーズ1/);
   assert.doesNotMatch(phase2, /### 1\. 証拠の取得/);

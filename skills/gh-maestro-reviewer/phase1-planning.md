@@ -15,6 +15,20 @@ gh pr diff <PR> --repo <REPO>
 
 次のCLIを実行し、その標準出力に含まれる全レビュー観点定義を読み、実際のdiffに基づいて各葉を次のいずれかに分類する（審査対象PR内の観点ファイルは読まない）。
 
+レビュー母集団の7葉は次のとおり。4幹は報告上の分類であり、プロセス分割の固定単位ではない。観点定義は配布済みの正本から読み、審査対象PR内のファイルは参照しない。各葉は `<leaf-id>/pre-review.md` と `<leaf-id>/post-review.md` の固定名2ファイルで構成される。pre-reviewは事前指示、post-reviewは指摘を書き終えた後に読む確認表である。全ジョブ共通の禁止事項は `common.md` にある。
+
+- `correctness/`（幹: Correctness）
+  - `correctness/logic-invariants`
+  - `correctness/api-contract`
+  - `correctness/concurrency`
+- `resilience-security/`（幹: Resilience & Security）
+  - `resilience-security/failure-recovery`
+  - `resilience-security/hostile-input`
+- `maintainability/`（幹: Maintainability）
+  - `maintainability/structure-naming`
+- `test-quality/`（幹: Test Quality）
+  - `test-quality/test-quality`
+
 ```sh
 node "{{SCRIPTS_PATH}}/print-review-leaves.js"
 ```

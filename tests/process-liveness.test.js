@@ -110,6 +110,22 @@ test('holderless records are reported once per source with the source path', () 
   assert.ok(lines.every((line) => /旧形式の記録を持ち主なしとして扱いました/.test(line)));
 });
 
+test('holderless report collection deduplicates sources and restores normal reporting when stopped', () => {
+  const { api } = makeLiveness();
+  const source = `C:/tmp/sweep-holderless-${process.pid}-${Date.now()}.json`;
+  const reports = processLiveness.collectHolderlessReports();
+  const during = captureStderr(() => {
+    api.observe(api.readRef({ pid: 4242 }, 'default', { source }));
+    api.observe(api.readRef({ pid: 4243 }, 'default', { source }));
+  });
+  assert.deepEqual(during, [], 'collection suppresses per-record stderr output');
+  assert.deepEqual(reports.sources(), [source]);
+  reports.stop();
+
+  const after = captureStderr(() => api.observe(api.readRef({ pid: 4244 }, 'default', { source })));
+  assert.equal(after.length, 1, 'normal once-per-source reporting resumes after stop');
+});
+
 test('corrupt process records stay unknown and are not treated as holderless', () => {
   const { api } = makeLiveness();
   const lines = captureStderr(() => {

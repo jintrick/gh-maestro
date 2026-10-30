@@ -544,6 +544,7 @@ function sweepRegistry(workspace, opts = {}) {
   const excludedWorkerNames = new Set();
   const excludedReviewPrs = new Set();
   const excludedPids = new Set();
+  let removedLeases = [];
 
   // 前段の kill ループおよび後段の housekeeping（ログ整理・一時ファイル削除）から除外する
   // 稼働中ワーカー・常駐プロセスを先に組み立てる。失敗時は fail-closed: kill ループも
@@ -553,7 +554,7 @@ function sweepRegistry(workspace, opts = {}) {
   if (!opts.match) {
     try {
       const { collectHousekeepingExclusions } = require('./shared/collect-housekeeping-exclusions');
-      const { workerNames, reviewPrs, pids } = collectHousekeepingExclusions(workspace, {
+      const { workerNames, reviewPrs, pids, removedLeases: collectedLeases } = collectHousekeepingExclusions(workspace, {
         // --dry-run は manager.running の stale 回収も含めて書き込みを行わない。
         cleanupStale: !opts.dryRun,
       });
@@ -562,6 +563,7 @@ function sweepRegistry(workspace, opts = {}) {
       if (pids) {
         for (const pid of pids) excludedPids.add(pid);
       }
+      removedLeases = collectedLeases || [];
     } catch (e) {
       results.errors.push(`sweep: 稼働中ワーカー除外リストの構築に失敗したため掃除を中断します: ${e.message}`);
       return results;
@@ -629,7 +631,10 @@ function sweepRegistry(workspace, opts = {}) {
     const { sweepWorkspaceFiles } = require('./shared/workspace-housekeeping');
     const housekeeping = sweepWorkspaceFiles(workspace, { excludedWorkerNames, excludedReviewPrs, dryRun: opts.dryRun });
     results.errors.push(...housekeeping.errors);
-    Object.defineProperty(results, 'housekeeping', { value: housekeeping, enumerable: false });
+    Object.defineProperty(results, 'housekeeping', {
+      value: { ...housekeeping, removedLeases: removedLeases || [] },
+      enumerable: false,
+    });
   }
 
   return results;
@@ -672,6 +677,7 @@ Description:
   PID registry を走査し、stale エントリを掃除する。
   各エントリはOS資源参照で生死を確認し、停止対象のPIDを特定する。
   判定不能なエントリは保持する（無関係なプロセスを保護）。
+  通常workerの孤立leaseも回収し、件数を1行で表示する。詳細は <workspace>/.gh-maestro/sweep-lease-report.log に保存する。
 
   status は指定した workspace・script・workerName の生存プロセスを読み取り専用で照会する。
   stdout には {"script":...,"workerName":...,"running":true|false,"pid":...} を出力する。
@@ -815,10 +821,38 @@ function main(argv = process.argv.slice(2)) {
     : undefined;
 
   let results;
+  let sweepError = null;
+  let holderlessSources = [];
+  const holderlessReports = require('./shared/process-liveness').collectHolderlessReports();
   try {
     results = sweepRegistry(workspace, { match: matchFilter, dryRun });
   } catch (e) {
-    writeErr(`process-lifecycle: sweep に失敗しました: ${e.message}`);
+    sweepError = e;
+  } finally {
+    holderlessSources = holderlessReports.sources();
+    holderlessReports.stop();
+  }
+
+  const removedLeases = results?.housekeeping?.removedLeases || [];
+  const reportItems = [];
+  if (removedLeases.length > 0) reportItems.push(`片付け済みワーカーの lease を ${removedLeases.length} 件削除しました`);
+  if (holderlessSources.length > 0) reportItems.push(`旧形式の記録 ${holderlessSources.length} 件を持ち主なしとして扱いました`);
+  if (reportItems.length > 0) {
+    const reportPath = path.join(workspace, '.gh-maestro', 'sweep-lease-report.log');
+    const details = [
+      ...removedLeases.map((leasePath) => `removed lease: ${leasePath}`),
+      ...holderlessSources.map((source) => `holderless record: ${source}`),
+    ].join('\n') + '\n';
+    try {
+      fs.writeFileSync(reportPath, details, 'utf8');
+      writeOut(`sweep: ${reportItems.join('。')}（一覧: ${reportPath}）`);
+    } catch (error) {
+      writeOut(`sweep: ${reportItems.join('。')}（一覧を書けませんでした: ${reportPath}: ${error.message}）`);
+    }
+  }
+
+  if (sweepError) {
+    writeErr(`process-lifecycle: sweep に失敗しました: ${sweepError.message}`);
     return { code: 1, lines: out, errLines: err };
   }
 
@@ -839,7 +873,7 @@ function main(argv = process.argv.slice(2)) {
     writeErr(`Errors (${results.errors.length}):`);
     for (const e of results.errors) writeErr(`  ${e}`);
   }
-  if (results.killed.length === 0 && results.cleaned.length === 0 && results.errors.length === 0) {
+  if (results.killed.length === 0 && results.cleaned.length === 0 && reportItems.length === 0 && results.errors.length === 0) {
     writeOut('No stale entries found.');
   }
 

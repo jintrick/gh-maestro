@@ -2,18 +2,6 @@
 
 PRを作成した時点で実装作業は完了する。CI監視はorchestratorの責務であり、コーダーは行わない。実装完了後の報告は不要（orchestratorがPRを自律検出する）。
 
-**計画報告は実装着手前に必須である。** 計画をIssueのpin済みコメントとして投稿し、`msg-send.js`でorchestratorに報告すること。この報告を送った時点で1アクション完了とみなし、プロセスを終了してよい（承認または差し戻しの指示が届き次第、orchestratorから再開される）。
-
-## 起動時に与えられる情報
-
-- `WORKER_NAME=<name>` — このワーカーの識別名（worktree名。msg-poll.js/msg-send.js等の一意識別に使う）
-- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-diagnostician）
-- `REPO=<owner/repo>` — 対象リポジトリ
-- `WORKSPACE=<path>` — メインワークスペースのルートパス
-- `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）
-- `ISSUE=<N>` — 担当するIssue番号
-- `BASE_BRANCH=<branch>` — PRのベースブランチ
-
 ## 手順
 
 {{RULES_CHECK_STEP}}
@@ -76,7 +64,6 @@ EOF
 ## 制約
 
 - `main` への直接pushは禁止
-- 素の `git commit` / `git push` / `gh pr create` を直接実行しない（`push-and-declare.js` がステージング・コミット・push・PR取得/作成・テスト結果申告を一括で行う。個別実行は申告を省く経路を生む）
 - `$WORKTREE` ルートで `npm install` / `npm ci` は実行しない。ルートで npm install を実行するとワークスペース共有の `node_modules` を破壊する
 - 実装で新しいサブパッケージ（例: `gui/`）を追加した場合、そのディレクトリ内での `npm install` は許可する（`cd gui && npm install`）
 

@@ -233,3 +233,52 @@ test('pre-commit フック経由: .claude/rules/ 配下の同期失敗でもコ�
     assert.ok(fs.existsSync(failureFile), 'コミット成立後も sync-rules.yaml が生成されていること');
   });
 });
+
+test('syncRules: ルール数が3件でも30件でも stdout は最終サマリー1行だけ', () => {
+  for (const count of [3, 30]) {
+    withGitWorkspace(base => {
+      const src = path.join(base, '.claude', 'rules');
+      const dst = path.join(base, '.agents', 'rules');
+      fs.mkdirSync(src, { recursive: true });
+      fs.mkdirSync(dst, { recursive: true });
+      for (let index = 0; index < count; index += 1) {
+        fs.writeFileSync(path.join(src, `rule-${index}.md`),
+          `---\npaths:\n  - "src/rule-${index}.js"\n---\nbody ${index}`);
+      }
+      fs.writeFileSync(path.join(dst, 'orphan.md'), 'stale');
+
+      const r = runScript(base);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout.trim().split(/\r?\n/).length, 1, r.stdout);
+      assert.match(r.stdout, new RegExp(`sync-rules: ${count} 件を \.agents/rules/ へ同期しました`));
+      assert.equal(r.stderr, '');
+      assert.ok(!fs.existsSync(path.join(dst, 'orphan.md')));
+      assert.equal(fs.readdirSync(dst).length, count);
+    });
+  }
+});
+
+test('syncRules: 1件の失敗を stderr 1行にまとめ、残りの同期と孤児回収を続ける', () => {
+  withGitWorkspace(base => {
+    const src = path.join(base, '.claude', 'rules');
+    const dst = path.join(base, '.agents', 'rules');
+    fs.mkdirSync(src, { recursive: true });
+    fs.mkdirSync(dst, { recursive: true });
+    fs.writeFileSync(path.join(src, 'good-a.md'), '---\npaths:\n  - "src/a.js"\n---\nA');
+    fs.writeFileSync(path.join(src, 'bad-rule.md'), '# missing frontmatter');
+    fs.writeFileSync(path.join(src, 'good-b.md'), '---\npaths:\n  - "src/b.js"\n---\nB');
+    fs.writeFileSync(path.join(dst, 'orphan.md'), 'stale');
+
+    const r = runScript(base);
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout.trim().split(/\r?\n/).length, 1, r.stdout);
+    assert.equal(r.stderr.trim().split(/\r?\n/).length, 1, r.stderr);
+    assert.match(r.stderr, /bad-rule\.md/);
+    assert.ok(fs.existsSync(path.join(dst, 'good-a.md')));
+    assert.ok(!fs.existsSync(path.join(dst, 'bad-rule.md')));
+    assert.ok(fs.existsSync(path.join(dst, 'good-b.md')));
+    assert.ok(!fs.existsSync(path.join(dst, 'orphan.md')));
+    const failureFile = path.join(base, '.gh-maestro', 'sync-failures', 'sync-rules.yaml');
+    assert.match(fs.readFileSync(failureFile, 'utf8'), /bad-rule\.md/);
+  });
+});

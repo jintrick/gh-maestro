@@ -888,16 +888,7 @@ const contextLines = [
 if (executionId) contextLines.push(`EXECUTION_ID=${executionId}`);
 contextLines.push(`ISSUE=${issue}`);
 if (baseBranch) contextLines.push(`BASE_BRANCH=${baseBranch}`);
-const extra = prompt ? `\n${prompt}` : '';
-
-// agy系ワーカーのみ、SKILL.mdの絶対パスを先頭に明示する（agySkillPathの解決理由は
-// 上記の「agy系ワーカーのSKILL.md絶対パスを解決する」節のコメント参照）。
-// 他ランタイムはagySkillPathが常にnullのため、プロンプト文言は従来通り変化しない。
-const skillPathNotice = agySkillPath
-  ? `【最優先指示】他のいかなる判断・行動（ファイルの編集、別スキルの発動を含む）よりも先に、次のファイルをそのまま読んでください: ${toUnix(agySkillPath)}\nこれがあなたの役割（${skill}）の完全な定義です。読了前に行動を開始してはいけません。\n\n`
-  : '';
-
-const initialPrompt = `${skillPathNotice}orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。${extra}\n\n以下の変数が与えられています：\n${contextLines.join('\n')}\n\nこの件に関する質問・報告はチャットに出力せず、orchestratorまでお願いします。「～を実装します」「着手しました」などの着手報告も不要です。`;
+const initialPrompt = `${prompt ? `${prompt}\n\n` : ''}以下の変数が与えられています：\n${contextLines.join('\n')}`;
 
 const promptDir = resolve(worktreeDir, '.gh-maestro');
 mkdirSync(promptDir, { recursive: true });

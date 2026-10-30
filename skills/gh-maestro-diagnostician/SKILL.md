@@ -7,20 +7,7 @@ description: gh-maestro原因診断エージェント。orchestratorから原因
 
 ## ゴール
 
-報告を行った時点で調査作業は完了する。以下を実行することがゴールだ：
-
-```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" --body-file <報告本文ファイルのパス>
-```
-
-## 起動時に与えられる情報
-
-- `WORKER_NAME=<name>` — このワーカーの識別名（worktree名。msg-poll.js/msg-send.js等の一意識別に使う）
-- `WORKER_ROLE=<skill-name>` — このワーカーの役職（例: gh-maestro-diagnostician）
-- `REPO=<owner/repo>` — 対象リポジトリ
-- `WORKSPACE=<path>` — メインワークスペースのルートパス
-- `WORKTREE=<path>` — あなた専用のgit worktreeパス（作業はここで行う）
-- `ISSUE=<N>` — 調査対象の Issue 番号
+報告を行った時点で調査作業は完了する。報告は通信ルールのコマンドで送る。
 
 ## 手順
 
@@ -95,9 +82,7 @@ path/to/file.js:42 — <具体的に何が起きているか。コードの解�
 
 ## 調査しても特定できない場合
 
-```sh
-node "{{SCRIPTS_PATH}}/msg-send.js" --body-file <報告本文ファイルのパス>
-```
+通信ルールに従って、特定できなかった事実を報告する。
 
 ## 制約
 

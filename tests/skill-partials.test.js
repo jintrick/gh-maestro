@@ -45,7 +45,7 @@ test('通信ルールの実行例はシェル非依存のファイル入力を�
   assert.match(powerShellExample[1], /<内容>/);
 });
 
-test('explorer/diagnosticianの必須報告例もBash専用構文を使わない', () => {
+test('explorer/diagnosticianの報告コマンドは共通通信ルールだけを参照する', () => {
   const fallbackHeadings = {
     'gh-maestro-explorer': '## 調査しても情報が見つからない場合',
     'gh-maestro-diagnostician': '## 調査しても特定できない場合',
@@ -53,19 +53,13 @@ test('explorer/diagnosticianの必須報告例もBash専用構文を使わない
 
   for (const [skill, heading] of Object.entries(fallbackHeadings)) {
     const content = fs.readFileSync(path.join(SKILLS_DIR, skill, 'SKILL.md'), 'utf8');
-    const goalExample = content.match(/## ゴール[\s\S]*?```(?:sh|powershell)\r?\n([\s\S]*?)\r?\n```/);
     const sectionStart = content.indexOf(heading);
     const nextSection = content.indexOf('\n## ', sectionStart + heading.length);
     const fallbackSection = content.slice(sectionStart, nextSection === -1 ? content.length : nextSection);
-    const fallbackExample = fallbackSection.match(/```(?:sh|powershell)\r?\n([\s\S]*?)\r?\n```/);
-
-    assert.ok(goalExample, `${skill}のゴール実行例が見つからない`);
-    assert.match(goalExample[1], /--body-file <報告本文ファイルのパス>/);
-    assert.doesNotMatch(goalExample[1], /<<['"]?EOF/);
     assert.notEqual(sectionStart, -1, `${skill}の調査失敗時節が見つからない`);
-    assert.ok(fallbackExample, `${skill}の調査失敗時実行例が見つからない`);
-    assert.match(fallbackExample[1], /--body-file <報告本文ファイルのパス>/);
-    assert.doesNotMatch(fallbackExample[1], /<<['"]?EOF/);
+    assert.match(content, /報告は通信ルールのコマンドで送る/);
+    assert.match(fallbackSection, /通信ルールに従って/);
+    assert.doesNotMatch(content, /node .*msg-send\.js/);
   }
 });
 
@@ -84,38 +78,28 @@ test('_partials は skills の走査で `_` 始まりとしてスキル扱いさ
   assert.ok(path.basename(PARTIALS_DIR).startsWith('_'), '部分テンプレート置き場は `_` 始まりである必要がある');
 });
 
-test('コーダースキル・共通テンプレートの npm install 禁止制約に自動リンク済みの前提記述が含まれない (Issue #425)', () => {
-  const targets = [
-    path.join(SKILLS_DIR, 'gh-maestro-coder', 'SKILL.md'),
-    path.join(SKILLS_DIR, 'gh-maestro-senior-coder', 'SKILL.md'),
-    path.join(PARTIALS_DIR, 'coder-workflow.md'),
-  ];
-  for (const target of targets) {
-    const content = fs.readFileSync(target, 'utf8');
-    assert.doesNotMatch(content, /自動リンク済み/, `${path.basename(target)} に「自動リンク済み」の記述が残っている`);
-    assert.match(
-      content,
-      /-\s+`\$WORKTREE`\s+ルートで\s+`npm install`\s+\/\s+`npm ci`\s+は実行しない。ルートで\s+npm install\s+を実行するとワークスペース共有の\s+`node_modules`\s+を破壊する/,
-      `${path.basename(target)} の npm install 禁止制約が期待形式と一致しない`,
-    );
+test('coder-workflow.md が coder 共通の npm install 制約を保持する', () => {
+  const shared = fs.readFileSync(path.join(PARTIALS_DIR, 'coder-workflow.md'), 'utf8');
+  assert.match(shared, /-\s+`\$WORKTREE`\s+ルートで\s+`npm install`\s+\/\s+`npm ci`\s+は実行しない。ルートで\s+npm install\s+を実行するとワークスペース共有の\s+`node_modules`\s+を破壊する/);
+  for (const skill of ['gh-maestro-coder', 'gh-maestro-senior-coder']) {
+    const content = fs.readFileSync(path.join(SKILLS_DIR, skill, 'SKILL.md'), 'utf8');
+    assert.match(content, /\{\{CODER_WORKFLOW\}\}/);
+    assert.doesNotMatch(content, /自動リンク済み|ルートで `npm install`/);
   }
 });
 
-test('質問投稿後のターン終了規約が対象スキルと共通ワークフローで一致する', () => {
+test('質問投稿後のターン終了規約は役割に応じた共通ファイルに集約する', () => {
   const turnEndRule = '質問の投稿が成功したら、そのターンで追加の調査・実装・計画・完了報告を続けず、ワーカー自身の手順を終了する。回答は次の resume で受け取る。';
-  const targets = [
-    path.join(SKILLS_DIR, 'gh-maestro-coder', 'SKILL.md'),
-    path.join(SKILLS_DIR, 'gh-maestro-senior-coder', 'SKILL.md'),
-    path.join(SKILLS_DIR, 'gh-maestro-base', 'SKILL.md'),
-    path.join(PARTIALS_DIR, 'coder-workflow.md'),
-  ];
-
-  for (const target of targets) {
-    const content = fs.readFileSync(target, 'utf8');
-    assert.match(content, /msg-send\.js"? --body-file <質問本文ファイルのパス>/, `${path.basename(target)} が既存の質問送信コマンドを案内していない`);
-    assert.ok(content.includes(turnEndRule), `${path.basename(target)} の質問後ターン終了規約が共通文言と一致しない`);
-    assert.doesNotMatch(content, /--question/, `${path.basename(target)} が新しい質問オプションに依存している`);
-    assert.doesNotMatch(content, /自分で止まらない/, `${path.basename(target)} に質問後停止と矛盾する文言が残っている`);
+  const sharedWorkflow = fs.readFileSync(path.join(PARTIALS_DIR, 'coder-workflow.md'), 'utf8');
+  assert.match(sharedWorkflow, /msg-send\.js"? --body-file <質問本文ファイルのパス>/);
+  assert.ok(sharedWorkflow.includes(turnEndRule));
+  for (const skill of ['gh-maestro-coder', 'gh-maestro-senior-coder']) {
+    const content = fs.readFileSync(path.join(SKILLS_DIR, skill, 'SKILL.md'), 'utf8');
+    assert.match(content, /\{\{CODER_WORKFLOW\}\}/);
+    assert.doesNotMatch(content, /質問投稿後のターン終了規約/);
   }
+  const base = fs.readFileSync(path.join(SKILLS_DIR, 'gh-maestro-base', 'SKILL.md'), 'utf8');
+  assert.match(base, /msg-send\.js"? --body-file <質問本文ファイルのパス>/);
+  assert.ok(base.includes(turnEndRule));
 });
 
