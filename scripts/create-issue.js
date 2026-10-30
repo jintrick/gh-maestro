@@ -15,12 +15,13 @@ const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { deleteInputFileBestEffort } = require('./shared/file-cleanup');
 const { isRetryableGhFailure, graphqlCreateIssue } = require('./shared/gh-fallback');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
+const { prepareScriptGuidance } = require('./shared/orchestrator-guidance');
 
 const USAGE = `create-issue.js — GitHub Issue を作成し、成功時にbody-fileの削除を試みる
 
 Usage:
-  node create-issue.js --title <タイトル> --body-file <path> [--repo <owner/repo>] [--workspace <path>]
-  node create-issue.js --title <タイトル> --title-only [--repo <owner/repo>] [--workspace <path>]
+  node create-issue.js --title <タイトル> --body-file <path> [--repo <owner/repo>] [--workspace <path>] [--guidance-signal <name>]
+  node create-issue.js --title <タイトル> --title-only [--repo <owner/repo>] [--workspace <path>] [--guidance-signal <name>]
 
 Arguments:
   --title <タイトル>     Issue タイトル
@@ -29,6 +30,7 @@ Arguments:
                         --body-file または --title-only のいずれか一方が必要（両方指定も不可）
   --repo <owner/repo>   対象リポジトリ（省略時はカレントディレクトリのリポジトリ）
   --workspace <path>    ワークスペースのルートパス（省略時は環境変数またはCWDから上方探索で解決）
+  --guidance-signal <name> 宣言済みの場面に限り、対応するorchestrator手順書を標準出力へ追加する
 
 Output (stdout):
   ISSUE_CREATED:<番号>  作成成功。<URL> も併記される
@@ -127,7 +129,7 @@ if (require.main === module) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(argv, {
-      flags: { '--title': {}, '--body-file': {}, '--repo': {}, '--workspace': {} },
+      flags: { '--title': {}, '--body-file': {}, '--repo': {}, '--workspace': {}, '--guidance-signal': {} },
       booleans: ['--title-only', '--help', '-h'],
       positionals: { min: 0, max: 0 },
     }));
@@ -177,6 +179,20 @@ if (require.main === module) {
     console.error('create-issue: ワークスペースを解決できません。--workspace を指定するか、.gh-maestro/ のあるディレクトリで実行してください。');
     process.exit(1);
   }
+
+  let guidance = '';
+  try {
+    guidance = prepareScriptGuidance({
+      workspace,
+      scriptName: 'create-issue.js',
+      signal: values['--guidance-signal'],
+      env: process.env,
+    });
+  } catch (error) {
+    console.error(`create-issue: ${error.message}`);
+    process.exit(1);
+  }
+  if (guidance) console.log(guidance);
 
   let absBodyFile = null;
   if (bodyFile) {

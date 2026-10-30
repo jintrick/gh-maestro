@@ -12,11 +12,12 @@ const { spawnSync } = require('./shared/child-process');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { deleteInputFileBestEffort } = require('./shared/file-cleanup');
 const { toWinPath } = require('./shared/win-path');
+const { prepareScriptGuidance } = require('./shared/orchestrator-guidance');
 
 const USAGE = `update-issue.js — GitHub Issue本文を更新し、成功時にbody-fileの削除を試みる
 
 Usage:
-  node update-issue.js --issue <N> --body-file <path> [--title <タイトル>] [--repo <owner/repo>] [--workspace <path>]
+  node update-issue.js --issue <N> --body-file <path> [--title <タイトル>] [--repo <owner/repo>] [--workspace <path>] [--guidance-signal <name>]
 
 Options:
   --issue <N>           対象Issue番号（必須、正の整数）
@@ -24,6 +25,7 @@ Options:
   --title <タイトル>    Issueタイトル（省略時は変更しない）
   --repo <owner/repo>   対象リポジトリ（省略時はworkspaceから解決）
   --workspace <path>    ワークスペースのルートパス（省略時は環境変数またはCWDから解決）
+  --guidance-signal <name> 宣言済みの場面に限り、対応するorchestrator手順書を標準出力へ追加する
 
 Output (stdout):
   ISSUE_UPDATED:<番号>  更新成功
@@ -73,6 +75,7 @@ function main(argv = process.argv.slice(2), deps = {}) {
         '--title': {},
         '--repo': {},
         '--workspace': {},
+        '--guidance-signal': {},
       },
       booleans: ['--help', '-h'],
       positionals: { min: 0, max: 0 },
@@ -95,12 +98,29 @@ function main(argv = process.argv.slice(2), deps = {}) {
     return { code: 1, stderr: 'update-issue: ワークスペースを解決できません。--workspaceを指定するか、.gh-maestro/のあるディレクトリで実行してください。' };
   }
 
+  let guidance = '';
+  try {
+    guidance = (deps.prepareScriptGuidanceFn || prepareScriptGuidance)({
+      workspace,
+      scriptName: 'update-issue.js',
+      signal: values['--guidance-signal'],
+      env: deps.env || process.env,
+      skillDirectory: deps.skillDirectory,
+    });
+  } catch (error) {
+    return { code: 1, stderr: `update-issue: ${error.message}` };
+  }
+
   const logicalBodyFile = values['--body-file'];
   const bodyFile = path.resolve(toWinPath(logicalBodyFile));
   try {
     fs.accessSync(bodyFile, fs.constants.F_OK);
   } catch {
-    return { code: 1, stderr: `update-issue: body-fileが見つかりません: ${logicalBodyFile}` };
+    return {
+      code: 1,
+      stdout: guidance,
+      stderr: `update-issue: body-fileが見つかりません: ${logicalBodyFile}`,
+    };
   }
 
   const result = updateIssue({
@@ -114,13 +134,14 @@ function main(argv = process.argv.slice(2), deps = {}) {
   if (!result.ok) {
     return {
       code: result.status || 1,
+      stdout: guidance,
       stderr: `update-issue: gh issue editに失敗しました。body-fileは保持します: ${logicalBodyFile}\n${result.stderr}`,
     };
   }
 
   return {
     code: 0,
-    stdout: `ISSUE_UPDATED:${issue}`,
+    stdout: [`ISSUE_UPDATED:${issue}`, guidance].filter(Boolean).join('\n'),
     stderr: result.cleanupWarning ? `update-issue: ${result.cleanupWarning}` : undefined,
   };
 }

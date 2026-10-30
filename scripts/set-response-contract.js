@@ -23,9 +23,10 @@ const { resolveWorkerName } = require('./shared/workers-registry');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { CONTRACT_TYPES, writeContract, clearContract } = require('./shared/response-contract');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
+const { prepareScriptGuidance } = require('./shared/orchestrator-guidance');
 
 const SPEC = {
-  flags: { '--issue': {}, '--skill': {}, '--type': {}, '--artifact': {}, '--workspace': {} },
+  flags: { '--issue': {}, '--skill': {}, '--type': {}, '--artifact': {}, '--workspace': {}, '--guidance-signal': {} },
   booleans: ['--help', '-h'],
   positionals: { min: 0, max: 0 },
 };
@@ -33,7 +34,7 @@ const SPEC = {
 const USAGE = `set-response-contract.js — orchestratorが応答契約を設定する
 
 Usage:
-  node set-response-contract.js --issue <N> --skill <role> --type <type> [--artifact <name>] [--workspace <path>]
+  node set-response-contract.js --issue <N> --skill <role> --type <type> [--artifact <name>] [--workspace <path>] [--guidance-signal <name>]
 
 Arguments:
   --issue <N>            対象のIssue番号（必須）
@@ -43,6 +44,7 @@ Arguments:
                            artifact-or-message   — 指定成果物の成立またはメッセージ送信で充足
   --artifact <name>      artifact-or-message 時の成果物種別（現在は "pr" のみ対応）
   --workspace <path>     ワークスペースパス（省略時は環境変数またはCWDから解決）
+  --guidance-signal <name> 宣言済みの場面に限り、対応するorchestrator手順書を標準出力へ追加する
 
 Output (stdout):
   設定した契約の要約を1行出力。例:
@@ -106,6 +108,20 @@ function main(argsOverride, deps = {}) {
     return { code: 1, lines: out, errLines: err };
   }
 
+  let guidance = '';
+  try {
+    guidance = (deps.prepareScriptGuidanceFn || prepareScriptGuidance)({
+      workspace,
+      scriptName: 'set-response-contract.js',
+      signal: values['--guidance-signal'],
+      env: deps.env || process.env,
+      skillDirectory: deps.skillDirectory,
+    });
+  } catch (e) {
+    writeErr(`set-response-contract: ${e.message}`);
+    return { code: 1, lines: out, errLines: err };
+  }
+
   // 契約型のバリデーション
   if (type !== CONTRACT_TYPES.MESSAGE_REQUIRED && type !== CONTRACT_TYPES.ARTIFACT_OR_MESSAGE) {
     writeErr(`set-response-contract: 未知の契約型です: "${type}"。${CONTRACT_TYPES.MESSAGE_REQUIRED} または ${CONTRACT_TYPES.ARTIFACT_OR_MESSAGE} を指定してください。`);
@@ -129,6 +145,7 @@ function main(argsOverride, deps = {}) {
   try {
     workerName = resolveWorkerName(workspace, { issue, skill });
   } catch (e) {
+    if (guidance) writeOut(guidance);
     writeErr(`set-response-contract: ワーカーを解決できません: ${e.message}`);
     return { code: 1, lines: out, errLines: err };
   }
@@ -137,6 +154,7 @@ function main(argsOverride, deps = {}) {
   if (type === CONTRACT_TYPES.MESSAGE_REQUIRED) {
     clearContract(workspace, workerName);
     writeOut(`CONTRACT_CLEARED:${workerName}`);
+    if (guidance) writeOut(guidance);
     return { code: 0, lines: out, errLines: err };
   }
 
@@ -154,6 +172,7 @@ function main(argsOverride, deps = {}) {
     } catch { /* best-effort */ }
   }
   writeOut(`CONTRACT_SET:${workerName} -> ${type}(${artifact})`);
+  if (guidance) writeOut(guidance);
 
   return { code: 0, lines: out, errLines: err };
 }

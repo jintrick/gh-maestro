@@ -4,8 +4,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const { parseFrontmatter } = require('../scripts/sync-rules');
+const { renderNotificationGuidance } = require('../scripts/shared/orchestrator-guidance');
 
 const SKILL_PATH = path.join(__dirname, '..', 'skills', 'gh-maestro-orchestrator', 'SKILL.md');
+const SKILL_DIR = path.dirname(SKILL_PATH);
 const STAGE_HEADING_RE = /^### (\d+)\. ([^\r\n]+)$/gm;
 const STAGE_COUNT_RE = /<!--\s*gh-maestro-structure:\s*stages=(\d+)\s*-->/g;
 const STAGE_STRUCTURE_RE = /<!--\s*gh-maestro-structure:\s*middle-items=(\d+)\s*-->/g;
@@ -48,6 +51,26 @@ function readDeclaredMiddleItemTotal(stage, stageNumber) {
     `工程${stageNumber}に中項目数の構造宣言がちょうど1件あること`,
   );
   return Number(declarations[0][1]);
+}
+
+function extractEventNames(eventTable) {
+  const names = new Set();
+  for (const line of eventTable.split(/\r?\n/)) {
+    const firstCell = /^\|\s*([^|]+)\|/.exec(line)?.[1];
+    if (!firstCell) continue;
+    const eventLabel = firstCell.replace(/<[^>]*>/g, ' ');
+    for (const match of eventLabel.matchAll(/(?:^|[^A-Za-z0-9_])([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)(?![A-Za-z0-9_])/g)) {
+      names.add(match[1]);
+    }
+  }
+  return names;
+}
+
+function requireDeclaredNotification(signal, eventNames, file) {
+  const match = /^notify:([A-Z][A-Z0-9_]*)$/.exec(signal);
+  assert.ok(match, `${file}の通知合図形式が有効であること: ${signal}`);
+  assert.ok(eventNames.has(match[1]), `${file}の通知合図 ${match[1]} がイベント表の通知名と完全一致すること`);
+  return match[1];
 }
 
 test('開発サイクルの大項目が文書上の連番で必須／任意に区分されている', () => {
@@ -107,7 +130,7 @@ test('文書が宣言した中項目の構造と記載内容が工程ごとに�
 });
 
 test('工程2の既存判断照合がADRと保留Issueに限定され、広域検索を要求しない', () => {
-  const stage = readStage(readDevelopmentCycle(), 2);
+  const stage = fs.readFileSync(path.join(SKILL_DIR, 'stage-2-research.md'), 'utf8');
 
   assert.match(stage, /docs\/adr\//, '工程2がADRの確認先を含むこと');
   assert.match(stage, /gh-maestro-pending/, '工程2が保留Issueの確認先を含むこと');
@@ -133,7 +156,88 @@ test('開発サイクルが工程1〜9で構成され、工程3に「抽象設�
   assert.equal(readDeclaredMiddleItemTotal(stage3, 3), 1, '工程3の中項目構造宣言が1件であること');
   assert.match(
     stage3,
-    /####\s*3-\[1\/1\]\s*抽象設計の検討【任意】/,
+    /3-\[1\/1\]\s*抽象設計の検討【任意】/,
     '工程3の中項目に「3-[1/1] 抽象設計の検討【任意】」が存在すること',
   );
+});
+
+test('12手順書の合図宣言が存在し、通知・script合図が実際の配信経路に結び付いている', () => {
+  const expectedFiles = [
+    'stage-1-requirements.md', 'stage-2-research.md', 'stage-3-architect.md',
+    'stage-4-coder.md', 'stage-5-plan-review.md', 'stage-6-implementation-start.md',
+    'stage-7-review-merge.md', 'stage-8-deployment-check.md', 'stage-9-retrospective.md',
+    'triage.md', 'retrospective.md', 'lightweight-pr.md',
+  ];
+  const eventTableStart = fs.readFileSync(SKILL_PATH, 'utf8').indexOf('## イベントの受け口');
+  const eventTableEnd = fs.readFileSync(SKILL_PATH, 'utf8').indexOf('## 横断的な手続き', eventTableStart);
+  const skill = fs.readFileSync(SKILL_PATH, 'utf8');
+  const eventTable = skill.slice(eventTableStart, eventTableEnd);
+  const eventNames = extractEventNames(eventTable);
+  const signalsByFile = new Map();
+
+  for (const file of expectedFiles) {
+    const content = fs.readFileSync(path.join(SKILL_DIR, file), 'utf8');
+    const { signals } = parseFrontmatter(content);
+    assert.ok(Array.isArray(signals), `${file}にsignals宣言があること`);
+    assert.ok(signals.length > 0, `${file}に少なくとも1つ合図があること`);
+    signalsByFile.set(file, signals);
+    if (file === 'stage-1-requirements.md') {
+      assert.deepEqual(signals, ['none'], 'stage-1は合図なしを宣言すること');
+    } else {
+      assert.ok(!signals.includes('none'), `${file}が他の合図とnoneを併記しないこと`);
+    }
+
+    for (const signal of signals) {
+      if (signal.startsWith('notify:')) {
+        const name = requireDeclaredNotification(signal, eventNames, file);
+        const prompt = `<task-notification><event>${name}:42</event></task-notification>`;
+        const output = renderNotificationGuidance({ workspace: path.dirname(SKILL_DIR), skillDirectory: SKILL_DIR, prompt });
+        assert.match(output, new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${name}で${file}が配信されること`);
+        assert.ok(output.length <= 9000, `${name}の追加文脈が9000文字以下であること`);
+      } else if (signal.startsWith('script:')) {
+        const [, scriptName] = /^script:([^:]+):(.+)$/.exec(signal) || [];
+        assert.ok(scriptName, `${file}のscript合図形式が有効であること`);
+        const scriptPath = path.join(__dirname, '..', 'scripts', scriptName);
+        assert.ok(fs.existsSync(scriptPath), `${scriptName}がscripts/に存在すること`);
+        const scriptSource = fs.readFileSync(scriptPath, 'utf8');
+        assert.match(scriptSource, /prepareScriptGuidance/, `${scriptName}が共有合図関数を呼ぶこと`);
+        assert.match(scriptSource, /--guidance-signal/, `${scriptName}が実CLI引数として合図を受け取ること`);
+      } else {
+        assert.equal(file, 'stage-1-requirements.md', `${file}の未知の合図形式`);
+      }
+    }
+  }
+
+  assert.deepEqual([...signalsByFile.keys()].sort(), [...expectedFiles].sort());
+  const merged = renderNotificationGuidance({
+    workspace: path.dirname(SKILL_DIR), skillDirectory: SKILL_DIR,
+    prompt: '<task-notification><event>PR_MERGED:42</event></task-notification>',
+  });
+  assert.ok(merged.length <= 9000, `PR_MERGEDの合計追加文脈が9000文字以下であること（${merged.length}）`);
+});
+
+test('notify合図はイベント名と完全一致し、部分一致だけする誤記を拒否する', () => {
+  const skill = fs.readFileSync(SKILL_PATH, 'utf8');
+  const eventTableStart = skill.indexOf('## イベントの受け口');
+  const eventTableEnd = skill.indexOf('## 横断的な手続き', eventTableStart);
+  const eventNames = extractEventNames(skill.slice(eventTableStart, eventTableEnd));
+
+  assert.ok(eventNames.has('PR_PUSH'), 'イベント表からPR_PUSHを通知名として抽出する');
+  assert.equal(eventNames.has('PR'), false, 'PR_PUSHの部分文字列や引数プレースホルダーを別通知名にしない');
+  assert.equal(requireDeclaredNotification('notify:PR_PUSH', eventNames, 'fixture.md'), 'PR_PUSH');
+  assert.throws(
+    () => requireDeclaredNotification('notify:PR', eventNames, 'fixture.md'),
+    /通知合図 PR がイベント表の通知名と完全一致すること/,
+  );
+});
+
+test('工程7に修正push後のexplorer事実確認が番号付き中項目としてある', () => {
+  const cycle = readDevelopmentCycle();
+  const stage7 = readStage(cycle, 7);
+  assert.equal(readDeclaredMiddleItemTotal(stage7, 7), 6);
+  assert.match(stage7, /7-\[4\/6\].*修正push後の事実確認/);
+  const handbook = fs.readFileSync(path.join(SKILL_DIR, 'stage-7-review-merge.md'), 'utf8');
+  assert.match(handbook, /PR_PUSH/);
+  assert.match(handbook, /explorer/);
+  assert.match(handbook, /checkout/);
 });

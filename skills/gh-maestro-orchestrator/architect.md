@@ -45,7 +45,7 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --skill gh-maestro-architect --issue <N> --description abstract-design \
   --session-id $SESSION_ID \
   --prompt-file <確定済み要件・相談したい設計上の論点・参照先のポインタを含むファイル> \
-  --execution-id issue-<N>-architect-<attempt> \
+  --execution-id issue-<N>-architect-<attempt> --guidance-signal architect-start \
   --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
 ```
 

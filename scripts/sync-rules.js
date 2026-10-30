@@ -29,23 +29,25 @@ const AGENTS_RULES = path.join(ROOT, '.agents', 'rules');
 
 function parseFrontmatter(rawContent) {
   const content = rawContent.replace(/\r\n/g, '\n');
-  if (!content.startsWith('---\n')) return { paths: null, body: content };
+  if (!content.startsWith('---\n')) return { paths: null, signals: null, body: content };
   const end = content.indexOf('\n---\n', 4);
-  if (end === -1) return { paths: null, body: content };
+  if (end === -1) return { paths: null, signals: null, body: content };
   const yaml = content.slice(4, end);
   const body = content.slice(end + 5);
 
-  const pathsMatch = yaml.match(/^paths:\s*\n((?:[ \t]+-[ \t]+.+\n?)+)/m);
-  if (!pathsMatch) return { paths: null, body };
+  // Keep this small list reader as part of the existing frontmatter parser so
+  // rule paths and handbook delivery signals share one parsing contract.
+  const parseList = (key) => {
+    const match = yaml.match(new RegExp('^' + key + ':\\s*\\n((?:[ \\t]+-[ \\t]+[^\\n]*(?:\\n|$))*)', 'm'));
+    if (!match) return null;
+    return match[1]
+      .split('\n')
+      .filter(line => /^[ \\t]+-[ \\t]+/.test(line))
+      .map(line => line.replace(/^[ \\t]+-[ \\t]+/, '').replace(/^['\"]|['\"]$/g, '').trim());
+  };
 
-  const paths = pathsMatch[1]
-    .split('\n')
-    .filter(l => /^[ \t]+-[ \t]+/.test(l))
-    .map(l => l.replace(/^[ \t]+-[ \t]+/, '').replace(/^["']|["']$/g, '').trim());
-
-  return { paths, body };
+  return { paths: parseList('paths'), signals: parseList('signals'), body };
 }
-
 function toAgyFrontmatter(paths, file) {
   if (!paths || paths.length === 0) {
     throw new Error(`sync-rules: ${file} has no paths: frontmatter`);

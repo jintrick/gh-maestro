@@ -12,12 +12,19 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
 3. **計画フェーズ（実装着手前に必須）**:
    - `$WORKTREE` 上で実装計画に必要な調査（対象ファイル・変更方針・作業分割・検証条件）を行う
    - 実装計画を `$WORKSPACE/.gh-maestro/plans/<issue>.md` にMarkdownファイルとして作成する（worktree は後で削除されるため、計画はworktree の外の per-workspace 領域に残す）
-   - `publish-plan.js` で計画をIssueのpin済みコメントとして投稿する：
+   - `publish-plan.js` で計画をIssueのpin済みコメントとして投稿し、そのURLからコメントIDを取る：
      ```sh
-     node "{{SCRIPTS_PATH}}/publish-plan.js" --issue $ISSUE --body-file <計画ファイル> --workspace $WORKSPACE
+     PLAN_URL=$(node "{{SCRIPTS_PATH}}/publish-plan.js" --issue $ISSUE --body-file <計画ファイル> --workspace $WORKSPACE)
+     PLAN_COMMENT_ID=${PLAN_URL##*#issuecomment-}
+     case "$PLAN_COMMENT_ID" in ''|*[!0-9]*) echo "計画コメントURLからIDを取得できません: $PLAN_URL" >&2; exit 1;; esac
      ```
      スクリプトが自動的に新規投稿（初回）か既存pinコメントの更新（差し戻し後）かを判定するため、コーダー側で分岐する必要はない
-   - 通信ルールの `msg-send.js` で計画投稿完了を報告する。**報告本文には pin 済みコメントのURLだけを書く。計画の要約・概要・要点を本文に含めてはならない。** orchestrator が本文を読まずに要約で承認判断を下す経路を作らないためであり、architect が設計コメントのURLだけを通知するのと同じ流儀である（既存の「結果を返信する」規約の一種として位置づける）。この報告を送った時点で1アクション完了とみなし、**そのまま終了してよい**（既存のresume機構により、承認または差し戻しの指示が届いた時点でorchestratorから再開される）
+   - pin 済みコメントのURLだけを書いた本文ファイルを作り、`msg-send.js --plan-comment-id <ID>` で報告する。**本文はURLだけとし、計画の要約・概要・要点を含めない。** `msg-poll.js` はcarrier報告を報告済みとして認識したうえで `PLAN_REPORTED` を1回出し、`NEW_MESSAGE` は重ねて出さない。計画コメント自体はhookが読む通知IDであり、stage-5の手順書はorchestratorの文脈だけに届く。
+     ```sh
+     printf '%s\n' "$PLAN_URL" | node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/plan-url-<N>.md --stdin
+     node "{{SCRIPTS_PATH}}/msg-send.js" --plan-comment-id "$PLAN_COMMENT_ID" --body-file /tmp/plan-url-<N>.md
+     ```
+     この報告を送った時点で1アクション完了とみなし、**そのまま終了してよい**（承認または差し戻しが届いた時点でorchestratorから再開される）
    - **承認の指示を受け取ったら**、以下の手順4に進む
    - **差し戻し（修正依頼）の指示を受け取ったら**、計画を修正し、再度 `publish-plan.js` で同じpin済みコメントを更新し、再度報告して待機する
 4. `$WORKTREE` 上で実装を完了させる（作業は必ず `$WORKTREE` 内で行う）

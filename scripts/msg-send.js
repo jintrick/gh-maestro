@@ -98,6 +98,7 @@ Options:
                         ヒアドキュメント内でも展開されてしまい、位置引数と同じ事故が再現する。
   --raw                 メッセージ用のマーカー・引用ヘッダーを付けず、本文をそのまま Issue コメントに投稿する。
   --execution-id <id>  実行記録と紐付けるID。投稿成功時だけ completed として記録する。
+  --plan-comment-id <id> 計画URL報告用（ワーカー専用）。msg-pollは通常のNEW_MESSAGEではなくPLAN_REPORTEDとして通知する。
 
 本文は --body-file と --stdin のどちらか一方を必ず指定する（同時指定・両方省略はエラー）。
 本文を位置引数で渡すことはできない（渡すとエラーになる）。
@@ -300,7 +301,7 @@ function main(argsOverride, envOverride, ioOverride) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(parsedArgs, {
-      flags: { '--workspace': {}, '--issue': {}, '--from': {}, '--body-file': {}, '--execution-id': {}, '--skill': {} },
+      flags: { '--workspace': {}, '--issue': {}, '--from': {}, '--body-file': {}, '--execution-id': {}, '--skill': {}, '--plan-comment-id': {} },
       booleans: ['--stdin', '--help', '-h'],
       // 宛先（recipient）は位置引数で受け取る。個数の妥当性は下の extraPositionals 判定で
       // 専用メッセージ（--stdin / --body-file 案内）と共に検証するため、パーサ側では上限を設けない。
@@ -337,6 +338,20 @@ function main(argsOverride, envOverride, ioOverride) {
   // 従来どおり正常に機能する（Issue #384）。
   const workerIdentity = env.GH_MAESTRO_WORKER || null;
   const isWorker = isWorkerIdentity(workerIdentity);
+  const planCommentId = values['--plan-comment-id'];
+  const hasPlanCommentId = planCommentId !== undefined;
+  if (hasPlanCommentId && !/^[1-9][0-9]*$/.test(planCommentId)) {
+    writeErr('msg-send: --plan-comment-id は正の整数で指定してください。');
+    return { code: 1, lines: out, errLines: err };
+  }
+  if (hasPlanCommentId && !isWorker) {
+    writeErr('msg-send: --plan-comment-id はワーカーからorchestratorへの計画報告専用です。');
+    return { code: 1, lines: out, errLines: err };
+  }
+  if (hasPlanCommentId && raw) {
+    writeErr('msg-send: --plan-comment-id はマーカー付きの計画URL報告専用です。--raw と同時に指定できません。');
+    return { code: 1, lines: out, errLines: err };
+  }
 
   // ── 送信先の解決 ────────────────────────────────────────────────────────
   // recipient（宛先）の位置引数解釈は本文入力方式の変更と無関係に維持する。
@@ -522,7 +537,12 @@ function main(argsOverride, envOverride, ioOverride) {
 
   // ── マーカー生成 ────────────────────────────────────────────────────────
 
-  const marker = JSON.stringify({ v: 1, to: recipient, from });
+  const markerData = { v: 1, to: recipient, from };
+  if (planCommentId) {
+    markerData.kind = 'plan-report';
+    markerData.planCommentId = Number(planCommentId);
+  }
+  const marker = JSON.stringify(markerData);
   const directionIcon = from === 'orchestrator' ? '📤' : '📥';
   const humanHeader = `> ${directionIcon} **From:** \`${from}\` ➔ **To:** \`${recipient}\`\n>\n> ` + body.replace(/\n/g, '\n> ');
   const fullBody = raw ? body : `<!-- gh-maestro ${marker} -->\n${humanHeader}`;

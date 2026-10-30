@@ -24,6 +24,19 @@ test('getReportStatusSinceStart: startTime以降に自分自身からの報告�
   });
 });
 
+test('計画報告マーカーもfrom/toが一致すれば通常の報告として数える', () => {
+  const planReport = {
+    id: 2,
+    author_association: 'MEMBER',
+    created_at: '2026-01-01T00:05:00Z',
+    body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-9-fix","kind":"plan-report","planCommentId":44} -->\n> 計画URL',
+  };
+  assert.deepEqual(getReportStatusSinceStart([planReport], 'issue-9-fix', '2026-01-01T00:00:00.000Z'), {
+    status: 'reported',
+    report: planReport,
+  });
+});
+
 test('getReportStatusSinceStart: write権限を持たない投稿者の報告は採用せず、信頼済み報告を上書きしない', () => {
   const untrusted = {
     id: 2,

@@ -79,6 +79,7 @@ Output (stdout):
   新着メッセージを1行ずつ出力:
     worker モード:       NEW_MESSAGE:<commentId>
     orchestrator モード: NEW_MESSAGE:<issue>:<commentId>
+    orchestrator モード: PLAN_REPORTED:<issue>:<planCommentId>（計画URL報告。報告コメントを既読化し、NEW_MESSAGEは重複出力しない）
     orchestrator モード: LOCK_DENIED:<role>[:<ownerPid>][:<reason>] / HANDOFF_WAIT:<role>[:<ownerPid>]
                           （常駐プロセスの role lease で起動が拒否された・引き継ぎ待機に
                           入った監査イベント。LOCK_DENIED の reason は live-lease または
@@ -680,8 +681,15 @@ function main(argsOverride, opts = {}) {
         continue;
       }
 
+      const planCommentId = isOrchestrator
+        && meta.from !== 'orchestrator'
+        && meta.kind === 'plan-report'
+        && Number.isSafeInteger(meta.planCommentId)
+        && meta.planCommentId > 0
+        ? meta.planCommentId
+        : null;
       if (!candidatesByIssue.has(issueKey)) candidatesByIssue.set(issueKey, []);
-      candidatesByIssue.get(issueKey).push({ cid, created_at: c.created_at, issue: issueKey });
+      candidatesByIssue.get(issueKey).push({ cid, created_at: c.created_at, issue: issueKey, planCommentId });
     }
 
     const allCandidates = [];
@@ -697,7 +705,8 @@ function main(argsOverride, opts = {}) {
 
     for (const e of emitted) {
       if (isOrchestrator) {
-        writeOut(`NEW_MESSAGE:${e.issue}:${e.cid}`);
+        if (e.planCommentId) writeOut(`PLAN_REPORTED:${e.issue}:${e.planCommentId}`);
+        else writeOut(`NEW_MESSAGE:${e.issue}:${e.cid}`);
       } else {
         writeOut(`NEW_MESSAGE:${e.cid}`);
       }

@@ -180,6 +180,64 @@ test('monitor task-notification の UserPromptSubmit 後に — で Stop して�
   });
 });
 
+test('task-notification の宣言済みイベントだけを additionalContext にまとめ、人間入力には追加しない', () => {
+  withEnv((env) => {
+    env.mark('session-A');
+    const skillDirectory = path.join(env.workspace, '.claude', 'skills', 'gh-maestro-orchestrator');
+    fs.mkdirSync(skillDirectory, { recursive: true });
+    fs.writeFileSync(path.join(skillDirectory, 'one.md'), [
+      '---', 'signals:', '  - notify:PR_MERGED', '---', '# merge guide',
+    ].join('\n'), 'utf8');
+    fs.writeFileSync(path.join(skillDirectory, 'two.md'), [
+      '---', 'signals:', '  - notify:PR_DETECTED', '---', '# detected guide',
+    ].join('\n'), 'utf8');
+    const taskInput = {
+      session_id: 'session-A',
+      hook_event_name: 'UserPromptSubmit',
+      prompt: '<task-notification><event>PR_MERGED:1\nPR_DETECTED:2\nUNKNOWN:3</event></task-notification>',
+    };
+    const result = hook.runCancelHook(taskInput, env.deps({ skillDirectory }));
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(result.exitCode, 0);
+    assert.equal(parsed.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+    assert.match(parsed.hookSpecificOutput.additionalContext, /# merge guide/);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /# detected guide/);
+    assert.equal((parsed.hookSpecificOutput.additionalContext.match(/gh-maestro-guidance/g) || []).length, 4);
+
+    const human = hook.runCancelHook({
+      session_id: 'session-A', hook_event_name: 'UserPromptSubmit', prompt: '人間からの入力',
+    }, env.deps({ skillDirectory }));
+    assert.deepEqual(human, { exitCode: 0 });
+  });
+});
+
+test('hook main はadditionalContextのJSONだけをstdoutへ書く', () => {
+  withEnv((env) => {
+    env.mark('session-A');
+    const skillDirectory = path.join(env.workspace, 'skill-fixture');
+    fs.mkdirSync(skillDirectory, { recursive: true });
+    fs.writeFileSync(path.join(skillDirectory, 'guide.md'), '---\nsignals:\n  - notify:PLAN_REPORTED\n---\n# plan guide\n', 'utf8');
+    let stdout = '';
+    let stderr = '';
+    const code = hook.main(['--cancel'], {
+      env: { CLAUDE_PROJECT_DIR: env.workspace },
+      resolveWorkspaceFn: (value) => (value ? path.resolve(value) : null),
+      runtimeRoot: env.runtimeRoot,
+      skillDirectory,
+      isStdinTTY: () => false,
+      readStdinFn: () => JSON.stringify({
+        session_id: 'session-A', hook_event_name: 'UserPromptSubmit',
+        prompt: '<task-notification><event>PLAN_REPORTED:5:99</event></task-notification>',
+      }),
+      writeStdoutFn: (value) => { stdout += value; },
+      writeStderrFn: (value) => { stderr += value; },
+    });
+    assert.equal(code, 0);
+    assert.equal(stderr, '');
+    assert.match(JSON.parse(stdout).hookSpecificOutput.additionalContext, /# plan guide/);
+  });
+});
+
 test('permission request: AskUserQuestion の回答後の PostToolUse 取消で、継続中に通知しない', () => {
   withEnv((env) => {
     env.mark('session-A');

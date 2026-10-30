@@ -71,9 +71,19 @@ test('parseFrontmatter: 複数の paths: を抽出する', () => {
   assert.deepEqual(paths, ['src/**/*.js', 'lib/**/*.js']);
 });
 
+test('parseFrontmatter: pathsとsignalsの宣言を同じfrontmatterから抽出する', () => {
+  const content = `---\npaths:\n  - "scripts/**/*.js"\nsignals:\n  - notify:PR_MERGED\n  - script:create-issue.js:implementation-issue\n---\nbody`;
+  assert.deepEqual(parseFrontmatter(content), {
+    paths: ['scripts/**/*.js'],
+    signals: ['notify:PR_MERGED', 'script:create-issue.js:implementation-issue'],
+    body: 'body',
+  });
+});
+
 test('parseFrontmatter: frontmatter なしは paths: null を返す', () => {
   const { paths, body } = parseFrontmatter('just body');
   assert.equal(paths, null);
+  assert.equal(parseFrontmatter('just body').signals, null);
   assert.equal(body, 'just body');
 });
 

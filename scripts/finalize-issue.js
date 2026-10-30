@@ -2,15 +2,17 @@
 'use strict';
 // finalize-issue.js
 // 反省会が完了した後に呼ぶ、決定的な最終後始末。
-//   1. 指定 Issue に紐づく全ワーカーを remove-worker.js 経由で削除する（取りこぼし防止）
-//   2. Issue をクローズする
+//   1. 決定事項をIssueへ投稿する
+//   2. 指定 Issue に紐づく全ワーカーを remove-worker.js 経由で削除する（取りこぼし防止）
+//   3. Issue をクローズする
 // 判断（反省会・コーダー意見聴取・ルール提案・承認反映）は orchestrator 側の責務であり、
-// このスクリプトは機械的な後始末だけを担う。反省会が済む前に呼んではならない。
+// このスクリプトは機械的な投稿と後始末だけを担う。反省会が済む前に呼んではならない。
 //
 // Usage:
-//   node finalize-issue.js --issue <N> [--repo <owner/repo>] [--workspace <path>]
+//   node finalize-issue.js --issue <N> --decision-file <path> [--repo <owner/repo>] [--workspace <path>]
 
 const path = require('path');
+const crypto = require('crypto');
 const { readFileSync, existsSync, rmSync } = require('fs');
 const childProcess = require('./shared/child-process');
 const { spawnSync } = childProcess;
@@ -20,18 +22,26 @@ const { ARTIFACTS, recordPath } = require('./shared/record-paths');
 const { pruneExecutionsForIssue } = require('./shared/execution-registry');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const { clearPrMonitorTarget } = require('./shared/pr-monitor-target');
+const { toWinPath } = require('./shared/win-path');
+const { resolveRepo } = require('./shared/repo');
+const { commentIssueBody } = require('./comment-issue');
 
 const USAGE = `finalize-issue.js — Issue をクローズし、そのIssueの全ワーカーを削除する
 
-Usage: node finalize-issue.js --issue <N> [--repo <owner/repo>] [--workspace <path>]
+Usage: node finalize-issue.js --issue <N> --decision-file <path> [--repo <owner/repo>] [--workspace <path>]
 
 Options:
   --issue <N>          クローズ対象の Issue 番号（正の整数）
+  --decision-file <path> Issueへ先に投稿する決定事項本文ファイル（UTF-8、必須、空は禁止）
   --repo <owner/repo>  対象リポジトリ（省略時は workspace の git remote から解決）
   --workspace <path>   ワークスペース（省略時は GH_MAESTRO_WORKSPACE env または CWD から上方探索で解決）
 
-反省会が完了した後にだけ呼ぶこと。Issueに紐づく全ワーカーを remove-worker.js 経由で削除し、
-そのあと Issue をクローズする。ワーカー削除は best-effort（一部失敗しても続行し、Issueは閉じる）。
+反省会が完了した後にだけ呼ぶこと。決定事項をIssueへ投稿した後、Issueに紐づく全ワーカーを
+remove-worker.js 経由で削除し、そのあと Issue をクローズする。コメント投稿失敗時は後始末しない。
+実行前に既存コメントを照合し、照合に失敗した場合は投稿も後始末もせず停止する。同じ決定事項の
+再実行ではコメントを重複投稿せず、後始末から再開する。投稿済みと認めるのは、ghの認証ユーザーが
+マーカーを含む決定事項の全文を投稿した場合だけである。
+ワーカー削除は best-effort（一部失敗しても続行し、Issueは閉じる）。
 
 さらに、このIssueの --issue で起動された監視ペインを close-pane 経由で終了する。
 worker worktree ごとの終了に失敗した場合は、そのworkerを削除せずIssueのクローズを中止する（非0終了）。
@@ -106,6 +116,105 @@ function defaultCloseStatusPane(workspace, issue) {
 function bodyReferencesIssue(body, issue) {
   if (typeof body !== 'string') return false;
   return new RegExp(`#${issue}(?![0-9])`).test(body);
+}
+
+function decisionCommentMarker(issue, decisionBody) {
+  const digest = crypto.createHash('sha256')
+    .update(`${issue}\0${decisionBody}`, 'utf8')
+    .digest('hex');
+  return `<!-- gh-maestro:finalize-decision:v1:${issue}:${digest} -->`;
+}
+
+function decisionCommentBody(issue, decisionBody) {
+  const body = decisionBody.replace(/\s+$/u, '');
+  return `${body}\n\n${decisionCommentMarker(issue, decisionBody)}`;
+}
+
+function isGitHubLogin(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9-]{1,39}$/.test(value);
+}
+
+function runGhApiRead(spawnFn, args, workspace, purpose) {
+  let result;
+  try {
+    result = spawnFn('gh', args, { cwd: workspace, encoding: 'utf8', timeout: 30000 });
+  } catch (error) {
+    throw new Error(`${purpose}: ${error.message}`);
+  }
+  if (!result || result.error || result.status !== 0) {
+    throw new Error(`${purpose}: ${result && result.error && result.error.message || result && result.stderr || 'gh api failed'}`);
+  }
+  return String(result.stdout || '');
+}
+
+function defaultReadIssueComments({ issue, repo, workspace }, deps = {}) {
+  const resolveRepoFn = deps.resolveRepoFn || resolveRepo;
+  const resolvedRepo = resolveRepoFn({ repo, workspace }, deps.repoDeps || {});
+  if (!resolvedRepo || !resolvedRepo.ok || !resolvedRepo.repo) {
+    throw new Error(`Issueコメントの照合に使うリポジトリを解決できません: ${resolvedRepo && resolvedRepo.error || 'unknown'}`);
+  }
+
+  const spawnFn = deps.spawnSyncFn || spawnSync;
+  const authOutput = runGhApiRead(spawnFn, ['api', 'user', '--jq', '.login'], workspace, 'GitHub認証ユーザーの取得に失敗しました');
+  const authLines = authOutput.trim().split(/\r?\n/);
+  const authenticatedLogin = authLines.length === 1 ? authLines[0] : '';
+  if (!isGitHubLogin(authenticatedLogin)) {
+    throw new Error('GitHub認証ユーザーを取得できないため、決定事項の投稿を安全に照合できません');
+  }
+
+  const endpoint = `repos/${resolvedRepo.repo}/issues/${issue}/comments`;
+  const commentOutput = runGhApiRead(
+    spawnFn,
+    ['api', '--paginate', endpoint, '--jq', '.[] | {login: .user.login, body: .body} | @json | @base64'],
+    workspace,
+    'Issueコメントの照合に失敗しました',
+  );
+  const lines = commentOutput.split(/\r?\n/).filter((line) => line.trim() !== '');
+  const comments = lines.map((line, index) => {
+    let encoded = line;
+    try {
+      const parsedLine = JSON.parse(line);
+      if (typeof parsedLine === 'string') encoded = parsedLine;
+    } catch { /* gh --jq may emit a scalar either raw or JSON-quoted */ }
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+      throw new Error(`Issueコメントの照合結果 ${index + 1} 件目が不正なBase64です`);
+    }
+    let comment;
+    try {
+      comment = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+    } catch (error) {
+      throw new Error(`Issueコメントの照合結果 ${index + 1} 件目をJSONとして読めません: ${error.message}`);
+    }
+    if (!comment || typeof comment !== 'object' || Array.isArray(comment)
+      || typeof comment.body !== 'string') {
+      throw new Error(`Issueコメントの照合結果 ${index + 1} 件目から本文を取得できません`);
+    }
+    return { login: comment.login, body: comment.body };
+  });
+
+  return { authenticatedLogin, comments };
+}
+
+function defaultFindDecisionPosted({ issue, repo, workspace, decisionBody }, deps = {}) {
+  const readCommentsFn = deps.readIssueCommentsFn || defaultReadIssueComments;
+  const result = readCommentsFn({ issue, repo, workspace }, deps.readIssueCommentsDeps || {});
+  if (!result || !isGitHubLogin(result.authenticatedLogin) || !Array.isArray(result.comments)) {
+    throw new Error('GitHub認証ユーザーまたはIssueコメントの照合結果を取得できません');
+  }
+  if (result.comments.some((comment) => !comment || typeof comment !== 'object'
+    || typeof comment.body !== 'string')) {
+    throw new Error('Issueコメントの本文を取得できないため、決定事項を安全に照合できません');
+  }
+
+  const expectedBody = decisionCommentBody(issue, decisionBody);
+  const authenticatedLogin = result.authenticatedLogin.toLowerCase();
+  return {
+    posted: result.comments.some((comment) => (
+      typeof comment.login === 'string'
+      && comment.login.toLowerCase() === authenticatedLogin
+      && comment.body === expectedBody
+    )),
+  };
 }
 
 // 既定の対象PR発見処理: Issueに紐づくPR番号を列挙する（poll-pr.js / assistant-watch.js と同一の2段構え）。
@@ -215,12 +324,60 @@ function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn 
  * Issue に紐づく全ワーカーの worktree 監視ペインを終了してからワーカーを削除し、Issue をクローズする。
  * あわせて、情報価値のない内部状態（assistant-watch/<issue>.json・対象PRの .incomplete・
  * executions.json の当該issueレコード）を後始末する（Issue #248 項目2/4/7）。
- * @param {{workspace: string, issue: string|number, repo?: string|null}} params
+ * @param {{workspace: string, issue: string|number, repo?: string|null, decisionBody: string}} params
  * @param {{removeWorkerFn?: Function, closeIssueFn?: Function, closeStatusPaneFn?: Function, findReviewPrsFn?: Function}} [deps] テスト用に処理を注入する
- * @returns {{workers: {name: string, ok: boolean}[], removedCount: number, closed: boolean, statusPaneClosed: boolean, workerStatusPaneFailures: {name:string, reason:string}[], artifacts: object|null}}
+ * @returns {{workers: {name: string, ok: boolean}[], removedCount: number, closed: boolean, statusPaneClosed: boolean, workerStatusPaneFailures: {name:string, reason:string}[], artifacts: object|null, decisionPosted: boolean, decisionAlreadyPosted: boolean, decisionUrl: string|null}}
  *   artifacts: cleanupIssueArtifacts() の結果（worker pane終了失敗時は後続cleanupを行わないため null）
  */
-function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
+function finalizeIssue({ workspace, issue, repo = null, decisionBody }, deps = {}) {
+  if (typeof decisionBody !== 'string' || decisionBody.trim() === '') {
+    throw new Error('決定事項本文は空でない文字列が必要です');
+  }
+  const postDecisionFn = deps.postDecisionFn || ((body) => commentIssueBody({
+    issue,
+    body,
+    repo,
+    workspace,
+  }));
+  const findDecisionPostedFn = deps.findDecisionPostedFn || ((params) => defaultFindDecisionPosted(params, {
+    readIssueCommentsFn: deps.readIssueCommentsFn,
+    readIssueCommentsDeps: deps.readIssueCommentsDeps,
+  }));
+  let existingDecision;
+  try {
+    existingDecision = findDecisionPostedFn({ issue, repo, workspace, decisionBody });
+    if (!existingDecision || typeof existingDecision.posted !== 'boolean') {
+      throw new Error('照合関数がpostedの真偽値を返しませんでした');
+    }
+  } catch (error) {
+    process.stderr.write(`finalize-issue: 既存の決定事項を照合できないため投稿と後始末を中止しました: ${error.message}\n`);
+    return {
+      workers: [], removedCount: 0, closed: false, statusPaneClosed: false,
+      monitorTarget: null, workerStatusPaneFailures: [], artifacts: null,
+      decisionPosted: false, decisionAlreadyPosted: false, decisionUrl: null,
+    };
+  }
+
+  let decision;
+  if (existingDecision.posted) {
+    decision = { ok: true, alreadyPosted: true, url: existingDecision.url || null };
+  } else {
+    try {
+      decision = postDecisionFn(decisionCommentBody(issue, decisionBody), issue, repo, workspace);
+    } catch (error) {
+      decision = { ok: false, stderr: error.message };
+    }
+  }
+  if (!decision || !decision.ok) {
+    const reason = String(decision && decision.stderr || 'unknown');
+    process.stderr.write(`finalize-issue: 決定事項コメントを投稿できないため後始末を中止しました: ${reason}\n`);
+    return {
+      workers: [], removedCount: 0, closed: false, statusPaneClosed: false,
+      monitorTarget: null, workerStatusPaneFailures: [], artifacts: null,
+      decisionPosted: false, decisionAlreadyPosted: false, decisionUrl: null,
+    };
+  }
+
   const removeWorkerFn = deps.removeWorkerFn || defaultRemoveWorker;
   const closeIssueFn = deps.closeIssueFn || defaultCloseIssue;
   const closeStatusPaneFn = deps.closeStatusPaneFn || defaultCloseStatusPane;
@@ -277,6 +434,9 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
       monitorTarget,
       workerStatusPaneFailures,
       artifacts: null,
+      decisionPosted: true,
+      decisionAlreadyPosted: decision.alreadyPosted === true,
+      decisionUrl: decision.url || null,
     };
   }
 
@@ -310,17 +470,29 @@ function finalizeIssue({ workspace, issue, repo = null }, deps = {}) {
     monitorTarget,
     workerStatusPaneFailures,
     artifacts,
+    decisionPosted: true,
+    decisionAlreadyPosted: decision.alreadyPosted === true,
+    decisionUrl: decision.url || null,
   };
 }
 
-module.exports = { collectWorkersForIssue, finalizeIssue, cleanupIssueArtifacts, bodyReferencesIssue };
+module.exports = {
+  collectWorkersForIssue,
+  finalizeIssue,
+  cleanupIssueArtifacts,
+  bodyReferencesIssue,
+  decisionCommentMarker,
+  decisionCommentBody,
+  defaultReadIssueComments,
+  defaultFindDecisionPosted,
+};
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
   let values, rest;
   try {
     ({ values, rest } = parseFlags(argv, {
-      flags: { '--issue': {}, '--repo': {}, '--workspace': {} },
+      flags: { '--issue': { required: true }, '--decision-file': { required: true }, '--repo': {}, '--workspace': {} },
       booleans: ['--help', '-h'],
       positionals: { min: 0, max: 0 },
     }));
@@ -340,6 +512,7 @@ if (require.main === module) {
   }
 
   const issue = values['--issue'];
+  const decisionFileArg = values['--decision-file'];
   const repo = values['--repo'] || null;
   const workspace = resolveWorkspace(values['--workspace']);
 
@@ -357,7 +530,20 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  const result = finalizeIssue({ workspace, issue, repo });
+  const decisionFile = path.resolve(toWinPath(decisionFileArg));
+  let decisionBody;
+  try {
+    decisionBody = readFileSync(decisionFile, 'utf8');
+  } catch (error) {
+    console.error(`finalize-issue: 決定事項ファイルを読めません: ${decisionFile}: ${error.message}`);
+    process.exit(1);
+  }
+  if (decisionBody.trim() === '') {
+    console.error(`finalize-issue: 決定事項ファイルが空です: ${decisionFile}`);
+    process.exit(1);
+  }
+
+  const result = finalizeIssue({ workspace, issue, repo, decisionBody });
   console.log(`FINALIZED:${issue} removed=${result.removedCount}/${result.workers.length} closed=${result.closed}`);
   process.exit(result.closed ? 0 : 1);
 }
