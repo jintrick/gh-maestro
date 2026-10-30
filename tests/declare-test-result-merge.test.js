@@ -103,22 +103,18 @@ for (const [label, slow, shown] of [
     assert.match(body, /- \*\*lint\*\*: pass/);
     const q = status(store);
     assert.equal(q.ok, true);
-    if (label === 'unavailable') {
-      // 結果行が unknown の申告は従来どおり query に layers を出さず NONE になる。
-      // 本文には full の件数と lint が残っており、GREEN にもならない。
-      const declaration = extractTestDeclaration(body);
-      assert.deepEqual(Object.keys(declaration.layers), ['full', 'slow']);
-      assert.equal(declaration.lint.status, 'complete');
-      assert.equal(q.status, 'NONE');
-      return;
-    }
     assert.deepEqual(Object.keys(q.layers), ['full', 'slow']);
     assert.equal(q.layers.full.pass, 2671);
     assert.equal(q.lint.status, 'complete');
     assert.equal(q.allLayersPresent, true);
-    assert.equal(q.status, label === 'pass' ? 'GREEN' : 'RED');
+    // unavailable な slow は結果行が unknown になるが、層・lint は query に返る。status は NONE。
+    assert.equal(q.status, { pass: 'GREEN', fail: 'RED', unavailable: 'NONE' }[label]);
+    assert.equal(q.allLayersComplete, label !== 'unavailable');
+    assert.equal(q.scope, 'aggregate');
+    assert.equal(q.provenance, 'test-runner');
   });
 }
+
 test('AC1: slow の層行（失敗テスト名）は合成後も原文のまま保たれる', () => {
   const store = ghStore();
   declare(store, aggregate({ slow: slowLayer({ outcome: 'fail', pass: 2, fail: 1, failedTests: ['t1', 't2'] }) }));

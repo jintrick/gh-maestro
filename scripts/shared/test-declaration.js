@@ -232,6 +232,9 @@ function extractV2Declaration(body) {
   const typecheckLine = body.split(/\r?\n/).some(line => /^\s*-\s+\*\*typecheck\*\*:/i.test(line));
   const typecheck = typecheckLine ? parseTypecheckDeclaration(body) : undefined;
 
+  // 層のどれかが unavailable だと結果行は unknown になる。構文と層行が有効な aggregate は、
+  // 結果行が unknown でも provenance/scope/layers/lint を保持する（status は outcome が無いので NONE）。
+  const hasAggregateLayers = aggregate !== null && Object.keys(aggregate.layers).length > 0;
   const hasCounts = fail !== undefined && pass !== undefined;
   const hasPartialCounts = (fail === undefined) !== (pass === undefined);
   // known として扱うのは、ランナー由来・範囲既知・結果ラベル既知に加えて、
@@ -240,7 +243,7 @@ function extractV2Declaration(body) {
   // コメントと区別できないため unknown に縮退させる。
   const isKnown = provenance === KNOWN_PROVENANCE
     && (scope === FULL_SCOPE || scope === PARTIAL_SCOPE || scope === AGGREGATE_SCOPE)
-    && (resultLabel === 'pass' || resultLabel === 'fail')
+    && (resultLabel === 'pass' || resultLabel === 'fail' || hasAggregateLayers)
     && !hasPartialCounts
     && (!aggregate || Object.keys(aggregate.layers).length > 0);
 
@@ -265,7 +268,7 @@ function extractV2Declaration(body) {
     scope,
     lint,
     ...(typecheck ? { typecheck } : {}),
-    outcome: resultLabel,
+    ...(resultLabel === 'pass' || resultLabel === 'fail' ? { outcome: resultLabel } : {}),
     ...(hasCounts ? { fail, pass } : {}),
     ...(tests !== undefined ? { tests } : {}),
     ...(aggregate ? aggregate : {}),
