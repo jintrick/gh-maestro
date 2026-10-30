@@ -91,6 +91,7 @@ function buildPrompt({ pr, repo, issue, workspace, mainGhDir, skillPath }) {
   const scriptsDir = toUnix(path.join(__dirname));
   const manifestFile = reviewArtifactPath(workspace, pr, '.manifest.json');
   const prompt = `Review Manager フェーズ1
+SKILL に指定されたファイルを読み、そこに記載されたフェーズ1の手順を実行してください。
 PR=${pr}
 REPO=${repo}
 WORKSPACE=${toUnix(workspace)}
@@ -117,6 +118,7 @@ function buildFinalizePrompt({ pr, repo, issue, workspace, outputFile, mainGhDir
   const scriptsDir = toUnix(path.join(__dirname));
   const draftFile = generateStagingPath(outputFile);
   const prompt = `Review Manager フェーズ2
+SKILL に指定されたファイルを読み、そこに記載されたフェーズ2の手順を実行してください。
 PR=${pr}
 REPO=${repo}
 WORKSPACE=${toUnix(workspace)}

@@ -83,7 +83,7 @@ test('buildPrompt normalizes backslash paths to forward slashes', () => {
   assert.match(prompt, /C:\/ws\/\.gh-maestro\/records\/pr\/5\/review\/manifest\.json/);
 });
 
-test('buildPrompt: paths and phase inputs are supplied without repeating skill instructions', () => {
+test('buildPrompt: paths and phase inputs include the instruction to read the phase skill', () => {
   const { prompt } = buildPrompt({
     pr: '5', repo: 'o/r', workspace: 'C:\\ws',
     mainGhDir: 'C:\\main\\.gh-maestro', skillPath: SKILL_MD,
@@ -91,6 +91,7 @@ test('buildPrompt: paths and phase inputs are supplied without repeating skill i
   assert.match(prompt, /SCRIPTS=/);
   assert.match(prompt, /MANIFEST=/);
   assert.match(prompt, /SKILL=/);
+  assert.match(prompt, /SKILL に指定されたファイルを読み、そこに記載されたフェーズ1の手順を実行してください/);
   assert.doesNotMatch(prompt, /OUTPUTファイルへ直接書き込まない/);
 });
 
@@ -132,6 +133,7 @@ test('buildFinalizePrompt: incomplete 時に --mode incomplete で最終化す�
   });
   assert.match(prompt, /Review Manager フェーズ2/);
   assert.match(prompt, /RESULTS=C:\/ws\/results\.json/);
+  assert.match(prompt, /SKILL に指定されたファイルを読み、そこに記載されたフェーズ2の手順を実行してください/);
   assert.doesNotMatch(prompt, /--mode incomplete|complete.*incomplete/);
 });
 
@@ -1056,7 +1058,7 @@ test('readIncompleteSentinel: 解釈できないセンチネルは null（notify
 
 // ── SKILL.md 絶対パス指定（PR #350 実障害対策） ─────────────────────────────
 
-test('buildPrompt: SKILL.mdを配布済み正本の絶対パスで指定する', () => {
+test('buildPrompt: SKILL.mdを読み込む指示と配布済み正本の絶対パスを指定する', () => {
   const { prompt } = buildPrompt({
     pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
     mainGhDir: 'C:\\main\\.gh-maestro',
@@ -1064,10 +1066,10 @@ test('buildPrompt: SKILL.mdを配布済み正本の絶対パスで指定する',
   });
   assert.match(prompt, /SKILL=C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md/);
   assert.match(prompt, /^Review Manager フェーズ1/);
-  assert.doesNotMatch(prompt, /SKILL\.md を読み、/);
+  assert.match(prompt, /SKILL に指定されたファイルを読み、/);
 });
 
-test('buildFinalizePrompt: SKILL.mdを配布済み正本の絶対パスで指定する', () => {
+test('buildFinalizePrompt: SKILL.mdを読み込む指示と配布済み正本の絶対パスを指定する', () => {
   const { prompt } = buildFinalizePrompt({
     pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
     outputFile: 'C:\\ws\\out.json', mainGhDir: 'C:\\main\\.gh-maestro',
@@ -1076,5 +1078,5 @@ test('buildFinalizePrompt: SKILL.mdを配布済み正本の絶対パスで指定
   });
   assert.match(prompt, /SKILL=C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md/);
   assert.match(prompt, /^Review Manager フェーズ2/);
-  assert.doesNotMatch(prompt, /SKILL\.md を読み、/);
+  assert.match(prompt, /SKILL に指定されたファイルを読み、/);
 });

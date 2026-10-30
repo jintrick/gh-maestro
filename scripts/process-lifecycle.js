@@ -843,11 +843,15 @@ function main(argv = process.argv.slice(2)) {
       ...removedLeases.map((leasePath) => `removed lease: ${leasePath}`),
       ...holderlessSources.map((source) => `holderless record: ${source}`),
     ].join('\n') + '\n';
-    try {
-      fs.writeFileSync(reportPath, details, 'utf8');
-      writeOut(`sweep: ${reportItems.join('。')}（一覧: ${reportPath}）`);
-    } catch (error) {
-      writeOut(`sweep: ${reportItems.join('。')}（一覧を書けませんでした: ${reportPath}: ${error.message}）`);
+    if (dryRun) {
+      writeOut(`sweep: ${reportItems.join('。')}（dry-run: 一覧は更新していません）`);
+    } else {
+      try {
+        fs.writeFileSync(reportPath, details, 'utf8');
+        writeOut(`sweep: ${reportItems.join('。')}（一覧: ${reportPath}）`);
+      } catch (error) {
+        writeOut(`sweep: ${reportItems.join('。')}（一覧を書けませんでした: ${reportPath}: ${error.message}）`);
+      }
     }
   }
 

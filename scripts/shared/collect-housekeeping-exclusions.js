@@ -24,7 +24,12 @@
 const path = require('path');
 const fs = require('fs');
 const { readWorkersRaw } = require('./workers-registry');
-const { createNormalWorkerStore, RESIDENT_ROLE_LEASE_PREFIX } = require('./worker-lease');
+const {
+  createNormalWorkerStore,
+  acquireLeaseLock,
+  releaseLeaseLock,
+  RESIDENT_ROLE_LEASE_PREFIX,
+} = require('./worker-lease');
 const { listRunningReviewManagers } = require('./running-review-managers');
 const { normalizePid } = require('./worker-entry');
 
@@ -63,6 +68,11 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
   const leaseRemovalCandidates = [];
   const ghDir = path.join(workspace, '.gh-maestro');
   const checker = opts.liveness || injectedLiveness || processLiveness;
+  const addLiveWorker = (workerName, entry) => {
+    workerNames.add(entry.workerName || workerName);
+    const normPid = normalizePid(entry && typeof entry === 'object' ? entry.pid : null);
+    if (normPid) pids.add(normPid);
+  };
   const live = (entry, description, source, reference = null) => {
     const state = checker.observe(reference || checker.readRef(entry, 'default', { source }));
     if (state === 'unknown') throw new Error(`${description} の生死を判定できません`);
@@ -80,9 +90,7 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
   if (rawWorkers) {
     for (const [workerName, entry] of Object.entries(rawWorkers)) {
       if (workerName !== 'orchestrator' && live(entry, `worker ${workerName}`, `${path.join(ghDir, 'workers.json')}#${workerName}`)) {
-        workerNames.add(workerName);
-        const normPid = normalizePid(entry && typeof entry === 'object' ? entry.pid : null);
-        if (normPid) pids.add(normPid);
+        addLiveWorker(workerName, entry);
       }
     }
   }
@@ -125,9 +133,7 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
 
       const isLive = live(entry, `lease ${leasePath}`, leasePath, leaseRef);
       if (isLive) {
-        workerNames.add(entry.workerName || workerName);
-        const normPid = normalizePid(entry.pid);
-        if (normPid) pids.add(normPid);
+        addLiveWorker(workerName, entry);
       } else if (isOrphanedWorkerLease && opts.cleanupStale !== false) {
         leaseRemovalCandidates.push({ store, workerName, leasePath });
       }
@@ -153,9 +159,51 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
 
   // Defer deletion until every source has been read and observed. A corrupt lease or
   // unknown owner later in the directory must fail closed without partial lease cleanup.
+  // Each candidate is then re-read under acquireLease's per-key lock so a replacement
+  // lease written after discovery cannot be removed as though it were the stale record.
   for (const candidate of leaseRemovalCandidates) {
-    candidate.store.remove(candidate.workerName);
-    removedLeases.push(candidate.leasePath);
+    let locked = false;
+    try {
+      acquireLeaseLock(candidate.store, candidate.workerName);
+      locked = true;
+
+      const currentLease = candidate.store.read(candidate.workerName);
+      if (!currentLease) {
+        if (fs.existsSync(candidate.leasePath)) {
+          throw new Error(`lease の読み取り・解析に失敗しました: ${candidate.leasePath}`);
+        }
+        continue;
+      }
+
+      const currentWorkers = readWorkersRaw(workspace);
+      const currentWorker = currentWorkers && Object.hasOwn(currentWorkers, candidate.workerName)
+        ? currentWorkers[candidate.workerName]
+        : null;
+      const residentLease = candidate.workerName.startsWith(RESIDENT_ROLE_LEASE_PREFIX);
+      const workerTree = path.join(ghDir, 'worktrees', candidate.workerName);
+      const isOrphanedWorkerLease = !residentLease && !currentWorker && !fs.existsSync(workerTree);
+      const hasOwnerIdentity = currentLease.resourceKey != null || currentLease.instanceId != null;
+
+      if (currentWorker
+          && live(currentWorker, `worker ${candidate.workerName}`, `${path.join(ghDir, 'workers.json')}#${candidate.workerName}`)) {
+        addLiveWorker(candidate.workerName, currentWorker);
+      }
+
+      let leaseIsLive = false;
+      if (hasOwnerIdentity) {
+        const leaseRef = checker.readRef(currentLease, 'default', { source: candidate.leasePath });
+        if (!leaseRef) throw new Error(`lease ${candidate.leasePath} の生死を判定できません`);
+        leaseIsLive = live(currentLease, `lease ${candidate.leasePath}`, candidate.leasePath, leaseRef);
+        if (leaseIsLive) addLiveWorker(candidate.workerName, currentLease);
+      }
+
+      if (!isOrphanedWorkerLease || leaseIsLive) continue;
+
+      candidate.store.remove(candidate.workerName);
+      removedLeases.push(candidate.leasePath);
+    } finally {
+      if (locked) releaseLeaseLock(candidate.store, candidate.workerName);
+    }
   }
 
   return { workerNames, reviewPrs, pids, removedLeases };

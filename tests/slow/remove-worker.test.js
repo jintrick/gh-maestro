@@ -8,6 +8,7 @@ const os = require('os');
 const { spawnSync, spawn } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'remove-worker.js');
+const storageLayout = require('../../scripts/shared/storage-layout');
 // workspace引数を省略する経路が実ワークスペースを読まないよう env を外す。
 // 明示した --workspace は GH_MAESTRO_WORKSPACE env より優先される。
 // （共通ヘルパー tests/_spawn-env.js の cleanSpawnEnv。ワーカー文脈環境変数も除去する）。
@@ -288,6 +289,30 @@ test('remove-worker: 停止失敗時はleaseを保持してパスを警告する
     assert.ok(fs.existsSync(leasePath), '停止失敗ではleaseを残す');
     assert.match(r.stderr, /プロセス停止処理が失敗したため lease を保持します/);
     assert.ok(r.stderr.includes(leasePath), '警告にleaseのパスを含める');
+  });
+});
+
+test('remove-worker: PID registry sweep のエラーがある場合はleaseを保持する', () => {
+  withTempDir((dir) => {
+    const ghDir = path.join(dir, '.gh-maestro');
+    const workerName = 'issue-55-coder';
+    const leasePath = path.join(ghDir, 'leases', `${workerName}.json`);
+    const runtimeRoot = path.join(dir, '.test-runtime');
+    const pidsDir = path.join(storageLayout.workspaceRuntimeDir(dir, runtimeRoot), 'pids');
+    fs.mkdirSync(path.dirname(leasePath), { recursive: true });
+    fs.mkdirSync(pidsDir, { recursive: true });
+    fs.writeFileSync(path.join(ghDir, 'workers.json'), JSON.stringify({
+      [workerName]: { issue: 55, skill: 'gh-maestro-coder' },
+    }), 'utf8');
+    fs.writeFileSync(leasePath, JSON.stringify({ pid: 76543, workerName }), 'utf8');
+    fs.writeFileSync(path.join(pidsDir, 'corrupt.json'), '{broken registry', 'utf8');
+
+    const r = run([workerName, '--workspace', dir]);
+
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.ok(fs.existsSync(leasePath), '停止を確認できない場合はleaseを残す');
+    assert.match(r.stderr, /PID registry error/);
+    assert.ok(r.stderr.includes(leasePath), 'leaseを保持した警告にパスを含める');
   });
 });
 

@@ -426,6 +426,31 @@ test('sweep: 旧形式の孤立 lease を件数に依存しない1行で報告�
   }
 });
 
+test('sweep --dry-run: holderless report は既存の詳細一覧を変更しない', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-sweep-dry-run-report-'));
+  const ghDir = path.join(ws, '.gh-maestro');
+  const runtimeDir = storageLayout.workspaceRuntimeDir(ws);
+  const pidsDir = path.join(runtimeDir, 'pids');
+  const reportPath = path.join(ghDir, 'sweep-lease-report.log');
+  const previousReport = 'existing report must remain byte-for-byte unchanged\n';
+  try {
+    fs.mkdirSync(pidsDir, { recursive: true });
+    fs.mkdirSync(ghDir, { recursive: true });
+    fs.writeFileSync(path.join(pidsDir, 'legacy.json'), JSON.stringify({ pid: 999999999 }), 'utf8');
+    fs.writeFileSync(reportPath, previousReport, 'utf8');
+
+    const result = runCli(['sweep', '--workspace', ws, '--dry-run']);
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(`${result.stdout}\n${result.stderr}`, /dry-run: 一覧は更新していません/);
+    assert.equal(fs.readFileSync(reportPath, 'utf8'), previousReport);
+    assert.ok(fs.existsSync(path.join(pidsDir, 'legacy.json')), 'dry-run は PID registry も削除しない');
+  } finally {
+    try { fs.rmSync(runtimeDir, { recursive: true, force: true }); } catch {}
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test('サブプロセス経由: 解析不能な workers.json で sweep は fail-closed の exit 1 を返す（PR #268 指摘回帰）', () => {
   const { spawnSync } = require('child_process');
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-sweep-cli-corrupt-'));

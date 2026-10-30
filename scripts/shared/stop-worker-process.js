@@ -61,7 +61,7 @@ function validLegacyPaneId(value) {
  * @param {Function} [opts.killProcessTreeFn] プロセス停止関数（テスト用）
  * @param {object} [opts.liveness] 生存確認モジュール（テスト用）
  * @param {object} [opts._injectedWorkers] テスト用 workers オブジェクト注入
- * @returns {{ success: boolean, stoppedPid: number|null, workerEntry: object }}
+ * @returns {{ success: boolean, stoppedPid: number|null, workerEntry: object, errors: string[] }}
  */
 function stopWorkerProcess(workspace, workerName, opts = {}) {
   const isRemoveMode = opts.isRemoveMode ?? false;
@@ -206,9 +206,10 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
   }
 
   return {
-    success: true,
+    success: sweepResults.errors.length === 0,
     stoppedPid,
     workerEntry,
+    errors: sweepResults.errors,
   };
 }
 

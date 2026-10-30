@@ -190,6 +190,59 @@ test('collectHousekeepingExclusions: PIDが生存中の旧形式 lease・workers
   } finally { fs.rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('collectHousekeepingExclusions: 候補登録後に同名の新しい lease が取得された場合は削除しない', () => {
+  const { che, lease } = fresh(); const ws = tmpWorkspace();
+  try {
+    const ghDir = path.join(ws, '.gh-maestro');
+    const workerName = 'issue-6-coder';
+    const store = lease.createNormalWorkerStore(ws);
+    fs.mkdirSync(path.dirname(store.filePath(workerName)), { recursive: true });
+    fs.writeFileSync(store.filePath(workerName), JSON.stringify({ pid: 12345, workerName }));
+
+    const managerPath = path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.running');
+    fs.mkdirSync(path.dirname(managerPath), { recursive: true });
+    fs.writeFileSync(managerPath, JSON.stringify({
+      pid: 54321,
+      resourceKey: 'b'.repeat(64),
+      instanceId: 'manager-instance',
+    }));
+
+    const replacementResourceKey = 'c'.repeat(64);
+    let replaced = false;
+    che._setLiveness({
+      readRef: (entry, _format, options = {}) => ({ ...entry, source: options.source }),
+      observe: (reference) => {
+        if (reference.source === managerPath && !replaced) {
+          // Simulate a new spawn taking the same per-key lock after the stale candidate
+          // was collected but before candidate cleanup starts.
+          lease.acquireLeaseLock(store, workerName);
+          try {
+            store.remove(workerName);
+            store.write(workerName, {
+              pid: process.pid,
+              workerName,
+              resourceKey: replacementResourceKey,
+              instanceId: 'new-worker-instance',
+            });
+          } finally {
+            lease.releaseLeaseLock(store, workerName);
+          }
+          replaced = true;
+          return 'alive';
+        }
+        if (reference.resourceKey === replacementResourceKey) return 'alive';
+        return 'dead';
+      },
+    });
+
+    const result = che.collectHousekeepingExclusions(ws);
+    assert.equal(replaced, true, '後続の情報源を読む間に新しい lease を取得する');
+    assert.deepEqual(result.removedLeases, []);
+    assert.equal(store.read(workerName).instanceId, 'new-worker-instance');
+    assert.ok(result.workerNames.has(workerName));
+  } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+});
+
 test('collectHousekeepingExclusions: workers.json または worktree にある lease は回収しない', () => {
   const { che } = fresh(); const ws = tmpWorkspace();
   try {
