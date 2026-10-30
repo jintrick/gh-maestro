@@ -2,25 +2,34 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const promptArg = process.argv.find(arg => /^Read .+ and execute it\.$/.test(arg));
-if (!promptArg) throw new Error('missing prompt');
-const prompt = fs.readFileSync(promptArg.slice(5, -16), 'utf8');
+const promptInstruction = process.argv.find(arg => /^Read (.+) and execute it\.$/s.test(arg));
+const promptFile = promptInstruction?.match(/^Read (.+) and execute it\.$/s)?.[1];
+if (!promptFile) throw new Error('missing prompt file instruction');
+const prompt = fs.readFileSync(promptFile, 'utf8');
 const fixture = process.env.REVIEW_RESUME_FIXTURE;
 const events = path.join(fixture, 'events.jsonl');
 function event(value) { fs.appendFileSync(events, JSON.stringify(value) + '\n'); }
-if (prompt.includes('レビューの計画（フェーズ1）')) {
+function value(name) {
+  const match = new RegExp(`^${name}=(.+)$`, 'm').exec(prompt);
+  if (!match) throw new Error(`missing ${name} input`);
+  return match[1];
+}
+if (/^Review Manager フェーズ1\r?$/m.test(prompt)) {
   event({ kind: 'phase1' });
-  const destination = prompt.match(/実行manifestを (.+?) に書き出すこと/)[1];
-  const head = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  const destination = value('MANIFEST');
+  const workspace = value('WORKSPACE');
+  const headResult = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' });
+  if (headResult.status !== 0) throw new Error(`could not read review worktree HEAD: ${headResult.stderr}`);
+  const head = headResult.stdout.trim();
   const plan = JSON.parse(fs.readFileSync(path.join(fixture, 'plan.json'), 'utf8'));
   plan.headRefOid = head;
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   fs.writeFileSync(destination, JSON.stringify(plan));
-} else if (prompt.includes('レビュー結果の統合（フェーズ2）')) {
+} else if (/^Review Manager フェーズ2\r?$/m.test(prompt)) {
   event({ kind: 'phase2' });
-  const results = prompt.match(/^RESULTS=(.+)$/m)[1];
+  const results = value('RESULTS');
   fs.copyFileSync(results, path.join(fixture, 'observed-results.json'));
-  const workspace = prompt.match(/^WORKSPACE=(.+)$/m)[1];
+  const workspace = value('WORKSPACE');
   const sentinel = path.join(workspace, '.gh-maestro', 'records', 'pr', '11', 'review', 'manager.incomplete');
   fs.mkdirSync(path.dirname(sentinel), { recursive: true });
   fs.writeFileSync(sentinel, JSON.stringify({ reason: 'incomplete-review' }));

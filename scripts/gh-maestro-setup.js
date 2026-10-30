@@ -298,7 +298,7 @@ function checkEnvironment() {
   }
   ok(`Repository: ${match[1]}`);
 
-  if (!run('gh', ['auth', 'status'], { capture: true })) {
+  if (run('gh', ['auth', 'status'], { capture: true }) === null) {
     fail(
       'gh CLI が認証されていません。',
       "→ 'gh auth login' を実行して GitHub アカウントを認証してください。",

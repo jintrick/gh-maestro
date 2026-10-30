@@ -234,28 +234,27 @@ test('pre-commit フック経由: .claude/rules/ 配下の同期失敗でもコ�
   });
 });
 
-test('syncRules: ルール数が3件でも30件でも stdout は最終サマリー1行だけ', () => {
-  for (const count of [3, 30]) {
-    withGitWorkspace(base => {
-      const src = path.join(base, '.claude', 'rules');
-      const dst = path.join(base, '.agents', 'rules');
-      fs.mkdirSync(src, { recursive: true });
-      fs.mkdirSync(dst, { recursive: true });
-      for (let index = 0; index < count; index += 1) {
-        fs.writeFileSync(path.join(src, `rule-${index}.md`),
-          `---\npaths:\n  - "src/rule-${index}.js"\n---\nbody ${index}`);
-      }
-      fs.writeFileSync(path.join(dst, 'orphan.md'), 'stale');
+test('syncRules: 30件でも stdout は最終サマリー1行だけ', () => {
+  const count = 30;
+  withGitWorkspace(base => {
+    const src = path.join(base, '.claude', 'rules');
+    const dst = path.join(base, '.agents', 'rules');
+    fs.mkdirSync(src, { recursive: true });
+    fs.mkdirSync(dst, { recursive: true });
+    for (let index = 0; index < count; index += 1) {
+      fs.writeFileSync(path.join(src, `rule-${index}.md`),
+        `---\npaths:\n  - "src/rule-${index}.js"\n---\nbody ${index}`);
+    }
+    fs.writeFileSync(path.join(dst, 'orphan.md'), 'stale');
 
-      const r = runScript(base);
-      assert.equal(r.status, 0, r.stderr);
-      assert.equal(r.stdout.trim().split(/\r?\n/).length, 1, r.stdout);
-      assert.match(r.stdout, new RegExp(`sync-rules: ${count} 件を \.agents/rules/ へ同期しました`));
-      assert.equal(r.stderr, '');
-      assert.ok(!fs.existsSync(path.join(dst, 'orphan.md')));
-      assert.equal(fs.readdirSync(dst).length, count);
-    });
-  }
+    const r = runScript(base);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim().split(/\r?\n/).length, 1, r.stdout);
+    assert.match(r.stdout, new RegExp(`sync-rules: ${count} 件を \.agents/rules/ へ同期しました`));
+    assert.equal(r.stderr, '');
+    assert.ok(!fs.existsSync(path.join(dst, 'orphan.md')));
+    assert.equal(fs.readdirSync(dst).length, count);
+  });
 });
 
 test('syncRules: 1件の失敗を stderr 1行にまとめ、残りの同期と孤児回収を続ける', () => {

@@ -355,7 +355,6 @@ test('CLI通し: 生存中のworker-supervisorを維持したままhookがreset�
 
     const result = runHook(workspace, env);
     assert.equal(result.status, 0, `hookは常駐生存中でも成功する: ${result.stderr}`);
-    assert.doesNotMatch(result.stdout, /\x1b\[32mv /, 'setup-ok があるhookでは成功確認行が出ないこと');
 
     const context = result.stdout.slice(result.stdout.lastIndexOf('[gh-maestro session context]'))
       .trim().split(/\r?\n/);

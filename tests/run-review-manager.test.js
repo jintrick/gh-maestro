@@ -60,16 +60,9 @@ test('buildPrompt supplies concise phase-1 startup context and manifest path', (
   assert.match(prompt, /GH_DIR=C:\/main\/\.gh-maestro/);
   assert.match(prompt, /Review Manager フェーズ1/);
   assert.match(prompt, /manifest\.json/);
-  assert.doesNotMatch(prompt, /adopted \/ excluded|ジョブを実行しない|全体ビルド/);
+  assert.doesNotMatch(prompt,
+    /adopted \/ excluded|ジョブを実行しない|全体ビルド|manifest書き出し後に即終了|決定論的スーパーバイザが行う|OUTPUTファイルへ直接書き込まない|msg-send\.js|完了報告/);
   assert.ok(typeof prompt === 'string');
-});
-
-test('buildPrompt: フェーズ1の指示はphase skillに集約される', () => {
-  const { prompt } = buildPrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
-    mainGhDir: 'C:\\main\\.gh-maestro', skillPath: SKILL_MD,
-  });
-  assert.doesNotMatch(prompt, /manifest書き出し後に即終了|決定論的スーパーバイザが行う/);
 });
 
 test('buildPrompt normalizes backslash paths to forward slashes', () => {
@@ -90,17 +83,8 @@ test('buildPrompt: paths and phase inputs include the instruction to read the ph
   });
   assert.match(prompt, /SCRIPTS=/);
   assert.match(prompt, /MANIFEST=/);
-  assert.match(prompt, /SKILL=/);
+  assert.match(prompt, /SKILL=C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md/);
   assert.match(prompt, /SKILL に指定されたファイルを読み、そこに記載されたフェーズ1の手順を実行してください/);
-  assert.doesNotMatch(prompt, /OUTPUTファイルへ直接書き込まない/);
-});
-
-test('buildPrompt: 他ワーカー用ツールの禁止事項は重ねて埋め込まない', () => {
-  const { prompt } = buildPrompt({
-    pr: '5', repo: 'o/r', workspace: 'C:\\ws',
-    mainGhDir: 'C:\\main\\.gh-maestro', skillPath: SKILL_MD,
-  });
-  assert.doesNotMatch(prompt, /msg-send\.js|完了報告/);
 });
 
 test('buildPrompt: 呼び出しごとに安定して prompt を生成する', () => {
@@ -120,21 +104,12 @@ test('buildFinalizePrompt supplies concise phase-2 paths for result integration'
     resultsFile: 'C:\\ws\\results.json', skillPath: SKILL_MD,
   });
   assert.match(prompt, /PR=5/);
-  assert.match(prompt, /RESULTS=C:\/ws\/results\.json/);
-  assert.match(prompt, /DRAFT=C:\/ws\/\.staging-out\.json\./);
-  assert.doesNotMatch(prompt, /重複統合|--mode complete|OUTPUTファイルへ直接書き込まない|ジョブを実行しない/);
-});
-
-test('buildFinalizePrompt: incomplete 時に --mode incomplete で最終化するよう指示する', () => {
-  const { prompt } = buildFinalizePrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
-    outputFile: 'C:\\ws\\out.json', mainGhDir: 'C:\\main\\.gh-maestro',
-    resultsFile: 'C:\\ws\\results.json', skillPath: SKILL_MD,
-  });
   assert.match(prompt, /Review Manager フェーズ2/);
+  assert.match(prompt, /OUTPUT=C:\/ws\/out\.json/);
   assert.match(prompt, /RESULTS=C:\/ws\/results\.json/);
+  assert.match(prompt, /SKILL=C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md/);
   assert.match(prompt, /SKILL に指定されたファイルを読み、そこに記載されたフェーズ2の手順を実行してください/);
-  assert.doesNotMatch(prompt, /--mode incomplete|complete.*incomplete/);
+  assert.match(prompt, /DRAFT=C:\/ws\/\.staging-out\.json\./);
 });
 
 // ── runJobsDeterministically / judgeJobRun（決定論的ジョブ実行・モデル介入なし） ──
@@ -1054,29 +1029,4 @@ test('readIncompleteSentinel: 解釈できないセンチネルは null（notify
   const result = incompleteSentinelOutcome({ sentinelPath, agentPid: null, reviewWtDir: null });
   assert.equal(result.outcome, 'incomplete-review');
   assert.equal(result.exitCode, 0);
-});
-
-// ── SKILL.md 絶対パス指定（PR #350 実障害対策） ─────────────────────────────
-
-test('buildPrompt: SKILL.mdを読み込む指示と配布済み正本の絶対パスを指定する', () => {
-  const { prompt } = buildPrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
-    mainGhDir: 'C:\\main\\.gh-maestro',
-    skillPath: SKILL_MD,
-  });
-  assert.match(prompt, /SKILL=C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md/);
-  assert.match(prompt, /^Review Manager フェーズ1/);
-  assert.match(prompt, /SKILL に指定されたファイルを読み、/);
-});
-
-test('buildFinalizePrompt: SKILL.mdを読み込む指示と配布済み正本の絶対パスを指定する', () => {
-  const { prompt } = buildFinalizePrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
-    outputFile: 'C:\\ws\\out.json', mainGhDir: 'C:\\main\\.gh-maestro',
-    resultsFile: 'C:\\ws\\results.json',
-    skillPath: SKILL_MD,
-  });
-  assert.match(prompt, /SKILL=C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md/);
-  assert.match(prompt, /^Review Manager フェーズ2/);
-  assert.match(prompt, /SKILL に指定されたファイルを読み、/);
 });

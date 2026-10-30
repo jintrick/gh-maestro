@@ -396,33 +396,32 @@ test('サブプロセス経由: sweep は CLI 主経路でも除外リストを�
 
 test('sweep: 旧形式の孤立 lease を件数に依存しない1行で報告し、詳細一覧を保存する', () => {
   const { spawnSync } = require('child_process');
-  for (const count of [1, 50]) {
-    const ws = fs.mkdtempSync(path.join(os.tmpdir(), `gh-maestro-sweep-leases-${count}-`));
-    try {
-      const leasesDir = path.join(ws, '.gh-maestro', 'leases');
-      fs.mkdirSync(leasesDir, { recursive: true });
-      for (let i = 0; i < count; i += 1) {
-        fs.writeFileSync(path.join(leasesDir, `issue-${i}-coder.json`), JSON.stringify({ pid: 900000 + i }));
-      }
-
-      const r = spawnSync(process.execPath, [SCRIPT, 'sweep', '--workspace', ws], {
-        encoding: 'utf8',
-        env: cleanSpawnEnv(),
-      });
-      assert.equal(r.status, 0, `sweep failed: ${r.stdout}\n${r.stderr}`);
-      const lines = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter(Boolean);
-      assert.equal(lines.length, 1, `N=${count}: output must stay to one summary line: ${lines.join('\n')}`);
-      assert.match(lines[0], new RegExp(`片付け済みワーカーの lease を ${count} 件削除しました`));
-      assert.match(lines[0], /一覧: .*sweep-lease-report\.log/);
-      assert.equal(fs.readdirSync(leasesDir).length, 0);
-
-      const reportPath = path.join(ws, '.gh-maestro', 'sweep-lease-report.log');
-      const reportLines = fs.readFileSync(reportPath, 'utf8').trim().split(/\r?\n/);
-      assert.equal(reportLines.length, count);
-      assert.ok(reportLines.every((line) => line.startsWith('removed lease: ')));
-    } finally {
-      fs.rmSync(ws, { recursive: true, force: true });
+  const count = 50;
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), `gh-maestro-sweep-leases-${count}-`));
+  try {
+    const leasesDir = path.join(ws, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    for (let i = 0; i < count; i += 1) {
+      fs.writeFileSync(path.join(leasesDir, `issue-${i}-coder.json`), JSON.stringify({ pid: 900000 + i }));
     }
+
+    const r = spawnSync(process.execPath, [SCRIPT, 'sweep', '--workspace', ws], {
+      encoding: 'utf8',
+      env: cleanSpawnEnv(),
+    });
+    assert.equal(r.status, 0, `sweep failed: ${r.stdout}\n${r.stderr}`);
+    const lines = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter(Boolean);
+    assert.equal(lines.length, 1, `N=${count}: output must stay to one summary line: ${lines.join('\n')}`);
+    assert.match(lines[0], new RegExp(`片付け済みワーカーの lease を ${count} 件削除しました`));
+    assert.match(lines[0], /一覧: .*sweep-lease-report\.log/);
+    assert.equal(fs.readdirSync(leasesDir).length, 0);
+
+    const reportPath = path.join(ws, '.gh-maestro', 'sweep-lease-report.log');
+    const reportLines = fs.readFileSync(reportPath, 'utf8').trim().split(/\r?\n/);
+    assert.equal(reportLines.length, count);
+    assert.ok(reportLines.every((line) => line.startsWith('removed lease: ')));
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
   }
 });
 

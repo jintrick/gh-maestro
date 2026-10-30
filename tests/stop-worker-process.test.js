@@ -7,8 +7,10 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const storageLayout = require('../scripts/shared/storage-layout');
 
 const { stopWorkerProcess, cleanupLegacyWorkerPanes } = require('../scripts/shared/stop-worker-process');
+const stopWorkerCli = require('../scripts/stop-worker');
 const { createTempDirScope } = require('../scripts/shared/temp-directory');
 const tempDirScope = createTempDirScope();
 test.after(() => tempDirScope.cleanup());
@@ -48,6 +50,48 @@ test('stopWorkerProcess: 不正なPIDは欠落扱いせず停止を拒否する'
       killProcessTreeFn: () => { killed = true; },
     }), /PID記録が不正/);
     assert.equal(killed, false);
+  });
+});
+
+test('stopWorkerProcess: PID registry sweep error is returned as unsuccessful', () => {
+  withWorkspace((workspace) => {
+    const runtimeRoot = path.join(workspace, '.test-runtime');
+    const pidsDir = path.join(storageLayout.workspaceRuntimeDir(workspace, runtimeRoot), 'pids');
+    fs.mkdirSync(pidsDir, { recursive: true });
+    fs.writeFileSync(path.join(pidsDir, 'corrupt.json'), '{broken registry', 'utf8');
+
+    const previousRuntimeRoot = process.env.GH_MAESTRO_RUNTIME_DIR;
+    process.env.GH_MAESTRO_RUNTIME_DIR = runtimeRoot;
+    try {
+      const warnings = [];
+      const result = stopWorkerProcess(workspace, 'worker', {
+        _injectedWorkers: { worker: {} },
+        logWarn: (message) => warnings.push(message),
+      });
+
+      assert.equal(result.success, false);
+      assert.equal(result.errors.length, 1);
+      assert.match(result.errors[0], /corrupt\.json/);
+      assert.ok(warnings.some((message) => message.includes('PID registry error')));
+    } finally {
+      if (previousRuntimeRoot === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+      else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntimeRoot;
+    }
+  });
+});
+
+test('stop-worker: success=false は停止未確認として非0 statusを返す', () => {
+  withWorkspace((workspace) => {
+    const errors = [];
+    const status = stopWorkerCli.main(['worker', '--workspace', workspace], {
+      stopWorkerProcessFn: () => ({ success: false, errors: ['registry unreadable'] }),
+      errorFn: (message) => errors.push(message),
+    });
+
+    assert.equal(status, 1);
+    assert.deepEqual(errors, [
+      'stop-worker: 停止処理を完了できませんでした（PID registry の処理に未解決エラーがあります）',
+    ]);
   });
 });
 
