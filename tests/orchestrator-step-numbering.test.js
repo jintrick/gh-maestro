@@ -53,6 +53,26 @@ function readDeclaredMiddleItemTotal(stage, stageNumber) {
   return Number(declarations[0][1]);
 }
 
+function extractEventNames(eventTable) {
+  const names = new Set();
+  for (const line of eventTable.split(/\r?\n/)) {
+    const firstCell = /^\|\s*([^|]+)\|/.exec(line)?.[1];
+    if (!firstCell) continue;
+    const eventLabel = firstCell.replace(/<[^>]*>/g, ' ');
+    for (const match of eventLabel.matchAll(/(?:^|[^A-Za-z0-9_])([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)(?![A-Za-z0-9_])/g)) {
+      names.add(match[1]);
+    }
+  }
+  return names;
+}
+
+function requireDeclaredNotification(signal, eventNames, file) {
+  const match = /^notify:([A-Z][A-Z0-9_]*)$/.exec(signal);
+  assert.ok(match, `${file}の通知合図形式が有効であること: ${signal}`);
+  assert.ok(eventNames.has(match[1]), `${file}の通知合図 ${match[1]} がイベント表の通知名と完全一致すること`);
+  return match[1];
+}
+
 test('開発サイクルの大項目が文書上の連番で必須／任意に区分されている', () => {
   const cycle = readDevelopmentCycle();
   const headings = readStageHeadings(cycle);
@@ -152,6 +172,7 @@ test('12手順書の合図宣言が存在し、通知・script合図が実際の
   const eventTableEnd = fs.readFileSync(SKILL_PATH, 'utf8').indexOf('## 横断的な手続き', eventTableStart);
   const skill = fs.readFileSync(SKILL_PATH, 'utf8');
   const eventTable = skill.slice(eventTableStart, eventTableEnd);
+  const eventNames = extractEventNames(eventTable);
   const signalsByFile = new Map();
 
   for (const file of expectedFiles) {
@@ -168,8 +189,7 @@ test('12手順書の合図宣言が存在し、通知・script合図が実際の
 
     for (const signal of signals) {
       if (signal.startsWith('notify:')) {
-        const name = signal.slice('notify:'.length);
-        assert.match(eventTable, new RegExp(`\\|[^\\n]*${name}[^\\n]*\\|`), `${file}の通知合図 ${name} がイベント表にあること`);
+        const name = requireDeclaredNotification(signal, eventNames, file);
         const prompt = `<task-notification><event>${name}:42</event></task-notification>`;
         const output = renderNotificationGuidance({ workspace: path.dirname(SKILL_DIR), skillDirectory: SKILL_DIR, prompt });
         assert.match(output, new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${name}で${file}が配信されること`);
@@ -194,6 +214,21 @@ test('12手順書の合図宣言が存在し、通知・script合図が実際の
     prompt: '<task-notification><event>PR_MERGED:42</event></task-notification>',
   });
   assert.ok(merged.length <= 9000, `PR_MERGEDの合計追加文脈が9000文字以下であること（${merged.length}）`);
+});
+
+test('notify合図はイベント名と完全一致し、部分一致だけする誤記を拒否する', () => {
+  const skill = fs.readFileSync(SKILL_PATH, 'utf8');
+  const eventTableStart = skill.indexOf('## イベントの受け口');
+  const eventTableEnd = skill.indexOf('## 横断的な手続き', eventTableStart);
+  const eventNames = extractEventNames(skill.slice(eventTableStart, eventTableEnd));
+
+  assert.ok(eventNames.has('PR_PUSH'), 'イベント表からPR_PUSHを通知名として抽出する');
+  assert.equal(eventNames.has('PR'), false, 'PR_PUSHの部分文字列や引数プレースホルダーを別通知名にしない');
+  assert.equal(requireDeclaredNotification('notify:PR_PUSH', eventNames, 'fixture.md'), 'PR_PUSH');
+  assert.throws(
+    () => requireDeclaredNotification('notify:PR', eventNames, 'fixture.md'),
+    /通知合図 PR がイベント表の通知名と完全一致すること/,
+  );
 });
 
 test('工程7に修正push後のexplorer事実確認が番号付き中項目としてある', () => {
