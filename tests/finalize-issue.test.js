@@ -12,6 +12,9 @@ const {
   finalizeIssue: finalizeIssueCore,
   cleanupIssueArtifacts,
   bodyReferencesIssue,
+  decisionCommentMarker,
+  defaultListIssueCommentBodies,
+  defaultFindDecisionPosted,
 } = require('../scripts/finalize-issue.js');
 const childProcess = require('../scripts/shared/child-process');
 
@@ -20,7 +23,11 @@ const childProcess = require('../scripts/shared/child-process');
 function finalizeIssue(params, deps = {}) {
   return finalizeIssueCore(
     { decisionBody: 'テスト決定事項', ...params },
-    { postDecisionFn: () => ({ ok: true, url: 'https://example.test/comment/1' }), ...deps },
+    {
+      findDecisionPostedFn: () => ({ posted: false }),
+      postDecisionFn: () => ({ ok: true, url: 'https://example.test/comment/1' }),
+      ...deps,
+    },
   );
 }
 
@@ -38,25 +45,44 @@ function withTempWorkspace(workers, fn) {
 }
 
 function fakeGhEnvironment(directory) {
+  fs.mkdirSync(directory, { recursive: true });
   const binDir = path.join(directory, 'fake-bin');
   fs.mkdirSync(binDir, { recursive: true });
   const bootstrap = path.join(binDir, 'fake-gh-bootstrap.js');
+  const commentsFile = path.join(directory, 'comments.json');
   fs.writeFileSync(bootstrap, [
     "'use strict';",
+    "const fs = require('node:fs');",
     "const path = require('node:path');",
     "if (path.basename(process.execPath).toLowerCase() === (process.platform === 'win32' ? 'gh.exe' : 'gh')) {",
-    "  process.stdout.write('https://github.com/test/repo/issues/5#issuecomment-555\\n');",
+    `  const commentsFile = ${JSON.stringify(commentsFile)};`,
+    "  const args = [path.basename(process.argv[1]), ...process.argv.slice(2)];",
+    "  process.stderr.write('fake-gh-args:' + JSON.stringify({ exe: process.execPath, argv: process.argv, args }) + '\\n');",
+    "  let comments = [];",
+    "  try { comments = JSON.parse(fs.readFileSync(commentsFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }",
+    "  if (args[0] === 'api') {",
+    "    process.stdout.write(comments.map((comment) => Buffer.from(comment, 'utf8').toString('base64')).join('\\n'));",
+    "  } else if (args[0] === 'issue' && args[1] === 'comment') {",
+    "    const bodyFileIndex = args.indexOf('--body-file');",
+    "    comments.push(fs.readFileSync(args[bodyFileIndex + 1], 'utf8'));",
+    "    fs.writeFileSync(commentsFile, JSON.stringify(comments), 'utf8');",
+    "    process.stdout.write('https://github.com/test/repo/issues/5#issuecomment-555\\n');",
+    "  } else if (args[0] === 'pr' && args[1] === 'list') {",
+    "    process.stdout.write('[]');",
+    "  }",
     '  process.exit(0);',
     '}',
     '',
   ].join('\n'), 'utf8');
   fs.copyFileSync(process.execPath, path.join(binDir, process.platform === 'win32' ? 'gh.exe' : 'gh'));
   if (process.platform !== 'win32') fs.chmodSync(path.join(binDir, 'gh'), 0o755);
-  return {
+  const env = {
     ...process.env,
     PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
     NODE_OPTIONS: `--require="${bootstrap.replace(/\\/g, '/')}"`,
+    GH_MAESTRO_FAKE_COMMENTS: commentsFile,
   };
+  return { env, commentsFile };
 }
 
 test('collectWorkersForIssue: 指定Issueのワーカーだけ列挙しorchestratorは除く', () => {
@@ -126,6 +152,7 @@ test('finalizeIssue: 決定事項コメント投稿失敗時はworker削除とIs
     const result = finalizeIssueCore(
       { workspace: dir, issue: 5, decisionBody: '反省会なし（軽量PR）' },
       {
+        findDecisionPostedFn: () => ({ posted: false }),
         postDecisionFn: () => ({ ok: false, stderr: 'GitHub unavailable' }),
         removeWorkerFn: () => { removeCalls += 1; return { ok: true }; },
         closeIssueFn: () => { closeCalls += 1; return { ok: true }; },
@@ -136,6 +163,99 @@ test('finalizeIssue: 決定事項コメント投稿失敗時はworker削除とIs
     assert.equal(removeCalls, 0);
     assert.equal(closeCalls, 0);
   });
+});
+
+test('finalizeIssue: 同じ決定事項を再実行しても投稿済みコメントを重複させない', () => {
+  withTempWorkspace({ 'issue-5-coder': { paneId: '1', issue: 5 } }, (dir) => {
+    const comments = [];
+    let postCalls = 0;
+    const params = { workspace: dir, issue: 5, repo: 'owner/repo', decisionBody: '採用した決定事項\n' };
+    const deps = {
+      findDecisionPostedFn: (input) => defaultFindDecisionPosted(input, {
+        listIssueCommentBodiesFn: () => comments,
+      }),
+      postDecisionFn: (body) => {
+        postCalls += 1;
+        comments.push(body);
+        return { ok: true, url: 'https://example.test/comment/1' };
+      },
+      clearPrMonitorTargetFn: () => true,
+      closeStatusPaneFn: () => ({ ok: false, stderr: 'pane unavailable' }),
+      removeWorkerFn: () => { throw new Error('failed pane must not remove worker'); },
+      closeIssueFn: () => { throw new Error('failed pane must not close issue'); },
+    };
+
+    const first = finalizeIssueCore(params, deps);
+    assert.equal(first.closed, false);
+    assert.equal(first.decisionAlreadyPosted, false);
+    assert.equal(comments.length, 1);
+    assert.ok(comments[0].includes(decisionCommentMarker(5, params.decisionBody)));
+
+    const retry = finalizeIssueCore(params, deps);
+    assert.equal(retry.closed, false);
+    assert.equal(retry.decisionAlreadyPosted, true);
+    assert.equal(postCalls, 1, 'retry reuses the existing GitHub comment');
+    assert.equal(comments.length, 1);
+  });
+});
+
+test('finalizeIssue: 決定事項の既存投稿照合に失敗したら投稿も後始末もしない', () => {
+  withTempWorkspace({ 'issue-5-coder': { issue: 5 } }, (dir) => {
+    let postCalls = 0;
+    let paneCloseCalls = 0;
+    let issueCloseCalls = 0;
+    const result = finalizeIssueCore(
+      { workspace: dir, issue: 5, decisionBody: '照合を要する決定事項' },
+      {
+        findDecisionPostedFn: () => { throw new Error('GitHub API unavailable'); },
+        postDecisionFn: () => { postCalls += 1; return { ok: true }; },
+        clearPrMonitorTargetFn: () => { throw new Error('must not clear'); },
+        closeStatusPaneFn: () => { paneCloseCalls += 1; return { ok: true }; },
+        closeIssueFn: () => { issueCloseCalls += 1; return { ok: true }; },
+      },
+    );
+
+    assert.equal(result.closed, false);
+    assert.equal(result.decisionPosted, false);
+    assert.equal(postCalls, 0);
+    assert.equal(paneCloseCalls, 0);
+    assert.equal(issueCloseCalls, 0);
+  });
+});
+
+test('defaultListIssueCommentBodies: GitHub APIの失敗を未投稿扱いにせずエラーにする', () => {
+  let captured;
+  assert.throws(() => defaultListIssueCommentBodies(
+    { issue: 5, repo: 'owner/repo', workspace: 'C:/temp/workspace' },
+    {
+      spawnSyncFn: (command, args, options) => {
+        captured = { command, args, cwd: options.cwd };
+        return { status: 1, stdout: '', stderr: 'rate limit' };
+      },
+    },
+  ), /Issueコメントの照合に失敗しました: rate limit/);
+  assert.deepEqual(captured, {
+    command: 'gh',
+    args: ['api', '--paginate', 'repos/owner/repo/issues/5/comments', '--jq', '.[].body | @base64'],
+    cwd: 'C:/temp/workspace',
+  });
+});
+
+test('defaultListIssueCommentBodies: ページごとにbase64化されたコメント本文を改行込みで復元する', () => {
+  const bodies = ['1ページ目の本文\n2行目', '2ページ目の本文'];
+  let capturedArgs;
+  const decoded = defaultListIssueCommentBodies(
+    { issue: 5, repo: 'owner/repo', workspace: 'C:/temp/workspace' },
+    {
+      spawnSyncFn: (command, args) => {
+        assert.equal(command, 'gh');
+        capturedArgs = args;
+        return { status: 0, stdout: `${bodies.map((body) => Buffer.from(body, 'utf8').toString('base64')).join('\n')}\n`, stderr: '' };
+      },
+    },
+  );
+  assert.deepEqual(capturedArgs, ['api', '--paginate', 'repos/owner/repo/issues/5/comments', '--jq', '.[].body | @base64']);
+  assert.deepEqual(decoded, bodies);
 });
 
 test('finalizeIssue: workers.jsonの読み取り失敗時はIssueをクローズしない', () => {
@@ -277,19 +397,22 @@ test('finalize-issue CLI: worktree runtimeのclose-pane失敗を非0で報告し
     const statusFile = statusPaneRegistry.statusPanePath(worktree, runtimeDir);
     fs.mkdirSync(path.dirname(statusFile), { recursive: true });
     fs.writeFileSync(statusFile, '{invalid json', 'utf8');
+    const fakeGh = fakeGhEnvironment(path.join(dir, 'fake'));
+    const cliArgs = [
+      path.join(__dirname, '..', 'scripts', 'finalize-issue.js'),
+      '--issue', '5',
+      '--decision-file', decisionFile,
+      '--repo', 'test/repo',
+      '--workspace', dir,
+    ];
 
     const savedRuntimeDir = process.env.GH_MAESTRO_RUNTIME_DIR;
     process.env.GH_MAESTRO_RUNTIME_DIR = runtimeDir;
     try {
       const cliResult = spawnNodeSync(
         process.execPath,
-        [
-          path.join(__dirname, '..', 'scripts', 'finalize-issue.js'),
-          '--issue', '5',
-          '--decision-file', decisionFile,
-          '--workspace', dir,
-        ],
-        { encoding: 'utf8', env: { ...fakeGhEnvironment(path.join(dir, 'fake')), GH_MAESTRO_RUNTIME_DIR: runtimeDir } },
+        cliArgs,
+        { encoding: 'utf8', env: { ...fakeGh.env, GH_MAESTRO_RUNTIME_DIR: runtimeDir } },
       );
       assert.equal(cliResult.status, 1);
       assert.match(cliResult.stdout, /FINALIZED:5 removed=0\/1 closed=false/, cliResult.stderr);

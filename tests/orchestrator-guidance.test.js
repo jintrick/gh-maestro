@@ -80,6 +80,51 @@ test('triage.mdは正式レビュー通知で届き、テスト結果コメン�
   assert.equal(notify('PR_COMMENT'), '', 'test-result and other ordinary PR comments do not repeat triage guidance');
 });
 
+test('script合図付きCLIの手順書例はstdoutを変数・pipe・redirectで飲み込まない', () => {
+  const skillsDirectory = path.resolve(__dirname, '..', 'skills');
+  const collectMarkdownFiles = (directory) => fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) return collectMarkdownFiles(target);
+    return entry.isFile() && entry.name.endsWith('.md') ? [target] : [];
+  });
+  const markdownFiles = collectMarkdownFiles(skillsDirectory);
+  const commands = [];
+
+  for (const filename of markdownFiles) {
+    const markdown = fs.readFileSync(filename, 'utf8');
+    const blocks = [...markdown.matchAll(/```[^\r\n]*\r?\n([\s\S]*?)```/g)].map((match) => match[1]);
+    for (const block of blocks) {
+      let pending = '';
+      for (const rawLine of block.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        const continued = /(?:\\|`)\s*$/.test(line);
+        pending += `${line.replace(/(?:\\|`)\s*$/, '')} `;
+        if (!continued) {
+          if (pending.includes('--guidance-signal')) commands.push({ filename, command: pending.trim(), block });
+          pending = '';
+        }
+      }
+      if (pending.includes('--guidance-signal')) commands.push({ filename, command: pending.trim(), block });
+    }
+  }
+
+  assert.ok(commands.length > 0, 'finds the declared CLI examples with a guidance signal');
+  for (const { filename, command, block } of commands) {
+    assert.match(command, /^node\s+/, `${filename} invokes the signaled CLI directly`);
+    assert.doesNotMatch(command, /\$\(/, `${filename} does not capture CLI output in command substitution`);
+    assert.doesNotMatch(command, /\|/, `${filename} does not pipe away CLI output`);
+    const hasStdoutRedirect = /(?:^|\s)(?:\d?>|>>|&>)\s*/.test(command);
+    if (hasStdoutRedirect) {
+      const redirectedFile = command.match(/(?:^|\s)>(?:\s*)["']?(\$[A-Za-z_][A-Za-z_0-9]*)/);
+      assert.ok(redirectedFile, `${filename} redirects only to an output file that can be replayed`);
+      const replayIndex = block.indexOf(`cat "${redirectedFile[1]}"`);
+      assert.ok(replayIndex >= 0, `${filename} prints redirected CLI output back to stdout`);
+      assert.ok(replayIndex > block.indexOf('--guidance-signal'), `${filename} replays the output after running the CLI`);
+    }
+  }
+});
+
 test('script合図は一致する宣言だけを読みorchestrator identityを要求する', () => {
   withTempDir((root) => {
     writeGuide(root, 'stage2.md', ['script:create-issue.js:implementation-issue'], '# stage 2');

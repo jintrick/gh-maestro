@@ -22,11 +22,19 @@ signals:
 本文ファイルは作らない。`--title-only` は明示的にタイトルだけのIssueを作るモードである。assistantはIssue作成時に自動起動されない。
 
 ```sh
-CREATE_OUTPUT=$(node "{{SCRIPTS_PATH}}/create-issue.js" \
+CREATE_OUTPUT_FILE=$(mktemp)
+node "{{SCRIPTS_PATH}}/create-issue.js" \
   --title "<変更内容の短いタイトル>" \
   --title-only \
-  --repo "$REPO" --workspace "$WORKSPACE" --guidance-signal lightweight-anchor)
-ISSUE=$(printf '%s\n' "$CREATE_OUTPUT" | sed -n 's/^ISSUE_CREATED:\([0-9][0-9]*\).*/\1/p')
+  --repo "$REPO" --workspace "$WORKSPACE" --guidance-signal lightweight-anchor >"$CREATE_OUTPUT_FILE"
+CREATE_STATUS=$?
+cat "$CREATE_OUTPUT_FILE"
+if [ "$CREATE_STATUS" -ne 0 ]; then
+  rm -f "$CREATE_OUTPUT_FILE"
+  exit "$CREATE_STATUS"
+fi
+ISSUE=$(sed -n 's/^ISSUE_CREATED:\([0-9][0-9]*\).*/\1/p' "$CREATE_OUTPUT_FILE")
+rm -f "$CREATE_OUTPUT_FILE"
 test -n "$ISSUE"
 ```
 

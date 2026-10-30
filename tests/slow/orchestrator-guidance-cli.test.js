@@ -5,10 +5,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
-const { parseFrontmatter } = require('../scripts/sync-rules');
-const { withTempDir } = require('../scripts/shared/temp-directory');
+const { parseFrontmatter } = require('../../scripts/sync-rules');
+const { withTempDir } = require('../../scripts/shared/temp-directory');
 
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '..', '..');
 const SCRIPT_DIR = path.join(ROOT, 'scripts');
 const GUIDE_DIR = path.join(ROOT, 'skills', 'gh-maestro-orchestrator');
 
