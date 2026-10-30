@@ -232,6 +232,9 @@ function extractV2Declaration(body) {
   const typecheckLine = body.split(/\r?\n/).some(line => /^\s*-\s+\*\*typecheck\*\*:/i.test(line));
   const typecheck = typecheckLine ? parseTypecheckDeclaration(body) : undefined;
 
+  // 層のどれかが unavailable だと結果行は unknown になる。構文と層行が有効な aggregate は、
+  // 結果行が unknown でも provenance/scope/layers/lint を保持する（status は outcome が無いので NONE）。
+  const hasAggregateLayers = aggregate !== null && Object.keys(aggregate.layers).length > 0;
   const hasCounts = fail !== undefined && pass !== undefined;
   const hasPartialCounts = (fail === undefined) !== (pass === undefined);
   // known として扱うのは、ランナー由来・範囲既知・結果ラベル既知に加えて、
@@ -240,7 +243,7 @@ function extractV2Declaration(body) {
   // コメントと区別できないため unknown に縮退させる。
   const isKnown = provenance === KNOWN_PROVENANCE
     && (scope === FULL_SCOPE || scope === PARTIAL_SCOPE || scope === AGGREGATE_SCOPE)
-    && (resultLabel === 'pass' || resultLabel === 'fail')
+    && (resultLabel === 'pass' || resultLabel === 'fail' || hasAggregateLayers)
     && !hasPartialCounts
     && (!aggregate || Object.keys(aggregate.layers).length > 0);
 
@@ -265,7 +268,7 @@ function extractV2Declaration(body) {
     scope,
     lint,
     ...(typecheck ? { typecheck } : {}),
-    outcome: resultLabel,
+    ...(resultLabel === 'pass' || resultLabel === 'fail' ? { outcome: resultLabel } : {}),
     ...(hasCounts ? { fail, pass } : {}),
     ...(tests !== undefined ? { tests } : {}),
     ...(aggregate ? aggregate : {}),
@@ -385,6 +388,12 @@ function evaluateTestDeclaration(declaration, headSha) {
   );
 
   if (!isMatch) return { status: 'STALE', ...result };
+  // aggregate は全層から結果が決まる。宣言の結果行が pass でも、層に fail が1つでも
+  // あれば（壊れた・合成前の旧コメントが残っていても）GREEN にしない。
+  if (declaration.scope === AGGREGATE_SCOPE && declaration.layers
+      && Object.values(declaration.layers).some(layer => layer && layer.outcome === 'fail')) {
+    return { status: 'RED', ...result };
+  }
   if (declaration.outcome === 'pass' || declaration.outcome === 'fail') {
     return { status: declaration.outcome === 'pass' ? 'GREEN' : 'RED', ...result };
   }
@@ -395,6 +404,93 @@ function evaluateTestDeclaration(declaration, headSha) {
     return { status: declaration.fail === 0 ? 'GREEN' : 'RED', ...result };
   }
   return { status: 'NONE', ...result };
+}
+
+const AGGREGATE_LAYER_ORDER = Object.freeze(['full', 'slow']);
+
+function sameCommit(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || !a || !b) return false;
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  return x.startsWith(y) || y.startsWith(x);
+}
+
+// v2 の aggregate 申告で、対象コミットと層行を持つときだけコミットを返す。
+function aggregateCommitOf(body) {
+  if (!body.includes(TEST_RESULT_MARKER)) return null;
+  if (matchBacktickField(body, '実行範囲') !== AGGREGATE_SCOPE) return null;
+  const commit = matchCommit(body);
+  if (!commit || Object.keys(parseAggregateLayers(body, undefined).layers).length === 0) return null;
+  return commit;
+}
+
+function layerLinesOf(body) {
+  const map = new Map();
+  for (const line of body.split(/\r?\n/)) {
+    const parsed = parseAggregateLayerLine(line, undefined);
+    if (parsed && !map.has(parsed.layer)) map.set(parsed.layer, { line, outcome: parsed.outcome });
+  }
+  return map;
+}
+
+function staticCheckLineOf(body, name) {
+  const re = new RegExp(`^\\s*-\\s+\\*\\*${name}\\*\\*:`, 'i');
+  return body.split(/\r?\n/).find(line => re.test(line));
+}
+
+/**
+ * 同一コミットの v2 aggregate 申告どうしを層単位で合成する純粋関数。
+ * 層行・lint/typecheck 行は原文のまま保持し（failedTests や並列数を再構成で落とさない）、
+ * 読み取りは extractTestDeclaration / parseAggregateLayerLine を再利用する。
+ * - 新本文にある層は新が勝つ。新本文に無い層は既存の行を残す。
+ * - lint / typecheck は新本文が missing / unavailable のときだけ既存行を残す。
+ * - 結果行は合成後の全層から再計算する（fail があれば fail、全 pass なら pass、他は unknown）。
+ * 合成できない組み合わせ（別コミット、v1、unknown、aggregate でない）は newBody をそのまま返す。
+ *
+ * @param {string} existingBody
+ * @param {string} newBody
+ * @returns {string}
+ */
+function mergeAggregateDeclarationBodies(existingBody, newBody) {
+  if (typeof existingBody !== 'string' || typeof newBody !== 'string') return newBody;
+  // 結果行が unknown の申告（slow が unavailable など）も合成の対象にするため、
+  // extractTestDeclaration の known 判定ではなく、v2・aggregate・層行の有無を見る。
+  const existingCommit = aggregateCommitOf(existingBody);
+  const incomingCommit = aggregateCommitOf(newBody);
+  if (!existingCommit || !incomingCommit || !sameCommit(existingCommit, incomingCommit)) {
+    return newBody;
+  }
+  const merged = new Map([...layerLinesOf(existingBody), ...layerLinesOf(newBody)]);
+  const ordered = [
+    ...AGGREGATE_LAYER_ORDER.filter(name => merged.has(name)),
+    ...[...merged.keys()].filter(name => !AGGREGATE_LAYER_ORDER.includes(name)),
+  ];
+  const outcomes = ordered.map(name => merged.get(name).outcome);
+  const outcome = outcomes.includes('fail') ? 'fail'
+    : (outcomes.every(o => o === 'pass') ? 'pass' : 'unknown');
+
+  const keepExisting = status => status === 'missing' || status === 'unavailable';
+  const keepLint = keepExisting(parseLintDeclaration(newBody).status)
+    ? staticCheckLineOf(existingBody, 'lint') : undefined;
+  const keepTypecheck = staticCheckLineOf(newBody, 'typecheck') && keepExisting(parseTypecheckDeclaration(newBody).status)
+    ? staticCheckLineOf(existingBody, 'typecheck') : undefined;
+
+  const out = [];
+  let emitted = false;
+  for (const line of newBody.split(/\r?\n/)) {
+    if (parseAggregateLayerLine(line, undefined)) {
+      if (!emitted) {
+        for (const name of ordered) out.push(merged.get(name).line);
+        emitted = true;
+      }
+      continue;
+    }
+    if (/^\s*-\s+\*\*結果\*\*:/.test(line)) out.push(`- **結果**: ${outcome}`);
+    else if (keepLint && /^\s*-\s+\*\*lint\*\*:/i.test(line)) out.push(keepLint);
+    else if (keepTypecheck && /^\s*-\s+\*\*typecheck\*\*:/i.test(line)) out.push(keepTypecheck);
+    else out.push(line);
+  }
+  return out.join('\n');
 }
 
 /**
@@ -431,5 +527,6 @@ module.exports = {
   hasTestDeclarationMarker,
   extractTestDeclaration,
   evaluateTestDeclaration,
+  mergeAggregateDeclarationBodies,
   findLatestTrustedTestDeclaration,
 };

@@ -175,8 +175,9 @@ test('共有ルール: aggregate は層別結果と全層充足性を抽出す�
     allLayersComplete: true,
     lint: { status: 'complete', outcome: 'pass', findingCount: 0 },
   });
+  // 結果行は pass でも slow 層が fail なので、全層から RED になる（Issue #664）。
   assert.deepEqual(evaluateTestDeclaration(declaration, SHA), {
-    status: 'GREEN',
+    status: 'RED',
     declaredSha: SHA,
     headSha: SHA,
     provenance: 'test-runner',
@@ -212,7 +213,8 @@ test('queryTestStatus: aggregate はfull/slowの層別結果と不足層を返�
     { pr: '42', repo: 'owner/repo' },
     { ghPrViewFn: () => prView([prComment(aggregateDeclarationBody())]) },
   );
-  assert.equal(complete.status, 'GREEN');
+  // 結果行は pass でも slow 層が fail なので RED（Issue #664）。
+  assert.equal(complete.status, 'RED');
   assert.equal(complete.scope, 'aggregate');
   assert.equal(complete.layers.full.pass, 1826);
   assert.equal(complete.layers.slow.fail, 1);
