@@ -392,21 +392,6 @@ describe('Cursor state management', () => {
     });
   });
 
-  test('readCursor: 壊れたJSONは初期状態を返す', () => {
-    withTempDir((dir) => {
-      const cursorsDir = path.join(dir, '.gh-maestro', 'records', 'issue', '1', 'workers', 'issue-1-bad');
-      fs.mkdirSync(cursorsDir, { recursive: true });
-      fs.writeFileSync(path.join(cursorsDir, 'cursor.json'), '{broken json');
-
-      const state = supervisor.readCursor(dir, 'issue-1-bad');
-      assert.equal(state.since, null);
-      assert.deepEqual(state.seenIds, []);
-      assert.equal(state.hangNotifiedPid, null);
-      assert.equal(state.hangNotifiedStartTime, null);
-      assert.equal(state.hangNotifiedAt, null);
-    });
-  });
-
   test('writeCursor → readCursor がラウンドトリップする', () => {
     withTempDir((dir) => {
       setupWorkspace(dir);

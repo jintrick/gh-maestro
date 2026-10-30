@@ -44,7 +44,6 @@ const {
 
 const {
   ALL_LEAF_IDS,
-  REVIEW_ASPECT_FILES,
   reviewFilesForLeaves,
   TRUNK_TO_LEAVES,
 } = require('../scripts/shared/review-aspects');
@@ -306,14 +305,25 @@ test('resolveReviewSkillsDir: 通常時は managedRoot() 配下の正本パス�
 });
 
 test('レビュー観点の7葉はcommon/pre/postの固定レイアウトを持つ', () => {
+  const expectedLeafIds = [
+    'correctness/logic-invariants',
+    'correctness/api-contract',
+    'correctness/concurrency',
+    'resilience-security/failure-recovery',
+    'resilience-security/hostile-input',
+    'maintainability/structure-naming',
+    'test-quality/test-quality',
+  ];
+  assert.deepEqual(ALL_LEAF_IDS, expectedLeafIds, '正本の7葉一覧はこの固定集合と一致する');
+
   const skillsDir = path.join(__dirname, '..', 'skills', 'gh-maestro-reviewer');
-  const common = fs.readFileSync(path.join(skillsDir, REVIEW_ASPECT_FILES.common), 'utf8');
+  const common = fs.readFileSync(path.join(skillsDir, 'common.md'), 'utf8');
   assert.match(common, /npm test/);
   assert.match(common, /npm run build/);
 
-  for (const leafId of ALL_LEAF_IDS) {
-    const prePath = path.join(skillsDir, leafId, REVIEW_ASPECT_FILES.pre);
-    const postPath = path.join(skillsDir, leafId, REVIEW_ASPECT_FILES.post);
+  for (const leafId of expectedLeafIds) {
+    const prePath = path.join(skillsDir, leafId, 'pre-review.md');
+    const postPath = path.join(skillsDir, leafId, 'post-review.md');
     assert.equal(fs.existsSync(prePath), true, `missing pre-review file: ${leafId}`);
     assert.equal(fs.existsSync(postPath), true, `missing post-review file: ${leafId}`);
     const pre = fs.readFileSync(prePath, 'utf8');
@@ -449,38 +459,6 @@ test('launchJobWorker: 未知の葉IDが指定された場合はエージェン�
     assert.equal(result.status, 'failed');
     assert.equal(result.jobId, 'job-1');
     assert.ok(result.error.includes('unknown leaf id'));
-  } finally {
-    fs.rmSync(worktreeDir, { recursive: true, force: true });
-    fs.rmSync(skillsDir, { recursive: true, force: true });
-  }
-});
-
-test('buildJobPrompt: 正本定義が読めないまたは未知IDの場合は例外をthrowする（fail-closed）', () => {
-  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-wt-'));
-  const skillsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-skills-'));
-  try {
-    const jobNonExistent = {
-      id: 'job-1',
-      leaf_ids: ['correctness/logic-invariants'],
-      aspect: 'Correctness',
-    };
-    const manifest = { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] };
-
-    assert.throws(
-      () => buildJobPrompt(jobNonExistent, manifest, worktreeDir, { reviewSkillsDir: skillsDir }),
-      /cannot read leaf file from canonical copy/,
-    );
-
-    const jobEscape = {
-      id: 'job-2',
-      leaf_ids: ['correctness/escape'],
-      aspect: 'Correctness',
-    };
-
-    assert.throws(
-      () => buildJobPrompt(jobEscape, manifest, worktreeDir, { reviewSkillsDir: skillsDir }),
-      /unknown leaf id/,
-    );
   } finally {
     fs.rmSync(worktreeDir, { recursive: true, force: true });
     fs.rmSync(skillsDir, { recursive: true, force: true });

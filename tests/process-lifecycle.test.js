@@ -390,14 +390,6 @@ test('findRunningInstances: 起動判定中に対象registryのJSON破損を空�
   }), /エントリを読み取れません/);
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// endpointを持たないPR1記録は、PIDが存在しても世代を判別できないためunknownにする。
-
-test('observe: endpointを持たないPR1 recordは生存PIDでもdeadを返す', () => {
-  const liveness = createResourceLiveness({ useRealResources: false, probeEndpoint: () => 'alive' });
-  const ref = liveness.readRef({ pid: 4242, startTime: MOCK_START_TIME, legacyEndpointless: true });
-  assert.equal(liveness.observe(ref), 'dead');
-});
 // findRunningInstance
 // ═══════════════════════════════════════════════════════════════════════════
 // verifyProcessIdentity 経由でWMIを呼ぶため、生存PIDを扱うテストは

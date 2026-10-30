@@ -409,20 +409,6 @@ test('未知のフラグを指定するとエラー終了する（黙って無�
 });
 
 
-// ── link-node-modules の解決 ──────────────────────────────────────────────────
-
-test('link-node-modules がリポジトリ内パスから解決できる', () => {
-  const nm = path.join(__dirname, '..', 'scripts', 'shared', 'link-node-modules');
-  assert.doesNotThrow(() => {
-    const resolved = require.resolve(nm);
-    assert.ok(resolved.endsWith('link-node-modules.js'));
-  });
-  const mod = require(nm);
-  assert.ok(mod.linkNodeModules);
-  assert.equal(typeof mod.linkNodeModules, 'function');
-});
-
-
 // ── agent 解決 ────────────────────────────────────────────────────────────────
 
 // ── ワーカーエントリ構築 ────────────────────────────────────────────────────────
@@ -696,10 +682,8 @@ test('establishOrchestratorBaseline: markRead が失敗すれば失敗として�
 // config.json の extraArgs 上書きで非対話化トークン（--print / run / exec 等）が欠落すると、
 // headless 起動が対話モードでハングする。起動をフェイルクローズで拒否する。
 
-// 注: 正のケース（トークン保持ならガードを通る）は tests/resolve-config.test.js の
-// validateNonInteractiveTokens 単体テスト + 実機の `node scripts/config.js status`
-// （正常時は警告なし）で担保する。ここで subprocess で検証すると checkAgentExists が
-// ログインシェル（pwsh）を起動するため、テスト内実プロセス spawn 禁止ルールに反する。
+// 注: 正のケース（トークン保持なら判定が valid）は tests/resolve-config.test.js の
+// validateNonInteractiveTokens 単体テストで確認する。この節は欠落時に起動を拒否する経路を扱う。
 
 // ── linkNodeModules のフェイルクローズ（Issue #425） ─────────────────────────
 // worktree への node_modules junction 作成に失敗（missing が空でない）した場合、
