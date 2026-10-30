@@ -9,9 +9,10 @@ const root = path.join(__dirname, '..');
 const architectSkill = fs.readFileSync(path.join(root, 'skills', 'gh-maestro-architect', 'SKILL.md'), 'utf8');
 
 test('architect skill は通信・完了・入力境界・手順・再試行を構造化して明記する', () => {
-  for (const heading of ['通信規約', '起動時に与えられる情報', '入力の境界', '手順', '投稿失敗と再試行']) {
+  for (const heading of ['通信規約', '入力の境界', '手順', '投稿失敗と再試行']) {
     assert.match(architectSkill, new RegExp(`## ${heading}`));
   }
+  assert.doesNotMatch(architectSkill, /## 起動時に与えられる情報/);
   assert.match(architectSkill, /## ゴールと(?:終了条件|責務)/);
   assert.match(architectSkill, /要件定義の変更/);
   assert.match(architectSkill, /自律的なリポジトリ探索/);

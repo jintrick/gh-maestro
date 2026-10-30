@@ -61,7 +61,8 @@ function validLegacyPaneId(value) {
  * @param {Function} [opts.killProcessTreeFn] プロセス停止関数（テスト用）
  * @param {object} [opts.liveness] 生存確認モジュール（テスト用）
  * @param {object} [opts._injectedWorkers] テスト用 workers オブジェクト注入
- * @returns {{ success: boolean, stoppedPid: number|null, workerEntry: object }}
+ * @returns {{ success: boolean, stoppedPid: number|null, workerEntry: object, errors: string[] }}
+ *   success is false when the worker's PID registry sweep reports unresolved errors.
  */
 function stopWorkerProcess(workspace, workerName, opts = {}) {
   const isRemoveMode = opts.isRemoveMode ?? false;
@@ -186,29 +187,28 @@ function stopWorkerProcess(workspace, workerName, opts = {}) {
   }
 
   // ── PID registry sweep: ワーカーの登録PIDを同一性確認の上で kill ─────
-  {
-    const sweepResults = sweepRegistry(workspace, {
-      match: (entry) => entry.workerName === workerName,
-    });
-    const prefix = isRemoveMode ? 'remove-worker' : 'stop-worker';
-    if (sweepResults.killed.length > 0) {
-      logWarn(`${prefix}: PID registry: ${sweepResults.killed.length} 件のプロセスを終了しました`);
-      for (const k of sweepResults.killed) {
-        logWarn(`${prefix}:   pid=${k.pid} script=${k.script || '-'}`);
-      }
+  const sweepResults = sweepRegistry(workspace, {
+    match: (entry) => entry.workerName === workerName,
+  });
+  const prefix = isRemoveMode ? 'remove-worker' : 'stop-worker';
+  if (sweepResults.killed.length > 0) {
+    logWarn(`${prefix}: PID registry: ${sweepResults.killed.length} 件のプロセスを終了しました`);
+    for (const k of sweepResults.killed) {
+      logWarn(`${prefix}:   pid=${k.pid} script=${k.script || '-'}`);
     }
-    if (sweepResults.cleaned.length > 0) {
-      logWarn(`${prefix}: PID registry: ${sweepResults.cleaned.length} 件のstaleエントリを掃除しました`);
-    }
-    for (const e of sweepResults.errors) {
-      logWarn(`${prefix}: PID registry error: ${e}`);
-    }
+  }
+  if (sweepResults.cleaned.length > 0) {
+    logWarn(`${prefix}: PID registry: ${sweepResults.cleaned.length} 件のstaleエントリを掃除しました`);
+  }
+  for (const e of sweepResults.errors) {
+    logWarn(`${prefix}: PID registry error: ${e}`);
   }
 
   return {
-    success: true,
+    success: sweepResults.errors.length === 0,
     stoppedPid,
     workerEntry,
+    errors: sweepResults.errors,
   };
 }
 

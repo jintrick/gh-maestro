@@ -101,9 +101,68 @@ function runSetup(dir) {
 // 少なくとも1件は実CLIのargv・require.main経路を維持する。その他の成功系は
 // 同じ main() をテストプロセス内で呼び、各ケースのGit fixtureと副作用の検証を
 // 残したままNodeプロセス起動の固定費だけを省く。
-function runSetupCli(dir) {
-  return spawnSync(process.execPath, [SCRIPT, dir], { cwd: dir, encoding: 'utf8' });
+function runSetupCli(dir, env = process.env) {
+  return spawnSync(process.execPath, [SCRIPT, dir], { cwd: dir, env, encoding: 'utf8' });
 }
+
+test('初回setupは成功確認行を表示し、後続実行用sentinelを作る', () => {
+  withGitProject((dir) => {
+    const sentinel = path.join(dir, '.gh-maestro', 'setup-ok');
+    fs.unlinkSync(sentinel);
+    gitIn(dir, 'config', 'remote.origin.url', 'https://github.com/example/gh-maestro-test.git');
+
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-setup-first-run-bin-'));
+    try {
+      const fakeSuccess = path.join(binDir, process.platform === 'win32' ? 'gh.exe' : 'gh');
+      const fakeVersion = path.join(binDir, process.platform === 'win32' ? 'wezterm.exe' : 'wezterm');
+      const fakeAuthStatusCall = path.join(binDir, 'fake-gh-auth-status.called');
+      const preload = path.join(binDir, 'fake-command-bootstrap.js');
+      fs.copyFileSync(process.execPath, fakeSuccess);
+      fs.copyFileSync(process.execPath, fakeVersion);
+      if (process.platform !== 'win32') {
+        fs.chmodSync(fakeSuccess, 0o755);
+        fs.chmodSync(fakeVersion, 0o755);
+      }
+      fs.writeFileSync(preload, [
+        "'use strict';",
+        "const path = require('node:path');",
+        `const expectedExecutable = ${JSON.stringify(fakeSuccess)};`,
+        `const marker = ${JSON.stringify(fakeAuthStatusCall)};`,
+        "const actualExecutable = path.resolve(process.execPath);",
+        "const resolvedExpectedExecutable = path.resolve(expectedExecutable);",
+        "const sameExecutable = process.platform === 'win32'",
+        "  ? actualExecutable.toLowerCase() === resolvedExpectedExecutable.toLowerCase()",
+        "  : actualExecutable === resolvedExpectedExecutable;",
+        "const command = path.basename(process.argv[1] || '').toLowerCase();",
+        "if (sameExecutable && command === 'auth' && process.argv[2] === 'status') {",
+        "  require('node:fs').writeFileSync(marker, 'called');",
+        "  process.exit(0);",
+        "}",
+      ].join('\n'));
+
+      const env = { ...process.env };
+      delete env.NODE_TEST_CONTEXT;
+      env.PATH = `${binDir}${path.delimiter}${env.PATH || ''}`;
+      env.NODE_OPTIONS = `--require=${preload}`;
+      env.WEZTERM_PANE = 'first-run-test-pane';
+      const r = runSetupCli(dir, env);
+
+      assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+      assert.ok(fs.existsSync(fakeAuthStatusCall), '初回のgh auth statusでfake ghを実行すること');
+      assert.match(r.stdout, /\x1b\[32mv Repository:/);
+      assert.match(r.stdout, /\x1b\[32mv \.gh-maestro\/worktrees directory ready/);
+      assert.ok(fs.existsSync(sentinel), '初回成功後に setup-ok を作成すること');
+
+      fs.rmSync(fakeAuthStatusCall, { force: true });
+      const rerun = runSetupCli(dir, env);
+      assert.equal(rerun.status, 0, `${rerun.stdout}\n${rerun.stderr}`);
+      assert.doesNotMatch(rerun.stdout, /\x1b\[32mv /, 'sentinel後は成功確認行を抑止する');
+      assert.ok(fs.existsSync(sentinel), '後続実行でも setup-ok を維持すること');
+    } finally {
+      fs.rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+});
 
 test('git問い合わせ: core.hooksPathの未設定と問い合わせ不能（status=null）を区別する', () => {
   const unavailable = setupModule.gitOutput(
@@ -225,7 +284,6 @@ test('既定ブランチがmainでなくてもmasterからdevブランチを作�
     const r = runSetupCli(dir);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Creating 'dev' branch from master/);
-    assert.match(r.stdout, /Branch 'dev' exists/);
     assert.equal(
       gitIn(dir, 'rev-parse', 'dev').stdout.trim(),
       gitIn(dir, 'rev-parse', 'master').stdout.trim(),
@@ -242,7 +300,6 @@ test('既定ブランチがmainの場合はmainからdevブランチを作成す
     const r = runSetup(dir);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Creating 'dev' branch from main/);
-    assert.match(r.stdout, /Branch 'dev' exists/);
     assert.equal(
       gitIn(dir, 'rev-parse', 'dev').stdout.trim(),
       gitIn(dir, 'rev-parse', 'main').stdout.trim(),
@@ -408,7 +465,6 @@ test('core.hooksPathが追跡下の.githooksを指し必要な呼び出しが揃
 
     // 追跡下フックは書き換えない（共有物を汚さない）
     assert.equal(fs.readFileSync(path.join(dir, '.githooks', 'pre-commit'), 'utf8'), before);
-    assert.match(r.stdout, /tracked; untouched/);
     // 実行されない既定置き場の死んだフックは削除される
     assert.equal(fs.existsSync(path.join(dir, '.git', 'hooks', 'pre-commit')), false);
     assert.equal(fs.existsSync(path.join(dir, '.git', 'hooks', 'pre-push')), false);
@@ -482,7 +538,6 @@ test('core.hooksPathがワークツリー外（絶対パス）を指す場合、
       const r = runSetup(dir);
       assert.equal(r.status, 0, r.stderr);
       const hook = fs.readFileSync(path.join(outside, 'pre-commit'), 'utf8');
-      assert.match(r.stdout, /pre-commit hook \(sync\): installed/);
       assert.match(hook, /# gh-maestro:sync-rules:v2/);
       assert.doesNotMatch(hook, /sync-agents-md\.js/);
       assert.doesNotMatch(hook, /git add CLAUDE\.md/);

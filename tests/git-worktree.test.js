@@ -53,6 +53,7 @@ test('worktreeAdd: baseRefあり — worktree add後に --set-upstream-to を呼
   assert.equal(calls[0].cmd, 'git');
   assert.ok(calls[0].args.includes('worktree'));
   assert.ok(calls[0].args.includes('add'));
+  assert.ok(calls[0].args.includes('--quiet'));
   assert.ok(calls[0].args.includes('/tmp/wt'));
   assert.ok(calls[0].args.includes('-b'));
   assert.ok(calls[0].args.includes('feat-x'));
@@ -75,6 +76,7 @@ test('worktreeAdd: baseRefなし — --set-upstream-to を呼ばない', () => {
   assert.equal(calls[0].cmd, 'git');
   assert.ok(calls[0].args.includes('worktree'));
   assert.ok(calls[0].args.includes('add'));
+  assert.ok(calls[0].args.includes('--quiet'));
 });
 
 test('worktreeAdd: worktree add 失敗時は --set-upstream-to を呼ばずに throw', () => {

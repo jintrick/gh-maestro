@@ -24,7 +24,12 @@
 const path = require('path');
 const fs = require('fs');
 const { readWorkersRaw } = require('./workers-registry');
-const { createNormalWorkerStore } = require('./worker-lease');
+const {
+  createNormalWorkerStore,
+  acquireLeaseLock,
+  releaseLeaseLock,
+  RESIDENT_ROLE_LEASE_PREFIX,
+} = require('./worker-lease');
 const { listRunningReviewManagers } = require('./running-review-managers');
 const { normalizePid } = require('./worker-entry');
 
@@ -51,7 +56,7 @@ let injectedLiveness = null;
  * @param {string} workspace ワークスペース絶対パス
  * @param {object} [opts]
  * @param {boolean} [opts.cleanupStale=true] staleなmanager.runningを回収するか
- * @returns {{ workerNames: Set<string>, reviewPrs: Set<string>, pids: Set<number> }}
+ * @returns {{ workerNames: Set<string>, reviewPrs: Set<string>, pids: Set<number>, removedLeases: string[] }}
  *   除外対象のワーカー名（通常 headless ワーカー）、Review Manager 対象 PR 番号、および稼働中プロセスの PID
  * @throws {Error} いずれかの情報源が「存在するのに読み取り・解析不能」の場合
  */
@@ -59,10 +64,17 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
   const workerNames = new Set();
   const reviewPrs = new Set();
   const pids = new Set();
+  const removedLeases = [];
+  const leaseRemovalCandidates = [];
   const ghDir = path.join(workspace, '.gh-maestro');
   const checker = opts.liveness || injectedLiveness || processLiveness;
-  const live = (entry, description, source) => {
-    const state = checker.observe(checker.readRef(entry, 'default', { source }));
+  const addLiveWorker = (workerName, entry) => {
+    workerNames.add(entry.workerName || workerName);
+    const normPid = normalizePid(entry && typeof entry === 'object' ? entry.pid : null);
+    if (normPid) pids.add(normPid);
+  };
+  const live = (entry, description, source, reference = null) => {
+    const state = checker.observe(reference || checker.readRef(entry, 'default', { source }));
     if (state === 'unknown') throw new Error(`${description} の生死を判定できません`);
     return state === 'alive';
   };
@@ -74,12 +86,11 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
   // 不能であり、黙って除外漏れにすると稼働中ワーカーのログを整理・ローテーションしかねない
   // ため、例外をそのまま伝播させて fail-closed にする（PR #268 レビュー指摘）。
   const rawWorkers = readWorkersRaw(workspace);
+  const registeredWorkerNames = new Set(rawWorkers ? Object.keys(rawWorkers) : []);
   if (rawWorkers) {
     for (const [workerName, entry] of Object.entries(rawWorkers)) {
       if (workerName !== 'orchestrator' && live(entry, `worker ${workerName}`, `${path.join(ghDir, 'workers.json')}#${workerName}`)) {
-        workerNames.add(workerName);
-        const normPid = normalizePid(entry && typeof entry === 'object' ? entry.pid : null);
-        if (normPid) pids.add(normPid);
+        addLiveWorker(workerName, entry);
       }
     }
   }
@@ -90,19 +101,41 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
     const store = createNormalWorkerStore(workspace);
     for (const name of fs.readdirSync(leasesDir).filter(n => n.endsWith('.json'))) {
       const workerName = name.slice(0, -5);
+      const leasePath = path.join(leasesDir, name);
       const entry = store.read(workerName);
-      // store.read は「不在」と「破損・解析不能」の両方で null を返す。このループは
-      // readdirSync で存在を確認した直後のため、null かつファイルが残っているのは
-      // 読み取り不能・解析不能を意味する（列挙直後に消えた = ワーカー終了による lease
-      // 解放は skip でよい）。破損 lease の生存判定は不能であり、黙って除外漏れにすると
-      // 稼働中ワーカーのログを整理しかねない（PR #268 レビュー指摘）。fail-closed で伝播。
+      // store.read は不在だけ null を返し、破損・読み取り不能は例外にする。列挙後に
+      // lease が消えた場合は skip できるが、null なのに同じパスが残っているなら、
+      // 別の記録が置かれた可能性があり fail-closed で中断する。読み取り不能なleaseを
+      // 無視すると稼働中ワーカーのログを整理しかねない（PR #268 レビュー指摘）。
       if (entry === null && fs.existsSync(path.join(leasesDir, name))) {
-        throw new Error(`lease の読み取り・解析に失敗しました: ${path.join(leasesDir, name)}`);
+        throw new Error(`lease の読み取り・解析に失敗しました: ${leasePath}`);
       }
-      if (entry && live(entry, `lease ${path.join(leasesDir, name)}`, path.join(leasesDir, name))) {
-        workerNames.add(entry.workerName || workerName);
-        const normPid = normalizePid(entry.pid);
-        if (normPid) pids.add(normPid);
+
+      if (!entry) continue;
+
+      const leaseRef = checker.readRef(entry, 'default', { source: leasePath });
+      if (!leaseRef) throw new Error(`lease ${leasePath} の生死を判定できません`);
+      const residentLease = workerName.startsWith(RESIDENT_ROLE_LEASE_PREFIX);
+      const workerTree = path.join(ghDir, 'worktrees', workerName);
+      const hasWorkerRecord = registeredWorkerNames.has(workerName);
+      const hasWorktree = fs.existsSync(workerTree);
+      const isOrphanedWorkerLease = !residentLease && !hasWorkerRecord && !hasWorktree;
+      const hasOwnerIdentity = entry.resourceKey != null || entry.instanceId != null;
+
+      // A lease is created before its worktree and workers.json record. New-format
+      // leases in that startup window remain protected by their live launcher endpoint.
+      // PR #658 made all newly created leases carry that identity, so only genuinely
+      // orphaned old-format leases can be reclaimed without observing a process.
+      if (isOrphanedWorkerLease && !hasOwnerIdentity) {
+        if (opts.cleanupStale !== false) leaseRemovalCandidates.push({ store, workerName, leasePath });
+        continue;
+      }
+
+      const isLive = live(entry, `lease ${leasePath}`, leasePath, leaseRef);
+      if (isLive) {
+        addLiveWorker(workerName, entry);
+      } else if (isOrphanedWorkerLease && opts.cleanupStale !== false) {
+        leaseRemovalCandidates.push({ store, workerName, leasePath });
       }
     }
   }
@@ -124,7 +157,56 @@ function collectHousekeepingExclusions(workspace, opts = {}) {
     reviewPrs.add(manager.pr);
   }
 
-  return { workerNames, reviewPrs, pids };
+  // Defer deletion until every source has been read and observed. A corrupt lease or
+  // unknown owner later in the directory must fail closed without partial lease cleanup.
+  // Each candidate is then re-read under acquireLease's per-key lock so a replacement
+  // lease written after discovery cannot be removed as though it were the stale record.
+  for (const candidate of leaseRemovalCandidates) {
+    let locked = false;
+    try {
+      acquireLeaseLock(candidate.store, candidate.workerName);
+      locked = true;
+
+      const currentLease = candidate.store.read(candidate.workerName);
+      if (!currentLease) {
+        if (fs.existsSync(candidate.leasePath)) {
+          throw new Error(`lease の読み取り・解析に失敗しました: ${candidate.leasePath}`);
+        }
+        continue;
+      }
+
+      const currentWorkers = readWorkersRaw(workspace);
+      const currentWorker = currentWorkers && Object.hasOwn(currentWorkers, candidate.workerName)
+        ? currentWorkers[candidate.workerName]
+        : null;
+      const residentLease = candidate.workerName.startsWith(RESIDENT_ROLE_LEASE_PREFIX);
+      const workerTree = path.join(ghDir, 'worktrees', candidate.workerName);
+      const isOrphanedWorkerLease = !residentLease && !currentWorker && !fs.existsSync(workerTree);
+      const hasOwnerIdentity = currentLease.resourceKey != null || currentLease.instanceId != null;
+
+      if (currentWorker
+          && live(currentWorker, `worker ${candidate.workerName}`, `${path.join(ghDir, 'workers.json')}#${candidate.workerName}`)) {
+        addLiveWorker(candidate.workerName, currentWorker);
+      }
+
+      let leaseIsLive = false;
+      if (hasOwnerIdentity) {
+        const leaseRef = checker.readRef(currentLease, 'default', { source: candidate.leasePath });
+        if (!leaseRef) throw new Error(`lease ${candidate.leasePath} の生死を判定できません`);
+        leaseIsLive = live(currentLease, `lease ${candidate.leasePath}`, candidate.leasePath, leaseRef);
+        if (leaseIsLive) addLiveWorker(candidate.workerName, currentLease);
+      }
+
+      if (!isOrphanedWorkerLease || leaseIsLive) continue;
+
+      candidate.store.remove(candidate.workerName);
+      removedLeases.push(candidate.leasePath);
+    } finally {
+      if (locked) releaseLeaseLock(candidate.store, candidate.workerName);
+    }
+  }
+
+  return { workerNames, reviewPrs, pids, removedLeases };
 }
 
 module.exports = {

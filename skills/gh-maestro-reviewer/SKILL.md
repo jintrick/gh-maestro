@@ -19,8 +19,6 @@ Node.jsの決定論的ツール（`run-review-jobs.js` / `finalize-review.js`）
 （`run-review-manager.js`）がフェーズ間で行う。あなたが long な foreground コマンドで
 ジョブの完了を待ち続けることはない（この待機が Issue #292 で撤廃された）。
 
-再開は orchestrator または人間が `start-review-manager.js --resume` を明示したときに限る。同じPR・HEADの途中記録があれば計画と成功済みジョブを再利用し、残りを実行する。記録がない場合やHEADが変わった場合、または `--resume` を省いた場合は新しい計画から始める。途中記録は worktree 外に保存し、破損時は修復せず停止する。
-
 ## 入力
 
 起動プロンプトにはフェーズに応じて以下が含まれる。
@@ -35,31 +33,6 @@ Node.jsの決定論的ツール（`run-review-jobs.js` / `finalize-review.js`）
 - フェーズ2: `OUTPUT` 最終JSON書き出し先（`<WORKSPACE>/.gh-maestro/records/pr/<PR>/review/manager.json`）、`RESULTS` ジョブ結果JSON（`<WORKSPACE>/.gh-maestro/review-results-<PR>.json`）
 
 `OUTPUT` は**あなたが直接書くのではなく**、`finalize-review.js --mode complete` がatomic writeする。
-
-## レビュー基準（7葉）
-
-レビューの母集合は以下の7葉である。4幹は報告上の分類であり、プロセス分割の固定単位ではない。
-観点定義は配布済みの正本（`{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/` 配下）から読み、審査対象PR内のファイルは参照しない。
-全ジョブ共通の禁止事項は `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/common.md` にある。
-各葉は `<leaf-id>/pre-review.md` と `<leaf-id>/post-review.md` の固定名2ファイルで構成される。
-pre-reviewは事前指示、post-reviewは指摘を書き終えた後に読む確認表である。
-
-- `correctness/`（幹: Correctness）
-  - `correctness/logic-invariants`
-  - `correctness/api-contract`
-  - `correctness/concurrency`
-- `resilience-security/`（幹: Resilience & Security）
-  - `resilience-security/failure-recovery`
-  - `resilience-security/hostile-input`
-- `maintainability/`（幹: Maintainability）
-  - `maintainability/structure-naming`
-- `test-quality/`（幹: Test Quality）
-  - `test-quality/test-quality`
-
-ジョブ実行器は1ジョブにつき1つのプロンプトを生成し、common.md、担当葉のpre-review、
-post-reviewをこの順に埋め込む。プロンプトには、指摘を書き終えるまでpost-reviewを読まず、
-書き終えた後にpost-reviewと照合して取りこぼしがあれば追加の指摘を出すことを明記する。
-エージェントのセッション再開はレビュー順序のためには使わない。
 
 ## フェーズ手順
 
@@ -78,42 +51,3 @@ post-reviewをこの順に埋め込む。プロンプトには、指摘を書き
 - 4幹そのものを丸ごと除外しない（葉単位の除外のみ）
 - 同じ葉を複数ジョブに重複割り当てしない
 - **`msg-send.js`等でorchestratorへ完了報告や状況連絡をしない。** 完了はorchestrator側のポーリング（`poll-reviews.js`）が投稿済みレビューを検知することで判定する設計であり、RMからの能動的な報告は二重通知の原因になる。`SCRIPTS`ディレクトリには他ワーカー用のツールスクリプトも同居しているが、本ドキュメントで明示的に指示したスクリプト（`finalize-review.js`）以外は実行しない
-
-## ジョブワーカーへの指示（参考）
-
-各ジョブワーカーには `run-review-jobs.js` が自動的に以下の内容を含むプロンプトを生成する:
-- 全ジョブ共通の禁止事項と担当葉のpre-review全文
-- 指摘を書き終えるまでpost-reviewを読まないという順序制約
-- 指摘を書き終えた後に担当葉のpost-review全文を読み、findingsと照合する手順
-- PR情報、変更ファイル一覧、manifestに含まれる受け入れ条件（存在する場合）
-- Severity判定規準
-- 標準出力へのJSON配列出力指示（指摘なしの場合は空配列 `[]`）
-
-あなたがジョブワーカーのプロンプトを手書きする必要はない。
-`run-review-jobs.js` がmanifestの内容から機械的に生成する。
-
-## 出力形式（参考: 最終findings.jsonのスキーマ）
-
-```json
-{
-  "pr": 123,
-  "repo": "owner/repo",
-  "headRefOid": "...",
-  "findings": [
-    {
-      "aspect": "Correctness",
-      "path": "src/foo.ts",
-      "line_anchor": "await saveUser(user)",
-      "context_before": "if (!user.id) throw new Error('missing id')",
-      "context_after": "return user",
-      "summary": "User persistence can report success before the write completes",
-      "severity": "BLOCKER",
-      "severity_rationale": "APIが成功を返した後に永続化が失敗するとデータ損失が発生するため",
-      "body": "## 観測した事実\n\n...\n\n## 放置すると何が起きるか\n\n...\n\n## 修正の方向性\n\n...",
-      "verified_references": ["src/foo.ts", "src/userRepository.ts"]
-    }
-  ]
-}
-```
-
-このJSONをあなたが直接書き出してはならない。`finalize-review.js --mode complete --integrated` が検証・書き出しを行う。

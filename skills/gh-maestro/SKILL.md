@@ -5,7 +5,7 @@ description: gh-maestroセッションをこのワークスペースで起動す
 
 ## 起動
 
-1. **PID registry sweep**: セッション起動時、前回セッションのクラッシュ残骸を回収するため、runtime側PID registryのstale sweepを実行する。旧 `.gh-maestro/pids` は遺物検査と明示的な整理で扱う:
+1. **PID registryとworker leaseのsweep**: セッション起動時、runtime側PID registryのstale entryと、台帳・worktreeの両方にない通常worker leaseを回収する。resident role leaseは対象外。leaseの回収や旧形式記録の集約があれば1行で表示し、詳細は `<workspace>/.gh-maestro/sweep-lease-report.log` に保存する。旧 `.gh-maestro/pids` は遺物検査と明示的な整理で扱う:
 
 ```sh
 node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE
@@ -13,13 +13,9 @@ node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE
 
 sweep が終了コード 1 を返した場合は、稼働中ワーカーの除外リストを組み立てられず前回の残骸が回収できていない状態です。原因（ログ）を解消してから次の手順へ進んでください。
 
-2. **既知レガシー遺物の非破壊検査**: セッション開始hookは、セットアップや前回セッションのリセットによる整理処理より前に、全台帳項目を次の入口から検査する:
+2. **セッション開始hookが行う既知レガシー遺物の非破壊検査**: hookが出力した状態を確認する。各項目は `present` / `absent` / `unknown` / `not_applicable`、台帳の網羅性は `complete` / `incomplete` で示される。
 
-```sh
-node "{{SCRIPTS_PATH}}/check-legacy.js" --workspace $WORKSPACE
-```
-
-検査は読み取りだけで完結し、ネットワーク通信、削除、移行、プロセス停止を行わない。結果は項目ごとに `present` / `absent` / `unknown` / `not_applicable`、台帳の網羅性を `complete` / `incomplete` で返す。`present`、`unknown`、または `incomplete` がある場合だけセッションコンテキストへ出力され、遺物の存在自体は検査成功（終了コード 0）として扱われる。検査を実行できない場合だけセッション開始を失敗させる。検査結果を受けて整理を自動連鎖させてはならない。
+`present`、`unknown`、または `incomplete` がある場合は、その事実を人間に提示し、整理を自動連鎖させない。`check-legacy.js` はhookが既に実行するため、ここで再実行しない。検査自体を実行できない場合はhookがセッション開始を失敗させる。
 
 3. **直近のIssue/PR概況の把握**: 新しくプロジェクトに加わったメンバーと同じ姿勢で、直近何が起きていたかを見出しレベルで把握してからでないと作業を始めない。本文は読まず、タイトル一覧だけを見る（本文を読み込むとコンテクストを消費するため。個別の深掘りが必要になった時点で、その対象だけを読むか、explorerに委譲する）:
 

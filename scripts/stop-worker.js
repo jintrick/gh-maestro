@@ -79,7 +79,10 @@ function main(argv = process.argv.slice(2), deps = {}) {
 
   try {
     const stopWorkerProcessFn = deps.stopWorkerProcessFn || stopWorkerProcess;
-    stopWorkerProcessFn(workspace, workerName, { isRemoveMode: false });
+    const stopResult = stopWorkerProcessFn(workspace, workerName, { isRemoveMode: false });
+    if (stopResult?.success !== true) {
+      return fail('停止処理を完了できませんでした（PID registry の処理に未解決エラーがあります）');
+    }
     return 0;
   } catch (e) {
     return fail(e.message);

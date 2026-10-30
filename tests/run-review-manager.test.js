@@ -48,7 +48,7 @@ after(() => {
 
 // ── buildPrompt（フェーズ1: 計画） ────────────────────────────────────────
 
-test('buildPrompt instructs the phase-1 coverage-ledger + manifest-write flow', () => {
+test('buildPrompt supplies concise phase-1 startup context and manifest path', () => {
   const { prompt } = buildPrompt({
     pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
     mainGhDir: 'C:\\main\\.gh-maestro', skillPath: SKILL_MD,
@@ -58,25 +58,11 @@ test('buildPrompt instructs the phase-1 coverage-ledger + manifest-write flow', 
   assert.match(prompt, /ISSUE=260/);
   // 再試行カウンタ永続化先（メインワークスペース ghDir）を渡す（Issue #273）
   assert.match(prompt, /GH_DIR=C:\/main\/\.gh-maestro/);
-  // 7葉の adopted / excluded 分類を指示
-  assert.match(prompt, /adopted \/ excluded/);
-  // manifest 書き出しパスが含まれる
+  assert.match(prompt, /Review Manager フェーズ1/);
   assert.match(prompt, /manifest\.json/);
-  // フェーズ1はジョブを実行しない（決定論的スーパーバイザが行う）旨を指示
-  assert.match(prompt, /ジョブを実行しない/);
-  // 全件テスト禁止
-  assert.match(prompt, /全体ビルド/);
+  assert.doesNotMatch(prompt,
+    /adopted \/ excluded|ジョブを実行しない|全体ビルド|manifest書き出し後に即終了|決定論的スーパーバイザが行う|OUTPUTファイルへ直接書き込まない|msg-send\.js|完了報告/);
   assert.ok(typeof prompt === 'string');
-});
-
-test('buildPrompt: フェーズ1でジョブ実行・finalizeの指示が含まれない（モデルのwaitを排除）', () => {
-  const { prompt } = buildPrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
-    mainGhDir: 'C:\\main\\.gh-maestro', skillPath: SKILL_MD,
-  });
-  // フェーズ1プロンプトは実行manifestの書き出しで止まり、ジョブ実行をモデルに指示しない
-  assert.match(prompt, /manifest書き出し後に即終了/);
-  assert.match(prompt, /決定論的スーパーバイザが行う/);
 });
 
 test('buildPrompt normalizes backslash paths to forward slashes', () => {
@@ -90,23 +76,15 @@ test('buildPrompt normalizes backslash paths to forward slashes', () => {
   assert.match(prompt, /C:\/ws\/\.gh-maestro\/records\/pr\/5\/review\/manifest\.json/);
 });
 
-test('buildPrompt: SCRIPTS path is included so RM can invoke tool scripts', () => {
+test('buildPrompt: paths and phase inputs include the instruction to read the phase skill', () => {
   const { prompt } = buildPrompt({
     pr: '5', repo: 'o/r', workspace: 'C:\\ws',
     mainGhDir: 'C:\\main\\.gh-maestro', skillPath: SKILL_MD,
   });
   assert.match(prompt, /SCRIPTS=/);
-  // OUTPUTファイルへ直接書き込まない（finalize-review.js が atomic write）
-  assert.match(prompt, /OUTPUTファイルへ直接書き込まない/);
-});
-
-test('buildPrompt: SCRIPTSディレクトリに同居する他ワーカー用ツール（msg-send.js等）の使用を禁止する指示が含まれる', () => {
-  const { prompt } = buildPrompt({
-    pr: '5', repo: 'o/r', workspace: 'C:\\ws',
-    mainGhDir: 'C:\\main\\.gh-maestro', skillPath: SKILL_MD,
-  });
-  assert.match(prompt, /msg-send\.js/);
-  assert.match(prompt, /完了報告/);
+  assert.match(prompt, /MANIFEST=/);
+  assert.match(prompt, /SKILL=C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md/);
+  assert.match(prompt, /SKILL に指定されたファイルを読み、そこに記載されたフェーズ1の手順を実行してください/);
 });
 
 test('buildPrompt: 呼び出しごとに安定して prompt を生成する', () => {
@@ -119,33 +97,19 @@ test('buildPrompt: 呼び出しごとに安定して prompt を生成する', ()
 
 // ── buildFinalizePrompt（フェーズ2: 統合・完否判断） ──────────────────────
 
-test('buildFinalizePrompt: complete 用に結果JSON・統合ドラフト・--integrated の指示が含まれる', () => {
+test('buildFinalizePrompt supplies concise phase-2 paths for result integration', () => {
   const { prompt } = buildFinalizePrompt({
     pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
     outputFile: 'C:\\ws\\out.json', mainGhDir: 'C:\\main\\.gh-maestro',
     resultsFile: 'C:\\ws\\results.json', skillPath: SKILL_MD,
   });
   assert.match(prompt, /PR=5/);
+  assert.match(prompt, /Review Manager フェーズ2/);
+  assert.match(prompt, /OUTPUT=C:\/ws\/out\.json/);
   assert.match(prompt, /RESULTS=C:\/ws\/results\.json/);
-  // 重複指摘の統合（同一欠陥を1件へ）を指示
-  assert.match(prompt, /重複統合/);
-  // complete 時は finalize-review.js --mode complete --integrated を実行するよう指示
-  assert.match(prompt, /--mode complete --results .* --integrated .* --output/);
-  // OUTPUTファイルへ直接書き込まない
-  assert.match(prompt, /OUTPUTファイルへ直接書き込まない/);
-  // ジョブを実行しない（決定論的スーパーバイザが実行済み）
-  assert.match(prompt, /ジョブを実行しない/);
-});
-
-test('buildFinalizePrompt: incomplete 時に --mode incomplete で最終化するよう指示する', () => {
-  const { prompt } = buildFinalizePrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
-    outputFile: 'C:\\ws\\out.json', mainGhDir: 'C:\\main\\.gh-maestro',
-    resultsFile: 'C:\\ws\\results.json', skillPath: SKILL_MD,
-  });
-  assert.match(prompt, /--mode incomplete/);
-  // 全採用葉が成功すれば complete、失敗が残れば incomplete と判断する旨
-  assert.match(prompt, /complete.*incomplete/);
+  assert.match(prompt, /SKILL=C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md/);
+  assert.match(prompt, /SKILL に指定されたファイルを読み、そこに記載されたフェーズ2の手順を実行してください/);
+  assert.match(prompt, /DRAFT=C:\/ws\/\.staging-out\.json\./);
 });
 
 // ── runJobsDeterministically / judgeJobRun（決定論的ジョブ実行・モデル介入なし） ──
@@ -1065,31 +1029,4 @@ test('readIncompleteSentinel: 解釈できないセンチネルは null（notify
   const result = incompleteSentinelOutcome({ sentinelPath, agentPid: null, reviewWtDir: null });
   assert.equal(result.outcome, 'incomplete-review');
   assert.equal(result.exitCode, 0);
-});
-
-// ── SKILL.md 絶対パス指定（PR #350 実障害対策） ─────────────────────────────
-
-test('buildPrompt: SKILL.mdを配布済み正本の絶対パスで指定する', () => {
-  const { prompt } = buildPrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
-    mainGhDir: 'C:\\main\\.gh-maestro',
-    skillPath: SKILL_MD,
-  });
-  assert.match(prompt, /SKILL=C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md/);
-  // 冒頭で読むべきファイルを絶対パスで名指しする（スキル名だけの発動指示にしない）
-  assert.match(prompt, /^C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md を読み、/);
-  // 「スキルを発動」だけの指示に戻っていないこと（worktree側の同名ファイルが読まれる余地を作る）
-  assert.ok(!/gh-maestro-reviewerスキルを発動/.test(prompt));
-});
-
-test('buildFinalizePrompt: SKILL.mdを配布済み正本の絶対パスで指定する', () => {
-  const { prompt } = buildFinalizePrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
-    outputFile: 'C:\\ws\\out.json', mainGhDir: 'C:\\main\\.gh-maestro',
-    resultsFile: 'C:\\ws\\results.json',
-    skillPath: SKILL_MD,
-  });
-  assert.match(prompt, /SKILL=C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md/);
-  assert.match(prompt, /^C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md を読み、/);
-  assert.ok(!/gh-maestro-reviewerスキルを発動/.test(prompt));
 });

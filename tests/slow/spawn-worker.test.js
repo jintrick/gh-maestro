@@ -843,6 +843,12 @@ test('junction 作成で missing が空かつ skipped が非空の場合、ワ�
     assert.equal(stdoutLines[stdoutLines.length - 1], workerName, '標準出力にワーカー名が出力されること');
     assert.equal(fs.existsSync(worktreeDir), true, 'worktreeディレクトリが存在すること');
     assert.equal(fs.existsSync(workersPath), true, 'workers.jsonが存在すること');
+    const promptText = fs.readFileSync(path.join(worktreeDir, '.gh-maestro', 'prompt.md'), 'utf8');
+    assert.match(promptText, /^以下の変数が与えられています：/);
+    assert.match(promptText, /WORKER_ROLE=gh-maestro-coder/);
+    assert.doesNotMatch(promptText, /orchestratorです。gh-maestro-coderスキルを発動/);
+    assert.doesNotMatch(promptText, /【最優先指示】/);
+    assert.doesNotMatch(promptText, /この件に関する質問・報告はチャットに出力せず/);
     const workers = JSON.parse(fs.readFileSync(workersPath, 'utf8'));
     assert.equal(workers[workerName].pid, 99991, 'workers.jsonにワーカーが登録されていること');
   } finally {

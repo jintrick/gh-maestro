@@ -276,9 +276,30 @@ function removeDeadSocket(endpoint, expected) {
 // 旧形式（決定論的 endpoint の識別情報を持たない）記録を持ち主なしとして扱ったことを、
 // 同じプロセス内では出所ごとに一度だけ報告する。常駐プロセスが周回するたびに繰り返さない。
 const reportedHolderlessSources = new Set();
+let activeHolderlessSources = null;
+
+/** Collect endpointless-record reports for a bounded operation such as sweep. */
+function collectHolderlessReports() {
+  if (activeHolderlessSources) throw new Error('holderless report collection is already active');
+  const sources = new Set();
+  activeHolderlessSources = sources;
+  let stopped = false;
+  return {
+    sources: () => [...sources],
+    stop() {
+      if (stopped) return;
+      if (activeHolderlessSources === sources) activeHolderlessSources = null;
+      stopped = true;
+    },
+  };
+}
 
 function reportHolderlessRecord(value) {
   const source = value.source || `pid ${value.pid}（出所不明）`;
+  if (activeHolderlessSources) {
+    activeHolderlessSources.add(source);
+    return;
+  }
   if (reportedHolderlessSources.has(source)) return;
   reportedHolderlessSources.add(source);
   try {
@@ -737,6 +758,7 @@ module.exports = {
   manifestPath,
   readManifest,
   createLiveness,
+  collectHolderlessReports,
   createProbeWorkerClient,
   PROBE_TIMEOUT_MS,
   ...liveness,

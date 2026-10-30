@@ -57,7 +57,7 @@ function setUpstream(branchName, baseRef, cwd) {
  * @returns {import('child_process').SpawnSyncReturns<Buffer>} spawnSync の戻り値
  */
 function worktreeAdd(worktreeDir, branchName, baseRef, cwd) {
-  const args = ['-c', 'core.longpaths=true', 'worktree', 'add', worktreeDir, '-b', branchName];
+  const args = ['-c', 'core.longpaths=true', 'worktree', 'add', '--quiet', worktreeDir, '-b', branchName];
   if (baseRef) args.push('--', `origin/${baseRef}`);
   const result = runOrThrow('git', args, { cwd, stdio: 'inherit' });
   // branch.autoSetupMerge に依存せず、常に明示的に upstream tracking を設定する

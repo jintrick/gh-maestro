@@ -8,6 +8,7 @@ const os = require('os');
 const { spawnSync, spawn } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'remove-worker.js');
+const storageLayout = require('../../scripts/shared/storage-layout');
 // workspace引数を省略する経路が実ワークスペースを読まないよう env を外す。
 // 明示した --workspace は GH_MAESTRO_WORKSPACE env より優先される。
 // （共通ヘルパー tests/_spawn-env.js の cleanSpawnEnv。ワーカー文脈環境変数も除去する）。
@@ -243,5 +244,93 @@ test('remove-worker: PR1形式でPIDが存在しても持ち主なしとしてki
       try { process.kill(parentPid, 'SIGKILL'); } catch {}
       try { process.kill(childPid, 'SIGKILL'); } catch {}
     }
+  });
+});
+
+test('remove-worker: プロセス停止成功後に通常worker leaseを削除する', () => {
+  withTempDir((dir) => {
+    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
+    const workerName = 'issue-52-coder';
+    const { parentPid, childPid, processRecord } = spawnProcessTree(dir, workerName);
+    const workersPath = path.join(dir, '.gh-maestro', 'workers.json');
+    const leasePath = path.join(dir, '.gh-maestro', 'leases', `${workerName}.json`);
+    fs.mkdirSync(path.dirname(leasePath), { recursive: true });
+    fs.writeFileSync(workersPath, JSON.stringify({
+      [workerName]: { ...processRecord, issue: 52, skill: 'gh-maestro-coder' },
+    }), 'utf8');
+    // Valid pre-endpoint leases are still removed after the worker stops successfully.
+    fs.writeFileSync(leasePath, JSON.stringify({ pid: parentPid, workerName }), 'utf8');
+    try {
+      const r = run([workerName, '--workspace', dir]);
+      assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+      assert.equal(fs.existsSync(leasePath), false, '停止成功後にleaseが削除される');
+      assert.equal(isProcessAlive(parentPid), false);
+      assert.equal(isProcessAlive(childPid), false);
+    } finally {
+      try { process.kill(parentPid, 'SIGKILL'); } catch {}
+      try { process.kill(childPid, 'SIGKILL'); } catch {}
+    }
+  });
+});
+
+test('remove-worker: 停止失敗時はleaseを保持してパスを警告する', () => {
+  withTempDir((dir) => {
+    const ghDir = path.join(dir, '.gh-maestro');
+    fs.mkdirSync(path.join(ghDir, 'leases'), { recursive: true });
+    const workerName = 'issue-53-coder';
+    const leasePath = path.join(ghDir, 'leases', `${workerName}.json`);
+    fs.writeFileSync(path.join(ghDir, 'workers.json'), JSON.stringify({
+      [workerName]: { pid: 'invalid', issue: 53, skill: 'gh-maestro-coder' },
+    }), 'utf8');
+    fs.writeFileSync(leasePath, JSON.stringify({ pid: 76543, workerName }), 'utf8');
+
+    const r = run([workerName, '--workspace', dir]);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.ok(fs.existsSync(leasePath), '停止失敗ではleaseを残す');
+    assert.match(r.stderr, /プロセス停止処理が失敗したため lease を保持します/);
+    assert.ok(r.stderr.includes(leasePath), '警告にleaseのパスを含める');
+  });
+});
+
+test('remove-worker: PID registry sweep のエラーがある場合はleaseを保持する', () => {
+  withTempDir((dir) => {
+    const ghDir = path.join(dir, '.gh-maestro');
+    const workerName = 'issue-55-coder';
+    const leasePath = path.join(ghDir, 'leases', `${workerName}.json`);
+    const runtimeRoot = path.join(dir, '.test-runtime');
+    const pidsDir = path.join(storageLayout.workspaceRuntimeDir(dir, runtimeRoot), 'pids');
+    fs.mkdirSync(path.dirname(leasePath), { recursive: true });
+    fs.mkdirSync(pidsDir, { recursive: true });
+    fs.writeFileSync(path.join(ghDir, 'workers.json'), JSON.stringify({
+      [workerName]: { issue: 55, skill: 'gh-maestro-coder' },
+    }), 'utf8');
+    fs.writeFileSync(leasePath, JSON.stringify({ pid: 76543, workerName }), 'utf8');
+    fs.writeFileSync(path.join(pidsDir, 'corrupt.json'), '{broken registry', 'utf8');
+
+    const r = run([workerName, '--workspace', dir]);
+
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.ok(fs.existsSync(leasePath), '停止を確認できない場合はleaseを残す');
+    assert.match(r.stderr, /PID registry error/);
+    assert.ok(r.stderr.includes(leasePath), 'leaseを保持した警告にパスを含める');
+  });
+});
+
+test('remove-worker: 破損leaseは停止成功後も保持してパスを警告する', () => {
+  withTempDir((dir) => {
+    const ghDir = path.join(dir, '.gh-maestro');
+    fs.mkdirSync(path.join(ghDir, 'leases'), { recursive: true });
+    const workerName = 'issue-54-coder';
+    const leasePath = path.join(ghDir, 'leases', `${workerName}.json`);
+    fs.writeFileSync(path.join(ghDir, 'workers.json'), JSON.stringify({
+      [workerName]: { issue: 54, skill: 'gh-maestro-coder' },
+    }), 'utf8');
+    fs.writeFileSync(leasePath, '{broken lease', 'utf8');
+
+    const r = run([workerName, '--workspace', dir]);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.equal(fs.readFileSync(leasePath, 'utf8'), '{broken lease');
+    assert.match(r.stderr, /lease を削除できないため保持します/);
+    assert.ok(r.stderr.includes(leasePath), '警告にleaseのパスを含める');
   });
 });

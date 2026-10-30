@@ -93,6 +93,9 @@ test('collectHousekeepingExclusions: live lease のワーカーを収集する�
     fs.writeFileSync(path.join(leasesDir, 'issue-2-coder.json'), JSON.stringify({
       pid: 12345, startTime: '2025-01-01T00:00:00.000Z', workerName: 'issue-2-coder',
     }));
+    fs.writeFileSync(path.join(ws, '.gh-maestro', 'workers.json'), JSON.stringify({
+      'issue-2-coder': { pid: 12345, startTime: '2025-01-01T00:00:00.000Z' },
+    }));
     che._setLiveness(simulated('2025-01-01T00:00:00.000Z'));
     const { workerNames } = che.collectHousekeepingExclusions(ws);
     assert.ok(workerNames.has('issue-2-coder'));
@@ -109,6 +112,9 @@ test('collectHousekeepingExclusions: live lease に workerName が無ければ�
     fs.mkdirSync(leasesDir, { recursive: true });
     fs.writeFileSync(path.join(leasesDir, 'issue-3-coder.json'), JSON.stringify({
       pid: 12345, startTime: '2025-01-01T00:00:00.000Z',
+    }));
+    fs.writeFileSync(path.join(ws, '.gh-maestro', 'workers.json'), JSON.stringify({
+      'issue-3-coder': { pid: 12345, startTime: '2025-01-01T00:00:00.000Z' },
     }));
     che._setLiveness(simulated('2025-01-01T00:00:00.000Z'));
     const { workerNames } = che.collectHousekeepingExclusions(ws);
@@ -179,8 +185,159 @@ test('collectHousekeepingExclusions: PIDが生存中の旧形式 lease・workers
     const result = che.collectHousekeepingExclusions(ws);
     assert.equal(result.workerNames.has('issue-1-coder-old'), false);
     assert.equal(result.workerNames.has('issue-2-coder-old'), false);
-    assert.ok(fs.existsSync(path.join(ghDir, 'leases', 'issue-1-coder-old.json')), '除外リスト構築では削除しない');
+    assert.ok(!fs.existsSync(path.join(ghDir, 'leases', 'issue-1-coder-old.json')), '孤立した旧形式 lease は回収する');
+    assert.ok(result.removedLeases.includes(path.join(ghDir, 'leases', 'issue-1-coder-old.json')));
   } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('collectHousekeepingExclusions: 候補登録後に同名の新しい lease が取得された場合は削除しない', () => {
+  const { che, lease } = fresh(); const ws = tmpWorkspace();
+  try {
+    const ghDir = path.join(ws, '.gh-maestro');
+    const workerName = 'issue-6-coder';
+    const store = lease.createNormalWorkerStore(ws);
+    fs.mkdirSync(path.dirname(store.filePath(workerName)), { recursive: true });
+    fs.writeFileSync(store.filePath(workerName), JSON.stringify({ pid: 12345, workerName }));
+
+    const managerPath = path.join(ghDir, 'records', 'pr', '42', 'review', 'manager.running');
+    fs.mkdirSync(path.dirname(managerPath), { recursive: true });
+    fs.writeFileSync(managerPath, JSON.stringify({
+      pid: 54321,
+      resourceKey: 'b'.repeat(64),
+      instanceId: 'manager-instance',
+    }));
+
+    const replacementResourceKey = 'c'.repeat(64);
+    let replaced = false;
+    che._setLiveness({
+      readRef: (entry, _format, options = {}) => ({ ...entry, source: options.source }),
+      observe: (reference) => {
+        if (reference.source === managerPath && !replaced) {
+          // Simulate a new spawn taking the same per-key lock after the stale candidate
+          // was collected but before candidate cleanup starts.
+          lease.acquireLeaseLock(store, workerName);
+          try {
+            store.remove(workerName);
+            store.write(workerName, {
+              pid: process.pid,
+              workerName,
+              resourceKey: replacementResourceKey,
+              instanceId: 'new-worker-instance',
+            });
+          } finally {
+            lease.releaseLeaseLock(store, workerName);
+          }
+          replaced = true;
+          return 'alive';
+        }
+        if (reference.resourceKey === replacementResourceKey) return 'alive';
+        return 'dead';
+      },
+    });
+
+    const result = che.collectHousekeepingExclusions(ws);
+    assert.equal(replaced, true, '後続の情報源を読む間に新しい lease を取得する');
+    assert.deepEqual(result.removedLeases, []);
+    assert.equal(store.read(workerName).instanceId, 'new-worker-instance');
+    assert.ok(result.workerNames.has(workerName));
+  } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('collectHousekeepingExclusions: workers.json または worktree にある lease は回収しない', () => {
+  const { che } = fresh(); const ws = tmpWorkspace();
+  try {
+    const ghDir = path.join(ws, '.gh-maestro');
+    const leasesDir = path.join(ghDir, 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    fs.mkdirSync(path.join(ghDir, 'worktrees', 'issue-3-coder'), { recursive: true });
+    fs.writeFileSync(path.join(ghDir, 'workers.json'), JSON.stringify({ 'issue-2-coder': { pid: 12345 } }));
+    fs.writeFileSync(path.join(leasesDir, 'issue-2-coder.json'), JSON.stringify({ pid: 12345 }));
+    fs.writeFileSync(path.join(leasesDir, 'issue-3-coder.json'), JSON.stringify({ pid: 12346 }));
+
+    const result = che.collectHousekeepingExclusions(ws);
+    assert.deepEqual(result.removedLeases, []);
+    assert.ok(fs.existsSync(path.join(leasesDir, 'issue-2-coder.json')));
+    assert.ok(fs.existsSync(path.join(leasesDir, 'issue-3-coder.json')));
+  } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('collectHousekeepingExclusions: resident lease と起動途中の新形式 lease は保持する', () => {
+  const { che } = fresh(); const ws = tmpWorkspace();
+  try {
+    const leasesDir = path.join(ws, '.gh-maestro', 'leases');
+    fs.mkdirSync(leasesDir, { recursive: true });
+    const residentPath = path.join(leasesDir, 'resident-role-worker-supervisor.json');
+    const residentNewPath = path.join(leasesDir, 'resident-role-msgpoll-orchestrator.json');
+    const initializingPath = path.join(leasesDir, 'issue-4-coder.json');
+    fs.writeFileSync(residentPath, JSON.stringify({ pid: 12345 }));
+    const residentResourceKey = 'b'.repeat(64);
+    const residentInstanceId = 'resident-instance';
+    fs.writeFileSync(residentNewPath, JSON.stringify({
+      pid: 12347, resourceKey: residentResourceKey, instanceId: residentInstanceId,
+      workerName: 'msgpoll-orchestrator', phase: 'active',
+    }));
+    const resourceKey = 'a'.repeat(64);
+    const instanceId = 'launcher-instance';
+    fs.writeFileSync(initializingPath, JSON.stringify({
+      pid: 12346, resourceKey, instanceId, workerName: 'issue-4-coder', phase: 'initializing',
+    }));
+    const manifests = new Map([
+      [resourceKey, { instanceId, pid: 12346 }],
+      [residentResourceKey, { instanceId: residentInstanceId, pid: 12347 }],
+    ]);
+    const checker = createLiveness({
+      useRealResources: false,
+      probeEndpoint: () => 'alive',
+      readManifest: (key) => ({ schemaVersion: 2, resourceKey: key, ...manifests.get(key) }),
+    });
+    che._setLiveness(checker);
+
+    const result = che.collectHousekeepingExclusions(ws);
+    assert.deepEqual(result.removedLeases, []);
+    assert.ok(fs.existsSync(residentPath), 'workers.json/worktree に載らない resident lease も維持する');
+    assert.ok(fs.existsSync(residentNewPath), '新形式の resident lease も維持する');
+    assert.ok(fs.existsSync(initializingPath), 'live launcher の initializing lease を維持する');
+    assert.ok(result.workerNames.has('issue-4-coder'));
+  } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('collectHousekeepingExclusions: cleanupStale=false は孤立した旧形式 lease を削除しない', () => {
+  const { che } = fresh(); const ws = tmpWorkspace();
+  try {
+    const leasePath = path.join(ws, '.gh-maestro', 'leases', 'issue-5-coder.json');
+    fs.mkdirSync(path.dirname(leasePath), { recursive: true });
+    fs.writeFileSync(leasePath, JSON.stringify({ pid: 12345 }));
+
+    const result = che.collectHousekeepingExclusions(ws, { cleanupStale: false });
+    assert.deepEqual(result.removedLeases, []);
+    assert.ok(fs.existsSync(leasePath));
+  } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('collectHousekeepingExclusions: unknown または破損 lease がある場合は候補 lease を何も削除しない', () => {
+  for (const laterLease of ['unknown', 'corrupt']) {
+    const { che } = fresh(); const ws = tmpWorkspace();
+    try {
+      const leasesDir = path.join(ws, '.gh-maestro', 'leases');
+      fs.mkdirSync(leasesDir, { recursive: true });
+      const earlierOldLease = path.join(leasesDir, 'issue-a-old.json');
+      fs.writeFileSync(earlierOldLease, JSON.stringify({ pid: 12345 }));
+      if (laterLease === 'corrupt') {
+        fs.writeFileSync(path.join(leasesDir, 'issue-z-corrupt.json'), '{broken');
+      } else {
+        fs.writeFileSync(path.join(leasesDir, 'issue-z-unknown.json'), JSON.stringify({
+          pid: 12346, resourceKey: 'b'.repeat(64), instanceId: 'instance-z',
+        }));
+        che._setLiveness(createLiveness({
+          useRealResources: false,
+          probeEndpoint: () => 'unknown',
+        }));
+      }
+
+      assert.throws(() => che.collectHousekeepingExclusions(ws));
+      assert.ok(fs.existsSync(earlierOldLease), `${laterLease} failure must not partially delete earlier candidates`);
+    } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+  }
 });
 
 test('collectHousekeepingExclusions: pid が不正な lease は従来どおり判定不能として中断する', () => {
