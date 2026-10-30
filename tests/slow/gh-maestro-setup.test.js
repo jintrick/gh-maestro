@@ -143,7 +143,7 @@ test('初回setupは成功確認行を表示し、後続実行用sentinelを作�
       const env = { ...process.env };
       delete env.NODE_TEST_CONTEXT;
       env.PATH = `${binDir}${path.delimiter}${env.PATH || ''}`;
-      env.NODE_OPTIONS = `--require="${preload}"`;
+      env.NODE_OPTIONS = `--require="${preload.replace(/\\/g, '/')}"`;
       env.WEZTERM_PANE = 'first-run-test-pane';
       const r = runSetupCli(dir, env);
 

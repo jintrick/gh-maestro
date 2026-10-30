@@ -2,8 +2,12 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const prompt = process.argv.at(-1);
-if (typeof prompt !== 'string' || !prompt) throw new Error('missing agent prompt');
+const promptReference = process.argv.at(-1);
+const promptFileMatch = typeof promptReference === 'string'
+  ? /^Read (.+) and execute it\.$/.exec(promptReference)
+  : null;
+if (!promptFileMatch) throw new Error('missing prompt file reference');
+const prompt = fs.readFileSync(promptFileMatch[1], 'utf8');
 const fixture = process.env.REVIEW_RESUME_FIXTURE;
 const events = path.join(fixture, 'events.jsonl');
 function event(value) { fs.appendFileSync(events, JSON.stringify(value) + '\n'); }

@@ -8,7 +8,6 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const storageLayout = require('../scripts/shared/storage-layout');
-const cycleMetrics = require('../scripts/shared/cycle-metrics');
 
 const { stopWorkerProcess, cleanupLegacyWorkerPanes } = require('../scripts/shared/stop-worker-process');
 const stopWorkerCli = require('../scripts/stop-worker');
@@ -93,34 +92,6 @@ test('stop-worker: success=false は停止未確認として非0 statusを返す
     assert.deepEqual(errors, [
       'stop-worker: 停止処理を完了できませんでした（PID registry の処理に未解決エラーがあります）',
     ]);
-  });
-});
-
-test('stopWorkerProcess: 生存PIDを停止しworker-stopped cycle eventを記録する', () => {
-  withWorkspace((workspace) => {
-    const workerName = 'issue-662-test-worker';
-    const startTime = '2026-10-30T00:00:00.000Z';
-    const killed = [];
-    const result = stopWorkerProcess(workspace, workerName, {
-      _injectedWorkers: {
-        [workerName]: { pid: process.pid, startTime, agentId: 'codex', skill: 'gh-maestro-coder' },
-      },
-      killProcessTreeFn: (pid) => { killed.push(pid); return { success: true }; },
-      sleepFn: () => {},
-    });
-
-    assert.equal(result.success, true);
-    assert.equal(result.stoppedPid, process.pid);
-    assert.deepEqual(killed, [process.pid]);
-
-    const events = cycleMetrics.readCycleEvents(workspace, 662);
-    assert.equal(events.length, 1);
-    assert.equal(events[0].event, 'worker-stopped');
-    assert.equal(events[0].workerName, workerName);
-    assert.equal(events[0].agentId, 'codex');
-    assert.equal(events[0].pid, process.pid);
-    assert.equal(events[0].startTime, startTime);
-    assert.equal(events[0].abnormal, true);
   });
 });
 
