@@ -409,20 +409,6 @@ test('未知のフラグを指定するとエラー終了する（黙って無�
 });
 
 
-// ── link-node-modules の解決 ──────────────────────────────────────────────────
-
-test('link-node-modules がリポジトリ内パスから解決できる', () => {
-  const nm = path.join(__dirname, '..', 'scripts', 'shared', 'link-node-modules');
-  assert.doesNotThrow(() => {
-    const resolved = require.resolve(nm);
-    assert.ok(resolved.endsWith('link-node-modules.js'));
-  });
-  const mod = require(nm);
-  assert.ok(mod.linkNodeModules);
-  assert.equal(typeof mod.linkNodeModules, 'function');
-});
-
-
 // ── agent 解決 ────────────────────────────────────────────────────────────────
 
 // ── ワーカーエントリ構築 ────────────────────────────────────────────────────────

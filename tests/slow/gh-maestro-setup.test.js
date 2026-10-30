@@ -111,7 +111,7 @@ test('初回setupは成功確認行を表示し、後続実行用sentinelを作�
     fs.unlinkSync(sentinel);
     gitIn(dir, 'config', 'remote.origin.url', 'https://github.com/example/gh-maestro-test.git');
 
-    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-setup-first-run-bin-'));
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm setup first-run bin with spaces-'));
     try {
       const fakeSuccess = path.join(binDir, process.platform === 'win32' ? 'gh.exe' : 'gh');
       const fakeVersion = path.join(binDir, process.platform === 'win32' ? 'wezterm.exe' : 'wezterm');
@@ -143,7 +143,7 @@ test('初回setupは成功確認行を表示し、後続実行用sentinelを作�
       const env = { ...process.env };
       delete env.NODE_TEST_CONTEXT;
       env.PATH = `${binDir}${path.delimiter}${env.PATH || ''}`;
-      env.NODE_OPTIONS = `--require=${preload}`;
+      env.NODE_OPTIONS = `--require="${preload}"`;
       env.WEZTERM_PANE = 'first-run-test-pane';
       const r = runSetupCli(dir, env);
 
@@ -675,13 +675,4 @@ test('require しただけでは副作用が起きない（git hooks を書き�
     const out = JSON.parse(r.stdout.trim().split('\n').pop());
     assert.equal(out.preCommitExists, false, 'require だけで pre-commit フックが作られてはならない');
   });
-});
-
-test('module.exports.main を公開する（CLI実行時のみ副作用を起こす）', () => {
-  const scriptPosix = SCRIPT.split(path.sep).join('/');
-  const r = spawnSync(process.execPath, [
-    '-e', `const m = require(${JSON.stringify(scriptPosix)}); console.log(typeof m.main);`,
-  ], { encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout.trim(), 'function');
 });

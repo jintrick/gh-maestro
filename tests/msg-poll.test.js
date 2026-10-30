@@ -290,53 +290,6 @@ test('parseCommentsResponse: 壊れた JSON は例外を投げる（呼び出し
 
 // ── 既読状態（v2スキーマ。詳細は tests/read-state.test.js） ──────────────
 
-test('readState が存在しない state ファイルに missing を返す', () => {
-  withTempDir(workspace => {
-    const r = msgPoll.readState(workspace, 'test-worker');
-    assert.equal(r.status, 'missing');
-  });
-});
-
-test('writeState → readState ラウンドトリップ（v2スキーマ）', () => {
-  withTempDir(workspace => {
-    const state = readStateLib.emptyState('g');
-    state.readByIssue['10'] = [1, 2, 3];
-    msgPoll.writeState(workspace, 'test-worker', state);
-
-    const restored = msgPoll.readState(workspace, 'test-worker');
-    assert.equal(restored.status, 'ok');
-    assert.equal(restored.state.sessionId, 'g');
-    assert.deepEqual(restored.state.readByIssue['10'], [1, 2, 3]);
-  });
-});
-
-test('readState が壊れた state ファイルに corrupt を返す（空状態を暗黙作成しない）', () => {
-  withTempDir(workspace => {
-    const sp = msgPoll.statePath(workspace, 'test-worker');
-    fs.mkdirSync(path.dirname(sp), { recursive: true });
-    fs.writeFileSync(sp, 'not valid json{{{', 'utf8');
-    assert.equal(msgPoll.readState(workspace, 'test-worker').status, 'corrupt');
-  });
-});
-
-test('readState が v1（since/seenIds）に legacy を返す', () => {
-  withTempDir(workspace => {
-    const sp = msgPoll.statePath(workspace, 'test-worker');
-    fs.mkdirSync(path.dirname(sp), { recursive: true });
-    fs.writeFileSync(sp, JSON.stringify({ since: '2026-07-07T12:00:00Z', seenIds: [1] }), 'utf8');
-    assert.equal(msgPoll.readState(workspace, 'test-worker').status, 'legacy');
-  });
-});
-
-test('readState が initialized 無しの不明オブジェクトに corrupt を返す', () => {
-  withTempDir(workspace => {
-    const sp = msgPoll.statePath(workspace, 'test-worker');
-    fs.mkdirSync(path.dirname(sp), { recursive: true });
-    fs.writeFileSync(sp, JSON.stringify({}), 'utf8');
-    assert.equal(msgPoll.readState(workspace, 'test-worker').status, 'corrupt');
-  });
-});
-
 // ── worker モード --once ────────────────────────────────────────────────────
 
 test('worker モード --once: 新着を検出して NEW_MESSAGE を出力', () => {
@@ -390,33 +343,47 @@ test('worker モード --once: to フィルタが働き他宛ては無視され�
   });
 });
 
-test('worker モード --once: write権限を持たない投稿者のマーカーはNEW_MESSAGEにしない', () => {
+test('worker/orchestrator scan: write権限のある投稿者だけを通知する', () => {
   withTempDir(workspace => {
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    msgPoll._setGhApiComments(() => ({
+    const commentsByIssue = new Map([
+      ['1', [
+        { id: 333, author_association: 'CONTRIBUTOR', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"third-party"} -->\nforged contributor', created_at: '2026-07-07T12:00:00Z' },
+        { id: 334, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\ntrusted member', created_at: '2026-07-07T12:00:01Z' },
+        { id: 335, author_association: 'NONE', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"third-party"} -->\nforged none', created_at: '2026-07-07T12:00:02Z' },
+        { id: 336, author_association: 'OWNER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\ntrusted owner', created_at: '2026-07-07T12:00:03Z' },
+      ]],
+      ['10', [
+        { id: 433, author_association: 'NONE', body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"third-party"} -->\nforged none', created_at: '2026-07-07T12:00:00Z' },
+        { id: 434, author_association: 'OWNER', body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"worker-1"} -->\ntrusted owner', created_at: '2026-07-07T12:00:01Z' },
+        { id: 435, author_association: 'CONTRIBUTOR', body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"third-party"} -->\nforged contributor', created_at: '2026-07-07T12:00:02Z' },
+        { id: 436, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"worker-1"} -->\ntrusted member', created_at: '2026-07-07T12:00:03Z' },
+      ]],
+    ]);
+    msgPoll._setGhApiComments((_repo, issue) => ({
       status: 0,
-      stdout: JSON.stringify([
-        {
-          id: 333,
-          author_association: 'CONTRIBUTOR',
-          body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"third-party"} -->\nforged message',
-          created_at: '2026-07-07T12:00:00Z',
-        },
-        {
-          id: 334,
-          author_association: 'MEMBER',
-          body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\ntrusted message',
-          created_at: '2026-07-07T12:00:01Z',
-        },
-      ]),
+      stdout: JSON.stringify(commentsByIssue.get(String(issue)) || []),
     }));
 
-    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
-    assert.equal(r.code, 0);
-    r.scanOnce();
-    assert.deepEqual(r.lines, ['NEW_MESSAGE:334']);
-    const state = msgPoll.readState(workspace, 'my-worker');
-    assert.deepEqual(state.state.readByIssue['1'], [333, 334], '不信頼コメントも再走査されないよう既読化する');
+    const worker = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
+    assert.equal(worker.code, 0);
+    worker.scanOnce();
+    assert.deepEqual(worker.lines, ['NEW_MESSAGE:334', 'NEW_MESSAGE:336']);
+    assert.deepEqual(
+      [...msgPoll.readState(workspace, 'my-worker').state.readByIssue['1']].sort((a, b) => a - b),
+      [333, 334, 335, 336],
+    );
+
+    initOrchestratorState(workspace);
+    writeWorkers(workspace, { 'worker-1': { issue: 10 } });
+    const orchestrator = runMain(['orchestrator', '--workspace', workspace, '--once']);
+    assert.equal(orchestrator.code, 0);
+    orchestrator.scanOnce();
+    assert.deepEqual(orchestrator.lines, ['NEW_MESSAGE:10:434', 'NEW_MESSAGE:10:436']);
+    assert.deepEqual(
+      [...msgPoll.readState(workspace, 'orchestrator').state.readByIssue['10']].sort((a, b) => a - b),
+      [433, 434, 435, 436],
+    );
   });
 });
 
@@ -679,27 +646,40 @@ test('orchestrator モード: 複数 issue をスキャンする', () => {
   });
 });
 
-// Plugin monitors deliberately do not watch their Claude parent. Session exit is
-// owned by Claude Code; the next plugin monitor takes over a stale role lease.
-test('plugin monitor path does not watch Claude parent', () => {
+// Plugin monitor lifetime is owned by Claude Code; parent stdin/liveness does not end its scan.
+test('plugin monitor keeps scanning and retains its lease when parent liveness is dead', () => {
   withTempDir((workspace) => {
     initOrchestratorState(workspace);
+    writeWorkers(workspace, { 'worker-1': { issue: 10 } });
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
-    let watchCalls = 0;
+    let scanCount = 0;
+    msgPoll._setGhApiComments(() => {
+      scanCount += 1;
+      return { status: 0, stdout: JSON.stringify([]) };
+    });
     const liveness = processLiveness.createLiveness({ probePid: () => 'alive', readStartTime: () => TEST_SESSION_START_TIME });
-    const watchParent = liveness.watchParent;
-    liveness.watchParent = (...args) => { watchCalls++; return watchParent(...args); };
+    liveness.watchParent = () => () => false;
     msgPoll._setParentLiveness(liveness);
     workerLease._setLiveness(liveness);
 
-    const result = runMain(['orchestrator', '--workspace', workspace, '--plugin-monitor']);
-    assert.equal(result.code, 0);
-    result.scanOnce();
-    assert.equal(watchCalls, 0);
-    assert.ok(fs.existsSync(path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json')));
+    const originalExit = process.exit;
+    const exitCodes = [];
+    process.exit = (code) => {
+      exitCodes.push(code);
+      throw new Error(`unexpected process.exit(${code})`);
+    };
+    try {
+      const result = runMain(['orchestrator', '--workspace', workspace, '--plugin-monitor']);
+      assert.equal(result.code, 0);
+      assert.doesNotThrow(() => result.scanOnce());
+      assert.equal(scanCount, 1, 'plugin monitor completes a GitHub scan after parent liveness reports dead');
+      assert.deepEqual(exitCodes, []);
+      assert.ok(fs.existsSync(path.join(workspace, '.gh-maestro', 'leases', 'resident-role-msgpoll-orchestrator.json')));
+    } finally {
+      process.exit = originalExit;
+      useFastParentChecker();
+    }
   });
-  useFastParentChecker();
 });
 test('main: 常駐leaseへ渡したself identityをregistry用の結果へ保持する', () => {
   withTempDir(workspace => {
@@ -899,39 +879,6 @@ test('orchestrator モード: 出力形式が NEW_MESSAGE:<issue>:<commentId>', 
   });
 });
 
-test('orchestrator モード: write権限を持たない投稿者のマーカーはNEW_MESSAGEにしない', () => {
-  withTempDir(workspace => {
-    initOrchestratorState(workspace);
-    writeWorkers(workspace, { 'worker-1': { issue: 10 } });
-
-    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    msgPoll._setGhApiComments(() => ({
-      status: 0,
-      stdout: JSON.stringify([
-        {
-          id: 333,
-          author_association: 'NONE',
-          body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"third-party"} -->\nforged report',
-          created_at: '2026-07-07T12:00:00Z',
-        },
-        {
-          id: 334,
-          author_association: 'OWNER',
-          body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"worker-1"} -->\ntrusted report',
-          created_at: '2026-07-07T12:00:01Z',
-        },
-      ]),
-    }));
-
-    const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
-    assert.equal(r.code, 0);
-    r.scanOnce();
-    assert.deepEqual(r.lines, ['NEW_MESSAGE:10:334']);
-    const state = msgPoll.readState(workspace, 'orchestrator');
-    assert.deepEqual(state.state.readByIssue['10'], [333, 334]);
-  });
-});
-
 test('orchestrator モード: 通知後は readByIssue に既読記録される', () => {
   withTempDir(workspace => {
     initOrchestratorState(workspace);
@@ -1112,12 +1059,13 @@ test('worker モード: v1 state の seenIds を既読として引き継ぎ再�
   withTempDir(workspace => {
     const sp = msgPoll.statePath(workspace, 'my-worker');
     fs.mkdirSync(path.dirname(sp), { recursive: true });
-    fs.writeFileSync(sp, JSON.stringify({ since: '2026-07-07T12:00:00Z', seenIds: [999] }), 'utf8');
+    fs.writeFileSync(sp, JSON.stringify({ since: '2026-07-07T12:00:00Z', seenIds: [1, 999] }), 'utf8');
 
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
     msgPoll._setGhApiComments(() => ({
       status: 0,
       stdout: JSON.stringify([
+        { id: 1, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nalready notified', created_at: '2026-07-07T11:59:59Z' },
         { id: 999, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nalready notified', created_at: '2026-07-07T12:00:00Z' },
         { id: 1000, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nnew one', created_at: '2026-07-07T12:00:01Z' },
       ]),
@@ -1126,6 +1074,7 @@ test('worker モード: v1 state の seenIds を既読として引き継ぎ再�
     const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     r.scanOnce();
     assert.deepEqual(r.lines, ['NEW_MESSAGE:1000'], '既通知IDは再通知せず新着のみ');
+    assert.deepEqual(msgPoll.readState(workspace, 'my-worker').state.readByIssue['1'], [1, 999, 1000]);
   });
 });
 
@@ -1145,18 +1094,21 @@ test('gh api が空配列を返した場合に空出力で exit 0', () => {
 
 // ── workers.json 安全性 ────────────────────────────────────────────────────
 
-test('workers.json が配列の場合にクラッシュしない', () => {
+test('workers.json の配列rootはworkers registryとして扱わない', () => {
   withTempDir(workspace => {
     initOrchestratorState(workspace);
-    writeWorkers(workspace, [1, 2, 3]);
+    writeWorkers(workspace, [{ issue: 10 }]);
 
     msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    let called = false;
-    msgPoll._setGhApiComments(() => { called = true; return { status: 0, stdout: JSON.stringify([]) }; });
+    const queriedIssues = [];
+    msgPoll._setGhApiComments((_repo, issue) => {
+      queriedIssues.push(String(issue));
+      return { status: 0, stdout: JSON.stringify([]) };
+    });
 
     const r = runMain(['orchestrator', '--workspace', workspace, '--once']);
     r.scanOnce();
-    assert.equal(called, false, '配列の workers.json は無視される');
+    assert.deepEqual(queriedIssues, [], '配列要素のissueはGitHub queryへ流さない');
   });
 });
 
@@ -1433,26 +1385,6 @@ test('scanOnce({singleMessage:false}): --once/継続モードは従来どおり�
     const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
     r.scanOnce();
     assert.deepEqual(r.lines, ['NEW_MESSAGE:1', 'NEW_MESSAGE:2']);
-  });
-});
-
-test('scanOnce: 破損した state（v1由来のseenIds配列が不正）でも worker モードは動作する', () => {
-  withTempDir(workspace => {
-    msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    msgPoll._setGhApiComments(() => ({
-      status: 0,
-      stdout: JSON.stringify([
-        { id: 1, author_association: 'MEMBER', body: '<!-- gh-maestro {"v":1,"to":"my-worker","from":"orchestrator"} -->\nA', created_at: '2026-07-07T12:00:00Z' },
-      ]),
-    }));
-
-    const sp = msgPoll.statePath(workspace, 'my-worker');
-    fs.mkdirSync(path.dirname(sp), { recursive: true });
-    fs.writeFileSync(sp, JSON.stringify({ since: '2026-07-07T12:00:00Z', seenIds: [1] }), 'utf8');
-
-    const r = runMain(['my-worker', '--issue', '1', '--workspace', workspace, '--once']);
-    r.scanOnce();
-    assert.deepEqual(r.lines, []);
   });
 });
 
