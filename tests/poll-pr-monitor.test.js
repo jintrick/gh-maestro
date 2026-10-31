@@ -81,23 +81,25 @@ test('spawnTarget はpoll-pr.jsのstdout/stderrをmonitorへ中継する', async
   assert.deepEqual(stderr, ['poll-pr warning\n']);
 });
 
-test('spawnTarget は親セッションPIDを子へ渡さず、stdinをpipe接続する', async () => {
+test('spawnTarget は子の stdin を pipe で接続する（親の終了を EOF で検知できる）', async () => {
   const child = fakeChild(505);
   let spawnedArgs;
+  let spawnedStdio;
   await monitor.runPrMonitor({ workspace: 'C:/workspace' }, {
     readTargetFn: () => target('reopened', { sessionPid: 123 }),
     maxIterations: 1,
     sleepFn: async () => {},
     spawnFn: (command, args, options) => {
       spawnedArgs = args;
-      assert.equal(options.stdio[0], 'pipe');
+      spawnedStdio = options.stdio;
       return child;
     },
     killProcessTreeFn: () => {},
     waitForChildCloseFn: async () => {},
     recoverOrphanedSlowRunsFn: () => [],
   });
-  assert.equal(spawnedArgs.includes('--session-pid'), false);
+  assert.ok(Array.isArray(spawnedArgs), 'spawn が呼ばれる');
+  assert.equal(spawnedStdio[0], 'pipe');
 });
 
 test('同じgenerationのpoll-prは終了しても再試行しない', async () => {

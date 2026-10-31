@@ -57,11 +57,13 @@ test('readWorkersRaw: 壊れたJSONはthrow（全リトライ後も解析不能�
   });
 });
 
-test('readWorkersRaw: 配列は型不正でthrow（オブジェクトでない）', () => {
+test('readWorkersRaw: 配列・JSON の null リテラルは型不正でthrow（オブジェクトでない）', () => {
   withTempDir((dir) => {
     fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(workersJsonPath(dir), '[]', 'utf8');
-    assert.throws(() => readWorkersRaw(dir), /workers\.json はJSONとしては妥当だがオブジェクトでない/);
+    for (const content of ['[]', 'null']) {
+      fs.writeFileSync(workersJsonPath(dir), content, 'utf8');
+      assert.throws(() => readWorkersRaw(dir), /workers\.json はJSONとしては妥当だがオブジェクトでない/, content);
+    }
   });
 });
 
@@ -122,14 +124,6 @@ test('readWorkersRaw: ENOENT以外の読み取りエラー（権限等）はthro
       assert.match(error.message, /workers\.json/);
       return true;
     });
-  });
-});
-
-test('readWorkersRaw: JSONのnullリテラルは型不正でthrow', () => {
-  withTempDir((dir) => {
-    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(workersJsonPath(dir), 'null', 'utf8');
-    assert.throws(() => readWorkersRaw(dir), /workers\.json はJSONとしては妥当だがオブジェクトでない/);
   });
 });
 

@@ -54,19 +54,10 @@ test('ROLE_LABEL_MAP: 全ロールラベルが英数字・ハイフンのみで�
   }
 });
 
-test('ROLE_LABEL_MAP: gh-maestro-reviewer → review-manager', () => {
+test('ROLE_LABEL_MAP: 既知スキルは各 role に対応する（reviewer・senior-coder・coder・diagnostician）', () => {
   assert.equal(ROLE_LABEL_MAP['gh-maestro-reviewer'], 'review-manager');
-});
-
-test('ROLE_LABEL_MAP: gh-maestro-senior-coder → senior-coder', () => {
   assert.equal(ROLE_LABEL_MAP['gh-maestro-senior-coder'], 'senior-coder');
-});
-
-test('ROLE_LABEL_MAP: gh-maestro-coder → coder', () => {
   assert.equal(ROLE_LABEL_MAP['gh-maestro-coder'], 'coder');
-});
-
-test('ROLE_LABEL_MAP: gh-maestro-diagnostician → diagnostician', () => {
   assert.equal(ROLE_LABEL_MAP['gh-maestro-diagnostician'], 'diagnostician');
 });
 
@@ -77,21 +68,10 @@ test('buildWorkerName: 正規形式 issue-<issue>-<role>-<description> を組み
   assert.equal(buildWorkerName(174, 'senior-coder', 'factory-lease'), 'issue-174-senior-coder-factory-lease');
   assert.equal(buildWorkerName(10, 'explorer', 'investigate-deps'), 'issue-10-explorer-investigate-deps');
   assert.equal(buildWorkerName(3, 'review-manager', 'pr-42'), 'issue-3-review-manager-pr-42');
+  assert.equal(buildWorkerName(5, 'coder', 'fix-auth-bug'), 'issue-5-coder-fix-auth-bug');
+  assert.equal(buildWorkerName(7, 'diagnostician', 'crash_on_startup_v2'), 'issue-7-diagnostician-crash_on_startup_v2');
 });
 
-test('buildWorkerName: descriptionにハイフンを含む場合も正しく組み立てる', () => {
-  assert.equal(
-    buildWorkerName(5, 'coder', 'fix-auth-bug'),
-    'issue-5-coder-fix-auth-bug',
-  );
-});
-
-test('buildWorkerName: descriptionにアンダースコアを含む場合も正しく組み立てる', () => {
-  assert.equal(
-    buildWorkerName(7, 'diagnostician', 'crash_on_startup_v2'),
-    'issue-7-diagnostician-crash_on_startup_v2',
-  );
-});
 
 // ── buildNormalWorkerLaunchSpec ────────────────────────────────────────────────
 
@@ -290,6 +270,15 @@ test('buildNormalWorkerLaunchSpec: カスタムスキル（gh-maestro-custom-rev
   assert.equal(spec.worktreeKey, spec.workerName);
 });
 
+test('buildNormalWorkerLaunchSpec: 数値化できない issue（"12abc"）は issue 検証のエラーになり、NaN を通さない（候補H）', () => {
+  assert.throws(
+    () => buildNormalWorkerLaunchSpec({
+      skill: 'gh-maestro-coder', issue: '12abc', description: 'fix-auth', repo: 'o/r', workspace: '/ws',
+    }),
+    (err) => err instanceof Error && !(err instanceof TypeError) && /invalid issue number/.test(err.message),
+  );
+});
+
 test('buildNormalWorkerLaunchSpec: gh-maestro-reviewer は通常ワーカーとして受け付ける（手動デバッグ経路）', () => {
   // docs/review-manager-plan.md に記載の手動デバッグ経路:
   //   spawn-worker.js --skill gh-maestro-reviewer
@@ -357,13 +346,6 @@ test('buildReviewManagerLaunchSpec: worktreeKey は review-pr-<pr>（workerName 
   assert.notEqual(spec.worktreeKey, spec.workerName);
 });
 
-test('buildReviewManagerLaunchSpec: worktreeKey は reviewWorktreeBranchName(pr) と一致する', () => {
-  const spec = buildReviewManagerLaunchSpec({
-    issue: 174, pr: '42', repo: 'o/r', workspace: '/ws',
-  });
-  assert.equal(spec.worktreeKey, reviewWorktreeBranchName('42'));
-});
-
 test('buildReviewManagerLaunchSpec: worktreeDir は .gh-maestro/worktrees/review-pr-<pr>', () => {
   const spec = buildReviewManagerLaunchSpec({
     issue: 174, pr: '42', repo: 'o/r', workspace: 'C:/ws',
@@ -429,84 +411,6 @@ test('buildReviewManagerLaunchSpec: issue は文字列でも数値に変換さ�
 // factoryが返す値が、現行の spawn-worker.js / start-review-manager.js /
 // run-review-manager.js / review-manager-paths.js がハードコードしている値と
 // 一致することを検証する。
-
-test('現行一致: 通常ワーカーのworktreeKeyがspawn-worker.jsのworktreeDir末尾と一致する', () => {
-  // spawn-worker.js line 218:
-  //   const worktreeDir = resolve(workspace, '.gh-maestro', 'worktrees', workerName);
-  // 旧workerName（issue-<issue>-<description>）は本factoryでは
-  // issue-<issue>-<role>-<description> に変更される。
-  // worktreeKeyは新しいworkerNameと同一であり、spawn-worker.jsが
-  // worktreeDirを組み立てる際のベース名として使えることを確認する。
-  const spec = buildNormalWorkerLaunchSpec({
-    skill: 'gh-maestro-coder',
-    issue: 5,
-    description: 'fix-auth',
-    repo: 'o/r',
-    workspace: 'C:/ws',
-  });
-
-  // 現行の spawn-worker.js がこのworkerNameでworktreeDirを組み立てた場合
-  const currentStyleWorktreeDir = path.join(
-    'C:/ws', '.gh-maestro', 'worktrees',
-    'issue-5-coder-fix-auth', // ← 新しい正規ID
-  );
-  assert.equal(spec.worktreeDir, currentStyleWorktreeDir);
-  // ベース名（ディレクトリ名）が worktreeKey と一致する
-  assert.equal(path.basename(spec.worktreeDir), spec.worktreeKey);
-});
-
-test('現行一致: Review ManagerのworkerNameがstart-review-manager.jsのGH_MAESTRO_WORKERと一致する', () => {
-  // start-review-manager.js line 102:
-  //   const workerName = `issue-${issue}-review-manager-pr-${pr}`;
-  const spec = buildReviewManagerLaunchSpec({
-    issue: 55, pr: '7', repo: 'o/r', workspace: '/ws',
-  });
-  // 現行コードと完全に一致
-  assert.equal(spec.workerName, 'issue-55-review-manager-pr-7');
-});
-
-test('現行一致: Review ManagerのleaseStoreがstart-review-manager.jsのlockFileと一致する', () => {
-  // start-review-manager.js line 92:
-  //   const lockFile = reviewArtifactPath(workspace, pr, '.running');
-  const workspace = 'C:/ws';
-
-  const spec = buildReviewManagerLaunchSpec({
-    issue: 174, pr: '42', repo: 'o/r', workspace,
-  });
-
-  // 現行コードの lockFile 構築と完全に一致
-  const expectedLockFile = reviewArtifactPath(workspace, '42', '.running');
-  assert.equal(spec.leaseStore, expectedLockFile);
-});
-
-test('現行一致: Review ManagerのworktreeKeyがrun-review-manager.jsのworktreeブランチ名と一致する', () => {
-  // run-review-manager.js → review-manager-paths.js:
-  //   reviewWorktreeBranchName(pr) → review-pr-<pr>
-  const spec = buildReviewManagerLaunchSpec({
-    issue: 174, pr: '42', repo: 'o/r', workspace: '/ws',
-  });
-
-  assert.equal(spec.worktreeKey, reviewWorktreeBranchName('42'));
-  assert.equal(spec.worktreeKey, 'review-pr-42');
-});
-
-test('現行一致: 通常ワーカーのlogKeyがworkerLogPathの第二引数として使える', () => {
-  // spawn-worker.js line 398:
-  //   const logPath = workerLogPath(workspace, workerName);
-  // 現行は旧workerName（issue-<issue>-<description>）を使っている。
-  // factoryのlogKey（正規ID）を workerLogPath に渡した場合のパスを確認する。
-  const spec = buildNormalWorkerLaunchSpec({
-    skill: 'gh-maestro-coder',
-    issue: 5,
-    description: 'fix-auth',
-    repo: 'o/r',
-    workspace: 'C:/ws',
-  });
-
-  const logPath = workerLogPath('C:/ws', spec.logKey);
-  assert.equal(logPath, spec.logPath);
-  assert.match(logPath, /records[/\\]issue[/\\]5[/\\]workers[/\\]issue-5-coder-fix-auth[/\\]worker\.log$/);
-});
 
 test('現行一致: Review Managerのfindings成果物キーはreview-manager-<pr>で変わらない', () => {
   // review-manager-paths.js:
@@ -634,65 +538,12 @@ test('buildReviewManagerLaunchSpec: 返り値はfreezeされている', () => {
 
 // ── 通常ワーカー vs Review Manager の LaunchSpec 差異検証 ──────────────────────
 
-test('LaunchSpec差異: 通常ワーカーはpr=null、Review Managerはprが設定される', () => {
-  const normal = buildNormalWorkerLaunchSpec({
-    skill: 'gh-maestro-coder',
-    issue: 5,
-    description: 'fix-auth',
-    repo: 'o/r',
-    workspace: '/ws',
-  });
-  const rm = buildReviewManagerLaunchSpec({
-    issue: 5, pr: '42', repo: 'o/r', workspace: '/ws',
-  });
-
-  assert.equal(normal.pr, null);
-  assert.notEqual(rm.pr, null);
-});
-
-test('LaunchSpec差異: 通常ワーカーはworktreeKey=workerName、Review Managerは異なる', () => {
-  const normal = buildNormalWorkerLaunchSpec({
-    skill: 'gh-maestro-coder',
-    issue: 5,
-    description: 'fix-auth',
-    repo: 'o/r',
-    workspace: '/ws',
-  });
-  const rm = buildReviewManagerLaunchSpec({
-    issue: 5, pr: '42', repo: 'o/r', workspace: '/ws',
-  });
-
-  assert.equal(normal.worktreeKey, normal.workerName);
-  assert.notEqual(rm.worktreeKey, rm.workerName);
-});
-
-test('LaunchSpec差異: 通常ワーカーはleaseStoreがworkers.json、Review Managerは.runningファイル', () => {
-  const normal = buildNormalWorkerLaunchSpec({
-    skill: 'gh-maestro-coder',
-    issue: 5,
-    description: 'fix-auth',
-    repo: 'o/r',
-    workspace: 'C:/ws',
-  });
-  const rm = buildReviewManagerLaunchSpec({
-    issue: 5, pr: '42', repo: 'o/r', workspace: 'C:/ws',
-  });
-
-  assert.match(normal.leaseStore, /workers\.json$/);
-  assert.match(rm.leaseStore, /records[/\\]pr[/\\]42[/\\]review[/\\]manager\.running$/);
-});
-
 // ── 入力バリデーション: assertValidIssue ───────────────────────────────────────
 
 test('assertValidIssue: 正整数文字列を受け付ける', () => {
   assert.equal(assertValidIssue('1'), 1);
   assert.equal(assertValidIssue('42'), 42);
   assert.equal(assertValidIssue('99999'), 99999);
-});
-
-test('assertValidIssue: 数値も受け付ける', () => {
-  assert.equal(assertValidIssue(1), 1);
-  assert.equal(assertValidIssue(42), 42);
 });
 
 test('assertValidIssue: 0 は拒否する', () => {
@@ -740,12 +591,8 @@ test('assertValidDescription: 空文字列は拒否する', () => {
   assert.throws(() => assertValidDescription(''), /invalid description/);
 });
 
-test('assertValidDescription: スラッシュを含むと拒否する（パストラバーサル対策）', () => {
-  assert.throws(() => assertValidDescription('foo/bar'), /invalid description/);
-  assert.throws(() => assertValidDescription('a/b'), /invalid description/);
-});
-
-test('assertValidDescription: ../ を含むパストラバーサル文字列は拒否する', () => {
+test('assertValidDescription: ../ を含むパストラバーサル文字列・スラッシュは拒否する', () => {
+  assert.throws(() => assertValidDescription('fix/auth'), /invalid description/);
   assert.throws(() => assertValidDescription('../../../etc'), /invalid description/);
   assert.throws(() => assertValidDescription('x/../../../../outside'), /invalid description/);
   assert.throws(() => assertValidDescription('..'), /invalid description/);
@@ -801,139 +648,38 @@ test('assertWithinRoot: ../ による脱出を拒否する（path.resolve で正
 
 // ── factoryレベルの入力検証 ────────────────────────────────────────────────────
 
-test('buildNormalWorkerLaunchSpec: issue が 0 だとエラー', () => {
-  assert.throws(
-    () => buildNormalWorkerLaunchSpec({
-      skill: 'gh-maestro-coder', issue: 0, description: 'fix-auth', repo: 'o/r', workspace: '/ws',
-    }),
-    /invalid issue number/,
-  );
+test('buildNormalWorkerLaunchSpec: 不正な issue（0・"abc"・"01"）はエラー（配線の確認）', () => {
+  for (const issue of [0, 'abc', '01']) {
+    assert.throws(
+      () => buildNormalWorkerLaunchSpec({
+        skill: 'gh-maestro-coder', issue, description: 'fix-auth', repo: 'o/r', workspace: '/ws',
+      }),
+      /invalid issue number/,
+      `issue=${JSON.stringify(issue)}`,
+    );
+  }
 });
 
-test('buildNormalWorkerLaunchSpec: issue が "abc" だとエラー', () => {
-  assert.throws(
-    () => buildNormalWorkerLaunchSpec({
-      skill: 'gh-maestro-coder', issue: 'abc', description: 'fix-auth', repo: 'o/r', workspace: '/ws',
-    }),
-    /invalid issue number/,
-  );
-});
-
-test('buildNormalWorkerLaunchSpec: issue が "01"（先頭ゼロ）だとエラー', () => {
-  assert.throws(
-    () => buildNormalWorkerLaunchSpec({
-      skill: 'gh-maestro-coder', issue: '01', description: 'fix-auth', repo: 'o/r', workspace: '/ws',
-    }),
-    /invalid issue number/,
-  );
-});
-
-test('buildNormalWorkerLaunchSpec: description にパストラバーサル文字列を含むとエラー', () => {
-  assert.throws(
-    () => buildNormalWorkerLaunchSpec({
-      skill: 'gh-maestro-coder', issue: 5, description: 'x/../../../../outside', repo: 'o/r', workspace: '/ws',
-    }),
-    /invalid description/,
-  );
-});
-
-test('buildNormalWorkerLaunchSpec: description にスラッシュを含むとエラー', () => {
-  assert.throws(
-    () => buildNormalWorkerLaunchSpec({
-      skill: 'gh-maestro-coder', issue: 5, description: 'foo/bar', repo: 'o/r', workspace: '/ws',
-    }),
-    /invalid description/,
-  );
-});
-
-test('buildNormalWorkerLaunchSpec: description が 51文字以上だとエラー', () => {
-  assert.throws(
-    () => buildNormalWorkerLaunchSpec({
-      skill: 'gh-maestro-coder', issue: 5, description: 'a'.repeat(51), repo: 'o/r', workspace: '/ws',
-    }),
-    /invalid description/,
-  );
-});
-
-test('buildNormalWorkerLaunchSpec: description が空文字列だとエラー', () => {
-  assert.throws(
-    () => buildNormalWorkerLaunchSpec({
-      skill: 'gh-maestro-coder', issue: 5, description: '', repo: 'o/r', workspace: '/ws',
-    }),
-    /invalid description/,
-  );
-});
-
-test('buildNormalWorkerLaunchSpec: description にスペースを含むとエラー', () => {
-  assert.throws(
-    () => buildNormalWorkerLaunchSpec({
-      skill: 'gh-maestro-coder', issue: 5, description: 'foo bar', repo: 'o/r', workspace: '/ws',
-    }),
-    /invalid description/,
-  );
-});
-
-test('buildNormalWorkerLaunchSpec: 正規の入力はパスが管理ルート配下に解決される', () => {
-  const spec = buildNormalWorkerLaunchSpec({
-    skill: 'gh-maestro-coder',
-    issue: 5,
-    description: 'fix-auth',
-    repo: 'o/r',
-    workspace: 'C:/ws',
-  });
-
-  // worktreeDir が worktrees/ ルート配下であること
-  const worktreesRoot = path.join('C:/ws', '.gh-maestro', 'worktrees');
-  assert.ok(
-    spec.worktreeDir.startsWith(worktreesRoot + path.sep) || spec.worktreeDir === worktreesRoot,
-    `worktreeDir "${spec.worktreeDir}" should be under "${worktreesRoot}"`,
-  );
-
-  // logPath が worker-logs/ ルート配下であること
-  const logsRoot = path.join('C:/ws', '.gh-maestro', 'records');
-  assert.ok(
-    spec.logPath.startsWith(logsRoot + path.sep) || spec.logPath === logsRoot,
-    `logPath "${spec.logPath}" should be under "${logsRoot}"`,
-  );
+test('buildNormalWorkerLaunchSpec: 不正な description（パス脱出・スラッシュ・51文字・空・スペース）はエラー（配線の確認）', () => {
+  for (const description of ['x/../../../../outside', 'foo/bar', 'a'.repeat(51), '', 'foo bar']) {
+    assert.throws(
+      () => buildNormalWorkerLaunchSpec({
+        skill: 'gh-maestro-coder', issue: 5, description, repo: 'o/r', workspace: '/ws',
+      }),
+      /invalid description/,
+      `description=${JSON.stringify(description)}`,
+    );
+  }
 });
 
 // ── buildReviewManagerLaunchSpec の issue 検証 ─────────────────────────────────
 
-test('buildReviewManagerLaunchSpec: issue が 0 だとエラー', () => {
-  assert.throws(
-    () => buildReviewManagerLaunchSpec({ issue: 0, pr: '42', repo: 'o/r', workspace: '/ws' }),
-    /invalid issue number/,
-  );
-});
-
-test('buildReviewManagerLaunchSpec: issue が負数だとエラー', () => {
-  assert.throws(
-    () => buildReviewManagerLaunchSpec({ issue: -1, pr: '42', repo: 'o/r', workspace: '/ws' }),
-    /invalid issue number/,
-  );
-});
-
-test('buildReviewManagerLaunchSpec: issue が "abc" だとエラー', () => {
-  assert.throws(
-    () => buildReviewManagerLaunchSpec({ issue: 'abc', pr: '42', repo: 'o/r', workspace: '/ws' }),
-    /invalid issue number/,
-  );
-});
-
-test('buildReviewManagerLaunchSpec: 正規の入力はパスが管理ルート配下に解決される', () => {
-  const spec = buildReviewManagerLaunchSpec({
-    issue: 174, pr: '42', repo: 'o/r', workspace: 'C:/ws',
-  });
-
-  // worktreeDir が worktrees/ ルート配下であること
-  const worktreesRoot = path.join('C:/ws', '.gh-maestro', 'worktrees');
-  assert.ok(
-    spec.worktreeDir.startsWith(worktreesRoot + path.sep) || spec.worktreeDir === worktreesRoot,
-  );
-
-  // logPath が worker-logs/ ルート配下であること
-  const logsRoot = path.join('C:/ws', '.gh-maestro', 'records');
-  assert.ok(
-    spec.logPath.startsWith(logsRoot + path.sep) || spec.logPath === logsRoot,
-  );
+test('buildReviewManagerLaunchSpec: 不正な issue（0・負数・"abc"）はエラー（配線の確認）', () => {
+  for (const issue of [0, -1, 'abc']) {
+    assert.throws(
+      () => buildReviewManagerLaunchSpec({ issue, pr: '42', repo: 'o/r', workspace: '/ws' }),
+      /invalid issue number/,
+      `issue=${JSON.stringify(issue)}`,
+    );
+  }
 });

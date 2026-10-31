@@ -75,7 +75,7 @@ describe('verifyReplyAndRelayIfMissing', () => {
     assert.equal(relayCalls.length, 0);
   });
 
-  test('sinceTimestampより前の返信は「返信済み」とみなさない（境界のinclusive/exclusiveを前提にしない）', () => {
+  test('境界時刻（sinceTimestamp ちょうど）のコメントは返信とみなさない', () => {
     withTempDir((dir) => {
       const logPath = path.join(dir, 'out.log');
       fs.writeFileSync(logPath, 'captured agent output');
@@ -183,19 +183,24 @@ describe('verifyReplyAndRelayIfMissing', () => {
 
   // ── 応答契約 (artifact-or-message) ──────────────────────────────────────
 
-  test('artifact-or-message 契約 + sinceTimestamp以降のPRあり → 代理送信しない（PRで契約充足）', () => {
-    hook._setGhApiComments(() => ({ status: 0, stdout: '[]', stderr: '' }));
-    hook._setGhPrList(() => ({
-      status: 0,
-      stdout: JSON.stringify([prEntry({ number: 42, createdAt: '2024-01-01T01:00:00Z' })]),
-      stderr: '',
-    }));
-    hook.verifyReplyAndRelayIfMissing({
-      workspace: '/ws', workerName: 'issue-5-fix', captureLogPath: '/tmp/x',
-      sinceTimestamp: '2024-01-01T00:00:00Z',
-      contract: { type: 'artifact-or-message', artifact: 'pr', issue: 5, sinceTimestamp: '2024-01-01T00:00:00Z' },
+  test('artifact-or-message 契約: 実ログで、PRが成立すれば代理送信せず、PRが無ければ代理送信する', () => {
+    withTempDir((dir) => {
+      const logPath = path.join(dir, 'out.log');
+      fs.writeFileSync(logPath, 'captured agent output');
+      const contract = { type: 'artifact-or-message', artifact: 'pr', issue: 5, sinceTimestamp: '2024-01-01T00:00:00Z' };
+      const run = (prs) => {
+        relayCalls = [];
+        hook._setGhApiComments(() => ({ status: 0, stdout: '[]', stderr: '' }));
+        hook._setGhPrList(() => ({ status: 0, stdout: JSON.stringify(prs), stderr: '' }));
+        hook.verifyReplyAndRelayIfMissing({
+          workspace: '/ws', workerName: 'issue-5-fix', captureLogPath: logPath,
+          sinceTimestamp: '2024-01-01T00:00:00Z', contract,
+        });
+        return relayCalls.length;
+      };
+      assert.equal(run([prEntry({ number: 42, createdAt: '2024-01-01T01:00:00Z' })]), 0, 'PR成立');
+      assert.equal(run([]), 1, 'PR不成立');
     });
-    assert.equal(relayCalls.length, 0);
   });
 
   test('artifact-or-message 契約 + PRなし → 代理送信する（契約未充足）', () => {
@@ -320,18 +325,12 @@ describe('verifyReplyAndRelayIfMissing', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('normalizeToSecondPrecision', () => {
-  test('ミリ秒付きタイムスタンプは秒精度に正規化される', () => {
+  test('ミリ秒付きタイムスタンプは秒精度に正規化される（秒精度の入力はそのまま返す）', () => {
     assert.equal(
       hook.normalizeToSecondPrecision('2024-01-01T00:00:00.123Z'),
       '2024-01-01T00:00:00Z'
     );
-  });
-
-  test('秒精度のタイムスタンプはそのまま', () => {
-    assert.equal(
-      hook.normalizeToSecondPrecision('2024-01-01T00:00:00Z'),
-      '2024-01-01T00:00:00Z'
-    );
+    assert.equal(hook.normalizeToSecondPrecision('2024-01-01T00:00:00Z'), '2024-01-01T00:00:00Z');
   });
 
   test('複数桁のミリ秒も正しく除去される', () => {

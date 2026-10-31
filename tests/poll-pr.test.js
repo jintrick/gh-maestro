@@ -68,18 +68,16 @@ function loadModule(spawnSyncImpl) {
 
 // ── spawnPollReviews ─────────────────────────────────────────────────────
 
-test('spawnPollReviews launches poll-reviews.js asynchronously and relays stdout', async () => {
+test('spawnPollReviews は poll-reviews.js を argv（PR・workspace・間隔）と stdin pipe で起動する', async () => {
   const { mod, calls } = loadModule(() => ({ status: 0 }));
   const code = await mod.spawnPollReviews('12', '/workspace', 30);
   assert.equal(code, 0);
   assert.equal(calls.length, 1);
   const [call] = calls;
   assert.equal(call.cmd, process.execPath);
-  assert.ok(call.args.some(a => a.endsWith('poll-reviews.js')));
-  assert.ok(call.args.includes('12'));
-  assert.ok(call.args.includes('/workspace'));
-  assert.equal(call.args.includes('--session-pid'), false);
-  assert.ok(!call.args.includes('--no-review-manager'));
+  assert.equal(call.args.length, 4);
+  assert.ok(call.args[0].endsWith('poll-reviews.js'));
+  assert.deepEqual(call.args.slice(1), ['12', '/workspace', '30']);
   assert.deepEqual(call.opts.stdio, ['pipe', 'pipe', 'inherit']);
 });
 
@@ -126,23 +124,20 @@ test("getPrBaseBranch parses baseRefName from gh pr view output", () => {
   assert.ok(calls[0].args.includes("baseRefName"));
 });
 
-test("getPrBaseBranch returns empty string when gh pr view fails", () => {
-  const { mod } = loadModule(() => ({ status: 1, stderr: "not found" }));
+test("getPrBaseBranch returns empty string when gh pr view fails or prints nothing", () => {
+  // 失敗時は stdout に値があっても捨てる（失敗を成功値として返さない）。空出力も同じ fail-closed の経路。
   const originalError = console.error;
   const errors = [];
   console.error = (...args) => errors.push(args.join(' '));
   try {
-    const branch = mod.getPrBaseBranch("999", "o/r");
-    assert.equal(branch, "");
+    const { mod: failed } = loadModule(() => ({ status: 1, stdout: "dev\n", stderr: "not found" }));
+    assert.equal(failed.getPrBaseBranch("999", "o/r"), "");
     assert.ok(errors.some(e => e.includes("ベースブランチ取得に失敗しました")));
+    const { mod: empty } = loadModule(() => ({ status: 0, stdout: "" }));
+    assert.equal(empty.getPrBaseBranch("42", "o/r"), "");
   } finally {
     console.error = originalError;
   }
-});
-
-test("getPrBaseBranch returns empty string for empty gh output", () => {
-  const { mod } = loadModule(() => ({ status: 0, stdout: "" }));
-  assert.equal(mod.getPrBaseBranch("42", "o/r"), "");
 });
 
 test('getPrHead rejects an empty or malformed gh response', () => {
@@ -165,7 +160,8 @@ test("getPrState parses state from gh pr view output", () => {
 });
 
 test("getPrState returns empty string when gh pr view fails (fail-closed)", () => {
-  const { mod } = loadModule(() => ({ status: 1, stderr: "not found" }));
+  // stdout に有効な状態（OPEN）が出ていても、終了コード非0なら採らない。
+  const { mod } = loadModule(() => ({ status: 1, stdout: "OPEN\n", stderr: "not found" }));
   const originalError = console.error;
   const errors = [];
   console.error = (...args) => errors.push(args.join(' '));
@@ -439,6 +435,22 @@ test('resolveSlowWorktree resolves the unique senior-coder worktree for an issue
   assert.deepEqual(mod.resolveSlowWorktree(workspace, 461), { workerName, worktree });
 });
 
+test('resolveSlowWorktree returns null when the same issue has more than one senior-coder worktree（候補C）', () => {
+  // 候補の一意性が崩れたとき、どちらかを黙って選ばず null（解決不能）を返す。期待値は null のリテラル。
+  const { mod } = loadModule();
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-ambiguous-worktree-');
+  const first = 'fixture-senior-a';
+  const second = 'fixture-senior-b';
+  fs.mkdirSync(path.join(workspace, '.gh-maestro', 'worktrees', first), { recursive: true });
+  fs.mkdirSync(path.join(workspace, '.gh-maestro', 'worktrees', second), { recursive: true });
+  fs.writeFileSync(path.join(workspace, '.gh-maestro', 'workers.json'), JSON.stringify({
+    [first]: { issue: 461, skill: 'gh-maestro-senior-coder' },
+    [second]: { issue: 461, skill: 'gh-maestro-senior-coder' },
+  }), 'utf8');
+
+  assert.equal(mod.resolveSlowWorktree(workspace, 461), null);
+});
+
 function completeLayer(layer, head) {
   return {
     layer,
@@ -682,9 +694,9 @@ test('runPollPr suppresses slow and CI only for lightweight PRs, while recovery 
   const headB = 'b'.repeat(40);
 
   for (const scenario of [
-    { name: 'lightweight', noReviewEvents: true, expectSlow: false, expectChecks: false },
-    { name: 'Review Manager recovery', noReviewEvents: false, expectSlow: true, expectChecks: true },
-    { name: 'revert PR', noReviewEvents: false, expectSlow: true, expectChecks: true },
+    { name: 'lightweight', noReviewManager: true, noReviewEvents: true, expectSlow: false, expectChecks: false },
+    { name: 'Review Manager recovery', noReviewManager: false, noReviewEvents: false, expectSlow: true, expectChecks: true },
+    { name: 'revert PR', noReviewManager: false, noReviewEvents: false, expectSlow: true, expectChecks: true },
   ]) {
     const { mod } = loadModule();
     const workspace = temporaryWorkspace(`gh-maestro-poll-pr-${scenario.name.replaceAll(' ', '-')}-`);
@@ -697,7 +709,7 @@ test('runPollPr suppresses slow and CI only for lightweight PRs, while recovery 
       issue: 600,
       repo: 'fixture/repo',
       workspace,
-      noReviewManager: true,
+      noReviewManager: scenario.noReviewManager,
       noReviewEvents: scenario.noReviewEvents,
       intervalMs: 0,
       intervalArg: '0',
@@ -724,6 +736,7 @@ test('runPollPr suppresses slow and CI only for lightweight PRs, while recovery 
       getPrStateFn: () => 'OPEN',
       recordMergeAndSnapshotFn: () => {},
       runSlowTestFn: async ({ headSha }) => { slowHeads.push(headSha); },
+      startReviewManagerFn: () => 'REVIEW_MANAGER_STARTED',
       cleanupFn: () => {},
       writeStdoutFn: text => output.push(text),
     });
@@ -1309,7 +1322,6 @@ test('runSlowTest does not let an older HEAD overwrite a newer worktree result',
   const child = new EventEmitter();
   child.pid = 1234;
   let headCalls = 0;
-  let artifactWrites = 0;
   let declareCalls = 0;
   try {
     const result = await mod.runSlowTest({
@@ -1322,13 +1334,14 @@ test('runSlowTest does not let an older HEAD overwrite a newer worktree result',
       },
       spawnFn: () => child,
       waitChildExitFn: async () => 0,
-      writeTestResultLayerFn: () => { artifactWrites += 1; },
       declareTestResultFn: () => { declareCalls += 1; return { ok: true }; },
     });
 
     assert.equal(result.status, 'unavailable');
     assert.match(result.error, /HEADが実行中に変更/);
-    assert.equal(artifactWrites, 0);
+    // 古い HEAD の結果は worktree の成果物に残らない（実際の成果物を読んで確認する）。
+    const artifact = readTestResultArtifact(worktree);
+    assert.equal(artifact.ok, false, '古い HEAD の slow 結果が成果物に書かれていない');
     assert.equal(declareCalls, 0);
     const state = JSON.parse(fs.readFileSync(mod.slowStatePath(workspace, '45'), 'utf8'));
     assert.equal(state.runs[head].status, 'unavailable');

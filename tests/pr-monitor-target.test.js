@@ -34,7 +34,7 @@ after(() => {
   else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntime;
 });
 
-test('PR monitor target はruntimeへ原子的に保存し、同じ値を読み戻す', () => {
+test('PR monitor target は runtime 配下へ保存し、同じ値を読み戻し、書き込み後に一時ファイルを残さない', () => {
   const workspace = makeWorkspace();
   const target = createPrMonitorTarget({
     issue: '581',
@@ -50,6 +50,10 @@ test('PR monitor target はruntimeへ原子的に保存し、同じ値を読み�
   assert.equal(readPrMonitorTarget(workspace).noReviewManager, true);
   assert.ok(targetPath(workspace).startsWith(runtimeRoot));
   assert.ok(!targetPath(workspace).startsWith(path.join(workspace, '.gh-maestro')));
+  const targetDir = path.dirname(targetPath(workspace));
+  const base = path.basename(targetPath(workspace));
+  const leftovers = fs.readdirSync(targetDir).filter((name) => name !== base && name.includes(base));
+  assert.deepEqual(leftovers, [], '書き込み後に一時ファイルが残らない');
 });
 
 test('PR monitor target が無い場合だけnullを返す', () => {

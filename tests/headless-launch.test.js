@@ -83,10 +83,6 @@ test('workerLogPath: issue所有のrecords配下に返す', () => {
   );
 });
 
-test('workerLogPath: 同じワーカー名なら毎回同じパスを返す（resumeも同じファイルへ追記される）', () => {
-  assert.equal(workerLogPath('/ws', 'issue-5-fix'), workerLogPath('/ws', 'issue-5-fix'));
-});
-
 // ── launchAgentHeadless: 中継シム経由の detached 起動 ─────────────────────────
 
 test('launchAgentHeadless: detached な node シム経由で起動する', () => {

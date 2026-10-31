@@ -20,9 +20,7 @@ test('normalizeWorkerEntry: 新形式 { pid, resourceKey, startTime, logPath, ag
     ...EMPTY,
     pid: 4242, resourceKey: 'a'.repeat(64), instanceId: 'worker-instance-4242', startTime: '2026-07-25T00:00:00.000Z', logPath: 'C:/ws/.gh-maestro/worker-logs/w.log', agentId: 'agy',
   });
-});
-
-test('normalizeWorkerEntry: 文字列のpidも数値化する', () => {
+  // 文字列の pid も normalizeWorkerEntry 経由で数値になる（統合で消した旧テストの確認を、この経路に移す）。
   assert.equal(normalizeWorkerEntry({ pid: '4242' }).pid, 4242);
 });
 
