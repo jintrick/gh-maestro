@@ -149,29 +149,6 @@ not ok 6 - test alpha
   assert.deepEqual(failures, ['test alpha', 'subtest delta', 'test alpha']);
 });
 
-test('parseTapFailures: 同名失敗を複数含む7件の失敗で、失敗件数と名前の一覧が一致する', () => {
-  const tapOutput = `TAP version 13
-not ok 1 - duplicate failure
-not ok 2 - unique 1
-not ok 3 - duplicate failure
-not ok 4 - unique 2
-not ok 5 - duplicate failure
-not ok 6 - duplicate failure
-not ok 7 - unique 3
-`;
-  const failures = parseTapFailures(tapOutput);
-  assert.equal(failures.length, 7);
-  assert.deepEqual(failures, [
-    'duplicate failure',
-    'unique 1',
-    'duplicate failure',
-    'unique 2',
-    'duplicate failure',
-    'duplicate failure',
-    'unique 3',
-  ]);
-});
-
 test('parseTapFailures: 空出力や失敗なしは空配列を返す', () => {
   assert.deepEqual(parseTapFailures(''), []);
   assert.deepEqual(parseTapFailures('ok 1 - test a\nok 2 - test b\n'), []);

@@ -301,20 +301,14 @@ test('saveStatusPane: launchedAt省略時は現在時刻で補完される', () 
     saveStatusPane(dir, paneEntry(100));
     const loaded = loadStatusPane(dir);
     assert.equal(loaded.paneId, '100');
-    assert.ok(loaded.launchedAt.length > 0);
+    // 補完された時刻は、保存時点の現在時刻として解釈できる（空文字や別の時刻ではない）
+    const launched = Date.parse(loaded.launchedAt);
+    assert.ok(Number.isFinite(launched), 'launchedAt は解釈できる時刻');
+    assert.ok(Math.abs(Date.now() - launched) < 60_000, 'launchedAt は保存時点の現在時刻に近い');
   });
 });
 
-test('removeStatusPane: 存在するファイルを削除しtrueを返す', () => {
-  withTempWorkspace((dir) => {
-    saveStatusPane(dir, paneEntry('99'));
-    const existed = removeStatusPane(dir);
-    assert.equal(existed, true);
-    assert.equal(loadStatusPane(dir), null);
-  });
-});
-
-test('removeStatusPane: 通常記録と回復記録をまとめて削除する', () => {
+test('removeStatusPane: 通常記録と回復記録をまとめて削除し、どちらか一方だけでも true を返す（統合元: 308）', () => {
   withTempWorkspace((dir) => {
     saveStatusPane(dir, paneEntry('primary'));
     saveStatusPaneRecovery(dir, paneEntry('recovery'));
@@ -322,6 +316,10 @@ test('removeStatusPane: 通常記録と回復記録をまとめて削除する',
     assert.equal(fs.existsSync(statusPanePath(dir)), false);
     assert.equal(fs.existsSync(statusPaneRecoveryPath(dir)), false);
     assert.equal(loadStatusPane(dir), null);
+  });
+  withTempWorkspace((dir) => {
+    saveStatusPane(dir, paneEntry('99'));
+    assert.equal(removeStatusPane(dir), true, '通常記録のみでも true');
   });
 });
 

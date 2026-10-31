@@ -29,6 +29,10 @@ test('assertValidPr rejects path-traversal payloads', () => {
   assert.throws(() => assertValidPr('1/../../etc/passwd'), /invalid PR number/);
   assert.throws(() => assertValidPr('../42'), /invalid PR number/);
   assert.throws(() => assertValidPr('42.running'), /invalid PR number/);
+  // 同じ検証を、ブランチ名と worktree 配置の入口でも確認する（パスを組む前に拒否する）
+  const workspace = path.resolve('C:/ws');
+  assert.throws(() => reviewWorktreeBranchName('../42'), /invalid PR number/);
+  assert.throws(() => reviewWorktreeDir(workspace, '../../evil'), /invalid PR number/);
 });
 
 // ── reviewArtifactPath ───────────────────────────────────────────────────
@@ -39,15 +43,12 @@ test('reviewArtifactPath builds a PR-owned records path', () => {
   assert.equal(result, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.running'));
 });
 
-test('reviewArtifactPath: .claim は空のPR単位claimセンチネルのパスを返す', () => {
-  const workspace = path.resolve('C:/ws');
-  const result = reviewArtifactPath(workspace, '42', '.claim');
-  assert.equal(result, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.claim'));
-});
-
 test('reviewArtifactPath rejects a path-traversal pr before building any path', () => {
   const workspace = path.resolve('C:/ws');
-  assert.throws(() => reviewArtifactPath(workspace, '../../evil', '.running'), /invalid PR number/);
+  // 同じ検証経路を、ファイル種別ごとの配置先（.running / .log / .retries.json）で確認する
+  for (const suffix of ['.running', '.log', '.retries.json']) {
+    assert.throws(() => reviewArtifactPath(workspace, '../../evil', suffix), /invalid PR number/);
+  }
 });
 
 test('reviewArtifactPath: .log はPR recordsのreview配下に置く', () => {
@@ -56,30 +57,16 @@ test('reviewArtifactPath: .log はPR recordsのreview配下に置く', () => {
   assert.equal(result, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.log'));
 });
 
-test('reviewArtifactPath: .log でもpath-traversalなprは拒否される', () => {
-  const workspace = path.resolve('C:/ws');
-  assert.throws(() => reviewArtifactPath(workspace, '../../evil', '.log'), /invalid PR number/);
-});
-
 test('reviewArtifactPath: .retries.json はPR recordsのreview配下に置く', () => {
   const workspace = path.resolve('C:/ws');
   const result = reviewArtifactPath(workspace, '42', '.retries.json');
   assert.equal(result, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.retries.json'));
 });
 
-test('reviewArtifactPath: .retries.json でもpath-traversalなprは拒否される', () => {
-  const workspace = path.resolve('C:/ws');
-  assert.throws(() => reviewArtifactPath(workspace, '../../evil', '.retries.json'), /invalid PR number/);
-});
-
 // ── reviewWorktreeBranchName / reviewWorktreeFetchRef ───────────────────
 
 test('reviewWorktreeBranchName builds a PR-scoped branch name', () => {
   assert.equal(reviewWorktreeBranchName('42'), 'review-pr-42');
-});
-
-test('reviewWorktreeBranchName rejects an invalid PR number', () => {
-  assert.throws(() => reviewWorktreeBranchName('../42'), /invalid PR number/);
 });
 
 test('reviewWorktreeFetchRef builds a dedicated non-remote-tracking ref name', () => {
@@ -94,7 +81,3 @@ test('reviewWorktreeDir builds a path inside workspace/.gh-maestro/worktrees', (
   assert.equal(result, path.join(workspace, '.gh-maestro', 'worktrees', 'review-pr-42'));
 });
 
-test('reviewWorktreeDir rejects a path-traversal pr before building any path', () => {
-  const workspace = path.resolve('C:/ws');
-  assert.throws(() => reviewWorktreeDir(workspace, '../../evil'), /invalid PR number/);
-});

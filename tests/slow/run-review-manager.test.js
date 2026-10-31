@@ -265,3 +265,124 @@ test('pollForArtifact: シグナルでabortされると即座に終了する', a
 
 
 // ── SKILL.md 絶対パス指定（PR #350 実障害対策） ─────────────────────────────
+
+// ── worktree の node_modules junction と破棄（実 git・実 junction を使う） ──────
+// 実障害: RM専用worktreeに node_modules が無く、プロジェクトのツール起動時に
+// MODULE_NOT_FOUND になった（Issue #155）。setupReviewWorktree が実際に junction を張り、
+// worktree から workspace の node_modules を参照できることを検証する。
+// 文字列の存在ではなく、作成された worktree の振る舞いで確認する。
+
+const {
+  setupReviewWorktree, teardownReviewWorktree,
+} = require('../../scripts/run-review-manager');
+const { reviewWorktreeDir } = require('../../scripts/shared/review-manager-paths');
+const processLiveness = require('../../scripts/shared/process-liveness');
+
+function gitInitRepoWithCommit(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  const git = (args) => spawnSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { encoding: 'utf8' });
+  assert.equal(git(['init']).status, 0);
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'a', 'utf8');
+  assert.equal(git(['add', 'a.txt']).status, 0);
+  assert.equal(git(['commit', '-m', 'init']).status, 0);
+  return git;
+}
+
+test('setupReviewWorktree: 作成した worktree から workspace の node_modules を参照できる（junction 経由）', () => {
+  const ws = path.join(tmpBase, 'setup-link-ws');
+  const git = gitInitRepoWithCommit(ws);
+  fs.mkdirSync(path.join(ws, 'node_modules'), { recursive: true });
+  fs.writeFileSync(path.join(ws, 'node_modules', 'marker.txt'), 'marker', 'utf8');
+
+  // PR head を refs/pull/77/head として持つ origin（ローカルの bare リポジトリ）を用意する
+  const origin = path.join(tmpBase, 'setup-link-origin.git');
+  assert.equal(spawnSync('git', ['init', '--bare', origin], { encoding: 'utf8' }).status, 0);
+  assert.equal(git(['remote', 'add', 'origin', origin]).status, 0);
+  assert.equal(git(['push', 'origin', 'HEAD:refs/pull/77/head']).status, 0);
+
+  const dir = setupReviewWorktree(ws, '77', () => {});
+  try {
+    // linkNodeModules が junction を張っていなければ、この参照は失敗する
+    assert.equal(fs.readFileSync(path.join(dir, 'node_modules', 'marker.txt'), 'utf8'), 'marker');
+  } finally {
+    teardownReviewWorktree(ws, '77', () => {});
+  }
+});
+
+test('teardownReviewWorktree: junction を除去しても、リンク先の node_modules は残る', () => {
+  // 検証対象は「リンク先を巻き込まない」という結果であり、呼び出し順は固定しない。
+  const ws = path.join(tmpBase, 'teardown-junction-ws');
+  fs.mkdirSync(ws, { recursive: true });
+  const external = path.join(tmpBase, 'teardown-junction-external', 'node_modules');
+  fs.mkdirSync(external, { recursive: true });
+  fs.writeFileSync(path.join(external, 'keep.txt'), 'keep', 'utf8');
+
+  const dir = reviewWorktreeDir(ws, '78');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.symlinkSync(external, path.join(dir, 'node_modules'), 'junction');
+
+  teardownReviewWorktree(ws, '78', () => {});
+
+  assert.equal(fs.existsSync(path.join(external, 'keep.txt')), true, 'リンク先の node_modules を消さない');
+  assert.equal(fs.existsSync(dir), false, 'worktree ディレクトリは破棄される');
+});
+
+// ── boundedCleanup: worktree 破棄の条件（退行経路3） ─────────────────────────
+// 検証対象: プロセスが停止確認できた（processStopped）か、起動前の pid が無い（pid == null）ときだけ
+// worktree を破棄する。停止を確認できなければ（unknown）worktree を残す。
+// 担当テストは worktreeDir・workspace・pr を渡して worktree 経路を通す。
+// 生死の判定だけを注入し、プロセスは実際には停止させない（unknown と dead のみを返す）。
+
+// resource key は 64 桁の16進数（process-liveness の RESOURCE_KEY_RE）
+const KEY_STOPPED = 'a'.repeat(64);
+const KEY_UNKNOWN = 'b'.repeat(64);
+
+test('boundedCleanup: 停止を確認できたら worktree を破棄し、停止できなければ残す', async () => {
+  const ws = path.join(tmpBase, 'bounded-wt-ws');
+  fs.mkdirSync(ws, { recursive: true });
+  const dir = reviewWorktreeDir(ws, '79');
+  // endpoint の照会結果だけを注入する（resource key を持つ参照でのみ生死判定が走る）
+  const liveness = processLiveness.createLiveness({
+    probeEndpoint: (endpoint) => (endpoint.includes(KEY_STOPPED.slice(0, 16)) ? 'dead' : 'unknown'),
+    readStartTime: () => '2026-08-28T00:00:00.000Z',
+  });
+
+  // 1. 停止を確認（dead）→ worktree を破棄する
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'f.txt'), 'x', 'utf8');
+  const stopped = await boundedCleanup({
+    pid: 4242, processRef: liveness.captureProcess(4242, KEY_STOPPED), worktreeDir: dir, workspace: ws, pr: '79',
+    lockFile: null, liveness, log: () => {}, gracefulShutdownMs: 0,
+  });
+  assert.equal(stopped.processStopped, true);
+  assert.equal(stopped.worktreeCleaned, true);
+  assert.equal(fs.existsSync(dir), false, '停止確認後は worktree を破棄する');
+
+  // 2. 生死を判定できない（unknown）→ worktree を残す（kill も行われない）
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'f.txt'), 'x', 'utf8');
+  // 自分が書いた lease（manager.running）を置く。生死を判定できないときは lease も残す。
+  const lockFile = path.join(ws, 'manager.running');
+  const lockOwner = liveness.captureProcess(4243, KEY_UNKNOWN);
+  fs.writeFileSync(lockFile, JSON.stringify(liveness.writeRef({}, lockOwner)), 'utf8');
+  const unknown = await boundedCleanup({
+    pid: 4243, processRef: liveness.captureProcess(4243, KEY_UNKNOWN), worktreeDir: dir, workspace: ws, pr: '79',
+    lockFile, lockOwner, liveness, log: () => {}, gracefulShutdownMs: 0,
+  });
+  assert.equal(unknown.processStopped, false);
+  assert.equal(unknown.worktreeCleaned, false);
+  assert.equal(unknown.leaseReleased, false);
+  assert.equal(fs.existsSync(path.join(dir, 'f.txt')), true, '生死を判定できないときは worktree を残す');
+  assert.equal(fs.existsSync(lockFile), true, '生死を判定できないときは lease（manager.running）を残す');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(lockFile, { force: true });
+
+  // 3. 起動前の pid が無い（pid == null）→ worktree を破棄する
+  fs.mkdirSync(dir, { recursive: true });
+  const noPid = await boundedCleanup({
+    pid: null, worktreeDir: dir, workspace: ws, pr: '79',
+    lockFile: null, liveness, log: () => {}, gracefulShutdownMs: 0,
+  });
+  assert.equal(noPid.worktreeCleaned, true);
+  assert.equal(fs.existsSync(dir), false);
+});

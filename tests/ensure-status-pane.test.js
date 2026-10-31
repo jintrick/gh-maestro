@@ -127,10 +127,14 @@ test('ensureStatusPane: 生存中の記録済みペインを再利用し起動�
 });
 
 test('ensureStatusPane: 既存記録の接続先と基準ペインを使い、現在環境を参照しない', () => {
+  // 記録の接続先と現在環境の接続先は別の値にする。同じ値だと、どちらを使ったか区別できない。
+  const RECORDED = Object.freeze({ unixSocket: 'C:\\wezterm\\recorded-socket', targetPaneId: 'recorded-base' });
+  const CURRENT = Object.freeze({ unixSocket: 'C:\\wezterm\\current-socket', targetPaneId: 'current-base' });
   let observedConnection = null;
   let launchParams = null;
   const { deps } = injectedDeps({
-    loadStatusPaneFn: () => paneEntry('old'),
+    loadStatusPaneFn: () => ({ paneId: 'old', ...RECORDED }),
+    getCurrentPaneTargetFn: () => ({ ...CURRENT }),
     isPaneAliveFn: (paneId, connection) => {
       observedConnection = connection;
       return false;
@@ -144,9 +148,9 @@ test('ensureStatusPane: 既存記録の接続先と基準ペインを使い、�
   const result = ensureStatusPane(baseParams(), deps);
 
   assert.deepEqual(result, { ok: true, paneId: 'new', reused: false });
-  assert.deepEqual(observedConnection, PANE_CONTEXT);
-  assert.deepEqual(launchParams.connection, PANE_CONTEXT);
-  assert.equal(launchParams.targetPaneId, PANE_CONTEXT.targetPaneId);
+  assert.deepEqual(observedConnection, { unixSocket: 'C:\\wezterm\\recorded-socket', targetPaneId: 'recorded-base' });
+  assert.deepEqual(launchParams.connection, { unixSocket: 'C:\\wezterm\\recorded-socket', targetPaneId: 'recorded-base' });
+  assert.equal(launchParams.targetPaneId, 'recorded-base');
 });
 
 test('ensureStatusPane: 要求Issueと異なる生存ペインは終了して対象Issueで張り直す', () => {

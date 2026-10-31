@@ -206,29 +206,16 @@ test('サブプロセス: workers.json の読み取り失敗は running:false �
 
 
 
-test('サブプロセス: list は見出しと状態ドットを表示する', () => {
-  const workspace = createWorkspace('gh-maestro-worker-status-list-cli-');
-  const { owner, record } = startAliveWorker(workspace);
-  try {
-    writeWorkers(workspace, { alive: record });
-    const result = runCli(['list', '--workspace', workspace]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stderr, '');
-    assert.match(result.stdout, /alive/);
-    assert.doesNotMatch(result.stdout, /\[running\]/);
-  } finally {
-    stopLivenessOwner(owner);
-    removeWorkspace(workspace);
-  }
-});
-
-
-
-test('サブプロセス: list --json は機械可読な JSON 配列を返す', () => {
+test('サブプロセス: list は生存ワーカーの名前を表示し、list --json は機械可読な JSON 配列を返す', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-list-json-');
   const { owner, record } = startAliveWorker(workspace);
   try {
     writeWorkers(workspace, { alive: record });
+    // 人間向けの list は生存ワーカーの名前を出す（統合元: 209）。見た目の文字列は検査しない。
+    const listed = runCli(['list', '--workspace', workspace]);
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.ok(listed.stdout.includes('alive'));
+
     const result = runCli(['list', '--workspace', workspace, '--json']);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stderr, '');
