@@ -107,6 +107,9 @@ async function scenario(mode) {
     const shimWorkerName = buildReviewManagerLaunchSpec({ issue: 1, pr: 11, repo: 'o/r', workspace: ws }).workerName;
     const shimResource = { workspace: ws, kind: 'worker', name: shimWorkerName };
     await waitUntil(() => checker.observeResource(shimResource).state === 'dead', 'headless shim and exit hook exit');
+    // Guard for the wait above: if the wait is removed, the shim is still alive at manager exit
+    // (observed in every scenario), so this check fails deterministically instead of racing cleanup.
+    assert.equal(checker.observeResource(shimResource).state, 'dead', 'headless shim and exit hook must be gone before cleanup');
     safeToCleanup = true;
   } finally { if (safeToCleanup) await cleanupTempScope(scope); }
 }
