@@ -225,8 +225,8 @@ function buildBusyRejectionMessage({ workerName, entry, issue, draftPath }) {
  * 相手が休止した時点で配送される」という従来どおりの動作であり損害はない。逆に拒否すると
  * GitHubが一時的に不調な間はワーカーへ一切指示を送れなくなり、起動時刻を記録できなかった
  * エントリには恒久的に送信不能になる——主要ワークフローが止まる方が損害が大きい。
- * `.claude/rules/fail-closed-safety-guards.md` は「通すと損害が出るガード」に適用するもので
- * あり、本件はその前提を満たさない。「報告が届かないまま誰も気づけない」という本Issueの
+ * これは AGENTS.md「安全ガードはフェイルクローズにする」の例外である
+ * （docs/adr/0052-busy-worker-guard-fails-open.md）。「報告が届かないまま誰も気づけない」という本Issueの
  * 核心は、この送信ガードではなく worker-supervisor 側の居座り通知（STALE_REPORT_DETECTED）
  * が担う。
  *
