@@ -176,6 +176,17 @@ function cmdUse(profileName) {
     process.exit(1);
   }
 
+  // 壊れた skillAgentMap を {} で上書きすると、人間が書いた設定が黙って消える。
+  // 書き換えず、箇所を示して止まる（ADR 0053）。
+  if (config.skillAgentMap !== undefined && !isPlainObject(config.skillAgentMap)) {
+    console.error(
+      `Error: skillAgentMap in ${CONFIG_PATH} is not an object ` +
+      `(found ${Array.isArray(config.skillAgentMap) ? 'array' : typeof config.skillAgentMap}). ` +
+      'The file was not changed. Fix it by hand, then run again.',
+    );
+    process.exit(1);
+  }
+
   const profiles = config.profiles || {};
   if (!profiles[profileName]) {
     const available = Object.keys(profiles);
@@ -572,7 +583,9 @@ Usage:
   node scripts/config.js <subcommand> [options]
 
 Subcommands:
-  use <profile>     Apply a named profile's skillAgentMap to config.json
+  use <profile>     Apply a named profile's skillAgentMap to config.json.
+                    Exits 1 without changing the file when config.json cannot
+                    be parsed or its skillAgentMap is not an object.
   doctor            Validate config structure and report issues
 
 Options:

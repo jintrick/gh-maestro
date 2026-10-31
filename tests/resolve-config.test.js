@@ -18,6 +18,11 @@ const {
 } = require('../scripts/shared/resolve-config');
 const { buildAgentCommandArgs, buildAgentExecArgs } = require('../scripts/shared/agent-launch');
 const { createSessionResumeAdapter } = require('../scripts/shared/inbox-adapters/session-resume-adapter');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
+
+// 一時ディレクトリは共有スコープが所有し、テストファイル終了時に削除する。
+const tempDirScope = createTempDirScope();
+test.after(() => tempDirScope.cleanup());
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -715,14 +720,134 @@ test('resolveAgentConfig: config.json が存在しなければデフォルトだ
   });
 });
 
-test('resolveAgentConfig: config.json のパース失敗時はデフォルトにフォールバック', () => {
-  withTempHome(home => {
-    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), '{ invalid json', 'utf8');
+// ── config.json の壊れ方（ADR 0053: 既定値で動き、警告し、書き換えない） ──────
 
-    const agent = resolveAgentConfig('agy', { homedir: home });
-    assert.ok(agent, 'should fall back to defaults on parse error');
-    assert.equal(agent.command, 'agy');
+/** fn 実行中に stderr へ書かれた内容を集める。戻り値は fn の結果と stderr 文字列。 */
+function captureStderr(fn) {
+  const original = process.stderr.write;
+  const chunks = [];
+  process.stderr.write = (chunk) => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  try {
+    return { value: fn(), stderr: chunks.join('') };
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+/** ファイルの内容を比較用に返す。ディレクトリなら 'DIR'（書き換えられていないことの確認用）。 */
+function snapshotPath(p) {
+  return fs.statSync(p).isDirectory() ? 'DIR' : fs.readFileSync(p, 'utf8');
+}
+
+test('config.json: JSON 構文エラーの global 設定は既定値で動き、警告に場所を示し、書き換えない', () => {
+  withTempHome(home => {
+    const configPath = path.join(home, '.gh-maestro', 'config.json');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, '{ invalid json', 'utf8');
+    const before = snapshotPath(configPath);
+
+    const { value: agent, stderr } = captureStderr(() => resolveAgentConfig('agy', { homedir: home }));
+    assert.equal(agent.command, 'agy', 'should fall back to defaults');
+    assert.ok(stderr.includes(configPath), `warning must name the broken file: ${stderr}`);
+    assert.ok(stderr.includes('既定値'), `warning must say defaults are used: ${stderr}`);
+    assert.equal(snapshotPath(configPath), before, 'config.json must not be rewritten');
+  });
+});
+
+test('config.json: JSON 構文エラーの workspace 設定も既定値で動き、警告に workspace のファイルを示す', () => {
+  withTempHome(home => {
+    const ws = tempDirScope.mkdtemp('gh-maestro-resolve-config-ws-');
+    const configPath = path.join(ws, '.gh-maestro', 'config.json');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, '{ "agents": ', 'utf8');
+    const before = snapshotPath(configPath);
+
+    const { value: agent, stderr } = captureStderr(() =>
+      resolveAgentConfig('agy', { homedir: home, workspace: ws }));
+    assert.equal(agent.command, 'agy', 'should fall back to defaults');
+    assert.ok(stderr.includes(configPath), `warning must name the workspace file: ${stderr}`);
+    assert.equal(snapshotPath(configPath), before, 'workspace config.json must not be rewritten');
+  });
+});
+
+// 同じ catch 経路へ落ちる失敗は、種別ごとに独立して注入して確かめる（AGENTS.md テスト規約）。
+const CONFIG_BREAK_KINDS = [
+  { name: 'ルートが配列', write: p => fs.writeFileSync(p, '[]', 'utf8') },
+  { name: 'ルートが文字列', write: p => fs.writeFileSync(p, '"agy"', 'utf8') },
+  { name: '読み取りに失敗（ディレクトリ）', write: p => fs.mkdirSync(p, { recursive: true }) },
+];
+for (const kind of CONFIG_BREAK_KINDS) {
+  test(`config.json: ${kind.name} でも既定値で動き、警告に場所を示し、書き換えない`, () => {
+    withTempHome(home => {
+      const configPath = path.join(home, '.gh-maestro', 'config.json');
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      kind.write(configPath);
+      const before = snapshotPath(configPath);
+
+      const { value: agent, stderr } = captureStderr(() => resolveAgentConfig('agy', { homedir: home }));
+      assert.equal(agent.command, 'agy', 'should fall back to defaults');
+      assert.ok(stderr.includes(configPath), `warning must name the broken file: ${stderr}`);
+      assert.equal(snapshotPath(configPath), before, 'config.json must not be rewritten');
+    });
+  });
+}
+
+// skillAgentMap の型不正は、取り込まず既定値を使う。他のキー（agents）は効き続ける。
+const SKILL_MAP_BREAK_KINDS = [
+  { name: '文字列', value: 'corrupted-string' },
+  { name: '配列', value: ['array', 'is', 'invalid'] },
+];
+for (const kind of SKILL_MAP_BREAK_KINDS) {
+  test(`config.json: skillAgentMap が${kind.name}のとき取り込まず既定値を使い、警告にパスとキー名を示す。他のキーは効く`, () => {
+    withTempHome(home => {
+      const configPath = path.join(home, '.gh-maestro', 'config.json');
+      writeConfig(home, { skillAgentMap: kind.value, agents: { agy: { label: 'Agy Override' } } });
+      const before = snapshotPath(configPath);
+
+      const { value: map, stderr } = captureStderr(() => resolveSkillAgentMap({ homedir: home }));
+      assert.deepEqual(map, loadDefaults().skillAgentMap, 'broken skillAgentMap must not be merged');
+      assert.ok(stderr.includes(configPath), `warning must name the file: ${stderr}`);
+      assert.ok(stderr.includes('skillAgentMap'), `warning must name the key: ${stderr}`);
+
+      const agent = resolveAgentConfig('agy', { homedir: home });
+      assert.equal(agent.label, 'Agy Override', 'other keys must still take effect');
+      assert.equal(snapshotPath(configPath), before, 'config.json must not be rewritten');
+    });
+  });
+}
+
+test('config.json: 壊れていない設定では警告を出さない', () => {
+  withTempHome(home => {
+    writeConfig(home, { skillAgentMap: { 'gh-maestro-coder': 'agy' } });
+    const { value: map, stderr } = captureStderr(() => resolveSkillAgentMap({ homedir: home }));
+    assert.equal(map['gh-maestro-coder'], 'agy');
+    assert.equal(stderr, '', 'valid config must not warn');
+  });
+});
+
+test('config.json: 同じプロセスで同じファイルを何度読んでも、警告は箇所ごとに1回だけ出る', () => {
+  withTempHome(home => {
+    const configPath = path.join(home, '.gh-maestro', 'config.json');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, '{ invalid json', 'utf8');
+
+    const { stderr: fileStderr } = captureStderr(() => {
+      for (let i = 0; i < 3; i++) resolveAgentConfig('agy', { homedir: home });
+    });
+    assert.equal(fileStderr.split(configPath).length - 1, 1, `file warning must appear once: ${fileStderr}`);
+  });
+
+  withTempHome(home => {
+    writeConfig(home, { skillAgentMap: 'corrupted-string' });
+
+    const { stderr } = captureStderr(() => {
+      for (let i = 0; i < 3; i++) resolveSkillAgentMap({ homedir: home });
+    });
+    const warningLines = stderr.split('\n').filter(line => line.includes('skillAgentMap'));
+    assert.equal(warningLines.length, 1, `skillAgentMap warning must appear once: ${stderr}`);
   });
 });
 

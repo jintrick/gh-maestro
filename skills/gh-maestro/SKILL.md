@@ -31,4 +31,6 @@ gh pr list --repo $REPO --state merged --limit 15
 
    セッション初期化が `invalid` を報告していても、それだけを理由に初期化やコンテキストの出力をやり直してはならない。出力された状態を使って人間へ状況を提示する。
 
-5. `gh-maestro-orchestrator` スキルのゴール定義に従ってorchestratorとして動作を開始する。
+5. **壊れた config.json の確認**: セッションコンテキストに `CONFIG_JSON_BROKEN=<path> (<理由>)` の行があれば、そのファイルは壊れており、gh-maestro は既定値で動いている。その行のパスと理由を人間へ伝える。gh-maestro はこのファイルを書き換えないため、直すのは人間である。行が無ければ何も伝えない。
+
+6. `gh-maestro-orchestrator` スキルのゴール定義に従ってorchestratorとして動作を開始する。
