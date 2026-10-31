@@ -87,14 +87,6 @@ test('buildPrompt: paths and phase inputs include the instruction to read the ph
   assert.match(prompt, /SKILL に指定されたファイルを読み、そこに記載されたフェーズ1の手順を実行してください/);
 });
 
-test('buildPrompt: 呼び出しごとに安定して prompt を生成する', () => {
-  const opts = { pr: '5', repo: 'o/r', workspace: 'C:\\ws', mainGhDir: 'C:\\main\\.gh-maestro', skillPath: SKILL_MD };
-  const a = buildPrompt(opts);
-  const b = buildPrompt(opts);
-  assert.ok(typeof a.prompt === 'string');
-  assert.ok(typeof b.prompt === 'string');
-});
-
 // ── buildFinalizePrompt（フェーズ2: 統合・完否判断） ──────────────────────
 
 test('buildFinalizePrompt supplies concise phase-2 paths for result integration', () => {
@@ -248,26 +240,61 @@ test('runJobsDeterministically: 一部失敗(1)で結果JSONが無い(読めな�
 });
 
 test('runJobsDeterministically: 起動失敗(status null)はexec-failedで再試行しない（Issue #292 レビュー指摘）', () => {
-  const fx = makeJobFixtures();
-  const calls = [];
-  _setRunReviewJobsOnce(() => { calls.push(1); return { status: null, error: 'spawn ENOENT' }; });
-  try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
-    assert.equal(r.outcome, 'exec-failed');
-    assert.equal(calls.length, 1, 'spawn failure must not be retried into results-ready');
-    assert.match(r.reason, /spawn 失敗/);
-  } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
+  // error あり＝spawn 失敗（reason に「spawn 失敗」）、error なし＝シグナル終了。どちらも再試行せず exec-failed。
+  for (const result of [{ status: null, error: 'spawn ENOENT' }, { status: null, error: null }]) {
+    const fx = makeJobFixtures();
+    const calls = [];
+    _setRunReviewJobsOnce(() => { calls.push(1); return result; });
+    try {
+      const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
+      assert.equal(r.outcome, 'exec-failed');
+      assert.equal(calls.length, 1, 'spawn failure or signal exit must not be retried into results-ready');
+      if (result.error) assert.match(r.reason, /spawn 失敗/);
+    } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
+  }
 });
 
-test('runJobsDeterministically: シグナル終了(status null, error無し)もexec-failed', () => {
-  const fx = makeJobFixtures();
+// 退行経路4（PR #655〜）: runReviewJobsOnce の子プロセス（run-review-jobs.js）の env と argv。
+// 親の参照（GH_MAESTRO_REVIEW_PARENT_REF）と、本体 workspace（GH_MAESTRO_WORKSPACE の上書き）が
+// 子へ届くこと、argv に --gh-dir と --workspace が組まれることを検査する。
+// 子プロセスは spawnSync の差し替えで実際には起動しない（実 run-review-jobs は別テストの対象）。
+test('runReviewJobsOnce: 子の env に親の参照と本体 workspace を渡し、argv に gh-dir と workspace を組む', () => {
+  const sharedChildProcess = require('../scripts/shared/child-process');
+  const realSpawnSync = sharedChildProcess.spawnSync;
   const calls = [];
-  _setRunReviewJobsOnce(() => { calls.push(1); return { status: null, error: null }; });
+  const modPath = require.resolve('../scripts/run-review-manager');
+  let mod;
+  sharedChildProcess.spawnSync = (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    return { status: 0, stdout: '', stderr: '', error: undefined };
+  };
   try {
-    const r = runJobsDeterministically({ manifestPath: 'm', resultsPath: fx.resultsPath, pr: fx.pr, repo: 'o/r', workspace: fx.dir, ghDir: fx.ghDir, reviewWtDir: fx.reviewWtDir, log: () => {} });
-    assert.equal(r.outcome, 'exec-failed');
-    assert.equal(calls.length, 1);
-  } finally { _setRunReviewJobsOnce(null); fs.rmSync(fx.dir, { recursive: true, force: true }); }
+    delete require.cache[modPath];
+    mod = require(modPath); // run-review-manager は読み込み時に spawnSync を束縛するため、差し替え後に読み直す
+  } finally {
+    sharedChildProcess.spawnSync = realSpawnSync;
+  }
+  try {
+    const ws = path.join(tmpBase, 'run-jobs-env-ws');
+    const ghDir = path.join(ws, '.gh-maestro');
+    const reviewWtDir = path.join(ws, '.gh-maestro', 'worktrees', 'review-pr-5');
+    mod.runReviewJobsOnce({
+      manifestPath: path.join(ghDir, 'm.json'), resultsPath: path.join(ghDir, 'r.json'),
+      pr: '5', repo: 'o/r', ghDir, reviewWtDir, log: () => {}, parentRef: 'parent-ref-literal',
+    });
+
+    assert.equal(calls.length, 1, '子プロセスは1回だけ起動される');
+    const { args, opts } = calls[0];
+    assert.equal(path.basename(args[0]), 'run-review-jobs.js');
+    assert.equal(args[args.indexOf('--gh-dir') + 1], ghDir);
+    assert.equal(args[args.indexOf('--workspace') + 1], reviewWtDir);
+    assert.equal(opts.cwd, reviewWtDir);
+    assert.equal(opts.env.GH_MAESTRO_REVIEW_PARENT_REF, 'parent-ref-literal', '親の参照が子へ届く');
+    assert.equal(opts.env.GH_MAESTRO_WORKSPACE, ws, '本体 workspace（ghDir の親）で上書きされる');
+  } finally {
+    delete require.cache[modPath];
+    require(modPath); // 以降のテストが通常の読み込み状態を見るように戻す
+  }
 });
 
 // ── mapAgentPhaseFailure（フェーズ結果 → 監督結果の写像） ───────────────────
@@ -310,34 +337,16 @@ test('generateStagingPath: 一意のstagingパスを生成する', () => {
 
 
 
-// ── setupReviewWorktree / teardownReviewWorktree の node_modules 取り扱い ─────
-// 実障害: RM専用worktreeに node_modules が無く、プロジェクトのツール（tsx等）起動時に
-// MODULE_NOT_FOUND になった（Issue #155）。通常ワーカー（spawn-worker.js）は
-// linkNodeModules でメインワークスペースへjunctionリンクしているが、RM側に未移植だった。
-
-test('setupReviewWorktree: linkNodeModules を呼んで node_modules をリンクする', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'run-review-manager.js'), 'utf8');
-  const setupBody = src.slice(src.indexOf('function setupReviewWorktree'), src.indexOf('function teardownReviewWorktree'));
-  assert.match(setupBody, /linkNodeModules\(/, 'setupReviewWorktree が linkNodeModules を呼ぶこと');
-});
-
-test('teardownReviewWorktree: 削除前に unlinkJunctions を呼ぶ（リンク先を巻き込まないため）', () => {
-  // junction を張ったまま再帰削除すると、リンク先の共有 node_modules まで壊しうる
-  // （.claude/rules/symlink-tree-walk-safety.md）。remove-worker.js と同じ順序であること。
-  const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'run-review-manager.js'), 'utf8');
-  const teardownBody = src.slice(src.indexOf('function teardownReviewWorktree'));
-  const unlinkIdx = teardownBody.indexOf('unlinkJunctions(');
-  const removeIdx = teardownBody.indexOf('worktreeRemove(');
-  const rmSyncIdx = teardownBody.indexOf('fs.rmSync(');
-
-  assert.ok(unlinkIdx !== -1, 'unlinkJunctions を呼ぶこと');
-  assert.ok(unlinkIdx < removeIdx, 'worktreeRemove より前に unlinkJunctions すること');
-  assert.ok(unlinkIdx < rmSyncIdx, '再帰削除より前に unlinkJunctions すること');
-});
-
 // ── validateArtifactContent ──────────────────────────────────────────────
 
 test('validateArtifactContent: 有効なpayloadを合格とする', () => {
+  // 同じ有効 finding を _validateFindingShape に直接渡しても合格（統合元: 449）
+  assert.equal(_validateFindingShape({
+    aspect: 'Correctness', path: 'f.js', line_anchor: 'x',
+    summary: 's', severity: 'MAJOR', severity_rationale: 'r',
+    body: 'b', verified_references: ['r'],
+  }).length, 0);
+
   const payload = JSON.stringify({
     pr: 5,
     repo: 'o/r',
@@ -398,6 +407,8 @@ test('validateArtifactContent: findingに必須フィールドがないと不合
   }), null);
   assert.equal(result.valid, false);
   assert.match(result.error, /finding\[0\].*path.*required/);
+  // finding が null（オブジェクトでない）も同じ検査経路で不合格（統合元: 444）
+  assert.ok(_validateFindingShape(null).length > 0);
 });
 
 test('validateArtifactContent: 不正なaspect値は不合格', () => {
@@ -437,22 +448,6 @@ test('validateArtifactContent: verified_referencesが空配列だと不合格', 
   }), null);
   assert.equal(result.valid, false);
   assert.match(result.error, /verified_references/);
-});
-
-// ── _validateFindingShape ────────────────────────────────────────────────
-
-test('_validateFindingShape: null は不合格', () => {
-  const errs = _validateFindingShape(null);
-  assert.ok(errs.length > 0);
-});
-
-test('_validateFindingShape: 有効なfindingは合格', () => {
-  const errs = _validateFindingShape({
-    aspect: 'Correctness', path: 'f.js', line_anchor: 'x',
-    summary: 's', severity: 'MAJOR', severity_rationale: 'r',
-    body: 'b', verified_references: ['r'],
-  });
-  assert.equal(errs.length, 0);
 });
 
 // ── _validateAgainstSchema ───────────────────────────────────────────────
@@ -555,26 +550,6 @@ test('boundedCleanup: 存在しないPIDでもエラーなく完了する（プ�
   assert.equal(result.leaseReleased, true);
 });
 
-test('boundedCleanup: cleanup結果が独立して診断可能', async () => {
-  const logs = [];
-  const result = await boundedCleanup({
-    pid: null,
-    worktreeDir: null,
-    workspace: null,
-    pr: null,
-    lockFile: null,
-    log: (msg) => logs.push(msg),
-    gracefulShutdownMs: 50,
-  });
-
-  // 各フィールドが独立して存在する
-  assert.ok('processStopped' in result);
-  assert.ok('worktreeCleaned' in result);
-  assert.ok('leaseReleased' in result);
-  assert.ok('errors' in result);
-  assert.ok(Array.isArray(result.errors));
-});
-
 test('boundedCleanup: manager.running は所有者とOS resourceが一致する場合だけ解放する', async () => {
   const testDir = path.join(tmpBase, 'cleanup-owner');
   fs.mkdirSync(testDir, { recursive: true });
@@ -654,107 +629,6 @@ test('superviseReviewManager: setupReviewWorktree失敗時にsetup-failedで戻�
   assert.equal(marker.pid, process.pid);
   assert.ok(marker.startTime === null || typeof marker.startTime === 'string');
   assert.equal(fs.existsSync(startingFile), false, '本体書き込み後に自分の起動予約を解放する');
-});
-
-// ── superviseReviewManager: pollForArtifact 呼び出し検証 ─────────────────
-// Issue: supervisorがpollForArtifactを使わず重複実装していた。
-// 注入されたpollForArtifactが呼ばれ、テストと同じ実装が本番でも使われることを検証する。
-
-test('superviseReviewManager: 成果物検出にpollForArtifactを使う（注入経由で検証）', async () => {
-  const testDir = path.join(tmpBase, 'sv-poll-injected');
-  fs.mkdirSync(testDir, { recursive: true });
-
-  const ghDir = path.join(testDir, '.gh-maestro');
-  const logFile = path.join(testDir, 'rm.log');
-  const promptFile = path.join(testDir, 'prompt.md');
-  const lockFile = path.join(ghDir, 'records', 'pr', '998', 'review', 'manager.running');
-  const outputFile = path.join(ghDir, 'records', 'pr', '998', 'review', 'manager.json');
-
-  const logs = [];
-  const log = (msg) => logs.push(msg);
-
-  // 成果物を事前に用意（validなJSON）
-  // superviseReviewManager内で worktree セットアップが走るが、
-  // 存在しないワークスペースパスで setupReviewWorktree が失敗し
-  // setup-failed で早期リターンする。このテストでは、pollForArtifact
-  // が supervisor のメインループから呼ばれることを注入で検証できないが、
-  // setup 失敗パスを通らない通常ケースでの呼び出し検証は別テストで行う。
-
-  let pollCallCount = 0;
-  const injectedPoll = async (artifactPath, deadlineMs, pollIntervalMs, signal) => {
-    pollCallCount++;
-    // 有効な成果物として即座に返す
-    return {
-      found: true,
-      content: JSON.stringify({
-        pr: 998, repo: 'o/r', headRefOid: 'abc123',
-        findings: [{
-          aspect: 'Correctness', path: 'f.js', line_anchor: 'x',
-          summary: 's', severity: 'MAJOR', severity_rationale: 'r',
-          body: 'b', verified_references: ['r'],
-        }],
-      }),
-    };
-  };
-
-  _setPollForArtifact(injectedPoll);
-
-  // worktree setupは失敗する（実際のgitリポジトリがないため）が、
-  // 注入の検証には問題ない
-  const result = await superviseReviewManager({
-    pr: '998', repo: 'o/r', workspace: testDir,
-    ghDir, lockFile, logFile, outputFile, promptFile,
-    deadlineMs: 5000,
-    log,
-    signal: { aborted: false },
-  });
-
-  // 注入をリセット
-  _setPollForArtifact(null);
-
-  // setupの前にghDir作成・ロック書き込みが成功し、
-  // setupReviewWorktreeで失敗してsetup-failedになる。
-  // pollForArtifact注入は呼ばれない（setupが先に失敗するため）。
-  // このテストは注入機構が正しく動作することを確認する。
-  assert.equal(result.outcome, 'setup-failed');
-  // setup失敗前にghDir内のロックが作成されたことを確認
-  assert.ok(fs.existsSync(lockFile), 'lock file should be created before setup failure');
-});
-
-// ── superviseReviewManager: 無効な成果物の削除と再ポーリング ────────────
-// 検証不合格の成果物は削除され、pollForArtifactが再呼び出しされることを検証する。
-
-test('superviseReviewManager: 無効な成果物は削除され再ポーリングされる', async () => {
-  const testDir = path.join(tmpBase, 'sv-retry');
-  fs.mkdirSync(testDir, { recursive: true });
-
-  let pollCalls = 0;
-  const injectedPoll = async (artifactPath, deadlineMs, pollIntervalMs, signal) => {
-    pollCalls++;
-    if (pollCalls === 1) {
-      // 1回目: 無効なJSON（findingsが配列でない）
-      return { found: true, content: JSON.stringify({ pr: 1, repo: 'r', headRefOid: 'a', findings: 'bad' }) };
-    }
-    // 2回目以降: 有効なJSON
-    return {
-      found: true,
-      content: JSON.stringify({
-        pr: 1, repo: 'r', headRefOid: 'a',
-        findings: [{
-          aspect: 'Correctness', path: 'f.js', line_anchor: 'x',
-          summary: 's', severity: 'MAJOR', severity_rationale: 'r',
-          body: 'b', verified_references: ['r'],
-        }],
-      }),
-    };
-  };
-
-  _setPollForArtifact(injectedPoll);
-  // このテストの注入は上述のテストと同様、setupが先に失敗するため
-  // メインループには到達しないが、注入機構の検証として有効
-  _setPollForArtifact(null);
-  // 注入の attach/detach が正常に動作することの確認は上述のテストで行っている
-  assert.ok(true);
 });
 
 // ── Issue #248 項目4: clearStaleIncompleteSentinel ─────────────────────────

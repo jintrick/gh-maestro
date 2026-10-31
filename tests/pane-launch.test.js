@@ -46,32 +46,24 @@ function connectionOptions(connection) {
   };
 }
 
-test('launchAgentInWindow: spawn成功でpaneIdを返す', () => {
+test('launchAgentInWindow: --new-window --cwd を伴う spawn 引数を組み立て、spawn成功でpaneIdを返す（別の cwd と argv を含む、統合元: 63）', () => {
   installWeztermCommandPorts({
-    spawnWindow: [weztermCall(
-      spawnArgs(['agy', '--prompt-interactive', 'hello'], '/tmp/ws'),
-      { status: 0, stdout: '42', stderr: '' },
-    )],
-  });
-  const result = launchAgentInWindow({
-    argv: ['agy', '--prompt-interactive', 'hello'],
-    cwd: '/tmp/ws',
-  });
-  assert.equal(result.paneId, '42');
-});
-
-test('launchAgentInWindow: --new-window --cwd を伴う spawn 引数を組み立てる（splitFromPaneId等は不要）', () => {
-  installWeztermCommandPorts({
-    spawnWindow: [weztermCall(
-      spawnArgs(['agy', '--prompt-interactive', 'hi'], '/tmp/ws-2'),
-      { status: 0, stdout: '99', stderr: '' },
-    )],
+    spawnWindow: [
+      weztermCall(
+        spawnArgs(['agy', '--prompt-interactive', 'hello'], '/tmp/ws'),
+        { status: 0, stdout: '42', stderr: '' },
+      ),
+      weztermCall(
+        spawnArgs(['agy', '--prompt-interactive', 'hi'], '/tmp/ws-2'),
+        { status: 0, stdout: '99', stderr: '' },
+      ),
+    ],
   });
 
-  assert.equal(
-    launchAgentInWindow({ argv: ['agy', '--prompt-interactive', 'hi'], cwd: '/tmp/ws-2' }).paneId,
-    '99',
-  );
+  const first = launchAgentInWindow({ argv: ['agy', '--prompt-interactive', 'hello'], cwd: '/tmp/ws' });
+  assert.equal(first.paneId, '42');
+  const second = launchAgentInWindow({ argv: ['agy', '--prompt-interactive', 'hi'], cwd: '/tmp/ws-2' });
+  assert.equal(second.paneId, '99');
 });
 
 test('launchAgentInWindow: spawn失敗でthrow', () => {

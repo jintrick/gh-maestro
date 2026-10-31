@@ -115,12 +115,6 @@ function aggregateDeclarationBody(commit = 'a1b2c3d4e5f6') {
   - **slow**: pass (fail: 0, pass: 10), tests: 10, executor: \`poll-pr\`, scope: \`partial\`, 実行記録: \`C:/runtime/slow.log\``;
 }
 
-test('extractTestDeclaration: 申告マーカーがないコメントは null', () => {
-  assert.equal(extractTestDeclaration('普通のコメント'), null);
-  assert.equal(extractTestDeclaration(''), null);
-  assert.equal(extractTestDeclaration(null), null);
-});
-
 test('formatTestStatusEvent: provenance/scope をTEST_STATUS通知へ含める', () => {
   assert.equal(
     formatTestStatusEvent({
@@ -346,6 +340,10 @@ test('evaluateTestDeclaration: コミット一致かつ fail > 0 → RED', () =>
 });
 
 test('extractTestDeclaration: 形式不正や欠落のあるコメントを安全に弾く', () => {
+  // 申告マーカーが無いコメント（統合元: 118）も null
+  assert.equal(extractTestDeclaration('普通のコメント'), null);
+  assert.equal(extractTestDeclaration(''), null);
+  assert.equal(extractTestDeclaration(null), null);
   assert.equal(extractTestDeclaration(`${LEGACY_TEST_RESULT_MARKER}\n対象コミットなし`), null);
   assert.equal(extractTestDeclaration(`${LEGACY_TEST_RESULT_MARKER}\n- **対象コミット**: \`1234567\`\n- 結果: 不明`), null);
   assert.equal(extractTestDeclaration({}), null);
@@ -411,22 +409,32 @@ test('CLI: --no-review-events フラグを省略すると runPollReviews に noR
   assert.equal(capturedParams.noReviewEvents, false);
 });
 
-test('CLI: --no-review-events フラグを指定すると runPollReviews に noReviewEvents=true が渡る', async () => {
-  let capturedParams = null;
-  const res = await main(['100', '/test/workspace', '--no-review-events'], {
-    resolveWorkspaceFn: (ws) => ws,
-    liveness: { watchParent: () => () => true },
-    registerProcessFn: () => {},
-    registerSignalHandlers: false,
-    pollReviewsStateFilesFn: () => ({ files: [] }),
-    runPollReviewsFn: async (params) => {
-      capturedParams = params;
-      return { exitCode: 0 };
-    },
-  });
+test('CLI: --no-review-events の有無で runPollReviews の noReviewEvents が true/false になる（省略時の既定 false を含む）', async () => {
+  const runWith = async (argv) => {
+    let capturedParams = null;
+    const res = await main(argv, {
+      resolveWorkspaceFn: (ws) => ws,
+      liveness: { watchParent: () => () => true },
+      registerProcessFn: () => {},
+      registerSignalHandlers: false,
+      pollReviewsStateFilesFn: () => ({ files: [] }),
+      runPollReviewsFn: async (params) => {
+        capturedParams = params;
+        return { exitCode: 0 };
+      },
+    });
+    assert.equal(res.exitCode, 0);
+    return capturedParams;
+  };
 
-  assert.equal(res.exitCode, 0);
-  assert.equal(capturedParams.noReviewEvents, true);
+  // 省略時は既定の false（統合元: 393）
+  const defaulted = await runWith(['100', '/test/workspace']);
+  assert.ok(defaulted, 'runPollReviews must be called');
+  assert.equal(defaulted.noReviewEvents, false);
+
+  // 指定時は true
+  const specified = await runWith(['100', '/test/workspace', '--no-review-events']);
+  assert.equal(specified.noReviewEvents, true);
 });
 
 test('CLI: 子プロセス起動で --no-review-events 引数が runPollReviews まで渡る', () => {
@@ -519,41 +527,6 @@ test('runPollReviews: noReviewEvents=true のとき inline comments と formal r
   assert.ok(!stdoutLines.some(line => line.includes('PR_REVIEW')));
 });
 
-test('runPollReviews: noReviewEvents=false のとき inline comments と formal reviews API を継続する', async () => {
-  const tmpDir = tempDirScope.mkdtemp('poll-reviews-manager-only-');
-  const calledGhArgs = [];
-  const stdoutLines = [];
-  const mockGhCapture = (args) => {
-    calledGhArgs.push(args);
-    const cmd = args.join(' ');
-    if (cmd.includes('pr view 100 --repo owner/repo --json state,headRefOid,author')) return 'OPEN|sha123|alice\n';
-    if (cmd.includes('pr view 100 --repo owner/repo --json comments')) return JSON.stringify({ comments: [] });
-    if (cmd.includes('pulls/100/comments')) return '1|file.js|10|bob|inline comment\n';
-    if (cmd.includes('pulls/100/reviews')) return '2|charlie|APPROVED|looks good\n';
-    return '';
-  };
-
-  await runPollReviews({
-    pr: 100,
-    workspace: tmpDir,
-    sessionPid: process.pid,
-    intervalSec: 1,
-    maxCycles: 1,
-  }, {
-    ghCaptureFn: mockGhCapture,
-    repo: 'owner/repo',
-    checkParentFn: () => true,
-    writeStdoutFn: (text) => stdoutLines.push(text),
-    sleepFn: () => Promise.resolve(),
-  });
-
-  const calledApis = calledGhArgs.map(a => a.join(' '));
-  assert.ok(calledApis.some(cmd => cmd.includes('pulls/100/comments')));
-  assert.ok(calledApis.some(cmd => cmd.includes('pulls/100/reviews')));
-  assert.ok(stdoutLines.some(line => line.includes('REVIEW_COMMENT')));
-  assert.ok(stdoutLines.some(line => line.includes('PR_REVIEW')));
-});
-
 test('runPollReviews: noReviewEvents=false のとき inline comments と formal reviews API を呼び出す', async () => {
   const tmpDir = tempDirScope.mkdtemp('poll-reviews-full-');
   const calledGhArgs = [];
@@ -643,5 +616,35 @@ test('pollReviewsStateFiles: 状態ファイルのパス定義を一元的に払
   assert.equal(paths.shaFile, path.join(ws, '.gh-maestro', 'poll-sha-42'));
   assert.equal(paths.testStatusFile, path.join(ws, '.gh-maestro', 'poll-test-status-42'));
   assert.deepEqual(paths.files, [paths.stateFile, paths.shaFile, paths.testStatusFile]);
+});
+
+// 退行経路6（PR #655〜）: 親の監視は PID 監視から stdin EOF 監視へ変わった。
+// 親が居ない（checkParentFn が false）と、GitHub を1回も照会せず parent_dead で終了すること。
+// 親の生存確認を loop の後ろへ移す、または無視すると、この検査が落ちる。
+test('runPollReviews: 親の stdin が EOF（親が居ない）なら GitHub を照会せず parent_dead で終了する', async () => {
+  const tmpDir = tempDirScope.mkdtemp('poll-reviews-parent-eof-');
+  const ghCalls = [];
+  const stderrLines = [];
+  const stdoutLines = [];
+  const res = await runPollReviews({
+    pr: 100,
+    workspace: tmpDir,
+    sessionPid: process.pid,
+    intervalSec: 1,
+    maxCycles: 5,
+  }, {
+    ghCaptureFn: (args) => { ghCalls.push(args); return ''; },
+    repo: 'owner/repo',
+    checkParentFn: () => false,
+    writeStdoutFn: (text) => stdoutLines.push(text),
+    writeStderrFn: (text) => stderrLines.push(text),
+    sleepFn: () => Promise.resolve(),
+  });
+
+  assert.equal(res.exitCode, 0);
+  assert.equal(res.reason, 'parent_dead');
+  assert.equal(ghCalls.length, 0, '親が居ない間は GitHub を照会しない');
+  assert.equal(stdoutLines.length, 0, '親が居ない間は中継イベントを出さない');
+  assert.ok(stderrLines.join('').includes('parent stdin reached EOF'), '終了理由を標準エラーへ出す');
 });
 

@@ -7,20 +7,36 @@ const os = require('os');
 const path = require('path');
 
 const {
-  ALL_LEAF_IDS,
-  reviewFilesForLeaves,
-} = require('../scripts/shared/review-aspects');
-const {
   USAGE,
   main,
   readReviewDefinitions,
   resolveReviewSkillsDir,
 } = require('../scripts/print-review-leaves');
 
+// 読み込み対象の定義ファイル（共通1件＋7葉の pre/post）を、正本の配置規約どおりリテラルで列挙する。
+// 本番の導出関数から作ると、本番が1件落としても fixture も同じく落として検出できないため、導出しない。
+const REVIEW_DEFINITION_FILES = Object.freeze([
+  'common.md',
+  'correctness/logic-invariants/pre-review.md',
+  'correctness/logic-invariants/post-review.md',
+  'correctness/api-contract/pre-review.md',
+  'correctness/api-contract/post-review.md',
+  'correctness/concurrency/pre-review.md',
+  'correctness/concurrency/post-review.md',
+  'resilience-security/failure-recovery/pre-review.md',
+  'resilience-security/failure-recovery/post-review.md',
+  'resilience-security/hostile-input/pre-review.md',
+  'resilience-security/hostile-input/post-review.md',
+  'maintainability/structure-naming/pre-review.md',
+  'maintainability/structure-naming/post-review.md',
+  'test-quality/test-quality/pre-review.md',
+  'test-quality/test-quality/post-review.md',
+]);
+
 function withReviewFixture(callback) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-review-leaves-'));
   try {
-    const files = reviewFilesForLeaves(ALL_LEAF_IDS);
+    const files = REVIEW_DEFINITION_FILES;
     const expected = files.map((relativePath) => {
       const content = `definition:${relativePath}\n`;
       const filePath = path.join(root, relativePath);
@@ -41,7 +57,7 @@ test('resolveReviewSkillsDir: managed root配下の共有レビュー正本を�
   );
 });
 
-test('readReviewDefinitions: 既存の導出順で全定義内容をそのまま連結する', () => {
+test('readReviewDefinitions: 正本の15ファイルをこの順序で連結して返す', () => {
   withReviewFixture((root, files, expected) => {
     assert.equal(readReviewDefinitions(root), expected);
     assert.equal(files.length, 15, '共通定義と7葉のpre/post定義をすべて読む');

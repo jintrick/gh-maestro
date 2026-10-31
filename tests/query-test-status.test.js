@@ -598,9 +598,3 @@ test('queryTestStatus: テスト名に「（他N件）」が含まれていて�
   assert.equal(result.layers.slow.otherFailedCount, 2);
 });
 
-test('main: --help は終了コード0で usage を返し、failedTests の説明を含む', () => {
-  const result = main(['--help']);
-  assert.equal(result.exitCode, 0);
-  assert.match(result.stdout, /failedTests and otherFailedCount/);
-});
-

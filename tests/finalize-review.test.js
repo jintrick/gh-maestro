@@ -104,19 +104,40 @@ test('checkCompleteness: excluded leaf without rationale fails', () => {
   assert.equal(result.passed, false);
 });
 
-test('checkCompleteness: trunk with unaccounted leaf fails', () => {
+test('checkCompleteness: trunk に未追跡の葉があれば不合格（幹ごとの検査、ledger 全体は通す）', () => {
+  // 全葉を ledger に入れ、Correctness 幹の葉のうち1つだけを採用して job に割り当てる。
+  // 残りの Correctness の葉は採用でも除外でもなく（decision: undecided）、どの job にも無い。
+  // 採用葉の割り当て検査（step 3）は対象外なので、幹ごとの検査（step 4）だけが落とす。
+  const correctnessLeaves = TRUNK_TO_LEAVES.Correctness;
+  assert.ok(correctnessLeaves.length >= 2, 'precondition: Correctness 幹は複数の葉を持つ');
+  const assigned = correctnessLeaves[0];
+  const unaccounted = correctnessLeaves.filter(id => id !== assigned);
   const coverageLedger = {
-    leaves: [
-      { id: 'correctness/logic-invariants', trunk: 'Correctness', decision: 'adopted', rationale: null },
-      { id: 'correctness/api-contract', trunk: 'Correctness', decision: 'adopted', rationale: null },
-      { id: 'correctness/concurrency', trunk: 'Correctness', decision: 'adopted', rationale: null },
-    ],
+    leaves: ALL_LEAF_IDS.map(id => ({
+      id,
+      trunk: Object.entries(TRUNK_TO_LEAVES).find(([, lvs]) => lvs.includes(id))[0],
+      decision: unaccounted.includes(id) ? 'undecided' : 'adopted',
+      rationale: null,
+    })),
   };
-  const jobResults = [
-    { id: 'job-1', status: 'success', leaf_ids: ['correctness/logic-invariants'], findings: [] },
-  ];
+  const jobLeaves = ALL_LEAF_IDS.filter(id => !unaccounted.includes(id));
+  const jobResults = jobLeaves.map((id, i) => ({
+    id: 'job-' + i,
+    status: 'success',
+    leaf_ids: [id],
+    findings: [],
+  }));
   const result = checkCompleteness(coverageLedger, jobResults);
   assert.equal(result.passed, false);
+  for (const id of unaccounted) {
+    assert.ok(
+      result.failures.some(f => f.includes(`trunk "Correctness" leaf ${id} is neither excluded nor successfully reviewed`)),
+      `幹の未追跡の葉 ${id} が失敗として報告される`,
+    );
+  }
+  // 幹以外の失敗（ledger 欠落・job 未割当）は出ない＝幹の検査が単独で落としている
+  assert.equal(result.failures.some(f => f.includes('missing from coverage ledger')), false);
+  assert.equal(result.failures.some(f => f.includes('not assigned to any job result')), false);
 });
 
 test('aggregateFindings merges findings from all success jobs', () => {

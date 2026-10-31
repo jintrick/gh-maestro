@@ -328,12 +328,6 @@ test('stripWorkerNamePrefix: 先頭の issue-<N>- を除去し、パターン外
   assert.equal(workerStatus.stripWorkerNamePrefix(null), '');
 });
 
-test('formatDuration: 秒数を文字列へ変換する', () => {
-  const values = [0, 45, 60, 125, 3599, 3600, 3665].map(workerStatus.formatDuration);
-  assert.equal(values.length, 7);
-  assert.ok(values.every(value => typeof value === 'string' && value.length > 0));
-});
-
 test('renderUptimeBars: 空ワーカー・単一ワーカー・複数ワーカーの横棒グラフを生成する（Issue番号・短縮名・agentId含む）', () => {
   // 0件
   assert.deepEqual(workerStatus.renderUptimeBars([]), ['No workers registered.']);
@@ -569,19 +563,19 @@ test('renderWorkerRows: 子行があっても最後の表示ワーカーに非�
   assert.match(lines[1], /^  └─ job-1 \(Correctness\)/);
 });
 
-test('renderWorkerRows: role/suffix列とagent列を既存の桁揃え経路でそろえ、suffixはASCII xNにする', () => {
+test('renderWorkerRows: role と agent を含む行を出し、suffixはASCII xNにする', () => {
+  // 列の桁位置は見た目であり検査しない（ADR-0033）。検査するのは内容（役割・suffix の表記）。
   const lines = workerStatus.renderWorkerRows([
     { role: 'coder', agentId: 'a', running: true, durationKnown: true, elapsedSeconds: 60, pid: 1 },
     { role: 'senior-coder', runNumber: 2, agentId: 'long-agent', running: true, durationKnown: true, elapsedSeconds: 120, pid: 2 },
   ]);
   const plain = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ''));
-  assert.equal(plain[0].indexOf('['), plain[1].indexOf('['));
   assert.ok(plain[0].includes('coder') && plain[1].includes('senior-coder'));
   assert.match(plain[1], /senior-coder x2/);
   assert.ok(!plain.join('\n').includes('×'));
 });
 
-test('renderSnapshotLines: 同一ワーカーのrunを1行へ畳み、最新PID・実状態・合計時間を表示する', () => {
+test('renderSnapshotLines: 同一ワーカーのrunを1行へ畳み、最新PIDを表示する', () => {
   const base = Date.parse('2026-08-26T00:00:00.000Z');
   const events = [
     { schemaVersion: 1, issue: 467, event: 'worker-started', at: new Date(base).toISOString(), workerName: 'issue-467-senior-coder-status-rows', role: 'senior-coder', agentId: 'codex', pid: 101, startTime: new Date(base).toISOString() },
@@ -770,7 +764,8 @@ test('main: list は見出しと最大4件のワーカー行を出力する', ()
     assert.ok(result.lines[0].includes('#100'));
     assert.ok(result.lines[1].includes('worker-a') && result.lines[1].includes('(pid: 111)'));
     assert.ok(result.lines[2].includes('worker-b') && result.lines[2].includes('(pid: 222)'));
-    assert.match(result.lines[3], /worker-c\s+\[-\s*\]\s+- \(pid: 999999999\)$/);
+    // 停止ワーカーの行が消えないこと。桁や空白の並びは見た目なので検査しない（ADR-0033）。
+    assert.ok(result.lines[3].includes('worker-c') && result.lines[3].includes('(pid: 999999999)'));
   } finally {
     workerStatus._setNow(null);
     setTestWorkerPredicate(null);
@@ -818,9 +813,10 @@ test('main: list --json は機械可読な JSON 配列を出力する', () => {
 test('collectWorkersStatus: PID-only worker record is unknown and does not capture a replacement identity', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-pid-only-');
   let probeCalls = 0;
-  let startTimeCalls = 0;
+  let pidProbeCalls = 0;
+  // PID の照会と endpoint の照会の回数を数える（どちらも呼ばれないことを検査する）
   workerStatus._setLiveness(createResourceLiveness({
-    useRealResources: false,
+    probePid: () => { pidProbeCalls++; return 'alive'; },
     probeEndpoint: () => { probeCalls++; return 'alive'; },
   }));
 
@@ -830,7 +826,7 @@ test('collectWorkersStatus: PID-only worker record is unknown and does not captu
     assert.equal(workers[0].running, false);
     assert.equal(workers[0].startTime, null);
     assert.equal(probeCalls, 0, 'a PID-only record has no resource endpoint to probe');
-    assert.equal(startTimeCalls, 0, 'PID-only records do not capture a replacement identity');
+    assert.equal(pidProbeCalls, 0, 'a PID-only record is not checked by PID (PID reuse), so no replacement identity is captured');
   } finally {
     workerStatus._setLiveness(null);
     removeWorkspace(workspace);
@@ -1677,8 +1673,10 @@ test('renderUptimeBars: skill(役割)が独立列として出力されないこ�
   assert.ok(!lines[0].includes('gh-maestro-coder'));
   assert.ok(lines[0].includes('#403') && lines[0].includes('coder-pane-display') && lines[0].includes('claude-code') && lines[0].includes('[running]'));
 
-  // 2行目: - unknown-prefix-worker - [stopped] -
-  assert.match(lines[1], /^-\s+unknown-prefix-worker\s+-\s+\[stopped\]\s+-$/);
+  // 2行目: 欠損値は「-」「[stopped]」に縮退する（空白の並びは見た目なので検査しない、ADR-0033）
+  assert.ok(lines[1].includes('unknown-prefix-worker'));
+  assert.ok(lines[1].includes('[stopped]'));
+  assert.ok(lines[1].includes('-'));
 });
 
 
@@ -2068,6 +2066,43 @@ test('collectWorkersStatus & main: list / --json でレビュージョブを収�
       elapsedSeconds: 180,
       agentId: 'codex',
     });
+  } finally {
+    workerStatus._setNow(null);
+    setTestProbePid(null);
+    setTestReadStartTime(null);
+    workerStatus._setFindRunningInstances(null);
+    removeWorkspace(workspace);
+  }
+});
+
+// 退行C（監視ペイン）: 終わったレビュージョブ行が残る。ジョブは「その観測で見えたもの」だけから作られるべきで、
+// 前の観測で見えたジョブが次の観測に残ってはならない。1回目の観測で出ることも確かめ、空振りを防ぐ。
+test('collectWorkersStatus: 観測の間に終了したレビュージョブは次の観測に含めない', () => {
+  const workspace = createWorkspace('gh-maestro-ws-rm-job-gone-');
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  setTestProbePid((pid) => pid === 222);
+  setTestReadStartTime(() => '2026-08-26T11:55:00.000Z');
+  let observation = 0;
+  workerStatus._setFindRunningInstances(() => {
+    observation++;
+    // 1回目の観測では job-1 が実行中、2回目の観測では終了している
+    return observation === 1
+      ? [{ pid: 333, script: 'review-job', pr: 417, jobId: 'job-1', aspect: 'Design', leafIds: ['leaf-1'], agentId: 'codex', startTime: '2026-08-26T11:57:00.000Z' }]
+      : [];
+  });
+
+  try {
+    writeReviewManager(workspace, 417, 222, '2026-08-26T11:55:00.000Z');
+
+    const first = workerStatus.collectWorkersStatus(workspace);
+    assert.equal(first[0].jobs.length, 1, '1回目の観測では実行中のジョブが見える');
+    assert.equal(first[0].jobs[0].jobId, 'job-1');
+
+    const second = workerStatus.collectWorkersStatus(workspace);
+    assert.equal(second[0].running, true, 'Review Manager 自体は生存している');
+    assert.equal((second[0].jobs || []).length, 0, '終了したジョブは次の観測に含めない');
+    assert.equal(JSON.stringify(second).includes('job-1'), false);
   } finally {
     workerStatus._setNow(null);
     setTestProbePid(null);

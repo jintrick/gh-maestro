@@ -39,20 +39,12 @@ function writeRecord(ws, pr, pid, startTime = '2026-08-28T00:00:00.000Z') {
   return file;
 }
 
-test('listRunningReviewManagers: records/pr が存在しない場合は空配列を返す', () => {
+test('listRunningReviewManagers: records/pr が存在しない・空の場合は空配列を返す', () => {
   const rrm = fresh();
   const ws = tmpWorkspace();
   try {
     assert.deepEqual(rrm.listRunningReviewManagers(ws), []);
-  } finally {
-    fs.rmSync(ws, { recursive: true, force: true });
-  }
-});
-
-test('listRunningReviewManagers: records/pr が空の場合は空配列を返す', () => {
-  const rrm = fresh();
-  const ws = tmpWorkspace();
-  try {
+    // records/pr が存在するが空のディレクトリの場合も空配列（統合元の検査）
     fs.mkdirSync(path.join(ws, '.gh-maestro', 'records', 'pr'), { recursive: true });
     assert.deepEqual(rrm.listRunningReviewManagers(ws), []);
   } finally {
@@ -60,7 +52,7 @@ test('listRunningReviewManagers: records/pr が空の場合は空配列を返す
   }
 });
 
-test('listRunningReviewManagers: PID＋起動時刻が一致する Review Manager だけを列挙する', () => {
+test('listRunningReviewManagers: 生存する Review Manager の pr・pid・startTime を返す', () => {
   const rrm = fresh();
   const ws = tmpWorkspace();
   try {
@@ -185,7 +177,14 @@ test('writeRunningReviewManager: PID＋起動時刻JSONを原子的に書く', (
     rrm._setLiveness(checker);
     const ref = checker.captureProcess(12345, 'review-manager-write-owner');
     rrm.writeRunningReviewManager(file, ref);
-    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), checker.writeRef({}, ref));
+    // 期待値は writeRef の出力ではなく、書かれるべき値をリテラルで検証する。
+    // resourceKey はテスト用アダプタが導出する64桁の16進数で、その形式だけを見る。
+    // instanceId は実行ごとに生成されるため、存在と型だけを見る。
+    const written = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.equal(written.pid, 12345);
+    assert.match(written.resourceKey, /^[a-f0-9]{64}$/);
+    assert.equal(typeof written.instanceId, 'string');
+    assert.ok(written.instanceId.length > 0);
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }

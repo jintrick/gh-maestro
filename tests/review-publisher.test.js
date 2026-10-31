@@ -30,6 +30,9 @@ test('validateFinding rejects blank required fields and empty references', () =>
   const errors = validateFinding(finding({ summary: '...', verified_references: [] }));
   assert.ok(errors.includes('summary is blank'));
   assert.ok(errors.includes('verified_references must be a non-empty array'));
+  // プレースホルダの body・severity_rationale も同じ検査（統合元: 47, 52）
+  assert.ok(validateFinding(finding({ body: '<placeholder>' })).includes('body is blank'));
+  assert.ok(validateFinding(finding({ severity_rationale: '...' })).includes('severity_rationale is blank'));
 });
 
 test('validateFinding rejects invalid severity', () => {
@@ -42,16 +45,6 @@ test('validateFinding rejects missing severity', () => {
   delete f.severity;
   const errors = validateFinding(f);
   assert.ok(errors.includes('severity is required'));
-});
-
-test('validateFinding rejects blank body', () => {
-  const errors = validateFinding(finding({ body: '<placeholder>' }));
-  assert.ok(errors.includes('body is blank'));
-});
-
-test('validateFinding rejects blank severity_rationale', () => {
-  const errors = validateFinding(finding({ severity_rationale: '...' }));
-  assert.ok(errors.includes('severity_rationale is blank'));
 });
 
 test('resolveLineAnchor resolves a unique anchor', () => {

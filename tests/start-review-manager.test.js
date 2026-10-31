@@ -147,17 +147,6 @@ test('isLockValid は旧PID-onlyを持ち主のいない stale として回収�
   assert.equal(fs.existsSync(lockFile), false);
 });
 
-test('入力照会の死亡と生存を区別する', () => {
-  const mod = loadModule();
-  const lockFile = path.join(freshWorkspace('lock-injected'), 'lock.running');
-  fs.writeFileSync(lockFile, JSON.stringify({ pid: 12345, resourceKey: 'injected-review-manager', instanceId: 'injected-review-manager-instance' }));
-  mod._setLiveness(makeLiveness(() => 'alive'));
-  assert.equal(mod.isLockValid(lockFile), true);
-  mod._setLiveness(makeLiveness(() => 'dead'));
-  assert.equal(mod.isLockValid(lockFile), false);
-  assert.equal(fs.existsSync(lockFile), false);
-});
-
 // ── startReviewManager ───────────────────────────────────────────────────
 
 test('startReviewManager returns ALREADY_RUNNING and does not launch when locked', () => {
@@ -180,23 +169,15 @@ test('startReviewManager returns ALREADY_RUNNING and does not launch when locked
   assert.equal(spawnCalls.length, 0);
 });
 
-test('startReviewManager rejects a non-numeric pr before touching the filesystem', () => {
+test('startReviewManager rejects a non-numeric or path-traversal pr before touching the filesystem', () => {
   const mod = loadModule();
-  const workspace = path.join(tmpBase, 'invalid-pr-unused');
-  assert.throws(() => mod.startReviewManager('abc', 'o/r', workspace, '5'), /invalid PR number/);
+  // 非数値（abc・空文字、統合元: 183）とパストラバーサル（統合元の検査）を同じ経路で拒否する
+  for (const pr of ['abc', '', '1/../../evil']) {
+    const workspace = path.join(tmpBase, `invalid-pr-unused-${pr.length}-${Math.random().toString(36).slice(2)}`);
+    assert.throws(() => mod.startReviewManager(pr, 'o/r', workspace, '5'), /invalid PR number/, `pr=${JSON.stringify(pr)}`);
+    assert.equal(fs.existsSync(workspace), false);
+  }
   assert.equal(spawnCalls.length, 0);
-  assert.equal(fs.existsSync(workspace), false);
-});
-
-test('startReviewManager rejects a path-traversal pr value before touching the filesystem', () => {
-  const mod = loadModule();
-  const workspace = path.join(tmpBase, 'traversal-pr-unused');
-  assert.throws(
-    () => mod.startReviewManager('1/../../evil', 'o/r', workspace, '5'),
-    /invalid PR number/
-  );
-  assert.equal(spawnCalls.length, 0);
-  assert.equal(fs.existsSync(workspace), false);
 });
 
 test('startReviewManager rejects a missing/invalid issue number before touching the filesystem', () => {
@@ -338,8 +319,8 @@ test('startReviewManager: ログパスはfactory仕様のlogPath（worker-logs�
 
   mod.startReviewManager('10', 'o/r', workspace, '55');
 
-  // Phase 5: ログパスは factory（buildReviewManagerLaunchSpec）で計算される。
-  // 正規workerName（issue-<issue>-review-manager-pr-<pr>）をログキーとして使う。
-  const spec = buildReviewManagerLaunchSpec({ issue: '55', pr: '10', repo: 'o/r', workspace });
-  assert.equal(spawnCalls[0].args[2], spec.logPath);
+  // 期待値は factory の出力ではなく、配置規約（records/pr/<PR>/workers/<正規 workerName>/worker.log）から
+  // リテラルで書く。正規 workerName は issue-<issue>-review-manager-pr-<pr>。
+  const expected = path.join(workspace, '.gh-maestro', 'records', 'pr', '10', 'workers', 'issue-55-review-manager-pr-10', 'worker.log');
+  assert.equal(spawnCalls[0].args[2], expected);
 });

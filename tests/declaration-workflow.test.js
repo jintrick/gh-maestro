@@ -75,8 +75,12 @@ test('coder-workflow.md: 計画ファイルの置き場所（worktree外 per-wor
 });
 
 test('coder-workflow.md: 素の git commit/push/gh pr create は push-and-declare 手順で禁止する', () => {
+  // 禁止文の一字一句には依存しない。「直接実行しない」と3つのコマンド名が同じ行にあることで判定する。
+  // 実行例に素のコマンドが現れないこと自体は、上の「フェンス内に素の …が無い」検査が見ている。
   const content = fs.readFileSync(CODER_WORKFLOW, 'utf8');
-  const constraintsSection = content.slice(content.indexOf('## 制約'));
-  assert.match(content, /素の `git commit` \/ `git push` \/ `gh pr create` を直接実行しない/);
-  assert.doesNotMatch(constraintsSection, /git commit.*git push.*gh pr create/);
+  const commands = ['git commit', 'git push', 'gh pr create'];
+  const prohibitionLine = content
+    .split('\n')
+    .find((line) => line.includes('直接実行しない') && commands.every((cmd) => line.includes(cmd)));
+  assert.ok(prohibitionLine, '素の git commit / git push / gh pr create の直接実行を禁止する文がある');
 });
