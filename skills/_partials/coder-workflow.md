@@ -65,11 +65,11 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
    - この一連の操作は「終状態への収束」として定義されており、同じコマンドの再実行だけで回復する（コミットすべき変更が無い場合は空コミットを作らず、その段をスキップする）
    - コミットメッセージは `impl(issue-<N>): <Issueタイトル>` に固定される（モデル推論を挟まない）
    - PRは get-or-create（既存PRがあれば使用、無ければ作成）。初回か修正かを自分で判定する必要はない
-   - PR 本文は `push-and-declare.js` が固定文（`関連Issue: #N`）で作るため、テストの申告表は実行後に `gh pr edit` で書き込む。本文には `関連Issue: #<N>` の行を残し、手順5で控えた次の表を載せる。表は新規・書き直したテスト1件につき1行で、列は「テスト（ファイル:行・名前）」「何が壊れたら失敗するか」「期待値の出所」「入れた欠陥と結果（または実施しない理由）」。その下に「削除・統合したテスト」の欄を置く。本文ファイルは `write-draft.js` で作る
+   - PR 本文は `push-and-declare.js` が固定文（`関連Issue: #N`）で作るため、テストの申告表は実行後に `gh pr edit` で書き込む。本文には `関連Issue: #<N>` の行を残し、手順5で控えた次の表を載せる。表は新規・書き直したテスト1件につき1行で、列は「テスト（ファイル:行・名前）」「何が壊れたら失敗するか」「期待値の出所」「入れた欠陥と結果（または実施しない理由）」。その下に「削除・統合したテスト」の欄を置く。本文ファイルは `$WORKSPACE` 配下に、heredoc（`cat >`）で直接作る（`write-draft.js` は `/tmp` 配下しか書けず、`gh` へ渡すパスに使えない）
      ```sh
      PR_NUMBER=$(gh pr view --json number -q .number)
      PR_BODY_FILE="$WORKSPACE/.gh-maestro/pr-body-$ISSUE.md"
-     node "{{SCRIPTS_PATH}}/write-draft.js" "$PR_BODY_FILE" --stdin <<'EOF'
+     cat > "$PR_BODY_FILE" <<'EOF'
      <関連Issue行と申告表>
      EOF
      gh pr edit "$PR_NUMBER" --body-file "$PR_BODY_FILE"
