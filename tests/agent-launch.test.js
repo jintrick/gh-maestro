@@ -137,6 +137,8 @@ test('runAgentWithPrompt: spawn失敗・observer例外・timeout相当の拒否�
   for (const scenario of [
     { spawnFn: () => { throw new Error('spawn failed'); }, observe: () => Promise.reject(new Error('unused')) },
     { spawnFn: () => fakeChild(), observe: () => Promise.reject(new Error('observer failed')) },
+    // timeout 相当の拒否（observe の reject）でも後始末されることを確かめる
+    { spawnFn: () => fakeChild(), observe: () => Promise.reject(new Error('timeout')) },
   ]) {
     await withTempDir('agent-launch-test-', async (root) => {
       await assert.rejects(runAgentWithPrompt({
@@ -147,24 +149,10 @@ test('runAgentWithPrompt: spawn失敗・observer例外・timeout相当の拒否�
         tempDirOptions: { tempRoot: root },
         spawnFn: scenario.spawnFn,
         observe: scenario.observe,
-      }), /failed|observer/);
+      }), /failed|observer|timeout/);
       assert.deepEqual(fs.readdirSync(root), []);
     });
   }
-
-  await withTempDir('agent-launch-test-', async (root) => {
-    const child = fakeChild();
-    await assert.rejects(runAgentWithPrompt({
-      agentConfig: fileDeliveryConfig('positional'),
-      promptText: '本文',
-      cwd: root,
-      tempPrefix: 'agent-launch-failure-',
-      tempDirOptions: { tempRoot: root },
-      spawnFn: () => child,
-      observe: () => Promise.reject(new Error('timeout')),
-    }), /timeout/);
-    assert.deepEqual(fs.readdirSync(root), []);
-  });
 });
 
 test('buildAgentCommandArgs: system-prompt-file delivery', () => {
@@ -296,7 +284,11 @@ test('inherited codex and agy extraArgs are shared by normal and Review Manager 
     const agyReview = buildAgentCommandArgs(normalizeAgentLaunchConfig(agy, cwd), { shortPrompt: 'prompt' });
     assert.deepEqual(agyNormal, ['agy', '--dangerously-skip-permissions', '--print-timeout', '30m0s', '--model', 'gemini-3.8-flash-medium', '--print', 'prompt']);
     assert.deepEqual(agyReview, ['agy', '--dangerously-skip-permissions', '--print-timeout', '30m0s', '--model', 'gemini-3.8-flash-medium', '--print', 'prompt']);
-    assert.deepEqual(buildAgentExecArgs(codex), [...codex.extraArgs, '--cd', '{workspace}']);
+    // 期待値はリテラル（codex.extraArgs という検証対象から導出しない）
+    assert.deepEqual(buildAgentExecArgs(codex), [
+      'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox',
+      '--config', 'model=gpt-6.1-sol', '--cd', '{workspace}',
+    ]);
   });
 });
 

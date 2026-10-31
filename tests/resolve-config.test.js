@@ -1,6 +1,6 @@
 'use strict';
 
-const { test, before, after } = require('node:test');
+const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -272,13 +272,15 @@ test('resolveAgentConfig: ~/.gh-maestro/config.json の override がデフォル
   withTempHome(home => {
     writeConfig(home, {
       agents: {
-        'claude-ds': { command: 'pwsh', extraArgs: ['-NoLogo', '-Command', 'claude-ds-wrapper'] },
+        'claude-ds': { command: 'pwsh', extraArgs: ['-NoLogo', '-Command', 'claude-ds-wrapper'], enterSequence: '\n' },
       },
     });
 
+    // workspace 未指定でも global が効く（旧 L961 の検査を統合）
     const agent = resolveAgentConfig('claude-ds', { homedir: home });
     assert.equal(agent.command, 'pwsh');
     assert.deepEqual(agent.extraArgs, ['-NoLogo', '-Command', 'claude-ds-wrapper']);
+    assert.equal(agent.enterSequence, '\n', 'global override should apply without a workspace');
     // 上書きされていないフィールドはデフォルトのまま
     assert.equal(agent.promptDelivery, 'system-prompt-file');
   });
@@ -508,10 +510,13 @@ test('resolveAgentConfig: workspace config の extends は無視される（EXEC
     const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-extends-sec-'));
     try {
       writeWorkspaceConfig(ws, {
-        agents: { 'workspace-only-agent': { extends: 'codex', command: 'workspace-only-agent' } },
+        agents: {
+          'workspace-only-agent': { extends: 'codex', command: 'workspace-only-agent', extraArgs: ['--evil'] },
+        },
       });
       // extendsが剥がされると command のみが残り、promptDelivery 等の必須フィールドが
       // 揃わないため isValidAgentConfig で弾かれ null になる（＝丸ごと継承の抜け道にならない）。
+      // extraArgs を併せて置くのは、追記経路（旧 L651）への到達も塞がれることを同じ assert で見るため。
       assert.equal(resolveAgentConfig('workspace-only-agent', { homedir: home, workspace: ws }), null);
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
@@ -542,15 +547,6 @@ test('resolveAgentConfig: extends + extraArgs は継承元配列の末尾に追�
   });
 });
 
-test('resolveExtends: 配列フィールドは継承元配列の末尾に追記される', () => {
-  const defaults = loadDefaults();
-  const entry = { id: 'derived', extends: 'claude', command: 'derived', extraArgs: ['--model', 'opus'] };
-  const resolved = resolveExtends(entry, defaults.agents);
-  const claude = defaults.agents.find(a => a.id === 'claude');
-  assert.deepEqual(resolved.extraArgs, [...claude.extraArgs, '--model', 'opus']);
-  assert.equal(resolved.command, 'derived');
-});
-
 test('resolveExtends: 追記対象（extraArgs/execArgs/nonInteractiveTokens）はそれぞれ追記され、resumeCommand は完全置換される', () => {
   const defaults = loadDefaults();
   const claude = { ...defaults.agents.find(a => a.id === 'claude'), execArgs: ['--base-route'] };
@@ -569,13 +565,6 @@ test('resolveExtends: 追記対象（extraArgs/execArgs/nonInteractiveTokens）�
   // resumeCommand は追記されず完全置換（末尾要素をセッション参照で置換する resume() の契約と整合）
   assert.deepEqual(resolved.resumeCommand, ['--custom-resume']);
   assert.deepEqual(resolved.nonInteractiveTokens, [...claude.nonInteractiveTokens, '--new-token']);
-});
-
-test('resolveExtends: resumeCommand は追記されず従来どおり完全置換される（createSessionResumeAdapter.resume() の末尾置換契約と整合）', () => {
-  const defaults = loadDefaults();
-  const entry = { id: 'derived', extends: 'claude', command: 'derived', resumeCommand: ['resume', '--custom'] };
-  const resolved = resolveExtends(entry, defaults.agents);
-  assert.deepEqual(resolved.resumeCommand, ['resume', '--custom']);
 });
 
 test('resolveAgentConfig + createSessionResumeAdapter.resume: extends で resumeCommand を継承しても sessionRef 置換が末尾の --last に対して行われる', () => {
@@ -645,45 +634,6 @@ test('resolveAgentConfig: extends なしの global override は従来どおり�
     // claude-ds は claude を extends するが、この override 自身は extends を持たないため置換経路
     assert.deepEqual(agent.extraArgs, ['-NoLogo', '-Command', 'my-wrapper'], 'non-extends override should fully replace extraArgs');
     assert.equal(agent.extraArgs.includes('--print'), false, 'inherited --print should be gone after full replace');
-  });
-});
-
-test('resolveAgentConfig: workspace config の extends + extraArgs は剥がれて null（EXEC_SENSITIVE_FIELDS、セキュリティ）', () => {
-  withTempHome(home => {
-    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-extends-arr-sec-'));
-    try {
-      writeWorkspaceConfig(ws, {
-        agents: {
-          'workspace-only-agent': { extends: 'codex', command: 'workspace-only-agent', extraArgs: ['--evil'] },
-        },
-      });
-      // extends と extraArgs が剥がされると command のみが残り、promptDelivery 等の必須フィールドが
-      // 揃わないため isValidAgentConfig で弾かれ null になる（追記経路への到達を塞ぐ）。
-      assert.equal(resolveAgentConfig('workspace-only-agent', { homedir: home, workspace: ws }), null);
-    } finally {
-      fs.rmSync(ws, { recursive: true, force: true });
-    }
-  });
-});
-
-test('validateNonInteractiveTokens: extends + extraArgs 追記ではトークン欠落せず valid（Issue #163 ガードとの整合）', () => {
-  const defaults = loadDefaults();
-  const entry = { id: 'derived', extends: 'claude', command: 'derived', extraArgs: ['--model', 'opus'] };
-  const resolved = resolveExtends(entry, defaults.agents);
-  // 追記なので --print が残り、検証は valid（完全置換なら欠落し得た）
-  assert.deepEqual(validateNonInteractiveTokens(resolved), { valid: true, missing: [] });
-});
-
-test('resolveAgentConfig: global config は command/extraArgs を上書きできる', () => {
-  withTempHome(home => {
-    writeConfig(home, {
-      agents: { 'claude-ds': { command: 'pwsh', extraArgs: ['-NoLogo', '-Command', 'my-wrapper'] } },
-    });
-
-    const agent = resolveAgentConfig('claude-ds', { homedir: home });
-    assert.ok(agent);
-    assert.equal(agent.command, 'pwsh', 'global config should override command');
-    assert.deepEqual(agent.extraArgs, ['-NoLogo', '-Command', 'my-wrapper'], 'global config should override extraArgs');
   });
 });
 
@@ -943,8 +893,6 @@ test('resolveAgentConfig: command 明示上書き時は dynamicCommand 解決を
       agent.extraArgs, ['--custom-flag'],
       'extraArgs should only contain user-specified values, no dynamic script path',
     );
-
-    // 他のフィールドは維持される
   });
 });
 
@@ -955,18 +903,6 @@ test('resolveAgentConfig: override が空オブジェクトの場合はデフォ
     writeConfig(home, { agents: { 'claude-ds': {} } });
     const agent = resolveAgentConfig('claude-ds', { homedir: home });
     assert.equal(agent.command, 'claude-ds', 'empty override should not change anything');
-  });
-});
-
-test('resolveAgentConfig: workspace 未指定時は global config のみ考慮', () => {
-  withTempHome(home => {
-    writeConfig(home, {
-      agents: { 'claude-ds': { enterSequence: '\n' } },
-    });
-
-    const agent = resolveAgentConfig('claude-ds', { homedir: home });
-    assert.equal(agent.enterSequence, '\n', 'global override should apply');
-    assert.equal(agent.command, 'claude-ds', 'default field unchanged');
   });
 });
 

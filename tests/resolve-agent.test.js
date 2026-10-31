@@ -52,15 +52,6 @@ test('resolveAgentConfig: agentIdがnullなら null を返す', () => {
   });
 });
 
-test('resolveAgentConfig: config.jsonが存在しなければデフォルトから解決する', () => {
-  withTempHome(home => {
-    const r = resolveAgentConfig('agy', home);
-    assert.ok(r, 'agy should be resolved from defaults');
-    assert.equal(r.command, 'agy');
-    assert.equal(r.promptDelivery, 'flag');
-  });
-});
-
 test('resolveAgentConfig: 該当エージェントが見つからなければ null を返す', () => {
   withTempHome(home => {
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
@@ -86,34 +77,27 @@ test('resolveAgentConfig: config.jsonのパース失敗時は例外を投げず 
   });
 });
 
-test('resolveAgentConfig: _homedir 省略時は環境変数 HOME を参照する', () => {
+test('resolveAgentConfig: _homedir 省略時は環境変数 HOME の config.json を読む', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-env-home-'));
+  const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
   try {
     fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
     fs.writeFileSync(
       path.join(dir, '.gh-maestro', 'config.json'),
-      JSON.stringify({
-        agents: { 'env-agent': { command: 'custom-cli', label: 'Env Agent', promptDelivery: 'flag', promptFlag: '-p' } },
-      }),
+      JSON.stringify({ agents: { agy: { label: 'Agy From HOME' } } }),
       'utf8',
     );
-    // 注: env-agent は defaults にないため、resolveAgentConfig は null を返す
-    // （merge のベースとなる defaultAgent が存在しないため）
-
-    const prevHome = process.env.HOME;
-    const prevUserProfile = process.env.USERPROFILE;
     process.env.HOME = dir;
     delete process.env.USERPROFILE;
-    try {
-      // agy は defaults にあるため、HOME から config.json override を適用できる
-      const r = resolveAgentConfig('agy');
-      assert.ok(r, 'agy should be resolved using HOME');
-      assert.equal(r.command, 'agy');
-    } finally {
-      process.env.HOME = prevHome;
-      if (prevUserProfile !== undefined) process.env.USERPROFILE = prevUserProfile;
-    }
+    // agy の label は既定値と異なる。config.json の値が効いた場合だけこの assert を通る
+    const r = resolveAgentConfig('agy');
+    assert.ok(r, 'agy should be resolved using HOME');
+    assert.equal(r.label, 'Agy From HOME');
   } finally {
+    // 元から未設定だった変数は delete で戻す（代入すると文字列 "undefined" になるため）
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevUserProfile;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

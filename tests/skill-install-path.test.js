@@ -7,6 +7,8 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const os = require('node:os');
+const path = require('node:path');
 
 const {
   computeSkillMdPath,
@@ -23,6 +25,8 @@ const YAML_AGENTS_MAP = {
 test('resolveSkillsFamilyKey: agentIdがagents.yamlのキーと直接一致する場合はそれを返す', () => {
   assert.equal(resolveSkillsFamilyKey('agy', undefined, YAML_AGENTS_MAP), 'agy');
   assert.equal(resolveSkillsFamilyKey('claude', undefined, YAML_AGENTS_MAP), 'claude');
+  // command が未定義（undefined）でも agentId 直接一致で解決する経路
+  assert.equal(resolveSkillsFamilyKey('codex', undefined, YAML_AGENTS_MAP), 'codex');
 });
 
 test('resolveSkillsFamilyKey: agentIdが一致しなくてもcommand文字列が一致すれば解決する（agy-interactive → agy）', () => {
@@ -33,16 +37,11 @@ test('resolveSkillsFamilyKey: agentIdにもcommandにも一致がなければnul
   assert.equal(resolveSkillsFamilyKey('unknown-agent', 'unknown-cmd', YAML_AGENTS_MAP), null);
 });
 
-test('resolveSkillsFamilyKey: commandが未定義でもagentId一致があれば解決する', () => {
-  assert.equal(resolveSkillsFamilyKey('codex', undefined, YAML_AGENTS_MAP), 'codex');
-});
-
 test('computeSkillMdPath: agy-interactiveのSKILL.mdパスをcommand経由で解決する', () => {
   const result = computeSkillMdPath(YAML_AGENTS_MAP, 'agy-interactive', 'agy', 'gh-maestro-assistant');
-  const expected = require('path').join(
-    require('../scripts/shared/agents-yaml').expandHome('~/.gemini/antigravity-cli/skills'),
-    'gh-maestro-assistant',
-    'SKILL.md'
+  // 期待値は os.homedir() から組むリテラル（本体の expandHome に依存させない）
+  const expected = path.join(
+    os.homedir(), '.gemini', 'antigravity-cli', 'skills', 'gh-maestro-assistant', 'SKILL.md'
   );
   assert.equal(result, expected);
 });
@@ -65,11 +64,7 @@ test('computeSkillMdPath: dests 配列が設定されている場合は先頭の
     },
   };
   const result = computeSkillMdPath(dualDestMap, 'agy', undefined, 'gh-maestro-coder');
-  const expected = require('path').join(
-    require('../scripts/shared/agents-yaml').expandHome('~/.agents/skills'),
-    'gh-maestro-coder',
-    'SKILL.md'
-  );
+  const expected = path.join(os.homedir(), '.agents', 'skills', 'gh-maestro-coder', 'SKILL.md');
   assert.equal(result, expected);
 });
 

@@ -1,19 +1,13 @@
 'use strict';
 
-const { test, before, after } = require('node:test');
+const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const {
-  loadJSON,
-  collectValidAgentIds,
-  closestKnownSkillKey,
-  validateConfig,
-  validateCouncilConfig,
-} = require('../../scripts/config');
+const { loadJSON } = require('../../scripts/config');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'config.js');
 
@@ -87,22 +81,16 @@ function runConfig(args, home, cwd) {
 
 // ── CLI integration: --help ────────────────────────────────────────────────────
 
-test('CLI: --help は usage を表示し exit 0', () => {
+test('CLI: --help / -h は usage を表示し exit 0', () => {
   withTempHome(home => {
-    const r = runConfig(['--help'], home);
-    assert.equal(r.status, 0, `exit 0, got ${r.status}, stderr: ${r.stderr}`);
-    assert.ok(r.stdout.includes('config.js'), 'stdout should include script name');
-    assert.ok(r.stdout.includes('use'), 'stdout should mention use subcommand');
-    assert.doesNotMatch(r.stdout, /\bstatus\b/, 'status subcommand should not appear in usage');
-    assert.ok(r.stdout.includes('doctor'), 'stdout should mention doctor subcommand');
-  });
-});
-
-test('CLI: -h も同様', () => {
-  withTempHome(home => {
-    const r = runConfig(['-h'], home);
-    assert.equal(r.status, 0);
-    assert.ok(r.stdout.includes('config.js'));
+    for (const flag of ['--help', '-h']) {
+      const r = runConfig([flag], home);
+      assert.equal(r.status, 0, `${flag}: exit 0, got ${r.status}, stderr: ${r.stderr}`);
+      assert.ok(r.stdout.includes('config.js'), `${flag}: stdout should include script name`);
+      assert.ok(r.stdout.includes('use'), `${flag}: stdout should mention use subcommand`);
+      assert.doesNotMatch(r.stdout, /\bstatus\b/, `${flag}: status subcommand should not appear in usage`);
+      assert.ok(r.stdout.includes('doctor'), `${flag}: stdout should mention doctor subcommand`);
+    }
   });
 });
 
@@ -137,6 +125,8 @@ test('CLI use: プロファイルを適用できる', () => {
 
     const config = loadJSON(path.join(home, '.gh-maestro', 'config.json'));
     assert.deepEqual(config.skillAgentMap, { 'gh-maestro-coder': 'agy' });
+    // 書き込み時に profiles 定義を落とさないことも確かめる（保存の欠陥を検出する）
+    assert.ok(config.profiles, 'profiles preserved after use');
     assert.ok(r.stdout.includes('peak'), 'stdout includes profile name');
   });
 });
@@ -198,10 +188,8 @@ test('CLI use: 未知のエージェントID を含むプロファイルはエ�
 
     const r = runConfig(['use', 'bad'], home);
     assert.notEqual(r.status, 0);
-    assert.ok(
-      r.stderr.includes('not found') || r.stderr.includes('no-such-agent'),
-      `stderr should mention bad agent: ${r.stderr}`,
-    );
+    // 実際のエラー形式（"[ERROR]" タグは無い）: 不明なエージェントIDを名指しして not found と報告する
+    assert.match(r.stderr, /agent ID "no-such-agent".*not found/, `stderr: ${r.stderr}`);
   });
 });
 
@@ -390,9 +378,10 @@ test('CLI doctor: workspace config も検証する', () => {
       writeWorkspaceConfig(ws, { skillAgentMap: { 'x': 'bad-agent' } });
 
       const r = runConfig(['doctor', '--workspace', ws], home);
+      // global は空なので、bad-agent の指摘は workspace 検証からしか出ない
       assert.ok(
-        r.stdout.includes('[WARN]') || r.stdout.includes('workspace'),
-        `should include workspace issues: ${r.stdout}`,
+        r.stdout.includes('[WARN]') && r.stdout.includes('bad-agent'),
+        `should report workspace bad-agent as [WARN]: ${r.stdout}`,
       );
     });
   });
@@ -443,49 +432,6 @@ test('CLI doctor: プロファイル内の未知のスキルキーを警告す�
       r.stdout.includes('unknown skill key') && r.stdout.includes('bad'),
       `should warn about unknown skill key in profile: ${r.stdout}`,
     );
-  });
-});
-
-// ── saveConfig ─────────────────────────────────────────────────────────────────
-
-test('saveConfig: 設定を書き込める', () => {
-  withTempHome(home => {
-    const { saveConfig } = require('../../scripts/config');
-    const configPath = path.join(home, '.gh-maestro', 'config.json');
-    // Override CONFIG_PATH for this test — can't directly, so test via use CLI
-    writeConfig(home, {
-      profiles: {
-        test: { skillAgentMap: { 'gh-maestro-coder': 'claude' } },
-      },
-    });
-
-    const r = runConfig(['use', 'test'], home);
-    assert.equal(r.status, 0, r.stderr);
-
-    const saved = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    assert.deepEqual(saved.skillAgentMap, { 'gh-maestro-coder': 'claude' });
-    assert.ok(saved.profiles, 'profiles preserved');
-  });
-});
-
-test('saveConfig: 新規ファイルを作成できる', () => {
-  withTempHome(home => {
-    // Remove .gh-maestro dir
-    fs.rmSync(path.join(home, '.gh-maestro'), { recursive: true, force: true });
-
-    writeConfig(home, {
-      profiles: {
-        test: { skillAgentMap: { 'gh-maestro-coder': 'claude' } },
-      },
-    });
-
-    // writeConfig creates .gh-maestro dir — now use a profile
-    const r = runConfig(['use', 'test'], home);
-    assert.equal(r.status, 0, r.stderr);
-
-    const configPath = path.join(home, '.gh-maestro', 'config.json');
-    const saved = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    assert.deepEqual(saved.skillAgentMap, { 'gh-maestro-coder': 'claude' });
   });
 });
 
@@ -598,44 +544,3 @@ test('CLI use: パース不能な config の場合はエラー', () => {
     assert.ok(r.stderr.includes('cannot parse'), r.stderr);
   });
 });
-
-// ── validateCouncilConfig（Issue #230） ───────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-// ── validateCouncilMerged（マージ後検証。review指摘 #4/#5） ─────────────────────
-
-/**
- * resolve-config.js の resolveCouncilConfig / resolveAgentConfig を差し替えた状態で
- * config.js を再ロードする。config.js はロード時に resolve-config の名前付きエクスポートを
- * 捕捉するため、キャッシュを消して現在のモックを反映させる。
- * @param {object} overrides  resolve-config.js の exports に対する上書き
- * @returns {object} 再ロードした config.js の module.exports
- */
-function loadConfigWithResolveConfig(overrides) {
-  const configPath = require.resolve('../../scripts/config');
-  const resolveConfigPath = require.resolve('../../scripts/shared/resolve-config');
-  const real = require(resolveConfigPath);
-  delete require.cache[configPath];
-  require.cache[resolveConfigPath] = {
-    id: resolveConfigPath,
-    filename: resolveConfigPath,
-    loaded: true,
-    exports: { ...real, ...overrides },
-  };
-  try {
-    return require(configPath);
-  } finally {
-    delete require.cache[resolveConfigPath];
-    delete require.cache[configPath];
-  }
-}
