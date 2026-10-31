@@ -84,6 +84,8 @@ function buildPrCreateArgs(opts) {
     args.push('--body-file', opts.bodyFile);
   }
   if (opts.repo) args.push('--repo', opts.repo);
+  // 下書き作成は呼び出し元（push-and-declare.js）からのみ指定する。CLI フラグとしては公開しない。
+  if (opts.draft) args.push('--draft');
   return args;
 }
 

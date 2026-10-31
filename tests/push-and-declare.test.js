@@ -52,6 +52,7 @@ const SPAWN_CAPTURING_MODULES = [
   '../scripts/shared/git-branch',
   '../scripts/shared/gh-pr',
   '../scripts/shared/gh-comments',
+  '../scripts/shared/pr-declaration',
 ];
 
 /**
@@ -880,4 +881,340 @@ test('main: NODE_TEST_CONTEXT 環境下では実副作用を実行せず拒否�
     delete process.env.NODE_TEST_CONTEXT;
   }
   assert.equal(calls.length, 0);
+});
+
+// ── テスト申告表のPRコメント投稿（--declaration-file。Issue #671 レビュー指摘1・2・PR#672再指摘） ──
+// 申告表は PR 本文ではなく、対象HEADのSHAをマーカーに持つ PR コメントに投稿する（PR本文は触らない）。
+// 既存PRは push の前に投稿して、レビューが新しいHEADを見る時点で申告表が揃うようにする。
+
+const DECLARATION_TABLE = '| テスト | 何が壊れたら失敗するか |\n|---|---|\n| t1 | 欠陥X |';
+const DECLARATION_MARKER_LINE = `<!-- gh-maestro:pr-declaration head=${SHA} -->`;
+const isCommentCreate = (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[1] === `repos/${REPO}/issues/5/comments` && args[2] === '-f';
+const isCommentPatch = (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[1] === '-X' && args[2] === 'PATCH';
+
+test('buildPrBody は申告表に関係なく関連Issue行のみを返す（PR本文は変更しない）', () => {
+  const { mod } = loadModule();
+  assert.equal(mod.buildPrBody(671), '関連Issue: #671');
+  assert.equal(mod.buildPrBodyWithDeclaration, undefined, '申告表をPR本文へ組み立てる経路は廃止している');
+});
+
+test('--declaration-file: 既存PRは push より前に、このHEADの申告表をPRコメントとして投稿し、PR本文は編集しない', () => {
+  const handlers = [
+    ...fullPathHandlers({ prList: { status: 0, stdout: JSON.stringify([{ number: 5, url: PR_URL }]) } }),
+    { matches: ({ cmd, args }) => isCommentCreate(cmd, args), result: { status: 0, stdout: `{"html_url":"${DECL_URL}"}` } },
+  ];
+  const { mod, calls } = loadModule(dispatcher(handlers));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  const postIndex = calls.findIndex(c => isCommentCreate(c.cmd, c.args));
+  const pushIndex = calls.findIndex(c => c.cmd === 'git' && c.args[0] === 'push');
+  assert.ok(postIndex >= 0 && postIndex < pushIndex, '申告表コメントは push より前に投稿されるべき');
+  const body = calls[postIndex].args[3];
+  assert.equal(body, `body=${DECLARATION_MARKER_LINE}\n${DECLARATION_TABLE}\n`);
+  assert.equal(call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'edit'), undefined, 'PR本文を編集しない');
+});
+
+test('--declaration-file: 同じHEADの信頼される既存申告表コメントは新規投稿せず更新する（冪等）', () => {
+  const existing = [{ id: 77, body: `${DECLARATION_MARKER_LINE}\n旧表`, author_association: 'OWNER', html_url: DECL_URL }];
+  const handlers = fullPathHandlers({
+    prList: { status: 0, stdout: JSON.stringify([{ number: 5, url: PR_URL }]) },
+    commentList: { status: 0, stdout: JSON.stringify(existing) },
+  });
+  handlers.push({ matches: ({ cmd, args }) => isCommentPatch(cmd, args), result: { status: 0, stdout: `{"html_url":"${DECL_URL}"}` } });
+  const { mod, calls } = loadModule(dispatcher(handlers));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  const patch = call(calls, (cmd, args) => isCommentPatch(cmd, args));
+  assert.ok(patch, '既存コメントを PATCH で更新する');
+  assert.equal(patch.args[3], 'repos/owner/repo/issues/comments/77');
+  assert.equal(call(calls, (cmd, args) => isCommentCreate(cmd, args) && args[3].includes('gh-maestro:pr-declaration')), undefined, '申告表を新規投稿しない');
+});
+
+test('--declaration-file: 申告表コメントの投稿に失敗したら push 前なら exit 2（リモート未変更）', () => {
+  const handlers = [
+    { matches: ({ cmd, args }) => isCommentCreate(cmd, args), result: { status: 1, stdout: '', stderr: 'boom' } },
+    ...fullPathHandlers({ prList: { status: 0, stdout: JSON.stringify([{ number: 5, url: PR_URL }]) } }),
+  ];
+  const { mod, calls } = loadModule(dispatcher(handlers));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 2);
+  assert.match(result.stderr, /申告表コメントの投稿に失敗/);
+  assert.equal(call(calls, (cmd, args) => cmd === 'git' && args[0] === 'push'), undefined, '投稿に失敗したら push しない');
+});
+
+test('--declaration-file: push 後の申告表コメント投稿に失敗したら exit 3（リモートは進んだ）', () => {
+  const handlers = [
+    { matches: ({ cmd, args }) => isCommentCreate(cmd, args), result: { status: 1, stdout: '', stderr: 'boom' } },
+    ...fullPathHandlers({ prCreate: { status: 0, stdout: PR_URL + '\n' } }),
+  ];
+  const { mod, calls } = loadModule(dispatcher(handlers));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 3);
+  assert.match(result.stderr, /申告表コメントの投稿に失敗/);
+  assert.ok(call(calls, (cmd, args) => cmd === 'git' && args[0] === 'push'), 'push は行われている');
+});
+
+test('--declaration-file: 空の申告表は副作用ゼロで exit 1', () => {
+  const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: '  \n',
+  }));
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(calls.length, 0);
+});
+
+test('main: --declaration-file のファイルが読めなければ副作用ゼロで exit 1', () => {
+  const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
+  const ws = tempWorkspace();
+  const missing = path.join(ws, 'no-such-declaration.md');
+  const result = mod.main(['--issue', '374', '--workspace', ws, '--declaration-file', missing]);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /読めません/);
+  assert.equal(calls.length, 0);
+});
+
+test('USAGE / SPEC: --declaration-file を宣言し、usage に記述がある', () => {
+  const { mod } = loadModule();
+  assert.ok(mod.SPEC.flags['--declaration-file'], '--declaration-file が SPEC に宣言されている');
+  assert.match(mod.USAGE, /^ {2}--declaration-file <path> {3}\S/m, 'Arguments 節に説明行がある');
+});
+
+
+// ── 下書きPRの公開（Issue #671 PR#672 3回目・5回目指摘） ──────────────────────────
+// 申告表を載せるPRは下書きで作り、申告表コメントが確認できてから公開する。公開するのは、このスクリプトが
+// 申告表のために作った下書き（PR本文に所有マーカーがあるもの）だけ。人間の下書きには触れない。
+
+const isPrReady = (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'ready';
+const isPrCreate = (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'create';
+const MARKER = `<!-- gh-maestro:pr-declaration head=${SHA} -->`;
+const OWNED_DRAFT_BODY = '関連Issue: #374\n\n<!-- gh-maestro:declaration-draft -->';
+
+/**
+ * 申告表コメントの投稿と一覧取得を状態として持つハンドラ群。投稿後の一覧に、そのHEADの申告表が現れる
+ * （GitHub と同じ読み直しの順序）。confirmed=false なら投稿しても一覧に現れない。
+ */
+function commentStateHandlers({ confirmed = true, createOk = true } = {}) {
+  let posted = false;
+  return [
+    {
+      matches: ({ cmd, args }) => isCommentCreate(cmd, args),
+      result: () => {
+        if (!createOk) return { status: 1, stdout: '', stderr: 'boom' };
+        posted = true;
+        return { status: 0, stdout: `{"html_url":"${DECL_URL}"}` };
+      },
+    },
+    {
+      matches: ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === '-X' && args[2] === 'PATCH',
+      result: () => {
+        posted = true;
+        return { status: 0, stdout: `{"html_url":"${DECL_URL}"}` };
+      },
+    },
+    {
+      matches: ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === '--method' && args[2] === 'GET',
+      result: () => ({
+        status: 0,
+        stdout: JSON.stringify(posted && confirmed
+          ? [{ id: 1, body: `${MARKER}\n${DECLARATION_TABLE}`, author_association: 'OWNER' }]
+          : []),
+      }),
+    },
+  ];
+}
+
+test('--declaration-file: 新規PRは作成後に申告表コメントを投稿し、PR本文は関連Issue行と所有マーカーにする', () => {
+  const handlers = [
+    ...fullPathHandlers({}),
+    { matches: ({ cmd, args }) => isPrReady(cmd, args), result: { status: 0, stdout: '' } },
+  ];
+  const { mod, calls } = loadModule(dispatcher([...commentStateHandlers(), ...handlers]));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  const createCall = call(calls, (cmd, args) => isPrCreate(cmd, args));
+  const createIndex = calls.indexOf(createCall);
+  const postIndex = calls.findIndex(c => isCommentCreate(c.cmd, c.args));
+  assert.ok(createIndex >= 0 && postIndex > createIndex, 'PR作成の後に投稿する（PR番号が必要）');
+  assert.equal(createCall.args[createCall.args.indexOf('--body') + 1], OWNED_DRAFT_BODY);
+  assert.equal(call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'edit'), undefined);
+});
+
+test('下書き公開: 新規PRは下書きで作成し、申告表の投稿を確認してから公開する', () => {
+  const handlers = [
+    ...fullPathHandlers({}),
+    { matches: ({ cmd, args }) => isPrReady(cmd, args), result: { status: 0, stdout: '' } },
+  ];
+  const { mod, calls } = loadModule(dispatcher([...commentStateHandlers(), ...handlers]));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  const createCall = call(calls, (cmd, args) => isPrCreate(cmd, args));
+  assert.ok(createCall.args.includes('--draft'), '申告表を載せる新規PRは下書きで作る');
+  const postIndex = calls.findIndex(c => isCommentCreate(c.cmd, c.args));
+  const readyIndex = calls.findIndex(c => isPrReady(c.cmd, c.args));
+  assert.ok(readyIndex > postIndex, '公開は申告表の投稿の後');
+  assert.deepEqual(calls[readyIndex].args, ['pr', 'ready', '5', '--repo', REPO]);
+});
+
+test('下書き公開: 申告表の投稿に失敗したら公開せず exit 3（PRは下書きのまま）', () => {
+  const handlers = [
+    ...fullPathHandlers({}),
+    { matches: ({ cmd, args }) => isPrReady(cmd, args), result: { status: 0, stdout: '' } },
+  ];
+  const { mod, calls } = loadModule(dispatcher([...commentStateHandlers({ createOk: false }), ...handlers]));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 3);
+  assert.match(result.stderr, /下書きのまま/);
+  assert.equal(call(calls, (cmd, args) => isPrReady(cmd, args)), undefined, '投稿に失敗したら公開しない');
+});
+
+test('下書き公開: 投稿したはずの申告表がこのHEADで確認できなければ公開しない（exit 3）', () => {
+  const handlers = [
+    ...fullPathHandlers({}),
+    { matches: ({ cmd, args }) => isPrReady(cmd, args), result: { status: 0, stdout: '' } },
+  ];
+  const { mod, calls } = loadModule(dispatcher([...commentStateHandlers({ confirmed: false }), ...handlers]));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 3);
+  assert.match(result.stderr, /確認できません/);
+  assert.equal(call(calls, (cmd, args) => isPrReady(cmd, args)), undefined);
+});
+
+test('下書き公開: 自分が作った下書き（所有マーカーあり）は、申告表を付けた再実行で確認の後に公開する', () => {
+  const handlers = [
+    ...fullPathHandlers({ prList: { status: 0, stdout: JSON.stringify([{ number: 5, url: PR_URL, isDraft: true, body: OWNED_DRAFT_BODY }]) } }),
+    { matches: ({ cmd, args }) => isPrReady(cmd, args), result: { status: 0, stdout: '' } },
+  ];
+  const { mod, calls } = loadModule(dispatcher([...commentStateHandlers(), ...handlers]));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  assert.equal(call(calls, (cmd, args) => isPrCreate(cmd, args)), undefined, '既存PRを作り直さない');
+  assert.ok(call(calls, (cmd, args) => isPrReady(cmd, args)), '自分の下書きは公開する');
+});
+
+test('下書き公開: 人間が作った下書き（所有マーカーなし）には触れない（申告表があっても公開しない）', () => {
+  const handlers = [
+    ...fullPathHandlers({ prList: { status: 0, stdout: JSON.stringify([{ number: 5, url: PR_URL, isDraft: true, body: '関連Issue: #374' }]) } }),
+    { matches: ({ cmd, args }) => isPrReady(cmd, args), result: { status: 0, stdout: '' } },
+  ];
+  const { mod, calls } = loadModule(dispatcher([...commentStateHandlers(), ...handlers]));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  assert.equal(call(calls, (cmd, args) => isPrReady(cmd, args)), undefined, '人間の下書きを公開しない');
+});
+
+test('下書き公開: 自分が作った下書きでも、申告表ファイルなしの再実行では公開せず exit 3', () => {
+  const handlers = [
+    ...fullPathHandlers({ prList: { status: 0, stdout: JSON.stringify([{ number: 5, url: PR_URL, isDraft: true, body: OWNED_DRAFT_BODY }]) } }),
+    { matches: ({ cmd, args }) => isPrReady(cmd, args), result: { status: 0, stdout: '' } },
+  ];
+  const { mod, calls } = loadModule(dispatcher(handlers));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+  }));
+
+  assert.equal(result.exitCode, 3);
+  assert.match(result.stderr, /--declaration-file/);
+  assert.equal(call(calls, (cmd, args) => isPrReady(cmd, args)), undefined, '申告表なしで公開しない');
+});
+
+test('下書き公開: 既に公開済みのPRは申告表の有無にかかわらず公開を呼ばない', () => {
+  const handlers = [
+    ...fullPathHandlers({ prList: { status: 0, stdout: JSON.stringify([{ number: 5, url: PR_URL, isDraft: false, body: OWNED_DRAFT_BODY }]) } }),
+    { matches: ({ cmd, args }) => isPrReady(cmd, args), result: { status: 0, stdout: '' } },
+  ];
+  const { mod, calls } = loadModule(dispatcher([...commentStateHandlers(), ...handlers]));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  assert.equal(call(calls, (cmd, args) => isPrReady(cmd, args)), undefined);
+});
+
+test('下書き公開: 申告表なしの新規PRは下書きにせず、公開も呼ばない', () => {
+  const handlers = [
+    ...fullPathHandlers({}),
+    { matches: ({ cmd, args }) => isPrReady(cmd, args), result: { status: 0, stdout: '' } },
+  ];
+  const { mod, calls } = loadModule(dispatcher(handlers));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+  }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  assert.equal(call(calls, (cmd, args) => isPrCreate(cmd, args)).args.includes('--draft'), false);
+  assert.equal(call(calls, (cmd, args) => isPrReady(cmd, args)), undefined);
+});
+
+test('下書き公開: 公開に失敗したら exit 3（申告表は投稿済み。再実行で回復）', () => {
+  const handlers = [
+    ...fullPathHandlers({}),
+    { matches: ({ cmd, args }) => isPrReady(cmd, args), result: { status: 1, stdout: '', stderr: 'ready failed' } },
+  ];
+  const { mod } = loadModule(dispatcher([...commentStateHandlers(), ...handlers]));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 3);
+  assert.match(result.stderr, /PRを公開できません/);
 });

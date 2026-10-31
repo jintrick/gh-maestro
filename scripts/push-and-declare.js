@@ -13,7 +13,7 @@
 // 「その段は既に満たされている」）。
 //
 // Usage:
-//   node push-and-declare.js --issue <N> [--workspace <path>]
+//   node push-and-declare.js --issue <N> [--workspace <path>] [--declaration-file <path>]
 //
 // 実行ディレクトリは作業用worktree（$WORKTREE）。ブランチ名 ^issue-<N> との一致を検証する。
 //
@@ -22,6 +22,7 @@
 // PR本文は `関連Issue: #<N>`（GitHubのマージ時自動クローズキーワードを含めない。Issueの
 // クローズは finalize-issue.js だけが行う）。
 
+const fs = require('fs');
 const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { resolveGitHead } = require('./shared/git-head');
@@ -31,25 +32,42 @@ const { createPr } = require('./gh-create-pr');
 const { declareTestResult } = require('./declare-test-result');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { listTestLayers } = require('./run-tests');
+const { upsertDeclarationComment, readPrDeclarationEvidence, DRAFT_OWNER_MARKER } = require('./shared/pr-declaration');
 
 const USAGE = `push-and-declare.js — ステージング・コミット・push・PR取得/作成・テスト結果申告を一つの操作にまとめる
 
 Usage:
-  node push-and-declare.js --issue <N> [--workspace <path>]
+  node push-and-declare.js --issue <N> [--workspace <path>] [--declaration-file <path>]
 
 Arguments:
-  --issue <N>          Issue番号（必須、正の整数。実行ブランチ名 ^issue-<N> と一致する必要がある）
-  --workspace <path>   ワークスペースのルートパス（省略時は GH_MAESTRO_WORKSPACE、次に
-                       CWD上方探索で解決）
+  --issue <N>                 Issue番号（必須、正の整数。実行ブランチ名 ^issue-<N> と一致する必要がある）
+  --workspace <path>          ワークスペースのルートパス（省略時は GH_MAESTRO_WORKSPACE、次に
+                              CWD上方探索で解決）
+  --declaration-file <path>   テスト申告表のファイル（UTF-8。空は不可）。毎回、push のたびに付ける。
+                              表は PR の差分全体のテストについて書く（追加・書き直し・削除・統合のどれも含む）。
+                              PR の差分にテストの変更が無い回は、表の代わりに「テストの変更なし」と書く。
+                              指定時、対象コミット（HEAD）の申告表を PR コメントとして投稿する（同じHEADの
+                              コメントは更新する）。PR本文には触れない。レビューは自分がレビューする HEAD と
+                              一致する申告表だけを使う。指定が無い回は申告表を投稿しない（push は止めない）。
+                              下書きの公開は、このスクリプトが作った下書き（所有マーカー付き）で、このHEADの
+                              申告表を確認できたときだけ行う（手順は coder-workflow.md の手順6）
 
 動作（終状態への収束。同じコマンドの再実行だけで回復する）:
   1. ブランチ検証（^issue-<N>）・リポジトリ特定・Issueタイトル取得
   2. git add -A で worktree 内の全変更をステージ（常に実行）
   3. ステージ済み変更があればコミット（無ければ空コミットを作らずスキップ）
+  3a. --declaration-file 指定時のみ: 既存PRがあれば push の前に、このHEADの申告表コメントを
+      投稿・更新する（失敗は exit 2。この時点でリモートは未変更）
   4. git push -u origin <ブランチ>（up-to-date なら no-op 成功。upstream を自ブランチへ固定）
   5. 現在のHEADを解決
   6. PRは get-or-create（既存PRがあれば使用、無ければ作成。タイトル=Issueタイトル、
      本文=関連Issue: #<N>）
+  6a. --declaration-file 指定時: 新規PRは下書き（draft。所有マーカーを本文に付ける）で作り、
+      このHEADの申告表コメントを投稿・更新する（冪等。失敗は exit 3）。
+      公開（gh pr ready）は、所有マーカー付きの下書きで、このHEADの申告表コメントを読み直して
+      確認できた場合だけ行う。確認できなければ exit 3 で下書きのまま残す（poll-pr は検出しない）。
+      所有マーカーの無い下書き（人間が作ったもの）には触れない。
+      申告表の無い実行は、所有マーカー付きの下書きを公開せず exit 3 で止まる（公開しない）
   7. 宣言された毎回側（scope=full）の層名を解決し、runtime root のテスト成果物を
      読んで解決したHEADに対するテスト結果を申告。必須層の結果が欠落・unavailable
      の場合は申告を失敗として返す。同じ成果物に lint 実行記録が無い場合も、
@@ -77,6 +95,7 @@ const SPEC = {
   flags: {
     '--issue': { required: true },
     '--workspace': {},
+    '--declaration-file': {},
   },
   booleans: ['--help', '-h'],
   positionals: { min: 0, max: 0 },
@@ -97,6 +116,16 @@ const AUTO_CLOSE_KEYWORD_RE = /\b(?:close|closes|closed|fix|fixes|fixed|resolve|
  */
 function buildPrBody(issue) {
   return `関連Issue: #${issue}`;
+}
+
+// gh 呼び出しの有限 timeout（shared/gh-comments.js の GH_TIMEOUT_MS と同じ値）
+const GH_TIMEOUT_MS = 30000;
+
+/** 下書きPRを公開する（gh pr ready）。timeout は spawnSync の error として返る。 */
+function markPrReady({ repo, prNumber, cwd }) {
+  return spawnSync('gh', ['pr', 'ready', String(prNumber), '--repo', repo], {
+    cwd, encoding: 'utf8', timeout: GH_TIMEOUT_MS,
+  });
 }
 
 /** spawnSync 結果のエラー文言を組み立てる。 */
@@ -177,13 +206,14 @@ function resolveRequiredTestLayers({ workspace, worktree, env, stagedFiles }, li
  * @param {string} [params.workspace]    workspace解決の引数（--workspace の値）
  * @param {string} params.worktree       作業用worktree（git操作の実行ディレクトリ）
  * @param {object} [params.env]          環境変数（createPr の base 解決に使う。既定 process.env）
+ * @param {string} [params.declaration] 対象HEADのテスト申告表（PRコメントに投稿。undefined なら投稿しない）
  * @param {object} [deps]                 テスト用の依存注入
  * @param {Function} [deps.declareTestResultFn]
  * @param {Function} [deps.commitContentHashFn]
  * @param {Function} [deps.listTestLayersFn]
  * @returns {{ exitCode: number, stdout: string, stderr: string }}
  */
-function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps = {}) {
+function pushAndDeclare({ issue, workspace, worktree, env = process.env, declaration }, deps = {}) {
   const declareTestResultFn = deps.declareTestResultFn || declareTestResult;
   const recordCycleEventFn = deps.recordCycleEventFn || recordCycleEvent;
   const listTestLayersFn = deps.listTestLayersFn || listTestLayers;
@@ -206,6 +236,11 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
   const ws = resolveWorkspace(workspace);
   if (!ws) {
     return { exitCode: 1, stdout: '', stderr: 'ワークスペースを解決できません（--workspace、GH_MAESTRO_WORKSPACE、またはCWDを確認してください）' };
+  }
+  if (declaration !== undefined) {
+    if (!declaration.trim()) {
+      return { exitCode: 1, stdout: '', stderr: '--declaration-file の内容が空です（申告表を書いてから実行してください）' };
+    }
   }
 
   // ── 作業ツリー検証 ─────────────────────────────────────────────────────────────
@@ -273,6 +308,36 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
     commitCreated = true;
   }
 
+  // ── 申告表コメントの投稿段（push前。既存PRのみ。--declaration-file 指定時のみ） ──────
+  // 既存PRのHEADを進める push の前に、対象HEADの申告表コメントを投稿する。レビューは新しいHEADの
+  // push を検出して push 直後に始まりうるため、その時点で申告表が PR に載っている必要がある。
+  // PR本文には触れない。失敗はここで止める（リモート未変更）。新規PRは後段（下書きで作成→
+  // 申告表投稿→公開）で扱う。
+  if (declaration !== undefined) {
+    const prePushRes = listPrsByBranch(repo, branch, { state: 'OPEN', json: 'number,url,isDraft,body', cwd: worktree });
+    if (prePushRes.error || prePushRes.status !== 0) {
+      return { exitCode: 2, stdout: '', stderr: `既存PRの検索に失敗しました（push前）: ${errText(prePushRes)}` };
+    }
+    const prePushPrs = parsePrListResponse(prePushRes.stdout);
+    if (!prePushPrs) {
+      return { exitCode: 2, stdout: '', stderr: '既存PRの検索結果のJSON parseに失敗しました（push前）' };
+    }
+    if (prePushPrs.length > 0 && prePushPrs[0].number) {
+      let preSha;
+      try {
+        preSha = resolveGitHead(worktree);
+      } catch (e) {
+        return { exitCode: 2, stdout: '', stderr: `HEADの解決に失敗しました（push前）: ${e.message}` };
+      }
+      const preUpsert = upsertDeclarationComment({
+        pr: prePushPrs[0].number, repo, headSha: preSha, table: declaration, cwd: worktree,
+      });
+      if (!preUpsert.ok) {
+        return { exitCode: 2, stdout: '', stderr: `${preUpsert.error}（push前。リモートは未変更）` };
+      }
+    }
+  }
+
   // ── push段 ─────────────────────────────────────────────────────────────────────
   // worktree作成時（spawn-worker.js 経由）の upstream は origin/<base> に設定されているため、
   // 素の git push（simpleモード）はブランチ名不一致で拒否される。明示的に
@@ -308,7 +373,7 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
   // ── PR段（get-or-create。初回か修正かをコーダーは判定しない） ─────────────────
   const prListRes = listPrsByBranch(repo, branch, {
     state: 'OPEN',
-    json: 'number,url',
+    json: 'number,url,isDraft,body',
     cwd: worktree,
   });
   if (prListRes.error || prListRes.status !== 0) {
@@ -333,7 +398,16 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
   } else {
     let createResult;
     try {
-      createResult = createPr({ title: issueTitle, body: buildPrBody(issueNum), repo, cwd: worktree, env });
+      // 申告表を載せるPRは下書きで作り、申告表コメントの投稿後に公開する（下の申告表段）。
+      // 申告表を投稿する前に Review Manager（poll-pr は公開済みPRだけを検出する）が始まらないため。
+      // 下書きは本スクリプトが作ったことを所有マーカーで示す（後で人間の下書きと区別する）。
+      const draftOwned = declaration !== undefined;
+      createResult = createPr({
+        title: issueTitle,
+        body: draftOwned ? `${buildPrBody(issueNum)}\n\n${DRAFT_OWNER_MARKER}` : buildPrBody(issueNum),
+        repo, cwd: worktree, env,
+        draft: draftOwned,
+      });
     } catch (e) {
       return { exitCode: 3, stdout: '', stderr: `PRの作成に失敗しました: ${e.message}` };
     }
@@ -349,6 +423,39 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
       try {
         recordCycleEventFn(ws, issueNum, 'pr-created', { pr: prNumber });
       } catch { /* best-effort; PR remains authoritative */ }
+    }
+  }
+
+  // ── 申告表コメント段＋公開段（--declaration-file 指定時のみ。冪等） ──────────────
+  // 1. このHEADの申告表コメントを投稿・更新する（push前に投稿済みでも更新する）。
+  // 2. このスクリプトが申告表のために下書きで作ったPR（本文に所有マーカーがあるもの）だけを、
+  //    このHEADの申告表コメントが確認できた場合に限って公開する。それ以外の下書きには触れない。
+  const ownedDraft = prAction === 'created'
+    ? declaration !== undefined
+    : Boolean(existingPr && existingPr.isDraft && String(existingPr.body || '').includes(DRAFT_OWNER_MARKER));
+  if (declaration !== undefined) {
+    if (!prNumber) {
+      return { exitCode: 3, stdout: '', stderr: 'PR番号を解決できないため申告表を投稿できません（pushは成功。再実行で回復）' };
+    }
+    const postUpsert = upsertDeclarationComment({
+      pr: prNumber, repo, headSha: sha, table: declaration, cwd: worktree,
+    });
+    if (!postUpsert.ok) {
+      return { exitCode: 3, stdout: '', stderr: `${postUpsert.error}（pushは成功。PRは下書きのまま。再実行で回復）` };
+    }
+  }
+  if (ownedDraft) {
+    if (declaration === undefined) {
+      return { exitCode: 3, stdout: '', stderr: 'このスクリプトが申告表のために作った下書きのPRは、申告表（--declaration-file）を付けて再実行するまで公開しません（pushは成功）' };
+    }
+    const evidence = readPrDeclarationEvidence({ pr: prNumber, repo, headSha: sha });
+    if (evidence.status !== 'present') {
+      const why = evidence.status === 'unavailable' ? evidence.reason : 'このHEADの申告表コメントが確認できません';
+      return { exitCode: 3, stdout: '', stderr: `PRを公開しません（${why}。PRは下書きのまま。再実行で回復）` };
+    }
+    const readyRes = markPrReady({ repo, prNumber, cwd: worktree });
+    if (readyRes.error || readyRes.status !== 0) {
+      return { exitCode: 3, stdout: '', stderr: `PRを公開できません（pushは成功。PRは下書きのまま。再実行で回復）: ${errText(readyRes)}` };
     }
   }
 
@@ -402,6 +509,17 @@ function main(argv) {
     return { exitCode: 0, stdout: USAGE };
   }
 
+  // 申告表は副作用より前に読む（読めない・不正な入力は副作用ゼロで exit 1）。
+  let declaration;
+  const declarationFile = values['--declaration-file'];
+  if (declarationFile !== undefined) {
+    try {
+      declaration = fs.readFileSync(declarationFile, 'utf8');
+    } catch (err) {
+      return { exitCode: 1, stdout: '', stderr: `--declaration-file を読めません: ${err.message}` };
+    }
+  }
+
   // resolveWorkspace が --workspace > GH_MAESTRO_WORKSPACE > CWD探索の順で解決する。
   const workspace = values['--workspace'];
   const result = pushAndDeclare({
@@ -409,6 +527,7 @@ function main(argv) {
     workspace,
     worktree: process.cwd(),
     env: process.env,
+    declaration,
   });
   return result;
 }

@@ -172,6 +172,38 @@ function spawnPollReviews(pr, workspace, intervalSeconds = 30, onOutputLine, opt
   });
 }
 
+/**
+ * Review Manager を起動してよい PR 番号を返す（無ければ空文字列）。下書き（isDraft）は除外する。
+ * push-and-declare.js は申告表を載せるPRを下書きで作り、申告表コメントを投稿してから
+ * 公開する（gh pr ready）。下書きを検出しないことで、申告表の無いHEADでレビューが始まらない。
+ *
+ * @param {{repo: string, issue: string|number}} params
+ * @param {Function} [spawnSyncFn]
+ * @returns {string}
+ */
+function findReviewablePr({ repo, issue }, spawnSyncFn = spawnSync) {
+  const listOpenPrs = (extraArgs) => {
+    const r = spawnSyncFn('gh', ['pr', 'list', '--repo', repo, '--state', 'open', ...extraArgs,
+      '--json', 'number,body,isDraft'], { encoding: 'utf8' });
+    if (!r || r.error || r.status !== 0) return [];
+    try {
+      const parsed = JSON.parse(String(r.stdout || '[]'));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+  // 下書きを除外してから照合する（gh の jq 式ではなく、取得したデータをここで判定する）。
+  const reviewable = (prs) => prs.filter((pr) => pr && pr.isDraft === false && Number.isInteger(pr.number));
+
+  const byBranch = reviewable(listOpenPrs(['--search', `head:issue-${issue}`]));
+  if (byBranch.length > 0) return String(byBranch[0].number);
+
+  const byBody = reviewable(listOpenPrs([]))
+    .filter((pr) => typeof pr.body === 'string' && pr.body.includes(`#${issue}`));
+  return byBody.length > 0 ? String(byBody[0].number) : '';
+}
+
 function parsePrPushLine(line) {
   if (typeof line !== 'string' || !line.startsWith('PR_PUSH:')) return null;
   const headSha = line.slice('PR_PUSH:'.length).trim();
@@ -1154,19 +1186,7 @@ async function runPollPr(params, deps = {}) {
     enablePrChecksMonitoring = true,
   } = params;
   const checkParentFn = deps.checkParentFn || (() => true);
-  const findPrFn = deps.findPrFn || (() => {
-    let r = spawnSync('gh', ['pr', 'list', '--repo', repo,
-      '--search', `head:issue-${issue}`, '--state', 'open',
-      '--json', 'number', '-q', '.[0].number'], { encoding: 'utf8' });
-    const pr = r.stdout.trim();
-    if (pr) return pr;
-
-    r = spawnSync('gh', ['pr', 'list', '--repo', repo, '--state', 'open',
-      '--json', 'number,body', '-q',
-      `.[] | select(.body | strings | contains("#${issue}")) | .number`],
-    { encoding: 'utf8' });
-    return r.stdout.trim().split('\n').find(s => s.trim()) || '';
-  });
+  const findPrFn = deps.findPrFn || (() => findReviewablePr({ repo, issue }));
   const getPrHeadFn = deps.getPrHeadFn || getPrHead;
   const queryPrChecksFn = deps.queryPrChecksFn || queryPrChecks;
   const getPrBaseBranchFn = deps.getPrBaseBranchFn || getPrBaseBranch;
@@ -1308,6 +1328,7 @@ async function runPollPr(params, deps = {}) {
 }
 
 module.exports = {
+  findReviewablePr,
   getPrHead,
   getPrBaseBranch,
   formatBaseBranchMismatch,
