@@ -9,6 +9,7 @@ const { createTempDirScope } = require('../../scripts/shared/temp-directory');
 const checkpoint = require('../../scripts/shared/review-checkpoint');
 const processLiveness = require('../../scripts/shared/process-liveness');
 const { validateManifest, ALL_LEAF_IDS, TRUNK_TO_LEAVES } = require('../../scripts/run-review-jobs');
+const { buildReviewManagerLaunchSpec } = require('../../scripts/shared/worker-factory');
 
 const root = path.resolve(__dirname, '../..');
 const worker = path.join(root, 'tests/fixtures/review-resume-worker.js');
@@ -100,6 +101,15 @@ async function scenario(mode) {
     assert.deepEqual(jobs.sort(), mode === 'resume' ? ['second'] : ['first', 'second']);
     await waitUntil(() => !fs.existsSync(runningPath), 'manager exit');
     await waitUntil(() => checker.observe(managerRef) === 'dead', 'Review Manager process exit');
+    // The headless shim owns the workspace cwd and the open log fd until its exit hook
+    // has run and it exits. Wait for its liveness resource (same key the launcher gave it),
+    // not a timeout, so cleanup never races the shim or its exit hook.
+    const shimWorkerName = buildReviewManagerLaunchSpec({ issue: 1, pr: 11, repo: 'o/r', workspace: ws }).workerName;
+    const shimResource = { workspace: ws, kind: 'worker', name: shimWorkerName };
+    await waitUntil(() => checker.observeResource(shimResource).state === 'dead', 'headless shim and exit hook exit');
+    // Guard for the wait above: if the wait is removed, the shim is still alive at manager exit
+    // (observed in every scenario), so this check fails deterministically instead of racing cleanup.
+    assert.equal(checker.observeResource(shimResource).state, 'dead', 'headless shim and exit hook must be gone before cleanup');
     safeToCleanup = true;
   } finally { if (safeToCleanup) await cleanupTempScope(scope); }
 }
