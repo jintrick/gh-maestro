@@ -84,3 +84,21 @@ test('coder-workflow.md: 素の git commit/push/gh pr create は push-and-declar
     .find((line) => line.includes('直接実行しない') && commands.every((cmd) => line.includes(cmd)));
   assert.ok(prohibitionLine, '素の git commit / git push / gh pr create の直接実行を禁止する文がある');
 });
+
+// テストの質の基準（.claude/rules/test-quality-criteria.md）を、書き手（coder）と
+// レビュー（test-quality 葉）の両方が参照することを固定する（Issue #671）。
+// 文言そのものは検査しない。参照先のパスが残っているかだけを確かめる。
+const TEST_QUALITY_CRITERIA_REF = '.claude/rules/test-quality-criteria.md';
+const TEST_QUALITY_CRITERIA_CONSUMERS = [
+  path.join(ROOT, 'skills', '_partials', 'coder-workflow.md'),
+  path.join(ROOT, 'skills', 'gh-maestro-reviewer', 'test-quality', 'test-quality', 'pre-review.md'),
+  path.join(ROOT, 'skills', 'gh-maestro-reviewer', 'test-quality', 'test-quality', 'post-review.md'),
+];
+
+test('テストの質の基準を書き手とレビューの手順書が参照している（Issue #671）', () => {
+  assert.ok(fs.existsSync(path.join(ROOT, TEST_QUALITY_CRITERIA_REF)), '基準ファイルが存在する');
+  for (const file of TEST_QUALITY_CRITERIA_CONSUMERS) {
+    const content = fs.readFileSync(file, 'utf8');
+    assert.ok(content.includes(TEST_QUALITY_CRITERIA_REF), `${path.relative(ROOT, file)} が基準ファイルを参照していない`);
+  }
+});
