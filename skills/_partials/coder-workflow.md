@@ -33,7 +33,7 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
 5. **新規追加・修正したファイルに対応するテストケースを作成し、宣言された毎回側のランナーを全件実行する**
    - テストを追加・変更する前に、`$WORKTREE` の `.claude/rules/test-quality-criteria.md` を `Read` ツールで読む（`paths` による自動読み込みには頼らない）。そのうえで、テストは基準の4条件（検証目的・期待値の独立性・欠陥検出能力・追加価値）を満たすものだけを書く
    - 追加・書き直したテスト1件ごとに、後で PR 本文へ次の4項目を表で申告できるよう、作業中に控えておく: ①テスト（ファイル:行・名前）、②何が壊れたら失敗するか、③期待値の出所（仕様・要件・既知の正解・外部契約のどれか）、④入れた欠陥と結果（または実施しない理由）
-   - 新規・書き直したテストすべてについて、③の欠陥を実際に入れて失敗することを確かめる（変異確認）。確かめられない場合は、実施しない理由を④に書く。結果の記録は、確かめた事実（入れた変更・失敗したテスト名）に限り、結果の数値を手で作らない
+   - 新規・書き直したテストすべてについて、そのテストの「何が壊れたら失敗するか」（②）に書いた欠陥を実際に入れて失敗することを確かめる（変異確認）。確かめられない場合は、実施しない理由を④に書く。結果の記録は、確かめた事実（入れた変更・失敗したテスト名）に限り、結果の数値を手で作らない
    - 削除・統合したテストがあれば、表とは別に「削除・統合したテスト」の欄を設け、統合先が何を検出するかを書く
    - 理由と経緯: `docs/adr/0051-test-quality-by-declaration-and-verification.md`
    - テスト結果の申告は、test runner が生成した機械可読な成果物からのみ行われる。fail/pass の数値を手で数えたり、申告用に入力したりしてはならない。成果物が生成されない環境では申告は `unknown` になるが、それを手入力で補ってはならない。文書だけの変更を除き、成果物が無い状態で `push-and-declare.js` を実行してはならない
@@ -59,21 +59,22 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
    - 実行は宣言されたランナー経由で行い、成果物に残った終了コード・実行範囲・件数・lint/型チェック記録を `push-and-declare.js` に引き渡す。毎回側の実行では lint を同じ成果物へ記録し、scope=full では package.json に `typecheck` スクリプトがあれば `npm run typecheck` を実行する。未定義・成功・失敗・起動不能を区別して記録する。lint と型チェックの結果はテストの失敗や終了コードへ変換せず、申告コメント、`TEST_STATUS` 通知、`query-test-status.js` 照会へ伝える。必須のlintまたは型チェック記録が欠落・古い・破損している場合は申告を完了させず、`run-tests.js` の再実行を促す。結果の数値を手入力してはならない
      - 実行入口は `node "{{SCRIPTS_PATH}}/run-tests.js" --workspace $WORKSPACE <一覧で確認した層名>` とし、分離側の変更対応を使うときは `--changed` と変更ファイルの相対パスを渡す
 6. **初回実装完了時・レビュー指摘対応の修正push時に、ステージング・コミット・push・PR取得/作成・テスト結果申告を一つの操作にまとめた `push-and-declare.js` を実行する**:
+   テストを追加・書き直した場合は、先に手順5で控えた申告表を `$WORKSPACE/.gh-maestro/` 配下のファイルに書き、`--declaration-file` で渡す。ファイルは heredoc（`cat >`）で直接作る（`write-draft.js` は `/tmp` 配下しか書けない）。
    ```sh
-   node "{{SCRIPTS_PATH}}/push-and-declare.js" --issue $ISSUE --workspace $WORKSPACE
+   DECL_FILE="$WORKSPACE/.gh-maestro/pr-declaration-$ISSUE.md"
+   cat > "$DECL_FILE" <<'EOF'
+   <手順5で控えた申告表>
+   EOF
    ```
+   ```sh
+   node "{{SCRIPTS_PATH}}/push-and-declare.js" --issue $ISSUE --workspace $WORKSPACE --declaration-file "$DECL_FILE"
+   ```
+   - 申告表は `push-and-declare.js` が push より前に PR 本文へ入れる（既存PRは push 前に本文を更新し、新規PRは作成時に本文へ含める）。レビューは push 直後に始まりうるため、申告表を push の後に書いてはならない。
+   - 申告表は、新規・書き直したテスト1件につき1行で、列は「テスト（ファイル:行・名前）」「何が壊れたら失敗するか」「期待値の出所」「入れた欠陥と結果（または実施しない理由）」。その下に「削除・統合したテスト」の欄を置く。PR本文の `関連Issue: #N` 行は script が付けるので、申告表に含めない。
+   - テストを追加・書き直していない変更（文書だけの変更など）では `--declaration-file` を付けない。
    - この一連の操作は「終状態への収束」として定義されており、同じコマンドの再実行だけで回復する（コミットすべき変更が無い場合は空コミットを作らず、その段をスキップする）
    - コミットメッセージは `impl(issue-<N>): <Issueタイトル>` に固定される（モデル推論を挟まない）
    - PRは get-or-create（既存PRがあれば使用、無ければ作成）。初回か修正かを自分で判定する必要はない
-   - PR 本文は `push-and-declare.js` が固定文（`関連Issue: #N`）で作るため、テストの申告表は実行後に `gh pr edit` で書き込む。本文には `関連Issue: #<N>` の行を残し、手順5で控えた次の表を載せる。表は新規・書き直したテスト1件につき1行で、列は「テスト（ファイル:行・名前）」「何が壊れたら失敗するか」「期待値の出所」「入れた欠陥と結果（または実施しない理由）」。その下に「削除・統合したテスト」の欄を置く。本文ファイルは `$WORKSPACE` 配下に、heredoc（`cat >`）で直接作る（`write-draft.js` は `/tmp` 配下しか書けず、`gh` へ渡すパスに使えない）
-     ```sh
-     PR_NUMBER=$(gh pr view --json number -q .number)
-     PR_BODY_FILE="$WORKSPACE/.gh-maestro/pr-body-$ISSUE.md"
-     cat > "$PR_BODY_FILE" <<'EOF'
-     <関連Issue行と申告表>
-     EOF
-     gh pr edit "$PR_NUMBER" --body-file "$PR_BODY_FILE"
-     ```
    - 理由と経緯: `docs/adr/0051-test-quality-by-declaration-and-verification.md`
    - 申告は直前のテスト runner が生成した成果物から fail/pass、実行範囲、lint/型チェック記録を読み取る（テストが赤でも終了コードは0）。宣言された毎回側の成果物またはlint/型チェック記録が欠落・古い・破損・対象外の場合、`push-and-declare.js` は push 後に非ゼロ終了する。文書だけの変更はテスト結果を要求せず、従来どおり進む。lintの指摘と型チェックの失敗・起動不能・未定義は停止条件にせず、数値を手入力して補ってはならない。申告後の両状態は同じ `TEST_STATUS` / `query-test-status.js` 経路で確認する
    - **素の `git commit` / `git push` / `gh pr create` を直接実行しない**（このスクリプトが一括で行う。個別実行すると申告を省く経路が生まれ、orchestratorがSTALE/NONE申告の検知で待たされる）

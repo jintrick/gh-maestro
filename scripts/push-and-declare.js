@@ -13,7 +13,7 @@
 // 「その段は既に満たされている」）。
 //
 // Usage:
-//   node push-and-declare.js --issue <N> [--workspace <path>]
+//   node push-and-declare.js --issue <N> [--workspace <path>] [--declaration-file <path>]
 //
 // 実行ディレクトリは作業用worktree（$WORKTREE）。ブランチ名 ^issue-<N> との一致を検証する。
 //
@@ -22,6 +22,7 @@
 // PR本文は `関連Issue: #<N>`（GitHubのマージ時自動クローズキーワードを含めない。Issueの
 // クローズは finalize-issue.js だけが行う）。
 
+const fs = require('fs');
 const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { resolveGitHead } = require('./shared/git-head');
@@ -35,21 +36,28 @@ const { listTestLayers } = require('./run-tests');
 const USAGE = `push-and-declare.js — ステージング・コミット・push・PR取得/作成・テスト結果申告を一つの操作にまとめる
 
 Usage:
-  node push-and-declare.js --issue <N> [--workspace <path>]
+  node push-and-declare.js --issue <N> [--workspace <path>] [--declaration-file <path>]
 
 Arguments:
-  --issue <N>          Issue番号（必須、正の整数。実行ブランチ名 ^issue-<N> と一致する必要がある）
-  --workspace <path>   ワークスペースのルートパス（省略時は GH_MAESTRO_WORKSPACE、次に
-                       CWD上方探索で解決）
+  --issue <N>                 Issue番号（必須、正の整数。実行ブランチ名 ^issue-<N> と一致する必要がある）
+  --workspace <path>          ワークスペースのルートパス（省略時は GH_MAESTRO_WORKSPACE、次に
+                              CWD上方探索で解決）
+  --declaration-file <path>   PR本文に追記するテスト申告表のファイル（UTF-8。空は不可。
+                              GitHubの自動クローズキーワードを含むと拒否）。指定時、PR本文は
+                              「関連Issue: #<N>」の後ろに申告表を続けた内容になる。既存PRは
+                              push の前に本文を更新し、新規PRは作成時に本文へ含める。
+                              レビューは push 直後に始まりうるため、この順序で申告表を先に揃える
 
 動作（終状態への収束。同じコマンドの再実行だけで回復する）:
   1. ブランチ検証（^issue-<N>）・リポジトリ特定・Issueタイトル取得
   2. git add -A で worktree 内の全変更をステージ（常に実行）
   3. ステージ済み変更があればコミット（無ければ空コミットを作らずスキップ）
+  3a. --declaration-file 指定時のみ: 既存PRがあれば push の前に本文を申告表付きに更新
+      （失敗は exit 2。この時点でリモートは未変更）
   4. git push -u origin <ブランチ>（up-to-date なら no-op 成功。upstream を自ブランチへ固定）
   5. 現在のHEADを解決
   6. PRは get-or-create（既存PRがあれば使用、無ければ作成。タイトル=Issueタイトル、
-     本文=関連Issue: #<N>）
+     本文=関連Issue: #<N>（申告表指定時はその後ろに申告表を続ける））
   7. 宣言された毎回側（scope=full）の層名を解決し、runtime root のテスト成果物を
      読んで解決したHEADに対するテスト結果を申告。必須層の結果が欠落・unavailable
      の場合は申告を失敗として返す。同じ成果物に lint 実行記録が無い場合も、
@@ -77,6 +85,7 @@ const SPEC = {
   flags: {
     '--issue': { required: true },
     '--workspace': {},
+    '--declaration-file': {},
   },
   booleans: ['--help', '-h'],
   positionals: { min: 0, max: 0 },
@@ -97,6 +106,20 @@ const AUTO_CLOSE_KEYWORD_RE = /\b(?:close|closes|closed|fix|fixes|fixed|resolve|
  */
 function buildPrBody(issue) {
   return `関連Issue: #${issue}`;
+}
+
+/**
+ * 申告表付きのPR本文を組み立てる。declaration が undefined なら buildPrBody と同じ。
+ * 申告表は coder が書いた表そのもので、自動クローズキーワードを含んではならない
+ * （呼び出し側が pushAndDeclare の入口で検証する）。
+ * @param {number|string} issue
+ * @param {string|undefined} declaration
+ * @returns {string}
+ */
+function buildPrBodyWithDeclaration(issue, declaration) {
+  const head = buildPrBody(issue);
+  if (declaration === undefined) return head;
+  return `${head}\n\n${declaration.trim()}`;
 }
 
 /** spawnSync 結果のエラー文言を組み立てる。 */
@@ -177,13 +200,14 @@ function resolveRequiredTestLayers({ workspace, worktree, env, stagedFiles }, li
  * @param {string} [params.workspace]    workspace解決の引数（--workspace の値）
  * @param {string} params.worktree       作業用worktree（git操作の実行ディレクトリ）
  * @param {object} [params.env]          環境変数（createPr の base 解決に使う。既定 process.env）
+ * @param {string} [params.declaration] PR本文に続けるテスト申告表（undefined なら本文は関連Issue行のみ）
  * @param {object} [deps]                 テスト用の依存注入
  * @param {Function} [deps.declareTestResultFn]
  * @param {Function} [deps.commitContentHashFn]
  * @param {Function} [deps.listTestLayersFn]
  * @returns {{ exitCode: number, stdout: string, stderr: string }}
  */
-function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps = {}) {
+function pushAndDeclare({ issue, workspace, worktree, env = process.env, declaration }, deps = {}) {
   const declareTestResultFn = deps.declareTestResultFn || declareTestResult;
   const recordCycleEventFn = deps.recordCycleEventFn || recordCycleEvent;
   const listTestLayersFn = deps.listTestLayersFn || listTestLayers;
@@ -206,6 +230,14 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
   const ws = resolveWorkspace(workspace);
   if (!ws) {
     return { exitCode: 1, stdout: '', stderr: 'ワークスペースを解決できません（--workspace、GH_MAESTRO_WORKSPACE、またはCWDを確認してください）' };
+  }
+  if (declaration !== undefined) {
+    if (!declaration.trim()) {
+      return { exitCode: 1, stdout: '', stderr: '--declaration-file の内容が空です（申告表を書いてから実行してください）' };
+    }
+    if (AUTO_CLOSE_KEYWORD_RE.test(declaration)) {
+      return { exitCode: 1, stdout: '', stderr: '--declaration-file の内容に自動クローズキーワード（close/fix/resolve + #番号）が含まれています。PR本文に入れられません' };
+    }
   }
 
   // ── 作業ツリー検証 ─────────────────────────────────────────────────────────────
@@ -273,6 +305,31 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
     commitCreated = true;
   }
 
+  // ── 申告表のPR本文更新段（--declaration-file 指定時のみ。push より前） ───────────
+  // 既存PRのHEADを進める push の前に本文を申告表付きにする。レビューは新しいHEADの
+  // push を検出して push 直後に始まりうるため、その時点で申告表が PR に載っている必要がある。
+  // 失敗はここで止める（リモート未変更）。新規PRは後段の作成時に本文へ含める。
+  if (declaration !== undefined) {
+    const prePushRes = listPrsByBranch(repo, branch, { state: 'OPEN', json: 'number,url', cwd: worktree });
+    if (prePushRes.error || prePushRes.status !== 0) {
+      return { exitCode: 2, stdout: '', stderr: `既存PRの検索に失敗しました（push前）: ${errText(prePushRes)}` };
+    }
+    const prePushPrs = parsePrListResponse(prePushRes.stdout);
+    if (!prePushPrs) {
+      return { exitCode: 2, stdout: '', stderr: '既存PRの検索結果のJSON parseに失敗しました（push前）' };
+    }
+    if (prePushPrs.length > 0 && prePushPrs[0].number) {
+      const editRes = spawnSync(
+        'gh',
+        ['pr', 'edit', String(prePushPrs[0].number), '--repo', repo, '--body', buildPrBodyWithDeclaration(issueNum, declaration)],
+        { cwd: worktree, encoding: 'utf8' },
+      );
+      if (editRes.error || editRes.status !== 0) {
+        return { exitCode: 2, stdout: '', stderr: `PR本文への申告表の書き込みに失敗しました（push前。リモートは未変更）: ${errText(editRes)}` };
+      }
+    }
+  }
+
   // ── push段 ─────────────────────────────────────────────────────────────────────
   // worktree作成時（spawn-worker.js 経由）の upstream は origin/<base> に設定されているため、
   // 素の git push（simpleモード）はブランチ名不一致で拒否される。明示的に
@@ -333,7 +390,7 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env }, deps 
   } else {
     let createResult;
     try {
-      createResult = createPr({ title: issueTitle, body: buildPrBody(issueNum), repo, cwd: worktree, env });
+      createResult = createPr({ title: issueTitle, body: buildPrBodyWithDeclaration(issueNum, declaration), repo, cwd: worktree, env });
     } catch (e) {
       return { exitCode: 3, stdout: '', stderr: `PRの作成に失敗しました: ${e.message}` };
     }
@@ -402,6 +459,17 @@ function main(argv) {
     return { exitCode: 0, stdout: USAGE };
   }
 
+  // 申告表は副作用より前に読む（読めない・不正な入力は副作用ゼロで exit 1）。
+  let declaration;
+  const declarationFile = values['--declaration-file'];
+  if (declarationFile !== undefined) {
+    try {
+      declaration = fs.readFileSync(declarationFile, 'utf8');
+    } catch (err) {
+      return { exitCode: 1, stdout: '', stderr: `--declaration-file を読めません: ${err.message}` };
+    }
+  }
+
   // resolveWorkspace が --workspace > GH_MAESTRO_WORKSPACE > CWD探索の順で解決する。
   const workspace = values['--workspace'];
   const result = pushAndDeclare({
@@ -409,11 +477,12 @@ function main(argv) {
     workspace,
     worktree: process.cwd(),
     env: process.env,
+    declaration,
   });
   return result;
 }
 
-module.exports = { USAGE, SPEC, AUTO_CLOSE_KEYWORD_RE, buildPrBody, pushAndDeclare, main };
+module.exports = { USAGE, SPEC, AUTO_CLOSE_KEYWORD_RE, buildPrBody, buildPrBodyWithDeclaration, pushAndDeclare, main };
 
 if (require.main === module) {
   const result = main(process.argv.slice(2));
