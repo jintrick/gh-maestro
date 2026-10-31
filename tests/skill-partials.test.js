@@ -44,11 +44,11 @@ test('通信ルールの実行例はシェル非依存のファイル入力を�
   assert.match(powerShellExample[1], /<内容>/);
 });
 
-test('ワーカースキルの通信ルールは重複コピペではなく {{COMMUNICATION_RULES}} を参照する', () => {
+test('各ワーカースキルが {{COMMUNICATION_RULES}} を参照している', () => {
+  // 参照の有無だけを確かめる。本文の重複（直書き）は検査しない。
   for (const skill of WORKER_SKILLS) {
     const content = fs.readFileSync(path.join(SKILLS_DIR, skill, 'SKILL.md'), 'utf8');
     assert.match(content, /\{\{COMMUNICATION_RULES\}\}/, `${skill}/SKILL.md が {{COMMUNICATION_RULES}} を参照していない`);
-    // 通信ルール本文の直書きが復活していないこと（部分テンプレート側にしか無いはずの文言）
   }
 });
 
