@@ -851,6 +851,28 @@ test('config.json: 同じプロセスで同じファイルを何度読んでも�
   });
 });
 
+test('config.json: global と workspace の同じキーが壊れていると、パスごとに警告が1回ずつ出る', () => {
+  withTempHome(home => {
+    const ws = tempDirScope.mkdtemp('gh-maestro-resolve-config-dedup-ws-');
+    const globalPath = path.join(home, '.gh-maestro', 'config.json');
+    const wsPath = path.join(ws, '.gh-maestro', 'config.json');
+    writeConfig(home, { skillAgentMap: 'global-corrupted' });
+    fs.mkdirSync(path.dirname(wsPath), { recursive: true });
+    fs.writeFileSync(wsPath, JSON.stringify({ skillAgentMap: ['ws', 'corrupted'] }), 'utf8');
+
+    const { stderr } = captureStderr(() => {
+      for (let i = 0; i < 3; i++) resolveSkillAgentMap({ homedir: home, workspace: ws });
+    });
+    const lines = stderr.split('\n').filter(line => line.includes('skillAgentMap'));
+    // キーは「パス＋キー名」で区別される。パスを外すと一方が抑止されて失敗する。
+    assert.equal(lines.filter(line => line.includes(globalPath)).length, 1,
+      `global warning must appear once: ${stderr}`);
+    assert.equal(lines.filter(line => line.includes(wsPath)).length, 1,
+      `workspace warning must appear once: ${stderr}`);
+    assert.equal(lines.length, 2, `exactly one warning per path: ${stderr}`);
+  });
+});
+
 test('resolveAgentConfig: config.json が配列の場合はデフォルトにフォールバック', () => {
   withTempHome(home => {
     fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });

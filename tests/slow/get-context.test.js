@@ -361,6 +361,23 @@ test('global の config.json が壊れていると CONFIG_JSON_BROKEN にその�
   }
 });
 
+test('有効な JSON でも skillAgentMap だけ不正な workspace の config.json は CONFIG_JSON_BROKEN にそのパスを出す', () => {
+  const { home, env } = isolatedHome();
+  // JSON としては正しく、skillAgentMap の型だけが不正（配列）。構文エラーとは別の分岐。
+  const workspace = createContextWorkspace(JSON.stringify({ skillAgentMap: ['not', 'an', 'object'] }));
+  try {
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    const lines = brokenLines(r.stdout);
+    assert.equal(lines.length, 1, `expected one broken-config line: ${r.stdout}`);
+    assert.ok(lines[0].replace(/\\/g, '/').includes(`${path.basename(workspace)}/.gh-maestro/config.json`),
+      `line must name the workspace config: ${lines[0]}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test('config.json が壊れていなければ CONFIG_JSON_BROKEN を出さない', () => {
   const { home, env } = isolatedHome();
   const workspace = createContextWorkspace(JSON.stringify({ skillAgentMap: { 'gh-maestro-coder': 'agy' } }));
