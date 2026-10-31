@@ -91,3 +91,18 @@ test('upsertDeclarationComment: 投稿に失敗したら ok:false を返す（�
   assert.equal(result.ok, false);
   assert.match(result.error, /投稿に失敗/);
 });
+
+test('upsertDeclarationComment: gh 呼び出しに有限の timeout を付け、超過は失敗として返す（無期限に止まらない）', () => {
+  const seenOptions = [];
+  const timedOut = upsertDeclarationComment({
+    pr: 5, repo: 'o/r', headSha: HEAD, table: TABLE,
+    listCommentsFn: () => ({ status: 0, stdout: '[]' }),
+    spawnSyncFn: (cmd, args, opts) => {
+      seenOptions.push(opts);
+      return { status: null, stdout: '', stderr: '', error: Object.assign(new Error('spawnSync gh ETIMEDOUT'), { code: 'ETIMEDOUT' }) };
+    },
+  });
+  assert.equal(timedOut.ok, false);
+  assert.match(timedOut.error, /投稿に失敗/);
+  assert.equal(seenOptions[0].timeout, 30000, 'gh-comments.js の GH_TIMEOUT_MS と同じ有限値');
+});

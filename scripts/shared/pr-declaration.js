@@ -10,6 +10,7 @@ const { spawnSync } = require('./child-process');
 const { listComments, parseCommentsResponse } = require('./gh-comments');
 const { isTrustedCommentAuthor } = require('./comment-author-trust');
 
+const GH_TIMEOUT_MS = 30000;
 const DECLARATION_MARKER_PREFIX = 'gh-maestro:pr-declaration';
 const HEAD_SHA_RE = /^[0-9a-f]{40}$/;
 const DECLARATION_HEAD_RE = /^<!-- gh-maestro:pr-declaration head=([0-9a-f]{40}) -->\r?\n?/;
@@ -117,7 +118,10 @@ function upsertDeclarationComment({ pr, repo, headSha, table, cwd, listCommentsF
   const args = updating
     ? ['api', '-X', 'PATCH', `repos/${repo}/issues/comments/${existing.commentId}`, '-f', `body=${body}`]
     : ['api', `repos/${repo}/issues/${pr}/comments`, '-f', `body=${body}`];
-  const posted = spawnSyncFn('gh', args, { encoding: 'utf8', cwd });
+  // 有限の timeout（応答しない GitHub で push 前・申告段が無期限に止まらないように）。
+  // 値は gh-comments.js の GH_TIMEOUT_MS と同じ。超過は spawnSync の error（ETIMEDOUT）になり、
+  // 下の判定で失敗として呼び出し元へ返る。
+  const posted = spawnSyncFn('gh', args, { encoding: 'utf8', cwd, timeout: GH_TIMEOUT_MS });
   if (posted.error || posted.status !== 0) {
     const detail = posted.stderr || (posted.error && posted.error.message) || 'unknown error';
     return { ok: false, error: `申告表コメントの投稿に失敗しました: ${String(detail).trim()}` };

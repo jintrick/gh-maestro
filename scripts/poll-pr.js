@@ -172,6 +172,29 @@ function spawnPollReviews(pr, workspace, intervalSeconds = 30, onOutputLine, opt
   });
 }
 
+/**
+ * Review Manager を起動してよい PR 番号を返す（無ければ空文字列）。下書き（isDraft）は除外する。
+ * push-and-declare.js は申告表を載せるPRを下書きで作り、申告表コメントを投稿してから
+ * 公開する（gh pr ready）。下書きを検出しないことで、申告表の無いHEADでレビューが始まらない。
+ *
+ * @param {{repo: string, issue: string|number}} params
+ * @param {Function} [spawnSyncFn]
+ * @returns {string}
+ */
+function findReviewablePr({ repo, issue }, spawnSyncFn = spawnSync) {
+  const byBranch = spawnSyncFn('gh', ['pr', 'list', '--repo', repo,
+    '--search', `head:issue-${issue}`, '--state', 'open',
+    '--json', 'number,isDraft', '-q', '.[] | select(.isDraft | not) | .number'], { encoding: 'utf8' });
+  const branchPr = String(byBranch.stdout || '').trim().split('\n').find(s => s.trim());
+  if (branchPr) return branchPr.trim();
+
+  const byBody = spawnSyncFn('gh', ['pr', 'list', '--repo', repo, '--state', 'open',
+    '--json', 'number,body,isDraft', '-q',
+    `.[] | select(.isDraft | not) | select(.body | strings | contains("#${issue}")) | .number`],
+  { encoding: 'utf8' });
+  return String(byBody.stdout || '').trim().split('\n').find(s => s.trim()) || '';
+}
+
 function parsePrPushLine(line) {
   if (typeof line !== 'string' || !line.startsWith('PR_PUSH:')) return null;
   const headSha = line.slice('PR_PUSH:'.length).trim();
@@ -1154,19 +1177,7 @@ async function runPollPr(params, deps = {}) {
     enablePrChecksMonitoring = true,
   } = params;
   const checkParentFn = deps.checkParentFn || (() => true);
-  const findPrFn = deps.findPrFn || (() => {
-    let r = spawnSync('gh', ['pr', 'list', '--repo', repo,
-      '--search', `head:issue-${issue}`, '--state', 'open',
-      '--json', 'number', '-q', '.[0].number'], { encoding: 'utf8' });
-    const pr = r.stdout.trim();
-    if (pr) return pr;
-
-    r = spawnSync('gh', ['pr', 'list', '--repo', repo, '--state', 'open',
-      '--json', 'number,body', '-q',
-      `.[] | select(.body | strings | contains("#${issue}")) | .number`],
-    { encoding: 'utf8' });
-    return r.stdout.trim().split('\n').find(s => s.trim()) || '';
-  });
+  const findPrFn = deps.findPrFn || (() => findReviewablePr({ repo, issue }));
   const getPrHeadFn = deps.getPrHeadFn || getPrHead;
   const queryPrChecksFn = deps.queryPrChecksFn || queryPrChecks;
   const getPrBaseBranchFn = deps.getPrBaseBranchFn || getPrBaseBranch;
@@ -1308,6 +1319,7 @@ async function runPollPr(params, deps = {}) {
 }
 
 module.exports = {
+  findReviewablePr,
   getPrHead,
   getPrBaseBranch,
   formatBaseBranchMismatch,

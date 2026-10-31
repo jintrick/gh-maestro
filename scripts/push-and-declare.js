@@ -58,7 +58,10 @@ Arguments:
   5. 現在のHEADを解決
   6. PRは get-or-create（既存PRがあれば使用、無ければ作成。タイトル=Issueタイトル、
      本文=関連Issue: #<N>）
-  6a. --declaration-file 指定時のみ: このHEADの申告表コメントを投稿・更新する（冪等。失敗は exit 3）
+  6a. --declaration-file 指定時: 新規PRは下書き（draft）で作成しており、このHEADの申告表
+      コメントを投稿・更新する（冪等。失敗は exit 3）。その後に下書きのPRを公開する（gh pr ready）。
+      下書きのままの PR は poll-pr が検出せず、Review Manager は始まらない。
+      申告表の無い実行で既存の下書きPRがあれば、同じく公開する
   7. 宣言された毎回側（scope=full）の層名を解決し、runtime root のテスト成果物を
      読んで解決したHEADに対するテスト結果を申告。必須層の結果が欠落・unavailable
      の場合は申告を失敗として返す。同じ成果物に lint 実行記録が無い場合も、
@@ -107,6 +110,16 @@ const AUTO_CLOSE_KEYWORD_RE = /\b(?:close|closes|closed|fix|fixes|fixed|resolve|
  */
 function buildPrBody(issue) {
   return `関連Issue: #${issue}`;
+}
+
+// gh 呼び出しの有限 timeout（shared/gh-comments.js の GH_TIMEOUT_MS と同じ値）
+const GH_TIMEOUT_MS = 30000;
+
+/** 下書きPRを公開する（gh pr ready）。timeout は spawnSync の error として返る。 */
+function markPrReady({ repo, prNumber, cwd }) {
+  return spawnSync('gh', ['pr', 'ready', String(prNumber), '--repo', repo], {
+    cwd, encoding: 'utf8', timeout: GH_TIMEOUT_MS,
+  });
 }
 
 /** spawnSync 結果のエラー文言を組み立てる。 */
@@ -289,12 +302,13 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
     commitCreated = true;
   }
 
-  // ── 申告表のPR本文更新段（--declaration-file 指定時のみ。push より前） ───────────
-  // 既存PRのHEADを進める push の前に本文を申告表付きにする。レビューは新しいHEADの
+  // ── 申告表コメントの投稿段（push前。既存PRのみ。--declaration-file 指定時のみ） ──────
+  // 既存PRのHEADを進める push の前に、対象HEADの申告表コメントを投稿する。レビューは新しいHEADの
   // push を検出して push 直後に始まりうるため、その時点で申告表が PR に載っている必要がある。
-  // 失敗はここで止める（リモート未変更）。新規PRは後段の作成時に本文へ含める。
+  // PR本文には触れない。失敗はここで止める（リモート未変更）。新規PRは後段（下書きで作成→
+  // 申告表投稿→公開）で扱う。
   if (declaration !== undefined) {
-    const prePushRes = listPrsByBranch(repo, branch, { state: 'OPEN', json: 'number,url', cwd: worktree });
+    const prePushRes = listPrsByBranch(repo, branch, { state: 'OPEN', json: 'number,url,isDraft', cwd: worktree });
     if (prePushRes.error || prePushRes.status !== 0) {
       return { exitCode: 2, stdout: '', stderr: `既存PRの検索に失敗しました（push前）: ${errText(prePushRes)}` };
     }
@@ -353,7 +367,7 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
   // ── PR段（get-or-create。初回か修正かをコーダーは判定しない） ─────────────────
   const prListRes = listPrsByBranch(repo, branch, {
     state: 'OPEN',
-    json: 'number,url',
+    json: 'number,url,isDraft',
     cwd: worktree,
   });
   if (prListRes.error || prListRes.status !== 0) {
@@ -378,7 +392,12 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
   } else {
     let createResult;
     try {
-      createResult = createPr({ title: issueTitle, body: buildPrBody(issueNum), repo, cwd: worktree, env });
+      // 申告表を載せるPRは下書きで作り、申告表コメントの投稿後に公開する（下の申告表段）。
+      // 申告表を投稿する前に Review Manager（poll-pr は公開済みPRだけを検出する）が始まらないため。
+      createResult = createPr({
+        title: issueTitle, body: buildPrBody(issueNum), repo, cwd: worktree, env,
+        draft: declaration !== undefined,
+      });
     } catch (e) {
       return { exitCode: 3, stdout: '', stderr: `PRの作成に失敗しました: ${e.message}` };
     }
@@ -397,13 +416,28 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
     }
   }
 
-  // ── 申告表コメント段（--declaration-file 指定時のみ。冪等。push前に投稿済みでも更新する） ──
+  // ── 申告表コメント段＋公開段（--declaration-file 指定時のみ。冪等） ──────────────
+  // 1. このHEADの申告表コメントを投稿・更新する（push前に投稿済みでも更新する）。
+  // 2. 下書きのPR（今回作成、または前回の失敗で下書きのまま）を公開する。
+  //    公開は申告表の投稿の後にだけ行う。下書きのままなら poll-pr は検出せず、
+  //    Review Manager は始まらない。再実行は同じ手順で公開まで進む。
   if (declaration !== undefined) {
+    if (!prNumber) {
+      return { exitCode: 3, stdout: '', stderr: 'PR番号を解決できないため申告表を投稿できません（pushは成功。再実行で回復）' };
+    }
     const postUpsert = upsertDeclarationComment({
       pr: prNumber, repo, headSha: sha, table: declaration, cwd: worktree,
     });
     if (!postUpsert.ok) {
-      return { exitCode: 3, stdout: '', stderr: `${postUpsert.error}（pushは成功。再実行で回復）` };
+      return { exitCode: 3, stdout: '', stderr: `${postUpsert.error}（pushは成功。PRは下書きのまま。再実行で回復）` };
+    }
+  }
+  // 下書きのPRは申告表の投稿が済んだ後にだけ公開する（declaration 無しでも下書きなら公開する）。
+  const isDraftNow = prAction === 'created' ? declaration !== undefined : Boolean(existingPr && existingPr.isDraft);
+  if (isDraftNow) {
+    const readyRes = markPrReady({ repo, prNumber, cwd: worktree });
+    if (readyRes.error || readyRes.status !== 0) {
+      return { exitCode: 3, stdout: '', stderr: `PRを公開できません（pushは成功。PRは下書きのまま。再実行で回復）: ${errText(readyRes)}` };
     }
   }
 
