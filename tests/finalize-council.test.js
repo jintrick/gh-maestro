@@ -30,22 +30,24 @@ test('tallyVotes: choice を支持票・agrees_with を賛同票として集計�
   assert.equal(t.totalVotes, 3);
 });
 
-test('tallyVotes: 支持票数の降順でソートする', () => {
-  const votes = [
-    { participant_id: 'alpha', choice: 'beta', rationale: 'r' },
-    { participant_id: 'beta', choice: 'alpha', rationale: 'r' },
-  ];
-  const t = m.tallyVotes({ votes, participantOrder: ORDER });
-  assert.equal(t.entries[0].participant_id, 'alpha'); // 1票
-  assert.equal(t.entries[1].participant_id, 'beta');  // 1票
-  assert.equal(t.entries[2].participant_id, 'gamma'); // 0票
-});
+test('tallyVotes: 同票はグループ定義順（participantOrder）で安定（辞書順と異なる定義順で検証）', () => {
+  // 定義順 gamma, beta, alpha は辞書順（alpha, beta, gamma）と一致しない。
+  // 全員0票なら定義順のまま（辞書順で並べる欠陥はここで失敗する）
+  const order = ['gamma', 'beta', 'alpha'];
+  const zero = m.tallyVotes({ votes: [], participantOrder: order });
+  assert.deepEqual(zero.entries.map((e) => e.participant_id), ['gamma', 'beta', 'alpha']);
+  assert.deepEqual(zero.entries.map((e) => e.rank), [1, 2, 3]);
 
-test('tallyVotes: 同票はグループ定義順（participantOrder）で安定', () => {
-  // 全員0票: alpha, beta, gamma の定義順のまま
-  const t = m.tallyVotes({ votes: [], participantOrder: ORDER });
-  assert.deepEqual(t.entries.map((e) => e.participant_id), ORDER);
-  assert.deepEqual(t.entries.map((e) => e.rank), [1, 2, 3]);
+  // 1票ずつの同票（beta と alpha）は定義順 beta → alpha。gamma は0票で最後
+  const tie = m.tallyVotes({
+    votes: [
+      { participant_id: 'gamma', choice: 'alpha', rationale: 'r' },
+      { participant_id: 'alpha', choice: 'beta', rationale: 'r' },
+    ],
+    participantOrder: order,
+  });
+  assert.deepEqual(tie.entries.map((e) => e.participant_id), ['beta', 'alpha', 'gamma']);
+  assert.deepEqual(tie.entries.map((e) => e.supportVotes), [1, 1, 0]);
 });
 
 test('tallyVotes: 同票でも支持票の多い順が優先され、順位は連番', () => {
@@ -139,6 +141,8 @@ test('buildSummaryMarkdown: 議題・開催日・参加モデルを記載する'
   assert.ok(s.includes('RAG構成の採用可否'));
   assert.ok(s.includes('2026-08-06T00:00:00Z'));
   assert.ok(s.includes('alpha, beta, gamma'));
+  // Discussion URL（統合元 No.13 の検出範囲）
+  assert.ok(s.includes('http://x/disc'));
 });
 
 test('buildSummaryMarkdown: 意見コメントへのリンクと投票テーブル・ランキングを含む', () => {
@@ -159,11 +163,6 @@ test('buildSummaryMarkdown: 欠席者が居なくても「なし」と明記す�
   const s = sampleSummary({ absentees: [] });
   assert.ok(s.includes('欠席・失敗した参加者'));
   assert.ok(s.includes('- なし'));
-});
-
-test('buildSummaryMarkdown: Discussion URL を記載する', () => {
-  const s = sampleSummary();
-  assert.ok(s.includes('http://x/disc'));
 });
 
 test('buildSummaryMarkdown: 意見が無ければ「意見なし」を記載する', () => {
@@ -342,5 +341,10 @@ test('buildStoppedState: 停止状態の shape を返す', () => {
   });
   assert.equal(s.status, 'stopped');
   assert.equal(s.phase, 'opinion');
+  assert.equal(s.stoppedAt, '2026-08-06T00:00:00Z');
   assert.equal(s.failures.length, 1);
+  // --resume の入力になるため、失敗の中身（participant_id・error）が欠落すると再開を壊す
+  assert.equal(s.failures[0].participant_id, 'a');
+  assert.equal(s.failures[0].error, 'agent exit 1');
+  assert.equal(s.failures[0].attempt, 1);
 });

@@ -1101,3 +1101,24 @@ test('finalize: 投票スキーマ違反はフェイルクローズ（exit 2・�
     assert.ok(r.err.includes('vote schema validation failed'));
   });
 });
+
+// ── CLI 境界（子プロセス）────────────────────────────────────────────────────
+// 例外: 下の2件だけは実プロセス（node）を起動する。引数検証で止まるため gh / workspace には触れない。
+// parseArgs の結果が runCouncil へ結線されていること、usage の非ゼロ終了を、in-process 呼び出しでは検出できないため。
+// 根拠: .claude/rules/cli-input-validation-at-boundary.md
+
+test('CLI境界: --body-file 欠落は子プロセスで exit 1 かつ エラー文言を出す（gh 呼び出しなし）', () => {
+  const { spawnSync } = require('child_process');
+  const script = path.join(__dirname, '..', 'scripts', 'run-council.js');
+  const r = spawnSync(process.execPath, [script, '--title', 'T'], { encoding: 'utf8', timeout: 15000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /--body-file is required/);
+});
+
+test('CLI境界: --resume なのに --session 無しは子プロセスで exit 1（usage が非ゼロで終わる）', () => {
+  const { spawnSync } = require('child_process');
+  const script = path.join(__dirname, '..', 'scripts', 'run-council.js');
+  const r = spawnSync(process.execPath, [script, '--title', 'T', '--body-file', 'a.md', '--resume'], { encoding: 'utf8', timeout: 15000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /--resume requires --session/);
+});

@@ -264,7 +264,8 @@ test('validateParticipantOutput: opinion の必須フィールド欠落はエラ
   const { mod } = loadModule();
   const out = { participant_id: 'p1', stance: 'AGREE' };
   const errs = mod.validateParticipantOutput('opinion', out, opinionManifest(), 'p1');
-  assert.ok(errs.some((e) => e.includes('opinion')));
+  // 欠落フィールド名まで指定して完全一致で検証する（他のエラーが混ざっても通らない）
+  assert.deepEqual(errs, ["output: missing required 'opinion'"]);
 });
 
 test('validateParticipantOutput: 不正な stance はエラー', () => {
@@ -374,16 +375,7 @@ test('extractJsonObject: 必須キーで選別し、無関係なJSONを除外す
   assert.equal(out.stance, 'AGREE');
 });
 
-test('extractJsonObject: stream-json の result エンベロープ内の回答を展開する', () => {
-  const { mod } = loadModule();
-  const answer = JSON.stringify({ participant_id: 'p1', opinion: '採用', stance: 'AGREE' });
-  const event = JSON.stringify({ type: 'result', subtype: 'success', result: answer, session_id: 's1' });
-  const out = mod.extractJsonObject(event, ['participant_id', 'opinion', 'stance']);
-  assert.equal(out.participant_id, 'p1');
-  assert.equal(out.stance, 'AGREE');
-});
-
-test('extractJsonObject: system/init と result イベントが混在しても回答を選ぶ', () => {
+test('extractJsonObject: system/init と result イベントが混在しても回答を選ぶ（result エンベロープを展開する）', () => {
   const { mod } = loadModule();
   const answer = JSON.stringify({ participant_id: 'p1', opinion: '採用', stance: 'AGREE' });
   const init = JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1', model: 'x' });
@@ -391,6 +383,8 @@ test('extractJsonObject: system/init と result イベントが混在しても�
   const out = mod.extractJsonObject(`${init}\n${result}`, ['participant_id', 'opinion', 'stance']);
   assert.equal(out.participant_id, 'p1');
   assert.equal(out.opinion, '採用');
+  // 統合元 No.31（result エンベロープの展開、stance）の検出範囲
+  assert.equal(out.stance, 'AGREE');
 });
 
 test('extractJsonObject: 必須キーを満たす候補が複数あれば曖昧として throw', () => {
@@ -407,12 +401,6 @@ test('extractJsonObject: 必須キーを満たす候補が無ければ null', ()
   // ネストした必須キーはトップレベル扱いしない（payload 内部のオブジェクトは候補にしない）
   const nested = JSON.stringify({ type: 'init', payload: { participant_id: 'p1', opinion: 'x', stance: 'AGREE' } });
   assert.equal(mod.extractJsonObject(nested, ['participant_id', 'opinion', 'stance']), null);
-});
-
-test('extractJsonObject: 必須キー省略時は最初のパース可能オブジェクトを返す（後方互換）', () => {
-  const { mod } = loadModule();
-  const out = mod.extractJsonObject('前置き ' + JSON.stringify({ participant_id: 'p1', opinion: 'x' }) + ' 後書き');
-  assert.equal(out.participant_id, 'p1');
 });
 
 /** 一時ワークスペースを作り、fn完了後に後始末する。 */
@@ -679,5 +667,51 @@ test('runPhaseJobs: attemptOf 省略時は全参加者 attempt=1', async () => {
     children[1].emit('close', 0);
     const r = await promise;
     assert.ok(r.results.every((x) => x.attempt === 1));
+  });
+});
+
+// ── 子プロセス境界の argv（注入モックのまま argv だけを検証する）──────────────
+// spawn は注入モックのまま（実プロセスは起動しない）。組み立てられた argv の規約を、
+// fixture の command・extraArgs・execArgs・promptFlag から独立に書いた期待値で検証する。
+// Windows では pwsh の -EncodedCommand にラップされるため、そのスクリプト本文を復元して比較する。
+// 根拠: AGENTS.md「子プロセス境界の argv を、常に注入モックで差し替えたままにしない」
+
+function launchedArgv(call) {
+  if (call.args[0] === '-NoLogo' && call.args[1] === '-EncodedCommand') {
+    const script = Buffer.from(call.args[2], 'base64').toString('utf16le');
+    const m = script.match(/^& (.*?); \$exitCode/);
+    assert.ok(m, `unexpected wrapper script: ${script}`);
+    return [...m[1].matchAll(/'((?:[^']|'')*)'/g)].map((x) => x[1].replace(/''/g, "'"));
+  }
+  return [call.cmd, ...call.args];
+}
+
+test('launchParticipantJob: 組み立てる argv は command・extraArgs・execArgs・promptFlag・プロンプトの順（argv 検証）', async () => {
+  const children = [];
+  const { mod, spawnCalls } = loadModule({
+    spawnImpl: () => { const c = fakeChild(); children.push(c); return c; },
+  });
+  await withTempWorkspace(async (ws) => {
+    const promise = mod.launchParticipantJob({
+      participant: { participant_id: 'p1', agent_id: 'claude-test' },
+      manifest: opinionManifest(),
+      agentConfig: fakeAgentConfig({ command: 'claude', extraArgs: ['--extra-marker'], execArgs: ['--exec-marker'], promptFlag: '--prompt-flag' }),
+      worktreeDir: '/wt',
+      workspace: ws,
+    });
+    try {
+      assert.equal(spawnCalls.length, 1);
+      const argv = launchedArgv(spawnCalls[0]);
+      // 期待値は fixture の値から独立に書く（command、extraArgs、execArgs、promptFlag の順）
+      assert.deepEqual(argv.slice(0, 4), ['claude', '--extra-marker', '--exec-marker', '--prompt-flag']);
+      // 末尾はプロンプト本文（promptFile を読ませる短い指示）
+      assert.equal(argv.length, 5);
+      assert.match(argv[4], /^Read .+ and execute it\.$/);
+    } finally {
+      // assert が失敗しても子プロセスを必ず閉じ、launch の Promise を解決させる（ハング防止）
+      children[0].stdout.emit('data', Buffer.from(JSON.stringify({ participant_id: 'p1', opinion: 'x', stance: 'AGREE' })));
+      children[0].emit('close', 0);
+      await promise;
+    }
   });
 });

@@ -75,14 +75,6 @@ test('slugifyTitle: ASCII英数字は小文字化して残し、決定論的ハ�
   assert.equal(mod.slugifyTitle('RAG構成の採用可否'), mod.slugifyTitle('RAG構成の採用可否'));
 });
 
-test('slugifyTitle: 非ASCIIのみのタイトルは council ベースでもハッシュで一意化される', () => {
-  const { mod } = loadModule();
-  assert.match(mod.slugifyTitle('採用可否について'), /^council-[0-9a-f]{8}$/);
-  assert.match(mod.slugifyTitle('!!!'), /^council-[0-9a-f]{8}$/);
-  // 異なる日本語タイトルが同じ 'council' に潰れない（review指摘 #2 の核心）
-  assert.notEqual(mod.slugifyTitle('採用可否について'), mod.slugifyTitle('料金改定について'));
-});
-
 test('slugifyTitle: NFKC で全角英字を ASCII へ正規化し、半角版と同一スラッグになる', () => {
   const { mod } = loadModule();
   // 全角英字「ＲＡＧ」は NFKC で「RAG」に正規化される
@@ -91,11 +83,12 @@ test('slugifyTitle: NFKC で全角英字を ASCII へ正規化し、半角版と
   assert.equal(mod.slugifyTitle('ＲＡＧ構成の採用可否'), mod.slugifyTitle('RAG構成の採用可否'));
 });
 
-test('slugifyTitle: 純日本語・ひらがな・カタカナのタイトル群は互いに異なるスラッグ（ASCII畳み込み後もハッシュで区別）', () => {
+test('slugifyTitle: 非ASCIIのみ（記号のみ含む）のタイトル群は council ベースでハッシュ一意化され、互いに異なるスラッグ', () => {
   const { mod } = loadModule();
-  const titles = ['採用可否について', 'ひらがなのみ', 'カタカナのみ'];
+  // 記号のみの '!!!' も非ASCIIのみと同じく council-<hash8>（統合元 No.2 の検出範囲）
+  const titles = ['採用可否について', 'ひらがなのみ', 'カタカナのみ', '!!!'];
   const slugs = titles.map(t => mod.slugifyTitle(t));
-  // いずれも ASCII ベースは 'council'（日本語が全て畳み込まれる）だが、ハッシュで一意化される
+  // いずれも ASCII ベースは 'council'（日本語・記号が全て畳み込まれる）だが、ハッシュで一意化される
   for (const s of slugs) assert.match(s, /^council-[0-9a-f]{8}$/);
   assert.equal(new Set(slugs).size, slugs.length, `slugs collide: ${slugs.join(', ')}`);
 });
@@ -181,13 +174,6 @@ test('resolveSession: 明示 session が形式外なら throw', () => {
   });
 });
 
-test('resolveSession: session 省略時は title から自動生成する', () => {
-  const { mod } = loadModule();
-  withTempWorkspace(ws => {
-    assert.equal(mod.resolveSession({ title: 'RAG構成の採用可否', workspace: ws }), mod.slugifyTitle('RAG構成の採用可否'));
-  });
-});
-
 test('resolveSession: state ファイル既存時は -2, -3... の接尾辞を付与する', () => {
   const { mod } = loadModule();
   withTempWorkspace(ws => {
@@ -199,10 +185,14 @@ test('resolveSession: state ファイル既存時は -2, -3... の接尾辞を�
   });
 });
 
-test('resolveSession: state ファイルが無ければ接尾辞を付けない', () => {
+test('resolveSession: state ファイルが無ければ接尾辞を付けない（session 省略時は title から生成）', () => {
   const { mod } = loadModule();
   withTempWorkspace(ws => {
     fs.writeFileSync(path.join(ws, '.gh-maestro', 'council-other.json'), '{}', 'utf8');
+    assert.equal(mod.resolveSession({ title: 'RAG構成の採用可否', workspace: ws }), mod.slugifyTitle('RAG構成の採用可否'));
+  });
+  // 空ディレクトリでも title からの生成になる（統合元「session 省略時の title 生成」の検出範囲）
+  withTempWorkspace(ws => {
     assert.equal(mod.resolveSession({ title: 'RAG構成の採用可否', workspace: ws }), mod.slugifyTitle('RAG構成の採用可否'));
   });
 });
