@@ -164,6 +164,8 @@ gh-maestroは割り当て可能なモデル資源を、判断の価値に応じ�
 - 管理用の状態ファイルが破損していた場合、削除・初期化・再構築による自動修復を実装してはならない。どのファイルがどう壊れているかを示して処理を止める。回復は有事に人間の指示のもとエージェントが行う。
   理由と経緯: docs/adr/0036-corrupt-state-files-are-reported-not-repaired.md
 理由と経緯: docs/adr/0040-stale-pane-socket-is-recreated.md
+- 例外: `config.json` は管理用の状態ファイルに当たらない。壊れていたら既定値で動いてよいが、どこが壊れていて既定値を使ったかを必ず警告する。壊れた `config.json` を書き換えて直してはならない。
+理由と経緯: docs/adr/0053-config-json-fallback-with-warning.md
 
 ### エージェントCLIの変更は実機で確認する
 
