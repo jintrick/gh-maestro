@@ -53,22 +53,82 @@ function loadDefaults() {
 
 // ── config.json 読み込み ────────────────────────────────────────────────────
 
+// 同じプロセス内で、同じファイル・同じ箇所についての警告を1回だけ出すための記録。
+// watch（周期的な再読み込み）や council / review manager は同じプロセス内で設定を
+// 何度も読むため、毎回出すと同じ警告で標準エラーが埋まる。キーは「ファイルパス」または
+// 「ファイルパス#キー名」。
+// ワーカー間で共有されない（プロセスごとに1回）。テストは一時ディレクトリのパスを使うため、
+// パスが衝突せず、リセットを要さない。
+const emittedConfigWarnings = new Set();
+
+function warnConfigOnce(location, message) {
+  if (emittedConfigWarnings.has(location)) return;
+  emittedConfigWarnings.add(location);
+  process.stderr.write(`${message}\n`);
+}
+
 /**
- * config.json を読み込む。存在しない／パース失敗時は空オブジェクトを返す。
+ * config.json を読み込む。存在しない場合は空オブジェクトを返す。
+ *
+ * 壊れている（JSON 構文エラー、トップレベルがオブジェクトでない、読み取り失敗）場合は、
+ * 既定値で動くため空オブジェクトを返すが、必ず stderr に警告する（ADR 0053）。
+ * ファイルは読むだけで書き換えない。
  * @param {string} configPath
  * @returns {object}
  */
 function loadConfigFile(configPath) {
-  if (!existsSync(configPath)) return {};
-  try {
-    const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
-    if (isPlainObject(parsed)) {
-      return parsed;
+  const read = loadTestConfigFile(configPath);
+  if (read.ok) return read.config;
+  warnConfigOnce(
+    configPath,
+    `gh-maestro: config.json を読めないため既定値を使います: ${configPath}（${read.error}）。ファイルは変更していません。`,
+  );
+  return {};
+}
+
+/**
+ * config.json の skillAgentMap を取り出す。プレーンオブジェクト以外の値は取り込まず、
+ * 警告して null を返す（ADR 0053: 壊れた箇所を示し、既定値で動く）。
+ * 値が無い（undefined）場合も null を返す。
+ * @param {object} config loadConfigFile の結果
+ * @param {string} configPath
+ * @returns {object|null}
+ */
+function readSkillAgentMapSection(config, configPath) {
+  if (config.skillAgentMap === undefined) return null;
+  if (isPlainObject(config.skillAgentMap)) return config.skillAgentMap;
+  warnConfigOnce(
+    `${configPath}#skillAgentMap`,
+    `gh-maestro: config.json の skillAgentMap がオブジェクトではないため無視し既定値を使います: ${configPath}（キー: skillAgentMap）。ファイルは変更していません。`,
+  );
+  return null;
+}
+
+/**
+ * config.json のうち、既定値へ戻して動いている箇所を調べる（セッション開始時の表示用）。
+ * 読み取りだけを行い、警告は出さない。壊れていないファイルは結果に含めない。
+ * @param {object} opts
+ * @param {string} [opts.homedir]
+ * @param {string} [opts.workspace]
+ * @returns {{path:string, reason:string}[]}
+ */
+function inspectConfigFileHealth(opts = {}) {
+  const homedir = opts.homedir || process.env.HOME || process.env.USERPROFILE || '';
+  const configPaths = [resolve(homedir, '.gh-maestro', 'config.json')];
+  if (opts.workspace) configPaths.push(resolve(opts.workspace, '.gh-maestro', 'config.json'));
+
+  const broken = [];
+  for (const configPath of configPaths) {
+    const read = loadTestConfigFile(configPath);
+    if (!read.ok) {
+      broken.push({ path: configPath, reason: read.error });
+      continue;
     }
-    return {};
-  } catch {
-    return {};
+    if (read.config.skillAgentMap !== undefined && !isPlainObject(read.config.skillAgentMap)) {
+      broken.push({ path: configPath, reason: 'skillAgentMap is not an object' });
+    }
   }
+  return broken;
 }
 
 /**
@@ -77,6 +137,7 @@ function loadConfigFile(configPath) {
  * agent 設定の既存ローダーは、壊れた config.json を空設定として扱う契約を
  * 持つため変更しない。テスト層宣言は未宣言と不正設定を区別する必要があるため、
  * この経路だけは JSON 構文とトップレベル型の失敗を呼び出し元へ返す。
+ * 読み取りだけを行い、警告は出さない（警告は loadConfigFile が出す）。
  * @param {string} configPath
  * @returns {{ok:true,config:object}|{ok:false,error:string}}
  */
@@ -711,15 +772,17 @@ function resolveSkillAgentMap(opts = {}) {
 
   let map = { ...defaults.skillAgentMap };
 
-  const globalConfig = loadConfigFile(resolve(homedir, '.gh-maestro', 'config.json'));
-  if (globalConfig.skillAgentMap) {
-    Object.assign(map, globalConfig.skillAgentMap);
+  const globalPath = resolve(homedir, '.gh-maestro', 'config.json');
+  const globalSection = readSkillAgentMapSection(loadConfigFile(globalPath), globalPath);
+  if (globalSection) {
+    Object.assign(map, globalSection);
   }
 
   if (opts.workspace) {
-    const wsConfig = loadConfigFile(resolve(opts.workspace, '.gh-maestro', 'config.json'));
-    if (wsConfig.skillAgentMap) {
-      Object.assign(map, wsConfig.skillAgentMap);
+    const wsPath = resolve(opts.workspace, '.gh-maestro', 'config.json');
+    const wsSection = readSkillAgentMapSection(loadConfigFile(wsPath), wsPath);
+    if (wsSection) {
+      Object.assign(map, wsSection);
     }
   }
 
@@ -864,6 +927,7 @@ module.exports = {
   validateTestMapping,
   validateDynamicConcurrency,
   resolveSkillAgentMap,
+  inspectConfigFileHealth,
   resolveCouncilConfig,
   resolveHumanNotificationConfig,
   resolveExtends,

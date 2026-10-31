@@ -319,3 +319,74 @@ test('orchestrator.json に sessionId が空文字または存在しない場合
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// 壊れた config.json は、既定値で動いていることをセッション開始時に示す（ADR 0053）。
+// 壊れていないときは CONFIG_JSON_BROKEN を一切出さない。
+function brokenLines(stdout) {
+  return stdout.split(/\r?\n/).filter(line => line.startsWith('CONFIG_JSON_BROKEN='));
+}
+
+test('workspace の config.json が壊れていると CONFIG_JSON_BROKEN にそのパスを出す', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace('{ broken');
+  try {
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    const lines = brokenLines(r.stdout);
+    assert.equal(lines.length, 1, `expected one broken-config line: ${r.stdout}`);
+    // 期待値は一時ディレクトリの名前と .gh-maestro/config.json から組み立てる（実装の出力から導出しない）。
+    assert.ok(lines[0].replace(/\\/g, '/').includes(`${path.basename(workspace)}/.gh-maestro/config.json`),
+      `line must name the workspace config: ${lines[0]}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('global の config.json が壊れていると CONFIG_JSON_BROKEN にそのパスを出す', () => {
+  const { home, env } = isolatedHome();
+  fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), '[]', 'utf8');
+  const workspace = createContextWorkspace(JSON.stringify({}));
+  try {
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    const lines = brokenLines(r.stdout);
+    assert.equal(lines.length, 1, `expected one broken-config line: ${r.stdout}`);
+    assert.ok(lines[0].replace(/\\/g, '/').includes(`${path.basename(home)}/.gh-maestro/config.json`),
+      `line must name the global config: ${lines[0]}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('有効な JSON でも skillAgentMap だけ不正な workspace の config.json は CONFIG_JSON_BROKEN にそのパスを出す', () => {
+  const { home, env } = isolatedHome();
+  // JSON としては正しく、skillAgentMap の型だけが不正（配列）。構文エラーとは別の分岐。
+  const workspace = createContextWorkspace(JSON.stringify({ skillAgentMap: ['not', 'an', 'object'] }));
+  try {
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    const lines = brokenLines(r.stdout);
+    assert.equal(lines.length, 1, `expected one broken-config line: ${r.stdout}`);
+    assert.ok(lines[0].replace(/\\/g, '/').includes(`${path.basename(workspace)}/.gh-maestro/config.json`),
+      `line must name the workspace config: ${lines[0]}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('config.json が壊れていなければ CONFIG_JSON_BROKEN を出さない', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace(JSON.stringify({ skillAgentMap: { 'gh-maestro-coder': 'agy' } }));
+  try {
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.deepEqual(brokenLines(r.stdout), []);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});

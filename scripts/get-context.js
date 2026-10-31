@@ -6,7 +6,7 @@ const { execSync } = require('child_process');
 const { getCurrentBranch } = require('./shared/git-branch');
 const { resolveWorkspace } = require('./shared/workspace');
 const { readState } = require('./shared/read-state');
-const { getTestLayerDeclarationStatus } = require('./shared/resolve-config');
+const { getTestLayerDeclarationStatus, inspectConfigFileHealth } = require('./shared/resolve-config');
 const {
   STATUS: NODE_MODULES_STATUS,
   formatStatusLine,
@@ -76,6 +76,17 @@ if (baseBranch) console.log(`BASE_BRANCH=${baseBranch}`);
 console.log('GH_MAESTRO_WORKER=orchestrator');
 if (sessionId) console.log(`SESSION_ID=${sessionId}`);
 console.log(`TEST_LAYERS_STATUS=${testLayersStatus}`);
+
+// 壊れた config.json（既定値で動いているもの）だけを表示する。壊れていなければ何も出さない（ADR 0053）。
+let brokenConfigs = [];
+try {
+  brokenConfigs = inspectConfigFileHealth({ workspace });
+} catch {
+  // 表示は補助情報であり、セッション初期化を止めない。
+}
+for (const broken of brokenConfigs) {
+  console.log(`CONFIG_JSON_BROKEN=${broken.path} (${broken.reason})`);
+}
 
 let nodeModulesStatus;
 try {

@@ -64,16 +64,25 @@ test('resolveAgentConfig: 該当エージェントが見つからなければ nu
   });
 });
 
-test('resolveAgentConfig: config.jsonのパース失敗時は例外を投げず null を返す', () => {
+test('resolveAgentConfig: config.jsonのパース失敗時は例外を投げず既定値を返し、警告で場所を示す', () => {
   withTempHome(home => {
-    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
-    fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), '{ not valid json', 'utf8');
-    // soft-fail: 内部で catch して null を返す
-    // ただし resolve-config.js の loadConfigFile が空オブジェクトを返すため、
-    // パース失敗時はデフォルト値にフォールバックする（null ではなくデフォルトが返る）
-    const r = resolveAgentConfig('agy', home);
+    const configPath = path.join(home, '.gh-maestro', 'config.json');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, '{ not valid json', 'utf8');
+    // 例外は投げない。壊れた config.json は既定値で動き、stderr に警告する（ADR 0053）。
+    // 既定値の command は agent-defaults.json の値（'agy'）を期待値として固定する。
+    const original = process.stderr.write;
+    const chunks = [];
+    process.stderr.write = (chunk) => { chunks.push(String(chunk)); return true; };
+    let r;
+    try {
+      r = resolveAgentConfig('agy', home);
+    } finally {
+      process.stderr.write = original;
+    }
     assert.ok(r, 'should fall back to defaults on parse error');
     assert.equal(r.command, 'agy');
+    assert.ok(chunks.join('').includes(configPath), 'warning must name the broken file');
   });
 });
 

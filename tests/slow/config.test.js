@@ -477,35 +477,51 @@ test('Profile semantics: プロファイルの重ね掛け（スタック適用�
   });
 });
 
-test('Profile semantics: 壊れた skillAgentMap（プレーンオブジェクト以外）があってもプロファイル適用時に修復される', () => {
+// 壊れた config.json は書き換えない（ADR 0053）。use は止まり、ファイルのバイト列は変わらない。
+test('Profile semantics: skillAgentMap が文字列のとき use は終了コード1で止まり、ファイルを書き換えず、箇所を示す', () => {
   withTempHome(home => {
-    // 1. skillAgentMap が文字列になっている（無効）
+    const configPath = path.join(home, '.gh-maestro', 'config.json');
     writeConfig(home, {
       skillAgentMap: 'corrupted-string-value',
       profiles: {
         peak: { skillAgentMap: { 'gh-maestro-coder': 'agy' } },
       },
     });
+    const before = fs.readFileSync(configPath, 'utf8');
 
-    let r = runConfig(['use', 'peak'], home);
-    assert.equal(r.status, 0, r.stderr);
+    const r = runConfig(['use', 'peak'], home);
+    assert.equal(r.status, 1, `expected exit 1, got ${r.status}: ${r.stderr}`);
+    assert.ok(r.stderr.includes('skillAgentMap'), `stderr must name the key: ${r.stderr}`);
+    assert.equal(fs.readFileSync(configPath, 'utf8'), before, 'config.json must not be rewritten');
+  });
+});
 
-    let config = loadJSON(path.join(home, '.gh-maestro', 'config.json'));
-    assert.deepEqual(config.skillAgentMap, { 'gh-maestro-coder': 'agy' });
-
-    // 2. skillAgentMap が配列になっている（無効）
+test('Profile semantics: skillAgentMap が配列のとき use は終了コード1で止まり、ファイルを書き換えない', () => {
+  withTempHome(home => {
+    const configPath = path.join(home, '.gh-maestro', 'config.json');
     writeConfig(home, {
       skillAgentMap: ['array', 'is', 'invalid'],
       profiles: {
         peak: { skillAgentMap: { 'gh-maestro-coder': 'agy' } },
       },
     });
+    const before = fs.readFileSync(configPath, 'utf8');
 
-    r = runConfig(['use', 'peak'], home);
-    assert.equal(r.status, 0, r.stderr);
+    const r = runConfig(['use', 'peak'], home);
+    assert.equal(r.status, 1, `expected exit 1, got ${r.status}: ${r.stderr}`);
+    assert.equal(fs.readFileSync(configPath, 'utf8'), before, 'config.json must not be rewritten');
+  });
+});
 
-    config = loadJSON(path.join(home, '.gh-maestro', 'config.json'));
-    assert.deepEqual(config.skillAgentMap, { 'gh-maestro-coder': 'agy' });
+test('Profile semantics: JSON 構文エラーの config.json では use は終了コード1で止まり、ファイルを書き換えない', () => {
+  withTempHome(home => {
+    const configPath = path.join(home, '.gh-maestro', 'config.json');
+    fs.writeFileSync(configPath, '{ "profiles": { "peak": ', 'utf8');
+    const before = fs.readFileSync(configPath, 'utf8');
+
+    const r = runConfig(['use', 'peak'], home);
+    assert.equal(r.status, 1, `expected exit 1, got ${r.status}: ${r.stderr}`);
+    assert.equal(fs.readFileSync(configPath, 'utf8'), before, 'config.json must not be rewritten');
   });
 });
 
