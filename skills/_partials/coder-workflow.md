@@ -59,19 +59,15 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
    - 実行は宣言されたランナー経由で行い、成果物に残った終了コード・実行範囲・件数・lint/型チェック記録を `push-and-declare.js` に引き渡す。毎回側の実行では lint を同じ成果物へ記録し、scope=full では package.json に `typecheck` スクリプトがあれば `npm run typecheck` を実行する。未定義・成功・失敗・起動不能を区別して記録する。lint と型チェックの結果はテストの失敗や終了コードへ変換せず、申告コメント、`TEST_STATUS` 通知、`query-test-status.js` 照会へ伝える。必須のlintまたは型チェック記録が欠落・古い・破損している場合は申告を完了させず、`run-tests.js` の再実行を促す。結果の数値を手入力してはならない
      - 実行入口は `node "{{SCRIPTS_PATH}}/run-tests.js" --workspace $WORKSPACE <一覧で確認した層名>` とし、分離側の変更対応を使うときは `--changed` と変更ファイルの相対パスを渡す
 6. **初回実装完了時・レビュー指摘対応の修正push時に、ステージング・コミット・push・PR取得/作成・テスト結果申告を一つの操作にまとめた `push-and-declare.js` を実行する**:
-   申告表は、PR の差分全体（基底ブランチ `$BASE_BRANCH` から HEAD まで）に含まれるテストについての表で、push のたびに出し直す。判定は次のとおり。
-   - 次のコマンドを、`push-and-declare.js` を実行する前に実行する。コミット済み・ステージ済み・未ステージの変更（`git diff` は作業ツリーと基底の差分）と未追跡ファイルのうち、対象プロジェクトのテスト層が宣言するテストファイル（`run-tests.js --declared-tests` が判定する）が1行でも出力されれば、PR の差分にテストの変更（追加・書き直し・削除・統合のいずれか）がある。テストの場所はディレクトリ名で決めず、宣言に従う。
-     ```sh
-     { git diff --name-only origin/$BASE_BRANCH; git ls-files --others --exclude-standard; } | node "{{SCRIPTS_PATH}}/run-tests.js" --workspace $WORKSPACE --declared-tests
-     ```
-     出力があれば、この push で必ず `--declaration-file` を付ける。今回の push がテストに触れていなくても付ける。
-   - 差分にテストの変更が無ければ（文書だけの変更など）付けない。
+   申告表は、PR の差分全体（基底ブランチ `$BASE_BRANCH` から HEAD まで）に含まれるテストについての表で、**push のたびに必ず** `--declaration-file` で出す。判定はしない（テストに触れない push でも出す）。
+   - PR の差分にテストの変更（追加・書き直し・削除・統合のいずれか）が無い回は、表の代わりに「テストの変更なし」とだけ書く。
+   - PR の差分にテストの変更がある回は、テストごとの表を書く（下の列の規則に従う）。
    - 表は前回の表（`$WORKSPACE/.gh-maestro/pr-declaration-$ISSUE.md`）を基に、今回の push で変わったテストを反映して全体を書き直す。テストに触れない push では内容を変えずに出し直す。
    - ファイルは heredoc（`cat >`）で直接作る（`write-draft.js` は `/tmp` 配下しか書けない）。
    ```sh
    DECL_FILE="$WORKSPACE/.gh-maestro/pr-declaration-$ISSUE.md"
    cat > "$DECL_FILE" <<'EOF'
-   <手順5で控えた申告表>
+   <手順5で控えた申告表。テストの変更が無い回は「テストの変更なし」の一文>
    EOF
    ```
    ```sh
