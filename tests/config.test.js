@@ -1,11 +1,10 @@
 'use strict';
 
-const { test, before, after } = require('node:test');
+const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
 
 const {
   loadJSON,
@@ -17,8 +16,6 @@ const {
 } = require('../scripts/config');
 
 const { loadDefaults } = require('../scripts/shared/resolve-config');
-
-const SCRIPT = path.join(__dirname, '..', 'scripts', 'config.js');
 
 test('config --help describes extraArgs as shared and execArgs as reserved', () => {
   assert.match(USAGE, /Set agents\.<id>\.extraArgs for arguments shared by normal and headless launches/);
@@ -53,46 +50,6 @@ function writeConfig(home, data) {
   );
 }
 
-/**
- * Create a temp workspace directory.
- */
-function withTempWorkspace(fn) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-config-ws-'));
-  try {
-    fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
-    return fn(dir);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-/**
- * Write workspace config into a temp workspace directory.
- */
-function writeWorkspaceConfig(ws, data) {
-  fs.writeFileSync(
-    path.join(ws, '.gh-maestro', 'config.json'),
-    JSON.stringify(data, null, 2),
-    'utf8',
-  );
-}
-
-/**
- * Run config.js as a subprocess with a custom HOME.
- */
-function runConfig(args, home, cwd) {
-  const env = { ...process.env, HOME: home, USERPROFILE: home };
-  // Unset GH_MAESTRO_WORKSPACE so tests don't pick up the real workspace
-  delete env.GH_MAESTRO_WORKSPACE;
-  // Use os.tmpdir() as default cwd to avoid accidentally picking up
-  // a .gh-maestro workspace directory from the home path
-  return spawnSync(process.execPath, [SCRIPT, ...args], {
-    cwd: cwd || os.tmpdir(),
-    env,
-    encoding: 'utf8',
-  });
-}
-
 // ── loadJSON ───────────────────────────────────────────────────────────────────
 
 test('loadJSON: 存在しないファイルは null を返す', () => {
@@ -122,21 +79,15 @@ test('loadJSON: パース失敗で _parseError を返す', () => {
   });
 });
 
-test('loadJSON: 配列は _parseError を返す', () => {
+test('loadJSON: 配列とプリミティブ値は _parseError を返す（オブジェクト以外を一律に拒否する）', () => {
   withTempHome(home => {
     const p = path.join(home, '.gh-maestro', 'config.json');
-    fs.writeFileSync(p, '[]', 'utf8');
-    const result = loadJSON(p);
-    assert.ok(result._parseError, 'should have _parseError for array');
-  });
-});
-
-test('loadJSON: プリミティブ値は _parseError を返す', () => {
-  withTempHome(home => {
-    const p = path.join(home, '.gh-maestro', 'config.json');
-    fs.writeFileSync(p, '"string"', 'utf8');
-    const result = loadJSON(p);
-    assert.ok(result._parseError, 'should have _parseError for primitive');
+    // Array.isArray だけを見る実装では "string" が通ってしまうため、両方を入力にする
+    for (const text of ['[]', '"string"']) {
+      fs.writeFileSync(p, text, 'utf8');
+      const result = loadJSON(p);
+      assert.ok(result._parseError, `should have _parseError for ${text}`);
+    }
   });
 });
 
@@ -183,22 +134,21 @@ test('closestKnownSkillKey: returns closest prefix match', () => {
   assert.equal(result, 'gh-maestro-reviewer');
 });
 
-test('closestKnownSkillKey: empty knownKeys returns null', () => {
-  assert.equal(closestKnownSkillKey('anything', []), null);
+test('closestKnownSkillKey: 候補が空・null なら null（例外を投げない）', () => {
+  // 空配列だけを見る実装では null 入力での例外を見逃すため、両方を入力にする
+  for (const knownKeys of [[], null]) {
+    assert.equal(closestKnownSkillKey('anything', knownKeys), null);
+  }
 });
 
-test('closestKnownSkillKey: null knownKeys returns null', () => {
-  assert.equal(closestKnownSkillKey('anything', null), null);
-});
-
-test('closestKnownSkillKey: short mismatch returns null', () => {
-  const keys = ['gh-maestro-coder', 'gh-maestro-reviewer'];
-  assert.equal(closestKnownSkillKey('xyz', keys), null);
-});
-
-test('closestKnownSkillKey: totally different key returns null', () => {
-  const keys = ['gh-maestro-coder', 'gh-maestro-reviewer', 'gh-maestro-base'];
-  assert.equal(closestKnownSkillKey('completely-unrelated', keys), null);
+test('closestKnownSkillKey: 短い不一致・全く異なるキーは null（誤一致させない）', () => {
+  const cases = [
+    ['xyz', ['gh-maestro-coder', 'gh-maestro-reviewer']],
+    ['completely-unrelated', ['gh-maestro-coder', 'gh-maestro-reviewer', 'gh-maestro-base']],
+  ];
+  for (const [key, keys] of cases) {
+    assert.equal(closestKnownSkillKey(key, keys), null, `key=${key}`);
+  }
 });
 
 test('closestKnownSkillKey: 共通接頭辞のみ一致し個別名が異なる場合は null を返す', () => {
@@ -388,9 +338,8 @@ test('validateConfig: プロファイルの skillAgentMap が空オブジェク�
   const defaults = loadDefaults();
   const config = { profiles: { empty: { skillAgentMap: {} } } };
   const issues = validateConfig('global', '/tmp/config.json', config, defaults);
-  assert.ok(issues.some(i =>
-    i.includes('empty') && (i.includes('empty') || i.includes('missing')),
-  ));
+  // [ERROR] であること（[WARN] への格下げを検出する）と、対象フィールド名を要求する
+  assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('skillAgentMap')), `issues: ${issues.join('\n')}`);
 });
 
 test('validateConfig: プロファイル内の未知のエージェントID は警告', () => {
@@ -486,48 +435,6 @@ test('validateConfig: プロファイルの未知スキルキーに "did you mea
     i.includes('did you mean') && i.includes('gh-maestro-reviewer') && i.includes('bad'),
   ), 'should suggest gh-maestro-reviewer in profile context');
 });
-
-// ── CLI integration: --help ────────────────────────────────────────────────────
-
-
-
-
-
-// ── CLI integration: use ───────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-// ── CLI integration: doctor ────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-// ── saveConfig ─────────────────────────────────────────────────────────────────
-
-
-
-// ── Profile differential semantics ─────────────────────────────────────────────
-
-// ── Config parse error handling ────────────────────────────────────────────────
-
-
-// ── --workspace flag parsing ───────────────────────────────────────────────────
 
 // ── validateCouncilConfig（Issue #230） ───────────────────────────────────────
 

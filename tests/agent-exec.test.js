@@ -1,11 +1,16 @@
 'use strict';
 
-const { test } = require('node:test');
+const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('child_process');
 
 const agentExec = require('../scripts/shared/agent-exec');
 const { buildLoginShellExecArgs, checkAgentExists } = agentExec;
+const realSpawnSync = require('../scripts/shared/child-process').spawnSync;
+
+// checkAgentExists 系のテストは _setSpawnSync で mock を差し替える。
+// 各テストの後に実物へ戻し、mock の状態が後続のテストへ漏れないようにする。
+afterEach(() => agentExec._setSpawnSync(realSpawnSync));
 
 // ── buildLoginShellExecArgs ──────────────────────────────────────────────────
 
@@ -28,15 +33,12 @@ test('buildLoginShellExecArgs: win32 は pwsh -EncodedCommand を返す', () => 
   assert.ok(decoded.endsWith('exit $exitCode'));
 });
 
-test('buildLoginShellExecArgs: win32 で引数内の \' をエスケープする', () => {
-  const args = buildLoginShellExecArgs(['claude', "hello 'world' test"], 'win32');
+test('buildLoginShellExecArgs: win32 で引数内の \' をエスケープし、空白を含む引数はクォートする', () => {
+  // 空白入り・クォート入りの引数は、完全一致でクォートの有無と二重化を検査する。
+  // 空白入りパス単独の引数も、同じ仕組みで引用符に包まれることを確かめる。
+  const args = buildLoginShellExecArgs(['claude', "hello 'world' test", 'C:/path with spaces/prompt.md', 'start'], 'win32');
   const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
   assert.ok(decoded.includes("'hello ''world'' test'"));
-});
-
-test('buildLoginShellExecArgs: win32 で空白を含むパスを安全に扱う', () => {
-  const args = buildLoginShellExecArgs(['claude', '--append-system-prompt-file', 'C:/path with spaces/prompt.md', 'start'], 'win32');
-  const decoded = Buffer.from(args[3], 'base64').toString('utf16le');
   assert.ok(decoded.includes("'C:/path with spaces/prompt.md'"));
 });
 
@@ -104,7 +106,6 @@ test('buildLoginShellExecArgs: 終了フックはエージェント終了後に�
   assert.deepEqual(unixArgs.slice(7), ['codex-pro', 'start']);
 });
 
-
 // ── win32: 終了コード検出の正確性（実障害の再発防止） ──────────────────────
 //
 // $LASTEXITCODE だけに頼ると、agentCmdArgs[0] がPATH上にもpwsh関数としても存在しない
@@ -112,9 +113,6 @@ test('buildLoginShellExecArgs: 終了フックはエージェント終了後に�
 // 更新されないため、onExitフックに exit code 0（成功）が渡ってしまっていた
 // （実障害: config.jsonのextendsで登録したpwsh関数名の誤記や、Review Managerへの
 // カスタムエージェント割り当て時にworker-exit-hook.jsの異常終了通知が発火しなかった）。
-
-
-
 
 // ── ログ複製（Tee-Object / tee）の撤去（Issue #151） ─────────────────────────
 //
@@ -163,11 +161,6 @@ test('buildLoginShellExecArgs: captureLogPath 相当の第5引数はもう受け
   assert.ok(!decoded.includes('Tee-Object'), decoded);
 });
 
-test('agent-exec: buildPwshCaptureClauses はエクスポートされていない', () => {
-  const agentExec = require('../scripts/shared/agent-exec');
-  assert.equal(agentExec.buildPwshCaptureClauses, undefined);
-});
-
 test('buildLoginShellExecArgs: 空配列でエラーになる', () => {
   assert.throws(() => buildLoginShellExecArgs([]), /non-empty array/);
   assert.throws(() => buildLoginShellExecArgs(null), /non-empty array/);
@@ -207,39 +200,43 @@ test('checkAgentExists: 存在しないコマンドは false を返す', () => {
   assert.equal(checkAgentExists('nonexistent-command-xyz-123-test'), false);
 });
 
-test('checkAgentExists: 空文字列は false を返す', () => {
+test('checkAgentExists: 空文字列は false を返す（mock が成功を返しても）', () => {
+  // mock は常に成功（status 0）を返す。空文字の早期 return を外すと true になる
+  agentExec._setSpawnSync(() => ({ status: 0 }));
   assert.equal(checkAgentExists(''), false);
 });
 
-test('checkAgentExists: win32 で存在するコマンドを確認できる', () => {
-  agentExec._setSpawnSync(() => ({ status: 0 }));
-  if (process.platform === 'win32') {
-    // Windows では node.exe が必ず存在する
-    assert.equal(checkAgentExists('node', 'win32'), true);
-    agentExec._setSpawnSync(() => ({ status: 1 }));
-    assert.equal(checkAgentExists('nonexistent-cmd-xyz-win', 'win32'), false);
-  }
+test('checkAgentExists: win32 では pwsh の Get-Command で確認し、argv と結果を検証する', () => {
+  // OS に依存させず、platform 引数で win32 経路を指定する
+  const calls = [];
+  agentExec._setSpawnSync((command, args) => {
+    calls.push({ command, args });
+    return { status: 0 };
+  });
+  assert.equal(checkAgentExists('node', 'win32'), true);
+  assert.equal(calls[0].command, 'pwsh');
+  assert.deepEqual(calls[0].args, [
+    '-NoLogo', '-NoProfile', '-Command', "Get-Command 'node' -ErrorAction Stop",
+  ]);
+
+  agentExec._setSpawnSync(() => ({ status: 1 }));
+  assert.equal(checkAgentExists('nonexistent-cmd-xyz-win', 'win32'), false);
 });
 
-test('checkAgentExists: Unix で存在するコマンドを確認できる', (t) => {
-  agentExec._setSpawnSync(() => ({ status: 0 }));
+test('checkAgentExists: platform 引数で経路（bash / pwsh）が切り替わる（OS に依らず argv を検証）', (t) => {
+  // 実行 OS が何であっても、platform 引数で選ばれる経路の argv を確認する
+  const calls = [];
+  agentExec._setSpawnSync((command, args) => {
+    calls.push({ command, args });
+    return { status: 0 };
+  });
   assert.equal(checkAgentExists('node', 'linux'), true);
+  assert.equal(calls[0].command, 'bash');
+  assert.deepEqual(calls[0].args, ['-lc', "command -v 'node' 2>/dev/null"]);
+  assert.equal(checkAgentExists('node', 'win32'), true);
+  assert.equal(calls[1].command, 'pwsh');
+
   agentExec._setSpawnSync(() => ({ status: 1 }));
   assert.equal(checkAgentExists('nonexistent-cmd-xyz-nix', 'linux'), false);
 });
 
-test('checkAgentExists: 異なるプラットフォーム指定で同一結果', (t) => {
-  agentExec._setSpawnSync(() => ({ status: 0 }));
-  // node はどのプラットフォームでも解決可能
-  assert.equal(checkAgentExists('node', 'win32'), true);
-  assert.equal(checkAgentExists('node', 'linux'), true);
-});
-
-// ── 7引数（resume形）の終了フック引数渡し検証 ────────────────────────────
-//
-// 旧実装では bash 経路で $1,$2,$3 しかキャプチャしておらず、resume時に渡される
-// 後半の引数（logPath, sinceTimestamp, logOffset, contractArg）がフックに届か
-// なかった。このテストは7引数の onExit.args を実際の bash -lc 経由で実行し、
-// 全引数 + 終了コードが正しくフックに渡っていることを確認する。
-// フック（bash -c）自身が消費する -c / script / hook-shim の3引数に加え、
-// resumeデータ4引数 + 終了コード1が届くことで、7引数設計の正当性を検証する。

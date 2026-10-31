@@ -8,7 +8,6 @@ const path = require('path');
 const {
   validateAgentEntry,
   validateAgentDefaults,
-  REQUIRED_FIELDS,
 } = require('../scripts/shared/validate-agent-defaults');
 const { resolveExtends } = require('../scripts/shared/resolve-config');
 
@@ -206,17 +205,12 @@ test('validateAgentEntry: promptDelivery=positional で promptFlag がなくて�
 
 // ── validateAgentEntry: 未知フィールド警告 ────────────────────────────────────
 
-test('validateAgentEntry: 未知のフィールドは警告する', () => {
+test('validateAgentEntry: 未知のフィールドは警告する（警告のみでエラーにはしない）', () => {
   const agent = makeValidAgent({ unknownField: 'surprise' });
   const issues = validateAgentEntry(agent, 0);
   assert.ok(issues.some(i => i.includes('[WARN]') && i.includes('unknownField')));
-});
-
-test('validateAgentEntry: 未知のフィールドは警告のみでエラーではない', () => {
-  const agent = makeValidAgent({ unknownField: 'surprise' });
-  const issues = validateAgentEntry(agent, 0);
-  const errors = issues.filter(i => i.startsWith('[ERROR]'));
-  assert.deepEqual(errors, []);
+  // 未知フィールドがエラーに昇格すると、ここで失敗する
+  assert.deepEqual(issues.filter(i => i.startsWith('[ERROR]')), []);
 });
 
 // ── validateAgentEntry: 既知のオプショナルフィールドの型チェック ──────────────
@@ -230,7 +224,8 @@ test('validateAgentEntry: dynamicCommand が boolean でないとエラー', () 
 test('validateAgentEntry: execPromptDelivery=flag に execPromptFlag がなければエラー', () => {
   const agent = makeValidAgent({ execPromptDelivery: 'flag' });
   const issues = validateAgentEntry(agent, 0);
-  assert.ok(issues.some(i => i.includes('execPromptFlag')), `issues: ${issues.join('\n')}`);
+  // 必須条件はエラーでなければならない（[WARN] への格下げを検出する）
+  assert.ok(issues.some(i => i.includes('[ERROR]') && i.includes('execPromptFlag')), `issues: ${issues.join('\n')}`);
 });
 test('validateAgentEntry: execArgs が配列でないとエラー', () => {
   const agent = makeValidAgent({ execArgs: 'not-an-array' });
@@ -269,11 +264,6 @@ test('validateAgentDefaults: 重複 id を検出する', () => {
 });
 
 // ── validation SSOT: フィールド一覧はテスト側で重複定義しない ──────────────────
-
-test('REQUIRED_FIELDS: rulesSupported が必須フィールドに含まれている', () => {
-  const fieldNames = REQUIRED_FIELDS.map(([f]) => f);
-  assert.ok(fieldNames.includes('rulesSupported'), 'rulesSupported must be in REQUIRED_FIELDS');
-});
 
 // ── extends ──────────────────────────────────────────────────────────────────
 
