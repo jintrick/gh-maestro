@@ -158,7 +158,7 @@ describe('CLI引数の解釈', () => {
     });
   });
 
-  test('7引数（resume+contract形）で非ゼロ終了コードを正しく解釈できる（回帰）', () => {
+  test('7引数（resume+contract形）でクラッシュしない（スモーク。終了コードの解釈は観測しない）', () => {
     withTempDir((dir) => {
       // exit code 1 → 異常終了通知がトリガーされるが、GH_MAESTRO_WORKER が
       // 無いため通知は発生せず、引数解釈の誤りによるクラッシュだけを検証する

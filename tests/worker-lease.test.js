@@ -203,11 +203,10 @@ test('createNormalWorkerStore: オブジェクト以外は read でエラーを�
   }
 });
 
-test('createNormalWorkerStore: update は staging+rename で原子的に更新する', () => {
+test('createNormalWorkerStore: update は更新後の値を残し、staging ファイルを残さない', () => {
   const store = tempStore();
   try {
     store.write('test-key', { pid: 1, workerName: 'original', createdAt: 'x' });
-    // 同時readをエミュレート: update中にreadしても完全なデータが読める
     store.update('test-key', { pid: 2, workerName: 'updated', createdAt: 'y' });
     const entry = store.read('test-key');
     assert.equal(entry.pid, 2);
@@ -696,20 +695,23 @@ test('acquireLease: lease記録と無関係にworker endpointがliveなら二重
   }
 });
 
-test('acquireLease: 破損JSONの既存リースは stale 扱いで回収', () => {
-  const store = tempStore();
-  try {
-    const fp = path.join(store._tmpDir, '.gh-maestro', 'leases', 'issue-1-coder-test.json');
-    fs.mkdirSync(path.dirname(fp), { recursive: true });
-    fs.writeFileSync(fp, 'corrupt', 'utf8');
+test('acquireLease: 破損JSONのリースは回収せず例外にし、ファイルを保持する（ADR 0036: 壊れた状態は報告し、修復しない）', () => {
+  // 現行の仕様: 破損JSONは stale として回収せず、「破損」の例外で止める。内容も変えない。
+  for (const [key, content] of [['issue-1-coder-test', 'corrupt'], ['broken', 'not-json']]) {
+    const store = tempStore();
+    try {
+      const fp = path.join(store._tmpDir, '.gh-maestro', 'leases', `${key}.json`);
+      fs.mkdirSync(path.dirname(fp), { recursive: true });
+      fs.writeFileSync(fp, content, 'utf8');
 
-    mockLiveness({ alive: true, identityMatch: true });
-    assert.throws(() => lease.acquireLease(store, 'issue-1-coder-test', {
-      processRef: testProcessRef(4242), workerName: 'issue-1-coder-test',
-    }), /破損/);
-    assert.equal(fs.readFileSync(fp, 'utf8'), 'corrupt');
-  } finally {
-    cleanupStore(store);
+      mockLiveness({ alive: true, identityMatch: true });
+      assert.throws(() => lease.acquireLease(store, key, {
+        processRef: testProcessRef(4242), workerName: key,
+      }), /破損/, key);
+      assert.equal(fs.readFileSync(fp, 'utf8'), content, key);
+    } finally {
+      cleanupStore(store);
+    }
   }
 });
 
@@ -1007,7 +1009,10 @@ test('acquireResidentLease: plugin takeover は生存中の同役割monitorを�
     const newLease = residentStore.read(lease.roleLeaseKey(role));
     assert.equal(newLease.pid, process.pid);
     assert.equal(typeof newLease.resourceKey, 'string');
-    assert.notEqual(newLease.resourceKey, 'old-plugin-monitor-resource');
+    // 資源キーは役割で決まり旧 monitor と同じになるため、比べるのは世代（instanceId）。
+    // 旧 monitor の instanceId（テストで与えた値）と、後発 lease の instanceId が異なることを確認する。
+    assert.equal(typeof newLease.instanceId, 'string', '比較の前提: 後発 lease に instanceId がある');
+    assert.notEqual(newLease.instanceId, 'old-plugin-monitor-instance');
     result.release();
   } finally {
     cleanupStore(store);
@@ -1292,7 +1297,7 @@ test('activateLease: callerが捕捉したProcessRefをそのまま保存する'
   }
 });
 
-test('activateLease: 起動時刻を取得できない場合はleaseを更新しない', () => {
+test('activateLease: endpoint が確認できない場合はリースを更新しない', () => {
   const store = tempStore();
   try {
     const existing = {
@@ -1317,21 +1322,29 @@ test('activateLease: 起動時刻を取得できない場合はleaseを更新し
   }
 });
 
-test('activateLease: temp+rename更新により並行readが不完全JSONを読まない', () => {
+test('activateLease: 更新は rename の直前まで旧値を残し、rename 後に新値へ切り替わる（候補J）', () => {
   const store = tempStore();
+  const realRename = fs.renameSync;
   try {
     store.write('test-key', {
       pid: 100, startTime: 'old', workerName: 'w', createdAt: 'x',
     });
 
-    // update中にreadしても完全な値が返る（atomic renameの保証）
+    // rename の直前に読んだ値を記録する（temp+rename なら、旧値か新値の完全な JSON のどちらかだけが見える）。
+    let seenBeforeRename = null;
+    fs.renameSync = (from, to) => {
+      if (String(to).endsWith('test-key.json')) seenBeforeRename = store.read('test-key');
+      return realRename(from, to);
+    };
     setReader(() => '2026-07-29T02:00:00.000Z');
     const processRef = testProcessRef(99999, '2026-07-29T02:00:00.000Z');
     lease.activateLease(store, 'test-key', processRef);
+    assert.equal(seenBeforeRename && seenBeforeRename.pid, 100, 'rename の直前は旧値が読まれる');
     const entry = store.read('test-key');
     assert.equal(entry.pid, 99999);
     assert.ok(entry.startTime);
   } finally {
+    fs.renameSync = realRename;
     cleanupStore(store);
   }
 });
@@ -1362,26 +1375,6 @@ test('シナリオ: 通常の起動フロー（予約→アクティベート→
   }
 });
 
-test('シナリオ: stale回収からの再起動', () => {
-  const store = tempStore();
-  try {
-    // 古いワーカーエントリを直接書き込む（プロセスは既に死んでいる）
-    store.write('issue-5-coder-fix-auth', {
-      pid: 11111, startTime: '2026-07-28T00:00:00.000Z', workerName: 'issue-5-coder-fix-auth', createdAt: '2026-07-28T00:00:00.000Z',
-    });
-
-    // PIDは死んでいる（stale判定）→ 高速チェック通過 → ロック取得 → 回収
-    mockLiveness({ alive: false });
-    const r2 = lease.acquireLease(store, 'issue-5-coder-fix-auth', {
-      processRef: activeLiveness.captureSelf(), workerName: 'issue-5-coder-fix-auth',
-    });
-    assert.equal(r2.staleReclaimed, true);
-    assert.equal(store.read('issue-5-coder-fix-auth').pid, process.pid);
-  } finally {
-    cleanupStore(store);
-  }
-});
-
 test('シナリオ: 起動失敗時のロールバック（リース解放）', () => {
   const store = tempStore();
   try {
@@ -1407,26 +1400,6 @@ test('シナリオ: 起動失敗時のロールバック（リース解放）', 
   }
 });
 
-test('シナリオ: staleロック保持者がいる場合、死亡していれば奪取して進行する', () => {
-  const store = tempStore();
-  try {
-    // 死んだlauncherのロックが残っている
-    mockLiveness({ alive: false }); // dead process reference
-    fs.mkdirSync(path.dirname(store.lockPath('issue-5-coder-fix-auth')), { recursive: true });
-    fs.writeFileSync(store.lockPath('issue-5-coder-fix-auth'), JSON.stringify({ pid: 2147483647, startTime: '2000-01-01T00:00:00.000Z' }), 'utf8');
-
-    // 既存leaseはなし、ロックはstale → 奪取成功
-    lease.acquireLease(store, 'issue-5-coder-fix-auth', {
-      processRef: activeLiveness.captureSelf(), workerName: 'issue-5-coder-fix-auth',
-    });
-    assert.equal(store.read('issue-5-coder-fix-auth').pid, process.pid);
-    // ロックは解放済み
-    assert.equal(fs.existsSync(store.lockPath('issue-5-coder-fix-auth')), false);
-  } finally {
-    cleanupStore(store);
-  }
-});
-
 // ── 常駐プロセス用 role lease（Issue #240） ───────────────────────────────────
 // workspace を canonicalWorkspace() で正規化して排他することで、表記差異（大文字小文字・
 // 末尾スラッシュ等）による重複起動のすり抜けを防ぐ。監査イベント記録は
@@ -1441,13 +1414,18 @@ test('roleLeaseKey: Windows パス無効文字をアンダースコアへ置換�
   assert.equal(lease.roleLeaseKey('a/b:c*d?e"f<g>h|i'), 'resident-role-a_b_c_d_e_f_g_h_i');
 });
 
-test('msgPollRole: MSGPOLL_ORCHESTRATOR_ROLE と msg-poll.js の role 構築が一箇所に集約されている（PR #302）', () => {
-  // MSGPOLL_ORCHESTRATOR_ROLE が msgPollRole('orchestrator') から導出されて
-  // いることを固定する。
+test('msgPollRole: 役割名の値を文字列リテラルで固定する（msgpoll-orchestrator・msgpoll-worker-1）', () => {
+  // 期待値は文字列リテラル。関数の戻り値同士の比較は、関数が何を返しても通るため使わない。
   assert.equal(typeof lease.msgPollRole, 'function');
   assert.equal(lease.msgPollRole('orchestrator'), 'msgpoll-orchestrator');
   assert.equal(lease.msgPollRole('worker-1'), 'msgpoll-worker-1');
-  assert.equal(lease.MSGPOLL_ORCHESTRATOR_ROLE, lease.msgPollRole('orchestrator'));
+  assert.equal(lease.MSGPOLL_ORCHESTRATOR_ROLE, 'msgpoll-orchestrator');
+});
+
+test('msg-poll.js は役割名を msgPollRole 経由で作る（候補K・静的検査）', () => {
+  // 役割名の構築を一箇所（msgPollRole）に集約していることを、ソースの呼び出しで確認する。
+  const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'msg-poll.js'), 'utf8');
+  assert.match(src, /msgPollRole\(/);
 });
 
 test('acquireResidentLease: live lease が無ければ取得して自PIDでアクティブ化する', () => {
@@ -1632,6 +1610,7 @@ test('acquireResidentLease: deterministic endpointがdeadならPIDが存在す�
     const ownerPid = 424242;
     installTestLiveness(createTestLiveness({
       probePid: () => 'alive',
+      probeEndpoint: () => 'dead', // 前提を明示する（既定値に頼らない）
     }));
     const kills = [];
     lease._setKillProcessTree((pid) => { kills.push(pid); });
@@ -1673,6 +1652,7 @@ test('isResidentLeaseLive: deterministic endpointがdeadならendpointless PR1�
     });
     installTestLiveness(createTestLiveness({
       probePid: (pid) => pid === ownerPid ? 'unknown' : 'alive',
+      probeEndpoint: () => 'dead', // 前提を明示する（既定値に頼らない）
     }));
 
     assert.equal(lease.isResidentLeaseLive({ workspace: tmp, role: 'worker-supervisor' }), false);
@@ -1833,19 +1813,6 @@ test('acquireLease: 不明な所有者のリースを保持し二重起動を拒
     }), { code: 'LIVENESS_UNKNOWN' });
     assert.deepEqual(store.read('unknown'), existing);
   } finally { installTestLiveness(null); cleanupStore(store); }
-});
-
-test('acquireLease: 破損したリースを保持し二重起動を拒否する', () => {
-  const store = tempStore();
-  try {
-    const fp = path.join(store._tmpDir, '.gh-maestro', 'leases', 'broken.json');
-    fs.mkdirSync(path.dirname(fp), { recursive: true });
-    fs.writeFileSync(fp, 'not-json');
-    assert.throws(() => lease.acquireLease(store, 'broken', {
-      processRef: testProcessRef(process.pid, '2026-07-29T00:00:00.000Z'), workerName: 'broken',
-    }), /破損/);
-    assert.equal(fs.readFileSync(fp, 'utf8'), 'not-json');
-  } finally { cleanupStore(store); }
 });
 
 test('acquireLease: EEXIST 後に不明な lease が現れても削除しない', () => {

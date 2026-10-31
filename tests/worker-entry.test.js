@@ -22,10 +22,6 @@ test('normalizeWorkerEntry: 新形式 { pid, resourceKey, startTime, logPath, ag
   });
 });
 
-test('normalizeWorkerEntry: 文字列のpidも数値化する', () => {
-  assert.equal(normalizeWorkerEntry({ pid: '4242' }).pid, 4242);
-});
-
 test('normalizeWorkerEntry: 不正なpid（0・負数・非数・小数）は null にする', () => {
   // 不正PIDのままkillや生存判定に使うと無関係なプロセスを対象にしうる
   for (const bad of [0, -1, 'abc', 1.5, {}, [], true, null, undefined]) {

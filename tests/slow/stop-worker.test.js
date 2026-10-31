@@ -125,19 +125,15 @@ function spawnProcessTree(dir, workerName, claimLiveness = true) {
   return { parentPid, childPid: processRecord.childPid, processRecord };
 }
 
-test('stop-worker: --help はUsageを表示して終了コード0', () => {
-  const r = run(['--help']);
-  assert.equal(r.status, 0);
-  assert.match(r.stdout, /Usage: node stop-worker\.js/);
-  assert.match(r.stdout, /<workerName>/);
-  assert.match(r.stdout, /--issue/);
-  assert.match(r.stdout, /--skill/);
-});
-
-test('stop-worker: -h もUsageを表示して終了コード0', () => {
-  const r = run(['-h']);
-  assert.equal(r.status, 0);
-  assert.match(r.stdout, /Usage: node stop-worker\.js/);
+test('stop-worker: --help と -h はUsageを表示して終了コード0（必須の項目を含む）', () => {
+  for (const flag of ['--help', '-h']) {
+    const r = run([flag]);
+    assert.equal(r.status, 0, flag);
+    assert.match(r.stdout, /Usage: node stop-worker\.js/, flag);
+    assert.match(r.stdout, /<workerName>/, flag);
+    assert.match(r.stdout, /--issue/, flag);
+    assert.match(r.stdout, /--skill/, flag);
+  }
 });
 
 test('killProcessTree: Windowsでtaskkillが自然終了を報告しても全PID停止後は成功する', () => {

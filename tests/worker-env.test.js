@@ -36,11 +36,3 @@ test('buildWorkerEnv: baseBranch 未指定（null/undefined/空文字）なら G
     }, `baseBranch=${JSON.stringify(baseBranch)}`);
   }
 });
-
-test('buildWorkerEnv: レガシーレコード（baseBranch 無し）も同じ形を返す（spawn/resume共通）', () => {
-  // 初回起動時に登録した値と resume時に再注入する値が一致することを保証する基底ケース。
-  // baseBranch が無いレガシーレコードでは空文字になり、gh-create-pr.js 側がフェイルクローズする。
-  const first = buildWorkerEnv({ workerName: 'w', workspace: 'C:/ws', baseBranch: 'dev' });
-  const resume = buildWorkerEnv({ workerName: 'w', workspace: 'C:/ws', baseBranch: 'dev' });
-  assert.deepEqual(resume, first);
-});

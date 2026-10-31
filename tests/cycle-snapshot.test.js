@@ -76,6 +76,25 @@ test('postCycleSnapshot: 同じPRのマーカーがあれば二重投稿しな�
   assert.equal(released, 1);
 });
 
+test('postCycleSnapshot: マーカーは issue と pr を含む文字列リテラルの形で保存される（候補B）', () => {
+  // 期待値は文字列リテラル（markerFor の戻り値から正規表現を作ると、空文字でも通ってしまう）。
+  assert.equal(markerFor(450, 99), '<!-- gh-maestro-cycle-snapshot:v1 issue=450 pr=99 -->');
+});
+
+test('postCycleSnapshot: 同じ Issue の別 PR の既存マーカーでは重複扱いせず投稿する（候補A）', () => {
+  let postCalls = 0;
+  const result = postCycleSnapshot({ issue: 450, pr: 99, repo: 'o/r', workspace: 'C:/workspace', metrics: metrics() }, {
+    acquireLockFn: () => true,
+    releaseLockFn: () => {},
+    listMetricsIssuesFn: () => ({ status: 0, stdout: '77\n' }),
+    listCommentsFn: () => ({ status: 0, stdout: JSON.stringify([{ body: 'old\n' + markerFor(450, 98) }]) }),
+    postCommentFn: () => { postCalls++; return { ok: true, url: 'https://github.com/o/r/issues/77#issuecomment-2' }; },
+  });
+  assert.equal(result.ok, true);
+  assert.notEqual(result.duplicate, true);
+  assert.equal(postCalls, 1);
+});
+
 test('postCycleSnapshot: 投稿失敗は失敗結果に隔離しロックを解放する', () => {
   let released = 0;
   const result = postCycleSnapshot({ issue: 450, pr: 99, repo: 'o/r', workspace: 'C:/workspace', metrics: metrics() }, {

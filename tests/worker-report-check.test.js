@@ -61,13 +61,6 @@ test('getReportStatusSinceStart: write権限を持たない投稿者の報告は
   );
 });
 
-test('getReportStatusSinceStart: 報告コメントが無ければ status: not-reported', () => {
-  assert.deepEqual(getReportStatusSinceStart([], 'issue-9-fix', '2026-01-01T00:00:00.000Z'), {
-    status: 'not-reported',
-    report: null,
-  });
-});
-
 test('getReportStatusSinceStart: 起動時刻より前の報告（前回セッションの古い報告）は無視して status: not-reported', () => {
   const comments = [
     { id: 1, author_association: 'MEMBER', created_at: '2025-12-31T23:59:00Z', body: marker({ from: 'issue-9-fix' }) },
@@ -117,16 +110,6 @@ test('getReportStatusSinceStart: startTimeが無ければ status: unknown（判�
     report: null,
   });
   assert.deepEqual(getReportStatusSinceStart(comments, 'issue-9-fix', undefined), {
-    status: 'unknown',
-    report: null,
-  });
-});
-
-test('getReportStatusSinceStart: startTimeが不正な文字列（Dateでパース不能）なら status: unknown（判定不能）', () => {
-  const comments = [
-    { id: 1, author_association: 'MEMBER', created_at: '2026-01-01T00:05:00Z', body: marker({ from: 'issue-9-fix' }) },
-  ];
-  assert.deepEqual(getReportStatusSinceStart(comments, 'issue-9-fix', 'old'), {
     status: 'unknown',
     report: null,
   });
@@ -182,7 +165,11 @@ test('getReportStatusSinceStart: 複数の報告がある場合は最新のコ�
   assert.equal(latest.report?.id, 2);
 });
 
-test('getReportStatusSinceStart: 該当報告が無ければ not-reported を返す', () => {
+test('getReportStatusSinceStart: 該当報告が無ければ（空の一覧を含む）not-reported を返す', () => {
+  assert.deepEqual(getReportStatusSinceStart([], 'issue-9-fix', '2026-01-01T00:00:00.000Z'), {
+    status: 'not-reported',
+    report: null,
+  });
   const comments = [
     { id: 1, author_association: 'MEMBER', created_at: '2025-12-31T23:59:00Z', body: marker({ from: 'issue-9-fix' }) },
   ];
@@ -199,6 +186,10 @@ test('getReportStatusSinceStart: 不正な引数は unknown を返す', () => {
     report: null,
   });
   assert.deepEqual(getReportStatusSinceStart([], 'issue-9-fix', null), {
+    status: 'unknown',
+    report: null,
+  });
+  assert.deepEqual(getReportStatusSinceStart([], 'issue-9-fix', 'old'), {
     status: 'unknown',
     report: null,
   });

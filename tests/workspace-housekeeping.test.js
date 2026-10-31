@@ -7,29 +7,6 @@ const os = require('os');
 const path = require('path');
 const { sweepWorkspaceFiles, TEMP_MIN_AGE_MS, MAX_WORKER_LOG_BYTES } = require('../scripts/shared/workspace-housekeeping');
 
-test('sweepWorkspaceFiles: 古いatomic tmpを掃除し、稼働中ワーカーのログを保護する', () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-housekeeping-'));
-  try {
-    const maestro = path.join(workspace, '.gh-maestro');
-    const logDir = path.join(maestro, 'records', 'issue', '7', 'workers');
-    const cursorDir = path.join(maestro, 'records', 'issue', '7', 'workers', 'issue-7-active');
-    fs.mkdirSync(cursorDir, { recursive: true });
-    fs.mkdirSync(logDir, { recursive: true });
-    const old = new Date(Date.now() - TEMP_MIN_AGE_MS - 1000);
-    const orphan = path.join(cursorDir, 'worker.json.abcd12');
-    fs.writeFileSync(orphan, '{}');
-    fs.utimesSync(orphan, old, old);
-    const active = path.join(logDir, 'issue-7-active', 'worker.log');
-    fs.mkdirSync(path.dirname(active), { recursive: true });
-    fs.writeFileSync(active, '{"type":"system","subtype":"thinking_tokens"}\n');
-    const result = sweepWorkspaceFiles(workspace, { excludedWorkerNames: new Set(['issue-7-active']) });
-    assert.ok(result.removed.includes(orphan));
-    assert.equal(fs.readFileSync(active, 'utf8').length > 0, true);
-  } finally {
-    fs.rmSync(workspace, { recursive: true, force: true });
-  }
-});
-
 test('sweepWorkspaceFiles: 完了ログを圧縮せず、残った肥大ログを世代ローテーションする', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-housekeeping-'));
   try {
@@ -80,6 +57,10 @@ test('sweepWorkspaceFiles: 稼働中ログ（excludedWorkerNames）は中身・m
     fs.writeFileSync(orphanTmp, content);
     const old = new Date(Date.now() - TEMP_MIN_AGE_MS - 1000);
     fs.utimesSync(orphanTmp, old, old);
+    // 古い atomic tmp（worker.json.*）も掃除対象。稼働中ワーカーのディレクトリにあっても、ログの保護は変えない。
+    const orphanAtomic = path.join(logDir, 'worker.json.abcd12');
+    fs.writeFileSync(orphanAtomic, '{}');
+    fs.utimesSync(orphanAtomic, old, old);
 
     const beforeMtime = fs.statSync(active).mtimeMs;
     const result = sweepWorkspaceFiles(workspace, { excludedWorkerNames: new Set(['issue-7-active']) });
@@ -90,6 +71,7 @@ test('sweepWorkspaceFiles: 稼働中ログ（excludedWorkerNames）は中身・m
     // 圧縮されないため .compact-*.tmp が新たに残らない（残骸は掃除される）。
     assert.ok(result.compacted.length === 0);
     assert.ok(result.removed.includes(orphanTmp));
+    assert.ok(result.removed.includes(orphanAtomic), '古い atomic tmp（worker.json.*）も掃除される');
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
