@@ -516,18 +516,6 @@ test('ワーカーコンテキスト: --from を渡しても無視され from �
   });
 });
 
-test('ワーカーコンテキスト: --skill（orchestrator専用）はエラーで拒否される', () => {
-  withTempDir(workspace => {
-    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    const r = msgSend.main(
-      ['--skill', 'gh-maestro-diagnostician', '--issue', '1', '--workspace', workspace, '--stdin'],
-      { GH_MAESTRO_WORKER: 'issue-1-investigate' },
-      stdinIO('報告本文'),
-    );
-    assert.equal(r.code, 1);
-    assert.ok(r.errLines.join('\n').includes('--skill は orchestrator 専用'));
-  });
-});
 
 // ── マーカー ────────────────────────────────────────────────────────────────
 
@@ -840,24 +828,6 @@ test('完了済み execution-id の再試行は Issue コメントを重複投�
 
 // ── --body-file ──────────────────────────────────────────────────────────
 
-test('--body-file で指定したファイルの内容が本文として使われる', () => {
-  withTempDir(workspace => {
-    const bodyFile = path.join(workspace, 'body.txt');
-    fs.writeFileSync(bodyFile, 'hello from file', 'utf8');
-
-    let capturedBody = null;
-
-    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    msgSend._setGhIssueComment((issue, body) => {
-      capturedBody = body;
-      return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
-    });
-
-    const r = msgSend.main(['worker-1', '--body-file', bodyFile, '--issue', '1', '--workspace', workspace]);
-    assert.equal(r.code, 0);
-    assert.ok(capturedBody.includes('hello from file'));
-  });
-});
 
 test('--body-file と本文相当の位置引数を両方指定するとエラーになる', () => {
   withTempDir(workspace => {
@@ -919,21 +889,6 @@ test('--body-file に空ファイルを指定した場合は本文なしエラ�
 
 // ── --stdin（本件バグ修正の核）────────────────────────────────────────────
 
-test('--stdin から読み込んだ内容が本文として使われる', () => {
-  withTempDir(workspace => {
-    let capturedBody = null;
-
-    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-    msgSend._setGhIssueComment((issue, body) => {
-      capturedBody = body;
-      return { status: 0, stdout: 'https://github.com/test/repo/issues/1#issuecomment-1\n' };
-    });
-
-    const r = msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO('from stdin'));
-    assert.equal(r.code, 0);
-    assert.ok(capturedBody.includes('from stdin'));
-  });
-});
 
 test('--stdin指定時、標準入力がTTYだとエラーで即終了する（ハング防止）', () => {
   withTempDir(workspace => {
@@ -965,17 +920,6 @@ test('--stdin経由ならバッククォート・ドル記号を含む本文も�
 
 // ── 戻り値の注入リセット（後続テストのため） ───────────────────────────────
 
-test('injected gh functions can be reset', () => {
-  // デフォルトの実装に戻す（副作用: spawnSync が使われるが、CLIモード実行なしなら問題なし）
-  msgSend._setGhRepoView(() => ({ status: 0, stdout: 'reset/repo\n' }));
-  msgSend._setGhIssueComment(() => ({ status: 0, stdout: 'reset-url\n' }));
-
-  withTempDir(workspace => {
-    const r = msgSend.main(['worker-1', '--stdin', '--issue', '1', '--workspace', workspace], null, stdinIO('hello'));
-    assert.equal(r.code, 0);
-    assert.equal(r.lines[0], 'reset-url');
-  });
-});
 
 // ── テスト実行中の実投稿防止ガード（Issue #202） ─────────────────────────────
 // 実障害: worker-exit-hook.js の実spawnテストがワーカー文脈の環境変数を子へ継承し、

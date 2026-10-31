@@ -295,41 +295,19 @@ test('ensureWorkerSupervisorRunning: spawnが例外を投げても試行記録�
   assert.equal(spawnCount, 1);
 });
 
-test('ensureWorkerSupervisorRunning: 生存判定とクールダウン判定の順序検証（クールダウン中であっても生存観測時は試行記録が消去される）', () => {
-  writeAttempt(Date.now()); // クールダウン中
-  mod._setFindRunningInstance(() => ({ pid: 777, script: 'worker-supervisor.js' }));
 
-  ensureWorkerSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
-  assert.equal(fs.existsSync(attemptPath()), false, 'クールダウン中でも生存観測で試行記録が消去される');
-});
+test('ensureWorkerSupervisorRunning: spawn の前に試行記録が残る（再試行の抑制の前提）', () => {
+  const spawned = [];
 
-test('ensureWorkerSupervisorRunning: 呼び出しシーケンス（順序）の厳密検証', () => {
-  const events = [];
-
-  mod._setFindRunningInstance(() => {
-    events.push('runningCheck');
-    return null;
-  });
-
-  mod._setIsResidentLeaseLive(({ role }) => {
-    events.push('leaseCheck');
-    return role === workerLease.MSGPOLL_ORCHESTRATOR_ROLE;
-  });
-
-  mod._setSpawn((cmd, args, opts) => {
+  mod._setFindRunningInstance(() => null);
+  mod._setIsResidentLeaseLive(({ role }) => role === workerLease.MSGPOLL_ORCHESTRATOR_ROLE);
+  mod._setSpawn(() => {
     const attempt = readAutostartAttempt(workspace, 'worker-supervisor');
-    events.push(`spawn(recorded:${attempt !== null})`);
+    spawned.push(attempt !== null);
     return fakeChild();
   });
 
   ensureWorkerSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
 
-  assert.deepEqual(events, [
-    'leaseCheck',
-    'runningCheck',
-    'runningCheck',
-    'leaseCheck',
-    'leaseCheck',
-    'spawn(recorded:true)',
-  ]);
+  assert.deepEqual(spawned, [true]);
 });

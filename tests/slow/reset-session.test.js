@@ -33,7 +33,7 @@ const WORKERS = {
 
 
 
-test('reset-session: status-pane.json が存在する場合にセッションリセットで削除される', () => {
+test('reset-session: WezTerm の pane 一覧で確認できない status-pane.json は削除せず保持する', () => {
   withTempDir(workspace => {
     const { saveStatusPane, loadStatusPane } = require('../../scripts/shared/status-pane-registry');
 

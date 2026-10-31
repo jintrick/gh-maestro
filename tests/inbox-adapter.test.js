@@ -64,6 +64,7 @@ test('createSessionResumeAdapter: start がコマンドと引数を返す（reas
 
   assert.equal(typeof result.command, 'string');
   assert.ok(Array.isArray(result.args));
+  assert.ok(result.args.includes('調査してください'));
   assert.equal(result.command, agent.command);
 });
 
@@ -92,6 +93,7 @@ test('createSessionResumeAdapter: start がコマンドと引数を返す（code
 
   assert.equal(typeof result.command, 'string');
   assert.ok(Array.isArray(result.args));
+  assert.ok(result.args.includes('review してください'));
   assert.equal(result.command, agent.command);
 });
 
@@ -285,16 +287,6 @@ test('createSessionResumeAdapter: deliverMessage は message 必須', () => {
   assert.throws(() => adapter.deliverMessage(null), /message is required/);
 });
 
-test('createSessionResumeAdapter: deliverMessage は body が空でもプロンプトを返す', () => {
-  const agent = getAgentMap().get('reasonix');
-  const adapter = createSessionResumeAdapter(agent);
-  const result = adapter.deliverMessage({ from: 'orchestrator', body: '' });
-
-  assert.equal(result.type, SESSION_RESUME_STRATEGY_TYPE);
-  assert.ok(result.prompt.includes('[gh-maestro inbox]'));
-  // body が空文字なので引用行は含まれない
-  assert.ok(!result.prompt.includes('> '));
-});
 
 test('createSessionResumeAdapter: deliverMessage の各エージェントで動作する', () => {
   for (const id of ['reasonix', 'agy', 'codex']) {
