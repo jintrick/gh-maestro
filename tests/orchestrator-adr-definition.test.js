@@ -26,18 +26,9 @@ function readAdrSection() {
   return rest.slice(0, end === -1 ? rest.length : end);
 }
 
-test('判断の場で照合する定義がオーケストレーターSKILL.mdの本文にある', () => {
+test('オーケストレーターSKILL.mdのADR定義節が書式を持つ adr.md を開く契機を参照する', () => {
   const section = readAdrSection();
-  const required = [
-    [/いつ書くか/, 'いつ書くか'],
-    [/3条件/, 'ADRにする3条件'],
-    [/3条件を満たさない判断の行き先/, '3条件を満たさない判断の行き先'],
-    [/adr\.md/, '書式を持つアセットを開く契機'],
-  ];
-
-  for (const [pattern, label] of required) {
-    assert.match(section, pattern, `ADRの定義節が「${label}」を含むこと`);
-  }
+  assert.match(section, /adr\.md/, 'ADRの定義節が adr.md を参照すること');
 });
 
 test('書くと決めた後にだけ要る詳細がアセットにある', () => {

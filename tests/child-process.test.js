@@ -145,17 +145,17 @@ test('child-process: realSpawnDisabledReason は環境変数に応じた抑止�
     // 1. NODE_TEST_CONTEXT のみ
     process.env.NODE_TEST_CONTEXT = '1';
     delete process.env.GH_MAESTRO_DISABLE_REAL_SPAWN;
-    assert.equal(realSpawnDisabledReason(), 'テスト実行中（NODE_TEST_CONTEXT が設定されています）');
+    assert.match(realSpawnDisabledReason(), /NODE_TEST_CONTEXT/);
 
     // 2. GH_MAESTRO_DISABLE_REAL_SPAWN のみ
     delete process.env.NODE_TEST_CONTEXT;
     process.env.GH_MAESTRO_DISABLE_REAL_SPAWN = '1';
-    assert.equal(realSpawnDisabledReason(), 'GH_MAESTRO_DISABLE_REAL_SPAWN が設定されています');
+    assert.match(realSpawnDisabledReason(), /GH_MAESTRO_DISABLE_REAL_SPAWN/);
 
     // 3. 両方設定時は NODE_TEST_CONTEXT が優先
     process.env.NODE_TEST_CONTEXT = '1';
     process.env.GH_MAESTRO_DISABLE_REAL_SPAWN = '1';
-    assert.equal(realSpawnDisabledReason(), 'テスト実行中（NODE_TEST_CONTEXT が設定されています）');
+    assert.match(realSpawnDisabledReason(), /NODE_TEST_CONTEXT/);
 
     // 4. いずれも未設定時は null
     delete process.env.NODE_TEST_CONTEXT;

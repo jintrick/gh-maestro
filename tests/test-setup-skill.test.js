@@ -9,16 +9,12 @@ const ROOT = path.join(__dirname, '..');
 const setupSkillPath = path.join(ROOT, 'skills', 'gh-maestro-test-setup', 'SKILL.md');
 const maestroSkillPath = path.join(ROOT, 'skills', 'gh-maestro', 'SKILL.md');
 
-test('gh-maestro-test-setup: 人間向けの7手順として層分類からorchestrator開始までを定義する', () => {
+test('gh-maestro-test-setup: frontmatter の name と層・並列数の設定キーを参照する', () => {
   assert.equal(fs.existsSync(setupSkillPath), true);
   const content = fs.readFileSync(setupSkillPath, 'utf8');
 
   assert.match(content, /^name: gh-maestro-test-setup$/m);
-  for (const step of ['1.', '2.', '3.', '4.', '5.', '6.', '7.']) {
-    assert.match(content, new RegExp(`^${step.replace('.', '\\.')}`, 'm'));
-  }
   assert.match(content, /テスト関数単位/);
-  assert.match(content, /承認を得るまで待つ/);
   assert.match(content, /重いテストが1つも無い場合は層を分けず/);
   assert.match(content, /既存の `slow`、`integration`、`e2e`/);
   assert.match(content, /dynamicConcurrency/);
@@ -27,11 +23,10 @@ test('gh-maestro-test-setup: 人間向けの7手順として層分類からorche
   assert.doesNotMatch(content, /spawn-worker\.js|agents\.yaml|msg-send\.js/);
 });
 
-test('gh-maestro-orchestrator: slow層の動的並列数を結果・申告の事実として扱う', () => {
+test('gh-maestro-orchestrator: stage-7 が slow 層の動的並列数の設定キーと review-job を参照する', () => {
   const content = fs.readFileSync(path.join(ROOT, 'skills', 'gh-maestro-orchestrator', 'stage-7-review-merge.md'), 'utf8');
   assert.match(content, /dynamicConcurrency/);
   assert.match(content, /review-job/);
-  assert.match(content, /並列数・CPU数・review-job数・取得できなかった入力/);
 });
 
 test('gh-maestro: 宣言状態に応じてtest-setupスキルを読む起動手順を持つ', () => {

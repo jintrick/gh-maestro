@@ -63,7 +63,8 @@ test('check-legacy CLI reports findings with exit code 0', () => {
 
     fs.writeFileSync(statusPane, '{not-json', 'utf8');
     const corrupt = JSON.parse(runCli('--workspace', workspace).stdout);
-    assert.notEqual(corrupt.items.find((entry) => entry.id === 'status-pane-legacy-record').status, 'present');
+    // 破損 JSON は present でも absent でもなく unknown として報告する（検出の正しさを status 完全一致で確認）
+    assert.equal(corrupt.items.find((entry) => entry.id === 'status-pane-legacy-record').status, 'unknown');
 
     fs.rmSync(statusPane);
     const missing = JSON.parse(runCli('--workspace', workspace).stdout);

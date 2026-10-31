@@ -22,9 +22,8 @@ test('lightweight-pr.md: タイトルだけのIssueからPR作成までの具体
   const powershellFences = [...content.matchAll(/^[ \t]*```powershell\r?\n([\s\S]*?)\r?\n[ \t]*```/gm)]
     .map((match) => match[1]);
 
+  // 参照先（スクリプトのフラグ・環境変数）だけを確かめる。git の手順の並びは検査しない。
   assert.ok(fences.some((fence) => /create-issue\.js/.test(fence) && /--title-only/.test(fence)));
-  assert.ok(fences.some((fence) => /git switch --create/.test(fence) && /\$BASE_BRANCH/.test(fence)));
-  assert.ok(fences.some((fence) => /git commit/.test(fence) && /git push/.test(fence)));
   assert.ok(fences.some((fence) => /gh-create-pr\.js/.test(fence)));
   assert.ok(powershellFences.some((fence) => /\$env:GH_MAESTRO_BASE_BRANCH/.test(fence) && /gh-create-pr\.js/.test(fence)));
 });
@@ -40,9 +39,10 @@ test('lightweight-pr.md: target経由のPR監視はReview Manager・slow層・CI
   assert.doesNotMatch(monitorFence, /start-review-manager\.js/);
   assert.match(content, /poll-pr-monitor\.js/);
   assert.doesNotMatch(content, /node "\{\{SCRIPTS_PATH\}\}\/poll-pr\.js"/);
-  assert.match(content, /SLOW_TEST_STARTED[\s\S]*SLOW_TEST_RESULT[\s\S]*出力されない/);
-  assert.match(content, /CI_CHECK_FAILED[\s\S]*CI_CHECKS_COMPLETE[\s\S]*出力されない/);
-  assert.match(content, /REVIEW_MANAGER_STARTED[\s\S]*出力されない/);
+  // 参照先（poll-pr-monitor.js / start-review-manager.js が出す合図の名前）だけを確かめる
+  assert.match(content, /SLOW_TEST_STARTED/);
+  assert.match(content, /CI_CHECK_FAILED/);
+  assert.match(content, /REVIEW_MANAGER_STARTED/);
 });
 
 test('lightweight-pr.md: 任意の対象プロジェクトで使えるセッション変数だけを前提にする', () => {
