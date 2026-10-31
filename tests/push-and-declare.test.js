@@ -52,6 +52,7 @@ const SPAWN_CAPTURING_MODULES = [
   '../scripts/shared/git-branch',
   '../scripts/shared/gh-pr',
   '../scripts/shared/gh-comments',
+  '../scripts/shared/pr-declaration',
 ];
 
 /**
@@ -882,48 +883,27 @@ test('main: NODE_TEST_CONTEXT 環境下では実副作用を実行せず拒否�
   assert.equal(calls.length, 0);
 });
 
-// ── テスト申告表のPR本文への書き込み（--declaration-file。Issue #671 レビュー指摘1・2） ──
-// レビュー（Review Manager）は push 直後に始まりうるため、申告表は push より前に PR 本文へ
-// 入っていなければならない。既存PRは push 前に gh pr edit、新規PRは作成時の本文に含める。
+// ── テスト申告表のPRコメント投稿（--declaration-file。Issue #671 レビュー指摘1・2・PR#672再指摘） ──
+// 申告表は PR 本文ではなく、対象HEADのSHAをマーカーに持つ PR コメントに投稿する（PR本文は触らない）。
+// 既存PRは push の前に投稿して、レビューが新しいHEADを見る時点で申告表が揃うようにする。
 
 const DECLARATION_TABLE = '| テスト | 何が壊れたら失敗するか |\n|---|---|\n| t1 | 欠陥X |';
-const EDIT_OK = (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'edit';
+const DECLARATION_MARKER_LINE = `<!-- gh-maestro:pr-declaration head=${SHA} -->`;
+const isCommentCreate = (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[1] === `repos/${REPO}/issues/5/comments` && args[2] === '-f';
+const isCommentPatch = (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[1] === '-X' && args[2] === 'PATCH';
 
-test('buildPrBodyWithDeclaration: 申告表なしは関連Issue行のみ、ありは関連Issue行の後ろに続ける', () => {
+test('buildPrBody は申告表に関係なく関連Issue行のみを返す（PR本文は変更しない）', () => {
   const { mod } = loadModule();
-  assert.equal(mod.buildPrBodyWithDeclaration(671, undefined), '関連Issue: #671');
-  assert.equal(
-    mod.buildPrBodyWithDeclaration(671, `\n${DECLARATION_TABLE}\n`),
-    `関連Issue: #671\n\n${DECLARATION_TABLE}`,
-  );
+  assert.equal(mod.buildPrBody(671), '関連Issue: #671');
+  assert.equal(mod.buildPrBodyWithDeclaration, undefined, '申告表をPR本文へ組み立てる経路は廃止している');
 });
 
-test('--declaration-file: 既存PRは push より前に gh pr edit で申告表付きの本文に更新する', () => {
+test('--declaration-file: 既存PRは push より前に、このHEADの申告表をPRコメントとして投稿し、PR本文は編集しない', () => {
   const handlers = [
     ...fullPathHandlers({ prList: { status: 0, stdout: JSON.stringify([{ number: 5, url: PR_URL }]) } }),
-    { matches: ({ cmd, args }) => EDIT_OK(cmd, args), result: { status: 0, stdout: '' } },
+    { matches: ({ cmd, args }) => isCommentCreate(cmd, args), result: { status: 0, stdout: `{"html_url":"${DECL_URL}"}` } },
   ];
   const { mod, calls } = loadModule(dispatcher(handlers));
-  const ws = tempWorkspace();
-  const result = withGuardBypassed(() => mod.pushAndDeclare({
-    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
-    declaration: `\n${DECLARATION_TABLE}\n`,
-  }));
-
-  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
-  const editIndex = calls.findIndex(c => EDIT_OK(c.cmd, c.args));
-  const pushIndex = calls.findIndex(c => c.cmd === 'git' && c.args[0] === 'push');
-  assert.ok(editIndex >= 0, 'gh pr edit が呼ばれるべき');
-  assert.ok(pushIndex >= 0 && editIndex < pushIndex, '本文更新は push より前に行われるべき');
-  const editArgs = calls[editIndex].args;
-  assert.deepEqual(editArgs.slice(0, 5), ['pr', 'edit', '5', '--repo', REPO]);
-  assert.equal(editArgs[5], '--body');
-  assert.equal(editArgs[6], `関連Issue: #374\n\n${DECLARATION_TABLE}`);
-  assert.equal(call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'create'), undefined);
-});
-
-test('--declaration-file: 新規PRは作成時の本文に申告表を含め、gh pr edit は呼ばない', () => {
-  const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
   const ws = tempWorkspace();
   const result = withGuardBypassed(() => mod.pushAndDeclare({
     issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
@@ -931,15 +911,57 @@ test('--declaration-file: 新規PRは作成時の本文に申告表を含め、g
   }));
 
   assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
-  assert.equal(call(calls, EDIT_OK), undefined, '新規PRでは gh pr edit を呼ばない');
-  const prCreateCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'create');
-  assert.ok(prCreateCall.args.includes(`関連Issue: #374\n\n${DECLARATION_TABLE}`));
+  const postIndex = calls.findIndex(c => isCommentCreate(c.cmd, c.args));
+  const pushIndex = calls.findIndex(c => c.cmd === 'git' && c.args[0] === 'push');
+  assert.ok(postIndex >= 0 && postIndex < pushIndex, '申告表コメントは push より前に投稿されるべき');
+  const body = calls[postIndex].args[3];
+  assert.equal(body, `body=${DECLARATION_MARKER_LINE}\n${DECLARATION_TABLE}\n`);
+  assert.equal(call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'edit'), undefined, 'PR本文を編集しない');
 });
 
-test('--declaration-file: 既存PRの本文更新が失敗したら exit 2、push は行わない（リモート未変更）', () => {
+test('--declaration-file: 新規PRは作成後に申告表コメントを投稿し、PR本文は関連Issue行のみにする', () => {
+  const handlers = fullPathHandlers({});
+  handlers.push({ matches: ({ cmd, args }) => isCommentCreate(cmd, args), result: { status: 0, stdout: `{"html_url":"${DECL_URL}"}` } });
+  const { mod, calls } = loadModule(dispatcher(handlers));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  const createIndex = calls.findIndex(c => c.cmd === 'gh' && c.args[0] === 'pr' && c.args[1] === 'create');
+  const postIndex = calls.findIndex(c => isCommentCreate(c.cmd, c.args));
+  assert.ok(createIndex >= 0 && postIndex > createIndex, 'PR作成の後に投稿する（PR番号が必要）');
+  assert.ok(calls[createIndex].args.includes('関連Issue: #374'), 'PR本文は関連Issue行のみ');
+  assert.equal(call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'edit'), undefined);
+});
+
+test('--declaration-file: 同じHEADの信頼される既存申告表コメントは新規投稿せず更新する（冪等）', () => {
+  const existing = [{ id: 77, body: `${DECLARATION_MARKER_LINE}\n旧表`, author_association: 'OWNER', html_url: DECL_URL }];
+  const handlers = fullPathHandlers({
+    prList: { status: 0, stdout: JSON.stringify([{ number: 5, url: PR_URL }]) },
+    commentList: { status: 0, stdout: JSON.stringify(existing) },
+  });
+  handlers.push({ matches: ({ cmd, args }) => isCommentPatch(cmd, args), result: { status: 0, stdout: `{"html_url":"${DECL_URL}"}` } });
+  const { mod, calls } = loadModule(dispatcher(handlers));
+  const ws = tempWorkspace();
+  const result = withGuardBypassed(() => mod.pushAndDeclare({
+    issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
+    declaration: DECLARATION_TABLE,
+  }));
+
+  assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+  const patch = call(calls, (cmd, args) => isCommentPatch(cmd, args));
+  assert.ok(patch, '既存コメントを PATCH で更新する');
+  assert.equal(patch.args[3], 'repos/owner/repo/issues/comments/77');
+  assert.equal(call(calls, (cmd, args) => isCommentCreate(cmd, args) && args[3].includes('gh-maestro:pr-declaration')), undefined, '申告表を新規投稿しない');
+});
+
+test('--declaration-file: 申告表コメントの投稿に失敗したら push 前なら exit 2（リモート未変更）', () => {
   const handlers = [
+    { matches: ({ cmd, args }) => isCommentCreate(cmd, args), result: { status: 1, stdout: '', stderr: 'boom' } },
     ...fullPathHandlers({ prList: { status: 0, stdout: JSON.stringify([{ number: 5, url: PR_URL }]) } }),
-    { matches: ({ cmd, args }) => EDIT_OK(cmd, args), result: { status: 1, stdout: '', stderr: 'boom' } },
   ];
   const { mod, calls } = loadModule(dispatcher(handlers));
   const ws = tempWorkspace();
@@ -949,21 +971,25 @@ test('--declaration-file: 既存PRの本文更新が失敗したら exit 2、pus
   }));
 
   assert.equal(result.exitCode, 2);
-  assert.match(result.stderr, /push前/);
-  assert.equal(call(calls, (cmd, args) => cmd === 'git' && args[0] === 'push'), undefined, '本文更新に失敗したら push しない');
+  assert.match(result.stderr, /申告表コメントの投稿に失敗/);
+  assert.equal(call(calls, (cmd, args) => cmd === 'git' && args[0] === 'push'), undefined, '投稿に失敗したら push しない');
 });
 
-test('--declaration-file: 自動クローズキーワードを含む申告表は副作用ゼロで exit 1', () => {
-  const { mod, calls } = loadModule(dispatcher(fullPathHandlers()));
+test('--declaration-file: push 後の申告表コメント投稿に失敗したら exit 3（リモートは進んだ）', () => {
+  const handlers = [
+    { matches: ({ cmd, args }) => isCommentCreate(cmd, args), result: { status: 1, stdout: '', stderr: 'boom' } },
+    ...fullPathHandlers({ prCreate: { status: 0, stdout: PR_URL + '\n' } }),
+  ];
+  const { mod, calls } = loadModule(dispatcher(handlers));
   const ws = tempWorkspace();
   const result = withGuardBypassed(() => mod.pushAndDeclare({
     issue: 374, workspace: ws, worktree: '/worktree', env: { GH_MAESTRO_BASE_BRANCH: 'dev' },
-    declaration: 'Closes #374',
+    declaration: DECLARATION_TABLE,
   }));
 
-  assert.equal(result.exitCode, 1);
-  assert.match(result.stderr, /自動クローズキーワード/);
-  assert.equal(calls.length, 0, '申告表の検証失敗では git / gh を一切呼ばない');
+  assert.equal(result.exitCode, 3);
+  assert.match(result.stderr, /申告表コメントの投稿に失敗/);
+  assert.ok(call(calls, (cmd, args) => cmd === 'git' && args[0] === 'push'), 'push は行われている');
 });
 
 test('--declaration-file: 空の申告表は副作用ゼロで exit 1', () => {
@@ -994,29 +1020,3 @@ test('USAGE / SPEC: --declaration-file を宣言し、usage に記述がある',
   assert.match(mod.USAGE, /^ {2}--declaration-file <path> {3}\S/m, 'Arguments 節に説明行がある');
 });
 
-// CLI境界の検証（.claude/rules/cli-input-validation-at-boundary.md）。main() の直接呼び出しでは
-// parseFlags からの結線が外れても緑のままになるため、実際に子プロセスで起動して終了コードと
-// 副作用ゼロ（git / gh 未到達）を確かめる。--declaration-file の検証は副作用より前に行われる。
-const PUSH_AND_DECLARE_SCRIPT = path.join(__dirname, '..', 'scripts', 'push-and-declare.js');
-
-test('CLI境界: --declaration-file が読めないと子プロセスは exit 1 で、git / gh に到達しない', () => {
-  const ws = tempWorkspace();
-  const result = spawnSync(process.execPath, [
-    PUSH_AND_DECLARE_SCRIPT, '--issue', '671', '--workspace', ws,
-    '--declaration-file', path.join(ws, 'missing.md'),
-  ], { cwd: ws, env: cleanChildEnv(), encoding: 'utf8' });
-  assert.equal(result.status, 1, `stderr: ${result.stderr}`);
-  assert.match(result.stderr, /--declaration-file を読めません/);
-  assert.doesNotMatch(result.stderr, /git |gh /);
-});
-
-test('CLI境界: 空の --declaration-file は子プロセスで exit 1 になり、ブランチ検査より前に止まる', () => {
-  const ws = tempWorkspace();
-  const declFile = path.join(ws, 'empty.md');
-  fs.writeFileSync(declFile, '  \n', 'utf8');
-  const result = spawnSync(process.execPath, [
-    PUSH_AND_DECLARE_SCRIPT, '--issue', '671', '--workspace', ws, '--declaration-file', declFile,
-  ], { cwd: ws, env: cleanChildEnv(), encoding: 'utf8' });
-  assert.equal(result.status, 1, `stderr: ${result.stderr}`);
-  assert.match(result.stderr, /内容が空です/);
-});

@@ -32,6 +32,7 @@ const { createPr } = require('./gh-create-pr');
 const { declareTestResult } = require('./declare-test-result');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { listTestLayers } = require('./run-tests');
+const { upsertDeclarationComment } = require('./shared/pr-declaration');
 
 const USAGE = `push-and-declare.js — ステージング・コミット・push・PR取得/作成・テスト結果申告を一つの操作にまとめる
 
@@ -42,22 +43,22 @@ Arguments:
   --issue <N>                 Issue番号（必須、正の整数。実行ブランチ名 ^issue-<N> と一致する必要がある）
   --workspace <path>          ワークスペースのルートパス（省略時は GH_MAESTRO_WORKSPACE、次に
                               CWD上方探索で解決）
-  --declaration-file <path>   PR本文に追記するテスト申告表のファイル（UTF-8。空は不可。
-                              GitHubの自動クローズキーワードを含むと拒否）。指定時、PR本文は
-                              「関連Issue: #<N>」の後ろに申告表を続けた内容になる。既存PRは
-                              push の前に本文を更新し、新規PRは作成時に本文へ含める。
-                              レビューは push 直後に始まりうるため、この順序で申告表を先に揃える
+  --declaration-file <path>   テスト申告表のファイル（UTF-8。空は不可）。指定時、対象コミット
+                              （HEAD）の申告表を PR コメントとして投稿する（既存の同じHEADの
+                              コメントは更新する）。PR本文には触れない。申告表は HEAD の SHA を
+                              マーカーに持ち、レビューは自分がレビューする HEAD と一致するものだけを使う
 
 動作（終状態への収束。同じコマンドの再実行だけで回復する）:
   1. ブランチ検証（^issue-<N>）・リポジトリ特定・Issueタイトル取得
   2. git add -A で worktree 内の全変更をステージ（常に実行）
   3. ステージ済み変更があればコミット（無ければ空コミットを作らずスキップ）
-  3a. --declaration-file 指定時のみ: 既存PRがあれば push の前に本文を申告表付きに更新
-      （失敗は exit 2。この時点でリモートは未変更）
+  3a. --declaration-file 指定時のみ: 既存PRがあれば push の前に、このHEADの申告表コメントを
+      投稿・更新する（失敗は exit 2。この時点でリモートは未変更）
   4. git push -u origin <ブランチ>（up-to-date なら no-op 成功。upstream を自ブランチへ固定）
   5. 現在のHEADを解決
   6. PRは get-or-create（既存PRがあれば使用、無ければ作成。タイトル=Issueタイトル、
-     本文=関連Issue: #<N>（申告表指定時はその後ろに申告表を続ける））
+     本文=関連Issue: #<N>）
+  6a. --declaration-file 指定時のみ: このHEADの申告表コメントを投稿・更新する（冪等。失敗は exit 3）
   7. 宣言された毎回側（scope=full）の層名を解決し、runtime root のテスト成果物を
      読んで解決したHEADに対するテスト結果を申告。必須層の結果が欠落・unavailable
      の場合は申告を失敗として返す。同じ成果物に lint 実行記録が無い場合も、
@@ -106,20 +107,6 @@ const AUTO_CLOSE_KEYWORD_RE = /\b(?:close|closes|closed|fix|fixes|fixed|resolve|
  */
 function buildPrBody(issue) {
   return `関連Issue: #${issue}`;
-}
-
-/**
- * 申告表付きのPR本文を組み立てる。declaration が undefined なら buildPrBody と同じ。
- * 申告表は coder が書いた表そのもので、自動クローズキーワードを含んではならない
- * （呼び出し側が pushAndDeclare の入口で検証する）。
- * @param {number|string} issue
- * @param {string|undefined} declaration
- * @returns {string}
- */
-function buildPrBodyWithDeclaration(issue, declaration) {
-  const head = buildPrBody(issue);
-  if (declaration === undefined) return head;
-  return `${head}\n\n${declaration.trim()}`;
 }
 
 /** spawnSync 結果のエラー文言を組み立てる。 */
@@ -200,7 +187,7 @@ function resolveRequiredTestLayers({ workspace, worktree, env, stagedFiles }, li
  * @param {string} [params.workspace]    workspace解決の引数（--workspace の値）
  * @param {string} params.worktree       作業用worktree（git操作の実行ディレクトリ）
  * @param {object} [params.env]          環境変数（createPr の base 解決に使う。既定 process.env）
- * @param {string} [params.declaration] PR本文に続けるテスト申告表（undefined なら本文は関連Issue行のみ）
+ * @param {string} [params.declaration] 対象HEADのテスト申告表（PRコメントに投稿。undefined なら投稿しない）
  * @param {object} [deps]                 テスト用の依存注入
  * @param {Function} [deps.declareTestResultFn]
  * @param {Function} [deps.commitContentHashFn]
@@ -234,9 +221,6 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
   if (declaration !== undefined) {
     if (!declaration.trim()) {
       return { exitCode: 1, stdout: '', stderr: '--declaration-file の内容が空です（申告表を書いてから実行してください）' };
-    }
-    if (AUTO_CLOSE_KEYWORD_RE.test(declaration)) {
-      return { exitCode: 1, stdout: '', stderr: '--declaration-file の内容に自動クローズキーワード（close/fix/resolve + #番号）が含まれています。PR本文に入れられません' };
     }
   }
 
@@ -319,13 +303,17 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
       return { exitCode: 2, stdout: '', stderr: '既存PRの検索結果のJSON parseに失敗しました（push前）' };
     }
     if (prePushPrs.length > 0 && prePushPrs[0].number) {
-      const editRes = spawnSync(
-        'gh',
-        ['pr', 'edit', String(prePushPrs[0].number), '--repo', repo, '--body', buildPrBodyWithDeclaration(issueNum, declaration)],
-        { cwd: worktree, encoding: 'utf8' },
-      );
-      if (editRes.error || editRes.status !== 0) {
-        return { exitCode: 2, stdout: '', stderr: `PR本文への申告表の書き込みに失敗しました（push前。リモートは未変更）: ${errText(editRes)}` };
+      let preSha;
+      try {
+        preSha = resolveGitHead(worktree);
+      } catch (e) {
+        return { exitCode: 2, stdout: '', stderr: `HEADの解決に失敗しました（push前）: ${e.message}` };
+      }
+      const preUpsert = upsertDeclarationComment({
+        pr: prePushPrs[0].number, repo, headSha: preSha, table: declaration, cwd: worktree,
+      });
+      if (!preUpsert.ok) {
+        return { exitCode: 2, stdout: '', stderr: `${preUpsert.error}（push前。リモートは未変更）` };
       }
     }
   }
@@ -390,7 +378,7 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
   } else {
     let createResult;
     try {
-      createResult = createPr({ title: issueTitle, body: buildPrBodyWithDeclaration(issueNum, declaration), repo, cwd: worktree, env });
+      createResult = createPr({ title: issueTitle, body: buildPrBody(issueNum), repo, cwd: worktree, env });
     } catch (e) {
       return { exitCode: 3, stdout: '', stderr: `PRの作成に失敗しました: ${e.message}` };
     }
@@ -406,6 +394,16 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
       try {
         recordCycleEventFn(ws, issueNum, 'pr-created', { pr: prNumber });
       } catch { /* best-effort; PR remains authoritative */ }
+    }
+  }
+
+  // ── 申告表コメント段（--declaration-file 指定時のみ。冪等。push前に投稿済みでも更新する） ──
+  if (declaration !== undefined) {
+    const postUpsert = upsertDeclarationComment({
+      pr: prNumber, repo, headSha: sha, table: declaration, cwd: worktree,
+    });
+    if (!postUpsert.ok) {
+      return { exitCode: 3, stdout: '', stderr: `${postUpsert.error}（pushは成功。再実行で回復）` };
     }
   }
 
@@ -482,7 +480,7 @@ function main(argv) {
   return result;
 }
 
-module.exports = { USAGE, SPEC, AUTO_CLOSE_KEYWORD_RE, buildPrBody, buildPrBodyWithDeclaration, pushAndDeclare, main };
+module.exports = { USAGE, SPEC, AUTO_CLOSE_KEYWORD_RE, buildPrBody, pushAndDeclare, main };
 
 if (require.main === module) {
   const result = main(process.argv.slice(2));
