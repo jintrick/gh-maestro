@@ -1835,3 +1835,73 @@ test('buildJobPrompt: テスト申告（PRコメント）はテスト品質の�
     scope.cleanup();
   }
 });
+
+test('runJobsFromManifest: 取得した申告表は実際に組み立てられたテスト品質の葉のジョブへ届き、他の葉のジョブへは届かない（Issue #671）', async () => {
+  const scope = require('../scripts/shared/temp-directory').createTempDirScope();
+  const workspace = scope.mkdtemp('rj-integration-ws-');
+  const skillsDir = scope.mkdtemp('rj-integration-skills-');
+  const head = '0123456789abcdef0123456789abcdef01234567';
+  const table = '| t1 | 欠陥X を入れると失敗する | 仕様の既知の正解 |';
+  const tqLeaf = 'test-quality/test-quality';
+  const otherLeaves = ALL_LEAF_IDS.filter(id => id !== tqLeaf);
+  writeReviewFixtures(skillsDir, ALL_LEAF_IDS);
+  const manifest = {
+    pr: 123, repo: 'o/r', headRefOid: head, changedFiles: ['tests/a.test.js'],
+    coverage_ledger: {
+      leaves: ALL_LEAF_IDS.map(id => ({
+        id,
+        trunk: Object.entries(TRUNK_TO_LEAVES).find(([, leaves]) => leaves.includes(id))[0],
+        decision: 'adopted', rationale: null,
+      })),
+    },
+    jobs: [
+      { id: 'job-tq-integration', leaf_ids: [tqLeaf], aspect: 'Test Quality' },
+      { id: 'job-other-integration', leaf_ids: otherLeaves, aspect: 'Correctness' },
+    ],
+  };
+  const manifestFile = path.join(workspace, 'manifest.json');
+  fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+  const resultsFile = path.join(workspace, 'results.json');
+
+  const promptsByJob = {};
+  const readOwnPrompt = (jobId) => {
+    const file = promptFileInOwnedDir(`review-job-${jobId}-review-`);
+    if (!file) return null;
+    const text = fs.readFileSync(file, 'utf8');
+    if (!promptsByJob[jobId]) promptsByJob[jobId] = text;
+    return text;
+  };
+  _setSpawn((command, args, opts) => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.kill = () => {};
+    process.nextTick(() => {
+      for (const jobId of ['job-tq-integration', 'job-other-integration']) {
+        const prompt = readOwnPrompt(jobId);
+        if (!prompt) continue;
+        fs.writeFileSync(resultFileFromPrompt(prompt), '[]', 'utf8');
+      }
+      child.emit('close', 0);
+    });
+    return child;
+  });
+
+  try {
+    const result = await runJobsFromManifest(manifestFile, resultsFile, workspace, 5000, 5000, '123', 'o/r', path.join(workspace, '.gh-maestro'), {
+      mainWorkspace: workspace,
+      reviewSkillsDir: skillsDir,
+      readDeclarationEvidence: ({ headSha }) => ({ status: 'present', head: headSha, table }),
+    });
+    assert.ok(result, 'runJobsFromManifest returns a summary');
+    const tqPrompt = promptsByJob['job-tq-integration'];
+    const otherPrompt = promptsByJob['job-other-integration'];
+    assert.ok(tqPrompt, 'テスト品質の葉のジョブのプロンプトが組み立てられる');
+    assert.ok(otherPrompt, '他の葉のジョブのプロンプトが組み立てられる');
+    assert.ok(tqPrompt.includes(table), 'テスト品質の葉のプロンプトに申告表が入る');
+    assert.ok(!otherPrompt.includes(table), '他の葉のプロンプトに申告表は入らない');
+    assert.doesNotMatch(otherPrompt, /テスト申告（PRコメント/);
+  } finally {
+    _setSpawn(null);
+    scope.cleanup();
+  }
+});

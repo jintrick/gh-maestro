@@ -109,26 +109,3 @@ test('resume selects only the same PR, repository and HEAD, preserving older run
   assert.equal(checkpoint.select(ws, 11, 'o/r', 'abc', validateManifest), null);
   assert.ok(fs.existsSync(entry.file));
 });
-
-test('runJobsFromManifest reads the PR declaration once for the manifest HEAD and PR（Issue #671）', async () => {
-  const ws = scope.mkdtemp('rm-declaration-');
-  try {
-    const plan = validManifest();
-    const entry = checkpoint.create(ws, 11, plan, validateManifest);
-    entry.state.attempts = 2;
-    entry.state.results.a = { jobId: 'a', status: 'success', leaf_ids: plan.jobs[0].leaf_ids, attempt: 1, findings: [] };
-    checkpoint.save(entry.file, entry.state, validateManifest);
-    const manifestFile = path.join(ws, 'manifest.json');
-    fs.writeFileSync(manifestFile, JSON.stringify(plan));
-    const seen = [];
-    const result = await runJobsFromManifest(manifestFile, path.join(ws, 'results.json'), ws, 1000, 1000, '11', 'o/r', path.join(ws, '.gh-maestro'), {
-      mainWorkspace: ws,
-      checkpointId: entry.id,
-      readDeclarationEvidence: (args) => { seen.push(args); return { status: 'absent', head: args.headSha }; },
-    });
-    assert.equal(result.ok, true, JSON.stringify(result.summary));
-    assert.deepEqual(seen, [{ pr: '11', repo: 'o/r', headSha: plan.headRefOid }]);
-  } finally {
-    scope.cleanup();
-  }
-});
