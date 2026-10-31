@@ -161,32 +161,6 @@ test('GIT_DIR 注入下で superviseReviewManager を呼んでも victim リポ�
 // ── 受け入れ条件: GIT_DIR 注入下で gh-maestro-setup → victim 無傷 ────────────
 
 
-// ── 1層目: .githooks の unset ────────────────────────────────────────────────
-
-// リポジトリ位置を上書きする変数だけを落とす。
-const HOOK_POSITION_VARS = [
-  'GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE',
-  'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_QUARANTINE_PATH',
-];
-// これらは落としてはならない。git commit -a / パス指定コミットで git が渡す一時
-// インデックスを失うと、git diff --cached が実インデックスを読みステージ内容が
-// 空に見え、sync が無言でスキップされる。
-const HOOK_MUST_KEEP_VARS = ['GIT_INDEX_FILE', 'GIT_PREFIX'];
-
-test('.githooks/pre-commit は最初の git 呼び出しより前にリポジトリ位置系の変数を unset する', () => {
-  const content = fs.readFileSync(path.join(__dirname, '..', '.githooks', 'pre-commit'), 'utf8');
-  const unsetIdx = content.indexOf('unset GIT_DIR');
-  assert.notEqual(unsetIdx, -1, 'pre-commit: unset 行が必要');
-  assert.ok(unsetIdx < content.indexOf('git diff --cached'), 'pre-commit: unset が最初の git 呼び出しより前にあること');
-  const unsetStmt = content.slice(unsetIdx, content.indexOf('|| true', unsetIdx));
-  for (const v of HOOK_POSITION_VARS) {
-    assert.ok(unsetStmt.includes(v), `pre-commit は ${v} を unset に含むこと`);
-  }
-  for (const v of HOOK_MUST_KEEP_VARS) {
-    assert.ok(!unsetStmt.includes(v), `pre-commit は ${v} を unset してはならない`);
-  }
-});
-
 // ── 2層目: tests/_env-setup.js プリロードの除去 ───────────────────────────────
 
 

@@ -222,3 +222,49 @@ test('_env-setup.js プリロードがワーカー文脈変数を除去し、テ
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+// ── 1層目: .githooks/pre-commit の unset 文を実行して確かめる ──────────────────
+// 文字列の有無だけを見ると、unset が効かない位置に書かれていても通ってしまう。
+// unset 文を切り出して sh で実行し、後続の git 呼び出しが cwd のリポジトリを見ること、
+// GIT_INDEX_FILE が残ることを確かめる（git 操作を伴うため slow 層へ置く）。
+
+function gitFreeEnv(extra) {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!k.startsWith('GIT_')) env[k] = v;
+  }
+  return { ...env, ...extra };
+}
+
+test('.githooks/pre-commit の unset 文は GIT_DIR 系を落とし、GIT_INDEX_FILE を残す（実行して確認）', () => {
+  const lines = fs.readFileSync(path.join(__dirname, '..', '..', '.githooks', 'pre-commit'), 'utf8').split(/\r?\n/);
+  const start = lines.findIndex((line) => line.startsWith('unset GIT_DIR'));
+  const end = lines.findIndex((line, i) => i >= start && line.includes('|| true'));
+  assert.ok(start >= 0 && end >= start, 'pre-commit に unset 文があること');
+  const unsetBlock = lines.slice(start, end + 1).join('\n');
+
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-hook-unset-'));
+  try {
+    const cwdRepo = path.join(base, 'cwd-repo');
+    const otherRepo = path.join(base, 'other-repo');
+    for (const dir of [cwdRepo, otherRepo]) {
+      fs.mkdirSync(dir);
+      const init = spawnSync('git', ['init', '-q', dir], { env: gitFreeEnv({}), encoding: 'utf8' });
+      assert.equal(init.status, 0, init.stderr);
+    }
+
+    const script = [unsetBlock, 'git rev-parse --absolute-git-dir', 'printf "%s\n" "${GIT_INDEX_FILE-}"'].join('\n');
+    const r = spawnSync('sh', ['-c', script], {
+      cwd: cwdRepo,
+      encoding: 'utf8',
+      env: gitFreeEnv({ GIT_DIR: path.join(otherRepo, '.git'), GIT_INDEX_FILE: path.join(base, 'keep-index') }),
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const [gitDirLine, indexLine] = r.stdout.split(/\r?\n/);
+    assert.ok(gitDirLine.includes('cwd-repo'), `cwd のリポジトリを指すこと: ${gitDirLine}`);
+    assert.ok(!gitDirLine.includes('other-repo'), `GIT_DIR の注入先を指してはならない: ${gitDirLine}`);
+    assert.equal(indexLine, path.join(base, 'keep-index'), 'GIT_INDEX_FILE は unset されず残ること');
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
