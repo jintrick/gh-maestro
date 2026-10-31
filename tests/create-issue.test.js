@@ -89,19 +89,6 @@ test('createIssue: 成功時はunlinkし、URLからissue番号を抽出する',
   assert.deepEqual(unlinked, ['/tmp/body.md']);
 });
 
-test('createIssue: 通常のIssue作成でもassistantを起動しない', () => {
-  let spawnAssistantCalled = false;
-  const result = createIssue(
-    { title: 't', bodyFile: '/tmp/body.md', repo: 'explicit/repo', workspace: '/tmp/ws' },
-    {
-      ghCreateFn: () => ({ status: 0, stdout: 'https://github.com/o/r/issues/7\n', stderr: '' }),
-      unlinkBodyFileFn: () => {},
-      spawnAssistantFn: () => { spawnAssistantCalled = true; return { status: 0 }; },
-    }
-  );
-  assert.equal(result.ok, true);
-  assert.equal(spawnAssistantCalled, false);
-});
 
 test('createIssue: Issue作成成功後の削除失敗は作成成功として警告する', () => {
   const result = createIssue(

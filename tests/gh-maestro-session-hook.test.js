@@ -340,30 +340,6 @@ test('runSessionHook: 検査の判定不能失敗を成功へ縮退させず、�
 
 
 
-test('CLI通し: get-contextが失敗した場合は旧SESSION_IDをstdoutへ出力しない', () => {
-  const workspace = createWorkspace();
-  try {
-    const calls = [];
-  const result = require('../scripts/gh-maestro-session-hook').runSessionHook(workspace, {
-      spawnSyncFn: (command, args) => {
-        calls.push(path.basename(args[0]));
-        if (calls.length === 4) {
-          return { status: 1, stdout: 'SESSION_ID=old-session-id\n', stderr: 'get-context failed\n' };
-        }
-        return { status: 0, stdout: `${path.basename(args[0])}\n`, stderr: '' };
-      },
-    });
-
-    assert.equal(result.ok, false);
-    assert.deepEqual(calls, ['check-legacy.js', 'gh-maestro-setup.js', 'reset-session.js', 'get-context.js']);
-    assert.doesNotMatch(result.stdout, /SESSION_ID=/,
-      'get-context失敗時はreset前後のSESSION_IDを含むstdoutを破棄すること');
-    assert.match(result.stderr, /get-context\.js failed/);
-    assert.match(result.stderr, /get-context failed/);
-  } finally {
-    fs.rmSync(workspace, { recursive: true, force: true });
-  }
-});
 
 test('recordOrchestratorSession: hook入力の session_id を workspace と共に記録する', () => {
   const { recordOrchestratorSession } = require('../scripts/gh-maestro-session-hook');

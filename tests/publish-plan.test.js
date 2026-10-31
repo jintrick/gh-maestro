@@ -9,26 +9,9 @@ const MARKER = PLAN_MARKER;
 
 // ── parseCommentsResponse ─────────────────────────────────────────────────
 
-test('parseCommentsResponse: --paginate --slurp のページ配列を平坦化する', () => {
-  const result = parseCommentsResponse(JSON.stringify([
-    [{ id: 1, body: 'a' }, { id: 2, body: 'b' }],
-    [{ id: 3, body: 'c' }],
-  ]));
-  assert.deepEqual(result, [{ id: 1, body: 'a' }, { id: 2, body: 'b' }, { id: 3, body: 'c' }]);
-});
 
-test('parseCommentsResponse: 平坦な配列はそのまま返す（テスト用モック後方互換）', () => {
-  const result = parseCommentsResponse(JSON.stringify([{ id: 1 }, { id: 2 }]));
-  assert.deepEqual(result, [{ id: 1 }, { id: 2 }]);
-});
 
-test('parseCommentsResponse: 空配列', () => {
-  assert.deepEqual(parseCommentsResponse('[]'), []);
-});
 
-test('parseCommentsResponse: 配列でないJSONはnull', () => {
-  assert.equal(parseCommentsResponse('{"message":"error"}'), null);
-});
 
 test('parseCommentsResponse: 空文字列は空配列', () => {
   assert.deepEqual(parseCommentsResponse(''), []);

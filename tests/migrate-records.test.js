@@ -92,7 +92,7 @@ test('migration holds a worker log owned by a live workers.json process', () => 
   assert.equal(fs.existsSync(oldLog), true);
 });
 
-test('migration holds a worker log when workers.json is unreadable（破損時は held に倒れる）', () => {
+test('migration holds a worker log when workers.json is unreadable（破損時は例外で止まり、ログは移動されない）', () => {
   const dir = workspace();
   const workerName = 'issue-5-coder-fix';
   const oldLog = path.join(dir, '.gh-maestro', 'worker-logs', `${workerName}.log`);

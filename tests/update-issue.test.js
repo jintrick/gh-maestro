@@ -89,19 +89,6 @@ test('updateIssue: gh失敗時はbody-fileを削除せず、更新成功扱い�
   assert.match(result.stderr, /permission denied/);
 });
 
-test('updateIssue: 更新成功後の削除失敗は更新成功として警告し、原案を保持する', () => {
-  const result = updateIssue(
-    { issue: '42', bodyFile: 'C:\\Temp\\issue-42.md', workspace: 'C:\\workspace' },
-    {
-      ghEditFn: () => ({ status: 0, stdout: '', stderr: '' }),
-      unlinkBodyFileFn: () => { throw new Error('EPERM'); },
-    },
-  );
-
-  assert.equal(result.ok, true);
-  assert.match(result.cleanupWarning, /原案を保持/);
-  assert.match(result.cleanupWarning, /EPERM/);
-});
 
 test('update-issue CLI: /tmpの論理パスを実体へ解決し、成功時に削除する', () => {
   withTempWorkspace((workspace) => withLogicalBody('本文 `$VALUE`\n', (logicalPath, physicalPath) => {

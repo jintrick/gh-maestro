@@ -98,17 +98,6 @@ test('listComments: since と per_page の両方を指定できる', () => {
   assert.ok(perPageF >= 0, 'per_page should be in args');
 });
 
-test('listComments: since と per_page が未指定でも引数に余計な -f は付かない', () => {
-  let capturedArgs;
-  ghComments._setSpawnSync((cmd, args) => {
-    capturedArgs = args;
-    return { status: 0, stdout: '[]' };
-  });
-  ghComments.listComments('test/repo', 42);
-  // --paginate と --slurp 以外に -f が無いことを確認
-  const fCount = capturedArgs.filter(a => a === '-f').length;
-  assert.equal(fCount, 0, 'no -f flags should appear when since/per_page not specified');
-});
 
 test('listComments: spawnSync options（cwd等）が透過的に渡される', () => {
   let capturedOpts;

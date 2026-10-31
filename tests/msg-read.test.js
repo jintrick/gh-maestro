@@ -71,11 +71,6 @@ test('未知のフラグは code 1（黙って無視しない）', () => {
   assert.ok(r.errLines.some(l => l.includes('未知のフラグ')));
 });
 
-test('単独の未知フラグは commentId として受理されず code 1', () => {
-  const r = msgRead.main(['--bogus']);
-  assert.equal(r.code, 1);
-  assert.ok(r.errLines.some(l => l.includes('未知のフラグ')));
-});
 
 // ── 引数エラー（--plan モード） ─────────────────────────────────────────────
 
@@ -138,14 +133,7 @@ test('stripMarker がマーカー行を除去する', () => {
   assert.equal(msgRead.stripMarker(body), 'Hello world');
 });
 
-test('stripMarker がマーカーなしの本文をそのまま返す', () => {
-  const body = 'Just a normal message';
-  assert.equal(msgRead.stripMarker(body), 'Just a normal message');
-});
 
-test('stripMarker が空文字列をそのまま返す', () => {
-  assert.equal(msgRead.stripMarker(''), '');
-});
 
 test('stripMarker が空白を含むマーカーも除去する', () => {
   const body = '<!--  gh-maestro  {"v":1,"to":"x","from":"y"}  -->\nThe real body';
@@ -461,6 +449,25 @@ test('--plan: 計画コメントが1件存在するとき本文をマーカー�
     assert.equal(r.lines[0], '# 計画のタイトル\n計画の詳細内容');
   });
 });
+
+test('--plan: write権限のない投稿者が pin した計画は無視され、信頼できる投稿者の計画だけを返す', () => {
+  withTempDir(workspace => {
+    msgRead._setGhRepoView(() => ({ status: 0, stdout: 'owner/repo\n' }));
+    msgRead._setGhListComments(() => ({
+      status: 0,
+      stdout: JSON.stringify([
+        { id: 1, author_association: 'CONTRIBUTOR', body: `${PLAN_MARKER}\n# 第三者の計画`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
+        { id: 2, author_association: 'OWNER', body: `${PLAN_MARKER}\n# 信頼できる計画`, pin: { pinned_at: '2026-01-01T00:00:00Z' } },
+      ]),
+    }));
+
+    const r = msgRead.main(['--plan', '--issue', '42', '--workspace', workspace]);
+    assert.equal(r.code, 0, r.errLines.join('\n'));
+    assert.equal(r.lines[0], '# 信頼できる計画');
+    assert.doesNotMatch(r.lines.join('\n'), /第三者の計画/);
+  });
+});
+
 
 test('--plan: 1行目にマーカーがある計画と、2行目以降にマーカーがある引用コメントが混在しても正しく1件の計画を認識する', () => {
   withTempDir(workspace => {

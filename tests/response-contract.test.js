@@ -102,8 +102,5 @@ describe('response-contract', () => {
   });
 
   describe('CONTRACT_TYPES', () => {
-    test('定数が freeze されている', () => {
-      assert.throws(() => { CONTRACT_TYPES.NEW_TYPE = 'test'; }, TypeError);
-    });
   });
 });

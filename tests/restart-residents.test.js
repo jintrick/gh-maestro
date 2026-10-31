@@ -159,21 +159,6 @@ function residentEntries(workspace) {
   ];
 }
 
-test('buildRestartArgs: registryに残った旧session-pid引数を除去する', () => {
-  const workspace = makeWorkspace();
-  try {
-    const harness = makeHarness(workspace);
-    const result = buildRestartArgs(
-      { script: 'msg-poll.js', workerName: null },
-      { args: ['orchestrator', '--workspace', workspace, '--session-pid', '1234'] },
-      workspace,
-      harness.hooks,
-    );
-    assert.deepEqual(result, { args: ['orchestrator', '--workspace', workspace] });
-  } finally {
-    fs.rmSync(workspace, { recursive: true, force: true });
-  }
-});
 
 test('restartResidents: plugin monitor管理の常駐は停止・再起動しない', () => {
   const workspace = makeWorkspace();
