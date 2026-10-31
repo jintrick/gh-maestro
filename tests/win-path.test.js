@@ -17,18 +17,28 @@ test('/c/Users/... 形式をドライブレター形式に変換する', () => {
   assert.equal(result, 'C:\\Users\\amg\\foo.md');
 });
 
-test('/tmp/... 形式を%TEMP%パスに変換する', () => {
-  const temp = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
-  const result = toWinPath('/tmp/pr-diff.txt');
-  assert.ok(
-    result.startsWith(temp) || result.endsWith('pr-diff.txt'),
-    `expected to start with TEMP dir, got: ${result}`
-  );
-  assert.ok(result.endsWith('pr-diff.txt'), `expected to end with filename, got: ${result}`);
-});
+// cygpath を失敗させ、フォールバック（%TEMP% への写像）を決定的に通す
+function loadWinPathWithoutCygpath() {
+  const cpPath = require.resolve('../scripts/shared/child-process');
+  const wpPath = require.resolve('../scripts/shared/win-path');
+  const savedCp = require.cache[cpPath];
+  const savedWp = require.cache[wpPath];
+  require.cache[cpPath] = {
+    id: cpPath, filename: cpPath, loaded: true,
+    exports: { spawnSync: () => ({ status: 1, stdout: '', stderr: '' }) },
+  };
+  delete require.cache[wpPath];
+  try {
+    return require(wpPath);
+  } finally {
+    if (savedCp) require.cache[cpPath] = savedCp; else delete require.cache[cpPath];
+    if (savedWp) require.cache[wpPath] = savedWp; else delete require.cache[wpPath];
+  }
+}
 
-test('/tmp/サブディレクトリ/ファイル も正しく変換する', () => {
+test('/tmp/... 形式を%TEMP%へ写像する（直下とサブディレクトリの両方、区切りはバックスラッシュ）', () => {
   const temp = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
-  const result = toWinPath('/tmp/sub/foo.md');
-  assert.ok(result.endsWith('sub\\foo.md'), `unexpected: ${result}`);
+  const { toWinPath: fallback } = loadWinPathWithoutCygpath();
+  assert.equal(fallback('/tmp/pr-diff.txt'), `${temp}\\pr-diff.txt`);
+  assert.equal(fallback('/tmp/sub/foo.md'), `${temp}\\sub\\foo.md`);
 });

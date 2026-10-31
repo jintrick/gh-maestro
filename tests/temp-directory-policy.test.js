@@ -63,7 +63,7 @@ const DIRECT_TEMP_USAGE = new Map([
   ['worker-supervisor.test.js', 2],
   ['workers-registry.test.js', 2],
   ['workspace-housekeeping.test.js', 12],
-  ['workspace.test.js', 22],
+  ['workspace.test.js', 20],
   ['write-draft.test.js', 10],
 ]);
 

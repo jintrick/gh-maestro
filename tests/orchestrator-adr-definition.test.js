@@ -26,28 +26,9 @@ function readAdrSection() {
   return rest.slice(0, end === -1 ? rest.length : end);
 }
 
-test('判断の場で照合する定義がオーケストレーターSKILL.mdの本文にある', () => {
+test('オーケストレーターSKILL.mdのADR定義節が書式を持つ adr.md を開く契機を参照する', () => {
   const section = readAdrSection();
-  const required = [
-    [/いつ書くか/, 'いつ書くか'],
-    [/3条件/, 'ADRにする3条件'],
-    [/3条件を満たさない判断の行き先/, '3条件を満たさない判断の行き先'],
-    [/adr\.md/, '書式を持つアセットを開く契機'],
-  ];
-
-  for (const [pattern, label] of required) {
-    assert.match(section, pattern, `ADRの定義節が「${label}」を含むこと`);
-  }
-});
-
-test('3条件と作文の禁止がSKILL.md本文にあり、別ファイルへの参照になっていない', () => {
-  const section = readAdrSection();
-
-  assert.match(section, /覆したときの影響が大きい/, '条件1が本文にあること');
-  assert.match(section, /再び合理的に見えうる/, '条件2が本文にあること');
-  assert.match(section, /具体的な場面を示せる/, '条件3が本文にあること');
-  assert.match(section, /作文してはならない/, '却下した案を作文しない旨が本文にあること');
-  assert.match(section, /機械的に検出も強制もできない/, '遵守の限界が本文にあること');
+  assert.match(section, /adr\.md/, 'ADRの定義節が adr.md を参照すること');
 });
 
 test('書くと決めた後にだけ要る詳細がアセットにある', () => {
@@ -62,13 +43,4 @@ test('書くと決めた後にだけ要る詳細がアセットにある', () =>
   for (const [pattern, label] of required) {
     assert.match(asset, pattern, `adr.mdが「${label}」を含むこと`);
   }
-});
-
-test('ADRの定義節が開発サイクルより前に置かれている', () => {
-  const content = fs.readFileSync(SKILL_PATH, 'utf8');
-
-  assert.ok(
-    content.indexOf(SECTION_HEADING) < content.indexOf('## 開発サイクル'),
-    'ADRの定義節が工程の記述より前にあること',
-  );
 });

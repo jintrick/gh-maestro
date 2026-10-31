@@ -99,18 +99,22 @@ describe('main: 引数検証', () => {
     assert.equal(r.code, 1);
   });
 
-  test('--issue が正の整数でなければエラー', async () => {
-    const r = await watch.main(['--issue', '0', '--workspace', '/ws']);
-    assert.equal(r.code, 1);
+  test('--issue が正の整数でなければ、workspace 解決より前に --issue の検証で止まる', async () => {
+    // 存在する workspace を渡し、code 1 が --issue の検証によるものだと区別する
+    await withTempDir(async (workspace) => {
+      const r = await watch.main(['--issue', '0', '--workspace', workspace]);
+      assert.equal(r.code, 1);
+      assert.ok(r.errLines.some((line) => line.includes('--issue')), `errLines: ${r.errLines}`);
+      assert.ok(!r.errLines.some((line) => line.includes('ワークスペースを解決できません')), `errLines: ${r.errLines}`);
+    });
   });
 
-  test('workspace を解決できなければエラー', async () => {
-    // 明示した --workspace が使われることを確認するため、git repoではない
-    // テンポラリディレクトリを渡し、_ghRepoView が失敗するパスを検証する。
-    await withTempDir(async (workspace) => {
-      const r = await watch.main(['--issue', '5', '--workspace', workspace]);
-      assert.equal(typeof r.code, 'number');
-    });
+  test('workspace を解決できなければ、解決失敗として code 1 で止まる', async () => {
+    // ホームは workspace として拒否される（assertValidWorkspace → resolveWorkspace が null）。
+    // 解決に失敗した時点で戻るため、ホーム配下へ書き込むことはない。
+    const r = await watch.main(['--issue', '5', '--workspace', os.homedir()]);
+    assert.equal(r.code, 1);
+    assert.ok(r.errLines.some((line) => line.includes('ワークスペースを解決できません')), `errLines: ${r.errLines}`);
   });
 
   test('リポジトリを解決できなければエラー', async () => {

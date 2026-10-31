@@ -68,15 +68,6 @@ describe('gh-pr: listPrsByBranch', () => {
     assert.throws(() => listPrsByBranch('owner/repo', ''), /有効な branch が必要です/);
     assert.throws(() => listPrsByBranch('owner/repo', null), /有効な branch が必要です/);
   });
-
-  test('_setListPrsByBranch によるモック差し替えとリセット', () => {
-    ghPr._setListPrsByBranch(() => ({ status: 0, stdout: 'mocked', stderr: '' }));
-    assert.equal(listPrsByBranch('o/r', 'b').stdout, 'mocked');
-
-    ghPr._resetListPrsByBranch();
-    ghPr._setSpawnSync(() => ({ status: 0, stdout: 'via-spawn', stderr: '' }));
-    assert.equal(listPrsByBranch('o/r', 'b').stdout, 'via-spawn');
-  });
 });
 
 describe('gh-pr: parsePrListResponse', () => {

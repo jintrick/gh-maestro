@@ -82,6 +82,8 @@ test('unlinkJunctions: 実ディレクトリと junction が混在しても実�
     assert.ok(!fs.existsSync(path.join(worktree, 'node_modules')));
     // ターゲットは無傷
     assert.ok(fs.existsSync(path.join(workspace, 'node_modules', 'sentinel.txt')));
+    // 実ディレクトリ src/ の中身も残る（junction 除去の際に実ディレクトリを壊さない）
+    assert.equal(fs.readFileSync(path.join(worktree, 'src', 'index.js'), 'utf8'), '// keep');
   });
 });
 

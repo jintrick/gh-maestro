@@ -135,13 +135,20 @@ test('syncRules: paths: なしのファイルはエラー終了する', () => {
 
 test('syncRules: workspace未解決時は stderr に警告を出力する', () => {
   withProject(base => {
-    const r = spawnSync(process.execPath, [SCRIPT], {
-      cwd: base,
-      env: { ...process.env, GH_MAESTRO_WORKSPACE: os.homedir() },
-      encoding: 'utf8',
-    });
-    assert.notEqual(r.status, 0);
-    assert.match(r.stderr, /同期失敗の記録に失敗しました/);
+    // 子プロセスの home を一時ディレクトリへ向ける（実ホームへ失敗記録を書かない）。
+    // workspace が home と同じ場合に未解決として扱われる、という条件は保つ。
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-sync-rules-home-'));
+    try {
+      const r = spawnSync(process.execPath, [SCRIPT], {
+        cwd: base,
+        env: { ...process.env, USERPROFILE: fakeHome, HOME: fakeHome, GH_MAESTRO_WORKSPACE: fakeHome },
+        encoding: 'utf8',
+      });
+      assert.notEqual(r.status, 0);
+      assert.match(r.stderr, /同期失敗の記録に失敗しました/);
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
   });
 });
 

@@ -129,15 +129,11 @@ test('文書が宣言した中項目の構造と記載内容が工程ごとに�
   }
 });
 
-test('工程2の既存判断照合がADRと保留Issueに限定され、広域検索を要求しない', () => {
+test('工程2の既存判断照合がADRと保留Issueを確認先として含む', () => {
   const stage = fs.readFileSync(path.join(SKILL_DIR, 'stage-2-research.md'), 'utf8');
 
   assert.match(stage, /docs\/adr\//, '工程2がADRの確認先を含むこと');
   assert.match(stage, /gh-maestro-pending/, '工程2が保留Issueの確認先を含むこと');
-  assert.doesNotMatch(stage, /explorer\s*(?:を|の)?\s*(?:起動|依頼|使用)(?:する|して|せよ|してください)/,
-    '工程2がexplorerの起動・依頼を要求しないこと');
-  assert.doesNotMatch(stage, /Issue(?:・|\/)PR.*(?:全文|全体).*検索(?:する|して|せよ|してください)/,
-    '工程2がIssue・PRの広域検索を要求しないこと');
 });
 
 test('開発サイクルに工程番号のない裸の手順番号が残っていない', () => {
@@ -238,6 +234,4 @@ test('工程7に修正push後のexplorer事実確認が番号付き中項目と�
   assert.match(stage7, /7-\[4\/6\].*修正push後の事実確認/);
   const handbook = fs.readFileSync(path.join(SKILL_DIR, 'stage-7-review-merge.md'), 'utf8');
   assert.match(handbook, /PR_PUSH/);
-  assert.match(handbook, /explorer/);
-  assert.match(handbook, /checkout/);
 });

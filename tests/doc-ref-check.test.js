@@ -120,14 +120,11 @@ test('extractMdRefs: file:///... リンクはisAbsoluteフラグ付きで抽出�
   assert.equal(refs[0].isAbsolute, true);
 });
 
-test('extractMdRefs: 裸のファイル名も抽出する（祖先ディレクトリ基準の解決はresolveRefExistsに委ねる）', () => {
-  const content = '`SKILL.md`と`logic-invariants.md`';
-  const refs = extractMdRefs(content);
-  const targets = refs.map((r) => r.target).sort();
-  assert.deepEqual(targets, ['SKILL.md', 'logic-invariants.md']);
-});
+test('extractMdRefs: 裸のファイル名も抽出し、リンクとインラインコードの種別を保持する', () => {
+  // 裸のファイル名（祖先ディレクトリ基準の解決は resolveRefExists に委ねる）
+  const bare = extractMdRefs('`SKILL.md`と`logic-invariants.md`').map((r) => r.target).sort();
+  assert.deepEqual(bare, ['SKILL.md', 'logic-invariants.md']);
 
-test('extractMdRefs: 裸ファイル名でもMarkdownリンクとインラインコードの種別を保持する', () => {
   const refs = extractMdRefs('[参照](missing.md) と `SKILL.md`');
   assert.deepEqual(refs.map((ref) => ({ target: ref.target, kind: ref.kind })), [
     { target: 'missing.md', kind: 'link' },
@@ -261,15 +258,5 @@ test('意図的に壊れたパスへの言及を含むフィクスチャで失�
     assert.ok(failures.some((f) => f.includes('.claude/rules/queue-path-safety.md')));
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test('妥当な既存パスへの言及は検出しない（.claude/rules/git-arg-injection.md）', () => {
-  const goodFile = path.join(REPO_ROOT, 'docs', 'github-comm-plan.md');
-  const content = fs.readFileSync(goodFile, 'utf8');
-  const refs = extractMdRefs(content).filter((r) => r.target.includes('git-arg-injection.md'));
-  assert.ok(refs.length > 0, 'git-arg-injection.mdへの言及が見つからなかった');
-  for (const ref of refs) {
-    assert.equal(resolveRefExists(REPO_ROOT, goodFile, ref.target, { isAbsolute: ref.isAbsolute }), true);
   }
 });

@@ -117,7 +117,9 @@ test('resolveBaseBranch: 異なるブランチ値もそのまま返す', () => {
 
 test('resolveBaseBranch: env未指定でも process.env から読む', () => {
   const { mod } = loadModule();
-  assert.equal(mod.resolveBaseBranch({ env: { GH_MAESTRO_BASE_BRANCH: 'dev' } }), 'dev');
+  withBaseBranch('dev', () => {
+    assert.equal(mod.resolveBaseBranch(), 'dev');
+  });
 });
 
 test('resolveBaseBranch: 未設定ならフェイルクローズ（エラー）', () => {
@@ -160,15 +162,13 @@ test('createPr: 環境変数のbaseを --base として gh pr create に渡す�
   assert.equal(ghCall.args[5], 'Fix bug');
   assert.equal(ghCall.args[6], '--body');
   assert.equal(ghCall.args[7], 'Closes #1');
-});
 
-test('createPr: base が自ブランチと同名でも base==head にならず base に渡る', () => {
-  // 本Issueの直接の事故形状: upstream が自ブランチを指すと旧実装は base==head で失敗した。
-  // 新実装では env の値がそのまま --base に渡る。
-  const { mod, calls } = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/1\n' }));
-  withGuardBypassed(() => mod.createPr({ title: 'Fix', body: 'Closes #1', env: { GH_MAESTRO_BASE_BRANCH: 'issue-269-coder-fix-pr-base-resolution' } }));
-  const ghCall = calls.find(c => c.cmd === 'gh');
-  assert.equal(ghCall.args[3], 'issue-269-coder-fix-pr-base-resolution');
+  // base が自ブランチと同名でも base==head にならず、env の値がそのまま --base に渡る（旧 165 の検査を統合）
+  const sameName = 'issue-269-coder-fix-pr-base-resolution';
+  const second = loadModule(() => ({ status: 0, stdout: 'https://github.com/owner/repo/pull/1\n' }));
+  withGuardBypassed(() => second.mod.createPr({ title: 'Fix', body: 'Closes #1', env: { GH_MAESTRO_BASE_BRANCH: sameName } }));
+  const sameCall = second.calls.find(c => c.cmd === 'gh');
+  assert.equal(sameCall.args[3], sameName);
 });
 
 test('createPr: --repo が指定された場合に渡される', () => {
@@ -219,18 +219,13 @@ test('createPr: GH_MAESTRO_BASE_BRANCH 未設定なら実PRを作らず throw �
 
 // ── main（CLIエントリポイント） ──────────────────────────────────────────────
 
-test('main: --help を表示する', () => {
+test('main: --help / -h を表示する', () => {
   const { mod } = loadModule();
-  const result = mod.main(['--help']);
-  assert.equal(result.exitCode, 0);
-  assert.ok(result.stdout.includes('Usage'));
-});
-
-test('main: -h を表示する', () => {
-  const { mod } = loadModule();
-  const result = mod.main(['-h']);
-  assert.equal(result.exitCode, 0);
-  assert.ok(result.stdout.includes('Usage'));
+  for (const flag of ['--help', '-h']) {
+    const result = mod.main([flag]);
+    assert.equal(result.exitCode, 0, flag);
+    assert.ok(result.stdout.includes('Usage'), flag);
+  }
 });
 
 test('main: --help に GH_MAESTRO_BASE_BRANCH の説明を含む', () => {

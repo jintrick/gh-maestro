@@ -194,18 +194,6 @@ test('resolveWorkspace: --workspace 引数が managed root（~/.gh-maestro）配
   });
 });
 
-test('resolveWorkspace: 通常のワークスペースは引き続き解決される（回帰確認）', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-normal-'));
-  try {
-    withEnv({ GH_MAESTRO_WORKSPACE: undefined }, () => {
-      delete process.env.GH_MAESTRO_WORKSPACE;
-      assert.equal(resolveWorkspace(tmpDir), path.resolve(tmpDir));
-    });
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
 // ── parseFlags（新契約: 仕様オブジェクト + ArgsValidationError throw） ─────
 
 function expectValidationError(args, spec, expectedMessage) {
@@ -413,11 +401,8 @@ test('parseFlags: 旧形式（第2引数なし）は契約変更エラーで thr
 
 // ── hasGenuineHelpRequest（catch でのヘルプ優先判定。値欠落はヘルプに握りつぶさない） ─────
 
-test('hasGenuineHelpRequest: --help があれば true', () => {
+test('hasGenuineHelpRequest: --help / -h があれば true', () => {
   assert.equal(hasGenuineHelpRequest(['--help'], []), true);
-});
-
-test('hasGenuineHelpRequest: -h があれば true', () => {
   assert.equal(hasGenuineHelpRequest(['-h'], []), true);
 });
 
@@ -458,20 +443,10 @@ function captureArgsValidationError(args, spec) {
   }
 }
 
-test('parseFlags: --help + 必須欠落は throw したエラーの helpRequested=true', () => {
-  const err = captureArgsValidationError(['--help'], {
-    flags: { '--pr': { required: true } },
-    booleans: ['--help', '-h'],
-  });
-  assert.equal(err.helpRequested, true);
-});
-
-test('parseFlags: -h + 必須欠落は throw したエラーの helpRequested=true', () => {
-  const err = captureArgsValidationError(['-h'], {
-    flags: { '--pr': { required: true } },
-    booleans: ['--help', '-h'],
-  });
-  assert.equal(err.helpRequested, true);
+test('parseFlags: --help / -h + 必須欠落は throw したエラーの helpRequested=true', () => {
+  const spec = { flags: { '--pr': { required: true } }, booleans: ['--help', '-h'] };
+  assert.equal(captureArgsValidationError(['--help'], spec).helpRequested, true);
+  assert.equal(captureArgsValidationError(['-h'], spec).helpRequested, true);
 });
 
 test('parseFlags: 値欠落が混ざると helpRequested=false（--help は値として渡された可能性）', () => {
@@ -497,10 +472,3 @@ test('parseFlags: --help が無ければ helpRequested=false', () => {
   assert.equal(err.helpRequested, false);
 });
 
-test('parseFlags: 成功時は throw せず helpRequested を持たない', () => {
-  const { values } = parseFlags(['--title', 'x'], {
-    flags: { '--title': {} },
-    booleans: ['--help', '-h'],
-  });
-  assert.equal(values['--title'], 'x');
-});

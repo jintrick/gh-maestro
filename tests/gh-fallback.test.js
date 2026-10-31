@@ -213,9 +213,3 @@ test('graphqlCreateIssue: bodyは-Fで渡す（-fにするとリテラル"@-"化
   assert.ok(bodyFlagIndex > 0);
   assert.equal(createCallArgs[bodyFlagIndex - 1], '-F');
 });
-
-// ── リセット（後続テストのため） ────────────────────────────────────────────
-
-test('injected graphql exec can be reset', () => {
-  ghFallback._setGraphqlExec(() => ({ status: 0, stdout: '{}' }));
-});

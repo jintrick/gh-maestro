@@ -222,3 +222,76 @@ test('_env-setup.js プリロードがワーカー文脈変数を除去し、テ
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+// ── 1層目: .githooks/pre-commit を実行し、git 呼び出し時点の環境を記録させて確かめる ──
+// 偽の git を PATH の先頭に置いてフックを実行する。偽 git は呼ばれた時点の位置系変数と
+// 残すべき変数を記録する。記録から次を確かめる:
+//   - 最初の git 呼び出しより前に HOOK_POSITION_VARS が unset されている
+//   - HOOK_MUST_KEEP_VARS は注入した値のまま残る
+// 変異確認: unset をフック末尾へ移す変異と、GIT_PREFIX を unset に加える変異で失敗する。
+
+// 親環境の GIT_* を取り除いた環境（テストの git 呼び出しを親のリポジトリ指定から切り離す）
+function gitFreeEnv(extra) {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!k.startsWith('GIT_')) env[k] = v;
+  }
+  return { ...env, ...extra };
+}
+
+function writeFakeGit(binDir) {
+  const gitPath = path.join(binDir, 'git');
+  fs.writeFileSync(gitPath, [
+    '#!/bin/sh',
+    'printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\n" "${GIT_DIR-unset}" "${GIT_COMMON_DIR-unset}" "${GIT_WORK_TREE-unset}" "${GIT_OBJECT_DIRECTORY-unset}" "${GIT_ALTERNATE_OBJECT_DIRECTORIES-unset}" "${GIT_QUARANTINE_PATH-unset}" "${GIT_INDEX_FILE-unset}" "${GIT_PREFIX-unset}" "$*" >> "$FAKE_GIT_LOG"',
+    'exit 0',
+    '',
+  ].join('\n'));
+  fs.chmodSync(gitPath, 0o755);
+}
+
+test('.githooks/pre-commit は最初の git 呼び出しより前に位置系変数を unset し、残すべき変数は残す（フックを実行して確認）', () => {
+  const hookPath = path.join(__dirname, '..', '..', '.githooks', 'pre-commit');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-hook-run-'));
+  try {
+    const binDir = path.join(base, 'bin');
+    fs.mkdirSync(binDir);
+    writeFakeGit(binDir);
+    const logPath = path.join(base, 'git-calls.log');
+    const injected = {
+      GIT_DIR: path.join(base, 'other', '.git'),
+      GIT_COMMON_DIR: path.join(base, 'other', '.git'),
+      GIT_WORK_TREE: path.join(base, 'other'),
+      GIT_OBJECT_DIRECTORY: path.join(base, 'other', 'objects'),
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: path.join(base, 'alt'),
+      GIT_QUARANTINE_PATH: path.join(base, 'quarantine'),
+      GIT_INDEX_FILE: path.join(base, 'keep-index'),
+      GIT_PREFIX: 'keep-prefix/',
+    };
+    const pathKey = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+    const r = spawnSync('sh', [hookPath], {
+      cwd: base,
+      encoding: 'utf8',
+      env: gitFreeEnv({
+        ...injected,
+        [pathKey]: binDir + path.delimiter + (process.env[pathKey] || ''),
+        FAKE_GIT_LOG: logPath,
+      }),
+    });
+    assert.equal(r.status, 0, r.stderr);
+
+    const lines = fs.readFileSync(logPath, 'utf8').split(/\r?\n/).filter(Boolean);
+    assert.ok(lines.length >= 1, 'フックが git を1回以上呼ぶこと');
+    // 偽 git の printf の並び = HOOK_POSITION_VARS → HOOK_MUST_KEEP_VARS
+    const logged = [...HOOK_POSITION_VARS, ...HOOK_MUST_KEEP_VARS];
+    for (const line of lines) {
+      const fields = line.split('|');
+      logged.forEach((name, i) => {
+        const expected = HOOK_POSITION_VARS.includes(name) ? 'unset' : injected[name];
+        assert.equal(fields[i], expected, `git 呼び出し時点の ${name}（${line}）`);
+      });
+    }
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});

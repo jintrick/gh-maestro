@@ -244,6 +244,8 @@ test('QUERIES: 全クエリが構造的に妥当（操作シグネチャ有り�
     assert.deepEqual(errors, [], `${name} query: ${errors.join('; ')}`);
     assert.deepEqual(undeclaredVariables(query), [], `${name} query`);
   }
+  // number に渡す変数 $num が Int! として宣言されている（型の欠陥を検出する。旧 285 の検査を統合）
+  assert.match(gql.QUERIES.repositoryDiscussion, /query\(\$owner:String!,\$name:String!,\$num:Int!\)/);
 });
 
 test('QUERIES: 各ドメイン関数が送信する query は QUERIES 定数のいずれか（直書きドリフト防止）', () => {
@@ -282,14 +284,3 @@ test('QUERIES: 各ドメイン関数が送信する query は QUERIES 定数の�
   }
 });
 
-test('discussion: クエリ文字列は使用変数をすべて宣言している（GraphQLとして妥当）', () => {
-  const calls = [];
-  capture(calls, okResponse({
-    repository: { discussion: { id: 'D1', number: 12, url: 'u', title: 't' } },
-  }));
-  gql.discussion('acme/repo', 12);
-  const query = calls[0].args.find(a => a.startsWith('query=')).slice('query='.length);
-  // number に渡す変数 $num が Int! として宣言されている
-  assert.match(query, /query\(\$owner:String!,\$name:String!,\$num:Int!\)/);
-  assert.deepEqual(undeclaredVariables(query), []);
-});
