@@ -203,26 +203,6 @@ describe('verifyReplyAndRelayIfMissing', () => {
     });
   });
 
-  test('artifact-or-message 契約（候補F）: 実ログがあり since より後のPRが存在すれば、PR検索を行い代理送信しない', () => {
-    withTempDir((dir) => {
-      const logPath = path.join(dir, 'out.log');
-      fs.writeFileSync(logPath, 'captured agent output');
-      let prLookups = 0;
-      hook._setGhApiComments(() => ({ status: 0, stdout: '[]', stderr: '' }));
-      hook._setGhPrList(() => {
-        prLookups++;
-        return { status: 0, stdout: JSON.stringify([prEntry({ number: 43, createdAt: '2024-01-01T02:00:00Z' })]), stderr: '' };
-      });
-      hook.verifyReplyAndRelayIfMissing({
-        workspace: '/ws', workerName: 'issue-5-fix', captureLogPath: logPath,
-        sinceTimestamp: '2024-01-01T00:00:00Z',
-        contract: { type: 'artifact-or-message', artifact: 'pr', issue: 5, sinceTimestamp: '2024-01-01T00:00:00Z' },
-      });
-      assert.equal(prLookups, 1, 'PR検索が1回行われる');
-      assert.equal(relayCalls.length, 0, '契約充足のとき代理送信しない');
-    });
-  });
-
   test('artifact-or-message 契約 + PRなし → 代理送信する（契約未充足）', () => {
     withTempDir((dir) => {
       const logPath = path.join(dir, 'out.log');

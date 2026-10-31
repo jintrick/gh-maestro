@@ -1422,10 +1422,17 @@ test('msgPollRole: 役割名の値を文字列リテラルで固定する（msgp
   assert.equal(lease.MSGPOLL_ORCHESTRATOR_ROLE, 'msgpoll-orchestrator');
 });
 
-test('msg-poll.js は役割名を msgPollRole 経由で作る（候補K・静的検査）', () => {
-  // 役割名の構築を一箇所（msgPollRole）に集約していることを、ソースの呼び出しで確認する。
-  const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'msg-poll.js'), 'utf8');
-  assert.match(src, /msgPollRole\(/);
+test('msg-poll.js は実行コードで役割名を msgPollRole(self) から作り、その role を lease のキーに使う（候補K・静的検査。コメントは除外）', () => {
+  // 静的検査の限界: 実行の観測ではなく、コメントを除いたソースの形を見る。
+  // 行コメントの除去は文字列中の「//」も落とすため、この検査は形の確認に限る。
+  const raw = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'msg-poll.js'), 'utf8');
+  const code = raw
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map((line) => line.replace(/\/\/.*$/, ''))
+    .join('\n');
+  assert.match(code, /const role = msgPollRole\(self\);/);
+  assert.match(code, /name: role\b/);
 });
 
 test('acquireResidentLease: live lease が無ければ取得して自PIDでアクティブ化する', () => {

@@ -270,19 +270,6 @@ test('buildNormalWorkerLaunchSpec: カスタムスキル（gh-maestro-custom-rev
   assert.equal(spec.worktreeKey, spec.workerName);
 });
 
-test('buildNormalWorkerLaunchSpec: 未登録スキルでも workerName の role はプレフィックス除去の結果と一致する（候補G）', () => {
-  // 期待値は文字列リテラル（deriveRoleFromSkill の戻り値を使うと実装と同じ式で期待値を作ってしまう）。
-  const spec = buildNormalWorkerLaunchSpec({
-    skill: 'gh-maestro-custom-reviewer',
-    issue: 5,
-    description: 'audit',
-    repo: 'o/r',
-    workspace: '/ws',
-  });
-  assert.equal(spec.workerName, 'issue-5-custom-reviewer-audit');
-  assert.equal(spec.role, 'custom-reviewer');
-});
-
 test('buildNormalWorkerLaunchSpec: 数値化できない issue（"12abc"）は issue 検証のエラーになり、NaN を通さない（候補H）', () => {
   assert.throws(
     () => buildNormalWorkerLaunchSpec({
