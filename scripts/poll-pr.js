@@ -182,17 +182,26 @@ function spawnPollReviews(pr, workspace, intervalSeconds = 30, onOutputLine, opt
  * @returns {string}
  */
 function findReviewablePr({ repo, issue }, spawnSyncFn = spawnSync) {
-  const byBranch = spawnSyncFn('gh', ['pr', 'list', '--repo', repo,
-    '--search', `head:issue-${issue}`, '--state', 'open',
-    '--json', 'number,isDraft', '-q', '.[] | select(.isDraft | not) | .number'], { encoding: 'utf8' });
-  const branchPr = String(byBranch.stdout || '').trim().split('\n').find(s => s.trim());
-  if (branchPr) return branchPr.trim();
+  const listOpenPrs = (extraArgs) => {
+    const r = spawnSyncFn('gh', ['pr', 'list', '--repo', repo, '--state', 'open', ...extraArgs,
+      '--json', 'number,body,isDraft'], { encoding: 'utf8' });
+    if (!r || r.error || r.status !== 0) return [];
+    try {
+      const parsed = JSON.parse(String(r.stdout || '[]'));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+  // 下書きを除外してから照合する（gh の jq 式ではなく、取得したデータをここで判定する）。
+  const reviewable = (prs) => prs.filter((pr) => pr && pr.isDraft === false && Number.isInteger(pr.number));
 
-  const byBody = spawnSyncFn('gh', ['pr', 'list', '--repo', repo, '--state', 'open',
-    '--json', 'number,body,isDraft', '-q',
-    `.[] | select(.isDraft | not) | select(.body | strings | contains("#${issue}")) | .number`],
-  { encoding: 'utf8' });
-  return String(byBody.stdout || '').trim().split('\n').find(s => s.trim()) || '';
+  const byBranch = reviewable(listOpenPrs(['--search', `head:issue-${issue}`]));
+  if (byBranch.length > 0) return String(byBranch[0].number);
+
+  const byBody = reviewable(listOpenPrs([]))
+    .filter((pr) => typeof pr.body === 'string' && pr.body.includes(`#${issue}`));
+  return byBody.length > 0 ? String(byBody[0].number) : '';
 }
 
 function parsePrPushLine(line) {

@@ -32,7 +32,7 @@ const { createPr } = require('./gh-create-pr');
 const { declareTestResult } = require('./declare-test-result');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { listTestLayers } = require('./run-tests');
-const { upsertDeclarationComment } = require('./shared/pr-declaration');
+const { upsertDeclarationComment, readPrDeclarationEvidence, DRAFT_OWNER_MARKER } = require('./shared/pr-declaration');
 
 const USAGE = `push-and-declare.js — ステージング・コミット・push・PR取得/作成・テスト結果申告を一つの操作にまとめる
 
@@ -50,8 +50,9 @@ Arguments:
                               投稿する（同じHEADのコメントは更新する）。PR本文には触れない。レビューは
                               自分がレビューする HEAD と一致する申告表だけを使う。この指定の要否は
                               本スクリプトでは判定しない。呼び出し側が、このスクリプトの実行前に
-                              「コミット済み・ステージ済み・未ステージ・未追跡」のテストの変更を
-                              見て決める（判定コマンドは coder-workflow.md の手順6）
+                              「コミット済み・ステージ済み・未ステージ・未追跡」の変更のうち、
+                              宣言されたテストファイルに該当するものを run-tests.js --declared-tests で
+                              確かめて決める（手順は coder-workflow.md の手順6）
 
 動作（終状態への収束。同じコマンドの再実行だけで回復する）:
   1. ブランチ検証（^issue-<N>）・リポジトリ特定・Issueタイトル取得
@@ -313,7 +314,7 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
   // PR本文には触れない。失敗はここで止める（リモート未変更）。新規PRは後段（下書きで作成→
   // 申告表投稿→公開）で扱う。
   if (declaration !== undefined) {
-    const prePushRes = listPrsByBranch(repo, branch, { state: 'OPEN', json: 'number,url,isDraft', cwd: worktree });
+    const prePushRes = listPrsByBranch(repo, branch, { state: 'OPEN', json: 'number,url,isDraft,body', cwd: worktree });
     if (prePushRes.error || prePushRes.status !== 0) {
       return { exitCode: 2, stdout: '', stderr: `既存PRの検索に失敗しました（push前）: ${errText(prePushRes)}` };
     }
@@ -372,7 +373,7 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
   // ── PR段（get-or-create。初回か修正かをコーダーは判定しない） ─────────────────
   const prListRes = listPrsByBranch(repo, branch, {
     state: 'OPEN',
-    json: 'number,url,isDraft',
+    json: 'number,url,isDraft,body',
     cwd: worktree,
   });
   if (prListRes.error || prListRes.status !== 0) {
@@ -399,9 +400,13 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
     try {
       // 申告表を載せるPRは下書きで作り、申告表コメントの投稿後に公開する（下の申告表段）。
       // 申告表を投稿する前に Review Manager（poll-pr は公開済みPRだけを検出する）が始まらないため。
+      // 下書きは本スクリプトが作ったことを所有マーカーで示す（後で人間の下書きと区別する）。
+      const draftOwned = declaration !== undefined;
       createResult = createPr({
-        title: issueTitle, body: buildPrBody(issueNum), repo, cwd: worktree, env,
-        draft: declaration !== undefined,
+        title: issueTitle,
+        body: draftOwned ? `${buildPrBody(issueNum)}\n\n${DRAFT_OWNER_MARKER}` : buildPrBody(issueNum),
+        repo, cwd: worktree, env,
+        draft: draftOwned,
       });
     } catch (e) {
       return { exitCode: 3, stdout: '', stderr: `PRの作成に失敗しました: ${e.message}` };
@@ -423,9 +428,11 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
 
   // ── 申告表コメント段＋公開段（--declaration-file 指定時のみ。冪等） ──────────────
   // 1. このHEADの申告表コメントを投稿・更新する（push前に投稿済みでも更新する）。
-  // 2. 下書きのPR（今回作成、または前回の失敗で下書きのまま）を公開する。
-  //    公開は申告表の投稿の後にだけ行う。下書きのままなら poll-pr は検出せず、
-  //    Review Manager は始まらない。再実行は同じ手順で公開まで進む。
+  // 2. このスクリプトが申告表のために下書きで作ったPR（本文に所有マーカーがあるもの）だけを、
+  //    このHEADの申告表コメントが確認できた場合に限って公開する。それ以外の下書きには触れない。
+  const ownedDraft = prAction === 'created'
+    ? declaration !== undefined
+    : Boolean(existingPr && existingPr.isDraft && String(existingPr.body || '').includes(DRAFT_OWNER_MARKER));
   if (declaration !== undefined) {
     if (!prNumber) {
       return { exitCode: 3, stdout: '', stderr: 'PR番号を解決できないため申告表を投稿できません（pushは成功。再実行で回復）' };
@@ -437,9 +444,15 @@ function pushAndDeclare({ issue, workspace, worktree, env = process.env, declara
       return { exitCode: 3, stdout: '', stderr: `${postUpsert.error}（pushは成功。PRは下書きのまま。再実行で回復）` };
     }
   }
-  // 下書きのPRは申告表の投稿が済んだ後にだけ公開する（declaration 無しでも下書きなら公開する）。
-  const isDraftNow = prAction === 'created' ? declaration !== undefined : Boolean(existingPr && existingPr.isDraft);
-  if (isDraftNow) {
+  if (ownedDraft) {
+    if (declaration === undefined) {
+      return { exitCode: 3, stdout: '', stderr: 'このスクリプトが申告表のために作った下書きのPRは、申告表（--declaration-file）を付けて再実行するまで公開しません（pushは成功）' };
+    }
+    const evidence = readPrDeclarationEvidence({ pr: prNumber, repo, headSha: sha });
+    if (evidence.status !== 'present') {
+      const why = evidence.status === 'unavailable' ? evidence.reason : 'このHEADの申告表コメントが確認できません';
+      return { exitCode: 3, stdout: '', stderr: `PRを公開しません（${why}。PRは下書きのまま。再実行で回復）` };
+    }
     const readyRes = markPrReady({ repo, prNumber, cwd: worktree });
     if (readyRes.error || readyRes.status !== 0) {
       return { exitCode: 3, stdout: '', stderr: `PRを公開できません（pushは成功。PRは下書きのまま。再実行で回復）: ${errText(readyRes)}` };

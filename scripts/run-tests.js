@@ -37,6 +37,7 @@ const USAGE = `run-tests.js — 宣言されたテスト層と対象worktreeの�
 
 Usage:
   node run-tests.js [--workspace <path>] --list
+  node run-tests.js [--workspace <path>] --declared-tests < paths
   node run-tests.js [--workspace <path>] [--changed] <layer> [path ...]
 
 Arguments:
@@ -49,6 +50,10 @@ Options:
                        実行対象と成果物の保存先は起動元CWDのworktree
   --list               宣言された層の名前とscopeをJSONで一覧表示する。層は実行しない
   --changed             後続の path を変更ファイルとして mapping でテストへ変換する
+  --declared-tests      標準入力の相対パス（1行に1つ）のうち、宣言された層のテストファイル
+                        （defaultTestFiles / testFilePattern / mapping の test）に該当するものを
+                        1行ずつ標準出力へ出す。テストは実行しない。層が宣言されていなければ何も出さない。
+                        標準入力が端末の場合は拒否する
 
 Output:
   --list は status と層ごとの name / scope だけをJSONで出力します。
@@ -70,7 +75,7 @@ Output:
 
 const SPEC = {
   flags: { '--workspace': {} },
-  booleans: ['--help', '-h', '--changed', '--list'],
+  booleans: ['--help', '-h', '--changed', '--list', '--declared-tests'],
   positionals: { min: 0, max: 65 },
 };
 
@@ -441,6 +446,64 @@ function listTestLayers({ cwd = process.cwd(), workspace, homedir, env = process
 }
 
 /**
+ * 宣言された層からテストファイルのパターンを集める（defaultTestFiles / testFilePattern / mapping.test）。
+ * ディレクトリ名は持たず、対象プロジェクトの宣言だけを根拠にする。
+ */
+function declaredTestFilePatterns(testConfig) {
+  const patterns = [];
+  for (const layer of Object.values(testConfig.layers || {})) {
+    if (!layer || typeof layer !== 'object') continue;
+    if (Array.isArray(layer.defaultTestFiles)) patterns.push(...layer.defaultTestFiles);
+    if (typeof layer.testFilePattern === 'string') patterns.push(layer.testFilePattern);
+    if (Array.isArray(layer.mapping)) {
+      for (const rule of layer.mapping) {
+        if (rule && typeof rule.test === 'string') patterns.push(rule.test);
+      }
+    }
+  }
+  return [...new Set(patterns.filter((p) => typeof p === 'string' && p))];
+}
+
+/**
+ * 相対パスのうち、宣言された層のテストファイルに該当するものを返す（実行はしない）。
+ * 宣言が無い（source が declared でない）場合は空。宣言の解決に失敗した場合は error。
+ *
+ * @param {{files: string[], cwd?: string, workspace?: string, env?: object, homedir?: string}} params
+ * @param {{resolveTestConfigFn?: Function}} [deps]
+ * @returns {{ok:true, files:string[]}|{ok:false, error:string}}
+ */
+function filterDeclaredTestFiles({ files, cwd = process.cwd(), workspace, env = process.env, homedir }, deps = {}) {
+  const resolveTestConfigFn = deps.resolveTestConfigFn || resolveTestConfig;
+  let configWorkspace;
+  try {
+    configWorkspace = resolveConfigWorkspace(cwd, workspace, env);
+  } catch {
+    return { ok: false, error: 'テスト層を解決できません' };
+  }
+  if (!configWorkspace) return { ok: false, error: 'テスト層を解決するworkspaceを特定できません' };
+
+  let testConfig;
+  try {
+    testConfig = resolveTestConfigFn({ workspace: configWorkspace, homedir });
+  } catch {
+    return { ok: false, error: 'テスト層の宣言を解決できません' };
+  }
+  if (!testConfig) return { ok: false, error: 'テスト層の宣言を解決できません' };
+  if (testConfig.source !== 'declared') return { ok: true, files: [] };
+
+  const patterns = declaredTestFilePatterns(testConfig);
+  const matched = [];
+  for (const rawFile of files) {
+    const normalized = normalizeRelativeTestFile(rawFile);
+    if (!normalized.ok) return normalized;
+    if (patterns.some((pattern) => matchesTestFilePattern(pattern, normalized.value))) {
+      if (!matched.includes(normalized.value)) matched.push(normalized.value);
+    }
+  }
+  return { ok: true, files: matched };
+}
+
+/**
  * 宣言されたテスト層を1回実行し、終了コードを結果の正本として成果物を作る。
  *
  * @param {{suite?:string, layer?:string, testFiles?:string[], changedFiles?:string[], cwd?:string, workspace?:string, env?:object, homedir?:string}} params
@@ -760,6 +823,12 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   };
 }
 
+/** 標準入力を全部読む。端末（TTY）なら null を返し、呼び出し側で拒否する（対話的な待機を作らない）。 */
+function readAllStdin() {
+  if (process.stdin.isTTY) return null;
+  return fs.readFileSync(0, 'utf8');
+}
+
 function main(argv, deps = {}) {
   let values, rest;
   try {
@@ -783,10 +852,10 @@ function main(argv, deps = {}) {
   }
 
   if (values['--list']) {
-    if (values['--changed'] || rest.length > 0) {
+    if (values['--changed'] || rest.length > 0 || values['--declared-tests']) {
       return {
         exitCode: 1,
-        stderr: `run-tests: --list は --changed や層名と併用できません\n${USAGE}`,
+        stderr: `run-tests: --list は --changed・層名・--declared-tests と併用できません\n${USAGE}`,
       };
     }
     const result = listTestLayers({
@@ -796,6 +865,35 @@ function main(argv, deps = {}) {
       homedir: deps.homedir,
     }, deps);
     return result;
+  }
+
+  if (values['--declared-tests']) {
+    if (values['--changed'] || rest.length > 0) {
+      return {
+        exitCode: 1,
+        stderr: `run-tests: --declared-tests は --changed や層名・パスと併用できません\n${USAGE}`,
+      };
+    }
+    let input;
+    try {
+      input = (deps.readStdinFn || readAllStdin)();
+    } catch (error) {
+      return { exitCode: 1, stderr: `run-tests: 標準入力を読めません: ${error.message}\n${USAGE}` };
+    }
+    if (input === null) {
+      return { exitCode: 1, stderr: `run-tests: --declared-tests は標準入力（パイプ）から読みます。端末からは使えません\n${USAGE}` };
+    }
+    const files = input.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const result = filterDeclaredTestFiles({
+      files,
+      cwd: process.cwd(),
+      workspace: values['--workspace'],
+      env: process.env,
+      homedir: deps.homedir,
+    }, deps);
+    if (!result.ok) return { exitCode: 1, stderr: `run-tests: ${result.error}` };
+    // 出力は1行に1つ。呼び出し側（main の出力）が末尾に改行を付けるため、ここでは付けない。
+    return { exitCode: 0, stdout: result.files.join('\n') };
   }
 
   if (rest.length === 0) {
@@ -823,6 +921,7 @@ module.exports = {
   SLOW_TEST_ACTORS,
   authorizeLayerExecution,
   listTestLayers,
+  filterDeclaredTestFiles,
   normalizeRelativeTestFile,
   normalizeTestFiles,
   mapChangedFilesToTests,

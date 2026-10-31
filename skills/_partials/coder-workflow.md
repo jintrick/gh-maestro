@@ -60,11 +60,11 @@ PRを作成した時点で実装作業は完了する。CI監視はorchestrator�
      - 実行入口は `node "{{SCRIPTS_PATH}}/run-tests.js" --workspace $WORKSPACE <一覧で確認した層名>` とし、分離側の変更対応を使うときは `--changed` と変更ファイルの相対パスを渡す
 6. **初回実装完了時・レビュー指摘対応の修正push時に、ステージング・コミット・push・PR取得/作成・テスト結果申告を一つの操作にまとめた `push-and-declare.js` を実行する**:
    申告表は、PR の差分全体（基底ブランチ `$BASE_BRANCH` から HEAD まで）に含まれるテストについての表で、push のたびに出し直す。判定は次のとおり。
-   - 次のコマンドを、`push-and-declare.js` を実行する前に実行する。コミット済みの変更、ステージ済み・未ステージの変更、未追跡ファイルのいずれかのテストが1行でも出力されれば、PR の差分にテストの変更（追加・書き直し・削除・統合のいずれか）がある。
+   - 次のコマンドを、`push-and-declare.js` を実行する前に実行する。コミット済み・ステージ済み・未ステージの変更（`git diff` は作業ツリーと基底の差分）と未追跡ファイルのうち、対象プロジェクトのテスト層が宣言するテストファイル（`run-tests.js --declared-tests` が判定する）が1行でも出力されれば、PR の差分にテストの変更（追加・書き直し・削除・統合のいずれか）がある。テストの場所はディレクトリ名で決めず、宣言に従う。
      ```sh
-     { git diff --name-only origin/$BASE_BRANCH -- tests; git ls-files --others --exclude-standard -- tests; }
+     { git diff --name-only origin/$BASE_BRANCH; git ls-files --others --exclude-standard; } | node "{{SCRIPTS_PATH}}/run-tests.js" --workspace $WORKSPACE --declared-tests
      ```
-     この判定は `push-and-declare.js` がステージ・コミットする前に行うため、未コミットのテストの変更も含まれる。テストの変更が1つでもあれば、この push で必ず `--declaration-file` を付ける。今回の push がテストに触れていなくても付ける。
+     出力があれば、この push で必ず `--declaration-file` を付ける。今回の push がテストに触れていなくても付ける。
    - 差分にテストの変更が無ければ（文書だけの変更など）付けない。
    - 表は前回の表（`$WORKSPACE/.gh-maestro/pr-declaration-$ISSUE.md`）を基に、今回の push で変わったテストを反映して全体を書き直す。テストに触れない push では内容を変えずに出し直す。
    - ファイルは heredoc（`cat >`）で直接作る（`write-draft.js` は `/tmp` 配下しか書けない）。

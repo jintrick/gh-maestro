@@ -12,6 +12,9 @@ const { isTrustedCommentAuthor } = require('./comment-author-trust');
 
 const GH_TIMEOUT_MS = 30000;
 const DECLARATION_MARKER_PREFIX = 'gh-maestro:pr-declaration';
+// 申告表のために push-and-declare.js が作った下書きPRの所有マーカー（PR本文の末尾に置く）。
+// 人間が作った下書きには付かないため、公開の対象を区別できる。
+const DRAFT_OWNER_MARKER = '<!-- gh-maestro:declaration-draft -->';
 const HEAD_SHA_RE = /^[0-9a-f]{40}$/;
 const DECLARATION_HEAD_RE = /^<!-- gh-maestro:pr-declaration head=([0-9a-f]{40}) -->\r?\n?/;
 
@@ -137,6 +140,7 @@ function upsertDeclarationComment({ pr, repo, headSha, table, cwd, listCommentsF
 
 module.exports = {
   DECLARATION_MARKER_PREFIX,
+  DRAFT_OWNER_MARKER,
   buildDeclarationComment,
   findDeclarationForHead,
   readPrDeclarationEvidence,

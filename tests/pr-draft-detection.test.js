@@ -1,41 +1,58 @@
 'use strict';
 
-// poll-pr の PR 検出は下書き（isDraft）を除外する（Issue #671 PR#672 3回目指摘1）。
-// 申告表を載せるPRは下書きで作られ、申告表投稿後に公開されるため、下書きを検出すると
-// 申告表の無いHEADでレビューが始まる。gh 呼び出しは注入し、実プロセスを起動しない。
+// poll-pr の PR 検出は下書き（isDraft）を除外する（Issue #671）。申告表を載せるPRは下書きで作られ、
+// 申告表投稿後に公開されるため、下書きを検出すると申告表の無いHEADでレビューが始まる。
+// gh 呼び出しは注入し、データ（下書きと公開済みが混ざった一覧）から実際に選ばれる PR 番号を検証する。
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { findReviewablePr } = require('../scripts/poll-pr');
 
-/** gh pr list の -q 出力を、クエリに応じて返すスタブ。 */
-function ghStub({ branchOut = '', bodyOut = '' } = {}) {
+/**
+ * gh pr list の呼び出しを、与えたデータで応答するスタブ。
+ * head 検索（--search）と、全件（検索なし）で別々の一覧を返す。
+ */
+function ghListStub({ byHead = [], all = [] } = {}) {
   const calls = [];
   const spawnSyncFn = (cmd, args) => {
     calls.push({ cmd, args });
-    const query = args[args.length - 1];
-    const out = query.includes('contains(') ? bodyOut : branchOut;
-    return { status: 0, stdout: out };
+    const isHeadSearch = args.includes('--search');
+    return { status: 0, stdout: JSON.stringify(isHeadSearch ? byHead : all) };
   };
   return { spawnSyncFn, calls };
 }
 
-test('findReviewablePr: 下書きのPRは検出せず、空文字列を返す', () => {
-  const { spawnSyncFn, calls } = ghStub({ branchOut: '', bodyOut: '' });
+const DRAFT_WITH_BODY = { number: 5, isDraft: true, body: '関連Issue: #671' };
+const PUBLIC_WITH_BODY = { number: 6, isDraft: false, body: '関連Issue: #671' };
+
+test('下書きと公開済みが混ざったとき、公開済みのPR番号だけを選ぶ（枝名検索の段）', () => {
+  const { spawnSyncFn } = ghListStub({ byHead: [DRAFT_WITH_BODY, PUBLIC_WITH_BODY] });
+  assert.equal(findReviewablePr({ repo: 'o/r', issue: 671 }, spawnSyncFn), '6');
+});
+
+test('下書きだけのとき、枝名検索でも本文検索でも検出しない（空文字列）', () => {
+  const { spawnSyncFn } = ghListStub({ byHead: [DRAFT_WITH_BODY], all: [DRAFT_WITH_BODY] });
   assert.equal(findReviewablePr({ repo: 'o/r', issue: 671 }, spawnSyncFn), '');
-  assert.equal(calls.length, 2, '枝名検索と本文検索の両方を行う');
-  for (const call of calls) {
-    assert.ok(call.args.includes('number,isDraft') || call.args.includes('number,body,isDraft'), 'isDraft を取得する');
-    assert.match(call.args[call.args.length - 1], /isDraft \| not/, '下書きを除外する条件を含む');
-  }
 });
 
-test('findReviewablePr: 公開済みのPR番号を返す（枝名検索を優先）', () => {
-  const { spawnSyncFn } = ghStub({ branchOut: '12\n', bodyOut: '34\n' });
-  assert.equal(findReviewablePr({ repo: 'o/r', issue: 671 }, spawnSyncFn), '12');
+test('枝名検索に公開済みが無ければ、本文検索で公開済みのPR番号を選ぶ（下書きは飛ばす）', () => {
+  const { spawnSyncFn } = ghListStub({
+    byHead: [],
+    all: [
+      { number: 7, isDraft: true, body: '関連Issue: #671' },
+      { number: 8, isDraft: false, body: '関連Issue: #671' },
+      { number: 9, isDraft: false, body: '関連Issue: #999' },
+    ],
+  });
+  assert.equal(findReviewablePr({ repo: 'o/r', issue: 671 }, spawnSyncFn), '8');
 });
 
-test('findReviewablePr: 枝名検索で見つからなければ本文の関連Issue番号で検索する', () => {
-  const { spawnSyncFn } = ghStub({ branchOut: '', bodyOut: '34\n' });
-  assert.equal(findReviewablePr({ repo: 'o/r', issue: 671 }, spawnSyncFn), '34');
+test('isDraft が取得できないPRは、下書きかどうか確認できないため検出しない（フェイルクローズ）', () => {
+  const { spawnSyncFn } = ghListStub({ byHead: [{ number: 10, body: '関連Issue: #671' }] });
+  assert.equal(findReviewablePr({ repo: 'o/r', issue: 671 }, spawnSyncFn), '');
+});
+
+test('gh の一覧取得が失敗したら検出しない（空文字列。例外にしない）', () => {
+  const spawnSyncFn = () => ({ status: 1, stdout: '', stderr: 'boom' });
+  assert.equal(findReviewablePr({ repo: 'o/r', issue: 671 }, spawnSyncFn), '');
 });
