@@ -50,20 +50,14 @@ function runScript(args, cwd) {
 
 // ── CLI integration ──────────────────────────────────────────────────────────
 
-test('CLI: --help はUsageを表示して終了コード0', () => {
+test('CLI: --help / -h はUsageを表示して終了コード0（--root を含む）', () => {
   withTempDir(dir => {
-    const r = runScript(['--help'], dir);
-    assert.equal(r.status, 0, `exit 0, got ${r.status}, stderr: ${r.stderr}`);
-    assert.ok(r.stdout.includes('Usage'), 'stdout should include Usage');
-    assert.ok(r.stdout.includes('--root'), 'stdout should mention --root');
-  });
-});
-
-test('CLI: -h も同様に終了コード0', () => {
-  withTempDir(dir => {
-    const r = runScript(['-h'], dir);
-    assert.equal(r.status, 0, `exit 0, got ${r.status}`);
-    assert.ok(r.stdout.includes('Usage'));
+    for (const flag of ['--help', '-h']) {
+      const r = runScript([flag], dir);
+      assert.equal(r.status, 0, `${flag}: exit 0, got ${r.status}, stderr: ${r.stderr}`);
+      assert.ok(r.stdout.includes('Usage'), `${flag}: stdout should include Usage`);
+      assert.ok(r.stdout.includes('--root'), `${flag}: stdout should mention --root`);
+    }
   });
 });
 

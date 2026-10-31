@@ -81,6 +81,15 @@ describe('compactWorkerLog', () => {
       assert.equal(result.removedLines, 0);
       assert.equal(fs.readFileSync(logPath, 'utf8'), original);
       assert.equal(fs.statSync(logPath).mtimeMs, before);
+
+      // 空ファイルも no-op（旧 118 の検査を統合）
+      const emptyPath = path.join(dir, 'empty.log');
+      fs.writeFileSync(emptyPath, '');
+      const emptyBefore = fs.statSync(emptyPath).mtimeMs;
+      const emptyResult = compactWorkerLog(emptyPath);
+      assert.equal(emptyResult.compacted, false);
+      assert.equal(fs.readFileSync(emptyPath, 'utf8'), '');
+      assert.equal(fs.statSync(emptyPath).mtimeMs, emptyBefore);
     });
   });
 
@@ -115,14 +124,6 @@ describe('compactWorkerLog', () => {
     assert.equal(result.removedLines, 0);
   });
 
-  test('空ファイルは no-op', () => {
-    withTempDir((dir) => {
-      const logPath = path.join(dir, 'worker.log');
-      fs.writeFileSync(logPath, '');
-      const result = compactWorkerLog(logPath);
-      assert.equal(result.compacted, false);
-    });
-  });
 
   test('一時ファイル(.tmp)を残さない', () => {
     withTempDir((dir) => {

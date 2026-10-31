@@ -57,15 +57,7 @@ test('buildShortPrompt: issue番号とpromptFileパス（スラッシュ化）�
   assert.match(shortPrompt, /ISSUE=9/);
   assert.match(shortPrompt, /gh-maestro-assistant/);
   assert.match(shortPrompt, /C:\/ws\/\.gh-maestro\/assistants\/issue-9\/prompt\.md/);
-  assert.equal(shortPrompt.includes('\n'), false);
-});
-
-test('buildShortPrompt: SKILL.mdの絶対パス（スラッシュ化）を含む1行', () => {
-  const shortPrompt = buildShortPrompt({
-    issue: '9',
-    promptFile: 'C:\\ws\\.gh-maestro\\assistants\\issue-9\\prompt.md',
-    skillPath: 'C:\\skills\\gh-maestro-assistant\\SKILL.md',
-  });
+  // SKILL.md の絶対パス（スラッシュ化）も含む（旧 63 の検査を統合）
   assert.match(shortPrompt, /C:\/skills\/gh-maestro-assistant\/SKILL\.md/);
   assert.equal(shortPrompt.includes('\n'), false);
 });
