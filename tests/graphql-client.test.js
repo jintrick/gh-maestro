@@ -5,20 +5,42 @@ const assert = require('node:assert/strict');
 
 const gql = require('../scripts/shared/graphql-client');
 
-test('graphqlExec: デフォルト実装は gh api graphql を spawnSync で呼ぶ（未注入時は実ghへの引数構築を検証）', () => {
-  // 実ghを起動したくないため、setterで注入して呼び出しを観測する。
-  const calls = [];
-  gql._setGraphqlExec((args, opts) => {
-    calls.push({ args, opts });
+// child-process の spawnSync だけを差し替えて graphql-client を読み直す（既定実装の argv を観測する）
+function loadGraphqlClientWithSpawn(fakeSpawnSync) {
+  const cpPath = require.resolve('../scripts/shared/child-process');
+  const gcPath = require.resolve('../scripts/shared/graphql-client');
+  const savedCp = require.cache[cpPath];
+  const savedGc = require.cache[gcPath];
+  require.cache[cpPath] = { id: cpPath, filename: cpPath, loaded: true, exports: { spawnSync: fakeSpawnSync } };
+  delete require.cache[gcPath];
+  try {
+    return require(gcPath);
+  } finally {
+    if (savedCp) require.cache[cpPath] = savedCp; else delete require.cache[cpPath];
+    if (savedGc) require.cache[gcPath] = savedGc; else delete require.cache[gcPath];
+  }
+}
+
+test('graphqlExec: 既定実装は gh api graphql を引数付きで spawnSync に渡す／注入した実装も graphqlExec 経由で呼ばれる', () => {
+  // 既定実装: 実ghを起動せず、spawnSync に渡る argv と opts を固定する（期待値は仕様上の形）
+  const spawned = [];
+  const fresh = loadGraphqlClientWithSpawn((cmd, args, opts) => {
+    spawned.push({ cmd, args, opts });
     return { status: 0, stdout: '{}', stderr: '' };
   });
-
-  const result = gql.graphqlExec(['-f', 'query={}'], { input: 'body' });
+  const result = fresh.graphqlExec(['-f', 'query={}'], { input: 'body' });
   assert.equal(result.status, 0);
-  assert.deepEqual(calls.length, 1);
-  assert.equal(calls[0].args[0], '-f');
-  assert.equal(calls[0].args[1], 'query={}');
-  assert.equal(calls[0].opts.input, 'body');
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].cmd, 'gh');
+  assert.deepEqual(spawned[0].args, ['api', 'graphql', '-f', 'query={}']);
+  assert.equal(spawned[0].opts.input, 'body');
+  assert.equal(spawned[0].opts.encoding, 'utf8');
+
+  // 注入の口: 注入した実装が graphqlExec 経由で呼ばれる（旧 6 の検査を統合）
+  let injectedCalled = false;
+  gql._setGraphqlExec(() => { injectedCalled = true; return { status: 0, stdout: '{}' }; });
+  gql.graphqlExec([]);
+  assert.equal(injectedCalled, true);
 });
 
 test('parseGraphqlJson: 有効JSONをパースする', () => {
@@ -47,9 +69,3 @@ test('isGraphqlSuccess: status 0 かつ errors無しのみ成功', () => {
   assert.equal(gql.isGraphqlSuccess(null), false);
 });
 
-test('_setGraphqlExec: 注入した実装は graphqlExec 経由で呼ばれる', () => {
-  let injectedCalled = false;
-  gql._setGraphqlExec(() => { injectedCalled = true; return { status: 0, stdout: '{}' }; });
-  gql.graphqlExec([]);
-  assert.equal(injectedCalled, true);
-});

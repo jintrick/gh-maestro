@@ -81,6 +81,10 @@ test('create-adr.js: --helpと-hはworkspace解決前に終了コード0でUsage
     assert.equal(result.status, 0, flag);
     assert.match(result.stdout, /--next/);
     assert.match(result.stdout, /--normative-file/);
+    // 規範なしの作成経路が無いこと（旧 Usage 検査を統合）
+    assert.doesNotMatch(result.stdout, /self-contained|規範文書なし/);
+    assert.match(result.stdout, /--reference-after/);
+    assert.match(result.stdout, /作成時に必須/);
   }
 });
 
@@ -682,28 +686,6 @@ test('create-adr.js: 既存ADRの規範参照がコードフェンス内だけ�
   }
 });
 
-test('create-adr.js: 一時workspace内の既存ADRを検査し、front matter無しは明示的にスキップする', () => {
-  const workspace = createWorkspace();
-  try {
-    writeNormative(workspace, 'docs/adr/0001-existing.md');
-    writeAdr(workspace, '0001-existing.md', [
-      '---',
-      'normative-file: AGENTS.md',
-      '---',
-      '',
-      VALID_BODY,
-    ].join('\n'));
-    writeAdr(workspace, '0002-legacy.md');
-    const results = validateExistingAdrFrontMatter(workspace);
-    assert.deepEqual(results.map((result) => ({ file: result.file, skipped: result.skipped })), [
-      { file: 'docs/adr/0001-existing.md', skipped: false },
-      { file: 'docs/adr/0002-legacy.md', skipped: true },
-    ]);
-  } finally {
-    cleanup(workspace);
-  }
-});
-
 test('create-adr.js: front matterの余分な項目は既存ADR検査で拒否する', () => {
   const workspace = createWorkspace();
   try {
@@ -753,9 +735,3 @@ test('create-adr.js: nextAdrPathは4桁を超える番号も切り詰めずに�
   }
 });
 
-test('create-adr.js: Usageに規範なしの作成経路が無いことを示す', () => {
-  assert.doesNotMatch(USAGE, /self-contained|規範文書なし/);
-  assert.match(USAGE, /--normative-file/);
-  assert.match(USAGE, /--reference-after/);
-  assert.match(USAGE, /作成時に必須/);
-});

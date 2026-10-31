@@ -79,11 +79,13 @@ test('globToRegex: 正規表現の特殊文字をエスケープする', () => {
 
 // ── matchesAny ───────────────────────────────────────────────────────────────
 
-test('matchesAny: いずれかのglobにマッチすればtrue', () => {
+test('matchesAny: いずれかのglobにマッチすればtrue（単一globの一致を含む）', () => {
   const globs = ['scripts/**/*.js', 'skills/**/*.md'];
   assert.ok(matchesAny('scripts/foo.js', globs));
   assert.ok(matchesAny('skills/sub/doc.md', globs));
   assert.ok(!matchesAny('scripts/foo.ts', globs));
+  // 要素数1の配列の特別扱いが無いこと（旧 98 の検査を統合）
+  assert.ok(matchesAny('CLAUDE.md', ['CLAUDE.md']));
 });
 
 test('matchesAny: 空のglobs配列は常にfalse', () => {
@@ -95,9 +97,6 @@ test('matchesAny: バックスラッシュパスを正規化する', () => {
   assert.ok(matchesAny('scripts\\sub\\file.js', globs));
 });
 
-test('matchesAny: 単一globにマッチ', () => {
-  assert.ok(matchesAny('CLAUDE.md', ['CLAUDE.md']));
-});
 
 // ── findMatchingRules ────────────────────────────────────────────────────────
 
