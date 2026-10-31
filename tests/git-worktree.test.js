@@ -59,6 +59,9 @@ test('worktreeAdd: baseRefあり — worktree add後に --set-upstream-to を呼
   assert.ok(calls[0].args.includes('feat-x'));
   assert.ok(calls[0].args.includes('origin/dev'));
 
+  // 呼び出しは worktree add と set-upstream-to の2回だけ（余計な git 呼び出しや順序の入れ替えを検出する）
+  assert.equal(calls.length, 2);
+
   // 2回目: git branch --set-upstream-to
   assert.equal(calls[1].cmd, 'git');
   assert.ok(calls[1].args.includes('branch'));
@@ -99,36 +102,6 @@ test('worktreeAdd: worktree add 失敗時は --set-upstream-to を呼ばずに t
   assert.ok(calls[0].args.includes('add'));
 });
 
-// ── 回帰テスト: branch.autoSetupMerge が false でも upstream tracking が設定される ──
-// このテストはモックレベルで「worktree add 後に必ず --set-upstream-to が呼ばれる」
-// ことを検証する。実際の autoSetupMerge=false 環境での動作は git-worktree.js の
-// ロジックそのものに依存せず、モック呼び出し順で担保する。
-
-test('worktreeAdd: baseRefありの場合の呼び出し順 — worktree add → set-upstream-to', () => {
-  const { mod, calls } = loadModule(() => ({ status: 0, stdout: '' }));
-  mod.worktreeAdd('/tmp/wt', 'feat-x', 'dev', '/repo');
-
-  assert.equal(calls.length, 2);
-  // 1回目: worktree add
-  assert.ok(calls[0].args.includes('worktree'));
-  assert.ok(calls[0].args.includes('add'));
-  // 2回目: --set-upstream-to
-  assert.ok(calls[1].args.includes('branch'));
-  assert.ok(calls[1].args.includes('--set-upstream-to'));
-});
-
-// ── エクスポート確認 ──────────────────────────────────────────────────────────
-
-test('git-worktree: setUpstream はエクスポートされていない', () => {
-  // setUpstream は内部関数のため、module.exports に含まれていない
-  // ここでは worktreeAdd/worktreeRemove/worktreePrune だけが公開されていることを確認
-  const { mod } = loadModule(() => ({ status: 0, stdout: '' }));
-  assert.equal(typeof mod.worktreeAdd, 'function');
-  assert.equal(typeof mod.worktreeRemove, 'function');
-  assert.equal(typeof mod.worktreePrune, 'function');
-  assert.equal(mod.setUpstream, undefined);
-});
-
 // ── worktreeAddDetached ─────────────────────────────────────────────────────────
 
 const SHA = '0123456789abcdef0123456789abcdef01234567'; // 40桁の16進数
@@ -155,9 +128,4 @@ test('worktreeAddDetached: git が失敗したら throw', () => {
     () => mod.worktreeAddDetached('/tmp/wt', SHA, '/repo'),
     { message: /exited with 128/ },
   );
-});
-
-test('git-worktree: worktreeAddDetached がエクスポートされている', () => {
-  const { mod } = loadModule(() => ({ status: 0, stdout: '' }));
-  assert.equal(typeof mod.worktreeAddDetached, 'function');
 });

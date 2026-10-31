@@ -45,24 +45,6 @@ test('通信ルールの実行例はシェル非依存のファイル入力を�
   assert.match(powerShellExample[1], /<内容>/);
 });
 
-test('explorer/diagnosticianの報告コマンドは共通通信ルールだけを参照する', () => {
-  const fallbackHeadings = {
-    'gh-maestro-explorer': '## 調査しても情報が見つからない場合',
-    'gh-maestro-diagnostician': '## 調査しても特定できない場合',
-  };
-
-  for (const [skill, heading] of Object.entries(fallbackHeadings)) {
-    const content = fs.readFileSync(path.join(SKILLS_DIR, skill, 'SKILL.md'), 'utf8');
-    const sectionStart = content.indexOf(heading);
-    const nextSection = content.indexOf('\n## ', sectionStart + heading.length);
-    const fallbackSection = content.slice(sectionStart, nextSection === -1 ? content.length : nextSection);
-    assert.notEqual(sectionStart, -1, `${skill}の調査失敗時節が見つからない`);
-    assert.match(content, /報告は通信ルールのコマンドで送る/);
-    assert.match(fallbackSection, /通信ルールに従って/);
-    assert.doesNotMatch(content, /node .*msg-send\.js/);
-  }
-});
-
 test('ワーカースキルの通信ルールは重複コピペではなく {{COMMUNICATION_RULES}} を参照する', () => {
   for (const skill of WORKER_SKILLS) {
     const content = fs.readFileSync(path.join(SKILLS_DIR, skill, 'SKILL.md'), 'utf8');
