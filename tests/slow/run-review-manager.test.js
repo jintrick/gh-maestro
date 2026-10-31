@@ -361,14 +361,21 @@ test('boundedCleanup: 停止を確認できたら worktree を破棄し、停止
   // 2. 生死を判定できない（unknown）→ worktree を残す（kill も行われない）
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'f.txt'), 'x', 'utf8');
+  // 自分が書いた lease（manager.running）を置く。生死を判定できないときは lease も残す。
+  const lockFile = path.join(ws, 'manager.running');
+  const lockOwner = liveness.captureProcess(4243, KEY_UNKNOWN);
+  fs.writeFileSync(lockFile, JSON.stringify(liveness.writeRef({}, lockOwner)), 'utf8');
   const unknown = await boundedCleanup({
     pid: 4243, processRef: liveness.captureProcess(4243, KEY_UNKNOWN), worktreeDir: dir, workspace: ws, pr: '79',
-    lockFile: null, liveness, log: () => {}, gracefulShutdownMs: 0,
+    lockFile, lockOwner, liveness, log: () => {}, gracefulShutdownMs: 0,
   });
   assert.equal(unknown.processStopped, false);
   assert.equal(unknown.worktreeCleaned, false);
+  assert.equal(unknown.leaseReleased, false);
   assert.equal(fs.existsSync(path.join(dir, 'f.txt')), true, '生死を判定できないときは worktree を残す');
+  assert.equal(fs.existsSync(lockFile), true, '生死を判定できないときは lease（manager.running）を残す');
   fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(lockFile, { force: true });
 
   // 3. 起動前の pid が無い（pid == null）→ worktree を破棄する
   fs.mkdirSync(dir, { recursive: true });
