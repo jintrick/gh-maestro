@@ -721,6 +721,13 @@ function mergeCycleWorkers(projectedWorkers, currentWorkers) {
       let elapsed = run.worker.elapsedSeconds;
       let durationKnown = workerDurationKnown(run.worker);
 
+      // 現在のレジストリに対応しない未停止runは、稼働中かどうか確かめられない。
+      // 古いrunを現在時刻まで数えて合計を過大にしないため、不明にする（Issue #692）。
+      if (run !== currentRun && run.worker.running && !run.worker.stopTime) {
+        elapsed = null;
+        durationKnown = false;
+      }
+
       if (run === currentRun && current) {
         if (workerDurationKnown(current)) {
           elapsed = current.elapsedSeconds;
@@ -896,6 +903,7 @@ function renderSnapshotLines(workspace, issue, opts = {}) {
 
   const projected = projectCycleMetrics(events, {
     issue: selectedIssue || null,
+    now: opts.now == null ? _now() : opts.now,
   });
   const workers = mergeCycleWorkers(projected.workers, currentWorkers.filter(worker => (
     selectedIssue == null || worker.issue == null || String(worker.issue) === selectedIssue

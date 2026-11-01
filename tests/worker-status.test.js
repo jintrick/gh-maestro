@@ -2306,3 +2306,72 @@ test('mergeCycleWorkers: 停止済みworkerは登録時刻と停止の開始時�
   assert.ok(lines[0].includes('01:30'));
   assert.ok(!lines[0].includes('??:??'));
 });
+
+
+// ── Issue #692: 投影 → 合算 → 監視ペインの表示行までを通しで確かめる ─────────
+
+test('renderSnapshotLines: resume を経た実イベント（開始・停止が数ミリ秒ずれる複数run）の停止中ワーカーの合計を表示する', () => {
+  // 期待値は手で書いた時刻から導く。run1: 0〜100秒、run2: 200〜250秒。合計150秒 = 02:30。
+  const t0 = Date.parse('2026-09-10T06:00:00.000Z');
+  const at = ms => new Date(t0 + ms).toISOString();
+  const name = 'issue-692-coder-e2e';
+  const cycleEvents = [
+    { schemaVersion: 1, issue: 692, event: 'worker-started', at: at(0), workerName: name, role: 'coder', agentId: 'agy', pid: 301, startTime: at(2) },
+    { schemaVersion: 1, issue: 692, event: 'worker-stopped', at: at(100000), workerName: name, pid: 301, startTime: at(0), exitCode: 0, abnormal: false },
+    { schemaVersion: 1, issue: 692, event: 'worker-started', at: at(200000), workerName: name, role: 'coder', agentId: 'agy', pid: 302, startTime: at(200003) },
+    { schemaVersion: 1, issue: 692, event: 'worker-stopped', at: at(250000), workerName: name, pid: 302, startTime: at(200000), exitCode: 0, abnormal: false },
+  ];
+  const lines = workerStatus.renderSnapshotLines('C:/temporary-workspace', 692, {
+    cycleEvents,
+    currentWorkers: [{ workerName: name, issue: 692, role: 'coder', agentId: 'agy', pid: 302, running: false, startTime: at(200003), elapsedSeconds: 0, durationKnown: false }],
+    now: t0 + 300000,
+    repo: 'jintrick/gh-maestro',
+    maxRows: 4,
+    maxLineWidth: 120,
+  });
+  assert.equal(lines.length, 2);
+  assert.ok(lines[1].includes('(pid: 302)'));
+  assert.ok(lines[1].includes('02:30'));
+  assert.ok(!lines[1].includes('??:??'));
+});
+
+test('renderSnapshotLines: 稼働中ワーカーは終わったrunの合計に現在のrunの経過を足して表示する', () => {
+  // 期待値は手で書いた時刻から導く。終わったrun: 0〜100秒（100）、200〜250秒（50）。
+  // 現在のrun: 300秒開始、now は 340秒時点で経過 40 秒。合計 190 秒 = 03:10。
+  const t0 = Date.parse('2026-09-10T06:00:00.000Z');
+  const at = ms => new Date(t0 + ms).toISOString();
+  const name = 'issue-692-coder-e2e-live';
+  const cycleEvents = [
+    { schemaVersion: 1, issue: 692, event: 'worker-started', at: at(0), workerName: name, role: 'coder', agentId: 'agy', pid: 401, startTime: at(2) },
+    { schemaVersion: 1, issue: 692, event: 'worker-stopped', at: at(100000), workerName: name, pid: 401, startTime: at(0), exitCode: 0, abnormal: false },
+    { schemaVersion: 1, issue: 692, event: 'worker-started', at: at(200000), workerName: name, role: 'coder', agentId: 'agy', pid: 402, startTime: at(200003) },
+    { schemaVersion: 1, issue: 692, event: 'worker-stopped', at: at(250000), workerName: name, pid: 402, startTime: at(200000), exitCode: 0, abnormal: false },
+    { schemaVersion: 1, issue: 692, event: 'worker-started', at: at(300000), workerName: name, role: 'coder', agentId: 'agy', pid: 403, startTime: at(300001) },
+  ];
+  const lines = workerStatus.renderSnapshotLines('C:/temporary-workspace', 692, {
+    cycleEvents,
+    currentWorkers: [{ workerName: name, issue: 692, role: 'coder', agentId: 'agy', pid: 403, running: true, startTime: at(300001), elapsedSeconds: 40, durationKnown: true }],
+    now: t0 + 340000,
+    repo: 'jintrick/gh-maestro',
+    maxRows: 4,
+    maxLineWidth: 120,
+  });
+  assert.equal(lines.length, 2);
+  assert.ok(lines[1].includes('(pid: 403)'));
+  assert.ok(lines[1].includes('03:10'));
+  assert.ok(!lines[1].includes('??:??'));
+});
+
+
+test('mergeCycleWorkers: 現在のレジストリに対応しない未停止runは現在時刻まで数えず不明にする', () => {
+  // 投影の最後のrun（pid 101、now までの 500 秒）は現在のレジストリ（pid 202）と対応しない。
+  // 稼働中かどうか確かめられないので、500 秒を合計に足さず不明にする（Issue #692）。
+  const merged = workerStatus.mergeCycleWorkers([
+    { workerName: 'issue-692-coder-stale', pid: 101, startTime: '2026-09-10T05:00:00.000Z', running: true, abnormal: false, elapsedSeconds: 500 },
+  ], [
+    { workerName: 'issue-692-coder-stale', pid: 202, startTime: '2026-09-10T05:10:00.000Z', running: true, abnormal: false, elapsedSeconds: 120, durationKnown: true },
+  ]);
+  assert.equal(merged[0].runNumber, 2);
+  assert.equal(merged[0].durationKnown, false);
+  assert.equal(merged[0].elapsedSeconds, null);
+});

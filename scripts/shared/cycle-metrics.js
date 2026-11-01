@@ -244,10 +244,12 @@ function stopMatches(start, stop) {
   return startMs !== null && stopMs !== null && stopMs >= startMs;
 }
 
-// 停止記録のない run は稼働中かどうかを cycle-metrics だけでは決められないため、
-// elapsedSeconds を現在時刻から推測せず null にする（Issue #692）。現在の run の経過は
-// worker-status の mergeCycleWorkers が workers.json の現在エントリから採る。
-function workerProjection(events) {
+// 停止記録のない run の扱い（Issue #692）:
+// - 同じワーカーに後続の run がある → その run は終わっているはずなので、停止の記録が
+//   無ければ不明（null）。推測で現在時刻まで計測しない。
+// - そのワーカーの最後の run → 本当に稼働中でありうるため、now までの経過を出す。
+//   稼働中かどうかの最終判定は worker-status の mergeCycleWorkers が現在のレジストリで行う。
+function workerProjection(events, now = Date.now()) {
   const normalized = Array.isArray(events) ? events.filter(Boolean) : [];
   const starts = normalized
     .filter(item => item.event === 'worker-started')
@@ -255,6 +257,7 @@ function workerProjection(events) {
   const stops = normalized
     .filter(item => item.event === 'worker-stopped')
     .sort((a, b) => timestampMs(a.at) - timestampMs(b.at));
+  const nowMs = timestampMs(now) ?? Date.now();
   const roleCounts = new Map();
 
   // Assign stops in chronological order. A stop with PID/startTime is matched
@@ -306,8 +309,13 @@ function workerProjection(events) {
 
     const startedAt = start.startTime || start.at;
     const endedAt = stop ? stop.at : null;
-    const startMs = timestampMs(startedAt);
-    const endMs = stop ? timestampMs(endedAt) : null;
+    // 経過は開始と停止の記録時刻（同じ記録の時計）から測る。startTime は登録時刻で、
+    // 数ミリ秒ずれうる。ずれを floor で切ると1秒欠けるため、記録時刻を使う（Issue #692）。
+    const startMs = timestampMs(start.at);
+    const hasLaterRunOfSameWorker = starts.some((other, otherIndex) => (
+      otherIndex > startIndex && (other.workerName || '') === (start.workerName || '')
+    ));
+    const endMs = stop ? timestampMs(endedAt) : (hasLaterRunOfSameWorker ? null : nowMs);
     const elapsedSeconds = startMs !== null && endMs !== null && endMs >= startMs
       ? Math.floor((endMs - startMs) / 1000)
       : null;
@@ -339,7 +347,7 @@ function projectCycleMetrics(events, opts = {}) {
   const issue = opts.issue == null ? null : assertIssue(opts.issue);
   const normalized = Array.isArray(events) ? events.filter(Boolean) : [];
   const interval = intervalProjection(normalized);
-  const workers = workerProjection(normalized);
+  const workers = workerProjection(normalized, opts.now == null ? Date.now() : opts.now);
   const prEvent = firstEvent(normalized, 'pr-created');
   return {
     issue,
