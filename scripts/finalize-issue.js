@@ -39,7 +39,8 @@ Options:
 反省会が完了した後にだけ呼ぶこと。決定事項をIssueへ投稿した後、Issueに紐づく全ワーカーを
 remove-worker.js 経由で削除し、そのあと Issue をクローズする。コメント投稿失敗時は後始末しない。
 実行前に既存コメントを照合し、照合に失敗した場合は投稿も後始末もせず停止する。同じ決定事項の
-再実行ではコメントを重複投稿せず、後始末から再開する。
+再実行ではコメントを重複投稿せず、後始末から再開する。投稿済みと認めるのは、ghの認証ユーザーが
+マーカーを含む決定事項の全文を投稿した場合だけである。
 ワーカー削除は best-effort（一部失敗しても続行し、Issueは閉じる）。
 
 さらに、このIssueの --issue で起動された監視ペインを close-pane 経由で終了する。
@@ -129,7 +130,24 @@ function decisionCommentBody(issue, decisionBody) {
   return `${body}\n\n${decisionCommentMarker(issue, decisionBody)}`;
 }
 
-function defaultListIssueCommentBodies({ issue, repo, workspace }, deps = {}) {
+function isGitHubLogin(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9-]{1,39}$/.test(value);
+}
+
+function runGhApiRead(spawnFn, args, workspace, purpose) {
+  let result;
+  try {
+    result = spawnFn('gh', args, { cwd: workspace, encoding: 'utf8', timeout: 30000 });
+  } catch (error) {
+    throw new Error(`${purpose}: ${error.message}`);
+  }
+  if (!result || result.error || result.status !== 0) {
+    throw new Error(`${purpose}: ${result && result.error && result.error.message || result && result.stderr || 'gh api failed'}`);
+  }
+  return String(result.stdout || '');
+}
+
+function defaultReadIssueComments({ issue, repo, workspace }, deps = {}) {
   const resolveRepoFn = deps.resolveRepoFn || resolveRepo;
   const resolvedRepo = resolveRepoFn({ repo, workspace }, deps.repoDeps || {});
   if (!resolvedRepo || !resolvedRepo.ok || !resolvedRepo.repo) {
@@ -137,45 +155,66 @@ function defaultListIssueCommentBodies({ issue, repo, workspace }, deps = {}) {
   }
 
   const spawnFn = deps.spawnSyncFn || spawnSync;
-  const endpoint = `repos/${resolvedRepo.repo}/issues/${issue}/comments`;
-  let result;
-  try {
-    result = spawnFn('gh', ['api', '--paginate', endpoint, '--jq', '.[].body | @base64'], {
-      cwd: workspace,
-      encoding: 'utf8',
-      timeout: 30000,
-    });
-  } catch (error) {
-    throw new Error(`Issueコメントの照合に失敗しました: ${error.message}`);
-  }
-  if (!result || result.error || result.status !== 0) {
-    throw new Error(`Issueコメントの照合に失敗しました: ${result && result.error && result.error.message || result && result.stderr || 'gh api failed'}`);
+  const authOutput = runGhApiRead(spawnFn, ['api', 'user', '--jq', '.login'], workspace, 'GitHub認証ユーザーの取得に失敗しました');
+  const authLines = authOutput.trim().split(/\r?\n/);
+  const authenticatedLogin = authLines.length === 1 ? authLines[0] : '';
+  if (!isGitHubLogin(authenticatedLogin)) {
+    throw new Error('GitHub認証ユーザーを取得できないため、決定事項の投稿を安全に照合できません');
   }
 
-  const lines = String(result.stdout || '').split(/\r?\n/).filter((line) => line.trim() !== '');
-  return lines.map((line, index) => {
+  const endpoint = `repos/${resolvedRepo.repo}/issues/${issue}/comments`;
+  const commentOutput = runGhApiRead(
+    spawnFn,
+    ['api', '--paginate', endpoint, '--jq', '.[] | {login: .user.login, body: .body} | @json | @base64'],
+    workspace,
+    'Issueコメントの照合に失敗しました',
+  );
+  const lines = commentOutput.split(/\r?\n/).filter((line) => line.trim() !== '');
+  const comments = lines.map((line, index) => {
     let encoded = line;
     try {
-      const parsed = JSON.parse(line);
-      if (typeof parsed === 'string') encoded = parsed;
-    } catch { /* gh --jq may emit the string either raw or JSON-quoted */ }
+      const parsedLine = JSON.parse(line);
+      if (typeof parsedLine === 'string') encoded = parsedLine;
+    } catch { /* gh --jq may emit a scalar either raw or JSON-quoted */ }
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
       throw new Error(`Issueコメントの照合結果 ${index + 1} 件目が不正なBase64です`);
     }
-    return Buffer.from(encoded, 'base64').toString('utf8');
+    let comment;
+    try {
+      comment = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+    } catch (error) {
+      throw new Error(`Issueコメントの照合結果 ${index + 1} 件目をJSONとして読めません: ${error.message}`);
+    }
+    if (!comment || typeof comment !== 'object' || Array.isArray(comment)
+      || typeof comment.body !== 'string') {
+      throw new Error(`Issueコメントの照合結果 ${index + 1} 件目から本文を取得できません`);
+    }
+    return { login: comment.login, body: comment.body };
   });
+
+  return { authenticatedLogin, comments };
 }
 
 function defaultFindDecisionPosted({ issue, repo, workspace, decisionBody }, deps = {}) {
-  const listCommentsFn = deps.listIssueCommentBodiesFn || defaultListIssueCommentBodies;
-  const bodies = listCommentsFn({ issue, repo, workspace }, deps.listIssueCommentDeps || {});
-  if (!Array.isArray(bodies) || bodies.some((body) => typeof body !== 'string')) {
-    throw new Error('Issueコメントの照合結果が不正です');
+  const readCommentsFn = deps.readIssueCommentsFn || defaultReadIssueComments;
+  const result = readCommentsFn({ issue, repo, workspace }, deps.readIssueCommentsDeps || {});
+  if (!result || !isGitHubLogin(result.authenticatedLogin) || !Array.isArray(result.comments)) {
+    throw new Error('GitHub認証ユーザーまたはIssueコメントの照合結果を取得できません');
+  }
+  if (result.comments.some((comment) => !comment || typeof comment !== 'object'
+    || typeof comment.body !== 'string')) {
+    throw new Error('Issueコメントの本文を取得できないため、決定事項を安全に照合できません');
   }
 
-  const marker = decisionCommentMarker(issue, decisionBody);
-  const legacyBody = decisionBody.replace(/\s+$/u, '');
-  return { posted: bodies.some((body) => body.includes(marker) || body.replace(/\s+$/u, '') === legacyBody) };
+  const expectedBody = decisionCommentBody(issue, decisionBody);
+  const authenticatedLogin = result.authenticatedLogin.toLowerCase();
+  return {
+    posted: result.comments.some((comment) => (
+      typeof comment.login === 'string'
+      && comment.login.toLowerCase() === authenticatedLogin
+      && comment.body === expectedBody
+    )),
+  };
 }
 
 // 既定の対象PR発見処理: Issueに紐づくPR番号を列挙する（poll-pr.js / assistant-watch.js と同一の2段構え）。
@@ -301,8 +340,8 @@ function finalizeIssue({ workspace, issue, repo = null, decisionBody }, deps = {
     workspace,
   }));
   const findDecisionPostedFn = deps.findDecisionPostedFn || ((params) => defaultFindDecisionPosted(params, {
-    listIssueCommentBodiesFn: deps.listIssueCommentBodiesFn,
-    listIssueCommentDeps: deps.listIssueCommentDeps,
+    readIssueCommentsFn: deps.readIssueCommentsFn,
+    readIssueCommentsDeps: deps.readIssueCommentsDeps,
   }));
   let existingDecision;
   try {
@@ -444,7 +483,7 @@ module.exports = {
   bodyReferencesIssue,
   decisionCommentMarker,
   decisionCommentBody,
-  defaultListIssueCommentBodies,
+  defaultReadIssueComments,
   defaultFindDecisionPosted,
 };
 
