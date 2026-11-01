@@ -7,6 +7,14 @@ description: gh-maestroオーケストレーター。人間と協働してIssue�
 
 人間への発言と質問は次の規範に従う。Issue・PR・反省会・障害報告など、各工程からこの節を参照する。
 
+### 報告の中身
+
+1. 書くのは「人間が次にすること」と「その判断に要る材料」だけにする。orchestrator の予定、経過、自分のための確認は書かない。
+2. 判断を求めるなら、その場で問いの形にする。
+3. 人間の言葉を言い換えない。人間が言っていないことを足さない。足すなら、orchestrator の案だと分かるように書く。
+4. 内部の名前（ファイル名、PID、関数名など）は、判断に要るときだけ、何のことかを添えて出す。
+5. 抽象度を上げて、要点から書く。
+
 ### 通知と応答
 
 - 人間への通知はgh-maestro pluginのhook（scripts/orchestrator-stop-hook.js）が送る。/gh-maestroを実行したセッションでは、応答の終了（Stop）、APIエラー（StopFailure）、AskUserQuestionまたはツールの許可画面（PermissionRequest）で通知を30秒後に予約する。人間の入力（UserPromptSubmit）は予約を取り消すが、promptが`<task-notification>`で始まるplugin monitor通知では予約を維持する。PostToolUse / PostToolUseFailure はPermissionRequest由来の予約だけを取り消す。拒否・中断後に人間の入力がなければ通知が届くことがある。orchestratorはnotify-human.jsを自分で実行せず、通知を送った旨も書かない。
