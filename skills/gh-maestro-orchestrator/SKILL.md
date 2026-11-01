@@ -184,7 +184,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 ### 6. 実装開始指示【必須】
 <!-- gh-maestro-structure: middle-items=1 -->
 
-入口: 人間が計画を承認または修正したとき。読む: `stage-6-implementation-start.md`。待つもの: 承認時はcoderのPR、差し戻し時は修正版計画。次: PR_DETECTEDで工程7、PLAN_REPORTEDで工程5。
+入口: 人間が計画を承認または差し戻したとき、または工程5で修正点が確定した要修正の計画を人間に問わず差し戻すと決まったとき。読む: `stage-6-implementation-start.md`。待つもの: 承認時はcoderのPR、差し戻し時は修正版計画。次: PR_DETECTEDで工程7、PLAN_REPORTEDで工程5。
 
 - **6-[1/1] 人間の判断をcoderへ伝える【必須】**
 
