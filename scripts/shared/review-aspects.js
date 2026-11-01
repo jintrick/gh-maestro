@@ -1,5 +1,5 @@
 'use strict';
-// review-aspects.js — Review Managerのレビュー基準（7葉）と幹（4幹）の定義
+// review-aspects.js — Review Managerのレビュー基準（8葉）と幹（4幹）の定義
 //
 // run-review-jobs.js / finalize-review.js 等から共有参照される単一の正規定義。
 // 将来葉や幹を変更する際はこのファイルだけを更新する。
@@ -14,6 +14,7 @@ const ALL_LEAF_IDS = Object.freeze([
   'resilience-security/failure-recovery',
   'resilience-security/hostile-input',
   'maintainability/structure-naming',
+  'maintainability/design-quality',
   'test-quality/test-quality',
 ]);
 
@@ -49,7 +50,7 @@ function reviewFilesForLeaves(leafIds) {
 const TRUNK_TO_LEAVES = Object.freeze({
   'Correctness': ['correctness/logic-invariants', 'correctness/api-contract', 'correctness/concurrency'],
   'Resilience & Security': ['resilience-security/failure-recovery', 'resilience-security/hostile-input'],
-  'Maintainability': ['maintainability/structure-naming'],
+  'Maintainability': ['maintainability/structure-naming', 'maintainability/design-quality'],
   'Test Quality': ['test-quality/test-quality'],
 });
 

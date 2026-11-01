@@ -60,7 +60,7 @@ node <SCRIPTS>/finalize-review.js \
 ```
 
 `finalize-review.js --mode complete --integrated` は:
-- 完全性ゲート（7葉の会計・採用葉の結果・4幹の追跡可能性）を機械的に検証する
+- 完全性ゲート（8葉の会計・採用葉の結果・4幹の追跡可能性）を機械的に検証する
 - ゲート通過 → あなたが統合したfindingsをスキーマ検証し、`<OUTPUT>` にatomic writeする
 - ゲート失敗 → エラー終了する（completeモードでは不完全な結果を書き出さない）
 

@@ -1,6 +1,6 @@
 ---
 name: gh-maestro-reviewer
-description: Run a gh-maestro PR Review Manager that evaluates 7 review leaves, creates an execution manifest (phase 1), and later integrates job results with duplicate-finding folding and complete/incomplete judgment (phase 2), producing structured findings JSON or an incomplete-review plane comment.
+description: Run a gh-maestro PR Review Manager that evaluates 8 review leaves, creates an execution manifest (phase 1), and later integrates job results with duplicate-finding folding and complete/incomplete judgment (phase 2), producing structured findings JSON or an incomplete-review plane comment.
 ---
 
 # gh-maestro-reviewer
