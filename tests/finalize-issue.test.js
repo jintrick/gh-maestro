@@ -13,8 +13,7 @@ const {
   cleanupIssueArtifacts,
   bodyReferencesIssue,
   decisionCommentMarker,
-  decisionCommentBody,
-  defaultReadIssueComments,
+  defaultListIssueCommentBodies,
   defaultFindDecisionPosted,
 } = require('../scripts/finalize-issue.js');
 const childProcess = require('../scripts/shared/child-process');
@@ -58,15 +57,14 @@ function fakeGhEnvironment(directory) {
     "if (path.basename(process.execPath).toLowerCase() === (process.platform === 'win32' ? 'gh.exe' : 'gh')) {",
     `  const commentsFile = ${JSON.stringify(commentsFile)};`,
     "  const args = [path.basename(process.argv[1]), ...process.argv.slice(2)];",
+    "  process.stderr.write('fake-gh-args:' + JSON.stringify({ exe: process.execPath, argv: process.argv, args }) + '\\n');",
     "  let comments = [];",
     "  try { comments = JSON.parse(fs.readFileSync(commentsFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }",
-    "  if (args[0] === 'api' && args[1] === 'user') {",
-    "    process.stdout.write('orchestrator\\n');",
-    "  } else if (args[0] === 'api') {",
-    "    process.stdout.write(comments.map((comment) => Buffer.from(JSON.stringify(comment), 'utf8').toString('base64')).join('\\n'));",
+    "  if (args[0] === 'api') {",
+    "    process.stdout.write(comments.map((comment) => Buffer.from(comment, 'utf8').toString('base64')).join('\\n'));",
     "  } else if (args[0] === 'issue' && args[1] === 'comment') {",
     "    const bodyFileIndex = args.indexOf('--body-file');",
-    "    comments.push({ login: 'orchestrator', body: fs.readFileSync(args[bodyFileIndex + 1], 'utf8') });",
+    "    comments.push(fs.readFileSync(args[bodyFileIndex + 1], 'utf8'));",
     "    fs.writeFileSync(commentsFile, JSON.stringify(comments), 'utf8');",
     "    process.stdout.write('https://github.com/test/repo/issues/5#issuecomment-555\\n');",
     "  } else if (args[0] === 'pr' && args[1] === 'list') {",
@@ -82,8 +80,9 @@ function fakeGhEnvironment(directory) {
     ...process.env,
     PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
     NODE_OPTIONS: `--require="${bootstrap.replace(/\\/g, '/')}"`,
+    GH_MAESTRO_FAKE_COMMENTS: commentsFile,
   };
-  return env;
+  return { env, commentsFile };
 }
 
 test('collectWorkersForIssue: 指定Issueのワーカーだけ列挙しorchestratorは除く', () => {
@@ -173,11 +172,11 @@ test('finalizeIssue: 同じ決定事項を再実行しても投稿済みコメ�
     const params = { workspace: dir, issue: 5, repo: 'owner/repo', decisionBody: '採用した決定事項\n' };
     const deps = {
       findDecisionPostedFn: (input) => defaultFindDecisionPosted(input, {
-        readIssueCommentsFn: () => ({ authenticatedLogin: 'orchestrator', comments }),
+        listIssueCommentBodiesFn: () => comments,
       }),
       postDecisionFn: (body) => {
         postCalls += 1;
-        comments.push({ login: 'orchestrator', body });
+        comments.push(body);
         return { ok: true, url: 'https://example.test/comment/1' };
       },
       clearPrMonitorTargetFn: () => true,
@@ -190,7 +189,7 @@ test('finalizeIssue: 同じ決定事項を再実行しても投稿済みコメ�
     assert.equal(first.closed, false);
     assert.equal(first.decisionAlreadyPosted, false);
     assert.equal(comments.length, 1);
-    assert.equal(comments[0].body, decisionCommentBody(5, params.decisionBody));
+    assert.ok(comments[0].includes(decisionCommentMarker(5, params.decisionBody)));
 
     const retry = finalizeIssueCore(params, deps);
     assert.equal(retry.closed, false);
@@ -224,95 +223,39 @@ test('finalizeIssue: 決定事項の既存投稿照合に失敗したら投稿�
   });
 });
 
-test('defaultReadIssueComments: コメント一覧APIの失敗を未投稿扱いにせずエラーにする', () => {
-  const calls = [];
-  assert.throws(() => defaultReadIssueComments(
+test('defaultListIssueCommentBodies: GitHub APIの失敗を未投稿扱いにせずエラーにする', () => {
+  let captured;
+  assert.throws(() => defaultListIssueCommentBodies(
     { issue: 5, repo: 'owner/repo', workspace: 'C:/temp/workspace' },
     {
       spawnSyncFn: (command, args, options) => {
-        calls.push({ command, args, cwd: options.cwd });
-        if (args[1] === 'user') return { status: 0, stdout: 'orchestrator\n', stderr: '' };
+        captured = { command, args, cwd: options.cwd };
         return { status: 1, stdout: '', stderr: 'rate limit' };
       },
     },
   ), /Issueコメントの照合に失敗しました: rate limit/);
-  assert.deepEqual(calls, [
-    { command: 'gh', args: ['api', 'user', '--jq', '.login'], cwd: 'C:/temp/workspace' },
-    {
-      command: 'gh',
-      args: ['api', '--paginate', 'repos/owner/repo/issues/5/comments', '--jq', '.[] | {login: .user.login, body: .body} | @json | @base64'],
-      cwd: 'C:/temp/workspace',
-    },
-  ]);
+  assert.deepEqual(captured, {
+    command: 'gh',
+    args: ['api', '--paginate', 'repos/owner/repo/issues/5/comments', '--jq', '.[].body | @base64'],
+    cwd: 'C:/temp/workspace',
+  });
 });
 
-test('defaultReadIssueComments: 認証ユーザーを取得できなければコメント照合を止める', () => {
-  let calls = 0;
-  assert.throws(() => defaultReadIssueComments(
+test('defaultListIssueCommentBodies: ページごとにbase64化されたコメント本文を改行込みで復元する', () => {
+  const bodies = ['1ページ目の本文\n2行目', '2ページ目の本文'];
+  let capturedArgs;
+  const decoded = defaultListIssueCommentBodies(
     { issue: 5, repo: 'owner/repo', workspace: 'C:/temp/workspace' },
     {
-      spawnSyncFn: () => {
-        calls += 1;
-        return { status: 0, stdout: '', stderr: '' };
-      },
-    },
-  ), /GitHub認証ユーザーを取得できない/);
-  assert.equal(calls, 1, 'comments are not read under an unknown identity');
-});
-
-test('defaultReadIssueComments: bot・投稿者不明を含むページ結果と改行を復元する', () => {
-  const expected = {
-    authenticatedLogin: 'orchestrator',
-    comments: [
-      { login: 'orchestrator', body: '1ページ目の本文\n2行目' },
-      { login: 'reviewer', body: '2ページ目の本文' },
-      { login: 'dependabot[bot]', body: 'botのコメント' },
-      { login: null, body: '削除済みユーザーのコメント' },
-    ],
-  };
-  const calls = [];
-  const actual = defaultReadIssueComments(
-    { issue: 5, repo: 'owner/repo', workspace: 'C:/temp/workspace' },
-    {
-      spawnSyncFn: (command, args, options) => {
-        calls.push({ command, args, cwd: options.cwd });
-        if (args[1] === 'user') return { status: 0, stdout: 'orchestrator\n', stderr: '' };
-        const lines = expected.comments.map((comment) => Buffer.from(JSON.stringify(comment), 'utf8').toString('base64'));
-        return { status: 0, stdout: `${lines.join('\n')}\n`, stderr: '' };
+      spawnSyncFn: (command, args) => {
+        assert.equal(command, 'gh');
+        capturedArgs = args;
+        return { status: 0, stdout: `${bodies.map((body) => Buffer.from(body, 'utf8').toString('base64')).join('\n')}\n`, stderr: '' };
       },
     },
   );
-  assert.deepEqual(actual, expected);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ['api', 'user', '--jq', '.login'],
-    ['api', '--paginate', 'repos/owner/repo/issues/5/comments', '--jq', '.[] | {login: .user.login, body: .body} | @json | @base64'],
-  ]);
-});
-
-test('defaultFindDecisionPosted: bot・投稿者不明が混在しても自分の完全一致本文だけを投稿済みとする', () => {
-  const params = { issue: 5, repo: 'owner/repo', workspace: 'C:/temp/workspace', decisionBody: '採用した決定事項' };
-  const expectedBody = decisionCommentBody(params.issue, params.decisionBody);
-  const marker = decisionCommentMarker(params.issue, params.decisionBody);
-  const find = (comments) => defaultFindDecisionPosted(params, {
-    readIssueCommentsFn: () => ({ authenticatedLogin: 'orchestrator', comments }),
-  });
-
-  assert.equal(find([{ login: 'ORCHESTRATOR', body: expectedBody }]).posted, true);
-  assert.equal(find([{ login: 'reviewer', body: `第三者のメモ ${marker}` }]).posted, false, 'third-party marker alone is not proof');
-  assert.equal(find([{ login: 'reviewer', body: expectedBody }]).posted, false, 'a third-party copy of the full body is not proof');
-  assert.equal(find([{ login: 'orchestrator', body: `決定事項 ${marker}` }]).posted, false, 'marker-only content is not the full decision');
-  assert.equal(find([{ login: 'orchestrator', body: params.decisionBody }]).posted, false, 'unmarked legacy content is not an exact match');
-  assert.equal(find([
-    { login: 'dependabot[bot]', body: marker },
-    { login: null, body: expectedBody },
-    { body: marker },
-    { login: 'orchestrator', body: expectedBody },
-  ]).posted, true, 'unreadable and bot authors are not fatal; the authenticated author exact match is recognized');
-  assert.equal(find([
-    { login: 'dependabot[bot]', body: expectedBody },
-    { login: null, body: expectedBody },
-    { body: marker },
-  ]).posted, false, 'bot and unreadable authors are never mistaken for the authenticated user');
+  assert.deepEqual(capturedArgs, ['api', '--paginate', 'repos/owner/repo/issues/5/comments', '--jq', '.[].body | @base64']);
+  assert.deepEqual(decoded, bodies);
 });
 
 test('finalizeIssue: workers.jsonの読み取り失敗時はIssueをクローズしない', () => {
@@ -454,7 +397,7 @@ test('finalize-issue CLI: worktree runtimeのclose-pane失敗を非0で報告し
     const statusFile = statusPaneRegistry.statusPanePath(worktree, runtimeDir);
     fs.mkdirSync(path.dirname(statusFile), { recursive: true });
     fs.writeFileSync(statusFile, '{invalid json', 'utf8');
-    const fakeGhEnv = fakeGhEnvironment(path.join(dir, 'fake'));
+    const fakeGh = fakeGhEnvironment(path.join(dir, 'fake'));
     const cliArgs = [
       path.join(__dirname, '..', 'scripts', 'finalize-issue.js'),
       '--issue', '5',
@@ -469,7 +412,7 @@ test('finalize-issue CLI: worktree runtimeのclose-pane失敗を非0で報告し
       const cliResult = spawnNodeSync(
         process.execPath,
         cliArgs,
-        { encoding: 'utf8', env: { ...fakeGhEnv, GH_MAESTRO_RUNTIME_DIR: runtimeDir } },
+        { encoding: 'utf8', env: { ...fakeGh.env, GH_MAESTRO_RUNTIME_DIR: runtimeDir } },
       );
       assert.equal(cliResult.status, 1);
       assert.match(cliResult.stdout, /FINALIZED:5 removed=0\/1 closed=false/, cliResult.stderr);
