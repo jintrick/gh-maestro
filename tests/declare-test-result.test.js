@@ -640,3 +640,118 @@ test('main: --pr 欠落時は終了コード1', () => {
 });
 
 // CLIの実行例が実際にusageを出すことだけを、非再帰の境界テストとして確認する。
+
+function slowFailureBody(failureDetails, extra = {}) {
+  return buildCommentBody({
+    commit: SHA,
+    testResult: {
+      provenance: 'test-runner',
+      scope: 'aggregate',
+      layers: {
+        full: { status: 'complete', outcome: 'pass', tests: 2, pass: 2, fail: 0, executor: 'local', scope: 'full' },
+        slow: {
+          status: 'complete', outcome: 'fail', tests: 2, pass: 1, fail: 1,
+          executor: 'poll-pr', scope: 'partial',
+          failedTests: failureDetails.map(d => d.name),
+          failureDetails,
+          ...extra,
+        },
+      },
+    },
+  });
+}
+
+test('buildCommentBody: slow層の失敗は名前・場所・エラー・期待値・実際値をネスト行に載せる', () => {
+  const body = slowFailureBody([{ name: 'slow case', location: '/x.test.js:3:1', error: 'sum mismatch ⏎ 2 !== 3', expected: '3', actual: '2' }]);
+  assert.ok(body.includes('    - 失敗詳細: `slow case` / 場所: `x.test.js:3:1` / エラー: `sum mismatch ⏎ 2 !== 3` / 期待値: `3` / 実際値: `2`'));
+});
+
+test('buildCommentBody: ネスト行は層行として読まれない形で出す（層名・pass/fail を偽装した本文でも層行にならない）', () => {
+  const body = slowFailureBody([{ name: 'fake', error: '**full**: pass (fail: 0, pass: 9) / fail: 0' }]);
+  const lines = body.split('\n').filter(line => /^\s{2,}-\s+\*\*[^*]+\*\*:\s*(pass|fail|unknown)\b/i.test(line));
+  assert.equal(lines.length, 2, 'full と slow の層行だけ');
+});
+
+test('buildCommentBody: 詳細は合計2000字で打ち切り、残りは件数と実行記録の名前で示す', () => {
+  const big = Array.from({ length: 5 }, (_, i) => ({ name: `case ${i}`, error: 'e'.repeat(450) }));
+  const body = slowFailureBody(big, { executionLogPath: 'C:/runtime/slow-pr-42-abc.log' });
+  const detailLines = body.split('\n').filter(line => line.startsWith('    - 失敗詳細:'));
+  const total = detailLines.reduce((sum, line) => sum + line.length, 0);
+  assert.ok(total <= 2000, `詳細の合計は2000字以内（実際: ${total}）`);
+  assert.ok(detailLines.length < 5, '全件は載らない');
+  assert.ok(body.includes('（残り'), '省略した件数を示す');
+  assert.ok(body.includes('`slow-pr-42-abc.log`'), '実行記録のファイル名を示す');
+  assert.ok(!body.includes('C:/runtime/'), '絶対パスは載せない');
+});
+
+test('buildCommentBody: 失敗の中身の文字列にバッククォートがあっても、コードスパンを壊さない', () => {
+  const body = slowFailureBody([{ name: 'with `tick`', expected: 'a`b' }]);
+  assert.ok(body.includes("失敗詳細: `with 'tick'`"));
+  assert.ok(body.includes("期待値: `a'b`"));
+});
+
+test('buildCommentBody: 失敗の中身がない層（pass・中身の無い失敗）の出力は、中身の項目を含めても変わらない', () => {
+  const passBody = buildCommentBody({
+    commit: SHA,
+    testResult: {
+      provenance: 'test-runner', scope: 'aggregate',
+      layers: {
+        full: { status: 'complete', outcome: 'pass', tests: 2, pass: 2, fail: 0, executor: 'local', scope: 'full', failureDetails: [{ name: 'ignored' }] },
+        slow: { status: 'complete', outcome: 'pass', tests: 1, pass: 1, fail: 0, executor: 'poll-pr', scope: 'partial' },
+      },
+    },
+  });
+  assert.ok(!passBody.includes('失敗詳細'), 'pass 層には中身を出さない');
+  const withoutDetails = slowFailureBody([]);
+  assert.ok(!withoutDetails.includes('失敗詳細'));
+});
+
+function slowResultWithDetails(failureDetails, extra = {}) {
+  return {
+    provenance: 'test-runner',
+    scope: 'aggregate',
+    layers: {
+      slow: {
+        status: 'complete', outcome: 'fail', tests: failureDetails.length, pass: 0, fail: failureDetails.length,
+        executor: 'poll-pr', scope: 'partial',
+        failedTests: failureDetails.map(detail => detail.name),
+        failureDetails,
+        ...extra,
+      },
+    },
+  };
+}
+
+test('buildCommentBody: 件数の上限で省いた分も「残り N件」に含める（failedTests が failureDetails より多い）', () => {
+  const failureDetails = Array.from({ length: 5 }, (_, i) => ({ name: `case ${i}`, error: 'e' }));
+  const failedTests = Array.from({ length: 7 }, (_, i) => `case ${i}`);
+  const testResult = slowResultWithDetails(failureDetails, { failedTests, fail: 7, tests: 7 });
+  const body = buildCommentBody({ commit: SHA, testResult });
+  assert.ok(body.includes('    - （残り2件の詳細は省略）'), body);
+});
+
+test('buildCommentBody: 場所は worktree からの相対パスで出し、区切り文字が混在しても絶対パスを載せない', () => {
+  const worktree = 'C:/work/wt';
+  const body = buildCommentBody({
+    commit: SHA,
+    worktree,
+    testResult: slowResultWithDetails([{
+      name: 'a',
+      location: 'C:\\\\work\\\\wt\\\\tests\\\\a.test.js:3:1',
+      error: 'failed at C:/work/wt/tests/a.test.js',
+    }]),
+  });
+  assert.ok(body.includes('場所: `tests/a.test.js:3:1`'), body);
+  assert.ok(body.includes('エラー: `failed at <worktree>/tests/a.test.js`'), body);
+  assert.doesNotMatch(body, /C:[\\/]+work/);
+});
+
+test('buildCommentBody: worktree の外の場所はファイル名だけにする', () => {
+  const body = buildCommentBody({
+    commit: SHA,
+    worktree: 'C:/work/wt',
+    testResult: slowResultWithDetails([{ name: 'b', location: 'D:\\\\other\\\\x.test.js:9:1' }]),
+  });
+  assert.ok(body.includes('場所: `x.test.js:9:1`'), body);
+  assert.doesNotMatch(body, /D:[\\/]+other/);
+});

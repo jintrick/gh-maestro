@@ -10,6 +10,7 @@ const {
   TEST_RESULT_PROVENANCE,
   parseTapSummary,
   parseTapFailures,
+  parseTapFailureDetails,
   testResultPath,
   testResultInvalidationPath,
   invalidateTestResultArtifact,
@@ -522,4 +523,140 @@ test('writeTestResultLayer: 指紋なし unavailable 層の追加後も lint と
   assert.deepEqual(result.result.lint, lint);
   assert.deepEqual(result.result.checks.typecheck, typecheck);
   assert.deepEqual(result.result.typecheck, typecheck);
+});
+
+// 実機の node:test（v22.15.0, --test-reporter=tap）の出力を、パスだけ差し替えて固定したもの。
+// 期待値はこの文字列を読んで手で書いた値であり、実装の出力から導いていない。
+const REAL_NODE_TAP_FAILURES = `TAP version 13
+# Subtest: alpha fails
+not ok 1 - alpha fails
+  ---
+  duration_ms: 1.5998
+  type: 'test'
+  location: '/work/fixtures/f.test.js:3:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    sum mismatch
+
+    2 !== 3
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 3
+  actual: 2
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/work/fixtures/f.test.js:3:36)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+  ...
+# Subtest: beta fails
+not ok 2 - beta fails
+  ---
+  duration_ms: 1.8834
+  type: 'test'
+  location: '/work/fixtures/f.test.js:4:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+      {
+    +   a: 1
+    -   a: 2
+      }
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    a: 2
+  actual:
+    a: 1
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (/work/fixtures/f.test.js:4:35)
+  ...
+# Subtest: gamma ok
+ok 3 - gamma ok
+  ---
+  duration_ms: 0.1692
+  type: 'test'
+  ...
+1..3
+# tests 3
+# pass 1
+# fail 2
+`;
+
+test('parseTapFailureDetails: 実機のnode:test出力から、場所・エラー・期待値・実際値を失敗ごとに取り出す（stackは載せない）', () => {
+  const details = parseTapFailureDetails(REAL_NODE_TAP_FAILURES);
+  assert.equal(details.length, 2);
+  assert.equal(details[0].name, 'alpha fails');
+  assert.equal(details[0].location, '/work/fixtures/f.test.js:3:1');
+  assert.equal(details[0].error, 'sum mismatch ⏎ 2 !== 3');
+  assert.equal(details[0].expected, '3');
+  assert.equal(details[0].actual, '2');
+  assert.equal(details[1].name, 'beta fails');
+  assert.equal(details[1].location, '/work/fixtures/f.test.js:4:1');
+  assert.ok(details[1].error.startsWith('Expected values to be strictly deep-equal:'));
+  assert.equal(details[1].expected, 'a: 2', '複数行のexpectedを連結して読む');
+  assert.equal(details[1].actual, 'a: 1');
+  assert.doesNotMatch(JSON.stringify(details), /TestContext|runInAsyncScope/, 'stackの行を中身として読まない');
+  assert.deepEqual(parseTapFailures(REAL_NODE_TAP_FAILURES), ['alpha fails', 'beta fails'], '名前だけの従来挙動は変わらない');
+});
+
+test('parseTapFailureDetails: 長い値は項目ごとの上限で切り詰める（error は300字）', () => {
+  const longError = 'x'.repeat(400);
+  const output = `TAP version 13
+not ok 1 - long one
+  ---
+  error: '${longError}'
+  ...
+1..1
+`;
+  const [detail] = parseTapFailureDetails(output);
+  assert.equal(detail.error.length, 300);
+  assert.ok(detail.error.endsWith('…'));
+});
+
+test('parseTapFailureDetails: 診断ブロックが無い失敗は名前だけを返す', () => {
+  assert.deepEqual(parseTapFailureDetails('not ok 1 - bare\n'), [{ name: 'bare' }]);
+});
+
+test('validateTestResultArtifact: failureDetails の型不正を種別ごとに独立して拒否する', () => {
+  const good = { name: 'a', location: '/x.js:1:1', error: 'e', expected: '1', actual: '2' };
+  assert.equal(validateTestResultArtifact(completeArtifact({ failureDetails: [good] })).ok, true);
+  for (const invalid of [
+    'not-an-array',
+    ['plain string'],
+    [{ location: '/x.js:1:1' }],
+    [{ name: '' }],
+    [{ name: 'a', error: 42 }],
+    [{ name: 'a', expected: null }],
+    [null],
+    Array.from({ length: 6 }, (_, i) => ({ name: `t${i}` })),
+  ]) {
+    assert.equal(validateTestResultArtifact(completeArtifact({ failureDetails: invalid })).ok, false, JSON.stringify(invalid).slice(0, 80));
+  }
+});
+
+test('writeTestResultLayer/readTestResultArtifact: slow層のfailureDetailsを保存し、読み取り結果にも返す', () => {
+  const worktree = tempWorktree();
+  const failureDetails = [{ name: 'slow case', location: '/x.js:2:1', error: 'boom', expected: '1', actual: '0' }];
+  writeTestResultLayer(worktree, {
+    layer: 'slow',
+    scope: 'partial',
+    status: 'complete',
+    outcome: 'fail',
+    fail: 1,
+    pass: 0,
+    tests: 1,
+    command: 'npm run test:slow',
+    recordedAt: '2026-10-16T00:00:00.000Z',
+    testedContentHash: 'a'.repeat(64),
+    failedTests: ['slow case'],
+    failureDetails,
+  });
+  const read = readTestResultArtifact(worktree);
+  assert.equal(read.ok, true);
+  assert.deepEqual(read.result.layers.slow.failureDetails, failureDetails);
 });

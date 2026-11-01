@@ -170,14 +170,20 @@ function parseTapSummary(output) {
   return { ok: true, summary };
 }
 
-function parseTapFailures(output) {
+const TAP_FAILURE_LINE_RE = /^\s*not ok(?:\s+[0-9]+)?\s+-\s+(.+?)\s*$/;
+const TAP_FAILURE_DETAIL_LIMITS = Object.freeze({ location: 200, error: 300, expected: 200, actual: 200 });
+// slow 層の申告に載せる失敗の中身の件数上限。申告の表示上限と揃える。
+const MAX_FAILURE_DETAILS = 5;
+
+// TAP の not ok ブロックを、テスト名と直後の診断ブロック（--- から ... まで）の行に分けて返す。
+// SKIP/TODO とスイート集約行は失敗として数えない。
+function scanTapFailures(output) {
   if (typeof output !== 'string' || !output) return [];
   const lines = output.split(/\r?\n/);
   const failures = [];
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const match = line.match(/^\s*not ok(?:\s+[0-9]+)?\s+-\s+(.+?)\s*$/);
+    const match = lines[i].match(TAP_FAILURE_LINE_RE);
     if (!match) continue;
 
     const testName = match[1].trim();
@@ -185,6 +191,7 @@ function parseTapFailures(output) {
       continue;
     }
 
+    const block = [];
     let isSuite = false;
     for (let j = i + 1; j < lines.length; j++) {
       const nextLine = lines[j];
@@ -193,19 +200,83 @@ function parseTapFailures(output) {
       }
       if (/^\s*type:\s*['"]?suite['"]?/.test(nextLine) || /^\s*failureType:\s*['"]?subtestsFailed['"]?/.test(nextLine)) {
         isSuite = true;
-        break;
       }
       if (/^\s*\.\.\.\s*$/.test(nextLine)) {
         break;
       }
+      block.push(nextLine);
     }
 
     if (!isSuite && testName) {
-      failures.push(testName);
+      failures.push({ name: testName, block });
     }
   }
 
   return failures;
+}
+
+function parseTapFailures(output) {
+  return scanTapFailures(output).map(failure => failure.name);
+}
+
+function unquoteYamlScalar(text) {
+  const trimmed = text.trim();
+  const quoted = trimmed.match(/^'(.*)'$/) || trimmed.match(/^"(.*)"$/);
+  return quoted ? quoted[1].replace(/''/g, "'") : trimmed;
+}
+
+function truncateText(text, max) {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+// node:test の TAP 診断ブロック（YAML風）から、トップレベルのキーごとの値を読む。
+// 複数行の値（| の block scalar、インデントされた複数行の map）は、空行を除いて ' ⏎ ' で連結する。
+// stack など読まないキーの値は捨てる。
+function parseTapDiagnostics(lines) {
+  const fields = {};
+  const keyRe = /^(\s*)([A-Za-z_][A-Za-z0-9_]*):(?:\s+(.*))?$/;
+  const indentOf = line => line.match(/^\s*/)[0].length;
+  let baseIndent = null;
+  let i = 0;
+  while (i < lines.length) {
+    const match = lines[i].match(keyRe);
+    if (!match) { i++; continue; }
+    const indent = match[1].length;
+    if (baseIndent === null) baseIndent = indent;
+    if (indent !== baseIndent) { i++; continue; }
+
+    const key = match[2];
+    const rest = (match[3] || '').trim();
+    const continuation = [];
+    let j = i + 1;
+    while (j < lines.length && (lines[j].trim() === '' || indentOf(lines[j]) > baseIndent)) {
+      if (lines[j].trim() !== '') continuation.push(lines[j].trim());
+      j++;
+    }
+    const isBlockScalar = /^[|>][-+]?$/.test(rest);
+    if (isBlockScalar || rest === '') {
+      if (continuation.length > 0) fields[key] = continuation.join(' ⏎ ');
+    } else {
+      fields[key] = unquoteYamlScalar(rest);
+    }
+    i = j;
+  }
+  return fields;
+}
+
+// 失敗テストごとに、場所・エラー・期待値・実際値を取り出す。取れない項目は省く。
+// 名前は failedTests と同じ文字列。件数の上限はここでは掛けず、呼び出し側が掛ける。
+function parseTapFailureDetails(output) {
+  return scanTapFailures(output).map(({ name, block }) => {
+    const fields = parseTapDiagnostics(block);
+    const detail = { name };
+    for (const key of Object.keys(TAP_FAILURE_DETAIL_LIMITS)) {
+      if (typeof fields[key] === 'string' && fields[key] !== '') {
+        detail[key] = truncateText(fields[key], TAP_FAILURE_DETAIL_LIMITS[key]);
+      }
+    }
+    return detail;
+  });
 }
 
 function validateCountFields(value, required) {
@@ -265,6 +336,24 @@ function validateDynamicConcurrencyResult(value, fieldPrefix) {
   return { ok: true };
 }
 
+const FAILURE_DETAIL_TEXT_FIELDS = ['location', 'error', 'expected', 'actual'];
+
+// 型が不正な失敗の中身を、黙って捨てず拒否する（読み取り側が中身なしへ縮退しないため）。
+function validateFailureDetails(value) {
+  if (!Array.isArray(value)) return { ok: false, error: 'failureDetails must be an array' };
+  if (value.length > MAX_FAILURE_DETAILS) return { ok: false, error: `failureDetails must have at most ${MAX_FAILURE_DETAILS} items` };
+  for (const item of value) {
+    if (!isPlainObject(item)) return { ok: false, error: 'failureDetails items must be JSON objects' };
+    if (typeof item.name !== 'string' || !item.name) return { ok: false, error: 'failureDetails item name is required' };
+    for (const field of FAILURE_DETAIL_TEXT_FIELDS) {
+      if (item[field] !== undefined && typeof item[field] !== 'string') {
+        return { ok: false, error: `failureDetails item ${field} must be a string` };
+      }
+    }
+  }
+  return { ok: true };
+}
+
 function validateResultFields(value, fieldPrefix, { requireLayer = false } = {}) {
   if (!isPlainObject(value)) return { ok: false, error: `${fieldPrefix} must be a JSON object` };
   if (requireLayer && (typeof value.layer !== 'string' || !value.layer.trim())) return { ok: false, error: `${fieldPrefix} layer is required` };
@@ -276,6 +365,10 @@ function validateResultFields(value, fieldPrefix, { requireLayer = false } = {})
     if (!Array.isArray(value.failedTests) || value.failedTests.some(t => typeof t !== 'string')) {
       return { ok: false, error: `${fieldPrefix} failedTests must be an array of strings` };
     }
+  }
+  if (value.failureDetails !== undefined) {
+    const details = validateFailureDetails(value.failureDetails);
+    if (!details.ok) return { ok: false, error: `${fieldPrefix} ${details.error}` };
   }
   if (value.status === 'complete') {
     if (value.outcome !== undefined && (typeof value.outcome !== 'string' || !TEST_RESULT_OUTCOMES.has(value.outcome))) return { ok: false, error: `${fieldPrefix} complete outcome is invalid` };
@@ -498,6 +591,7 @@ function layerForRead(layer) {
     ...(layer.outcome !== undefined ? { outcome: layer.outcome } : {}),
     ...Object.fromEntries(TAP_COUNT_FIELDS.filter(field => Object.prototype.hasOwnProperty.call(layer, field)).map(field => [field, layer[field]])),
     ...(Array.isArray(layer.failedTests) ? { failedTests: layer.failedTests } : {}),
+    ...(Array.isArray(layer.failureDetails) ? { failureDetails: layer.failureDetails } : {}),
     command: layer.command,
     recordedAt: layer.recordedAt,
     testedHead: layer.testedHead || undefined,
@@ -550,6 +644,7 @@ function readTestResultArtifact(worktree = process.cwd()) {
       ...(parsed.outcome !== undefined ? { outcome: parsed.outcome } : {}),
       ...Object.fromEntries(TAP_COUNT_FIELDS.filter(field => Object.prototype.hasOwnProperty.call(parsed, field)).map(field => [field, parsed[field]])),
       ...(Array.isArray(parsed.failedTests) ? { failedTests: parsed.failedTests } : {}),
+      ...(Array.isArray(parsed.failureDetails) ? { failureDetails: parsed.failureDetails } : {}),
       command: parsed.command,
       recordedAt: parsed.recordedAt,
       testedHead: parsed.testedHead || undefined,
@@ -586,6 +681,8 @@ module.exports = {
   invalidateTestResultArtifact,
   parseTapSummary,
   parseTapFailures,
+  parseTapFailureDetails,
+  MAX_FAILURE_DETAILS,
   validateLayerResult,
   validateLintResult,
   validateStaticCheckResult,

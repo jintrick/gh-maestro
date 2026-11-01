@@ -22,6 +22,8 @@ const {
   calculateWorktreeContentHash,
   parseTapSummary,
   parseTapFailures,
+  parseTapFailureDetails,
+  MAX_FAILURE_DETAILS,
   publicTestCommand,
   validateLintResult,
   validateStaticCheckResult,
@@ -588,6 +590,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   const writeStdoutFn = deps.writeStdoutFn || ((text) => process.stdout.write(text));
   const writeStderrFn = deps.writeStderrFn || ((text) => process.stderr.write(text));
   const parseTapFailuresFn = deps.parseTapFailuresFn || parseTapFailures;
+  const parseTapFailureDetailsFn = deps.parseTapFailureDetailsFn || parseTapFailureDetails;
   const lintSpawnSyncFn = deps.lintSpawnSyncFn || spawnSync;
 
   try {
@@ -668,6 +671,10 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
   const combinedOutput = `${stdout}${stderr ? `\n${stderr}` : ''}`;
   const summary = parseTapSummary(combinedOutput);
   const failedTests = parseTapFailuresFn(combinedOutput);
+  // 失敗の中身（場所・エラー・期待値・実際値）は slow 層の成果物だけに残す。full 層の成果物とログは増やさない。
+  const failureDetails = layerName === 'slow'
+    ? parseTapFailureDetailsFn(combinedOutput).slice(0, MAX_FAILURE_DETAILS)
+    : [];
   // TAPの必須欄が揃っていても、framework固有の集計が成果物契約に収まらない場合は
   // 件数だけを捨てる。テスト実行後の非0終了は、summaryが不正でも終了コード由来の
   // failとして保持する。
@@ -707,6 +714,7 @@ function runTests({ suite, layer, testFiles = [], changedFiles = [], cwd = proce
       ...(dynamicConcurrency ? { dynamicConcurrency } : {}),
       ...summaryFields,
       ...(outcome === 'fail' && failedTests.length > 0 ? { failedTests } : {}),
+      ...(outcome === 'fail' && failureDetails.length > 0 ? { failureDetails } : {}),
     };
   } else {
     artifact = {
