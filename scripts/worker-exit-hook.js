@@ -40,6 +40,8 @@ const { isWorkerIdentity } = require('./shared/resident-force-guard');
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { deriveRoleFromSkill } = require('./shared/worker-factory');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
+const { releaseReviewManagerStartup } = require('./shared/running-review-managers');
+const { reviewArtifactPath } = require('./shared/review-manager-paths');
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -289,6 +291,7 @@ if (require.main === module) {
   const exitCode = parseInt(exitCodeRaw, 10);
   const workerName = process.env.GH_MAESTRO_WORKER || null;
 
+  try {
   // 終了フックはペインの有無に依存しない正本側の停止打刻点。
   if (workspace && workerName) {
     try {
@@ -349,6 +352,23 @@ if (require.main === module) {
       });
     } catch (error) {
       process.stderr.write(`worker-exit-hook: 返信確認・代理送信処理で例外: ${error.message}\n`);
+    }
+  }
+  } finally {
+    // Review Managerの起動予約は、終了フックの通知が終わってから解放する。
+    // supervisorはmanager.runningがstaleでも予約がliveなら停止判定を保留する。
+    const reviewManagerPr = process.env.GH_MAESTRO_REVIEW_MANAGER_PR;
+    const startupToken = process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN;
+    if (workspace && reviewManagerPr && startupToken) {
+      try {
+        const runningPath = reviewArtifactPath(workspace, reviewManagerPr, '.running');
+        const release = releaseReviewManagerStartup(runningPath, startupToken);
+        if (!release.released && !release.missing) {
+          process.stderr.write(`worker-exit-hook: Review Manager起動予約を解放できません: ${release.reason || 'unknown reason'}\n`);
+        }
+      } catch (error) {
+        process.stderr.write(`worker-exit-hook: Review Manager起動予約を解放できません: ${error.message}\n`);
+      }
     }
   }
 }

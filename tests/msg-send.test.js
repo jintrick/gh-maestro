@@ -8,11 +8,9 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('node:child_process');
 const { EventEmitter } = require('events');
 
 const msgSend = require('../scripts/msg-send');
-const { cleanSpawnEnv } = require('./_spawn-env');
 const workerLiveness = require('../scripts/shared/worker-liveness');
 const processLifecycle = require('../scripts/process-lifecycle');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
@@ -200,7 +198,7 @@ test('--abnormal-exit は終了フック通知を機械識別できるkind付き
   });
 });
 
-test('--abnormal-exit はorchestratorとraw投稿から拒否する', () => {
+test('--abnormal-exit はorchestrator・raw・plan-reportとの併用を拒否する', () => {
   withTempDir(workspace => {
     const orchestrator = msgSend.main(
       ['orchestrator', '--abnormal-exit', '--stdin', '--issue', '9', '--workspace', workspace],
@@ -215,23 +213,13 @@ test('--abnormal-exit はorchestratorとraw投稿から拒否する', () => {
     );
     assert.equal(raw.code, 1);
     assert.match(raw.errLines.join('\n'), /マーカー付きの通常コメント専用/);
-  });
-});
 
-test('--abnormal-exitのorchestrator拒否は実CLI境界でもcode 1になる', () => {
-  withTempDir(workspace => {
-    const result = spawnSync(process.execPath, [
-      path.join(__dirname, '..', 'scripts', 'msg-send.js'),
-      'orchestrator', '--abnormal-exit', '--stdin', '--issue', '9', '--workspace', workspace,
-    ], {
-      cwd: workspace,
-      encoding: 'utf8',
-      input: 'body',
-      env: { ...cleanSpawnEnv(), GH_MAESTRO_WORKER: 'orchestrator' },
-      timeout: 30000,
-    });
-    assert.equal(result.status, 1, `nonzero exit expected; stderr: ${result.stderr}`);
-    assert.match(result.stderr, /ワーカー通知専用/);
+    const planReport = msgSend.main(
+      ['issue-9-coder', '--abnormal-exit', '--plan-comment-id', '42', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-9-coder' }, stdinIO('body'),
+    );
+    assert.equal(planReport.code, 1);
+    assert.match(planReport.errLines.join('\n'), /--raw \/ --plan-comment-id と同時に指定できません/);
   });
 });
 

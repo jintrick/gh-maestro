@@ -113,11 +113,9 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
   // 起動側は隣接するmanager.startingだけを原子的に予約する。
   // manager.runningが本体書き込み前の窓でも、予約を持つ起動だけが先へ進める。
   //
-  // 起動予約の endpoint は、この起動処理が予約を進めている間だけ保持する。呼び出し元が
-  // poll-pr.js のような常駐プロセスでも、起動処理を終えたら（成功・既存 manager・失敗の
-  // いずれでも）解放する。保持し続けると、Review Manager 本体が終了した後も外部からの
-  // 再開起動が claim に失敗し続ける。起動状態の正本は manager.running と、生存する
-  // 所有者を持つ manager.starting である。
+  // 起動処理が始めた予約はshimへ引き渡し、終了フックが終わるまでshimが所有する。
+  // manager.runningがstaleになってもmanager.startingがliveなら、worker-supervisorは
+  // 終了フックの通知完了まで停止通知を待てる。
   const self = checker();
   let startupRef;
   try {
@@ -181,6 +179,7 @@ function startReviewManagerWithStartupRef({
       GH_MAESTRO_WORKER: workerName,
       GH_MAESTRO_WORKSPACE: workspace,
       GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN: startup.token,
+      GH_MAESTRO_REVIEW_MANAGER_PR: String(pr),
     },
     onExit: {
       command: process.execPath,
@@ -199,12 +198,12 @@ function startReviewManagerWithStartupRef({
       + (stopError ? `。子プロセスの停止にも失敗しました: ${stopError.message}` : '。子プロセスを停止しました'));
   }
 
-  // manager.runningはここでは書かない。本体が書き込んだ後に起動予約を
-  // 解放できるよう、shimのPIDだけをmanager.startingへ引き渡す。
+  // manager.runningはここでは書かない。shimは起動から終了フック完了まで
+  // manager.startingを所有するため、shimのPIDだけを予約へ引き渡す。
   const transferred = transferReviewManagerStartup(lockFile, startup.token, {
     processRef: launched.processRef,
   });
-  // 本体が先にmanager.runningを書いて予約を解放した場合はmissingになる。
+  // Review Managerと終了フックが素早く完了して予約を解放した場合はmissingになる。
   // それは正常な並行実行なので、二重起動扱いにはしない。
   if (!transferred.transferred && !transferred.missing) {
     throw new Error(transferred.reason || 'Review Manager起動予約の引き渡しに失敗しました');

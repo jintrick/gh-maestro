@@ -212,6 +212,10 @@ test('startReviewManager launches run-review-manager.js via launchAgentHeadless�
   // onExitフックは通常ワーカーと同じ worker-exit-hook.js（shimへ渡す）
   const exitHook = JSON.parse(spawnCalls[0].args[3]);
   assert.match(exitHook.args[0], /worker-exit-hook\.js/);
+  assert.equal(spawnCalls[0].options.env.GH_MAESTRO_REVIEW_MANAGER_PR, '7', '終了フックがmanager.startingを解放するPRを識別できる');
+  assert.equal(spawnCalls[0].options.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN, JSON.parse(fs.readFileSync(
+    path.join(workspace, '.gh-maestro', 'records', 'pr', '7', 'review', 'manager.starting'), 'utf8',
+  )).token, '終了フックへshim所有の起動予約トークンを継承させる');
 });
 
 test('startReviewManager: 起動側はmanager.runningを書かず、起動予約へshimを引き渡す', () => {

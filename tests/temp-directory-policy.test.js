@@ -47,6 +47,7 @@ const DIRECT_TEMP_USAGE = new Map([
   ['response-contract.test.js', 2],
   ['restart-residents.test.js', 2],
   ['run-council-jobs.test.js', 2],
+  ['review-manager-generation.test.js', 2],
   ['run-council.test.js', 6],
   ['run-review-jobs.test.js', 95],
   ['run-review-manager.test.js', 2],

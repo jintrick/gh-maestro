@@ -34,11 +34,11 @@ function parseAnchorIssue(value, runningPath) {
 }
 
 /**
- * Review Managerの起動中だけ使う予約ファイルのパスを返す。
+ * Review Managerのshimが終了フックを終えるまで保持する予約ファイルのパスを返す。
  *
  * manager.runningはReview Manager本体だけが所有するため、detachしたshimを
- * 起動側が記録することはできない。起動側と本体がmanager.runningへ所有権を
- * 引き渡すまでの短い空白は、隣接する専用予約ファイルで排他する。
+ * 起動側が記録することはできない。隣接する予約ファイルは、起動時の排他と、
+ * 本体終了後に終了フックが通知を終えるまでの順序保証にも使う。
  *
  * @param {string} runningPath manager.runningのパス
  * @returns {string}
@@ -164,7 +164,7 @@ function transferReviewManagerStartup(runningPath, token, owner) {
 }
 
 /**
- * 本体がmanager.runningを書いた後、対応する起動予約だけを解放する。
+ * 起動側または終了フックが、対応する起動予約だけを解放する。
  *
  * @param {string} runningPath manager.runningのパス
  * @param {string} token 起動側が作成した予約トークン

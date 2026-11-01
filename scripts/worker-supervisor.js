@@ -80,8 +80,9 @@ const { readContract, clearContract } = require('./shared/response-contract');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
 const closedPrGuard = require('./shared/closed-pr-guard');
 const { ARTIFACTS, legacyWorkerOwner, recordPath, recordRoot } = require('./shared/record-paths');
-const { inspectRunningReviewManager } = require('./shared/running-review-managers');
+const { inspectRunningReviewManager, reviewManagerStartingPath } = require('./shared/running-review-managers');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
+const { readReviewManagerGeneration } = require('./shared/review-manager-generation');
 const { readCycleEvents } = require('./shared/cycle-metrics');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
@@ -920,7 +921,7 @@ function main(argsOverride, opts = {}) {
   const unknownReviewManagerNotifications = new Map();
   const reportUnknownReviewManager = ({ pr, pid = null, startTime = null, issue = null, reason }) => {
     const key = String(pr);
-    const identity = `${pid ?? 'unknown'}:${startTime ?? 'unknown'}:${reason}`;
+    const identity = `${pid ?? 'unknown'}:${startTime ?? 'unknown'}`;
     let notification = unknownReviewManagerNotifications.get(key);
     if (!notification || notification.identity !== identity) {
       notification = { identity, notified: false };
@@ -941,6 +942,10 @@ function main(argsOverride, opts = {}) {
       writeErr(`worker-supervisor: PR #${pr} の Review Manager 判定不能通知に失敗: ${notifyError.message}`);
     }
   };
+
+  // The existing stoppedNotified cursor remains the durable source of truth. Keep only
+  // generations whose notification was delivered but whose cursor could not be saved.
+  const stoppedReviewManagerNotificationsAwaitingCursor = new Map();
 
   const resolveReviewManagerOwner = (manager) => {
     if (manager.issue !== null && manager.issue !== undefined) {
@@ -1031,9 +1036,19 @@ function main(argsOverride, opts = {}) {
     try {
       prEntries = fs.readdirSync(prRoot, { withFileTypes: true });
     } catch (error) {
-      if (error.code === 'ENOENT') return;
+      if (error.code === 'ENOENT') {
+        unknownReviewManagerNotifications.clear();
+        return;
+      }
       reportUnknownReviewManager({ pr: 'unknown', reason: `records/pr を走査できません: ${error.message}` });
       return;
+    }
+
+    const visiblePrs = new Set(prEntries
+      .filter((entry) => entry.isDirectory() && /^[1-9]\d*$/.test(entry.name))
+      .map((entry) => entry.name));
+    for (const key of unknownReviewManagerNotifications.keys()) {
+      if (key === 'unknown' || !visiblePrs.has(key)) unknownReviewManagerNotifications.delete(key);
     }
 
     for (const entry of prEntries) {
@@ -1063,32 +1078,69 @@ function main(argsOverride, opts = {}) {
         reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: manager.error?.message || `状態が不正です: ${manager.status}` });
         continue;
       }
-      unknownReviewManagerNotifications.delete(pr);
 
-      let hasResult;
+      // manager.running may become stale before the shim has finished its exit hook.
+      // The existing manager.starting record is owned by that shim and remains live
+      // until the hook has posted (or failed to post) its abnormal-exit notification.
+      let startup;
       try {
-        const resultPath = reviewArtifactPath(workspace, pr, '.json');
-        const incompletePath = reviewArtifactPath(workspace, pr, '.incomplete');
-        const exists = (filePath) => {
-          try {
-            fs.statSync(filePath);
-            return true;
-          } catch (error) {
-            if (error.code === 'ENOENT') return false;
-            throw error;
-          }
-        };
-        hasResult = exists(resultPath) || exists(incompletePath);
+        startup = inspectRunningReviewManager(reviewManagerStartingPath(runningPath), {
+          pr, cleanupStale: false, onError: 'throw',
+        });
       } catch (error) {
-        reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: `レビュー成果物を確認できません: ${error.message}` });
+        reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: `終了フックの完了状態を確認できません: ${error.message}` });
         continue;
       }
-      if (hasResult) continue;
+      if (startup.status === 'live') continue;
+      if (startup.status !== 'missing' && startup.status !== 'stale') {
+        reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: `終了フックの完了状態が不明です: ${startup.error?.message || startup.status}` });
+        continue;
+      }
+
+      let generation;
+      try {
+        generation = readReviewManagerGeneration(workspace, pr);
+      } catch (error) {
+        reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: error.message });
+        continue;
+      }
+
+      const currentGeneration = generation && generation.startTime === manager.startTime;
+      if (currentGeneration && generation.state === 'complete') {
+        const resultPath = reviewArtifactPath(workspace, pr, '.json');
+        try {
+          const resultStat = fs.statSync(resultPath);
+          if (!resultStat.isFile()) throw new Error('manager.jsonが通常ファイルではありません');
+          unknownReviewManagerNotifications.delete(pr);
+          continue;
+        } catch (error) {
+          if (error.code !== 'ENOENT') {
+            reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: `レビュー成果物を確認できません: ${error.message}` });
+            continue;
+          }
+          reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: '世代記録は完了を示していますがmanager.jsonがありません' });
+          continue;
+        }
+      }
+      if (currentGeneration && generation.state === 'incomplete') {
+        unknownReviewManagerNotifications.delete(pr);
+        continue;
+      }
 
       const owner = resolveReviewManagerOwner(manager);
       if (owner.error) {
         reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, reason: owner.error });
         continue;
+      }
+
+      const stopGeneration = `${manager.pid}:${owner.startTime ?? 'unknown'}`;
+      const pendingCursorGeneration = stoppedReviewManagerNotificationsAwaitingCursor.get(owner.workerName);
+      if (pendingCursorGeneration === stopGeneration) {
+        unknownReviewManagerNotifications.delete(pr);
+        continue;
+      }
+      if (pendingCursorGeneration && pendingCursorGeneration !== stopGeneration) {
+        stoppedReviewManagerNotificationsAwaitingCursor.delete(owner.workerName);
       }
 
       let cursor;
@@ -1100,7 +1152,10 @@ function main(argsOverride, opts = {}) {
       }
       const alreadyNotified = cursor.stoppedNotifiedPid === manager.pid
         && cursor.stoppedNotifiedStartTime === (owner.startTime ?? null);
-      if (alreadyNotified) continue;
+      if (alreadyNotified) {
+        unknownReviewManagerNotifications.delete(pr);
+        continue;
+      }
 
       const abnormalExit = findAbnormalExitNotification(owner);
       if (abnormalExit.status === 'unknown') {
@@ -1111,9 +1166,18 @@ function main(argsOverride, opts = {}) {
         cursor.stoppedNotifiedPid = manager.pid;
         cursor.stoppedNotifiedStartTime = owner.startTime ?? null;
         cursor.stoppedNotifiedAt = new Date().toISOString();
-        persistCursor(owner.workerName, owner.issue, cursor);
+        const persisted = persistCursor(owner.workerName, owner.issue, cursor);
+        if (!persisted) {
+          stoppedReviewManagerNotificationsAwaitingCursor.set(owner.workerName, stopGeneration);
+          writeErr(`worker-supervisor: PR #${pr} の異常終了通知は確認済みですがカーソル保存に失敗しました。プロセス内でこの世代を通知済みに保持します`);
+        }
+        unknownReviewManagerNotifications.delete(pr);
         continue;
       }
+
+      // All state, cursor, and GitHub checks succeeded. A prior unknown-state notice
+      // can now be cleared before attempting the actionable stop notification.
+      unknownReviewManagerNotifications.delete(pr);
 
       const body = `⚠️ PR #${pr} の Review Manager（PID ${manager.pid}）が停止しています。レビュー結果（manager.json）がなく、終了フックの異常終了通知も確認できませんでした。Review Manager の再起動はしていません。`;
       let notified = false;
@@ -1130,7 +1194,11 @@ function main(argsOverride, opts = {}) {
         cursor.stoppedNotifiedPid = manager.pid;
         cursor.stoppedNotifiedStartTime = owner.startTime ?? null;
         cursor.stoppedNotifiedAt = new Date().toISOString();
-        persistCursor(owner.workerName, owner.issue, cursor);
+        const persisted = persistCursor(owner.workerName, owner.issue, cursor);
+        if (!persisted) {
+          stoppedReviewManagerNotificationsAwaitingCursor.set(owner.workerName, stopGeneration);
+          writeErr(`worker-supervisor: PR #${pr} の停止通知は届きましたがカーソル保存に失敗しました。プロセス内でこの世代を通知済みに保持します`);
+        }
         writeOut(`REVIEW_MANAGER_STOP_DETECTED:${pr}:${manager.pid}`);
       }
     }
