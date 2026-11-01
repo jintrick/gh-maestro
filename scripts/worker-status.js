@@ -1232,6 +1232,20 @@ function main(argv = process.argv.slice(2)) {
   return { code: 0, lines: out, errLines: err };
 }
 
+// 1フレームを出力先の高さ（rows）に収める。ペインより高いフレームは、あふれた上側の行が
+// スクロールバックへ押し出されるため、ヘッダー側を残して末尾を切り詰める。切り詰めたことは
+// 最後の行に省略件数を出して示す（黙って落とさない）。rows が数値でないとき（非TTY等）は切り詰めない。
+// 折り返しによる押し出しを避けるため、rows より1行少ない行数を上限とする。
+function fitFrameToRows(lines, rows) {
+  if (!Number.isInteger(rows) || rows <= 0) return lines;
+  const budget = rows - 1;
+  if (lines.length <= budget) return lines;
+  const omitIndicator = (count) => `…（ほか ${count} 行を省略）`;
+  if (budget < 2) return [omitIndicator(lines.length)];
+  const kept = lines.slice(0, budget - 1);
+  return [...kept, omitIndicator(lines.length - kept.length)];
+}
+
 function runWatchLoop(workspace, interval, opts = {}) {
   const intervalMs = interval * 1000;
   const outStream = opts.stdout || process.stdout;
@@ -1260,7 +1274,7 @@ function runWatchLoop(workspace, interval, opts = {}) {
           : Boolean(outStream.isTTY && process.env.NO_COLOR !== '1'),
       });
       outStream.write('\x1b[2J\x1b[H');
-      for (const line of lines) {
+      for (const line of fitFrameToRows(lines, outStream.rows)) {
         outStream.write(line + '\n');
       }
     } catch (e) {
@@ -1268,10 +1282,14 @@ function runWatchLoop(workspace, interval, opts = {}) {
     }
   };
 
+  // 代替画面に入る。代替画面はスクロールバックを持たないため、更新を重ねても見出しが蓄積しない。
+  // 終了時に必ず戻す（戻さないとペインが代替画面のまま残る）。
+  outStream.write('\x1b[?1049h');
   render();
   const timer = setIntervalFn(render, intervalMs);
   const handleSignal = () => {
     clearIntervalFn(timer);
+    outStream.write('\x1b[?1049l');
     exitFn(0);
   };
   onSignalFn('SIGINT', handleSignal);

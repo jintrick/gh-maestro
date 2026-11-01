@@ -962,6 +962,147 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
   }
 });
 
+// watch の描画を注入ストリームで走らせ、出力とイベント順序を記録する。
+// 描画そのもの（collect / render）はモックしない。注入するのは出力先・タイマー・シグナル・exit だけ。
+function runWatchForTest(workspace, { rows } = {}) {
+  const chunks = [];
+  const events = [];
+  const stdout = {
+    write: (chunk) => {
+      chunks.push(chunk);
+      events.push(['write', chunk]);
+    },
+  };
+  if (rows !== undefined) stdout.rows = rows;
+  let timerCallback = null;
+  const signalHandlers = {};
+  const run = workerStatus.runWatchLoop(workspace, 2, {
+    stdout,
+    stderr: { write: () => {} },
+    setIntervalFn: (cb) => { timerCallback = cb; return 1; },
+    clearIntervalFn: () => {},
+    onSignalFn: (sig, handler) => { signalHandlers[sig] = handler; },
+    exitFn: (code) => { events.push(['exit', code]); },
+  });
+  return { run, chunks, events, signalHandlers, timerCallback: () => timerCallback() };
+}
+
+// 画面消去（\x1b[2J\x1b[H）以降の1フレームを行の配列として取り出す。
+function frameLinesOf(chunks) {
+  const text = chunks.join('');
+  const marker = '\x1b[2J\x1b[H';
+  const at = text.lastIndexOf(marker);
+  assert.notEqual(at, -1, '画面消去を伴うフレームが出力されている');
+  const parts = text.slice(at + marker.length).split('\n');
+  parts.pop();
+  return parts;
+}
+
+function writeManyWorkers(workspace, count) {
+  const workers = {};
+  for (let i = 0; i < count; i++) {
+    workers[`worker-${String(i).padStart(2, '0')}`] = { pid: 1000 + i, startTime: DEFAULT_TEST_START_TIME };
+  }
+  writeWorkers(workspace, workers);
+}
+
+test('runWatchLoop: 代替画面へ入ってから描画し、SIGINT/SIGTERM では通常画面へ戻してから exit する', () => {
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    const workspace = createWorkspace();
+    try {
+      writeWorkers(workspace, { 'worker-a': { pid: 111, startTime: DEFAULT_TEST_START_TIME } });
+      const { chunks, events, signalHandlers } = runWatchForTest(workspace);
+      assert.equal(chunks[0], '\x1b[?1049h', `${sig}: 初回描画より前に代替画面へ入る`);
+
+      signalHandlers[sig]();
+      const exitIndex = events.findIndex(([kind]) => kind === 'exit');
+      const leaveIndex = events.findIndex(([kind, value]) => kind === 'write' && value === '\x1b[?1049l');
+      assert.notEqual(leaveIndex, -1, `${sig}: 終了時に通常画面へ戻す`);
+      assert.notEqual(exitIndex, -1, `${sig}: exit が呼ばれる`);
+      assert.ok(leaveIndex < exitIndex, `${sig}: exit より前に通常画面へ戻す`);
+      assert.deepEqual(events[exitIndex], ['exit', 0]);
+    } finally {
+      removeWorkspace(workspace);
+    }
+  }
+});
+
+test('runWatchLoop: rows を超えるフレームは先頭を残して切り詰め、省略件数を末尾に示す', () => {
+  const workspace = createWorkspace();
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  try {
+    writeManyWorkers(workspace, 20);
+    const full = frameLinesOf(runWatchForTest(workspace).chunks);
+    const rows = 4;
+    const fit = frameLinesOf(runWatchForTest(workspace, { rows }).chunks);
+
+    assert.ok(full.length > rows - 1, 'fixture: 切り詰めが必要な高さになっている');
+    assert.ok(fit.length <= rows - 1, `行数が rows - 1 以下（実際: ${fit.length}）`);
+    assert.deepEqual(
+      fit.slice(0, fit.length - 1),
+      full.slice(0, fit.length - 1),
+      '先頭（ヘッダー側）の行を残す',
+    );
+    const omitted = full.length - (fit.length - 1);
+    const digits = fit[fit.length - 1].match(/\d+/g) || [];
+    assert.ok(digits.includes(String(omitted)), `末尾に省略件数 ${omitted} を示す`);
+  } finally {
+    workerStatus._setNow(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('runWatchLoop: フレームがちょうど rows - 1 行に収まるときは切り詰めず、省略表示も出さない', () => {
+  const workspace = createWorkspace();
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  try {
+    writeManyWorkers(workspace, 20);
+    const full = frameLinesOf(runWatchForTest(workspace).chunks);
+    const fit = frameLinesOf(runWatchForTest(workspace, { rows: full.length + 1 }).chunks);
+    assert.deepEqual(fit, full, 'rows - 1 行にちょうど収まる境界では全行を出す');
+  } finally {
+    workerStatus._setNow(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('runWatchLoop: rows が取れない出力先では切り詰めず、大きい rows のときと同じ行を出す', () => {
+  const workspace = createWorkspace();
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  try {
+    writeManyWorkers(workspace, 20);
+    const noRows = frameLinesOf(runWatchForTest(workspace).chunks);
+    const roomy = frameLinesOf(runWatchForTest(workspace, { rows: 1000 }).chunks);
+    assert.deepEqual(noRows, roomy, 'rows 不明のときは切り詰めない');
+    assert.ok(!noRows.some((line) => line.includes('省略')), '省略表示を出さない');
+  } finally {
+    workerStatus._setNow(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('runWatchLoop: rows が極端に小さいときも、行数を rows 以下に保ち省略表示を1行だけ出す', () => {
+  const workspace = createWorkspace();
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  try {
+    writeManyWorkers(workspace, 20);
+    const full = frameLinesOf(runWatchForTest(workspace).chunks);
+    for (const rows of [1, 2]) {
+      const fit = frameLinesOf(runWatchForTest(workspace, { rows }).chunks);
+      assert.equal(fit.length, 1, `rows=${rows}: 省略表示の1行だけを出す`);
+      const digits = fit[0].match(/\d+/g) || [];
+      assert.ok(digits.includes(String(full.length)), `rows=${rows}: 省略件数 ${full.length} を示す`);
+    }
+  } finally {
+    workerStatus._setNow(null);
+    removeWorkspace(workspace);
+  }
+});
+
 test('collectWorkersStatus: 各観測でOS resourceを確認し、消失したworkerを停止表示する', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-start-cache-');
   const originalStartTime = '2026-08-26T11:55:00.000Z';
