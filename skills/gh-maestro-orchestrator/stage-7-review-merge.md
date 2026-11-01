@@ -9,7 +9,7 @@ signals:
 
 <!-- gh-maestro-structure: middle-items=6 -->
 
-入口: 通常経路のPR_DETECTEDを受けたとき（軽量PRはlightweight-pr.mdに従う）。待つもの: Review Manager、テスト、CI、レビューコメント、PR状態の通知と、指摘への番号指定・マージ判断という人間の判断。次: PR_MERGEDを受けて工程8。
+入口: 通常経路のPR_DETECTEDを受けたとき（軽量PRはlightweight-pr.mdに従う）。待つもの: Review Manager、テスト、CI、レビューコメント、PR状態の通知と、指摘への推奨の承認または変更・マージ判断という人間の判断。次: PR_MERGEDを受けて工程8。
 
 中項目番号は、人間に判断や対応を求める発言で名乗る。7-[1/6]は内部監視であり、監視中の状況だけを通知しない。7-[1/6]の結果のうちマージ判断に必要なものは、7-[5/6]にまとめて示す。
 
