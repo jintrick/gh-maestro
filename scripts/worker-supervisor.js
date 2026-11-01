@@ -498,8 +498,11 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
     };
   }
 
+  // 登録（workers.json）と開始の記録に同じ時刻を使う。別々に採ると数ミリ秒ずれ、
+  // 停止の記録と対応付かなくなる（Issue #692）。
+  const resumedAt = new Date().toISOString();
   try {
-    const updated = updateWorkerProcess(workspace, workerName, launched);
+    const updated = updateWorkerProcess(workspace, workerName, { ...launched, startedAt: resumedAt });
     if (!updated) {
       // updateWorkerProcess の false はエントリ不在のみ（破損は throw でここに来ない）。
       return { success: false, method: 'resume-failed', error: `workers.json に worker "${workerName}" のエントリがありません` };
@@ -526,7 +529,7 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
         skill,
         agentId,
         pid: launched.pid,
-        startTime: new Date().toISOString(),
+        startTime: resumedAt,
       });
     } catch { /* best-effort */ }
   }

@@ -800,6 +800,47 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     });
   });
 
+  test('tryResumeAndDeliver: 登録（workers.json）と開始の記録は同じ startTime（停止記録と対応付くため）', () => {
+    // new Date() を呼ぶたびに1ms進む決定的な時計に差し替える。登録と記録の時刻を別々に採る
+    // 回帰では2つの値がずれ、このテストが失敗する（実時計だと同一ミリ秒で偶然一致しうる）。
+    const RealDate = Date;
+    let tick = 0;
+    const base = RealDate.parse('2026-09-10T00:00:00.000Z');
+    globalThis.Date = class extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(base + (tick++));
+        else super(...args);
+      }
+    };
+    const recorded = [];
+    supervisor._setRecordCycleEvent((workspace, issue, event, details) => {
+      recorded.push({ issue, event, details });
+      return { ok: true };
+    });
+    try {
+      withTempDir((dir) => {
+        setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
+        resetHeadlessLaunchMocks({ pid: 77 });
+        setWorkerAlive(() => true);
+
+        const result = supervisor.tryResumeAndDeliver({
+          workerName: 'issue-7-fix', agentId: 'agy',
+          message: { from: 'orch', body: '新着' }, workspace: dir, homedir: '/home',
+        });
+        assert.equal(result.success, true);
+
+        const startedEvents = recorded.filter(item => item.event === 'worker-started');
+        assert.equal(startedEvents.length, 1);
+        const registeredStart = readWorkersRaw(dir)['issue-7-fix'].startTime;
+        assert.notEqual(registeredStart, 'old');
+        assert.equal(startedEvents[0].details.startTime, registeredStart);
+      });
+    } finally {
+      globalThis.Date = RealDate;
+      supervisor._setRecordCycleEvent(null);
+    }
+  });
+
   test('tryResumeAndDeliver: ワーカーのログは1ファイルに追記され、代理送信用のオフセットが終了フックへ渡る', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });

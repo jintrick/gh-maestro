@@ -207,11 +207,25 @@ function samePid(left, right) {
   return left != null && right != null && Number(left) === Number(right);
 }
 
-function sameStartTime(left, right) {
-  if (!left || !right) return true;
+// 開始時刻の許容差。resume では「開始の記録」と「workers.json の startTime」が
+// 別々に new Date() で採られ、1〜3ms ずれていた（Issue #692）。同一の実行を指す
+// 2つの時刻はこの範囲に収まる。PID 再利用による別 run を誤結合しないよう、
+// 秒単位の差は別 run として扱う。
+const START_TIME_TOLERANCE_MS = 1000;
+
+/**
+ * 2つの開始時刻が同じ実行を指すか。どちらかが読めなければ false。
+ * 欠落を許すかどうかは呼び出し側が決める。
+ */
+function sameStartInstant(left, right) {
   const a = timestampMs(left);
   const b = timestampMs(right);
-  return a !== null && b !== null && a === b;
+  return a !== null && b !== null && Math.abs(a - b) <= START_TIME_TOLERANCE_MS;
+}
+
+function sameStartTime(left, right) {
+  if (!left || !right) return true;
+  return sameStartInstant(left, right);
 }
 
 function stopHasIdentity(stop) {
@@ -230,6 +244,11 @@ function stopMatches(start, stop) {
   return startMs !== null && stopMs !== null && stopMs >= startMs;
 }
 
+// 停止記録のない run の扱い（Issue #692）:
+// - 同じワーカーに後続の run がある → その run は終わっているはずなので、停止の記録が
+//   無ければ不明（null）。推測で現在時刻まで計測しない。
+// - そのワーカーの最後の run → 本当に稼働中でありうるため、now までの経過を出す。
+//   稼働中かどうかの最終判定は worker-status の mergeCycleWorkers が現在のレジストリで行う。
 function workerProjection(events, now = Date.now()) {
   const normalized = Array.isArray(events) ? events.filter(Boolean) : [];
   const starts = normalized
@@ -290,8 +309,13 @@ function workerProjection(events, now = Date.now()) {
 
     const startedAt = start.startTime || start.at;
     const endedAt = stop ? stop.at : null;
-    const startMs = timestampMs(startedAt);
-    const endMs = stop ? timestampMs(endedAt) : nowMs;
+    // 経過は開始と停止の記録時刻（同じ記録の時計）から測る。startTime は登録時刻で、
+    // 数ミリ秒ずれうる。ずれを floor で切ると1秒欠けるため、記録時刻を使う（Issue #692）。
+    const startMs = timestampMs(start.at);
+    const hasLaterRunOfSameWorker = starts.some((other, otherIndex) => (
+      otherIndex > startIndex && (other.workerName || '') === (start.workerName || '')
+    ));
+    const endMs = stop ? timestampMs(endedAt) : (hasLaterRunOfSameWorker ? null : nowMs);
     const elapsedSeconds = startMs !== null && endMs !== null && endMs >= startMs
       ? Math.floor((endMs - startMs) / 1000)
       : null;
@@ -321,10 +345,9 @@ function workerProjection(events, now = Date.now()) {
 
 function projectCycleMetrics(events, opts = {}) {
   const issue = opts.issue == null ? null : assertIssue(opts.issue);
-  const now = opts.now == null ? Date.now() : opts.now;
   const normalized = Array.isArray(events) ? events.filter(Boolean) : [];
   const interval = intervalProjection(normalized);
-  const workers = workerProjection(normalized, now);
+  const workers = workerProjection(normalized, opts.now == null ? Date.now() : opts.now);
   const prEvent = firstEvent(normalized, 'pr-created');
   return {
     issue,
@@ -348,6 +371,7 @@ module.exports = {
   parseEventLine,
   readCycleEvents,
   intervalProjection,
+  sameStartInstant,
   workerProjection,
   projectCycleMetrics,
 };

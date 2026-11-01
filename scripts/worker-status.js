@@ -24,6 +24,7 @@ const {
   INTERVALS,
   readCycleEvents,
   projectCycleMetrics,
+  sameStartInstant,
 } = require('./shared/cycle-metrics');
 
 const CLI_USAGE = `worker-status.js — ワーカーの稼働状況・連続稼働時間の確認
@@ -242,6 +243,9 @@ function stripWorkerNamePrefix(workerName) {
  * @param {number} seconds
  * @returns {string}
  */
+// 停止記録が無く経過時間を確定できない run の表示。0 や「-」（欠損）と区別する。
+const UNKNOWN_DURATION_LABEL = '??:??';
+
 function formatDuration(seconds) {
   const s = Math.max(0, Math.floor(seconds));
   const hours = Math.floor(s / 3600);
@@ -648,7 +652,7 @@ function workerRunMatches(left, right) {
       || Number(left.pid) !== Number(right.pid)) return false;
     return true;
   }
-  if (left.startTime && right.startTime && left.startTime !== right.startTime) return false;
+  if (left.startTime && right.startTime && !sameStartInstant(left.startTime, right.startTime)) return false;
   return true;
 }
 
@@ -698,7 +702,7 @@ function mergeCycleWorkers(projectedWorkers, currentWorkers) {
         && item.worker.pid != null && current.pid != null
         && Number(item.worker.pid) === Number(current.pid)
         && item.worker.startTime && current.startTime
-        && item.worker.startTime === current.startTime
+        && sameStartInstant(item.worker.startTime, current.startTime)
       ));
       currentRun = exact || runs.slice().reverse().find(item => workerRunMatches(item.worker, current)) || null;
     }
@@ -716,6 +720,13 @@ function mergeCycleWorkers(projectedWorkers, currentWorkers) {
     for (const run of runs) {
       let elapsed = run.worker.elapsedSeconds;
       let durationKnown = workerDurationKnown(run.worker);
+
+      // 現在のレジストリに対応しない未停止runは、稼働中かどうか確かめられない。
+      // 古いrunを現在時刻まで数えて合計を過大にしないため、不明にする（Issue #692）。
+      if (run !== currentRun && run.worker.running && !run.worker.stopTime) {
+        elapsed = null;
+        durationKnown = false;
+      }
 
       if (run === currentRun && current) {
         if (workerDurationKnown(current)) {
@@ -799,8 +810,9 @@ function renderWorkerRows(workers, opts = {}) {
     const runSuffix = Number.isInteger(runNumber) && runNumber > 1 ? ` x${runNumber}` : '';
     const dots = Array.from({ length: DOT_COUNT }, () => dot).join(' ');
     const agent = worker.agentId ? String(worker.agentId) : '-';
+    // 時間が分からないときは推測値も「-」（停止・欠損と同じ）にせず、不明だと分かる記号を出す。
     const elapsed = worker.elapsedSeconds == null || !workerDurationKnown(worker)
-      ? '-'
+      ? UNKNOWN_DURATION_LABEL
       : formatDuration(worker.elapsedSeconds);
     const pid = worker.pid == null ? '-' : String(worker.pid);
     const row = {

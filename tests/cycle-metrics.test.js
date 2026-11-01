@@ -111,7 +111,8 @@ test('workerProjection: 識別情報のない停止は同名runの直近未停�
   const workers = metrics.workerProjection(events, Date.parse('2026-09-05T00:20:00Z'));
   assert.equal(workers.length, 2);
   assert.deepEqual(workers.map(worker => ({ pid: worker.pid, running: worker.running, elapsedSeconds: worker.elapsedSeconds })), [
-    { pid: 10, running: true, elapsedSeconds: 1200 },
+    // 停止記録のない過去runは、現在時刻から推測せず不明（null）にする（Issue #692）。
+    { pid: 10, running: true, elapsedSeconds: null },
     { pid: 11, running: false, elapsedSeconds: 300 },
   ]);
 });
@@ -129,4 +130,67 @@ test('recordCycleEvent: 書き込み失敗は呼び出し元へ投げず引数�
   assert.equal(result.ok, false);
   assert.deepEqual(calls, [{ workspace: 'C:/workspace', issue: 450 }]);
   assert.match(result.error.message, /disk full/);
+});
+
+
+// ── Issue #692: resume を経た実イベント形と、経過時間の推測禁止 ──────────────
+
+test('workerProjection: resume の開始と停止で startTime が3ms ずれていても停止が対応付く', () => {
+  // 開始の記録は workers.json と別の時刻で採られ、数ミリ秒ずれる（実際の resume の形）。
+  const events = [
+    { schemaVersion: 1, issue: 692, event: 'worker-started', at: '2026-09-10T00:00:00.000Z', workerName: 'issue-692-coder-x', role: 'coder', agentId: 'agy', pid: 10, startTime: '2026-09-10T00:00:00.000Z' },
+    { schemaVersion: 1, issue: 692, event: 'worker-stopped', at: '2026-09-10T00:10:00.000Z', workerName: 'issue-692-coder-x', pid: 10, startTime: '2026-09-10T00:00:00.003Z', exitCode: 0, abnormal: false },
+  ];
+  const workers = metrics.workerProjection(events);
+  assert.equal(workers.length, 1);
+  assert.equal(workers[0].running, false);
+  // 期待値は停止の at − 開始の at から手で導く（600秒）。
+  assert.equal(workers[0].elapsedSeconds, 600);
+});
+
+test('workerProjection: 停止記録のない過去runの経過時間は現在時刻から推測せず null にする', () => {
+  const events = [
+    { schemaVersion: 1, issue: 692, event: 'worker-started', at: '2026-09-10T00:00:00Z', workerName: 'issue-692-coder', role: 'coder', agentId: 'agy', pid: 10, startTime: '2026-09-10T00:00:00Z' },
+    { schemaVersion: 1, issue: 692, event: 'worker-started', at: '2026-09-10T00:05:00Z', workerName: 'issue-692-coder', role: 'coder', agentId: 'agy', pid: 11, startTime: '2026-09-10T00:05:00Z' },
+    { schemaVersion: 1, issue: 692, event: 'worker-stopped', at: '2026-09-10T00:10:00Z', workerName: 'issue-692-coder', pid: 11, startTime: '2026-09-10T00:05:00Z', exitCode: 0, abnormal: false },
+  ];
+  const workers = metrics.workerProjection(events);
+  // pid 10 は停止記録が無いが、後続のrunがあるので終わっている。時刻を変えても値は変わらず不明（null）。
+  assert.deepEqual(workers.map(worker => ({ pid: worker.pid, running: worker.running, elapsedSeconds: worker.elapsedSeconds })), [
+    { pid: 10, running: true, elapsedSeconds: null },
+    { pid: 11, running: false, elapsedSeconds: 300 },
+  ]);
+});
+
+test('workerProjection: 同じワーカーの最後の未停止runだけは now までの経過を出す（後続のrunがあれば不明）', () => {
+  // 期待値は手で書いた時刻から導く。pid 10 は後続のrun（pid 11）があるので不明、
+  // pid 11 は最後のrunで、now（00:10:00）まで 300 秒。
+  const events = [
+    { schemaVersion: 1, issue: 692, event: 'worker-started', at: '2026-09-10T00:00:00Z', workerName: 'issue-692-coder-last', role: 'coder', agentId: 'agy', pid: 10, startTime: '2026-09-10T00:00:00Z' },
+    { schemaVersion: 1, issue: 692, event: 'worker-started', at: '2026-09-10T00:05:00Z', workerName: 'issue-692-coder-last', role: 'coder', agentId: 'agy', pid: 11, startTime: '2026-09-10T00:05:00Z' },
+  ];
+  const workers = metrics.workerProjection(events, Date.parse('2026-09-10T00:10:00Z'));
+  assert.deepEqual(workers.map(worker => ({ pid: worker.pid, elapsedSeconds: worker.elapsedSeconds })), [
+    { pid: 10, elapsedSeconds: null },
+    { pid: 11, elapsedSeconds: 300 },
+  ]);
+});
+
+test('sameStartInstant: 許容差（1秒）以内は同じ実行、超える差は別の実行', () => {
+  assert.equal(metrics.sameStartInstant('2026-09-10T00:00:00.000Z', '2026-09-10T00:00:00.003Z'), true);
+  assert.equal(metrics.sameStartInstant('2026-09-10T00:00:00.000Z', '2026-09-10T00:00:01.000Z'), true);
+  assert.equal(metrics.sameStartInstant('2026-09-10T00:00:00.000Z', '2026-09-10T00:00:01.001Z'), false);
+  // 読めない時刻は同じと判定しない（欠落の扱いは呼び出し側が決める）。
+  assert.equal(metrics.sameStartInstant('2026-09-10T00:00:00.000Z', 'not-a-date'), false);
+});
+
+test('workerProjection: 許容差を超えて開始時刻が違う停止は対応付けず、元のrunを止めない', () => {
+  const events = [
+    { schemaVersion: 1, issue: 692, event: 'worker-started', at: '2026-09-10T00:00:00Z', workerName: 'issue-692-coder', role: 'coder', agentId: 'agy', pid: 10, startTime: '2026-09-10T00:00:00Z' },
+    { schemaVersion: 1, issue: 692, event: 'worker-stopped', at: '2026-09-10T00:10:00Z', workerName: 'issue-692-coder', pid: 10, startTime: '2026-09-10T00:00:05Z', exitCode: 0, abnormal: false },
+  ];
+  // 元のrunはこのワーカーの最後のrunなので、now（00:10:00）までの経過になる。
+  const workers = metrics.workerProjection(events, Date.parse('2026-09-10T00:10:00Z'));
+  assert.equal(workers[0].running, true);
+  assert.equal(workers[0].elapsedSeconds, 600);
 });
