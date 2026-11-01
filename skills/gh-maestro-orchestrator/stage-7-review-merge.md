@@ -11,11 +11,11 @@ signals:
 
 入口: 通常経路のPR_DETECTEDを受けたとき（軽量PRはlightweight-pr.mdに従う）。待つもの: Review Manager、テスト、CI、レビューコメント、PR状態の通知と、指摘への番号指定・マージ判断という人間の判断。次: PR_MERGEDを受けて工程8。
 
-中項目の番号は、人間に名乗る場面に振る。7-[1/6]の監視はorchestratorの内部作業で、人間に声をかけるのは監視中の事象を伝えるとき、7-[2/6]〜7-[6/6]の場面である。7-[1/6]を済ませたことは、7-[5/6]の提示に監視の結果を載せることで示す。
+中項目番号は、人間に判断や対応を求める発言で名乗る。7-[1/6]は内部監視であり、監視中の状況だけを通知しない。7-[1/6]の結果のうちマージ判断に必要なものは、7-[5/6]にまとめて示す。
 
 #### 7-[1/6] PR検出とレビュー監視【必須】
 
-PR検出後、plugin monitorから届くレビュー・テスト・CI・PR状態の通知を処理する。新しいMonitorやポーリングプロセスをここで起動してはならない。通知名ごとの一次対応は「イベントの受け口」に集約する。監視中の事象（ベースブランチ違い、GitHub accessの劣化、PRのクローズなど）を人間へ伝えるときは `工程7-[1/6]` と名乗る。
+PR検出後、plugin monitorから届くレビュー・テスト・CI・PR状態の通知を処理する。新しいMonitorやポーリングプロセスをここで起動してはならない。通知名ごとの一次対応は「イベントの受け口」に集約する。監視中の事象は記録し、対応する復旧手順へ進む。人間の判断が必要な場合だけ、その判断に要る状況を添えて尋ねる。マージ判断に関わる未解決事項は7-[5/6]で提示する。
 
 `poll-pr.js`はレビュー観点を一切選ばない。通常経路ではPR検出時にReview Managerを全観点で起動する。軽量PR（`--no-review-manager` と `--no-review-events` の併用）では起動しない。**観点を絞り込むかどうかの判断はorchestratorの責務ではなく、Review Manager自身が実際のPR diffを見た上で行う**（詳細は`skills/gh-maestro-reviewer/SKILL.md`参照）。
 
@@ -29,30 +29,30 @@ node "{{SCRIPTS_PATH}}/poll-pr-monitor.js" --plugin-monitor --workspace "$WORKSP
 
 Review Managerの完了、通常経路のslow層結果、GitHub checks、テスト申告を利用可能なHEADと照合する。通知が揃わない場合は受け取った事実を保持し、自動再実行・自動診断を行わない。必要な結果を確認するまでコーダーのrollbackやworktree削除へ進まない。軽量PRではslow層とGitHub checksを待たない。
 
-レビュー指摘が届いたら7-[3/6]、findingsが0件なら7-[3/6]を理由付きでスキップする。転送済みBLOCKER/MAJORの修正pushがあれば7-[4/6]を完了してから7-[5/6]へ進む。PRが閉じられた場合は通知表に従い、監視が新しいPR検出へ戻ったことを確認してPR_DETECTEDを待つ。起動シグナルの欠落やReview Managerのクラッシュは7-[2/6]で扱う。
+レビュー指摘が届いたら7-[3/6]、findingsが0件なら7-[3/6]をスキップする。転送済みBLOCKER/MAJORの修正pushがあれば7-[4/6]を完了してから7-[5/6]へ進む。PRが閉じられた場合は通知表に従い、監視が新しいPR検出へ戻ったことを確認してPR_DETECTEDを待つ。起動シグナルの欠落やReview Managerのクラッシュは7-[2/6]で扱う。
 
 #### 7-[2/6] PR監視・Review Managerの再起動【任意】
 
-plugin monitorまたはその子 `poll-pr.js` が落ちた場合の確認・targetの再設定、Review Managerが起動しなかった／失敗した場合の再起動は、いずれも `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` の「PR監視・Review Managerの再起動」を参照する。異常を人間へ報告するときは `工程7-[2/6]` と名乗る。**再レビューが不要な場合は `activate-pr-monitor.js` に `--no-review-manager` を渡すこと**（付け忘れると検出のたびにレビューが蒸し返されquotaを浪費する）。
+plugin monitorまたはその子 `poll-pr.js` が落ちた場合の確認・targetの再設定、Review Managerが起動しなかった／失敗した場合の再起動は、いずれも `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/monitor-recovery.md` の「PR監視・Review Managerの再起動」を参照する。復旧できず人間の判断が必要な場合は、判断に要る状況を示して尋ね、`工程7-[2/6]` と名乗る。復旧済みの事実だけは報告しない。**再レビューが不要な場合は `activate-pr-monitor.js` に `--no-review-manager` を渡すこと**（付け忘れると検出のたびにレビューが蒸し返されquotaを浪費する）。
 理由と経緯: docs/adr/0046-review-manager-resume-requires-explicit-flag.md
 
 #### 7-[3/6] コメントトリアージ【任意】
 
-Review Manager の findings が1件以上あるときだけ行う。0件のPRではトリアージは発生せず、7-[5/6]の提示の冒頭で `工程7-[3/6]（任意）をスキップ：findings 0件` と名乗る。
+Review Manager の findings が1件以上あるときだけ行う。0件のPRではトリアージは発生せず、7-[5/6]の提示で `工程7-[3/6]（任意）をスキップ` とだけ名乗る。
 
 PRに新しいレビューコメントが届くたびに、orchestratorは指摘を評価するところまでを行う。`{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/triage.md` を開き、そこに従って実害度スコア／対応コストの付与・人間への提示・回答に従った実行を行う。提示は `工程7-[3/6]` と名乗り、「人間への発言の規範」に従う。**実際にコーダーに修正依頼する／無視する／保留Issueに積むという実行アクションは、観点やスコアの値に関わらず、必ず人間の明示的な決定を経てから行う。** 観点・実害度・対応コストがどうであれ、人間の確認を省略してよい経路は存在しない。同じBLOCKERが2回連続して届くスパイラルの提示もここで行う。
 
-回答に従って修正を依頼したら7-[1/6]の監視へ戻る。全指摘の処理後、該当する修正push後の事実確認があれば7-[4/6]を行い、その後7-[5/6]へ進む。該当しなければ7-[4/6]を理由付きでスキップする。
+回答に従って修正を依頼したら7-[1/6]の監視へ戻る。全指摘の処理後、該当する修正push後の事実確認があれば7-[4/6]を行い、その後7-[5/6]へ進む。該当しない場合は7-[4/6]を実行せず、7-[5/6]へ進む。
 
 #### 7-[4/6] 修正push後の事実確認【必須】
 
 転送済みBLOCKER/MAJORへの修正を含むPR_PUSHが届いたときに行う。元の指摘と修正pushのHEADを指定し、既存のexplorerへ再現条件が解消したかを事実確認させる。調査前にexplorer自身が対象PRのbranch/commitをfetchし、対象HEADをcheckoutしたことを確認する。調査結果に推測を混ぜず、対象SHA・再現手順・結果を受け取り、結果が確認できるまでその指摘を未解消として扱う。別の指摘修正pushにも同様に確認する。
 
-該当する転送済みBLOCKER/MAJORが無い場合は、工程7-[4/6]（必須項目、条件該当なし）を理由付きでスキップして7-[5/6]へ進む。
+該当する転送済みBLOCKER/MAJORが無い場合は、工程7-[4/6]を実行せず7-[5/6]へ進む。
 
 #### 7-[5/6] マージ判断の依頼【必須】
 
-`REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の条件を満たすときだけである。提示は `工程7-[5/6]` と名乗り、7-[1/6]の監視結果（Review Manager、テスト申告、CI checks）と、7-[3/6]を行ったかどうかを載せる。マージ判断の問いは「人間への発言の規範」に従う。
+`REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の条件を満たすときだけである。提示は `工程7-[5/6]` と名乗り、Review Managerのレビュー結果、テスト申告、CI checksを判断材料として示す。7-[3/6]を実施した場合はtriage結果も示し、該当する場合はPRのbase違いと結果を取得できなかった項目も示す。マージ判断の問いは「人間への発言の規範」に従う。
 
 - Review Manager 完了（`PR_REVIEW:...Posted inline findings: N` 到着 or `records/pr/<PR>/review/manager.json` 生成）
 - 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER/MAJOR は、修正 push に対する explorer の事実確認が完了するまで未解消として扱う）

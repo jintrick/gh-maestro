@@ -43,7 +43,7 @@ EOF
 
 ## 4. 素案をIssueに提示する
 
-まず構造化した素案を対象Issueへ投稿し、その後、人間には全文を再掲せず短く通知する。提案が0件でも「改善点なし」と明示した素案を提示し、人間の返答を待つ。返答前に後始末やIssueクローズへ進まない。
+まず構造化した素案を対象Issueへ投稿する。人間には全文を再掲せずIssueコメントのURLを示し、素案への意見を求める。提案が0件でも「改善点なし」と明示した素案を提示し、人間の返答を待つ。返答前に後始末やIssueクローズへ進まない。
 
 素案の形式:
 
@@ -89,7 +89,7 @@ EOF
 node "{{SCRIPTS_PATH}}/comment-issue.js" --issue <N> --repo $REPO --workspace $WORKSPACE --body-file /tmp/retro-<N>.md
 ```
 
-投稿成功後の人間向け通知は「【反省会】Issue #<N> に素案を投稿しました。ご意見をお願いします。」とする。GitHub上のIssueコメントはassistantも参照できる。
+投稿成功後は、素案の在り処であるIssueコメントのURLを人間に示し、意見を求める。GitHub上のIssueコメントはassistantも参照できる。
 
 ## 5. 人間の判断後
 
