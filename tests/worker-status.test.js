@@ -868,7 +868,13 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
   const workspace = createWorkspace();
   const stdoutChunks = [];
   const stderrChunks = [];
-  const fakeStdout = { write: (chunk) => stdoutChunks.push(chunk) };
+  // 出力の書き込みは完了を即座に通知する（端末へ渡し終えた状態）。
+  const fakeStdout = {
+    write: (chunk, callback) => {
+      stdoutChunks.push(chunk);
+      if (typeof callback === 'function') callback();
+    },
+  };
   const fakeStderr = { write: (chunk) => stderrChunks.push(chunk) };
 
   let timerCallback = null;
@@ -964,16 +970,28 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
 
 // watch の描画を注入ストリームで走らせ、出力とイベント順序を記録する。
 // 描画そのもの（collect / render）はモックしない。注入するのは出力先・タイマー・シグナル・exit だけ。
-function runWatchForTest(workspace, { rows } = {}) {
+// deferFlush: 書き込みの完了通知（callback）を呼ばず、テストが pendingFlush から任意の時点で呼ぶ。
+// 上限タイマーは timeouts に記録され、テストが任意の時点で発火させる。
+function runWatchForTest(workspace, { rows, columns, deferFlush = false } = {}) {
   const chunks = [];
   const events = [];
+  const pendingFlush = [];
+  const timeouts = [];
   const stdout = {
-    write: (chunk) => {
+    write: (chunk, callback) => {
       chunks.push(chunk);
       events.push(['write', chunk]);
+      if (typeof callback !== 'function') return;
+      const flush = () => {
+        events.push(['flushed', chunk]);
+        callback();
+      };
+      if (deferFlush) pendingFlush.push(flush);
+      else flush();
     },
   };
   if (rows !== undefined) stdout.rows = rows;
+  if (columns !== undefined) stdout.columns = columns;
   let timerCallback = null;
   const signalHandlers = {};
   const run = workerStatus.runWatchLoop(workspace, 2, {
@@ -983,8 +1001,28 @@ function runWatchForTest(workspace, { rows } = {}) {
     clearIntervalFn: () => {},
     onSignalFn: (sig, handler) => { signalHandlers[sig] = handler; },
     exitFn: (code) => { events.push(['exit', code]); },
+    setTimeoutFn: (cb, ms) => {
+      const timeout = { cb, ms, cleared: false };
+      timeouts.push(timeout);
+      return timeout;
+    },
+    clearTimeoutFn: (timeout) => { if (timeout) timeout.cleared = true; },
   });
-  return { run, chunks, events, signalHandlers, timerCallback: () => timerCallback() };
+  return {
+    run,
+    chunks,
+    events,
+    signalHandlers,
+    pendingFlush,
+    timeouts,
+    timerCallback: () => timerCallback(),
+  };
+}
+
+// 端末の表示幅の保守的な見積もり（ASCII は1列、それ以外は2列）。実装より大きく見積もるので、
+// これで収まれば実装の表示幅も収まる。
+function conservativeWidth(text) {
+  return Array.from(text).reduce((sum, ch) => sum + (ch.codePointAt(0) > 0x7f ? 2 : 1), 0);
 }
 
 // 画面消去（\x1b[2J\x1b[H）以降の1フレームを行の配列として取り出す。
@@ -1045,8 +1083,80 @@ test('runWatchLoop: rows を超えるフレームは先頭を残して切り詰�
       '先頭（ヘッダー側）の行を残す',
     );
     const omitted = full.length - (fit.length - 1);
-    const digits = fit[fit.length - 1].match(/\d+/g) || [];
+    const lastLine = fit[fit.length - 1];
+    const digits = lastLine.match(/\d+/g) || [];
     assert.ok(digits.includes(String(omitted)), `末尾に省略件数 ${omitted} を示す`);
+    assert.match(lastLine, /省略/, '省略したことを示す文言が最終行にある');
+  } finally {
+    workerStatus._setNow(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('runWatchLoop: 終了時、代替画面の復帰の書き込みが渡り終えるまで exit しない', () => {
+  const workspace = createWorkspace();
+  try {
+    writeWorkers(workspace, { 'worker-a': { pid: 111, startTime: DEFAULT_TEST_START_TIME } });
+    const { events, signalHandlers, pendingFlush, timeouts } = runWatchForTest(workspace, { deferFlush: true });
+    signalHandlers.SIGINT();
+    assert.equal(events.some(([kind]) => kind === 'exit'), false, '書き込み完了の前には exit しない');
+    assert.equal(pendingFlush.length, 1, '復帰の書き込みの完了を待っている');
+
+    pendingFlush[0]();
+    const exitIndex = events.findIndex(([kind]) => kind === 'exit');
+    const flushedIndex = events.findIndex(([kind, value]) => kind === 'flushed' && value === '\x1b[?1049l');
+    assert.notEqual(flushedIndex, -1, '復帰の書き込みが完了した');
+    assert.ok(flushedIndex < exitIndex, '完了の後に exit する');
+    assert.deepEqual(events[exitIndex], ['exit', 0]);
+    assert.equal(timeouts[0].cleared, true, '完了したら上限タイマーを解除する');
+  } finally {
+    removeWorkspace(workspace);
+  }
+});
+
+test('runWatchLoop: 書き込みの完了が来なくても、上限時間の後に一度だけ exit する', () => {
+  const workspace = createWorkspace();
+  try {
+    writeWorkers(workspace, { 'worker-a': { pid: 111, startTime: DEFAULT_TEST_START_TIME } });
+    const { events, signalHandlers, pendingFlush, timeouts } = runWatchForTest(workspace, { deferFlush: true });
+    signalHandlers.SIGTERM();
+    assert.equal(events.some(([kind]) => kind === 'exit'), false, '上限時間の前には exit しない');
+    assert.equal(timeouts.length, 1, '上限時間のタイマーを1つ張る');
+    assert.ok(Number.isFinite(timeouts[0].ms) && timeouts[0].ms > 0 && timeouts[0].ms <= 5000,
+      `上限時間は有限の正の値（実際: ${timeouts[0].ms}）`);
+
+    timeouts[0].cb();
+    pendingFlush[0]();
+    const exits = events.filter(([kind]) => kind === 'exit');
+    assert.deepEqual(exits, [['exit', 0]], '遅れて完了が来ても exit は一度だけ');
+  } finally {
+    removeWorkspace(workspace);
+  }
+});
+
+test('runWatchLoop: 列数が狭いときは折り返しの物理行で数え、省略表示も列数に収める', () => {
+  const workspace = createWorkspace();
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  try {
+    writeManyWorkers(workspace, 20);
+    const full = frameLinesOf(runWatchForTest(workspace).chunks);
+    const rows = 6;
+    const columns = 12;
+    const fit = frameLinesOf(runWatchForTest(workspace, { rows, columns }).chunks);
+
+    const physicalRows = fit.reduce(
+      (sum, line) => sum + Math.max(1, Math.ceil(conservativeWidth(line) / columns)),
+      0,
+    );
+    assert.ok(physicalRows <= rows - 1, `折り返し後の物理行が rows - 1 以下（実際: ${physicalRows}）`);
+
+    const lastLine = fit[fit.length - 1];
+    assert.ok(conservativeWidth(lastLine) <= columns, `省略表示が列数に収まる（幅: ${conservativeWidth(lastLine)}）`);
+    assert.match(lastLine, /省略/, '狭くても省略したことを示す');
+    const omitted = full.length - (fit.length - 1);
+    const digits = lastLine.match(/\d+/g) || [];
+    assert.ok(digits.includes(String(omitted)), `狭くても省略件数 ${omitted} を示す`);
   } finally {
     workerStatus._setNow(null);
     removeWorkspace(workspace);

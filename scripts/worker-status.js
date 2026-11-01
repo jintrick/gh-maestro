@@ -1232,18 +1232,67 @@ function main(argv = process.argv.slice(2)) {
   return { code: 0, lines: out, errLines: err };
 }
 
-// 1フレームを出力先の高さ（rows）に収める。ペインより高いフレームは、あふれた上側の行が
-// スクロールバックへ押し出されるため、ヘッダー側を残して末尾を切り詰める。切り詰めたことは
-// 最後の行に省略件数を出して示す（黙って落とさない）。rows が数値でないとき（非TTY等）は切り詰めない。
-// 折り返しによる押し出しを避けるため、rows より1行少ない行数を上限とする。
-function fitFrameToRows(lines, rows) {
+// 終了時の代替画面復帰（\x1b[?1049l）の書き込み完了を待つ上限（ミリ秒）。
+// 書き込みの完了が来なくても、この時間を過ぎたら必ず exit する（終了が止まらないようにする）。
+const RESTORE_FLUSH_TIMEOUT_MS = 1000;
+
+// 端末上の表示幅。ANSI を除き、全角（東アジアの広い文字）は2列、それ以外は1列として数える。
+// 近似: 列幅表（East Asian Width）の全体は持たず、日本語・全角記号・絵文字で使う範囲を扱う。
+function displayWidth(text) {
+  let width = 0;
+  for (const ch of Array.from(stripAnsi(text))) {
+    const cp = ch.codePointAt(0);
+    const wide = (cp >= 0x1100 && cp <= 0x115F)
+      || (cp >= 0x2E80 && cp <= 0xA4CF)
+      || (cp >= 0xAC00 && cp <= 0xD7A3)
+      || (cp >= 0xF900 && cp <= 0xFAFF)
+      || (cp >= 0xFE30 && cp <= 0xFE4F)
+      || (cp >= 0xFF00 && cp <= 0xFF60)
+      || (cp >= 0xFFE0 && cp <= 0xFFE6)
+      || (cp >= 0x1F300 && cp <= 0x1F64F)
+      || (cp >= 0x20000 && cp <= 0x3FFFD);
+    width += wide ? 2 : 1;
+  }
+  return width;
+}
+
+// 1行が端末上で占める物理行数。列数が不明なら1行とみなす。
+function physicalRowsOf(line, columns) {
+  if (!Number.isInteger(columns) || columns <= 0) return 1;
+  return Math.max(1, Math.ceil(displayWidth(line) / columns));
+}
+
+// 省略表示。列数に収まる最も詳しい書き方を選ぶ。どれも収まらないときは最も短い書き方を使う。
+function omitIndicatorFor(count, columns) {
+  const candidates = [
+    `（ほか ${count} 行を省略）`,
+    `（${count} 行省略）`,
+    `（省略 ${count}）`,
+  ];
+  if (!Number.isInteger(columns) || columns <= 0) return candidates[0];
+  return candidates.find((text) => displayWidth(text) <= columns) || candidates[candidates.length - 1];
+}
+
+// 1フレームを出力先に収める。ペインより高いフレームは、あふれた上側の行がスクロールバックへ
+// 押し出されるため、ヘッダー側を残して末尾を切り詰める。切り詰めたことは最後の行に省略件数を
+// 出して示す（黙って落とさない）。rows が数値でないとき（非TTY等）は切り詰めない。
+// 折り返しによる押し出しを避けるため、rows より1行少ない物理行数を上限とする。
+// 行数は論理行ではなく、列数で折り返した後の物理行で数える（省略表示を含む）。
+function fitFrameToRows(lines, rows, columns) {
   if (!Number.isInteger(rows) || rows <= 0) return lines;
   const budget = rows - 1;
-  if (lines.length <= budget) return lines;
-  const omitIndicator = (count) => `…（ほか ${count} 行を省略）`;
-  if (budget < 2) return [omitIndicator(lines.length)];
-  const kept = lines.slice(0, budget - 1);
-  return [...kept, omitIndicator(lines.length - kept.length)];
+  const rowsOf = (line) => physicalRowsOf(line, columns);
+  const total = lines.reduce((sum, line) => sum + rowsOf(line), 0);
+  if (total <= budget) return lines;
+  if (budget < 2) return [omitIndicatorFor(lines.length, columns)];
+  const kept = [];
+  let used = 0;
+  for (const line of lines) {
+    if (used + rowsOf(line) > budget - 1) break;
+    kept.push(line);
+    used += rowsOf(line);
+  }
+  return [...kept, omitIndicatorFor(lines.length - kept.length, columns)];
 }
 
 function runWatchLoop(workspace, interval, opts = {}) {
@@ -1252,6 +1301,8 @@ function runWatchLoop(workspace, interval, opts = {}) {
   const errStream = opts.stderr || process.stderr;
   const setIntervalFn = opts.setIntervalFn || setInterval;
   const clearIntervalFn = opts.clearIntervalFn || clearInterval;
+  const setTimeoutFn = opts.setTimeoutFn || setTimeout;
+  const clearTimeoutFn = opts.clearTimeoutFn || clearTimeout;
   const onSignalFn = opts.onSignalFn || ((sig, handler) => process.on(sig, handler));
   const exitFn = opts.exitFn || process.exit;
   const liveness = opts.liveness || _injectedLiveness || createWorkerStatusLiveness({
@@ -1274,7 +1325,7 @@ function runWatchLoop(workspace, interval, opts = {}) {
           : Boolean(outStream.isTTY && process.env.NO_COLOR !== '1'),
       });
       outStream.write('\x1b[2J\x1b[H');
-      for (const line of fitFrameToRows(lines, outStream.rows)) {
+      for (const line of fitFrameToRows(lines, outStream.rows, outStream.columns)) {
         outStream.write(line + '\n');
       }
     } catch (e) {
@@ -1287,10 +1338,22 @@ function runWatchLoop(workspace, interval, opts = {}) {
   outStream.write('\x1b[?1049h');
   render();
   const timer = setIntervalFn(render, intervalMs);
+  // 復帰の書き込みが端末へ渡り終えてから exit する。書き込みの完了が来なければ上限時間で exit する。
+  let exiting = false;
   const handleSignal = () => {
+    if (exiting) return;
+    exiting = true;
     clearIntervalFn(timer);
-    outStream.write('\x1b[?1049l');
-    exitFn(0);
+    let done = false;
+    let timeout = null;
+    const exitOnce = () => {
+      if (done) return;
+      done = true;
+      if (timeout !== null) clearTimeoutFn(timeout);
+      exitFn(0);
+    };
+    timeout = setTimeoutFn(exitOnce, RESTORE_FLUSH_TIMEOUT_MS);
+    outStream.write('\x1b[?1049l', exitOnce);
   };
   onSignalFn('SIGINT', handleSignal);
   onSignalFn('SIGTERM', handleSignal);
