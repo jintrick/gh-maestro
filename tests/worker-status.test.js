@@ -868,7 +868,13 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
   const workspace = createWorkspace();
   const stdoutChunks = [];
   const stderrChunks = [];
-  const fakeStdout = { write: (chunk) => stdoutChunks.push(chunk) };
+  // 出力の書き込みは完了を即座に通知する（端末へ渡し終えた状態）。
+  const fakeStdout = {
+    write: (chunk, callback) => {
+      stdoutChunks.push(chunk);
+      if (typeof callback === 'function') callback();
+    },
+  };
   const fakeStderr = { write: (chunk) => stderrChunks.push(chunk) };
 
   let timerCallback = null;
@@ -958,6 +964,251 @@ test('runWatchLoop: 初回描画・定期再描画・シグナルハンドラ・
   } finally {
     workerStatus._setNow(null);
     workerStatus._setLiveness(null);
+    removeWorkspace(workspace);
+  }
+});
+
+// watch の描画を注入ストリームで走らせ、出力とイベント順序を記録する。
+// 描画そのもの（collect / render）はモックしない。注入するのは出力先・タイマー・シグナル・exit だけ。
+// deferFlush: 書き込みの完了通知（callback）を呼ばず、テストが pendingFlush から任意の時点で呼ぶ。
+// 上限タイマーは timeouts に記録され、テストが任意の時点で発火させる。
+function runWatchForTest(workspace, { rows, columns, deferFlush = false } = {}) {
+  const chunks = [];
+  const events = [];
+  const pendingFlush = [];
+  const timeouts = [];
+  const stdout = {
+    write: (chunk, callback) => {
+      chunks.push(chunk);
+      events.push(['write', chunk]);
+      if (typeof callback !== 'function') return;
+      const flush = () => {
+        events.push(['flushed', chunk]);
+        callback();
+      };
+      if (deferFlush) pendingFlush.push(flush);
+      else flush();
+    },
+  };
+  if (rows !== undefined) stdout.rows = rows;
+  if (columns !== undefined) stdout.columns = columns;
+  let timerCallback = null;
+  const signalHandlers = {};
+  const run = workerStatus.runWatchLoop(workspace, 2, {
+    stdout,
+    stderr: { write: () => {} },
+    setIntervalFn: (cb) => { timerCallback = cb; return 1; },
+    clearIntervalFn: () => {},
+    onSignalFn: (sig, handler) => { signalHandlers[sig] = handler; },
+    exitFn: (code) => { events.push(['exit', code]); },
+    setTimeoutFn: (cb, ms) => {
+      const timeout = { cb, ms, cleared: false };
+      timeouts.push(timeout);
+      return timeout;
+    },
+    clearTimeoutFn: (timeout) => { if (timeout) timeout.cleared = true; },
+  });
+  return {
+    run,
+    chunks,
+    events,
+    signalHandlers,
+    pendingFlush,
+    timeouts,
+    timerCallback: () => timerCallback(),
+  };
+}
+
+// 端末の表示幅の保守的な見積もり（ASCII は1列、それ以外は2列）。実装より大きく見積もるので、
+// これで収まれば実装の表示幅も収まる。
+function conservativeWidth(text) {
+  return Array.from(text).reduce((sum, ch) => sum + (ch.codePointAt(0) > 0x7f ? 2 : 1), 0);
+}
+
+// 画面消去（\x1b[2J\x1b[H）以降の1フレームを行の配列として取り出す。
+function frameLinesOf(chunks) {
+  const text = chunks.join('');
+  const marker = '\x1b[2J\x1b[H';
+  const at = text.lastIndexOf(marker);
+  assert.notEqual(at, -1, '画面消去を伴うフレームが出力されている');
+  const parts = text.slice(at + marker.length).split('\n');
+  parts.pop();
+  return parts;
+}
+
+function writeManyWorkers(workspace, count) {
+  const workers = {};
+  for (let i = 0; i < count; i++) {
+    workers[`worker-${String(i).padStart(2, '0')}`] = { pid: 1000 + i, startTime: DEFAULT_TEST_START_TIME };
+  }
+  writeWorkers(workspace, workers);
+}
+
+test('runWatchLoop: 代替画面へ入ってから描画し、SIGINT/SIGTERM では通常画面へ戻してから exit する', () => {
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    const workspace = createWorkspace();
+    try {
+      writeWorkers(workspace, { 'worker-a': { pid: 111, startTime: DEFAULT_TEST_START_TIME } });
+      const { chunks, events, signalHandlers } = runWatchForTest(workspace);
+      assert.equal(chunks[0], '\x1b[?1049h', `${sig}: 初回描画より前に代替画面へ入る`);
+
+      signalHandlers[sig]();
+      const exitIndex = events.findIndex(([kind]) => kind === 'exit');
+      const leaveIndex = events.findIndex(([kind, value]) => kind === 'write' && value === '\x1b[?1049l');
+      assert.notEqual(leaveIndex, -1, `${sig}: 終了時に通常画面へ戻す`);
+      assert.notEqual(exitIndex, -1, `${sig}: exit が呼ばれる`);
+      assert.ok(leaveIndex < exitIndex, `${sig}: exit より前に通常画面へ戻す`);
+      assert.deepEqual(events[exitIndex], ['exit', 0]);
+    } finally {
+      removeWorkspace(workspace);
+    }
+  }
+});
+
+test('runWatchLoop: rows を超えるフレームは先頭を残して切り詰め、省略件数を末尾に示す', () => {
+  const workspace = createWorkspace();
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  try {
+    writeManyWorkers(workspace, 20);
+    const full = frameLinesOf(runWatchForTest(workspace).chunks);
+    const rows = 4;
+    const fit = frameLinesOf(runWatchForTest(workspace, { rows }).chunks);
+
+    assert.ok(full.length > rows - 1, 'fixture: 切り詰めが必要な高さになっている');
+    assert.ok(fit.length <= rows - 1, `行数が rows - 1 以下（実際: ${fit.length}）`);
+    assert.deepEqual(
+      fit.slice(0, fit.length - 1),
+      full.slice(0, fit.length - 1),
+      '先頭（ヘッダー側）の行を残す',
+    );
+    const omitted = full.length - (fit.length - 1);
+    const lastLine = fit[fit.length - 1];
+    const digits = lastLine.match(/\d+/g) || [];
+    assert.ok(digits.includes(String(omitted)), `末尾に省略件数 ${omitted} を示す`);
+    assert.match(lastLine, /省略/, '省略したことを示す文言が最終行にある');
+  } finally {
+    workerStatus._setNow(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('runWatchLoop: 終了時、代替画面の復帰の書き込みが渡り終えるまで exit しない', () => {
+  const workspace = createWorkspace();
+  try {
+    writeWorkers(workspace, { 'worker-a': { pid: 111, startTime: DEFAULT_TEST_START_TIME } });
+    const { events, signalHandlers, pendingFlush, timeouts } = runWatchForTest(workspace, { deferFlush: true });
+    signalHandlers.SIGINT();
+    assert.equal(events.some(([kind]) => kind === 'exit'), false, '書き込み完了の前には exit しない');
+    assert.equal(pendingFlush.length, 1, '復帰の書き込みの完了を待っている');
+
+    pendingFlush[0]();
+    const exitIndex = events.findIndex(([kind]) => kind === 'exit');
+    const flushedIndex = events.findIndex(([kind, value]) => kind === 'flushed' && value === '\x1b[?1049l');
+    assert.notEqual(flushedIndex, -1, '復帰の書き込みが完了した');
+    assert.ok(flushedIndex < exitIndex, '完了の後に exit する');
+    assert.deepEqual(events[exitIndex], ['exit', 0]);
+    assert.equal(timeouts[0].cleared, true, '完了したら上限タイマーを解除する');
+  } finally {
+    removeWorkspace(workspace);
+  }
+});
+
+test('runWatchLoop: 書き込みの完了が来なくても、上限時間の後に一度だけ exit する', () => {
+  const workspace = createWorkspace();
+  try {
+    writeWorkers(workspace, { 'worker-a': { pid: 111, startTime: DEFAULT_TEST_START_TIME } });
+    const { events, signalHandlers, pendingFlush, timeouts } = runWatchForTest(workspace, { deferFlush: true });
+    signalHandlers.SIGTERM();
+    assert.equal(events.some(([kind]) => kind === 'exit'), false, '上限時間の前には exit しない');
+    assert.equal(timeouts.length, 1, '上限時間のタイマーを1つ張る');
+    assert.ok(Number.isFinite(timeouts[0].ms) && timeouts[0].ms > 0 && timeouts[0].ms <= 5000,
+      `上限時間は有限の正の値（実際: ${timeouts[0].ms}）`);
+
+    timeouts[0].cb();
+    pendingFlush[0]();
+    const exits = events.filter(([kind]) => kind === 'exit');
+    assert.deepEqual(exits, [['exit', 0]], '遅れて完了が来ても exit は一度だけ');
+  } finally {
+    removeWorkspace(workspace);
+  }
+});
+
+test('runWatchLoop: 列数が狭いときは折り返しの物理行で数え、省略表示も列数に収める', () => {
+  const workspace = createWorkspace();
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  try {
+    writeManyWorkers(workspace, 20);
+    const full = frameLinesOf(runWatchForTest(workspace).chunks);
+    const rows = 6;
+    const columns = 12;
+    const fit = frameLinesOf(runWatchForTest(workspace, { rows, columns }).chunks);
+
+    const physicalRows = fit.reduce(
+      (sum, line) => sum + Math.max(1, Math.ceil(conservativeWidth(line) / columns)),
+      0,
+    );
+    assert.ok(physicalRows <= rows - 1, `折り返し後の物理行が rows - 1 以下（実際: ${physicalRows}）`);
+
+    const lastLine = fit[fit.length - 1];
+    assert.ok(conservativeWidth(lastLine) <= columns, `省略表示が列数に収まる（幅: ${conservativeWidth(lastLine)}）`);
+    assert.match(lastLine, /省略/, '狭くても省略したことを示す');
+    const omitted = full.length - (fit.length - 1);
+    const digits = lastLine.match(/\d+/g) || [];
+    assert.ok(digits.includes(String(omitted)), `狭くても省略件数 ${omitted} を示す`);
+  } finally {
+    workerStatus._setNow(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('runWatchLoop: フレームがちょうど rows - 1 行に収まるときは切り詰めず、省略表示も出さない', () => {
+  const workspace = createWorkspace();
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  try {
+    writeManyWorkers(workspace, 20);
+    const full = frameLinesOf(runWatchForTest(workspace).chunks);
+    const fit = frameLinesOf(runWatchForTest(workspace, { rows: full.length + 1 }).chunks);
+    assert.deepEqual(fit, full, 'rows - 1 行にちょうど収まる境界では全行を出す');
+  } finally {
+    workerStatus._setNow(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('runWatchLoop: rows が取れない出力先では切り詰めず、大きい rows のときと同じ行を出す', () => {
+  const workspace = createWorkspace();
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  try {
+    writeManyWorkers(workspace, 20);
+    const noRows = frameLinesOf(runWatchForTest(workspace).chunks);
+    const roomy = frameLinesOf(runWatchForTest(workspace, { rows: 1000 }).chunks);
+    assert.deepEqual(noRows, roomy, 'rows 不明のときは切り詰めない');
+    assert.ok(!noRows.some((line) => line.includes('省略')), '省略表示を出さない');
+  } finally {
+    workerStatus._setNow(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('runWatchLoop: rows が極端に小さいときも、行数を rows 以下に保ち省略表示を1行だけ出す', () => {
+  const workspace = createWorkspace();
+  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
+  workerStatus._setNow(() => fixedNow);
+  try {
+    writeManyWorkers(workspace, 20);
+    const full = frameLinesOf(runWatchForTest(workspace).chunks);
+    for (const rows of [1, 2]) {
+      const fit = frameLinesOf(runWatchForTest(workspace, { rows }).chunks);
+      assert.equal(fit.length, 1, `rows=${rows}: 省略表示の1行だけを出す`);
+      const digits = fit[0].match(/\d+/g) || [];
+      assert.ok(digits.includes(String(full.length)), `rows=${rows}: 省略件数 ${full.length} を示す`);
+    }
+  } finally {
+    workerStatus._setNow(null);
     removeWorkspace(workspace);
   }
 });
