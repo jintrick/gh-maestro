@@ -24,12 +24,30 @@ const processLiveness = require('./process-liveness');
 let injectedLiveness = null;
 function checkerFor(opts = {}) { return opts.liveness || injectedLiveness || processLiveness; }
 
+function parseAnchorIssue(value, runningPath) {
+  if (value === undefined || value === null) return null;
+  const text = String(value);
+  if (!/^[1-9]\d*$/.test(text) || !Number.isSafeInteger(Number(text))) {
+    throw new Error(`manager.running のアンカーIssueが不正です: ${runningPath}`);
+  }
+  return Number(text);
+}
+
+function parseAnchorPr(value, runningPath) {
+  if (value === undefined || value === null) return null;
+  const text = String(value);
+  if (!/^[1-9]\d*$/.test(text) || !Number.isSafeInteger(Number(text))) {
+    throw new Error(`Review Manager起動予約のPRが不正です: ${runningPath}`);
+  }
+  return Number(text);
+}
+
 /**
- * Review Managerの起動中だけ使う予約ファイルのパスを返す。
+ * Review Managerのshimが終了フックを終えるまで保持する予約ファイルのパスを返す。
  *
  * manager.runningはReview Manager本体だけが所有するため、detachしたshimを
- * 起動側が記録することはできない。起動側と本体がmanager.runningへ所有権を
- * 引き渡すまでの短い空白は、隣接する専用予約ファイルで排他する。
+ * 起動側が記録することはできない。隣接する予約ファイルは、起動時の排他と、
+ * 本体終了後に終了フックが通知を終えるまでの順序保証にも使う。
  *
  * @param {string} runningPath manager.runningのパス
  * @returns {string}
@@ -42,14 +60,20 @@ function createStartupToken() {
   return crypto.randomBytes(16).toString('hex');
 }
 
-function normalizeStartupMarker({ processRef, token }, checker = checkerFor()) {
+function normalizeStartupMarker({ processRef, token, pr, issue, startTime }, checker = checkerFor()) {
   if (typeof processRef !== 'string' || !processRef) throw new Error('Review Manager起動予約の参照が不正です');
   const owner = checker.writeRef({}, processRef);
   if (!owner || normalizePid(owner.pid) === null) throw new Error('Review Manager起動予約のPIDが不正です');
   if (typeof token !== 'string' || token === '') {
     throw new Error('Review Manager起動予約のトークンが不正です');
   }
-  return { ...owner, token };
+  const normalizedPr = parseAnchorPr(pr, STARTING_FILE_NAME);
+  const normalizedIssue = parseAnchorIssue(issue, STARTING_FILE_NAME);
+  if (normalizedPr === null || normalizedIssue === null
+    || typeof startTime !== 'string' || !Number.isFinite(Date.parse(startTime))) {
+    throw new Error('Review Manager起動予約のPR、アンカーIssue、世代時刻が必要です');
+  }
+  return { ...owner, token, pr: normalizedPr, issue: normalizedIssue, startTime };
 }
 
 function writeStartupMarkerExclusive(startingPath, marker) {
@@ -69,6 +93,9 @@ function writeStartupMarkerExclusive(startingPath, marker) {
  * @param {object} [opts]
  * @param {string} [opts.processRef] 予約を作るプロセスの不透明な参照
  * @param {string} [opts.token] 本体へ引き渡すトークン
+ * @param {string|number} [opts.pr] 対象PR
+ * @param {string|number} [opts.issue] アンカーIssue
+ * @param {string} [opts.startTime] 実行世代の開始時刻
  * @returns {{acquired:boolean,active?:boolean,error?:Error,path:string,token?:string}}
  */
 function acquireReviewManagerStartup(runningPath, opts = {}) {
@@ -79,6 +106,9 @@ function acquireReviewManagerStartup(runningPath, opts = {}) {
   const marker = normalizeStartupMarker({
     processRef,
     token: opts.token || createStartupToken(),
+    pr: opts.pr,
+    issue: opts.issue,
+    startTime: opts.startTime,
   }, checker);
 
   try {
@@ -89,6 +119,7 @@ function acquireReviewManagerStartup(runningPath, opts = {}) {
   }
 
   const existing = inspectRunningReviewManager(startingPath, {
+    pr: opts.pr,
     onError: 'skip',
     cleanupStale: true,
     liveness: opts.liveness,
@@ -141,7 +172,9 @@ function transferReviewManagerStartup(runningPath, token, owner) {
 
   let next;
   try {
-    next = { ...marker, ...normalizeStartupMarker({ ...owner, token }) };
+    next = { ...marker, ...normalizeStartupMarker({
+      ...owner, token, pr: marker.pr, issue: marker.issue, startTime: marker.startTime,
+    }) };
   } catch (e) {
     return { transferred: false, reason: e.message };
   }
@@ -155,7 +188,7 @@ function transferReviewManagerStartup(runningPath, token, owner) {
 }
 
 /**
- * 本体がmanager.runningを書いた後、対応する起動予約だけを解放する。
+ * 起動側または終了フックが、対応する起動予約だけを解放する。
  *
  * @param {string} runningPath manager.runningのパス
  * @param {string} token 起動側が作成した予約トークン
@@ -194,12 +227,13 @@ function releaseReviewManagerStartup(runningPath, token) {
  * manager.running の内容を解析する。
  *
  * 旧形式は、ファイル全体が正の整数PIDだけのテキストである。新形式は
- * {pid, resourceKey, instanceId} のJSONオブジェクトである。PR1の起動時刻だけの
- * 旧JSONはOS資源参照がなく、process-liveness が持ち主のいない記録（dead）として扱う。
+ * {pid, resourceKey, instanceId} のJSONオブジェクトである。manager.startingではさらに
+ * pr、issue、startTimeを起動世代として記録する。PR1の起動時刻だけの旧JSONはOS資源参照が
+ * なく、process-liveness が持ち主のいない記録（dead）として扱う。
  *
  * @param {string} raw
  * @param {string} [runningPath]
- * @returns {{pid: number, resourceKey: string|null, instanceId: string|null, legacy: boolean, raw: string}}
+ * @returns {{pid: number, resourceKey: string|null, instanceId: string|null, startTime: string|null, issue: number|null, reservationPr: number|null, legacy: boolean, raw: string}}
  * @throws {Error} 形式またはPIDが不正な場合
  */
 function parseRunningReviewManagerRecord(raw, runningPath = 'manager.running') {
@@ -212,7 +246,7 @@ function parseRunningReviewManagerRecord(raw, runningPath = 'manager.running') {
   // 誤認すると、想定外の内容をプロセス識別子として扱うことになる。
   if (/^[1-9]\d*$/.test(trimmed)) {
     const pid = normalizePid(trimmed);
-    if (pid !== null) return { pid, resourceKey: null, instanceId: null, legacy: true, raw };
+    if (pid !== null) return { pid, resourceKey: null, instanceId: null, startTime: null, issue: null, reservationPr: null, legacy: true, raw };
   }
 
   let parsed;
@@ -243,7 +277,12 @@ function parseRunningReviewManagerRecord(raw, runningPath = 'manager.running') {
   const startTime = typeof parsed.startTime === 'string' && Number.isFinite(Date.parse(parsed.startTime))
     ? parsed.startTime
     : null;
-  return { pid, resourceKey, instanceId, startTime, legacy: resourceKey === null, raw };
+  if (parsed.startTime !== undefined && startTime === null) {
+    throw new Error(`manager.running の世代時刻が不正です: ${runningPath}`);
+  }
+  const issue = parseAnchorIssue(parsed.issue, runningPath);
+  const reservationPr = parseAnchorPr(parsed.pr, runningPath);
+  return { pid, resourceKey, instanceId, startTime, issue, reservationPr, legacy: resourceKey === null, raw };
 }
 
 /**
@@ -298,6 +337,10 @@ function finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reas
     status: 'stale',
     pr,
     pid: record.pid,
+    instanceId: record.instanceId,
+    startTime: record.startTime,
+    issue: record.issue,
+    reservationPr: record.reservationPr,
     resourceKey: record.resourceKey,
     legacy: record.legacy,
     reason,
@@ -313,7 +356,7 @@ function finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reas
  * @param {'throw'|'skip'} [opts.onError='throw'] エラー時の動作
  * @param {boolean} [opts.cleanupStale=false] staleファイルを内容比較後に削除するか
  * @param {(info:{pr:string|null,pid:number,path:string,legacy:true})=>void} [opts.onLegacyLive]
- * @returns {{status:'missing'|'live'|'legacy-live'|'stale'|'error', pr:string|null, pid?:number, startTime?:string|null, processRef?:string, legacy?:boolean, reason?:string, error?:Error}}
+ * @returns {{status:'missing'|'live'|'legacy-live'|'stale'|'error', pr:string|null, reservationPr?:number|null, pid?:number, startTime?:string|null, issue?:number|null, processRef?:string, legacy?:boolean, reason?:string, error?:Error}}
  */
 function inspectRunningReviewManager(runningPath, opts = {}) {
   const onError = opts.onError || 'throw';
@@ -335,6 +378,10 @@ function inspectRunningReviewManager(runningPath, opts = {}) {
     return errorResult(e, onError);
   }
 
+  if (pr !== null && record.reservationPr !== null && record.reservationPr !== Number(pr)) {
+    return errorResult(`Review Manager起動予約のPRがパスと一致しません: ${runningPath}`, onError);
+  }
+
   const checker = checkerFor(opts);
   const state = checker.observe(checker.readRef(record, 'default', { source: runningPath }));
   if (state === 'unknown') {
@@ -344,7 +391,7 @@ function inspectRunningReviewManager(runningPath, opts = {}) {
     return finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reason: 'process not alive or identity mismatch' });
   }
   return {
-    status: 'live', pr, pid: record.pid, resourceKey: record.resourceKey, instanceId: record.instanceId, startTime: record.startTime,
+    status: 'live', pr, pid: record.pid, resourceKey: record.resourceKey, instanceId: record.instanceId, startTime: record.startTime, issue: record.issue, reservationPr: record.reservationPr,
     processRef: checker.readRef(record), legacy: false,
   };
 
@@ -355,7 +402,7 @@ function inspectRunningReviewManager(runningPath, opts = {}) {
  * resourceKey は決定論的OS endpointを指し、instanceIdは起動世代を識別する。
  *
  * @param {string} runningPath
- * @param {string|{processRef:string}} record
+ * @param {string|{processRef:string,startTime?:string,issue?:number|string|null}} record
  * @returns {string}
  */
 function writeRunningReviewManager(runningPath, record) {
@@ -363,9 +410,13 @@ function writeRunningReviewManager(runningPath, record) {
   if (typeof processRef !== 'string' || !processRef) throw new Error(`manager.running の参照が不正です: ${runningPath}`);
   const checker = checkerFor();
   if (checker.observe(processRef) !== 'alive') throw new Error(`manager.running の所有者を確認できません: ${runningPath}`);
-  const metadata = record && typeof record === 'object' && typeof record.startTime === 'string'
-    ? { startTime: record.startTime }
-    : {};
+  const metadata = {};
+  if (record && typeof record === 'object') {
+    if (typeof record.startTime === 'string') metadata.startTime = record.startTime;
+    if (record.issue !== undefined && record.issue !== null) {
+      metadata.issue = parseAnchorIssue(record.issue, runningPath);
+    }
+  }
   atomicWriteJson(runningPath, checker.writeRef(metadata, processRef));
   return runningPath;
 }
@@ -417,7 +468,7 @@ function removeRunningReviewManagerIfOwned(runningPath, owner) {
  * @param {'throw'|'skip'} [opts.onError='throw'] 不正値・読み取り不能時の挙動
  * @param {boolean} [opts.cleanupStale=false] staleファイルを回収するか
  * @param {(info:object)=>void} [opts.onLegacyLive] 旧形式の生存PIDを当該PRの保護対象として通知
- * @returns {Array<{pr:string,pid:number,startTime:string}>}
+ * @returns {Array<{pr:string,pid:number,startTime:string|null,issue:number|null}>}
  */
 function listRunningReviewManagers(workspace, opts = {}) {
   const onError = opts.onError || 'throw';
@@ -445,7 +496,7 @@ function listRunningReviewManagers(workspace, opts = {}) {
       onError,
     });
     if (inspection.status === 'live') {
-      results.push({ pr: entry.name, pid: inspection.pid, startTime: inspection.startTime });
+      results.push({ pr: entry.name, pid: inspection.pid, startTime: inspection.startTime, issue: inspection.issue ?? null });
     }
   }
 

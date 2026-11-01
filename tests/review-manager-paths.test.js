@@ -63,6 +63,12 @@ test('reviewArtifactPath: .retries.json はPR recordsのreview配下に置く', 
   assert.equal(result, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.retries.json'));
 });
 
+test('reviewArtifactPath: .generation.json はPR recordsのreview配下に置く', () => {
+  const workspace = path.resolve('C:/ws');
+  const result = reviewArtifactPath(workspace, '42', '.generation.json');
+  assert.equal(result, path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.generation.json'));
+});
+
 // ── reviewWorktreeBranchName / reviewWorktreeFetchRef ───────────────────
 
 test('reviewWorktreeBranchName builds a PR-scoped branch name', () => {

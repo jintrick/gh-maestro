@@ -889,3 +889,80 @@ describe('resident unknown-liveness integration', () => {
     });
   });
 });
+
+describe('Review Manager stop notification integration', () => {
+  test('manager.running作成前の実停止をresident CLIが起動予約から検出して通知する', async () => {
+    await withTempDir(async (dir) => {
+      const maestroDir = path.join(dir, '.gh-maestro');
+      fs.mkdirSync(maestroDir, { recursive: true });
+      const runtimeRoot = path.join(dir, 'review-manager-runtime');
+      const owner = startLivenessOwner({
+        workspace: dir,
+        runtimeRoot,
+        kind: 'review-manager-startup',
+        name: '42',
+      });
+      const startTime = new Date(Date.now() - 1000).toISOString();
+      const runningPath = path.join(maestroDir, 'records', 'pr', '42', 'review', 'manager.running');
+      fs.mkdirSync(path.dirname(runningPath), { recursive: true });
+      const { childPid: _childPid, ...ownerRecord } = owner.record;
+      const startupPath = path.join(path.dirname(runningPath), 'manager.starting');
+      fs.writeFileSync(startupPath, JSON.stringify({
+        ...ownerRecord,
+        token: 'startup-token-42',
+        pr: 42,
+        issue: 715,
+        startTime,
+      }), 'utf8');
+      assert.ok(!fs.existsSync(runningPath), 'the manager has not written manager.running');
+
+      const ghLogPath = path.join(dir, 'review-manager-gh-calls.jsonl');
+      const preloadPath = createResidentUnknownLivenessPreload(ghLogPath);
+      let result;
+      try {
+        stopLivenessOwner(owner);
+        await waitForLivenessOwnerExit(owner);
+        result = realSpawnSync(process.execPath, [
+          '-r', preloadPath,
+          SUPERVISOR_SCRIPT,
+          '--once', '--workspace', dir,
+        ], {
+          cwd: dir,
+          encoding: 'utf8',
+          timeout: 30000,
+          env: {
+            ...cleanSpawnEnv(),
+            GH_MAESTRO_RUNTIME_DIR: runtimeRoot,
+          },
+        });
+      } finally {
+        if (isPidAlive(owner.child.pid)) {
+          stopLivenessOwner(owner);
+          await waitForLivenessOwnerExit(owner);
+        }
+      }
+
+      assert.equal(result.status, 0, `resident CLI succeeds\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+      assert.match(result.stdout, /REVIEW_MANAGER_STOP_DETECTED:42:/);
+      assert.ok(fs.existsSync(startupPath), 'stopped startup reservation is retained for recovery');
+      assert.ok(!fs.existsSync(runningPath), 'the notification came from the startup-only path');
+      assert.ok(!fs.existsSync(path.join(maestroDir, 'workers.json')), 'Review Manager is not registered in workers.json');
+
+      const auditDir = path.join(storageLayout.workspaceRuntimeDir(dir, runtimeRoot), 'resident-audit');
+      const auditEvents = fs.readdirSync(auditDir)
+        .filter((name) => name.endsWith('.json'))
+        .map((name) => JSON.parse(fs.readFileSync(path.join(auditDir, name), 'utf8')));
+      const notifications = auditEvents.filter((event) => event.type === 'notification'
+        && event.role === 'worker-supervisor');
+      assert.equal(notifications.length, 1);
+      assert.match(notifications[0].detail.body, /PR #42/);
+      assert.match(notifications[0].detail.body, /manager\.json/);
+      assert.match(notifications[0].detail.body, /再起動はしていません/);
+
+      const cursorPath = path.join(maestroDir, 'records', 'pr', '42', 'workers', 'issue-715-review-manager-pr-42', 'cursor.json');
+      const cursor = JSON.parse(fs.readFileSync(cursorPath, 'utf8'));
+      assert.equal(cursor.stoppedNotifiedPid, owner.child.pid);
+      assert.equal(cursor.stoppedNotifiedStartTime, startTime);
+    });
+  });
+});

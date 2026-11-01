@@ -79,6 +79,8 @@ test('--help が usage を返して code 0', () => {
   const r = msgSend.main(['--help']);
   assert.equal(r.code, 0);
   assert.ok(r.lines.join('\n').includes('msg-send.js'));
+  assert.ok(r.lines.join('\n').includes('--abnormal-exit'));
+  assert.ok(r.lines.join('\n').includes('--abnormal-exit-generation'));
   assert.equal(r.errLines.length, 0);
 });
 
@@ -171,6 +173,73 @@ test('--plan-comment-id はfrom/toを保った計画報告マーカーを投稿�
     assert.deepEqual(JSON.parse(marker[1]), {
       v: 1, to: 'orchestrator', from: 'issue-9-coder', kind: 'plan-report', planCommentId: 42,
     });
+  });
+});
+
+test('--abnormal-exit は終了フック通知を機械識別できるkind付きマーカーで投稿する', () => {
+  withTempDir(workspace => {
+    let capturedBody = null;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-52\n' };
+    });
+
+    const r = msgSend.main(
+      ['orchestrator', '--abnormal-exit', '--abnormal-exit-generation', '2026-08-01T10:00:00.000Z', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-9-review-manager-pr-42' },
+      stdinIO('終了理由の説明文は識別子として使わない'),
+    );
+    assert.equal(r.code, 0, r.errLines.join('\n'));
+    const marker = /^<!-- gh-maestro (\{.*\}) -->$/m.exec(capturedBody);
+    assert.ok(marker, '異常終了コメントにmachine markerが付く');
+    assert.deepEqual(JSON.parse(marker[1]), {
+      v: 1, to: 'orchestrator', from: 'issue-9-review-manager-pr-42', kind: 'abnormal-exit',
+      generation: '2026-08-01T10:00:00.000Z',
+    });
+  });
+});
+
+test('--abnormal-exit-generation は異常終了通知にのみ、有効な起動時刻を付けられる', () => {
+  withTempDir(workspace => {
+    const withoutAbnormalExit = msgSend.main(
+      ['orchestrator', '--abnormal-exit-generation', '2026-08-01T10:00:00.000Z', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-9-review-manager-pr-42' }, stdinIO('body'),
+    );
+    assert.equal(withoutAbnormalExit.code, 1);
+    assert.match(withoutAbnormalExit.errLines.join('\n'), /--abnormal-exit と同時に指定/);
+
+    const invalidGeneration = msgSend.main(
+      ['orchestrator', '--abnormal-exit', '--abnormal-exit-generation', 'not-a-time', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-9-review-manager-pr-42' }, stdinIO('body'),
+    );
+    assert.equal(invalidGeneration.code, 1);
+    assert.match(invalidGeneration.errLines.join('\n'), /有効な起動時刻/);
+  });
+});
+
+test('--abnormal-exit はorchestrator・raw・plan-reportとの併用を拒否する', () => {
+  withTempDir(workspace => {
+    const orchestrator = msgSend.main(
+      ['orchestrator', '--abnormal-exit', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'orchestrator' }, stdinIO('body'),
+    );
+    assert.equal(orchestrator.code, 1);
+    assert.match(orchestrator.errLines.join('\n'), /ワーカー通知専用/);
+
+    const raw = msgSend.main(
+      ['orchestrator', '--abnormal-exit', '--raw', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-9-review-manager-pr-42' }, stdinIO('body'),
+    );
+    assert.equal(raw.code, 1);
+    assert.match(raw.errLines.join('\n'), /マーカー付きの通常コメント専用/);
+
+    const planReport = msgSend.main(
+      ['issue-9-coder', '--abnormal-exit', '--plan-comment-id', '42', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-9-coder' }, stdinIO('body'),
+    );
+    assert.equal(planReport.code, 1);
+    assert.match(planReport.errLines.join('\n'), /--raw \/ --plan-comment-id と同時に指定できません/);
   });
 });
 

@@ -40,6 +40,9 @@ const { isWorkerIdentity } = require('./shared/resident-force-guard');
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { deriveRoleFromSkill } = require('./shared/worker-factory');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
+const { releaseReviewManagerStartup } = require('./shared/running-review-managers');
+const { reviewArtifactPath } = require('./shared/review-manager-paths');
+const { inspectReviewManagerResult } = require('./shared/review-manager-generation');
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -65,8 +68,16 @@ let _ghPrList = (repo, headBranch, opts = {}) => {
 // msg-send.js自身が「本文は位置引数で渡せない」ガードを持つ（--stdin/--body-fileのみ許可。
 // 過去にバッククォート/$入りの本文が位置引数のままbashに解釈され黙って壊れた事故に由来）。
 // ここから呼ぶ場合も同じ規約に従い、本文はspawnSyncのinputでstdin経由に渡す。
-function buildMsgSendRelayArgs(workspace) {
-  return [path.join(__dirname, 'msg-send.js'), '--stdin', '--workspace', workspace];
+function buildMsgSendRelayArgs(workspace, { abnormalExit = false, abnormalExitGeneration = undefined } = {}) {
+  return [
+    path.join(__dirname, 'msg-send.js'),
+    '--stdin',
+    '--workspace', workspace,
+    ...(abnormalExit ? ['--abnormal-exit'] : []),
+    ...(abnormalExit && abnormalExitGeneration !== undefined
+      ? ['--abnormal-exit-generation', abnormalExitGeneration]
+      : []),
+  ];
 }
 
 let _relayMessage = (workspace, body) => {
@@ -74,6 +85,28 @@ let _relayMessage = (workspace, body) => {
 };
 
 let _recordCycleEvent = recordCycleEvent;
+
+function completeReviewManagerStartup({ workspace, pr, token, startTime, notificationResult }) {
+  const notificationDelivered = Boolean(notificationResult && notificationResult.status === 0);
+  if (!notificationDelivered) {
+    let result;
+    try {
+      result = inspectReviewManagerResult(workspace, pr, startTime);
+    } catch (error) {
+      process.stderr.write(`worker-exit-hook: Review Managerの結果を確認できません: ${error.message}\n`);
+      return { released: false, retained: true, reason: '通知未達かつ対応する結果未確定' };
+    }
+    if (result.status !== 'confirmed') {
+      if (result.status === 'complete-without-artifact') {
+        process.stderr.write(`worker-exit-hook: Review Managerの結果を確認できません: ${result.reason || `${result.resultPath} がありません`}\n`);
+      }
+      return { released: false, retained: true, reason: '通知未達かつ対応する結果未確定' };
+    }
+  }
+
+  const runningPath = reviewArtifactPath(workspace, pr, '.running');
+  return releaseReviewManagerStartup(runningPath, token);
+}
 
 function readWorkerEntry(workspace, workerName) {
   try {
@@ -283,7 +316,9 @@ if (require.main === module) {
 
   const exitCode = parseInt(exitCodeRaw, 10);
   const workerName = process.env.GH_MAESTRO_WORKER || null;
+  let abnormalExitNotificationResult = null;
 
+  try {
   // 終了フックはペインの有無に依存しない正本側の停止打刻点。
   if (workspace && workerName) {
     try {
@@ -320,10 +355,14 @@ if (require.main === module) {
   //    1ターン完了を含む）は通知しない。
   if (Number.isFinite(exitCode) && exitCode !== 0 && workerName && workspace) {
     const body = `⚠️ 起動失敗または異常終了: exit code ${exitCode}。このワーカーのプロセスが正常に完了せず終了しました（起動時のエラーの可能性）。`;
-    const r = spawnSync(process.execPath, buildMsgSendRelayArgs(workspace), { encoding: 'utf8', input: body });
+    const r = spawnSync(process.execPath, buildMsgSendRelayArgs(workspace, {
+      abnormalExit: true,
+      abnormalExitGeneration: process.env.GH_MAESTRO_REVIEW_MANAGER_START_TIME,
+    }), { encoding: 'utf8', input: body });
 
-    if (r.status !== 0) {
-      process.stderr.write(`worker-exit-hook: 異常終了通知の投稿に失敗: ${(r.stderr || '').trim()}\n`);
+    abnormalExitNotificationResult = r;
+    if (!r || r.status !== 0) {
+      process.stderr.write(`worker-exit-hook: 異常終了通知の投稿に失敗: ${(r?.stderr || '').trim()}\n`);
     }
   }
 
@@ -346,6 +385,30 @@ if (require.main === module) {
       process.stderr.write(`worker-exit-hook: 返信確認・代理送信処理で例外: ${error.message}\n`);
     }
   }
+  } finally {
+    // 起動予約は、異常終了通知の成功または同じ世代の結果確定まで残す。
+    // 投稿に失敗し結果も無い場合は、shim終了後にsupervisorがstale予約から停止を検知する。
+    const reviewManagerPr = process.env.GH_MAESTRO_REVIEW_MANAGER_PR;
+    const startupToken = process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN;
+    if (workspace && reviewManagerPr && startupToken) {
+      try {
+        const release = completeReviewManagerStartup({
+          workspace,
+          pr: reviewManagerPr,
+          token: startupToken,
+          startTime: process.env.GH_MAESTRO_REVIEW_MANAGER_START_TIME,
+          notificationResult: abnormalExitNotificationResult,
+        });
+        if (release.retained) {
+          process.stderr.write(`worker-exit-hook: ${release.reason}ためReview Manager起動予約を保持します\n`);
+        } else if (!release.released && !release.missing) {
+          process.stderr.write(`worker-exit-hook: Review Manager起動予約を解放できません: ${release.reason || 'unknown reason'}\n`);
+        }
+      } catch (error) {
+        process.stderr.write(`worker-exit-hook: Review Manager起動予約を解放できません: ${error.message}\n`);
+      }
+    }
+  }
 }
 
 module.exports = {
@@ -354,6 +417,7 @@ module.exports = {
   _setGhPrList: (fn) => { _ghPrList = fn; },
   _setRelayMessage: (fn) => { _relayMessage = fn; },
   _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
+  completeReviewManagerStartup,
   recordWorkerStopped,
   verifyReplyAndRelayIfMissing,
   checkPrCreatedDuringResume,

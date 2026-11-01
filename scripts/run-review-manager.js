@@ -15,8 +15,11 @@ const processLiveness = require('./shared/process-liveness');
 const {
   writeRunningReviewManager,
   removeRunningReviewManagerIfOwned,
-  releaseReviewManagerStartup,
 } = require('./shared/running-review-managers');
+const {
+  beginReviewManagerGeneration,
+  recordReviewManagerResult,
+} = require('./shared/review-manager-generation');
 const {
   assertValidPr, reviewArtifactPath,
   reviewWorktreeBranchName, reviewWorktreeFetchRef, reviewWorktreeDir,
@@ -510,12 +513,21 @@ module.exports = {
   readIncompleteSentinel,
   incompleteSentinelOutcome,
   persistReviewManifest,
+  resolveReviewManagerStartTime,
   // テスト用エクスポート
   _validateFindingShape, _validateAgainstSchema,
   _setPollForArtifact: (fn) => { _injectedPollForArtifact = fn; },
   _setRunReviewJobsOnce: (fn) => { _injectedRunReviewJobsOnce = fn; },
   _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
 };
+
+function resolveReviewManagerStartTime(startupStartTime) {
+  if (startupStartTime === undefined) return new Date().toISOString();
+  if (typeof startupStartTime !== 'string' || !Number.isFinite(Date.parse(startupStartTime))) {
+    throw new Error('Review Manager起動予約の世代時刻が不正です');
+  }
+  return startupStartTime;
+}
 
 /**
  * 同一PRの古い不完全レビュー・センチネル（review-manager-<PR>.incomplete）を削除する。
@@ -524,26 +536,38 @@ module.exports = {
  * 不完全として正当に完了した」旨のマーカーで、superviseReviewManager はこれを見て
  * outcome: 'incomplete-review' を返す。前周回が不完全終了した後、同じPRで再レビューを
  * 開始すると古いセンチネルが残ったままだと新周回の途中結果を「不完全完了」と誤判定して
- * しまうため、新たなレビュー周回の開始（.running ロック作成）時に必ず消す
- * （Issue #248 項目4）。best-effort: 存在しなければ何もしない。
+ * しまうため、新たなレビュー周回の開始時にworkspaceとreview worktreeの両方から消す。
+ * 削除できない場合は古い成果物を今回の結果と誤認するため、起動を失敗させる。
  *
  * @param {string} workspace メインワークスペース
  * @param {string|number} pr レビュー対象 PR 番号（reviewArtifactPath が正整数検証する）
  */
 function clearStaleIncompleteSentinel(workspace, pr) {
-  const sentinelPath = reviewArtifactPath(workspace, pr, '.incomplete');
-  try {
-    if (fs.existsSync(sentinelPath)) {
-      fs.unlinkSync(sentinelPath);
-      console.warn(`run-review-manager: 前周回の不完全レビュー・センチネル ${path.basename(sentinelPath)} を削除しました（再レビュー開始）`);
+  const worktreeDir = reviewWorktreeDir(workspace, pr);
+  const sentinelPaths = [
+    reviewArtifactPath(worktreeDir, pr, '.incomplete'),
+    reviewArtifactPath(workspace, pr, '.incomplete'),
+  ];
+  for (const sentinelPath of sentinelPaths) {
+    let exists = false;
+    try {
+      fs.statSync(sentinelPath);
+      exists = true;
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        throw new Error('run-review-manager: 不完全レビュー・センチネルを確認できません: ' + sentinelPath + ': ' + error.message);
+      }
     }
-  } catch (e) {
-    // 削除に失敗しても再レビュー自体は続行する（best-effort）。ただし黙って消えないように
-    // ログには残す。
-    console.warn(`run-review-manager: 不完全レビュー・センチネル削除に失敗しました（続行します）: ${e.message}`);
+    if (!exists) continue;
+    try {
+      fs.unlinkSync(sentinelPath);
+      console.warn('run-review-manager: 前周回の不完全レビュー・センチネル ' + path.basename(sentinelPath) + ' を削除しました（再レビュー開始）');
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw new Error('run-review-manager: 古い不完全レビュー・センチネルを削除できません: ' + sentinelPath + ': ' + error.message);
+    }
   }
 }
-
 /**
  * 再試行カウンタ（run-review-jobs.js の決定的再試行上限、Issue #273）を、新しいレビュー
  * 周回の開始時にリセットする。
@@ -1053,17 +1077,11 @@ async function superviseReviewManager({
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
     fs.mkdirSync(path.dirname(lockFile), { recursive: true });
     const owner = lockOwner || processLiveness.captureSelf();
-    writeRunningReviewManager(lockFile, { processRef: owner, startTime: startedAt });
-    const startupToken = process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN;
-    if (startupToken) {
-      const released = releaseReviewManagerStartup(lockFile, startupToken);
-      if (!released.released && !released.missing) {
-        // manager.runningは既に本体所有者で書けているため、予約の解放失敗で
-        // Review Manager自体を失敗扱いにしない。残った予約は次回起動時に
-        // stale判定される（予約のトークンが一致する場合だけ解放可能）。
-        log(`起動予約の解放に失敗しました: ${released.reason || 'unknown reason'}`);
-      }
-    }
+    beginReviewManagerGeneration(workspace, pr, startedAt);
+    writeRunningReviewManager(lockFile, { processRef: owner, startTime: startedAt, issue });
+    // manager.starting はReview Managerの終了フックを含むshimが所有する。
+    // hookが異常終了通知を投稿し終える前にsupervisorが停止通知を送らないよう、
+    // manager.runningの書き込み後もここでは予約を解放しない。
   } catch (e) {
     return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir: null, reason: `初期化失敗: ${e.message}` };
   }
@@ -1166,6 +1184,13 @@ async function superviseReviewManager({
     if (sentinelPath) {
       const outcome = incompleteSentinelOutcome({ sentinelPath, agentPid: null, reviewWtDir });
       log(`incomplete review sentinel detected (${path.basename(sentinelPath)}) — ${outcome.reason}`);
+      if (outcome.outcome === 'incomplete-review') {
+        try {
+          recordReviewManagerResult(workspace, pr, startedAt, 'incomplete');
+        } catch (error) {
+          return { ...outcome, outcome: 'process-exit-no-artifact', exitCode: 1, reason: `不完全レビュー世代記録の保存に失敗: ${error.message}` };
+        }
+      }
       return outcome;
     }
     return { outcome: 'process-exit-no-artifact', exitCode: 1, artifact: null, agentPid: null, reviewWtDir, reason: 'run-review-jobs incomplete but no sentinel found' };
@@ -1190,6 +1215,13 @@ async function superviseReviewManager({
     // RM が incomplete 判断 → finalize-review --mode incomplete がセンチネルを書いた
     const outcome = incompleteSentinelOutcome({ sentinelPath: phase2.sentinelPath, agentPid: phase2.agentPid, agentRef: phase2.agentRef, reviewWtDir });
     log(`incomplete review sentinel detected (${path.basename(phase2.sentinelPath)}) — ${outcome.reason}`);
+    if (outcome.outcome === 'incomplete-review') {
+      try {
+        recordReviewManagerResult(workspace, pr, startedAt, 'incomplete');
+      } catch (error) {
+        return { ...outcome, outcome: 'process-exit-no-artifact', exitCode: 1, reason: `不完全レビュー世代記録の保存に失敗: ${error.message}` };
+      }
+    }
     return outcome;
   }
   if (phase2.outcome !== 'target') {
@@ -1210,6 +1242,11 @@ async function superviseReviewManager({
     return { outcome: 'process-exit-no-artifact', exitCode: 1, artifact: null, agentPid: phase2.agentPid, agentRef: phase2.agentRef, reviewWtDir, reason: `成果物コピー失敗: ${copyResult.error}` };
   }
   log(`artifact atomically copied to ${outputFile}`);
+  try {
+    recordReviewManagerResult(workspace, pr, startedAt, 'complete');
+  } catch (error) {
+    return { outcome: 'process-exit-no-artifact', exitCode: 1, artifact: null, agentPid: phase2.agentPid, agentRef: phase2.agentRef, reviewWtDir, reason: `レビュー成果物の世代記録保存に失敗: ${error.message}` };
+  }
 
   const publish = spawnSync(process.execPath, [
     path.join(__dirname, 'review-publisher.js'),
@@ -1315,7 +1352,14 @@ if (require.main === module) {
         return null;
       }
     })();
-    const reviewManagerStartTime = new Date().toISOString();
+    let reviewManagerStartTime;
+    try {
+      reviewManagerStartTime = resolveReviewManagerStartTime(process.env.GH_MAESTRO_REVIEW_MANAGER_START_TIME);
+    } catch (error) {
+      console.error(`run-review-manager: ${error.message}`);
+      process.exitCode = 1;
+      return;
+    }
     try {
       _recordCycleEvent(workspace, issue, 'worker-started', {
         workerName: reviewManagerWorkerName,

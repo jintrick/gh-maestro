@@ -8,6 +8,8 @@ const path = require('path');
 
 const hook = require('../scripts/worker-exit-hook');
 const { workerLogPath } = require('../scripts/shared/headless-launch');
+const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
+const { reviewManagerStartingPath } = require('../scripts/shared/running-review-managers');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-exit-hook-test-'));
@@ -354,59 +356,90 @@ describe('buildMsgSendRelayArgs', () => {
       '--workspace', '/ws',
     ]);
   });
+
+  test('Review Manager異常終了時は世代をmarkerへ渡し、通常ワーカーには渡さない', () => {
+    const args = hook.buildMsgSendRelayArgs('/ws', {
+      abnormalExit: true,
+      abnormalExitGeneration: '2026-08-01T10:00:00.000Z',
+    });
+    assert.deepEqual(args, [
+      path.join(__dirname, '..', 'scripts', 'msg-send.js'),
+      '--stdin',
+      '--workspace', '/ws',
+      '--abnormal-exit',
+      '--abnormal-exit-generation', '2026-08-01T10:00:00.000Z',
+    ]);
+    assert.deepEqual(hook.buildMsgSendRelayArgs('/ws', { abnormalExit: true }).slice(-1), ['--abnormal-exit']);
+  });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// CLI: 引数個数によるresume/新規起動の判別
-// ═══════════════════════════════════════════════════════════════════════════
+describe('completeReviewManagerStartup', () => {
+  const startTime = '2026-08-01T10:00:00.000Z';
 
-const { spawnSync: realSpawnSync } = require('child_process');
-const HOOK_SCRIPT = path.join(__dirname, '..', 'scripts', 'worker-exit-hook.js');
-// 実spawnする子プロセスにはワーカー文脈の環境変数（GH_MAESTRO_WORKER 等）を継承させない。
-// 継承すると、非ゼロ終了時に worker-exit-hook.js の通知分岐が msg-send.js を呼び、
-// 実ワークスペース・実Issueへ偽の異常終了通知を投稿する事故になる（Issue #202）。
-const { cleanSpawnEnv } = require('./_spawn-env');
+  function writeStartup(workspace, pr = '42') {
+    const runningPath = reviewArtifactPath(workspace, pr, '.running');
+    const startingPath = reviewManagerStartingPath(runningPath);
+    fs.mkdirSync(path.dirname(startingPath), { recursive: true });
+    fs.writeFileSync(startingPath, JSON.stringify({ token: 'startup-token' }), 'utf8');
+    return startingPath;
+  }
 
-// 実spawnする hook サブプロセスへ rename EPERM を注入する preload（node -r で読み込ませる）。
-// NODE_OPTIONS ではなく -r 引数を使う（NODE_OPTIONS は Windows のパス解析でバックスラッシュが
-// 化けて読み込めないことを実機で確認済み）。
-//   LOG_RENAME_FAIL_MODE=once   -> 1回目だけ失敗（リトライ成功を検証）
-//   LOG_RENAME_FAIL_MODE=always -> 常に失敗（最終失敗のログ記録を検証）
-const RENAME_INJECTOR_SOURCE = `
-'use strict';
-const fs = require('fs');
-const originalRenameSync = fs.renameSync;
-const mode = process.env.LOG_RENAME_FAIL_MODE;
-if (mode === 'once' || mode === 'always') {
-  let attempts = 0;
-  fs.renameSync = (from, to) => {
-    const isCompactionTarget = String(from).includes('.compact-') || String(to).endsWith('worker.log');
-    if (isCompactionTarget && (mode === 'always' || attempts++ === 0)) {
-      const err = new Error('simulated sharing violation (EPERM)');
-      err.code = 'EPERM';
-      throw err;
-    }
-    return originalRenameSync(from, to);
-  };
-}
-`;
+  test('異常終了通知の投稿失敗後、結果も未確定なら監視可能な起動予約を保持する', () => {
+    withTempDir((workspace) => {
+      const startingPath = writeStartup(workspace);
+      const result = hook.completeReviewManagerStartup({
+        workspace, pr: '42', token: 'startup-token', startTime,
+        notificationResult: { status: 1, stderr: 'temporary GitHub failure' },
+      });
+      assert.equal(result.retained, true);
+      assert.equal(fs.existsSync(startingPath), true);
+    });
+  });
 
-describe('CLI引数の解釈', () => {
+  test('異常終了通知の投稿成功後は起動予約を解放する', () => {
+    withTempDir((workspace) => {
+      const startingPath = writeStartup(workspace);
+      const result = hook.completeReviewManagerStartup({
+        workspace, pr: '42', token: 'startup-token', startTime,
+        notificationResult: { status: 0, stderr: '' },
+      });
+      assert.equal(result.released, true);
+      assert.equal(fs.existsSync(startingPath), false);
+    });
+  });
 
+  test('異常終了通知に失敗しても同世代の確定結果があれば起動予約を解放する', () => {
+    withTempDir((workspace) => {
+      const startingPath = writeStartup(workspace);
+      fs.writeFileSync(reviewArtifactPath(workspace, '42', '.generation.json'), JSON.stringify({
+        version: 1, startTime, state: 'incomplete',
+      }), 'utf8');
+      const result = hook.completeReviewManagerStartup({
+        workspace, pr: '42', token: 'startup-token', startTime,
+        notificationResult: { status: 1, stderr: 'temporary GitHub failure' },
+      });
+      assert.equal(result.released, true);
+      assert.equal(fs.existsSync(startingPath), false);
+    });
+  });
 
+  test('complete世代でもmanager.jsonが無ければ予約を残し、成果物を確認できた後に解放する', () => {
+    withTempDir((workspace) => {
+      const startingPath = writeStartup(workspace);
+      fs.writeFileSync(reviewArtifactPath(workspace, '42', '.generation.json'), JSON.stringify({
+        version: 1, startTime, state: 'complete',
+      }), 'utf8');
+      const params = {
+        workspace, pr: '42', token: 'startup-token', startTime,
+        notificationResult: { status: 1, stderr: 'temporary GitHub failure' },
+      };
 
+      assert.equal(hook.completeReviewManagerStartup(params).retained, true);
+      assert.equal(fs.existsSync(startingPath), true);
 
-
-
-
-
-  // ── 回帰テスト（Issue #202） ─────────────────────────────────────────────
-  // 実運用では `npm test` がワーカー起動コンテキスト（GH_MAESTRO_WORKER / GH_MAESTRO_WORKSPACE /
-  // ISSUE が注入された状態）で実行されることがある。この環境を親プロセス（テストランナー）に
-  // 再現し、実spawn CLIテストがそれらを子へ継承しない（= 異常終了通知を投稿しない）ことを検証する。
-  // 万一 cleanSpawnEnv() が漏れて env がリークした場合も、親に注入する GH_MAESTRO_WORKSPACE は
-  // git repo ではない一時dirを指すため、msg-send.js はリポジトリ解決で失敗し GitHub 投稿には
-  // 至らない（テスト自体が安全）。リーク時は通知分岐が発火して stderr に「異常終了通知の投稿に失敗」
-  // が出るため、下の doesNotMatch で回帰を検出できる。
-
+      fs.writeFileSync(reviewArtifactPath(workspace, '42', '.json'), '{}', 'utf8');
+      assert.equal(hook.completeReviewManagerStartup(params).released, true);
+      assert.equal(fs.existsSync(startingPath), false);
+    });
+  });
 });

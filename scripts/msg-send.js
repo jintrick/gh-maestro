@@ -99,6 +99,8 @@ Options:
   --raw                 メッセージ用のマーカー・引用ヘッダーを付けず、本文をそのまま Issue コメントに投稿する。
   --execution-id <id>  実行記録と紐付けるID。投稿成功時だけ completed として記録する。
   --plan-comment-id <id> 計画URL報告用（ワーカー専用）。msg-pollは通常のNEW_MESSAGEではなくPLAN_REPORTEDとして通知する。
+  --abnormal-exit      worker-exit-hook専用。非ゼロ終了通知をkind付きマーカーで識別できるようにする。
+  --abnormal-exit-generation <ISO> Review Manager異常終了通知に起動世代を記録する（worker-exit-hook専用）。
 
 本文は --body-file と --stdin のどちらか一方を必ず指定する（同時指定・両方省略はエラー）。
 本文を位置引数で渡すことはできない（渡すとエラーになる）。
@@ -301,8 +303,8 @@ function main(argsOverride, envOverride, ioOverride) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(parsedArgs, {
-      flags: { '--workspace': {}, '--issue': {}, '--from': {}, '--body-file': {}, '--execution-id': {}, '--skill': {}, '--plan-comment-id': {} },
-      booleans: ['--stdin', '--help', '-h'],
+      flags: { '--workspace': {}, '--issue': {}, '--from': {}, '--body-file': {}, '--execution-id': {}, '--skill': {}, '--plan-comment-id': {}, '--abnormal-exit-generation': {} },
+      booleans: ['--stdin', '--abnormal-exit', '--help', '-h'],
       // 宛先（recipient）は位置引数で受け取る。個数の妥当性は下の extraPositionals 判定で
       // 専用メッセージ（--stdin / --body-file 案内）と共に検証するため、パーサ側では上限を設けない。
       positionals: { min: 0, max: Infinity },
@@ -339,7 +341,26 @@ function main(argsOverride, envOverride, ioOverride) {
   const workerIdentity = env.GH_MAESTRO_WORKER || null;
   const isWorker = isWorkerIdentity(workerIdentity);
   const planCommentId = values['--plan-comment-id'];
+  const abnormalExit = values['--abnormal-exit'] === true;
+  const abnormalExitGeneration = values['--abnormal-exit-generation'];
   const hasPlanCommentId = planCommentId !== undefined;
+  if (abnormalExitGeneration !== undefined && !abnormalExit) {
+    writeErr('msg-send: --abnormal-exit-generation は --abnormal-exit と同時に指定してください。');
+    return { code: 1, lines: out, errLines: err };
+  }
+  if (abnormalExitGeneration !== undefined
+    && (typeof abnormalExitGeneration !== 'string' || !Number.isFinite(Date.parse(abnormalExitGeneration)))) {
+    writeErr('msg-send: --abnormal-exit-generation は有効な起動時刻で指定してください。');
+    return { code: 1, lines: out, errLines: err };
+  }
+  if (abnormalExit && !isWorker) {
+    writeErr('msg-send: --abnormal-exit は worker-exit-hook のワーカー通知専用です。');
+    return { code: 1, lines: out, errLines: err };
+  }
+  if (abnormalExit && (raw || hasPlanCommentId)) {
+    writeErr('msg-send: --abnormal-exit はマーカー付きの通常コメント専用です。--raw / --plan-comment-id と同時に指定できません。');
+    return { code: 1, lines: out, errLines: err };
+  }
   if (hasPlanCommentId && !/^[1-9][0-9]*$/.test(planCommentId)) {
     writeErr('msg-send: --plan-comment-id は正の整数で指定してください。');
     return { code: 1, lines: out, errLines: err };
@@ -541,6 +562,9 @@ function main(argsOverride, envOverride, ioOverride) {
   if (planCommentId) {
     markerData.kind = 'plan-report';
     markerData.planCommentId = Number(planCommentId);
+  } else if (abnormalExit) {
+    markerData.kind = 'abnormal-exit';
+    if (abnormalExitGeneration !== undefined) markerData.generation = abnormalExitGeneration;
   }
   const marker = JSON.stringify(markerData);
   const directionIcon = from === 'orchestrator' ? '📤' : '📥';

@@ -18,6 +18,8 @@ const residentAudit = require('../scripts/shared/resident-audit');
 const processLiveness = require('../scripts/shared/process-liveness');
 const { canonicalWorkspace } = require('../scripts/shared/storage-layout');
 const workerLiveness = require('../scripts/shared/worker-liveness');
+const runningReviewManagers = require('../scripts/shared/running-review-managers');
+const { recordCycleEvent } = require('../scripts/shared/cycle-metrics');
 
 // 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
 // PIDを誤って渡す回帰は即座に検出する。
@@ -150,6 +152,68 @@ function mockGhApiComments(comments) {
   });
 }
 
+let reviewManagerLivenessState = 'dead';
+function setReviewManagerLiveness(state) {
+  reviewManagerLivenessState = state;
+  const probe = typeof state === 'function' ? state : () => reviewManagerLivenessState;
+  runningReviewManagers._setLiveness(processLiveness.createLiveness({
+    probeEndpoint: probe,
+    probePid: probe,
+    readStartTime: () => TEST_SESSION_START_TIME,
+  }));
+}
+
+function writeReviewManagerRecord(workspace, { pr = '42', issue = 715, pid = 4200, startTime = '2026-08-01T10:00:00.000Z', pidOnly = false } = {}) {
+  const file = path.join(workspace, '.gh-maestro', 'records', 'pr', String(pr), 'review', 'manager.running');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (pidOnly) {
+    fs.writeFileSync(file, `${pid}\n`, 'utf8');
+    return file;
+  }
+  const record = {
+    pid,
+    resourceKey: `review-manager-resource-${pr}`,
+    instanceId: `review-manager-instance-${pr}`,
+    startTime,
+  };
+  if (issue !== null) record.issue = issue;
+  fs.writeFileSync(file, JSON.stringify(record), 'utf8');
+  return file;
+}
+
+function writeReviewManagerGeneration(workspace, { pr = '42', startTime = '2026-08-01T10:00:00.000Z', state = 'running' } = {}) {
+  const file = path.join(workspace, '.gh-maestro', 'records', 'pr', String(pr), 'review', 'manager.generation.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ version: 1, startTime, state }), 'utf8');
+  return file;
+}
+
+function writeReviewManagerStartup(workspace, {
+  pr = '42', pid = 5200, issue = 715, startTime = '2026-08-01T10:00:00.000Z',
+} = {}) {
+  const runningPath = path.join(workspace, '.gh-maestro', 'records', 'pr', String(pr), 'review', 'manager.running');
+  const file = path.join(path.dirname(runningPath), 'manager.starting');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({
+    pid,
+    resourceKey: 'a'.repeat(64),
+    instanceId: `review-manager-startup-instance-${pr}`,
+    token: `startup-token-${pr}`,
+    pr: Number(pr),
+    issue,
+    startTime,
+  }), 'utf8');
+  return file;
+}
+
+function abnormalExitComment(workerName, generation = '2026-08-01T10:00:00.000Z', createdAt = '2026-08-01T10:00:00.000Z') {
+  const marker = JSON.stringify({ v: 1, to: 'orchestrator', from: workerName, kind: 'abnormal-exit', generation });
+  return {
+    created_at: createdAt,
+    body: `<!-- gh-maestro ${marker} -->\n終了理由の説明文は変更されてもよい`,
+  };
+}
+
 /** gh api comments の実実装にリセット */
 function resetGhApiComments() {
   supervisor._setGhApiComments((repo, issue, since, opts = {}) => {
@@ -219,6 +283,7 @@ function resetAllMocks() {
   setWorkersIdle();
   workerLease._setLiveness(testLiveness);
   supervisor._setParentLiveness(testLiveness);
+  setReviewManagerLiveness('dead');
   // resume直後の生存確認スリープは実待機させない
   supervisor._setSleep(() => {});
   // 通知は実 _notifyOrchestrator を通しつつ、内部 spawn だけを安全なモック（実spawnを起こさない）
@@ -230,6 +295,448 @@ function resetAllMocks() {
 }
 
 resetAllMocks();
+
+describe('Review Manager stop monitoring', () => {
+  beforeEach(() => resetAllMocks());
+
+  test('manager.running作成前に停止したstale起動予約からPRの停止を通知し、既存cursorへ世代を保存する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerStartup(dir);
+      const runningPath = path.join(dir, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.running');
+      assert.equal(fs.existsSync(runningPath), false, '起動予約だけが存在する状態');
+
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0].issue, '715');
+      assert.match(notifications[0].body, /PR #42/);
+      assert.ok(scan.lines.includes('REVIEW_MANAGER_STOP_DETECTED:42:5200'));
+      const cursor = JSON.parse(fs.readFileSync(
+        supervisor.cursorPath(dir, 'issue-715-review-manager-pr-42'), 'utf8',
+      ));
+      assert.equal(cursor.stoppedNotifiedPid, 5200);
+      assert.equal(cursor.stoppedNotifiedStartTime, '2026-08-01T10:00:00.000Z');
+    });
+  });
+
+  test('manager.running前の停止でも同世代の確定結果があれば通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerStartup(dir);
+      const reviewDir = path.join(dir, '.gh-maestro', 'records', 'pr', '42', 'review');
+      fs.writeFileSync(path.join(reviewDir, 'manager.json'), '{}', 'utf8');
+      writeReviewManagerGeneration(dir, { state: 'complete' });
+
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+      assert.equal(notifications.length, 0);
+    });
+  });
+
+  test('PRを特定できない旧起動予約は停止と誤認せず判定不能を通知する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      const startupPath = writeReviewManagerStartup(dir);
+      const startup = JSON.parse(fs.readFileSync(startupPath, 'utf8'));
+      delete startup.pr;
+      fs.writeFileSync(startupPath, JSON.stringify(startup), 'utf8');
+
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1);
+      assert.match(notifications[0].body, /状態を判定できません/);
+      assert.doesNotMatch(notifications[0].body, /Review Manager（PID/);
+      assert.ok(!scan.lines.some((line) => line.startsWith('REVIEW_MANAGER_STOP_DETECTED:')));
+    });
+  });
+
+  test('manager.running停止通知はPRを示し、既存stopped cursorで同じPIDと起動時刻を重複通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([{
+      created_at: '2026-08-01T10:00:01.000Z',
+      body: '<!-- gh-maestro {"v":1,"to":"orchestrator","from":"issue-715-review-manager-pr-42"} -->\n⚠️ 起動失敗または異常終了: exit code 1',
+    }]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerRecord(dir);
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0].issue, '715');
+      assert.match(notifications[0].body, /PR #42/);
+      assert.match(notifications[0].body, /manager\.json/);
+      assert.match(notifications[0].body, /再起動はしていません/);
+      assert.ok(scan.lines.includes('REVIEW_MANAGER_STOP_DETECTED:42:4200'));
+
+      const workerName = 'issue-715-review-manager-pr-42';
+      const cursor = JSON.parse(fs.readFileSync(supervisor.cursorPath(dir, workerName), 'utf8'));
+      assert.equal(cursor.stoppedNotifiedPid, 4200);
+      assert.equal(cursor.stoppedNotifiedStartTime, '2026-08-01T10:00:00.000Z');
+    });
+  });
+
+  test('終了フックのabnormal-exit markerは本文の説明文によらず停止通知を抑止し、cursorへ記録する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    const workerName = 'issue-715-review-manager-pr-42';
+    supervisor._setGhApiComments(mockGhApiComments([abnormalExitComment(workerName)]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerRecord(dir);
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+
+      assert.equal(notifications.length, 0);
+      const cursor = JSON.parse(fs.readFileSync(supervisor.cursorPath(dir, workerName), 'utf8'));
+      assert.equal(cursor.stoppedNotifiedPid, 4200);
+      assert.equal(cursor.stoppedNotifiedStartTime, '2026-08-01T10:00:00.000Z');
+    });
+  });
+
+  test('同じ秒に投稿された前世代の異常終了markerでは今回の停止通知を抑止しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    const workerName = 'issue-715-review-manager-pr-42';
+    supervisor._setGhApiComments(mockGhApiComments([
+      abnormalExitComment(workerName, '2026-08-01T10:00:00.001Z', '2026-08-01T10:00:00.500Z'),
+    ]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerRecord(dir, { startTime: '2026-08-01T10:00:00.999Z' });
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1, 'workerNameと秒が同じでも別世代のmarkerは一致しない');
+      assert.match(notifications[0].body, /PR #42/);
+    });
+  });
+
+  test('今回のmanager.generation.jsonが成功成果物を指すと停止通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerRecord(dir, { pr: '42' });
+      writeReviewManagerRecord(dir, { pr: '43' });
+      const reviewDir42 = path.join(dir, '.gh-maestro', 'records', 'pr', '42', 'review');
+      const reviewDir43 = path.join(dir, '.gh-maestro', 'records', 'pr', '43', 'review');
+      fs.writeFileSync(path.join(reviewDir42, 'manager.json'), '{}', 'utf8');
+      fs.writeFileSync(path.join(reviewDir43, 'manager.incomplete'), '{}', 'utf8');
+      writeReviewManagerGeneration(dir, { pr: '42', state: 'complete' });
+      writeReviewManagerGeneration(dir, { pr: '43', state: 'incomplete' });
+
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+      assert.equal(notifications.length, 0);
+    });
+  });
+
+  test('前回のmanager.jsonは今回のmanager.runningの停止通知を抑止しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerRecord(dir, { startTime: '2026-08-02T10:00:00.000Z' });
+      const reviewDir = path.join(dir, '.gh-maestro', 'records', 'pr', '42', 'review');
+      fs.writeFileSync(path.join(reviewDir, 'manager.json'), '{}', 'utf8');
+      writeReviewManagerGeneration(dir, { startTime: '2026-08-01T10:00:00.000Z', state: 'complete' });
+
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1);
+      assert.match(notifications[0].body, /PR #42/);
+      assert.match(notifications[0].body, /manager\.json/);
+    });
+  });
+
+  test('manager.startingがliveの間は異常終了フックの完了を待ち、同じ停止を重ねて通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    let comments = [];
+    let commentReads = 0;
+    supervisor._setGhApiComments(() => {
+      commentReads += 1;
+      return { status: 0, stdout: JSON.stringify(comments), stderr: '' };
+    });
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+    const startupResourceKey = 'a'.repeat(64);
+    const managerResourceKey = 'b'.repeat(64);
+    const startupInstanceId = 'review-manager-startup-instance-42';
+    runningReviewManagers._setLiveness(processLiveness.createLiveness({
+      probeEndpoint: (endpoint) => endpoint === processLiveness.endpointPath(startupResourceKey) ? 'alive' : 'dead',
+      readManifest: (resourceKey) => resourceKey === startupResourceKey
+        ? { pid: 5200, resourceKey, instanceId: startupInstanceId }
+        : null,
+    }));
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      const runningPath = writeReviewManagerRecord(dir);
+      const managerRecord = JSON.parse(fs.readFileSync(runningPath, 'utf8'));
+      managerRecord.resourceKey = managerResourceKey;
+      fs.writeFileSync(runningPath, JSON.stringify(managerRecord), 'utf8');
+      const startupPath = writeReviewManagerStartup(dir);
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+
+      assert.equal(commentReads, 0, 'live startup owner means the hook has not finished');
+      assert.equal(notifications.length, 0);
+
+      comments = [abnormalExitComment('issue-715-review-manager-pr-42')];
+      fs.unlinkSync(startupPath);
+      scan.runOnce();
+
+      assert.equal(commentReads, 1);
+      assert.equal(notifications.length, 0, 'the hook marker suppresses the supervisor notice');
+      assert.ok(fs.existsSync(runningPath));
+    });
+  });
+
+  test('生死不明は停止通知にせずPR付きで一度知らせ、manager.runningを保持する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    setReviewManagerLiveness('unknown');
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      const runningPath = writeReviewManagerRecord(dir);
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1);
+      assert.match(notifications[0].body, /PR #42/);
+      assert.match(notifications[0].body, /状態を判定できません/);
+      assert.ok(scan.lines.includes('REVIEW_MANAGER_STATE_UNKNOWN:42'));
+      assert.ok(fs.existsSync(runningPath), '不明な所有者記録を削除しない');
+    });
+  });
+
+  test('壊れた停止通知cursorは未通知扱いにせず判定不能を知らせる', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      const runningPath = writeReviewManagerRecord(dir);
+      const cursorPath = supervisor.cursorPath(dir, 'issue-715-review-manager-pr-42');
+      fs.mkdirSync(path.dirname(cursorPath), { recursive: true });
+      fs.writeFileSync(cursorPath, '{broken cursor', 'utf8');
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1);
+      assert.match(notifications[0].body, /状態を判定できません/);
+      assert.match(notifications[0].body, /cursor/);
+      assert.equal(fs.readFileSync(cursorPath, 'utf8'), '{broken cursor');
+      assert.ok(fs.existsSync(runningPath));
+      assert.ok(!scan.lines.some((line) => line.startsWith('REVIEW_MANAGER_STOP_DETECTED:')));
+    });
+  });
+
+  test('通知済み世代のcursor保存に失敗しても同じ停止を次のscanで再通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    let cursorPath;
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      fs.mkdirSync(cursorPath, { recursive: true });
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerRecord(dir);
+      cursorPath = supervisor.cursorPath(dir, 'issue-715-review-manager-pr-42');
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1);
+      assert.ok(scan.errLines.some((line) => line.includes('停止通知は届きましたがカーソル保存に失敗')));
+      assert.ok(scan.lines.includes('REVIEW_MANAGER_STOP_DETECTED:42:4200'));
+      assert.ok(fs.statSync(cursorPath).isDirectory(), '失敗したカーソル保存を修復・置換しない');
+    });
+  });
+
+  test('後続のGitHub確認が失敗し続ける間、同じ判定不能通知は一度だけ届き、確認成功後は停止判定へ進む', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    let commentsAvailable = false;
+    supervisor._setGhApiComments(() => (commentsAvailable
+      ? { status: 0, stdout: '[]', stderr: '' }
+      : { status: 1, stdout: '', stderr: 'temporary API failure' }));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerRecord(dir);
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1);
+      assert.match(notifications[0].body, /状態を判定できません/);
+
+      commentsAvailable = true;
+      scan.runOnce();
+      assert.equal(notifications.length, 2);
+      assert.match(notifications[1].body, /PR #42/);
+      assert.doesNotMatch(notifications[1].body, /状態を判定できません/);
+    });
+  });
+
+  test('アンカーIssueのない旧manager.runningはcycle metricsで特定する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      const workerName = 'issue-715-review-manager-pr-42';
+      const startTime = '2026-08-01T10:00:00.000Z';
+      writeReviewManagerRecord(dir, { issue: null, startTime });
+      recordCycleEvent(dir, 715, 'worker-started', {
+        workerName,
+        role: 'review-manager',
+        skill: 'gh-maestro-reviewer',
+        pid: 4200,
+        startTime,
+        pr: 42,
+      });
+
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0].issue, '715');
+      assert.match(notifications[0].body, /PR #42/);
+    });
+  });
+
+  test('旧PID-only manager.runningはPIDが一致する単一cycle eventでIssueを復元する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      const workerName = 'issue-715-review-manager-pr-42';
+      writeReviewManagerRecord(dir, { issue: null, pidOnly: true });
+      recordCycleEvent(dir, 715, 'worker-started', {
+        workerName,
+        role: 'review-manager',
+        skill: 'gh-maestro-reviewer',
+        pid: 4200,
+        startTime: '2026-08-01T10:00:00.000Z',
+        pr: 42,
+      });
+
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0].issue, '715');
+    });
+  });
+});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // --help / usage

@@ -80,6 +80,22 @@ test('triage.mdは正式レビュー通知で届き、テスト結果コメン�
   assert.equal(notify('PR_COMMENT'), '', 'test-result and other ordinary PR comments do not repeat triage guidance');
 });
 
+test('Review Manager停止・判定不能のresident通知は復旧手順へ案内し、自動再開を指示しない', () => {
+  const skillDirectory = path.resolve(__dirname, '..', 'skills', 'gh-maestro-orchestrator');
+  const skill = fs.readFileSync(path.join(skillDirectory, 'SKILL.md'), 'utf8');
+  const eventTableStart = skill.indexOf('## イベントの受け口');
+  const eventTableEnd = skill.indexOf('## 横断的な手続き', eventTableStart);
+  const eventTable = skill.slice(eventTableStart, eventTableEnd);
+  const recovery = fs.readFileSync(path.join(skillDirectory, 'monitor-recovery.md'), 'utf8');
+
+  assert.match(eventTable, /RESIDENT_NOTIFICATION（source=worker-supervisor、Review Manager停止・PR番号あり）/);
+  assert.match(eventTable, /RESIDENT_NOTIFICATION（source=worker-supervisor、Review Managerの状態判定不能）/);
+  assert.match(recovery, /manager\.running.*manager\.log.*manager\.json.*manager\.incomplete/);
+  assert.match(recovery, /worker-status\.js list/);
+  assert.match(recovery, /start-review-manager\.js" --resume/);
+  assert.match(recovery, /状態を判定できません[\s\S]*不確かな間は再開しない/);
+});
+
 test('script合図付きCLIの手順書例はstdoutを変数・pipe・redirectで飲み込まない', () => {
   const skillsDirectory = path.resolve(__dirname, '..', 'skills');
   const collectMarkdownFiles = (directory) => fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

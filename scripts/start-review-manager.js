@@ -113,11 +113,9 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
   // 起動側は隣接するmanager.startingだけを原子的に予約する。
   // manager.runningが本体書き込み前の窓でも、予約を持つ起動だけが先へ進める。
   //
-  // 起動予約の endpoint は、この起動処理が予約を進めている間だけ保持する。呼び出し元が
-  // poll-pr.js のような常駐プロセスでも、起動処理を終えたら（成功・既存 manager・失敗の
-  // いずれでも）解放する。保持し続けると、Review Manager 本体が終了した後も外部からの
-  // 再開起動が claim に失敗し続ける。起動状態の正本は manager.running と、生存する
-  // 所有者を持つ manager.starting である。
+  // 起動処理が始めた予約はshimへ引き渡し、終了フックが終わるまでshimが所有する。
+  // manager.runningがstaleになってもmanager.startingがliveなら、worker-supervisorは
+  // 終了フックの通知完了まで停止通知を待てる。
   const self = checker();
   let startupRef;
   try {
@@ -128,8 +126,9 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
     throw e;
   }
   try {
+    const startTime = new Date().toISOString();
     return startReviewManagerWithStartupRef({
-      pr, repo, workspace, issue, resume, lockFile, logPath, workerName, self, startupRef,
+      pr, repo, workspace, issue, resume, lockFile, logPath, workerName, self, startupRef, startTime,
     });
   } finally {
     try { if (typeof self.release === 'function') self.release(startupRef); } catch (e) {
@@ -139,17 +138,21 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
 }
 
 function startReviewManagerWithStartupRef({
-  pr, repo, workspace, issue, resume, lockFile, logPath, workerName, self, startupRef,
+  pr, repo, workspace, issue, resume, lockFile, logPath, workerName, self, startupRef, startTime,
 }) {
   const startup = acquireReviewManagerStartup(lockFile, {
     processRef: startupRef,
     liveness: self,
+    pr,
+    issue,
+    startTime,
   });
   if (!startup.acquired) {
     if (startup.error) throw startup.error;
     return 'REVIEW_MANAGER_ALREADY_RUNNING';
   }
 
+  let launchAttempted = false;
   try {
     // req.13: stale 判定付きで lock チェック
     if (isLockValid(lockFile)) {
@@ -171,6 +174,7 @@ function startReviewManagerWithStartupRef({
   // 通常ワーカーが既に使っている、ログインシェルのコマンド連鎖自体に組み込まれた
   // onExitフック（呼び出し元の状態に一切依存せず確実に発火する）に乗せることで、
   // タイムアウトに頼らず起動直後から実行完了までの全期間のクラッシュを検出できる。
+  launchAttempted = true;
   const launched = launchAgentHeadless({
     // Phase 5: ISSUE を run-review-manager.js へ構造化引数として渡す。
     // shell文字列の再構築を避け、argv配列で直接渡す（argv-parsing-pitfalls ルール準拠）。
@@ -181,6 +185,8 @@ function startReviewManagerWithStartupRef({
       GH_MAESTRO_WORKER: workerName,
       GH_MAESTRO_WORKSPACE: workspace,
       GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN: startup.token,
+      GH_MAESTRO_REVIEW_MANAGER_PR: String(pr),
+      GH_MAESTRO_REVIEW_MANAGER_START_TIME: startTime,
     },
     onExit: {
       command: process.execPath,
@@ -199,19 +205,25 @@ function startReviewManagerWithStartupRef({
       + (stopError ? `。子プロセスの停止にも失敗しました: ${stopError.message}` : '。子プロセスを停止しました'));
   }
 
-  // manager.runningはここでは書かない。本体が書き込んだ後に起動予約を
-  // 解放できるよう、shimのPIDだけをmanager.startingへ引き渡す。
+  // manager.runningはここでは書かない。shimは起動から終了フック完了まで
+  // manager.startingを所有するため、shimのPIDだけを予約へ引き渡す。
   const transferred = transferReviewManagerStartup(lockFile, startup.token, {
     processRef: launched.processRef,
   });
-  // 本体が先にmanager.runningを書いて予約を解放した場合はmissingになる。
+  // Review Managerと終了フックが素早く完了して予約を解放した場合はmissingになる。
   // それは正常な並行実行なので、二重起動扱いにはしない。
   if (!transferred.transferred && !transferred.missing) {
+    try { _killProcessTree(launched.pid); } catch (killError) {
+      console.warn(`start-review-manager: 起動予約引き渡し失敗後のReview Manager停止にも失敗: ${killError.message}`);
+    }
     throw new Error(transferred.reason || 'Review Manager起動予約の引き渡しに失敗しました');
   }
   return 'REVIEW_MANAGER_STARTED';
   } catch (e) {
-    releaseReviewManagerStartup(lockFile, startup.token);
+    // 起動処理に入った後の失敗は、終了フックまたはsupervisorが結果を確認するまで
+    // 起動予約を残す。shimがまだ予約を引き継いでいない場合も、この関数の呼び出し元が
+    // endpointを解放した時点で予約はstaleになり、停止検出の対象になる。
+    if (!launchAttempted) releaseReviewManagerStartup(lockFile, startup.token);
     throw e;
   }
 }

@@ -26,15 +26,24 @@ const {
   superviseReviewManager, clearStaleIncompleteSentinel, resetRetryCount,
   findIncompleteSentinel, readIncompleteSentinel, incompleteSentinelOutcome,
   persistReviewManifest, runJobsDeterministically, mapAgentPhaseFailure,
+  resolveReviewManagerStartTime,
   _validateFindingShape, _validateAgainstSchema,
   _setPollForArtifact, _setRunReviewJobsOnce,
 } = require('../scripts/run-review-manager');
 
 const SKILL_MD = 'C:\\canonical\\skills\\gh-maestro-reviewer\\SKILL.md';
 const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
+const { readReviewManagerGeneration } = require('../scripts/shared/review-manager-generation');
 const { reviewManagerStartingPath } = require('../scripts/shared/running-review-managers');
 const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'run-review-manager.js');
+
+test('起動予約が渡した世代時刻をrun-review-managerが保持し、不正値は拒否する', () => {
+  const startTime = '2026-08-01T10:00:00.000Z';
+  assert.equal(resolveReviewManagerStartTime(startTime), startTime);
+  assert.throws(() => resolveReviewManagerStartTime('invalid'), /世代時刻が不正/);
+  assert.equal(Number.isFinite(Date.parse(resolveReviewManagerStartTime(undefined))), true);
+});
 
 const tmpBase = path.join(os.tmpdir(), 'gh-maestro-test-run-rm-' + Date.now());
 
@@ -580,7 +589,7 @@ test('boundedCleanup: manager.running は所有者とOS resourceが一致する�
 
 // ── superviseReviewManager: setupReviewWorktree 失敗時の記録 ──────────────
 
-test('superviseReviewManager: setupReviewWorktree失敗時にsetup-failedで戻りロックを記録して起動予約を解放する', async () => {
+test('superviseReviewManager: setupReviewWorktree失敗時もmanager.startingを終了フックまで保持する', async () => {
   const testDir = path.join(tmpBase, 'sv-error-imm');
   fs.mkdirSync(testDir, { recursive: true });
 
@@ -594,8 +603,7 @@ test('superviseReviewManager: setupReviewWorktree失敗時にsetup-failedで戻�
   const logs = [];
   const log = (msg) => logs.push(msg);
 
-  // 起動側が先に作った予約を、本体がmanager.runningを書いた直後に解放する
-  // 順序を模擬する（PR #410の二重writer回帰）。
+  // 起動側がshim所有として渡した予約を、本体がmanager.runningを書いても保持する。
   const startupToken = 'startup-token-for-test';
   fs.mkdirSync(path.dirname(startingFile), { recursive: true });
   fs.writeFileSync(startingFile, JSON.stringify({
@@ -609,7 +617,7 @@ test('superviseReviewManager: setupReviewWorktree失敗時にsetup-failedで戻�
   let result;
   try {
     result = await superviseReviewManager({
-      pr: '999', repo: 'o/r', workspace: testDir,
+      pr: '999', repo: 'o/r', issue: '715', workspace: testDir,
       ghDir, lockFile, logFile, outputFile, promptFile,
       deadlineMs: 30000,
       log,
@@ -628,7 +636,10 @@ test('superviseReviewManager: setupReviewWorktree失敗時にsetup-failedで戻�
   const marker = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
   assert.equal(marker.pid, process.pid);
   assert.ok(marker.startTime === null || typeof marker.startTime === 'string');
-  assert.equal(fs.existsSync(startingFile), false, '本体書き込み後に自分の起動予約を解放する');
+  assert.equal(marker.issue, 715);
+  const generation = readReviewManagerGeneration(testDir, '999');
+  assert.deepEqual(generation, { version: 1, startTime: marker.startTime, state: 'running' });
+  assert.equal(fs.existsSync(startingFile), true, '異常終了通知を送る終了フックが解放するまで予約を保持する');
 });
 
 // ── Issue #248 項目4: clearStaleIncompleteSentinel ─────────────────────────
@@ -646,6 +657,29 @@ test('clearStaleIncompleteSentinel: 存在するセンチネルを削除する',
   fs.writeFileSync(sentinel, 'done');
   clearStaleIncompleteSentinel(testDir, 123);
   assert.ok(!fs.existsSync(sentinel), 'sentinel should be removed');
+});
+
+test('clearStaleIncompleteSentinel: 前周回のreview worktree sentinelも削除する', () => {
+  const testDir = path.join(tmpBase, 'stale-worktree-sentinel');
+  const worktreeSentinel = path.join(
+    testDir, '.gh-maestro', 'worktrees', 'review-pr-123',
+    '.gh-maestro', 'records', 'pr', '123', 'review', 'manager.incomplete',
+  );
+  fs.mkdirSync(path.dirname(worktreeSentinel), { recursive: true });
+  fs.writeFileSync(worktreeSentinel, 'done');
+
+  clearStaleIncompleteSentinel(testDir, 123);
+
+  assert.ok(!fs.existsSync(worktreeSentinel), 'old worktree artifact must not be recorded as the current generation');
+});
+
+test('clearStaleIncompleteSentinel: 古いセンチネルを削除できないと新世代を開始しない', () => {
+  const testDir = path.join(tmpBase, 'stale-sentinel-unremovable');
+  const sentinel = reviewArtifactPath(testDir, 123, '.incomplete');
+  fs.mkdirSync(sentinel, { recursive: true });
+
+  assert.throws(() => clearStaleIncompleteSentinel(testDir, 123), /古い不完全レビュー・センチネルを削除できません/);
+  assert.equal(fs.statSync(sentinel).isDirectory(), true, '削除不能な状態を自動修復しない');
 });
 
 test('clearStaleIncompleteSentinel: 存在しなければno-op（エラーにしない）', () => {
