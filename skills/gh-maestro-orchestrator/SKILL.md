@@ -142,8 +142,8 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 
 **番号と呼称の規約**:
 - 大項目は `1.`〜`9.` の固定番号で表し、必須／任意を見出しに記す。
-- 中項目は `大項目-[項目番号/総数]`（例: `5-[3/4]`）で表す。見出しに必須／任意を記し、任意を飛ばすときは番号と理由を明示する。必須の穴は規約違反である。
-- 人間へ提示・依頼する冒頭で実行中の工程番号を名乗る。任意項目を飛ばす場合も番号と理由を名乗る。
+- 中項目は `大項目-[項目番号/総数]`（例: `5-[3/4]`）で表す。見出しに必須／任意を記し、任意を飛ばすときは番号だけを示して理由を書かない。必須の穴は規約違反である。
+- 人間に判断や対応を求める発言の冒頭で実行中の工程番号を示す。任意工程・中項目を飛ばす発言では番号だけを示し、理由を添えない。
 - Issueごとの工程は一度に1件だけ進める。別件は保留Issueへ積み、ワーカー待ちの間に着手しない。
 
 ### 1. 要件確定【必須】
@@ -224,22 +224,22 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 | 到着イベント・契機 | 一次対応 | 次の工程・処理先 |
 |---|---|---|
 | セッション開始、/gh-maestro起動 | plugin monitorがロードされたことを確認する。受信monitorを手動で張り直さない。 | 横断手続き「セッションの受信monitorとInbox Supervisor」 |
-| セッション開始時の$WORKSPACE/.gh-maestro/sync-failures/確認 | 失敗記録があれば事実を伝え、規約同期失敗の確認・再同期を促す。 | 横断手続き「セッションの受信monitorとInbox Supervisor」 |
+| セッション開始時の$WORKSPACE/.gh-maestro/sync-failures/確認 | 失敗記録があれば、対象ファイルの確認と再同期という人間の次の操作を依頼する。 | 横断手続き「セッションの受信monitorとInbox Supervisor」 |
 | PLAN_REPORTED:<issue>:<planCommentId> | 計画URL報告のcarrierコメントは既読化済み。`msg-read.js --plan --issue <issue> --workspace $WORKSPACE` でpin済み計画を読む。 | 工程5。NEW_MESSAGEは重ねて出力されない。 |
 | NEW_MESSAGE:<issue>:<commentId> | `msg-read.js <commentId> --workspace $WORKSPACE` で本文を読む。plan-report以外の報告・障害を本文から判定する。 | 該当工程、PR/Review Manager通知、または障害対応。 |
 | msg-poll未初期化・旧形式(v1) | `reset-session.js --workspace $WORKSPACE` で初期化して受信を再開する。 | 横断手続き「セッションの受信monitorとInbox Supervisor」 |
-| worker起動失敗・異常終了、または配送断念 | 未完了の事実を扱う。必要時だけworker logを確認し、人間へ伝える。 | monitor-recovery.mdまたは横断手続き「ワーカーの稼働監視」 |
+| worker起動失敗・異常終了、または配送断念 | 未完了の作業を復旧手順に渡す。必要時だけworker logを確認し、人間の判断が必要な場合に限り、未完了作業と判断材料を示して尋ねる。 | monitor-recovery.mdまたは横断手続き「ワーカーの稼働監視」 |
 | 自動代理送信マーカー | msg-send.jsの呼び忘れとして本文を通常どおり評価する。 | 該当工程 |
 | 報告後のプロセス残留 | `stop-worker.js`でプロセスだけを止め、成果を保持する。 | 横断手続き「ワーカーの停止と削除」 |
-| ハング通知・不審な長時間稼働 | worker logと状態を確認し、ハング時は自動停止せず人間へ報告する。 | 横断手続き「ワーカーの稼働監視」とmonitor-recovery.md |
-| workerプロセス停止検知 | 成果待ちでなければ何もしない。待っていた場合は30秒後に報告を再確認し、無ければ成果なしと伝える。 | 該当工程 |
+| ハング通知・不審な長時間稼働 | worker logと状態を確認し、ハング時はmonitor-recovery.mdに従う。人間の判断が必要な場合だけ、対象作業と選択肢を示して尋ねる。 | 横断手続き「ワーカーの稼働監視」とmonitor-recovery.md |
+| workerプロセス停止検知 | 成果待ちでなければ何もしない。待っていた場合は30秒後に報告を再確認し、無ければ該当工程の復旧手順へ進む。 | 該当工程 |
 | 新規起動workerが報告なしで終了 | logを読んで代理投稿せず、短いresumeで本人に報告させる。 | 該当工程 |
-| Inbox/PR monitor停止・通知欠落 | sessionとregistryを確認し、異常を報告する。plugin管理monitorを重複起動しない。 | monitor-recovery.md |
+| Inbox/PR monitor停止・通知欠落 | sessionとregistryを確認してmonitor-recovery.mdに従う。人間の対応が必要な場合だけ、停止している通知経路と必要な操作を示して尋ねる。plugin管理monitorを重複起動しない。 | monitor-recovery.md |
 | PR_MONITOR_TARGET_SET:<json> | Issue・generation・workspaceが正しいことを確認する。 | 工程4。次にPR_DETECTEDを待つ。 |
-| PR_BASE_MISMATCH:<PR>:<expected>:<actual> | PRは処理対象として保持し、base違いを人間へ伝える。 | 工程7-[1/6] |
+| PR_BASE_MISMATCH:<PR>:<expected>:<actual> | PRは処理対象として保持し、baseの差異を記録してマージ判断時の材料にする。 | 工程7-[1/6] |
 | PR_DETECTED:<PR> | PRを記録する。通常経路ではReview Managerとslow層を起動し、軽量PRはlightweight-pr.mdに従う。 | 工程7-[1/6] |
 | REVIEW_MANAGER_STARTED / REVIEW_MANAGER_ALREADY_RUNNING / REVIEW_MANAGER_ALREADY_CLAIMED | 起動・稼働・claim済みを記録する。必要時はmonitor-recovery.mdを確認する。 | 工程7-[1/6] |
-| Review Manager異常終了のNEW_MESSAGE（fromがissue-<N>-review-manager-pr-<PR>） | worker logで原因を確認して人間へ報告し、原因解消後にReview Managerだけ復旧する。 | 工程7-[2/6] |
+| Review Manager異常終了のNEW_MESSAGE（fromがissue-<N>-review-manager-pr-<PR>） | worker logで原因を確認し、原因解消後にReview Managerだけ復旧する。復旧を進めるために人間の判断が必要な場合だけ、その判断に要る状況を示して尋ねる。 | 工程7-[2/6] |
 | SLOW_TEST_STARTED / SLOW_TEST_ALREADY_RECORDED / SLOW_TEST_RESULT | PR/HEAD/layerを照合し、状態・件数・ログ識別子を記録する。unavailableや申告更新失敗を再試行・診断しない。軽量PRでは発生しない。 | 工程7-[1/6] |
 | REVIEW_COMMENT / PR_REVIEW | 投稿者と本文を保持する。APPROVEDはマージ許可シグナル、CHANGES_REQUESTEDは指摘、COMMENTEDはPR_COMMENT同様に扱う。 | triage.mdと工程7-[3/6]。 |
 | PR_COMMENT | 投稿者と本文を保持する。テスト結果申告など、正式レビューではないコメントではtriage.mdを追加しない。 | 工程7-[1/6]。 |
@@ -249,8 +249,8 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 | PR_MERGED:<PR番号> | mergeを確認する。worker/worktreeは消さない。 | 工程8。hookはstage-8・stage-9・retrospective.mdをまとめて追加する。 |
 | PR_CLOSED:<PR番号> | 却下・cancel理由を確認し、mergeと扱わない。 | 工程7-[1/6]。 |
 | PR_CLOSED_RESUMED:<PR番号> | 次のPR検出へ戻った生存シグナルとして記録する。 | 工程7-[1/6]でPR_DETECTED待ち。 |
-| POLL_ERROR:<detail> / POLL_RECOVERED | GitHub accessの劣化・復旧を人間へ事実として伝える。自動再起動しない。 | 工程7-[1/6] |
-| 同じBLOCKERが2回連続するスパイラル | 転送を止め、対象と回数を提示する。原因・次の対応は人間に委ねる。 | 工程7-[3/6] |
+| POLL_ERROR:<detail> / POLL_RECOVERED | GitHub accessの状態を記録し、自動再起動しない。復旧した事実だけは人間へ伝えず、マージ判断に影響する未解決状態は工程7-[5/6]の材料にする。 | 工程7-[1/6] |
+| 同じBLOCKERが2回連続するスパイラル | 転送を止め、対象と連続回数を判断材料として示し、次に取る対応を人間に尋ねる。 | 工程7-[3/6] |
 
 PR監視・受信monitorの停止、slow state、worker-statusの復旧詳細はmonitor-recovery.mdに従う。
 

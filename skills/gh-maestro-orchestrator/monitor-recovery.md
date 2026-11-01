@@ -14,7 +14,7 @@
 
 1. `/gh-maestro` を実行した現在の対話型セッションに、plugin monitor `gh-maestro-inbox` がロードされていることを確認する。
 2. `node "{{SCRIPTS_PATH}}/process-lifecycle.js" status --workspace $WORKSPACE --script msg-poll.js` でregistryの事実を確認する。生存していても、別セッションのstdoutを現在の画面へ届ける根拠にはしない。
-3. Claude Codeの強制終了後に残った同役割monitorは、次の対話型セッションで自動引き継ぎされる。monitorの起動後に現在のセッションへ通知が届くことを確認する。pluginのロード失敗・引き継ぎ後のmonitor終了・`NEW_MESSAGE` の欠落が続く場合は人間へ事実を報告する。手動でmonitorを重複起動しない。
+3. Claude Codeの強制終了後に残った同役割monitorは、次の対話型セッションで自動引き継ぎされる。monitorの起動後に現在のセッションへ通知が届くことを確認する。pluginのロード失敗・引き継ぎ後のmonitor終了・`NEW_MESSAGE` の欠落が続く場合は復旧手順に従う。復旧が止まり人間の対応が必要なときだけ、停止している通知経路と必要な操作を示して尋ねる。手動でmonitorを重複起動しない。
 
 ## PR監視・Review Managerの再起動
 
@@ -27,7 +27,7 @@ node "{{SCRIPTS_PATH}}/activate-pr-monitor.js" \
 
 Review Managerを起動しない軽量経路では、上のコマンドへ `--no-review-manager --no-review-events` を追加する。`poll-pr-monitor.js` がruntimeの `pr-monitor-target.json` を読み、世代ごとに `poll-pr.js` を1回だけ子プロセスとして起動する。targetの切替・削除では旧poll-prとslow子プロセスをまとめて停止し、同じ世代を自動再試行しない。
 
-途中停止した Review Manager を続行する場合は `node "{{SCRIPTS_PATH}}/start-review-manager.js" --resume <PR> <REPO> "$WORKSPACE" <ISSUE>` を明示する。同じHEADの計画と成功済みジョブを再利用し、記録なし・HEAD変更時は新規開始する。`--resume` なしでは常に新規開始し、古い記録は保持する。前回のジョブ実行器が生存中または同一性を確認できない場合は再開を拒否し、停止しない。記録の破損や読み取り失敗は削除・修復せず報告する。
+途中停止した Review Manager を続行する場合は `node "{{SCRIPTS_PATH}}/start-review-manager.js" --resume <PR> <REPO> "$WORKSPACE" <ISSUE>` を明示する。同じHEADの計画と成功済みジョブを再利用し、記録なし・HEAD変更時は新規開始する。`--resume` なしでは常に新規開始し、古い記録は保持する。前回のジョブ実行器が生存中または同一性を確認できない場合は再開を拒否し、停止しない。記録の破損や読み取り失敗は削除・修復せず停止する。復旧判断を人間に求める場合は、対象ファイルと失敗理由を示して必要な操作を尋ねる。
 
 確認する記録は次のとおりである。
 
@@ -37,14 +37,14 @@ Review Managerを起動しない軽量経路では、上のコマンドへ `--no
 
 ### slow stateがrunningのまま残った場合
 
-`poll-pr.js` は起動時に `.gh-maestro/poll-slow-test-<PR>.json` を走査する。`running` レコードのslow workerについて、endpointがdead、または記録がendpointを持たない旧形式（持ち主のいない記録として dead）の場合は、workerをkillせず `unavailable` と `SLOW_TEST_RESULT` を記録する。endpointへのI/Oがunknownの場合は状態を確定せず停止して報告する。再実行は行わない。生きたendpointと同じ `instanceId` を確認できる場合だけ、そのworkerを待つ。
+`poll-pr.js` は起動時に `.gh-maestro/poll-slow-test-<PR>.json` を走査する。`running` レコードのslow workerについて、endpointがdead、または記録がendpointを持たない旧形式（持ち主のいない記録として dead）の場合は、workerをkillせず `unavailable` と `SLOW_TEST_RESULT` を記録する。endpointへのI/Oがunknownの場合は状態を確定せず停止する。再実行は行わない。人間の判断が必要なときは、PR・HEAD・layerと取得できていない結果を判断材料として示す。生きたendpointと同じ `instanceId` を確認できる場合だけ、そのworkerを待つ。
 
 再現調査で `poll-pr.js` を停止するとslow実行も停止し、stateが `running` のまま残った事実は、親子プロセス寿命の契約を確認する回帰材料である。slowをdetached化して監視から切り離すことで隠すのではなく、回収処理で結果を確定する。
 
 ### plugin monitorまたはpoll-prが終了した場合
 
 1. registryの `script=msg-poll.js` / `script=poll-pr.js` と、plugin monitorのセッション状態を別々に確認する。
-2. `pr-monitor-target.json` の読み取りエラーは対象なしとして扱わず、人間へ破損・読み取り不能を報告する。
+2. `pr-monitor-target.json` の読み取りエラーは対象なしとして扱わず、処理を止める。人間に復旧を求めるときは対象ファイルと読み取り理由を示して復旧指示を尋ねる。
 3. targetが意図せず消えている場合だけ、`activate-pr-monitor.js` で現在のIssueを再設定する。Review Managerだけを再起動する場合は `start-review-manager.js` の規約に従い、PR監視全体を重複起動しない。
 
 ## Issue終了時
@@ -73,10 +73,10 @@ node "{{SCRIPTS_PATH}}/worker-status.js" close-pane --workspace $WORKSPACE
 
 他のワーカーと比べて連続稼働時間が突出している場合や、タスク規模に対して不自然に長い場合は、worker log（$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log）を読み、処理中か、暴走ループか、無応答かを切り分ける。ログは異常終了・配送断念・長時間無反応の生死確認が必要な場合にだけ読む。新規起動workerが報告せず終了してもログから代理投稿せず、短いresumeメッセージで本人に報告させる。
 
-暴走やハングと判断した場合はstop-worker.jsでプロセスを停止し、人間に状況を報告するか、必要に応じて追加指示でresumeを促す。閾値による機械的な自動停止は行わず、停止・再開はorchestratorが判断する。報告後にプロセスだけが残った居座りもstop-worker.jsを使う。remove-worker.jsはworktree・branch・登録も消すため、再開可能な停止に使わない。
+暴走やハングと判断した場合はstop-worker.jsでプロセスを停止する。閾値による機械的な自動停止は行わず、停止・再開はorchestratorが判断する。人間の判断が必要な場合だけ、対象workerの作業・状態・選択肢を示して尋ねる。報告後にプロセスだけが残った居座りもstop-worker.jsを使う。remove-worker.jsはworktree・branch・登録も消すため、再開可能な停止に使わない。
 ## 監視ペイン
 
-`status-pane` はplugin monitorとは別のWezTerm設備である。install後の常駐更新が監視ペインを別workspaceから奪わない契約は維持する。必要時だけ次を実行し、失敗した場合はregistryを確認して人間へ報告する。
+`status-pane` はplugin monitorとは別のWezTerm設備である。install後の常駐更新が監視ペインを別workspaceから奪わない契約は維持する。必要時だけ次を実行し、失敗した場合はregistryを確認する。監視paneの状態が人間の判断を妨げるときに限り、対象状態と必要な対応を示して尋ねる。
 
 ```sh
 node "{{SCRIPTS_PATH}}/restart-residents.js" --workspace "$WORKSPACE" --restart-status-pane
@@ -90,4 +90,4 @@ endpointを持たない旧形式の `msg-poll.js` が複数ある場合だけ、
 node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace "$WORKSPACE" --dry-run
 ```
 
-対象PIDと `instanceId`（旧記録で無い場合はその事実）を人間へ報告し、無関係な常駐を含む無条件のsweepや手動killを行わない。plugin管理対象を通常Monitorの再接続で置き換えない。
+対象PIDと `instanceId`（旧記録で無い場合はその事実）を確認し、無関係な常駐を含む無条件のsweepや手動killを行わない。人間の判断が必要なcleanupでは、対象PID・`instanceId`・実施する操作を示して一つの問いで確認する。plugin管理対象を通常Monitorの再接続で置き換えない。
