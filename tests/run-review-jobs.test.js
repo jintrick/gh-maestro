@@ -304,7 +304,7 @@ test('resolveReviewSkillsDir: 通常時は managedRoot() 配下の正本パス�
   assert.equal(customDir, path.resolve('/custom/skills/gh-maestro-reviewer'));
 });
 
-test('レビュー観点の7葉はcommon/pre/postの固定レイアウトを持つ', () => {
+test('レビュー観点の8葉はcommon/pre/postの固定レイアウトを持つ', () => {
   const expectedLeafIds = [
     'correctness/logic-invariants',
     'correctness/api-contract',
@@ -312,9 +312,10 @@ test('レビュー観点の7葉はcommon/pre/postの固定レイアウトを持�
     'resilience-security/failure-recovery',
     'resilience-security/hostile-input',
     'maintainability/structure-naming',
+    'maintainability/design-quality',
     'test-quality/test-quality',
   ];
-  assert.deepEqual(ALL_LEAF_IDS, expectedLeafIds, '正本の7葉一覧はこの固定集合と一致する');
+  assert.deepEqual(ALL_LEAF_IDS, expectedLeafIds, '正本の8葉一覧はこの固定集合と一致する');
 
   const skillsDir = path.join(__dirname, '..', 'skills', 'gh-maestro-reviewer');
   const common = fs.readFileSync(path.join(skillsDir, 'common.md'), 'utf8');

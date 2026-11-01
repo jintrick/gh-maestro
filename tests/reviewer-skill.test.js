@@ -24,6 +24,7 @@ test('gh-maestro-reviewer: フェーズ1手順は print-review-leaves と葉の�
   assert.match(phase1, /node "\{\{SCRIPTS_PATH\}\}\/print-review-leaves\.js"/);
   assert.match(phase1, /correctness\/logic-invariants/);
   assert.match(phase1, /resilience-security\/failure-recovery/);
+  assert.match(phase1, /maintainability\/design-quality/);
   assert.match(phase1, /test-quality\/test-quality/);
 });
 

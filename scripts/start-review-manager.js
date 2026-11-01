@@ -33,7 +33,7 @@ Arguments:
   <WORKSPACE>  ワークスペースの絶対パス
   <ISSUE>      アンカー Issue 番号（起動直後クラッシュ等の異常終了通知の投稿先）
 
-Review Managerは7葉のレビュー基準を評価し、PR diffに基づいて関連する葉を adopted /
+Review Managerは8葉のレビュー基準を評価し、PR diffに基づいて関連する葉を adopted /
 excluded に分類した上で、採用葉のレビュージョブを動的に分割・並列実行する。
 Node.jsの決定論的ツール（run-review-jobs.js / finalize-review.js）がジョブの起動・
 状態記録・完全性ゲート検証・成果物書き出しを機械的に行う（skills/gh-maestro-reviewer/SKILL.md参照）。
