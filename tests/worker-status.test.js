@@ -2258,3 +2258,51 @@ test('_getRepo: 既定の timeoutMs に REPO_RESOLVE_TIMEOUT_MS (3000ms) を渡�
   workerStatus._setResolveRepo(null);
   workerStatus._clearRepoCache();
 });
+
+
+// ── Issue #692: 稼働時間の合計（投影と現在のレジストリの突き合わせ） ─────────
+
+test('mergeCycleWorkers: 現在runの登録時刻が投影と数ミリ秒ずれても二重計上せず、過去runと合算する', () => {
+  // 過去run（停止済み60秒）と現在run（投影は未停止・登録は +3ms）。
+  const merged = workerStatus.mergeCycleWorkers([
+    { workerName: 'issue-692-coder-x', pid: 101, startTime: '2026-09-10T05:00:00.000Z', stopTime: '2026-09-10T05:01:00.000Z', running: false, abnormal: false, elapsedSeconds: 60 },
+    { workerName: 'issue-692-coder-x', pid: 202, startTime: '2026-09-10T05:10:00.000Z', running: true, abnormal: false, elapsedSeconds: null },
+  ], [
+    { workerName: 'issue-692-coder-x', pid: 202, startTime: '2026-09-10T05:10:00.003Z', running: true, abnormal: false, elapsedSeconds: 120, durationKnown: true },
+  ]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].runNumber, 2);
+  assert.equal(merged[0].running, true);
+  // 期待値: 過去run 60秒 + 現在run 120秒（登録の経過）= 180秒。
+  assert.equal(merged[0].durationKnown, true);
+  assert.equal(merged[0].elapsedSeconds, 180);
+});
+
+test('mergeCycleWorkers: 停止記録のない過去runがあれば合計は不明にし、推測値を出さない', () => {
+  const merged = workerStatus.mergeCycleWorkers([
+    { workerName: 'issue-692-coder-y', pid: 101, startTime: '2026-09-10T05:00:00.000Z', running: true, abnormal: false, elapsedSeconds: null },
+    { workerName: 'issue-692-coder-y', pid: 202, startTime: '2026-09-10T05:10:00.000Z', running: true, abnormal: false, elapsedSeconds: null },
+  ], [
+    { workerName: 'issue-692-coder-y', pid: 202, startTime: '2026-09-10T05:10:00.000Z', running: true, abnormal: false, elapsedSeconds: 120, durationKnown: true },
+  ]);
+  assert.equal(merged[0].durationKnown, false);
+  assert.equal(merged[0].elapsedSeconds, null);
+  // 表示上も 0 や推測値にせず、不明だと分かる記号になる。
+  const lines = workerStatus.renderWorkerRows([merged[0]], { maxRows: 4 });
+  assert.ok(lines[0].includes('??:??'));
+});
+
+test('mergeCycleWorkers: 停止済みworkerは登録時刻と停止の開始時刻が数ミリ秒ずれても「不明」にならない', () => {
+  const merged = workerStatus.mergeCycleWorkers([
+    { workerName: 'issue-692-coder-z', pid: 101, startTime: '2026-09-10T05:00:00.000Z', stopTime: '2026-09-10T05:01:30.000Z', running: false, abnormal: false, elapsedSeconds: 90 },
+  ], [
+    { workerName: 'issue-692-coder-z', pid: 101, startTime: '2026-09-10T05:00:00.003Z', running: false, abnormal: false, elapsedSeconds: 0, durationKnown: false },
+  ]);
+  assert.equal(merged[0].running, false);
+  assert.equal(merged[0].durationKnown, true);
+  assert.equal(merged[0].elapsedSeconds, 90);
+  const lines = workerStatus.renderWorkerRows([merged[0]], { maxRows: 4 });
+  // 期待値: 開始 05:00:00 から停止 05:01:30 までの 90 秒（01:30）。
+  assert.ok(lines[0].includes('01:30'));
+  assert.ok(!lines[0].includes('??:??'));
+});
