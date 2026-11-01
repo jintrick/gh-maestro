@@ -188,7 +188,9 @@ function writeReviewManagerGeneration(workspace, { pr = '42', startTime = '2026-
   return file;
 }
 
-function writeReviewManagerStartup(workspace, { pr = '42', pid = 5200 } = {}) {
+function writeReviewManagerStartup(workspace, {
+  pr = '42', pid = 5200, issue = 715, startTime = '2026-08-01T10:00:00.000Z',
+} = {}) {
   const runningPath = path.join(workspace, '.gh-maestro', 'records', 'pr', String(pr), 'review', 'manager.running');
   const file = path.join(path.dirname(runningPath), 'manager.starting');
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -197,6 +199,9 @@ function writeReviewManagerStartup(workspace, { pr = '42', pid = 5200 } = {}) {
     resourceKey: 'a'.repeat(64),
     instanceId: `review-manager-startup-instance-${pr}`,
     token: `startup-token-${pr}`,
+    pr: Number(pr),
+    issue,
+    startTime,
   }), 'utf8');
   return file;
 }
@@ -293,6 +298,87 @@ resetAllMocks();
 
 describe('Review Manager stop monitoring', () => {
   beforeEach(() => resetAllMocks());
+
+  test('manager.running作成前に停止したstale起動予約からPRの停止を通知し、既存cursorへ世代を保存する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerStartup(dir);
+      const runningPath = path.join(dir, '.gh-maestro', 'records', 'pr', '42', 'review', 'manager.running');
+      assert.equal(fs.existsSync(runningPath), false, '起動予約だけが存在する状態');
+
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0].issue, '715');
+      assert.match(notifications[0].body, /PR #42/);
+      assert.ok(scan.lines.includes('REVIEW_MANAGER_STOP_DETECTED:42:5200'));
+      const cursor = JSON.parse(fs.readFileSync(
+        supervisor.cursorPath(dir, 'issue-715-review-manager-pr-42'), 'utf8',
+      ));
+      assert.equal(cursor.stoppedNotifiedPid, 5200);
+      assert.equal(cursor.stoppedNotifiedStartTime, '2026-08-01T10:00:00.000Z');
+    });
+  });
+
+  test('manager.running前の停止でも同世代の確定結果があれば通知しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerStartup(dir);
+      const reviewDir = path.join(dir, '.gh-maestro', 'records', 'pr', '42', 'review');
+      fs.writeFileSync(path.join(reviewDir, 'manager.json'), '{}', 'utf8');
+      writeReviewManagerGeneration(dir, { state: 'complete' });
+
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+      assert.equal(notifications.length, 0);
+    });
+  });
+
+  test('PRを特定できない旧起動予約は停止と誤認せず判定不能を通知する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      const startupPath = writeReviewManagerStartup(dir);
+      const startup = JSON.parse(fs.readFileSync(startupPath, 'utf8'));
+      delete startup.pr;
+      fs.writeFileSync(startupPath, JSON.stringify(startup), 'utf8');
+
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1);
+      assert.match(notifications[0].body, /状態を判定できません/);
+      assert.doesNotMatch(notifications[0].body, /Review Manager（PID/);
+      assert.ok(!scan.lines.some((line) => line.startsWith('REVIEW_MANAGER_STOP_DETECTED:')));
+    });
+  });
 
   test('manager.running停止通知はPRを示し、既存stopped cursorで同じPIDと起動時刻を重複通知しない', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));

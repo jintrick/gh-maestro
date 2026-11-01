@@ -513,12 +513,21 @@ module.exports = {
   readIncompleteSentinel,
   incompleteSentinelOutcome,
   persistReviewManifest,
+  resolveReviewManagerStartTime,
   // テスト用エクスポート
   _validateFindingShape, _validateAgainstSchema,
   _setPollForArtifact: (fn) => { _injectedPollForArtifact = fn; },
   _setRunReviewJobsOnce: (fn) => { _injectedRunReviewJobsOnce = fn; },
   _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
 };
+
+function resolveReviewManagerStartTime(startupStartTime) {
+  if (startupStartTime === undefined) return new Date().toISOString();
+  if (typeof startupStartTime !== 'string' || !Number.isFinite(Date.parse(startupStartTime))) {
+    throw new Error('Review Manager起動予約の世代時刻が不正です');
+  }
+  return startupStartTime;
+}
 
 /**
  * 同一PRの古い不完全レビュー・センチネル（review-manager-<PR>.incomplete）を削除する。
@@ -1343,7 +1352,14 @@ if (require.main === module) {
         return null;
       }
     })();
-    const reviewManagerStartTime = new Date().toISOString();
+    let reviewManagerStartTime;
+    try {
+      reviewManagerStartTime = resolveReviewManagerStartTime(process.env.GH_MAESTRO_REVIEW_MANAGER_START_TIME);
+    } catch (error) {
+      console.error(`run-review-manager: ${error.message}`);
+      process.exitCode = 1;
+      return;
+    }
     try {
       _recordCycleEvent(workspace, issue, 'worker-started', {
         workerName: reviewManagerWorkerName,

@@ -1070,18 +1070,18 @@ function main(argsOverride, opts = {}) {
         continue;
       }
 
-      if (manager.status === 'missing' || manager.status === 'live') {
+      if (manager.status === 'live') {
         unknownReviewManagerNotifications.delete(pr);
         continue;
       }
-      if (manager.status !== 'stale') {
+      if (manager.status !== 'missing' && manager.status !== 'stale') {
         reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: manager.error?.message || `状態が不正です: ${manager.status}` });
         continue;
       }
 
-      // manager.running may become stale before the shim has finished its exit hook.
-      // The existing manager.starting record is owned by that shim and remains live
-      // until the hook has posted (or failed to post) its abnormal-exit notification.
+      // manager.running may be absent before the manager starts or become stale before
+      // the shim has finished its exit hook. The reservation carries the same PR and
+      // generation identity and remains live until notification/result confirmation.
       let startup;
       try {
         startup = inspectRunningReviewManager(reviewManagerStartingPath(runningPath), {
@@ -1091,9 +1091,37 @@ function main(argsOverride, opts = {}) {
         reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: `終了フックの完了状態を確認できません: ${error.message}` });
         continue;
       }
-      if (startup.status === 'live') continue;
+      if (startup.status === 'live') {
+        unknownReviewManagerNotifications.delete(pr);
+        continue;
+      }
       if (startup.status !== 'missing' && startup.status !== 'stale') {
         reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: `終了フックの完了状態が不明です: ${startup.error?.message || startup.status}` });
+        continue;
+      }
+
+      if (manager.status === 'missing') {
+        if (startup.status === 'missing') {
+          unknownReviewManagerNotifications.delete(pr);
+          continue;
+        }
+        if (startup.reservationPr !== Number(pr) || !startup.startTime || !startup.issue) {
+          reportUnknownReviewManager({
+            pr, pid: startup.pid, startTime: startup.startTime, issue: startup.issue,
+            reason: 'manager.runningが無く、起動予約にPR・アンカーIssue・世代時刻の全てがありません',
+          });
+          continue;
+        }
+        // 起動予約はmanager.runningより先に作成される。本体がmanager.runningを
+        // 書く前に消えた場合も、このstale予約の世代を使って停止を判定する。
+        manager = { ...startup, pr, status: 'stale' };
+      } else if (startup.status === 'stale'
+        && startup.startTime && manager.startTime
+        && startup.startTime !== manager.startTime) {
+        reportUnknownReviewManager({
+          pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue,
+          reason: 'manager.runningと起動予約の世代が一致しません',
+        });
         continue;
       }
 

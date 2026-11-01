@@ -891,7 +891,7 @@ describe('resident unknown-liveness integration', () => {
 });
 
 describe('Review Manager stop notification integration', () => {
-  test('実停止したReview Managerを実resident CLIが検出し、PR付き通知をisolated runtimeへ届ける', async () => {
+  test('manager.running作成前の実停止をresident CLIが起動予約から検出して通知する', async () => {
     await withTempDir(async (dir) => {
       const maestroDir = path.join(dir, '.gh-maestro');
       fs.mkdirSync(maestroDir, { recursive: true });
@@ -899,14 +899,22 @@ describe('Review Manager stop notification integration', () => {
       const owner = startLivenessOwner({
         workspace: dir,
         runtimeRoot,
-        kind: 'review-manager',
-        name: 'issue-715-review-manager-pr-42',
+        kind: 'review-manager-startup',
+        name: '42',
       });
       const startTime = new Date(Date.now() - 1000).toISOString();
       const runningPath = path.join(maestroDir, 'records', 'pr', '42', 'review', 'manager.running');
       fs.mkdirSync(path.dirname(runningPath), { recursive: true });
       const { childPid: _childPid, ...ownerRecord } = owner.record;
-      fs.writeFileSync(runningPath, JSON.stringify({ ...ownerRecord, startTime, issue: 715 }), 'utf8');
+      const startupPath = path.join(path.dirname(runningPath), 'manager.starting');
+      fs.writeFileSync(startupPath, JSON.stringify({
+        ...ownerRecord,
+        token: 'startup-token-42',
+        pr: 42,
+        issue: 715,
+        startTime,
+      }), 'utf8');
+      assert.ok(!fs.existsSync(runningPath), 'the manager has not written manager.running');
 
       const ghLogPath = path.join(dir, 'review-manager-gh-calls.jsonl');
       const preloadPath = createResidentUnknownLivenessPreload(ghLogPath);
@@ -936,7 +944,8 @@ describe('Review Manager stop notification integration', () => {
 
       assert.equal(result.status, 0, `resident CLI succeeds\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
       assert.match(result.stdout, /REVIEW_MANAGER_STOP_DETECTED:42:/);
-      assert.ok(fs.existsSync(runningPath), 'stopped manager.running is retained for recovery');
+      assert.ok(fs.existsSync(startupPath), 'stopped startup reservation is retained for recovery');
+      assert.ok(!fs.existsSync(runningPath), 'the notification came from the startup-only path');
       assert.ok(!fs.existsSync(path.join(maestroDir, 'workers.json')), 'Review Manager is not registered in workers.json');
 
       const auditDir = path.join(storageLayout.workspaceRuntimeDir(dir, runtimeRoot), 'resident-audit');

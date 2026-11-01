@@ -236,6 +236,27 @@ test('manager.runningのアンカーIssueが不正なら黙って旧形式へ縮
   assert.throws(() => rrm.parseRunningReviewManagerRecord(JSON.stringify({ pid: 12345, issue: '715x' })), /アンカーIssueが不正/);
 });
 
+test('manager.startingのPRが配置先と違う場合は起動予約の世代を取り違えない', () => {
+  const rrm = fresh();
+  const ws = tmpWorkspace();
+  try {
+    const file = rrm.reviewManagerStartingPath(runningPath(ws, 42));
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      pid: 12345,
+      resourceKey: 'a'.repeat(64),
+      instanceId: 'startup-instance',
+      token: 'startup-token',
+      pr: 42,
+      issue: 715,
+      startTime: '2026-08-28T00:00:00.000Z',
+    }), 'utf8');
+    assert.throws(() => rrm.inspectRunningReviewManager(file, { pr: 43 }), /PRがパスと一致しません/);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test('removeRunningReviewManagerIfOwned: 別所有者のファイルは削除しない', () => {
   const rrm = fresh();
   const ws = tmpWorkspace();

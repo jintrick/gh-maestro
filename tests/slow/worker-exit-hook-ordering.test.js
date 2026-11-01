@@ -19,7 +19,7 @@ function withTempDir(fn) {
   }
 }
 
-test('実際の非ゼロ終了フックは通知を終えてからmanager.startingを解放する', () => {
+test('実際の終了フックは通知失敗後にmanager.startingを保持し、通知成功後に解放する', () => {
   withTempDir((workspace) => {
     const reviewDir = path.join(workspace, '.gh-maestro', 'records', 'pr', '42', 'review');
     fs.mkdirSync(reviewDir, { recursive: true });
@@ -44,30 +44,39 @@ test('実際の非ゼロ終了フックは通知を終えてからmanager.starti
       '};',
       'childProcess.spawnSync = (command, args, options = {}) => {',
       '  fs.writeFileSync(capturePath, JSON.stringify({ command, args, input: options.input }), \'utf8\');',
-      "  fs.appendFileSync(eventsPath, 'abnormal-notification-complete\\n');",
-      "  return { status: 0, stdout: '', stderr: '' };",
+      "  const status = Number(process.env.SIMULATED_NOTIFICATION_STATUS);",
+      "  const event = status === 0 ? 'abnormal-notification-complete\\n' : 'abnormal-notification-failed\\n';",
+      '  fs.appendFileSync(eventsPath, event);',
+      "  return { status, stdout: '', stderr: 'simulated GitHub failure' };",
       '};',
     ].join('\n'), 'utf8');
 
-    const result = spawnSync(process.execPath, [
-      '-r', preloadPath,
-      HOOK_SCRIPT,
-      workspace,
-      '',
-      '3',
-    ], {
-      cwd: workspace,
-      encoding: 'utf8',
-      timeout: 15000,
-      env: {
-        ...cleanSpawnEnv(),
-        GH_MAESTRO_WORKER: 'issue-9-review-manager-pr-42',
-        GH_MAESTRO_REVIEW_MANAGER_PR: '42',
-        GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN: 'startup-token-42',
-      },
-    });
+    const runHook = (notificationStatus) => spawnSync(process.execPath, [
+        '-r', preloadPath,
+        HOOK_SCRIPT,
+        workspace,
+        '',
+        '3',
+      ], {
+        cwd: workspace,
+        encoding: 'utf8',
+        timeout: 15000,
+        env: {
+          ...cleanSpawnEnv(),
+          GH_MAESTRO_WORKER: 'issue-9-review-manager-pr-42',
+          GH_MAESTRO_REVIEW_MANAGER_PR: '42',
+          GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN: 'startup-token-42',
+          GH_MAESTRO_REVIEW_MANAGER_START_TIME: '2026-08-01T10:00:00.000Z',
+          SIMULATED_NOTIFICATION_STATUS: String(notificationStatus),
+        },
+      });
 
-    assert.equal(result.status, 0, result.stderr);
+    const failedPost = runHook(1);
+    assert.equal(failedPost.status, 0, failedPost.stderr);
+    assert.ok(fs.existsSync(startupPath), '投稿失敗後もsupervisorが読む起動予約を残す');
+
+    const successfulPost = runHook(0);
+    assert.equal(successfulPost.status, 0, successfulPost.stderr);
     const relay = JSON.parse(fs.readFileSync(capturePath, 'utf8'));
     assert.deepEqual(relay.args, [
       path.join(__dirname, '..', '..', 'scripts', 'msg-send.js'),
@@ -77,6 +86,7 @@ test('実際の非ゼロ終了フックは通知を終えてからmanager.starti
     ]);
     assert.match(relay.input, /exit code 3/);
     assert.deepEqual(fs.readFileSync(eventsPath, 'utf8').trim().split(/\r?\n/), [
+      'abnormal-notification-failed',
       'abnormal-notification-complete',
       'startup-released',
     ]);

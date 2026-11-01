@@ -8,6 +8,8 @@ const path = require('path');
 
 const hook = require('../scripts/worker-exit-hook');
 const { workerLogPath } = require('../scripts/shared/headless-launch');
+const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
+const { reviewManagerStartingPath } = require('../scripts/shared/running-review-managers');
 
 function withTempDir(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-exit-hook-test-'));
@@ -363,5 +365,76 @@ describe('buildMsgSendRelayArgs', () => {
       '--workspace', '/ws',
       '--abnormal-exit',
     ]);
+  });
+});
+
+describe('completeReviewManagerStartup', () => {
+  const startTime = '2026-08-01T10:00:00.000Z';
+
+  function writeStartup(workspace, pr = '42') {
+    const runningPath = reviewArtifactPath(workspace, pr, '.running');
+    const startingPath = reviewManagerStartingPath(runningPath);
+    fs.mkdirSync(path.dirname(startingPath), { recursive: true });
+    fs.writeFileSync(startingPath, JSON.stringify({ token: 'startup-token' }), 'utf8');
+    return startingPath;
+  }
+
+  test('異常終了通知の投稿失敗後、結果も未確定なら監視可能な起動予約を保持する', () => {
+    withTempDir((workspace) => {
+      const startingPath = writeStartup(workspace);
+      const result = hook.completeReviewManagerStartup({
+        workspace, pr: '42', token: 'startup-token', startTime,
+        notificationResult: { status: 1, stderr: 'temporary GitHub failure' },
+      });
+      assert.equal(result.retained, true);
+      assert.equal(fs.existsSync(startingPath), true);
+    });
+  });
+
+  test('異常終了通知の投稿成功後は起動予約を解放する', () => {
+    withTempDir((workspace) => {
+      const startingPath = writeStartup(workspace);
+      const result = hook.completeReviewManagerStartup({
+        workspace, pr: '42', token: 'startup-token', startTime,
+        notificationResult: { status: 0, stderr: '' },
+      });
+      assert.equal(result.released, true);
+      assert.equal(fs.existsSync(startingPath), false);
+    });
+  });
+
+  test('異常終了通知に失敗しても同世代の確定結果があれば起動予約を解放する', () => {
+    withTempDir((workspace) => {
+      const startingPath = writeStartup(workspace);
+      fs.writeFileSync(reviewArtifactPath(workspace, '42', '.generation.json'), JSON.stringify({
+        version: 1, startTime, state: 'incomplete',
+      }), 'utf8');
+      const result = hook.completeReviewManagerStartup({
+        workspace, pr: '42', token: 'startup-token', startTime,
+        notificationResult: { status: 1, stderr: 'temporary GitHub failure' },
+      });
+      assert.equal(result.released, true);
+      assert.equal(fs.existsSync(startingPath), false);
+    });
+  });
+
+  test('complete世代でもmanager.jsonが無ければ予約を残し、成果物を確認できた後に解放する', () => {
+    withTempDir((workspace) => {
+      const startingPath = writeStartup(workspace);
+      fs.writeFileSync(reviewArtifactPath(workspace, '42', '.generation.json'), JSON.stringify({
+        version: 1, startTime, state: 'complete',
+      }), 'utf8');
+      const params = {
+        workspace, pr: '42', token: 'startup-token', startTime,
+        notificationResult: { status: 1, stderr: 'temporary GitHub failure' },
+      };
+
+      assert.equal(hook.completeReviewManagerStartup(params).retained, true);
+      assert.equal(fs.existsSync(startingPath), true);
+
+      fs.writeFileSync(reviewArtifactPath(workspace, '42', '.json'), '{}', 'utf8');
+      assert.equal(hook.completeReviewManagerStartup(params).released, true);
+      assert.equal(fs.existsSync(startingPath), false);
+    });
   });
 });

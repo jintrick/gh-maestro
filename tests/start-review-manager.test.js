@@ -213,9 +213,15 @@ test('startReviewManager launches run-review-manager.js via launchAgentHeadless�
   const exitHook = JSON.parse(spawnCalls[0].args[3]);
   assert.match(exitHook.args[0], /worker-exit-hook\.js/);
   assert.equal(spawnCalls[0].options.env.GH_MAESTRO_REVIEW_MANAGER_PR, '7', '終了フックがmanager.startingを解放するPRを識別できる');
-  assert.equal(spawnCalls[0].options.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN, JSON.parse(fs.readFileSync(
+  const startup = JSON.parse(fs.readFileSync(
     path.join(workspace, '.gh-maestro', 'records', 'pr', '7', 'review', 'manager.starting'), 'utf8',
-  )).token, '終了フックへshim所有の起動予約トークンを継承させる');
+  ));
+  assert.equal(spawnCalls[0].options.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN, startup.token,
+    '終了フックへshim所有の起動予約トークンを継承させる');
+  assert.equal(startup.pr, 7, '起動予約は対象PRを保持する');
+  assert.equal(startup.issue, 55, '起動予約はアンカーIssueを保持する');
+  assert.equal(startup.startTime, spawnCalls[0].options.env.GH_MAESTRO_REVIEW_MANAGER_START_TIME,
+    '起動予約とrun-review-managerが同じ世代時刻を使う');
 });
 
 test('startReviewManager: 起動側はmanager.runningを書かず、起動予約へshimを引き渡す', () => {
@@ -231,7 +237,9 @@ test('startReviewManager: 起動側はmanager.runningを書かず、起動予約
   const marker = JSON.parse(fs.readFileSync(startingFile, 'utf8'));
   assert.equal(marker.pid, 77701);
   assert.equal(typeof marker.resourceKey, 'string');
-  assert.equal(marker.startTime, undefined);
+  assert.equal(marker.pr, 8);
+  assert.equal(marker.issue, 55);
+  assert.equal(Number.isFinite(Date.parse(marker.startTime)), true);
   assert.match(marker.token, /^[0-9a-f]{32}$/);
 });
 
@@ -286,7 +294,7 @@ test('startReviewManager: 別の起動処理が起動予約 endpoint を保持�
   assert.equal(spawnCalls.length, 0);
 });
 
-test('startReviewManager: shim が endpoint を確立しなければ子を停止し、起動予約と endpoint を解放して失敗する', () => {
+test('startReviewManager: shim がendpointを確立できない場合は子を止め、stale検出用の起動予約を残す', () => {
   headlessLaunch._setSpawn(fakeSpawn({ pid: 66601, claimEndpoint: false }));
   // 偽の shim の endpoint は確立しない（観測は dead のまま）。
   headlessLaunch._setLiveness(makeLiveness((pid) => (pid === 66601 ? 'dead' : 'alive')));
@@ -298,7 +306,10 @@ test('startReviewManager: shim が endpoint を確立しなければ子を停止
 
   assert.throws(() => mod.startReviewManager('14', 'o/r', workspace, '55'), /起動を確認できません/);
   assert.deepEqual(killedPids, [66601]);
-  assert.equal(fs.existsSync(startingFile), false);
+  const startup = JSON.parse(fs.readFileSync(startingFile, 'utf8'));
+  assert.equal(startup.pr, 14);
+  assert.equal(startup.issue, 55);
+  assert.equal(Number.isFinite(Date.parse(startup.startTime)), true);
   assert.equal(sharedLiveness.observeResource({ workspace, kind: 'review-manager-startup', name: '14' }).state, 'dead');
 });
 

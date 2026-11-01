@@ -26,6 +26,7 @@ const {
   superviseReviewManager, clearStaleIncompleteSentinel, resetRetryCount,
   findIncompleteSentinel, readIncompleteSentinel, incompleteSentinelOutcome,
   persistReviewManifest, runJobsDeterministically, mapAgentPhaseFailure,
+  resolveReviewManagerStartTime,
   _validateFindingShape, _validateAgainstSchema,
   _setPollForArtifact, _setRunReviewJobsOnce,
 } = require('../scripts/run-review-manager');
@@ -36,6 +37,13 @@ const { readReviewManagerGeneration } = require('../scripts/shared/review-manage
 const { reviewManagerStartingPath } = require('../scripts/shared/running-review-managers');
 const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'run-review-manager.js');
+
+test('起動予約が渡した世代時刻をrun-review-managerが保持し、不正値は拒否する', () => {
+  const startTime = '2026-08-01T10:00:00.000Z';
+  assert.equal(resolveReviewManagerStartTime(startTime), startTime);
+  assert.throws(() => resolveReviewManagerStartTime('invalid'), /世代時刻が不正/);
+  assert.equal(Number.isFinite(Date.parse(resolveReviewManagerStartTime(undefined))), true);
+});
 
 const tmpBase = path.join(os.tmpdir(), 'gh-maestro-test-run-rm-' + Date.now());
 
