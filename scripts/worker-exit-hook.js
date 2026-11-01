@@ -42,7 +42,7 @@ const { deriveRoleFromSkill } = require('./shared/worker-factory');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { releaseReviewManagerStartup } = require('./shared/running-review-managers');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
-const { readReviewManagerGeneration } = require('./shared/review-manager-generation');
+const { inspectReviewManagerResult } = require('./shared/review-manager-generation');
 
 // ── gh 呼び出し（テストで注入可能） ────────────────────────────────────────
 
@@ -68,12 +68,15 @@ let _ghPrList = (repo, headBranch, opts = {}) => {
 // msg-send.js自身が「本文は位置引数で渡せない」ガードを持つ（--stdin/--body-fileのみ許可。
 // 過去にバッククォート/$入りの本文が位置引数のままbashに解釈され黙って壊れた事故に由来）。
 // ここから呼ぶ場合も同じ規約に従い、本文はspawnSyncのinputでstdin経由に渡す。
-function buildMsgSendRelayArgs(workspace, { abnormalExit = false } = {}) {
+function buildMsgSendRelayArgs(workspace, { abnormalExit = false, abnormalExitGeneration = undefined } = {}) {
   return [
     path.join(__dirname, 'msg-send.js'),
     '--stdin',
     '--workspace', workspace,
     ...(abnormalExit ? ['--abnormal-exit'] : []),
+    ...(abnormalExit && abnormalExitGeneration !== undefined
+      ? ['--abnormal-exit-generation', abnormalExitGeneration]
+      : []),
   ];
 }
 
@@ -83,26 +86,24 @@ let _relayMessage = (workspace, body) => {
 
 let _recordCycleEvent = recordCycleEvent;
 
-function reviewManagerResultIsConfirmed(workspace, pr, startTime) {
-  if (!workspace || !pr || typeof startTime !== 'string' || !Number.isFinite(Date.parse(startTime))) return false;
-  try {
-    const generation = readReviewManagerGeneration(workspace, pr);
-    if (!generation || generation.startTime !== startTime) return false;
-    if (generation.state === 'incomplete') return true;
-    if (generation.state !== 'complete') return false;
-    const resultPath = reviewArtifactPath(workspace, pr, '.json');
-    return fs.statSync(resultPath).isFile();
-  } catch (error) {
-    process.stderr.write(`worker-exit-hook: Review Managerの結果を確認できません: ${error.message}\n`);
-    return false;
-  }
-}
-
 function completeReviewManagerStartup({ workspace, pr, token, startTime, notificationResult }) {
   const notificationDelivered = Boolean(notificationResult && notificationResult.status === 0);
-  if (!notificationDelivered && !reviewManagerResultIsConfirmed(workspace, pr, startTime)) {
-    return { released: false, retained: true, reason: '通知未達かつ対応する結果未確定' };
+  if (!notificationDelivered) {
+    let result;
+    try {
+      result = inspectReviewManagerResult(workspace, pr, startTime);
+    } catch (error) {
+      process.stderr.write(`worker-exit-hook: Review Managerの結果を確認できません: ${error.message}\n`);
+      return { released: false, retained: true, reason: '通知未達かつ対応する結果未確定' };
+    }
+    if (result.status !== 'confirmed') {
+      if (result.status === 'complete-without-artifact') {
+        process.stderr.write(`worker-exit-hook: Review Managerの結果を確認できません: ${result.reason || `${result.resultPath} がありません`}\n`);
+      }
+      return { released: false, retained: true, reason: '通知未達かつ対応する結果未確定' };
+    }
   }
+
   const runningPath = reviewArtifactPath(workspace, pr, '.running');
   return releaseReviewManagerStartup(runningPath, token);
 }
@@ -354,7 +355,10 @@ if (require.main === module) {
   //    1ターン完了を含む）は通知しない。
   if (Number.isFinite(exitCode) && exitCode !== 0 && workerName && workspace) {
     const body = `⚠️ 起動失敗または異常終了: exit code ${exitCode}。このワーカーのプロセスが正常に完了せず終了しました（起動時のエラーの可能性）。`;
-    const r = spawnSync(process.execPath, buildMsgSendRelayArgs(workspace, { abnormalExit: true }), { encoding: 'utf8', input: body });
+    const r = spawnSync(process.execPath, buildMsgSendRelayArgs(workspace, {
+      abnormalExit: true,
+      abnormalExitGeneration: process.env.GH_MAESTRO_REVIEW_MANAGER_START_TIME,
+    }), { encoding: 'utf8', input: body });
 
     abnormalExitNotificationResult = r;
     if (!r || r.status !== 0) {
@@ -414,7 +418,6 @@ module.exports = {
   _setRelayMessage: (fn) => { _relayMessage = fn; },
   _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
   completeReviewManagerStartup,
-  reviewManagerResultIsConfirmed,
   recordWorkerStopped,
   verifyReplyAndRelayIfMissing,
   checkPrCreatedDuringResume,

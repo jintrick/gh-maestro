@@ -83,6 +83,7 @@ test('実際の終了フックは通知失敗後にmanager.startingを保持し�
       '--stdin',
       '--workspace', workspace,
       '--abnormal-exit',
+      '--abnormal-exit-generation', '2026-08-01T10:00:00.000Z',
     ]);
     assert.match(relay.input, /exit code 3/);
     assert.deepEqual(fs.readFileSync(eventsPath, 'utf8').trim().split(/\r?\n/), [

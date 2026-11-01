@@ -68,8 +68,41 @@ function recordReviewManagerResult(workspace, pr, startTime, state) {
   return record;
 }
 
+function inspectReviewManagerResult(workspace, pr, startTime) {
+  if (!workspace || !pr || typeof startTime !== 'string' || !Number.isFinite(Date.parse(startTime))) {
+    return { status: 'unconfirmed', reason: 'Review Managerの世代識別情報が不正です' };
+  }
+
+  const generation = readReviewManagerGeneration(workspace, pr);
+  if (!generation || generation.startTime !== startTime) {
+    return { status: 'unconfirmed', reason: '対応する世代記録がありません' };
+  }
+  if (generation.state === 'incomplete') {
+    return { status: 'confirmed', state: generation.state };
+  }
+  if (generation.state !== 'complete') {
+    return { status: 'unconfirmed', state: generation.state };
+  }
+
+  const resultPath = reviewArtifactPath(workspace, pr, '.json');
+  let resultStat;
+  try {
+    resultStat = fs.statSync(resultPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return { status: 'complete-without-artifact', resultPath };
+    }
+    throw new Error(`Review Managerの成果物を確認できません: ${resultPath}: ${error.message}`);
+  }
+  if (!resultStat.isFile()) {
+    return { status: 'complete-without-artifact', resultPath, reason: 'manager.jsonが通常ファイルではありません' };
+  }
+  return { status: 'confirmed', state: generation.state };
+}
+
 module.exports = {
   beginReviewManagerGeneration,
   recordReviewManagerResult,
   readReviewManagerGeneration,
+  inspectReviewManagerResult,
 };

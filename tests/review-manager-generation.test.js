@@ -9,6 +9,7 @@ const {
   beginReviewManagerGeneration,
   recordReviewManagerResult,
   readReviewManagerGeneration,
+  inspectReviewManagerResult,
 } = require('../scripts/shared/review-manager-generation');
 const { reviewArtifactPath } = require('../scripts/shared/review-manager-paths');
 
@@ -62,6 +63,30 @@ test('Review Manager結果は別世代のgeneration記録へ書き込めない',
     );
     assert.deepEqual(readReviewManagerGeneration(workspace, '42'), {
       version: 1, startTime: '2026-08-02T10:00:00.000Z', state: 'running',
+    });
+  });
+});
+
+test('共有結果確認は同世代のincompleteとcomplete成果物だけを確定扱いする', () => {
+  withTempDir((workspace) => {
+    const currentStart = '2026-08-02T10:00:00.000Z';
+    beginReviewManagerGeneration(workspace, '42', currentStart);
+    assert.deepEqual(inspectReviewManagerResult(workspace, '42', currentStart), {
+      status: 'unconfirmed', state: 'running',
+    });
+    assert.equal(inspectReviewManagerResult(workspace, '42', '2026-08-01T10:00:00.000Z').status, 'unconfirmed');
+
+    recordReviewManagerResult(workspace, '42', currentStart, 'incomplete');
+    assert.deepEqual(inspectReviewManagerResult(workspace, '42', currentStart), {
+      status: 'confirmed', state: 'incomplete',
+    });
+
+    beginReviewManagerGeneration(workspace, '43', currentStart);
+    recordReviewManagerResult(workspace, '43', currentStart, 'complete');
+    assert.equal(inspectReviewManagerResult(workspace, '43', currentStart).status, 'complete-without-artifact');
+    fs.writeFileSync(reviewArtifactPath(workspace, '43', '.json'), '{}', 'utf8');
+    assert.deepEqual(inspectReviewManagerResult(workspace, '43', currentStart), {
+      status: 'confirmed', state: 'complete',
     });
   });
 });

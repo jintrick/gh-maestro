@@ -206,8 +206,8 @@ function writeReviewManagerStartup(workspace, {
   return file;
 }
 
-function abnormalExitComment(workerName, createdAt = '2026-08-01T10:00:00.000Z') {
-  const marker = JSON.stringify({ v: 1, to: 'orchestrator', from: workerName, kind: 'abnormal-exit' });
+function abnormalExitComment(workerName, generation = '2026-08-01T10:00:00.000Z', createdAt = '2026-08-01T10:00:00.000Z') {
+  const marker = JSON.stringify({ v: 1, to: 'orchestrator', from: workerName, kind: 'abnormal-exit', generation });
   return {
     created_at: createdAt,
     body: `<!-- gh-maestro ${marker} -->\n終了理由の説明文は変更されてもよい`,
@@ -435,6 +435,30 @@ describe('Review Manager stop monitoring', () => {
       const cursor = JSON.parse(fs.readFileSync(supervisor.cursorPath(dir, workerName), 'utf8'));
       assert.equal(cursor.stoppedNotifiedPid, 4200);
       assert.equal(cursor.stoppedNotifiedStartTime, '2026-08-01T10:00:00.000Z');
+    });
+  });
+
+  test('同じ秒に投稿された前世代の異常終了markerでは今回の停止通知を抑止しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    const workerName = 'issue-715-review-manager-pr-42';
+    supervisor._setGhApiComments(mockGhApiComments([
+      abnormalExitComment(workerName, '2026-08-01T10:00:00.001Z', '2026-08-01T10:00:00.500Z'),
+    ]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerRecord(dir, { startTime: '2026-08-01T10:00:00.999Z' });
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1, 'workerNameと秒が同じでも別世代のmarkerは一致しない');
+      assert.match(notifications[0].body, /PR #42/);
     });
   });
 

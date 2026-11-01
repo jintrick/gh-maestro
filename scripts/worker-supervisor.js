@@ -82,7 +82,7 @@ const closedPrGuard = require('./shared/closed-pr-guard');
 const { ARTIFACTS, legacyWorkerOwner, recordPath, recordRoot } = require('./shared/record-paths');
 const { inspectRunningReviewManager, reviewManagerStartingPath } = require('./shared/running-review-managers');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
-const { readReviewManagerGeneration } = require('./shared/review-manager-generation');
+const { inspectReviewManagerResult } = require('./shared/review-manager-generation');
 const { readCycleEvents } = require('./shared/cycle-metrics');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
@@ -1017,15 +1017,13 @@ function main(argsOverride, opts = {}) {
       return { status: 'unknown', error: 'Issue コメントの応答が配列ではありません' };
     }
 
-    const startSecond = Math.floor(Date.parse(startTime) / 1000);
     const notified = comments.some((comment) => {
-      const createdMs = Date.parse(comment.created_at || '');
-      if (!Number.isFinite(createdMs) || Math.floor(createdMs / 1000) < startSecond) return false;
       const marker = parseMarker(comment.body);
       return marker?.v === 1
         && marker.kind === 'abnormal-exit'
         && marker.from === workerName
-        && marker.to === 'orchestrator';
+        && marker.to === 'orchestrator'
+        && marker.generation === startTime;
     });
     return { status: notified ? 'reported' : 'not-reported' };
   };
@@ -1125,33 +1123,23 @@ function main(argsOverride, opts = {}) {
         continue;
       }
 
-      let generation;
+      let resultConfirmation;
       try {
-        generation = readReviewManagerGeneration(workspace, pr);
+        resultConfirmation = inspectReviewManagerResult(workspace, pr, manager.startTime);
       } catch (error) {
         reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: error.message });
         continue;
       }
 
-      const currentGeneration = generation && generation.startTime === manager.startTime;
-      if (currentGeneration && generation.state === 'complete') {
-        const resultPath = reviewArtifactPath(workspace, pr, '.json');
-        try {
-          const resultStat = fs.statSync(resultPath);
-          if (!resultStat.isFile()) throw new Error('manager.jsonが通常ファイルではありません');
-          unknownReviewManagerNotifications.delete(pr);
-          continue;
-        } catch (error) {
-          if (error.code !== 'ENOENT') {
-            reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: `レビュー成果物を確認できません: ${error.message}` });
-            continue;
-          }
-          reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: '世代記録は完了を示していますがmanager.jsonがありません' });
-          continue;
-        }
-      }
-      if (currentGeneration && generation.state === 'incomplete') {
+      if (resultConfirmation.status === 'confirmed') {
         unknownReviewManagerNotifications.delete(pr);
+        continue;
+      }
+      if (resultConfirmation.status === 'complete-without-artifact') {
+        reportUnknownReviewManager({
+          pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue,
+          reason: resultConfirmation.reason || '世代記録は完了を示していますがmanager.jsonがありません',
+        });
         continue;
       }
 

@@ -357,14 +357,19 @@ describe('buildMsgSendRelayArgs', () => {
     ]);
   });
 
-  test('異常終了時だけ machine marker を要求するmsg-send専用フラグを付ける', () => {
-    const args = hook.buildMsgSendRelayArgs('/ws', { abnormalExit: true });
+  test('Review Manager異常終了時は世代をmarkerへ渡し、通常ワーカーには渡さない', () => {
+    const args = hook.buildMsgSendRelayArgs('/ws', {
+      abnormalExit: true,
+      abnormalExitGeneration: '2026-08-01T10:00:00.000Z',
+    });
     assert.deepEqual(args, [
       path.join(__dirname, '..', 'scripts', 'msg-send.js'),
       '--stdin',
       '--workspace', '/ws',
       '--abnormal-exit',
+      '--abnormal-exit-generation', '2026-08-01T10:00:00.000Z',
     ]);
+    assert.deepEqual(hook.buildMsgSendRelayArgs('/ws', { abnormalExit: true }).slice(-1), ['--abnormal-exit']);
   });
 });
 

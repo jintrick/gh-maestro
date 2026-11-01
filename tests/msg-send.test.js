@@ -80,6 +80,7 @@ test('--help が usage を返して code 0', () => {
   assert.equal(r.code, 0);
   assert.ok(r.lines.join('\n').includes('msg-send.js'));
   assert.ok(r.lines.join('\n').includes('--abnormal-exit'));
+  assert.ok(r.lines.join('\n').includes('--abnormal-exit-generation'));
   assert.equal(r.errLines.length, 0);
 });
 
@@ -185,7 +186,7 @@ test('--abnormal-exit は終了フック通知を機械識別できるkind付き
     });
 
     const r = msgSend.main(
-      ['orchestrator', '--abnormal-exit', '--stdin', '--issue', '9', '--workspace', workspace],
+      ['orchestrator', '--abnormal-exit', '--abnormal-exit-generation', '2026-08-01T10:00:00.000Z', '--stdin', '--issue', '9', '--workspace', workspace],
       { GH_MAESTRO_WORKER: 'issue-9-review-manager-pr-42' },
       stdinIO('終了理由の説明文は識別子として使わない'),
     );
@@ -194,7 +195,26 @@ test('--abnormal-exit は終了フック通知を機械識別できるkind付き
     assert.ok(marker, '異常終了コメントにmachine markerが付く');
     assert.deepEqual(JSON.parse(marker[1]), {
       v: 1, to: 'orchestrator', from: 'issue-9-review-manager-pr-42', kind: 'abnormal-exit',
+      generation: '2026-08-01T10:00:00.000Z',
     });
+  });
+});
+
+test('--abnormal-exit-generation は異常終了通知にのみ、有効な起動時刻を付けられる', () => {
+  withTempDir(workspace => {
+    const withoutAbnormalExit = msgSend.main(
+      ['orchestrator', '--abnormal-exit-generation', '2026-08-01T10:00:00.000Z', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-9-review-manager-pr-42' }, stdinIO('body'),
+    );
+    assert.equal(withoutAbnormalExit.code, 1);
+    assert.match(withoutAbnormalExit.errLines.join('\n'), /--abnormal-exit と同時に指定/);
+
+    const invalidGeneration = msgSend.main(
+      ['orchestrator', '--abnormal-exit', '--abnormal-exit-generation', 'not-a-time', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-9-review-manager-pr-42' }, stdinIO('body'),
+    );
+    assert.equal(invalidGeneration.code, 1);
+    assert.match(invalidGeneration.errLines.join('\n'), /有効な起動時刻/);
   });
 });
 
