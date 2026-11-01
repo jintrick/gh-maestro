@@ -260,6 +260,34 @@ function missingRequiredLayers(testResult, requiredLayers, options = {}) {
 
 // ── コメント本文生成 ────────────────────────────────────────────────────────
 
+// 失敗の中身（場所・エラー・期待値・実際値）を、層行の直下のネスト行にする。
+// ネスト行は `  - **層名**:` の形にしない。層行の解析（parseAggregateLayers）に層として拾われないため。
+// 申告コメントの長さを抑えるため、詳細は合計 FAILURE_DETAIL_BUDGET 字までに切り、超えた分は実行記録の名前で示す。
+const FAILURE_DETAIL_BUDGET = 2000;
+function failureDetailLines(layer, recordName) {
+  if (!Array.isArray(layer.failureDetails) || layer.failureDetails.length === 0) return [];
+  const code = value => `\`${String(value).replaceAll('`', "'")}\``;
+  const lines = [];
+  let used = 0;
+  for (const detail of layer.failureDetails) {
+    const parts = [`失敗詳細: ${code(detail.name)}`];
+    if (detail.location !== undefined) parts.push(`場所: ${code(detail.location)}`);
+    if (detail.error !== undefined) parts.push(`エラー: ${code(detail.error)}`);
+    if (detail.expected !== undefined) parts.push(`期待値: ${code(detail.expected)}`);
+    if (detail.actual !== undefined) parts.push(`実際値: ${code(detail.actual)}`);
+    const line = `    - ${parts.join(' / ')}`;
+    if (used + line.length > FAILURE_DETAIL_BUDGET) break;
+    lines.push(line);
+    used += line.length;
+  }
+  const omitted = layer.failureDetails.length - lines.length;
+  if (omitted > 0) {
+    const pointer = recordName ? `、詳細は実行記録 ${code(recordName)} を参照` : '';
+    lines.push(`    - （残り${omitted}件の詳細は省略${pointer}）`);
+  }
+  return lines;
+}
+
 /**
  * 申告コメントの本文を組み立てる純粋関数。結果と件数は testResult からのみ参照する。
  * @param {{commit:string, testResult:object}} params
@@ -319,6 +347,7 @@ function buildCommentBody({ commit, testResult }) {
         failuresSuffix = `, 失敗: ${shown.map(t => `\`${String(t).replaceAll('`', "'")}\``).join(', ')}${overflowText}`;
       }
       lines.push(`  - **${name}**: ${status}${countSuffix}${count}${executor}${scope}${record}${concurrencySuffix}${command}${reason}${failuresSuffix}`);
+      if (status === 'fail') lines.push(...failureDetailLines(layer, recordName));
     }
     return lines.join('\n');
   }

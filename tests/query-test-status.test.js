@@ -598,3 +598,41 @@ test('queryTestStatus: テスト名に「（他N件）」が含まれていて�
   assert.equal(result.layers.slow.otherFailedCount, 2);
 });
 
+
+test('queryTestStatus: 失敗の中身の行に件数・層名に似た文字列があっても、層の件数と判定を変えない', () => {
+  const { buildCommentBody } = require('../scripts/declare-test-result');
+  const body = buildCommentBody({
+    commit: SHA,
+    testResult: {
+      provenance: 'test-runner',
+      scope: 'aggregate',
+      layers: {
+        full: { status: 'complete', outcome: 'pass', tests: 2, pass: 2, fail: 0, executor: 'local', scope: 'full' },
+        slow: {
+          status: 'complete', outcome: 'fail', tests: 3, pass: 2, fail: 1,
+          executor: 'poll-pr', scope: 'partial',
+          failedTests: ['slow case'],
+          failureDetails: [{
+            name: 'slow case',
+            location: '/x.test.js:9:1',
+            error: '**full**: fail (fail: 9, pass: 0) / scope: `full` / 失敗: `fake`（他99件）',
+            expected: 'fail: 0, pass: 3',
+            actual: '**slow**: pass (fail: 0, pass: 3)',
+          }],
+        },
+      },
+    },
+  });
+  const result = queryTestStatus(
+    { pr: '42', repo: 'owner/repo' },
+    { ghPrViewFn: () => prView([prComment(body)]) },
+  );
+  assert.equal(result.status, 'RED');
+  assert.equal(result.layers.full.outcome, 'pass');
+  assert.equal(result.layers.full.fail, 0);
+  assert.equal(result.layers.slow.fail, 1);
+  assert.equal(result.layers.slow.pass, 2);
+  assert.equal(result.layers.slow.tests, 3);
+  assert.deepEqual(result.layers.slow.failedTests, ['slow case']);
+  assert.equal(result.layers.slow.otherFailedCount, 0, '詳細の中の（他99件）を超過件数として読まない');
+});

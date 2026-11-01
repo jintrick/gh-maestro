@@ -997,3 +997,60 @@ test('main: 未知のsuiteはエラーをstderrへ返す', () => {
   assert.equal(result.exitCode, 1);
   assert.match(result.stderr, /未知のテストスイート/);
 });
+
+function tapFailureBlock(name, index, { expected, actual }) {
+  return `# Subtest: ${name}
+not ok ${index} - ${name}
+  ---
+  duration_ms: 1.0
+  type: 'test'
+  location: '/work/fixtures/${name.replaceAll(' ', '-')}.test.js:3:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    mismatch for ${name}
+  code: 'ERR_ASSERTION'
+  expected: ${expected}
+  actual: ${actual}
+  ...
+`;
+}
+
+test('runTests: slow層の失敗は場所・エラー・期待値・実際値を成果物のfailureDetailsに残す', () => {
+  const tapOutput = tapFailureBlock('slow one', 1, { expected: 3, actual: 2 })
+    + tapFailureBlock('slow two', 2, { expected: 'x', actual: 'y' })
+    + tapSummary({ tests: 2, pass: 0, fail: 2 });
+  const fixture = runWithChild({
+    suite: 'slow',
+    child: { status: 1, stdout: tapOutput, stderr: '' },
+  });
+
+  assert.equal(fixture.artifacts[0].outcome, 'fail');
+  assert.deepEqual(fixture.artifacts[0].failureDetails, [
+    { name: 'slow one', location: '/work/fixtures/slow-one.test.js:3:1', error: 'mismatch for slow one', expected: '3', actual: '2' },
+    { name: 'slow two', location: '/work/fixtures/slow-two.test.js:3:1', error: 'mismatch for slow two', expected: 'x', actual: 'y' },
+  ]);
+});
+
+test('runTests: slow層の失敗の中身は5件までに抑える', () => {
+  const tapOutput = Array.from({ length: 7 }, (_, i) => tapFailureBlock(`case ${i + 1}`, i + 1, { expected: 1, actual: 0 })).join('')
+    + tapSummary({ tests: 7, pass: 0, fail: 7 });
+  const fixture = runWithChild({
+    suite: 'slow',
+    child: { status: 1, stdout: tapOutput, stderr: '' },
+  });
+
+  assert.equal(fixture.artifacts[0].failureDetails.length, 5);
+  assert.equal(fixture.artifacts[0].failedTests.length, 7, '名前は従来どおり全件のまま');
+});
+
+test('runTests: full層の成果物には失敗の中身を載せない（full層の出力は増やさない）', () => {
+  const tapOutput = tapFailureBlock('full one', 1, { expected: 3, actual: 2 })
+    + tapSummary({ tests: 1, pass: 0, fail: 1 });
+  const fixture = runWithChild({
+    child: { status: 1, stdout: tapOutput, stderr: '' },
+  });
+
+  assert.equal(fixture.artifacts[0].outcome, 'fail');
+  assert.deepEqual(fixture.artifacts[0].failedTests, ['full one']);
+  assert.equal('failureDetails' in fixture.artifacts[0], false);
+});
