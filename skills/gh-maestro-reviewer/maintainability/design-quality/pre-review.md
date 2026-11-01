@@ -4,12 +4,16 @@
 
 ## 原則の読み取り（対象プロジェクトから）
 
-設計原則は、レビュー対象プロジェクトのファイルからだけ読む。PR の base 側を使う（PR の head 側は PR 自身が書き換えうるため使わない）。
+設計原則は、レビュー対象プロジェクトのファイルからだけ読む。PR の head 側は PR 自身が書き換えうるため使わない。読む対象は PR の base commit に固定する。追跡ブランチ（`origin/<base>`）は使わない。レビュー用worktreeは PR head の専用refしか取得しないため、追跡ブランチは古いか存在しない。
 
-1. `gh pr view <PR> --repo <REPO> --json baseRefName` で base 名を得る。
-2. 次を読む: `git show origin/<baseRefName>:AGENTS.md`、および `git ls-tree -r --name-only origin/<baseRefName> -- .claude/rules/` で列挙した各ファイル（`git show` で読む）。
-3. 設計に関係する原則（責務の分け方、配置、共有部品の使い方、依存の向き）だけを抜き出す。原則ごとに出典（ファイルパスと見出しまたは行）を控える。
-4. どちらも読めない、または存在しない場合は、その事実を結果に残す。原則を推測で補ってはならない。この場合は、デザインパターンと重複の探索だけで評価する。
+1. `gh pr view <PR> --repo <REPO> --json baseRefOid --jq .baseRefOid` で base commit（`BASE_OID`）を得る。失敗したら取得失敗とする。
+2. `git fetch --no-tags origin <BASE_OID>` で base commit を取得する。失敗したら取得失敗とする。
+3. 次を `BASE_OID` に対して読む: `AGENTS.md`、および `git ls-tree -r --name-only <BASE_OID> -- .claude/rules/` で列挙した各ファイル（`git show <BASE_OID>:<path>` で読む）。
+   - 対象が存在しないことは、`git ls-tree <BASE_OID> -- AGENTS.md` が空を返すことで判定する。
+   - `git show` や `git ls-tree` 自体が失敗した場合は、存在しないのではなく取得失敗とする（commit が無い等）。
+4. 設計に関係する原則（責務の分け方、配置、共有部品の使い方、依存の向き）だけを抜き出す。原則ごとに出典（ファイルパスと見出しまたは行）を控える。
+5. 取得失敗のときは、「原則なし」として続けてはならない。この葉では設計評価と指摘を行わず、取得失敗の理由（どの取得が失敗したか）を結果に残す。
+6. 原則ファイルが存在しない（取得は成功）ときは、その事実を結果に残す。原則を推測で補ってはならない。この場合は、デザインパターンと重複の探索だけで評価する。
 
 レビュー担当の記憶や一般論を、対象プロジェクトの原則として扱ってはならない。
 
