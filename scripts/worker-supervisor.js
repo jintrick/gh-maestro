@@ -44,7 +44,7 @@ const { buildAgentResumeCommandArgs } = require('./shared/agent-launch');
 const { launchAgentHeadless, workerLogPath } = require('./shared/headless-launch');
 const { buildWorkerEnv } = require('./shared/worker-env');
 const { readWorkersRaw, updateWorkerProcess } = require('./shared/workers-registry');
-const { deriveRoleFromSkill } = require('./shared/worker-factory');
+const { deriveRoleFromSkill, buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { observeWorker } = require('./shared/worker-liveness');
 const {
@@ -80,6 +80,9 @@ const { readContract, clearContract } = require('./shared/response-contract');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
 const closedPrGuard = require('./shared/closed-pr-guard');
 const { ARTIFACTS, legacyWorkerOwner, recordPath, recordRoot } = require('./shared/record-paths');
+const { inspectRunningReviewManager } = require('./shared/running-review-managers');
+const { reviewArtifactPath } = require('./shared/review-manager-paths');
+const { readCycleEvents } = require('./shared/cycle-metrics');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
 
@@ -117,6 +120,8 @@ Output (stdout):
     HANG_RESUMED:<workerName>:<pid>
     STALE_REPORT_DETECTED:<workerName>:<pid> elapsed=<duration>
     STOP_DETECTED:<workerName>:<pid>
+    REVIEW_MANAGER_STOP_DETECTED:<PR>:<pid>
+    REVIEW_MANAGER_STATE_UNKNOWN:<PR>
     SCAN_END:<workers>:<detected> source=worker-supervisor.js scope=worker-delivery-scan workers=<workers> detected=<detected> orchestrator-inbox=separate-msg-poll.js
 
 Description:
@@ -131,6 +136,7 @@ Description:
     起動時刻）が復帰した場合のみHANG_RESUMEDを出力する。通知抑止にはworkers.jsonのPIDとworker起動時刻をカーソルキーとして使う。これは通知世代の補助情報であり、生死の判定は決定論的OS endpointを使う。
   居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みで、報告から10秒以上経過してもendpointがaliveの場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（ハング検知とは独立）。通知抑止はPIDとworker起動時刻をカーソルキーとして使う。
   停止検知: workers.json に登録されたワーカーのendpointがdeadと判定された場合、STOP_DETECTEDを出力しorchestratorへ通知する。通知本文には hasReportedSinceStart による報告状況（報告済み/未投稿）が明記される。プロセスの停止・再起動・削除等の自動介入は行わない。
+  Review Manager停止検知: records/pr/<PR>/review/manager.running を既存の同一性確認で調べる。結果artifactも終了フックの異常終了通知も無い停止だけを通知し、既存cursorで同じプロセスへの重複通知を抑える。判定不能もPR付きで知らせ、Review Managerの停止・再起動・workers.json登録は行わない。
   orchestrator msg-poll の決定論的endpointと世代を確認し、monitor takeover中は新しいmsg-pollへの接続を待つ。
   一定時間以内に再接続できなければ、通常終了して自分のleaseを解放する。`;
 
@@ -232,21 +238,39 @@ function cursorPath(workspace, workerName) {
  * @param {string} workerName
  * @returns {{ since: string|null, seenIds: number[], deliveredIds: number[], pendingDeliveries: object, hangNotifiedPid: number|null, hangNotifiedStartTime: string|null, hangNotifiedAt: string|null, staleReportPendingPid: number|null, staleReportPendingStartTime: string|null, staleReportPendingCreatedAt: string|null, staleReportNotifiedPid: number|null, staleReportNotifiedStartTime: string|null, staleReportNotifiedAt: string|null, stoppedNotifiedPid: number|null, stoppedNotifiedStartTime: string|null, stoppedNotifiedAt: string|null, reportedPid: number|null, reportedStartTime: string|null, reportedCreatedAt: string|null }}
  */
-function readCursor(workspace, workerName) {
+function emptyCursor() {
+  return {
+    since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {},
+    hangNotifiedPid: null, hangNotifiedStartTime: null, hangNotifiedAt: null,
+    staleReportPendingPid: null, staleReportPendingStartTime: null, staleReportPendingCreatedAt: null,
+    staleReportNotifiedPid: null, staleReportNotifiedStartTime: null, staleReportNotifiedAt: null,
+    stoppedNotifiedPid: null, stoppedNotifiedStartTime: null, stoppedNotifiedAt: null,
+    reportedPid: null, reportedStartTime: null, reportedCreatedAt: null,
+  };
+}
+
+function readCursor(workspace, workerName, { strict = false } = {}) {
   const cp = cursorPath(workspace, workerName);
+  let raw;
   try {
-    if (!fs.existsSync(cp)) {
-      return {
-        since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {},
-        hangNotifiedPid: null, hangNotifiedStartTime: null, hangNotifiedAt: null,
-        staleReportPendingPid: null, staleReportPendingStartTime: null, staleReportPendingCreatedAt: null,
-        staleReportNotifiedPid: null, staleReportNotifiedStartTime: null, staleReportNotifiedAt: null,
-        stoppedNotifiedPid: null, stoppedNotifiedStartTime: null, stoppedNotifiedAt: null,
-        reportedPid: null, reportedStartTime: null, reportedCreatedAt: null,
-      };
-    }
-    const raw = fs.readFileSync(cp, 'utf8');
+    raw = fs.readFileSync(cp, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return emptyCursor();
+    if (strict) throw new Error(`worker cursor の読み取りに失敗しました: ${cp}: ${error.message}`);
+    return emptyCursor();
+  }
+
+  try {
     const parsed = JSON.parse(raw);
+    if (strict && (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))) {
+      throw new Error('cursorのトップレベルがオブジェクトではありません');
+    }
+    if (strict && ((parsed.stoppedNotifiedPid != null
+      && (!Number.isSafeInteger(parsed.stoppedNotifiedPid) || parsed.stoppedNotifiedPid <= 0))
+      || (parsed.stoppedNotifiedStartTime != null && typeof parsed.stoppedNotifiedStartTime !== 'string')
+      || (parsed.stoppedNotifiedAt != null && typeof parsed.stoppedNotifiedAt !== 'string'))) {
+      throw new Error('停止通知カーソルの形式が不正です');
+    }
     return {
       since: typeof parsed.since === 'string' ? parsed.since : null,
       seenIds: Array.isArray(parsed.seenIds) ? parsed.seenIds : [],
@@ -270,15 +294,9 @@ function readCursor(workspace, workerName) {
       reportedStartTime: typeof parsed.reportedStartTime === 'string' ? parsed.reportedStartTime : null,
       reportedCreatedAt: typeof parsed.reportedCreatedAt === 'string' ? parsed.reportedCreatedAt : null,
     };
-  } catch {
-    return {
-      since: null, seenIds: [], deliveredIds: [], pendingDeliveries: {},
-      hangNotifiedPid: null, hangNotifiedStartTime: null, hangNotifiedAt: null,
-      staleReportPendingPid: null, staleReportPendingStartTime: null, staleReportPendingCreatedAt: null,
-      staleReportNotifiedPid: null, staleReportNotifiedStartTime: null, staleReportNotifiedAt: null,
-      stoppedNotifiedPid: null, stoppedNotifiedStartTime: null, stoppedNotifiedAt: null,
-      reportedPid: null, reportedStartTime: null, reportedCreatedAt: null,
-    };
+  } catch (error) {
+    if (strict) throw new Error(`worker cursor の解析に失敗しました: ${cp}: ${error.message}`);
+    return emptyCursor();
   }
 }
 
@@ -899,6 +917,225 @@ function main(argsOverride, opts = {}) {
     return recordWorkerLiveness(workerName, entry, issue, observeWorkerState(entry, workerName));
   };
 
+  const unknownReviewManagerNotifications = new Map();
+  const reportUnknownReviewManager = ({ pr, pid = null, startTime = null, issue = null, reason }) => {
+    const key = String(pr);
+    const identity = `${pid ?? 'unknown'}:${startTime ?? 'unknown'}:${reason}`;
+    let notification = unknownReviewManagerNotifications.get(key);
+    if (!notification || notification.identity !== identity) {
+      notification = { identity, notified: false };
+      unknownReviewManagerNotifications.set(key, notification);
+    }
+    if (notification.notified) return;
+
+    const body = `⚠️ PR #${pr} の Review Manager の状態を判定できません: ${reason}。記録は保持し、自動再起動はしていません。`;
+    try {
+      const result = _notifyOrchestrator({ workspace, issue, body });
+      if (result && result.status === 0) {
+        notification.notified = true;
+        writeOut(`REVIEW_MANAGER_STATE_UNKNOWN:${pr}`);
+      } else {
+        writeErr(`worker-supervisor: PR #${pr} の Review Manager 判定不能通知に失敗: ${(result?.stderr || '').trim() || '通知コマンドが成功を返しませんでした'}`);
+      }
+    } catch (notifyError) {
+      writeErr(`worker-supervisor: PR #${pr} の Review Manager 判定不能通知に失敗: ${notifyError.message}`);
+    }
+  };
+
+  const resolveReviewManagerOwner = (manager) => {
+    if (manager.issue !== null && manager.issue !== undefined) {
+      const launchSpec = buildReviewManagerLaunchSpec({ issue: manager.issue, pr: manager.pr, repo, workspace });
+      return {
+        issue: Number(manager.issue),
+        workerName: launchSpec.workerName,
+        startTime: manager.startTime || null,
+      };
+    }
+
+    const issueRoot = path.join(recordRoot(workspace), 'issue');
+    let issueEntries;
+    try {
+      issueEntries = fs.readdirSync(issueRoot, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === 'ENOENT') return { error: 'アンカーIssue記録がありません' };
+      return { error: `アンカーIssue記録を走査できません: ${error.message}` };
+    }
+
+    const matches = [];
+    const readErrors = [];
+    for (const entry of issueEntries) {
+      if (!entry.isDirectory() || !/^[1-9]\d*$/.test(entry.name)) continue;
+      const issue = Number(entry.name);
+      const events = readCycleEvents(workspace, issue, {
+        onError: (error) => readErrors.push(error),
+      });
+      for (const event of events) {
+        if (event.event !== 'worker-started'
+          || event.role !== 'review-manager'
+          || Number(event.pr) !== Number(manager.pr)) continue;
+        const sameStart = manager.startTime && event.startTime === manager.startTime;
+        const sameLegacyPid = !manager.startTime && event.pid === manager.pid;
+        if (!sameStart && !sameLegacyPid) continue;
+        const launchSpec = buildReviewManagerLaunchSpec({ issue, pr: manager.pr, repo, workspace });
+        if (event.workerName !== launchSpec.workerName) continue;
+        matches.push({ issue, workerName: launchSpec.workerName, startTime: event.startTime || null });
+      }
+    }
+
+    if (readErrors.length > 0) {
+      return { error: `Review Manager のアンカーIssue記録を読み取れません: ${readErrors[0].message}` };
+    }
+    if (matches.length !== 1) {
+      return { error: matches.length === 0
+        ? 'manager.running にアンカーIssueがなく、対応する cycle metrics も特定できません'
+        : 'manager.running にアンカーIssueがなく、対応する cycle metrics が複数あります' };
+    }
+    return matches[0];
+  };
+
+  const findAbnormalExitNotification = ({ issue, workerName, startTime }) => {
+    if (!startTime || !Number.isFinite(Date.parse(startTime))) {
+      return { status: 'unknown', error: '起動時刻が無いため異常終了通知の世代を照合できません' };
+    }
+    const apiResult = _ghApiComments(repo, String(issue), null, { cwd: workspace });
+    if (!apiResult || apiResult.status !== 0) {
+      return { status: 'unknown', error: `Issue コメントを取得できません: ${apiResult?.stderr || apiResult?.error?.message || '(empty)'}` };
+    }
+
+    let comments;
+    try {
+      comments = parseCommentsResponse(apiResult.stdout);
+    } catch (error) {
+      return { status: 'unknown', error: `Issue コメントのJSONを解析できません: ${error.message}` };
+    }
+    if (!Array.isArray(comments)) {
+      return { status: 'unknown', error: 'Issue コメントの応答が配列ではありません' };
+    }
+
+    const startSecond = Math.floor(Date.parse(startTime) / 1000);
+    const notified = comments.some((comment) => {
+      const createdMs = Date.parse(comment.created_at || '');
+      if (!Number.isFinite(createdMs) || Math.floor(createdMs / 1000) < startSecond) return false;
+      const marker = parseMarker(comment.body);
+      return marker?.v === 1
+        && marker.kind === 'abnormal-exit'
+        && marker.from === workerName
+        && marker.to === 'orchestrator';
+    });
+    return { status: notified ? 'reported' : 'not-reported' };
+  };
+
+  const scanReviewManagers = () => {
+    const prRoot = path.join(recordRoot(workspace), 'pr');
+    let prEntries;
+    try {
+      prEntries = fs.readdirSync(prRoot, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === 'ENOENT') return;
+      reportUnknownReviewManager({ pr: 'unknown', reason: `records/pr を走査できません: ${error.message}` });
+      return;
+    }
+
+    for (const entry of prEntries) {
+      if (!entry.isDirectory() || !/^[1-9]\d*$/.test(entry.name)) continue;
+      const pr = entry.name;
+      const runningPath = reviewArtifactPath(workspace, pr, '.running');
+      let manager;
+      try {
+        manager = inspectRunningReviewManager(runningPath, { pr, cleanupStale: false, onError: 'throw' });
+      } catch (error) {
+        let fileIdentity = error.message;
+        try {
+          const stat = fs.statSync(runningPath);
+          fileIdentity = `${stat.size}:${stat.mtimeMs}:${error.message}`;
+        } catch (statError) {
+          if (statError.code !== 'ENOENT') fileIdentity = `${fileIdentity}:${statError.message}`;
+        }
+        reportUnknownReviewManager({ pr, reason: error.message, startTime: fileIdentity });
+        continue;
+      }
+
+      if (manager.status === 'missing' || manager.status === 'live') {
+        unknownReviewManagerNotifications.delete(pr);
+        continue;
+      }
+      if (manager.status !== 'stale') {
+        reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: manager.error?.message || `状態が不正です: ${manager.status}` });
+        continue;
+      }
+      unknownReviewManagerNotifications.delete(pr);
+
+      let hasResult;
+      try {
+        const resultPath = reviewArtifactPath(workspace, pr, '.json');
+        const incompletePath = reviewArtifactPath(workspace, pr, '.incomplete');
+        const exists = (filePath) => {
+          try {
+            fs.statSync(filePath);
+            return true;
+          } catch (error) {
+            if (error.code === 'ENOENT') return false;
+            throw error;
+          }
+        };
+        hasResult = exists(resultPath) || exists(incompletePath);
+      } catch (error) {
+        reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, issue: manager.issue, reason: `レビュー成果物を確認できません: ${error.message}` });
+        continue;
+      }
+      if (hasResult) continue;
+
+      const owner = resolveReviewManagerOwner(manager);
+      if (owner.error) {
+        reportUnknownReviewManager({ pr, pid: manager.pid, startTime: manager.startTime, reason: owner.error });
+        continue;
+      }
+
+      let cursor;
+      try {
+        cursor = readCursor(workspace, owner.workerName, { strict: true });
+      } catch (error) {
+        reportUnknownReviewManager({ pr, pid: manager.pid, startTime: owner.startTime, issue: owner.issue, reason: error.message });
+        continue;
+      }
+      const alreadyNotified = cursor.stoppedNotifiedPid === manager.pid
+        && cursor.stoppedNotifiedStartTime === (owner.startTime ?? null);
+      if (alreadyNotified) continue;
+
+      const abnormalExit = findAbnormalExitNotification(owner);
+      if (abnormalExit.status === 'unknown') {
+        reportUnknownReviewManager({ pr, pid: manager.pid, startTime: owner.startTime, issue: owner.issue, reason: abnormalExit.error });
+        continue;
+      }
+      if (abnormalExit.status === 'reported') {
+        cursor.stoppedNotifiedPid = manager.pid;
+        cursor.stoppedNotifiedStartTime = owner.startTime ?? null;
+        cursor.stoppedNotifiedAt = new Date().toISOString();
+        persistCursor(owner.workerName, owner.issue, cursor);
+        continue;
+      }
+
+      const body = `⚠️ PR #${pr} の Review Manager（PID ${manager.pid}）が停止しています。レビュー結果（manager.json）がなく、終了フックの異常終了通知も確認できませんでした。Review Manager の再起動はしていません。`;
+      let notified = false;
+      try {
+        const result = _notifyOrchestrator({ workspace, issue: String(owner.issue), body });
+        notified = result && result.status === 0;
+        if (!notified) {
+          writeErr(`worker-supervisor: PR #${pr} の Review Manager 停止通知に失敗: ${(result?.stderr || '').trim() || '通知コマンドが成功を返しませんでした'}`);
+        }
+      } catch (error) {
+        writeErr(`worker-supervisor: PR #${pr} の Review Manager 停止通知に失敗: ${error.message}`);
+      }
+      if (notified) {
+        cursor.stoppedNotifiedPid = manager.pid;
+        cursor.stoppedNotifiedStartTime = owner.startTime ?? null;
+        cursor.stoppedNotifiedAt = new Date().toISOString();
+        persistCursor(owner.workerName, owner.issue, cursor);
+        writeOut(`REVIEW_MANAGER_STOP_DETECTED:${pr}:${manager.pid}`);
+      }
+    }
+  };
+
   const observeMsgPollFn = opts.observeMsgPollFn || observeOrchestratorMsgPoll;
   let connectedMsgPollRef = null;
   let msgPollMissingSince = null;
@@ -1423,6 +1660,8 @@ function main(argsOverride, opts = {}) {
       // する。ディスクが巻き戻っても deliveredIds はメモリキャッシュで重複配送を防ぐ。
       persistCursor(workerName, issue, cursor);
     }
+
+    scanReviewManagers();
 
     writeOut(`SCAN_END:${workers.size}:${totalDetected} source=worker-supervisor.js scope=worker-delivery-scan workers=${workers.size} detected=${totalDetected} orchestrator-inbox=separate-msg-poll.js`);
   }

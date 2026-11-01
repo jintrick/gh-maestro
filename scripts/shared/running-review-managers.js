@@ -24,6 +24,15 @@ const processLiveness = require('./process-liveness');
 let injectedLiveness = null;
 function checkerFor(opts = {}) { return opts.liveness || injectedLiveness || processLiveness; }
 
+function parseAnchorIssue(value, runningPath) {
+  if (value === undefined || value === null) return null;
+  const text = String(value);
+  if (!/^[1-9]\d*$/.test(text) || !Number.isSafeInteger(Number(text))) {
+    throw new Error(`manager.running のアンカーIssueが不正です: ${runningPath}`);
+  }
+  return Number(text);
+}
+
 /**
  * Review Managerの起動中だけ使う予約ファイルのパスを返す。
  *
@@ -199,7 +208,7 @@ function releaseReviewManagerStartup(runningPath, token) {
  *
  * @param {string} raw
  * @param {string} [runningPath]
- * @returns {{pid: number, resourceKey: string|null, instanceId: string|null, legacy: boolean, raw: string}}
+ * @returns {{pid: number, resourceKey: string|null, instanceId: string|null, startTime: string|null, issue: number|null, legacy: boolean, raw: string}}
  * @throws {Error} 形式またはPIDが不正な場合
  */
 function parseRunningReviewManagerRecord(raw, runningPath = 'manager.running') {
@@ -212,7 +221,7 @@ function parseRunningReviewManagerRecord(raw, runningPath = 'manager.running') {
   // 誤認すると、想定外の内容をプロセス識別子として扱うことになる。
   if (/^[1-9]\d*$/.test(trimmed)) {
     const pid = normalizePid(trimmed);
-    if (pid !== null) return { pid, resourceKey: null, instanceId: null, legacy: true, raw };
+    if (pid !== null) return { pid, resourceKey: null, instanceId: null, startTime: null, issue: null, legacy: true, raw };
   }
 
   let parsed;
@@ -243,7 +252,8 @@ function parseRunningReviewManagerRecord(raw, runningPath = 'manager.running') {
   const startTime = typeof parsed.startTime === 'string' && Number.isFinite(Date.parse(parsed.startTime))
     ? parsed.startTime
     : null;
-  return { pid, resourceKey, instanceId, startTime, legacy: resourceKey === null, raw };
+  const issue = parseAnchorIssue(parsed.issue, runningPath);
+  return { pid, resourceKey, instanceId, startTime, issue, legacy: resourceKey === null, raw };
 }
 
 /**
@@ -298,6 +308,9 @@ function finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reas
     status: 'stale',
     pr,
     pid: record.pid,
+    instanceId: record.instanceId,
+    startTime: record.startTime,
+    issue: record.issue,
     resourceKey: record.resourceKey,
     legacy: record.legacy,
     reason,
@@ -313,7 +326,7 @@ function finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reas
  * @param {'throw'|'skip'} [opts.onError='throw'] エラー時の動作
  * @param {boolean} [opts.cleanupStale=false] staleファイルを内容比較後に削除するか
  * @param {(info:{pr:string|null,pid:number,path:string,legacy:true})=>void} [opts.onLegacyLive]
- * @returns {{status:'missing'|'live'|'legacy-live'|'stale'|'error', pr:string|null, pid?:number, startTime?:string|null, processRef?:string, legacy?:boolean, reason?:string, error?:Error}}
+ * @returns {{status:'missing'|'live'|'legacy-live'|'stale'|'error', pr:string|null, pid?:number, startTime?:string|null, issue?:number|null, processRef?:string, legacy?:boolean, reason?:string, error?:Error}}
  */
 function inspectRunningReviewManager(runningPath, opts = {}) {
   const onError = opts.onError || 'throw';
@@ -344,7 +357,7 @@ function inspectRunningReviewManager(runningPath, opts = {}) {
     return finishStale({ runningPath, raw, record, pr, cleanupStale, onError, reason: 'process not alive or identity mismatch' });
   }
   return {
-    status: 'live', pr, pid: record.pid, resourceKey: record.resourceKey, instanceId: record.instanceId, startTime: record.startTime,
+    status: 'live', pr, pid: record.pid, resourceKey: record.resourceKey, instanceId: record.instanceId, startTime: record.startTime, issue: record.issue,
     processRef: checker.readRef(record), legacy: false,
   };
 
@@ -355,7 +368,7 @@ function inspectRunningReviewManager(runningPath, opts = {}) {
  * resourceKey は決定論的OS endpointを指し、instanceIdは起動世代を識別する。
  *
  * @param {string} runningPath
- * @param {string|{processRef:string}} record
+ * @param {string|{processRef:string,startTime?:string,issue?:number|string|null}} record
  * @returns {string}
  */
 function writeRunningReviewManager(runningPath, record) {
@@ -363,9 +376,13 @@ function writeRunningReviewManager(runningPath, record) {
   if (typeof processRef !== 'string' || !processRef) throw new Error(`manager.running の参照が不正です: ${runningPath}`);
   const checker = checkerFor();
   if (checker.observe(processRef) !== 'alive') throw new Error(`manager.running の所有者を確認できません: ${runningPath}`);
-  const metadata = record && typeof record === 'object' && typeof record.startTime === 'string'
-    ? { startTime: record.startTime }
-    : {};
+  const metadata = {};
+  if (record && typeof record === 'object') {
+    if (typeof record.startTime === 'string') metadata.startTime = record.startTime;
+    if (record.issue !== undefined && record.issue !== null) {
+      metadata.issue = parseAnchorIssue(record.issue, runningPath);
+    }
+  }
   atomicWriteJson(runningPath, checker.writeRef(metadata, processRef));
   return runningPath;
 }
@@ -417,7 +434,7 @@ function removeRunningReviewManagerIfOwned(runningPath, owner) {
  * @param {'throw'|'skip'} [opts.onError='throw'] 不正値・読み取り不能時の挙動
  * @param {boolean} [opts.cleanupStale=false] staleファイルを回収するか
  * @param {(info:object)=>void} [opts.onLegacyLive] 旧形式の生存PIDを当該PRの保護対象として通知
- * @returns {Array<{pr:string,pid:number,startTime:string}>}
+ * @returns {Array<{pr:string,pid:number,startTime:string|null,issue:number|null}>}
  */
 function listRunningReviewManagers(workspace, opts = {}) {
   const onError = opts.onError || 'throw';
@@ -445,7 +462,7 @@ function listRunningReviewManagers(workspace, opts = {}) {
       onError,
     });
     if (inspection.status === 'live') {
-      results.push({ pr: entry.name, pid: inspection.pid, startTime: inspection.startTime });
+      results.push({ pr: entry.name, pid: inspection.pid, startTime: inspection.startTime, issue: inspection.issue ?? null });
     }
   }
 

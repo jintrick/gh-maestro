@@ -609,7 +609,7 @@ test('superviseReviewManager: setupReviewWorktree失敗時にsetup-failedで戻�
   let result;
   try {
     result = await superviseReviewManager({
-      pr: '999', repo: 'o/r', workspace: testDir,
+      pr: '999', repo: 'o/r', issue: '715', workspace: testDir,
       ghDir, lockFile, logFile, outputFile, promptFile,
       deadlineMs: 30000,
       log,
@@ -628,6 +628,7 @@ test('superviseReviewManager: setupReviewWorktree失敗時にsetup-failedで戻�
   const marker = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
   assert.equal(marker.pid, process.pid);
   assert.ok(marker.startTime === null || typeof marker.startTime === 'string');
+  assert.equal(marker.issue, 715);
   assert.equal(fs.existsSync(startingFile), false, '本体書き込み後に自分の起動予約を解放する');
 });
 

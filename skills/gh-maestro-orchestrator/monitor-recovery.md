@@ -29,6 +29,14 @@ Review Managerを起動しない軽量経路では、上のコマンドへ `--no
 
 途中停止した Review Manager を続行する場合は `node "{{SCRIPTS_PATH}}/start-review-manager.js" --resume <PR> <REPO> "$WORKSPACE" <ISSUE>` を明示する。同じHEADの計画と成功済みジョブを再利用し、記録なし・HEAD変更時は新規開始する。`--resume` なしでは常に新規開始し、古い記録は保持する。前回のジョブ実行器が生存中または同一性を確認できない場合は再開を拒否し、停止しない。記録の破損や読み取り失敗は削除・修復せず停止する。復旧判断を人間に求める場合は、対象ファイルと失敗理由を示して必要な操作を尋ねる。
 
+### Review Manager停止通知
+
+`RESIDENT_NOTIFICATION` の `source` が `worker-supervisor` で、本文にReview ManagerとPR番号がある場合は停止検知の通知である。PR単位の `records/pr/<PR>/review/manager.running`、`manager.log`、`manager.json`、`manager.incomplete` を確認し、必要なら `worker-status.js list --workspace "$WORKSPACE"` で現在のReview Managerの生存状態を照合する。
+
+停止通知は、結果artifactと終了フックの `abnormal-exit` markerを確認できなかった停止を示す。`manager.json` または `manager.incomplete` があれば成果を確認し、`manager.log` で停止理由を調べる。原因と継続対象を確認できた場合だけ、上記の `start-review-manager.js --resume` を明示して再開する。通知を契機に自動再起動・プロセス停止・記録削除をしない。
+
+本文が「状態を判定できません」と伝えている場合は、死亡と決めつけず、`manager.running` と必要なcycle metricsを保持して調査する。endpoint確認や記録の読み取りが不確かな間は再開しない。判定不能が解消せず人間の操作が必要な場合は、PR番号・確認できた状態・失敗理由を示して一つの対応を尋ねる。
+
 確認する記録は次のとおりである。
 
 - `PR_MONITOR_TARGET_SET:<json>` が出力され、Issue・generation・workspaceが意図した値である。

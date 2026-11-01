@@ -8,9 +8,11 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('node:child_process');
 const { EventEmitter } = require('events');
 
 const msgSend = require('../scripts/msg-send');
+const { cleanSpawnEnv } = require('./_spawn-env');
 const workerLiveness = require('../scripts/shared/worker-liveness');
 const processLifecycle = require('../scripts/process-lifecycle');
 const closedPrGuard = require('../scripts/shared/closed-pr-guard');
@@ -79,6 +81,7 @@ test('--help が usage を返して code 0', () => {
   const r = msgSend.main(['--help']);
   assert.equal(r.code, 0);
   assert.ok(r.lines.join('\n').includes('msg-send.js'));
+  assert.ok(r.lines.join('\n').includes('--abnormal-exit'));
   assert.equal(r.errLines.length, 0);
 });
 
@@ -171,6 +174,64 @@ test('--plan-comment-id はfrom/toを保った計画報告マーカーを投稿�
     assert.deepEqual(JSON.parse(marker[1]), {
       v: 1, to: 'orchestrator', from: 'issue-9-coder', kind: 'plan-report', planCommentId: 42,
     });
+  });
+});
+
+test('--abnormal-exit は終了フック通知を機械識別できるkind付きマーカーで投稿する', () => {
+  withTempDir(workspace => {
+    let capturedBody = null;
+    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
+    msgSend._setGhIssueComment((issue, body) => {
+      capturedBody = body;
+      return { status: 0, stdout: 'https://github.com/test/repo/issues/9#issuecomment-52\n' };
+    });
+
+    const r = msgSend.main(
+      ['orchestrator', '--abnormal-exit', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-9-review-manager-pr-42' },
+      stdinIO('終了理由の説明文は識別子として使わない'),
+    );
+    assert.equal(r.code, 0, r.errLines.join('\n'));
+    const marker = /^<!-- gh-maestro (\{.*\}) -->$/m.exec(capturedBody);
+    assert.ok(marker, '異常終了コメントにmachine markerが付く');
+    assert.deepEqual(JSON.parse(marker[1]), {
+      v: 1, to: 'orchestrator', from: 'issue-9-review-manager-pr-42', kind: 'abnormal-exit',
+    });
+  });
+});
+
+test('--abnormal-exit はorchestratorとraw投稿から拒否する', () => {
+  withTempDir(workspace => {
+    const orchestrator = msgSend.main(
+      ['orchestrator', '--abnormal-exit', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'orchestrator' }, stdinIO('body'),
+    );
+    assert.equal(orchestrator.code, 1);
+    assert.match(orchestrator.errLines.join('\n'), /ワーカー通知専用/);
+
+    const raw = msgSend.main(
+      ['orchestrator', '--abnormal-exit', '--raw', '--stdin', '--issue', '9', '--workspace', workspace],
+      { GH_MAESTRO_WORKER: 'issue-9-review-manager-pr-42' }, stdinIO('body'),
+    );
+    assert.equal(raw.code, 1);
+    assert.match(raw.errLines.join('\n'), /マーカー付きの通常コメント専用/);
+  });
+});
+
+test('--abnormal-exitのorchestrator拒否は実CLI境界でもcode 1になる', () => {
+  withTempDir(workspace => {
+    const result = spawnSync(process.execPath, [
+      path.join(__dirname, '..', 'scripts', 'msg-send.js'),
+      'orchestrator', '--abnormal-exit', '--stdin', '--issue', '9', '--workspace', workspace,
+    ], {
+      cwd: workspace,
+      encoding: 'utf8',
+      input: 'body',
+      env: { ...cleanSpawnEnv(), GH_MAESTRO_WORKER: 'orchestrator' },
+      timeout: 30000,
+    });
+    assert.equal(result.status, 1, `nonzero exit expected; stderr: ${result.stderr}`);
+    assert.match(result.stderr, /ワーカー通知専用/);
   });
 });
 

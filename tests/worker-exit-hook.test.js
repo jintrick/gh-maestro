@@ -354,6 +354,16 @@ describe('buildMsgSendRelayArgs', () => {
       '--workspace', '/ws',
     ]);
   });
+
+  test('異常終了時だけ machine marker を要求するmsg-send専用フラグを付ける', () => {
+    const args = hook.buildMsgSendRelayArgs('/ws', { abnormalExit: true });
+    assert.deepEqual(args, [
+      path.join(__dirname, '..', 'scripts', 'msg-send.js'),
+      '--stdin',
+      '--workspace', '/ws',
+      '--abnormal-exit',
+    ]);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -392,6 +402,50 @@ if (mode === 'once' || mode === 'always') {
 `;
 
 describe('CLI引数の解釈', () => {
+
+  test('実際の非ゼロ終了フックは --abnormal-exit をmsg-sendへ渡す', () => {
+    withTempDir((workspace) => {
+      fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+      const capturePath = path.join(workspace, 'relay-args.json');
+      const preloadPath = path.join(workspace, 'capture-relay.js');
+      const childProcessModule = require.resolve('../scripts/shared/child-process');
+      fs.writeFileSync(preloadPath, [
+        "'use strict';",
+        "const fs = require('fs');",
+        `const childProcess = require(${JSON.stringify(childProcessModule)});`,
+        `const capturePath = ${JSON.stringify(capturePath)};`,
+        'childProcess.spawnSync = (command, args, options = {}) => {',
+        '  fs.writeFileSync(capturePath, JSON.stringify({ command, args, input: options.input }), \'utf8\');',
+        "  return { status: 0, stdout: '', stderr: '' };",
+        '};',
+      ].join('\n'), 'utf8');
+
+      const result = realSpawnSync(process.execPath, [
+        '-r', preloadPath,
+        HOOK_SCRIPT,
+        workspace,
+        '',
+        '3',
+      ], {
+        cwd: workspace,
+        encoding: 'utf8',
+        timeout: 30000,
+        env: {
+          ...cleanSpawnEnv(),
+          GH_MAESTRO_WORKER: 'issue-9-review-manager-pr-42',
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const relay = JSON.parse(fs.readFileSync(capturePath, 'utf8'));
+      assert.deepEqual(relay.args, [
+        path.join(__dirname, '..', 'scripts', 'msg-send.js'),
+        '--stdin',
+        '--workspace', workspace,
+        '--abnormal-exit',
+      ]);
+      assert.match(relay.input, /exit code 3/);
+    });
+  });
 
 
 

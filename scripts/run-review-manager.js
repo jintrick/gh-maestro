@@ -1053,7 +1053,7 @@ async function superviseReviewManager({
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
     fs.mkdirSync(path.dirname(lockFile), { recursive: true });
     const owner = lockOwner || processLiveness.captureSelf();
-    writeRunningReviewManager(lockFile, { processRef: owner, startTime: startedAt });
+    writeRunningReviewManager(lockFile, { processRef: owner, startTime: startedAt, issue });
     const startupToken = process.env.GH_MAESTRO_REVIEW_MANAGER_STARTUP_TOKEN;
     if (startupToken) {
       const released = releaseReviewManagerStartup(lockFile, startupToken);
