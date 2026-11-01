@@ -19,6 +19,8 @@ const {
 const { createBuiltinTestConfig } = require('../scripts/shared/resolve-config');
 const { createTempDirScope } = require('../scripts/shared/temp-directory');
 const { findRunningInstances, pidsDir } = require('../scripts/process-lifecycle');
+const { buildCommentBody } = require('../scripts/declare-test-result');
+const { readTestResultArtifact, writeTestResultLayer } = require('../scripts/shared/test-result');
 
 const BUILTIN_TEST_LAYERS = createBuiltinTestConfig().layers;
 
@@ -1053,4 +1055,31 @@ test('runTests: full層の成果物には失敗の中身を載せない（full�
   assert.equal(fixture.artifacts[0].outcome, 'fail');
   assert.deepEqual(fixture.artifacts[0].failedTests, ['full one']);
   assert.equal('failureDetails' in fixture.artifacts[0], false);
+});
+
+test('runTests→申告: 実際の node:test の失敗出力の中身が、成果物と読み取りを経て申告の本文に載り、絶対パスは載らない', () => {
+  const worktree = tempWorktree();
+  // 実機の node:test（--test-reporter=tap）の出力。場所だけを実行時の worktree に置き換える。
+  // Windows の実出力は場所の区切りが二重の \\ になるため、同じ形に揃える。
+  const captured = fs.readFileSync(path.join(__dirname, 'fixtures', 'node-test-tap-failures.txt'), 'utf8');
+  const tap = captured.replaceAll('__WORKTREE__', worktree.replace(/\\/g, '\\\\'));
+  const fixture = runWithChild({
+    suite: 'slow',
+    cwd: worktree,
+    child: { status: 1, stdout: tap, stderr: '' },
+  });
+  assert.equal(fixture.artifacts[0].outcome, 'fail');
+
+  writeTestResultLayer(worktree, fixture.artifacts[0]);
+  const read = readTestResultArtifact(worktree);
+  assert.equal(read.ok, true);
+  const body = buildCommentBody({ commit: SHA, worktree, testResult: { provenance: 'test-runner', scope: 'aggregate', layers: read.result.layers } });
+
+  assert.ok(body.includes('失敗詳細: `alpha fails` / 場所: `tests/f.test.js:3:1`'), body);
+  assert.ok(body.includes('エラー: `sum mismatch ⏎ 2 !== 3`'), body);
+  assert.ok(body.includes('期待値: `3` / 実際値: `2`'), body);
+  assert.ok(body.includes('失敗詳細: `beta fails` / 場所: `tests/f.test.js:4:1`'), body);
+  assert.ok(body.includes('期待値: `a: 2` / 実際値: `a: 1`'), body);
+  assert.ok(!body.includes(worktree), '絶対パスを載せない');
+  assert.ok(!body.includes(worktree.replace(/\\/g, '\\\\')), '二重区切りの絶対パスも載せない');
 });

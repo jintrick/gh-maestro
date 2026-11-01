@@ -260,27 +260,61 @@ function missingRequiredLayers(testResult, requiredLayers, options = {}) {
 
 // ── コメント本文生成 ────────────────────────────────────────────────────────
 
+// 申告に載せるとき、worktree の絶対パスを出さない（#477）。
+// 場所は worktree からの相対パス、worktree の外ならファイル名だけにする。成果物はローカルなのでそのままにする。
+function worktreePathPattern(worktree) {
+  if (typeof worktree !== 'string' || !worktree.trim()) return null;
+  const parts = worktree.replace(/\\+/g, '/').replace(/\/+$/, '').split('/').filter(Boolean);
+  if (parts.length === 0) return null;
+  return new RegExp(parts.map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\\\/]+'), 'i');
+}
+
+function isAbsolutePath(value) {
+  return /^(?:[A-Za-z]:)?[\\/]/.test(value);
+}
+
+function displayLocation(location, worktree) {
+  const match = String(location).match(/^(.*?)((?::\d+){1,2})?$/);
+  const pathPart = match[1];
+  const suffix = match[2] || '';
+  const pattern = worktreePathPattern(worktree);
+  if (pattern) {
+    const under = new RegExp(`^${pattern.source}[\\\\/]+`, 'i');
+    if (under.test(pathPart)) return `${pathPart.replace(under, '').replace(/\\+/g, '/')}${suffix}`;
+  }
+  if (isAbsolutePath(pathPart)) return `${pathPart.replace(/\\+/g, '/').split('/').pop()}${suffix}`;
+  return `${pathPart.replace(/\\+/g, '/')}${suffix}`;
+}
+
+function redactWorktreeText(text, worktree) {
+  const pattern = worktreePathPattern(worktree);
+  return pattern ? String(text).replace(new RegExp(pattern.source, 'gi'), '<worktree>') : String(text);
+}
+
 // 失敗の中身（場所・エラー・期待値・実際値）を、層行の直下のネスト行にする。
 // ネスト行は `  - **層名**:` の形にしない。層行の解析（parseAggregateLayers）に層として拾われないため。
-// 申告コメントの長さを抑えるため、詳細は合計 FAILURE_DETAIL_BUDGET 字までに切り、超えた分は実行記録の名前で示す。
+// 申告コメントの長さを抑えるため、詳細は合計 FAILURE_DETAIL_BUDGET 字までに切る。
+// 省いた件数は、件数の上限で省いた分（failedTests の件数との差）と文字数の上限で省いた分を合わせた残りで示す。
 const FAILURE_DETAIL_BUDGET = 2000;
-function failureDetailLines(layer, recordName) {
+function failureDetailLines(layer, recordName, worktree) {
   if (!Array.isArray(layer.failureDetails) || layer.failureDetails.length === 0) return [];
   const code = value => `\`${String(value).replaceAll('`', "'")}\``;
+  const text = value => code(redactWorktreeText(value, worktree));
+  const total = Math.max(Array.isArray(layer.failedTests) ? layer.failedTests.length : 0, layer.failureDetails.length);
   const lines = [];
   let used = 0;
   for (const detail of layer.failureDetails) {
-    const parts = [`失敗詳細: ${code(detail.name)}`];
-    if (detail.location !== undefined) parts.push(`場所: ${code(detail.location)}`);
-    if (detail.error !== undefined) parts.push(`エラー: ${code(detail.error)}`);
-    if (detail.expected !== undefined) parts.push(`期待値: ${code(detail.expected)}`);
-    if (detail.actual !== undefined) parts.push(`実際値: ${code(detail.actual)}`);
+    const parts = [`失敗詳細: ${text(detail.name)}`];
+    if (detail.location !== undefined) parts.push(`場所: ${code(displayLocation(detail.location, worktree))}`);
+    if (detail.error !== undefined) parts.push(`エラー: ${text(detail.error)}`);
+    if (detail.expected !== undefined) parts.push(`期待値: ${text(detail.expected)}`);
+    if (detail.actual !== undefined) parts.push(`実際値: ${text(detail.actual)}`);
     const line = `    - ${parts.join(' / ')}`;
     if (used + line.length > FAILURE_DETAIL_BUDGET) break;
     lines.push(line);
     used += line.length;
   }
-  const omitted = layer.failureDetails.length - lines.length;
+  const omitted = total - lines.length;
   if (omitted > 0) {
     const pointer = recordName ? `、詳細は実行記録 ${code(recordName)} を参照` : '';
     lines.push(`    - （残り${omitted}件の詳細は省略${pointer}）`);
@@ -288,12 +322,7 @@ function failureDetailLines(layer, recordName) {
   return lines;
 }
 
-/**
- * 申告コメントの本文を組み立てる純粋関数。結果と件数は testResult からのみ参照する。
- * @param {{commit:string, testResult:object}} params
- * @returns {string}
- */
-function buildCommentBody({ commit, testResult }) {
+function buildCommentBody({ commit, testResult, worktree }) {
   if (testResult && testResult.scope === 'aggregate' && testResult.layers) {
     const layers = Object.entries(testResult.layers);
     const statuses = layers.map(([, layer]) => aggregateLayerStatus(layer));
@@ -347,7 +376,7 @@ function buildCommentBody({ commit, testResult }) {
         failuresSuffix = `, 失敗: ${shown.map(t => `\`${String(t).replaceAll('`', "'")}\``).join(', ')}${overflowText}`;
       }
       lines.push(`  - **${name}**: ${status}${countSuffix}${count}${executor}${scope}${record}${concurrencySuffix}${command}${reason}${failuresSuffix}`);
-      if (status === 'fail') lines.push(...failureDetailLines(layer, recordName));
+      if (status === 'fail') lines.push(...failureDetailLines(layer, recordName, worktree));
     }
     return lines.join('\n');
   }
@@ -547,7 +576,7 @@ function declareTestResult(params = {}, deps = {}) {
   }
   if (!comments) return { ok: false, error: 'コメント一覧のJSON形式が不正です' };
 
-  const ownBody = buildCommentBody({ commit: trimmedHead, testResult });
+  const ownBody = buildCommentBody({ commit: trimmedHead, testResult, worktree: cwd });
 
   // 4. 既存の申告コメント検索（最新のコメントを対象にするため末尾から検索）
   const existingComment = [...comments].reverse()

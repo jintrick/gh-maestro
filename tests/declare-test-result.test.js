@@ -663,7 +663,7 @@ function slowFailureBody(failureDetails, extra = {}) {
 
 test('buildCommentBody: slow層の失敗は名前・場所・エラー・期待値・実際値をネスト行に載せる', () => {
   const body = slowFailureBody([{ name: 'slow case', location: '/x.test.js:3:1', error: 'sum mismatch ⏎ 2 !== 3', expected: '3', actual: '2' }]);
-  assert.ok(body.includes('    - 失敗詳細: `slow case` / 場所: `/x.test.js:3:1` / エラー: `sum mismatch ⏎ 2 !== 3` / 期待値: `3` / 実際値: `2`'));
+  assert.ok(body.includes('    - 失敗詳細: `slow case` / 場所: `x.test.js:3:1` / エラー: `sum mismatch ⏎ 2 !== 3` / 期待値: `3` / 実際値: `2`'));
 });
 
 test('buildCommentBody: ネスト行は層行として読まれない形で出す（層名・pass/fail を偽装した本文でも層行にならない）', () => {
@@ -704,4 +704,54 @@ test('buildCommentBody: 失敗の中身がない層（pass・中身の無い失�
   assert.ok(!passBody.includes('失敗詳細'), 'pass 層には中身を出さない');
   const withoutDetails = slowFailureBody([]);
   assert.ok(!withoutDetails.includes('失敗詳細'));
+});
+
+function slowResultWithDetails(failureDetails, extra = {}) {
+  return {
+    provenance: 'test-runner',
+    scope: 'aggregate',
+    layers: {
+      slow: {
+        status: 'complete', outcome: 'fail', tests: failureDetails.length, pass: 0, fail: failureDetails.length,
+        executor: 'poll-pr', scope: 'partial',
+        failedTests: failureDetails.map(detail => detail.name),
+        failureDetails,
+        ...extra,
+      },
+    },
+  };
+}
+
+test('buildCommentBody: 件数の上限で省いた分も「残り N件」に含める（failedTests が failureDetails より多い）', () => {
+  const failureDetails = Array.from({ length: 5 }, (_, i) => ({ name: `case ${i}`, error: 'e' }));
+  const failedTests = Array.from({ length: 7 }, (_, i) => `case ${i}`);
+  const testResult = slowResultWithDetails(failureDetails, { failedTests, fail: 7, tests: 7 });
+  const body = buildCommentBody({ commit: SHA, testResult });
+  assert.ok(body.includes('    - （残り2件の詳細は省略）'), body);
+});
+
+test('buildCommentBody: 場所は worktree からの相対パスで出し、区切り文字が混在しても絶対パスを載せない', () => {
+  const worktree = 'C:/work/wt';
+  const body = buildCommentBody({
+    commit: SHA,
+    worktree,
+    testResult: slowResultWithDetails([{
+      name: 'a',
+      location: 'C:\\\\work\\\\wt\\\\tests\\\\a.test.js:3:1',
+      error: 'failed at C:/work/wt/tests/a.test.js',
+    }]),
+  });
+  assert.ok(body.includes('場所: `tests/a.test.js:3:1`'), body);
+  assert.ok(body.includes('エラー: `failed at <worktree>/tests/a.test.js`'), body);
+  assert.doesNotMatch(body, /C:[\\/]+work/);
+});
+
+test('buildCommentBody: worktree の外の場所はファイル名だけにする', () => {
+  const body = buildCommentBody({
+    commit: SHA,
+    worktree: 'C:/work/wt',
+    testResult: slowResultWithDetails([{ name: 'b', location: 'D:\\\\other\\\\x.test.js:9:1' }]),
+  });
+  assert.ok(body.includes('場所: `x.test.js:9:1`'), body);
+  assert.doesNotMatch(body, /D:[\\/]+other/);
 });
