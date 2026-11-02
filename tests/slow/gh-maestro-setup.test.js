@@ -1,6 +1,7 @@
 'use strict';
 
 const { test } = require('node:test');
+const { createFakeGh } = require('../helpers/fake-gh');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
@@ -113,38 +114,20 @@ test('初回setupは成功確認行を表示し、後続実行用sentinelを作�
 
     const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm setup first-run bin with spaces-'));
     try {
-      const fakeSuccess = path.join(binDir, process.platform === 'win32' ? 'gh.exe' : 'gh');
-      const fakeVersion = path.join(binDir, process.platform === 'win32' ? 'wezterm.exe' : 'wezterm');
       const fakeAuthStatusCall = path.join(binDir, 'fake-gh-auth-status.called');
-      const preload = path.join(binDir, 'fake-command-bootstrap.js');
-      fs.copyFileSync(process.execPath, fakeSuccess);
+      const baseEnv = { ...process.env };
+      delete baseEnv.NODE_TEST_CONTEXT;
+      const fakeGh = createFakeGh({
+        binDir,
+        baseEnv,
+        extraEnv: { WEZTERM_PANE: 'first-run-test-pane' },
+        fixtures: [{ match: ['auth', 'status'], action: 'write-marker', markerPath: fakeAuthStatusCall }],
+      });
+      const fakeVersion = path.join(binDir, process.platform === 'win32' ? 'wezterm.exe' : 'wezterm');
       fs.copyFileSync(process.execPath, fakeVersion);
-      if (process.platform !== 'win32') {
-        fs.chmodSync(fakeSuccess, 0o755);
-        fs.chmodSync(fakeVersion, 0o755);
-      }
-      fs.writeFileSync(preload, [
-        "'use strict';",
-        "const path = require('node:path');",
-        `const expectedExecutable = ${JSON.stringify(fakeSuccess)};`,
-        `const marker = ${JSON.stringify(fakeAuthStatusCall)};`,
-        "const actualExecutable = path.resolve(process.execPath);",
-        "const resolvedExpectedExecutable = path.resolve(expectedExecutable);",
-        "const sameExecutable = process.platform === 'win32'",
-        "  ? actualExecutable.toLowerCase() === resolvedExpectedExecutable.toLowerCase()",
-        "  : actualExecutable === resolvedExpectedExecutable;",
-        "const command = path.basename(process.argv[1] || '').toLowerCase();",
-        "if (sameExecutable && command === 'auth' && process.argv[2] === 'status') {",
-        "  require('node:fs').writeFileSync(marker, 'called');",
-        "  process.exit(0);",
-        "}",
-      ].join('\n'));
+      if (process.platform !== 'win32') fs.chmodSync(fakeVersion, 0o755);
+      const env = fakeGh.env;
 
-      const env = { ...process.env };
-      delete env.NODE_TEST_CONTEXT;
-      env.PATH = `${binDir}${path.delimiter}${env.PATH || ''}`;
-      env.NODE_OPTIONS = `--require="${preload.replace(/\\/g, '/')}"`;
-      env.WEZTERM_PANE = 'first-run-test-pane';
       const r = runSetupCli(dir, env);
 
       assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);

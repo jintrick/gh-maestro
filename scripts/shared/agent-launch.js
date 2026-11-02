@@ -16,6 +16,24 @@ function agentLaunchConfigError(message) {
   return error;
 }
 
+/**
+ * 設定解決済みの phase 引数を agent-launch の既存引数形式へ選択する。
+ * 検証・警告・fallback は resolve-config.js の責務。
+ *
+ * @param {object} agentConfig
+ * @param {'planning'|'implementation'|null} modelPhase
+ * @returns {object} 選択した extraArgs を持つ設定。元の設定は変更しない。
+ */
+function selectAgentConfigForModelPhase(agentConfig, modelPhase) {
+  if (!agentConfig || typeof agentConfig !== 'object') {
+    throw new Error('agentConfig is required');
+  }
+  if (modelPhase !== 'planning') return agentConfig;
+  const planArgs = agentConfig.resolvedPhaseArgs && agentConfig.resolvedPhaseArgs.planning;
+  if (!Array.isArray(planArgs)) return agentConfig;
+  return { ...agentConfig, extraArgs: planArgs };
+}
+
 // resume起動（--continue）はメッセージ履歴を復元するが、システムプロンプトは復元しない
 // （Claude Code公式ドキュメント: 「These flags apply only to the current invocation」）。
 // 初回spawn時にsystem-prompt-file配送で注入した報告プロトコル（msg-send.js経由での報告義務・
@@ -379,6 +397,7 @@ function buildAgentResumeCommandArgs(agentConfig, resumeArgs, opts = {}) {
 }
 
 module.exports = {
+  selectAgentConfigForModelPhase,
   buildAgentCommandArgs,
   buildAgentExecArgs,
   normalizeAgentLaunchConfig,

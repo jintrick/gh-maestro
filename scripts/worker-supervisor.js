@@ -40,7 +40,7 @@ const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { resolveAgentConfig } = require('./shared/resolve-config');
 const { resolveAdapter } = require('./shared/inbox-adapters');
-const { buildAgentResumeCommandArgs } = require('./shared/agent-launch');
+const { buildAgentResumeCommandArgs, selectAgentConfigForModelPhase } = require('./shared/agent-launch');
 const { launchAgentHeadless, workerLogPath } = require('./shared/headless-launch');
 const { buildWorkerEnv } = require('./shared/worker-env');
 const { readWorkersRaw, updateWorkerProcess } = require('./shared/workers-registry');
@@ -77,6 +77,7 @@ const {
 } = require('./shared/worker-report-check');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { readContract, clearContract } = require('./shared/response-contract');
+const { readImplementationApproval } = require('./shared/implementation-approval');
 const { createWriteFailureMonitor } = require('./shared/write-failure-warning');
 const closedPrGuard = require('./shared/closed-pr-guard');
 const { ARTIFACTS, legacyWorkerOwner, recordPath, recordRoot } = require('./shared/record-paths');
@@ -377,6 +378,7 @@ function loadWorkers(workspace) {
  * @param {object} params
  * @param {string} params.workerName
  * @param {string|null} params.agentId
+ * @param {'planning'|null} [params.modelPhase] - workers.json に初回起動時に記録された計画状態。
  * @param {object} params.message    - { from, body }
  * @param {string} params.workspace
  * @param {string} params.homedir
@@ -386,7 +388,7 @@ function loadWorkers(workspace) {
  *   （Issue #269）。レガシーレコードでは null。
  * @returns {{ success: boolean, method: string, error?: string, newPaneId?: string }}
  */
-function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, workspace, homedir, baseBranch, repo }) {
+function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, workspace, homedir, baseBranch, repo, modelPhase }) {
   let agentConfig;
   try {
     agentConfig = agentId ? resolveAgentConfig(agentId, { workspace, homedir }) : null;
@@ -397,6 +399,24 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
     // config解決の恒久的失敗は'pending'（相手が稼働中で順番待ち＝正常）と区別する。
     // 'pending'のままだとshouldRetry()のisAwaitingIdleがtrueになり無限リトライ＋通知未発火になる。
     return { success: false, method: 'config-unresolvable', error: `agentId "${agentId}" のconfigを解決できません` };
+  }
+
+  let launchAgentConfig = agentConfig;
+  const isCoderRole = skill === 'gh-maestro-coder' || skill === 'gh-maestro-senior-coder';
+  if (isCoderRole && modelPhase === 'planning') {
+    let approval;
+    try {
+      approval = readImplementationApproval(workspace, workerName);
+    } catch (error) {
+      return {
+        success: false,
+        method: 'resume-failed',
+        error: `実装承認記録を確認できないため resume を中止しました: ${error.message}`,
+      };
+    }
+    if (!approval) {
+      launchAgentConfig = selectAgentConfigForModelPhase(agentConfig, 'planning');
+    }
   }
 
   if (repo) {
@@ -430,7 +450,7 @@ function tryResumeAndDeliver({ workerName, agentId, skill, issue, message, works
 
   let argv, afterLaunchText;
   try {
-    ({ argv, afterLaunchText } = buildAgentResumeCommandArgs(agentConfig, resumeResult.args, {
+    ({ argv, afterLaunchText } = buildAgentResumeCommandArgs(launchAgentConfig, resumeResult.args, {
       shortPrompt: message.body || '(本文なし)',
     }));
   } catch (e) {
@@ -600,6 +620,7 @@ function deliverMessage({ workerName, entry, message, workspace, homedir, issue,
     workerName,
     agentId: entry.agentId,
     skill: entry.skill,
+    modelPhase: entry.modelPhase,
     issue,
     message,
     workspace,

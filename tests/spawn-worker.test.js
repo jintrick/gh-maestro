@@ -24,6 +24,7 @@ const {
 const readStateLib = require('../scripts/shared/read-state');
 const { createTempDirScope } = require('../scripts/shared/temp-directory');
 const { isRolelessWorkerName: sharedIsRolelessWorkerName } = require('../scripts/shared/roleless-worker');
+const { createFakeGh } = require('./helpers/fake-gh');
 const fs = require('fs');
 const os = require('os');
 
@@ -77,8 +78,21 @@ const FAST_CLI_PRELOAD = (() => {
     `const supervisor = require(${JSON.stringify(supervisorPath)});`,
     'supervisor._setSpawn(() => ({ pid: 99990, on: () => {}, unref: () => {} }));',
     'supervisor._setFindRunningInstance(() => null);',
-    'supervisor._setFindSessionRootPid(() => null);',
     'supervisor._setIsResidentLeaseLive(() => false);',
+    'if (process.env.GHM_TEST_CAPTURE_AGENT_ARGV) {',
+    `  const agentExec = require(${JSON.stringify(require.resolve('../scripts/shared/agent-exec'))});`,
+    '  agentExec.checkAgentExists = () => true;',
+    `  const skillInstallPath = require(${JSON.stringify(require.resolve('../scripts/shared/skill-install-path'))});`,
+    '  skillInstallPath.resolveSkillMdPath = () => process.env.GHM_TEST_SKILL_FILE;',
+    `  const headless = require(${JSON.stringify(require.resolve('../scripts/shared/headless-launch'))});`,
+    `  const lease = require(${JSON.stringify(require.resolve('../scripts/shared/worker-lease'))});`,
+    '  lease.activateLease = () => {};',
+    '  headless.launchAgentHeadless = ({ argv, cwd, logPath, env }) => {',
+    '    require("node:fs").appendFileSync(process.env.GHM_TEST_CAPTURE_AGENT_ARGV, `${JSON.stringify(argv)}\\n`, "utf8");',
+    '    const processRef = processLiveness.captureSelf({ workspace: env.GH_MAESTRO_WORKSPACE, kind: "worker", name: env.GH_MAESTRO_WORKER });',
+    '    return { pid: process.pid, processRef, logPath };',
+    '  };',
+    '}',
   ].join('\n');
   fs.writeFileSync(file, source, 'utf8');
   process.once('exit', () => {
@@ -149,6 +163,62 @@ function parseRejects(args, pattern) {
 
 // headless起動になったため WEZTERM_PANE は不要。引数バリデーションの検証には追加の環境変数は要らない。
 const BASE_ENV = {};
+
+test('spawn-worker: coderの初回argvはagy基底引数を保ち、planExtraArgsのモデルを使う', () => {
+  const workspace = tempDirScope.mkdtemp('ghm-spawn-plan-model-');
+  copyGitTemplate(workspace);
+  const home = path.join(workspace, 'home');
+  const fakeRoot = path.join(workspace, 'fake-gh');
+  const captureFile = path.join(workspace, 'agent-argv.jsonl');
+  const skillFile = path.join(workspace, 'test-skill.md');
+  const runtimeDir = path.join(workspace, 'runtime');
+  fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+  fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+  readStateLib.initializeState(workspace, 'orchestrator', { sessionId: TEST_SESSION_ID });
+  fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), JSON.stringify({
+    agents: {
+      'agy-flash': {
+        extends: 'agy',
+        extraArgs: ['--model', 'gemini-3.8-flash-medium'],
+        planExtraArgs: ['--model', 'gemini-4-argon-low'],
+      },
+    },
+  }), 'utf8');
+  fs.writeFileSync(skillFile, '# argv fixture\n', 'utf8');
+  const fakeGh = createFakeGh({
+    binDir: path.join(fakeRoot, 'bin'),
+    logPath: path.join(fakeRoot, 'calls.jsonl'),
+    fixtures: [
+      { match: { prefix: ['pr', 'list'] }, stdout: '[]' },
+      { match: { prefix: ['api', '--method', 'GET', 'repos/test/maestro/issues/725/comments'] }, stdout: '[[]]' },
+    ],
+  });
+  const result = run([
+    '--skill', 'gh-maestro-senior-coder', '--issue', '725', '--description', 'model-check',
+    '--repo', 'test/maestro', '--workspace', workspace, '--agent', 'agy-flash',
+    '--short-prompt', 'return the test marker', '--session-id', TEST_SESSION_ID,
+  ], {
+    ...fakeGh.env,
+    HOME: home,
+    GH_MAESTRO_RUNTIME_DIR: runtimeDir,
+    GHM_TEST_CAPTURE_AGENT_ARGV: captureFile,
+    GHM_TEST_SKILL_FILE: skillFile,
+  });
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const [argvLine] = fs.readFileSync(captureFile, 'utf8').trim().split(/\r?\n/);
+  const argv = JSON.parse(argvLine);
+  assert.equal(argv[0], 'agy');
+  assert.deepEqual(argv.slice(1, 4), ['--dangerously-skip-permissions', '--print-timeout', '30m0s']);
+  assert.deepEqual(argv.slice(4, 6), ['--model', 'gemini-4-argon-low']);
+  assert.equal(argv.includes('gemini-3.8-flash-medium'), false);
+  assert.equal(argv.at(-2), '--print', 'agy promptFlag remains present after extraArgs resolution');
+
+  const workers = JSON.parse(fs.readFileSync(path.join(workspace, '.gh-maestro', 'workers.json'), 'utf8'));
+  assert.equal(workers['issue-725-senior-coder-model-check'].modelPhase, 'planning');
+  assert.ok(fakeGh.readCalls().length >= 2);
+  assert.ok(fakeGh.readCalls().every(call => path.resolve(call.executable) === path.resolve(fakeGh.executablePath)));
+});
 
 // 生存判定を注入して、実プロセスに触れずに stale 判定だけを検証する
 const ALIVE = () => true;

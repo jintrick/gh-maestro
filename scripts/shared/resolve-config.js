@@ -23,7 +23,7 @@ const { isPlainObject } = require('./object');
 const { readJsonFile } = require('./json-file');
 
 // workspace/.gh-maestro/config.json からの上書きを許さない実行系フィールド。
-// command/extraArgs に加え、execArgs も同じ扱いとする（PR #103 Review Manager指摘:
+// command/extraArgs/planExtraArgs に加え、execArgs も同じ扱いとする（PR #103 Review Manager指摘:
 // execArgsだけ除外対象から漏れると、workspace configで--sandbox/--skip-git-repo-check等の
 // 安全設定を欠いたコマンドラインに差し替えられてしまう）。
 // extendsも同じ扱いが必要: workspace configがextendsで既存エージェント（claude等）の
@@ -31,10 +31,10 @@ const { readJsonFile } = require('./json-file');
 // nonInteractiveTokensも同じ扱い（Issue #163 Review Manager指摘）: 単なる宣言フィールドでは
 // なく安全ガードそのものであり、workspace config（信頼できないclone元からの入力として扱う）
 // が agents.<id>.nonInteractiveTokens: [] を指定するだけで、グローバル設定側の
-// extraArgs/execArgs 欠落検出を無効化できてしまう。カスタムエージェントで宣言したい場合は
+// extraArgs/planExtraArgs/execArgs 欠落検出を無効化できてしまう。カスタムエージェントで宣言したい場合は
 // ~/.gh-maestro/config.json（グローバル・信頼された設定）でのみ可能。
 // ワークスペース側から上書きできない実行系フィールドの単一の一覧。resolveAgentConfig が除外に使う。
-const EXEC_SENSITIVE_FIELDS = ['command', 'extraArgs', 'execArgs', 'execPromptDelivery', 'execPromptFlag', 'resumeCommand', 'extends', 'nonInteractiveTokens'];
+const EXEC_SENSITIVE_FIELDS = ['command', 'extraArgs', 'planExtraArgs', 'execArgs', 'execPromptDelivery', 'execPromptFlag', 'resumeCommand', 'extends', 'nonInteractiveTokens'];
 
 // テスト宣言は agent 設定とは別のセクションで解決する。agent 設定の command 等を
 // workspace 段から除去する既存の境界を変更せず、テスト宣言については組み込み既定値、
@@ -525,8 +525,8 @@ function resolveDynamicCommand(agent) {
  * 配列フィールドの扱いはモードで分かれる（Issue #235）:
  * - 既定（appendArrays=false）: 配列フィールド（extraArgs 等）は override 側が完全に置き換える。
  *   非extendsの通常上書き経路（global/workspace override）はこのモード。
- * - appendArrays=true: 対象の配列フィールド（APPEND_ARRAY_FIELDS: extraArgs / execArgs /
- *   nonInteractiveTokens）は base の配列内容の末尾に override の内容を連結する
+ * - appendArrays=true: 対象の配列フィールド（APPEND_ARRAY_FIELDS: extraArgs /
+ *   execArgs / nonInteractiveTokens）は base の配列内容の末尾に override の内容を連結する
  *   （継承元の内容が失われない）。extends 解決（resolveExtends）専用のモード。
  *   resumeCommand は対象外（従来どおり完全置換。末尾要素をセッション参照で置換する
  *   createSessionResumeAdapter.resume() の契約と整合させるため。PR #236 レビュー指摘）。
@@ -607,6 +607,80 @@ function resolveExtends(entry, agentsArray, seen = new Set()) {
 }
 
 /**
+ * resolveExtends が平坦化する前の、許可された agent-defaults extends 鎖を保持する。
+ * config.json 側の extends も継承元は agent-defaults のみとし、global config 同士は辿らない。
+ *
+ * @param {object|null} entry
+ * @param {object[]} agentsArray
+ * @param {{fallbackId?:string}} [opts]
+ * @param {Set<string>} [seen]
+ * @returns {object[]}
+ */
+function collectAgentLayers(entry, agentsArray, opts = {}, seen = new Set()) {
+  if (!entry || typeof entry !== 'object') return [];
+
+  const entryId = typeof entry.id === 'string' && entry.id !== '' ? entry.id : opts.fallbackId;
+  if (entryId && seen.has(entryId)) return [];
+  const nextSeen = new Set(seen);
+  if (entryId) nextSeen.add(entryId);
+
+  let baseLayers = [];
+  if (typeof entry.extends === 'string' && entry.extends !== '') {
+    const base = Array.isArray(agentsArray) ? agentsArray.find(agent => agent && agent.id === entry.extends) : null;
+    if (base) baseLayers = collectAgentLayers(base, agentsArray, {}, nextSeen);
+  }
+
+  const layer = {};
+  if (entryId) layer.id = entryId;
+  for (const field of ['extraArgs', 'planExtraArgs']) {
+    if (!Object.prototype.hasOwnProperty.call(entry, field)) continue;
+    const value = entry[field];
+    layer[field] = Array.isArray(value) ? [...value] : value;
+  }
+  return [...baseLayers, layer];
+}
+
+function isStringArray(value) {
+  return Array.isArray(value) && value.every(item => typeof item === 'string');
+}
+
+/**
+ * レイヤーごとの引数を通常用・計画用に解決する。
+ * planExtraArgs の検証と警告は設定解決時に一度だけ行い、agent-launch 側へ不正値を渡さない。
+ *
+ * @param {object[]} layers
+ * @param {string} agentId
+ * @param {(message:string)=>void} warnFn
+ * @returns {{default:string[], planning:string[]}}
+ */
+function resolvePhaseArgs(layers, agentId, warnFn) {
+  const normalArgs = [];
+  const planningArgs = [];
+
+  for (const layer of layers) {
+    const ownArgs = Array.isArray(layer.extraArgs) ? layer.extraArgs : [];
+    normalArgs.push(...ownArgs);
+
+    let planArgs = ownArgs;
+    if (Object.prototype.hasOwnProperty.call(layer, 'planExtraArgs')) {
+      if (isStringArray(layer.planExtraArgs)) {
+        planArgs = layer.planExtraArgs;
+      } else {
+        const id = typeof layer.id === 'string' && layer.id !== '' ? layer.id : agentId;
+        const actual = Array.isArray(layer.planExtraArgs) ? '文字列以外を含む配列' : typeof layer.planExtraArgs;
+        warnFn(
+          `gh-maestro: agents["${id}"].planExtraArgs は文字列配列ではありません (${actual})。` +
+          'このレイヤーでは extraArgs を計画用引数として使います。config.json は変更していません。',
+        );
+      }
+    }
+    planningArgs.push(...planArgs);
+  }
+
+  return { default: normalArgs, planning: planningArgs };
+}
+
+/**
  * 解決済みエージェント設定が起動に必要な最小フィールドを持っているか検証する。
  * config.json のみで定義されたカスタムエージェントが不完全な状態で使われるのを防ぐ。
  *
@@ -673,6 +747,7 @@ function validateNonInteractiveTokens(agent, argsArray) {
  * @param {object} [opts={}]
  * @param {string} [opts.workspace]  ワークスペース絶対パス
  * @param {string} [opts.homedir]    ホームディレクトリ（省略時: HOME/USERPROFILE env）
+ * @param {(message:string)=>void} [opts.warnFn] 不正な planExtraArgs の警告先
  * @returns {object|null} 解決済みエージェント設定。agentId が defaults にも config にも無ければ null。
  */
 function resolveAgentConfig(agentId, opts = {}) {
@@ -684,6 +759,7 @@ function resolveAgentConfig(agentId, opts = {}) {
   // 1. デフォルトからベースを探す（extends があれば解決する）
   const rawDefaultAgent = defaults.agents.find(a => a.id === agentId) || null;
   const defaultAgent = rawDefaultAgent ? resolveExtends(rawDefaultAgent, defaults.agents) : null;
+  let layers = rawDefaultAgent ? collectAgentLayers(rawDefaultAgent, defaults.agents) : [];
 
   // 2. ~/.gh-maestro/config.json の agents セクション
   const globalConfigPath = resolve(homedir, '.gh-maestro', 'config.json');
@@ -726,9 +802,23 @@ function resolveAgentConfig(agentId, opts = {}) {
   // extends解決結果を新しいbaseとして使う（通常のフィールド単位マージではなく総入れ替え）。
   if (hasGlobal || hasWorkspace) {
     if (hasGlobal) {
-      merged = globalOverride.extends
-        ? resolveExtends(globalOverride, defaults.agents)
-        : mergeAgentConfig(merged, globalOverride);
+      if (globalOverride.extends) {
+        merged = resolveExtends(globalOverride, defaults.agents);
+        layers = collectAgentLayers(globalOverride, defaults.agents, { fallbackId: agentId });
+      } else {
+        merged = mergeAgentConfig(merged, globalOverride);
+        if (Object.prototype.hasOwnProperty.call(globalOverride, 'extraArgs')) {
+          // extends のない extraArgs は既存どおり解決済み配列全体を置き換える。
+          layers = collectAgentLayers({ ...globalOverride, id: agentId }, []);
+        } else if (Object.prototype.hasOwnProperty.call(globalOverride, 'planExtraArgs')) {
+          // 既存の定義へ planExtraArgs だけを足す場合は、通常引数レイヤーを保ったうえで
+          // 計画フェーズ専用の差分レイヤーを最後に重ねる。
+          layers = [
+            ...layers,
+            { id: agentId, extraArgs: [], planExtraArgs: globalOverride.planExtraArgs },
+          ];
+        }
+      }
     }
     if (hasWorkspace) {
       merged = workspaceOverride.extends
@@ -747,6 +837,24 @@ function resolveAgentConfig(agentId, opts = {}) {
 
   // 解決結果が起動可能な設定を持っているか検証
   if (!isValidAgentConfig(merged)) return null;
+
+  const warnFn = typeof opts.warnFn === 'function' ? opts.warnFn : console.warn;
+  const resolvedPhaseArgs = resolvePhaseArgs(layers, agentId, warnFn);
+  // dynamicCommand は従来どおり解決済み extraArgs の先頭へ実行対象を追加する。
+  // レイヤー由来の通常引数はそのまま保持し、この動的 prefix を両 phase へ引き継ぐ。
+  const resolvedExtraArgs = Array.isArray(merged.extraArgs) ? merged.extraArgs : [];
+  const layerDefaultArgs = resolvedPhaseArgs.default;
+  const hasLayerArgsSuffix = resolvedExtraArgs.length >= layerDefaultArgs.length
+    && layerDefaultArgs.every((arg, index) => resolvedExtraArgs[resolvedExtraArgs.length - layerDefaultArgs.length + index] === arg);
+  if (hasLayerArgsSuffix) {
+    const dynamicPrefix = resolvedExtraArgs.slice(0, resolvedExtraArgs.length - layerDefaultArgs.length);
+    resolvedPhaseArgs.default = [...resolvedExtraArgs];
+    resolvedPhaseArgs.planning = [...dynamicPrefix, ...resolvedPhaseArgs.planning];
+  }
+  // 既存読み手は従来どおり平坦な通常引数を受け取り、phase-aware な2箇所だけが
+  // resolvedPhaseArgs.planning を選択する。
+  merged.layers = layers;
+  merged.resolvedPhaseArgs = resolvedPhaseArgs;
 
   // id は常に呼び出し元が要求した agentId に固定する。extends 解決結果は継承元の id
   // （例: codex-terra が codex を extends した場合の "codex"）を引きずっているため、

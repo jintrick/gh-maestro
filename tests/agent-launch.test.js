@@ -11,6 +11,7 @@ const {
   buildAgentCommandArgs,
   buildAgentExecArgs,
   buildAgentResumeCommandArgs,
+  selectAgentConfigForModelPhase,
   normalizeAgentLaunchConfig,
   runAgentWithPrompt,
   RESULT_FILE_TOKEN,
@@ -32,6 +33,41 @@ function promptInRoot(root) {
   assert.ok(directories.length > 0);
   return path.join(root, directories[0].name, 'prompt.md');
 }
+
+test('selectAgentConfigForModelPhase: 解決済み計画引数を選び、元設定は変更しない', () => {
+  const agent = {
+    id: 'codex-plan', command: 'codex', promptDelivery: 'positional',
+    extraArgs: ['exec', '--model', 'implementation'],
+    planExtraArgs: ['--model', 'planning'],
+    resolvedPhaseArgs: {
+      default: ['exec', '--model', 'implementation'],
+      planning: ['exec', '--skip-git-repo-check', '--model', 'planning'],
+    },
+  };
+  const selected = selectAgentConfigForModelPhase(agent, 'planning');
+
+  assert.notEqual(selected, agent);
+  assert.deepEqual(selected.extraArgs, ['exec', '--skip-git-repo-check', '--model', 'planning']);
+  assert.deepEqual(agent.extraArgs, ['exec', '--model', 'implementation']);
+  assert.deepEqual(buildAgentCommandArgs(selected, { shortPrompt: 'plan' }), [
+    'codex', 'exec', '--skip-git-repo-check', '--model', 'planning', 'plan',
+  ]);
+});
+
+test('selectAgentConfigForModelPhase: phase未設定または実装中なら extraArgs を維持する', () => {
+  const agent = {
+    id: 'codex-plan',
+    extraArgs: ['exec', '--model', 'implementation'],
+    resolvedPhaseArgs: { default: ['exec', '--model', 'implementation'], planning: ['exec', '--model', 'planning'] },
+  };
+  assert.equal(selectAgentConfigForModelPhase(agent, null), agent);
+  assert.equal(selectAgentConfigForModelPhase(agent, 'implementation'), agent);
+});
+
+test('selectAgentConfigForModelPhase: phase引数が未解決なら legacy extraArgs のままにする', () => {
+  const agent = { id: 'old-agent', extraArgs: ['--model', 'legacy'], planExtraArgs: ['--model', 'raw'] };
+  assert.equal(selectAgentConfigForModelPhase(agent, 'planning'), agent);
+});
 
 function fileDeliveryConfig(promptDelivery, extra = {}) {
   return {

@@ -18,7 +18,11 @@ const {
 const { loadDefaults } = require('../scripts/shared/resolve-config');
 
 test('config --help describes extraArgs as shared and execArgs as reserved', () => {
-  assert.match(USAGE, /Set agents\.<id>\.extraArgs for arguments shared by normal and headless launches/);
+  assert.match(USAGE, /Set agents\.<id>\.extraArgs for normal launches and coder\/senior-coder launches after approval/);
+  assert.match(USAGE, /gh-maestro-coder and gh-maestro-senior-coder planning only/);
+  assert.match(USAGE, /planExtraArgs replaces only that definition layer's extraArgs/);
+  assert.match(USAGE, /arguments inherited through extends remain/);
+  assert.match(USAGE, /malformed, a warning is printed and that layer's/);
   assert.match(USAGE, /Do not set agents\.<id>\.execArgs in config\.json/);
 });
 

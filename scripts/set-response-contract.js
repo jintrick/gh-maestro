@@ -22,6 +22,7 @@
 const { resolveWorkerName } = require('./shared/workers-registry');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { CONTRACT_TYPES, writeContract, clearContract } = require('./shared/response-contract');
+const { writeImplementationApproval } = require('./shared/implementation-approval');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { prepareScriptGuidance } = require('./shared/orchestrator-guidance');
 
@@ -53,6 +54,8 @@ Output (stdout):
 Description:
   orchestratorがコーダー/シニアコーダーの計画を承認し実装フェーズに進める際に、
   msg-send.js で承認指示を送る前にこのスクリプトで応答契約を設定する。
+  coder / senior-coder の artifact-or-message 契約では、応答契約とは別の永続承認記録も保存する。
+  承認記録を書き込めない場合は非ゼロ終了し、契約を設定しない。
   契約は worker-supervisor.js が resume 時に読み取り、設定された完了シグナル
   （メッセージ送信 または PR作成）に基づいて代理送信の要否を判定する。`;
 
@@ -65,6 +68,7 @@ function main(argsOverride, deps = {}) {
 
   const args = argsOverride || process.argv.slice(2);
   const recordCycleEventFn = deps.recordCycleEventFn || recordCycleEvent;
+  const writeImplementationApprovalFn = deps.writeImplementationApprovalFn || writeImplementationApproval;
 
   let values, rest;
   try {
@@ -160,9 +164,18 @@ function main(argsOverride, deps = {}) {
 
   // artifact-or-message 契約を書き込み
   const contract = { type, artifact, issue: parseInt(issue, 10) };
+  const isCoderRole = skill === 'gh-maestro-coder' || skill === 'gh-maestro-senior-coder'
+    || skill === 'coder' || skill === 'senior-coder';
+  if (isCoderRole) {
+    try {
+      writeImplementationApprovalFn(workspace, workerName);
+    } catch (error) {
+      writeErr(`set-response-contract: 実装承認記録を書き込めません: ${error.message}`);
+      return { code: 1, lines: out, errLines: err };
+    }
+  }
   writeContract(workspace, workerName, contract);
-  if (skill === 'gh-maestro-coder' || skill === 'gh-maestro-senior-coder'
-    || skill === 'coder' || skill === 'senior-coder') {
+  if (isCoderRole) {
     try {
       recordCycleEventFn(workspace, issue, 'implementation-approved', {
         workerName,

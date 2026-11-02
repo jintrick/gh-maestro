@@ -16,7 +16,7 @@ const {
   loadDefaults,
   validateNonInteractiveTokens,
 } = require('../scripts/shared/resolve-config');
-const { buildAgentCommandArgs, buildAgentExecArgs } = require('../scripts/shared/agent-launch');
+const { buildAgentCommandArgs, buildAgentExecArgs, selectAgentConfigForModelPhase } = require('../scripts/shared/agent-launch');
 const { createSessionResumeAdapter } = require('../scripts/shared/inbox-adapters/session-resume-adapter');
 const { createTempDirScope } = require('../scripts/shared/temp-directory');
 
@@ -388,6 +388,148 @@ test('resolveAgentConfig: workspace config は execArgs も上書きできない
   });
 });
 
+test('resolveAgentConfig: workspace config は planExtraArgs を上書きできない', () => {
+  withTempHome(home => {
+    const ws = tempDirScope.mkdtemp('gh-maestro-ws-plan-args-');
+    try {
+      writeConfig(home, { agents: { codex: { planExtraArgs: ['exec', '--model', 'trusted-plan'] } } });
+      writeWorkspaceConfig(ws, { agents: { codex: { planExtraArgs: ['exec', '--model', 'workspace-value'] } } });
+
+      const agent = resolveAgentConfig('codex', { homedir: home, workspace: ws });
+      assert.deepEqual(agent.planExtraArgs, ['exec', '--model', 'trusted-plan']);
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('resolveAgentConfig: 不正 planExtraArgs は警告して同じレイヤーの extraArgs に戻し config.json を変更しない', () => {
+  withTempHome(home => {
+    const configPath = path.join(home, '.gh-maestro', 'config.json');
+    const badValues = [true, ['--model', 7]];
+    for (const planExtraArgs of badValues) {
+      writeConfig(home, {
+        agents: {
+          'agy-plan': {
+            extends: 'agy',
+            extraArgs: ['--model', 'flash'],
+            planExtraArgs,
+          },
+        },
+      });
+      const before = fs.readFileSync(configPath, 'utf8');
+      const warnings = [];
+      const agent = resolveAgentConfig('agy-plan', { homedir: home, warnFn: message => warnings.push(message) });
+
+      assert.deepEqual(agent.resolvedPhaseArgs.planning, [
+        '--dangerously-skip-permissions', '--print-timeout', '30m0s', '--model', 'flash',
+      ]);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /agents\["agy-plan"\]\.planExtraArgs/);
+      assert.match(warnings[0], /extraArgs を計画用引数として使います/);
+      assert.equal(fs.readFileSync(configPath, 'utf8'), before);
+    }
+  });
+});
+
+test('resolveAgentConfig: extends layers keep base args and replace only the owning layer during planning', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'agy-flash': {
+          extends: 'agy',
+          extraArgs: ['--model', 'gemini-3.8-flash-medium'],
+          planExtraArgs: ['--model', 'gemini-4-argon-low'],
+        },
+      },
+    });
+
+    const agent = resolveAgentConfig('agy-flash', { homedir: home });
+    const baseArgs = ['--dangerously-skip-permissions', '--print-timeout', '30m0s'];
+    const normalArgs = [...baseArgs, '--model', 'gemini-3.8-flash-medium'];
+    const planArgs = [...baseArgs, '--model', 'gemini-4-argon-low'];
+
+    assert.deepEqual(agent.layers, [
+      { id: 'agy', extraArgs: baseArgs },
+      {
+        id: 'agy-flash',
+        extraArgs: ['--model', 'gemini-3.8-flash-medium'],
+        planExtraArgs: ['--model', 'gemini-4-argon-low'],
+      },
+    ]);
+    assert.deepEqual(agent.extraArgs, normalArgs, 'legacy readers keep the usual flattened args');
+    assert.deepEqual(agent.resolvedPhaseArgs, { default: normalArgs, planning: planArgs });
+
+    const selected = selectAgentConfigForModelPhase(agent, 'planning');
+    assert.deepEqual(selected.extraArgs, planArgs);
+    assert.deepEqual(buildAgentCommandArgs(selected, { shortPrompt: 'plan' }), [
+      'agy', ...planArgs, '--print', 'plan',
+    ]);
+  });
+});
+
+test('resolveAgentConfig: planExtraArgs-only override retains the existing default extends layers', () => {
+  withTempHome(home => {
+    writeConfig(home, { agents: { 'claude-ds': { planExtraArgs: ['--model', 'haiku'] } } });
+    const agent = resolveAgentConfig('claude-ds', { homedir: home });
+
+    assert.deepEqual(agent.extraArgs, [
+      '--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose',
+    ]);
+    assert.deepEqual(agent.resolvedPhaseArgs.planning, [
+      '--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose', '--model', 'haiku',
+    ]);
+  });
+});
+
+test('resolveAgentConfig: planning keeps Codex and Claude required base arguments; dynamic command prefixes both phases', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'codex-plan': {
+          extends: 'codex',
+          extraArgs: ['--config', 'model=implementation'],
+          planExtraArgs: ['--config', 'model=planning'],
+        },
+        'claude-plan': {
+          extends: 'claude',
+          extraArgs: ['--model', 'haiku'],
+          planExtraArgs: ['--model', 'sonnet'],
+        },
+        reasonix: { planExtraArgs: ['--planning-only'] },
+      },
+    });
+
+    const codex = resolveAgentConfig('codex-plan', { homedir: home });
+    assert.deepEqual(codex.resolvedPhaseArgs.planning, [
+      'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox',
+      '--config', 'model=planning',
+    ]);
+    assert.ok(codex.resolvedPhaseArgs.planning.includes('exec'));
+    assert.deepEqual(codex.extraArgs, codex.resolvedPhaseArgs.default);
+
+    const claude = resolveAgentConfig('claude-plan', { homedir: home });
+    assert.deepEqual(claude.resolvedPhaseArgs.planning, [
+      '--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose',
+      '--model', 'sonnet',
+    ]);
+    assert.ok(claude.resolvedPhaseArgs.planning.includes('--print'));
+    assert.ok(claude.resolvedPhaseArgs.planning.includes('--dangerously-skip-permissions'));
+    assert.deepEqual(claude.extraArgs, claude.resolvedPhaseArgs.default);
+
+    const reasonix = resolveAgentConfig('reasonix', { homedir: home });
+    assert.deepEqual(reasonix.extraArgs, reasonix.resolvedPhaseArgs.default);
+    assert.deepEqual(reasonix.resolvedPhaseArgs.planning, [
+      ...reasonix.resolvedPhaseArgs.default,
+      '--planning-only',
+    ]);
+    if (reasonix.command === 'node') {
+      assert.ok(reasonix.resolvedPhaseArgs.default[0].endsWith('reasonix.js'));
+      assert.equal(reasonix.resolvedPhaseArgs.planning[0], reasonix.resolvedPhaseArgs.default[0]);
+    }
+  });
+});
+
 test('resolveAgentConfig: workspace config は Review Manager用プロンプト設定を上書きできない（セキュリティ）', () => {
   withTempHome(home => {
     const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-sec-exec-prompt-'));
@@ -552,20 +694,22 @@ test('resolveAgentConfig: extends + extraArgs は継承元配列の末尾に追�
   });
 });
 
-test('resolveExtends: 追記対象（extraArgs/execArgs/nonInteractiveTokens）はそれぞれ追記され、resumeCommand は完全置換される', () => {
+test('resolveExtends: extraArgs/execArgs/nonInteractiveTokens を追記し、planExtraArgs は解決レイヤーで扱う', () => {
   const defaults = loadDefaults();
-  const claude = { ...defaults.agents.find(a => a.id === 'claude'), execArgs: ['--base-route'] };
+  const claude = { ...defaults.agents.find(a => a.id === 'claude'), planExtraArgs: ['--plan-base'], execArgs: ['--base-route'] };
   const entry = {
     id: 'derived',
     extends: 'claude',
     command: 'derived',
     extraArgs: ['--model', 'opus'],
+    planExtraArgs: ['--model', 'planning'],
     execArgs: ['--extra-exec'],
     resumeCommand: ['--custom-resume'],
     nonInteractiveTokens: ['--new-token'],
   };
   const resolved = resolveExtends(entry, [claude]);
   assert.deepEqual(resolved.extraArgs, [...claude.extraArgs, '--model', 'opus']);
+  assert.deepEqual(resolved.planExtraArgs, ['--model', 'planning']);
   assert.deepEqual(resolved.execArgs, [...claude.execArgs, '--extra-exec']);
   // resumeCommand は追記されず完全置換（末尾要素をセッション参照で置換する resume() の契約と整合）
   assert.deepEqual(resolved.resumeCommand, ['--custom-resume']);
