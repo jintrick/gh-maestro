@@ -23,6 +23,7 @@ gh-maestroは割り当て可能なモデル資源を、判断の価値に応じ�
 - gh-maestroはAIエージェント開発の基盤である。速度や手軽さより堅牢性を優先する。構造的な脆弱性を見つけたら、その場で握り潰さず記録して起票を相談する。
 - 判断の背景と採用理由: `docs/adr/0003-value-based-agent-allocation.md`
 理由と経緯: docs/adr/0055-plan-model-inside-agent-definition.md
+理由と経緯: docs/adr/0056-agent-args-resolved-by-layer.md
 
 ## エージェントの役割
 
