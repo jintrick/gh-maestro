@@ -938,3 +938,76 @@ test('readIncompleteSentinel: 解釈できないセンチネルは null（notify
   assert.equal(result.outcome, 'incomplete-review');
   assert.equal(result.exitCode, 0);
 });
+
+// ── Issue #717: 何も渡さない起動のプロンプトは変更前と同一 ───────────────────
+// 期待値は変更前（aedbe97）の buildPrompt / buildFinalizePrompt の出力を、
+// 同じ入力で実行して得た文字列をそのまま書いたもの。実装から導出していない。
+// SCRIPTS=（モジュールの置き場所）と DRAFT=（実行ごとの乱数名）だけは実行環境で変わる。
+
+const PRE_717_SCRIPTS_DIR = path.join(__dirname, '..', 'scripts').replace(/\\/g, '/');
+
+test('#717: priorFindingsFile を渡さない buildPrompt は変更前と同一の文字列（フェーズ1）', () => {
+  const { prompt } = buildPrompt({
+    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:/ws',
+    mainGhDir: 'C:/main/.gh-maestro', skillPath: 'C:/canonical/skills/gh-maestro-reviewer/SKILL.md',
+  });
+  const expected = [
+    'Review Manager フェーズ1',
+    'SKILL に指定されたファイルを読み、そこに記載されたフェーズ1の手順を実行してください。',
+    'PR=5',
+    'REPO=o/r',
+    'WORKSPACE=C:/ws',
+    `SCRIPTS=${PRE_717_SCRIPTS_DIR}`,
+    'SKILL=C:/canonical/skills/gh-maestro-reviewer/SKILL.md',
+    'ISSUE=260',
+    'GH_DIR=C:/main/.gh-maestro',
+    'MANIFEST=C:/ws/.gh-maestro/records/pr/5/review/manifest.json',
+  ].join('\n');
+  assert.equal(prompt, expected);
+});
+
+test('#717: priorFindingsFile を渡さない buildFinalizePrompt は変更前と同一の文字列（フェーズ2）', () => {
+  const { prompt } = buildFinalizePrompt({
+    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:/ws',
+    outputFile: 'C:/ws/out.json', mainGhDir: 'C:/main/.gh-maestro',
+    resultsFile: 'C:/ws/results.json', skillPath: 'C:/canonical/skills/gh-maestro-reviewer/SKILL.md',
+  });
+  const lines = prompt.split('\n');
+  assert.match(lines[lines.length - 1], /^DRAFT=C:\/ws\/\.staging-out\.json\.\d+-\d+-[a-z0-9]+$/);
+  const expected = [
+    'Review Manager フェーズ2',
+    'SKILL に指定されたファイルを読み、そこに記載されたフェーズ2の手順を実行してください。',
+    'PR=5',
+    'REPO=o/r',
+    'WORKSPACE=C:/ws',
+    'OUTPUT=C:/ws/out.json',
+    'RESULTS=C:/ws/results.json',
+    `SCRIPTS=${PRE_717_SCRIPTS_DIR}`,
+    'SKILL=C:/canonical/skills/gh-maestro-reviewer/SKILL.md',
+    'ISSUE=260',
+    'GH_DIR=C:/main/.gh-maestro',
+  ].join('\n');
+  assert.equal(lines.slice(0, -1).join('\n'), expected);
+});
+
+test('#717: priorFindingsFile を渡すと、両フェーズとも未指定時のプロンプトの末尾に、指定ファイルと再レビュー手順書を読む指示だけが足される', () => {
+  const skillPath = 'C:/canonical/skills/gh-maestro-reviewer/SKILL.md';
+  const suffix = [
+    '',
+    'PRIOR_FINDINGS=C:/data/prior.json',
+    'RE_REVIEW=C:/canonical/skills/gh-maestro-reviewer/re-review.md',
+    'RE_REVIEW に指定されたファイルも読み、PRIOR_FINDINGS の扱いに関する手順に従ってください。',
+  ].join('\n');
+  const common = { pr: '5', repo: 'o/r', issue: '260', workspace: 'C:/ws', mainGhDir: 'C:/main/.gh-maestro', skillPath };
+
+  const base1 = buildPrompt(common).prompt;
+  const p1 = buildPrompt({ ...common, priorFindingsFile: 'C:\\data\\prior.json' }).prompt;
+  assert.equal(p1, base1 + suffix);
+
+  const fin = { ...common, outputFile: 'C:/ws/out.json', resultsFile: 'C:/ws/results.json' };
+  // DRAFT= は実行ごとの乱数名なので、その行だけ固定値へ置き換えてから全体を比較する。
+  const norm = (p) => p.replace(/DRAFT=\S+/, 'DRAFT=<x>');
+  const base2 = norm(buildFinalizePrompt(fin).prompt);
+  const p2 = norm(buildFinalizePrompt({ ...fin, priorFindingsFile: 'C:\\data\\prior.json' }).prompt);
+  assert.equal(p2, base2 + suffix);
+});

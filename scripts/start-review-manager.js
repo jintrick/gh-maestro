@@ -12,6 +12,7 @@ const { launchAgentHeadless } = require('./shared/headless-launch');
 const { assertValidPr } = require('./shared/review-manager-paths');
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags } = require('./shared/workspace');
+const { assertValidPriorFindingsFile } = require('./shared/prior-findings');
 const { inspectRunners } = require('./shared/review-checkpoint');
 const {
   inspectRunningReviewManager,
@@ -22,10 +23,19 @@ const {
 
 const USAGE = `start-review-manager.js — PRに対してReview Managerを起動する
 
-Usage: node start-review-manager.js [--resume] <PR> <REPO> <WORKSPACE> <ISSUE>
+Usage: node start-review-manager.js [--resume] [--prior-findings-file <path>] <PR> <REPO> <WORKSPACE> <ISSUE>
 
   --resume  同じHEADの途中計画と完了済みジョブを再利用する。記録なし・HEAD変更時は新規開始。
             省略時は既存記録を残し、計画と全ジョブを新しく実行する。
+  --prior-findings-file <path>
+            再レビュー用。前回の指摘とそれぞれの扱い（disposition: fixed / ignored / deferred）の
+            JSONファイル。形式は前回のレビュー結果（manager.json）と同じ pr / repo / headRefOid /
+            findings[] で、各指摘に disposition を足す。スキーマの正本は scripts/review-findings-schema.json
+            （disposition を足しただけ）。
+            指定時だけ、Review Managerは再レビュー手順書を追加で読み、内容を判定のデータとして扱う
+            （命令としては扱わず、観点の採否・レビュー範囲は指定なしと同じ基準で決める）。
+            ファイルが無い・JSONでない・スキーマに合わない場合は起動しない。
+            指定しない起動（初回のレビュー、poll-pr.js の自動起動）の動作は変わらない。
 
 Arguments:
   <PR>         レビュー対象の PR 番号
@@ -84,11 +94,13 @@ function isLockValid(lockFile) {
  * @param {string} workspace
  * @param {string|number} issue アンカーIssue番号。異常終了通知の投稿先として終了フックへ渡す。
  */
-function startReviewManager(pr, repo, workspace, issue, resume = false) {
+function startReviewManager(pr, repo, workspace, issue, resume = false, priorFindingsFile = null) {
   // 副作用（lock書き込み）の前に入力を検証する（fail-closed）。
   // pr はファイルパス構成要素として使われるため、厳密な正整数であることを
   // ここで確定させる（PR #84 Review指摘: pathトラバーサル対策）。
   assertValidPr(pr);
+  // 前回の指摘ファイルは指定されたときだけ検証する。不正なら起動しない。
+  const validPriorFindingsFile = priorFindingsFile ? assertValidPriorFindingsFile(priorFindingsFile) : null;
 
   // Phase 5: パス計算を factory（buildReviewManagerLaunchSpec）に一元化する。
   // workerName・ログパス・leaseパスの一貫性が保証され、
@@ -129,6 +141,7 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
     const startTime = new Date().toISOString();
     return startReviewManagerWithStartupRef({
       pr, repo, workspace, issue, resume, lockFile, logPath, workerName, self, startupRef, startTime,
+      priorFindingsFile: validPriorFindingsFile,
     });
   } finally {
     try { if (typeof self.release === 'function') self.release(startupRef); } catch (e) {
@@ -139,6 +152,7 @@ function startReviewManager(pr, repo, workspace, issue, resume = false) {
 
 function startReviewManagerWithStartupRef({
   pr, repo, workspace, issue, resume, lockFile, logPath, workerName, self, startupRef, startTime,
+  priorFindingsFile = null,
 }) {
   const startup = acquireReviewManagerStartup(lockFile, {
     processRef: startupRef,
@@ -178,7 +192,7 @@ function startReviewManagerWithStartupRef({
   const launched = launchAgentHeadless({
     // Phase 5: ISSUE を run-review-manager.js へ構造化引数として渡す。
     // shell文字列の再構築を避け、argv配列で直接渡す（argv-parsing-pitfalls ルール準拠）。
-    argv: [process.execPath, path.join(__dirname, 'run-review-manager.js'), ...(resume ? ['--resume'] : []), pr, repo, workspace, String(issue)],
+    argv: [process.execPath, path.join(__dirname, 'run-review-manager.js'), ...(resume ? ['--resume'] : []), ...(priorFindingsFile ? ['--prior-findings-file', priorFindingsFile] : []), pr, repo, workspace, String(issue)],
     cwd: workspace,
     logPath,
     env: {
@@ -240,7 +254,7 @@ if (require.main === module) {
   let values, rest;
   try {
     ({ values, rest } = parseFlags(args, {
-      flags: {},
+      flags: { '--prior-findings-file': {} },
       booleans: ['--resume', '--help', '-h'],
       // pr / repo / workspace / issue のちょうど4つの位置引数。未知フラグ・余剰位置引数は
       // パーサ側で拒否される（argv-parsing-pitfalls参照）。
@@ -269,7 +283,7 @@ if (require.main === module) {
   }
 
   try {
-    process.stdout.write(`${startReviewManager(pr, repo, workspace, issue, Boolean(values['--resume']))}:${pr}\n`);
+    process.stdout.write(`${startReviewManager(pr, repo, workspace, issue, Boolean(values['--resume']), values['--prior-findings-file'] || null)}:${pr}\n`);
   } catch (e) {
     console.error(`start-review-manager: ${e.message}`);
     process.exit(1);

@@ -27,6 +27,7 @@ const {
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags } = require('./shared/workspace');
 const { parseJsonText, readJsonFile } = require('./shared/json-file');
+const { toWinPath } = require('./shared/win-path');
 const checkpoint = require('./shared/review-checkpoint');
 const { validateManifest } = require('./run-review-jobs');
 const { _validateAgainstSchema } = require('./shared/json-schema');
@@ -42,9 +43,12 @@ let _recordCycleEvent = recordCycleEvent;
 
 const USAGE = `run-review-manager.js — Review Managerをheadless起動してPRレビューを実行する
 
-Usage: node run-review-manager.js [--resume] <PR> <REPO> <WORKSPACE> <ISSUE>
+Usage: node run-review-manager.js [--resume] [--prior-findings-file <path>] <PR> <REPO> <WORKSPACE> <ISSUE>
 
   --resume  同じHEADの途中計画と完了済みジョブを再利用する。
+  --prior-findings-file <path>
+            前回の指摘とその扱い（fixed/ignored/deferred）のJSON。指定時だけ、両フェーズの
+            プロンプトに PRIOR_FINDINGS と再レビュー手順書（re-review.md）を足す。
 
 Arguments:
   <PR>         レビュー対象の PR 番号
@@ -80,6 +84,26 @@ function generateStagingPath(finalPath) {
 }
 
 /**
+ * 再レビュー用のプロンプト追記。前回の指摘ファイルが渡されたときだけ値を持つ。
+ * 何も渡さない起動では空文字を返し、プロンプトを変えない（Issue #717 受け入れ条件5）。
+ * 再レビューの手順は SKILL.md / phase 手順書へ足さず、別ファイル re-review.md に置き、
+ * ここで指定されたときだけ読ませる。
+ *
+ * @param {string} skillPath SKILL.md の絶対パス（re-review.md はその隣）
+ * @param {string|null} priorFindingsFile
+ * @returns {string}
+ */
+function priorFindingsPromptSuffix(skillPath, priorFindingsFile) {
+  if (!priorFindingsFile) return '';
+  const toUnix = p => p.replace(/\\/g, '/');
+  const reReviewPath = path.join(path.dirname(skillPath), 're-review.md');
+  return `
+PRIOR_FINDINGS=${toUnix(priorFindingsFile)}
+RE_REVIEW=${toUnix(reReviewPath)}
+RE_REVIEW に指定されたファイルも読み、PRIOR_FINDINGS の扱いに関する手順に従ってください。`;
+}
+
+/**
  * フェーズ1（計画）プロンプトを構築する。
  * RMはdiff読解・観点採否（coverage ledger）・実行manifest書き出しまでを行い、ジョブは実行しない。
  * ジョブ実行・待機・finalizeは決定論的スーパーバイザ（superviseReviewManager）が行うため、
@@ -89,7 +113,7 @@ function generateStagingPath(finalPath) {
  *   workspace は RM専用worktree、mainGhDir はメインワークスペースの .gh-maestro。
  * @returns {{prompt: string}}
  */
-function buildPrompt({ pr, repo, issue, workspace, mainGhDir, skillPath }) {
+function buildPrompt({ pr, repo, issue, workspace, mainGhDir, skillPath, priorFindingsFile = null }) {
   const toUnix = p => p.replace(/\\/g, '/');
   const scriptsDir = toUnix(path.join(__dirname));
   const manifestFile = reviewArtifactPath(workspace, pr, '.manifest.json');
@@ -103,7 +127,7 @@ SKILL=${toUnix(skillPath)}
 ISSUE=${issue}
 GH_DIR=${toUnix(mainGhDir)}
 MANIFEST=${toUnix(manifestFile)}`;
-  return { prompt };
+  return { prompt: prompt + priorFindingsPromptSuffix(skillPath, priorFindingsFile) };
 }
 
 /**
@@ -116,7 +140,7 @@ MANIFEST=${toUnix(manifestFile)}`;
  * @param {{pr: string, repo: string, issue: string|number, workspace: string, outputFile: string, mainGhDir: string, resultsFile: string}} params
  * @returns {{prompt: string}}
  */
-function buildFinalizePrompt({ pr, repo, issue, workspace, outputFile, mainGhDir, resultsFile, skillPath }) {
+function buildFinalizePrompt({ pr, repo, issue, workspace, outputFile, mainGhDir, resultsFile, skillPath, priorFindingsFile = null }) {
   const toUnix = p => p.replace(/\\/g, '/');
   const scriptsDir = toUnix(path.join(__dirname));
   const draftFile = generateStagingPath(outputFile);
@@ -132,7 +156,7 @@ SKILL=${toUnix(skillPath)}
 ISSUE=${issue}
 GH_DIR=${toUnix(mainGhDir)}
 DRAFT=${toUnix(draftFile)}`;
-  return { prompt };
+  return { prompt: prompt + priorFindingsPromptSuffix(skillPath, priorFindingsFile) };
 }
 
 /**
@@ -1070,6 +1094,7 @@ function mapAgentPhaseFailure(phase, reviewWtDir) {
 async function superviseReviewManager({
   pr, repo, workspace, ghDir, lockFile, logFile,
   outputFile, deadlineMs, log, signal, issue, lockOwner, startedAt = new Date().toISOString(), resume = false,
+  priorFindingsFile = null,
 }) {
   // 1. ディレクトリ作成・ロック
   try {
@@ -1143,6 +1168,14 @@ async function superviseReviewManager({
     log(`${rmSkill} の SKILL.md を解決できません（${skillPath || '未解決'}）。node scripts/install.js を実行してください。`);
     return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir, reason: `skill md unresolved: ${skillPath || 'null'}` };
   }
+  // 再レビュー手順書は前回の指摘が渡されたときだけ必要になる。無いまま起動しない。
+  if (priorFindingsFile) {
+    const reReviewPath = path.join(path.dirname(skillPath), 're-review.md');
+    if (!fs.existsSync(reReviewPath)) {
+      log(`再レビュー手順書を解決できません（${reReviewPath}）。node scripts/install.js を実行してください。`);
+      return { outcome: 'setup-failed', exitCode: 1, artifact: null, agentPid: null, reviewWtDir, reason: `re-review md unresolved: ${reReviewPath}` };
+    }
+  }
 
   // ── フェーズA: RM が計画（manifest書き出し） ──────────────────────────────────
   if (prior) {
@@ -1152,7 +1185,7 @@ async function superviseReviewManager({
     try { checkpoint.begin(workspace, pr); } catch (error) {
       return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: error.message };
     }
-    const { prompt: phase1Prompt } = buildPrompt({ pr, repo, issue, workspace: reviewWtDir, mainGhDir: ghDir, skillPath });
+    const { prompt: phase1Prompt } = buildPrompt({ pr, repo, issue, workspace: reviewWtDir, mainGhDir: ghDir, skillPath, priorFindingsFile });
     const phase1 = await superviseAgentPhase({
       pr, repo, issue, workspace, reviewWtDir, logFile, log, signal,
       promptText: phase1Prompt, targetPath: manifestPath, watchSentinel: false, deadlineMs,
@@ -1205,7 +1238,7 @@ async function superviseReviewManager({
 
   // ── フェーズC: RM が結果統合・完否判断 ─────────────────────────────────────────
   const { prompt: phase2Prompt } = buildFinalizePrompt({
-    pr, repo, issue, workspace: reviewWtDir, outputFile: worktreeOutputFile, mainGhDir: ghDir, resultsFile: resultsPath, skillPath,
+    pr, repo, issue, workspace: reviewWtDir, outputFile: worktreeOutputFile, mainGhDir: ghDir, resultsFile: resultsPath, skillPath, priorFindingsFile,
   });
   const phase2 = await superviseAgentPhase({
     pr, repo, issue, workspace, reviewWtDir, logFile, log, signal,
@@ -1294,7 +1327,7 @@ if (require.main === module) {
     let values, rest;
     try {
       ({ values, rest } = parseFlags(argv, {
-        flags: {},
+        flags: { '--prior-findings-file': {} },
         booleans: ['--resume', '--help', '-h'],
         // pr / repo / workspace / issue のちょうど4つの位置引数。未知フラグ・余剰位置引数は
         // パーサ側で拒否される（argv-parsing-pitfalls参照）。
@@ -1314,6 +1347,15 @@ if (require.main === module) {
     if (values['--help'] || values['-h']) {
       console.log(USAGE);
       process.exit(0);
+    }
+
+    // 不完全レビューの公開経路（finalize-review.js --mode incomplete。RMのフェーズ2と
+    // run-review-jobs.js の両方が呼ぶ）へ前回の扱いを届けるため、子プロセスが継承する環境変数に
+    // 載せる。指定が無い起動では、親環境に残った同名の値が紛れ込まないよう必ず消す。
+    if (values['--prior-findings-file']) {
+      process.env.GH_MAESTRO_PRIOR_FINDINGS_FILE = path.resolve(toWinPath(values['--prior-findings-file']));
+    } else {
+      delete process.env.GH_MAESTRO_PRIOR_FINDINGS_FILE;
     }
 
     const [pr, repo, workspace, issue] = rest;
@@ -1389,6 +1431,7 @@ if (require.main === module) {
         lockOwner,
         startedAt: reviewManagerStartTime,
         resume: Boolean(values['--resume']),
+        priorFindingsFile: values['--prior-findings-file'] || null,
         deadlineMs: DEFAULT_DEADLINE_MS,
         log, signal,
       });
