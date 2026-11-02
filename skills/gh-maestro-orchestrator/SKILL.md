@@ -255,6 +255,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 | 同じBLOCKERが2回連続するスパイラル | 転送を止め、対象と連続回数を判断材料として示し、次に取る対応を人間に尋ねる。 | 工程7-[3/6] |
 
 PR監視・受信monitorの停止、slow state、worker-statusの復旧詳細はmonitor-recovery.mdに従う。
+理由と経緯: docs/adr/0054-orchestrator-decides-re-review.md
 
 ## 横断的な手続き
 
