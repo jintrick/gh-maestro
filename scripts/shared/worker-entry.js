@@ -1,7 +1,7 @@
 'use strict';
 // workers.json のエントリを正規化・構築する。
 //
-// 新形式: { pid, resourceKey, instanceId, startTime, logPath, agentId, issue, skill, baseBranch }。
+// 新形式: { pid, resourceKey, instanceId, startTime, logPath, agentId, issue, skill, baseBranch, modelPhase }。
 //   pid/resourceKey/instanceId — headless起動したプロセスの識別。生存確認は決定論的OS資源への接続で行い、
 //     PIDは停止先の指定にだけ使う（scripts/shared/worker-liveness.js 参照）。
 //   startTime — workerの起動日時。応答コメントの起動後判定と経過時間表示に使う。
@@ -13,6 +13,8 @@
 //   baseBranch — このワーカーのPRのベースブランチ。初回起動（spawn-worker.js）が登録し、
 //     resume配送（worker-supervisor.js）が GH_MAESTRO_BASE_BRANCH 環境変数として再注入する
 //     ために使う（Issue #269）。本変更以前に起動したレガシーレコードには無い。
+//   modelPhase — coder / senior-coder の初回起動時に planning を記録する。未設定の旧記録は
+//     extraArgs を使う互換経路として null へ正規化する。承認後の状態は別の per-worker record に残す。
 //
 // レガシー: paneId / notifierPid は、WezTermペイン運用時代（Issue #151 以前）に
 // 起動されたワーカーのエントリを読むためだけに残している。新規登録では設定されない。
@@ -37,6 +39,12 @@ function normalizePid(v) {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
+function normalizeModelPhase(v) {
+  if (v === undefined || v === null) return null;
+  if (v === 'planning') return v;
+  throw new Error(`workers.json の modelPhase が不正です: ${JSON.stringify(v)}`);
+}
+
 function normalizeWorkerEntry(v) {
   if (v && typeof v === 'object') {
     return {
@@ -49,6 +57,7 @@ function normalizeWorkerEntry(v) {
       issue: v.issue != null ? Number(v.issue) : null,
       skill: v.skill ?? null,
       baseBranch: typeof v.baseBranch === 'string' && v.baseBranch !== '' ? v.baseBranch : null,
+      modelPhase: normalizeModelPhase(v.modelPhase),
       // ── レガシー（移行前セッションの掃除にのみ使う） ──
       paneId: v.paneId != null ? String(v.paneId) : null,
       notifierPid: v.notifierPid ?? null,
@@ -57,7 +66,7 @@ function normalizeWorkerEntry(v) {
   // 最旧形式: pane_id 文字列そのものがエントリだった時代
   return {
     pid: null, resourceKey: null, instanceId: null, startTime: null, logPath: null,
-    agentId: null, issue: null, skill: null, baseBranch: null,
+    agentId: null, issue: null, skill: null, baseBranch: null, modelPhase: null,
     paneId: v != null ? String(v) : null, notifierPid: null,
   };
 }

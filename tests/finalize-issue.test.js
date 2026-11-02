@@ -18,6 +18,7 @@ const {
   defaultFindDecisionPosted,
 } = require('../scripts/finalize-issue.js');
 const childProcess = require('../scripts/shared/child-process');
+const { createFakeGh } = require('./helpers/fake-gh');
 
 // 既存のcleanupテストでは決定コメント投稿を成功として注入する。必須入力と投稿失敗の
 // 挙動はfinalizeIssueCoreを直接使う専用テストで検証する。
@@ -46,44 +47,23 @@ function withTempWorkspace(workers, fn) {
 }
 
 function fakeGhEnvironment(directory) {
-  fs.mkdirSync(directory, { recursive: true });
-  const binDir = path.join(directory, 'fake-bin');
-  fs.mkdirSync(binDir, { recursive: true });
-  const bootstrap = path.join(binDir, 'fake-gh-bootstrap.js');
   const commentsFile = path.join(directory, 'comments.json');
-  fs.writeFileSync(bootstrap, [
-    "'use strict';",
-    "const fs = require('node:fs');",
-    "const path = require('node:path');",
-    "if (path.basename(process.execPath).toLowerCase() === (process.platform === 'win32' ? 'gh.exe' : 'gh')) {",
-    `  const commentsFile = ${JSON.stringify(commentsFile)};`,
-    "  const args = [path.basename(process.argv[1]), ...process.argv.slice(2)];",
-    "  let comments = [];",
-    "  try { comments = JSON.parse(fs.readFileSync(commentsFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }",
-    "  if (args[0] === 'api' && args[1] === 'user') {",
-    "    process.stdout.write('orchestrator\\n');",
-    "  } else if (args[0] === 'api') {",
-    "    process.stdout.write(comments.map((comment) => Buffer.from(JSON.stringify(comment), 'utf8').toString('base64')).join('\\n'));",
-    "  } else if (args[0] === 'issue' && args[1] === 'comment') {",
-    "    const bodyFileIndex = args.indexOf('--body-file');",
-    "    comments.push({ login: 'orchestrator', body: fs.readFileSync(args[bodyFileIndex + 1], 'utf8') });",
-    "    fs.writeFileSync(commentsFile, JSON.stringify(comments), 'utf8');",
-    "    process.stdout.write('https://github.com/test/repo/issues/5#issuecomment-555\\n');",
-    "  } else if (args[0] === 'pr' && args[1] === 'list') {",
-    "    process.stdout.write('[]');",
-    "  }",
-    '  process.exit(0);',
-    '}',
-    '',
-  ].join('\n'), 'utf8');
-  fs.copyFileSync(process.execPath, path.join(binDir, process.platform === 'win32' ? 'gh.exe' : 'gh'));
-  if (process.platform !== 'win32') fs.chmodSync(path.join(binDir, 'gh'), 0o755);
-  const env = {
-    ...process.env,
-    PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
-    NODE_OPTIONS: `--require="${bootstrap.replace(/\\/g, '/')}"`,
-  };
-  return env;
+  return createFakeGh({
+    binDir: path.join(directory, 'fake-bin'),
+    logPath: path.join(directory, 'fake-gh-calls.jsonl'),
+    fixtures: [
+      { match: { prefix: ['api', 'user'] }, stdout: 'orchestrator\n' },
+      { match: { prefix: ['api'] }, action: 'read-base64-json-lines', stateFile: commentsFile },
+      {
+        match: { prefix: ['issue', 'comment'] },
+        action: 'append-body-file',
+        stateFile: commentsFile,
+        fields: { login: 'orchestrator' },
+        stdout: 'https://github.com/test/repo/issues/5#issuecomment-555\n',
+      },
+      { match: { prefix: ['pr', 'list'] }, stdout: '[]' },
+    ],
+  }).env;
 }
 
 test('collectWorkersForIssue: 指定Issueのワーカーだけ列挙しorchestratorは除く', () => {

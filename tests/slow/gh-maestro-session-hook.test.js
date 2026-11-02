@@ -1,6 +1,7 @@
 'use strict';
 
 const { test } = require('node:test');
+const { createFakeGh: createSharedFakeGh } = require('../helpers/fake-gh');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -159,41 +160,22 @@ function createWorkspace(oldSessionId = 'old-session-id') {
 }
 
 function createFakeGh(binDir, { fail = false } = {}) {
-  fs.mkdirSync(binDir, { recursive: true });
-  const source = [
-    "'use strict';",
-    `const fail = ${fail ? 'true' : 'false'};`,
-    "const path = require('path');",
-    "const args = process.argv.slice(1);",
-    "if (path.basename(args[0] || '') === 'repo' && args[1] === 'view') {",
-    "  if (!fail) {",
-    "    process.stdout.write('example/gh-maestro-test\\n');",
-    '    process.exit(0);',
-    '  }',
-    "  process.stderr.write('fake gh failure\\n');",
-    '  process.exit(1);',
-    '}',
-    '',
-  ].join('\n');
-
-  const bootstrapPath = path.join(binDir, 'fake-gh-bootstrap.js');
-  const ghPath = path.join(binDir, process.platform === 'win32' ? 'gh.exe' : 'gh');
-  fs.writeFileSync(bootstrapPath, source, 'utf8');
-  // reset-session.js invokes the real executable name `gh` without a shell. A copied
-  // Node executable plus NODE_OPTIONS gives the test a cross-platform executable
-  // replacement without relying on .cmd/.bat resolution on Windows.
-  fs.copyFileSync(process.execPath, ghPath);
-  if (process.platform !== 'win32') fs.chmodSync(ghPath, 0o755);
-  return bootstrapPath;
+  return createSharedFakeGh({
+    binDir,
+    fixtures: [{
+      match: { prefix: ['repo', 'view'] },
+      status: fail ? 1 : 0,
+      stdout: fail ? '' : 'example/gh-maestro-test\n',
+      stderr: fail ? 'fake gh failure\n' : '',
+    }],
+  });
 }
 
-function hookEnv(binDir, runtimeDir, bootstrapPath) {
+function hookEnv(_binDir, runtimeDir, fakeGh) {
   const env = {
-    ...process.env,
-    PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
+    ...fakeGh.env,
     GH_MAESTRO_RUNTIME_DIR: runtimeDir,
     GH_MAESTRO_WORKER: 'orchestrator',
-    ...(bootstrapPath ? { NODE_OPTIONS: `--require=${bootstrapPath}` } : {}),
   };
   delete env[processLiveness.RESOURCE_KEY_ENV];
   delete env[processLiveness.INSTANCE_ID_ENV];
@@ -299,8 +281,8 @@ test('CLI通し: 旧sessionIdを置いた一時workspaceでreset後のSESSION_ID
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-bin-'));
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-runtime-'));
   try {
-    const bootstrapPath = createFakeGh(binDir);
-    const result = runHook(workspace, hookEnv(binDir, runtimeDir, bootstrapPath));
+    const fakeGh = createFakeGh(binDir);
+    const result = runHook(workspace, hookEnv(binDir, runtimeDir, fakeGh));
 
     assert.equal(result.status, 0, result.stderr);
     assert.doesNotMatch(result.stdout, /\x1b\[32mv /, 'setup-ok があるhookでは成功確認行が出ないこと');
@@ -331,8 +313,8 @@ test('CLI通し: 生存中のworker-supervisorを維持したままhookがreset�
   workerLease._setLiveness(processLiveness.createLiveness({ runtimeRoot: () => runtimeDir }));
   let supervisor = null;
   try {
-    const bootstrapPath = createFakeGh(binDir);
-    const env = hookEnv(binDir, runtimeDir, bootstrapPath);
+    const fakeGh = createFakeGh(binDir);
+    const env = hookEnv(binDir, runtimeDir, fakeGh);
     supervisor = spawn(process.execPath, [SUPERVISOR_SCRIPT, '--workspace', workspace, '--interval', '1'], {
       cwd: workspace,
       env: { ...env, GH_MAESTRO_WORKER: 'orchestrator' },
@@ -413,8 +395,8 @@ test('CLI通し: 常駐プロセスのOS endpoint identity取得に失敗した�
   const restoreEnvironment = isolateLivenessEnvironment(workspace, runtimeDir);
   let supervisor = null;
   try {
-    const bootstrapPath = createFakeGh(binDir);
-    const env = hookEnv(binDir, runtimeDir, bootstrapPath);
+    const fakeGh = createFakeGh(binDir);
+    const env = hookEnv(binDir, runtimeDir, fakeGh);
     supervisor = spawn(process.execPath, [
       '-r', RESIDENT_IDENTITY_FAILURE_PRELOAD,
       SUPERVISOR_SCRIPT,

@@ -12,6 +12,10 @@ test('recordPath resolves distinct issue/pr/job owners without collisions', () =
     workerName: 'issue-7-coder-fix',
   }), /records[\\/]issue[\\/]7[\\/]workers[\\/]issue-7-coder-fix[\\/]worker\.log$/);
   assert.match(recordPath('C:/workspace', {
+    ownerKind: 'issue', ownerId: 7, artifact: ARTIFACTS.IMPLEMENTATION_APPROVAL,
+    workerName: 'issue-7-coder-fix',
+  }), /records[\\/]issue[\\/]7[\\/]workers[\\/]issue-7-coder-fix[\\/]implementation-approved\.json$/);
+  assert.match(recordPath('C:/workspace', {
     ownerKind: 'pr', ownerId: 7, artifact: ARTIFACTS.REVIEW_MANAGER_JSON,
   }), /records[\\/]pr[\\/]7[\\/]review[\\/]manager\.json$/);
   assert.match(recordPath('C:/workspace', {

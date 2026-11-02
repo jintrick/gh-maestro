@@ -13,6 +13,7 @@ const ARTIFACTS = Object.freeze({
   WORKER_LOG: 'workerLog',
   CURSOR: 'cursor',
   CONTRACT: 'contract',
+  IMPLEMENTATION_APPROVAL: 'implementationApproval',
   ASSISTANT_WATCH: 'assistantWatch',
   REVIEW_MANAGER_JSON: 'reviewManagerJson',
   REVIEW_MANAGER_CLAIM: 'reviewManagerClaim',
@@ -95,6 +96,9 @@ function recordPath(workspace, params) {
       break;
     case ARTIFACTS.CONTRACT:
       candidate = path.join(worker(), 'contract.json');
+      break;
+    case ARTIFACTS.IMPLEMENTATION_APPROVAL:
+      candidate = path.join(worker(), 'implementation-approved.json');
       break;
     case ARTIFACTS.ASSISTANT_WATCH:
       if (params.ownerKind !== 'issue' || params.workerName !== undefined) {

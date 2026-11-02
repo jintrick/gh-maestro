@@ -263,7 +263,7 @@ PR監視・受信monitorの停止、slow state、worker-statusの復旧詳細は
 
 起動フックがプロンプト先頭の `[gh-maestro session context]` に設定する `SESSION_ID` は、`spawn-worker.js` の必須引数 `--session-id` に渡す。セッションコンテキストから読み取り、手動で取得・設定しない。
 
-### ワーカーの使い分けと起動
+### ワーカーの役割・モデル配分と起動
 
 各ワーカーの特長を理解し、タスクに応じて自律的に選ぶ。
 
@@ -277,6 +277,10 @@ PR監視・受信monitorの停止、slow state、worker-statusの復旧詳細は
 | gh-maestro-base | その他の動的役職。prompt-fileで役割を定義する |
 
 coder・senior-coder・explorer・diagnosticianは起動可否を人間に尋ねず、必要なら起動する。architectの起動可否・時機・相談内容は人間が決める。同一Issueに同じ役割のワーカーを複数起動しない。追加作業は既存workerへmsg-send.jsで指示し、並列化が必要ならIssueを分けて順に回す。
+
+coder / senior-coder には計画中と実装中で異なるモデルを割り当てられる。`agents.<id>.planExtraArgs` が設定されていれば、計画報告までの初回起動と差し戻し再開に限り、その定義自身の `extraArgs` 部分を置き換える。`extends` で受け継いだ引数は残る。未設定ならその定義の `extraArgs` を使う。設定値が文字列配列でない場合は警告して `extraArgs` に戻し、config.json は変更しない。workspace config からこの起動引数を上書きできない。書き方は `config.js --help` を参照する。
+
+工程6で計画を承認すると、`set-response-contract.js` が応答契約とは別の per-worker 記録へ承認状態を保存する。保存が失敗したときは承認指示を送らない。worker-supervisor.js はその記録を読み、承認後の実装・レビュー修正の再開には `extraArgs` を使う。契約ファイルが消費された後も承認状態は残る。初回起動時に計画状態の記録が無い旧ワーカーは `extraArgs` を使う。工程6の操作は `stage-6-implementation-start.md` に従う。
 
 #### アンカーIssueと起動
 

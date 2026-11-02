@@ -10,7 +10,9 @@ signals:
 
 入口: 工程3でarchitectを起動しないと決めた後、または3-[1/1]の設計論点が解消した後。待つもの: PR監視targetの確認通知とコーダーの計画報告。次: PLAN_REPORTEDを受けて工程5。
 
-実装ワーカーを起動する。共通のspawn-worker.js呼び出しには `--guidance-signal coder-start` を付ける。explorer・diagnostician・architect等の起動には付けない。タスクの特長（設計上の複雑さや影響の大きさなど）を自律的に判断して `gh-maestro-coder` と `gh-maestro-senior-coder` のどちらを使うか選択する（「ワーカーの使い分け」「ワーカーの起動」参照）。**コーダーは実装に着手する前に、必ず計画をorchestratorに報告する。**
+実装ワーカーを起動する。共通のspawn-worker.js呼び出しには `--guidance-signal coder-start` を付ける。explorer・diagnostician・architect等の起動には付けない。タスクの特長（設計上の複雑さや影響の大きさなど）を自律的に判断して `gh-maestro-coder` と `gh-maestro-senior-coder` のどちらを使うか選択する（「ワーカーの役割・モデル配分と起動」参照）。**コーダーは実装に着手する前に、必ず計画をorchestratorに報告する。**
+
+coder / senior-coder は初回起動から計画報告まで、設定済みなら `agents.<id>.planExtraArgs` を同じ定義内の `extraArgs` の代わりに使い、`extends` で受け継いだ引数は保つ。未設定なら既存の `extraArgs` を使う。計画への追加指示による再開も、工程6で承認記録が書かれるまでは計画用の引数を使う。引数設定の意味はorchestratorの共通手続きと `config.js --help` を参照する。
 
 
 

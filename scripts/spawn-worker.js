@@ -31,7 +31,7 @@ const fs = require('fs');
 const { linkNodeModules } = require('./shared/link-node-modules');
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { buildWorkerEnv } = require('./shared/worker-env');
-const { buildAgentCommandArgs } = require('./shared/agent-launch');
+const { buildAgentCommandArgs, selectAgentConfigForModelPhase } = require('./shared/agent-launch');
 const { checkAgentExists } = require('./shared/agent-exec');
 const { launchAgentHeadless } = require('./shared/headless-launch');
 const { buildNormalWorkerLaunchSpec } = require('./shared/worker-factory');
@@ -580,21 +580,29 @@ if (!agentConfig) {
   fail(`エージェント "${agentId}" の設定を解決できません。agent-defaults.json が破損していないか確認してください。`);
 }
 
+const usesPlanModel = skill === 'gh-maestro-coder' || skill === 'gh-maestro-senior-coder';
+const launchAgentConfig = usesPlanModel
+  ? selectAgentConfigForModelPhase(agentConfig, 'planning')
+  : agentConfig;
+const launchArgsField = usesPlanModel
+  ? '計画用引数（extraArgs / planExtraArgs を extends ごとに解決）'
+  : 'extraArgs';
+
 // --- 非対話化トークン検証（フェイルクローズ、Issue #163） ---
-// config.json の extraArgs 上書きは配列ごと置換されるため、非対話化に必須のトークン
-// （claude系: --print、reasonix: run、codex系: exec 等）がうっかり欠落しても、headless 起動は
+// 設定解決がレイヤーごとに組み立てた実使用引数を検証する。非対話化に必須のトークン
+// （claude系: --print、reasonix: run、codex系: exec 等）が欠落している場合、headless 起動は
 // 対話モードでハングし誰にも気づけない。欠落検出は worktree 作成・プロセス起動より前に
 // 行い、副作用を残さずに起動を拒否する（fail-closed-safety-guards: 検出できた異常は放置しない）。
 // 検証自体が例外を投げることはなく、nonInteractiveTokens 未宣言のエージェント（agy 等）は
 // 常に valid を返すため、正当なカスタマイズまで止めることはない。
-// 通常ワーカー起動は共通の extraArgs を使う（Review Manager 系は extraArgs と経路固有の
+// 通常ワーカー起動は役割・phaseごとに選んだ引数列を使う（Review Manager 系は extraArgs と経路固有の
 // execArgs を合成し、run-review-manager.js / run-review-jobs.js 側で検証する）。
-const tokenCheck = validateNonInteractiveTokens(agentConfig, agentConfig.extraArgs);
+const tokenCheck = validateNonInteractiveTokens(agentConfig, launchAgentConfig.extraArgs);
 if (!tokenCheck.valid) {
   fail(
-    `エージェント "${agentId}" の extraArgs が非対話化トークン（${tokenCheck.missing.join(', ')}）を保持していません。` +
+    `エージェント "${agentId}" の ${launchArgsField} が非対話化トークン（${tokenCheck.missing.join(', ')}）を保持していません。` +
     `トークン欠落のまま起動すると headless 実行で対話モードに入りハングします。` +
-    `~/.gh-maestro/config.json の agents["${agentId}"].extraArgs を確認してください。`,
+    `~/.gh-maestro/config.json の agents["${agentId}"].${launchArgsField} を確認してください。`,
   );
 }
 
@@ -633,9 +641,9 @@ if (agentConfig.runtime === 'agy') {
 
 // --- [レガシーガード] pwsh -Command 経由エージェントの空白パスガード ---
 // 新しい agent-exec.js は -EncodedCommand（Windows）/ exec "$@"（Unix）を使用するため
-// 引数内の空白は安全に扱える。ただし、extraArgs に -Command を含む旧来のカスタム設定が
+// 引数内の空白は安全に扱える。ただし、選択された起動引数に -Command を含む旧来のカスタム設定が
 // config.json に残っている場合のためにこのガードを残す（新構成では発動しない想定）。
-if (agentConfig.extraArgs?.includes('-Command') && /\s/.test(workspace)) {
+if (launchAgentConfig.extraArgs?.includes('-Command') && /\s/.test(workspace)) {
   console.error(`spawn-worker: ワークスペースのパスに空白が含まれています: "${workspace}"`);
   console.error(`  エージェント "${agentId}" は pwsh -Command 経由で起動するため、空白を含むパスは`);
   console.error(`  PowerShell の再パースで引数が分割され、起動が壊れます。`);
@@ -933,7 +941,7 @@ const shortPrompt = `${skillPathShortNotice}orchestratorです。${skill}スキ�
 // docs/agent-launch-mechanism-plan.md 参照。
 let agentCmdArgs;
 try {
-  agentCmdArgs = buildAgentCommandArgs(agentConfig, {
+  agentCmdArgs = buildAgentCommandArgs(launchAgentConfig, {
     promptFile,
     shortPrompt,
     systemPromptText: `orchestratorです。${skill}スキルを発動し、指示に従って作業を開始してください。`,
@@ -1010,6 +1018,7 @@ try {
     agentId: agentConfig.id,
     issue,
     skill,
+    ...(usesPlanModel ? { modelPhase: 'planning' } : {}),
     // resume配送（worker-supervisor.js）が GH_MAESTRO_BASE_BRANCH として再注入できるよう、
     // ベースブランチをワーカーレコードに永続化する（Issue #269）。
     baseBranch,

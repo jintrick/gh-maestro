@@ -6,7 +6,7 @@ const { normalizeWorkerEntry, normalizePid } = require('../scripts/shared/worker
 
 const EMPTY = {
   pid: null, resourceKey: null, instanceId: null, startTime: null, logPath: null,
-  agentId: null, issue: null, skill: null, baseBranch: null,
+  agentId: null, issue: null, skill: null, baseBranch: null, modelPhase: null,
   paneId: null, notifierPid: null,
 };
 
@@ -58,6 +58,16 @@ test('normalizeWorkerEntry: baseBranch は空文字・非文字列なら null �
   assert.equal(normalizeWorkerEntry({ pid: 1, baseBranch: null }).baseBranch, null);
   // レガシーレコード（baseBranch 未設定）も null に正規化される
   assert.equal(normalizeWorkerEntry({ pid: 1 }).baseBranch, null);
+});
+
+test('normalizeWorkerEntry: planning phase を保持し、未設定の旧記録は extraArgs 経路へ正規化する', () => {
+  assert.equal(normalizeWorkerEntry({ pid: 1, modelPhase: 'planning' }).modelPhase, 'planning');
+  assert.equal(normalizeWorkerEntry({ pid: 1 }).modelPhase, null);
+  assert.equal(normalizeWorkerEntry('legacy-pane').modelPhase, null);
+});
+
+test('normalizeWorkerEntry: 未知の modelPhase は黙って旧記録扱いにしない', () => {
+  assert.throws(() => normalizeWorkerEntry({ pid: 1, modelPhase: 'implementation' }), /modelPhase が不正/);
 });
 
 // ── レガシー形式（移行前セッションの掃除にのみ使う） ─────────────────────────

@@ -20,6 +20,7 @@ const { canonicalWorkspace } = require('../scripts/shared/storage-layout');
 const workerLiveness = require('../scripts/shared/worker-liveness');
 const runningReviewManagers = require('../scripts/shared/running-review-managers');
 const { recordCycleEvent } = require('../scripts/shared/cycle-metrics');
+const { writeImplementationApproval, implementationApprovalPath } = require('../scripts/shared/implementation-approval');
 
 // 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
 // PIDを誤って渡す回帰は即座に検出する。
@@ -1186,13 +1187,120 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     setWorkerAlive(() => true);
   });
 
-  function setupResumeWorkspace(dir, { workerName = 'issue-7-fix', agentId = 'agy' } = {}) {
+  function setupResumeWorkspace(dir, { workerName = 'issue-7-fix', agentId = 'agy', skill, modelPhase } = {}) {
     fs.mkdirSync(path.join(dir, '.gh-maestro', 'worktrees', workerName), { recursive: true });
+    const entry = { pid: 456, startTime: 'old', agentId, issue: 7 };
+    if (skill !== undefined) entry.skill = skill;
+    if (modelPhase !== undefined) entry.modelPhase = modelPhase;
     fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), JSON.stringify({
       orchestrator: { agentId: null },
-      [workerName]: { pid: 456, startTime: 'old', agentId, issue: 7 },
+      [workerName]: entry,
     }, null, 2));
   }
+
+  function setupModelConfig(home) {
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), JSON.stringify({
+      agents: {
+        'codex-plan': {
+          extends: 'codex',
+          extraArgs: ['--config', 'model=implementation-model'],
+          planExtraArgs: ['--config', 'model=planning-model'],
+        },
+      },
+    }, null, 2));
+  }
+
+  test('tryResumeAndDeliver: planning coder resumes with planExtraArgs while approval is absent', () => {
+    withTempDir(workspace => {
+      const workerName = 'issue-725-senior-coder-plan-model';
+      const home = path.join(workspace, 'home');
+      setupResumeWorkspace(workspace, { workerName, agentId: 'codex-plan', skill: 'gh-maestro-senior-coder', modelPhase: 'planning' });
+      setupModelConfig(home);
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName, agentId: 'codex-plan', skill: 'gh-maestro-senior-coder', issue: '725', modelPhase: 'planning',
+        message: { from: 'orchestrator', body: 'revise plan' }, workspace, homedir: home,
+      });
+      assert.equal(result.success, true);
+      const cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
+      assert.match(cmd, /model=planning-model/);
+      assert.doesNotMatch(cmd, /model=implementation-model/);
+    });
+  });
+
+  test('tryResumeAndDeliver: persistent approval switches implementation and later review resumes to extraArgs', () => {
+    withTempDir(workspace => {
+      const workerName = 'issue-725-senior-coder-plan-model';
+      const home = path.join(workspace, 'home');
+      setupResumeWorkspace(workspace, { workerName, agentId: 'codex-plan', skill: 'gh-maestro-senior-coder', modelPhase: 'planning' });
+      setupModelConfig(home);
+      writeImplementationApproval(workspace, workerName, { approvedAt: '2026-10-21T03:04:05.000Z' });
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName, agentId: 'codex-plan', skill: 'gh-maestro-senior-coder', issue: '725', modelPhase: 'planning',
+        message: { from: 'orchestrator', body: 'implement' }, workspace, homedir: home,
+      });
+      assert.equal(result.success, true);
+      let cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
+      assert.match(cmd, /model=implementation-model/);
+      assert.doesNotMatch(cmd, /model=planning-model/);
+
+      // contract consumption is independent; removing it must not erase the approval marker.
+      const { clearContract, writeContract } = require('../scripts/shared/response-contract');
+      writeContract(workspace, workerName, { type: 'artifact-or-message', artifact: 'pr', issue: 725 });
+      clearContract(workspace, workerName);
+      assert.equal(fs.existsSync(implementationApprovalPath(workspace, workerName)), true);
+      resetHeadlessLaunchMocks({ pid: 78 });
+      const reviewResult = supervisor.tryResumeAndDeliver({
+        workerName, agentId: 'codex-plan', skill: 'gh-maestro-senior-coder', issue: '725', modelPhase: 'planning',
+        message: { from: 'orchestrator', body: 'fix review findings' }, workspace, homedir: home,
+      });
+      assert.equal(reviewResult.success, true);
+      cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
+      assert.match(cmd, /model=implementation-model/);
+      assert.doesNotMatch(cmd, /model=planning-model/);
+    });
+  });
+
+  test('tryResumeAndDeliver: old coder records without modelPhase keep extraArgs', () => {
+    withTempDir(workspace => {
+      const workerName = 'issue-725-senior-coder-plan-model';
+      const home = path.join(workspace, 'home');
+      setupResumeWorkspace(workspace, { workerName, agentId: 'codex-plan', skill: 'gh-maestro-senior-coder' });
+      setupModelConfig(home);
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName, agentId: 'codex-plan', skill: 'gh-maestro-senior-coder', issue: '725',
+        message: { from: 'orchestrator', body: 'continue old session' }, workspace, homedir: home,
+      });
+      assert.equal(result.success, true);
+      const cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
+      assert.match(cmd, /model=implementation-model/);
+      assert.doesNotMatch(cmd, /model=planning-model/);
+    });
+  });
+
+  test('tryResumeAndDeliver: corrupt approval record fails closed without launching a resume', () => {
+    withTempDir(workspace => {
+      const workerName = 'issue-725-senior-coder-plan-model';
+      const home = path.join(workspace, 'home');
+      setupResumeWorkspace(workspace, { workerName, agentId: 'codex-plan', skill: 'gh-maestro-senior-coder', modelPhase: 'planning' });
+      setupModelConfig(home);
+      const approvalFile = implementationApprovalPath(workspace, workerName);
+      fs.mkdirSync(path.dirname(approvalFile), { recursive: true });
+      fs.writeFileSync(approvalFile, '{broken', 'utf8');
+
+      const result = supervisor.tryResumeAndDeliver({
+        workerName, agentId: 'codex-plan', skill: 'gh-maestro-senior-coder', issue: '725', modelPhase: 'planning',
+        message: { from: 'orchestrator', body: 'do not resume' }, workspace, homedir: home,
+      });
+      assert.equal(result.success, false);
+      assert.equal(result.method, 'resume-failed');
+      assert.match(result.error, /承認記録を確認できない/);
+      assert.equal(lastSpawnCalls.length, 0);
+    });
+  });
 
   test('tryResumeAndDeliver: claude（system-prompt-file）も成功する', () => {
     withTempDir((dir) => {

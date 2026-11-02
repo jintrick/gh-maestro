@@ -575,7 +575,12 @@ Profile semantics:
     defaults → global skillAgentMap → workspace skillAgentMap
 
 Agent launch arguments:
-  Set agents.<id>.extraArgs for arguments shared by normal and headless launches.
+  Set agents.<id>.extraArgs for normal launches and coder/senior-coder launches after approval.
+  For gh-maestro-coder and gh-maestro-senior-coder planning only, optional
+  agents.<id>.planExtraArgs replaces only that definition layer's extraArgs;
+  arguments inherited through extends remain. If it is absent, that layer's
+  extraArgs is used. If it is malformed, a warning is printed and that layer's
+  extraArgs is used without changing config.json.
   Do not set agents.<id>.execArgs in config.json; it is reserved for built-in
   route-specific arguments such as --cd {workspace}.
 
