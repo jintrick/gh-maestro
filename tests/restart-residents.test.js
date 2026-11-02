@@ -350,7 +350,9 @@ test('stopResidentEntry: 停止済み常駐のregistryとworker-supervisorのleg
     };
     const releasedRoles = [];
     const hooks = {
-      isProcessAlive: () => false,
+      liveness: processLiveness.createLiveness({
+        probePid: () => 'dead',
+      }),
       unregisterProcess: () => {
         fs.unlinkSync(registryPath);
       },
@@ -406,7 +408,9 @@ test('stopResidentEntry: 同じPIDのresident lease identity不一致を成功�
     };
 
     const result = stopResidentEntry(workspace, entry, {
-      isProcessAlive: () => false,
+      liveness: processLiveness.createLiveness({
+        probePid: () => 'dead',
+      }),
       unregisterProcess: () => {},
       releaseResidentLeaseForProcess,
     });
