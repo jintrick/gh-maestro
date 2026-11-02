@@ -247,6 +247,29 @@ gh-maestroが実際に細かい起動設定を必要とするのは claude / cod
 
 配列フィールドのうち `extraArgs`・`nonInteractiveTokens` は、継承元の配列内容に自分の内容を**末尾追記（マージ）**する。順序は「継承元の配列 → 自分の配列」の連結で、継承元で指定していた非対話トークン（`--print` 等）は失われない。`execArgs` は既定エージェントの経路固有引数であり、ユーザーの `config.json` に書くと起動時にエラーになる。`resumeCommand` は追記対象外で、上書き時は従来どおり完全置換される（再開時に末尾要素をセッション参照で置き換える挙動と整合）。`extends` を使わない通常のオーバーライド（前述の `agents` の例）では従来どおり全配列フィールドが完全置換される。**完全置換**（継承元の配列を捨てて自分の配列だけにする）したい場合は `extends` を使わずに定義する。`extends` は `agent-defaults.json` 内のエージェントのみを対象にでき、`config.json` だけで定義した別のカスタムエージェントを連鎖して継承することはできない。
 
+#### planExtraArgs — 計画中だけ使うモデル
+
+`gh-maestro-coder` と `gh-maestro-senior-coder` は、計画が承認されるまで（差し戻しで計画を直す間も含む）は上位のモデル、工程6で承認された後の実装とレビュー指摘への修正は下位のモデルで動かせる。上位のモデルは、`skillAgentMap` が指すエージェント定義の中に `planExtraArgs` として書く。
+
+```json
+"agents": {
+  "agy-flash": {
+    "extends": "agy",
+    "extraArgs": ["--model", "gemini-3.8-flash-medium"],
+    "planExtraArgs": ["--model", "gemini-4-argon-low"]
+  }
+}
+```
+
+- 計画中は、その定義の `extraArgs` の代わりに `planExtraArgs` を使う。置き換わるのはその定義自身が書いた分だけで、`extends` で受け継いだ引数（上の例なら `agy` の権限指定やタイムアウト）は残る。
+- 承認後は、同じ会話を `extraArgs` で再開する。モデルだけが替わり、会話は引き継がれる。
+- 上位と下位は同じ定義の中に書くので、必ず同じ CLI になる（会話の記録は CLI ごとのもので、CLI をまたいで引き継げないため）。
+- `planExtraArgs` が無い定義は、今までどおり計画も実装も `extraArgs` で動く。
+- `planExtraArgs` が文字列の配列でないときは、警告を出して `extraArgs` で動く。`config.json` は書き換えない。
+- 対象は coder と senior-coder だけ。他のワーカーは `planExtraArgs` を使わない。
+
+判断の背景: `docs/adr/0055-plan-model-inside-agent-definition.md`、`docs/adr/0056-agent-args-resolved-by-layer.md`
+
 ### test.layers
 
 テスト実行方法をプロジェクトの `config.json` に宣言する。`test.layers` は組み込み既定値、`~/.gh-maestro/config.json`、`<workspace>/.gh-maestro/config.json` の順に層単位・フィールド単位で解決され、3段すべてが実行コマンドを指定できる。`test.layers` を宣言した場合は、そのプロジェクトが宣言した層だけを使い、未宣言の分離側を推測しない。
