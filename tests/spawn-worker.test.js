@@ -166,6 +166,7 @@ const BASE_ENV = {};
 
 test('spawn-worker: coderの初回argvはagy基底引数を保ち、planExtraArgsのモデルを使う', () => {
   const workspace = tempDirScope.mkdtemp('ghm-spawn-plan-model-');
+  copyGitTemplate(workspace);
   const home = path.join(workspace, 'home');
   const fakeRoot = path.join(workspace, 'fake-gh');
   const captureFile = path.join(workspace, 'agent-argv.jsonl');
@@ -184,17 +185,6 @@ test('spawn-worker: coderの初回argvはagy基底引数を保ち、planExtraArg
     },
   }), 'utf8');
   fs.writeFileSync(skillFile, '# argv fixture\n', 'utf8');
-  const git = (args) => {
-    const result = spawnSync('git', args, { cwd: workspace, encoding: 'utf8' });
-    assert.equal(result.status, 0, `git ${args.join(' ')} failed: ${result.stderr}`);
-  };
-  git(['init']);
-  git(['config', 'user.email', 'test@example.com']);
-  git(['config', 'user.name', 'test']);
-  fs.writeFileSync(path.join(workspace, 'README.md'), '# fixture\n', 'utf8');
-  git(['add', 'README.md']);
-  git(['commit', '-m', 'initial']);
-
   const fakeGh = createFakeGh({
     binDir: path.join(fakeRoot, 'bin'),
     logPath: path.join(fakeRoot, 'calls.jsonl'),
