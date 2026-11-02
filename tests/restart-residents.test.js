@@ -384,6 +384,41 @@ test('stopResidentEntry: 停止済み常駐のregistryとworker-supervisorのleg
   }
 });
 
+test('stopResidentEntry: registry解除が残存する場合は解除未確認エラーとして失敗する', () => {
+  const workspace = makeWorkspace();
+  const registryPath = path.join(workspace, 'pid-registry.json');
+  const legacyRegistryPath = path.join(workspace, 'legacy-pid-registry.json');
+  try {
+    fs.writeFileSync(registryPath, '{}', 'utf8');
+    fs.writeFileSync(legacyRegistryPath, '{}', 'utf8');
+    const entry = {
+      pid: 4242,
+      script: 'worker-supervisor.js',
+      workerName: null,
+      workspace,
+      startTime: '2026-07-29T00:00:00.424Z',
+      args: [],
+    };
+    const hooks = {
+      liveness: processLiveness.createLiveness({
+        probePid: () => 'dead',
+      }),
+      unregisterProcess: () => {},
+      pidFilePath: () => registryPath,
+      legacyPidFilePath: () => legacyRegistryPath,
+      releaseResidentLeaseForProcess: () => ({ released: true, remaining: false }),
+    };
+
+    const result = stopResidentEntry(workspace, entry, hooks);
+
+    assert.equal(result.ok, false);
+    assert.match(result.error, /PID registryの解除を確認できませんでした/);
+    assert.equal(fs.existsSync(registryPath), true);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test('stopResidentEntry: 同じPIDのresident lease identity不一致を成功扱いにしない', () => {
   const workspace = makeWorkspace();
   const leaseStore = createNormalWorkerStore(workspace);
