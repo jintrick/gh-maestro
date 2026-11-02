@@ -27,6 +27,7 @@ const {
 const { buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
 const { parseFlags } = require('./shared/workspace');
 const { parseJsonText, readJsonFile } = require('./shared/json-file');
+const { toWinPath } = require('./shared/win-path');
 const checkpoint = require('./shared/review-checkpoint');
 const { validateManifest } = require('./run-review-jobs');
 const { _validateAgainstSchema } = require('./shared/json-schema');
@@ -1346,6 +1347,15 @@ if (require.main === module) {
     if (values['--help'] || values['-h']) {
       console.log(USAGE);
       process.exit(0);
+    }
+
+    // 不完全レビューの公開経路（finalize-review.js --mode incomplete。RMのフェーズ2と
+    // run-review-jobs.js の両方が呼ぶ）へ前回の扱いを届けるため、子プロセスが継承する環境変数に
+    // 載せる。指定が無い起動では、親環境に残った同名の値が紛れ込まないよう必ず消す。
+    if (values['--prior-findings-file']) {
+      process.env.GH_MAESTRO_PRIOR_FINDINGS_FILE = path.resolve(toWinPath(values['--prior-findings-file']));
+    } else {
+      delete process.env.GH_MAESTRO_PRIOR_FINDINGS_FILE;
     }
 
     const [pr, repo, workspace, issue] = rest;

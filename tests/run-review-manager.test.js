@@ -990,24 +990,24 @@ test('#717: priorFindingsFile を渡さない buildFinalizePrompt は変更前�
   assert.equal(lines.slice(0, -1).join('\n'), expected);
 });
 
-test('#717: priorFindingsFile を渡すと両フェーズのプロンプトに PRIOR_FINDINGS と RE_REVIEW が足され、先頭は未指定時と同一', () => {
+test('#717: priorFindingsFile を渡すと、両フェーズとも未指定時のプロンプトの末尾に、指定ファイルと再レビュー手順書を読む指示だけが足される', () => {
   const skillPath = 'C:/canonical/skills/gh-maestro-reviewer/SKILL.md';
-  const base1 = buildPrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:/ws', mainGhDir: 'C:/main/.gh-maestro', skillPath,
-  }).prompt;
-  const p1 = buildPrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:/ws', mainGhDir: 'C:/main/.gh-maestro', skillPath,
-    priorFindingsFile: 'C:\\data\\prior.json',
-  }).prompt;
-  assert.ok(p1.startsWith(base1));
-  assert.match(p1, /\nPRIOR_FINDINGS=C:\/data\/prior\.json\n/);
-  assert.match(p1, /\nRE_REVIEW=C:\/canonical\/skills\/gh-maestro-reviewer\/re-review\.md\n/);
+  const suffix = [
+    '',
+    'PRIOR_FINDINGS=C:/data/prior.json',
+    'RE_REVIEW=C:/canonical/skills/gh-maestro-reviewer/re-review.md',
+    'RE_REVIEW に指定されたファイルも読み、PRIOR_FINDINGS の扱いに関する手順に従ってください。',
+  ].join('\n');
+  const common = { pr: '5', repo: 'o/r', issue: '260', workspace: 'C:/ws', mainGhDir: 'C:/main/.gh-maestro', skillPath };
 
-  const p2 = buildFinalizePrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:/ws', outputFile: 'C:/ws/out.json',
-    mainGhDir: 'C:/main/.gh-maestro', resultsFile: 'C:/ws/results.json', skillPath,
-    priorFindingsFile: 'C:\\data\\prior.json',
-  }).prompt;
-  assert.match(p2, /\nPRIOR_FINDINGS=C:\/data\/prior\.json\n/);
-  assert.match(p2, /\nRE_REVIEW=C:\/canonical\/skills\/gh-maestro-reviewer\/re-review\.md\n/);
+  const base1 = buildPrompt(common).prompt;
+  const p1 = buildPrompt({ ...common, priorFindingsFile: 'C:\\data\\prior.json' }).prompt;
+  assert.equal(p1, base1 + suffix);
+
+  const fin = { ...common, outputFile: 'C:/ws/out.json', resultsFile: 'C:/ws/results.json' };
+  // DRAFT= は実行ごとの乱数名なので、その行だけ固定値へ置き換えてから全体を比較する。
+  const norm = (p) => p.replace(/DRAFT=\S+/, 'DRAFT=<x>');
+  const base2 = norm(buildFinalizePrompt(fin).prompt);
+  const p2 = norm(buildFinalizePrompt({ ...fin, priorFindingsFile: 'C:\\data\\prior.json' }).prompt);
+  assert.equal(p2, base2 + suffix);
 });

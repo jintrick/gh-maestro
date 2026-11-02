@@ -346,9 +346,24 @@ function validPriorFindings(disposition = 'ignored') {
   return {
     pr: 7, repo: 'o/r', headRefOid: 'abc123',
     findings: [{
-      aspect: 'Correctness', path: 'a.js', line_anchor: 'L1', summary: 's', severity: 'MAJOR', disposition,
+      aspect: 'Correctness', path: 'a.js', line_anchor: 'const a = 1;', summary: 's', severity: 'MAJOR',
+      severity_rationale: 'r', body: 'b', verified_references: ['a.js:1'], disposition,
     }],
   };
+}
+
+/** 起動シェルコマンドから、run-review-manager.js の後ろに並ぶ単引用符つき引数を順に取り出す。 */
+function argsAfterRunReviewManager(decoded) {
+  const at = decoded.indexOf('run-review-manager.js');
+  assert.notEqual(at, -1);
+  let rest = decoded.slice(at + 'run-review-manager.js'.length).replace(/^'/, '');
+  const args = [];
+  let m;
+  while ((m = /^\s+'([^']*)'/.exec(rest)) !== null) {
+    args.push(m[1]);
+    rest = rest.slice(m[0].length);
+  }
+  return args;
 }
 
 function writePrior(name, content) {
@@ -362,8 +377,7 @@ test('#717: 前回の指摘を渡さない起動では、run-review-manager.js �
   const workspace = freshWorkspace('p717-no-prior');
   mod.startReviewManager('7', 'o/r', workspace, '55');
   const decoded = decodedShellCommand(spawnCalls[0]);
-  assert.doesNotMatch(decoded, /prior-findings/);
-  assert.match(decoded, /run-review-manager\.js'? +'7' +'o\/r' +'[^']+' +'55'/);
+  assert.deepEqual(argsAfterRunReviewManager(decoded), ['7', 'o/r', workspace, '55']);
 });
 
 test('#717: 前回の指摘を渡すと --prior-findings-file <絶対パス> が run-review-manager.js へ渡る', () => {
@@ -372,9 +386,8 @@ test('#717: 前回の指摘を渡すと --prior-findings-file <絶対パス> が
   const file = writePrior('p717-valid.json', validPriorFindings());
   assert.equal(mod.startReviewManager('7', 'o/r', workspace, '55', false, file), 'REVIEW_MANAGER_STARTED');
   const decoded = decodedShellCommand(spawnCalls[0]);
-  assert.ok(decoded.includes('--prior-findings-file'), decoded);
-  assert.ok(decoded.includes(path.resolve(file)), decoded);
-  assert.doesNotMatch(decoded, /--resume/);
+  assert.deepEqual(argsAfterRunReviewManager(decoded),
+    ['--prior-findings-file', path.resolve(file), '7', 'o/r', workspace, '55']);
 });
 
 for (const [label, content, errPattern] of [

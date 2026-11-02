@@ -30,7 +30,8 @@ Usage: node start-review-manager.js [--resume] [--prior-findings-file <path>] <P
   --prior-findings-file <path>
             再レビュー用。前回の指摘とそれぞれの扱い（disposition: fixed / ignored / deferred）の
             JSONファイル。形式は前回のレビュー結果（manager.json）と同じ pr / repo / headRefOid /
-            findings[] で、各指摘に disposition を足す（スキーマ: scripts/prior-findings-schema.json）。
+            findings[] で、各指摘に disposition を足す。スキーマの正本は scripts/review-findings-schema.json
+            （disposition を足しただけ）。
             指定時だけ、Review Managerは再レビュー手順書を追加で読み、内容を判定のデータとして扱う
             （命令としては扱わず、観点の採否・レビュー範囲は指定なしと同じ基準で決める）。
             ファイルが無い・JSONでない・スキーマに合わない場合は起動しない。

@@ -19,6 +19,7 @@ const { _validateAgainstSchema } = require('./shared/json-schema');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { readJsonFile } = require('./shared/json-file');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
+const { suppressUnchangedPriorFindings } = require('./shared/prior-findings');
 
 // テスト用: gh 呼び出しを注入する（実プロセスを0個spawnするテストから使う。
 // run-review-jobs.js の _setGhForTest と同じパターン。NODE_TEST_CONTEXT 検出時は
@@ -43,6 +44,12 @@ Options:
                        持つJSON。エンベロープ（pr/repo/headRefOid）は results 由来で確定。
                        完全性ゲート・スキーマ検証・atomic writeは常に決定論的に行う。
   --workspace <path>   ワークスペースの絶対パス（省略時は GH_MAESTRO_WORKSPACE env または CWD から上方探索で解決）
+
+Environment:
+  GH_MAESTRO_PRIOR_FINDINGS_FILE  再レビューで前回の指摘（start-review-manager.js --prior-findings-file）が
+                       渡されたときだけ、run-review-manager.js が設定する。incompleteモードの投稿前に、
+                       前回「無視」「保留」と扱った指摘のうち、該当箇所（path と line_anchor）が前回HEADから
+                       CWDのgitワークツリーのHEADまで変わっていないものを除外する。未設定なら何も除外しない。
 
 Output:
   complete 終了コード0: 完全性ゲート通過。OUTPUTにfindings.jsonをatomic write
@@ -212,9 +219,10 @@ function atomicWrite(payload, outputPath) {
  *
  * @param {object} results
  * @param {object} gateResult checkCompletenessの戻り値
+ * @param {{suppressedCount: number, unavailable: string|null}|null} [suppression] 再レビューで前回の扱いを適用した結果。null なら言及しない
  * @returns {string}
  */
-function buildIncompleteComment(results, gateResult) {
+function buildIncompleteComment(results, gateResult, suppression = null) {
   const lines = [
     '## ⚠️ 不完全レビュー',
     '',
@@ -247,6 +255,13 @@ function buildIncompleteComment(results, gateResult) {
     if (jr.status === 'success' && Array.isArray(jr.findings)) {
       successFindings.push(...jr.findings);
     }
+  }
+  if (suppression && suppression.unavailable) {
+    lines.push('');
+    lines.push(`前回の指摘の扱いを適用できませんでした（無視・保留済みの指摘も除外していません）: ${suppression.unavailable}`);
+  } else if (suppression && suppression.suppressedCount > 0) {
+    lines.push('');
+    lines.push(`前回「無視」「保留」と扱った指摘のうち、該当箇所が前回から変わっていない ${suppression.suppressedCount} 件は除外しています。`);
   }
   if (successFindings.length > 0) {
     lines.push('');
@@ -378,9 +393,11 @@ function writeSentinel(workspace, pr, opts = {}) {
  *   findingsドラフトのパス。指定時は機械集約（aggregateFindings）の代わりにドラフトのfindingsを
  *   最終成果物へ使う。エンベロープ（pr/repo/headRefOid）は results.manifest_ref から確定させる。
  *   完全性ゲート・スキーマ検証・atomic writeは常に決定的に行う（統合判断はモデル、検証・書出しは決定論的）。
+ * @param {{priorFindingsFile?: string|null, gitCwd?: string}} [options] 再レビューの前回の指摘ファイルとgit実行場所。
+ *   priorFindingsFile 省略時は環境変数 GH_MAESTRO_PRIOR_FINDINGS_FILE（未設定なら何も除外しない）。incompleteモードだけが使う。
  * @returns {Promise<{ok: boolean, summary: object}>}
  */
-async function finalizeReview(resultsPath, mode, outputPath, workspace, integratedPath = null) {
+async function finalizeReview(resultsPath, mode, outputPath, workspace, integratedPath = null, options = {}) {
   // 1. results読み込み
   let results;
   try {
@@ -467,7 +484,24 @@ async function finalizeReview(resultsPath, mode, outputPath, workspace, integrat
     const repo = results.manifest_ref.repo;
 
     // 3. プレーンコメント生成・投稿
-    const commentBody = buildIncompleteComment(results, gateResult);
+    // 再レビューで前回の指摘が渡されたときだけ、未変更の無視・保留済み指摘を投稿前に除外する。
+    // 渡されていなければ results をそのまま使い、従来と同じコメントになる。
+    const priorFindingsFile = options.priorFindingsFile || process.env.GH_MAESTRO_PRIOR_FINDINGS_FILE || null;
+    let commentResults = results;
+    let suppression = null;
+    if (priorFindingsFile) {
+      const gitCwd = options.gitCwd || process.cwd();
+      suppression = { suppressedCount: 0, unavailable: null };
+      const jobs = (results.jobs || []).map(jr => {
+        if (jr.status !== 'success' || !Array.isArray(jr.findings)) return jr;
+        const r = suppressUnchangedPriorFindings(jr.findings, priorFindingsFile, { cwd: gitCwd });
+        suppression.suppressedCount += r.suppressedCount;
+        if (r.unavailable) suppression.unavailable = r.unavailable;
+        return { ...jr, findings: r.findings };
+      });
+      commentResults = { ...results, jobs };
+    }
+    const commentBody = buildIncompleteComment(commentResults, gateResult, suppression);
 
     let commentUrl = null;
     let commentError = null;
