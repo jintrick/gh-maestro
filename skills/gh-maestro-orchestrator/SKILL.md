@@ -245,7 +245,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 | SLOW_TEST_STARTED / SLOW_TEST_ALREADY_RECORDED / SLOW_TEST_RESULT | PR/HEAD/layerを照合し、状態・件数・ログ識別子を記録する。unavailableや申告更新失敗を再試行・診断しない。軽量PRでは発生しない。 | 工程7-[1/6] |
 | REVIEW_COMMENT / PR_REVIEW | 投稿者と本文を保持する。APPROVEDはマージ許可シグナル、CHANGES_REQUESTEDは指摘、COMMENTEDはPR_COMMENT同様に扱う。 | triage.mdと工程7-[3/6]。 |
 | PR_COMMENT | 投稿者と本文を保持する。テスト結果申告など、正式レビューではないコメントではtriage.mdを追加しない。 | 工程7-[1/6]。 |
-| PR_PUSH:<sha> | 新HEADへslowを予約しCI checksを照会する。転送済みBLOCKER/MAJORへの修正はexplorerの事実確認を行う。 | 工程7-[4/6]。 |
+| PR_PUSH:<sha> | 新HEADへslowを予約しCI checksを照会する。修正pushごとに、Review Managerで再レビューする・explorerで事実確認する・どちらもしない、のどれかをorchestratorが判断して選ぶ。 | 工程7-[4/6]。 |
 | TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>:lint=<lintState>:typecheck=<typecheckState> | 状態をそのまま記録する。STALE/NONEはquery-test-status.jsで正本を確認する。機械的停止条件にしない。 | 工程7-[5/6] |
 | CI_CHECK_FAILED / CI_CHECKS_COMPLETE / CI_CHECKS_EMPTY / CI_CHECKS_UNAVAILABLE | HEAD・check名・状態・URLを記録する。取得失敗をチェックなし・成功としない。実行中は候補提示を待つ。軽量PRでは発生しない。 | 工程7-[5/6] |
 | PR_MERGED:<PR番号> | mergeを確認する。worker/worktreeは消さない。 | 工程8。hookはstage-8・stage-9・retrospective.mdをまとめて追加する。 |

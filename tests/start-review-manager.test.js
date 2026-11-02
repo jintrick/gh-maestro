@@ -339,3 +339,80 @@ test('startReviewManager: ログパスはfactory仕様のlogPath（worker-logs�
   const expected = path.join(workspace, '.gh-maestro', 'records', 'pr', '10', 'workers', 'issue-55-review-manager-pr-10', 'worker.log');
   assert.equal(spawnCalls[0].args[2], expected);
 });
+
+// ── Issue #717: --prior-findings-file ───────────────────────────────────────
+
+function validPriorFindings(disposition = 'ignored') {
+  return {
+    pr: 7, repo: 'o/r', headRefOid: 'abc123',
+    findings: [{
+      aspect: 'Correctness', path: 'a.js', line_anchor: 'L1', summary: 's', severity: 'MAJOR', disposition,
+    }],
+  };
+}
+
+function writePrior(name, content) {
+  const file = path.join(tmpBase, name);
+  fs.writeFileSync(file, typeof content === 'string' ? content : JSON.stringify(content));
+  return file;
+}
+
+test('#717: 前回の指摘を渡さない起動では、run-review-manager.js へ渡す引数は <PR> <REPO> <WORKSPACE> <ISSUE> だけ（変更前と同一）', () => {
+  const mod = loadModule();
+  const workspace = freshWorkspace('p717-no-prior');
+  mod.startReviewManager('7', 'o/r', workspace, '55');
+  const decoded = decodedShellCommand(spawnCalls[0]);
+  assert.doesNotMatch(decoded, /prior-findings/);
+  assert.match(decoded, /run-review-manager\.js'? +'7' +'o\/r' +'[^']+' +'55'/);
+});
+
+test('#717: 前回の指摘を渡すと --prior-findings-file <絶対パス> が run-review-manager.js へ渡る', () => {
+  const mod = loadModule();
+  const workspace = freshWorkspace('p717-with-prior');
+  const file = writePrior('p717-valid.json', validPriorFindings());
+  assert.equal(mod.startReviewManager('7', 'o/r', workspace, '55', false, file), 'REVIEW_MANAGER_STARTED');
+  const decoded = decodedShellCommand(spawnCalls[0]);
+  assert.ok(decoded.includes('--prior-findings-file'), decoded);
+  assert.ok(decoded.includes(path.resolve(file)), decoded);
+  assert.doesNotMatch(decoded, /--resume/);
+});
+
+for (const [label, content, errPattern] of [
+  ['JSON構文エラー', '{ not json', /JSON|parse|Unexpected/i],
+  ['型不正（配列でない findings）', { pr: 7, repo: 'o/r', headRefOid: 'a', findings: 'x' }, /schema|スキーマ|findings/],
+  ['disposition 不正', validPriorFindings('wontfix'), /disposition/],
+  ['disposition 欠落', (() => { const v = validPriorFindings(); delete v.findings[0].disposition; return v; })(), /disposition/],
+]) {
+  test(`#717: 前回の指摘ファイルが${label}なら起動を拒否し、何も起動しない`, () => {
+    const mod = loadModule();
+    const workspace = freshWorkspace('p717-bad-' + label.length);
+    const file = writePrior('p717-bad-' + label.length + '.json', content);
+    assert.throws(() => mod.startReviewManager('7', 'o/r', workspace, '55', false, file), errPattern);
+    assert.equal(spawnCalls.length, 0);
+    assert.equal(fs.existsSync(path.join(workspace, '.gh-maestro')), false, '予約などの副作用を残さない');
+  });
+}
+
+test('#717: 前回の指摘ファイルが存在しなければ起動を拒否する', () => {
+  const mod = loadModule();
+  const workspace = freshWorkspace('p717-missing');
+  assert.throws(() => mod.startReviewManager('7', 'o/r', workspace, '55', false, path.join(tmpBase, 'nope.json')));
+  assert.equal(spawnCalls.length, 0);
+});
+
+test('#717: --help の Usage に --prior-findings-file が載り、終了コード0', () => {
+  const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'scripts', 'start-review-manager.js'), '--help'], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /--prior-findings-file <path>/);
+  assert.match(r.stdout, /fixed \/ ignored \/ deferred/);
+});
+
+test('#717: CLI境界: スキーマに合わない前回の指摘ファイルは非ゼロ終了し、起動予約を作らない', () => {
+  const workspace = freshWorkspace('p717-cli-bad');
+  const file = writePrior('p717-cli-bad.json', validPriorFindings('wontfix'));
+  const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'scripts', 'start-review-manager.js'),
+    '--prior-findings-file', file, '7', 'o/r', workspace, '55'], { encoding: 'utf8' });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /disposition/);
+  assert.equal(fs.existsSync(path.join(workspace, '.gh-maestro')), false);
+});

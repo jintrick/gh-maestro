@@ -29,7 +29,7 @@ node "{{SCRIPTS_PATH}}/poll-pr-monitor.js" --plugin-monitor --workspace "$WORKSP
 
 Review Managerの完了、通常経路のslow層結果、GitHub checks、テスト申告を利用可能なHEADと照合する。通知が揃わない場合は受け取った事実を保持し、自動再実行・自動診断を行わない。必要な結果を確認するまでコーダーのrollbackやworktree削除へ進まない。軽量PRではslow層とGitHub checksを待たない。
 
-レビュー指摘が届いたら7-[3/6]、findingsが0件なら7-[3/6]をスキップする。転送済みBLOCKER/MAJORの修正pushがあれば7-[4/6]を完了してから7-[5/6]へ進む。PRが閉じられた場合は通知表に従い、監視が新しいPR検出へ戻ったことを確認してPR_DETECTEDを待つ。起動シグナルの欠落やReview Managerのクラッシュは7-[2/6]で扱う。
+レビュー指摘が届いたら7-[3/6]、findingsが0件なら7-[3/6]をスキップする。修正pushがあれば7-[4/6]で選んだ対応（再レビュー・事実確認・なし）を完了してから7-[5/6]へ進む。PRが閉じられた場合は通知表に従い、監視が新しいPR検出へ戻ったことを確認してPR_DETECTEDを待つ。起動シグナルの欠落やReview Managerのクラッシュは7-[2/6]で扱う。
 
 #### 7-[2/6] PR監視・Review Managerの再起動【任意】
 
@@ -42,20 +42,42 @@ Review Manager の findings が1件以上あるときだけ行う。0件のPRで
 
 PRに新しいレビューコメントが届くたびに、orchestratorは指摘を評価するところまでを行う。`{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/triage.md` を開き、そこに従って実害度スコア／対応コストの付与・人間への提示・回答に従った実行を行う。提示は `工程7-[3/6]` と名乗り、「人間への発言の規範」に従う。**実際にコーダーに修正依頼する／無視する／保留Issueに積むという実行アクションは、観点やスコアの値に関わらず、必ず人間の明示的な決定を経てから行う。** 観点・実害度・対応コストがどうであれ、人間の確認を省略してよい経路は存在しない。同じBLOCKERが2回連続して届くスパイラルの提示もここで行う。
 
-回答に従って修正を依頼したら7-[1/6]の監視へ戻る。全指摘の処理後、該当する修正push後の事実確認があれば7-[4/6]を行い、その後7-[5/6]へ進む。該当しない場合は7-[4/6]を実行せず、7-[5/6]へ進む。
+回答に従って修正を依頼したら7-[1/6]の監視へ戻る。修正pushが届いたら7-[4/6]で再レビュー・事実確認・どちらもしない、のどれかを選び、その後7-[5/6]へ進む。
 
 #### 7-[4/6] 修正push後の事実確認【必須】
 
-転送済みBLOCKER/MAJORへの修正を含むPR_PUSHが届いたときに行う。元の指摘と修正pushのHEADを指定し、既存のexplorerへ再現条件が解消したかを事実確認させる。調査前にexplorer自身が対象PRのbranch/commitをfetchし、対象HEADをcheckoutしたことを確認する。調査結果に推測を混ぜず、対象SHA・再現手順・結果を受け取り、結果が確認できるまでその指摘を未解消として扱う。別の指摘修正pushにも同様に確認する。
+修正を含むPR_PUSHが届くたびに、orchestratorが次の3つから1つを選ぶ。人間へ事前に尋ねない。選んだものと理由は7-[5/6]で示す。
 
-該当する転送済みBLOCKER/MAJORが無い場合は、工程7-[4/6]を実行せず7-[5/6]へ進む。
+- (a) Review Managerに新しいHEADをレビューし直させる。
+- (b) 転送済みBLOCKER/MAJORについて、explorerに事実確認だけさせる。
+- (c) どちらもしない。
+
+選ぶのはorchestratorの判断であり、指摘の件数や重大度などの機械的な条件では決めない。目安は次のとおり。
+
+- 修正が指摘箇所の外へ広がった、または作りを変えた → (a)。修正で入った変更そのものを誰もレビューしていないため。
+- 指摘箇所だけの局所的な修正で、直ったかどうかだけ確かめればよい → (b)。
+- 転送済みのBLOCKER/MAJORが無く、変更も文言や体裁などに限られる → (c)。
+
+再レビューで新しい指摘が続き終わらない場合は、7-[3/6]の「同じBLOCKERが2回連続して届いたら人間に尋ねる」規則で止める。Review Managerや監視スクリプトは自分で再レビューを始めない。
+
+**(a)の手順**: 前回のレビュー結果（`records/pr/<PR>/review/manager.json`）の `pr`・`repo`・`headRefOid`・`findings` を写したファイルを作り、各指摘に7-[3/6]で決めた扱い `disposition`（`fixed`／`ignored`／`deferred`）を足す（形式は `start-review-manager.js --help`）。前回のReview Managerが終了していることを確認して実行する。`poll-pr.js` の起動claimは触らない。途中経過から再開するときだけ `--resume` を付ける。結果は通常と同じく `PR_REVIEW` で届き、7-[3/6]で扱う。渡した内容は判定に使うデータであり、観点やレビュー範囲を絞る目的では使わない。
+
+```sh
+node "{{SCRIPTS_PATH}}/start-review-manager.js" --prior-findings-file <前回の指摘ファイル> <PR> $REPO $WORKSPACE <ISSUE>
+```
+
+**(b)の手順**: 元の指摘と修正pushのHEADを指定し、既存のexplorerへ再現条件が解消したかを事実確認させる。調査前にexplorer自身が対象PRのbranch/commitをfetchし、対象HEADをcheckoutしたことを確認する。調査結果に推測を混ぜず、対象SHA・再現手順・結果を受け取り、結果が確認できるまでその指摘を未解消として扱う。別の指摘修正pushにも同様に確認する。
+
+(c)を選んだ場合は、何も起動せず7-[5/6]へ進む。
+
+判断の背景と採用理由: `docs/adr/0054-orchestrator-decides-re-review.md`
 
 #### 7-[5/6] マージ判断の依頼【必須】
 
-`REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の条件を満たすときだけである。提示は `工程7-[5/6]` と名乗り、Review Managerのレビュー結果、テスト申告、CI checksを判断材料として示す。7-[3/6]を実施した場合はtriage結果も示し、該当する場合はPRのbase違いと結果を取得できなかった項目も示す。マージ判断の問いは「人間への発言の規範」に従う。
+`REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の条件を満たすときだけである。提示は `工程7-[5/6]` と名乗り、Review Managerのレビュー結果、テスト申告、CI checksを判断材料として示す。7-[3/6]を実施した場合はtriage結果も示し、該当する場合はPRのbase違いと結果を取得できなかった項目も示す。マージ判断の問いは「人間への発言の規範」に従う。修正pushがあった場合は、pushごとに7-[4/6]で選んだもの（再レビュー・事実確認・どちらもしない）と理由を1行ずつ示す。
 
 - Review Manager 完了（`PR_REVIEW:...Posted inline findings: N` 到着 or `records/pr/<PR>/review/manager.json` 生成）
-- 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER/MAJOR は、修正 push に対する explorer の事実確認が完了するまで未解消として扱う）
+- 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER/MAJOR は、修正 push に対する explorer の事実確認、または再レビューが完了するまで未解消として扱う）
 - **テスト申告状態の確認と事実提示（Issue #209）**:
   - `node "{{SCRIPTS_PATH}}/query-test-status.js" --pr <PR>` を実行し、成功時に返るJSON 1行をテスト申告状態の正本として確認する。このコマンドは現在のPRコメントとHEADをGitHubから取得するため、`poll-reviews.js` の内部状態ファイルや「新しいコメントがあるか」の推測を使わない。
   - JSONの `status`（`GREEN`/`RED`/`STALE`/`NONE`）と、存在する `declaredSha`・`headSha`・`fail`・`pass`・`provenance`・`scope`・`lint`、`typecheck`、層別結果の `failedTests`・`otherFailedCount` を**解釈を加えずそのまま事実として記載**する。申告コメントの層行の直下にある「失敗詳細」行（失敗したテスト名・場所（worktree からの相対パス）・エラー・期待値と実際値、省略された件数と実行記録の名前）も、同じく解釈を加えず原文のまま載せる。これは slow 層の失敗だけに付き、件数は `failedTests` の上限5件までに揃う。slow層に `dynamicConcurrency` がある場合は、その `value`・`cpuCount`・`reviewJobCount`・`status`・`unavailableInputs` も確認して伝える。`GREEN` は申告あり・SHA一致・fail 0、`RED` は申告あり・SHA一致・fail > 0、`STALE` はSHA不一致、`NONE` は申告なしまたは照合不能を表す。`lint.status` は従来どおり `complete`（`outcome=pass` または `findings` と `findingCount`）、`unavailable`、`missing` のいずれか。`typecheck.status` は `complete`（`outcome=pass/fail` と `exitCode`）、`unavailable`、`undefined`、`missing` のいずれか。いずれも `unavailable`/`missing` を状態のない GREEN と読み替えてはならない。lint の指摘と型チェック結果は commit・push・PR作成・merge の機械停止条件ではなく、止めるかどうかは orchestrator と人間が判断する。`provenance` が `unknown`、または `scope` が `unknown` の場合も、その値を変更せず記載する。
