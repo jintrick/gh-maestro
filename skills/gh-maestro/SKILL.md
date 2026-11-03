@@ -6,6 +6,7 @@ description: gh-maestroセッションをこのワークスペースで起動す
 ## 起動
 
 起動時に人間へ伝えるのは、人間がこれから作業を始めるのに役立つことと、gh-maestro の動作に悪影響があることだけである。以下の検査は、その判断の材料を集めるために行う。どちらにも当たらない結果は伝えない。
+理由と経緯: docs/adr/0057-startup-report-only-actionable.md
 
 1. **PID registryとworker leaseのsweep**: runtime側PID registryのstale entryと、台帳・worktreeの両方にない通常worker leaseを回収する。resident role leaseは対象外。回収や旧形式記録の集約の詳細は `<workspace>/.gh-maestro/sweep-lease-report.log` に保存される。旧 `.gh-maestro/pids` は遺物検査と明示的な整理で扱う。
 
