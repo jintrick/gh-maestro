@@ -21,6 +21,9 @@ const {
 } = require('../scripts/install.js');
 const { MANAGED_TOP_LEVEL } = require('../scripts/shared/storage-layout');
 const { withTempDir } = require('../scripts/shared/temp-directory');
+const TEST_QUALITY_CRITERIA_CONTENT = stripFrontmatter(
+  fs.readFileSync(path.join(ROOT, '.claude', 'rules', 'test-quality-criteria.md'), 'utf8').replace(/\r\n/g, '\n')
+).trim();
 
 test('installPluginAssets: plugin manifest・固定monitors・plugin rootのscriptsを配置する', () => {
   const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-plugin-source-'));
@@ -429,6 +432,39 @@ test('installSkills: 複数宛先（dests配列）を持つエージェントで
   }
 });
 
+test('installSkills / installSharedSkills: coderとReview Managerへ同じテスト品質基準を配布する', () => {
+  withTempDir('ghm-test-quality-distribution-', (tmpBase) => {
+    const agentSkills = path.join(tmpBase, 'agent-skills');
+    const sharedSkills = path.join(tmpBase, 'shared-skills');
+    const sharedScripts = path.join(tmpBase, 'shared-scripts');
+    const testAgents = { testAgent: { dest: agentSkills, substitutions: {} } };
+    installSkills(testAgents, {
+      skillsDir: path.join(ROOT, 'skills'), sharedScripts, sharedSkills,
+      rulesSupportedMap: new Map([['testAgent', true]]), step: () => {}, ok: () => {},
+    });
+    installSharedSkills(testAgents, {
+      skillsDir: path.join(ROOT, 'skills'), sharedScripts, sharedSkills,
+      step: () => {}, ok: () => {},
+    });
+
+    for (const skill of ['gh-maestro-coder', 'gh-maestro-senior-coder']) {
+      const skillText = fs.readFileSync(path.join(agentSkills, skill, 'SKILL.md'), 'utf8');
+      assert.ok(skillText.includes(TEST_QUALITY_CRITERIA_CONTENT), `${skill}へ基準本文が配布されていない`);
+      assert.ok(!skillText.includes('{{TEST_QUALITY_CRITERIA_CONTENT}}'), `${skill}に未展開placeholderが残っている`);
+    }
+
+    const reviewerSource = path.join('gh-maestro-reviewer', 'test-quality', 'test-quality', 'pre-review.md');
+    for (const root of [agentSkills, sharedSkills]) {
+      const preReview = fs.readFileSync(path.join(root, reviewerSource), 'utf8');
+      assert.ok(preReview.includes(TEST_QUALITY_CRITERIA_CONTENT), `${root}のReview Manager手順に同じ基準本文がない`);
+      assert.ok(!preReview.includes('{{TEST_QUALITY_CRITERIA_CONTENT}}'), `${root}に未展開placeholderが残っている`);
+    }
+
+    const postReview = fs.readFileSync(path.join(sharedSkills, 'gh-maestro-reviewer', 'test-quality', 'test-quality', 'post-review.md'), 'utf8');
+    assert.match(postReview, /pre-review 手順に埋め込まれた基準/);
+  });
+});
+
 test('installSkills / installScripts / installSharedSkills: options省略時でもTDZエラーを起こさずSHARED_SCRIPTS等のデフォルト値を使う', () => {
   const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-default-opts-test-'));
   const destDir = path.join(tmpBase, 'test-agent-skills');
@@ -598,6 +634,7 @@ test('coder/senior-coderの実テンプレートがinstallerのpartial配線で�
     COMMUNICATION_RULES: partial('communication-rules.md'),
     RULES_CHECK_STEP: partial('rules-check-step.md'),
     SCRIPTS_PATH: '/abs/path/scripts',
+    TEST_QUALITY_CRITERIA_CONTENT,
   };
   for (const skill of ['gh-maestro-coder', 'gh-maestro-senior-coder']) {
     const template = fs.readFileSync(path.join(ROOT, 'skills', skill, 'SKILL.md'), 'utf8');
@@ -606,6 +643,7 @@ test('coder/senior-coderの実テンプレートがinstallerのpartial配線で�
 
     const result = applySubstitutions(template, substitutions);
     assert.ok(result.includes('## ゴール'), `${skill}に共通workflowのゴールが展開されていない`);
+    assert.ok(result.includes(TEST_QUALITY_CRITERIA_CONTENT), `${skill}に基準本文が展開されていない`);
     assert.ok(result.includes('## 制約'), `${skill}に共通workflowの制約が展開されていない`);
     assert.ok(result.includes('## コメントと命名の方針'), `${skill}に共通方針が展開されていない`);
     assert.ok(result.includes('/abs/path/scripts/publish-plan.js'), `${skill}のネストしたSCRIPTS_PATHが未展開`);

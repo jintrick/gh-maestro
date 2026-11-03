@@ -85,20 +85,23 @@ test('coder-workflow.md: 素の git commit/push/gh pr create は push-and-declar
   assert.ok(prohibitionLine, '素の git commit / git push / gh pr create の直接実行を禁止する文がある');
 });
 
-// テストの質の基準（.claude/rules/test-quality-criteria.md）を、書き手（coder）と
-// レビュー（test-quality 葉）の両方が参照することを固定する（Issue #671）。
-// 文言そのものは検査しない。参照先のパスが残っているかだけを確かめる。
-const TEST_QUALITY_CRITERIA_REF = '.claude/rules/test-quality-criteria.md';
+// Issue #733: 配布手順へ基準本文を埋め込む場所を固定する。
 const TEST_QUALITY_CRITERIA_CONSUMERS = [
   path.join(ROOT, 'skills', '_partials', 'coder-workflow.md'),
   path.join(ROOT, 'skills', 'gh-maestro-reviewer', 'test-quality', 'test-quality', 'pre-review.md'),
   path.join(ROOT, 'skills', 'gh-maestro-reviewer', 'test-quality', 'test-quality', 'post-review.md'),
 ];
 
-test('テストの質の基準を書き手とレビューの手順書が参照している（Issue #671）', () => {
-  assert.ok(fs.existsSync(path.join(ROOT, TEST_QUALITY_CRITERIA_REF)), '基準ファイルが存在する');
-  for (const file of TEST_QUALITY_CRITERIA_CONSUMERS) {
-    const content = fs.readFileSync(file, 'utf8');
-    assert.ok(content.includes(TEST_QUALITY_CRITERIA_REF), `${path.relative(ROOT, file)} が基準ファイルを参照していない`);
+test('coder と Test Quality 葉の手順は配布時に基準本文を埋め込む（Issue #733）', () => {
+  const [coderWorkflow, preReview, postReview] = TEST_QUALITY_CRITERIA_CONSUMERS
+    .map(file => fs.readFileSync(file, 'utf8'));
+  const placeholder = '{{TEST_QUALITY_CRITERIA_CONTENT}}';
+
+  assert.ok(coderWorkflow.includes(placeholder), 'coder共通手順が配布用の基準本文を要求していない');
+  assert.ok(preReview.includes(placeholder), 'Review Managerの事前手順が配布用の基準本文を要求していない');
+  assert.match(postReview, /pre-review.*埋め込まれた基準/);
+  for (const [index, content] of [coderWorkflow, preReview, postReview].entries()) {
+    assert.doesNotMatch(content, /\.claude\/rules\/test-quality-criteria\.md/,
+      `${path.relative(ROOT, TEST_QUALITY_CRITERIA_CONSUMERS[index])} が対象プロジェクト内のファイルに依存している`);
   }
 });

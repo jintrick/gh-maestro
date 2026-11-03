@@ -44,6 +44,12 @@ function readPartial(name) {
   return fs.readFileSync(path.join(PARTIALS_DIR, name), 'utf8').trimEnd();
 }
 
+function readTestQualityCriteria() {
+  const criteriaPath = path.join(ROOT, '.claude', 'rules', 'test-quality-criteria.md');
+  const source = fs.readFileSync(criteriaPath, 'utf8').replace(/\r\n/g, '\n');
+  return stripFrontmatter(source).trim();
+}
+
 function stripFrontmatter(content) {
   if (!content.startsWith('---\n')) return content;
   const end = content.indexOf('\n---\n', 4);
@@ -644,6 +650,7 @@ function installSkills(agents, options = {}) {
   const COMMUNICATION_RULES_CONTENT = readPartial('communication-rules.md');
   const CODER_WORKFLOW_CONTENT = readPartial('coder-workflow.md');
   const COMMENTS_AND_NAMING_CONTENT = readPartial('comments-and-naming.md');
+  const TEST_QUALITY_CRITERIA_CONTENT = readTestQualityCriteria();
 
   for (const [agentName, config] of Object.entries(agents)) {
     const destList = (config.dests && config.dests.length > 0)
@@ -677,6 +684,7 @@ function installSkills(agents, options = {}) {
         COMMUNICATION_RULES: COMMUNICATION_RULES_CONTENT,
         CODER_WORKFLOW: CODER_WORKFLOW_CONTENT,
         COMMENTS_AND_NAMING: COMMENTS_AND_NAMING_CONTENT,
+        TEST_QUALITY_CRITERIA_CONTENT,
       });
 
       for (const skill of skillDirs) {
@@ -908,6 +916,7 @@ function installSharedSkills(agents, options = {}) {
   const COMMUNICATION_RULES_CONTENT = readPartial('communication-rules.md');
   const CODER_WORKFLOW_CONTENT = readPartial('coder-workflow.md');
   const COMMENTS_AND_NAMING_CONTENT = readPartial('comments-and-naming.md');
+  const TEST_QUALITY_CRITERIA_CONTENT = readTestQualityCriteria();
 
   const canonicalAgent = agents && (agents['claude'] || agents[Object.keys(agents)[0]]);
   const sharedSubstitutions = Object.assign({}, canonicalAgent?.substitutions ?? {}, {
@@ -917,6 +926,7 @@ function installSharedSkills(agents, options = {}) {
     COMMUNICATION_RULES: COMMUNICATION_RULES_CONTENT,
     CODER_WORKFLOW: CODER_WORKFLOW_CONTENT,
     COMMENTS_AND_NAMING: COMMENTS_AND_NAMING_CONTENT,
+    TEST_QUALITY_CRITERIA_CONTENT,
   });
 
   // stale 削除（ディレクトリと未知ファイルの両方）
