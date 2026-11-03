@@ -23,6 +23,8 @@ const EXCLUDED_FILES = [
   'docs/architect-plan.md',
   'docs/harmonic-finding-token.md',
   'docs/review-manager-plan.md',
+  // Issue #733 relocates the criteria asset; this ADR preserves the path used when it was written.
+  'docs/adr/0051-test-quality-by-declaration-and-verification.md',
 ];
 
 function listMarkdownFiles(dir, out) {
