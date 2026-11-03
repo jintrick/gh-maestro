@@ -5,32 +5,42 @@ description: gh-maestroセッションをこのワークスペースで起動す
 
 ## 起動
 
-1. **PID registryとworker leaseのsweep**: セッション起動時、runtime側PID registryのstale entryと、台帳・worktreeの両方にない通常worker leaseを回収する。resident role leaseは対象外。leaseの回収や旧形式記録の集約があれば1行で表示し、詳細は `<workspace>/.gh-maestro/sweep-lease-report.log` に保存する。旧 `.gh-maestro/pids` は遺物検査と明示的な整理で扱う:
+起動時に人間へ伝えるのは、人間がこれから作業を始めるのに役立つことと、gh-maestro の動作に悪影響があることだけである。以下の検査は、その判断の材料を集めるために行う。どちらにも当たらない結果は伝えない。
 
-```sh
-node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE
-```
+1. **PID registryとworker leaseのsweep**: runtime側PID registryのstale entryと、台帳・worktreeの両方にない通常worker leaseを回収する。resident role leaseは対象外。回収や旧形式記録の集約の詳細は `<workspace>/.gh-maestro/sweep-lease-report.log` に保存される。旧 `.gh-maestro/pids` は遺物検査と明示的な整理で扱う。
 
-sweep が終了コード 1 を返した場合は、稼働中ワーカーの除外リストを組み立てられず前回の残骸が回収できていない状態です。原因（ログ）を解消してから次の手順へ進んでください。
+   ```sh
+   node "{{SCRIPTS_PATH}}/process-lifecycle.js" sweep --workspace $WORKSPACE
+   ```
 
-2. **セッション開始hookが行う既知レガシー遺物の非破壊検査**: hookが出力した状態を確認する。各項目は `present` / `absent` / `unknown` / `not_applicable`、台帳の網羅性は `complete` / `incomplete` で示される。
+   終了コード 1 は、稼働中ワーカーの除外リストを組み立てられず、前回の残骸を回収できていない状態である。ログから原因を解消してから次へ進み、解消できなければ人間へ伝える。
 
-`present`、`unknown`、または `incomplete` がある場合は、その事実を人間に提示し、整理を自動連鎖させない。`check-legacy.js` はhookが既に実行するため、ここで再実行しない。検査自体を実行できない場合はhookがセッション開始を失敗させる。
+2. **既知の旧形式遺物**: セッション開始hookが非破壊検査を行い、各項目の状態（`present` / `absent` / `unknown` / `not_applicable`）と台帳の網羅性（`complete` / `incomplete`）を出力する。`check-legacy.js` はここで再実行せず、整理も自動で連鎖させない。
 
-3. **直近のIssue/PR概況の把握**: 新しくプロジェクトに加わったメンバーと同じ姿勢で、直近何が起きていたかを見出しレベルで把握してからでないと作業を始めない。本文は読まず、タイトル一覧だけを見る（本文を読み込むとコンテクストを消費するため。個別の深掘りが必要になった時点で、その対象だけを読むか、explorerに委譲する）:
+   次の項目は、残っていると gh-maestro の動作に影響する。`present` または `unknown` なら、その項目と影響を人間へ伝える。
 
-```sh
-gh issue list --repo $REPO --state open --limit 20
-gh pr list --repo $REPO --state merged --limit 15
-```
+   | 項目 | 影響 |
+   |---|---|
+   | `setup-ai-review-ci` | 旧AIレビューCIが GitHub 上で発火する |
+   | `setup-pre-commit-checks-hook` | commit 時に廃止済みの検査が走る |
+   | `setup-pre-push-checks-hook` | push 時に廃止済みの検査が走る |
+   | `setup-legacy-gitignore` | `.gh-maestro/config.json` が追跡されず、worktree でプロジェクト設定が効かない |
+   | `msg-poll-v1-state` | メッセージ受信が止まり、ワーカー起動も拒否される |
+   | `worker-supervisor-legacy-name` | worker-supervisor が自動起動されず、ワーカーへの指示が届かない |
+   | `spawn-worker-roleless-worker` | 同じ Issue・description のワーカー起動が重複として拒否される |
+   | `status-pane-legacy-record` | 監視ペインの確認・起動が失敗する |
 
-4. **テスト層宣言の確認**: セッションコンテキストの `TEST_LAYERS_STATUS` を確認する。
+   これ以外の項目は、残っていても今のコードが読まないか、install やセッションリセットが互換処理で片付けるので伝えない。
 
-   - `declared` の場合は、既存の宣言されたテスト層を使う。
-   - `missing` または `invalid` の場合は、`gh-maestro-test-setup` スキルを読み、その手順に従う。提案を人間へ提示して承認を得るまで、対象プロジェクトのテストや設定を変更してはならない。承認後の設定・テスト配置・実行結果の確認まで終わってから次へ進む。
+3. **直近のIssue/PR**: 新しくプロジェクトに加わったメンバーと同じ姿勢で、直近何が起きていたかを見出しレベルで把握してから作業を始める。本文は読まずタイトル一覧だけを見て（本文はコンテクストを消費する。深掘りが要るときはその対象だけを読むか explorer に委譲する）、その概況を人間へ伝える。
 
-   セッション初期化が `invalid` を報告していても、それだけを理由に初期化やコンテキストの出力をやり直してはならない。出力された状態を使って人間へ状況を提示する。
+   ```sh
+   gh issue list --repo $REPO --state open --limit 20
+   gh pr list --repo $REPO --state merged --limit 15
+   ```
 
-5. **壊れた config.json の確認**: セッションコンテキストに `CONFIG_JSON_BROKEN=<path> (<理由>)` の行があれば、そのファイルは壊れており、gh-maestro は既定値で動いている。その行のパスと理由を人間へ伝える。gh-maestro はこのファイルを書き換えないため、直すのは人間である。行が無ければ何も伝えない。
+4. **テスト層宣言**: セッションコンテキストの `TEST_LAYERS_STATUS` が `missing` または `invalid` なら、`gh-maestro-test-setup` スキルを読んで従う。提案を人間へ提示して承認を得るまで、対象プロジェクトのテストや設定を変更しない。承認後の設定・テスト配置・実行結果の確認まで終えてから次へ進む。`invalid` を理由に初期化やコンテキスト出力をやり直さず、出力された状態を使う。
+
+5. **壊れた config.json**: セッションコンテキストに `CONFIG_JSON_BROKEN=<path> (<理由>)` の行があれば、gh-maestro はそのファイルを使えず既定値で動いている。パスと理由を人間へ伝える。gh-maestro はこのファイルを書き換えないため、直すのは人間である。
 
 6. `gh-maestro-orchestrator` スキルのゴール定義に従ってorchestratorとして動作を開始する。
