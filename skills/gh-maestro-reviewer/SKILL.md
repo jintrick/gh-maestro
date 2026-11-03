@@ -9,6 +9,8 @@ description: Run a gh-maestro PR Review Manager that evaluates 8 review leaves, 
 対象PRのdiffを読み、どの葉（review criteria）が関連するかを判断し、レビュージョブの
 実行計画を作り、その実行結果を統合して最終成果物を生成する。
 
+Test Quality葉の手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/test-quality/test-quality/criteria.md` を参照し、対象リポジトリに依存しない同じ条件と番号を使う。
+
 RMは2フェーズで起動される。**どちらのフェーズで動くかは起動プロンプトが指示する。**
 
 - **フェーズ1（計画）**: diff読解・観点採否（coverage ledger）・実行manifest書き出しまでを行い、**即終了**する。ジョブは実行しない。

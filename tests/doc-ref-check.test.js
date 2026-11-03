@@ -25,6 +25,20 @@ const EXCLUDED_FILES = [
   'docs/review-manager-plan.md',
 ];
 
+// Issue #733 relocates the criteria asset, while ADR 0051 keeps its historical wording.
+// Exempt only that single reference; all other references in the ADR remain checked.
+const HISTORICAL_REFERENCE_EXCEPTION = {
+  source: 'docs/adr/0051-test-quality-by-declaration-and-verification.md',
+  line: 11,
+  target: '.claude/rules/test-quality-criteria.md',
+};
+
+function isHistoricalReferenceException(ref, source) {
+  return source === HISTORICAL_REFERENCE_EXCEPTION.source &&
+    ref.line === HISTORICAL_REFERENCE_EXCEPTION.line &&
+    ref.target === HISTORICAL_REFERENCE_EXCEPTION.target;
+}
+
 function listMarkdownFiles(dir, out) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const abs = path.join(dir, entry.name);
@@ -54,12 +68,12 @@ function listRootMarkdownFiles() {
 function checkFiles(files, acceptRef = () => true) {
   const failures = [];
   for (const file of files) {
+    const source = path.relative(REPO_ROOT, file).split(path.sep).join('/');
     const content = fs.readFileSync(file, 'utf8');
     const refs = extractMdRefs(content);
     for (const ref of refs) {
-      if (!acceptRef(ref)) continue;
+      if (!acceptRef(ref, source)) continue;
       if (!resolveRefExists(REPO_ROOT, file, ref.target, { isAbsolute: ref.isAbsolute })) {
-        const source = path.relative(REPO_ROOT, file).split(path.sep).join('/');
         failures.push(
           `${source} の ${ref.line} 行目が ${ref.target} を参照していますが、そのファイルは存在しません`,
         );
@@ -228,7 +242,11 @@ test('docs/**/*.md と skills/**/*.md 内の.md言及が実在するファイル
     ...listMarkdownFiles(path.join(REPO_ROOT, 'skills'), []),
   ];
   assert.ok(files.length > 0, 'ドキュメント/スキルファイルが1件も見つからなかった');
-  const failures = checkFiles(files);
+  const adrFile = files.find(
+    file => path.relative(REPO_ROOT, file).split(path.sep).join('/') === HISTORICAL_REFERENCE_EXCEPTION.source,
+  );
+  assert.ok(adrFile, 'ADR 0051 が文書内リンク検査から除外されている');
+  const failures = checkFiles(files, (ref, source) => !isHistoricalReferenceException(ref, source));
   assert.deepEqual(failures, [], `参照先が存在しない箇所があります。\n${failures.join('\n')}`);
 });
 

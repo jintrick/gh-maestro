@@ -85,20 +85,39 @@ test('coder-workflow.md: 素の git commit/push/gh pr create は push-and-declar
   assert.ok(prohibitionLine, '素の git commit / git push / gh pr create の直接実行を禁止する文がある');
 });
 
-// テストの質の基準（.claude/rules/test-quality-criteria.md）を、書き手（coder）と
-// レビュー（test-quality 葉）の両方が参照することを固定する（Issue #671）。
-// 文言そのものは検査しない。参照先のパスが残っているかだけを確かめる。
-const TEST_QUALITY_CRITERIA_REF = '.claude/rules/test-quality-criteria.md';
+// Issue #733: coderとReview Managerが同じ配布資産を読む契約を固定する。
+const TEST_QUALITY_CRITERIA_REF = '{{SHARED_SKILLS_PATH}}/gh-maestro-reviewer/test-quality/test-quality/criteria.md';
+const TEST_QUALITY_CRITERIA_SOURCE = path.join(
+  ROOT, 'skills', 'gh-maestro-reviewer', 'test-quality', 'test-quality', 'criteria.md'
+);
 const TEST_QUALITY_CRITERIA_CONSUMERS = [
   path.join(ROOT, 'skills', '_partials', 'coder-workflow.md'),
+  path.join(ROOT, 'skills', 'gh-maestro-reviewer', 'SKILL.md'),
   path.join(ROOT, 'skills', 'gh-maestro-reviewer', 'test-quality', 'test-quality', 'pre-review.md'),
   path.join(ROOT, 'skills', 'gh-maestro-reviewer', 'test-quality', 'test-quality', 'post-review.md'),
 ];
 
-test('テストの質の基準を書き手とレビューの手順書が参照している（Issue #671）', () => {
-  assert.ok(fs.existsSync(path.join(ROOT, TEST_QUALITY_CRITERIA_REF)), '基準ファイルが存在する');
+test('coder と Review Manager の手順は配布された同じ基準ファイルを参照する（Issue #733）', () => {
+  assert.ok(fs.existsSync(TEST_QUALITY_CRITERIA_SOURCE), 'スキル配下の基準正本が存在する');
   for (const file of TEST_QUALITY_CRITERIA_CONSUMERS) {
     const content = fs.readFileSync(file, 'utf8');
-    assert.ok(content.includes(TEST_QUALITY_CRITERIA_REF), `${path.relative(ROOT, file)} が基準ファイルを参照していない`);
+    assert.ok(content.includes(TEST_QUALITY_CRITERIA_REF), `${path.relative(ROOT, file)} が配布正本を参照していない`);
+  }
+
+  const criteria = fs.readFileSync(TEST_QUALITY_CRITERIA_SOURCE, 'utf8');
+  const requiredHeadings = [
+    '# gh-maestro テスト品質判定基準',
+    '## 2. 不要テストの判定条件',
+    '### A. 欠陥検出能力の欠如',
+    '14. **実装に合わせて期待値を改変している**',
+    '## 3. gh-maestro 新規テスト採用基準',
+    '### 基準1：検証目的が明確',
+    '### 基準2：期待値が独立している',
+    '### 基準3：欠陥を検出できる',
+    '### 基準4：追加する価値がある',
+    '## 5. 最終判断原則',
+  ];
+  for (const heading of requiredHeadings) {
+    assert.ok(criteria.includes(heading), `基準正本に既存の見出し・番号が無い: ${heading}`);
   }
 });
