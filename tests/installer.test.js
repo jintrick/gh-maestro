@@ -726,9 +726,35 @@ test('インストーラー成果物検証: 全エージェント宛先・共有
       scriptsDir: path.join(ROOT, 'scripts'),
       sharedScripts: tmpSharedScripts,
       agentsYaml: agentsYamlPath,
+      installSource: {
+        repo: 'jintrick/gh-maestro',
+        branch: 'dev',
+        commit: 'c'.repeat(40),
+      },
       step: () => {},
       ok: () => {},
     });
+
+    const sourceModulePath = path.join(tmpSharedScripts, 'get-context.js');
+    assert.deepEqual(require(sourceModulePath).INSTALL_SOURCE, {
+      repo: 'jintrick/gh-maestro',
+      branch: 'dev',
+      commit: 'c'.repeat(40),
+    }, '共有get-context.jsへinstall元のrepo・branch・HEADが埋め込まれること');
+
+    const pluginRoot = path.join(tmpBase, 'plugin-root');
+    installPluginAssets({
+      pluginDir: path.join(ROOT, 'plugin'),
+      pluginRoot: path.join(pluginRoot, '.claude-plugin'),
+      monitorsDir: path.join(pluginRoot, 'monitors'),
+      pluginInstallRoot: pluginRoot,
+      scriptsDir: tmpSharedScripts,
+    });
+    assert.deepEqual(require(path.join(pluginRoot, 'scripts', 'get-context.js')).INSTALL_SOURCE, {
+      repo: 'jintrick/gh-maestro',
+      branch: 'dev',
+      commit: 'c'.repeat(40),
+    }, 'Claude pluginのscriptsコピーにも同じinstall元情報が届くこと');
 
     // 3. 共有スキルのデプロイ
     installSharedSkills(testAgents, {

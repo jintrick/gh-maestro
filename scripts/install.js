@@ -18,6 +18,8 @@ const storageLayout = require(path.join(__dirname, 'shared', 'storage-layout'));
 const { parseAgentsYaml, expandHome } = require(path.join(__dirname, 'shared', 'agents-yaml'));
 const { getCurrentBranch } = require(path.join(__dirname, 'shared', 'git-branch'));
 const { resolveWorkspace } = require(path.join(__dirname, 'shared', 'workspace'));
+const { resolveGitHead } = require(path.join(__dirname, 'shared', 'git-head'));
+const { getRemoteRepo } = require('./gh-maestro-setup');
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -109,6 +111,32 @@ function pruneStaleRecursive(srcDir, destDir, label) {
       } catch (_) { /* stat失敗時はスキップ */ }
     }
   }
+}
+
+function resolveInstallSource(root = ROOT) {
+  const failures = [];
+  let repo = null;
+  let branch = null;
+  let commit = null;
+  try {
+    repo = getRemoteRepo(root);
+    if (!repo) failures.push('remote.origin.urlからGitHub repoを解決できません');
+  } catch (error) {
+    failures.push(`GitHub repoを確認できません: ${error.message}`);
+  }
+  try {
+    branch = getCurrentBranch(root);
+    if (!branch) failures.push('現在のブランチがありません');
+  } catch (error) {
+    failures.push(`現在のブランチを確認できません: ${error.message}`);
+  }
+  try {
+    commit = resolveGitHead(root);
+  } catch (error) {
+    failures.push(`HEAD commitを確認できません: ${error.message}`);
+  }
+  if (failures.length) return { reason: failures.join('; ') };
+  return { repo, branch, commit };
 }
 
 function step(msg) { console.log(`\x1b[36m[gh-maestro-install] ${msg}\x1b[0m`); }
@@ -682,6 +710,7 @@ function installSkills(agents, options = {}) {
  * @param {string} [options.scriptsDir] スキル原本ディレクトリ（既定: scripts/）
  * @param {string} [options.sharedScripts] 集約先スクリプトディレクトリ（既定: SHARED_SCRIPTS）
  * @param {string} [options.agentsYaml] agents.yaml パス（既定: skills/agents.yaml）
+ * @param {string} [options.installRoot] install元のgitルート（既定: このリポジトリのROOT）
  * @param {function} [options.step] ログ用 step 関数
  * @param {function} [options.ok] ログ用 ok 関数
  */
@@ -691,6 +720,7 @@ function installScripts(options = {}) {
   const agentsYamlPath = options.agentsYaml || AGENTS_YAML;
   const logStep = options.step || step;
   const logOk = options.ok || ok;
+  const installSource = options.installSource || resolveInstallSource(options.installRoot || ROOT);
 
   logStep('Installing all scripts into the shared directory...');
   fs.mkdirSync(destDir, { recursive: true });
@@ -720,7 +750,21 @@ function installScripts(options = {}) {
     }
   }
   for (const f of scriptFiles) {
-    fs.copyFileSync(path.join(srcDir, f), path.join(destDir, f));
+    const sourcePath = path.join(srcDir, f);
+    const destinationPath = path.join(destDir, f);
+    if (f === 'get-context.js') {
+      const source = fs.readFileSync(sourcePath, 'utf8');
+      const marker = "const INSTALL_SOURCE_B64 = '__GH_MAESTRO_INSTALL_SOURCE_UNSET__';";
+      if (!source.includes(marker)) {
+        throw new Error('get-context.js にインストール元情報の置換位置がありません');
+      }
+      const installSourceB64 = Buffer.from(JSON.stringify(installSource), 'utf8').toString('base64');
+      const template = source.replace(marker, "const INSTALL_SOURCE_B64 = '{{INSTALL_SOURCE_B64}}';");
+      const content = applySubstitutions(template, { INSTALL_SOURCE_B64: installSourceB64 });
+      fs.writeFileSync(destinationPath, content, 'utf8');
+    } else {
+      fs.copyFileSync(sourcePath, destinationPath);
+    }
   }
   for (const d of scriptSubdirs) {
     const destSubdir = path.join(destDir, d);
