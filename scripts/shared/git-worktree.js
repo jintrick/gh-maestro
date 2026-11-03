@@ -10,6 +10,7 @@
 // 使用箇所: spawn-worker.js, remove-worker.js, reset-session.js
 
 const { spawnSync } = require('./child-process');
+const { unlinkJunctionsAndVerify } = require('./unlink-junctions');
 
 /**
  * コマンドを実行し、非ゼロ終了コードなら throw する。
@@ -89,8 +90,14 @@ function worktreeAddDetached(worktreeDir, sha, cwd) {
  * @param {boolean} [opts.doubleForce=false] - true で --force --force を付与
  * @param {string} [opts.stdio='pipe'] - stdio モード
  * @returns {import('child_process').SpawnSyncReturns<Buffer>} spawnSync の戻り値
+ *
+ * 契約: `git worktree remove --force` は junction を張ったままだと、リンク先（作業場所の外の
+ * node_modules など）の中身まで消す（Issue #737 で再現済み）。そのため git を呼ぶ前に
+ * unlinkJunctionsAndVerify で全リンクを外し、外せたと確認できたときだけ git に消させる。
+ * 外せなかった・判定できなかった場合は throw し、何も削除しない。
  */
 function worktreeRemove(worktreeDir, cwd, opts = {}) {
+  unlinkJunctionsAndVerify(worktreeDir);
   const forceArgs = opts.doubleForce ? ['--force', '--force'] : ['--force'];
   const args = ['-c', 'core.longpaths=true', 'worktree', 'remove', ...forceArgs, worktreeDir];
   return runOrThrow('git', args, { cwd, stdio: opts.stdio || 'pipe' });

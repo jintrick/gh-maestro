@@ -97,3 +97,59 @@ test('reset-session.js: robocopyRemove が /XJ フラグを含む（junction を
     'reset-session.js の robocopy コマンドに /XJ がない — robocopy が junction を追跡して workspace/node_modules を空にする'
   );
 });
+
+// ── unlinkJunctionsAndVerify（Issue #737） ─────────────────────────────────
+// 削除の前に「リンクが1つも残っていない」ことを確かめる関数。確かめられなければ throw する。
+const { unlinkJunctionsAndVerify } = require('../scripts/shared/unlink-junctions');
+
+test('unlinkJunctionsAndVerify: junction を外せたら throw せず、リンク先の番兵も残る', () => {
+  withDirs((base) => {
+    const workspace = path.join(base, 'workspace');
+    const worktree  = path.join(base, 'worktree');
+    fs.mkdirSync(path.join(workspace, 'node_modules'), { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'node_modules', 'sentinel.txt'), 'must survive');
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.symlinkSync(path.join(workspace, 'node_modules'), path.join(worktree, 'node_modules'), 'junction');
+
+    assert.doesNotThrow(() => unlinkJunctionsAndVerify(worktree));
+    assert.equal(fs.existsSync(path.join(worktree, 'node_modules')), false, 'junction が外れていない');
+    assert.equal(fs.readFileSync(path.join(workspace, 'node_modules', 'sentinel.txt'), 'utf8'), 'must survive');
+  });
+});
+
+test('unlinkJunctionsAndVerify: dir が存在しなければ何もせず throw しない', () => {
+  withDirs((base) => {
+    assert.doesNotThrow(() => unlinkJunctionsAndVerify(path.join(base, 'absent')));
+  });
+});
+
+test('unlinkJunctionsAndVerify: リンクが残ったら WORKTREE_LINKS_REMAIN で throw し、残ったパスを示す', () => {
+  withDirs((base) => {
+    const workspace = path.join(base, 'workspace');
+    const worktree  = path.join(base, 'worktree');
+    fs.mkdirSync(path.join(workspace, 'node_modules'), { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    const link = path.join(worktree, 'node_modules');
+    fs.symlinkSync(path.join(workspace, 'node_modules'), link, 'junction');
+
+    // 外す処理が何もしなかった場合を注入で再現する（実際にリンクが残る状態）
+    assert.throws(
+      () => unlinkJunctionsAndVerify(worktree, { unlinkFn: () => {} }),
+      (err) => err.code === 'WORKTREE_LINKS_REMAIN' && Array.isArray(err.paths) && err.paths.includes(link)
+    );
+    // 判定に失敗しても、リンク先の中身は消えない
+    assert.ok(fs.existsSync(path.join(workspace, 'node_modules')));
+  });
+});
+
+test('unlinkJunctionsAndVerify: 木を読めない（readdir 失敗）場合は WORKTREE_LINKS_UNVERIFIABLE で throw する', () => {
+  withDirs((base) => {
+    // ディレクトリではなくファイルを dir として渡すと、existsSync は真だが readdir が失敗する
+    const notADir = path.join(base, 'not-a-dir');
+    fs.writeFileSync(notADir, 'x');
+    assert.throws(
+      () => unlinkJunctionsAndVerify(notADir),
+      (err) => err.code === 'WORKTREE_LINKS_UNVERIFIABLE'
+    );
+  });
+});

@@ -129,3 +129,25 @@ test('worktreeAddDetached: git が失敗したら throw', () => {
     { message: /exited with 128/ },
   );
 });
+
+// ── worktreeRemove: リンクを外せると確認できなければ git を呼ばない（Issue #737） ──
+
+test('worktreeRemove: リンクの除去を判定できない作業場所では git worktree remove を呼ばず throw する', () => {
+  const { withTempDir } = require('../scripts/shared/temp-directory');
+  withTempDir('ghm-wt-remove-guard-', (base) => {
+    // dir をファイルにすると readdir が失敗し、リンクの有無を確認できない状態になる
+    const notADir = require('path').join(base, 'wt');
+    require('fs').writeFileSync(notADir, 'x');
+    const { mod, calls } = loadModule(() => ({ status: 0, stdout: '' }));
+    assert.throws(() => mod.worktreeRemove(notADir, '/repo'), { code: 'WORKTREE_LINKS_UNVERIFIABLE' });
+    assert.equal(calls.length, 0, 'git が呼ばれてはならない（リンク先を消す危険）');
+  });
+});
+
+test('worktreeRemove: 作業場所が存在しなければ従来どおり --force 付きで git worktree remove を呼ぶ', () => {
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: '' }));
+  mod.worktreeRemove('/definitely/not/here/wt', '/repo');
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].args.includes('remove'));
+  assert.ok(calls[0].args.includes('--force'), '--force 付きで remove すること');
+});

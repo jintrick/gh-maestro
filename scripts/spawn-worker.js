@@ -24,7 +24,7 @@
 
 const { spawnSync } = require('./shared/child-process');
 const { existsSync, mkdirSync, readFileSync, writeFileSync,
-        lstatSync, rmdirSync, rmSync, readdirSync } = require('fs');
+        rmSync } = require('fs');
 const { resolve, relative } = require('path');
 const fs = require('fs');
 // link-node-modules は常に同一ディレクトリに同居する（リポジトリの scripts/ もインストール先 ~/.gh-maestro/scripts/ も）。
@@ -41,6 +41,7 @@ const { createNormalWorkerStore, acquireLease: acquireWorkerLease, isLeaseLive,
         acquireLeaseLock, releaseLeaseLock } = require('./shared/worker-lease');
 const { killProcessTree } = require('./shared/kill-tree');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-worktree');
+const { unlinkJunctionsAndVerify } = require('./shared/unlink-junctions');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { ensureWorkerSupervisorRunning } = require('./shared/ensure-worker-supervisor');
@@ -827,7 +828,10 @@ try {
   worktreeAdd(worktreeDir, workerName, baseBranch || null, workspace);
 } catch (e) {
   console.warn(`spawn-worker: worktree作成失敗: ${e.message.split('\n')[0]} — 残骸を除去してリトライします`);
-  // 残骸除去（各ステップの失敗を個別にログ）
+  // 残骸除去。リンクを外せたと確認できるまで、一切削除しない（Issue #737: 残ったjunctionは
+  // git worktree remove / rmSync がリンク先（本体の node_modules）まで消す）。
+  try { unlinkJunctionsAndVerify(worktreeDir); }
+  catch (e2) { fail(`前回の作業場所からリンクを外せないため、削除せずに起動を中止しました: ${e2.message.split('\n')[0]}`); }
   try { worktreeRemove(worktreeDir, workspace); }
   catch (e2) { console.warn(`  git worktree remove: ${e2.message.split('\n')[0]}`); }
   try { worktreePrune(workspace); }
@@ -849,24 +853,12 @@ try {
 // --- worktree のロールバック関数（以降の処理が失敗したときに使う） ---
 const rollbackWorktree = () => {
   console.warn('spawn-worker: worktreeをロールバックします...');
-  // junction除去
-  (function unlinkJunctions(dir) {
-    if (!existsSync(dir)) return;
-    let entries;
-    try { entries = readdirSync(dir); } catch (e) {
-      console.warn(`  rollback: readdirSync 失敗: ${dir} — ${e.message}`); return;
-    }
-    for (const entry of entries) {
-      const fullPath = resolve(dir, entry);
-      try {
-        const st = lstatSync(fullPath);
-        if (st.isSymbolicLink()) rmdirSync(fullPath);
-        else if (st.isDirectory()) unlinkJunctions(fullPath);
-      } catch (e) {
-        console.warn(`  rollback: junction除去失敗: ${fullPath} — ${e.message}`);
-      }
-    }
-  })(worktreeDir);
+  // junction除去。外せたと確認できなければ、作業場所もブランチも消さずに戻る（Issue #737）。
+  try { unlinkJunctionsAndVerify(worktreeDir); }
+  catch (e) {
+    console.warn(`  rollback: リンクを外せないため作業場所を削除しません: ${e.message.split('\n')[0]}`);
+    return;
+  }
 
   try { worktreeRemove(worktreeDir, workspace); }
   catch (e) {
