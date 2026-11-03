@@ -175,19 +175,19 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 ### 5. 計画評価【必須】
 <!-- gh-maestro-structure: middle-items=3 -->
 
-入口: `PLAN_REPORTED`を受けたとき。読む: `stage-5-plan-review.md`。待つもの: 評価に必要な計画と人間の承認・修正判断。次: 承認後は工程6、更新計画の報告後は工程5。
+入口: `PLAN_REPORTED`を受けたとき。読む: `stage-5-plan-review.md`。待つもの: 評価に必要な計画。人間の判断を要する論点が残る場合と、architectの計画レビューを問う場合は人間の回答。承認推奨の計画は人間に問わない。次: 承認または差し戻しで工程6、更新計画の報告後は工程5。
 
 - **5-[1/3] 計画を評価【必須】**
 - **5-[2/3] architectの計画レビューを問う【任意】**
-- **5-[3/3] 人間へ提示【必須】**
+- **5-[3/3] 承認・差し戻し・人間への問い【必須】**
 理由と経緯: docs/adr/0058-orchestrator-approves-recommended-plans.md
 
 ### 6. 実装開始指示【必須】
 <!-- gh-maestro-structure: middle-items=1 -->
 
-入口: 人間が計画を承認または差し戻したとき、または工程5で修正点が確定した要修正の計画を人間に問わず差し戻すと決まったとき。読む: `stage-6-implementation-start.md`。待つもの: 承認時はcoderのPR、差し戻し時は修正版計画。次: PR_DETECTEDで工程7、PLAN_REPORTEDで工程5。
+入口: 工程5でorchestratorが計画の承認または差し戻しを決めたとき。読む: `stage-6-implementation-start.md`。待つもの: 承認時はcoderのPR、差し戻し時は修正版計画。次: PR_DETECTEDで工程7、PLAN_REPORTEDで工程5。
 
-- **6-[1/1] 人間の判断をcoderへ伝える【必須】**
+- **6-[1/1] 承認または差し戻しをcoderへ伝える【必須】**
 
 ### 7. レビューとマージ【必須】
 <!-- gh-maestro-structure: middle-items=6 -->

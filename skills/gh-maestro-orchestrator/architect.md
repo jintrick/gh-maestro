@@ -64,4 +64,4 @@ node "{{SCRIPTS_PATH}}/spawn-worker.js" \
   --repo $REPO --workspace $WORKSPACE --base-branch $BASE_BRANCH
 ```
 
-architect の計画レビュー結果（承認推奨または要修正）の扱いは、SKILL.md「5. 計画評価」の5-[3/3]に従う（あくまで推奨であり、最終承認ではない）。
+architect の計画レビュー結果（承認推奨または要修正）の扱いは、SKILL.md「5. 計画評価」の5-[3/3]に従う（あくまで判断材料であり、承認は orchestrator が決める）。
