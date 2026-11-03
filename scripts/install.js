@@ -113,25 +113,25 @@ function pruneStaleRecursive(srcDir, destDir, label) {
   }
 }
 
-function resolveInstallSource() {
+function resolveInstallSource(root = ROOT) {
   const failures = [];
   let repo = null;
   let branch = null;
   let commit = null;
   try {
-    repo = getRemoteRepo(ROOT);
+    repo = getRemoteRepo(root);
     if (!repo) failures.push('remote.origin.urlからGitHub repoを解決できません');
   } catch (error) {
     failures.push(`GitHub repoを確認できません: ${error.message}`);
   }
   try {
-    branch = getCurrentBranch(ROOT);
+    branch = getCurrentBranch(root);
     if (!branch) failures.push('現在のブランチがありません');
   } catch (error) {
     failures.push(`現在のブランチを確認できません: ${error.message}`);
   }
   try {
-    commit = resolveGitHead(ROOT);
+    commit = resolveGitHead(root);
   } catch (error) {
     failures.push(`HEAD commitを確認できません: ${error.message}`);
   }
@@ -710,6 +710,7 @@ function installSkills(agents, options = {}) {
  * @param {string} [options.scriptsDir] スキル原本ディレクトリ（既定: scripts/）
  * @param {string} [options.sharedScripts] 集約先スクリプトディレクトリ（既定: SHARED_SCRIPTS）
  * @param {string} [options.agentsYaml] agents.yaml パス（既定: skills/agents.yaml）
+ * @param {string} [options.installRoot] install元のgitルート（既定: このリポジトリのROOT）
  * @param {function} [options.step] ログ用 step 関数
  * @param {function} [options.ok] ログ用 ok 関数
  */
@@ -719,7 +720,7 @@ function installScripts(options = {}) {
   const agentsYamlPath = options.agentsYaml || AGENTS_YAML;
   const logStep = options.step || step;
   const logOk = options.ok || ok;
-  const installSource = options.installSource || resolveInstallSource();
+  const installSource = options.installSource || resolveInstallSource(options.installRoot || ROOT);
 
   logStep('Installing all scripts into the shared directory...');
   fs.mkdirSync(destDir, { recursive: true });

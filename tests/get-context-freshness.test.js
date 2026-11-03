@@ -136,7 +136,11 @@ test('配布済みスクリプトの情報は検証し、不在・破損した�
   assert.throws(() => readInstalledSource({
     installedScriptPath: 'isolated/get-context.js',
     readFileFn: () => "const INSTALL_SOURCE_B64 = '__GH_MAESTRO_INSTALL_SOURCE_UNSET__';\n",
-  }), /情報がありません/);
+  }), /インストール済みスクリプトにインストール元情報がありません/);
+  assert.throws(() => readInstalledSource({
+    installedScriptPath: 'isolated/get-context.js',
+    readFileFn: () => "const INSTALL_SOURCE_B64 = 'bnVsbA==';\n",
+  }), /インストール済みスクリプトにインストール元情報がありません/);
 });
 
 test('ローカルHEADを確認できなくてもinstall元を独立確認し、理由を出す', () => {
