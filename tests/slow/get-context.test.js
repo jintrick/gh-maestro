@@ -6,6 +6,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
+const { createFakeGh } = require('../helpers/fake-gh');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'get-context.js');
 const REPO_ROOT = path.join(__dirname, '..', '..');
@@ -36,6 +37,38 @@ const FAST_CONTEXT_PRELOAD = (() => {
 function runContext(options = {}) {
   return spawnSync(process.execPath, ['-r', FAST_CONTEXT_PRELOAD, SCRIPT], options);
 }
+
+test('GitHub上の遅れは件数付きで出し、install情報が無くても実CLIを成功させる', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace();
+  const git = (args) => spawnSync('git', args, { cwd: workspace, encoding: 'utf8' });
+  try {
+    const branch = git(['checkout', '-b', 'dev']);
+    assert.equal(branch.status, 0, branch.stderr);
+    const commit = git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-m', 'fixture']);
+    assert.equal(commit.status, 0, commit.stderr);
+    const localHead = git(['rev-parse', 'HEAD']);
+    assert.equal(localHead.status, 0, localHead.stderr);
+    const head = localHead.stdout.trim();
+    const fakeGh = createFakeGh({
+      binDir: path.join(home, 'bin'),
+      baseEnv: env,
+      fixtures: [{
+        match: ['api', `repos/test/repo/compare/${head}...dev`],
+        stdout: JSON.stringify({ ahead_by: 4 }),
+      }],
+    });
+    const result = runContext({ cwd: workspace, env: fakeGh.env, encoding: 'utf8' });
+
+    assert.equal(result.status, 0, `exit ${result.status}: ${result.stderr}`);
+    assert.match(result.stdout, /^BASE_BRANCH_STATUS=behind BEHIND_COMMITS=4$/m);
+    assert.match(result.stdout, /^GH_MAESTRO_INSTALL_STATUS=unknown REASON=.*インストール済みスクリプト/m);
+    assert.equal(fakeGh.readCalls().length, 1, '未知のinstall情報を正常扱いせず、不要なAPI呼び出しをしない');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
 
 function isolatedHome() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-get-context-home-'));
@@ -78,28 +111,50 @@ function writeDependencyFixture(workspace, installedVersion = null) {
 }
 
 test('REPO と WORKSPACE を正しいフォーマットで出力する', () => {
-  const r = runContext({
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
+  const { home, env } = isolatedHome();
+  const fakeGh = createFakeGh({
+    binDir: path.join(home, 'bin'),
+    baseEnv: env,
+    fixtures: [{ match: { prefix: ['api'] }, stdout: JSON.stringify({ ahead_by: 0 }) }],
   });
-  assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
-  // フォーマット: クォートなし、owner/repo形式
-  assert.match(r.stdout, /^REPO=[^/\s]+\/[^\s]+/m);
-  assert.match(r.stdout, /^WORKSPACE=.+/m);
-  assert.match(r.stdout, /^GH_MAESTRO_WORKER=orchestrator$/m);
+  try {
+    const r = runContext({
+      cwd: REPO_ROOT,
+      env: fakeGh.env,
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    // フォーマット: クォートなし、owner/repo形式
+    assert.match(r.stdout, /^REPO=[^/\s]+\/[^\s]+/m);
+    assert.match(r.stdout, /^WORKSPACE=.+/m);
+    assert.match(r.stdout, /^GH_MAESTRO_WORKER=orchestrator$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('GH_MAESTRO_WORKER=orchestrator がセッション変数として出力される（Issue #384）', () => {
-  const r = runContext({
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
+  const { home, env } = isolatedHome();
+  const fakeGh = createFakeGh({
+    binDir: path.join(home, 'bin'),
+    baseEnv: env,
+    fixtures: [{ match: { prefix: ['api'] }, stdout: JSON.stringify({ ahead_by: 0 }) }],
   });
-  assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
-  const lines = r.stdout.split(/\r?\n/);
-  assert.ok(
-    lines.includes('GH_MAESTRO_WORKER=orchestrator'),
-    `出力に GH_MAESTRO_WORKER=orchestrator が含まれること: ${r.stdout}`
-  );
+  try {
+    const r = runContext({
+      cwd: REPO_ROOT,
+      env: fakeGh.env,
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    const lines = r.stdout.split(/\r?\n/);
+    assert.ok(
+      lines.includes('GH_MAESTRO_WORKER=orchestrator'),
+      `出力に GH_MAESTRO_WORKER=orchestrator が含まれること: ${r.stdout}`
+    );
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('test.layers宣言が無い場合はmissingをsession contextへ出力する', () => {
