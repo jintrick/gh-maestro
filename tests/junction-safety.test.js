@@ -153,3 +153,60 @@ test('unlinkJunctionsAndVerify: 木を読めない（readdir 失敗）場合は 
     );
   });
 });
+
+// ── PR #738 レビュー指摘: junction の判定を isSymbolicLink() だけに頼らない ──────
+test('unlinkJunctionsAndVerify: isSymbolicLink()=false に見える junction（Windows の stat 形）も残存リンクとして throw し、リンク先をたどらない', () => {
+  withDirs((base) => {
+    const workspace = path.join(base, 'workspace');
+    const worktree  = path.join(base, 'worktree');
+    fs.mkdirSync(path.join(workspace, 'node_modules'), { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'node_modules', 'sentinel.txt'), 'must survive');
+    fs.mkdirSync(worktree, { recursive: true });
+    const link = path.join(worktree, 'node_modules');
+    fs.symlinkSync(path.join(workspace, 'node_modules'), link, 'junction');
+
+    const { lstatSync } = fs;
+    // Windows の junction は isDirectory()=true / isSymbolicLink()=false と見える環境を再現する
+    const windowsShapedLstat = (p) => {
+      const st = lstatSync(p);
+      if (p !== link) return st;
+      return { isSymbolicLink: () => false, isDirectory: () => true };
+    };
+    // 外す処理は何もしない（残った junction を検出できるかだけを見る）
+    assert.throws(
+      () => unlinkJunctionsAndVerify(worktree, { unlinkFn: () => {}, lstatFn: windowsShapedLstat }),
+      (err) => err.code === 'WORKTREE_LINKS_REMAIN' && Array.isArray(err.paths) && err.paths.includes(link),
+    );
+    assert.equal(
+      fs.readFileSync(path.join(workspace, 'node_modules', 'sentinel.txt'), 'utf8'),
+      'must survive',
+    );
+  });
+});
+
+test('unlinkJunctionsAndVerify: readlink が判定不能（EACCES）なら、通常ディレクトリでも UNVERIFIABLE で throw する', () => {
+  withDirs((base) => {
+    const worktree = path.join(base, 'worktree');
+    // 空ディレクトリは既定の外し処理が消してしまうため、中身を入れて検証まで届かせる
+    fs.mkdirSync(path.join(worktree, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(worktree, 'sub', 'keep.txt'), 'x');
+    const readlinkFn = () => { const e = new Error('denied'); e.code = 'EACCES'; throw e; };
+    assert.throws(
+      () => unlinkJunctionsAndVerify(worktree, { readlinkFn }),
+      (err) => err.code === 'WORKTREE_LINKS_UNVERIFIABLE',
+    );
+  });
+});
+
+test('unlinkJunctionsAndVerify: lstat が失敗したら UNVERIFIABLE で throw する', () => {
+  withDirs((base) => {
+    const worktree = path.join(base, 'worktree');
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.writeFileSync(path.join(worktree, 'a.txt'), 'x');
+    const lstatFn = () => { const e = new Error('denied'); e.code = 'EPERM'; throw e; };
+    assert.throws(
+      () => unlinkJunctionsAndVerify(worktree, { lstatFn }),
+      (err) => err.code === 'WORKTREE_LINKS_UNVERIFIABLE',
+    );
+  });
+});

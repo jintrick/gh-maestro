@@ -1334,6 +1334,7 @@ async function runPollPr(params, deps = {}) {
 }
 
 module.exports = {
+  cleanupDetachedSlowWorktree,
   findReviewablePr,
   getPrHead,
   getPrBaseBranch,

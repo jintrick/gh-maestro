@@ -41,7 +41,7 @@ const { createNormalWorkerStore, acquireLease: acquireWorkerLease, isLeaseLive,
         acquireLeaseLock, releaseLeaseLock } = require('./shared/worker-lease');
 const { killProcessTree } = require('./shared/kill-tree');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-worktree');
-const { unlinkJunctionsAndVerify } = require('./shared/unlink-junctions');
+const { unlinkJunctionsAndVerify, isLinkGuardError } = require('./shared/unlink-junctions');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { ensureWorkerSupervisorRunning } = require('./shared/ensure-worker-supervisor');
@@ -833,7 +833,11 @@ try {
   try { unlinkJunctionsAndVerify(worktreeDir); }
   catch (e2) { fail(`前回の作業場所からリンクを外せないため、削除せずに起動を中止しました: ${e2.message.split('\n')[0]}`); }
   try { worktreeRemove(worktreeDir, workspace); }
-  catch (e2) { console.warn(`  git worktree remove: ${e2.message.split('\n')[0]}`); }
+  catch (e2) {
+    // リンク検証の失敗なら、prune・rmSync へ進まず中止する（Issue #737）。
+    if (isLinkGuardError(e2)) fail(`前回の作業場所からリンクを外せないため、削除せずに起動を中止しました: ${e2.message.split('\n')[0]}`);
+    console.warn(`  git worktree remove: ${e2.message.split('\n')[0]}`);
+  }
   try { worktreePrune(workspace); }
   catch (e2) { console.warn(`  git worktree prune: ${e2.message.split('\n')[0]}`); }
   try { rmSync(worktreeDir, { recursive: true, force: true }); }
@@ -862,6 +866,11 @@ const rollbackWorktree = () => {
 
   try { worktreeRemove(worktreeDir, workspace); }
   catch (e) {
+    // リンク検証の失敗なら、prune・rmSync へ進まない（Issue #737）。
+    if (isLinkGuardError(e)) {
+      console.warn(`  rollback: リンクを外せないため作業場所を削除しません: ${e.message.split('\n')[0]}`);
+      return;
+    }
     console.warn(`  rollback: git worktree remove 失敗: ${e.message.split('\n')[0]}`);
     try { worktreePrune(workspace); }
     catch (e2) { console.warn(`  rollback: git worktree prune 失敗: ${e2.message.split('\n')[0]}`); }

@@ -11,7 +11,7 @@
 const { spawnSync, execSync } = require('./shared/child-process');
 const { resolve } = require('path');
 const { readFileSync, existsSync, rmSync } = require('fs');
-const { unlinkJunctionsAndVerify } = require('./shared/unlink-junctions');
+const { unlinkJunctionsAndVerify, isLinkGuardError } = require('./shared/unlink-junctions');
 const { worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
@@ -181,7 +181,13 @@ function main(argv = process.argv.slice(2)) {
       try {
         worktreeRemove(worktreeDir, workspace, { doubleForce: true });
       } catch (e) {
-        console.warn(`remove-worker: git worktree remove 失敗: ${e.message.split('\n')[0]}`);
+        if (isLinkGuardError(e)) {
+          // リンク検証の失敗は、以降の削除段（rm）へ進めない（Issue #737）。
+          linksVerified = false;
+          console.warn(`remove-worker: リンクを外せないため worktree を削除しません（リンク先を保護）: ${e.message.split('\n')[0]}`);
+        } else {
+          console.warn(`remove-worker: git worktree remove 失敗: ${e.message.split('\n')[0]}`);
+        }
       }
 
       try {
@@ -197,7 +203,7 @@ function main(argv = process.argv.slice(2)) {
         console.warn(`remove-worker: git branch -D 失敗: ${e.message.split('\n')[0]}`);
       }
 
-      if (existsSync(worktreeDir)) {
+      if (linksVerified && existsSync(worktreeDir)) {
         if (IS_WIN) {
           psRemove(worktreeDir);
         } else {
