@@ -11,7 +11,7 @@
 const { spawnSync, execSync } = require('./shared/child-process');
 const { resolve } = require('path');
 const { readFileSync, existsSync, rmSync } = require('fs');
-const { unlinkJunctions } = require('./shared/unlink-junctions');
+const { unlinkJunctionsAndVerify, isLinkGuardError } = require('./shared/unlink-junctions');
 const { worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { atomicWriteJson } = require('./shared/atomic-write');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
@@ -167,41 +167,58 @@ function main(argv = process.argv.slice(2)) {
   if (existsSync(worktreeDir)) {
     console.warn(`remove-worker: worktree "${workerName}" を削除します...`);
 
-    unlinkJunctions(worktreeDir, (msg) => console.warn(`remove-worker: ${msg}`));
-
-    // git worktree remove
+    // リンクを外せたと確認できなければ、作業場所もGit登録も削除しない（Issue #737）。
+    let linksVerified = true;
     try {
-      worktreeRemove(worktreeDir, workspace, { doubleForce: true });
+      unlinkJunctionsAndVerify(worktreeDir);
     } catch (e) {
-      console.warn(`remove-worker: git worktree remove 失敗: ${e.message.split('\n')[0]}`);
+      linksVerified = false;
+      console.warn(`remove-worker: リンクを外せないため worktree を削除しません（リンク先を保護）: ${e.message.split('\n')[0]}`);
     }
 
-    try {
-      worktreePrune(workspace);
-    } catch (e) {
-      console.warn(`remove-worker: git worktree prune 失敗: ${e.message.split('\n')[0]}`);
-    }
+    if (linksVerified) {
+      // git worktree remove
+      try {
+        worktreeRemove(worktreeDir, workspace, { doubleForce: true });
+      } catch (e) {
+        if (isLinkGuardError(e)) {
+          // リンク検証の失敗は、以降の削除段（rm）へ進めない（Issue #737）。
+          linksVerified = false;
+          console.warn(`remove-worker: リンクを外せないため worktree を削除しません（リンク先を保護）: ${e.message.split('\n')[0]}`);
+        } else {
+          console.warn(`remove-worker: git worktree remove 失敗: ${e.message.split('\n')[0]}`);
+        }
+      }
 
-    // git branch -D（worktreeと同名のブランチを削除）
-    try {
-      execSync(`git branch -D "${workerName}"`, { cwd: workspace, stdio: 'pipe' });
-    } catch (e) {
-      console.warn(`remove-worker: git branch -D 失敗: ${e.message.split('\n')[0]}`);
-    }
+      try {
+        worktreePrune(workspace);
+      } catch (e) {
+        console.warn(`remove-worker: git worktree prune 失敗: ${e.message.split('\n')[0]}`);
+      }
 
-    if (existsSync(worktreeDir)) {
-      if (IS_WIN) {
-        psRemove(worktreeDir);
-      } else {
-        try {
-          rmSync(worktreeDir, { recursive: true, force: true });
-        } catch (e) {
-          console.warn(`remove-worker: rmSync 失敗: ${e.message.split('\n')[0]}`);
+      // git branch -D（worktreeと同名のブランチを削除）
+      try {
+        execSync(`git branch -D "${workerName}"`, { cwd: workspace, stdio: 'pipe' });
+      } catch (e) {
+        console.warn(`remove-worker: git branch -D 失敗: ${e.message.split('\n')[0]}`);
+      }
+
+      if (linksVerified && existsSync(worktreeDir)) {
+        if (IS_WIN) {
+          psRemove(worktreeDir);
+        } else {
+          try {
+            rmSync(worktreeDir, { recursive: true, force: true });
+          } catch (e) {
+            console.warn(`remove-worker: rmSync 失敗: ${e.message.split('\n')[0]}`);
+          }
         }
       }
     }
 
-    if (existsSync(worktreeDir)) {
+    if (!linksVerified) {
+      console.warn(`remove-worker: worktree "${workerName}" は残しています。リンクを外してから再実行してください。この残骸を手動の rm / rm -rf で消さないこと（junction の先の共有 node_modules が消えます）。`);
+    } else if (existsSync(worktreeDir)) {
       console.warn(`remove-worker: worktree "${workerName}" のメタデータ・ブランチ・workers.json エントリは削除済み。ディレクトリ実体だけがロックで残りました（kill直後のハンドル未解放。Windowsでは正常な挙動で、失敗ではありません）。次回セッションの reset-session.js が junction 非追跡で安全に掃除します。`);
       console.warn(`remove-worker: [重要・orchestratorへ] この残骸ディレクトリを手動の rm / rm -rf で消さないこと。worktree 内の node_modules は共有ワークスペースへの junction であり、rm は junction を辿って共有ファイルを破壊します。放置して reset-session.js に任せてください。`);
     } else {

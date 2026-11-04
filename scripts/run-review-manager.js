@@ -7,7 +7,7 @@ const { spawn, spawnSync } = require('./shared/child-process');
 const { buildAgentExecArgs, runAgentWithPrompt } = require('./shared/agent-launch');
 const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-worktree');
 const { linkNodeModules } = require('./shared/link-node-modules');
-const { unlinkJunctions } = require('./shared/unlink-junctions');
+const { unlinkJunctionsAndVerify, isLinkGuardError } = require('./shared/unlink-junctions');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { killProcessTree } = require('./shared/kill-tree');
@@ -181,7 +181,13 @@ function setupReviewWorktree(workspace, pr, log) {
   // 残骸があれば先に除去してから作り直す（spawn-worker.js と同様のリトライパターン）。
   // git worktree prune はディスク上にディレクトリが存在しない登録済みworktreeのメタデータだけを
   // 掃除するため、rmSync（ディレクトリ削除）→ worktreePrune（メタデータ掃除）の順で行う。
-  try { worktreeRemove(dir, workspace); } catch {}
+  // 残骸のリンクを外せたと確認できるまで削除しない（Issue #737）。外せなければ throw して、
+  // worktree を作り直さずに終わる。
+  unlinkJunctionsAndVerify(dir);
+  try { worktreeRemove(dir, workspace); } catch (e) {
+    // リンク検証の失敗は握り潰さず、rmSync・prune へ進ませない（Issue #737）。
+    if (isLinkGuardError(e)) throw e;
+  }
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
   try { worktreePrune(workspace); } catch {}
   try { spawnSync('git', ['branch', '-D', '--', branchName], { cwd: workspace, stdio: 'pipe' }); } catch {}
@@ -226,20 +232,30 @@ function teardownReviewWorktree(workspace, pr, log) {
   // 削除の前に node_modules junction を外す。junction を張ったまま再帰削除すると、
   // リンク先（メインワークスペースの node_modules）まで巻き込んで壊しうる
   // （.claude/rules/symlink-tree-walk-safety.md。remove-worker.js も同じ順序で行う）。
+  // リンクを外せたと確認できなければ、ディレクトリ・Git登録ともに削除しない（Issue #737）。
+  let linksVerified = true;
   try {
-    unlinkJunctions(dir, (msg) => log(msg));
+    unlinkJunctionsAndVerify(dir);
   } catch (e) {
-    log(`junction 除去で例外: ${e.message.split('\n')[0]}`);
+    linksVerified = false;
+    log(`リンクを外せないため worktree を削除しません（リンク先を保護）: ${e.message.split('\n')[0]}`);
   }
 
-  try {
-    worktreeRemove(dir, workspace);
-  } catch (e) {
-    log(`worktree remove 失敗: ${e.message.split('\n')[0]}`);
-    // git worktree prune はディスク上にディレクトリが存在しない登録済みworktreeのメタデータだけを
-    // 掃除するため、先にディレクトリを消してからpruneする（順序を逆にするとメタデータが残留する）。
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-    try { worktreePrune(workspace); } catch {}
+  if (linksVerified) {
+    try {
+      worktreeRemove(dir, workspace);
+    } catch (e) {
+      if (isLinkGuardError(e)) {
+        // リンク検証の失敗は、ここでも削除へ進めない（Issue #737）。
+        log(`リンクを外せないため worktree を削除しません（リンク先を保護）: ${e.message.split('\n')[0]}`);
+      } else {
+        log(`worktree remove 失敗: ${e.message.split('\n')[0]}`);
+        // git worktree prune はディスク上にディレクトリが存在しない登録済みworktreeのメタデータだけを
+        // 掃除するため、先にディレクトリを消してからpruneする（順序を逆にするとメタデータが残留する）。
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+        try { worktreePrune(workspace); } catch {}
+      }
+    }
   }
   try {
     const delR = spawnSync('git', ['branch', '-D', '--', branchName], { cwd: workspace, stdio: 'pipe', encoding: 'utf8' });

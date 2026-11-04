@@ -33,7 +33,7 @@ const { resolveWorkerName } = require('./shared/workers-registry');
 const { worktreeAddDetached, worktreeRemove } = require('./shared/git-worktree');
 const { createTempDirScope } = require('./shared/temp-directory');
 const { linkNodeModules } = require('./shared/link-node-modules');
-const { unlinkJunctions } = require('./shared/unlink-junctions');
+const { unlinkJunctionsAndVerify, isLinkGuardError } = require('./shared/unlink-junctions');
 const {
   readTestResultArtifact,
   testResultPath,
@@ -680,19 +680,29 @@ function finishSlowRun({ pr, repo, workspace, target, headSha, statePath, runKey
 
 function cleanupDetachedSlowWorktree({ scope, worktree, workspace, worktreeAdded }, deps = {}) {
   if (!scope) return;
-  const unlinkJunctionsFn = deps.unlinkJunctionsFn || unlinkJunctions;
+  const unlinkJunctionsFn = deps.unlinkJunctionsFn || unlinkJunctionsAndVerify;
   const worktreeRemoveFn = deps.worktreeRemoveFn || worktreeRemove;
   const errors = [];
 
   // Junctions must be removed before Git or the temp-directory scope recursively
   // removes the worktree. The Git registration is removed before the owning
   // temp scope is closed so a failed test cannot leave stale worktree metadata.
+  // リンクを外せたと確認できなければ、Git登録も一時ディレクトリも削除しない（Issue #737）。
+  let linksVerified = !worktreeAdded;
   if (worktreeAdded) {
-    try { unlinkJunctionsFn(worktree); } catch (error) { errors.push(error); }
-    try { worktreeRemoveFn(worktree, workspace); } catch (error) { errors.push(error); }
+    try { unlinkJunctionsFn(worktree); linksVerified = true; } catch (error) { errors.push(error); }
+    if (linksVerified) {
+      try { worktreeRemoveFn(worktree, workspace); } catch (error) {
+        errors.push(error);
+        // worktreeRemove 内の再検証が失敗したら、一時ルートの再帰削除（scope.cleanup）も行わない（Issue #737）。
+        if (isLinkGuardError(error)) linksVerified = false;
+      }
+    }
   }
 
-  try { scope.cleanup(); } catch (error) { errors.push(error); }
+  if (linksVerified) {
+    try { scope.cleanup(); } catch (error) { errors.push(error); }
+  }
   if (errors.length === 1) throw errors[0];
   if (errors.length > 1) throw new AggregateError(errors, 'slow worktree cleanup failed');
 }
@@ -1328,6 +1338,7 @@ async function runPollPr(params, deps = {}) {
 }
 
 module.exports = {
+  cleanupDetachedSlowWorktree,
   findReviewablePr,
   getPrHead,
   getPrBaseBranch,

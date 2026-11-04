@@ -17,7 +17,7 @@ const path = require('path');
 const { resolve } = path;
 const { existsSync, readFileSync, rmSync,
         readdirSync, statSync, renameSync, unlinkSync } = require('fs');
-const { unlinkJunctions } = require('./shared/unlink-junctions');
+const { unlinkJunctions, unlinkJunctionsAndVerify, isLinkGuardError } = require('./shared/unlink-junctions');
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { killProcessTree } = require('./shared/kill-tree');
 const { observeWorker } = require('./shared/worker-liveness');
@@ -594,12 +594,19 @@ if (require.main === module) {
   // ── worktreeを削除する（junction除去 → git → PowerShell → robocopy → quarantine） ──
 
   const removeWorktree = (dir) => {
-    unlinkJunctions(dir, warn);
+    // リンクを外せたと確認できなければ、どの削除段にも進まない（Issue #737）。
+    try {
+      unlinkJunctionsAndVerify(dir);
+    } catch (e) {
+      return { ok: false, reason: `リンクを外せないため削除しません（リンク先を保護）: ${e.message.split('\n')[0]}` };
+    }
 
     try {
       worktreeRemove(dir, workspace, { doubleForce: true });
       if (!existsSync(dir)) return { ok: true };
     } catch (e) {
+      // リンク検証の失敗なら、後続の削除段（PowerShell・robocopy・quarantine）へ進まない（Issue #737）。
+      if (isLinkGuardError(e)) return { ok: false, reason: `リンクを外せないため削除しません（リンク先を保護）: ${e.message.split('\n')[0]}` };
       warn(`git worktree remove 失敗: ${e.message.split('\n')[0]}`);
     }
 
