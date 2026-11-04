@@ -5,9 +5,9 @@ const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('./shared/child-process');
 const { buildAgentExecArgs, runAgentWithPrompt } = require('./shared/agent-launch');
-const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-worktree');
+const { worktreeAdd } = require('./shared/git-worktree');
 const { linkNodeModules } = require('./shared/link-node-modules');
-const { unlinkJunctionsAndVerify, isLinkGuardError } = require('./shared/unlink-junctions');
+const { removeWorktreeWithLinkGuard } = require('./shared/worktree-removal');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { killProcessTree } = require('./shared/kill-tree');
@@ -183,13 +183,13 @@ function setupReviewWorktree(workspace, pr, log) {
   // 掃除するため、rmSync（ディレクトリ削除）→ worktreePrune（メタデータ掃除）の順で行う。
   // 残骸のリンクを外せたと確認できるまで削除しない（Issue #737）。外せなければ throw して、
   // worktree を作り直さずに終わる。
-  unlinkJunctionsAndVerify(dir);
-  try { worktreeRemove(dir, workspace); } catch (e) {
-    // リンク検証の失敗は握り潰さず、rmSync・prune へ進ませない（Issue #737）。
-    if (isLinkGuardError(e)) throw e;
-  }
-  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-  try { worktreePrune(workspace); } catch {}
+  // リンク検証の失敗は共有関数が throw し、rmSync・prune・再作成へ進まない（Issue #737）。
+  removeWorktreeWithLinkGuard(dir, workspace, {
+    fallback: 'always',
+    order: 'forceFirst',
+    forceRemove: 'rmSync',
+    log: (m) => log(m),
+  });
   try { spawnSync('git', ['branch', '-D', '--', branchName], { cwd: workspace, stdio: 'pipe' }); } catch {}
 
   worktreeAdd(dir, branchName, null, workspace);
@@ -233,29 +233,17 @@ function teardownReviewWorktree(workspace, pr, log) {
   // リンク先（メインワークスペースの node_modules）まで巻き込んで壊しうる
   // （.claude/rules/symlink-tree-walk-safety.md。remove-worker.js も同じ順序で行う）。
   // リンクを外せたと確認できなければ、ディレクトリ・Git登録ともに削除しない（Issue #737）。
-  let linksVerified = true;
+  // 共有関数が throw したら、リンク検証の失敗として作業場所もGit登録も残す（Issue #737）。
+  // 手順の順序（先にディレクトリを消してから prune）も共有関数が forceFirst で守る。
   try {
-    unlinkJunctionsAndVerify(dir);
+    removeWorktreeWithLinkGuard(dir, workspace, {
+      fallback: 'onGitFailure',
+      order: 'forceFirst',
+      forceRemove: 'rmSync',
+      log,
+    });
   } catch (e) {
-    linksVerified = false;
     log(`リンクを外せないため worktree を削除しません（リンク先を保護）: ${e.message.split('\n')[0]}`);
-  }
-
-  if (linksVerified) {
-    try {
-      worktreeRemove(dir, workspace);
-    } catch (e) {
-      if (isLinkGuardError(e)) {
-        // リンク検証の失敗は、ここでも削除へ進めない（Issue #737）。
-        log(`リンクを外せないため worktree を削除しません（リンク先を保護）: ${e.message.split('\n')[0]}`);
-      } else {
-        log(`worktree remove 失敗: ${e.message.split('\n')[0]}`);
-        // git worktree prune はディスク上にディレクトリが存在しない登録済みworktreeのメタデータだけを
-        // 掃除するため、先にディレクトリを消してからpruneする（順序を逆にするとメタデータが残留する）。
-        try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-        try { worktreePrune(workspace); } catch {}
-      }
-    }
   }
   try {
     const delR = spawnSync('git', ['branch', '-D', '--', branchName], { cwd: workspace, stdio: 'pipe', encoding: 'utf8' });
