@@ -23,8 +23,7 @@
 // 標準出力: ワーカー名（例: issue-5-coder-implement）
 
 const { spawnSync } = require('./shared/child-process');
-const { existsSync, mkdirSync, readFileSync, writeFileSync,
-        rmSync } = require('fs');
+const { existsSync, mkdirSync, readFileSync, writeFileSync } = require('fs');
 const { resolve, relative } = require('path');
 const fs = require('fs');
 // link-node-modules は常に同一ディレクトリに同居する（リポジトリの scripts/ もインストール先 ~/.gh-maestro/scripts/ も）。
@@ -40,8 +39,8 @@ const { createNormalWorkerStore, acquireLease: acquireWorkerLease, isLeaseLive,
         activateLease: activateWorkerLease, releaseLease: releaseWorkerLease,
         acquireLeaseLock, releaseLeaseLock } = require('./shared/worker-lease');
 const { killProcessTree } = require('./shared/kill-tree');
-const { worktreeAdd, worktreeRemove, worktreePrune } = require('./shared/git-worktree');
-const { unlinkJunctionsAndVerify, isLinkGuardError } = require('./shared/unlink-junctions');
+const { worktreeAdd } = require('./shared/git-worktree');
+const { removeWorktreeWithLinkGuard } = require('./shared/worktree-removal');
 const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens } = require('./shared/resolve-config');
 const { resolveSkillMdPath } = require('./shared/skill-install-path');
 const { ensureWorkerSupervisorRunning } = require('./shared/ensure-worker-supervisor');
@@ -830,18 +829,17 @@ try {
   console.warn(`spawn-worker: worktree作成失敗: ${e.message.split('\n')[0]} — 残骸を除去してリトライします`);
   // 残骸除去。リンクを外せたと確認できるまで、一切削除しない（Issue #737: 残ったjunctionは
   // git worktree remove / rmSync がリンク先（本体の node_modules）まで消す）。
-  try { unlinkJunctionsAndVerify(worktreeDir); }
-  catch (e2) { fail(`前回の作業場所からリンクを外せないため、削除せずに起動を中止しました: ${e2.message.split('\n')[0]}`); }
-  try { worktreeRemove(worktreeDir, workspace); }
-  catch (e2) {
-    // リンク検証の失敗なら、prune・rmSync へ進まず中止する（Issue #737）。
-    if (isLinkGuardError(e2)) fail(`前回の作業場所からリンクを外せないため、削除せずに起動を中止しました: ${e2.message.split('\n')[0]}`);
-    console.warn(`  git worktree remove: ${e2.message.split('\n')[0]}`);
+  // リンク検証の失敗は共有関数が throw する。その場合は prune・rmSync へ進まず中止する（Issue #737）。
+  try {
+    removeWorktreeWithLinkGuard(worktreeDir, workspace, {
+      fallback: 'always',
+      order: 'pruneFirst',
+      forceRemove: 'rmSync',
+      log: (m) => console.warn(`  ${m}`),
+    });
+  } catch (e2) {
+    fail(`前回の作業場所からリンクを外せないため、削除せずに起動を中止しました: ${e2.message.split('\n')[0]}`);
   }
-  try { worktreePrune(workspace); }
-  catch (e2) { console.warn(`  git worktree prune: ${e2.message.split('\n')[0]}`); }
-  try { rmSync(worktreeDir, { recursive: true, force: true }); }
-  catch (e2) { console.warn(`  rmSync: ${e2.message.split('\n')[0]}`); }
   try {
     const delR = spawnSync('git', ['branch', '-D', '--', workerName], { cwd: workspace, stdio: 'pipe' });
     if (delR.status !== 0) throw new Error(`git branch -D 失敗: ${(delR.stderr || '').toString().trim()}`);
@@ -858,24 +856,17 @@ try {
 const rollbackWorktree = () => {
   console.warn('spawn-worker: worktreeをロールバックします...');
   // junction除去。外せたと確認できなければ、作業場所もブランチも消さずに戻る（Issue #737）。
-  try { unlinkJunctionsAndVerify(worktreeDir); }
-  catch (e) {
+  // リンク検証の失敗は共有関数が throw し、作業場所もブランチも消さずに戻る（Issue #737）。
+  try {
+    removeWorktreeWithLinkGuard(worktreeDir, workspace, {
+      fallback: 'onGitFailure',
+      order: 'pruneFirst',
+      forceRemove: 'rmSync',
+      log: (m) => console.warn(`  rollback: ${m}`),
+    });
+  } catch (e) {
     console.warn(`  rollback: リンクを外せないため作業場所を削除しません: ${e.message.split('\n')[0]}`);
     return;
-  }
-
-  try { worktreeRemove(worktreeDir, workspace); }
-  catch (e) {
-    // リンク検証の失敗なら、prune・rmSync へ進まない（Issue #737）。
-    if (isLinkGuardError(e)) {
-      console.warn(`  rollback: リンクを外せないため作業場所を削除しません: ${e.message.split('\n')[0]}`);
-      return;
-    }
-    console.warn(`  rollback: git worktree remove 失敗: ${e.message.split('\n')[0]}`);
-    try { worktreePrune(workspace); }
-    catch (e2) { console.warn(`  rollback: git worktree prune 失敗: ${e2.message.split('\n')[0]}`); }
-    try { rmSync(worktreeDir, { recursive: true, force: true }); }
-    catch (e2) { console.warn(`  rollback: rmSync 失敗: ${e2.message.split('\n')[0]}`); }
   }
   try {
     const delR = spawnSync('git', ['branch', '-d', '--', workerName], { cwd: workspace, stdio: 'pipe' });

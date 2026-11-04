@@ -17,11 +17,12 @@ const path = require('path');
 const { resolve } = path;
 const { existsSync, readFileSync, rmSync,
         readdirSync, statSync, renameSync, unlinkSync } = require('fs');
-const { unlinkJunctions, unlinkJunctionsAndVerify, isLinkGuardError } = require('./shared/unlink-junctions');
+const { unlinkJunctions } = require('./shared/unlink-junctions');
+const { removeWorktreeWithLinkGuard, deleteDirectoryViaPowerShell } = require('./shared/worktree-removal');
 const { normalizeWorkerEntry } = require('./shared/worker-entry');
 const { killProcessTree } = require('./shared/kill-tree');
 const { observeWorker } = require('./shared/worker-liveness');
-const { worktreeRemove, worktreePrune } = require('./shared/git-worktree');
+const { worktreePrune } = require('./shared/git-worktree');
 const { sweepRegistry } = require('./process-lifecycle');
 const processLiveness = require('./shared/process-liveness');
 const { getAlivePaneIds, killPane } = require('./shared/pane-launch');
@@ -520,24 +521,6 @@ if (require.main === module) {
     }
   };
 
-  // ── [Windows] PowerShell で強制削除 ──────────────────────────────
-
-  const psRemove = (dir) => {
-    if (!IS_WIN) return false;
-    // Remove-Item -Recurse は PowerShell 5.x で junction を辿り中身を削除するため使用不可。
-    // [System.IO.Directory]::Delete は junction 自体を削除し中身を辿らない。
-    const escaped = dir.replace(/'/g, "''");
-    try {
-      execSync(
-        `powershell -NoProfile -Command "[System.IO.Directory]::Delete('${escaped}', $true)"`,
-        { stdio: 'pipe', timeout: 15000 }
-      );
-      return !existsSync(dir);
-    } catch (_) {
-      return false;
-    }
-  };
-
   // ── [Windows] robocopy で中身を空にしてから削除（最終兵器）───────
   // 空ディレクトリを /MIR でミラーリングすることで全ファイルを除去する。
   // ロックされたファイルはスキップされるが、その後 rmSync で枠だけ消せることが多い。
@@ -583,7 +566,7 @@ if (require.main === module) {
       if (!e.startsWith('__orphan_')) continue;
       const dir = resolve(worktreesDir, e);
       log(`前回の quarantine を再試行: ${e}`);
-      if (psRemove(dir) || robocopyRemove(dir)) {
+      if (deleteDirectoryViaPowerShell(dir) || robocopyRemove(dir)) {
         log(`  → 削除成功: ${e}`);
       } else {
         warn(`  → 削除失敗（次回も再試行します）: ${e}`);
@@ -594,40 +577,19 @@ if (require.main === module) {
   // ── worktreeを削除する（junction除去 → git → PowerShell → robocopy → quarantine） ──
 
   const removeWorktree = (dir) => {
-    // リンクを外せたと確認できなければ、どの削除段にも進まない（Issue #737）。
+    // リンク確認・git 削除・prune・PowerShell/rmSync の削除は共有関数が行う。
+    // リンクを外せたと確認できなければ throw し、後続の削除段（robocopy・quarantine）へは進まない（Issue #737）。
     try {
-      unlinkJunctionsAndVerify(dir);
+      const r = removeWorktreeWithLinkGuard(dir, workspace, {
+        fallback: 'whenDirRemains',
+        order: 'pruneFirst',
+        forceRemove: 'platform',
+        doubleForce: true,
+        log: warn,
+      });
+      if (r.removed) return { ok: true };
     } catch (e) {
       return { ok: false, reason: `リンクを外せないため削除しません（リンク先を保護）: ${e.message.split('\n')[0]}` };
-    }
-
-    try {
-      worktreeRemove(dir, workspace, { doubleForce: true });
-      if (!existsSync(dir)) return { ok: true };
-    } catch (e) {
-      // リンク検証の失敗なら、後続の削除段（PowerShell・robocopy・quarantine）へ進まない（Issue #737）。
-      if (isLinkGuardError(e)) return { ok: false, reason: `リンクを外せないため削除しません（リンク先を保護）: ${e.message.split('\n')[0]}` };
-      warn(`git worktree remove 失敗: ${e.message.split('\n')[0]}`);
-    }
-
-    try {
-      worktreePrune(workspace);
-    } catch (e) {
-      warn(`git worktree prune 失敗: ${e.message.split('\n')[0]}`);
-    }
-
-    if (!existsSync(dir)) return { ok: true };
-
-    // PowerShell Remove-Item（Windows主役、非Windowsは rmSync）
-    if (IS_WIN) {
-      if (psRemove(dir)) return { ok: true };
-    } else {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-        if (!existsSync(dir)) return { ok: true };
-      } catch (e) {
-        warn(`rmSync 失敗: ${e.message.split('\n')[0]}`);
-      }
     }
 
     // robocopy で強制削除（Windows限定）

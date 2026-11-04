@@ -7,7 +7,7 @@
 // すべての git コマンドは spawnSync（引数配列）を使用し、
 // シェル経由の文字列補間に伴う注入脆弱性を回避する。
 //
-// 使用箇所: spawn-worker.js, remove-worker.js, reset-session.js
+// 使用箇所: spawn-worker.js, remove-worker.js, reset-session.js, run-review-manager.js（作業場所の削除は shared/worktree-removal.js 経由）
 
 const { spawnSync } = require('./child-process');
 const { unlinkJunctionsAndVerify } = require('./unlink-junctions');
