@@ -99,6 +99,25 @@ test('poll-pr cleanupDetachedSlowWorktree: リンク除去の検証が失敗し�
   assert.equal(calls.cleanup, 0, 'リンク検証に失敗したのに一時ディレクトリを掃除した');
 });
 
+test('poll-pr cleanupDetachedSlowWorktree: 事前検証は通り、worktreeRemove 内の再検証だけがリンク検証エラーで失敗しても、一時ルートの掃除をしない', () => {
+  const { cleanupDetachedSlowWorktree } = require('../../scripts/poll-pr');
+  const calls = { cleanup: 0 };
+  const scope = { cleanup: () => { calls.cleanup += 1; } };
+  const failure = Object.assign(new Error('worktree remove 内の再検証で失敗'), { code: 'WORKTREE_LINKS_UNVERIFIABLE' });
+
+  assert.throws(
+    () => cleanupDetachedSlowWorktree(
+      { scope, worktree: '/unused/worktree', workspace: '/unused/ws', worktreeAdded: true },
+      {
+        unlinkJunctionsFn: () => {},          // 事前検証は成功
+        worktreeRemoveFn: () => { throw failure; }, // 2回目の検証だけ失敗
+      },
+    ),
+    (err) => err === failure,
+  );
+  assert.equal(calls.cleanup, 0, 'リンク検証に失敗したのに一時ルートを再帰削除した');
+});
+
 test('poll-pr cleanupDetachedSlowWorktree: リンク除去の検証に成功したときだけ worktree 削除と掃除へ進む（対照）', () => {
   const { cleanupDetachedSlowWorktree } = require('../../scripts/poll-pr');
   const calls = { remove: 0, cleanup: 0 };

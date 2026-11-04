@@ -80,7 +80,9 @@ function setupResidue(base, workerName) {
 }
 
 // 後段（linkNodeModules）で止める preload。unlinkThrows=true なら、リンクを外せたか判定できない状態を注入する。
-function writeStopPreload(home, { unlinkThrows }) {
+// reachedMarker を渡すと、linkNodeModules（作業場所の再作成が成功した後にしか呼ばれない）に到達した時点で
+// そのパスへ作業場所のパスを書く。残骸除去の後に再作成まで進んだことを、CLI の外から確かめるための到達マーカー。
+function writeStopPreload(home, { unlinkThrows, reachedMarker }) {
   const preload = path.join(home, 'preload.js');
   const req = (p) => JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'shared', p));
   fs.writeFileSync(preload, [
@@ -89,7 +91,9 @@ function writeStopPreload(home, { unlinkThrows }) {
     `const ghComments = require(${req('gh-comments.js')});`,
     "ghComments.listComments = () => ({ status: 0, stdout: '[]' });",
     `const nm = require(${req('link-node-modules.js')});`,
-    "nm.linkNodeModules = () => ({ linked: [], skipped: [], missing: ['stop (test)'] });",
+    reachedMarker
+      ? `nm.linkNodeModules = (wt) => { require('fs').writeFileSync(${JSON.stringify(reachedMarker)}, wt, 'utf8'); return { linked: [], skipped: [], missing: ['stop (test)'] }; };`
+      : "nm.linkNodeModules = () => ({ linked: [], skipped: [], missing: ['stop (test)'] });",
     unlinkThrows
       ? `const uj = require(${req('unlink-junctions.js')});
          uj.unlinkJunctionsAndVerify = () => { const e = new Error('test: cannot verify links'); e.code = 'WORKTREE_LINKS_UNVERIFIABLE'; throw e; };`
@@ -109,11 +113,20 @@ test('spawn-worker: 同名の残骸を作り直しても、リンク先の番兵
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-spawn-residue-'));
   try {
     const workerName = 'issue-737-coder-residue-restart';
-    const { ws, home, sentinelDir } = setupResidue(base, workerName);
-    const preload = writeStopPreload(home, { unlinkThrows: false });
+    const { ws, home, wt, sentinelDir } = setupResidue(base, workerName);
+    const reachedMarker = path.join(home, 'reached-recreate.txt');
+    const preload = writeStopPreload(home, { unlinkThrows: false, reachedMarker });
 
-    runSpawn(home, ws, preload, workerName);
+    const r = runSpawn(home, ws, preload, workerName);
 
+    // 残骸の除去を経て、作業場所の再作成まで進んだことを確かめる（番兵の検査より前に置く）
+    assert.match(r.stderr, /残骸を除去してリトライします/, `残骸除去の経路に入ったこと: ${r.stderr}`);
+    assert.equal(fs.existsSync(reachedMarker), true, '作業場所の再作成まで進まなかった（到達マーカーが無い）');
+    assert.equal(
+      fs.readFileSync(reachedMarker, 'utf8'),
+      wt,
+      '再作成された作業場所のパスが、同名ワーカーの作業場所と一致しない',
+    );
     assert.equal(
       fs.readFileSync(path.join(sentinelDir, 'sentinel.txt'), 'utf8'),
       'must survive',

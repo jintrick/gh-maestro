@@ -33,7 +33,7 @@ const { resolveWorkerName } = require('./shared/workers-registry');
 const { worktreeAddDetached, worktreeRemove } = require('./shared/git-worktree');
 const { createTempDirScope } = require('./shared/temp-directory');
 const { linkNodeModules } = require('./shared/link-node-modules');
-const { unlinkJunctionsAndVerify } = require('./shared/unlink-junctions');
+const { unlinkJunctionsAndVerify, isLinkGuardError } = require('./shared/unlink-junctions');
 const {
   readTestResultArtifact,
   testResultPath,
@@ -692,7 +692,11 @@ function cleanupDetachedSlowWorktree({ scope, worktree, workspace, worktreeAdded
   if (worktreeAdded) {
     try { unlinkJunctionsFn(worktree); linksVerified = true; } catch (error) { errors.push(error); }
     if (linksVerified) {
-      try { worktreeRemoveFn(worktree, workspace); } catch (error) { errors.push(error); }
+      try { worktreeRemoveFn(worktree, workspace); } catch (error) {
+        errors.push(error);
+        // worktreeRemove 内の再検証が失敗したら、一時ルートの再帰削除（scope.cleanup）も行わない（Issue #737）。
+        if (isLinkGuardError(error)) linksVerified = false;
+      }
     }
   }
 
